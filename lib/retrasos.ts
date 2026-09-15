@@ -29,6 +29,29 @@
 // para PINTAR es otra cosa que inferir para ESCRIBIR"— porque una marca falsa avisa a
 // pasajeros y ensucia el registro. Aquí sale un VEREDICTO; quién lo pinta y quién avisa
 // se decide fuera.
+//
+// ── EL "SIGUIENTE PARADERO" ES UN HECHO FÍSICO, NO UN BOTÓN ─────────────────────────
+// `paradaSiguiente` respondía con `paradas.find(p => p.estado !== "completada")`, que es
+// EXACTAMENTE la definición que la cabecera de lib/avance-paradas.ts:3-8 declara rota:
+// no dice por dónde va el bus, dice si un humano tocó un botón. Ese módulo se escribió
+// para arreglarlo en el modal del operador y en el portal del cliente; este quedó con la
+// definición vieja, y con el conductor sin marcar —lo habitual— la torre apuntaba a un
+// paradero que el bus había dejado atrás hacía media hora.
+//
+// El fallo medido (SNACKS AMERICA LATINA, reserva #25526, 09-09-2026 23:05): el modal
+// decía "2 parada(s) pasada(s) sin marcar · próxima Puente Santa Anita, a 1.4 km,
+// llega 23:05"; la misma pantalla, en la fila de abajo, decía "TARDE EN RUTA +47' ·
+// llegará tarde a Bertello · a 13.9 km · ETA 23:27 vs 22:40 plan". Los 13.9 km son la
+// distancia a un paradero YA PASADO, así que el "retraso" CRECÍA cuanto mejor iba el
+// servicio: cada kilómetro que el bus avanzaba por su ruta engordaba el número. Y no
+// era solo pintura — /api/alertas-flota/tick manda ese veredicto por WhatsApp.
+//
+// Por eso el motor recibe ahora `paradasPasadas`: los ids que el motor de avance
+// (lib/avance-paradas.ts, el MISMO que consume el modal) da por dejados atrás. Se recibe
+// resuelto y no se calcula aquí — este módulo es puro y no lee la huella—, que es la
+// misma división de trabajo que ya tienen `eta` y `fixes`. Sin ese dato (endpoint caído,
+// huella vacía) el conjunto llega vacío y el comportamiento es el de siempre: el piso
+// del conductor manda solo, igual que en `piso = max(pisoConductor, pisoGps)`.
 
 import { distM, velocidadPorVentana, type FixVel } from "./huella";
 
@@ -304,6 +327,17 @@ export type EntradaPuntualidad = {
   cfg?: Partial<ConfigRetraso>;
   /** unidad tercerizada: sin GPS hasta que el conductor abre el link del token */
   esTercero?: boolean;
+  /**
+   * IDs de las paradas que el bus YA dejó atrás según el motor de avance
+   * (lib/avance-paradas.ts). Es el mismo veredicto que pinta el modal del operador, y
+   * viaja por ID —nunca por índice— a propósito: quien lo calcula ordena las paradas por
+   * su cuenta y emparejar por posición es el error que este repo ya pagó tres veces
+   * ("escribir con una identidad y leer con otra", ver CLAUDE.md).
+   *
+   * Es ADITIVO sobre el marcado del conductor, jamás sustractivo: una parada `completada`
+   * sigue contando como pasada aunque no esté aquí. Ausente o vacío → solo manda el botón.
+   */
+  paradasPasadas?: Iterable<number> | null;
 };
 
 const SIN_VEREDICTO = (nivel: NivelRetraso, causa: string): Veredicto => ({
@@ -322,11 +356,23 @@ function paradaOrigen(paradas: ParadaPuntual[]): (ParadaPuntual & { lat: number;
   return null;
 }
 
-/** Siguiente parada pendiente CON coordenadas (para el retraso EN RUTA). */
-function paradaSiguiente(paradas: ParadaPuntual[]): (ParadaPuntual & { lat: number; lng: number }) | null {
+/**
+ * Siguiente parada pendiente CON coordenadas (para el retraso EN RUTA).
+ *
+ * Dos fuentes, y el orden entre ellas no importa porque solo pueden SUMAR paradas
+ * pasadas: el botón del conductor (`estado === "completada"`, autoridad máxima) y el
+ * motor de avance por GPS (`pasadas`). Es el `piso = max(pisoConductor, pisoGps)` de
+ * lib/avance-paradas.ts visto desde el otro lado: en vez de un índice, el conjunto de
+ * ids que ya no pueden ser el objetivo.
+ */
+function paradaSiguiente(
+  paradas: ParadaPuntual[],
+  pasadas?: ReadonlySet<number> | null,
+): (ParadaPuntual & { lat: number; lng: number }) | null {
   const ord = [...(paradas || [])].sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0));
   for (const p of ord) {
     if (p.estado === "completada") continue;
+    if (pasadas?.has(p.id)) continue;
     const la = num(p.lat), ln = num(p.lng);
     if (la !== null && ln !== null) return { ...p, lat: la, lng: ln };
   }
@@ -401,7 +447,13 @@ export function evaluarPuntualidad(e: EntradaPuntualidad): Veredicto {
 
   // ── RAMA EN RUTA ────────────────────────────────────────────────────────────
   if (r.estado === "en_curso") {
-    const sig = paradaSiguiente(e.paradas);
+    const pasadas = e.paradasPasadas ? new Set(e.paradasPasadas) : null;
+    const sig = paradaSiguiente(e.paradas, pasadas);
+    // Objetivo que habría salido mirando SOLO el botón del conductor. Sirve para una cosa
+    // y solo una: decir en la evidencia que el objetivo lo movió el GPS. Sin eso, la torre
+    // y el app del conductor nombran paraderos distintos y no hay forma de saber por qué.
+    const sigMarcado = pasadas ? paradaSiguiente(e.paradas) : sig;
+    const objetivoPorGps = !!sig && sig.id !== sigMarcado?.id;
     const pos = sig ? posicionRespectoA(e.fixes, sig, e.ahoraMs) : POSICION_NULA;
     const objSig = hhmmMin(sig?.hora_estimada ?? null);
     const inicio = inicioRealMin(r, e.paradas);
@@ -417,10 +469,17 @@ export function evaluarPuntualidad(e: EntradaPuntualidad): Veredicto {
     // esto salía VERDE y el día perdía el único retraso que de verdad ocurrió.
     const arrancoTarde = difInicio !== null && difInicio > cfg.toleranciaMin;
     if (!sig || objSig === null || pos.estado === "desconocida") {
+      // Sin objetivo hay DOS mundos distintos y colapsarlos en una frase mandaba a buscar
+      // coordenadas que no faltaban: o el recorrido no tiene ningún paradero geocodificado
+      // (problema de datos, se arregla en la ficha de la ruta), o el bus ya los pasó TODOS
+      // —el servicio está terminando y solo falta cerrarlo—. Se nombra cuál es.
+      const todasPasadas = !sig && e.paradas.some((p) => p.estado === "completada" || pasadas?.has(p.id));
       return {
         ...base, nivel: arrancoTarde ? "inicio_tarde" : "en_hora", minutos: difInicio,
         causa: arrancoTarde ? `inició ${difInicio} min tarde` : "en ruta",
-        evidencia: sig ? frase([sig.nombre, pos.motivo]) : "sin paradas pendientes con coordenadas",
+        evidencia: sig ? frase([sig.nombre, pos.motivo])
+          : todasPasadas ? "ya pasó todos los paraderos del recorrido"
+          : "sin paradas pendientes con coordenadas",
       };
     }
 
@@ -442,6 +501,10 @@ export function evaluarPuntualidad(e: EntradaPuntualidad): Veredicto {
           `ETA ${minHhmm(llegada)} vs ${minHhmm(objSig)} plan`,
           e.eta?.fuente === "google" ? "con tráfico" : "estimado",
           pos.hace !== null ? `GPS hace ${pos.hace} min` : null,
+          // Solo cuando el GPS movió el objetivo por delante del botón. Es el caso en que
+          // el app del conductor sigue mostrando otro paradero como pendiente, y sin esta
+          // línea la torre parecería estar hablando de otro servicio.
+          objetivoPorGps ? `objetivo por GPS (${sigMarcado?.nombre || "el anterior"} sin marcar)` : null,
         ]),
         requiereEta: e.eta?.fuente !== "google",
       };

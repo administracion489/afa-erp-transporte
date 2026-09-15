@@ -77,3 +77,51 @@ create index if not exists idx_doc_terc_avisos_dedupe on public.documentos_terce
 -- `proveedores/<empresa_id>/...`. No hace falta crear un bucket nuevo ni políticas de storage:
 -- la subida SIEMPRE pasa por /api/tercerizadas/documentos-proveedor con service-role, nunca
 -- desde el navegador del proveedor.
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- ROW LEVEL SECURITY · y por qué NO es la política de siempre en las cuatro
+--
+-- Este archivo no traía RLS, y el editor de Supabase lo canta al ejecutarlo ("This query
+-- creates tables without enabling Row Level Security"). Sus dos botones se quedan cortos, los
+-- dos en la misma dirección: "Run without RLS" deja `proveedor_tokens` legible por cualquiera
+-- con la anon key, y "Run and enable RLS" enciende RLS SIN POLÍTICAS, con lo que el panel de
+-- revisiones de /tercerizadas se queda mudo. Ni una ni otra: cada tabla necesita lo suyo.
+--
+-- QUIÉN TOCA QUÉ (verificado con grep sobre app/ y lib/, tabla por tabla):
+--
+--   tabla                          navegador (anon)   servidor (service-role)
+--   ─────────────────────────────  ─────────────────  ───────────────────────
+--   documentos_tercero_revisiones  SÍ · lee, aprueba  sí
+--   proveedor_tokens               NO                 sí
+--   config_proveedores_docs        NO                 sí
+--   documentos_tercero_avisos      NO                 sí
+--
+-- RLS se enciende en las CUATRO. La política de `authenticated` va SOLO en la primera, que es
+-- la única que el navegador necesita. Las otras tres se quedan con RLS y SIN política: el
+-- service-role se salta RLS por diseño, así que el cron y las rutas de API siguen igual, y
+-- la anon key no ve nada.
+--
+-- POR QUÉ `proveedor_tokens` NO LLEVA LA POLÍTICA DE `authenticated`, aunque el resto del
+-- repo la ponga en todo: ESOS TOKENS SON LA ÚNICA AUTENTICACIÓN DEL PORTAL PÚBLICO. Cada
+-- fila es la llave del formulario donde un proveedor sube sus documentos. Dejarla legible
+-- —aunque sea solo a usuarios con sesión— es repartir las llaves de todos los proveedores a
+-- cualquiera que consiga una cuenta. Ninguna pantalla los necesita: se leen y se escriben
+-- exclusivamente desde el servidor.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+alter table public.documentos_tercero_revisiones enable row level security;
+alter table public.proveedor_tokens              enable row level security;
+alter table public.config_proveedores_docs       enable row level security;
+alter table public.documentos_tercero_avisos     enable row level security;
+
+-- La única que se abre al navegador: /tercerizadas lista las revisiones pendientes y un
+-- operador las aprueba o las rechaza desde ahí.
+drop policy if exists doc_terc_revisiones_auth on public.documentos_tercero_revisiones;
+create policy doc_terc_revisiones_auth on public.documentos_tercero_revisiones
+  for all
+  using (auth.role() = 'authenticated')
+  with check (auth.role() = 'authenticated');
+
+-- Las otras tres se quedan a propósito SIN política. No es un olvido: es la diferencia entre
+-- "el servidor puede" y "cualquiera con sesión puede". Si algún día una pantalla necesita
+-- leerlas, se agrega su política aquí y se dice a qué pantalla sirve — nunca "por si acaso".

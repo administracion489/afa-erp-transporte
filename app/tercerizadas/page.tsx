@@ -4,7 +4,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
 import OdometroTerceroModal from "./_components/OdometroTerceroModal";
+import AvisoFichaCombustible from "@/components/flota/AvisoFichaCombustible";
+import { FAMILIAS_TANQUE, parseCapacidadTanque as parseCapTanqueT, capacidadTanqueAForm as capTanqueTAForm, faltaColumnaTanque } from "@/lib/combustible-tipos";
 import { DISTRITOS_LIMA, distanciaDistritos, etiquetaDistancia } from "@/lib/distritos-lima";
+import { ambitoTipoDoc, docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
+import {
+  AUTORIDADES, REGIONES_PERU, avisosAutorizacion, configAutoridad, etiquetaAutorizacion,
+  type Autoridad,
+} from "@/lib/autorizacion-transporte";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -12,8 +19,17 @@ type Empresa = {
   id: number; razon_social: string; ruc: string | null;
   telefono: string | null; email: string | null;
   contacto_nombre: string | null; contacto_telefono: string | null;
-  autorizacion_mtc: string | null; habilitacion_sutran: string | null;
-  venc_autorizacion: string | null; venc_habilitacion: string | null;
+  autorizacion_mtc: string | null;
+  venc_autorizacion: string | null;
+  // `habilitacion_sutran` / `venc_habilitacion` SIGUEN EN LA BASE pero ya no se leen: SUTRAN
+  // fiscaliza, no autoriza, así que ese par nunca fue una exigencia — era la habilitación
+  // vehicular (hoy la TUC, por placa, en Documentos) puesta en el sitio equivocado. Las
+  // columnas no se borran: los datos que alguien escribió se conservan y se pueden consultar
+  // por SQL. Ver supabase/tercerizadas-autorizacion-ambito.sql.
+  // Columnas de tercerizadas-autorizacion-ambito.sql. Opcionales en el tipo porque la app
+  // reintenta el SELECT sin ellas si la migración no se corrió (mismo patrón que
+  // COLUMNAS_OPCIONALES en lib/reservas-pacto.ts).
+  autoridad_habilitante?: Autoridad | null; autoridad_emisor?: string | null;
   estado: string; observaciones?: string | null; created_at?: string;
   direccion_fiscal?: string | null; distrito_fiscal?: string | null;
   direccion_cochera?: string | null; distrito_cochera?: string | null;
@@ -28,10 +44,13 @@ type VehiculoTercero = {
   descripcion_unidad?: string | null;
   tipo_vehiculo_costeo?: string | null;
   kilometraje_actual?: number | null;
+  /** {diesel: 100, glp: 25} — por FAMILIA. La columna existía desde
+   *  `radar-ia-combustible-multifoto.sql` y esta pantalla no tenía dónde llenarla. */
+  capacidad_tanque?: Record<string, number> | null;
   direccion_cochera?: string | null; distrito_cochera?: string | null; // override — si es null, usa el de la empresa
 };
 
-type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null };
+type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null; tipo_combustible_1?: string | null };
 
 type ConductorTercero = {
   id: number; empresa_id: number; nombre: string; dni: string | null;
@@ -75,18 +94,32 @@ type DetalleEmpresa = {
 
 // ─── TIPOS DOC ────────────────────────────────────────────────────────────────
 
+// Las CLAVES son las etiquetas canónicas de lib/documentos-estado.ts. Nunca se indexa este
+// Record con `d.tipo` crudo: en la base el tipo es texto tecleado y hay filas con el nombre
+// viejo ("Habilitación SUTRAN") o sin tildes. Siempre `etiquetaTipoDoc(d.tipo)` primero, que
+// es lo que hace que renombrar un documento no le apague la marca de OBLIGATORIO.
 const TIPOS_DOC_TERCERO: Record<string, { icon: string; obligatorio: boolean }> = {
-  "SOAT":                     { icon: "🚗", obligatorio: true  },
-  "Revisión Técnica (CITV)":  { icon: "🔍", obligatorio: true  },
-  "Habilitación SUTRAN":      { icon: "✅", obligatorio: true  },
-  "Permiso Operación MTC":    { icon: "🏛️", obligatorio: true  },
-  "Tarjeta de Propiedad":     { icon: "📋", obligatorio: true  },
-  "SCTR Salud":               { icon: "🏥", obligatorio: true  },
-  "SCTR Pensión":             { icon: "💼", obligatorio: true  },
-  "Seguro Todo Riesgo":       { icon: "🛡️", obligatorio: false },
-  "Responsabilidad Civil":    { icon: "⚖️", obligatorio: false },
-  "Otro":                     { icon: "📄", obligatorio: false },
+  "SOAT":                              { icon: "🚗", obligatorio: true  },
+  "Revisión Técnica (CITV)":           { icon: "🔍", obligatorio: true  },
+  "Tarjeta Única de Circulación (TUC)":{ icon: "✅", obligatorio: true  },
+  // NO obligatoria por placa: la habilitación es UNA de la empresa (la madre) y de ella
+  // salen las TUC de cada vehículo (las hijas). Si la placa tiene TUC, la empresa la tiene.
+  // Se vigila en la ficha de la empresa. Ver `exige: null` en lib/documentos-estado.ts.
+  "Habilitación Vehicular (MTC/ATU)":  { icon: "🏛️", obligatorio: false },
+  "Tarjeta de Propiedad":              { icon: "📋", obligatorio: true  },
+  // Seguros del TRABAJADOR, no de la placa: `ambitoTipoDoc` los marca "personal" y por eso
+  // no se le reclaman a una unidad concreta. Vida Ley faltaba y es igual de obligatoria.
+  "SCTR Salud":                        { icon: "🏥", obligatorio: true  },
+  "SCTR Pensión":                      { icon: "💼", obligatorio: true  },
+  "Vida Ley":                          { icon: "🧾", obligatorio: true  },
+  "Seguro Todo Riesgo":                { icon: "🛡️", obligatorio: false },
+  "Responsabilidad Civil":             { icon: "⚖️", obligatorio: false },
+  "Otro":                              { icon: "📄", obligatorio: false },
 };
+
+/** Config del tipo de UNA fila, resolviendo antes la etiqueta canónica. */
+const cfgTipoDoc = (tipo: string | null | undefined) =>
+  TIPOS_DOC_TERCERO[etiquetaTipoDoc(tipo)] ?? null;
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -94,12 +127,32 @@ function diasPara(f: string | null): number | null {
   if (!f) return null;
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
-function estadoDoc(f: string | null): "vigente" | "por_vencer" | "vencido" | "sin_fecha" {
+
+type EstDoc = "vigente" | "por_vencer" | "vencido" | "sin_fecha" | "sin_vencimiento";
+
+/** Estado de una FECHA suelta: la autorización de la empresa, que no es una fila de
+ *  `documentos_tercero` y por tanto no tiene tipo que consultar. */
+function estadoDoc(f: string | null): Exclude<EstDoc, "sin_vencimiento"> {
   const d = diasPara(f);
   if (d === null) return "sin_fecha";
   if (d < 0)    return "vencido";
   if (d <= 30)  return "por_vencer";
   return "vigente";
+}
+
+/**
+ * Estado de una FILA de documento. El TIPO manda sobre la fecha, y ese orden es todo el
+ * arreglo: la Tarjeta de Propiedad (TIVE) que emite SUNARP no tiene fecha de vencimiento,
+ * así que la pantalla la sacaba como "Sin fecha" y `calcAptitud` la contaba como motivo de
+ * REVISAR — un ámbar permanente por un dato que no existe y que nadie podía completar. Tres
+ * de las cuatro unidades de la captura del dueño estaban en ámbar por esto.
+ *
+ * Si además hay una fecha tecleada por error se ignora igual: un documento que no caduca no
+ * puede estar vencido, y dejar que caduque sería el mismo ámbar disfrazado de rojo.
+ */
+function estadoDocumento(d: { tipo?: string | null; fecha_vencimiento: string | null }): EstDoc {
+  if (docSinVencimiento(d.tipo)) return "sin_vencimiento";
+  return estadoDoc(d.fecha_vencimiento);
 }
 function fmtFecha(f: string | null) {
   if (!f) return "—";
@@ -133,11 +186,14 @@ const telE164 = (t: string | null | undefined) => {
   return d.length === 9 ? "51" + d : d;
 };
 
-const ESTADO_DOC_CFG = {
+const ESTADO_DOC_CFG: Record<EstDoc, { label: string; bg: string; color: string; dot: string }> = {
   vigente:    { label: "Vigente",    bg: "#dcfce7", color: "#166534", dot: "#16a34a" },
   por_vencer: { label: "Por vencer", bg: "#fef9c3", color: "#854d0e", dot: "#eab308" },
   vencido:    { label: "Vencido",    bg: "#fee2e2", color: "#991b1b", dot: "#dc2626" },
   sin_fecha:  { label: "Sin fecha",  bg: "#f3f4f6", color: "#4b5563", dot: "#9ca3af" },
+  // Azul informativo, no verde: "Vigente" se lee como "al día HASTA una fecha", y aquí no
+  // hay ninguna. Tampoco el gris de "Sin fecha", que se lee como dato pendiente.
+  sin_vencimiento: { label: "No vence", bg: "#e0f2fe", color: "#075985", dot: "#0284c7" },
 };
 
 const NIVEL_CFG: Record<Nivel, { label: string; bg: string; color: string; borde: string; icono: string }> = {
@@ -148,28 +204,36 @@ const NIVEL_CFG: Record<Nivel, { label: string; bg: string; color: string; borde
 
 const OBLIGATORIOS = Object.entries(TIPOS_DOC_TERCERO).filter(([, v]) => v.obligatorio).map(([k]) => k);
 
+// Las columnas de la autorización son ACCESORIAS: si `tercerizadas-autorizacion-ambito.sql`
+// no se corrió, pedirlas tumba el SELECT ENTERO y la pantalla se queda vacía por un dato de
+// adorno. Se reintenta sin ellas y se avisa en el formulario, que es donde hacen falta —
+// mismo criterio que `guardarReservas` con COLUMNAS_OPCIONALES: a un ERP al que le falta un
+// SQL accesorio se le tiene que poder seguir gestionando la flota.
+const COLS_EMP = "id,razon_social,ruc,estado,telefono,email,contacto_nombre,contacto_telefono,autorizacion_mtc,venc_autorizacion,direccion_fiscal,distrito_fiscal,direccion_cochera,distrito_cochera,lat_cochera,lng_cochera";
+const COLS_EMP_AUTORIDAD = `${COLS_EMP},autoridad_habilitante,autoridad_emisor`;
+
 // Riesgo de la EMPRESA: documentos obligatorios vencidos/por vencer, licencias y las
-// habilitaciones propias de la empresa (MTC/SUTRAN), que antes no entraban al semáforo.
+// la autorización de transporte propia de la empresa, que antes no entraba al semáforo.
 function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], emp?: Empresa | null): Nivel {
   if (emp && emp.estado === "suspendido") return "alto";
-  const docVencidos = docs.filter(d => estadoDoc(d.fecha_vencimiento) === "vencido" &&
-    TIPOS_DOC_TERCERO[d.tipo]?.obligatorio).length;
+  const docVencidos = docs.filter(d => estadoDocumento(d) === "vencido" &&
+    cfgTipoDoc(d.tipo)?.obligatorio).length;
   const licVencidas = conductores.filter(c => {
     const d = diasPara(c.vencimiento_licencia);
     return d !== null && d < 0;
   }).length;
   const habVencidas = emp
-    ? [emp.venc_autorizacion, emp.venc_habilitacion].filter(f => estadoDoc(f) === "vencido").length
+    ? [emp.venc_autorizacion].filter(f => estadoDoc(f) === "vencido").length
     : 0;
   if (docVencidos > 0 || licVencidas > 0 || habVencidas > 0) return "alto";
-  const docPorV = docs.filter(d => estadoDoc(d.fecha_vencimiento) === "por_vencer" &&
-    TIPOS_DOC_TERCERO[d.tipo]?.obligatorio).length;
+  const docPorV = docs.filter(d => estadoDocumento(d) === "por_vencer" &&
+    cfgTipoDoc(d.tipo)?.obligatorio).length;
   const licPorV = conductores.filter(c => {
     const d = diasPara(c.vencimiento_licencia);
     return d !== null && d >= 0 && d <= 30;
   }).length;
   const habPorV = emp
-    ? [emp.venc_autorizacion, emp.venc_habilitacion].filter(f => estadoDoc(f) === "por_vencer").length
+    ? [emp.venc_autorizacion].filter(f => estadoDoc(f) === "por_vencer").length
     : 0;
   if (docPorV > 0 || licPorV > 0 || habPorV > 0) return "medio";
   return "ok";
@@ -178,9 +242,21 @@ function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], e
 // PUNTO CIEGO HISTÓRICO: calcRiesgo solo castiga documentos REGISTRADOS y vencidos, así que
 // un proveedor que nunca cargó su SOAT salía ✅ verde. Esto lo detecta, pero como dimensión
 // aparte (chip "Sin documentos") para no teñir de rojo a toda la cartera.
-function docsObligFaltantes(docs: DocumentoTercero[]): string[] {
-  const presentes = new Set(docs.map(d => d.tipo));
-  return OBLIGATORIOS.filter(t => !presentes.has(t));
+/**
+ * Obligatorios que ninguna fila cubre.
+ *
+ * `soloUnidad` acota la lista a los documentos de la PLACA. Filtrando por BUI-272 el ERP
+ * reclamaba "SCTR Salud" y "SCTR Pensión" como obligatorios sin registrar de esa unidad, y
+ * un bus no tiene SCTR: la póliza es de las personas que lo conducen. El chip llevaba a un
+ * formulario donde lo único que se podía hacer era colgarle a la placa un documento que no
+ * es suyo — y mientras tanto la lista de pendientes nunca bajaba de tres.
+ */
+function docsObligFaltantes(docs: DocumentoTercero[], soloUnidad = false): string[] {
+  // Por etiqueta CANÓNICA: con `d.tipo` crudo, la fila que dice "Habilitación SUTRAN" no
+  // casaba con la clave nueva y el documento salía como faltante teniéndolo cargado.
+  const presentes = new Set(docs.map(d => etiquetaTipoDoc(d.tipo)));
+  return OBLIGATORIOS.filter(t =>
+    !presentes.has(t) && (!soloUnidad || ambitoTipoDoc(t) === "unidad"));
 }
 
 // Veredicto de UNA unidad, en una frase con causa concreta: es lo que el operador
@@ -203,16 +279,20 @@ function calcAptitud(
   const cands: Cand[] = [];
 
   for (const d of aplican) {
-    if (!TIPOS_DOC_TERCERO[d.tipo]?.obligatorio) continue;
-    const est = estadoDoc(d.fecha_vencimiento);
+    if (!cfgTipoDoc(d.tipo)?.obligatorio) continue;
+    const est = estadoDocumento(d);
     const dias = diasPara(d.fecha_vencimiento);
-    if (est === "vencido" && dias !== null) cands.push({ nivel: "alto",  dias, texto: `${d.tipo} vencido hace ${Math.abs(dias)} d` });
-    if (est === "por_vencer" && dias !== null) cands.push({ nivel: "medio", dias, texto: `${d.tipo} vence en ${dias} d` });
-    if (est === "sin_fecha") cands.push({ nivel: "medio", dias: 9999, texto: `${d.tipo} sin fecha de vencimiento` });
+    const nom = etiquetaTipoDoc(d.tipo);
+    if (est === "vencido" && dias !== null) cands.push({ nivel: "alto",  dias, texto: `${nom} vencido hace ${Math.abs(dias)} d` });
+    if (est === "por_vencer" && dias !== null) cands.push({ nivel: "medio", dias, texto: `${nom} vence en ${dias} d` });
+    // "sin_fecha" sigue siendo un aviso legítimo: al SOAT le falta un dato que existe.
+    // "sin_vencimiento" no genera candidato ninguno — no hay nada que revisar ni que renovar.
+    if (est === "sin_fecha") cands.push({ nivel: "medio", dias: 9999, texto: `${nom} sin fecha de vencimiento` });
   }
+  // La autorización la firma quien corresponda según el ámbito (MTC, ATU, Gobierno Regional
+  // o Municipalidad Provincial): el rótulo lo dice la ficha, no una constante.
   for (const h of [
-    { label: "Autorización MTC", f: emp.venc_autorizacion },
-    { label: "Habilitación SUTRAN", f: emp.venc_habilitacion },
+    { label: `Autorización ${configAutoridad(emp.autoridad_habilitante)?.corto ?? "de transporte"}`, f: emp.venc_autorizacion },
   ]) {
     const est = estadoDoc(h.f);
     const dias = diasPara(h.f);
@@ -227,8 +307,14 @@ function calcAptitud(
   const medios = cands.filter(c => c.nivel === "medio").sort((a, b) => a.dias - b.dias);
   if (medios.length) return { nivel: "medio", causa: medios[0].texto };
 
-  const faltan = docsObligFaltantes(aplican);
-  if (faltan.length >= OBLIGATORIOS.length) return { nivel: "medio", causa: "Sin documentos cargados" };
+  // Con `veh` la pregunta es "¿puede salir ESTA unidad?", y el SCTR de los conductores no
+  // se responde desde su ficha. Sin `veh` (veredicto de la empresa entera) sí cuentan.
+  const faltan = docsObligFaltantes(aplican, !!veh);
+  // El "no hay NADA" se mide contra el total del mismo ámbito: comparando siempre contra los
+  // 8 de la empresa, una unidad sin un solo papel nunca llegaba al tope (tiene 5 exigibles)
+  // y salía como "Faltan 5 documentos obligatorios", que suena a que hay algo cargado.
+  const totalExigible = veh ? OBLIGATORIOS.filter(t => ambitoTipoDoc(t) === "unidad").length : OBLIGATORIOS.length;
+  if (faltan.length >= totalExigible) return { nivel: "medio", causa: "Sin documentos cargados" };
   if (faltan.length > 0) return { nivel: "medio", causa: `Faltan ${faltan.length} documento${faltan.length > 1 ? "s" : ""} obligatorio${faltan.length > 1 ? "s" : ""}` };
   return { nivel: "ok", causa: "Sin vencimientos próximos" };
 }
@@ -236,8 +322,8 @@ function calcAptitud(
 const FORM_EMP = {
   razon_social: "", ruc: "", telefono: "", email: "",
   contacto_nombre: "", contacto_telefono: "",
-  autorizacion_mtc: "", habilitacion_sutran: "",
-  venc_autorizacion: "", venc_habilitacion: "",
+  autorizacion_mtc: "", venc_autorizacion: "",
+  autoridad_habilitante: "", autoridad_emisor: "",
   estado: "activo", observaciones: "",
   direccion_fiscal: "", distrito_fiscal: "",
   direccion_cochera: "", distrito_cochera: "",
@@ -270,6 +356,11 @@ export default function EmpresasTercerizadasPage() {
   const [mostrarFormDoc,  setMostrarFormDoc]  = useState(false);
   const [editEmpId,   setEditEmpId]   = useState<number | null>(null);
   const [editVehId,   setEditVehId]   = useState<number | null>(null);
+  // La capacidad de tanque de una unidad de TERCERO. La columna existe en `vehiculos_tercero`
+  // desde `radar-ia-combustible-multifoto.sql` y los dos lectores del ERP la consultan, pero
+  // esta pantalla no tenía dónde llenarla: el control de «esta carga excede el tanque» caía
+  // siempre al estimado por categoría y no había forma de corregirlo desde ningún sitio.
+  const [capTanqueT, setCapTanqueT] = useState<Record<string, string>>({});
   const [editCondId,  setEditCondId]  = useState<number | null>(null);
   const [editDocId,   setEditDocId]   = useState<number | null>(null);
   const [formEmp,  setFormEmp]  = useState(FORM_EMP);
@@ -281,6 +372,9 @@ export default function EmpresasTercerizadasPage() {
   const [confirmarBorrado, setConfirmarBorrado] = useState<Empresa | null>(null);
   const [textoBorrado, setTextoBorrado] = useState("");
   const [geocodificando, setGeocodificando] = useState(false);
+  // ¿Se corrió tercerizadas-autorizacion-ambito.sql? Se sondea UNA vez al cargar el índice y
+  // se degrada sin romper (mismo patrón que `detectarVigencia` en radar-worker/src/db.ts).
+  const [colsAutoridad, setColsAutoridad] = useState(true);
 
   // Documentos que algún proveedor subió desde su link público, pendientes de aprobar.
   const [revisionesPend, setRevisionesPend] = useState<RevisionPendiente[]>([]);
@@ -310,9 +404,11 @@ export default function EmpresasTercerizadasPage() {
   const [busqCond,   setBusqCond]   = useState("");
   const [filtroLic,  setFiltroLic]  = useState<"todos" | "vencida" | "por_vencer" | "app">("todos");
   const [limiteCond, setLimiteCond] = useState(50);
-  const [filtroDoc,  setFiltroDoc]  = useState<"todos" | "vencido" | "por_vencer" | "vigente" | "sin_fecha">("todos");
+  const [filtroDoc,  setFiltroDoc]  = useState<"todos" | EstDoc>("todos");
   const [filtroDocVeh, setFiltroDocVeh] = useState("");
   const [limiteDoc,  setLimiteDoc]  = useState(50);
+
+  const cfgAutoridadForm = configAutoridad(formEmp.autoridad_habilitante as Autoridad);
 
   const fe = (k: keyof typeof FORM_EMP) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -325,10 +421,24 @@ export default function EmpresasTercerizadasPage() {
 
   const cargarIndice = async () => {
     setLoading(true);
+
+    // ¿EXISTEN LAS COLUMNAS DE LA AUTORIZACIÓN? Se pregunta ANTES y con una consulta de una
+    // fila, mirando `error`.
+    //
+    // NO se puede envolver `paginarFilas` en un try/catch para averiguarlo, y esto ya dejó la
+    // pantalla EN BLANCO una vez: `paginarFilas` (lib/huella.ts:89) hace `if (error) break`
+    // —conserva lo acumulado a propósito, "huella parcial > vacía"— así que NUNCA lanza.
+    // Pedirle una columna inexistente devuelve `[]` sin un solo aviso, el catch no llega a
+    // ejecutarse, y los 21 proveedores desaparecen de la lista como si no existieran. Un
+    // dato accesorio no puede tumbar la pantalla entera, y menos en silencio.
+    const { error: errAutoridad } = await supabase
+      .from("empresas_tercerizadas").select("id,autoridad_habilitante").limit(1);
+    const hayAutoridad = !errAutoridad;
+    setColsAutoridad(hayAutoridad);
+
     const [eRows, vRows, cRows, dRows] = await Promise.all([
       paginarFilas(() => supabase.from("empresas_tercerizadas")
-        .select("id,razon_social,ruc,estado,telefono,email,contacto_nombre,contacto_telefono,autorizacion_mtc,habilitacion_sutran,venc_autorizacion,venc_habilitacion,direccion_fiscal,distrito_fiscal,direccion_cochera,distrito_cochera,lat_cochera,lng_cochera")
-        .order("razon_social").order("id")),
+        .select(hayAutoridad ? COLS_EMP_AUTORIDAD : COLS_EMP).order("razon_social").order("id")),
       paginarFilas(() => supabase.from("vehiculos_tercero")
         .select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,distrito_cochera")
         .order("placa").order("id")),
@@ -370,12 +480,16 @@ export default function EmpresasTercerizadasPage() {
   const aprobarRevision = async (r: RevisionPendiente) => {
     setProcesandoRevision(r.id);
     try {
+      // Aprobar es la puerta por la que un texto de fuera entra a `documentos_tercero`: se
+      // canoniza el tipo (el proveedor pudo mandarlo con el nombre viejo) y se anula la fecha
+      // si el documento no caduca — la misma regla que aplica el formulario interno.
+      const tipoAprobado = etiquetaTipoDoc(r.tipo);
       const payloadDoc = {
         empresa_id: r.empresa_id,
         vehiculo_id: r.vehiculo_id,
-        tipo: r.tipo,
+        tipo: tipoAprobado,
         numero: r.numero,
-        fecha_vencimiento: r.fecha_vencimiento_propuesta,
+        fecha_vencimiento: docSinVencimiento(tipoAprobado) ? null : r.fecha_vencimiento_propuesta,
         entidad_emisora: r.entidad_emisora,
         archivo_url: r.archivo_url,
       };
@@ -399,7 +513,7 @@ export default function EmpresasTercerizadasPage() {
   };
 
   const rechazarRevision = async (r: RevisionPendiente) => {
-    const motivo = prompt(`¿Por qué se rechaza "${r.tipo}"? Se lo enviamos al proveedor para que lo corrija.`);
+    const motivo = prompt(`¿Por qué se rechaza "${etiquetaTipoDoc(r.tipo)}"? Se lo enviamos al proveedor para que lo corrija.`);
     if (motivo === null) return;
     setProcesandoRevision(r.id);
     try {
@@ -463,7 +577,7 @@ export default function EmpresasTercerizadasPage() {
   // Capa 3: los parámetros de costeo solo viajan si alguien abre el formulario de vehículo.
   useEffect(() => {
     if (!mostrarFormVeh || paramsVeh.length > 0) return;
-    supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo")
+    supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo,tipo_combustible_1")
       .eq("activo", true).order("grupo_vehiculo").order("capacidad")
       .then(({ data }: any) => setParamsVeh(data || []));
   }, [mostrarFormVeh, paramsVeh.length]);
@@ -497,7 +611,7 @@ export default function EmpresasTercerizadasPage() {
       m[e.id] = {
         nivel: calcRiesgo(docs, conds, e),
         faltan: docsObligFaltantes(docs).length,
-        venc: docs.filter(d => estadoDoc(d.fecha_vencimiento) === "vencido").length
+        venc: docs.filter(d => estadoDocumento(d) === "vencido").length
             + conds.filter(c => { const x = diasPara(c.vencimiento_licencia); return x !== null && x < 0; }).length,
       };
     }
@@ -514,8 +628,8 @@ export default function EmpresasTercerizadasPage() {
   // ── Alertas empresa seleccionada ──────────────────────────────────────────
 
   const riesgoEmp = empActual ? calcRiesgo(docEmpresa, condEmpresa, empActual) : "ok";
-  const docsVencOblig  = docEmpresa.filter(d => estadoDoc(d.fecha_vencimiento) === "vencido" && TIPOS_DOC_TERCERO[d.tipo]?.obligatorio);
-  const docsPorVOblig  = docEmpresa.filter(d => estadoDoc(d.fecha_vencimiento) === "por_vencer" && TIPOS_DOC_TERCERO[d.tipo]?.obligatorio);
+  const docsVencOblig  = docEmpresa.filter(d => estadoDocumento(d) === "vencido" && cfgTipoDoc(d.tipo)?.obligatorio);
+  const docsPorVOblig  = docEmpresa.filter(d => estadoDocumento(d) === "por_vencer" && cfgTipoDoc(d.tipo)?.obligatorio);
   const licVencidas    = condEmpresa.filter(c => diasPara(c.vencimiento_licencia) !== null && diasPara(c.vencimiento_licencia)! < 0);
   const aptitudEmp     = empActual ? calcAptitud(null, empActual, docEmpresa, condEmpresa) : null;
 
@@ -691,9 +805,14 @@ export default function EmpresasTercerizadasPage() {
       contacto_nombre: formEmp.contacto_nombre.trim() || null,
       contacto_telefono: formEmp.contacto_telefono.trim() || null,
       autorizacion_mtc: formEmp.autorizacion_mtc.trim() || null,
-      habilitacion_sutran: formEmp.habilitacion_sutran.trim() || null,
       venc_autorizacion: formEmp.venc_autorizacion || null,
-      venc_habilitacion: formEmp.venc_habilitacion || null,
+      // El emisor solo tiene sentido para las autoridades que lo piden: guardar "Ica" bajo
+      // una autorización de la ATU sería escribir un territorio que nadie autorizó.
+      ...(colsAutoridad ? {
+        autoridad_habilitante: formEmp.autoridad_habilitante || null,
+        autoridad_emisor: configAutoridad(formEmp.autoridad_habilitante as Autoridad)?.pideEmisor
+          ? (formEmp.autoridad_emisor.trim() || null) : null,
+      } : {}),
       estado: formEmp.estado,
       observaciones: formEmp.observaciones.trim() || null,
       direccion_fiscal: formEmp.direccion_fiscal.trim() || null,
@@ -718,9 +837,9 @@ export default function EmpresasTercerizadasPage() {
       contacto_nombre: e.contacto_nombre || "",
       contacto_telefono: e.contacto_telefono || "",
       autorizacion_mtc: e.autorizacion_mtc || "",
-      habilitacion_sutran: e.habilitacion_sutran || "",
       venc_autorizacion: e.venc_autorizacion || "",
-      venc_habilitacion: e.venc_habilitacion || "",
+      autoridad_habilitante: e.autoridad_habilitante || "",
+      autoridad_emisor: e.autoridad_emisor || "",
       estado: e.estado || "activo", observaciones: e.observaciones || "",
       direccion_fiscal: e.direccion_fiscal || "", distrito_fiscal: e.distrito_fiscal || "",
       direccion_cochera: e.direccion_cochera || "", distrito_cochera: e.distrito_cochera || "",
@@ -818,12 +937,21 @@ export default function EmpresasTercerizadasPage() {
       descripcion_unidad: formVeh.descripcion_unidad.trim() || null,
       tipo_vehiculo_costeo: formVeh.tipo_vehiculo_costeo || null,
       distrito_cochera: formVeh.distrito_cochera || null,
+      capacidad_tanque: parseCapTanqueT(capTanqueT),
     };
-    const { error } = editVehId
-      ? await supabase.from("vehiculos_tercero").update(payload).eq("id", editVehId)
-      : await supabase.from("vehiculos_tercero").insert(payload);
+    // Mismo patrón que /vehiculos: la columna va siempre (para poder VACIARLA) y si la
+    // migración accesoria no se corrió se reintenta sin ella, diciéndolo.
+    const escribir = (datos: Record<string, unknown>) => editVehId
+      ? supabase.from("vehiculos_tercero").update(datos).eq("id", editVehId)
+      : supabase.from("vehiculos_tercero").insert(datos);
+    let { error } = await escribir(payload);
+    if (error && faltaColumnaTanque(error)) {
+      const { capacidad_tanque: _omitida, ...sinTanque } = payload;
+      ({ error } = await escribir(sinTanque));
+      if (!error) alert("Se guardó, pero la capacidad de tanque no: falta correr supabase/radar-ia-combustible-multifoto.sql.");
+    }
     if (error) { alert(error.message); setGuardando(false); return; }
-    setFormVeh(FORM_VEH); setEditVehId(null); setMostrarFormVeh(false);
+    setFormVeh(FORM_VEH); setCapTanqueT({}); setEditVehId(null); setMostrarFormVeh(false);
     await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]);
     setGuardando(false);
   };
@@ -865,7 +993,10 @@ export default function EmpresasTercerizadasPage() {
       vehiculo_id: formDoc.vehiculo_id ? Number(formDoc.vehiculo_id) : null,
       tipo: formDoc.tipo,
       numero: formDoc.numero.trim() || null,
-      fecha_vencimiento: formDoc.fecha_vencimiento || null,
+      // Se GUARDA null, no solo se oculta la casilla: editar un documento que ya traía una
+      // fecha vieja tiene que limpiarla, o el dato malo sobrevive al arreglo y vuelve a salir
+      // en cualquier pantalla que todavía mire la columna en crudo.
+      fecha_vencimiento: docSinVencimiento(formDoc.tipo) ? null : (formDoc.fecha_vencimiento || null),
       entidad_emisora: formDoc.entidad_emisora.trim() || null,
       archivo_url: formDoc.archivo_url.trim() || null,
       observaciones: formDoc.observaciones.trim() || null,
@@ -910,15 +1041,16 @@ export default function EmpresasTercerizadasPage() {
 
   // Copia antes de ordenar: docEmpresa viene del estado y .sort() lo mutaría en pleno render.
   const docsFiltrados = useMemo(() => {
-    const ord = { vencido: 0, por_vencer: 1, sin_fecha: 2, vigente: 3 };
+    // "No vence" va al final: lo urgente arriba, y lo que no tiene nada que vigilar, abajo.
+    const ord: Record<EstDoc, number> = { vencido: 0, por_vencer: 1, sin_fecha: 2, vigente: 3, sin_vencimiento: 4 };
     return [...docEmpresa]
       .filter(d => {
-        if (filtroDoc !== "todos" && estadoDoc(d.fecha_vencimiento) !== filtroDoc) return false;
+        if (filtroDoc !== "todos" && estadoDocumento(d) !== filtroDoc) return false;
         if (filtroDocVeh === "empresa" && d.vehiculo_id !== null) return false;
         if (filtroDocVeh && filtroDocVeh !== "empresa" && String(d.vehiculo_id) !== filtroDocVeh) return false;
         return true;
       })
-      .sort((a, b) => (ord[estadoDoc(a.fecha_vencimiento)] ?? 3) - (ord[estadoDoc(b.fecha_vencimiento)] ?? 3));
+      .sort((a, b) => (ord[estadoDocumento(a)] ?? 3) - (ord[estadoDocumento(b)] ?? 3));
   }, [docEmpresa, filtroDoc, filtroDocVeh]);
 
   // ── Piezas de UI reutilizadas ─────────────────────────────────────────────
@@ -1314,12 +1446,56 @@ export default function EmpresasTercerizadasPage() {
                   </div>
                 </div>
 
-                {/* Habilitaciones: chips en línea si ambas están vigentes; tarjetas cuando
-                    hay algo que atender. */}
+                {/* ALCANCE · lo primero que hay que saber antes de asignarle un servicio.
+                    No es lo mismo que "tiene los papeles al día": una autorización de la ATU
+                    perfectamente vigente NO habilita un viaje a Ica, y ese es el error que
+                    ninguna fecha de vencimiento puede detectar. Va arriba de las
+                    habilitaciones, con su territorio escrito, para que se lea antes de
+                    elegir la unidad. */}
+                {(() => {
+                  const aut = {
+                    autoridad: empActual.autoridad_habilitante ?? null,
+                    emisor: empActual.autoridad_emisor ?? null,
+                    numero: empActual.autorizacion_mtc,
+                    vencimiento: empActual.venc_autorizacion,
+                  };
+                  const cfg = configAutoridad(aut.autoridad);
+                  const avisos = avisosAutorizacion(aut);
+                  const faltaLoEsencial = avisos.some(v => v.codigo === "sin_autoridad" || v.codigo === "sin_emisor");
+                  return (
+                    <div className="mt-3 rounded-xl border px-3 py-2.5"
+                      style={{ borderColor: faltaLoEsencial ? "#fde68a" : "#bae6fd",
+                               background: faltaLoEsencial ? "#fffbeb" : "#f0f9ff" }}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[10px] font-bold uppercase tracking-wide"
+                          style={{ color: faltaLoEsencial ? "#92400e" : "#075985" }}>
+                          Alcance autorizado
+                        </span>
+                        <span className="text-[11px] font-black px-2 py-0.5 rounded-lg"
+                          style={{ background: faltaLoEsencial ? "#fef3c7" : "#e0f2fe",
+                                   color: faltaLoEsencial ? "#92400e" : "#075985" }}>
+                          {etiquetaAutorizacion(aut) ?? "Sin autoridad registrada"}
+                        </span>
+                        {empActual.autorizacion_mtc && (
+                          <span className="text-[11px] font-mono text-gray-500">{empActual.autorizacion_mtc}</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] mt-1" style={{ color: faltaLoEsencial ? "#92400e" : "#0c4a6e" }}>
+                        {cfg && !faltaLoEsencial
+                          ? cfg.alcance
+                          : "Si sus unidades tienen TUC, la empresa está habilitada — pero la TUC no dice QUIÉN la autorizó ni HASTA DÓNDE puede llegar, y sin eso el ERP no puede avisar cuando un servicio se salga de su ámbito. Complétalo en ✏️ Editar."}
+                      </p>
+                    </div>
+                  );
+                })()}
+
+                {/* La autorización: chip en línea si está vigente; tarjeta cuando hay algo
+                    que atender. Era una pareja MTC + SUTRAN; hoy es una sola, porque SUTRAN
+                    fiscaliza y no autoriza. */}
                 {(() => {
                   const habs = [
-                    { label: "MTC", full: "Autorización MTC", num: empActual.autorizacion_mtc, venc: empActual.venc_autorizacion },
-                    { label: "SUTRAN", full: "Habilitación SUTRAN", num: empActual.habilitacion_sutran, venc: empActual.venc_habilitacion },
+                    { label: configAutoridad(empActual.autoridad_habilitante)?.corto ?? "Autorización",
+                      full: "Autorización de transporte", num: empActual.autorizacion_mtc, venc: empActual.venc_autorizacion },
                   ];
                   const hayQueAtender = habs.some(h => ["vencido", "por_vencer"].includes(estadoDoc(h.venc)));
                   if (!hayQueAtender) {
@@ -1370,14 +1546,15 @@ export default function EmpresasTercerizadasPage() {
                       const dias = diasPara(d.fecha_vencimiento);
                       return (
                         <p key={d.id}>
-                          · <b>{d.tipo}</b> vencido{dias !== null ? ` hace ${Math.abs(dias)} d` : ""} —{" "}
+                          · <b>{etiquetaTipoDoc(d.tipo)}</b> vencido{dias !== null ? ` hace ${Math.abs(dias)} d` : ""} —{" "}
                           {veh ? <span className="font-mono font-bold">{veh.placa}</span> : "empresa (general)"}
                         </p>
                       );
                     })}
                     {licVencidas.map(c => <p key={c.id}>· Licencia vencida: <b>{c.nombre}</b></p>)}
-                    {estadoDoc(empActual.venc_autorizacion) === "vencido" && <p>· <b>Autorización MTC</b> vencida</p>}
-                    {estadoDoc(empActual.venc_habilitacion) === "vencido" && <p>· <b>Habilitación SUTRAN</b> vencida</p>}
+                    {estadoDoc(empActual.venc_autorizacion) === "vencido" && (
+                      <p>· <b>Autorización {configAutoridad(empActual.autoridad_habilitante)?.corto ?? "de transporte"}</b> vencida</p>
+                    )}
                     <button onClick={() => { setTabActiva("documentos"); setFiltroDoc("vencido"); }}
                       className="font-bold underline">Ver documentos →</button>
                   </div>
@@ -1428,7 +1605,7 @@ export default function EmpresasTercerizadasPage() {
                       ops={[["todos", "Todos"], ["disponible", "Disponibles"], ["ocupado", "Ocupados"], ["inactivo", "Inactivos"]]} />
                     <Segmented valor={vistaFlota} onChange={v => setVistaFlota(v)}
                       ops={[["tabla", "☰ Tabla"], ["fichas", "▦ Fichas"]] as ["tabla" | "fichas", string][]} />
-                    <button onClick={() => { setFormVeh(FORM_VEH); setEditVehId(null); setMostrarFormVeh(v => !v); }}
+                    <button onClick={() => { setFormVeh(FORM_VEH); setCapTanqueT({}); setEditVehId(null); setMostrarFormVeh(v => !v); }}
                       className="px-4 py-2 rounded-xl text-xs font-bold text-white" style={{ background: "#0b315f" }}>
                       + Agregar vehículo
                     </button>
@@ -1450,8 +1627,15 @@ export default function EmpresasTercerizadasPage() {
                           <select className={inputCls()} value={formVeh.tipo_vehiculo_costeo}
                             onChange={e => setFormVeh(p => ({ ...p, tipo_vehiculo_costeo: e.target.value }))}>
                             <option value="">— sin asignar —</option>
-                            {paramsVeh.map(p => <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>{p.nombre} ({p.tipo_vehiculo})</option>)}
+                            {/* El COMBUSTIBLE va en la etiqueta: es lo que decide el S/km de la ficha. */}
+                            {paramsVeh.map(p => (
+                              <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>
+                                {p.nombre} ({p.tipo_vehiculo}){p.tipo_combustible_1 ? ` · ${p.tipo_combustible_1}` : ""}
+                              </option>
+                            ))}
                           </select>
+                          <AvisoFichaCombustible capTanque={capTanqueT}
+                            tipoCombustibleFicha={paramsVeh.find(x => x.tipo_vehiculo === formVeh.tipo_vehiculo_costeo)?.tipo_combustible_1} />
                         </Campo>
                         <Campo label="Capacidad pax">
                           <input type="number" className={inputCls()} placeholder="45"
@@ -1534,12 +1718,33 @@ export default function EmpresasTercerizadasPage() {
                           />
                         </Campo>
                       </div>
+                      {/* Capacidad de tanque — la columna existe en `vehiculos_tercero` y hasta
+                          ahora no había ninguna pantalla para llenarla, así que las cargas de una
+                          unidad de tercero se juzgaban siempre contra el estimado de su categoría.
+                          Las claves son las FAMILIAS del catálogo: es como las busca quien lee. */}
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-2">Capacidad de tanque</p>
+                        <p className="text-[11px] text-gray-500 mb-2">
+                          Capacidad máxima por tipo de combustible. Sirve para detectar cargas que exceden el tanque
+                          y para avisar si la categoría de costeo elegida arriba costea otro combustible. Déjalo vacío
+                          para usar el estimado por categoría. Con kit GLP, pon la capacidad real del kit.
+                        </p>
+                        <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+                          {FAMILIAS_TANQUE.map(t => (
+                            <Campo key={t.familia} label={`${t.label} (${t.unidadLabel})`}>
+                              <input type="number" min="0" step="0.1" className={inputCls()} placeholder="—"
+                                value={capTanqueT[t.familia] ?? ""}
+                                onChange={e => setCapTanqueT(p => ({ ...p, [t.familia]: e.target.value }))} />
+                            </Campo>
+                          ))}
+                        </div>
+                      </div>
                       <div className="flex gap-2">
                         <button onClick={guardarVehiculo} disabled={guardando}
                           className="px-4 py-2 rounded-xl text-xs font-bold text-white" style={{ background: "#0b315f" }}>
                           {guardando ? "..." : editVehId ? "Actualizar" : "Guardar"}
                         </button>
-                        <button onClick={() => { setFormVeh(FORM_VEH); setEditVehId(null); setMostrarFormVeh(false); }}
+                        <button onClick={() => { setFormVeh(FORM_VEH); setCapTanqueT({}); setEditVehId(null); setMostrarFormVeh(false); }}
                           className="px-4 py-2 rounded-xl text-xs font-bold border text-gray-600">Cancelar</button>
                       </div>
                     </div>
@@ -1596,7 +1801,7 @@ export default function EmpresasTercerizadasPage() {
                                     <div className="flex gap-1.5" onClick={ev => ev.stopPropagation()}>
                                       <button onClick={() => setModalOdoVeh(v)} title="Odómetro" className="hover:opacity-70">📷</button>
                                       <button title="Editar" className="text-gray-400 hover:text-gray-800"
-                                        onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}>✏️</button>
+                                        onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setCapTanqueT(capTanqueTAForm(v.capacidad_tanque)); setEditVehId(v.id); setMostrarFormVeh(true); }}>✏️</button>
                                       <button className="text-red-400 hover:text-red-600" title="Eliminar"
                                         onClick={async () => { if (!confirm(`¿Eliminar la unidad ${v.placa}?`)) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}>✕</button>
                                     </div>
@@ -1675,7 +1880,7 @@ export default function EmpresasTercerizadasPage() {
                                   style={{ background: v.estado === "disponible" ? "#dcfce7" : "#f3f4f6", color: v.estado === "disponible" ? "#166534" : "#4b5563" }}>
                                   {v.estado}
                                 </span>
-                                <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
+                                <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setCapTanqueT(capTanqueTAForm(v.capacidad_tanque)); setEditVehId(v.id); setMostrarFormVeh(true); }}
                                   className="text-xs font-bold text-gray-500 hover:text-gray-800">✏️</button>
                                 <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}
                                   className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>
@@ -1817,7 +2022,7 @@ export default function EmpresasTercerizadasPage() {
                 <div className="bg-white rounded-b-2xl border shadow-sm p-4 space-y-3">
                   <div className="flex justify-between items-center gap-3 flex-wrap">
                     <Segmented valor={filtroDoc} onChange={setFiltroDoc}
-                      ops={[["todos", "Todos"], ["vencido", "Vencidos"], ["por_vencer", "Por vencer"], ["vigente", "Vigentes"], ["sin_fecha", "Sin fecha"]] as ["todos" | "vencido" | "por_vencer" | "vigente" | "sin_fecha", string][]} />
+                      ops={[["todos", "Todos"], ["vencido", "Vencidos"], ["por_vencer", "Por vencer"], ["vigente", "Vigentes"], ["sin_fecha", "Sin fecha"], ["sin_vencimiento", "No vencen"]] as ["todos" | EstDoc, string][]} />
                     <select value={filtroDocVeh} onChange={e => setFiltroDocVeh(e.target.value)}
                       className="border border-gray-200 rounded-xl px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f]">
                       <option value="">Todas las unidades</option>
@@ -1830,21 +2035,44 @@ export default function EmpresasTercerizadasPage() {
                     </button>
                   </div>
 
-                  {/* Obligatorios que ningún registro cubre: el semáforo por sí solo no los ve. */}
+                  {/* Obligatorios que ningún registro cubre: el semáforo por sí solo no los ve.
+                      Se mide contra LO QUE SE ESTÁ MIRANDO, no contra toda la empresa: con
+                      una placa elegida, los documentos que aplican son los suyos más los
+                      generales, y los que se le pueden reclamar son solo los de la UNIDAD —
+                      el SCTR y la Vida Ley son de las personas, no del bus. */}
                   {(() => {
-                    const faltan = docsObligFaltantes(docEmpresa);
+                    const placaSel = filtroDocVeh && filtroDocVeh !== "empresa" ? Number(filtroDocVeh) : null;
+                    const aplican = placaSel
+                      ? docEmpresa.filter(d => d.vehiculo_id === null || d.vehiculo_id === placaSel)
+                      : docEmpresa;
+                    const faltan = docsObligFaltantes(aplican, placaSel !== null);
                     if (!faltan.length || cargandoDetalle) return null;
+                    const placa = placaSel ? vehEmpresa.find(v => v.id === placaSel)?.placa : null;
                     return (
                       <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
-                        <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Obligatorios sin registrar ({faltan.length})</p>
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                          Obligatorios sin registrar ({faltan.length}){placa ? ` · ${placa}` : ""}
+                        </p>
                         <div className="flex gap-1.5 flex-wrap">
                           {faltan.map(t => (
-                            <button key={t} onClick={() => { setFormDoc({ ...FORM_DOC, tipo: t }); setEditDocId(null); setMostrarFormDoc(true); }}
+                            <button key={t} onClick={() => {
+                              // Un documento de la unidad nace con la placa que se está mirando;
+                              // uno del personal, nunca: es de la empresa.
+                              setFormDoc({ ...FORM_DOC, tipo: t,
+                                vehiculo_id: placaSel && ambitoTipoDoc(t) === "unidad" ? String(placaSel) : "" });
+                              setEditDocId(null); setMostrarFormDoc(true);
+                            }}
                               className="text-[11px] font-bold px-2 py-0.5 rounded-lg border border-gray-300 bg-white text-gray-600 hover:border-[#0b315f] hover:text-[#0b315f]">
-                              {TIPOS_DOC_TERCERO[t]?.icon} {t} +
+                              {cfgTipoDoc(t)?.icon} {t} +
                             </button>
                           ))}
                         </div>
+                        {placaSel !== null && (
+                          <p className="text-[10px] text-gray-400 mt-1">
+                            Los seguros del personal (SCTR Salud, SCTR Pensión, Vida Ley) son de la empresa,
+                            no de una unidad: se ven eligiendo «Todas las unidades».
+                          </p>
+                        )}
                       </div>
                     );
                   })()}
@@ -1866,8 +2094,17 @@ export default function EmpresasTercerizadasPage() {
                         <Campo label="Número">
                           <input className={inputCls("font-mono")} value={formDoc.numero} onChange={e => setFormDoc(p => ({ ...p, numero: e.target.value }))} />
                         </Campo>
+                        {/* La casilla se APAGA, no se esconde: el hueco vacío en la rejilla
+                            haría pensar que la pantalla se rompió. Deshabilitada y con el
+                            motivo escrito, enseña la regla en el sitio donde se teclea. */}
                         <Campo label="Fecha vencimiento">
-                          <input type="date" className={inputCls()} value={formDoc.fecha_vencimiento} onChange={e => setFormDoc(p => ({ ...p, fecha_vencimiento: e.target.value }))} />
+                          {docSinVencimiento(formDoc.tipo) ? (
+                            <div className="w-full border border-sky-200 bg-sky-50 rounded-xl px-3 py-2.5 text-xs text-sky-800">
+                              <b>No vence.</b> Este documento no tiene fecha de vencimiento.
+                            </div>
+                          ) : (
+                            <input type="date" className={inputCls()} value={formDoc.fecha_vencimiento} onChange={e => setFormDoc(p => ({ ...p, fecha_vencimiento: e.target.value }))} />
+                          )}
                         </Campo>
                         <Campo label="Entidad emisora">
                           <input className={inputCls()} value={formDoc.entidad_emisora} onChange={e => setFormDoc(p => ({ ...p, entidad_emisora: e.target.value }))} />
@@ -1902,10 +2139,13 @@ export default function EmpresasTercerizadasPage() {
                         </thead>
                         <tbody>
                           {docsFiltrados.slice(0, limiteDoc).map(d => {
-                            const est = estadoDoc(d.fecha_vencimiento);
+                            const est = estadoDocumento(d);
                             const cfg = ESTADO_DOC_CFG[est];
-                            const dias = diasPara(d.fecha_vencimiento);
-                            const tipoCfg = TIPOS_DOC_TERCERO[d.tipo] || { icon: "📄", obligatorio: false };
+                            // Un documento que no caduca no tiene cuenta atrás que mostrar,
+                            // tenga o no una fecha tecleada por error en la fila.
+                            const dias = est === "sin_vencimiento" ? null : diasPara(d.fecha_vencimiento);
+                            const nombreTipo = etiquetaTipoDoc(d.tipo);
+                            const tipoCfg = cfgTipoDoc(d.tipo) || { icon: "\ud83d\udcc4", obligatorio: false };
                             // Solo entre las unidades de ESTA empresa: las secuencias de id de
                             // `vehiculos` y `vehiculos_tercero` se solapan.
                             const veh = vehEmpresa.find(v => v.id === d.vehiculo_id);
@@ -1915,13 +2155,13 @@ export default function EmpresasTercerizadasPage() {
                                 <td className="p-2">
                                   <div className="flex items-center gap-1">
                                     <span>{tipoCfg.icon}</span>
-                                    <span className="font-bold text-gray-800">{d.tipo}</span>
+                                    <span className="font-bold text-gray-800">{nombreTipo}</span>
                                     {tipoCfg.obligatorio && <span className="text-[9px] text-red-500 font-bold">OBL</span>}
                                   </div>
                                 </td>
                                 <td className="p-2 font-mono text-[#0b315f]">{veh ? veh.placa : "Empresa"}</td>
                                 <td className="p-2 font-mono text-gray-500">{d.numero || "—"}</td>
-                                <td className="p-2">{fmtFecha(d.fecha_vencimiento)}</td>
+                                <td className="p-2">{est === "sin_vencimiento" ? <span className="text-sky-700">No vence</span> : fmtFecha(d.fecha_vencimiento)}</td>
                                 <td className="p-2 font-black" style={{ color: dias !== null && dias < 0 ? "#dc2626" : dias !== null && dias <= 30 ? "#d97706" : "#166534" }}>
                                   {dias !== null ? (dias < 0 ? `${Math.abs(dias)}d venc.` : `${dias}d`) : "—"}
                                 </td>
@@ -1936,7 +2176,7 @@ export default function EmpresasTercerizadasPage() {
                                 </td>
                                 <td className="p-2">
                                   <div className="flex gap-1">
-                                    <button onClick={() => { setFormDoc({ vehiculo_id: d.vehiculo_id ? String(d.vehiculo_id) : "", tipo: d.tipo, numero: d.numero || "", fecha_vencimiento: d.fecha_vencimiento || "", entidad_emisora: d.entidad_emisora || "", archivo_url: d.archivo_url || "", observaciones: d.observaciones || "" }); setEditDocId(d.id); setMostrarFormDoc(true); }}
+                                    <button onClick={() => { setFormDoc({ vehiculo_id: d.vehiculo_id ? String(d.vehiculo_id) : "", tipo: nombreTipo, numero: d.numero || "", fecha_vencimiento: d.fecha_vencimiento || "", entidad_emisora: d.entidad_emisora || "", archivo_url: d.archivo_url || "", observaciones: d.observaciones || "" }); setEditDocId(d.id); setMostrarFormDoc(true); }}
                                       className="text-gray-400 hover:text-gray-800">✏️</button>
                                     <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("documentos_tercero").delete().eq("id", d.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}
                                       className="text-red-400 hover:text-red-600">✕</button>
@@ -2020,28 +2260,69 @@ export default function EmpresasTercerizadasPage() {
                 </Campo>
               </div>
             </div>
+            {/* ── AUTORIZACIÓN DE TRANSPORTE ──────────────────────────────────────────
+                UNA sola, no dos. Antes se pedían "N° Autorización MTC" y "N° Habilitación
+                SUTRAN" como si todo transportista tuviera las dos: quien opera con
+                autorización de la ATU no tiene número de MTC, dejaba el campo vacío, y el
+                vacío se leía como "le falta un papel" en vez de "no le corresponde". SUTRAN
+                además no autoriza, fiscaliza.
+                Lo que se gana no es un campo menos: es saber HASTA DÓNDE puede llegar. */}
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Habilitaciones legales</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">
+                Autorización de transporte de personas
+              </p>
+              {!colsAutoridad && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900 mb-3">
+                  Falta correr <b>supabase/tercerizadas-autorizacion-ambito.sql</b>: hasta entonces se puede
+                  cargar el número y el vencimiento, pero no queda registrado quién autorizó ni hasta dónde
+                  puede circular esta empresa.
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <Campo label="N° Autorización MTC">
-                  <input className={inputCls("font-mono")} placeholder="Ej: MTC-001-2024" value={formEmp.autorizacion_mtc} onChange={fe("autorizacion_mtc")} />
+                <Campo label="Autoridad que autoriza" span={2}>
+                  <select className={inputCls()} value={formEmp.autoridad_habilitante}
+                    disabled={!colsAutoridad}
+                    onChange={e => setFormEmp(p => ({
+                      ...p, autoridad_habilitante: e.target.value,
+                      // El emisor pertenece a la autoridad elegida: al cambiarla se limpia, o
+                      // quedaría "ATU · Región Ica" — un territorio que nadie autorizó.
+                      autoridad_emisor: "",
+                    }))}>
+                    <option value="">— Sin especificar —</option>
+                    {AUTORIDADES.map(a => <option key={a.clave} value={a.clave}>{a.label}</option>)}
+                  </select>
                 </Campo>
-                <Campo label="Vencimiento autorización MTC">
+                {cfgAutoridadForm?.pideEmisor && (
+                  <Campo label={cfgAutoridadForm.etiquetaEmisor ?? "Emisor"} span={2}>
+                    {cfgAutoridadForm.clave === "regional" ? (
+                      <select className={inputCls()} value={formEmp.autoridad_emisor} onChange={fe("autoridad_emisor")}>
+                        <option value="">— Elegir región —</option>
+                        {REGIONES_PERU.map(r => <option key={r} value={r}>{r}</option>)}
+                      </select>
+                    ) : (
+                      <input className={inputCls()} placeholder="Ej: Cañete, Huaral, Trujillo…"
+                        value={formEmp.autoridad_emisor} onChange={fe("autoridad_emisor")} />
+                    )}
+                  </Campo>
+                )}
+                {cfgAutoridadForm && (
+                  <div className="md:col-span-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2.5">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-sky-700 mb-0.5">
+                      Alcance · {etiquetaAutorizacion({ autoridad: cfgAutoridadForm.clave, emisor: formEmp.autoridad_emisor })}
+                    </p>
+                    <p className="text-[11px] text-sky-900">{cfgAutoridadForm.alcance}</p>
+                  </div>
+                )}
+                <Campo label="N° de la resolución que autoriza">
+                  <input className={inputCls("font-mono")}
+                    placeholder={cfgAutoridadForm?.clave === "atu" ? "Ej: R.D. 000123-2024-ATU/DO" : "Ej: R.D. 1234-2024-MTC/15"}
+                    value={formEmp.autorizacion_mtc} onChange={fe("autorizacion_mtc")} />
+                </Campo>
+                <Campo label="Vencimiento de la autorización">
                   <input type="date" className={inputCls()} value={formEmp.venc_autorizacion} onChange={fe("venc_autorizacion")} />
                   {formEmp.venc_autorizacion && (
                     <p className="text-[10px] mt-1 font-bold" style={{ color: diasPara(formEmp.venc_autorizacion) !== null && diasPara(formEmp.venc_autorizacion)! <= 0 ? "#dc2626" : "#166534" }}>
                       {diasPara(formEmp.venc_autorizacion) !== null && diasPara(formEmp.venc_autorizacion)! <= 0 ? "⚠ Vencida" : `Vence en ${diasPara(formEmp.venc_autorizacion)} días`}
-                    </p>
-                  )}
-                </Campo>
-                <Campo label="N° Habilitación SUTRAN">
-                  <input className={inputCls("font-mono")} placeholder="Ej: SUTRAN-001-2024" value={formEmp.habilitacion_sutran} onChange={fe("habilitacion_sutran")} />
-                </Campo>
-                <Campo label="Vencimiento habilitación SUTRAN">
-                  <input type="date" className={inputCls()} value={formEmp.venc_habilitacion} onChange={fe("venc_habilitacion")} />
-                  {formEmp.venc_habilitacion && (
-                    <p className="text-[10px] mt-1 font-bold" style={{ color: diasPara(formEmp.venc_habilitacion) !== null && diasPara(formEmp.venc_habilitacion)! <= 0 ? "#dc2626" : "#166534" }}>
-                      {diasPara(formEmp.venc_habilitacion) !== null && diasPara(formEmp.venc_habilitacion)! <= 0 ? "⚠ Vencida" : `Vence en ${diasPara(formEmp.venc_habilitacion)} días`}
                     </p>
                   )}
                 </Campo>
@@ -2122,7 +2403,7 @@ export default function EmpresasTercerizadasPage() {
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <p className="font-bold text-sm text-gray-900">{r.empresa?.razon_social || "—"}</p>
-                        <p className="text-xs text-gray-500">{r.tipo} · {r.vehiculo?.placa ? `Unidad ${r.vehiculo.placa}` : "Empresa (general)"}</p>
+                        <p className="text-xs text-gray-500">{etiquetaTipoDoc(r.tipo)} · {r.vehiculo?.placa ? `Unidad ${r.vehiculo.placa}` : "Empresa (general)"}</p>
                       </div>
                       <a href={r.archivo_url} target="_blank" rel="noreferrer"
                         className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap flex-shrink-0">Ver archivo →</a>

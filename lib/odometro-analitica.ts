@@ -22,6 +22,9 @@
 // y el combustible. Ver [[project_radar_combustible_multifoto]].
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { seriesRendimiento, normalizarCantidad } from "@/lib/rendimiento";
+import { familiaCombustible, configCombustible } from "@/lib/combustible-tipos";
+
 // ─── TIPOS ───────────────────────────────────────────────────────────────────
 
 /** Fila cruda de lecturas_odometro (los campos que consume la analítica). */
@@ -537,19 +540,34 @@ export type RegistroCombustible = {
 };
 
 export type IndicadoresEconomicos = {
-  rendimientoKmGal: number | null; // km por galón (promedio de tramos consecutivos)
+  rendimientoKmGal: number | null; // MEDIANA de los tramos de la familia principal (lib/rendimiento.ts)
+  rendimientoLabel: string;        // "km/gal" | "km/m³" — una unidad de GNV no rinde en galones
+  rendimientoFamilia: string | null;
+  rendimientoTramos: number;       // sobre cuántos tramos se midió: 2 tramos no son un patrón
   costoTotal: number;
   costoPorKm: number | null;       // costo combustible / km recorridos (odómetro)
   costoPromedioDia: number | null;
-  galonesTotal: number;
+  /**
+   * Cantidad cargada POR FAMILIA, cada una en SU unidad. Era un `galonesTotal: number` que
+   * sumaba `galones` a secas: en una unidad de GNV eso son metros cúbicos, y en una fila del
+   * Radar pueden ser litros — tres magnitudes distintas apiladas y publicadas como "gal".
+   * Lo único agregable entre combustibles es `costoTotal`.
+   */
+  cantidadPorFamilia: { familia: string; cantidad: number; unidadLabel: string }[];
   nRegistros: number;
 };
 
 /**
- * Indicadores económicos de un vehículo en [desde, hasta]. El rendimiento km/gal
- * se calcula por tramos entre recargas consecutivas (igual criterio que
- * app/combustible). El costo/km usa el km recorrido REAL del odómetro en el
- * período (más honesto que el delta de kilometraje del propio combustible).
+ * Indicadores económicos de un vehículo en [desde, hasta].
+ *
+ * El rendimiento sale de lib/rendimiento.ts, la regla ÚNICA del ERP. El bucle que vivía aquí
+ * era la tercera copia de la fórmula y arrastraba dos defectos: usaba la media (que un tanque
+ * a medio llenar mueve) y **no segmentaba por tipo de combustible**, así que una carga de
+ * diésel seguida de una de urea producía un tramo falso con los LITROS DE UREA como
+ * denominador de los km de diésel.
+ *
+ * El costo/km NO se toca: ya usa el km recorrido REAL del odómetro en el período, que es más
+ * honesto que el delta de kilometraje del propio combustible, y es la definición única del ERP.
  */
 export function indicadoresEconomicos(
   combustible: RegistroCombustible[],
@@ -559,26 +577,51 @@ export function indicadoresEconomicos(
 ): IndicadoresEconomicos {
   const regs = combustible
     .filter((c) => c.fecha >= desde && c.fecha <= hasta)
-    .sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
+    .sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
 
   const costoTotal = regs.reduce((s, c) => s + Number(c.total || 0), 0);
-  const galonesTotal = regs.reduce((s, c) => s + Number(c.galones || 0), 0);
-
-  const rends: number[] = [];
-  for (let i = 1; i < regs.length; i++) {
-    const km = Number(regs[i].kilometraje) - Number(regs[i - 1].kilometraje);
-    const gal = Number(regs[i].galones);
-    if (km > 0 && gal > 0) rends.push(km / gal);
+  // Por familia y normalizada a su unidad: la que no se sabe convertir no se suma a ninguna.
+  const porFamilia = new Map<string, number>();
+  for (const c of regs) {
+    const fam = familiaCombustible(c.tipo_combustible);
+    const q = normalizarCantidad(c.galones, (c as any).unidad, fam);
+    if (q != null) porFamilia.set(fam, (porFamilia.get(fam) ?? 0) + q);
   }
+
+  // La familia con más cargas manda: un bimodal tiene DOS rendimientos y promediarlos daría
+  // un número que no es de ninguno de los dos.
+  const series = seriesRendimiento(
+    regs.map((c, i) => ({
+      id: i + 1,
+      unidad: String(c.vehiculo_id ?? "u"),
+      fecha: String(c.fecha).slice(0, 10),
+      kilometraje: c.kilometraje,
+      cantidad: c.galones,
+      unidadCantidad: (c as any).unidad ?? null,
+      tipo: c.tipo_combustible,
+    }))
+  );
+  const principal = [...series.values()]
+    .filter((s) => s.resumen.n > 0)
+    .sort((a, b) => b.resumen.n - a.resumen.n)[0] ?? null;
 
   const nDias = Math.max(1, diasEntreFechas(desde, hasta) + 1);
 
   return {
-    rendimientoKmGal: rends.length ? media(rends) : null,
+    rendimientoKmGal: principal?.resumen.mediana ?? null,
+    rendimientoLabel: principal?.resumen.label ?? "km/gal",
+    rendimientoFamilia: principal?.resumen.familia ?? null,
+    rendimientoTramos: principal?.resumen.n ?? 0,
     costoTotal: Math.round(costoTotal * 100) / 100,
     costoPorKm: kmRecorridoPeriodo && kmRecorridoPeriodo > 0 ? Math.round((costoTotal / kmRecorridoPeriodo) * 100) / 100 : null,
     costoPromedioDia: Math.round((costoTotal / nDias) * 100) / 100,
-    galonesTotal: Math.round(galonesTotal * 100) / 100,
+    cantidadPorFamilia: [...porFamilia.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([familia, cantidad]) => ({
+        familia,
+        cantidad: Math.round(cantidad * 100) / 100,
+        unidadLabel: configCombustible(familia).unidadLabel,
+      })),
     nRegistros: regs.length,
   };
 }

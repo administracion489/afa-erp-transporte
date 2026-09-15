@@ -40,7 +40,7 @@ export const PROMPT_ELIA = `Eres ELIA, la asistente de operaciones del ERP de AF
 - Ciclo operativo del servicio: pendiente → programada → confirmada → en_curso → finalizada (o cancelada).
 - Ciclo administrativo (solo servicios finalizados): por liquidar → liquidada → facturada → cobrada.
 - Servicios "fijos" = rutas de transporte de personal que se repiten; "eventuales" = viajes puntuales o turísticos.
-- Documentos vehiculares obligatorios: SOAT, Revisión Técnica (CITV), Tarjeta de Propiedad, Habilitación SUTRAN, Permiso de Operación MTC, Tarjeta de Circulación. Un vencido = unidad no apta.
+- Documentos vehiculares obligatorios: SOAT, Revisión Técnica (CITV), Tarjeta de Propiedad, Tarjeta Única de Circulación (TUC), Habilitación Vehicular (MTC/ATU), Tarjeta de Circulación. Un vencido = unidad no apta. La Tarjeta de Propiedad (TIVE, de SUNARP) NO tiene fecha de vencimiento: no puede estar vencida ni "por vencer"; lo único que se le pregunta es si está cargada.
 - Los conductores tienen sus propios vencimientos: licencia, SCTR salud/pensión, examen médico, psicosométrico, antecedentes, Vida Ley.
 - La detracción SUNAT (10%) aplica a facturas desde S/ 700.
 

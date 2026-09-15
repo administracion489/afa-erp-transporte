@@ -15,6 +15,23 @@
 
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
+import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
+import {
+  familiaCombustible, capacidadTanqueDe,
+  tipoDeEtiquetaPrecio, precioReferencialDe, revisarPrecioUnitario, unidadDeCarga,
+} from "@/lib/combustible-tipos";
+import { resolverTipoCombustible, revisarTipoContraPrecio } from "./tipo-voucher";
+import { serieRendimiento, juzgarTramo, TECHO_FAMILIA, type CargaRendimiento } from "@/lib/rendimiento";
+import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
+import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
+import {
+  resolverIdentidadGrifo,
+  normalizarDiscrepancias,
+  esFalsaDiscrepancia,
+  codigoDeDiscrepancia,
+  detalleDeDiscrepancia,
+  type EmpresasConocidas,
+} from "./identidad-voucher";
 import type {
   AnomaliaCombustible,
   CategoriaRadar,
@@ -86,26 +103,6 @@ function numOpc(v: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// ── Capacidad de tanque estimada por categoría del vehículo ──────────────────
-// Copiado de la constante CAPACIDAD_TANQUE de app/combustible/page.tsx (misma heurística).
-
-const CAPACIDAD_TANQUE: Record<string, Record<string, number>> = {
-  BUS:     { diesel: 100, gnv: 150, glp: 80,  gasolina: 80,  urea: 30 },
-  MINIBUS: { diesel: 60,  gnv: 80,  glp: 50,  gasolina: 50,  urea: 15 },
-  VAN:     { diesel: 20,  gnv: 40,  glp: 25,  gasolina: 20,  urea: 10 },
-  AUTO:    { diesel: 12,  gnv: 30,  glp: 15,  gasolina: 12,  urea: 5  },
-  DEFAULT: { diesel: 80,  gnv: 100, glp: 60,  gasolina: 60,  urea: 20 },
-};
-
-function getCapacidad(categoria: string | null | undefined, tipo: string): number {
-  if (!categoria) return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
-  const cat = categoria.toUpperCase();
-  for (const [k, v] of Object.entries(CAPACIDAD_TANQUE)) {
-    if (cat.includes(k)) return v[tipo] || v.diesel || 80;
-  }
-  return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
-}
-
 // Marcas de KIT DE CONVERSIÓN A GLP (se ven en el tablero) — NUNCA son el grifo/estación.
 // Si la IA las devuelve como grifo/proveedor, se descartan (trampa "LANDI RENZO" del caso CWQ-400).
 const MARCAS_KIT_GLP = [
@@ -119,15 +116,57 @@ function esMarcaKitGLP(s?: string | null): boolean {
 }
 
 /**
- * Capacidad del tanque para (vehículo, tipo). Usa la capacidad EDITABLE por vehículo si el
- * operador la configuró (vehiculos.capacidad_tanque jsonb { diesel, glp, gnv, ... }); si no,
- * cae a la heurística por categoría. Editable resuelve el caso GLP: un kit convertido tiene
- * ~20-30 gal, no los 80 que asumía la heurística de un bus.
+ * Capacidad del tanque para (vehículo, tipo) — la resuelve `lib/combustible-tipos.ts`.
+ *
+ * Este cuerpo hacía `veh?.capacidad_tanque?.[tipo]` y llevaba su propia copia de la heurística
+ * por categoría. Las dos cosas estaban mal por la misma razón: `capacidad_tanque` se ESCRIBE
+ * con la clave de la FAMILIA y aquí se buscaba con el TIPO leído del voucher, así que un
+ * `gasolina_premium` no encontraba la capacidad que el operador había configurado y encima
+ * remataba en el tanque de diésel. Ver la cabecera del catálogo.
  */
 function capacidadTanque(veh: VehiculoMatch | null, tipo: string): number {
-  const editable = veh?.capacidad_tanque?.[tipo];
-  if (editable != null && Number(editable) > 0) return Number(editable);
-  return getCapacidad(veh?.categoria, tipo);
+  return capacidadTanqueDe(veh, tipo);
+}
+
+// ── Empresas que el ERP conoce como suyas (para el guard de identidad del voucher) ──
+// La propia (`empresa_perfil`, fila 1) y las tercerizadas. Ninguna puede ser el grifo de su
+// propio voucher de combustible: en la nota de despacho son el CLIENTE que compró. Ver
+// lib/radar/identidad-voucher.ts.
+//
+// Se memoiza por 5 minutos: son dos selects sobre tablas chicas, pero el lote procesa hasta
+// 50 mensajes y no tiene sentido repetirlos por cada uno. Cinco minutos es corto de sobra
+// para que una tercerizada recién dada de alta entre en el siguiente barrido del cron.
+const TTL_EMPRESAS_MS = 5 * 60_000;
+let _empresasConocidas: { data: EmpresasConocidas; en: number } | null = null;
+
+async function cargarEmpresasConocidas(sb: any): Promise<EmpresasConocidas> {
+  if (_empresasConocidas && Date.now() - _empresasConocidas.en < TTL_EMPRESAS_MS) return _empresasConocidas.data;
+  const nombres: string[] = [];
+  const rucs: string[] = [];
+  // La propia va PRIMERA: identidad-voucher.ts la usa para decir "la propia empresa" en vez
+  // de "una tercerizada" en el texto de la anomalía.
+  try {
+    const { data } = await sb.from("empresa_perfil").select("nombre, ruc").eq("id", 1).maybeSingle();
+    if (data?.nombre) nombres.push(String(data.nombre));
+    if (data?.ruc) rucs.push(String(data.ruc));
+  } catch {
+    // sin perfil de empresa: el guard sigue con las tercerizadas
+  }
+  // Respaldo por si el perfil está vacío: la misma variable que ya usan las notificaciones y
+  // los pactos para firmar como la empresa. Nunca un nombre hardcodeado — este ERP se vende.
+  if (!nombres.length && process.env.EMPRESA_NOMBRE) nombres.push(process.env.EMPRESA_NOMBRE);
+  try {
+    const { data } = await sb.from("empresas_tercerizadas").select("razon_social, ruc");
+    for (const e of (data ?? []) as { razon_social?: string; ruc?: string }[]) {
+      if (e.razon_social) nombres.push(String(e.razon_social));
+      if (e.ruc) rucs.push(String(e.ruc));
+    }
+  } catch {
+    // sin tabla de tercerizadas: el guard se abstiene con lo que tenga
+  }
+  const res: EmpresasConocidas = { nombres, rucs };
+  _empresasConocidas = { data: res, en: Date.now() };
+  return res;
 }
 
 // ── Helpers compartidos contra la BD ─────────────────────────────────────────
@@ -401,10 +440,60 @@ type ArgsAccion = {
   datos: any; // extracción de la IA (forma según categoría)
   confianza: number;
   config: RadarConfig;
+  /** Lo que dejó la corrida anterior de este mensaje. Lo llena `ejecutarAccion`. */
+  previo?: PlanReproceso;
 };
+
+/**
+ * Retira lo que la corrida ANTERIOR de este mensaje dejó propuesto, y devuelve qué comprometió
+ * (para no repetirlo). Se ejecuta solo cuando el mensaje ya tiene `procesado_en`: el endpoint
+ * de reproceso lo conserva, así que es la señal de "esto ya pasó por aquí" sin columna nueva.
+ * Best-effort: si algo falla, el reproceso sigue — peor un duplicado que un mensaje perdido.
+ */
+async function retirarCorridaAnterior(sb: any, mensaje: any): Promise<PlanReproceso | undefined> {
+  if (!mensaje?.id || !mensaje?.procesado_en) return undefined;
+  try {
+    const [rc, ro, ra] = await Promise.all([
+      sb.from("radar_combustible").select("id, estado, combustible_id").eq("mensaje_id", mensaje.id),
+      sb.from("radar_oportunidades").select("id, estado, cotizacion_id").eq("mensaje_id", mensaje.id),
+      sb.from("radar_alertas").select("id").eq("mensaje_id", mensaje.id),
+    ]);
+    const previos: ArtefactoPrevio[] = [
+      ...(((rc?.data as Record<string, unknown>[]) ?? []).map((r) => ({
+        tabla: "radar_combustible" as const,
+        id: String(r.id),
+        estado: (r.estado as string) ?? null,
+        comprometido: r.combustible_id == null ? null : Number(r.combustible_id),
+      }))),
+      ...(((ro?.data as Record<string, unknown>[]) ?? []).map((r) => ({
+        tabla: "radar_oportunidades" as const,
+        id: String(r.id),
+        estado: (r.estado as string) ?? null,
+        comprometido: r.cotizacion_id == null ? null : Number(r.cotizacion_id),
+      }))),
+      ...(((ra?.data as Record<string, unknown>[]) ?? []).map((r) => ({
+        tabla: "radar_alertas" as const,
+        id: String(r.id),
+      }))),
+    ];
+    const plan = planificarReproceso(previos, mensaje.resultado);
+    // Solo se borra lo que el plan autorizó: nunca una fila con una carga real detrás.
+    for (const [tabla, ids] of Object.entries(plan.retirar) as [string, string[]][]) {
+      if (ids.length) await sb.from(tabla).delete().in("id", ids);
+    }
+    return plan;
+  } catch (e: unknown) {
+    console.warn("[radar/acciones] no se pudo retirar la corrida anterior:", (e as Error)?.message ?? e);
+    return undefined;
+  }
+}
 
 export async function ejecutarAccion(args: ArgsAccion): Promise<ResultadoAccion> {
   try {
+    // Reprocesar vuelve a correr la acción ENTERA, y las acciones insertan sin mirar si la
+    // corrida anterior ya lo hizo: cada clic en "Reprocesar" duplicaba lo que el mensaje había
+    // creado. Se retira antes lo PROPUESTO y se recuerda lo COMPROMETIDO para no repetirlo.
+    args.previo = await retirarCorridaAnterior(args.sb, args.mensaje);
     switch (args.categoria) {
       case "oportunidad_comercial": return await accionOportunidad(args);
       case "combustible":           return await accionCombustible(args);
@@ -436,7 +525,18 @@ function firmaRadar(mensaje: any): string {
 
 // ── Oportunidad comercial ────────────────────────────────────────────────────
 
-async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<ResultadoAccion> {
+async function accionOportunidad({ sb, mensaje, datos, previo }: ArgsAccion): Promise<ResultadoAccion> {
+  // Alguien ya cotizó, revisó o descartó la oportunidad de este mensaje: reprocesarlo no puede
+  // abrir otra igual al lado, borrando de hecho ese trabajo de la vista del comercial.
+  if (previo?.oportunidadTocada) {
+    return {
+      accion: "oportunidad_ya_trabajada",
+      detalle:
+        "Reproceso sin efecto: la oportunidad de este mensaje ya fue trabajada (cotizada, revisada o descartada). " +
+        "No se crea otra para no duplicarla en la bandeja comercial.",
+      datos: { reproceso: true },
+    };
+  }
   const d = datos as ExtraccionOportunidad;
   const hoy = fechaLima();
   const manana = fechaLima(1);
@@ -595,7 +695,94 @@ async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<Re
 
 // ── Combustible ──────────────────────────────────────────────────────────────
 
-async function accionCombustible({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
+/**
+ * Abre una fila de `radar_combustible` por cada despacho ADICIONAL del álbum (el primero ya
+ * tiene la suya, con el pipeline completo). Devuelve cuántas se crearon.
+ *
+ * Deliberadamente NO repite el pipeline entero —conductor por WhatsApp, consumo contra el
+ * histórico, duplicados, cuadre— sobre cada extra: eso es un segundo camino con las reglas
+ * escritas otra vez, y lo que hay que resolver acá es más simple y más urgente. Lo que sí hace
+ * es lo único que el operador no puede rehacer a mano: **guardar los números del voucher que
+ * si no se perdía**, con su placa ya cruzada contra la flota. El resto lo confirma la persona
+ * que abre la fila con la foto delante, que es quien tiene que decidirlo igual.
+ */
+async function insertarRecargasAdicionales(
+  sb: any,
+  ctx: {
+    album: RecargaAlbum[];
+    mensajeId: string;
+    fechaPorDefecto: string;
+    grifoPorDefecto: string | null;
+    fotos: { url: string; mime: string | null; nombre: string | null }[];
+    conductor: string | null;
+    proveedor: string | null;
+    totalDespachos: number;
+  }
+): Promise<number> {
+  if (!ctx.album.length) return 0;
+  let creadas = 0;
+  for (const [i, r] of ctx.album.entries()) {
+    try {
+      const veh = await matchVehiculo(sb, r.placa);
+      const terc = veh ? null : await matchVehiculoTercero(sb, r.placa);
+      const { error } = await sb.from("radar_combustible").insert({
+        mensaje_id: ctx.mensajeId,
+        placa: placaFormato(r.placa) ?? veh?.placa ?? terc?.placa ?? null,
+        vehiculo_id: veh?.id ?? null,
+        vehiculo_tercero_id: terc?.id ?? null,
+        fecha: r.fecha || ctx.fechaPorDefecto,
+        hora: r.hora,
+        // El grifo del álbum es el mismo salvo que el voucher diga otro: son notas de la
+        // misma ráfaga, casi siempre de la misma estación.
+        grifo: r.grifo ?? ctx.grifoPorDefecto,
+        tipo_combustible: r.tipoCombustible,
+        galones: r.galones,
+        litros: r.litros,
+        precio_galon: r.precioGalon,
+        precio_litro: r.precioLitro,
+        monto_total: r.montoTotal,
+        comprobante: r.comprobante,
+        kilometraje: r.kilometraje,
+        conductor: ctx.conductor,
+        proveedor: ctx.proveedor,
+        estado: "pendiente_revision",
+        combustible_id: null,
+        anomalias: [
+          {
+            codigo: "multiples_recargas_en_cluster",
+            detalle:
+              `Recarga ${i + 2} de ${ctx.totalDespachos} de una misma ráfaga de fotos${r.comprobante ? ` (comprobante ${r.comprobante})` : ""}. ` +
+              `Se le abrió fila propia para no perderla al fusionarla con la primera; sus datos salen del voucher, ` +
+              `pero el conductor y los controles de consumo no se le cruzaron — confírmala entera contra su foto.`,
+            bloquea: true,
+          },
+        ],
+        fotos: ctx.fotos,
+      });
+      if (error) throw new Error(error.message);
+      creadas++;
+    } catch (e: unknown) {
+      // Una extra que falla no puede tumbar el reporte principal, que ya está guardado.
+      console.warn("[radar/acciones] recarga adicional no guardada:", (e as Error)?.message ?? e);
+    }
+  }
+  return creadas;
+}
+
+async function accionCombustible({ sb, mensaje, datos, confianza, config, previo }: ArgsAccion): Promise<ResultadoAccion> {
+  // Este mensaje YA registró una carga real en `combustible`. Volver a procesarlo NO puede
+  // crear una segunda: sería el mismo gasto contado dos veces en v_egresos, en el costo por km
+  // y en el margen del servicio. Tampoco se borra la que existe — eso lo decide una persona en
+  // /combustible, que es donde vive la fila autoritativa.
+  if (previo?.combustibleId != null) {
+    return {
+      accion: "combustible_ya_registrado",
+      detalle:
+        `Reproceso sin efecto: este mensaje ya registró la carga #${previo.combustibleId} en /combustible. ` +
+        `No se vuelve a registrar para no duplicar el gasto. Si hay que rehacerla, bórrala primero desde /combustible.`,
+      datos: { combustible_id: previo.combustibleId, reproceso: true },
+    };
+  }
   const d = datos as ExtraccionCombustible;
   const fecha = d.fecha || fechaLimaDeTs(mensaje.ts_mensaje) || fechaLima();
   // La IA a veces deja una placa real (p.ej. "CUP 435" sin guion) en "unidad" en vez de
@@ -638,25 +825,54 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   // Placa resuelta (leída del voucher o inferida) y nombre canónico del conductor identificado.
   const placa = placaFormato(d.placa) ?? veh?.placa ?? terc?.placa ?? null;
   const conductorNombre = condMatch?.nombre ?? d.conductor ?? null;
-  const tipoComb = String(d.tipo_combustible || "diesel").toLowerCase();
-  const cantidad = numOpc(d.galones) ?? numOpc(d.litros);
-  const precioUnit = numOpc(d.precio_galon) ?? numOpc(d.precio_litro);
-  const monto = numOpc(d.monto_total);
+  // El tipo, COTEJANDO la conclusión de la IA contra el producto que transcribió del papel.
+  //
+  // Esto era un `??` —`tipo_combustible ?? producto_voucher`— y por eso la nota V97T-00001413 de
+  // COESTI, que imprime "GLP-G" en la línea del producto, se registró como DIÉSEL: con la
+  // conclusión puesta, la transcripción no se miraba nunca. Transcribir es copiar y tipificar es
+  // decidir; cuando discrepan manda el papel. Ver lib/radar/tipo-voucher.ts.
+  const vTipo = resolverTipoCombustible({ declarado: d.tipo_combustible, producto: d.producto_voucher });
+  // `null` cuando no hay señal — la columna sale vacía, que es lo honesto.
+  const tipoLeido = vTipo.tipo;
+  // Para los cruces que necesitan SÍ o SÍ un tipo (capacidad de tanque, rendimiento): el diésel
+  // es el 90 % de la flota y es el respaldo de toda la app.
+  const tipoComb = tipoLeido ?? "diesel";
+  // Los tres números del voucher son `let`: el cuadre aritmético (más abajo) puede corregir
+  // el que se leyó mal, y todos los controles siguientes —tanque, consumo, duplicado— tienen
+  // que juzgar el número corregido, no el que ya se sabe equivocado.
+  let cantidad = numOpc(d.galones) ?? numOpc(d.litros);
+  let precioUnit = numOpc(d.precio_galon) ?? numOpc(d.precio_litro);
+  let monto = numOpc(d.monto_total);
   const km = numOpc(d.kilometraje);
+  // La cantidad se guarda en la columna que la IA usó (galones XOR litros). Se lleva aparte
+  // para que una corrección aterrice en la misma columna de la que salió.
+  let galonesFila = numOpc(d.galones);
+  let litrosFila = numOpc(d.litros);
+  let precioGalonFila = numOpc(d.precio_galon);
+  let precioLitroFila = numOpc(d.precio_litro);
+  const esLitros = galonesFila == null && litrosFila != null;
+  const unidadCant = esLitros ? "lt" : "gal";
   const umbral = Number(config.umbral_confianza ?? 0.7);
 
   const anomalias: AnomaliaCombustible[] = [];
+
+  // El tipo va PRIMERO, antes que el tanque, el rendimiento y el precio: los tres se comparan
+  // contra el combustible que se creyó comprado, así que un tipo equivocado los hace mentir a los
+  // tres. Es la misma razón por la que el cuadre aritmético va antes que todos los demás.
+  if (vTipo.anomalia) anomalias.push(vTipo.anomalia);
 
   // ── Campos del camino de VISIÓN multi-foto (opcionales; el de texto no los llena) ──
   const consumoTasa = numOpc(d.consumo_l_100km);
   const tripKm = numOpc(d.trip_km);
   const vioNota = d.vio_nota === true;
   const vioSurtidor = d.vio_surtidor === true;
-  const discrepancias = Array.isArray(d.discrepancias) ? d.discrepancias.filter(Boolean) : [];
+  const vioTablero = d.vio_tablero === true;
+  const discrepancias = normalizarDiscrepancias(d.discrepancias);
 
   // Identidad: el grifo/proveedor JAMÁS es una marca de kit GLP del tablero (trampa "LANDI RENZO").
   let grifo = d.grifo ?? null;
   let proveedor = d.proveedor ?? null;
+  let direccionGrifo = d.direccion_grifo ?? null;
   if (esMarcaKitGLP(grifo) || esMarcaKitGLP(proveedor)) {
     anomalias.push({
       codigo: "marca_kit_como_grifo",
@@ -666,6 +882,24 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     if (esMarcaKitGLP(grifo)) grifo = null;
     if (esMarcaKitGLP(proveedor)) proveedor = null;
   }
+
+  // El grifo tampoco es quien COMPRÓ. La nota de despacho trae DOS empresas —el grifo en el
+  // encabezado y el cliente en "RAZ.SOC"— y el segundo campo se llama literalmente "razón
+  // social", así que ahí terminaban GLOBAL BUS PERÚ S.A.C. (la tercerizada dueña del bus) y
+  // hasta AFA TOURS PERÚ S.A.C. El ERP tiene la evidencia que el modelo no puede tener: sabe
+  // cómo se llama y quiénes son sus tercerizadas, y ninguna puede venderle combustible a AFA
+  // en su propio voucher. Ver lib/radar/identidad-voucher.ts.
+  // `radar_combustible` no guarda el RUC, así que del resultado solo se aplican el nombre y la
+  // dirección; el RUC entra igual porque es la otra mitad de la prueba (el nombre puede estar
+  // bien y el RUC salir del bloque del cliente, y ahí lo que sobra es la dirección).
+  const identidad = resolverIdentidadGrifo(
+    { grifo, proveedor, ruc: d.ruc ?? null, direccionGrifo, clienteEnNota: d.cliente_en_nota ?? null },
+    await cargarEmpresasConocidas(sb)
+  );
+  grifo = identidad.grifo;
+  proveedor = identidad.proveedor;
+  direccionGrifo = identidad.direccionGrifo;
+  if (identidad.anomalia) anomalias.push(identidad.anomalia);
 
   // Guard determinista (no confiar solo en el prompt): "16.3 L/100km" es una TASA de consumo,
   // no una cantidad cargada. 16.3 es un galonaje plausible → sin este freno pasaría todos los
@@ -685,10 +919,103 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       bloquea: true,
     });
   }
-  // Discrepancias surtidor/display vs nota que reportó la IA: la NOTA manda (decisión del
-  // operador); el valor del surtidor queda solo como alerta informativa (no bloquea).
+  // Diferencias que reportó la IA: la NOTA manda (decisión del operador), así que quedan como
+  // alerta informativa (no bloquean). Lo que SÍ cambia es la etiqueta: antes TODAS entraban
+  // como "el surtidor no coincide con la nota", y en un reporte de dos fotos —la nota y el
+  // TABLERO— eso acusaba a una máquina que nadie fotografió. Cada una declara entre qué dos
+  // fuentes es, y se contrasta contra las fotos que de verdad se vieron: una comparación
+  // contra una foto ausente baja a observación en vez de nombrar al surtidor.
+  // Y antes de eso se descarta la que NO es una diferencia: la IA reportó como discrepancia el
+  // odómetro de una nota (175,445 km) contra el de su tablero (175445 km) —el mismo número, con
+  // la coma de miles leída como decimal— y su propio texto decía "es congruente con el de la
+  // nota". Un rojo sobre una recarga correcta enseña a ignorar los rojos de verdad, así que la
+  // discrepancia declara sus dos valores y acá se comprueban (ver `esFalsaDiscrepancia`).
+  const fotosVistas = { vioSurtidor, vioNota, vioTablero };
   for (const disc of discrepancias) {
-    anomalias.push({ codigo: "discrepancia_maquina_vs_nota", detalle: String(disc).slice(0, 240), bloquea: false });
+    if (esFalsaDiscrepancia(disc)) continue;
+    anomalias.push({
+      codigo: codigoDeDiscrepancia(disc, fotosVistas),
+      detalle: detalleDeDiscrepancia(disc, fotosVistas),
+      bloquea: false,
+    });
+  }
+
+  // ── CUADRE ARITMÉTICO DEL VOUCHER ──────────────────────────────────────────
+  // El papel trae CANTIDAD × PRECIO = IMPORTE, así que se verifica a sí mismo: cuando los
+  // tres no dan, la división dice cuál se leyó mal y cuál es su valor. Va ANTES de todos los
+  // controles de abajo a propósito — un galonaje mal leído hace mentir al consumo, al tanque
+  // y al duplicado, y el revisor terminaba persiguiendo anomalías que no existían.
+  // La corrección NUNCA auto-registra (bloquea: true): es una propuesta que una persona
+  // confirma contra la foto, con el número ya puesto en el formulario.
+  const cantidadIA = cantidad; // lo que la IA extrajo, antes de que el cuadre lo toque
+  const cuadre = revisarCoherenciaVoucher({
+    cantidad,
+    precio: precioUnit,
+    monto,
+    cantidadTexto: d.texto_cantidad ?? null,
+    unidad: unidadCant,
+  });
+  const corr = cuadre.correccion;
+  if (corr && (cuadre.estado === "corregible" || cuadre.estado === "completado")) {
+    if (corr.campo === "cantidad") {
+      cantidad = corr.corregido;
+      if (esLitros) litrosFila = corr.corregido;
+      else galonesFila = corr.corregido;
+    } else if (corr.campo === "precio") {
+      precioUnit = corr.corregido;
+      if (esLitros) precioLitroFila = corr.corregido;
+      else precioGalonFila = corr.corregido;
+    } else {
+      monto = corr.corregido;
+    }
+    anomalias.push({
+      codigo: cuadre.estado === "completado" ? "dato_derivado" : "lectura_corregida",
+      detalle: cuadre.detalle,
+      // Un dígito corregido SIEMPRE bloquea: sobre plata decide una persona. Un dato derivado
+      // solo si es la CANTIDAD — un galonaje que nadie leyó no puede registrarse solo. El
+      // precio y el importe derivados NO bloquean porque el ERP ya los derivaba en silencio
+      // (`precioFinal = monto / cantidad` en el auto-registro, y `combustible.total` es una
+      // columna generada): mandar a revisión lo que antes pasaba solo sería castigar al
+      // operador con cola nueva por hacer explícita una cuenta que ya se hacía.
+      bloquea: cuadre.estado === "corregible" || corr.campo === "cantidad",
+      correccion: { campo: corr.campo, leido: corr.leido, corregido: corr.corregido, unidad: unidadCant },
+    });
+  } else if (cuadre.estado === "ambiguo") {
+    anomalias.push({ codigo: "cuadre_ambiguo", detalle: cuadre.detalle, bloquea: true });
+  }
+
+  // La transcripción literal ("8.799x" copiado del papel) es una SEGUNDA lectura del mismo
+  // número: si contradice a la que la IA puso en el campo, una de las dos está mal.
+  // Se compara contra lo que la IA EXTRAJO, no contra el valor ya corregido: cuando el cuadre
+  // corrigió la cantidad, la aritmética ya zanjó cuál de las dos era —levantar además esta
+  // sería acusar dos veces el mismo dígito, y en rojo crítico sobre algo ya resuelto.
+  // Y solo BLOQUEA cuando no hay cuenta que lo desempate: con los tres números cuadrando,
+  // que la transcripción no calce es un descuido de copia, no una carga que registrar mal.
+  const cantTexto = numeroDeTranscripcion(d.texto_cantidad);
+  const cuadreCorrigioCantidad = corr?.campo === "cantidad";
+  if (!cuadreCorrigioCantidad && cantTexto != null && cantidadIA != null && Math.abs(cantTexto - cantidadIA) > 0.0005) {
+    anomalias.push({
+      codigo: "cantidad_no_coincide_texto",
+      detalle: `La IA extrajo ${cantidadIA} ${unidadCant} pero transcribió "${String(d.texto_cantidad).trim()}" del voucher — las dos lecturas del mismo número no coinciden${cuadre.estado === "cuadra" ? ", aunque la cantidad extraída sí cuadra con el precio y el importe" : ""}`,
+      bloquea: cuadre.estado === "incompleto",
+    });
+  }
+
+  // ── ¿LA RÁFAGA ES UN REPORTE O SON VARIOS DESPACHOS? ───────────────────────
+  // El cluster agrupa por remitente y hora porque un reporte llega partido en varias fotos,
+  // pero un conductor que cierra turno manda juntos los vouchers del DÍA. El 20-08 eso fusionó
+  // dos notas de COESTI —CTV370 por S/ 180.03 y BUI272 por S/ 240.56, once horas aparte— en una
+  // sola recarga con la placa de una y los números de la otra, y el segundo gasto desapareció.
+  // `multiples_recargas_en_cluster` existía como código desde el día uno y NADIE lo levantaba.
+  const album = leerAlbumRecargas(d, { comprobante: d.comprobante ?? null, placa, monto });
+  if (album.multiple) {
+    anomalias.push({
+      codigo: "multiples_recargas_en_cluster",
+      detalle: album.detalle,
+      // Bloquea siempre: con dos despachos en la ráfaga, ni siquiera el principal es de fiar
+      // hasta que alguien confirme cuál voucher describe cuál fila.
+      bloquea: true,
+    });
   }
 
   // 1) Cantidad vs capacidad del tanque (editable por vehículo si el operador la configuró)
@@ -718,36 +1045,118 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         });
       }
     }
-    if (placa && !anomalias.some((a) => a.codigo === "posible_duplicado")) {
-      const { data: rc } = await sb
-        .from("radar_combustible")
-        .select("id, monto_total")
-        .eq("placa", placa)
-        .eq("fecha", fecha)
-        .in("estado", ["registrado", "pendiente_revision"]);
-      const dup = ((rc as any[]) ?? []).find(
-        (r) => r.monto_total != null && Math.abs(Number(r.monto_total) - monto) < 1
-      );
-      if (dup) {
-        anomalias.push({
-          codigo: "posible_duplicado",
-          detalle: `El Radar ya capturó una carga de ${placa} el ${fecha} por un monto similar`,
-        });
+    if (!anomalias.some((a) => a.codigo === "posible_duplicado")) {
+      // La identidad de un despacho es su NÚMERO DE NOTA, no su placa. El chequeo anterior
+      // filtraba por `placa`, así que el mismo voucher V70S-00043064 entrando dos veces —una
+      // atribuida a BUI-272 y otra a CTV-370— nunca se comparó consigo mismo y no avisó nada.
+      // Se traen los candidatos por FECHA (un día de flota son pocas filas) y, aparte, por
+      // comprobante sin restringir fecha: una foto reenviada días después sigue siendo el
+      // mismo papel. `buscarDuplicado` decide; las reglas viven en un solo sitio.
+      const candidatos = new Map<string, DespachoGuardado>();
+      const sumar = (filas: unknown) => {
+        for (const r of ((filas as Record<string, unknown>[]) ?? [])) {
+          const id = String(r.id ?? "");
+          // Las filas de ESTE mensaje no son un duplicado de sí mismas (un reproceso ya las
+          // retiró; las adicionales del álbum son despachos distintos con su propia nota).
+          if (!id || r.mensaje_id === mensaje.id) continue;
+          candidatos.set(id, {
+            id,
+            placa: (r.placa as string) ?? null,
+            fecha: (r.fecha as string) ?? null,
+            comprobante: (r.comprobante as string) ?? null,
+            monto: r.monto_total == null ? null : Number(r.monto_total),
+            cantidad: r.galones != null ? Number(r.galones) : r.litros != null ? Number(r.litros) : null,
+          });
+        }
+      };
+      const cols = "id, mensaje_id, placa, fecha, comprobante, monto_total, galones, litros";
+      const estados = ["registrado", "pendiente_revision"];
+      const { data: delDia } = await sb.from("radar_combustible").select(cols).eq("fecha", fecha).in("estado", estados);
+      sumar(delDia);
+      if (d.comprobante) {
+        const { data: porComp } = await sb
+          .from("radar_combustible")
+          .select(cols)
+          .eq("comprobante", d.comprobante)
+          .in("estado", estados);
+        sumar(porComp);
       }
+      const dup = buscarDuplicado(
+        { placa, fecha, comprobante: d.comprobante ?? null, monto, cantidad },
+        [...candidatos.values()]
+      );
+      if (dup) anomalias.push({ codigo: "posible_duplicado", detalle: dup.detalle });
     }
   }
 
-  // 3) Precio unitario vs referencia de precios_combustible (±20%)
+  // 3) Precio unitario vs referencia de precios_combustible (±20%), y la INVERSIÓN.
   if (precioUnit != null) {
     try {
       const { data: precios } = await sb.from("precios_combustible").select("tipo, precio");
-      const ref = ((precios as any[]) ?? []).find((p) => String(p.tipo ?? "").toLowerCase() === tipoComb);
-      const pRef = ref ? Number(ref.precio) : 0;
-      if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
+      // El referencial es por FAMILIA: `gasolina_premium` y `gasolina_regular` comparten la
+      // fila de gasolina si el operador no cargó una por grado.
+      //
+      // LA CLAVE SE DERIVA CON `tipoDeEtiquetaPrecio`, NO CON `.toLowerCase()`. La tabla guarda
+      // `Diésel` CON TILDE, así que el `"diésel" === "diesel"` de antes era falso SIEMPRE: el
+      // diésel de toda la flota resolvía `pRef = 0` y ni este ±20 % ni `revisarTipoContraPrecio`
+      // se aplicaron nunca a una carga de diésel. Ver el puente en lib/combustible-tipos.ts.
+      const filas = ((precios as any[]) ?? []).map((p) => ({
+        tipo: tipoDeEtiquetaPrecio(p.tipo) ?? String(p.tipo ?? "").toLowerCase(),
+        precio: Number(p.precio),
+      }));
+      const pRef = precioReferencialDe(filas, tipoComb);
+
+      // Antes del "precio fuera de rango": ¿no estarán la cantidad y el precio intercambiados?
+      // El cuadre aritmético es CIEGO a esto (la multiplicación es conmutativa), así que hace
+      // falta el referencial. Si lo están, "precio fuera de rango" es un síntoma, no la causa.
+      const inv = detectarInversionCantidadPrecio(cantidad, precioUnit, pRef, unidadCant);
+      if (inv) {
+        const cantAntes = cantidad;
+        const precioAntes = precioUnit;
+        cantidad = inv.cantidad;
+        precioUnit = inv.precio;
+        if (esLitros) { litrosFila = inv.cantidad; precioLitroFila = inv.precio; }
+        else { galonesFila = inv.cantidad; precioGalonFila = inv.precio; }
         anomalias.push({
-          codigo: "precio_fuera_de_rango",
-          detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
+          codigo: "cantidad_precio_invertidos",
+          detalle: inv.detalle,
+          bloquea: true,
+          correccion: { campo: "cantidad", leido: cantAntes, corregido: inv.cantidad, unidad: unidadCant },
         });
+        void precioAntes;
+      } else {
+        // ¿Y si el precio se sale porque el TIPO está mal? Un GLP guardado como diésel deja el
+        // precio a un 69 % del referencial del diésel y clavado en el del GLP. Va antes de
+        // "precio fuera de rango" por lo mismo que la inversión: ese aviso sería el síntoma, y
+        // manda a discutir el precio de una carga cuyo problema es qué producto se compró.
+        // Es la evidencia que queda cuando la IA no transcribió el producto y el papel no puede
+        // contradecirla — y no reescribe el tipo: un precio no es un producto.
+        const vPrecio = revisarTipoContraPrecio({
+          tipo: tipoComb,
+          precio: precioUnit,
+          referenciales: filas,
+          leido: tipoLeido != null,
+        });
+        if (vPrecio.anomalia) anomalias.push(vPrecio.anomalia);
+        else {
+          // ¿Y si el número no puede ser un precio de ESTA unidad? El ±20 % juzga el MERCADO y
+          // se mueve todos los meses; esto juzga la MAGNITUD y no se mueve nunca. Va antes por
+          // la misma razón que los dos de arriba: con la unidad equivocada, "se aleja del
+          // referencial" es el síntoma. Y aquí el detalle es exacto — dice qué unidad encaja.
+          const vUnidad = revisarPrecioUnitario({ tipo: tipoComb, precio: precioUnit, unidad: unidadDeCarga(tipoComb, unidadCant) });
+          if (vUnidad.estado === "parece_otra_unidad" || vUnidad.estado === "fuera_de_banda") {
+            anomalias.push({
+              codigo: "precio_fuera_de_rango",
+              detalle: vUnidad.detalle,
+              bloquea: vUnidad.estado === "parece_otra_unidad",
+            });
+          } else if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
+            anomalias.push({
+              codigo: "precio_fuera_de_rango",
+              detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
+            });
+          }
+        }
       }
     } catch {
       // sin tabla de precios: se omite este chequeo
@@ -762,32 +1171,84 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     });
   }
 
-  // 5) Consumo excesivo: rendimiento del tramo >30% bajo el promedio del vehículo
+  // 5) Rendimiento del tramo, contra el patrón de la propia unidad.
+  //
+  // El bucle que vivía aquí era la copia del que estaba en /combustible: media sin techo y
+  // SOLO cota inferior. Ahora lo decide lib/rendimiento.ts, con las dos cotas y la mediana.
+  //
+  // La consulta cambia en dos cosas: ya NO filtra `tipo_combustible` (se segmenta por FAMILIA
+  // en TS, porque gasolina regular y premium son el mismo tanque) y ya NO filtra
+  // `kilometraje > 0` — esas filas hacen falta justamente para detectar que el tramo se las
+  // tragó y su combustible no está en el denominador.
   if (veh && km != null && cantidad != null) {
     const { data: prevs } = await sb
       .from("combustible")
-      .select("kilometraje, galones")
+      .select("id, fecha, kilometraje, galones, unidad, tipo_combustible")
       .eq("vehiculo_id", veh.id)
-      .eq("tipo_combustible", tipoComb)
-      .gt("kilometraje", 0)
-      .order("kilometraje", { ascending: true });
-    const regs = (prevs as any[]) ?? [];
-    const rends: number[] = [];
-    for (let i = 1; i < regs.length; i++) {
-      const dkm = Number(regs[i].kilometraje) - Number(regs[i - 1].kilometraje);
-      const qty = Number(regs[i].galones);
-      if (dkm > 0 && qty > 0) rends.push(dkm / qty);
-    }
-    const promedio = rends.length ? rends.reduce((a, b) => a + b) / rends.length : null;
-    const previa = [...regs].reverse().find((r) => Number(r.kilometraje) < km);
-    if (promedio && previa) {
-      const rend = (km - Number(previa.kilometraje)) / cantidad;
-      if (rend > 0 && (promedio - rend) / promedio > 0.3) {
-        anomalias.push({
-          codigo: "consumo_excesivo",
-          detalle: `Rendimiento del tramo ${rend.toFixed(1)} vs promedio ${promedio.toFixed(1)} (más de 30% por debajo)`,
-        });
-      }
+      .order("fecha", { ascending: true });
+
+    const historia: CargaRendimiento[] = ((prevs as any[]) ?? []).map((r) => ({
+      id: r.id,
+      unidad: String(veh.id),
+      fecha: String(r.fecha ?? "").slice(0, 10),
+      kilometraje: r.kilometraje,
+      cantidad: r.galones,
+      unidadCantidad: r.unidad,
+      tipo: r.tipo_combustible,
+    }));
+    // La carga entrante entra como fila virtual: es el tramo que hay que juzgar.
+    const entrante: CargaRendimiento = {
+      id: -1, unidad: String(veh.id), fecha,
+      // Misma derivación que la fila que se va a escribir: si el motor juzga el tramo con una
+      // unidad y la fila se guarda con otra, el veredicto del Radar y el de /combustible dejan
+      // de hablar del mismo número.
+      kilometraje: km, cantidad, unidadCantidad: unidadDeCarga(tipoComb, esLitros ? "litros" : "galones"), tipo: tipoComb,
+    };
+    const familia = familiaCombustible(tipoComb);
+    // Las cargas del OTRO combustible de esta misma unidad van como marcas, no como cargas:
+    // una unidad BICOMBUSTIBLE (la CWQ400 carga GLP casi siempre y gasolina de vez en cuando)
+    // hace parte de sus km con el combustible que no está en este denominador. Sin pasarlas, un
+    // tramo de gasolina con miles de km hechos a GLP superaba el techo y se bloqueaba el voucher
+    // con "Falta registrar una carga" — mandando a buscar un repostaje que nunca faltó.
+    // Los aditivos (urea) NO son otro combustible: no mueven el bus.
+    const otrasFamilias = historia
+      .filter((h) => {
+        const f = familiaCombustible(h.tipo);
+        return f !== familia && TECHO_FAMILIA[f] !== null;
+      })
+      .map((h) => ({
+        id: h.id,
+        fecha: h.fecha,
+        kilometraje: h.kilometraje,
+        familia: familiaCombustible(h.tipo),
+      }));
+    const serie = serieRendimiento(
+      [...historia.filter((h) => familiaCombustible(h.tipo) === familia), entrante],
+      otrasFamilias
+    );
+    const suyo = serie.tramos.find((t) => t.cargaId === -1);
+    const hallazgo = suyo ? juzgarTramo(suyo, serie.resumen) : null;
+
+    if (hallazgo?.codigo === "rendimiento_bajo") {
+      // Se conserva el código histórico: `radar_combustible.anomalias` ya tiene filas con él
+      // y /radar-ia lo filtra por nombre. Sigue SIN bloquear el auto-registro.
+      anomalias.push({ codigo: "consumo_excesivo", detalle: hallazgo.detalle });
+    } else if (hallazgo?.codigo === "rendimiento_alto") {
+      // BLOQUEA, pero solo cuando es FÍSICO (superó el techo de la familia), nunca cuando es
+      // la banda estadística: si no, la primera carga tras una parada legítima de un mes
+      // frenaría un voucher bueno, y un bloqueo que sale siempre se vuelve paisaje.
+      //
+      // Por qué bloquea el físico: si el km está mal, el auto-registro lo escribe además en
+      // `lecturas_odometro` (más abajo) y ese km envenena todos los tramos siguientes y el km
+      // de vencimiento de mantenimiento. El Radar ya bloquea por los gemelos exactos de esto
+      // (`trip_como_odometro`, `galones_coinciden_km`). Desbloquear una carga buena cuesta un
+      // clic en /radar-ia con la foto del tablero al lado; auto-registrar un odómetro malo
+      // cuesta una cadena corrompida que nadie vuelve a mirar.
+      anomalias.push({
+        codigo: "rendimiento_implausible",
+        detalle: hallazgo.detalle,
+        ...(hallazgo.fisico ? { bloquea: true } : {}),
+      });
     }
   }
 
@@ -800,14 +1261,15 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     }
   }
 
-  // 7) Cantidad × precio no cuadra con el total del voucher
-  if (cantidad != null && precioUnit != null && monto != null) {
-    const calc = cantidad * precioUnit;
-    if (Math.abs(calc - monto) > Math.max(2, 0.05 * monto)) {
-      anomalias.push({
-        codigo: "monto_inconsistente",
-        detalle: `Cantidad × precio = ${fmtSoles(calc)} pero el total reportado es ${fmtSoles(monto)}`,
-      });
+  // 7) Cantidad × precio no cuadra con el total del voucher.
+  //    El cuadre de arriba ya intentó explicarlo dígito a dígito; esto se queda con lo que
+  //    NINGÚN error de lectura explica (un descuento del grifo, otro producto en el mismo
+  //    comprobante) y hereda su detalle, que dice cuánto falta y por qué no se corrigió.
+  //    Si el cuadre corrigió, los números de acá ya cuadran y esta anomalía no se levanta.
+  if (cuadre.estado === "descuadra") {
+    const calc = cantidad! * precioUnit!;
+    if (Math.abs(calc - monto!) > Math.max(2, 0.05 * monto!)) {
+      anomalias.push({ codigo: "monto_inconsistente", detalle: cuadre.detalle });
     }
   }
 
@@ -840,6 +1302,65 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     });
   }
 
+  // ── ¿QUEDÓ LLENO EL TANQUE? (lib/radar/tanque-lleno.ts) ───────────────────
+  //
+  // El rendimiento se mide de tanque lleno a tanque lleno, y una carga PARCIAL no declarada
+  // infla el número exactamente igual que una carga comprada y no registrada — las dos salen
+  // como `rendimiento_alto`, y solo la segunda es plata que falta en los libros.
+  //
+  // El Radar NO escribe `combustible.tanque_lleno`: sigue entrando en `null`, que ANCLA por la
+  // política de la empresa, igual que hasta hoy. Lo único que cambia es que cuando la aguja del
+  // tablero dice que NO quedó lleno —la excepción que el dueño nombró: sin saldo de crédito, el
+  // grifo sin stock— la carga va a revisión en vez de auto-registrarse midiendo mal ese tramo.
+  // Un `false` puesto por una máquina deja de anclar en silencio, y un tramo que deja de medirse
+  // no se nota en ninguna pantalla: por eso lo confirma una persona.
+  const nivelTanque = d.nivel_tanque ?? null;
+  if (nivelTanque === "parcial") {
+    anomalias.push({
+      codigo: "carga_parcial_probable",
+      detalle:
+        "La aguja del tablero NO marca el tanque lleno después de cargar. Si fue una carga parcial " +
+        "hay que decirlo: el rendimiento se mide de tanque lleno a tanque lleno, y una parcial sin " +
+        "declarar lo infla igual que una carga que nadie registró. Confírmalo con la foto y marca " +
+        "la casilla «tanque lleno» como corresponda.",
+      bloquea: true,
+    });
+  }
+
+  // Todas las fotos del cluster (voucher/surtidor/tablero) que la IA procesó, para el panel de
+  // revisión. Fallback a la foto propia del mensaje si el motor no las pasó.
+  const fotosEvidencia: { url: string; mime: string | null; nombre: string | null }[] =
+    (mensaje as { fotos_cluster?: { url: string; mime: string | null; nombre: string | null }[] }).fotos_cluster?.length
+      ? (mensaje as { fotos_cluster: { url: string; mime: string | null; nombre: string | null }[] }).fotos_cluster
+      : mensaje.media_url
+        ? [{ url: mensaje.media_url, mime: mensaje.media_mime ?? null, nombre: mensaje.media_nombre ?? null }]
+        : [];
+
+  /**
+   * Inserta en `radar_combustible` soltando la columna ACCESORIA que el error NOMBRA.
+   *
+   * Dos de los campos de esta fila viven en migraciones que el deploy no corre (`fotos`, de
+   * radar-ia-combustible-revision.sql, y `nivel_tanque`, de combustible-02). Que falte un SQL
+   * accesorio no puede hacer que una recarga leída se pierda entera: es el patrón de
+   * `COLUMNAS_OPCIONALES` (lib/reservas-pacto.ts), y se suelta LA QUE EL ERROR NOMBRA, no un
+   * juego fijo — con un juego fijo el mensaje acaba acusando a la migración equivocada.
+   */
+  const insertarRadar = async (fila: Record<string, unknown>, devolverId = false) => {
+    const OPCIONALES = ["fotos", "nivel_tanque"];
+    let payload = { ...fila };
+    for (let intento = 0; intento <= OPCIONALES.length; intento++) {
+      const q = sb.from("radar_combustible").insert(payload);
+      const { data, error } = devolverId ? await q.select("id").single() : await q;
+      if (!error) return { data, quitadas: Object.keys(fila).filter((k) => !(k in payload)) };
+      const msg = String(error.message ?? "");
+      const culpable = OPCIONALES.find((c) => c in payload && msg.includes(c) && /does not exist/i.test(msg));
+      if (!culpable) throw new Error(`radar_combustible: ${error.message}`);
+      const { [culpable]: _fuera, ...resto } = payload;
+      payload = resto;
+    }
+    throw new Error("radar_combustible: no se pudo insertar");
+  };
+
   // Fila base para radar_combustible (se inserta SIEMPRE, con el estado que corresponda)
   const filaRadar: Record<string, unknown> = {
     mensaje_id: mensaje.id,
@@ -849,23 +1370,28 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     fecha,
     hora: d.hora ?? null,
     grifo,
-    direccion_grifo: d.direccion_grifo ?? null,
-    tipo_combustible: d.tipo_combustible ?? null,
-    galones: numOpc(d.galones),
-    litros: numOpc(d.litros),
-    precio_galon: numOpc(d.precio_galon),
-    precio_litro: numOpc(d.precio_litro),
+    // La ya resuelta, no la cruda: cuando el "grifo" resultó ser el comprador, esta dirección
+    // salía del mismo bloque "RAZ.SOC / RUC / DIRECC" y es la del cliente, no la de la estación.
+    direccion_grifo: direccionGrifo,
+    // El normalizado, no el crudo: es lo que pinta la columna y lo que se registra.
+    tipo_combustible: tipoLeido,
+    // Los números que el cuadre pudo corregir, no los crudos de la IA: el formulario de
+    // revisión se llena de acá y el revisor tiene que ver el valor bueno ya puesto. Lo que
+    // leyó la IA no se pierde — viaja en `anomalias[].correccion.leido`.
+    galones: galonesFila,
+    litros: litrosFila,
+    precio_galon: precioGalonFila,
+    precio_litro: precioLitroFila,
     monto_total: monto,
     comprobante: d.comprobante ?? null,
     kilometraje: km,
     conductor: conductorNombre,
     proveedor,
     anomalias,
-    // Todas las fotos del cluster (voucher/surtidor/tablero) que la IA procesó, para el
-    // panel de revisión. Fallback a la foto propia del mensaje si el motor no las pasó.
-    fotos: (mensaje as any).fotos_cluster?.length
-      ? (mensaje as any).fotos_cluster
-      : (mensaje.media_url ? [{ url: mensaje.media_url, mime: mensaje.media_mime ?? null, nombre: mensaje.media_nombre ?? null }] : []),
+    fotos: fotosEvidencia,
+    // Lo que la IA vio en el indicador de nivel. PROPONE la casilla del panel de revisión; no
+    // decide nada por su cuenta. Columna de `combustible-02-nivel-tanque-radar.sql`.
+    nivel_tanque: nivelTanque,
   };
 
   // ¿Se puede registrar automáticamente en la tabla real `combustible`?
@@ -889,7 +1415,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     const observaciones =
       firmaRadar(mensaje) +
       (d.comprobante ? ` · Comprobante ${d.comprobante}` : "") +
-      (d.direccion_grifo ? ` · ${d.direccion_grifo}` : "");
+      (direccionGrifo ? ` · ${direccionGrifo}` : "");
 
     const { data: comb, error: errComb } = await sb
       .from("combustible")
@@ -902,8 +1428,11 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         grifo,
         conductor: conductorNombre,
         observaciones,
-        tipo_combustible: d.tipo_combustible ?? "diesel",
-        unidad: numOpc(d.galones) != null ? "galones" : "litros",
+        tipo_combustible: tipoComb,
+        // La unidad se DERIVA del producto (lib/combustible-tipos.ts). El `esLitros ?
+        // "litros" : "galones"` que había aquí rotulaba en GALONES cada carga de GNV —el
+        // 70 % de la flota— con un número que son METROS CÚBICOS.
+        unidad: unidadDeCarga(tipoComb, esLitros ? "litros" : "galones"),
       })
       .select("id")
       .single();
@@ -928,25 +1457,54 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       });
     }
 
-    const { error: errRadar } = await sb
-      .from("radar_combustible")
-      .insert({ ...filaRadar, estado: "registrado", combustible_id: combustibleId });
-    if (errRadar) throw new Error(`radar_combustible: ${errRadar.message}`);
+    await insertarRadar({ ...filaRadar, estado: "registrado", combustible_id: combustibleId });
 
     return {
       accion: "combustible_registrado",
-      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${numOpc(d.galones) != null ? "gal" : "lt"} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}`,
+      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${unidadCant} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}`,
       datos: { combustible_id: combustibleId, vehiculo_id: veh!.id, conductor: conductorNombre, conductor_via: condMatch?.via ?? null, anomalias },
     };
   }
 
   // Queda en revisión: registrar + alertar con los motivos
-  const { data: rcIns, error: errRadar } = await sb
-    .from("radar_combustible")
-    .insert({ ...filaRadar, estado: "pendiente_revision", combustible_id: null })
-    .select("id")
-    .single();
-  if (errRadar) throw new Error(`radar_combustible: ${errRadar.message}`);
+  const { data: rcIns } = await insertarRadar(
+    { ...filaRadar, estado: "pendiente_revision", combustible_id: null }, true
+  );
+
+  // El dígito que corrigió la aritmética se guarda como LECCIÓN, igual que si lo hubiera
+  // corregido una persona en la pantalla: leccionesCombustible() la inyecta en el prompt de
+  // visión y la próxima nota de despacho parecida se lee bien de entrada. Cerrar el ciclo sin
+  // esperar a un humano es la diferencia entre corregir el mismo error todos los meses y
+  // dejar de cometerlo. `usuario: "radar_ia"` es lo que distingue estas lecciones de las
+  // humanas (la pantalla no llena esa columna), para que no ahoguen a las de una persona.
+  if (corr && corr.leido != null && cuadre.estado === "corregible") {
+    const { error: errLeccion } = await sb.from("radar_combustible_correcciones").insert({
+      radar_combustible_id: (rcIns as { id?: string } | null)?.id ?? null,
+      campo: corr.campo === "cantidad" ? (esLitros ? "litros" : "galones") : corr.campo,
+      valor_ia: String(corr.leido),
+      valor_correcto: String(corr.corregido),
+      foto_url: fotosEvidencia[0]?.url ?? null,
+      nota: `lo detectó el cuadre del voucher (cantidad × precio = importe), no una persona${corr.cambio ? ` · ${corr.cambio}` : ""}`,
+      usuario: "radar_ia",
+    });
+    if (errLeccion) console.warn("[radar/acciones] lección de cuadre no guardada:", errLeccion.message);
+  }
+
+  // Cada despacho ADICIONAL del álbum recibe su propia fila. Sin esto, la segunda recarga —un
+  // gasto real, con su placa y su importe— no quedaba en ninguna parte del ERP: la ráfaga
+  // producía una sola fila y el resto se evaporaba. Van todas a `pendiente_revision` (nunca
+  // auto-registro: si la ráfaga trajo dos vouchers, cuál describe a cuál lo confirma una
+  // persona contra la foto), con las MISMAS fotos del cluster, que son su evidencia.
+  const filasExtra = await insertarRecargasAdicionales(sb, {
+    album: album.adicionales,
+    mensajeId: mensaje.id,
+    fechaPorDefecto: fecha,
+    grifoPorDefecto: grifo,
+    fotos: fotosEvidencia,
+    conductor: conductorNombre,
+    proveedor,
+    totalDespachos: album.total,
+  });
 
   const motivos: string[] = anomalias.map((a) => a.detalle);
   if (config.acciones_automaticas?.combustible !== true) motivos.push("Registro automático de combustible desactivado en la configuración");
@@ -977,7 +1535,29 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       a.codigo === "marca_kit_como_grifo" ||
       a.codigo === "tasa_como_cantidad" ||
       a.codigo === "trip_como_odometro" ||
-      a.codigo === "voucher_no_leido"
+      a.codigo === "voucher_no_leido" ||
+      // Los números del voucher se contradicen y NADA los explica: la plata que se va a
+      // registrar no es la del papel. Una corrección resuelta ("lectura_corregida") no
+      // entra acá — deja el número bueno puesto y solo hay que confirmarlo, y la
+      // transcripción que no calza sobre un voucher que SÍ cuadra tampoco (no bloquea).
+      a.codigo === "cuadre_ambiguo" ||
+      // Cantidad y precio intercambiados: los dos números de plata están en el campo del otro.
+      a.codigo === "cantidad_precio_invertidos" ||
+      (a.codigo === "cantidad_no_coincide_texto" && a.bloquea !== false) ||
+      // Dos vouchers en la misma ráfaga: hasta que alguien diga cuál describe cuál fila, no se
+      // sabe de qué unidad es el gasto — y antes el segundo directamente se perdía.
+      a.codigo === "multiples_recargas_en_cluster" ||
+      // El papel desmiente el tipo y nombra varios productos: no se sabe QUÉ se compró, y de eso
+      // cuelgan el tanque, el precio referencial y el rendimiento de la unidad. Es la forma
+      // `cuadre_ambiguo` de este campo. `tipo_corregido_por_producto` NO entra —deja el tipo
+      // bueno puesto, solo hay que confirmarlo, igual que `lectura_corregida`— y
+      // `tipo_no_coincide_con_precio` tampoco: es una sospecha por un precio, no el papel
+      // contradiciéndose, y ya bloquea el auto-registro. Un rojo crítico sobre una carga que
+      // quizá solo salió cara enseña a ignorar los rojos.
+      a.codigo === "tipo_no_coincide_con_producto" ||
+      // Rindió más de lo físicamente posible: falta una carga por registrar o el odómetro
+      // está mal leído, y ese km se escribiría además en lecturas_odometro.
+      (a.codigo === "rendimiento_implausible" && a.bloquea === true)
   )
     ? "critico"
     : "atencion";
@@ -1001,7 +1581,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
 
   return {
     accion: "combustible_en_revision",
-    detalle: `Carga capturada pero quedó en revisión: ${motivos[0] ?? "requiere revisión manual"}`,
+    detalle:
+      `Carga capturada pero quedó en revisión: ${motivos[0] ?? "requiere revisión manual"}` +
+      (filasExtra ? ` · ${filasExtra} recarga(s) más de la misma ráfaga quedaron en filas aparte` : ""),
     datos: {
       radar_combustible_id: (rcIns as any)?.id ?? null,
       alerta_id: alertaId,
@@ -1012,6 +1594,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       placa_inferida: placaInferida,
       anomalias,
       motivos,
+      recargas_adicionales: filasExtra,
+      despachos_en_rafaga: album.total,
     },
   };
 }
@@ -1160,6 +1744,10 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       // la IA (auditoría sin columnas nuevas). ref_origen sigue siendo "radar_ia" para no
       // sacar la lectura del panel de /radar-ia, que filtra por ese valor exacto.
       motivo: kmCorregido ? `Corregido por el sistema: ${veredicto.motivo}` : null,
+      // Aquí no hay nadie mirando la foto. Un número que el ERP DEDUJO (el dígito repetido) se
+      // guarda para revisarlo, no se da por bueno: a diferencia del parcial/trip —que el modelo
+      // sí transcribió del tablero— esta cifra no la escribió nadie.
+      forzarRevision: veredicto.confirmar === true,
     });
     if (res.ok && res.estado === "aceptada") {
       // Registrada, pero hay dos casos que igual conviene que un humano revise: la PRIMERA
@@ -1251,7 +1839,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
 
 // ── Mantenimiento ────────────────────────────────────────────────────────────
 
-async function accionMantenimiento({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
+async function accionMantenimiento({ sb, mensaje, datos, confianza, config, previo }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionMantenimiento;
   const veh = await matchVehiculo(sb, d.placa);
   const umbral = Number(config.umbral_confianza ?? 0.7);
@@ -1259,7 +1847,13 @@ async function accionMantenimiento({ sb, mensaje, datos, confianza, config }: Ar
   let ordenId: number | null = null;
   let unidadBloqueada = false;
 
-  const puedeAuto = config.acciones_automaticas?.mantenimiento === true && !!veh && confianza >= umbral;
+  // Si este mensaje ya abrió una orden, reprocesarlo no abre otra: serían dos órdenes de
+  // trabajo para el mismo reporte, y con `urgente` volvería a sacar la unidad de circulación.
+  const puedeAuto =
+    config.acciones_automaticas?.mantenimiento === true &&
+    !!veh &&
+    confianza >= umbral &&
+    previo?.ordenMantenimientoId == null;
 
   if (puedeAuto) {
     // Payload espejo del guardado de app/mantenimiento/_tabs/HistorialTab.tsx

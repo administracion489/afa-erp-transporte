@@ -2468,13 +2468,21 @@ export default function ConductorApp() {
       if (data && km && data.calidad_imagen !== "mala" && !dudoso) {
         setKm(String(km));
         setFoto((prev) => (prev ? { ...prev, kmOcr: km } : prev));
-        if (data.corregido) {
+        if (data.codigo_seleccion === "digito_repetido") {
+          // El conductor tiene el tablero delante: es el mejor momento del ERP para cotejar.
+          alert(`La IA leyó ${Number(data.km_ia).toLocaleString("es-PE")} y le sobra un dígito repetido.\nPusimos ${km.toLocaleString("es-PE")} km.\n\nMira el tablero y confírmalo antes de continuar.`);
+        } else if (data.corregido) {
           alert(`Km leído: ${km.toLocaleString("es-PE")}.\nOjo: la foto muestra dos contadores y se tomó el total (el otro número es el parcial). Verifícalo.`);
         } else if (data.confianza !== "alta") {
           alert(`Km leído: ${km.toLocaleString("es-PE")}${data.motivo ? ` (${data.motivo})` : ""}.\nRevísalo y corrige si hace falta.`);
         }
       } else if (dudoso) {
-        alert(`El número leído (${km.toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad.\nEscribe el kilometraje mirando el tablero — la foto ya quedó registrada.`);
+        // El conductor no necesita el detalle técnico, pero sí saber QUÉ mirar: "le sobra un
+        // dígito" manda a contar las cifras del tablero, que es donde está el error.
+        const titular = data?.codigo_seleccion === "digito_de_mas"
+          ? `La IA leyó ${km.toLocaleString("es-PE")}, que tiene un dígito de más para esta unidad.`
+          : `El número leído (${km.toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad.`;
+        alert(`${titular}\nEscribe el kilometraje mirando el tablero — la foto ya quedó registrada.`);
       } else {
         alert("No se pudo leer el km automáticamente. Escribe el kilometraje a mano — la foto ya quedó registrada.");
       }

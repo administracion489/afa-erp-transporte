@@ -213,8 +213,9 @@ export type ConductorDoc = {
 
 /**
  * Empresa tercerizada. Columnas verificadas en app/tercerizadas/page.tsx:13-21:
- * `razon_social, venc_autorizacion (Autorización MTC), venc_habilitacion (Habilitación
- * SUTRAN), estado`. Valores de `estado` observados en la UI (page.tsx:1982-1983):
+ * `razon_social, venc_autorizacion (LA autorización de transporte, la firme el MTC, la ATU,
+ * un Gobierno Regional o una Municipalidad Provincial — ver lib/autorizacion-transporte.ts),
+ * estado`. Valores de `estado` observados en la UI (page.tsx:1982-1983):
  * "activo" | "inactivo" | "suspendido".
  */
 export type EmpresaDoc = {
@@ -222,7 +223,6 @@ export type EmpresaDoc = {
   razon_social?: string | null;
   estado?: string | null;
   venc_autorizacion?: string | null;
-  venc_habilitacion?: string | null;
 };
 
 export type EntradaAptitud = {
@@ -279,6 +279,26 @@ type TipoDoc = {
   grupo?: string;
   /** alias ya normalizados con normalizarTipoDoc(); el canónico se añade solo */
   alias?: string[];
+  /**
+   * El documento NO CADUCA por ley: exigirle una fecha de vencimiento es exigirle un dato
+   * que no existe. Ver la nota de la Tarjeta de Propiedad (TIVE) en TIPOS_DOC_UNIDAD.
+   * Consecuencia única y absoluta: **cargado ⇒ conforme**, con fecha o sin ella. Nunca
+   * "vencido", nunca "por vencer", nunca "sin fecha". Lo que sí sigue faltando si no hay
+   * fila es el documento mismo → "sin_registro", igual que cualquier otro obligatorio.
+   */
+  sinVencimiento?: true;
+  /**
+   * DE QUIÉN es el documento. Por defecto "unidad" (cuelga de una placa).
+   *
+   * "personal" son los seguros del TRABAJADOR —SCTR Salud, SCTR Pensión, Vida Ley—, que
+   * viven en `documentos_tercero` solo porque `conductores_tercero` no tiene columnas para
+   * ellos (ver el HUECO CONOCIDO en ConductorDoc). Estar guardados ahí no los vuelve
+   * documentos del bus: **una placa no tiene SCTR**. Filtrando la unidad BUI-272, el ERP le
+   * reclamaba "SCTR Salud" y "SCTR Pensión" como obligatorios sin registrar de ESA placa —
+   * y no hay forma de cumplirlo, porque lo que se contrata es la póliza de las personas.
+   * Un pendiente que no se puede cerrar es el que enseña a ignorar la lista de pendientes.
+   */
+  ambito?: "unidad" | "personal";
 };
 
 /**
@@ -303,12 +323,64 @@ export const TIPOS_DOC_UNIDAD: TipoDoc[] = [
   // La variante SIN TILDES es literalmente el bug de app/programacion/page.tsx:367; entra
   // como alias para que ese texto, si alguien lo guardó así en la BD, se reconozca igual.
   { canonico: "Revisión Técnica (CITV)", exige: "ambas",   alias: ["revision tecnica citv", "revision tecnica", "citv"] },
-  { canonico: "Tarjeta de Propiedad",    exige: "ambas",   alias: ["tarjeta propiedad"] },
-  { canonico: "Habilitación SUTRAN",     exige: "ambas",   alias: ["habilitacion sutran", "sutran"] },
-  { canonico: "Permiso Operación MTC",   exige: "ambas",   alias: ["permiso operacion mtc", "permiso mtc"] },
+  // TIVE · Tarjeta de Identificación Vehicular (la "tarjeta de propiedad" de toda la vida).
+  // LA EMITE SUNARP Y NO TIENE FECHA DE VENCIMIENTO: acredita la titularidad inscrita en el
+  // Registro de Propiedad Vehicular y vale mientras esa titularidad y las características
+  // del vehículo no cambien. Se REEMPLAZA (duplicado por pérdida, cambio de placa o de
+  // características, transferencia), que no es lo mismo que caducar: no hay renovación
+  // periódica ni fecha que vigilar. Por eso `sinVencimiento` y por eso los alias incluyen
+  // el nombre nuevo — la ficha impresa dice "Tarjeta de Identificación Vehicular" desde
+  // 2010 y en el ERP se sigue tecleando de las dos formas.
+  { canonico: "Tarjeta de Propiedad",    exige: "ambas",   sinVencimiento: true,
+    alias: ["tarjeta propiedad", "tive", "tarjeta de identificacion vehicular", "tarjeta identificacion vehicular"] },
+  // TUC · Tarjeta Única de Circulación. Es el nombre REAL del documento que el ERP venía
+  // llamando "Habilitación SUTRAN": la habilitación vehicular no es un papel, es el estado
+  // en el registro del MTC, y lo que se lleva en la unidad y se le enseña al fiscalizador es
+  // la TUC. El nombre viejo queda de ALIAS —hay filas escritas así en `documentos_tercero` y
+  // `documentos_vehiculo`— y `supabase/documentos-tuc-renombrar.sql` las pasa al nuevo; hasta
+  // que esa migración corra, el alias es lo único que sostiene la lectura. No se borra ni
+  // después: alguien lo va a volver a teclear como lo aprendió.
+  { canonico: "Tarjeta Única de Circulación (TUC)", exige: "ambas",
+    alias: ["habilitacion sutran", "sutran", "tuc", "tarjeta unica de circulacion",
+            "tarjeta unica de circulacion tuc"] },
+  // Habilitación Vehicular · CATALOGADA PERO **NO OBLIGATORIA POR PLACA**, y esto es lo que
+  // hay que entender antes de volver a marcarla:
+  //
+  // LA HABILITACIÓN ES UNA SOLA Y ES DE LA EMPRESA — la madre. La otorga el MTC (o la ATU en
+  // Lima y Callao, o un Gobierno Regional), es una Resolución Directoral, y de ELLA cuelgan
+  // las TUC de cada vehículo — las hijas. Un bus no tiene su propia "habilitación vehicular"
+  // como papel aparte: lo que lleva a bordo y le enseña al fiscalizador es su TUC.
+  //
+  // Consecuencia práctica, y es la razón del cambio: **si una placa tiene TUC, la empresa
+  // tiene habilitación por lógica** — la TUC no se emite de otro modo. Exigirla también por
+  // unidad producía un "obligatorio sin registrar" imposible de cerrar salvo colgándole a la
+  // placa una copia del papel de la empresa, que es duplicar el dato en el sitio equivocado.
+  //
+  // Dónde vive de verdad: `empresas_tercerizadas.autorizacion_mtc` / `.venc_autorizacion`,
+  // con su autoridad y su territorio (lib/autorizacion-transporte.ts). Ahí sí se vigila.
+  //
+  // Se queda en el catálogo con `exige: null` en vez de borrarse, por las filas que ya
+  // existen: sin la entrada, un "Permiso Operación MTC" viejo dejaría de resolver, caería a
+  // "Otro" y perdería hasta el nombre. Catalogada se sigue viendo, y si está cargada y
+  // vencida se avisa (sin bloquear); lo que no se hace es reclamarla.
+  { canonico: "Habilitación Vehicular (MTC/ATU)", exige: null,
+    alias: ["permiso operacion mtc", "permiso mtc", "permiso de operacion mtc",
+            "habilitacion vehicular", "habilitacion vehicular mtc", "habilitacion vehicular atu",
+            "habilitacion vehicular mtc atu"] },
+  // OJO, NO ES LA TUC: esta es la municipal, anual, del titular. Se deja aparte porque
+  // alguien la catalogó aparte; si AFA decide que es la misma exigencia, se unen con un
+  // `grupo` compartido, no borrando una de las dos.
   { canonico: "Tarjeta de Circulación",  exige: "propia",  alias: ["tarjeta circulacion"] },
-  { canonico: "SCTR Salud",              exige: "tercero" },
-  { canonico: "SCTR Pensión",            exige: "tercero", alias: ["sctr pension"] },
+  // ── Seguros del TRABAJADOR, no de la unidad (ver `ambito`) ──────────────────────────
+  // Los tres protegen a la persona que conduce, y se contratan por planilla, no por placa.
+  // Vida Ley faltaba: es tan obligatoria como las otras dos (Ley 26790 para el SCTR;
+  // D. Leg. 688 para el seguro de vida, exigible desde el primer día de trabajo), y en el
+  // ERP ya existía para la flota propia como `conductores.vida_ley_venc` — a los terceros
+  // simplemente no se les pedía.
+  { canonico: "SCTR Salud",              exige: "tercero", ambito: "personal" },
+  { canonico: "SCTR Pensión",            exige: "tercero", ambito: "personal", alias: ["sctr pension"] },
+  { canonico: "Vida Ley",                exige: "tercero", ambito: "personal",
+    alias: ["vida ley", "seguro vida ley", "seguro de vida ley", "seguro de vida"] },
   // Catalogados pero NUNCA obligatorios: si están y están vencidos se reportan como aviso,
   // y si no están no se echan de menos.
   { canonico: "Certificado GNV",         exige: null },
@@ -382,10 +454,55 @@ export function tipoCanonico(tipoCrudo: string | null | undefined): TipoDoc | nu
   return cand.length === 1 ? cand[0].tipo : null;
 }
 
-/** Tipos obligatorios según el origen de la unidad (uno por grupo de equivalencia). */
-export function tiposObligatorios(tercerizada: boolean): TipoDoc[] {
+/**
+ * Etiqueta CANÓNICA de un tipo tecleado, para pintar y para indexar los `Record<tipo, cfg>`
+ * de las pantallas. Un tipo no catalogado se devuelve tal cual: inventarle un nombre sería
+ * peor que mostrar lo que alguien escribió.
+ *
+ * Es lo que permite renombrar un documento sin migrar la base primero. "Habilitación SUTRAN"
+ * son filas ya escritas en `documentos_tercero`/`documentos_vehiculo`; sin pasar por aquí,
+ * el `TIPOS_DOC[d.tipo]` de cada pantalla no encontraría la clave nueva, caería a "Otro" y
+ * el documento perdería su icono, su marca de OBLIGATORIO y su sitio en la completitud —
+ * o sea, renombrar una etiqueta habría apagado un control legal en silencio.
+ */
+export function etiquetaTipoDoc(tipoCrudo: string | null | undefined): string {
+  return tipoCanonico(tipoCrudo)?.canonico ?? (tipoCrudo || "");
+}
+
+/**
+ * ¿Este documento NO CADUCA por ley? (hoy: solo la Tarjeta de Propiedad / TIVE.)
+ *
+ * ES LA ÚNICA DEFINICIÓN DEL HECHO en todo el ERP, y resuelve por `tipoCanonico()` a
+ * propósito: las cinco listas de la cabecera guardan el tipo como texto tecleado, así que
+ * comparar con `=== "Tarjeta de Propiedad"` volvería a dejar fuera "tarjeta de propiedad",
+ * "TIVE" y la variante sin tildes — exactamente el bug de app/programacion/page.tsx:367,
+ * pero al revés: en vez de callar una alerta verdadera, levantaría una falsa.
+ *
+ * Un tipo no catalogado devuelve false: sin saber qué documento es, lo prudente es seguir
+ * pidiéndole la fecha.
+ */
+export function docSinVencimiento(tipo: string | null | undefined): boolean {
+  return tipoCanonico(tipo)?.sinVencimiento === true;
+}
+
+/** ¿De quién es el documento? "unidad" (de la placa) o "personal" (del trabajador). */
+export function ambitoTipoDoc(tipo: string | null | undefined): "unidad" | "personal" {
+  return tipoCanonico(tipo)?.ambito ?? "unidad";
+}
+
+/**
+ * Tipos obligatorios según el origen de la unidad (uno por grupo de equivalencia).
+ *
+ * `ambito` acota a los de la UNIDAD o a los del PERSONAL. Sin acotar salen los dos, que es
+ * lo correcto para la empresa entera (el cron de avisos, el semáforo del proveedor) y lo
+ * incorrecto para una placa: a un bus no se le puede reclamar el SCTR de nadie.
+ */
+export function tiposObligatorios(tercerizada: boolean, ambito?: "unidad" | "personal"): TipoDoc[] {
   const donde: ExigeEn = tercerizada ? "tercero" : "propia";
-  return TIPOS_DOC_UNIDAD.filter((t) => t.exige === "ambas" || t.exige === donde);
+  return TIPOS_DOC_UNIDAD.filter((t) =>
+    (t.exige === "ambas" || t.exige === donde) &&
+    (!ambito || (t.ambito ?? "unidad") === ambito),
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -471,12 +588,23 @@ const plural = (n: number, sing: string, pl: string) => `${n} ${n === 1 ? sing :
  * `por_vencer` es la única de las cuatro que dice la verdad: válido hoy, mañana no.
  * La tentación de escribir `dias <= 0 → vencido` sigue siendo un error: adelantaría un día
  * el vencimiento de toda unidad que renueva justo a tiempo.
+ *
+ * `permanente` es la excepción entera de la Tarjeta de Propiedad (ver `sinVencimiento`), y
+ * SOLO se pasa true cuando la fila EXISTE: el documento está cargado y no caduca, así que
+ * está conforme y `dias` es null porque no hay ninguna cuenta atrás que informar. Se decide
+ * ANTES de leer la fecha —y no después— por la razón que sigue: si alguien tecleó una fecha
+ * en un documento que por ley no vence, ese dato no significa nada, y dejarlo caducar
+ * pintaría de rojo una unidad que está perfectamente en regla. Un rojo imposible de arreglar
+ * es el que enseña a ignorar los rojos de verdad. No se puede colar nada por aquí: un
+ * documento que no caduca no puede estar vencido.
  */
 function evaluarFecha(
   fechaServicio: string,
   fechaVenc: string | null | undefined,
   avisoDias: number,
+  permanente = false,
 ): { veredicto: VeredictoDoc; dias: number | null } {
+  if (permanente) return { veredicto: "conforme", dias: null };
   const dias = diasEntreFechas(fechaServicio, fechaVenc);
   if (dias === null) return { veredicto: "sin_registro", dias: null };
   if (dias < 0) return { veredicto: "vencido", dias };
@@ -513,7 +641,11 @@ function hallazgo(
       ? `${tipo}${de} cargado sin fecha de vencimiento`
       : `${tipo}${de} sin cargar`;
   } else {
-    texto = `${tipo}${de} vigente hasta el ${fechaCorta(fechaVencimiento)}`;
+    // Conforme SIN fecha = el documento que no caduca (Tarjeta de Propiedad). "vigente hasta
+    // el —" sería el guion que hace dudar de si falta el dato o falta el documento.
+    texto = fechaVencimiento
+      ? `${tipo}${de} vigente hasta el ${fechaCorta(fechaVencimiento)}`
+      : `${tipo}${de} cargado (no vence)`;
   }
   return {
     sujeto,
@@ -602,9 +734,21 @@ export function evaluarAptitud(e: EntradaAptitud): AptitudServicio {
       });
     }
     // Habilitaciones propias de la EMPRESA (columnas verificadas en tercerizadas:19).
+    //
+    // La primera es LA autorización de transporte, la exija quien la exija: el nombre de la
+    // columna dice "mtc" por historia, pero la firma el MTC, la ATU, un Gobierno Regional o
+    // una Municipalidad Provincial según el ámbito (ver lib/autorizacion-transporte.ts).
+    // Rotularla "Autorización MTC" le reclamaba al operador de la ATU un papel que no le
+    // corresponde tener.
+    //
+    // Y es LA ÚNICA de la empresa. Antes había una segunda, "Habilitación SUTRAN", que no
+    // correspondía a nada: SUTRAN fiscaliza, no autoriza, y lo que se estaba pidiendo ahí era
+    // en realidad la habilitación VEHICULAR — que es por placa y hoy es la TUC, en
+    // `documentos_tercero`. Exigirla a nivel de empresa ponía un aviso permanente e
+    // incumplible en la ficha de todo proveedor, y un aviso que sale siempre se vuelve
+    // paisaje. Las columnas siguen en la base; nadie las lee.
     for (const h of [
-      { label: "Autorización MTC", f: emp.venc_autorizacion },
-      { label: "Habilitación SUTRAN (empresa)", f: emp.venc_habilitacion },
+      { label: "Autorización de transporte", f: emp.venc_autorizacion },
     ]) {
       const r = evaluarFecha(fechaServicio, h.f, cfg.avisoDias);
       push(hallazgo("empresa", empNombre, h.label, r.veredicto, h.f ?? null, r.dias, esFuturo));
@@ -695,18 +839,30 @@ export function evaluarAptitud(e: EntradaAptitud): AptitudServicio {
         const filas = porTipo.get(t.canonico);
         if (!filas || !filas.length) continue;
         const f = mejorDe(filas);
-        const r = evaluarFecha(fechaServicio, f.fecha_vencimiento, cfg.avisoDias);
+        // `!!t.sinVencimiento` va aquí dentro, donde ya consta que la fila EXISTE: un
+        // documento que no caduca está conforme por estar cargado. Sin fila el flujo sigue
+        // igual y cae en el `sin_registro` de abajo — que no caduque no lo hace opcional.
+        const r = evaluarFecha(fechaServicio, f.fecha_vencimiento, cfg.avisoDias, !!t.sinVencimiento);
         presentes.push({ canon: t.canonico, v: r.veredicto, f: f.fecha_vencimiento ?? null, dias: r.dias });
       }
+      // A QUIÉN se le reclama. Los seguros del trabajador (SCTR, Vida Ley) viven en
+      // `documentos_tercero` por falta de columnas en `conductores_tercero`, pero son de la
+      // EMPRESA: rotularlos con la placa producía "SCTR Salud de BUI-272 sin cargar", un
+      // pendiente imposible de cerrar desde la ficha de esa unidad. El grupo entero comparte
+      // ámbito (los de equivalencia son todos de unidad), así que basta mirar al primero.
+      const esPersonal = (grupo[0].ambito ?? "unidad") === "personal";
+      const suj: Sujeto = esPersonal ? "empresa" : "unidad";
+      const sujNombre = esPersonal ? empNombre : uniNombre;
+
       if (!presentes.length) {
         // Aquí muere el "verde por base vacía": la ausencia se REPORTA, no se calla.
         // Se nombra el miembro principal del grupo (el primero del catálogo).
-        push(hallazgo("unidad", uniNombre, grupo[0].canonico, "sin_registro", null, null, esFuturo));
+        push(hallazgo(suj, sujNombre, grupo[0].canonico, "sin_registro", null, null, esFuturo));
         continue;
       }
       presentes.sort((a, b) => RANK[a.v] - RANK[b.v] || (b.dias ?? -9999) - (a.dias ?? -9999));
       const mejor = presentes[0];
-      push(hallazgo("unidad", uniNombre, mejor.canon, mejor.v, mejor.f, mejor.dias, esFuturo));
+      push(hallazgo(suj, sujNombre, mejor.canon, mejor.v, mejor.f, mejor.dias, esFuturo));
     }
 
     // Documentos NO obligatorios que están cargados y vencidos: se reportan como AVISO
@@ -718,8 +874,12 @@ export function evaluarAptitud(e: EntradaAptitud): AptitudServicio {
     const yaEvaluados = new Set(exigencias.flat().map((t) => t.canonico));
     for (const [canon, filas] of porTipo) {
       if (yaEvaluados.has(canon)) continue;
+      // Hoy ningún tipo `sinVencimiento` es opcional, así que todos salen por `yaEvaluados`
+      // y esta guarda nunca se dispara. Va igual: el día que se catalogue uno opcional, sin
+      // ella una fecha vieja tecleada en un documento que no caduca reaparecería como aviso
+      // de vencido justo por la puerta de al lado.
       const f = mejorDe(filas);
-      const r = evaluarFecha(fechaServicio, f.fecha_vencimiento, cfg.avisoDias);
+      const r = evaluarFecha(fechaServicio, f.fecha_vencimiento, cfg.avisoDias, docSinVencimiento(canon));
       if (r.veredicto !== "vencido") continue;
       // El veredicto se queda en "vencido" y lo que se degrada es `bloquea`, no la verdad.
       // Antes se emitía como "por_vencer" con `diasRestantes` NEGATIVO (defecto [BAJA]

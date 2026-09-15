@@ -60,6 +60,7 @@ function reserva(p: Partial<ReservaLiq> & { fecha: string; precio: number; vehic
     vehiculo_id: p.vehiculo,
     conductor_id: p.conductor_id ?? 1,
     pasajeros_abordados: p.pasajeros_abordados ?? null,
+    capacidad_contratada: p.capacidad_contratada ?? null,
     hora_real_inicio: p.hora_real_inicio ?? null,
     hora_real_fin: p.hora_real_fin ?? null,
     tipo_servicio_detalle: "transporte_personal",
@@ -78,14 +79,17 @@ const VEHICULOS: Record<number, { placa: string; cap: number; desc: string }> = 
 // 52 servicios, no como 104.
 const reservas: ReservaLiq[] = [];
 function parDelDia(f: string, i: number, veh: number, precio: number, costo: number, pax: number, horas: { ida: [string, string]; ret: [string, string] }) {
+  // Los asientos CONTRATADOS son del día y no cambian con la ocupación: se escriben
+  // iguales en los dos tramos, como los escribe Programación.
+  const contratados = veh === 2 ? 12 : 45;
   const ida = reserva({
     fecha: f, precio, vehiculo: veh, costo_proveedor: costo,
-    conductor_id: veh, pasajeros_abordados: pax,
+    conductor_id: veh, pasajeros_abordados: pax, capacidad_contratada: contratados,
     hora_real_inicio: horas.ida[0], hora_real_fin: horas.ida[1],
   });
   const ret = reserva({
     fecha: f, precio: 0, vehiculo: veh, costo_proveedor: 0,
-    conductor_id: veh, pasajeros_abordados: pax - 1,
+    conductor_id: veh, pasajeros_abordados: pax - 1, capacidad_contratada: contratados,
     hora_real_inicio: horas.ret[0], hora_real_fin: horas.ret[1],
   });
   ida.reserva_vinculada_id = ret.id;
@@ -166,7 +170,10 @@ const totales = totalesValorizacion(
 // El anexo lista los DOS tramos del servicio con el mismo número de ítem: el retorno
 // va como "Incluido" en S/ 0.00, igual que lo arma lib/liquidacion-datos.ts.
 const SERIES = ["A", "B"];
-const anexo1: FilaAnexo[] = [];
+// El anexo se imprime en orden de fecha sobre todo el periodo, no por línea:
+// se arma con su clave cronológica y se ordena al final, igual que el loader real.
+const pendientes: { fila: FilaAnexo; clave: string }[] = [];
+let kmMuestra = 0;
 lineasAgrupadas.forEach((l, gi) => {
   let n = 0;
   const vistos = new Set<number>();
@@ -179,30 +186,42 @@ lineasAgrupadas.forEach((l, gi) => {
     }
     const tarde = r.hora_real_inicio === "22:35";
     const incluida = !Number(r.precio_cliente);
-    anexo1.push({
-      ref: `${SERIES[gi] ?? "X"}-${String(n).padStart(2, "0")}`,
-      fecha: fechaFormato(r.fecha_servicio).slice(0, 5),
-      codigo: r.codigo!,
-      ruta: `CD Callao → ${l.ruta} (${r.direccion_servicio === "retorno" ? "Retorno" : "Ida"})`,
-      turno: l.turno === "NOCHE" ? "Noche" : "Día",
-      placa: catalogo.placaDe(r),
-      conductor: catalogo.conductorDe(r),
-      pax: r.pasajeros_abordados ?? null,
-      salida: r.hora_real_inicio ?? "",
-      llegada: r.hora_real_fin ?? "",
-      km: l.movil === 1 ? 42.1 + (n % 5) / 10 : 28.2 + (n % 4) / 10,
-      estado: tarde ? "Tardío" : incluida ? "Incluido" : "Conforme",
-      importe: incluida ? 0 : l.precio_unitario,
-      alerta: tarde,
+    const ref = `${SERIES[gi] ?? "X"}-${String(n).padStart(2, "0")}`;
+    kmMuestra += l.movil === 1 ? 42.1 + (n % 5) / 10 : 28.2 + (n % 4) / 10;
+    pendientes.push({
+      // El par ida↔retorno viaja junto: se ubica en la fecha de la ida.
+      clave: `${String(r.fecha_servicio).slice(0, 10)}|${ref}|${String(r.hora_servicio ?? "")}`,
+      fila: {
+        ref,
+        fecha: fechaFormato(r.fecha_servicio).slice(0, 5),
+        codigo: r.codigo!,
+        ruta: `CD Callao → ${l.ruta} (${r.direccion_servicio === "retorno" ? "Retorno" : "Ida"})`,
+        // El Anexo 1 lleva la HORA del servicio, no un turno deducido.
+        turno: String(r.hora_servicio ?? "").slice(0, 5) || "—",
+        placa: catalogo.placaDe(r),
+        conductor: catalogo.conductorDe(r),
+        // La columna PAX del anexo es la capacidad CONTRATADA, no la ocupación.
+        paxContratado: r.capacidad_contratada ?? null,
+        estado: tarde ? "Tardío" : incluida ? "Incluido" : "Conforme",
+        importe: incluida ? 0 : l.precio_unitario,
+        alerta: tarde,
+      },
     });
   }
 });
-anexo1.push({
-  ref: "C-01", fecha: "28/06", codigo: adicional.codigo!,
-  ruta: "CD Callao → RUTA 1 (Ida) · adicional", turno: "Noche",
-  placa: "AYL-789", conductor: "Sergio Sánchez", pax: 44,
-  salida: "22:04", llegada: "23:18", km: 42.8, estado: "Adicional", importe: 790,
+kmMuestra += 42.8;
+pendientes.push({
+  clave: "2026-06-28|C-01|22:00",
+  fila: {
+    ref: "C-01", fecha: "28/06", codigo: adicional.codigo!,
+    ruta: "CD Callao → RUTA 1 (Ida) · adicional", turno: "22:00",
+    placa: "AYL-789", conductor: "Sergio Sánchez", paxContratado: 44,
+    estado: "Adicional", importe: 790,
+  },
 });
+const anexo1: FilaAnexo[] = pendientes
+  .sort((a, b) => (a.clave < b.clave ? -1 : a.clave > b.clave ? 1 : 0))
+  .map((p) => p.fila);
 
 // ── Documento ───────────────────────────────────────────────────────────────
 
@@ -264,8 +283,10 @@ const docCliente: DocLiquidacion = {
     serviciosEjecutados: anexo1.length,
     serviciosProgramados: reservas.length,
     puntualidadPct: 96.2,
-    pasajeros: anexo1.reduce((a, f) => a + (f.pax ?? 0), 0),
-    km: Math.round(anexo1.reduce((a, f) => a + (f.km ?? 0), 0)),
+    // El Anexo 2 sí cuenta personas transportadas, y sale de las reservas: el Anexo 1
+    // ya no lleva ese dato porque su columna PAX es la capacidad contratada.
+    pasajeros: reservas.reduce((a, r) => a + (r.pasajeros_abordados ?? 0), 0),
+    km: Math.round(kmMuestra),
     incidencias: [
       { fecha: "28/06", codigo: adicional.codigo!, tipo: "Adicional", descripcion: "Sobredemanda del turno noche: se despachó una unidad extra (AYL-789) a solicitud del área.", accion: "Autorizado por correo del cliente", efecto: 790 },
       { fecha: "03/07", codigo: "AFA-2026-004823", tipo: "Demora", descripcion: "Unidad AXP-940 se presentó 35 min tarde en el punto de embarque (congestión Av. Argentina).", accion: "Penalidad cláusula 8.2", efecto: -210 },
@@ -367,7 +388,7 @@ console.log(`  bloqueadas                : ${analisis.bloqueadas.length}`);
 console.log(`  avisos                    : ${analisis.avisos.length}`);
 console.log("── Agrupación ───────────────────────────────");
 for (const l of lineasAgrupadas)
-  console.log(`  móvil ${l.movil} · ${l.ruta} · ${l.turno} · ${l.placas.join("/")} → ${l.cantidad_ejecutada}/${l.cantidad_programada} × S/ ${l.precio_unitario} = S/ ${l.total_linea}  (${l.reservas.length} tramos)`);
+  console.log(`  ${l.moviles > 1 ? `móvil ${l.movil}/${l.moviles} · ` : ""}${l.nombre_ida ?? l.ruta}${l.nombre_retorno ? ` ↩ ${l.nombre_retorno}` : ""} · ${l.pax_contratado ?? "sin pax"} · ${l.placas.join("/")} → ${l.cantidad_ejecutada}/${l.cantidad_programada} × S/ ${l.precio_unitario} = S/ ${l.total_linea}  (${l.reservas.length} tramos)`);
 console.log("── Totales cliente ──────────────────────────");
 console.log(`  servicios   S/ ${totales.servicios}`);
 console.log(`  adicionales S/ ${totales.adicionales}`);

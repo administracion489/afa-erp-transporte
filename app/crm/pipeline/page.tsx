@@ -1,6 +1,7 @@
 "use client";
 import React, { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
+import { telefonoLegible } from "@/lib/crm-telefono";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -28,7 +29,7 @@ type Pipeline = {
   asignado_a?: string;
   created_at: string;
   updated_at: string;
-  crm_contactos?: { id: string; nombre: string; empresa?: string; telefono?: string; canal_origen: string };
+  crm_contactos?: { id: string; nombre: string; empresa?: string; telefono?: string; wa_id?: string; canal_origen: string };
 };
 
 type Actividad = {
@@ -98,7 +99,7 @@ export default function PipelinePage() {
   const cargar = useCallback(async () => {
     const { data } = await supabase
       .from("crm_pipeline")
-      .select("*, crm_contactos(id,nombre,empresa,telefono,canal_origen)")
+      .select("*, crm_contactos(id,nombre,empresa,telefono,wa_id,canal_origen)")
       .order("updated_at", { ascending: false });
     setCards(data ?? []);
     setCargando(false);
@@ -395,7 +396,9 @@ export default function PipelinePage() {
                   <div className="space-y-1.5 text-sm">
                     {selected.empresa_nombre && <Row label="Empresa" value={selected.empresa_nombre} />}
                     {selected.crm_contactos?.nombre && <Row label="Contacto" value={selected.crm_contactos.nombre} />}
-                    {selected.crm_contactos?.telefono && <Row label="Teléfono" value={selected.crm_contactos.telefono} />}
+                    {telefonoLegible(selected.crm_contactos) && (
+                      <Row label="Teléfono" value={telefonoLegible(selected.crm_contactos)!} />
+                    )}
                     {selected.n_trabajadores && <Row label="Trabajadores" value={`${selected.n_trabajadores}`} />}
                     {selected.frecuencia && <Row label="Frecuencia" value={selected.frecuencia} />}
                     {selected.rutas_descripcion && <Row label="Rutas" value={selected.rutas_descripcion} />}

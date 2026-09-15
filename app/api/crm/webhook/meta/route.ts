@@ -178,12 +178,16 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
     .maybeSingle();
   if (dup) return null;
 
-  // Buscar o crear contacto
+  // Buscar o crear contacto. La copia del teléfono (solo WhatsApp, donde el
+  // senderId ES el número en E.164 sin "+") vive dentro de resolverContacto, así
+  // que también la reciben los echos y el historial de la coexistencia — no solo
+  // los mensajes entrantes como cuando el bloque estaba aquí suelto.
   const contacto = await resolverContacto(supabase, {
     campo: m.idField,
     valor: m.senderId,
     nombre: m.senderName || null,
     canal: m.canal,
+    telefono: m.canal === "whatsapp" ? m.senderId : null,
   });
   if (!contacto) return null;
 

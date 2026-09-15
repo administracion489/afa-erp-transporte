@@ -112,7 +112,7 @@ export default function ConfigOperacionesPage() {
       notifica_conductor_tercero: c.notifica_conductor_tercero ?? false,
       destinatarios: c.destinatarios, ...canales, updated_at: new Date().toISOString(),
     }).eq("clave", c.clave);
-    showToast(error ? "Error al guardar" : `Guardado: ${c.nombre}`, !error);
+    showToast(error ? `Error al guardar: ${error.message}` : `Guardado: ${c.nombre}`, !error);
   };
 
 
@@ -177,6 +177,31 @@ export default function ConfigOperacionesPage() {
     botonTexto: "Abrir app conductor",
     botonUrl: "https://transportesafa.com/conductor",
   };
+  // Asignación AGRUPADA: la usa el motor de alertas cuando a un mismo conductor se le
+  // programan VARIOS servicios de una sentada (antes recibía un WhatsApp por cada uno).
+  // Mientras no exista/esté aprobada, el motor cae solo a los mensajes de uno en uno,
+  // así que crearla es opcional — sólo mejora el resultado.
+  //
+  // SIN botón: los de mapa son por servicio y aquí hay varios.
+  // El teléfono NO puede ir en la última línea: Meta rechaza las plantillas cuyo cuerpo
+  // TERMINA en variable. Por eso cierra la línea de la app, que es texto fijo.
+  // {{4}} va en UNA línea con " • " de separador porque Meta rechaza los parámetros con
+  // saltos de línea; los saltos que se ven en el mensaje son del texto fijo de abajo.
+  const PLANTILLA_ASIGNACION_MULTIPLE: NuevaPlantilla = {
+    name: "conductor_asignacion_multiple",
+    category: "UTILITY",
+    body: "Hola {{1}} 👋\n\n📋 *{{2}} servicios asignados* para el {{3}}\n\n{{4}}\n\n☎️ Coordinador de Operaciones: {{5}}\n📱 Ruta y detalle de cada servicio en la app AFA conductor.",
+    ejemplos: [
+      "Peter",
+      "4",
+      "viernes 28 de agosto",
+      "1️⃣ 06:35 El Agustino → Punta Hermosa    2️⃣ 10:35 Primero de Mayo → Villa El Salvador",
+      "+51 999 888 777",
+    ],
+    botonTexto: "",
+    botonUrl: "",
+  };
+
   const [nuevaTpl, setNuevaTpl] = useState<NuevaPlantilla | null>(null);
   const [creandoTpl, setCreandoTpl] = useState(false);
   const varsDe = (texto: string) => [...new Set((texto.match(/\{\{\s*\d+\s*\}\}/g) ?? []).map((v) => v.replace(/\s/g, "")))].sort();
@@ -232,7 +257,9 @@ export default function ConfigOperacionesPage() {
   };
   const guardarDest = async (d: Destinatario) => {
     const { error } = await supabase.from("alerta_destinatarios").update({ nombre: d.nombre, funcion: d.funcion, telefono: d.telefono, activo: d.activo, es_contingencia: d.es_contingencia ?? false }).eq("id", d.id);
-    showToast(error ? "Error al guardar" : "Contacto actualizado", !error);
+    // El mensaje de Supabase se MUESTRA, no se traga: un "Error al guardar" pelado deja
+    // al usuario sin saber si falta una migración, si es RLS o si el dato es inválido.
+    showToast(error ? `Error al guardar: ${error.message}` : "Contacto actualizado", !error);
   };
   const borrarDest = async (id: number) => {
     if (!confirm("¿Eliminar este contacto de las alertas?")) return;
@@ -455,9 +482,14 @@ export default function ConfigOperacionesPage() {
         <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
           <h2 className="text-sm font-bold text-gray-700">Crear plantilla nueva</h2>
           {!nuevaTpl && (
-            <button onClick={() => setNuevaTpl({ ...PLANTILLA_CHECKOUT })} className="text-xs font-semibold text-[#0b315f] hover:underline">
-              Prellenar: recordatorio de Check-out
-            </button>
+            <div className="flex items-center gap-3 flex-wrap">
+              <button onClick={() => setNuevaTpl({ ...PLANTILLA_CHECKOUT })} className="text-xs font-semibold text-[#0b315f] hover:underline">
+                Prellenar: recordatorio de Check-out
+              </button>
+              <button onClick={() => setNuevaTpl({ ...PLANTILLA_ASIGNACION_MULTIPLE })} className="text-xs font-semibold text-[#0b315f] hover:underline">
+                Prellenar: varios servicios asignados
+              </button>
+            </div>
           )}
         </div>
         <p className="text-xs text-gray-500 mb-3">
@@ -511,7 +543,7 @@ export default function ConfigOperacionesPage() {
                 <input className={input + " w-auto flex-1 min-w-[160px]"} placeholder="Texto del botón (ej. Abrir app conductor)"
                   maxLength={25} value={nuevaTpl.botonTexto}
                   onChange={(e) => setNuevaTpl((p) => p && { ...p, botonTexto: e.target.value })} />
-                <input className={input + " w-auto flex-1 min-w-[220px]"} placeholder="https://transportesafa.com/conductor"
+                <input className={input + " w-auto flex-1 min-w-[220px]"} placeholder="https://tudominio.com/conductor"
                   value={nuevaTpl.botonUrl}
                   onChange={(e) => setNuevaTpl((p) => p && { ...p, botonUrl: e.target.value })} />
               </div>
@@ -528,8 +560,11 @@ export default function ConfigOperacionesPage() {
         )}
       </div>
 
+      {/* Arriba, NO abajo: en bottom-right viven los botones flotantes de ELIA y de la
+          ayuda (ver app/layout.tsx), que tapaban el aviso — y justo los errores, que son
+          los que hay que leer. z-50 para quedar por encima de ambos. */}
       {toast && (
-        <div className={`fixed bottom-6 right-6 px-4 py-3 rounded-xl text-sm text-white shadow-lg ${toast.ok ? "bg-[#0b315f]" : "bg-red-600"}`}>{toast.msg}</div>
+        <div className={`fixed top-6 right-6 z-50 max-w-md px-4 py-3 rounded-xl text-sm text-white shadow-lg ${toast.ok ? "bg-[#0b315f]" : "bg-red-600"}`}>{toast.msg}</div>
       )}
     </div>
   );

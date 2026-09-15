@@ -20,8 +20,8 @@ import {
   cargarMapaGruposActivos,
   insertarMensaje,
   subirMedia,
-  debeRelinkear,
-  limpiarSolicitudRelink,
+  leerSolicitudes,
+  limpiarSolicitud,
   type FilaMensaje,
   type InfoGrupoActivo,
 } from "./db.js";
@@ -33,7 +33,8 @@ const _b: any = baileysMod as any;
 const _raiz: any = typeof _b.makeWASocket === "function" ? _b : (_b.default ?? _b);
 const makeWASocket: any = _raiz.makeWASocket ?? _b.default;
 const useMultiFileAuthState: any = _raiz.useMultiFileAuthState ?? _b.useMultiFileAuthState;
-const DisconnectReason: any = _raiz.DisconnectReason ?? _b.DisconnectReason ?? {};
+// (el enum DisconnectReason no se usa: los códigos de cierre van como literales en COD,
+//  más abajo, para que el diagnóstico no dependa de esta interop)
 const fetchLatestBaileysVersion: any = _raiz.fetchLatestBaileysVersion ?? _b.fetchLatestBaileysVersion;
 const downloadMediaMessage: any = _raiz.downloadMediaMessage ?? _b.downloadMediaMessage;
 
@@ -46,7 +47,48 @@ const ARRANQUE_MS = Date.now();
 const TS_MINIMO_MS = ARRANQUE_MS - 5 * 60_000;
 const MAX_MEDIA_BYTES = 15 * 1024 * 1024;
 
+// ── Códigos de cierre de WhatsApp ──────────────────────────────────────────
+// Van como números literales A PROPÓSITO: son códigos del protocolo (fijos) y así
+// el diagnóstico no depende de que el enum DisconnectReason sobreviva la interop
+// CJS/ESM de arriba. Si no la sobreviviera, todas las comparaciones darían
+// `undefined` y NINGÚN código haría match — que es exactamente cómo una sesión
+// muerta se queda dando vueltas sin llegar a pedir un QR.
+const COD = {
+  desvinculado: 401,        // loggedOut: cerraron la sesión desde el teléfono
+  prohibido: 403,           // forbidden: WhatsApp bloqueó/baneó el número
+  noAutorizado: 405,        // WhatsApp rechaza las credenciales al conectar
+  perdida: 408,             // connectionLost / timedOut (también vence así un ciclo de QRs)
+  desajusteMultidevice: 411,
+  cerrada: 428,             // connectionClosed
+  reemplazada: 440,         // connectionReplaced
+  sesionMala: 500,          // badSession — OJO: en Baileys es el default de CUALQUIER error no mapeado
+  servicioCaido: 503,
+  reinicioRequerido: 515,
+} as const;
+
+/**
+ * Códigos que significan "estas credenciales ya no sirven": la única salida es
+ * borrar auth/ y escanear un QR nuevo.
+ *
+ * Baileys solo emite el evento `qr` cuando NO hay credenciales guardadas. Así que
+ * reconectar con credenciales muertas es un bucle infinito Y SIN QR: el worker
+ * reintenta para siempre y en /radar-ia nunca aparece el código para vincular.
+ * Ese era el agujero del 403 (número bloqueado por usar un cliente no oficial),
+ * que caía en el backoff genérico y dejaba el Radar sin forma de cambiar de número.
+ */
+const CODIGOS_SESION_MUERTA: Record<number, string> = {
+  [COD.desvinculado]: "Sesión cerrada desde el teléfono — escanea el QR para vincular un número",
+  [COD.prohibido]:
+    "WhatsApp BLOQUEÓ este número (403). No va a volver a conectar: escanea el QR con OTRO número dedicado",
+  [COD.noAutorizado]:
+    "WhatsApp rechazó las credenciales guardadas (405) — escanea el QR para vincular un número",
+  [COD.desajusteMultidevice]:
+    "El teléfono no tiene multi-dispositivo (411) — actualiza WhatsApp y escanea el QR de nuevo",
+};
+
 let sock: any = null;
+/** Sube en cada conectar()/descarte. Los eventos de un socket viejo se ignoran si no coincide. */
+let generacion = 0;
 let gruposActivos: Map<string, InfoGrupoActivo> = new Map();
 let intentosReconexion = 0;
 /** 515s seguidos sin lograr un "open": tope para no caer en bucle caliente de reconexión. */
@@ -54,6 +96,9 @@ let reinicios515Seguidos = 0;
 let timerReconexion: NodeJS.Timeout | null = null;
 let timerProcesar: NodeJS.Timeout | null = null;
 let cerrando = false;
+/** Por qué estamos pidiendo un QR. Viaja con el código hasta que alguien lo escanea:
+ *  si el número quedó bloqueado, eso es justo lo que hay que leer ANTES de escanear. */
+let motivoQrPendiente: string | null = null;
 
 // ── Utilitarios ────────────────────────────────────────────────────────────
 
@@ -108,20 +153,46 @@ async function refrescarCacheGrupos(): Promise<void> {
   gruposActivos = await cargarMapaGruposActivos();
 }
 
-/** Lee de WhatsApp todos los grupos donde participa el número y los upsertea en radar_grupos. */
-async function sincronizarListaGrupos(): Promise<void> {
-  if (!sock) return;
-  try {
-    const grupos = await sock.groupFetchAllParticipating();
-    const lista = Object.entries(grupos ?? {}).map(([jid, meta]: [string, any]) => ({
-      wa_group_id: jid,
-      nombre: String(meta?.subject ?? ""),
-      participantes: Array.isArray(meta?.participants) ? meta.participants.length : 0,
-    }));
-    await sincronizarGrupos(lista);
-  } catch (e: any) {
-    console.warn("[radar-worker] No se pudo sincronizar la lista de grupos:", e?.message ?? e);
+function esperar(ms: number): Promise<void> {
+  return new Promise((listo) => setTimeout(listo, ms));
+}
+
+/**
+ * Lee de WhatsApp todos los grupos donde participa el número y los vuelca en radar_grupos.
+ *
+ * REINTENTA: justo después de vincular, WhatsApp suele tardar en responder las consultas
+ * de inicialización (se ve como un 408 "Timed Out" en los logs). Antes esto se registraba
+ * con un warn y se abandonaba hasta el barrido siguiente —hasta 30 minutos después—, así
+ * que tras cambiar de número la pestaña Grupos seguía mostrando la lista del anterior sin
+ * ninguna señal de que la lectura había fallado.
+ *
+ * Devuelve true solo si WhatsApp respondió; el timestamp en radar_estado se escribe
+ * únicamente en ese caso, para que el dashboard pueda decir la verdad sobre la lista.
+ */
+async function sincronizarListaGrupos(intentos = 3): Promise<boolean> {
+  for (let intento = 1; intento <= intentos; intento++) {
+    if (!sock) return false;
+    try {
+      const grupos = await sock.groupFetchAllParticipating();
+      const lista = Object.entries(grupos ?? {}).map(([jid, meta]: [string, any]) => ({
+        wa_group_id: jid,
+        nombre: String(meta?.subject ?? ""),
+        participantes: Array.isArray(meta?.participants) ? meta.participants.length : 0,
+      }));
+      await sincronizarGrupos(lista);
+      await actualizarEstado({ grupos_sincronizados_en: ahoraIso() });
+      console.log(`[radar-worker] Lista de grupos sincronizada: el número ve ${lista.length} grupo(s).`);
+      return true;
+    } catch (e: any) {
+      console.warn(
+        `[radar-worker] No se pudo leer la lista de grupos (intento ${intento}/${intentos}):`,
+        e?.message ?? e
+      );
+      if (intento < intentos) await esperar(5_000 * intento);
+    }
   }
+  console.warn("[radar-worker] La lista de grupos quedó sin actualizar — se reintenta en el próximo barrido o desde /radar-ia.");
+  return false;
 }
 
 // ── Aviso al ERP (debounce 2 s tras insertar mensajes) ─────────────────────
@@ -151,6 +222,28 @@ async function notificarErp(): Promise<void> {
 }
 
 // ── Procesamiento de un mensaje entrante ───────────────────────────────────
+
+/**
+ * El jid de QUIEN mandó el mensaje, o `null` si WhatsApp no lo entrega.
+ *
+ * Antes era `String(msg.key.participant ?? "")`, que ante un `participant` ausente escribía
+ * **cadena vacía** — el mismo valor para todo el mundo. El ERP agrupa las fotos de un reporte
+ * de recarga por remitente + grupo + ±10 min, así que ese comodín compartido fusionaba en una
+ * sola recarga las fotos de VARIOS celulares (pasó en producción: seis tableros de unidades
+ * distintas en una fila). Un remitente desconocido es `null` y no agrupa con nadie.
+ *
+ * Baileys no siempre pone el autor en el mismo sitio: `key.participant` es lo normal en un
+ * grupo, pero con la migración a LID aparece también en `key.participantPn` / `key.participantAlt`
+ * y algunos eventos lo traen en `msg.participant`. Se toma el primero que venga.
+ */
+function remitenteDe(msg: { key?: Record<string, unknown>; participant?: unknown }): string | null {
+  const key = msg?.key ?? {};
+  for (const c of [key.participant, key.participantPn, key.participantAlt, msg?.participant]) {
+    const s = typeof c === "string" ? c.trim() : "";
+    if (s) return s;
+  }
+  return null;
+}
 
 /** Extrae, sube media si corresponde e inserta la fila en radar_mensajes. Devuelve true si insertó. */
 async function procesarMensaje(msg: any): Promise<boolean> {
@@ -234,7 +327,7 @@ async function procesarMensaje(msg: any): Promise<boolean> {
     grupo_id: grupo.id,
     wa_group_id: jid,
     grupo_nombre: grupo.nombre,
-    remitente_wa: String(msg.key.participant ?? ""),
+    remitente_wa: remitenteDe(msg),
     remitente_nombre: msg.pushName ? String(msg.pushName) : null,
     tipo,
     texto,
@@ -260,8 +353,56 @@ function programarReconexion(ms: number): void {
   }, ms);
 }
 
+/**
+ * Jubila el socket vigente: sube la generación (sus eventos dejan de aplicarse,
+ * incluido el `creds.update` que si no volvería a escribir las credenciales que
+ * estamos por borrar) y cierra el WebSocket.
+ */
+function descartarSocket(): void {
+  generacion++;
+  try {
+    sock?.end?.(undefined);
+  } catch {
+    /* el socket puede ya estar cerrado */
+  }
+  sock = null;
+}
+
+/**
+ * Deja al worker pidiendo un QR, pase lo que pase: descarta el socket, BORRA las
+ * credenciales y reconecta. Es el ÚNICO camino posible cuando las credenciales ya
+ * no sirven (número bloqueado, desvinculado) o cuando se quiere vincular otro
+ * número desde el ERP, porque Baileys solo emite `qr` con auth/ vacío.
+ */
+async function forzarQrNuevo(detalle: string): Promise<void> {
+  if (cerrando) return;
+  motivoQrPendiente = detalle;
+  descartarSocket();
+  try {
+    await rm(config.authDir, { recursive: true, force: true });
+    console.log(`[radar-worker] Credenciales borradas (${config.authDir}) — se pedirá un QR nuevo.`);
+  } catch (e: any) {
+    // Sin poder borrar auth/ no hay QR posible: hay que verlo en los logs.
+    console.error(`[radar-worker] NO se pudo borrar ${config.authDir}:`, e?.message ?? e);
+  }
+  await actualizarEstado({
+    estado: "esperando_qr",
+    qr_data_url: null,
+    numero: null,
+    conectado_desde: null,
+    detalle,
+  });
+  intentosReconexion = 0;
+  reinicios515Seguidos = 0; // vinculación fresca: el 515 que sigue al QR debe reconectar rápido
+  programarReconexion(1_000);
+}
+
 async function conectar(): Promise<void> {
   if (cerrando) return;
+
+  const miGeneracion = ++generacion;
+  /** Este socket sigue siendo el bueno (nadie lo jubiló mientras se armaba). */
+  const vigente = () => !cerrando && miGeneracion === generacion;
 
   const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
 
@@ -273,7 +414,12 @@ async function conectar(): Promise<void> {
     console.warn("[radar-worker] No se pudo consultar la última versión de WhatsApp Web — usando la por defecto.");
   }
 
-  sock = makeWASocket({
+  // Entre el ++generacion y este punto hubo awaits: si mientras tanto alguien pidió
+  // un QR nuevo (relink) o se jubiló esta conexión, no se abre un socket zombi —
+  // el reintento ya quedó programado por quien la jubiló.
+  if (!vigente()) return;
+
+  const socket = makeWASocket({
     version,
     auth: state,
     logger,
@@ -281,11 +427,17 @@ async function conectar(): Promise<void> {
     syncFullHistory: false,
     browser: ["Windows", "Chrome", "125.0.6422.142"],
   });
+  sock = socket;
 
-  sock.ev.on("creds.update", saveCreds);
+  // Guardar credenciales SOLO si este socket sigue siendo el vigente: si no, un
+  // socket viejo volvería a crear auth/ justo después de que forzarQrNuevo lo borró.
+  socket.ev.on("creds.update", () => {
+    if (vigente()) void saveCreds();
+  });
 
-  sock.ev.on("connection.update", async (u: any) => {
+  socket.ev.on("connection.update", async (u: any) => {
     try {
+      if (!vigente()) return;
       const { connection, lastDisconnect, qr } = u ?? {};
 
       if (qr) {
@@ -295,7 +447,14 @@ async function conectar(): Promise<void> {
         intentosReconexion = 0;
         try {
           const dataUrl = await qrcode.toDataURL(qr);
-          await actualizarEstado({ estado: "esperando_qr", qr_data_url: dataUrl, numero: null, detalle: null });
+          // El motivo viaja CON el QR (no se limpia hasta conectar): si el número anterior
+          // fue bloqueado, quien va a escanear tiene que enterarse antes de usar el mismo.
+          await actualizarEstado({
+            estado: "esperando_qr",
+            qr_data_url: dataUrl,
+            numero: null,
+            detalle: motivoQrPendiente,
+          });
           const ascii = await qrcode.toString(qr, { type: "terminal", small: true });
           console.log("\n[radar-worker] Escanea este QR con el NÚMERO DEDICADO del Radar");
           console.log("(WhatsApp > Dispositivos vinculados > Vincular un dispositivo):\n");
@@ -309,7 +468,8 @@ async function conectar(): Promise<void> {
       if (connection === "open") {
         intentosReconexion = 0;
         reinicios515Seguidos = 0;
-        const numero: string | null = sock?.user?.id ? String(sock.user.id).split(":")[0] ?? null : null;
+        motivoQrPendiente = null; // ya hay número vinculado: el motivo del QR dejó de aplicar
+        const numero: string | null = socket?.user?.id ? String(socket.user.id).split(":")[0] ?? null : null;
         console.log(`[radar-worker] Conectado a WhatsApp como ${numero ?? "(número desconocido)"}.`);
         await actualizarEstado({
           estado: "conectado",
@@ -326,29 +486,17 @@ async function conectar(): Promise<void> {
       if (connection === "close") {
         if (cerrando) return;
         const codigo = aNumero((lastDisconnect?.error as any)?.output?.statusCode);
+        const sesionMuerta = CODIGOS_SESION_MUERTA[codigo];
 
-        if (codigo === DisconnectReason.loggedOut) {
-          // Sesión revocada desde el teléfono: borrar credenciales y pedir QR de nuevo.
-          // OJO: no tratar el 500 (badSession) igual — en Baileys 500 es el código por
-          // defecto de cualquier error no mapeado, no un diagnóstico de sesión corrupta;
-          // borrar auth/ ante un 500 destruiría la sesión por errores transitorios.
-          console.warn("[radar-worker] Sesión cerrada desde el teléfono — se pedirá un QR nuevo.");
-          try {
-            await rm(config.authDir, { recursive: true, force: true });
-          } catch (e: any) {
-            console.error(`[radar-worker] No se pudo borrar ${config.authDir}:`, e?.message ?? e);
-          }
-          await actualizarEstado({
-            estado: "esperando_qr",
-            qr_data_url: null,
-            numero: null,
-            conectado_desde: null,
-            detalle: "Sesión cerrada desde el teléfono — escanea el QR de nuevo",
-          });
-          intentosReconexion = 0;
-          reinicios515Seguidos = 0; // re-vinculación fresca: el 515 que sigue al nuevo QR debe reconectar rápido
-          programarReconexion(1_000);
-        } else if (codigo === DisconnectReason.restartRequired && reinicios515Seguidos < 3) {
+        if (sesionMuerta) {
+          // Credenciales inservibles (desvinculado / bloqueado / rechazado): borrarlas y
+          // pedir QR. Reintentar con ellas no reconecta NUNCA y encima no emite QR.
+          // OJO: el 500 (badSession) NO entra acá — en Baileys es el código por defecto de
+          // cualquier error no mapeado, así que borrar auth/ ante un 500 destruiría una
+          // sesión sana por un error transitorio.
+          console.warn(`[radar-worker] ${sesionMuerta} (código ${codigo}).`);
+          await forzarQrNuevo(sesionMuerta);
+        } else if (codigo === COD.reinicioRequerido && reinicios515Seguidos < 3) {
           // 515: WhatsApp SIEMPRE lo envía justo después de emparejar (escanear el QR),
           // pidiendo reiniciar el socket para completar la vinculación. Hay que reconectar
           // YA: si se aplica backoff, el emparejamiento caduca y el teléfono descarta la
@@ -362,7 +510,14 @@ async function conectar(): Promise<void> {
         } else {
           const espera = Math.min(60_000, 5_000 * 2 ** intentosReconexion);
           intentosReconexion++;
-          const detalle = `Conexión cerrada (código ${codigo || "desconocido"}) — reintentando en ${Math.round(espera / 1000)} s`;
+          // Corte de internet y "WhatsApp no quiere estas credenciales" se ven igual desde
+          // acá (428/408 secos, sin código que los distinga). Tras ~10 intentos seguidos ya
+          // no parece un corte: decirlo en el detalle para que en /radar-ia se sepa que la
+          // salida es el botón "Generar QR nuevo", en vez de esperar para siempre.
+          const insistente = intentosReconexion >= 10
+            ? " · lleva muchos intentos: si el número fue bloqueado, usa \"Generar QR nuevo\" y vincula otro"
+            : "";
+          const detalle = `Conexión cerrada (código ${codigo || "desconocido"}) — reintentando en ${Math.round(espera / 1000)} s${insistente}`;
           console.warn(`[radar-worker] ${detalle}`);
           await actualizarEstado({ estado: "desconectado", qr_data_url: null, detalle });
           programarReconexion(espera);
@@ -373,8 +528,9 @@ async function conectar(): Promise<void> {
     }
   });
 
-  sock.ev.on("messages.upsert", async (evento: any) => {
+  socket.ev.on("messages.upsert", async (evento: any) => {
     try {
+      if (!vigente()) return; // eco de un socket ya jubilado
       if (evento?.type !== "notify") return; // solo mensajes nuevos en vivo, no histórico
       let insertados = 0;
       for (const msg of evento.messages ?? []) {
@@ -419,25 +575,51 @@ function iniciarLatido(): void {
 }
 
 /**
- * Revisa cada pocos segundos si el ERP pidió un QR nuevo (botón "Generar QR nuevo"
- * en /radar-ia). Si sí, cierra la sesión actual de WhatsApp: eso dispara el mismo
- * evento "loggedOut" que ya maneja connection.update (limpia auth/ y reconecta
- * mostrando un QR fresco), sin necesidad de tocar el proceso a mano.
+ * Revisa cada pocos segundos qué pidió el ERP desde los botones de /radar-ia.
+ *
+ * **QR nuevo**: el logout() es solo cortesía (desvincular el dispositivo en el teléfono
+ * cuando la sesión todavía vive) y va con tope de tiempo: si el socket está caído —número
+ * bloqueado, WhatsApp rechazando las credenciales— logout() no responde nunca, y ESE es
+ * justo el caso en que más falta hace el QR. Antes todo el relink colgaba de que ese
+ * logout funcionara, así que el botón no hacía nada y no quedaba más salida que entrar al
+ * servidor a borrar auth/ a mano. Ahora el QR se fuerza igual.
+ *
+ * **Resincronizar grupos**: la lista de grupos solo se releía al conectar y cada 30 min.
+ * Si esa lectura fallaba (WhatsApp responde 408 con frecuencia justo después de vincular)
+ * no había forma de forzarla sin reiniciar el proceso.
  */
-function iniciarPollRelink(): void {
+function iniciarPollSolicitudes(): void {
   setInterval(async () => {
     try {
-      if (!(await debeRelinkear())) return;
-      console.log('[radar-worker] Se pidió un QR nuevo desde el ERP — cerrando la sesión actual...');
-      await limpiarSolicitudRelink(); // primero baja la bandera, para no repetir el logout
-      try {
-        await sock?.logout();
-      } catch (e: any) {
-        // El propio logout() cierra el socket; connection.update se encarga del resto.
-        console.warn("[radar-worker] Error al cerrar sesión para relink:", e?.message ?? e);
+      const solicitudes = await leerSolicitudes();
+
+      if (solicitudes.relink) {
+        console.log("[radar-worker] Se pidió un QR nuevo desde el ERP — cerrando la sesión actual...");
+        await limpiarSolicitud("solicitar_relink"); // primero baja la bandera, para no repetirlo en el próximo chequeo
+        if (sock) {
+          try {
+            await Promise.race([
+              sock.logout(),
+              new Promise((_, rechazar) =>
+                setTimeout(() => rechazar(new Error("logout sin respuesta en 5 s")), 5_000)
+              ),
+            ]);
+          } catch (e: any) {
+            console.warn("[radar-worker] No se pudo cerrar sesión limpiamente (se fuerza igual):", e?.message ?? e);
+          }
+        }
+        await forzarQrNuevo("QR nuevo pedido desde el ERP — escanea el código para vincular el número");
+        return; // la sesión se está rehaciendo: cualquier otra solicitud espera al próximo ciclo
+      }
+
+      if (solicitudes.syncGrupos) {
+        console.log("[radar-worker] Se pidió resincronizar la lista de grupos desde el ERP.");
+        await limpiarSolicitud("solicitar_sync_grupos");
+        await sincronizarListaGrupos();
+        await refrescarCacheGrupos();
       }
     } catch (e: any) {
-      console.warn("[radar-worker] Error revisando solicitud de relink:", e?.message ?? e);
+      console.warn("[radar-worker] Error revisando las solicitudes del ERP:", e?.message ?? e);
     }
   }, 5_000);
 }
@@ -485,7 +667,7 @@ async function main(): Promise<void> {
     console.log("[radar-worker] Aún no hay grupos activos — actívalos en el ERP: /radar-ia > Grupos.");
   }
   iniciarLatido();
-  iniciarPollRelink();
+  iniciarPollSolicitudes();
   await conectar();
 }
 

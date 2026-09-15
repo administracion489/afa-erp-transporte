@@ -42,6 +42,7 @@ const MODULOS = [
   "personal-administrativo",
   "proveedores",
   "ordenes-compra",
+  "pactos",
   "liquidaciones",
   "finanzas",
   "tesoreria",

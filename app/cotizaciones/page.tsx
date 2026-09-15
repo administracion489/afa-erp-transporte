@@ -6,16 +6,40 @@ import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, enc
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
 import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from "@/lib/coordenadas";
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
+import { empresaConDefectos } from "@/lib/empresa-perfil";
+
+/**
+ * Quién EMITE la cotización, resuelto por el escalón único del ERP.
+ *
+ * Este archivo llevaba los datos de AFA escritos a mano —nombre, RUC, teléfono, correo, web y
+ * domicilio— repetidos VEINTICINCO veces entre sus cuatro generadores de PDF. `empresa_perfil`
+ * es la fuente; `empresaConDefectos` rellena y, lo que falta, lo deja VACÍO para que el pie del
+ * documento omita la línea en vez de imprimir el dato de otra empresa.
+ *
+ * El alias es corto a propósito: el HTML de estos PDF va en una sola línea y
+ * `empresaConDefectos(empresa).telefono` repetido la vuelve ilegible.
+ */
+const EMP = empresaConDefectos;
+import { componentesCostoKm } from "@/lib/costos/costo-km-parametro";
+import {
+  NIVELES, NIVEL_CFG, nivelDeEquipamiento, equipamientoDeNivel, nivelDeFicha, fichasDelNivel,
+  planDeNivel, cotejarUnidadConNivel, etiquetaNivel, type NivelServicio,
+} from "@/lib/costos/nivel-servicio";
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
 type EstadoCot="borrador"|"pendiente"|"enviado"|"aprobado"|"rechazado";
 type ModoServ="eventual"|"fijo";
-type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
+// `pax_contratado` = asientos que el cliente contrata para este ítem. Es el ORIGEN del
+// "N PAX" que imprime la liquidación, y NO la capacidad del vehículo asignado: AFA
+// asigna por disponibilidad, así que una ruta pactada para 15 puede cubrirse con un bus
+// de 17 o de 20 y el formato tiene que seguir diciendo 15.
+// Vive dentro de items_json (jsonb), así que no necesitó migración.
+type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;pax_contratado?:number|null;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
 type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;};
-type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;};
+type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;cuentas_bancarias?:{banco:string;cuenta:string;cci:string}[]|null;};
 type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
 type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;};
 type Tarifa={id:number;origen:string;destino:string;tipo_vehiculo:string;equipamiento:string;tipo_servicio:string;modo:string;precio:number;moneda:string;confidencial:boolean;incluye_guia:boolean;incluye_peajes:boolean;incluye_alimentacion:boolean;notas:string|null;};
@@ -29,7 +53,7 @@ const SERVS_FIJO=[{id:"fijo_solo_ida",label:"→ Solo Ida",cat:"Ruta Simple"},{i
 const ESTADO_CFG:Record<EstadoCot,{label:string;bg:string;color:string}>={borrador:{label:"Borrador",bg:"#f3f4f6",color:"#6b7280"},pendiente:{label:"Pendiente",bg:"#fef9c3",color:"#854d0e"},enviado:{label:"Enviado",bg:"#e0f2fe",color:"#0369a1"},aprobado:{label:"Aprobado",bg:"#dcfce7",color:"#166534"},rechazado:{label:"Rechazado",bg:"#fee2e2",color:"#991b1b"}};
 const TRANSICIONES:Record<EstadoCot,EstadoCot[]>={borrador:["pendiente"],pendiente:["enviado"],enviado:["aprobado","rechazado"],aprobado:[],rechazado:["pendiente"]};
 const TIPOS_APROBACION=["Operación bancaria","Orden de compra","Orden de servicio","Correo de confirmación","Contrato firmado"];
-const ITEM_VACIO:ItemCot={descripcion:"",dias:1,cantidad:1,precio_unit:0,descuento_pct:0};
+const ITEM_VACIO:ItemCot={descripcion:"",dias:1,cantidad:1,precio_unit:0,descuento_pct:0,pax_contratado:null};
 const FORM0={cliente_id:"",origen:"",destino:"",km:"",costo_estimado:"",estado:"pendiente" as EstadoCot,numero_cotizacion:"",atencion:"",asunto:"",punto_retorno:"",fecha_servicio:"",fecha_retorno:"",hora_ida:"",hora_retorno:"",descuento_pct:"0",tipo_vehiculo:"",equipamiento:"full_equipo",vehiculo_flota_id:"",vehiculo_tercero_id:"",modo_servicio:"eventual" as ModoServ,tipo_servicio:"solo_ida",dias_servicio:"1",horas_servicio:"8",pernocte_costo:"0",precio_dia:"",incluye_igv:true,itinerario_texto:""};
 
 const fmtS=(n:number)=>`S/ ${n.toLocaleString("es-PE",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
@@ -46,14 +70,15 @@ function Campo({label,span,req,hint,children}:{label:string;span?:number;req?:bo
 }
 
 function calcCostoVeh(p:ParamCosto,pr:Record<string,number>,km:number,dias:number,peajes:number,pernocte:number,viaticos:number){
-  const pc1=pr[p.tipo_combustible_1]||0;
-  const combKm=(pc1/p.rendimiento_1)*p.pct_uso_1+(p.tipo_combustible_2&&p.rendimiento_2&&p.pct_uso_2?((pr[p.tipo_combustible_2]||0)/p.rendimiento_2)*p.pct_uso_2:0);
-  const ureaRate=p.usa_urea&&p.tipo_combustible_1==="Diésel"?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(pr["UREA"]||0):0;
-  const sub=((combKm+ureaRate)*km)+((p.n_neumaticos*p.costo_neumatico)/p.vida_neumatico_km)*km+p.mantenimiento_km*km+((p.valor_compra*(1-p.residual_pct))/(p.vida_util_anios*p.km_anio))*km+((p.seguro_anual+p.soat_anual+p.revision_semestral*2+p.permisos_anual+p.otros_fijos_mensual*12)/p.km_anio)*km;
+  // Los seis términos del S/km salen de lib/costos/costo-km-parametro.ts, que es donde vive
+  // ahora la fórmula. Lo que NO se toca es el AGRUPAMIENTO de esta suma: en coma flotante,
+  // reordenar los mismos términos puede mover el último decimal, y de aquí sale un precio.
+  const c=componentesCostoKm(p,pr);
+  const sub=((c.combustible+c.urea)*km)+c.neumaticos*km+c.mantenimiento*km+c.depreciacion*km+c.fijos*km;
   const total=(sub+sub*RESERVA)+p.conductor_dia*dias+peajes;
   const base=total+total*OVERHEAD+pernocte+viaticos;
   const pF=(m:number)=>base/(1-m);const fF=(m:number)=>pF(m)*(1+IGV);
-  return{baseCosto:base,totalMin15:fF(0.15),totalEst20:fF(0.20),totalAlto25:fF(0.25),sinIGV15:pF(0.15),sinIGV20:pF(0.20),sinIGV25:pF(0.25),precioPax20:fF(0.20)/(p.capacidad||1),diaEstIGV:fF(0.20),diaMinIGV:fF(0.15),mesEstIGV:fF(0.20)*26};
+  return{baseCosto:base,totalMin15:fF(0.15),totalEst20:fF(0.20),totalAlto25:fF(0.25),sinIGV15:pF(0.15),sinIGV20:pF(0.20),sinIGV25:pF(0.25),precioPax20:fF(0.20)/(p.capacidad||1),precioPax20Sin:pF(0.20)/(p.capacidad||1),diaEstIGV:fF(0.20),diaMinIGV:fF(0.15),mesEstIGV:fF(0.20)*26};
 }
 
 function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peajes,pernocte,viaticos,modoServ,tarifas,paramsDB,preciosDB,onAplicar}:{origen:string;destino:string;tipoVehId:string;tipoServ:string;equip:string;km:number;dias:number;peajes:number;pernocte:number;viaticos:number;modoServ:ModoServ;tarifas:Tarifa[];paramsDB:ParamCosto[];preciosDB:Record<string,number>;onAplicar:(sinIGV:number,fuente:string,costo?:number)=>void;}){
@@ -99,7 +124,7 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
             <p className="text-[9px] font-black text-blue-300 uppercase mb-1">🔧 Estándar 20%</p>
             {km>0&&costo?(<>
               <p className="font-black text-lg text-white font-mono">{fmtS(dispEst)}</p>
-              <p className="text-[9px] text-blue-300/70">{esFijo?`~${fmtS(dispEst*26)}/mes`:`${fmtS(costo.precioPax20/1.18)}/pax`}</p>
+              <p className="text-[9px] text-blue-300/70">{esFijo?`~${fmtS(dispEst*26)}/mes`:`${fmtS(costo.precioPax20Sin)}/pax`}</p>
               <button onClick={()=>onAplicar(dispEst,"cotizador",costo.baseCosto)} className="mt-2 w-full py-1 rounded-lg text-[10px] font-black text-white bg-blue-500 hover:bg-blue-400">✓ Usar estándar</button>
             </>):<p className="text-white/25 text-xs mt-1">Ingresa km</p>}
           </div>
@@ -462,9 +487,9 @@ function generarPDFModerno(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCo
   const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
   const cp=cfg?.color_primario||"#1a1a2e"; const cs=cfg?.color_secundario||"#2f8ee9";
   const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
-  const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C.";
-  const empRuc=empresa?.ruc||"20602117091"; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
-  const empWeb=empresa?.web||"www.afatoursperu.com";
+  const empNombre=EMP(empresa).nombre;
+  const empRuc=EMP(empresa).ruc; const empTel=EMP(empresa).telefono; const empEmail=EMP(empresa).email;
+  const empWeb=EMP(empresa).web;
   const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;">${i+1}. ${it.descripcion}</td><td style="padding:10px 12px;text-align:center;border-bottom:1px solid #f0f0f0;">${it.dias}d × ${it.cantidad}</td><td style="padding:10px 12px;text-align:right;border-bottom:1px solid #f0f0f0;font-weight:700;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}).join("");
   const inc=(cfg?.condiciones_incluye||consid.incluye).map(i=>`<li style="margin:4px 0;font-size:10px;color:#333;">${i}</li>`).join("");
   const noInc=(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li style="margin:4px 0;font-size:10px;color:#333;">${i}</li>`).join("");
@@ -511,7 +536,7 @@ function generarPDFTuristico(cot:Cotizacion,cliente:Cliente|undefined,items:Item
   const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
   const cp=cfg?.color_primario||"#b45309"; const cs=cfg?.color_secundario||"#d97706";
   const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
-  const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C."; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
+  const empNombre=EMP(empresa).nombre; const empTel=EMP(empresa).telefono; const empEmail=EMP(empresa).email;
   const filasItems=items.map((it)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:8px 12px;border-bottom:1px solid #fde68a;">${it.descripcion}<br/><span style="font-size:9px;color:#92400e;">${it.dias} día(s) × ${it.cantidad} unidad(es)</span></td><td style="padding:8px 12px;text-align:right;border-bottom:1px solid #fde68a;font-weight:800;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}).join("");
   const paradas=cot.paradas_json||[];const paradasHtml=paradas.length>0?`<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px;margin-bottom:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 10px;">🗺️ Itinerario de paradas</p>${paradas.map((p,i)=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;"><div style="width:24px;height:24px;border-radius:50%;background:${cp};color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;flex-shrink:0;">${i+1}</div><div><p style="font-weight:700;font-size:11px;margin:0;">${p.nombre||p.tipo}</p>${p.hora?`<p style="font-size:10px;color:#92400e;margin:1px 0 0;">🕐 ${p.hora}</p>`:""}</div></div>`).join("")}</div>`:""  ;
   const win=window.open("","_blank");if(!win)return;
@@ -544,7 +569,7 @@ function generarPDFTuristico(cot:Cotizacion,cliente:Cliente|undefined,items:Item
     </div>
     ${cfg?.mensaje_cierre?`<p style="text-align:center;color:${cp};font-weight:700;font-size:12px;margin:16px 0;padding:12px;background:#fff7ed;border-radius:10px;">${cfg.mensaje_cierre}</p>`:""}
   ${buildAnexoHtml(cot,nomCl,nCot,cp,cs)}
-  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,empresa?.web||"www.afatoursperu.com")}
+  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,EMP(empresa).web)}
   <script>window.onload=()=>window.print();</script></body></html>`);
   win.document.close();
 }
@@ -556,7 +581,7 @@ function generarPDFEjecutivo(cot:Cotizacion,cliente:Cliente|undefined,items:Item
   const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
   const cp=cfg?.color_primario||"#1a1a1a"; const acento=cfg?.color_acento||"#C8A24B";
   const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
-  const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C."; const empRuc=empresa?.ruc||"20602117091"; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
+  const empNombre=EMP(empresa).nombre; const empRuc=EMP(empresa).ruc; const empTel=EMP(empresa).telefono; const empEmail=EMP(empresa).email;
   const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;font-size:10.5px;">${it.descripcion}</td><td style="padding:10px 14px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:10px;color:#6b7280;">${it.dias}d × ${it.cantidad}</td><td style="padding:10px 14px;text-align:right;border-bottom:1px solid #f0f0f0;font-weight:800;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td><td style="padding:10px 14px;text-align:center;border-bottom:1px solid #f0f0f0;color:#6b7280;font-style:italic;font-size:9.5px;">USD ${(tf/3.7).toFixed(2)}</td></tr>`;}).join("");
   const win=window.open("","_blank");if(!win)return;
   win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Service Quotation N° ${nCot}</title>
@@ -605,18 +630,69 @@ function generarPDFEjecutivo(cot:Cotizacion,cliente:Cliente|undefined,items:Item
   </div>
   ${cfg?.mensaje_cierre?`<p style="text-align:center;color:#6b7280;font-style:italic;font-size:11px;margin-bottom:20px;border-top:1px solid #e5e7eb;padding-top:14px;">${cfg.mensaje_cierre}</p>`:""}
   ${buildAnexoHtml(cot,nomCl,nCot,cp,acento)}
-  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,empresa?.web||"www.afatoursperu.com")}
+  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,EMP(empresa).web)}
   <script>window.onload=()=>window.print();</script></body></html>`);
   win.document.close();
 }
 
 // v2: muestra FECHA IDA + FECHA RETORNO separados cuando fecha_retorno está cargado
-function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculos:VehiculoFlota[],repr="JENNY ELYZABETH URBINA AFATA",consid:ConsidCot=DEFAULT_CONSID,plantilla="corporativo",cfg:CotPlantillaConfig|null=null,empresa:EmpresaPerfilPDF|null=null){
+/**
+ * EL BLOQUE DE CUENTAS BANCARIAS DEL PDF, ARMADO DESDE LA CONFIGURACIÓN.
+ *
+ * Estaba ESCRITO A MANO en el HTML con las cuentas reales de una empresa concreta — número de
+ * cuenta y CCI, en BCP soles y dólares. Es el peor de todos los literales que tenía este
+ * archivo: los demás imprimían un nombre equivocado; este manda el dinero al destinatario
+ * equivocado. Un comprador cotiza, su cliente lee «nuestras cuentas bancarias» y transfiere…
+ * a la cuenta de otro.
+ *
+ * Y los campos YA EXISTÍAN: `cot_plantilla_config` tiene `banco_1..3_{nombre,cuenta,cci}` y
+ * `mostrar_cuentas_bancarias`, con su formulario en /cotizaciones/plantillas — que además ya
+ * decía «ve a Configuración para editar las cuentas bancarias». La pantalla prometía algo que
+ * el PDF no cumplía.
+ *
+ * SIN CUENTAS CONFIGURADAS NO SE IMPRIME EL BLOQUE. Ni un encabezado vacío ni un ejemplo: un
+ * «Nuestras cuentas bancarias» sin nada debajo se lee como un documento a medio hacer, y
+ * cualquier número de relleno es plata mandada a donde no es.
+ */
+function buildCuentasHtml(cfg: CotPlantillaConfig | null, empresa?: EmpresaPerfilPDF | null): string {
+  if (cfg && cfg.mostrar_cuentas_bancarias === false) return "";
+
+  // `usar_bancos_propios` significa que ESTA plantilla cobra en cuentas distintas de las de la
+  // empresa. Apagado —el caso normal— manda la ficha de la empresa, que es donde vive la cuenta
+  // a la que te pagan: con tres plantillas, el mismo número en tres sitios es tres sitios que
+  // corregir el día que cambies de banco.
+  if (!cfg?.usar_bancos_propios) {
+    const deEmpresa = EMP(empresa).cuentas;
+    if (deEmpresa.length) return pintarCuentas(deEmpresa);
+    // Sin cuentas en la empresa se mira igual la plantilla: una base a la que le falte
+    // `empresa-02` no puede perder el bloque que ya venía imprimiendo.
+  }
+
+  const cuentas = [1, 2, 3]
+    .map(n => ({
+      banco:  String((cfg as any)?.[`banco_${n}_nombre`] ?? "").trim(),
+      cuenta: String((cfg as any)?.[`banco_${n}_cuenta`] ?? "").trim(),
+      cci:    String((cfg as any)?.[`banco_${n}_cci`]    ?? "").trim(),
+    }))
+    // Basta con el nombre del banco y un número: una fila con solo el rótulo no dice dónde pagar.
+    .filter(c => c.banco && (c.cuenta || c.cci));
+  return pintarCuentas(cuentas);
+}
+
+function pintarCuentas(cuentas: { banco: string; cuenta: string; cci: string }[]): string {
+  if (!cuentas.length) return "";
+  return `<div class="cuentas"><h3>Nuestras cuentas bancarias</h3><div class="cuentas-grid">${
+    cuentas.map(c => `<div class="cuenta-box"><div class="banco">${c.banco}</div>${
+      c.cuenta ? `<p>Cta: ${c.cuenta}</p>` : ""}${c.cci ? `<p>CCI: ${c.cci}</p>` : ""}</div>`).join("")
+  }</div></div>`;
+}
+
+function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculos:VehiculoFlota[],repr="",consid:ConsidCot=DEFAULT_CONSID,plantilla="corporativo",cfg:CotPlantillaConfig|null=null,empresa:EmpresaPerfilPDF|null=null){
   if(plantilla==="moderno_fotos"){generarPDFModerno(cot,cliente,items,vehiculos,repr,consid,cfg,empresa);return;}
   if(plantilla==="turistico"){generarPDFTuristico(cot,cliente,items,vehiculos,repr,consid,cfg,empresa);return;}
   if(plantilla==="ejecutivo"){generarPDFEjecutivo(cot,cliente,items,vehiculos,repr,consid,cfg,empresa);return;}
   // ── plantilla corporativo (original intacta, solo empresa_perfil si existe) ──
-  const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C."; const empRuc=empresa?.ruc||"20602117091"; const empEmail=empresa?.email||"transporte@afatoursperu.com"; const empTel=empresa?.telefono||"(01) 3453707 – 966 707 225"; const empDir=empresa?.direccion||"Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima";
+  const empNombre=EMP(empresa).nombre; const empRuc=EMP(empresa).ruc; const empEmail=EMP(empresa).email; const empTel=EMP(empresa).telefono; const empDir=EMP(empresa).direccion;
   const conIGV=cot.incluye_igv!==false;
   const{subtotal,igv,total}=calcItems(items,conIGV);const desc=items.reduce((s,it)=>s+it.dias*it.cantidad*it.precio_unit*(it.descuento_pct/100),0);
   const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
@@ -631,7 +707,7 @@ function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],veh
   const totalesCorpHtml=(()=>{let h="<table class=\"totales\">";if(conIGV){h+=`<tr><td class="label">SUBTOTAL</td><td class="valor">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;if(desc>0)h+=`<tr><td class="label">DESCUENTO</td><td class="valor" style="color:#dc2626;">- S/ ${desc.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;h+=`<tr><td class="label">IGV (18%)</td><td class="valor">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}h+=`<tr class="sep"><td class="label total-neto">TOTAL NETO</td><td class="valor total-neto">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;if(!conIGV)h+="<tr><td colspan=\"2\" style=\"text-align:right;font-size:9px;color:#6b7280;padding:2px 10px 0;\">No incluye IGV</td></tr>";h+="</table>";return h;})();
   const saltoIncl=items.length>=3||vehiculos.length>=3?'<div style="page-break-before:always;height:70px;margin:0;"></div>':"";
   const win=window.open("","_blank");if(!win)return;
-  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title><style>${css}</style></head><body>${buildHeaderPDFHtml(empresa?.logo_url||LOGO_DEFAULT,"#0b315f",`COTIZACIÓN N° ${nCot} - ${anio}`,`Fecha: ${fechaDoc} · Válida 30 días`)}<div class="grid2"><div class="box"><div class="box-title">Datos del cliente</div><div class="box-row"><b>CLIENTE:</b> ${nomCl}</div><div class="box-row"><b>${cliente?.ruc?"RUC":"DNI"}:</b> ${cliente?.ruc||cliente?.dni||"—"}</div><div class="box-row"><b>DIRECCIÓN:</b> ${cliente?.direccion||"—"}</div><div class="box-row"><b>CELULAR:</b> ${cliente?.telefono||"—"}</div><div class="box-row"><b>ATENCIÓN:</b> ${cot.atencion||cliente?.operativo_nombre||"—"}</div></div><div class="box"><div class="box-title">${empNombre}</div><div class="box-row"><b>RUC:</b> ${empRuc}</div><div class="box-row"><b>REPR:</b> ${repr}</div><div class="box-row"><b>EMAIL:</b> ${empEmail}</div><div class="box-row"><b>TELF:</b> ${empTel}</div></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Detalle del servicio</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;"><div class="box-row"><b>ORIGEN:</b> ${cot.origen||"—"}</div><div class="box-row"><b>DESTINO:</b> ${cot.destino||"—"}</div><div class="box-row"><b>RETORNO:</b> ${cot.punto_retorno||cot.origen||"—"}</div></div>${cot.asunto?`<div class="box-row" style="margin-top:4px;"><b>ASUNTO:</b> ${cot.asunto}</div>`:""}${cot.fecha_retorno?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA IDA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORA IDA:</b> <b>${cot.hora_ida||"_____"}</b></div><div class="box-row"><b>FECHA RETORNO:</b> ${new Date(cot.fecha_retorno+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase()}</div><div class="box-row"><b>HORA RETORNO:</b> <b>${cot.hora_retorno||"_____"}</b></div></div>`:`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORARIO:</b> Salida: <b>${cot.hora_ida||"_____"}</b> | Retorno: <b>${cot.hora_retorno||"_____"}</b></div></div>`}${notaFijo}</div>${buildCronogramaMultidiaPDF(cot,"#0b315f")}<table><thead><tr><th style="width:40px;">ITEM</th><th style="text-align:left;">DESCRIPCIÓN</th><th style="width:45px;">DÍAS</th><th style="width:55px;">CANT.</th><th style="width:110px;">P. UNIT S/ sin IGV</th><th style="width:55px;">% DSCTO.</th><th style="width:110px;">TOTAL S/</th></tr></thead><tbody>${filasItems}<tr><td colspan="7" style="border:1px solid #ccc;padding:0;vertical-align:top;">${totalesCorpHtml}</td></tr></tbody></table><div class="cuentas"><h3>Nuestras cuentas bancarias</h3><div class="cuentas-grid"><div class="cuenta-box"><div class="banco">BCP — Soles</div><p>Cta: 191-2644342-0-24</p><p>CCI: 00219100264434202450</p></div><div class="cuenta-box"><div class="banco">BCP — Dólares</div><p>Cta: 191-7394169-1-83</p><p>CCI: 00219100739416918351</p></div></div></div>${buildAnexoHtml(cot,nomCl,nCot,"#0b315f","#1d4ed8")}<div class="page-break"></div><h2 style="font-size:14px;font-weight:900;color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:6px;margin-bottom:16px;padding-top:82px;">Descripción de la unidad y condiciones</h2>${vehiculos.length?`<div class="box" style="margin-bottom:10px;"><div class="box-title">Características de la unidad${vehiculos.length>1?" · "+vehiculos.length+" vehículos":""}</div><div class="box-row">${vehsSec}</div></div>`:""}`+saltoIncl+`<div class="anexo"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;"><div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">✅ Servicio incluye</h3><ul>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div><div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">❌ No incluye</h3><ul>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div></div><h3 style="color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:3px;">📋 Consideraciones generales</h3><ul>${(cfg?.condiciones_generales||consid.generales).map(i=>`<li>${i}</li>`).join("")}</ul></div>${buildFooterPDFHtml("#0b315f",empDir,empTel,empEmail,empresa?.web||"www.afatoursperu.com")}<script>window.onload=()=>window.print();</script></body></html>`);
+  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title><style>${css}</style></head><body>${buildHeaderPDFHtml(empresa?.logo_url||LOGO_DEFAULT,"#0b315f",`COTIZACIÓN N° ${nCot} - ${anio}`,`Fecha: ${fechaDoc} · Válida 30 días`)}<div class="grid2"><div class="box"><div class="box-title">Datos del cliente</div><div class="box-row"><b>CLIENTE:</b> ${nomCl}</div><div class="box-row"><b>${cliente?.ruc?"RUC":"DNI"}:</b> ${cliente?.ruc||cliente?.dni||"—"}</div><div class="box-row"><b>DIRECCIÓN:</b> ${cliente?.direccion||"—"}</div><div class="box-row"><b>CELULAR:</b> ${cliente?.telefono||"—"}</div><div class="box-row"><b>ATENCIÓN:</b> ${cot.atencion||cliente?.operativo_nombre||"—"}</div></div><div class="box"><div class="box-title">${empNombre}</div><div class="box-row"><b>RUC:</b> ${empRuc}</div>${repr?`<div class="box-row"><b>REPRESENTANTE:</b> ${repr}</div>`:""}<div class="box-row"><b>EMAIL:</b> ${empEmail}</div><div class="box-row"><b>TELF:</b> ${empTel}</div></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Detalle del servicio</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;"><div class="box-row"><b>ORIGEN:</b> ${cot.origen||"—"}</div><div class="box-row"><b>DESTINO:</b> ${cot.destino||"—"}</div><div class="box-row"><b>RETORNO:</b> ${cot.punto_retorno||cot.origen||"—"}</div></div>${cot.asunto?`<div class="box-row" style="margin-top:4px;"><b>ASUNTO:</b> ${cot.asunto}</div>`:""}${cot.fecha_retorno?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA IDA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORA IDA:</b> <b>${cot.hora_ida||"_____"}</b></div><div class="box-row"><b>FECHA RETORNO:</b> ${new Date(cot.fecha_retorno+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase()}</div><div class="box-row"><b>HORA RETORNO:</b> <b>${cot.hora_retorno||"_____"}</b></div></div>`:`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORARIO:</b> Salida: <b>${cot.hora_ida||"_____"}</b> | Retorno: <b>${cot.hora_retorno||"_____"}</b></div></div>`}${notaFijo}</div>${buildCronogramaMultidiaPDF(cot,"#0b315f")}<table><thead><tr><th style="width:40px;">ITEM</th><th style="text-align:left;">DESCRIPCIÓN</th><th style="width:45px;">DÍAS</th><th style="width:55px;">CANT.</th><th style="width:110px;">P. UNIT S/ sin IGV</th><th style="width:55px;">% DSCTO.</th><th style="width:110px;">TOTAL S/</th></tr></thead><tbody>${filasItems}<tr><td colspan="7" style="border:1px solid #ccc;padding:0;vertical-align:top;">${totalesCorpHtml}</td></tr></tbody></table>${buildCuentasHtml(cfg,empresa)}${buildAnexoHtml(cot,nomCl,nCot,"#0b315f","#1d4ed8")}<div class="page-break"></div><h2 style="font-size:14px;font-weight:900;color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:6px;margin-bottom:16px;padding-top:82px;">Descripción de la unidad y condiciones</h2>${vehiculos.length?`<div class="box" style="margin-bottom:10px;"><div class="box-title">Características de la unidad${vehiculos.length>1?" · "+vehiculos.length+" vehículos":""}</div><div class="box-row">${vehsSec}</div></div>`:""}`+saltoIncl+`<div class="anexo"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;"><div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">✅ Servicio incluye</h3><ul>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div><div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">❌ No incluye</h3><ul>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div></div><h3 style="color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:3px;">📋 Consideraciones generales</h3><ul>${(cfg?.condiciones_generales||consid.generales).map(i=>`<li>${i}</li>`).join("")}</ul></div>${buildFooterPDFHtml("#0b315f",empDir,empTel,empEmail,EMP(empresa).web)}<script>window.onload=()=>window.print();</script></body></html>`);
   win.document.close();
 }
 
@@ -809,7 +885,7 @@ export default function CotizacionesPage(){
   const [draftRecuperado,setDraftRecuperado]=useState(false);
   const [cfgDefault,setCfgDefault]=useState<CotPlantillaConfig|null>(null);
   const [form,setForm]=useState(FORM0);const [items,setItems]=useState<ItemCot[]>([{...ITEM_VACIO}]);const [modalAprob,setModalAprob]=useState<Cotizacion|null>(null);const [guardarTar,setGuardarTar]=useState(true);const [paradas,setParadas]=useState<ParadaTP[]>([]);const [paradasRetorno,setParadasRetorno]=useState<ParadaTP[]>([]);const [consid,setConsid]=useState<ConsidCot>(DEFAULT_CONSID);const [panelId,setPanelId]=useState<number|null>(null);
-  const [diasCond,setDiasCond]=useState(1);const [peajesF,setPeajesF]=useState(0);const [pernocteF,setPernocteF]=useState(0);const [viaticosF,setViaticosF]=useState(0);const [reprNombre,setReprNombre]=useState("JENNY ELYZABETH URBINA AFATA");
+  const [diasCond,setDiasCond]=useState(1);const [peajesF,setPeajesF]=useState(0);const [pernocteF,setPernocteF]=useState(0);const [viaticosF,setViaticosF]=useState(0);const [reprNombre,setReprNombre]=useState("");
   const [modalPlantilla,setModalPlantilla]=useState<Cotizacion|null>(null);const [plantillaElegida,setPlantillaElegida]=useState("corporativo");
   const [modalEnvio,setModalEnvio]=useState<Cotizacion|null>(null);
   const [rolUsuario,setRolUsuario]=useState<string>("operador");
@@ -872,7 +948,35 @@ export default function CotizacionesPage(){
 
   const f=(k:keyof typeof FORM0)=>(e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>)=>setForm(p=>({...p,[k]:e.target.value}));
   useEffect(()=>{
-    const cargarNombre=async(session:any)=>{if(!session?.user)return;const m=session.user.user_metadata;const fullName=(m?.full_name||m?.name||"").trim();if(fullName){setReprNombre(extraerNombreApellido(fullName));}};
+    /**
+     * EL REPRESENTANTE ES EL OPERADOR CON LA SESIÓN ABIERTA, no un nombre fijo.
+     *
+     * Antes el campo nacía con el nombre de una persona escrito en el código y la cotización
+     * salía a su nombre la firmara quien la firmara. Y no es el representante LEGAL de la
+     * empresa: es quien atiende ese documento, por eso el PDF lo rotula «REPRESENTANTE».
+     *
+     * Se busca por los dos caminos porque `user_metadata` suele venir vacío en Supabase: ahí
+     * está el nombre solo si alguien lo puso al crear la cuenta. El que siempre existe es
+     * `usuarios.nombre`, que es la ficha del operador dentro del ERP — la misma que ya
+     * consultaban al guardar. Si no hay ninguno, el campo se queda VACÍO y el PDF omite la
+     * línea: un documento sin representante es mejor que uno a nombre de otra persona.
+     */
+    const cargarNombre=async(session:any)=>{
+      if(!session?.user)return;
+      const m=session.user.user_metadata;
+      const fullName=(m?.full_name||m?.name||"").trim();
+      if(fullName){setReprNombre(extraerNombreApellido(fullName));return;}
+      try{
+        const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("id",session.user.id).maybeSingle();
+        const n=String((uRow as any)?.nombre??"").trim();
+        if(n){setReprNombre(extraerNombreApellido(n));return;}
+        if(session.user.email){
+          const{data:porCorreo}=await supabase.from("usuarios").select("nombre").eq("email",session.user.email).maybeSingle();
+          const n2=String((porCorreo as any)?.nombre??"").trim();
+          if(n2)setReprNombre(extraerNombreApellido(n2));
+        }
+      }catch(e){/* best-effort: sin nombre, el PDF omite la línea */}
+    };
     const{data:{subscription}}=supabase.auth.onAuthStateChange(async(_event,session)=>{await cargarNombre(session);});
     supabase.auth.getSession().then(({data:{session}})=>{cargarNombre(session);});
     return()=>subscription.unsubscribe();
@@ -937,7 +1041,7 @@ export default function CotizacionesPage(){
     if(skipDescRef.current){skipDescRef.current=false;return;}
     const servLbl=form.modo_servicio==="fijo"?"SERVICIO DE TRANSPORTE DE PERSONAL":"SERVICIO DE TRANSPORTE TURÍSTICO";
     const tipoNom=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||"";
-    const equipLbl=form.equipamiento==="full_equipo"?"FULL EQUIPO":form.equipamiento==="basico"?"BASICO":"";
+    const equipLbl=etiquetaNivel(form.equipamiento);   // PREMIUM / ESTÁNDAR, la misma palabra que la pantalla
     const autoDesc=tipoNom?`${servLbl} - ${tipoNom}${equipLbl?" "+equipLbl:""}`:servLbl;
     setItems(prev=>{const n=[...prev];if(n[0])n[0]={...n[0],descripcion:autoDesc};return n;});
   },[form.modo_servicio,form.tipo_vehiculo,form.equipamiento,mostrarForm]);
@@ -970,7 +1074,38 @@ export default function CotizacionesPage(){
     });
   },[form.origen,form.destino,origenPlace,destinoPlace,mostrarForm]);
 
-  const gruposVeh=useMemo(()=>{const m:Record<string,ParamCosto[]>={};paramsDB.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});return m;},[paramsDB]);
+  // ── NIVEL DE SERVICIO ───────────────────────────────────────────────────────
+  // El nivel se DERIVA de `form.equipamiento`, que es lo que se guarda: un estado propio al lado
+  // sería un segundo sitio donde vive la misma decisión, que es el bug que esto viene a cerrar.
+  const nivel=nivelDeEquipamiento(form.equipamiento);
+  const [avisoNivel,setAvisoNivel]=useState("");
+
+  /** El selector de «Vehículo de tarifa» solo ofrece las fichas del nivel elegido. */
+  const fichasNivel=useMemo(()=>fichasDelNivel(paramsDB,nivel),[paramsDB,nivel]);
+  const gruposVeh=useMemo(()=>{const m:Record<string,ParamCosto[]>={};fichasNivel.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});return m;},[fichasNivel]);
+
+  /** Cambiar de nivel arrastra la ficha a su gemela; `planDeNivel` declara el motivo si no puede. */
+  const cambiarNivel=(n:NivelServicio)=>{
+    const plan=planDeNivel(form.tipo_vehiculo,n,paramsDB);
+    setForm(p=>({...p,equipamiento:equipamientoDeNivel(n),
+      ...(plan.codigo==="cambia"||plan.codigo==="sin_gemela"||plan.codigo==="nivel_vacio"?{tipo_vehiculo:plan.clave||""}:{})}));
+    setAvisoNivel(plan.codigo==="sin_gemela"||plan.codigo==="nivel_vacio"?plan.detalle:"");
+  };
+
+  /** Elegir una ficha declara su nivel: nunca queda un nivel que contradiga a la unidad de tarifa. */
+  const elegirFicha=(clave:string)=>{
+    setForm(p=>({...p,tipo_vehiculo:clave,equipamiento:equipamientoDeNivel(nivelDeFicha(clave))}));
+    setAvisoNivel("");
+  };
+
+  /**
+   * La PLACA contra el nivel. Solo se juzga la flota propia: `vehiculos_tercero` no tiene columna
+   * `equipamiento`, así que de 86 unidades no hay dato y afirmar ahí sería inventar.
+   */
+  const cotejoUnidad=useMemo(()=>{
+    const propia=form.vehiculo_flota_id?flota.find(v=>v.id===Number(form.vehiculo_flota_id)):null;
+    return cotejarUnidadConNivel(propia?.equipamiento,nivel,!!propia);
+  },[form.vehiculo_flota_id,flota,nivel]);
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
@@ -1094,12 +1229,34 @@ export default function CotizacionesPage(){
     const costoCalc=vehParam?calcCostoVeh(vehParam,preciosDB,kmNum>0?kmNum:1,diasCond,peajesF,pernocteF,viaticosF):null;
     const precioDiaNum=esFijo?Number(form.precio_dia)||costoCalc?.diaEstIGV:null;
     if(guardarTar&&form.tipo_vehiculo&&form.tipo_servicio&&form.equipamiento&&subtotal>0){const{error:tarErr}=await supabase.from("tarifario").upsert({origen:form.origen.trim().toUpperCase(),destino:form.destino.trim().toUpperCase(),tipo_vehiculo:form.tipo_vehiculo,equipamiento:form.equipamiento,tipo_servicio:form.tipo_servicio,modo:form.modo_servicio,precio:esFijo?(precioDiaNum||subtotal)/1.18:subtotal,moneda:"PEN",confidencial:["full_day","multi_dia"].includes(form.tipo_servicio),incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Cotización ${form.numero_cotizacion||""}`.trim(),activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});if(tarErr)alert("Error al guardar en tarifario: "+tarErr.message);}
-    // Detectar servicios futuros no ejecutados para ofrecer propagación (solo en fijos editados)
+    // Detectar servicios futuros no ejecutados para ofrecer propagación de las direcciones.
+    //
+    // TRES COSAS DEJABAN SERVICIOS FUERA, y las tres en silencio — el operador veía "se
+    // propagó" y una parte de sus servicios seguía con la dirección vieja:
+    //
+    // 1 · SOLO CORRÍA EN LOS FIJOS (`esFijo &&`). Una cotización eventual o multi-día también
+    //     genera varios servicios desde la misma ficha, y ninguno recibía las paradas nuevas.
+    //     Lo que decide si hay que propagar es tener paradas y servicios futuros, no el modo.
+    // 2 · POSTGREST CORTA EN 1000 FILAS. Un contrato fijo largo pasa de ese techo, así que el
+    //     select plano alcanzaba a los primeros 1000 y callaba el resto.
+    // 3 · `.neq("estado", …)` EXCLUÍA LAS FILAS CON `estado` NULL. En SQL `estado <> 'x'` es
+    //     NULL cuando el campo es NULL, y PostgREST descarta lo que no evalúa a true — así que
+    //     los servicios sin estado escrito, que son servicios VIVOS y los que más falta hace
+    //     tocar, quedaban fuera. El filtro se hace en JS, donde "no es ninguno de estos tres"
+    //     significa lo que uno espera que signifique.
     let reservasParaPropagar:{id:number;direccion_servicio:string|null}[]=[];
-    if(esFijo&&cotIdGuardado&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
+    if(cotIdGuardado&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
       const todayPeru=new Date(Date.now()-5*60*60*1000).toISOString().split("T")[0];
-      const{data:afect}=await supabase.from("reservas").select("id,direccion_servicio").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).neq("estado","en_curso").neq("estado","finalizada").neq("estado","cancelada");
-      reservasParaPropagar=afect||[];
+      const afect:{id:number;direccion_servicio:string|null;estado:string|null}[]=[];
+      for(let d=0;d<40000;d+=1000){
+        const{data,error:eLee}=await supabase.from("reservas").select("id,direccion_servicio,estado").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).range(d,d+999);
+        if(eLee)break;
+        afect.push(...(data||[]));
+        if(!data||data.length<1000)break;
+      }
+      reservasParaPropagar=afect
+        .filter(r=>!["en_curso","finalizada","cancelada"].includes(r.estado||""))
+        .map(r=>({id:r.id,direccion_servicio:r.direccion_servicio}));
     }
     // ── Sincronizar el CLIENTE a los servicios ya generados desde esta cotización ──────────
     // cliente_id en una reserva es identidad HEREDADA de la cotización (se fija al generar el
@@ -1147,9 +1304,21 @@ export default function CotizacionesPage(){
     const todosIds=reservas.map(r=>r.id);
     const BATCH=100;
 
-    // 1 query: qué reservas ya tienen paradas escaneadas
-    const{data:conActividad}=await supabase.from("paradas").select("reserva_id").in("reserva_id",todosIds).eq("estado","completada");
-    const idsConActividad=new Set((conActividad||[]).map((p:any)=>p.reserva_id));
+    // Qué reservas ya tienen paradas escaneadas. Por LOTES y con paginado, no en una consulta:
+    // con un contrato largo `todosIds` pasa de mil, y un solo `.in()` arma una URL que revienta
+    // y encima devuelve a lo más 1000 filas. Quedarse corto aquí es lo peligroso: una reserva
+    // cuya actividad no se ve entra a `reservasAfectar` y se le pisan las paradas de un servicio
+    // que YA se estaba prestando.
+    const idsConActividad=new Set<number>();
+    for(let i=0;i<todosIds.length;i+=BATCH){
+      const lote=todosIds.slice(i,i+BATCH);
+      for(let d=0;d<20000;d+=1000){
+        const{data,error:eAct}=await supabase.from("paradas").select("reserva_id").in("reserva_id",lote).eq("estado","completada").range(d,d+999);
+        if(eAct)break;
+        (data||[]).forEach((p:any)=>idsConActividad.add(p.reserva_id));
+        if(!data||data.length<1000)break;
+      }
+    }
     const reservasAfectar=reservas.filter(r=>!idsConActividad.has(r.id));
     const saltadas=reservas.length-reservasAfectar.length;
 
@@ -1257,11 +1426,11 @@ export default function CotizacionesPage(){
     const vehiculos=[...vehsMap.values()];
     let nombreFinal=(cot as any).creado_por||"";
     if(!nombreFinal){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreFinal=extraerNombreApellido(uRow.nombre);}}catch(e){}}
-    const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario,web").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
+    const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
     if(plantilla!=="corporativo")await supabase.from("cotizaciones").update({plantilla_pdf:plantilla}).eq("id",cot.id);
     setModalPlantilla(null);
     const considFinal=editandoId===cot.id?consid:(cot.consideraciones_json||consid);
-    generarPDF(cot,cl,its,vehiculos,nombreFinal||"JENNY ELYZABETH URBINA AFATA",considFinal,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
+    generarPDF(cot,cl,its,vehiculos,nombreFinal,considFinal,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
   };
 
   // Un vehículo de tercero visto como uno de flota, para los documentos. El texto de
@@ -1349,7 +1518,7 @@ export default function CotizacionesPage(){
         if(urlRet)qrRet=await QRCode.toDataURL(urlRet,{margin:1,width:240});
       }catch{}
 
-      const{data:empData}=await supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario,web").eq("id",1).maybeSingle();
+      const{data:empData}=await supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle();
 
       const emp=empData as EmpresaPerfilPDF|null;
       const cl=clientes.find(c=>c.id===cot.cliente_id);
@@ -1373,7 +1542,7 @@ export default function CotizacionesPage(){
         puntosIda:pIda,puntosRet:pRet,metrica,mapaIda,mapaRet,qrIda,qrRet,urlIda,urlRet,
         vehiculos:vehs,
         unidadDetalle:vehs.map(v=>[v.placa,v.marca,v.modelo,v.capacidad_pasajeros?`${v.capacidad_pasajeros} pax`:""].filter(Boolean).join(" · ")).join("   |   "),
-        empresa:{nombre:emp?.nombre||"AFA Tours Peru S.A.C.",email:emp?.email||"transporte@afatoursperu.com",telefono:emp?.telefono||"(01) 3453707 – 966 707 225",web:emp?.web||"www.afatoursperu.com",direccion:emp?.direccion||"Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima",logo:emp?.logo_url||LOGO_DEFAULT},
+        empresa:{nombre:EMP(emp).nombre,email:EMP(emp).email,telefono:EMP(emp).telefono,web:EMP(emp).web,direccion:EMP(emp).direccion,logo:emp?.logo_url||LOGO_DEFAULT},
         aviso,
       });
     }catch(e:any){
@@ -1509,18 +1678,25 @@ export default function CotizacionesPage(){
             </div>
 
             {/* ── TIPO DE MOVILIDAD ── */}
+            {/* NIVEL DE SERVICIO · una sola palabra para lo que antes se decidía dos veces.
+                Se llamaba «Tipo de movilidad · Full Equipo / Básico» y abajo, en «Vehículo de
+                tarifa», seguían saliendo las fichas `· Estándar (>10 años)`: dos nombres para la
+                misma decisión comercial, y ninguno acotaba al otro. Lo que se guarda sigue siendo
+                `equipamiento` — ver lib/costos/nivel-servicio.ts. */}
             <div className="rounded-2xl border-2 p-4" style={{borderColor:"#e9d5ff",background:"#faf5ff"}}>
-              <p className="text-[10px] font-bold uppercase tracking-widest mb-3" style={{color:"#7c3aed"}}>Tipo de movilidad</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest mb-3" style={{color:"#7c3aed"}}>Nivel de servicio</p>
               <div className="flex gap-2">
-                {[{val:"full_equipo",label:"⭐ Full Equipo",sub:"AC · TV · USB · GPS",color:"#7c3aed",bg:"#f5f3ff"},{val:"basico",label:"📦 Básico",sub:"Estándar — cumple ley",color:"#4b5563",bg:"#f3f4f6"}].map(e=>{
-                  const act=form.equipamiento===e.val;
+                {NIVELES.map(n=>{
+                  const cfg=NIVEL_CFG[n];const act=nivel===n;
                   return(
-                    <button key={e.val} onClick={()=>setForm(p=>({...p,equipamiento:e.val}))} className="flex-1 flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 transition-all" style={{background:act?e.bg:"white",borderColor:act?e.color:"#e5e7eb",color:act?e.color:"#9ca3af"}}>
-                      <div><p className="font-bold text-xs">{e.label}</p><p className="text-[10px] opacity-70">{e.sub}</p></div>
+                    <button key={n} onClick={()=>cambiarNivel(n)} className="flex-1 flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 transition-all" style={{background:act?cfg.bg:"white",borderColor:act?cfg.color:"#e5e7eb",color:act?cfg.color:"#9ca3af"}}>
+                      <div><p className="font-bold text-xs">{cfg.icono} {cfg.label}</p><p className="text-[10px] opacity-70">{cfg.sub}</p></div>
                     </button>
                   );
                 })}
               </div>
+              {avisoNivel&&<p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">⚠ {avisoNivel}</p>}
+              {cotejoUnidad.codigo==="discrepa"&&<p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">⚠ {cotejoUnidad.detalle}</p>}
             </div>
 
             {/* ── VEHÍCULOS ── */}
@@ -1528,7 +1704,7 @@ export default function CotizacionesPage(){
               <button className="w-full flex items-center justify-between px-4 py-3 transition-colors hover:bg-gray-50" style={{background:"#f9fafb"}} onClick={()=>setVehExpandido(v=>!v)}>
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-black text-gray-700">🚌 Vehículo de tarifa</span>
-                  <span className="text-[10px] text-gray-400 font-normal">({paramsDB.length} disponibles)</span>
+                  <span className="text-[10px] text-gray-400 font-normal">({fichasNivel.length} de nivel {NIVEL_CFG[nivel].label})</span>
                   {form.tipo_vehiculo&&<span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{background:"#eef3f8",color:"#0b315f"}}>{paramsDB.find(v=>v.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo}</span>}
                   {!form.tipo_vehiculo&&<span className="text-[10px] text-amber-600 font-semibold">Sin asignar</span>}
                 </div>
@@ -1541,7 +1717,7 @@ export default function CotizacionesPage(){
                       <p className="text-[9px] font-black uppercase tracking-wider mb-1" style={{color:gc.color}}>{grupo}</p>
                       <div className="grid grid-cols-3 md:grid-cols-5 gap-1.5">
                         {vehs.map(v=>{const act=form.tipo_vehiculo===v.tipo_vehiculo;return(
-                          <button key={v.tipo_vehiculo} onClick={()=>{setForm(p=>({...p,tipo_vehiculo:v.tipo_vehiculo}));setVehExpandido(false);}} className="flex flex-col items-center px-1 py-2 rounded-xl border-2 transition-all text-center" style={{background:act?gc.bg:"white",borderColor:act?gc.color:"#e5e7eb",color:act?gc.color:"#9ca3af"}}>
+                          <button key={v.tipo_vehiculo} onClick={()=>{elegirFicha(v.tipo_vehiculo);setVehExpandido(false);}} className="flex flex-col items-center px-1 py-2 rounded-xl border-2 transition-all text-center" style={{background:act?gc.bg:"white",borderColor:act?gc.color:"#e5e7eb",color:act?gc.color:"#9ca3af"}}>
                             <span className="text-base">{v.icono||"🚌"}</span>
                             <span className="text-[8px] font-bold leading-tight">{v.nombre}</span>
                             {v.usa_urea&&<span className="text-[7px] text-cyan-600 font-bold">🧪</span>}
@@ -1712,7 +1888,7 @@ export default function CotizacionesPage(){
                 <div className="col-span-1"/>
               </div>
               <div className="space-y-2">
-                {items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return(<div key={i} className="grid grid-cols-12 gap-2 items-start bg-gray-50 rounded-xl p-2"><div className="col-span-12 md:col-span-4"><textarea rows={1} className={iCls("resize-y min-h-[40px] leading-snug")} placeholder="Descripción del servicio" value={it.descripcion} onChange={e=>{updItem(i,"descripcion",e.target.value);e.target.style.height="auto";e.target.style.height=e.target.scrollHeight+"px";}} style={{overflow:"hidden"}}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Días</label><input type="number" min="1" className={iCls("text-center")} value={it.dias} onChange={e=>updItem(i,"dias",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Cant.</label><input type="number" min="1" className={iCls("text-center")} value={it.cantidad} onChange={e=>updItem(i,"cantidad",e.target.value)}/></div><div className="col-span-6 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">P. Unit.</label><input type="number" min="0" className={iCls("text-right")} placeholder="0.00" value={it.precio_unit||""} onChange={e=>updItem(i,"precio_unit",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Dto.%</label><input type="number" min="0" max="100" className={iCls("text-center")} placeholder="0" value={it.descuento_pct||""} onChange={e=>updItem(i,"descuento_pct",e.target.value)}/></div><div className="col-span-9 md:col-span-2 text-right font-bold text-sm text-gray-800 pr-2 flex md:block items-center justify-end gap-1"><span className="md:hidden text-[9px] font-normal text-gray-400">Total:</span>{fmtS(tf)}</div><div className="col-span-3 md:col-span-1 flex justify-end">{items.length>1&&<button onClick={()=>delItem(i)} className="w-7 h-7 rounded-lg text-red-400 hover:bg-red-50 font-bold text-sm">✕</button>}</div>{(flota.length>0||flotaTercero.length>0)&&<div className="col-span-12 mt-1"><select className="w-full border border-gray-100 rounded-lg px-2 py-1.5 text-xs text-gray-500 bg-white focus:outline-none focus:border-[#0b315f]" value={it.vehiculo_flota_id?`f_${it.vehiculo_flota_id}`:it.vehiculo_tercero_id?`t_${it.vehiculo_tercero_id}`:""} onChange={e=>{const val=e.target.value;setItems(prev=>prev.map((x,xi)=>xi!==i?x:val.startsWith("f_")?{...x,vehiculo_flota_id:Number(val.slice(2)),vehiculo_tercero_id:null}:val.startsWith("t_")?{...x,vehiculo_flota_id:null,vehiculo_tercero_id:Number(val.slice(2))}:{...x,vehiculo_flota_id:null,vehiculo_tercero_id:null}));}}><option value="">🚌 Asignar vehículo a este ítem (opcional)</option>{flota.length>0&&<optgroup label="Flota propia">{flota.map(v=><option key={v.id} value={`f_${v.id}`}>{v.placa}{v.categoria?` · ${v.categoria}`:""}{v.marca?` ${v.marca}`:""}{v.capacidad_pasajeros?` (${v.capacidad_pasajeros}p)`:""}</option>)}</optgroup>}{flotaTercero.length>0&&<optgroup label="Tercerizado">{flotaTercero.map(v=><option key={v.id} value={`t_${v.id}`}>{v.placa}{v.categoria?` · ${v.categoria}`:""}{v.empresa_nombre?` — ${v.empresa_nombre}`:""}</option>)}</optgroup>}</select></div>}</div>);})}
+                {items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return(<div key={i} className="grid grid-cols-12 gap-2 items-start bg-gray-50 rounded-xl p-2"><div className="col-span-12 md:col-span-3"><textarea rows={1} className={iCls("resize-y min-h-[40px] leading-snug")} placeholder="Descripción del servicio" value={it.descripcion} onChange={e=>{updItem(i,"descripcion",e.target.value);e.target.style.height="auto";e.target.style.height=e.target.scrollHeight+"px";}} style={{overflow:"hidden"}}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Días</label><input type="number" min="1" className={iCls("text-center")} value={it.dias} onChange={e=>updItem(i,"dias",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Cant.</label><input type="number" min="1" className={iCls("text-center")} value={it.cantidad} onChange={e=>updItem(i,"cantidad",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Pax</label><input type="number" min="1" className={iCls("text-center")} placeholder="pax" title="Asientos CONTRATADOS para este ítem. Es lo que imprime la liquidación — no la capacidad del bus que se asigne el día del servicio." value={it.pax_contratado||""} onChange={e=>updItem(i,"pax_contratado",e.target.value)}/></div><div className="col-span-6 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">P. Unit.</label><input type="number" min="0" className={iCls("text-right")} placeholder="0.00" value={it.precio_unit||""} onChange={e=>updItem(i,"precio_unit",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Dto.%</label><input type="number" min="0" max="100" className={iCls("text-center")} placeholder="0" value={it.descuento_pct||""} onChange={e=>updItem(i,"descuento_pct",e.target.value)}/></div><div className="col-span-9 md:col-span-2 text-right font-bold text-sm text-gray-800 pr-2 flex md:block items-center justify-end gap-1"><span className="md:hidden text-[9px] font-normal text-gray-400">Total:</span>{fmtS(tf)}</div><div className="col-span-3 md:col-span-1 flex justify-end">{items.length>1&&<button onClick={()=>delItem(i)} className="w-7 h-7 rounded-lg text-red-400 hover:bg-red-50 font-bold text-sm">✕</button>}</div>{(flota.length>0||flotaTercero.length>0)&&<div className="col-span-12 mt-1"><select className="w-full border border-gray-100 rounded-lg px-2 py-1.5 text-xs text-gray-500 bg-white focus:outline-none focus:border-[#0b315f]" value={it.vehiculo_flota_id?`f_${it.vehiculo_flota_id}`:it.vehiculo_tercero_id?`t_${it.vehiculo_tercero_id}`:""} onChange={e=>{const val=e.target.value;setItems(prev=>prev.map((x,xi)=>xi!==i?x:val.startsWith("f_")?{...x,vehiculo_flota_id:Number(val.slice(2)),vehiculo_tercero_id:null}:val.startsWith("t_")?{...x,vehiculo_flota_id:null,vehiculo_tercero_id:Number(val.slice(2))}:{...x,vehiculo_flota_id:null,vehiculo_tercero_id:null}));}}><option value="">🚌 Asignar vehículo a este ítem (opcional)</option>{flota.length>0&&<optgroup label="Flota propia">{flota.map(v=><option key={v.id} value={`f_${v.id}`}>{v.placa}{v.categoria?` · ${v.categoria}`:""}{v.marca?` ${v.marca}`:""}{v.capacidad_pasajeros?` (${v.capacidad_pasajeros}p)`:""}</option>)}</optgroup>}{flotaTercero.length>0&&<optgroup label="Tercerizado">{flotaTercero.map(v=><option key={v.id} value={`t_${v.id}`}>{v.placa}{v.categoria?` · ${v.categoria}`:""}{v.empresa_nombre?` — ${v.empresa_nombre}`:""}</option>)}</optgroup>}</select></div>}</div>);})}
               </div>
               <div className="flex justify-end mt-4">
                 <div className="w-full md:w-72 space-y-1.5 bg-gray-50 rounded-xl p-4">

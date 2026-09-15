@@ -154,6 +154,29 @@ const PLANTILLA_CONDUCTOR = "recordatorio_conductor";
 // Botones: los mismos 2 dinámicos (origen/destino de la IDA).
 const PLANTILLA_CONDUCTOR_COMPLETO = "recordatorio_conductor_completo";
 
+// Asignación AGRUPADA: varios servicios asignados al mismo conductor en la misma
+// pasada del motor de alertas viajan en UN solo mensaje, en vez de uno por reserva
+// (un conductor con 5 servicios recibía 5 WhatsApp seguidos). Sólo aplica a la
+// asignación: cambio, cancelación y desasignación siguen siendo uno por reserva,
+// porque cada uno describe un hecho distinto sobre un servicio concreto.
+// Variables del cuerpo, EN ESTE ORDEN:
+//   {{1}} nombre del conductor
+//   {{2}} cantidad de servicios ("4")
+//   {{3}} fecha ("viernes 28 de agosto") o "varias fechas" si no coinciden
+//   {{4}} listado de servicios en UNA línea, numerado con emoji y separado por " · "
+//   {{5}} teléfono de contingencia (el marcado es_contingencia en alerta_destinatarios;
+//         el texto fijo de la plantilla lo presenta como "Coordinador de Operaciones",
+//         así que esa ficha del directorio debe ser esa persona)
+// SIN botones: los de mapa son por servicio y aquí hay varios; el detalle de cada uno
+// está en la app del conductor.
+//
+// OJO AL FORMATO DE {{4}}: Meta RECHAZA parámetros de plantilla que contengan saltos
+// de línea, tabulaciones o más de 4 espacios seguidos. Por eso el listado va en una
+// sola línea con separadores y pasa por unaLinea() — no se puede maquetar con "\n".
+// Los saltos de línea que sí se ven en el mensaje son los del texto FIJO de la
+// plantilla, alrededor de {{4}}.
+const PLANTILLA_ASIGNACION_MULTIPLE = "conductor_asignacion_multiple";
+
 // Plantilla de LLEGADA (utility). Se dispara desde el motor de proximidad
 // (lib/proximidad.ts) cuando el bus llega a un paradero — reutiliza esa misma
 // detección (radio adaptativo + velocidad + dedupe), NO tiene lógica propia de
@@ -731,6 +754,122 @@ export async function notificarReserva(
 }
 
 // ─── AVISO AL CONDUCTOR ────────────────────────────────────────────────────────
+
+/**
+ * Aplana un texto para que Meta lo acepte como parámetro de plantilla: sin saltos de
+ * línea ni tabulaciones, y sin rachas de más de 4 espacios. Sin esto, la API devuelve
+ * error y el aviso NO sale.
+ */
+function unaLinea(s: string): string {
+  // Se conservan hasta 4 espacios seguidos A PROPÓSITO: son el único recurso que queda
+  // para separar visualmente los servicios, ya que el salto de línea está prohibido.
+  // Sólo se recortan las rachas de 5+, que son las que Meta rechaza.
+  return s.replace(/[\r\n\t]+/g, " ").replace(/ {5,}/g, "    ").trim();
+}
+
+/** Separación entre servicios: 4 espacios, el máximo que Meta tolera. */
+const SEP_SERVICIOS = "    ";
+
+/** Numeración del listado de servicios. Sin emoji a partir del 11 (no existen). */
+const NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
+
+/**
+ * UN solo aviso de asignación al conductor cubriendo VARIOS servicios.
+ *
+ * Por qué existe: el motor de alertas detecta las asignaciones reserva por reserva, así
+ * que a un conductor al que se le programan 5 servicios de una sentada le llegaban 5
+ * WhatsApp seguidos. Aquí se agrupan en un mensaje con la lista.
+ *
+ * Alcance deliberado: SOLO la asignación. Cambio, cancelación y desasignación siguen
+ * yendo una por reserva — cada una informa un hecho distinto sobre un servicio concreto
+ * y agruparlas escondería el que importa.
+ *
+ * Se registra UNA fila en `notificaciones_enviadas` (anclada a la primera reserva),
+ * porque un mensaje salió, no N: loguear N mentiría en la auditoría y volvería a llenar
+ * la línea de tiempo del CRM. El "¿se avisó de la reserva X?" lo responde
+ * `alerta_estado.conductor_avisado`, que el motor graba por reserva igual que antes.
+ */
+export async function notificarConductorAsignacionAgrupada(args: {
+  reservaIds: number[];
+  conductor: { id: number; nombre?: string | null; telefono?: string | null; email?: string | null };
+  tabla: "conductores" | "conductores_tercero";
+  canales: CanalesConductor;
+}): Promise<{ estado: ResultadoCanal; detalle?: string }> {
+  const { reservaIds, conductor, tabla, canales } = args;
+  if (reservaIds.length === 0) return { estado: "sin_canal", detalle: "sin reservas" };
+
+  type ReservaLista = {
+    id: number; fecha_servicio: string | null; hora_servicio: string | null;
+    origen: string | null; destino: string | null;
+  };
+  type ParadaLista = { reserva_id: number; nombre: string | null; orden: number | null };
+
+  const { data } = await supabaseAdmin
+    .from("reservas")
+    .select("id, fecha_servicio, hora_servicio, origen, destino")
+    .in("id", reservaIds);
+  const reservas = (data ?? []) as ReservaLista[];
+  if (reservas.length === 0) {
+    return { estado: "sin_canal", detalle: "reservas no encontradas" };
+  }
+
+  // Origen/destino: la reserva manda; si viene vacío se cae al primer/último paradero.
+  // Una sola consulta para todas las reservas — esto corre dentro del tick.
+  const { data: pData } = await supabaseAdmin
+    .from("paradas")
+    .select("reserva_id, nombre, orden")
+    .in("reserva_id", reservas.map((r) => r.id))
+    .order("orden");
+  const porReserva = new Map<number, ParadaLista[]>();
+  for (const p of (pData ?? []) as ParadaLista[]) {
+    const arr = porReserva.get(p.reserva_id) ?? [];
+    arr.push(p);
+    porReserva.set(p.reserva_id, arr);
+  }
+
+  const ordenadas = [...reservas].sort((a, b) =>
+    (a.fecha_servicio ?? "").localeCompare(b.fecha_servicio ?? "") ||
+    (a.hora_servicio ?? "").localeCompare(b.hora_servicio ?? ""));
+
+  const items = ordenadas.map((r, i) => {
+    const ps = porReserva.get(r.id) ?? [];
+    const origen = r.origen || ps[0]?.nombre || "Por confirmar";
+    const ultima = ps[ps.length - 1];
+    const destino = r.destino || (ultima && ultima !== ps[0] ? ultima.nombre : null) || "Por confirmar";
+    // Numerado con emoji: al ir todo en una línea (ver unaLinea), el número es lo que
+    // deja ver de un golpe cuántos servicios son y dónde empieza cada uno. Pasado el
+    // 10 no hay emoji de teclado, así que se cae a "11." — nunca queda un hueco.
+    const marca = NUM_EMOJI[i] ?? `${i + 1}.`;
+    return `${marca} ${r.hora_servicio?.slice(0, 5) ?? "-"} ${origen} → ${destino}`;
+  });
+
+  const fechas = new Set(ordenadas.map((r) => r.fecha_servicio).filter(Boolean) as string[]);
+  const fechaTexto = fechas.size === 1 ? formatFecha([...fechas][0]) : "varias fechas";
+
+  const telConting = await telefonoContingencia();
+  const titulo = `${ordenadas.length} servicios asignados`;
+
+  const r = await enviarAConductor({
+    conductor,
+    tabla,
+    plantilla: PLANTILLA_ASIGNACION_MULTIPLE,
+    parametros: [
+      nombreCorto(conductor.nombre ?? ""),
+      String(ordenadas.length),
+      fechaTexto,
+      // Cada item se limpia POR SEPARADO y se unen después: si se limpiara la cadena ya
+      // unida, la propia regla de "máximo 4 espacios" se comería el separador.
+      items.map(unaLinea).join(SEP_SERVICIOS),
+      telConting,
+    ],
+    canales,
+    titulo,
+    pushTexto: `${ordenadas.length} servicios para el ${fechaTexto}`,
+    reservaId: ordenadas[0].id,
+    trigger: "asignacion",
+  });
+  return r;
+}
 
 /**
  * Notifica al CONDUCTOR asignado a una reserva por WhatsApp (2do número). Por defecto

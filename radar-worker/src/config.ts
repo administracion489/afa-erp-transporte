@@ -34,6 +34,9 @@ export const config = {
   workerSecret: process.env.RADAR_WORKER_SECRET!.trim(),
   /** Carpeta donde Baileys persiste la sesión de WhatsApp (escanear QR una sola vez). */
   authDir: process.env.AUTH_DIR?.trim() || "./auth",
-  /** Versión del worker (se reporta a radar_estado.version_worker). */
-  version: "1.0.0",
+  /** Versión del worker (se reporta a radar_estado.version_worker; /radar-ia la muestra
+   *  para saber si el servidor ya tiene el código nuevo o quedó en una versión vieja). */
+  // 1.3.0 — el remitente se guarda como null cuando WhatsApp no lo entrega, nunca "" (un
+  // comodín compartido fusionaba las fotos de varios celulares en una sola recarga).
+  version: "1.3.0",
 };

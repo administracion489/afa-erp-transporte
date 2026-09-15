@@ -7,7 +7,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
-import { aceptarLectura } from "@/lib/odometro";
+import { aceptarLectura, registrarLectura } from "@/lib/odometro";
+import { revisarKmTecleado } from "@/lib/odometro-seleccion";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { normalizarConfigRadar } from "@/lib/radar/config";
 import {
@@ -24,12 +25,29 @@ import {
   type RadarOportunidad,
   type SeveridadAlerta,
 } from "@/lib/radar/tipos";
+import { COMBUSTIBLES, TIPOS_PARA_ELEGIR, configCombustible, unidadDeCarga } from "@/lib/combustible-tipos";
+import { fotosDeLectura, type FotoLeida } from "@/lib/radar/fotos-lectura";
+import { proponerTanqueLleno } from "@/lib/radar/tanque-lleno";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
 function hoyISO(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * ¿La versión que reportó el worker es anterior a la mínima? Sin dato devuelve `false`: no se
+ * acusa de estar desactualizado a un servidor que todavía no ha reportado su versión.
+ */
+function versionMenorQue(version: string | null | undefined, minimo: number[]): boolean {
+  const partes = String(version ?? "").trim().split(".").map((p) => Number.parseInt(p, 10));
+  if (!partes.length || partes.some((n) => !Number.isFinite(n))) return false;
+  for (let i = 0; i < minimo.length; i++) {
+    const suya = partes[i] ?? 0;
+    if (suya !== minimo[i]) return suya < minimo[i];
+  }
+  return false;
 }
 
 function fechaLocalDe(iso: string): string {
@@ -106,10 +124,43 @@ const ANOMALIA_LABEL: Record<string, string> = {
   precio_fuera_de_rango:  "Precio fuera de rango",
   km_menor_al_actual:     "KM menor al actual",
   consumo_excesivo:       "Consumo excesivo",
+  rendimiento_implausible: "Falta registrar una carga",
   recarga_madrugada:      "Recarga de madrugada",
   monto_inconsistente:    "Monto inconsistente",
   galones_coinciden_km:   "Cantidad = kilometraje",
+  // Camino de visión multi-foto (lib/radar/acciones.ts) — sin etiqueta salía el código crudo.
+  marca_kit_como_grifo:   "Marca de kit como grifo",
+  tasa_como_cantidad:     "Tasa como cantidad",
+  trip_como_odometro:     "Trip como odómetro",
+  discrepancia_maquina_vs_nota: "Surtidor ≠ nota",
+  discrepancia_km_tablero_vs_nota: "KM tablero ≠ nota",
+  observacion_lectura:    "Observación de lectura",
+  voucher_no_leido:       "Voucher ilegible",
+  multiples_recargas_en_cluster: "Varias recargas juntas",
+  // Identidad de la nota (lib/radar/identidad-voucher.ts)
+  cliente_como_grifo:     "Cliente puesto como grifo",
+  ruc_del_cliente:        "RUC del cliente",
+  // Cuadre aritmético del voucher (lib/radar/coherencia-voucher.ts)
+  lectura_corregida:      "Lectura corregida",
+  dato_derivado:          "Dato calculado",
+  cuadre_ambiguo:         "No cuadra (ambiguo)",
+  cantidad_no_coincide_texto: "Cantidad ≠ transcripción",
+  cantidad_precio_invertidos: "Cantidad y precio invertidos",
+  // Qué combustible se compró (lib/radar/tipo-voucher.ts)
+  tipo_corregido_por_producto:  "Tipo corregido por el producto",
+  tipo_no_coincide_con_producto: "Tipo ≠ producto del voucher",
+  // ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts)
+  carga_parcial_probable: "Carga parcial (aguja)",
+  tipo_no_coincide_con_precio:  "Tipo ≠ precio pagado",
 };
+
+/**
+ * Una corrección del cuadre no es un problema: es el número YA arreglado esperando que alguien
+ * lo confirme contra la foto. Pintarla del mismo rojo que "Posible duplicado" enseña a
+ * ignorarla, que es justo lo contrario de lo que se necesita.
+ */
+const ANOMALIA_ES_ARREGLO = (codigo: string) =>
+  codigo === "lectura_corregida" || codigo === "dato_derivado" || codigo === "tipo_corregido_por_producto";
 
 const TABS = [
   { id: "feed",          label: "Feed" },
@@ -124,7 +175,11 @@ type TabId = (typeof TABS)[number]["id"];
 
 type VehiculoLite = { id: number; placa: string; categoria: string | null; estado: string | null };
 
-type VehiculoGuiaOdometro = { tipo: "propio" | "tercero"; id: number; placa: string; categoria: string | null; guia_odometro: string | null };
+// `kilometraje_actual` es el km VIGENTE de la unidad (derivado de lecturas_odometro). Viaja
+// hasta la pantalla porque el revisor de una recarga tiene que ver contra qué número compara
+// el odómetro que leyó la IA — un 239.980 sobre una unidad que va en 23.980 solo se nota si
+// los dos están a la vista.
+type VehiculoGuiaOdometro = { tipo: "propio" | "tercero"; id: number; placa: string; categoria: string | null; guia_odometro: string | null; kilometraje_actual: number | null };
 
 // Lectura de odómetro que el Radar registró en lecturas_odometro (ref_origen='radar_ia').
 type RadarLecturaOdometro = {
@@ -610,9 +665,22 @@ type EdicionComb = {
   vehiculo: string;   // fleet-encoded: "propio:12" | "tercero:5" | ""
   fecha: string;      // YYYY-MM-DD
   grifo: string;
+  tipoCombustible: string; // clave del catálogo de lib/combustible-tipos.ts
   cantidad: string;   // galones o litros (según esLitros)
   precio: string;     // precio unitario (por galón/litro)
   monto: string;      // monto total
+  /**
+   * Odómetro leído del tablero. Se escribe en `combustible.kilometraje` Y pasa por
+   * `registrarLectura` (la misma puerta que /combustible y que el auto-registro del Radar):
+   * de ese número dependen el km vigente de la unidad, el vencimiento de su mantenimiento y
+   * el rendimiento km/gal de todos sus tramos. Vacío es un dato válido — "sin odómetro".
+   */
+  kilometraje: string;
+  /**
+   * ¿Quedó lleno el tanque? Tri-estado como la columna: `""` = nadie lo tocó (manda la
+   * propuesta de la aguja, y si no la hay, la política). `"si"`/`"no"` = lo afirmó el revisor.
+   */
+  tanqueLleno: "" | "si" | "no";
 };
 
 export type OverrideComb = {
@@ -620,10 +688,20 @@ export type OverrideComb = {
   vehiculoId: number;
   fecha: string | null;
   grifo: string | null;
+  /** Tipo de combustible confirmado por el revisor: es lo que se registra. */
+  tipoCombustible: string;
   cantidad: number | null;
   esLitros: boolean;
   precio: number | null;
   monto: number | null;
+  /** Odómetro confirmado por el revisor. `null` = sin dato (no se registra ninguna lectura). */
+  kilometraje: number | null;
+  /**
+   * `combustible.tanque_lleno` y su fuente. `null` = nadie lo afirmó y la columna se queda en
+   * null, que ANCLA por la política de la empresa — el comportamiento de siempre.
+   */
+  tanqueLleno: boolean | null;
+  tanqueFuente: "operador" | "ia_aguja" | null;
 };
 
 function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar }: {
@@ -656,12 +734,11 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
   };
 
   // Fotos que la IA procesó: las guardadas en la fila, o (filas viejas) la del mensaje origen.
-  const fotosDe = (c: RadarCombustible): { url: string; nombre: string | null }[] => {
-    const propias = (c.fotos ?? []).filter((f) => f?.url).map((f) => ({ url: f.url, nombre: f.nombre ?? null }));
-    if (propias.length) return propias;
-    const m = c.mensaje_id ? mensajesPorId[c.mensaje_id] : null;
-    return m?.media_url ? [{ url: m.media_url, nombre: m.media_nombre ?? null }] : [];
-  };
+  // La cascada vive en lib/radar/fotos-lectura.ts porque /combustible hace la misma pregunta
+  // para poder CORREGIR una carga contra el papel; dos copias se desincronizan en la primera
+  // fila vieja, que es justo la que se audita.
+  const fotosDe = (c: RadarCombustible): FotoLeida[] =>
+    fotosDeLectura(c, c.mensaje_id ? mensajesPorId[c.mensaje_id] : null);
 
   // Estado de edición de una fila (perezoso: se crea al expandir con lo que dejó la IA).
   const edicionDe = (c: RadarCombustible): EdicionComb => {
@@ -672,9 +749,17 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
       vehiculo: u ? `${u.tipo}:${u.id}` : "",
       fecha: c.fecha ?? "",
       grifo: c.grifo ?? "",
+      // Vacío cuando la IA no lo leyó: antes se registraba TODO como diésel en silencio.
+      tipoCombustible: c.tipo_combustible ?? "",
       cantidad: esLitros ? (c.litros != null ? String(c.litros) : "") : (c.galones != null ? String(c.galones) : ""),
       precio: (esLitros ? c.precio_litro : c.precio_galon) != null ? String(esLitros ? c.precio_litro : c.precio_galon) : "",
       monto: c.monto_total != null ? String(c.monto_total) : "",
+      // El 0 que dejan las filas viejas se muestra VACÍO: cero kilómetros no es una lectura, es
+      // la ausencia de una (lib/rendimiento.ts trata 0 y null como lo mismo), y pre-llenarlo con
+      // un cero invitaría a registrarlo como si fuera el odómetro del tablero.
+      kilometraje: c.kilometraje != null && c.kilometraje > 0 ? String(c.kilometraje) : "",
+      // Vacío = no lo ha tocado nadie. El default visible lo pone la aguja (ver `propTanque`).
+      tanqueLleno: "",
     };
   };
   const setCampo = (c: RadarCombustible, campo: keyof EdicionComb, valor: string) =>
@@ -686,7 +771,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
         <table className="w-full text-sm">
           <thead>
             <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-              {["Fecha", "Unidad", "Grifo", "Cantidad", "Precio", "Monto", "Anomalías", "Estado"].map((h) => (
+              {["Fecha", "Unidad", "Grifo", "Tipo", "Cantidad", "Precio", "Monto", "Anomalías", "Estado"].map((h) => (
                 <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -699,7 +784,10 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const unidad = unidadDe(c);
               const placaMatch = unidad?.placa ?? null;
               const esTercero = unidad?.tipo === "tercero";
-              const cantidad = c.galones != null ? `${c.galones} gal` : c.litros != null ? `${c.litros} lt` : "—";
+              // La unidad la pone el PRODUCTO: un "9.4 gal" sobre una carga de GNV son m³.
+              const cantidad = c.galones != null
+                ? `${c.galones} ${configCombustible(c.tipo_combustible).unidad === "m3" ? "m³" : "gal"}`
+                : c.litros != null ? `${c.litros} lt` : "—";
               const precio = c.precio_galon != null ? `${fmtSoles(c.precio_galon)}/gal` : c.precio_litro != null ? `${fmtSoles(c.precio_litro)}/lt` : "—";
               // Edición del revisor (perezosa) — solo se usa en el bloque expandido.
               const ed = edicionDe(c);
@@ -708,8 +796,30 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const cantEd = numEd(ed.cantidad);
               const precioEd = numEd(ed.precio);
               const montoEd = numEd(ed.monto);
+              // La unidad ELEGIDA en el formulario, no la que trae la fila: el km vigente contra
+              // el que se compara el odómetro es el de la unidad a la que se le va a cargar.
+              const unidadEd = ed.vehiculo
+                ? vehiculosGuia.find((v) => `${v.tipo}:${v.id}` === ed.vehiculo) ?? null
+                : null;
+              const kmEd = numEd(ed.kilometraje);
+              const avisoKm = revisarKmTecleado({ km: kmEd, kmVigente: unidadEd?.kilometraje_actual ?? null });
               const fotos = fotosDe(c);
-              const puedeRegistrar = ed.vehiculo !== "" && cantEd != null && (precioEd != null || montoEd != null);
+              const puedeRegistrar = ed.vehiculo !== "" && ed.tipoCombustible !== "" && cantEd != null && (precioEd != null || montoEd != null);
+              // ── ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts) ────────
+              // La AGUJA propone el valor por defecto (es una observación del tanque); el
+              // importe redondo y la cantidad ≈ capacidad se enseñan como indicios y no mueven
+              // la casilla. Decide quien revisa, y entonces la fuente es `operador`.
+              const propTanque = proponerTanqueLleno({
+                vehiculo: unidadEd,
+                tipo: ed.tipoCombustible || c.tipo_combustible,
+                cantidad: cantEd,
+                unidad: esLitros ? "litros" : "galones",
+                monto: montoEd,
+                nivelAguja: c.nivel_tanque,
+              });
+              const tanqueMarcado = ed.tanqueLleno === "" ? (propTanque.porDefecto ?? true) : ed.tanqueLleno === "si";
+              const tanqueFuente: "operador" | "ia_aguja" | null =
+                ed.tanqueLleno !== "" ? "operador" : propTanque.fuente;
               return (
                 <FragmentoFilaCombustible key={c.id}>
                   <tr
@@ -724,13 +834,30 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                       {esTercero && <span className="ml-1.5 text-[10px] font-black text-[#7c3aed] bg-[#f3e8ff] px-1.5 py-0.5 rounded-full">tercero</span>}
                     </td>
                     <td className="p-3 text-gray-600 max-w-[180px] truncate">{c.grifo ?? "—"}</td>
+                    <td className="p-3 whitespace-nowrap">
+                      {c.tipo_combustible ? (() => {
+                        const cfg = configCombustible(c.tipo_combustible);
+                        return (
+                          <span className="text-[10px] font-black px-2 py-0.5 rounded-full whitespace-nowrap"
+                                style={{ background: cfg.bg, color: cfg.color }} title={cfg.label}>
+                            {cfg.icon} {cfg.labelCorto}
+                          </span>
+                        );
+                      })() : <span className="text-xs text-gray-300">—</span>}
+                    </td>
                     <td className="p-3 whitespace-nowrap font-bold text-gray-700">{cantidad}</td>
                     <td className="p-3 whitespace-nowrap text-gray-600">{precio}</td>
                     <td className="p-3 whitespace-nowrap font-black text-[#0b315f]">{c.monto_total != null ? fmtSoles(c.monto_total) : "—"}</td>
                     <td className="p-3">
                       <div className="flex flex-wrap gap-1 max-w-[220px]">
                         {(c.anomalias ?? []).map((a, i) => (
-                          <span key={i} className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-[#FDECEC] text-[#EB5757]" title={a.detalle}>
+                          <span
+                            key={i}
+                            className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${
+                              ANOMALIA_ES_ARREGLO(a.codigo) ? "bg-[#E8F5E9] text-[#2E7D32]" : "bg-[#FDECEC] text-[#EB5757]"
+                            }`}
+                            title={a.detalle}
+                          >
                             {ANOMALIA_LABEL[a.codigo] ?? a.codigo}
                           </span>
                         ))}
@@ -750,7 +877,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                   </tr>
                   {esPendiente && abierto && (
                     <tr className="border-t" style={{ borderColor: "#f1f5f9" }}>
-                      <td colSpan={8} className="p-4 bg-blue-50/40" onClick={(e) => e.stopPropagation()}>
+                      <td colSpan={9} className="p-4 bg-blue-50/40" onClick={(e) => e.stopPropagation()}>
                         {/* Fotos que la IA procesó (voucher / surtidor / tablero) */}
                         {fotos.length > 0 ? (
                           <div className="mb-4">
@@ -767,6 +894,28 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           </div>
                         ) : (
                           <p className="text-[11px] text-gray-400 font-semibold mb-4">Sin foto disponible para esta recarga.</p>
+                        )}
+
+                        {/* POR QUÉ quedó en revisión, en texto. El detalle de cada anomalía vivía solo en
+                            el `title` del chip: con "Monto inconsistente" en un tooltip, la única forma de
+                            saber CUÁL de los tres números no cuadraba era abrir la foto y rehacer la cuenta
+                            a mano. Acá se lee sin pasar el mouse por nada, y cuando el cuadre ya corrigió el
+                            dígito, dice qué número cambió y a cuál — que es todo lo que hace falta para
+                            mirar la foto una vez y confirmar. */}
+                        {(c.anomalias ?? []).length > 0 && (
+                          <div className="mb-4 rounded-xl border border-[#F2C94C] bg-[#FFFBEB] px-3 py-2.5">
+                            <p className="text-[11px] font-black text-[#B07A0F] uppercase tracking-wide mb-1.5">Lo que revisó el Radar</p>
+                            <ul className="space-y-1">
+                              {(c.anomalias ?? []).map((a, i) => (
+                                <li key={i} className="text-xs leading-relaxed text-[#6b5310]">
+                                  <span className={`font-black ${ANOMALIA_ES_ARREGLO(a.codigo) ? "text-[#2E7D32]" : "text-[#B07A0F]"}`}>
+                                    {ANOMALIA_ES_ARREGLO(a.codigo) ? "✓ " : "• "}{ANOMALIA_LABEL[a.codigo] ?? a.codigo}:
+                                  </span>{" "}
+                                  {a.detalle}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         )}
 
                         {/* Edición de los campos extraídos — corrige lo que la IA leyó mal */}
@@ -792,6 +941,20 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           <CampoEdit label="Grifo">
                             <input type="text" value={ed.grifo} onChange={(e) => setCampo(c, "grifo", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
                           </CampoEdit>
+                          <CampoEdit label="Tipo de combustible">
+                            <select value={ed.tipoCombustible} onChange={(e) => setCampo(c, "tipoCombustible", e.target.value)}
+                                    className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-bold outline-none focus:border-[#0b315f] bg-white"
+                                    style={{ color: ed.tipoCombustible ? configCombustible(ed.tipoCombustible).color : "#0b315f" }}>
+                              <option value="">— Elegir —</option>
+                              {TIPOS_PARA_ELEGIR.map((t) => (
+                                <option key={t} value={t}>{COMBUSTIBLES[t].icon} {COMBUSTIBLES[t].label}</option>
+                              ))}
+                              {/* El valor legado solo aparece si la fila ya lo trae, para no perderlo al guardar. */}
+                              {ed.tipoCombustible && !TIPOS_PARA_ELEGIR.includes(ed.tipoCombustible) && (
+                                <option value={ed.tipoCombustible}>{configCombustible(ed.tipoCombustible).label}</option>
+                              )}
+                            </select>
+                          </CampoEdit>
                           <CampoEdit label={esLitros ? "Cantidad (lt)" : "Cantidad (gal)"}>
                             <input type="number" inputMode="decimal" step="0.001" value={ed.cantidad} onChange={(e) => setCampo(c, "cantidad", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
                           </CampoEdit>
@@ -801,6 +964,62 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           <CampoEdit label="Monto total">
                             <input type="number" inputMode="decimal" step="0.01" value={ed.monto} onChange={(e) => setCampo(c, "monto", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
                           </CampoEdit>
+                          {/* El odómetro que la IA leyó del tablero. No se podía editar en ninguna
+                              pantalla y se registraba igual (`kilometraje: c.kilometraje ?? 0`), así que
+                              un dígito de más viajaba tal cual a la carga — y de ahí al km vigente de la
+                              unidad, a su vencimiento de mantenimiento y al km/gal de todos sus tramos. */}
+                          <CampoEdit label="Odómetro (km)">
+                            <input
+                              type="number" inputMode="numeric" step="1" min="0"
+                              value={ed.kilometraje}
+                              onChange={(e) => setCampo(c, "kilometraje", e.target.value)}
+                              placeholder="—"
+                              className={`w-full border rounded-lg px-2 py-1.5 text-sm font-bold outline-none bg-white ${
+                                avisoKm ? "border-[#F2C94C] text-[#B07A0F] focus:border-[#B07A0F]" : "border-gray-200 text-[#0b315f] focus:border-[#0b315f]"
+                              }`}
+                            />
+                            {/* Los dos números a la vista con etiquetas distintas, y NUNCA un botón
+                                «usar el vigente»: el que manda es el del tablero, y copiar el vigente
+                                sería fabricar una lectura que nadie tomó. */}
+                            <p className="text-[10px] text-gray-400 mt-1 leading-tight">
+                              {!unidadEd
+                                ? "Elige la unidad para ver su km vigente"
+                                : unidadEd.kilometraje_actual != null && unidadEd.kilometraje_actual > 0
+                                  ? `Vigente de ${unidadEd.placa}: ${Number(unidadEd.kilometraje_actual).toLocaleString("es-PE")} km`
+                                  : `${unidadEd.placa} aún no tiene km vigente`}
+                            </p>
+                          </CampoEdit>
+                        </div>
+
+                        {avisoKm && (
+                          <p className="text-[11px] font-bold text-[#B07A0F] mt-2">⚠ Odómetro: {avisoKm.aviso}</p>
+                        )}
+                        {kmEd == null && (
+                          <p className="text-[11px] text-gray-400 mt-2">
+                            Sin odómetro la recarga se registra igual, pero el rendimiento km/gal de ese tramo no se puede medir.
+                          </p>
+                        )}
+
+                        {/* EL TANQUE. El rendimiento se mide de lleno a lleno: una carga parcial
+                            sin declarar infla el número igual que una carga que nadie registró,
+                            y las dos salen como el mismo rojo. Aquí es donde se separan. */}
+                        <div className="mt-3 rounded-xl border px-3 py-2.5"
+                          style={{ background: tanqueMarcado ? "#f8fafc" : "#fffbeb", borderColor: tanqueMarcado ? "#e2e8f0" : "#fcd34d" }}>
+                          <label className="flex items-start gap-2.5 cursor-pointer">
+                            <input type="checkbox" className="mt-0.5 w-4 h-4 accent-[#0b315f]" checked={tanqueMarcado}
+                              onChange={(e) => setCampo(c, "tanqueLleno", e.target.checked ? "si" : "no")} />
+                            <span className="text-xs">
+                              <b className="text-gray-800">El tanque quedó lleno</b>
+                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                                {tanqueMarcado
+                                  ? "Es la política de la empresa. Desmárcalo solo si esta vez no se cargó a tope (sin crédito, el grifo sin stock)."
+                                  : "Carga PARCIAL: no cierra una medición de rendimiento. Su combustible no se pierde — se suma al del próximo tanque lleno."}
+                              </span>
+                              {propTanque.indicios.map((ind) => (
+                                <span key={ind.codigo} className="block text-[11px] text-[#B07A0F] mt-1">• {ind.detalle}</span>
+                              ))}
+                            </span>
+                          </label>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-3 mt-3">
@@ -813,10 +1032,16 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                                 vehiculoId: Number(ed.vehiculo.split(":")[1]),
                                 fecha: ed.fecha || null,
                                 grifo: ed.grifo.trim() || null,
+                                tipoCombustible: ed.tipoCombustible,
                                 cantidad: cantEd,
                                 esLitros,
                                 precio: precioEd,
                                 monto: montoEd,
+                                kilometraje: kmEd,
+                                // `null` cuando nadie lo afirmó y no hay aguja: la columna se
+                                // queda en null, que ANCLA por la política. Igual que hoy.
+                                tanqueLleno: tanqueFuente === null ? null : tanqueMarcado,
+                                tanqueFuente,
                               })}
                               disabled={!puedeRegistrar || registrando === c.id}
                               className="px-3 py-2 rounded-xl text-xs font-bold bg-[#0b315f] text-white hover:bg-[#1262bd] transition-colors disabled:opacity-40"
@@ -833,7 +1058,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                         </div>
                         {!puedeRegistrar && (
                           <p className="text-[11px] text-[#B07A0F] font-bold mt-2">
-                            Para registrar se necesita unidad, galones o litros, y precio o monto total.
+                            Para registrar se necesita unidad, tipo de combustible, galones o litros, y precio o monto total.
                           </p>
                         )}
                         <p className="text-[11px] text-gray-400 mt-1">Si corriges lo que la IA leyó, se guarda como lección para que no repita el error.</p>
@@ -1100,6 +1325,29 @@ function TabAlertas({ alertas, onMarcarLeida, onMarcarTodas }: {
 // sostiene la sesión de WhatsApp del Radar ni cómo levantarlo cuando se cae.
 // El detalle largo vive en radar-worker/README.md; esto es el resumen operativo.
 
+/**
+ * Traduce el código de cierre que dejó el worker en `detalle` cuando significa
+ * "WhatsApp ya no acepta estas credenciales". Son los casos en que reintentar no
+ * sirve de nada: la única salida es borrar la sesión y escanear un QR nuevo.
+ * El worker 1.1.0+ lo hace solo; en versiones anteriores el 403 (número bloqueado)
+ * caía en el reintento genérico y el Radar se quedaba para siempre sin mostrar QR.
+ */
+function credencialesRechazadas(detalle: string | null | undefined): string | null {
+  const codigo = detalle ? /código\s+(\d{3})/i.exec(detalle)?.[1] : null;
+  switch (codigo) {
+    case "403":
+      return "WhatsApp bloqueó el número del Radar (403). Ese número no va a volver a conectar por más que se reintente: hay que vincular OTRO número dedicado con “Generar QR nuevo”.";
+    case "401":
+      return "La sesión se cerró desde el teléfono (401). Hay que volver a vincular con “Generar QR nuevo”.";
+    case "405":
+      return "WhatsApp rechazó las credenciales guardadas (405). Hay que volver a vincular con “Generar QR nuevo”.";
+    case "411":
+      return "El teléfono no tiene multi-dispositivo activo (411). Actualiza WhatsApp en el celular y vuelve a vincular.";
+    default:
+      return null;
+  }
+}
+
 function Cmd({ children }: { children: string }) {
   const [copiado, setCopiado] = useState(false);
   return (
@@ -1149,8 +1397,40 @@ function ModalServidor({ estado, onClose }: { estado: RadarEstado | null; onClos
           <div className="text-sm text-gray-600 space-y-1">
             <p><span className="font-bold text-[#0b315f]">Conexión:</span> {estado?.estado ?? "sin datos"}{estado?.detalle ? ` — ${estado.detalle}` : ""}</p>
             <p><span className="font-bold text-[#0b315f]">Último latido:</span> {estado?.ultimo_latido ? `${haceRelativo(estado.ultimo_latido)} (${new Date(estado.ultimo_latido).toLocaleString("es-PE")})` : "nunca"}</p>
+            <p><span className="font-bold text-[#0b315f]">Versión del worker:</span> {estado?.version_worker ?? "sin datos"}{" "}
+              <span className="text-xs text-gray-400">(el botón “Generar QR nuevo” necesita 1.1.0 o superior)</span>
+            </p>
+            {/* 1.3.0 arregla el remitente vacío que fusionaba fotos de varios celulares en una
+                sola recarga. El ERP ya no las une sin verificar, pero mientras el droplet siga
+                en una versión vieja esos mensajes se procesan sueltos en vez de agruparse. */}
+            {versionMenorQue(estado?.version_worker, [1, 3, 0]) && (
+              <p className="text-xs text-[#8a5a00] bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-lg px-2 py-1.5">
+                Este servidor está en una versión anterior a <b>1.3.0</b>: cuando WhatsApp no manda quién escribió,
+                el mensaje se guarda sin remitente y no se agrupa con el resto de su reporte. Actualízalo en el droplet
+                con <span className="font-mono">git pull &amp;&amp; pm2 restart radar-worker</span>.
+              </p>
+            )}
             <p className="text-xs text-gray-400">El latido lo escribe el worker en la tabla <span className="font-mono">radar_estado</span>. Si está viejo, el proceso no está corriendo o no llega a Supabase.</p>
           </div>
+        </div>
+
+        <div className="bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-xl p-4">
+          <p className="text-xs font-black text-[#8a5a00] uppercase tracking-wide mb-2">Cambiar de número (o si el QR no aparece)</p>
+          <p className="text-sm text-[#8a5a00]/90 font-medium mb-2">
+            Normalmente basta el botón <span className="font-black">“Generar QR nuevo”</span> de esta pantalla. Si el worker no lo
+            atiende (versión vieja, o el proceso no está corriendo), se fuerza a mano: la sesión de WhatsApp es la carpeta{" "}
+            <span className="font-mono text-xs">auth/</span>, y borrarla obliga a escanear un QR nuevo.
+          </p>
+          <Cmd>{`cd /root/radar-worker
+pm2 stop radar-worker
+rm -rf auth
+pm2 restart radar-worker
+pm2 logs radar-worker`}</Cmd>
+          <ul className="text-xs text-[#8a5a00]/80 mt-2 space-y-1 list-disc pl-4">
+            <li>El QR sale en <span className="font-mono">pm2 logs</span> y acá en pantalla. Escanearlo con el número NUEVO lo deja vinculado.</li>
+            <li>Si WhatsApp bloqueó el número (código 403), ese número no vuelve: hay que usar OTRO chip dedicado.</li>
+            <li>Para actualizar el código del worker: si la carpeta es un clon del repo, <span className="font-mono">git pull &amp;&amp; npm install</span> y reiniciar; si se copió a mano, volver a copiar <span className="font-mono">radar-worker/</span>.</li>
+          </ul>
         </div>
 
         <div className="bg-[#f4f9f0] border border-[#27AE60]/20 rounded-xl p-4">
@@ -1215,33 +1495,107 @@ pm2 save`}</Cmd>
 
 type PatchGrupo = { contexto: string | null; categorias_permitidas: CategoriaRadar[] | null };
 
-function TabGrupos({ grupos, onToggle, onGuardarContexto }: {
+/**
+ * `visible` no existe en las filas anteriores a supabase/radar-ia-grupos-vigencia.sql.
+ * `undefined` significa "no se sabe todavía", y hay que tratarlo como visible: dar por
+ * perdido todo lo antiguo llenaría la lista de advertencias falsas el día del despliegue.
+ */
+const grupoVisible = (g: RadarGrupo) => g.visible !== false;
+
+function TabGrupos({ grupos, estado, workerVivo, sincronizando, onToggle, onGuardarContexto, onSincronizar, onEliminar }: {
   grupos: RadarGrupo[];
+  estado: RadarEstado | null;
+  workerVivo: boolean;
+  sincronizando: boolean;
   onToggle: (g: RadarGrupo) => void;
   onGuardarContexto: (g: RadarGrupo, patch: PatchGrupo) => Promise<void>;
+  onSincronizar: () => void;
+  onEliminar: (g: RadarGrupo) => void;
 }) {
   const [busqueda, setBusqueda] = useState("");
-  const filtrados = grupos.filter((g) => !busqueda.trim() || norm(g.nombre).includes(norm(busqueda)));
+  const [ocultarPerdidos, setOcultarPerdidos] = useState(false);
+
+  const perdidos = grupos.filter((g) => !grupoVisible(g));
+  // Los peligrosos: siguen en "Monitorear" pero el número actual no es miembro, así que
+  // aparentan vigilancia sin que pueda llegar un solo mensaje.
+  const perdidosActivos = perdidos.filter((g) => g.activo);
+
+  const filtrados = grupos.filter(
+    (g) =>
+      (!busqueda.trim() || norm(g.nombre).includes(norm(busqueda))) &&
+      (!ocultarPerdidos || grupoVisible(g))
+  );
 
   return (
     <div className="space-y-4">
       <div className="bg-[#E8F1FB] border border-[#2f8ee9]/30 rounded-2xl p-4 flex items-start gap-3">
         <span className="text-xl">ℹ️</span>
         <p className="text-sm text-[#0b315f] font-semibold">
-          El número dedicado del Radar debe ser miembro del grupo. Los grupos se sincronizan solos al conectar el worker.
+          El Radar solo ve los grupos donde el número conectado{estado?.numero ? ` (${estado.numero})` : ""} es miembro.
           Si un grupo NO es de la operación de AFA (p.ej. una red de apoyo entre transportistas), abre la fila y cuéntale
           el contexto a ELIA para que no clasifique mal sus mensajes.
         </p>
       </div>
 
-      <div className="relative max-w-sm">
-        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-300"><Ic.Lupa size={15} /></span>
-        <input
-          value={busqueda}
-          onChange={(e) => setBusqueda(e.target.value)}
-          placeholder="Buscar grupo…"
-          className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#0b315f] transition-colors bg-white"
-        />
+      {/* Cuándo se leyó esta lista de WhatsApp — y cómo forzar una lectura nueva. */}
+      <div className="bg-white border border-gray-100 rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-sm">
+          <p className="font-black text-[#0b315f]">Lista leída de WhatsApp</p>
+          <p className="text-gray-500 font-medium">
+            {estado?.grupos_sincronizados_en
+              ? `Última lectura correcta ${haceRelativo(estado.grupos_sincronizados_en)}.`
+              : "Todavía no hay ninguna lectura registrada con este worker."}
+            {!workerVivo && " El worker no responde: no se puede actualizar."}
+          </p>
+        </div>
+        <button
+          onClick={onSincronizar}
+          disabled={sincronizando}
+          title="Vuelve a preguntarle a WhatsApp en qué grupos está el número conectado"
+          className="flex items-center gap-1.5 bg-white border border-gray-200 shadow-sm rounded-xl px-3 py-2 text-xs font-bold text-gray-600 hover:border-gray-300 transition-colors disabled:opacity-50"
+        >
+          <Ic.Refresh size={14} /> {sincronizando ? "Solicitando…" : "Actualizar lista"}
+        </button>
+      </div>
+
+      {perdidos.length > 0 && (
+        <div className={`rounded-2xl p-4 flex items-start gap-3 border ${perdidosActivos.length > 0 ? "bg-[#FDECEC] border-[#EB5757]/30" : "bg-[#FFF6E5] border-[#B07A0F]/25"}`}>
+          <span className="text-xl">{perdidosActivos.length > 0 ? "⚠️" : "👻"}</span>
+          <div className="text-sm">
+            <p className={`font-black ${perdidosActivos.length > 0 ? "text-[#8f1f1f]" : "text-[#8a5a00]"}`}>
+              {perdidos.length} grupo{perdidos.length === 1 ? "" : "s"} que el número conectado ya no ve
+            </p>
+            <p className={`font-medium mt-0.5 ${perdidosActivos.length > 0 ? "text-[#8f1f1f]/90" : "text-[#8a5a00]/90"}`}>
+              Quedaron de un número anterior. No se borran solos: conservan el contexto que le escribiste a ELIA y los
+              mensajes ya capturados.{" "}
+              {perdidosActivos.length > 0 && (
+                <strong>
+                  {perdidosActivos.length} de ellos sigue{perdidosActivos.length === 1 ? "" : "n"} en “Monitorear”, así que
+                  parece{perdidosActivos.length === 1 ? "" : "n"} vigilado{perdidosActivos.length === 1 ? "" : "s"} sin
+                  serlo. Para recuperarlos, agrega el número nuevo a esos grupos de WhatsApp.
+                </strong>
+              )}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="relative max-w-sm flex-1 min-w-[220px]">
+          <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-300"><Ic.Lupa size={15} /></span>
+          <input
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            placeholder="Buscar grupo…"
+            className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#0b315f] transition-colors bg-white"
+          />
+        </div>
+        {perdidos.length > 0 && (
+          <label className="flex items-center gap-2 text-xs font-bold text-gray-500 cursor-pointer select-none">
+            <input type="checkbox" checked={ocultarPerdidos} onChange={(e) => setOcultarPerdidos(e.target.checked)} />
+            Ocultar los que ya no se ven
+          </label>
+        )}
       </div>
 
       {filtrados.length === 0 ? (
@@ -1252,14 +1606,14 @@ function TabGrupos({ grupos, onToggle, onGuardarContexto }: {
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                  {["Grupo", "Participantes", "ID de WhatsApp", "Monitorear"].map((h) => (
-                    <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                  {["Grupo", "Participantes", "ID de WhatsApp", "Monitorear", ""].map((h, i) => (
+                    <th key={h || `col-${i}`} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {filtrados.map((g) => (
-                  <FilaGrupo key={g.id} g={g} onToggle={onToggle} onGuardar={onGuardarContexto} />
+                  <FilaGrupo key={g.id} g={g} onToggle={onToggle} onGuardar={onGuardarContexto} onEliminar={onEliminar} />
                 ))}
               </tbody>
             </table>
@@ -1270,10 +1624,11 @@ function TabGrupos({ grupos, onToggle, onGuardarContexto }: {
   );
 }
 
-function FilaGrupo({ g, onToggle, onGuardar }: {
+function FilaGrupo({ g, onToggle, onGuardar, onEliminar }: {
   g: RadarGrupo;
   onToggle: (g: RadarGrupo) => void;
   onGuardar: (g: RadarGrupo, patch: PatchGrupo) => Promise<void>;
+  onEliminar: (g: RadarGrupo) => void;
 }) {
   const [abierto, setAbierto] = useState(false);
   const [contexto, setContexto] = useState(g.contexto ?? "");
@@ -1298,33 +1653,62 @@ function FilaGrupo({ g, onToggle, onGuardar }: {
   };
 
   const personalizado = !!g.contexto || !!(g.categorias_permitidas && g.categorias_permitidas.length);
+  const visible = grupoVisible(g);
 
   return (
     <>
       <tr className="border-t hover:bg-gray-50 transition-colors" style={{ borderColor: "#f1f5f9" }}>
         <td className="p-3">
-          <button onClick={() => setAbierto((v) => !v)} className="flex items-center gap-2 font-bold text-[#0b315f] text-left">
+          <button onClick={() => setAbierto((v) => !v)} className="flex items-center gap-2 font-bold text-left">
             <Ic.Chevron size={13} className={`text-gray-300 transition-transform flex-shrink-0 ${abierto ? "rotate-180" : ""}`} />
-            <span>{g.nombre || "(sin nombre)"}</span>
+            <span className={visible ? "text-[#0b315f]" : "text-gray-400 line-through decoration-gray-300"}>
+              {g.nombre || "(sin nombre)"}
+            </span>
             {personalizado && (
               <span className="w-1.5 h-1.5 rounded-full bg-[#2f8ee9] flex-shrink-0" title="Tiene contexto o categorías personalizadas" />
+            )}
+            {!visible && (
+              <span
+                title={
+                  g.visto_en
+                    ? `El número conectado no es miembro de este grupo. Visto por última vez ${haceRelativo(g.visto_en)}.`
+                    : "El número conectado no es miembro de este grupo."
+                }
+                className={`px-2 py-0.5 rounded-full text-[10px] font-black whitespace-nowrap ${
+                  g.activo ? "bg-[#FDECEC] text-[#8f1f1f]" : "bg-gray-100 text-gray-500"
+                }`}
+              >
+                {g.activo ? "Activo pero sin acceso" : "Ya no se ve"}
+              </span>
             )}
           </button>
         </td>
         <td className="p-3 text-gray-600">{g.participantes}</td>
         <td className="p-3 font-mono text-xs text-gray-400">{g.wa_group_id}</td>
         <td className="p-3"><Switch on={g.activo} onClick={() => onToggle(g)} /></td>
+        <td className="p-3">
+          {/* Solo para los heredados: un grupo vigente se deja de monitorear con el switch, no se borra. */}
+          {!visible && (
+            <button
+              onClick={() => onEliminar(g)}
+              title="Quitar este grupo de la lista (no borra los mensajes ya capturados)"
+              className="text-[11px] font-bold text-gray-400 hover:text-[#EB5757] transition-colors whitespace-nowrap"
+            >
+              Quitar
+            </button>
+          )}
+        </td>
       </tr>
       {abierto && (
         <tr className="bg-blue-50/30 border-t" style={{ borderColor: "#f1f5f9" }}>
-          <td colSpan={4} className="p-4 space-y-3">
+          <td colSpan={5} className="p-4 space-y-3">
             <div>
               <label className="text-xs font-black text-gray-400 uppercase tracking-wide">Contexto para ELIA (opcional)</label>
               <textarea
                 value={contexto}
                 onChange={(e) => setContexto(e.target.value)}
                 rows={2}
-                placeholder='Ej: "Red de apoyo entre transportistas independientes, NO es la flota de AFA. Marcar oportunidad_comercial solo si alguien pide un servicio que AFA podría cubrir."'
+                placeholder='Ej: "Red de apoyo entre transportistas independientes, NO es la flota propia. Marcar oportunidad_comercial solo si alguien pide un servicio que la empresa podría cubrir."'
                 className="w-full mt-1 border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-[#0b315f] transition-colors bg-white"
               />
             </div>
@@ -1621,7 +2005,7 @@ function TabConfiguracion({ config, guardando, onGuardar, vehiculosGuia, onGuard
             <textarea
               value={cfg.correos_alerta ?? ""}
               onChange={(e) => set("correos_alerta", e.target.value || null)}
-              placeholder="operaciones@afatoursperu.com, administracion@afatoursperu.com"
+              placeholder="operaciones@tuempresa.com, administracion@tuempresa.com"
               rows={2}
               className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#0b315f] transition-colors resize-none"
             />
@@ -1739,6 +2123,7 @@ export default function RadarIAPage() {
   const [registrandoComb, setRegistrandoComb] = useState<string | null>(null);
   const [guardandoConfig, setGuardandoConfig] = useState(false);
   const [solicitandoQr, setSolicitandoQr] = useState(false);
+  const [sincronizandoGrupos, setSincronizandoGrupos] = useState(false);
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -1757,8 +2142,8 @@ export default function RadarIAPage() {
         supabase.from("radar_combustible").select("*").order("created_at", { ascending: false }).limit(60),
         supabase.from("lecturas_odometro").select("*").eq("ref_origen", "radar_ia").order("created_at", { ascending: false }).limit(60),
         supabase.from("radar_alertas").select("*").order("created_at", { ascending: false }).limit(100),
-        supabase.from("vehiculos").select("id, placa, categoria, estado, guia_odometro"),
-        supabase.from("vehiculos_tercero").select("id, placa, categoria, guia_odometro"),
+        supabase.from("vehiculos").select("id, placa, categoria, estado, guia_odometro, kilometraje_actual"),
+        supabase.from("vehiculos_tercero").select("id, placa, categoria, guia_odometro, kilometraje_actual"),
       ]);
       if (rEstado.error) console.warn("radar-ia: error leyendo radar_estado", rEstado.error);
       if (rConfig.error) console.warn("radar-ia: error leyendo radar_config", rConfig.error);
@@ -1777,9 +2162,11 @@ export default function RadarIAPage() {
       setVehiculos(((rVehiculos.data ?? []) as VehiculoLite[]));
       const guiaPropios: VehiculoGuiaOdometro[] = ((rVehiculos.data ?? []) as any[]).map((v) => ({
         tipo: "propio", id: v.id, placa: v.placa, categoria: v.categoria ?? null, guia_odometro: v.guia_odometro ?? null,
+        kilometraje_actual: v.kilometraje_actual != null ? Number(v.kilometraje_actual) : null,
       }));
       const guiaTerceros: VehiculoGuiaOdometro[] = ((rVehTercero.data ?? []) as any[]).map((v) => ({
         tipo: "tercero", id: v.id, placa: v.placa, categoria: v.categoria ?? null, guia_odometro: v.guia_odometro ?? null,
+        kilometraje_actual: v.kilometraje_actual != null ? Number(v.kilometraje_actual) : null,
       }));
       setVehiculosGuia(
         [...guiaPropios, ...guiaTerceros].sort((a, b) => (a.placa ?? "").localeCompare(b.placa ?? ""))
@@ -1879,12 +2266,20 @@ export default function RadarIAPage() {
     return map;
   }, [mensajes]);
 
+  // ── Estado del worker ──
+  // El latido lo escribe el proceso del servidor cada 60 s. Si está viejo, el worker NO
+  // está corriendo: ni el QR que se vea en pantalla sirve (los códigos de WhatsApp caducan
+  // en segundos) ni el botón "Generar QR nuevo" va a ser atendido por nadie.
+  const latidoMs = estado?.ultimo_latido ? Date.now() - new Date(estado.ultimo_latido).getTime() : null;
+  const workerVivo = latidoMs !== null && latidoMs < 3 * 60 * 1000;
+  /** Desconexión que ningún reintento va a arreglar (la deja un worker anterior a 1.1.0). */
+  const motivoRechazo = credencialesRechazadas(estado?.detalle);
+
   // ── Chip de conexión ──
   const conexion = (() => {
     if (!estado) return { dot: "#EB5757", color: "#EB5757", texto: "Sin estado", sub: "Corre supabase/radar-ia.sql" as string | null };
-    const latidoMs = estado.ultimo_latido ? Date.now() - new Date(estado.ultimo_latido).getTime() : null;
     if (estado.estado === "conectado") {
-      if (latidoMs === null || latidoMs > 3 * 60 * 1000) {
+      if (!workerVivo) {
         return {
           dot: "#B07A0F", color: "#B07A0F", texto: "Worker sin señal",
           sub: estado.ultimo_latido ? `último latido ${haceRelativo(estado.ultimo_latido)}` : "sin latido registrado",
@@ -1897,7 +2292,10 @@ export default function RadarIAPage() {
       };
     }
     if (estado.estado === "esperando_qr") {
-      return { dot: "#B07A0F", color: "#B07A0F", texto: "Esperando QR", sub: "escanea el código para vincular" };
+      return {
+        dot: "#B07A0F", color: "#B07A0F", texto: "Esperando QR",
+        sub: workerVivo ? "escanea el código para vincular" : "el worker no responde: el QR no sirve",
+      };
     }
     return { dot: "#EB5757", color: "#EB5757", texto: "Desconectado", sub: estado.detalle };
   })();
@@ -1920,13 +2318,10 @@ export default function RadarIAPage() {
   }
 
   async function solicitarNuevoQr() {
-    if (
-      !window.confirm(
-        "Esto va a cerrar la sesión de WhatsApp que el Radar tiene activa ahora mismo y va a pedir escanear un QR nuevo. ¿Continuar?"
-      )
-    ) {
-      return;
-    }
+    const aviso = estado?.estado === "conectado"
+      ? `Esto va a desvincular el número que el Radar usa ahora mismo (${estado.numero ?? "sin número"}) y va a pedir escanear un QR nuevo. ¿Continuar?`
+      : "Esto va a borrar las credenciales de WhatsApp guardadas en el servidor y va a pedir un QR nuevo, para vincular el mismo número u otro. ¿Continuar?";
+    if (!window.confirm(aviso)) return;
     setSolicitandoQr(true);
     try {
       const { error } = await supabase.from("radar_estado").update({ solicitar_relink: true }).eq("id", 1);
@@ -1935,7 +2330,15 @@ export default function RadarIAPage() {
         showToast("No se pudo solicitar el QR nuevo", false);
         return;
       }
-      showToast("Solicitado — si el worker está corriendo, el QR nuevo aparece aquí en unos segundos");
+      setEstado((prev) => (prev ? { ...prev, solicitar_relink: true } : prev));
+      // La solicitud es solo una bandera en la BD: la atiende el worker. Si no está
+      // corriendo, no la va a ver nadie — decirlo acá evita esperar un QR que no viene.
+      showToast(
+        workerVivo
+          ? "Solicitado — el QR nuevo aparece acá en unos segundos"
+          : "Solicitado, pero el worker no está respondiendo: enciéndelo y lo atiende al arrancar",
+        workerVivo
+      );
     } finally {
       setSolicitandoQr(false);
     }
@@ -2047,8 +2450,15 @@ export default function RadarIAPage() {
 
   // Registra la corrección del revisor (valor IA vs valor final) como lección de la IA. Best-effort.
   async function guardarCorreccionesCombustible(c: RadarCombustible, ov: OverrideComb, fotoUrl: string | null) {
-    const iaCantidad = ov.esLitros ? c.litros : c.galones;
-    const iaPrecio = ov.esLitros ? c.precio_litro : c.precio_galon;
+    // Lo que la IA LEYÓ no es siempre lo que quedó en la fila: cuando el cuadre aritmético del
+    // voucher atrapó un dígito, la fila ya trae el número arreglado y la lectura original viaja
+    // en la anomalía. Sin esto, corregir a mano un valor ya corregido le enseñaría a la IA que
+    // se equivocó en algo que nunca leyó — se lee por CÓDIGO, no olfateando el texto del detalle.
+    const leidoPorIA = <T,>(campo: "cantidad" | "precio" | "monto" | "tipo_combustible", enLaFila: T) =>
+      ((c.anomalias ?? []).find((a) => a.correccion?.campo === campo)?.correccion?.leido as T | undefined) ??
+      enLaFila;
+    const iaCantidad = leidoPorIA("cantidad", ov.esLitros ? c.litros : c.galones);
+    const iaPrecio = leidoPorIA("precio", ov.esLitros ? c.precio_litro : c.precio_galon);
     const distinto = (a: unknown, b: unknown) => {
       const na = a == null || a === "" ? null : a, nb = b == null || b === "" ? null : b;
       if (typeof na === "number" || typeof nb === "number") return Number(na) !== Number(nb);
@@ -2059,7 +2469,17 @@ export default function RadarIAPage() {
       { campo: "grifo",  ia: c.grifo,   correcto: ov.grifo },
       { campo: ov.esLitros ? "litros" : "galones", ia: iaCantidad, correcto: ov.cantidad },
       { campo: "precio", ia: iaPrecio,  correcto: ov.precio },
-      { campo: "monto",  ia: c.monto_total, correcto: ov.monto },
+      { campo: "monto",  ia: leidoPorIA("monto", c.monto_total), correcto: ov.monto },
+      // Por `leidoPorIA`, no por `c.tipo_combustible`: cuando el producto impreso desmintió a la
+      // IA, la fila ya trae el tipo bueno y lo que la IA dijo vive en la anomalía. Sin esto, el
+      // revisor que confirma un "glp" ya corregido le enseñaría a la IA que leyó glp donde había
+      // escrito diesel — el error que nunca cometió, en vez del que sí.
+      { campo: "tipo_combustible", ia: leidoPorIA("tipo_combustible", c.tipo_combustible), correcto: ov.tipoCombustible || null },
+      // El odómetro también se aprende: el dígito de más es EL error de lectura de esta flota
+      // (ver la sección "Lectura del odómetro" del CLAUDE.md), y cada corrección humana entra al
+      // prompt de la próxima foto. El 0 de una fila vieja se manda como "no leyó nada": cero
+      // kilómetros no es una lectura equivocada, es la ausencia de lectura.
+      { campo: "kilometraje", ia: c.kilometraje != null && c.kilometraje > 0 ? c.kilometraje : null, correcto: ov.kilometraje },
     ];
     const filas = campos
       .filter((x) => x.correcto != null && distinto(x.ia, x.correcto))
@@ -2089,29 +2509,54 @@ export default function RadarIAPage() {
     setRegistrandoComb(c.id);
     try {
       const grupo = (c.mensaje_id && grupoPorMensaje[c.mensaje_id]) || "WhatsApp";
-      const fotoUrl = (c.fotos?.[0]?.url) ?? (c.mensaje_id ? mensajesPorId[c.mensaje_id]?.media_url ?? null : null);
+      const msg = c.mensaje_id ? mensajesPorId[c.mensaje_id] ?? null : null;
+      const fotoUrl = (c.fotos?.[0]?.url) ?? msg?.media_url ?? null;
       // Guarda primero las correcciones (dataset de aprendizaje), sin frenar el registro.
       await guardarCorreccionesCombustible(c, ov, fotoUrl);
 
       const destino = ov.tipo === "tercero" ? { vehiculo_tercero_id: ov.vehiculoId } : { vehiculo_id: ov.vehiculoId };
+      const fechaCarga = ov.fecha ?? c.fecha ?? hoyISO();
       // OJO: nunca escribir `total` — es columna generada (galones × precio_galon)
       const { data, error } = await supabase
         .from("combustible")
         .insert({
           ...destino,
-          fecha: ov.fecha ?? c.fecha ?? hoyISO(),
-          kilometraje: c.kilometraje ?? 0,
+          fecha: fechaCarga,
+          // El que confirmó el revisor mirando la foto, no el que leyó la IA. Antes era
+          // `c.kilometraje ?? 0` y no había ningún campo que lo pudiera cambiar: un dígito de
+          // más entraba tal cual a la carga y de ahí al rendimiento km/gal de la unidad.
+          // Vacío sigue siendo 0, que es como el resto del ERP escribe "sin odómetro" en esta
+          // columna (`/combustible` hace lo mismo, y lib/rendimiento.ts lee 0 y null igual).
+          kilometraje: ov.kilometraje ?? 0,
           galones: ov.cantidad,
           precio_galon: precio,
           grifo: ov.grifo ?? c.grifo,
           conductor: c.conductor,
           observaciones: `Radar IA (manual${ov.tipo === "tercero" ? " · tercero" : ""}) · grupo ${grupo}`,
-          tipo_combustible: c.tipo_combustible ?? "diesel",
-          unidad: ov.esLitros ? "litros" : "galones",
+          // El que confirmó el revisor. Antes era `c.tipo_combustible ?? "diesel"`: una recarga
+          // de GLP cuyo tipo la IA no leyó entraba al libro como diésel, y de ahí a la
+          // capacidad de tanque, al precio referencial y al rendimiento del vehículo.
+          tipo_combustible: ov.tipoCombustible || c.tipo_combustible || "diesel",
+          // La unidad se DERIVA del producto, igual que en el auto-registro del Radar y que en
+          // el formulario de /combustible. El `esLitros ? "litros" : "galones"` rotulaba en
+          // GALONES cada carga de GNV —el 70 % de la flota— con un número que son m³, y con la
+          // unidad mal escrita ni el rendimiento ni la banda de precio pueden juzgarla.
+          unidad: unidadDeCarga(ov.tipoCombustible || c.tipo_combustible, ov.esLitros ? "litros" : "galones"),
         })
         .select("id")
         .single();
       if (error || !data) throw error ?? new Error("no se pudo insertar en combustible");
+      // ¿Quedó lleno el tanque? Va en una escritura APARTE y best-effort a propósito: es de una
+      // migración accesoria (`combustible-01-tanque-lleno.sql`) y una recarga confirmada contra
+      // la foto no se puede perder porque falte un SQL. Solo se escribe cuando alguien lo
+      // AFIRMÓ —el revisor, o la aguja del tablero—; si nadie lo hizo, la columna se queda en
+      // null, que ANCLA por la política de la empresa, que es el comportamiento de siempre.
+      if (ov.tanqueFuente !== null) {
+        await supabase
+          .from("combustible")
+          .update({ tanque_lleno: ov.tanqueLleno, tanque_lleno_fuente: ov.tanqueFuente })
+          .eq("id", (data as any).id);
+      }
       await supabase
         .from("radar_combustible")
         .update({
@@ -2121,7 +2566,46 @@ export default function RadarIAPage() {
           vehiculo_tercero_id: ov.tipo === "tercero" ? ov.vehiculoId : null,
         })
         .eq("id", c.id);
-      showToast("Recarga registrada en Combustible");
+
+      // El odómetro consolidado, por la MISMA puerta que el resto del ERP (`registrarLectura`,
+      // como /combustible al crear una carga y como el auto-registro del Radar). Antes esta
+      // rama no lo alimentaba: la recarga que pasaba por revisión —justo la que un humano
+      // miró— dejaba su kilometraje solo dentro de la carga, así que no llegaba a
+      // lecturas_odometro ni al km vigente de la unidad, y no salía en /mantenimiento.
+      // El anti-retroceso decide el estado; acá no se fuerza nada, se REPORTA el veredicto.
+      let notaOdo = "";
+      if (ov.kilometraje != null && ov.kilometraje > 0) {
+        try {
+          const r = await registrarLectura(supabase, {
+            vehiculo_id: ov.vehiculoId,
+            flota: ov.tipo === "tercero" ? "tercero" : "propia",
+            km: ov.kilometraje,
+            fuente: "combustible",
+            fecha: fechaCarga,
+            foto_url: fotoUrl,
+            ref_origen: "radar_ia",
+            capturado_en: msg?.ts_mensaje ?? null,
+            // La hora del mensaje es la del ENVÍO: la foto del tablero pudo tomarse antes.
+            horaEsTope: true,
+            // Por FILA del Radar, nunca por mensaje: una ráfaga con dos vouchers deja dos filas
+            // con el MISMO mensaje_id (insertarRecargasAdicionales), y una clave compartida
+            // haría que la segunda lectura se dedujera "ya registrada" y se perdiera entera.
+            idemKey: `radar_odo_comb_rev:${c.id}`,
+          });
+          if (!r.ok) notaOdo = ` · el odómetro no se pudo registrar (${r.error ?? r.motivo ?? "error"})`;
+          // Dedupe: NO se escribió nada nuevo. Decirlo importa — con dos vouchers de la misma
+          // unidad en una ráfaga comparten la foto del cluster, y sin este aviso la pantalla
+          // diría "registrado" sobre un número que no quedó guardado en ninguna parte.
+          else if (r.duplicada) notaOdo = " · el odómetro NO se guardó: esa lectura ya estaba en el historial";
+          else if (r.estado !== "aceptada") notaOdo = ` · odómetro por revisar: ${r.motivo ?? r.estado}`;
+        } catch (e) {
+          // Nunca tumba el registro: la carga —el gasto— ya está escrita.
+          console.warn("radar-ia: no se pudo registrar la lectura de odómetro", e);
+          notaOdo = " · el odómetro no se pudo registrar";
+        }
+      }
+
+      showToast(`Recarga registrada en Combustible${notaOdo}`, !notaOdo);
       cargar();
     } catch (e) {
       console.warn("radar-ia: error registrando combustible", e);
@@ -2191,6 +2675,51 @@ export default function RadarIAPage() {
     showToast(`Contexto de «${g.nombre}» guardado`);
   }
 
+  /**
+   * Pide al worker que vuelva a preguntarle a WhatsApp en qué grupos está el número.
+   * Es una bandera en la BD, igual que el relink: si el worker no corre, no la atiende nadie.
+   */
+  async function solicitarSyncGrupos() {
+    setSincronizandoGrupos(true);
+    try {
+      const { error } = await supabase.from("radar_estado").update({ solicitar_sync_grupos: true }).eq("id", 1);
+      if (error) {
+        console.warn("radar-ia: error solicitando sincronización de grupos", error);
+        // El caso típico: falta correr supabase/radar-ia-grupos-vigencia.sql.
+        showToast(
+          error.message?.includes("solicitar_sync_grupos")
+            ? "Falta correr supabase/radar-ia-grupos-vigencia.sql en Supabase"
+            : "No se pudo pedir la actualización de la lista",
+          false
+        );
+        return;
+      }
+      showToast(
+        workerVivo
+          ? "Solicitado — la lista se actualiza en unos segundos"
+          : "Solicitado, pero el worker no responde: lo hará cuando arranque",
+        workerVivo
+      );
+    } finally {
+      setSincronizandoGrupos(false);
+    }
+  }
+
+  /** Quita de la lista un grupo que el número actual ya no ve. Los mensajes ya capturados quedan. */
+  async function eliminarGrupo(g: RadarGrupo) {
+    if (!window.confirm(`¿Quitar «${g.nombre || g.wa_group_id}» de la lista?\n\nSolo desaparece de esta pantalla. Los mensajes que ya se capturaron de ese grupo NO se borran. Si el número vuelve a entrar al grupo, reaparece solo.`)) {
+      return;
+    }
+    const { error } = await supabase.from("radar_grupos").delete().eq("id", g.id);
+    if (error) {
+      console.warn("radar-ia: error eliminando grupo", error);
+      showToast("No se pudo quitar el grupo", false);
+      return;
+    }
+    setGrupos((prev) => prev.filter((x) => x.id !== g.id));
+    showToast(`«${g.nombre || g.wa_group_id}» quitado de la lista`);
+  }
+
   async function guardarGuiaOdometro(v: VehiculoGuiaOdometro, guia: string | null) {
     const tabla = v.tipo === "tercero" ? "vehiculos_tercero" : "vehiculos";
     const { error } = await supabase.from(tabla).update({ guia_odometro: guia }).eq("id", v.id);
@@ -2257,9 +2786,10 @@ export default function RadarIAPage() {
     <div className="min-h-screen bg-[#eef3f8]">
       <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
 
-        {/* Toast */}
+        {/* Toast. `max-w` para que un veredicto largo (el motivo con que el odómetro quedó
+            por revisar) envuelva en dos líneas en vez de cruzar la pantalla entera. */}
         {toast && (
-          <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-lg text-sm font-medium text-white transition-all ${toast.ok ? "bg-[#0b315f]" : "bg-red-600"}`}>
+          <div className={`fixed top-4 right-4 z-50 max-w-sm px-4 py-3 rounded-xl shadow-lg text-sm font-medium text-white transition-all ${toast.ok ? "bg-[#0b315f]" : "bg-red-600"}`}>
             {toast.msg}
           </div>
         )}
@@ -2285,14 +2815,19 @@ export default function RadarIAPage() {
               </span>
               <Ic.Servidor size={14} className="text-gray-300 ml-0.5" />
             </button>
-            {estado && estado.estado !== "esperando_qr" && (
+            {/* Siempre disponible: en `esperando_qr` también hace falta (un QR viejo de un
+                worker caído no sirve, y si el número quedó bloqueado hay que vincular otro). */}
+            {estado && (
               <button
                 onClick={solicitarNuevoQr}
                 disabled={solicitandoQr}
-                title="Cierra la sesión de WhatsApp actual y pide vincular un número (el mismo u otro) escaneando un QR nuevo"
+                title="Borra la sesión de WhatsApp guardada en el servidor y pide vincular un número (el mismo u otro) escaneando un QR nuevo"
                 className="flex items-center gap-1.5 bg-white border border-gray-100 shadow-sm rounded-xl px-3 py-2 text-xs font-bold text-gray-600 hover:border-gray-300 transition-colors disabled:opacity-50"
               >
-                <Ic.QrCode size={14} /> {solicitandoQr ? "Solicitando…" : "Generar QR nuevo"}
+                <Ic.QrCode size={14} />
+                {solicitandoQr
+                  ? "Solicitando…"
+                  : estado.estado === "conectado" ? "Vincular otro número" : "Generar QR nuevo"}
               </button>
             )}
             <div className="flex items-center gap-2.5 bg-white border border-gray-100 shadow-sm rounded-xl px-3.5 py-2">
@@ -2310,14 +2845,39 @@ export default function RadarIAPage() {
         ) : (
           <>
             {/* Vinculación / worker apagado */}
-            {estado?.estado === "esperando_qr" && estado.qr_data_url && (
+            {estado?.estado === "esperando_qr" && (
               <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 flex flex-col items-center text-center">
                 <h2 className="font-black text-[#0b315f] text-lg mb-1">Vincula el WhatsApp del Radar</h2>
                 <p className="text-sm text-gray-500 max-w-md mb-4">
                   En el teléfono del número DEDICADO: WhatsApp → Ajustes → Dispositivos vinculados → Vincular un dispositivo → escanea este código. Solo se hace una vez.
                 </p>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={estado.qr_data_url} alt="Código QR para vincular el WhatsApp del Radar" className="w-64 h-64 rounded-xl border border-gray-100" />
+                {estado.detalle && (
+                  <div className="mb-4 max-w-md text-sm font-semibold text-[#8a5a00] bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-xl px-4 py-3">
+                    {estado.detalle}
+                  </div>
+                )}
+                {!workerVivo ? (
+                  // Los QR de WhatsApp caducan en segundos y solo los renueva el worker
+                  // corriendo: mostrar uno viejo sería mandar a escanear algo que no sirve.
+                  <div className="max-w-md text-sm text-[#8f1f1f] bg-[#FDECEC] border border-[#EB5757]/30 rounded-xl px-4 py-3">
+                    <p className="font-black">Este código ya no sirve: el worker no está respondiendo</p>
+                    <p className="mt-1 font-medium">
+                      Último latido {estado.ultimo_latido ? haceRelativo(estado.ultimo_latido) : "nunca"}. Los QR de WhatsApp
+                      caducan en segundos y solo el worker corriendo genera uno nuevo — enciéndelo primero y el código aparece acá solo.
+                    </p>
+                    <button onClick={() => setVerServidor(true)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-black text-[#1262bd] hover:underline">
+                      <Ic.Servidor size={13} /> ¿Cuál es el servidor y cómo lo enciendo?
+                    </button>
+                  </div>
+                ) : estado.qr_data_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={estado.qr_data_url} alt="Código QR para vincular el WhatsApp del Radar" className="w-64 h-64 rounded-xl border border-gray-100" />
+                ) : (
+                  <div className="w-64 h-64 rounded-xl border border-dashed border-gray-200 flex flex-col items-center justify-center gap-3 text-gray-400">
+                    <div className="w-7 h-7 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
+                    <p className="text-xs font-bold">Generando el código…</p>
+                  </div>
+                )}
               </div>
             )}
             {estado?.estado === "desconectado" && (
@@ -2328,10 +2888,35 @@ export default function RadarIAPage() {
                   <p className="text-sm text-gray-500 mt-1">
                     El worker de WhatsApp está apagado o sin conexión{estado.detalle ? ` (${estado.detalle})` : ""}. Enciéndelo en el servidor.
                   </p>
+                  {/* Reintentar no arregla unas credenciales que WhatsApp ya rechazó: decir cuál es la salida. */}
+                  {motivoRechazo && (
+                    <div className="mt-2 text-sm text-[#8f1f1f] bg-[#FDECEC] border border-[#EB5757]/30 rounded-xl px-4 py-3">
+                      <p className="font-semibold">{motivoRechazo}</p>
+                      <button
+                        onClick={solicitarNuevoQr}
+                        disabled={solicitandoQr}
+                        className="mt-2 inline-flex items-center gap-1.5 text-xs font-black text-[#1262bd] hover:underline disabled:opacity-50"
+                      >
+                        <Ic.QrCode size={13} /> {solicitandoQr ? "Solicitando…" : "Generar QR nuevo"}
+                      </button>
+                    </div>
+                  )}
                   <button onClick={() => setVerServidor(true)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold text-[#1262bd] hover:underline">
                     <Ic.Servidor size={13} /> ¿Cuál es el servidor y cómo lo enciendo?
                   </button>
                 </div>
+              </div>
+            )}
+            {/* La solicitud es una bandera en la BD: la atiende el worker cuando la ve. */}
+            {estado?.solicitar_relink && (
+              <div className="bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-2xl p-4 flex items-start gap-3">
+                <span className="text-xl">⏳</span>
+                <p className="text-sm font-semibold text-[#8a5a00]">
+                  QR nuevo solicitado.{" "}
+                  {workerVivo
+                    ? "El worker lo va a atender en unos segundos: el código aparece acá solo."
+                    : "Pero el worker no está respondiendo, así que nadie va a atenderlo — enciéndelo y lo hace apenas arranque."}
+                </p>
               </div>
             )}
 
@@ -2403,7 +2988,18 @@ export default function RadarIAPage() {
             {tab === "alertas" && (
               <TabAlertas alertas={alertas} onMarcarLeida={marcarAlertaLeida} onMarcarTodas={marcarTodasLeidas} />
             )}
-            {tab === "grupos" && <TabGrupos grupos={grupos} onToggle={toggleGrupo} onGuardarContexto={guardarContextoGrupo} />}
+            {tab === "grupos" && (
+              <TabGrupos
+                grupos={grupos}
+                estado={estado}
+                workerVivo={workerVivo}
+                sincronizando={sincronizandoGrupos}
+                onToggle={toggleGrupo}
+                onGuardarContexto={guardarContextoGrupo}
+                onSincronizar={solicitarSyncGrupos}
+                onEliminar={eliminarGrupo}
+              />
+            )}
             {tab === "configuracion" && (
               config ? (
                 <TabConfiguracion

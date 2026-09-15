@@ -14,20 +14,16 @@
 // vencido/por vencer — ver supabase/proveedor-documentos-autoservicio.sql.
 
 import { enviarEmail, enviarAvisoWhatsApp } from "@/lib/notificaciones";
+import { docSinVencimiento, etiquetaTipoDoc, tipoCanonico, tiposObligatorios } from "@/lib/documentos-estado";
 
 // ─── TIPOS OBLIGATORIOS ─────────────────────────────────────────────────────────
-// DEBE coincidir con TIPOS_DOC_TERCERO (obligatorio:true) en app/tercerizadas/page.tsx —
-// mismo trade-off que MODULOS en /api/crear-usuario vs. menuGrupos del layout: dos listas
-// independientes por vivir en lados (cliente/servidor) que no se importan entre sí.
-export const TIPOS_DOC_OBLIGATORIOS = [
-  "SOAT",
-  "Revisión Técnica (CITV)",
-  "Habilitación SUTRAN",
-  "Permiso Operación MTC",
-  "Tarjeta de Propiedad",
-  "SCTR Salud",
-  "SCTR Pensión",
-];
+// Ya NO es una copia a mano de app/tercerizadas/page.tsx: se DERIVA del catálogo único de
+// lib/documentos-estado.ts, que es un módulo puro (sin React) y por tanto sí se puede
+// importar desde el cron. La copia se mantuvo mientras el catálogo no existía; hoy solo
+// sería una lista más que se desincroniza — y la primera prueba fue este mismo cambio: al
+// renombrar "Habilitación SUTRAN" a TUC, la copia habría dejado de pedirle al proveedor el
+// documento con el que se sube a la carretera, en silencio y sin que nada fallara.
+export const TIPOS_DOC_OBLIGATORIOS = tiposObligatorios(true).map((t) => t.canonico);
 
 // ─── FECHAS / ESTADO ─────────────────────────────────────────────────────────────
 
@@ -36,14 +32,26 @@ export function diasPara(f: string | null | undefined): number | null {
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
 
-export type EstadoDoc = "vigente" | "por_vencer" | "vencido" | "sin_fecha";
+export type EstadoDoc = "vigente" | "por_vencer" | "vencido" | "sin_fecha" | "sin_vencimiento";
 
+/** Estado por FECHA suelta (habilitaciones de la empresa, que no son un tipo de documento). */
 export function estadoDoc(f: string | null | undefined): EstadoDoc {
   const d = diasPara(f);
   if (d === null) return "sin_fecha";
   if (d < 0) return "vencido";
   if (d <= 30) return "por_vencer";
   return "vigente";
+}
+
+/**
+ * Estado de una FILA de documento, que es distinto: el tipo decide antes que la fecha.
+ * Un documento que no caduca nunca sale "sin fecha" — no le falta un dato, es que no lo
+ * tiene. Es lo que le impedía al proveedor cerrar su checklist: el portal le pedía subir
+ * de nuevo una tarjeta de propiedad perfectamente válida, con una fecha que no existe.
+ */
+export function estadoDocumento(d: { tipo?: string | null; fecha_vencimiento?: string | null }): EstadoDoc {
+  if (docSinVencimiento(d.tipo)) return "sin_vencimiento";
+  return estadoDoc(d.fecha_vencimiento);
 }
 
 // "Día gatillo": para no mandar un correo distinto cada día mientras algo está por vencer,
@@ -75,7 +83,21 @@ export async function tokenVigentePara(admin: any, empresaId: number): Promise<s
 
   const token = generarToken();
   const expira = new Date(Date.now() + DIAS_VIGENCIA_TOKEN * 86400000).toISOString();
-  await admin.from("proveedor_tokens").insert({ empresa_id: empresaId, token, expira_en: expira });
+  // SE COMPRUEBA EL ERROR, y esto no es celo: si el insert falla —lo más probable, que
+  // `proveedor-documentos-autoservicio.sql` no se haya corrido y la tabla no exista— el
+  // `await` a secas se lo tragaba y esta función devolvía igual un token que NO ESTÁ GUARDADO
+  // EN NINGÚN SITIO. El correo salía con su enlace, el proveedor lo abría y leía "Este enlace
+  // no es válido o ya expiró". Mandarle a un tercero un link muerto con el membrete de AFA es
+  // peor que no mandarle nada: la próxima vez no abre el que sí sirve.
+  const { error } = await admin
+    .from("proveedor_tokens")
+    .insert({ empresa_id: empresaId, token, expira_en: expira });
+  if (error) {
+    throw new Error(
+      `No se pudo crear el enlace del proveedor (proveedor_tokens): ${error.message}. ` +
+      `Si la tabla no existe, falta correr supabase/proveedor-documentos-autoservicio.sql.`,
+    );
+  }
   return token;
 }
 
@@ -88,7 +110,7 @@ export function linkProveedor(token: string): string {
 // ─── DOCUMENTOS POR VENCER DE UNA EMPRESA ────────────────────────────────────────
 
 export type ItemVencimiento = {
-  claveDoc: string;           // "doc:<id>" | "auth_mtc" | "hab_sutran" — dedupe del aviso
+  claveDoc: string;           // "doc:<id>" | "auth_mtc" — dedupe del aviso
   documentoId: number | null;
   vehiculoId: number | null;
   vehiculoPlaca: string | null;
@@ -98,41 +120,60 @@ export type ItemVencimiento = {
   estado: "por_vencer" | "vencido";
 };
 
-/** Junta, para UNA empresa, los documentos obligatorios (propios + por unidad) y las
- *  habilitaciones MTC/SUTRAN que están vencidos o por vencer (≤30 días). */
+/** Junta, para UNA empresa, los documentos obligatorios (propios + por unidad) y su
+ *  autorización de transporte, que estén vencidos o por vencer (≤30 días). */
 export async function documentosPorVencerDeEmpresa(admin: any, empresa: {
-  id: number; venc_autorizacion?: string | null; venc_habilitacion?: string | null;
+  id: number; venc_autorizacion?: string | null;
 }): Promise<ItemVencimiento[]> {
   const items: ItemVencimiento[] = [];
 
+  // El filtro por tipo se hace en JS con `tipoCanonico()` y NO con un `.in("tipo", …)`: en la
+  // base el tipo es texto tecleado, así que un `.in` con las etiquetas de hoy se salta las
+  // filas escritas con el nombre viejo ("Habilitación SUTRAN") o sin tildes — que son
+  // exactamente las que nadie ha revisado. Un aviso que no se manda no se nota.
   const { data: docs } = await admin
     .from("documentos_tercero")
     .select("id, vehiculo_id, tipo, fecha_vencimiento")
     .eq("empresa_id", empresa.id)
-    .not("fecha_vencimiento", "is", null)
-    .in("tipo", TIPOS_DOC_OBLIGATORIOS);
+    .not("fecha_vencimiento", "is", null);
 
-  const vehIds = [...new Set((docs || []).map((d: any) => d.vehiculo_id).filter(Boolean))];
+  type FilaDoc = { id: number; vehiculo_id: number | null; tipo: string; fecha_vencimiento: string };
+  const obligatorios = new Set(TIPOS_DOC_OBLIGATORIOS);
+  const relevantes = ((docs || []) as FilaDoc[]).filter((d) => {
+    const t = tipoCanonico(d.tipo);
+    // La Tarjeta de Propiedad no caduca: pedirle al proveedor que la "renueve" es pedirle
+    // un trámite que no existe, y le enseña a ignorar el correo que sí importa. Si trae una
+    // fecha tecleada por error, se ignora igual — ver `sinVencimiento`.
+    return !!t && !t.sinVencimiento && obligatorios.has(t.canonico);
+  });
+
+  const vehIds = [...new Set(relevantes.map((d) => d.vehiculo_id).filter(Boolean))];
   const placaPorVeh: Record<number, string> = {};
   if (vehIds.length) {
     const { data: vehs } = await admin.from("vehiculos_tercero").select("id, placa").in("id", vehIds);
     for (const v of vehs || []) placaPorVeh[v.id] = v.placa;
   }
 
-  for (const d of docs || []) {
+  for (const d of relevantes) {
     const est = estadoDoc(d.fecha_vencimiento);
     if (est !== "por_vencer" && est !== "vencido") continue;
     items.push({
       claveDoc: `doc:${d.id}`, documentoId: d.id, vehiculoId: d.vehiculo_id,
       vehiculoPlaca: d.vehiculo_id ? placaPorVeh[d.vehiculo_id] ?? null : null,
-      tipo: d.tipo, fechaVencimiento: d.fecha_vencimiento,
+      // Se le escribe al proveedor con el nombre de HOY aunque su fila guarde el viejo: el
+      // correo se lee fuera del ERP, y "Habilitación SUTRAN" ya no es como se llama el papel.
+      tipo: etiquetaTipoDoc(d.tipo), fechaVencimiento: d.fecha_vencimiento,
       dias: diasPara(d.fecha_vencimiento)!, estado: est,
     });
   }
 
+  // "Autorización de transporte" y no "Autorización MTC": la firma el MTC, la ATU, un
+  // Gobierno Regional o una Municipalidad Provincial según el ámbito, y el correo lo lee el
+  // proveedor — pedirle a un operador de la ATU que renueve su "MTC" es pedirle un papel que
+  // no tiene. La antigua "Habilitación SUTRAN" ya no se avisa: SUTRAN fiscaliza, no autoriza,
+  // así que ese correo le pedía renovar algo que nadie le emite.
   for (const h of [
-    { clave: "auth_mtc", tipo: "Autorización MTC", f: empresa.venc_autorizacion },
-    { clave: "hab_sutran", tipo: "Habilitación SUTRAN (empresa)", f: empresa.venc_habilitacion },
+    { clave: "auth_mtc", tipo: "Autorización de transporte", f: empresa.venc_autorizacion },
   ]) {
     const est = estadoDoc(h.f);
     if (est !== "por_vencer" && est !== "vencido") continue;

@@ -108,14 +108,24 @@ export default function OdometroTerceroModal({
       if (!res.ok || !data.ok) throw new Error(data?.error || `Error ${res.status}`);
       if (!data.km) { alert("La IA no pudo leer el km con seguridad. Ingrésalo manualmente."); }
       else if (data.auto_ok === false) {
-        // No se pre-llena: el número no cuadra con el kilometraje de esta unidad.
-        alert(`El número leído (${Number(data.km).toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad${data.motivo_seleccion ? `:\n${data.motivo_seleccion}` : "."}\nRevisa la foto e ingrésalo a mano.`);
+        // No se pre-llena: el número no cuadra con el kilometraje de esta unidad. El titular
+        // sale del CÓDIGO (mismo criterio que /mantenimiento), no de olfatear el motivo.
+        const titular = data.codigo_seleccion === "digito_de_mas"
+          ? `A la lectura de la IA (${Number(data.km).toLocaleString("es-PE")}) le SOBRA UN DÍGITO para esta unidad`
+          : `El número leído (${Number(data.km).toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad`;
+        alert(`${titular}${data.motivo_seleccion ? `:\n${data.motivo_seleccion}` : "."}\nRevisa la foto e ingrésalo a mano.`);
       } else {
         setForm(f => ({ ...f, km: String(data.km), fuente: "whatsapp_foto" }));
         alert(
-          data.corregido
-            ? `Leído: ${Number(data.km).toLocaleString("es-PE")} km.\nLa foto mostraba dos contadores: se tomó el total y se descartó el parcial. Revisa antes de registrar.`
-            : `Leído: ${Number(data.km).toLocaleString("es-PE")} km (confianza ${data.confianza}). Revisa antes de registrar.`
+          // Mismo criterio que /mantenimiento: un número deducido se pre-llena, pero se dicen
+          // los DOS para que la persona lo coteje contra la foto que tiene delante.
+          data.codigo_seleccion === "digito_repetido"
+            ? `La IA leyó ${Number(data.km_ia).toLocaleString("es-PE")} y le sobra un dígito repetido.\n` +
+              `Se propone ${Number(data.km).toLocaleString("es-PE")} km, el único valor posible para esta unidad.\n\n` +
+              `COMPRUÉBALO CONTRA LA FOTO antes de registrar: lo dedujo el sistema, no lo leyó nadie.`
+            : data.corregido
+              ? `Leído: ${Number(data.km).toLocaleString("es-PE")} km.\nLa foto mostraba dos contadores: se tomó el total y se descartó el parcial. Revisa antes de registrar.`
+              : `Leído: ${Number(data.km).toLocaleString("es-PE")} km (confianza ${data.confianza}). Revisa antes de registrar.`
         );
       }
     } catch (e: any) {

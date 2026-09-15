@@ -3,15 +3,30 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Calendar, FileText, Pencil, Trash2, X } from "lucide-react";
+import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
+import { configAutoridad, etiquetaAutorizacion, type Autoridad } from "@/lib/autorizacion-transporte";
+import { Calculator, Calendar, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import {
   ESTADOS_RESERVA, ESTADOS_RESERVA_LISTA, ORDEN_ESTADO,
   ESTADOS_ADMIN, ESTADOS_ADMIN_LISTA, aplicaAdmin, ESTADO_ADMIN_INICIAL, etiquetaAdmin, siguienteAdmin,
 } from "@/lib/estados";
 import type { EstadoReserva, EstadoAdmin } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
+import {
+  guardarReservas, normalizarAsignacion, avisosDe, margenEnVivo, sugerirCosto, type TramoHermano,
+  describirResultado,
+} from "@/lib/reservas-pacto";
+import { planDeCancelacion, esCancelacion } from "@/lib/reservas-cancelacion";
+import {
+  cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxDeServicio,
+  normalizarNombreRuta, type CatalogoRutas, type PaxResuelto,
+} from "@/lib/liquidacion-rutas";
+import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
+import { planDeCanje, notaDeCanje, opuesto, efectoDeMarcarTramo } from "@/lib/reservas-canje";
+import { sumarDias } from "@/lib/odometro-analitica";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
-import ModalGenerarPrograma from "@/components/programacion/ModalGenerarPrograma";
+import ModalGenerarPrograma, { type ModoPrograma } from "@/components/programacion/ModalGenerarPrograma";
+import ModalCostear from "@/components/programacion/ModalCostear";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
@@ -153,7 +168,11 @@ type ParadaTP = {
 type Cliente            = { id: number; nombre: string; empresa?: string; tipo?: string; };
 type Vehiculo           = { id: number; placa: string; categoria?: string; estado?: string; estado_operativo?: string; capacidad_pasajeros?: number; };
 type Conductor          = { id: number; nombre: string; licencia?: string; vencimiento_licencia?: string; estado?: string; telefono?: string; };
-type EmpresaTercerizada = { id: number; razon_social: string; ruc?: string | null; telefono?: string | null; estado: string; };
+type EmpresaTercerizada = {
+  id: number; razon_social: string; ruc?: string | null; telefono?: string | null; estado: string;
+  // De tercerizadas-autorizacion-ambito.sql. Opcionales: el SELECT reintenta sin ellas.
+  autoridad_habilitante?: Autoridad | null; autoridad_emisor?: string | null;
+};
 type VehiculoTercero    = { id: number; empresa_id: number; placa: string; categoria?: string | null; capacidad?: number | null; estado: string; marca?: string | null; };
 type ConductorTercero   = { id: number; empresa_id: number; nombre: string; licencia?: string | null; vencimiento_licencia?: string | null; telefono?: string | null; estado: string; };
 type DocumentoTercero   = { id: number; empresa_id: number; tipo: string; fecha_vencimiento?: string | null; };
@@ -179,6 +198,34 @@ type Reserva = {
   reserva_vinculada_id?: number | null;
   direccion_servicio?: string | null;
   lote_generacion?: string | null;
+  ruta_nombre?: string | null;
+  /**
+   * contrato | adicional | contingencia. Sin esta marca, la salida extra que el
+   * cliente pidió a S/ 480 se fundía con las líneas del contrato en la liquidación y
+   * dejaba de existir como concepto (supabase/reservas-04-servicios-adicionales.sql).
+   * Opcional: si esa migración no se corrió, la columna no llega y se lee como
+   * 'contrato', que es el default de la base.
+   */
+  origen_contractual?: string | null;
+  /**
+   * Acuerdo de pago sobre una CANCELACIÓN (supabase/reservas-05-falso-flete.sql). Una
+   * cancelación vale S/ 0.00 y el importe por sí solo no autoriza nada: solo se paga con
+   * esta marca, que alguien escribe DESPUÉS de saber que el servicio se canceló. Opcional
+   * como las de arriba: sin esa migración la columna no llega y se lee como `false`.
+   */
+  falso_flete?: boolean | null;
+  /** La única constancia de por qué salió dinero por un viaje que no se prestó. */
+  falso_flete_motivo?: string | null;
+  /** De cuánto se partió al generarlo. Solo para poder mostrar la diferencia. */
+  precio_cotizado?: number | null;
+  /**
+   * Asientos que el cliente CONTRATÓ para este servicio. NO es la capacidad del bus que
+   * se le asignó: AFA asigna por disponibilidad, así que una ruta contratada para 15
+   * puede cubrirse un lunes con una unidad de 17 y el jueves con una de 20. Es lo que
+   * imprime la liquidación (el «N PAX» del AFA-FL-07).
+   * Opcional: la agrega supabase/liquidaciones-03-ruta-contratada.sql.
+   */
+  capacidad_contratada?: number | null;
 };
 
 type Ocupacion = {
@@ -200,7 +247,44 @@ const FORM_VACIO = {
   vehiculo_id: "", conductor_id: "",
   empresa_tercerizada_id: "", vehiculo_tercero_id: "", conductor_tercero_id: "",
   costo_proveedor: "", observaciones: "",
+  // El PRECIO DE VENTA no existía en ninguna pantalla del ERP: una vez creado el
+  // servicio, su precio era inmodificable. Por eso "el cliente pidió una unidad mayor"
+  // era literalmente irrepresentable y el operador solo podía cambiar el bus y callarse.
+  precio_cliente: "",
+  // Los asientos que el cliente CONTRATÓ. Tampoco existía en ninguna pantalla: se podía
+  // escribir al generar el programa y después solo desde el borrador de la liquidación,
+  // que es la última pantalla del mes y ya no vuelve al servicio. Vacío = "no lo sé",
+  // que NO es lo mismo que cero: el CHECK de la base rechaza el cero por eso.
+  capacidad_contratada: "",
+  // ── Qué pasa con el dinero de una CANCELACIÓN (lib/reservas-cancelacion.ts) ──
+  // Una cancelación vale S/ 0.00; el importe que quede cargado no se paga ni se cobra,
+  // pero SÍ ensucia `v_costo_servicio` y `v_egresos`, que lo leen sin preguntar si el
+  // servicio se prestó. `cancelacion_decision` es lo que el operador elige al cancelar;
+  // el monto del avance se teclea APARTE y arranca vacío a propósito — heredar el importe
+  // cargado pagaría el servicio completo donde el acuerdo era una fracción.
+  cancelacion_decision: "cero" as "cero" | "falso_flete",
+  cancelacion_monto: "",
+  falso_flete_motivo: "",
+  cambio_motivo: "", cambio_nota: "",
 };
+
+/** Motivos de un clic. Si declarar el porqué cuesta un párrafo, nadie lo declara. */
+const MOTIVOS_CAMBIO = [
+  { clave: "cliente_unidad_mayor",   nombre: "Cliente pidió unidad mayor",  lado: "ambos"  },
+  { clave: "cliente_unidad_menor",   nombre: "Cliente pidió unidad menor",  lado: "ambos"  },
+  { clave: "cliente_cambio_ruta",    nombre: "Cliente cambió ruta u hora",  lado: "ambos"  },
+  { clave: "proveedor_sin_unidad",   nombre: "Proveedor sin unidad",        lado: "compra" },
+  { clave: "proveedor_mejor_precio", nombre: "Proveedor más barato",        lado: "compra" },
+  { clave: "proveedor_incumplio",    nombre: "Proveedor incumplió",         lado: "compra" },
+  { clave: "precio_renegociado",     nombre: "Importe renegociado",         lado: "compra" },
+  { clave: "averia_unidad",          nombre: "Avería de la unidad",         lado: "compra" },
+  { clave: "correccion_carga",       nombre: "Corrección de un dato",       lado: "ambos"  },
+  // `lado: "venta"` lo deja SOLO en el modal de origen: el modal de edición filtra
+  // los de venta. No es un motivo de cambio de importe —no hay importe que mover en
+  // un canje—, es el porqué de que la etiqueta de contrato estuviera en el servicio
+  // equivocado. Sin FK contra pacto_motivo, igual que el resto (ver reservas-04).
+  { clave: "intercambio_contingencia", nombre: "Intercambio de unidad por contingencia", lado: "venta" },
+];
 
 // ─── CARGA ACOTADA (rendimiento) ────────────────────────────────────────────
 // La tabla `reservas` crece sin tope (los "Programa fijo" generan meses adelante).
@@ -219,7 +303,38 @@ const COLS_LISTA =
   "tipo_asignacion,empresa_tercerizada_id,vehiculo_tercero_id,conductor_tercero_id," +
   "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
   "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
-  "lote_generacion,origen,destino";
+  "lote_generacion,origen,destino,ruta_nombre,origen_contractual,precio_cotizado," +
+  "capacidad_contratada,falso_flete,falso_flete_motivo";
+
+// Columnas de `reservas` cuya migración es OPCIONAL. PostgREST rechaza el select
+// entero por una columna desconocida, así que pedirlas sin red dejaría la pantalla
+// de Reservas en blanco en cualquier entorno donde el SQL todavía no se corrió.
+// Se reintenta sin ellas: la lista se pinta igual, solo sin el chip de origen.
+const COLS_OPCIONALES = [
+  "origen_contractual", "precio_cotizado", "capacidad_contratada",
+  "falso_flete", "falso_flete_motivo",
+];
+
+const quitarColumna = (cols: string, col: string) =>
+  cols.split(",").map(c => c.trim()).filter(c => c !== col).join(",");
+
+const columnaFaltante = (msg: string) =>
+  COLS_OPCIONALES.find(c => new RegExp(`\\b${c}\\b`, "i").test(msg)) ?? null;
+
+/** 'contrato' cuando la columna no existe o viene vacía: es el default de la base. */
+const origenDe = (r: { origen_contractual?: string | null }) =>
+  String(r.origen_contractual || "contrato");
+const esAdicional = (r: { origen_contractual?: string | null }) => origenDe(r) !== "contrato";
+
+// ── Qué se cambia de cada lado al reclasificar el origen ────────────────────
+// El día entero (por defecto) o solo el tramo que el operador marcó. Todo lo que
+// escribe o calcula pasa por aquí: si `todos` se usara en un sitio y `ids` en otro,
+// la pantalla mostraría un plan y la base recibiría otro. Fuera del componente para
+// que su identidad sea estable y los useMemo del modal no dependan de ellas.
+const ladoPropio = (m: { soloTramo: boolean; ids: number[]; todos: number[] }) =>
+  m.soloTramo ? m.ids : m.todos;
+const ladoContraparte = (m: { soloTramo: boolean; elegido: number | null; contraparte: number[] }) =>
+  m.soloTramo ? (m.elegido != null ? [m.elegido] : []) : m.contraparte;
 
 // Proyección ultraligera para los agregados globales (KPIs, flujo de estados, sumas).
 const COLS_RESUMEN = "id,estado,estado_admin,fecha_servicio,precio_cliente,costo_proveedor,margen,sincronizado_app";
@@ -364,10 +479,22 @@ function Campo({ label, span, children }: { label: string; span?: number; childr
   );
 }
 
+// La lista literal que había aquí estaba SIN TILDES ("Revision Tecnica (CITV)",
+// "Habilitacion SUTRAN", "Permiso Operacion MTC") y los datos de `documentos_tercero` SÍ las
+// llevan, así que ese `includes()` solo acertaba con "SOAT": tres de los cuatro documentos
+// obligatorios eran invisibles para esta pantalla, en silencio, desde siempre. Es el defecto
+// que lib/documentos-estado.ts documenta como PROBLEMA 2, punto 4. Se deriva del catálogo y
+// se compara por etiqueta canónica, que es lo único que sobrevive a cómo se teclea el tipo.
+const OBLIGATORIOS_PROG = new Set(tiposObligatorios(true).map(t => t.canonico));
+
 function riesgoEmpresa(docs: DocumentoTercero[], empresaId: number): "alto" | "ok" {
-  const OBLIGATORIOS = ["SOAT", "Revision Tecnica (CITV)", "Habilitacion SUTRAN", "Permiso Operacion MTC"];
-  const docsEmp = docs.filter(d => d.empresa_id === empresaId);
-  const vencidos = docsEmp.filter(d => OBLIGATORIOS.includes(d.tipo) && diasPara(d.fecha_vencimiento || null) !== null && diasPara(d.fecha_vencimiento || null)! < 0);
+  const vencidos = docs.filter(d =>
+    d.empresa_id === empresaId &&
+    // La Tarjeta de Propiedad no caduca: una fecha suya tecleada por error marcaría en rojo
+    // a un proveedor en regla.
+    !docSinVencimiento(d.tipo) &&
+    OBLIGATORIOS_PROG.has(etiquetaTipoDoc(d.tipo)) &&
+    (diasPara(d.fecha_vencimiento || null) ?? 1) < 0);
   return vencidos.length > 0 ? "alto" : "ok";
 }
 
@@ -401,6 +528,20 @@ export default function ReservasPage() {
   const [conductores,  setConductores]  = useState<Conductor[]>([]);
   const [empresasTer,  setEmpresasTer]  = useState<EmpresaTercerizada[]>([]);
   const [vehTercero,   setVehTercero]   = useState<VehiculoTercero[]>([]);
+  /** Aviso de las migraciones del Pacto pendientes. No bloquea: informa. */
+  const [msgPacto, setMsgPacto] = useState("");
+  /**
+   * Avisos que SOBREVIVEN al cierre del formulario. `msgPacto` se pinta dentro de
+   * `{mostrarForm && editandoId && …}`, y todos los caminos de guardado llaman a
+   * `limpiar()` justo después de emitirlo: el aviso no llegaba a verse nunca —incluido
+   * el de "los PAX no llegaron a su tramo hermano", que es el único reporte de un día
+   * escrito a medias— y encima quedaba pegado en el estado, así que reaparecía sobre el
+   * SIGUIENTE servicio acusándolo de un fallo ajeno. Este se pinta a nivel de página.
+   */
+  const [avisoPagina, setAvisoPagina] = useState("");
+  const avisar = (t: string) => setAvisoPagina(t);
+  /** Último costo pactado con el proveedor elegido — el tarifario de compra ya existe. */
+  const [costoSug, setCostoSug] = useState<{ costo: number; base: string; dias: number } | null>(null);
   const [condTercero,  setCondTercero]  = useState<ConductorTercero[]>([]);
   const [docsTercero,  setDocsTercero]  = useState<DocumentoTercero[]>([]);
   const [otPendientePorVeh, setOtPendientePorVeh] = useState<Set<number>>(new Set()); // vehiculo_id (flota propia) con OT abierta
@@ -435,9 +576,14 @@ export default function ReservasPage() {
   const [filtroTipo,   setFiltroTipo]   = useState("todos");
   const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
   const [filtroSentido, setFiltroSentido] = useState<"todos" | "ida" | "retorno">("todos");
+  const [filtroOrigen,  setFiltroOrigen]  = useState<"todos" | "contrato" | "adicional">("todos");
   const [form, setForm] = useState(FORM_VACIO);
   const [modalReservaId,       setModalReservaId]       = useState<number | null>(null);
-  const [mostrarModalPrograma, setMostrarModalPrograma] = useState(false);
+  // El mismo modal en dos modos. null = cerrado. Ver ModalGenerarPrograma.Props.modo.
+  const [modoPrograma, setModoPrograma] = useState<ModoPrograma | null>(null);
+  // Costear un servicio de flota propia. En tercerizado no aplica: ahí el costo es
+  // el importe pactado con el proveedor, que ya tiene su campo.
+  const [costearId, setCostearId] = useState<number | null>(null);
   const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
   const [modalLinksId,         setModalLinksId]         = useState<number | null>(null);
   const [confirmEliminarId,    setConfirmEliminarId]    = useState<number | null>(null);
@@ -461,6 +607,39 @@ export default function ReservasPage() {
   const [textoConfirmLote, setTextoConfirmLote] = useState("");
   const [eliminandoLote,  setEliminandoLote]  = useState(false);
   const [ultimoLote,      setUltimoLote]      = useState<{ lote: string; cantidad: number } | null>(null);
+  // ── Reclasificar el origen de servicios ya creados ───────────────────────
+  // Los adicionales de meses pasados nacieron como 'contrato' porque la opción no
+  // existía. Quien sabe cuáles son es el operador, no el sistema: esto es la forma
+  // de que lo declare sin tocar la base a mano.
+  //
+  // El modo CANJE es el otro camino del mismo modal: cuando la etiqueta no está de
+  // más sino en el servicio equivocado (dos servicios del mismo día que se
+  // intercambiaron las unidades por una contingencia), lo correcto es que los dos se
+  // cambien a la vez. Ver lib/reservas-canje.ts.
+  const [modalOrigen, setModalOrigen] = useState<{
+    destino: "adicional" | "contrato";
+    ids: number[];      // lo que el operador marcó
+    todos: number[];    // …más los tramos hermanos: el día entero, no medio día
+    liquidadas: { id: number; codigo: string | null; estado: string; cuantas: number }[];
+    cargando: boolean;
+    /**
+     * No arrastrar al hermano: cambiar SOLO el tramo marcado. Apagado por defecto,
+     * porque la unidad que se cobra es el día. Encendido es el caso fino: lo que
+     * cambió de manos fue un tramo, y marcar los dos diría más de lo que pasó.
+     */
+    soloTramo: boolean;
+    // ── Canje ───────────────────────────────────────────────────────────────
+    canje: boolean;                 // el operador pidió intercambiar, no solo marcar
+    candidatos: Reserva[] | null;   // null = todavía no se buscaron
+    cargandoCandidatos: boolean;
+    sinColumna: boolean;            // la migración de reservas-04 no está corrida
+    elegido: number | null;         // la contraparte que marcó
+    contraparte: number[];          // …con sus tramos hermanos
+    filas: Record<number, Reserva>; // datos de todos los implicados (código, importe)
+  } | null>(null);
+  const [origenMotivo,    setOrigenMotivo]    = useState("");
+  const [origenNota,      setOrigenNota]      = useState("");
+  const [aplicandoOrigen, setAplicandoOrigen] = useState(false);
   // ── Paradas inline ──────────────────────────────────────────────────────
   const mapsLoaded = useGoogleMapsLoaded();
   const [nuevoParNombre,       setNuevoParNombre]       = useState<Record<number, string>>({});
@@ -475,11 +654,37 @@ export default function ReservasPage() {
     otrasReservas: Reserva[];   // todos los servicios activos del contrato (sin filtrar)
     horaOriginal: string;       // hora del servicio editado, antes de guardar
     resumen: string;            // "Vehículo · Conductor" para mostrar en el modal
+    /**
+     * PAX contratados, SOLO si el operador acaba de cambiarlos. null cuando no los tocó:
+     * propagarlos siempre pisaría en 30 servicios una capacidad que alguien corrigió día
+     * por día. Cuando sí los tocó es al revés — el pax es del CONTRATO, y corregirlo de a
+     * uno en 30 fechas es lo que hace que nadie lo corrija.
+     */
+    pax: number | null;
+    paxTocado: boolean;
+    /**
+     * Lo que este servicio decía ANTES. Es lo que distingue "corregir la capacidad de
+     * esta ruta" de "pisarle la suya a otro móvil": una misma cotización puede tener
+     * tres ítems con pax distinto, y el masivo no filtra por móvil. Ver `aceptaPax`.
+     */
+    paxAntes: number | null;
+    /**
+     * Los nombres de ruta del día editado (los dos tramos), normalizados. Acotan la
+     * propagación del pax a SU ruta: una cotización puede tener varias, y las de un
+     * contrato viejo tienen todas la capacidad en NULL. Vacío = no hay con qué comparar.
+     */
+    rutasObjetivo: string[];
   } | null>(null);
   const [aplicarScope,         setAplicarScope]         = useState<"todos" | "rango">("todos");
   const [aplicarDesde,         setAplicarDesde]         = useState("");
   const [aplicarHasta,         setAplicarHasta]         = useState("");
-  const [aplicarCampos,        setAplicarCampos]        = useState<"todo" | "conductor">("todo");
+  /**
+   * "pax" es su propio modo, y no una casilla más sobre "todo": quien viene solo a
+   * corregir los asientos contratados no quiere de paso reescribir el vehículo y el
+   * conductor de 30 fechas. Solo se ofrece cuando el pax se acaba de tocar.
+   */
+  const [aplicarCampos,        setAplicarCampos]        = useState<"todo" | "conductor" | "pax">("todo");
+  const [aplicarPax,           setAplicarPax]           = useState(true);
   const [aplicarOtraHora,      setAplicarOtraHora]      = useState(false);
   const [aplicarOtraUnidad,    setAplicarOtraUnidad]    = useState(false);
   const [aplicando,            setAplicando]            = useState(false);
@@ -1068,15 +1273,26 @@ export default function ReservasPage() {
     const otrosIds     = targets.filter(r => r.estado !== "pendiente").map(r => r.id);
     const BATCH = 50;
 
-    const asignBase = { vehiculo_id: Number(asignarVehId), conductor_id: asignarCondId ? Number(asignarCondId) : null, tipo_asignacion: "propio" };
+    // Asignar flota propia en bloque: normalizarAsignacion pone tipo='propia' y limpia
+    // el lado tercerizado. Sin eso, un servicio que venía de un proveedor se quedaba con
+    // su empresa y su costo pegados mientras lo operaba un bus de AFA — y la liquidación
+    // al proveedor cobraba un servicio que nunca prestó.
+    const asignBase = normalizarAsignacion({
+      vehiculo_id: Number(asignarVehId),
+      conductor_id: asignarCondId ? Number(asignarCondId) : null,
+      tipo_asignacion: "propio",
+      empresa_tercerizada_id: null, vehiculo_tercero_id: null, conductor_tercero_id: null,
+    }, vehTercero);
 
-    for (let i = 0; i < pendienteIds.length; i += BATCH) {
-      const { error } = await supabase.from("reservas").update({ ...asignBase, estado: "programada" }).in("id", pendienteIds.slice(i, i + BATCH));
-      if (error) { alert("Error: " + error.message); setAsignando(false); return; }
-    }
-    for (let i = 0; i < otrosIds.length; i += BATCH) {
-      const { error } = await supabase.from("reservas").update(asignBase).in("id", otrosIds.slice(i, i + BATCH));
-      if (error) { alert("Error: " + error.message); setAsignando(false); return; }
+    const cambio = { motivo: "correccion_carga", nota: "Asignación de flota propia en bloque" };
+    const resP = await guardarReservas(supabase, pendienteIds, { ...asignBase, estado: "programada" }, cambio);
+    const resO = await guardarReservas(supabase, otrosIds, asignBase, cambio);
+    const rechazos = [...resP.rechazos, ...resO.rechazos];
+    if (resP.aviso || resO.aviso) setMsgPacto(resP.aviso || resO.aviso || "");
+    if (rechazos.length > 0) {
+      alert(`${rechazos.length} servicio(s) no se pudieron asignar:\n` +
+            rechazos.slice(0, 5).map(x => `#${x.id}: ${x.motivo}`).join("\n"));
+      setAsignando(false); return;
     }
 
     const allIds = targets.map(r => r.id);
@@ -1096,13 +1312,22 @@ export default function ReservasPage() {
   // filtros (rango de fechas, cotización…). El orden fecha desc + id desc es determinista,
   // así el paginado no repite ni se salta filas.
   const fetchReservasCols = async (cols: string, aplica: (q: any) => any): Promise<any[]> => {
+    // `colsUso` puede encogerse: ver COLS_OPCIONALES. Se reintenta la PRIMERA página
+    // hasta que el select sea aceptable, y el resto ya se pide con esas columnas.
+    let colsUso = cols;
     const base = (withCount: boolean) => aplica(
       supabase.from("reservas")
-        .select(cols, withCount ? { count: "exact" } : undefined)
+        .select(colsUso, withCount ? { count: "exact" } : undefined)
         .order("fecha_servicio", { ascending: false })
         .order("id", { ascending: false })
     );
-    const first = await base(true).range(0, PAGE_SUPABASE - 1);
+    let first = await base(true).range(0, PAGE_SUPABASE - 1);
+    for (let i = 0; first.error && i < COLS_OPCIONALES.length; i++) {
+      const falta = columnaFaltante(String(first.error.message));
+      if (!falta || !colsUso.split(",").some(c => c.trim() === falta)) break;
+      colsUso = quitarColumna(colsUso, falta);
+      first = await base(true).range(0, PAGE_SUPABASE - 1);
+    }
     if (first.error || !first.data) return [];
     const all: any[] = [...first.data];
     if (first.count != null) {
@@ -1162,8 +1387,16 @@ export default function ReservasPage() {
     if (ids.length === 0) return [];
     const out: any[] = [];
     for (let i = 0; i < ids.length; i += 300) {
-      const { data } = await supabase.from("reservas").select(COLS_LISTA).in("id", ids.slice(i, i + 300));
-      if (data) out.push(...data);
+      const trozo = ids.slice(i, i + 300);
+      let colsUso = COLS_LISTA;
+      let r = await supabase.from("reservas").select(colsUso).in("id", trozo);
+      for (let j = 0; r.error && j < COLS_OPCIONALES.length; j++) {
+        const falta = columnaFaltante(String(r.error.message));
+        if (!falta) break;
+        colsUso = quitarColumna(colsUso, falta);
+        r = await supabase.from("reservas").select(colsUso).in("id", trozo);
+      }
+      if (r.data) out.push(...r.data);
     }
     return out as Reserva[];
   };
@@ -1211,7 +1444,18 @@ export default function ReservasPage() {
       supabase.from("clientes").select("id,nombre,empresa,tipo").order("nombre"),
       supabase.from("vehiculos").select("id,placa,categoria,estado,estado_operativo,capacidad_pasajeros").order("placa"),
       supabase.from("conductores").select("id,nombre,licencia,vencimiento_licencia,estado,telefono").order("nombre"),
-      supabase.from("empresas_tercerizadas").select("id,razon_social,ruc,telefono,estado").order("razon_social"),
+      // Las columnas del alcance son accesorias: si el SQL no se corrió, este select falla y
+      // se llevaría por delante TODO el catálogo de la pantalla. Se reintenta sin ellas.
+      // Aquí sí se puede encadenar el reintento porque se mira `r.error` del builder crudo.
+      // OJO si alguien lo pasa a `paginarFilas`: ese helper NO lanza y NO propaga el error
+      // (lib/huella.ts:89) — devuelve [] en silencio, y así fue como /tercerizadas se quedó
+      // sin un solo proveedor en pantalla. Con `paginarFilas` hay que SONDEAR antes.
+      supabase.from("empresas_tercerizadas")
+        .select("id,razon_social,ruc,telefono,estado,autoridad_habilitante,autoridad_emisor")
+        .order("razon_social")
+        .then((r: { error: unknown }) => r.error
+          ? supabase.from("empresas_tercerizadas").select("id,razon_social,ruc,telefono,estado").order("razon_social")
+          : r),
       supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,capacidad,estado,marca").order("placa"),
       supabase.from("conductores_tercero").select("id,empresa_id,nombre,licencia,vencimiento_licencia,telefono,estado").order("nombre"),
       supabase.from("documentos_tercero").select("id,empresa_id,tipo,fecha_vencimiento"),
@@ -1308,7 +1552,7 @@ export default function ReservasPage() {
 
   // Al cambiar cualquier filtro de cliente (búsqueda, estado, tipo…) se vuelve a mostrar
   // desde las primeras 100 filas, para que "Cargar más" no arrastre el conteo anterior.
-  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroPorAsignar]);
+  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, filtroPorAsignar]);
 
   const nombreCliente    = (id: number | null) => { const c = clientes.find(c => c.id === id); return c ? (c.empresa || c.nombre) : "Sin cliente"; };
   const nombreVehiculo   = (id: number | null) => vehiculos.find(v => v.id === id)?.placa || "-";
@@ -1327,7 +1571,9 @@ export default function ReservasPage() {
   const condEmpSel   = empSelId ? condTercero.filter(c => c.empresa_id === empSelId) : [];
   const riesgoEmpSel = empSelId ? riesgoEmpresa(docsTercero, empSelId) : "ok";
 
-  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); };
+  // `msgPacto` es del servicio que se está editando: si no se borra, el banner ámbar del
+  // anterior aparece sobre el siguiente, acusándolo de un problema que no es suyo.
+  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); setMsgPacto(""); };
 
   const setRangoRapido = (tipo: "hoy" | "semana" | "7dias" | "mes" | "limpiar") => {
     if (tipo === "limpiar") { setFiltroDesde(""); setFiltroHasta(""); return; }
@@ -1366,10 +1612,345 @@ export default function ReservasPage() {
       conductor_tercero_id:   r.conductor_tercero_id      ? String(r.conductor_tercero_id)      : "",
       costo_proveedor:        r.costo_proveedor           ? String(r.costo_proveedor)           : "",
       observaciones:          r.observaciones             || "",
+      precio_cliente:         r.precio_cliente            ? String(r.precio_cliente)            : "",
+      // Solo lo ESCRITO en esta fila. Lo que resuelve la cascada (el hermano, la
+      // cotización, la ficha de la ruta) se muestra al lado como referencia, pero no se
+      // precarga: precargarlo lo convertiría en un dato escrito a mano en cuanto el
+      // operador guarde cualquier otra cosa, y entonces corregir el contrato en la ficha
+      // ya no arreglaría este servicio.
+      capacidad_contratada:   r.capacidad_contratada != null ? String(r.capacidad_contratada)   : "",
+      // El acuerdo que YA está escrito manda sobre el default. Sin esto, abrir un servicio
+      // cancelado con falso flete y guardar cualquier otra cosa lo retiraría en silencio —
+      // y con él, el pago acordado al proveedor.
+      cancelacion_decision:   r.falso_flete === true ? "falso_flete" : "cero",
+      // El monto SÍ se precarga cuando el acuerdo ya existe: ahí no es "el importe que dejó
+      // el error", es el avance que alguien pactó y dejó escrito. Lo que nunca se hereda es
+      // el importe de un servicio SIN acuerdo (ver lib/reservas-cancelacion.ts).
+      cancelacion_monto:      r.falso_flete === true && r.costo_proveedor ? String(r.costo_proveedor) : "",
+      falso_flete_motivo:     r.falso_flete_motivo || "",
+      // El motivo es de CADA cambio: se arranca en blanco para que no quede pegado el
+      // de la edición anterior y termine sustentando algo que no ocurrió.
+      cambio_motivo: "", cambio_nota: "",
     });
+    setCostoSug(null);
+    setMsgPacto("");
     setEditandoId(r.id); setMostrarForm(true);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
+
+  // ── Autocompletado del costo ──────────────────────────────────────────────
+  // Es lo ÚNICO del Pacto que le AHORRA trabajo al operador, y por eso es lo que hace
+  // que la regla se cumpla: hoy ese número vive en la cabeza de una persona y se teclea
+  // de memoria (o no se teclea). Al elegir empresa, se propone lo último realmente
+  // pactado con ella en esa ruta. No pisa un importe ya escrito.
+  useEffect(() => {
+    const emp = Number(form.empresa_tercerizada_id) || null;
+    if (form.tipo_asignacion !== "tercerizado" || !emp) { setCostoSug(null); return; }
+    let vivo = true;
+    (async () => {
+      const r = reservas.find(x => x.id === editandoId);
+      const s = await sugerirCosto(supabase, emp, r?.ruta_nombre ?? null,
+        form.vehiculo_tercero_id ? Number(form.vehiculo_tercero_id) : null);
+      if (!vivo) return;
+      setCostoSug(s);
+      // Se rellena solo si el campo está vacío: nunca se pisa lo que el operador escribió.
+      if (s && !form.costo_proveedor) setForm(p => ({ ...p, costo_proveedor: String(s.costo) }));
+    })();
+    return () => { vivo = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.empresa_tercerizada_id, form.vehiculo_tercero_id, form.tipo_asignacion, editandoId]);
+
+  /** Sugerencia de motivo según lo que se está moviendo. Un clic, no un párrafo. */
+  const motivoSugerido = useMemo(() => {
+    const r = reservas.find(x => x.id === editandoId);
+    if (!r) return null;
+    const empCambio = String(r.empresa_tercerizada_id ?? "") !== String(form.empresa_tercerizada_id ?? "");
+    if (empCambio && r.empresa_tercerizada_id) return "proveedor_sin_unidad";
+    const capAntes = vehTercero.find(v => v.id === r.vehiculo_tercero_id)?.capacidad ?? null;
+    const capAhora = vehTercero.find(v => v.id === Number(form.vehiculo_tercero_id))?.capacidad ?? null;
+    if (capAntes != null && capAhora != null && capAhora > capAntes) return "cliente_unidad_mayor";
+    if (capAntes != null && capAhora != null && capAhora < capAntes) return "cliente_unidad_menor";
+    return null;
+  }, [form.empresa_tercerizada_id, form.vehiculo_tercero_id, editandoId, reservas, vehTercero]);
+
+  /** Margen en vivo, normalizado por afectación: sin eso se equivoca hasta en 30 %. */
+  const margenVivo = useMemo(() => {
+    const r = reservas.find(x => x.id === editandoId);
+    const emp: any = empresasTer.find(e => e.id === Number(form.empresa_tercerizada_id));
+    const precio = form.precio_cliente !== "" ? form.precio_cliente : (r?.precio_cliente ?? 0);
+    const antes = margenEnVivo(r?.precio_cliente ?? 0, r?.costo_proveedor ?? 0, {
+      compraAfectacion: (r as any)?.compra_afectacion, emiteFactura: emp?.emite_factura !== false,
+    });
+    const ahora = margenEnVivo(precio, form.costo_proveedor, {
+      compraAfectacion: emp?.afectacion_defecto, emiteFactura: emp?.emite_factura !== false,
+    });
+    return { antes, ahora, afectacion: (emp?.afectacion_defecto ?? "10") as CodigoAfectacion };
+  }, [form.precio_cliente, form.costo_proveedor, form.empresa_tercerizada_id, editandoId, reservas, empresasTer]);
+
+  /**
+   * El OTRO tramo del día del servicio que se está editando.
+   *
+   * Sin él, los avisos mienten: AFA cobra UNA tarifa por la ida y el retorno, así que el
+   * tramo que no la lleva va en S/ 0.00 a propósito. Juzgando la reserva aislada, todo
+   * retorno disparaba "sin costo pactado" — un rojo permanente y falso que invitaba a
+   * "arreglarlo" cargando el importe dos veces, que es cobrar el día dos veces.
+   *
+   * Se busca primero en lo ya cargado; si el filtro de la pantalla lo dejó fuera, se
+   * pide esa sola fila.
+   */
+  /**
+   * El id del otro tramo, por los DOS SENTIDOS del enlace.
+   *
+   * `reserva_vinculada_id` se escribe en los dos lados, pero en dos pasos (el generador
+   * inserta las idas, después los retornos apuntando a su ida y recién al final actualiza
+   * las idas), y borrar un tramo deja el enlace del superviviente en NULL. Cuando queda
+   * escrito en un solo lado y se sigue solo hacia adelante, el tramo que no lo lleva se
+   * ve SUELTO: un retorno en S/ 0.00 sin hermano dispara "sin precio de venta" y quien
+   * viene a arreglarlo le carga la tarifa — que es cobrarle al cliente el día dos veces.
+   */
+  const hermanoId = useMemo(() => {
+    if (!editandoId) return null;
+    const r = reservas.find((x) => x.id === editandoId);
+    const adelante = Number((r as any)?.reserva_vinculada_id ?? 0);
+    if (adelante) return adelante;
+    // Hacia atrás solo si es inequívoco: con dos filas apuntando a la misma, el enlace
+    // está roto de otra forma y elegir una sería adivinar.
+    const inverso = reservas.filter((x) => Number((x as any).reserva_vinculada_id ?? 0) === Number(editandoId));
+    return inverso.length === 1 ? inverso[0].id : null;
+  }, [editandoId, reservas]);
+
+  /** Si ya está en la tabla cargada, se DERIVA: no hace falta estado ni una consulta. */
+  const hermanoLocal = useMemo<TramoHermano>(() => {
+    if (!hermanoId) return null;
+    const l = reservas.find((x) => x.id === Number(hermanoId));
+    return l
+      ? {
+          id: l.id, codigo: idAfa(l), direccion_servicio: (l as any).direccion_servicio,
+          estado: l.estado, precio_cliente: l.precio_cliente, costo_proveedor: l.costo_proveedor,
+          // El generador escribe la capacidad contratada SOLO en la ida: sin traerla de
+          // aquí, todo retorno se abriría diciendo "sin dato" y el operador la volvería a
+          // teclear —o teclearía otra, que la liquidación descarta en silencio porque
+          // mira la ida primero.
+          capacidad_contratada: l.capacidad_contratada ?? null,
+          ruta_nombre: l.ruta_nombre ?? null,
+        }
+      : null;
+  }, [hermanoId, reservas]);
+
+  /**
+   * Solo cuando el filtro de la pantalla lo dejó fuera se pide esa única fila. Y si acá no
+   * se conoce ningún id —el enlace está escrito solo en el otro tramo, que además no está
+   * cargado— se pregunta por ese sentido: quién apunta a este servicio.
+   */
+  const [hermanoRemoto, setHermanoRemoto] = useState<{ para: number; tramo: TramoHermano } | null>(null);
+  useEffect(() => {
+    if (!editandoId || hermanoLocal) return;
+    let vivo = true;
+    (async () => {
+      let cols = "id,codigo,direccion_servicio,estado,precio_cliente,costo_proveedor," +
+                 "fecha_servicio,ruta_nombre,capacidad_contratada";
+      // Con dos filas apuntando a este servicio el enlace está roto de otra forma: no se
+      // elige ninguna, porque adivinar acá es escribir dinero en el tramo equivocado.
+      const pedir = () => {
+        const q = supabase.from("reservas").select(cols);
+        return (hermanoId ? q.eq("id", hermanoId) : q.eq("reserva_vinculada_id", editandoId)).limit(2);
+      };
+      let res = await pedir();
+      // `capacidad_contratada` es de una migración opcional, y PostgREST rechaza el select
+      // ENTERO por una columna que no existe: sin este reintento, el chip del hermano
+      // —que es lo que impide cobrar el día dos veces— desaparecería de la pantalla.
+      for (let i = 0; res.error && i < COLS_OPCIONALES.length; i++) {
+        const falta = columnaFaltante(String(res.error.message));
+        if (!falta || !cols.split(",").some(c => c.trim() === falta)) break;
+        cols = quitarColumna(cols, falta);
+        res = await pedir();
+      }
+      if (!vivo) return;
+      const filas = (res.data ?? []) as TramoHermano[];
+      setHermanoRemoto({ para: Number(editandoId), tramo: filas.length === 1 ? filas[0] : null });
+    })();
+    return () => { vivo = false; };
+  }, [editandoId, hermanoId, hermanoLocal]);
+
+  // Se compara contra QUÉ servicio se pidió: así, al saltar de uno a otro, nunca se
+  // muestra por un instante el hermano del anterior.
+  const hermano: TramoHermano =
+    hermanoLocal ?? (hermanoRemoto?.para === Number(editandoId) ? hermanoRemoto.tramo : null);
+
+  // ── PAX CONTRATADOS ────────────────────────────────────────────────────────
+  // De dónde sale el número cuando este servicio no lo trae escrito. Es la MISMA
+  // cascada que aplica la liquidación (lib/liquidacion-rutas.ts), resuelta para un
+  // servicio suelto. Sin ella el campo diría "vacío" sobre un contrato que sí declara
+  // sus 15 asientos en la cotización, y el operador escribiría a mano un dato que ya
+  // existe — o, peor, uno distinto.
+  const reservaEditada = useMemo(
+    () => reservas.find(x => x.id === editandoId) ?? null,
+    [reservas, editandoId]
+  );
+  const [ctxPax, setCtxPax] = useState<{
+    para: number;
+    paxCotizacion: Map<number, number>;
+    catalogo: CatalogoRutas | null;
+  } | null>(null);
+
+  useEffect(() => {
+    const cot = reservaEditada?.cotizacion_id ?? null;
+    const cli = reservaEditada?.cliente_id ?? null;
+    // No se limpia el contexto anterior: se compara contra QUÉ servicio se pidió (`para`),
+    // igual que con el hermano, así al saltar de un servicio a otro nunca se muestra por
+    // un instante el pax del anterior.
+    if (!editandoId) return;
+    let vivo = true;
+    (async () => {
+      // Ninguna de las dos lanza: son escalones OPCIONALES de la cascada (la tabla
+      // cliente_ruta puede no existir todavía) y su ausencia solo la acorta.
+      const [paxCotizacion, catalogo] = await Promise.all([
+        cot ? cargarPaxDeCotizaciones(supabase, [cot]) : Promise.resolve(new Map<number, number>()),
+        cli ? cargarRutasContratadas(supabase, [cli]) : Promise.resolve(null),
+      ]);
+      if (!vivo) return;
+      setCtxPax({ para: Number(editandoId), paxCotizacion, catalogo });
+    })();
+    return () => { vivo = false; };
+  }, [editandoId, reservaEditada?.cotizacion_id, reservaEditada?.cliente_id]);
+
+  /**
+   * Lo que el campo va a mandar. null = "no lo sé", que NO es cero: el CHECK de la base
+   * rechaza el cero justamente para que no se confundan las dos cosas.
+   */
+  const paxDelForm = useMemo(() => {
+    const t = form.capacidad_contratada.trim();
+    if (t === "") return null;
+    const n = Number(t);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  }, [form.capacidad_contratada]);
+
+  /** Solo se manda si cambió: escribirlo siempre pisaría el dato en cada guardado. */
+  const paxTocadoForm = paxDelForm !== (reservaEditada?.capacidad_contratada ?? null);
+
+  /**
+   * ── QUÉ PASA CON EL DINERO SI ESTE SERVICIO QUEDA CANCELADO ────────────────────────
+   *
+   * La regla vive entera en lib/reservas-cancelacion.ts (motor puro, con su matriz). Acá
+   * solo se le entrega lo que va a quedar guardado y se pinta lo que devuelve.
+   *
+   * Se juzga contra el FORMULARIO y no contra la base, igual que los avisos: cancelar y
+   * guardar es un solo acto, así que la decisión sobre el importe tiene que ofrecerse en
+   * el mismo momento — que además es el único en que quien cancela sabe si el bus llegó a
+   * salir. Preguntarlo después es preguntárselo a alguien que ya no se acuerda.
+   */
+  const planCancelacion = useMemo(() => planDeCancelacion({
+    estado: form.estado,
+    tipoAsignacion: form.tipo_asignacion,
+    // El costo que la fila tiene HOY, no el del campo: lo que se está decidiendo es qué
+    // hacer con el importe ya cargado. El campo del formulario es justamente el que deja
+    // de mandar cuando el servicio se cancela.
+    costo: reservaEditada?.costo_proveedor ?? 0,
+    precio: form.precio_cliente !== "" ? form.precio_cliente : (reservaEditada?.precio_cliente ?? 0),
+    falsoFleteActual: reservaEditada?.falso_flete ?? false,
+    hermano,
+    decision: form.cancelacion_decision,
+    montoAcordado: form.cancelacion_monto,
+    motivoAcuerdo: form.falso_flete_motivo,
+  }), [
+    form.estado, form.tipo_asignacion, form.precio_cliente, form.cancelacion_decision,
+    form.cancelacion_monto, form.falso_flete_motivo, reservaEditada, hermano,
+  ]);
+
+  /** Lo que va a quedar: lo tecleado manda sobre lo guardado, y sobre la cascada. */
+  const paxResuelto: PaxResuelto = useMemo(() => {
+    if (!reservaEditada) return { pax: null, fuente: null };
+    const escrito = form.capacidad_contratada.trim();
+    if (escrito !== "") {
+      const n = Number(escrito);
+      return Number.isFinite(n) && n > 0
+        ? { pax: Math.round(n), fuente: "servicio" }
+        : { pax: null, fuente: null };
+    }
+    const vigente = ctxPax?.para === Number(editandoId) ? ctxPax : null;
+    return resolverPaxDeServicio(
+      // Vacío es vacío: se pregunta por lo que quedaría si se guarda así.
+      { ...reservaEditada, capacidad_contratada: null },
+      hermano,
+      { paxCotizacion: vigente?.paxCotizacion, catalogo: vigente?.catalogo ?? undefined }
+    );
+  }, [reservaEditada, form.capacidad_contratada, hermano, ctxPax, editandoId]);
+
+  /**
+   * La capacidad de la unidad ASIGNADA. Está a la vista para poder compararla, nunca
+   * para copiarse sola: es un dato de la flota, no del contrato, y confundirlos es lo
+   * que hacía que el formato le declarara al cliente asientos que nadie pactó.
+   */
+  const capacidadUnidad = useMemo(() => {
+    if (form.tipo_asignacion === "propio") {
+      const v = vehiculos.find(x => x.id === Number(form.vehiculo_id));
+      return v ? { placa: v.placa, cap: v.capacidad_pasajeros ?? null } : null;
+    }
+    const v = vehTercero.find(x => x.id === Number(form.vehiculo_tercero_id));
+    return v ? { placa: v.placa, cap: v.capacidad ?? null } : null;
+  }, [form.tipo_asignacion, form.vehiculo_id, form.vehiculo_tercero_id, vehiculos, vehTercero]);
+
+  /**
+   * El hermano, preguntado AHORA y no leído del memo. Misma regla que `hermanoId` y que
+   * el efecto: se sigue el enlace hacia adelante y, si no lo hay, hacia atrás — y solo
+   * cuando es inequívoco, porque con dos filas apuntando a la misma, elegir sería
+   * adivinar. Devuelve null si no se puede identificar, y quien llama lo dice en pantalla
+   * en vez de escribir medio día en silencio.
+   */
+  const resolverHermanoAhora = async (
+    id: number, vinculadaId: number | null
+  ): Promise<{ id: number; codigo: string | null; pax: number | null } | null> => {
+    let cols = "id,codigo,fecha_servicio,capacidad_contratada";
+    const pedir = () => {
+      const q = supabase.from("reservas").select(cols);
+      return (vinculadaId ? q.eq("id", vinculadaId) : q.eq("reserva_vinculada_id", id)).limit(2);
+    };
+    let res = await pedir();
+    for (let i = 0; res.error && i < COLS_OPCIONALES.length; i++) {
+      const falta = columnaFaltante(String(res.error.message));
+      if (!falta || !cols.split(",").some(c => c.trim() === falta)) break;
+      cols = quitarColumna(cols, falta);
+      res = await pedir();
+    }
+    const filas = (res.data ?? []) as { id: number; codigo?: string | null; capacidad_contratada?: number | null }[];
+    if (filas.length !== 1) return null;
+    return {
+      id: Number(filas[0].id),
+      codigo: idAfa(filas[0]),
+      pax: filas[0].capacidad_contratada ?? null,
+    };
+  };
+
+  /** De dónde salió el número, dicho en la pantalla: cada fuente se corrige en otro sitio. */
+  const FUENTE_PAX: Record<string, string> = {
+    servicio:   "escrito en este servicio",
+    hermano:    "escrito en su tramo hermano",
+    cotizacion: "del ítem de la cotización",
+    ficha:      "de la ficha de la ruta contratada",
+  };
+
+  const porIdReserva = useMemo(() => new Map(reservas.map((r) => [r.id, r])), [reservas]);
+
+  /**
+   * El estado ECONÓMICO del día, no del tramo. Devuelve null cuando está todo bien: un
+   * chip en cada fila sería el mismo ruido permanente que este cambio viene a quitar, y
+   * un aviso que sale siempre se aprende a no leer.
+   */
+  function problemaDelDia(r: Reserva): { texto: string; tono: string } | null {
+    const parId = (r as any).reserva_vinculada_id;
+    const par = parId ? porIdReserva.get(Number(parId)) : null;
+    if (!par) return null;
+    const cMio = Number(r.costo_proveedor || 0), cPar = Number(par.costo_proveedor || 0);
+    const pMio = Number(r.precio_cliente || 0), pPar = Number(par.precio_cliente || 0);
+    const esTer = r.tipo === "tercerizada";
+    if ((esTer && cMio > 0 && cPar > 0) || (pMio > 0 && pPar > 0))
+      return { texto: "DÍA 2×", tono: "background:#fee2e2;color:#b91c1c" };
+    if (pMio <= 0 && pPar <= 0)
+      return { texto: "DÍA SIN PRECIO", tono: "background:#fef3c7;color:#92400e" };
+    if (esTer && cMio <= 0 && cPar <= 0)
+      return { texto: "DÍA SIN COSTO", tono: "background:#fef3c7;color:#92400e" };
+    return null;
+  }
 
   const guardarReserva = async () => {
     if (!editandoId) return;
@@ -1382,6 +1963,77 @@ export default function ReservasPage() {
     }
     if (form.tipo_asignacion === "tercerizado" && riesgoEmpSel === "alto") {
       const ok = confirm("ALERTA: Esta empresa tiene documentos OBLIGATORIOS vencidos. Continuar de todas formas?");
+      if (!ok) return;
+    }
+
+    // CANDADO DEL FALSO FLETE. Pagarle a un proveedor un servicio que no se prestó es la
+    // salida de dinero más fácil de colar, y el motivo es la ÚNICA constancia que queda de
+    // ella. Por eso esto sí BLOQUEA —igual que en /liquidaciones → ModalServicios— mientras
+    // que el resto de la pantalla solo pregunta: aquí no se está despachando un bus, se
+    // está autorizando un pago.
+    if (planCancelacion.bloqueo) { alert(`⚠️ ${planCancelacion.bloqueo}`); return; }
+
+    // Y el retiro del importe se ANUNCIA antes de escribirlo. El default de la pantalla es
+    // ponerlo en S/ 0.00 —el lado reversible del error, el mismo criterio que el
+    // `default false` de la migración— pero sigue siendo plata que sale de una fila: se
+    // dice cuánta y sobre qué, como en el botón de limpieza de /liquidaciones.
+    if (planCancelacion.pide && planCancelacion.resumen) {
+      const ok = confirm(
+        `${planCancelacion.resumen}\n\n` +
+        (planCancelacion.decision === "falso_flete"
+          ? "Se le va a pagar al proveedor un servicio que no se prestó. Queda registrado " +
+            "quién lo autorizó y por qué.\n\n¿Guardar así?"
+          : "Hoy ese importe no se liquida, pero sí está contando en los reportes de margen " +
+            "mientras siga escrito.\n\n¿Guardar así?")
+      );
+      if (!ok) return;
+    }
+
+    // CANDADO DEL DOBLE COBRO. La tarifa del día cubre la ida y el retorno, así que el
+    // importe va en UN solo tramo. Si se pone en los dos, la liquidación los lee como dos
+    // servicios independientes y el día se cobra —o se paga al proveedor— dos veces. Eso
+    // es plata real, así que aquí sí se pregunta en lugar de dejarlo pasar.
+    const costoHermano = Number(hermano?.costo_proveedor ?? 0);
+    const precioHermano = Number(hermano?.precio_cliente ?? 0);
+    // Los dos candados de abajo callan cuando el DÍA ENTERO se cayó: ahí no hay nada que
+    // cobrar dos veces ni ningún costo que falte pactar — el plan de cancelación ya está
+    // retirando los importes. Es el mismo silencio que `avisosDe` aplica a un día caído, y
+    // por la misma razón: un aviso que sale cuando el sistema está haciendo lo correcto
+    // enseña a hacer clic sin leer, y el de al lado es el que avisa del cobro doble.
+    const diaCaido = planCancelacion.codigo === "decidir" || planCancelacion.codigo === "sin_importe";
+    const dobles: string[] = [];
+    if (!diaCaido && form.tipo_asignacion === "tercerizado" && Number(form.costo_proveedor) > 0 && costoHermano > 0)
+      dobles.push(`costo: ${fmtSoles(Number(form.costo_proveedor))} aquí + ${fmtSoles(costoHermano)} en ${hermano?.codigo ?? "el otro tramo"}`);
+    if (!diaCaido && Number(form.precio_cliente) > 0 && precioHermano > 0)
+      dobles.push(`precio: ${fmtSoles(Number(form.precio_cliente))} aquí + ${fmtSoles(precioHermano)} en ${hermano?.codigo ?? "el otro tramo"}`);
+    if (dobles.length) {
+      const ok = confirm(
+        "OJO: los DOS tramos del día van a quedar con importe.\n\n" +
+        dobles.map((d) => "  · " + d).join("\n") +
+        "\n\nLa tarifa cubre ida y retorno, así que el cierre lo va a liquidar como DOS " +
+        "servicios y el día se cobrará dos veces.\n\n" +
+        "Solo continúa si de verdad son dos cobros distintos.\n\n¿Guardar así?"
+      );
+      if (!ok) return;
+    }
+
+    // El campo dice "Costo S/ *" con asterisco desde siempre, pero nada lo exigía:
+    // guardar con el campo vacío escribía 0 en silencio y el problema aparecía 30 días
+    // después, en el bloque rojo de /liquidaciones. Ahora se avisa aquí. NO se bloquea:
+    // a las 5 a.m. el bus tiene que salir igual, y una regla que impide despachar se
+    // esquiva el primer día. Lo que se gobierna es la plata, no la operación.
+    //
+    // Y NO se pregunta cuando el otro tramo ya lleva el costo del día: ese 0 es correcto.
+    // Preguntarlo en cada retorno era un rojo permanente y falso, del que se aprende a
+    // hacer clic sin leer — y así el aviso deja de servir cuando el problema es real.
+    if (!diaCaido && form.tipo_asignacion === "tercerizado" && !(Number(form.costo_proveedor) > 0) && costoHermano <= 0) {
+      const ok = confirm(
+        (hermano
+          ? "Ni este tramo ni el otro del mismo día tienen COSTO PACTADO.\n\n"
+          : "Este servicio tercerizado se va a guardar SIN COSTO PACTADO.\n\n") +
+        "Finanzas no podrá liquidarlo al cierre del mes y va a quedar en la bandeja de " +
+        "pendientes hasta que alguien lo cargue.\n\n¿Guardar así de todos modos?"
+      );
       if (!ok) return;
     }
 
@@ -1412,9 +2064,11 @@ export default function ReservasPage() {
       if (!ok) { setGuardando(false); return; }
     }
 
-    const asignPayload = {
+    // normalizarAsignacion aplica las mismas reglas de coherencia que el trigger de
+    // nacimiento (derivar la empresa del vehículo de tercero, limpiar el lado que no
+    // corresponde), para que el operador vea el resultado antes de guardar.
+    const asignPayload = normalizarAsignacion({
       hora_servicio:          form.hora_servicio,
-      tipo:                   form.tipo_asignacion === "propio" ? "propia" : "tercerizada",
       tipo_asignacion:        form.tipo_asignacion,
       vehiculo_id:            form.tipo_asignacion === "propio" ? Number(form.vehiculo_id) : null,
       conductor_id:           form.tipo_asignacion === "propio" ? Number(form.conductor_id) : null,
@@ -1422,23 +2076,99 @@ export default function ReservasPage() {
       vehiculo_tercero_id:    form.tipo_asignacion === "tercerizado" && form.vehiculo_tercero_id ? Number(form.vehiculo_tercero_id) : null,
       conductor_tercero_id:   form.tipo_asignacion === "tercerizado" && form.conductor_tercero_id ? Number(form.conductor_tercero_id) : null,
       costo_proveedor:        costo,
-    };
+    }, vehTercero);
 
     // Puente A→B: si el servicio pasa a "finalizada" y aún no tiene estado administrativo,
     // arranca en "por_liquidar".
     const adminPayload = (nuevoEstado === "finalizada" && !reservaActual?.estado_admin)
       ? { estado_admin: ESTADO_ADMIN_INICIAL }
       : {};
-    const { error } = await supabase.from("reservas").update({
+    // El precio de venta solo se manda si el operador lo tocó: mandarlo siempre haría
+    // que cada guardado escribiera un acta de venta idéntica y llenaría la línea de
+    // tiempo del servicio de ruido.
+    const precioTocado = form.precio_cliente !== ""
+      && Number(form.precio_cliente) !== Number(reservaActual?.precio_cliente ?? 0);
+
+    // Los PAX contratados: igual que el precio, solo si el operador los tocó. Se leen de
+    // los mismos memos que pinta la pantalla, para que lo que se guarda sea exactamente
+    // lo que el aviso de "se escribirá también en …" prometió.
+    const paxEscrito = paxDelForm;
+    const paxTocado = paxTocadoForm;
+
+    // El plan de la cancelación va AL FINAL a propósito: sus columnas tienen que ganarle a
+    // `asignPayload.costo_proveedor` y al precio del formulario. Un servicio cancelado vale
+    // S/ 0.00 salvo acuerdo escrito, y esa es la última palabra sobre el importe.
+    //
+    // El estado que se juzgó es `form.estado`, pero el que se escribe es `nuevoEstado` (que
+    // puede subir un `pendiente` a `programada`/`confirmada` por la asignación). Nunca
+    // bajan a cancelada solos, así que el plan no puede quedar desalineado; si algún día
+    // esa promoción cambiara, este patch se aplicaría sobre un servicio que ya no cae.
+    const patchCancelacion = esCancelacion(nuevoEstado) === esCancelacion(form.estado)
+      ? planCancelacion.patch : {};
+
+    const res = await guardarReservas(supabase, [editandoId], {
       ...asignPayload,
       ...adminPayload,
+      ...(precioTocado ? { precio_cliente: Number(form.precio_cliente) } : {}),
+      ...(paxTocado ? { capacidad_contratada: paxEscrito } : {}),
       fecha_servicio:  form.fecha_servicio,
       hora_servicio:   form.hora_servicio,
       estado:          nuevoEstado,
       observaciones:   form.observaciones.trim() || null,
-    }).eq("id", editandoId);
+      ...patchCancelacion,
+    }, {
+      // El motivo del operador manda; el del plan solo rellena el hueco. Al retirar o
+      // acordar un importe sobre una cancelación, `correccion_carga` es literalmente lo
+      // que es, y sin él ese movimiento de plata quedaría en el acta sin explicación.
+      motivo: form.cambio_motivo || (Object.keys(patchCancelacion).length ? planCancelacion.motivo : null),
+      nota: form.cambio_nota.trim()
+        || (Object.keys(patchCancelacion).length ? planCancelacion.nota : null),
+    });
 
-    if (error) { alert(error.message); setGuardando(false); return; }
+    if (!res.ok) { alert(describirResultado(res)); setGuardando(false); return; }
+    if (res.aviso) avisar(res.aviso);
+
+    // ── El pax es del DÍA, no del tramo ───────────────────────────────────────
+    // A diferencia del importe —que va en un tramo y en el otro queda en S/ 0.00 a
+    // propósito— los asientos contratados son los MISMOS para la ida y el retorno: el
+    // cliente contrató una ruta de N asientos. Y la liquidación imprime UN «N PAX» por
+    // día, tomando el primer tramo que lo traiga con la ida por delante, así que dejar
+    // 15 en el retorno y 20 en la ida no representa dos cantidades: hace que una de las
+    // dos se descarte en silencio. Se escriben las dos.
+    //
+    // Va en su propia llamada porque el patch de arriba lleva fecha, hora, estado y
+    // asignación: mandárselo también al hermano le cambiaría el horario y la unidad.
+    // Y SIN el motivo del cambio: no dispara acta (el trigger solo mira costo, precio,
+    // empresa y unidad), y dejar un motivo pegado en esa fila contaminaría el acta que
+    // sí escriba el próximo cambio de dinero.
+    //
+    // Se propaga el NÚMERO, nunca el borrado. Vaciar el campo de la ida y arrastrar al
+    // hermano borraría justo lo que la pantalla acababa de prometer que iba a aportar
+    // ("la liquidación tomará 15 PAX · escrito en su tramo hermano"), y con la cotización
+    // y la ficha también en blanco el ítem saldría sin el «N PAX». Quien quiera dejar el
+    // día entero sin dato abre los dos tramos: son dos gestos distintos.
+    if (paxTocado && paxEscrito != null) {
+      // El hermano se pregunta a la BASE aunque el memo ya tenga uno. Dos razones: el memo
+      // se llena con una consulta asíncrona (guardar antes de que resuelva dejaría el otro
+      // tramo sin el número y sin que nadie se entere), y su búsqueda inversa mira solo la
+      // ventana de fechas cargada — con dos filas apuntando acá y una fuera del filtro,
+      // ahí parece inequívoco y no lo es. `resolverHermanoAhora` ve las dos y no adivina.
+      const destino = await resolverHermanoAhora(editandoId, reservaActual?.reserva_vinculada_id ?? null);
+
+      if (destino && destino.pax !== paxEscrito) {
+        const resH = await guardarReservas(supabase, [destino.id], { capacidad_contratada: paxEscrito });
+        if (!resH.ok)
+          avisar(`Se guardó este servicio, pero los PAX no llegaron a su tramo hermano `
+               + `${destino.codigo ?? `#${destino.id}`}: ${resH.rechazos[0]?.motivo ?? "error desconocido"}. `
+               + `Corrígelo abriendo ese servicio.`);
+        else if (resH.aviso) avisar(resH.aviso);
+      } else if (!destino && reservaActual?.reserva_vinculada_id) {
+        // El enlace existe pero el otro tramo no aparece (o hay dos apuntando acá, que es
+        // un enlace roto de otra forma). Se escribió medio día: hay que decirlo.
+        avisar("Se escribieron los PAX solo en este tramo: no se pudo identificar su "
+             + "hermano. Revisa el enlace ida↔retorno en Liquidaciones → Enlazar tramos.");
+      }
+    }
 
     // ── Si es servicio FIJO con contrato, ofrecer aplicar a otros días ──
     if (reservaActual && !esEventual(reservaActual) && reservaActual.cotizacion_id) {
@@ -1479,7 +2209,18 @@ export default function ReservasPage() {
         setAplicarCampos("todo");
         setAplicarOtraHora(false);
         setAplicarOtraUnidad(false);
-        setModalAplicarMasivo({ cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas, horaOriginal, resumen });
+        // Marcado por defecto solo cuando hay un número que propagar: con el campo
+        // vaciado, el default estaría BORRANDO la capacidad de 30 servicios.
+        setAplicarPax(paxEscrito != null);
+        setModalAplicarMasivo({
+          cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas,
+          horaOriginal, resumen, pax: paxEscrito, paxTocado,
+          paxAntes: reservaActual.capacidad_contratada ?? null,
+          rutasObjetivo: [
+            normalizarNombreRuta(reservaActual.ruta_nombre),
+            normalizarNombreRuta(hermano?.ruta_nombre),
+          ].filter(Boolean),
+        });
         cargarDatos();
         return;
       }
@@ -1502,12 +2243,97 @@ export default function ReservasPage() {
         && !pisa(r.vehiculo_tercero_id,    payload.vehiculo_tercero_id);
   };
 
+  /**
+   * Los hermanos DENTRO del contrato, por los dos sentidos del enlace. Se arma una sola
+   * vez porque `aceptaPax` lo consulta por cada fila y por cada render del modal.
+   *
+   * Sin esto, la regla de abajo miraba un retorno —que nace en NULL, porque el generador
+   * escribe la capacidad solo en la ida— y lo tomaba por "sin dato". En un contrato de
+   * tres móviles eso significaba escribir la capacidad del móvil 1 sobre los retornos de
+   * los otros dos: un número que nadie pactó, invisible (la liquidación mira la ida
+   * primero) y sin vuelta atrás, porque el valor anterior era NULL.
+   */
+  const hermanosDelContrato = useMemo(() => {
+    const filas = modalAplicarMasivo?.otrasReservas ?? [];
+    const porId = new Map(filas.map(r => [r.id, r]));
+    // Índice inverso solo con los INEQUÍVOCOS: con dos filas apuntando a la misma, el
+    // enlace está roto de otra forma y elegir una sería adivinar (misma regla que
+    // `hermanoId` y que lib/liquidacion-hermanos.ts).
+    const cuantos = new Map<number, number>();
+    for (const r of filas) {
+      const v = Number(r.reserva_vinculada_id ?? 0);
+      if (v) cuantos.set(v, (cuantos.get(v) ?? 0) + 1);
+    }
+    const inverso = new Map<number, Reserva>();
+    for (const r of filas) {
+      const v = Number(r.reserva_vinculada_id ?? 0);
+      if (v && cuantos.get(v) === 1) inverso.set(v, r);
+    }
+    const de = (r: Reserva): Reserva | undefined =>
+      (r.reserva_vinculada_id ? porId.get(Number(r.reserva_vinculada_id)) : undefined) ?? inverso.get(r.id);
+    return {
+      /** La capacidad que este servicio declara, suya o de su hermano: el pax es del día. */
+      pax: (r: Reserva) => r.capacidad_contratada ?? de(r)?.capacidad_contratada ?? null,
+      /** Los nombres de ruta del día (los dos tramos), normalizados como el catálogo. */
+      rutas: (r: Reserva) => [
+        normalizarNombreRuta(r.ruta_nombre),
+        normalizarNombreRuta(de(r)?.ruta_nombre),
+      ].filter(Boolean),
+    };
+  }, [modalAplicarMasivo]);
+
+  /**
+   * ¿Este servicio acepta la capacidad que se está propagando?
+   *
+   * Una misma cotización puede tener varios ítems con pax distinto (tres móviles, uno de
+   * 15 y dos de 25) y el masivo no filtra por móvil: sin esta regla, corregir un ítem
+   * pisaría la capacidad —correcta— de los otros dos. Dos filtros, y hacen falta los dos:
+   *
+   *   · La RUTA. Un contrato generado antes de que existiera la columna tiene TODAS sus
+   *     capacidades en NULL, así que sin esto una corrección se derramaría sobre las
+   *     otras rutas de la misma cotización. Si no hay nombre de ruta con qué comparar no
+   *     se filtra: es el caso de una sola ruta, y excluir a todos sería peor.
+   *   · La CAPACIDAD, leída del día y no del tramo: se propaga a quien no tiene nada
+   *     escrito ni en su tramo ni en su hermano, o a quien venía diciendo lo mismo que
+   *     decía este servicio antes. Esos son la cohorte que se está corrigiendo; los que
+   *     dicen otra cosa la dicen a propósito.
+   */
+  const motivoPax = (
+    r: Reserva, m: NonNullable<typeof modalAplicarMasivo>
+  ): "ok" | "otra_ruta" | "otra_capacidad" => {
+    if (m.rutasObjetivo.length) {
+      const suyas = hermanosDelContrato.rutas(r);
+      if (suyas.length && !suyas.some(e => m.rutasObjetivo.includes(e))) return "otra_ruta";
+    }
+    const actual = hermanosDelContrato.pax(r);
+    return actual === null || actual === m.paxAntes || actual === m.pax ? "ok" : "otra_capacidad";
+  };
+
+  const aceptaPax = (r: Reserva, m: NonNullable<typeof modalAplicarMasivo>) => motivoPax(r, m) === "ok";
+
   // Los servicios que recibirán la asignación, según los filtros elegidos en el modal.
   // Misma lógica en el render (contador) y en el update, para que el número que se ve
   // sea exactamente el que se escribe.
   const targetsAplicar = (m: NonNullable<typeof modalAplicarMasivo>) => {
     const soloConductor = aplicarCampos === "conductor";
+    const soloPax       = aplicarCampos === "pax";
     return m.otrasReservas.filter(r => {
+      // Los PAX contratados NO se filtran por hora ni por unidad: esos dos filtros
+      // existen para proteger la ASIGNACIÓN (no mandarle el bus de la ida al retorno,
+      // no pisarle la placa a quien ya tiene una), y los asientos no son de la unidad
+      // sino del contrato. Filtrarlos igual dejaría a los retornos sin el número salvo
+      // que el operador marcara "incluir otro horario", que es una casilla puesta ahí
+      // para otra cosa.
+      if (soloPax) {
+        if (aplicarScope === "rango") {
+          if (!r.fecha_servicio) return false;
+          if (aplicarDesde && r.fecha_servicio < aplicarDesde) return false;
+          if (aplicarHasta && r.fecha_servicio > aplicarHasta) return false;
+        }
+        // El que ya declara OTRA capacidad queda fuera del conteo, no solo del update:
+        // el número que se ve tiene que ser el que se escribe.
+        return aceptaPax(r, m);
+      }
       if (!aplicarOtraHora && (r.hora_servicio?.slice(0, 5) || "") !== m.horaOriginal) return false;
       if (soloConductor) {
         // No se toca la unidad, así que da igual qué placa tenga; pero no mezclamos
@@ -1535,14 +2361,35 @@ export default function ReservasPage() {
 
     setAplicando(true);
     const soloConductor = aplicarCampos === "conductor";
+    const soloPax       = aplicarCampos === "pax";
 
     // "Solo el conductor": no se escribe vehículo, empresa, tipo ni hora — cada servicio
-    // conserva su unidad y su horario.
-    const base: Record<string, any> = soloConductor
-      ? (payload.tipo_asignacion === "propio"
-          ? { conductor_id: payload.conductor_id }
-          : { conductor_tercero_id: payload.conductor_tercero_id })
-      : payload;
+    // conserva su unidad y su horario. "Solo los PAX": no se escribe NADA de la
+    // asignación, ni el estado.
+    const baseAsignacion = soloPax
+      ? {}
+      : soloConductor
+        ? (payload.tipo_asignacion === "propio"
+            ? { conductor_id: payload.conductor_id }
+            : { conductor_tercero_id: payload.conductor_tercero_id })
+        : payload;
+
+    // Los PAX contratados viajan aparte de la asignación: son del CONTRATO, no de la
+    // unidad. Por eso se propagan también en "solo el conductor", y son lo único que NO
+    // se le quita a los servicios de otro horario cuando el operador los incluye: la hora
+    // y el costo son de cada tramo, los asientos son del día.
+    const propagaPax = modalAplicarMasivo.paxTocado && (aplicarPax || soloPax);
+    const base: Record<string, any> = propagaPax
+      ? { ...baseAsignacion, capacidad_contratada: modalAplicarMasivo.pax }
+      : baseAsignacion;
+
+    // Nada que escribir (el modo pax con la casilla apagada no debería llegar acá, pero
+    // un update vacío sería un error que se leería como "no se pudo guardar").
+    if (Object.keys(base).length === 0) {
+      setModalAplicarMasivo(null);
+      setAplicando(false);
+      return;
+    }
 
     const propioCompleto      = payload.tipo_asignacion === "propio" && !!payload.vehiculo_id && !!payload.conductor_id;
     const tercerizadoCompleto = payload.tipo_asignacion === "tercerizado" && !!payload.empresa_tercerizada_id && !!payload.vehiculo_tercero_id && !!payload.conductor_tercero_id;
@@ -1556,24 +2403,39 @@ export default function ReservasPage() {
       // la hora los reescribiría con la de la ida, y la ida y el retorno se le pagan distinto
       // al proveedor. La hora sí se propaga entre los de la misma hora, que es como se cambia
       // el horario de todo el contrato.
-      if (!soloConductor && (r.hora_servicio?.slice(0, 5) || "") !== horaOriginal) {
+      if (!soloConductor && !soloPax && (r.hora_servicio?.slice(0, 5) || "") !== horaOriginal) {
         delete patch.hora_servicio;
         delete patch.costo_proveedor;
       }
+      // El que ya declara OTRA capacidad contratada la declara a propósito (otro móvil
+      // del mismo contrato): recibe la asignación, no el pax. En el modo "solo los PAX"
+      // ni siquiera llega acá, porque `targetsAplicar` ya lo dejó fuera del conteo.
+      if (propagaPax && !aceptaPax(r, modalAplicarMasivo)) delete patch.capacidad_contratada;
       // Un pendiente que queda completamente asignado se confirma. En "solo conductor" no:
-      // el servicio puede seguir sin unidad.
-      if (!soloConductor && r.estado === "pendiente") patch.estado = estadoPendientes;
+      // el servicio puede seguir sin unidad. Y en "solo los PAX" tampoco: corregir cuántos
+      // asientos se contrataron no programa nada, y confirmar 30 servicios sin unidad
+      // asignada sería mentirle al tablero.
+      if (!soloConductor && !soloPax && r.estado === "pendiente") patch.estado = estadoPendientes;
       const key = JSON.stringify(patch);
       const lote = lotes.get(key) || { patch, ids: [] };
       lote.ids.push(r.id);
       lotes.set(key, lote);
     }
 
+    // Por el helper, igual que el guardado individual: si un lote falla, se reintenta
+    // fila por fila y se dice CUÁL falló. Antes, un `.in("id", [50 ids])` que reventaba
+    // solo decía "error al actualizar 1 lote" y el operador tenía que adivinar entre 50.
     const results = await Promise.all(
-      [...lotes.values()].map(l => supabase.from("reservas").update(l.patch).in("id", l.ids))
+      [...lotes.values()].map(l =>
+        guardarReservas(supabase, l.ids, l.patch,
+          { motivo: form.cambio_motivo || null, nota: form.cambio_nota.trim() || null }))
     );
-    const errores = results.filter(r => r.error);
-    if (errores.length > 0) alert(`Error al actualizar ${errores.length} lote(s). Revisa la consola.`);
+    const rechazos = results.flatMap(r => r.rechazos);
+    const aviso = results.find(r => r.aviso)?.aviso;
+    if (aviso) avisar(aviso);
+    if (rechazos.length > 0)
+      alert(`${rechazos.length} servicio(s) no se pudieron actualizar:\n` +
+            rechazos.slice(0, 5).map(x => `#${x.id}: ${x.motivo}`).join("\n"));
 
     setModalAplicarMasivo(null);
     setAplicando(false);
@@ -1652,6 +2514,286 @@ export default function ReservasPage() {
     cargarDatos();
   };
 
+  // ── Reclasificar el ORIGEN de servicios ya creados ───────────────────────
+  //
+  // Antes de que existiera el botón "Adicional", TODO nacía como contrato, incluidos
+  // los servicios que el cliente pidió por encima de lo pactado. Quién sabe cuáles son
+  // es el operador; el sistema no puede adivinarlo y no lo intenta.
+  //
+  // Tres reglas que hacen esto seguro:
+  //
+  //   1. ARRASTRA AL HERMANO POR DEFECTO. La unidad que se cobra es el DÍA (ida +
+  //      retorno = una tarifa), así que lo normal es que los dos tramos queden del
+  //      mismo lado. Se puede apagar con "Cambiar solo el tramo marcado" cuando lo
+  //      que cambió de manos fue un tramo — y entonces la pantalla dice ANTES qué
+  //      pasa con la valorización (`efectoDeMarcarTramo`), porque quien clasifica el
+  //      día es el tramo que LLEVA EL IMPORTE: marcar el que va en S/ 0.00 deja la
+  //      valorización intacta, y marcar el que lleva la tarifa mueve el día entero.
+  //   2. NO INVENTA `precio_cotizado`. De un servicio de agosto no se sabe cuál era la
+  //      tarifa de referencia ENTONCES; leerla hoy de la cotización daría una
+  //      comparación falsa si el contrato se renegoció. Se queda en null, que dice la
+  //      verdad: "se marcó después, sin referencia registrada".
+  //   3. NO DISPARA NADA: el WHEN de trg_reservas_pacto_acta solo cubre costo, precio,
+  //      proveedor y vehículo, así que reclasificar no levanta actas ni enlaces de
+  //      conformidad. Por eso el motivo vive en `adicional_motivo`, no en
+  //      `cambio_motivo`.
+  //
+  // Y hay un segundo camino, el CANJE: cuando la etiqueta no sobra sino que está en
+  // el servicio equivocado (dos servicios que se intercambiaron las unidades por una
+  // contingencia), lo correcto es cambiar los dos a la vez, para que la cuenta de días
+  // contratados y adicionales no se mueva. Ver lib/reservas-canje.ts.
+
+  /** Expande ids con sus tramos hermanos por las DOS direcciones del vínculo: si solo
+   *  se marcó el retorno y su ida no lo referencia de vuelta, mirar un solo lado se
+   *  dejaría la mitad. */
+  const expandirHermanos = async (base: number[]): Promise<number[]> => {
+    const ids = new Set(base);
+    for (let i = 0; i < base.length; i += 200) {
+      const trozo = base.slice(i, i + 200);
+      const [ida, vuelta] = await Promise.all([
+        supabase.from("reservas").select("reserva_vinculada_id").in("id", trozo),
+        supabase.from("reservas").select("id").in("reserva_vinculada_id", trozo),
+      ]);
+      for (const r of (ida.data ?? [])) if (r.reserva_vinculada_id) ids.add(Number(r.reserva_vinculada_id));
+      for (const r of (vuelta.data ?? [])) ids.add(Number(r.id));
+    }
+    return Array.from(ids);
+  };
+
+  /** Qué documentos ya emitidos contienen alguno de estos servicios. No bloquea: el
+   *  papel que el cliente firmó no cambia, y hay que decirlo antes, no después. */
+  const buscarLiquidadas = async (todos: number[]) => {
+    const conteo = new Map<number, number>();
+    for (let i = 0; i < todos.length; i += 200) {
+      const { data } = await supabase.from("reservas")
+        .select("liquidacion_cliente_id").in("id", todos.slice(i, i + 200))
+        .not("liquidacion_cliente_id", "is", null);
+      for (const r of (data ?? [])) {
+        const k = Number(r.liquidacion_cliente_id);
+        conteo.set(k, (conteo.get(k) ?? 0) + 1);
+      }
+    }
+    if (!conteo.size) return [];
+    const { data } = await supabase.from("liquidacion_cliente")
+      .select("id,codigo,estado").in("id", [...conteo.keys()]);
+    return (data ?? []).map((l: { id: number; codigo: string | null; estado: string }) => ({
+      id: Number(l.id), codigo: l.codigo ?? null, estado: String(l.estado),
+      cuantas: conteo.get(Number(l.id)) ?? 0,
+    }));
+  };
+
+  const indexarFilas = (rs: Reserva[]): Record<number, Reserva> =>
+    Object.fromEntries(rs.map(r => [r.id, r]));
+
+  const prepararCambioOrigen = async (destino: "adicional" | "contrato", idsBase?: number[]) => {
+    // Los ids se pasan EXPLÍCITOS desde el botón de una fila. Apoyarse en
+    // `seleccionados` ahí no funciona: setSeleccionados no ha llegado todavía cuando
+    // esta función corre, y el modal se abriría con la selección anterior.
+    const base = idsBase ?? Array.from(seleccionados);
+    if (base.length === 0) return;
+    setOrigenMotivo(""); setOrigenNota("");
+    setModalOrigen({
+      destino, ids: base, todos: base, liquidadas: [], cargando: true, soloTramo: false,
+      canje: false, candidatos: null, cargandoCandidatos: false, sinColumna: false,
+      elegido: null, contraparte: [], filas: {},
+    });
+
+    const todos = await expandirHermanos(base);
+    const [filas, liquidadas] = await Promise.all([
+      fetchReservasPorIds(todos).then(indexarFilas),
+      buscarLiquidadas(todos),
+    ]);
+    // Si mientras tanto se cerró el modal o se abrió otro, no pisar el que está a la
+    // vista con datos de una selección anterior.
+    setModalOrigen(prev =>
+      prev && prev.destino === destino && prev.ids.join() === base.join()
+        ? { ...prev, todos, filas, liquidadas, cargando: false }
+        : prev);
+  };
+
+  // ── Canje: buscar la contraparte ─────────────────────────────────────────
+  //
+  // La contraparte es un servicio DEL MISMO CLIENTE con el origen contrario y cerca
+  // en el calendario: el intercambio de unidades pasa el mismo día, y la ventana de
+  // ±3 días solo cubre el servicio nocturno que retorna al día siguiente y la carga
+  // hecha con un día de desfase.
+  const CANJE_DIAS = 3;
+
+  const cargarCandidatosCanje = async () => {
+    const m = modalOrigen;
+    if (!m || m.cargando) return;
+    if (!origenMotivo) setOrigenMotivo("intercambio_contingencia");
+    setModalOrigen(p => p ? { ...p, canje: true, cargandoCandidatos: true, sinColumna: false } : p);
+
+    const propias = m.todos.map(id => m.filas[id]).filter(Boolean);
+    const cliente = propias.find(r => r.cliente_id)?.cliente_id ?? null;
+    const fechas = propias.map(r => r.fecha_servicio).filter(Boolean).sort() as string[];
+    if (!cliente || !fechas.length) {
+      setModalOrigen(p => p ? { ...p, candidatos: [], cargandoCandidatos: false } : p);
+      return;
+    }
+    const desde = sumarDias(fechas[0], -CANJE_DIAS);
+    const hasta = sumarDias(fechas[fechas.length - 1], CANJE_DIAS);
+    // La contraparte es la que HOY lleva la etiqueta que este lado va a TOMAR: si este
+    // pasa a 'adicional', la otra es la que hoy figura como 'adicional' y volverá a
+    // 'contrato'. Buscarla por el origen contrario ofrecía exactamente las filas a las
+    // que después se les escribía el valor que ya tenían: el canje cambiaba un solo
+    // lado y el "intercambio" era un no-op que además movía dinero de verdad.
+    const buscado = m.destino;
+
+    let colsUso = COLS_LISTA;
+    const pedir = () => supabase.from("reservas").select(colsUso)
+      .eq("cliente_id", cliente)
+      .eq("origen_contractual", buscado)
+      .gte("fecha_servicio", desde).lte("fecha_servicio", hasta)
+      .order("fecha_servicio").order("hora_servicio").limit(80);
+    let r = await pedir();
+    for (let i = 0; r.error && i < COLS_OPCIONALES.length; i++) {
+      const falta = columnaFaltante(String(r.error.message));
+      // Si lo que falta es `origen_contractual` no hay nada que reintentar: es la
+      // columna por la que se FILTRA, y sin ella no existen los dos lados del canje.
+      if (!falta || falta === "origen_contractual") break;
+      colsUso = quitarColumna(colsUso, falta);
+      r = await pedir();
+    }
+    if (r.error) {
+      setModalOrigen(p => p ? {
+        ...p, candidatos: [], cargandoCandidatos: false,
+        sinColumna: /origen_contractual/i.test(String(r.error?.message)),
+      } : p);
+      return;
+    }
+    const propios = new Set(m.todos);
+    const candidatos = ((r.data ?? []) as Reserva[]).filter(x => !propios.has(x.id));
+    setModalOrigen(p => p ? { ...p, candidatos, cargandoCandidatos: false } : p);
+  };
+
+  const elegirContraparte = async (id: number) => {
+    const m = modalOrigen;
+    if (!m) return;
+    if (m.elegido === id) {
+      // Deseleccionar: los avisos de liquidación vuelven a ser solo los del lado propio.
+      setModalOrigen(p => p ? { ...p, elegido: null, contraparte: [] } : p);
+      buscarLiquidadas(m.todos).then(liq =>
+        setModalOrigen(p => p && p.elegido === null ? { ...p, liquidadas: liq } : p));
+      return;
+    }
+    setModalOrigen(p => p ? { ...p, elegido: id, cargandoCandidatos: true } : p);
+    const contraparte = await expandirHermanos([id]);
+    const faltan = contraparte.filter(x => !m.filas[x]);
+    const [nuevas, liquidadas] = await Promise.all([
+      fetchReservasPorIds(faltan).then(indexarFilas),
+      buscarLiquidadas([...m.todos, ...contraparte]),
+    ]);
+    setModalOrigen(p => p && p.elegido === id
+      ? { ...p, contraparte, liquidadas, filas: { ...p.filas, ...nuevas }, cargandoCandidatos: false }
+      : p);
+  };
+
+  /** El plan del canje con los datos ya cargados, o null cuando no es un canje. */
+  const planCanje = useMemo(() => {
+    if (!modalOrigen?.canje || !modalOrigen.contraparte.length) return null;
+    const de = (ids: number[]) => ids.map(id => modalOrigen.filas[id]).filter(Boolean);
+    return planDeCanje(de(ladoPropio(modalOrigen)), de(ladoContraparte(modalOrigen)), modalOrigen.destino);
+  }, [modalOrigen]);
+
+  /**
+   * Qué le pasa a la valorización al marcar medio par. Solo sobre UN día: en una
+   * selección en lote cada día se decide por su propio tramo con importe, y una sola
+   * frase describiría a uno mientras miente sobre los demás. Ahí se dice la regla en
+   * vez de un número (ver el JSX del modal).
+   */
+  const efectoTramo = useMemo(() => {
+    if (!modalOrigen?.soloTramo || modalOrigen.ids.length !== 1) return null;
+    const par = modalOrigen.todos.map(id => modalOrigen.filas[id]).filter(Boolean);
+    if (par.length < 2) return null;
+    return efectoDeMarcarTramo(par, modalOrigen.ids, modalOrigen.destino);
+  }, [modalOrigen]);
+
+  const aplicarCambioOrigen = async () => {
+    if (!modalOrigen || modalOrigen.cargando) return;
+    const m = modalOrigen;
+    const plan = planCanje;
+    if (m.canje && (!plan || !plan.aplicable)) return;
+    // En un canje el porqué es obligatorio: es un movimiento excepcional y esta nota
+    // es el ÚNICO rastro que queda (el lado que vuelve a contrato limpia sus campos).
+    if (plan && (!origenMotivo || !origenNota.trim())) return;
+    setAplicandoOrigen(true);
+
+    const codigosDe = (ids: number[]) =>
+      ids.map(id => m.filas[id]?.codigo ?? `#${id}`);
+
+    // Volver a 'contrato' limpia el motivo y la nota: describían un adicional que ya
+    // no existe, y dejarlos pegados haría que el próximo reporte contara una historia
+    // que la fila ya no sostiene.
+    const propio = ladoPropio(m);
+    const contra = ladoContraparte(m);
+    const grupos = plan
+      ? [
+          { ids: propio, destino: m.destino,          otros: codigosDe(contra) },
+          { ids: contra, destino: opuesto(m.destino), otros: codigosDe(propio) },
+        ]
+      : [{ ids: propio, destino: m.destino, otros: [] as string[] }];
+
+    let hechos = 0;
+    let error = "";
+    let gruposHechos = 0;
+    for (const g of grupos) {
+      const esAdic = g.destino === "adicional";
+      const campos = {
+        origen_contractual: g.destino,
+        adicional_motivo: esAdic ? (origenMotivo || null) : null,
+        adicional_nota: esAdic
+          ? ((plan ? notaDeCanje(origenNota, g.otros) : origenNota.trim()) || null)
+          : null,
+      };
+      for (let i = 0; i < g.ids.length; i += 200) {
+        const trozo = g.ids.slice(i, i + 200);
+        const r = await supabase.from("reservas").update(campos).in("id", trozo).select("id");
+        if (r.error) { error = r.error.message; break; }
+        hechos += (r.data ?? []).length;
+      }
+      if (error) break;
+      gruposHechos++;
+    }
+
+    setAplicandoOrigen(false);
+    if (error) {
+      // Un canje a medias deja los dos servicios del MISMO lado. No se revierte solo:
+      // el rollback tendría que restaurar un motivo y una nota que la lista no trae,
+      // y borrarlos sería peor. Se dice exactamente qué quedó hecho.
+      const medias = !plan || hechos === 0
+        ? ""
+        : gruposHechos === 1 && hechos === propio.length
+          // El fallo cayó justo entre los dos lados: se puede nombrar cuál es cuál.
+          ? `\n\nOJO: el canje quedó A MEDIAS. ${codigosDe(propio).join(", ")} ya cambió; ` +
+            `${codigosDe(contra).join(", ")} no. Los dos están del mismo lado: ` +
+            `corrige el que falta antes de liquidar.`
+          // Se cortó dentro de un lado: no se sabe cuáles pasaron, así que se pide
+          // revisar los dos en vez de afirmar algo que no consta.
+          : `\n\nOJO: el canje quedó A MEDIAS (${hechos} servicio(s) alcanzaron a cambiar). ` +
+            `Revisa el origen de ${[...codigosDe(propio), ...codigosDe(contra)].join(", ")} ` +
+            `antes de liquidar.`;
+      alert(
+        (/origen_contractual|adicional_motivo|adicional_nota/i.test(error)
+          ? "Falta correr supabase/reservas-04-servicios-adicionales.sql en Supabase: la base todavía no tiene la columna de origen."
+          : "No se pudo cambiar el origen: " + error) + medias
+      );
+      if (medias) { setModalOrigen(null); limpiarSeleccion(); await cargarDatos(); }
+      return;
+    }
+    setModalOrigen(null);
+    limpiarSeleccion();
+    // Tras el canje siempre al filtro de adicionales: uno de los dos lados acaba de
+    // entrar ahí y es lo que el operador va a querer verificar.
+    setFiltroOrigen(plan || m.destino === "adicional" ? "adicional" : "todos");
+    await cargarDatos();
+    alert(plan
+      ? `Canje aplicado: ${plan.a.ids.length} servicio(s) a ${plan.a.destino.toUpperCase()} ` +
+        `y ${plan.b.ids.length} a ${plan.b.destino.toUpperCase()}.`
+      : `${hechos} servicio(s) quedaron como ${m.destino === "adicional" ? "ADICIONAL" : "CONTRATO"}.`);
+  };
+
   // Prepara el modal de borrado en grupo: expande la pareja IDA/RETORNO vinculada
   // no seleccionada, y separa las reservas facturadas/cobradas (no se eliminan solas).
   const prepararEliminacionLote = async (idsBase: number[]) => {
@@ -1707,6 +2849,51 @@ export default function ReservasPage() {
     if (estado === "finalizada") {
       setModalFinalizar({ id, motivo: "" });
       return;
+    }
+
+    // ── LA SEGUNDA PUERTA POR LA QUE SE CANCELA ────────────────────────────────────
+    // Este desplegable escribe directo, sin pasar por el formulario. Con un importe ya
+    // cargado eso dejaba el mismo dato sucio que el formulario acaba de aprender a
+    // evitar — la trampa de las ramas duplicadas que este ERP ya pagó con el precio.
+    //
+    // La cancelación SIN importe se queda rápida, que es el 90 % de los casos (un
+    // servicio que se cae con días de antelación no tiene nada cargado). Solo cuando hay
+    // plata de por medio se manda al formulario: es donde vive la decisión completa
+    // —poner en S/ 0.00 o acordar un falso flete—, y un `confirm()` de dos botones no
+    // puede ofrecer tres caminos sin esconder el que paga.
+    //
+    // Quién necesita decisión lo dice EL MISMO motor que el formulario, no una copia de
+    // la condición: dos definiciones de "esto hay que decidirlo" es cómo una de las dos
+    // se queda atrás. El hermano se resuelve por los DOS sentidos del enlace, que se
+    // escribe en dos pasos y a veces queda en un solo lado (lib/liquidacion-hermanos.ts);
+    // si ni así aparece —está fuera de la ventana cargada— el plan lo lee como día caído
+    // y manda al formulario, donde el hermano SÍ se busca en la base y el veredicto se
+    // rehace con la verdad completa. Errar hacia el formulario cuesta un clic; errar
+    // hacia el update directo deja el importe huérfano, que es lo que se está arreglando.
+    const rApagar = reservas.find(r => r.id === id);
+    if (esCancelacion(estado) && rApagar) {
+      const vinc = (rApagar as any).reserva_vinculada_id;
+      const hermanoDeFila =
+        (vinc ? reservas.find(x => x.id === Number(vinc)) : null)
+        ?? reservas.find(x => Number((x as any).reserva_vinculada_id) === rApagar.id)
+        ?? null;
+      const plan = planDeCancelacion({
+        estado,
+        tipoAsignacion: rApagar.tipo_asignacion ?? (rApagar.tipo === "tercerizada" ? "tercerizado" : "propio"),
+        costo: rApagar.costo_proveedor ?? 0,
+        precio: rApagar.precio_cliente ?? 0,
+        falsoFleteActual: rApagar.falso_flete ?? false,
+        hermano: hermanoDeFila,
+      });
+      if (plan.pide) {
+        editarReserva(rApagar);
+        setForm(p => ({ ...p, estado }));
+        setMsgPacto(
+          `Este servicio tiene importe cargado. Una cancelación vale S/ 0.00, así que hay que ` +
+          `decir qué pasa con esa plata antes de guardarla.`
+        );
+        return;
+      }
     }
     await supabase.from("reservas").update({ estado }).eq("id", id);
     setReservas(prev => prev.map(r => r.id === id ? { ...r, estado } : r));
@@ -1779,11 +2966,23 @@ export default function ReservasPage() {
     const base = reservas.filter(r => {
       const q     = busqueda.toLowerCase();
       const numCot = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || String(r.cotizacion_id).padStart(5, "0")) : "";
-      const txt = (r.id + " " + numCot + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
+      // El CÓDIGO va primero y es el que faltaba: la columna ID muestra "OS-2026-006532"
+      // y el operador nombra los servicios así, pero la búsqueda solo miraba `r.id`
+      // (la llave interna, que no se enseña en ninguna parte). Buscar el folio que
+      // acabas de leer en pantalla no devolvía nada. Igual con `ruta_nombre`: el
+      // recuadro dice "cliente, ruta o ID" y la ruta que se pinta es esa, no
+      // origen/destino.
+      const txt = (
+        (r.codigo || "") + " " + r.id + " " + numCot + " " + nombreCliente(r.cliente_id) + " " +
+        (r.ruta_nombre || "") + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")
+      ).toLowerCase();
       const passServicio    = filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r));
       const passSentido     = filtroSentido === "todos" || sentidoServicio(r) === filtroSentido;
+      const passOrigen      = filtroOrigen === "todos"
+        || (filtroOrigen === "adicional" ? esAdicional(r) : !esAdicional(r));
       const passPorAsignar  = !filtroPorAsignar || (r.estado === "pendiente" && !r.vehiculo_id && !r.empresa_tercerizada_id);
       return txt.includes(q) &&
+        passOrigen &&
         (filtroEstado === "todos" || r.estado === filtroEstado) &&
         (filtroTipo === "todos" || r.tipo === filtroTipo) &&
         passServicio &&
@@ -1814,7 +3013,7 @@ export default function ReservasPage() {
       }
       return aFut ? -1 : 1;
     });
-  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
+  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
 
   // Agrupación de servicios fijos por contrato (cotizacion_id)
   const gruposContratos = useMemo(() => {
@@ -1869,12 +3068,341 @@ export default function ReservasPage() {
   return (
     <main className="p-6 space-y-5 max-w-7xl mx-auto">
 
-      {mostrarModalPrograma && (
+      {costearId != null && (() => {
+        const r = reservas.find(x => x.id === costearId);
+        if (!r) return null;
+        return (
+          <ModalCostear
+            reserva={{
+              id: r.id, codigo: r.codigo ?? null, fecha_servicio: r.fecha_servicio,
+              ruta_nombre: r.ruta_nombre ?? null, vehiculo_id: r.vehiculo_id,
+              conductor_id: r.conductor_id, precio_cliente: r.precio_cliente, estado: r.estado,
+            }}
+            onCerrar={() => setCostearId(null)}
+          />
+        );
+      })()}
+
+      {modoPrograma && (
         <ModalGenerarPrograma
           clientes={clientes}
-          onClose={() => setMostrarModalPrograma(false)}
-          onGenerado={({ lote, cantidad }) => { cargarDatos(); setFiltroServicio("fijo"); setUltimoLote({ lote, cantidad }); }}
+          modo={modoPrograma}
+          onClose={() => setModoPrograma(null)}
+          onGenerado={({ lote, cantidad }) => {
+            const adicional = modoPrograma === "adicional";
+            cargarDatos();
+            setFiltroServicio("fijo");
+            // Un adicional nace entre cientos de servicios de contrato del mismo
+            // cliente y la misma ruta: sin este filtro habría que ir a buscarlo.
+            if (adicional) setFiltroOrigen("adicional");
+            setUltimoLote({ lote, cantidad });
+          }}
         />
+      )}
+
+      {/* MODAL · reclasificar el origen de servicios ya creados */}
+      {modalOrigen && (() => {
+        const esAdic = modalOrigen.destino === "adicional";
+        const arrastrados = modalOrigen.todos.length - modalOrigen.ids.length;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.45)" }}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col" style={{ maxHeight: "calc(100vh - 32px)" }}>
+              <div className="flex items-center justify-between px-6 py-4 border-b shrink-0" style={{ borderColor: "#e2e8f0" }}>
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0"
+                       style={{ background: esAdic ? "#b45309" : "#0b315f" }}>
+                    <Sparkles size={18} />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold text-gray-900">
+                      {modalOrigen.canje
+                        ? "Intercambiar el origen"
+                        : esAdic ? "Marcar como ADICIONAL" : "Devolver a CONTRATO"}
+                    </h2>
+                    <p className="text-xs text-gray-400">
+                      {modalOrigen.canje
+                        ? "Dos servicios que se cambiaron el lado del contrato"
+                        : "Corrige el origen de servicios ya creados"}
+                    </p>
+                  </div>
+                </div>
+                <button onClick={() => setModalOrigen(null)} className="p-2 rounded-xl hover:bg-gray-100">
+                  <X size={18} className="text-gray-500" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4 overflow-y-auto flex-1">
+                {modalOrigen.cargando ? (
+                  <p className="text-sm text-gray-400">Revisando los servicios…</p>
+                ) : (
+                  <>
+                    <div className="rounded-xl px-4 py-3 text-sm" style={{ background: esAdic ? "#fffbeb" : "#eef3f8", color: esAdic ? "#854d0e" : "#0b315f" }}>
+                      <b>{ladoPropio(modalOrigen).length} servicio(s)</b> pasarán a{" "}
+                      <b>{esAdic ? "ADICIONAL" : "CONTRATO"}</b>.
+                      {arrastrados > 0 && !modalOrigen.soloTramo && (
+                        <p className="mt-1.5 text-[12px] leading-snug">
+                          Marcaste {modalOrigen.ids.length} y se suman {arrastrados} por el tramo
+                          hermano: <b>lo que se cobra es el día completo</b> (ida + retorno = una
+                          tarifa), así que por defecto los dos tramos quedan del mismo lado.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* ── SOLO ESTE TRAMO ────────────────────────────────────────────
+                        El día es la unidad que se cobra, pero a veces lo que cambió de
+                        manos fue un tramo. Se puede, y la consecuencia se enseña ANTES:
+                        el origen del día lo declara el tramo que lleva el importe. */}
+                    {arrastrados > 0 && (
+                      <div className="rounded-xl border px-4 py-3" style={{ borderColor: "#e2e8f0" }}>
+                        <label className="flex items-start gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={modalOrigen.soloTramo}
+                            onChange={e => setModalOrigen(p => p ? { ...p, soloTramo: e.target.checked } : p)}
+                            className="mt-0.5 w-4 h-4 shrink-0"
+                          />
+                          <span>
+                            <span className="text-sm font-bold text-gray-800">
+                              Cambiar solo el tramo marcado
+                            </span>
+                            <span className="block text-[11px] text-gray-500 leading-snug mt-0.5">
+                              No tocar {arrastrados === 1 ? "su tramo hermano" : "sus tramos hermanos"}
+                              {" "}({modalOrigen.todos.filter(id => !modalOrigen.ids.includes(id))
+                                      .map(id => modalOrigen.filas[id]?.codigo ?? `#${id}`).join(", ")}).
+                            </span>
+                          </span>
+                        </label>
+                        {modalOrigen.soloTramo && (efectoTramo ? (
+                          <p className="text-[12px] leading-snug mt-2.5 pl-6"
+                             style={{ color: efectoTramo.mueveValorizacion ? "#854d0e" : "#0b315f" }}>
+                            {efectoTramo.aviso}
+                          </p>
+                        ) : modalOrigen.ids.length > 1 && (
+                          // En lote no se puede dar UN importe: cada día lo decide su
+                          // propio tramo con tarifa. Se dice la regla, no una cifra falsa.
+                          <p className="text-[12px] leading-snug mt-2.5 pl-6" style={{ color: "#0b315f" }}>
+                            Son {modalOrigen.ids.length} tramos de días distintos. En cada día,
+                            el que decide cómo se cobra es <b>el tramo que lleva la tarifa</b>:
+                            donde marques ese, el día cambia de subtotal; donde marques el que
+                            va en S/ 0.00, la valorización no se mueve y queda el registro.
+                          </p>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* ── CANJE ──────────────────────────────────────────────────────
+                        El caso en que la etiqueta no sobra: está en el servicio
+                        equivocado porque dos unidades se intercambiaron el trabajo. */}
+                    {!modalOrigen.canje ? (
+                      <button
+                        onClick={cargarCandidatosCanje}
+                        className="w-full text-left rounded-xl border px-4 py-3 hover:bg-gray-50 transition-colors"
+                        style={{ borderColor: "#e2e8f0" }}
+                      >
+                        <span className="text-sm font-bold text-gray-800">
+                          ⇄ Fue un intercambio con otro servicio
+                        </span>
+                        <span className="block text-[11px] text-gray-500 leading-snug mt-0.5">
+                          Los dos cambian de lado a la vez: este pasa a{" "}
+                          {esAdic ? "adicional" : "contrato"} y el otro vuelve a{" "}
+                          {esAdic ? "contrato" : "adicional"}. Los totales no se mueven, solo se
+                          corrige cuál era cuál.
+                        </span>
+                      </button>
+                    ) : (
+                      <div className="rounded-xl border p-4 space-y-3" style={{ borderColor: "#c7d7ea", background: "#f8fafc" }}>
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-bold" style={{ color: "#0b315f" }}>
+                            ⇄ Intercambio con otro servicio
+                          </span>
+                          <button
+                            onClick={() => setModalOrigen(p => p ? { ...p, canje: false, elegido: null, contraparte: [] } : p)}
+                            className="text-[11px] font-bold text-gray-500 hover:text-gray-700"
+                          >
+                            Quitar
+                          </button>
+                        </div>
+
+                        {modalOrigen.sinColumna ? (
+                          <p className="text-[12px] leading-snug" style={{ color: "#b45309" }}>
+                            Falta correr <b>supabase/reservas-04-servicios-adicionales.sql</b>: sin la
+                            columna de origen no existen los dos lados del canje.
+                          </p>
+                        ) : modalOrigen.cargandoCandidatos && modalOrigen.candidatos === null ? (
+                          <p className="text-[12px] text-gray-400">Buscando la contraparte…</p>
+                        ) : (modalOrigen.candidatos ?? []).length === 0 ? (
+                          <p className="text-[12px] leading-snug text-gray-500">
+                            No hay servicios <b>{modalOrigen.destino}</b> de este cliente
+                            dentro de los ±{CANJE_DIAS} días. Un canje necesita los dos lados: si la
+                            contraparte no está marcada todavía, márcala primero desde su propia fila.
+                          </p>
+                        ) : (
+                          <>
+                            <p className="text-[11px] text-gray-500 leading-snug">
+                              Elige el servicio que hoy está como{" "}
+                              <b>{modalOrigen.destino}</b> y que en realidad era el otro:
+                            </p>
+                            <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+                              {(modalOrigen.candidatos ?? []).map(c => {
+                                const sel = modalOrigen.elegido === c.id;
+                                return (
+                                  <button
+                                    key={c.id}
+                                    onClick={() => elegirContraparte(c.id)}
+                                    className="w-full text-left rounded-lg border px-3 py-2 transition-colors"
+                                    style={sel
+                                      ? { borderColor: "#0b315f", background: "#eef3f8" }
+                                      : { borderColor: "#e2e8f0", background: "#fff" }}
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="font-mono text-[12px] font-bold text-gray-800">
+                                        {c.codigo ?? `#${c.id}`}
+                                      </span>
+                                      <span className="text-[11px] text-gray-500">
+                                        {c.fecha_servicio} · {String(c.hora_servicio ?? "").slice(0, 5)}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-2 mt-0.5">
+                                      <span className="text-[11px] text-gray-500 truncate">
+                                        {c.ruta_nombre || rutaDe(c).o}
+                                      </span>
+                                      <span className="text-[11px] font-bold text-gray-700 shrink-0">
+                                        {fmtSoles(Number(c.precio_cliente ?? 0))}
+                                      </span>
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </>
+                        )}
+
+                        {planCanje && (
+                          <div className="rounded-lg bg-white border p-3 space-y-2" style={{ borderColor: "#e2e8f0" }}>
+                            {[planCanje.a, planCanje.b].map((l, i) => (
+                              <div key={i} className="flex items-start justify-between gap-3 text-[12px]">
+                                <span className="font-mono text-gray-700 leading-snug">
+                                  {l.codigos.join(", ")}
+                                </span>
+                                <span className="shrink-0 font-bold" style={{ color: l.destino === "adicional" ? "#b45309" : "#0b315f" }}>
+                                  → {l.destino.toUpperCase()} · {fmtSoles(l.importe)}
+                                </span>
+                              </div>
+                            ))}
+                            {planCanje.netoAdicionales === 0 && planCanje.aplicable && (
+                              <p className="text-[11px] leading-snug" style={{ color: "#166534" }}>
+                                Neto sobre la valorización: <b>cero</b>. Solo se corrige la etiqueta.
+                              </p>
+                            )}
+                            {planCanje.avisos.map((a, i) => (
+                              <p key={i} className="text-[11px] leading-snug" style={{ color: planCanje.aplicable ? "#854d0e" : "#b91c1c" }}>
+                                {a}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {modalOrigen.liquidadas.length > 0 && (
+                      <div className="rounded-xl px-4 py-3 text-[12px] leading-snug" style={{ background: "#fef9c3", color: "#854d0e" }}>
+                        <p className="font-bold mb-1">Ojo: hay servicios que ya están liquidados</p>
+                        {modalOrigen.liquidadas.map(l => (
+                          <p key={l.id}>· {l.codigo ?? "#" + l.id} ({l.estado}) — {l.cuantas} servicio(s)</p>
+                        ))}
+                        <p className="mt-1.5">
+                          El documento ya emitido <b>no cambia</b>: es una foto de lo que el cliente
+                          recibió. Esto corrige el registro operativo, para que los reportes y los
+                          próximos cierres digan la verdad. Si alguna está en <b>borrador</b>, ábrela
+                          y usa <b>↻ Recalcular descripciones</b> para que la línea se rearme.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* En un canje SIEMPRE hay un lado que queda como adicional, aunque el
+                        botón hubiera sido "Devolver a CONTRATO": el motivo se pide igual. */}
+                    {(esAdic || planCanje) && (
+                      <>
+                        <div>
+                          <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                            Motivo {planCanje ? "(obligatorio)" : "(opcional)"}
+                          </label>
+                          <select className="w-full border rounded-xl px-3 py-2.5 text-sm" value={origenMotivo} onChange={e => setOrigenMotivo(e.target.value)}>
+                            <option value="">Sin motivo declarado</option>
+                            {MOTIVOS_CAMBIO.filter(m => m.lado !== "compra").map(m => (
+                              <option key={m.clave} value={m.clave}>{m.nombre}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                            Nota {planCanje ? "(obligatoria)" : "(opcional)"}
+                          </label>
+                          <input className="w-full border rounded-xl px-3 py-2.5 text-sm" value={origenNota}
+                                 onChange={e => setOrigenNota(e.target.value)}
+                                 placeholder={planCanje
+                                   ? "Ej. La unidad del adicional cubrió el retorno del contrato por avería"
+                                   : "Ej. Salidas extra pedidas por correo en agosto"} />
+                          <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                            {planCanje ? (
+                              <>
+                                Se escribe en el lado que queda como <b>adicional</b>, nombrando a su
+                                contraparte. Es el <b>único rastro</b> del intercambio: el lado que
+                                vuelve a contrato limpia sus campos, porque describirían un adicional
+                                que ya no existe.
+                              </>
+                            ) : (
+                              <>
+                                Se escribe en los {ladoPropio(modalOrigen).length} servicios. El
+                                <b> precio de referencia se deja vacío</b> a propósito: de un servicio
+                                pasado no se sabe cuál era la tarifa de entonces, y leerla hoy de la
+                                cotización daría una comparación falsa si el contrato se renegoció.
+                              </>
+                            )}
+                          </p>
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div className="flex gap-3 px-6 py-4 border-t shrink-0" style={{ borderColor: "#e2e8f0" }}>
+                <button onClick={aplicarCambioOrigen}
+                        disabled={
+                          modalOrigen.cargando || aplicandoOrigen ||
+                          // En modo canje no se puede aplicar a medias: sin contraparte
+                          // elegida, con tramos compartidos, o sin el porqué escrito.
+                          (modalOrigen.canje && (!planCanje || !planCanje.aplicable || !origenMotivo || !origenNota.trim()))
+                        }
+                        className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-40"
+                        style={{ background: esAdic ? "#b45309" : "#0b315f" }}>
+                  {aplicandoOrigen
+                    ? "Aplicando…"
+                    : planCanje
+                      ? `Intercambiar ${planCanje.a.ids.length} ⇄ ${planCanje.b.ids.length} servicio(s)`
+                      : `Cambiar ${ladoPropio(modalOrigen).length} servicio(s)`}
+                </button>
+                <button onClick={() => setModalOrigen(null)} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Avisos que sobreviven al cierre del formulario: lo que quedó a medias al
+          guardar. Va acá, a nivel de página, porque el formulario se cierra en el mismo
+          gesto que los produce. No se cierra solo: un día escrito a medias hay que
+          leerlo. */}
+      {avisoPagina && (
+        <div className="flex items-start gap-3 px-5 py-3 rounded-2xl border text-sm"
+             style={{ background: "#fffbeb", borderColor: "#fcd34d", color: "#92400e" }}>
+          <span className="flex-1">{avisoPagina}</span>
+          <button onClick={() => setAvisoPagina("")}
+                  className="text-amber-600 hover:text-amber-800 font-bold">×</button>
+        </div>
       )}
 
       {/* Banner "Deshacer generación" tras usar Programa fijo */}
@@ -1907,6 +3435,7 @@ export default function ReservasPage() {
         const { otrasReservas, resumen, cotizacion_id, payload, horaOriginal } = modalAplicarMasivo;
         const targets = targetsAplicar(modalAplicarMasivo);
         const soloConductor = aplicarCampos === "conductor";
+        const soloPax       = aplicarCampos === "pax";
 
         // El calendario se abre a TODO el contrato: limitarlo a las fechas de los
         // candidatos ya filtrados hacía que se vieran casi todos los días bloqueados.
@@ -1929,7 +3458,14 @@ export default function ReservasPage() {
         // Si se cambió la hora del servicio editado, el masivo la propaga a los de su mismo
         // horario original: hay que decirlo, no es lo que el operador cree estar aplicando.
         const horaNueva  = payload.hora_servicio?.slice(0, 5) || "";
-        const cambiaHora = !soloConductor && !!horaNueva && horaNueva !== horaOriginal;
+        const cambiaHora = !soloConductor && !soloPax && !!horaNueva && horaNueva !== horaOriginal;
+        // Por qué queda fuera cada uno: son DOS trabajos distintos y decirlos con la
+        // misma frase mandaba a los de otra ruta —que se van a imprimir sin el «N PAX»—
+        // con un "la suya es correcta" que no era cierto.
+        const paxOtraRuta = modalAplicarMasivo.paxTocado
+          ? candidatos.filter(r => motivoPax(r, modalAplicarMasivo) === "otra_ruta").length : 0;
+        const paxOtraCapacidad = modalAplicarMasivo.paxTocado
+          ? candidatos.filter(r => motivoPax(r, modalAplicarMasivo) === "otra_capacidad").length : 0;
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -1950,25 +3486,100 @@ export default function ReservasPage() {
                   <p className="font-bold text-green-800">{resumen || "—"}</p>
                 </div>
 
+                {/* ── PAX contratados ────────────────────────────────────────────
+                    El pax es del CONTRATO: si cambió, cambió para todos los días de la
+                    misma ruta, y corregirlo de a uno en 30 fechas es lo que hace que
+                    nadie lo corrija. Pero es una escritura sobre 30 filas, así que se
+                    ofrece marcado y a la vista, nunca en silencio. */}
+                {modalAplicarMasivo.paxTocado && !soloPax && (
+                  <label className="flex items-start gap-2.5 cursor-pointer rounded-xl px-4 py-3"
+                         style={{ background: "#eff6ff", border: "1px solid #bfdbfe" }}>
+                    <input type="checkbox" checked={aplicarPax}
+                           onChange={e => setAplicarPax(e.target.checked)}
+                           className="mt-0.5 accent-[#0b315f]" />
+                    <span className="text-xs text-blue-900">
+                      Aplicar también los <b>PAX contratados</b>{" "}
+                      {modalAplicarMasivo.pax != null
+                        ? <>(<b>{modalAplicarMasivo.pax}</b> asientos)</>
+                        : <>(<b>vacío</b>: se borra la capacidad escrita en esos servicios)</>}.
+                      <span className="block text-blue-700/70 mt-0.5">
+                        Los asientos son del contrato, no de la unidad: se escriben aunque
+                        elijas «solo el conductor». Acá viajan pegados a la asignación, así
+                        que los retornos solo los reciben si marcas abajo los de otro horario
+                        — para alcanzarlos a todos, usa <b>«Solo los PAX contratados»</b>.
+                        {paxOtraCapacidad > 0 && (
+                          <> <b>{paxOtraCapacidad} servicio(s) ya declaran otra capacidad y no
+                          se tocan</b>: son otro móvil de esta ruta.</>
+                        )}
+                        {paxOtraRuta > 0 && (
+                          <> <b>{paxOtraRuta} servicio(s) son de otras rutas de este
+                          contrato</b> y tampoco se tocan: los PAX son de cada ruta.</>
+                        )}
+                      </span>
+                    </span>
+                  </label>
+                )}
+                {soloPax && (
+                  <div className="rounded-xl px-4 py-3 text-xs" style={{ background: "#eff6ff", border: "1px solid #bfdbfe", color: "#0b315f" }}>
+                    Se escribirán{" "}
+                    {modalAplicarMasivo.pax != null
+                      ? <><b>{modalAplicarMasivo.pax} PAX contratados</b></>
+                      : <><b>los PAX en blanco</b> (se borra la capacidad escrita en esos servicios)</>}
+                    {" "}y nada más. Entran las idas <b>y</b> los retornos del rango: los
+                    asientos son del día completo.
+                    {paxOtraCapacidad > 0 && (
+                      <span className="block mt-1">
+                        Quedan fuera <b>{paxOtraCapacidad} servicio(s)</b> que ya declaran otra
+                        capacidad: son otro móvil de esta ruta y la suya es correcta. Para
+                        cambiarlos, abre uno de ellos.
+                      </span>
+                    )}
+                    {paxOtraRuta > 0 && (
+                      <span className="block mt-1">
+                        Quedan fuera <b>{paxOtraRuta} servicio(s) de otras rutas</b> de este
+                        contrato: los PAX son de cada ruta, así que esos se corrigen abriendo
+                        uno de ellos. <b>Si están en blanco, su ítem saldrá sin el «N PAX».</b>
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {/* Qué campos aplicar */}
-                {hayConductor && (
+                {(hayConductor || modalAplicarMasivo.paxTocado) && (
                   <div className="space-y-2">
                     <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">¿Qué aplicar?</p>
                     <div className="grid grid-cols-2 gap-2">
-                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${!soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${aplicarCampos === "todo" ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
                         <div className="flex items-center gap-2">
-                          <input type="radio" name="campos" checked={!soloConductor} onChange={() => setAplicarCampos("todo")} className="accent-[#0b315f]" />
+                          <input type="radio" name="campos" checked={aplicarCampos === "todo"} onChange={() => setAplicarCampos("todo")} className="accent-[#0b315f]" />
                           <p className="font-bold text-sm text-gray-800">{payload.tipo_asignacion === "propio" ? "Vehículo y conductor" : "Empresa y unidad"}</p>
                         </div>
                         <p className="text-[11px] text-gray-500 mt-1 ml-6">Reemplaza la asignación completa.</p>
                       </label>
-                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
-                        <div className="flex items-center gap-2">
-                          <input type="radio" name="campos" checked={soloConductor} onChange={() => setAplicarCampos("conductor")} className="accent-[#0b315f]" />
-                          <p className="font-bold text-sm text-gray-800">Solo el conductor</p>
-                        </div>
-                        <p className="text-[11px] text-gray-500 mt-1 ml-6">Cada servicio conserva su unidad.</p>
-                      </label>
+                      {hayConductor && (
+                        <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                          <div className="flex items-center gap-2">
+                            <input type="radio" name="campos" checked={soloConductor} onChange={() => setAplicarCampos("conductor")} className="accent-[#0b315f]" />
+                            <p className="font-bold text-sm text-gray-800">Solo el conductor</p>
+                          </div>
+                          <p className="text-[11px] text-gray-500 mt-1 ml-6">Cada servicio conserva su unidad.</p>
+                        </label>
+                      )}
+                      {/* Su propio modo, no una casilla sobre "todo": quien vino a corregir
+                          los asientos contratados no quiere de paso reescribirle el
+                          vehículo y el conductor a 30 fechas. */}
+                      {modalAplicarMasivo.paxTocado && (
+                        <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloPax ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                          <div className="flex items-center gap-2">
+                            <input type="radio" name="campos" checked={soloPax} onChange={() => setAplicarCampos("pax")} className="accent-[#0b315f]" />
+                            <p className="font-bold text-sm text-gray-800">Solo los PAX contratados</p>
+                          </div>
+                          <p className="text-[11px] text-gray-500 mt-1 ml-6">
+                            No toca unidad, conductor, hora ni estado. Alcanza a los dos tramos
+                            del día.
+                          </p>
+                        </label>
+                      )}
                     </div>
                   </div>
                 )}
@@ -2006,8 +3617,9 @@ export default function ReservasPage() {
                   </label>
                 </div>
 
-                {/* Qué se incluye / qué se está dejando fuera */}
-                {(otraHora.length > 0 || otraUnidad.length > 0 || soloConductor) && (
+                {/* Qué se incluye / qué se está dejando fuera. En "solo los PAX" no
+                    aplica: esos filtros protegen la asignación, y ahí no se escribe. */}
+                {!soloPax && (otraHora.length > 0 || otraUnidad.length > 0 || soloConductor) && (
                   <div className="space-y-1.5 rounded-xl border border-gray-200 px-4 py-3">
                     <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">Incluir también</p>
 
@@ -2608,11 +4220,24 @@ export default function ReservasPage() {
         </div>
         <div className="flex gap-2 flex-wrap">
           <button
-            onClick={() => setMostrarModalPrograma(true)}
+            onClick={() => setModoPrograma("fijo")}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
             style={{ background: "#0b315f" }}
           >
             <Calendar size={15} /> Programa fijo
+          </button>
+          {/* El adicional se registra desde el MISMO sitio y con el mismo modal: se
+              elige la cotización que ya tiene los paraderos, y lo único que cambia es
+              que las fechas son sueltas, el sentido se elige y el precio se puede
+              escribir. Antes había que generarlo como programa fijo y corregir el
+              precio servicio por servicio. */}
+          <button
+            onClick={() => setModoPrograma("adicional")}
+            title="Servicio que el cliente pide por encima de lo contratado, con su propio precio"
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
+            style={{ background: "#b45309" }}
+          >
+            <Sparkles size={15} /> Adicional
           </button>
           {editandoId && (
             <button onClick={limpiar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
@@ -2722,6 +4347,26 @@ export default function ReservasPage() {
             </div>
           </div>
 
+          {msgPacto && (
+            <div className="rounded-xl px-4 py-3 text-xs bg-amber-50 border border-amber-200 text-amber-800 flex items-start gap-3">
+              <span className="flex-1">{msgPacto}</span>
+              <button onClick={() => setMsgPacto("")} className="text-amber-500 hover:text-amber-700">×</button>
+            </div>
+          )}
+
+          {/* Lo que ya está pactado, leído del propio servicio: el operador ve con quién
+              y en cuánto se quedó antes de tocar nada. */}
+          {(() => {
+            const r = reservas.find(x => x.id === editandoId);
+            if (!r || !(Number(r.costo_proveedor) > 0)) return null;
+            return (
+              <p className="text-[11px] text-gray-500">
+                Pactado hoy: <b className="text-gray-700">{nombreEmpTer(r.empresa_tercerizada_id)}</b>
+                {" · "}<b className="text-gray-700">{fmtSoles(Number(r.costo_proveedor))}</b>
+              </p>
+            );
+          })()}
+
           <div className="rounded-xl px-4 py-3 text-xs" style={{ background: "#e0f2fe", color: "#0369a1" }}>
             Al asignar recursos el estado pasara automaticamente a Programada. Para tercerizado el sistema verificara que la empresa no tenga documentos vencidos.
           </div>
@@ -2750,7 +4395,125 @@ export default function ReservasPage() {
                   <option value="cancelada">Cancelada</option>
                 </select>
               </Campo>
+
+              {/* ── PAX CONTRATADOS ───────────────────────────────────────────
+                  Los asientos que el cliente CONTRATÓ, que no son los del bus que salió.
+                  Hasta ahora este campo solo se podía escribir al generar el programa y
+                  después corregir desde el borrador de la liquidación —la última pantalla
+                  del mes, y que ya no vuelve al servicio—, así que desde Programación el
+                  dato era invisible: se veía "17 pax" en el selector de la unidad y se
+                  daba por bueno para el contrato. Va acá, y no en la sección de la
+                  asignación, porque el contrato es del SERVICIO: la asignación está
+                  duplicada en dos ramas (propia / tercerizada) y ponerlo ahí lo dejaría
+                  fuera de una de las dos, que es exactamente lo que le pasó al precio. */}
+              <Campo label="PAX contratados por el cliente" span={2}>
+                <input
+                  type="number" min="1" step="1" className={inputCls()}
+                  placeholder={paxResuelto.pax != null && paxResuelto.fuente !== "servicio"
+                    ? String(paxResuelto.pax) : "—"}
+                  value={form.capacidad_contratada}
+                  onChange={e => {
+                    // El 0 (y el negativo) se normalizan ACÁ y no al guardar. Si no, el
+                    // campo mostraba "0", el pie decía "Queda escrito en este servicio" y
+                    // al guardar se borraba el 15 que había: la pantalla anunciaba lo
+                    // contrario de lo que iba a pasar. Vacío y cero son lo mismo para la
+                    // base (el CHECK rechaza el cero); que lo sean también acá. Se
+                    // conserva el texto tecleado mientras sea positivo —redondear en vivo
+                    // reescribiría lo que el operador está escribiendo—, que ya redondea
+                    // `paxDelForm` al guardar.
+                    const v = e.target.value;
+                    const n = Number(v);
+                    setForm(p => ({
+                      ...p,
+                      capacidad_contratada: v.trim() === "" || !(n > 0) ? "" : v,
+                    }));
+                  }}
+                />
+                {form.capacidad_contratada.trim() === "" ? (
+                  paxResuelto.pax != null ? (
+                    <p className="text-[10px] mt-1 text-gray-500 leading-snug">
+                      Sin dato propio: la liquidación tomará <b>{paxResuelto.pax} PAX</b>{" "}
+                      ({FUENTE_PAX[String(paxResuelto.fuente)]}). Escríbelo acá solo si para
+                      este servicio se contrató otra cantidad.
+                    </p>
+                  ) : (
+                    <p className="text-[10px] mt-1 text-amber-700 leading-snug">
+                      Ninguna fuente sabe cuántos asientos se contrataron: el ítem de la
+                      liquidación saldrá <b>sin el «N PAX»</b>. Se corrige acá, o de una vez
+                      para toda la ruta en <b>Liquidaciones → Rutas contratadas</b>.
+                    </p>
+                  )
+                ) : (
+                  <p className="text-[10px] mt-1 text-gray-400 leading-snug">
+                    Queda escrito en este servicio y manda sobre la cotización y la ficha de
+                    la ruta. Vacío no es cero: vacío es «no lo sé».
+                  </p>
+                )}
+                {/* Que la escritura al hermano no sea una sorpresa: el operador ve UN
+                    servicio y se van a tocar dos. Solo cuando hay número que propagar: el
+                    borrado NO se arrastra, porque borraría justo lo que la cascada acaba
+                    de anunciar que el hermano aporta. */}
+                {paxTocadoForm && paxDelForm != null && hermano?.id
+                  && (hermano.capacidad_contratada ?? null) !== paxDelForm && (
+                  <p className="text-[10px] mt-1 text-gray-500 leading-snug">
+                    Se escribirá también en <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b>:
+                    los asientos son del <b>día</b>, no del tramo.
+                  </p>
+                )}
+                {paxTocadoForm && paxDelForm == null && hermano?.capacidad_contratada != null && (
+                  <p className="text-[10px] mt-1 text-gray-500 leading-snug">
+                    Se borra <b>solo acá</b>: <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b>{" "}
+                    conserva sus {hermano.capacidad_contratada} y la liquidación los seguirá
+                    imprimiendo. Para dejar el día sin dato, vacíalo también en ese tramo.
+                  </p>
+                )}
+                {/* La discrepancia que YA existe. Sin esto no se ve: la pantalla muestra
+                    este tramo y el formato imprime el de la ida, y nadie los compara. Solo
+                    cuando los DOS declaran un número: un null frente a un 15 no es un
+                    conflicto —es el reparto normal, y la cascada lo resuelve bien—, y
+                    avisarlo sería el rojo permanente que enseña a no leer los avisos. */}
+                {!paxTocadoForm && hermano?.capacidad_contratada != null
+                  && reservaEditada?.capacidad_contratada != null
+                  && hermano.capacidad_contratada !== reservaEditada.capacidad_contratada && (
+                  <p className="text-[10px] mt-1 text-amber-700 leading-snug">
+                    Este tramo dice <b>{reservaEditada.capacidad_contratada}</b> y{" "}
+                    <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b> dice{" "}
+                    <b>{hermano.capacidad_contratada}</b>. La liquidación imprime <b>uno solo</b>
+                    {" "}(mira la ida primero), así que uno de los dos se está descartando en
+                    silencio. Escribe el correcto: se guarda en los dos.
+                  </p>
+                )}
+              </Campo>
+
+              <Campo label="Capacidad de la unidad asignada" span={2}>
+                <div className="border rounded-xl px-4 py-2.5 text-sm bg-gray-50 text-gray-600">
+                  {capacidadUnidad
+                    ? <>
+                        <b className="font-mono text-gray-800">{capacidadUnidad.placa}</b>
+                        {capacidadUnidad.cap != null
+                          ? <> · {capacidadUnidad.cap} asientos</>
+                          : <span className="text-gray-400"> · sin capacidad registrada</span>}
+                      </>
+                    : <span className="text-gray-400">Sin unidad asignada todavía</span>}
+                </div>
+                <p className="text-[10px] mt-1 text-gray-400 leading-snug">
+                  Dato de la <b>flota</b>, no del contrato, y <b>no se copia solo</b>: mandar
+                  un bus de 20 a una ruta contratada para 15 no cambia lo que se factura.
+                </p>
+              </Campo>
             </div>
+
+            {/* La unidad no alcanza para lo contratado. Es un problema de OPERACIÓN, no de
+                facturación: no bloquea (a las 5 a.m. el bus sale igual), pero es mejor
+                enterarse acá que en el paradero. */}
+            {capacidadUnidad?.cap != null && paxResuelto.pax != null && capacidadUnidad.cap < paxResuelto.pax && (
+              <div className="mt-3 rounded-xl px-4 py-2.5 text-xs bg-amber-50 border border-amber-200 text-amber-800">
+                La unidad <b className="font-mono">{capacidadUnidad.placa}</b> tiene{" "}
+                <b>{capacidadUnidad.cap} asientos</b> y el contrato son <b>{paxResuelto.pax} PAX</b>:
+                no entran todos. Revisa la asignación o confirma con el cliente que se
+                contrató esa cantidad.
+              </div>
+            )}
           </div>
 
           <div>
@@ -2787,6 +4550,25 @@ export default function ReservasPage() {
                 <Campo label="Observaciones">
                   <input className={inputCls()} placeholder="Notas del servicio..." value={form.observaciones} onChange={f("observaciones")} />
                 </Campo>
+                {/* Costear solo tiene sentido con la unidad ya elegida y el servicio
+                    guardado: el presupuesto se ata a una reserva, no a un formulario. */}
+                {editandoId && (
+                  <div className="md:col-span-3">
+                    <button
+                      type="button"
+                      onClick={() => setCostearId(editandoId)}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
+                      style={{ background: "#0f5257" }}
+                    >
+                      <Calculator size={15} /> Costear este servicio
+                    </button>
+                    <p className="text-[10px] text-gray-400 mt-1.5 leading-snug">
+                      Combustible según el rendimiento medido de esta placa, conductor a
+                      costo empresa y desgaste de la unidad. Se compara contra lo que se
+                      gastó de verdad.
+                    </p>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="space-y-4">
@@ -2802,13 +4584,20 @@ export default function ReservasPage() {
                       ))}
                     </select>
                   </Campo>
-                  <Campo label="Costo S/ *">
+                  <Campo label="Costo del proveedor S/ *">
                     <input type="number" min="0" className={inputCls()} placeholder="0.00" value={form.costo_proveedor} onChange={f("costo_proveedor")} />
-                    {form.costo_proveedor && (() => {
-                      const r = reservas.find(r => r.id === editandoId);
-                      const margen = Number(r?.precio_cliente || 0) - Number(form.costo_proveedor);
-                      return <p className="text-[10px] mt-1 font-bold" style={{ color: margen >= 0 ? "#166534" : "#dc2626" }}>Margen: {fmtSoles(margen)}</p>;
-                    })()}
+                    {costoSug && (
+                      <button type="button"
+                        onClick={() => setForm(p => ({ ...p, costo_proveedor: String(costoSug.costo) }))}
+                        className="text-[10px] mt-1 text-violet-700 hover:underline text-left">
+                        Último con este proveedor en {costoSug.base}: {fmtSoles(costoSug.costo)} · hace {costoSug.dias} día(s)
+                      </button>
+                    )}
+                    {!afectacionDe(margenVivo.afectacion).grava && Number(form.costo_proveedor) > 0 && (
+                      <p className="text-[10px] mt-1 text-amber-700">
+                        {afectacionDe(margenVivo.afectacion).etiqueta}: sin IGV que recuperar, cuesta los {fmtSoles(Number(form.costo_proveedor))} completos.
+                      </p>
+                    )}
                   </Campo>
                 </div>
 
@@ -2817,6 +4606,36 @@ export default function ReservasPage() {
                     ATENCION: Esta empresa tiene documentos obligatorios vencidos. Revisar modulo de Tercerizadas antes de confirmar.
                   </div>
                 )}
+
+                {/* HASTA DÓNDE PUEDE LLEGAR ESTE PROVEEDOR. Es lo que ninguna fecha de
+                    vencimiento detecta: una autorización de la ATU perfectamente VIGENTE no
+                    habilita un viaje a Ica. Va aquí, en el momento de asignar, porque es
+                    cuando se decide — y no se afirma nada sobre ESTE servicio en concreto:
+                    el destino de una reserva es texto libre y deducirle la región sería
+                    adivinar. Se pone el dato delante de quien sí sabe a dónde va el bus. */}
+                {empSelId && (() => {
+                  const e = empresasTer.find(x => x.id === empSelId);
+                  if (!e) return null;
+                  const aut = { autoridad: e.autoridad_habilitante ?? null, emisor: e.autoridad_emisor ?? null };
+                  const cfg = configAutoridad(aut.autoridad);
+                  const nacional = cfg?.ambito === "nacional";
+                  if (!cfg) {
+                    return (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[11px] text-amber-900">
+                        <b>Alcance no registrado.</b> No consta qué autoridad autorizó a {e.razon_social}, así que no
+                        se puede saber si este servicio cae dentro de su ámbito. Complétalo en Tercerizadas → Editar.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="rounded-xl px-4 py-2.5 text-[11px] border"
+                      style={{ borderColor: nacional ? "#bbf7d0" : "#bae6fd",
+                               background: nacional ? "#f0fdf4" : "#f0f9ff",
+                               color: nacional ? "#14532d" : "#0c4a6e" }}>
+                      <b>Alcance autorizado: {etiquetaAutorizacion(aut)}.</b> {cfg.alcance}
+                    </div>
+                  );
+                })()}
 
                 {empSelId && (
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -2857,6 +4676,251 @@ export default function ReservasPage() {
                 })()}
               </div>
             )}
+          </div>
+
+          {/* ── DINERO DEL SERVICIO ─────────────────────────────────────────
+              Vale para las DOS asignaciones. Estaba dentro de la rama de tercerizados,
+              así que un servicio de flota propia no tenía dónde ponerle precio de venta:
+              se creaba, se prestaba y llegaba al cierre sin importe, y ahí el bloque rojo
+              decía "Sin precio de venta" sin que existiera ninguna pantalla para cargarlo.
+              El precio, el motivo del cambio, el tramo hermano y los avisos son del
+              SERVICIO; lo único que es del tercero es el costo del proveedor. */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">
+              Dinero del servicio
+            </p>
+            <div className="space-y-4">
+                {/* ── Precio de venta ─────────────────────────────────────────
+                    Este campo NO existía en ninguna pantalla del ERP: una vez creado
+                    el servicio, su precio era inmodificable (los únicos updates de
+                    precio_cliente del repo son sobre la tabla `cotizaciones`). Por eso
+                    "el cliente pidió una unidad mayor" era irrepresentable: se cambiaba
+                    el bus y el servicio se seguía vendiendo al precio del bus anterior. */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <Campo label="Precio al cliente S/">
+                    <input type="number" min="0" className={inputCls()} placeholder="0.00"
+                      value={form.precio_cliente} onChange={f("precio_cliente")} />
+                    <p className="text-[10px] mt-1 text-gray-400">
+                      Súbelo cuando el cliente pida una unidad mayor. Queda en el acta con su motivo,
+                      y se cobra en la liquidación del cierre.
+                    </p>
+                  </Campo>
+
+                  {/* Panel de margen en vivo: es lo que le ENSEÑA al operador por qué le
+                      conviene cobrar el diferencial. Es la primera vez que el ERP se lo
+                      muestra en el momento de decidir. */}
+                  <div className="md:col-span-2">
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">Margen</p>
+                    {form.tipo_asignacion === "propio" ? (
+                      // Con costo_proveedor en cero el margen daría 100 %, y en flota propia
+                      // eso no es "todavía no se sabe": es FALSO. El costo de una unidad
+                      // propia no es un importe pactado con nadie — sale de los egresos
+                      // reales del servicio, que ya suma v_costo_servicio.
+                      <div className="rounded-xl border bg-gray-50 px-4 py-3 text-[11px] text-gray-500 leading-snug">
+                        En flota propia no hay costo pactado con nadie, así que aquí no se
+                        muestra margen: con el costo en cero saldría <b>100 %</b>, que es falso.
+                        El costo real de este servicio sale de sus egresos —combustible,
+                        peajes, caja chica— y se ve en <b>Gastos → Costo del servicio</b>.
+                      </div>
+                    ) : (
+                    <div className="rounded-xl border bg-gray-50 px-4 py-3 flex flex-wrap items-center gap-4">
+                      <div>
+                        <span className="block text-[10px] uppercase text-gray-400">Antes</span>
+                        <span className="font-black text-gray-600 tabular-nums">
+                          {margenVivo.antes.pct != null ? `${margenVivo.antes.pct.toFixed(1)}%` : "—"}
+                        </span>
+                        <span className="block text-[10px] text-gray-400 tabular-nums">
+                          {fmtSoles(margenVivo.antes.ingreso)} / {fmtSoles(margenVivo.antes.costo)}
+                        </span>
+                      </div>
+                      <span className="text-gray-300 text-lg">→</span>
+                      <div>
+                        <span className="block text-[10px] uppercase text-gray-400">Después</span>
+                        <span className="font-black tabular-nums" style={{
+                          color: margenVivo.ahora.pct == null ? "#6b7280"
+                               : margenVivo.ahora.pct < 0 ? "#dc2626"
+                               : margenVivo.ahora.pct < (margenVivo.antes.pct ?? 0) ? "#b45309" : "#166534",
+                        }}>
+                          {margenVivo.ahora.pct != null ? `${margenVivo.ahora.pct.toFixed(1)}%` : "—"}
+                        </span>
+                        <span className="block text-[10px] text-gray-400 tabular-nums">
+                          {fmtSoles(margenVivo.ahora.ingreso)} / {fmtSoles(margenVivo.ahora.costo)}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-gray-400 flex-1 min-w-[180px]">
+                        Importes netos, normalizados por IGV: así un proveedor gravado y uno
+                        exonerado se comparan de verdad.
+                      </p>
+                    </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── Motivo del cambio: un clic, no un párrafo ───────────────── */}
+                <div>
+                  <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    ¿Por qué cambia? {motivoSugerido && <span className="text-violet-600 normal-case font-normal">· sugerido</span>}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {MOTIVOS_CAMBIO.filter(m => m.lado !== "venta").map(m => {
+                      const sel = form.cambio_motivo === m.clave;
+                      const sug = motivoSugerido === m.clave && !form.cambio_motivo;
+                      return (
+                        <button key={m.clave} type="button"
+                          onClick={() => setForm(p => ({ ...p, cambio_motivo: sel ? "" : m.clave }))}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                            sel ? "bg-violet-600 text-white border-violet-600"
+                                : sug ? "bg-violet-50 text-violet-700 border-violet-300"
+                                      : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"}`}>
+                          {m.nombre}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {form.cambio_motivo && (
+                    <input className={inputCls() + " mt-2"} placeholder="Detalle (opcional)"
+                      value={form.cambio_nota} onChange={f("cambio_nota")} />
+                  )}
+                </div>
+
+                {/* El otro tramo del día, a la vista. Sin esto no hay forma de saber, desde
+                    esta pantalla, que el 0.00 de un retorno es correcto porque su ida ya
+                    lleva la tarifa — y ese desconocimiento es lo que lleva a cargarla dos
+                    veces. */}
+                {hermano && (
+                  <div className="rounded-xl border bg-gray-50 px-3 py-2 text-[11px] text-gray-600 flex flex-wrap gap-x-3 gap-y-1 items-center">
+                    <span className="font-bold text-gray-700">
+                      {String((hermano as any).direccion_servicio).toLowerCase() === "retorno" ? "↩ Su retorno" : "↪ Su ida"}
+                    </span>
+                    <span className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</span>
+                    <span className={["cancelada", "anulada"].includes(String(hermano.estado ?? "").toLowerCase()) ? "text-red-600 font-bold" : ""}>
+                      {hermano.estado}
+                    </span>
+                    <span>costo {fmtSoles(Number(hermano.costo_proveedor ?? 0))}</span>
+                    <span>precio {fmtSoles(Number(hermano.precio_cliente ?? 0))}</span>
+                    <span className="text-gray-400">· la tarifa del día cubre los dos tramos</span>
+                  </div>
+                )}
+
+                {/* ── QUÉ PASA CON EL DINERO DE ESTA CANCELACIÓN ───────────────────
+                    Se pregunta AQUÍ, al cancelar, porque es el único momento en que quien
+                    cancela sabe si el bus llegó a salir. Hasta ahora el importe se quedaba
+                    escrito en la reserva: no se pagaba en el cierre, pero sí contaba como
+                    costo en `v_costo_servicio` y `v_egresos`, que lo leen sin preguntar si
+                    el servicio se prestó. La limpieza vivía una pantalla más allá
+                    (/liquidaciones → "Poner en S/ 0.00"), o sea que el dato sucio nacía en
+                    el origen y se saneaba en la desembocadura, una vez al mes.
+
+                    La regla entera está en lib/reservas-cancelacion.ts, con su matriz. */}
+                {planCancelacion.pide && (
+                  <div className="rounded-xl border-2 border-amber-300 bg-amber-50 px-3 py-3 space-y-2">
+                    <p className="text-[12px] font-bold text-amber-900">
+                      Este servicio queda cancelado y tiene importe cargado
+                      {planCancelacion.costoSuelto > 0 && <> · costo {fmtSoles(planCancelacion.costoSuelto)}</>}
+                      {planCancelacion.precioSuelto > 0 && <> · precio {fmtSoles(planCancelacion.precioSuelto)}</>}
+                    </p>
+                    <p className="text-[11px] text-amber-800">
+                      Una cancelación vale <b>S/ 0.00</b>. El importe, por sí solo, no autoriza ningún pago:
+                      hay que decir qué pasó.
+                    </p>
+
+                    <label className="flex items-start gap-2 text-[11px] text-gray-700 cursor-pointer">
+                      <input type="radio" className="mt-0.5" name="cancelacion"
+                        checked={planCancelacion.decision === "cero"}
+                        onChange={() => setForm(p => ({ ...p, cancelacion_decision: "cero" }))} />
+                      <span>
+                        <b>El bus no salió</b> — no se paga ni se cobra. El importe se pone en S/ 0.00.
+                      </span>
+                    </label>
+
+                    {/* Solo tercerizado: la flota propia no tiene proveedor a quien pagarle
+                        un avance, y `normalizarAsignacion` ya le pone el costo en cero. */}
+                    {planCancelacion.ofreceFalsoFlete && (
+                      <label className="flex items-start gap-2 text-[11px] text-gray-700 cursor-pointer">
+                        <input type="radio" className="mt-0.5" name="cancelacion"
+                          checked={planCancelacion.decision === "falso_flete"}
+                          onChange={() => setForm(p => ({ ...p, cancelacion_decision: "falso_flete" }))} />
+                        <span>
+                          <b>El proveedor ya había salido y hay acuerdo</b> — falso flete: se le paga el
+                          avance pactado.
+                        </span>
+                      </label>
+                    )}
+
+                    {planCancelacion.decision === "falso_flete" && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pl-5">
+                        {/* El monto se TECLEA, no se hereda: el importe cargado es el del
+                            servicio completo que no se prestó — se pagarían S/ 664.41 donde
+                            el acuerdo eran S/ 120. Marcar y poner el monto son un solo acto. */}
+                        <div>
+                          <label className="block text-[10px] font-bold text-amber-900 mb-0.5">
+                            Avance acordado S/
+                          </label>
+                          <input type="number" min="0" step="0.01" className={inputCls()}
+                            placeholder="0.00" value={form.cancelacion_monto}
+                            onChange={f("cancelacion_monto")} />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-amber-900 mb-0.5">
+                            ¿Por qué se le paga? *
+                          </label>
+                          <input type="text"
+                            className={inputCls() + (form.falso_flete_motivo.trim() ? "" : " border-amber-400 bg-amber-50")}
+                            placeholder="Ej.: ya había salido de cochera"
+                            value={form.falso_flete_motivo} onChange={f("falso_flete_motivo")} />
+                        </div>
+                      </div>
+                    )}
+
+                    {planCancelacion.resumen && (
+                      <p className="text-[11px] font-bold text-amber-900 border-t border-amber-200 pt-2">
+                        Al guardar: {planCancelacion.resumen}
+                      </p>
+                    )}
+                    {planCancelacion.bloqueo && (
+                      <p className="text-[11px] rounded-lg px-3 py-2 bg-red-50 border border-red-200 text-red-700">
+                        {planCancelacion.bloqueo}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Lo que va a pasar al guardar, dicho antes de guardar. No bloquea nada:
+                    en esta fase la política está en modo observa y el bus sale igual. */}
+                {(() => {
+                  const r = reservas.find(x => x.id === editandoId);
+                  // Se juzga lo que va a QUEDAR guardado, plan de cancelación incluido: si
+                  // no, un día caído seguía diciendo "márcalo como falso flete" con la
+                  // casilla ya marcada tres centímetros más arriba, y los importes que el
+                  // plan está a punto de retirar disparaban avisos de dinero que ya no
+                  // existe. Un aviso que contradice a la propia pantalla es peor que ninguno.
+                  const p = planCancelacion.patch as Record<string, any>;
+                  const avisos = avisosDe({
+                    tipo_asignacion: form.tipo_asignacion,
+                    costo_proveedor: "costo_proveedor" in p ? Number(p.costo_proveedor) : Number(form.costo_proveedor || 0),
+                    precio_cliente: "precio_cliente" in p ? Number(p.precio_cliente)
+                      : form.precio_cliente !== "" ? Number(form.precio_cliente) : Number(r?.precio_cliente ?? 0),
+                    cambio_motivo: form.cambio_motivo || null,
+                    direccion_servicio: (r as any)?.direccion_servicio ?? null,
+                    estado: form.estado ?? r?.estado ?? null,
+                    falso_flete: "falso_flete" in p ? p.falso_flete === true : r?.falso_flete === true,
+                  }, r ? { precio_cliente: r.precio_cliente, costo_proveedor: r.costo_proveedor } : null, hermano);
+                  if (!avisos.length) return null;
+                  return (
+                    <div className="space-y-1.5">
+                      {avisos.map((a, i) => (
+                        <p key={i} className={`text-[11px] rounded-lg px-3 py-2 border ${
+                          a.nivel === "alerta"
+                            ? "bg-red-50 border-red-200 text-red-700"
+                            : "bg-sky-50 border-sky-200 text-sky-800"}`}>
+                          {a.texto}
+                        </p>
+                      ))}
+                    </div>
+                  );
+                })()}
+
+            </div>
           </div>
 
           <div className="flex gap-3">
@@ -2915,6 +4979,25 @@ export default function ReservasPage() {
                 }}
               >
                 {t === "todos" ? "Ida y retorno" : t === "ida" ? "Ida" : "Retorno"}
+              </button>
+            ))}
+          </div>
+          {/* Origen contractual. "¿Cuántos adicionales le hicimos a este cliente en
+              agosto?" no se podía responder desde el ERP: había que abrir la
+              liquidación y leer renglón por renglón. */}
+          <div className="flex gap-1 rounded-xl p-1" style={{ background: "#f1f5f9" }} title="Filtrar entre lo contratado y lo que el cliente pidió por encima del contrato">
+            {(["todos", "contrato", "adicional"] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => setFiltroOrigen(t)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                style={{
+                  background: filtroOrigen === t ? "white" : "transparent",
+                  color: filtroOrigen === t ? (t === "adicional" ? "#b45309" : "#0b315f") : "#9ca3af",
+                  boxShadow: filtroOrigen === t ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                }}
+              >
+                {t === "todos" ? "Todo origen" : t === "contrato" ? "Contrato" : "Adicionales"}
               </button>
             ))}
           </div>
@@ -3158,6 +5241,15 @@ export default function ReservasPage() {
                                       {r.direccion_servicio === "retorno" && (
                                         <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#ede9fe", color: "#6d28d9" }}>RETORNO</span>
                                       )}
+                                      {esAdicional(r) && (
+                                        <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase"
+                                              title={r.precio_cotizado != null
+                                                ? `Fuera del contrato. Cotizado S/ ${Number(r.precio_cotizado).toFixed(2)} · cobrado S/ ${Number(r.precio_cliente ?? 0).toFixed(2)}`
+                                                : "Servicio fuera de lo contratado"}
+                                              style={{ background: "#fef3c7", color: "#b45309" }}>
+                                          {origenDe(r)}
+                                        </span>
+                                      )}
                                     </div>
                                   </td>
                                   <td className="px-4 py-2.5 capitalize text-gray-500">{diaSem}</td>
@@ -3334,9 +5426,33 @@ export default function ReservasPage() {
           <button onClick={limpiarSeleccion} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 transition-colors" style={{ borderColor: "#c7d7ea", color: "#0b315f" }}>
             Ninguno
           </button>
+          {/* Reclasificar el origen. Va aquí y no en cada fila porque lo normal es
+              corregir un mes entero de una ruta: fila por fila son sesenta clics y
+              sesenta oportunidades de saltarse uno. */}
+          <button
+            onClick={() => prepararCambioOrigen("adicional")}
+            title="Marcar lo seleccionado como servicio pedido por encima del contrato"
+            className="ml-auto flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white transition-colors hover:opacity-90"
+            style={{ background: "#b45309" }}
+          >
+            <Sparkles size={13} /> Marcar como Adicional
+          </button>
+          {Array.from(seleccionados).some(id => {
+            const r = reservas.find(x => x.id === id);
+            return r ? esAdicional(r) : false;
+          }) && (
+            <button
+              onClick={() => prepararCambioOrigen("contrato")}
+              title="Devolver lo seleccionado a servicios del contrato"
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 transition-colors"
+              style={{ borderColor: "#c7d7ea", color: "#0b315f" }}
+            >
+              Devolver a Contrato
+            </button>
+          )}
           <button
             onClick={() => prepararEliminacionLote(Array.from(seleccionados))}
-            className="ml-auto flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors"
+            className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors"
           >
             <Trash2 size={13} /> Eliminar seleccionados
           </button>
@@ -3443,12 +5559,39 @@ export default function ReservasPage() {
                           <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: esFijo ? "#eef3f8" : "#ede9fe", color: esFijo ? "#0b315f" : "#6d28d9" }}>
                             {esFijo ? "Fijo" : "Eventual"}
                           </span>
+                          {/* Fuera del contrato. Con la diferencia contra lo cotizado en el
+                              tooltip: es la respuesta a "¿por qué esta salida costó S/ 480?". */}
+                          {esAdicional(r) && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase"
+                                  title={r.precio_cotizado != null
+                                    ? `Fuera del contrato. Cotizado S/ ${Number(r.precio_cotizado).toFixed(2)} · cobrado S/ ${Number(r.precio_cliente ?? 0).toFixed(2)}`
+                                    : "Servicio fuera de lo contratado"}
+                                  style={{ background: "#fef3c7", color: "#b45309" }}>
+                              {origenDe(r)}
+                            </span>
+                          )}
                           {sentido === "ida" && (
                             <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#dbeafe", color: "#1d4ed8" }}>IDA</span>
                           )}
                           {sentido === "retorno" && (
                             <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#ede9fe", color: "#6d28d9" }}>RETORNO</span>
                           )}
+                          {/* El dinero se pacta por DÍA (ida + retorno = una tarifa), así que
+                              el aviso mira el par, no el tramo. Solo aparece cuando hay algo
+                              que corregir: falta el importe en los dos, o está en los dos. */}
+                          {(() => {
+                            const p = problemaDelDia(r);
+                            if (!p) return null;
+                            return (
+                              <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full"
+                                title={p.texto === "DÍA 2×"
+                                  ? "Los dos tramos del día llevan importe: el cierre lo liquidará dos veces."
+                                  : "Ni la ida ni el retorno de este día tienen importe: no se podrá liquidar."}
+                                style={Object.fromEntries(p.tono.split(";").map((x) => x.split(":"))) as any}>
+                                {p.texto}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </td>
 
@@ -3511,6 +5654,15 @@ export default function ReservasPage() {
                         <span className="mt-1 inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={esTer ? { background: "#ede9fe", color: "#6d28d9" } : { background: "#dbeafe", color: "#1d4ed8" }}>
                           {esTer ? "Tercerizado" : "Propio"}
                         </span>
+                        {/* Un tercerizado sin costo pactado se ve AQUÍ, el día que se
+                            programa, y no 30 días después en el bloque rojo del cierre. */}
+                        {esTer && !(Number(r.costo_proveedor) > 0) && (
+                          <span className="mt-1 ml-1 inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md"
+                            style={{ background: "#fee2e2", color: "#b91c1c" }}
+                            title="Finanzas no podrá liquidar este servicio al cierre hasta que se cargue el costo.">
+                            Sin costo
+                          </span>
+                        )}
                       </td>
 
                       <td className="p-3" onClick={e => e.stopPropagation()}>
@@ -3568,6 +5720,21 @@ export default function ReservasPage() {
                           <button onClick={() => setModalLinksId(r.id)} className="flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                             Links
+                          </button>
+                          {/* Cambiar el origen de ESTE servicio. La acción en lote solo
+                              aparece al seleccionar filas, y eso no se adivina: quien mira
+                              una fila y quiere marcarla la busca aquí. Abre el mismo modal
+                              —con el arrastre del hermano y el aviso de lo ya liquidado—,
+                              no una segunda regla que diga otra cosa. */}
+                          <button
+                            onClick={() => prepararCambioOrigen(esAdicional(r) ? "contrato" : "adicional", [r.id])}
+                            title={esAdicional(r) ? "Devolver este servicio al contrato" : "Marcar este servicio como adicional"}
+                            className="flex items-center justify-center p-2 rounded-xl transition-colors border"
+                            style={esAdicional(r)
+                              ? { background: "#fef3c7", color: "#b45309", borderColor: "#fde68a" }
+                              : { background: "#f8fafc", color: "#94a3b8", borderColor: "#e2e8f0" }}
+                          >
+                            <Sparkles size={14} />
                           </button>
                           <button onClick={() => editarReserva(r)} title="Editar" className="flex items-center justify-center bg-gray-50 hover:bg-gray-100 text-gray-600 p-2 rounded-xl transition-colors border border-gray-200">
                             <Pencil size={14} />

@@ -9,3 +9,7 @@ auth/
 
 # Logs
 *.log
+
+# Residuo de correr `next build` con el directorio equivocado: el /.next/ de la raíz
+# está anclado a la raíz, así que no cubre esta subcarpeta.
+.next/

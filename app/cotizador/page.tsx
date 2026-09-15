@@ -2,6 +2,12 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { calcularCostoUnidad, escenariosPrecio, type ParametrosUnidad } from "@/lib/costeo-propio";
+import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
+import {
+  NIVELES, NIVEL_CFG, equipamientoDeNivel, nivelDeFicha, fichasDelNivel, planDeNivel,
+  type NivelServicio,
+} from "@/lib/costos/nivel-servicio";
 
 // ══════════════════════════════════════════════════════════════════
 // TIPOS
@@ -27,9 +33,11 @@ type Resultado = {
   costoDirectos:number; costoDirectoTotal:number; overhead:number;
   baseCosto:number; costoKm:number;
   totalMin15:number; totalEst20:number; totalAlto25:number;
-  sinIGV15:number; sinIGV20:number; sinIGV25:number; precioPax20:number;
+  sinIGV15:number; sinIGV20:number; sinIGV25:number;
+  /** Por asiento, en las DOS bases. La pantalla publica la de sin IGV; ver `escenariosPrecio`. */
+  precioPax20:number; precioPax20Sin:number;
   diaEst:number; diaEstIGV:number; diaMinIGV:number; diaAltoIGV:number;
-  mesEstIGV:number;
+  mesEst:number; mesEstIGV:number;
 };
 
 type PlaceResult = { address:string; lat:number; lng:number; placeId:string; };
@@ -52,30 +60,37 @@ type DiaPlan = {
 
 // ══════════════════════════════════════════════════════════════════
 // MOTOR DE CÁLCULO
+//
+// La fórmula ya no vive aquí: está en lib/costeo-propio.ts, porque el costeo de un
+// servicio de flota propia necesita exactamente la misma cuenta. Dos copias de la
+// misma fórmula divergen, y el día que divergen nadie sabe cuál de los dos números
+// creer. Esta función queda como ADAPTADOR: arma el `Resultado` con la forma que
+// espera el resto de esta pantalla, sin tocar nada más.
+//
+// Que los números no cambiaron lo prueba scripts/prueba-costeo.mts, que corre la
+// versión anterior y la nueva sobre los mismos casos y las compara al sexto decimal.
 // ══════════════════════════════════════════════════════════════════
 
-const IGV=0.18, OVERHEAD=0.10, RESERVA=0.05;
+const MESES_DIAS = 26;   // días facturables de un mes de servicio fijo
 
 function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number, peajes:number, otros:number, pernocte:number, viaticos:number):Resultado|null {
-  if(!p||km<=0)return null;
-  const pc1=pr[p.tipo_combustible_1]||0;
-  const combKm=(pc1/p.rendimiento_1)*p.pct_uso_1+(p.tipo_combustible_2&&p.rendimiento_2&&p.pct_uso_2?((pr[p.tipo_combustible_2]||0)/p.rendimiento_2)*p.pct_uso_2:0);
-  const ureaRate=p.usa_urea&&p.tipo_combustible_1==="Diésel"?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(pr["UREA"]||0):0;
-  const costoCombustible=(combKm+ureaRate)*km; const costoUrea=ureaRate*km;
-  const costoNeumaticos=((p.n_neumaticos*p.costo_neumatico)/p.vida_neumatico_km)*km;
-  const costoMantenimiento=p.mantenimiento_km*km;
-  const costoDeprec=((p.valor_compra*(1-p.residual_pct))/(p.vida_util_anios*p.km_anio))*km;
-  const costoFijosKm=((p.seguro_anual+p.soat_anual+p.revision_semestral*2+p.permisos_anual+p.otros_fijos_mensual*12)/p.km_anio)*km;
-  const sub=costoCombustible+costoNeumaticos+costoMantenimiento+costoDeprec+costoFijosKm;
-  const reserva=sub*RESERVA; const costoVehiculo=sub+reserva;
-  const costoConductor=p.conductor_dia*dias;
-  const costoDirectos=peajes+otros;
-  const costoDirectoTotal=costoVehiculo+costoConductor+costoDirectos;
-  const overhead=costoDirectoTotal*OVERHEAD;
-  const baseCosto=costoDirectoTotal+overhead+pernocte+viaticos;
-  const costoKm=costoDirectoTotal/Math.max(km,1);
-  const pF=(m:number)=>baseCosto/(1-m); const fF=(m:number)=>pF(m)*(1+IGV);
-  return{costoCombustible,costoNeumaticos,costoMantenimiento,costoDeprec,costoFijosKm,costoUrea,reserva,costoVehiculo,costoConductor,costoDirectos,costoDirectoTotal,overhead,baseCosto,costoKm,totalMin15:fF(0.15),totalEst20:fF(0.20),totalAlto25:fF(0.25),sinIGV15:pF(0.15),sinIGV20:pF(0.20),sinIGV25:pF(0.25),precioPax20:fF(0.20)/(p.capacidad||1),diaEst:pF(0.20),diaEstIGV:fF(0.20),diaMinIGV:fF(0.15),diaAltoIGV:fF(0.25),mesEstIGV:fF(0.20)*26};
+  const c = calcularCostoUnidad(p as ParametrosUnidad, pr, { km, dias, peajes, otros, pernocte, viaticos });
+  if (!c) return null;
+  const e = escenariosPrecio(c.baseCosto, p.capacidad);
+  return {
+    costoCombustible:c.costoCombustible, costoNeumaticos:c.costoNeumaticos,
+    costoMantenimiento:c.costoMantenimiento, costoDeprec:c.costoDeprec,
+    costoFijosKm:c.costoFijosKm, costoUrea:c.costoUrea, reserva:c.reserva,
+    costoVehiculo:c.costoVehiculo, costoConductor:c.costoConductor,
+    costoDirectos:c.costoDirectos, costoDirectoTotal:c.costoDirectoTotal,
+    overhead:c.overhead, baseCosto:c.baseCosto, costoKm:c.costoKm,
+    totalMin15:e.conIgv.min, totalEst20:e.conIgv.est, totalAlto25:e.conIgv.alto,
+    sinIGV15:e.sinIgv.min,  sinIGV20:e.sinIgv.est,  sinIGV25:e.sinIgv.alto,
+    precioPax20:e.precioPax, precioPax20Sin:e.precioPaxSinIgv,
+    diaEst:e.sinIgv.est, diaEstIGV:e.conIgv.est,
+    diaMinIGV:e.conIgv.min, diaAltoIGV:e.conIgv.alto,
+    mesEst:e.sinIgv.est * MESES_DIAS, mesEstIGV:e.conIgv.est * MESES_DIAS,
+  };
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -863,15 +878,21 @@ export default function CotizadorPage(){
       const f=pR.data||[];const pr:Record<string,number>={};
       (cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});
       setFlota(f);setPrecios(pr);
+      // El nivel sale de la ficha elegida, no de un default suelto: el orden de la consulta
+      // decide cuál cae primero y podría ser una `_ESTANDAR`, dejando el botón en Full Equipo con
+      // una unidad de más de diez años seleccionada — la contradicción que este arreglo mata.
       const bus=f.find((v:ParamCosto)=>v.grupo_vehiculo==="Buses")||f[0];
-      if(bus)setIdxVeh(bus.tipo_vehiculo);
+      if(bus){setIdxVeh(bus.tipo_vehiculo);setNivel(nivelDeFicha(bus.tipo_vehiculo));}
       setDbReady(true);
     }
     cargar();
   },[]);
 
   const [idxVeh,    setIdxVeh]    =useState("");
-  const [equip,     setEquip]     =useState<"full_equipo"|"basico">("full_equipo");
+  // El nivel de servicio (Full Equipo / Estándar). Lo que se GUARDA sigue siendo `equipamiento`
+  // (`full_equipo`/`basico`): ver la cabecera de lib/costos/nivel-servicio.ts.
+  const [nivel,     setNivel]     =useState<NivelServicio>("full_equipo");
+  const [avisoNivel,setAvisoNivel]=useState("");
   const [modo,      setModo]      =useState<"eventual"|"fijo">("eventual");
   const [tipoServEv,setTipoServEv]=useState("solo_ida");
   const [tipoServFj,setTipoServFj]=useState("transporte_personal");
@@ -891,11 +912,35 @@ export default function CotizadorPage(){
   const enOf=enHorario();
   const veh=flota.find(v=>v.tipo_vehiculo===idxVeh);
 
+  // EL SELECTOR SE FILTRA POR NIVEL; EL COMPARATIVO DE ABAJO NO. Son dos cosas distintas: aquí
+  // se ELIGE una unidad —y ofrecer las del otro nivel es justo el bug que se reportó—, y allá se
+  // COMPARAN los dos niveles con su Δ, que es la única pantalla donde esa diferencia se ve.
+  // Filtrar el comparativo borraría la respuesta a «¿por qué una cuesta más que la otra?».
+  const flotaNivel=useMemo(()=>fichasDelNivel(flota,nivel),[flota,nivel]);
+
   const grupos=useMemo(()=>{
     const m:Record<string,ParamCosto[]>={};
-    flota.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});
+    flotaNivel.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});
     return m;
-  },[flota]);
+  },[flotaNivel]);
+
+  /**
+   * Cambiar de nivel es cambiar de nivel, no perder el bus: se pasa a la gemela de la misma
+   * capacidad. `planDeNivel` decide y DECLARA el motivo cuando no puede (lib/costos/nivel-servicio).
+   */
+  const cambiarNivel=useCallback((n:NivelServicio)=>{
+    setNivel(n);
+    const plan=planDeNivel(idxVeh,n,flota);
+    if(plan.codigo==="cambia"||plan.codigo==="sin_gemela"||plan.codigo==="nivel_vacio")setIdxVeh(plan.clave||"");
+    setAvisoNivel(plan.codigo==="sin_gemela"||plan.codigo==="nivel_vacio"?plan.detalle:"");
+  },[idxVeh,flota]);
+
+  /** Elegir una fila del comparativo ARRASTRA el nivel: nunca queda una selección que la rejilla no pueda enseñar. */
+  const elegirFicha=useCallback((clave:string)=>{
+    setIdxVeh(clave);
+    setNivel(nivelDeFicha(clave));
+    setAvisoNivel("");
+  },[]);
 
   // Pernocte y viáticos: vienen de meta si es multi-día, si no se ingresan aparte
   const esMultiDia=tipoServ==="multi_dia";
@@ -927,7 +972,7 @@ export default function CotizadorPage(){
       origen:metaRuta.origen||null,destino:metaRuta.destino||null,
       km:kmRuta,tipo:modo==="fijo"?"transporte_personal":"eventual",
       estado:"pendiente",modo_servicio:modo,tipo_servicio:tipoServ,
-      tipo_vehiculo:veh.tipo_vehiculo,equipamiento:equip,
+      tipo_vehiculo:veh.tipo_vehiculo,equipamiento:equipamientoDeNivel(nivel),
       precio_cliente:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
       costo_estimado:resultado.baseCosto,
       margen_estimado:modo==="eventual"?resultado.totalEst20-resultado.baseCosto:resultado.diaEstIGV-resultado.baseCosto,
@@ -1082,23 +1127,27 @@ export default function CotizadorPage(){
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <div className="flex items-center justify-between mb-3">
                 <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">🚌 Vehículo</p>
+                {/* ESTE BOTÓN AHORA FILTRA. Antes solo se guardaba al crear la cotización, así
+                    que parecía un filtro y no lo era: con «Full Equipo» puesto seguían saliendo
+                    abajo las trece categorías de más de diez años. */}
                 <div className="flex rounded-xl border overflow-hidden flex-shrink-0">
-                  {[{val:"full_equipo",icon:"⭐",label:"Full Equipo"},{val:"basico",icon:"📦",label:"Básico"}].map(e=>(
-                    <button key={e.val} onClick={()=>setEquip(e.val as "full_equipo"|"basico")}
+                  {NIVELES.map(n=>(
+                    <button key={n} onClick={()=>cambiarNivel(n)}
                       className="px-2.5 py-1 text-[10px] font-bold transition-all"
-                      style={{background:equip===e.val?"#0b315f":"white",color:equip===e.val?"white":"#0b315f"}}>
-                      {e.icon} {e.label}
+                      style={{background:nivel===n?"#0b315f":"white",color:nivel===n?"white":"#0b315f"}}>
+                      {NIVEL_CFG[n].icono} {NIVEL_CFG[n].label}
                     </button>
                   ))}
                 </div>
               </div>
+              {avisoNivel&&<p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mb-2">⚠ {avisoNivel}</p>}
               <div className="space-y-3">
                 {Object.entries(grupos).map(([grupo,vehs])=>{
                   const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
                   return(<div key={grupo}><p className="text-[9px] font-black uppercase tracking-wider mb-1.5" style={{color:gc.color}}>{grupo}</p>
                   <div className="grid grid-cols-2 gap-1.5">
                     {vehs.map(v=>{const act=v.tipo_vehiculo===idxVeh;return(
-                      <button key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)}
+                      <button key={v.tipo_vehiculo} onClick={()=>elegirFicha(v.tipo_vehiculo)}
                         className="flex flex-col items-center px-2 py-2 rounded-xl border-2 transition-all text-center"
                         style={{background:act?gc.bg:"white",borderColor:act?gc.color:"#e5e7eb",color:act?gc.color:"#9ca3af"}}>
                         <span className="text-xl">{v.icono||"🚌"}</span>
@@ -1149,27 +1198,56 @@ export default function CotizadorPage(){
                 {/* Precios */}
                 {modo==="eventual"?(
                   <div className="grid grid-cols-3 gap-3">
-                    {[{label:"⛔ Mínimo (15%)",val:resultado.totalMin15,sinIgv:resultado.sinIGV15,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Estándar (20%)",val:resultado.totalEst20,sinIgv:resultado.sinIGV20,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Premium (25%)",val:resultado.totalAlto25,sinIgv:resultado.sinIGV25,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
+                    {/* LOS TRES CUADROS SON MÁRGENES, NO CLASES DE BUS. Se llamaban
+                        "Estándar" y "Premium", los mismos nombres que entonces llevaban las fichas de la unidad,
+                        así que con un bus premium elegido la pantalla ofrecía además un "precio
+                        estándar": dos ejes distintos con el mismo nombre. La unidad decide el
+                        COSTO; el margen decide el PRECIO.
+
+                        EL NÚMERO GRANDE ES SIN IGV, y el con IGV va debajo en pequeño. Lo que se
+                        negocia con el cliente y lo que sostiene el margen es la BASE IMPONIBLE:
+                        el IGV no es de AFA, se recauda y se entrega. Con el número grande en
+                        bruto, el 18 % se lee como parte del precio propio y cada comparación
+                        contra la competencia —que cotiza sin IGV— sale 18 % desviada. Los dos
+                        siguen a la vista: el de arriba para decidir, el de abajo para la
+                        factura. */}
+                    {[{label:"⛔ Margen mínimo (15%)",val:resultado.totalMin15,sinIgv:resultado.sinIGV15,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Margen objetivo (20%)",val:resultado.totalEst20,sinIgv:resultado.sinIGV20,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Margen alto (25%)",val:resultado.totalAlto25,sinIgv:resultado.sinIGV25,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
                       <div key={k.label} className="rounded-2xl p-4 border-2" style={{background:k.bg,borderColor:k.border}}>
                         <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
-                        <p className="font-black text-xl mt-1" style={{color:k.color}}>{fmt(k.val)}</p>
-                        <p className="text-[11px] text-gray-400 mt-1">Sin IGV: {fmt(k.sinIgv)}</p>
-                        {k.label.includes("20%")&&<p className="text-[10px] text-green-600 font-bold mt-0.5">S/ {fmtN(resultado.precioPax20,0)}/pax</p>}
+                        <p className="font-black text-xl mt-1 leading-tight" style={{color:k.color}}>
+                          {fmt(k.sinIgv)} <span className="text-[10px] font-bold text-gray-400 uppercase align-middle">sin IGV</span>
+                        </p>
+                        <p className="text-[11px] text-gray-400 mt-1">Con IGV: {fmt(k.val)}</p>
+                        {k.label.includes("20%")&&<p className="text-[10px] text-green-600 font-bold mt-0.5">S/ {fmtN(resultado.precioPax20Sin,0)}/pax</p>}
                       </div>
                     ))}
                   </div>
                 ):(
                   <div className="space-y-3">
                     <div className="grid grid-cols-3 gap-3">
-                      {[{label:"⛔ Día mín. (15%)",val:resultado.diaMinIGV,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Día est. (20%)",val:resultado.diaEstIGV,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Día prem. (25%)",val:resultado.diaAltoIGV,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
+                      {/* Misma inversión que en eventual: grande sin IGV, con IGV debajo. El modo
+                          fijo no tenía siquiera la línea sin IGV, así que el precio/día del
+                          contrato solo se podía comparar contra el de un competidor dividiendo
+                          entre 1.18 a mano. */}
+                      {[{label:"⛔ Día · margen mín. (15%)",val:resultado.diaMinIGV,sinIgv:resultado.sinIGV15,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Día · margen objetivo (20%)",val:resultado.diaEstIGV,sinIgv:resultado.sinIGV20,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Día · margen alto (25%)",val:resultado.diaAltoIGV,sinIgv:resultado.sinIGV25,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
                         <div key={k.label} className="rounded-2xl p-4 border-2" style={{background:k.bg,borderColor:k.border}}>
                           <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
-                          <p className="font-black text-xl mt-1" style={{color:k.color}}>{fmt(k.val)}</p>
+                          <p className="font-black text-xl mt-1 leading-tight" style={{color:k.color}}>
+                            {fmt(k.sinIgv)} <span className="text-[10px] font-bold text-gray-400 uppercase align-middle">sin IGV</span>
+                          </p>
+                          <p className="text-[11px] text-gray-400 mt-1">Con IGV: {fmt(k.val)}</p>
                         </div>
                       ))}
                     </div>
                     <div className="rounded-2xl border-2 border-green-300 bg-green-50 p-5 flex items-center justify-between">
-                      <div><p className="text-[11px] font-bold text-green-600 uppercase">Estimado mensual (20% · ×26 días)</p><p className="font-black text-3xl text-green-700 mt-1">{fmt(resultado.mesEstIGV)}</p><p className="text-xs text-green-600 mt-1">{fmt(resultado.diaEstIGV)}/día × 26 = {fmt(resultado.mesEstIGV)}/mes</p></div>
+                      <div>
+                        <p className="text-[11px] font-bold text-green-600 uppercase">Estimado mensual (20% · ×26 días)</p>
+                        <p className="font-black text-3xl text-green-700 mt-1 leading-tight">
+                          {fmt(resultado.mesEst)} <span className="text-[11px] font-bold text-green-600/70 uppercase align-middle">sin IGV</span>
+                        </p>
+                        <p className="text-xs text-green-600 mt-1">{fmt(resultado.diaEst)}/día × 26 = {fmt(resultado.mesEst)}/mes</p>
+                        <p className="text-xs text-green-600/70 mt-0.5">Con IGV: {fmt(resultado.mesEstIGV)}/mes ({fmt(resultado.diaEstIGV)}/día)</p>
+                      </div>
                       <div className="text-4xl">📅</div>
                     </div>
                   </div>
@@ -1213,9 +1291,15 @@ export default function CotizadorPage(){
                   ):(
                     <div className="p-5">
                       <h3 className="font-black text-white text-base mb-1">→ Enviar a Cotizaciones</h3>
-                      <p className="text-white/60 text-xs mb-4">{modo==="fijo"?`FIJO · ${fmt(resultado.diaEstIGV)}/día · mes ${fmt(resultado.mesEstIGV)}`:`EVENTUAL · total ${fmt(resultado.totalEst20)}`} · {kmRuta} km</p>
+                      {/* ESTE BLOQUE SIGUE EN CON IGV, y sus etiquetas lo DICEN. Es lo único de la
+                          pantalla que no es una referencia para negociar: es el importe que se va
+                          a GUARDAR en la cotización (`precio_cliente`, `precio_dia`), y ese campo
+                          es con IGV en todo el ERP. Enseñar aquí el sin IGV para que "cuadre" con
+                          los cuadros de arriba haría que el número visible y el guardado fueran
+                          distintos — el error caro de esta pantalla, no el de leer dos bases. */}
+                      <p className="text-white/60 text-xs mb-4">{modo==="fijo"?`FIJO · ${fmt(resultado.diaEstIGV)}/día · mes ${fmt(resultado.mesEstIGV)} · c/IGV`:`EVENTUAL · total ${fmt(resultado.totalEst20)} c/IGV`} · {kmRuta} km</p>
                       <div className="grid grid-cols-3 gap-3 mb-4">
-                        {(modo==="eventual"?[{label:"Costo base",val:fmt(resultado.baseCosto),color:"#fca5a5"},{label:"Sin IGV",val:fmt(resultado.sinIGV20),color:"#fcd34d"},{label:"Total final",val:fmt(resultado.totalEst20),color:"#6ee7b7"}]:[{label:"Precio/día",val:fmt(resultado.diaEstIGV),color:"#6ee7b7"},{label:"Mes est.",val:fmt(resultado.mesEstIGV),color:"#a78bfa"},{label:"Costo/día",val:fmt(resultado.baseCosto),color:"#fca5a5"}]).map(k=>(
+                        {(modo==="eventual"?[{label:"Costo base",val:fmt(resultado.baseCosto),color:"#fca5a5"},{label:"Sin IGV",val:fmt(resultado.sinIGV20),color:"#fcd34d"},{label:"Total c/IGV",val:fmt(resultado.totalEst20),color:"#6ee7b7"}]:[{label:"Precio/día c/IGV",val:fmt(resultado.diaEstIGV),color:"#6ee7b7"},{label:"Mes est. c/IGV",val:fmt(resultado.mesEstIGV),color:"#a78bfa"},{label:"Costo/día",val:fmt(resultado.baseCosto),color:"#fca5a5"}]).map(k=>(
                           <div key={k.label} className="bg-white/10 rounded-xl p-3 text-center"><p className="text-white/50 text-[10px] font-bold uppercase">{k.label}</p><p className="font-black text-sm mt-0.5" style={{color:k.color}}>{k.val}</p></div>
                         ))}
                       </div>
@@ -1229,23 +1313,59 @@ export default function CotizadorPage(){
 
                 {/* Comparativo */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                  <div className="px-5 py-4 border-b"><h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 20%</h2></div>
+                  <div className="px-5 py-4 border-b">
+                    <h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 20% · <span className="text-gray-400">sin IGV</span></h2>
+                    {/* La usada va PEGADA a su gemela, no suelta en la lista ordenada por
+                        capacidad: con las dos separadas por cinco filas, que una cueste más que
+                        la otra se lee como un error de la pantalla en vez de como lo que es. */}
+                    {/* El comparativo enseña LOS DOS NIVELES aunque arriba haya uno filtrado, y es
+                        a propósito: es la única pantalla donde la diferencia de precio entre
+                        gemelas se ve. Hacer clic en una fila del otro nivel mueve también el
+                        botón de arriba (`elegirFicha`), así que nunca queda seleccionada una
+                        unidad que la rejilla no pueda mostrar. */}
+                    <p className="text-[11px] text-gray-400 mt-0.5">Cada categoría Estándar va debajo de su Premium, con la diferencia de precio entre las dos. Aquí salen <b>los dos niveles</b> aunque arriba tengas uno filtrado — es donde se comparan; al elegir una fila, el nivel de arriba la sigue. Todos los importes van SIN IGV, igual que los tres cuadros.</p>
+                  </div>
                   {Object.entries(grupos).map(([grupo,vehs])=>{
                     const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
                     return(<div key={grupo}><div className="px-4 py-2 text-[10px] font-black uppercase tracking-wider border-b" style={{background:gc.color+"15",color:gc.color}}>{grupo}</div>
-                    <table className="w-full text-sm"><thead><tr className="bg-gray-50 border-b">{["Vehículo","Cap.",modo==="eventual"?"Total (20%)":"Día (20%)",modo==="eventual"?"S/pax":"Mes ×26","Mín 15%","UREA"].map(h=><th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>)}</tr></thead>
+                    <table className="w-full text-sm"><thead><tr className="bg-gray-50 border-b">{["Vehículo","Cap.",modo==="eventual"?"Total (20%) s/IGV":"Día (20%) s/IGV",modo==="eventual"?"S/pax s/IGV":"Mes ×26 s/IGV","Mín 15% s/IGV","UREA"].map(h=><th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>)}</tr></thead>
                     <tbody className="divide-y divide-gray-50">
-                      {vehs.map(v=>{
-                        const item=comparativo.find(c=>c.v.tipo_vehiculo===v.tipo_vehiculo);
-                        if(!item?.r)return null;const r=item.r;const act=v.tipo_vehiculo===idxVeh;
-                        return(<tr key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
-                          <td className="px-3 py-2.5"><span className={`text-xs ${act?"font-black text-[#0b315f]":"font-semibold text-gray-600"}`}>{v.icono||"🚌"} {v.nombre}</span>{act&&<span className="ml-1 text-[9px] font-black bg-[#0b315f] text-white px-1.5 py-0.5 rounded">SEL</span>}</td>
-                          <td className="px-3 py-2.5 text-xs text-gray-500">{v.capacidad}p</td>
-                          <td className="px-3 py-2.5 text-xs font-black text-[#0b315f] font-mono">{fmt(modo==="eventual"?r.totalEst20:r.diaEstIGV)}</td>
-                          <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax20,0)}`:fmt(r.mesEstIGV)}</td>
-                          <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(modo==="eventual"?r.totalMin15:r.diaMinIGV)}</td>
-                          <td className="px-3 py-2.5 text-center">{v.usa_urea?<span className="text-[10px] text-cyan-600 font-bold">🧪</span>:<span className="text-gray-200 text-xs">—</span>}</td>
-                        </tr>);
+                      {emparejarFlota(vehs).flatMap(par=>{
+                        // El precio de la gemela nueva, para poder restar. Si la premium no
+                        // calcula (falta un parámetro), la usada se pinta igual SIN Δ: inventar
+                        // una diferencia contra un número que no existe es peor que no darla.
+                        const base=comparativo.find(c=>c.v.tipo_vehiculo===par.premium.tipo_vehiculo)?.r;
+                        // Sin IGV en las dos puntas: el Δ es la diferencia entre lo que se
+                        // publica arriba, no entre dos números que la tabla ya no enseña.
+                        const baseVal=base?base.sinIGV20:null;
+                        const filas=[par.premium,...(par.usada?[par.usada]:[])];
+                        return filas.map((v,i)=>{
+                          const item=comparativo.find(c=>c.v.tipo_vehiculo===v.tipo_vehiculo);
+                          if(!item?.r)return null;const r=item.r;const act=v.tipo_vehiculo===idxVeh;
+                          const val=r.sinIGV20;   // eventual → total del evento; fijo → precio/día. Los dos, sin IGV.
+                          const esGemela=i===1;
+                          const delta=esGemela&&baseVal!==null?val-baseVal:null;
+                          return(<tr key={v.tipo_vehiculo} onClick={()=>elegirFicha(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
+                            <td className={`px-3 py-2.5 ${esGemela?"pl-7":""}`}>
+                              {esGemela&&<span className="text-gray-300 mr-1 text-xs">↳</span>}
+                              <span className={`text-xs ${act?"font-black text-[#0b315f]":esGemela?"font-semibold text-gray-500":"font-semibold text-gray-600"}`}>{v.icono||"🚌"} {v.nombre}</span>
+                              {act&&<span className="ml-1 text-[9px] font-black bg-[#0b315f] text-white px-1.5 py-0.5 rounded">SEL</span>}
+                            </td>
+                            <td className="px-3 py-2.5 text-xs text-gray-500">{v.capacidad}p</td>
+                            <td className="px-3 py-2.5 text-xs font-black text-[#0b315f] font-mono">
+                              {fmt(val)}
+                              {/* El Δ NO se pinta de rojo/verde: una usada más cara no es una
+                                  alarma ni una usada más barata una felicitación — es el reparto
+                                  entre capital y taller, y el color lo convertiría en juicio. */}
+                              {delta!==null&&Math.abs(delta)>=0.005&&(
+                                <span className="ml-1.5 text-[9px] font-bold text-gray-400">{delta>0?"+":""}{fmtN(delta,0)}</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax20Sin,0)}`:fmt(r.mesEst)}</td>
+                            <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(r.sinIGV15)}</td>
+                            <td className="px-3 py-2.5 text-center">{v.usa_urea?<span className="text-[10px] text-cyan-600 font-bold">🧪</span>:<span className="text-gray-200 text-xs">—</span>}</td>
+                          </tr>);
+                        });
                       })}
                     </tbody></table></div>);
                   })}

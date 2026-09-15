@@ -6,6 +6,9 @@
 // ============================================================
 import { createClient } from "@supabase/supabase-js";
 import { etiquetaEstado, etiquetaAdmin } from "@/lib/estados";
+import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
+import { seriesRendimiento, juzgarTramo, normalizarCantidad } from "@/lib/rendimiento";
+import { familiaCombustible, configCombustible, capacidadTanqueDe } from "@/lib/combustible-tipos";
 import type {
   BloqueUI,
   ServicioUI,
@@ -82,14 +85,17 @@ const tienePermiso = (ctx: { permisos: string[]; rol: string }, modulos: string[
 const puedeVerPrecios = (ctx: { permisos: string[]; rol: string }) =>
   tienePermiso(ctx, ["facturacion", "reportes", "cotizaciones", "gastos"]);
 
-// Documentos vehiculares obligatorios (mismo criterio que documentos-vehiculares)
+// Documentos vehiculares obligatorios (mismo criterio que documentos-vehiculares).
+// Se comparan SIEMPRE contra `etiquetaTipoDoc(tipo)`: en la base el tipo es texto tecleado
+// y hay filas con el nombre viejo ("Habilitación SUTRAN", "Permiso Operación MTC").
 const DOCS_OBLIGATORIOS = new Set([
   "SOAT",
   "Revisión Técnica (CITV)",
   "Tarjeta de Propiedad",
-  "Habilitación SUTRAN",
-  "Permiso Operación MTC",
+  "Tarjeta Única de Circulación (TUC)",
   "Tarjeta de Circulación",
+  // La Habilitación Vehicular NO va aquí: es UNA de la empresa, y de ella salen las TUC de
+  // cada vehículo. Se vigila en la ficha del proveedor, no por placa.
 ]);
 
 // ── Rutas navegables (espejo de menuGrupos en app/layout.tsx) ───────────────
@@ -452,7 +458,7 @@ const TOOLS_DEF: any[] = [
   {
     name: "consultar_tercerizadas",
     description:
-      "Semáforo de riesgo de las EMPRESAS tercerizadas: documentos obligatorios (SOAT, CITV, SUTRAN, MTC, Tarjeta de Propiedad, SCTR) vencidos o por vencer, licencias de sus conductores, tamaño de su flota y servicios que nos hicieron en el período. Úsala para '¿qué empresas tercerizadas están en riesgo?', '¿con quién trabajamos más?'.",
+      "Semáforo de riesgo de las EMPRESAS tercerizadas: documentos obligatorios (SOAT, CITV, TUC, Habilitación Vehicular MTC/ATU, Tarjeta de Propiedad, SCTR) vencidos o por vencer, licencias de sus conductores, tamaño de su flota y servicios que nos hicieron en el período. Úsala para '¿qué empresas tercerizadas están en riesgo?', '¿con quién trabajamos más?'.",
     input_schema: {
       type: "object",
       properties: {
@@ -628,7 +634,8 @@ export async function calcularRadar(sb: SB, permisos: string[], rol: string): Pr
       const { data } = await sb.from("documentos_vehiculo").select("vehiculo_id, tipo, fecha_vencimiento");
       let vencidos = 0, porVencer = 0;
       for (const d of (data as any[]) ?? []) {
-        if (!DOCS_OBLIGATORIOS.has(d.tipo)) continue;
+        if (!DOCS_OBLIGATORIOS.has(etiquetaTipoDoc(d.tipo))) continue;
+        if (docSinVencimiento(d.tipo)) continue;
         const dias = diasPara(d.fecha_vencimiento);
         if (dias === null) continue;
         if (dias < 0) vencidos++;
@@ -648,6 +655,7 @@ export async function calcularRadar(sb: SB, permisos: string[], rol: string): Pr
       const vencidasPorEmpresa = new Set<number>();
       const porVencerPorEmpresa = new Set<number>();
       for (const d of (data as any[]) ?? []) {
+        if (docSinVencimiento(d.tipo)) continue;
         const dias = diasPara(d.fecha_vencimiento);
         if (dias === null) continue;
         if (dias < 0) vencidasPorEmpresa.add(d.empresa_id);
@@ -901,9 +909,10 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
 
             const porVehiculo: Record<number, { tipo: string; dias: number }[]> = {};
             for (const d of (docs as any[]) ?? []) {
+              if (docSinVencimiento(d.tipo)) continue;
               const dias = diasPara(d.fecha_vencimiento);
               if (dias === null || dias > 30) continue;
-              (porVehiculo[d.vehiculo_id] ||= []).push({ tipo: d.tipo, dias });
+              (porVehiculo[d.vehiculo_id] ||= []).push({ tipo: etiquetaTipoDoc(d.tipo), dias });
             }
 
             itemsPropios = flota.map((v) => {
@@ -940,7 +949,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
         let resumenEmpresas: any[] = [];
         if (alcance !== "propia") {
           const [{ data: emp }, { data: vt }, { data: dt }] = await Promise.all([
-            sb.from("empresas_tercerizadas").select("id, razon_social, ruc, estado, venc_autorizacion, venc_habilitacion"),
+            sb.from("empresas_tercerizadas").select("id, razon_social, ruc, estado, venc_autorizacion"),
             (() => {
               let q = sb.from("vehiculos_tercero").select("id, empresa_id, placa, categoria, marca, estado");
               if (input.placa) q = q.ilike("placa", `%${input.placa}%`);
@@ -963,9 +972,8 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           }
           for (const e of empresas) {
             for (const [campo, etiqueta] of [
-              ["venc_autorizacion", "Autorización MTC"],
-              ["venc_habilitacion", "Habilitación SUTRAN"],
-            ] as [string, string][]) {
+              ["venc_autorizacion", "Autorización de transporte"],
+              ] as [string, string][]) {
               const dias = diasPara(e[campo]);
               if (dias !== null && dias <= 30) (docsEmpresa[e.id] ||= []).push({ tipo: etiqueta, dias });
             }
@@ -1233,10 +1241,19 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
         const inicio = `${Math.floor(totalMeses / 12)}-${String((totalMeses % 12) + 1).padStart(2, "0")}-01`;
         const agrupar: "conductor" | "vehiculo" = input.agrupar === "vehiculo" ? "vehiculo" : "conductor";
 
-        // Vehículos (para placas, categorías y capacidad de tanque)
-        let qVeh = sb.from("vehiculos").select("id, placa, categoria");
+        // Vehículos (para placas, categorías y capacidad de tanque). `capacidad_tanque` es lo
+        // que la unidad DECLARÓ y manda sobre el estimado por categoría — sin pedirla,
+        // `capacidadTanqueDe` solo podría adivinar, que es lo que hacía la copia local.
+        // Es de una migración accesoria: si no se corrió, se reintenta sin ella.
+        const colsVeh = "id, placa, categoria, capacidad_tanque";
+        let qVeh = sb.from("vehiculos").select(colsVeh);
         if (input.placa) qVeh = qVeh.ilike("placa", `%${input.placa}%`);
-        const { data: vehs } = await qVeh;
+        let { data: vehs, error: errVeh } = await qVeh;
+        if (errVeh && /capacidad_tanque/i.test(errVeh.message || "") && /does not exist/i.test(errVeh.message || "")) {
+          let q2 = sb.from("vehiculos").select("id, placa, categoria");
+          if (input.placa) q2 = q2.ilike("placa", `%${input.placa}%`);
+          vehs = (await q2).data as any;
+        }
         const vehiculos = (vehs as any[]) ?? [];
         if (input.placa && vehiculos.length === 0)
           return { paraModelo: JSON.stringify({ encontrados: 0, nota: `No hay vehículos con placa parecida a "${input.placa}".` }) };
@@ -1265,58 +1282,78 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
         const gastoDe = (c: any) => Number(c.total || 0) || Number(c.galones || 0) * Number(c.precio_galon || 0);
 
         // ── Agrupación (conductor = texto libre del registro; puede venir vacío)
-        const grupos: Record<string, { etiqueta: string; cargas: number; cantidad: number; gasto: number; vehiculos: Set<string> }> = {};
+        //
+        // LA CANTIDAD SE ACUMULA POR FAMILIA, NUNCA EN UN SOLO NÚMERO. La flota usa cuatro
+        // combustibles y el GNV se vende por m³: `g.cantidad += galones` sumaba metros cúbicos
+        // con galones y con litros y lo publicaba rotulado "gal". Un m³ y un galón no son la
+        // misma magnitud, no se suman y no se promedian — **lo único agregable libremente entre
+        // combustibles es el gasto en soles**, que es el que decide el ranking.
+        const grupos: Record<string, {
+          etiqueta: string; cargas: number; porFamilia: Map<string, number>; gasto: number; vehiculos: Set<string>;
+        }> = {};
         for (const c of cargas) {
           const crudo = agrupar === "conductor" ? (c.conductor || "").trim() : porVehiculoId[c.vehiculo_id]?.placa || `Vehículo #${c.vehiculo_id}`;
           const etiqueta = crudo || "(sin conductor registrado)";
           const clave = etiqueta.toLowerCase();
-          const g = (grupos[clave] ||= { etiqueta, cargas: 0, cantidad: 0, gasto: 0, vehiculos: new Set() });
+          const g = (grupos[clave] ||= { etiqueta, cargas: 0, porFamilia: new Map(), gasto: 0, vehiculos: new Set() });
           g.cargas++;
-          g.cantidad += Number(c.galones || 0);
+          const fam = familiaCombustible(c.tipo_combustible);
+          const q = normalizarCantidad(c.galones, c.unidad, fam);
+          if (q != null) g.porFamilia.set(fam, (g.porFamilia.get(fam) ?? 0) + q);
           g.gasto += gastoDe(c);
           const placa = porVehiculoId[c.vehiculo_id]?.placa;
           if (placa) g.vehiculos.add(placa);
         }
+        /** "398.6 gal · 120.0 m³" — cada familia con SU unidad, o "" si no hay nada medible. */
+        const cantidadTexto = (m: Map<string, number>) =>
+          [...m.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([fam, q]) => `${q.toFixed(1)} ${configCombustible(fam).unidadLabel}`)
+            .join(" · ");
         const rankingGrupos = Object.values(grupos)
           .sort((a, b) => b.gasto - a.gasto)
           .slice(0, 8);
 
-        // ── Rendimiento y anomalías por vehículo+tipo (cargas ordenadas por km)
-        // Capacidades estimadas de tanque (mismas heurísticas que el módulo Combustible)
-        const CAPACIDAD: Record<string, number> = { BUS: 100, CUSTER: 100, MINIBUS: 60, VAN: 20, AUTO: 12, SUV: 15 };
-        const capacidadDe = (categoria?: string | null) => {
-          const cat = (categoria || "").toUpperCase();
-          for (const [k, v] of Object.entries(CAPACIDAD)) if (cat.includes(k)) return v;
-          return 80;
-        };
-
+        // ── Rendimiento y anomalías POR VEHÍCULO (la familia la parte lib/rendimiento.ts)
+        //
+        // La capacidad del tanque la resuelve `capacidadTanqueDe` (lib/combustible-tipos.ts):
+        // aquí vivía una CUARTA copia de esa tabla, que además ignoraba el `capacidad_tanque`
+        // declarado en la ficha y comparaba m³ contra galones.
         type Anomalia = { fecha: string; placa: string; conductor: string | null; detalle: string; monto: number };
         const anomalias: Anomalia[] = [];
-        const rendimientosPorVehiculo: Record<string, number[]> = {};
+        const rendimientosPorVehiculo: Record<string, { valor: number; label: string; familia: string }[]> = {};
 
+        // Agrupado por VEHÍCULO y no por (vehículo, tipo): `seriesRendimiento` ya parte por
+        // FAMILIA —así regular y premium no se separaban en dos cadenas de un tramo— y además
+        // es el único que puede ver las otras familias de la unidad, que es lo que hace falta
+        // para no publicar el rendimiento imposible de una bicombustible.
         const porSerie: Record<string, any[]> = {};
         for (const c of cargas) {
           if (!c.vehiculo_id) continue;
-          const tipo = c.tipo_combustible || "diesel";
-          if (tipo === "urea") continue; // aditivo: no aplica rendimiento km/gal
-          (porSerie[`${c.vehiculo_id}-${tipo}`] ||= []).push(c);
+          (porSerie[String(c.vehiculo_id)] ||= []).push(c);
         }
 
         for (const [serie, lista] of Object.entries(porSerie)) {
-          const vehId = Number(serie.split("-")[0]);
+          const vehId = Number(serie);
           const placa = porVehiculoId[vehId]?.placa || `#${vehId}`;
-          const cap = capacidadDe(porVehiculoId[vehId]?.categoria);
+          const veh = porVehiculoId[vehId];
 
-          // Doble carga el mismo día + sobre-capacidad
+          // Doble carga el mismo día + sobre-capacidad. Las dos se dicen en la unidad de la
+          // FAMILIA de esa carga: "70 gal supera el tanque (~100 gal)" sobre un número que son
+          // metros cúbicos no es un aviso, es un dato inventado.
+          const uni = (c: any) => configCombustible(c.tipo_combustible).unidadLabel;
+          const qDe = (c: any) => normalizarCantidad(c.galones, c.unidad, familiaCombustible(c.tipo_combustible));
           const porDia: Record<string, number> = {};
           for (const c of lista) {
             porDia[c.fecha] = (porDia[c.fecha] || 0) + 1;
-            if (Number(c.galones) > cap * 1.1)
+            const q = qDe(c);
+            const cap = capacidadTanqueDe(veh, c.tipo_combustible);
+            if (q != null && q > cap * 1.1)
               anomalias.push({
                 fecha: c.fecha,
                 placa,
                 conductor: c.conductor,
-                detalle: `Carga de ${Number(c.galones).toFixed(1)} gal supera la capacidad estimada del tanque (~${cap} gal)`,
+                detalle: `Carga de ${q.toFixed(1)} ${uni(c)} supera la capacidad estimada del tanque (~${cap} ${uni(c)})`,
                 monto: gastoDe(c),
               });
           }
@@ -1327,45 +1364,60 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
                 fecha,
                 placa,
                 conductor: delDia[0]?.conductor ?? null,
-                detalle: `${n} cargas el mismo día (${delDia.map((c) => `${Number(c.galones).toFixed(0)} gal`).join(" + ")})`,
+                detalle: `${n} cargas el mismo día (${delDia.map((c) => `${(qDe(c) ?? Number(c.galones)).toFixed(0)} ${uni(c)}`).join(" + ")})`,
                 monto: delDia.reduce((s, c) => s + gastoDe(c), 0),
               });
             }
           }
 
-          // Rendimiento entre cargas consecutivas (por kilometraje)
-          const conKm = lista.filter((c) => Number(c.kilometraje) > 0).sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
-          const deltas: { c: any; rend: number }[] = [];
-          for (let i = 1; i < conKm.length; i++) {
-            const km = Number(conKm[i].kilometraje) - Number(conKm[i - 1].kilometraje);
-            const gal = Number(conKm[i].galones);
-            if (km <= 0 && gal > 0) {
-              anomalias.push({
-                fecha: conKm[i].fecha,
-                placa,
-                conductor: conKm[i].conductor,
-                detalle: `Cargó ${gal.toFixed(1)} gal sin avance de kilometraje registrado`,
-                monto: gastoDe(conKm[i]),
+          // Rendimiento entre cargas consecutivas. La fórmula la decide lib/rendimiento.ts:
+          // el bucle que había aquí era la cuarta copia, con su propio umbral (0.6 en vez de
+          // 0.7) y su propia puerta (3 tramos en vez de 5).
+          const porId = new Map(lista.map((c: any) => [c.id, c]));
+          const series = seriesRendimiento(
+            lista.map((c: any) => ({
+              id: c.id,
+              unidad: placa,
+              fecha: String(c.fecha ?? "").slice(0, 10),
+              kilometraje: c.kilometraje,
+              cantidad: c.galones,
+              unidadCantidad: c.unidad,
+              tipo: c.tipo_combustible,
+            }))
+          );
+
+          for (const s of series.values()) {
+            // Con su ETIQUETA: promediar la mediana de GNV con la de diésel daba un número que
+            // no es de ninguno de los dos, y lo rotulaba "km/gal".
+            if (s.resumen.mediana)
+              (rendimientosPorVehiculo[placa] ||= []).push({
+                valor: s.resumen.mediana, label: s.resumen.label, familia: s.resumen.familia,
               });
-              continue;
-            }
-            if (km > 0 && gal > 0) deltas.push({ c: conKm[i], rend: km / gal });
-          }
-          if (deltas.length >= 3) {
-            const prom = deltas.reduce((s, d) => s + d.rend, 0) / deltas.length;
-            (rendimientosPorVehiculo[placa] ||= []).push(prom);
-            for (const d of deltas) {
-              if (d.rend < prom * 0.6)
+            for (const t of s.tramos) {
+              const c = porId.get(t.cargaId);
+              if (!c) continue;
+
+              // Una carga que no aporta km al libro. Antes solo se veía el caso "el odómetro
+              // no avanzó"; ahora también la que se guardó sin kilometraje, que es la que de
+              // verdad deja combustible fuera de toda medición.
+              if (t.motivo === "sin_odometro" || t.motivo === "odometro_retrocede") {
                 anomalias.push({
-                  fecha: d.c.fecha,
-                  placa,
-                  conductor: d.c.conductor,
-                  detalle: `Rendimiento de ${d.rend.toFixed(1)} km/gal, muy por debajo del promedio de la unidad (${prom.toFixed(1)} km/gal)`,
-                  monto: gastoDe(d.c),
+                  fecha: c.fecha, placa, conductor: c.conductor,
+                  detalle: `Cargó ${(qDe(c) ?? Number(c.galones)).toFixed(1)} ${uni(c)} y ${t.motivo === "sin_odometro" ? "no se registró el kilometraje" : "el odómetro no avanzó"}: ese combustible no entra a ninguna medición`,
+                  monto: gastoDe(c),
                 });
+                continue;
+              }
+
+              const h = juzgarTramo(t, s.resumen);
+              if (h) {
+                anomalias.push({
+                  fecha: c.fecha, placa, conductor: c.conductor,
+                  detalle: h.detalle,
+                  monto: gastoDe(c),
+                });
+              }
             }
-          } else if (deltas.length > 0) {
-            (rendimientosPorVehiculo[placa] ||= []).push(deltas.reduce((s, d) => s + d.rend, 0) / deltas.length);
           }
         }
 
@@ -1379,7 +1431,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             puesto: i + 1,
             nombre: g.etiqueta,
             valor: fmtSoles(g.gasto),
-            sub: `${g.cargas} carga${g.cargas === 1 ? "" : "s"} · ${g.cantidad.toFixed(0)} gal${agrupar === "conductor" && g.vehiculos.size ? ` · ${[...g.vehiculos].slice(0, 3).join(", ")}` : ""}`,
+            sub: `${g.cargas} carga${g.cargas === 1 ? "" : "s"}${cantidadTexto(g.porFamilia) ? ` · ${cantidadTexto(g.porFamilia)}` : ""}${agrupar === "conductor" && g.vehiculos.size ? ` · ${[...g.vehiculos].slice(0, 3).join(", ")}` : ""}`,
           })),
         };
 
@@ -1393,17 +1445,27 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             ranking: rankingGrupos.map((g) => ({
               grupo: g.etiqueta,
               cargas: g.cargas,
-              galones: Math.round(g.cantidad * 10) / 10,
+              // Por familia y con su unidad: un solo "galones" mezclaba m³ con galones.
+              cantidad_por_combustible: Object.fromEntries(
+                [...g.porFamilia.entries()].map(([fam, q]) => [
+                  `${fam}_${configCombustible(fam).unidadLabel}`, Math.round(q * 10) / 10,
+                ])
+              ),
               gasto: Math.round(g.gasto * 100) / 100,
               vehiculos: [...g.vehiculos],
             })),
-            rendimiento_promedio_km_gal: Object.fromEntries(
-              Object.entries(rendimientosPorVehiculo).map(([p, r]) => [p, Math.round((r.reduce((s, n) => s + n, 0) / r.length) * 10) / 10])
+            nota_unidades: "Las cantidades NO se suman entre combustibles (el GNV va en m³ y el resto en galones o litros): el único total comparable entre unidades es el gasto en soles.",
+            rendimiento_por_unidad: Object.fromEntries(
+              Object.entries(rendimientosPorVehiculo).map(([p, r]) => [
+                p, r.map((x) => `${Math.round(x.valor * 10) / 10} ${x.label} (${x.familia})`).join(" · "),
+              ])
             ),
             patrones_inusuales: anomalias.slice(0, 12),
             notas: [
               "El campo 'conductor' de cada carga es texto libre: puede venir vacío o escrito distinto (agrupa lo evidente y menciónalo si hay '(sin conductor registrado)').",
               "IMPORTANTE: presenta los patrones inusuales como situaciones PARA REVISAR con el responsable; NUNCA acuses a una persona de robo — los datos no prueban intención.",
+              "UN RENDIMIENTO IMPOSIBLEMENTE ALTO NO ES UN BUEN CONDUCTOR: es una carga que FALTA POR REGISTRAR. El combustible se compró y se consumió, pero no está en el libro, así que el costo de esa unidad sale más bajo del real y el margen de sus servicios, más alto. Nunca lo presentes como una buena noticia ni felicites a nadie por él: lo que hay que hacer es buscar el comprobante que falta.",
+              "El rendimiento por vehículo es la MEDIANA de sus tramos, no el promedio, y excluye los tramos que no se pudieron medir (cargas sin kilometraje, odómetro que retrocede, resultados imposibles). Si una unidad tiene pocos tramos, dilo en vez de tratar su número como firme.",
             ],
           }),
           ui: anomalias.length
@@ -2603,7 +2665,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
 
         let qe = sb
           .from("empresas_tercerizadas")
-          .select("id, razon_social, ruc, telefono, contacto_nombre, contacto_telefono, venc_autorizacion, venc_habilitacion, estado");
+          .select("id, razon_social, ruc, telefono, contacto_nombre, contacto_telefono, venc_autorizacion, estado");
         if (input.nombre) qe = qe.ilike("razon_social", `%${input.nombre}%`);
         const [{ data: emp }, { data: dt }, { data: ct }, { data: vt }, servicios] = await Promise.all([
           qe.limit(40),
@@ -2629,15 +2691,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
         const unidadesPorEmpresa: Record<number, number> = {};
         for (const v of (vt as any[]) ?? []) unidadesPorEmpresa[v.empresa_id] = (unidadesPorEmpresa[v.empresa_id] || 0) + 1;
 
-        const OBLIG_TERCERO = new Set([
-          "SOAT",
-          "Revisión Técnica (CITV)",
-          "Habilitación SUTRAN",
-          "Permiso Operación MTC",
-          "Tarjeta de Propiedad",
-          "SCTR Salud",
-          "SCTR Pensión",
-        ]);
+        const OBLIG_TERCERO = new Set(tiposObligatorios(true).map((t) => t.canonico));
         const detalle = empresas.map((e) => {
           const docs = ((dt as any[]) ?? []).filter((d) => d.empresa_id === e.id);
           const vencidos: string[] = [];
@@ -2645,12 +2699,15 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           for (const d of docs) {
             const dias = diasPara(d.fecha_vencimiento);
             if (dias === null) continue;
-            if (dias < 0 && OBLIG_TERCERO.has(d.tipo)) vencidos.push(d.tipo);
-            else if (dias >= 0 && dias <= 30 && OBLIG_TERCERO.has(d.tipo)) porVencer.push(`${d.tipo} (${dias}d)`);
+            const nom = etiquetaTipoDoc(d.tipo);
+            // Un documento que no caduca no entra por la fecha: si arrastra una tecleada por
+            // error, ELIA reportaría como "vencida" una unidad en regla.
+            if (docSinVencimiento(d.tipo)) continue;
+            if (dias < 0 && OBLIG_TERCERO.has(nom)) vencidos.push(nom);
+            else if (dias >= 0 && dias <= 30 && OBLIG_TERCERO.has(nom)) porVencer.push(`${nom} (${dias}d)`);
           }
           for (const [campo, etiqueta] of [
-            ["venc_autorizacion", "Autorización MTC"],
-            ["venc_habilitacion", "Habilitación SUTRAN"],
+            ["venc_autorizacion", "Autorización de transporte"],
           ] as [string, string][]) {
             const dias = diasPara(e[campo]);
             if (dias === null) continue;

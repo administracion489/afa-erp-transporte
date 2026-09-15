@@ -46,7 +46,7 @@ export type ControlDoc = {
 
 export type LineaDoc = {
   item: number;
-  tipo: "servicio" | "adicional" | "penalidad" | "descuento";
+  tipo: "servicio" | "adicional" | "falso_flete" | "penalidad" | "descuento";
   descripcion: string;
   unidad_medida: string;
   cantidad_programada?: number | null;
@@ -60,17 +60,20 @@ export type LineaDoc = {
 };
 
 export type FilaAnexo = {
-  ref: string;             // 'A-01'
+  ref: string;             // 'A-01' — el ítem de la valorización que sustenta esta fila
   fecha: string;           // '15/06'
   codigo: string;          // 'AFA-2026-004612'
   ruta: string;
   turno: string;
   placa: string;
   conductor: string;
-  pax: number | null;
-  salida: string;
-  llegada: string;
-  km: number | null;
+  /**
+   * Asientos CONTRATADOS para ese servicio, y lo ÚNICO que la columna PAX imprime. Es lo
+   * que el cliente pactó y lo que se le factura, no lo que cupo en el bus ni cuánta gente
+   * subió ese día. null = ninguna fuente lo sabe, y entonces se imprime "—" en vez de
+   * inventar un número.
+   */
+  paxContratado?: number | null;
   estado: string;          // 'Conforme' | 'Tardío' | 'Adicional' | 'No ejecutado'
   importe: number;
   alerta?: boolean;
@@ -89,6 +92,8 @@ export type Anexo2 = {
 export type TotalesDoc = {
   servicios: number;
   adicionales: number;
+  /** Avances pagados por servicios que no se prestaron. Siempre 0 del lado cliente. */
+  falsos_fletes?: number;
   descuentos: number;
   subtotal: number;
   igvPct: number;
@@ -144,7 +149,15 @@ export type DocLiquidacion = {
   comentarios?: string | null;
   anexo1: FilaAnexo[];
   anexo2?: Anexo2 | null;
-  firmas: { rol: string; entidad: string }[];
+  firmas: {
+    rol: string;
+    entidad: string;
+    /**
+     * Firma escaneada, ya rubricada. Solo la lleva la de AFA: las del cliente van en blanco
+     * a propósito, porque son las que él tiene que firmar al dar la conformidad.
+     */
+    firmaUrl?: string | null;
+  }[];
   empresa: { nombre: string; ruc?: string | null; logo?: string | null; direccion?: string | null; telefono?: string | null; email?: string | null; web?: string | null };
   /** QR como data URL; enlaza a la página pública de verificación/conformidad. */
   qr?: string | null;
@@ -199,7 +212,9 @@ table{width:100%;border-collapse:collapse}
 .datos td.v{color:#0f172a;font-weight:600}
 .val thead th{background:${cp};color:#fff;font-size:7.4px;font-weight:800;padding:5px 4px;border:1px solid ${cp};text-transform:uppercase}
 .val td{border:1px solid #cbd5e1;padding:4.5px 5px;font-size:8.5px;vertical-align:top}
-.val .desc{font-weight:600;color:#0f172a;line-height:1.35}
+/* pre-line: la descripción trae un renglón por tramo (ida, retorno, móvil) y sin esto
+   el HTML colapsa los saltos y el nombre de la ruta queda pegado al del retorno. */
+.val .desc{font-weight:600;color:#0f172a;line-height:1.35;white-space:pre-line}
 .val .meta{color:#64748b;font-size:7.2px;margin-top:2px}
 .val tr.adicional td{background:#fffbeb}
 .val tr.negativo td{background:#fef2f2}
@@ -228,6 +243,9 @@ table{width:100%;border-collapse:collapse}
 .firmas{display:flex;gap:14px;margin-top:18px}
 .firma{flex:1;text-align:center}
 .firma .linea{border-top:1.2px solid #334155;margin:34px 8px 4px}
+/* Con firma escaneada, el hueco lo ocupa la imagen y la línea deja de reservarlo. */
+.firma .linea.con-rubrica{margin-top:0}
+.firma .rubrica{display:block;margin:0 auto;height:38px;width:auto;max-width:86%;object-fit:contain;object-position:bottom}
 .firma .rol{font-size:8.4px;font-weight:900;color:${cp}}
 .firma .ent{font-size:7.4px;color:#64748b;margin-top:1px}
 .anx thead th{background:${cp};color:#fff;font-size:6.8px;font-weight:800;padding:4px 3px;border:1px solid ${cp};text-transform:uppercase}
@@ -244,6 +262,50 @@ table{width:100%;border-collapse:collapse}
 .kpi .l{font-size:7.2px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-top:3px}
 .kpi .s{font-size:6.8px;color:#94a3b8;margin-top:2px}
 .aviso{margin-top:10px;border:1px solid #fed7aa;background:#fff7ed;color:#9a3412;border-radius:6px;padding:6px 9px;font-size:8px;font-weight:700}
+`;
+
+// ── Cómo se corta el documento entre hoja y hoja ────────────────────────────
+//
+// El documento se imprime desde el navegador (window.print), así que el corte de
+// página lo decide Chrome y hay que decírselo. Cuatro cosas, y las cuatro se ven solo
+// a partir de la SEGUNDA hoja — la primera siempre salió bien y por eso el problema
+// pasó desapercibido:
+//
+//   1. El margen tiene que estar en `@page`, no en el padding del body: el padding
+//      solo reserva aire arriba de la primera hoja y abajo de la última, así que las
+//      intermedias arrancaban y terminaban al filo del papel.
+//   2. El pie tiene que RESERVAR su sitio, no solo repetirse. `position:fixed` se
+//      repite en cada hoja pero no ocupa flujo: se imprimía encima del contenido.
+//   3. Ninguna fila se parte por la mitad: `break-inside` en las filas y en los
+//      bloques que se leen como una unidad (firmas, sello, totales, KPIs).
+//   4. Una cabecera de sección o de tabla no puede quedar sola al pie de una hoja:
+//      `break-after:avoid` en las bandas de sección y `table-header-group` para que
+//      la cabecera de la tabla se repita arriba de cada hoja que la continúa.
+const CSS_IMPRESION = `
+@page{size:A4;margin:12mm 11mm 12mm}
+body{padding:0}
+@media screen{body{padding:12mm 11mm 0}}
+.hoja{width:100%;border-collapse:collapse}
+.hoja>tbody>tr>td,.hoja>tfoot>tr>td{padding:0;border:0;vertical-align:top}
+/* La fila que envuelve TODO el documento sí se parte: es la que pagina. */
+.hoja>tbody>tr,.hoja>tbody>tr>td{break-inside:auto;page-break-inside:auto}
+/* El pie deja de ser fijo: va dentro del <tfoot>, que el navegador repite al pie de
+   cada hoja RESERVÁNDOLE el sitio. Fijo se pintaba encima del último renglón, y con
+   un hueco de alto fijo no bastaba: la banda envuelve a dos líneas según lo largo
+   que sea el domicilio de la empresa. */
+.pdf-footer{position:static;margin-top:16px;padding:7px 14px !important}
+/* La banda ya no ocupa el ancho del papel sino el del área imprimible, y el membrete
+   entero no entra en un renglón a 8.5px: sin esto parte "www…" a una segunda línea y
+   deja un separador "|" colgando al final de la primera. El !important es porque
+   buildFooterPDFHtml trae los tamaños en el atributo style. */
+.pdf-footer span{font-size:7.4px !important}
+thead{display:table-header-group}
+/* La cabecera SÍ se repite arriba de cada hoja; el pie del anexo NO: dice "TOTALES DEL
+   PERIODO" y repetirlo al pie de cada hoja se lee como un subtotal de la hoja. */
+.anx tfoot{display:table-row-group}
+.val tr,.anx tr,.docs tr,.datos tr,.tot tr{break-inside:avoid;page-break-inside:avoid}
+.sec,.titulo-anexo,.sub-anexo{break-after:avoid;page-break-after:avoid}
+.ctrl,.folio,.conf,.sello,.firmas,.firma,.kpis,.kpi,.tot,.nota,.coment,.aviso{break-inside:avoid;page-break-inside:avoid}
 `;
 
 // ── Bloques ─────────────────────────────────────────────────────────────────
@@ -302,11 +364,21 @@ function bloqueDatos(d: DocLiquidacion): string {
 function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
   const moneda = d.servicio.moneda;
   const filas = d.lineas.map((l) => {
-    const clase = l.tipo === "adicional" ? "adicional" : (l.tipo === "penalidad" || l.tipo === "descuento") ? "negativo" : "";
+    const clase = l.tipo === "adicional" || l.tipo === "falso_flete" ? "adicional"
+      : (l.tipo === "penalidad" || l.tipo === "descuento") ? "negativo" : "";
     const negativo = l.total_linea < 0;
-    const cumplimiento =
-      l.tipo === "servicio"
+    // Un adicional puede venir de dos sitios y no se informan igual: el que se generó
+    // en Programación TIENE programado y ejecutado (se pidieron 3 salidas, se
+    // prestaron 2) y esconderlo tras un guion perdería justo lo que el cliente
+    // pregunta; el que se escribió a mano en el editor no tiene contra qué comparar.
+    const conProgramado = Number(l.cantidad_programada ?? 0) > 0;
+    // Un falso flete no tiene nada que contrastar: se pactaron N avances y se pagan N.
+    // Imprimir "3 / 0" sería cierto y a la vez ilegible — parecería un incumplimiento.
+    const cumplimiento = l.tipo === "falso_flete"
+      ? `— / <b>${num(l.cantidad, 0)}</b> ${chip("FALSO FLETE", "warn")}`
+      : l.tipo === "servicio" || (l.tipo === "adicional" && conProgramado)
         ? `${num(l.cantidad_programada, 0)} / <b>${num(l.cantidad_ejecutada, 0)}</b> ${chipCumplimiento(l.cantidad_programada, l.cantidad_ejecutada)}`
+          + (l.tipo === "adicional" ? ` ${chip("ADICIONAL", "warn")}` : "")
         : l.tipo === "adicional"
         ? `— / <b>${num(l.cantidad, 0)}</b> ${chip("ADICIONAL", "warn")}`
         : "—";
@@ -325,10 +397,25 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
   const filaTot = (k: string, v: string, cls = "") =>
     `<tr class="${cls}"><td class="k">${esc(k)}</td><td class="v">${v}</td></tr>`;
 
+  // El formato del cliente NO desglosa el valorizado por categoría. "Servicios del
+  // periodo", "Adicionales autorizados" y "Falsos fletes" son cortes internos de AFA:
+  // al cliente se le entrega el detalle renglón por renglón en la tabla de arriba —cada
+  // adicional sale rotulado ADICIONAL, cada descuento con su cláusula— y abajo lo único
+  // que tiene que cuadrar contra su orden de compra, que es el valorizado. El desglose
+  // sigue entero donde se trabaja el documento: el botón "Revisar" (app/liquidaciones/
+  // ModalEditor.tsx) y el lado proveedor de aquí abajo. Cualquier subtotal nuevo por
+  // categoría se agrega ahí, no acá.
+  //
+  // El falso flete además NO ES SUYO: una cancelación se le cobra al cliente en S/ 0.00
+  // pase lo que pase, y el avance que se le reconoce al proveedor es cosa de AFA con el
+  // proveedor. Imprimirle ese renglón —aunque llegue en cero— sería enseñarle un acuerdo
+  // en el que no es parte.
+  //
+  // El descuento SÍ se imprime: no es un corte por categoría, es plata que se le
+  // resta a este cliente en esta factura, y callarla en el total sería cobrar sin decir
+  // por qué el importe bajó.
   const totales = d.lado === "cliente"
     ? [
-        filaTot("Servicios del periodo", m2(t.servicios, moneda)),
-        t.adicionales ? filaTot("Adicionales autorizados", m2(t.adicionales, moneda)) : "",
         t.descuentos ? filaTot("Descuentos y penalidades", "− " + m2(t.descuentos, moneda), "neg") : "",
         filaTot("TOTAL VALORIZADO (sin IGV)", m2(t.subtotal, moneda)),
         filaTot(`IGV ${num(t.igvPct, 0)}%`, m2(t.igv, moneda)),
@@ -337,6 +424,7 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
     : [
         filaTot("Servicios prestados", m2(t.servicios, moneda)),
         t.adicionales ? filaTot("Adicionales", m2(t.adicionales, moneda)) : "",
+        t.falsos_fletes ? filaTot("Falsos fletes (servicios cancelados con acuerdo)", m2(t.falsos_fletes, moneda)) : "",
         t.descuentos ? filaTot("Penalidades y descuentos", "− " + m2(t.descuentos, moneda), "neg") : "",
         filaTot("Subtotal (sin IGV)", m2(t.subtotal, moneda)),
         filaTot(`IGV ${num(t.igvPct, 0)}%`, m2(t.igv, moneda)),
@@ -408,45 +496,58 @@ function bloqueConformidad(d: DocLiquidacion, n: number): string {
 }
 
 function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
+  /**
+   * La celda PAX: SOLO los asientos contratados.
+   *
+   * La columna llegó a imprimir `reservas.pasajeros_abordados`, que NO LO ESCRIBE NADIE
+   * —el abordaje vive en `pasajeros_parada`— así que salía 0 con el manifiesto lleno; un
+   * cero que el cliente lee como "no viajó nadie" en un servicio que sí se prestó y se le
+   * cobra. La corrección de aquello llegó a poner los dos números, contratados y
+   * embarcados, y AFA decidió imprimir solo el contratado: es el que sustenta el importe.
+   * Cuánta gente subió cada día es cierto pero no es lo que se está valorizando, y en el
+   * papel invitaba a discutir la factura contra la ocupación del bus.
+   *
+   * Sin dato se imprime "—", nunca un cero: cero asientos contratados no existe.
+   */
+  const paxCelda = (f: FilaAnexo) => `${f.paxContratado ?? "—"}`;
+
   if (!d.anexo1.length) return "";
   const moneda = d.servicio.moneda;
   const filas = d.anexo1.map((f) => `<tr${f.alerta ? ' class="alerta"' : ""}>
     <td class="c">${esc(f.ref)}</td><td class="c">${esc(f.fecha)}</td><td class="c nw">${esc(f.codigo)}</td>
     <td>${esc(f.ruta)}</td><td class="c">${esc(f.turno)}</td><td class="c">${esc(f.placa || "—")}</td>
-    <td>${esc(f.conductor || "—")}</td><td class="c">${f.pax ?? "—"}</td>
-    <td class="c">${esc(f.salida || "—")}</td><td class="c">${esc(f.llegada || "—")}</td>
-    <td class="c">${f.km != null ? num(f.km, 1) : "—"}</td>
+    <td>${esc(f.conductor || "—")}</td><td class="c">${paxCelda(f)}</td>
     <td class="c">${chip(f.estado, f.alerta ? "bad" : /adicional/i.test(f.estado) ? "warn" : /incluido/i.test(f.estado) ? "info" : "ok")}</td>
     <td class="r">${/incluido/i.test(f.estado) ? '<span style="color:#64748b">incl.</span>' : num(f.importe)}</td>
   </tr>`).join("");
 
-  const totPax = d.anexo1.reduce((a, f) => a + (f.pax ?? 0), 0);
-  const totKm = d.anexo1.reduce((a, f) => a + (f.km ?? 0), 0);
+  // La columna PAX no se totaliza. Son los mismos asientos contratados cada día, y la ida
+  // con su retorno los contarían dos veces: un "620" al pie de un mes de 31 servicios de
+  // 20 asientos es un número que no pactó nadie y que no se puede cotejar contra nada.
   const totImp = d.anexo1.reduce((a, f) => a + f.importe, 0);
 
   return `<div class="page-break"></div>
   <div style="padding-top:6px">
     <p class="titulo-anexo">ANEXO 1 — DETALLE DE SERVICIOS EJECUTADOS</p>
-    <p class="sub-anexo">Respaldo línea por línea de la cantidad valorizada. Cada fila es un servicio finalizado en el sistema, con sus horas reales.</p>
+    <p class="sub-anexo">Respaldo día por día de la cantidad valorizada, en orden de fecha. Cada fila es un servicio finalizado en el sistema.</p>
     <table class="anx">
       <thead><tr>
-        <th style="width:26px">#</th><th style="width:42px">FECHA</th><th style="width:74px">N° AFA</th>
-        <th>RUTA / SENTIDO</th><th style="width:38px">TURNO</th><th style="width:40px">PLACA</th>
-        <th style="width:82px">CONDUCTOR</th><th style="width:24px">PAX</th>
-        <th style="width:34px">SALIDA</th><th style="width:36px">LLEGADA</th><th style="width:34px">KM</th>
-        <th style="width:48px">ESTADO</th><th style="width:50px">IMPORTE</th>
+        <th style="width:34px">ÍTEM</th><th style="width:42px">FECHA</th><th style="width:74px">N° AFA</th>
+        <th>RUTA / SENTIDO</th><th style="width:38px">TURNO</th><th style="width:46px">PLACA</th>
+        <th style="width:110px">CONDUCTOR</th><th style="width:48px">PAX<br><span style="font-weight:400">contratado</span></th>
+        <th style="width:56px">ESTADO</th><th style="width:60px">IMPORTE</th>
       </tr></thead>
       <tbody>${filas}</tbody>
       <tfoot><tr>
         <td colspan="7" class="r">TOTALES DEL PERIODO</td>
-        <td class="c">${totPax || "—"}</td><td colspan="2" class="c">—</td>
-        <td class="c">${totKm ? num(totKm, 0) : "—"}</td>
+        <td class="c">—</td>
         <td class="c">${d.anexo1.length} serv.</td>
         <td class="r">${num(totImp)}</td>
       </tr></tfoot>
     </table>
-    <div class="nota"><b>Cómo leer este anexo:</b> las horas de salida y llegada son las <b>reales registradas por el sistema</b>, no las programadas.
-    Los pasajeros son los efectivamente embarcados según el manifiesto digital. Cualquier fila puede rastrearse con su N° AFA.
+    <div class="nota"><b>Cómo leer este anexo:</b> las filas van en <b>orden de fecha</b>, del primer al último día del periodo; los dos tramos de un mismo día se listan juntos.
+    La columna <b>ÍTEM</b> es el número con el que la fila se rastrea en la valorización, y <b>TURNO</b> es la hora programada de salida.
+    La columna <b>PAX</b> es la <b>capacidad contratada</b> de esa ruta: los asientos pactados con el cliente. Cualquier fila puede rastrearse con su N° AFA.
     ${d.anexo1.some((f) => /incluido/i.test(f.estado))
       ? "Los tramos marcados <b>incl.</b> corresponden al retorno del mismo servicio: una sola tarifa cubre ida y retorno, por eso comparten el número de ítem y el importe se cobra una vez. "
       : ""}
@@ -507,18 +608,20 @@ function bloqueAnexo2(d: DocLiquidacion): string {
 export function buildLiquidacionHtml(d: DocLiquidacion): string {
   const cp = d.lado === "cliente" ? CP_CLIENTE : CP_PROVEEDOR;
   const emp = d.empresa;
-  const pie = buildFooterPDFHtml(
-    cp,
-    emp.direccion || "—",
-    emp.telefono || "—",
-    emp.email || "—",
-    emp.web || "www.afatoursperu.com"
-  );
+  // Sin "—" de respaldo: `liquidacion-datos` ya entrega el perfil con los huecos rellenos
+  // (lib/empresa-perfil.ts). Dejarlos aquí solo escondería que el dato no llegó.
+  const pie = buildFooterPDFHtml(cp, emp.direccion || "", emp.telefono || "", emp.email || "", emp.web || "");
 
   const firmas = d.firmas.length
     ? `<div class="sec"><span class="num">6</span><h2>Firmas</h2></div>
        <div class="firmas">${d.firmas.map((f) =>
-         `<div class="firma"><div class="linea"></div><div class="rol">${esc(f.rol)}</div><div class="ent">${esc(f.entidad)}</div></div>`
+         // La imagen va DENTRO del hueco que la línea ya reservaba (el margen superior de
+         // 34px), no encima: si se sumara, la banda de firmas crecería y en un documento de
+         // varias páginas empujaría el bloque a la siguiente. Por eso la firma rubricada
+         // lleva su propia clase, con el margen recortado.
+         `<div class="firma">${f.firmaUrl ? `<img class="rubrica" src="${esc(f.firmaUrl)}" alt=""/>` : ""}` +
+         `<div class="linea${f.firmaUrl ? " con-rubrica" : ""}"></div>` +
+         `<div class="rol">${esc(f.rol)}</div><div class="ent">${esc(f.entidad)}</div></div>`
        ).join("")}</div>`
     : "";
 
@@ -538,11 +641,18 @@ export function buildLiquidacionHtml(d: DocLiquidacion): string {
     ${bloqueAnexo2(d)}
   `;
 
-  // El pie va fijo (se repite en cada página); la cabecera controlada va en el flujo
-  // porque cada anexo trae la suya propia y repetirla completa robaría media hoja.
-  const css = sharedCSS(CSS_DOC(cp)) + `body{padding:14mm 12mm 24mm}`;
+  // Todo el documento va dentro de una tabla de una sola celda para poder colgar el
+  // pie de un <tfoot>: el navegador lo repite al pie de CADA hoja impresa y —esto es
+  // lo que no hacía `position:fixed`— le reserva el sitio, así que el contenido nunca
+  // más pasa por debajo de la banda. La cabecera controlada, en cambio, va en el flujo
+  // y sale una sola vez: cada anexo trae la suya propia y repetirla robaría media hoja.
+  const cuerpoImpreso = `<table class="hoja">
+    <tfoot><tr><td>${pie}</td></tr></tfoot>
+    <tbody><tr><td>${cuerpo}</td></tr></tbody>
+  </table>`;
+  const css = sharedCSS(CSS_DOC(cp)) + CSS_IMPRESION;
   return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
     <title>${esc(d.control.titulo)} ${esc(d.codigo)}</title>
     <style>${css}</style></head>
-    <body>${cuerpo}${pie}</body></html>`;
+    <body>${cuerpoImpreso}</body></html>`;
 }

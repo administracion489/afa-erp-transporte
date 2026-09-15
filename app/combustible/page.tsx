@@ -1,9 +1,17 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { registrarLectura } from "@/lib/odometro";
 import { sincronizarPrecioDesdeCarga } from "@/lib/precios-combustible";
+import {
+  esImagenLeida,
+  fotosPorCarga,
+  type FilaConFotos,
+  type FotoLeida,
+  type MediaDeMensaje,
+} from "@/lib/radar/fotos-lectura";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -21,54 +29,48 @@ type Combustible = {
   observaciones: string | null; created_at: string;
   tipo_combustible: string | null;
   unidad: string | null;
+  // Migración accesoria (supabase/combustible-01-tanque-lleno.sql). TRI-ESTADO: `null` es
+  // "nadie lo declaró", no "no llenó" — y si el SQL no se corrió, la columna ni llega.
+  tanque_lleno?: boolean | null;
+  tanque_lleno_fuente?: string | null;
+  km_salto_motivo?: string | null;
 };
+
+// Lo que el Radar IA guarda de la carga que él mismo registró. `combustible` no guarda NADA
+// del Radar (ni el id de la lectura, ni la foto, ni el nº de nota), así que el puente es
+// `radar_combustible.combustible_id` y se lee al revés: del Radar hacia la carga.
+type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?: string | null };
 
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
 type GranPeriodo = "dia" | "semana" | "mes";
 
+import { COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
+import { paginarFilas } from "@/lib/huella";
+import {
+  seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
+  resumirVentana, compararVentanas, MIN_TRAMOS_CONFIABLE,
+  movilesPorCarga, revisarSaltoKm, claveSerie, normalizarCantidad,
+  type CargaRendimiento, type Tramo, type ResumenUnidad, type VeredictoSalto,
+} from "@/lib/rendimiento";
+import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
+import ComparacionPeriodo from "./ComparacionPeriodo";
+
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
+// El catálogo vive en lib/combustible-tipos.ts: /radar-ia lo necesita para su columna de
+// tipo, y dos copias con etiquetas o colores distintos serían el mismo combustible con dos
+// caras. Ahí están además los grados de gasolina (regular/premium) y `familia`, que es con
+// lo que se compara tanque, precio referencial y rendimiento.
 
-type FuelConfig = {
-  label: string; unidad: string; unidadLabel: string;
-  icon: string; color: string; bg: string;
-  precioRef: number; // precio referencial Perú S/
-  esAditivo: boolean; // UREA es aditivo, no combustible principal
-  rendimientoLabel: string; // km/gal, km/m³, etc.
-};
-
-const COMBUSTIBLES: Record<string, FuelConfig> = {
-  diesel:   { label: "Diésel",        unidad: "galones", unidadLabel: "gal", icon: "🛢️",  color: "#1d4ed8", bg: "#dbeafe", precioRef: 16.5, esAditivo: false, rendimientoLabel: "km/gal" },
-  gasolina: { label: "Gasolina",      unidad: "galones", unidadLabel: "gal", icon: "⛽",  color: "#dc2626", bg: "#fee2e2", precioRef: 18.0, esAditivo: false, rendimientoLabel: "km/gal" },
-  glp:      { label: "GLP",           unidad: "galones", unidadLabel: "gal", icon: "🔵",  color: "#7c3aed", bg: "#ede9fe", precioRef: 7.65, esAditivo: false, rendimientoLabel: "km/gal" },
-  gnv:      { label: "GNV",           unidad: "m3",      unidadLabel: "m³",  icon: "💨",  color: "#0f766e", bg: "#f0fdfa", precioRef: 1.78, esAditivo: false, rendimientoLabel: "km/m³"  },
-  urea:     { label: "Urea (AdBlue)", unidad: "litros",  unidadLabel: "lt",  icon: "🧪",  color: "#854d0e", bg: "#fef9c3", precioRef: 5.50, esAditivo: true,  rendimientoLabel: "lt/100km"},
-  biodiesel:{ label: "Biodiésel",     unidad: "galones", unidadLabel: "gal", icon: "🌿",  color: "#166534", bg: "#dcfce7", precioRef: 15.0, esAditivo: false, rendimientoLabel: "km/gal" },
-};
-
-const CAPACIDAD_TANQUE: Record<string, Record<string, number>> = {
-  BUS:     { diesel: 100, gnv: 150, glp: 80,  gasolina: 80,  urea: 30 },
-  MINIBUS: { diesel: 60,  gnv: 80,  glp: 50,  gasolina: 50,  urea: 15 },
-  VAN:     { diesel: 20,  gnv: 40,  glp: 25,  gasolina: 20,  urea: 10 },
-  AUTO:    { diesel: 12,  gnv: 30,  glp: 15,  gasolina: 12,  urea: 5  },
-  DEFAULT: { diesel: 80,  gnv: 100, glp: 60,  gasolina: 60,  urea: 20 },
-};
-
+// La capacidad del tanque y su heurística por categoría viven en lib/combustible-tipos.ts:
+// esta tabla estaba copiada LITERAL en lib/radar/acciones.ts, y las dos buscaban la capacidad
+// declarada por TIPO cuando el formulario de la unidad la escribe por FAMILIA — así que en una
+// carga de `gasolina_regular` o `gasolina_premium` la capacidad configurada no se encontraba
+// nunca y el control caía al tanque de DIÉSEL.
 function getCapacidad(
   vehOCat: string | { categoria?: string | null; capacidad_tanque?: Record<string, number> | null } | null | undefined,
   tipo: string
 ): number {
-  // La capacidad EDITABLE por vehículo (vehiculos.capacidad_tanque) tiene prioridad sobre la heurística.
-  if (vehOCat && typeof vehOCat === "object") {
-    const edit = vehOCat.capacidad_tanque?.[tipo];
-    if (edit != null && Number(edit) > 0) return Number(edit);
-  }
-  const categoria = typeof vehOCat === "string" ? vehOCat : vehOCat?.categoria ?? undefined;
-  if (!categoria) return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
-  const cat = categoria.toUpperCase();
-  for (const [k, v] of Object.entries(CAPACIDAD_TANQUE)) {
-    if (cat.includes(k)) return v[tipo] || v.diesel || 80;
-  }
-  return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
+  return capacidadTanqueDe(vehOCat, tipo);
 }
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -95,12 +97,86 @@ function Campo({ label, span, children }: { label: string; span?: number; childr
   );
 }
 
-function calcRendimiento(curr: Combustible, prev: Combustible | null): number | null {
-  if (!prev || !curr.kilometraje || !prev.kilometraje || !curr.galones) return null;
-  const km = Number(curr.kilometraje) - Number(prev.kilometraje);
-  if (km <= 0) return null;
-  return km / Number(curr.galones);
+/**
+ * La(s) foto(s) que el Radar IA leyó para esta carga, al lado de los números que sacó de ellas.
+ *
+ * Sin esto, corregir una carga que registró el Radar era teclear de memoria: el galonaje, el
+ * precio y el monto salieron de un papel que estaba en WhatsApp y que esta pantalla no
+ * mostraba por ningún lado. Es la misma tira del panel de revisión de /radar-ia, con la
+ * diferencia de que aquí la carga YA está en el libro y lo que se hace es enmendarla.
+ *
+ * Se abre en pestaña nueva a tamaño real: la miniatura sirve para reconocer el papel, no para
+ * leer un dígito de matriz de puntos —que es justo el error que trae aquí a la gente.
+ */
+function FotosDelRadar({ fotos, nota, alto = "h-40" }: { fotos: FotoLeida[]; nota?: string | null; alto?: string }) {
+  if (!fotos.length) return null;
+  return (
+    <div className="rounded-2xl border border-[#bfdbfe] bg-[#eff6ff] px-4 py-3">
+      <p className="text-[10px] font-black uppercase tracking-widest text-[#1d4ed8] mb-2">
+        📷 {fotos.length === 1 ? "Foto que leyó el Radar IA" : `${fotos.length} fotos que leyó el Radar IA`}
+        {nota && <span className="ml-2 font-mono lowercase tracking-normal text-[#1e40af]">· nota {nota}</span>}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {fotos.map((f, i) => esImagenLeida(f) ? (
+          <a key={i} href={f.url} target="_blank" rel="noreferrer" title={f.nombre ?? "Abrir en tamaño real"} className="block">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={f.url} alt={f.nombre ?? `Foto ${i + 1}`}
+              className={`${alto} w-auto max-w-[240px] object-contain rounded-xl border border-blue-200 bg-white hover:ring-2 hover:ring-[#1d4ed8] transition`} />
+          </a>
+        ) : (
+          // El bucket del Radar guarda también PDFs y audios: un adjunto que no es imagen se
+          // ofrece como enlace y no como un <img> roto, que se lee igual que "no hay foto".
+          <a key={i} href={f.url} target="_blank" rel="noreferrer"
+            className={`${alto} w-[150px] flex flex-col items-center justify-center gap-1 rounded-xl border border-blue-200 bg-white text-center px-2 hover:ring-2 hover:ring-[#1d4ed8] transition`}>
+            <span className="text-2xl">📄</span>
+            <span className="text-[10px] font-bold text-[#1e40af] truncate max-w-full">{f.nombre ?? "Abrir adjunto"}</span>
+          </a>
+        ))}
+      </div>
+      <p className="text-[10px] text-[#1e40af]/70 mt-2">Ábrela en tamaño real y compara los números con lo que está guardado antes de corregir.</p>
+    </div>
+  );
 }
+
+/**
+ * Las lecturas del Radar IA que YA se convirtieron en una carga de este libro.
+ *
+ * `fotos` llegó con una migración accesoria (supabase/radar-ia-combustible-revision.sql): si no
+ * se corrió, la consulta falla nombrando la columna y se reintenta sin ella — igual que hacen
+ * `guardarReservas` y el modal de adicionales. Ver una foto es un extra; que /combustible deje
+ * de listar cargas porque falta un SQL accesorio, no.
+ */
+async function cargarLecturasRadar(): Promise<LecturaRadar[]> {
+  const pedir = (cols: string) =>
+    supabase.from("radar_combustible").select(cols).not("combustible_id", "is", null);
+  let res = await pedir("combustible_id, mensaje_id, comprobante, fotos");
+  if (res.error && /fotos/i.test(res.error.message || "")) res = await pedir("combustible_id, mensaje_id, comprobante");
+  if (res.error || !res.data) return [];
+  return res.data as unknown as LecturaRadar[];
+}
+
+/**
+ * El rendimiento vive en lib/rendimiento.ts, no aquí.
+ *
+ * La versión que estaba en este archivo dividía el delta de odómetro entre los galones de
+ * una sola carga SIN NINGÚN TECHO, y el color solo miraba hacia abajo. Con la CWZ-371 eso
+ * publicó 162.9 km/gal en verde —1 592 km de un hueco de registro entre dos cargas—, y esa
+ * fila subió la media de 28.6 a 43.5, dejando SIETE de nueve filas sanas marcadas 🚨.
+ * Ver la cabecera de lib/rendimiento.ts.
+ */
+const cargaParaRendimiento = (r: Combustible, unidad: string): CargaRendimiento => ({
+  id: r.id,
+  unidad,
+  fecha: String(r.fecha ?? "").slice(0, 10),
+  kilometraje: r.kilometraje,
+  cantidad: r.galones,
+  unidadCantidad: r.unidad,
+  tipo: r.tipo_combustible,
+  gasto: r.total,
+  // Solo viaja si la columna existe. `undefined` es el modo LEGADO del motor —cada carga es su
+  // propia ancla— así que sin la migración corrida el rendimiento se mide igual que siempre.
+  ...(r.tanque_lleno === undefined ? {} : { tanqueLleno: r.tanque_lleno }),
+});
 
 // Clave + etiqueta del período (día/semana/mes) para el análisis de gasto y rendimiento.
 function clavePeriodo(fecha: string, gran: GranPeriodo): { key: string; label: string } {
@@ -123,6 +199,11 @@ const FORM_VACIO = {
   kilometraje: "", galones: "", precio_galon: "",
   tipo_combustible: "diesel", unidad: "galones",
   grifo: "", conductor: "", observaciones: "",
+  // MARCADA POR DEFECTO, y solo aquí: la política de AFA es cargar a tope, y en este formulario
+  // hay una persona que lo está afirmando. El Radar NO puede afirmarlo desde un voucher, así que
+  // la columna nace sin default — ver la cabecera de combustible-01-tanque-lleno.sql.
+  tanque_lleno: true,
+  km_salto_motivo: "",
 };
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
@@ -136,6 +217,14 @@ export default function CombustiblePage() {
   const [guardando,   setGuardando]   = useState(false);
   const [editandoId,  setEditandoId]  = useState<number | null>(null);
   const [mostrarForm, setMostrarForm] = useState(false);
+  // QUIÉN AFIRMA EL TANQUE NO ES SIEMPRE QUIEN GUARDA, y por eso la fuente no se puede fijar en
+  // el payload. Abrir una carga vieja para corregirle el precio no es afirmar nada sobre el
+  // tanque: la casilla sale marcada por el DEFAULT del formulario, o sea por la política de la
+  // empresa. Sellar eso como `operador` —la afirmación más fuerte del CHECK— convertiría las 56
+  // filas del histórico en declaraciones que nadie hizo, que es justo lo que esta columna existe
+  // para evitar. `operador` solo cuando una persona MUEVE la casilla; una fuente ya escrita se
+  // conserva, para no degradar a `politica` un `false` que sí afirmó alguien.
+  const [tanqueFuente, setTanqueFuente] = useState<string | null>(null);
   const [expandidoId, setExpandidoId] = useState<number | null>(null);
   const [vista,       setVista]       = useState<VistaActiva>("historial");
   const [granularidad,setGranularidad]= useState<GranPeriodo>("mes");
@@ -145,6 +234,11 @@ export default function CombustiblePage() {
   const [filtroTipo,  setFiltroTipo]  = useState("todos");
   const [filtroMes,   setFiltroMes]   = useState("todos");
   const [form, setForm] = useState(FORM_VACIO);
+  // Lo que leyó el Radar IA de las cargas que él registró, para poder corregirlas mirando el
+  // papel. `mediaMensajes` es el respaldo de las filas viejas (sin `fotos`) y se pide de a una
+  // al abrir la carga: son ids de mensajes, y pedirlos todos de golpe sería una URL kilométrica.
+  const [lecturasRadar, setLecturasRadar] = useState<LecturaRadar[]>([]);
+  const [mediaMensajes, setMediaMensajes] = useState<Record<string, MediaDeMensaje>>({});
 
   const fuelCfg = COMBUSTIBLES[form.tipo_combustible] || COMBUSTIBLES.diesel;
   const totalPreview = Number(form.galones || 0) * Number(form.precio_galon || 0);
@@ -157,16 +251,24 @@ export default function CombustiblePage() {
 
   const cargarDatos = async () => {
     setLoading(true);
-    const [vRes, vtRes, cRes, condRes] = await Promise.all([
+    const [vRes, vtRes, cRes, condRes, radRes] = await Promise.all([
       supabase.from("vehiculos").select("*").order("placa"),
       supabase.from("vehiculos_tercero").select("*").order("placa"),
-      supabase.from("combustible").select("*").order("fecha", { ascending: false }).order("id", { ascending: false }),
+      // Paginado, no `select("*")` a secas: PostgREST corta en 1000 filas sin avisar, y una
+      // serie a la que le falte la cabeza pierde sus tramos más viejos EN SILENCIO — que es
+      // justo lo que el módulo de rendimiento no puede permitirse. La misma trampa que ya
+      // documentó lib/huella.ts y que truncó /programacion.
+      paginarFilas(() =>
+        supabase.from("combustible").select("*").order("fecha", { ascending: false }).order("id", { ascending: false })
+      ).then(data => ({ data })),
       supabase.from("conductores").select("id,nombre").order("nombre"),
+      cargarLecturasRadar(),
     ]);
     setVehiculos(vRes.data || []);
     setVehiculosTercero(vtRes.data || []);
     setRegistros(cRes.data || []);
     setConductores(condRes.data || []);
+    setLecturasRadar(radRes);
     setLoading(false);
   };
 
@@ -183,47 +285,204 @@ export default function CombustiblePage() {
   const unidadDe = (uid: string) => unidades.find(u => u.uid === uid);
   const placaReg = (r: Combustible) => unidadDe(uidReg(r))?.placa || "—";
 
-  // ── Rendimiento promedio por unidad+tipo ───────────────────────────────────
+  // ── Rendimiento ────────────────────────────────────────────────────────────
+  //
+  // Una sola llamada al módulo compartido reemplaza los dos useMemo que había aquí
+  // (`rendimientoPromedio` con su media sin techo, y `prevRegistro` con su cadena ordenada
+  // por kilometraje). El promedio es ahora MEDIANA, los tramos absurdos se descartan
+  // declarando por qué, y las series van por FAMILIA de combustible: `gasolina_regular` y
+  // `gasolina_premium` son el mismo tanque y eran dos cadenas separadas.
+  //
+  // Se calcula sobre `registros` (todo), NO sobre `filtrados`: el km entre dos cargas es un
+  // hecho del vehículo y no cambia porque la pantalla esté filtrando un mes.
+  const seriesRend = useMemo(
+    () => seriesRendimiento(registros.map(r => cargaParaRendimiento(r, uidReg(r)))),
+    [registros]
+  );
+  const rendDeCarga = useMemo(() => tramosPorCarga(seriesRend), [seriesRend]);
+  // La ventana móvil de 5 tramos por (unidad, familia). Va al lado del dato de cada carga: fila
+  // por fila el ruido tapa la señal, y la mediana histórica —que es con lo que se juzga cada
+  // tramo— se mueve despacio a propósito, así que una degradación reciente queda diluida dentro
+  // de ella justo mientras está ocurriendo.
+  const movilDeCarga = useMemo(() => movilesPorCarga(seriesRend), [seriesRend]);
 
-  const rendimientoPromedio = useMemo(() => {
-    const mapa: Record<string, number | null> = {};
-    unidades.forEach(u => {
-      Object.keys(COMBUSTIBLES).forEach(tipo => {
-        const regs = registros
-          .filter(r => uidReg(r) === u.uid && (r.tipo_combustible || "diesel") === tipo && r.kilometraje > 0)
-          .sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
-        if (regs.length < 2) { mapa[`${u.uid}-${tipo}`] = null; return; }
-        const rends: number[] = [];
-        for (let i = 1; i < regs.length; i++) {
-          const km  = Number(regs[i].kilometraje) - Number(regs[i - 1].kilometraje);
-          const qty = Number(regs[i].galones);
-          if (km > 0 && qty > 0) rends.push(km / qty);
-        }
-        mapa[`${u.uid}-${tipo}`] = rends.length > 0 ? rends.reduce((a, b) => a + b) / rends.length : null;
-      });
+  // ── EL SALTO DE KM QUE NO CABE EN UN TANQUE ───────────────────────────────
+  //
+  // Se juzga MIENTRAS se teclea, no al guardar, para que el motivo aparezca antes del botón.
+  // La lectura previa es la última carga de esa unidad y familia ANTERIOR a la fecha del
+  // formulario — no la última de la tabla: una carga vieja que se registra hoy tiene su
+  // predecesor en su propia fecha, y comparar contra la más reciente daría un salto negativo o
+  // un falso positivo. Al EDITAR se excluye la propia fila, o se compararía consigo misma.
+  //
+  // Va DESPUÉS de `seriesRend` a propósito: necesita la mediana de esa unidad, y declararlo
+  // arriba lo dejaría leyendo una const todavía sin inicializar.
+  const saltoKm: VeredictoSalto = useMemo(() => {
+    if (!form.vehiculo_id || !form.kilometraje) return { estado: "sin_base", motivo: "sin_km_previo" };
+    const uSel = unidades.find(u => u.uid === form.vehiculo_id);
+    if (!uSel) return { estado: "sin_base", motivo: "sin_km_previo" };
+    const familia = familiaCombustible(form.tipo_combustible);
+    const previa = registros
+      .filter(r => uidReg(r) === form.vehiculo_id
+        && familiaCombustible(r.tipo_combustible) === familia
+        && r.id !== editandoId
+        && Number(r.kilometraje) > 0
+        && String(r.fecha ?? "").slice(0, 10) <= form.fecha)
+      .sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)) || Number(b.kilometraje) - Number(a.kilometraje))[0];
+    const serie = seriesRend.get(claveSerie(form.vehiculo_id, familia));
+    return revisarSaltoKm({
+      km: Number(form.kilometraje),
+      kmPrevio: previa ? Number(previa.kilometraje) : null,
+      capacidad: getCapacidad(uSel, form.tipo_combustible),
+      mediana: serie?.resumen.mediana ?? null,
+      medianaConfiable: !!serie?.resumen.confiable,
+      label: serie?.resumen.label ?? (COMBUSTIBLES[form.tipo_combustible] ?? COMBUSTIBLES.diesel).rendimientoLabel,
     });
-    return mapa;
-  }, [unidades, registros]);
+  }, [form.vehiculo_id, form.kilometraje, form.tipo_combustible, form.fecha, editandoId, registros, unidades, seriesRend]);
 
-  // Mapa prev registro
-  const prevRegistro = useMemo(() => {
-    const mapa: Record<number, Combustible | null> = {};
-    const ord = [...registros].sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
-    ord.forEach((r, i) => {
-      const tipo = r.tipo_combustible || "diesel";
-      const prev = ord.slice(0, i).reverse().find(x =>
-        uidReg(x) === uidReg(r) &&
-        (x.tipo_combustible || "diesel") === tipo &&
-        x.kilometraje < r.kilometraje
-      );
-      mapa[r.id] = prev || null;
+  const faltaMotivoSalto = saltoKm.estado === "salto" && !form.km_salto_motivo.trim();
+
+  // ── ¿ESTE PRECIO PUEDE SER DE ESTA UNIDAD? ────────────────────────────────
+  //
+  // El control de unidad del plan: se juzga MIENTRAS se teclea y **no bloquea**. Es la banda
+  // física, no el mercado — el ±20 % contra `precios_combustible` es otra pregunta y vive en
+  // el Radar. Lo valioso es que cuando el número encaja en la banda de la OTRA unidad, lo DICE:
+  // «esto parece un precio por litro y la carga dice galones», que es exacto y accionable.
+  const precioSospechoso = useMemo(() => {
+    const v = revisarPrecioUnitario({
+      tipo: form.tipo_combustible,
+      precio: Number(form.precio_galon),
+      unidad: form.unidad,
     });
+    return v.estado === "parece_otra_unidad" || v.estado === "fuera_de_banda" ? v.detalle : null;
+  }, [form.tipo_combustible, form.precio_galon, form.unidad]);
+
+  // ── La comparación del final: esta ventana contra la anterior ──────────────
+  //
+  // EL FILTRO DE MES MANDA sobre la ventana. Con «agosto» puesto compara agosto contra
+  // julio; con «todos los meses» son los últimos 30 días contra los 30 anteriores. Una
+  // ficha que ignora un filtro que está a la vista en la misma pantalla es la forma más
+  // fácil de leer mal un número.
+  //
+  // El mes anterior es el mes CALENDARIO, no "31 días atrás": restar días haría que el
+  // anterior de febrero fuese un trozo de enero y no enero.
+  //
+  // (Hermana a unificar el día que alguien lo haga: `rangoAnterior` en app/cliente/page.tsx,
+  // que resuelve lo mismo para el selector de periodo de esa pantalla.)
+  const ventanas = useMemo(() => {
+    if (filtroMes !== "todos") {
+      const [y, m] = filtroMes.split("-").map(Number);
+      const finMes = (yy: number, mm: number) => new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+      const prevY = m === 1 ? y - 1 : y, prevM = m === 1 ? 12 : m - 1;
+      const dd = (n: number) => String(n).padStart(2, "0");
+      const nombre = (yy: number, mm: number) =>
+        new Date(Date.UTC(yy, mm - 1, 1)).toLocaleDateString("es-PE", { month: "long", year: "numeric", timeZone: "UTC" });
+      return {
+        actual: { desde: `${y}-${dd(m)}-01`, hasta: `${y}-${dd(m)}-${dd(finMes(y, m))}`, label: nombre(y, m) },
+        previa: { desde: `${prevY}-${dd(prevM)}-01`, hasta: `${prevY}-${dd(prevM)}-${dd(finMes(prevY, prevM))}`, label: nombre(prevY, prevM) },
+      };
+    }
+    const hoy = hoyLima();
+    return {
+      actual: { desde: sumarDias(hoy, -29), hasta: hoy, label: "últimos 30 días" },
+      previa: { desde: sumarDias(hoy, -59), hasta: sumarDias(hoy, -30), label: "30 días anteriores" },
+    };
+  }, [filtroMes]);
+
+  // La ficha mide exactamente lo que la tabla muestra: respeta vehículo, flota, tipo y
+  // búsqueda. El mes es el único filtro que se comporta distinto — define la ventana en
+  // vez de recortarla — así que se quita del universo antes de resumir.
+  const comparacion = useMemo(() => {
+    const universo = registros.filter(r => {
+      const u = unidadDe(uidReg(r));
+      const q = busqueda.toLowerCase();
+      const txt = `${u?.placa || ""} ${r.grifo || ""} ${r.conductor || ""} ${r.tipo_combustible || ""}`.toLowerCase();
+      return txt.includes(q) &&
+        (filtroFlota === "todos" || (u?.tipo ?? "propio") === filtroFlota) &&
+        (filtroVeh === "todos" || uidReg(r) === filtroVeh) &&
+        (filtroTipo === "todos" || (r.tipo_combustible || "diesel") === filtroTipo);
+    }).map(r => cargaParaRendimiento(r, uidReg(r)));
+
+    // Las series se rehacen sobre el universo filtrado: si se filtra un tipo, la cadena
+    // de la otra familia no debe aportar km.
+    const series = seriesRendimiento(universo);
+    const a = resumirVentana(series, universo, ventanas.actual.desde, ventanas.actual.hasta, ventanas.actual.label);
+    const p = resumirVentana(series, universo, ventanas.previa.desde, ventanas.previa.hasta, ventanas.previa.label);
+    return compararVentanas(a, p);
+  }, [registros, unidades, busqueda, filtroFlota, filtroVeh, filtroTipo, ventanas]);
+
+  // Sin filtro de vehículo, el total ESCONDE la anomalía: con diez unidades, una que
+  // empeoró 25 % mueve el agregado un 2.5 % y nadie la ve. Esta lista es "dónde mirar".
+  const porUnidadComparada = useMemo(() => {
+    if (filtroVeh !== "todos") return [];
+    return unidades.map(u => {
+      const suyas = registros
+        .filter(r => uidReg(r) === u.uid && (filtroTipo === "todos" || (r.tipo_combustible || "diesel") === filtroTipo))
+        .map(r => cargaParaRendimiento(r, u.uid));
+      if (!suyas.length) return null;
+      const series = seriesRendimiento(suyas);
+      const a = resumirVentana(series, suyas, ventanas.actual.desde, ventanas.actual.hasta);
+      const p = resumirVentana(series, suyas, ventanas.previa.desde, ventanas.previa.hasta);
+      const c = compararVentanas(a, p);
+      if (!c.comparable || c.variacion.rendimiento === null) return null;
+      return {
+        uid: u.uid, placa: u.placa, tipo: u.tipo, c,
+        firme: Math.min(a.cargasMedidas, p.cargasMedidas) >= MIN_TRAMOS_CONFIABLE,
+      };
+    }).filter(Boolean).sort((x, y) => {
+      // Las firmes primero, y dentro de cada grupo la que más empeoró.
+      if (x!.firme !== y!.firme) return x!.firme ? -1 : 1;
+      return (x!.c.variacion.rendimiento ?? 0) - (y!.c.variacion.rendimiento ?? 0);
+    }) as { uid: string; placa: string; tipo: string; c: ReturnType<typeof compararVentanas>; firme: boolean }[];
+  }, [registros, unidades, filtroVeh, filtroTipo, ventanas]);
+
+  // ── Lo que leyó el Radar IA ────────────────────────────────────────────────
+
+  // Índice carga → fotos. La cascada (fila del Radar, y si no la media del mensaje) vive en
+  // lib/radar/fotos-lectura.ts, compartida con el panel de revisión de /radar-ia.
+  const fotosDeCarga = useMemo(() => fotosPorCarga(lecturasRadar, mediaMensajes), [lecturasRadar, mediaMensajes]);
+  // El nº de nota de despacho: con dos fotos (nota y tablero) es lo que dice CUÁL papel es este.
+  const notaDeCarga = useMemo(() => {
+    const mapa: Record<number, string> = {};
+    for (const l of lecturasRadar) {
+      const id = Number(l.combustible_id);
+      if (Number.isFinite(id) && l.comprobante && !mapa[id]) mapa[id] = l.comprobante;
+    }
     return mapa;
-  }, [registros]);
+  }, [lecturasRadar]);
+  const lecturaDeCarga = (id: number) => lecturasRadar.find(l => Number(l.combustible_id) === id) || null;
+  // Qué cargas nacieron de una foto. Se marca la CARGA, no la foto: en una fila vieja la foto
+  // se pide recién al abrirla, y de todos modos lo que dice el marcador es de dónde salió el dato.
+  const cargasDelRadar = useMemo(
+    () => new Set(lecturasRadar.map(l => Number(l.combustible_id)).filter(Number.isFinite)),
+    [lecturasRadar]);
+
+  // Filas viejas (anteriores a la columna `fotos`): su única evidencia es la media del mensaje
+  // de WhatsApp. Se pide al ABRIR la carga —una consulta de una fila— en vez de traer todos los
+  // mensajes al cargar la pantalla.
+  const asegurarMedia = async (mensajeId: string | null | undefined) => {
+    if (!mensajeId || mediaMensajes[mensajeId] !== undefined) return;
+    const { data } = await supabase
+      .from("radar_mensajes").select("media_url, media_mime, media_nombre").eq("id", mensajeId).maybeSingle();
+    // Se guarda incluso el vacío: marca la consulta como hecha y no se vuelve a pedir.
+    setMediaMensajes(prev => ({ ...prev, [mensajeId]: (data as MediaDeMensaje) ?? {} }));
+  };
+  const verLoQueLeyoElRadar = (cargaId: number) => {
+    const l = lecturaDeCarga(cargaId);
+    if (l && !(l.fotos ?? []).length) asegurarMedia(l.mensaje_id);
+  };
+  // Los cuatro estados posibles, para no afirmar "no hay foto" mientras todavía se está
+  // pidiendo: en una fila vieja la media se consulta al abrir la carga.
+  const estadoFotoRadar = (cargaId: number): "sin_radar" | "cargando" | "sin_foto" | "hay" => {
+    if ((fotosDeCarga[cargaId] ?? []).length) return "hay";
+    const l = lecturaDeCarga(cargaId);
+    if (!l) return "sin_radar";
+    if (l.mensaje_id && mediaMensajes[l.mensaje_id] === undefined) return "cargando";
+    return "sin_foto";
+  };
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); };
+  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setTanqueFuente(null); setMostrarForm(false); };
 
   const guardar = async () => {
     if (!form.vehiculo_id || !form.fecha) { alert("Selecciona vehículo y fecha"); return; }
@@ -241,8 +500,18 @@ export default function CombustiblePage() {
       if (!ok) return;
     }
 
+    // EL MOTIVO DEL SALTO BLOQUEA EL GUARDADO, no el registro. Una carga que no llega a ser fila
+    // desaparece de donde se corrige; una que se guarda sin explicar de dónde salieron 742 km
+    // envenena el rendimiento de la unidad y el vencimiento de su mantenimiento. Misma regla que
+    // `falso_flete_motivo` y `adicional_motivo`: se guarda, con el porqué escrito.
+    if (faltaMotivoSalto) {
+      alert("Escribe qué pasó con el salto de kilometraje antes de guardar.");
+      setGuardando(false);
+      return;
+    }
+
     setGuardando(true);
-    const payload = {
+    const base = {
       vehiculo_id:         esTercero ? null : uSel.id,
       vehiculo_tercero_id: esTercero ? uSel.id : null,
       fecha:            form.fecha,
@@ -255,10 +524,39 @@ export default function CombustiblePage() {
       tipo_combustible: form.tipo_combustible,
       unidad:           form.unidad,
     };
+    // LA COLUMNA SE MANDA SIEMPRE, incluso en null. Incluirla solo cuando trae valor deja un
+    // dato que no se puede BORRAR — el agujero que tuvo `capacidad_tanque`: al desmarcar, el
+    // payload dejaría de llevarla y el `true` viejo seguiría escrito.
+    const payload = {
+      ...base,
+      tanque_lleno: form.tanque_lleno,
+      // `operador` solo si una persona movió la casilla; si no, la afirmación es de la POLÍTICA
+      // de la empresa y se dice así. Un `true` que alguien miró y uno que salió del default no
+      // valen lo mismo, y el rendimiento construido sobre cada uno tiene que poder declararlo.
+      tanque_lleno_fuente: tanqueFuente ?? "politica",
+      km_salto_motivo: form.km_salto_motivo.trim() || null,
+    };
 
-    const { error } = editandoId
-      ? await supabase.from("combustible").update(payload).eq("id", editandoId)
-      : await supabase.from("combustible").insert(payload);
+    const escribir = (p: Record<string, unknown>) =>
+      editandoId
+        ? supabase.from("combustible").update(p).eq("id", editandoId)
+        : supabase.from("combustible").insert(p);
+
+    let { error } = await escribir(payload);
+    // Reintento sin las columnas de la migración accesoria, nombrando el SQL: registrar una
+    // carga no se puede bloquear porque falte un dato del método de tanque lleno — pero un dato
+    // que parece guardarse y no llega sí hay que decirlo.
+    if (error && /tanque_lleno|km_salto_motivo/i.test(error.message || "") && /does not exist/i.test(error.message || "")) {
+      const r2 = await escribir(base);
+      error = r2.error;
+      if (!error) {
+        alert(
+          "La carga se guardó, PERO sin «tanque lleno» ni el motivo del salto de km: falta correr " +
+          "supabase/combustible-01-tanque-lleno.sql en Supabase.\n\nHasta entonces el rendimiento se " +
+          "mide como antes (cada carga cuenta como tanque lleno)."
+        );
+      }
+    }
 
     if (error) { alert(error.message); setGuardando(false); return; }
 
@@ -269,6 +567,9 @@ export default function CombustiblePage() {
       tipoCombustible: form.tipo_combustible,
       precio:          Number(form.precio_galon),
       fecha:           form.fecha,
+      // La unidad de ESTA carga: la ficha del cotizador vive en la unidad canónica de la
+      // familia, así que un precio por litro se convierte antes de escribirse (o no se escribe).
+      unidad:          form.unidad,
       actualizadoPor:  authData?.user?.email || undefined,
     });
 
@@ -306,8 +607,15 @@ export default function CombustiblePage() {
       grifo:            r.grifo        || "",
       conductor:        r.conductor    || "",
       observaciones:    r.observaciones|| "",
+      // Al editar NO se re-afirma la política: si la fila no lo declara (`null`, o la columna
+      // no existe), la casilla sale marcada como default del formulario igual que en un alta —
+      // pero lo que había escrito manda sobre ella.
+      tanque_lleno:     r.tanque_lleno ?? true,
+      km_salto_motivo:  r.km_salto_motivo || "",
     });
+    setTanqueFuente(r.tanque_lleno_fuente ?? null);
     setEditandoId(r.id); setMostrarForm(true);
+    verLoQueLeyoElRadar(r.id);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
 
@@ -325,24 +633,51 @@ export default function CombustiblePage() {
   const resMes  = registros.filter(r => { const d = new Date(r.fecha + "T00:00:00"); return d.getMonth() === hoyMes && d.getFullYear() === hoyAnio; });
   const gastoMes= resMes.reduce((s, r) => s + Number(r.total || 0), 0);
 
+  // ── EL COSTO POR KM DE LA FLOTA — la métrica principal del módulo ──────────
+  //
+  // Con cuatro combustibles en la flota, km/gal NO permite comparar una unidad contra otra: un
+  // km/m³ de GNV y un km/gal de diésel no son el mismo número ni se pueden promediar. Soles por
+  // kilómetro sí, y es lo único que se puede sumar entre combustibles distintos.
+  //
+  // Se calcula sobre el conjunto ①: Σ soles ÷ Σ km de los tramos con kilometraje de fiar,
+  // publiquen rendimiento o no. Y se publica CON SU COBERTURA — un CPK medido sobre el 30 % del
+  // gasto no describe el periodo, y sin decirlo se lee como si lo hiciera.
+  const cpkFlota = useMemo(() => {
+    let km = 0, soles = 0;
+    const gastoDe = new Map(registros.map(r => [r.id, Number(r.total || 0)]));
+    for (const r of registros) {
+      const t = rendDeCarga[r.id]?.tramo;
+      if (!t || !t.kmConfiable || t.km == null || t.km <= 0) continue;
+      km += t.km;
+      soles += gastoDe.get(r.id) ?? 0;
+      for (const id of t.absorbidas) soles += gastoDe.get(id) ?? 0;
+    }
+    const total = registros.reduce((s, r) => s + Number(r.total || 0), 0);
+    return { km, soles, cpk: km > 0 ? soles / km : null, cobertura: total > 0 ? soles / total : null };
+  }, [registros, rendDeCarga]);
+
   // KPIs por tipo de combustible
+  // La tarjeta rotula con la unidad del CATÁLOGO, así que la cantidad tiene que llegar en esa
+  // unidad: el Radar guarda litros en la misma columna `galones`, y sumarlos crudos publicaba
+  // "398.6 gal" sobre un total que mezclaba litros dentro. `normalizarCantidad` es la misma
+  // conversión que usa el motor de rendimiento — una segunda aquí sería otra copia.
   const kpisPorTipo = Object.entries(COMBUSTIBLES).map(([tipo, cfg]) => {
     const regs = registros.filter(r => (r.tipo_combustible || "diesel") === tipo);
-    return { tipo, cfg, cantidad: regs.reduce((s, r) => s + Number(r.galones || 0), 0), costo: regs.reduce((s, r) => s + Number(r.total || 0), 0), cargas: regs.length };
+    const cantidad = regs.reduce((s, r) => s + (normalizarCantidad(r.galones, r.unidad, cfg.familia) ?? 0), 0);
+    return { tipo, cfg, cantidad, costo: regs.reduce((s, r) => s + Number(r.total || 0), 0), cargas: regs.length };
   }).filter(d => d.cargas > 0);
 
-  // Anomalías
+  // Anomalías. El hallazgo de rendimiento lo decide `juzgarTramo`, que ahora mira las DOS
+  // cotas: un rendimiento imposiblemente ALTO es una carga que falta por registrar, y antes
+  // se pintaba verde con ✓.
   const totalAnomalias = registros.filter(r => {
     const tipo = r.tipo_combustible || "diesel";
-    if (COMBUSTIBLES[tipo]?.esAditivo) return false;
-    const prev = prevRegistro[r.id];
-    const rend = calcRendimiento(r, prev);
-    const key  = `${uidReg(r)}-${tipo}`;
-    const promedio = rendimientoPromedio[key];
     const cap  = getCapacidad(unidadDe(uidReg(r)), tipo);
-    if (Number(r.galones) > cap * 1.1) return true;
-    if (rend !== null && promedio && promedio > 0 && ((promedio - rend) / promedio) > 0.3) return true;
-    return false;
+    // En la unidad del tanque, no en la de la fila: 60 litros no superan un tanque de 20 gal.
+    const q = normalizarCantidad(r.galones, r.unidad, familiaCombustible(tipo));
+    if (q != null && q > cap * 1.1) return true;
+    const e = rendDeCarga[r.id];
+    return !!(e && juzgarTramo(e.tramo, e.resumen));
   }).length;
 
   // Meses únicos
@@ -361,20 +696,93 @@ export default function CombustiblePage() {
       (filtroMes  === "todos" || r.fecha?.slice(0, 7) === filtroMes);
   }), [registros, busqueda, filtroFlota, filtroVeh, filtroTipo, filtroMes, unidades]);
 
-  // Datos por vehículo (ambas flotas)
+  // ── Datos por vehículo (ambas flotas) ──────────────────────────────────────
+  //
+  // EL CPK. Antes era `costo del período ÷ vehiculos.kilometraje_actual`, es decir el gasto
+  // de unas semanas dividido entre el odómetro de TODA LA VIDA del vehículo: un número que
+  // no significa nada y que además se pintaba de verde por ser pequeño.
+  //
+  // Ahora es Σ soles de las cargas que cierran tramos MEDIDOS ÷ Σ km de esos tramos —
+  // numerador y denominador de las mismas filas, sin una sola consulta nueva. Se publica con
+  // su cobertura, y sin ningún tramo medido sale "—" en vez de un número sin sentido.
+  //
+  // El CPK contra el odómetro real (lecturas_odometro) NO se calcula aquí: esta pantalla no
+  // tiene período —el filtro de mes admite "todos"— así que el denominador honesto sería la
+  // historia entera de la flota, miles de filas para una columna. Ese número ya existe, es la
+  // definición única del ERP y vive en /mantenimiento → Analítica de vehículo
+  // (`indicadoresEconomicos.costoPorKm`, que sí usa el odómetro).
   const datosVehiculo = unidades.map(v => {
     const regs = registros.filter(r => uidReg(r) === v.uid);
     const costo = regs.reduce((s, r) => s + Number(r.total || 0), 0);
-    const km    = Number(v.kilometraje_actual || 0);
     const tipos = [...new Set(regs.map(r => r.tipo_combustible || "diesel"))];
-    return { vehiculo: v, regs: regs.length, costo, cpk: km > 0 && costo > 0 ? costo / km : null, tipos };
+
+    // EL CONJUNTO ① — km de fiar, publiquen rendimiento o no. Antes esto exigía
+    // `rendimiento !== null`, así que el CPK heredaba TODOS los filtros del rendimiento:
+    // un tramo bicombustible o con un hueco de registro no aportaba sus km, y el costo salía
+    // sobre una minoría de las cargas y encima INFLADO (menos km abajo, soles de otras cargas
+    // arriba). El costo por km es la única métrica comparable entre unidades con combustibles
+    // distintos y tiene que poder calcularse para toda la flota.
+    let kmMedido = 0, solesMedidos = 0;
+    const porId = new Map(regs.map(r => [r.id, Number(r.total || 0)]));
+    for (const r of regs) {
+      const t = rendDeCarga[r.id]?.tramo;
+      if (t && t.kmConfiable && t.km != null && t.km > 0) {
+        kmMedido += t.km;
+        solesMedidos += porId.get(r.id) ?? 0;
+        // La plata de las cargas parciales que el tramo absorbió: sin ella el costo sale corto.
+        for (const id of t.absorbidas) solesMedidos += porId.get(id) ?? 0;
+      }
+    }
+    // Una serie por familia: una unidad bimodal (diésel + GLP) tiene dos rendimientos y
+    // promediarlos daría un número que no es de ninguno de los dos.
+    const series = [...seriesRend.values()].filter(s => s.resumen.unidad === v.uid && s.resumen.n > 0);
+
+    return {
+      vehiculo: v, regs: regs.length, costo, tipos, series,
+      cpk: kmMedido > 0 && solesMedidos > 0 ? solesMedidos / kmMedido : null,
+      kmMedido,
+      coberturaCargas: regs.filter(r => rendDeCarga[r.id]?.tramo.rendimiento !== null).length,
+      sinOdometro: regs.filter(r => !Number(r.kilometraje)).length,
+    };
   }).filter(d => d.regs > 0).sort((a, b) => b.costo - a.costo);
 
-  // Datos por conductor
-  const conductoresUsados = [...new Set(registros.map(r => r.conductor).filter(Boolean))] as string[];
+  // ── Datos por conductor ────────────────────────────────────────────────────
+  //
+  // Dos trampas, y las dos hay que declararlas o la columna miente:
+  //
+  // 1. UN TRAMO TIENE DOS CARGAS y puede tener dos conductores. Se atribuye al de la carga
+  //    que CIERRA —los km medidos son los que recorrió antes de llenar— y solo si los dos
+  //    extremos traen el mismo nombre. Con dos nombres distintos no se adivina: se cuenta
+  //    aparte. Es la misma disciplina que `hermano_ambiguo` en liquidaciones, y aquí importa
+  //    más porque el número señala a una persona.
+  // 2. COMPARAR CONDUCTOR CONTRA CONDUCTOR NO SIGNIFICA NADA: quien maneja la van siempre le
+  //    gana a quien maneja el bus. Lo que se compara es el Δ % contra la mediana de LA UNIDAD
+  //    QUE MANEJÓ. Ésa es la columna principal; el km/gal crudo va al lado, de referencia.
+  const conductoresUsados = [...new Set(registros.map(r => r.conductor?.trim()).filter(Boolean))] as string[];
   const datosConductor = conductoresUsados.map(cond => {
-    const regs = registros.filter(r => r.conductor === cond);
-    return { conductor: cond, cargas: regs.length, costo: regs.reduce((s, r) => s + Number(r.total || 0), 0) };
+    const regs = registros.filter(r => r.conductor?.trim() === cond);
+    const desvios: number[] = [];
+    const rends: number[] = [];
+    let ambiguos = 0;
+
+    for (const r of regs) {
+      const ent = rendDeCarga[r.id];
+      if (!ent || ent.tramo.rendimiento === null || !ent.resumen.mediana) continue;
+      const previa = ent.tramo.previaId != null ? registros.find(x => x.id === ent.tramo.previaId) : null;
+      if (previa && previa.conductor?.trim() !== cond) { ambiguos++; continue; }
+      rends.push(ent.tramo.rendimiento);
+      desvios.push((ent.tramo.rendimiento - ent.resumen.mediana) / ent.resumen.mediana);
+    }
+
+    return {
+      conductor: cond,
+      cargas: regs.length,
+      costo: regs.reduce((s, r) => s + Number(r.total || 0), 0),
+      tramos: desvios.length,
+      ambiguos,
+      desvio: desvios.length ? desvios.reduce((a, b) => a + b, 0) / desvios.length : null,
+      rendMedio: rends.length ? rends.reduce((a, b) => a + b, 0) / rends.length : null,
+    };
   }).sort((a, b) => b.costo - a.costo);
 
   // Datos por grifo
@@ -391,27 +799,51 @@ export default function CombustiblePage() {
   // el rendimiento del período = Σ km / Σ galones (exacto si filtras una unidad+tipo, aproximado
   // si es la flota combinada). Los aditivos (urea) no cuentan para galones ni km.
   const rendLabelAnalisis = filtroTipo !== "todos" ? (COMBUSTIBLES[filtroTipo]?.rendimientoLabel || "km/gal") : "km/gal";
+  // ¿Se puede publicar UN rendimiento agregado para lo que hay en pantalla? Solo si todo lo
+  // filtrado es de la MISMA familia. Con GNV al 70 % de la flota, sumar m³ con galones y dividir
+  // los km entre esa suma daba un número que no es de ninguno de los cuatro combustibles — la
+  // pantalla lo llamaba "aproximado" y no lo era: era una suma de unidades incompatibles.
+  const familiasEnAnalisis = useMemo(
+    () => [...new Set(filtrados
+      .filter(r => !COMBUSTIBLES[r.tipo_combustible || "diesel"]?.esAditivo)
+      .map(r => familiaCombustible(r.tipo_combustible)))],
+    [filtrados]
+  );
+  const rendAgregable = familiasEnAnalisis.length === 1;
   const analisisPeriodos = useMemo(() => {
-    const buckets: Record<string, { key: string; label: string; gasto: number; galones: number; km: number; cargas: number }> = {};
+    const buckets: Record<string, { key: string; label: string; gasto: number; galones: number; km: number; kmCpk: number; solesCpk: number; cargas: number }> = {};
+    const gastoDe = new Map(filtrados.map(r => [r.id, Number(r.total || 0)]));
     for (const r of filtrados) {
       const tipo = r.tipo_combustible || "diesel";
       const { key, label } = clavePeriodo(r.fecha, granularidad);
-      const b = buckets[key] ?? (buckets[key] = { key, label, gasto: 0, galones: 0, km: 0, cargas: 0 });
+      const b = buckets[key] ?? (buckets[key] = { key, label, gasto: 0, galones: 0, km: 0, kmCpk: 0, solesCpk: 0, cargas: 0 });
       b.gasto += Number(r.total || 0);
       b.cargas += 1;
+      const t = rendDeCarga[r.id]?.tramo;
+      // El COSTO POR KM entra siempre y de todas las familias: es lo único agregable entre
+      // combustibles distintos, y los aditivos también son plata gastada por kilómetro.
+      if (t && t.kmConfiable && t.km != null && t.km > 0) {
+        b.kmCpk += t.km;
+        b.solesCpk += gastoDe.get(r.id) ?? 0;
+        for (const id of t.absorbidas) b.solesCpk += gastoDe.get(id) ?? 0;
+      }
       if (!COMBUSTIBLES[tipo]?.esAditivo) {
-        b.galones += Number(r.galones || 0);
-        const prev = prevRegistro[r.id];
-        if (prev) {
-          const dkm = Number(r.kilometraje) - Number(prev.kilometraje);
-          if (dkm > 0) b.km += dkm;
+        // El RENDIMIENTO, en cambio, solo con tramos medidos — numerador y denominador de las
+        // mismas filas — y solo se PUBLICA si todo lo filtrado es de una sola familia.
+        if (t && t.rendimiento !== null && t.km != null && t.cantidad != null) {
+          b.km += t.km;
+          b.galones += t.cantidad;
         }
       }
     }
     return Object.values(buckets)
-      .map(b => ({ ...b, rendimiento: b.km > 0 && b.galones > 0 ? b.km / b.galones : null }))
+      .map(b => ({
+        ...b,
+        rendimiento: rendAgregable && b.km > 0 && b.galones > 0 ? b.km / b.galones : null,
+        cpk: b.kmCpk > 0 && b.solesCpk > 0 ? b.solesCpk / b.kmCpk : null,
+      }))
       .sort((a, b) => b.key.localeCompare(a.key));
-  }, [filtrados, prevRegistro, granularidad]);
+  }, [filtrados, rendDeCarga, granularidad]);
 
   // ─── RENDER ───────────────────────────────────────────────────────────────
 
@@ -439,6 +871,41 @@ export default function CombustiblePage() {
           🚨 <b>{totalAnomalias} registro{totalAnomalias > 1 ? "s" : ""} con anomalías</b> — carga excesiva o rendimiento anormal detectado
         </div>
       )}
+
+      {/* LA MÉTRICA PRINCIPAL: COSTO POR KM.
+          Va sola y arriba porque es la única comparable entre las cuatro familias de la flota —
+          un km/gal y un km/m³ no se pueden poner en la misma columna. El rendimiento por unidad
+          de combustible pasa a ser el dato secundario, por unidad, en la tabla de abajo. */}
+      <section className="rounded-2xl border p-4 flex flex-wrap items-center gap-x-8 gap-y-3"
+        style={{ background: "#eef3f8", borderColor: "#0b315f22" }}>
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-[#0b315f]/60">
+            Costo por kilómetro · toda la flota
+          </p>
+          <p className="text-4xl font-black leading-tight text-[#0b315f]">
+            {cpkFlota.cpk != null ? `S/ ${fmtNum(cpkFlota.cpk, 2)}` : "—"}
+            {cpkFlota.cpk != null && <span className="text-base font-bold text-[#0b315f]/50"> /km</span>}
+          </p>
+        </div>
+        <div className="text-xs text-[#0b315f]/70 leading-relaxed">
+          {cpkFlota.cpk != null ? (
+            <>
+              <b>{fmtSoles(cpkFlota.soles)}</b> en <b>{fmtNum(cpkFlota.km, 0)} km</b> medidos.<br />
+              {/* La cobertura no es decoración: un CPK sobre el 30 % del gasto no describe el
+                  periodo, y sin decirlo se lee como si lo hiciera. */}
+              Cubre el <b>{cpkFlota.cobertura != null ? Math.round(cpkFlota.cobertura * 100) : 0} %</b> del gasto registrado
+              {cpkFlota.cobertura != null && cpkFlota.cobertura < 0.8 && (
+                <span className="text-[#b45309]"> — el resto son cargas sin odómetro o con el km mal</span>
+              )}.
+            </>
+          ) : (
+            <>Todavía no hay dos cargas seguidas con kilometraje en ninguna unidad. Ponle el odómetro a las cargas y aparece.</>
+          )}
+        </div>
+        <div className="text-[11px] text-[#0b315f]/50 max-w-[280px] leading-snug ml-auto">
+          Soles ÷ kilómetros recorridos. Es lo único que se puede sumar entre GNV, diésel, gasolina y GLP.
+        </div>
+      </section>
 
       {/* KPIs GLOBALES */}
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -489,6 +956,22 @@ export default function CombustiblePage() {
             </div>
           </div>
 
+          {/* La foto del voucher, arriba de los campos: se corrige mirándola, no de memoria. */}
+          {editandoId != null && (() => {
+            const est = estadoFotoRadar(editandoId);
+            if (est === "sin_radar") return null;
+            if (est === "hay") return <FotosDelRadar fotos={fotosDeCarga[editandoId]} nota={notaDeCarga[editandoId]} />;
+            return (
+              <p className="rounded-2xl border border-blue-100 bg-[#f8fafc] px-4 py-3 text-xs text-gray-500">
+                {est === "cargando" ? "Buscando la foto que leyó el Radar IA…" : <>
+                  📷 Esta carga la registró el <b>Radar IA</b>, pero no quedó guardada la foto que leyó
+                  {notaDeCarga[editandoId] ? <> (nota <span className="font-mono">{notaDeCarga[editandoId]}</span>)</> : null}.
+                  {" "}Su lectura completa está en <Link href="/radar-ia?tab=combustible" className="font-bold text-[#1d4ed8] hover:underline">Radar IA → Combustible</Link>.
+                </>}
+              </p>
+            );
+          })()}
+
           {/* Selector visual de tipo de combustible */}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Tipo de combustible</p>
@@ -532,10 +1015,49 @@ export default function CombustiblePage() {
                   onChange={e => setForm(p => ({ ...p, fecha: e.target.value }))} />
               </Campo>
               <Campo label="Kilometraje actual">
-                <input type="number" className={inputCls("font-mono")} placeholder="Ej: 150000" value={form.kilometraje}
+                <input type="number" className={inputCls(`font-mono ${saltoKm.estado === "salto" ? "border-amber-400 bg-amber-50" : ""}`)}
+                  placeholder="Ej: 150000" value={form.kilometraje}
                   onChange={e => setForm(p => ({ ...p, kilometraje: e.target.value }))} />
               </Campo>
             </div>
+
+            {/* EL TANQUE LLENO ES LO QUE HACE VÁLIDA LA MEDICIÓN.
+                Si el tanque queda a tope en los dos extremos, lo despachado al cerrar es
+                exactamente lo consumido: el nivel restante —que nadie mide— se cancela solo.
+                Con una carga parcial el denominador es menor que lo consumido y el rendimiento
+                sale INFLADO, que es indistinguible de una carga comprada y no registrada. */}
+            <div className="mt-4 rounded-2xl border px-4 py-3"
+              style={{ background: form.tanque_lleno ? "#f8fafc" : "#fffbeb", borderColor: form.tanque_lleno ? "#e2e8f0" : "#fcd34d" }}>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" className="mt-0.5 w-4 h-4 accent-[#0b315f]" checked={form.tanque_lleno}
+                  onChange={e => { setForm(p => ({ ...p, tanque_lleno: e.target.checked })); setTanqueFuente("operador"); }} />
+                <span className="text-sm">
+                  <b className="text-gray-800">El tanque quedó lleno</b>
+                  <span className="block text-xs text-gray-500 mt-0.5">
+                    {form.tanque_lleno
+                      ? "Es la política de la empresa y el default. Desmárcalo solo si esta vez no se cargó a tope (sin crédito, el grifo sin stock)."
+                      : "Carga PARCIAL: esta carga no cierra una medición de rendimiento. Su combustible no se pierde — se suma al del próximo tanque lleno y ahí se mide."}
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {/* El candado del salto: aparece con el número delante y pide el motivo, no bloquea
+                el registro. Lo habitual es una carga que se hizo y nadie registró. */}
+            {saltoKm.estado === "salto" && (
+              <div className="mt-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 space-y-2">
+                <p className="text-xs text-amber-900 leading-relaxed">
+                  <b>Este salto de kilometraje no cabe en un tanque.</b><br />{saltoKm.detalle}
+                </p>
+                <input className={inputCls(faltaMotivoSalto ? "border-amber-400 bg-white" : "bg-white")}
+                  placeholder="¿Qué pasó? Ej: falta registrar la carga del 12/08 en el grifo de Ate"
+                  value={form.km_salto_motivo}
+                  onChange={e => setForm(p => ({ ...p, km_salto_motivo: e.target.value }))} />
+                {faltaMotivoSalto && (
+                  <p className="text-[11px] font-bold text-amber-800">Obligatorio para guardar.</p>
+                )}
+              </div>
+            )}
           </div>
 
           <div>
@@ -553,9 +1075,19 @@ export default function CombustiblePage() {
                   <p className="text-xs text-red-600 mt-1 font-bold">⚠ Supera capacidad del tanque</p>
                 )}
               </Campo>
+              {/* EL PRECIO DELATA LA UNIDAD EQUIVOCADA, y es lo único que la delata al teclear.
+                  La banda es de plausibilidad FÍSICA, no de mercado: dice si el número puede ser
+                  un precio de ESTA unidad. Avisa y NO bloquea — igual que el resto de los
+                  controles de esta pantalla, una carga que no llega a ser fila desaparece de
+                  donde se corrige. */}
               <Campo label={`Precio S/ por ${fuelCfg.unidadLabel} · Ref: ${fmtSoles(fuelCfg.precioRef)}`}>
-                <input type="number" min="0" className={inputCls()} placeholder={String(fuelCfg.precioRef)} value={form.precio_galon}
+                <input type="number" min="0"
+                  className={inputCls(precioSospechoso ? "border-amber-400 bg-amber-50" : "")}
+                  placeholder={String(fuelCfg.precioRef)} value={form.precio_galon}
                   onChange={e => setForm(p => ({ ...p, precio_galon: e.target.value }))} />
+                {precioSospechoso && (
+                  <p className="text-[11px] text-amber-800 mt-1 leading-snug">{precioSospechoso}</p>
+                )}
               </Campo>
               <Campo label="Grifo / Estación">
                 <input className={inputCls()} placeholder="Ej: Primax - Ate" value={form.grifo}
@@ -582,12 +1114,14 @@ export default function CombustiblePage() {
                 </div>
                 {/* Rendimiento esperado */}
                 {form.vehiculo_id && !fuelCfg.esAditivo && (() => {
-                  const key  = `${form.vehiculo_id}-${form.tipo_combustible}`;
-                  const prom = rendimientoPromedio[key];
-                  return prom ? (
+                  const s = seriesRend.get(`${form.vehiculo_id}|${familiaCombustible(form.tipo_combustible)}`);
+                  return s?.resumen.mediana ? (
                     <div className="ml-auto text-right">
                       <p className="text-[10px] font-bold uppercase" style={{ color: fuelCfg.color + "99" }}>Rendimiento histórico</p>
-                      <p className="font-black" style={{ color: fuelCfg.color }}>{fmtNum(prom, 1)} {fuelCfg.rendimientoLabel}</p>
+                      <p className="font-black" style={{ color: fuelCfg.color }}>{fmtNum(s.resumen.mediana, 1)} {s.resumen.label}</p>
+                      <p className="text-[10px]" style={{ color: fuelCfg.color + "88" }}>
+                        mediana de {s.resumen.n} tramo{s.resumen.n === 1 ? "" : "s"}
+                      </p>
                     </div>
                   ) : null;
                 })()}
@@ -601,7 +1135,8 @@ export default function CombustiblePage() {
           </Campo>
 
           <div className="flex gap-3">
-            <button onClick={guardar} disabled={guardando}
+            <button onClick={guardar} disabled={guardando || faltaMotivoSalto}
+              title={faltaMotivoSalto ? "Escribe el motivo del salto de kilometraje" : undefined}
               className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 hover:opacity-90"
               style={{ background: "#0b315f" }}>
               {guardando ? "Guardando..." : editandoId ? "Actualizar" : "Guardar carga"}
@@ -672,41 +1207,55 @@ export default function CombustiblePage() {
                 <thead>
                   <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
                     <th className="p-3 w-8"></th>
-                    {["Fecha", "Vehículo", "Combustible", "Cantidad", "Precio/ud", "Total", "Rendimiento", "Grifo", "Conductor", "⚠", "Acciones"].map(h => (
+                    {["Fecha", "Vehículo", "Combustible", "Cantidad", "Precio/ud", "Total", "Km", "Rendimiento", "Últimas 5", "Grifo", "Conductor", "⚠", "Acciones"].map(h => (
                       <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {loading ? (
-                    <tr><td colSpan={12} className="p-10 text-center text-gray-400">
+                    <tr><td colSpan={14} className="p-10 text-center text-gray-400">
                       <div className="flex items-center justify-center gap-2"><div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />Cargando...</div>
                     </td></tr>
                   ) : filtrados.length === 0 ? (
-                    <tr><td colSpan={12} className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">⛽</p><p>No hay registros</p></td></tr>
+                    <tr><td colSpan={14} className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">⛽</p><p>No hay registros</p></td></tr>
                   ) : filtrados.map(r => {
                     const tipo    = r.tipo_combustible || "diesel";
                     const cfg     = COMBUSTIBLES[tipo] || COMBUSTIBLES.diesel;
                     const unidLbl = r.unidad === "m3" ? "m³" : r.unidad || "gal";
-                    const prev    = prevRegistro[r.id];
-                    const rend    = calcRendimiento(r, prev);
-                    const key     = `${uidReg(r)}-${tipo}`;
-                    const promedio= rendimientoPromedio[key];
+                    const ent     = rendDeCarga[r.id];
+                    const tramo   = ent?.tramo ?? null;
+                    const resumen = ent?.resumen ?? null;
+                    const rend    = tramo?.rendimiento ?? null;
+                    const promedio= resumen?.mediana ?? null;
+                    const hallazgo= ent ? juzgarTramo(ent.tramo, ent.resumen) : null;
                     const uni     = unidadDe(uidReg(r));
                     const cap     = getCapacidad(uni,tipo);
                     const expandido = expandidoId === r.id;
 
                     const anomaliaExceso = Number(r.galones) > cap * 1.1;
-                    const anomaliaRend   = !cfg.esAditivo && rend !== null && promedio && ((promedio - rend) / promedio) > 0.3;
-                    const tieneAnomalia  = anomaliaExceso || anomaliaRend;
+                    const tieneAnomalia  = anomaliaExceso || !!hallazgo;
+                    // Rojo = consumió de más (plata que se fue). Ámbar = rindió de más de lo
+                    // posible, que es una carga SIN REGISTRAR (plata que falta en los libros).
+                    // Son dos cosas distintas y antes eran el mismo cubo — con el segundo caso
+                    // pintado de verde.
+                    const colorRend = !tramo || rend === null ? "#9ca3af"
+                      : hallazgo?.codigo === "rendimiento_bajo" ? "#dc2626"
+                      : hallazgo?.codigo === "rendimiento_alto" ? "#b45309"
+                      : "#166534";
 
                     return (
                       <React.Fragment key={r.id}>
                         <tr className={`border-t transition-colors cursor-pointer ${tieneAnomalia ? "bg-red-50/40" : "hover:bg-gray-50"}`}
                           style={{ borderColor: "#f1f5f9" }}
-                          onClick={() => setExpandidoId(expandido ? null : r.id)}>
+                          onClick={() => { setExpandidoId(expandido ? null : r.id); if (!expandido) verLoQueLeyoElRadar(r.id); }}>
                           <td className="p-3 text-gray-300 text-xs">{expandido ? "▼" : "▶"}</td>
-                          <td className="p-3 text-xs text-gray-600 font-medium">{fmtFecha(r.fecha)}</td>
+                          <td className="p-3 text-xs text-gray-600 font-medium whitespace-nowrap">
+                            {fmtFecha(r.fecha)}
+                            {cargasDelRadar.has(r.id) && (
+                              <span className="ml-1.5" title="La leyó el Radar IA de una foto — ábrela para verla">📷</span>
+                            )}
+                          </td>
                           <td className="p-3 font-mono font-black text-xs text-[#0b315f]">
                             {placaReg(r)}
                             {uni?.tipo === "tercero" && <span className="ml-1.5 text-[9px] font-black text-[#7c3aed] bg-[#f3e8ff] px-1.5 py-0.5 rounded-full align-middle">tercero</span>}
@@ -721,12 +1270,74 @@ export default function CombustiblePage() {
                           </td>
                           <td className="p-3 text-xs text-gray-500">{fmtSoles(Number(r.precio_galon || 0))}/{unidLbl}</td>
                           <td className="p-3 font-black text-xs text-red-700">{fmtSoles(Number(r.total || 0))}</td>
-                          <td className="p-3 text-xs font-bold">
-                            {!cfg.esAditivo && rend !== null
-                              ? <span style={{ color: promedio && rend < promedio * 0.7 ? "#dc2626" : "#166534" }}>
-                                  {fmtNum(rend, 1)} {cfg.rendimientoLabel}
+                          {/* EL ODÓMETRO SOLO NO DICE NADA: 103,915 no es información, lo
+                              accionable es cuánto recorrió desde la carga anterior. Por eso el
+                              delta va grande y el odómetro pequeño encima. Sin odómetro sale
+                              "—" y NUNCA "0": un cero se lee como "no recorrió". */}
+                          <td className="p-3 text-xs whitespace-nowrap">
+                            {r.kilometraje ? (
+                              <>
+                                <span className="font-mono text-[10px] text-gray-400 block leading-tight">
+                                  {fmtNum(Number(r.kilometraje), 0)}
                                 </span>
-                              : <span className="text-gray-300">—</span>}
+                                {tramo?.km != null ? (
+                                  <b className={tramo.rendimiento !== null ? "text-gray-700" : "text-gray-400"}>
+                                    +{fmtNum(tramo.km, 0)} km
+                                  </b>
+                                ) : (
+                                  <span className="text-gray-300">—</span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-gray-300" title="Esta carga se guardó sin kilometraje: su tramo no se puede medir">—</span>
+                            )}
+                          </td>
+                          {/* El "—" colapsaba cinco casos distintos y cada uno se arregla en
+                              otro lado. Ahora la celda dice CUÁL, y el detalle completo está
+                              al desplegar la fila. */}
+                          <td className="p-3 text-xs font-bold">
+                            {rend !== null ? (
+                              <span style={{ color: colorRend }}>
+                                {fmtNum(rend, 1)} {resumen?.label ?? cfg.rendimientoLabel}
+                              </span>
+                            ) : tramo?.motivo ? (
+                              <span className="text-gray-400 font-medium" title={tramo.detalle}>
+                                {tramo.crudo !== null && (
+                                  <span className="line-through text-gray-300 mr-1">{fmtNum(tramo.crudo, 1)}</span>
+                                )}
+                                {etiquetaMotivo(tramo.motivo)}
+                              </span>
+                            ) : <span className="text-gray-300">—</span>}
+                          </td>
+                          {/* LA VENTANA MÓVIL — lo que una fila sola no puede decir.
+                              Fila por fila el ruido tapa la señal (un tanque que cortó antes, una
+                              semana de cerro), y la MEDIANA con la que se juzga cada tramo se mueve
+                              despacio a propósito: son meses de historia, así que una caída reciente
+                              queda diluida dentro de ella justo mientras está ocurriendo. El Δ es
+                              contra esa mediana, que es donde la degradación se ve.
+                              SIN COLOR: el ruido irreducible de los gases licuados es del 3-5 %
+                              (la válvula corta al 80 % por norma, y el volumen varía con la
+                              temperatura), así que un umbral único sería ciego en diésel y ruidoso
+                              en GLP y GNV. Se publica el número y decide quien mira. */}
+                          <td className="p-3 text-xs whitespace-nowrap">
+                            {(() => {
+                              const mv = movilDeCarga[r.id];
+                              if (!mv) return <span className="text-gray-300">—</span>;
+                              const pct = mv.desviacion != null ? Math.round(mv.desviacion * 100) : null;
+                              return (
+                                <span title={`Media de los últimos ${mv.tramos} tramo(s): ${fmtNum(mv.km, 0)} km ÷ ${fmtNum(mv.cantidad, 1)}`}>
+                                  <b className="text-gray-700">{fmtNum(mv.rendimiento, 1)}</b>
+                                  {pct !== null && (
+                                    <span className={`ml-1.5 font-bold ${pct <= -5 ? "text-amber-700" : pct >= 5 ? "text-gray-500" : "text-gray-400"}`}>
+                                      {pct > 0 ? "+" : ""}{pct}%
+                                    </span>
+                                  )}
+                                  {mv.tramos < MIN_TRAMOS_CONFIABLE && (
+                                    <span className="block text-[9px] text-gray-400 leading-tight">{mv.tramos} de {MIN_TRAMOS_CONFIABLE}</span>
+                                  )}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="p-3 text-xs text-gray-500 max-w-[90px]"><div className="truncate">{r.grifo || "—"}</div></td>
                           <td className="p-3 text-xs text-gray-500 max-w-[90px]"><div className="truncate">{r.conductor || "—"}</div></td>
@@ -743,7 +1354,7 @@ export default function CombustiblePage() {
 
                         {expandido && (
                           <tr style={{ background: "#f8fafc" }} className="border-t">
-                            <td colSpan={12} className="px-6 py-4">
+                            <td colSpan={14} className="px-6 py-4">
                               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                                 <div className="space-y-1">
                                   <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Carga</p>
@@ -763,11 +1374,37 @@ export default function CombustiblePage() {
                                 <div className="space-y-1">
                                   <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Rendimiento</p>
                                   {cfg.esAditivo
-                                    ? <p className="text-gray-400 italic">Aditivo — sin cálculo de rendimiento</p>
+                                    ? <p className="text-gray-400 italic">Aditivo — su métrica es el consumo (lt/100km), no el rendimiento</p>
                                     : <>
-                                        <p><span className="text-gray-400">Este tramo:</span> {rend !== null ? <b style={{ color: promedio && rend < promedio * 0.7 ? "#dc2626" : "#166534" }}>{fmtNum(rend, 1)} {cfg.rendimientoLabel}</b> : "—"}</p>
-                                        <p><span className="text-gray-400">Prom. vehículo:</span> {promedio ? <b>{fmtNum(promedio, 1)} {cfg.rendimientoLabel}</b> : "—"}</p>
+                                        <p><span className="text-gray-400">Este tramo:</span>{" "}
+                                          {rend !== null
+                                            ? <b style={{ color: colorRend }}>{fmtNum(rend, 1)} {resumen?.label}</b>
+                                            : <b className="text-gray-500">{tramo?.motivo ? etiquetaMotivo(tramo.motivo) : "—"}</b>}
+                                          {tramo?.km != null && tramo.cantidad != null && (
+                                            <span className="text-gray-400"> · {fmtNum(tramo.km, 0)} km ÷ {fmtNum(tramo.cantidad, 2)}</span>
+                                          )}
+                                        </p>
+                                        <p><span className="text-gray-400">Mediana del vehículo:</span>{" "}
+                                          {promedio
+                                            ? <b>{fmtNum(promedio, 1)} {resumen?.label}</b>
+                                            : <span className="text-gray-400">sin medir aún</span>}
+                                          {resumen && resumen.n > 0 && (
+                                            <span className={resumen.confiable ? "text-gray-400" : "text-amber-600"}>
+                                              {" "}({resumen.n} tramo{resumen.n === 1 ? "" : "s"}{resumen.confiable ? "" : ", aún pocos"})
+                                            </span>
+                                          )}
+                                        </p>
                                         <p><span className="text-gray-400">Cap. tanque:</span> {cap} {unidLbl}</p>
+                                        {/* El porqué del "—", en la fila donde se puede arreglar. */}
+                                        {tramo?.motivo && tramo.detalle && (
+                                          <p className="text-[11px] text-gray-500 leading-snug pt-1">{tramo.detalle}</p>
+                                        )}
+                                        {resumen && resumen.cargasSinOdometro > 0 && (
+                                          <p className="text-[11px] text-amber-700 leading-snug">
+                                            Esta unidad tiene {resumen.cargasSinOdometro} carga(s) sin kilometraje:
+                                            ponérselo mejora todos sus tramos.
+                                          </p>
+                                        )}
                                       </>}
                                 </div>
                                 <div className="space-y-1">
@@ -776,10 +1413,29 @@ export default function CombustiblePage() {
                                     ? <div className="flex items-center gap-1.5 text-green-700"><span>✅</span><span className="font-bold">Sin anomalías</span></div>
                                     : <>
                                         {anomaliaExceso && <div className="rounded-lg px-2 py-1.5 bg-red-50 text-red-700 text-[10px] font-bold">🚨 Carga ({fmtNum(Number(r.galones))} {unidLbl}) supera capacidad ({cap} {unidLbl})</div>}
-                                        {anomaliaRend   && <div className="rounded-lg px-2 py-1.5 bg-red-50 text-red-700 text-[10px] font-bold">🔴 Rendimiento anormal: {fmtNum(rend!, 1)} vs prom. {fmtNum(promedio!, 1)} {cfg.rendimientoLabel}</div>}
+                                        {hallazgo && (
+                                          <div className={`rounded-lg px-2 py-1.5 text-[10px] leading-snug ${hallazgo.codigo === "rendimiento_bajo" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-800"}`}>
+                                            <b>{hallazgo.codigo === "rendimiento_bajo" ? "🔴 Consumió de más" : "🟠 Falta registrar una carga"}</b>
+                                            <div className="font-medium mt-0.5">{hallazgo.detalle}</div>
+                                          </div>
+                                        )}
                                       </>}
                                 </div>
                               </div>
+                              {(() => {
+                                const est = estadoFotoRadar(r.id);
+                                if (est === "sin_radar") return null;
+                                if (est === "hay") return (
+                                  <div className="mt-4"><FotosDelRadar fotos={fotosDeCarga[r.id]} nota={notaDeCarga[r.id]} alto="h-28" /></div>
+                                );
+                                return (
+                                  <p className="mt-3 text-[11px] text-gray-400">
+                                    {est === "cargando"
+                                      ? "Buscando la foto que leyó el Radar IA…"
+                                      : "📷 La registró el Radar IA, pero no quedó guardada la foto que leyó."}
+                                  </p>
+                                );
+                              })()}
                             </td>
                           </tr>
                         )}
@@ -796,6 +1452,16 @@ export default function CombustiblePage() {
               </div>
             )}
           </section>
+
+          {/* ── LA COMPARACIÓN · por qué cambió el gasto ──────────────────────
+              Va al final de las recargas, que es donde se mira después de
+              recorrer la tabla. Compara esta ventana contra la anterior y —lo
+              importante— reparte la diferencia de gasto entre sus TRES causas,
+              porque se gestionan de forma opuesta: más km es más trabajo, peor
+              rendimiento es una anomalía, y un precio más alto es del mercado.
+              Sin separarlas, la subida del diésel de S/ 24.70 a S/ 25.74 se lee
+              como problema operativo. Ver la cabecera de lib/rendimiento.ts. */}
+          <ComparacionPeriodo c={comparacion} porUnidad={porUnidadComparada} onVerUnidad={setFiltroVeh} />
         </>
       )}
 
@@ -842,7 +1508,7 @@ export default function CombustiblePage() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                {["Vehículo", "Cargas", "Combustibles usados", "Costo total", "CPK", ""].map(h => (
+                {["Vehículo", "Cargas", "Combustibles usados", "Costo total", "Rendimiento", "CPK combustible", ""].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -862,8 +1528,40 @@ export default function CombustiblePage() {
                     </div>
                   </td>
                   <td className="p-3 font-bold text-red-700">{fmtSoles(d.costo)}</td>
-                  <td className="p-3 font-bold" style={{ color: d.cpk ? (d.cpk > 0.5 ? "#dc2626" : "#16a34a") : "#9ca3af" }}>
-                    {d.cpk ? `S/ ${fmtNum(d.cpk, 3)}/km` : "—"}
+                  {/* Mediana, una línea por familia. Con pocos tramos el número sale en gris
+                      diciendo cuántos son: nunca escondido, nunca disfrazado de firme. */}
+                  <td className="p-3">
+                    {d.series.length === 0 ? <span className="text-gray-300">—</span> : (
+                      <div className="space-y-0.5">
+                        {d.series.map(s => (
+                          <div key={s.resumen.familia} className="whitespace-nowrap">
+                            <b className={s.resumen.confiable ? "text-[#166534]" : "text-gray-400"}>
+                              {fmtNum(s.resumen.mediana ?? 0, 1)} {s.resumen.label}
+                            </b>
+                            <span className="text-[10px] text-gray-400 ml-1">
+                              ({s.resumen.n} tramo{s.resumen.n === 1 ? "" : "s"}{s.resumen.confiable ? "" : ", pocos"})
+                            </span>
+                          </div>
+                        ))}
+                        {d.sinOdometro > 0 && (
+                          <div className="text-[10px] text-amber-600">{d.sinOdometro} carga(s) sin km</div>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  <td className="p-3">
+                    {d.cpk ? (
+                      <>
+                        <b className="text-gray-800">S/ {fmtNum(d.cpk, 3)}/km</b>
+                        <div className="text-[10px] text-gray-400">
+                          medido entre cargas · {d.coberturaCargas} de {d.regs} · {fmtNum(d.kmMedido, 0)} km
+                        </div>
+                      </>
+                    ) : (
+                      <span className="text-gray-400 text-xs">
+                        —<span className="block text-[10px]">sin tramos medidos</span>
+                      </span>
+                    )}
                   </td>
                   <td className="p-3">
                     <button onClick={() => { setFiltroVeh(d.vehiculo.uid); setVista("historial"); }}
@@ -871,7 +1569,7 @@ export default function CombustiblePage() {
                   </td>
                 </tr>
               ))}
-              {datosVehiculo.length === 0 && <tr><td colSpan={6} className="p-10 text-center text-gray-400">Sin datos</td></tr>}
+              {datosVehiculo.length === 0 && <tr><td colSpan={7} className="p-10 text-center text-gray-400">Sin datos</td></tr>}
             </tbody>
           </table>
         </section>
@@ -883,25 +1581,52 @@ export default function CombustiblePage() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                {["Conductor", "Cargas", "Gasto total", "Prom. por carga", ""].map(h => (
+                {["Conductor", "Cargas", "Gasto total", "Prom. por carga", "vs. su unidad", "Rendimiento", ""].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {datosConductor.length === 0 ? (
-                <tr><td colSpan={5} className="p-10 text-center text-gray-400">Sin conductores en registros</td></tr>
+                <tr><td colSpan={7} className="p-10 text-center text-gray-400">Sin conductores en registros</td></tr>
               ) : datosConductor.map(d => (
                 <tr key={d.conductor} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
                   <td className="p-3 font-bold text-gray-800">👤 {d.conductor}</td>
                   <td className="p-3 text-gray-600">{d.cargas}</td>
                   <td className="p-3 font-bold text-red-700">{fmtSoles(d.costo)}</td>
                   <td className="p-3 text-gray-600">{d.cargas > 0 ? fmtSoles(d.costo / d.cargas) : "—"}</td>
+                  {/* La comparación que significa algo: contra la mediana de la unidad que
+                      manejó, no contra los demás conductores. */}
+                  <td className="p-3">
+                    {d.desvio === null ? (
+                      <span className="text-gray-300">—</span>
+                    ) : (
+                      <>
+                        <b style={{ color: d.desvio < -0.1 ? "#dc2626" : d.desvio > 0.1 ? "#b45309" : "#166534" }}>
+                          {d.desvio > 0 ? "+" : ""}{fmtNum(d.desvio * 100, 1)} %
+                        </b>
+                        <div className="text-[10px] text-gray-400">
+                          {d.tramos} tramo{d.tramos === 1 ? "" : "s"} medido{d.tramos === 1 ? "" : "s"}
+                          {d.ambiguos > 0 && ` · ${d.ambiguos} con cambio de conductor`}
+                        </div>
+                      </>
+                    )}
+                  </td>
+                  <td className="p-3 text-gray-600 text-xs">
+                    {d.rendMedio !== null ? fmtNum(d.rendMedio, 1) : <span className="text-gray-300">—</span>}
+                  </td>
                   <td className="p-3"><button onClick={() => { setVista("historial"); setBusqueda(d.conductor); }} className="text-xs font-bold text-[#0b315f] hover:underline">Ver →</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <p className="px-4 py-3 text-[11px] text-gray-500 border-t leading-snug" style={{ borderColor: "#f1f5f9" }}>
+            <b>vs. su unidad</b> compara cada tramo contra la mediana de la unidad que se manejó, no contra
+            los demás conductores: quien conduce una van siempre rendiría más que quien conduce un bus.
+            Un tramo cuyos dos extremos los cargaron personas distintas no se atribuye a ninguna
+            —se cuenta aparte— porque aquí el número señala a alguien. <b>Una diferencia no es una acusación:</b>{" "}
+            la ruta, el tráfico y el tanque llenado a medias explican la mayoría.
+          </p>
         </section>
       )}
 
@@ -918,11 +1643,14 @@ export default function CombustiblePage() {
                 </button>
               ))}
             </div>
+            {/* NO es "aproximado": un km/gal y un km/m³ no se pueden sumar, y decir "aproximado"
+                invita a leer igual un número que no describe nada. El COSTO POR KM sí se agrega
+                entre combustibles distintos, y por eso es el que se publica siempre. */}
             <p className="text-xs text-gray-500 flex-1 min-w-[200px]">
-              Gasto y rendimiento por período (respeta los filtros de vehículo/tipo).{" "}
-              {filtroVeh === "todos" || filtroTipo === "todos"
-                ? "Filtra por una unidad y un tipo para un rendimiento exacto; combinado es aproximado."
-                : "Rendimiento exacto para el filtro seleccionado."}
+              Gasto y costo por km por período (respeta los filtros de vehículo/tipo).{" "}
+              {rendAgregable
+                ? "El rendimiento sale porque todo lo filtrado es del mismo combustible."
+                : `Hay ${familiasEnAnalisis.length} combustibles en pantalla, así que el rendimiento NO se agrega — sus unidades no se pueden sumar. Filtra un tipo para verlo.`}
             </p>
           </div>
 
@@ -930,14 +1658,25 @@ export default function CombustiblePage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {(() => {
               const totGasto = analisisPeriodos.reduce((s, b) => s + b.gasto, 0);
-              const totKm = analisisPeriodos.reduce((s, b) => s + b.km, 0);
+              const totKm = analisisPeriodos.reduce((s, b) => s + b.kmCpk, 0);
+              const totSoles = analisisPeriodos.reduce((s, b) => s + b.solesCpk, 0);
               const totGal = analisisPeriodos.reduce((s, b) => s + b.galones, 0);
-              const rend = totKm > 0 && totGal > 0 ? totKm / totGal : null;
+              const rend = rendAgregable && totKm > 0 && totGal > 0
+                ? analisisPeriodos.reduce((s, b) => s + b.km, 0) / totGal : null;
               const tarjetas = [
                 { label: "Gasto en el rango", valor: fmtSoles(totGasto), color: "#991b1b", bg: "#fee2e2" },
                 { label: "Km recorridos", valor: totKm > 0 ? `${fmtNum(totKm, 0)} km` : "—", color: "#0b315f", bg: "#eef3f8" },
-                { label: "Cantidad total", valor: totGal > 0 ? `${fmtNum(totGal, 1)}` : "—", color: "#6d28d9", bg: "#ede9fe" },
-                { label: "Rendimiento prom.", valor: rend != null ? `${fmtNum(rend, 1)} ${rendLabelAnalisis}` : "—", color: "#166534", bg: "#dcfce7" },
+                // La métrica principal también aquí: es la única que sobrevive a un filtro que
+                // mezcla combustibles.
+                { label: "Costo por km", valor: totKm > 0 && totSoles > 0 ? `S/ ${fmtNum(totSoles / totKm, 2)}` : "—", color: "#0b315f", bg: "#eef3f8" },
+                // Y el rendimiento SOLO con una familia en pantalla. Sumar m³ con galones y
+                // dividir los km entre esa suma daba un número que no es de ningún combustible.
+                {
+                  label: rendAgregable ? "Rendimiento prom." : "Rendimiento prom.",
+                  valor: rend != null ? `${fmtNum(rend, 1)} ${rendLabelAnalisis}`
+                    : rendAgregable ? "—" : `${familiasEnAnalisis.length} combustibles`,
+                  color: "#166534", bg: "#dcfce7",
+                },
               ];
               return tarjetas.map(k => (
                 <div key={k.label} className="rounded-2xl p-4" style={{ background: k.bg }}>
@@ -953,27 +1692,30 @@ export default function CombustiblePage() {
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                  {["Período", "Cargas", "Cantidad", "Km recorridos", "Gasto", `Rendimiento (${rendLabelAnalisis})`].map(h => (
+                  {["Período", "Cargas", "Cantidad", "Km recorridos", "Gasto", "Costo/km", rendAgregable ? `Rendimiento (${rendLabelAnalisis})` : "Rendimiento"].map(h => (
                     <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {analisisPeriodos.length === 0 ? (
-                  <tr><td colSpan={6} className="p-10 text-center text-gray-400">Sin datos en el rango seleccionado</td></tr>
+                  <tr><td colSpan={7} className="p-10 text-center text-gray-400">Sin datos en el rango seleccionado</td></tr>
                 ) : (() => {
                   const maxGasto = Math.max(...analisisPeriodos.map(x => x.gasto), 1);
                   return analisisPeriodos.map(b => (
                     <tr key={b.key} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
                       <td className="p-3 font-bold text-gray-800 capitalize whitespace-nowrap">{b.label}</td>
                       <td className="p-3 text-gray-600">{b.cargas}</td>
-                      <td className="p-3 text-gray-600">{b.galones > 0 ? fmtNum(b.galones, 1) : "—"}</td>
-                      <td className="p-3 text-gray-600 whitespace-nowrap">{b.km > 0 ? `${fmtNum(b.km, 0)} km` : "—"}</td>
+                      <td className="p-3 text-gray-600">{rendAgregable && b.galones > 0 ? fmtNum(b.galones, 1) : "—"}</td>
+                      <td className="p-3 text-gray-600 whitespace-nowrap">{b.kmCpk > 0 ? `${fmtNum(b.kmCpk, 0)} km` : "—"}</td>
                       <td className="p-3">
                         <div className="flex items-center gap-2">
                           <div className="h-2 rounded-full flex-shrink-0" style={{ width: `${Math.round((b.gasto / maxGasto) * 70)}px`, background: "#991b1b", opacity: 0.25 }} />
                           <span className="font-bold text-red-700 whitespace-nowrap">{fmtSoles(b.gasto)}</span>
                         </div>
+                      </td>
+                      <td className="p-3 font-bold whitespace-nowrap text-[#0b315f]">
+                        {b.cpk != null ? `S/ ${fmtNum(b.cpk, 2)}` : "—"}
                       </td>
                       <td className="p-3 font-bold whitespace-nowrap" style={{ color: b.rendimiento != null ? "#166534" : "#9ca3af" }}>
                         {b.rendimiento != null ? fmtNum(b.rendimiento, 1) : "—"}

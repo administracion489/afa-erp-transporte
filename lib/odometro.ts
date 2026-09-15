@@ -123,8 +123,21 @@ function targetFlota(flota: Flota | undefined): { tabla: "vehiculos" | "vehiculo
 /** Decide el estado de una lectura nueva frente al km vigente. Función pura. */
 /** Tolerancia de horas por delante para no marcar "futuro" por desfase de reloj. */
 const HORAS_FUTURO_TOLERANCIA = 6;
-/** Factor de salto de orden de magnitud: ×8 sobre el vigente = casi seguro un dígito de más. */
-const RATIO_DIGITO_DE_MAS = 8;
+/**
+ * Factor de salto de orden de magnitud: ×8 sobre el vigente = casi seguro un dígito de más.
+ *
+ * Se EXPORTA porque hay dos módulos que juzgan el mismo número y tienen que decir lo mismo:
+ * el que ESCRIBE (evaluarLectura, aquí) y el que LEE (elegirOdometro, lib/odometro-seleccion.ts,
+ * que decide si el número de la IA se pre-llena en la pantalla). Con el ratio en un solo lado,
+ * la pantalla ofrecía como bueno un número que esta función marcaba "Salto ×10: posible dígito
+ * de más" tres líneas después.
+ */
+export const RATIO_DIGITO_DE_MAS = 8;
+/**
+ * Piso desde el cual el ratio significa algo. En odómetros bajos (unidad nueva) un ×8 legítimo
+ * es posible, y el caso real no se pierde: un dígito de más SIEMPRE deja el vigente alto.
+ */
+export const PISO_RATIO_DIGITO = 5000;
 
 export function evaluarLectura(opts: {
   kmVigente: number | null | undefined;
@@ -225,7 +238,7 @@ export function evaluarLectura(opts: {
   //    de km/día no lo captura por diseño; el ratio sí. Solo con el vigente ya ALTO: en
   //    odómetros bajos (unidad nueva) un ×8 legítimo es posible, así que el piso evita
   //    falsos positivos sin perder el caso real (un dígito de más siempre deja el vigente alto).
-  if (kmBase >= 5000 && kmNuevo >= kmBase * RATIO_DIGITO_DE_MAS) {
+  if (kmBase >= PISO_RATIO_DIGITO && kmNuevo >= kmBase * RATIO_DIGITO_DE_MAS) {
     const veces = Math.round(kmNuevo / kmBase);
     return { estado: "sospechosa", motivo: `Salto ×${veces} (${kmNuevo.toLocaleString("es-PE")}): posible dígito de más` };
   }
@@ -495,6 +508,17 @@ export async function registrarLectura(
     ref_origen?: string | null;
     kmDiaMax?: number;
     forzar?: boolean;          // saltar validación (aceptar desde panel de revisión)
+    /**
+     * Lo contrario de `forzar`: el número NO lo transcribió nadie, lo DEDUJO el ERP, así que
+     * la lectura se guarda (con su foto, en "Lecturas por revisar") pero **nunca se acepta
+     * sola** — no mueve `vehiculos.kilometraje_actual` hasta que una persona la confirme.
+     *
+     * Existe para el Radar, que es el único carril que graba sin nadie delante. En las pantallas
+     * el humano ya está mirando la foto cuando se le propone el número; ahí no hace falta.
+     * Un km deducido que se acepta solo envenena el vencimiento de mantenimiento y el
+     * rendimiento km/gal de todos los tramos siguientes, y nadie se entera.
+     */
+    forzarRevision?: boolean;
     flota?: Flota;             // "propia" (default) | "tercero"
     capturado_en?: string | null; // cuándo se TOMÓ la lectura (no cuándo se insertó)
     /**
@@ -513,7 +537,21 @@ export async function registrarLectura(
      */
     motivo?: string | null;
   }
-): Promise<{ ok: boolean; estado: EstadoLectura; motivo: string | null; lecturaId?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  estado: EstadoLectura;
+  motivo: string | null;
+  lecturaId?: string;
+  error?: string;
+  /**
+   * `true` = no se insertó nada: esta lectura ya existía (misma clave de evento, misma URL de
+   * foto o mismo binario) y lo que se devuelve es la fila de antes. Es información para quien
+   * llama, no un error — pero callarla hace que una pantalla diga "registrado" cuando el
+   * número que acaba de teclear una persona NO quedó guardado (dos vouchers de la misma unidad
+   * en una ráfaga comparten las fotos del cluster y caen justo aquí).
+   */
+  duplicada?: boolean;
+}> {
   const km = Number(l.km);
   if (!l.vehiculo_id || !Number.isFinite(km) || km <= 0) {
     return { ok: false, estado: "rechazada", motivo: "Datos incompletos", error: "Datos incompletos" };
@@ -527,14 +565,14 @@ export async function registrarLectura(
     const { data: yaIdem } = await client
       .from("lecturas_odometro").select("id,estado,motivo")
       .eq("idem_key", l.idemKey).limit(1).maybeSingle();
-    if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id };
+    if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id, duplicada: true };
   }
   // (b) Por foto: la MISMA foto reenviada a otro grupo o el mensaje reprocesado.
   if (l.foto_url) {
     const { data: yaFoto } = await client
       .from("lecturas_odometro").select("id,estado,motivo")
       .eq(fk, l.vehiculo_id).eq("foto_url", l.foto_url).neq("estado", "anulada").limit(1).maybeSingle();
-    if (yaFoto) return { ok: true, estado: yaFoto.estado, motivo: yaFoto.motivo, lecturaId: yaFoto.id };
+    if (yaFoto) return { ok: true, estado: yaFoto.estado, motivo: yaFoto.motivo, lecturaId: yaFoto.id, duplicada: true };
   }
   // (c) Por CONTENIDO de la foto: un reenvío de WhatsApp es un mensaje nuevo, el worker lo sube
   //     con otro nombre y (b) no lo ve — pero el binario es el mismo. El hash lo delata.
@@ -545,7 +583,7 @@ export async function registrarLectura(
       .from("lecturas_odometro").select("id,estado,motivo")
       .eq(fk, l.vehiculo_id).eq("foto_hash", fotoHash).neq("estado", "anulada").limit(1).maybeSingle();
     // Si la columna aún no existe (migración sin correr) el error se ignora: se sigue sin (c).
-    if (!eHash && yaHash) return { ok: true, estado: yaHash.estado, motivo: yaHash.motivo, lecturaId: yaHash.id };
+    if (!eHash && yaHash) return { ok: true, estado: yaHash.estado, motivo: yaHash.motivo, lecturaId: yaHash.id, duplicada: true };
   }
 
   // Momento de CAPTURA de esta lectura (no el de inserción/proceso): al reprocesar una foto
@@ -611,13 +649,20 @@ export async function registrarLectura(
 
   const origenIA = l.fuente === "whatsapp_foto" || l.fuente === "whatsapp_manual" || l.fuente === "combustible";
 
-  const evalr: EvalLectura = l.forzar
+  let evalr: EvalLectura = l.forzar
     ? { estado: "aceptada", motivo: null }
     : evaluarLectura({
         kmVigente, kmNuevo: km, kmDiaMax, horasDesdeUltima, origenIA, duplicadoProbable, corroborada,
         fechaLectura: l.capturado_en ?? fecha,
         refAnterior: anterior, refPosterior: posterior,
       });
+
+  // Número deducido por el ERP: se evalúa igual (los otros hallazgos siguen valiendo) pero un
+  // "aceptada" baja a "sospechosa". La lectura existe y se ve en la bandeja con su foto; lo que
+  // no hace es moverle el km vigente a la unidad sin que nadie la haya mirado.
+  if (!l.forzar && l.forzarRevision && evalr.estado === "aceptada") {
+    evalr = { estado: "sospechosa", motivo: evalr.motivo };
+  }
 
   // El motivo del caller (p.ej. "el sistema corrigió el número de la IA") y el aviso de reloj
   // se anteponen al de evaluarLectura para que queden visibles en la bandeja; no alteran el estado.
@@ -652,7 +697,7 @@ export async function registrarLectura(
     if (esViolacionUnica(error) && l.idemKey) {
       const { data: yaIdem } = await client
         .from("lecturas_odometro").select("id,estado,motivo").eq("idem_key", l.idemKey).limit(1).maybeSingle();
-      if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id };
+      if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id, duplicada: true };
     }
     return { ok: false, estado: evalr.estado, motivo: evalr.motivo, error: error.message };
   }

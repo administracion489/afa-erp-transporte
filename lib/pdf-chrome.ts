@@ -2,6 +2,8 @@
 // Estaban dentro de app/cotizaciones/page.tsx; viven aquí para que cualquier documento
 // nuevo herede el mismo membrete sin copiarlo, y para poder generarlo fuera del navegador.
 
+import { etiquetaNivel } from "./costos/nivel-servicio";
+
 export const LOGO_DEFAULT = "/logoafacotizacion-removebg-preview.png";
 
 /**
@@ -12,10 +14,22 @@ export const LOGO_DEFAULT = "/logoafacotizacion-removebg-preview.png";
 export const esc = (s: unknown): string =>
   String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
+/**
+ * El logo se dimensiona contra el RECUADRO BLANCO, que es lo que se ve, no contra la banda.
+ * La tarjeta blanca se estira a los 65px de la banda, así que lo único que limitaba el logo
+ * era su propio `max-height`: con 46px y 8px de padding arriba y abajo sobraban 9px de blanco
+ * por lado y el logo se leía pequeño dentro de su propio recuadro. Con 5px de padding quedan
+ * 55px útiles y el tope sube a 54 — el logo de AFA (754×331) pasa de 105×46 a 123×54, un 38 %
+ * más de área, y conserva 5.5px de blanco arriba y abajo: crece SIN pasar el recuadro.
+ * Horizontalmente la tarjeta se ajusta al logo (entre 140 y 175), así que el hueco blanco de la
+ * derecha —41px con el logo anterior— deja de ser mayor que el margen de los otros tres lados.
+ * `justify-content:center` es para el logo de OTRA empresa (este ERP se vende): uno cuadrado no
+ * llega al mínimo de 140 y sin eso quedaría pegado al borde izquierdo con todo el blanco detrás.
+ */
 export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, subtitulo: string): string {
   return `<div class="pdf-header" style="background:${cp};display:flex;align-items:stretch;height:65px;">
-    <div style="background:white;border-radius:0 20px 20px 0;padding:8px 20px 8px 14px;display:flex;align-items:center;min-width:140px;max-width:160px;flex-shrink:0;">
-      <img src="${logoUrl}" style="max-height:46px;max-width:130px;object-fit:contain;"/>
+    <div style="background:white;border-radius:0 20px 20px 0;padding:5px 18px 5px 14px;display:flex;align-items:center;justify-content:center;min-width:140px;max-width:175px;flex-shrink:0;">
+      <img src="${logoUrl}" style="max-height:54px;max-width:140px;object-fit:contain;"/>
     </div>
     <div style="flex:1;display:flex;align-items:center;justify-content:flex-end;padding:0 24px;">
       <div style="text-align:right;">
@@ -26,15 +40,39 @@ export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, 
   </div>`;
 }
 
+/**
+ * El pie del documento OMITE lo que no tiene dato, en vez de imprimir su rótulo vacío.
+ *
+ * Antes los cuatro campos iban siempre, así que un perfil a medio llenar imprimía
+ * `⌂ Dir.: | ✆ | ✉ | ☏` — cuatro iconos y tres barras sin nada al lado, que se lee como un
+ * documento roto. Y era el caso NORMAL: `empresa_perfil` nace vacía, y desde que los valores
+ * de respaldo dejaron de ser los de una empresa concreta (ver `lib/empresa-perfil.ts`), un
+ * campo sin llenar llega aquí como cadena vacía a propósito.
+ *
+ * Callar el rótulo es lo mismo que hace la autorización del regulador: sin dato no se inventa
+ * nada, tampoco el hueco donde iría.
+ *
+ * Y lo que queda va CENTRADO en la banda. Sin `justify-content` el flex arranca a la izquierda
+ * y los datos se apilaban contra el margen con la mitad derecha de la banda en azul vacío;
+ * centrado, el pie queda simétrico como la banda que lo pinta — y con la omisión de arriba eso
+ * pasa a ser lo que sostiene el pie de un perfil a medio llenar: dos datos alineados a la
+ * izquierda dejan tres cuartos de banda vacíos, y eso sí se lee como un documento roto. El
+ * `wrap` sigue puesto: con un domicilio largo el membrete pasa a dos líneas y cada una se
+ * centra por su cuenta.
+ */
 export function buildFooterPDFHtml(cp: string, empDir: string, empTel: string, empEmail: string, empWeb: string): string {
-  return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-    <span style="color:white;font-size:8.5px;">&#8962; Dir.: ${empDir}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9990; ${empTel}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9993; ${empEmail}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9741; ${empWeb}</span>
+  const partes = [
+    { icono: "&#8962;", texto: empDir ? `Dir.: ${empDir}` : "" },
+    { icono: "&#9990;", texto: empTel },
+    { icono: "&#9993;", texto: empEmail },
+    { icono: "&#9741;", texto: empWeb },
+  ].filter(p => String(p.texto ?? "").trim());
+
+  if (!partes.length) return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;"></div>`;
+
+  const sep = `<span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>`;
+  return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;">
+    ${partes.map(p => `<span style="color:white;font-size:8.5px;">${p.icono} ${p.texto}</span>`).join(sep)}
   </div>`;
 }
 
@@ -70,7 +108,9 @@ export function buildVehsHtml(vehiculos: VehiculoPDF[], cp: string, opts?: { img
       ? `<div style="display:grid;grid-template-columns:${veh.foto_externa_url && veh.foto_interna_url ? "1fr 1fr" : "1fr"};gap:${gap};margin:10px 0;">${veh.foto_externa_url ? mkImg(veh.foto_externa_url) : ""}${veh.foto_interna_url ? mkImg(veh.foto_interna_url) : ""}</div>`
       : "";
     const sep = idx > 0 ? `<div style="height:1px;background:#e5e7eb;margin:10px 0 12px;"></div>` : "";
-    const tipoEquip = esFull ? "FULL EQUIPO" : "BÁSICO";
+    // El MISMO rótulo que la pantalla y que la descripción del ítem: el cliente no puede leer
+    // un rótulo en el anexo distinto del nivel con el que se le vendió el servicio.
+    const tipoEquip = etiquetaNivel(veh.equipamiento);
     const lbl = vehiculos.length > 1
       ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc((veh.categoria || "UNIDAD").toUpperCase())} ${tipoEquip}${veh.capacidad_pasajeros ? " DE " + veh.capacidad_pasajeros + " PASAJEROS" : ""}</p>`
       : "";

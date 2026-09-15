@@ -55,6 +55,7 @@ export async function GET(req: Request) {
 
     const doc = await cargarDocumentoLiquidacion(sb, lado, { token }, {
       urlPublica: `${BASE()}/conformidad/${token}`,
+      firmaUrl: `${BASE()}/firmaJLCA.png`,
     });
     if (!doc) return Response.json({ error: "No se pudo cargar la liquidación." }, { status: 404 });
 

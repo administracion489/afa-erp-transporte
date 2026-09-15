@@ -823,9 +823,12 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       "Aquí se cierra el periodo: se valoriza todo lo que se ejecutó, se emite el formato de liquidación y conformidad, y recién con el visto bueno se factura al cliente o se le paga al tercerizado.",
     paraQueSirve: [
       "Cerrar un mes o una quincena completa de una pasada, en vez de servicio por servicio.",
+      "Aislar a un cliente o a un proveedor con el filtro de arriba, para atenderlo sin leer los otros nueve.",
+      "Ordenar por dentro el mes de un proveedor: ver (o cerrar aparte) solo lo de un cliente, o solo los servicios fijos, los adicionales o los eventuales.",
       "Mandarle al cliente un documento con el detalle de lo que se ejecutó, para que dé su conformidad antes de facturar.",
       "Convertir los servicios que hizo un tercerizado en una cuenta por pagar con su detalle.",
-      "Ver en rojo, antes de emitir, qué servicios están mal (sin precio, sin unidad, sin finalizar).",
+      "Ver en rojo, antes de emitir, qué servicios están mal (sin precio, sin unidad, sin finalizar) — y en gris lo que simplemente no corresponde liquidar, como los cancelados.",
+      "Pagarle al proveedor el falso flete de un servicio cancelado, cuando hay acuerdo por el avance, sin que se pague solo por un descuido.",
     ],
     conceptos: [
       "liquidacion_cliente",
@@ -838,8 +841,14 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       "cuentas_por_cobrar",
       "cuentas_por_pagar",
       "estado_admin",
+      "servicio_adicional",
     ],
     faqs: [
+      {
+        pregunta: "En la valorización veo un renglón naranja que dice ADICIONAL. ¿Qué es?",
+        respuesta:
+          "Es un servicio que el cliente pidió **por encima de lo contratado** y que se registró como tal en Reservas (botón *Adicional*).\n\nNo se mezcla con las líneas del contrato a propósito, aunque sea la misma ruta:\n\n• Va en **su propio renglón**, aunque coincida la ruta y hasta el precio.\n• Se suma aparte, en **“Adicionales autorizados”**, debajo de *Servicios del periodo*.\n• Sale al **final** del bloque de líneas, no intercalado, para que el cliente lo lea contra los servicios contratados.\n• La descripción arranca con **SERVICIO ADICIONAL**, porque esa descripción se copia a correos y a órdenes de compra, y ahí el color del renglón se pierde.\n\nSi el mes tuvo 22 servicios contratados y 3 adicionales, el formato dice 22 y 3, no 25. Ese es todo el punto.",
+      },
       {
         pregunta: "¿Qué diferencia hay entre liquidar al cliente y liquidar al proveedor?",
         respuesta:
@@ -853,7 +862,12 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       {
         pregunta: "Hay grupos en rojo que no me deja seleccionar. ¿Qué pasa?",
         respuesta:
-          "Son servicios que **todavía no se pueden liquidar**, y el ERP te lo dice antes de emitir para que no lo descubra el cliente semanas después.\n\nAbre el grupo y verás dos bloques:\n\n• **“No se pueden liquidar todavía”** (rojo) — el motivo exacto, servicio por servicio. Del lado cliente: *Sin precio de venta*, *Sin cliente asignado*, *Ya está en la liquidación #N*, o *Su tarifa va en el servicio #N, que no está en este periodo* (el clásico del turno noche que retorna al día siguiente: mueve el rango de fechas). Del lado proveedor lo mismo con *Sin costo de proveedor* y *Sin empresa tercerizada*. Casi todo se corrige en Programación.\n\n• **“Revisa antes de emitir”** (ámbar) — servicios programados que **no se ejecutaron**. No bloquean: el formato los muestra igual en la columna de programado contra ejecutado, para que el cliente vea qué se hizo y qué no.\n\nQue un servicio no esté finalizado NO impide liquidar el grupo; solo aparece como no ejecutado. Lo que deja la casilla muerta es que el grupo no tenga **ninguna** línea valorizable.",
+          "Son servicios que **todavía no se pueden liquidar**, y el ERP te lo dice antes de emitir para que no lo descubra el cliente semanas después.\n\nAbre el grupo y verás dos bloques:\n\n• **“No se pueden liquidar todavía”** (rojo) — el motivo exacto, servicio por servicio. Del lado cliente: *Sin precio de venta*, *Sin cliente asignado*, *Ya está en la liquidación #N*, o *Su tarifa va en el servicio #N, que no está en este periodo* (el clásico del turno noche que retorna al día siguiente: mueve el rango de fechas). Del lado proveedor lo mismo con *Sin costo de proveedor* y *Sin empresa tercerizada*. Casi todo se corrige en Programación.\n\nHay cuatro motivos que hablan del **tramo hermano** y que NO se arreglan poniendo un precio, porque ese día ya lo cobra el otro tramo: *Le falta el enlace ida↔retorno con OS-…* (se arregla con el botón ámbar **Enlazar ida↔retorno**), *Ese día esa ruta salió con más de un móvil: su hermano es uno de N* (mismo botón, pero eligiendo tú cuál), *Su tarifa va en OS-…, que no entra a este cierre* (ya se facturó en otro documento) y *El enlace ida↔retorno está cruzado*. Ponerles importe factura el día dos veces.\n\n• **“Revisa antes de emitir”** (ámbar) — servicios programados que **no se ejecutaron**. No bloquean: el formato los muestra igual en la columna de programado contra ejecutado, para que el cliente vea qué se hizo y qué no.\n\nQue un servicio no esté finalizado NO impide liquidar el grupo; solo aparece como no ejecutado. Lo que deja la casilla muerta es que el grupo no tenga **ninguna** línea valorizable.",
+      },
+      {
+        pregunta: "Un retorno sale como “Sin precio de venta”, pero su ida ya tiene el precio. ¿Qué hago?",
+        respuesta:
+          "**No le pongas precio.** Ese retorno va en S/ 0.00 a propósito: AFA cobra **una sola tarifa por los dos tramos del día**, la tarifa está en la ida, y cargarla también en el retorno **factura el día dos veces**.\n\nLo que pasa es que los dos tramos perdieron el enlace que dice que son el mismo día (la columna que los une en Reservas). Sin ese enlace el ERP no ve un servicio de ida y vuelta: ve dos servicios sueltos, y le reclama tarifa al que está en cero.\n\nEl enlace se pierde de dos formas: queda escrito **en un solo lado** (se escribe en dos pasos al generar el programa, y a veces el segundo no llega) o se borra entero al eliminar y volver a crear un tramo.\n\n**Cómo se arregla:** en la barra de arriba aparece el botón ámbar **“Enlazar N tramo(s) ida↔retorno”**. Ábrelo, revisa cada fila y enlaza. **No cambia ningún importe**: solo dice que esos dos tramos son el mismo día. Desde ese momento el retorno deja de pedir tarifa en este cierre y en todos los siguientes, y el día vuelve a contarse como **un** servicio.\n\nDentro del modal hay dos tipos de fila, y la diferencia importa:\n\n• **Ya marcadas** — esa ruta salió **una sola vez** ese día, así que no hay otra pareja posible. Verifícalas igual.\n• **Sin marcar, “elígelo tú”** — esa ruta salió con **más de un móvil** ese día. El ERP no adivina cuál va con cuál: eliges el hermano en la lista. Despliega **“ver los otros N tramos de esa ruta ese día”** para ver todos con su enlace actual; ahí se descubre, por ejemplo, que dos servicios quedaron enlazados cruzados. Si eliges un tramo que ya estaba enlazado con otro, se te avisa y al guardar ese enlace viejo se suelta.\n\n**Por qué el ERP ya no propone pares “obvios” cuando hay dos móviles:** porque una vez lo hizo y se equivocó. Con cuatro tramos de la misma ruta el mismo día, dos ya enlazados, los otros dos parecían los únicos posibles y se propusieron juntos — mismo cliente, mismo día, misma ruta, sentidos contrarios — y eran de móviles distintos. Ahora se cuenta el día completo, no lo que sobra.",
       },
       {
         pregunta: "¿Qué pasa exactamente cuando pulso “Facturar” en una liquidación de cliente?",
@@ -871,6 +885,36 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
           "Porque así es como se factura en transporte de personal: el precio pactado cubre el traslado completo (llevar y traer), no cada tramo por separado.\n\nEl ERP los empareja solo y te lo indica en el rótulo del grupo (“…servicio(s) (ida y retorno)”). Si contara los dos tramos, estarías facturando el doble.",
       },
       {
+        pregunta: "El cliente canceló la ida pero el retorno sí se hizo. ¿Cómo lo cobro?",
+        respuesta:
+          "**Ponle el precio al retorno**, que es el tramo donde hubo servicio, y deja la ida cancelada en S/ 0.00. El día se liquida igual: el ERP cobra un día cuando se prestó **cualquiera** de sus dos tramos, no solo el que suele llevar la tarifa.\n\nSi el precio se quedó cargado en la ida cancelada, el día **también** se cobra —no se pierde—, pero la pantalla de cierre te avisa: *«el importe está en la ida, que no se prestó»*. Ese aviso está para que decidas si corresponde cobrar el día completo o ajustar el importe a lo que realmente se hizo.\n\nEn el Anexo 1 el cliente ve el detalle del día: el tramo prestado como **Conforme** y el caído como **No ejecutado**. No hay nada que esconder ahí — al contrario, es lo que sustenta el cobro.",
+      },
+      {
+        pregunta: "¿Por qué el retorno sale en S/ 0.00 y me avisaba que “no se podrá liquidar”?",
+        respuesta:
+          "El S/ 0.00 del retorno es **correcto**: AFA cobra una sola tarifa por los dos tramos del día, y esa tarifa vive en un solo servicio (normalmente la ida). El retorno viaja incluido.\n\nEse aviso miraba cada servicio por separado, sin saber que tenía par, así que salía en **todos** los retornos. Ya no: ahora el formulario de Programación te muestra el otro tramo con su importe y solo avisa cuando de verdad hay algo mal — que **ninguno** de los dos tenga importe, o que lo tengan **los dos**.\n\nLo de «los dos» es lo caro: si cargas la tarifa en la ida y en el retorno, el cierre lo liquida como **dos servicios** y el día se cobra dos veces. Por eso ahora se pide confirmación expresa antes de guardarlo así, y en la lista de Programación el día sale marcado **DÍA 2×**.",
+      },
+      {
+        pregunta: "¿De dónde sale el texto de cada ítem de la valorización?",
+        respuesta:
+          "Del **nombre completo de la ruta**, tal como lo escribió la operación, y de nada más:\n\n**TRANSPORTE DE PERSONAL · 15 PAX · DEL 01-08-2026 AL 31-08-2026**\n**IDA ·** RUTA A/ ENTRADA 06:35/ SANTA ANITA→BSF PUNTA HERMOSA\n**RETORNO ·** RUTA A/ RETORNO 17:00/ BSF PUNTA HERMOSA→SANTA ANITA (incluido en la misma tarifa)\n\nSe imprimen **los dos tramos** aunque la tarifa esté cargada en uno solo. Eso es a propósito: la ida y el retorno tienen dos nombres independientes, y si no se vieran los dos, un ítem podría salir rotulado con la ruta equivocada sin que nadie lo notara.\n\nDos servicios van al mismo ítem cuando coinciden **la ida, el retorno y la tarifa** — o sea, cuando son la misma ruta contratada. Por eso el nombre de ruta no es decorativo: si a mitad de mes alguien lo reescribe, esa ruta sale partida en dos renglones.\n\nSi el documento es anterior a este formato, ábrelo con **✎ Revisar** y pulsa **↻ Recalcular descripciones**: reescribe el texto con los datos de hoy sin tocar cantidades, precios ni totales. Solo funciona en borrador.",
+      },
+      {
+        pregunta: "¿De dónde sale el “15 PAX”? A veces no aparece.",
+        respuesta:
+          "De la **capacidad contratada**, que es lo que el cliente pidió — no la del bus que salió ese día.\n\nLa distinción importa: si el cliente contrató 15 asientos y AFA, por disponibilidad, manda un lunes uno de 17, un martes uno de 20 y un jueves uno de 16, el formato tiene que seguir diciendo **15**. Antes decía el número del bus, y ese es un dato con el que se puede observar una factura.\n\nEl ERP lo busca en este orden: lo que corregiste a mano en la línea → lo que el servicio trae de cuando se programó → el ítem de la cotización → la ficha de la ruta. **Si ninguno lo sabe, el ítem sale sin el “N PAX”**, a propósito: mejor un dato de menos que uno inventado.\n\nTienes tres sitios para cargarlo, y conviene saber cuál usar:\n\n• **La columna PAX de este editor** (solo en borrador): escribe el número y pulsa **✓**. Se guarda en **los servicios de esa línea**, no solo en este documento, y se rehace su descripción con el número nuevo. Es lo que se usa cuando el mes ya está cerrado y hay un renglón mal.\n• **El botón Rutas contratadas** de “Cerrar periodo” (se pone ámbar y te dice cuántas rutas están sin capacidad): ficha la ruta una vez y **desde el mes siguiente sale sola**. Es lo que arregla el problema de raíz.\n• **El campo PAX contratados de Programación**, al programar el servicio, que además lo copia al tramo hermano y te ofrece aplicarlo a todo el contrato.\n\nDejarlo vacío también es una respuesta: el ítem se imprime sin el “N PAX”. Vacío no es cero.",
+      },
+      {
+        pregunta: "En “Rutas contratadas” me sale una fila “(sin nombre de ruta)”. ¿Qué servicios son esos?",
+        respuesta:
+          "Púlsalos: **el número de la columna SERV. se abre**. Verás uno por uno los servicios que están cayendo en esa ficha, con su código, fecha, hora, unidad, conductor, estado e importe — y ahí mismo los corriges, sin salir de la pantalla.\n\nUna fila sale **“(sin nombre de ruta)”** cuando esos servicios se programaron sin el nombre completo escrito. Como el nombre es lo que junta los servicios en una misma ruta contratada (y lo que se imprime en el ítem), sin él no hay forma de saber a cuál pertenecen. **El nombre se escribe en el servicio, no en esta ficha**, así que el arreglo es entrar por el contador, poner el nombre en la columna Ruta y guardar.\n\nDos avisos sobre los números de esa tabla:\n\n• **SERV. cuenta días cobrados**, no tramos. La ida y su retorno son **un** servicio a una sola tarifa, así que una ruta con 48 servicios abre unos 96 tramos. El detalle los lista todos —incluidos los días que no se prestaron—, porque cuando un número no cuadra, el que falta es justo el que hay que poder ver.\n• **Precio cliente** es la tarifa por servicio tal como va a la valorización, y debajo lo que la ruta suma en el mes. Si dice **“2 tarifas”**, esa ruta no está cobrando siempre lo mismo: casi siempre es un servicio adicional a otro precio (mira la etiqueta ámbar de la fila) o un segundo móvil — y a veces, un importe mal tecleado.",
+      },
+      {
+        pregunta: "¿Cuándo aparece “MÓVIL 1 DE 2” en un ítem?",
+        respuesta:
+          "**Solo cuando la ruta sale de verdad con dos unidades a la misma hora**, porque una sola no da abasto. Ahí el cliente contrató dos móviles y el formato los lista por separado, como en el Excel que ya firma.\n\nNo aparece por que roten las placas: si en 30 días de servicio pasaron cinco unidades distintas por la misma ruta, sigue siendo **un solo ítem** con 30 servicios. Las placas se listan en el detalle y en el Anexo 1, que es donde son un hecho comprobable — nunca parten la línea.\n\nTampoco aparece cuando el mismo bus da dos vueltas el mismo día a distinta hora: eso son dos servicios de un móvil, no dos móviles.",
+      },
+      {
         pregunta: "Arriba hay una casilla que dice “Los precios del ERP ya incluyen IGV”. ¿La marco o no?",
         respuesta:
           "Depende de cómo tengas cargados tus precios en Programación, y cambia el resultado:\n\n• **Marcada** — el precio de S/ 1,120 que tienes cargado ya trae el IGV dentro. El ERP lo separa: S/ 949.15 de base + S/ 170.85 de IGV.\n• **Sin marcar** — S/ 1,120 es la base, y el IGV se suma encima: el total sería S/ 1,321.60.\n\nElige mal y toda la liquidación sale con un 18 % de diferencia. **Confirma con tu contador o con quien carga los precios** cómo están registrados, y no lo cambies de mes a mes.",
@@ -879,6 +923,36 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
         pregunta: "Me equivoqué en una liquidación que ya emití. ¿Cómo la corrijo?",
         respuesta:
           "Depende de hasta dónde llegó:\n\n• Si está **emitida u observada**, usa **↩ Reabrir** para volverla a borrador, corrígela con **✎ Revisar** y vuelve a emitirla.\n• Mientras **no haya generado todavía la factura de venta (ni la cuenta por pagar)**, el botón **🗑** te deja anularla y los servicios vuelven a quedar disponibles para liquidar. En cuanto genera el comprobante, ese botón desaparece.\n• Si ya generó la factura al cliente, la corrección ya no es aquí: se hace **emitiendo una nota de crédito** en /facturacion. Una factura emitida no se edita.",
+      },
+      {
+        pregunta: "Son diez clientes y cuatrocientos servicios en la misma pantalla. ¿Cómo trabajo con uno solo?",
+        respuesta:
+          "Con el desplegable que está al lado de las fechas. Dice **Cliente** en la pestaña de facturar y **Proveedor** en la de pagar, y filtra toda la pantalla de una vez: los grupos, el bloque rojo de “No entran a la liquidación”, los botones de precios y costos faltantes, las rutas sin capacidad contratada y también los documentos ya emitidos.\n\nEn el bloque rojo puedes además pulsar directamente el nombre del cliente de una fila para aislarlo.\n\nCada opción trae dos cifras, y **no son del mismo alcance**:\n\n• **“· 65 serv.”** son los servicios de ese cliente **en el periodo** que tienes puesto. Cuentan por día: la ida y el retorno del mismo día son **un** servicio, igual que en la valorización.\n• **“· 2 doc. emitido(s)”** son las liquidaciones que lleva emitidas **en total**, no las del periodo. Por eso un cliente que ya cerró meses anteriores aparece en la lista aunque este mes no tenga nada: es lo que te deja filtrar sus documentos viejos.\n\nDos detalles más que conviene saber:\n\n• **Filtrar es mirar, no desmarcar.** Si ya habías marcado grupos de otro cliente, siguen marcados y el botón verde los va a liquidar igual. Por eso la barra te avisa entre paréntesis cuántos seleccionados quedaron **fuera del filtro**.\n• El filtro **se limpia solo** al cambiar de pestaña, porque los clientes y los proveedores son listas distintas. Y si **mueves las fechas**, se borra la selección de grupos: lo marcado era del periodo anterior.\n\nEste desplegable elige **qué tarjetas ves** y nunca cambia lo que hay dentro de una. Para cortar **por dentro** —solo lo de un cliente dentro de un proveedor, o solo los adicionales— está la **segunda fila** de filtros, que sí recorta el cierre: es la pregunta que sigue.",
+      },
+      {
+        pregunta: "GRIJALVA me sale con 34 servicios de tres clientes mezclados. ¿Cómo reviso solo lo de uno?",
+        respuesta:
+          "Con la **segunda fila de filtros**, la que dice *“Dentro del proveedor”*. Trae dos cosas:\n\n• **Cliente** — para quedarte con lo que ese proveedor hizo para un cliente concreto. (En la pestaña de facturar el mismo desplegable dice **Proveedor**, y ahí incluye la **flota propia**: sirve para ver qué parte del mes de un cliente la puso un tercero.)\n• **Servicios: Todas · Fijos · Adicionales · Eventuales** — con el número de cada uno al lado, para que se vea de un vistazo si este mes hubo adicionales sin tener que abrir nada.\n\nY sin tocar ningún filtro, la tarjeta del proveedor ahora trae arriba una **etiqueta por cliente** con sus servicios y su importe (*“SNACKS · 12 serv. · S/ 5,694.96”*). Púlsala y filtra por ese cliente; vuelve a pulsarla y lo quita. Cada renglón dice además **de quién es**, al lado del PAX y las placas.\n\n**Lo importante de estos dos filtros: no solo miran, RECORTAN.** El de arriba elige qué tarjetas ves y no cambia nada de lo que se emite —cada proveedor es su propio documento—; estos cortan la tarjeta **por dentro**, así que la liquidación que emitas contendrá **solo lo que quede dentro del filtro**. Eso es útil a propósito (pagarle a un proveedor lo de un cliente en un documento y lo del otro en otro), pero para que no pase por descuido:\n\n• mientras haya un recorte, arriba del botón verde sale un aviso ámbar **“Cierre parcial: se está valorizando 12 de 34 servicio(s)”** con el botón *Incluir todo*;\n• al pulsar **Liquidar** se pide confirmación diciendo cuántos quedan fuera;\n• **cambiar uno de estos filtros borra la selección de grupos**, igual que mover las fechas: lo que estaba marcado ya no contiene lo mismo.\n\nLo que queda fuera **no se pierde**: sigue *por conciliar* (o *por liquidar*) y se cierra después en otro documento.",
+      },
+      {
+        pregunta: "¿Qué cuenta como “Fijo”, “Adicional” y “Eventual” en ese filtro?",
+        respuesta:
+          "Son tres cosas que no se cobran ni se concilian igual:\n\n• **Fijos** — transporte de personal contratado: el programa recurrente que nace de una cotización de servicio **fijo**.\n• **Adicionales** — lo que el cliente pidió **por encima del contrato** (se registra con el botón *Adicional* en Reservas). Incluye también las **contingencias**. Son los que van en el subtotal *“Adicionales autorizados”* del formato.\n• **Eventuales** — ventas sueltas: full day, multi-día, traslados, turismo. Todo lo que **no** nació de un contrato fijo — y ahí caen también los servicios que se registraron **sin tipo de servicio**, así que si el número de eventuales te sorprende, mira primero eso.\n\nDos reglas que conviene tener claras:\n\n• **La clase es del DÍA, no del tramo.** La declara el tramo que **lleva el importe**, igual que el origen contractual: marcar el retorno —que va en S/ 0.00 a propósito— no mueve el día de sitio. Así la ida y su retorno **siempre caen en el mismo filtro** y ningún filtro puede partir un día en dos.\n• **La marca escrita gana.** Si un servicio está marcado como adicional, sale en *Adicionales* aunque su tipo diga otra cosa: alguien lo escribió a propósito.",
+      },
+      {
+        pregunta: "Un servicio cancelado me sale como “Sin costo de proveedor”. ¿Tengo que cargarle algo?",
+        respuesta:
+          "**No.** Un servicio cancelado no se paga ni se cobra: el bus no salió. Eso ya está corregido — ahora esas filas dicen **“Cancelado sin acuerdo de falso flete: no se le paga al proveedor”**, salen en **gris y no en rojo**, y **no cuentan** en el botón de “Cargar N costo(s) faltante(s)”.\n\nSiguen apareciendo en “No entran a la liquidación” a propósito: esconderlas sería la forma de que una ruta desaparezca del cierre sin que nadie pueda decir por qué. La cabecera del bloque ahora desglosa **“N por resolver · M cancelados, y está bien”**, para que se vea de un vistazo cuánto de eso es trabajo de verdad.\n\nY ojo con un tercer caso que antes salía con ese mismo mensaje: un servicio que quedó en **Programada o Confirmada** en un mes ya cerrado. Ese **sí es rojo**, pero lo que falta no es el costo: es **cerrarlo**. El mensaje ahora lo dice, porque cargarle un costo a un viaje que nadie confirmó que salió crea una cuenta por pagar de la nada.",
+      },
+      {
+        pregunta: "El proveedor ya había salido de cochera y acordamos pagarle. ¿Cómo lo registro?",
+        respuesta:
+          "Es un **falso flete**, y ahora tiene su propio camino:\n\n1. Abre el detalle del servicio (pulsando el contador de la fila, en el bloque rojo o en la tarjeta del proveedor).\n2. En la columna del costo verás el importe **tachado**: mientras el servicio esté cancelado no se paga.\n3. Marca la casilla **“Falso flete”**, escribe el **monto acordado** (que casi nunca es la tarifa completa: es el avance) y el **motivo** — *“ya había llegado al punto de origen”*.\n4. Guarda. Ese día entra a la liquidación en un renglón propio y con su propio subtotal: **“Falsos fletes (servicios cancelados con acuerdo)”**.\n\n**El motivo es obligatorio y no se puede saltar.** Es la única constancia de por qué salió dinero por un viaje que no se prestó.\n\nDos cosas más:\n\n• **Sin marcar la casilla no se paga, por más que el importe esté escrito.** Es a propósito. Muchas veces la cancelada se queda con el costo puesto por error, y si el ERP lo pagara solo, recuperar esa plata del proveedor es muy difícil. Al revés no: si le falta, el proveedor reclama y se le paga después. El sistema se equivoca siempre para el lado que se puede arreglar.\n• **Al cliente no se le cobra la cancelación**, así que del lado facturar la casilla no existe.",
+      },
+      {
+        pregunta: "Me sale un botón “Poner en S/ 0.00” sobre los cancelados. ¿Qué hace y es peligroso?",
+        respuesta:
+          "Borra el importe que quedó cargado en servicios cancelados que **no se van a liquidar**. Te dice antes cuánto es y sobre cuántos servicios, y pide confirmación.\n\n**Por qué conviene hacerlo aunque la liquidación ya los ignore:** ese importe sí lo leen los reportes de **margen y de egresos**, que miran el costo del servicio sin preguntar si llegó a prestarse. Mientras siga escrito, el mes se ve **más caro de lo que fue**.\n\nNo es peligroso y no se hace solo: lo pulsa una persona, se guarda por el mismo camino que Programación, queda registrado con el motivo *“Corrección de un dato mal cargado”* y se puede ver en el historial del Pacto. Si alguno de esos servicios sí correspondía pagarlo, márcalo antes como **falso flete** — los marcados no se tocan.",
       },
       {
         pregunta: "¿Qué es el botón “Del 15 al 14”?",
@@ -897,6 +971,7 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
         pasos: [
           "Entra a Liquidaciones, pestaña “Al Cliente (facturar)” y vista “Cerrar periodo”.",
           "Fija el periodo: “Mes pasado” o “Del 15 al 14”, según cómo cierre ese cliente.",
+          "Si vas a cerrar cliente por cliente, elígelo en el desplegable “Cliente” que está junto a las fechas: la pantalla entera se queda solo con lo suyo.",
           "Revisa los grupos. Abre los que estén en rojo y corrige en Programación lo que dice el bloque “No se pueden liquidar todavía”.",
           "Comprueba que cada grupo tenga sede. Si no la tiene, pulsa “+ Crear sede” y cárgala.",
           "Verifica arriba la casilla “Los precios del ERP ya incluyen IGV” — que esté como corresponde a cómo cargas tus precios.",
@@ -914,7 +989,9 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
         pasos: [
           "Cambia a la pestaña “Al Proveedor (pagar)”, misma vista “Cerrar periodo”.",
           "Fija el mismo periodo que usaste para el cliente, para que los dos lados cuadren.",
-          "Los grupos ahora son por empresa tercerizada (GRIJALVA TOURS, ALVAREZ FARFAN…). Ábrelos y revisa las líneas al costo pactado.",
+          "Los grupos ahora son por empresa tercerizada (GRIJALVA TOURS, ALVAREZ FARFAN…). Con el desplegable “Proveedor” te quedas con uno solo si vas a cerrar de a uno.",
+          "Ábrelos y revisa las líneas al costo pactado. Si el proveedor movió a varios clientes, la fila de etiquetas de la tarjeta te dice cuánto es de cada uno; púlsala para revisar solo eso.",
+          "Si vas a pagarle por separado lo de cada cliente (o los adicionales aparte), usa la segunda fila de filtros: “Dentro del proveedor · Cliente / Servicios”. Ojo: eso recorta el cierre, y el documento saldrá solo con lo filtrado — el aviso ámbar de arriba te dice cuántos servicios quedan fuera.",
           "Marca los grupos correctos y pulsa “Liquidar N grupo(s)”.",
           "En la vista “Documentos”, revisa el detalle con “✎ Revisar” y mándaselo al proveedor con “✉ Enviar” para que coteje antes de emitirte su factura.",
           "Cuando esté conforme, pulsa el botón verde “→ CxP” de esa fila: se crea la cuenta por pagar en Tesorería.",
@@ -952,7 +1029,7 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       {
         pregunta: "¿Qué diferencia hay entre Proveedores y Empresas Tercerizadas?",
         respuesta:
-          "• **Proveedores** — a quien le compras **bienes y servicios de apoyo**: el taller, el grifo, la vulcanizadora, el seguro, la financiera del leasing, el lavadero. Te venden algo y te facturan.\n\n• **Empresas Tercerizadas** — empresas de transporte que **ejecutan servicios en nombre de AFA**. Ponen la unidad y el chofer, y el cliente ve un servicio de AFA. Por eso su ficha lleva mucho más: la flota con sus placas, los conductores con sus licencias y los documentos (autorización MTC, habilitación SUTRAN) con sus vencimientos.\n\nSi la SUTRAN para una unidad tercerizada con la habilitación vencida, el problema es de AFA, no del tercero. Por eso ese control vive aquí.",
+          "• **Proveedores** — a quien le compras **bienes y servicios de apoyo**: el taller, el grifo, la vulcanizadora, el seguro, la financiera del leasing, el lavadero. Te venden algo y te facturan.\n\n• **Empresas Tercerizadas** — empresas de transporte que **ejecutan servicios en nombre de AFA**. Ponen la unidad y el chofer, y el cliente ve un servicio de AFA. Por eso su ficha lleva mucho más: la flota con sus placas, los conductores con sus licencias y los documentos (Tarjeta Única de Circulación, Habilitación Vehicular MTC/ATU) con sus vencimientos.\n\nSi la SUTRAN para una unidad tercerizada con la TUC vencida, el problema es de AFA, no del tercero. Por eso ese control vive aquí.",
       },
       {
         pregunta: "Quiero pagarle a un proveedor por el archivo del banco. ¿Dónde pongo su cuenta y su CCI?",
@@ -970,9 +1047,19 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
           "Antes de crear uno nuevo, búscalo siempre por RUC en el buscador: es la forma segura de no duplicar.\n\nSi ya tienes el duplicado, deja activo el que tiene las facturas asociadas y **desactiva el otro** (estado Inactivo) en vez de borrarlo. Borrarlo puede dejar comprobantes huérfanos.\n\nEl ERP tiene una defensa por el otro lado: no deja registrar dos veces la misma factura para el mismo RUC con la misma serie y número.",
       },
       {
+        pregunta: "En la ficha de la empresa, ¿por qué ahora se pide UNA sola autorización y no MTC + SUTRAN?",
+        respuesta:
+          "Porque ningún transportista tiene las dos. **Una empresa tiene UNA autorización, la firma UNA autoridad, y esa autoridad decide hasta dónde puede circular:**\n\n• **MTC** → ámbito **nacional**: todo el país, incluidos los recorridos que cruzan de una región a otra.\n• **Gobierno Regional** → ámbito **regional**: dentro de SU región, entre las provincias de esa región.\n• **ATU** → **Lima Metropolitana y Callao** (Ley 30900; antes lo daban las municipalidades de Lima y Callao).\n• **Municipalidad Provincial** → dentro de SU provincia.\n\nQuien opera con autorización de la ATU no tiene número de MTC: dejaba el campo vacío y el ERP lo leía como “le falta un papel” en vez de “no le corresponde”. Y **SUTRAN no autoriza: fiscaliza**, así que pedirle su número a todo el mundo era pedir un dato que para la mayoría no existe — lo que se registraba ahí era en realidad la **habilitación vehicular**, que es de cada placa y hoy es la **TUC**, en la pestaña Documentos. Ese campo se retiró; lo que alguien hubiera escrito sigue guardado en la base, pero el ERP ya no lo mira.\n\n**Por eso hay que decir de qué región o de qué provincia.** Sin ese dato, “regional” no dice nada: es la diferencia entre “puede ir a Ica” y “no puede salir de Lima”.",
+      },
+      {
+        pregunta: "Tengo un proveedor con autorización de la ATU y le quiero dar un paseo a Ica. ¿Puedo?",
+        respuesta:
+          "**No.** La autorización de la ATU cubre Lima Metropolitana y la Provincia Constitucional del Callao. Un viaje a Ica —o a Cañete, o a Huaral— es otro ámbito, y prestarlo sin la autorización que corresponde es un servicio no autorizado. El problema no se queda en el tercero: **el cliente contrató a AFA.**\n\nY ojo con lo que engaña: los papeles pueden estar **todos vigentes**. Ninguna fecha de vencimiento detecta esto, porque no es que el papel esté vencido — es que ese papel no vale para ese destino. Por eso el ERP muestra el **alcance autorizado** en dos sitios: en la ficha del proveedor y, sobre todo, en Programación al momento de asignarlo.\n\nQuién sí puede: un proveedor con autorización **nacional del MTC**, que cubre los tres ámbitos, o uno con autorización **regional de Ica** si el viaje se queda dentro de esa región.\n\n**El ERP te enseña el alcance; no adivina el destino.** El origen y el destino de un servicio son texto libre, así que la comparación la haces tú mirando el aviso. **Confirma con tu asesor el caso concreto** — hay regímenes excepcionales para el transporte de trabajadores según cómo esté autorizada la empresa.",
+      },
+      {
         pregunta: "¿Para qué sirven los avisos de documentos vencidos de una tercerizada?",
         respuesta:
-          "Para que no salga a la calle una unidad que no puede circular. En la ficha de cada empresa, la pestaña **📄 Documentos** lleva el control de la autorización del MTC, la habilitación de la SUTRAN y demás, con su fecha de vencimiento.\n\nCuando algo está vencido o por vencer, la ficha te lo marca arriba con un enlace directo a la lista filtrada. Es un control operativo, pero tiene consecuencias de dinero: una unidad intervenida es un servicio no prestado, una multa, y un cliente molesto.",
+          "Para que no salga a la calle una unidad que no puede circular. En la ficha de cada empresa, la pestaña **📄 Documentos** lleva el control del SOAT, la CITV, la Tarjeta Única de Circulación (TUC), la Habilitación Vehicular (MTC/ATU) y demás, con su fecha de vencimiento.\n\nCuando algo está vencido o por vencer, la ficha te lo marca arriba con un enlace directo a la lista filtrada. Es un control operativo, pero tiene consecuencias de dinero: una unidad intervenida es un servicio no prestado, una multa, y un cliente molesto.\n\nDos cosas que conviene saber para no perseguir pendientes que no existen:\n\n• **La Tarjeta de Propiedad (TIVE) no vence.** La emite SUNARP y no trae fecha: sale como **No vence** y lo único que se le pregunta es si está cargada. No le inventes una fecha.\n\n• **El SCTR Salud, el SCTR Pensión y la Vida Ley son de las PERSONAS, no del bus.** Si filtras la lista por una placa no te los va a pedir, porque una unidad no tiene SCTR: la póliza cubre a los conductores. Los ves eligiendo «Todas las unidades», donde figuran como documentos de la empresa.\n\n• **La Habilitación Vehicular tampoco se le pide a una placa.** Es UNA sola y es de la empresa —la madre—, y de ella salen las **TUC** de cada vehículo —las hijas—. Si un bus tiene TUC, la empresa está habilitada por lógica. Lo que se controla por placa es la TUC; la habilitación de la empresa va en su ficha, en *Autorización de transporte de personas*.",
       },
       {
         pregunta: "Puse un proveedor en “Bloqueado”. ¿Qué cambia?",
@@ -998,13 +1085,14 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
         titulo: "Dar de alta una empresa tercerizada con su flota",
         pasos: [
           "En /tercerizadas pulsa “+ Nueva empresa” y carga razón social, RUC, contacto y la dirección de la cochera.",
+          "En Autorización de transporte de personas, elige QUIÉN la autorizó (MTC, ATU, Gobierno Regional o Municipalidad Provincial) y, si es regional o provincial, de qué región o provincia. El ERP te muestra ahí mismo hasta dónde puede circular esa empresa, y lo repite en Programación cuando la asignes.",
           "Selecciona la empresa en la lista de la izquierda para abrir su ficha.",
           "Pestaña 🚌 Flota: agrega cada unidad con su placa (por ejemplo CWQ-400), categoría, capacidad de pasajeros y fotos.",
           "Pestaña 👤 Conductores: agrega los choferes que esa empresa asigna a los servicios de AFA.",
-          "Pestaña 📄 Documentos: carga la autorización MTC, la habilitación SUTRAN y demás, con sus fechas de vencimiento.",
+          "Pestaña 📄 Documentos: carga el SOAT, la CITV, la Tarjeta Única de Circulación (TUC) y la Habilitación Vehicular (MTC/ATU) de cada placa, con sus fechas; y como documentos de la empresa (sin placa), el SCTR Salud, el SCTR Pensión y la Vida Ley, que cubren a los conductores.",
         ],
         advertencia:
-          "Carga las fechas de vencimiento aunque el documento esté al día. Sin fecha, el ERP no te puede avisar cuando esté por caducar, y esa es la mitad del valor de tener el módulo.",
+          "Carga las fechas de vencimiento aunque el documento esté al día. Sin fecha, el ERP no te puede avisar cuando esté por caducar, y esa es la mitad del valor de tener el módulo. La única excepción es la Tarjeta de Propiedad, que no vence: ahí el ERP ni te pide la fecha.",
       },
     ],
     relacionadas: [
@@ -1089,6 +1177,106 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       { etiqueta: "Proveedores · a quién le compras", href: "/proveedores" },
       { etiqueta: "Gastos · dónde aterriza el costo", href: "/gastos" },
       { etiqueta: "Tesorería · la factura que llega después", href: "/tesoreria" },
+    ],
+  },
+
+  {
+    clave: "pactos",
+    rutas: ["/pactos"],
+    titulo: "Pactos · lo que se acordó, y todo lo que cambió después",
+    resumen:
+      "Aquí se ve lo que se acordó pagarle a cada proveedor y cobrarle a cada cliente por un servicio, qué servicios nadie pactó todavía, y cada cambio que ocurrió después de la cotización: quién lo hizo, cuándo y por qué.",
+    paraQueSirve: [
+      "Encontrar HOY los servicios tercerizados sin costo pactado, en vez de descubrirlos al cerrar el mes.",
+      "Cargar esos costos en lote, agrupados por proveedor y ruta, con el importe que ya está en tus facturas de compra.",
+      "Que gerencia autorice solo los cambios que de verdad bajan el margen, y no todos.",
+      "Responder “¿quién le cambió el proveedor a este servicio y por qué?” sin llamar a nadie.",
+      "Imprimir la adenda de un contrato: el sustento de por qué el mes salió distinto de lo cotizado.",
+    ],
+    conceptos: [
+      "pacto_servicio",
+      "costo_real_comparable",
+      "afectacion_igv",
+      "visado_gerencia",
+      "adenda",
+      "tercerizado",
+      "margen_real",
+      "regla_oro",
+    ],
+    faqs: [
+      {
+        pregunta: "¿Por qué aparecen menos servicios acá que líneas rojas en Liquidaciones?",
+        respuesta:
+          "Porque esta pantalla cuenta **decisiones**, no líneas.\n\nUn servicio de ida y vuelta son dos filas en la base, pero la tarifa va en una sola: el retorno se cobra dentro de la ida. Cuando las dos están en cero, Liquidaciones marca las dos en rojo —y con razón, porque no puede saber cuál llevará el importe—. Acá, en cambio, se muestra **una sola**: en cuanto pactas la ida, el retorno pasa solo a “incluido” y desaparece.\n\nPor eso 67 líneas rojas suelen ser unas 30 decisiones de verdad. El número de acá es el que te dice cuánto trabajo real tienes por delante.",
+      },
+      {
+        pregunta: "¿Esto va a impedir que mis operadores despachen?",
+        respuesta:
+          "**No. Nunca.**\n\nEl servicio se guarda igual, el estado avanza igual, el conductor recibe su aviso igual y el bus sale igual. Si el costo va vacío, el sistema advierte lo que va a pasar y deja guardar de todos modos.\n\nLa decisión de diseño es esa a propósito: una regla que impide despachar a las 5 de la mañana se esquiva el primer día y termina odiada. Lo que sí se puede frenar —y solo cuando tú lo decidas, en una fase posterior— es **el pago al proveedor** cuando el sobrecosto quedó sin visto bueno. Se congela la plata, no el bus.",
+      },
+      {
+        pregunta: "¿Por qué un proveedor de S/ 550 aparece como más barato que uno de S/ 500?",
+        respuesta:
+          "Porque no siempre pagas IGV, y **el IGV que sí pagas te lo devuelven** como crédito fiscal.\n\n• Un bus **gravado** que te factura S/ 550: el IGV vuelve, así que te cuesta **S/ 466.10**.\n• Un taxi **exonerado** de S/ 500: no hay IGV que recuperar, te cuesta **S/ 500.00**.\n\nEl “caro” es 7 % más barato. Al revés es peor: un exonerado de S/ 550 contra un gravado de S/ 500 no es 10 % más caro, es **30 %**.\n\nTodas las cifras de esta pantalla y el panel de margen de Programación ya vienen con esa cuenta hecha. El número que ves es el bueno.",
+      },
+      {
+        pregunta: "¿Qué llega a “Por visar” y qué no?",
+        respuesta:
+          "Solo lo que **empeora el margen más allá de lo tolerado**. Con la política por defecto (+10 % o +S/ 100, margen mínimo 15 %):\n\n• Cargar por primera vez un costo que faltaba → **no** pide visado. Es un dato que se debía, no un deterioro.\n• Cambiar de S/ 500 a S/ 550 → **no** pide visado. Está dentro de la tolerancia.\n• Cambiar de S/ 550 a S/ 950 → **sí**.\n• Conseguir un proveedor más barato → **nunca** pide visado.\n\nEso último es deliberado: si el cambio bueno costara el mismo trámite que el malo, el operador aprende a esconder los dos.",
+      },
+      {
+        pregunta: "Subí el precio de un servicio y al cliente no se le pidió conformidad. ¿Falta algo?",
+        respuesta:
+          "No. **Eso se apagó a propósito.** Antes, cada vez que a un servicio ya creado se le subía el precio, el ERP generaba un enlace para que el cliente firmara ese cambio suelto, y quedaba en la pestaña *Conformidades* esperando que alguien se lo mandara.\n\nSe quitó porque duplicaba la firma que ya se pide bien: **la del cierre**. En un contrato fijo, una avería a media semana y dos cambios de unidad son tres enlaces sueltos al mes, de pocos soles cada uno, a la misma persona que dentro de veinte días va a firmar la valorización con todo dentro. El cliente deja de abrirlos — y el día que le llegue el enlace del cierre, que sí importa, ya aprendió a ignorarlos.\n\n**El cambio no se pierde:** el acta de venta se sigue escribiendo igual (quién, cuándo, de cuánto a cuánto y con qué motivo) y se ve en 📜 *Historial*. Lo que el cliente acepta es el importe del mes, en la liquidación.\n\nLa pestaña *Conformidades* se queda como archivo de las que sí se firmaron cuando se emitían: esas sostienen su cobro y no se tocan.",
+      },
+      {
+        pregunta: "¿Qué significa “Cuenta de control: cuadrado”?",
+        respuesta:
+          "Que **el acta y la realidad dicen lo mismo**: para cada servicio, el importe que figura en su ficha coincide con el último importe registrado en su historial.\n\nEs el semáforo más importante de la pantalla y el que menos se mira. Si alguna vez muestra un número en vez de “Cuadrado”, significa que alguien escribió un importe por un camino que no dejó rastro, y hay que encontrarlo antes de endurecer ninguna regla.",
+      },
+      {
+        pregunta: "¿Qué son las “actas de apertura” que no se muestran?",
+        respuesta:
+          "Son la **foto del día en que se instaló el Pacto**: una por cada servicio vivo, con el importe que tenía en ese momento y **sin autor**.\n\nNo se inventaron autores para el pasado: antes de esto el ERP no guardaba ningún historial, así que firmar por lo que pasó antes sería mentir. La línea de corte queda explícita — de ahí para atrás nadie firma, de ahí para adelante todo tiene nombre, fecha y motivo. Ningún reporte histórico cambió de valor por esto.",
+      },
+    ],
+    comoHacer: [
+      {
+        titulo: "Cargar de una vez los costos que faltan del mes",
+        pasos: [
+          "Entra a la pestaña “Sin costo pactado”. Arriba se ve cuántas decisiones reales hay.",
+          "Empieza por los grupos marcados “Ya ejecutado”: ahí el proveedor ya trabajó y está esperando su plata.",
+          "En cada grupo (proveedor + ruta) usa “Pactar”. Si el importe ya está en una factura de compra tuya, aparece propuesto: acéptalo con un clic.",
+          "Si no hay propuesta, escribe el importe una vez en “Aplicar a todo el grupo” y se reparte a los servicios de ese grupo.",
+          "Revisa que el IGV del grupo sea el correcto (gravado para un bus, exonerado para un taxi) y guarda.",
+        ],
+        advertencia:
+          "Cuando una misma factura calza con varios servicios, el sistema NO propone importe para ninguno: esa factura dice el total de todos juntos, no el costo de cada uno. Ahí decide una persona mirando el detalle.",
+      },
+      {
+        titulo: "Autorizar o rechazar los cambios pendientes",
+        pasos: [
+          "Entra a “Por visar”. Arriba se ve el impacto acumulado en soles de lo que está sin autorizar.",
+          "Prioriza los marcados “Vencido” y los de “Margen negativo”.",
+          "Lee el antes → después y el motivo que declaró quien hizo el cambio.",
+          "Marca varios y aprueba en bloque, o rechaza uno explicando por qué (el motivo queda en el acta y lo lee quien hizo el cambio).",
+        ],
+        advertencia:
+          "Aprobar o rechazar es solo para administración y gerencia. Rechazar no deshace nada —el servicio ya se prestó—: deja constancia de que ese sobrecosto no estaba autorizado.",
+      },
+      {
+        titulo: "Sustentarle a un cliente por qué el mes salió distinto",
+        pasos: [
+          "Entra a “Historial” y quédate en la vista “Por contrato”.",
+          "Busca la cotización del cliente: verás cuántos servicios cambiaron, cuánto subió la venta, cuánto el costo y cómo quedó el margen.",
+          "Para el detalle servicio por servicio, cambia a “Movimientos” y busca por el número de la ruta o del contrato.",
+        ],
+      },
+    ],
+    relacionadas: [
+      { etiqueta: "Programación · donde se pacta el cambio", href: "/programacion" },
+      { etiqueta: "Liquidaciones · el cierre del periodo", href: "/liquidaciones" },
+      { etiqueta: "Tercerizadas · los proveedores y sus unidades", href: "/tercerizadas" },
     ],
   },
 ];

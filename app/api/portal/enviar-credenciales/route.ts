@@ -59,8 +59,8 @@ export async function POST(req: NextRequest) {
       .eq("id", usuario.cliente_id)
       .single();
 
-    const empresa      = process.env.EMPRESA_NOMBRE || "AFA Tours Peru S.A.C.";
-    const fromAddr     = process.env.RESEND_FROM    || "noreply@afatoursperu.com";
+    const empresa      = process.env.EMPRESA_NOMBRE || "El equipo";
+    const fromAddr     = process.env.RESEND_FROM    || "onboarding@resend.dev";
     const apiKey       = process.env.RESEND_API_KEY || "";
     const nombreEmp    = cliente?.empresa || cliente?.nombre || empresa;
     const ruc          = cliente?.ruc ?? "";
@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
     const tipoId       = tipo_doc || "Identificación";
     const portalUrl    = process.env.NEXT_PUBLIC_APP_URL
       ? `${process.env.NEXT_PUBLIC_APP_URL}/cliente`
-      : "https://www.transportesafa.com/cliente";
+      : process.env.NEXT_PUBLIC_URL_BASE ? process.env.NEXT_PUBLIC_URL_BASE + "/cliente" : "";
 
     const html = `
 <!DOCTYPE html>
@@ -150,7 +150,7 @@ export async function POST(req: NextRequest) {
           <td style="background:#F6F4EE;padding:18px 36px;border-top:1px solid #E6E2D6">
             <p style="margin:0;font-size:11px;color:#9AA0AC">
               ${empresa} &nbsp;·&nbsp; Portal Empresarial &nbsp;·&nbsp;
-              <a href="https://www.transportesafa.com" style="color:#0b315f;text-decoration:none">transportesafa.com</a>
+              ${empresa}
             </p>
           </td>
         </tr>

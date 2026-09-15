@@ -98,6 +98,7 @@ export async function procesarEchos(sb: SB, value: any): Promise<number> {
       campo: "wa_id",
       valor: cliente,
       canal: "whatsapp",
+      telefono: cliente,
     });
     if (!contacto) continue;
 
@@ -198,7 +199,7 @@ export async function procesarHistorial(sb: SB, value: any): Promise<number> {
       // Un backfill de seis meses son miles de mensajes: resolverlos uno a uno
       // eran dos consultas por mensaje y el webhook no alcanzaba a responderle a
       // Meta antes de que reintentara.
-      const contacto = await resolverContacto(sb, { campo: "wa_id", valor: cliente, canal: "whatsapp" });
+      const contacto = await resolverContacto(sb, { campo: "wa_id", valor: cliente, canal: "whatsapp", telefono: cliente });
       if (!contacto) continue;
 
       const conv = await resolverConversacion(sb, {
@@ -283,6 +284,7 @@ export async function procesarContactos(sb: SB, value: any): Promise<number> {
       valor: telefono,
       nombre,
       canal: "whatsapp",
+      telefono,
     });
     if (contacto) procesados++;
   }

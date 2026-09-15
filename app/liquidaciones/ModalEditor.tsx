@@ -10,7 +10,8 @@ import { fmtMoneda } from "@/lib/finanzas/dinero";
 import { totalesValorizacion } from "@/lib/liquidacion-agrupacion";
 import {
   actualizarCantidad, agregarLineaManual, eliminarLinea, recalcularTotales,
-  emitirLiquidacion, totalesProveedorExt, detraccionDe, type Lado,
+  emitirLiquidacion, recalcularDescripciones, reagruparLineas, actualizarPaxContratado,
+  contarServiciosDeLinea, totalesProveedorExt, detraccionDe, type Lado,
 } from "@/lib/liquidaciones";
 
 type Linea = {
@@ -19,7 +20,21 @@ type Linea = {
   cantidad_programada: number | null; cantidad_ejecutada: number | null;
   cantidad: number; cantidad_motivo: string | null;
   precio_unitario: number; total_linea: number; referencia: string | null;
+  /** Asientos contratados. null = el ítem se imprime sin el "N PAX". */
+  pax_contratado: number | null;
+  /** La escribe la agrupación. Presente ⇒ la línea tiene reservas detrás. */
+  agrupacion_clave: string | null;
 };
+
+/**
+ * ¿La línea salió de servicios reales o la escribió alguien a mano en este editor?
+ *
+ * No basta con `tipo === "servicio"`: desde que los adicionales se registran en
+ * Programación, una línea de tipo `adicional` también puede venir de reservas —con su
+ * pax contratado, su programado/ejecutado y su descripción de varios renglones— y
+ * tratarla como una línea manual la mostraba vacía ("—") y con botón de borrar.
+ */
+const deReservas = (l: Linea) => l.tipo === "servicio" || !!l.agrupacion_clave;
 
 const campo = "w-full px-2.5 py-1.5 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-[#2a5298]/30";
 const label = "text-[10px] font-bold text-gray-500 uppercase tracking-wide";
@@ -44,6 +59,13 @@ export default function ModalEditor({
   const [trabajando, setTrabajando] = useState(false);
   const [nueva, setNueva] = useState({ tipo: "adicional" as "adicional" | "penalidad" | "descuento", descripcion: "", cantidad: "1", precio: "" });
   const [detraccionPct, setDetraccionPct] = useState<number | null>(null);
+  /**
+   * Los PAX tal como llegaron de la base. Se compara contra esto para escribirlos SOLO
+   * cuando el operador los cambió: `actualizarPaxContratado` toca las reservas y rehace
+   * la descripción del renglón, y hacerlo en cada «✓» sería reescribir el texto que
+   * alguien acaba de ajustar a mano.
+   */
+  const [paxOriginal, setPaxOriginal] = useState<Record<number, number | null>>({});
 
   async function cargar() {
     setCargando(true);
@@ -52,7 +74,12 @@ export default function ModalEditor({
       supabase.from(tLin).select("*").eq("liquidacion_id", liquidacionId).order("item"),
     ]);
     setCab(c);
-    setLineas(((l as any[]) ?? []).map((x) => ({ ...x, cantidad: Number(x.cantidad), precio_unitario: Number(x.precio_unitario) })));
+    const filas = ((l as any[]) ?? []).map((x) => ({
+      ...x, cantidad: Number(x.cantidad), precio_unitario: Number(x.precio_unitario),
+      pax_contratado: x.pax_contratado != null ? Number(x.pax_contratado) : null,
+    })) as Linea[];
+    setLineas(filas);
+    setPaxOriginal(Object.fromEntries(filas.map((x) => [x.id, x.pax_contratado ?? null])));
     if (lado === "proveedor" && c?.detraccion_codigo) {
       const d = await detraccionDe(supabase, c.detraccion_codigo);
       setDetraccionPct(d?.porcentaje ?? null);
@@ -97,7 +124,46 @@ export default function ModalEditor({
         total_linea: (l.tipo === "penalidad" || l.tipo === "descuento" ? -1 : 1) * Number(l.cantidad || 0) * Number(l.precio_unitario || 0),
       }).eq("id", l.id);
       await recalcularTotales(supabase, lado, liquidacionId);
-      setMsg("✅ Línea actualizada.");
+
+      // Los PAX contratados van DESPUÉS de la descripción, y a propósito: no son texto
+      // del documento sino un dato de los servicios, así que se escriben en las reservas
+      // y desde ahí se rehace el renglón —que lleva el «N PAX» adentro—. Hacerlo antes
+      // dejaría el texto viejo pisando al número nuevo.
+      let extra = "";
+      const paxAhora = l.pax_contratado ?? null;
+      if (deReservas(l) && paxAhora !== (paxOriginal[l.id] ?? null)) {
+        // VACIARLO no es corregirlo: borra el snapshot contractual de todos los servicios
+        // de la línea y es irreversible. Además puede no verse — si la cotización o la
+        // ficha de la ruta siguen sabiendo el número, el ítem lo sigue imprimiendo y la
+        // celda vuelve a mostrarlo, así que parecería que no pasó nada. Se pregunta.
+        if (paxAhora == null) {
+          const n = await contarServiciosDeLinea(supabase, lado, l.id);
+          const ok = window.confirm(
+            `Vas a BORRAR la capacidad contratada de ${n} servicio(s) de esta línea.\n\n` +
+            "No es lo mismo que dejar el ítem sin «N PAX»: si la cotización o la ficha de la " +
+            "ruta lo saben, el documento lo va a seguir imprimiendo y lo único que se pierde " +
+            "es el dato guardado en los servicios.\n\n¿Borrarlo igual?"
+          );
+          if (!ok) { setTrabajando(false); return; }
+        }
+        const rp = await actualizarPaxContratado(supabase, lado, l.id, paxAhora, { usuario });
+        if (!rp.ok) throw new Error(rp.error);
+        // Lo que pasó DE VERDAD, no lo que se pidió: la descripción solo se reescribe si
+        // el texto cambió, y el ítem puede quedar con otro número que el tecleado.
+        extra = (rp.reservas
+                  ? ` ${paxAhora ?? "Sin"} PAX escritos en ${rp.reservas} servicio(s).`
+                  : " No se escribió en ningún servicio.")
+              + (rp.descripciones ? " Se reescribió la descripción del ítem." : "")
+              // Solo se habla del ítem si se pudo releer: sin la migración este select
+              // también falla, y afirmar "queda sin «N PAX»" sería inventar un resultado.
+              + (rp.paxLeido && rp.paxResultante !== paxAhora
+                  ? ` El ítem queda con ${rp.paxResultante ?? "sin «N PAX»"}: lo aporta la `
+                    + "cotización o la ficha de la ruta. Para cambiarlo ahí, usa Rutas contratadas."
+                  : "")
+              + (rp.aviso ? ` ${rp.aviso}` : "");
+      }
+
+      setMsg("✅ Línea actualizada." + extra);
       await cargar(); onCambio();
     } catch (e: any) {
       setMsg("⚠️ " + String(e?.message ?? e));
@@ -153,6 +219,56 @@ export default function ModalEditor({
     await cargar(); onCambio(); setTrabajando(false);
   }
 
+  /**
+   * Reescribe las descripciones con los datos de hoy. Hace falta porque la descripción
+   * es un snapshot: un documento creado antes del cambio de formato conserva el
+   * "RUTA B / TURNO DÍA / MÓVIL 1" con el que nació, y sin esto la única forma de verlo
+   * con el nombre real de la ruta sería anularlo y volver a cerrar el periodo.
+   * No toca cantidades, precios ni totales.
+   */
+  /**
+   * Rehace los RENGLONES con la agrupación de hoy. Es el hermano del recálculo de
+   * descripciones: aquel reescribe el texto de cada línea, este decide qué líneas hay.
+   *
+   * Se pide confirmación porque, a diferencia del recálculo, esto CAMBIA la forma del
+   * documento: donde había tres renglones puede quedar uno. Los importes no se mueven —la
+   * agrupación no puede mover un sol— pero el papel se ve distinto, y quien lo tenga a
+   * medio revisar merece saberlo antes.
+   */
+  async function reagrupar() {
+    if (!confirm(
+      "Rehacer los renglones con la agrupación de hoy.\n\n" +
+      "Los servicios de una misma ruta contratada se juntan en un solo ítem, y los que " +
+      "tienen distinta tarifa o distinta capacidad contratada quedan separados. El total " +
+      "NO cambia.\n\n" +
+      "Las líneas escritas a mano (penalidades, descuentos) no se tocan.\n\n¿Continuar?"
+    )) return;
+    setTrabajando(true); setMsg("");
+    const r = await reagruparLineas(supabase, lado, liquidacionId, { usuario });
+    setMsg(
+      r.ok
+        ? `✅ ${r.antes} → ${r.despues} ítem(s).` +
+          (r.manuales ? ` ${r.manuales} línea(s) escrita(s) a mano intacta(s).` : "") +
+          (r.ajustesPerdidos?.length
+            ? ` ⚠️ ${r.ajustesPerdidos.length} cantidad(es) que habías fijado a mano no tienen dónde ir porque su ítem se fundió con otro: vuelve a ponerlas.`
+            : "")
+        : "⚠️ " + r.error
+    );
+    await cargar(); onCambio(); setTrabajando(false);
+  }
+
+  async function recalcular() {
+    setTrabajando(true); setMsg("");
+    const r = await recalcularDescripciones(supabase, lado, liquidacionId, { usuario });
+    setMsg(
+      r.ok
+        ? `✅ ${r.actualizadas} descripción(es) actualizada(s).` +
+          (r.sinPax ? ` ${r.sinPax} ruta(s) salen sin el "N PAX": fíchalas en Liquidaciones → Rutas contratadas.` : "")
+        : "⚠️ " + r.error
+    );
+    await cargar(); onCambio(); setTrabajando(false);
+  }
+
   if (cargando || !cab)
     return (
       <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
@@ -173,6 +289,20 @@ export default function ModalEditor({
           </div>
           <div className="ml-auto flex items-center gap-2">
             <button onClick={() => onVerPdf(liquidacionId)} className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50">📄 Ver PDF</button>
+            {editable && (
+              <button onClick={recalcular} disabled={trabajando}
+                title="Reescribe las descripciones con el nombre real de cada ruta y la capacidad contratada. No toca cantidades ni precios."
+                className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 disabled:opacity-50">
+                ↻ Recalcular descripciones
+              </button>
+            )}
+            {editable && (
+              <button onClick={reagrupar} disabled={trabajando}
+                title="Rehace los renglones con la agrupación de hoy: junta los servicios de una misma ruta contratada y separa los de distinta tarifa o capacidad. No cambia el total ni toca las líneas escritas a mano."
+                className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 disabled:opacity-50">
+                ↻ Reagrupar ítems
+              </button>
+            )}
             {editable && (
               <button onClick={emitir} disabled={trabajando} className="px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-50" style={{ background: cp }}>
                 Emitir documento
@@ -253,6 +383,7 @@ export default function ModalEditor({
                   <tr>
                     <th className="px-2 py-2 text-left w-8">#</th>
                     <th className="px-2 py-2 text-left">Descripción</th>
+                    <th className="px-2 py-2 w-24" title="Asientos CONTRATADOS por el cliente. No es la capacidad del vehículo asignado.">PAX</th>
                     <th className="px-2 py-2 w-24">Prog./Ejec.</th>
                     <th className="px-2 py-2 w-20">Cant.</th>
                     <th className="px-2 py-2 w-24">P. unit.</th>
@@ -268,7 +399,10 @@ export default function ModalEditor({
                       <tr key={l.id} className={l.tipo === "adicional" ? "bg-amber-50/60" : negativo ? "bg-red-50/60" : ""}>
                         <td className="px-2 py-2 text-gray-400">{l.item}</td>
                         <td className="px-2 py-2">
-                          <input disabled={!editable} className="w-full bg-transparent text-[13px] font-medium focus:outline-none"
+                          {/* La descripción trae varios renglones (concepto, ida, retorno, móvil):
+                              un <input> de una línea solo dejaba ver el primero. */}
+                          <textarea disabled={!editable} rows={deReservas(l) ? 3 : 1}
+                            className="w-full bg-transparent text-[13px] font-medium focus:outline-none resize-y leading-snug"
                             value={l.descripcion} onChange={(e) => setLinea(l.id, { descripcion: e.target.value })} />
                           {difiere && (
                             <input disabled={!editable} className="w-full mt-1 px-2 py-1 rounded border border-amber-300 bg-amber-50 text-[11px]"
@@ -277,8 +411,46 @@ export default function ModalEditor({
                           )}
                           {l.referencia && <p className="text-[10px] text-gray-400 mt-0.5">Anexo 1 · ítems {l.referencia}</p>}
                         </td>
+                        {/* Los asientos CONTRATADOS, editables acá mismo. Antes eran texto:
+                            un "sin dato" en ámbar que solo se podía arreglar fichando la
+                            ruta en otra pantalla, y un número ya puesto que no se podía
+                            corregir en ningún lado. Escribirlo acá NO se queda en el
+                            renglón: va a `reservas.capacidad_contratada` de los servicios
+                            de esta línea (ver `actualizarPaxContratado`), así que recalcular
+                            no lo borra. Corrige ESTE periodo: los servicios del mes que viene
+                            son otras filas, y quien los hace nacer bien es la ficha de la ruta
+                            (o el ítem de la cotización), no esta celda. */}
+                        <td className="px-2 py-2">
+                          {deReservas(l) ? (
+                            <input
+                              disabled={!editable} type="number" min="1" step="1"
+                              placeholder="s/d"
+                              title={l.pax_contratado == null
+                                ? "Ninguna fuente sabe cuántos asientos se contrataron: el ítem se imprime sin el «N PAX». Escríbelo acá y se guarda en los servicios de esta línea; para que los meses siguientes salgan solos, fíchalo en Liquidaciones → Rutas contratadas."
+                                : "Asientos CONTRATADOS por el cliente. No es la capacidad del bus asignado. Al cambiarlo se escribe en los servicios de esta línea y se rehace la descripción."}
+                              className={`w-full px-1.5 py-1 rounded border text-sm text-center ${
+                                l.pax_contratado == null
+                                  ? "border-amber-300 bg-amber-50 placeholder:text-amber-600"
+                                  : ""}`}
+                              value={l.pax_contratado ?? ""}
+                              onChange={(e) => {
+                                // El 0 se normaliza acá y no al guardar: si no, el campo
+                                // mostraría "0" y el mensaje diría "0 PAX escritos" cuando
+                                // lo que se guardó fue un null. Vacío y cero son lo mismo
+                                // para la base (el CHECK rechaza el cero); que lo sean
+                                // también en la pantalla.
+                                const n = Number(e.target.value);
+                                setLinea(l.id, {
+                                  pax_contratado: e.target.value.trim() === "" || !(n > 0) ? null : Math.round(n),
+                                });
+                              }}
+                            />
+                          ) : (
+                            <span className="block text-center text-xs text-gray-400">—</span>
+                          )}
+                        </td>
                         <td className="px-2 py-2 text-center text-xs text-gray-500">
-                          {l.tipo === "servicio" ? `${l.cantidad_programada ?? "—"} / ${l.cantidad_ejecutada ?? "—"}` : "—"}
+                          {deReservas(l) ? `${l.cantidad_programada ?? "—"} / ${l.cantidad_ejecutada ?? "—"}` : "—"}
                         </td>
                         <td className="px-2 py-2">
                           <input disabled={!editable} type="number" step="0.01" className="w-full px-1.5 py-1 rounded border text-sm text-center"
@@ -296,7 +468,7 @@ export default function ModalEditor({
                             <div className="flex gap-1 justify-end">
                               <button onClick={() => guardarLinea(l)} disabled={trabajando} title="Guardar"
                                 className="px-2 py-1 rounded text-[11px] font-bold bg-emerald-600 text-white disabled:opacity-50">✓</button>
-                              {l.tipo !== "servicio" && (
+                              {!deReservas(l) && (
                                 <button onClick={() => borrar(l.id)} disabled={trabajando} title="Eliminar"
                                   className="px-2 py-1 rounded text-[11px] font-bold border text-red-600 border-red-200">✕</button>
                               )}
@@ -309,6 +481,17 @@ export default function ModalEditor({
                 </tbody>
               </table>
             </div>
+
+            {editable && (
+              <p className="mt-2 text-[11px] text-gray-500 leading-snug">
+                <b>PAX</b> son los asientos que el cliente <b>contrató</b>, no la capacidad del
+                bus que salió (esa cambia según la unidad disponible del día). Al corregirlo y
+                pulsar <b>✓</b> se guarda en los servicios de esa línea —no solo en este
+                documento—, se rehace su descripción y recalcular ya no lo borra. Corrige
+                <b>este periodo</b>: para que los próximos meses nazcan bien, fíchalo además en
+                <b>Rutas contratadas</b>. Vacío no es cero: el ítem se imprime <b>sin el «N PAX»</b>.
+              </p>
+            )}
 
             {editable && (
               <div className="mt-3 grid grid-cols-12 gap-2 items-end bg-gray-50 rounded-xl p-3">

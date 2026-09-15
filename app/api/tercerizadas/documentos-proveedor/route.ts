@@ -14,7 +14,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { estadoDoc, TIPOS_DOC_OBLIGATORIOS } from "@/lib/proveedor-documentos";
+import { estadoDocumento, TIPOS_DOC_OBLIGATORIOS } from "@/lib/proveedor-documentos";
+import { docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
 import { enviarEmail } from "@/lib/notificaciones";
 
 export const dynamic = "force-dynamic";
@@ -58,7 +59,13 @@ export async function GET(req: NextRequest) {
       admin.from("documentos_tercero_revisiones").select("*").eq("empresa_id", empresa.id).order("creado_en", { ascending: false }).limit(30),
     ]);
 
-    const docsConEstado = (documentos || []).map((d: any) => ({ ...d, estado: estadoDoc(d.fecha_vencimiento) }));
+    // `tipo` se canoniza antes de salir: la fila puede guardar "Habilitación SUTRAN" y el
+    // proveedor tiene que leer el nombre del papel que lleva en la unidad. El estado lo
+    // decide `estadoDocumento` (tipo primero, fecha después) para que la Tarjeta de
+    // Propiedad no le aparezca como pendiente de una fecha que no existe.
+    const docsConEstado = (documentos || []).map((d: any) => ({
+      ...d, tipo: etiquetaTipoDoc(d.tipo), estado: estadoDocumento(d),
+    }));
 
     return NextResponse.json({
       ok: true,
@@ -121,7 +128,10 @@ export async function POST(req: NextRequest) {
       tipo,
       numero: body.numero ? String(body.numero).trim() : null,
       fecha_vencimiento_actual: fechaActual,
-      fecha_vencimiento_propuesta: body.fechaVencimientoPropuesta || null,
+      // Un documento que no caduca no propone fecha, venga de donde venga el POST: el
+      // formulario ni la muestra, pero esta puerta es pública y el operador que aprueba
+      // copia lo que llegue. Es más barato no dejarla entrar que descubrirla vencida.
+      fecha_vencimiento_propuesta: docSinVencimiento(tipo) ? null : (body.fechaVencimientoPropuesta || null),
       entidad_emisora: body.entidadEmisora ? String(body.entidadEmisora).trim() : null,
       archivo_url: archivoUrl,
       observaciones_proveedor: body.observaciones ? String(body.observaciones).trim() : null,

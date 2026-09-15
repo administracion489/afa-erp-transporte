@@ -2,6 +2,10 @@
 
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
+import { FAMILIAS_TANQUE, parseCapacidadTanque as parseCapTanque, capacidadTanqueAForm as capTanqueAForm, faltaColumnaTanque } from "@/lib/combustible-tipos";
+import AvisoFichaCombustible from "@/components/flota/AvisoFichaCombustible";
+import { NIVEL_CFG } from "@/lib/costos/nivel-servicio";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -19,7 +23,7 @@ type Vehiculo = {
   tipo_vehiculo_costeo: string | null;
 };
 
-type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null };
+type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null; tipo_combustible_1?: string | null };
 
 type DocVehiculo = {
   id: number; vehiculo_id: number; tipo: string; numero: string | null;
@@ -37,9 +41,14 @@ const TIPOS_DOC: Record<string, TipoDocConfig> = {
   "SOAT":                    { label: "SOAT",                    icon: "🚗", obligatorio: true,  renovacion: "Anual",      entidad: "Aseguradora" },
   "CAT":                     { label: "CAT",                     icon: "📜", obligatorio: true,  renovacion: "Anual",      entidad: "AFOCAT" },
   "Revisión Técnica (CITV)": { label: "Revisión Técnica (CITV)", icon: "🔍", obligatorio: true,  renovacion: "Semestral",  entidad: "CITV / MTC" },
-  "Tarjeta de Propiedad":    { label: "Tarjeta de Propiedad",    icon: "📋", obligatorio: true,  renovacion: "Permanente", entidad: "SUNARP" },
-  "Habilitación SUTRAN":     { label: "Habilitación SUTRAN",     icon: "✅", obligatorio: true,  renovacion: "Anual",      entidad: "SUTRAN" },
-  "Permiso Operación MTC":   { label: "Permiso Operación MTC",   icon: "🏛️", obligatorio: true,  renovacion: "10 años",    entidad: "MTC" },
+  // "No vence": la TIVE que emite SUNARP no caduca. La regla vive en `sinVencimiento`
+  // (lib/documentos-estado.ts); esto solo la rotula.
+  "Tarjeta de Propiedad":    { label: "Tarjeta de Propiedad",    icon: "📋", obligatorio: true,  renovacion: "No vence",   entidad: "SUNARP" },
+  "Tarjeta Única de Circulación (TUC)": { label: "Tarjeta Única de Circulación (TUC)", icon: "✅", obligatorio: true, renovacion: "Anual", entidad: "MTC / SUTRAN" },
+  // NO obligatoria por placa: la habilitación es UNA de la empresa (la madre) y de ella
+  // salen las TUC de cada vehículo (las hijas). Si la placa tiene TUC, la empresa la tiene.
+  // Se vigila en la ficha de la empresa. Ver `exige: null` en lib/documentos-estado.ts.
+  "Habilitación Vehicular (MTC/ATU)":   { label: "Habilitación Vehicular (MTC/ATU)",   icon: "🏛️", obligatorio: false, renovacion: "10 años", entidad: "MTC / ATU" },
   "Tarjeta de Circulación":  { label: "Tarjeta de Circulación",  icon: "🏙️", obligatorio: true,  renovacion: "Anual",      entidad: "Municipio" },
   "Certificado GNV":         { label: "Certificado GNV",         icon: "💨", obligatorio: false, renovacion: "Anual",      entidad: "Taller cert." },
   "Certificado GLP":         { label: "Certificado GLP",         icon: "🔵", obligatorio: false, renovacion: "Anual",      entidad: "Taller cert." },
@@ -49,14 +58,21 @@ const TIPOS_DOC: Record<string, TipoDocConfig> = {
 };
 const DOCS_OBLIGATORIOS = Object.entries(TIPOS_DOC).filter(([, v]) => v.obligatorio).map(([k]) => k);
 
+/** Config del tipo de UNA fila. Las claves de TIPOS_DOC son canónicas y en la base el tipo es
+ *  texto tecleado: sin canonizar, una fila con el nombre viejo cae a "Otro" y deja de contar
+ *  como obligatoria — o sea, un renombre apagaría un control legal en silencio. */
+const cfgTipoDoc = (tipo: string | null | undefined) => TIPOS_DOC[etiquetaTipoDoc(tipo)] ?? null;
+
 // ─── CONSTANTES ───────────────────────────────────────────────────────────────
 
 const CATEGORIAS = ["AUTO", "SUV", "VAN", "MINIBUS", "BUS", "CUSTER"];
 const ICONO_CAT: Record<string, string> = { AUTO: "🚗", SUV: "🚙", VAN: "🚐", MINIBUS: "🚌", BUS: "🚌", CUSTER: "🚐" };
 
+// El NOMBRE sale de lib/costos/nivel-servicio.ts para que sea el mismo en /cotizador,
+// /cotizaciones, /tarifario y aquí. El VALOR de la columna (`full_equipo`/`basico`) no se toca.
 const EQUIP_CFG = {
-  full_equipo: { label: "Full Equipo",  icon: "⭐", desc: "AC · TV · WiFi · reclinables · bodega · GPS", color: "#0b315f", bg: "#eef3f8" },
-  basico:      { label: "Básico",       icon: "📦", desc: "Servicio estándar sin equipamiento premium",   color: "#4b5563", bg: "#f3f4f6" },
+  full_equipo: { label: NIVEL_CFG.full_equipo.label,  icon: NIVEL_CFG.full_equipo.icono,  desc: "AC · TV · WiFi · reclinables · bodega · GPS", color: "#0b315f", bg: "#eef3f8" },
+  basico:      { label: NIVEL_CFG.estandar.label, icon: NIVEL_CFG.estandar.icono, desc: "Servicio estándar sin equipamiento premium",   color: "#4b5563", bg: "#f3f4f6" },
 };
 
 const DESC_DEFECTO = {
@@ -74,11 +90,13 @@ const ESTADO_VEHICULO: Record<string, { label: string; bg: string; color: string
   mantenimiento: { label: "Mantenimiento", bg: "#fef9c3", color: "#854d0e" },
   inactivo:      { label: "Inactivo",      bg: "#f3f4f6", color: "#4b5563" },
 };
-const ESTADO_DOC: Record<string, { label: string; bg: string; color: string }> = {
+const ESTADO_DOC: Record<EstDoc, { label: string; bg: string; color: string }> = {
   vigente:    { label: "Vigente",    bg: "#dcfce7", color: "#166534" },
   por_vencer: { label: "Por vencer", bg: "#fef9c3", color: "#854d0e" },
   vencido:    { label: "Vencido",    bg: "#fee2e2", color: "#991b1b" },
   sin_fecha:  { label: "Sin fecha",  bg: "#f3f4f6", color: "#4b5563" },
+  // Azul: ni verde (promete vigencia hasta una fecha) ni gris (se lee como dato pendiente).
+  sin_vencimiento: { label: "No vence", bg: "#e0f2fe", color: "#075985" },
 };
 
 const FORM_V = {
@@ -91,28 +109,9 @@ const FORM_V = {
   tipo_vehiculo_costeo: "",
 };
 
-// Tipos de combustible con su unidad, para editar la capacidad del tanque por vehículo.
-const TIPOS_TANQUE: { tipo: string; label: string; unidad: string }[] = [
-  { tipo: "diesel",   label: "Diésel",   unidad: "gal" },
-  { tipo: "gasolina", label: "Gasolina", unidad: "gal" },
-  { tipo: "glp",      label: "GLP",      unidad: "gal" },
-  { tipo: "gnv",      label: "GNV",      unidad: "m³"  },
-  { tipo: "urea",     label: "Urea",     unidad: "lt"  },
-];
-// {diesel:"100", glp:"25"} → {diesel:100, glp:25}; todo vacío → null.
-function parseCapTanque(cap: Record<string, string>): Record<string, number> | null {
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(cap || {})) {
-    const n = Number(v);
-    if (v !== "" && Number.isFinite(n) && n > 0) out[k] = n;
-  }
-  return Object.keys(out).length ? out : null;
-}
-function capTanqueAForm(cap: Record<string, number> | null | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(cap || {})) out[k] = String(v);
-  return out;
-}
+// El catálogo de familias del tanque vive en lib/combustible-tipos.ts (`FAMILIAS_TANQUE`):
+// esta copia de cinco filas escritas a mano dejó de decir lo mismo que el catálogo el día que
+// se abrió la gasolina por octanaje, y quien LEE la capacidad la busca por familia.
 
 const FORM_D = {
   vehiculo_id: "", tipo: "SOAT", numero: "", fecha_emision: "",
@@ -125,12 +124,21 @@ function diasPara(fecha: string | null): number | null {
   if (!fecha) return null;
   return Math.ceil((new Date(fecha + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
-function estadoDoc(fecha: string | null): string {
+type EstDoc = "vigente" | "por_vencer" | "vencido" | "sin_fecha" | "sin_vencimiento";
+
+function estadoDoc(fecha: string | null): Exclude<EstDoc, "sin_vencimiento"> {
   const d = diasPara(fecha);
   if (d === null) return "sin_fecha";
   if (d < 0) return "vencido";
   if (d <= 30) return "por_vencer";
   return "vigente";
+}
+
+/** Estado de una FILA: el tipo manda sobre la fecha. La Tarjeta de Propiedad (TIVE) no
+ *  caduca, así que nunca sale "Sin fecha" ni puede llegar a vencida. */
+function estadoDocumento(d: { tipo?: string | null; fecha_vencimiento: string | null }): EstDoc {
+  if (docSinVencimiento(d.tipo)) return "sin_vencimiento";
+  return estadoDoc(d.fecha_vencimiento);
 }
 function fmtFecha(f: string | null) {
   if (!f) return "—";
@@ -150,9 +158,11 @@ function Campo({ label, span, hint, children }: { label: string; span?: number; 
 }
 function calcEstadoOperativo(docs: DocVehiculo[]): "apto" | "no_apto" {
   for (const tipo of DOCS_OBLIGATORIOS.filter(t => t !== "CAT")) {
-    const doc = docs.find(d => d.tipo === tipo);
+    // Por etiqueta canónica: con `d.tipo === tipo` la fila escrita con el nombre viejo no
+    // casaba con la clave nueva y su vencido dejaba de bajar la unidad a NO APTO.
+    const doc = docs.find(d => etiquetaTipoDoc(d.tipo) === tipo);
     if (!doc) continue;
-    if (estadoDoc(doc.fecha_vencimiento) === "vencido") return "no_apto";
+    if (estadoDocumento(doc) === "vencido") return "no_apto";
   }
   return "apto";
 }
@@ -317,7 +327,7 @@ export default function VehiculosPage() {
     const [{ data: vData }, { data: dData }, { data: pData }] = await Promise.all([
       supabase.from("vehiculos").select("*").order("placa"),
       supabase.from("documentos_vehiculo").select("*").order("fecha_vencimiento"),
-      supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo").eq("activo", true).order("grupo_vehiculo").order("capacidad"),
+      supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo,tipo_combustible_1").eq("activo", true).order("grupo_vehiculo").order("capacidad"),
     ]);
     const vList = (vData || []) as Vehiculo[];
     const dList = (dData || []) as DocVehiculo[];
@@ -349,13 +359,22 @@ export default function VehiculosPage() {
       proximo_mantenimiento_km: formV.proximo_km ? Number(formV.proximo_km) : null,
       observaciones: formV.observaciones.trim() || null,
       tipo_vehiculo_costeo: formV.tipo_vehiculo_costeo || null,
-      // Solo se incluye si hay algún valor: así, si la migración de capacidad_tanque aún no
-      // corrió, guardar un vehículo SIN capacidad configurada no rompe (no envía la columna nueva).
-      ...(capT ? { capacidad_tanque: capT } : {}),
+      // La columna va SIEMPRE, incluso en null. Antes solo se incluía si traía valor —para no
+      // romper si la migración accesoria no se había corrido— y eso dejaba una capacidad que no
+      // se podía BORRAR: al vaciar los campos el payload dejaba de llevarla y el número viejo
+      // seguía escrito. La migración se protege reintentando sin ella, que es el patrón de
+      // `COLUMNAS_OPCIONALES` (lib/reservas-pacto.ts): se suelta la columna que el error NOMBRA.
+      capacidad_tanque: capT,
     };
-    const { error } = editandoId
-      ? await supabase.from("vehiculos").update(payload).eq("id", editandoId)
-      : await supabase.from("vehiculos").insert(payload);
+    const escribir = (datos: Record<string, unknown>) => editandoId
+      ? supabase.from("vehiculos").update(datos).eq("id", editandoId)
+      : supabase.from("vehiculos").insert(datos);
+    let { error } = await escribir(payload);
+    if (error && faltaColumnaTanque(error)) {
+      const { capacidad_tanque: _omitida, ...sinTanque } = payload;
+      ({ error } = await escribir(sinTanque));
+      if (!error) alert("Se guardó, pero la capacidad de tanque no: falta correr supabase/radar-ia-combustible-multifoto.sql.");
+    }
     if (error) { alert(error.message); setGuardando(false); return; }
     setFormV(FORM_V); setCapTanque({}); setEditandoId(null); setMostrarFormV(false);
     cargarTodo(); setGuardando(false);
@@ -399,8 +418,9 @@ export default function VehiculosPage() {
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
   const editarDocumento = (d: DocVehiculo) => {
-    setFormD({ vehiculo_id: String(d.vehiculo_id), tipo: d.tipo, numero: d.numero || "",
+    setFormD({ vehiculo_id: String(d.vehiculo_id), tipo: etiquetaTipoDoc(d.tipo), numero: d.numero || "",
       fecha_emision: d.fecha_emision || "", fecha_vencimiento: d.fecha_vencimiento || "",
+      // (el `tipo` se canoniza más abajo: el <select> se indexa por la clave canónica)
       entidad_emisora: d.entidad_emisora || "", archivo_url: d.archivo_url || "", observaciones: d.observaciones || "" });
     setEditandoDocId(d.id); setMostrarFormD(true);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
@@ -412,7 +432,9 @@ export default function VehiculosPage() {
     const payload = {
       vehiculo_id: Number(formD.vehiculo_id), tipo: formD.tipo,
       numero: formD.numero.trim() || null, fecha_emision: formD.fecha_emision || null,
-      fecha_vencimiento: formD.fecha_vencimiento || null,
+      // Se GUARDA null, no solo se oculta la casilla: editar un documento que ya arrastraba
+      // una fecha vieja tiene que limpiarla, o el dato malo sobrevive al arreglo.
+      fecha_vencimiento: docSinVencimiento(formD.tipo) ? null : (formD.fecha_vencimiento || null),
       entidad_emisora: formD.entidad_emisora.trim() || cfg.entidad || null,
       archivo_url: formD.archivo_url.trim() || null, observaciones: formD.observaciones.trim() || null,
     };
@@ -437,8 +459,8 @@ export default function VehiculosPage() {
   const disponi   = vehiculos.filter(v => v.estado === "disponible").length;
   const fullEquip = vehiculos.filter(v => (v.equipamiento || "full_equipo") === "full_equipo").length;
   const basico    = vehiculos.filter(v => v.equipamiento === "basico").length;
-  const docVenc   = documentos.filter(d => estadoDoc(d.fecha_vencimiento) === "vencido").length;
-  const docPorV   = documentos.filter(d => estadoDoc(d.fecha_vencimiento) === "por_vencer").length;
+  const docVenc   = documentos.filter(d => estadoDocumento(d) === "vencido").length;
+  const docPorV   = documentos.filter(d => estadoDocumento(d) === "por_vencer").length;
 
   const filtrados = vehiculos.filter(v => {
     const q = busqueda.toLowerCase();
@@ -449,8 +471,9 @@ export default function VehiculosPage() {
   });
 
   const docsOrdenados = [...documentos].sort((a, b) => {
-    const ord = { vencido: 0, por_vencer: 1, sin_fecha: 2, vigente: 3 };
-    return (ord[estadoDoc(a.fecha_vencimiento) as keyof typeof ord] || 3) - (ord[estadoDoc(b.fecha_vencimiento) as keyof typeof ord] || 3);
+    // "No vence" al final: primero lo que hay que atender.
+    const ord: Record<EstDoc, number> = { vencido: 0, por_vencer: 1, sin_fecha: 2, vigente: 3, sin_vencimiento: 4 };
+    return (ord[estadoDocumento(a)] ?? 3) - (ord[estadoDocumento(b)] ?? 3);
   });
 
   // ─── RENDER ───────────────────────────────────────────────────────────────
@@ -485,7 +508,7 @@ export default function VehiculosPage() {
           { label: "Aptos",         valor: aptos,     color: "#166534", bg: "#dcfce7" },
           { label: "No aptos",      valor: noAptos,   color: "#991b1b", bg: "#fee2e2" },
           { label: "Disponibles",   valor: disponi,   color: "#1d4ed8", bg: "#dbeafe" },
-          { label: "⭐ Full Equipo", valor: fullEquip, color: "#0b315f", bg: "#eef3f8" },
+          { label: `${NIVEL_CFG.full_equipo.icono} ${NIVEL_CFG.full_equipo.label}`, valor: fullEquip, color: "#0b315f", bg: "#eef3f8" },
           { label: "📦 Básico",     valor: basico,    color: "#4b5563", bg: "#f3f4f6" },
           { label: "Docs vencidos", valor: docVenc,   color: "#991b1b", bg: "#fee2e2" },
           { label: "Por vencer",    valor: docPorV,   color: "#854d0e", bg: "#fef9c3" },
@@ -534,8 +557,16 @@ export default function VehiculosPage() {
               <Campo label="Categoría de costeo" hint="Vincula esta unidad a su ficha de costos — así las cotizaciones que la usan sirven de referencia en Tarifario">
                 <select className={inputCls()} value={formV.tipo_vehiculo_costeo} onChange={fv("tipo_vehiculo_costeo")}>
                   <option value="">— sin asignar —</option>
-                  {paramsVeh.map(p => <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>{p.nombre} ({p.tipo_vehiculo})</option>)}
+                  {/* El COMBUSTIBLE va en la etiqueta: es lo que decide el S/km de la ficha, y sin
+                      verlo se elige una categoría que costea otro combustible sin enterarse. */}
+                  {paramsVeh.map(p => (
+                    <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>
+                      {p.nombre} ({p.tipo_vehiculo}){p.tipo_combustible_1 ? ` · ${p.tipo_combustible_1}` : ""}
+                    </option>
+                  ))}
                 </select>
+                <AvisoFichaCombustible capTanque={capTanque}
+                  tipoCombustibleFicha={paramsVeh.find(p => p.tipo_vehiculo === formV.tipo_vehiculo_costeo)?.tipo_combustible_1} />
               </Campo>
               <Campo label="Estado">
                 <select className={inputCls()} value={formV.estado} onChange={fv("estado")}>
@@ -639,12 +670,12 @@ export default function VehiculosPage() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Capacidad de tanque</p>
             <p className="text-xs text-gray-500 mb-3">Capacidad máxima por tipo de combustible. Sirve para detectar cargas que exceden el tanque (Radar IA y registro manual). Déjalo vacío para usar el estimado por categoría. Para GLP a gas, usa la capacidad real del kit (no la del tanque original).</p>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              {TIPOS_TANQUE.map((t) => (
-                <Campo key={t.tipo} label={`${t.label} (${t.unidad})`}>
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+              {FAMILIAS_TANQUE.map((t) => (
+                <Campo key={t.familia} label={`${t.label} (${t.unidadLabel})`}>
                   <input type="number" min="0" step="0.1" className={inputCls()} placeholder="—"
-                    value={capTanque[t.tipo] ?? ""}
-                    onChange={(e) => setCapTanque((p) => ({ ...p, [t.tipo]: e.target.value }))} />
+                    value={capTanque[t.familia] ?? ""}
+                    onChange={(e) => setCapTanque((p) => ({ ...p, [t.familia]: e.target.value }))} />
                 </Campo>
               ))}
             </div>
@@ -705,9 +736,19 @@ export default function VehiculosPage() {
             <Campo label="Número / Código"><input className={inputCls("font-mono")} value={formD.numero} onChange={fd("numero")} /></Campo>
             <Campo label="Entidad emisora"><input className={inputCls()} value={formD.entidad_emisora} onChange={fd("entidad_emisora")} /></Campo>
             <Campo label="Fecha de emisión"><input type="date" className={inputCls()} value={formD.fecha_emision} onChange={fd("fecha_emision")} /></Campo>
+            {/* La casilla se APAGA en vez de esconderse: un hueco en la rejilla se lee como
+                pantalla rota, y así la regla se aprende donde se teclea. */}
             <Campo label="Fecha de vencimiento">
+              {docSinVencimiento(formD.tipo) && (
+                <div className="w-full border border-sky-200 bg-sky-50 rounded-xl px-3 py-2.5 text-xs text-sky-800">
+                  <b>No vence.</b> La {formD.tipo} no tiene fecha de vencimiento: se emite una vez y
+                  vale mientras no cambien el titular ni las características del vehículo.
+                </div>
+              )}
+              {!docSinVencimiento(formD.tipo) && (
               <input type="date" className={inputCls(formD.fecha_vencimiento && diasPara(formD.fecha_vencimiento) !== null && diasPara(formD.fecha_vencimiento)! <= 0 ? "border-red-400 bg-red-50" : "")} value={formD.fecha_vencimiento} onChange={fd("fecha_vencimiento")} />
-              {formD.fecha_vencimiento && diasPara(formD.fecha_vencimiento) !== null && (
+              )}
+              {!docSinVencimiento(formD.tipo) && formD.fecha_vencimiento && diasPara(formD.fecha_vencimiento) !== null && (
                 <p className="text-[10px] mt-1 font-bold" style={{ color: diasPara(formD.fecha_vencimiento)! <= 0 ? "#dc2626" : "#166534" }}>
                   {diasPara(formD.fecha_vencimiento)! <= 0 ? "⚠ Vencido" : `Vence en ${diasPara(formD.fecha_vencimiento)} días`}
                 </p>
@@ -751,9 +792,9 @@ export default function VehiculosPage() {
             {CATEGORIAS.map(c => <option key={c}>{c}</option>)}
           </select>
           <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEquip} onChange={e => setFiltroEquip(e.target.value)}>
-            <option value="todos">Todo equipamiento</option>
-            <option value="full_equipo">⭐ Full Equipo</option>
-            <option value="basico">📦 Básico</option>
+            <option value="todos">Todo nivel</option>
+            <option value="full_equipo">{NIVEL_CFG.full_equipo.icono} {NIVEL_CFG.full_equipo.label}</option>
+            <option value="basico">{NIVEL_CFG.estandar.icono} {NIVEL_CFG.estandar.label}</option>
           </select>
           <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEst} onChange={e => setFiltroEst(e.target.value)}>
             <option value="todos">Todos los estados</option>
@@ -793,8 +834,8 @@ export default function VehiculosPage() {
                   const docsV    = documentos.filter(d => d.vehiculo_id === v.id);
                   const expandido = expandidoId === v.id;
                   const kmAlert  = v.proximo_mantenimiento_km && v.kilometraje_actual && (v.proximo_mantenimiento_km - v.kilometraje_actual) <= 5000;
-                  const docsCrit = docsV.filter(d => estadoDoc(d.fecha_vencimiento) === "vencido").length;
-                  const docsPorV = docsV.filter(d => estadoDoc(d.fecha_vencimiento) === "por_vencer").length;
+                  const docsCrit = docsV.filter(d => estadoDocumento(d) === "vencido").length;
+                  const docsPorV = docsV.filter(d => estadoDocumento(d) === "por_vencer").length;
                   const nFotos   = [v.foto_externa_url, v.foto_interna_url].filter(Boolean).length;
 
                   return (
@@ -885,16 +926,16 @@ export default function VehiculosPage() {
                                 </div>
                                 {docsV.length === 0 ? <p className="text-xs text-gray-300">Sin documentos</p>
                                   : docsV.map(d => {
-                                    const est = estadoDoc(d.fecha_vencimiento);
+                                    const est = estadoDocumento(d);
                                     const cfg = ESTADO_DOC[est];
-                                    const dias = diasPara(d.fecha_vencimiento);
-                                    const tipoCfg = TIPOS_DOC[d.tipo] || TIPOS_DOC["Otro"];
+                                    const dias = est === "sin_vencimiento" ? null : diasPara(d.fecha_vencimiento);
+                                    const tipoCfg = cfgTipoDoc(d.tipo) || TIPOS_DOC["Otro"];
                                     return (
                                       <div key={d.id} className="flex items-center justify-between bg-white border rounded-xl px-3 py-2">
                                         <div className="text-xs flex items-center gap-2">
                                           <span>{tipoCfg.icon}</span>
                                           <div>
-                                            <span className="font-bold text-gray-700">{d.tipo}</span>
+                                            <span className="font-bold text-gray-700">{etiquetaTipoDoc(d.tipo)}</span>
                                             {d.fecha_vencimiento && <div className="text-[10px] text-gray-400">Vence: {fmtFecha(d.fecha_vencimiento)}{dias !== null && dias >= 0 ? ` (${dias}d)` : ""}</div>}
                                           </div>
                                         </div>
@@ -919,7 +960,7 @@ export default function VehiculosPage() {
             </table>
           </div>
           <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between" style={{ borderColor: "#f1f5f9" }}>
-            <span>{filtrados.length} de {total} vehículos · {fullEquip} Full Equipo · {basico} Básico</span>
+            <span>{filtrados.length} de {total} vehículos · {fullEquip} {NIVEL_CFG.full_equipo.label} · {basico} {NIVEL_CFG.estandar.label}</span>
             <span>AFA ERP · Flota</span>
           </div>
         </section>
@@ -942,17 +983,17 @@ export default function VehiculosPage() {
                   <tr><td colSpan={9} className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">📄</p><p>Sin documentos</p></td></tr>
                 ) : docsOrdenados.map(d => {
                   const veh = vehiculos.find(v => v.id === d.vehiculo_id);
-                  const est = estadoDoc(d.fecha_vencimiento);
+                  const est = estadoDocumento(d);
                   const cfg = ESTADO_DOC[est];
-                  const tipoCfg = TIPOS_DOC[d.tipo] || TIPOS_DOC["Otro"];
-                  const dias = diasPara(d.fecha_vencimiento);
+                  const tipoCfg = cfgTipoDoc(d.tipo) || TIPOS_DOC["Otro"];
+                  const dias = est === "sin_vencimiento" ? null : diasPara(d.fecha_vencimiento);
                   return (
                     <tr key={d.id} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9", background: est === "vencido" ? "#fff5f5" : est === "por_vencer" ? "#fffbeb" : "white" }}>
                       <td className="p-3"><span className="font-black font-mono text-[#0b315f]">{veh?.placa || "—"}</span><span className="text-xs text-gray-400 ml-1">{veh?.categoria}</span></td>
-                      <td className="p-3"><div className="flex items-center gap-1.5"><span>{tipoCfg.icon}</span><div><div className="text-xs font-bold text-gray-700">{d.tipo}</div>{tipoCfg.obligatorio && <div className="text-[9px] text-red-500 font-bold">Obligatorio</div>}</div></div></td>
+                      <td className="p-3"><div className="flex items-center gap-1.5"><span>{tipoCfg.icon}</span><div><div className="text-xs font-bold text-gray-700">{etiquetaTipoDoc(d.tipo)}</div>{tipoCfg.obligatorio && <div className="text-[9px] text-red-500 font-bold">Obligatorio</div>}</div></div></td>
                       <td className="p-3 font-mono text-xs text-gray-500">{d.numero || "—"}</td>
                       <td className="p-3 text-xs text-gray-500">{d.entidad_emisora || "—"}</td>
-                      <td className="p-3 text-xs text-gray-600">{fmtFecha(d.fecha_vencimiento)}</td>
+                      <td className="p-3 text-xs text-gray-600">{est === "sin_vencimiento" ? <span className="text-sky-700">No vence</span> : fmtFecha(d.fecha_vencimiento)}</td>
                       <td className="p-3">{dias !== null ? <span className="font-black text-xs" style={{ color: dias < 0 ? "#dc2626" : dias <= 30 ? "#d97706" : "#166534" }}>{dias < 0 ? `${Math.abs(dias)}d venc.` : `${dias}d`}</span> : "—"}</td>
                       <td className="p-3"><span className="text-xs font-bold px-2.5 py-1 rounded-lg" style={{ background: cfg.bg, color: cfg.color }}>{cfg.label}</span></td>
                       <td className="p-3">{d.archivo_url ? <a href={d.archivo_url} target="_blank" rel="noreferrer" className="text-blue-500 underline text-xs font-bold">📄 Ver</a> : <span className="text-gray-300 text-xs">—</span>}</td>

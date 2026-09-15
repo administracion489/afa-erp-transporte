@@ -50,6 +50,10 @@ export type RadarEstado = {
   ultimo_latido: string | null;
   /** El dashboard la prende con el botón "Generar QR nuevo"; el worker la apaga apenas la atiende. */
   solicitar_relink: boolean;
+  /** Igual, para el botón "Actualizar lista" de la pestaña Grupos. */
+  solicitar_sync_grupos?: boolean;
+  /** Última lectura EXITOSA de la lista de grupos de WhatsApp (null si nunca se logró). */
+  grupos_sincronizados_en?: string | null;
   updated_at: string;
 };
 
@@ -63,6 +67,16 @@ export type RadarGrupo = {
   contexto: string | null;
   /** Restringe qué categorías aplican para ESTE grupo; null = usa las globales de radar_config. */
   categorias_permitidas: CategoriaRadar[] | null;
+  /**
+   * ¿El número conectado HOY ve este grupo? `false` = quedó de un número anterior, así que
+   * por más que esté `activo` no puede llegar ni un mensaje. Opcional porque las filas
+   * anteriores a supabase/radar-ia-grupos-vigencia.sql no la traen: **trátala siempre como
+   * `g.visible !== false`**, nunca como `!g.visible` (undefined significa "no se sabe", y
+   * dar por no visible todo lo antiguo pintaría la lista entera de advertencias).
+   */
+  visible?: boolean;
+  /** Última vez que el worker vio este grupo en la lista de WhatsApp. */
+  visto_en?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -164,6 +178,12 @@ export type RadarCombustible = {
   anomalias: AnomaliaCombustible[];
   /** Fotos que la IA procesó (voucher/surtidor/tablero): [{ url, mime, nombre }]. Vacío en filas viejas. */
   fotos: RadarFoto[] | null;
+  /**
+   * El indicador de nivel del tablero DESPUÉS de cargar, tal como lo leyó la IA. PROPONE el
+   * valor de `combustible.tanque_lleno` en el panel de revisión; no decide nada por su cuenta.
+   * `null` en filas viejas y si no se corrió `combustible-02-nivel-tanque-radar.sql`.
+   */
+  nivel_tanque?: "lleno" | "parcial" | "no_visible" | null;
   combustible_id: number | null;
   created_at: string;
 };
@@ -181,6 +201,8 @@ export type AnomaliaCombustible = {
     | "precio_fuera_de_rango"
     | "km_menor_al_actual"
     | "consumo_excesivo"
+    /** Rindió MÁS de lo posible: una carga que falta por registrar, o un odómetro mal leído. */
+    | "rendimiento_implausible"
     | "recarga_madrugada"
     | "monto_inconsistente"
     | "galones_coinciden_km"
@@ -190,10 +212,46 @@ export type AnomaliaCombustible = {
     | "trip_como_odometro"           // el "Trip"/viaje parcial registrado como odómetro total
     | "discrepancia_maquina_vs_nota" // surtidor/display difiere de la nota (informativo: manda la nota)
     | "voucher_no_leido"             // había foto de nota/surtidor pero no se pudo leer la cantidad/importe
-    | "multiples_recargas_en_cluster"; // la ráfaga trae 2 recargas/comprobantes distintos
+    | "multiples_recargas_en_cluster" // la ráfaga trae 2 recargas/comprobantes distintos
+    // Identidad de la nota (lib/radar/identidad-voucher.ts):
+    | "cliente_como_grifo"           // se guardó como grifo a quien COMPRÓ (AFA o una tercerizada del ERP)
+    | "ruc_del_cliente"              // el nombre del grifo está bien pero el RUC salió del bloque del cliente
+    | "discrepancia_km_tablero_vs_nota" // el km del tablero no coincide con el impreso en la nota
+    | "observacion_lectura"          // diferencia que la IA notó sin declarar entre qué dos fuentes
+    // Cuadre aritmético del voucher (lib/radar/coherencia-voucher.ts):
+    | "lectura_corregida"            // cantidad × precio = total identificó el dígito mal leído y se corrigió
+    | "cuadre_ambiguo"               // no cuadra y más de una lectura lo explicaría: no se tocó nada
+    | "dato_derivado"                // faltaba uno de los tres números y se calculó de los otros dos
+    | "cantidad_no_coincide_texto"   // el número extraído contradice la transcripción literal de la IA
+    | "cantidad_precio_invertidos"   // se leyó el precio como cantidad y viceversa (el cuadre no lo ve: es conmutativo)
+    // Qué combustible se compró (lib/radar/tipo-voucher.ts):
+    | "tipo_corregido_por_producto"  // la IA dijo un tipo y el producto impreso dice otro: manda el papel
+    | "tipo_no_coincide_con_producto"// el papel la contradice pero nombra varios productos: no se adivina
+    | "tipo_no_coincide_con_precio"  // se pagó el precio de otro combustible (solo avisa: no reescribe el tipo)
+    // ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts):
+    | "carga_parcial_probable";      // la aguja del tablero NO marca lleno: ese tramo no se mide igual
   detalle: string;
   /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
   bloquea?: boolean;
+  /**
+   * Qué número cambió el cuadre aritmético, en estructurado. Existe para que la pantalla y el
+   * dataset de lecciones NO tengan que olfatear el texto de `detalle`: `valor_ia` de una
+   * corrección humana posterior es `leido`, no lo que quedó guardado en la fila.
+   */
+  correccion?: {
+    /**
+     * `tipo_combustible` no es un número y entra igual: el campo existe para que quien lea sepa
+     * QUÉ cambió el ERP y con qué valor llegó de la IA, y eso vale igual para "diesel"→"glp" que
+     * para 6.799→8.799. Sin él, corregir a mano un tipo ya corregido le enseñaría a la IA que se
+     * equivocó en algo que nunca dijo (ver `leidoPorIA` en app/radar-ia/page.tsx).
+     */
+    campo: "cantidad" | "precio" | "monto" | "tipo_combustible";
+    /** Lo que leyó la IA. null = el campo faltaba y se derivó. */
+    leido: number | string | null;
+    corregido: number | string;
+    /** Si la cantidad se guardó en litros y no en galones (para nombrar el campo). */
+    unidad?: string | null;
+  };
 };
 
 export type SeveridadAlerta = "critico" | "atencion" | "info";
@@ -280,10 +338,71 @@ export type ExtraccionCombustible = {
   vio_nota?: boolean | null;           // se vio una foto de nota/comprobante de grifo
   vio_surtidor?: boolean | null;       // se vio una foto del surtidor
   vio_tablero?: boolean | null;        // se vio una foto del tablero/odómetro
+  /** El indicador de nivel del tablero DESPUÉS de cargar. Propone `combustible.tanque_lleno`. */
+  nivel_tanque?: "lleno" | "parcial" | "no_visible" | null;
   fuentes?: Record<string, string | null> | null;          // de qué foto salió cada campo clave (galones→surtidor, etc.)
   confianza_campos?: Record<string, number | null> | null; // 0..1 por campo clave
-  discrepancias?: string[] | null;     // p.ej. "surtidor 8.548 gal vs nota 8.55 gal"
+  /**
+   * Razón social de quien COMPRÓ (el "RAZ.SOC" de la nota). Existe para que el comprador
+   * tenga dónde ir: sin este campo terminaba en `grifo`, porque la nota rotula ese dato como
+   * "razón social" y el prompt pedía la razón social. Ver lib/radar/identidad-voucher.ts.
+   */
+  cliente_en_nota?: string | null;
+  /**
+   * La descripción del PRODUCTO tal como la imprime el voucher ("MAX-D DIESEL B5 S50 UV",
+   * "GLP-G", "GASOHOL 95"). De ahí sale el tipo de combustible: la unidad ("UGL") no lo dice.
+   */
+  producto_voucher?: string | null;
+  /**
+   * TODOS los nº de comprobante distintos del álbum. Si trae más de uno, la ráfaga no es un
+   * reporte: son varios despachos (ver lib/radar/album-recargas.ts).
+   */
+  comprobantes_vistos?: string[] | null;
+  /**
+   * Los despachos ADICIONALES cuando el álbum trae más de uno — el primero vive en los campos
+   * planos de arriba. Cada uno recibe su propia fila en `radar_combustible`: fusionarlos daba
+   * una recarga con la placa de un voucher y los importes de otro, y perdía el segundo gasto.
+   */
+  recargas_adicionales?: {
+    placa?: string | null;
+    comprobante?: string | null;
+    fecha?: string | null;
+    hora?: string | null;
+    grifo?: string | null;
+    tipo_combustible?: string | null;
+    galones?: number | null;
+    litros?: number | null;
+    precio_galon?: number | null;
+    precio_litro?: number | null;
+    monto_total?: number | null;
+    kilometraje?: number | null;
+  }[] | null;
+  /**
+   * Diferencias entre dos fuentes. La forma nueva declara ENTRE QUÉ dos es
+   * (`{campo, entre, detalle}`); los strings sueltos son la forma vieja, que sigue entrando
+   * como observación porque no dice qué se comparó con qué.
+   */
+  discrepancias?:
+    | (
+        | string
+        | {
+            campo?: string | null;
+            entre?: string | null;
+            /** Los dos valores comparados: si coinciden, no era una discrepancia. */
+            valor_a?: number | string | null;
+            valor_b?: number | string | null;
+            detalle?: string | null;
+          }
+      )[]
+    | null;
   notas_extraccion?: string | null;    // dudas de 7 segmentos, fotos ilegibles, etc.
+  /**
+   * Los dígitos de la cantidad TAL CUAL están impresos ("8.799x"), sin interpretar. Espejo de
+   * `texto_leido` en ExtraccionOdometro y por el mismo motivo: transcribir obliga a mirar las
+   * cifras en vez de estimar el número, y deja una SEGUNDA lectura del mismo dato con la que
+   * el ERP puede contrastar la primera (ver lib/radar/coherencia-voucher.ts).
+   */
+  texto_cantidad?: string | null;
 };
 
 /**

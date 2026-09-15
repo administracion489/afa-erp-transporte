@@ -434,7 +434,7 @@ export default function SegurosPage() {
                   onChange={e => setForm(p => ({ ...p, numero_poliza: e.target.value }))} />
               </Campo>
               <Campo label="Titular / Contratante">
-                <input className={inputCls()} placeholder="Ej: AFA Tours Perú SAC" value={form.titular}
+                <input className={inputCls()} placeholder="Ej: TU EMPRESA S.A.C." value={form.titular}
                   onChange={e => setForm(p => ({ ...p, titular: e.target.value }))} />
               </Campo>
 

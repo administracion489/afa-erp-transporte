@@ -668,7 +668,7 @@ export async function cargarFichaDatos(r: ReservaFicha, opts?: OpcionesFicha): P
     // app/tercerizadas/page.tsx:11-21).
     esTer && r.empresa_tercerizada_id != null
       ? filaTolerante("empresa", fallos, "empresas_tercerizadas",
-          "id,razon_social,ruc,telefono,contacto_nombre,contacto_telefono,estado,venc_autorizacion,venc_habilitacion",
+          "id,razon_social,ruc,telefono,contacto_nombre,contacto_telefono,estado,venc_autorizacion",
           r.empresa_tercerizada_id)
       : Promise.resolve(null),
 
@@ -791,7 +791,6 @@ export async function cargarFichaDatos(r: ReservaFicha, opts?: OpcionesFicha): P
         razon_social: empresa!.razon_social,
         estado: empresa!.estado,
         venc_autorizacion: (empRow as any).venc_autorizacion ?? null,
-        venc_habilitacion: (empRow as any).venc_habilitacion ?? null,
       }
     : null;
 

@@ -1,6 +1,24 @@
 "use client";
 import React, { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
+import { componentesCostoKm, costoKmDeParametro } from "@/lib/costos/costo-km-parametro";
+import {
+  escribirParametro, aplicarRendimientoMedido, registrarDescarte, cargarProcedenciasCostos,
+  aplicarMantenimientoMedido, registrarDescarteMant,
+} from "@/lib/costos/parametros";
+import { agregarPorTipo, CAMPO_DESCARTE, type AgregadoTipo, type PlacaMedida, type Procedencia } from "@/lib/costos/rendimiento-tipo";
+import { cargarPlacasMedidas } from "@/lib/costos/rendimiento-flota";
+import {
+  agregarMantenimientoPorTipo, cotejarAntiguedadPorTipo, CAMPO_DESCARTE_MANT,
+  type AgregadoMant, type AntiguedadTipo, type PlacaMantenimiento, type ProcedenciaMant,
+} from "@/lib/costos/mantenimiento-tipo";
+import { cargarPlacasMantenimiento } from "@/lib/costos/mantenimiento-flota";
+import { clavePremiumDe } from "@/lib/costos/equilibrio-usado";
+import { GRUPOS_VEHICULO, ICONOS_VEHICULO, ETIQUETA_FICHA, type ActaFicha, type FichaTipo } from "@/lib/costos/ficha-tipo";
+import ModalRendimientoMedido, { ChipMedido } from "./ModalRendimientoMedido";
+import ModalMantenimientoMedido, { ChipMantenimiento } from "./ModalMantenimientoMedido";
+import ModalAntiguedadTipo, { ChipAntiguedad } from "./ModalAntiguedadTipo";
+import ModalFichaTipo from "./ModalFichaTipo";
 
 type Combustible = {
   id:number; tipo:string; unidad:string; precio:number;
@@ -29,8 +47,10 @@ type Historial = {
 
 const EURO_NORMS  = ["Euro II","Euro III","Euro IV","Euro V","Euro VI"];
 const EURO_UREA   = ["Euro V","Euro VI"];
-const GRUPOS_VEH  = ["Ligeros","Vans","Buses","Otros"];
-const ICONOS_VEH  = ["🚗","🚙","🚐","🚌","🏎️","🚚","🚛","🚑"];
+// Los grupos y los íconos viven en lib/costos/ficha-tipo.ts: el alta y la edición de la ficha
+// tienen que ofrecer la MISMA lista, y dos copias es como una se queda atrás.
+const GRUPOS_VEH  = [...GRUPOS_VEHICULO];
+const ICONOS_VEH  = [...ICONOS_VEHICULO];
 
 const CAMPOS_EDIT: {key:keyof ParamCosto;label:string;grupo:string;unidad:string;step:number;desc?:string}[] = [
   {key:"rendimiento_1",      label:"Rendimiento",        grupo:"Combustible",     unidad:"km/unidad",step:0.5, desc:"Km por galón (Diésel/GLP/Gasolina) o m³ (GNV)"},
@@ -51,6 +71,18 @@ const CAMPOS_EDIT: {key:keyof ParamCosto;label:string;grupo:string;unidad:string
 ];
 const GRUPOS_CAMPOS = [...new Set(CAMPOS_EDIT.map(c=>c.grupo))];
 
+/** Los campos del historial que NO son celdas editables de la tabla. Un código sin etiqueta
+ *  imprime el código crudo, que es lo que le pasó a `multiples_recargas_en_cluster`. */
+const ETIQUETA_CAMPO:Record<string,string> = {
+  [CAMPO_DESCARTE]:"Medición revisada",
+  [CAMPO_DESCARTE_MANT]:"Mantenimiento medido revisado",
+  tipo_combustible_1:"Combustible",
+  euronorm:"Norma Euro",
+  precio:"Precio",
+  ...ETIQUETA_FICHA,   // nombre · capacidad · grupo_vehiculo · icono
+};
+const etiquetaCampo = (k:string) => CAMPOS_EDIT.find(c=>c.key===k)?.label || ETIQUETA_CAMPO[k] || k;
+
 const COMB_COLOR:Record<string,string> = {Gasolina:"#f97316",Diésel:"#0b315f",GLP:"#8b5cf6",GNV:"#10b981",UREA:"#06b6d4"};
 const COMB_BG:Record<string,string>    = {Gasolina:"#fff7ed",Diésel:"#eef3f8",GLP:"#f5f3ff",GNV:"#ecfdf5",UREA:"#ecfeff"};
 const GRUPO_CFG:Record<string,{color:string;bg:string}> = {
@@ -62,17 +94,9 @@ const fmtS  = (n:number) => `S/ ${n.toLocaleString("es-PE",{minimumFractionDigit
 const fmtN  = (n:number,d=2) => n.toLocaleString("es-PE",{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtDt = (s:string) => new Date(s).toLocaleString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
 
-function calcCostoKm(p:ParamCosto,pr:Record<string,number>):number {
-  const pc1=pr[p.tipo_combustible_1]||0;
-  const combKm=(pc1/p.rendimiento_1)*p.pct_uso_1
-    +(p.tipo_combustible_2&&p.rendimiento_2&&p.pct_uso_2?((pr[p.tipo_combustible_2]||0)/p.rendimiento_2)*p.pct_uso_2:0);
-  const neumKm=(p.n_neumaticos*p.costo_neumatico)/p.vida_neumatico_km;
-  const depKm=(p.valor_compra*(1-p.residual_pct))/(p.vida_util_anios*p.km_anio);
-  const fijKm=(p.seguro_anual+p.soat_anual+p.revision_semestral*2+p.permisos_anual+p.otros_fijos_mensual*12)/p.km_anio;
-  const ureaKm=p.usa_urea&&p.tipo_combustible_1==="Diésel"
-    ?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(pr["UREA"]||0):0;
-  return combKm+neumKm+p.mantenimiento_km+depKm+fijKm+ureaKm;
-}
+// El costo por kilómetro vive en lib/costos/costo-km-parametro.ts, no aquí: la misma fórmula
+// estaba escrita tres veces (esta, la de la tabla "Impacto" doce líneas más abajo, y
+// `calcCostoVeh` de /cotizaciones) y la de la tabla estaba mal.
 
 function CeldaEditable({valor,campo,vehId,onGuardado,unidad,step}:{
   valor:number;campo:keyof ParamCosto;vehId:string;
@@ -156,6 +180,20 @@ function CombCard({comb,onGuardar}:{comb:Combustible;onGuardar:(n:number)=>void}
     </div>
   );
 }
+
+/**
+ * La columna de la derecha cambia con la CATEGORÍA de parámetros elegida, porque cada grupo se
+ * mide con una fuente distinta: el combustible con las cargas, el mantenimiento con las órdenes
+ * de trabajo y la depreciación con el año de fabricación de las unidades.
+ *
+ * En las otras tres categorías NO se pinta nada, y es deliberado: una columna vacía se leería
+ * como "aquí tampoco hay medición", que es distinto de "esto no se mide".
+ */
+const COL_FLOTA:Record<string,{titulo:string;nota:string}> = {
+  "Combustible":   {titulo:"Medido",nota:"por la flota"},
+  "Mantenimiento": {titulo:"Medido",nota:"S/km gastado"},
+  "Depreciación":  {titulo:"Flota",nota:"años de las unidades"},
+};
 
 const FRM0={tipo_vehiculo:"",nombre:"",capacidad:"",icono:"🚌",grupo_vehiculo:"Buses",tipo_combustible_1:"Diésel",rendimiento_1:"",euronorm:"Euro III",n_neumaticos:"6",costo_neumatico:"1500",vida_neumatico_km:"65000",mantenimiento_km:"1.20",valor_compra:"",residual_pct:"0.15",vida_util_anios:"9",km_anio:"65000",seguro_anual:"",soat_anual:"",revision_semestral:"",permisos_anual:"",otros_fijos_mensual:"0",conductor_dia:""};
 
@@ -295,7 +333,29 @@ export default function AjustesCostosPage() {
   const [userEmail,setUserEmail]     =useState("Sistema");
   const [motivo,setMotivo]           =useState("");
   const [alerta,setAlerta]           =useState("");
+  // El fallo NO caduca solo. El verde se va a los 4 s porque es una confirmación; un guardado
+  // que no se hizo hay que leerlo y atenderlo, así que se queda hasta que lo cierres.
+  const [fallo,setFallo]             =useState("");
   const [mostrarForm,setMostrarForm] =useState(false);
+  // ── El rendimiento MEDIDO por la flota ─────────────────────────────────────
+  // Se carga APARTE y DESPUÉS: mide sobre la tabla `combustible` entera (paginada), y esta
+  // pantalla tiene que pintar sus parámetros sin esperar a eso. Mientras llega, la columna
+  // dice "midiendo…" en vez de afirmar que no hay medición — nunca se afirma un vacío
+  // mientras se está buscando, el mismo criterio que `estadoFotoRadar` en /combustible.
+  const [placas,setPlacas]           =useState<PlacaMedida[]|null>(null);
+  const [procedencias,setProcedencias]=useState<Map<string,Procedencia>>(new Map());
+  const [tipoAbierto,setTipoAbierto] =useState<string|null>(null);
+  // ── El MANTENIMIENTO medido y la EDAD de la flota ──────────────────────────
+  // Las dos salen del mismo cargador (`cargarPlacasMantenimiento`): reparten las mismas placas
+  // por el mismo `tipo_vehiculo_costeo`, y dos lecturas de la misma flota es como una se queda
+  // atrás. Mismo `null` inicial que arriba: mientras llega se dice "midiendo…", nunca "no hay".
+  const [placasMant,setPlacasMant]   =useState<PlacaMantenimiento[]|null>(null);
+  const [procMant,setProcMant]       =useState<Map<string,ProcedenciaMant>>(new Map());
+  const [mantAbierto,setMantAbierto] =useState<string|null>(null);
+  const [edadAbierta,setEdadAbierta] =useState<string|null>(null);
+  // La ficha (nombre · capacidad · grupo · ícono) del tipo que se está editando. Se guarda la
+  // CLAVE y no la fila: al recargar, la fila es otro objeto y el modal se quedaría con la vieja.
+  const [fichaAbierta,setFichaAbierta]=useState<string|null>(null);
 
   useEffect(()=>{supabase.auth.getUser().then(({data})=>{if(data?.user)setUserEmail(data.user.email||"Usuario");});},[]);
 
@@ -311,7 +371,46 @@ export default function AjustesCostosPage() {
   };
   useEffect(()=>{cargar();},[]);
 
+  // Best-effort: si falla, la columna MEDIDO se queda vacía y el resto de la pantalla sigue
+  // sirviendo. Un parámetro tecleado sin su medición al lado es peor experiencia, no un dato
+  // equivocado — lo contrario (bloquear la pantalla de costos por una consulta accesoria) sí
+  // lo sería.
+  const cargarMedidos=async()=>{
+    try{
+      const [ps,pm,pr]=await Promise.all([
+        cargarPlacasMedidas(supabase),
+        cargarPlacasMantenimiento(supabase),
+        cargarProcedenciasCostos(supabase),
+      ]);
+      setPlacas(ps);setPlacasMant(pm);
+      setProcedencias(pr.rendimiento);setProcMant(pr.mantenimiento);
+    }catch{ setPlacas([]);setPlacasMant([]); }
+  };
+  useEffect(()=>{cargarMedidos();},[]);
+
+  // El agregado se DERIVA de lo que ya está cargado. Guardar un parámetro recarga `params` y
+  // el veredicto se rehace solo, sin volver a leer la tabla de combustible: los tramos son
+  // hechos del vehículo y no cambian porque alguien teclee un número aquí.
+  const medidos=useMemo(
+    ()=>placas?agregarPorTipo(params,placas,procedencias):new Map<string,AgregadoTipo>(),
+    [params,placas,procedencias]
+  );
+  const medidosMant=useMemo(
+    ()=>placasMant?agregarMantenimientoPorTipo(params,placasMant,procMant):new Map<string,AgregadoMant>(),
+    [params,placasMant,procMant]
+  );
+  // El año de referencia se toma UNA vez por render y se pasa al motor puro: la edad de una
+  // unidad no puede cambiar a mitad de la tabla, y el módulo no lee el reloj para que la matriz
+  // pueda fijar un resultado.
+  const antiguedades=useMemo(
+    ()=>placasMant?cotejarAntiguedadPorTipo(params,placasMant,new Date().getFullYear()):new Map<string,AntiguedadTipo>(),
+    [params,placasMant]
+  );
+
   const preciosMap=useMemo(()=>{const m:Record<string,number>={};combustibles.forEach(c=>{m[c.tipo]=c.precio;});return m;},[combustibles]);
+  /** Solo para avisar de un nombre repetido al editar la ficha. Estable: si no, el plan del
+   *  modal se recalcularía en cada tecla por una lista que no cambió. */
+  const nombresTipos=useMemo(()=>params.map(p=>({tipo_vehiculo:p.tipo_vehiculo,nombre:p.nombre})),[params]);
 
   function mostrarAlerta(msg:string){setAlerta(msg);setTimeout(()=>setAlerta(""),4000);}
 
@@ -324,10 +423,32 @@ export default function AjustesCostosPage() {
   };
 
   const guardarParam=async(vehId:string,campo:string,vN:number,vA:number)=>{
-    setGuardando(true);
-    await supabase.from("parametros_costos").update({[campo]:vN,updated_by:userEmail}).eq("tipo_vehiculo",vehId);
-    await supabase.from("historial_costos").insert({tabla_origen:"parametros_costos",tipo_vehiculo:vehId,campo_modificado:campo,valor_anterior:vA,valor_nuevo:vN,motivo:motivo||"Actualización manual",cambiado_por:userEmail});
-    mostrarAlerta(`✅ ${vehId} · ${CAMPOS_EDIT.find(c=>c.key===campo)?.label||campo}: ${fmtN(vA)} → ${fmtN(vN)}`);
+    setGuardando(true);setFallo("");
+    const r=await escribirParametro(supabase,{
+      tipo_vehiculo:vehId,
+      patch:{[campo]:vN},
+      acta:{campo_modificado:campo,valor_anterior:vA,valor_nuevo:vN,motivo:motivo||"Actualización manual"},
+      por:userEmail,
+    });
+    // El toast verde ya NO es incondicional. Antes decía "✅ 19.00 → 28.50" aunque el update
+    // no hubiera tocado ninguna fila, y al recargar volvía el 19.00.
+    if(r.ok) mostrarAlerta(`✅ ${vehId} · ${CAMPOS_EDIT.find(c=>c.key===campo)?.label||campo}: ${fmtN(vA)} → ${fmtN(vN)}${r.acta?"":" (sin registrar en el historial)"}`);
+    if(r.error) setFallo(r.error);
+    cargar();setGuardando(false);
+  };
+
+  // ── La ficha del tipo ──────────────────────────────────────────────────────
+  // Pasa por `escribirParametro` como todo lo demás: es la única puerta, y es la que comprueba
+  // que la clave exista y sea única ANTES de escribir. El plan (qué cambia y qué acta queda) lo
+  // arma `planDeFicha`; aquí solo se escribe y se cuenta lo que pasó.
+  const guardarFicha=async(vehId:string,patch:Record<string,unknown>,actas:ActaFicha[],resumen:string)=>{
+    setGuardando(true);setFallo("");
+    const r=await escribirParametro(supabase,{tipo_vehiculo:vehId,patch,acta:actas,por:userEmail});
+    if(r.ok){
+      setFichaAbierta(null);
+      mostrarAlerta(`✅ ${vehId} · ${resumen}${r.acta?"":" (sin registrar en el historial)"}`);
+    }
+    if(r.error) setFallo(r.error);
     cargar();setGuardando(false);
   };
 
@@ -335,10 +456,66 @@ export default function AjustesCostosPage() {
     setGuardando(true);
     const veh=params.find(p=>p.tipo_vehiculo===vehId);
     const usaUrea=EURO_UREA.includes(veh?.euronorm||"")&&nuevoComb==="Diésel";
-    await supabase.from("parametros_costos").update({tipo_combustible_1:nuevoComb,usa_urea:usaUrea,updated_by:userEmail}).eq("tipo_vehiculo",vehId);
-    await supabase.from("historial_costos").insert({tabla_origen:"parametros_costos",tipo_vehiculo:vehId,campo_modificado:"tipo_combustible_1",valor_anterior:null,valor_nuevo:null,motivo:`Combustible → ${nuevoComb}${motivo?` | ${motivo}`:""}`,cambiado_por:userEmail});
-    mostrarAlerta(`✅ ${vehId} → ${nuevoComb}${usaUrea?" + UREA activada":""}`);
+    setFallo("");
+    const r=await escribirParametro(supabase,{
+      tipo_vehiculo:vehId,
+      patch:{tipo_combustible_1:nuevoComb,usa_urea:usaUrea},
+      acta:{campo_modificado:"tipo_combustible_1",valor_anterior:null,valor_nuevo:null,motivo:`Combustible → ${nuevoComb}${motivo?` | ${motivo}`:""}`},
+      por:userEmail,
+    });
+    if(r.ok) mostrarAlerta(`✅ ${vehId} → ${nuevoComb}${usaUrea?" + UREA activada":""}${r.acta?"":" (sin registrar en el historial)"}`);
+    if(r.error) setFallo(r.error);
     cargar();setGuardando(false);
+  };
+
+  // ── Adoptar / descartar el rendimiento medido ──────────────────────────────
+  // Las dos pasan por lib/costos/parametros.ts, que es la única puerta: un `update` propio
+  // aquí sería un segundo camino con las reglas escritas otra vez.
+  const recargarTodo=async()=>{
+    await cargar();
+    // Solo las procedencias: los tramos y las órdenes de trabajo son hechos del vehículo y no
+    // cambian porque alguien teclee un parámetro aquí.
+    try{ const pr=await cargarProcedenciasCostos(supabase); setProcedencias(pr.rendimiento); setProcMant(pr.mantenimiento); }catch{}
+  };
+
+  const aplicarMedido=async(a:AgregadoTipo,nota:string)=>{
+    setGuardando(true);setFallo("");
+    const r=await aplicarRendimientoMedido(supabase,a,userEmail,nota||undefined);
+    if(r.ok) mostrarAlerta(`✅ ${a.nombre} · Rendimiento: ${fmtN(a.parametro)} → ${fmtN(a.medido as number)} ${a.label||""}${r.acta?"":" (sin registrar en el historial)"}`);
+    if(r.error) setFallo(r.error);
+    setTipoAbierto(null);
+    await recargarTodo();setGuardando(false);
+  };
+
+  const descartarMedido=async(a:AgregadoTipo,nota:string)=>{
+    setGuardando(true);setFallo("");
+    const r=await registrarDescarte(supabase,a,userEmail,nota||undefined);
+    // No dice "guardado": no se guardó ningún parámetro, que es justo lo que se decidió.
+    if(r.ok) mostrarAlerta(`✅ ${a.nombre} · se conserva ${fmtN(a.parametro)} ${a.label||""}. La medición queda registrada como revisada.`);
+    if(r.error) setFallo(r.error);
+    setTipoAbierto(null);
+    await recargarTodo();setGuardando(false);
+  };
+
+  // ── Adoptar / descartar el mantenimiento medido ────────────────────────────
+  // Mismas dos puertas, mismo módulo. La diferencia de signo está en el modal: aquí el número
+  // medido normalmente SUBE el costo, mientras que el del rendimiento lo bajaba.
+  const aplicarMant=async(a:AgregadoMant,nota:string)=>{
+    setGuardando(true);setFallo("");
+    const r=await aplicarMantenimientoMedido(supabase,a,userEmail,nota||undefined);
+    if(r.ok) mostrarAlerta(`✅ ${a.nombre} · Mantenimiento: ${fmtN(a.parametro)} → ${fmtN(a.medido as number)} S/km${r.acta?"":" (sin registrar en el historial)"}`);
+    if(r.error) setFallo(r.error);
+    setMantAbierto(null);
+    await recargarTodo();setGuardando(false);
+  };
+
+  const descartarMant=async(a:AgregadoMant,nota:string)=>{
+    setGuardando(true);setFallo("");
+    const r=await registrarDescarteMant(supabase,a,userEmail,nota||undefined);
+    if(r.ok) mostrarAlerta(`✅ ${a.nombre} · se conserva ${fmtN(a.parametro)} S/km. La medición queda registrada como revisada.`);
+    if(r.error) setFallo(r.error);
+    setMantAbierto(null);
+    await recargarTodo();setGuardando(false);
   };
 
   const cambiarEuro=async(vehId:string,nuevaEuro:string)=>{
@@ -358,6 +535,7 @@ export default function AjustesCostosPage() {
   };
 
   const camposGrupo=CAMPOS_EDIT.filter(c=>c.grupo===grupoCampo);
+  const colFlota=COL_FLOTA[grupoCampo];
   const gruposActivos=[...new Set(params.map(p=>p.grupo_vehiculo||"Otros"))];
   const combSinUrea=combustibles.filter(c=>c.tipo!=="UREA");
 
@@ -372,6 +550,17 @@ export default function AjustesCostosPage() {
       </div>
 
       {alerta&&<div className="rounded-xl px-5 py-3 bg-green-50 border border-green-300 text-green-800 font-bold text-sm">{alerta}</div>}
+
+      {fallo&&(
+        <div className="rounded-xl px-5 py-3 bg-red-50 border-2 border-red-300 text-red-800 text-sm flex items-start gap-3">
+          <span className="text-lg leading-none mt-0.5">⚠️</span>
+          <div className="flex-1">
+            <p className="font-black">No se guardó</p>
+            <p className="mt-0.5">{fallo}</p>
+          </div>
+          <button onClick={()=>setFallo("")} className="text-red-400 hover:text-red-600 font-bold text-lg leading-none">✕</button>
+        </div>
+      )}
 
       <div className="bg-white rounded-2xl border shadow-sm px-5 py-4 flex items-center gap-4">
         <div className="flex-shrink-0">
@@ -419,10 +608,13 @@ export default function AjustesCostosPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   {params.map(p=>{
-                    const pc=preciosMap[p.tipo_combustible_1]||0;
-                    const combKm=pc/p.rendimiento_1;
-                    const totalKm=calcCostoKm(p,preciosMap);
-                    const ureaKm=p.usa_urea&&p.tipo_combustible_1==="Diésel"?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(preciosMap["UREA"]||0):0;
+                    // Antes esta fila calculaba su propio `pc/rendimiento_1`, SIN `pct_uso_1` y sin
+                    // el segundo combustible: en una unidad bimodal publicaba un S/km de combustible
+                    // que no era el que usaba el S/km total de la columna de al lado.
+                    const comp=componentesCostoKm(p,preciosMap);
+                    const combKm=comp.combustible;
+                    const totalKm=costoKmDeParametro(p,preciosMap);
+                    const ureaKm=comp.urea;
                     return(
                       <tr key={p.id} className="hover:bg-gray-50">
                         <td className="px-3 py-2.5 font-bold text-gray-800 text-xs">{p.icono||"🚌"} {p.nombre}</td>
@@ -447,7 +639,7 @@ export default function AjustesCostosPage() {
       {tab==="vehiculos"&&(
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-500">{params.length} vehículos activos · Clic en celda para editar · El dropdown cambia combustible y activa/desactiva UREA automáticamente</p>
+            <p className="text-sm text-gray-500">{params.length} vehículos activos · Clic en celda para editar · Clic en el nombre para cambiar la ficha (nombre, pax, grupo, ícono) · El dropdown cambia combustible y activa/desactiva UREA automáticamente</p>
             <button onClick={()=>setMostrarForm(v=>!v)} className="px-5 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90" style={{background:mostrarForm?"#6b7280":"#0b315f"}}>
               {mostrarForm?"✕ Cancelar":"➕ Agregar vehículo"}
             </button>
@@ -463,6 +655,29 @@ export default function AjustesCostosPage() {
                 </button>
               ))}
             </div>
+            {grupoCampo==="Combustible"&&(
+              <p className="text-[11px] text-gray-500 mt-3 leading-relaxed">
+                La columna <b>Medido</b> es lo que rinden de verdad las unidades propias de cada tipo, calculado
+                sobre las cargas de <b>/combustible</b> con el mismo motor que pinta esa pantalla. Es una propuesta:
+                el número que se costea sigue siendo el tecleado hasta que alguien aplique el otro.
+              </p>
+            )}
+            {grupoCampo==="Mantenimiento"&&(
+              <p className="text-[11px] text-gray-500 mt-3 leading-relaxed">
+                La columna <b>Medido</b> es lo que de verdad costó mantener estas unidades por kilómetro: los soles
+                de las órdenes de trabajo de <b>/mantenimiento</b> divididos entre los km recorridos entre ellas.
+                Es un <b>piso</b> —solo cuenta lo asentado como orden— y es una propuesta: el número que se costea
+                sigue siendo el tecleado hasta que alguien aplique el otro.
+              </p>
+            )}
+            {grupoCampo==="Depreciación"&&(
+              <p className="text-[11px] text-gray-500 mt-3 leading-relaxed">
+                La columna <b>Flota</b> cruza el <b>año de fabricación</b> de las unidades con la vida útil que
+                declara esta ficha. Una categoría que mezcla un bus 0 km con uno comprado usado se deprecia con un
+                solo valor de compra que está mal para los dos: ahí lo que toca es <b>duplicar la categoría</b>
+                {" "}(premium y estándar) y reasignar cada placa. No escribe nada: solo lo enseña.
+              </p>
+            )}
           </div>
           {gruposActivos.map(grupo=>{
             const vehs=params.filter(p=>(p.grupo_vehiculo||"Otros")===grupo);
@@ -483,23 +698,35 @@ export default function AjustesCostosPage() {
                         <th className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">Norma Euro</th>
                         <th className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">UREA</th>
                         {camposGrupo.map(c=><th key={c.key} className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap"><div>{c.label}</div><div className="text-[9px] font-normal text-gray-300 normal-case">{c.unidad}</div></th>)}
+                        {/* La columna de la derecha solo sale en las tres categorías que la flota
+                            SABE medir (combustible, mantenimiento y la edad de las unidades). En
+                            las otras no se pinta: una columna vacía se leería como "aquí tampoco
+                            hay medición", que es distinto de "esto no se mide". */}
+                        {colFlota&&<th className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap"><div>{colFlota.titulo}</div><div className="text-[9px] font-normal text-gray-300 normal-case">{colFlota.nota}</div></th>}
                         <th className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">S/km</th>
                         <th className="px-3 py-3"></th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-50">
                       {vehs.map(p=>{
-                        const costoKm=calcCostoKm(p,preciosMap);
+                        const costoKm=costoKmDeParametro(p,preciosMap);
                         return(
                           <tr key={p.id} className="hover:bg-gray-50">
+                            {/* La ficha se edita desde aquí. El nombre, la capacidad, el grupo y
+                                el ícono solo se podían teclear en el alta: un "SUV 6 pax GLP"
+                                mal escrito se leía en el cotizador, el comparativo y el
+                                tarifario, y no se corregía en ninguna pantalla del ERP. */}
                             <td className="px-4 py-3 sticky left-0 bg-white z-10 border-r border-gray-100">
-                              <div className="flex items-center gap-1.5">
+                              <button onClick={()=>setFichaAbierta(p.tipo_vehiculo)}
+                                title={`Editar la ficha de ${p.tipo_vehiculo}`}
+                                className="group flex items-center gap-1.5 w-full text-left hover:bg-blue-50 rounded-lg px-1.5 py-1 -mx-1.5 transition-colors">
                                 <span className="text-lg">{p.icono||"🚌"}</span>
-                                <div>
-                                  <div className="font-bold text-gray-800 text-xs">{p.nombre}</div>
+                                <div className="min-w-0">
+                                  <div className="font-bold text-gray-800 text-xs truncate">{p.nombre}</div>
                                   <div className="text-[10px] text-gray-400">{p.capacidad} pax</div>
                                 </div>
-                              </div>
+                                <span className="text-[10px] text-blue-400 opacity-0 group-hover:opacity-100 ml-auto pl-1">✏️</span>
+                              </button>
                             </td>
                             <td className="px-3 py-2.5">
                               <select value={p.tipo_combustible_1} onChange={e=>cambiarComb(p.tipo_vehiculo,e.target.value)}
@@ -518,6 +745,37 @@ export default function AjustesCostosPage() {
                               {p.usa_urea?<span className="text-[10px] font-black text-cyan-700 bg-cyan-50 border border-cyan-200 px-2 py-0.5 rounded-full">🧪 Activa</span>:<span className="text-[10px] text-gray-300">—</span>}
                             </td>
                             {camposGrupo.map(c=><td key={c.key} className="px-3 py-2"><CeldaEditable valor={p[c.key] as number} campo={c.key} vehId={p.tipo_vehiculo} unidad={c.unidad} step={c.step} onGuardado={(campo,vN,vA)=>guardarParam(p.tipo_vehiculo,campo,vN,vA)}/></td>)}
+                            {/* NO hay botón de aplicar en la celda. `CeldaEditable` guarda en
+                                `onBlur`, así que un botón pegado al lado invita al clic ciego
+                                sobre el campo que mueve el precio de una categoría entera. El
+                                chip ABRE la evidencia; el botón vive dentro. */}
+                            {colFlota&&(
+                              <td className="px-3 py-2 min-w-[112px]">
+                                {grupoCampo==="Combustible"&&(
+                                  placas===null
+                                    ? <span className="text-[10px] text-gray-300 italic">midiendo…</span>
+                                    : medidos.get(p.tipo_vehiculo)
+                                      ? <ChipMedido a={medidos.get(p.tipo_vehiculo)!} onAbrir={()=>setTipoAbierto(p.tipo_vehiculo)}/>
+                                      : <span className="text-[10px] text-gray-300">—</span>
+                                )}
+                                {grupoCampo==="Mantenimiento"&&(
+                                  placasMant===null
+                                    ? <span className="text-[10px] text-gray-300 italic">midiendo…</span>
+                                    : medidosMant.get(p.tipo_vehiculo)
+                                      ? <ChipMantenimiento a={medidosMant.get(p.tipo_vehiculo)!} onAbrir={()=>setMantAbierto(p.tipo_vehiculo)}/>
+                                      : <span className="text-[10px] text-gray-300">—</span>
+                                )}
+                                {/* Sin placas asignadas no se pinta chip: el tipo no tiene flota que
+                                    contradiga su ficha, y un "—" con tono ya dice lo mismo. */}
+                                {grupoCampo==="Depreciación"&&(
+                                  placasMant===null
+                                    ? <span className="text-[10px] text-gray-300 italic">midiendo…</span>
+                                    : antiguedades.get(p.tipo_vehiculo)&&antiguedades.get(p.tipo_vehiculo)!.codigo!=="sin_placas"
+                                      ? <ChipAntiguedad x={antiguedades.get(p.tipo_vehiculo)!} onAbrir={()=>setEdadAbierta(p.tipo_vehiculo)}/>
+                                      : <span className="text-[10px] text-gray-300">—</span>
+                                )}
+                              </td>
+                            )}
                             <td className="px-3 py-3"><span className="font-black font-mono text-[#0b315f] text-sm">S/ {fmtN(costoKm,4)}</span></td>
                             <td className="px-3 py-2.5"><button onClick={()=>desactivarVeh(p.tipo_vehiculo)} className="text-[10px] text-red-400 hover:text-red-600 border border-red-100 hover:bg-red-50 px-2 py-1 rounded-lg font-bold">Desactivar</button></td>
                           </tr>
@@ -554,7 +812,7 @@ export default function AjustesCostosPage() {
                         <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap">{fmtDt(h.cambiado_en)}</td>
                         <td className="px-4 py-2.5"><span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${h.tabla_origen==="precios_combustible"?"bg-orange-100 text-orange-700":"bg-blue-100 text-blue-700"}`}>{h.tabla_origen==="precios_combustible"?"⛽ Combustible":"🚌 Vehículo"}</span></td>
                         <td className="px-4 py-2.5 font-bold text-gray-700 text-xs">{h.tipo_vehiculo||h.tipo_combustible||"—"}</td>
-                        <td className="px-4 py-2.5 text-xs text-gray-600">{CAMPOS_EDIT.find(c=>c.key===h.campo_modificado)?.label||h.campo_modificado}</td>
+                        <td className="px-4 py-2.5 text-xs text-gray-600">{etiquetaCampo(h.campo_modificado)}</td>
                         <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{h.valor_anterior!==null?fmtN(h.valor_anterior,2):"—"}</td>
                         <td className="px-4 py-2.5 font-mono font-black text-xs text-[#0b315f]">{h.valor_nuevo!==null?fmtN(h.valor_nuevo,2):"—"}</td>
                         <td className="px-4 py-2.5">{h.valor_anterior&&h.valor_nuevo?<span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${sube?"bg-red-100 text-red-600":"bg-green-100 text-green-600"}`}>{sube?"▲":"▼"} {Math.abs(((h.valor_nuevo-h.valor_anterior)/h.valor_anterior)*100).toFixed(1)}%</span>:"—"}</td>
@@ -568,6 +826,62 @@ export default function AjustesCostosPage() {
             </div>
           )}
         </div>
+      )}
+
+      {fichaAbierta&&params.find(p=>p.tipo_vehiculo===fichaAbierta)&&(()=>{
+        const p=params.find(x=>x.tipo_vehiculo===fichaAbierta)!;
+        const ficha:FichaTipo={tipo_vehiculo:p.tipo_vehiculo,nombre:p.nombre,capacidad:p.capacidad,icono:p.icono,grupo_vehiculo:p.grupo_vehiculo};
+        return(
+          <ModalFichaTipo
+            ficha={ficha}
+            otros={nombresTipos}
+            nota={motivo}
+            guardando={guardando}
+            onGuardar={(patch,actas,resumen)=>guardarFicha(p.tipo_vehiculo,patch,actas,resumen)}
+            onCerrar={()=>setFichaAbierta(null)}
+          />
+        );
+      })()}
+
+      {tipoAbierto&&medidos.get(tipoAbierto)&&params.find(p=>p.tipo_vehiculo===tipoAbierto)&&(
+        <ModalRendimientoMedido
+          a={medidos.get(tipoAbierto)!}
+          parametro={params.find(p=>p.tipo_vehiculo===tipoAbierto)!}
+          precios={preciosMap}
+          guardando={guardando}
+          onAplicar={n=>aplicarMedido(medidos.get(tipoAbierto)!,n)}
+          onDescartar={n=>descartarMedido(medidos.get(tipoAbierto)!,n)}
+          onCerrar={()=>setTipoAbierto(null)}
+        />
+      )}
+
+      {mantAbierto&&medidosMant.get(mantAbierto)&&params.find(p=>p.tipo_vehiculo===mantAbierto)&&(()=>{
+        // La gemela PREMIUM de una ficha usada, para el punto de equilibrio. Se busca por la
+        // CLAVE (`clavePremiumDe`), nunca por el nombre: el nombre es texto que se edita desde
+        // el modal de ficha, y emparejar por ahí sería emparejar por casualidad.
+        const clavePrem=clavePremiumDe(mantAbierto);
+        const prem=clavePrem?params.find(p=>p.tipo_vehiculo===clavePrem):undefined;
+        return(
+        <ModalMantenimientoMedido
+          a={medidosMant.get(mantAbierto)!}
+          parametro={params.find(p=>p.tipo_vehiculo===mantAbierto)!}
+          precios={preciosMap}
+          gemela={prem?{nombre:prem.nombre,parametro:prem}:null}
+          guardando={guardando}
+          onAplicar={n=>aplicarMant(medidosMant.get(mantAbierto)!,n)}
+          onDescartar={n=>descartarMant(medidosMant.get(mantAbierto)!,n)}
+          onCerrar={()=>setMantAbierto(null)}
+        />);
+      })()}
+
+      {edadAbierta&&antiguedades.get(edadAbierta)&&params.find(p=>p.tipo_vehiculo===edadAbierta)&&(
+        <ModalAntiguedadTipo
+          x={antiguedades.get(edadAbierta)!}
+          nombre={params.find(p=>p.tipo_vehiculo===edadAbierta)!.nombre}
+          parametro={params.find(p=>p.tipo_vehiculo===edadAbierta)!}
+          precios={preciosMap}
+          onCerrar={()=>setEdadAbierta(null)}
+        />
       )}
     </main>
   );

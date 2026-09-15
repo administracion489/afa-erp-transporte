@@ -27,21 +27,35 @@ const DUPLICADO = "23505";
  * inserta cientos de mensajes casi a la vez y dos de ellos pueden intentar crear
  * el mismo contacto en paralelo. Con el patrón "select y luego insert" a secas,
  * uno de los dos moría con un 23505 y su mensaje se perdía.
+ *
+ * `telefono` se pasa SOLO en WhatsApp, donde el id del canal (`wa_id`) es el
+ * número del cliente en E.164 sin "+". Hay que copiarlo porque `wa_id` es la
+ * clave técnica de Meta y las pantallas del ERP leen `telefono`: sin la copia el
+ * operador veía el nombre del contacto y ningún número al que llamar. En
+ * Messenger/Instagram el id es opaco (fb_psid/ig_id) y no debe copiarse.
  */
 export async function resolverContacto(
   sb: SB,
-  opts: { campo: CampoId; valor: string; nombre?: string | null; canal: string },
+  opts: { campo: CampoId; valor: string; nombre?: string | null; canal: string; telefono?: string | null },
 ): Promise<{ id: string } | null> {
   const buscar = async () =>
-    (await sb.from("crm_contactos").select("id, nombre").eq(opts.campo, opts.valor).maybeSingle()).data;
+    (await sb.from("crm_contactos").select("id, nombre, telefono").eq(opts.campo, opts.valor).maybeSingle()).data;
 
   const existente = await buscar();
   if (existente) {
+    const patch: Record<string, unknown> = {};
     // Un nombre real (de los contactos del celular o del perfil de WhatsApp)
     // reemplaza al marcador que se puso cuando solo se conocía el número.
     // Nunca pisa un nombre que alguien escribió a mano en el CRM.
     if (opts.nombre && opts.nombre !== opts.valor && existente.nombre === opts.valor) {
-      await sb.from("crm_contactos").update({ nombre: opts.nombre }).eq("id", existente.id);
+      patch.nombre = opts.nombre;
+    }
+    // Relleno de una sola vez para contactos anteriores: `!existente.telefono` es
+    // lo que impide pisar un número corregido a mano, y esto corre en CADA mensaje.
+    if (opts.telefono && !existente.telefono) patch.telefono = opts.telefono;
+
+    if (Object.keys(patch).length > 0) {
+      await sb.from("crm_contactos").update(patch).eq("id", existente.id);
     }
     return { id: existente.id };
   }
@@ -52,6 +66,7 @@ export async function resolverContacto(
       nombre: opts.nombre || opts.valor,
       canal_origen: opts.canal,
       [opts.campo]: opts.valor,
+      ...(opts.telefono ? { telefono: opts.telefono } : {}),
     })
     .select("id")
     .single();

@@ -26,6 +26,21 @@ export function fmtMoneda(n: number, moneda = "PEN"): string {
   })}`;
 }
 
+/**
+ * Códigos del Catálogo 07 de SUNAT que NO llevan IGV en el comprobante.
+ * 20 = exonerado (el taxi que AFA compra) · 30 = inafecto · 40 = exportación (el
+ * paquete turístico a no domiciliado). La ficha completa —nombre, si da derecho a
+ * crédito fiscal, etiqueta para la UI— vive en lib/finanzas/afectacion.ts; aquí queda
+ * solo el primitivo porque es lo único que necesita la aritmética, y este módulo no
+ * tiene dependencias a propósito. La autoridad es la tabla public.cat_afectacion_igv.
+ */
+const CODIGOS_SIN_IGV = new Set(["20", "30", "40"]);
+
+/** ¿La operación lleva IGV? Un código desconocido cae en gravado, que es el caso normal. */
+export function gravaIgv(afectacion?: string | null): boolean {
+  return !CODIGOS_SIN_IGV.has(String(afectacion ?? "10"));
+}
+
 export type DesgloseIgv = {
   base: number;      // base imponible (neto sin IGV)
   igv: number;       // impuesto
@@ -59,16 +74,26 @@ export type Detraccion = {
  * Calcula la detracción sobre el TOTAL de un comprobante. Opera solo si el total
  * alcanza el umbral. El % y umbral vienen del catálogo (cat_detraccion), NO se fijan
  * aquí. AFA debe confirmar con su contador el código de servicio y la tasa vigente.
+ *
+ * `afectacion` es el código del Catálogo 07 (public.cat_afectacion_igv). Confirmado
+ * con el contador de AFA: **si la operación no lleva IGV, no hay detracción**. Hasta
+ * esta versión la función detraía con solo superar el umbral, sin preguntar — así que
+ * un servicio exonerado (taxi) o una exportación (paquete turístico) recibía una
+ * detracción que no correspondía. Omitir el parámetro conserva el comportamiento
+ * anterior para los llamadores que aún no declaran afectación.
  */
 export function calcularDetraccion(
   total: number,
-  cfg: { porcentaje: number; umbral_min?: number; codigo?: string | null; activa?: boolean }
+  cfg: { porcentaje: number; umbral_min?: number; codigo?: string | null; activa?: boolean },
+  afectacion?: string | null
 ): Detraccion {
   const t = redondear(total);
   const umbral = cfg.umbral_min ?? 700;
-  if (cfg.activa === false || cfg.porcentaje <= 0 || t < umbral) {
-    return { aplica: false, porcentaje: cfg.porcentaje, monto: 0, neto_a_pagar: t, codigo: cfg.codigo ?? null };
-  }
+  const sinDetraccion = { aplica: false, porcentaje: cfg.porcentaje, monto: 0, neto_a_pagar: t, codigo: cfg.codigo ?? null };
+
+  if (afectacion != null && !gravaIgv(afectacion)) return sinDetraccion;
+  if (cfg.activa === false || cfg.porcentaje <= 0 || t < umbral) return sinDetraccion;
+
   const monto = redondear(t * (cfg.porcentaje / 100));
   return { aplica: true, porcentaje: cfg.porcentaje, monto, neto_a_pagar: redondear(t - monto), codigo: cfg.codigo ?? null };
 }

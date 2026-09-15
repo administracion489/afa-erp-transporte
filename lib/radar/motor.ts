@@ -22,6 +22,7 @@ import { leccionesCombustible } from "./lecciones-combustible";
 import { ejecutarAccion, crearAlerta, fechaLima, horaLima } from "./acciones";
 import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
 import { transcribirAudio } from "./transcripcion";
+import { miembrosDelMismoRemitente, remitenteUtilizable } from "./cluster-remitente";
 import { CONFIG_DEFECTO, normalizarConfigRadar } from "./config";
 import { LISTA_CATEGORIAS, type CategoriaRadar, type RadarConfig, type ResumenProcesamiento } from "./tipos";
 
@@ -284,12 +285,18 @@ function dentroDeGraciaCluster(mensaje: any): boolean {
 type ResolucionCluster = { primaria: boolean; primariaId?: string; miembros?: any[] };
 
 /**
- * Busca otros mensajes del MISMO remitente en el MISMO grupo, dentro de la ventana, que
+ * Busca otros mensajes de LA MISMA PERSONA en el MISMO grupo, dentro de la ventana, que
  * también "parecen combustible". El más antiguo del grupo se vuelve la "primaria" (la que
  * dispara la extracción combinada); el resto se fusiona en ella sin generar su propia fila.
+ *
+ * **Quién mandó el mensaje se decide en `lib/radar/cluster-remitente.ts`, no con el `.eq()`.**
+ * En producción se fusionaron fotos de VARIOS celulares en una sola recarga: basta con que el
+ * jid llegue vacío o con un valor de relleno para que el filtro empareje a todo el grupo — un
+ * comodín compartido casa con todos. Por eso el jid se valida antes de agrupar y cada
+ * candidato se vuelve a comprobar aquí, cruzando el número con el pushName.
  */
 async function resolverCluster(sb: any, mensaje: any): Promise<ResolucionCluster> {
-  if (!pareceCombustible(mensaje) || !mensaje.remitente_wa || !mensaje.grupo_id) {
+  if (!pareceCombustible(mensaje) || !remitenteUtilizable(mensaje) || !mensaje.grupo_id) {
     return { primaria: true };
   }
   const centro = new Date(mensaje.recibido_en).getTime();
@@ -297,13 +304,18 @@ async function resolverCluster(sb: any, mensaje: any): Promise<ResolucionCluster
   const hasta = new Date(centro + VENTANA_CLUSTER_MS).toISOString();
   const { data } = await sb
     .from("radar_mensajes")
-    .select("id, recibido_en, estado, tipo, texto, transcripcion, media_url, media_mime")
+    // `remitente_wa`/`remitente_nombre` viajan para poder VERIFICAR el remitente, no solo
+    // filtrarlo; `media_nombre` porque es el nombre de archivo que se guarda como evidencia.
+    .select("id, recibido_en, estado, tipo, texto, transcripcion, media_url, media_mime, media_nombre, remitente_wa, remitente_nombre")
     .eq("remitente_wa", mensaje.remitente_wa)
     .eq("grupo_id", mensaje.grupo_id)
     .neq("estado", "fusionado")
     .gte("recibido_en", desde)
     .lte("recibido_en", hasta);
-  const candidatos = ((data as any[]) ?? []).filter((m) => pareceCombustible(m));
+  const candidatos = miembrosDelMismoRemitente(
+    mensaje,
+    ((data as any[]) ?? []).filter((m) => pareceCombustible(m))
+  );
   if (candidatos.length <= 1) return { primaria: true };
 
   candidatos.sort((a, b) => new Date(a.recibido_en).getTime() - new Date(b.recibido_en).getTime());
@@ -343,30 +355,38 @@ function seleccionarMediaCluster(candidatos: any[], cap: number): any[] {
 }
 
 /**
- * Guías de lectura del odómetro por vehículo (propio + tercerizado, vehiculos.guia_odometro /
- * vehiculos_tercero.guia_odometro). Se cargan una sola vez por lote, solo si hay algún
- * candidato con pinta de combustible (para no gastar la consulta en lotes sin eso).
+ * Cómo se lee el odómetro de cada unidad: la guía del operador (vehiculos.guia_odometro /
+ * vehiculos_tercero.guia_odometro) y CUÁNTOS DÍGITOS tiene su odómetro. Se carga una sola vez
+ * por lote, solo si hay algún candidato con pinta de combustible (para no gastar la consulta
+ * en lotes sin eso).
+ *
+ * La consulta filtraba `.not("guia_odometro","is",null)`, así que una unidad sin guía escrita a
+ * mano no llegaba al prompt NI SIQUIERA con su número de dígitos — que el ERP siempre sabe, sale
+ * de `kilometraje_actual`. Dos datos distintos con dueños distintos: la guía es una opinión que
+ * alguien teclea, la forma del número es un hecho de la base. Atar el hecho a la opinión es lo
+ * que dejó al modelo leyendo tableros a ciegas y devolviendo un dígito de más (ver
+ * `bloqueFormaOdometro` en lib/vision-ia.ts, el mismo agujero en el otro carril de lectura).
+ * Cuesta una línea corta de prompt por unidad; leer mal un odómetro cuesta bastante más.
  */
-async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string; digitos: number | null }[]> {
+async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string | null; digitos: number | null }[]> {
   try {
-    // `kilometraje_actual` viaja en la MISMA fila: de ahí sale cuántos dígitos tiene el odómetro
-    // de esa unidad, que es lo que distingue un parcial de 4 cifras de un total de 6. Se manda
-    // la cantidad de dígitos, nunca el km exacto (ver ContextoPrompt.guiasOdometro).
+    // Se manda la cantidad de dígitos, nunca el km exacto (ver ContextoPrompt.guiasOdometro).
     const [{ data: propios }, { data: terceros }] = await Promise.all([
-      sb.from("vehiculos").select("placa, guia_odometro, kilometraje_actual").not("guia_odometro", "is", null),
-      sb.from("vehiculos_tercero").select("placa, guia_odometro, kilometraje_actual").not("guia_odometro", "is", null),
+      sb.from("vehiculos").select("placa, guia_odometro, kilometraje_actual"),
+      sb.from("vehiculos_tercero").select("placa, guia_odometro, kilometraje_actual"),
     ]);
     const filas = [...((propios as any[]) ?? []), ...((terceros as any[]) ?? [])];
     return filas
-      .filter((f) => String(f.guia_odometro ?? "").trim())
       .map((f) => {
         const km = Number(f.kilometraje_actual ?? 0);
         return {
-          placa: String(f.placa ?? ""),
-          guia: String(f.guia_odometro).trim(),
+          placa: String(f.placa ?? "").trim(),
+          guia: String(f.guia_odometro ?? "").trim() || null,
           digitos: km > 0 ? Math.round(km).toString().length : null,
         };
-      });
+      })
+      // Una unidad sin placa no se puede nombrar, y una sin guía NI dígitos no aporta nada.
+      .filter((f) => f.placa && (f.guia || f.digitos));
   } catch {
     return [];
   }
@@ -404,7 +424,7 @@ async function procesarMensaje(
   config: RadarConfig,
   forzar: boolean,
   grupoInfo: GrupoInfo | null,
-  guiasOdometro: { placa: string; guia: string; digitos: number | null }[],
+  guiasOdometro: { placa: string; guia: string | null; digitos: number | null }[],
   leccionesOdo: string,
   leccionesComb: string
 ): Promise<ResultadoMensaje> {
@@ -552,7 +572,13 @@ async function procesarMensaje(
     );
     const notaMultiple =
       bloquesMedia.length > 1
-        ? `\n\nSe adjuntan ${bloquesMedia.length} archivos que el remitente envió JUNTOS como parte del MISMO reporte. Si es una recarga de combustible suelen tener ROLES distintos (foto del tablero/odómetro, del nivel de combustible, del surtidor del grifo y de la NOTA DE DESPACHO): combínalos en UNA sola extracción cruzando sus datos — no los trates por separado, y no ignores ninguno (la nota con los importes suele ir al final del álbum).`
+        // OJO con lo que se le pide aquí: la versión anterior decía "son parte del MISMO
+        // reporte … combínalos en UNA sola extracción, no los trates por separado", sin
+        // excepción. Un conductor que al cerrar turno manda juntos los vouchers del DÍA hacía
+        // que el modelo obedeciera y fusionara dos despachos de dos placas distintas en uno,
+        // perdiendo el segundo. Ahora la ráfaga es un solo reporte SALVO prueba en contrario,
+        // y la prueba son los datos del propio papel (ver album-recargas.ts).
+        ? `\n\nSe adjuntan ${bloquesMedia.length} archivos que el remitente envió JUNTOS. No ignores ninguno (la nota con los importes suele ir al final del álbum).\nLo NORMAL es que sean UN mismo reporte fotografiado por partes, con ROLES distintos (tablero/odómetro, nivel de combustible, surtidor del grifo, NOTA DE DESPACHO): en ese caso combínalos en UNA sola extracción cruzando sus datos.\nPERO antes COMPRUÉBALO: si ves DOS NOTAS con número de comprobante distinto, o placas distintas, o importes distintos, son DOS RECARGAS y NO se mezclan — un conductor manda juntos los vouchers del día al cerrar el turno. Ahí, la primera va en los campos de siempre y CADA UNA DE LAS DEMÁS en "recargas_adicionales". Nunca elijas una ni promedies: los datos de un despacho no describen al otro.`
         : "";
     const prompt =
       promptExtraccionMedia(ctx) +
