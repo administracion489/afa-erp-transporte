@@ -24,6 +24,7 @@ import {
   minutosAHhmm,
   planDeEnvioConductor,
   proximaAperturaMs,
+  textoDuracion,
   ventanaCubreMadrugada,
   type Horario,
 } from "../lib/alertas-horario";
@@ -38,7 +39,7 @@ const chk = (nombre: string, ok: boolean, extra = "") => {
 const lima = (fecha: string, hora: string) => limaAUtcMs(fecha, hora)!;
 
 /** La ventana que siembra supabase/alertas-horario-conductor.sql. */
-const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60 };
+const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60, margenMin: 90 };
 
 // ── 1. Aritmética de Lima (UTC-5 fijo) ─────────────────────────────────────────
 {
@@ -105,72 +106,89 @@ const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60 }
   }
 }
 
-// ── 4. LO QUE NUNCA SE RETIENE (la mitad que importa) ──────────────────────────
+// ── 4. LA REGLA DURA: se retiene mientras el horario llegue A TIEMPO ───────────
 {
-  // LA REGLA DURA: solo se retiene lo que se va a entregar la VÍSPERA. Se asigna a las
-  // 23:00 un servicio de mañana a las 06:00 → la ventana no vuelve a abrir hasta el día
-  // del servicio, así que sale ya.
-  const p = planDeEnvioConductor({
-    ahoraMs: lima("2026-09-14", "23:00"),
-    fechaServicio: "2026-09-15", horario: VENTANA,
+  // LOS TRES CASOS REALES DEL DUEÑO, con SU ventana (11:59–21:00) y el margen heredado.
+  // Los tres se programan de noche, fuera del horario; lo único que cambia es a qué hora
+  // es el servicio, y eso es exactamente lo que tiene que decidir.
+  const suya: Horario = { respeta: true, desdeMin: 11 * 60 + 59, hastaMin: 21 * 60, margenMin: 90 };
+  const alAbrir = (ahora: string, hora: string) => planDeEnvioConductor({
+    ahoraMs: lima("2026-09-14", ahora), fechaServicio: "2026-09-15", horaServicio: hora, horario: suya,
   });
-  chk("si el horario solo abre el día del servicio, sale YA",
-    p.enviar === true && p.codigo === "no_es_vispera", p.codigo);
 
-  // Un día más allá sí alcanza a ser víspera.
-  const pasado = planDeEnvioConductor({
-    ahoraMs: lima("2026-09-14", "23:00"),
-    fechaServicio: "2026-09-16", horario: VENTANA,
-  });
-  chk("para un servicio de pasado mañana sí espera", pasado.enviar === false, pasado.codigo);
-  chk("…y lo entrega la víspera",
-    pasado.enviar === false && pasado.abreMs === lima("2026-09-15", "12:00"),
-    pasado.enviar === false ? pasado.abreTexto : "salió");
+  const tarde = alAbrir("23:00", "15:00");
+  chk("23:00 → servicio de mañana a las 15:00: ESPERA, no lo despierta",
+    tarde.enviar === false && tarde.abreMs === lima("2026-09-15", "11:59"),
+    tarde.enviar === false ? tarde.abreTexto : tarde.codigo);
+
+  const madrugada = alAbrir("21:01", "03:00");
+  chk("21:01 → servicio de mañana a las 03:00: URGENTE, sale ya",
+    madrugada.enviar === true && madrugada.codigo === "urgente", madrugada.codigo);
+
+  const filo = alAbrir("21:01", "12:00");
+  chk("21:01 → servicio de mañana a las 12:00: URGENTE (llegaría con 1 min)",
+    filo.enviar === true && filo.codigo === "urgente", filo.codigo);
+
+  // LA FRONTERA EXACTA del margen. La apertura es a las 11:59: con el servicio a las
+  // 13:29 faltan 90 min justos (espera) y un minuto antes, 89 (urgente).
+  chk("a 90 min justos de la apertura todavía espera", alAbrir("23:00", "13:29").enviar === false);
+  chk("a 89 min ya es urgente", alAbrir("23:00", "13:28").enviar === true);
 }
 {
-  // EL CASO QUE REPORTÓ EL DUEÑO — «el servicio urgente que se programa a las 21:01 de
-  // hoy y arranca a las 03:00 de mañana». Con su ventana real (11:59–21:00).
-  const suya: Horario = { respeta: true, desdeMin: 11 * 60 + 59, hastaMin: 21 * 60 };
-  for (const hora of ["03:00", "06:00", "11:30", "12:00", "14:00", "23:59"]) {
-    const p = planDeEnvioConductor({
-      ahoraMs: lima("2026-09-14", "21:01"), fechaServicio: "2026-09-15", horario: suya,
-    });
-    chk(`urgente 21:01 → servicio del 15 a las ${hora}: sale al instante`,
-      p.enviar === true && p.codigo === "no_es_vispera", p.codigo);
-  }
-  // EL AGUJERO QUE DESTAPÓ, conservado como regresión: con la regla vieja («no retener
-  // más allá de la HORA»), un servicio del 15 a las 12:00 se retenía hasta las 11:59 y
-  // le llegaba con UN MINUTO de aviso, porque 11:59 es técnicamente "antes" de las 12:00.
-  const aperturaVieja = lima("2026-09-15", "11:59");
-  chk("la regla vieja habría dado 1 minuto de aviso (por eso ya no se mira la hora)",
-    aperturaVieja < lima("2026-09-15", "12:00") && aperturaVieja > lima("2026-09-15", "11:00"));
-  // Y el de PASADO mañana sigue esperando: el urgente no puede desactivar el arreglo.
-  const lejano = planDeEnvioConductor({
-    ahoraMs: lima("2026-09-14", "21:01"), fechaServicio: "2026-09-16", horario: suya,
-  });
-  chk("…pero el del 16 sigue esperando al mediodía del 15",
-    lejano.enviar === false && lejano.abreMs === lima("2026-09-15", "11:59"),
-    lejano.enviar === false ? lejano.abreTexto : "salió");
-}
-{
-  // Un cambio de HOY sobre un servicio de HOY es un hecho real y urgente, no el
-  // artefacto de medianoche: sale a la hora que sea.
+  // EL BUG ORIGINAL SIGUE CERRADO: el programa fijo que se detecta a medianoche.
   const p = planDeEnvioConductor({
-    ahoraMs: lima("2026-09-14", "03:00"), fechaServicio: "2026-09-14", horario: VENTANA,
+    ahoraMs: lima("2026-09-15", "00:05"),
+    fechaServicio: "2026-09-16", horaServicio: "06:00", horario: VENTANA,
   });
-  chk("un servicio de HOY se avisa al instante", p.enviar === true && p.codigo === "servicio_hoy", p.codigo);
+  chk("el aviso de medianoche para pasado mañana sigue esperando al mediodía",
+    p.enviar === false && p.abreMs === lima("2026-09-15", "12:00"),
+    p.enviar === false ? p.abreTexto : p.codigo);
 }
 {
-  // Sin saber QUÉ DÍA es el servicio no se puede comprobar la regla dura → se envía.
+  // Y SE FUE LA EXCEPCIÓN «servicio de HOY», que era demasiado ancha: despertaba a las
+  // 03:00 por un servicio de las 15:00 del mismo día. Ahora decide el margen.
+  const lejos = planDeEnvioConductor({
+    ahoraMs: lima("2026-09-14", "03:00"),
+    fechaServicio: "2026-09-14", horaServicio: "15:00", horario: VENTANA,
+  });
+  chk("un servicio de HOY a las 15:00 detectado a las 03:00 ya NO lo despierta",
+    lejos.enviar === false, lejos.codigo);
+  const cerca = planDeEnvioConductor({
+    ahoraMs: lima("2026-09-14", "03:00"),
+    fechaServicio: "2026-09-14", horaServicio: "05:00", horario: VENTANA,
+  });
+  chk("…pero uno de HOY a las 05:00 sí sale al instante",
+    cerca.enviar === true && cerca.codigo === "urgente", cerca.codigo);
+}
+{
+  // Margen 0 = "nada es urgente": todo lo que caiga fuera del horario espera.
+  const sinMargen: Horario = { respeta: true, desdeMin: 720, hastaMin: 1320, margenMin: 0 };
+  const p = planDeEnvioConductor({
+    ahoraMs: lima("2026-09-14", "23:00"),
+    fechaServicio: "2026-09-15", horaServicio: "12:30", horario: sinMargen,
+  });
+  chk("con margen 0 hasta un servicio de las 12:30 espera", p.enviar === false, p.codigo);
+  chk("un 0 explícito se respeta y no cae al defecto",
+    horarioDe({ respeta_horario: true, horario_desde: "12:00", horario_hasta: "22:00", horario_margen_min: 0 }).margenMin === 0);
+  chk("y sin columna se usan los 90 heredados",
+    horarioDe({ respeta_horario: true, horario_desde: "12:00", horario_hasta: "22:00" }).margenMin === 90);
+}
+{
+  // Sin saber CUÁNDO es el servicio no se puede comprobar la regla dura → se envía.
   for (const fecha of [null, "", undefined]) {
     const p = planDeEnvioConductor({
-      ahoraMs: lima("2026-09-14", "03:00"), fechaServicio: fecha, horario: VENTANA,
+      ahoraMs: lima("2026-09-14", "03:00"), fechaServicio: fecha, horaServicio: "06:00", horario: VENTANA,
     });
     chk(`sin fecha (${String(fecha)}) el aviso sale`, p.enviar === true && p.codigo === "sin_fecha", p.codigo);
   }
-  // Una fecha PASADA nunca retiene: ninguna apertura futura es su víspera.
+  // Sin hora se supone el inicio más temprano (00:00), el lado seguro.
+  const sinHora = planDeEnvioConductor({
+    ahoraMs: lima("2026-09-14", "23:00"), fechaServicio: "2026-09-15", horario: VENTANA,
+  });
+  chk("sin hora se supone lo más temprano y sale", sinHora.enviar === true && sinHora.codigo === "urgente", sinHora.codigo);
+  // Una fecha PASADA nunca retiene.
   const viejo = planDeEnvioConductor({
-    ahoraMs: lima("2026-09-14", "03:00"), fechaServicio: "2026-09-10", horario: VENTANA,
+    ahoraMs: lima("2026-09-14", "03:00"), fechaServicio: "2026-09-10", horaServicio: "06:00", horario: VENTANA,
   });
   chk("un servicio ya pasado no se retiene", viejo.enviar === true, viejo.codigo);
 }
@@ -182,7 +200,7 @@ const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60 }
   const p = planDeEnvioConductor({
     ahoraMs: lima("2026-09-14", "00:05"),
     fechaServicio: "2026-09-15",
-    horario: { respeta: false, desdeMin: 720, hastaMin: 1320 },
+    horario: { respeta: false, desdeMin: 720, hastaMin: 1320, margenMin: 90 },
   });
   chk("un tipo que no respeta horario sale siempre", p.enviar === true && p.codigo === "no_difiere", p.codigo);
 }
@@ -206,9 +224,9 @@ const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60 }
 {
   // Una ventana a medio configurar no puede silenciar el sistema: se envía.
   for (const horario of [
-    { respeta: true, desdeMin: null, hastaMin: 1320 },
-    { respeta: true, desdeMin: 720, hastaMin: null },
-    { respeta: true, desdeMin: 720, hastaMin: 720 },   // longitud cero
+    { respeta: true, desdeMin: null, hastaMin: 1320, margenMin: 90 },
+    { respeta: true, desdeMin: 720, hastaMin: null, margenMin: 90 },
+    { respeta: true, desdeMin: 720, hastaMin: 720, margenMin: 90 },   // longitud cero
   ] as Horario[]) {
     const p = planDeEnvioConductor({
       ahoraMs: lima("2026-09-14", "00:05"),
@@ -219,33 +237,39 @@ const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60 }
   }
 }
 
-// ── 6. Invariante por barrido: TODA espera se entrega la VÍSPERA ───────────────
+// ── 6. Invariante por barrido: ninguna espera avisa tarde ─────────────────────
 {
-  // La única garantía que no puede fallar en ninguna combinación, y es más fuerte que la
-  // anterior («no más allá de la hora»): un aviso retenido se entrega en una FECHA
-  // anterior a la del servicio, así que ninguna hora puede alcanzarlo — ni las 00:00.
-  // Se barre el día entero cada 10 min (la cadencia real del tick) contra servicios de
-  // hoy, mañana y pasado mañana, con cuatro ventanas, incluida la real del dueño.
-  const ventanas: Horario[] = [
-    { respeta: true, desdeMin: 720, hastaMin: 1320 },            // 12:00–22:00, la sembrada
-    { respeta: true, desdeMin: 7 * 60, hastaMin: 21 * 60 },      // 07:00–21:00
-    { respeta: true, desdeMin: 11 * 60 + 59, hastaMin: 21 * 60 },// 11:59–21:00, la suya
-    { respeta: true, desdeMin: 1320, hastaMin: 360 },            // 22:00–06:00, nocturna
+  // Lo que no puede fallar en ninguna combinación: si se retiene, al abrir el horario
+  // todavía queda AL MENOS el margen antes del servicio. Se barre el día entero cada
+  // 10 min (la cadencia real del tick) contra servicios de hoy, mañana y pasado mañana a
+  // toda hora, con cuatro ventanas —incluida la real del dueño— y tres márgenes.
+  const ventanas: [number, number][] = [
+    [720, 1320],            // 12:00–22:00, la sembrada
+    [7 * 60, 21 * 60],      // 07:00–21:00
+    [11 * 60 + 59, 21 * 60],// 11:59–21:00, la suya
+    [1320, 360],            // 22:00–06:00, nocturna
   ];
   let casos = 0, tardios = 0, retenidos = 0;
-  for (const horario of ventanas) {
-    for (let min = 0; min < 1440; min += 10) {
-      const ahoraMs = lima("2026-09-14", minutosAHhmm(min));
-      for (const fecha of ["2026-09-14", "2026-09-15", "2026-09-16"]) {
-        const p = planDeEnvioConductor({ ahoraMs, fechaServicio: fecha, horario });
-        casos++;
-        if (p.enviar) continue;
-        retenidos++;
-        if (fechaLima(p.abreMs) >= fecha) tardios++;
+  for (const [desdeMin, hastaMin] of ventanas) {
+    for (const margenMin of [0, 90, 240]) {
+      const horario: Horario = { respeta: true, desdeMin, hastaMin, margenMin };
+      for (let min = 0; min < 1440; min += 10) {
+        const ahoraMs = lima("2026-09-14", minutosAHhmm(min));
+        for (const fecha of ["2026-09-14", "2026-09-15", "2026-09-16"]) {
+          for (let h = 0; h < 24; h++) {
+            const horaServicio = minutosAHhmm(h * 60);
+            const p = planDeEnvioConductor({ ahoraMs, fechaServicio: fecha, horaServicio, horario });
+            casos++;
+            if (p.enviar) continue;
+            retenidos++;
+            const antelacion = (limaAUtcMs(fecha, horaServicio)! - p.abreMs) / 60_000;
+            if (antelacion < margenMin) tardios++;
+          }
+        }
       }
     }
   }
-  chk(`toda espera se entrega antes del día del servicio (${casos} combinaciones, ${retenidos} retenidas)`,
+  chk(`toda espera conserva su margen (${casos} combinaciones, ${retenidos} retenidas)`,
     tardios === 0, `${tardios} tardía(s)`);
   // Si esto llega a 0, el módulo dejó de hacer su trabajo y la prueba de arriba
   // pasaría igual: un "no retiene nunca" cumple la invariante de forma trivial.
@@ -259,7 +283,7 @@ const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60 }
   // eso el aviso seguía saliendo a las 00:05 y encima uno hecho al mediodía esperaba
   // hasta la noche. El motor no puede detectarlo —una ventana nocturna es legítima— así
   // que lo único que queda es que la pantalla lo DIGA antes de guardar.
-  const invertida: Horario = { respeta: true, desdeMin: 21 * 60, hastaMin: 7 * 60 };
+  const invertida: Horario = { respeta: true, desdeMin: 21 * 60, hastaMin: 7 * 60, margenMin: 90 };
   const p = planDeEnvioConductor({
     ahoraMs: lima("2026-09-15", "00:05"),
     fechaServicio: "2026-09-16", horario: invertida,
@@ -286,6 +310,10 @@ const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60 }
   const f = describirHorario(7 * 60, 21 * 60);
   chk("la frase nombra el rango de ENVÍO", f.includes("ENVÍA") && f.includes("07:00") && f.includes("21:00"), f);
   chk("y dice hasta cuándo espera lo que cae fuera", f.includes("espera a las 07:00"));
+  chk("la frase nombra el margen de urgencia", describirHorario(7 * 60, 21 * 60, 90).includes("1 h 30 min"),
+    describirHorario(7 * 60, 21 * 60, 90));
+  chk("con margen 0 dice que nada es urgente", describirHorario(7 * 60, 21 * 60, 0).includes("Nada se considera urgente"));
+  chk("textoDuracion", textoDuracion(45) === "45 min" && textoDuracion(90) === "1 h 30 min" && textoDuracion(120) === "2 h");
   chk("una ventana vacía se describe como apagada",
     describirHorario(9 * 60, 9 * 60).includes("al instante"));
   chk("y una incompleta también", describirHorario(null, 21 * 60).includes("al instante"));
