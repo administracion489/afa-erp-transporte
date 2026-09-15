@@ -123,6 +123,25 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "No. Al guardar pasan dos cosas solas:\n\n1. **Se escribe también en el tramo hermano.** Los asientos son del **día**, no del tramo: el cliente contrató una ruta de N asientos, no una ida de 15 y un retorno de 20. La liquidación imprime uno solo (mira la ida primero), así que dejarlos distintos no representa dos cantidades — hace que una se descarte en silencio.\n2. **Si el servicio es de un contrato, el ERP te ofrece aplicarlo al resto.** En el modal *¿Aplicar a más servicios del contrato?* elige **Solo los PAX contratados**: no toca unidad, conductor, hora ni estado, y alcanza a las idas **y** a los retornos del rango.\n\nDos cosas que ese modo NO hace, a propósito: no pisa a los servicios que **ya declaran otra capacidad** (son otro móvil del mismo contrato y la suya es correcta — el modal te dice cuántos deja fuera), y no confirma nada: corregir cuántos asientos se contrataron no programa un bus.\n\nSi la ruta se repite mes a mes, lo que conviene es ficharla una sola vez en **Liquidaciones → Rutas contratadas**: desde ahí sale sola sin escribirla en cada servicio.",
       },
       {
+        pregunta: "Cambié la hora del contrato y en los paraderos sigue la hora vieja.",
+        respuesta:
+          "Eso era un defecto y ya está arreglado. **La hora de un servicio vive en dos sitios y antes solo se movía uno.**\n\n" +
+          "Lo que se veía en la lista era `hora del servicio`; lo que de verdad llega a la calle es la hora de **cada paradero**: " +
+          "de ahí salen el aviso al pasajero, el itinerario de la app del conductor, la hoja de ruta impresa y el semáforo de " +
+          "puntualidad. Al correr el horario de un contrato, la fila cambiaba y los paraderos se quedaban con la hora anterior — " +
+          "así que la que no se movía era justamente la que importaba.\n\n" +
+          "Ahora, cambies la hora donde la cambies (en la fila, en el formulario o aplicándola a todo el contrato), **los paraderos " +
+          "se corren con ella**. Tres cosas que conviene saber:\n\n" +
+          "• **Se corren por el mismo desplazamiento, no se les pone a todos la hora nueva.** Si adelantas de 05:10 a 05:25, los " +
+          "paraderos de 05:25 y 06:05 pasan a 05:40 y 06:20: el espaciado que planificaste se conserva.\n" +
+          "• **Al paradero sin hora no se le inventa una**, y el que el conductor ya marcó conserva la suya: esa es la hora contra " +
+          "la que se midió si llegó tarde.\n" +
+          "• **Si el servicio no tiene paraderos propios, el ERP te lo dice** en vez de callarlo. Ese servicio saca su itinerario de " +
+          "la cotización, así que la hora nueva hay que propagarla desde **Cotizaciones**, guardando la cotización y aceptando " +
+          "*Propagar a futuros*.\n\n" +
+          "Y si el servicio ya estaba sincronizado, te seguirá preguntando **“¿Re-notificar a los pasajeros?”**: se les avisó la hora anterior.",
+      },
+      {
         pregunta: "¿Qué es el bloque violeta “Cierre administrativo”?",
         respuesta:
           "Es el **segundo ciclo** del servicio, el del dinero, y solo aplica a los que ya están *Finalizados*. Va aparte y en otro color justamente para que no se confunda con el ciclo operativo.\n\n**Un servicio finalizado arranca automáticamente en “Por liquidar”**: el viaje se hizo, pero todavía no se cerró cuánto se cobra ni se emitió nada. De ahí sigue a *Liquidada* → *Facturada* → *Cobrada*.\n\nEse contador de “Por liquidar” es tu cola de trabajo pendiente: cada número ahí es un viaje hecho que todavía no te ha pagado nadie. Se trabaja desde **Liquidaciones**.\n\nSi el servicio fue **tercerizado**, además corre el ciclo del proveedor (por conciliar → conciliada → por pagar → pagada). Que el cliente ya te haya pagado no significa que tú ya le pagaste a GRIJALVA TOURS.",

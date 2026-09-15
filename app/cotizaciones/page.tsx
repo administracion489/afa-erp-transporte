@@ -1239,6 +1239,10 @@ export default function CotizacionesPage(){
     //     Lo que decide si hay que propagar es tener paradas y servicios futuros, no el modo.
     // 2 · POSTGREST CORTA EN 1000 FILAS. Un contrato fijo largo pasa de ese techo, así que el
     //     select plano alcanzaba a los primeros 1000 y callaba el resto.
+    // 2b· Y UN PAGINADO SIN ORDEN NO ES UN PAGINADO. `.range()` sobre un select sin
+    //     `order` deja el orden a criterio de Postgres, que puede devolver las páginas
+    //     solapadas: con más de 1000 servicios se repetían unos y se PERDÍAN otros, en
+    //     silencio y sin patrón — justo lo que hace que "a algunos sí les llegó".
     // 3 · `.neq("estado", …)` EXCLUÍA LAS FILAS CON `estado` NULL. En SQL `estado <> 'x'` es
     //     NULL cuando el campo es NULL, y PostgREST descarta lo que no evalúa a true — así que
     //     los servicios sin estado escrito, que son servicios VIVOS y los que más falta hace
@@ -1249,7 +1253,7 @@ export default function CotizacionesPage(){
       const todayPeru=new Date(Date.now()-5*60*60*1000).toISOString().split("T")[0];
       const afect:{id:number;direccion_servicio:string|null;estado:string|null}[]=[];
       for(let d=0;d<40000;d+=1000){
-        const{data,error:eLee}=await supabase.from("reservas").select("id,direccion_servicio,estado").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).range(d,d+999);
+        const{data,error:eLee}=await supabase.from("reservas").select("id,direccion_servicio,estado").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).order("id").range(d,d+999);
         if(eLee)break;
         afect.push(...(data||[]));
         if(!data||data.length<1000)break;
@@ -1268,7 +1272,7 @@ export default function CotizacionesPage(){
     if(cotIdGuardado){
       const nuevoCliente=payload.cliente_id;
       const vinc:{id:number;cliente_id:number|null;estado:string|null;estado_admin:string|null}[]=[];
-      for(let d=0;d<40000;d+=1000){const{data,error:eLee}=await supabase.from("reservas").select("id,cliente_id,estado,estado_admin").eq("cotizacion_id",cotIdGuardado).range(d,d+999);if(eLee)break;vinc.push(...(data||[]));if(!data||data.length<1000)break;}
+      for(let d=0;d<40000;d+=1000){const{data,error:eLee}=await supabase.from("reservas").select("id,cliente_id,estado,estado_admin").eq("cotizacion_id",cotIdGuardado).order("id").range(d,d+999);if(eLee)break;vinc.push(...(data||[]));if(!data||data.length<1000)break;}
       const idsResinc=vinc.filter(r=>r.cliente_id!==nuevoCliente&&r.estado!=="cancelada"&&!["facturada","cobrada"].includes(r.estado_admin||"")).map(r=>r.id);
       for(let i=0;i<idsResinc.length;i+=100)await supabase.from("reservas").update({cliente_id:nuevoCliente}).in("id",idsResinc.slice(i,i+100));
       clientesResinc=idsResinc.length;
@@ -1313,7 +1317,7 @@ export default function CotizacionesPage(){
     for(let i=0;i<todosIds.length;i+=BATCH){
       const lote=todosIds.slice(i,i+BATCH);
       for(let d=0;d<20000;d+=1000){
-        const{data,error:eAct}=await supabase.from("paradas").select("reserva_id").in("reserva_id",lote).eq("estado","completada").range(d,d+999);
+        const{data,error:eAct}=await supabase.from("paradas").select("reserva_id").in("reserva_id",lote).eq("estado","completada").order("id").range(d,d+999);
         if(eAct)break;
         (data||[]).forEach((p:any)=>idsConActividad.add(p.reserva_id));
         if(!data||data.length<1000)break;

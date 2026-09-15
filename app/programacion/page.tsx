@@ -24,6 +24,9 @@ import {
 import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
 import { planDeCanje, notaDeCanje, opuesto, efectoDeMarcarTramo } from "@/lib/reservas-canje";
 import { sumarDias } from "@/lib/odometro-analitica";
+import { minutosHHMM, correrHora, etiquetaDelta, planDeHoraParaderos,
+         type CodigoHoraParaderos } from "@/lib/paradas-hora";
+import { correrParaderosDeServicios, resumirCorrida } from "@/lib/paradas-hora-datos";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma, { type ModoPrograma } from "@/components/programacion/ModalGenerarPrograma";
 import ModalCostear from "@/components/programacion/ModalCostear";
@@ -404,30 +407,12 @@ function fmtFecha(f: string | null) {
   return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
-// ── Helpers de hora (edición inline "solo este servicio") ──────────────────
-// Trabajan siempre sobre "HH:MM" (la BD guarda `time`, que llega como "HH:MM:SS").
-function minutosHHMM(s: string): number {
-  const [h, m] = s.slice(0, 5).split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-function fmtHHMM(min: number): string {
-  let t = min % 1440; if (t < 0) t += 1440; // envolver dentro del día (una parada podría cruzar medianoche)
-  return String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0");
-}
-// Corre una hora "HH:MM(:SS)" por un delta en minutos, devolviendo "HH:MM".
-function correrHora(hhmm: string, deltaMin: number): string {
-  return fmtHHMM(minutosHHMM(hhmm) + deltaMin);
-}
-// Delta con signo legible: "+30 min · sale después" / "−15 min · sale antes".
-function etiquetaDelta(deltaMin: number): string {
-  if (deltaMin === 0) return "sin cambio";
-  const signo = deltaMin > 0 ? "+" : "−";
-  const abs = Math.abs(deltaMin);
-  const txt = abs >= 60
-    ? `${Math.floor(abs / 60)}h${abs % 60 ? " " + (abs % 60) + "min" : ""}`
-    : `${abs} min`;
-  return `${signo}${txt} · sale ${deltaMin > 0 ? "después" : "antes"}`;
-}
+// ── Helpers de hora ────────────────────────────────────────────────────────
+// Viven en lib/paradas-hora.ts (motor PURO), no acá: los TRES caminos que mueven la
+// hora de un servicio —esta fila, el formulario y el masivo del contrato— tienen que
+// correr los paraderos por el mismo desplazamiento, y tres copias del cálculo es cómo
+// una se queda atrás. Trabajan siempre sobre "HH:MM" (la BD guarda `time`, que llega
+// como "HH:MM:SS").
 
 // Un servicio se puede re-horar salvo que ya se esté operando o ya haya pasado: no le
 // cambiamos el bus al conductor a media ruta ni reescribimos historial.
@@ -696,6 +681,8 @@ export default function ReservasPage() {
     horaNueva: string;         // "HH:MM"
     deltaMin: number;          // horaNueva − horaOriginal, en minutos
     paradas: { id: number; nombre: string; de: string; a: string }[]; // preview (solo con hora)
+    motivo: string;            // la frase del motor: qué va a pasar y por qué
+    codigo: CodigoHoraParaderos;
   } | null>(null);
   const [guardandoHora,        setGuardandoHora]        = useState(false);
   // Tras cambiar la hora de un servicio ya avisado/sincronizado: preguntar si re-notificar.
@@ -1104,34 +1091,56 @@ export default function ReservasPage() {
   };
 
   // ── Edición de hora "solo este servicio" ──────────────────────────────────
-  // Paso 1: al confirmar la hora inline, calcula el delta, carga las paradas para el
-  // preview y abre el modal de advertencia. NO escribe nada todavía.
+  // Paso 1: al confirmar la hora inline, le pregunta al motor qué les pasa a los
+  // paraderos y abre el modal de advertencia. NO escribe nada todavía.
+  //
+  // El preview sale del MISMO `planDeHoraParaderos` que después escribe, así que lo
+  // que se lee en el modal es exactamente lo que va a quedar guardado. Y mira las DOS
+  // caras del itinerario: las filas de `paradas` (si ya se materializaron) y la
+  // semilla `paradas_json` — un programa fijo recién generado solo tiene la semilla,
+  // así que preguntando solo por las filas el modal decía "0 paradas" sobre un
+  // servicio con cinco paraderos.
   const pedirCambioHora = async (r: Reserva, nuevaHHMM: string) => {
     const horaOriginal = r.hora_servicio?.slice(0, 5) || "";
     if (!nuevaHHMM || nuevaHHMM === horaOriginal) return;
-    const deltaMin = horaOriginal ? minutosHHMM(nuevaHHMM) - minutosHHMM(horaOriginal) : 0;
-    // Sin delta (p. ej. el servicio no tenía hora previa) no hay nada que correr en las paradas.
-    const { data } = deltaMin === 0
-      ? { data: [] as any[] }
-      : await supabase.from("paradas").select("id,orden,nombre,hora_estimada").eq("reserva_id", r.id).order("orden");
-    const paradas = (data || [])
-      .filter((p: any) => p.hora_estimada)
-      .map((p: any) => ({ id: p.id as number, nombre: p.nombre as string, de: (p.hora_estimada as string).slice(0, 5), a: correrHora(p.hora_estimada, deltaMin) }));
-    setModalHora({ reserva: r, horaOriginal, horaNueva: nuevaHHMM, deltaMin, paradas });
+    const [{ data: filas }, { data: rSem }] = await Promise.all([
+      supabase.from("paradas").select("id,orden,nombre,hora_estimada,estado").eq("reserva_id", r.id).order("orden"),
+      supabase.from("reservas").select("paradas_json").eq("id", r.id).maybeSingle(),
+    ]);
+    const plan = planDeHoraParaderos({
+      horaAntes: horaOriginal, horaNueva: nuevaHHMM,
+      filas: (filas || []) as any[],
+      semilla: Array.isArray(rSem?.paradas_json) ? rSem.paradas_json : null,
+    });
+    // Sin filas materializadas el preview nombra los paraderos de la SEMILLA: se van a
+    // mover igual, y no enseñarlos haría creer que no hay nada que corregir — que es
+    // justo lo que pasaba con un programa fijo recién generado.
+    const semillaVieja: any[] = Array.isArray(rSem?.paradas_json) ? rSem.paradas_json : [];
+    const preview = plan.filas.length > 0
+      ? plan.filas
+      : (plan.semilla || [])
+          .map((p: any, i: number) => ({
+            id: -(i + 1), nombre: String(p?.nombre ?? ""),
+            de: String(semillaVieja[i]?.hora ?? "").slice(0, 5), a: String(p?.hora ?? ""),
+          }))
+          .filter(p => p.a);
+    setModalHora({ reserva: r, horaOriginal, horaNueva: nuevaHHMM, deltaMin: plan.deltaMin, paradas: preview, motivo: plan.motivo, codigo: plan.codigo });
   };
 
-  // Paso 2: confirmar en el modal. Escribe SOLO esta reserva: su hora + corre las paradas.
+  // Paso 2: confirmar en el modal. Escribe SOLO esta reserva: su hora + corre sus
+  // paraderos (las filas de `paradas` Y la semilla `paradas_json`, que es de donde se
+  // materializan las que todavía no existen).
   // Nunca toca los hermanos del contrato ni el retorno vinculado. Sin propagación masiva.
   const guardarHoraServicio = async () => {
     if (!modalHora) return;
-    const { reserva, horaNueva, deltaMin, paradas } = modalHora;
+    const { reserva, horaNueva, horaOriginal } = modalHora;
     setGuardandoHora(true);
     const { error } = await supabase.from("reservas").update({ hora_servicio: horaNueva }).eq("id", reserva.id);
     if (error) { alert(error.message); setGuardandoHora(false); return; }
-    if (deltaMin !== 0 && paradas.length > 0) {
-      await Promise.all(paradas.map(p => supabase.from("paradas").update({ hora_estimada: p.a }).eq("id", p.id)));
-      await recargarParadas(reserva.id);
-    }
+    const corrida = await correrParaderosDeServicios(supabase, [reserva.id], horaOriginal, horaNueva);
+    const dicho = resumirCorrida(corrida, { soloProblemas: true });
+    if (dicho) avisar(dicho);
+    await recargarParadas(reserva.id);
     setReservas(prev => prev.map(x => x.id === reserva.id ? { ...x, hora_servicio: horaNueva } : x));
     setGuardandoHora(false);
     setModalHora(null);
@@ -2128,6 +2137,20 @@ export default function ReservasPage() {
     if (!res.ok) { alert(describirResultado(res)); setGuardando(false); return; }
     if (res.aviso) avisar(res.aviso);
 
+    // ── La hora de un servicio arrastra SUS PARADEROS ─────────────────────────
+    // El formulario escribía `reservas.hora_servicio` y ahí se quedaba: el itinerario
+    // —`paradas.hora_estimada` y la semilla `paradas_json`— seguía con la hora vieja,
+    // y de ahí salen el aviso al pasajero, la app del conductor, la hoja de ruta y el
+    // semáforo de puntualidad. Se corren por el mismo desplazamiento, después de que
+    // la hora quedó guardada: si el UPDATE de arriba falla, el itinerario no se toca.
+    const horaAntesServicio = reservaActual?.hora_servicio?.slice(0, 5) || "";
+    if (horaAntesServicio && form.hora_servicio !== horaAntesServicio) {
+      const corrida = await correrParaderosDeServicios(
+        supabase, [editandoId], horaAntesServicio, form.hora_servicio);
+      const dicho = resumirCorrida(corrida);
+      if (dicho) avisar(dicho);
+    }
+
     // ── El pax es del DÍA, no del tramo ───────────────────────────────────────
     // A diferencia del importe —que va en un tramo y en el otro queda en S/ 0.00 a
     // propósito— los asientos contratados son los MISMOS para la ida y el retorno: el
@@ -2397,6 +2420,7 @@ export default function ReservasPage() {
 
     // Se agrupan los targets por el patch exacto que reciben y se manda un update por lote.
     const lotes = new Map<string, { patch: Record<string, any>; ids: number[] }>();
+    const idsConHora: number[] = [];
     for (const r of targets) {
       const patch: Record<string, any> = { ...base };
       // A los servicios de OTRA hora (el retorno) no se les toca ni el horario ni el costo:
@@ -2411,6 +2435,10 @@ export default function ReservasPage() {
       // del mismo contrato): recibe la asignación, no el pax. En el modo "solo los PAX"
       // ni siquiera llega acá, porque `targetsAplicar` ya lo dejó fuera del conteo.
       if (propagaPax && !aceptaPax(r, modalAplicarMasivo)) delete patch.capacidad_contratada;
+      // Los que SÍ se llevan la hora nueva. Se apunta acá y no se vuelve a deducir
+      // después: la condición de arriba es la que manda, y una segunda copia de ella
+      // correría los paraderos de un servicio al que no se le movió el horario.
+      if (patch.hora_servicio) idsConHora.push(r.id);
       // Un pendiente que queda completamente asignado se confirma. En "solo conductor" no:
       // el servicio puede seguir sin unidad. Y en "solo los PAX" tampoco: corregir cuántos
       // asientos se contrataron no programa nada, y confirmar 30 servicios sin unidad
@@ -2436,6 +2464,28 @@ export default function ReservasPage() {
     if (rechazos.length > 0)
       alert(`${rechazos.length} servicio(s) no se pudieron actualizar:\n` +
             rechazos.slice(0, 5).map(x => `#${x.id}: ${x.motivo}`).join("\n"));
+
+    // ── EL CONTRATO ENTERO ARRASTRA SUS PARADEROS ────────────────────────────
+    // Este es el camino del defecto reportado: se corría el horario de un contrato
+    // fijo, `reservas.hora_servicio` cambiaba en los cien servicios futuros y el
+    // ITINERARIO de todos se quedaba con la hora vieja. Al abrir el lunes siguiente,
+    // la fila decía una hora y sus paraderos otra — y de los paraderos salen el aviso
+    // al pasajero, la app del conductor y el semáforo de puntualidad, así que la que
+    // no se movió es justamente la que llega a la calle.
+    //
+    // Se corren SOLO los que de verdad se guardaron con la hora nueva: un rechazo
+    // dejó su fila con el horario viejo, y moverle los paraderos lo desalinearía al
+    // revés. Se corre también `paradas_json`, que es la semilla de la que se
+    // materializan los paraderos que todavía no existen: dejarla vieja re-inyecta la
+    // hora anterior servicio por servicio durante lo que dure el contrato.
+    const guardados = new Set(results.flatMap(r => r.guardados));
+    const aCorrer = idsConHora.filter(id => guardados.has(id));
+    if (aCorrer.length > 0) {
+      const corrida = await correrParaderosDeServicios(
+        supabase, aCorrer, horaOriginal, payload.hora_servicio);
+      const dicho = resumirCorrida(corrida);
+      if (dicho) avisar(dicho);
+    }
 
     setModalAplicarMasivo(null);
     setAplicando(false);
@@ -3657,7 +3707,9 @@ export default function ReservasPage() {
                     <span>⏰</span>
                     <span>
                       Cambiaste la hora de <b>{horaOriginal}</b> a <b>{horaNueva}</b>: también se aplicará
-                      a los servicios que salían a las {horaOriginal}.
+                      a los servicios que salían a las {horaOriginal}, y <b>sus paraderos se corren
+                      {" "}{etiquetaDelta(minutosHHMM(horaNueva) - minutosHHMM(horaOriginal))}</b> para
+                      conservar el espaciado del recorrido.
                     </span>
                   </div>
                 )}
@@ -4139,7 +4191,16 @@ export default function ReservasPage() {
                     </div>
                   </>
                 ) : (
-                  <p className="text-[11px] text-gray-400 mb-1">Este servicio no tiene paradas con hora que recalcular.</p>
+                  // El motivo lo DECLARA el motor y la pantalla enruta por CÓDIGO, no
+                  // olfateando el texto: "no tiene paraderos propios" (su hora sale de
+                  // la cotización y hay que ir allá) y "los tiene sin hora escrita" se
+                  // arreglan en sitios distintos, y una sola frase para los dos mandaba
+                  // a la mitad al lugar equivocado. Solo el que tiene arreglo en otra
+                  // pantalla pinta ámbar; el resto es una nota, no una alarma.
+                  <p className="text-[11px] mb-1 px-3 py-2 rounded-lg"
+                     style={m.codigo === "sin_paraderos"
+                       ? { background: "#fffbeb", color: "#92400e" }
+                       : { background: "#f8fafc", color: "#64748b" }}>{m.motivo}</p>
                 )}
                 <div className="mt-4 text-[11px] px-3 py-2 rounded-lg flex items-start gap-2" style={{ background: "#eef3f8", color: "#0b315f" }}>
                   <span>⚠</span>
