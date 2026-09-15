@@ -12,7 +12,10 @@ const admin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } },
 );
 
-export type ModoTiempo = "evento" | "anticipacion" | "hora_fija";
+// El dueño del tipo es el módulo PURO que documenta qué hace de verdad cada modo y qué
+// bloque lo lee (`lib/alertas-modo-tiempo.ts`). Aquí se re-exporta para no romper a nadie.
+export type { ModoTiempo } from "@/lib/alertas-modo-tiempo";
+import type { ModoTiempo } from "@/lib/alertas-modo-tiempo";
 
 export type AlertaConfig = {
   clave: string;
