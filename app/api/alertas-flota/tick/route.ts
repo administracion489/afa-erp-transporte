@@ -20,6 +20,7 @@ import {
   cargarMotor, directorioDe, reclamarEnvio, liberarEnvio, cargarEstados, upsertEstado,
   hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, canalesConductor, type AlertaConfig,
 } from "@/lib/alertas";
+import { horarioDe, limaAUtcMs, planDeEnvioConductor } from "@/lib/alertas-horario";
 import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
 
@@ -97,6 +98,9 @@ async function handler(req: NextRequest) {
     const hoy = hoyLima();
     const manana = fechaManana();
     const ahora = ahoraLimaMin();
+    // Un solo instante para todo el tick: el horario de envío y el resto de los bloques
+    // tienen que juzgar contra el mismo reloj, no contra el que cada uno lea al pasar.
+    const ahoraMs = Date.now();
     const telConting = await telefonoContingencia();
     const res: Record<string, number> = {};
 
@@ -217,6 +221,34 @@ async function handler(req: NextRequest) {
             cCanc = activa("cancelacion"), cDes = activa("desasignacion");
       if (cAsig || cCamb || cCanc || cDes) {
         let n = 0;
+        // ── HORARIO DE ENVÍO (lib/alertas-horario.ts + supabase/alertas-horario-conductor.sql) ──
+        // Este bloque es `modo_tiempo = 'evento'`: dispara cuando DETECTA el cambio. Y como
+        // el motor solo mira `fecha_servicio in (hoy, mañana)`, un programa fijo creado con
+        // semanas de antelación se detecta justo cuando su fecha pasa a ser "mañana" — a
+        // MEDIANOCHE. De ahí los "vehículo asignado · 12:00 a. m." que reportó el dueño:
+        // no era una hora mal puesta, era la primera vez que el motor veía la reserva.
+        //
+        // Retener NO pierde nada, y es por cómo está armado el bloque: el baseline
+        // (`upsertEstado`) solo avanza cuando el envío SALE, así que una reserva retenida
+        // se vuelve a detectar idéntica en el siguiente tick (~10 min) hasta que abra la
+        // ventana. Es el mismo PRINCIPIO ANTI-PÉRDIDA de la cabecera del archivo.
+        //
+        // Lo que el motor NUNCA retiene lo decide `planDeEnvioConductor`, no este bucle:
+        // un servicio de HOY y un servicio cuya hora llega antes que la ventana salen al
+        // instante, sea la hora que sea.
+        let enEspera = 0;
+        const esperaA = (cfg: AlertaConfig | null | undefined, r: any): boolean => {
+          if (!cfg) return false;
+          const plan = planDeEnvioConductor({
+            ahoraMs,
+            fechaServicio: r.fecha_servicio,
+            horaServicio: horaCorta(r.hora_servicio),
+            horario: horarioDe(cfg),
+          });
+          if (plan.enviar) return false;
+          enEspera++;
+          return true;
+        };
         // Las ASIGNACIONES no se envían dentro del bucle: se acumulan por conductor y
         // salen agrupadas al final (un conductor al que se le programan 5 servicios de
         // una sentada recibía 5 WhatsApp seguidos). El resto de avisos del bloque
@@ -241,8 +273,10 @@ async function handler(req: NextRequest) {
           const mismoCond = !!ref && !!refPrev && ref.id === refPrev.id && ref.tabla === refPrev.tabla;
 
           // Cancelación: avisar al conductor asignado. Solo marcar si el envío salió.
+          // `esperaA` va DENTRO de la condición: retenido no se marca nada, así que el
+          // próximo tick lo vuelve a ver pendiente (`cancelacion_avisada` sigue false).
           if (r.estado === "cancelada") {
-            if (cCanc && ref && refPrev && !est?.cancelacion_avisada) {
+            if (cCanc && ref && refPrev && !est?.cancelacion_avisada && !esperaA(cCanc, r)) {
               const nombre = nombreCorto(datosCond(ref)?.nombre);
               if ((await aConductor(cCanc, ref, [nombre, fecha, ruta])) === "enviado") {
                 n++;
@@ -258,6 +292,21 @@ async function handler(req: NextRequest) {
           let diferido = false; // asignación encolada: su estado se graba tras el envío agrupado
           const tieneTel = !!datosCond(ref)?.telefono;
           if (!mismoCond) {
+            // El aviso al SALIENTE y el del entrante comparten el baseline de esta
+            // reserva, así que se retienen juntos o ninguno: retener solo la asignación
+            // dejaría el "ya no cubres ese servicio" saliendo en CADA tick hasta que
+            // abriera la ventana — una ráfaga de WhatsApp facturables cada 10 min.
+            // Manda la ventana de `asignacion` (es el aviso que motivó todo esto); si ese
+            // tipo está apagado, la de `desasignacion`, que es el único que quedaría.
+            //
+            // Solo se retiene si de verdad iba a salir algo. Una reserva TERCERIZADA con
+            // el aviso apagado pasa por aquí a propósito —para grabar su baseline y que
+            // encenderlo algún día no dispare una avalancha por reservas viejas— y
+            // retenerla sería aplazar ese grabado y, peor, contarla como "en espera"
+            // cuando no hay ningún mensaje esperando.
+            const vaSalirAlgo = (!!cDes && !!refPrev && avisaA(cDes, refPrev))
+                             || (!!cAsig && avisaA(cAsig, ref));
+            if (vaSalirAlgo && esperaA(cAsig ?? cDes, r)) continue;  // sin tocar estado → se reintenta
             // Reasignación: avisar al conductor SALIENTE que ya no cubre el servicio.
             if (cDes && refPrev) {
               const ant = nombreCorto(datosCond(refPrev)?.nombre);
@@ -277,6 +326,7 @@ async function handler(req: NextRequest) {
             }
           } else if (est!.hora_avisada !== hora || est!.vehiculo_avisado !== (r.vehiculo_id ?? null)) {
             if (cCamb && avisaA(cCamb, ref)) {
+              if (esperaA(cCamb, r)) continue;        // sin tocar estado → se reintenta
               if (!tieneTel) { avanzar = false; }
               else {
                 const rc = await notificarConductor(r.id, "cambio", cCamb.plantilla ?? undefined, canalesConductor(cCamb));
@@ -341,6 +391,10 @@ async function handler(req: NextRequest) {
           await marcarEnviadas(g, enviadas);
         }
         res.ciclo_vida = n;
+        // Cuántos avisos quedaron esperando a que abra el horario. Se publica para poder
+        // contestar "¿por qué no le llegó todavía?" sin mirar la base: 0 significa que
+        // nada está retenido, no que el horario esté apagado.
+        if (enEspera) res.ciclo_vida_en_espera = enEspera;
       }
     }
 
@@ -877,15 +931,6 @@ async function handler(req: NextRequest) {
     console.error("[alertas-flota/tick]", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-}
-
-/** "YYYY-MM-DD" + "HH:MM" en hora Lima (UTC-5 fijo, sin horario de verano) → ms UTC absolutos. */
-function limaAUtcMs(fecha?: string | null, horaHHMM?: string | null): number | null {
-  if (!fecha) return null;
-  const [y, m, d] = fecha.split("-").map(Number);
-  const [hh, mm] = (horaHHMM || "00:00").split(":").map(Number);
-  if (!y || !m || !d || !Number.isFinite(hh)) return null;
-  return Date.UTC(y, m - 1, d, hh + 5, mm || 0);
 }
 
 /** ¿Estamos en la ventana de disparo del recordatorio? Piso amplio + dedupe = "una vez, sin perder". */
