@@ -28,6 +28,7 @@ type Conversacion = {
 // solo en el filtro sin tocar código. Lo que no esté aquí se muestra como "+51…".
 const ALIAS_NUMERO: Record<string, string> = {
   "966707225": "Ventas",
+  "922775131": "Ventas 2",
   "905438216": "Avisos",
 };
 
