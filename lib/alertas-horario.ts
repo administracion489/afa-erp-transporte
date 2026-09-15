@@ -22,10 +22,23 @@
 // "PRINCIPIO ANTI-PÉRDIDA" que ya gobierna el tick.
 //
 // LA REGLA QUE NO SE PUEDE AFLOJAR, y es la que ordena todas las demás:
-//   **NUNCA se retiene un aviso más allá del servicio que anuncia.**
-// Un aviso a deshora molesta y se perdona; un aviso que llega después de la hora de
-// salida es un bus sin conductor. Es la misma asimetría de `montoDe` con el falso flete:
-// se elige siempre el lado del error reversible.
+//   **SOLO SE RETIENE UN AVISO QUE SE VAYA A ENTREGAR LA VÍSPERA DEL SERVICIO.**
+// Un aviso a deshora molesta y se perdona; uno que llega encima de la hora de salida es
+// un bus sin conductor. Misma asimetría de `montoDe` con el falso flete: siempre el lado
+// del error reversible.
+//
+// La primera versión de esta regla decía «no se retiene más allá de la HORA del servicio»
+// y era demasiado literal — lo reportó el dueño preguntando por los servicios urgentes.
+// Con la ventana 11:59–21:00, un servicio del 15 a las 12:00 programado el 14 a las 21:01
+// se retenía hasta las 11:59 del 15: técnicamente «antes del servicio», y **un minuto de
+// aviso**. Las 12:00 pasaban el filtro por un minuto y las 14:00 por dos horas.
+//
+// Por eso la unidad de la regla es el DÍA, no el minuto: se retiene solo si la ventana
+// abre ANTES del día en que se presta el servicio. Y eso NO es un umbral elegido —es la
+// promesa que el dueño pidió con sus palabras, «que le llegue el día anterior»—, así que
+// no hay ningún margen en minutos que calibrar ni que envejezca. De paso absorbe los dos
+// casos que antes eran reglas aparte: un servicio de HOY y uno cuya hora ya pasó caen
+// dentro por construcción.
 
 /** Minutos de un día completo. */
 const MIN_DIA = 1440;
@@ -88,9 +101,10 @@ export type CodigoEnvio =
   | "en_ventana"
   /** El servicio es HOY: un cambio de hoy sobre un servicio de hoy se avisa al instante. */
   | "servicio_hoy"
-  /** La ventana abriría DESPUÉS de la hora del servicio: esperar sería no avisar. */
-  | "no_alcanza"
-  /** Sin fecha/hora del servicio no se puede garantizar que la espera no lo tape. */
+  /** La ventana solo abriría el MISMO DÍA del servicio: esperar dejaría de ser un aviso
+   *  de la víspera y pasaría a ser un aviso de última hora. */
+  | "no_es_vispera"
+  /** Sin fecha del servicio no se puede garantizar que la espera no lo tape. */
   | "sin_fecha";
 
 export type PlanEnvio =
@@ -195,24 +209,26 @@ const sale = (codigo: CodigoEnvio, motivo: string): PlanEnvio => ({ enviar: true
  *  2. Sin ventana declarada → sale. No se inventa un horario, igual que `elegirOdometro`
  *     no inventa un techo cuando no hay historial.
  *  3. Dentro de la ventana → sale.
- *  4. El servicio es HOY → sale, sea la hora que sea. Que alguien toque un servicio de
- *     hoy a las 03:00 es un hecho real y urgente, no el artefacto de medianoche.
- *  5. La ventana abre después de que el servicio empiece → sale. **La regla dura.**
- *  6. No se sabe QUÉ DÍA es el servicio → sale. Sin fecha no hay forma de comprobar (5),
+ *  4. No se sabe QUÉ DÍA es el servicio → sale. Sin fecha no hay forma de comprobar (6),
  *     y ante la duda se envía: molestar es reversible, dejar un bus sin conductor no.
- *     Con fecha pero SIN HORA no se envía a ciegas: se sitúa el servicio a las 00:00 de
- *     su día, o sea en el inicio más temprano que puede tener. Es el lado seguro — un
- *     inicio supuesto más temprano solo puede hacer que (5) mande enviar antes, nunca
- *     que se retenga de más.
+ *  5. El servicio es HOY → sale, sea la hora que sea. Que alguien toque un servicio de
+ *     hoy a las 03:00 es un hecho real y urgente, no el artefacto de medianoche. (Es un
+ *     caso particular de (6), separado solo para que el motivo se lea claro.)
+ *  6. La ventana no abre antes del DÍA del servicio → sale. **La regla dura.** Cubre al
+ *     urgente que se programa de noche para la madrugada siguiente y al que se programa
+ *     de noche para el mediodía siguiente — que es el que se colaba cuando la regla
+ *     miraba la hora en vez del día.
  *  7. Si no, ESPERA — y el plan dice hasta cuándo.
+ *
+ * La HORA del servicio no entra en la decisión, y es deliberado: con la regla en días, el
+ * aviso retenido se entrega siempre en una fecha anterior, así que ninguna hora puede
+ * alcanzarlo. Pedirla invitaría a reintroducir comparaciones al minuto como la que falló.
  */
 export function planDeEnvioConductor(args: {
   /** Instante actual en ms UTC (Date.now() en producción; fijo en las pruebas). */
   ahoraMs: number;
   /** Fecha del servicio que anuncia el aviso ("YYYY-MM-DD"). */
   fechaServicio?: string | null;
-  /** Hora pactada del servicio ("HH:MM" o "HH:MM:SS"). */
-  horaServicio?: string | null;
   horario: Horario;
 }): PlanEnvio {
   const { ahoraMs, horario } = args;
@@ -233,12 +249,13 @@ export function planDeEnvioConductor(args: {
   if (!fecha) return sale("sin_fecha", "el aviso no dice de qué día es el servicio");
   if (fecha === fechaLima(ahoraMs)) return sale("servicio_hoy", "el servicio es hoy");
 
-  const inicioMs = limaAUtcMs(fecha, String(args.horaServicio || "00:00").slice(0, 5));
-  if (inicioMs == null) return sale("sin_fecha", "el aviso no dice a qué hora es el servicio");
-
+  // Las fechas ISO se comparan en binario, nunca con localeCompare: es texto ordenable por
+  // construcción y localeCompare ignora la puntuación (misma razón que el Anexo 1).
   const abreMs = proximaAperturaMs(ahoraMs, desdeMin);
-  if (abreMs >= inicioMs) {
-    return sale("no_alcanza", `el horario abre a las ${minutosAHhmm(desdeMin)}, después del servicio`);
+  const diaApertura = fechaLima(abreMs);
+  if (diaApertura >= fecha) {
+    return sale("no_es_vispera",
+      `el horario no volvería a abrir hasta el ${diaApertura}, el día del servicio`);
   }
 
   return {
