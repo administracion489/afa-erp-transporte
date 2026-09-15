@@ -11,7 +11,6 @@
 
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { normalizarEmpresa } from "@/lib/empresa";
 
 type Grupo = {
   id: number; cliente_id: number | null; nombre: string;
@@ -79,7 +78,7 @@ export default function SelectorGrupos({ reservaId, clienteId, paradas, dnisExis
 
     // Filtrar: solo agregar pasajeros que no estén ya en el manifiesto (por DNI)
     const aAgregar = miembros.filter((m: any) => {
-      const dni = m.pasajeros?.dni;
+      const dni = (m.pasajeros?.dni || "").trim();
       return dni && !dnisExistentes.has(dni);
     });
 
@@ -89,21 +88,43 @@ export default function SelectorGrupos({ reservaId, clienteId, paradas, dnisExis
       return;
     }
 
-    // 1) Insertar pasajeros nuevos como ad-hoc de la reserva
-    //    (clonamos los datos para no romper el vínculo del cliente original)
+    // EL MIEMBRO DEL GRUPO **YA ES** LA FICHA DEL PASAJERO: no se clona, se usa.
+    // Esta función insertaba una copia con el mismo (cliente_id, dni), y esa pareja es la
+    // unique `uq_pasajero_cliente_dni`, así que el INSERT reventaba SIEMPRE que la persona
+    // ya tuviera ficha en el cliente — o sea, siempre, porque el grupo se arma justamente
+    // con fichas de ese cliente. El operador leía «Error al aplicar grupo: duplicate key
+    // value violates unique constraint…» y el grupo no se aplicaba nunca.
+    //
+    // Estar en un servicio es `pasajeros_parada`, y por eso aquí el paradero es
+    // OBLIGATORIO: el habitual si su nombre casa, y si no el primero del itinerario. Sin
+    // fila de paradero la persona no saldría en este manifiesto (su `reserva_id` apunta a
+    // su propia ficha, no a este servicio), que sería agregarla a la nada.
+    if (paradas.length === 0) {
+      alert("⚠️ Este servicio todavía no tiene paraderos. Agrega al menos uno antes de aplicar un grupo.");
+      setAplicando(null);
+      return;
+    }
+
+    const asignaciones = aAgregar.map((m: any) => {
+      const paradaHab = m.parada_habitual_nom;
+      const paradaMatch = paradaHab
+        ? paradas.find(p =>
+            p.nombre.toLowerCase().includes(paradaHab.toLowerCase()) ||
+            paradaHab.toLowerCase().includes(p.nombre.toLowerCase())
+          )
+        : undefined;
+      if (paradaMatch) paradasAsignadas++;
+      return {
+        pasajero_id:     m.pasajeros.id,
+        parada_id:       (paradaMatch || paradas[0]).id,
+        estado:          "esperando",
+        estado_abordaje: "Pendiente",
+        asiento:         m.asiento_habitual,
+      };
+    });
+
     const { data: insertados, error } = await supabase
-      .from("pasajeros")
-      .insert(aAgregar.map((m: any) => ({
-        nombre:     m.pasajeros.nombre,
-        dni:        m.pasajeros.dni,
-        telefono:   m.pasajeros.telefono,
-        email:      m.pasajeros.email,
-        empresa:    normalizarEmpresa(m.pasajeros.empresa),
-        cliente_id: clienteId,
-        reserva_id: reservaId,
-        activo:     true,
-      })))
-      .select();
+      .from("pasajeros_parada").insert(asignaciones).select();
 
     if (error) {
       alert(`Error al aplicar grupo: ${error.message}`);
@@ -112,35 +133,6 @@ export default function SelectorGrupos({ reservaId, clienteId, paradas, dnisExis
     }
 
     agregados = insertados?.length || 0;
-
-    // 2) Auto-asignación de parada habitual (matchea por nombre de parada)
-    if (insertados && paradas.length > 0) {
-      const asignaciones: any[] = [];
-      insertados.forEach((nuevoPas: any, idx: number) => {
-        const miembroOrig = aAgregar[idx];
-        const paradaHab = miembroOrig.parada_habitual_nom;
-        if (paradaHab) {
-          // Buscar parada cuyo nombre matchee (case-insensitive, substring)
-          const paradaMatch = paradas.find(p =>
-            p.nombre.toLowerCase().includes(paradaHab.toLowerCase()) ||
-            paradaHab.toLowerCase().includes(p.nombre.toLowerCase())
-          );
-          if (paradaMatch) {
-            asignaciones.push({
-              pasajero_id:     nuevoPas.id,
-              parada_id:       paradaMatch.id,
-              estado:          "esperando",
-              estado_abordaje: "Pendiente",
-              asiento:         miembroOrig.asiento_habitual,
-            });
-            paradasAsignadas++;
-          }
-        }
-      });
-      if (asignaciones.length > 0) {
-        await supabase.from("pasajeros_parada").insert(asignaciones);
-      }
-    }
 
     // 3) Registrar la aplicación (incrementa veces_usado vía trigger)
     await supabase.from("grupo_aplicado_reserva").insert({
@@ -153,9 +145,12 @@ export default function SelectorGrupos({ reservaId, clienteId, paradas, dnisExis
     setAbierto(false);
     onAplicado(agregados);
 
-    const msg = paradasAsignadas > 0
-      ? `✅ ${agregados} pasajeros agregados · ${paradasAsignadas} auto-asignados a paradas habituales`
-      : `✅ ${agregados} pasajeros agregados al manifiesto`;
+    // Todos quedan con paradero: se dice cuántos cayeron en el HABITUAL y cuántos en el
+    // primero por no tener con qué casarlo — si no, el resto parecería ya revisado.
+    const alPrimero = agregados - paradasAsignadas;
+    const msg = `✅ ${agregados} pasajero(s) agregado(s)`
+      + (paradasAsignadas > 0 ? ` · ${paradasAsignadas} en su paradero habitual` : "")
+      + (alPrimero > 0 ? ` · ${alPrimero} en el primer paradero (revísalos)` : "");
     alert(msg);
   };
 

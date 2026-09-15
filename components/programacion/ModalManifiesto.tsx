@@ -8,6 +8,13 @@ import { paginarFilas } from "@/lib/huella";
 import { huellaRuta } from "@/lib/ruta-equivalente";
 import { normalizarEmpresa } from "@/lib/empresa";
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
+// Quién es una persona de un cliente se contesta en UN solo sitio: su fila de `pasajeros`
+// es única por (cliente_id, dni), así que estar en un servicio es `pasajeros_parada` y
+// nunca una fila nueva. Los tres altas de esta pantalla importan el mismo motor.
+import {
+  clasificarPadron, filtrarCandidatos, motivoPanelVacio, planDeAlta, claveDni,
+  type Candidato, type PersonaCliente,
+} from "@/lib/manifiesto-nomina";
 import SelectorGrupos from "./SelectorGrupos";
 import TimelineParadasEditable, { ParadaEditable } from "./TimelineParadasEditable";
 import GestorParadas from "./GestorParadas";
@@ -134,7 +141,9 @@ export default function ModalManifiesto(props: Props) {
   // ── Panel "Agregar desde nómina" ─────────────────────────────────────────
   const [mostrarNomina,  setMostrarNomina]  = useState(false);
   const [nominaBusq,     setNominaBusq]     = useState("");
-  const [nomina,         setNomina]         = useState<PasajeroManifiesto[]>([]);
+  // El PADRÓN completo del cliente, no solo las filas con `reserva_id is null`: una persona
+  // cuya ficha quedó tomada por otro servicio es justo la que desaparecía del panel.
+  const [nomina,         setNomina]         = useState<PersonaCliente[]>([]);
   const [loadingNomina,  setLoadingNomina]  = useState(false);
   const [agregandoPaxId, setAgregandoPaxId] = useState<number | null>(null);
 
@@ -568,8 +577,8 @@ export default function ModalManifiesto(props: Props) {
         return;
       }
 
-      const dnisExistentes = new Set(pasajeros.map((p) => p.dni));
-      const nuevos = resultado.ok.filter((p) => !dnisExistentes.has(p.dni));
+      const dnisExistentes = new Set(pasajeros.map((p) => claveDni(p.dni)).filter(Boolean));
+      const nuevos = resultado.ok.filter((p) => !dnisExistentes.has(claveDni(p.dni)));
       const duplicados = resultado.ok.length - nuevos.length;
 
       if (nuevos.length === 0) {
@@ -579,55 +588,79 @@ export default function ModalManifiesto(props: Props) {
         return;
       }
 
-      const insResp = await supabase
-        .from("pasajeros")
-        .insert(nuevos.map((p) => ({
-          reserva_id: reservaId,
-          cliente_id: clienteId,
-          nombre: p.nombre,
-          dni: p.dni,
-          telefono: p.telefono,
-          email: p.email,
-          empresa: normalizarEmpresa(p.empresa),
-        })))
-        .select();
-
-      if (insResp.error) {
-        setMensaje({ tipo: "err", texto: "Error al guardar: " + insResp.error.message });
-        setImportando(false);
-        if (fileRef.current) fileRef.current.value = "";
-        return;
-      }
-
-      const cuantos = insResp.data?.length || 0;
-
-      // Auto-registrar en nómina los pasajeros nuevos que no estaban
-      let registradosNomina = 0;
-      if (clienteId && insResp.data && cuantos > 0) {
-        const { data: nominaExiste } = await supabase
-          .from("pasajeros").select("dni")
-          .eq("cliente_id", clienteId).is("reserva_id", null);
-        const dnisNomina = new Set((nominaExiste || []).map((p: any) => p.dni));
-        const paraNomina = insResp.data.filter((p: any) => p.dni && !dnisNomina.has(p.dni));
-        if (paraNomina.length > 0) {
-          await supabase.from("pasajeros").insert(
-            paraNomina.map((p: any) => ({
-              cliente_id: clienteId, reserva_id: null,
-              nombre: p.nombre, dni: p.dni, email: p.email || null,
-              empresa: normalizarEmpresa(p.empresa), telefono: p.telefono || null, activo: true,
-            }))
-          );
-          registradosNomina = paraNomina.length;
+      // QUIÉN DEL ARCHIVO YA TIENE FICHA EN ESTE CLIENTE. La fila de una persona es única
+      // por (cliente_id, dni): insertarla otra vez —que es lo que hacía este lote— choca
+      // con uq_pasajero_cliente_dni en cuanto UNA de las filas del archivo ya viajó en
+      // otro servicio, y como el INSERT es uno solo, ESE choque tumbaba la carga ENTERA
+      // con un error de Postgres en pantalla. A quien ya tiene ficha se le reutiliza.
+      const fichas = new Map<string, PersonaCliente>();
+      if (clienteId) {
+        const dnis = [...new Set(nuevos.map((p) => claveDni(p.dni)).filter(Boolean))];
+        for (let i = 0; i < dnis.length; i += 100) { // por lotes: un .in() con cientos de DNIs revienta la URL
+          const { data } = await supabase
+            .from("pasajeros")
+            .select("id, reserva_id, nombre, dni, telefono, empresa")
+            .eq("cliente_id", clienteId).in("dni", dnis.slice(i, i + 100));
+          for (const f of (data || []) as PersonaCliente[]) fichas.set(claveDni(f.dni), f);
         }
       }
 
+      const aReusar = nuevos.map((p) => fichas.get(claveDni(p.dni))).filter(Boolean) as PersonaCliente[];
+      const aCrear  = nuevos.filter((p) => !fichas.has(claveDni(p.dni)));
+
+      let insResp: any = { data: [] as any[], error: null };
+      if (aCrear.length > 0) {
+        insResp = await supabase
+          .from("pasajeros")
+          .insert(aCrear.map((p) => ({
+            reserva_id: reservaId,
+            cliente_id: clienteId,
+            nombre: p.nombre,
+            dni: p.dni,
+            telefono: p.telefono,
+            email: p.email,
+            empresa: normalizarEmpresa(p.empresa),
+          })))
+          .select();
+
+        if (insResp.error) {
+          setMensaje({ tipo: "err", texto: "Error al guardar: " + insResp.error.message });
+          setImportando(false);
+          if (fileRef.current) fileRef.current.value = "";
+          return;
+        }
+      }
+
+      // Las fichas que ya existían entran por `pasajeros_parada`, que es lo que de verdad
+      // dice quién viaja. Sin paraderos no hay dónde colgarlas: se DICE, en vez de darlas
+      // por cargadas. (Las nuevas sí se ven sin paradero, por su `reserva_id`, y se dejan
+      // "sin asignar" a propósito: es la señal de que falta elegirles paradero.)
+      let reusados = 0, sinSitio = 0;
+      if (aReusar.length > 0) {
+        if (paradas.length === 0) {
+          sinSitio = aReusar.length;
+        } else {
+          const { error: errPP } = await supabase.from("pasajeros_parada").insert(
+            aReusar.map((f) => ({
+              pasajero_id: f.id, parada_id: paradas[0].id,
+              estado: "esperando", estado_abordaje: "Pendiente",
+            })),
+          );
+          if (errPP) setMensaje({ tipo: "warn", texto: "Fichas existentes no agregadas: " + errPP.message });
+          else reusados = aReusar.length;
+        }
+      }
+
+      const cuantos = (insResp.data?.length || 0) + reusados;
+
       const partes = [
         cuantos + " pasajero(s) cargado(s)",
-        registradosNomina > 0 ? registradosNomina + " nuevo(s) en nómina" : "",
+        reusados > 0 ? reusados + " con ficha ya existente (reutilizada, no duplicada)" : "",
+        sinSitio > 0 ? sinSitio + " con ficha existente SIN cargar: agrega un paradero al itinerario y repite" : "",
         duplicados > 0 ? duplicados + " duplicado(s) omitido(s)" : "",
         resultado.errores.length > 0 ? resultado.errores.length + " fila(s) con error" : "",
       ].filter(Boolean);
-      setMensaje({ tipo: "ok", texto: partes.join(" · ") });
+      setMensaje({ tipo: sinSitio > 0 ? "warn" : "ok", texto: partes.join(" · ") });
 
       if (insResp.data?.length) await enviarInvitaciones(insResp.data.map((p: any) => p.id));
       await cargar();
@@ -810,64 +843,93 @@ export default function ModalManifiesto(props: Props) {
       setMensaje({ tipo: "err", texto: "Nombre y DNI son requeridos" });
       return;
     }
-    if (dnisExistentes.has(formAdd.dni.trim())) {
-      setMensaje({ tipo: "warn", texto: `Ya existe un pasajero con DNI ${formAdd.dni.trim()} en este servicio` });
-      return;
-    }
+    const dni = formAdd.dni.trim();
     setSavingAdd(true);
     setMensaje(null);
     try {
-      const { data: nuevo, error: insErr } = await supabase
-        .from("pasajeros")
-        .insert({
-          reserva_id: reservaId,
-          cliente_id: clienteId,
-          nombre:     formAdd.nombre.trim(),
-          dni:        formAdd.dni.trim(),
-          empresa:    normalizarEmpresa(formAdd.empresa),
-          telefono:   formAdd.telefono.trim() || null,
-          email:      formAdd.email.trim() || null,
-          activo:     true,
-        })
-        .select("id")
-        .single();
+      // La ficha de una persona es ÚNICA por (cliente_id, dni). Insertar sin preguntar es
+      // lo que chocaba con uq_pasajero_cliente_dni en cuanto esa persona ya existía en
+      // cualquier otro servicio del cliente, y el operador leía el error crudo de Postgres
+      // — que es exactamente «el sistema no me permite agregarlo».
+      let existente: PersonaCliente | null = null;
+      if (clienteId) {
+        const { data } = await supabase
+          .from("pasajeros")
+          .select("id, reserva_id, nombre, dni, telefono, empresa")
+          .eq("cliente_id", clienteId).eq("dni", dni)
+          .order("id").limit(1);
+        existente = ((data || [])[0] as PersonaCliente) || null;
+      }
 
-      if (insErr || !nuevo) {
-        setMensaje({ tipo: "err", texto: insErr?.message || "Error al agregar pasajero" });
+      const plan = planDeAlta({ dni, nombre: formAdd.nombre.trim(), existente, enManifiesto, reservaId });
+      if (!plan.puede) {
+        setMensaje({ tipo: "warn", texto: plan.aviso });
         return;
       }
 
-      if (formAdd.parada_id) {
-        await supabase.from("pasajeros_parada").insert({
-          pasajero_id:    nuevo.id,
-          parada_id:      Number(formAdd.parada_id),
+      // El paradero elegido, o el primero del itinerario: una ficha reutilizada —y una
+      // nueva de nómina— solo se ve en ESTE manifiesto por `pasajeros_parada`, así que
+      // dejarla sin paradero sería agregarla a la nada.
+      const paradaElegida = formAdd.parada_id ? Number(formAdd.parada_id) : (paradas[0]?.id ?? null);
+
+      // Reutilizar una ficha SIN paradero no agregaría a nadie: se dice, en vez de
+      // anunciar un alta que la pantalla no va a mostrar.
+      if (plan.codigo === "reusar" && paradaElegida == null) {
+        setMensaje({ tipo: "warn", texto: `${plan.aviso} Agrega primero una parada al itinerario para poder subirlo a este servicio.` });
+        return;
+      }
+
+      let pasajeroId = plan.pasajeroId;
+      let nacioEnNomina = false;
+
+      if (plan.codigo === "crear") {
+        // Nace en la NÓMINA del cliente (`reserva_id` null) cuando el servicio ya tiene
+        // paraderos: así queda reutilizable en los demás servicios, que es lo que esta
+        // pantalla venía ANUNCIANDO («y a la nómina ✓») sin conseguirlo jamás — la
+        // segunda fila que insertaba para eso chocaba siempre con la unique y su error
+        // no se leía. Sin paraderos no hay de dónde colgarla y solo entonces se ata a
+        // este servicio, que es el comportamiento de antes, para no perderla.
+        const atarAlServicio = paradaElegida == null;
+        const { data: nuevo, error: insErr } = await supabase
+          .from("pasajeros")
+          .insert({
+            reserva_id: atarAlServicio ? reservaId : null,
+            cliente_id: clienteId,
+            nombre:     formAdd.nombre.trim(),
+            dni,
+            empresa:    normalizarEmpresa(formAdd.empresa),
+            telefono:   formAdd.telefono.trim() || null,
+            email:      formAdd.email.trim() || null,
+            activo:     true,
+          })
+          .select("id")
+          .single();
+
+        if (insErr || !nuevo) {
+          setMensaje({ tipo: "err", texto: insErr?.message || "Error al agregar pasajero" });
+          return;
+        }
+        pasajeroId = nuevo.id;
+        nacioEnNomina = !atarAlServicio;
+      }
+
+      if (pasajeroId != null && paradaElegida != null) {
+        const { error: errPP } = await supabase.from("pasajeros_parada").insert({
+          pasajero_id:     pasajeroId,
+          parada_id:       paradaElegida,
+          estado:          "esperando",
           estado_abordaje: "Pendiente",
         });
+        if (errPP) { setMensaje({ tipo: "err", texto: errPP.message }); return; }
       }
 
-      // Auto-registrar en nómina si no existe aún (por DNI)
-      let registradoEnNomina = false;
-      if (clienteId) {
-        const { data: existeNomina } = await supabase
-          .from("pasajeros").select("id")
-          .eq("cliente_id", clienteId).is("reserva_id", null)
-          .eq("dni", formAdd.dni.trim()).maybeSingle();
-        if (!existeNomina) {
-          await supabase.from("pasajeros").insert({
-            cliente_id: clienteId, reserva_id: null,
-            nombre: formAdd.nombre.trim(), dni: formAdd.dni.trim(),
-            empresa: normalizarEmpresa(formAdd.empresa),
-            telefono: formAdd.telefono.trim() || null,
-            email: formAdd.email.trim() || null, activo: true,
-          });
-          registradoEnNomina = true;
-        }
-      }
-
-      setMensaje({ tipo: "ok", texto: `${formAdd.nombre.trim()} agregado al manifiesto${registradoEnNomina ? " y a la nómina" : ""} ✓` });
+      const cola = plan.codigo === "reusar" ? " · " + plan.aviso
+                 : nacioEnNomina             ? " y a la nómina del cliente ✓"
+                 : " ✓ · el servicio no tiene paraderos todavía, así que su ficha queda atada a él";
+      setMensaje({ tipo: "ok", texto: `${formAdd.nombre.trim()} agregado al manifiesto${cola}` });
       setFormAdd({ nombre: "", dni: "", empresa: "", telefono: "", email: "", parada_id: "" });
       setMostrarFormAdd(false);
-      await enviarInvitaciones([nuevo.id]);
+      if (plan.codigo === "crear" && pasajeroId != null) await enviarInvitaciones([pasajeroId]);
       await cargar();
       if (onChange) onChange();
     } finally {
@@ -876,29 +938,40 @@ export default function ModalManifiesto(props: Props) {
   };
 
   // ── Panel nómina: carga y agrega ────────────────────────────────────────────
+  // Trae el PADRÓN ENTERO del cliente. Dos cosas que antes no hacía, y cada una escondía
+  // gente distinta: (1) pedía `.is("reserva_id", null)`, así que quien tenía la ficha
+  // tomada por otro servicio era invisible aquí — el caso de VELIZ y CHAVEZ; (2) iba sin
+  // paginar, y PostgREST corta CUALQUIER respuesta en 1000 filas, de modo que en un
+  // cliente grande la cola del alfabeto no existía. Lo que no se pueda ofrecer se muestra
+  // igual, con su motivo: esconderlo es lo que obliga a ir a mirar la base.
   const cargarNominaPanel = async () => {
     if (!clienteId) return;
     setLoadingNomina(true);
-    const { data } = await supabase
-      .from("pasajeros")
-      .select("id, reserva_id, cliente_id, nombre, dni, telefono, empresa")
-      .eq("cliente_id", clienteId)
-      .is("reserva_id", null)
-      .order("nombre");
-    setNomina((data || []) as PasajeroManifiesto[]);
+    const filas = await paginarFilas(() =>
+      supabase
+        .from("pasajeros")
+        .select("id, reserva_id, nombre, dni, telefono, empresa")
+        .eq("cliente_id", clienteId)
+        .order("nombre").order("id"), // orden estable: sin él las páginas pueden solaparse
+    );
+    setNomina(filas as PersonaCliente[]);
     setLoadingNomina(false);
   };
 
-  const agregarDesdeNomina = async (pax: PasajeroManifiesto) => {
+  const agregarDesdeNomina = async (cand: Candidato) => {
     if (paradas.length === 0) {
       setMensaje({ tipo: "warn", texto: "Agrega primero una parada al itinerario para poder asignar pasajeros." });
       return;
     }
+    const pax = cand.persona;
     setAgregandoPaxId(pax.id);
     setMensaje(null);
     try {
-      // Enlaza el pasajero de nómina existente a la primera parada (no duplica su fila
-      // en `pasajeros`: eso choca con uq_pasajero_cliente_dni, único por dni+cliente).
+      // Enlaza la ficha EXISTENTE a la primera parada. Nunca se duplica su fila en
+      // `pasajeros`: (cliente_id, dni) es único, así que la copia chocaría con
+      // uq_pasajero_cliente_dni. Vale igual para la ficha que ocupa otro servicio —
+      // `reserva_id` se queda como está (es de aquel manifiesto) y esta pantalla la
+      // recoge por `pasajeros_parada`, que es lo que de verdad dice quién viaja.
       const { error } = await supabase.from("pasajeros_parada").insert({
         pasajero_id: pax.id,
         parada_id: paradas[0].id,
@@ -906,7 +979,9 @@ export default function ModalManifiesto(props: Props) {
         estado_abordaje: "Pendiente",
       });
       if (error) { setMensaje({ tipo: "err", texto: error.message }); return; }
-      setNomina(prev => prev.filter(p => p.id !== pax.id));
+      if (cand.codigo === "en_otro_servicio") {
+        setMensaje({ tipo: "ok", texto: `${pax.nombre} agregado. Su ficha la ocupa el servicio #${pax.reserva_id}; sigue viajando en los dos.` });
+      }
       await cargar();
       if (onChange) onChange();
     } finally {
@@ -999,18 +1074,31 @@ export default function ModalManifiesto(props: Props) {
   const syncBd = sincronizadoApp ? "#a7f3d0" : "#fed7aa";
   const syncColor = sincronizadoApp ? "#065f46" : "#9a3412";
 
-  const dnisExistentes = new Set(pasajeros.map((p) => p.dni).filter(Boolean));
+  // Quién va ya en este manifiesto, en la forma que pide el motor.
+  const enManifiesto = useMemo(
+    () => pasajeros.map((p) => ({ id: p.id, nombre: p.nombre, dni: p.dni })),
+    [pasajeros],
+  );
 
+  // DNIs ya embarcados (lo consumen los dos cargadores). Memoizado: recrearlo en cada
+  // render invalidaba las dependencias de todo lo que colgaba de él.
+  const dnisExistentes = useMemo(
+    () => new Set(pasajeros.map((p) => claveDni(p.dni)).filter(Boolean)),
+    [pasajeros],
+  );
+
+  const padron = useMemo(
+    () => clasificarPadron(nomina, enManifiesto, reservaId),
+    [nomina, enManifiesto, reservaId],
+  );
+
+  // SIN búsqueda, la lista es para ELEGIR: solo lo agregable. CON búsqueda, el operador
+  // está preguntando «¿dónde está fulano?» y ahí se muestra todo lo que coincide, también
+  // lo que no se puede agregar y por qué — que es la respuesta que el panel se callaba.
   const nominaFiltrada = useMemo(() => {
-    const disponibles = nomina.filter(p => !dnisExistentes.has(p.dni));
-    const q = nominaBusq.toLowerCase().trim();
-    if (!q) return disponibles;
-    return disponibles.filter(p =>
-      p.nombre.toLowerCase().includes(q) ||
-      p.dni.toLowerCase().includes(q) ||
-      (p.empresa || "").toLowerCase().includes(q)
-    );
-  }, [nomina, dnisExistentes, nominaBusq]);
+    const base = nominaBusq.trim() === "" ? padron.ofrecibles : padron.todos;
+    return filtrarCandidatos(base, nominaBusq);
+  }, [padron, nominaBusq]);
 
   const paradasGestion = paradas.map((p) => ({
     id: p.id,
@@ -1562,36 +1650,50 @@ export default function ModalManifiesto(props: Props) {
                   />
                 </div>
                 {loadingNomina ? (
+                  // Nunca se afirma un vacío mientras se está buscando.
                   <p className="text-xs text-gray-400">Cargando nómina…</p>
                 ) : nominaFiltrada.length === 0 ? (
-                  <p className="text-xs text-gray-400">
-                    {nomina.length === 0
-                      ? "La nómina de este cliente está vacía."
-                      : "Todos los pasajeros de la nómina ya están en este servicio."}
+                  <p className="text-xs text-gray-500">
+                    {motivoPanelVacio({ hayCliente: !!clienteId, padron: nomina.length, busqueda: nominaBusq }).texto}
                   </p>
                 ) : (
                   <div className="max-h-52 overflow-y-auto flex flex-col gap-1.5 pr-1">
-                    {nominaFiltrada.map(p => (
-                      <div key={p.id} className="flex items-center justify-between rounded-lg px-3 py-2 bg-white border" style={{ borderColor: "#e2e8f0" }}>
+                    {nominaFiltrada.map(c => {
+                      const p = c.persona;
+                      return (
+                      <div key={p.id} className="flex items-center justify-between rounded-lg px-3 py-2 border" style={{ borderColor: "#e2e8f0", background: c.ofrecible ? "white" : "#f8fafc" }}>
                         <div className="flex items-center gap-2 min-w-0">
-                          <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style={{ background: "#0b315f" }}>
+                          <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style={{ background: c.ofrecible ? "#0b315f" : "#94a3b8" }}>
                             {p.nombre.charAt(0)}
                           </div>
                           <div className="min-w-0">
-                            <p className="text-xs font-bold text-gray-800 truncate">{p.nombre}</p>
+                            <p className="text-xs font-bold truncate" style={{ color: c.ofrecible ? "#1f2937" : "#64748b" }}>{p.nombre}</p>
                             <p className="text-[10px] text-gray-400 font-mono">{p.dni}{p.empresa ? ` · ${p.empresa}` : ""}</p>
+                            {/* El motivo se DECLARA: lo que no se puede agregar dice por qué y dónde se arregla. */}
+                            {c.codigo !== "en_nomina" && (
+                              <p className="text-[10px] mt-0.5" style={{ color: c.codigo === "dni_ocupado_por_otro" ? "#991b1b" : "#64748b" }}>
+                                {c.detalle}
+                              </p>
+                            )}
                           </div>
                         </div>
-                        <button
-                          onClick={() => agregarDesdeNomina(p)}
-                          disabled={agregandoPaxId === p.id}
-                          className="ml-3 px-3 py-1 rounded-lg font-bold text-[11px] text-white flex-shrink-0 disabled:opacity-50"
-                          style={{ background: "#0b315f" }}
-                        >
-                          {agregandoPaxId === p.id ? "…" : "+ Agregar"}
-                        </button>
+                        {c.ofrecible ? (
+                          <button
+                            onClick={() => agregarDesdeNomina(c)}
+                            disabled={agregandoPaxId === p.id}
+                            className="ml-3 px-3 py-1 rounded-lg font-bold text-[11px] text-white flex-shrink-0 disabled:opacity-50"
+                            style={{ background: "#0b315f" }}
+                          >
+                            {agregandoPaxId === p.id ? "…" : "+ Agregar"}
+                          </button>
+                        ) : (
+                          <span className="ml-3 text-[10px] font-bold flex-shrink-0" style={{ color: "#94a3b8" }}>
+                            {c.codigo === "ya_en_este_servicio" ? "✓ ya viaja" : "revisar"}
+                          </span>
+                        )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

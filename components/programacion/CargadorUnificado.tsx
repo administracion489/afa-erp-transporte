@@ -151,13 +151,19 @@ export default function CargadorUnificado(props: Props) {
 
         // 2) Para cada pasajero de esa parada
         for (const pax of parada.pasajeros) {
-          // ¿Ya existe el pasajero por DNI?
+          // ¿Ya existe el pasajero por DNI? La ficha es única por (cliente_id, dni), así
+          // que la búsqueda tiene que ir ACOTADA AL CLIENTE y derivar la clave por el mismo
+          // camino con el que se escribe. Sin `cliente_id` pasaban dos cosas: el mismo DNI
+          // registrado en dos clientes hacía que `maybeSingle()` fallara (más de una fila)
+          // y la persona terminaba en la rama de "crear", que choca con la unique; y cuando
+          // sí encontraba una, el UPDATE de abajo le reescribía el `cliente_id` — o sea, le
+          // robaba la ficha al otro cliente.
           let pasajeroId: number;
-          const buscaPax = await supabase
-            .from("pasajeros")
-            .select("id")
-            .eq("dni", pax.dni)
-            .maybeSingle();
+          let qPax = supabase.from("pasajeros").select("id").eq("dni", pax.dni);
+          // `.eq("cliente_id", null)` NO compara contra NULL en PostgREST: hay que pedir `is`.
+          qPax = clienteId == null ? qPax.is("cliente_id", null) : qPax.eq("cliente_id", clienteId);
+          const buscaPax = await qPax.order("id").limit(1)
+            .then((r: any) => ({ ...r, data: (r.data || [])[0] || null }));
 
           if (buscaPax.data) {
             pasajeroId = buscaPax.data.id;
