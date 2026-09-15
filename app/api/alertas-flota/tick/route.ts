@@ -21,6 +21,10 @@ import {
   hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, canalesConductor, type AlertaConfig,
 } from "@/lib/alertas";
 import { horarioDe, limaAUtcMs, planDeEnvioConductor } from "@/lib/alertas-horario";
+import {
+  enViaRecordatorio as enViaRecordatorioPuro,
+  enVentanaHoraFija as enVentanaHoraFijaPuro,
+} from "@/lib/alertas-modo-tiempo";
 import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
 
@@ -32,9 +36,9 @@ const admin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } },
 );
 
-// Ventana generosa para modo hora_fija: tolera ticks caídos (un hueco no pierde el día).
-// El dedupe garantiza "una sola vez", así que ampliar la ventana solo permite recuperar.
-const VENTANA_HORA_FIJA = 120;
+// La ventana del modo hora_fija (generosa a propósito: tolera ticks caídos sin perder el
+// día) vive ahora en `lib/alertas-modo-tiempo.ts` como `VENTANA_HORA_FIJA_MIN`, junto a los
+// dos predicados que la usan y a la tabla que la pantalla necesita para poder avisar.
 
 const DIA_MS = 86_400_000;
 // Techo de duración. 26 h y no 12: hay tours full day de hasta 24 h — mismo techo que
@@ -933,35 +937,28 @@ async function handler(req: NextRequest) {
   }
 }
 
+// Los dos predicados de abajo viven en `lib/alertas-modo-tiempo.ts` (módulo PURO) y aquí
+// solo se adaptan a la forma que usan los bloques. No es ceremonia: el panel tiene que
+// avisar cuando el modo elegido no es uno de los que estos predicados saben ejecutar
+// —`evento` en un recordatorio no envía NUNCA; un modo que no sea `hora_fija` en un barrido
+// diario lo deja SIN ventana y sale a las 00:0x—, y un guard que mirara su propia copia de
+// esa tabla sería el bug del semáforo de puntualidad, con el agravante de que el que
+// mentiría es justo el que existe para no mentir.
+
 /** ¿Estamos en la ventana de disparo del recordatorio? Piso amplio + dedupe = "una vez, sin perder". */
 function enViaRecordatorio(
   cfg: AlertaConfig, r: any, hoy: string, manana: string, ahora: number, force: boolean,
 ): boolean {
-  if (force) return true;
-  if (cfg.modo_tiempo === "hora_fija") {
-    if (r.fecha_servicio !== manana) return false; // hora fija → recuerda los de MAÑANA
-    const hf = hhmmAMin(cfg.hora_fija) ?? 480;
-    return ahora >= hf && ahora < hf + VENTANA_HORA_FIJA;
-  }
-  if (cfg.modo_tiempo === "anticipacion") {
-    // Fecha absoluta (no solo "minutos del día de hoy"): una anticipación de varias
-    // horas sobre un servicio de MAÑANA temprano dispara HOY en la noche — cruza la
-    // medianoche, y comparar solo r.fecha_servicio===hoy lo perdía por completo.
-    if (r.fecha_servicio !== hoy && r.fecha_servicio !== manana) return false;
-    const inicioMs = limaAUtcMs(r.fecha_servicio, r.hora_servicio);
-    if (inicioMs == null) return false;
-    const disparoMs = inicioMs - (cfg.min_anticipacion ?? 90) * 60_000;
-    const nowMs = Date.now();
-    return nowMs >= disparoMs && nowMs < inicioMs; // desde X min antes hasta la hora de inicio
-  }
-  return false;
+  return enViaRecordatorioPuro({
+    modo_tiempo: cfg.modo_tiempo, hora_fija: cfg.hora_fija, min_anticipacion: cfg.min_anticipacion,
+    fechaServicio: r.fecha_servicio, horaServicio: r.hora_servicio,
+    hoy, manana, ahoraMin: ahora, ahoraMs: Date.now(), force,
+  });
 }
 
 /** Ventana para alertas de hora fija (docs/solape/jornada). Modos no-hora-fija: sin ventana. */
 function enVentanaHoraFija(cfg: AlertaConfig, ahora: number, force: boolean): boolean {
-  if (force) return true;
-  if (cfg.modo_tiempo !== "hora_fija") return true;
-  const hf = hhmmAMin(cfg.hora_fija);
-  if (hf == null) return true;
-  return ahora >= hf && ahora < hf + VENTANA_HORA_FIJA;
+  return enVentanaHoraFijaPuro({
+    modo_tiempo: cfg.modo_tiempo, hora_fija: cfg.hora_fija, ahoraMin: ahora, force,
+  });
 }

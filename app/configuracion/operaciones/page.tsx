@@ -4,9 +4,12 @@ import { supabase } from "@/lib/supabase";
 // Módulo PURO (no lee la base): la frase y el aviso salen de los MISMOS números que usa
 // el motor del tick, para que la pantalla no pueda describir la ventana al revés.
 import { MARGEN_URGENTE_MIN, describirHorario, hhmmAMinutos, ventanaCubreMadrugada } from "@/lib/alertas-horario";
+// La MISMA tabla que usa el tick para decidir qué modo aplica a qué aviso: el motor importa
+// de ahí sus dos predicados. Sin eso, el guard que existe para que la pantalla no mienta
+// tendría su propia copia y sería el primero en quedarse atrás.
+import { cotejarModoTiempo, leeElModo, type ModoTiempo } from "@/lib/alertas-modo-tiempo";
 
 type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean; es_contingencia?: boolean };
-type ModoTiempo = "evento" | "anticipacion" | "hora_fija";
 type AlertaCfg = {
   clave: string; nombre: string; descripcion: string | null; activo: boolean;
   modo_tiempo: ModoTiempo; min_anticipacion: number | null; hora_fija: string | null; umbral: number | null;
@@ -392,8 +395,15 @@ export default function ConfigOperacionesPage() {
                 <span className={c.activo ? "text-green-600" : "text-gray-400"}>{c.activo ? "Activo" : "Inactivo"}</span>
               </label>
             </div>
+            {/* ¿El bloque de este aviso lee siquiera el selector "Cuándo"? Se DERIVA de la
+                tabla del motor en vez de depender de que alguien mantenga a mano la columna
+                `tiempo_editable` — que sigue mandando cuando dice false (es un AND), pero ya
+                no hace falta correr un SQL para que un control inerte deje de ofrecerse.
+                Doce de los veintiún tipos no lo leen: los de ciclo de vida, el semáforo de
+                puntualidad, el GPS, el checkout y el abandono tienen su propio disparador. */}
+            {(() => { const modoVisible = c.tiempo_editable && leeElModo(c.clave); return (
             <div className="grid md:grid-cols-4 gap-3">
-              {c.tiempo_editable && (
+              {modoVisible && (
                 <div>
                   <label className={label}>Cuándo</label>
                   <select className={input} value={c.modo_tiempo} onChange={(e) => setCfg(c.clave, { modo_tiempo: e.target.value as ModoTiempo })}>
@@ -403,11 +413,11 @@ export default function ConfigOperacionesPage() {
                   </select>
                 </div>
               )}
-              {c.tiempo_editable && c.modo_tiempo === "anticipacion" && (
+              {modoVisible && c.modo_tiempo === "anticipacion" && (
                 <div><label className={label}>Minutos antes</label>
                   <input type="number" className={input} value={c.min_anticipacion ?? 90} onChange={(e) => setCfg(c.clave, { min_anticipacion: Number(e.target.value) })} /></div>
               )}
-              {c.tiempo_editable && c.modo_tiempo === "hora_fija" && (
+              {modoVisible && c.modo_tiempo === "hora_fija" && (
                 <div><label className={label}>Hora (HH:MM)</label>
                   <input type="time" className={input} value={c.hora_fija ?? "08:00"} onChange={(e) => setCfg(c.clave, { hora_fija: e.target.value })} /></div>
               )}
@@ -426,6 +436,28 @@ export default function ConfigOperacionesPage() {
                 </label>
               )}
             </div>
+            ); })()}
+
+            {/* EL MODO ELEGIDO CONTRA EL QUE SU BLOQUE SABE EJECUTAR.
+                Cuatro alertas salieron a las 00:00 (o no salieron nunca) por esto y la
+                pantalla no tenía forma de decirlo: basta con tocar el desplegable para que
+                un barrido diario se quede sin ventana —`guardarCfg` conserva el `hora_fija`
+                viejo— o para que un recordatorio quede activo y MUDO. No se arregla en el
+                motor: un `hora_fija` que quedó de antes no es una intención, es un resto, y
+                deducir de ahí es lo que `montoDe` rechaza con el falso flete. Se DICE, como
+                la ventana invertida del horario.
+                Solo pintan ámbar los dos códigos que cambian lo que hace el sistema; el
+                resto no pinta nada, porque un aviso que sale siempre se vuelve paisaje. */}
+            {(() => {
+              const m = cotejarModoTiempo(c);
+              if (!m.alarma) return null;
+              return (
+                <div className="mt-3 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                  ⚠️ <strong>{m.codigo === "evento_mudo" ? "Este aviso no se envía nunca." : "Este aviso sale de madrugada."}</strong>{" "}
+                  {m.detalle} <span className="font-semibold">{m.arreglo}</span>
+                </div>
+              );
+            })()}
 
             {/* Canales de ESTE tipo de mensaje */}
             {(c.notifica_conductor || c.notifica_pasajero) && (
