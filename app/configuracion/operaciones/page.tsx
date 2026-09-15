@@ -1,6 +1,9 @@
 "use client";
 import React, { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+// Módulo PURO (no lee la base): la frase y el aviso salen de los MISMOS números que usa
+// el motor del tick, para que la pantalla no pueda describir la ventana al revés.
+import { describirHorario, hhmmAMinutos, ventanaCubreMadrugada } from "@/lib/alertas-horario";
 
 type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean; es_contingencia?: boolean };
 type ModoTiempo = "evento" | "anticipacion" | "hora_fija";
@@ -17,6 +20,10 @@ type AlertaCfg = {
   tiempo_editable: boolean;
   // Horario de envío al conductor (supabase/alertas-horario-conductor.sql)
   respeta_horario: boolean; horario_desde: string | null; horario_hasta: string | null;
+  /** false = este aviso NO le escribe al directorio → la tarjeta oculta el selector, en vez
+   *  de ofrecer contactos a los que el motor nunca les va a mandar nada. Gemela de
+   *  `tiempo_editable` (supabase/alertas-controles-que-no-aplican.sql). */
+  usa_directorio: boolean;
 };
 
 // Columnas de canal que DEBEN viajar en el update. Si se olvida alguna, la casilla se
@@ -105,6 +112,9 @@ export default function ConfigOperacionesPage() {
       respeta_horario:                      x.respeta_horario                      ?? false,
       horario_desde:                        x.horario_desde                        ?? null,
       horario_hasta:                        x.horario_hasta                        ?? null,
+      // Sin la columna, se muestra: ocultar el selector por una migración que falta
+      // escondería contactos que sí están configurados y funcionando.
+      usa_directorio:                       x.usa_directorio                       ?? true,
     })));
     setDests(d.data ?? []);
     setCargando(false);
@@ -436,22 +446,33 @@ export default function ConfigOperacionesPage() {
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     <span className="text-xs text-gray-500 w-20 shrink-0">Horario</span>
                     <label className="flex items-center gap-1 text-xs text-gray-600"
-                      title="Fuera de este horario el aviso espera a que abra la ventana, en vez de llegarle al conductor de madrugada.">
+                      title="Detectado fuera de este horario, el aviso espera a que abra la ventana en vez de llegarle al conductor de madrugada.">
                       <input type="checkbox" checked={c.respeta_horario}
                         onChange={(e) => setCfg(c.clave, { respeta_horario: e.target.checked })} />
-                      🌙 No escribir de madrugada
+                      🕐 Enviar solo dentro de un horario
                     </label>
                     {c.respeta_horario && (
                       <>
-                        <span className="text-[11px] text-gray-500">de</span>
+                        {/* "Enviar de X a Y", NUNCA "no escribir de X a Y": la etiqueta anterior
+                            nombraba las horas de SILENCIO mientras los campos son las de ENVÍO, y
+                            con eso se configuró 21:00–07:00 — o sea "escríbele solo de noche",
+                            justo el defecto que este módulo vino a arreglar. */}
+                        <span className="text-[11px] font-semibold text-gray-600">Enviar de</span>
                         <input type="time" className={input + " w-28"} value={c.horario_desde ?? "12:00"}
                           onChange={(e) => setCfg(c.clave, { horario_desde: e.target.value })} />
-                        <span className="text-[11px] text-gray-500">a</span>
+                        <span className="text-[11px] font-semibold text-gray-600">a</span>
                         <input type="time" className={input + " w-28"} value={c.horario_hasta ?? "22:00"}
                           onChange={(e) => setCfg(c.clave, { horario_hasta: e.target.value })} />
-                        <span className="text-[11px] text-gray-400">
+                        <div className="basis-full text-[11px] text-gray-500 pl-20">
+                          {describirHorario(hhmmAMinutos(c.horario_desde ?? "12:00"), hhmmAMinutos(c.horario_hasta ?? "22:00"))}{" "}
                           Nunca retiene un aviso más allá de la hora del servicio, ni uno de hoy.
-                        </span>
+                        </div>
+                        {ventanaCubreMadrugada(hhmmAMinutos(c.horario_desde ?? "12:00"), hhmmAMinutos(c.horario_hasta ?? "22:00")) && (
+                          <div className="basis-full ml-20 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                            ⚠️ Este horario <strong>permite</strong> escribirle al conductor de madrugada. Si lo que
+                            quieres es lo contrario, el rango es el de <strong>envío</strong>: prueba <strong>07:00 a 21:00</strong>.
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
@@ -481,7 +502,12 @@ export default function ConfigOperacionesPage() {
                 )}
               </div>
             )}
-            {dests.length > 0 && (
+            {/* Los avisos de ciclo de vida (asignación, cambio, cancelación, desasignación)
+                solo le escriben al CONDUCTOR: el motor nunca llama al directorio desde ese
+                bloque. Ofrecer ahí los contactos es prometer envíos que no ocurren — se
+                marcaron a mano una vez y nadie recibió nada. Mismo criterio que
+                `tiempo_editable` con el selector "Cuándo". */}
+            {dests.length > 0 && c.usa_directorio && (
               <div className="mt-3">
                 <label className={label}>También avisar a (directorio):</label>
                 <div className="flex flex-wrap gap-2">

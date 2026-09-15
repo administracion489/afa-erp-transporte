@@ -132,6 +132,49 @@ export function dentroDeVentana(min: number, desdeMin: number, hastaMin: number)
     : min >= desdeMin || min < hastaMin;
 }
 
+/**
+ * Franja que la pantalla llama "de madrugada" al advertir sobre una ventana mal puesta.
+ * 00:00–05:00: la hora a la que el dueño reportó que llegaban los avisos.
+ */
+const MADRUGADA_DESDE = 0;
+const MADRUGADA_HASTA = 5 * 60;
+
+/**
+ * ¿Esta ventana PERMITE escribir de madrugada?
+ *
+ * Existe por un error real, y el error fue de la etiqueta, no del motor: la casilla decía
+ * «No escribir de madrugada DE 21:00 A 07:00» y esos dos campos son la ventana en la que
+ * SÍ se envía, así que quedó configurado «escríbele solo de noche» — exactamente al revés
+ * de lo que se quería, y con el mismo aviso saliendo a las 00:05 como si nada se hubiera
+ * arreglado. Un rango invertido no es detectable por el motor (una ventana nocturna es
+ * legítima: un tipo de aviso podría querer justo eso), así que lo único que se puede hacer
+ * es DECIRLO en la pantalla antes de guardar.
+ */
+export function ventanaCubreMadrugada(desdeMin: number | null, hastaMin: number | null): boolean {
+  if (desdeMin == null || hastaMin == null || desdeMin === hastaMin) return false;
+  for (let m = MADRUGADA_DESDE; m <= MADRUGADA_HASTA; m++) {
+    if (dentroDeVentana(m, desdeMin, hastaMin)) return true;
+  }
+  return false;
+}
+
+/**
+ * La frase que la pantalla imprime debajo de los dos campos, derivada de los MISMOS
+ * números que usa `planDeEnvioConductor`. Vive aquí y no en el TSX a propósito: la
+ * confusión que costó el error fue de DIRECCIÓN (qué mitad del día es la que envía), y
+ * una frase compuesta en la pantalla puede volver a describirla al revés sin que nada falle.
+ */
+export function describirHorario(desdeMin: number | null, hastaMin: number | null): string {
+  if (desdeMin == null || hastaMin == null) {
+    return "Horario incompleto: el aviso sale al instante, como si la casilla estuviera apagada.";
+  }
+  if (desdeMin === hastaMin) {
+    return "La ventana no dura nada: el aviso sale al instante, como si la casilla estuviera apagada.";
+  }
+  const d = minutosAHhmm(desdeMin), h = minutosAHhmm(hastaMin);
+  return `Se ENVÍA entre las ${d} y las ${h}. Detectado fuera de ese rango, el aviso espera a las ${d}.`;
+}
+
 /** Próximo instante (ms UTC) en que el reloj de Lima marca `desdeMin`. */
 export function proximaAperturaMs(ahoraMs: number, desdeMin: number): number {
   const hoyApertura = limaAUtcMs(fechaLima(ahoraMs), minutosAHhmm(desdeMin));

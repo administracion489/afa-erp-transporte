@@ -15,6 +15,7 @@
 
 import {
   dentroDeVentana,
+  describirHorario,
   fechaLima,
   hhmmAMinutos,
   horarioDe,
@@ -23,6 +24,7 @@ import {
   minutosAHhmm,
   planDeEnvioConductor,
   proximaAperturaMs,
+  ventanaCubreMadrugada,
   type Horario,
 } from "../lib/alertas-horario";
 
@@ -243,6 +245,45 @@ const VENTANA: Horario = { respeta: true, desdeMin: 12 * 60, hastaMin: 22 * 60 }
   // Si esto llega a 0, el módulo dejó de hacer su trabajo y la prueba de arriba
   // pasaría igual: un "no retiene nunca" cumple la invariante de forma trivial.
   chk("…y sí retiene de verdad en la madrugada", retenidos > 0, String(retenidos));
+}
+
+// ── 7. LA VENTANA INVERTIDA: el error que costó una configuración en producción ──
+{
+  // El dueño puso 21:00–07:00 leyendo la etiqueta vieja («No escribir de madrugada DE…
+  // A…»), que nombraba las horas de SILENCIO mientras los campos son las de ENVÍO. Con
+  // eso el aviso seguía saliendo a las 00:05 y encima uno hecho al mediodía esperaba
+  // hasta la noche. El motor no puede detectarlo —una ventana nocturna es legítima— así
+  // que lo único que queda es que la pantalla lo DIGA antes de guardar.
+  const invertida: Horario = { respeta: true, desdeMin: 21 * 60, hastaMin: 7 * 60 };
+  const p = planDeEnvioConductor({
+    ahoraMs: lima("2026-09-15", "00:05"),
+    fechaServicio: "2026-09-16", horaServicio: "06:00", horario: invertida,
+  });
+  chk("con 21:00–07:00 el aviso de medianoche SIGUE saliendo (el bug reportado)",
+    p.enviar === true && p.codigo === "en_ventana", p.codigo);
+  const mediodia = planDeEnvioConductor({
+    ahoraMs: lima("2026-09-15", "12:00"),
+    fechaServicio: "2026-09-16", horaServicio: "06:00", horario: invertida,
+  });
+  chk("…y el de mediodía se retiene hasta la noche, que es lo contrario de lo que se quería",
+    mediodia.enviar === false, mediodia.codigo);
+
+  chk("la pantalla AVISA de esa ventana", ventanaCubreMadrugada(21 * 60, 7 * 60));
+  chk("y no avisa de la correcta", !ventanaCubreMadrugada(7 * 60, 21 * 60));
+  chk("la sembrada tampoco", !ventanaCubreMadrugada(12 * 60, 22 * 60));
+  // Una ventana que abarca el día entero salvo un rato SÍ deja escribir de madrugada.
+  chk("una ventana casi completa avisa igual", ventanaCubreMadrugada(6 * 60, 5 * 60));
+  chk("una ventana a medio configurar no avisa de nada",
+    !ventanaCubreMadrugada(null, 7 * 60) && !ventanaCubreMadrugada(9 * 60, 9 * 60));
+}
+{
+  // La frase dice la DIRECCIÓN, que es justo lo que la etiqueta vieja decía al revés.
+  const f = describirHorario(7 * 60, 21 * 60);
+  chk("la frase nombra el rango de ENVÍO", f.includes("ENVÍA") && f.includes("07:00") && f.includes("21:00"), f);
+  chk("y dice hasta cuándo espera lo que cae fuera", f.includes("espera a las 07:00"));
+  chk("una ventana vacía se describe como apagada",
+    describirHorario(9 * 60, 9 * 60).includes("al instante"));
+  chk("y una incompleta también", describirHorario(null, 21 * 60).includes("al instante"));
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
