@@ -4,6 +4,7 @@
 // /api/alertas-flota/tick usa esto; nada de esto está hardcodeado.
 
 import { createClient } from "@supabase/supabase-js";
+import { fechaLima, minutoDelDiaLima } from "@/lib/alertas-horario";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -42,6 +43,13 @@ export type AlertaConfig = {
   canal_pasajero_whatsapp?: boolean | null;
   canal_pasajero_whatsapp_solo_sin_app?: boolean | null;
   tiempo_editable?: boolean | null;
+  // ── Horario de envío al conductor (supabase/alertas-horario-conductor.sql) ──
+  // Opcionales por lo mismo que los canales: si la migración no corrió llegan
+  // undefined y `horarioDe()` (lib/alertas-horario.ts) los lee como "no espera",
+  // que es el comportamiento de siempre. Un deploy sin SQL no retiene un mensaje.
+  respeta_horario?: boolean | null;
+  horario_desde?: string | null;         // "HH:MM" Lima
+  horario_hasta?: string | null;         // "HH:MM" Lima
 };
 
 export type CanalesConductor = { whatsapp: boolean; email: boolean; push: boolean };
@@ -57,18 +65,18 @@ export type Destinatario = { id: number; nombre: string; funcion: string | null;
 
 // ─── FECHA / HORA LIMA (UTC-5) ─────────────────────────────────────────────────
 
+// Las dos delegan en lib/alertas-horario.ts, que es PURO y por tanto probable desde un
+// script. Tener aquí una segunda copia del mismo desplazamiento a UTC-5 es cómo dos
+// módulos acaban contestando distinto sobre el mismo instante.
+
 /** Fecha local de Lima (YYYY-MM-DD). */
 export function hoyLima(): string {
-  const d = new Date();
-  d.setUTCHours(d.getUTCHours() - 5);
-  return d.toISOString().split("T")[0];
+  return fechaLima(Date.now());
 }
 
 /** Minutos transcurridos del día en Lima (0..1439). */
 export function ahoraLimaMin(): number {
-  const d = new Date();
-  d.setUTCHours(d.getUTCHours() - 5);
-  return d.getUTCHours() * 60 + d.getUTCMinutes();
+  return minutoDelDiaLima(Date.now());
 }
 
 /** "HH:MM" → minutos del día (o null). */

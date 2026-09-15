@@ -15,6 +15,8 @@ type AlertaCfg = {
   canal_pasajero_email: boolean; canal_pasajero_email_solo_sin_app: boolean;
   canal_pasajero_whatsapp: boolean; canal_pasajero_whatsapp_solo_sin_app: boolean;
   tiempo_editable: boolean;
+  // Horario de envío al conductor (supabase/alertas-horario-conductor.sql)
+  respeta_horario: boolean; horario_desde: string | null; horario_hasta: string | null;
 };
 
 // Columnas de canal que DEBEN viajar en el update. Si se olvida alguna, la casilla se
@@ -66,6 +68,11 @@ export default function ConfigOperacionesPage() {
   // Los canales ya NO son un bloque global: viven dentro de cada tipo de mensaje.
   // Si falta la migración, `faltaCanales` avisa en vez de fingir que se guarda.
   const [faltaCanales, setFaltaCanales] = useState(false);
+  // Ídem para el horario de envío al conductor. Sin la columna, el motor envía al
+  // instante (comportamiento de siempre) y estos campos no se mandan en el update:
+  // PostgREST rechaza la fila ENTERA si una columna no existe, así que incluirlos
+  // dejaría sin guardar también los canales y el resto de la tarjeta.
+  const [faltaHorario, setFaltaHorario] = useState(false);
 
   const showToast = (msg: string, ok = true) => { setToast({ msg, ok }); setTimeout(() => setToast(null), 3500); };
 
@@ -78,6 +85,7 @@ export default function ConfigOperacionesPage() {
     const filas = (c.data ?? []) as any[];
     // ¿La migración de canales ya corrió? (columna presente en la primera fila)
     setFaltaCanales(filas.length > 0 && filas[0].canal_conductor_whatsapp === undefined);
+    setFaltaHorario(filas.length > 0 && filas[0].respeta_horario === undefined);
     setCfgs(filas.map((x: any) => ({
       ...x,
       destinatarios: Array.isArray(x.destinatarios) ? x.destinatarios.map(Number) : [],
@@ -93,6 +101,10 @@ export default function ConfigOperacionesPage() {
       canal_pasajero_whatsapp_solo_sin_app: x.canal_pasajero_whatsapp_solo_sin_app ?? true,
       tiempo_editable:                      x.tiempo_editable                      ?? true,
       notifica_conductor_tercero:           x.notifica_conductor_tercero           ?? false,
+      // Default = comportamiento de siempre: sin horario, se envía al instante.
+      respeta_horario:                      x.respeta_horario                      ?? false,
+      horario_desde:                        x.horario_desde                        ?? null,
+      horario_hasta:                        x.horario_hasta                        ?? null,
     })));
     setDests(d.data ?? []);
     setCargando(false);
@@ -104,14 +116,28 @@ export default function ConfigOperacionesPage() {
 
   const guardarCfg = async (c: AlertaCfg) => {
     const canales = Object.fromEntries(COLS_CANAL.map((k) => [k, (c as any)[k] ?? false]));
+    // Si la migración del horario no corrió, estas tres NO viajan (ver `faltaHorario`).
+    // Con la casilla marcada y sin horas se guardan las 12:00–22:00 que siembra el SQL:
+    // dejarlas en null sería una espera que nunca abre, y el motor lo leería como
+    // "sin ventana" — o sea, la casilla diría una cosa y el sistema haría otra.
+    const horario = faltaHorario ? {} : {
+      respeta_horario: c.respeta_horario,
+      horario_desde: c.respeta_horario ? (c.horario_desde || "12:00") : c.horario_desde,
+      horario_hasta: c.respeta_horario ? (c.horario_hasta || "22:00") : c.horario_hasta,
+    };
     const { error } = await supabase.from("alerta_config").update({
       activo: c.activo, modo_tiempo: c.modo_tiempo,
       min_anticipacion: c.modo_tiempo === "anticipacion" ? (c.min_anticipacion ?? 90) : c.min_anticipacion,
       hora_fija: c.modo_tiempo === "hora_fija" ? (c.hora_fija ?? "08:00") : c.hora_fija,
       umbral: c.umbral, notifica_conductor: c.notifica_conductor, notifica_pasajero: c.notifica_pasajero,
       notifica_conductor_tercero: c.notifica_conductor_tercero ?? false,
-      destinatarios: c.destinatarios, ...canales, updated_at: new Date().toISOString(),
+      destinatarios: c.destinatarios, ...canales, ...horario, updated_at: new Date().toISOString(),
     }).eq("clave", c.clave);
+    if (!error && !faltaHorario) {
+      // Reflejar en pantalla lo que de verdad quedó escrito: si no, la casilla queda
+      // marcada con los campos de hora vacíos y el operador cree que no se guardó nada.
+      setCfg(c.clave, { horario_desde: (horario as any).horario_desde, horario_hasta: (horario as any).horario_hasta });
+    }
     showToast(error ? `Error al guardar: ${error.message}` : `Guardado: ${c.nombre}`, !error);
   };
 
@@ -293,6 +319,16 @@ export default function ConfigOperacionesPage() {
         </div>
       )}
 
+      {faltaHorario && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 text-sm text-amber-800">
+          El <strong>horario de envío al conductor</strong> aún no está activo en la base de datos, así que los
+          avisos de servicio asignado siguen saliendo en cuanto el sistema los detecta — que en un programa fijo
+          es a las <strong>00:00</strong>, cuando el conductor duerme. Ejecuta{" "}
+          <code className="font-mono">supabase/alertas-horario-conductor.sql</code> en el SQL Editor de Supabase
+          y recarga.
+        </div>
+      )}
+
       {/* Directorio de contactos */}
       <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
         <h2 className="text-sm font-bold text-gray-700 mb-1">Directorio de contactos</h2>
@@ -388,6 +424,36 @@ export default function ConfigOperacionesPage() {
                     <Canal on={c.canal_conductor_whatsapp} set={(v) => setCfg(c.clave, { canal_conductor_whatsapp: v })}>💬 WhatsApp</Canal>
                     <Canal on={c.canal_conductor_email} set={(v) => setCfg(c.clave, { canal_conductor_email: v })}>📧 Correo</Canal>
                     <Canal on={c.canal_conductor_push} set={(v) => setCfg(c.clave, { canal_conductor_push: v })}>📲 Push</Canal>
+                  </div>
+                )}
+
+                {/* HORARIO DE ENVÍO AL CONDUCTOR ("no molestar").
+                    Los avisos de ciclo de vida son 'evento': salen cuando el motor
+                    DETECTA el cambio, y como solo mira hoy/mañana, un programa fijo
+                    hecho con antelación se detecta a MEDIANOCHE — que es exactamente
+                    por qué llegaban a las 00:00. Aquí se elige a qué hora sale. */}
+                {c.notifica_conductor && !faltaHorario && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <span className="text-xs text-gray-500 w-20 shrink-0">Horario</span>
+                    <label className="flex items-center gap-1 text-xs text-gray-600"
+                      title="Fuera de este horario el aviso espera a que abra la ventana, en vez de llegarle al conductor de madrugada.">
+                      <input type="checkbox" checked={c.respeta_horario}
+                        onChange={(e) => setCfg(c.clave, { respeta_horario: e.target.checked })} />
+                      🌙 No escribir de madrugada
+                    </label>
+                    {c.respeta_horario && (
+                      <>
+                        <span className="text-[11px] text-gray-500">de</span>
+                        <input type="time" className={input + " w-28"} value={c.horario_desde ?? "12:00"}
+                          onChange={(e) => setCfg(c.clave, { horario_desde: e.target.value })} />
+                        <span className="text-[11px] text-gray-500">a</span>
+                        <input type="time" className={input + " w-28"} value={c.horario_hasta ?? "22:00"}
+                          onChange={(e) => setCfg(c.clave, { horario_hasta: e.target.value })} />
+                        <span className="text-[11px] text-gray-400">
+                          Nunca retiene un aviso más allá de la hora del servicio, ni uno de hoy.
+                        </span>
+                      </>
+                    )}
                   </div>
                 )}
 
