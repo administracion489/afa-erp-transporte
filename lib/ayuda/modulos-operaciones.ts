@@ -835,6 +835,85 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
   },
 
   // ══════════════════════════════════════════════════════════════════════════
+  // REDES SOCIALES
+  // ══════════════════════════════════════════════════════════════════════════
+  {
+    clave: "redes",
+    rutas: ["/redes"],
+    titulo: "Redes sociales · una publicación al día, aprobada por ti",
+    resumen:
+      "Cada mañana la IA deja redactado el texto del día. Tú lo revisas, lo apruebas, y sale a Facebook, Instagram, TikTok y YouTube. El estado de WhatsApp llega listo a tu celular para que lo publiques tú.",
+    paraQueSirve: [
+      "Sostener la presencia diaria en redes sin que alguien tenga que sentarse a escribir cada mañana.",
+      "Que nada se publique sin que una persona lo haya leído antes.",
+      "Ver en una sola pantalla en qué red salió, en cuál no y por qué no.",
+      "Tener guardado lo publicado cada día, con quién lo aprobó.",
+    ],
+    faqs: [
+      {
+        pregunta: "¿La IA publica sola?",
+        respuesta:
+          "**No.** Redacta y deja la propuesta esperando. Nada sale a ninguna red hasta que alguien pulsa **«Aprobar y publicar»**, y queda escrito quién lo aprobó y cuándo.\n\nEs la misma regla del resto del ERP: el sistema propone con la evidencia delante y firma una persona. Una publicación no se puede despublicar de la memoria de quien la vio.",
+      },
+      {
+        pregunta: "¿Por qué no se publica en los estados de WhatsApp como en las demás?",
+        respuesta:
+          "Porque **no existe ninguna API para publicar estados de WhatsApp**. No es que falte configurarlo: la API oficial de Meta manda mensajes a conversaciones y nunca ha tenido esa función.\n\nLo único que los publica es un programa no oficial, y eso choca con dos cosas: el número de atención al cliente está en la API oficial y conectarlo por ahí la rompería; y un estado **solo lo ven los contactos que tienen ese número guardado**, así que publicarlo desde un chip que nadie tiene agendado sería publicar para nadie.\n\nPor eso el agente te manda la pieza ya armada al celular y tú la publicas desde el número de atención al cliente, que es el que tus clientes sí tienen guardado.",
+      },
+      {
+        pregunta: "YouTube y TikTok son video. ¿Qué pasa los días que no grabé nada?",
+        respuesta:
+          "Tú decides, publicación por publicación, con el selector **«Video de hoy»**:\n\n**Sin video** — salen Facebook e Instagram con la imagen, y las de video se saltan ese día. La pantalla lo dice; no se inventa un relleno.\n\n**Que el agente arme el Reel/Short** — monta un vertical con la imagen y el texto encima. Sirve para sostener la frecuencia; se nota que es plantilla.\n\n**Video propio** — subes el que grabaste. Es lo que de verdad hace crecer un canal.",
+      },
+      {
+        pregunta: "Una red dice que no va a publicar. ¿Cómo sé por qué?",
+        respuesta:
+          "La columna de la derecha explica cada red por separado, con el motivo **y dónde se arregla**. No es el mismo problema que falte conectar la cuenta, que el texto no quepa, o que hoy no haya video.\n\nSolo se pintan en **ámbar** los motivos que alguien tiene que atender. Que TikTok no publique porque hoy elegiste «sin video» no es un fallo: es lo que pediste, y por eso sale en gris.",
+      },
+      {
+        pregunta: "¿La IA se puede inventar datos sobre la empresa?",
+        respuesta:
+          "Tiene **prohibido** escribir cifras, años de experiencia, número de unidades, certificaciones, premios o porcentajes, y también superlativos del tipo «los mejores» o «líderes del mercado».\n\nLa razón es que un número inventado se publica en nombre de la empresa y no se puede retirar. Si no está tecleado en **Ajustes**, para la IA no existe.\n\nEn **Ajustes → Prohibido mencionar** puedes añadir lo que sea propio de tu operación: nombres de clientes, tarifas, placas, rutas concretas.",
+      },
+      {
+        pregunta: "¿Qué pasa si no apruebo nada en todo el día?",
+        respuesta:
+          "No se publica nada, y eso es correcto. La propuesta se queda esperando y al día siguiente se redacta otra.\n\nNo hay ningún camino por el que una publicación salga sin aprobación: el botón **«Publicar ahora»** solo adelanta la **hora** de algo que ya firmaste.",
+      },
+    ],
+    comoHacer: [
+      {
+        titulo: "Publicar lo de hoy",
+        pasos: [
+          "Entra a **Redes sociales → Hoy**. Si no hay propuesta, pulsa «Pedirle una a la IA».",
+          "Lee el texto. Corrígelo si hace falta y pulsa «Guardar cambios».",
+          "Sube la imagen del día.",
+          "Elige el modo de video: sin video, que lo arme el agente, o sube el tuyo.",
+          "Mira la columna de la derecha: dice red por red qué va a pasar.",
+          "Pulsa «Aprobar y publicar» y confirma.",
+        ],
+        advertencia:
+          "Si quedan cambios sin guardar, la pantalla no deja aprobar: se publicaría el texto anterior.",
+      },
+      {
+        titulo: "Conectar una red por primera vez",
+        pasos: [
+          "Ve a la pestaña **Cuentas**.",
+          "Pulsa «Conectar» en la red que quieras.",
+          "Sigue las indicaciones de esa tarjeta: dicen exactamente qué pegar y de dónde sacarlo.",
+          "Guarda. La credencial se cifra y no vuelve a salir de la pantalla ni del servidor.",
+        ],
+        advertencia:
+          "Lee el aviso ámbar de cada tarjeta: TikTok solo deja el video en borradores hasta que aprueben la auditoría de la app, y YouTube sube en privado mientras Google no verifique la app. Eso son trámites con la plataforma, no ajustes del ERP.",
+      },
+    ],
+    relacionadas: [
+      { etiqueta: "Inbox CRM", href: "/crm" },
+      { etiqueta: "Campañas", href: "/crm/campanas" },
+    ],
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
   // REPORTES
   // ══════════════════════════════════════════════════════════════════════════
   {
