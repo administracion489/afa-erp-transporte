@@ -25,6 +25,7 @@ const MODULOS = [
   "clientes",
   "crm",
   "radar-ia",
+  "redes",
   "despachador",
   "programacion",
   "seguimiento",
