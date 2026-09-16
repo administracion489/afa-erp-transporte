@@ -22,6 +22,19 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
 import { CAPACIDADES, type Red } from "./tipos";
+import {
+  MAX_ESCENAS,
+  MAX_ESCENA_SEG,
+  MAX_SUBTEXTO,
+  MAX_TITULO,
+  MIN_ESCENA_SEG,
+  MOVIMIENTOS,
+  TRANSICIONES,
+  normalizarGuion,
+  type CodigoGuion,
+  type Guion,
+} from "./guion";
+import { empresaConDefectos } from "../empresa-perfil";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
 
@@ -55,6 +68,23 @@ export async function leerConfig(): Promise<ConfigRedes | null> {
   if (!sb) return null;
   const { data } = await sb.from("redes_config").select("*").eq("id", 1).maybeSingle();
   return (data as ConfigRedes) ?? null;
+}
+
+/**
+ * El nombre que se estampa en el video, resuelto por `empresaConDefectos`.
+ *
+ * NO es una constante con «AFA Transportes» dentro, que es lo que había: **este ERP se
+ * vende**, y un literal en el código sale impreso en el video de quien lo compre — el
+ * mismo defecto que los PDF de mantenimiento y que el respaldo de `empresa-perfil`.
+ * Con el perfil sin llenar devuelve `null` y el video sale SIN marca: mejor sin nombre
+ * que con el de otra empresa, igual que la autorización del MTC.
+ */
+export async function marcaDeEmpresa(): Promise<string | null> {
+  const sb = db();
+  if (!sb) return null;
+  const { data } = await sb.from("empresa_perfil").select("nombre, razon_social").eq("id", 1).maybeSingle();
+  const e = empresaConDefectos(data as any);
+  return e.sinConfigurar ? null : e.nombre;
 }
 
 /**
@@ -215,6 +245,173 @@ function extraerJson(texto: string): any | null {
     }
   }
   return null;
+}
+
+// ── El guion del video ────────────────────────────────────────────────────────
+//
+// NINGÚN MODELO DE ANTHROPIC GENERA VIDEO NI IMAGEN, y eso hay que decirlo en vez de
+// aparentarlo: lo que la IA aporta aquí es la DIRECCIÓN sobre las fotos que ya existen —
+// qué se ve en cada escena, qué frase va encima, cuánto dura y cómo se mueve la cámara.
+//
+// Y LAS MIRA DE VERDAD. Las fotos van al modelo como imágenes, no como una lista de URLs:
+// sin verlas, el guion sería el caption repartido en cuatro trozos y la escena diría
+// «nuestras unidades» sobre la foto de una oficina. Es la diferencia entre un guion y un
+// troceado. Se mandan por URL (el bucket es público, que es la razón de que lo sea) para
+// no bajar y re-subir megabytes en cada propuesta.
+//
+// EL TEXTO DE PANTALLA NO ES EL CAPTION, y el prompt lo repite porque es el error natural
+// del modelo: se le da el caption como contexto y la tentación es copiarlo. Cuatro a siete
+// palabras por escena; el caption sigue en su sitio.
+
+/** Cuántas fotos se le enseñan al modelo. Más allá, el guion no cabe en `MAX_ESCENAS`. */
+const MAX_IMAGENES_GUION = 8;
+
+function sistemaGuion(cfg: ConfigRedes, nImagenes: number, marca: string | null): string {
+  return [
+    "Diriges videos verticales cortos (Reel / Short / TikTok) para una empresa peruana de",
+    "transporte de personal. Te dan el texto de la publicación del día y las fotos que hay.",
+    "Tu trabajo es escribir el GUION: qué foto se ve en cada escena, qué frase va ENCIMA,",
+    "cuánto dura y cómo se mueve la cámara.",
+    "",
+    "LO MÁS IMPORTANTE: EL TEXTO DE PANTALLA NO ES EL TEXTO DE LA PUBLICACIÓN.",
+    "El caption se lee con el pulgar quieto; lo que va sobre el video se lee en dos segundos",
+    `mientras la imagen se mueve. Cada 'titulo' son 3 a 7 palabras, máximo ${MAX_TITULO}`,
+    "caracteres. NO copies frases enteras del caption, NO pongas hashtags, NO pongas emojis",
+    "(en el video salen como cuadros vacíos) y NO repitas la misma idea en dos escenas.",
+    "",
+    "MIRA LAS FOTOS ANTES DE ESCRIBIR. La frase de una escena tiene que tener que ver con lo",
+    "que se ve en SU foto. Si una foto no te dice nada que encaje, déjala fuera: es mejor un",
+    "guion de tres escenas buenas que de cinco con una que no viene a cuento.",
+    "",
+    "LO QUE NO PUEDES HACER, y es lo mismo que rige el caption:",
+    "• NO inventes NINGÚN dato: ni cifras, ni años, ni número de unidades, ni clientes, ni",
+    "  certificaciones, ni porcentajes. Si no lo ves en la foto o no está escrito abajo, NO",
+    "  EXISTE. Y lo que ves en una foto se describe, no se convierte en un dato ('buses' sí,",
+    "  'nuestra flota de 40 buses' no).",
+    "• NO nombres clientes, placas, conductores, rutas concretas, precios ni tarifas, aunque",
+    "  se lean en la foto.",
+    "• NO uses superlativos comparativos ni promesas ('los más seguros', 'siempre puntuales').",
+    "",
+    `HAY ${nImagenes} FOTO(S), numeradas de 0 a ${Math.max(0, nImagenes - 1)} en el orden en que`,
+    "te llegan. El campo 'imagen' es ese número. Usa null solo para una tarjeta de color sin",
+    "foto (sirve para rematar).",
+    "",
+    "RITMO:",
+    `• Entre 3 y ${MAX_ESCENAS - 1} escenas, sin contar el cierre.`,
+    `• Cada escena dura entre ${MIN_ESCENA_SEG} y ${MAX_ESCENA_SEG} segundos; lo normal son 2.5 a 3.5.`,
+    "• La PRIMERA escena es el gancho: tiene que hacer parar el dedo. Nada de saludos.",
+    "• La ÚLTIMA escena lleva \"tipo\": \"cierre\", imagen null y una frase de remate corta.",
+    marca ? `  La marca que aparece en pantalla es «${marca}»; no hace falta repetirla en el texto.` : "",
+    "",
+    `• 'movimiento' es uno de: ${MOVIMIENTOS.join(", ")}. Elígelo según la foto: un plano`,
+    "  abierto pide zoom_in, un vehículo de lado pide un paneo. No repitas el mismo dos veces",
+    "  seguidas.",
+    `• 'transicion' es cómo ENTRA la escena, uno de: ${TRANSICIONES.join(", ")}.`,
+    `• 'texto' es una línea secundaria opcional, máximo ${MAX_SUBTEXTO} caracteres. Úsala poco.`,
+    "",
+    cfg.tono ? `TONO DE LA MARCA:\n${cfg.tono}` : "",
+    cfg.publico ? `A QUIÉN LE HABLA:\n${cfg.publico}` : "",
+    cfg.prohibido ? `PROHIBIDO EXPRESAMENTE POR LA EMPRESA:\n${cfg.prohibido}` : "",
+    "",
+    "FORMATO DE RESPUESTA — responde SOLO con un objeto JSON, sin ```, sin explicación:",
+    '{"escenas":[{"imagen":0,"titulo":"...","texto":"...","movimiento":"zoom_in",',
+    '"duracion_seg":3,"transicion":"corte"}, ... ,{"imagen":null,"titulo":"...",',
+    '"movimiento":"estatico","duracion_seg":2.2,"transicion":"fundido","tipo":"cierre"}]}',
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export type GuionIA = {
+  ok: boolean;
+  guion?: Guion;
+  avisos?: CodigoGuion[];
+  modelo?: string;
+  error?: string;
+};
+
+/**
+ * Le pide a Claude el guion del video del día.
+ *
+ * Devuelve el guion YA NORMALIZADO: lo que el modelo escriba pasa por `normalizarGuion`
+ * antes de salir de aquí, así que ningún consumidor recibe una escena de 40 segundos ni
+ * un índice de foto que no existe. Los arreglos viajan como `avisos` — corregir en
+ * silencio sería que nadie sepa que se corrigió.
+ */
+export async function redactarGuion(opts: {
+  texto: string;
+  imagenes: string[];
+  cfg: ConfigRedes;
+  marca?: string | null;
+  /** Lo que pidió el operador esta vez ("más corto", "empieza por el taller"). */
+  instruccion?: string;
+}): Promise<GuionIA> {
+  const { texto, cfg, instruccion } = opts;
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return { ok: false, error: "Falta ANTHROPIC_API_KEY en el entorno." };
+  }
+  const imagenes = (opts.imagenes ?? []).filter(Boolean).slice(0, MAX_IMAGENES_GUION);
+  if (!imagenes.length) {
+    return {
+      ok: false,
+      error:
+        "No hay ninguna imagen cargada. El guion se escribe MIRANDO las fotos: sin ellas " +
+        "solo saldría el texto troceado, que es lo que hacía la versión anterior.",
+    };
+  }
+
+  const modelo = cfg.modelo || "claude-opus-5";
+  const marca = opts.marca ?? null;
+  const defecto = { texto, imagenes, marca: marca ?? undefined };
+
+  // Las fotos primero y la instrucción después: el modelo tiene que haberlas visto antes
+  // de leer lo que se le pide de ellas.
+  const contenido: any[] = imagenes.map((url) => ({
+    type: "image",
+    source: { type: "url", url },
+  }));
+  contenido.push({
+    type: "text",
+    text: [
+      `Esas son las ${imagenes.length} foto(s), en orden (la primera es la 0).`,
+      "",
+      "Texto de la publicación de hoy (es el CONTEXTO, no el texto de pantalla):",
+      texto.trim(),
+      instruccion?.trim() ? `\nLo que pide el operador para este guion: ${instruccion.trim()}` : "",
+      "\nEscribe el guion.",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  });
+
+  try {
+    const resp: any = await anthropic.messages.create({
+      model: modelo,
+      max_tokens: 3000,
+      system: sistemaGuion(cfg, imagenes.length, marca),
+      messages: [{ role: "user", content: contenido }],
+      ...modelExtras(modelo),
+    } as any);
+
+    const salida = (resp.content ?? [])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("")
+      .trim();
+
+    const json = extraerJson(salida);
+    if (!json) return { ok: false, error: "El modelo no devolvió un guion utilizable." };
+
+    const norm = normalizarGuion(json, defecto);
+    // `usoDefecto` significa que no quedó NADA del guion del modelo. Devolverlo como éxito
+    // haría que la pantalla dijera «guion escrito por la IA» sobre el reparto automático.
+    if (norm.usoDefecto) {
+      return { ok: false, error: "El modelo no devolvió ninguna escena válida." };
+    }
+    return { ok: true, guion: norm.guion, avisos: norm.avisos, modelo };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
 }
 
 export type ResultadoPropuesta = {

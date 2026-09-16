@@ -36,9 +36,12 @@ export type TipoMedia = "ninguna" | "imagen" | "video";
  *   • `ninguno`  — hoy no hay video. Salen Facebook e Instagram con la imagen y las
  *                  redes de video se saltan DICIÉNDOLO (`falta_video`), en vez de
  *                  inventar un relleno. Es el modo por defecto.
- *   • `generado` — el agente monta un vertical 9:16 con la imagen y el texto del día.
- *                  Sale en las cuatro sin que nadie grabe, y se nota que es plantilla:
- *                  sirve para sostener la frecuencia, no para hacer crecer el canal.
+ *   • `generado` — el agente monta un vertical 9:16 de VARIAS escenas sobre las fotos del
+ *                  día: la IA las mira y escribe el guion (`lib/redes/guion.ts`) — qué se
+ *                  ve en cada una, qué frase va encima, cuánto dura y cómo se mueve la
+ *                  cámara— y `lib/redes/video.ts` lo pinta. Sale en las cuatro sin que
+ *                  nadie grabe, y sigue siendo montaje sobre material que ya existía:
+ *                  ningún modelo de Anthropic genera video.
  *   • `propio`   — alguien grabó y cargó el video. Es lo que de verdad rinde en TikTok
  *                  y en Shorts, y exige una persona con el celular.
  */
@@ -48,7 +51,7 @@ export const MODOS_VIDEO: ModoVideo[] = ["ninguno", "generado", "propio"];
 
 export const ETIQUETA_MODO_VIDEO: Record<ModoVideo, string> = {
   ninguno: "Sin video hoy (solo imagen)",
-  generado: "Que el agente arme el Reel/Short",
+  generado: "Que el agente dirija y arme el Reel/Short",
   propio: "Video propio (lo cargo yo)",
 };
 
