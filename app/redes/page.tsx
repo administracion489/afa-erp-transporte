@@ -97,6 +97,9 @@ export default function RedesPage() {
   const [sucio, setSucio] = useState(false);
 
   const [pctVideo, setPctVideo] = useState<number | null>(null);
+  // La pieza ampliada. Aprobar algo que solo se ve en una miniatura de 96 px es aprobar
+  // a ciegas, y este módulo entero se sostiene sobre que una persona LO HAYA VISTO.
+  const [ampliada, setAmpliada] = useState<{ tipo: "imagen" | "video"; url: string } | null>(null);
   const fileImg = useRef<HTMLInputElement>(null);
   const fileVid = useRef<HTMLInputElement>(null);
 
@@ -313,6 +316,27 @@ export default function RedesPage() {
     cargar();
   }
 
+  /**
+   * Quita el video del día. NO borra el archivo del bucket: la publicación puede estar
+   * ya despachada en otra red y su enlace tiene que seguir sirviendo — borrar el objeto
+   * dejaría un video roto en TikTok o en YouTube. Aquí solo se suelta la referencia.
+   */
+  async function quitarVideo() {
+    if (!pub) return;
+    if (!confirm("Se quita el video de esta publicación. Podrás armar otro o subir el tuyo. ¿Seguir?")) return;
+    setOcupado("quitar");
+    const { error } = await supabase
+      .from("redes_publicaciones")
+      .update({ video_url: null, video_duracion_seg: null, actualizado_en: new Date().toISOString() })
+      .eq("id", pub.id);
+    setOcupado(null);
+    if (error) aviso(error.message, false);
+    else {
+      aviso("Video quitado.");
+      cargar();
+    }
+  }
+
   const formatoVid = typeof window !== "undefined" ? formatoDisponible() : null;
 
   async function generarVideo() {
@@ -501,8 +525,15 @@ export default function RedesPage() {
                   <label className={label}>Imagen del día</label>
                   <div className="flex items-center gap-3">
                     {pub.imagen_url ? (
+                      // Clicable: lo que se aprueba hay que poder VERLO al tamaño en que
+                      // lo va a ver el cliente, no en una miniatura.
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={pub.imagen_url} alt="" className="h-24 w-24 object-cover rounded-xl border" />
+                      <img
+                        src={pub.imagen_url}
+                        alt="Imagen de la publicación"
+                        onClick={() => setAmpliada({ tipo: "imagen", url: pub.imagen_url! })}
+                        className="h-24 w-24 object-cover rounded-xl border cursor-zoom-in hover:opacity-90 transition"
+                      />
                     ) : (
                       <div className="h-24 w-24 rounded-xl border border-dashed grid place-items-center text-gray-300 text-xs">
                         sin imagen
@@ -519,6 +550,14 @@ export default function RedesPage() {
                       <button onClick={() => fileImg.current?.click()} className={`${btn} bg-gray-100 text-gray-700`}>
                         {pub.imagen_url ? "Cambiar" : "Subir imagen"}
                       </button>
+                      {pub.imagen_url && (
+                        <button
+                          onClick={() => setAmpliada({ tipo: "imagen", url: pub.imagen_url! })}
+                          className={`${btn} bg-transparent text-[#0b315f] underline px-2`}
+                        >
+                          Ver grande
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -562,8 +601,20 @@ export default function RedesPage() {
                               disabled={ocupado !== null || !pub.imagen_url}
                               className={`${btn} bg-gray-100 text-gray-700`}
                             >
-                              {pctVideo !== null ? `Armando… ${Math.round(pctVideo * 100)}%` : "Armar video"}
+                              {pctVideo !== null
+                                ? `Armando… ${Math.round(pctVideo * 100)}%`
+                                : pub.video_url
+                                  ? "Rehacer video"
+                                  : "Armar video"}
                             </button>
+                            {/* El botón deshabilitado DICE qué le falta. Antes solo se
+                                apagaba y, al pulsarlo, un toast que se iba a los 5 s — el
+                                operador se quedaba sin saber por qué no pasaba nada. */}
+                            {!pub.imagen_url && (
+                              <p className="mt-2 text-xs text-amber-700">
+                                Sube primero la imagen del día: el video se monta sobre ella.
+                              </p>
+                            )}
                             {!sirveParaInstagram(formatoVid) && (
                               <p className="mt-2 text-xs text-amber-700">
                                 Este navegador graba <b>{formatoVid.ext}</b>, que TikTok y YouTube aceptan pero
@@ -603,13 +654,45 @@ export default function RedesPage() {
                       </div>
                     )}
 
+                    {/* EL VIDEO SE VE AQUÍ, no en otra pestaña.
+                        Antes solo había un enlace «Verlo», y eso convertía «Aprobar y
+                        publicar» en firmar algo que no se había mirado — que es
+                        exactamente lo que este módulo existe para no hacer. El
+                        `controls` deja reproducirlo en el sitio; `key` fuerza a recargar
+                        el <video> cuando se rehace (misma etiqueta, otra URL). */}
                     {pub.video_url && (
-                      <p className="mt-2 text-xs text-gray-500">
-                        Video cargado{pub.video_duracion_seg ? ` · ${pub.video_duracion_seg} s` : ""}.{" "}
-                        <a href={pub.video_url} target="_blank" rel="noreferrer" className="text-[#0b315f] underline">
-                          Verlo
-                        </a>
-                      </p>
+                      <div className="mt-3 flex items-start gap-3">
+                        <video
+                          key={pub.video_url}
+                          src={pub.video_url}
+                          controls
+                          playsInline
+                          preload="metadata"
+                          className="w-36 rounded-xl border bg-black aspect-[9/16] object-cover"
+                        />
+                        <div className="text-xs text-gray-500 space-y-1.5">
+                          <div>
+                            Video listo
+                            {pub.video_duracion_seg ? ` · ${pub.video_duracion_seg} s` : ""} · vertical 9:16
+                          </div>
+                          <div className="text-gray-400">Revísalo antes de aprobar: es lo que va a salir.</div>
+                          <div className="flex flex-wrap gap-2 pt-1">
+                            <button
+                              onClick={() => setAmpliada({ tipo: "video", url: pub.video_url! })}
+                              className={`${btn} bg-gray-100 text-gray-700 py-1.5`}
+                            >
+                              Ver grande
+                            </button>
+                            <button
+                              onClick={quitarVideo}
+                              disabled={ocupado !== null || pub.estado === "cerrada"}
+                              className={`${btn} bg-gray-100 text-red-600 py-1.5`}
+                            >
+                              Quitar
+                            </button>
+                          </div>
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -751,6 +834,49 @@ export default function RedesPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* ── La pieza a tamaño de revisión ──
+          El video se pinta en 9:16 con alto acotado al viewport, que es la forma en la
+          que lo va a ver quien lo reciba. `autoPlay` + `controls`: se aprueba lo que se
+          acaba de ver, no lo que uno recuerda haber subido. */}
+      {ampliada && (
+        <div
+          onClick={() => setAmpliada(null)}
+          className="fixed inset-0 z-50 bg-black/80 grid place-items-center p-6"
+        >
+          <div onClick={(e) => e.stopPropagation()} className="max-h-full flex flex-col items-center gap-3">
+            {ampliada.tipo === "video" ? (
+              <video
+                src={ampliada.url}
+                controls
+                autoPlay
+                loop
+                playsInline
+                className="max-h-[80vh] rounded-2xl bg-black"
+              />
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={ampliada.url} alt="Pieza de la publicación" className="max-h-[80vh] rounded-2xl" />
+            )}
+            <div className="flex items-center gap-3">
+              <a
+                href={ampliada.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-white/70 underline hover:text-white"
+              >
+                Abrir en otra pestaña
+              </a>
+              <button
+                onClick={() => setAmpliada(null)}
+                className="px-4 py-2 rounded-xl text-sm font-semibold bg-white text-gray-800"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
