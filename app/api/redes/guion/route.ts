@@ -16,6 +16,7 @@ import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { leerConfig, marcaDeEmpresa, redactarGuion } from "@/lib/redes/ia";
 import { AVISO_GUION } from "@/lib/redes/guion";
+import { lineasValidas } from "@/lib/redes/lineas";
 
 // Una llamada con visión sobre varias fotos y thinking adaptativo pasa de los 10 s.
 export const maxDuration = 60;
@@ -55,10 +56,13 @@ export async function POST(req: NextRequest) {
     {
       const r = await supabaseAdmin
         .from("redes_publicaciones")
-        .select("id, estado, texto, imagen_url, imagenes")
+        .select("id, estado, texto, imagen_url, imagenes, linea")
         .eq("id", publicacion_id)
         .maybeSingle();
-      if (r.error && faltaColumna(r.error.message, "imagenes")) {
+      // Se sueltan de a una: `imagenes` es de redes-02 y `linea` de redes-03, y una base
+      // puede tener corrida una sí y la otra no. Pedirlas juntas y rendirse al primer
+      // error acusaría al SQL equivocado.
+      if (r.error && (faltaColumna(r.error.message, "imagenes") || faltaColumna(r.error.message, "linea"))) {
         hayColumnas = false;
         const r2 = await supabaseAdmin
           .from("redes_publicaciones")
@@ -88,6 +92,9 @@ export async function POST(req: NextRequest) {
       cfg,
       marca,
       instruccion,
+      // La MISMA línea que el texto. Un guion de turismo sobre un caption de transporte
+      // de personal serían dos mitades del mismo post contradiciéndose.
+      linea: lineasValidas([pub.linea])[0],
     });
     if (!r.ok || !r.guion) return NextResponse.json({ error: r.error }, { status: 400 });
 
