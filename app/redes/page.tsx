@@ -27,7 +27,16 @@ import {
   type ModoVideo,
   type Red,
 } from "@/lib/redes/tipos";
-import { armarVideo, formatoDisponible, sirveParaInstagram, DURACION_SEG } from "@/lib/redes/video";
+import { armarVideo, formatoDisponible, sirveParaInstagram } from "@/lib/redes/video";
+import {
+  AVISO_GUION,
+  describirEscena,
+  duracionGuion,
+  guionPorDefecto,
+  normalizarGuion,
+  type Guion,
+} from "@/lib/redes/guion";
+import { empresaConDefectos } from "@/lib/empresa-perfil";
 import PanelCuentas from "./PanelCuentas";
 import PanelAjustes from "./PanelAjustes";
 
@@ -51,6 +60,11 @@ type Publicacion = {
   texto: string;
   titulo: string | null;
   imagen_url: string | null;
+  /** Fotos ADICIONALES (columna de redes-02). La principal sigue siendo `imagen_url`. */
+  imagenes: string[] | null;
+  /** El storyboard normalizado (columna de redes-02). `null` = se monta el de defecto. */
+  guion: Guion | null;
+  guion_modelo: string | null;
   video_url: string | null;
   video_duracion_seg: number | null;
   modo_video: ModoVideo;
@@ -97,10 +111,20 @@ export default function RedesPage() {
   const [sucio, setSucio] = useState(false);
 
   const [pctVideo, setPctVideo] = useState<number | null>(null);
+  /**
+   * El nombre que se estampa en el video. Sale de `empresa_perfil`, NUNCA de un literal:
+   * este ERP se vende y un «AFA Transportes» escrito en el código saldría impreso en el
+   * video de quien lo compre. Sin perfil llenado queda en `null` y el video sale sin
+   * marca — mejor sin nombre que con el de otra empresa, igual que la autorización MTC.
+   */
+  const [marca, setMarca] = useState<string | null>(null);
+  /** Lo que el SQL accesorio no dejó guardar, con el archivo nombrado. */
+  const [faltaGuionSql, setFaltaGuionSql] = useState(false);
   // La pieza ampliada. Aprobar algo que solo se ve en una miniatura de 96 px es aprobar
   // a ciegas, y este módulo entero se sostiene sobre que una persona LO HAYA VISTO.
   const [ampliada, setAmpliada] = useState<{ tipo: "imagen" | "video"; url: string } | null>(null);
   const fileImg = useRef<HTMLInputElement>(null);
+  const fileFoto = useRef<HTMLInputElement>(null);
   const fileVid = useRef<HTMLInputElement>(null);
 
   const hoy = fechaLima(Date.now());
@@ -144,6 +168,14 @@ export default function RedesPage() {
       setDestinos([]);
       setRedesOn([]);
     }
+
+    const { data: emp } = await supabase
+      .from("empresa_perfil")
+      .select("nombre, razon_social")
+      .eq("id", 1)
+      .maybeSingle();
+    const e = empresaConDefectos(emp as any);
+    setMarca(e.sinConfigurar ? null : e.nombre);
 
     const { data: c } = await supabase.from("redes_cuentas").select("red, vigente").eq("vigente", true);
     // La pantalla no ve tokens (la tabla no tiene política RLS permisiva para ellos):
@@ -290,29 +322,103 @@ export default function RedesPage() {
   }
 
   // ── Piezas ─────────────────────────────────────────────────────────────────
-  async function subir(file: File, tipo: "imagen" | "video", duracionSeg?: number) {
-    if (!pub) return;
-    setOcupado("subir");
+  //
+  // Las columnas de `redes-02` son ACCESORIAS: sin ellas la pantalla sigue entera y solo
+  // se pierde guardar el guion y las fotos de más. Se SUELTA LA COLUMNA QUE EL ERROR
+  // NOMBRA, no un juego fijo — mismo patrón que `COLUMNAS_OPCIONALES` en reservas: con un
+  // juego fijo, cualquier otra columna opcional en el patch mataría el guardado entero y
+  // el mensaje acusaría al SQL equivocado.
+  const COLS_OPCIONALES = ["imagenes", "guion", "guion_modelo"] as const;
+
+  async function guardarPub(
+    patch: Record<string, any>,
+  ): Promise<{ ok: boolean; error?: string; soltadas: string[] }> {
+    if (!pub) return { ok: false, error: "No hay publicación de hoy.", soltadas: [] };
+    let cuerpo: Record<string, any> = { ...patch, actualizado_en: new Date().toISOString() };
+    const soltadas: string[] = [];
+    for (let i = 0; i <= COLS_OPCIONALES.length; i++) {
+      const { error } = await supabase.from("redes_publicaciones").update(cuerpo).eq("id", pub.id);
+      if (!error) return { ok: true, soltadas };
+      const col = COLS_OPCIONALES.find(
+        (c) =>
+          c in cuerpo &&
+          new RegExp(`column .*${c}.* does not exist|'${c}' column`, "i").test(error.message),
+      );
+      if (!col) return { ok: false, error: error.message, soltadas };
+      delete cuerpo[col];
+      soltadas.push(col);
+      if (!Object.keys(cuerpo).filter((k) => k !== "actualizado_en").length) break;
+    }
+    return { ok: false, error: "No se pudo guardar.", soltadas };
+  }
+
+  async function subirArchivo(file: File, tipo: "imagen" | "video"): Promise<string | null> {
+    if (!pub) return null;
     const ext = file.name.split(".").pop() || (tipo === "imagen" ? "jpg" : "mp4");
-    const ruta = `${pub.fecha}/${tipo}-${Date.now()}.${ext}`;
+    const ruta = `${pub.fecha}/${tipo}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
     const { error } = await supabase.storage
       .from("redes-publicaciones")
       .upload(ruta, file, { upsert: true, contentType: file.type || undefined });
     if (error) {
-      setOcupado(null);
       aviso(`No se pudo subir: ${error.message}`, false);
-      return;
+      return null;
     }
     // URL PÚBLICA, no firmada: Facebook e Instagram DESCARGAN el archivo desde aquí, y
     // una signed URL caduca. Es la razón de que este bucket sea público (ver el SQL).
-    const { data } = supabase.storage.from("redes-publicaciones").getPublicUrl(ruta);
+    return supabase.storage.from("redes-publicaciones").getPublicUrl(ruta).data.publicUrl;
+  }
+
+  async function subir(file: File, tipo: "imagen" | "video", duracionSeg?: number) {
+    if (!pub) return;
+    setOcupado("subir");
+    const url = await subirArchivo(file, tipo);
+    if (!url) {
+      setOcupado(null);
+      return;
+    }
     const patch =
       tipo === "imagen"
-        ? { imagen_url: data.publicUrl }
-        : { video_url: data.publicUrl, video_duracion_seg: duracionSeg ?? null };
-    await supabase.from("redes_publicaciones").update(patch).eq("id", pub.id);
+        ? { imagen_url: url }
+        : { video_url: url, video_duracion_seg: duracionSeg ?? null };
+    const r = await guardarPub(patch);
     setOcupado(null);
-    aviso(tipo === "imagen" ? "Imagen lista." : "Video listo.");
+    if (!r.ok) aviso(r.error ?? "No se pudo guardar.", false);
+    else aviso(tipo === "imagen" ? "Imagen lista." : "Video listo.");
+    cargar();
+  }
+
+  /**
+   * Una foto MÁS para el video. No toca `imagen_url`: esa es la que se publica en
+   * Facebook e Instagram cuando no hay video, y pisarla al añadir una foto de apoyo
+   * cambiaría lo que sale publicado sin que nadie lo pidiera.
+   */
+  async function agregarFoto(file: File) {
+    if (!pub) return;
+    setOcupado("subir");
+    const url = await subirArchivo(file, "imagen");
+    if (!url) {
+      setOcupado(null);
+      return;
+    }
+    const r = await guardarPub({ imagenes: [...(pub.imagenes ?? []), url] });
+    setOcupado(null);
+    if (r.soltadas.includes("imagenes")) {
+      setFaltaGuionSql(true);
+      aviso(
+        "La foto se subió pero no se pudo guardar: falta correr supabase/redes-02-guion-video.sql.",
+        false,
+      );
+    } else if (!r.ok) aviso(r.error ?? "No se pudo guardar.", false);
+    else aviso("Foto agregada al video.");
+    cargar();
+  }
+
+  async function quitarFoto(url: string) {
+    if (!pub) return;
+    setOcupado("quitar");
+    const r = await guardarPub({ imagenes: (pub.imagenes ?? []).filter((u) => u !== url) });
+    setOcupado(null);
+    if (!r.ok) aviso(r.error ?? "No se pudo guardar.", false);
     cargar();
   }
 
@@ -339,17 +445,66 @@ export default function RedesPage() {
 
   const formatoVid = typeof window !== "undefined" ? formatoDisponible() : null;
 
+  /** Las fotos del video: la principal primero, después las de apoyo, sin repetir. */
+  const fotos = useMemo(
+    () =>
+      [pub?.imagen_url, ...(pub?.imagenes ?? [])]
+        .filter((u): u is string => !!u)
+        .filter((u, i, a) => a.indexOf(u) === i),
+    [pub?.imagen_url, pub?.imagenes],
+  );
+
+  /**
+   * El guion con el que se va a montar. Se resuelve AQUÍ y una sola vez, para que lo que
+   * enseña el panel sea exactamente lo que va a pintar `armarVideo` — dos ideas distintas
+   * de «cómo queda el video» es el bug del semáforo de puntualidad otra vez.
+   *
+   * Se normaliza también el guardado: el texto o las fotos pueden haber cambiado desde
+   * que se escribió, y un índice que ya no existe tiene que darse la vuelta antes de
+   * llegar al canvas, no dentro de él.
+   */
+  const guionInfo = useMemo(() => {
+    const opts = { texto, imagenes: fotos, marca: marca ?? undefined };
+    if (pub?.guion?.escenas?.length) {
+      const n = normalizarGuion(pub.guion, opts);
+      return { guion: n.guion, avisos: n.avisos, escrito: true };
+    }
+    return { guion: guionPorDefecto(opts), avisos: [], escrito: false };
+  }, [pub?.guion, texto, fotos, marca]);
+
+  async function escribirGuion(instruccion?: string) {
+    if (!pub) return;
+    setOcupado("guion");
+    const r = await llamar("/api/redes/guion", { publicacion_id: pub.id, instruccion });
+    setOcupado(null);
+    if (!r?.ok) {
+      aviso(r?.error ?? "No se pudo escribir el guion.", false);
+      return;
+    }
+    if (r.no_guardado) {
+      // El guion es bueno; lo que falta es dónde guardarlo. Se deja en memoria para poder
+      // montarlo AHORA y se dice qué se pierde al recargar, en vez de callarlo.
+      setFaltaGuionSql(true);
+      setPub((p) => (p ? { ...p, guion: r.guion } : p));
+      aviso(r.no_guardado, false);
+      return;
+    }
+    setFaltaGuionSql(false);
+    const extra = r.avisos?.length ? ` ${r.avisos.join(" ")}` : "";
+    aviso(`Guion listo: ${r.guion?.escenas?.length ?? 0} escenas.${extra}`);
+    cargar();
+  }
+
   async function generarVideo() {
-    if (!pub?.imagen_url) {
-      aviso("Sube primero la imagen: el video se monta sobre ella.", false);
+    if (!fotos.length) {
+      aviso("Sube primero una foto: el video se monta sobre las imágenes.", false);
       return;
     }
     setOcupado("video");
     setPctVideo(0);
     const r = await armarVideo({
-      imagenUrl: pub.imagen_url,
-      texto,
-      pie: "AFA Transportes",
+      guion: guionInfo.guion,
+      imagenes: fotos,
       onProgreso: (p) => setPctVideo(p),
     });
     setPctVideo(null);
@@ -359,7 +514,14 @@ export default function RedesPage() {
       return;
     }
     setOcupado(null);
-    await subir(new File([r.blob], `reel.${r.ext}`, { type: r.blob.type }), "video", r.duracionSeg ?? DURACION_SEG);
+    // El aviso NO cancela la subida: el archivo existe y puede estar perfecto. Se dice y
+    // se deja que lo juzgue quien lo va a ver, que es para lo que está el reproductor.
+    if (r.aviso) aviso(r.aviso, false);
+    await subir(
+      new File([r.blob], `reel.${r.ext}`, { type: r.blob.type }),
+      "video",
+      r.duracionSeg ?? undefined,
+    );
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -558,7 +720,63 @@ export default function RedesPage() {
                           Ver grande
                         </button>
                       )}
+                      <p className="mt-1 text-xs text-gray-400">
+                        Es la que se publica en Facebook e Instagram cuando no hay video.
+                      </p>
                     </div>
+                  </div>
+
+                  {/* ── Fotos de apoyo: SOLO para el video ──
+                      Un video de una sola foto es un póster con zoom, que es exactamente
+                      lo que había. Cada foto de más es una escena que puede estrenar
+                      imagen. No tocan lo que se publica como post: para eso está la de
+                      arriba. */}
+                  <div className="mt-4">
+                    <label className={label}>Fotos de apoyo (solo para el video)</label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {(pub.imagenes ?? []).map((u) => (
+                        <div key={u} className="relative">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={u}
+                            alt="Foto de apoyo"
+                            onClick={() => setAmpliada({ tipo: "imagen", url: u })}
+                            className="h-16 w-16 object-cover rounded-lg border cursor-zoom-in"
+                          />
+                          <button
+                            onClick={() => quitarFoto(u)}
+                            disabled={ocupado !== null || pub.estado === "cerrada"}
+                            title="Quitar esta foto"
+                            className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-white border text-red-600 text-xs leading-none shadow"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                      <input
+                        ref={fileFoto}
+                        type="file"
+                        accept="image/*"
+                        hidden
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = "";
+                          if (f) agregarFoto(f);
+                        }}
+                      />
+                      <button
+                        onClick={() => fileFoto.current?.click()}
+                        disabled={ocupado !== null || pub.estado === "cerrada"}
+                        className="h-16 w-16 rounded-lg border border-dashed text-gray-400 text-xl hover:text-gray-600 disabled:opacity-40"
+                      >
+                        +
+                      </button>
+                    </div>
+                    <p className="mt-1.5 text-xs text-gray-400">
+                      {fotos.length <= 1
+                        ? "Con una sola foto el video es un zoom sobre ella. Con tres o cuatro, la IA puede repartir escenas."
+                        : `${fotos.length} fotos disponibles para el guion.`}
+                    </p>
                   </div>
 
                   <div className="mt-5 pt-5 border-t border-gray-100">
@@ -580,7 +798,8 @@ export default function RedesPage() {
                             <div className="text-sm text-gray-700">{ETIQUETA_MODO_VIDEO[m]}</div>
                             <div className="text-xs text-gray-400">
                               {m === "ninguno" && "Salen Facebook e Instagram con la imagen. YouTube y TikTok no publican hoy."}
-                              {m === "generado" && "Vertical 9:16 con la imagen y el texto encima. Se monta en este navegador."}
+                              {m === "generado" &&
+                                "Vertical 9:16 con varias escenas: la IA escribe el guion mirando tus fotos y se monta en este navegador."}
                               {m === "propio" && "Sube el archivo que grabaste. Es lo que mejor rinde en TikTok y Shorts."}
                             </div>
                           </div>
@@ -596,10 +815,88 @@ export default function RedesPage() {
                           </p>
                         ) : (
                           <>
+                            {/* ── EL GUION ──
+                                Ningún modelo de Anthropic genera video: lo que la IA
+                                aporta es la DIRECCIÓN sobre las fotos que ya hay. El panel
+                                enseña el guion ANTES de montar, porque es lo único que
+                                permite corregirlo cuando cuesta un clic y no veinte
+                                segundos de grabación. */}
+                            <div className="rounded-xl border border-gray-200 bg-gray-50/70 p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div className="text-sm font-semibold text-gray-700">
+                                    Guion del video
+                                    <span className="ml-2 font-normal text-xs text-gray-500">
+                                      {guionInfo.guion.escenas.length} escena(s) ·{" "}
+                                      {duracionGuion(guionInfo.guion)} s
+                                    </span>
+                                  </div>
+                                  <div className="text-xs text-gray-500 mt-0.5">
+                                    {guionInfo.escrito
+                                      ? "Escrito por la IA mirando tus fotos."
+                                      : "Reparto automático del texto por frases. La IA no lo ha escrito todavía."}
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={() => escribirGuion()}
+                                  disabled={ocupado !== null || !fotos.length || pub.estado === "cerrada"}
+                                  className={`${btn} bg-[#0b315f] text-white py-2 shrink-0`}
+                                >
+                                  {ocupado === "guion"
+                                    ? "Escribiendo…"
+                                    : guionInfo.escrito
+                                      ? "Otro guion"
+                                      : "✨ Escribir guion"}
+                                </button>
+                              </div>
+
+                              {/* El guion se LEE antes de montar. `describirEscena` vive en
+                                  el módulo puro: una frase compuesta aquí puede describir
+                                  al revés lo que hace el motor sin que nada falle. */}
+                              <ol className="mt-3 space-y-1">
+                                {guionInfo.guion.escenas.map((e, i) => (
+                                  <li
+                                    key={i}
+                                    className={`text-xs ${e.tipo === "cierre" ? "text-gray-400" : "text-gray-600"}`}
+                                  >
+                                    {describirEscena(e, i)}
+                                  </li>
+                                ))}
+                              </ol>
+
+                              {guionInfo.avisos.map((c) => (
+                                <p key={c} className="mt-2 text-xs text-amber-700">
+                                  {AVISO_GUION[c]}
+                                </p>
+                              ))}
+
+                              {!guionInfo.escrito && fotos.length > 0 && (
+                                <p className="mt-2 text-xs text-gray-500">
+                                  Puedes armarlo así, pero con el guion escrito cada escena dice algo de
+                                  SU foto en vez de repartir el caption.
+                                </p>
+                              )}
+                              {!fotos.length && (
+                                <p className="mt-2 text-xs text-amber-700">
+                                  Sube al menos una foto: el guion se escribe mirándolas.
+                                </p>
+                              )}
+                              {faltaGuionSql && (
+                                <p className="mt-2 text-xs text-amber-700">
+                                  Falta correr{" "}
+                                  <code className="bg-white px-1 py-0.5 rounded">
+                                    supabase/redes-02-guion-video.sql
+                                  </code>
+                                  : el guion y las fotos de apoyo no se guardan y hay que pedirlos otra vez
+                                  al recargar.
+                                </p>
+                              )}
+                            </div>
+
                             <button
                               onClick={generarVideo}
-                              disabled={ocupado !== null || !pub.imagen_url}
-                              className={`${btn} bg-gray-100 text-gray-700`}
+                              disabled={ocupado !== null || !fotos.length}
+                              className={`${btn} bg-gray-100 text-gray-700 mt-3`}
                             >
                               {pctVideo !== null
                                 ? `Armando… ${Math.round(pctVideo * 100)}%`
@@ -610,9 +907,15 @@ export default function RedesPage() {
                             {/* El botón deshabilitado DICE qué le falta. Antes solo se
                                 apagaba y, al pulsarlo, un toast que se iba a los 5 s — el
                                 operador se quedaba sin saber por qué no pasaba nada. */}
-                            {!pub.imagen_url && (
+                            {!fotos.length && (
                               <p className="mt-2 text-xs text-amber-700">
                                 Sube primero la imagen del día: el video se monta sobre ella.
+                              </p>
+                            )}
+                            {pctVideo !== null && (
+                              <p className="mt-2 text-xs text-gray-500">
+                                Deja esta pestaña a la vista mientras se graba: en segundo plano el navegador
+                                deja de pintar y el video sale con tramos congelados.
                               </p>
                             )}
                             {!sirveParaInstagram(formatoVid) && (

@@ -39,6 +39,26 @@ import {
   type Red,
 } from "../lib/redes/tipos";
 
+import {
+  AVISO_GUION,
+  MAX_ESCENAS,
+  MAX_ESCENA_SEG,
+  MAX_SUBTEXTO,
+  MAX_TITULO,
+  MIN_ESCENA_SEG,
+  MIN_TOTAL_SEG,
+  MOVIMIENTOS,
+  TRANSICIONES,
+  describirEscena,
+  duracionGuion,
+  frasesDe,
+  guionPorDefecto,
+  normalizarGuion,
+  recortarPalabras,
+  type CodigoGuion,
+  type Guion,
+} from "../lib/redes/guion";
+
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
   console.log(`${ok ? "  ok  " : "FALLA "} ${nombre}${extra ? " — " + extra : ""}`);
@@ -455,6 +475,157 @@ console.log("\n5 · El catálogo se describe a sí mismo\n");
     conArreglo.filter((m) => MOTIVO_TEXTO[m].arreglo.length <= 20).join(","),
   );
   chk("hhmm redondea bien", hhmm(0) === "00:00" && hhmm(8 * 60) === "08:00" && hhmm(23 * 60 + 59) === "23:59");
+}
+
+// ── 6 · El GUION del video ────────────────────────────────────────────────────
+//
+// Lo que fija, y por qué duele si se rompe:
+//
+//   · EL TEXTO DE PANTALLA NO ES EL CAPTION. Es el defecto que este módulo vino a
+//     corregir: la versión anterior pegaba el caption entero —hashtags incluidos— sobre
+//     una foto fija. Ninguna escena puede pasar de `MAX_TITULO` ni llevar un hashtag.
+//   · NORMALIZAR ES IDEMPOTENTE. Se llama en tres sitios (al recibirlo del modelo, al
+//     leerlo de la base y antes de montar); si no lo fuera, cada guardado añadiría otra
+//     tarjeta de cierre y el video crecería solo.
+//   · TODO LO QUE SALE ES MONTABLE. Un guion del modelo con basura dentro no puede llegar
+//     al canvas con un índice de foto que no existe, una duración de 40 s o un movimiento
+//     inventado: ahí no falla la prueba, falla el video que se publica.
+//   · TODO ARREGLO DEJA SU CÓDIGO. Corregir en silencio es que nadie sepa que se corrigió.
+console.log("\n6 · El guion del video\n");
+
+{
+  const FOTOS = ["https://cdn.afa/1.jpg", "https://cdn.afa/2.jpg", "https://cdn.afa/3.jpg"];
+  const CAPTION =
+    "Cada mañana movemos al personal de nuestros clientes con unidades revisadas y " +
+    "conductores con su documentación al día. Coordinamos rutas y horarios con cada " +
+    "empresa para que nadie llegue tarde a su turno.\n\n#transporte #transportedepersonal #peru";
+  const base = { texto: CAPTION, imagenes: FOTOS, marca: "AFA Transportes" };
+
+  const valido = (g: Guion, nImg: number): string[] => {
+    const malos: string[] = [];
+    if (!g.escenas.length) malos.push("sin escenas");
+    if (g.escenas.length > MAX_ESCENAS) malos.push("demasiadas escenas");
+    g.escenas.forEach((e, i) => {
+      if (e.duracion_seg < MIN_ESCENA_SEG || e.duracion_seg > MAX_ESCENA_SEG) {
+        // La última puede haberse alargado para llegar al piso del total; aun así el
+        // alargue jamás puede pasar de MAX_ESCENA_SEG, o normalizar dejaría de ser
+        // idempotente (la segunda pasada la recortaría).
+        malos.push(`duración fuera de banda en ${i}: ${e.duracion_seg}`);
+      }
+      if (e.imagen !== null && (e.imagen < 0 || e.imagen >= nImg || !Number.isInteger(e.imagen))) {
+        malos.push(`imagen inválida en ${i}: ${e.imagen}`);
+      }
+      if (!MOVIMIENTOS.includes(e.movimiento)) malos.push(`movimiento inválido en ${i}`);
+      if (!TRANSICIONES.includes(e.transicion)) malos.push(`transición inválida en ${i}`);
+      if ((e.titulo?.length ?? 0) > MAX_TITULO) malos.push(`título largo en ${i}`);
+      if ((e.texto?.length ?? 0) > MAX_SUBTEXTO) malos.push(`subtexto largo en ${i}`);
+      if (/#/.test(e.titulo ?? "") || /#/.test(e.texto ?? "")) malos.push(`hashtag en pantalla en ${i}`);
+    });
+    if (g.escenas[0].transicion !== "corte") malos.push("la primera escena entra con transición");
+    if (g.escenas.filter((e) => e.tipo === "cierre").length > 1) malos.push("más de un cierre");
+    if (duracionGuion(g) < MIN_TOTAL_SEG) malos.push(`total corto: ${duracionGuion(g)}`);
+    return malos;
+  };
+
+  // (a) El defecto que motivó el módulo: el caption NO se vuelca en pantalla.
+  const porDefecto = guionPorDefecto(base);
+  chk("el guion por defecto es montable", valido(porDefecto, FOTOS.length).length === 0, valido(porDefecto, FOTOS.length).join(" · "));
+  chk(
+    "ninguna escena repite el caption entero (es el defecto que se corrigió)",
+    porDefecto.escenas.every((e) => (e.titulo ?? "").length <= MAX_TITULO && !(e.titulo ?? "").includes("#")),
+  );
+  chk("el guion por defecto estrena las fotos que hay", new Set(porDefecto.escenas.map((e) => e.imagen)).size >= 3);
+  chk("frasesDe quita los hashtags", frasesDe(CAPTION).every((f) => !f.includes("#")));
+  // El prompt ya se lo prohíbe al modelo, pero un prompt no es un guard: el ERP lo
+  // comprueba por su cuenta, igual que con el cuadre del voucher.
+  {
+    const conTag = normalizarGuion({ escenas: [{ imagen: 0, titulo: "Rutas puntuales #AFA", duracion_seg: 3 }] }, base);
+    chk("un hashtag en el texto de pantalla se limpia", conTag.guion.escenas[0].titulo === "Rutas puntuales AFA", conTag.guion.escenas[0].titulo);
+    chk("…y se declara", conTag.avisos.includes("hashtag_quitado"));
+  }
+
+  // (b) Idempotencia — la que evita que el cierre se duplique en cada guardado.
+  const n1 = normalizarGuion(porDefecto, base).guion;
+  const n2 = normalizarGuion(n1, base).guion;
+  const n3 = normalizarGuion(n2, base).guion;
+  chk("normalizar es idempotente (3 pasadas dan lo mismo)", JSON.stringify(n1) === JSON.stringify(n3), `${n1.escenas.length} vs ${n3.escenas.length}`);
+  chk("no se acumulan cierres al re-normalizar", n3.escenas.filter((e) => e.tipo === "cierre").length === 1);
+  chk("re-normalizar un guion limpio no levanta avisos", normalizarGuion(n1, base).avisos.length === 0, normalizarGuion(n1, base).avisos.join(","));
+
+  // (c) Basura del modelo: se arregla, se declara y sale montable.
+  const basura = {
+    escenas: [
+      { imagen: 99, titulo: CAPTION, movimiento: "tiktok_cool", duracion_seg: 45, transicion: "explosion" },
+      { imagen: "1", texto: CAPTION, duracion_seg: 0.05 },
+      { imagen: null, titulo: "Remate", duracion_seg: "tres" },
+      ...Array.from({ length: 12 }, (_, i) => ({ imagen: i, titulo: `escena ${i}`, duracion_seg: 3 })),
+    ],
+  };
+  const sucio = normalizarGuion(basura, base);
+  const malSucio = valido(sucio.guion, FOTOS.length);
+  chk("un guion con basura dentro sale montable igual", malSucio.length === 0, malSucio.join(" · "));
+  chk("…y DECLARA lo que arregló", ["escenas_recortadas", "duracion_ajustada", "imagen_fuera_de_rango", "texto_recortado", "valor_desconocido"].every((c) => sucio.avisos.includes(c as CodigoGuion)), sucio.avisos.join(","));
+  chk("…y no se da por escrito por la IA cuando no quedó nada", normalizarGuion({}, base).usoDefecto === true);
+  chk("un guion vacío declara sin_escenas", normalizarGuion({ escenas: [] }, base).avisos.includes("sin_escenas"));
+
+  // (d) Sin fotos NO se afirma que todo está bien: se dice.
+  chk("sin imágenes se declara sin_imagenes", normalizarGuion(basura, { ...base, imagenes: [] }).avisos.includes("sin_imagenes"));
+  chk(
+    "sin imágenes ninguna escena apunta a una foto",
+    normalizarGuion(basura, { ...base, imagenes: [] }).guion.escenas.every((e) => e.imagen === null),
+  );
+
+  // (e) El piso del total. Un guion de una escena corta sería impublicable en Reels.
+  const corto = normalizarGuion({ escenas: [{ imagen: 0, titulo: "Hola", duracion_seg: 1.2 }] }, { texto: "Hola", imagenes: FOTOS });
+  chk("un guion demasiado corto se alarga hasta el mínimo publicable", duracionGuion(corto.guion) >= MIN_TOTAL_SEG, `${duracionGuion(corto.guion)} s`);
+  chk("…y lo dice", corto.avisos.includes("total_alargado"));
+  chk("…sin pasarse del tope por escena (o dejaría de ser idempotente)", corto.guion.escenas.every((e) => e.duracion_seg <= MAX_ESCENA_SEG));
+
+  // (f) Barrido: ninguna combinación produce un guion que el canvas no pueda pintar.
+  let malBarrido = 0;
+  let malIdem = 0;
+  let n = 0;
+  const TITULOS = ["", "Corto", CAPTION, "#solohashtags #otro", "  espacios   raros  "];
+  const DURS: any[] = [-3, 0, 0.4, 3, 9, 1e9, "x", null];
+  const IMGS: any[] = [-1, 0, 2, 7, null, "1", undefined];
+  const MOVS: any[] = ["zoom_in", "nope", undefined];
+  const NFOTOS = [0, 1, 3];
+  for (const t of TITULOS)
+    for (const d of DURS)
+      for (const im of IMGS)
+        for (const mv of MOVS)
+          for (const nf of NFOTOS) {
+            n++;
+            const opts = { texto: CAPTION, imagenes: FOTOS.slice(0, nf), marca: "AFA Transportes" };
+            const r = normalizarGuion(
+              { escenas: [{ imagen: im, titulo: t, movimiento: mv, duracion_seg: d }, { imagen: im, titulo: t, duracion_seg: d }] },
+              opts,
+            );
+            if (valido(r.guion, Math.max(1, nf)).length) malBarrido++;
+            // Idempotencia también sobre lo corregido: es donde se rompería.
+            const otra = normalizarGuion(r.guion, opts).guion;
+            if (JSON.stringify(otra) !== JSON.stringify(r.guion)) malIdem++;
+          }
+  console.log(`  (${n.toLocaleString("es-PE")} combinaciones)`);
+  chk("(barrido) todo guion normalizado es montable", malBarrido === 0, `${malBarrido} fallos`);
+  chk("(barrido) normalizar dos veces da lo mismo", malIdem === 0, `${malIdem} fallos`);
+
+  // (g) El catálogo de avisos se describe a sí mismo.
+  const CODIGOS: CodigoGuion[] = ["sin_escenas", "escenas_recortadas", "duracion_ajustada", "total_alargado", "imagen_fuera_de_rango", "texto_recortado", "valor_desconocido", "hashtag_quitado", "sin_imagenes"];
+  chk("todo código de guion tiene texto para la pantalla", CODIGOS.every((c) => (AVISO_GUION[c] ?? "").length > 25));
+  chk(
+    "describirEscena nombra la foto, la duración y el texto",
+    describirEscena({ imagen: 1, titulo: "Ruta lista", movimiento: "pan_der", duracion_seg: 3, transicion: "corte" }, 0)
+      .includes("foto 2") &&
+      describirEscena({ imagen: 1, titulo: "Ruta lista", movimiento: "pan_der", duracion_seg: 3, transicion: "corte" }, 0)
+        .includes("3 s"),
+  );
+  chk(
+    "recortarPalabras no parte palabras por la mitad",
+    recortarPalabras("transporte de personal ejecutivo", 20) === "transporte de…",
+    recortarPalabras("transporte de personal ejecutivo", 20),
+  );
+  chk("recortarPalabras nunca pasa del tope", [5, 12, 48].every((m) => recortarPalabras(CAPTION, m).length <= m));
 }
 
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);

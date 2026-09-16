@@ -863,7 +863,22 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       {
         pregunta: "YouTube y TikTok son video. ¿Qué pasa los días que no grabé nada?",
         respuesta:
-          "Tú decides, publicación por publicación, con el selector **«Video de hoy»**:\n\n**Sin video** — salen Facebook e Instagram con la imagen, y las de video se saltan ese día. La pantalla lo dice; no se inventa un relleno.\n\n**Que el agente arme el Reel/Short** — monta un vertical con la imagen y el texto encima. Sirve para sostener la frecuencia; se nota que es plantilla.\n\n**Video propio** — subes el que grabaste. Es lo que de verdad hace crecer un canal.",
+          "Tú decides, publicación por publicación, con el selector **«Video de hoy»**:\n\n**Sin video** — salen Facebook e Instagram con la imagen, y las de video se saltan ese día. La pantalla lo dice; no se inventa un relleno.\n\n**Que el agente dirija y arme el Reel/Short** — la IA **mira tus fotos**, escribe el guion (qué se ve en cada escena, qué frase va encima, cuánto dura, cómo se mueve la cámara) y el navegador lo monta en vertical.\n\n**Video propio** — subes el que grabaste. Es lo que de verdad hace crecer un canal.",
+      },
+      {
+        pregunta: "¿La IA genera el video?",
+        respuesta:
+          "**No genera imágenes ni grabaciones: dirige.** Ningún modelo de Anthropic produce video, y decirte lo contrario sería venderte algo que no hace.\n\nLo que sí hace es mirar las fotos que subiste y escribir el **guion**: qué foto se ve en cada escena, qué frase corta va encima, cuánto dura y cómo se mueve la cámara. Con eso, el navegador monta un vertical de varias escenas, con transiciones y el texto entrando línea a línea.\n\n**El texto del video NO es el texto de la publicación.** El caption se lee con el dedo quieto; lo que va sobre el video son cuatro a siete palabras que se leen mientras la imagen se mueve. Por eso la IA escribe frases nuevas para la pantalla en vez de repartir el caption.\n\nCuantas más fotos subas (**«Fotos de apoyo»**), más escenas distintas puede repartir. Con una sola, el video es un zoom sobre ella.",
+      },
+      {
+        pregunta: "El guion dice «reparto automático del texto». ¿Qué significa?",
+        respuesta:
+          "Que la IA todavía no lo ha escrito, y el video se montaría repartiendo tus frases por escenas. Funciona, pero sale peor: las frases no tienen por qué corresponder con lo que se ve en cada foto.\n\nPulsa **«✨ Escribir guion»** y la IA mira las fotos antes de escribirlo. Puedes volver a pedirlo las veces que quieras con «Otro guion».\n\nEl guion se lee entero en la pantalla **antes** de montar nada: ahí es donde cuesta un clic corregirlo, y no veinte segundos de grabación.",
+      },
+      {
+        pregunta: "Armé el video y salió con tramos congelados.",
+        respuesta:
+          "Pasó porque cambiaste de pestaña mientras se grababa. El navegador **deja de pintar** lo que no se está viendo, así que el video se queda clavado en un cuadro mientras la grabación sigue.\n\nNo se puede evitar: el video se monta en tu navegador porque es lo único que no exige montar un servidor de render aparte. Déjala a la vista los segundos que dura y rehazlo. Si ocurrió, el ERP te lo dice al terminar.",
       },
       {
         pregunta: "Una red dice que no va a publicar. ¿Cómo sé por qué?",
@@ -887,8 +902,9 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
         pasos: [
           "Entra a **Redes sociales → Hoy**. Si no hay propuesta, pulsa «Pedirle una a la IA».",
           "Lee el texto. Corrígelo si hace falta y pulsa «Guardar cambios».",
-          "Sube la imagen del día.",
-          "Elige el modo de video: sin video, que lo arme el agente, o sube el tuyo.",
+          "Sube la imagen del día. Si vas a hacer video, añade dos o tres **fotos de apoyo**: cada una puede ser una escena.",
+          "Elige el modo de video: sin video, que lo dirija el agente, o sube el tuyo.",
+          "Si lo dirige el agente: pulsa «✨ Escribir guion», léelo, y después «Armar video». Míralo en el reproductor antes de seguir.",
           "Mira la columna de la derecha: dice red por red qué va a pasar.",
           "Pulsa «Aprobar y publicar» y confirma.",
         ],
