@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { proponerPublicacion, leerConfig } from "@/lib/redes/ia";
 import { verificarUsuarioApi } from "@/lib/api-auth";
+import { lineasValidas } from "@/lib/redes/lineas";
 import { hoyLima } from "@/lib/alertas";
 
 // Redactar con thinking adaptativo puede pasar de los 10 s por defecto.
@@ -24,6 +25,9 @@ export async function POST(req: NextRequest) {
     const r = await proponerPublicacion({
       fecha: body?.fecha || hoyLima(),
       instruccion: body?.instruccion,
+      // Si el operador eligió línea, manda sobre la rotación: la rotación existe para
+      // cuando nadie decide, no para pisar a quien decidió.
+      linea: lineasValidas([body?.linea])[0],
       // Desde el botón siempre se rehace: es justo para lo que existe.
       rehacer: body?.rehacer !== false,
     });

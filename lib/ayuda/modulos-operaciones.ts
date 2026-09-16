@@ -886,6 +886,16 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "La columna de la derecha explica cada red por separado, con el motivo **y dónde se arregla**. No es el mismo problema que falte conectar la cuenta, que el texto no quepa, o que hoy no haya video.\n\nSolo se pintan en **ámbar** los motivos que alguien tiene que atender. Que TikTok no publique porque hoy elegiste «sin video» no es un fallo: es lo que pediste, y por eso sale en gris.",
       },
       {
+        pregunta: "Solo publica de transporte de personal. ¿Y el turismo, los paseos escolares y el alquiler?",
+        respuesta:
+          "Ya no. En **Ajustes → Líneas de negocio que publicas** marcas las que de verdad prestas —**transporte de personal**, **turismo**, **paseos escolares** y **alquiler de buses**— y el agente **rota** entre ellas, una por día, para que el canal no hable siempre del mismo negocio.\n\nNo es un tema: cada línea le habla a otra persona y le puede prometer otras cosas. Al jefe de planta que contrata el transporte de su gente y al colegio que organiza un paseo no se les dice lo mismo.\n\nEn la pestaña **Hoy** puedes tocar otra línea para redactar el post de hoy con ese enfoque. Cambiarla **reemplaza el texto**: cambia a quién le habla, así que no es un rótulo que se pueda corregir encima de lo ya escrito.\n\nMarca solo las que prestas. Publicar sobre un servicio que no das es prometerle algo a quien pregunte por él.",
+      },
+      {
+        pregunta: "¿Qué cuida el agente en cada línea?",
+        respuesta:
+          "Cada línea trae escrito lo que **no** se puede decir en ella, y no es lo mismo:\n\n**Transporte de personal** — nunca el cliente, la ruta, la placa ni el conductor: son datos de un contrato.\n\n**Turismo** — AFA pone el transporte. No promete destinos, itinerarios, precios, fechas de salida, guías ni entradas: eso se pacta viaje por viaje.\n\n**Paseos escolares** — nunca el nombre de un colegio, de un alumno ni de un docente. Y cuando eliges esta línea, la pantalla te avisa en ámbar: **revisa las fotos, no pueden verse caras de menores identificables**, ni uniformes con logo ni listas de alumnos. Eso no lo puede controlar la IA, lo controla quien sube la foto. Publicar la imagen de un menor sin autorización no es un problema de marketing.\n\n**Alquiler de buses** — no da precios ni afirma disponibilidad: depende del día.",
+      },
+      {
         pregunta: "¿La IA se puede inventar datos sobre la empresa?",
         respuesta:
           "Tiene **prohibido** escribir cifras, años de experiencia, número de unidades, certificaciones, premios o porcentajes, y también superlativos del tipo «los mejores» o «líderes del mercado».\n\nLa razón es que un número inventado se publica en nombre de la empresa y no se puede retirar. Si no está tecleado en **Ajustes**, para la IA no existe.\n\nEn **Ajustes → Prohibido mencionar** puedes añadir lo que sea propio de tu operación: nombres de clientes, tarifas, placas, rutas concretas.",
@@ -901,6 +911,7 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
         titulo: "Publicar lo de hoy",
         pasos: [
           "Entra a **Redes sociales → Hoy**. Si no hay propuesta, pulsa «Pedirle una a la IA».",
+          "Mira la **línea de negocio** de hoy. Si quieres otra, tócala: se redacta de nuevo con ese enfoque.",
           "Lee el texto. Corrígelo si hace falta y pulsa «Guardar cambios».",
           "Sube la imagen del día. Si vas a hacer video, añade dos o tres **fotos de apoyo**: cada una puede ser una escena.",
           "Elige el modo de video: sin video, que lo dirija el agente, o sube el tuyo.",

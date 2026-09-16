@@ -36,6 +36,13 @@ import {
   normalizarGuion,
   type Guion,
 } from "@/lib/redes/guion";
+import {
+  ETIQUETA_LINEA,
+  FICHA_LINEA,
+  LINEAS,
+  lineasActivas,
+  type LineaNegocio,
+} from "@/lib/redes/lineas";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
 import PanelCuentas from "./PanelCuentas";
 import PanelAjustes from "./PanelAjustes";
@@ -72,6 +79,8 @@ type Publicacion = {
   estado: "propuesta" | "aprobada" | "cerrada" | "descartada";
   origen: string;
   ia_tema: string | null;
+  /** De qué negocio habla el post (columna de redes-03). */
+  linea: LineaNegocio | null;
 };
 
 type DestinoFila = {
@@ -118,6 +127,8 @@ export default function RedesPage() {
    * marca — mejor sin nombre que con el de otra empresa, igual que la autorización MTC.
    */
   const [marca, setMarca] = useState<string | null>(null);
+  /** Las líneas que esta empresa declaró en Ajustes. Sin redes-03 solo hay `personal`. */
+  const [lineasOfrecidas, setLineasOfrecidas] = useState<LineaNegocio[]>(["personal"]);
   /** Lo que el SQL accesorio no dejó guardar, con el archivo nombrado. */
   const [faltaGuionSql, setFaltaGuionSql] = useState(false);
   // La pieza ampliada. Aprobar algo que solo se ve en una miniatura de 96 px es aprobar
@@ -168,6 +179,11 @@ export default function RedesPage() {
       setDestinos([]);
       setRedesOn([]);
     }
+
+    // `select("*")` no nombra columnas, así que sobrevive a que falte redes-03: la
+    // columna simplemente no viene y `lineasActivas` cae a `personal`.
+    const { data: cfgRow } = await supabase.from("redes_config").select("*").eq("id", 1).maybeSingle();
+    setLineasOfrecidas(lineasActivas((cfgRow as any)?.lineas));
 
     const { data: emp } = await supabase
       .from("empresa_perfil")
@@ -245,12 +261,14 @@ export default function RedesPage() {
     return res.json();
   }
 
-  async function proponer(instruccion?: string) {
+  async function proponer(instruccion?: string, linea?: LineaNegocio) {
     setOcupado("proponer");
-    const r = await llamar("/api/redes/proponer", { fecha: hoy, instruccion, rehacer: true });
+    const r = await llamar("/api/redes/proponer", { fecha: hoy, instruccion, linea, rehacer: true });
     setOcupado(null);
     if (r?.ok) {
-      aviso("Propuesta lista. Revísala antes de aprobar.");
+      // `aviso` de la respuesta = se guardó pero algo accesorio falló (una migración sin
+      // correr). No es un fallo de guardado y no se presenta como tal.
+      aviso(r.aviso ? `Propuesta lista. ${r.aviso}` : "Propuesta lista. Revísala antes de aprobar.", !r.aviso);
       cargar();
     } else aviso(r?.error ?? "No se pudo redactar la propuesta.", false);
   }
@@ -593,6 +611,10 @@ export default function RedesPage() {
             <thead className="bg-gray-50 text-gray-500 text-xs">
               <tr>
                 <th className="text-left px-4 py-2.5">Fecha</th>
+                {/* La LÍNEA contesta «¿hace cuánto que no publico nada de turismo?», que
+                    es la pregunta que motivó todo esto. El tema es el ángulo dentro de
+                    ella, así que se enseñan las dos. */}
+                <th className="text-left px-4 py-2.5">Línea</th>
                 <th className="text-left px-4 py-2.5">Tema</th>
                 <th className="text-left px-4 py-2.5">Texto</th>
                 <th className="text-left px-4 py-2.5">Estado</th>
@@ -602,6 +624,9 @@ export default function RedesPage() {
               {historial.map((h) => (
                 <tr key={h.id} className="border-t border-gray-100">
                   <td className="px-4 py-2.5 whitespace-nowrap">{h.fecha}</td>
+                  <td className="px-4 py-2.5 whitespace-nowrap text-gray-500">
+                    {h.linea ? `${FICHA_LINEA[h.linea].icono} ${ETIQUETA_LINEA[h.linea]}` : "—"}
+                  </td>
                   <td className="px-4 py-2.5 text-gray-500">{h.ia_tema ?? "—"}</td>
                   <td className="px-4 py-2.5 text-gray-600 max-w-md truncate">{h.texto}</td>
                   <td className="px-4 py-2.5">
@@ -611,7 +636,7 @@ export default function RedesPage() {
               ))}
               {!historial.length && (
                 <tr>
-                  <td colSpan={4} className="px-4 py-8 text-center text-gray-400">
+                  <td colSpan={5} className="px-4 py-8 text-center text-gray-400">
                     Todavía no hay publicaciones.
                   </td>
                 </tr>
@@ -648,6 +673,61 @@ export default function RedesPage() {
             <div className="grid lg:grid-cols-[1fr_380px] gap-5">
               {/* ── Editor ── */}
               <div className="space-y-4">
+                {/* ── LÍNEA DE NEGOCIO ──
+                    Va ARRIBA del texto porque decide a quién le habla el post, y cambiarla
+                    obliga a volver a redactar: no es un rótulo que se pueda corregir
+                    después sobre el mismo texto. Por eso el chip REDACTA en vez de
+                    limitarse a guardar la etiqueta — si solo guardara, quedaría un post de
+                    transporte de personal marcado como turismo, que es la pantalla
+                    mintiendo sobre lo que dice el texto. */}
+                {lineasOfrecidas.length > 1 && (
+                  <div className="rounded-2xl border border-gray-200 p-5">
+                    <label className={label}>Línea de negocio de hoy</label>
+                    <div className="flex flex-wrap gap-2">
+                      {lineasOfrecidas.map((l) => {
+                        const activa = (pub.linea ?? "personal") === l;
+                        return (
+                          <button
+                            key={l}
+                            onClick={() => {
+                              if (activa) return;
+                              if (
+                                !confirm(
+                                  `Se vuelve a redactar el texto de hoy para «${ETIQUETA_LINEA[l]}».\n\n` +
+                                    "Cambiar de línea cambia a quién le habla el post, así que el texto " +
+                                    "actual se reemplaza. ¿Seguir?",
+                                )
+                              )
+                                return;
+                              proponer(undefined, l);
+                            }}
+                            disabled={ocupado !== null || pub.estado === "cerrada"}
+                            className={`px-3 py-2 rounded-xl text-sm font-medium border transition disabled:opacity-40 ${
+                              activa
+                                ? "bg-[#0b315f] text-white border-[#0b315f]"
+                                : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
+                            }`}
+                          >
+                            {FICHA_LINEA[l].icono} {FICHA_LINEA[l].etiqueta}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-2 text-xs text-gray-400">
+                      El agente rota entre tus líneas, una por día. Toca otra para redactar la de hoy con ese
+                      enfoque. Las que se ofrecen se marcan en <b>Ajustes</b>.
+                    </p>
+                    {/* El aviso lo declara la FICHA de la línea, no la pantalla: solo lo
+                        llevan las líneas donde el riesgo lo corre quien elige la foto, y
+                        uno en las cuatro se volvería paisaje. */}
+                    {pub.linea && FICHA_LINEA[pub.linea]?.avisoPantalla && (
+                      <p className="mt-2 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-900">
+                        {FICHA_LINEA[pub.linea].avisoPantalla}
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <div className="rounded-2xl border border-gray-200 p-5">
                   <div className="flex items-center justify-between mb-3">
                     <label className={label + " mb-0"}>Texto de la publicación</label>

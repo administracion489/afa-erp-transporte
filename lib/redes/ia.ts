@@ -34,6 +34,13 @@ import {
   type CodigoGuion,
   type Guion,
 } from "./guion";
+import {
+  LINEA_DEFECTO,
+  bloqueLinea,
+  lineaDelDia,
+  lineasActivas,
+  type LineaNegocio,
+} from "./lineas";
 import { empresaConDefectos } from "../empresa-perfil";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
@@ -60,6 +67,8 @@ export type ConfigRedes = {
   prohibido: string | null;
   hashtags_fijos: string | null;
   temas: string[] | null;
+  /** Las líneas de negocio que esta instalación publica (columna de redes-03). */
+  lineas: string[] | null;
   modelo: string | null;
 };
 
@@ -108,11 +117,15 @@ function topeTexto(redes: Red[]): number {
   return topes.length ? Math.min(...topes) : 700;
 }
 
-function sistema(cfg: ConfigRedes, redes: Red[]): string {
+function sistema(cfg: ConfigRedes, redes: Red[], linea: LineaNegocio): string {
   const tope = topeTexto(redes);
   return [
-    "Redactas las publicaciones diarias de redes sociales de una empresa de transporte de",
-    "personal en Perú. Escribes en español de Perú, en un castellano natural y directo.",
+    "Redactas las publicaciones diarias de redes sociales de una empresa peruana de",
+    "transporte de pasajeros. Escribes en español de Perú, en un castellano natural y directo.",
+    "",
+    // La línea va ARRIBA del todo: decide a quién le hablas, y eso cambia el texto entero.
+    // Debajo de las prohibiciones se leería como una nota al pie.
+    bloqueLinea(linea),
     "",
     "LO QUE NO PUEDES HACER, Y ES LO MÁS IMPORTANTE DE ESTAS INSTRUCCIONES:",
     "• NO inventes NINGÚN dato: ni cifras, ni años de experiencia, ni número de unidades,",
@@ -149,6 +162,7 @@ export type PropuestaIA = {
   texto?: string;
   titulo?: string;
   tema?: string;
+  linea?: LineaNegocio;
   modelo?: string;
   error?: string;
 };
@@ -168,6 +182,8 @@ export async function redactarPublicacion(opts: {
   instruccion?: string;
   /** Lo publicado los últimos días, para no repetirse. */
   recientes?: string[];
+  /** De qué negocio habla el post. Sin ella se rota sobre las activas del día. */
+  linea?: LineaNegocio;
 }): Promise<PropuestaIA> {
   const { fecha, redes, cfg, instruccion, recientes } = opts;
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -175,6 +191,10 @@ export async function redactarPublicacion(opts: {
   }
 
   const modelo = cfg.modelo || "claude-opus-5";
+  const linea = opts.linea ?? lineaDelDia(lineasActivas(cfg.lineas), fecha);
+  // El tema es ORTOGONAL a la línea: la línea dice a quién le hablas, el tema con qué
+  // ángulo. Meterlos en el mismo campo haría que un tema de mantenimiento suprimiera el
+  // encuadre de un día de turismo.
   const tema = instruccion?.trim() || temaDelDia(cfg.temas, fecha);
 
   const partes = [
@@ -192,7 +212,7 @@ export async function redactarPublicacion(opts: {
     const resp: any = await anthropic.messages.create({
       model: modelo,
       max_tokens: 2000,
-      system: sistema(cfg, redes),
+      system: sistema(cfg, redes, linea),
       messages: [{ role: "user", content: partes.join("\n") }],
       ...modelExtras(modelo),
     } as any);
@@ -212,6 +232,7 @@ export async function redactarPublicacion(opts: {
       texto: String(json.texto).trim(),
       titulo: json.titulo ? String(json.titulo).slice(0, 100) : undefined,
       tema: json.tema ? String(json.tema).slice(0, 80) : (tema ?? undefined),
+      linea,
       modelo,
     };
   } catch (e: any) {
@@ -266,12 +287,22 @@ function extraerJson(texto: string): any | null {
 /** Cuántas fotos se le enseñan al modelo. Más allá, el guion no cabe en `MAX_ESCENAS`. */
 const MAX_IMAGENES_GUION = 8;
 
-function sistemaGuion(cfg: ConfigRedes, nImagenes: number, marca: string | null): string {
+function sistemaGuion(
+  cfg: ConfigRedes,
+  nImagenes: number,
+  marca: string | null,
+  linea: LineaNegocio,
+): string {
   return [
     "Diriges videos verticales cortos (Reel / Short / TikTok) para una empresa peruana de",
-    "transporte de personal. Te dan el texto de la publicación del día y las fotos que hay.",
+    "transporte de pasajeros. Te dan el texto de la publicación del día y las fotos que hay.",
     "Tu trabajo es escribir el GUION: qué foto se ve en cada escena, qué frase va ENCIMA,",
     "cuánto dura y cómo se mueve la cámara.",
+    "",
+    // El mismo encuadre que el redactor, y por la misma razón: una frase de pantalla para
+    // un colegio no se parece a una para un jefe de planta. Y el bloque trae las
+    // prohibiciones de la línea, que aquí importan MÁS: el guion elige qué foto se ve.
+    bloqueLinea(linea),
     "",
     "LO MÁS IMPORTANTE: EL TEXTO DE PANTALLA NO ES EL TEXTO DE LA PUBLICACIÓN.",
     "El caption se lee con el pulgar quieto; lo que va sobre el video se lee en dos segundos",
@@ -345,6 +376,8 @@ export async function redactarGuion(opts: {
   marca?: string | null;
   /** Lo que pidió el operador esta vez ("más corto", "empieza por el taller"). */
   instruccion?: string;
+  /** De qué negocio habla el video. La misma que el texto, o se contradirían. */
+  linea?: LineaNegocio;
 }): Promise<GuionIA> {
   const { texto, cfg, instruccion } = opts;
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -361,6 +394,7 @@ export async function redactarGuion(opts: {
   }
 
   const modelo = cfg.modelo || "claude-opus-5";
+  const linea = opts.linea ?? LINEA_DEFECTO;
   const marca = opts.marca ?? null;
   const defecto = { texto, imagenes, marca: marca ?? undefined };
 
@@ -388,7 +422,7 @@ export async function redactarGuion(opts: {
     const resp: any = await anthropic.messages.create({
       model: modelo,
       max_tokens: 3000,
-      system: sistemaGuion(cfg, imagenes.length, marca),
+      system: sistemaGuion(cfg, imagenes.length, marca, linea),
       messages: [{ role: "user", content: contenido }],
       ...modelExtras(modelo),
     } as any);
@@ -434,6 +468,8 @@ export async function proponerPublicacion(opts: {
   fecha: string;
   instruccion?: string;
   rehacer?: boolean;
+  /** Fuerza la línea de hoy. Sin ella rota sobre las activas. */
+  linea?: LineaNegocio;
 }): Promise<ResultadoPropuesta> {
   const sb = db();
   if (!sb) return { ok: false, error: "Sin credenciales de Supabase en el servidor." };
@@ -484,6 +520,7 @@ export async function proponerPublicacion(opts: {
     redes: redes.length ? redes : (["instagram"] as Red[]),
     cfg,
     instruccion: opts.instruccion,
+    linea: opts.linea,
     recientes: (previas ?? []).map((p: any) => p.texto).filter(Boolean),
   });
   if (!prop.ok) return { ok: false, error: prop.error };
@@ -501,16 +538,27 @@ export async function proponerPublicacion(opts: {
     ia_tema: prop.tema ?? null,
     ia_texto_original: prop.texto,
     redes: redes.length ? redes : undefined,
+    linea: prop.linea ?? null,
     actualizado_en: new Date().toISOString(),
   };
 
-  if (existente) {
-    const { error } = await sb.from("redes_publicaciones").update(patch).eq("id", existente.id);
-    if (error) return { ok: false, error: error.message };
-    return { ok: true, publicacion_id: existente.id, texto: prop.texto };
-  }
+  // `linea` es de una migración ACCESORIA: si no está, se suelta la columna que el error
+  // NOMBRA y la propuesta se guarda igual. Perder el post del día porque falta un SQL
+  // accesorio sería peor que perder de qué negocio hablaba.
+  const escribir = async (cuerpo: Record<string, any>) =>
+    existente
+      ? sb.from("redes_publicaciones").update(cuerpo).eq("id", existente.id).select("id").single()
+      : sb.from("redes_publicaciones").insert(cuerpo).select("id").single();
 
-  const { data, error } = await sb.from("redes_publicaciones").insert(patch).select("id").single();
-  if (error) return { ok: false, error: error.message };
-  return { ok: true, publicacion_id: data.id, texto: prop.texto };
+  let r = await escribir(patch);
+  let aviso: string | undefined;
+  if (r.error && /column .*linea.* does not exist|'linea' column/i.test(r.error.message)) {
+    const { linea: _fuera, ...sinLinea } = patch as any;
+    r = await escribir(sinLinea);
+    aviso =
+      "La propuesta se guardó, pero la línea de negocio no: falta correr " +
+      "supabase/redes-03-lineas-negocio.sql.";
+  }
+  if (r.error) return { ok: false, error: r.error.message };
+  return { ok: true, publicacion_id: r.data!.id, texto: prop.texto, aviso };
 }

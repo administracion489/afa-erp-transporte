@@ -59,6 +59,16 @@ import {
   type Guion,
 } from "../lib/redes/guion";
 
+import {
+  FICHA_LINEA,
+  LINEAS,
+  bloqueLinea,
+  lineaDelDia,
+  lineasActivas,
+  lineasValidas,
+  type LineaNegocio,
+} from "../lib/redes/lineas";
+
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
   console.log(`${ok ? "  ok  " : "FALLA "} ${nombre}${extra ? " — " + extra : ""}`);
@@ -626,6 +636,97 @@ console.log("\n6 · El guion del video\n");
     recortarPalabras("transporte de personal ejecutivo", 20),
   );
   chk("recortarPalabras nunca pasa del tope", [5, 12, 48].every((m) => recortarPalabras(CAPTION, m).length <= m));
+}
+
+// ── 7 · Las LÍNEAS DE NEGOCIO ─────────────────────────────────────────────────
+//
+// Lo que fija, y por qué duele si se rompe:
+//
+//   · NUNCA SE CAE A LAS CUATRO. Una configuración vacía, corrupta o sin migrar cae a
+//     `personal` —el comportamiento anterior—, jamás a todas: publicar sobre paseos
+//     escolares en el canal de quien no los hace es un dato inventado, y este ERP se vende.
+//   · LA ROTACIÓN ES POR DÍA, NO AL AZAR. Con `random`, cuatro líneas dan dos y tres días
+//     seguidos de la misma con toda naturalidad y el canal se ve monotemático.
+//   · CADA LÍNEA DICE QUÉ NO SE PUEDE DECIR, y el bloque del prompt lo lleva. La de
+//     paseos escolares tiene que prohibir nombrar colegios y alumnos: ahí el fallo no es
+//     de marketing.
+console.log("\n7 · Las líneas de negocio\n");
+
+{
+  const FECHAS = ["2026-01-01", "2026-03-14", "2026-09-16", "2026-12-31", "2027-02-28"];
+
+  chk("el catálogo describe las cuatro líneas", LINEAS.length === 4 && LINEAS.every((l) => FICHA_LINEA[l]?.queEs?.length > 40));
+  chk(
+    "cada línea declara a quién le habla, de qué hablar y qué NO decir",
+    LINEAS.every((l) => FICHA_LINEA[l].aQuien.length > 40 && FICHA_LINEA[l].angulos.length >= 3 && FICHA_LINEA[l].ojo.length >= 2),
+  );
+
+  // (a) El lado que NO se puede aflojar: nunca se inventan negocios.
+  const basuras: unknown[] = [null, undefined, [], {}, "turismo", ["nope"], ["turismo", "nope"], [1, 2], [null]];
+  let malCae = 0;
+  for (const b of basuras) {
+    const act = lineasActivas(b);
+    const inventadas = act.filter((l) => !(Array.isArray(b) ? (b as any[]) : []).includes(l));
+    // Solo se admite inventar `personal`, y solo cuando no quedó ninguna válida.
+    if (inventadas.length && !(inventadas.length === 1 && inventadas[0] === "personal" && lineasValidas(b).length === 0)) malCae++;
+    if (!act.length) malCae++;
+  }
+  chk("una configuración vacía o corrupta cae a 'personal', nunca a las cuatro", malCae === 0, `${malCae} fallos`);
+  chk("sin migración (columna ausente) el comportamiento es el de antes", JSON.stringify(lineasActivas(undefined)) === '["personal"]');
+  chk("se descarta lo que el catálogo no conoce", JSON.stringify(lineasValidas(["turismo", "submarino", "escolar"])) === '["turismo","escolar"]');
+  chk("…y se devuelve en el orden del catálogo, no en el de la base", JSON.stringify(lineasValidas(["alquiler", "personal"])) === '["personal","alquiler"]');
+
+  // (b) Rotación: determinista, cubre todas y avanza de día en día.
+  let malRota = 0;
+  let malCubre = 0;
+  const SUBCONJUNTOS: LineaNegocio[][] = [
+    ["personal"],
+    ["personal", "turismo"],
+    ["turismo", "escolar", "alquiler"],
+    [...LINEAS],
+  ];
+  for (const set of SUBCONJUNTOS) {
+    for (const f of FECHAS) {
+      const a = lineaDelDia(set, f);
+      if (!set.includes(a)) malRota++;
+      if (lineaDelDia(set, f) !== a) malRota++; // determinista
+    }
+    // En tantos días como líneas activas, salen TODAS: es lo que evita el canal monotemático.
+    const vistas = new Set<LineaNegocio>();
+    for (let d = 0; d < set.length; d++) {
+      const fecha = new Date(Date.UTC(2026, 5, 1 + d)).toISOString().slice(0, 10);
+      vistas.add(lineaDelDia(set, fecha));
+    }
+    if (vistas.size !== set.length) malCubre++;
+  }
+  chk("la línea del día siempre es una de las activas, y es determinista", malRota === 0, `${malRota} fallos`);
+  chk("en N días con N líneas salen todas (no se repite ninguna)", malCubre === 0, `${malCubre} fallos`);
+  chk("una fecha inválida no rompe la rotación", LINEAS.includes(lineaDelDia([...LINEAS], "no-es-fecha")));
+
+  // (c) El bloque del prompt DERIVA de la ficha: no es un texto escrito aparte.
+  let malBloque = 0;
+  for (const l of LINEAS) {
+    const b = bloqueLinea(l);
+    const f = FICHA_LINEA[l];
+    if (!b.includes(f.etiqueta.toUpperCase())) malBloque++;
+    if (!f.angulos.every((a) => b.includes(a))) malBloque++;
+    if (!f.ojo.every((o) => b.includes(o))) malBloque++;
+  }
+  chk("el bloque del prompt lleva TODO lo que declara la ficha", malBloque === 0, `${malBloque} fallos`);
+  chk(
+    "paseos escolares prohíbe nombrar colegios y alumnos (aquí el fallo no es de marketing)",
+    /colegio/i.test(bloqueLinea("escolar")) && /alumno/i.test(bloqueLinea("escolar")),
+  );
+  chk(
+    "…y la pantalla avisa de las caras de menores, que el modelo no puede controlar",
+    (FICHA_LINEA.escolar.avisoPantalla ?? "").length > 80 && /menor/i.test(FICHA_LINEA.escolar.avisoPantalla ?? ""),
+  );
+  chk("turismo no promete itinerarios ni precios", /itinerario|precio/i.test(bloqueLinea("turismo")));
+  chk("alquiler no da precios ni afirma disponibilidad", /precio/i.test(bloqueLinea("alquiler")) && /disponibilidad/i.test(bloqueLinea("alquiler")));
+  chk(
+    "solo la línea con riesgo en la FOTO lleva aviso de pantalla (uno en las cuatro sería paisaje)",
+    LINEAS.filter((l) => FICHA_LINEA[l].avisoPantalla).length === 1,
+  );
 }
 
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);

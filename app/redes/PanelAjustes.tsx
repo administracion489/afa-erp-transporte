@@ -12,6 +12,7 @@
 // lib/redes/ia.ts); esto es lo que cada empresa añade por encima.
 
 import React, { useCallback, useEffect, useState } from "react";
+import { FICHA_LINEA, LINEAS, lineasActivas, type LineaNegocio } from "@/lib/redes/lineas";
 import { supabase } from "@/lib/supabase";
 import { hhmm } from "@/lib/redes/plan";
 
@@ -29,6 +30,7 @@ type Cfg = {
   prohibido: string | null;
   hashtags_fijos: string | null;
   temas: string[] | null;
+  lineas: string[] | null;
   modelo: string | null;
 };
 
@@ -41,6 +43,7 @@ const VACIA: Cfg = {
   prohibido: "",
   hashtags_fijos: "",
   temas: [],
+  lineas: ["personal"],
   modelo: "claude-opus-5",
 };
 
@@ -57,6 +60,8 @@ export default function PanelAjustes() {
   const [cargando, setCargando] = useState(true);
   const [guardando, setGuardando] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  /** `true` cuando falta redes-03: la pantalla lo DICE en vez de aparentar que guarda. */
+  const [faltaLineas, setFaltaLineas] = useState(false);
 
   const cargar = useCallback(async () => {
     setCargando(true);
@@ -71,9 +76,7 @@ export default function PanelAjustes() {
 
   async function guardar() {
     setGuardando(true);
-    const { error } = await supabase
-      .from("redes_config")
-      .update({
+    const patch: Record<string, any> = {
         activo: cfg.activo,
         hora_propuesta_min: cfg.hora_propuesta_min,
         hora_publicar_min: cfg.hora_publicar_min,
@@ -83,14 +86,39 @@ export default function PanelAjustes() {
         publico: cfg.publico?.trim() || null,
         prohibido: cfg.prohibido?.trim() || null,
         hashtags_fijos: cfg.hashtags_fijos?.trim() || null,
-        temas: (cfg.temas ?? []).filter((t) => t.trim()),
-        modelo: cfg.modelo || null,
-        actualizado_en: new Date().toISOString(),
-      })
-      .eq("id", 1);
+      temas: (cfg.temas ?? []).filter((t) => t.trim()),
+      // Nunca se guarda vacío: sin ninguna línea el agente no sabría de qué hablar, y
+      // `lineasActivas` caería a `personal` de todos modos. Mejor que lo diga la fila.
+      lineas: lineasActivas(cfg.lineas),
+      modelo: cfg.modelo || null,
+      actualizado_en: new Date().toISOString(),
+    };
+
+    let { error } = await supabase.from("redes_config").update(patch).eq("id", 1);
+    // Se suelta la columna que el error NOMBRA: que falte un SQL accesorio no puede
+    // impedir cambiar el tono o la hora de publicación.
+    if (error && /column .*lineas.* does not exist|'lineas' column/i.test(error.message)) {
+      const { lineas: _fuera, ...sinLineas } = patch;
+      ({ error } = await supabase.from("redes_config").update(sinLineas).eq("id", 1));
+      setFaltaLineas(true);
+      if (!error) {
+        setGuardando(false);
+        setMsg("Guardado, menos las líneas de negocio: falta correr supabase/redes-03-lineas-negocio.sql.");
+        setTimeout(() => setMsg(null), 8000);
+        return;
+      }
+    }
     setGuardando(false);
     setMsg(error ? error.message : "Guardado.");
     setTimeout(() => setMsg(null), 4000);
+  }
+
+  function alternarLinea(l: LineaNegocio) {
+    const hay = (cfg.lineas ?? []).includes(l);
+    setCfg({
+      ...cfg,
+      lineas: hay ? (cfg.lineas ?? []).filter((x) => x !== l) : [...(cfg.lineas ?? []), l],
+    });
   }
 
   if (cargando) return <div className="text-sm text-gray-400 py-6">Cargando ajustes…</div>;
@@ -164,8 +192,57 @@ export default function PanelAjustes() {
             placeholder="Cercano y directo, sin jerga corporativa. Trata de usted. Frases cortas."
           />
         </div>
+        {/* ── LÍNEAS DE NEGOCIO ──
+            Van ARRIBA de «a quién le habla» a propósito: cada línea trae su propio
+            público, y el campo de texto de abajo es lo que se añade por encima. Sin
+            marcar ninguna, el agente solo habla de transporte de personal, que es lo
+            que hacía antes de que estas casillas existieran. */}
         <div>
-          <label className={label}>A quién le habla</label>
+          <label className={label}>Líneas de negocio que publicas</label>
+          <div className="space-y-2">
+            {LINEAS.map((l) => {
+              const f = FICHA_LINEA[l];
+              const marcada = (cfg.lineas ?? []).includes(l);
+              return (
+                <label key={l} className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={marcada}
+                    onChange={() => alternarLinea(l)}
+                    className="mt-1"
+                  />
+                  <div>
+                    <div className="text-sm text-gray-700">
+                      {f.icono} {f.etiqueta}
+                    </div>
+                    <div className="text-xs text-gray-400">{f.resumen}</div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+          <p className="mt-2 text-xs text-gray-400">
+            El agente <b>rota</b> entre las marcadas, una por día, para que el canal no hable siempre
+            del mismo negocio. Marca solo las que de verdad prestas: publicar sobre un servicio que no
+            das es prometerle algo a quien pregunte por él.
+          </p>
+          {(cfg.lineas ?? []).length === 0 && (
+            <p className="mt-1.5 text-xs text-amber-700">
+              Sin ninguna marcada se guarda <b>Transporte de personal</b>, que es lo que el agente hacía
+              antes. No se puede dejar en blanco: tendría que hablar de algo.
+            </p>
+          )}
+          {faltaLineas && (
+            <p className="mt-1.5 text-xs text-amber-700">
+              Falta correr{" "}
+              <code className="bg-white px-1 py-0.5 rounded">supabase/redes-03-lineas-negocio.sql</code>: estas
+              casillas no se guardan y el agente sigue publicando solo transporte de personal.
+            </p>
+          )}
+        </div>
+
+        <div>
+          <label className={label}>A quién le habla (además de lo de arriba)</label>
           <textarea
             rows={3}
             className={input}
