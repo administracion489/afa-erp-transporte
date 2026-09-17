@@ -213,7 +213,9 @@ Si AFA tiene ejecutivo de cuenta asignado, va directo a él con copia a ese corr
 > - La posibilidad de **habilitar primero una unidad de prueba** antes de extenderlo a la
 >   flota.
 >
-> Quedamos a disposición para una reunión técnica entre su equipo y el nuestro.
+> Agradeceremos su respuesta por este medio indicando cuál de las modalidades pueden
+> ofrecernos. Si su área técnica necesita precisar algún punto del anexo, quedamos atentos
+> por correo.
 >
 > Cordialmente,
 >
