@@ -234,14 +234,22 @@ Si AFA tiene ejecutivo de cuenta asignado, va directo a él con copia a ese corr
 
 ## 8. Anexo técnico (para el área de sistemas del proveedor)
 
-> **El PDF que se envía se genera desde `docs/anexo-gps-tracklink.html`**, con membrete y
+> **El PDF que se envía se genera desde `docs/anexo-gps-proveedor.html`**, con membrete y
 > el logo de AFA embebido. Para regenerarlo tras editarlo (mismo motor que usan los
 > documentos imprimibles del ERP — ver `lib/pdf-chrome.ts`):
 >
 > ```bash
 > chrome --headless=new --no-pdf-header-footer \
->   --print-to-pdf=anexo.pdf file:///ruta/a/docs/anexo-gps-tracklink.html
+>   --print-to-pdf=anexo.pdf file:///ruta/a/docs/anexo-gps-proveedor.html
 > ```
+>
+> **EL ANEXO NO NOMBRA A NINGÚN PROVEEDOR, y es deliberado.** Lo que pide —posición con
+> la hora del EQUIPO, placa e IMEI, el origen del odómetro, reintentos y frecuencia— no
+> depende de quién lo provea, así que el mismo PDF sirve para Tracklink, para pedir una
+> segunda cotización y para el proveedor de una tercerizada que acepte retransmitir. Un
+> anexo con el nombre de un proveedor dentro obliga a reescribirlo para cada uno, y el
+> día que se reescribe a mano es el día que a una copia se le queda un párrafo viejo.
+> **Quien nombra al destinatario es el CORREO** (§7), que es lo que hace una carta.
 >
 > Dos cosas de su maquetación que no se pueden aflojar, y que costaron una revisión:
 > el pie **cuelga de un `<tfoot>`**, no de un `position:fixed` — fijo se repite en cada
