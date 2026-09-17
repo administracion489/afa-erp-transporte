@@ -203,8 +203,7 @@ Si AFA tiene ejecutivo de cuenta asignado, va directo a él con copia a ese corr
 > longitud, velocidad, rumbo, precisión, y —si el equipo lo reporta— odómetro y estado de
 > encendido del motor.**
 >
-> Adjuntamos un **anexo técnico de una página** con el detalle exacto para su área de
-> sistemas.
+> Adjuntamos el **anexo técnico** con el detalle exacto para su área de sistemas.
 >
 > Sobre lo comercial, quedamos atentos a:
 >
@@ -232,6 +231,25 @@ Si AFA tiene ejecutivo de cuenta asignado, va directo a él con copia a ese corr
 ---
 
 ## 8. Anexo técnico (para el área de sistemas del proveedor)
+
+> **El PDF que se envía se genera desde `docs/anexo-gps-tracklink.html`**, con membrete y
+> el logo de AFA embebido. Para regenerarlo tras editarlo (mismo motor que usan los
+> documentos imprimibles del ERP — ver `lib/pdf-chrome.ts`):
+>
+> ```bash
+> chrome --headless=new --no-pdf-header-footer \
+>   --print-to-pdf=anexo.pdf file:///ruta/a/docs/anexo-gps-tracklink.html
+> ```
+>
+> Dos cosas de su maquetación que no se pueden aflojar, y que costaron una revisión:
+> el pie **cuelga de un `<tfoot>`**, no de un `position:fixed` — fijo se repite en cada
+> hoja pero **no reserva su sitio** y se imprimió encima del bloque JSON de la página 2,
+> el mismo defecto que documenta `CSS_IMPRESION` en `lib/liquidacion-doc.ts`; y el
+> ejemplo JSON lleva `break-inside:avoid`, porque partido entre dos hojas dejaba un
+> corchete solo al pie de la primera. **Se revisa mirando el PDF completo, nunca la
+> primera página en pantalla.**
+
+El texto del anexo, para referencia:
 
 > **ANEXO TÉCNICO — Integración de datos GPS · AFA Tours Perú S.A.C.**
 >
