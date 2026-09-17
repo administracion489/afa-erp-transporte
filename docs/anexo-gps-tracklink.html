@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Anexo técnico · Integración de datos GPS · AFA Tours Perú S.A.C.</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 20mm 15mm; }
+
+  :root{
+    --tinta:#14181d;
+    --gris:#5b6672;
+    --linea:#d8dee5;
+    --suave:#f4f6f8;
+    --acento:#0f4c81;
+    --ambar:#8a5a00;
+    --ambar-bg:#fdf7e8;
+  }
+
+  *{ box-sizing:border-box; }
+
+  body{
+    font-family:"Liberation Sans", Arial, Helvetica, sans-serif;
+    font-size:9.5pt;
+    line-height:1.45;
+    color:var(--tinta);
+    margin:0;
+    -webkit-print-color-adjust:exact;
+    print-color-adjust:exact;
+  }
+
+  /* ---- Membrete ---- */
+  .membrete{
+    display:flex;
+    align-items:flex-end;
+    justify-content:space-between;
+    border-bottom:2.5px solid var(--acento);
+    padding-bottom:7px;
+    margin-bottom:14px;
+  }
+  .membrete img{ height:44px; width:auto; display:block; }
+  .membrete .emisor{ font-size:8.2pt; color:var(--gris); line-height:1.45; text-align:right; }
+  .membrete .emisor strong{ color:var(--tinta); font-size:9pt; display:block; letter-spacing:.2px; }
+
+  .rotulo{
+    font-size:7.6pt; letter-spacing:1.6px; text-transform:uppercase;
+    color:var(--acento); font-weight:bold; margin:0 0 2px;
+  }
+  h1{
+    font-size:16pt; line-height:1.22; margin:0 0 10px; font-weight:bold;
+    letter-spacing:-.2px;
+  }
+
+  /* ---- Ficha de cabecera ---- */
+  .ficha{ width:100%; border-collapse:collapse; margin-bottom:14px; }
+  .ficha td{
+    border-top:1px solid var(--linea); border-bottom:1px solid var(--linea);
+    padding:5px 8px; font-size:8.8pt; vertical-align:top;
+  }
+  .ficha td.k{
+    width:78px; color:var(--gris); text-transform:uppercase;
+    font-size:7.4pt; letter-spacing:.7px; padding-top:7px; white-space:nowrap;
+  }
+  .ficha tr td{ border-bottom:none; }
+  .ficha tr:last-child td{ border-bottom:1px solid var(--linea); }
+
+  /* ---- Secciones ---- */
+  h2{
+    font-size:10.4pt; margin:14px 0 6px; padding-bottom:3px;
+    border-bottom:1px solid var(--linea); font-weight:bold;
+  }
+  h2 .n{ color:var(--acento); margin-right:7px; }
+  h3{ font-size:9.4pt; margin:11px 0 4px; font-weight:bold; }
+  p{ margin:0 0 7px; text-align:justify; }
+  ul,ol{ margin:0 0 7px; padding-left:17px; }
+  li{ margin-bottom:4px; }
+  strong{ font-weight:bold; }
+  code{
+    font-family:"DejaVu Sans Mono","Liberation Mono",monospace;
+    font-size:8.4pt; background:var(--suave); padding:.5px 3px;
+    border-radius:2px; border:1px solid #e6eaef;
+  }
+
+  .lede{
+    background:var(--suave); border-left:3px solid var(--acento);
+    padding:8px 11px; margin:0 0 14px; font-size:9.3pt;
+  }
+  .lede p:last-child{ margin-bottom:0; }
+
+  /* ---- Bloque JSON ---- */
+  pre{
+    font-family:"DejaVu Sans Mono","Liberation Mono",monospace;
+    font-size:7.8pt; line-height:1.4;
+    background:#1f242b; color:#e8edf3;
+    padding:10px 12px; border-radius:4px;
+    margin:0 0 9px; white-space:pre; overflow:visible;
+  }
+  pre .c{ color:#8fa3b8; }
+  pre .k{ color:#9ecbff; }
+  pre .s{ color:#b8e3a0; }
+  pre .n{ color:#f2c98a; }
+
+  /* ---- Tabla de campos ---- */
+  table.campos{ width:100%; border-collapse:collapse; margin:0 0 9px; font-size:8.5pt; }
+  table.campos th{
+    background:var(--acento); color:#fff; text-align:left;
+    padding:5px 7px; font-size:7.8pt; letter-spacing:.4px; text-transform:uppercase;
+  }
+  table.campos td{ border-bottom:1px solid var(--linea); padding:4.5px 7px; vertical-align:top; }
+  table.campos tr:nth-child(even) td{ background:#fafbfc; }
+  table.campos td.campo{
+    font-family:"DejaVu Sans Mono","Liberation Mono",monospace;
+    font-size:8.1pt; white-space:nowrap; font-weight:bold;
+  }
+  table.campos td.ob{ white-space:nowrap; font-size:8pt; }
+  .si{ color:#0a6b3d; font-weight:bold; }
+  .op{ color:var(--gris); }
+
+  /* ---- Requisitos críticos ---- */
+  .req{
+    border:1px solid var(--linea); border-left:3px solid var(--ambar);
+    background:var(--ambar-bg);
+    padding:7px 10px; margin:0 0 7px;
+  }
+  .req .t{ font-weight:bold; margin-bottom:2px; font-size:9.5pt; }
+  .req p{ margin:0; font-size:9pt; }
+
+  .nota{ font-size:8.4pt; color:var(--gris); margin:0 0 7px; }
+
+  /* ---- Checklist de preguntas ---- */
+  ul.check{ list-style:none; padding-left:0; margin:0 0 7px; }
+  ul.check li{
+    padding-left:20px; position:relative; margin-bottom:5px;
+    break-inside:avoid;
+  }
+  ul.check li:before{
+    content:""; position:absolute; left:0; top:2.5px;
+    width:10px; height:10px; border:1.3px solid var(--acento); border-radius:2px;
+  }
+
+  .alt{ border:1px solid var(--linea); padding:9px 11px; margin:0 0 8px; break-inside:avoid; }
+  .alt .t{ font-weight:bold; margin-bottom:3px; }
+  .alt p{ margin:0; font-size:9pt; }
+
+  .contacto{
+    border-top:2px solid var(--acento); margin-top:11px; padding-top:7px;
+    font-size:9pt; break-inside:avoid;
+  }
+  .contacto .quien{ font-weight:bold; }
+
+  /* ---- Pie repetido en cada hoja ----
+     NO se usa position:fixed: se repite en cada hoja pero NO reserva su sitio, y se
+     imprime ENCIMA del ultimo renglon (verificado: pisaba el bloque JSON de la p.2).
+     El <tfoot> de una tabla de una celda lo repite al pie reservando su alto real.
+     Es el mismo patron que CSS_IMPRESION en lib/liquidacion-doc.ts del ERP. */
+  table.hoja{ width:100%; border-collapse:collapse; }
+  table.hoja > tbody > tr > td,
+  table.hoja > tfoot > tr > td{ padding:0; border:none; }
+  .pie{
+    border-top:1px solid var(--linea); padding-top:4px; margin-top:10px;
+    font-size:7.4pt; color:var(--gris);
+    display:flex; justify-content:space-between;
+  }
+
+  /* ---- Lo que no se puede partir entre hojas ---- */
+  pre, .req, .alt, .contacto, .lede, ul.check li,
+  table.campos tr, table.ficha tr{ break-inside:avoid; }
+  h1, h2, h3{ break-after:avoid; }
+  table.campos thead{ display:table-header-group; }
+</style>
+</head>
+<body>
+
+<table class="hoja">
+<tfoot><tr><td>
+  <div class="pie">
+    <span>AFA Tours Perú S.A.C. &middot; Anexo técnico: integración de datos GPS</span>
+    <span>administracion@afatoursperu.com</span>
+  </div>
+</td></tr></tfoot>
+<tbody><tr><td>
+
+<div class="membrete">
+  <img src="data:image/png;base64,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" alt="AFA">
+  <div class="emisor">
+    <strong>AFA TOURS PERÚ S.A.C.</strong>
+    Transporte de personal, turismo y alquiler de unidades<br>
+    transportesafa.com &middot; administracion@afatoursperu.com
+  </div>
+</div>
+
+<p class="rotulo">Anexo técnico</p>
+<h1>Integración de datos GPS hacia el sistema de gestión de AFA</h1>
+
+<table class="ficha">
+  <tr>
+    <td class="k">Para</td>
+    <td>Tracklink Perú &mdash; Área de Sistemas / Integraciones <span class="op">(vía ejecutivo de cuenta)</span></td>
+  </tr>
+  <tr>
+    <td class="k">De</td>
+    <td>AFA Tours Perú S.A.C. &mdash; cliente Tracklink</td>
+  </tr>
+  <tr>
+    <td class="k">Asunto</td>
+    <td>Especificación para la retransmisión de posiciones GPS de nuestras unidades</td>
+  </tr>
+  <tr>
+    <td class="k">Fecha</td>
+    <td>17 de septiembre de 2026</td>
+  </tr>
+</table>
+
+<div class="lede">
+  <p><strong>En una línea:</strong> solicitamos que la información de posición de nuestros equipos GPS llegue de forma automática a nuestro sistema de gestión, <strong>además</strong> de seguir disponible en la plataforma de Tracklink.</p>
+  <p style="margin-top:5px"><strong>No estamos pidiendo reemplazar su plataforma ni modificar la configuración de los equipos.</strong> Seguiremos usando su servicio de monitoreo y emergencias tal como está hoy.</p>
+</div>
+
+<h2><span class="n">1.</span>Objetivo y contexto</h2>
+<p>AFA Tours Perú S.A.C. opera un sistema propio de gestión (ERP) donde administra la programación de servicios, el seguimiento en vivo para clientes y pasajeros, el mantenimiento de flota y la liquidación mensual. Hoy la posición de las unidades la obtenemos del teléfono del conductor, lo que nos deja expuestos a que el equipo se quede sin batería, sin datos o con la aplicación detenida por el sistema operativo.</p>
+<p>Queremos incorporar el dato de sus equipos como <strong>fuente adicional e independiente</strong>. Nuestro sistema está preparado para recibir posiciones de más de un origen sin modificar ninguna de sus pantallas.</p>
+
+<h2><span class="n">2.</span>Modalidad preferida: webhook HTTP POST</h2>
+<p>Su plataforma envía una petición HTTP a una dirección nuestra cada vez que haya posiciones nuevas. Es la modalidad que preferimos porque no requiere abrir puertos, viaja cifrada y se autentica con un token.</p>
+
+<table class="ficha">
+  <tr><td class="k">Método</td><td><code>POST</code> sobre HTTPS (TLS 1.2 o superior)</td></tr>
+  <tr><td class="k">URL</td><td><code>https://transportesafa.com/api/gps/ingesta</code> <span class="op">(confirmamos la dirección definitiva al implementar)</span></td></tr>
+  <tr><td class="k">Cabeceras</td><td><code>Content-Type: application/json</code><br><code>Authorization: Bearer &lt;token&gt;</code> &mdash; el token lo entregamos nosotros</td></tr>
+  <tr><td class="k">Firma</td><td>Si pueden firmar el cuerpo con HMAC-SHA256, indíquennos el esquema y la cabecera que usan. Es deseable, no obligatorio.</td></tr>
+  <tr><td class="k">Origen</td><td>Podemos restringir por IP. Envíennos el rango de direcciones desde el que saldrán las peticiones.</td></tr>
+  <tr><td class="k">Respuesta</td><td>Respondemos <code>200 OK</code> en cuanto recibimos. Cualquier otro código debe considerarse fallo de entrega.</td></tr>
+</table>
+
+<h2><span class="n">3.</span>Formato del cuerpo</h2>
+<p>Un objeto por posición, o un arreglo de objetos cuando se envíen posiciones acumuladas. Si su formato actual es distinto, <strong>no es necesario que lo adapten</strong>: envíennos su especificación y nosotros nos ajustamos. Lo que sigue describe la información que necesitamos, no una imposición de estructura.</p>
+
+<pre><span class="c">[</span>
+  <span class="c">{</span>
+    <span class="k">"placa"</span>: <span class="s">"CWZ-371"</span>,
+    <span class="k">"imei"</span>: <span class="s">"861234567890123"</span>,
+    <span class="k">"fix_ts"</span>: <span class="s">"2026-09-17T14:32:05-05:00"</span>,
+    <span class="k">"lat"</span>: <span class="n">-12.046374</span>,
+    <span class="k">"lng"</span>: <span class="n">-77.042793</span>,
+    <span class="k">"velocidad_kmh"</span>: <span class="n">42.5</span>,
+    <span class="k">"rumbo"</span>: <span class="n">187</span>,
+    <span class="k">"precision_m"</span>: <span class="n">8</span>,
+    <span class="k">"odometro_km"</span>: <span class="n">175445</span>,
+    <span class="k">"ignicion"</span>: <span class="n">true</span>
+  <span class="c">}</span>
+<span class="c">]</span></pre>
+
+<table class="campos">
+  <thead>
+    <tr><th style="width:23%">Campo</th><th style="width:20%">Tipo</th><th style="width:14%">Requerido</th><th>Descripción</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="campo">placa</td><td>texto</td><td class="ob"><span class="si">Sí</span> *</td><td>Placa de la unidad. Es como identificamos el vehículo en nuestro sistema.</td></tr>
+    <tr><td class="campo">imei</td><td>texto</td><td class="ob"><span class="si">Sí</span> *</td><td>Identificador del equipo. Es estable aunque la placa cambie.</td></tr>
+    <tr><td class="campo">fix_ts</td><td>ISO 8601 con zona horaria</td><td class="ob"><span class="si">Sí</span></td><td>Hora en que <strong>el equipo tomó la posición</strong>. Ver requisito 4.1.</td></tr>
+    <tr><td class="campo">lat</td><td>número decimal</td><td class="ob"><span class="si">Sí</span></td><td>Latitud en grados decimales (WGS-84).</td></tr>
+    <tr><td class="campo">lng</td><td>número decimal</td><td class="ob"><span class="si">Sí</span></td><td>Longitud en grados decimales (WGS-84).</td></tr>
+    <tr><td class="campo">velocidad_kmh</td><td>número</td><td class="ob">Deseable</td><td>Velocidad instantánea en kilómetros por hora.</td></tr>
+    <tr><td class="campo">rumbo</td><td>número 0&ndash;359</td><td class="ob">Deseable</td><td>Grados respecto al norte.</td></tr>
+    <tr><td class="campo">precision_m</td><td>número</td><td class="ob">Deseable</td><td>Precisión estimada en metros, o HDOP indicando cuál de los dos envían.</td></tr>
+    <tr><td class="campo">odometro_km</td><td>número</td><td class="ob">Muy deseable</td><td>Odómetro acumulado. Ver requisito 4.3 sobre su origen.</td></tr>
+    <tr><td class="campo">ignicion</td><td>booleano</td><td class="ob">Muy deseable</td><td>Estado del encendido del motor.</td></tr>
+    <tr><td class="campo">evento</td><td>texto</td><td class="ob"><span class="op">Opcional</span></td><td>Código del evento que originó el reporte, si lo manejan.</td></tr>
+  </tbody>
+</table>
+<p class="nota">* Con al menos uno de los dos es suficiente para operar, pero <strong>preferimos recibir ambos</strong>: nos permite mantener la correspondencia entre equipo y unidad sin errores cuando una placa cambia de vehículo o un equipo se reinstala.</p>
+
+<h2><span class="n">4.</span>Cinco requisitos críticos</h2>
+
+<div class="req">
+  <div class="t">4.1 &nbsp;La hora debe ser la del equipo, no la del envío</div>
+  <p>Cuando un equipo pierde cobertura y luego descarga las posiciones acumuladas, todas llegan juntas. Si cada una trae la hora de envío en lugar de la hora real del posicionamiento, nuestro sistema dibuja un vehículo que se teletransporta y calcula mal los tiempos de llegada que se le muestran al cliente. <strong>Es el dato más importante de toda la integración.</strong> Si su formato incluye ambas horas, envíennos las dos y nos indican cuál es cuál.</p>
+</div>
+
+<div class="req">
+  <div class="t">4.2 &nbsp;Placa e IMEI en el mismo mensaje</div>
+  <p>Necesitamos poder resolver a qué unidad corresponde cada posición sin depender de una tabla de equivalencias que alguien tenga que mantener a mano. Si solo pueden enviar el IMEI, requerimos además el listado actualizado de la correspondencia IMEI&ndash;placa y una forma de recibir sus cambios.</p>
+</div>
+
+<div class="req">
+  <div class="t">4.3 &nbsp;El odómetro: indíquennos si viene del vehículo o del GPS</div>
+  <p>No es un detalle menor para nosotros. El odómetro tomado del CAN bus del vehículo es el número real del tablero; el calculado a partir del recorrido GPS acumula desviación con el tiempo. Usamos este dato para programar el mantenimiento preventivo y para medir el rendimiento de combustible, así que necesitamos saber cuál de los dos estamos recibiendo. <strong>Ambos nos sirven, siempre que sepamos cuál es.</strong></p>
+</div>
+
+<div class="req">
+  <div class="t">4.4 &nbsp;Política de reintentos</div>
+  <p>Si nuestro servidor responde con error o no responde a tiempo: ¿reintentan el envío?, ¿cuántas veces y con qué espera entre intentos?, ¿se descarta la posición o queda en cola? Necesitamos saberlo para dimensionar nuestra tolerancia a fallos.</p>
+</div>
+
+<div class="req">
+  <div class="t">4.5 &nbsp;Frecuencia de reporte</div>
+  <p>¿Cada cuántos segundos reportan con el vehículo en movimiento y cuántos en reposo? ¿Es configurable por unidad? Para nuestro uso, un reporte cada 15 a 30 segundos en movimiento es suficiente; no necesitamos mayor frecuencia.</p>
+</div>
+
+<h2><span class="n">5.</span>Consultas adicionales a su equipo</h2>
+<ul class="check">
+  <li>¿Su plataforma expone geocercas y eventos de entrada/salida que podamos recibir por el mismo canal?</li>
+  <li>¿Calculan tiempo estimado de llegada a un destino? De ser así, <strong>¿considera tráfico en tiempo real o solo distancia y velocidad promedio?</strong></li>
+  <li>¿Reportan eventos de conducción: frenada brusca, aceleración brusca, exceso de velocidad, ralentí prolongado?</li>
+  <li>¿Existe alguna limitación de volumen, o tarifa asociada a la cantidad de posiciones transmitidas?</li>
+  <li>¿Disponen de un ambiente de pruebas, o podemos habilitar <strong>una sola unidad</strong> antes de extenderlo a la flota?</li>
+  <li>¿Qué plazo estiman para la implementación una vez aprobada la parte comercial?</li>
+</ul>
+
+<h2><span class="n">6.</span>Alternativas si el webhook no está disponible</h2>
+<p>Cualquiera de estas dos nos sirve. Indíquennos cuál pueden ofrecer:</p>
+
+<div class="alt">
+  <div class="t">A. &nbsp;API de consulta</div>
+  <p>Credenciales de solo lectura de su API, con su documentación, para que nuestro sistema consulte periódicamente la posición de nuestras unidades. Requiere menos trabajo de su lado, aunque el dato nos llega con algo más de retraso.</p>
+</div>
+
+<div class="alt">
+  <div class="t">B. &nbsp;Retransmisión de tramas (TCP/UDP)</div>
+  <p>Reenvío del flujo de datos hacia un servidor nuestro, del que les proporcionamos dirección IP y puerto. Necesitaríamos que nos indiquen el protocolo y el formato de trama para poder decodificarla. <strong>Preferimos que la retransmisión se haga desde su plataforma y no reconfigurando los equipos</strong>, para no afectar en ningún caso el monitoreo que ustedes prestan.</p>
+</div>
+
+<h2><span class="n">7.</span>Alcance inicial</h2>
+<p>La integración se aplicaría en primer lugar a las <strong>unidades propias de AFA</strong> con equipos Tracklink. Buena parte de nuestra operación se cubre con unidades de empresas tercerizadas, cuyos equipos no son de nuestra propiedad: para esas seguiremos usando el rastreo por aplicación del conductor. Lo mencionamos para que el dimensionamiento comercial parta del número correcto de unidades.</p>
+
+<div class="contacto">
+  <p style="margin-bottom:3px"><span class="quien">Contacto técnico y comercial de AFA:</span></p>
+  <p style="margin:0">AFA Tours Perú S.A.C. &mdash; administracion@afatoursperu.com &mdash; transportesafa.com</p>
+  <p class="nota" style="margin:6px 0 0">Quedamos a disposición para una reunión técnica entre su equipo y el nuestro, y agradecemos su respuesta sobre cuál de las modalidades descritas pueden ofrecernos.</p>
+</div>
+
+</td></tr></tbody>
+</table>
+
+</body>
+</html>
