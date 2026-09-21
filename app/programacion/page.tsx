@@ -541,6 +541,10 @@ export default function ReservasPage() {
   const [cotMapNum,    setCotMapNum]    = useState<Record<number, string>>({}); // cotizacion_id → numero_cotizacion
   const [cotMapAsunto, setCotMapAsunto] = useState<Record<number, string>>({}); // cotizacion_id → asunto
   const [ocupacionMap, setOcupacionMap] = useState<Record<number, Ocupacion>>({});
+  // reserva_id → asientos CONTRATADOS (y de dónde salieron). Es el denominador que el
+  // cliente ve en su portal; la capacidad de la unidad asignada es OTRO número y vive
+  // en `capacidadDe`. Ver el comentario de la celda de pasajeros.
+  const [paxListaMap,  setPaxListaMap]  = useState<Record<number, PaxResuelto>>({});
   const [loading,      setLoading]      = useState(true); // arranca cargando (evita parpadeo "No hay reservas")
   const [guardando,    setGuardando]    = useState(false);
   const [paradasMap,   setParadasMap]   = useState<Record<number, any[]>>({});
@@ -727,6 +731,60 @@ export default function ReservasPage() {
     }
     setCotMapNum(m);
     setCotMapAsunto(ma);
+  };
+
+  /**
+   * Los asientos CONTRATADOS de cada fila visible, con la MISMA cascada que el
+   * formulario (`resolverPaxDeServicio`). No es una segunda definición: es la de
+   * lib/liquidacion-rutas.ts, que es también la que usan el portal del cliente y el
+   * reporte de ocupación. Dos motores que contesten "cuántos asientos se contrataron"
+   * terminan contestando distinto, y este número se le publica al cliente.
+   *
+   * Vive en la LISTA y no solo dentro del formulario porque el reflejo que hay que
+   * romper se produce mirando la lista: la celda de pasajeros enseña `34/50` con la
+   * capacidad del BUS, y de ahí se concluye "el contrato son 50" sin abrir nada. Le
+   * pasó al dueño con la RUTA C (bus de 50, contrato leído como 50, portal publicando
+   * 10) y es la misma trampa que el campo «PAX contratados por el cliente» vino a
+   * cerrar, por la puerta de al lado.
+   *
+   * Best-effort de punta a punta: si falla, la celda se queda con el número de la
+   * unidad —lo de antes— y la lista se pinta igual.
+   */
+  const cargarPaxContratado = async (rows: Reserva[]) => {
+    try {
+      const cotIds = [...new Set(rows.map(r => r.cotizacion_id).filter((v): v is number => v != null))];
+      const cliIds = [...new Set(rows.map(r => r.cliente_id).filter((v): v is number => v != null))];
+      const [paxCotizacion, catalogo] = await Promise.all([
+        cargarPaxDeCotizaciones(supabase, cotIds),
+        cliIds.length ? cargarRutasContratadas(supabase, cliIds) : Promise.resolve(null),
+      ]);
+      const porId = new Map(rows.map(r => [Number(r.id), r]));
+      // El hermano, por los DOS sentidos del enlace: `reserva_vinculada_id` se escribe
+      // en dos pasos y borrar un tramo deja en NULL el del superviviente, así que
+      // seguirlo solo hacia adelante dejaría a todo retorno "sin dato" — el generador
+      // escribe la capacidad únicamente en la ida. Hacia atrás SOLO cuando es
+      // inequívoco: con dos filas apuntando a la misma, elegir sería adivinar.
+      const apuntanA = new Map<number, number[]>();
+      for (const r of rows) {
+        const v = Number(r.reserva_vinculada_id ?? 0);
+        if (v > 0) apuntanA.set(v, [...(apuntanA.get(v) ?? []), Number(r.id)]);
+      }
+      const map: Record<number, PaxResuelto> = {};
+      for (const r of rows) {
+        const id = Number(r.id);
+        const adelante = porId.get(Number(r.reserva_vinculada_id ?? 0)) ?? null;
+        const atras = apuntanA.get(id);
+        const hermanoAqui = adelante ?? (atras?.length === 1 ? porId.get(atras[0]) ?? null : null);
+        map[id] = resolverPaxDeServicio(
+          r as any,
+          hermanoAqui as any,
+          { paxCotizacion, catalogo: catalogo ?? undefined }
+        );
+      }
+      setPaxListaMap(map);
+    } catch {
+      setPaxListaMap({});
+    }
   };
 
   const cargarPasajerosAsignados = async (reservaId: number, paradaId?: number) => {
@@ -1523,6 +1581,8 @@ export default function ReservasPage() {
     await cargarOcupaciones(filas.map((r: any) => r.id));
     setLoading(false);
     cargarRutas(filas.map((r: any) => r.id));
+    // Después de pintar: el contrato es un dato de contraste, no puede retrasar la lista.
+    cargarPaxContratado(filas);
   };
 
   // Refresco tras una mutación (guardar, eliminar, aplicar masivo…): lista + totales.
@@ -5431,7 +5491,8 @@ export default function ReservasPage() {
                   const badge   = urgenciaBadge(r.fecha_servicio, r.estado);
                   const ocup    = ocupacionMap[r.id];
                   const totalPax = ocup?.total_pasajeros || 0;
-                  const cap     = capacidadDe(r);
+                  const cap     = capacidadDe(r);   // del BUS, no del contrato
+                  const paxContratoAg = paxListaMap[r.id]?.pax ?? null;
                   const sob     = ocup?.sobrecupo || false;
                   return (
                     <div key={r.id} className="flex items-center gap-4 px-5 py-3 hover:bg-gray-50 transition-colors" style={{ boxShadow: sob ? "inset 3px 0 0 #dc2626" : urgenciaFila(r.fecha_servicio, r.estado) }}>
@@ -5457,7 +5518,11 @@ export default function ReservasPage() {
                         <div className="text-xs text-gray-400 mt-0.5 truncate">{rutaDe(r).o} → {rutaDe(r).d}</div>
                         <div className="text-xs text-gray-400 mt-0.5">
                           {esTer ? nombreEmpTer(r.empresa_tercerizada_id) : (nombreVehiculo(r.vehiculo_id) !== "-" ? nombreVehiculo(r.vehiculo_id) + " · " + nombreConductor(r.conductor_id) : "Sin asignar")}
-                          {cap !== null && <span className="ml-2 text-[10px] font-bold">{totalPax}/{cap} pax</span>}
+                          {/* Mismo texto que la celda de la tabla: cambiar de vista no
+                              puede decir dos cosas del mismo servicio, y el denominador
+                              de acá es la UNIDAD, nunca el contrato. */}
+                          {cap !== null && <span className="ml-2 text-[10px] font-bold">{totalPax}/{cap} en la unidad</span>}
+                          {paxContratoAg != null && <span className="ml-2 text-[10px] font-bold text-gray-500">{paxContratoAg} contratados</span>}
                         </div>
                       </div>
                       <div className="flex gap-1.5 shrink-0">
@@ -5566,7 +5631,13 @@ export default function ReservasPage() {
                 const urgShadow = urgenciaFila(r.fecha_servicio, r.estado);
                 const riesgo    = esTer && r.empresa_tercerizada_id ? riesgoEmpresa(docsTercero, r.empresa_tercerizada_id) : "ok";
                 const ocup      = ocupacionMap[r.id];
-                const cap       = capacidadDe(r);
+                const cap       = capacidadDe(r);   // asientos del BUS que sale, no del contrato
+                // Asientos CONTRATADOS: la cascada de lib/liquidacion-rutas.ts, la misma
+                // que publica el portal del cliente. Nunca se cae a `cap`.
+                const paxContrato = paxListaMap[r.id]?.pax ?? null;
+                // La unidad asignada NO alcanza para lo pactado: el único caso que alarma
+                // acá, y el mismo que bloquea en el cierre.
+                const unidadBajoContrato = cap !== null && paxContrato != null && cap < paxContrato;
                 const totalPax  = ocup?.total_pasajeros || 0;
                 const sobrecupo = ocup?.sobrecupo || false;
                 const pctOcup   = ocup?.ocupacion_pct;
@@ -5726,9 +5797,39 @@ export default function ReservasPage() {
                         )}
                       </td>
 
+                      {/* ── PASAJEROS · DOS DENOMINADORES, DOS ETIQUETAS ───────────
+                          El número grande es el manifiesto sobre la capacidad de la
+                          UNIDAD ASIGNADA (`capacidadDe`), y contesta lo operativo: ¿cabe
+                          todo el mundo en el bus que va a salir? Los asientos CONTRATADOS
+                          son otra pregunta y otro número — el que sustenta el importe y el
+                          que el cliente ve en su portal.
+
+                          Iban los dos sin decir cuál era cuál, y se leyó el equivocado: un
+                          `34/50` sobre un bus de 50 asientos se dio por «el contrato son
+                          50» mientras el portal publicaba «34 / 10 de contratados». Es
+                          exactamente el reflejo que el campo «PAX contratados por el
+                          cliente» del formulario vino a romper, vivo en la lista, que es
+                          donde se mira todo el día. Y la cura es la misma que ya se aplicó
+                          en el portal: los dos números juntos, con ETIQUETAS distintas.
+
+                          El contrato se calla cuando no se sabe, en vez de pintar un «sin
+                          contrato» en casi toda la pantalla: un aviso que sale siempre se
+                          vuelve paisaje, y el formulario ya lo dice en ámbar al abrirlo.
+                          Solo se alarma cuando la unidad es MENOR que lo contratado, que
+                          es lo que el cierre ya marca en `/liquidaciones`. */}
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         <button
                           onClick={() => abrirManifiesto(r.id)}
+                          title={
+                            `${totalPax} a bordo (manifiesto)` +
+                            (cap !== null ? ` · unidad asignada: ${cap} asientos` : " · sin unidad asignada") +
+                            // De dónde salió el contrato: cada fuente se corrige en otro
+                            // sitio, así que el número solo sirve si viene con su origen.
+                            (paxContrato != null
+                              ? ` · contratados por el cliente: ${paxContrato}`
+                                + ` (${FUENTE_PAX[String(paxListaMap[r.id]?.fuente)] ?? "origen desconocido"})`
+                              : " · asientos contratados: sin dato — se escriben en el servicio")
+                          }
                           className="group flex flex-col items-start gap-0.5 px-2.5 py-1.5 rounded-lg cursor-pointer transition-transform hover:scale-105"
                           style={{ background: ocupBg }}
                         >
@@ -5737,8 +5838,16 @@ export default function ReservasPage() {
                             {sobrecupo ? " (!)" : ""}
                           </span>
                           <span className="text-[9px] font-bold uppercase tracking-wide opacity-70" style={{ color: ocupColor }}>
-                            {pctOcup !== null && pctOcup !== undefined ? pctOcup + "%" : "Ver pax"}
+                            {pctOcup !== null && pctOcup !== undefined ? pctOcup + "% de la unidad" : "Ver pax"}
                           </span>
+                          {paxContrato != null && (
+                            <span
+                              className="text-[9px] font-bold uppercase tracking-wide"
+                              style={{ color: unidadBajoContrato ? "#b45309" : "#64748b" }}
+                            >
+                              {unidadBajoContrato ? "⚠ " : ""}{paxContrato} contratados
+                            </span>
+                          )}
                         </button>
                       </td>
 
