@@ -29,6 +29,11 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { redondear, desdeTotal } from "@/lib/finanzas/dinero";
+import {
+  rotuloColapsado,
+  etiquetaCortaDetalle,
+  type FuenteEtiqueta as FuenteEtiquetaRuta,
+} from "@/lib/ruta-identidad";
 
 // ── Entrada ─────────────────────────────────────────────────────────────────
 
@@ -209,8 +214,12 @@ export function sentidoDeReserva(r: ReservaLiq): "IDA" | "RETORNO" {
  * que el cliente reconoce: con `tramo` o `ninguna` el servicio SÍ se liquida, pero
  * sale rotulado de otra forma y en otro lugar de la lista (que se ordena
  * alfabéticamente) — el operador lo lee como "esa ruta no salió".
+ *
+ * Vive en `lib/ruta-identidad.ts` desde que el mismo colapso apareció en CUATRO
+ * sitios (aquí, la app del pasajero ×2 y el portal del cliente). Se re-exporta para
+ * no mover a ningún importador.
  */
-export type FuenteEtiqueta = "nombre" | "tramo" | "ninguna";
+export type FuenteEtiqueta = FuenteEtiquetaRuta;
 
 /**
  * El nombre COMPLETO de la ruta, tal como lo escribió la operación:
@@ -221,32 +230,21 @@ export type FuenteEtiqueta = "nombre" | "tramo" | "ninguna";
  * perdían la hora y los extremos, que es justo lo que distingue una ruta de otra:
  * dos rutas distintas de la misma letra salían como dos renglones de texto idéntico.
  *
- * Solo se normalizan los espacios. Ni mayúsculas ni acentos se tocan: este texto lo
- * lee el cliente y también el pasajero en su app, y tiene que decir lo mismo.
+ * SE COLAPSA A PROPÓSITO, y por eso el motor vive aparte con ese nombre
+ * (`rotuloColapsado`): el ítem del formato imprime UN renglón, así que un servicio
+ * sin nombre tiene que salir rotulado con lo que haya. Las PANTALLAS no colapsan —
+ * usan `identidadRuta`, que devuelve el nombre y el recorrido por separado.
  */
 export function nombreRutaDetalle(r: ReservaLiq | null | undefined): { nombre: string; fuente: FuenteEtiqueta } {
-  const n = String(r?.ruta_nombre ?? "").trim().replace(/\s+/g, " ");
-  if (n) return { nombre: n, fuente: "nombre" };
-  const tramo = [r?.origen, r?.destino].filter(Boolean).join(" → ").toUpperCase();
-  return tramo ? { nombre: tramo, fuente: "tramo" } : { nombre: "SIN NOMBRE DE RUTA", fuente: "ninguna" };
+  return rotuloColapsado(r);
 }
 
 /** Atajo cuando solo hace falta el texto. */
 export const nombreRuta = (r: ReservaLiq | null | undefined) => nombreRutaDetalle(r).nombre;
 
-/**
- * Separador entre "RUTA" y su letra. Con `\s+` a secas, "RUTA-A" y "RUTA:A" —que se
- * escriben a mano en tres pantallas distintas— no calzaban y el servicio salía rotulado
- * con su tramo. El `+` es deliberado: sin él "RUTAS" produciría "RUTA S".
- */
-const RE_ETIQUETA_RUTA = /\bRUTA[\s:.\-–—]+([A-Z0-9]{1,3})\b/i;
-
 /** Etiqueta + por qué es esa, para poder avisar cuando NO salió del nombre de la ruta. */
 export function etiquetaRutaDetalle(r: ReservaLiq): { etiqueta: string; fuente: FuenteEtiqueta } {
-  const m = RE_ETIQUETA_RUTA.exec(String(r.ruta_nombre ?? ""));
-  if (m) return { etiqueta: `RUTA ${m[1].toUpperCase()}`, fuente: "nombre" };
-  const tramo = [r.origen, r.destino].filter(Boolean).join(" → ").toUpperCase();
-  return tramo ? { etiqueta: tramo, fuente: "tramo" } : { etiqueta: "RUTA ÚNICA", fuente: "ninguna" };
+  return etiquetaCortaDetalle(r);
 }
 
 /**

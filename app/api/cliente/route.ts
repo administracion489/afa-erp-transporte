@@ -22,6 +22,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createHash, createHmac, timingSafeEqual } from "crypto";
 import { esAbordado } from "@/lib/documentos-servicio";
+import {
+  resolverPaxDeServicio,
+  cargarPaxDeCotizaciones,
+  cargarRutasContratadas,
+} from "@/lib/liquidacion-rutas";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -111,10 +116,30 @@ function limpiarReserva<T extends Record<string, any>>(r: T): T {
 //
 // paradas_json es la mitad del peso de cada fila (~1.7 KB de 3.2 KB) y solo hace falta
 // para el servicio abierto o los de HOY → se hidrata aparte (acción paradas_json_reservas).
+//
+// `ruta_nombre` viaja desde que el portal distingue las DOS rutas. Antes su columna
+// "RUTA" pintaba solo `origen → destino`, así que el cliente leía el plus code
+// geocodificado ("W2VG+39R, EL AGUSTINO 15022, PERÚ") en vez del nombre con el que
+// él mismo identifica el servicio ("RUTA A/ ENTRADA 06:30/…"). La columna existe
+// desde siempre y no depende de ninguna migración.
 const COLS_PORTAL =
-  "id,codigo,origen,destino,fecha_servicio,hora_servicio,estado,precio_cliente," +
+  "id,codigo,origen,destino,ruta_nombre,fecha_servicio,hora_servicio,estado,precio_cliente," +
   "vehiculo_id,conductor_id,cotizacion_id,created_at," +
   "vehiculo_tercero_id,conductor_tercero_id,empresa_tercerizada_id";
+
+// Lo que necesita la cascada del PAX CONTRATADO (`resolverPaxDeServicio`). Va aparte
+// de COLS_PORTAL a propósito: `capacidad_contratada` es de una migración accesoria
+// (supabase/liquidaciones-03-ruta-contratada.sql) y si no se corrió, pedirla dentro
+// del payload principal dejaría al cliente sin NINGÚN servicio en pantalla. Acá, lo
+// único que se pierde es el denominador de la ocupación.
+const COLS_PAX = "id,capacidad_contratada,cotizacion_id,ruta_nombre,reserva_vinculada_id";
+const COLS_PAX_SIN_MIGRACION = "id,cotizacion_id,ruta_nombre,reserva_vinculada_id";
+
+/** ¿El error NOMBRA la columna de la migración accesoria? Mismo patrón que `faltaColumnaTanque`. */
+const faltaCapacidadContratada = (e: { message?: string } | null | undefined): boolean => {
+  const m = String(e?.message ?? "").toLowerCase();
+  return m.includes("capacidad_contratada") && m.includes("does not exist");
+};
 
 // Hacia atrás no se corta (el histórico real de un cliente son cientos de filas, no miles,
 // y de ahí salen todos sus KPIs). Hacia adelante sí: el portal solo muestra los "próximos
@@ -394,7 +419,19 @@ export async function POST(req: NextRequest) {
         // query string— devolvía HTTP 400; paginado() se tragaba el error y el endpoint
         // respondía 200 con {stats:{}}, lo que dejaba al efecto del cliente reintentando
         // en bucle. Ahora el servidor deriva la misma ventana que muestra la pantalla.
-        const propias = await paginado(reservasVentana(cid, "id"));
+        // Se piden ya las columnas de la cascada del pax: es el mismo recorrido y evita
+        // una segunda pasada por la ventana entera. Si falta la migración accesoria se
+        // suelta SOLO la columna que el error NOMBRA — un `catch` a secas degradaría
+        // también ante un fallo de red y la ocupación desaparecería sin decir por qué.
+        let propias: any[];
+        let hayCapacidad = true;
+        try {
+          propias = await paginado(reservasVentana(cid, COLS_PAX));
+        } catch (e: any) {
+          if (!faltaCapacidadContratada(e)) throw e;
+          hayCapacidad = false;
+          propias = await paginado(reservasVentana(cid, COLS_PAX_SIN_MIGRACION));
+        }
         const ids = propias.map((r: any) => r.id);
         if (ids.length === 0) return NextResponse.json({ stats: {} });
 
@@ -419,9 +456,63 @@ export async function POST(req: NextRequest) {
           paxPorReserva[rid]?.add(pp.pasajero_id);
           if (esAbordado(pp)) abordadosPorReserva[rid]?.add(pp.pasajero_id);
         });
-        const stats: Record<number, { embarcados: number; esperados: number }> = {};
+        // ── CAPACIDAD CONTRATADA ────────────────────────────────────────────
+        //
+        // El denominador que el cliente pidió ver en la columna PASAJEROS. Se resuelve
+        // con `resolverPaxDeServicio`, la MISMA cascada que usa /programacion: dos
+        // motores que contesten "cuántos asientos se contrataron" terminan contestando
+        // distinto, y aquí el número se le enseña al cliente.
+        //
+        // Su última rama es la regla dura del módulo y no se toca: **NUNCA se cae a la
+        // capacidad del vehículo asignado**. Sin dato viaja null y la pantalla pinta
+        // «—». Un 20 donde el contrato dice 15 se descubre cuando el cliente rechaza
+        // la valorización.
+        let contratadoPorReserva = new Map<number, number | null>();
+        if (hayCapacidad) {
+          try {
+            const porId = new Map<number, any>(propias.map((r: any) => [Number(r.id), r]));
+            // El hermano se busca por los DOS sentidos del enlace: `reserva_vinculada_id`
+            // se escribe en dos pasos y borrar un tramo deja en NULL el del superviviente,
+            // así que seguirlo solo hacia adelante deja al retorno "sin dato" — el mismo
+            // fallo que documenta lib/liquidacion-hermanos.ts.
+            const apuntanA = new Map<number, number[]>();
+            for (const r of propias) {
+              const v = Number((r as any).reserva_vinculada_id ?? 0);
+              if (v > 0) apuntanA.set(v, [...(apuntanA.get(v) ?? []), Number(r.id)]);
+            }
+            const [paxCotizacion, catalogo] = await Promise.all([
+              cargarPaxDeCotizaciones(admin, propias.map((r: any) => Number(r.cotizacion_id ?? 0))),
+              cargarRutasContratadas(admin, [cid]),
+            ]);
+            for (const r of propias) {
+              const id = Number(r.id);
+              const haciaAdelante = porId.get(Number((r as any).reserva_vinculada_id ?? 0)) ?? null;
+              // Hacia atrás SOLO cuando es inequívoco: con dos filas apuntando a la misma,
+              // adivinar sería enseñarle al cliente los asientos de otro servicio.
+              const atras = apuntanA.get(id);
+              const haciaAtras = atras?.length === 1 ? porId.get(atras[0]) ?? null : null;
+              const hermano = haciaAdelante ?? haciaAtras;
+              const { pax } = resolverPaxDeServicio(
+                { ...r, cliente_id: cid } as any,
+                hermano as any,
+                { paxCotizacion, catalogo },
+              );
+              contratadoPorReserva.set(id, pax);
+            }
+          } catch {
+            // Best-effort: la ocupación es un extra. Que falle el catálogo de rutas no
+            // puede dejar al cliente sin su historial ni sin su tasa de embarque.
+            contratadoPorReserva = new Map();
+          }
+        }
+
+        const stats: Record<number, { embarcados: number; esperados: number; contratado: number | null }> = {};
         ids.forEach((id: number) => {
-          stats[id] = { embarcados: abordadosPorReserva[id]?.size || 0, esperados: paxPorReserva[id]?.size || 0 };
+          stats[id] = {
+            embarcados: abordadosPorReserva[id]?.size || 0,
+            esperados: paxPorReserva[id]?.size || 0,
+            contratado: contratadoPorReserva.get(id) ?? null,
+          };
         });
         return NextResponse.json({ stats });
       }

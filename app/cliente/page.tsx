@@ -18,6 +18,20 @@ import { estadoCliente, normalizaEstado } from "@/lib/estados";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado } from "@/lib/documentos-servicio";
 import { logoDeFondo } from "@/lib/empresa-perfil";
 import { saveSession, loadSession, clearSession, getPortalToken, portalApi } from "@/lib/portal-sesion";
+import {
+  identidadRuta, ETIQUETA_RECORRIDO, SIN_NOMBRE_RUTA, SIN_RECORRIDO,
+} from "@/lib/ruta-identidad";
+
+/**
+ * Los TRES números de un servicio, y son tres preguntas distintas:
+ *   embarcados  — cuántas personas subieron de verdad (`pasajeros_parada`).
+ *   esperados   — cuántas estaban en el manifiesto. Denominador de la TASA DE EMBARQUE.
+ *   contratado  — cuántos asientos pactó el cliente. Denominador de la OCUPACIÓN, y
+ *                 NUNCA la capacidad del bus que salió ese día. `null` = nadie lo declaró.
+ * Confundir los dos denominadores es el defecto que la columna PASAJEROS arrastraba:
+ * enseñaba `embarcados / esperados`, que es el mismo número que ya publica la columna SLA.
+ */
+type EstadisticaServicio = { embarcados: number; esperados: number; contratado: number | null };
 
 // Los dos modales se cargan al abrirlos, no al entrar al portal. Ambos se montan detrás
 // de un guard (`{gpsModalOpen && …}`, `{modalManifiestoData && …}`), así que no necesitan
@@ -475,7 +489,7 @@ export default function ClientePortal() {
   const [reservasExtra,  setReservasExtra]  = useState<Reserva[]>([]);
   const [cargandoRango,  setCargandoRango]  = useState(false);
   const rangoPedidoRef = useRef("");
-  const [reservaStats,   setReservaStats]   = useState<Record<number, { embarcados: number; esperados: number }>>({});
+  const [reservaStats,   setReservaStats]   = useState<Record<number, EstadisticaServicio>>({});
   const [loadingStats,   setLoadingStats]   = useState(false);
   const [exportando,     setExportando]     = useState(false);
   // Sello del intento de stats: se marca ANTES de pedir y en TODOS los caminos (mismo
@@ -979,7 +993,7 @@ export default function ClientePortal() {
     statsPedidosRef.current = true;   // el sello va PRIMERO: un fallo no debe reintentar solo
     setLoadingStats(true);
     const { ok, data } = await portalApi("historial_stats");
-    if (ok) setReservaStats((data.stats || {}) as Record<number, { embarcados: number; esperados: number }>);
+    if (ok) setReservaStats((data.stats || {}) as Record<number, EstadisticaServicio>);
     setLoadingStats(false);
   }, []);
 
@@ -2337,7 +2351,14 @@ export default function ClientePortal() {
   const busca = filtroBusqueda.toLowerCase();   // se minusculizaba una vez POR FILA
   return reservasPeriodo.filter(r => {
     const cumpleEstado   = filtroEstado === "todos" || efectivoEstado(r) === filtroEstado;
-    const cumpleBusqueda = !busca || r.origen.toLowerCase().includes(busca) || r.destino.toLowerCase().includes(busca) || fmtFecha(r.fecha_servicio).includes(filtroBusqueda);
+    // El buscador dice "Buscar por ruta o fecha…" y hasta ahora NO buscaba por ruta:
+    // solo por los extremos. Teclear "RUTA A" no devolvía nada, que es la pantalla
+    // incumpliendo lo que promete su propio placeholder.
+    const cumpleBusqueda = !busca
+      || String((r as any).ruta_nombre ?? "").toLowerCase().includes(busca)
+      || r.origen.toLowerCase().includes(busca)
+      || r.destino.toLowerCase().includes(busca)
+      || fmtFecha(r.fecha_servicio).includes(filtroBusqueda);
     return cumpleEstado && cumpleBusqueda;
   }).sort((a, b) => {
     const da = a.fecha_servicio || "9999-99-99";
@@ -4054,11 +4075,18 @@ export default function ClientePortal() {
                 { k: "fecha",   h: "Fecha",      min: 11, max: 13, al: "center" },
                 { k: "dia",     h: "Día",        min: 7,  max: 10, al: "center" },
                 { k: "hora",    h: "Hora",       min: 7,  max: 9,  al: "center" },
+                // La RUTA (el nombre) va delante de sus extremos: es el dato con el que el
+                // cliente identifica el servicio en su orden de compra, y el export no lo
+                // llevaba por ningún lado.
+                { k: "ruta",    h: "Ruta",       min: 26, max: 48, al: "left",  wrap: true },
                 { k: "origen",  h: "Origen",     min: 22, max: 42, al: "left",  wrap: true },
                 { k: "destino", h: "Destino",    min: 22, max: 42, al: "left",  wrap: true },
                 { k: "estado",  h: "Estado",     min: 12, max: 14, al: "center" },
                 { k: "emb",     h: "Emb.",       min: 6,  max: 9,  al: "center", nf: "0" },
+                // Dos denominadores distintos, con su rótulo cada uno: "Pax" es la gente del
+                // manifiesto (con la que se mide el SLA) y "Contrat." los asientos pactados.
                 { k: "esp",     h: "Pax",        min: 6,  max: 9,  al: "center", nf: "0" },
+                { k: "cont",    h: "Contrat.",   min: 9,  max: 11, al: "center", nf: "0" },
                 { k: "sla",     h: "SLA",        min: 7,  max: 9,  al: "center", nf: '0"%"' },
                 ...(puedeVerMontos ? [{ k: "total", h: "Total (S/)", min: 13, max: 16, al: "right", nf: '"S/ "#,##0.00' }] : []),
               ];
@@ -4083,11 +4111,16 @@ export default function ClientePortal() {
                     case "fecha":   return fmtFecha(r.fecha_servicio);
                     case "dia":     return fmtFechaLrg(r.fecha_servicio).split(",")[0];
                     case "hora":    return r.hora_servicio?.slice(0, 5) || "";
+                    // Sin nombre va vacío, NUNCA el recorrido: en una hoja de cálculo que
+                    // alguien va a filtrar, un recorrido colado en la columna "Ruta" es un
+                    // valor más del filtro y agrupa servicios que no son la misma ruta.
+                    case "ruta":    return identidadRuta(r as any).nombre ?? "";
                     case "origen":  return r.origen || "";
                     case "destino": return r.destino || "";
                     case "estado":  return estadoCliente(efectivoEstado(r)).label;
                     case "emb":     return st ? st.embarcados : "";
                     case "esp":     return st ? st.esperados : "";
+                    case "cont":    return st?.contratado ?? "";
                     case "sla":     return sla;
                     case "total":   return Number(r.precio_cliente || 0);
                     default:        return "";
@@ -4375,15 +4408,30 @@ export default function ClientePortal() {
                             <div style={{ width: 3, height: 36, borderRadius: 2, background: est.dot, flexShrink: 0 }} />
                             {/* ruta + estado */}
                             <div style={{ flex: 1, minWidth: 0 }}>
+                              {/* Misma jerarquía que la tabla: el NOMBRE arriba, el recorrido
+                                  debajo. Cambiar de vista no puede perder el dato con el que
+                                  el cliente identifica su servicio. */}
                               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const }}>
-                                <span style={{ fontWeight: 700, fontSize: 12.5, color: C.ink, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>{r.origen}</span>
-                                <span style={{ color: C.mute2, fontSize: 11 }}>→</span>
-                                <span style={{ fontSize: 12, color: C.mute, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>{r.destino}</span>
+                                {(() => { const id = identidadRuta(r as any); return (
+                                  <span title={id.nombre ?? undefined}
+                                        style={{ fontWeight: 700, fontSize: 12.5, color: id.nombre ? C.ink : C.mute2, fontStyle: id.nombre ? "normal" : "italic", overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>
+                                    {id.nombre ?? SIN_NOMBRE_RUTA}
+                                  </span>
+                                ); })()}
                                 <span style={{ fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 20, background: est.bg, color: est.c, whiteSpace: "nowrap" as const }}>{est.label}</span>
+                              </div>
+                              <div style={{ fontSize: 11, color: C.mute, marginTop: 2, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>
+                                <span style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: C.mute2, marginRight: 5 }}>{ETIQUETA_RECORRIDO}</span>
+                                {identidadRuta(r as any).recorrido ?? SIN_RECORRIDO}
                               </div>
                               {st && (
                                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
-                                  <span style={{ fontSize: 10.5, color: C.mute }}>{st.embarcados}/{st.esperados} pax</span>
+                                  {/* La MISMA ocupación que la tabla (embarcados sobre asientos
+                                      contratados), o la agenda y el historial dirían dos cosas
+                                      del mismo servicio. */}
+                                  <span style={{ fontSize: 10.5, color: C.mute }}>
+                                    {st.esperados === 0 ? "sin manifiesto" : `${st.embarcados}/${st.contratado ?? "—"} contratados`}
+                                  </span>
                                   {sla !== null && <span style={{ fontSize: 10, fontWeight: 700, color: slaColor(sla) }}>SLA {sla}%</span>}
                                 </div>
                               )}
@@ -4451,9 +4499,33 @@ export default function ClientePortal() {
                           <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 11.5, color: C.mute, whiteSpace: "nowrap" as const }}>
                             {r.hora_servicio?.slice(0,5) || "–"}
                           </td>
-                          <td style={{ padding: "10px 12px", maxWidth: 180 }}>
-                            <p style={{ fontWeight: 700, color: C.ink, margin: 0, fontSize: 12.5, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>{r.origen}</p>
-                            <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>→ {r.destino}</p>
+                          {/* ── RUTA (el nombre) · ORIGEN → DESTINO (el recorrido) ──
+                              Son DOS datos y hasta ahora los dos se rotulaban "RUTA":
+                              esta celda pintaba solo el recorrido, así que el cliente leía
+                              el plus code geocodificado donde esperaba "RUTA A/ ENTRADA
+                              06:30". `identidadRuta` los devuelve por separado y NUNCA
+                              sustituye uno por el otro — sin nombre se dice "Sin nombre",
+                              no se cae al recorrido. */}
+                          <td style={{ padding: "10px 12px", maxWidth: 220 }}>
+                            {(() => {
+                              const id = identidadRuta(r as any);
+                              const corte = { overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const };
+                              return (
+                                <>
+                                  <p title={id.nombre ?? undefined}
+                                     style={{ fontWeight: 700, color: id.nombre ? C.ink : C.mute2, fontStyle: id.nombre ? "normal" : "italic", margin: 0, fontSize: 12.5, ...corte }}>
+                                    {id.nombre ?? SIN_NOMBRE_RUTA}
+                                  </p>
+                                  <p title={id.recorrido ?? undefined}
+                                     style={{ color: C.mute, fontSize: 10.5, margin: "3px 0 0", ...corte }}>
+                                    <span style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: C.mute2, marginRight: 5 }}>
+                                      {ETIQUETA_RECORRIDO}
+                                    </span>
+                                    {id.recorrido ?? SIN_RECORRIDO}
+                                  </p>
+                                </>
+                              );
+                            })()}
                           </td>
                           <td style={{ padding: "10px 14px" }}><Badge estado={efectivoEstado(r)} /></td>
                           {/* ── Manifiesto ── */}
@@ -4475,17 +4547,40 @@ export default function ClientePortal() {
                               );
                             })()}
                           </td>
+                          {/* ── PASAJEROS = embarcados / ASIENTOS CONTRATADOS ──────
+                              Antes era embarcados / personas del manifiesto, que es
+                              EXACTAMENTE lo que ya dice la columna SLA de al lado: el
+                              mismo número dos veces. Esto responde otra pregunta —cuánto
+                              del bus pactado se usó— y es la que decide si conviene
+                              cambiar de unidad.
+
+                              El denominador NUNCA es la capacidad del vehículo asignado:
+                              AFA cubre una ruta de 15 con el bus que hay disponible, así
+                              que ese número no lo pactó nadie. Sin dato va «—». Y un
+                              manifiesto VACÍO no se pinta como «0 de 45» —eso se lee como
+                              "no viajó nadie" sobre un servicio que sí se prestó, el mismo
+                              cero que el Anexo 1 ya tuvo que quitar—: se dice que falta el
+                              manifiesto. */}
                           <td style={{ padding: "10px 14px", whiteSpace: "nowrap" as const }}>
                             {loadingStats ? (
                               <span style={{ color: C.mute2, fontSize: 11 }}>...</span>
-                            ) : st ? (
+                            ) : !st ? (
+                              <span style={{ color: C.mute2, fontSize: 11 }}>–</span>
+                            ) : st.esperados === 0 ? (
                               <div>
-                                <span style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 13, color: C.ink2 }}>{st.embarcados}</span>
-                                <span style={{ fontFamily: C.fontMono, fontSize: 11, color: C.mute }}> / {st.esperados}</span>
-                                <p style={{ fontSize: 9.5, color: C.mute2, margin: "1px 0 0" }}>embarcados</p>
+                                <span style={{ fontFamily: C.fontMono, fontSize: 12, color: C.mute2 }}>—</span>
+                                <p style={{ fontSize: 9.5, color: C.mute2, margin: "1px 0 0" }}>sin manifiesto</p>
                               </div>
                             ) : (
-                              <span style={{ color: C.mute2, fontSize: 11 }}>–</span>
+                              <div>
+                                <span style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 13, color: C.ink2 }}>{st.embarcados}</span>
+                                <span style={{ fontFamily: C.fontMono, fontSize: 11, color: C.mute }}>
+                                  {" / "}{st.contratado ?? "—"}
+                                </span>
+                                <p style={{ fontSize: 9.5, color: C.mute2, margin: "1px 0 0" }}>
+                                  {st.contratado ? "de contratados" : "sin contrato"}
+                                </p>
+                              </div>
                             )}
                           </td>
                           <td style={{ padding: "10px 12px", minWidth: 84 }}>
@@ -4499,6 +4594,11 @@ export default function ClientePortal() {
                                 <div style={{ height: 5, background: C.surfaceAlt, borderRadius: 3, overflow: "hidden" as const }}>
                                   <div style={{ height: "100%", width: `${sla}%`, background: slaColor(sla), borderRadius: 3, transition: "width .4s ease" }} />
                                 </div>
+                                {/* Desde que PASAJEROS mide contra los asientos CONTRATADOS, las
+                                    dos columnas tienen denominadores distintos. Sin decir cuál es
+                                    cuál, un 43/45 al lado de un 100 % se lee como una contradicción
+                                    de la pantalla. */}
+                                <p style={{ fontSize: 9.5, color: C.mute2, margin: "3px 0 0" }}>del manifiesto</p>
                               </div>
                             ) : (
                               <span style={{ color: C.mute2, fontSize: 11 }}>–</span>
