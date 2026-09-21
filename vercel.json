@@ -42,7 +42,7 @@
     },
     {
       "path": "/api/reportes/ocupacion-semanal",
-      "schedule": "0 1 * * 0"
+      "schedule": "0 1 * * *"
     }
   ]
 }

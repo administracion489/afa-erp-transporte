@@ -15,14 +15,18 @@
 // se calla la propuesta. Esconder la fila entera le quitaría al cliente un dato
 // suyo para protegerle a AFA un margen, que es exactamente al revés.
 //
-// `CODIGO_ES_PROPUESTA` (lib/ocupacion/semanal.ts) es quien decide qué cae de ese
+// `CODIGO_RECOMIENDA` (lib/ocupacion/semanal.ts) es quien decide qué cae de ese
 // lado, y vive pegado al código y no en una lista aparte que haya que acordarse
-// de actualizar — misma razón que `problema` en el catálogo de /redes.
+// de actualizar — misma razón que `problema` en el catálogo de /redes. Calla los
+// DOS sentidos: ni «cabría en una unidad menor» ni «conviene revisar el
+// contrato». Lo que nunca se calla son los NÚMEROS.
 // ══════════════════════════════════════════════════════════════════════════════
 
 import * as XLSX from "xlsx";
+import type { Ventana } from "@/lib/ocupacion/cadencia";
 import {
-  CODIGO_ES_PROPUESTA, ETIQUETA_OCUPACION, motivoOcupacion, rotuloFila,
+  CODIGO_RECOMIENDA, ETIQUETA_RECOMIENDA, ETIQUETA_OCUPACION,
+  motivoOcupacion, motivoSinRecomendacion, rotuloFila,
   type FilaOcupacion,
 } from "@/lib/ocupacion/semanal";
 
@@ -35,7 +39,19 @@ export type MetaReporte = {
   hayCapacidad: boolean;
   /** Para AFA va true siempre; para el cliente lo dice su ficha. */
   incluirSugerencias: boolean;
+  /** Qué periodo abarca, para titular el correo con lo que de verdad se midió. */
+  ventana: Ventana;
 };
+
+/**
+ * El título del correo se DERIVA de la ventana configurada. Estaba escrito
+ * «Ocupación de los últimos 7 días» como literal, y con las ventanas
+ * configurables eso habría encabezado un reporte de 30 días diciendo 7 — la
+ * pantalla mintiendo sobre lo que hay debajo, que es el defecto que este ERP ya
+ * pagó con la etiqueta del horario del conductor.
+ */
+export const tituloVentana = (v: Ventana): string =>
+  v === "mes" ? "Ocupación del mes" : `Ocupación de los últimos ${v} días`;
 
 const esc = (v: unknown): string =>
   String(v ?? "").replace(/[&<>"']/g, (c) =>
@@ -46,18 +62,28 @@ const fecha = (f: string | null | undefined): string =>
 
 /**
  * El motivo tal como lo va a leer ESTE destinatario. Con las sugerencias apagadas,
- * una fila proponible conserva su ocupación y pierde la propuesta.
+ * la fila conserva sus NÚMEROS y pierde la conclusión — en los dos sentidos: ni
+ * «cabría en una unidad menor» ni «conviene revisar el contrato».
+ *
+ * El texto neutro lo compone el MOTOR (`motivoSinRecomendacion`), no este módulo:
+ * dos redacciones del mismo hecho terminan diciendo cifras distintas el día que
+ * una se queda atrás.
  */
 export function motivoParaDestinatario(f: FilaOcupacion, incluirSugerencias: boolean): string {
-  if (!incluirSugerencias && CODIGO_ES_PROPUESTA[f.codigo]) {
-    return `El día de más afluencia viajaron ${f.pico} personas sobre ${f.contratado} asientos contratados.`;
+  if (!incluirSugerencias && CODIGO_RECOMIENDA[f.codigo]) {
+    return motivoSinRecomendacion(f) ?? motivoOcupacion(f);
   }
   return motivoOcupacion(f);
 }
 
-/** La etiqueta del chip, con la misma regla. */
+/**
+ * La etiqueta del chip. Aquí la regla NO es la misma: «Cabe en una unidad menor»
+ * ES la propuesta y se calla, pero «Superó lo contratado» es un HECHO medido que
+ * el cliente tiene derecho a leer con o sin sugerencias. Callarlo escondería que
+ * 32 personas viajaron sobre 30 asientos, que es justo lo que no se puede callar.
+ */
 export function etiquetaParaDestinatario(f: FilaOcupacion, incluirSugerencias: boolean): string {
-  if (!incluirSugerencias && CODIGO_ES_PROPUESTA[f.codigo]) return "Ocupación del periodo";
+  if (!incluirSugerencias && ETIQUETA_RECOMIENDA[f.codigo]) return "Ocupación del periodo";
   return ETIQUETA_OCUPACION[f.codigo];
 }
 
@@ -83,7 +109,7 @@ export function htmlReporte(filas: FilaOcupacion[], meta: MetaReporte): string {
   const sinManifiesto = filas.reduce((a, f) => a + f.sin_manifiesto, 0);
 
   const fila = (f: FilaOcupacion) => {
-    const color = (!inc && CODIGO_ES_PROPUESTA[f.codigo]) ? "#475569" : (COLOR[f.codigo] ?? "#475569");
+    const color = (!inc && ETIQUETA_RECOMIENDA[f.codigo]) ? "#475569" : (COLOR[f.codigo] ?? "#475569");
     // Sin pico no se imprime un 0: un cero se lee como «no viajó nadie».
     const ocupacion = f.pico === null
       ? "—"
@@ -117,7 +143,7 @@ export function htmlReporte(filas: FilaOcupacion[], meta: MetaReporte): string {
 <div style="max-width:760px;margin:0 auto;padding:22px 16px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
 
   <div style="background:#0b315f;border-radius:12px 12px 0 0;padding:18px 20px;">
-    <p style="margin:0;color:#fff;font-size:16px;font-weight:800;">Ocupación de los últimos 7 días</p>
+    <p style="margin:0;color:#fff;font-size:16px;font-weight:800;">${esc(tituloVentana(meta.ventana))}</p>
     <p style="margin:5px 0 0;color:rgba(255,255,255,.72);font-size:12px;">
       ${esc(meta.clienteNombre)} · del ${fecha(meta.inicio)} al ${fecha(meta.fin)}
     </p>
@@ -179,7 +205,7 @@ export function asuntoReporte(filas: FilaOcupacion[], meta: MetaReporte): string
   const cola = excesos
     ? ` · ${excesos} ruta(s) por encima de lo contratado`
     : props ? ` · ${props} ruta(s) podrían usar una unidad menor` : "";
-  return `Ocupación del ${fecha(meta.inicio)} al ${fecha(meta.fin)}${cola} — ${meta.empresaNombre}`;
+  return `${tituloVentana(meta.ventana)} · ${fecha(meta.inicio)} al ${fecha(meta.fin)}${cola} — ${meta.empresaNombre}`;
 }
 
 // ─── El Excel ────────────────────────────────────────────────────────────────

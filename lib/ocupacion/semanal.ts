@@ -152,13 +152,40 @@ export const CODIGO_ACCIONABLE: Record<CodigoOcupacion, boolean> = {
 };
 
 /**
- * ¿Este código es una PROPUESTA COMERCIAL (ofrecerle al cliente pagar menos)?
+ * ¿El MOTIVO de este código le RECOMIENDA algo al cliente sobre su vehículo?
+ *
+ * Son los dos sentidos, no solo el de bajar: `sugiere_cambio` propone una unidad
+ * menor y `excede_contratado` remata con «conviene revisar el contrato», que es
+ * proponer una mayor. El dueño lo pidió con esas palabras — *«que el cliente
+ * analice su flota y sus gastos y nosotros no le hagamos ninguna sugerencia»*—,
+ * así que la casilla los calla a LOS DOS. Los NÚMEROS no se tocan nunca: el
+ * cliente sigue viendo su pico sobre sus asientos contratados.
+ *
  * Se declara pegado al código y no en una lista aparte que haya que acordarse de
- * actualizar — misma razón que `problema` en `MOTIVO_TEXTO` de /redes. Lo lee la
- * configuración por cliente: hay clientes a los que AFA sí quiere proponerles el
- * cambio y otros a los que no.
+ * actualizar — misma razón que `problema` en el catálogo de /redes.
  */
-export const CODIGO_ES_PROPUESTA: Record<CodigoOcupacion, boolean> = {
+export const CODIGO_RECOMIENDA: Record<CodigoOcupacion, boolean> = {
+  sugiere_cambio: true,      // "cabría en la Van 10" → bajar de unidad
+  excede_contratado: true,   // "conviene revisar el contrato" → subir de unidad
+  no_hay_menor: false,
+  ya_es_la_menor: false,
+  sin_contratado: false,
+  sin_manifiesto: false,
+  cobertura_baja: false,
+  pocos_dias: false,
+  sin_flota: false,
+};
+
+/**
+ * ¿La ETIQUETA del chip también recomienda, o es un hecho?
+ *
+ * Hace falta aparte porque los dos códigos que recomiendan NO se comportan igual
+ * en el rótulo: «Cabe en una unidad menor» ES la propuesta, mientras que «Superó
+ * lo contratado» es un hecho medido que el cliente tiene derecho a leer — con o
+ * sin sugerencias. Colapsar las dos tablas en una habría escondido que 32
+ * personas viajaron sobre 30 asientos, que es justo lo que no se puede callar.
+ */
+export const ETIQUETA_RECOMIENDA: Record<CodigoOcupacion, boolean> = {
   sugiere_cambio: true,
   excede_contratado: false,
   no_hay_menor: false,
@@ -407,6 +434,29 @@ export function motivoOcupacion(f: FilaOcupacion): string {
   }
 }
 
+/**
+ * El mismo motivo SIN la recomendación, para el cliente que pidió que AFA no le
+ * sugiera nada. Devuelve `null` en los códigos que no recomiendan: ahí no hay que
+ * reescribir nada, y una segunda redacción de un texto que ya era neutro es una
+ * copia que se queda atrás.
+ *
+ * **Los NÚMEROS no se tocan.** Lo que se calla es la conclusión («cabría en la Van
+ * 10», «conviene revisar el contrato»), nunca el hecho medido — el cliente sigue
+ * leyendo cuánta gente viajó sobre cuántos asientos contrató, que es el dato con
+ * el que puede analizar su flota por su cuenta.
+ */
+export function motivoSinRecomendacion(f: FilaOcupacion): string | null {
+  switch (f.codigo) {
+    case "sugiere_cambio":
+      return `El día de más afluencia viajaron ${f.pico} personas sobre ${f.contratado} asientos contratados.`;
+    case "excede_contratado":
+      return `El ${f.dia_pico} viajaron ${f.pico} personas sobre ${f.contratado} asientos contratados: `
+        + `${f.pico! - f.contratado!} por encima de lo pactado.`;
+    default:
+      return null;
+  }
+}
+
 /** Etiqueta corta del código, para el chip de una tabla. */
 export const ETIQUETA_OCUPACION: Record<CodigoOcupacion, string> = {
   sugiere_cambio: "Cabe en una unidad menor",
@@ -425,25 +475,15 @@ export function rotuloFila(f: FilaOcupacion): string {
   return f.ruta_nombre ?? (f.recorrido ? `Sin nombre · ${f.recorrido}` : "Sin nombre");
 }
 
-// ─── La ventana ──────────────────────────────────────────────────────────────
-
-/**
- * Los 7 días que cierran en `fin` (inclusive). Se calcula con aritmética de
- * calendario sobre la cadena ISO, no con `new Date()` local: el servidor corre en
- * UTC y "hoy" en Perú es UTC-5 — la misma trampa que documenta el resto del ERP.
- */
-export function ventanaSemanal(fin: string, dias = 7): { inicio: string; fin: string } {
-  const t = Date.parse(`${fin}T12:00:00Z`);
-  const inicio = new Date(t - (dias - 1) * 86400000).toISOString().slice(0, 10);
-  return { inicio, fin };
-}
-
-/** "YYYY-MM-DD" de hoy en Perú (UTC-5, sin horario de verano). */
-export function hoyLima(ahora = Date.now()): string {
-  return new Date(ahora - 5 * 3600000).toISOString().slice(0, 10);
-}
-
-/** ¿Es sábado en Perú? 0=domingo … 6=sábado. */
-export function esSabadoLima(ahora = Date.now()): boolean {
-  return new Date(ahora - 5 * 3600000).getUTCDay() === 6;
-}
+// ─── La ventana y la hora de Perú ────────────────────────────────────────────
+//
+// Viven en `lib/ocupacion/cadencia.ts` desde que el reporte dejó de ser solo
+// semanal: CADA CUÁNTO se manda y CUÁNTO abarca son dos ejes configurables por
+// cliente. Se reexportan para no mover a ningún importador — misma fachada que
+// `liquidacion-agrupacion` conserva sobre `ruta-identidad`.
+export {
+  hoyLima, esSabadoLima, ventanaSemanal, ventanaDe, tocaHoy,
+  normalizarFrecuencia, normalizarVentana, describirCadencia, avisoCadencia,
+  FRECUENCIAS, VENTANAS,
+  type Frecuencia, type Ventana,
+} from "@/lib/ocupacion/cadencia";
