@@ -102,13 +102,14 @@ export function firmaRuta(
 // (evita el corte a 1000 filas). `ordenCols` deben dar un orden ESTABLE por página.
 async function inChunksPaginado(
   tabla: string, columnas: string, campo: string, ids: number[], ordenCols: string[], chunk = 80,
+  sb: any = supabase,
 ): Promise<any[]> {
   const out: any[] = [];
   for (let i = 0; i < ids.length; i += chunk) {
     const sub = ids.slice(i, i + chunk);
     if (!sub.length) continue;
     const filas = await paginarFilas(() => {
-      let q: any = supabase.from(tabla).select(columnas).in(campo, sub);
+      let q: any = sb.from(tabla).select(columnas).in(campo, sub);
       for (const c of ordenCols) q = q.order(c);
       return q;
     }, 200000);
@@ -133,36 +134,42 @@ const estadoLabel = (e: string): string => (ESTADOS_RESERVA as any)[e]?.label ||
 // ══════════════════════════════════════════════════════════════════════════════
 export async function cargarServiciosRango(
   desde: string, hasta: string,
+  // El cliente de Supabase se INYECTA, con el de navegador por defecto: el reporte
+  // semanal de ocupación arma los mismos lotes desde un cron, con service-role y sin
+  // sesión. Escribir una segunda versión del armado habría dejado dos definiciones de
+  // "el manifiesto de este servicio", y el papel que se manda por correo dejaría de
+  // ser el mismo que el operador imprime desde /seguimiento.
+  sb: any = supabase,
 ): Promise<{ servicios: ServicioLote[]; empresa: EmpresaPerfilLite }> {
   // Reservas del rango (paginado, orden estable con id de desempate).
   const reservas = await paginarFilas(() =>
-    supabase.from("reservas")
+    sb.from("reservas")
       .select("id,tipo,estado,fecha_servicio,hora_servicio,hora_real_inicio,hora_real_fin,origen,destino,cliente_id,vehiculo_id,conductor_id,conductor_tercero_id,empresa_tercerizada_id,vehiculo_tercero_id,direccion_servicio,tipo_servicio_detalle,reserva_vinculada_id")
       .gte("fecha_servicio", desde).lte("fecha_servicio", hasta)
       .in("estado", ["programada", "confirmada", "en_curso", "finalizada", "cancelada"])
       .order("fecha_servicio").order("hora_servicio").order("id"),
     30000);
 
-  const empresaProm = supabase.from("empresa_perfil").select("nombre,logo_url,telefono,email").eq("id", 1).maybeSingle();
+  const empresaProm = sb.from("empresa_perfil").select("nombre,logo_url,telefono,email").eq("id", 1).maybeSingle();
 
   // Tablas de referencia (pequeñas, pero se paginan por las dudas).
   const [clientes, vehiculos, vehsTer, conductores, conductoresTer] = await Promise.all([
-    paginarFilas(() => supabase.from("clientes").select("id,nombre,empresa,ruc").order("id"), 50000),
-    paginarFilas(() => supabase.from("vehiculos").select("id,placa").order("id"), 50000),
-    paginarFilas(() => supabase.from("vehiculos_tercero").select("id,placa").order("id"), 50000),
-    paginarFilas(() => supabase.from("conductores").select("id,nombre,numero_licencia:licencia").order("id"), 50000),
-    paginarFilas(() => supabase.from("conductores_tercero").select("id,nombre,licencia").order("id"), 50000),
+    paginarFilas(() => sb.from("clientes").select("id,nombre,empresa,ruc").order("id"), 50000),
+    paginarFilas(() => sb.from("vehiculos").select("id,placa").order("id"), 50000),
+    paginarFilas(() => sb.from("vehiculos_tercero").select("id,placa").order("id"), 50000),
+    paginarFilas(() => sb.from("conductores").select("id,nombre,numero_licencia:licencia").order("id"), 50000),
+    paginarFilas(() => sb.from("conductores_tercero").select("id,nombre,licencia").order("id"), 50000),
   ]);
 
   const reservaIds = reservas.map((r: any) => r.id);
   const [paradas, gastos, paxAdhoc] = await Promise.all([
-    inChunksPaginado("paradas", "id,reserva_id,orden,nombre,hora_estimada", "reserva_id", reservaIds, ["reserva_id", "orden", "id"]),
-    inChunksPaginado("gastos", "reserva_id,monto", "reserva_id", reservaIds, ["reserva_id", "id"]),
-    inChunksPaginado("pasajeros", "id,reserva_id", "reserva_id", reservaIds, ["reserva_id", "id"]),
+    inChunksPaginado("paradas", "id,reserva_id,orden,nombre,hora_estimada", "reserva_id", reservaIds, ["reserva_id", "orden", "id"], 80, sb),
+    inChunksPaginado("gastos", "reserva_id,monto", "reserva_id", reservaIds, ["reserva_id", "id"], 80, sb),
+    inChunksPaginado("pasajeros", "id,reserva_id", "reserva_id", reservaIds, ["reserva_id", "id"], 80, sb),
   ]);
   const paradaIds = paradas.map((p: any) => p.id);
   const pasajParada = await inChunksPaginado(
-    "pasajeros_parada", "parada_id,pasajero_id,estado,estado_abordaje", "parada_id", paradaIds, ["parada_id", "pasajero_id"], 150,
+    "pasajeros_parada", "parada_id,pasajero_id,estado,estado_abordaje", "parada_id", paradaIds, ["parada_id", "pasajero_id"], 150, sb,
   );
 
   // Índices en memoria.
@@ -271,13 +278,13 @@ export function agruparPorRuta(servicios: ServicioLote[]): GrupoRuta[] {
 // Réplica de la regla de cargarDocDatos() en app/seguimiento: dedupe por pasajero
 // (preferir la fila abordada) + entradas sintéticas para pasajeros sin paradero + edad
 // resiliente (consulta aislada; si la columna faltara, el manifiesto muestra "–").
-async function cargarRoster(s: ServicioLote): Promise<DocPasajero[]> {
+async function cargarRoster(s: ServicioLote, sb: any = supabase): Promise<DocPasajero[]> {
   const paradaIds = s.paradas.map(p => p.id);
   const [ppRes, paxRes] = await Promise.all([
     paradaIds.length
-      ? supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni)").in("parada_id", paradaIds)
+      ? sb.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni)").in("parada_id", paradaIds)
       : Promise.resolve({ data: [] as any[] }),
-    supabase.from("pasajeros").select("id,nombre,dni").eq("reserva_id", s.id),
+    sb.from("pasajeros").select("id,nombre,dni").eq("reserva_id", s.id),
   ]);
   const ppRaw = ((ppRes as any).data as any[]) || [];
 
@@ -295,7 +302,7 @@ async function cargarRoster(s: ServicioLote): Promise<DocPasajero[]> {
 
   const idsPax = [...new Set(roster.map(x => x.pasajero_id).filter(Boolean))];
   if (idsPax.length > 0) {
-    const { data: edades } = await supabase.from("pasajeros").select("id,edad").in("id", idsPax);
+    const { data: edades } = await sb.from("pasajeros").select("id,edad").in("id", idsPax);
     if (edades) {
       const em = new Map((edades as any[]).map(e => [e.id, e.edad]));
       roster.forEach(x => { if (x.pasajero) (x.pasajero as any).edad = em.get(x.pasajero_id) ?? null; });
@@ -330,8 +337,20 @@ function buildMeta(tituloDoc: string, sel: ServicioLote[], empresa: EmpresaPerfi
 }
 
 // Manifiestos MTC combinados (uno por página + carátula). Devuelve el HTML listo para imprimir.
-export async function construirManifiestosLoteHTML(sel: ServicioLote[], empresa: EmpresaPerfilLite): Promise<string> {
-  const conRoster = await mapLimit(sel, 6, async (s) => ({ s, roster: await cargarRoster(s) }));
+export type OpcionesLote = {
+  /** Cliente de Supabase. Por defecto el del navegador; el cron inyecta service-role. */
+  sb?: any;
+  /**
+   * Origen absoluto para el logo y la firma del Reporte de Servicio. En el navegador
+   * sale de `window.location.origin`; desde un cron NO HAY window, y una ruta relativa
+   * dentro de un adjunto de correo no resuelve contra nada — las imágenes saldrían
+   * rotas. Sin origen se OMITEN, que es mejor que un recuadro roto.
+   */
+  origin?: string;
+};
+
+export async function construirManifiestosLoteHTML(sel: ServicioLote[], empresa: EmpresaPerfilLite, opts: OpcionesLote = {}): Promise<string> {
+  const conRoster = await mapLimit(sel, 6, async (s) => ({ s, roster: await cargarRoster(s, opts.sb ?? supabase) }));
   const docs: DatosServicioDoc[] = conRoster.map(({ s, roster }) => ({
     empresa: { logoUrl: empresa.logo_url ?? null },
     cliente: { nombre: s.cliente_nombre },
@@ -345,10 +364,10 @@ export async function construirManifiestosLoteHTML(sel: ServicioLote[], empresa:
 }
 
 // Reportes de Servicio combinados (uno por página + carátula).
-export async function construirReportesLoteHTML(sel: ServicioLote[], empresa: EmpresaPerfilLite): Promise<string> {
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
+export async function construirReportesLoteHTML(sel: ServicioLote[], empresa: EmpresaPerfilLite, opts: OpcionesLote = {}): Promise<string> {
+  const origin = opts.origin ?? (typeof window !== "undefined" ? window.location.origin : "");
   const toMin = (t: string) => { const [h, m] = t.split(":").map(Number); return (h || 0) * 60 + (m || 0); };
-  const conRoster = await mapLimit(sel, 6, async (s) => ({ s, roster: await cargarRoster(s) }));
+  const conRoster = await mapLimit(sel, 6, async (s) => ({ s, roster: await cargarRoster(s, opts.sb ?? supabase) }));
   const docs: DatosServicioDoc[] = conRoster.map(({ s, roster }) => {
     const ini = s.reserva.hora_real_inicio || null;
     const fin = s.reserva.hora_real_fin || null;
@@ -357,8 +376,8 @@ export async function construirReportesLoteHTML(sel: ServicioLote[], empresa: Em
     return {
       empresa: {
         nombre: empresa.nombre ?? null, telefono: empresa.telefono ?? null, email: empresa.email ?? null,
-        logoReporteUrl: origin + "/logoafacotizacion-removebg-preview.png",
-        firmaUrl: origin + "/firmaJLCA.png",
+        logoReporteUrl: origin ? origin + "/logoafacotizacion-removebg-preview.png" : null,
+        firmaUrl: origin ? origin + "/firmaJLCA.png" : null,
       },
       cliente: { nombre: s.cliente_nombre, ruc: s.cliente_ruc },
       servicio: { fecha: s.reserva.fecha_servicio, hora: s.reserva.hora_servicio, origen: s.origen, destino: s.destino },
