@@ -66,6 +66,8 @@ export default function ReportesPage() {
         </p>
       </div>
 
+      <PanelOcupacionSemanal />
+
       {loading ? (
         <div className="bg-white rounded-xl border shadow p-6 text-center">
           Cargando reportes...
@@ -262,5 +264,125 @@ export default function ReportesPage() {
         </>
       )}
     </main>
+  );
+}
+// ══════════════════════════════════════════════════════════════════════════════
+// Reporte semanal de ocupación — disparo manual y estado
+//
+// El correo sale solo los sábados a las 20:00 (Lima) por cron. Este panel existe
+// por dos razones concretas:
+//
+//  · PODER COMPROBARLO SIN ESPERAR AL SÁBADO. Un envío automático que solo se
+//    puede verificar una vez por semana se despliega a ciegas.
+//  · PODER REEMITIR una semana cuyo cron falló, nombrando su fecha de cierre.
+//
+// El botón NO salta el candado del envío doble: el endpoint relee la bitácora y
+// el índice único de Postgres remata. Reemitir una semana ya enviada responde
+// «ya se envió este periodo» en vez de mandarlo otra vez — un correo no se
+// des-envía, así que ese candado no se puede aflojar ni «para probar».
+// ══════════════════════════════════════════════════════════════════════════════
+function PanelOcupacionSemanal() {
+  const [corriendo, setCorriendo] = useState(false);
+  const [res, setRes] = useState<any>(null);
+  const [fin, setFin] = useState("");
+
+  const emitir = async () => {
+    // El sábado es el día del reporte, no un capricho: si hoy no lo es, se fuerza
+    // para poder probar, pero la VENTANA sigue siendo los 7 días que cierran en la
+    // fecha indicada. Nunca se inventa un periodo distinto del que se va a mandar.
+    if (!confirm("Se van a enviar correos REALES a los clientes que tengan el reporte activado. ¿Continuar?")) return;
+    setCorriendo(true); setRes(null);
+    try {
+      const { data: s } = await supabase.auth.getSession();
+      const r = await fetch("/api/reportes/ocupacion-semanal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.session?.access_token ?? ""}` },
+        body: JSON.stringify({ fin: fin || undefined, forzarDia: true }),
+      });
+      setRes(await r.json());
+    } catch (e: any) {
+      setRes({ error: String(e?.message ?? e) });
+    } finally {
+      setCorriendo(false);
+    }
+  };
+
+  const sinMigracion = typeof res?.motivo === "string" && res.motivo.startsWith("sin_migracion");
+
+  return (
+    <section className="bg-white rounded-xl border shadow p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="font-bold text-lg">Ocupación semanal</h2>
+          <p className="text-sm text-gray-600 max-w-2xl mt-1">
+            Cada <b>sábado a las 20:00</b> sale, a los clientes que lo tengan activado, el detalle de los
+            últimos 7 días: cuánta gente viajó frente a los asientos contratados, ruta por ruta, con el
+            Excel del detalle, los manifiestos y los reportes de servicio. Se mide el <b>día de más
+            afluencia</b>, nunca el promedio. Se activa cliente por cliente en <b>Clientes → editar</b>.
+          </p>
+        </div>
+        <div className="flex items-end gap-2">
+          <label className="text-xs text-gray-500">
+            <span className="block mb-1">Semana que cierra el</span>
+            <input type="date" value={fin} onChange={e => setFin(e.target.value)}
+              className="border rounded-lg px-2 py-1.5 text-sm" />
+          </label>
+          <button onClick={emitir} disabled={corriendo}
+            className={`px-4 py-2 rounded-lg text-sm font-bold text-white ${corriendo ? "bg-gray-400" : "bg-[#0b315f] hover:bg-[#0a2a50]"}`}>
+            {corriendo ? "Enviando…" : "Enviar ahora"}
+          </button>
+        </div>
+      </div>
+
+      {sinMigracion && (
+        <p className="mt-3 text-sm bg-amber-50 border-l-4 border-amber-500 rounded-r px-3 py-2 text-amber-900">
+          Falta correr <code className="font-mono text-xs">supabase/reportes-01-ocupacion-semanal.sql</code>.
+          Hasta entonces no se manda nada y el interruptor por cliente no se guarda.
+        </p>
+      )}
+
+      {res?.error && <p className="mt-3 text-sm text-red-700">{res.error}</p>}
+
+      {res && !res.error && !sinMigracion && (
+        <div className="mt-4 text-sm">
+          {res.periodo && (
+            <p className="text-gray-500 text-xs mb-2">
+              Periodo {res.periodo.inicio} → {res.periodo.fin}
+            </p>
+          )}
+          {res.motivo === "ningun_cliente_activo" ? (
+            <p className="text-gray-600">
+              Ningún cliente tiene el reporte activado todavía. Se enciende en <b>Clientes → editar →
+              Reporte semanal de ocupación</b>.
+            </p>
+          ) : res.motivo === "no_es_sabado" ? (
+            <p className="text-gray-600">Hoy no es sábado, así que el cron no habría emitido.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wide text-gray-500 border-b">
+                  <th className="py-1.5">Cliente</th><th className="py-1.5">Rutas</th><th className="py-1.5">Enviado a</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(res.clientes ?? []).map((c: any, i: number) => (
+                  <tr key={i} className="border-b last:border-0">
+                    <td className="py-1.5 font-medium">{c.cliente}</td>
+                    <td className="py-1.5 text-gray-600">{c.rutas}</td>
+                    <td className="py-1.5 text-gray-600">
+                      {c.error
+                        ? <span className="text-red-700">{c.error}</span>
+                        : c.enviados?.length
+                          ? c.enviados.join(", ")
+                          : <span className="text-gray-400">{c.omitido ?? "—"}</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </section>
   );
 }

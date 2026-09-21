@@ -21,7 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createHash, createHmac, timingSafeEqual } from "crypto";
-import { esAbordado } from "@/lib/documentos-servicio";
+import { contarPasajeros } from "@/lib/manifiesto-conteo";
 import {
   resolverPaxDeServicio,
   cargarPaxDeCotizaciones,
@@ -164,15 +164,10 @@ function reservasVentana(cid: number, cols: string) {
     .range(f, t);
 }
 
-// PostgREST manda el .in() en la query string: con miles de ids la URL revienta
-// (HTTP 400 / UND_ERR_HEADERS_OVERFLOW medido a partir de ~2500 ids) y el error se
-// tragaba silencioso. Se trocea en lotes que caben siempre, ejecutados en paralelo.
-const LOTE_IN = 200;
-function lotes<T>(xs: T[], n = LOTE_IN): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n));
-  return out;
-}
+// El troceado en lotes del `.in()` —que PostgREST manda en la query string y que
+// revienta la URL a partir de ~2500 ids— se fue con el conteo a
+// `lib/manifiesto-conteo.ts`, que es su único consumidor desde que el portal y el
+// reporte semanal comparten la cuenta.
 
 // Caché de la flota del cliente: el mapa "En vivo" la repide cada 15 s y la respuesta
 // (qué buses han servido a este cliente) es prácticamente estática. Vive por instancia
@@ -435,27 +430,10 @@ export async function POST(req: NextRequest) {
         const ids = propias.map((r: any) => r.id);
         if (ids.length === 0) return NextResponse.json({ stats: {} });
 
-        // Troceado en lotes: ningún .in() vuelve a acercarse al límite de URL.
-        const [ppPorLote, paxPorLote] = await Promise.all([
-          Promise.all(lotes(ids).map(lote => paginado((f, t) => admin.from("pasajeros_parada")
-            .select("pasajero_id, estado, estado_abordaje, paradas!inner(reserva_id)")
-            .in("paradas.reserva_id", lote).order("id").range(f, t)))),
-          Promise.all(lotes(ids).map(lote => paginado((f, t) => admin.from("pasajeros")
-            .select("id, reserva_id").in("reserva_id", lote).order("id").range(f, t)))),
-        ]);
-        const ppData = ppPorLote.flat();
-        const paxAdhocData = paxPorLote.flat();
-
-        const paxPorReserva: Record<number, Set<number>> = {};
-        const abordadosPorReserva: Record<number, Set<number>> = {};
-        ids.forEach((id: number) => { paxPorReserva[id] = new Set(); abordadosPorReserva[id] = new Set(); });
-        paxAdhocData.forEach((p: any) => { paxPorReserva[p.reserva_id]?.add(p.id); });
-        ppData.forEach((pp: any) => {
-          const rid = pp.paradas?.reserva_id;
-          if (!rid) return;
-          paxPorReserva[rid]?.add(pp.pasajero_id);
-          if (esAbordado(pp)) abordadosPorReserva[rid]?.add(pp.pasajero_id);
-        });
+        // El conteo vive en `lib/manifiesto-conteo.ts`, no aquí: el reporte semanal
+        // de ocupación publica el MISMO número por correo, y dos cuentas separadas
+        // terminarían diciéndole al cliente una cosa en su portal y otra el sábado.
+        const conteo = await contarPasajeros(admin, ids);
         // ── CAPACIDAD CONTRATADA ────────────────────────────────────────────
         //
         // El denominador que el cliente pidió ver en la columna PASAJEROS. Se resuelve
@@ -508,9 +486,10 @@ export async function POST(req: NextRequest) {
 
         const stats: Record<number, { embarcados: number; esperados: number; contratado: number | null }> = {};
         ids.forEach((id: number) => {
+          const c = conteo.get(id);
           stats[id] = {
-            embarcados: abordadosPorReserva[id]?.size || 0,
-            esperados: paxPorReserva[id]?.size || 0,
+            embarcados: c?.embarcados ?? 0,
+            esperados: c?.esperados ?? 0,
             contratado: contratadoPorReserva.get(id) ?? null,
           };
         });

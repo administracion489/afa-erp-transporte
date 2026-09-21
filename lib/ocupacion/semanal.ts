@@ -1,0 +1,449 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// lib/ocupacion/semanal.ts
+// CUÁNTO DEL BUS CONTRATADO SE USÓ, y si cabría en uno más chico. Módulo PURO.
+//
+// Lo pidió el dueño así: «cada sábado al finalizar el día, un reporte de los
+// últimos 7 días con el detalle de pasajeros embarcados sobre la capacidad
+// contratada, con una sugerencia de cambio de vehículo — pero si embarcaron 12 y
+// el contratado es de 15 no se sugiere nada, porque el vehículo menor es de 10».
+//
+// ─── LAS CINCO DECISIONES QUE SOSTIENEN EL MÓDULO ───────────────────────────
+//
+// 1 · SE MIDE EL PICO, JAMÁS EL PROMEDIO. Con 12 de lunes a viernes y 28 el
+//     sábado, el promedio son ~15 y una unidad de 20 "cabría" — y el sábado ocho
+//     personas se quedan en el paradero. El promedio se PUBLICA (es útil para
+//     leer la ocupación típica) pero no decide nada. La asimetría es la de
+//     siempre: cobrar de menos se corrige con una nota de crédito; dejar gente
+//     en tierra no se deshace.
+//
+// 2 · UN MANIFIESTO VACÍO NO ES UN CERO. `embarcados = 0` con el manifiesto sin
+//     llenar significa «nadie lo registró», no «nadie viajó». Contarlo hundiría
+//     el pico y el ERP propondría encoger un bus lleno. Los servicios sin
+//     manifiesto quedan FUERA de la medición, se CUENTAN aparte, y si son
+//     demasiados no se propone nada (`cobertura_baja`). Es el mismo cero que el
+//     Anexo 1 tuvo que dejar de imprimir.
+//
+// 3 · LA ESCALERA SALE DE LA FLOTA, NO DE UNA LISTA EN EL CÓDIGO. Las capacidades
+//     son las de `parametros_costos` (las categorías que AFA sabe cotizar y
+//     asignar), así que dar de alta una unidad nueva cambia lo que el reporte
+//     puede proponer sin tocar una línea. Sin escalera NO se propone nada — no se
+//     inventa un vehículo que la empresa no tiene.
+//
+// 4 · SE PROPONE, NO SE APLICA. Nada de esto cambia un contrato, un precio ni una
+//     reserva: es un correo con la evidencia al lado (el pico, el día en que
+//     ocurrió, los asientos que sobrarían). Firma una persona, igual que la
+//     columna «Medido» de /configuracion/costos.
+//
+// 5 · SE AGRUPA POR NOMBRE DE RUTA, Y PARTIR ES EL ERROR SEGURO. Se usa
+//     `normalizarNombreRuta` —la MISMA definición de «esta ruta y esta son la
+//     misma» que usa el catálogo `cliente_ruta` y su índice único— y NO la unión
+//     por cercanía de `agruparPorRutaContratada`, que además junta por los
+//     extremos en el mapa. Consecuencia declarada: una ruta escrita de dos formas
+//     sale en DOS filas. Eso es visible y conservador (el operador ve los dos
+//     picos y decide); fundir dos rutas distintas produciría un pico ajeno y una
+//     sugerencia falsa, que es lo que no se puede permitir.
+//
+// El CONTRATADO entra en la clave por la misma razón que el pax entra en el cubo
+// de `agruparPorRutaContratada`: una fila imprime UN «de N contratados», así que
+// mezclar dos capacidades obliga a imprimir un número que nadie pactó.
+//
+// Matriz: npx tsx scripts/prueba-ocupacion-semanal.mts
+// ══════════════════════════════════════════════════════════════════════════════
+
+import { normalizarNombreRuta } from "@/lib/liquidacion-rutas";
+
+// ─── Umbrales ────────────────────────────────────────────────────────────────
+//
+// NINGUNO DE LOS TRES ESTÁ MEDIDO NI SE HEREDA, y se declara como tal — misma
+// honestidad que `MARGEN_SALTO_TANQUE`. En los tres, el lado seguro es SUBIRLOS:
+// subir exige más evidencia antes de proponer encoger un bus.
+
+/**
+ * Asientos de holgura que la unidad propuesta debe dejar POR ENCIMA del pico.
+ *
+ * El defecto es **0** porque es literalmente la regla que dictó el dueño («si
+ * embarcaron 12 y el menor es de 10, no se sugiere»), y con cualquier otro valor
+ * sus dos ejemplos dejarían de reproducirse. No es un número prudente: con 0, un
+ * pico de 23 puede proponer una unidad de 25 y quedan dos asientos. Por eso la
+ * fila publica `asientos_holgura` y decide una persona.
+ */
+export const MARGEN_ASIENTOS = 0;
+
+/**
+ * Días DISTINTOS con manifiesto que hace falta para hablar de un «pico».
+ * Con una sola observación no hay pico, hay un dato.
+ */
+export const MIN_DIAS_MEDIDOS = 2;
+
+/** Fracción mínima de servicios prestados que tienen manifiesto. La mayoría. */
+export const MIN_COBERTURA = 0.5;
+
+// ─── Entrada ─────────────────────────────────────────────────────────────────
+
+/** Un servicio del periodo, ya resuelto por quien leyó la base. */
+export type ServicioOcupacion = {
+  reserva_id: number;
+  fecha: string | null;
+  hora: string | null;
+  /** El nombre tecleado. null cuando nadie lo escribió. */
+  ruta_nombre: string | null;
+  /** "ORIGEN → DESTINO", para poder nombrar una ruta sin nombre. */
+  recorrido: string | null;
+  /** Asientos pactados. null = ninguna fuente lo sabe (jamás la capacidad del bus). */
+  contratado: number | null;
+  /** Personas que de verdad subieron (`esAbordado` sobre `pasajeros_parada`). */
+  embarcados: number;
+  /** Personas en el manifiesto. 0 = NADIE lo llenó, que no es «no viajó nadie». */
+  esperados: number;
+  cancelado: boolean;
+  placa: string | null;
+};
+
+/** Un escalón de la flota: una categoría que AFA sabe cotizar y asignar. */
+export type EscalonFlota = {
+  clave: string;
+  nombre: string;
+  capacidad: number;
+};
+
+export type ConfigOcupacion = {
+  margenAsientos?: number;
+  minDiasMedidos?: number;
+  minCobertura?: number;
+};
+
+// ─── Salida ──────────────────────────────────────────────────────────────────
+
+/**
+ * El motivo se DECLARA, no se olfatea. Cada código se arregla en otro sitio y la
+ * pantalla (y el correo) enrutan por él, igual que los bloqueos de /liquidaciones.
+ */
+export type CodigoOcupacion =
+  /** Hay una unidad MENOR en la flota en la que el pico cabe. */
+  | "sugiere_cambio"
+  /** El pico SUPERÓ los asientos contratados: alguien viajó de pie o se quedó. */
+  | "excede_contratado"
+  /** Cabría en menos, pero la flota no tiene nada entre el pico y lo contratado. */
+  | "no_hay_menor"
+  /** Ya es la unidad más chica que AFA ofrece. */
+  | "ya_es_la_menor"
+  /** Nadie declaró los asientos contratados: no hay contra qué comparar. */
+  | "sin_contratado"
+  /** Ningún servicio del periodo tiene manifiesto: no se midió nada. */
+  | "sin_manifiesto"
+  /** Demasiados servicios sin manifiesto para que el pico signifique algo. */
+  | "cobertura_baja"
+  /** Un solo día medido: eso no es un pico. */
+  | "pocos_dias"
+  /** La flota no declara capacidades: no se inventa un vehículo. */
+  | "sin_flota";
+
+/** ¿Este código pide una acción de alguien? Decide el tono en el correo. */
+export const CODIGO_ACCIONABLE: Record<CodigoOcupacion, boolean> = {
+  sugiere_cambio: true,
+  excede_contratado: true,
+  no_hay_menor: false,
+  ya_es_la_menor: false,
+  sin_contratado: true,
+  sin_manifiesto: true,
+  cobertura_baja: true,
+  pocos_dias: false,
+  sin_flota: false,
+};
+
+/**
+ * ¿Este código es una PROPUESTA COMERCIAL (ofrecerle al cliente pagar menos)?
+ * Se declara pegado al código y no en una lista aparte que haya que acordarse de
+ * actualizar — misma razón que `problema` en `MOTIVO_TEXTO` de /redes. Lo lee la
+ * configuración por cliente: hay clientes a los que AFA sí quiere proponerles el
+ * cambio y otros a los que no.
+ */
+export const CODIGO_ES_PROPUESTA: Record<CodigoOcupacion, boolean> = {
+  sugiere_cambio: true,
+  excede_contratado: false,
+  no_hay_menor: false,
+  ya_es_la_menor: false,
+  sin_contratado: false,
+  sin_manifiesto: false,
+  cobertura_baja: false,
+  pocos_dias: false,
+  sin_flota: false,
+};
+
+export type DiaOcupacion = {
+  fecha: string;
+  hora: string | null;
+  reserva_id: number;
+  embarcados: number;
+  esperados: number;
+  cancelado: boolean;
+  /** false = nadie llenó el manifiesto. NO se cuenta como «viajaron 0». */
+  medido: boolean;
+  placa: string | null;
+};
+
+export type FilaOcupacion = {
+  clave: string;
+  /** El nombre tecleado, o null. NUNCA se rellena con el recorrido. */
+  ruta_nombre: string | null;
+  /** Para poder nombrar la fila cuando la ruta no tiene nombre. */
+  recorrido: string | null;
+  contratado: number | null;
+
+  servicios: number;
+  cancelados: number;
+  /** Servicios prestados CON manifiesto. Es la base de la medición. */
+  medidos: number;
+  /** Servicios prestados SIN manifiesto. El hueco que hay que cerrar. */
+  sin_manifiesto: number;
+  /** medidos / prestados. 0..1 */
+  cobertura: number;
+  dias_medidos: number;
+
+  /** MAX de embarcados sobre los medidos. null si no se midió nada. */
+  pico: number | null;
+  dia_pico: string | null;
+  /** Media de embarcados sobre los medidos. Se PUBLICA, no decide. */
+  promedio: number | null;
+
+  codigo: CodigoOcupacion;
+  /** La unidad propuesta. Solo con `sugiere_cambio`. */
+  propuesta: EscalonFlota | null;
+  /** Asientos que sobrarían en la propuesta (`capacidad − pico`). */
+  asientos_holgura: number | null;
+  /** Asientos que se dejarían de contratar (`contratado − capacidad`). */
+  asientos_liberados: number | null;
+
+  dias: DiaOcupacion[];
+};
+
+// ─── El motor ────────────────────────────────────────────────────────────────
+
+/** Clave de agrupación. Ver la decisión 5 de la cabecera. */
+function claveDe(s: ServicioOcupacion): string {
+  const n = normalizarNombreRuta(s.ruta_nombre);
+  const identidad = n || `«${String(s.recorrido ?? "").trim().toUpperCase()}»`;
+  // El contratado entra en la clave: una fila imprime UN «de N contratados».
+  return `${identidad}|${s.contratado ?? "?"}`;
+}
+
+/**
+ * La escalera, ordenada y sin repetidos. Dos categorías de la misma capacidad
+ * (una Full Equipo y su gemela Estándar) son UN escalón para esta pregunta: lo
+ * que decide si el pico cabe son los asientos, no la ficha de costeo. Se conserva
+ * la de nombre alfabéticamente menor solo para poder nombrarla.
+ */
+export function escaleraDeFlota(escalones: EscalonFlota[]): EscalonFlota[] {
+  const porCapacidad = new Map<number, EscalonFlota>();
+  for (const e of escalones) {
+    const cap = Math.round(Number(e.capacidad ?? 0));
+    if (!Number.isFinite(cap) || cap <= 0) continue;
+    const previo = porCapacidad.get(cap);
+    if (!previo || String(e.nombre ?? "") < String(previo.nombre ?? "")) {
+      porCapacidad.set(cap, { ...e, capacidad: cap });
+    }
+  }
+  return [...porCapacidad.values()].sort((a, b) => a.capacidad - b.capacidad);
+}
+
+export function analizarOcupacion(
+  servicios: ServicioOcupacion[],
+  escalones: EscalonFlota[],
+  cfg: ConfigOcupacion = {},
+): FilaOcupacion[] {
+  const margen = Number.isFinite(cfg.margenAsientos) ? Number(cfg.margenAsientos) : MARGEN_ASIENTOS;
+  const minDias = Number.isFinite(cfg.minDiasMedidos) ? Number(cfg.minDiasMedidos) : MIN_DIAS_MEDIDOS;
+  const minCob = Number.isFinite(cfg.minCobertura) ? Number(cfg.minCobertura) : MIN_COBERTURA;
+  const escalera = escaleraDeFlota(escalones);
+
+  const grupos = new Map<string, ServicioOcupacion[]>();
+  for (const s of servicios) {
+    if (!s.fecha) continue;   // sin fecha no entra a un reporte de un periodo
+    const k = claveDe(s);
+    grupos.set(k, [...(grupos.get(k) ?? []), s]);
+  }
+
+  const filas: FilaOcupacion[] = [];
+
+  for (const [clave, lista] of grupos) {
+    const dias: DiaOcupacion[] = lista
+      .map((s) => ({
+        fecha: String(s.fecha),
+        hora: s.hora ?? null,
+        reserva_id: s.reserva_id,
+        embarcados: Math.max(0, Math.round(Number(s.embarcados ?? 0))),
+        esperados: Math.max(0, Math.round(Number(s.esperados ?? 0))),
+        cancelado: !!s.cancelado,
+        // Un servicio CANCELADO no se midió: no salió. Y uno sin manifiesto
+        // tampoco, aunque sí haya salido.
+        medido: !s.cancelado && Number(s.esperados ?? 0) > 0,
+        placa: s.placa ?? null,
+      }))
+      .sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : (a.hora ?? "") < (b.hora ?? "") ? -1 : 1));
+
+    const cancelados = dias.filter((d) => d.cancelado).length;
+    const prestados = dias.length - cancelados;
+    const medidosArr = dias.filter((d) => d.medido);
+    const medidos = medidosArr.length;
+    const cobertura = prestados > 0 ? medidos / prestados : 0;
+    const diasMedidos = new Set(medidosArr.map((d) => d.fecha)).size;
+
+    const pico = medidos > 0 ? Math.max(...medidosArr.map((d) => d.embarcados)) : null;
+    const diaPico = pico === null ? null : (medidosArr.find((d) => d.embarcados === pico)?.fecha ?? null);
+    const promedio = medidos > 0
+      ? Math.round((medidosArr.reduce((a, d) => a + d.embarcados, 0) / medidos) * 10) / 10
+      : null;
+
+    const primero = lista[0];
+    const contratado = Number.isFinite(Number(primero.contratado)) && Number(primero.contratado) > 0
+      ? Math.round(Number(primero.contratado))
+      : null;
+
+    // ── El veredicto, en orden: evidencia primero, juicio después ────────────
+    let codigo: CodigoOcupacion;
+    let propuesta: EscalonFlota | null = null;
+    let holgura: number | null = null;
+    let liberados: number | null = null;
+
+    if (medidos === 0) {
+      // Nada que medir. Va primero: sin esto no hay ni pico que enseñar.
+      codigo = "sin_manifiesto";
+    } else if (cobertura < minCob) {
+      codigo = "cobertura_baja";
+    } else if (diasMedidos < minDias) {
+      codigo = "pocos_dias";
+    } else if (contratado === null) {
+      // Se midió bien, pero no hay contra qué comparar. El pico SÍ se publica.
+      codigo = "sin_contratado";
+    } else if (pico! > contratado) {
+      // El hallazgo que el dueño no pidió y es el más caro de los dos: alguien
+      // viajó de pie o se quedó en el paradero, y además se está prestando un
+      // servicio mayor que el pactado.
+      codigo = "excede_contratado";
+    } else if (escalera.length === 0) {
+      codigo = "sin_flota";
+    } else {
+      const necesario = pico! + margen;
+      const menores = escalera.filter((e) => e.capacidad < contratado);
+      const caben = menores.filter((e) => e.capacidad >= necesario);
+      if (caben.length > 0) {
+        propuesta = caben[0];                       // la MÁS CHICA que cabe
+        holgura = propuesta.capacidad - pico!;
+        liberados = contratado - propuesta.capacidad;
+        codigo = "sugiere_cambio";
+      } else if (menores.length === 0) {
+        codigo = "ya_es_la_menor";
+      } else {
+        // Los dos ejemplos del dueño caen aquí: cabría en menos, pero entre el
+        // pico y lo contratado la flota no tiene nada.
+        codigo = "no_hay_menor";
+      }
+    }
+
+    filas.push({
+      clave,
+      ruta_nombre: primero.ruta_nombre?.trim() || null,
+      recorrido: primero.recorrido?.trim() || null,
+      contratado,
+      servicios: dias.length,
+      cancelados,
+      medidos,
+      sin_manifiesto: prestados - medidos,
+      cobertura: Math.round(cobertura * 100) / 100,
+      dias_medidos: diasMedidos,
+      pico,
+      dia_pico: diaPico,
+      promedio,
+      codigo,
+      propuesta,
+      asientos_holgura: holgura,
+      asientos_liberados: liberados,
+      dias,
+    });
+  }
+
+  // Lo accionable primero, y dentro de eso lo que más asientos libera. Un reporte
+  // que empieza por lo que no hay que hacer se deja de leer en la tercera semana.
+  const ORDEN: CodigoOcupacion[] = [
+    "excede_contratado", "sugiere_cambio", "sin_contratado", "cobertura_baja",
+    "sin_manifiesto", "no_hay_menor", "pocos_dias", "ya_es_la_menor", "sin_flota",
+  ];
+  return filas.sort((a, b) =>
+    ORDEN.indexOf(a.codigo) - ORDEN.indexOf(b.codigo) ||
+    (b.asientos_liberados ?? 0) - (a.asientos_liberados ?? 0) ||
+    String(a.ruta_nombre ?? a.recorrido ?? "").localeCompare(String(b.ruta_nombre ?? b.recorrido ?? ""))
+  );
+}
+
+// ─── Textos (uno por código, en un solo sitio) ───────────────────────────────
+
+/** Qué pasó, y dónde se arregla. Lo imprimen el correo y la pantalla. */
+export function motivoOcupacion(f: FilaOcupacion): string {
+  switch (f.codigo) {
+    case "sugiere_cambio":
+      return `El día de más afluencia viajaron ${f.pico} personas sobre ${f.contratado} asientos contratados. `
+        + `Cabría en ${f.propuesta!.nombre} (${f.propuesta!.capacidad} asientos), con ${f.asientos_holgura} de holgura.`;
+    case "excede_contratado":
+      return `El ${f.dia_pico} viajaron ${f.pico} personas sobre ${f.contratado} asientos contratados: `
+        + `${f.pico! - f.contratado!} por encima de lo pactado. Conviene revisar el contrato de esta ruta.`;
+    case "no_hay_menor":
+      return `El día de más afluencia viajaron ${f.pico} sobre ${f.contratado} asientos, pero no hay ninguna `
+        + `unidad entre ${f.pico} y ${f.contratado} asientos: se mantiene la actual.`;
+    case "ya_es_la_menor":
+      return `Ya es la unidad más pequeña disponible (${f.contratado} asientos).`;
+    case "sin_contratado":
+      return `No están declarados los asientos contratados de esta ruta, así que no hay contra qué comparar. `
+        + `Se registra un pico de ${f.pico} pasajeros. Se completa en Programación o en la ficha de la ruta.`;
+    case "sin_manifiesto":
+      return `Ninguno de los ${f.servicios} servicios del periodo tiene manifiesto cargado, así que no se midió `
+        + `cuánta gente viajó. Sin eso no se puede juzgar la ocupación.`;
+    case "cobertura_baja":
+      return `Solo ${f.medidos} de ${f.servicios - f.cancelados} servicios prestados tienen manifiesto `
+        + `(${Math.round(f.cobertura * 100)} %). Con tantos huecos, el pico de ${f.pico} no describe la semana.`;
+    case "pocos_dias":
+      return `Solo se midió ${f.dias_medidos} día del periodo: hace falta más de uno para hablar de un pico.`;
+    case "sin_flota":
+      return `No hay capacidades declaradas en la flota, así que no se puede proponer ninguna unidad alternativa.`;
+  }
+}
+
+/** Etiqueta corta del código, para el chip de una tabla. */
+export const ETIQUETA_OCUPACION: Record<CodigoOcupacion, string> = {
+  sugiere_cambio: "Cabe en una unidad menor",
+  excede_contratado: "Superó lo contratado",
+  no_hay_menor: "Sin unidad menor disponible",
+  ya_es_la_menor: "Ya es la menor",
+  sin_contratado: "Sin asientos contratados",
+  sin_manifiesto: "Sin manifiesto",
+  cobertura_baja: "Manifiestos incompletos",
+  pocos_dias: "Pocos días medidos",
+  sin_flota: "Sin flota declarada",
+};
+
+/** El nombre con el que se imprime la fila. Sin nombre NO se inventa uno. */
+export function rotuloFila(f: FilaOcupacion): string {
+  return f.ruta_nombre ?? (f.recorrido ? `Sin nombre · ${f.recorrido}` : "Sin nombre");
+}
+
+// ─── La ventana ──────────────────────────────────────────────────────────────
+
+/**
+ * Los 7 días que cierran en `fin` (inclusive). Se calcula con aritmética de
+ * calendario sobre la cadena ISO, no con `new Date()` local: el servidor corre en
+ * UTC y "hoy" en Perú es UTC-5 — la misma trampa que documenta el resto del ERP.
+ */
+export function ventanaSemanal(fin: string, dias = 7): { inicio: string; fin: string } {
+  const t = Date.parse(`${fin}T12:00:00Z`);
+  const inicio = new Date(t - (dias - 1) * 86400000).toISOString().slice(0, 10);
+  return { inicio, fin };
+}
+
+/** "YYYY-MM-DD" de hoy en Perú (UTC-5, sin horario de verano). */
+export function hoyLima(ahora = Date.now()): string {
+  return new Date(ahora - 5 * 3600000).toISOString().slice(0, 10);
+}
+
+/** ¿Es sábado en Perú? 0=domingo … 6=sábado. */
+export function esSabadoLima(ahora = Date.now()): boolean {
+  return new Date(ahora - 5 * 3600000).getUTCDay() === 6;
+}

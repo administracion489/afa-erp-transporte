@@ -144,6 +144,12 @@ const FORM_VACIO = {
   tipo_empresa: "", rubro: "", nombre_comercial: "",
   condicion_pago: "", moneda: "", tipo_comprobante: "", volumen_compra: "",
   como_nos_conocio: "",
+  // Reporte semanal de ocupación. Los dos booleanos nacen como la columna: el envío
+  // APAGADO (no se le manda nada a un cliente que no lo pidió) y la sugerencia
+  // ENCENDIDA, porque solo tiene efecto sobre un envío que alguien ya encendió a mano.
+  reporte_ocupacion_activo: false,
+  reporte_ocupacion_sugerencias: true,
+  reporte_ocupacion_correos: "",
   servicios_interes: [] as string[],
   contactos_admin: [{ ...BLANK_CONTACTO }] as FormContacto[],
   contactos_op:    [{ ...BLANK_CONTACTO }] as FormContacto[],
@@ -429,6 +435,11 @@ export default function ClientesPage() {
       email: c.email || "", email_facturacion: c.email_facturacion || "",
       estado: c.estado || "activo", direccion: c.direccion || "",
       distrito: c.distrito || "", ciudad: c.ciudad || "", notas: c.notas || "",
+      reporte_ocupacion_activo: (c as any).reporte_ocupacion_activo === true,
+      // Sin la migración corrida la columna llega `undefined`, y eso NO es «apagada»:
+      // es «no se sabe». Se lee como encendida, que es el default de la columna.
+      reporte_ocupacion_sugerencias: (c as any).reporte_ocupacion_sugerencias !== false,
+      reporte_ocupacion_correos: (c as any).reporte_ocupacion_correos || "",
       tipo_empresa: c.tipo_empresa || "", rubro: c.rubro || "",
       nombre_comercial: c.nombre_comercial || "",
       condicion_pago: c.condicion_pago || "", moneda: c.moneda || "",
@@ -484,17 +495,54 @@ export default function ClientesPage() {
       volumen_compra:  form.tipo === "b2b" ? form.volumen_compra.trim() || undefined : undefined,
       como_nos_conocio:form.como_nos_conocio.trim()|| undefined,
       dni:             form.tipo === "b2c" ? form.dni.trim()            || undefined : undefined,
-    };
+      // Los tres se mandan SIEMPRE, incluso vacíos: si solo viajaran cuando traen
+      // valor, apagar el reporte o borrar los correos no llegaría nunca a la base y
+      // el dato quedaría corregible pero no retirable — el agujero que tuvo
+      // `capacidad_tanque`.
+      reporte_ocupacion_activo: form.reporte_ocupacion_activo,
+      reporte_ocupacion_sugerencias: form.reporte_ocupacion_sugerencias,
+      reporte_ocupacion_correos: form.reporte_ocupacion_correos.trim() || null,
+    } as Partial<Cliente>;
 
     let clienteId = editandoId;
 
+    // Las tres columnas del reporte semanal son de una migración accesoria
+    // (supabase/reportes-01-ocupacion-semanal.sql). Si no se corrió, se SUELTAN las
+    // que el error NOMBRA y el cliente se guarda igual: no poder dar de alta un
+    // cliente porque falta un SQL de un reporte sería desproporcionado. Pero se
+    // AVISA — lo que el operador acaba de marcar no se guardó, y callarlo lo
+    // dejaría esperando un correo que nunca va a salir.
+    const COLS_REPORTE = ["reporte_ocupacion_activo", "reporte_ocupacion_sugerencias", "reporte_ocupacion_correos"] as const;
+    const faltaReporte = (msg: string) => {
+      const m = msg.toLowerCase();
+      return m.includes("does not exist") && COLS_REPORTE.some(c => m.includes(c));
+    };
+    const sinReporte = () => {
+      const copia: any = { ...payload };
+      for (const c of COLS_REPORTE) delete copia[c];
+      return copia as Partial<Cliente>;
+    };
+    let avisoReporte = false;
+
     if (editandoId) {
-      const { error } = await supabase.from("clientes").update(payload).eq("id", editandoId);
+      let { error } = await supabase.from("clientes").update(payload).eq("id", editandoId);
+      if (error && faltaReporte(error.message)) {
+        avisoReporte = true;
+        ({ error } = await supabase.from("clientes").update(sinReporte()).eq("id", editandoId));
+      }
       if (error) { toast(error.message, "error"); setGuardando(false); return; }
     } else {
-      const { data, error } = await supabase.from("clientes").insert(payload).select("id").single();
+      let { data, error } = await supabase.from("clientes").insert(payload).select("id").single();
+      if (error && faltaReporte(error.message)) {
+        avisoReporte = true;
+        ({ data, error } = await supabase.from("clientes").insert(sinReporte()).select("id").single());
+      }
       if (error) { toast(error.message, "error"); setGuardando(false); return; }
-      clienteId = data.id;
+      clienteId = data!.id;
+    }
+
+    if (avisoReporte) {
+      toast("Se guardó el cliente, pero la configuración del reporte semanal no: falta correr supabase/reportes-01-ocupacion-semanal.sql.", "error");
     }
 
     /* Sync contacts */
@@ -1864,6 +1912,57 @@ export default function ClientesPage() {
                   <Field label="Notas internas" span={3}>
                     <textarea style={{ ...inp(), resize: "none", height: 72 } as React.CSSProperties} placeholder="Observaciones, condiciones especiales..." value={form.notas} onChange={f("notas")} />
                   </Field>
+                </div>
+              </div>
+
+              {/* ── Reporte semanal de ocupación ──────────────────────────────
+                  Nace APAGADO para todos. El reporte le dice a un cliente cuánta
+                  gente viajó frente a los asientos que contrató, y —si se deja la
+                  segunda casilla— le propone bajar de unidad, que es ofrecerle
+                  pagar menos. Eso no se enciende de una vez para toda la cartera:
+                  se decide cliente por cliente, que es como lo pidió el dueño. */}
+              <div style={{ marginBottom: 24 }}>
+                <SecLabel>Reporte semanal de ocupación</SecLabel>
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: "14px 16px" }}>
+                  <label style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: "pointer" }}>
+                    <input type="checkbox" checked={form.reporte_ocupacion_activo}
+                      onChange={e => setForm(p => ({ ...p, reporte_ocupacion_activo: e.target.checked }))}
+                      style={{ marginTop: 2, width: 16, height: 16, accentColor: "#0b315f", cursor: "pointer" }} />
+                    <span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#0f172a" }}>Enviarle el reporte cada sábado</span>
+                      <span style={{ display: "block", fontSize: 11.5, color: "#64748b", marginTop: 2, lineHeight: 1.5 }}>
+                        Los últimos 7 días, ruta por ruta: cuánta gente viajó el día de más afluencia
+                        frente a los asientos contratados. Adjunta el Excel con el detalle día por día,
+                        los manifiestos de pasajeros y los reportes de servicio de la semana.
+                      </span>
+                    </span>
+                  </label>
+
+                  {form.reporte_ocupacion_activo && (
+                    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px dashed #cbd5e1" }}>
+                      <label style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: "pointer" }}>
+                        <input type="checkbox" checked={form.reporte_ocupacion_sugerencias}
+                          onChange={e => setForm(p => ({ ...p, reporte_ocupacion_sugerencias: e.target.checked }))}
+                          style={{ marginTop: 2, width: 16, height: 16, accentColor: "#0b315f", cursor: "pointer" }} />
+                        <span>
+                          <span style={{ fontSize: 12.5, fontWeight: 700, color: "#0f172a" }}>Incluirle la sugerencia de cambio de vehículo</span>
+                          <span style={{ display: "block", fontSize: 11.5, color: "#64748b", marginTop: 2, lineHeight: 1.5 }}>
+                            Con esto apagado, el cliente igual ve su ocupación — lo que se calla es la
+                            propuesta de pasar a una unidad más pequeña. <b>La copia interna de AFA la
+                            lleva siempre</b>, así que la decisión no se pierde: solo no se le ofrece a él.
+                          </span>
+                        </span>
+                      </label>
+
+                      <div style={{ marginTop: 12 }}>
+                        <Field label="Correos del reporte (opcional)" span={3}>
+                          <input style={inp()} placeholder="Vacío = se usan el correo del cliente y el de facturación"
+                            value={form.reporte_ocupacion_correos}
+                            onChange={f("reporte_ocupacion_correos")} />
+                        </Field>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
