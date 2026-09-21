@@ -37,6 +37,8 @@ export type PerfilEmpresa = {
   razon_social?: string | null;
   ruc?: string | null;
   logo_url?: string | null;
+  /** La versión para fondos OSCUROS. Ver `logoDeFondo`. */
+  logo_claro_url?: string | null;
   telefono?: string | null;
   email?: string | null;
   direccion?: string | null;
@@ -49,6 +51,51 @@ export type PerfilEmpresa = {
 
 /** Una cuenta de cobro. `cuenta` y `cci` son texto: llevan guiones y ceros a la izquierda. */
 export type CuentaBancaria = { banco: string; cuenta: string; cci: string };
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SON DOS IMÁGENES Y EL ERP NO PUEDE DEDUCIR UNA DE LA OTRA
+//
+// `logo_url` es el que se imprime en papel: letras azules sobre fondo blanco.
+// `logo_claro_url` es el mismo logo en blanco, para fondos oscuros, y
+// /configuracion/perfil lo pide desde el día uno con ese rótulo exacto —
+// «Logo Versión Clara · Para sidebar y fondos oscuros».
+//
+// **Y NINGUNA PANTALLA LO LEÍA.** La columna se escribía y no la consultaba nadie, así
+// que el panel azul marino de /cliente pintaba el PRINCIPAL y en producción salía un
+// parche blanco con letras azules sobre el fondo oscuro. Una columna que se puede
+// llenar y que nadie lee es el mismo defecto que `vehiculos_tercero.capacidad_tanque`
+// sin formulario, por la puerta contraria: ahí faltaba dónde escribirla, acá faltaba
+// quién la leyera, y en los dos casos el operador configura algo que no hace nada.
+//
+// EL FONDO LO DECLARA LA PANTALLA. El ERP no puede mirar un PNG y decidir si se ve
+// encima, así que `logoDeFondo` recibe "claro" | "oscuro" en vez de adivinarlo — mismo
+// criterio que `respeta_horario`, que se declara por tipo en vez de deducirse de la clave.
+//
+// LAS DOS CASCADAS NO SON SIMÉTRICAS, y ahí está lo único delicado:
+//   · sobre OSCURO: clara → principal. Sin versión clara se cae al principal porque ES
+//     EL LOGO DE LA EMPRESA: se verá su fondo blanco, pero es suyo y se lee. Es además
+//     el comportamiento que ya había, así que llenar el perfil solo puede mejorarlo.
+//   · sobre CLARO: principal, y NUNCA la versión clara. Un logo blanco sobre papel
+//     blanco no es un logo feo: es un logo invisible, el mismo error al revés.
+//
+// Sin ninguna de las dos devuelve `null` y **decide la pantalla** qué poner (su asset o
+// nada). Aquí no se nombra ningún archivo: los del bundle son de AFA y este ERP se vende.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Sobre qué está pintado el logo. Lo sabe la pantalla, no la base. */
+export type FondoLogo = "claro" | "oscuro";
+
+/** El logo que SÍ se ve sobre ese fondo, o `null` si el perfil no tiene ninguno. */
+export function logoDeFondo(
+  p: Pick<PerfilEmpresa, "logo_url" | "logo_claro_url"> | null | undefined,
+  fondo: FondoLogo,
+): string | null {
+  const v = (x: unknown): string => String(x ?? "").trim();
+  const principal = v(p?.logo_url);
+  const claro = v(p?.logo_claro_url);
+  if (fondo === "oscuro") return claro || principal || null;
+  return principal || null;
+}
 
 /**
  * Las cuentas utilizables: las que tienen banco Y algún número.
