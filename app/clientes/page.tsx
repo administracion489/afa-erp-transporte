@@ -5,6 +5,10 @@ import { supabase } from "@/lib/supabase";
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
 import { parsearPortalUsuarios, descargarPlantillaPortalUsuarios, descargarCredencialesPortal, type CredencialExport } from "@/lib/portal-usuarios-csv";
 import { useCanalesInvitacion } from "@/lib/useCanalesInvitacion";
+import {
+  FRECUENCIAS, VENTANAS, normalizarFrecuencia, normalizarVentana,
+  describirCadencia, avisoCadencia, type Frecuencia, type Ventana,
+} from "@/lib/ocupacion/cadencia";
 
 /* ══════════════════════════════════════════════
    TYPES
@@ -150,6 +154,11 @@ const FORM_VACIO = {
   reporte_ocupacion_activo: false,
   reporte_ocupacion_sugerencias: true,
   reporte_ocupacion_correos: "",
+  // CADA CUÁNTO y CUÁNTO ABARCA son dos ejes independientes. Los defectos son lo
+  // que el módulo hacía antes de que existieran, así que abrir el formulario no
+  // le cambia el reporte a ningún cliente ya configurado.
+  reporte_ocupacion_frecuencia: "semanal" as Frecuencia,
+  reporte_ocupacion_ventana: "7" as Ventana,
   servicios_interes: [] as string[],
   contactos_admin: [{ ...BLANK_CONTACTO }] as FormContacto[],
   contactos_op:    [{ ...BLANK_CONTACTO }] as FormContacto[],
@@ -440,6 +449,8 @@ export default function ClientesPage() {
       // es «no se sabe». Se lee como encendida, que es el default de la columna.
       reporte_ocupacion_sugerencias: (c as any).reporte_ocupacion_sugerencias !== false,
       reporte_ocupacion_correos: (c as any).reporte_ocupacion_correos || "",
+      reporte_ocupacion_frecuencia: normalizarFrecuencia((c as any).reporte_ocupacion_frecuencia),
+      reporte_ocupacion_ventana: normalizarVentana((c as any).reporte_ocupacion_ventana),
       tipo_empresa: c.tipo_empresa || "", rubro: c.rubro || "",
       nombre_comercial: c.nombre_comercial || "",
       condicion_pago: c.condicion_pago || "", moneda: c.moneda || "",
@@ -502,6 +513,8 @@ export default function ClientesPage() {
       reporte_ocupacion_activo: form.reporte_ocupacion_activo,
       reporte_ocupacion_sugerencias: form.reporte_ocupacion_sugerencias,
       reporte_ocupacion_correos: form.reporte_ocupacion_correos.trim() || null,
+      reporte_ocupacion_frecuencia: form.reporte_ocupacion_frecuencia,
+      reporte_ocupacion_ventana: form.reporte_ocupacion_ventana,
     } as Partial<Cliente>;
 
     let clienteId = editandoId;
@@ -512,7 +525,10 @@ export default function ClientesPage() {
     // cliente porque falta un SQL de un reporte sería desproporcionado. Pero se
     // AVISA — lo que el operador acaba de marcar no se guardó, y callarlo lo
     // dejaría esperando un correo que nunca va a salir.
-    const COLS_REPORTE = ["reporte_ocupacion_activo", "reporte_ocupacion_sugerencias", "reporte_ocupacion_correos"] as const;
+    const COLS_REPORTE = [
+      "reporte_ocupacion_activo", "reporte_ocupacion_sugerencias", "reporte_ocupacion_correos",
+      "reporte_ocupacion_frecuencia", "reporte_ocupacion_ventana",
+    ] as const;
     const faltaReporte = (msg: string) => {
       const m = msg.toLowerCase();
       return m.includes("does not exist") && COLS_REPORTE.some(c => m.includes(c));
@@ -1940,6 +1956,40 @@ export default function ClientesPage() {
 
                   {form.reporte_ocupacion_activo && (
                     <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px dashed #cbd5e1" }}>
+
+                      {/* CADA CUÁNTO y CUÁNTO ABARCA van separados a propósito: se
+                          puede querer un envío quincenal que mire 30 días, o uno
+                          semanal que mire solo 7. Atarlos obligaría a elegir entre
+                          las dos mitades de lo que alguien quiere. */}
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 14 }}>
+                        <Field label="Cada cuánto se envía">
+                          <select style={inp()} value={form.reporte_ocupacion_frecuencia}
+                            onChange={e => setForm(p => ({ ...p, reporte_ocupacion_frecuencia: normalizarFrecuencia(e.target.value) }))}>
+                            {FRECUENCIAS.map(f => <option key={f.clave} value={f.clave}>{f.etiqueta}</option>)}
+                          </select>
+                        </Field>
+                        <Field label="Qué periodo abarca">
+                          <select style={inp()} value={form.reporte_ocupacion_ventana}
+                            onChange={e => setForm(p => ({ ...p, reporte_ocupacion_ventana: normalizarVentana(e.target.value) }))}>
+                            {VENTANAS.map(v => <option key={v.clave} value={v.clave}>{v.etiqueta}</option>)}
+                          </select>
+                        </Field>
+                      </div>
+
+                      {/* La frase la DERIVA el mismo módulo que usa el cron. Compuesta
+                          dentro del TSX, esta pantalla podría describir al revés lo que
+                          el sistema hace sin que nada falle — que es exactamente lo que
+                          pasó con la etiqueta del horario del conductor. */}
+                      <p style={{ margin: "8px 0 0", fontSize: 11.5, color: "#0b315f", fontWeight: 600 }}>
+                        {describirCadencia(form.reporte_ocupacion_frecuencia, form.reporte_ocupacion_ventana)}
+                      </p>
+                      {avisoCadencia(form.reporte_ocupacion_frecuencia, form.reporte_ocupacion_ventana) && (
+                        <p style={{ margin: "6px 0 0", fontSize: 11.5, color: "#92400e", background: "#fffbeb", borderLeft: "3px solid #f59e0b", borderRadius: "0 6px 6px 0", padding: "7px 9px", lineHeight: 1.5 }}>
+                          ⚠ {avisoCadencia(form.reporte_ocupacion_frecuencia, form.reporte_ocupacion_ventana)}
+                        </p>
+                      )}
+
+                      <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px dashed #cbd5e1" }} />
                       <label style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: "pointer" }}>
                         <input type="checkbox" checked={form.reporte_ocupacion_sugerencias}
                           onChange={e => setForm(p => ({ ...p, reporte_ocupacion_sugerencias: e.target.checked }))}

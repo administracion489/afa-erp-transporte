@@ -287,9 +287,10 @@ function PanelOcupacionSemanal() {
   const [fin, setFin] = useState("");
 
   const emitir = async () => {
-    // El sábado es el día del reporte, no un capricho: si hoy no lo es, se fuerza
-    // para poder probar, pero la VENTANA sigue siendo los 7 días que cierran en la
-    // fecha indicada. Nunca se inventa un periodo distinto del que se va a mandar.
+    // `forzarDia` salta SOLO la comprobación de «¿hoy le toca a este cliente?», para
+    // poder probar sin esperar a su fecha. La VENTANA no se toca: cada cliente sigue
+    // recibiendo el periodo que tiene configurado, cerrando en la fecha indicada.
+    // Nunca se inventa un periodo distinto del que se va a mandar de verdad.
     if (!confirm("Se van a enviar correos REALES a los clientes que tengan el reporte activado. ¿Continuar?")) return;
     setCorriendo(true); setRes(null);
     try {
@@ -315,15 +316,18 @@ function PanelOcupacionSemanal() {
         <div>
           <h2 className="font-bold text-lg">Ocupación semanal</h2>
           <p className="text-sm text-gray-600 max-w-2xl mt-1">
-            Cada <b>sábado a las 20:00</b> sale, a los clientes que lo tengan activado, el detalle de los
-            últimos 7 días: cuánta gente viajó frente a los asientos contratados, ruta por ruta, con el
-            Excel del detalle, los manifiestos y los reportes de servicio. Se mide el <b>día de más
-            afluencia</b>, nunca el promedio. Se activa cliente por cliente en <b>Clientes → editar</b>.
+            A las <b>20:00</b> sale, a cada cliente que lo tenga activado, el detalle de cuánta gente
+            viajó frente a los asientos contratados, ruta por ruta, con el Excel del detalle, los
+            manifiestos y los reportes de servicio. Se mide el <b>día de más afluencia</b>, nunca el
+            promedio. <b>Cada cuánto se envía</b> (sábados · días 1 y 16 · día 1 · fin de mes) y
+            <b>qué periodo abarca</b> (7, 15, 30 días o el mes calendario) se eligen por separado, en
+            <b>Clientes → editar → Reporte semanal de ocupación</b>, junto con el interruptor de las
+            sugerencias. El cron corre a diario y cada cliente sale el día que le toca.
           </p>
         </div>
         <div className="flex items-end gap-2">
           <label className="text-xs text-gray-500">
-            <span className="block mb-1">Semana que cierra el</span>
+            <span className="block mb-1">Periodo que cierra el</span>
             <input type="date" value={fin} onChange={e => setFin(e.target.value)}
               className="border rounded-lg px-2 py-1.5 text-sm" />
           </label>
@@ -355,8 +359,10 @@ function PanelOcupacionSemanal() {
               Ningún cliente tiene el reporte activado todavía. Se enciende en <b>Clientes → editar →
               Reporte semanal de ocupación</b>.
             </p>
-          ) : res.motivo === "no_es_sabado" ? (
-            <p className="text-gray-600">Hoy no es sábado, así que el cron no habría emitido.</p>
+          ) : res.motivo === "hoy_no_toca_a_nadie" ? (
+            <p className="text-gray-600">
+              Hoy no le toca a ningún cliente según su cadencia, así que el cron no habría emitido.
+            </p>
           ) : (
             <table className="w-full text-sm">
               <thead>

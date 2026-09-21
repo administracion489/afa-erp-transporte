@@ -2,7 +2,10 @@
 // app/api/reportes/ocupacion-semanal/route.ts
 // El reporte de los sábados: cuánta gente viajó frente a los asientos contratados.
 //
-//   • GET  → cron de Vercel, sábados 20:00 Lima. Fail-closed con CRON_SECRET.
+//   • GET  → cron de Vercel, TODOS los días a las 20:00 Lima. Fail-closed con
+//            CRON_SECRET. Corre a diario porque la cadencia es POR CLIENTE: uno
+//            quiere sábados, otro los días 1 y 16, otro el último del mes. El
+//            cron solo despierta; quién toca hoy lo decide `tocaHoy`.
 //   • POST → disparo manual desde el ERP (módulo `reportes`), con `fin` opcional
 //            para re-emitir una semana concreta.
 //
@@ -26,10 +29,10 @@ import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { enviarEmail } from "@/lib/notificaciones";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
+import { analizarOcupacion, type FilaOcupacion } from "@/lib/ocupacion/semanal";
 import {
-  analizarOcupacion, ventanaSemanal, hoyLima, esSabadoLima,
-  type FilaOcupacion,
-} from "@/lib/ocupacion/semanal";
+  hoyLima, tocaHoy, ventanaDe, normalizarFrecuencia, normalizarVentana,
+} from "@/lib/ocupacion/cadencia";
 import { cargarOcupacion, cargarEscaleraFlota, anotarPlacas } from "@/lib/ocupacion/datos";
 import {
   htmlReporte, asuntoReporte, xlsxReporteBase64, nombreArchivo, type MetaReporte,
@@ -75,21 +78,12 @@ type Resultado = {
 async function emitir(opts: { fin?: string; forzarDia?: boolean }): Promise<Resultado> {
   const fin = opts.fin || hoyLima();
 
-  // El cron corre a una hora fija; la comprobación del DÍA vive acá y no en el
-  // cron para que un reintento de la plataforma un domingo no mande el reporte
-  // de una semana que ya salió.
-  if (!opts.forzarDia && !esSabadoLima(Date.parse(`${fin}T12:00:00Z`))) {
-    return { ok: true, motivo: "no_es_sabado", periodo: ventanaSemanal(fin) };
-  }
-
-  const { inicio } = ventanaSemanal(fin);
-
   // ── A quién se le manda ───────────────────────────────────────────────────
   let activos: any[];
   try {
     const { data, error } = await admin
       .from("clientes")
-      .select("id,nombre,empresa,email,email_facturacion,reporte_ocupacion_activo,reporte_ocupacion_correos,reporte_ocupacion_sugerencias")
+      .select("id,nombre,empresa,email,email_facturacion,reporte_ocupacion_activo,reporte_ocupacion_correos,reporte_ocupacion_sugerencias,reporte_ocupacion_frecuencia,reporte_ocupacion_ventana")
       .eq("reporte_ocupacion_activo", true);
     if (error) throw new Error(error.message);
     activos = (data as any[]) ?? [];
@@ -100,7 +94,25 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean }): Promise<Resu
     throw e;
   }
 
-  if (!activos.length) return { ok: true, motivo: "ningun_cliente_activo", periodo: { inicio, fin } };
+  if (!activos.length) return { ok: true, motivo: "ningun_cliente_activo", periodo: { inicio: fin, fin } };
+
+  // La VENTANA es por cliente, así que el rango de servicios que hay que leer para
+  // los adjuntos es la unión de todas las que tocan hoy. Se calcula antes para
+  // pedir `cargarServiciosRango` UNA sola vez.
+  const aEmitir = activos
+    .map((c) => ({
+      c,
+      frecuencia: normalizarFrecuencia(c.reporte_ocupacion_frecuencia),
+      ventana: normalizarVentana(c.reporte_ocupacion_ventana),
+    }))
+    .filter((x) => opts.forzarDia || tocaHoy(x.frecuencia, fin))
+    .map((x) => ({ ...x, periodo: ventanaDe(x.ventana, fin) }));
+
+  if (!aEmitir.length) {
+    return { ok: true, motivo: "hoy_no_toca_a_nadie", periodo: { inicio: fin, fin } };
+  }
+  const inicioMin = aEmitir.map((x) => x.periodo.inicio).reduce((a, b) => (a < b ? a : b));
+  const finMax = aEmitir.map((x) => x.periodo.fin).reduce((a, b) => (a > b ? a : b));
 
   // ── Lo que se comparte entre todos los clientes ───────────────────────────
   const [perfilRes, escalera, lote] = await Promise.all([
@@ -108,7 +120,7 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean }): Promise<Resu
     cargarEscaleraFlota(admin),
     // El MISMO armado que usa /seguimiento para bajar manifiestos: el papel que
     // se manda por correo tiene que ser idéntico al que se imprime a mano.
-    cargarServiciosRango(inicio, fin, admin).catch(() => null),
+    cargarServiciosRango(inicioMin, finMax, admin).catch(() => null),
   ]);
   const empresa = empresaConDefectos(perfilRes?.data ?? null);
   const origin = process.env.NEXT_PUBLIC_SITE_URL || "https://transportesafa.com";
@@ -119,19 +131,24 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean }): Promise<Resu
     : correosDe(empresa.email);
 
   // Qué envíos de este periodo YA salieron (candado 1).
+  // Con ventanas por cliente, `periodo_fin` ya no es único en la corrida: el de la
+  // ventana `mes` cierra el último día del mes anterior. Se relee por los cierres
+  // que de verdad se van a pedir.
+  const cierres = [...new Set(aEmitir.map((x) => x.periodo.fin))];
   const { data: yaEnviados } = await admin
     .from("reporte_ocupacion_envios")
-    .select("cliente_id,destino")
-    .eq("periodo_fin", fin)
+    .select("cliente_id,destino,periodo_fin")
+    .in("periodo_fin", cierres)
     .is("error", null);
-  const salido = new Set(((yaEnviados as any[]) ?? []).map((r) => `${r.cliente_id}|${r.destino}`));
+  const salido = new Set(((yaEnviados as any[]) ?? []).map((r) => `${r.cliente_id}|${r.destino}|${r.periodo_fin}`));
 
   const resumen: Resultado["clientes"] = [];
 
-  for (const c of activos) {
+  for (const { c, ventana, periodo } of aEmitir) {
+    const { inicio, fin: cierre } = periodo;
     const nombreCliente = String(c.empresa || c.nombre || `Cliente ${c.id}`);
     try {
-      const { servicios, hayCapacidad } = await cargarOcupacion(admin, Number(c.id), inicio, fin);
+      const { servicios, hayCapacidad } = await cargarOcupacion(admin, Number(c.id), inicio, cierre);
       if (!servicios.length) {
         resumen.push({ cliente: nombreCliente, rutas: 0, enviados: [], omitido: "sin servicios en el periodo" });
         continue;
@@ -161,28 +178,28 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean }): Promise<Resu
 
       if (!paraCliente.length) {
         resumen.push({ cliente: nombreCliente, rutas: filas.length, enviados: [], omitido: "sin correo de destino" });
-      } else if (salido.has(`${c.id}|cliente`)) {
+      } else if (salido.has(`${c.id}|cliente|${cierre}`)) {
         resumen.push({ cliente: nombreCliente, rutas: filas.length, enviados: [], omitido: "ya se envió este periodo" });
       } else {
         const meta: MetaReporte = {
-          empresaNombre: empresa.nombre, clienteNombre: nombreCliente, inicio, fin, hayCapacidad,
+          empresaNombre: empresa.nombre, clienteNombre: nombreCliente, inicio, fin: cierre, hayCapacidad, ventana,
           incluirSugerencias: c.reporte_ocupacion_sugerencias !== false,
         };
         await mandar(paraCliente, filas, meta, adjuntos);
-        await registrar(Number(c.id), "cliente", inicio, fin, paraCliente, servicios.length, filas, null);
+        await registrar(Number(c.id), "cliente", inicio, cierre, paraCliente, servicios.length, filas, null);
         enviados.push(...paraCliente);
       }
 
       // ── 2) La copia de AFA, SIEMPRE con las sugerencias ────────────────────
       // Es la única que las lleva completas aunque el cliente las tenga apagadas:
       // la propuesta comercial la tiene que ver AFA para poder decidirla.
-      if (correosAfa.length && !salido.has(`${c.id}|afa`)) {
+      if (correosAfa.length && !salido.has(`${c.id}|afa|${cierre}`)) {
         const metaAfa: MetaReporte = {
-          empresaNombre: empresa.nombre, clienteNombre: nombreCliente, inicio, fin, hayCapacidad,
+          empresaNombre: empresa.nombre, clienteNombre: nombreCliente, inicio, fin: cierre, hayCapacidad, ventana,
           incluirSugerencias: true,
         };
         await mandar(correosAfa, filas, metaAfa, adjuntos);
-        await registrar(Number(c.id), "afa", inicio, fin, correosAfa, servicios.length, filas, null);
+        await registrar(Number(c.id), "afa", inicio, cierre, correosAfa, servicios.length, filas, null);
         enviados.push(...correosAfa);
       }
 
@@ -191,12 +208,12 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean }): Promise<Resu
       // Un cliente que falla no tumba a los demás, y su fallo queda escrito para
       // poder reintentarlo: el índice único solo bloquea los envíos EXITOSOS.
       console.error("[ocupacion-semanal]", nombreCliente, e);
-      await registrar(Number(c.id), "cliente", inicio, fin, [], 0, [], String(e?.message ?? e)).catch(() => {});
+      await registrar(Number(c.id), "cliente", inicio, cierre, [], 0, [], String(e?.message ?? e)).catch(() => {});
       resumen.push({ cliente: nombreCliente, rutas: 0, enviados: [], error: String(e?.message ?? e) });
     }
   }
 
-  return { ok: true, periodo: { inicio, fin }, clientes: resumen };
+  return { ok: true, periodo: { inicio: inicioMin, fin: finMax }, clientes: resumen };
 }
 
 type Adjunto = { filename: string; content: string };

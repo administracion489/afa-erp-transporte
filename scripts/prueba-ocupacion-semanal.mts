@@ -38,11 +38,16 @@ const requerir = createRequire(import.meta.url);
 const OC = requerir("../lib/ocupacion/semanal") as typeof import("../lib/ocupacion/semanal");
 
 const {
-  analizarOcupacion, escaleraDeFlota, motivoOcupacion, rotuloFila,
+  analizarOcupacion, escaleraDeFlota, motivoOcupacion, motivoSinRecomendacion, rotuloFila,
   ventanaSemanal, hoyLima, esSabadoLima,
-  CODIGO_ES_PROPUESTA, CODIGO_ACCIONABLE, ETIQUETA_OCUPACION,
+  CODIGO_RECOMIENDA, ETIQUETA_RECOMIENDA, CODIGO_ACCIONABLE, ETIQUETA_OCUPACION,
   MARGEN_ASIENTOS, MIN_DIAS_MEDIDOS, MIN_COBERTURA,
 } = OC;
+const CAD = requerir("../lib/ocupacion/cadencia") as typeof import("../lib/ocupacion/cadencia");
+const {
+  tocaHoy, ventanaDe, normalizarFrecuencia, normalizarVentana,
+  describirCadencia, avisoCadencia, FRECUENCIAS, VENTANAS, diasDelMes, restarDias,
+} = CAD;
 
 type Servicio = import("../lib/ocupacion/semanal").ServicioOcupacion;
 type Escalon = import("../lib/ocupacion/semanal").EscalonFlota;
@@ -199,10 +204,27 @@ chk("32 personas sobre 30 asientos contratados → `excede_contratado`",
 chk("…el motivo dice cuántas por encima y en qué día",
   /2 por encima/.test(motivoOcupacion(exceso)) && /2026-09-16/.test(motivoOcupacion(exceso)),
   motivoOcupacion(exceso).slice(0, 90));
-chk("…y NO es una propuesta comercial (no se le ofrece al cliente pagar menos)",
-  CODIGO_ES_PROPUESTA.excede_contratado === false && CODIGO_ACCIONABLE.excede_contratado === true);
-chk("solo `sugiere_cambio` es propuesta comercial",
-  Object.entries(CODIGO_ES_PROPUESTA).filter(([, v]) => v).map(([k]) => k).join(",") === "sugiere_cambio");
+// Los DOS sentidos son una recomendación y la casilla los calla a los dos: el dueño
+// lo pidió como «que el cliente analice su flota y nosotros no le hagamos ninguna
+// sugerencia». Pero la ETIQUETA de `excede_contratado` es un HECHO y se conserva:
+// callar que 32 personas viajaron sobre 30 asientos es lo único que no se puede hacer.
+chk("recomiendan los DOS sentidos: bajar y subir de unidad",
+  CODIGO_RECOMIENDA.sugiere_cambio === true && CODIGO_RECOMIENDA.excede_contratado === true &&
+  Object.entries(CODIGO_RECOMIENDA).filter(([, v]) => v).length === 2);
+chk("…pero solo la etiqueta de `sugiere_cambio` es en sí una propuesta",
+  ETIQUETA_RECOMIENDA.sugiere_cambio === true && ETIQUETA_RECOMIENDA.excede_contratado === false);
+chk("el motivo sin recomendación CONSERVA los números y suelta la conclusión",
+  (() => {
+    const n = motivoSinRecomendacion(exceso)!;
+    return /32/.test(n) && /30/.test(n) && !/conviene/i.test(n);
+  })(), motivoSinRecomendacion(exceso) ?? "null");
+chk("…y en `sugiere_cambio` tampoco nombra la unidad propuesta",
+  (() => {
+    const n = motivoSinRecomendacion(ej3)!;
+    return /10/.test(n) && /30/.test(n) && !/Van/.test(n) && !/cabr/i.test(n);
+  })(), motivoSinRecomendacion(ej3) ?? "null");
+chk("los códigos que no recomiendan no reescriben su motivo",
+  motivoSinRecomendacion(ej1) === null && motivoSinRecomendacion(nada) === null);
 
 // ── 6 · SIN CONTRATADO Y SIN FLOTA ───────────────────────────────────────────
 console.log("\n6 · Lo que no se puede juzgar se NOMBRA\n");
@@ -294,11 +316,19 @@ chk("no es trivial: el barrido produjo propuestas de verdad", propuestas > 20, `
 
 // Todo código tiene etiqueta y motivo: un código sin texto imprime el código crudo.
 const CODIGOS = Object.keys(ETIQUETA_OCUPACION) as (keyof typeof ETIQUETA_OCUPACION)[];
-chk("todo código tiene etiqueta, y las tres tablas cubren los mismos códigos",
+// Las CUATRO tablas cubren exactamente los mismos códigos: una que se quedara corta
+// dejaría un código sin juzgar y la pantalla imprimiría el código crudo.
+chk("todo código tiene etiqueta, y las cuatro tablas cubren los mismos códigos",
   CODIGOS.every((c) => !!ETIQUETA_OCUPACION[c])
-  && CODIGOS.every((c) => c in CODIGO_ES_PROPUESTA && c in CODIGO_ACCIONABLE)
-  && Object.keys(CODIGO_ES_PROPUESTA).length === CODIGOS.length,
+  && CODIGOS.every((c) => c in CODIGO_RECOMIENDA && c in ETIQUETA_RECOMIENDA && c in CODIGO_ACCIONABLE)
+  && Object.keys(CODIGO_RECOMIENDA).length === CODIGOS.length
+  && Object.keys(ETIQUETA_RECOMIENDA).length === CODIGOS.length
+  && Object.keys(CODIGO_ACCIONABLE).length === CODIGOS.length,
   `${CODIGOS.length} códigos`);
+// Una etiqueta que recomienda implica que el motivo también: al revés sí puede pasar
+// (`excede_contratado` tiene etiqueta de hecho y motivo con recomendación).
+chk("si la etiqueta recomienda, el motivo también",
+  CODIGOS.every((c) => !ETIQUETA_RECOMIENDA[c] || CODIGO_RECOMIENDA[c]));
 
 // ── 9 · LA VENTANA Y LA FECHA PERUANA ────────────────────────────────────────
 console.log("\n9 · La ventana de 7 días y la hora de Perú\n");
@@ -344,6 +374,125 @@ chk("el margen por defecto es 0: es la regla literal del dueño, no un número p
   MARGEN_ASIENTOS === 0);
 chk("un pico necesita al menos dos días", MIN_DIAS_MEDIDOS >= 2, String(MIN_DIAS_MEDIDOS));
 chk("la cobertura mínima es la mayoría", MIN_COBERTURA >= 0.5, String(MIN_COBERTURA));
+
+// ── 12 · LA CADENCIA: CADA CUÁNTO Y CUÁNTO ABARCA ────────────────────────────
+console.log("\n12 · Cada cuánto se manda y cuánto periodo abarca son DOS ejes\n");
+
+// Todo 2026, día por día. Es el barrido que descubre los meses de 28, 29, 30 y 31.
+const DIAS_2026: string[] = [];
+for (let m = 1; m <= 12; m++) {
+  for (let d = 1; d <= diasDelMes(2026, m); d++) {
+    DIAS_2026.push(`2026-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+  }
+}
+chk("el año se arma con 365 días (2026 no es bisiesto)", DIAS_2026.length === 365, `${DIAS_2026.length}`);
+
+const cuenta = (f: any) => DIAS_2026.filter((d) => tocaHoy(f, d)).length;
+chk("semanal → 52 sábados", cuenta("semanal") === 52, `${cuenta("semanal")}`);
+chk("quincenal → 24 envíos (día 1 y 16 de cada mes)", cuenta("quincenal") === 24, `${cuenta("quincenal")}`);
+chk("mensual → 12 envíos (día 1)", cuenta("mensual") === 12, `${cuenta("mensual")}`);
+chk("fin de mes → 12 envíos, y acierta en los meses de 28, 30 y 31",
+  cuenta("fin_de_mes") === 12
+  && tocaHoy("fin_de_mes", "2026-02-28") && !tocaHoy("fin_de_mes", "2026-02-27")
+  && tocaHoy("fin_de_mes", "2026-04-30") && !tocaHoy("fin_de_mes", "2026-04-29")
+  && tocaHoy("fin_de_mes", "2026-12-31"),
+  `${cuenta("fin_de_mes")}`);
+
+// LA VENTANA `mes` ES EL ÚLTIMO MES COMPLETO, y esa es la definición que hace
+// coherentes las cuatro frecuencias. Sin ella, «mensual + mes calendario» habría
+// mandado un reporte de 24 horas.
+const vMes = (f: string) => ventanaDe("mes", f);
+chk("fin de mes → el mes que acaba de cerrar",
+  JSON.stringify(vMes("2026-09-30")) === JSON.stringify({ inicio: "2026-09-01", fin: "2026-09-30" }),
+  JSON.stringify(vMes("2026-09-30")));
+chk("día 1 → el mes anterior COMPLETO, no un día suelto",
+  JSON.stringify(vMes("2026-10-01")) === JSON.stringify({ inicio: "2026-09-01", fin: "2026-09-30" }),
+  JSON.stringify(vMes("2026-10-01")));
+chk("a mitad de mes → el último completo, nunca medio mes en curso",
+  JSON.stringify(vMes("2026-10-15")) === JSON.stringify({ inicio: "2026-09-01", fin: "2026-09-30" }),
+  JSON.stringify(vMes("2026-10-15")));
+chk("cruza el año sin romperse",
+  JSON.stringify(vMes("2027-01-01")) === JSON.stringify({ inicio: "2026-12-01", fin: "2026-12-31" }),
+  JSON.stringify(vMes("2027-01-01")));
+chk("febrero sale con sus 28 días, no con 30",
+  JSON.stringify(vMes("2026-03-01")) === JSON.stringify({ inicio: "2026-02-01", fin: "2026-02-28" }),
+  JSON.stringify(vMes("2026-03-01")));
+
+// Barrido: la ventana `mes` SIEMPRE es un mes completo y SIEMPRE ya cerró.
+let mesMal = 0;
+for (const d of DIAS_2026) {
+  const v = vMes(d);
+  const [ai, mi, di] = v.inicio.split("-").map(Number);
+  const [af, mf, df] = v.fin.split("-").map(Number);
+  if (di !== 1) mesMal++;                                   // arranca el día 1
+  if (ai !== af || mi !== mf) mesMal++;                     // mismo mes en los dos extremos
+  if (df !== diasDelMes(af, mf)) mesMal++;                  // termina el último día
+  if (v.fin > d) mesMal++;                                  // ya cerró en o antes de `fin`
+}
+chk(`${DIAS_2026.length} días · la ventana «mes» es siempre un mes COMPLETO y ya cerrado`,
+  mesMal === 0, `${mesMal} fallos`);
+
+// Las ventanas por días: N días exactos, cerrando en `fin`.
+let diasMal = 0;
+for (const d of DIAS_2026) {
+  for (const n of ["7", "15", "30"] as const) {
+    const v = ventanaDe(n, d);
+    if (v.fin !== d) diasMal++;
+    if (v.inicio !== restarDias(d, Number(n) - 1)) diasMal++;
+  }
+}
+chk(`${DIAS_2026.length * 3} ventanas · 7/15/30 días cierran EXACTAMENTE en el día del envío`,
+  diasMal === 0, `${diasMal} fallos`);
+
+// Un valor desconocido cae al DEFECTO, nunca apaga el reporte de nadie.
+chk("sin migración (undefined) el comportamiento es el de siempre: sábados con 7 días",
+  normalizarFrecuencia(undefined) === "semanal" && normalizarVentana(undefined) === "7");
+chk("un valor corrupto tampoco apaga a nadie",
+  normalizarFrecuencia("cada-luna-llena") === "semanal" && normalizarVentana("99") === "7");
+chk("todas las claves del catálogo se normalizan a sí mismas",
+  FRECUENCIAS.every((f) => normalizarFrecuencia(f.clave) === f.clave)
+  && VENTANAS.every((v) => normalizarVentana(v.clave) === v.clave));
+
+// La frase de pantalla se DERIVA de los mismos valores que usa el motor.
+let fraseMal = 0;
+for (const f of FRECUENCIAS) {
+  for (const v of VENTANAS) {
+    const t = describirCadencia(f.clave, v.clave);
+    if (!t.startsWith("Se envía") || !t.endsWith(".")) fraseMal++;
+    // Nombra el periodo con el mismo número que la ventana, no con otro.
+    if (v.clave !== "mes" && !t.includes(`${v.clave} días`)) fraseMal++;
+    if (v.clave === "mes" && !/mes calendario/.test(t)) fraseMal++;
+  }
+}
+chk(`${FRECUENCIAS.length * VENTANAS.length} combinaciones · la frase describe la configuración real`,
+  fraseMal === 0, `${fraseMal} fallos`);
+
+// El aviso sale EXACTAMENTE donde dos envíos del mismo mes piden el mismo periodo.
+chk("avisa en semanal + mes calendario (varios envíos piden el mismo periodo)",
+  avisoCadencia("semanal", "mes") !== null && avisoCadencia("quincenal", "mes") !== null);
+chk("…y NO avisa donde cada envío pide un periodo distinto",
+  avisoCadencia("mensual", "mes") === null && avisoCadencia("fin_de_mes", "mes") === null
+  && FRECUENCIAS.every((f) => (["7", "15", "30"] as const).every((v) => avisoCadencia(f.clave, v) === null)));
+
+// Y LA RAZÓN DEL AVISO TIENE QUE SER CIERTA. La primera redacción prometía «solo
+// saldrá el primero de cada mes» y este barrido la desmintió: cuando el último día
+// del mes cae sábado, ESE envío pide su propio mes y también sale. Lo que sí es
+// cierto —y es lo único que el aviso promete ahora— es que sale UNO por periodo.
+const sabados2026 = DIAS_2026.filter((d) => tocaHoy("semanal", d));
+const periodos2026 = new Set(sabados2026.map((d) => vMes(d).fin));
+chk("el aviso no miente: 52 envíos semanales con ventana «mes» caen en un puñado de periodos",
+  sabados2026.length === 52 && periodos2026.size <= 13 && periodos2026.size >= 12,
+  `${sabados2026.length} envíos → ${periodos2026.size} periodo(s) distintos`);
+chk("…y ningún envío queda sin periodo (cada sábado pide uno, aunque se repita)",
+  sabados2026.every((d) => !!vMes(d).fin));
+// El caso que desmintió la primera redacción, conservado: el 31-10-2026 es sábado.
+chk("un sábado que además es el último día del mes pide SU mes, no el anterior",
+  tocaHoy("semanal", "2026-10-31") && vMes("2026-10-31").inicio === "2026-10-01",
+  JSON.stringify(vMes("2026-10-31")));
+
+// La compatibilidad: la ventana de siempre sigue siendo la de 7 días.
+chk("ventanaSemanal ≡ ventanaDe(\"7\")",
+  JSON.stringify(ventanaSemanal("2026-09-19")) === JSON.stringify(ventanaDe("7", "2026-09-19")));
 
 // ── Cierre ────────────────────────────────────────────────────────────────────
 console.log(`\n${fallos === 0 ? "TODO EN VERDE" : `${fallos} FALLO(S)`}\n`);
