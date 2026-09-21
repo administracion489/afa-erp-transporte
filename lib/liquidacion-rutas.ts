@@ -261,12 +261,45 @@ export async function guardarPaxDeServicios(
 /**
  * Pax contratado por cotización, leído de `items_json`.
  *
- * Una cotización puede tener varios ítems y la reserva no guarda a cuál pertenece. Por
- * eso solo se usa el número cuando NO hay ambigüedad: si todos los ítems que declaran
- * pax declaran el mismo, ese es; si declaran distintos, se devuelve null y la cascada
- * sigue de largo. Adivinar aquí sería volver al problema que este módulo viene a
- * resolver, solo que con otra fuente.
+ * Una cotización puede tener varios ítems y la reserva no guarda a cuál pertenece —
+ * `ModalGenerarPrograma` arma UN MÓVIL POR ÍTEM, y cada móvil puede tener su propia
+ * capacidad. Por eso solo se usa el número cuando la cotización no puede estar hablando
+ * de otro móvil.
+ *
+ * UN ÍTEM MUDO NO CONSIENTE, y esa es la corrección que costó un número falso en
+ * producción. La versión anterior miraba solo "los ítems que DECLARAN pax": con tres
+ * móviles donde uno declaraba 10 y los otros dos no declaraban nada, `paxes.length === 1`
+ * y esos 10 se le prestaban a los tres. En el portal del cliente, la RUTA C —un bus de
+ * 50 asientos con 34 pasajeros a bordo— salió publicada como «34 / 10 de contratados»,
+ * que es un contrato que nadie firmó enseñado a la cara del cliente. El silencio de un
+ * ítem no es un acuerdo con el que sí habló: es que de ESE móvil no se sabe nada, y el
+ * móvil de esta reserva puede ser justo ese.
+ *
+ * La regla queda: la cotización contesta solo si TODOS sus ítems declaran pax y declaran
+ * el MISMO. Cualquier otra cosa —uno mudo, dos números distintos, sin ítems— devuelve
+ * null y la cascada sigue de largo hasta `cliente_ruta` o hasta nada. Es la dirección
+ * segura de siempre: un dato de menos se completa desde `/programacion`, que además lo
+ * dice en ámbar; un dato falso se descubre cuando el cliente rechaza la valorización.
+ *
+ * Lo que NO cambia: el escalón sigue sirviendo para lo que se creó —los servicios
+ * generados antes de que existiera `reservas.capacidad_contratada`—, porque una
+ * cotización de un solo móvil, o de varios con la misma capacidad, se resuelve igual.
  */
+export function paxDeItems(itemsJson: unknown): number | null {
+  const items = Array.isArray(itemsJson) ? itemsJson : [];
+  // Sin ítems la cotización no describe ningún móvil: no hay nada que contestar.
+  if (!items.length) return null;
+  const declarados = items.map((it: any) => {
+    const n = Number((it as any)?.pax_contratado ?? 0);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  });
+  // Basta un ítem mudo para que la cotización deje de poder hablar por esta reserva.
+  if (declarados.some((n) => n == null)) return null;
+  const unicos = new Set(declarados as number[]);
+  return unicos.size === 1 ? [...unicos][0] : null;
+}
+
+/** Lo mismo para un lote de cotizaciones. La regla vive arriba, en `paxDeItems`. */
 export async function cargarPaxDeCotizaciones(
   sb: any,
   cotizacionIds: number[]
@@ -282,15 +315,8 @@ export async function cargarPaxDeCotizaciones(
         .in("id", ids.slice(i, i + 200));
       if (error) return out;
       for (const c of ((data as any[]) ?? [])) {
-        const items = Array.isArray(c.items_json) ? c.items_json : [];
-        const paxes = [
-          ...new Set(
-            items
-              .map((it: any) => Number(it?.pax_contratado ?? 0))
-              .filter((n: number) => Number.isFinite(n) && n > 0)
-          ),
-        ];
-        if (paxes.length === 1) out.set(Number(c.id), Number(paxes[0]));
+        const p = paxDeItems(c.items_json);
+        if (p != null) out.set(Number(c.id), p);
       }
     }
   } catch {
