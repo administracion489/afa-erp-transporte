@@ -16,6 +16,7 @@ import { idAfa } from "@/lib/folio";
 import { fmtCoord } from "@/lib/coordenadas";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado } from "@/lib/documentos-servicio";
+import { logoDeFondo } from "@/lib/empresa-perfil";
 import { saveSession, loadSession, clearSession, getPortalToken, portalApi } from "@/lib/portal-sesion";
 
 // Los dos modales se cargan al abrirlos, no al entrar al portal. Ambos se montan detrás
@@ -120,7 +121,10 @@ function hhmmLima(ms: number): string {
 }
 
 type GPS            = { lat: number; lng: number; velocidad: number; timestamp: string; estado?: string; };
-type EmpresaPerfil  = { nombre: string | null; logo_url: string | null; color_primario: string | null; telefono: string | null; email: string | null; slogan: string | null; };
+// `logo_claro_url` es la versión del logo para fondos OSCUROS, y este portal es casi todo
+// fondo oscuro: el panel del login y la barra superior. Cuál se pinta en cada sitio lo
+// decide `logoDeFondo` (lib/empresa-perfil.ts), que es donde está escrito el porqué.
+type EmpresaPerfil  = { nombre: string | null; logo_url: string | null; logo_claro_url: string | null; color_primario: string | null; telefono: string | null; email: string | null; slogan: string | null; };
 type ConductorInfo  = { nombre: string; numero_licencia: string | null; telefono: string | null; };
 type VehiculoInfo   = { placa: string; };
 type Tab = "dashboard" | "activos" | "historial" | "facturacion" | "documentos" | "cuenta";
@@ -572,8 +576,17 @@ export default function ClientePortal() {
 
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    supabase.from("empresa_perfil").select("nombre,logo_url,color_primario,telefono,email,slogan").eq("id", 1).maybeSingle()
-      .then(({ data }: any) => { if (data) setEmpresa(data as EmpresaPerfil); });
+    // Se pide SIN `logo_claro_url` si la columna no está: es de una migración accesoria y
+    // sin ella el error tumbaría la consulta entera, o sea el portal perdería también el
+    // nombre y el teléfono de la empresa. El logo claro es un extra; los datos, no.
+    (async () => {
+      const COLS = "nombre,logo_url,color_primario,telefono,email,slogan";
+      let { data, error }: any = await supabase.from("empresa_perfil").select(`${COLS},logo_claro_url`).eq("id", 1).maybeSingle();
+      if (error && /logo_claro_url/i.test(error.message || "")) {
+        ({ data } = await supabase.from("empresa_perfil").select(COLS).eq("id", 1).maybeSingle());
+      }
+      if (data) setEmpresa({ logo_claro_url: null, ...data } as EmpresaPerfil);
+    })();
     const saved = loadSession();
     if (saved) {
       setCliente(saved.c); setPortalUsuario(saved.u);
@@ -2481,8 +2494,8 @@ export default function ClientePortal() {
             {/* Logo */}
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <img
-                src={empresa?.logo_url || "/logoafa-removebg-preview.png"}
-                alt="AFA Tours Peru"
+                src={logoDeFondo(empresa, "oscuro") || "/logoafa-removebg-preview.png"}
+                alt={empresa?.nombre || "Portal cliente"}
                 style={{ height: 38, objectFit: "contain", imageRendering: "-webkit-optimize-contrast" as any }}
               />
               <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase" as const, marginLeft: 4 }}>· Portal Cliente</span>
@@ -3129,7 +3142,10 @@ export default function ClientePortal() {
       <div style={{ background: C.navyDeep, borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "0 20px", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 30, height: 56 }}>
         {/* Logo */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-          <img src="/logoafa-removebg-preview.png" alt="AFA Tours Peru" style={{ height: 36, objectFit: "contain", imageRendering: "-webkit-optimize-contrast" as any }} />
+          {/* Fondo oscuro, igual que el panel del login — y hasta hoy el asset iba
+              hardcodeado: esta barra no leía el perfil, así que ni con el logo claro
+              subido cambiaba nada, y el portal de un comprador saldría con el de AFA. */}
+          <img src={logoDeFondo(empresa, "oscuro") || "/logoafa-removebg-preview.png"} alt={empresa?.nombre || "Portal cliente"} style={{ height: 36, objectFit: "contain", imageRendering: "-webkit-optimize-contrast" as any }} />
           <span style={{ color: "rgba(255,255,255,0.22)", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase" as const }}>PORTAL CLIENTE</span>
         </div>
 

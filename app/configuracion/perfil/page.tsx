@@ -411,10 +411,41 @@ export default function PerfilEmpresaPage() {
       const urlBase = urlConCache.split("?")[0];
       const campo = tipo === "principal" ? "logo_url" : "logo_claro_url";
 
-      await supabase
+      // EL ERROR DE ESTE UPDATE NO SE MIRABA, y el toast decía «actualizado ✓» igual.
+      // La imagen sí subía al bucket, así que la vista previa la pintaba desde el estado
+      // local y todo parecía correcto — hasta recargar. Una pantalla que afirma haber
+      // guardado lo que no llegó a la fila es el peor modo de fallar: el operador da el
+      // dato por puesto y el defecto reaparece semanas después en otra pantalla.
+      // `.select("id")` además distingue el caso sin error y sin fila: un perfil que
+      // todavía no se guardó ni una vez no tiene la fila 1 que este UPDATE busca.
+      const { data: filas, error } = await supabase
         .from("empresa_perfil")
         .update({ [campo]: urlBase, updated_at: new Date().toISOString() })
-        .eq("id", 1);
+        .eq("id", 1)
+        .select("id");
+
+      // El aviso separa las DOS mitades: la imagen ya está en el bucket, lo que no quedó
+      // es la referencia en el perfil. Decir «error al subir» mandaría a repetir la subida,
+      // que es justo lo único que sí funcionó.
+      if (error) {
+        // La columna del logo claro es de una migración accesoria: se NOMBRA el SQL en vez
+        // de enseñar el error crudo de Postgres, que para el operador es «no me deja».
+        const faltaColumna = /logo_claro_url/i.test(error.message || "");
+        mostrarToast(
+          faltaColumna
+            ? "La imagen subió, pero NO quedó guardada en el perfil: falta correr supabase/empresa-03-logo-claro.sql"
+            : "La imagen subió, pero NO quedó guardada en el perfil: " + error.message,
+          "error"
+        );
+        return;
+      }
+      if (!filas?.length) {
+        mostrarToast(
+          "La imagen subió, pero el perfil aún no existe: pulsa «Guardar cambios» una vez y vuelve a subir el logo",
+          "error"
+        );
+        return;
+      }
 
       setPerfil((p) => ({ ...p, [campo]: urlConCache }));
       mostrarToast(
