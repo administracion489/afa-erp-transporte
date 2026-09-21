@@ -15,6 +15,7 @@ import { esAbordado } from "@/lib/documentos-servicio";
 import { paginarFilas } from "@/lib/huella";
 import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
 import { derivarTiempos, procedencia, type Instante } from "@/lib/servicio-tiempos";
+import { SIN_NOMBRE_RUTA, ETIQUETA_RECORRIDO } from "@/lib/ruta-identidad";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -480,12 +481,17 @@ function CeldaRuta({ s, onGuardado, onMasivo }: { s: ServicioView; onGuardado: (
           <button
             onClick={abrir}
             disabled={guardando}
+            /* El tooltip decía que sin nombre «al pasajero le saldrá origen → destino», y
+               eso dejó de ser cierto: ni la app del pasajero ni el portal del cliente
+               sustituyen ya un dato por el otro — enseñan los dos, cada uno rotulado. Una
+               pantalla que describe un comportamiento que el sistema ya no tiene es el
+               mismo defecto que la etiqueta invertida del horario del conductor. */
             title={nombre
-              ? `${nombre}\n\nEs el nombre que ve el pasajero al elegir su bus. Clic para editarlo.`
-              : "Sin nombre de ruta: al pasajero le saldrá “origen → destino”. Clic para ponerle nombre."}
+              ? `${nombre}\n\nEs el nombre que ve el pasajero al elegir su bus, y el que el cliente ve en su portal. Clic para editarlo.`
+              : `Sin nombre de ruta: el pasajero y el cliente verán “${SIN_NOMBRE_RUTA}” y tendrán que distinguirla por su ${ETIQUETA_RECORRIDO.toLowerCase()}. Clic para ponerle nombre.`}
             className={`absolute inset-0 flex items-center rounded-md px-1.5 text-left text-[11px] leading-tight transition-colors ${guardando ? "opacity-50" : ""} ${
               nombre ? "font-semibold text-[#0b315f] hover:bg-[#EFF6FF]" : "font-medium italic text-gray-300 hover:bg-gray-50 hover:text-gray-400"}`}>
-            <span className="truncate">{nombre || "Sin nombre"}</span>
+            <span className="truncate">{nombre || SIN_NOMBRE_RUTA}</span>
           </button>
         )}
       </div>

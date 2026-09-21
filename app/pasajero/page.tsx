@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, esAppNativa, bateriaExenta, solicitarExencionBateria, type GeoWatch } from "@/lib/geo";
 import { detectarSoportePush, activarPushWeb, activarPushNativo, desactivarPush, resincronizarSuscripcion, permisoBloqueado, type SoportePush } from "@/lib/push-cliente";
+import { identidadRuta, SIN_NOMBRE_RUTA } from "@/lib/ruta-identidad";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
@@ -2358,9 +2359,22 @@ export default function AppPasajero() {
                                     <IconBus sz={22} c="var(--navy)" />
                                   </div>
                                   <div style={{ flex: 1, minWidth: 0 }}>
-                                    <p style={{ margin: 0, fontWeight: 800, fontSize: 14, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                      {r.ruta_nombre || `${r.origen} → ${r.destino}`}
-                                    </p>
+                                    {/* El NOMBRE de la ruta y el ORIGEN → DESTINO son dos datos:
+                                        colapsarlos (`ruta_nombre || origen → destino`) hacía que
+                                        una ruta sin nombre se presentara con su plus code
+                                        geocodificado como si ESE fuera su nombre. Se enseñan los
+                                        dos — y con dos rutas sin nombre, el recorrido es justo lo
+                                        único que las distingue. */}
+                                    {(() => { const id = identidadRuta(r as any); return (<>
+                                      <p style={{ margin: 0, fontWeight: 800, fontSize: 14, color: id.nombre ? "var(--ink)" : "var(--mute)", fontStyle: id.nombre ? "normal" : "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                        {id.nombre ?? SIN_NOMBRE_RUTA}
+                                      </p>
+                                      {id.recorrido && (
+                                        <p style={{ margin: "2px 0 0", fontSize: 11.5, color: "var(--mute)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                          {id.recorrido}
+                                        </p>
+                                      )}
+                                    </>); })()}
                                     <p style={{ margin: "3px 0 0", fontSize: 12, color: "var(--mute)" }}>
                                       Hoy · {(r.hora_servicio || "—").slice(0, 5)} · {(r.paradas || []).length} paraderos
                                     </p>
@@ -2397,9 +2411,19 @@ export default function AppPasajero() {
                               </button>
                               <Eyebrow color="var(--navy)">Elige tu paradero</Eyebrow>
                             </div>
-                            <p style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>
-                              {ruta?.ruta_nombre || `${ruta?.origen} → ${ruta?.destino}`}
-                            </p>
+                            {/* El colapso con template literal además imprimía literalmente
+                                "undefined → undefined" cuando `ruta` todavía no estaba
+                                resuelta: `${undefined}` no es cadena vacía. */}
+                            {(() => { const id = identidadRuta(ruta as any); return (
+                              <div style={{ margin: "0 0 12px" }}>
+                                <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: id.nombre ? "var(--ink)" : "var(--mute)", fontStyle: id.nombre ? "normal" : "italic" }}>
+                                  {id.nombre ?? SIN_NOMBRE_RUTA}
+                                </p>
+                                {id.recorrido && (
+                                  <p style={{ margin: "2px 0 0", fontSize: 11.5, color: "var(--mute)" }}>{id.recorrido}</p>
+                                )}
+                              </div>
+                            ); })()}
                             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
                               {paradas.map((p: any, i: number) => {
                                 const sel = p.id === selParadaId;
