@@ -18,6 +18,10 @@ import {
 } from "@/lib/reservas-pacto";
 import { planDeCancelacion, esCancelacion } from "@/lib/reservas-cancelacion";
 import {
+  planMasivo, TEXTO_MOTIVO,
+  type EjeMasivo, type ResumenEje, type ServicioMasivo,
+} from "@/lib/reservas-masivo";
+import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxDeServicio,
   normalizarNombreRuta, type CatalogoRutas, type PaxResuelto,
 } from "@/lib/liquidacion-rutas";
@@ -641,7 +645,29 @@ export default function ReservasPage() {
     cotizacion_id: number;
     payload: Record<string, any>;
     otrasReservas: Reserva[];   // todos los servicios activos del contrato (sin filtrar)
+    /**
+     * TODAS las filas del contrato, incluido el servicio que se acaba de guardar y ya con
+     * su importe nuevo. No se escribe sobre ellas: sirven para saber cómo es cada DÍA.
+     *
+     * Sin esto, el hermano del servicio recién editado se vería como un día sin importe y
+     * recibiría la tarifa que ese acaba de recibir — el cobro doble en el único día que el
+     * operador sí revisó. Ver la cabecera de lib/reservas-masivo.ts.
+     */
+    contexto: Reserva[];
     horaOriginal: string;       // hora del servicio editado, antes de guardar
+    horaNueva: string;          // la que se acaba de guardar ("" si no cambió)
+    /** Sentido del servicio editado: decide qué tramo del día lleva el importe cuando ninguno lo lleva. */
+    sentidoEditado: string | null;
+    /** Precio de venta y costo recién escritos, SOLO si el operador los tocó. null = no se ofrecen. */
+    precio: number | null;
+    costo: number | null;
+    /**
+     * El motivo y la nota que el operador puso en el formulario. Viajan acá porque
+     * `limpiar()` corre antes de abrir el modal y vaciaba el form: el masivo escribía
+     * `motivo: null` SIEMPRE, así que el acta de 900 servicios no decía por qué.
+     */
+    motivo: string;
+    nota: string;
     resumen: string;            // "Vehículo · Conductor" para mostrar en el modal
     /**
      * PAX contratados, SOLO si el operador acaba de cambiarlos. null cuando no los tocó:
@@ -654,7 +680,8 @@ export default function ReservasPage() {
     /**
      * Lo que este servicio decía ANTES. Es lo que distingue "corregir la capacidad de
      * esta ruta" de "pisarle la suya a otro móvil": una misma cotización puede tener
-     * tres ítems con pax distinto, y el masivo no filtra por móvil. Ver `aceptaPax`.
+     * tres ítems con pax distinto, y el eje del pax no filtra por móvil. La regla que lo
+     * impide es `motivoPaxDe` en lib/reservas-masivo.ts.
      */
     paxAntes: number | null;
     /**
@@ -668,14 +695,43 @@ export default function ReservasPage() {
   const [aplicarDesde,         setAplicarDesde]         = useState("");
   const [aplicarHasta,         setAplicarHasta]         = useState("");
   /**
-   * "pax" es su propio modo, y no una casilla más sobre "todo": quien viene solo a
-   * corregir los asientos contratados no quiere de paso reescribir el vehículo y el
-   * conductor de 30 fechas. Solo se ofrece cuando el pax se acaba de tocar.
+   * ── LOS SEIS EJES DEL MASIVO ─────────────────────────────────────────────
+   * Antes esto era UN selector de tres modos excluyentes (`todo | conductor | pax`), o
+   * sea tres PAQUETES: el precio de venta no tenía camino masivo por ningún lado y el
+   * costo del proveedor solo viajaba pegado a «Empresa y unidad». Ahora cada cosa se
+   * marca por separado y cada una tiene su propio conjunto de destinatarios — la regla
+   * de quién recibe qué vive entera en lib/reservas-masivo.ts, no acá.
+   *
+   * La asignación sigue siendo UN selector y no dos casillas: empresa, unidad y conductor
+   * están entrelazados y mandarle a la empresa B el conductor de la empresa A deja una
+   * fila que no describe a nadie.
    */
-  const [aplicarCampos,        setAplicarCampos]        = useState<"todo" | "conductor" | "pax">("todo");
+  const [aplicarAsignacion,    setAplicarAsignacion]    = useState<"no" | "completa" | "conductor">("completa");
+  const [aplicarHora,          setAplicarHora]          = useState(false);
   const [aplicarPax,           setAplicarPax]           = useState(true);
+  /**
+   * LOS DOS EJES DE DINERO NACEN APAGADOS, SIEMPRE, y es la única regla de este bloque
+   * que no se puede aflojar. Un eje pre-marcado escribe plata en cientos de filas porque
+   * nadie leyó una casilla, y la asimetría de siempre manda: cobrar (o pagar) de menos se
+   * reclama y se corrige; de más hay que pedir que lo devuelvan, y no vuelve.
+   *
+   * Esto CAMBIA lo de antes a propósito: «Empresa y unidad» arrastraba `costo_proveedor`
+   * sin decirlo. Ahora, si se reasigna sin marcar el costo, la pantalla lo avisa en ámbar
+   * en vez de escribirlo sola.
+   */
+  const [aplicarPrecio,        setAplicarPrecio]        = useState(false);
+  const [aplicarCosto,         setAplicarCosto]         = useState(false);
+  const [aplicarMotivo,        setAplicarMotivo]        = useState("");
   const [aplicarOtraHora,      setAplicarOtraHora]      = useState(false);
   const [aplicarOtraUnidad,    setAplicarOtraUnidad]    = useState(false);
+  /**
+   * Los servicios del contrato ya reclamados por una liquidación EMITIDA. Se consulta
+   * best-effort al abrir el modal y solo cuando hay dinero que ofrecer: el papel que el
+   * cliente firmó no cambia porque acá se toque un número. `null` = todavía no se sabe,
+   * y nunca se afirma un vacío mientras se está buscando.
+   */
+  const [aplicarLiquidadas,    setAplicarLiquidadas]    = useState<
+    { cliente: Set<number>; proveedor: Set<number> } | null>(null);
   const [aplicando,            setAplicando]            = useState(false);
   const [sincCoords,           setSincCoords]           = useState<{ activo: boolean; msg: string }>({ activo: false, msg: "" });
   // ── Edición de hora "solo este servicio" (MVP) ────────────────────────────
@@ -2284,20 +2340,49 @@ export default function ReservasPage() {
           const eNombre = empresasTer.find(e => e.id === Number(form.empresa_tercerizada_id))?.razon_social || "";
           resumen = eNombre;
         }
+        // El COSTO solo se ofrece si de verdad cambió: el campo se rellena en cada
+        // edición, así que "hay un número" no significa que alguien lo haya tocado.
+        const costoAntes = Number(reservaActual.costo_proveedor ?? 0);
+        const costoTocado = form.tipo_asignacion === "tercerizado" && costo !== costoAntes;
+        // El motivo y la nota se capturan ANTES de `limpiar()`: leerlos del formulario
+        // dentro de `aplicarMasivo` devolvía siempre "" y el acta salía sin motivo.
+        const motivoEditado = form.cambio_motivo || "";
+        const notaEditada   = form.cambio_nota.trim() || "";
         limpiar();
         setGuardando(false);
         setAplicarScope("todos");
         setAplicarDesde("");
         setAplicarHasta("");
-        setAplicarCampos("todo");
+        setAplicarAsignacion("completa");
         setAplicarOtraHora(false);
         setAplicarOtraUnidad(false);
+        setAplicarMotivo(motivoEditado);
+        setAplicarLiquidadas(null);
+        // La HORA nace marcada cuando se acaba de correr: es lo que el modo «todo» hacía
+        // antes sin casilla, así que el comportamiento por defecto no cambia — solo pasa
+        // a verse, y a poder apagarse.
+        setAplicarHora(!!asignPayload.hora_servicio
+          && String(asignPayload.hora_servicio).slice(0, 5) !== horaOriginal);
         // Marcado por defecto solo cuando hay un número que propagar: con el campo
         // vaciado, el default estaría BORRANDO la capacidad de 30 servicios.
         setAplicarPax(paxEscrito != null);
+        // Y EL DINERO NACE APAGADO, SIEMPRE. Ver la declaración de los dos estados.
+        setAplicarPrecio(false);
+        setAplicarCosto(false);
         setModalAplicarMasivo({
           cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas,
+          // El contrato ENTERO, incluido el servicio que se acaba de guardar. Se lee del
+          // servidor DESPUÉS de escribirlo, así que esa fila ya trae su importe nuevo —
+          // que es justo lo que hace falta: sin ella a la vista, su propio hermano se
+          // vería como un día sin tarifa y se la llevaría también. Ese es el cobro doble
+          // en el único día que el operador sí revisó.
+          contexto: delContrato as Reserva[],
           horaOriginal, resumen, pax: paxEscrito, paxTocado,
+          horaNueva: form.hora_servicio?.slice(0, 5) || "",
+          sentidoEditado: reservaActual.direccion_servicio ?? null,
+          precio: precioTocado ? Number(form.precio_cliente) : null,
+          costo:  costoTocado  ? costo : null,
+          motivo: motivoEditado, nota: notaEditada,
           paxAntes: reservaActual.capacidad_contratada ?? null,
           rutasObjetivo: [
             normalizarNombreRuta(reservaActual.ruta_nombre),
@@ -2312,212 +2397,133 @@ export default function ReservasPage() {
     limpiar(); cargarDatos(); setGuardando(false);
   };
 
-  // Un servicio "conserva su unidad" si aplicarle la asignación completa no le cambia
-  // ninguna unidad que YA tenía: los campos vacíos se completan, pero los que tienen valor
-  // no se pisan. Se comparan los tres campos de unidad a la vez, no solo el del tipo del
-  // payload: un servicio tercerizado tiene vehiculo_id = null (miraríamos el campo
-  // equivocado y lo daríamos por "libre") pero su empresa_tercerizada_id sí está puesta, y
-  // una asignación propia se la borraría junto con su unidad, su conductor y su costo.
-  const conservaUnidad = (r: Reserva, payload: Record<string, any>) => {
-    const pisa = (actual: number | null, nuevo: any) =>
-      actual !== null && actual !== undefined && actual !== (nuevo ?? null);
-    return !pisa(r.vehiculo_id,            payload.vehiculo_id)
-        && !pisa(r.empresa_tercerizada_id, payload.empresa_tercerizada_id)
-        && !pisa(r.vehiculo_tercero_id,    payload.vehiculo_tercero_id);
-  };
+  /**
+   * EL PLAN DEL MASIVO. Un solo objeto para pintar y para escribir: la pantalla enseña
+   * exactamente lo que va a ocurrir porque es literalmente lo mismo que se manda. Dos
+   * motores —uno para contar y otro para guardar— terminan contestando distinto, que es
+   * el bug del semáforo de puntualidad.
+   *
+   * La REGLA de quién recibe qué vive entera en lib/reservas-masivo.ts, con su matriz:
+   * acá solo se le entrega lo que la pantalla sabe.
+   */
+  const plan = useMemo(() => {
+    const m = modalAplicarMasivo;
+    if (!m) return null;
+    const comoServicio = (r: Reserva): ServicioMasivo => r as unknown as ServicioMasivo;
+    const propioCompleto      = m.payload.tipo_asignacion === "propio"
+      && !!m.payload.vehiculo_id && !!m.payload.conductor_id;
+    const tercerizadoCompleto = m.payload.tipo_asignacion === "tercerizado"
+      && !!m.payload.empresa_tercerizada_id && !!m.payload.vehiculo_tercero_id && !!m.payload.conductor_tercero_id;
+    return planMasivo({
+      universo: m.otrasReservas.map(comoServicio),
+      contexto: m.contexto.map(comoServicio),
+      seleccion: {
+        asignacion: aplicarAsignacion,
+        hora:   aplicarHora   && !!m.horaNueva && m.horaNueva !== m.horaOriginal,
+        pax:    aplicarPax    && m.paxTocado,
+        precio: aplicarPrecio && m.precio != null,
+        costo:  aplicarCosto  && m.costo  != null,
+      },
+      payload: m.payload,
+      horaOriginal: m.horaOriginal,
+      horaNueva: m.horaNueva || null,
+      sentidoEditado: m.sentidoEditado,
+      desde: aplicarScope === "rango" ? (aplicarDesde || null) : null,
+      hasta: aplicarScope === "rango" ? (aplicarHasta || null) : null,
+      otraHora: aplicarOtraHora,
+      otraUnidad: aplicarOtraUnidad,
+      pax: m.pax, paxAntes: m.paxAntes, rutasObjetivo: m.rutasObjetivo,
+      precio: m.precio, costo: m.costo,
+      liquidadasCliente:   aplicarLiquidadas?.cliente,
+      liquidadasProveedor: aplicarLiquidadas?.proveedor,
+      estadoPendientes: (propioCompleto || tercerizadoCompleto) ? "confirmada" : "programada",
+    });
+  }, [modalAplicarMasivo, aplicarAsignacion, aplicarHora, aplicarPax, aplicarPrecio,
+      aplicarCosto, aplicarScope, aplicarDesde, aplicarHasta, aplicarOtraHora,
+      aplicarOtraUnidad, aplicarLiquidadas]);
 
   /**
-   * Los hermanos DENTRO del contrato, por los dos sentidos del enlace. Se arma una sola
-   * vez porque `aceptaPax` lo consulta por cada fila y por cada render del modal.
+   * ¿Qué servicios del contrato ya están dentro de una liquidación EMITIDA? Solo se
+   * pregunta cuando hay dinero que ofrecer: es una consulta paginada sobre cientos de
+   * ids y no tiene sentido pagarla para reasignar un bus.
    *
-   * Sin esto, la regla de abajo miraba un retorno —que nace en NULL, porque el generador
-   * escribe la capacidad solo en la ida— y lo tomaba por "sin dato". En un contrato de
-   * tres móviles eso significaba escribir la capacidad del móvil 1 sobre los retornos de
-   * los otros dos: un número que nadie pactó, invisible (la liquidación mira la ida
-   * primero) y sin vuelta atrás, porque el valor anterior era NULL.
+   * Todo el camino es best-effort: si falla, los dos ejes de dinero siguen disponibles
+   * (el candado de verdad es la propia liquidación, que se reabre para corregirse). Lo
+   * que NO se hace es afirmar un vacío mientras se está buscando.
    */
-  const hermanosDelContrato = useMemo(() => {
-    const filas = modalAplicarMasivo?.otrasReservas ?? [];
-    const porId = new Map(filas.map(r => [r.id, r]));
-    // Índice inverso solo con los INEQUÍVOCOS: con dos filas apuntando a la misma, el
-    // enlace está roto de otra forma y elegir una sería adivinar (misma regla que
-    // `hermanoId` y que lib/liquidacion-hermanos.ts).
-    const cuantos = new Map<number, number>();
-    for (const r of filas) {
-      const v = Number(r.reserva_vinculada_id ?? 0);
-      if (v) cuantos.set(v, (cuantos.get(v) ?? 0) + 1);
-    }
-    const inverso = new Map<number, Reserva>();
-    for (const r of filas) {
-      const v = Number(r.reserva_vinculada_id ?? 0);
-      if (v && cuantos.get(v) === 1) inverso.set(v, r);
-    }
-    const de = (r: Reserva): Reserva | undefined =>
-      (r.reserva_vinculada_id ? porId.get(Number(r.reserva_vinculada_id)) : undefined) ?? inverso.get(r.id);
-    return {
-      /** La capacidad que este servicio declara, suya o de su hermano: el pax es del día. */
-      pax: (r: Reserva) => r.capacidad_contratada ?? de(r)?.capacidad_contratada ?? null,
-      /** Los nombres de ruta del día (los dos tramos), normalizados como el catálogo. */
-      rutas: (r: Reserva) => [
-        normalizarNombreRuta(r.ruta_nombre),
-        normalizarNombreRuta(de(r)?.ruta_nombre),
-      ].filter(Boolean),
-    };
+  useEffect(() => {
+    const m = modalAplicarMasivo;
+    if (!m || (m.precio == null && m.costo == null)) { setAplicarLiquidadas(null); return; }
+    let vivo = true;
+    (async () => {
+      const cliente = new Set<number>(), proveedor = new Set<number>();
+      const ids = m.otrasReservas.map(r => r.id);
+      try {
+        for (let i = 0; i < ids.length; i += 200) {
+          const { data, error } = await supabase.from("reservas")
+            .select("id,liquidacion_cliente_id,liquidacion_proveedor_id")
+            .in("id", ids.slice(i, i + 200));
+          if (error) return;                       // sin columnas o sin permiso: se calla
+          for (const r of (data ?? []) as any[]) {
+            if (r.liquidacion_cliente_id)   cliente.add(Number(r.id));
+            if (r.liquidacion_proveedor_id) proveedor.add(Number(r.id));
+          }
+        }
+      } catch { return; }
+      if (vivo) setAplicarLiquidadas({ cliente, proveedor });
+    })();
+    return () => { vivo = false; };
   }, [modalAplicarMasivo]);
 
-  /**
-   * ¿Este servicio acepta la capacidad que se está propagando?
-   *
-   * Una misma cotización puede tener varios ítems con pax distinto (tres móviles, uno de
-   * 15 y dos de 25) y el masivo no filtra por móvil: sin esta regla, corregir un ítem
-   * pisaría la capacidad —correcta— de los otros dos. Dos filtros, y hacen falta los dos:
-   *
-   *   · La RUTA. Un contrato generado antes de que existiera la columna tiene TODAS sus
-   *     capacidades en NULL, así que sin esto una corrección se derramaría sobre las
-   *     otras rutas de la misma cotización. Si no hay nombre de ruta con qué comparar no
-   *     se filtra: es el caso de una sola ruta, y excluir a todos sería peor.
-   *   · La CAPACIDAD, leída del día y no del tramo: se propaga a quien no tiene nada
-   *     escrito ni en su tramo ni en su hermano, o a quien venía diciendo lo mismo que
-   *     decía este servicio antes. Esos son la cohorte que se está corrigiendo; los que
-   *     dicen otra cosa la dicen a propósito.
-   */
-  const motivoPax = (
-    r: Reserva, m: NonNullable<typeof modalAplicarMasivo>
-  ): "ok" | "otra_ruta" | "otra_capacidad" => {
-    if (m.rutasObjetivo.length) {
-      const suyas = hermanosDelContrato.rutas(r);
-      if (suyas.length && !suyas.some(e => m.rutasObjetivo.includes(e))) return "otra_ruta";
-    }
-    const actual = hermanosDelContrato.pax(r);
-    return actual === null || actual === m.paxAntes || actual === m.pax ? "ok" : "otra_capacidad";
-  };
-
-  const aceptaPax = (r: Reserva, m: NonNullable<typeof modalAplicarMasivo>) => motivoPax(r, m) === "ok";
-
-  // Los servicios que recibirán la asignación, según los filtros elegidos en el modal.
-  // Misma lógica en el render (contador) y en el update, para que el número que se ve
-  // sea exactamente el que se escribe.
-  const targetsAplicar = (m: NonNullable<typeof modalAplicarMasivo>) => {
-    const soloConductor = aplicarCampos === "conductor";
-    const soloPax       = aplicarCampos === "pax";
-    return m.otrasReservas.filter(r => {
-      // Los PAX contratados NO se filtran por hora ni por unidad: esos dos filtros
-      // existen para proteger la ASIGNACIÓN (no mandarle el bus de la ida al retorno,
-      // no pisarle la placa a quien ya tiene una), y los asientos no son de la unidad
-      // sino del contrato. Filtrarlos igual dejaría a los retornos sin el número salvo
-      // que el operador marcara "incluir otro horario", que es una casilla puesta ahí
-      // para otra cosa.
-      if (soloPax) {
-        if (aplicarScope === "rango") {
-          if (!r.fecha_servicio) return false;
-          if (aplicarDesde && r.fecha_servicio < aplicarDesde) return false;
-          if (aplicarHasta && r.fecha_servicio > aplicarHasta) return false;
-        }
-        // El que ya declara OTRA capacidad queda fuera del conteo, no solo del update:
-        // el número que se ve tiene que ser el que se escribe.
-        return aceptaPax(r, m);
-      }
-      if (!aplicarOtraHora && (r.hora_servicio?.slice(0, 5) || "") !== m.horaOriginal) return false;
-      if (soloConductor) {
-        // No se toca la unidad, así que da igual qué placa tenga; pero no mezclamos
-        // conductor propio con servicios tercerizados (y viceversa)...
-        if (r.tipo_asignacion && r.tipo_asignacion !== m.payload.tipo_asignacion) return false;
-        // ...ni mandamos el conductor de una empresa proveedora a cubrir los servicios
-        // de otra empresa.
-        if (m.payload.tipo_asignacion === "tercerizado" &&
-            r.empresa_tercerizada_id !== m.payload.empresa_tercerizada_id) return false;
-      } else if (!aplicarOtraUnidad && !conservaUnidad(r, m.payload)) return false;
-      if (aplicarScope === "rango") {
-        if (!r.fecha_servicio) return false;
-        if (aplicarDesde && r.fecha_servicio < aplicarDesde) return false;
-        if (aplicarHasta && r.fecha_servicio > aplicarHasta) return false;
-      }
-      return true;
-    });
-  };
-
   const aplicarMasivo = async () => {
-    if (!modalAplicarMasivo) return;
-    const { payload, horaOriginal } = modalAplicarMasivo;
-    const targets = targetsAplicar(modalAplicarMasivo);
-    if (targets.length === 0) { alert("No hay servicios que cumplan esos filtros"); return; }
+    if (!modalAplicarMasivo || !plan) return;
+    const { horaOriginal, horaNueva } = modalAplicarMasivo;
+    if (plan.patches.length === 0) { alert("No hay servicios que cumplan esos filtros"); return; }
+
+    // EL DINERO SE NOMBRA ANTES DE AUTORIZARLO. Un "¿estás seguro?" sobre un número
+    // abstracto no se audita: acá se dice cuántos servicios, de cuánto a cuánto y qué
+    // suman — el mismo criterio del botón «Poner en S/ 0.00» de /liquidaciones.
+    const mueve = [
+      plan.dinero.precio && `PRECIO DE VENTA de ${plan.dinero.precio.cuantos} servicio(s) a `
+        + `${fmtSoles(plan.dinero.precio.unitario)} c/u  (hoy suman ${fmtSoles(plan.dinero.precio.antes)} `
+        + `→ quedarán ${fmtSoles(plan.dinero.precio.despues)})`,
+      plan.dinero.costo && `COSTO DEL PROVEEDOR de ${plan.dinero.costo.cuantos} servicio(s) a `
+        + `${fmtSoles(plan.dinero.costo.unitario)} c/u  (hoy suman ${fmtSoles(plan.dinero.costo.antes)} `
+        + `→ quedarán ${fmtSoles(plan.dinero.costo.despues)})`,
+    ].filter(Boolean) as string[];
+    if (mueve.length) {
+      const ok = confirm(
+        "Se va a cambiar DINERO en varios servicios del contrato:\n\n"
+        + mueve.map(t => "  · " + t).join("\n\n")
+        + "\n\nCada uno deja su acta de cambio con el motivo que elegiste.\n\n¿Aplicar?");
+      if (!ok) return;
+    }
 
     setAplicando(true);
-    const soloConductor = aplicarCampos === "conductor";
-    const soloPax       = aplicarCampos === "pax";
 
-    // "Solo el conductor": no se escribe vehículo, empresa, tipo ni hora — cada servicio
-    // conserva su unidad y su horario. "Solo los PAX": no se escribe NADA de la
-    // asignación, ni el estado.
-    const baseAsignacion = soloPax
-      ? {}
-      : soloConductor
-        ? (payload.tipo_asignacion === "propio"
-            ? { conductor_id: payload.conductor_id }
-            : { conductor_tercero_id: payload.conductor_tercero_id })
-        : payload;
-
-    // Los PAX contratados viajan aparte de la asignación: son del CONTRATO, no de la
-    // unidad. Por eso se propagan también en "solo el conductor", y son lo único que NO
-    // se le quita a los servicios de otro horario cuando el operador los incluye: la hora
-    // y el costo son de cada tramo, los asientos son del día.
-    const propagaPax = modalAplicarMasivo.paxTocado && (aplicarPax || soloPax);
-    const base: Record<string, any> = propagaPax
-      ? { ...baseAsignacion, capacidad_contratada: modalAplicarMasivo.pax }
-      : baseAsignacion;
-
-    // Nada que escribir (el modo pax con la casilla apagada no debería llegar acá, pero
-    // un update vacío sería un error que se leería como "no se pudo guardar").
-    if (Object.keys(base).length === 0) {
-      setModalAplicarMasivo(null);
-      setAplicando(false);
-      return;
-    }
-
-    const propioCompleto      = payload.tipo_asignacion === "propio" && !!payload.vehiculo_id && !!payload.conductor_id;
-    const tercerizadoCompleto = payload.tipo_asignacion === "tercerizado" && !!payload.empresa_tercerizada_id && !!payload.vehiculo_tercero_id && !!payload.conductor_tercero_id;
-    const estadoPendientes: EstadoReserva = (propioCompleto || tercerizadoCompleto) ? "confirmada" : "programada";
-
-    // Se agrupan los targets por el patch exacto que reciben y se manda un update por lote.
+    // Se agrupan los servicios por el patch EXACTO que reciben y se manda un update por
+    // lote: un contrato de seis meses son un puñado de UPDATE y no 900 peticiones.
     const lotes = new Map<string, { patch: Record<string, any>; ids: number[] }>();
-    const idsConHora: number[] = [];
-    for (const r of targets) {
-      const patch: Record<string, any> = { ...base };
-      // A los servicios de OTRA hora (el retorno) no se les toca ni el horario ni el costo:
-      // la hora los reescribiría con la de la ida, y la ida y el retorno se le pagan distinto
-      // al proveedor. La hora sí se propaga entre los de la misma hora, que es como se cambia
-      // el horario de todo el contrato.
-      if (!soloConductor && !soloPax && (r.hora_servicio?.slice(0, 5) || "") !== horaOriginal) {
-        delete patch.hora_servicio;
-        delete patch.costo_proveedor;
-      }
-      // El que ya declara OTRA capacidad contratada la declara a propósito (otro móvil
-      // del mismo contrato): recibe la asignación, no el pax. En el modo "solo los PAX"
-      // ni siquiera llega acá, porque `targetsAplicar` ya lo dejó fuera del conteo.
-      if (propagaPax && !aceptaPax(r, modalAplicarMasivo)) delete patch.capacidad_contratada;
-      // Los que SÍ se llevan la hora nueva. Se apunta acá y no se vuelve a deducir
-      // después: la condición de arriba es la que manda, y una segunda copia de ella
-      // correría los paraderos de un servicio al que no se le movió el horario.
-      if (patch.hora_servicio) idsConHora.push(r.id);
-      // Un pendiente que queda completamente asignado se confirma. En "solo conductor" no:
-      // el servicio puede seguir sin unidad. Y en "solo los PAX" tampoco: corregir cuántos
-      // asientos se contrataron no programa nada, y confirmar 30 servicios sin unidad
-      // asignada sería mentirle al tablero.
-      if (!soloConductor && !soloPax && r.estado === "pendiente") patch.estado = estadoPendientes;
+    for (const { id, patch } of plan.patches) {
       const key = JSON.stringify(patch);
       const lote = lotes.get(key) || { patch, ids: [] };
-      lote.ids.push(r.id);
+      lote.ids.push(id);
       lotes.set(key, lote);
     }
 
     // Por el helper, igual que el guardado individual: si un lote falla, se reintenta
     // fila por fila y se dice CUÁL falló. Antes, un `.in("id", [50 ids])` que reventaba
     // solo decía "error al actualizar 1 lote" y el operador tenía que adivinar entre 50.
+    //
+    // El motivo sale del modal y ya no de `form`: `limpiar()` corre antes de abrirlo, así
+    // que leerlo del formulario escribía `null` SIEMPRE y el acta de cientos de servicios
+    // no decía por qué se movió el dinero.
     const results = await Promise.all(
       [...lotes.values()].map(l =>
-        guardarReservas(supabase, l.ids, l.patch,
-          { motivo: form.cambio_motivo || null, nota: form.cambio_nota.trim() || null }))
-    );
+        guardarReservas(supabase, l.ids, l.patch, {
+          motivo: aplicarMotivo || modalAplicarMasivo.motivo || null,
+          nota: modalAplicarMasivo.nota || null,
+        })));
     const rechazos = results.flatMap(r => r.rechazos);
     const aviso = results.find(r => r.aviso)?.aviso;
     if (aviso) avisar(aviso);
@@ -2535,14 +2541,13 @@ export default function ReservasPage() {
     //
     // Se corren SOLO los que de verdad se guardaron con la hora nueva: un rechazo
     // dejó su fila con el horario viejo, y moverle los paraderos lo desalinearía al
-    // revés. Se corre también `paradas_json`, que es la semilla de la que se
-    // materializan los paraderos que todavía no existen: dejarla vieja re-inyecta la
-    // hora anterior servicio por servicio durante lo que dure el contrato.
+    // revés. El motor ya devuelve exactamente ese conjunto (`idsConHora`), así que la
+    // condición no se vuelve a deducir acá — una segunda copia es la que se queda atrás.
     const guardados = new Set(results.flatMap(r => r.guardados));
-    const aCorrer = idsConHora.filter(id => guardados.has(id));
-    if (aCorrer.length > 0) {
+    const aCorrer = plan.idsConHora.filter(id => guardados.has(id));
+    if (aCorrer.length > 0 && horaNueva) {
       const corrida = await correrParaderosDeServicios(
-        supabase, aCorrer, horaOriginal, payload.hora_servicio);
+        supabase, aCorrer, horaOriginal, horaNueva);
       const dicho = resumirCorrida(corrida);
       if (dicho) avisar(dicho);
     }
@@ -2551,6 +2556,7 @@ export default function ReservasPage() {
     setAplicando(false);
     cargarDatos();
   };
+
 
   // ── Selección múltiple ───────────────────────────────────────────────────
   const toggleSel = (id: number) => {
@@ -3540,12 +3546,10 @@ export default function ReservasPage() {
         </div>
       )}
 
-      {/* MODAL APLICAR ASIGNACIÓN MASIVA A SERVICIOS FIJOS */}
-      {modalAplicarMasivo && (() => {
-        const { otrasReservas, resumen, cotizacion_id, payload, horaOriginal } = modalAplicarMasivo;
-        const targets = targetsAplicar(modalAplicarMasivo);
-        const soloConductor = aplicarCampos === "conductor";
-        const soloPax       = aplicarCampos === "pax";
+      {/* MODAL APLICAR AL RESTO DEL CONTRATO · SEIS EJES INDEPENDIENTES */}
+      {modalAplicarMasivo && plan && (() => {
+        const m = modalAplicarMasivo;
+        const { otrasReservas, resumen, cotizacion_id, payload, horaOriginal, horaNueva } = m;
 
         // El calendario se abre a TODO el contrato: limitarlo a las fechas de los
         // candidatos ya filtrados hacía que se vieran casi todos los días bloqueados.
@@ -3553,29 +3557,57 @@ export default function ReservasPage() {
         const minF = fechas[0] || "";
         const maxF = fechas[fechas.length - 1] || "";
 
-        // Los conteos de los avisos se calculan sobre el rango de fechas ya elegido: si no,
-        // el modal ofrecería incluir servicios que el rango deja fuera de todos modos.
-        const enRango = (r: Reserva) => aplicarScope !== "rango" || (
-          !!r.fecha_servicio &&
-          (!aplicarDesde || r.fecha_servicio >= aplicarDesde) &&
-          (!aplicarHasta || r.fecha_servicio <= aplicarHasta)
-        );
-        const candidatos = otrasReservas.filter(enRango);
-        const otraHora   = candidatos.filter(r => (r.hora_servicio?.slice(0, 5) || "") !== horaOriginal);
-        const enHora     = aplicarOtraHora ? candidatos : candidatos.filter(r => (r.hora_servicio?.slice(0, 5) || "") === horaOriginal);
-        const otraUnidad = enHora.filter(r => !conservaUnidad(r, payload));
         const hayConductor = payload.tipo_asignacion === "propio" ? !!payload.conductor_id : !!payload.conductor_tercero_id;
-        // Si se cambió la hora del servicio editado, el masivo la propaga a los de su mismo
-        // horario original: hay que decirlo, no es lo que el operador cree estar aplicando.
-        const horaNueva  = payload.hora_servicio?.slice(0, 5) || "";
-        const cambiaHora = !soloConductor && !soloPax && !!horaNueva && horaNueva !== horaOriginal;
-        // Por qué queda fuera cada uno: son DOS trabajos distintos y decirlos con la
-        // misma frase mandaba a los de otra ruta —que se van a imprimir sin el «N PAX»—
-        // con un "la suya es correcta" que no era cierto.
-        const paxOtraRuta = modalAplicarMasivo.paxTocado
-          ? candidatos.filter(r => motivoPax(r, modalAplicarMasivo) === "otra_ruta").length : 0;
-        const paxOtraCapacidad = modalAplicarMasivo.paxTocado
-          ? candidatos.filter(r => motivoPax(r, modalAplicarMasivo) === "otra_capacidad").length : 0;
+        const cambiaHora   = !!horaNueva && horaNueva !== horaOriginal;
+        const tocaDinero   = aplicarPrecio || aplicarCosto;
+        // El acta de cientos de servicios tiene que decir POR QUÉ se movió el dinero. Es
+        // el mismo candado que `falso_flete_motivo` y `adicional_motivo`: cuando la plata
+        // sale de una fila, el motivo es la única constancia que queda.
+        const faltaMotivo  = tocaDinero && !aplicarMotivo;
+
+        /**
+         * Un eje = una casilla, su conteo y por qué el resto queda fuera. Es una FUNCIÓN
+         * que devuelve JSX y no un componente declarado acá dentro: un componente nuevo en
+         * cada render remonta su subárbol, y con él el <input> que se acaba de marcar.
+         */
+        const casillaEje = (
+          eje: EjeMasivo, marcado: boolean, onMarcar: (v: boolean) => void,
+          titulo: React.ReactNode, detalle: React.ReactNode, tono = "#0b315f",
+        ) => {
+          const r: ResumenEje = plan.ejes[eje];
+          return (
+            <label key={eje} className={`block rounded-xl px-3 py-2.5 cursor-pointer border-2 transition-all ${marcado ? "bg-blue-50" : "border-gray-200 bg-white"}`}
+                   style={marcado ? { borderColor: tono } : undefined}>
+              <div className="flex items-start gap-2.5">
+                <input type="checkbox" checked={marcado} onChange={e => onMarcar(e.target.checked)}
+                       className="mt-0.5 accent-[#0b315f]" style={{ accentColor: tono }} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-bold text-sm text-gray-800">{titulo}</p>
+                    {marcado && (
+                      <span className="text-[11px] font-black px-2 py-0.5 rounded-lg whitespace-nowrap"
+                            style={{ background: r.ids.length ? "#e0f2fe" : "#f3f4f6", color: r.ids.length ? "#0369a1" : "#6b7280" }}>
+                        {r.ids.length} serv.
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-0.5">{detalle}</p>
+                  {/* Lo que queda fuera se VE, con su porqué al lado: un conteo que no
+                      cuadra y no se explica manda a consultar la base. */}
+                  {marcado && r.fuera.length > 0 && (
+                    <ul className="mt-1.5 space-y-0.5">
+                      {r.fuera.map(f => (
+                        <li key={f.motivo} className="text-[11px] text-gray-500">
+                          · <b>{f.cuantos}</b> {TEXTO_MOTIVO[f.motivo]}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </label>
+          );
+        };
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -3596,105 +3628,7 @@ export default function ReservasPage() {
                   <p className="font-bold text-green-800">{resumen || "—"}</p>
                 </div>
 
-                {/* ── PAX contratados ────────────────────────────────────────────
-                    El pax es del CONTRATO: si cambió, cambió para todos los días de la
-                    misma ruta, y corregirlo de a uno en 30 fechas es lo que hace que
-                    nadie lo corrija. Pero es una escritura sobre 30 filas, así que se
-                    ofrece marcado y a la vista, nunca en silencio. */}
-                {modalAplicarMasivo.paxTocado && !soloPax && (
-                  <label className="flex items-start gap-2.5 cursor-pointer rounded-xl px-4 py-3"
-                         style={{ background: "#eff6ff", border: "1px solid #bfdbfe" }}>
-                    <input type="checkbox" checked={aplicarPax}
-                           onChange={e => setAplicarPax(e.target.checked)}
-                           className="mt-0.5 accent-[#0b315f]" />
-                    <span className="text-xs text-blue-900">
-                      Aplicar también los <b>PAX contratados</b>{" "}
-                      {modalAplicarMasivo.pax != null
-                        ? <>(<b>{modalAplicarMasivo.pax}</b> asientos)</>
-                        : <>(<b>vacío</b>: se borra la capacidad escrita en esos servicios)</>}.
-                      <span className="block text-blue-700/70 mt-0.5">
-                        Los asientos son del contrato, no de la unidad: se escriben aunque
-                        elijas «solo el conductor». Acá viajan pegados a la asignación, así
-                        que los retornos solo los reciben si marcas abajo los de otro horario
-                        — para alcanzarlos a todos, usa <b>«Solo los PAX contratados»</b>.
-                        {paxOtraCapacidad > 0 && (
-                          <> <b>{paxOtraCapacidad} servicio(s) ya declaran otra capacidad y no
-                          se tocan</b>: son otro móvil de esta ruta.</>
-                        )}
-                        {paxOtraRuta > 0 && (
-                          <> <b>{paxOtraRuta} servicio(s) son de otras rutas de este
-                          contrato</b> y tampoco se tocan: los PAX son de cada ruta.</>
-                        )}
-                      </span>
-                    </span>
-                  </label>
-                )}
-                {soloPax && (
-                  <div className="rounded-xl px-4 py-3 text-xs" style={{ background: "#eff6ff", border: "1px solid #bfdbfe", color: "#0b315f" }}>
-                    Se escribirán{" "}
-                    {modalAplicarMasivo.pax != null
-                      ? <><b>{modalAplicarMasivo.pax} PAX contratados</b></>
-                      : <><b>los PAX en blanco</b> (se borra la capacidad escrita en esos servicios)</>}
-                    {" "}y nada más. Entran las idas <b>y</b> los retornos del rango: los
-                    asientos son del día completo.
-                    {paxOtraCapacidad > 0 && (
-                      <span className="block mt-1">
-                        Quedan fuera <b>{paxOtraCapacidad} servicio(s)</b> que ya declaran otra
-                        capacidad: son otro móvil de esta ruta y la suya es correcta. Para
-                        cambiarlos, abre uno de ellos.
-                      </span>
-                    )}
-                    {paxOtraRuta > 0 && (
-                      <span className="block mt-1">
-                        Quedan fuera <b>{paxOtraRuta} servicio(s) de otras rutas</b> de este
-                        contrato: los PAX son de cada ruta, así que esos se corrigen abriendo
-                        uno de ellos. <b>Si están en blanco, su ítem saldrá sin el «N PAX».</b>
-                      </span>
-                    )}
-                  </div>
-                )}
-
-                {/* Qué campos aplicar */}
-                {(hayConductor || modalAplicarMasivo.paxTocado) && (
-                  <div className="space-y-2">
-                    <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">¿Qué aplicar?</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${aplicarCampos === "todo" ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
-                        <div className="flex items-center gap-2">
-                          <input type="radio" name="campos" checked={aplicarCampos === "todo"} onChange={() => setAplicarCampos("todo")} className="accent-[#0b315f]" />
-                          <p className="font-bold text-sm text-gray-800">{payload.tipo_asignacion === "propio" ? "Vehículo y conductor" : "Empresa y unidad"}</p>
-                        </div>
-                        <p className="text-[11px] text-gray-500 mt-1 ml-6">Reemplaza la asignación completa.</p>
-                      </label>
-                      {hayConductor && (
-                        <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
-                          <div className="flex items-center gap-2">
-                            <input type="radio" name="campos" checked={soloConductor} onChange={() => setAplicarCampos("conductor")} className="accent-[#0b315f]" />
-                            <p className="font-bold text-sm text-gray-800">Solo el conductor</p>
-                          </div>
-                          <p className="text-[11px] text-gray-500 mt-1 ml-6">Cada servicio conserva su unidad.</p>
-                        </label>
-                      )}
-                      {/* Su propio modo, no una casilla sobre "todo": quien vino a corregir
-                          los asientos contratados no quiere de paso reescribirle el
-                          vehículo y el conductor a 30 fechas. */}
-                      {modalAplicarMasivo.paxTocado && (
-                        <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloPax ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
-                          <div className="flex items-center gap-2">
-                            <input type="radio" name="campos" checked={soloPax} onChange={() => setAplicarCampos("pax")} className="accent-[#0b315f]" />
-                            <p className="font-bold text-sm text-gray-800">Solo los PAX contratados</p>
-                          </div>
-                          <p className="text-[11px] text-gray-500 mt-1 ml-6">
-                            No toca unidad, conductor, hora ni estado. Alcanza a los dos tramos
-                            del día.
-                          </p>
-                        </label>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Opciones */}
+                {/* ── ¿A cuántos servicios? El RANGO va primero porque acota todo lo de abajo ── */}
                 <div className="space-y-2">
                   <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">¿A cuántos servicios aplicar?</p>
 
@@ -3727,57 +3661,173 @@ export default function ReservasPage() {
                   </label>
                 </div>
 
-                {/* Qué se incluye / qué se está dejando fuera. En "solo los PAX" no
-                    aplica: esos filtros protegen la asignación, y ahí no se escribe. */}
-                {!soloPax && (otraHora.length > 0 || otraUnidad.length > 0 || soloConductor) && (
-                  <div className="space-y-1.5 rounded-xl border border-gray-200 px-4 py-3">
-                    <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">Incluir también</p>
+                {/* ── QUÉ SE APLICA · cada casilla alcanza a SU propio conjunto ────────
+                    Antes esto era un selector de tres modos excluyentes, así que el precio
+                    de venta no tenía camino masivo y el costo solo viajaba pegado al bus.
+                    Los filtros de cada eje NO son intercambiables: los de la asignación
+                    protegen el despacho, los del pax alcanzan a los dos tramos del día y
+                    los del dinero eligen UNO solo. Ver lib/reservas-masivo.ts. */}
+                <div className="space-y-2">
+                  <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">¿Qué se aplica?</p>
 
-                    {otraHora.length > 0 && (
-                      <label className="flex items-start gap-2.5 cursor-pointer">
-                        <input type="checkbox" checked={aplicarOtraHora} onChange={e => setAplicarOtraHora(e.target.checked)} className="mt-0.5 accent-[#0b315f]" />
-                        <span className="text-xs text-gray-700">
-                          Los servicios de <b>otro horario</b> (ida y retorno) — {otraHora.length} servicio(s).
-                          <span className="text-gray-400"> Por defecto solo se aplica a los de las {horaOriginal || "—"}.</span>
+                  {/* La ASIGNACIÓN es un objeto entrelazado (empresa · unidad · conductor),
+                      no tres casillas: mandarle a la empresa B el conductor de la A deja
+                      una fila que no describe a nadie. Por eso es un selector. */}
+                  <div className="rounded-xl border-2 px-3 py-2.5"
+                       style={{ borderColor: aplicarAsignacion !== "no" ? "#0b315f" : "#e5e7eb",
+                                background: aplicarAsignacion !== "no" ? "#eff6ff" : "white" }}>
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <p className="font-bold text-sm text-gray-800">
+                        {payload.tipo_asignacion === "propio" ? "Vehículo y conductor" : "Empresa y unidad"}
+                      </p>
+                      {aplicarAsignacion !== "no" && (
+                        <span className="text-[11px] font-black px-2 py-0.5 rounded-lg" style={{ background: "#e0f2fe", color: "#0369a1" }}>
+                          {(aplicarAsignacion === "completa" ? plan.ejes.asignacion : plan.ejes.conductor).ids.length} serv.
                         </span>
-                      </label>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1">
+                      {([["completa", "Asignación completa"],
+                         ...(hayConductor ? [["conductor", "Solo el conductor"] as const] : []),
+                         ["no", "No tocarla"]] as [typeof aplicarAsignacion, string][]).map(([v, t]) => (
+                        <label key={v} className="flex items-center gap-1.5 cursor-pointer text-xs text-gray-700">
+                          <input type="radio" name="asignacion" checked={aplicarAsignacion === v}
+                                 onChange={() => setAplicarAsignacion(v)} className="accent-[#0b315f]" />
+                          {t}
+                        </label>
+                      ))}
+                    </div>
+                    {aplicarAsignacion === "conductor" && (
+                      <p className="text-[11px] text-gray-500 mt-1">Cada servicio conserva su unidad y su horario.</p>
                     )}
+                    {aplicarAsignacion !== "no" && (aplicarAsignacion === "completa" ? plan.ejes.asignacion : plan.ejes.conductor).fuera.length > 0 && (
+                      <ul className="mt-1.5 space-y-0.5">
+                        {(aplicarAsignacion === "completa" ? plan.ejes.asignacion : plan.ejes.conductor).fuera.map(f => (
+                          <li key={f.motivo} className="text-[11px] text-gray-500">· <b>{f.cuantos}</b> {TEXTO_MOTIVO[f.motivo]}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
 
-                    {!soloConductor && otraUnidad.length > 0 && (
+                  {cambiaHora && casillaEje("hora", aplicarHora, setAplicarHora,
+                    <>Hora del servicio · <b>{horaOriginal} → {horaNueva}</b></>,
+                    <>Solo los que hoy salen a las {horaOriginal || "—"}. Sus <b>paraderos se corren
+                      {" "}{etiquetaDelta(minutosHHMM(horaNueva) - minutosHHMM(horaOriginal))}</b> para conservar
+                      el espaciado del recorrido.</>)}
+
+                  {m.paxTocado && casillaEje("pax", aplicarPax, setAplicarPax,
+                    <>PAX contratados · <b>{m.pax != null ? `${m.pax} asientos` : "vacío"}</b></>,
+                    <>Los asientos son del <b>contrato</b>, no de la unidad: alcanzan a las idas
+                      <b> y</b> a los retornos, sin mirar la hora ni la placa.
+                      {m.pax == null && <> Vacío <b>borra</b> la capacidad escrita en esos servicios.</>}</>)}
+
+                  {/* ── EL DINERO ─────────────────────────────────────────────────
+                      Nacen apagados y se pintan aparte: no son "un campo más". */}
+                  {m.precio != null && casillaEje("precio", aplicarPrecio, setAplicarPrecio,
+                    <>Precio de venta · <b>{fmtSoles(m.precio)}</b></>,
+                    <>Va a <b>UN solo tramo por día</b> —el que ya lleva el importe—, porque la
+                      tarifa cubre la ida y el retorno y escribirla en los dos cobraría el día dos veces.</>,
+                    "#15803d")}
+
+                  {m.costo != null && casillaEje("costo", aplicarCosto, setAplicarCosto,
+                    <>Costo del proveedor · <b>{fmtSoles(m.costo)}</b></>,
+                    <>Un tramo por día, y solo a los servicios que va a cubrir
+                      <b> esa misma empresa</b>: la tarifa que se pactó con ella no es la de otra.</>,
+                    "#b45309")}
+                </div>
+
+                {/* Los filtros de la ASIGNACIÓN. No se pintan en los otros ejes porque no
+                    los usan: decir "incluir otro horario" al lado del precio haría creer
+                    que ahí también hace algo. */}
+                {aplicarAsignacion !== "no" && (
+                  <div className="space-y-1.5 rounded-xl border border-gray-200 px-4 py-3">
+                    <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">
+                      Dentro de la asignación, incluir también
+                    </p>
+                    <label className="flex items-start gap-2.5 cursor-pointer">
+                      <input type="checkbox" checked={aplicarOtraHora} onChange={e => setAplicarOtraHora(e.target.checked)} className="mt-0.5 accent-[#0b315f]" />
+                      <span className="text-xs text-gray-700">
+                        Los servicios de <b>otro horario</b> (ida y retorno).
+                        <span className="text-gray-400"> Por defecto solo se aplica a los de las {horaOriginal || "—"}.</span>
+                      </span>
+                    </label>
+                    {aplicarAsignacion === "completa" && (
                       <label className="flex items-start gap-2.5 cursor-pointer">
                         <input type="checkbox" checked={aplicarOtraUnidad} onChange={e => setAplicarOtraUnidad(e.target.checked)} className="mt-0.5 accent-[#0b315f]" />
                         <span className="text-xs text-gray-700">
-                          Los servicios que ya tienen <b>otra unidad</b> asignada — {otraUnidad.length} servicio(s).
+                          Los servicios que ya tienen <b>otra unidad</b> asignada.
                           <span className="font-bold" style={{ color: "#b45309" }}> Se les sobrescribirá la unidad.</span>
                         </span>
                       </label>
                     )}
-
-                    {soloConductor && (
-                      <p className="text-xs text-gray-500">
-                        Se cambia solo el conductor: la <b>unidad y el horario</b> de cada servicio quedan intactos.
-                      </p>
-                    )}
                   </div>
                 )}
 
-                {/* Aviso: la hora también se propaga */}
-                {cambiaHora && (
+                {/* EL MOTIVO DEL ACTA. Cada servicio que cambia de importe escribe un acta
+                    de compra o de venta, y sin motivo esas actas no dicen nada tres meses
+                    después. Bloquea, como el del falso flete: acá se está moviendo plata. */}
+                {tocaDinero && (
+                  <div className="rounded-xl px-4 py-3 space-y-1.5"
+                       style={{ background: faltaMotivo ? "#fef2f2" : "#f8fafc", border: `1px solid ${faltaMotivo ? "#fecaca" : "#e2e8f0"}` }}>
+                    <p className="text-[11px] font-black uppercase tracking-widest" style={{ color: faltaMotivo ? "#b91c1c" : "#94a3b8" }}>
+                      Motivo del cambio de importe *
+                    </p>
+                    <select value={aplicarMotivo} onChange={e => setAplicarMotivo(e.target.value)}
+                            className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f]">
+                      <option value="">— elige un motivo —</option>
+                      {MOTIVOS_CAMBIO.filter(x => x.lado !== "venta").map(x => (
+                        <option key={x.clave} value={x.clave}>{x.nombre}</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-gray-500">
+                      Queda en el acta de <b>cada uno</b> de los servicios que cambien de importe. Es lo
+                      único que explica el movimiento cuando alguien lo revise.
+                    </p>
+                  </div>
+                )}
+
+                {/* Reasignar sin llevar el costo deja a esos servicios pagando la tarifa
+                    del proveedor anterior. No se escribe solo —eso es plata— pero tampoco
+                    se calla: es exactamente lo que «Empresa y unidad» hacía sin avisar. */}
+                {aplicarAsignacion === "completa" && m.costo != null && !aplicarCosto && (
                   <div className="rounded-xl px-4 py-2.5 text-xs flex items-start gap-2" style={{ background: "#fffbeb", border: "1px solid #fcd34d", color: "#92400e" }}>
-                    <span>⏰</span>
+                    <span>💰</span>
                     <span>
-                      Cambiaste la hora de <b>{horaOriginal}</b> a <b>{horaNueva}</b>: también se aplicará
-                      a los servicios que salían a las {horaOriginal}, y <b>sus paraderos se corren
-                      {" "}{etiquetaDelta(minutosHHMM(horaNueva) - minutosHHMM(horaOriginal))}</b> para
-                      conservar el espaciado del recorrido.
+                      Los servicios pasan a esta asignación pero <b>conservan el costo que tienen hoy</b>.
+                      Si la tarifa pactada es la nueva, marca <b>«Costo del proveedor»</b>.
                     </span>
                   </div>
                 )}
 
-                {/* Preview conteo */}
-                <div className="rounded-xl px-4 py-2.5 text-xs font-bold flex items-center gap-2" style={{ background: "#e0f2fe", color: "#0369a1" }}>
+                {/* Aviso: se cambió la hora y la casilla está apagada. */}
+                {cambiaHora && !aplicarHora && (
+                  <div className="rounded-xl px-4 py-2.5 text-xs flex items-start gap-2" style={{ background: "#fffbeb", border: "1px solid #fcd34d", color: "#92400e" }}>
+                    <span>⏰</span>
+                    <span>
+                      Cambiaste la hora de <b>{horaOriginal}</b> a <b>{horaNueva}</b> solo en este servicio.
+                      El resto del contrato <b>sigue saliendo a las {horaOriginal}</b>.
+                    </span>
+                  </div>
+                )}
+
+                {/* Preview conteo. Cuenta SERVICIOS, no campos: uno puede recibir varios
+                    ejes y sumarlos daría un número que no existe. */}
+                <div className="rounded-xl px-4 py-2.5 text-xs font-bold flex items-start gap-2" style={{ background: "#e0f2fe", color: "#0369a1" }}>
                   <span>📊</span>
-                  <span>Se actualizarán <b>{targets.length}</b> servicio(s) adicional(es)</span>
+                  <span>
+                    Se actualizarán <b>{plan.total}</b> servicio(s)
+                    {(plan.dinero.precio || plan.dinero.costo) && (
+                      <span className="block font-normal mt-0.5">
+                        {plan.dinero.precio && <>Venta: {plan.dinero.precio.cuantos} serv. · {fmtSoles(plan.dinero.precio.antes)} → <b>{fmtSoles(plan.dinero.precio.despues)}</b>. </>}
+                        {plan.dinero.costo  && <>Costo: {plan.dinero.costo.cuantos} serv. · {fmtSoles(plan.dinero.costo.antes)} → <b>{fmtSoles(plan.dinero.costo.despues)}</b>.</>}
+                      </span>
+                    )}
+                    {tocaDinero && aplicarLiquidadas === null && (
+                      <span className="block font-normal mt-0.5 text-gray-500">
+                        Comprobando cuáles ya están en una liquidación emitida…
+                      </span>
+                    )}
+                  </span>
                 </div>
               </div>
 
@@ -3785,11 +3835,11 @@ export default function ReservasPage() {
               <div className="px-6 pb-5 flex gap-3">
                 <button
                   onClick={aplicarMasivo}
-                  disabled={aplicando || targets.length === 0}
+                  disabled={aplicando || plan.total === 0 || faltaMotivo}
                   className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60"
                   style={{ background: "#0b315f" }}
                 >
-                  {aplicando ? "Aplicando..." : `Aplicar a ${targets.length} servicio(s)`}
+                  {aplicando ? "Aplicando..." : `Aplicar a ${plan.total} servicio(s)`}
                 </button>
                 <button
                   onClick={() => setModalAplicarMasivo(null)}
@@ -3799,6 +3849,12 @@ export default function ReservasPage() {
                   Solo este
                 </button>
               </div>
+              {/* Un botón apagado DICE qué le falta: si no, se pulsa y no pasa nada. */}
+              {faltaMotivo && (
+                <p className="px-6 pb-4 -mt-2 text-[11px] font-bold" style={{ color: "#b91c1c" }}>
+                  Elige el motivo del cambio de importe para poder aplicarlo.
+                </p>
+              )}
             </div>
           </div>
         );
