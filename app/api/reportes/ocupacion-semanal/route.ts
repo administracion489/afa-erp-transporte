@@ -38,6 +38,10 @@ import {
   htmlReporte, asuntoReporte, xlsxReporteBase64, nombreArchivo, type MetaReporte,
 } from "@/lib/ocupacion/correo";
 import {
+  resolverCopiaInterna, correosDeTexto, planDeEnvio, MOTIVO_SIN_PRUEBA,
+  type FilaCopia,
+} from "@/lib/ocupacion/copia-interna";
+import {
   cargarServiciosRango, construirManifiestosLoteHTML, construirReportesLoteHTML,
   type ServicioLote,
 } from "@/lib/descarga-masiva";
@@ -59,8 +63,9 @@ const admin = createClient(
  */
 const TOPE_ADJUNTOS = 250;
 
-const correosDe = (txt: unknown): string[] =>
-  String(txt ?? "").split(/[,;\s]+/).map((s) => s.trim()).filter((s) => s.includes("@"));
+// Vive en el módulo puro y se importa: la pantalla que edita la copia interna
+// tiene que partir la lista exactamente igual que el cron que la manda.
+const correosDe = correosDeTexto;
 
 /** ¿El error NOMBRA la columna de la migración? Mismo patrón que `faltaColumnaTanque`. */
 const faltaMigracion = (e: { message?: string } | null | undefined): boolean => {
@@ -73,6 +78,12 @@ type Resultado = {
   motivo?: string;
   periodo?: { inicio: string; fin: string };
   clientes?: { cliente: string; rutas: number; enviados: string[]; omitido?: string; error?: string }[];
+  /**
+   * Qué hizo la copia interna en ESTA corrida, con su código y su procedencia.
+   * Contesta «¿por qué no me llegó a mí?» sin mirar la base — mismo papel que
+   * `ciclo_vida_en_espera` en el tick de alertas.
+   */
+  copia_interna?: { codigo: string; correos: string[]; fuente: string | null };
 };
 
 /**
@@ -87,17 +98,39 @@ type Resultado = {
  *   conserva. Un id que no esté encendido devuelve `cliente_no_activo` en vez de
  *   emitir, y eso es distinto de `ningun_cliente_activo`: uno se arregla marcando
  *   la casilla de ESE cliente y el otro es que no hay ninguno en toda la cartera.
+ *
+ * @param soloAfa  PRUEBA: el reporte de ese cliente sale SOLO a los correos de la
+ *   copia interna y el cliente NO recibe nada. Exige `clienteId`.
+ *
+ *   Por eso —y solo por eso— este camino NO filtra por `reporte_ocupacion_activo`:
+ *   ver cómo queda el reporte de un cliente ANTES de encenderle el envío es
+ *   justamente para lo que sirve. La garantía dura sigue intacta porque la prueba
+ *   nunca le escribe al cliente: `planDeEnvio` no devuelve el destino `cliente` en
+ *   una prueba, ni siquiera cuando la copia interna no tiene a dónde ir.
+ *
+ *   Y NO consume el envío programado: su destino es `prueba_afa`, así que el
+ *   candado `(cliente_id, destino, periodo_fin)` de `afa` queda libre. Registrarla
+ *   como `afa` habría quemado la copia real de ese periodo en silencio.
  */
-async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: number }): Promise<Resultado> {
+async function emitir(opts: {
+  fin?: string; forzarDia?: boolean; clienteId?: number; soloAfa?: boolean;
+}): Promise<Resultado> {
   const fin = opts.fin || hoyLima();
+
+  // Una prueba «a toda la cartera» sería una ráfaga de correos a operaciones con
+  // un clic, así que se exige el cliente. No es una limitación técnica: es la
+  // misma razón por la que el botón de la ficha manda solo a ese cliente.
+  if (opts.soloAfa && !opts.clienteId) {
+    return { ok: false, motivo: "prueba_sin_cliente: elige a qué cliente le corresponde la prueba" };
+  }
 
   // ── A quién se le manda ───────────────────────────────────────────────────
   let activos: any[];
   try {
     let q = admin
       .from("clientes")
-      .select("id,nombre,empresa,email,email_facturacion,reporte_ocupacion_activo,reporte_ocupacion_correos,reporte_ocupacion_sugerencias,reporte_ocupacion_frecuencia,reporte_ocupacion_ventana")
-      .eq("reporte_ocupacion_activo", true);
+      .select("id,nombre,empresa,email,email_facturacion,reporte_ocupacion_activo,reporte_ocupacion_correos,reporte_ocupacion_sugerencias,reporte_ocupacion_frecuencia,reporte_ocupacion_ventana");
+    if (!opts.soloAfa) q = q.eq("reporte_ocupacion_activo", true);
     if (opts.clienteId) q = q.eq("id", opts.clienteId);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
@@ -112,7 +145,9 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
   if (!activos.length) {
     return {
       ok: true,
-      motivo: opts.clienteId ? "cliente_no_activo" : "ningun_cliente_activo",
+      motivo: opts.soloAfa ? "cliente_no_existe"
+        : opts.clienteId ? "cliente_no_activo"
+        : "ningun_cliente_activo",
       periodo: { inicio: fin, fin },
     };
   }
@@ -126,7 +161,10 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
       frecuencia: normalizarFrecuencia(c.reporte_ocupacion_frecuencia),
       ventana: normalizarVentana(c.reporte_ocupacion_ventana),
     }))
-    .filter((x) => opts.forzarDia || tocaHoy(x.frecuencia, fin))
+    // Una prueba salta el «¿hoy le toca?» por definición: se pide para verla
+    // ahora. Sin esto, probar un martes un cliente configurado para sábados
+    // contestaría «hoy no toca a nadie» y se leería como que está roto.
+    .filter((x) => opts.forzarDia || opts.soloAfa || tocaHoy(x.frecuencia, fin))
     .map((x) => ({ ...x, periodo: ventanaDe(x.ventana, fin) }));
 
   if (!aEmitir.length) {
@@ -136,20 +174,37 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
   const finMax = aEmitir.map((x) => x.periodo.fin).reduce((a, b) => (a > b ? a : b));
 
   // ── Lo que se comparte entre todos los clientes ───────────────────────────
-  const [perfilRes, escalera, lote] = await Promise.all([
+  const [perfilRes, escalera, lote, cfgRes] = await Promise.all([
     admin.from("empresa_perfil").select("*").eq("id", 1).maybeSingle(),
     cargarEscaleraFlota(admin),
     // El MISMO armado que usa /seguimiento para bajar manifiestos: el papel que
     // se manda por correo tiene que ser idéntico al que se imprime a mano.
     cargarServiciosRango(inicioMin, finMax, admin).catch(() => null),
+    // Sin `reportes-03` corrido esto devuelve error y la fila llega `null`, que
+    // `resolverCopiaInterna` lee como «nadie lo apagó»: la copia sale igual y sus
+    // direcciones salen de la cascada de siempre. Correr el SQL no cambia nada.
+    admin.from("reporte_ocupacion_config").select("*").eq("id", 1).maybeSingle(),
   ]);
   const empresa = empresaConDefectos(perfilRes?.data ?? null);
   const origin = process.env.NEXT_PUBLIC_SITE_URL || "https://transportesafa.com";
 
-  // La copia interna. Sin destinatario declarado NO se inventa uno: se omite.
-  const correosAfa = correosDe(process.env.REPORTE_OCUPACION_CORREOS) .length
-    ? correosDe(process.env.REPORTE_OCUPACION_CORREOS)
-    : correosDe(empresa.email);
+  // La copia interna: si sale y a quién, con la MISMA función que consulta la
+  // pantalla. Sin destinatario en toda la cascada NO se inventa uno: se omite.
+  const copia = resolverCopiaInterna({
+    fila: (cfgRes?.data as FilaCopia | null) ?? null,
+    env: process.env.REPORTE_OCUPACION_CORREOS,
+    emailEmpresa: empresa.email,
+  });
+
+  // Quién recibe esta corrida. La MISMA función que describe la pantalla: acá se
+  // decide una sola vez y los dos bloques de abajo la obedecen.
+  const plan = planDeEnvio({ prueba: opts.soloAfa, copia });
+
+  // Una prueba que no tiene a dónde ir no se convierte en un correo al cliente:
+  // se para acá y DICE cuál de los dos arreglos le falta.
+  if (plan.motivo) {
+    return { ok: false, motivo: `prueba_sin_destino: ${MOTIVO_SIN_PRUEBA[plan.motivo]}`, periodo: { inicio: inicioMin, fin: finMax } };
+  }
 
   // Qué envíos de este periodo YA salieron (candado 1).
   // Con ventanas por cliente, `periodo_fin` ya no es único en la corrida: el de la
@@ -186,6 +241,10 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
       }
 
       const filas = analizarOcupacion(servicios, escalera);
+      // Los SERVICIOS de la bitácora son los que el reporte cuenta: DÍAS, con la
+      // ida y su retorno juntos. `servicios.length` son tramos, y grabar ese
+      // número dejaría la bitácora diciendo el doble que el correo.
+      const diasDelPeriodo = filas.reduce((a, f) => a + f.servicios, 0);
 
       // Los adjuntos se arman UNA vez y se reusan en los dos correos.
       const adjuntos = await armarAdjuntos(delCliente, lote, origin);
@@ -197,7 +256,11 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
         ? correosDe(c.reporte_ocupacion_correos)
         : [...new Set([...correosDe(c.email), ...correosDe(c.email_facturacion)])];
 
-      if (!paraCliente.length) {
+      if (!plan.destinos.includes("cliente")) {
+        // Una PRUEBA. El cliente no entra ni por asomo: ni su correo se resuelve
+        // para nada, ni se escribe su fila de bitácora, así que el envío del
+        // sábado le sigue tocando entero.
+      } else if (!paraCliente.length) {
         resumen.push({ cliente: nombreCliente, rutas: filas.length, enviados: [], omitido: "sin correo de destino" });
       } else if (salido.has(`${c.id}|cliente|${cierre}`)) {
         resumen.push({ cliente: nombreCliente, rutas: filas.length, enviados: [], omitido: "ya se envió este periodo" });
@@ -207,21 +270,30 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
           incluirSugerencias: c.reporte_ocupacion_sugerencias !== false,
         };
         await mandar(paraCliente, filas, meta, adjuntos);
-        await registrar(Number(c.id), "cliente", inicio, cierre, paraCliente, servicios.length, filas, null);
+        await registrar(Number(c.id), "cliente", inicio, cierre, paraCliente, diasDelPeriodo, filas, null);
         enviados.push(...paraCliente);
       }
 
       // ── 2) La copia de AFA, SIEMPRE con las sugerencias ────────────────────
       // Es la única que las lleva completas aunque el cliente las tenga apagadas:
-      // la propuesta comercial la tiene que ver AFA para poder decidirla.
-      if (correosAfa.length && !salido.has(`${c.id}|afa|${cierre}`)) {
+      // la propuesta comercial la tiene que ver AFA para poder decidirla. Se
+      // enciende y se apaga en /reportes → «Copia interna de AFA».
+      //
+      // En una PRUEBA el destino es `prueba_afa` y NO se consulta el candado: su
+      // fila es una constancia, no una reserva del envío programado. (Dos pruebas
+      // del mismo periodo dejan una sola fila —el índice único las junta— y eso
+      // está bien: lo que tiene que quedar escrito es que ese periodo se probó.)
+      const destinoAfa = plan.destinos.find((d) => d === "afa" || d === "prueba_afa");
+      const consume = destinoAfa ? plan.consumen.includes(destinoAfa) : false;
+
+      if (destinoAfa && !(consume && salido.has(`${c.id}|afa|${cierre}`))) {
         const metaAfa: MetaReporte = {
           empresaNombre: empresa.nombre, clienteNombre: nombreCliente, inicio, fin: cierre, hayCapacidad, ventana,
           incluirSugerencias: true,
         };
-        await mandar(correosAfa, filas, metaAfa, adjuntos);
-        await registrar(Number(c.id), "afa", inicio, cierre, correosAfa, servicios.length, filas, null);
-        enviados.push(...correosAfa);
+        await mandar(copia.correos, filas, metaAfa, adjuntos);
+        await registrar(Number(c.id), destinoAfa, inicio, cierre, copia.correos, diasDelPeriodo, filas, null);
+        enviados.push(...copia.correos);
       }
 
       resumen.push({ cliente: nombreCliente, rutas: filas.length, enviados });
@@ -229,12 +301,19 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
       // Un cliente que falla no tumba a los demás, y su fallo queda escrito para
       // poder reintentarlo: el índice único solo bloquea los envíos EXITOSOS.
       console.error("[ocupacion-semanal]", nombreCliente, e);
-      await registrar(Number(c.id), "cliente", inicio, cierre, [], 0, [], String(e?.message ?? e)).catch(() => {});
+      // Con el destino que de verdad se intentó: una prueba que falla no puede
+      // quedar escrita como si le hubiera fallado el envío AL CLIENTE.
+      await registrar(Number(c.id), plan.destinos[0] ?? "cliente", inicio, cierre, [], 0, [], String(e?.message ?? e)).catch(() => {});
       resumen.push({ cliente: nombreCliente, rutas: 0, enviados: [], error: String(e?.message ?? e) });
     }
   }
 
-  return { ok: true, periodo: { inicio: inicioMin, fin: finMax }, clientes: resumen };
+  return {
+    ok: true,
+    periodo: { inicio: inicioMin, fin: finMax },
+    clientes: resumen,
+    copia_interna: { codigo: copia.codigo, correos: copia.correos, fuente: copia.fuente },
+  };
 }
 
 type Adjunto = { filename: string; content: string };
@@ -328,8 +407,11 @@ export async function POST(req: NextRequest) {
     // parecería «no hay clientes activos».
     const idCrudo = Number(body?.clienteId ?? 0);
     const clienteId = Number.isFinite(idCrudo) && idCrudo > 0 ? Math.round(idCrudo) : undefined;
+    // `soloAfa` es la PRUEBA: solo un `true` explícito la activa, y `emitir`
+    // rechaza la que no nombre a un cliente.
     return NextResponse.json(await emitir({
       fin: body?.fin, forzarDia: body?.forzarDia === true, clienteId,
+      soloAfa: body?.soloAfa === true,
     }));
   } catch (e: any) {
     console.error("[ocupacion-semanal manual]", e);

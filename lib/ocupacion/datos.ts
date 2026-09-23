@@ -14,6 +14,7 @@
 import { normalizaEstado } from "@/lib/estados";
 import { contarPasajeros } from "@/lib/manifiesto-conteo";
 import { identidadRuta } from "@/lib/ruta-identidad";
+import { sentidoDeReserva } from "@/lib/liquidacion-agrupacion";
 import {
   resolverPaxDeServicio,
   cargarPaxDeCotizaciones,
@@ -170,6 +171,17 @@ export async function cargarOcupacion(
       esperados: c.esperados,
       cancelado: normalizaEstado(r.estado) === "cancelada",
       placa: null,
+      // El MISMO hermano que ya resuelve el pax contratado, sin una segunda
+      // definición de «quién es el hermano de este tramo». Solo sirve si está
+      // DENTRO del periodo: el motor no encuentra al de fuera y deja el tramo solo,
+      // que es lo correcto — su día se mide en el otro reporte.
+      hermano_id: hermano ? Number(hermano.id) : null,
+      // Solo ROTULA cuál es la ida y cuál el retorno. `direccion_servicio` NO se
+      // pide a propósito: es de una migración accesoria y arriesgar el reporte
+      // entero por una etiqueta no vale la pena. `sentidoDeReserva` cae al nombre
+      // de la ruta, y como la identidad del grupo es el CONJUNTO de los dos
+      // nombres, equivocarse aquí intercambia dos etiquetas y nada más.
+      sentido: sentidoDeReserva(r as any),
     };
   });
 
