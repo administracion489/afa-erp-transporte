@@ -37,6 +37,7 @@ import { cargarOcupacion, cargarEscaleraFlota, anotarPlacas } from "@/lib/ocupac
 import {
   htmlReporte, asuntoReporte, xlsxReporteBase64, nombreArchivo, type MetaReporte,
 } from "@/lib/ocupacion/correo";
+import { resolverCopiaInterna, correosDeTexto, type FilaCopia } from "@/lib/ocupacion/copia-interna";
 import {
   cargarServiciosRango, construirManifiestosLoteHTML, construirReportesLoteHTML,
   type ServicioLote,
@@ -59,8 +60,9 @@ const admin = createClient(
  */
 const TOPE_ADJUNTOS = 250;
 
-const correosDe = (txt: unknown): string[] =>
-  String(txt ?? "").split(/[,;\s]+/).map((s) => s.trim()).filter((s) => s.includes("@"));
+// Vive en el módulo puro y se importa: la pantalla que edita la copia interna
+// tiene que partir la lista exactamente igual que el cron que la manda.
+const correosDe = correosDeTexto;
 
 /** ¿El error NOMBRA la columna de la migración? Mismo patrón que `faltaColumnaTanque`. */
 const faltaMigracion = (e: { message?: string } | null | undefined): boolean => {
@@ -73,6 +75,12 @@ type Resultado = {
   motivo?: string;
   periodo?: { inicio: string; fin: string };
   clientes?: { cliente: string; rutas: number; enviados: string[]; omitido?: string; error?: string }[];
+  /**
+   * Qué hizo la copia interna en ESTA corrida, con su código y su procedencia.
+   * Contesta «¿por qué no me llegó a mí?» sin mirar la base — mismo papel que
+   * `ciclo_vida_en_espera` en el tick de alertas.
+   */
+  copia_interna?: { codigo: string; correos: string[]; fuente: string | null };
 };
 
 /**
@@ -136,20 +144,27 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
   const finMax = aEmitir.map((x) => x.periodo.fin).reduce((a, b) => (a > b ? a : b));
 
   // ── Lo que se comparte entre todos los clientes ───────────────────────────
-  const [perfilRes, escalera, lote] = await Promise.all([
+  const [perfilRes, escalera, lote, cfgRes] = await Promise.all([
     admin.from("empresa_perfil").select("*").eq("id", 1).maybeSingle(),
     cargarEscaleraFlota(admin),
     // El MISMO armado que usa /seguimiento para bajar manifiestos: el papel que
     // se manda por correo tiene que ser idéntico al que se imprime a mano.
     cargarServiciosRango(inicioMin, finMax, admin).catch(() => null),
+    // Sin `reportes-03` corrido esto devuelve error y la fila llega `null`, que
+    // `resolverCopiaInterna` lee como «nadie lo apagó»: la copia sale igual y sus
+    // direcciones salen de la cascada de siempre. Correr el SQL no cambia nada.
+    admin.from("reporte_ocupacion_config").select("*").eq("id", 1).maybeSingle(),
   ]);
   const empresa = empresaConDefectos(perfilRes?.data ?? null);
   const origin = process.env.NEXT_PUBLIC_SITE_URL || "https://transportesafa.com";
 
-  // La copia interna. Sin destinatario declarado NO se inventa uno: se omite.
-  const correosAfa = correosDe(process.env.REPORTE_OCUPACION_CORREOS) .length
-    ? correosDe(process.env.REPORTE_OCUPACION_CORREOS)
-    : correosDe(empresa.email);
+  // La copia interna: si sale y a quién, con la MISMA función que consulta la
+  // pantalla. Sin destinatario en toda la cascada NO se inventa uno: se omite.
+  const copia = resolverCopiaInterna({
+    fila: (cfgRes?.data as FilaCopia | null) ?? null,
+    env: process.env.REPORTE_OCUPACION_CORREOS,
+    emailEmpresa: empresa.email,
+  });
 
   // Qué envíos de este periodo YA salieron (candado 1).
   // Con ventanas por cliente, `periodo_fin` ya no es único en la corrida: el de la
@@ -213,15 +228,16 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
 
       // ── 2) La copia de AFA, SIEMPRE con las sugerencias ────────────────────
       // Es la única que las lleva completas aunque el cliente las tenga apagadas:
-      // la propuesta comercial la tiene que ver AFA para poder decidirla.
-      if (correosAfa.length && !salido.has(`${c.id}|afa|${cierre}`)) {
+      // la propuesta comercial la tiene que ver AFA para poder decidirla. Se
+      // enciende y se apaga en /reportes → «Copia interna de AFA».
+      if (copia.sale && !salido.has(`${c.id}|afa|${cierre}`)) {
         const metaAfa: MetaReporte = {
           empresaNombre: empresa.nombre, clienteNombre: nombreCliente, inicio, fin: cierre, hayCapacidad, ventana,
           incluirSugerencias: true,
         };
-        await mandar(correosAfa, filas, metaAfa, adjuntos);
-        await registrar(Number(c.id), "afa", inicio, cierre, correosAfa, servicios.length, filas, null);
-        enviados.push(...correosAfa);
+        await mandar(copia.correos, filas, metaAfa, adjuntos);
+        await registrar(Number(c.id), "afa", inicio, cierre, copia.correos, servicios.length, filas, null);
+        enviados.push(...copia.correos);
       }
 
       resumen.push({ cliente: nombreCliente, rutas: filas.length, enviados });
@@ -234,7 +250,12 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: num
     }
   }
 
-  return { ok: true, periodo: { inicio: inicioMin, fin: finMax }, clientes: resumen };
+  return {
+    ok: true,
+    periodo: { inicio: inicioMin, fin: finMax },
+    clientes: resumen,
+    copia_interna: { codigo: copia.codigo, correos: copia.correos, fuente: copia.fuente },
+  };
 }
 
 type Adjunto = { filename: string; content: string };
