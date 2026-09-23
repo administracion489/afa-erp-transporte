@@ -160,3 +160,79 @@ export function describirCopiaInterna(c: CopiaInterna): string {
  * casilla. Un aviso que sale siempre se vuelve paisaje.
  */
 export const alarmaCopiaInterna = (c: CopiaInterna): boolean => c.codigo === "sin_destinatario";
+
+// ──────────────────────────────────────────────────────────────────────────────
+// QUIÉN RECIBE ESTE ENVÍO · el envío de verdad y la PRUEBA
+//
+// Lo pidió el dueño: «quiero enviar solo a un cliente y solo a AFA para probar,
+// no hay esa opción». Y no la había: el botón de /reportes dispara el tick entero
+// y el de la ficha del cliente manda a UNO pero TAMBIÉN al cliente. O sea, no
+// había forma de ver el reporte de un cliente sin que a ese cliente le llegara —
+// que es justo lo que se quiere antes de encenderle el envío.
+//
+// ─── LO QUE SEPARA UNA PRUEBA DE UN ENVÍO NO ES EL DESTINATARIO: ES EL CANDADO ─
+//
+// Una prueba se manda a los MISMOS correos que la copia interna, así que por ese
+// lado no se distingue de la copia del sábado. Lo que la hace una prueba es que
+// **NO CONSUME EL ENVÍO PROGRAMADO**. El candado del correo doble es
+// `(cliente_id, destino, periodo_fin)`, así que si la prueba se registrara como
+// `afa` quemaría la copia real de ese periodo: el cliente recibiría la suya el
+// sábado y operaciones no, sin que nada lo dijera. Por eso su destino es
+// `prueba_afa` — otro valor, otra fila, y el candado de `afa` intacto.
+//
+// ─── UNA PRUEBA NO SE CAE AL CLIENTE, NUNCA ─────────────────────────────────
+//
+// Si la copia interna está apagada o no tiene a dónde ir, la prueba NO manda
+// nada y DICE por qué. La tentación sería «si no hay a quién, mándaselo al
+// cliente», y eso es exactamente el correo que no se puede des-enviar.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type DestinoEnvio = "cliente" | "afa" | "prueba_afa";
+
+/** Por qué una prueba no sale. Las dos se arreglan en el mismo bloque de /reportes. */
+export type MotivoSinPrueba = "copia_apagada" | "copia_sin_destinatario";
+
+export type PlanEnvio = {
+  /** A quién se le intenta mandar, en orden. */
+  destinos: DestinoEnvio[];
+  /** Cuáles de esos BLOQUEAN el envío programado de ese periodo. */
+  consumen: DestinoEnvio[];
+  /** Solo cuando una prueba no puede salir. */
+  motivo?: MotivoSinPrueba;
+};
+
+/**
+ * Decide quién recibe esta corrida. Lo usan el cron y el botón de prueba, y la
+ * pantalla lo describe con el MISMO resultado: una pantalla que dijera «solo a
+ * ti» mientras el sistema le manda también al cliente es el error caro de este
+ * módulo, y es un correo que no se des-envía.
+ */
+export function planDeEnvio(entrada: { prueba?: boolean; copia: CopiaInterna }): PlanEnvio {
+  if (!entrada.prueba) {
+    // El envío de siempre: el cliente y, si sale, la copia interna. Los dos
+    // consumen el candado, que es lo que impide mandarlos dos veces.
+    const destinos: DestinoEnvio[] = ["cliente", ...(entrada.copia.sale ? ["afa" as const] : [])];
+    return { destinos, consumen: destinos };
+  }
+
+  // Una prueba sin destinatario interno no se convierte en un correo al cliente.
+  if (!entrada.copia.sale) {
+    return {
+      destinos: [],
+      consumen: [],
+      motivo: entrada.copia.codigo === "apagada" ? "copia_apagada" : "copia_sin_destinatario",
+    };
+  }
+
+  return { destinos: ["prueba_afa"], consumen: [] };
+}
+
+/** Qué contestarle a quien pidió una prueba que no pudo salir. */
+export const MOTIVO_SIN_PRUEBA: Record<MotivoSinPrueba, string> = {
+  copia_apagada:
+    "La copia interna está apagada, así que la prueba no tiene a dónde ir. "
+    + "Enciéndela arriba y vuelve a intentarlo.",
+  copia_sin_destinatario:
+    "La copia interna está encendida pero no hay ninguna dirección en toda la cascada: "
+    + "escribe arriba a quién le llega y vuelve a intentarlo.",
+};
