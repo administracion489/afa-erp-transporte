@@ -32,13 +32,22 @@
 //
 // 6 · `excede_contratado` es el hallazgo que el dueño NO pidió y es el más caro de los
 //     dos: alguien viajó de pie o se quedó en el paradero.
+//
+// 7 · LA IDA Y SU RETORNO SON UN SOLO SERVICIO (sección 13). Lo reportó el dueño sobre
+//     el correo real: «debería decir 1 ruta con 17 servicios». Se fija el conteo, pero
+//     sobre todo el DAÑO que evita — con las filas separadas, el retorno de una ruta de
+//     50 asientos que movió 20 personas proponía por su cuenta «cabe en una unidad
+//     menor» sobre un bus que por la mañana va con 34. El algoritmo VIEJO está copiado
+//     literal al lado para probar que reproduce ese defecto, y que sin `hermano_id` el
+//     resultado sigue siendo byte a byte el de antes.
 import { createRequire } from "node:module";
 
 const requerir = createRequire(import.meta.url);
 const OC = requerir("../lib/ocupacion/semanal") as typeof import("../lib/ocupacion/semanal");
 
 const {
-  analizarOcupacion, escaleraDeFlota, motivoOcupacion, motivoSinRecomendacion, rotuloFila,
+  analizarOcupacion, escaleraDeFlota, emparejarDias,
+  motivoOcupacion, motivoSinRecomendacion, rotuloFila,
   ventanaSemanal, hoyLima, esSabadoLima,
   CODIGO_RECOMIENDA, ETIQUETA_RECOMIENDA, CODIGO_ACCIONABLE, ETIQUETA_OCUPACION,
   MARGEN_ASIENTOS, MIN_DIAS_MEDIDOS, MIN_COBERTURA,
@@ -493,6 +502,241 @@ chk("un sábado que además es el último día del mes pide SU mes, no el anteri
 // La compatibilidad: la ventana de siempre sigue siendo la de 7 días.
 chk("ventanaSemanal ≡ ventanaDe(\"7\")",
   JSON.stringify(ventanaSemanal("2026-09-19")) === JSON.stringify(ventanaDe("7", "2026-09-19")));
+
+// ── 13 · LA IDA Y SU RETORNO SON UN SOLO SERVICIO ────────────────────────────
+console.log("\n13 · La ida y su retorno son UN servicio de UNA ruta\n");
+
+/**
+ * EL AGRUPADOR VIEJO, COPIADO LITERAL: una fila por TRAMO. Está aquí para que la
+ * prueba no sea trivial — hay que demostrar que el defecto existía y que el arreglo
+ * lo quita, no solo que el código nuevo hace algo.
+ */
+const claveVIEJA = (s: Servicio) => {
+  const n = String(s.ruta_nombre ?? "").trim().replace(/\s+/g, " ").toUpperCase();
+  const identidad = n || `«${String(s.recorrido ?? "").trim().toUpperCase()}»`;
+  return `${identidad}|${s.contratado ?? "?"}`;
+};
+const gruposVIEJOS = (ss: Servicio[]) => {
+  const m = new Map<string, Servicio[]>();
+  for (const s of ss) {
+    if (!s.fecha) continue;
+    const k = claveVIEJA(s);
+    m.set(k, [...(m.get(k) ?? []), s]);
+  }
+  return m;
+};
+
+/** Un día de contrato: la ida y su retorno, enlazados por los DOS lados. */
+let idSec = 0;
+const dia = (
+  fecha: string, embIda: number, embRet: number,
+  opts: { contratado?: number | null; ida?: string; retorno?: string; enlace?: "mutuo" | "suelto";
+          canceladaIda?: boolean; canceladaRet?: boolean; espIda?: number; espRet?: number } = {},
+): Servicio[] => {
+  const a = 5000 + (idSec += 2), b = a + 1;
+  const mutuo = (opts.enlace ?? "mutuo") === "mutuo";
+  const base = {
+    fecha, recorrido: "SANTA ANITA → BSF", contratado: opts.contratado === undefined ? 50 : opts.contratado,
+    placa: "B8H-967",
+  };
+  return [
+    { ...base, reserva_id: a, hora: "06:35", ruta_nombre: opts.ida ?? "RUTA C/ ENTRADA 06:35",
+      sentido: "IDA" as const, embarcados: embIda, esperados: opts.espIda ?? Math.max(embIda, 1),
+      cancelado: !!opts.canceladaIda, hermano_id: mutuo ? b : null },
+    { ...base, reserva_id: b, hora: "17:00", ruta_nombre: opts.retorno ?? "RUTA C/ RETORNO 17:00",
+      sentido: "RETORNO" as const, embarcados: embRet, esperados: opts.espRet ?? Math.max(embRet, 1),
+      cancelado: !!opts.canceladaRet, hermano_id: mutuo ? a : null },
+  ];
+};
+
+// EL CASO REPORTADO. Seis días de contrato = 12 tramos = 1 ruta, 6 servicios.
+const contrato = [
+  ...dia("2026-09-14", 34, 20), ...dia("2026-09-15", 33, 19), ...dia("2026-09-16", 34, 20),
+  ...dia("2026-09-17", 32, 18), ...dia("2026-09-18", 34, 20), ...dia("2026-09-19", 33, 19),
+];
+const fc1 = analizarOcupacion(contrato, FLOTA);
+chk("12 tramos de ida y retorno son 1 RUTA, no dos",
+  fc1.length === 1, `${fc1.length} filas`);
+chk("…y 6 SERVICIOS, no 12 (es lo que reportó el dueño)",
+  fc1[0].servicios === 6 && fc1[0].tramos === 12,
+  `${fc1[0].servicios} servicios · ${fc1[0].tramos} tramos`);
+chk("el rótulo imprime los DOS nombres, ida y retorno",
+  rotuloFila(fc1[0]) === "RUTA C/ ENTRADA 06:35 ⇄ RUTA C/ RETORNO 17:00", rotuloFila(fc1[0]));
+
+// EL PICO DEL DÍA ES EL MÁXIMO, JAMÁS LA SUMA.
+chk("el pico del día es el MÁXIMO de sus tramos (34), nunca la suma (54)",
+  fc1[0].pico === 34, `pico ${fc1[0].pico}`);
+chk("no es trivial: sumando los dos tramos el pico sería 54 sobre 50 asientos",
+  34 + 20 > 50);
+const sumando = analizarOcupacion(contrato, FLOTA).length && (34 + 20);
+chk("…y ese 54 habría puesto una ruta que nunca se llenó en `excede_contratado`",
+  sumando > 50 && fc1[0].codigo !== "excede_contratado", fc1[0].codigo);
+
+// EL DAÑO QUE EVITA, Y ES EL MOTIVO DEL CAMBIO.
+const viejo = [...gruposVIEJOS(contrato).entries()].map(([k, ss]) =>
+  analizarOcupacion(ss, FLOTA)[0]);
+chk("con el agrupador VIEJO salían DOS filas para la misma ruta",
+  gruposVIEJOS(contrato).size === 2, `${gruposVIEJOS(contrato).size} filas`);
+chk("…y el RETORNO proponía por su cuenta encoger un bus que por la mañana lleva 34",
+  viejo.some((f) => f.codigo === "sugiere_cambio" && f.pico === 20),
+  viejo.map((f) => `${f.pico}→${f.codigo}`).join(" · "));
+chk("con el día entero, la ruta NO se encoge", fc1[0].codigo === "no_hay_menor", fc1[0].codigo);
+
+// LA OTRA MITAD DE LO QUE PIDIÓ EL DUEÑO: «son rutas diferentes si son horarios
+// diferentes sin ser hermanos».
+const dosHorarios = analizarOcupacion([
+  ...dia("2026-09-14", 34, 20), ...dia("2026-09-15", 33, 19),
+  ...dia("2026-09-14", 12, 9, { ida: "RUTA C/ ENTRADA 05:10", retorno: "RUTA C/ RETORNO 15:00" }),
+  ...dia("2026-09-15", 11, 8, { ida: "RUTA C/ ENTRADA 05:10", retorno: "RUTA C/ RETORNO 15:00" }),
+], FLOTA);
+chk("dos horarios distintos que NO son hermanos siguen siendo DOS rutas",
+  dosHorarios.length === 2, `${dosHorarios.length} filas`);
+chk("…y ninguna hereda el pico de la otra",
+  dosHorarios.some((f) => f.pico === 34) && dosHorarios.some((f) => f.pico === 12),
+  dosHorarios.map((f) => f.pico).join(" · "));
+
+// UN TRAMO SIN MANIFIESTO NO HUNDE AL DÍA (la decisión 2, aplicada al día).
+const conRetornoVacio = analizarOcupacion([
+  ...dia("2026-09-14", 34, 0, { espRet: 0 }),
+  ...dia("2026-09-15", 33, 0, { espRet: 0 }),
+  ...dia("2026-09-16", 34, 0, { espRet: 0 }),
+], FLOTA);
+chk("un retorno sin manifiesto NO deja el día sin medir",
+  conRetornoVacio[0].medidos === 3 && conRetornoVacio[0].sin_manifiesto === 0,
+  `${conRetornoVacio[0].medidos} medidos · ${conRetornoVacio[0].sin_manifiesto} sin manifiesto`);
+chk("…y el pico del día es el del tramo que SÍ se midió",
+  conRetornoVacio[0].pico === 34, `pico ${conRetornoVacio[0].pico}`);
+
+// EL DÍA SE CANCELA SOLO SI SE CAYERON LOS DOS.
+const medioCaido = analizarOcupacion([
+  ...dia("2026-09-14", 0, 20, { canceladaIda: true, espIda: 0 }),
+  ...dia("2026-09-15", 0, 19, { canceladaIda: true, espIda: 0 }),
+  ...dia("2026-09-16", 0, 0, { canceladaIda: true, canceladaRet: true, espIda: 0, espRet: 0 }),
+], FLOTA);
+chk("con la ida cancelada y el retorno prestado, el día NO está cancelado",
+  medioCaido[0].cancelados === 1 && medioCaido[0].medidos === 2,
+  `${medioCaido[0].cancelados} cancelados · ${medioCaido[0].medidos} medidos`);
+
+// UN ENLACE QUE NO ES MUTUO NO EMPAREJA: adivinar sería medir dos días como uno.
+const treParaUno = [
+  ...dia("2026-09-14", 34, 20),                       // A ⇄ B, mutuo
+  { ...dia("2026-09-14", 12, 9)[0], reserva_id: 9001, hermano_id: 5002 }, // C → B, sin vuelta
+];
+const dTres = emparejarDias(treParaUno as Servicio[]);
+chk("un tercer tramo que reclama un hermano ya emparejado se queda SOLO",
+  dTres.length === 2 && dTres.some((d) => d.tramos.length === 2) && dTres.some((d) => d.tramos.length === 1),
+  dTres.map((d) => d.tramos.length).join(" · "));
+
+const noReciproco = emparejarDias([
+  { ...dia("2026-09-14", 34, 20)[0], hermano_id: 7002 },
+  { ...dia("2026-09-14", 20, 0)[1], reserva_id: 7002, hermano_id: 7999 },
+] as Servicio[]);
+chk("un enlace que apunta a otro sitio no empareja nada",
+  noReciproco.length === 2, `${noReciproco.length} días`);
+
+// UN DÍA AL QUE LE FALTA UN TRAMO NO ES OTRA RUTA — pero solo sin ambigüedad.
+const conSuelto = analizarOcupacion([
+  ...dia("2026-09-14", 34, 20), ...dia("2026-09-15", 33, 19), ...dia("2026-09-16", 34, 20),
+  // El 17 se borró el retorno: la ida llega sola y sin enlace.
+  { ...dia("2026-09-17", 32, 0)[0], hermano_id: null },
+], FLOTA);
+chk("una ida suelta se suma al grupo de su ruta (hay UN solo candidato)",
+  conSuelto.length === 1 && conSuelto[0].servicios === 4 && conSuelto[0].tramos === 7,
+  `${conSuelto.length} filas · ${conSuelto[0]?.servicios} servicios · ${conSuelto[0]?.tramos} tramos`);
+
+// Y un RETORNO suelto absorbido no puede rotular la columna de la IDA con su
+// nombre: el rótulo sale de los días COMPLETOS cuando los hay.
+const retornoSuelto = analizarOcupacion([
+  ...dia("2026-09-14", 34, 20), ...dia("2026-09-15", 33, 19),
+  { ...dia("2026-09-17", 0, 30)[1], hermano_id: null },
+], FLOTA);
+chk("un retorno suelto se absorbe sin ensuciar el nombre de la ida",
+  retornoSuelto.length === 1
+  && retornoSuelto[0].ruta_nombre === "RUTA C/ ENTRADA 06:35"
+  && retornoSuelto[0].ruta_retorno === "RUTA C/ RETORNO 17:00"
+  && retornoSuelto[0].servicios === 3,
+  `${rotuloFila(retornoSuelto[0])} · ${retornoSuelto[0].servicios} servicios`);
+
+const sueltoAmbiguo = analizarOcupacion([
+  ...dia("2026-09-14", 34, 20), ...dia("2026-09-15", 33, 19),
+  // Otra ruta que comparte el nombre de la ida, con otro retorno.
+  ...dia("2026-09-14", 12, 9, { retorno: "RUTA C/ RETORNO 15:00" }),
+  ...dia("2026-09-15", 11, 8, { retorno: "RUTA C/ RETORNO 15:00" }),
+  { ...dia("2026-09-17", 32, 0)[0], hermano_id: null },
+], FLOTA);
+chk("con DOS candidatos la suelta se queda aparte: adivinar le metería el pico de otra",
+  sueltoAmbiguo.length === 3, `${sueltoAmbiguo.length} filas`);
+
+// SIN `hermano_id` EL COMPORTAMIENTO ES BYTE A BYTE EL ANTERIOR.
+const sinEnlace = contrato.map((s) => ({ ...s, hermano_id: null }));
+const fSin = analizarOcupacion(sinEnlace, FLOTA);
+const vSin = gruposVIEJOS(sinEnlace);
+chk("sin enlace escrito, la agrupación es EXACTAMENTE la vieja (una fila por tramo)",
+  fSin.length === vSin.size
+  && fSin.every((f) => f.tramos === f.servicios)
+  && [...vSin.values()].every((ss) => fSin.some((f) => f.servicios === ss.length)),
+  `${fSin.length} filas contra ${vSin.size} del viejo`);
+chk("…y el retorno vuelve a proponer encoger el bus — el defecto reaparece sin el dato",
+  fSin.some((f) => f.codigo === "sugiere_cambio"),
+  fSin.map((f) => `${f.pico}→${f.codigo}`).join(" · "));
+
+// ── EL BARRIDO DEL EMPAREJAMIENTO ────────────────────────────────────────────
+console.log("\n13b · Barrido: no se pierde ni se duplica ningún tramo\n");
+
+const ENLACES = ["mutuo", "suelto"] as const;
+const EMB_IDA = [0, 12, 34];
+const EMB_RET = [0, 20, 30];
+const CANCELA: [boolean, boolean][] = [[false, false], [true, false], [false, true], [true, true]];
+const ESPERADOS: [number | undefined, number | undefined][] = [[undefined, undefined], [0, undefined], [undefined, 0], [0, 0]];
+
+let barridos = 0, tramosMal = 0, sumaMal = 0, contadoresMal2 = 0, pareados = 0, sueltos = 0, picoMal = 0;
+
+for (const enlace of ENLACES) {
+  for (const ei of EMB_IDA) {
+    for (const er of EMB_RET) {
+      for (const [ci, cr] of CANCELA) {
+        for (const [si, sr] of ESPERADOS) {
+          barridos++;
+          const legs = [
+            ...dia("2026-09-14", ei, er, { enlace, canceladaIda: ci, canceladaRet: cr, espIda: si, espRet: sr }),
+            ...dia("2026-09-15", ei, er, { enlace, canceladaIda: ci, canceladaRet: cr, espIda: si, espRet: sr }),
+          ];
+          const fs = analizarOcupacion(legs, FLOTA);
+
+          // (a) NO SE PIERDE NI SE DUPLICA NINGÚN TRAMO.
+          if (fs.reduce((a, f) => a + f.tramos, 0) !== legs.length) tramosMal++;
+
+          // (b) Los contadores siguen siendo exhaustivos sobre DÍAS.
+          if (fs.some((f) => f.servicios !== f.cancelados + f.medidos + f.sin_manifiesto)) contadoresMal2++;
+
+          // (c) EL PICO JAMÁS ES LA SUMA: ningún día publica más que su tramo más lleno.
+          for (const f of fs) {
+            for (const d of f.dias) {
+              const tope = Math.max(0, ...d.tramos.filter((t) => t.medido).map((t) => t.embarcados));
+              if (d.embarcados > tope) sumaMal++;
+              if (d.medido && d.embarcados !== tope) picoMal++;
+            }
+          }
+
+          const dd = fs.flatMap((f) => f.dias);
+          if (enlace === "mutuo") { if (dd.every((d) => d.tramos.length === 2)) pareados++; }
+          else if (dd.every((d) => d.tramos.length === 1)) sueltos++;
+        }
+      }
+    }
+  }
+}
+
+chk(`${barridos} combinaciones · no se pierde ni se duplica ningún tramo`, tramosMal === 0, `${tramosMal} fallos`);
+chk(`${barridos} combinaciones · servicios = cancelados + medidos + sin manifiesto (sobre DÍAS)`,
+  contadoresMal2 === 0, `${contadoresMal2} fallos`);
+chk(`${barridos} combinaciones · el pico del día NUNCA supera a su tramo más lleno`,
+  sumaMal === 0, `${sumaMal} fallos`);
+chk(`${barridos} combinaciones · y es EXACTAMENTE ese máximo`, picoMal === 0, `${picoMal} fallos`);
+// El corolario: un motor que no emparejara nunca cumpliría todo lo de arriba.
+chk("no es trivial: con enlace mutuo los días SÍ se emparejan, y sin él NO",
+  pareados === barridos / 2 && sueltos === barridos / 2,
+  `${pareados} pareados · ${sueltos} sueltos de ${barridos / 2} cada uno`);
 
 // ── Cierre ────────────────────────────────────────────────────────────────────
 console.log(`\n${fallos === 0 ? "TODO EN VERDE" : `${fallos} FALLO(S)`}\n`);
