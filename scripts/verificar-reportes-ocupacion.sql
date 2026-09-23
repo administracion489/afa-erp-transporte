@@ -1,8 +1,8 @@
 -- ══════════════════════════════════════════════════════════════════════════════
--- ¿SE CORRIERON LOS DOS SQL DEL REPORTE DE OCUPACIÓN?
+-- ¿SE CORRIERON LOS SQL DEL REPORTE DE OCUPACIÓN?
 --
 -- Pégalo entero en el SQL Editor de Supabase y dale Run. Cada fila dice si esa
--- pieza está o falta, y CUÁL de los dos archivos hay que volver a correr.
+-- pieza está o falta, y CUÁL de los archivos hay que volver a correr.
 --
 -- No escribe nada: solo lee el catálogo de Postgres.
 --
@@ -122,6 +122,65 @@ select '02 · CHECK ' || k,
     'clientes_reporte_ocupacion_frecuencia_check',
     'clientes_reporte_ocupacion_ventana_check'
   ]) as k
+
+union all
+
+-- ── reportes-03: la copia interna de AFA ────────────────────────────────────
+--
+-- ACCESORIO, y de los más inofensivos: sin la tabla la copia SIGUE saliendo
+-- exactamente igual (a la variable REPORTE_OCUPACION_CORREOS y, si no, al correo
+-- de la empresa). Lo único que falta es poder encenderla, apagarla y cambiarle el
+-- destinatario desde /reportes. Por eso su aviso es ⚠️ y no ❌.
+select '03 · tabla reporte_ocupacion_config',
+       case when exists (
+         select 1 from information_schema.tables
+          where table_schema = 'public' and table_name = 'reporte_ocupacion_config'
+       ) then '✅ existe'
+         else '⚠️ falta (opcional) — la copia sale igual, pero no se puede '
+              || 'gobernar · corre supabase/reportes-03-copia-interna.sql' end
+
+union all
+
+-- El default TIENE que ser true, y es lo contrario del de `reporte_ocupacion_activo`:
+-- aquel manda un correo a un TERCERO que no lo pidió, éste no sale de la empresa.
+-- Con false, correr el SQL le apagaría la copia a operaciones sin que nadie lo diga.
+select '03 · default de copia_afa_activa',
+       case when coalesce((
+              select column_default from information_schema.columns
+               where table_schema = 'public' and table_name = 'reporte_ocupacion_config'
+                 and column_name = 'copia_afa_activa'
+            ), '(sin columna)') like 'true%'
+            then '✅ true'
+            else '⚠️ revisa: se esperaba true y hay '
+                 || coalesce((
+                      select coalesce(column_default, '(ninguno)')
+                        from information_schema.columns
+                       where table_schema = 'public' and table_name = 'reporte_ocupacion_config'
+                         and column_name = 'copia_afa_activa'
+                    ), '(sin columna)') end
+
+union all
+
+-- Sin política permisiva a propósito: la fila se lee y se escribe SOLO por
+-- /api/reportes/copia-interna con service-role, porque uno de los tres escalones
+-- de la cascada es una variable de entorno que la pantalla no puede ver. Una
+-- política acá sería una segunda puerta que puede contestar distinto.
+select '03 · RLS activo y SIN política permisiva',
+       case
+         when not exists (select 1 from information_schema.tables
+                           where table_schema = 'public' and table_name = 'reporte_ocupacion_config')
+           then '⚠️ (sin tabla todavía)'
+         when not coalesce((
+                select c.relrowsecurity from pg_class c
+                  join pg_namespace n on n.oid = c.relnamespace
+                 where n.nspname = 'public' and c.relname = 'reporte_ocupacion_config'
+              ), false)
+           then '❌ RLS APAGADO — corre supabase/reportes-03-copia-interna.sql'
+         when exists (select 1 from pg_policies
+                       where schemaname = 'public' and tablename = 'reporte_ocupacion_config')
+           then '⚠️ hay una política: alguien la agregó a mano, el SQL no crea ninguna'
+         else '✅ como debe'
+       end
 
 order by 1;
 

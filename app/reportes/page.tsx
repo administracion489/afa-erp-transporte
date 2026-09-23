@@ -2,6 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import {
+  describirCopiaInterna, alarmaCopiaInterna, FUENTE_COPIA,
+  type CopiaInterna,
+} from "@/lib/ocupacion/copia-interna";
 
 export default function ReportesPage() {
   const [resumen, setResumen] = useState<any>(null);
@@ -345,6 +349,8 @@ function PanelOcupacionSemanal() {
         </p>
       )}
 
+      <BloqueCopiaInterna />
+
       {res?.error && <p className="mt-3 text-sm text-red-700">{res.error}</p>}
 
       {res && !res.error && !sinMigracion && (
@@ -352,6 +358,17 @@ function PanelOcupacionSemanal() {
           {res.periodo && (
             <p className="text-gray-500 text-xs mb-2">
               Periodo {res.periodo.inicio} → {res.periodo.fin}
+            </p>
+          )}
+          {/* Lo que hizo la copia interna en ESTA corrida. Solo se dice cuando NO
+              salió: contesta «¿por qué no me llegó a mí?» sin mirar la base, y
+              repetirlo cada vez que sí sale lo volvería paisaje. */}
+          {res.copia_interna && res.copia_interna.codigo !== "activa" && (
+            <p className="text-gray-500 text-xs mb-2">
+              Copia interna de AFA:{" "}
+              {res.copia_interna.codigo === "apagada"
+                ? "apagada, no salió."
+                : "encendida pero sin ninguna dirección, no salió."}
             </p>
           )}
           {res.motivo === "ningun_cliente_activo" ? (
@@ -390,5 +407,168 @@ function PanelOcupacionSemanal() {
         </div>
       )}
     </section>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// La copia interna de AFA — el interruptor y a quién le llega
+//
+// Es el correo que le sale a AFA por CADA cliente al que se le manda el reporte,
+// y es la única que lleva las sugerencias completas aunque el cliente las tenga
+// apagadas: la propuesta comercial la tiene que ver quien puede decidirla.
+//
+// Vivía en una variable de entorno de Vercel, o sea un control que el sistema LEE
+// y que nadie podía tocar desde el ERP — el mismo defecto que una columna sin
+// formulario. Lo pidió el dueño así: «mejor que esté detallado, o un botón para
+// activar o desactivar el envío al área de operaciones de AFA».
+//
+// LA PANTALLA NO RESUELVE NADA POR SU CUENTA. `REPORTE_OCUPACION_CORREOS` solo
+// existe en el servidor, así que quien dice a quién le va a llegar es el endpoint,
+// con el MISMO `resolverCopiaInterna` que corre el cron. Acá se pinta lo que
+// contestó: una pantalla con su propia cuenta terminaría enseñando una lista y el
+// cron mandando a otra.
+// ══════════════════════════════════════════════════════════════════════════════
+function BloqueCopiaInterna() {
+  const [cargando, setCargando] = useState(true);
+  const [guardando, setGuardando] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [sinTabla, setSinTabla] = useState(false);
+  const [activa, setActiva] = useState(true);
+  const [correos, setCorreos] = useState("");
+  const [copia, setCopia] = useState<CopiaInterna | null>(null);
+  const [respaldos, setRespaldos] = useState<{ variable_entorno: string[]; perfil_empresa: string[] } | null>(null);
+
+  const aplicar = (j: any) => {
+    setSinTabla(j?.sin_tabla === true);
+    if (j?.fila) {
+      setActiva(j.fila.copia_afa_activa !== false);
+      setCorreos(j.fila.copia_afa_correos ?? "");
+    }
+    if (j?.copia) setCopia(j.copia as CopiaInterna);
+    if (j?.respaldos) setRespaldos(j.respaldos);
+  };
+
+  const pedir = async (metodo: "GET" | "POST") => {
+    const { data: s } = await supabase.auth.getSession();
+    const r = await fetch("/api/reportes/copia-interna", {
+      method: metodo,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.session?.access_token ?? ""}` },
+      ...(metodo === "POST"
+        ? { body: JSON.stringify({ copia_afa_activa: activa, copia_afa_correos: correos }) }
+        : {}),
+    });
+    const j = await r.json();
+    // El endpoint exige el módulo `reportes`, y un operador puede no tenerlo. Sin
+    // nombrarlo se lee como que el ERP está roto.
+    if (r.status === 403) throw new Error("Te falta el permiso del módulo Reportes para ver o cambiar esto.");
+    if (j?.error) throw new Error(j.error);
+    return j;
+  };
+
+  useEffect(() => {
+    (async () => {
+      try { aplicar(await pedir("GET")); }
+      catch (e: any) { setErr(String(e?.message ?? e)); }
+      finally { setCargando(false); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const guardar = async () => {
+    setGuardando(true); setErr(null);
+    try {
+      const j = await pedir("POST");
+      aplicar(j);
+      if (j?.ok === false && j?.error) setErr(j.error);
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setGuardando(false);
+    }
+  };
+
+  return (
+    <div className="mt-5 border-t pt-4">
+      <h3 className="font-bold text-sm">Copia interna de AFA</h3>
+
+      {cargando ? (
+        // Nunca se afirma un vacío mientras se está buscando.
+        <p className="text-sm text-gray-500 mt-1">Consultando…</p>
+      ) : (
+        <>
+          <label className="flex items-start gap-2 mt-2 cursor-pointer">
+            <input type="checkbox" checked={activa} onChange={e => setActiva(e.target.checked)}
+              className="mt-1" />
+            <span className="text-sm">
+              <b>Enviar copia al área de operaciones de AFA</b>
+              <span className="block text-xs text-gray-600 mt-0.5">
+                Un correo por cada cliente al que se le mande el reporte, <b>siempre con las
+                sugerencias completas</b> aunque ese cliente las tenga apagadas. No sustituye al
+                interruptor de cada cliente: si nadie lo tiene encendido, no hay nada que copiar.
+              </span>
+            </span>
+          </label>
+
+          <label className="block mt-3 text-xs text-gray-500">
+            <span className="block mb-1">Correos de operaciones (separados por coma)</span>
+            <input value={correos} onChange={e => setCorreos(e.target.value)}
+              disabled={!activa}
+              placeholder="operaciones@empresa.com, gerencia@empresa.com"
+              className={`w-full max-w-xl border rounded-lg px-3 py-2 text-sm ${activa ? "" : "bg-gray-100 text-gray-400"}`} />
+          </label>
+
+          {/* Los dos escalones de respaldo se NOMBRAN, porque cada uno se corrige
+              en otro sitio: Vercel o /configuracion/perfil. Sin decirlo, vaciar el
+              campo parece apagar la copia y en realidad la manda a otra parte. */}
+          {activa && !correos.trim() && respaldos && (
+            <p className="text-xs text-gray-500 mt-1">
+              Vacío = se usa{" "}
+              {respaldos.variable_entorno.length
+                ? <>la variable <code className="font-mono">REPORTE_OCUPACION_CORREOS</code> de Vercel ({respaldos.variable_entorno.join(", ")})</>
+                : respaldos.perfil_empresa.length
+                  ? <>el correo de la empresa de <b>/configuracion/perfil</b> ({respaldos.perfil_empresa.join(", ")})</>
+                  : <>… y no hay nada en ninguno de los dos escalones de respaldo.</>}
+            </p>
+          )}
+
+          {/* La frase la compone el módulo PURO con los mismos valores que el cron.
+              Dentro del TSX, una pantalla puede describir al revés lo que el sistema
+              hace sin que nada falle. */}
+          {copia && (
+            <p className={`mt-3 text-sm rounded-r px-3 py-2 border-l-4 ${
+              alarmaCopiaInterna(copia)
+                ? "bg-amber-50 border-amber-500 text-amber-900"
+                : "bg-gray-50 border-gray-300 text-gray-700"}`}>
+              {describirCopiaInterna(copia)}
+              {copia.fuente && copia.fuente !== "configurada" && (
+                <span className="block text-xs mt-1 text-gray-500">
+                  Se corrigen {FUENTE_COPIA[copia.fuente]}.
+                </span>
+              )}
+            </p>
+          )}
+
+          <div className="flex items-center gap-3 mt-3">
+            <button onClick={guardar} disabled={guardando}
+              className={`px-4 py-2 rounded-lg text-sm font-bold text-white ${guardando ? "bg-gray-400" : "bg-[#0b315f] hover:bg-[#0a2a50]"}`}>
+              {guardando ? "Guardando…" : "Guardar copia interna"}
+            </button>
+            <span className="text-xs text-gray-500">
+              Lo guardado es lo que lee el cron: la frase de arriba se rehace con la respuesta del servidor.
+            </span>
+          </div>
+
+          {sinTabla && (
+            <p className="mt-3 text-sm bg-amber-50 border-l-4 border-amber-500 rounded-r px-3 py-2 text-amber-900">
+              Falta correr <code className="font-mono text-xs">supabase/reportes-03-copia-interna.sql</code>.
+              Hasta entonces esto <b>no se guarda</b> — y la copia sigue saliendo exactamente como
+              hasta ahora, a la dirección que resuelva la cascada.
+            </p>
+          )}
+
+          {err && <p className="mt-3 text-sm text-red-700">{err}</p>}
+        </>
+      )}
+    </div>
   );
 }
