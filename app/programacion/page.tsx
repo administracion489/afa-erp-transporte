@@ -2312,22 +2312,33 @@ export default function ReservasPage() {
     // ── Si es servicio FIJO con contrato, ofrecer aplicar a otros días ──
     if (reservaActual && !esEventual(reservaActual) && reservaActual.cotizacion_id) {
       const horaOriginal = reservaActual.hora_servicio?.slice(0, 5) || "";
-      // Candidatos = lo que queda por operar del contrato. El recorte fino (misma hora,
-      // misma unidad) lo decide el usuario en el modal: antes se filtraba aquí y los
-      // servicios ya asignados a OTRA unidad quedaban fuera para siempre, así que era
-      // imposible reasignar el conductor en bloque sin reasignar también la unidad.
-      // Nunca entran los servicios ya operados (fecha pasada, aunque nadie los haya
-      // marcado "finalizada") ni el que está en ruta ahora mismo: cambiarles la unidad
-      // reescribiría el historial o le cambiaría el bus al conductor a media carretera.
-      const hoyPeru = fechaLima();
+      // Candidatos = el contrato ENTERO. El recorte fino (misma hora, misma unidad) lo
+      // decide el usuario en el modal, y el de «esto ya se prestó» lo decide cada EJE: antes
+      // se filtraba aquí y los servicios ya asignados a OTRA unidad quedaban fuera para
+      // siempre, así que era imposible reasignar el conductor en bloque sin reasignar
+      // también la unidad — el mismo error de paquete que arrastraba la fecha.
       // Todos los servicios del contrato desde el servidor: los "Programa fijo" se extienden
       // meses adelante, fuera de la ventana visible. Sin esto, "aplicar a rango" solo
       // alcanzaría lo que estuviera cargado en pantalla.
       const delContrato = await fetchReservasCols(COLS_LISTA, (q: any) => q.eq("cotizacion_id", reservaActual.cotizacion_id!));
+      // EL UNIVERSO NO SE RECORTA POR FECHA NI POR ESTADO, y esto es un arreglo.
+      //
+      // Antes se filtraba aquí `estado !== finalizada/en_curso && fecha >= hoy`: un filtro
+      // de PAQUETE aplicado antes de que existiera ningún eje, o sea exactamente el defecto
+      // que los seis ejes vinieron a corregir, sobreviviendo un piso más arriba. Con él, el
+      // PAX de un servicio ya prestado no se podía corregir en lote desde ninguna pantalla
+      // —y es el que el portal le publica al cliente— y el calendario del modal ni siquiera
+      // dejaba elegir una fecha anterior a hoy, porque su `min` sale de esta misma lista.
+      //
+      // El guard no se pierde: se mudó a `planMasivo` como veredicto POR EJE
+      // (`ya_ocurrio` / `en_ruta`), así que sigue frenando la asignación y la hora, y ahora
+      // se VE con su motivo en vez de desaparecer antes de contarse.
+      //
+      // Lo único que se sigue excluyendo aquí es la CANCELADA: su importe lo decide
+      // `planDeCancelacion` y sus asientos no describen nada. Y el propio servicio editado,
+      // que ya se guardó.
       const otrasReservas = (delContrato as Reserva[]).filter(r =>
-        r.id !== editandoId &&
-        r.estado !== "cancelada" && r.estado !== "finalizada" && r.estado !== "en_curso" &&
-        (r.fecha_servicio || "") >= hoyPeru
+        r.id !== editandoId && r.estado !== "cancelada"
       );
       if (otrasReservas.length > 0) {
         // Construir resumen legible de lo asignado
@@ -2430,6 +2441,9 @@ export default function ReservasPage() {
       sentidoEditado: m.sentidoEditado,
       desde: aplicarScope === "rango" ? (aplicarDesde || null) : null,
       hasta: aplicarScope === "rango" ? (aplicarHasta || null) : null,
+      // Hoy en PERÚ, no el del navegador: a las 19:00 de Lima el reloj UTC ya es mañana y
+      // los servicios de esta noche saldrían marcados como pasados.
+      hoy: fechaLima(),
       otraHora: aplicarOtraHora,
       otraUnidad: aplicarOtraUnidad,
       pax: m.pax, paxAntes: m.paxAntes, rutasObjetivo: m.rutasObjetivo,
@@ -3718,7 +3732,8 @@ export default function ReservasPage() {
                   {m.paxTocado && casillaEje("pax", aplicarPax, setAplicarPax,
                     <>PAX contratados · <b>{m.pax != null ? `${m.pax} asientos` : "vacío"}</b></>,
                     <>Los asientos son del <b>contrato</b>, no de la unidad: alcanzan a las idas
-                      <b> y</b> a los retornos, sin mirar la hora ni la placa.
+                      <b> y</b> a los retornos, a los <b>otros horarios</b> de la misma ruta y
+                      también a los servicios <b>ya prestados</b> — sin mirar la placa.
                       {m.pax == null && <> Vacío <b>borra</b> la capacidad escrita en esos servicios.</>}</>)}
 
                   {/* ── EL DINERO ─────────────────────────────────────────────────

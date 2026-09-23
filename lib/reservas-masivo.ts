@@ -74,8 +74,7 @@
 // Matriz: npx tsx scripts/prueba-masivo.mts
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { sentidoDeReserva } from "@/lib/liquidacion-agrupacion";
-import { normalizarNombreRuta } from "@/lib/liquidacion-rutas";
+import { sentidoDeReserva, sinHoraRuta } from "@/lib/liquidacion-agrupacion";
 
 /** Las dos caras del dinero. El precio es del CLIENTE, el costo del PROVEEDOR. */
 export type LadoDinero = "precio" | "costo";
@@ -123,6 +122,16 @@ export type MotivoMasivo =
   | "ok"
   /** El rango de fechas elegido lo deja fuera. */
   | "fuera_de_rango"
+  /**
+   * Despacho: el servicio YA OCURRIÓ (finalizado, o su fecha ya pasó). Reasignarle la
+   * unidad reescribiría el historial, y correrle la hora movería los paraderos contra los
+   * que ya se midió si el bus llegó tarde. **Solo frena al despacho**: los asientos
+   * contratados y el importe de un servicio pasado se corrigen todo el tiempo — es
+   * justo el mes que hay que cerrar.
+   */
+  | "ya_ocurrio"
+  /** Despacho: está EN RUTA ahora mismo. No se le cambia el bus al conductor a media carretera. */
+  | "en_ruta"
   /** Sale a otra hora: los filtros de la ASIGNACIÓN existen para no mandarle el bus de la ida al retorno. */
   | "otro_horario"
   /** Ya tiene una unidad asignada y no se marcó sobrescribirla. */
@@ -203,6 +212,12 @@ export type EntradaMasivo = {
   sentidoEditado?: string | null;
   desde?: string | null;
   hasta?: string | null;
+  /**
+   * Hoy en Perú (ISO). Con ella, los ejes de DESPACHO dejan fuera lo que ya ocurrió y lo
+   * declaran (`ya_ocurrio`); sin ella no se juzga la fecha — no se inventa un «hoy» desde
+   * el reloj del navegador, que es UTC y adelanta el día a las 19:00 de Lima.
+   */
+  hoy?: string | null;
   otraHora?: boolean;
   otraUnidad?: boolean;
   pax?: number | null;
@@ -310,18 +325,37 @@ export function tramoDelImporte(
   return { tramo: null, motivo: "no_se_sabe_que_tramo" };
 }
 
-/** ¿Este servicio acepta la capacidad que se está propagando? (la regla de `aceptaPax`). */
+/**
+ * ¿Este servicio acepta la capacidad que se está propagando? (la regla de `aceptaPax`).
+ *
+ * LA RUTA SE COMPARA SIN LA HORA, y esa es la corrección que hace que este eje sirva.
+ * `normalizarNombreRuta` solo recorta espacios y sube a mayúsculas, y **el nombre lleva
+ * la hora DENTRO** («RUTA C/ 04:35- 17:00» contra «RUTA C/ 06:35- 15:00»): comparándolo
+ * entero, cada móvil de la misma ruta era «otra ruta» y el eje no alcanzaba a ninguno.
+ * Medido en producción sobre el contrato #240: 1 582 de 1 582 candidatos salían
+ * `otra_ruta` y el modal ofrecía «Aplicar a 0 servicio(s)».
+ *
+ * `sinHoraRuta` es el MISMO eje que ya usa `agruparPorRutaContratada` para unir los ítems
+ * de una liquidación, y está medido ahí (nombre completo 30 ítems · sin la hora 21): no es
+ * un recorte inventado para este módulo.
+ *
+ * Y ensanchar aquí NO afloja lo caro, porque el guard de verdad es el otro: los asientos
+ * de OTRO móvil los protege la CAPACIDAD (`otra_capacidad`), que es exacta y no depende de
+ * cómo alguien tecleó el nombre. Un móvil de la misma ruta con 30 asientos contratados
+ * sigue quedando fuera; lo que deja de quedar fuera es el que tiene los mismos que el
+ * servicio editado, que es justo el que hay que corregir.
+ */
 function motivoPaxDe(
   r: ServicioMasivo,
   e: EntradaMasivo,
   hermano: (t: ServicioMasivo) => ServicioMasivo | null,
 ): MotivoMasivo {
-  const rutas = (e.rutasObjetivo ?? []).filter(Boolean);
+  const rutas = (e.rutasObjetivo ?? []).map(sinHoraRuta).filter(Boolean);
   if (rutas.length) {
     const h = hermano(r);
     const suyas = [
-      normalizarNombreRuta(r.ruta_nombre),
-      normalizarNombreRuta(h?.ruta_nombre),
+      sinHoraRuta(r.ruta_nombre),
+      sinHoraRuta(h?.ruta_nombre),
     ].filter(Boolean);
     if (suyas.length && !suyas.some(x => rutas.includes(x))) return "otra_ruta";
   }
@@ -379,10 +413,35 @@ export function planMasivo(e: EntradaMasivo): PlanMasivo {
       (!e.hasta || r.fecha_servicio <= e.hasta)
     );
 
+  /**
+   * ¿Este servicio ya ocurrió, o está ocurriendo? SOLO lo miran los ejes de DESPACHO.
+   *
+   * Vivía en la CONSULTA de `/programacion`, que armaba el universo con
+   * `estado !== finalizada/en_curso && fecha >= hoy` — un filtro de paquete aplicado antes
+   * de que existiera ningún eje, o sea el mismo defecto que los seis ejes vinieron a
+   * corregir, sobreviviendo un piso más arriba. Consecuencia medida y reportada: **el PAX
+   * de un servicio pasado no se podía corregir en lote por ninguna pantalla**, y el
+   * calendario del modal ni siquiera dejaba elegir una fecha anterior a hoy porque su
+   * `min` salía de ese mismo universo recortado.
+   *
+   * Aquí es un veredicto POR EJE y con su código, así que lo que queda fuera se ve y dice
+   * por qué. Sin `hoy` no se juzga la fecha: inventarlo desde el reloj del navegador
+   * adelantaría el día a las 19:00 de Lima.
+   */
+  const yaOcurrio = (r: ServicioMasivo): MotivoMasivo | null => {
+    const est = String(r.estado ?? "").toLowerCase();
+    if (est === "en_curso") return "en_ruta";
+    if (est === "finalizada") return "ya_ocurrio";
+    if (e.hoy && r.fecha_servicio && r.fecha_servicio < e.hoy) return "ya_ocurrio";
+    return null;
+  };
+
   // ── ASIGNACIÓN (completa o solo el conductor) ─────────────────────────────
   // Sus filtros —hora y unidad— protegen el DESPACHO, no el dinero. Se conservan tal cual
   // estaban: este cambio abre ejes nuevos, no afloja los que ya funcionaban.
   const veredictoAsignacion = (r: ServicioMasivo): MotivoMasivo => {
+    const ocurrio = yaOcurrio(r);
+    if (ocurrio) return ocurrio;
     if (!enRango(r)) return "fuera_de_rango";
     if (!e.otraHora && hhmm(r.hora_servicio) !== e.horaOriginal) return "otro_horario";
     if (sel.asignacion === "conductor") {
@@ -406,20 +465,26 @@ export function planMasivo(e: EntradaMasivo): PlanMasivo {
   // ── HORA ──────────────────────────────────────────────────────────────────
   // Su filtro es UNO solo y no se parece a los de la asignación: los que hoy salen a la
   // hora vieja. A un servicio que ya salía a otra hora, correrle el horario —y con él sus
-  // paraderos, por el mismo delta— lo desalinearía en vez de moverlo.
+  // paraderos, por el mismo delta— lo desalinearía en vez de moverlo. Y tampoco se le
+  // corre a lo que ya ocurrió: la hora de un paradero recorrido es contra la que se midió
+  // si el bus llegó tarde, y moverla reescribe el veredicto de un tramo que ya pasó.
   const horaNueva = hhmm(e.horaNueva);
   const vHora = e.universo.map(r => ({
     id: r.id,
     motivo: (!sel.hora || !horaNueva || horaNueva === e.horaOriginal) ? ("fuera_de_rango" as MotivoMasivo)
-      : !enRango(r) ? ("fuera_de_rango" as MotivoMasivo)
-      : hhmm(r.hora_servicio) !== e.horaOriginal ? ("otra_hora_de_origen" as MotivoMasivo)
-      : ("ok" as MotivoMasivo),
+      : (yaOcurrio(r) ?? (
+          !enRango(r) ? ("fuera_de_rango" as MotivoMasivo)
+          : hhmm(r.hora_servicio) !== e.horaOriginal ? ("otra_hora_de_origen" as MotivoMasivo)
+          : ("ok" as MotivoMasivo))),
   }));
   const horas = sel.hora ? resumir(vHora) : sinEje();
 
   // ── PAX ───────────────────────────────────────────────────────────────────
-  // Ni hora ni unidad: esos filtros protegen la asignación y los asientos son del
-  // contrato, así que el pax alcanza a los retornos sin marcar nada.
+  // Ni hora, ni unidad, NI LA FECHA: los dos primeros protegen la asignación y el tercero
+  // protege el despacho, y los asientos no son ninguna de las dos cosas — son del
+  // CONTRATO. Por eso el pax alcanza a los retornos sin marcar nada y alcanza también a
+  // los servicios que ya se prestaron: corregir el «de 10 contratados» que el portal le
+  // publicó al cliente el 18 de septiembre es, literalmente, el caso de uso.
   const vPax = e.universo.map(r => ({
     id: r.id,
     motivo: !sel.pax ? ("fuera_de_rango" as MotivoMasivo)
@@ -521,6 +586,8 @@ export function planMasivo(e: EntradaMasivo): PlanMasivo {
 export const TEXTO_MOTIVO: Record<MotivoMasivo, string> = {
   ok:                         "recibe el cambio",
   fuera_de_rango:             "fuera del rango de fechas elegido",
+  ya_ocurrio:                 "ya se prestaron: no se les cambia la unidad ni la hora, pero sus asientos y su importe sí se corrigen",
+  en_ruta:                    "están en ruta ahora mismo",
   otro_horario:               "salen a otro horario (marca «incluir otro horario» si también son suyos)",
   ya_tiene_unidad:            "ya tienen otra unidad asignada (marca «sobrescribir la unidad»)",
   otro_tipo_asignacion:       "son del otro tipo de asignación: no se mezcla un conductor propio con un servicio tercerizado",

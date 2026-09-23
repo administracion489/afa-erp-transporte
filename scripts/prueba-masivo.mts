@@ -514,6 +514,111 @@ titulo("10 · El número que autoriza una persona es honesto");
      "los soles del aviso son los del cambio REAL", JSON.stringify(plan.dinero.precio));
 }
 
+// ── 11 · EL PAX DE LO QUE YA SE PRESTÓ ──────────────────────────────────────
+//
+// Reportado desde la pantalla, con el contrato #240 a la vista: «no me permite cambiar
+// los PAX de servicios pasados, al colocar fecha para cambio masivo no deja el sistema».
+// El modal contaba 1 812 servicios activos y decía «Aplicar a 0 servicio(s)»: 1 582
+// `otra_ruta` + 230 `fuera_de_rango`, cero destinatarios.
+//
+// Eran DOS defectos a la vez, y esta sección fija los dos.
+titulo("11 · El PAX alcanza lo ya prestado; el despacho no");
+{
+  seq = 0;
+  // Un contrato con la misma RUTA C en dos horarios (dos móviles) y días ya pasados.
+  const ctx = [
+    ...dia("2026-09-18", { ruta_nombre: "RUTA C/ 04:35- 17:00", estado: "finalizada" },
+                         { ruta_nombre: "RUTA C/ 04:35- 17:00", estado: "finalizada" }),
+    ...dia("2026-09-19", { ruta_nombre: "RUTA C/ 06:35- 15:00", estado: "finalizada" },
+                         { ruta_nombre: "RUTA C/ 06:35- 15:00", estado: "finalizada" }),
+    ...dia("2026-12-01", { ruta_nombre: "RUTA C/ 06:35- 15:00" },
+                         { ruta_nombre: "RUTA C/ 06:35- 15:00" }),
+  ];
+  const base = {
+    contexto: ctx, hoy: "2026-09-23",
+    pax: 50, paxAntes: null,
+    rutasObjetivo: [normalizarNombreRuta("RUTA C/ 04:35- 17:00")],
+  };
+
+  const plan = planMasivo(entrada({ ...base, seleccion: { ...SEL_NADA, pax: true } }));
+  ok(plan.ejes.pax.ids.length === 6,
+     "los SEIS tramos reciben los asientos: los del 18, los del 19 y los de diciembre",
+     `${plan.ejes.pax.ids.length} de 6`);
+  ok(plan.ejes.pax.fuera.length === 0, "y nada queda fuera",
+     JSON.stringify(plan.ejes.pax.fuera));
+
+  // Defecto 1 · el NOMBRE lleva la hora dentro.
+  const soloExacto = ctx.filter(r =>
+    normalizarNombreRuta(r.ruta_nombre) === normalizarNombreRuta("RUTA C/ 04:35- 17:00"));
+  ok(soloExacto.length === 2,
+     "con el nombre COMPLETO solo casaban los del 04:35 — cada móvil era «otra ruta»");
+  ok(plan.ejes.pax.ids.length > soloExacto.length,
+     "comparar sin la hora es lo que hace que el eje alcance a la ruta entera");
+
+  // Defecto 2 · el universo excluía lo pasado y lo finalizado.
+  const universoVIEJO = ctx.filter(r =>
+    r.estado !== "cancelada" && r.estado !== "finalizada" && r.estado !== "en_curso" &&
+    (r.fecha_servicio || "") >= "2026-09-23");
+  ok(universoVIEJO.length === 2,
+     "el universo viejo dejaba fuera los cuatro tramos ya prestados antes de contarlos");
+  const planVIEJO = planMasivo(entrada({
+    ...base, contexto: ctx, universo: universoVIEJO, seleccion: { ...SEL_NADA, pax: true },
+  }));
+  ok(planVIEJO.ejes.pax.ids.length === 2,
+     "y con él, corregir el PAX del 18 de septiembre era imposible desde esta pantalla");
+}
+{
+  // Y el guard NO se perdió: sigue frenando al despacho, ahora con su código.
+  seq = 0;
+  const ctx = [
+    ...dia("2026-09-18", { estado: "finalizada" }, null),
+    ...dia("2026-09-23", { estado: "en_curso" }, null),
+    ...dia("2026-12-01", {}, null),
+  ];
+  const base = { contexto: ctx, hoy: "2026-09-23", otraUnidad: true, otraHora: true };
+
+  const asign = planMasivo(entrada({ ...base, seleccion: { ...SEL_NADA, asignacion: "completa" } }));
+  ok(asign.ejes.asignacion.ids.length === 1,
+     "la asignación solo alcanza al de diciembre", asign.ejes.asignacion.ids.length);
+  ok(asign.ejes.asignacion.fuera.some(f => f.motivo === "ya_ocurrio"),
+     "el ya prestado queda fuera con su código: reasignarlo reescribe el historial");
+  ok(asign.ejes.asignacion.fuera.some(f => f.motivo === "en_ruta"),
+     "y el que va en ruta también: no se le cambia el bus a media carretera");
+
+  const hora = planMasivo(entrada({
+    ...base, horaNueva: "06:30", seleccion: { ...SEL_NADA, hora: true },
+  }));
+  ok(hora.ejes.hora.ids.length === 1,
+     "la hora tampoco se le corre a lo que ya pasó: su paradero es contra el que se midió el retraso",
+     hora.ejes.hora.ids.length);
+
+  const pax = planMasivo(entrada({ ...base, pax: 50, seleccion: { ...SEL_NADA, pax: true } }));
+  ok(pax.ejes.pax.ids.length === 3,
+     "y el PAX sí llega a los tres: los asientos son del CONTRATO, no del despacho",
+     pax.ejes.pax.ids.length);
+}
+{
+  // LO QUE NO SE AFLOJA: ensanchar la ruta no pisa los asientos de otro móvil.
+  seq = 0;
+  const ctx = [
+    ...dia("2026-10-01", { ruta_nombre: "RUTA C/ 04:35", capacidad_contratada: 50 }, null),
+    ...dia("2026-10-02", { ruta_nombre: "RUTA C/ 06:35", capacidad_contratada: 30 }, null),
+    ...dia("2026-10-03", { ruta_nombre: "RUTA A/ 04:35", capacidad_contratada: 50 }, null),
+  ];
+  const plan = planMasivo(entrada({
+    contexto: ctx, pax: 45, paxAntes: 50,
+    rutasObjetivo: [normalizarNombreRuta("RUTA C/ 04:35")],
+    seleccion: { ...SEL_NADA, pax: true },
+  }));
+  ok(plan.ejes.pax.ids.length === 1 && plan.ejes.pax.ids[0] === ctx[0].id,
+     "el móvil de 30 asientos NO recibe los 45: lo protege la CAPACIDAD, que es exacta",
+     JSON.stringify(plan.ejes.pax.ids));
+  ok(plan.ejes.pax.fuera.some(f => f.motivo === "otra_capacidad"),
+     "y queda fuera con ese código, no con el de la ruta");
+  ok(plan.ejes.pax.fuera.some(f => f.motivo === "otra_ruta"),
+     "la RUTA A sigue siendo otra ruta: sin la hora no significa sin el nombre");
+}
+
 // ── Resultado ───────────────────────────────────────────────────────────────
 console.log(`\n${fallos === 0 ? "✓ TODO EN VERDE" : `✗ ${fallos} FALLA(S)`}\n`);
 process.exit(fallos === 0 ? 0 : 1);
