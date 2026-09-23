@@ -1,196 +1,72 @@
--- ══════════════════════════════════════════════════════════════════════════════
--- ¿SE CORRIERON LOS SQL DEL REPORTE DE OCUPACIÓN?
+-- ¿SE CORRIERON LOS SQL DEL REPORTE DE OCUPACIÓN? — pégalo entero y dale Run.
 --
--- Pégalo entero en el SQL Editor de Supabase y dale Run. Cada fila dice si esa
--- pieza está o falta, y CUÁL de los archivos hay que volver a correr.
+-- SOLO LEE EL CATÁLOGO de Postgres (information_schema, pg_*), y eso no es un
+-- detalle: una versión anterior terminaba contando clientes, y como Postgres
+-- ANALIZA la consulta entera antes de ejecutarla, si faltaba la columna el
+-- script moría sin mostrar NI UNA fila — se rompía en el único caso en que
+-- hace falta. El conteo va al final, comentado, para pegarlo aparte.
 --
--- No escribe nada: solo lee el catálogo de Postgres.
---
--- ─── POR QUÉ ESTO NO CUENTA CLIENTES NI ENVÍOS ──────────────────────────────
---
--- La primera versión terminaba con un `count(*) from clientes where
--- reporte_ocupacion_activo`, protegido por un CASE. No funciona: Postgres ANALIZA
--- la consulta entera antes de ejecutar nada, así que si la columna no existe el
--- script muere con «column ... does not exist» y NO se ve ninguna de las filas de
--- arriba. O sea: el verificador se rompía exactamente en el único caso en que hace
--- falta. Lo que se consulta por catálogo (`information_schema`, `pg_*`) es seguro
--- siempre, porque son tablas que existen pase lo que pase.
---
--- El conteo de clientes encendidos va al final, comentado, para pegarlo APARTE
--- cuando lo de arriba ya salga en verde.
--- ══════════════════════════════════════════════════════════════════════════════
+-- Y VA COMPACTO A PROPÓSITO: la versión documentada pasaba de 180 líneas y al
+-- pegarla en el editor de Supabase se cortaba a la mitad («syntax error at end
+-- of input»). Un verificador que no se puede pegar de un tirón falla igual que
+-- uno que revienta.
 
--- ── reportes-01: a quién se le manda ────────────────────────────────────────
-select '01 · clientes.' || c as revisar,
-       case when exists (
-         select 1 from information_schema.columns
-          where table_schema = 'public' and table_name = 'clientes' and column_name = c
-       ) then '✅ existe'
-         else '❌ FALTA — corre supabase/reportes-01-ocupacion-semanal.sql' end as estado
-  from unnest(array[
-    'reporte_ocupacion_activo',
-    'reporte_ocupacion_correos',
-    'reporte_ocupacion_sugerencias'
-  ]) as c
-
-union all
-
--- ── Los DEFAULTS son parte de la migración, no un detalle ───────────────────
---
--- `reporte_ocupacion_activo` tiene que nacer en FALSE: es lo que hace que correr
--- el SQL no empiece a mandarle correos a todos los clientes de la base. Si alguien
--- corrió una versión editada a mano con otro default, las columnas "existen" y el
--- módulo hace algo distinto de lo que dice su documentación. Por eso se comprueba.
-select '01 · default de ' || d.col,
-       case when coalesce((
-              select column_default from information_schema.columns
-               where table_schema = 'public' and table_name = 'clientes'
-                 and column_name = d.col
-            ), '(sin columna)') like d.esperado || '%'
-            then '✅ ' || d.esperado
-            else '⚠️ revisa: se esperaba ' || d.esperado || ' y hay '
-                 || coalesce((
-                      select coalesce(column_default, '(ninguno)')
-                        from information_schema.columns
-                       where table_schema = 'public' and table_name = 'clientes'
-                         and column_name = d.col
-                    ), '(sin columna)') end
-  from (values
-    ('reporte_ocupacion_activo',      'false'),
-    ('reporte_ocupacion_sugerencias', 'true')
-  ) as d(col, esperado)
-
-union all
-
--- ── reportes-01: la bitácora y su candado ───────────────────────────────────
-select '01 · tabla reporte_ocupacion_envios',
-       case when exists (
-         select 1 from information_schema.tables
-          where table_schema = 'public' and table_name = 'reporte_ocupacion_envios'
-       ) then '✅ existe'
-         else '❌ FALTA — corre supabase/reportes-01-ocupacion-semanal.sql' end
-
-union all
-
--- El índice único es lo que impide que un reintento del cron mande el mismo correo
--- dos veces. La tabla puede existir sin él, así que se revisa aparte.
-select '01 · candado anti-correo-doble (uq_reporte_ocupacion_envio)',
-       case when exists (
-         select 1 from pg_indexes
-          where schemaname = 'public' and indexname = 'uq_reporte_ocupacion_envio'
-       ) then '✅ existe'
-         else '❌ FALTA — corre supabase/reportes-01-ocupacion-semanal.sql' end
-
-union all
-
-select '01 · RLS activo en reporte_ocupacion_envios',
-       case when coalesce((
-         select c.relrowsecurity from pg_class c
-           join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = 'public' and c.relname = 'reporte_ocupacion_envios'
-       ), false) then '✅ activo'
-         else '❌ FALTA — corre supabase/reportes-01-ocupacion-semanal.sql' end
-
-union all
-
--- ── reportes-02: cada cuánto se manda y cuánto abarca ───────────────────────
---
--- ACCESORIO: sin él el módulo corre con su comportamiento original (sábados,
--- últimos 7 días) y no se rompe nada. Por eso su aviso es ⚠️ y no ❌.
-select '02 · clientes.' || c,
-       case when exists (
-         select 1 from information_schema.columns
-          where table_schema = 'public' and table_name = 'clientes' and column_name = c
-       ) then '✅ existe'
-         else '⚠️ falta (opcional) — sin esto va sábados + últimos 7 días · '
-              || 'corre supabase/reportes-02-cadencia.sql' end
-  from unnest(array[
-    'reporte_ocupacion_frecuencia',
-    'reporte_ocupacion_ventana'
-  ]) as c
-
-union all
-
--- Los CHECK son lo que impide que entre a la columna un valor que la pantalla no
--- sabe pintar (el código normaliza lo desconocido al defecto, pero el desplegable
--- saldría vacío sin que nada fallara).
-select '02 · CHECK ' || k,
-       case when exists (select 1 from pg_constraint where conname = k)
-            then '✅ existe'
-            else '⚠️ falta (opcional) — corre supabase/reportes-02-cadencia.sql' end
-  from unnest(array[
-    'clientes_reporte_ocupacion_frecuencia_check',
-    'clientes_reporte_ocupacion_ventana_check'
-  ]) as k
-
-union all
-
--- ── reportes-03: la copia interna de AFA ────────────────────────────────────
---
--- ACCESORIO, y de los más inofensivos: sin la tabla la copia SIGUE saliendo
--- exactamente igual (a la variable REPORTE_OCUPACION_CORREOS y, si no, al correo
--- de la empresa). Lo único que falta es poder encenderla, apagarla y cambiarle el
--- destinatario desde /reportes. Por eso su aviso es ⚠️ y no ❌.
-select '03 · tabla reporte_ocupacion_config',
-       case when exists (
-         select 1 from information_schema.tables
-          where table_schema = 'public' and table_name = 'reporte_ocupacion_config'
-       ) then '✅ existe'
-         else '⚠️ falta (opcional) — la copia sale igual, pero no se puede '
-              || 'gobernar · corre supabase/reportes-03-copia-interna.sql' end
-
-union all
-
--- El default TIENE que ser true, y es lo contrario del de `reporte_ocupacion_activo`:
--- aquel manda un correo a un TERCERO que no lo pidió, éste no sale de la empresa.
--- Con false, correr el SQL le apagaría la copia a operaciones sin que nadie lo diga.
-select '03 · default de copia_afa_activa',
-       case when coalesce((
-              select column_default from information_schema.columns
-               where table_schema = 'public' and table_name = 'reporte_ocupacion_config'
-                 and column_name = 'copia_afa_activa'
-            ), '(sin columna)') like 'true%'
-            then '✅ true'
-            else '⚠️ revisa: se esperaba true y hay '
-                 || coalesce((
-                      select coalesce(column_default, '(ninguno)')
-                        from information_schema.columns
-                       where table_schema = 'public' and table_name = 'reporte_ocupacion_config'
-                         and column_name = 'copia_afa_activa'
-                    ), '(sin columna)') end
-
-union all
-
--- Sin política permisiva a propósito: la fila se lee y se escribe SOLO por
--- /api/reportes/copia-interna con service-role, porque uno de los tres escalones
--- de la cascada es una variable de entorno que la pantalla no puede ver. Una
--- política acá sería una segunda puerta que puede contestar distinto.
-select '03 · RLS activo y SIN política permisiva',
+with c(n, que, tipo, t, x, archivo, opc) as (values
+  ( 1,'clientes.reporte_ocupacion_activo',       'col'  ,'clientes','reporte_ocupacion_activo'          ,'reportes-01-ocupacion-semanal.sql',false),
+  ( 2,'clientes.reporte_ocupacion_correos',      'col'  ,'clientes','reporte_ocupacion_correos'         ,'reportes-01-ocupacion-semanal.sql',false),
+  ( 3,'clientes.reporte_ocupacion_sugerencias',  'col'  ,'clientes','reporte_ocupacion_sugerencias'     ,'reportes-01-ocupacion-semanal.sql',false),
+  -- Los DEFAULTS son parte de la migración: `activo` TIENE que nacer en false,
+  -- que es lo que impide que correr el SQL le empiece a mandar correos a todos.
+  ( 4,'default activo = false',                  'def'  ,'clientes','reporte_ocupacion_activo|false'    ,'reportes-01-ocupacion-semanal.sql',false),
+  ( 5,'default sugerencias = true',              'def'  ,'clientes','reporte_ocupacion_sugerencias|true','reportes-01-ocupacion-semanal.sql',false),
+  ( 6,'tabla reporte_ocupacion_envios',          'tabla','reporte_ocupacion_envios',''                  ,'reportes-01-ocupacion-semanal.sql',false),
+  ( 7,'candado anti-correo-doble',               'idx'  ,'','uq_reporte_ocupacion_envio'                ,'reportes-01-ocupacion-semanal.sql',false),
+  ( 8,'RLS en reporte_ocupacion_envios',         'rls'  ,'reporte_ocupacion_envios',''                  ,'reportes-01-ocupacion-semanal.sql',false),
+  -- ACCESORIO: sin la 02 el módulo corre con su comportamiento original
+  -- (sábados, últimos 7 días). Por eso su aviso es ⚠️ y no ❌.
+  ( 9,'clientes.reporte_ocupacion_frecuencia',   'col'  ,'clientes','reporte_ocupacion_frecuencia'      ,'reportes-02-cadencia.sql',true),
+  (10,'clientes.reporte_ocupacion_ventana',      'col'  ,'clientes','reporte_ocupacion_ventana'         ,'reportes-02-cadencia.sql',true),
+  (11,'CHECK de frecuencia',                     'chk'  ,'','clientes_reporte_ocupacion_frecuencia_check','reportes-02-cadencia.sql',true),
+  (12,'CHECK de ventana',                        'chk'  ,'','clientes_reporte_ocupacion_ventana_check'  ,'reportes-02-cadencia.sql',true),
+  -- ACCESORIO también: sin la 03 la copia interna de AFA sale exactamente
+  -- igual que hasta ahora; lo único que falta es poder gobernarla desde
+  -- /reportes. Su default es `true` justo por eso.
+  (13,'tabla reporte_ocupacion_config',          'tabla','reporte_ocupacion_config',''                  ,'reportes-03-copia-interna.sql',true),
+  (14,'default copia_afa_activa = true',         'def'  ,'reporte_ocupacion_config','copia_afa_activa|true','reportes-03-copia-interna.sql',true),
+  (15,'RLS en reporte_ocupacion_config',         'rls'  ,'reporte_ocupacion_config',''                  ,'reportes-03-copia-interna.sql',true)
+)
+select c.que as revisar,
        case
-         when not exists (select 1 from information_schema.tables
-                           where table_schema = 'public' and table_name = 'reporte_ocupacion_config')
-           then '⚠️ (sin tabla todavía)'
-         when not coalesce((
-                select c.relrowsecurity from pg_class c
-                  join pg_namespace n on n.oid = c.relnamespace
-                 where n.nspname = 'public' and c.relname = 'reporte_ocupacion_config'
-              ), false)
-           then '❌ RLS APAGADO — corre supabase/reportes-03-copia-interna.sql'
-         when exists (select 1 from pg_policies
-                       where schemaname = 'public' and tablename = 'reporte_ocupacion_config')
-           then '⚠️ hay una política: alguien la agregó a mano, el SQL no crea ninguna'
-         else '✅ como debe'
-       end
-
-order by 1;
+         when v.ok then '✅'
+         when c.tipo = 'def' then '⚠️ el default no es el esperado (o falta la columna) · supabase/' || c.archivo
+         when c.opc then '⚠️ falta (opcional) · corre supabase/' || c.archivo
+         else '❌ FALTA · corre supabase/' || c.archivo
+       end as estado
+  from c
+  cross join lateral (select case c.tipo
+    when 'col'   then exists (select 1 from information_schema.columns
+                               where table_schema = 'public' and table_name::text = c.t and column_name::text = c.x)
+    when 'tabla' then exists (select 1 from information_schema.tables
+                               where table_schema = 'public' and table_name::text = c.t)
+    when 'idx'   then exists (select 1 from pg_indexes
+                               where schemaname = 'public' and indexname::text = c.x)
+    when 'chk'   then exists (select 1 from pg_constraint where conname::text = c.x)
+    when 'rls'   then coalesce((select k.relrowsecurity from pg_class k
+                                  join pg_namespace ns on ns.oid = k.relnamespace
+                                 where ns.nspname = 'public' and k.relname::text = c.t), false)
+    when 'def'   then coalesce((select column_default from information_schema.columns
+                                 where table_schema = 'public' and table_name::text = c.t
+                                   and column_name::text = split_part(c.x, '|', 1)), '')
+                     like split_part(c.x, '|', 2) || '%'
+  end) as v(ok)
+ order by c.n;
 
 
 -- ══════════════════════════════════════════════════════════════════════════════
--- PARTE 2 — SOLO cuando todo lo de arriba salga ✅
+-- PARTE 2 — SOLO cuando todo lo de arriba salga ✅ (quita los guiones y pégala aparte)
 --
 -- Correr el SQL NO enciende el reporte de nadie: `reporte_ocupacion_activo` nace
--- en false y se enciende cliente por cliente en /clientes → editar. Estas dos
--- filas contestan esa otra mitad. Quita los guiones y pégalas aparte.
+-- en false y se enciende cliente por cliente en /clientes → editar.
 -- ══════════════════════════════════════════════════════════════════════════════
 
 -- select 'Clientes con el reporte ENCENDIDO' as revisar,
