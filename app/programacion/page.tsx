@@ -2457,6 +2457,22 @@ export default function ReservasPage() {
       aplicarOtraUnidad, aplicarLiquidadas]);
 
   /**
+   * Esc cierra el modal del masivo, igual que la ✕ y que «No, solo este».
+   *
+   * Es la tercera puerta de salida y la que se intenta sin pensar. Nunca mientras se está
+   * ESCRIBIENDO (`aplicando`): cerrar a mitad de un lote dejaría la pantalla diciendo que
+   * no pasó nada sobre servicios que ya se guardaron.
+   */
+  useEffect(() => {
+    if (!modalAplicarMasivo) return;
+    const alTecla = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && !aplicando) setModalAplicarMasivo(null);
+    };
+    window.addEventListener("keydown", alTecla);
+    return () => window.removeEventListener("keydown", alTecla);
+  }, [modalAplicarMasivo, aplicando]);
+
+  /**
    * ¿Qué servicios del contrato ya están dentro de una liquidación EMITIDA? Solo se
    * pregunta cuando hay dinero que ofrecer: es una consulta paginada sobre cientos de
    * ids y no tiene sentido pagarla para reasignar un bus.
@@ -3626,13 +3642,28 @@ export default function ReservasPage() {
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[92vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-              {/* Header */}
+              {/* Header · con su SALIDA.
+                  Las dos únicas puertas eran «Aplicar» y «Solo este», y las dos se leen
+                  como una acción: quien no estaba seguro no tenía por dónde salirse. La ✕
+                  y la tecla Escape hacen exactamente lo mismo que «Solo este» — cerrar sin
+                  propagar. NO se llaman «Cancelar» a propósito: el servicio que se editó
+                  YA está guardado (este modal se ofrece después de guardarlo), así que un
+                  botón que prometiera deshacerlo estaría mintiendo. */}
               <div className="px-6 py-4 flex items-center gap-3 rounded-t-2xl" style={{ background: "#0b315f" }}>
                 <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center text-lg">📋</div>
-                <div>
+                <div className="flex-1 min-w-0">
                   <p className="font-black text-white text-base">¿Aplicar a más servicios del contrato?</p>
                   <p className="text-white/60 text-xs">Contrato #{cotizacion_id} · {otrasReservas.length} servicio(s) activo(s)</p>
                 </div>
+                <button
+                  onClick={() => setModalAplicarMasivo(null)}
+                  disabled={aplicando}
+                  title="Cerrar sin aplicar a más servicios. Lo que editaste en este servicio ya quedó guardado."
+                  aria-label="Cerrar sin aplicar a más servicios"
+                  className="shrink-0 w-8 h-8 rounded-lg text-white/70 hover:text-white hover:bg-white/15 text-xl leading-none disabled:opacity-40"
+                >
+                  ×
+                </button>
               </div>
 
               <div className="px-6 py-5 space-y-4">
@@ -3859,11 +3890,19 @@ export default function ReservasPage() {
                 <button
                   onClick={() => setModalAplicarMasivo(null)}
                   disabled={aplicando}
+                  title="Cierra sin tocar ningún otro servicio del contrato."
                   className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50 disabled:opacity-60"
                 >
-                  Solo este
+                  No, solo este
                 </button>
               </div>
+              {/* Lo que un «Cancelar» haría creer, dicho al derecho: no hay nada pendiente
+                  de confirmar sobre el servicio que se editó — se guardó al pulsar Guardar,
+                  y este modal solo pregunta por los DEMÁS. */}
+              <p className="px-6 pb-4 -mt-2 text-[11px] text-gray-500">
+                Lo que cambiaste en <b>este</b> servicio ya quedó guardado. Salir de aquí
+                —con «No, solo este», la ✕ o la tecla Esc— solo deja sin tocar al resto del contrato.
+              </p>
               {/* Un botón apagado DICE qué le falta: si no, se pulsa y no pasa nada. */}
               {faltaMotivo && (
                 <p className="px-6 pb-4 -mt-2 text-[11px] font-bold" style={{ color: "#b91c1c" }}>
