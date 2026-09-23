@@ -2312,22 +2312,33 @@ export default function ReservasPage() {
     // ── Si es servicio FIJO con contrato, ofrecer aplicar a otros días ──
     if (reservaActual && !esEventual(reservaActual) && reservaActual.cotizacion_id) {
       const horaOriginal = reservaActual.hora_servicio?.slice(0, 5) || "";
-      // Candidatos = lo que queda por operar del contrato. El recorte fino (misma hora,
-      // misma unidad) lo decide el usuario en el modal: antes se filtraba aquí y los
-      // servicios ya asignados a OTRA unidad quedaban fuera para siempre, así que era
-      // imposible reasignar el conductor en bloque sin reasignar también la unidad.
-      // Nunca entran los servicios ya operados (fecha pasada, aunque nadie los haya
-      // marcado "finalizada") ni el que está en ruta ahora mismo: cambiarles la unidad
-      // reescribiría el historial o le cambiaría el bus al conductor a media carretera.
-      const hoyPeru = fechaLima();
+      // Candidatos = el contrato ENTERO. El recorte fino (misma hora, misma unidad) lo
+      // decide el usuario en el modal, y el de «esto ya se prestó» lo decide cada EJE: antes
+      // se filtraba aquí y los servicios ya asignados a OTRA unidad quedaban fuera para
+      // siempre, así que era imposible reasignar el conductor en bloque sin reasignar
+      // también la unidad — el mismo error de paquete que arrastraba la fecha.
       // Todos los servicios del contrato desde el servidor: los "Programa fijo" se extienden
       // meses adelante, fuera de la ventana visible. Sin esto, "aplicar a rango" solo
       // alcanzaría lo que estuviera cargado en pantalla.
       const delContrato = await fetchReservasCols(COLS_LISTA, (q: any) => q.eq("cotizacion_id", reservaActual.cotizacion_id!));
+      // EL UNIVERSO NO SE RECORTA POR FECHA NI POR ESTADO, y esto es un arreglo.
+      //
+      // Antes se filtraba aquí `estado !== finalizada/en_curso && fecha >= hoy`: un filtro
+      // de PAQUETE aplicado antes de que existiera ningún eje, o sea exactamente el defecto
+      // que los seis ejes vinieron a corregir, sobreviviendo un piso más arriba. Con él, el
+      // PAX de un servicio ya prestado no se podía corregir en lote desde ninguna pantalla
+      // —y es el que el portal le publica al cliente— y el calendario del modal ni siquiera
+      // dejaba elegir una fecha anterior a hoy, porque su `min` sale de esta misma lista.
+      //
+      // El guard no se pierde: se mudó a `planMasivo` como veredicto POR EJE
+      // (`ya_ocurrio` / `en_ruta`), así que sigue frenando la asignación y la hora, y ahora
+      // se VE con su motivo en vez de desaparecer antes de contarse.
+      //
+      // Lo único que se sigue excluyendo aquí es la CANCELADA: su importe lo decide
+      // `planDeCancelacion` y sus asientos no describen nada. Y el propio servicio editado,
+      // que ya se guardó.
       const otrasReservas = (delContrato as Reserva[]).filter(r =>
-        r.id !== editandoId &&
-        r.estado !== "cancelada" && r.estado !== "finalizada" && r.estado !== "en_curso" &&
-        (r.fecha_servicio || "") >= hoyPeru
+        r.id !== editandoId && r.estado !== "cancelada"
       );
       if (otrasReservas.length > 0) {
         // Construir resumen legible de lo asignado
@@ -2430,6 +2441,9 @@ export default function ReservasPage() {
       sentidoEditado: m.sentidoEditado,
       desde: aplicarScope === "rango" ? (aplicarDesde || null) : null,
       hasta: aplicarScope === "rango" ? (aplicarHasta || null) : null,
+      // Hoy en PERÚ, no el del navegador: a las 19:00 de Lima el reloj UTC ya es mañana y
+      // los servicios de esta noche saldrían marcados como pasados.
+      hoy: fechaLima(),
       otraHora: aplicarOtraHora,
       otraUnidad: aplicarOtraUnidad,
       pax: m.pax, paxAntes: m.paxAntes, rutasObjetivo: m.rutasObjetivo,
@@ -2441,6 +2455,22 @@ export default function ReservasPage() {
   }, [modalAplicarMasivo, aplicarAsignacion, aplicarHora, aplicarPax, aplicarPrecio,
       aplicarCosto, aplicarScope, aplicarDesde, aplicarHasta, aplicarOtraHora,
       aplicarOtraUnidad, aplicarLiquidadas]);
+
+  /**
+   * Esc cierra el modal del masivo, igual que la ✕ y que «No, solo este».
+   *
+   * Es la tercera puerta de salida y la que se intenta sin pensar. Nunca mientras se está
+   * ESCRIBIENDO (`aplicando`): cerrar a mitad de un lote dejaría la pantalla diciendo que
+   * no pasó nada sobre servicios que ya se guardaron.
+   */
+  useEffect(() => {
+    if (!modalAplicarMasivo) return;
+    const alTecla = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && !aplicando) setModalAplicarMasivo(null);
+    };
+    window.addEventListener("keydown", alTecla);
+    return () => window.removeEventListener("keydown", alTecla);
+  }, [modalAplicarMasivo, aplicando]);
 
   /**
    * ¿Qué servicios del contrato ya están dentro de una liquidación EMITIDA? Solo se
@@ -3612,13 +3642,28 @@ export default function ReservasPage() {
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[92vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-              {/* Header */}
+              {/* Header · con su SALIDA.
+                  Las dos únicas puertas eran «Aplicar» y «Solo este», y las dos se leen
+                  como una acción: quien no estaba seguro no tenía por dónde salirse. La ✕
+                  y la tecla Escape hacen exactamente lo mismo que «Solo este» — cerrar sin
+                  propagar. NO se llaman «Cancelar» a propósito: el servicio que se editó
+                  YA está guardado (este modal se ofrece después de guardarlo), así que un
+                  botón que prometiera deshacerlo estaría mintiendo. */}
               <div className="px-6 py-4 flex items-center gap-3 rounded-t-2xl" style={{ background: "#0b315f" }}>
                 <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center text-lg">📋</div>
-                <div>
+                <div className="flex-1 min-w-0">
                   <p className="font-black text-white text-base">¿Aplicar a más servicios del contrato?</p>
                   <p className="text-white/60 text-xs">Contrato #{cotizacion_id} · {otrasReservas.length} servicio(s) activo(s)</p>
                 </div>
+                <button
+                  onClick={() => setModalAplicarMasivo(null)}
+                  disabled={aplicando}
+                  title="Cerrar sin aplicar a más servicios. Lo que editaste en este servicio ya quedó guardado."
+                  aria-label="Cerrar sin aplicar a más servicios"
+                  className="shrink-0 w-8 h-8 rounded-lg text-white/70 hover:text-white hover:bg-white/15 text-xl leading-none disabled:opacity-40"
+                >
+                  ×
+                </button>
               </div>
 
               <div className="px-6 py-5 space-y-4">
@@ -3718,7 +3763,8 @@ export default function ReservasPage() {
                   {m.paxTocado && casillaEje("pax", aplicarPax, setAplicarPax,
                     <>PAX contratados · <b>{m.pax != null ? `${m.pax} asientos` : "vacío"}</b></>,
                     <>Los asientos son del <b>contrato</b>, no de la unidad: alcanzan a las idas
-                      <b> y</b> a los retornos, sin mirar la hora ni la placa.
+                      <b> y</b> a los retornos, a los <b>otros horarios</b> de la misma ruta y
+                      también a los servicios <b>ya prestados</b> — sin mirar la placa.
                       {m.pax == null && <> Vacío <b>borra</b> la capacidad escrita en esos servicios.</>}</>)}
 
                   {/* ── EL DINERO ─────────────────────────────────────────────────
@@ -3844,11 +3890,19 @@ export default function ReservasPage() {
                 <button
                   onClick={() => setModalAplicarMasivo(null)}
                   disabled={aplicando}
+                  title="Cierra sin tocar ningún otro servicio del contrato."
                   className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50 disabled:opacity-60"
                 >
-                  Solo este
+                  No, solo este
                 </button>
               </div>
+              {/* Lo que un «Cancelar» haría creer, dicho al derecho: no hay nada pendiente
+                  de confirmar sobre el servicio que se editó — se guardó al pulsar Guardar,
+                  y este modal solo pregunta por los DEMÁS. */}
+              <p className="px-6 pb-4 -mt-2 text-[11px] text-gray-500">
+                Lo que cambiaste en <b>este</b> servicio ya quedó guardado. Salir de aquí
+                —con «No, solo este», la ✕ o la tecla Esc— solo deja sin tocar al resto del contrato.
+              </p>
               {/* Un botón apagado DICE qué le falta: si no, se pulsa y no pasa nada. */}
               {faltaMotivo && (
                 <p className="px-6 pb-4 -mt-2 text-[11px] font-bold" style={{ color: "#b91c1c" }}>
