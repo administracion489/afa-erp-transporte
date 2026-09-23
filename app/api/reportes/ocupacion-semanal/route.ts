@@ -75,16 +75,31 @@ type Resultado = {
   clientes?: { cliente: string; rutas: number; enviados: string[]; omitido?: string; error?: string }[];
 };
 
-async function emitir(opts: { fin?: string; forzarDia?: boolean }): Promise<Resultado> {
+/**
+ * @param clienteId  Acota el envío a UN cliente. Lo usa el botón «Guardar y enviar
+ *   ahora» de la ficha del cliente: ahí el operador está mirando a UNO, y disparar
+ *   el tick entero —que es lo que hace el botón de /reportes— le mandaría el correo
+ *   también a todos los demás activos sin que la pantalla lo diga. El botón dice a
+ *   quién le manda y manda a ese.
+ *
+ *   NO es una puerta trasera: se acota SOBRE la lista de activos, así que la
+ *   garantía dura del módulo —nada sale de un cliente que nadie encendió— se
+ *   conserva. Un id que no esté encendido devuelve `cliente_no_activo` en vez de
+ *   emitir, y eso es distinto de `ningun_cliente_activo`: uno se arregla marcando
+ *   la casilla de ESE cliente y el otro es que no hay ninguno en toda la cartera.
+ */
+async function emitir(opts: { fin?: string; forzarDia?: boolean; clienteId?: number }): Promise<Resultado> {
   const fin = opts.fin || hoyLima();
 
   // ── A quién se le manda ───────────────────────────────────────────────────
   let activos: any[];
   try {
-    const { data, error } = await admin
+    let q = admin
       .from("clientes")
       .select("id,nombre,empresa,email,email_facturacion,reporte_ocupacion_activo,reporte_ocupacion_correos,reporte_ocupacion_sugerencias,reporte_ocupacion_frecuencia,reporte_ocupacion_ventana")
       .eq("reporte_ocupacion_activo", true);
+    if (opts.clienteId) q = q.eq("id", opts.clienteId);
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
     activos = (data as any[]) ?? [];
   } catch (e: any) {
@@ -94,7 +109,13 @@ async function emitir(opts: { fin?: string; forzarDia?: boolean }): Promise<Resu
     throw e;
   }
 
-  if (!activos.length) return { ok: true, motivo: "ningun_cliente_activo", periodo: { inicio: fin, fin } };
+  if (!activos.length) {
+    return {
+      ok: true,
+      motivo: opts.clienteId ? "cliente_no_activo" : "ningun_cliente_activo",
+      periodo: { inicio: fin, fin },
+    };
+  }
 
   // La VENTANA es por cliente, así que el rango de servicios que hay que leer para
   // los adjuntos es la unión de todas las que tocan hoy. Se calcula antes para
@@ -300,7 +321,16 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     // `forzarDia` permite emitir un martes para probar; NO salta el candado del
     // envío doble, que es el que de verdad protege.
-    return NextResponse.json(await emitir({ fin: body?.fin, forzarDia: body?.forzarDia === true }));
+    //
+    // `clienteId` acota a UNO (ver `emitir`). Se normaliza acá y no se confía en el
+    // cuerpo: un 0, un negativo o un texto tienen que caer en `undefined` —o sea, el
+    // tick de siempre— y nunca en un `.eq("id", NaN)` que no devolvería a nadie y
+    // parecería «no hay clientes activos».
+    const idCrudo = Number(body?.clienteId ?? 0);
+    const clienteId = Number.isFinite(idCrudo) && idCrudo > 0 ? Math.round(idCrudo) : undefined;
+    return NextResponse.json(await emitir({
+      fin: body?.fin, forzarDia: body?.forzarDia === true, clienteId,
+    }));
   } catch (e: any) {
     console.error("[ocupacion-semanal manual]", e);
     return NextResponse.json({ error: String(e?.message ?? e) }, { status: 500 });

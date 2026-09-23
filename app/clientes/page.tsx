@@ -7,7 +7,8 @@ import { parsearPortalUsuarios, descargarPlantillaPortalUsuarios, descargarCrede
 import { useCanalesInvitacion } from "@/lib/useCanalesInvitacion";
 import {
   FRECUENCIAS, VENTANAS, normalizarFrecuencia, normalizarVentana,
-  describirCadencia, avisoCadencia, type Frecuencia, type Ventana,
+  describirCadencia, avisoCadencia, ventanaDe, hoyLima,
+  type Frecuencia, type Ventana,
 } from "@/lib/ocupacion/cadencia";
 
 /* ══════════════════════════════════════════════
@@ -366,11 +367,19 @@ export default function ClientesPage() {
   const [form,         setForm]         = useState(FORM_VACIO);
   const [errors,       setErrors]       = useState<Record<string, string>>({});
   const [toDelete,     setToDelete]     = useState<{ id: number; nombre: string } | null>(null);
+  // «Guardar y enviar ahora» del bloque del reporte. El resultado se guarda en
+  // estado y NO se pinta como toast: un toast se va a los cinco segundos y lo que
+  // hay que leer es a QUIÉN le salió el correo.
+  const [enviandoRep,  setEnviandoRep]  = useState(false);
+  const [resEnvioRep,  setResEnvioRep]  = useState<any>(null);
   const formRef = useRef<HTMLDivElement>(null);
   const debRef  = useRef<ReturnType<typeof setTimeout>>();
 
   limpiarClienteRef.current = () => {
     setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); setErrors({});
+    // El resultado del envío es de UN cliente: heredarlo al abrir otro diría que le
+    // salió un correo a quien no le salió.
+    setResEnvioRep(null);
   };
 
   /* Debounced search */
@@ -464,7 +473,7 @@ export default function ClientesPage() {
         ? opContacts.map(x => ({ nombre: x.nombre || "", apellido: x.apellido || "", cargo: x.cargo || "", telefono: x.telefono || "", email: x.email || "" }))
         : [{ ...BLANK_CONTACTO }],
     });
-    setEditandoId(c.id); setMostrarForm(true); setErrors({});
+    setEditandoId(c.id); setMostrarForm(true); setErrors({}); setResEnvioRep(null);
     setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   };
 
@@ -482,7 +491,58 @@ export default function ClientesPage() {
   };
 
   /* Save client */
-  const guardarCliente = async () => {
+  /**
+   * Manda el reporte de ocupación de UN cliente, ahora.
+   *
+   * `forzarDia` salta SOLO la comprobación de «¿hoy le toca?» —si no, probar un
+   * miércoles un cliente configurado para sábados no haría nada y parecería roto—.
+   * El candado del envío doble NO se toca: vive en Postgres y es el que de verdad
+   * protege, porque un correo no se des-envía.
+   *
+   * `clienteId` acota el tick a este cliente. Sin él saldría el correo a TODOS los
+   * activos, que es lo que hace el botón de /reportes y es correcto ahí; desde la
+   * ficha de un cliente sería una pantalla diciendo una cosa y un sistema haciendo
+   * otra.
+   */
+  const enviarReporteAhora = async (id: number) => {
+    setEnviandoRep(true); setResEnvioRep(null);
+    try {
+      const { data: s } = await supabase.auth.getSession();
+      const r = await fetch("/api/reportes/ocupacion-semanal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.session?.access_token ?? ""}` },
+        body: JSON.stringify({ clienteId: id, forzarDia: true }),
+      });
+      const j = await r.json();
+      // El endpoint pide el módulo `reportes`, que un operador de Clientes puede no
+      // tener. Sin nombrarlo, el 403 se lee como «el reporte está roto».
+      if (r.status === 403) {
+        setResEnvioRep({ error: "Te falta el permiso del módulo Reportes para poder mandarlo desde acá." });
+      } else {
+        setResEnvioRep(j);
+      }
+    } catch (e: any) {
+      setResEnvioRep({ error: String(e?.message ?? e) });
+    } finally {
+      setEnviandoRep(false);
+    }
+  };
+
+  /**
+   * `luegoEnviar` guarda y, con el cliente ya escrito, manda su reporte.
+   *
+   * Los dos actos van juntos a propósito: el cron lee la BASE, así que un botón de
+   * envío suelto dentro de un formulario sin guardar mandaría el reporte descrito
+   * por una configuración que todavía no existe — y el operador lo cotejaría contra
+   * lo que tiene en pantalla. Es exactamente el desconcierto de «marqué la casilla y
+   * el sistema dice que no hay ningún cliente encendido». Por eso el botón se llama
+   * «Guardar y enviar ahora» y hace las dos.
+   *
+   * En ese camino el formulario NO se cierra: el resultado dice a qué correos salió,
+   * y cerrarlo lo escondería.
+   */
+  const guardarCliente = async (opciones?: { luegoEnviar?: boolean }) => {
+    const luegoEnviar = opciones?.luegoEnviar === true;
     if (!validate()) return;
     setGuardando(true);
 
@@ -582,6 +642,20 @@ export default function ClientesPage() {
     }
 
     toast(editandoId ? "Cliente actualizado ✓" : "Cliente creado ✓", "ok");
+
+    // Con `luegoEnviar` el formulario se queda abierto y el editandoId se fija por si
+    // el cliente acababa de nacer: sin eso, el segundo envío ya no sabría a quién.
+    if (luegoEnviar && clienteId) {
+      setEditandoId(clienteId);
+      cargarClientes();
+      setGuardando(false);
+      // El aviso de la migración accesoria manda sobre el envío: si las columnas del
+      // reporte no se guardaron, mandarlo emitiría con la configuración VIEJA y el
+      // operador lo leería como la nueva.
+      if (!avisoReporte) await enviarReporteAhora(clienteId);
+      return;
+    }
+
     limpiarCliente(); cargarClientes(); setGuardando(false);
   };
 
@@ -2011,13 +2085,109 @@ export default function ClientesPage() {
                             onChange={f("reporte_ocupacion_correos")} />
                         </Field>
                       </div>
+
+                      {/* ── GUARDAR Y ENVIAR AHORA ─────────────────────────────
+                          Estaba solo en /reportes, y ahí dispara el tick ENTERO: le
+                          manda a todos los clientes activos. Desde la ficha de UNO
+                          eso sería una pantalla diciendo una cosa y un sistema
+                          haciendo otra, así que el endpoint acota por `clienteId`.
+
+                          Guarda ANTES de mandar porque el cron lee la BASE: un botón
+                          de envío suelto dentro de un formulario sin guardar mandaría
+                          el reporte descrito por una configuración que todavía no
+                          existe, y el operador lo cotejaría contra lo que ve en
+                          pantalla.
+
+                          Enviar hoy NO se come el envío programado: el candado es por
+                          `periodo_fin`, y el de hoy y el del sábado son fechas
+                          distintas. Por eso la frase lo dice en vez de dejar a alguien
+                          con la duda. */}
+                      <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px dashed #cbd5e1" }}>
+                        {(() => {
+                          const destinos = form.reporte_ocupacion_correos.trim()
+                            || [form.email.trim(), form.email_facturacion.trim()].filter(Boolean).join(", ");
+                          const per = ventanaDe(form.reporte_ocupacion_ventana, hoyLima());
+                          const quien = form.nombre.trim() || form.empresa.trim() || "este cliente";
+                          return (
+                            <>
+                              <button
+                                disabled={guardando || enviandoRep || !destinos}
+                                onClick={() => {
+                                  // El confirm NOMBRA a quién y a qué correos, en vez de
+                                  // preguntar «¿estás seguro?»: es un correo real a gente
+                                  // real, y lo único que evita mandárselo al cliente
+                                  // equivocado es leer esa lista.
+                                  const ok = confirm(
+                                    `Se le va a MANDAR AHORA el reporte a ${quien}.\n\n` +
+                                    `Periodo: ${per.inicio} → ${per.fin}\n` +
+                                    `Correos: ${destinos}\n\n` +
+                                    `Son correos REALES. El envío programado no se pierde: ` +
+                                    `cubre otro periodo y sale igual.\n\n¿Continuar?`
+                                  );
+                                  if (ok) guardarCliente({ luegoEnviar: true });
+                                }}
+                                style={{
+                                  padding: "9px 18px", borderRadius: 10, border: "none",
+                                  background: (guardando || enviandoRep || !destinos) ? "#94a3b8" : "#0b315f",
+                                  color: "white", fontSize: 12.5, fontWeight: 700,
+                                  cursor: (guardando || enviandoRep || !destinos) ? "not-allowed" : "pointer",
+                                }}>
+                                {enviandoRep ? "Enviando…" : guardando ? "Guardando…" : "Guardar y enviar ahora"}
+                              </button>
+                              {/* Un botón deshabilitado DICE qué le falta: si no, se
+                                  pulsa y no pasa nada. */}
+                              <span style={{ marginLeft: 10, fontSize: 11.5, color: "#64748b" }}>
+                                {!destinos
+                                  ? "Sin correos: llena el campo de arriba, o el correo del cliente."
+                                  : `Guarda lo de esta pantalla y manda el periodo ${per.inicio} → ${per.fin} a ${destinos}.`}
+                              </span>
+                            </>
+                          );
+                        })()}
+
+                        {resEnvioRep && (
+                          <div style={{ marginTop: 10, fontSize: 12 }}>
+                            {resEnvioRep.error ? (
+                              <p style={{ margin: 0, color: "#b91c1c" }}>{resEnvioRep.error}</p>
+                            ) : typeof resEnvioRep.motivo === "string" && resEnvioRep.motivo.startsWith("sin_migracion") ? (
+                              <p style={{ margin: 0, color: "#92400e" }}>
+                                Falta correr <code>supabase/reportes-01-ocupacion-semanal.sql</code>.
+                              </p>
+                            ) : resEnvioRep.motivo === "cliente_no_activo" ? (
+                              <p style={{ margin: 0, color: "#92400e" }}>
+                                Este cliente quedó guardado con el reporte APAGADO, así que no se mandó nada.
+                              </p>
+                            ) : (
+                              <div>
+                                {(resEnvioRep.clientes ?? []).map((c: any, i: number) => (
+                                  <p key={i} style={{ margin: "2px 0", color: c.error ? "#b91c1c" : "#166534" }}>
+                                    {c.error
+                                      ? `No salió: ${c.error}`
+                                      : c.enviados?.length
+                                        ? `✓ Enviado a ${c.enviados.join(", ")} · ${c.rutas} ruta(s)`
+                                        : `No se mandó: ${c.omitido ?? "sin motivo declarado"}`}
+                                  </p>
+                                ))}
+                                {!(resEnvioRep.clientes ?? []).length && (
+                                  <p style={{ margin: 0, color: "#64748b" }}>
+                                    No se mandó nada{resEnvioRep.motivo ? ` (${resEnvioRep.motivo})` : ""}.
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
               </div>
 
               <div style={{ display: "flex", gap: 10, paddingTop: 16, borderTop: "1px solid #f1f5f9" }}>
-                <button onClick={guardarCliente} disabled={guardando}
+                {/* Se envuelve en una flecha a propósito: pasado directo, React le
+                    entrega el MouseEvent como primer argumento y `opciones.luegoEnviar`
+                    se leería de un evento del DOM. */}
+                <button onClick={() => guardarCliente()} disabled={guardando}
                   style={{ padding: "11px 30px", borderRadius: 11, border: "none", background: guardando ? "#94a3b8" : "#0b315f", color: "white", fontSize: 13, fontWeight: 700, cursor: guardando ? "not-allowed" : "pointer" }}>
                   {guardando ? "Guardando..." : editandoId ? "Actualizar cliente" : "Guardar cliente"}
                 </button>
