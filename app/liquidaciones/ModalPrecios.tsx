@@ -1,12 +1,18 @@
 "use client";
 // ──────────────────────────────────────────────────────────────────────────────
-// ModalPrecios — cargar el PRECIO DE VENTA sin salir de Liquidaciones.
+// ModalPrecios — cargar y CORREGIR el PRECIO DE VENTA sin salir de Liquidaciones.
 //
 // Es el espejo, del lado cliente, de components/pactos/ModalCostos. Faltaba, y esa
 // asimetría costó un cierre: una ruta con sesenta servicios de agosto no salió en la
 // valorización porque nadie le había cargado la tarifa, el bloque rojo decía "Sin
 // precio de venta" en ocho filas recortadas de sesenta, y arreglarlo obligaba a ir a
 // Programación servicio por servicio.
+//
+// Y por qué tiene DOS modos (`faltantes` | `periodo`), igual que su espejo: se abría
+// solo con `sinPrecio.length > 0`, o sea únicamente para RELLENAR. Una tarifa ya
+// cargada y equivocada no tenía camino en lote, y en cuanto no faltaba ninguna el botón
+// DESAPARECÍA: la única pantalla que ve lo que se le factura a cada cliente en el mes
+// no ofrecía cambiarlo.
 //
 // Dos decisiones del dominio que este modal respeta:
 //
@@ -17,6 +23,14 @@
 //     precio en los dos facturaría el doble. Cuál lo lleva no es siempre la ida — si el
 //     cliente canceló la ida y el retorno sí se prestó, va en el retorno.
 //
+// ESA SEGUNDA REGLA YA NO SE ESCRIBE ACÁ: vive en `lib/liquidacion-dinero.ts`, que es
+// el mismo motor que usa ModalCostos. Estaba duplicada en los dos modales y era
+// suficiente MIENTRAS solo se vieran días con los dos tramos en S/ 0.00; con los
+// importes ya cargados a la vista deja de serlo, porque miraba `finalizada` y no quién
+// LLEVA la tarifa. Y se escribe por `guardarReservas`, no con un `update` crudo: antes
+// el acta que levanta el trigger nacía con `motivo: null` en cada precio cargado desde
+// el cierre, y un lote que fallaba no nombraba ninguna fila.
+//
 // Y el caso que obligó a lo de "va incluido": hay retornos SIN `reserva_vinculada_id`.
 // Sin ese enlace el ERP no puede saber qué ida los cubre, así que los pedía como
 // servicios sueltos — y ponerles precio habría cobrado el día dos veces. Este modal les
@@ -24,12 +38,19 @@
 // ofrece REPARAR el vínculo en vez de un flag nuevo de "incluido": ese flag sería un
 // segundo sitio donde vive "estos dos tramos son el mismo día", y el problema es
 // justamente que al primero le faltan filas.
+//
+// Matriz del motor: npx tsx scripts/prueba-liquidacion-dinero.mts
 // ──────────────────────────────────────────────────────────────────────────────
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
-import { nombreRuta, sentidoDeReserva, origenContractual, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
+import { nombreRuta, origenContractual, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
 import { indiceHermanos, repararEnlaces } from "@/lib/liquidacion-hermanos";
+import { guardarReservas } from "@/lib/reservas-pacto";
+import {
+  planDeImportes, indiceDelDia, tramoQueLlevaElImporte, lotesDeEscritura, importeDe,
+  TEXTO_MOTIVO_DINERO, type ServicioDinero,
+} from "@/lib/liquidacion-dinero";
 
 export type ReservaSinPrecio = ReservaLiq & { clienteNombre?: string };
 
@@ -70,18 +91,53 @@ type GrupoRuta = {
   hasta: string;
 };
 
-const LOTE = 200;
+/**
+ * Motivos del acta, las mismas claves de `pacto_motivo` que ofrece Programación,
+ * filtradas a las del lado VENTA: acá solo se mueve lo que se le factura al cliente.
+ */
+const MOTIVOS_PRECIO = [
+  { clave: "precio_renegociado",   nombre: "Tarifa renegociada con el cliente" },
+  { clave: "cliente_unidad_mayor", nombre: "Cliente pidió unidad mayor" },
+  { clave: "cliente_unidad_menor", nombre: "Cliente pidió unidad menor" },
+  { clave: "cliente_cambio_ruta",  nombre: "Cliente cambió ruta u hora" },
+  { clave: "correccion_carga",     nombre: "Corrección de un dato" },
+];
 
 export default function ModalPrecios({
-  reservas, unidadDe, onCerrar, onGuardado,
+  reservas, contexto, modo = "faltantes", enlacesRotos = 0, unidadDe, onCerrar, onGuardado,
 }: {
+  /** Las filas que se ENSEÑAN. En modo `faltantes`, las bloqueadas por `sin_precio`. */
   reservas: ReservaSinPrecio[];
+  /**
+   * Todos los tramos del periodo a la vista. El juicio del DÍA se hace sobre esto:
+   * sin el hermano, un día cuya tarifa vive en el otro tramo se vería como un día sin
+   * precio y lo recibiría por segunda vez. Mismo reparto `contexto` / `universo` que
+   * lib/reservas-masivo.ts. Por defecto, las propias filas.
+   */
+  contexto?: ReservaSinPrecio[];
+  /** `faltantes` = solo lo que bloquea el cierre. `periodo` = todo, para corregir. */
+  modo?: "faltantes" | "periodo";
+  /**
+   * Cuántos días del periodo están PARTIDOS en dos por falta de `reserva_vinculada_id`.
+   * Este modal repara los que puede deducir (`conIda`), pero solo cuando el otro tramo
+   * YA lleva la tarifa; los demás llegan como dos filas y un precio por ruta se les
+   * escribiría a las dos, cobrando el día dos veces. No se bloquea —el enlace tiene su
+   * propio botón— pero se DICE.
+   */
+  enlacesRotos?: number;
   /** "BUS 50 PAX" · el tipo de unidad que cubrió el servicio. La tarifa depende de esto. */
   unidadDe: (r: ReservaSinPrecio) => string;
   onCerrar: () => void;
   onGuardado: (servicios: number) => void;
 }) {
+  /**
+   * Importe por GRUPO, no por fila: «se cobra POR RUTA, no por servicio» es la premisa
+   * de este modal y de la agrupación del formato. Un casillero por día contradiría el
+   * renglón que va a imprimir la valorización, que lleva UN precio unitario.
+   */
   const [montos, setMontos] = useState<Record<string, string>>({});
+  const [motivo, setMotivo] = useState("precio_renegociado");
+  const [nota, setNota] = useState("");
   const [guardando, setGuardando] = useState(false);
   const [msg, setMsg] = useState("");
   /** reserva huérfana → la ida que la cubre, cuando se encontró UNA sola. */
@@ -141,31 +197,36 @@ export default function ModalPrecios({
     return () => { vivo = false; };
   }, [objetivo]);
 
+  /** El universo del JUICIO: los tramos que se enseñan más los que solo dan contexto. */
+  const todos = useMemo<ReservaSinPrecio[]>(() => {
+    const m = new Map<number, ReservaSinPrecio>();
+    for (const r of [...(contexto ?? []), ...reservas]) m.set(Number(r.id), r);
+    return [...m.values()];
+  }, [reservas, contexto]);
+
   const grupos = useMemo<GrupoRuta[]>(() => {
     // De cada par se cobra UN tramo; el otro queda en S/ 0.00 cubierto por la tarifa.
     // Cuál lo lleva NO es siempre la ida: si el cliente canceló la ida y el retorno sí
     // se prestó, el importe tiene que ir donde hubo servicio, o el día no se factura.
-    const porId = new Map(reservas.map((r) => [r.id, r]));
-    // El par se resuelve por los DOS sentidos del enlace: si estuviera escrito solo en el
-    // otro tramo, los dos aparecerían como filas sueltas y escribir un importe se lo
-    // pondría a los dos, que es cobrar el día dos veces.
-    const enLaLista = indiceHermanos(reservas as ReservaLiq[]);
-    const hecho = (r?: ReservaSinPrecio | null) => String(r?.estado ?? "").toLowerCase() === "finalizada";
-    const tramoQueCobra = (a: ReservaSinPrecio, b?: ReservaSinPrecio | null): ReservaSinPrecio => {
-      if (!b) return a;
-      if (hecho(a) !== hecho(b)) return hecho(a) ? a : b;      // manda el que se prestó
-      return sentidoDeReserva(a) === "IDA" ? a : b;            // a igualdad, la ida
-    };
-
+    //
+    // La regla vive en lib/liquidacion-dinero.ts y NO acá: estaba duplicada con la de
+    // ModalCostos, y las dos miraban `finalizada` sin preguntar quién LLEVA la tarifa —
+    // correcto mientras el modal solo viera días en S/ 0.00, y un cobro doble en cuanto
+    // ve los importes ya cargados. El hermano se busca sobre `todos`, no sobre las filas
+    // que se enseñan: si el enlace estuviera escrito solo en el otro tramo, los dos
+    // aparecerían como filas sueltas y el importe se les pondría a los dos.
+    const { delDia } = indiceDelDia(todos as ServicioDinero[]);
     const vistos = new Set<number>();
     const cobran: ReservaSinPrecio[] = [];
     for (const r of reservas) {
-      if (vistos.has(r.id)) continue;
-      const hermano = enLaLista.hermanoDe(r);
-      const par = hermano ? porId.get(hermano.id) : undefined;
-      vistos.add(r.id);
-      if (par) vistos.add(par.id);
-      cobran.push(tramoQueCobra(r, par));
+      if (vistos.has(Number(r.id))) continue;
+      const tramos = delDia(r as ServicioDinero);
+      for (const t of tramos) vistos.add(Number(t.id));
+      const elegido = tramoQueLlevaElImporte(tramos, "precio").tramo;
+      // Sin destinatario (día entero cancelado, o ya duplicado) la fila se enseña igual:
+      // el plan la declara fuera con su motivo y la pantalla lo pinta. Esconderla sería
+      // que un servicio del bloque rojo no aparezca en el modal que lo desbloquea.
+      cobran.push((elegido as ReservaSinPrecio) ?? r);
     }
     const cubiertos = reservas.length - cobran.length;
 
@@ -197,7 +258,23 @@ export default function ModalPrecios({
     // el número que importa al operador es "cuántos servicios voy a desbloquear".
     if (salida.length) salida[0].cubiertos = cubiertos;
     return salida;
-  }, [reservas, candidatas, unidadDe]);
+  }, [reservas, todos, candidatas, unidadDe]);
+
+  /**
+   * El plan, con el MISMO motor que corre al guardar — una pantalla con su propia idea
+   * de «esto se va a escribir» es el bug del semáforo de puntualidad. El importe se
+   * teclea por grupo y se reparte a sus días; el motor decide a qué TRAMO de cada día.
+   */
+  const plan = useMemo(() => planDeImportes({
+    lado: "precio",
+    contexto: todos as ServicioDinero[],
+    tecleado: grupos.flatMap((g) => {
+      const v = Number(montos[g.clave]);
+      return Number.isFinite(v) && v > 0 ? g.filas.map((f) => ({ id: Number(f.id), importe: v })) : [];
+    }),
+  }), [grupos, montos, todos]);
+
+  const faltaMotivo = plan.requiereMotivo && !motivo;
 
   /**
    * El último precio que se le cobró a ese cliente por esa MISMA ruta con esa MISMA
@@ -258,20 +335,26 @@ export default function ModalPrecios({
     return () => { vivo = false; };
   }, [grupos, reservas, unidadDe]);
 
-  const totalAAplicar = grupos.reduce(
-    (a, g) => a + (Number(montos[g.clave]) > 0 ? g.filas.length : 0), 0
-  );
-  const importeTotal = grupos.reduce(
-    (a, g) => a + (Number(montos[g.clave]) > 0 ? Number(montos[g.clave]) * g.filas.length : 0), 0
-  );
+  const totalAAplicar = plan.escribir.length;
+  const importeTotal = plan.totalDespues;
 
   async function guardar() {
-    const conImporte = grupos.filter((g) => Number(montos[g.clave]) > 0 && g.filas.length);
     const aEnlazar = [...enlazar].filter((id) => candidatas.has(id));
-    if (!conImporte.length && !aEnlazar.length) {
+    if (!plan.escribir.length && !aEnlazar.length) {
       setMsg("⚠️ Escribe el importe de al menos una ruta, o marca las que van incluidas en su ida.");
       return;
     }
+    if (faltaMotivo) return;
+
+    // La plata se NOMBRA antes de autorizarla, y solo cuando se PISA: confirmar lo que
+    // se está rellenando sería un clic de trámite, y los clics de trámite se dan sin leer.
+    if (plan.pisados > 0 && !confirm(
+      `Se va a cambiar la tarifa de ${plan.pisados} servicio(s) que YA tenían precio:\n` +
+      `${fmtMoneda(plan.totalAntes)} → ${fmtMoneda(plan.totalDespues)}.\n\n` +
+      (plan.nuevos > 0 ? `Además se carga el precio de ${plan.nuevos} servicio(s) que no lo tenían.\n\n` : "") +
+      `Es lo que va a la factura del cliente. Queda registrado en el acta del servicio.\n\n¿Continuar?`
+    )) return;
+
     setGuardando(true); setMsg("");
     let hechos = 0;
     try {
@@ -288,21 +371,22 @@ export default function ModalPrecios({
         if (errores.length) throw new Error(`${errores.join(" · ")} (se enlazaron ${reparados})`);
       }
 
-      // 2) Y recién ahora los importes, sobre los tramos que de verdad cobran.
-      for (const g of conImporte) {
-        const precio = Number(montos[g.clave]);
-        const ids = g.filas.map((r) => r.id);
-        for (let i = 0; i < ids.length; i += LOTE) {
-          const { error } = await supabase
-            .from("reservas")
-            .update({ precio_cliente: precio })
-            .in("id", ids.slice(i, i + LOTE));
-          // Se corta al primer fallo y se informa cuántos SÍ entraron: dejar creer que
-          // se aplicaron 60 cuando entraron 20 es peor que el propio fallo.
-          if (error) throw new Error(`${g.ruta}: ${error.message} (se aplicaron ${hechos})`);
-          hechos += Math.min(LOTE, ids.length - i);
-        }
+      // 2) Y recién ahora los importes, por `guardarReservas` — la misma puerta que
+      //    Programación. Un `update` crudo dejaba el acta del trigger con `motivo: null`
+      //    y un lote que fallaba no nombraba ninguna fila.
+      const cambio = plan.requiereMotivo ? { motivo, nota: nota.trim() || null } : undefined;
+      const rechazos: { id: number; motivo: string }[] = [];
+      const avisos: string[] = [];
+      for (const l of lotesDeEscritura(plan, "precio")) {
+        const r = await guardarReservas(supabase, l.ids, l.patch, cambio);
+        hechos += r.guardados.length;
+        rechazos.push(...r.rechazos);
+        if (r.aviso && !avisos.includes(r.aviso)) avisos.push(r.aviso);
       }
+      if (rechazos.length)
+        throw new Error(`${rechazos.length} rechazado(s) — #${rechazos[0].id}: ${rechazos[0].motivo} `
+                      + `(se aplicaron ${hechos})`);
+      if (avisos.length) setMsg("⚠️ " + avisos.join(" "));
       onGuardado(hechos);
     } catch (e: any) {
       setMsg("⚠️ " + String(e?.message ?? e));
@@ -315,14 +399,28 @@ export default function ModalPrecios({
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-3" onClick={onCerrar}>
       <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="px-5 py-3 border-b sticky top-0 bg-white rounded-t-2xl z-10">
-          <h3 className="font-black text-[#0b315f]">Cargar el precio de venta que falta</h3>
+          <h3 className="font-black text-[#0b315f]">
+            {modo === "periodo" ? "Precios de venta del periodo" : "Cargar el precio de venta que falta"}
+          </h3>
           <p className="text-xs text-gray-500">
-            Estas rutas no entran a la liquidación porque ninguno de sus servicios tiene tarifa.
-            Escribe el precio de una y se aplica a todos sus servicios del periodo.
+            {modo === "periodo"
+              ? <>Lo que se le va a facturar a cada cliente por ruta. Escribe solo el precio que quieras
+                  cambiar: el que dejes vacío se queda como está.</>
+              : <>Estas rutas no entran a la liquidación porque ninguno de sus servicios tiene tarifa.
+                  Escribe el precio de una y se aplica a todos sus servicios del periodo.</>}
           </p>
         </div>
 
         {msg && <div className="mx-5 mt-3 px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-900">{msg}</div>}
+
+        {enlacesRotos > 0 && (
+          <div className="mx-5 mt-3 px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-[12px] text-amber-900">
+            <b>{enlacesRotos} día(s) del periodo están partidos en dos</b> porque les falta el
+            enlace ida↔retorno. Los que se pueden deducir se ofrecen abajo como «van incluidos en
+            su ida»; el resto sale como DOS filas, y un precio por ruta se les escribiría a las
+            dos — facturando el día dos veces. Ciérralos con «Enlazar tramo(s) ida↔retorno».
+          </div>
+        )}
 
         <div className="p-5">
           <table className="w-full text-sm">
@@ -330,7 +428,10 @@ export default function ModalPrecios({
               <tr>
                 <th className="text-left px-2 py-2">Ruta</th>
                 <th className="px-2 py-2 w-20">Serv.</th>
-                <th className="px-2 py-2 w-32">Precio unitario</th>
+                {/* Los DOS números con etiquetas distintas, y nunca un botón «usar este»
+                    sobre el actual: copiarlo sería reescribir el mes con lo que ya había. */}
+                <th className="px-2 py-2 w-28">Hoy</th>
+                <th className="px-2 py-2 w-32">Precio nuevo</th>
                 <th className="px-2 py-2 w-28 text-right">Total</th>
               </tr>
             </thead>
@@ -341,6 +442,13 @@ export default function ModalPrecios({
                 const todosIncluidos = g.conIda.length > 0 && g.filas.length === 0;
                 const ejemplo = g.conIda.length ? candidatas.get(g.conIda[0].id) : null;
                 const ultimo = ultimos.get(g.clave);
+                // Lo que la ruta dice HOY. Con varias tarifas dentro del mismo grupo se
+                // declara «varios» en vez de enseñar una: mostrar la primera haría creer
+                // que ese es el precio del renglón, y escribir encima pisaría las otras.
+                const hoy = [...new Set(g.filas.map((f) => importeDe(f as ServicioDinero, "precio")))];
+                const bloqueadas = g.filas
+                  .map((f) => plan.fuera.find((x) => x.id === Number(f.id)))
+                  .filter((x) => x && x.motivo !== "sin_importe" && x.motivo !== "sin_cambio");
                 return (
                   <tr key={g.clave} className={precio > 0 || marcados ? "bg-emerald-50/40" : ""}>
                     <td className="px-2 py-2">
@@ -392,19 +500,31 @@ export default function ModalPrecios({
                     <td className="px-2 py-2 text-center text-xs text-gray-500">
                       {g.filas.length || "—"}
                     </td>
+                    <td className="px-2 py-2 text-right text-xs tabular-nums">
+                      {todosIncluidos ? <span className="text-gray-300">—</span>
+                        : hoy.length > 1 ? <span className="text-amber-700" title={hoy.map((x) => fmtMoneda(x)).join(" · ")}>varios</span>
+                        : hoy[0] > 0 ? <span className="font-bold text-gray-700">{fmtMoneda(hoy[0])}</span>
+                        : <span className="text-gray-400">sin precio</span>}
+                      {bloqueadas.length > 0 && (
+                        <span className="block text-[10px] text-amber-700 font-normal">
+                          {bloqueadas.length} día(s): {TEXTO_MOTIVO_DINERO[bloqueadas[0]!.motivo]}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-2 py-2">
                       {todosIncluidos ? (
                         <span className="block text-center text-[11px] text-emerald-700">incluido</span>
                       ) : (
                         <input type="number" min="0" step="0.01"
                           className="w-full px-2 py-1 rounded border text-sm text-right"
-                          placeholder="0.00"
+                          placeholder={hoy.some((x) => x > 0) ? "nuevo" : "0.00"}
                           value={montos[g.clave] ?? ""}
                           onChange={(e) => setMontos((m) => ({ ...m, [g.clave]: e.target.value }))} />
                       )}
                     </td>
                     <td className="px-2 py-2 text-right font-bold text-gray-700">
-                      {todosIncluidos ? "S/ 0.00" : precio > 0 ? fmtMoneda(precio * g.filas.length) : "—"}
+                      {todosIncluidos ? "S/ 0.00"
+                        : precio > 0 ? fmtMoneda(precio * g.filas.length) : "—"}
                     </td>
                   </tr>
                 );
@@ -422,18 +542,47 @@ export default function ModalPrecios({
           </p>
         </div>
 
+        {/* El acta. Solo cuando se PISA una tarifa ya cargada: rellenar lo que falta no
+            mueve plata que alguien acordó, y un peaje que sale siempre se vuelve paisaje. */}
+        {plan.requiereMotivo && (
+          <div className="mx-5 mb-4 px-4 py-3 rounded-xl bg-amber-50 border border-amber-200">
+            <p className="text-[12px] font-bold text-amber-900">
+              {plan.pisados} servicio(s) ya tenían tarifa: {fmtMoneda(plan.totalAntes)} → {fmtMoneda(plan.totalDespues)}.
+            </p>
+            <p className="text-[11px] text-amber-800 mt-0.5">
+              Es lo que va a la factura del cliente. Queda un acta por servicio con quién,
+              cuándo y por qué; el motivo es obligatorio.
+            </p>
+            <div className="flex flex-wrap items-center gap-2 mt-2">
+              <select value={motivo} onChange={(e) => setMotivo(e.target.value)}
+                className="px-2 py-1.5 border rounded-lg text-xs bg-white">
+                <option value="">— Elige el motivo —</option>
+                {MOTIVOS_PRECIO.map((m) => <option key={m.clave} value={m.clave}>{m.nombre}</option>)}
+              </select>
+              <input value={nota} onChange={(e) => setNota(e.target.value)}
+                placeholder="Nota (opcional): el detalle que el motivo no dice"
+                className="flex-1 min-w-[16rem] px-2 py-1.5 border rounded-lg text-xs" />
+            </div>
+          </div>
+        )}
+
         <div className="px-5 py-4 border-t flex gap-2 justify-end sticky bottom-0 bg-white rounded-b-2xl">
           <span className="mr-auto text-xs text-gray-500 self-center">
             {buscando ? "Buscando la ida de cada tramo…" : (
               <>
                 {enlazar.size > 0 && <><b>{enlazar.size}</b> se enlazan con su ida{totalAAplicar ? " · " : ""}</>}
-                {totalAAplicar > 0 && <>importe a <b>{totalAAplicar}</b> servicio(s) · {fmtMoneda(importeTotal)} sin IGV</>}
+                {totalAAplicar > 0 && (
+                  <>importe a <b>{totalAAplicar}</b> servicio(s) · {fmtMoneda(importeTotal)} sin IGV
+                    {plan.pisados > 0 && <> · <b className="text-amber-700">{plan.pisados} pisa(n)</b> una tarifa ya cargada</>}
+                  </>
+                )}
                 {!enlazar.size && !totalAAplicar && "Escribe el importe de al menos una ruta"}
               </>
             )}
           </span>
           <button onClick={onCerrar} className="px-4 py-2 rounded-xl border text-sm font-bold text-gray-600 hover:bg-gray-50">Cerrar</button>
-          <button onClick={guardar} disabled={guardando || buscando || (!totalAAplicar && !enlazar.size)}
+          <button onClick={guardar} disabled={guardando || buscando || faltaMotivo || (!totalAAplicar && !enlazar.size)}
+            title={faltaMotivo ? "Elige el motivo: se está cambiando una tarifa ya cargada" : ""}
             className="px-4 py-2 rounded-xl text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40">
             {guardando ? "Guardando…" : "Aplicar precios"}
           </button>

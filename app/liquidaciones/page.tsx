@@ -250,14 +250,21 @@ export default function LiquidacionesPage() {
   const [editor, setEditor] = useState<number | null>(null);
   const [modalSede, setModalSede] = useState<{ sede: Sede; cliente: string } | null>(null);
   const [enviar, setEnviar] = useState<any | null>(null);
-  const [modalCostos, setModalCostos] = useState<ReservaSinCosto[] | null>(null);
+  /**
+   * `faltantes` = solo lo que bloquea el cierre (el botón rojo de siempre).
+   * `periodo` = TODOS los días a la vista, para corregir un importe ya cargado. Eran lo
+   * mismo hasta hoy, y por eso la única pantalla que ve el dinero del mes entero no
+   * ofrecía cambiarlo: el botón se llamaba «Cargar los que faltan» y desaparecía cuando
+   * no faltaba ninguno.
+   */
+  const [modalCostos, setModalCostos] = useState<{ filas: ReservaSinCosto[]; modo: "faltantes" | "periodo" } | null>(null);
   /**
    * Las fichas de capacidad contratada. Es una BANDERA y no la lista congelada al abrir:
    * desde ahí se abre el detalle de los servicios y se corrigen (el nombre de una ruta,
    * por ejemplo), y al recargar la página la tabla del modal tiene que rearmarse sola.
    */
   const [modalRutas, setModalRutas] = useState(false);
-  const [modalPrecios, setModalPrecios] = useState<ReservaSinPrecio[] | null>(null);
+  const [modalPrecios, setModalPrecios] = useState<{ filas: ReservaSinPrecio[]; modo: "faltantes" | "periodo" } | null>(null);
   /** Los pares ida↔retorno que la base perdió y hay que volver a escribir. */
   const [modalEnlaces, setModalEnlaces] = useState<EnlacePendiente[] | null>(null);
   /**
@@ -884,6 +891,20 @@ export default function LiquidacionesPage() {
   }, [gruposVisibles, lado]);
 
   /**
+   * TODOS los tramos que la pantalla tiene a la vista, con los filtros puestos.
+   *
+   * Es el CONTEXTO con el que los dos modales juzgan el día, y es distinto de las filas
+   * que enseñan: sin el hermano, un día cuya tarifa vive en el otro tramo se vería como
+   * un día sin importe y lo recibiría por segunda vez. Mismo reparto `contexto` /
+   * `universo` que lib/reservas-masivo.ts, y por la misma razón.
+   */
+  const reservasVisibles = useMemo<ReservaLiq[]>(() => {
+    const m = new Map<number, ReservaLiq>();
+    for (const g of gruposVisibles) for (const r of g.reservas) m.set(Number(r.id), r);
+    return [...m.values()];
+  }, [gruposVisibles]);
+
+  /**
    * Los días partidos en dos porque les falta el enlace ida↔retorno.
    *
    * Se arman sobre el PERIODO y no sobre los bloqueados: un par con el enlace escrito en
@@ -1445,15 +1466,39 @@ export default function LiquidacionesPage() {
             </span>
             <span className="font-black" style={{ color: cp }}>{fmtMoneda(totalSeleccionado)}</span>
             {sinCosto.length > 0 && (
-              <button onClick={() => setModalCostos(sinCosto)}
+              <button onClick={() => setModalCostos({ filas: sinCosto, modo: "faltantes" })}
                 className="px-3 py-2 rounded-xl text-sm font-bold text-red-700 bg-red-50 border border-red-200 hover:bg-red-100">
                 Cargar {sinCosto.length} costo(s) faltante(s)
               </button>
             )}
             {sinPrecio.length > 0 && (
-              <button onClick={() => setModalPrecios(sinPrecio)}
+              <button onClick={() => setModalPrecios({ filas: sinPrecio, modo: "faltantes" })}
                 className="px-3 py-2 rounded-xl text-sm font-bold text-red-700 bg-red-50 border border-red-200 hover:bg-red-100">
                 Cargar {sinPrecio.length} precio(s) de venta faltante(s)
+              </button>
+            )}
+            {/*
+              CORREGIR lo que YA está cargado. Es un botón aparte, NEUTRO y que no
+              desaparece: los rojos de arriba solo salen cuando algo BLOQUEA el cierre,
+              así que en cuanto no faltaba ningún importe esta pantalla —la única que ve
+              el dinero del mes entero— no ofrecía cambiarlo, y renegociar una tarifa
+              obligaba a abrir los servicios de a uno desde Programación.
+
+              No se fusiona con el rojo a propósito: uno dice «esto no cierra hasta que
+              lo llenes» y el otro «esto se puede cambiar». Un solo botón con las dos
+              cosas dentro convertiría el rojo en una tarea permanente, y un rojo que
+              sale siempre se vuelve paisaje.
+            */}
+            {reservasVisibles.length > 0 && (
+              <button
+                onClick={() => lado === "proveedor"
+                  ? setModalCostos({ filas: reservasVisibles as ReservaSinCosto[], modo: "periodo" })
+                  : setModalPrecios({ filas: reservasVisibles as ReservaSinPrecio[], modo: "periodo" })}
+                title={lado === "proveedor"
+                  ? "Ver y corregir lo que se le paga a cada proveedor por ruta en este periodo"
+                  : "Ver y corregir lo que se le factura a cada cliente por ruta en este periodo"}
+                className="px-3 py-2 rounded-xl text-sm font-bold text-gray-600 bg-white border border-gray-200 hover:bg-gray-50">
+                {lado === "proveedor" ? "Costos del periodo" : "Precios del periodo"}
               </button>
             )}
             {/* Un día partido en dos no es un precio que falta: es un enlace que falta. Y
@@ -1907,16 +1952,31 @@ export default function LiquidacionesPage() {
           onEnviado={() => { setEnviar(null); cargarLiquidaciones(); }} />
       )}
       {modalCostos && (
-        <ModalCostos reservas={modalCostos} terceros={terceros} unidadDe={unidadDe}
+        <ModalCostos
+          reservas={modalCostos.filas} modo={modalCostos.modo}
+          // El CONTEXTO es el pool entero a la vista, no las filas que se enseñan: sin el
+          // hermano, un día cuya tarifa vive en el otro tramo recibiría el importe por
+          // segunda vez, que es el error más caro que se puede cometer desde acá.
+          contexto={reservasVisibles as ReservaSinCosto[]}
+          enlacesRotos={enlacesRotos.length}
+          terceros={terceros} unidadDe={unidadDe}
           onCerrar={() => setModalCostos(null)}
-          onGuardado={() => { setModalCostos(null); setMsg("Costos pactados. El bloque rojo se recalcula."); cargar(); }} />
+          onGuardado={(n) => {
+            setModalCostos(null);
+            setMsg(`✅ Costo pactado en ${n} servicio(s). El bloque rojo y los totales se recalculan.`);
+            cargar();
+          }} />
       )}
       {modalPrecios && (
-        <ModalPrecios reservas={modalPrecios} unidadDe={unidadDe}
+        <ModalPrecios
+          reservas={modalPrecios.filas} modo={modalPrecios.modo}
+          contexto={reservasVisibles as ReservaSinPrecio[]}
+          enlacesRotos={enlacesRotos.length}
+          unidadDe={unidadDe}
           onCerrar={() => setModalPrecios(null)}
           onGuardado={(n) => {
             setModalPrecios(null);
-            setMsg(`✅ Precio cargado en ${n} servicio(s). Sus rutas ya entran a la valorización.`);
+            setMsg(`✅ Precio escrito en ${n} servicio(s). Sus rutas ya entran a la valorización.`);
             cargar();
           }} />
       )}
