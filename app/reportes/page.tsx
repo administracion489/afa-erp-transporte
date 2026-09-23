@@ -350,6 +350,7 @@ function PanelOcupacionSemanal() {
       )}
 
       <BloqueCopiaInterna />
+      <BloquePrueba fin={fin} />
 
       {res?.error && <p className="mt-3 text-sm text-red-700">{res.error}</p>}
 
@@ -568,6 +569,145 @@ function BloqueCopiaInterna() {
 
           {err && <p className="mt-3 text-sm text-red-700">{err}</p>}
         </>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Probar: el reporte de UN cliente, SOLO a AFA
+//
+// Lo pidió el dueño: «quiero enviar solo a un cliente y solo a AFA para probar,
+// no hay esa opción». Y no la había — los dos botones que existían le mandan al
+// CLIENTE: el de arriba dispara el tick entero y el de la ficha manda a uno pero
+// también a él. O sea, no había forma de ver cómo queda el reporte de un cliente
+// sin que ese cliente lo recibiera, que es justo lo que se quiere mirar ANTES de
+// encenderle el envío.
+//
+// DOS COSAS QUE LA HACEN UNA PRUEBA Y NO UN ENVÍO, y las decide `planDeEnvio`:
+//
+//  · El cliente no entra ni por asomo. Ni se resuelve su correo, ni se escribe su
+//    fila de bitácora. Y si la copia interna no tiene a dónde ir, la prueba NO
+//    sale: no se cae al cliente, que sería el correo que no se des-envía.
+//  · NO consume el envío del sábado. Se registra como `prueba_afa`, así que el
+//    candado `(cliente_id, destino, periodo_fin)` de `afa` queda libre. Con
+//    destino `afa` habría quemado la copia real de ese periodo en silencio.
+//
+// Por eso ESTA lista trae TODOS los clientes, encendidos o no: probar antes de
+// encender es el caso de uso. La garantía dura del módulo —nada le sale a un
+// cliente que nadie encendió— no la toca, porque la prueba nunca le escribe.
+// ══════════════════════════════════════════════════════════════════════════════
+function BloquePrueba({ fin }: { fin: string }) {
+  const [clientes, setClientes] = useState<any[]>([]);
+  const [cargando, setCargando] = useState(true);
+  const [id, setId] = useState("");
+  const [enviando, setEnviando] = useState(false);
+  const [res, setRes] = useState<any>(null);
+
+  useEffect(() => {
+    (async () => {
+      // `reporte_ocupacion_activo` es de una migración accesoria: se pide y, si el
+      // error la NOMBRA, se reintenta sin ella. Lo único que se pierde entonces es
+      // la marca de «ya encendido»; la lista sigue sirviendo para probar.
+      const base = "id,nombre,empresa";
+      let r = await supabase.from("clientes").select(`${base},reporte_ocupacion_activo`).order("empresa");
+      if (r.error && /reporte_ocupacion/i.test(r.error.message ?? "")) {
+        r = await supabase.from("clientes").select(base).order("empresa");
+      }
+      setClientes((r.data as any[]) ?? []);
+      setCargando(false);
+    })();
+  }, []);
+
+  const elegido = clientes.find((c) => String(c.id) === id);
+  const nombre = elegido ? String(elegido.empresa || elegido.nombre || `Cliente ${elegido.id}`) : "";
+
+  const probar = async () => {
+    if (!elegido) return;
+    // El confirm NOMBRA al cliente y dice las dos cosas que la separan de un
+    // envío, en vez de preguntar «¿estás seguro?».
+    if (!confirm(
+      `Se va a enviar el reporte de ${nombre}${fin ? ` (periodo que cierra el ${fin})` : ""} `
+      + "SOLO a los correos de la copia interna de AFA.\n\n"
+      + "· El cliente NO recibe nada.\n"
+      + "· No consume su envío programado: ese sigue saliendo el día que le toca.\n\n"
+      + "¿Continuar?",
+    )) return;
+
+    setEnviando(true); setRes(null);
+    try {
+      const { data: s } = await supabase.auth.getSession();
+      const r = await fetch("/api/reportes/ocupacion-semanal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.session?.access_token ?? ""}` },
+        body: JSON.stringify({ clienteId: Number(id), soloAfa: true, fin: fin || undefined }),
+      });
+      if (r.status === 403) throw new Error("Te falta el permiso del módulo Reportes.");
+      setRes(await r.json());
+    } catch (e: any) {
+      setRes({ error: String(e?.message ?? e) });
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  const salieron: string[] = (res?.clientes ?? []).flatMap((c: any) => c.enviados ?? []);
+  const omitido: string | undefined = (res?.clientes ?? [])[0]?.omitido;
+
+  return (
+    <div className="mt-5 border-t pt-4">
+      <h3 className="font-bold text-sm">Probar: mándame a mí el de un cliente</h3>
+      <p className="text-xs text-gray-600 mt-1 max-w-2xl">
+        Sale <b>solo a los correos de la copia interna</b> de arriba, con las sugerencias completas.
+        El cliente <b>no recibe nada</b> y <b>no se gasta su envío programado</b>. Sirve para ver cómo
+        le va a quedar antes de encenderle el reporte en <b>Clientes → editar</b>.
+      </p>
+
+      <div className="flex flex-wrap items-end gap-2 mt-3">
+        <label className="text-xs text-gray-500">
+          <span className="block mb-1">Cliente</span>
+          <select value={id} onChange={e => { setId(e.target.value); setRes(null); }}
+            disabled={cargando}
+            className="border rounded-lg px-2 py-1.5 text-sm min-w-[18rem]">
+            <option value="">{cargando ? "Cargando clientes…" : "— elige un cliente —"}</option>
+            {clientes.map((c) => (
+              <option key={c.id} value={c.id}>
+                {String(c.empresa || c.nombre || `Cliente ${c.id}`)}
+                {c.reporte_ocupacion_activo ? " · reporte encendido" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button onClick={probar} disabled={!id || enviando}
+          className={`px-4 py-2 rounded-lg text-sm font-bold text-white ${!id || enviando ? "bg-gray-400" : "bg-[#0b315f] hover:bg-[#0a2a50]"}`}>
+          {enviando ? "Enviando…" : "Enviarme la prueba"}
+        </button>
+      </div>
+
+      {/* Un botón apagado DICE qué le falta, en vez de quedarse mudo. */}
+      {!id && !cargando && (
+        <p className="text-xs text-gray-500 mt-1">Elige un cliente para habilitar el botón.</p>
+      )}
+      <p className="text-xs text-gray-500 mt-1">
+        {fin ? <>Usa el <b>periodo que cierra el {fin}</b> de arriba.</> : <>Sin fecha arriba, usa el periodo que cierra <b>hoy</b>.</>}
+      </p>
+
+      {res?.error && <p className="mt-3 text-sm text-red-700">{res.error}</p>}
+
+      {res && !res.error && (
+        <p className={`mt-3 text-sm rounded-r px-3 py-2 border-l-4 ${
+          salieron.length ? "bg-green-50 border-green-500 text-green-900"
+                          : "bg-amber-50 border-amber-500 text-amber-900"}`}>
+          {salieron.length ? (
+            <>Enviado a <b>{[...new Set(salieron)].join(", ")}</b>
+              {res.periodo && <> · periodo {res.periodo.inicio} → {res.periodo.fin}</>}.
+              {" "}Al cliente no le llegó nada.</>
+          ) : (
+            // El motivo viene del servidor con su código delante; se enseña entero
+            // porque cada uno se arregla en otro sitio.
+            <>No salió: {res.motivo ?? omitido ?? "sin motivo declarado"}</>
+          )}
+        </p>
       )}
     </div>
   );

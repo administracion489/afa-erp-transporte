@@ -26,7 +26,7 @@
 // Correr:  npx tsx scripts/prueba-copia-interna.mts
 import {
   resolverCopiaInterna, correosDeTexto, describirCopiaInterna,
-  alarmaCopiaInterna, FUENTE_COPIA,
+  alarmaCopiaInterna, FUENTE_COPIA, planDeEnvio, MOTIVO_SIN_PRUEBA,
   type FilaCopia,
 } from "../lib/ocupacion/copia-interna";
 
@@ -226,6 +226,70 @@ ok(/no va a salir/i.test(fSin) && /escribe/i.test(fSin),
 for (const [nombre, f] of [["activa", fActiva], ["apagada", fApagada], ["sin_destinatario", fSin]] as const) {
   ok(f.trim().length > 20, `la frase de \`${nombre}\` existe y dice algo`);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+titulo("7 · La PRUEBA: solo a AFA, y sin quemar el envío del sábado");
+// ════════════════════════════════════════════════════════════════════════════
+
+const copiaViva = resolverCopiaInterna({ fila: { copia_afa_correos: "ops@afa.com" }, ...conEnv });
+
+const normal = planDeEnvio({ copia: copiaViva });
+ok(normal.destinos.join() === "cliente,afa", "el envío de siempre va al cliente y a la copia interna");
+ok(normal.consumen.join() === "cliente,afa", "y los DOS consumen el candado, que es lo que impide repetirlos");
+
+const prueba = planDeEnvio({ prueba: true, copia: copiaViva });
+ok(prueba.destinos.join() === "prueba_afa", "la prueba va a UN destino y no es el cliente");
+ok(prueba.consumen.length === 0,
+  "y NO consume el candado: con destino `afa` habría quemado la copia real de ese periodo");
+ok(!prueba.destinos.includes("afa" as any),
+  "su destino NO es `afa` — si lo fuera, el índice único bloquearía la copia del sábado");
+
+const pruebaApagada = planDeEnvio({ prueba: true, copia: resolverCopiaInterna({ fila: { copia_afa_activa: false }, ...conEnv }) });
+ok(pruebaApagada.destinos.length === 0 && pruebaApagada.motivo === "copia_apagada",
+  "con la copia apagada la prueba NO sale, y dice cuál de los dos arreglos falta");
+const pruebaSinDest = planDeEnvio({ prueba: true, copia: resolverCopiaInterna({ fila: {}, env: "", emailEmpresa: "" }) });
+ok(pruebaSinDest.destinos.length === 0 && pruebaSinDest.motivo === "copia_sin_destinatario",
+  "y sin ninguna dirección tampoco");
+ok(MOTIVO_SIN_PRUEBA[pruebaApagada.motivo!].length > 20 && MOTIVO_SIN_PRUEBA[pruebaSinDest.motivo!].length > 20,
+  "los dos motivos tienen texto: la pantalla no lo redacta");
+for (const m of ["copia_apagada", "copia_sin_destinatario"] as const) {
+  ok(/intentarlo|enciéndela|escribe/i.test(MOTIVO_SIN_PRUEBA[m]),
+    `\`${m}\` nombra el problema Y el arreglo`);
+}
+
+// ── Barrido: las invariantes duras ──────────────────────────────────────────
+let casos7 = 0, pruebaAlCliente = 0, pruebaQuemaCandado = 0, consumenFuera = 0;
+let clienteFaltaEnNormal = 0, pruebasQueSalen = 0, normalesConCopia = 0;
+for (const env of ENVS) {
+  for (const email of EMAILS) {
+    for (const fila of FILAS) {
+      const copia = resolverCopiaInterna({ fila, env, emailEmpresa: email });
+      for (const esPrueba of [false, true]) {
+        const p = planDeEnvio({ prueba: esPrueba, copia });
+        casos7++;
+        // (1) y (2): lo que hace segura la prueba.
+        if (esPrueba && p.destinos.includes("cliente")) pruebaAlCliente++;
+        if (esPrueba && p.consumen.length) pruebaQuemaCandado++;
+        // (5) `consumen` no puede nombrar a quien no se le manda.
+        if (p.consumen.some((d) => !p.destinos.includes(d))) consumenFuera++;
+        // (4) el corolario, o todo lo anterior se cumpliría sin mandar nunca nada.
+        if (!esPrueba && !p.destinos.includes("cliente")) clienteFaltaEnNormal++;
+        if (esPrueba && p.destinos.length) pruebasQueSalen++;
+        if (!esPrueba && copia.sale && !p.destinos.includes("afa")) normalesConCopia++;
+        // Un plan sin destinos solo se admite en una prueba, y DECLARANDO el motivo.
+        if (!p.destinos.length && (!esPrueba || !p.motivo)) consumenFuera++;
+      }
+    }
+  }
+}
+ok(pruebaAlCliente === 0, `${casos7} combinaciones: una prueba JAMÁS le escribe al cliente`);
+ok(pruebaQuemaCandado === 0, "una prueba JAMÁS consume el envío programado");
+ok(consumenFuera === 0, "`consumen ⊆ destinos`, y un plan vacío solo existe en una prueba que declara su motivo");
+ok(clienteFaltaEnNormal === 0, "el envío de siempre NUNCA deja al cliente fuera");
+ok(normalesConCopia === 0, "y con la copia interna viva SIEMPRE la incluye");
+ok(pruebasQueSalen > 0,
+  "hay pruebas que SÍ salen — un motor que no mandara nunca cumpliría todo lo anterior de forma trivial",
+  `${pruebasQueSalen} de ${casos7 / 2}`);
 
 // ─── Resultado ──────────────────────────────────────────────────────────────
 console.log(`\n${fallos === 0 ? "✓ TODO EN VERDE" : `✗ ${fallos} FALLA(S)`}\n`);
