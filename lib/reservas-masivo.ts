@@ -613,3 +613,65 @@ export const TEXTO_EJE: Record<EjeMasivo, string> = {
   precio:     "Precio de venta",
   costo:      "Costo del proveedor",
 };
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EL VALOR DE UN EJE SE TECLEA EN EL MODAL, Y UN CAMPO VACÍO NO ESCRIBE NUNCA UN 0
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Los tres ejes de contrato —PAX, precio de venta y costo del proveedor— solo se
+// ofrecían cuando el operador había tocado ESE campo en el formulario antes de guardar.
+// Reportado con la pantalla delante: *«ya no me sale para cambiar solo pax, solo precio
+// cliente, solo precio proveedor, o check box de cada dato que quiero cambiar»* — con la
+// asignación en «No tocarla» y nada más tocado, el modal se quedaba sin una sola casilla
+// y remataba en «Aplicar a 0 servicio(s)».
+//
+// Era el filtro de paquete otra vez, un piso más arriba todavía: lo que se puede cambiar
+// en lote lo decidía lo que se había tocado de paso. Ahora el valor se TECLEA en el
+// modal, y esta función es la única que dice qué significa lo escrito.
+//
+// LA REGLA QUE NO SE PUEDE AFLOJAR: **un campo vacío no es un cero y no es un borrado.**
+// Un 0 deducido de un campo en blanco pondría 900 servicios en S/ 0.00 —o sin asientos—
+// porque nadie escribió nada, que es la forma más barata de perder un contrato entero.
+// Vacío NO se aplica, salvo cuando quien abrió el modal DECLARA que vaciar es lo que se
+// pidió: hoy solo el PAX, y solo cuando el operador vació ese campo en el formulario
+// (el comportamiento que ya existía, con su aviso en pantalla).
+export type CodigoValor =
+  /** Hay un número escrito y se puede aplicar. */
+  | "tecleado"
+  /** Vacío Y vaciar está permitido: se aplica, y lo que escribe es un BORRADO. */
+  | "vaciar"
+  /** Vacío sin permiso para vaciar: no hay nada que aplicar. */
+  | "sin_valor"
+  /** Hay algo escrito que no es un número utilizable para este eje. */
+  | "no_valido";
+
+export type ValorEje = {
+  /** Lo que se va a escribir. `null` con `vaciar`; `null` también cuando no se aplica. */
+  valor: number | null;
+  /** ¿El eje puede marcarse y escribir algo? */
+  aplicable: boolean;
+  codigo: CodigoValor;
+};
+
+/**
+ * Lee lo que el operador tecleó para un eje. PURA: no mira la base ni el formulario.
+ *
+ * `vaciarPermitido` lo declara quien abre el modal — no se deduce de que el campo esté
+ * en blanco, porque en blanco es justamente lo que se ve cuando nadie escribió nada.
+ * `entero` es para el PAX: medio asiento no existe, y un 0 contratado tampoco.
+ */
+export function valorTecleado(
+  texto: string,
+  opts?: { vaciarPermitido?: boolean; entero?: boolean },
+): ValorEje {
+  const t = String(texto ?? "").trim().replace(",", ".");
+  if (t === "")
+    return opts?.vaciarPermitido
+      ? { valor: null, aplicable: true,  codigo: "vaciar" }
+      : { valor: null, aplicable: false, codigo: "sin_valor" };
+  const n = Number(t);
+  if (!Number.isFinite(n) || n < 0) return { valor: null, aplicable: false, codigo: "no_valido" };
+  if (opts?.entero && (!Number.isInteger(n) || n <= 0))
+    return { valor: null, aplicable: false, codigo: "no_valido" };
+  return { valor: n, aplicable: true, codigo: "tecleado" };
+}
