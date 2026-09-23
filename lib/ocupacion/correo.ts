@@ -106,6 +106,7 @@ export function htmlReporte(filas: FilaOcupacion[], meta: MetaReporte): string {
   const propuestas = inc ? filas.filter((f) => f.codigo === "sugiere_cambio") : [];
   const excesos = filas.filter((f) => f.codigo === "excede_contratado");
   const totalServicios = filas.reduce((a, f) => a + f.servicios, 0);
+  const totalTramos = filas.reduce((a, f) => a + f.tramos, 0);
   const sinManifiesto = filas.reduce((a, f) => a + f.sin_manifiesto, 0);
 
   const fila = (f: FilaOcupacion) => {
@@ -154,6 +155,8 @@ export function htmlReporte(filas: FilaOcupacion[], meta: MetaReporte): string {
     <p style="margin:0 0 14px;font-size:12.5px;color:#475569;line-height:1.55;">
       Cuántas personas viajaron de verdad en cada ruta, frente a los asientos contratados.
       <b>Se mide el día de MÁS afluencia</b>, no el promedio: es el que tiene que caber.
+      La <b>ida y su retorno son UN servicio</b> de la misma ruta — se mide el tramo más
+      lleno del día, nunca la suma, porque son los mismos asientos contratados.
     </p>
 
     ${!meta.hayCapacidad ? aviso(
@@ -185,7 +188,8 @@ export function htmlReporte(filas: FilaOcupacion[], meta: MetaReporte): string {
     </table>
 
     <p style="margin:16px 0 0;font-size:11px;color:#64748b;line-height:1.55;">
-      ${filas.length} ruta(s) · ${totalServicios} servicio(s) en el periodo.
+      ${filas.length} ruta(s) · ${totalServicios} servicio(s) en el periodo${
+        totalTramos > totalServicios ? ` (${totalTramos} tramos de ida y retorno)` : ""}.
       El detalle día por día va en el Excel adjunto, junto con los manifiestos de pasajeros
       y los reportes de servicio de la semana.
     </p>
@@ -211,8 +215,8 @@ export function asuntoReporte(filas: FilaOcupacion[], meta: MetaReporte): string
 // ─── El Excel ────────────────────────────────────────────────────────────────
 
 /**
- * Dos hojas: el resumen por ruta y el detalle día por día. Se devuelve en base64
- * porque es lo que pide el adjunto de Resend.
+ * Dos hojas: el resumen por ruta y el detalle tramo por tramo. Se devuelve en
+ * base64 porque es lo que pide el adjunto de Resend.
  *
  * En el detalle, un servicio SIN manifiesto va con la celda de embarcados VACÍA,
  * jamás con un 0. En una hoja que alguien va a sumar o graficar, ese cero se
@@ -224,12 +228,15 @@ export function xlsxReporteBase64(filas: FilaOcupacion[], meta: MetaReporte): st
 
   const resumen = filas.map((f) => ({
     "Ruta": rotuloFila(f),
+    "Ruta (ida)": f.ruta_nombre ?? "",
+    "Ruta (retorno)": f.ruta_retorno ?? "",
     "Origen → destino": f.recorrido ?? "",
     "Asientos contratados": f.contratado ?? "",
     "Pico de pasajeros": f.pico ?? "",
     "Día del pico": f.dia_pico ?? "",
     "Promedio": f.promedio ?? "",
-    "Servicios": f.servicios,
+    "Servicios (ida+retorno = 1)": f.servicios,
+    "Tramos": f.tramos,
     "Cancelados": f.cancelados,
     "Medidos": f.medidos,
     "Sin manifiesto": f.sin_manifiesto,
@@ -239,24 +246,34 @@ export function xlsxReporteBase64(filas: FilaOcupacion[], meta: MetaReporte): st
     "Observación": motivoParaDestinatario(f, inc),
   }));
 
+  // El detalle va por TRAMO, no por día: es lo que de verdad hay en la operación y
+  // es lo que alguien coteja contra su calendario. El día se ve igual — sus dos
+  // tramos comparten fecha y «Pico del día».
   const detalle = filas.flatMap((f) =>
-    f.dias.map((d) => ({
-      "Ruta": rotuloFila(f),
-      "Fecha": d.fecha,
-      "Hora": d.hora ?? "",
-      "Placa": d.placa ?? "",
-      "Estado": d.cancelado ? "Cancelado" : "Prestado",
-      // Vacío, NUNCA 0: ver la cabecera de esta función.
-      "Embarcados": d.medido ? d.embarcados : "",
-      "En el manifiesto": d.medido ? d.esperados : "",
-      "Asientos contratados": f.contratado ?? "",
-      "Se midió": d.medido ? "Sí" : (d.cancelado ? "No — cancelado" : "No — sin manifiesto"),
-    }))
+    f.dias.flatMap((d) =>
+      d.tramos.map((t) => ({
+        "Ruta": rotuloFila(f),
+        "Fecha": d.fecha,
+        "Tramo": t.sentido === "RETORNO" ? "Retorno" : t.sentido === "IDA" ? "Ida" : "",
+        "Ruta del tramo": t.ruta_nombre ?? "",
+        "Hora": t.hora ?? "",
+        "Placa": t.placa ?? "",
+        "Estado": t.cancelado ? "Cancelado" : "Prestado",
+        // Vacío, NUNCA 0: ver la cabecera de esta función.
+        "Embarcados": t.medido ? t.embarcados : "",
+        "En el manifiesto": t.medido ? t.esperados : "",
+        "Asientos contratados": f.contratado ?? "",
+        // El pico del DÍA es el MÁXIMO de sus tramos, jamás la suma: son los mismos
+        // asientos contratados, ocupados por las mismas personas yendo y volviendo.
+        "Pico del día": d.medido ? d.embarcados : "",
+        "Se midió": t.medido ? "Sí" : (t.cancelado ? "No — cancelado" : "No — sin manifiesto"),
+      }))
+    )
   );
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumen), "Resumen por ruta");
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detalle), "Detalle por día");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detalle), "Detalle por tramo");
   return XLSX.write(wb, { type: "base64", bookType: "xlsx" }) as string;
 }
 

@@ -241,6 +241,10 @@ async function emitir(opts: {
       }
 
       const filas = analizarOcupacion(servicios, escalera);
+      // Los SERVICIOS de la bitácora son los que el reporte cuenta: DÍAS, con la
+      // ida y su retorno juntos. `servicios.length` son tramos, y grabar ese
+      // número dejaría la bitácora diciendo el doble que el correo.
+      const diasDelPeriodo = filas.reduce((a, f) => a + f.servicios, 0);
 
       // Los adjuntos se arman UNA vez y se reusan en los dos correos.
       const adjuntos = await armarAdjuntos(delCliente, lote, origin);
@@ -266,7 +270,7 @@ async function emitir(opts: {
           incluirSugerencias: c.reporte_ocupacion_sugerencias !== false,
         };
         await mandar(paraCliente, filas, meta, adjuntos);
-        await registrar(Number(c.id), "cliente", inicio, cierre, paraCliente, servicios.length, filas, null);
+        await registrar(Number(c.id), "cliente", inicio, cierre, paraCliente, diasDelPeriodo, filas, null);
         enviados.push(...paraCliente);
       }
 
@@ -288,7 +292,7 @@ async function emitir(opts: {
           incluirSugerencias: true,
         };
         await mandar(copia.correos, filas, metaAfa, adjuntos);
-        await registrar(Number(c.id), destinoAfa, inicio, cierre, copia.correos, servicios.length, filas, null);
+        await registrar(Number(c.id), destinoAfa, inicio, cierre, copia.correos, diasDelPeriodo, filas, null);
         enviados.push(...copia.correos);
       }
 
