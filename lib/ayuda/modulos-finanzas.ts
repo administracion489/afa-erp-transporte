@@ -829,6 +829,7 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       "Convertir los servicios que hizo un tercerizado en una cuenta por pagar con su detalle.",
       "Ver en rojo, antes de emitir, qué servicios están mal (sin precio, sin unidad, sin finalizar) — y en gris lo que simplemente no corresponde liquidar, como los cancelados.",
       "Pagarle al proveedor el falso flete de un servicio cancelado, cuando hay acuerdo por el avance, sin que se pague solo por un descuido.",
+      "Corregir en lote lo que se le paga a un proveedor —o lo que se le factura a un cliente— en todo el periodo, sin ir a Programación servicio por servicio.",
     ],
     conceptos: [
       "liquidacion_cliente",
@@ -918,6 +919,21 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
         pregunta: "Arriba hay una casilla que dice “Los precios del ERP ya incluyen IGV”. ¿La marco o no?",
         respuesta:
           "Depende de cómo tengas cargados tus precios en Programación, y cambia el resultado:\n\n• **Marcada** — el precio de S/ 1,120 que tienes cargado ya trae el IGV dentro. El ERP lo separa: S/ 949.15 de base + S/ 170.85 de IGV.\n• **Sin marcar** — S/ 1,120 es la base, y el IGV se suma encima: el total sería S/ 1,321.60.\n\nElige mal y toda la liquidación sale con un 18 % de diferencia. **Confirma con tu contador o con quien carga los precios** cómo están registrados, y no lo cambies de mes a mes.",
+      },
+      {
+        pregunta: "Renegocié la tarifa con el proveedor a mitad de mes. ¿Tengo que abrir los servicios uno por uno?",
+        respuesta:
+          "No. En la barra de arriba, al lado del botón verde de liquidar, tienes **“Costos del periodo”** en la pestaña de pagar y **“Precios del periodo”** en la de facturar.\n\nEs distinto del botón rojo de al lado: el rojo (**“Cargar N costo(s) faltante(s)”**) solo sale cuando falta algún importe y **desaparece** cuando no falta ninguno. El nuevo está siempre y sirve para **cambiar lo que ya está cargado**.\n\nDentro ves una fila por día agrupada por proveedor (o cliente) y ruta, con **dos números y dos etiquetas distintas**:\n\n• **Hoy** — lo que la ruta dice ahora mismo. Si dentro del mismo grupo hay varias tarifas, dice **varios** en vez de enseñar una: mostrar la primera te haría creer que ese es el precio del renglón.\n• **Precio nuevo** — el campo, que arranca **vacío a propósito**. Nunca se precarga con el actual ni hay un botón “usar este”: un campo relleno invita a darle Enter sin leer, y *aplicar a todo el grupo* sobre una rejilla precargada reescribe el mes con el número que ya estaba.\n\nLo que dejes vacío no se toca. Y el importe se escribe en **un solo tramo de cada día**, nunca en los dos: cargarlo en ambos cobraría (o pagaría) el día por duplicado.",
+      },
+      {
+        pregunta: "Al cambiar un costo me pide un motivo y no me deja guardar sin él. ¿Por qué?",
+        respuesta:
+          "Porque no es lo mismo **rellenar** que **pisar**.\n\n• Si el servicio estaba en S/ 0.00, le estás completando un dato que faltaba: se guarda sin preguntar nada.\n• Si ya tenía un importe pactado, estás **moviendo plata que alguien acordó**, y el acta del servicio es la única constancia de por qué. Ahí el motivo es obligatorio y el botón queda bloqueado hasta que lo elijas.\n\nAntes de guardar sale además un aviso que **nombra la plata**: cuántos servicios cambian y de qué suma a qué suma. No es un “¿estás seguro?” — es el número que estás firmando.\n\nDespués queda registrado en **/pactos → Historial**: quién, cuándo, de cuánto a cuánto y con qué motivo.",
+      },
+      {
+        pregunta: "Me avisa de que hay días “partidos en dos” al abrir los costos del periodo. ¿Qué significa?",
+        respuesta:
+          "Que a esos días les falta el enlace **ida↔retorno**, y el ERP solo puede emparejar los tramos que ese enlace declara.\n\nSin él, un día que son dos tramos aparece como **dos filas**, y si escribes un importe para esa ruta se lo lleva **cada una**: el día se paga (o se cobra) dos veces. Es el error más caro que se puede cometer desde esta pantalla.\n\nNo se bloquea nada —bloquear te dejaría sin poder corregir el resto del periodo por un dato de otra fila— pero conviene cerrarlo primero con el botón ámbar **“Enlazar N tramo(s) ida↔retorno”**, que está en la misma barra. Enlazar **no toca ningún importe**.",
       },
       {
         pregunta: "Me equivoqué en una liquidación que ya emití. ¿Cómo la corrijo?",
