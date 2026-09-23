@@ -18,8 +18,8 @@ import {
 } from "@/lib/reservas-pacto";
 import { planDeCancelacion, esCancelacion } from "@/lib/reservas-cancelacion";
 import {
-  planMasivo, TEXTO_MOTIVO,
-  type EjeMasivo, type ResumenEje, type ServicioMasivo,
+  planMasivo, TEXTO_MOTIVO, valorTecleado,
+  type EjeMasivo, type ResumenEje, type ServicioMasivo, type ValorEje,
 } from "@/lib/reservas-masivo";
 import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxDeServicio,
@@ -658,9 +658,20 @@ export default function ReservasPage() {
     horaNueva: string;          // la que se acaba de guardar ("" si no cambió)
     /** Sentido del servicio editado: decide qué tramo del día lleva el importe cuando ninguno lo lleva. */
     sentidoEditado: string | null;
-    /** Precio de venta y costo recién escritos, SOLO si el operador los tocó. null = no se ofrecen. */
+    /**
+     * Precio de venta y costo recién escritos, SOLO si el operador los tocó. Ya NO deciden
+     * si el eje se ofrece —eso sería el filtro de paquete otra vez— sino con qué nace
+     * relleno su campo y si la pantalla avisa de una reasignación sin tarifa nueva.
+     */
     precio: number | null;
     costo: number | null;
+    /**
+     * Lo que este servicio lleva DESPUÉS de guardarlo. Es lo que se enseña al lado del
+     * campo del modal: el masivo alcanza al RESTO del contrato, así que escribir acá un
+     * número distinto al suyo lo deja atrás — y eso se dice, no se descubre en el cierre.
+     */
+    precioAhora: number;
+    costoAhora: number;
     /**
      * El motivo y la nota que el operador puso en el formulario. Viajan acá porque
      * `limpiar()` corre antes de abrir el modal y vaciaba el form: el masivo escribía
@@ -721,6 +732,23 @@ export default function ReservasPage() {
    */
   const [aplicarPrecio,        setAplicarPrecio]        = useState(false);
   const [aplicarCosto,         setAplicarCosto]         = useState(false);
+  /**
+   * ── EL VALOR DE CADA EJE DE CONTRATO SE TECLEA ACÁ ───────────────────────
+   * Los tres solo se ofrecían cuando el operador había tocado ESE campo en el
+   * formulario antes de guardar, así que con la asignación en «No tocarla» el modal
+   * se quedaba sin una sola casilla y remataba en «Aplicar a 0 servicio(s)» — el
+   * filtro de paquete otra vez, ahora decidiendo qué se PUEDE cambiar a partir de lo
+   * que se tocó de paso.
+   *
+   * Se siembran con lo que el formulario acaba de guardar (para que el camino de
+   * siempre no cambie en nada) y se pueden escribir sin haber tocado nada. Qué
+   * significa lo escrito lo decide `valorTecleado`, en el módulo puro: **un campo
+   * vacío no es un cero y no es un borrado**, o media cartera se queda en S/ 0.00
+   * porque nadie escribió nada.
+   */
+  const [aplicarPaxTxt,        setAplicarPaxTxt]        = useState("");
+  const [aplicarPrecioTxt,     setAplicarPrecioTxt]     = useState("");
+  const [aplicarCostoTxt,      setAplicarCostoTxt]      = useState("");
   const [aplicarMotivo,        setAplicarMotivo]        = useState("");
   const [aplicarOtraHora,      setAplicarOtraHora]      = useState(false);
   const [aplicarOtraUnidad,    setAplicarOtraUnidad]    = useState(false);
@@ -2374,12 +2402,20 @@ export default function ReservasPage() {
         // a verse, y a poder apagarse.
         setAplicarHora(!!asignPayload.hora_servicio
           && String(asignPayload.hora_servicio).slice(0, 5) !== horaOriginal);
-        // Marcado por defecto solo cuando hay un número que propagar: con el campo
-        // vaciado, el default estaría BORRANDO la capacidad de 30 servicios.
-        setAplicarPax(paxEscrito != null);
+        // Marcado por defecto solo cuando hay un número que propagar Y el operador lo
+        // acaba de tocar: con el campo vaciado, el default estaría BORRANDO la capacidad
+        // de 30 servicios, y sin tocarlo nadie pidió propagar nada.
+        setAplicarPax(paxTocado && paxEscrito != null);
         // Y EL DINERO NACE APAGADO, SIEMPRE. Ver la declaración de los dos estados.
         setAplicarPrecio(false);
         setAplicarCosto(false);
+        // Los tres campos de valor nacen con lo que el formulario acaba de guardar, y
+        // VACÍOS cuando no se tocó nada: un campo pre-rellenado con el número que ya
+        // estaba invita al Enter ciego sobre todo el contrato (mismo criterio que el
+        // importe nuevo de /liquidaciones, que tampoco se precarga con el actual).
+        setAplicarPaxTxt(paxTocado && paxEscrito != null ? String(paxEscrito) : "");
+        setAplicarPrecioTxt(precioTocado ? String(Number(form.precio_cliente)) : "");
+        setAplicarCostoTxt(costoTocado ? String(costo) : "");
         setModalAplicarMasivo({
           cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas,
           // El contrato ENTERO, incluido el servicio que se acaba de guardar. Se lee del
@@ -2393,6 +2429,10 @@ export default function ReservasPage() {
           sentidoEditado: reservaActual.direccion_servicio ?? null,
           precio: precioTocado ? Number(form.precio_cliente) : null,
           costo:  costoTocado  ? costo : null,
+          // Lo que ESTE servicio lleva ya guardado. El precio solo se escribe cuando se
+          // tocó; el costo viaja siempre dentro de `asignPayload`.
+          precioAhora: precioTocado ? Number(form.precio_cliente) : Number(reservaActual.precio_cliente ?? 0),
+          costoAhora:  costo,
           motivo: motivoEditado, nota: notaEditada,
           paxAntes: reservaActual.capacidad_contratada ?? null,
           rutasObjetivo: [
@@ -2417,6 +2457,30 @@ export default function ReservasPage() {
    * La REGLA de quién recibe qué vive entera en lib/reservas-masivo.ts, con su matriz:
    * acá solo se le entrega lo que la pantalla sabe.
    */
+  /**
+   * QUÉ SIGNIFICA LO QUE SE TECLEÓ EN CADA EJE. Lo decide `valorTecleado` (módulo puro),
+   * no la pantalla: la regla que sostiene esto —**un campo vacío no es un cero y no es un
+   * borrado**— es la que impide dejar 900 servicios en S/ 0.00 porque nadie escribió nada.
+   *
+   * Vaciar el PAX en lote solo se permite cuando el operador vació ESE campo en el
+   * formulario: es la forma de pedirlo que ya existía, y un campo en blanco que nadie
+   * tocó significa «no escribí nada», no «bórralo en todo el contrato».
+   */
+  const vaciarPaxPermitido = !!modalAplicarMasivo?.paxTocado && modalAplicarMasivo?.pax == null;
+  const vPax: ValorEje = useMemo(
+    () => valorTecleado(aplicarPaxTxt, { entero: true, vaciarPermitido: vaciarPaxPermitido }),
+    [aplicarPaxTxt, vaciarPaxPermitido]);
+  const vPrecio: ValorEje = useMemo(() => valorTecleado(aplicarPrecioTxt), [aplicarPrecioTxt]);
+  const vCosto:  ValorEje = useMemo(() => valorTecleado(aplicarCostoTxt),  [aplicarCostoTxt]);
+  /**
+   * El COSTO solo se ofrece sobre una asignación TERCERIZADA, y no es una comodidad: la
+   * tarifa es de UNA empresa, y `motivoCostoEmpresa` la identifica por el
+   * `empresa_tercerizada_id` del payload. Con la asignación propia ese campo va en null,
+   * así que el filtro «solo quien va a ser servido por esa empresa» no tendría con qué
+   * comparar y la tarifa caería sobre los servicios de CUALQUIER proveedor del contrato.
+   */
+  const ofreceCosto = modalAplicarMasivo?.payload?.tipo_asignacion === "tercerizado";
+
   const plan = useMemo(() => {
     const m = modalAplicarMasivo;
     if (!m) return null;
@@ -2431,9 +2495,11 @@ export default function ReservasPage() {
       seleccion: {
         asignacion: aplicarAsignacion,
         hora:   aplicarHora   && !!m.horaNueva && m.horaNueva !== m.horaOriginal,
-        pax:    aplicarPax    && m.paxTocado,
-        precio: aplicarPrecio && m.precio != null,
-        costo:  aplicarCosto  && m.costo  != null,
+        // Un eje marcado sin valor utilizable NO se aplica. La casilla ya sale
+        // deshabilitada, pero el motor no puede depender de que la pantalla acierte.
+        pax:    aplicarPax    && vPax.aplicable,
+        precio: aplicarPrecio && vPrecio.aplicable,
+        costo:  aplicarCosto  && vCosto.aplicable && ofreceCosto,
       },
       payload: m.payload,
       horaOriginal: m.horaOriginal,
@@ -2446,15 +2512,19 @@ export default function ReservasPage() {
       hoy: fechaLima(),
       otraHora: aplicarOtraHora,
       otraUnidad: aplicarOtraUnidad,
-      pax: m.pax, paxAntes: m.paxAntes, rutasObjetivo: m.rutasObjetivo,
-      precio: m.precio, costo: m.costo,
+      // Los tres valores salen de lo TECLEADO en el modal, no de lo que el formulario
+      // tocara de paso. `paxAntes` sigue siendo lo que este servicio decía antes: es lo
+      // que distingue «corregir la capacidad de esta ruta» de «pisarle la suya a otro
+      // móvil», y no cambia porque el número nuevo se escriba en otro sitio.
+      pax: vPax.valor, paxAntes: m.paxAntes, rutasObjetivo: m.rutasObjetivo,
+      precio: vPrecio.valor, costo: vCosto.valor,
       liquidadasCliente:   aplicarLiquidadas?.cliente,
       liquidadasProveedor: aplicarLiquidadas?.proveedor,
       estadoPendientes: (propioCompleto || tercerizadoCompleto) ? "confirmada" : "programada",
     });
   }, [modalAplicarMasivo, aplicarAsignacion, aplicarHora, aplicarPax, aplicarPrecio,
       aplicarCosto, aplicarScope, aplicarDesde, aplicarHasta, aplicarOtraHora,
-      aplicarOtraUnidad, aplicarLiquidadas]);
+      aplicarOtraUnidad, aplicarLiquidadas, vPax, vPrecio, vCosto, ofreceCosto]);
 
   /**
    * Esc cierra el modal del masivo, igual que la ✕ y que «No, solo este».
@@ -2483,7 +2553,14 @@ export default function ReservasPage() {
    */
   useEffect(() => {
     const m = modalAplicarMasivo;
-    if (!m || (m.precio == null && m.costo == null)) { setAplicarLiquidadas(null); return; }
+    if (!m) return;
+    if (aplicarLiquidadas) return;             // ya se miró para este modal
+    // Desde que los dos ejes de dinero se ofrecen SIEMPRE, «hay dinero que ofrecer» dejó
+    // de acotar nada: pagarla en cada guardado sería una consulta paginada sobre cientos
+    // de ids para reasignar un bus. Se paga cuando el formulario acaba de tocar un
+    // importe —el camino de siempre, y así llega con tiempo— o en cuanto alguien marca
+    // uno de los dos ejes, que es el momento en que ese dato empieza a decidir algo.
+    if (m.precio == null && m.costo == null && !aplicarPrecio && !aplicarCosto) return;
     let vivo = true;
     (async () => {
       const cliente = new Set<number>(), proveedor = new Set<number>();
@@ -2503,7 +2580,7 @@ export default function ReservasPage() {
       if (vivo) setAplicarLiquidadas({ cliente, proveedor });
     })();
     return () => { vivo = false; };
-  }, [modalAplicarMasivo]);
+  }, [modalAplicarMasivo, aplicarPrecio, aplicarCosto, aplicarLiquidadas]);
 
   const aplicarMasivo = async () => {
     if (!modalAplicarMasivo || !plan) return;
@@ -3589,55 +3666,110 @@ export default function ReservasPage() {
 
         const hayConductor = payload.tipo_asignacion === "propio" ? !!payload.conductor_id : !!payload.conductor_tercero_id;
         const cambiaHora   = !!horaNueva && horaNueva !== horaOriginal;
-        const tocaDinero   = aplicarPrecio || aplicarCosto;
+        const tocaDinero   = (aplicarPrecio && vPrecio.aplicable) || (aplicarCosto && vCosto.aplicable && ofreceCosto);
+        // Lo que ESTE servicio lleva ya guardado, para poder enseñarlo al lado del campo.
+        const paxAhora     = m.paxTocado ? m.pax : m.paxAntes;
+        /**
+         * Un eje marcado con un número distinto al de este servicio deja a este servicio
+         * atrás: el masivo alcanza al RESTO del contrato (es lo que promete el pie, y lo
+         * que hace que el juicio del día sea correcto — ver `contexto` vs `universo` en
+         * lib/reservas-masivo.ts). Se DICE en el sitio donde ocurre, no se descubre al
+         * cerrar el mes con un día a otra tarifa.
+         */
+        const seQuedaAtras = (aplica: boolean, nuevo: number | null, ahora: number | null, comoTexto: (n: number | null) => string) =>
+          aplica && nuevo !== ahora ? (
+            <p className="mt-1.5 pl-6 text-[11px]" style={{ color: "#92400e" }}>
+              ⚠ <b>Este servicio se queda con {comoTexto(ahora)}</b>: el masivo solo alcanza a los
+              demás. Si también tiene que cambiar, ábrelo y edítalo.
+            </p>
+          ) : null;
         // El acta de cientos de servicios tiene que decir POR QUÉ se movió el dinero. Es
         // el mismo candado que `falso_flete_motivo` y `adicional_motivo`: cuando la plata
         // sale de una fila, el motivo es la única constancia que queda.
         const faltaMotivo  = tocaDinero && !aplicarMotivo;
 
         /**
-         * Un eje = una casilla, su conteo y por qué el resto queda fuera. Es una FUNCIÓN
-         * que devuelve JSX y no un componente declarado acá dentro: un componente nuevo en
-         * cada render remonta su subárbol, y con él el <input> que se acaba de marcar.
+         * Un eje = una casilla, SU CAMPO DE VALOR, su conteo y por qué el resto queda
+         * fuera. Es una FUNCIÓN que devuelve JSX y no un componente declarado acá dentro:
+         * un componente nuevo en cada render remonta su subárbol, y con él el <input> que
+         * se acaba de escribir.
+         *
+         * El contenedor es un <div> y no un <label>: con el campo del valor dentro, un
+         * label envolviéndolo todo convierte cada clic sobre el número en un clic sobre la
+         * casilla. Solo la cabecera es label, que es lo que se quiere poder pulsar.
          */
         const casillaEje = (
           eje: EjeMasivo, marcado: boolean, onMarcar: (v: boolean) => void,
           titulo: React.ReactNode, detalle: React.ReactNode, tono = "#0b315f",
+          extra?: { campo?: React.ReactNode; puede?: boolean; nota?: React.ReactNode },
         ) => {
           const r: ResumenEje = plan.ejes[eje];
+          // `puede === false` = no hay valor utilizable todavía (o el eje no aplica a
+          // este servicio). La casilla se apaga y la nota DICE qué falta: un control
+          // muerto sin motivo se pulsa y no pasa nada.
+          const puede = extra?.puede !== false;
+          const activo = marcado && puede;
           return (
-            <label key={eje} className={`block rounded-xl px-3 py-2.5 cursor-pointer border-2 transition-all ${marcado ? "bg-blue-50" : "border-gray-200 bg-white"}`}
-                   style={marcado ? { borderColor: tono } : undefined}>
+            <div key={eje} className={`rounded-xl px-3 py-2.5 border-2 transition-all ${activo ? "bg-blue-50" : "border-gray-200 bg-white"}`}
+                 style={activo ? { borderColor: tono } : undefined}>
               <div className="flex items-start gap-2.5">
-                <input type="checkbox" checked={marcado} onChange={e => onMarcar(e.target.checked)}
-                       className="mt-0.5 accent-[#0b315f]" style={{ accentColor: tono }} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-bold text-sm text-gray-800">{titulo}</p>
-                    {marcado && (
-                      <span className="text-[11px] font-black px-2 py-0.5 rounded-lg whitespace-nowrap"
-                            style={{ background: r.ids.length ? "#e0f2fe" : "#f3f4f6", color: r.ids.length ? "#0369a1" : "#6b7280" }}>
-                        {r.ids.length} serv.
-                      </span>
-                    )}
+                <label className="flex items-start gap-2.5 flex-1 min-w-0 cursor-pointer">
+                  <input type="checkbox" checked={marcado} disabled={!puede}
+                         onChange={e => onMarcar(e.target.checked)}
+                         className="mt-0.5 accent-[#0b315f] disabled:opacity-40" style={{ accentColor: tono }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className={`font-bold text-sm ${puede ? "text-gray-800" : "text-gray-400"}`}>{titulo}</p>
+                      {activo && (
+                        <span className="text-[11px] font-black px-2 py-0.5 rounded-lg whitespace-nowrap"
+                              style={{ background: r.ids.length ? "#e0f2fe" : "#f3f4f6", color: r.ids.length ? "#0369a1" : "#6b7280" }}>
+                          {r.ids.length} serv.
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-gray-500 mt-0.5">{detalle}</p>
                   </div>
-                  <p className="text-[11px] text-gray-500 mt-0.5">{detalle}</p>
-                  {/* Lo que queda fuera se VE, con su porqué al lado: un conteo que no
-                      cuadra y no se explica manda a consultar la base. */}
-                  {marcado && r.fuera.length > 0 && (
-                    <ul className="mt-1.5 space-y-0.5">
-                      {r.fuera.map(f => (
-                        <li key={f.motivo} className="text-[11px] text-gray-500">
-                          · <b>{f.cuantos}</b> {TEXTO_MOTIVO[f.motivo]}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+                </label>
               </div>
-            </label>
+              {extra?.campo}
+              {extra?.nota}
+              {/* Lo que queda fuera se VE, con su porqué al lado: un conteo que no
+                  cuadra y no se explica manda a consultar la base. */}
+              {activo && r.fuera.length > 0 && (
+                <ul className="mt-1.5 space-y-0.5 pl-6">
+                  {r.fuera.map(f => (
+                    <li key={f.motivo} className="text-[11px] text-gray-500">
+                      · <b>{f.cuantos}</b> {TEXTO_MOTIVO[f.motivo]}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           );
         };
+
+        /**
+         * El campo de valor de un eje. Enseña los DOS números con etiquetas distintas —lo
+         * que se va a escribir y lo que lleva ESTE servicio— y **nunca hay un botón «usar
+         * este»**: mismo criterio que el PAX contratado del formulario, el km vigente del
+         * Radar y el importe nuevo del cierre. Un campo precargado con el número que ya
+         * estaba invita al Enter ciego sobre todo el contrato.
+         */
+        const campoValor = (
+          etiqueta: string, valor: string, onValor: (v: string) => void,
+          v: ValorEje, ahora: React.ReactNode, paso: string, marcador: string,
+        ) => (
+          <div className="mt-2 pl-6 flex items-center gap-2 flex-wrap">
+            <span className="text-[10px] font-black uppercase tracking-wide text-gray-400">{etiqueta}</span>
+            <input
+              type="number" min="0" step={paso} value={valor} placeholder={marcador}
+              onChange={e => onValor(e.target.value)}
+              className="w-28 border rounded-lg px-2 py-1 text-sm font-bold focus:outline-none focus:border-[#0b315f]"
+              style={{ borderColor: v.codigo === "no_valido" ? "#fca5a5" : undefined }}
+            />
+            <span className="text-[11px] text-gray-400">este servicio: <b className="text-gray-600">{ahora}</b></span>
+          </div>
+        );
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -3760,26 +3892,111 @@ export default function ReservasPage() {
                       {" "}{etiquetaDelta(minutosHHMM(horaNueva) - minutosHHMM(horaOriginal))}</b> para conservar
                       el espaciado del recorrido.</>)}
 
-                  {m.paxTocado && casillaEje("pax", aplicarPax, setAplicarPax,
-                    <>PAX contratados · <b>{m.pax != null ? `${m.pax} asientos` : "vacío"}</b></>,
+                  {/* ── LOS TRES EJES DEL CONTRATO ────────────────────────────────
+                      Se ofrecen SIEMPRE, con su propio campo. Antes cada uno aparecía
+                      solo si el operador había tocado ESE campo del formulario, así que
+                      con la asignación en «No tocarla» el modal se quedaba sin una sola
+                      casilla: el filtro de paquete otra vez, decidiendo qué se PUEDE
+                      cambiar a partir de lo que se tocó de paso. */}
+                  {casillaEje("pax", aplicarPax, setAplicarPax,
+                    <>PAX contratados</>,
                     <>Los asientos son del <b>contrato</b>, no de la unidad: alcanzan a las idas
                       <b> y</b> a los retornos, a los <b>otros horarios</b> de la misma ruta y
-                      también a los servicios <b>ya prestados</b> — sin mirar la placa.
-                      {m.pax == null && <> Vacío <b>borra</b> la capacidad escrita en esos servicios.</>}</>)}
+                      también a los servicios <b>ya prestados</b> — sin mirar la placa.</>,
+                    "#0b315f",
+                    {
+                      puede: vPax.aplicable,
+                      campo: campoValor("Asientos", aplicarPaxTxt, setAplicarPaxTxt, vPax,
+                        paxAhora != null ? `${paxAhora} asientos` : "sin dato",
+                        "1", vaciarPaxPermitido ? "vacío = borrar" : "—"),
+                      nota: (
+                        <>
+                          {/* Vaciar es un BORRADO y se dice con esa palabra. Solo se puede
+                              pedir vaciando el campo en el formulario: un modal en blanco
+                              que nadie tocó significa «no escribí nada». */}
+                          {vPax.codigo === "vaciar" && (
+                            <p className="mt-1.5 pl-6 text-[11px]" style={{ color: "#b91c1c" }}>
+                              Vacío <b>BORRA</b> la capacidad escrita en esos servicios.
+                            </p>
+                          )}
+                          {vPax.codigo === "sin_valor" && (
+                            <p className="mt-1.5 pl-6 text-[11px] text-gray-400">
+                              Escribe los asientos contratados para poder aplicarlo.
+                            </p>
+                          )}
+                          {vPax.codigo === "no_valido" && (
+                            <p className="mt-1.5 pl-6 text-[11px]" style={{ color: "#b91c1c" }}>
+                              Tienen que ser asientos enteros y mayores que cero.
+                            </p>
+                          )}
+                          {seQuedaAtras(aplicarPax && vPax.aplicable, vPax.valor, paxAhora,
+                            n => n != null ? `${n} asientos` : "sin dato")}
+                        </>
+                      ),
+                    })}
 
                   {/* ── EL DINERO ─────────────────────────────────────────────────
-                      Nacen apagados y se pintan aparte: no son "un campo más". */}
-                  {m.precio != null && casillaEje("precio", aplicarPrecio, setAplicarPrecio,
-                    <>Precio de venta · <b>{fmtSoles(m.precio)}</b></>,
+                      Nacen apagados SIEMPRE y se pintan aparte: no son "un campo más".
+                      Un eje de plata pre-marcado escribe en cientos de filas porque nadie
+                      leyó una casilla, y cobrar de más no se deshace. */}
+                  {casillaEje("precio", aplicarPrecio, setAplicarPrecio,
+                    <>Precio de venta <span className="text-gray-400 font-normal">(al cliente)</span></>,
                     <>Va a <b>UN solo tramo por día</b> —el que ya lleva el importe—, porque la
                       tarifa cubre la ida y el retorno y escribirla en los dos cobraría el día dos veces.</>,
-                    "#15803d")}
+                    "#15803d",
+                    {
+                      puede: vPrecio.aplicable,
+                      campo: campoValor("Nuevo S/", aplicarPrecioTxt, setAplicarPrecioTxt, vPrecio,
+                        fmtSoles(m.precioAhora), "0.01", "—"),
+                      nota: (
+                        <>
+                          {vPrecio.codigo === "sin_valor" && (
+                            <p className="mt-1.5 pl-6 text-[11px] text-gray-400">
+                              Escribe el precio para poder aplicarlo. En blanco no se escribe nada:
+                              un campo vacío <b>no es S/ 0.00</b>.
+                            </p>
+                          )}
+                          {vPrecio.codigo === "no_valido" && (
+                            <p className="mt-1.5 pl-6 text-[11px]" style={{ color: "#b91c1c" }}>
+                              Tiene que ser un importe válido, nunca negativo.
+                            </p>
+                          )}
+                          {seQuedaAtras(aplicarPrecio && vPrecio.aplicable, vPrecio.valor, m.precioAhora, n => fmtSoles(n ?? 0))}
+                        </>
+                      ),
+                    })}
 
-                  {m.costo != null && casillaEje("costo", aplicarCosto, setAplicarCosto,
-                    <>Costo del proveedor · <b>{fmtSoles(m.costo)}</b></>,
-                    <>Un tramo por día, y solo a los servicios que va a cubrir
-                      <b> esa misma empresa</b>: la tarifa que se pactó con ella no es la de otra.</>,
-                    "#b45309")}
+                  {casillaEje("costo", aplicarCosto, setAplicarCosto,
+                    <>Costo del proveedor</>,
+                    ofreceCosto
+                      ? <>Un tramo por día, y solo a los servicios que va a cubrir
+                          <b> esa misma empresa</b>: la tarifa que se pactó con ella no es la de otra.</>
+                      : <>Este servicio quedó en <b>flota propia</b>: no hay proveedor a quien pagarle,
+                          y sin empresa tampoco se sabe con cuál se pactó la tarifa que se escribiría.</>,
+                    "#b45309",
+                    {
+                      puede: ofreceCosto && vCosto.aplicable,
+                      campo: ofreceCosto
+                        ? campoValor("Nuevo S/", aplicarCostoTxt, setAplicarCostoTxt, vCosto,
+                            fmtSoles(m.costoAhora), "0.01", "—")
+                        : null,
+                      nota: ofreceCosto ? (
+                        <>
+                          {vCosto.codigo === "sin_valor" && (
+                            <p className="mt-1.5 pl-6 text-[11px] text-gray-400">
+                              Escribe el costo para poder aplicarlo. En blanco no se escribe nada:
+                              un campo vacío <b>no es S/ 0.00</b>.
+                            </p>
+                          )}
+                          {vCosto.codigo === "no_valido" && (
+                            <p className="mt-1.5 pl-6 text-[11px]" style={{ color: "#b91c1c" }}>
+                              Tiene que ser un importe válido, nunca negativo.
+                            </p>
+                          )}
+                          {seQuedaAtras(aplicarCosto && vCosto.aplicable, vCosto.valor, m.costoAhora, n => fmtSoles(n ?? 0))}
+                        </>
+                      ) : null,
+                    })}
                 </div>
 
                 {/* Los filtros de la ASIGNACIÓN. No se pintan en los otros ejes porque no

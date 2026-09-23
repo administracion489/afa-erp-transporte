@@ -24,7 +24,8 @@
 //
 // Correr:  npx tsx scripts/prueba-masivo.mts
 import {
-  planMasivo, tramoDelImporte, conservaSuUnidad, TEXTO_MOTIVO, TEXTO_EJE, EJES_MASIVOS,
+  planMasivo, tramoDelImporte, conservaSuUnidad, valorTecleado,
+  TEXTO_MOTIVO, TEXTO_EJE, EJES_MASIVOS,
   type ServicioMasivo, type Seleccion, type EntradaMasivo, type MotivoMasivo,
 } from "../lib/reservas-masivo";
 import { normalizarNombreRuta } from "../lib/liquidacion-rutas";
@@ -617,6 +618,116 @@ titulo("11 · El PAX alcanza lo ya prestado; el despacho no");
      "y queda fuera con ese código, no con el de la ruta");
   ok(plan.ejes.pax.fuera.some(f => f.motivo === "otra_ruta"),
      "la RUTA A sigue siendo otra ruta: sin la hora no significa sin el nombre");
+}
+
+// ── 12 · EL VALOR SE TECLEA, Y UN CAMPO VACÍO NO ESCRIBE NUNCA ──────────────
+//
+// LO REPORTADO, con la pantalla delante: «ya no me sale para cambiar solo pax, solo
+// precio cliente, solo precio proveedor, o check box de cada dato que quiero cambiar».
+// Los tres ejes de contrato solo se ofrecían cuando el operador había tocado ESE campo
+// del formulario antes de guardar, así que con la asignación en «No tocarla» el modal se
+// quedaba sin una sola casilla — el filtro de paquete otra vez, un piso más arriba:
+// ahora decidía qué se PUEDE cambiar a partir de lo que se tocó de paso.
+//
+// Lo que esta sección existe para impedir es lo que abre esa puerta: que un campo en
+// blanco se lea como un 0. Un precio deducido de un input vacío dejaría el contrato
+// entero en S/ 0.00 porque nadie escribió nada, y cobrar de menos se reclama pero
+// facturar en cero no se factura.
+titulo("12 · El valor de cada eje se teclea, y vacío NUNCA escribe");
+{
+  // ── 12a · Barrido de `valorTecleado` ────────────────────────────────────
+  const TEXTOS = ["", "   ", "0", "1", "12", "12.5", "12,5", "480.50", "-1", "-0.01",
+                  "abc", "1e3", "0.0", " 45 "];
+  const OPCS: { vaciarPermitido?: boolean; entero?: boolean }[] = [
+    {}, { entero: true }, { vaciarPermitido: true }, { vaciarPermitido: true, entero: true },
+  ];
+  let aplicablesSinValor = 0, negativos = 0, vaciarConValor = 0, tecleadoSinNumero = 0;
+  let vacioSinPermisoAplicable = 0, casos = 0;
+  for (const t of TEXTOS) for (const o of OPCS) {
+    const v = valorTecleado(t, o); casos++;
+    if (v.aplicable !== (v.codigo === "tecleado" || v.codigo === "vaciar")) aplicablesSinValor++;
+    if (v.valor != null && v.valor < 0) negativos++;
+    if (v.codigo === "vaciar" && v.valor !== null) vaciarConValor++;
+    if (v.codigo === "tecleado" && !Number.isFinite(v.valor as number)) tecleadoSinNumero++;
+    if (t.trim() === "" && !o.vaciarPermitido && v.aplicable) vacioSinPermisoAplicable++;
+  }
+  ok(aplicablesSinValor === 0,
+     `aplicable ⟺ (tecleado ∨ vaciar), sobre las ${casos} combinaciones`, aplicablesSinValor);
+  ok(negativos === 0, "jamás se devuelve un importe negativo como aplicable", negativos);
+  ok(vaciarConValor === 0, "vaciar siempre lleva valor null: es un BORRADO, no un cero");
+  ok(tecleadoSinNumero === 0, "todo «tecleado» trae un número finito");
+  ok(vacioSinPermisoAplicable === 0,
+     "LA REGLA DURA: en blanco sin permiso de vaciar NO se aplica — nunca un 0 deducido",
+     vacioSinPermisoAplicable);
+
+  // El corolario, porque un motor que no aplicara nunca cumpliría todo lo anterior.
+  ok(valorTecleado("480.50").aplicable && valorTecleado("480.50").valor === 480.5,
+     "y lo que sí se escribió, se aplica: 480.50 es un importe");
+  ok(valorTecleado("12,5").valor === 12.5, "la coma decimal se entiende: 12,5 son 12.5");
+  ok(valorTecleado("", { vaciarPermitido: true }).codigo === "vaciar",
+     "vaciar se puede pedir, y se DECLARA con su código");
+  ok(valorTecleado("0").aplicable && valorTecleado("0").valor === 0,
+     "S/ 0.00 tecleado a propósito sí se escribe: es lo que ya hacía el formulario");
+  ok(!valorTecleado("0", { entero: true }).aplicable,
+     "pero 0 ASIENTOS no: un contrato de cero asientos no existe");
+  ok(!valorTecleado("12.5", { entero: true }).aplicable, "ni medio asiento");
+}
+{
+  // ── 12b · Teclear sin haber tocado el formulario alcanza a los MISMOS ────
+  // La pantalla dejó de mirar «¿tocaste este campo?» para ofrecer el eje. Esto fija que
+  // el conjunto de destinatarios no depende de por dónde entró el número: el motor
+  // recibe un valor y nada más.
+  seq = 0;
+  const ctx = [
+    ...dia("2026-10-01", { precio_cliente: 480 }, {}),
+    ...dia("2026-10-02", { precio_cliente: 480 }, {}),
+    ...dia("2026-10-03", { precio_cliente: 480 }, {}),
+  ];
+  const planDe = (precio: number | null) => planMasivo(entrada({
+    contexto: ctx, precio, seleccion: { ...SEL_NADA, precio: precio != null },
+  }));
+
+  const tecleado = valorTecleado("500");
+  const conCampo  = planDe(tecleado.valor);          // el operador lo escribió en el modal
+  const conForm   = planDe(500);                     // venía del formulario, como antes
+  ok(JSON.stringify(conCampo.ejes.precio.ids) === JSON.stringify(conForm.ejes.precio.ids),
+     "un precio TECLEADO en el modal alcanza exactamente a los mismos que uno heredado del formulario",
+     JSON.stringify(conCampo.ejes.precio.ids));
+  ok(conCampo.ejes.precio.ids.length === 3, "y son los tres días, uno por día",
+     conCampo.ejes.precio.ids.length);
+
+  // Y con el campo vacío no se escribe NADA: ni un 0, ni el importe que ya estaba.
+  const vacio = valorTecleado("");
+  const conVacio = planDe(vacio.valor);
+  ok(conVacio.patches.length === 0 && conVacio.total === 0,
+     "con el campo vacío el plan no toca un solo servicio", conVacio.total);
+  const quedan = despues(ctx, conVacio, "precio_cliente");
+  ok([...quedan.values()].every((v, i) => v === Number(ctx[i].precio_cliente ?? 0)),
+     "y ningún importe se movió: un campo en blanco no es S/ 0.00");
+}
+{
+  // ── 12c · Vaciar el PAX sigue siendo posible, y sigue siendo un borrado ──
+  seq = 0;
+  const ctx = [...dia("2026-10-01", { capacidad_contratada: 30 }, { capacidad_contratada: 30 })];
+  const v = valorTecleado("", { vaciarPermitido: true, entero: true });
+  const plan = planMasivo(entrada({
+    contexto: ctx, pax: v.valor, paxAntes: 30,
+    seleccion: { ...SEL_NADA, pax: v.aplicable },
+  }));
+  ok(plan.ejes.pax.ids.length === 2, "el borrado alcanza a los dos tramos del día: el pax es del DÍA",
+     plan.ejes.pax.ids.length);
+  ok(plan.patches.every(p => p.patch.capacidad_contratada === null),
+     "y lo que escribe es null, no un 0",
+     JSON.stringify(plan.patches.map(p => p.patch)));
+
+  // Sin permiso de vaciar, ese mismo campo en blanco no borra nada.
+  const sinPermiso = valorTecleado("", { entero: true });
+  const planSin = planMasivo(entrada({
+    contexto: ctx, pax: sinPermiso.valor, paxAntes: 30,
+    seleccion: { ...SEL_NADA, pax: sinPermiso.aplicable },
+  }));
+  ok(planSin.total === 0,
+     "un modal en blanco que nadie tocó NO borra la capacidad de todo el contrato", planSin.total);
 }
 
 // ── Resultado ───────────────────────────────────────────────────────────────
