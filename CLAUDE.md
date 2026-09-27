@@ -822,6 +822,10 @@ La fórmula del costo de mover un bus propio —combustible por km/galón con ur
 
 Un full day Lima→Huacachina (624 km) salía casi el doble del mercado. Dos premisas del modelo son urbanas: el **rendimiento** (medido con tráfico) y el prorrateo de los **fijos anuales por km** (seguro, SOAT, permisos, depreciación del parámetro son costos de TIEMPO: un día de 600 km se llevaba la cuota de una semana urbana). En `carretera`: rendimiento ×1.25 y fijos por DÍA (año de 300 días). Neumáticos, mantenimiento y depreciación CONTABLE siguen por km. **Los dos números no están medidos y se declaran**; el lado seguro es bajarlos. Sin el campo el resultado es byte a byte el urbano (`prueba-costeo.mts`). El cotizador SUGIERE carretera desde 150 km/día (`recorridoSugerido`) y una persona lo cambia. De paso, en multi-día los días de conductor salen del itinerario (antes quedaban en 1).
 
+### Precio mínimo por hora (`aplicarPisoHora`, `parametros_costos.tarifa_hora_minima`)
+
+Un city tour recorre pocos km y ocupa el bus todo el día: el mercado lo cobra por TIEMPO (S/ 180/h un bus 50 pax Full Equipo) y el costeo por km sale muy por debajo. `tarifa_hora_minima` es un **PRECIO sin IGV**, no un costo, así que el piso se aplica a los tres escenarios DESPUÉS del margen y nunca toca `baseCosto`. Solo sube, nunca baja; sin horas o sin tarifa no hay piso. Migración `supabase/costos-06-tarifa-hora-minima.sql` (**no la corre el deploy**; sin ella no hay piso, comportamiento de siempre) y no siembra valores. Se edita en `/configuracion/costos → Mano de obra`.
+
 ### Presupuesto del servicio y utilidad antes de impuestos
 
 `supabase/costeo-01-planilla-y-presupuesto.sql` + `lib/costeo-conductor.ts` + `lib/costeo-servicio.ts` + `components/programacion/ModalCostear.tsx`.
