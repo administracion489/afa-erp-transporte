@@ -46,6 +46,9 @@ import ModalSede, { SEDE_VACIA, type Sede } from "./ModalSede";
 import ModalEnviar from "./ModalEnviar";
 import ModalCostos, { type ReservaSinCosto } from "@/components/pactos/ModalCostos";
 import { guardarReservas } from "@/lib/reservas-pacto";
+import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
+import { etiquetasDelDia, segmentosEtiquetas, SQL_ETIQUETAS } from "@/lib/liquidacion-etiquetas";
+import type { TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
 
 const COLS_RESERVA =
   "id,codigo,fecha_servicio,hora_servicio,estado,estado_admin,estado_proveedor,cliente_id,cliente_sede_id," +
@@ -74,6 +77,24 @@ const COL_FALSO_FLETE = "falso_flete,falso_flete_motivo";
  * estuviera, la agrupación se apoya solo en el nombre, que es como se comportaba antes.
  */
 const COL_PARADAS = "paradas_json";
+
+/**
+ * Las ETIQUETAS del ítem (supabase/liquidaciones-04-etiquetas-item.sql). Sin ellas la
+ * agrupación es la de siempre, por el nombre; con ellas, RUTA + TURNO + MÓVIL deciden el
+ * ítem y la hora deja de partirlo.
+ */
+const COLS_ETIQUETAS = ["ruta_etiqueta", "turno", "movil"];
+
+/**
+ * Todas las columnas de migraciones ACCESORIAS que el cierre lee. PostgREST rechaza el
+ * select ENTERO por una sola columna desconocida, así que se pide todo y se suelta SOLO la
+ * que el error nombra. Antes era una cascada de combinaciones fijas (`.catch().catch()…`):
+ * con cuatro migraciones accesorias las combinaciones ya no caben, y una combinación que
+ * faltara en la cascada dejaba sin leer justo el dato que sí estaba.
+ */
+const OPCIONALES_CIERRE = [
+  COL_PAX_CONTRATADO, COL_ORIGEN, COL_PARADAS, ...COL_FALSO_FLETE.split(","), ...COLS_ETIQUETAS,
+];
 
 /** Paginación defensiva: PostgREST corta en 1000 filas y un mes de operación pasa de eso. */
 async function traerTodo(query: () => any): Promise<any[]> {
@@ -274,6 +295,10 @@ export default function LiquidacionesPage() {
    * servicio por código. Ahora se abren y se corrigen aquí.
    */
   const [modalServicios, setModalServicios] = useState<{ titulo: string; subtitulo: string; ids: number[] } | null>(null);
+  /** Poner RUTA / TURNO / MÓVIL a los servicios del cierre. Ver components/programacion/ModalEtiquetas. */
+  const [modalEtiquetas, setModalEtiquetas] = useState(false);
+  /** ¿La base tiene las columnas de etiquetas? null = todavía no se sabe. */
+  const [etiquetasDisponibles, setEtiquetasDisponibles] = useState<boolean | null>(null);
 
   /** Las reservas del periodo por id: los tres contadores guardan ids, no filas. */
   const reservasPorId = useMemo(() => new Map(reservas.map((r) => [r.id, r])), [reservas]);
@@ -317,18 +342,24 @@ export default function LiquidacionesPage() {
             .order("fecha_servicio", { ascending: true })
             .order("id", { ascending: true })
         );
-      // Dos columnas de migraciones opcionales (liquidaciones-03 y reservas-04). Si esas
-      // migraciones no se corrieron, PostgREST rechaza el select ENTERO, así que se
-      // reintenta quitándolas de a una: sin el pax la cascada pierde su primer escalón,
-      // y sin el origen todo se lee como contratado. Ninguna de las dos puede impedir
-      // cerrar el periodo.
-      const rs = await traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN},${COL_PARADAS},${COL_FALSO_FLETE}`)
-        .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN},${COL_PARADAS}`))
-        .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN},${COL_FALSO_FLETE}`))
-        .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN}`))
-        .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO}`))
-        .catch(() => traerReservas(`${COLS_RESERVA},${COL_ORIGEN}`))
-        .catch(() => traerReservas(COLS_RESERVA));
+      // Las columnas de migraciones opcionales (liquidaciones-03 y -04, reservas-04 y -05).
+      // Si alguna no se corrió, PostgREST rechaza el select ENTERO, así que se reintenta
+      // soltando la que el error nombra: sin el pax la cascada pierde su primer escalón,
+      // sin el origen todo se lee como contratado y sin las etiquetas se agrupa por el
+      // nombre. Ninguna puede impedir cerrar el periodo.
+      let opcionales = [...OPCIONALES_CIERRE];
+      let rs: unknown[] = [];
+      for (;;) {
+        try { rs = await traerReservas([COLS_RESERVA, ...opcionales].join(",")); break; }
+        catch (e) {
+          const m = String((e as { message?: unknown } | null)?.message ?? e);
+          const falta = opcionales.find((c) => new RegExp(`\\b${c}\\b`, "i").test(m));
+          if (falta) { opcionales = opcionales.filter((c) => c !== falta); continue; }
+          if (opcionales.length) { opcionales = []; continue; }
+          throw e;
+        }
+      }
+      setEtiquetasDisponibles(COLS_ETIQUETAS.every((c) => opcionales.includes(c)));
       setReservas(rs as ReservaLiq[]);
 
       const [cl, te, ve, vt, co, ct, cfg] = await Promise.all([
@@ -905,6 +936,30 @@ export default function LiquidacionesPage() {
   }, [gruposVisibles]);
 
   /**
+   * Cuántos DÍAS del cierre a la vista todavía no tienen RUTA y TURNO. Se cuentan por día
+   * —la ida y su retorno son uno, y basta con que un tramo esté etiquetado— para que el
+   * número sea el mismo que después se ve en el modal.
+   */
+  const diasSinEtiqueta = useMemo(() => {
+    const vistos = new Set<number>();
+    let n = 0;
+    for (const r of reservasVisibles) {
+      if (vistos.has(r.id)) continue;
+      vistos.add(r.id);
+      const h = hermanos.hermanoDe(r);
+      if (h) vistos.add(h.id);
+      if (!etiquetasDelDia([r, h]).etiquetas) n++;
+    }
+    return n;
+  }, [reservasVisibles, hermanos]);
+
+  /** La etiqueta corta de un servicio para las listas: las del día si las tiene, si no la del nombre. */
+  const rotuloCorto = useCallback((r: ReservaLiq) => {
+    const e = etiquetasDelDia([r, hermanos.hermanoDe(r)]).etiquetas;
+    return e ? `${e.ruta} · T${e.turno}${e.movil ? ` · M${e.movil}` : ""}` : etiquetaRuta(r);
+  }, [hermanos]);
+
+  /**
    * Los días partidos en dos porque les falta el enlace ida↔retorno.
    *
    * Se arman sobre el PERIODO y no sobre los bloqueados: un par con el enlace escrito en
@@ -982,11 +1037,14 @@ export default function LiquidacionesPage() {
       for (const { r, motivos, codigos } of g.bloqueadas)
         // El motivo se despersonaliza (#1234 → #…) para que sesenta servicios con el
         // mismo problema sean UNA fila y no sesenta.
-        sumar(donde, quien, etiquetaRuta(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"),
+        // La ruta con sus etiquetas si las tiene ("RUTA A · T1"): con dos turnos de la misma
+        // ruta, "¿por qué no sale la RUTA A?" necesita saber cuál de los dos.
+        sumar(donde, quien, rotuloCorto(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"),
               r, r.id, bloqueoEsTrabajo(codigos));
       for (const l of g.sinEjecutar)
         for (const id of l.reservas_periodo)
-          sumar(donde, quien, l.ruta, `Programada pero ningún servicio quedó finalizado (${l.cantidad_programada})`,
+          sumar(donde, quien, l.etiquetas ? segmentosEtiquetas(l.etiquetas, l.moviles).join(" · ") : l.ruta,
+                `Programada pero ningún servicio quedó finalizado (${l.cantidad_programada})`,
                 reservasPorId.get(id), id, true);
     }
     // Primero lo que hay que arreglar. Lo informativo se hunde al fondo: es lo que ya
@@ -994,7 +1052,7 @@ export default function LiquidacionesPage() {
     return [...out.values()].sort(
       (a, b) => Number(b.trabajo) - Number(a.trabajo) || b.servicios - a.servicios || a.ruta.localeCompare(b.ruta)
     );
-  }, [gruposVisibles, reservasPorId, cruceDe, nombreDelCruce, lado]);
+  }, [gruposVisibles, reservasPorId, cruceDe, nombreDelCruce, lado, rotuloCorto]);
 
   /** El desglose que se lee en la cabecera del bloque rojo, y el material del botón de limpieza. */
   const resumenFuera = useMemo(() => {
@@ -1518,6 +1576,22 @@ export default function LiquidacionesPage() {
                 </button>
               );
             })()}
+            {/* Las ETIQUETAS deciden los ítems (RUTA + TURNO + MÓVIL): con ellas un cambio de
+                horario deja de abrir otro ítem. En azul y no en rojo: no bloquea nada — lo que
+                no está etiquetado se sigue agrupando por el nombre, como siempre. */}
+            {reservasVisibles.length > 0 && (
+              <button onClick={() => setModalEtiquetas(true)}
+                title={etiquetasDisponibles === false
+                  ? `Falta correr ${SQL_ETIQUETAS} en Supabase para poder etiquetar`
+                  : "RUTA, TURNO y MÓVIL deciden los ítems de la liquidación: la hora ya no los separa"}
+                className={`px-3 py-2 rounded-xl text-sm font-bold border ${
+                  diasSinEtiqueta && etiquetasDisponibles !== false
+                    ? "text-sky-800 bg-sky-50 border-sky-200 hover:bg-sky-100"
+                    : "text-gray-600 bg-white hover:bg-gray-50"
+                }`}>
+                🏷 {diasSinEtiqueta ? `${diasSinEtiqueta} día(s) sin etiqueta de ítem` : "Etiquetas de ítem"}
+              </button>
+            )}
             {lado === "cliente" && rutasDelPeriodo.length > 0 && (
               <button onClick={() => setModalRutas(true)}
                 className={`px-3 py-2 rounded-xl text-sm font-bold border ${
@@ -1772,17 +1846,33 @@ export default function LiquidacionesPage() {
                                   {l.origen_contractual}
                                 </span>
                               )}
-                              {l.nombre_ida ?? l.ruta}
+                              {/* Un ítem ETIQUETADO se lee por sus etiquetas —es lo que se
+                                  imprime— y los nombres de ruta que reúne van debajo, en gris,
+                                  para ver qué horarios juntó. */}
+                              {l.etiquetas ? (
+                                <b className="text-[#075985]">🏷 {segmentosEtiquetas(l.etiquetas, l.moviles).join(" · ")}</b>
+                              ) : (
+                                l.nombre_ida ?? l.ruta
+                              )}
+                              {!l.etiquetas && etiquetasDisponibles && (
+                                <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full align-middle bg-gray-100 text-gray-400"
+                                      title="Este ítem se agrupa por el nombre de la ruta, que lleva la hora dentro: un cambio de horario lo parte. Ponle RUTA y TURNO con «🏷 Etiquetas de ítem».">
+                                  sin etiqueta
+                                </span>
+                              )}
                             </span>
+                            {l.etiquetas && l.nombre_ida && (
+                              <span className="block text-[11px] text-gray-400">{l.nombre_ida}{l.nombres_uniformes ? "" : " (y otras redacciones)"}</span>
+                            )}
                             {l.nombre_retorno && (
-                              <span className="block text-gray-500">↩ {l.nombre_retorno}</span>
+                              <span className={`block ${l.etiquetas ? "text-[11px] text-gray-400" : "text-gray-500"}`}>↩ {l.nombre_retorno}</span>
                             )}
                             <span className="block text-[11px] text-gray-400">
                               {deQuien.length > 0 && (
                                 <span className="font-bold text-gray-500">{deQuien.join(" + ")} · </span>
                               )}
                               {l.pax_contratado ? `${l.pax_contratado} PAX contratados` : "sin capacidad contratada"}
-                              {l.moviles > 1 ? ` · Móvil ${l.movil} de ${l.moviles}` : ""}
+                              {!l.etiquetas && l.moviles > 1 ? ` · Móvil ${l.movil} de ${l.moviles}` : ""}
                               {l.placas.length ? ` · ${l.placas.join(", ")}` : ""}
                             </span>
                             {unidadCorta && (
@@ -1797,8 +1887,8 @@ export default function LiquidacionesPage() {
                           <span className="text-xs text-gray-500 whitespace-nowrap">
                             <button
                               onClick={() => verServicios(
-                                l.nombre_ida ?? l.ruta,
-                                [g.contraparteNombre, l.nombre_retorno ? `↩ ${l.nombre_retorno}` : "", l.moviles > 1 ? `Móvil ${l.movil} de ${l.moviles}` : ""].filter(Boolean).join(" · "),
+                                l.etiquetas ? segmentosEtiquetas(l.etiquetas, l.moviles).join(" · ") : (l.nombre_ida ?? l.ruta),
+                                [g.contraparteNombre, l.nombre_retorno ? `↩ ${l.nombre_retorno}` : "", !l.etiquetas && l.moviles > 1 ? `Móvil ${l.movil} de ${l.moviles}` : ""].filter(Boolean).join(" · "),
                                 l.reservas_periodo
                               )}
                               className="underline decoration-dotted hover:text-gray-800 font-semibold"
@@ -1990,6 +2080,23 @@ export default function LiquidacionesPage() {
           onGuardado={(n) => {
             setModalEnlaces(null);
             setMsg(`✅ ${n} par(es) enlazado(s). Esos días vuelven a contarse como UN servicio con su ida y su retorno.`);
+            cargar();
+          }} />
+      )}
+      {modalEtiquetas && (
+        <ModalEtiquetas
+          titulo="Etiquetas del ítem · cierre del periodo"
+          subtitulo={`${fCorta(periodo.desde)} al ${fCorta(periodo.hasta)} · ${lado === "cliente" ? "al cliente" : "al proveedor"}${filtroContraparte ? " · con el filtro puesto" : ""}`}
+          // Lo que se ve (los filtros puestos): es lo que se está por liquidar. El contexto
+          // es el periodo entero, para que el turno se cuente con TODAS las salidas del día.
+          objetivo={reservasVisibles as unknown as TramoEtq[]}
+          contexto={reservas as unknown as TramoEtq[]}
+          nombreCliente={nombreCliente}
+          onCerrar={() => setModalEtiquetas(false)}
+          onGuardado={(n, detalle) => {
+            setModalEtiquetas(false);
+            setMsg(`✅ Etiquetas guardadas en ${n} servicio(s). Los ítems se rearman con ellas.${detalle}` +
+              " Los borradores que ya existían no cambian solos: ábrelos y usa «↻ Reagrupar ítems».");
             cargar();
           }} />
       )}

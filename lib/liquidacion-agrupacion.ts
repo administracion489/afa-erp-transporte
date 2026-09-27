@@ -34,6 +34,11 @@ import {
   etiquetaCortaDetalle,
   type FuenteEtiqueta as FuenteEtiquetaRuta,
 } from "@/lib/ruta-identidad";
+import {
+  etiquetasDelDia, claveEtiquetas, claveRutaTurno, totalMoviles, segmentosEtiquetas,
+  compararEtiquetas, movilEfectivo, rotuloEtiquetas,
+  type EtiquetasItem, type EtiquetasDelDia,
+} from "@/lib/liquidacion-etiquetas";
 
 // ── Entrada ─────────────────────────────────────────────────────────────────
 
@@ -108,6 +113,15 @@ export type ReservaLiq = {
    * exactamente como se comportaba antes.
    */
   paradas_json?: unknown;
+  /**
+   * Las ETIQUETAS del ítem (supabase/liquidaciones-04-etiquetas-item.sql): RUTA, TURNO y
+   * MÓVIL, escritas por una persona. Con RUTA y TURNO puestos, el día se agrupa por ellas
+   * y la HORA deja de partir el ítem; sin ellas, por el nombre como siempre. Ver
+   * lib/liquidacion-etiquetas.ts.
+   */
+  ruta_etiqueta?: string | null;
+  turno?: number | null;
+  movil?: number | null;
 };
 
 /**
@@ -323,6 +337,19 @@ function tramosDelPar(a: ReservaLiq, b?: ReservaLiq | null): { ida: ReservaLiq |
   const sb = sentidoDeReserva(b);
   if (sa === sb) return { ida: a, retorno: b };   // dato contradictorio: se respeta el orden recibido
   return sa === "IDA" ? { ida: a, retorno: b } : { ida: b, retorno: a };
+}
+
+/**
+ * Las ETIQUETAS del día (RUTA, TURNO, MÓVIL), leídas con la ida por delante.
+ *
+ * Son del DÍA, igual que los PAX: se escriben en los dos tramos y basta con que uno las
+ * lleve para que el día entero caiga en su ítem. Por eso se leen de la ida y el retorno
+ * por su SENTIDO —no de la cabeza, que es solo quien lleva el importe— y un retorno sin
+ * etiqueta cuya ida sí la tiene no parte el día en dos. Si los dos traen etiquetas
+ * distintas gana la ida y `analizarServicios` lo avisa.
+ */
+export function etiquetasDelPar(p: ParServicio): EtiquetasDelDia {
+  return etiquetasDelDia([p.ida, p.retorno, p.cabeza, ...p.adjuntas]);
 }
 
 /** Cómo se nombra un tramo en los avisos: "La ida del 03-08-2026". */
@@ -759,6 +786,21 @@ export function analizarServicios(
       });
     }
 
+    // La ida y el retorno son UN servicio y van en UN ítem, así que sus etiquetas tienen
+    // que decir lo mismo. Si no, gana la ida (igual que el PAX) — pero no en silencio: el
+    // retorno está diciendo que es de otro ítem, y alguien lo escribió así por algo.
+    {
+      const [ida, ret] = sentidoDeReserva(r) === "RETORNO" ? [par, r] : [r, par];
+      const conflicto = etiquetasDelDia([ida, ret]).conflicto;
+      if (conflicto)
+        res.avisos.push({
+          r: ret,
+          mensaje:
+            `La ida (${rotuloEtiquetas(conflicto.gana)}) y el retorno (${rotuloEtiquetas(conflicto.pierde)}) ` +
+            `tienen etiquetas distintas: el día va al ítem de la ida. Iguálalas con "🏷 Etiquetas".`,
+        });
+    }
+
     const mA = montoDe(r, lado);
     const mB = montoDe(par, lado);
 
@@ -963,6 +1005,11 @@ export type LineaAgrupada = {
   movil: number;
   /** Cuántas unidades simultáneas tiene la ruta. 1 = no se imprime ningún "MÓVIL". */
   moviles: number;
+  /**
+   * RUTA, TURNO y MÓVIL escritos por una persona, cuando el ítem se armó con ellos. null =
+   * ítem agrupado por el nombre de la ruta, como antes de que existieran las etiquetas.
+   */
+  etiquetas: EtiquetasItem | null;
   /** Todas las placas que cubrieron la ruta en el periodo. Van al detalle, nunca parten la línea. */
   placas: string[];
   /** Asientos CONTRATADOS. null = ninguna fuente lo sabe y el formato sale sin el "N PAX". */
@@ -1177,7 +1224,17 @@ export function agruparPorRutaContratada(
     if (!e) return "";
     return lugares.get(`${e.nombre}|${e.lat ?? ""}|${e.lng ?? ""}`) ?? `?${e.nombre}`;
   };
-  const extremos = (r: ReservaLiq | null) => (r ? `${lugarDe(r, "inicio")}→${lugarDe(r, "destino")}` : "");
+  // Sin NINGÚN extremo, el eje del mapa no sabe nada de ese tramo y devuelve "". Antes
+  // devolvía "→" —dos huecos con la flecha en medio—, que no es vacío: todos los tramos sin
+  // paraderos compartían esa misma firma y el mapa los UNÍA entre sí aunque fueran rutas
+  // distintas (RUTA A y RUTA B a la misma tarifa terminaban en un solo ítem). El eje del
+  // nombre sigue uniendo lo que se llama igual.
+  const extremos = (r: ReservaLiq | null) => {
+    if (!r) return "";
+    const a = lugarDe(r, "inicio");
+    const b = lugarDe(r, "destino");
+    return a || b ? `${a}→${b}` : "";
+  };
 
   const senas = new Map<ParServicio, SenasRuta>();
   for (const p of pares) {
@@ -1196,8 +1253,31 @@ export function agruparPorRutaContratada(
     });
   }
 
+  // ── Los días ETIQUETADOS no pasan por la unión ────────────────────────────
+  //
+  // Con RUTA y TURNO escritos, el ítem ya está decidido por una persona: se agrupan por
+  // sus etiquetas y nada más —ni el nombre, ni la hora, ni el mapa—, que es lo que el
+  // dueño pidió para que un cambio de horario no abra otro ítem. PERO SIEMPRE DENTRO DEL
+  // CUBO: la tarifa, el origen contractual, los PAX contratados y el falso flete siguen
+  // separando igual que antes, por la misma razón estructural (el formato imprime un solo
+  // unitario y un solo "N PAX" por ítem). Una etiqueta no puede fundir dos tarifas.
+  //
+  // Un día etiquetado y uno sin etiquetar NO se juntan aunque sean la misma ruta: el ERP no
+  // adivina a qué ítem va el que no dice nada, y el cierre avisa de cuántos faltan.
+  const etiquetasDe = new Map<ParServicio, EtiquetasItem | null>(
+    pares.map((p) => [p, etiquetasDelPar(p).etiquetas]));
+  const porEtiqueta = new Map<string, ParServicio[]>();
+  for (const p of pares) {
+    const e = etiquetasDe.get(p);
+    if (!e) continue;
+    const k = `${senas.get(p)!.dinero}#${claveEtiquetas(e)}`;
+    const ya = porEtiqueta.get(k);
+    if (ya) ya.push(p); else porEtiqueta.set(k, [p]);
+  }
+  const sinEtiqueta = pares.filter((p) => !etiquetasDe.get(p));
+
   // ── Conjuntos disjuntos ───────────────────────────────────────────────────
-  const padre = new Map<ParServicio, ParServicio>(pares.map((p) => [p, p]));
+  const padre = new Map<ParServicio, ParServicio>(sinEtiqueta.map((p) => [p, p]));
   const raiz = (p: ParServicio): ParServicio => {
     let r = p;
     while (padre.get(r) !== r) r = padre.get(r)!;
@@ -1215,7 +1295,7 @@ export function agruparPorRutaContratada(
   // duras —ni dos tarifas ni dos capacidades contratadas en el mismo ítem— son
   // estructurales, no algo que haya que recordar respetar.
   const cubos = new Map<string, ParServicio[]>();
-  for (const p of pares) {
+  for (const p of sinEtiqueta) {
     const k = senas.get(p)!.dinero;
     const ya = cubos.get(k);
     if (ya) ya.push(p); else cubos.set(k, [p]);
@@ -1297,12 +1377,12 @@ export function agruparPorRutaContratada(
   }
 
   const componentes = new Map<ParServicio, ParServicio[]>();
-  for (const p of pares) {
+  for (const p of sinEtiqueta) {
     const r = raiz(p);
     const ya = componentes.get(r);
     if (ya) ya.push(p); else componentes.set(r, [p]);
   }
-  return [...componentes.values()];
+  return [...porEtiqueta.values(), ...componentes.values()];
 }
 
 /**
@@ -1377,8 +1457,15 @@ export function agruparServicios(
     movil: number;
     moviles: number;
     filas: ParServicio[];
+    /** Las etiquetas del ítem, si sus días las llevan. null = ítem agrupado por el nombre. */
+    etiquetas: EtiquetasItem | null;
   };
   const buckets: Bucket[] = [];
+
+  // Cuántos móviles tiene cada RUTA + TURNO en este conjunto: el "DE N" de "MÓVIL 1 DE 2".
+  // Se deriva de lo escrito y sobre TODOS los pares, no solo sobre el ítem: el móvil 2 vive
+  // en otro ítem (otro renglón), y es justamente el que dice que el 1 no sale solo.
+  const movilesEtiquetados = totalMoviles(pares.map((p) => etiquetasDelPar(p).etiquetas));
 
   // Un bucket por RUTA CONTRATADA: ya no una por redacción del nombre. Ver
   // `agruparPorRutaContratada` — une por el nombre sin la hora O por los extremos en el
@@ -1426,8 +1513,28 @@ export function agruparServicios(
     // adicionales de la RUTA C, uno contratado por 4 asientos y dos por 10, reunidos en un
     // renglón que solo puede imprimir un número. La unión ya decidió qué va junto; volver a
     // agrupar aquí solo puede estropearlo.
+    const etiquetas = etiquetasDelPar(p).etiquetas;
+    if (etiquetas) {
+      // ÍTEM ETIQUETADO: lo decide lo que alguien escribió (RUTA, TURNO, MÓVIL), dentro del
+      // cubo de siempre. La clave lleva todo lo que lo separa —también los PAX y el falso
+      // flete— para no depender del desempate de abajo, y arranca en "ETQ|" para que una
+      // clave vieja por nombre nunca pueda confundirse con una nueva al reagrupar.
+      const pax = catalogo.paxContratadoDe?.(p) ?? null;
+      const clave = [
+        "ETQ", claveEtiquetas(etiquetas), `PAX${pax ?? "?"}`, precio.toFixed(2), origen,
+        ...(p.falsoFlete ? ["FF"] : []),
+      ].join("|");
+      buckets.push({
+        clave, ruta: etiquetas.ruta, fuenteRuta: "nombre", nombreIda, nombreRetorno, sentido, origen, precio,
+        movil: movilEfectivo(etiquetas),
+        moviles: movilesEtiquetados.get(claveRutaTurno(etiquetas)) ?? 1,
+        filas: [...componente],
+        etiquetas,
+      });
+      continue;
+    }
     const clave = [norm(nombreIda ?? ""), norm(nombreRetorno ?? ""), precio.toFixed(2), origen].join("|");
-    buckets.push({ clave, ruta, fuenteRuta, nombreIda, nombreRetorno, sentido, origen, precio, movil: 1, moviles: 1, filas: [...componente] });
+    buckets.push({ clave, ruta, fuenteRuta, nombreIda, nombreRetorno, sentido, origen, precio, movil: 1, moviles: 1, filas: [...componente], etiquetas: null });
   }
 
   // Dos ítems distintos pueden llegar a la misma clave —mismo nombre dominante, misma
@@ -1457,6 +1564,9 @@ export function agruparServicios(
   // sale con dos buses a las 05:10 queda en dos, que es como el cliente ya la firma.
   const finales: Bucket[] = [];
   for (const b of buckets) {
+    // Un ítem etiquetado ya trae su MÓVIL escrito: partirlo otra vez por simultaneidad
+    // sería volver a deducir lo que una persona acaba de decidir.
+    if (b.etiquetas) { finales.push(b); continue; }
     const porSalida = new Map<string, ParServicio[]>();
     for (const p of b.filas) {
       const k = `${p.cabeza.fecha_servicio ?? ""}|${String(p.cabeza.hora_servicio ?? "").slice(0, 5)}`;
@@ -1494,6 +1604,11 @@ export function agruparServicios(
       // no se prestó, y se lee al final contra todo lo que sí salió.
       Number(a.filas[0]?.falsoFlete ?? false) - Number(b.filas[0]?.falsoFlete ?? false) ||
       Number(a.origen !== "contrato") - Number(b.origen !== "contrato") ||
+      // Lo etiquetado primero y en orden natural (RUTA A · T1, T2… RUTA B…); lo que todavía
+      // se agrupa por el nombre, después y como siempre. Sin etiquetas los dos términos dan
+      // 0 y el orden es byte a byte el de antes.
+      Number(!a.etiquetas) - Number(!b.etiquetas) ||
+      compararEtiquetas(a.etiquetas, b.etiquetas) ||
       String(a.nombreIda ?? a.ruta).localeCompare(String(b.nombreIda ?? b.ruta)) ||
       String(a.nombreRetorno ?? "").localeCompare(String(b.nombreRetorno ?? "")) ||
       a.precio - b.precio ||
@@ -1551,6 +1666,7 @@ export function agruparServicios(
         totalMoviles: b.moviles,
         origen: b.origen,
         falsoFlete: esFF,
+        etiquetas: b.etiquetas,
       }),
       unidad_medida: "SERV.",
       cantidad_programada: b.filas.length,
@@ -1594,6 +1710,7 @@ export function agruparServicios(
       sentido: b.sentido,
       movil: b.movil,
       moviles: b.moviles,
+      etiquetas: b.etiquetas,
       placas,
       pax_contratado: pax,
       capacidad_minima_asignada: capacidadMinima,
@@ -1672,6 +1789,18 @@ export function descripcionLinea(p: {
   origen?: string | null;
   /** El día no se prestó y se paga el avance acordado. Manda sobre el rótulo del origen. */
   falsoFlete?: boolean;
+  /**
+   * Las ETIQUETAS del ítem. Con ellas la descripción es la que pidió el dueño, en UN
+   * renglón y sin horas:
+   *
+   *     TRANSPORTE DE PERSONAL / 50 PAX / DEL 01-09-2026 AL 30-09-2026 / RUTA A / TURNO 1
+   *
+   * Los nombres de cada tramo NO se imprimen ahí, y es deliberado: llevan la hora dentro
+   * ("ENTRADA 04:35"), así que un ítem que junta la semana de las 04:35 con la de las 05:00
+   * imprimiría una hora que es falsa para la mitad de sus servicios. La hora de cada día
+   * sigue en el Anexo 1, donde el cliente la verifica fila por fila.
+   */
+  etiquetas?: EtiquetasItem | null;
 }): string {
   // El rótulo va ADELANTE del concepto y en la primera línea. El formato ya pinta la
   // fila de otro color y la suma aparte, pero eso se pierde en cuanto alguien copia la
@@ -1684,6 +1813,19 @@ export function descripcionLinea(p: {
   const rotuloOrigen = p.falsoFlete
     ? "FALSO FLETE · SERVICIO CANCELADO CON ACUERDO DE AVANCE"
     : p.origen && p.origen !== "contrato" ? `SERVICIO ${norm(p.origen)}` : null;
+
+  // ÍTEM ETIQUETADO: una sola línea con barras. Aquí sí van barras, porque ningún
+  // segmento trae barras propias (el nombre de ruta, que sí las trae, no se imprime).
+  if (p.etiquetas)
+    return [
+      rotuloOrigen,
+      `${p.concepto || "TRANSPORTE DE PERSONAL"}${p.sede ? " " + norm(p.sede) : ""}`,
+      // Sin capacidad contratada NO se escribe nada: ver `paxContratadoDe`.
+      p.pax ? `${p.pax} PAX` : null,
+      p.desde && p.hasta ? `DEL ${fechaFormato(p.desde)} AL ${fechaFormato(p.hasta)}` : null,
+      ...segmentosEtiquetas(p.etiquetas, p.totalMoviles ?? 1),
+    ].filter(Boolean).join(" / ");
+
   const cabecera = [
     rotuloOrigen,
     `${p.concepto || "TRANSPORTE DE PERSONAL"}${p.sede ? " " + norm(p.sede) : ""}`,

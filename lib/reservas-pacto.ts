@@ -117,6 +117,10 @@ export type TramoHermano = {
    */
   capacidad_contratada?: number | null;
   ruta_nombre?: string | null;
+  /** Las etiquetas del ítem (RUTA, TURNO, MÓVIL): del día, igual que los PAX. */
+  ruta_etiqueta?: string | null;
+  turno?: number | null;
+  movil?: number | null;
 } | null;
 
 const esRetorno = (d?: string | null) => String(d ?? "").toLowerCase() === "retorno";
@@ -352,6 +356,9 @@ const COLUMNAS_OPCIONALES: Record<string, { sql: string; que: string }> = {
     sql: "supabase/reservas-05-falso-flete.sql",
     que: "el motivo del falso flete",
   },
+  ruta_etiqueta: { sql: "supabase/liquidaciones-04-etiquetas-item.sql", que: "la etiqueta de RUTA del ítem" },
+  turno:         { sql: "supabase/liquidaciones-04-etiquetas-item.sql", que: "el TURNO del ítem" },
+  movil:         { sql: "supabase/liquidaciones-04-etiquetas-item.sql", que: "el MÓVIL del ítem" },
 };
 
 /**

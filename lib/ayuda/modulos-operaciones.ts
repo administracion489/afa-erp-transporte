@@ -84,9 +84,15 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       "Cargar el manifiesto (los pasajeros y sus paraderos) y mandárselo al conductor y a los pasajeros.",
       "Ver en qué estado está cada servicio y qué le falta para cerrarse administrativamente.",
       "Vigilar el sobrecupo: más pasajeros que asientos.",
+      "Etiquetar RUTA, TURNO y MÓVIL (🏷): deciden en qué ítem de la liquidación va cada servicio.",
     ],
     conceptos: ["estado_admin", "estado_proveedor", "tercerizado", "margen", "liquidacion_cliente", "servicio_adicional"],
     faqs: [
+      {
+        pregunta: "¿Qué es el chip azul «🏷 RUTA A · T1 · 50 PAX» y cómo lo pongo?",
+        respuesta:
+          "Son las **etiquetas del ítem de la liquidación**. Deciden en qué renglón del formato va el servicio: todos los que tienen la misma **RUTA, TURNO y MÓVIL** (y los mismos PAX contratados y tarifa) van en **un solo ítem**, aunque cambie la hora. El turno 1 que sale a las 04:35 una semana y a las 05:00 la siguiente suma en el mismo.\n\n• **RUTA** — «RUTA A», «RUTA B»… Si escribes solo «A», queda «RUTA A».\n• **TURNO** — 1 es la salida más temprana de esa ruta, 2 la siguiente.\n• **MÓVIL** — solo cuando salen **dos buses a la vez** en la misma ruta y turno. Si sale uno, se deja vacío.\n• **PAX** — no se escribe: sale solo de los PAX contratados.\n\nTres formas de ponerlas, sin rellenar una por una:\n\n• **Muchos a la vez:** marca las filas (filtra por la ruta y las fechas y usa «Seleccionar todos») → **🏷 Etiquetar ítem**. El ERP propone la RUTA desde el nombre y el TURNO por el orden de salida de cada día; revisas por grupos y guardas.\n• **Al generar un programa fijo:** el generador trae el bloque «Ítem de la liquidación»: la RUTA ya viene del nombre, escribes el TURNO y los servicios nacen etiquetados (con varios vehículos, cada uno como MÓVIL 1, 2…).\n• **Uno solo:** en el formulario del servicio, bloque «🏷 Ítem de la liquidación». Te muestra la sugerencia del ERP con un clic para usarla.\n\nSe guardan en la ida **y** el retorno del día. No cambian ningún importe.",
+      },
       {
         pregunta: "¿Qué significa cada estado y cómo avanza un servicio?",
         respuesta:
@@ -331,9 +337,15 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       "Ver cuántos pasajeros abordaron contra cuántos estaban en el manifiesto.",
       "Imprimir el Manifiesto MTC y el Reporte de Servicio de cada viaje.",
       "Detectar servicios finalizados que nunca arrancaron su cierre administrativo.",
+      "Etiquetar RUTA, TURNO y MÓVIL de los servicios del día (🏷 Etiquetas): deciden los ítems de la liquidación.",
     ],
     conceptos: ["estado_admin", "conformidad", "liquidacion_cliente", "tercerizado"],
     faqs: [
+      {
+        pregunta: "¿Qué es el botón «🏷 Etiquetas» y el chip azul debajo de la ruta?",
+        respuesta:
+          "El chip («🏷 RUTA A · T1 · 50 PAX») dice en qué **ítem de la liquidación** va ese servicio: todos los que comparten RUTA, TURNO y MÓVIL (con los mismos PAX contratados y tarifa) se cobran en un solo renglón, aunque cambie la hora.\n\nEl botón **🏷 Etiquetas** abre la propuesta del ERP para los servicios que estás viendo: la RUTA sale del nombre («RUTA A/ …») y el TURNO del orden de salida del día (la más temprana es el 1). Revisas por grupos y guardas; se escriben en la ida y el retorno. Si filtras primero (por ejemplo, buscando «RUTA C»), solo se etiquetan esos.\n\nPara etiquetar semanas o meses de una vez es más cómodo hacerlo desde **Programación** o desde el cierre de **Liquidaciones**, que ven varios días juntos.",
+      },
       {
         pregunta: "El panel de Puntualidad, ¿qué me está diciendo exactamente?",
         respuesta:

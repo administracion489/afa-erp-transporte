@@ -35,6 +35,10 @@ import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxContratado,
 } from "@/lib/liquidacion-rutas";
 import { guardarReservas } from "@/lib/reservas-pacto";
+import {
+  etiquetasDeTramo, claveEtiquetas, claveRutaTurno, totalMoviles,
+  type EtiquetasItem,
+} from "@/lib/liquidacion-etiquetas";
 
 export type Lado = "cliente" | "proveedor";
 
@@ -433,19 +437,72 @@ export async function crearLiquidaciones(
 
 const COLS_RECALCULO =
   "id,codigo,fecha_servicio,hora_servicio,estado,cliente_id,cliente_sede_id,ruta_nombre," +
-  "direccion_servicio,origen,destino,reserva_vinculada_id,cotizacion_id,capacidad_contratada," +
+  "direccion_servicio,origen,destino,reserva_vinculada_id,cotizacion_id," +
   "precio_cliente,costo_proveedor,vehiculo_id,vehiculo_tercero_id";
 
-/** La agrega supabase/reservas-04: se pide aparte para no romper el recálculo si falta. */
-const COL_ORIGEN_CONTRACTUAL = "origen_contractual";
+/**
+ * Columnas de `reservas` que solo existen con una migración ACCESORIA corrida. Se piden
+ * junto a las de siempre y, si la base no las tiene, se suelta SOLO la que el error NOMBRA
+ * (misma regla que `COLUMNAS_OPCIONALES` en lib/reservas-pacto.ts).
+ *
+ *   capacidad_contratada        → liquidaciones-03 (el "N PAX" contratado)
+ *   origen_contractual          → reservas-04 (el subtotal de adicionales)
+ *   falso_flete, _motivo        → reservas-05. NO es decorativa: sin ella `montoDe` lee toda
+ *                                 cancelación como S/ 0.00, y una línea de FALSO FLETE se
+ *                                 recalcularía a cero y al reagrupar desaparecería.
+ *   ruta_etiqueta, turno, movil → liquidaciones-04 (las etiquetas del ítem)
+ *
+ * Antes esto era una cascada de combinaciones fijas escrita a mano en cada lector; con
+ * cuatro migraciones accesorias las combinaciones ya no caben en una cascada, y dejar una
+ * fuera es quedarse sin leer justo el dato que sí estaba.
+ */
+const OPCIONALES_RESERVA = [
+  "capacidad_contratada",
+  "origen_contractual",
+  "falso_flete", "falso_flete_motivo",
+  "ruta_etiqueta", "turno", "movil",
+];
 
 /**
- * La agrega supabase/reservas-05. Aquí NO es decorativa: sin ella `montoDe` lee toda
- * cancelación como S/ 0.00, así que una línea de FALSO FLETE se recalcularía a cero y al
- * reagrupar desaparecería del documento. Por eso las accesorias se sueltan de a una y en
- * orden: primero se intenta con las dos, y solo se renuncia a la que de verdad falte.
+ * Lee reservas por id con las columnas `base` más todas las accesorias que la base tenga.
+ * Una accesoria que falta se suelta y se sigue; si el error no nombra ninguna, se intenta
+ * con lo mínimo (`base`) y después con `respaldo`, que es como se comportaba la cascada.
  */
-const COL_FALSO_FLETE = "falso_flete,falso_flete_motivo";
+async function leerReservasPorIds(sb: any, base: string, ids: number[], respaldo?: string): Promise<any[]> {
+  const out: any[] = [];
+  let opcionales = [...OPCIONALES_RESERVA];
+  let cols = base;
+  for (let i = 0; i < ids.length; i += 300) {
+    const trozo = ids.slice(i, i + 300);
+    for (;;) {
+      const r = await sb.from("reservas").select([cols, ...opcionales].join(",")).in("id", trozo);
+      if (!r.error) { out.push(...((r.data as any[]) ?? [])); break; }
+      const msg = String(r.error.message ?? r.error);
+      const falta = opcionales.find((c) => new RegExp(`\\b${c}\\b`, "i").test(msg));
+      if (falta) { opcionales = opcionales.filter((c) => c !== falta); continue; }
+      if (opcionales.length) { opcionales = []; continue; }
+      if (respaldo && cols !== respaldo) { cols = respaldo; continue; }
+      throw new Error(`no se pudieron leer los servicios: ${msg}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Las etiquetas de una LÍNEA ya creada, desde las reservas de su puente: las del ítem si
+ * todos sus tramos etiquetados dicen lo mismo; null si ninguno está etiquetado o si
+ * mezclan etiquetas distintas (la línea es de antes, o se re-etiquetó después de crearla:
+ * lo que hace falta ahí es "↻ Reagrupar ítems", no reescribir el texto).
+ */
+function etiquetasDeLinea(filas: ReservaLiq[]): { etiquetas: EtiquetasItem | null; mezcla: boolean } {
+  const vistas = new Map<string, EtiquetasItem>();
+  for (const r of filas) {
+    const e = etiquetasDeTramo(r);
+    if (e) vistas.set(claveEtiquetas(e), e);
+  }
+  if (vistas.size === 1) return { etiquetas: [...vistas.values()][0], mezcla: false };
+  return { etiquetas: null, mezcla: vistas.size > 1 };
+}
 
 /** El nombre de ruta que más veces aparece en un conjunto de tramos. */
 function nombreMasFrecuente(filas: ReservaLiq[]): string | null {
@@ -479,13 +536,18 @@ function nombreMasFrecuente(filas: ReservaLiq[]): string | null {
  * `opts.lineas` la acota a esas líneas. Lo usa `actualizarPaxContratado`: al cambiar el
  * pax de UN renglón hay que rehacer SU texto (lleva el «N PAX» adentro) sin pisar las
  * descripciones que alguien haya ajustado a mano en los otros.
+ *
+ * Una línea cuyos servicios llevan las MISMAS etiquetas (RUTA, TURNO, MÓVIL) se reescribe
+ * con el formato de etiquetas; una que MEZCLA etiquetas distintas conserva el formato por
+ * nombre y se cuenta en `mezcladas`: ahí no falta reescribir el texto, falta partir el
+ * renglón, y eso es "↻ Reagrupar ítems".
  */
 export async function recalcularDescripciones(
   sb: any,
   lado: Lado,
   id: number,
   opts?: { usuario?: string | null; lineas?: number[] }
-): Promise<{ ok: boolean; actualizadas?: number; sinPax?: number; error?: string }> {
+): Promise<{ ok: boolean; actualizadas?: number; sinPax?: number; mezcladas?: number; error?: string }> {
   try {
     const t = T[lado];
     const { data: cab } = await sb.from(t.cab).select("*").eq("id", id).maybeSingle();
@@ -503,31 +565,26 @@ export async function recalcularDescripciones(
     // una de ellas (lleva `agrupacion_clave`); una adicional escrita a mano en el editor
     // no lo es, y reescribirle la descripción borraría lo que alguien tecleó.
     const soloEstas = opts?.lineas?.length ? new Set(opts.lineas.map(Number)) : null;
-    const lineas = ((lineasRaw as any[]) ?? []).filter(
+    const todasLineas = ((lineasRaw as any[]) ?? []);
+    const lineas = todasLineas.filter(
       (l) => (l.tipo === "servicio" || (l.tipo === "adicional" && l.agrupacion_clave))
           && (!soloEstas || soloEstas.has(Number(l.id)))
     );
-    if (!lineas.length) return { ok: true, actualizadas: 0, sinPax: 0 };
+    if (!lineas.length) return { ok: true, actualizadas: 0, sinPax: 0, mezcladas: 0 };
 
-    // Puente línea ↔ reserva, por lotes: un periodo largo pasa del corte de PostgREST.
-    const lineaIds = lineas.map((l) => Number(l.id));
+    // Puente línea ↔ reserva, por lotes: un periodo largo pasa del corte de PostgREST. Se
+    // lee el del documento ENTERO aunque solo se reescriba una línea: el "DE N" de
+    // "MÓVIL 1 DE 2" se cuenta sobre todos los renglones, y el móvil 2 vive en otro.
+    const lineaIds = todasLineas.map((l) => Number(l.id));
     const puente: any[] = [];
     for (let i = 0; i < lineaIds.length; i += 100) {
       const { data } = await sb.from(t.puente).select("linea_id,reserva_id").in("linea_id", lineaIds.slice(i, i + 100));
       puente.push(...((data as any[]) ?? []));
     }
     const reservaIds = [...new Set(puente.map((p) => Number(p.reserva_id)))];
-    const reservas: any[] = [];
-    for (let i = 0; i < reservaIds.length; i += 300) {
-      const trozo = reservaIds.slice(i, i + 300);
-      let r = await sb.from("reservas")
-        .select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL},${COL_FALSO_FLETE}`).in("id", trozo);
-      if (r.error) r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
-      if (r.error) r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_FALSO_FLETE}`).in("id", trozo);
-      if (r.error) r = await sb.from("reservas").select(COLS_RECALCULO).in("id", trozo);
-      reservas.push(...((r.data as any[]) ?? []));
-    }
+    const reservas = await leerReservasPorIds(sb, COLS_RECALCULO, reservaIds);
     const porId = new Map<number, ReservaLiq>(reservas.map((r) => [Number(r.id), r as ReservaLiq]));
+    const movilesDoc = totalMoviles(reservas.map((r) => etiquetasDeTramo(r)));
 
     // Contexto de la cascada del pax contratado.
     const [catalogo, paxCotizacion, sedeR] = await Promise.all([
@@ -544,6 +601,7 @@ export async function recalcularDescripciones(
 
     let actualizadas = 0;
     let sinPax = 0;
+    let mezcladas = 0;
 
     for (const l of lineas) {
       const filas = puente
@@ -551,6 +609,8 @@ export async function recalcularDescripciones(
         .map((p) => porId.get(Number(p.reserva_id)))
         .filter(Boolean) as ReservaLiq[];
       if (!filas.length) continue;
+      const { etiquetas, mezcla } = etiquetasDeLinea(filas);
+      if (mezcla) mezcladas += 1;
 
       const idas = filas.filter((r) => sentidoDeReserva(r) === "IDA");
       const retornos = filas.filter((r) => sentidoDeReserva(r) === "RETORNO");
@@ -608,6 +668,10 @@ export async function recalcularDescripciones(
         // diciendo "servicio" y el importe sumaba bajo Servicios del periodo. Crear y
         // recalcular daban dos textos distintos para la misma línea.
         origen: origenDeTramos(filas, lado),
+        // Con etiquetas, el texto es el de la agrupación por etiquetas —mismo formato que
+        // al crear—, y el "DE N" se cuenta sobre el documento entero.
+        etiquetas,
+        ...(etiquetas ? { totalMoviles: movilesDoc.get(claveRutaTurno(etiquetas)) ?? 1 } : {}),
       });
       if (descripcion === l.descripcion) continue;
 
@@ -624,10 +688,11 @@ export async function recalcularDescripciones(
     await registrarEvento(sb, lado, id, "descripciones_recalculadas", {
       detalle:
         `${actualizadas} de ${lineas.length} línea(s) reescrita(s)` +
-        (sinPax ? ` · ${sinPax} sin capacidad contratada: salen sin el "N PAX"` : ""),
+        (sinPax ? ` · ${sinPax} sin capacidad contratada: salen sin el "N PAX"` : "") +
+        (mezcladas ? ` · ${mezcladas} mezclan etiquetas distintas: hay que reagrupar` : ""),
       usuario: opts?.usuario ?? undefined,
     });
-    return { ok: true, actualizadas, sinPax };
+    return { ok: true, actualizadas, sinPax, mezcladas };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   }
@@ -819,7 +884,7 @@ export type ResultadoResincronizacion = {
  */
 const COLS_REAGRUPAR =
   "id,codigo,fecha_servicio,hora_servicio,estado,cliente_id,cliente_sede_id,ruta_nombre," +
-  "direccion_servicio,origen,destino,reserva_vinculada_id,cotizacion_id,capacidad_contratada," +
+  "direccion_servicio,origen,destino,reserva_vinculada_id,cotizacion_id," +
   "precio_cliente,costo_proveedor,vehiculo_id,vehiculo_tercero_id,empresa_tercerizada_id," +
   "tipo_asignacion,paradas_json";
 
@@ -906,20 +971,9 @@ export async function reagruparLineas(
     const reservaIds = [...new Set(puente.map((p) => Number(p.reserva_id)))];
     if (!reservaIds.length) throw new Error("Las líneas de este documento no tienen servicios detrás: no hay nada que reagrupar.");
 
-    const reservas: any[] = [];
-    for (let i = 0; i < reservaIds.length; i += 300) {
-      const trozo = reservaIds.slice(i, i + 300);
-      // Igual que en el recálculo: las columnas accesorias se sueltan si su migración no
-      // se corrió, en vez de dejar el documento sin poder reagruparse.
-      let r = await sb.from("reservas")
-        .select(`${COLS_REAGRUPAR},${COL_ORIGEN_CONTRACTUAL},${COL_FALSO_FLETE}`).in("id", trozo);
-      if (r.error) r = await sb.from("reservas").select(`${COLS_REAGRUPAR},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
-      if (r.error) r = await sb.from("reservas").select(`${COLS_REAGRUPAR},${COL_FALSO_FLETE}`).in("id", trozo);
-      if (r.error) r = await sb.from("reservas").select(COLS_REAGRUPAR).in("id", trozo);
-      if (r.error) r = await sb.from("reservas").select(COLS_RESINCRONIZAR).in("id", trozo);
-      if (r.error) throw new Error(`no se pudieron leer los servicios: ${r.error.message}`);
-      reservas.push(...((r.data as any[]) ?? []));
-    }
+    // Igual que en el recálculo: las columnas accesorias —las etiquetas incluidas— se
+    // sueltan si su migración no se corrió, en vez de dejar el documento sin reagruparse.
+    const reservas = await leerReservasPorIds(sb, COLS_REAGRUPAR, reservaIds, COLS_RESINCRONIZAR);
 
     // ── El mismo contexto que usa la pantalla de cierre ───────────────────
     const [catalogoRutas, paxCotizacion, sedeR, veh, vehT] = await Promise.all([
