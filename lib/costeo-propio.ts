@@ -339,3 +339,44 @@ export function escenariosPrecio(
     precioPaxSinIgv: sin.est / asientos,
   };
 }
+
+// ── Piso por hora ─────────────────────────────────────────────────────────────
+
+/**
+ * PRECIO MÍNIMO POR HORA · el costeo por km se queda corto en los servicios cortos.
+ *
+ * Un city tour en bus de 50 pax recorre pocos km y ocupa la unidad todo el día: el
+ * mercado lo cobra por TIEMPO (un proveedor le cobró a AFA S/ 180/hora). Costeado por
+ * km sale muy por debajo, porque el km no mide lo que se está vendiendo.
+ *
+ * `tarifaHora` es un PRECIO sin IGV (margen incluido), no un costo: por eso el piso se
+ * aplica a los tres escenarios DESPUÉS del margen y nunca toca `baseCosto`. Mezclarlo
+ * con el costo haría que el margen se cobrara dos veces sobre él.
+ *
+ * Solo SUBE un precio, nunca lo baja: si el costeo por km ya da más (un viaje largo),
+ * el piso no hace nada. Sin horas o sin tarifa, no hay piso (null/0 = sin dato, no un
+ * precio de cero).
+ */
+export function aplicarPisoHora(
+  e: EscenariosPrecio,
+  capacidad: number,
+  horas: number,
+  tarifaHora: number | null | undefined,
+  igvPct = POLITICA_DEFECTO.igvPct,
+): EscenariosPrecio & { piso: number; pisoAplica: { min: boolean; est: boolean; alto: boolean } } {
+  const piso = horas > 0 && (tarifaHora ?? 0) > 0 ? horas * (tarifaHora as number) : 0;
+  const aplica = { min: e.sinIgv.min < piso, est: e.sinIgv.est < piso, alto: e.sinIgv.alto < piso };
+  if (!piso) return { ...e, piso: 0, pisoAplica: aplica };
+  const sin = {
+    min: Math.max(e.sinIgv.min, piso),
+    est: Math.max(e.sinIgv.est, piso),
+    alto: Math.max(e.sinIgv.alto, piso),
+  };
+  const con = { min: conIgv(sin.min, igvPct), est: conIgv(sin.est, igvPct), alto: conIgv(sin.alto, igvPct) };
+  const asientos = Math.max(capacidad || 1, 1);
+  return {
+    sinIgv: sin, conIgv: con,
+    precioPax: con.est / asientos, precioPaxSinIgv: sin.est / asientos,
+    piso, pisoAplica: aplica,
+  };
+}

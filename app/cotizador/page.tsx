@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { calcularCostoUnidad, escenariosPrecio, recorridoSugerido, RECORRIDO_CARRETERA, type ParametrosUnidad, type Recorrido } from "@/lib/costeo-propio";
+import { calcularCostoUnidad, escenariosPrecio, aplicarPisoHora, recorridoSugerido, RECORRIDO_CARRETERA, type ParametrosUnidad, type Recorrido } from "@/lib/costeo-propio";
 import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
 import {
   NIVELES, NIVEL_CFG, equipamientoDeNivel, nivelDeFicha, fichasDelNivel, planDeNivel,
@@ -24,6 +24,8 @@ type ParamCosto = {
   vida_util_anios:number; km_anio:number;
   seguro_anual:number; soat_anual:number; revision_semestral:number;
   permisos_anual:number; otros_fijos_mensual:number; conductor_dia:number;
+  /** Precio mínimo por hora, sin IGV (supabase/costos-06). Ausente/null = sin piso. */
+  tarifa_hora_minima?:number|null;
 };
 
 type Resultado = {
@@ -38,6 +40,8 @@ type Resultado = {
   precioPax20:number; precioPax20Sin:number;
   diaEst:number; diaEstIGV:number; diaMinIGV:number; diaAltoIGV:number;
   mesEst:number; mesEstIGV:number;
+  /** Piso por hora (sin IGV) y si levantó el precio objetivo. 0 = no hay piso. */
+  pisoHora:number; pisoAplicaEst:boolean;
 };
 
 type PlaceResult = { address:string; lat:number; lng:number; placeId:string; };
@@ -73,10 +77,10 @@ type DiaPlan = {
 
 const MESES_DIAS = 26;   // días facturables de un mes de servicio fijo
 
-function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number, peajes:number, otros:number, pernocte:number, viaticos:number, recorrido:Recorrido="urbano"):Resultado|null {
+function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number, peajes:number, otros:number, pernocte:number, viaticos:number, recorrido:Recorrido="urbano", horas=0):Resultado|null {
   const c = calcularCostoUnidad(p as ParametrosUnidad, pr, { km, dias, peajes, otros, pernocte, viaticos, recorrido });
   if (!c) return null;
-  const e = escenariosPrecio(c.baseCosto, p.capacidad);
+  const e = aplicarPisoHora(escenariosPrecio(c.baseCosto, p.capacidad), p.capacidad, horas, p.tarifa_hora_minima);
   return {
     costoCombustible:c.costoCombustible, costoNeumaticos:c.costoNeumaticos,
     costoMantenimiento:c.costoMantenimiento, costoDeprec:c.costoDeprec,
@@ -90,6 +94,7 @@ function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number
     diaEst:e.sinIgv.est, diaEstIGV:e.conIgv.est,
     diaMinIGV:e.conIgv.min, diaAltoIGV:e.conIgv.alto,
     mesEst:e.sinIgv.est * MESES_DIAS, mesEstIGV:e.conIgv.est * MESES_DIAS,
+    pisoHora:e.piso, pisoAplicaEst:e.pisoAplica.est,
   };
 }
 
@@ -898,6 +903,7 @@ export default function CotizadorPage(){
   const [tipoServFj,setTipoServFj]=useState("transporte_personal");
   const [peajes,    setPeajes]    =useState(24);
   const [otros,     setOtros]     =useState(0);
+  const [horas,     setHoras]     =useState(0);
   const [dias,      setDias]      =useState(1);
   /** null = seguir la sugerencia por km/día; un valor = lo eligió una persona. */
   const [recorridoElegido,setRecorridoElegido]=useState<Recorrido|null>(null);
@@ -960,12 +966,12 @@ export default function CotizadorPage(){
 
   const resultado=useMemo(()=>{
     if(!veh||kmRuta<=0)return null;
-    return calcular(veh,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido);
-  },[veh,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido]);
+    return calcular(veh,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido,horas);
+  },[veh,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido,horas]);
 
   const comparativo=useMemo(()=>
-    flota.map(v=>({v,r:kmRuta>0?calcular(v,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido):null})),
-    [flota,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido]
+    flota.map(v=>({v,r:kmRuta>0?calcular(v,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido,horas):null})),
+    [flota,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido,horas]
   );
 
   const handleRutaUpdate=useCallback((km:number,meta:any)=>{
@@ -1134,6 +1140,17 @@ export default function CotizadorPage(){
                   {recorridoElegido!==null&&<button onClick={()=>setRecorridoElegido(null)} className="ml-1 text-blue-500 hover:underline font-bold">↺ Usar sugerido</button>}
                 </p>
               </div>
+              <div>
+                <label className="text-[10px] font-bold text-gray-400 uppercase block mb-1.5">Horas de servicio (precio mínimo)</label>
+                <input type="number" min={0} step={0.5} value={horas||""} placeholder="0 = no aplicar" onChange={e=>setHoras(Math.max(0,Number(e.target.value)||0))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] text-center"/>
+                <p className="text-[10px] text-gray-400 mt-1.5">
+                  {horas<=0?"Para city tours y disposiciones: el precio no baja de horas × tarifa mínima de la unidad."
+                    :!veh?"":!(veh.tarifa_hora_minima&&veh.tarifa_hora_minima>0)
+                      ?<span className="text-amber-600 font-bold">{veh.nombre} no tiene precio mínimo por hora: se llena en Configuración → Costos → Mano de obra.</span>
+                      :`Piso: ${horas} h × ${fmt(veh.tarifa_hora_minima)} = ${fmt(horas*veh.tarifa_hora_minima)} sin IGV.`}
+                </p>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 {[{l:"Peajes S/",v:peajes,s:setPeajes},{l:"Otros S/",v:otros,s:setOtros}].map(fi=>(
                   <div key={fi.l}><label className="text-[10px] font-bold text-gray-400 uppercase block mb-1.5">{fi.l}</label><input type="number" value={fi.v} onChange={e=>fi.s(Number(e.target.value))} min={0} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] text-center"/></div>
@@ -1245,6 +1262,7 @@ export default function CotizadorPage(){
                         </p>
                         <p className="text-[11px] text-gray-400 mt-1">Con IGV: {fmt(k.val)}</p>
                         {k.label.includes("20%")&&<p className="text-[10px] text-green-600 font-bold mt-0.5">S/ {fmtN(resultado.precioPax20Sin,0)}/pax</p>}
+                        {resultado.pisoHora>0&&Math.abs(k.sinIgv-resultado.pisoHora)<0.005&&<p className="text-[10px] text-amber-600 font-bold mt-0.5">⏱ Precio mínimo por hora ({horas} h)</p>}
                       </div>
                     ))}
                   </div>

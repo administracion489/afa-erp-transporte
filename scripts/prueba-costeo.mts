@@ -9,7 +9,7 @@
 // La referencia de abajo es una copia LITERAL de la función original, tal como estaba
 // antes del cambio. No se toca ni se "mejora": está aquí para discrepar.
 
-import {
+import { aplicarPisoHora, escenariosPrecio as escP,
   calcularCostoUnidad, escenariosPrecio,
   type ParametrosUnidad, type PreciosCombustible,
 } from "../lib/costeo-propio";
@@ -170,6 +170,18 @@ console.log("\n── Recorrido urbano / carretera ──");
   ok(cont.costoDeprec === 312, "la depreciación contable sigue por km en carretera");
   ok(car.baseCosto < sin.baseCosto, "un día largo en carretera cuesta menos que costeado como urbano",
      `${car.baseCosto.toFixed(2)} vs ${sin.baseCosto.toFixed(2)}`);
+}
+
+console.log("\n── Piso por hora ──");
+{
+  const e = escP(1000, 50);
+  const p = aplicarPisoHora(e, 50, 8, 180);
+  ok(p.sinIgv.min === 1440 && p.sinIgv.est === 1440 && Math.abs(p.sinIgv.alto - 1440) < 1e-9 && p.pisoAplica.est, "8 h × 180 levanta los precios bajos a 1 440");
+  ok(Math.abs(p.conIgv.est - 1440 * 1.18) < 1e-9, "el con IGV se rehace desde el piso");
+  const alto = aplicarPisoHora(escP(5000, 50), 50, 8, 180);
+  ok(alto.sinIgv.est === escP(5000, 50).sinIgv.est && !alto.pisoAplica.est, "el piso nunca baja un precio");
+  ok(JSON.stringify(aplicarPisoHora(e, 50, 0, 180).sinIgv) === JSON.stringify(e.sinIgv), "sin horas no hay piso");
+  ok(JSON.stringify(aplicarPisoHora(e, 50, 8, null).sinIgv) === JSON.stringify(e.sinIgv), "sin tarifa no hay piso");
 }
 
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);

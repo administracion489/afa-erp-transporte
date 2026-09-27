@@ -37,7 +37,7 @@ type ParamCosto = {
   vida_util_anios:number; km_anio:number;
   seguro_anual:number; soat_anual:number; revision_semestral:number;
   permisos_anual:number; otros_fijos_mensual:number;
-  conductor_dia:number; updated_at:string; updated_by:string|null;
+  conductor_dia:number; tarifa_hora_minima?:number|null; updated_at:string; updated_by:string|null;
 };
 type Historial = {
   id:number; tabla_origen:string; tipo_vehiculo:string|null; tipo_combustible:string|null;
@@ -68,6 +68,9 @@ const CAMPOS_EDIT: {key:keyof ParamCosto;label:string;grupo:string;unidad:string
   {key:"permisos_anual",     label:"Permisos",           grupo:"Seguros y fijos", unidad:"S/año",    step:100},
   {key:"otros_fijos_mensual",label:"Otros fijos",        grupo:"Seguros y fijos", unidad:"S/mes",    step:50},
   {key:"conductor_dia",      label:"Conductor",          grupo:"Mano de obra",    unidad:"S/día",    step:10},
+  // Es un PRECIO de mercado (sin IGV), no un costo: el cotizador lo usa como piso en city
+  // tours y disposiciones. Columna de supabase/costos-06 (0/vacío = sin piso).
+  {key:"tarifa_hora_minima", label:"Precio mín. / hora", grupo:"Mano de obra",    unidad:"S/h s/IGV",step:10, desc:"Piso del precio para servicios que se cobran por tiempo (city tour)"},
 ];
 const GRUPOS_CAMPOS = [...new Set(CAMPOS_EDIT.map(c=>c.grupo))];
 
@@ -744,7 +747,7 @@ export default function AjustesCostosPage() {
                             <td className="px-3 py-2.5 text-center">
                               {p.usa_urea?<span className="text-[10px] font-black text-cyan-700 bg-cyan-50 border border-cyan-200 px-2 py-0.5 rounded-full">🧪 Activa</span>:<span className="text-[10px] text-gray-300">—</span>}
                             </td>
-                            {camposGrupo.map(c=><td key={c.key} className="px-3 py-2"><CeldaEditable valor={p[c.key] as number} campo={c.key} vehId={p.tipo_vehiculo} unidad={c.unidad} step={c.step} onGuardado={(campo,vN,vA)=>guardarParam(p.tipo_vehiculo,campo,vN,vA)}/></td>)}
+                            {camposGrupo.map(c=><td key={c.key} className="px-3 py-2"><CeldaEditable valor={(p[c.key] as number)??0} campo={c.key} vehId={p.tipo_vehiculo} unidad={c.unidad} step={c.step} onGuardado={(campo,vN,vA)=>guardarParam(p.tipo_vehiculo,campo,vN,vA)}/></td>)}
                             {/* NO hay botón de aplicar en la celda. `CeldaEditable` guarda en
                                 `onBlur`, así que un botón pegado al lado invita al clic ciego
                                 sobre el campo que mueve el precio de una categoría entera. El
