@@ -35,6 +35,13 @@ import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma, { type ModoPrograma } from "@/components/programacion/ModalGenerarPrograma";
 import ModalCostear from "@/components/programacion/ModalCostear";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
+import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
+import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
+import {
+  textoDeTramo, validarEtiquetas, etiquetasDeTramo, patchEtiquetas, rotuloEtiquetas,
+  type TextoEtiquetas,
+} from "@/lib/liquidacion-etiquetas";
+import { armarDias, proponerEtiquetas, type TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
 function useGoogleMapsLoaded() {
@@ -233,6 +240,15 @@ type Reserva = {
    * Opcional: la agrega supabase/liquidaciones-03-ruta-contratada.sql.
    */
   capacidad_contratada?: number | null;
+  /**
+   * Las ETIQUETAS del ítem de liquidación: RUTA, TURNO y MÓVIL. Deciden en qué renglón del
+   * AFA-FL-07 va el servicio, y con ellas un cambio de horario ya no abre otro ítem. Son
+   * del DÍA (se escriben en la ida y el retorno). Opcionales: las agrega
+   * supabase/liquidaciones-04-etiquetas-item.sql. Ver lib/liquidacion-etiquetas.ts.
+   */
+  ruta_etiqueta?: string | null;
+  turno?: number | null;
+  movil?: number | null;
 };
 
 type Ocupacion = {
@@ -273,6 +289,10 @@ const FORM_VACIO = {
   cancelacion_monto: "",
   falso_flete_motivo: "",
   cambio_motivo: "", cambio_nota: "",
+  // ── Etiquetas del ítem de liquidación (lib/liquidacion-etiquetas.ts) ──
+  // Texto tal como se teclea; `validarEtiquetas` decide qué significa. Solo se escriben si
+  // el operador las cambió respecto de cómo se abrió el formulario.
+  etiqueta_ruta: "", etiqueta_turno: "", etiqueta_movil: "",
 };
 
 /** Motivos de un clic. Si declarar el porqué cuesta un párrafo, nadie lo declara. */
@@ -311,7 +331,7 @@ const COLS_LISTA =
   "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
   "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
   "lote_generacion,origen,destino,ruta_nombre,origen_contractual,precio_cotizado," +
-  "capacidad_contratada,falso_flete,falso_flete_motivo";
+  "capacidad_contratada,falso_flete,falso_flete_motivo,ruta_etiqueta,turno,movil";
 
 // Columnas de `reservas` cuya migración es OPCIONAL. PostgREST rechaza el select
 // entero por una columna desconocida, así que pedirlas sin red dejaría la pantalla
@@ -320,6 +340,7 @@ const COLS_LISTA =
 const COLS_OPCIONALES = [
   "origen_contractual", "precio_cotizado", "capacidad_contratada",
   "falso_flete", "falso_flete_motivo",
+  "ruta_etiqueta", "turno", "movil",
 ];
 
 const quitarColumna = (cols: string, col: string) =>
@@ -641,6 +662,18 @@ export default function ReservasPage() {
   const [nuevoParLat,          setNuevoParLat]          = useState<Record<number, number>>({});
   const [nuevoParLng,          setNuevoParLng]          = useState<Record<number, number>>({});
   const [agregandoPar2,        setAgregandoPar2]        = useState<Record<number, boolean>>({});
+  /**
+   * Cómo estaban las etiquetas del ítem al abrir el formulario. Se escriben SOLO si el
+   * operador las cambia respecto de esto: así guardar una hora o un bus nunca toca las
+   * etiquetas, ni bloquea el guardado por unas que estaban a medias desde antes.
+   */
+  const [etqAlAbrir, setEtqAlAbrir] = useState<TextoEtiquetas>({ ruta: "", turno: "", movil: "" });
+  /**
+   * El modal de etiquetas en lote: las filas marcadas, CONGELADAS al abrir. null = cerrado.
+   * Una foto y no un filtro en cada render: la propuesta recorre todos los días cargados, y
+   * rehacerla cada vez que la página se repinta no aporta nada mientras el modal está abierto.
+   */
+  const [modalEtiquetasFilas, setModalEtiquetasFilas] = useState<Reserva[] | null>(null);
   const [modalAplicarMasivo,   setModalAplicarMasivo]   = useState<{
     cotizacion_id: number;
     payload: Record<string, any>;
@@ -1784,7 +1817,14 @@ export default function ReservasPage() {
       // El motivo es de CADA cambio: se arranca en blanco para que no quede pegado el
       // de la edición anterior y termine sustentando algo que no ocurrió.
       cambio_motivo: "", cambio_nota: "",
+      // Lo escrito en ESTE tramo, aunque esté a medias. Si está vacío y el otro tramo del
+      // día sí las tiene, la pantalla lo dice al lado — no se precarga, para que guardar
+      // otra cosa no escriba unas etiquetas que nadie miró.
+      etiqueta_ruta:  textoDeTramo(r).ruta,
+      etiqueta_turno: textoDeTramo(r).turno,
+      etiqueta_movil: textoDeTramo(r).movil,
     });
+    setEtqAlAbrir(textoDeTramo(r));
     setCostoSug(null);
     setMsgPacto("");
     setEditandoId(r.id); setMostrarForm(true);
@@ -1886,6 +1926,9 @@ export default function ReservasPage() {
           // mira la ida primero.
           capacidad_contratada: l.capacidad_contratada ?? null,
           ruta_nombre: l.ruta_nombre ?? null,
+          ruta_etiqueta: l.ruta_etiqueta ?? null,
+          turno: l.turno ?? null,
+          movil: l.movil ?? null,
         }
       : null;
   }, [hermanoId, reservas]);
@@ -1901,7 +1944,7 @@ export default function ReservasPage() {
     let vivo = true;
     (async () => {
       let cols = "id,codigo,direccion_servicio,estado,precio_cliente,costo_proveedor," +
-                 "fecha_servicio,ruta_nombre,capacidad_contratada";
+                 "fecha_servicio,ruta_nombre,capacidad_contratada,ruta_etiqueta,turno,movil";
       // Con dos filas apuntando a este servicio el enlace está roto de otra forma: no se
       // elige ninguna, porque adivinar acá es escribir dinero en el tramo equivocado.
       const pedir = () => {
@@ -2043,6 +2086,32 @@ export default function ReservasPage() {
     return v ? { placa: v.placa, cap: v.capacidad ?? null } : null;
   }, [form.tipo_asignacion, form.vehiculo_id, form.vehiculo_tercero_id, vehiculos, vehTercero]);
 
+  // ── ETIQUETAS DEL ÍTEM DE LIQUIDACIÓN ─────────────────────────────────────
+  // RUTA + TURNO (+ MÓVIL) deciden en qué renglón de la liquidación va el servicio. Se
+  // escriben solo si el operador las cambió respecto de cómo abrió el formulario.
+  const etqTexto: TextoEtiquetas = {
+    ruta: form.etiqueta_ruta, turno: form.etiqueta_turno, movil: form.etiqueta_movil,
+  };
+  const etqTocadas =
+    etqTexto.ruta.trim() !== etqAlAbrir.ruta.trim() ||
+    etqTexto.turno.trim() !== etqAlAbrir.turno.trim() ||
+    etqTexto.movil.trim() !== etqAlAbrir.movil.trim();
+  const etqValidacion = validarEtiquetas(etqTexto);
+  /** Las etiquetas del otro tramo del día: si este no tiene, son las que valen para el día. */
+  const etqHermano = hermano ? etiquetasDeTramo(hermano) : null;
+  /**
+   * Lo que el ERP propondría para este servicio: la RUTA del nombre y el TURNO por el orden
+   * de salida de ese día entre los servicios cargados del mismo cliente. Es la MISMA
+   * propuesta del modal de etiquetas (lib/liquidacion-etiquetas-propuesta.ts), no otra.
+   */
+  const etqSugerida = useMemo(() => {
+    if (!reservaEditada) return null;
+    const delCliente = reservas.filter(x => x.cliente_id === reservaEditada.cliente_id);
+    const d = proponerEtiquetas(armarDias(delCliente as unknown as TramoEtq[]))
+      .find(x => x.tramos.some(t => t.id === reservaEditada.id));
+    return d ? { ...d.propuesta, motivo: d.motivo } : null;
+  }, [reservaEditada, reservas]);
+
   /**
    * El hermano, preguntado AHORA y no leído del memo. Misma regla que `hermanoId` y que
    * el efecto: se sigue el enlace hacia adelante y, si no lo hay, hacia atrás — y solo
@@ -2085,6 +2154,26 @@ export default function ReservasPage() {
   const porIdReserva = useMemo(() => new Map(reservas.map((r) => [r.id, r])), [reservas]);
 
   /**
+   * El otro tramo de una fila, entre lo cargado, por los DOS sentidos del enlace (hacia
+   * atrás solo si es inequívoco). Lo usa el chip de etiquetas: las etiquetas son del DÍA, y
+   * un retorno sin etiquetas cuya ida sí las tiene va igual a ese ítem.
+   */
+  const apuntanAEnLista = useMemo(() => {
+    const m = new Map<number, number[]>();
+    for (const r of reservas) {
+      const v = Number(r.reserva_vinculada_id ?? 0);
+      if (v > 0) m.set(v, [...(m.get(v) ?? []), r.id]);
+    }
+    return m;
+  }, [reservas]);
+  const hermanoEnLista = (r: Reserva): Reserva | null => {
+    const adelante = r.reserva_vinculada_id ? porIdReserva.get(Number(r.reserva_vinculada_id)) : undefined;
+    if (adelante) return adelante;
+    const atras = apuntanAEnLista.get(r.id) ?? [];
+    return atras.length === 1 ? porIdReserva.get(atras[0]) ?? null : null;
+  };
+
+  /**
    * El estado ECONÓMICO del día, no del tramo. Devuelve null cuando está todo bien: un
    * chip en cada fila sería el mismo ruido permanente que este cambio viene a quitar, y
    * un aviso que sale siempre se aprende a no leer.
@@ -2125,6 +2214,11 @@ export default function ReservasPage() {
     // que el resto de la pantalla solo pregunta: aquí no se está despachando un bus, se
     // está autorizando un pago.
     if (planCancelacion.bloqueo) { alert(`⚠️ ${planCancelacion.bloqueo}`); return; }
+
+    // Las etiquetas del ítem SOLO se validan si el operador las tocó: unas que estaban a
+    // medias desde antes no pueden impedir guardar un cambio de hora a las 5 a.m.
+    if (etqTocadas && !etqValidacion.ok) { alert(`⚠️ Ítem de la liquidación: ${etqValidacion.error}`); return; }
+    const etqAGuardar = etqTocadas && etqValidacion.ok ? etqValidacion.etiquetas : undefined;
 
     // Y el retiro del importe se ANUNCIA antes de escribirlo. El default de la pantalla es
     // ponerlo en S/ 0.00 —el lado reversible del error, el mismo criterio que el
@@ -2264,6 +2358,7 @@ export default function ReservasPage() {
       ...adminPayload,
       ...(precioTocado ? { precio_cliente: Number(form.precio_cliente) } : {}),
       ...(paxTocado ? { capacidad_contratada: paxEscrito } : {}),
+      ...(etqAGuardar !== undefined ? patchEtiquetas(etqAGuardar) : {}),
       fecha_servicio:  form.fecha_servicio,
       hora_servicio:   form.hora_servicio,
       estado:          nuevoEstado,
@@ -2333,6 +2428,26 @@ export default function ReservasPage() {
         // El enlace existe pero el otro tramo no aparece (o hay dos apuntando acá, que es
         // un enlace roto de otra forma). Se escribió medio día: hay que decirlo.
         avisar("Se escribieron los PAX solo en este tramo: no se pudo identificar su "
+             + "hermano. Revisa el enlace ida↔retorno en Liquidaciones → Enlazar tramos.");
+      }
+    }
+
+    // ── Las etiquetas del ítem son del DÍA: van también al otro tramo ──────────
+    // Igual que los PAX: la ida y el retorno son UN servicio y van en UN ítem. Llamada
+    // aparte y sin `cambio` (las etiquetas no son dinero y no levantan acta), con el
+    // hermano preguntado a la base por la misma razón que arriba. Aquí SÍ se propaga el
+    // borrado: quitar las etiquetas es sacar el DÍA de su ítem, y dejarlas en el otro tramo
+    // lo seguiría metiendo ahí.
+    if (etqAGuardar !== undefined) {
+      const destino = await resolverHermanoAhora(editandoId, reservaActual?.reserva_vinculada_id ?? null);
+      if (destino) {
+        const resE = await guardarReservas(supabase, [destino.id], patchEtiquetas(etqAGuardar));
+        if (!resE.ok)
+          avisar(`Las etiquetas del ítem no llegaron al tramo hermano ${destino.codigo ?? `#${destino.id}`}: `
+               + `${resE.rechazos[0]?.motivo ?? "error desconocido"}. Corrígelo abriendo ese servicio.`);
+        else if (resE.aviso) avisar(resE.aviso);
+      } else if (reservaActual?.reserva_vinculada_id) {
+        avisar("Las etiquetas del ítem se escribieron solo en este tramo: no se pudo identificar su "
              + "hermano. Revisa el enlace ida↔retorno en Liquidaciones → Enlazar tramos.");
       }
     }
@@ -3305,6 +3420,25 @@ export default function ReservasPage() {
           />
         );
       })()}
+
+      {modalEtiquetasFilas && (
+        <ModalEtiquetas
+          titulo="Etiquetas del ítem · servicios marcados"
+          subtitulo={`${modalEtiquetasFilas.length} servicio(s) marcado(s) en Programación — sus tramos hermanos se incluyen solos`}
+          objetivo={modalEtiquetasFilas as unknown as TramoEtq[]}
+          // Todo lo cargado: el turno es el orden de salida del DÍA y se cuenta con todas las
+          // salidas de esa ruta, no solo con las marcadas.
+          contexto={reservas as unknown as TramoEtq[]}
+          nombreCliente={nombreCliente}
+          onCerrar={() => setModalEtiquetasFilas(null)}
+          onGuardado={(n, detalle) => {
+            setModalEtiquetasFilas(null);
+            limpiarSeleccion();
+            avisar(`Etiquetas del ítem guardadas en ${n} servicio(s).${detalle}`);
+            cargarDatos();
+          }}
+        />
+      )}
 
       {modoPrograma && (
         <ModalGenerarPrograma
@@ -4962,6 +5096,73 @@ export default function ReservasPage() {
                 contrató esa cantidad.
               </div>
             )}
+
+            {/* ── ÍTEM DE LA LIQUIDACIÓN: RUTA · TURNO · MÓVIL ─────────────────
+                Deciden en qué renglón del AFA-FL-07 va este servicio. La hora ya no parte
+                el ítem: el turno 1 que sale a las 04:35 una semana y a las 05:00 la
+                siguiente suma en el mismo. Los PAX no se escriben acá: salen solos de los
+                PAX contratados de arriba. Se guardan en la ida Y el retorno. */}
+            <div className="mt-4 rounded-xl border px-4 py-3" style={{ borderColor: "#bae6fd", background: "#f0f9ff" }}>
+              <p className="text-[10px] font-black uppercase tracking-widest mb-2" style={{ color: "#075985" }}>
+                🏷 Ítem de la liquidación
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="w-32">
+                  <Campo label="Ruta">
+                    <input className={inputCls("uppercase")} placeholder="RUTA A"
+                      value={form.etiqueta_ruta} onChange={f("etiqueta_ruta")} />
+                  </Campo>
+                </div>
+                <div className="w-20">
+                  <Campo label="Turno">
+                    <input className={inputCls()} placeholder="1" inputMode="numeric"
+                      value={form.etiqueta_turno} onChange={f("etiqueta_turno")} />
+                  </Campo>
+                </div>
+                <div className="w-32">
+                  <Campo label="Móvil (2+ a la vez)">
+                    <input className={inputCls()} placeholder="—" inputMode="numeric"
+                      value={form.etiqueta_movil} onChange={f("etiqueta_movil")} />
+                  </Campo>
+                </div>
+                <div className="pb-2 text-xs text-gray-600">
+                  PAX: <b>{paxResuelto.pax != null ? `${paxResuelto.pax}` : "sin dato"}</b>
+                  <span className="text-gray-400"> (automático, de los PAX contratados)</span>
+                </div>
+              </div>
+              {etqTocadas && !etqValidacion.ok && (
+                <p className="text-[11px] mt-1 font-bold text-red-700">{etqValidacion.error}</p>
+              )}
+              {etqTocadas && etqValidacion.ok && (
+                <p className="text-[10px] mt-1 text-gray-500 leading-snug">
+                  {etqValidacion.etiquetas
+                    ? <>Quedará <b>{rotuloEtiquetas(etqValidacion.etiquetas, paxResuelto.pax)}</b>{hermano?.id ? <> en este tramo y en <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b> (las etiquetas son del día)</> : ""}.</>
+                    : <>Se quitan las etiquetas{hermano?.id ? " de este tramo y de su hermano" : ""}: el servicio vuelve a agruparse por el nombre de la ruta.</>}
+                </p>
+              )}
+              {!etqTocadas && !etiquetasDeTramo(reservaEditada) && (
+                <p className="text-[10px] mt-1 text-gray-500 leading-snug">
+                  {etqHermano
+                    ? <>Sin etiquetas propias: el día va al ítem <b>{rotuloEtiquetas(etqHermano)}</b> porque así está el otro tramo.</>
+                    : <>Sin etiquetas: la liquidación lo agrupa por el nombre de la ruta, que lleva la hora dentro.</>}
+                  {etqSugerida?.ruta && etqSugerida?.turno && (
+                    <>
+                      {" "}Sugerencia del ERP: <b>{etqSugerida.ruta} · TURNO {etqSugerida.turno}{etqSugerida.movil ? ` · MÓVIL ${etqSugerida.movil}` : ""}</b>{" "}
+                      <button type="button" className="underline font-bold" style={{ color: "#075985" }}
+                        onClick={() => setForm(p => ({
+                          ...p,
+                          etiqueta_ruta: etqSugerida.ruta ?? "",
+                          etiqueta_turno: etqSugerida.turno ? String(etqSugerida.turno) : "",
+                          etiqueta_movil: etqSugerida.movil ? String(etqSugerida.movil) : "",
+                        }))}>
+                        usarla
+                      </button>
+                    </>
+                  )}
+                  {" "}Para muchos servicios a la vez: márcalos en la lista → <b>🏷 Etiquetar</b>.
+                </p>
+              )}
+            </div>
           </div>
 
           <div>
@@ -5879,13 +6080,24 @@ export default function ReservasPage() {
           <button onClick={limpiarSeleccion} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 transition-colors" style={{ borderColor: "#c7d7ea", color: "#0b315f" }}>
             Ninguno
           </button>
+          {/* Etiquetas del ítem de liquidación en lote. Con las filas de una ruta marcadas
+              (filtra por la ruta y el rango, «Seleccionar todos»), el ERP propone RUTA del
+              nombre y TURNO por el orden de salida de cada día; se revisa por grupos. */}
+          <button
+            onClick={() => setModalEtiquetasFilas(reservas.filter(r => seleccionados.has(r.id)))}
+            title="Poner RUTA, TURNO y MÓVIL a lo seleccionado: deciden los ítems de la liquidación"
+            className="ml-auto flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-sky-50 transition-colors"
+            style={{ borderColor: "#7dd3fc", color: "#075985" }}
+          >
+            🏷 Etiquetar ítem ({seleccionados.size})
+          </button>
           {/* Reclasificar el origen. Va aquí y no en cada fila porque lo normal es
               corregir un mes entero de una ruta: fila por fila son sesenta clics y
               sesenta oportunidades de saltarse uno. */}
           <button
             onClick={() => prepararCambioOrigen("adicional")}
             title="Marcar lo seleccionado como servicio pedido por encima del contrato"
-            className="ml-auto flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white transition-colors hover:opacity-90"
+            className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white transition-colors hover:opacity-90"
             style={{ background: "#b45309" }}
           >
             <Sparkles size={13} /> Marcar como Adicional
@@ -6087,6 +6299,10 @@ export default function ReservasPage() {
                           const { o, d } = rutaDe(r);
                           return <div className="truncate text-xs" title={`${o} - ${d}`}>{o} - {d}</div>;
                         })()}
+                        {/* El ítem de la liquidación: RUTA · TURNO · MÓVIL con los PAX
+                            contratados. Leído del DÍA (este tramo y su hermano). */}
+                        <ChipEtiquetas className="mt-1" pax={paxContrato}
+                          tramos={[r, hermanoEnLista(r)]} />
                       </td>
 
                       <td className="p-3 text-xs">

@@ -16,6 +16,9 @@ import { paginarFilas } from "@/lib/huella";
 import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
 import { derivarTiempos, procedencia, type Instante } from "@/lib/servicio-tiempos";
 import { SIN_NOMBRE_RUTA, ETIQUETA_RECORRIDO } from "@/lib/ruta-identidad";
+import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
+import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
+import type { TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -49,6 +52,11 @@ type Reserva = {
   // Los tres que necesita el renombrado en lote para reconocer "los demás días de esta misma
   // ruta" (lib/ruta-equivalente.ts). También venían ya en el `select("*")`.
   cotizacion_id?: number|null; direccion_servicio?: string|null; paradas_json?: unknown;
+  // Las ETIQUETAS del ítem de liquidación (RUTA · TURNO · MÓVIL) y lo que hace falta para
+  // leerlas por DÍA (el tramo hermano) y proponerlas. Llegan en el `select("*")` desde que
+  // se corrió supabase/liquidaciones-04-etiquetas-item.sql; sin ella, simplemente no vienen.
+  reserva_vinculada_id?: number|null; origen_contractual?: string|null; capacidad_contratada?: number|null;
+  ruta_etiqueta?: string|null; turno?: number|null; movil?: number|null;
 };
 
 type Cliente   = { id: number; nombre: string; empresa?: string|null };
@@ -363,7 +371,7 @@ function chipsAlerta(s: ServicioView): { label: string; color: string; bg: strin
  * respetando el formato que ya usa la operación ("RUTA B/ ENTRADA 05:10/ CHILCA→BSF PUNTA
  * HERMOSA"), y por eso el aviso vive en el tooltip y en la ficha de ayuda del módulo.
  */
-function CeldaRuta({ s, onGuardado, onMasivo }: { s: ServicioView; onGuardado: (id: number, valor: string|null) => void; onMasivo: (r: Reserva, nombre: string) => void }) {
+function CeldaRuta({ s, hermano, onGuardado, onMasivo }: { s: ServicioView; hermano?: Reserva|null; onGuardado: (id: number, valor: string|null) => void; onMasivo: (r: Reserva, nombre: string) => void }) {
   const [editando, setEditando] = useState(false);
   const [borrador, setBorrador] = useState("");
   const [guardando, setGuardando] = useState(false);
@@ -495,11 +503,17 @@ function CeldaRuta({ s, onGuardado, onMasivo }: { s: ServicioView; onGuardado: (
           </button>
         )}
       </div>
+      {/* El ítem de la liquidación (RUTA · TURNO · MÓVIL), leído del DÍA: este tramo y su
+          hermano. Solo se pinta si hay etiquetas; se ponen con «🏷 Etiquetas» arriba. */}
+      <div className="px-1.5 mt-0.5 overflow-hidden">
+        <ChipEtiquetas tramos={[s.reserva, hermano]}
+          pax={s.reserva.capacidad_contratada ?? hermano?.capacidad_contratada ?? null} />
+      </div>
     </div>
   );
 }
 
-function FilaServicio({ s, onOpen, onGps, onRutaNombre, onRutaMasiva }:{ s: ServicioView; onOpen: () => void; onGps: () => void; onRutaNombre: (id: number, valor: string|null) => void; onRutaMasiva: (r: Reserva, nombre: string) => void }) {
+function FilaServicio({ s, hermano, onOpen, onGps, onRutaNombre, onRutaMasiva }:{ s: ServicioView; hermano?: Reserva|null; onOpen: () => void; onGps: () => void; onRutaNombre: (id: number, valor: string|null) => void; onRutaMasiva: (r: Reserva, nombre: string) => void }) {
   const est      = ESTADO_VIS[s.estado_visual];
   const progreso = s.paradas_total > 0 ? Math.round((s.paradas_completadas / s.paradas_total) * 100) : 0;
   const alertas  = chipsAlerta(s);
@@ -519,7 +533,7 @@ function FilaServicio({ s, onOpen, onGps, onRutaNombre, onRutaMasiva }:{ s: Serv
           sobrante, así que cualquier celda posterior queda a una distancia distinta del borde
           según cuántos chips de alerta traiga la fila — y una columna que baila de sitio en
           cada fila deja de leerse como columna. Aquí arranca siempre en el mismo píxel. */}
-      <CeldaRuta s={s} onGuardado={onRutaNombre} onMasivo={onRutaMasiva} />
+      <CeldaRuta s={s} hermano={hermano} onGuardado={onRutaNombre} onMasivo={onRutaMasiva} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-bold text-[#0b315f] text-sm truncate">{s.cliente_nombre}</span>
@@ -605,6 +619,13 @@ export default function SeguimientoPage() {
   // pantalla entera y monta su propia consulta, y colgarlo de una fila lo desmontaría en cuanto
   // el realtime reconstruya la lista a media edición.
   const [rutaMasiva, setRutaMasiva] = useState<{ reserva: Reserva; nombre: string } | null>(null);
+  /**
+   * Poner RUTA / TURNO / MÓVIL a los servicios que se ven, CONGELADOS al abrir: la lista se
+   * repinta con cada evento en vivo y el modal no tiene por qué rehacer su propuesta cada vez.
+   * Ver components/programacion/ModalEtiquetas.
+   */
+  const [modalEtiquetas, setModalEtiquetas] = useState<Reserva[] | null>(null);
+  const [avisoEtiquetas, setAvisoEtiquetas] = useState("");
   const [empresaPerfil, setEmpresaPerfil] = useState<EmpresaPerfil | null>(null);
   const [puntualidad, setPuntualidad] = useState<Record<number, Puntualidad>>({});
   const [resumenPunt, setResumenPunt] = useState<ResumenPuntualidad | null>(null);
@@ -864,6 +885,32 @@ export default function SeguimientoPage() {
     estado: p.estado, orden: p.orden,
   })),[firmaParadasGps]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /**
+   * El otro tramo de cada servicio del día, por los DOS sentidos del enlace (hacia atrás solo
+   * si es inequívoco). Las etiquetas del ítem son del DÍA: un retorno sin etiquetas cuya ida
+   * sí las tiene va igual a ese ítem, y el chip lo tiene que decir.
+   */
+  const hermanoDe = useMemo(() => {
+    const porId = new Map(reservas.map(r => [r.id, r]));
+    const apuntanA = new Map<number, number[]>();
+    for (const r of reservas) {
+      const v = Number(r.reserva_vinculada_id ?? 0);
+      if (v > 0) apuntanA.set(v, [...(apuntanA.get(v) ?? []), r.id]);
+    }
+    return (r: Reserva): Reserva | null => {
+      const adelante = r.reserva_vinculada_id ? porId.get(Number(r.reserva_vinculada_id)) : undefined;
+      if (adelante) return adelante;
+      const atras = apuntanA.get(r.id) ?? [];
+      return atras.length === 1 ? porId.get(atras[0]) ?? null : null;
+    };
+  }, [reservas]);
+
+  /** Nombre del cliente para los grupos del modal de etiquetas (estable entre renders). */
+  const nombreClienteEtq = useCallback((id: number | null) => {
+    const c = clientes.find(x => x.id === id);
+    return c ? (c.empresa || c.nombre) : "Sin cliente";
+  }, [clientes]);
+
   const filtrados = servicios.filter(s=>{
     if (filtroTipo==="fijo"&&s.es_eventual) return false;
     if (filtroTipo==="eventual"&&!s.es_eventual) return false;
@@ -903,6 +950,12 @@ export default function SeguimientoPage() {
               className="flex items-center gap-2 bg-white border border-gray-200 hover:border-[#0b315f] text-[#0b315f] px-4 py-2.5 rounded-xl text-sm font-bold transition-colors shadow-sm"
               title="Descargar Manifiestos MTC y Reportes en bloque, agrupados por ruta">
               <Ic.FileText size={15} color="#0b315f"/> Descarga masiva
+            </button>
+            {/* ── ETIQUETAS DEL ÍTEM (RUTA · TURNO · MÓVIL) de los servicios que se ven ── */}
+            <button onClick={()=>setModalEtiquetas(filtrados.map(s => s.reserva))} disabled={!filtrados.length}
+              className="flex items-center gap-2 bg-white border border-gray-200 hover:border-[#0b315f] text-[#075985] px-4 py-2.5 rounded-xl text-sm font-bold transition-colors shadow-sm disabled:opacity-40"
+              title="Poner RUTA, TURNO y MÓVIL a los servicios que ves: deciden los ítems de la liquidación">
+              🏷 Etiquetas
             </button>
             {/* ── MAPA GLOBAL ── */}
             <Link href="/monitoreo" className="flex items-center gap-2 bg-[#0b315f] text-white px-4 py-2.5 rounded-xl text-sm font-bold hover:bg-[#1262bd] transition-colors shadow-sm">
@@ -1045,7 +1098,7 @@ export default function SeguimientoPage() {
               </div>
               <div className="divide-y divide-gray-50">
                 {[...filtrados].sort((a,b)=>(a.reserva.hora_servicio||"").localeCompare(b.reserva.hora_servicio||"")).map(s=>(
-                  <FilaServicio key={s.reserva.id} s={s} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRutaNombre={patchRutaNombre} onRutaMasiva={(r,n)=>setRutaMasiva({reserva:r,nombre:n})} />
+                  <FilaServicio key={s.reserva.id} s={s} hermano={hermanoDe(s.reserva)} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRutaNombre={patchRutaNombre} onRutaMasiva={(r,n)=>setRutaMasiva({reserva:r,nombre:n})} />
                 ))}
               </div>
             </div>
@@ -1093,6 +1146,29 @@ export default function SeguimientoPage() {
           onClose={() => setRutaMasiva(null)}
           onAplicado={cargar}
         />
+      )}
+
+      {/* ── MODAL: ETIQUETAS DEL ÍTEM (RUTA · TURNO · MÓVIL) ── */}
+      {modalEtiquetas && (
+        <ModalEtiquetas
+          titulo="Etiquetas del ítem · servicios del día"
+          subtitulo={`${modalEtiquetas.length} servicio(s) a la vista · ${fechaFiltro}`}
+          objetivo={modalEtiquetas as unknown as TramoEtq[]}
+          contexto={reservas as unknown as TramoEtq[]}
+          nombreCliente={nombreClienteEtq}
+          onCerrar={() => setModalEtiquetas(null)}
+          onGuardado={(n, detalle) => {
+            setModalEtiquetas(null);
+            setAvisoEtiquetas(`✅ Etiquetas del ítem guardadas en ${n} servicio(s).${detalle}`);
+            cargar();
+          }}
+        />
+      )}
+      {avisoEtiquetas && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-40 max-w-xl px-4 py-3 rounded-xl bg-white border border-sky-200 shadow-lg text-sm text-sky-900 flex items-start gap-3">
+          <span className="flex-1">{avisoEtiquetas}</span>
+          <button onClick={() => setAvisoEtiquetas("")} className="text-gray-400 hover:text-gray-600">✕</button>
+        </div>
       )}
     </div>
   );

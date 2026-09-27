@@ -238,9 +238,10 @@ export default function ModalEditor({
   async function reagrupar() {
     if (!confirm(
       "Rehacer los renglones con la agrupación de hoy.\n\n" +
-      "Los servicios de una misma ruta contratada se juntan en un solo ítem, y los que " +
-      "tienen distinta tarifa o distinta capacidad contratada quedan separados. El total " +
-      "NO cambia.\n\n" +
+      "Los servicios etiquetados con la misma RUTA, TURNO y MÓVIL se juntan en un solo ítem " +
+      "aunque hayan cambiado de horario; los que no tienen etiquetas se juntan por el nombre " +
+      "de la ruta, como antes. Los que tienen distinta tarifa o distinta capacidad contratada " +
+      "quedan separados. El total NO cambia.\n\n" +
       "Las líneas escritas a mano (penalidades, descuentos) no se tocan.\n\n¿Continuar?"
     )) return;
     setTrabajando(true); setMsg("");
@@ -263,7 +264,8 @@ export default function ModalEditor({
     setMsg(
       r.ok
         ? `✅ ${r.actualizadas} descripción(es) actualizada(s).` +
-          (r.sinPax ? ` ${r.sinPax} ruta(s) salen sin el "N PAX": fíchalas en Liquidaciones → Rutas contratadas.` : "")
+          (r.sinPax ? ` ${r.sinPax} ruta(s) salen sin el "N PAX": fíchalas en Liquidaciones → Rutas contratadas.` : "") +
+          (r.mezcladas ? ` ⚠️ ${r.mezcladas} renglón(es) juntan servicios con etiquetas distintas (RUTA/TURNO/MÓVIL): usa «↻ Reagrupar ítems» para separarlos.` : "")
         : "⚠️ " + r.error
     );
     await cargar(); onCambio(); setTrabajando(false);

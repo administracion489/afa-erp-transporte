@@ -4,6 +4,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { X, Calendar, RefreshCw, ArrowRight, ArrowLeftRight, Layers, Signpost, Plus, Sparkles } from "lucide-react";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
+import { validarEtiquetas, rotuloEtiquetas, patchEtiquetas } from "@/lib/liquidacion-etiquetas";
+import { rutaDelNombre } from "@/lib/liquidacion-etiquetas-propuesta";
 
 type ItemCot = {
   descripcion: string;
@@ -85,6 +87,11 @@ const COLUMNAS_OPCIONALES = [
   "precio_cotizado",
   "adicional_motivo",
   "adicional_nota",
+  // Etiquetas del ítem de liquidación (supabase/liquidaciones-04). Sin ellas los servicios
+  // nacen sin etiqueta y se agrupan por el nombre, como antes: no vale perder el programa.
+  "ruta_etiqueta",
+  "turno",
+  "movil",
 ] as const;
 
 type ResultadoInsert = { data: any[] | null; error: any; omitidas: string[] };
@@ -209,6 +216,14 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
   const [nombreIda,        setNombreIda]        = useState("");
   const [nombreRetorno,    setNombreRetorno]    = useState("");
   const [nombreTocado,     setNombreTocado]     = useState(false);
+  // Etiquetas del ítem de liquidación (lib/liquidacion-etiquetas.ts). La RUTA se DERIVA del
+  // nombre ("RUTA B/ …") mientras nadie la toque, igual que el precio del adicional; el
+  // TURNO lo escribe la persona: el generador no sabe si este contrato es el primer turno
+  // de la ruta o el segundo. Sin RUTA y TURNO los servicios nacen sin etiqueta.
+  const [etqRuta,          setEtqRuta]          = useState("");
+  const [etqRutaTocada,    setEtqRutaTocada]    = useState(false);
+  const [etqTurno,         setEtqTurno]         = useState("");
+  const [etqMovil,         setEtqMovil]         = useState("");
 
   // ── Estado exclusivo del modo ADICIONAL ────────────────────────────────
   // Fechas SUELTAS: un adicional son tres salidas de días distintos, no un rango
@@ -370,6 +385,23 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
   const numItems       = slotsAGenerar.length;
   const esMultiVehiculo = numItems > 1;
 
+  // ── Etiquetas del ítem ───────────────────────────────────────────────────
+  const etqRutaVal = etqRutaTocada ? etqRuta : (rutaDelNombre(generaIda ? nombreIda : nombreRetorno) ?? "");
+  const etqRellenas = !!(etqRutaVal.trim() || etqTurno.trim() || (esAdicional && etqMovil.trim()));
+  const etqValidas = validarEtiquetas({ ruta: etqRutaVal, turno: etqTurno, movil: esAdicional ? etqMovil : "" });
+  /**
+   * Las etiquetas de cada vehículo del programa. Los vehículos de un contrato salen a la
+   * MISMA hora con el mismo nombre de ruta, así que son móviles de la misma ruta y turno:
+   * el orden de la cotización es el número de móvil. Con un solo vehículo no hay móvil.
+   */
+  const etiquetasDeSlot = (idx: number) => {
+    if (!etqValidas.ok || !etqValidas.etiquetas) return {};
+    const movil = esAdicional ? etqValidas.etiquetas.movil : esMultiVehiculo ? idx + 1 : null;
+    return patchEtiquetas({ ...etqValidas.etiquetas, movil });
+  };
+  /** ¿Alguien escribió en las etiquetas? La RUTA derivada del nombre sola no cuenta. */
+  const etqTocadas = etqRutaTocada || !!etqTurno.trim() || (esAdicional && !!etqMovil.trim());
+
   const clienteNombre = (id: number | null) => {
     if (!id) return "Sin cliente";
     const c = clientes.find(c => c.id === id);
@@ -384,17 +416,21 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
   // ERP está roto.
   const faltaPara: string | null = (() => {
     if (!cotizacionId) return "Elige la cotización de la que salen los paraderos.";
+    // Unas etiquetas escritas a medias no se guardan en silencio: se dice qué falta. Las
+    // que nadie tocó (la RUTA derivada del nombre sin TURNO) no frenan nada: los servicios
+    // nacen sin etiqueta y se etiquetan después.
+    const etqFalta = etqTocadas && !etqValidas.ok ? `Ítem de la liquidación: ${etqValidas.error}` : null;
     if (esAdicional) {
       if (fechasSueltas.length === 0) return "Agrega al menos una fecha.";
       if (generaRetorno && !horaRetornoEfectiva) return "Falta la hora del retorno.";
       if (difierePrecio && !motivoAdic)
         return "El precio no es el de la cotización: elige el motivo.";
-      return null;
+      return etqFalta;
     }
     if (!fechaInicio || !fechaFin) return "Falta el rango de fechas.";
     if (!diasUI.some(Boolean)) return "Selecciona al menos un día de la semana.";
     if (fechasRango.length === 0) return "El rango no produce ninguna fecha.";
-    return null;
+    return etqFalta;
   })();
   const puedeGenerar = faltaPara === null;
 
@@ -459,7 +495,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
       return ids;
     };
 
-    for (const slot of slotsAGenerar) {
+    for (const [idxSlot, slot] of slotsAGenerar.entries()) {
       // Campos de vehículo según tipo de asignación
       const camposVehiculo = slot.tipo === "tercerizada"
         ? {
@@ -483,6 +519,8 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
         lote_generacion:       lote,
         ...camposVehiculo,
         ...camposOrigen,
+        // Las etiquetas van en la ida Y en el retorno: son del día, como los PAX.
+        ...etiquetasDeSlot(idxSlot),
       };
 
       const camposIda = {
@@ -569,6 +607,17 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
         `la base todavía no tiene esa columna.\n\n` +
         `Corre supabase/reservas-04-servicios-adicionales.sql en Supabase y vuelve a marcarlos, ` +
         `o la liquidación los cobrará junto a los del contrato.`
+      );
+    }
+
+    // Lo mismo con las etiquetas: los servicios se crearon, pero sin su RUTA / TURNO, y la
+    // liquidación los agrupará por el nombre hasta que se corra la migración y se etiqueten.
+    if (etqValidas.ok && etqValidas.etiquetas && omitidasTotal.has("ruta_etiqueta")) {
+      alert(
+        `Se crearon ${totalInsertados} servicio(s), pero SIN las etiquetas del ítem ` +
+        `(${rotuloEtiquetas(etqValidas.etiquetas)}): la base todavía no tiene esas columnas.\n\n` +
+        `Corre supabase/liquidaciones-04-etiquetas-item.sql en Supabase y etiquétalos desde ` +
+        `Programación (marca las filas → 🏷 Etiquetar ítem).`
       );
     }
 
@@ -1012,6 +1061,51 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
                 Así lo verá el pasajero al elegir su bus. Sugerido desde la cotización;
                 corrígelo aquí y se aplica a los {totalServicios || 0} servicios de una vez.
                 {generaIda && !nombreIda && " Si lo dejas vacío habrá que ponerlo servicio por servicio."}
+              </p>
+            </div>
+          )}
+
+          {/* Ítem de la liquidación: RUTA + TURNO (+ MÓVIL). Con esto los servicios nacen
+              etiquetados y la liquidación los junta en un ítem aunque el horario cambie. */}
+          {cot && (
+            <div className="rounded-xl border px-3 py-2.5" style={{ borderColor: "#bae6fd", background: "#f0f9ff" }}>
+              <label className="block text-[11px] font-bold uppercase tracking-wide mb-1.5" style={{ color: "#075985" }}>
+                🏷 Ítem de la liquidación
+              </label>
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="w-32">
+                  <span className="block text-[9px] font-black text-gray-400 uppercase">Ruta</span>
+                  <input className={inputCls() + " uppercase"} placeholder="RUTA A"
+                    value={etqRutaVal}
+                    onChange={e => { setEtqRutaTocada(true); setEtqRuta(e.target.value); }} />
+                </div>
+                <div className="w-20">
+                  <span className="block text-[9px] font-black text-gray-400 uppercase">Turno</span>
+                  <input className={inputCls()} placeholder="1" inputMode="numeric"
+                    value={etqTurno} onChange={e => setEtqTurno(e.target.value)} />
+                </div>
+                {esAdicional && (
+                  <div className="w-28">
+                    <span className="block text-[9px] font-black text-gray-400 uppercase">Móvil (2+ a la vez)</span>
+                    <input className={inputCls()} placeholder="—" inputMode="numeric"
+                      value={etqMovil} onChange={e => setEtqMovil(e.target.value)} />
+                  </div>
+                )}
+              </div>
+              <p className="text-[10px] mt-1.5 leading-snug" style={{ color: etqTocadas && !etqValidas.ok ? "#b91c1c" : "#64748b" }}>
+                {etqValidas.ok && etqValidas.etiquetas ? (
+                  <>
+                    Los {totalServicios || 0} servicios nacen como <b>{rotuloEtiquetas(etqValidas.etiquetas)}</b>
+                    {!esAdicional && esMultiVehiculo && <> y cada vehículo como <b>MÓVIL 1 a {numItems}</b> (en el orden de la cotización)</>}.
+                    {" "}La liquidación los junta en un solo ítem por ruta y turno aunque cambie el horario.
+                  </>
+                ) : etqTocadas && !etqValidas.ok ? (
+                  etqValidas.error
+                ) : etqRellenas ? (
+                  <>La RUTA sale del nombre. <b>Escribe el TURNO</b> (1 = la salida más temprana de esa ruta) para que nazcan etiquetados; si lo dejas vacío, se etiquetan después desde Programación.</>
+                ) : (
+                  <>Opcional: RUTA y TURNO deciden el ítem de la liquidación. Si lo dejas vacío, se etiquetan después desde Programación.</>
+                )}
               </p>
             </div>
           )}
