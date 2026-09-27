@@ -86,7 +86,44 @@ export type ViajeCosteado = {
    * hace que el costeo cuadre con el libro en vez de aproximarlo.
    */
   deprecKm?: number | null;
+  /**
+   * Dónde rueda la unidad. Sin el campo es `urbano` y el resultado es BYTE A BYTE el de
+   * siempre (scripts/prueba-costeo.mts lo fija). Ver `RECORRIDO_CARRETERA` abajo.
+   */
+  recorrido?: Recorrido;
 };
+
+/**
+ * URBANO o CARRETERA · por qué un viaje interprovincial no se costea igual que uno en Lima.
+ *
+ * Reportado: en Lima el cotizador se acerca al mercado; un full day Lima→Huacachina
+ * (624 km) salía casi el doble de lo que cobra el mercado (S/ 2 500 sin IGV). Dos
+ * premisas del modelo son urbanas y en carretera dejan de ser ciertas:
+ *
+ *   1. EL RENDIMIENTO. `rendimiento_1` se mide en la operación diaria —tráfico, paradas,
+ *      ralentí—. En la Panamericana a velocidad constante el mismo bus rinde más.
+ *   2. LOS FIJOS ANUALES (seguro, SOAT, revisión, permisos, otros fijos y la
+ *      depreciación del parámetro) se prorrateaban por KM. Pero son costos de TIEMPO:
+ *      el seguro corre igual si el bus hace 50 km o 600 en el día. Repartidos por km,
+ *      un solo día de viaje largo se llevaba la cuota de UNA SEMANA de operación
+ *      urbana. En carretera se reparten por DÍA ocupado.
+ *
+ * Lo que NO cambia, a propósito: neumáticos y mantenimiento son desgaste por km de
+ * verdad; el conductor ya iba por día. Y la depreciación CONTABLE (`deprecKm`) sigue
+ * por km: esa la decidió el libro, no este módulo.
+ *
+ * LOS DOS NÚMEROS NO ESTÁN MEDIDOS Y SE DECLARAN COMO TAL (misma honestidad que
+ * `MARGEN_SALTO_TANQUE`): 1.25 es la mejora típica ciudad→carretera de un diésel
+ * pesado, y 300 días es un año operativo sin domingos ni días en taller. El lado
+ * seguro de los dos es BAJARLOS: un rendimiento optimista o un año de más abarata el
+ * precio, y un costo corto se descubre cuando el servicio ya se prestó.
+ */
+export type Recorrido = "urbano" | "carretera";
+
+export const RECORRIDO_CARRETERA = {
+  factorRendimiento: 1.25,
+  diasOperativosAnio: 300,
+} as const;
 
 /** Porcentajes de la política comercial. Se pasan para poder cambiarlos sin tocar el motor. */
 export type PoliticaCosteo = {
@@ -125,10 +162,17 @@ export type CostoUnidad = {
   costoKm: number;
   /** De dónde salió cada dato discutible, para poder mostrarlo. */
   fuentes: { conductor: "real" | "parametro"; depreciacion: "contable" | "parametro" };
+  recorrido: Recorrido;
 };
 
 /** Consumo de combustible en soles por kilómetro, con sus dos tipos y la urea. */
-function combustiblePorKm(p: ParametrosUnidad, precios: PreciosCombustible): { comb: number; urea: number } {
+function combustiblePorKm(p0: ParametrosUnidad, precios: PreciosCombustible, factor = 1): { comb: number; urea: number } {
+  // En carretera el rendimiento sube; la urea es fracción del combustible, así que baja con él.
+  const p = factor === 1 ? p0 : {
+    ...p0,
+    rendimiento_1: p0.rendimiento_1 * factor,
+    rendimiento_2: p0.rendimiento_2 != null ? p0.rendimiento_2 * factor : p0.rendimiento_2,
+  };
   const precio1 = precios[p.tipo_combustible_1] || 0;
   // Un rendimiento en cero dividiría por cero: se trata como "no consume", no como infinito.
   const tramo1 = p.rendimiento_1 > 0 ? (precio1 / p.rendimiento_1) * p.pct_uso_1 : 0;
@@ -159,7 +203,9 @@ export function calcularCostoUnidad(
   const km = Number(viaje.km || 0);
   if (!p || km <= 0) return null;
 
-  const { comb, urea } = combustiblePorKm(p, precios);
+  const carretera = viaje.recorrido === "carretera";
+  const dias = Math.max(Number(viaje.dias || 0), 1);
+  const { comb, urea } = combustiblePorKm(p, precios, carretera ? RECORRIDO_CARRETERA.factorRendimiento : 1);
   const costoCombustible = (comb + urea) * km;
   const costoUrea = urea * km;
 
@@ -172,13 +218,19 @@ export function calcularCostoUnidad(
   const deprecContable = viaje.deprecKm != null && viaje.deprecKm >= 0;
   const costoDeprec = deprecContable
     ? (viaje.deprecKm as number) * km
-    : p.vida_util_anios > 0 && p.km_anio > 0
-      ? ((p.valor_compra * (1 - p.residual_pct)) / (p.vida_util_anios * p.km_anio)) * km
-      : 0;
+    : carretera
+      ? p.vida_util_anios > 0
+        ? ((p.valor_compra * (1 - p.residual_pct)) / p.vida_util_anios / RECORRIDO_CARRETERA.diasOperativosAnio) * dias
+        : 0
+      : p.vida_util_anios > 0 && p.km_anio > 0
+        ? ((p.valor_compra * (1 - p.residual_pct)) / (p.vida_util_anios * p.km_anio)) * km
+        : 0;
 
   const fijosAnuales =
     p.seguro_anual + p.soat_anual + p.revision_semestral * 2 + p.permisos_anual + p.otros_fijos_mensual * 12;
-  const costoFijosKm = p.km_anio > 0 ? (fijosAnuales / p.km_anio) * km : 0;
+  const costoFijosKm = carretera
+    ? (fijosAnuales / RECORRIDO_CARRETERA.diasOperativosAnio) * dias
+    : p.km_anio > 0 ? (fijosAnuales / p.km_anio) * km : 0;
 
   const subVehiculo = costoCombustible + costoNeumaticos + costoMantenimiento + costoDeprec + costoFijosKm;
   const reserva = subVehiculo * politica.reservaPct;
@@ -215,7 +267,19 @@ export function calcularCostoUnidad(
       conductor: conductorReal ? "real" : "parametro",
       depreciacion: deprecContable ? "contable" : "parametro",
     },
+    recorrido: carretera ? "carretera" : "urbano",
   };
+}
+
+/**
+ * El recorrido que se PROPONE según los km por día. No decide: la pantalla lo ofrece
+ * como valor inicial y una persona lo cambia. 150 km/día tampoco está medido — es
+ * más de lo que hace un servicio urbano de Lima en un día (ida y retorno a Lurín
+ * ronda 120) y menos que el viaje de provincia más corto (Lima–Huacho, ~300).
+ */
+export const KM_DIA_CARRETERA = 150;
+export function recorridoSugerido(km: number, dias: number): Recorrido {
+  return km / Math.max(dias || 1, 1) >= KM_DIA_CARRETERA ? "carretera" : "urbano";
 }
 
 // ── Del costo al precio ───────────────────────────────────────────────────────

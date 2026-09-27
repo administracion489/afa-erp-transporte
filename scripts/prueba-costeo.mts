@@ -154,5 +154,23 @@ console.log("\n── Bordes que hacían dividir por cero ──");
      "sin kilómetros devuelve null, no un cero que se lea como gratis");
 }
 
+console.log("\n── Recorrido urbano / carretera ──");
+{
+  const v = { km: 624, dias: 1, peajes: 24, otros: 0, pernocte: 0, viaticos: 0 };
+  const sin = calcularCostoUnidad(BUS, PRECIOS, v)!;
+  const urb = calcularCostoUnidad(BUS, PRECIOS, { ...v, recorrido: "urbano" })!;
+  ok(JSON.stringify(sin) === JSON.stringify(urb), "sin el campo es exactamente urbano");
+  const car = calcularCostoUnidad(BUS, PRECIOS, { ...v, recorrido: "carretera" })!;
+  ok(Math.abs(car.costoCombustible - sin.costoCombustible / 1.25) < 1e-9, "en carretera el combustible baja por el factor de rendimiento");
+  ok(car.costoMantenimiento === sin.costoMantenimiento && car.costoNeumaticos === sin.costoNeumaticos,
+     "el desgaste por km no cambia");
+  const car2 = calcularCostoUnidad(BUS, PRECIOS, { ...v, recorrido: "carretera", dias: 2 })!;
+  ok(Math.abs(car2.costoFijosKm - 2 * car.costoFijosKm) < 1e-9, "los fijos en carretera escalan con los días, no con los km");
+  const cont = calcularCostoUnidad(BUS, PRECIOS, { ...v, recorrido: "carretera", deprecKm: 0.5 })!;
+  ok(cont.costoDeprec === 312, "la depreciación contable sigue por km en carretera");
+  ok(car.baseCosto < sin.baseCosto, "un día largo en carretera cuesta menos que costeado como urbano",
+     `${car.baseCosto.toFixed(2)} vs ${sin.baseCosto.toFixed(2)}`);
+}
+
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);
 process.exit(fallos === 0 ? 0 : 1);
