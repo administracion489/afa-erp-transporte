@@ -818,6 +818,10 @@ La fórmula del costo de mover un bus propio —combustible por km/galón con ur
 - **`precioConMargen` es sobre el PRECIO, no sobre el costo**: con 20 % el precio es `costo/0.8`, no `costo × 1.2`. Es la diferencia entre ganar 20 % y ganar 16.7 %.
 - Todo divisor que venía de un parámetro sin llenar (`rendimiento_1`, `vida_neumatico_km`, `km_anio`) se protege: antes producía `Infinity`/`NaN` que se propagaba al precio.
 
+### Recorrido URBANO o CARRETERA (`ViajeCosteado.recorrido`)
+
+Un full day Lima→Huacachina (624 km) salía casi el doble del mercado. Dos premisas del modelo son urbanas: el **rendimiento** (medido con tráfico) y el prorrateo de los **fijos anuales por km** (seguro, SOAT, permisos, depreciación del parámetro son costos de TIEMPO: un día de 600 km se llevaba la cuota de una semana urbana). En `carretera`: rendimiento ×1.25 y fijos por DÍA (año de 300 días). Neumáticos, mantenimiento y depreciación CONTABLE siguen por km. **Los dos números no están medidos y se declaran**; el lado seguro es bajarlos. Sin el campo el resultado es byte a byte el urbano (`prueba-costeo.mts`). El cotizador SUGIERE carretera desde 150 km/día (`recorridoSugerido`) y una persona lo cambia. De paso, en multi-día los días de conductor salen del itinerario (antes quedaban en 1).
+
 ### Presupuesto del servicio y utilidad antes de impuestos
 
 `supabase/costeo-01-planilla-y-presupuesto.sql` + `lib/costeo-conductor.ts` + `lib/costeo-servicio.ts` + `components/programacion/ModalCostear.tsx`.

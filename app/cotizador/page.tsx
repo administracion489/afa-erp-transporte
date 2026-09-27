@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { calcularCostoUnidad, escenariosPrecio, type ParametrosUnidad } from "@/lib/costeo-propio";
+import { calcularCostoUnidad, escenariosPrecio, recorridoSugerido, RECORRIDO_CARRETERA, type ParametrosUnidad, type Recorrido } from "@/lib/costeo-propio";
 import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
 import {
   NIVELES, NIVEL_CFG, equipamientoDeNivel, nivelDeFicha, fichasDelNivel, planDeNivel,
@@ -73,8 +73,8 @@ type DiaPlan = {
 
 const MESES_DIAS = 26;   // días facturables de un mes de servicio fijo
 
-function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number, peajes:number, otros:number, pernocte:number, viaticos:number):Resultado|null {
-  const c = calcularCostoUnidad(p as ParametrosUnidad, pr, { km, dias, peajes, otros, pernocte, viaticos });
+function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number, peajes:number, otros:number, pernocte:number, viaticos:number, recorrido:Recorrido="urbano"):Resultado|null {
+  const c = calcularCostoUnidad(p as ParametrosUnidad, pr, { km, dias, peajes, otros, pernocte, viaticos, recorrido });
   if (!c) return null;
   const e = escenariosPrecio(c.baseCosto, p.capacidad);
   return {
@@ -899,6 +899,8 @@ export default function CotizadorPage(){
   const [peajes,    setPeajes]    =useState(24);
   const [otros,     setOtros]     =useState(0);
   const [dias,      setDias]      =useState(1);
+  /** null = seguir la sugerencia por km/día; un valor = lo eligió una persona. */
+  const [recorridoElegido,setRecorridoElegido]=useState<Recorrido|null>(null);
   const [cliente,   setCliente]   =useState("");
   const [kmRuta,    setKmRuta]    =useState(0);
   const [metaRuta,  setMetaRuta]  =useState<any>({});
@@ -951,14 +953,19 @@ export default function CotizadorPage(){
     ?(metaRuta.dias||[]).reduce((s:number,d:any)=>s+d.viaticos,0)
     :viaticosExtra;
 
+  // En multi-día el contador de días se oculta: los días son los del itinerario. Antes se
+  // quedaba en 1 y un viaje de 7 días pagaba un solo día de conductor.
+  const diasEf=esMultiDia?Math.max((metaRuta.dias||[]).length,1):dias;
+  const recorrido:Recorrido=recorridoElegido??recorridoSugerido(kmRuta,diasEf);
+
   const resultado=useMemo(()=>{
     if(!veh||kmRuta<=0)return null;
-    return calcular(veh,precios,kmRuta,dias,peajes,otros,pernocteTotal,viaticosTotal);
-  },[veh,precios,kmRuta,dias,peajes,otros,pernocteTotal,viaticosTotal]);
+    return calcular(veh,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido);
+  },[veh,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido]);
 
   const comparativo=useMemo(()=>
-    flota.map(v=>({v,r:kmRuta>0?calcular(v,precios,kmRuta,dias,peajes,otros,pernocteTotal,viaticosTotal):null})),
-    [flota,precios,kmRuta,dias,peajes,otros,pernocteTotal,viaticosTotal]
+    flota.map(v=>({v,r:kmRuta>0?calcular(v,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido):null})),
+    [flota,precios,kmRuta,diasEf,peajes,otros,pernocteTotal,viaticosTotal,recorrido]
   );
 
   const handleRutaUpdate=useCallback((km:number,meta:any)=>{
@@ -981,7 +988,7 @@ export default function CotizadorPage(){
       vehiculo_cotizador:veh.nombre,
       precio_dia:modo==="fijo"?resultado.diaEstIGV:null,
       precio_mes_estimado:modo==="fijo"?resultado.mesEstIGV:null,
-      dias_servicio:modo==="eventual"?dias:1,
+      dias_servicio:modo==="eventual"?diasEf:1,
       pernocte_costo:pernocteTotal||null,modo_precio:"cotizador",
       paradas_json:metaRuta.puntos||null,
       observaciones:[
@@ -1108,6 +1115,25 @@ export default function CotizadorPage(){
                   </div>
                 </div>
               )}
+              <div>
+                <label className="text-[10px] font-bold text-gray-400 uppercase block mb-1.5">Tipo de recorrido</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([["urbano","🏙️ Urbano","Lima · fijos por km"],["carretera","🛣️ Carretera","Provincia · fijos por día"]] as const).map(([id,l,sub])=>(
+                    <button key={id} onClick={()=>setRecorridoElegido(id)}
+                      className={`rounded-xl border px-2 py-2 text-left ${recorrido===id?"border-[#0b315f] bg-[#eef3f8]":"border-gray-200 hover:bg-gray-50"}`}>
+                      <span className="block text-xs font-black text-[#0b315f]">{l}</span>
+                      <span className="block text-[10px] text-gray-400">{sub}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1.5">
+                  {recorridoElegido===null?`Sugerido por ${kmRuta>0?Math.round(kmRuta/diasEf):0} km/día. `:""}
+                  {recorrido==="carretera"
+                    ?`Rendimiento ×${RECORRIDO_CARRETERA.factorRendimiento} y seguros, SOAT y depreciación por día (año de ${RECORRIDO_CARRETERA.diasOperativosAnio} días), no por km. Estimados, no medidos.`
+                    :"Seguros, SOAT y depreciación se reparten por km recorrido."}
+                  {recorridoElegido!==null&&<button onClick={()=>setRecorridoElegido(null)} className="ml-1 text-blue-500 hover:underline font-bold">↺ Usar sugerido</button>}
+                </p>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 {[{l:"Peajes S/",v:peajes,s:setPeajes},{l:"Otros S/",v:otros,s:setOtros}].map(fi=>(
                   <div key={fi.l}><label className="text-[10px] font-bold text-gray-400 uppercase block mb-1.5">{fi.l}</label><input type="number" value={fi.v} onChange={e=>fi.s(Number(e.target.value))} min={0} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] text-center"/></div>
@@ -1255,7 +1281,7 @@ export default function CotizadorPage(){
 
                 {/* Desglose */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                  <div className="px-5 py-4 border-b"><h2 className="font-black text-[#0b315f] text-sm">Desglose de costos</h2><p className="text-xs text-gray-400 mt-0.5">{veh.icono||"🚌"} {veh.nombre} · {kmRuta} km{veh.usa_urea?" · 🧪 UREA":""}</p></div>
+                  <div className="px-5 py-4 border-b"><h2 className="font-black text-[#0b315f] text-sm">Desglose de costos</h2><p className="text-xs text-gray-400 mt-0.5">{veh.icono||"🚌"} {veh.nombre} · {kmRuta} km · {recorrido==="carretera"?"🛣️ carretera":"🏙️ urbano"}{veh.usa_urea?" · 🧪 UREA":""}</p></div>
                   <div className="p-5 space-y-2">
                     {[
                       {label:`Combustible (${veh.tipo_combustible_1})`,val:resultado.costoCombustible-resultado.costoUrea,color:COMB_COLOR[veh.tipo_combustible_1]||"#666"},
