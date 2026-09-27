@@ -47,7 +47,7 @@ import ModalEnviar from "./ModalEnviar";
 import ModalCostos, { type ReservaSinCosto } from "@/components/pactos/ModalCostos";
 import { guardarReservas } from "@/lib/reservas-pacto";
 import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
-import { etiquetasDelDia, segmentosEtiquetas, SQL_ETIQUETAS } from "@/lib/liquidacion-etiquetas";
+import { etiquetasDelDia, segmentosEtiquetas, SQL_ETIQUETAS, huecosDeEtiquetas, type DiaParaHuecos } from "@/lib/liquidacion-etiquetas";
 import type { TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
 
 const COLS_RESERVA =
@@ -953,6 +953,28 @@ export default function LiquidacionesPage() {
     return n;
   }, [reservasVisibles, hermanos]);
 
+  /**
+   * Días del periodo en que una RUTA · TURNO del contrato no tiene servicio aunque ese día
+   * de la semana suele salir. No bloquea: puede ser un feriado o un servicio sin registrar.
+   */
+  const huecos = useMemo(() => {
+    const vistos = new Set<number>();
+    const dias: DiaParaHuecos[] = [];
+    for (const r of reservasVisibles) {
+      if (vistos.has(r.id)) continue;
+      vistos.add(r.id);
+      const h = hermanos.hermanoDe(r);
+      if (h) vistos.add(h.id);
+      dias.push({
+        cliente_id: r.cliente_id ?? null,
+        fecha: r.fecha_servicio ?? null,
+        etiquetas: etiquetasDelDia([r, h]).etiquetas,
+        adicional: String((r as { origen_contractual?: string | null }).origen_contractual || "contrato") !== "contrato",
+      });
+    }
+    return huecosDeEtiquetas(dias, periodo.desde, periodo.hasta);
+  }, [reservasVisibles, hermanos, periodo.desde, periodo.hasta]);
+
   /** La etiqueta corta de un servicio para las listas: las del día si las tiene, si no la del nombre. */
   const rotuloCorto = useCallback((r: ReservaLiq) => {
     const e = etiquetasDelDia([r, hermanos.hermanoDe(r)]).etiquetas;
@@ -1590,6 +1612,18 @@ export default function LiquidacionesPage() {
                     : "text-gray-600 bg-white hover:bg-gray-50"
                 }`}>
                 🏷 {diasSinEtiqueta ? `${diasSinEtiqueta} día(s) sin etiqueta de ítem` : "Etiquetas de ítem"}
+              </button>
+            )}
+            {huecos.length > 0 && (
+              <button
+                onClick={() => alert(
+                  "Turnos del contrato sin servicio un día en que suelen salir:\n\n" +
+                  huecos.slice(0, 60).map((x) => `• ${x.fecha.split("-").reverse().join("/")} — ${nombreCliente(x.cliente_id)} · ${x.rotulo}`).join("\n") +
+                  (huecos.length > 60 ? `\n… y ${huecos.length - 60} más` : "") +
+                  "\n\nPuede ser un feriado o un servicio que no se registró. Revísalo en Programación antes de emitir.")}
+                title="Días en que una RUTA · TURNO del contrato no tiene servicio aunque ese día de la semana suele salir"
+                className="px-3 py-2 rounded-xl text-sm font-bold border text-amber-800 bg-amber-50 border-amber-200 hover:bg-amber-100">
+                ⚠ {huecos.length} día(s) sin servicio de un turno
               </button>
             )}
             {lado === "cliente" && rutasDelPeriodo.length > 0 && (

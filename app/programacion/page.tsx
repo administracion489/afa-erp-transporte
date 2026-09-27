@@ -38,8 +38,8 @@ import TimelineParadasEditable from "@/components/programacion/TimelineParadasEd
 import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
 import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
 import {
-  textoDeTramo, validarEtiquetas, etiquetasDeTramo, patchEtiquetas, rotuloEtiquetas,
-  type TextoEtiquetas,
+  textoDeTramo, validarEtiquetas, etiquetasDeTramo, patchEtiquetas, rotuloEtiquetas, mismasEtiquetas, etiquetasDelDia, claveRutaTurno,
+  type TextoEtiquetas, type TramoConEtiquetas,
 } from "@/lib/liquidacion-etiquetas";
 import { armarDias, proponerEtiquetas, type TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
 
@@ -591,6 +591,8 @@ export default function ReservasPage() {
   const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
   const [filtroSentido, setFiltroSentido] = useState<"todos" | "ida" | "retorno">("todos");
   const [filtroOrigen,  setFiltroOrigen]  = useState<"todos" | "contrato" | "adicional">("todos");
+  /** "" = todas · "sin" = sin etiquetas · "RUTA A|T1" = esa ruta y turno (etiquetas del DÍA). */
+  const [filtroEtiqueta, setFiltroEtiqueta] = useState("");
   const [form, setForm] = useState(FORM_VACIO);
   const [modalReservaId,       setModalReservaId]       = useState<number | null>(null);
   // El mismo modal en dos modos. null = cerrado. Ver ModalGenerarPrograma.Props.modo.
@@ -668,6 +670,8 @@ export default function ReservasPage() {
    * etiquetas, ni bloquea el guardado por unas que estaban a medias desde antes.
    */
   const [etqAlAbrir, setEtqAlAbrir] = useState<TextoEtiquetas>({ ruta: "", turno: "", movil: "" });
+  /** El operador pidió igualar la ida y el retorno aunque no haya tocado los campos. */
+  const [etqIgualar, setEtqIgualar] = useState(false);
   /**
    * El modal de etiquetas en lote: las filas marcadas, CONGELADAS al abrir. null = cerrado.
    * Una foto y no un filtro en cada render: la propuesta recorre todos los días cargados, y
@@ -1738,7 +1742,7 @@ export default function ReservasPage() {
 
   // Al cambiar cualquier filtro de cliente (búsqueda, estado, tipo…) se vuelve a mostrar
   // desde las primeras 100 filas, para que "Cargar más" no arrastre el conteo anterior.
-  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, filtroPorAsignar]);
+  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, filtroPorAsignar, filtroEtiqueta]);
 
   const nombreCliente    = (id: number | null) => { const c = clientes.find(c => c.id === id); return c ? (c.empresa || c.nombre) : "Sin cliente"; };
   const nombreVehiculo   = (id: number | null) => vehiculos.find(v => v.id === id)?.placa || "-";
@@ -1825,6 +1829,7 @@ export default function ReservasPage() {
       etiqueta_movil: textoDeTramo(r).movil,
     });
     setEtqAlAbrir(textoDeTramo(r));
+    setEtqIgualar(false);
     setCostoSug(null);
     setMsgPacto("");
     setEditandoId(r.id); setMostrarForm(true);
@@ -2095,10 +2100,14 @@ export default function ReservasPage() {
   const etqTocadas =
     etqTexto.ruta.trim() !== etqAlAbrir.ruta.trim() ||
     etqTexto.turno.trim() !== etqAlAbrir.turno.trim() ||
-    etqTexto.movil.trim() !== etqAlAbrir.movil.trim();
+    etqTexto.movil.trim() !== etqAlAbrir.movil.trim() ||
+    etqIgualar;
   const etqValidacion = validarEtiquetas(etqTexto);
   /** Las etiquetas del otro tramo del día: si este no tiene, son las que valen para el día. */
   const etqHermano = hermano ? etiquetasDeTramo(hermano) : null;
+  /** La ida y el retorno dicen cosas distintas: el día iría al ítem de la ida. */
+  const etqPropias = reservaEditada ? etiquetasDeTramo(reservaEditada) : null;
+  const etqDesiguales = !!etqHermano && !!etqPropias && !mismasEtiquetas(etqHermano, etqPropias);
   /**
    * Lo que el ERP propondría para este servicio: la RUTA del nombre y el TURNO por el orden
    * de salida de ese día entre los servicios cargados del mismo cliente. Es la MISMA
@@ -2172,6 +2181,20 @@ export default function ReservasPage() {
     const atras = apuntanAEnLista.get(r.id) ?? [];
     return atras.length === 1 ? porIdReserva.get(atras[0]) ?? null : null;
   };
+  /** La clave del filtro por etiqueta: las del DÍA (ida primero), por RUTA y TURNO. */
+  const claveFiltroEtiqueta = (r: Reserva): string => {
+    const e = etiquetasDelDia([r, hermanoEnLista(r)] as unknown as TramoConEtiquetas[]).etiquetas;
+    return e ? claveRutaTurno(e) : "sin";
+  };
+  /** Opciones del filtro: las RUTA·TURNO que aparecen en lo cargado, en orden. */
+  const opcionesEtiqueta = useMemo(() => {
+    const vistas = new Map<string, number>();
+    for (const r of reservas) { const k = claveFiltroEtiqueta(r); vistas.set(k, (vistas.get(k) ?? 0) + 1); }
+    return [...vistas.entries()].filter(([k]) => k !== "sin")
+      .sort(([a], [b]) => a.localeCompare(b, "es", { numeric: true }))
+      .map(([k, n]) => ({ k, n, rotulo: k.replace("|T", " · T") }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reservas]);
 
   /**
    * El estado ECONÓMICO del día, no del tramo. Devuelve null cuando está todo bien: un
@@ -3318,6 +3341,7 @@ export default function ReservasPage() {
       const passSentido     = filtroSentido === "todos" || sentidoServicio(r) === filtroSentido;
       const passOrigen      = filtroOrigen === "todos"
         || (filtroOrigen === "adicional" ? esAdicional(r) : !esAdicional(r));
+      const passEtiqueta    = !filtroEtiqueta || claveFiltroEtiqueta(r) === filtroEtiqueta;
       const passPorAsignar  = !filtroPorAsignar || (r.estado === "pendiente" && !r.vehiculo_id && !r.empresa_tercerizada_id);
       return txt.includes(q) &&
         passOrigen &&
@@ -3327,7 +3351,8 @@ export default function ReservasPage() {
         passSentido &&
         (!filtroDesde || (r.fecha_servicio && r.fecha_servicio >= filtroDesde)) &&
         (!filtroHasta || (r.fecha_servicio && r.fecha_servicio <= filtroHasta)) &&
-        passPorAsignar;
+        passPorAsignar &&
+        passEtiqueta;
     });
     // Próximos primero: futuros ascendentes, luego pasados descendentes (más reciente primero)
     // Desempate por hora_servicio: mismo día → la hora más próxima arriba
@@ -3351,7 +3376,7 @@ export default function ReservasPage() {
       }
       return aFut ? -1 : 1;
     });
-  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
+  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy, filtroEtiqueta]);
 
   // Agrupación de servicios fijos por contrato (cotizacion_id)
   const gruposContratos = useMemo(() => {
@@ -3426,7 +3451,7 @@ export default function ReservasPage() {
           titulo="Etiquetas del ítem · servicios marcados"
           subtitulo={`${modalEtiquetasFilas.length} servicio(s) marcado(s) en Programación — sus tramos hermanos se incluyen solos`}
           objetivo={modalEtiquetasFilas as unknown as TramoEtq[]}
-          // Todo lo cargado: el turno es el orden de salida del DÍA y se cuenta con todas las
+          // Todo lo cargado: el turno se hereda de lo ya escrito a la misma hora, mirando todas las
           // salidas de esa ruta, no solo con las marcadas.
           contexto={reservas as unknown as TramoEtq[]}
           nombreCliente={nombreCliente}
@@ -5140,6 +5165,16 @@ export default function ReservasPage() {
                     : <>Se quitan las etiquetas{hermano?.id ? " de este tramo y de su hermano" : ""}: el servicio vuelve a agruparse por el nombre de la ruta.</>}
                 </p>
               )}
+              {!etqTocadas && etqDesiguales && (
+                <p className="text-[11px] mt-1 font-bold text-amber-800 leading-snug">
+                  ⚠ Este tramo dice <b>{rotuloEtiquetas(etqPropias!)}</b> y su hermano{" "}
+                  <b className="font-mono">{hermano?.codigo ?? `#${hermano?.id}`}</b> dice <b>{rotuloEtiquetas(etqHermano!)}</b>.
+                  La liquidación usa las de la ida.{" "}
+                  <button type="button" className="underline" onClick={() => setEtqIgualar(true)}>
+                    Igualar los dos a las de este tramo al guardar
+                  </button>
+                </p>
+              )}
               {!etqTocadas && !etiquetasDeTramo(reservaEditada) && (
                 <p className="text-[10px] mt-1 text-gray-500 leading-snug">
                   {etqHermano
@@ -5650,6 +5685,14 @@ export default function ReservasPage() {
               </button>
             ))}
           </div>
+          {/* Por etiqueta del ítem: revisar un turno entero (RUTA A · T1) o lo que falta etiquetar. */}
+          <select value={filtroEtiqueta} onChange={e => setFiltroEtiqueta(e.target.value)}
+            className="border rounded-xl px-3 py-2 text-xs font-bold text-[#0b315f] bg-white"
+            title="Filtrar por las etiquetas del ítem de liquidación (RUTA · TURNO)">
+            <option value="">🏷 Toda etiqueta</option>
+            <option value="sin">Sin etiquetas</option>
+            {opcionesEtiqueta.map(o => <option key={o.k} value={o.k}>{o.rotulo} ({o.n})</option>)}
+          </select>
         </div>
 
         {/* Fila 2: rango de fechas + atajos + toggles */}
@@ -6082,7 +6125,7 @@ export default function ReservasPage() {
           </button>
           {/* Etiquetas del ítem de liquidación en lote. Con las filas de una ruta marcadas
               (filtra por la ruta y el rango, «Seleccionar todos»), el ERP propone RUTA del
-              nombre y TURNO por el orden de salida de cada día; se revisa por grupos. */}
+              nombre; el TURNO lo escribe el operador por grupo de hora. */}
           <button
             onClick={() => setModalEtiquetasFilas(reservas.filter(r => seleccionados.has(r.id)))}
             title="Poner RUTA, TURNO y MÓVIL a lo seleccionado: deciden los ítems de la liquidación"

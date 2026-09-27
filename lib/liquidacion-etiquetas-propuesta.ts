@@ -1,35 +1,26 @@
 // ──────────────────────────────────────────────────────────────────────────────
-// lib/liquidacion-etiquetas-propuesta.ts — El ERP PROPONE las etiquetas por horario;
-// las confirma una persona. Módulo PURO (sin Supabase, sin React).
+// lib/liquidacion-etiquetas-propuesta.ts — El ERP PROPONE lo que es un HECHO; el TURNO
+// lo DECIDE el operador. Módulo PURO (sin Supabase, sin React).
 //
-// Etiquetar a mano un mes entero son cientos de servicios. Pero casi todo lo que hace
-// falta ya está escrito en otra forma, y lo que no está, se nombra:
+// Etiquetar a mano un mes entero son cientos de servicios, así que el ERP adelanta lo que
+// ya está escrito en otra forma y deja en blanco lo que es una decisión:
 //
 //   · RUTA   → sale del NOMBRE solo cuando el nombre la dice ("RUTA A/ ENTRADA…"). Si
-//              el nombre no trae una letra de ruta, NO se inventa: el grupo sale con la
-//              RUTA en blanco y la escribe la persona.
-//   · TURNO  → el orden de salida de la ruta ESE DÍA: la más temprana es el TURNO 1, la
-//              siguiente el 2. Es la definición del dueño («T1 temprano, T2 siguiente») y
-//              es la que hace que un cambio de horario NO cambie el turno: si la RUTA A
-//              sale a las 04:35 una semana y a las 05:00 la siguiente, las dos son su
-//              primera salida del día.
-//   · MÓVIL  → solo cuando 2+ buses de la misma ruta salen A LA MISMA HORA el mismo día.
-//              Numerados por PAX contratados (el mayor es el 1, como en los formatos que
-//              AFA ya emite) y, a igualdad, por id — el generador inserta cada móvil del
-//              contrato en su propio lote, así que el id mantiene el mismo número todos
-//              los días.
+//              el nombre no trae una letra de ruta, NO se inventa.
+//   · TURNO  → NO SE DEDUCE. Es el rango de horas en que trabajan los pasajeros de ese
+//              turno, y eso lo sabe el operador, no el orden de salida. Una versión
+//              anterior lo numeraba por orden de salida del día y el dueño lo corrigió:
+//              un feriado sin el primer bus, un adicional o un cambio de horario movían el
+//              número sin que el turno de nadie cambiara. Lo único que se propone es lo
+//              que el operador YA escribió: si los días de esa ruta que salen a esa misma
+//              hora dicen todos TURNO 1, el día sin etiqueta hereda el 1. Si no hay nada
+//              escrito o lo escrito no coincide, el campo queda en blanco y el grupo se
+//              ofrece por hora de salida para escribirlo de un golpe.
+//   · MÓVIL  → solo cuando 2+ buses de la misma ruta salen A LA MISMA HORA el mismo día
+//              (es un hecho, no una decisión). Numerados por PAX contratados (el mayor es
+//              el 1) y, a igualdad, por id.
 //
-// CUANDO EL DÍA NO SE PARECE A LOS DEMÁS, NO SE ADIVINA
-//
-// Contar salidas funciona mientras cada día salgan las mismas. Un feriado en que solo sale
-// el segundo turno tiene UNA salida, y contarla la haría "TURNO 1". Por eso el turno se
-// cuenta directo solo en los días que tienen el número de salidas habitual de la ruta (la
-// moda); en los demás, cada salida se compara contra la hora típica de cada turno, y se
-// propone solo si la más cercana es ÚNICA, está a menos de `TOLERANCIA_TURNO_MIN` y el día
-// entero queda en orden. Si no, el día sale sin turno propuesto y con su motivo.
-//
-// El orden de los controles es el de siempre: de la evidencia al juicio. Y la propuesta
-// NUNCA se escribe sola: solo llena el formulario del modal de etiquetas.
+// La propuesta NUNCA se escribe sola: solo llena el formulario del modal de etiquetas.
 //
 // Matriz: npx tsx scripts/prueba-etiquetas.mts
 // ──────────────────────────────────────────────────────────────────────────────
@@ -41,14 +32,6 @@ import {
   validarEtiquetas,
   type EtiquetasDelDia, type EtiquetasItem, type TextoEtiquetas, type TramoConEtiquetas,
 } from "@/lib/liquidacion-etiquetas";
-
-/**
- * Cuánto puede separarse una salida de la hora típica de su turno para proponérselo en un
- * día atípico. NO está medido: es el colchón contra el corrimiento normal de un horario. El
- * lado seguro es BAJARLO — deja más días sin propuesta, que se etiquetan a mano; subirlo
- * propone turnos a salidas que no se parecen a ninguno.
- */
-export const TOLERANCIA_TURNO_MIN = 120;
 
 /** Lo que hace falta de una reserva para proponer y escribir sus etiquetas. */
 export type TramoEtq = TramoConEtiquetas & {
@@ -69,20 +52,20 @@ export type TramoEtq = TramoConEtiquetas & {
 
 /** Por qué una propuesta salió incompleta. Se DECLARA: la pantalla enruta por código. */
 export type MotivoPropuesta =
-  /** Hay RUTA y TURNO propuestos. */
+  /** Hay RUTA y TURNO propuestos (el turno, heredado de lo que el operador ya escribió). */
   | "propuesta"
+  /** El TURNO lo decide el operador: nada escrito a esa hora, o lo escrito no coincide. */
+  | "escribe_turno"
   /** El nombre no dice "RUTA X": la RUTA la escribe una persona. */
   | "sin_ruta_en_nombre"
-  /** Ese día salieron más o menos buses que lo habitual y la hora no decide el turno. */
-  | "turno_ambiguo"
-  /** El servicio no tiene hora: no hay con qué ordenarlo. */
+  /** El servicio no tiene hora. */
   | "sin_hora";
 
 export const TEXTO_MOTIVO_PROPUESTA: Record<MotivoPropuesta, string> = {
-  propuesta: "propuesta por horario",
+  propuesta: "turno heredado de los días de esta ruta a la misma hora que ya etiquetaste",
+  escribe_turno: "escribe el TURNO (el ERP no lo deduce del horario)",
   sin_ruta_en_nombre: "el nombre del servicio no dice la RUTA: escríbela",
-  turno_ambiguo: "ese día no salieron las mismas unidades que los demás y la hora no decide el turno: escríbelo",
-  sin_hora: "el servicio no tiene hora: escribe el turno",
+  sin_hora: "el servicio no tiene hora",
 };
 
 /** Lo que el ERP propone. Puede venir a medias: lo que falta lo escribe la persona. */
@@ -113,10 +96,6 @@ export type DiaEtq = {
 };
 
 const hhmm = (h?: string | null) => (h ? String(h).slice(0, 5) : null);
-const aMin = (h: string | null): number | null => {
-  const m = /^(\d{1,2}):(\d{2})/.exec(String(h ?? ""));
-  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
-};
 const sentido = (t: TramoEtq) => sentidoDeReserva(t as unknown as ReservaLiq);
 const esAdicional = (t: TramoEtq | null) => !!t && String(t.origen_contractual || "contrato") !== "contrato";
 
@@ -197,148 +176,32 @@ export function armarDias(tramos: TramoEtq[]): DiaEtq[] {
   return dias;
 }
 
-// ─── Turnos por horario ──────────────────────────────────────────────────────
-
-const mediana = (xs: number[]): number => {
-  const s = [...xs].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
-};
+// ─── Propuesta ───────────────────────────────────────────────────────────────
 
 /**
- * El turno más cercano a una hora, y solo si es INEQUÍVOCO: la distancia al más cercano
- * tiene que ser estrictamente menor que al segundo, y no pasar de la tolerancia.
- */
-function turnoMasCercano(min: number, tipicas: number[]): number | null {
-  const d = tipicas.map((t, i) => ({ i, d: Math.abs(t - min) })).sort((a, b) => a.d - b.d);
-  if (!d.length) return null;
-  if (d.length > 1 && d[0].d === d[1].d) return null;
-  if (d[0].d > TOLERANCIA_TURNO_MIN) return null;
-  return d[0].i + 1;
-}
-
-/**
- * Asigna el turno a cada día de una ruta según su hora de salida.
- *
- * `base` define la estructura (cuántas salidas tiene un día normal y a qué hora sale cada
- * turno); `aAsignar` recibe el turno. Normalmente son los mismos días; los adicionales y
- * los retornos sueltos se asignan contra la estructura de los demás, nunca la definen.
- */
-function turnosPorHorario(
-  base: DiaEtq[],
-  aAsignar: DiaEtq[],
-  horaDe: (d: DiaEtq) => number | null,
-): { turno: Map<DiaEtq, number | null>; tipicas: number[] } {
-  const turno = new Map<DiaEtq, number | null>();
-  const baseSet = new Set(base);
-
-  // Salidas DISTINTAS por fecha: dos buses a la misma hora son un solo turno (dos móviles).
-  const porFecha = new Map<string, number[]>();
-  for (const d of base) {
-    const h = horaDe(d);
-    if (h == null || !d.fecha) continue;
-    const ya = porFecha.get(d.fecha) ?? [];
-    if (!ya.includes(h)) ya.push(h);
-    porFecha.set(d.fecha, ya);
-  }
-  for (const hs of porFecha.values()) hs.sort((a, b) => a - b);
-  if (!porFecha.size) {
-    for (const d of aAsignar) turno.set(d, null);
-    return { turno, tipicas: [] };
-  }
-
-  // Cuántas salidas tiene un día NORMAL: la moda. En empate, la mayor, para que los días
-  // completos se cuenten directo y los que tienen menos se comparen por la hora típica.
-  const frec = new Map<number, number>();
-  for (const hs of porFecha.values()) frec.set(hs.length, (frec.get(hs.length) ?? 0) + 1);
-  const K = [...frec.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
-  const completas = [...porFecha.values()].filter((hs) => hs.length === K);
-  const tipicas = Array.from({ length: K }, (_, k) => mediana(completas.map((hs) => hs[k])));
-
-  // Un día atípico se asigna ENTERO o nada: cada salida a su turno más cercano, sin repetir
-  // y en orden. Si dos salidas caen en el mismo turno, o el orden se invierte, no se adivina.
-  const planFecha = new Map<string, Map<number, number> | null>();
-  const planDe = (fecha: string, hs: number[]): Map<number, number> | null => {
-    if (planFecha.has(fecha)) return planFecha.get(fecha)!;
-    let plan: Map<number, number> | null = new Map();
-    if (hs.length === K) hs.forEach((h, i) => plan!.set(h, i + 1));
-    else {
-      let previo = 0;
-      for (const h of hs) {
-        const k = turnoMasCercano(h, tipicas);
-        if (k == null || k <= previo) { plan = null; break; }
-        plan.set(h, k);
-        previo = k;
-      }
-    }
-    planFecha.set(fecha, plan);
-    return plan;
-  };
-
-  for (const d of aAsignar) {
-    const h = horaDe(d);
-    if (h == null) { turno.set(d, null); continue; }
-    if (baseSet.has(d) && d.fecha && porFecha.has(d.fecha)) {
-      turno.set(d, planDe(d.fecha, porFecha.get(d.fecha)!)?.get(h) ?? null);
-      continue;
-    }
-    turno.set(d, turnoMasCercano(h, tipicas));
-  }
-  return { turno, tipicas };
-}
-
-/**
- * Propone RUTA, TURNO y MÓVIL para cada día. Recibe TODOS los días del contexto (el turno
- * es el orden de salida del día, así que se cuenta con los días completos, no solo con los
- * que se van a etiquetar) y devuelve los mismos días con `propuesta` y `motivo` puestos.
+ * Propone RUTA (del nombre), TURNO (solo heredado de lo ya escrito por el operador a la
+ * misma hora en la misma ruta, y solo si es unánime) y MÓVIL (buses simultáneos). Recibe
+ * TODOS los días del contexto: la herencia y los móviles se miran con los días completos.
  */
 export function proponerEtiquetas(dias: DiaEtq[]): DiaEtq[] {
   const porRuta = new Map<string, DiaEtq[]>();
   for (const d of dias) porRuta.set(d.claveRuta, [...(porRuta.get(d.claveRuta) ?? []), d]);
 
   for (const grupo of porRuta.values()) {
-    const conIda = grupo.filter((d) => d.ida);
-    const soloRetorno = grupo.filter((d) => !d.ida);
-
-    // La estructura la define lo CONTRATADO: un adicional a las 12:00 no es un tercer
-    // turno de la ruta. Si la ruta solo tiene adicionales, se ordenan entre ellos.
-    const baseIda = conIda.filter((d) => !d.adicional);
-    const { turno: tIda } = turnosPorHorario(
-      baseIda.length ? baseIda : conIda, conIda, (d) => aMin(d.horaIda));
-
-    // Retornos sueltos (la ida se borró): contra la hora típica de RETORNO de cada turno,
-    // medida en los días que sí tienen los dos tramos. Sin esos días, entre ellos.
-    const tRet = new Map<DiaEtq, number | null>();
-    if (soloRetorno.length) {
-      const porTurno = new Map<number, number[]>();
-      for (const d of conIda) {
-        const k = tIda.get(d);
-        const m = aMin(d.horaRetorno);
-        if (k && m != null && !d.adicional) porTurno.set(k, [...(porTurno.get(k) ?? []), m]);
-      }
-      if (porTurno.size) {
-        const max = Math.max(...porTurno.keys());
-        // Un turno sin retornos medidos queda con una típica imposible, para que nunca sea
-        // el "más cercano" de nadie.
-        const tipicas = Array.from({ length: max }, (_, i) =>
-          porTurno.has(i + 1) ? mediana(porTurno.get(i + 1)!) : Number.MAX_SAFE_INTEGER / 4);
-        for (const d of soloRetorno) {
-          const m = aMin(d.horaRetorno);
-          tRet.set(d, m == null ? null : turnoMasCercano(m, tipicas));
-        }
-      } else {
-        const baseRet = soloRetorno.filter((d) => !d.adicional);
-        const { turno } = turnosPorHorario(
-          baseRet.length ? baseRet : soloRetorno, soloRetorno, (d) => aMin(d.horaRetorno));
-        for (const [d, k] of turno) tRet.set(d, k);
-      }
+    // Lo que el operador ya escribió, por hora de salida (ida; o retorno si es suelto).
+    const escritos = new Map<string, Set<number>>();
+    for (const d of grupo) {
+      const e = d.actual.etiquetas;
+      const h = d.ida ? d.horaIda : d.horaRetorno;
+      if (!e || !h) continue;
+      const k = `${d.ida ? "I" : "R"}${h}`;
+      escritos.set(k, (escritos.get(k) ?? new Set()).add(e.turno));
     }
 
-    // Móviles: 2+ días CONTRATADOS de la misma ruta, la misma fecha y la misma hora de
-    // salida. El mayor PAX contratado es el 1; a igualdad, el id.
+    // Móviles: 2+ días CONTRATADOS de la misma ruta, la misma fecha y la misma hora.
     const simultaneos = new Map<string, DiaEtq[]>();
-    for (const d of conIda) {
-      if (d.adicional || !d.fecha || !d.horaIda) continue;
+    for (const d of grupo) {
+      if (!d.ida || d.adicional || !d.fecha || !d.horaIda) continue;
       const k = `${d.fecha}|${d.horaIda}`;
       simultaneos.set(k, [...(simultaneos.get(k) ?? []), d]);
     }
@@ -352,11 +215,12 @@ export function proponerEtiquetas(dias: DiaEtq[]): DiaEtq[] {
 
     for (const d of grupo) {
       const hora = d.ida ? d.horaIda : d.horaRetorno;
-      const turno = d.ida ? tIda.get(d) ?? null : tRet.get(d) ?? null;
+      const vistos = hora ? escritos.get(`${d.ida ? "I" : "R"}${hora}`) : undefined;
+      const turno = vistos && vistos.size === 1 ? [...vistos][0] : null;
       d.propuesta = { ruta: d.propuesta.ruta, turno, movil: movil.get(d) ?? null };
-      d.motivo = !hora ? "sin_hora"
-        : !turno ? "turno_ambiguo"
-        : !d.propuesta.ruta ? "sin_ruta_en_nombre"
+      d.motivo = !d.propuesta.ruta ? "sin_ruta_en_nombre"
+        : !hora ? "sin_hora"
+        : !turno ? "escribe_turno"
         : "propuesta";
     }
   }
@@ -411,7 +275,9 @@ export function agruparParaEtiquetar(dias: DiaEtq[], opts?: { reemplazar?: boole
       d.cliente_id ?? "x",
       usaActual ? "A" : "P",
       ruta ?? `?${d.claveRuta}`,
-      turno ?? `?${d.motivo}`,
+      // Sin turno, el grupo es la HORA de salida: el operador escribe el turno de todos
+      // los días que salen a esa hora de un golpe.
+      turno ?? `h:${d.ida ? d.horaIda ?? "-" : "R" + (d.horaRetorno ?? "-")}`,
       movil ?? "-",
     ].join("|");
     let g = grupos.get(clave);

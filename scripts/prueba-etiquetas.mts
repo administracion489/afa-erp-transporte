@@ -14,22 +14,21 @@
 //   · la tarifa, los PAX, el origen y el falso flete siguen separando: una etiqueta no
 //     puede fundir dos precios;
 //   · sin etiquetas, la agrupación es la de siempre;
-//   · la PROPUESTA nunca adivina: un día atípico sale sin turno y con su motivo;
+//   · la PROPUESTA nunca deduce el TURNO: solo hereda lo que el operador ya escribió;
 //   · el guardado escribe los DOS tramos del día y solo los que cambian.
 //
 // Correr:  npx tsx scripts/prueba-etiquetas.mts
 import {
-  agruparServicios, analizarServicios, etiquetasDelPar,
+  agruparServicios, analizarServicios, etiquetasDelPar, choquesDeEtiquetas,
   type LineaAgrupada, type OpcionesAgrupacion, type ReservaLiq,
 } from "../lib/liquidacion-agrupacion";
 import {
   normalizarRutaEtiqueta, normalizarNumeroEtiqueta, validarEtiquetas, etiquetasDelDia,
   etiquetasDeTramo, cambiaEtiquetas, totalMoviles, segmentosEtiquetas, rotuloEtiquetas,
-  faltaMigracionEtiquetas, textoDeTramo,
+  faltaMigracionEtiquetas, textoDeTramo, huecosDeEtiquetas,
 } from "../lib/liquidacion-etiquetas";
 import {
   armarDias, proponerEtiquetas, agruparParaEtiquetar, planDeGuardado, rutaDelNombre,
-  TOLERANCIA_TURNO_MIN,
   type TramoEtq, type DecisionGrupo,
 } from "../lib/liquidacion-etiquetas-propuesta";
 
@@ -388,7 +387,7 @@ function par(fecha: string, horaIda: string, horaRet: string, nombre: string, ex
   return [a, b];
 }
 
-titulo("4 · La RUTA sale del nombre; el TURNO, del orden de salida del día");
+titulo("4 · La RUTA sale del nombre; el TURNO lo decide el operador");
 {
   ok(rutaDelNombre("RUTA A/ ENTRADA 04:35/ SANTA ANITA") === "RUTA A", "«RUTA A/ ENTRADA…» → RUTA A");
   ok(rutaDelNombre("RUTA C/ENTRADA 4:35/ 1RO MAYO") === "RUTA C", "«RUTA C/ENTRADA…» → RUTA C (sin espacio tras la barra)");
@@ -396,25 +395,27 @@ titulo("4 · La RUTA sale del nombre; el TURNO, del orden de salida del día");
   ok(rutaDelNombre(null) === null, "sin nombre tampoco");
 
   const tramos: TramoEtq[] = [];
-  // RUTA A: T1 a las 04:35 del 1 al 5, a las 05:00 del 8 al 12 (el cambio de horario);
-  // T2 a las 06:30 todos los días. El 10 es feriado y solo sale el T2.
-  for (const f of [...fechas(1, 5), ...fechas(8, 5)]) {
-    const h1 = f <= "2026-09-05" ? "04:35" : "05:00";
-    if (f !== "2026-09-10") tramos.push(...par(f, h1, "15:00", "RUTA A"));
-    tramos.push(...par(f, "06:30", "17:00", "RUTA A"));
-  }
+  for (const f of fechas(1, 5)) { tramos.push(...par(f, "04:35", "15:00", "RUTA A")); tramos.push(...par(f, "06:30", "17:00", "RUTA A")); }
   const dias = proponerEtiquetas(armarDias(tramos));
-  ok(dias.length === 19, "un día por par ida+retorno", dias.length);
-  const t1 = dias.filter((d) => d.horaIda === "04:35" || d.horaIda === "05:00");
-  const t2 = dias.filter((d) => d.horaIda === "06:30");
-  ok(t1.every((d) => d.propuesta.ruta === "RUTA A" && d.propuesta.turno === 1 && d.motivo === "propuesta"),
-    "04:35 y 05:00 son los dos TURNO 1 (la primera salida del día)", t1.map((d) => d.propuesta.turno).join(""));
-  ok(t2.every((d) => d.propuesta.turno === 2), "06:30 es TURNO 2 todos los días", t2.map((d) => d.propuesta.turno).join(""));
-  const feriado = dias.find((d) => d.fecha === "2026-09-10")!;
-  ok(feriado.propuesta.turno === 2, "el feriado con una sola salida (06:30) NO se vuelve TURNO 1: se compara por la hora típica", feriado.propuesta.turno);
-  ok(dias.every((d) => d.propuesta.movil === null), "sin buses simultáneos no se propone ningún móvil");
+  ok(dias.every((d) => d.propuesta.ruta === "RUTA A"), "la RUTA se propone del nombre");
+  ok(dias.every((d) => d.propuesta.turno === null && d.motivo === "escribe_turno"),
+    "sin nada escrito, el TURNO NO se deduce del orden de salida: lo escribe el operador");
+  // Un feriado con una sola salida tampoco inventa nada (la regresión de la versión por orden).
+  const solo = proponerEtiquetas(armarDias(par("2026-09-10", "06:30", "17:00", "RUTA A")));
+  ok(solo[0].propuesta.turno === null, "la única salida del día NO se vuelve TURNO 1");
 
-  // Idempotente: proponer dos veces da lo mismo.
+  // Herencia: lo ya escrito a la misma hora se propone a los días sin etiqueta.
+  const conEscrito = tramos.map((t) => ({ ...t }));
+  for (const t of conEscrito) if (t.fecha_servicio === "2026-09-01" && t.hora_servicio === "04:35") { t.ruta_etiqueta = "RUTA A"; t.turno = 3; }
+  const d2 = proponerEtiquetas(armarDias(conEscrito));
+  ok(d2.filter((d) => d.horaIda === "04:35" && !d.actual.etiquetas).every((d) => d.propuesta.turno === 3 && d.motivo === "propuesta"),
+    "los días a las 04:35 heredan el TURNO que el operador escribió a esa hora (aunque sea el 3)");
+  ok(d2.filter((d) => d.horaIda === "06:30").every((d) => d.propuesta.turno === null), "las 06:30 no heredan nada");
+  // Escrito contradictorio → no se elige.
+  for (const t of conEscrito) if (t.fecha_servicio === "2026-09-02" && t.hora_servicio === "04:35") { t.ruta_etiqueta = "RUTA A"; t.turno = 1; }
+  const d3 = proponerEtiquetas(armarDias(conEscrito));
+  ok(d3.filter((d) => d.horaIda === "04:35" && !d.actual.etiquetas).every((d) => d.propuesta.turno === null),
+    "si lo escrito a esa hora no coincide (T3 y T1), no se hereda ninguno");
   const otra = proponerEtiquetas(armarDias(tramos));
   ok(JSON.stringify(otra.map((d) => [d.clave, d.propuesta, d.motivo])) === JSON.stringify(dias.map((d) => [d.clave, d.propuesta, d.motivo])),
     "misma entrada, misma propuesta");
@@ -428,7 +429,6 @@ titulo("4b · Dos buses a la misma hora → MÓVIL 1 y 2 (el de más PAX primero
     tramos.push(...par(f, "07:00", "16:00", "RUTA B", { capacidad_contratada: 50 }));
   }
   const dias = proponerEtiquetas(armarDias(tramos));
-  ok(dias.every((d) => d.propuesta.turno === 1), "los dos son TURNO 1 (misma salida)");
   ok(dias.filter((d) => d.pax === 50).every((d) => d.propuesta.movil === 1), "el de 50 PAX es el MÓVIL 1");
   ok(dias.filter((d) => d.pax === 30).every((d) => d.propuesta.movil === 2), "el de 30 PAX es el MÓVIL 2");
 }
@@ -436,46 +436,12 @@ titulo("4b · Dos buses a la misma hora → MÓVIL 1 y 2 (el de más PAX primero
 titulo("4c · Lo que no se puede proponer, se DICE");
 {
   const tramos: TramoEtq[] = [
-    ...par("2026-09-01", "06:30", "17:00", "ENTRADA 06:30/ HOTEL EL VUELO"),          // sin RUTA en el nombre
-    tramo({ fecha: "2026-09-01", hora: null, nombre: "RUTA Z/ SIN HORA" }),             // sin hora
+    ...par("2026-09-01", "06:30", "17:00", "ENTRADA 06:30/ HOTEL EL VUELO"),
+    tramo({ fecha: "2026-09-01", hora: null, nombre: "RUTA Z/ SIN HORA" }),
   ];
   const dias = proponerEtiquetas(armarDias(tramos));
-  const sinRuta = dias.find((d) => d.nombre?.startsWith("ENTRADA"))!;
-  ok(sinRuta.propuesta.ruta === null && sinRuta.propuesta.turno === 1 && sinRuta.motivo === "sin_ruta_en_nombre",
-    "sin «RUTA X» en el nombre: turno propuesto, RUTA en blanco para escribirla", `${sinRuta.motivo}`);
-  const sinHora = dias.find((d) => d.nombre?.startsWith("RUTA Z"))!;
-  ok(sinHora.propuesta.turno === null && sinHora.motivo === "sin_hora", "sin hora: no hay turno", sinHora.motivo);
-
-  // Un día con una salida de más a una hora rara: el día entero queda sin turno.
-  const raros: TramoEtq[] = [];
-  for (const f of fechas(1, 5)) { raros.push(...par(f, "04:35", "15:00", "RUTA A")); raros.push(...par(f, "06:30", "17:00", "RUTA A")); }
-  raros.push(...par("2026-09-03", "12:00", "20:00", "RUTA A"));
-  const d2 = proponerEtiquetas(armarDias(raros));
-  const del3 = d2.filter((d) => d.fecha === "2026-09-03");
-  ok(del3.every((d) => d.propuesta.turno === null && d.motivo === "turno_ambiguo"),
-    "un día con 3 salidas donde lo normal son 2 → sin turno, `turno_ambiguo`", del3.map((d) => d.propuesta.turno).join(","));
-  ok(d2.filter((d) => d.fecha !== "2026-09-03").every((d) => d.propuesta.turno != null), "los demás días sí se proponen");
-
-  // Un ADICIONAL no define la estructura: cerca de un turno se le propone ese turno, lejos no.
-  const conAdic = [...raros.filter((t) => t.hora_servicio !== "12:00" && t.hora_servicio !== "20:00")];
-  conAdic.push(...par("2026-09-04", "06:40", "17:00", "RUTA A", { origen_contractual: "adicional" }));
-  conAdic.push(...par("2026-09-05", "12:00", "20:00", "RUTA A", { origen_contractual: "adicional" }));
-  const d3 = proponerEtiquetas(armarDias(conAdic));
-  const a1 = d3.find((d) => d.adicional && d.horaIda === "06:40")!;
-  const a2 = d3.find((d) => d.adicional && d.horaIda === "12:00")!;
-  ok(a1.propuesta.turno === 2, "adicional a las 06:40 → TURNO 2 (cerca de las 06:30)", a1.propuesta.turno);
-  ok(a2.propuesta.turno === null && a2.motivo === "turno_ambiguo", `adicional a las 12:00 → sin turno (a más de ${TOLERANCIA_TURNO_MIN} min de cualquiera)`, a2.motivo);
-  ok(d3.filter((d) => !d.adicional).every((d) => d.propuesta.turno != null), "los adicionales no desordenan los turnos del contrato");
-}
-
-titulo("4d · Retorno suelto (se borró la ida): se ubica por la hora típica de retorno");
-{
-  const tramos: TramoEtq[] = [];
-  for (const f of fechas(1, 4)) { tramos.push(...par(f, "04:35", "15:00", "RUTA A")); tramos.push(...par(f, "06:30", "17:00", "RUTA A")); }
-  tramos.push(tramo({ fecha: "2026-09-05", hora: "17:00", nombre: "RUTA A/ RETORNO 17:00/ BSF→SANTA ANITA", dir: "retorno" }));
-  const dias = proponerEtiquetas(armarDias(tramos));
-  const suelto = dias.find((d) => !d.ida)!;
-  ok(suelto.propuesta.turno === 2, "el retorno de las 17:00 es del TURNO 2 (el de las 06:30)", suelto.propuesta.turno);
+  ok(dias.find((d) => d.nombre?.startsWith("ENTRADA"))!.motivo === "sin_ruta_en_nombre", "sin «RUTA X» → `sin_ruta_en_nombre`");
+  ok(dias.find((d) => d.nombre?.startsWith("RUTA Z"))!.motivo === "sin_hora", "sin hora → `sin_hora`");
 }
 
 // ══ 5 · Grupos y guardado ═══════════════════════════════════════════════════
@@ -483,50 +449,72 @@ titulo("5 · Grupos del modal y lo que se escribe");
 {
   const tramos: TramoEtq[] = [];
   for (const f of fechas(1, 3)) { tramos.push(...par(f, "04:35", "15:00", "RUTA A")); tramos.push(...par(f, "06:30", "17:00", "RUTA A")); }
-  // Un día ya etiquetado a mano como T1 en la ida (el retorno vacío).
-  tramos[0].ruta_etiqueta = "RUTA A"; tramos[0].turno = 1;
+  tramos.push(...par("2026-09-04", "05:00", "15:00", "RUTA A"));   // cambio de horario del T1
+  tramos[0].ruta_etiqueta = "RUTA A"; tramos[0].turno = 1;          // un día ya etiquetado (retorno vacío)
   const dias = proponerEtiquetas(armarDias(tramos));
   const grupos = agruparParaEtiquetar(dias);
-  const prop1 = grupos.find((g) => g.fuente === "propuesta" && g.inicial.turno === "1")!;
-  const prop2 = grupos.find((g) => g.fuente === "propuesta" && g.inicial.turno === "2")!;
   const actual = grupos.find((g) => g.fuente === "actual")!;
-  ok(!!prop1 && !!prop2 && !!actual, "tres grupos: lo ya etiquetado, la propuesta T1 y la T2", grupos.map((g) => `${g.fuente}:${g.inicial.ruta}/${g.inicial.turno}×${g.dias.length}`).join(" · "));
-  ok(prop1.dias.length === 2 && prop2.dias.length === 3 && actual.dias.length === 1, "con 2, 3 y 1 días");
-  ok(actual.aMedio === 1, "el ya etiquetado declara que su retorno está vacío (se completa al guardar)");
-  ok(prop2.horas[0]?.hora === "06:30" && prop2.horas[0]?.dias === 3, "y enseña sus horas: 06:30 ×3");
-  ok(grupos.every((g) => g.completo), "todos llegan completos (RUTA y TURNO)");
+  const g435 = grupos.find((g) => g.fuente === "propuesta" && g.horas[0]?.hora === "04:35")!;
+  const g630 = grupos.find((g) => g.fuente === "propuesta" && g.horas[0]?.hora === "06:30")!;
+  const g500 = grupos.find((g) => g.fuente === "propuesta" && g.horas[0]?.hora === "05:00")!;
+  ok(!!actual && !!g435 && !!g630 && !!g500, "grupos: lo etiquetado, y los demás POR HORA de salida",
+    grupos.map((g) => `${g.fuente}:${g.inicial.turno || g.horas[0]?.hora}×${g.dias.length}`).join(" · "));
+  ok(actual.aMedio === 1, "el ya etiquetado declara que su retorno está vacío");
+  ok(g435.inicial.turno === "1" && g435.completo, "las 04:35 heredan el T1 escrito y llegan completas");
+  ok(!g630.completo && g630.inicial.turno === "", "las 06:30 llegan con el TURNO en blanco");
 
+  // El operador escribe T1 a las 05:00 y T2 a las 06:30: todo queda guardable.
   const dec = new Map<string, DecisionGrupo>();
   for (const g of grupos) dec.set(g.clave, { ...g.inicial, aplicar: true });
+  dec.set(g630.clave, { ...g630.inicial, turno: "2", aplicar: true });
+  dec.set(g500.clave, { ...g500.inicial, turno: "1", aplicar: true });
   const plan = planDeGuardado(grupos, dec);
-  ok(plan.errores.length === 0, "sin errores");
-  ok(plan.tramos === 11, "escribe los 11 tramos que cambian (12 menos la ida que ya decía RUTA A · T1)", plan.tramos);
-  ok(plan.sinCambio === 1, "y NO cuenta el que ya decía eso", plan.sinCambio);
+  ok(plan.errores.length === 0, "sin errores", plan.errores.map((e) => e.error).join(";"));
+  ok(plan.tramos === 13 && plan.sinCambio === 1, "escribe 13 tramos y no cuenta el que ya decía eso", `${plan.tramos}/${plan.sinCambio}`);
   const ids = plan.lotes.flatMap((l) => l.ids);
   ok(new Set(ids).size === ids.length, "cada tramo recibe UN solo destino");
-  ok(plan.lotes.every((l) => l.patch.ruta_etiqueta === "RUTA A" && l.patch.turno != null), "todos con RUTA A y su turno");
 
-  // Una decisión a medias no se escribe: se nombra.
   const malo = new Map(dec);
-  malo.set(prop2.clave, { ruta: "RUTA A", turno: "", movil: "", aplicar: true });
+  malo.set(g630.clave, { ruta: "RUTA A", turno: "", movil: "", aplicar: true });
   const p2 = planDeGuardado(grupos, malo);
   ok(p2.errores.length === 1 && /TURNO/.test(p2.errores[0].error), "RUTA sin TURNO → error con su porqué", p2.errores[0]?.error);
-  ok(!p2.lotes.some((l) => l.patch.turno === null && l.patch.ruta_etiqueta), "y no se escribe nada a medias");
 
-  // Quitar: las tres vacías sobre un grupo etiquetado.
   const quitar = new Map<string, DecisionGrupo>([[actual.clave, { ruta: "", turno: "", movil: "", aplicar: true }]]);
   const p3 = planDeGuardado(grupos, quitar);
-  ok(p3.quitar === 1 && p3.lotes[0]?.patch.ruta_etiqueta === null, "vaciar los tres campos QUITA las etiquetas (solo donde había)", p3.quitar);
-
-  // Sin marcar, no se escribe nada.
-  const nada = planDeGuardado(grupos, new Map());
-  ok(nada.lotes.length === 0 && nada.tramos === 0, "sin grupos marcados no se escribe nada");
-
-  // `reemplazar` agrupa también lo ya etiquetado por la propuesta.
-  const todos = agruparParaEtiquetar(dias, { reemplazar: true });
-  ok(todos.every((g) => g.fuente === "propuesta"), "«reemplazar» agrupa todo por la propuesta");
+  ok(p3.quitar === 1 && p3.lotes[0]?.patch.ruta_etiqueta === null, "vaciar los tres campos QUITA las etiquetas", p3.quitar);
+  ok(planDeGuardado(grupos, new Map()).tramos === 0, "sin grupos marcados no se escribe nada");
+  ok(agruparParaEtiquetar(dias, { reemplazar: true }).every((g) => g.fuente === "propuesta"), "«reemplazar» agrupa todo por la propuesta");
   ok(cambiaEtiquetas({ ruta_etiqueta: "RUTA A", turno: 1, movil: null }, { ruta: "RUTA A", turno: 1, movil: null }) === false,
     "escribir lo mismo no es un cambio");
+}
+
+titulo("7 · Choques y huecos");
+{
+  // Dos buses el mismo día con la misma RUTA · TURNO · MÓVIL → aviso con los dos códigos.
+  const rs = [
+    ...dia({ fecha: "2026-09-01", nombreIda: "RUTA A/ E", nombreRet: "RUTA A/ R", etq: { ruta: "RUTA A", turno: 1 } }),
+    ...dia({ fecha: "2026-09-01", horaIda: "06:30", nombreIda: "RUTA A/ E2", nombreRet: "RUTA A/ R2", etq: { ruta: "RUTA A", turno: 1 } }),
+    ...dia({ fecha: "2026-09-01", nombreIda: "RUTA A/ E3", nombreRet: "RUTA A/ R3", etq: { ruta: "RUTA A", turno: 1, movil: 2 } }),
+  ];
+  const an = analizarServicios(rs, "cliente");
+  ok(choquesDeEtiquetas(an.pares).length === 1, "un choque: dos días RUTA A · T1 sin móvil el mismo día");
+  ok(an.avisos.some((a) => /mismas etiquetas/.test(a.mensaje)), "y el cierre lo avisa");
+  const sinChoque = analizarServicios([
+    ...dia({ fecha: "2026-09-01", nombreIda: "RUTA A/ E", nombreRet: "RUTA A/ R", etq: { ruta: "RUTA A", turno: 1, movil: 1 } }),
+    ...dia({ fecha: "2026-09-01", nombreIda: "RUTA A/ E", nombreRet: "RUTA A/ R", etq: { ruta: "RUTA A", turno: 1, movil: 2 } }),
+    ...dia({ fecha: "2026-09-02", nombreIda: "RUTA A/ E", nombreRet: "RUTA A/ R", etq: { ruta: "RUTA A", turno: 1, movil: 1 } }),
+  ], "cliente");
+  ok(choquesDeEtiquetas(sinChoque.pares).length === 0, "MÓVIL 1 y 2 el mismo día, o el mismo móvil en días distintos, no chocan");
+
+  // Huecos: T1 sale lun-vie tres semanas y falta el miércoles 16.
+  const e = { ruta: "RUTA A", turno: 1, movil: null };
+  const dias = fechas(1, 21)
+    .filter((f) => ![0, 6].includes(new Date(f + "T00:00:00Z").getUTCDay()) && f !== "2026-09-16")
+    .map((f) => ({ cliente_id: 1, fecha: f, etiquetas: e }));
+  const h = huecosDeEtiquetas(dias, "2026-09-01", "2026-09-30");
+  ok(h.length === 1 && h[0].fecha === "2026-09-16", "falta el miércoles 16 → un hueco; los fines de semana no", h.map((x) => x.fecha).join(","));
+  const adic = huecosDeEtiquetas([{ cliente_id: 1, fecha: "2026-09-01", etiquetas: e, adicional: true }], "2026-09-01", "2026-09-30");
+  ok(adic.length === 0, "los adicionales no definen el patrón");
 }
 
 titulo("6 · Utilidades de pantalla");

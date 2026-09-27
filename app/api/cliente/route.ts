@@ -18,6 +18,7 @@
 //   • colaboradores_*  → CRUD de usuarios del portal (solo admin del portal)
 //   • doc_url          → URL firmada de un documento del cliente (storage)
 
+import { etiquetasDelDia, rotuloEtiquetas } from "@/lib/liquidacion-etiquetas";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createHash, createHmac, timingSafeEqual } from "crypto";
@@ -484,13 +485,37 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        const stats: Record<number, { embarcados: number; esperados: number; contratado: number | null }> = {};
+        // ── ETIQUETAS DEL ÍTEM ("RUTA A · T1") ──────────────────────────────
+        // El mismo vocabulario de la valorización, para que el cliente coteje su factura
+        // contra su orden de compra. Accesorias (liquidaciones-04): sin la migración o
+        // ante cualquier fallo, simplemente no viajan.
+        const etiquetaPorReserva = new Map<number, string>();
+        try {
+          const filasEtq = await paginado(reservasVentana(cid, "id,ruta_etiqueta,turno,movil,reserva_vinculada_id"));
+          type FilaEtq = { id: number; ruta_etiqueta: string | null; turno: number | null; movil: number | null; reserva_vinculada_id: number | null };
+          const filas = filasEtq as FilaEtq[];
+          const porIdEtq = new Map<number, FilaEtq>(filas.map((r) => [Number(r.id), r]));
+          const atrasEtq = new Map<number, number[]>();
+          for (const r of filas) {
+            const v = Number(r.reserva_vinculada_id ?? 0);
+            if (v > 0) atrasEtq.set(v, [...(atrasEtq.get(v) ?? []), Number(r.id)]);
+          }
+          for (const r of filas) {
+            const at = atrasEtq.get(Number(r.id));
+            const h = porIdEtq.get(Number(r.reserva_vinculada_id ?? 0)) ?? (at?.length === 1 ? porIdEtq.get(at[0]) : null) ?? null;
+            const e = etiquetasDelDia([r, h]).etiquetas;
+            if (e) etiquetaPorReserva.set(Number(r.id), rotuloEtiquetas(e));
+          }
+        } catch { /* best-effort */ }
+
+        const stats: Record<number, { embarcados: number; esperados: number; contratado: number | null; etiqueta: string | null }> = {};
         ids.forEach((id: number) => {
           const c = conteo.get(id);
           stats[id] = {
             embarcados: c?.embarcados ?? 0,
             esperados: c?.esperados ?? 0,
             contratado: contratadoPorReserva.get(id) ?? null,
+            etiqueta: etiquetaPorReserva.get(id) ?? null,
           };
         });
         return NextResponse.json({ stats });

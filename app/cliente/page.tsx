@@ -31,7 +31,7 @@ import {
  * Confundir los dos denominadores es el defecto que la columna PASAJEROS arrastraba:
  * enseñaba `embarcados / esperados`, que es el mismo número que ya publica la columna SLA.
  */
-type EstadisticaServicio = { embarcados: number; esperados: number; contratado: number | null };
+type EstadisticaServicio = { embarcados: number; esperados: number; contratado: number | null; etiqueta?: string | null };
 
 // Los dos modales se cargan al abrirlos, no al entrar al portal. Ambos se montan detrás
 // de un guard (`{gpsModalOpen && …}`, `{modalManifiestoData && …}`), así que no necesitan
@@ -4419,6 +4419,9 @@ export default function ClientePortal() {
                                   </span>
                                 ); })()}
                                 <span style={{ fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 20, background: est.bg, color: est.c, whiteSpace: "nowrap" as const }}>{est.label}</span>
+                                {st?.etiqueta && (
+                                  <span style={{ fontSize: 9.5, fontWeight: 800, padding: "2px 7px", borderRadius: 20, background: "#e0f2fe", color: "#075985", whiteSpace: "nowrap" as const }}>🏷 {st.etiqueta}</span>
+                                )}
                               </div>
                               <div style={{ fontSize: 11, color: C.mute, marginTop: 2, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>
                                 <span style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: C.mute2, marginRight: 5 }}>{ETIQUETA_RECORRIDO}</span>
@@ -4512,6 +4515,11 @@ export default function ClientePortal() {
                               const corte = { overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const };
                               return (
                                 <>
+                                  {st?.etiqueta && (
+                                    <span title="Ítem de la liquidación" style={{ display: "inline-block", fontSize: 9.5, fontWeight: 800, padding: "1px 7px", borderRadius: 20, background: "#e0f2fe", color: "#075985", marginBottom: 2 }}>
+                                      🏷 {st.etiqueta}
+                                    </span>
+                                  )}
                                   <p title={id.nombre ?? undefined}
                                      style={{ fontWeight: 700, color: id.nombre ? C.ink : C.mute2, fontStyle: id.nombre ? "normal" : "italic", margin: 0, fontSize: 12.5, ...corte }}>
                                     {id.nombre ?? SIN_NOMBRE_RUTA}

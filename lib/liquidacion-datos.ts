@@ -11,6 +11,7 @@
 // service-role de una API route.
 // ──────────────────────────────────────────────────────────────────────────────
 
+import { etiquetasDelDia, rotuloEtiquetas } from "@/lib/liquidacion-etiquetas";
 import type { DocLiquidacion, FilaAnexo, LineaDoc, ControlDoc, Anexo2 } from "./liquidacion-doc";
 import { fechaFormato } from "./liquidacion-agrupacion";
 import { empresaConDefectos } from "./empresa-perfil";
@@ -172,9 +173,12 @@ export async function cargarDocumentoLiquidacion(
     const reservaIds = [...new Set(puente.map((p) => Number(p.reserva_id)))];
     if (reservaIds.length) {
       const reservas = await enLotes(reservaIds, 300, async (chunk) => {
-        const { data } = await sb.from("reservas")
-          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,capacidad_contratada,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
-          .in("id", chunk);
+        const base = "id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,capacidad_contratada,precio_cliente,costo_proveedor,estado,reserva_vinculada_id";
+        // Las etiquetas del ítem (liquidaciones-04) son accesorias: sin la migración se
+        // imprime como antes, nunca un anexo vacío.
+        const conEtq = await sb.from("reservas").select(`${base},ruta_etiqueta,turno,movil`).in("id", chunk);
+        if (!conEtq.error) return ((conEtq.data as unknown as Record<string, unknown>[]) ?? []);
+        const { data } = await sb.from("reservas").select(base).in("id", chunk);
         return ((data as any[]) ?? []);
       });
       const porId = new Map<number, any>(reservas.map((r) => [Number(r.id), r]));
@@ -255,7 +259,13 @@ export async function cargarDocumentoLiquidacion(
             ref,
             fecha: fechaFormato(r.fecha_servicio).slice(0, 5),
             codigo: r.codigo || `#${r.id}`,
-            ruta: [r.ruta_nombre || [r.origen, r.destino].filter(Boolean).join(" → "),
+            // Con etiquetas, la fila empieza por ellas («RUTA A · T1»): es el mismo
+            // vocabulario del ítem de la valorización, y el cliente coteja por ahí.
+            ruta: [(() => {
+                     const e = etiquetasDelDia([r, porId.get(Number(r.reserva_vinculada_id ?? 0)) ?? null]).etiquetas;
+                     return e ? `${rotuloEtiquetas(e)} ·` : "";
+                   })(),
+                   r.ruta_nombre || [r.origen, r.destino].filter(Boolean).join(" → "),
                    r.direccion_servicio === "retorno" ? "(Retorno)" : "(Ida)"].filter(Boolean).join(" "),
             turno: hhmm(r.hora_servicio) || "—",
             placa: placa.get((esTercero ? "t" : "p") + (r.vehiculo_tercero_id ?? r.vehiculo_id)) ?? "",

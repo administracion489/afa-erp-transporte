@@ -290,3 +290,58 @@ export function textoDeTramo(r: TramoConEtiquetas | null | undefined): TextoEtiq
 export const faltaMigracionEtiquetas = (msg: unknown): boolean =>
   COLUMNAS_ETIQUETAS.some((c) => new RegExp(`\\b${c}\\b`, "i").test(String(msg ?? "")))
   && /does not exist|schema cache|column/i.test(String(msg ?? ""));
+
+// ─── Huecos: un turno contratado que no salió un día que suele salir ─────────
+
+export type DiaParaHuecos = {
+  cliente_id: number | null;
+  fecha: string | null;
+  etiquetas: EtiquetasItem | null;
+  /** Los adicionales no definen el patrón del contrato. */
+  adicional?: boolean;
+};
+
+export type Hueco = { cliente_id: number | null; clave: string; rotulo: string; fecha: string };
+
+/** Día de la semana (0 = domingo) de una fecha ISO, sin zona horaria. */
+const diaSemana = (iso: string): number => {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+};
+
+/**
+ * Las fechas del periodo en que una RUTA · TURNO etiquetada NO tiene servicio aunque ese
+ * DÍA DE LA SEMANA sí lo tenga en al menos `minSemanas` otras semanas del periodo. El
+ * patrón se mide por día de semana a propósito: un turno de lunes a viernes no deja un
+ * hueco cada sábado. Solo avisa: puede ser un feriado, o un servicio que nadie registró.
+ * Un día que existe (aunque esté cancelado) no es un hueco: está registrado.
+ */
+export function huecosDeEtiquetas(
+  dias: DiaParaHuecos[], desde: string, hasta: string, minSemanas = 2,
+): Hueco[] {
+  const porClave = new Map<string, { cliente_id: number | null; e: EtiquetasItem; fechas: Set<string> }>();
+  for (const d of dias) {
+    if (!d.etiquetas || !d.fecha || d.adicional) continue;
+    const k = `${d.cliente_id ?? "x"}#${claveRutaTurno(d.etiquetas)}`;
+    const g = porClave.get(k) ?? { cliente_id: d.cliente_id, e: d.etiquetas, fechas: new Set<string>() };
+    g.fechas.add(d.fecha);
+    porClave.set(k, g);
+  }
+  const huecos: Hueco[] = [];
+  for (const [k, g] of porClave) {
+    const porDia = new Map<number, number>();
+    for (const f of g.fechas) porDia.set(diaSemana(f), (porDia.get(diaSemana(f)) ?? 0) + 1);
+    const orden = [...g.fechas].sort();
+    const ini = orden[0] > desde ? orden[0] : desde;
+    const fin = orden[orden.length - 1] < hasta ? orden[orden.length - 1] : hasta;
+    const [y, m, d] = ini.split("-").map(Number);
+    for (let t = Date.UTC(y, m - 1, d); ; t += 86400000) {
+      const f = new Date(t).toISOString().slice(0, 10);
+      if (f > fin) break;
+      if (g.fechas.has(f)) continue;
+      if ((porDia.get(diaSemana(f)) ?? 0) >= minSemanas)
+        huecos.push({ cliente_id: g.cliente_id, clave: k, rotulo: `${g.e.ruta} · T${g.e.turno}`, fecha: f });
+    }
+  }
+  return huecos.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.rotulo.localeCompare(b.rotulo));
+}

@@ -17,6 +17,15 @@ type ItemCot = {
   vehiculo_tercero_id?: number | null;  // vehículo ter. → reservas.vehiculo_tercero_id + empresa_tercerizada_id
   /** Asientos CONTRATADOS del ítem → reservas.capacidad_contratada. Ver el Slot. */
   pax_contratado?:      number | null;
+  /**
+   * Etiquetas del ítem de liquidación de ESTE móvil. Cada ítem de la cotización es un
+   * móvil, así que una sola cotización con tres vehículos puede declarar T1·M1, T1·M2 y
+   * T2 sin partirla en tres cotizaciones. Las escribe el generador al programar y de aquí
+   * las hereda el mes siguiente.
+   */
+  etiqueta_ruta?:       string | null;
+  etiqueta_turno?:      number | null;
+  etiqueta_movil?:      number | null;
 };
 
 type CotizacionFija = {
@@ -64,6 +73,12 @@ type Slot = {
    * que nadie pactó (ver supabase/liquidaciones-03-ruta-contratada.sql).
    */
   pax_contratado:         number | null;
+  /** Las etiquetas que la cotización ya guardó para este móvil (ver ItemCot). */
+  etq_ruta?:              string | null;
+  etq_turno?:             number | null;
+  etq_movil?:             number | null;
+  /** Posición del ítem en `items_json` (para devolverle sus etiquetas). */
+  item_idx?:              number;
 };
 
 type Cliente = { id: number; nombre: string; empresa?: string; };
@@ -223,6 +238,13 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
   const [etqRuta,          setEtqRuta]          = useState("");
   const [etqRutaTocada,    setEtqRutaTocada]    = useState(false);
   const [etqTurno,         setEtqTurno]         = useState("");
+  /** TURNO/MÓVIL escritos para un vehículo concreto (fijo con varios móviles). */
+  // Atado a la cotización: otra cotización, otros móviles — lo escrito no se arrastra.
+  type EtqPorSlot = Record<number, { turno?: string; movil?: string }>;
+  const [etqSlotRaw, setEtqSlotRaw] = useState<{ cot: string; v: EtqPorSlot }>({ cot: "", v: {} });
+  const etqSlot: EtqPorSlot = etqSlotRaw.cot === cotizacionId ? etqSlotRaw.v : {};
+  const setEtqSlot = (f: (p: EtqPorSlot) => EtqPorSlot) =>
+    setEtqSlotRaw((raw) => ({ cot: cotizacionId, v: f(raw.cot === cotizacionId ? raw.v : {}) }));
   const [etqMovil,         setEtqMovil]         = useState("");
 
   // ── Estado exclusivo del modo ADICIONAL ────────────────────────────────
@@ -292,7 +314,13 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
       }];
     }
 
-    return items.map((it): Slot => {
+    return items.map((it, itemIdx): Slot => ({ ...slotDeItem(it), item_idx: itemIdx,
+      etq_ruta: it.etiqueta_ruta ?? null,
+      etq_turno: Number(it.etiqueta_turno) > 0 ? Number(it.etiqueta_turno) : null,
+      etq_movil: Number(it.etiqueta_movil) > 0 ? Number(it.etiqueta_movil) : null,
+    }));
+
+    function slotDeItem(it: ItemCot): Slot {
       // Vehículo tercerizado
       if (it.vehiculo_tercero_id) {
         const veh = vehTercero.find(v => v.id === it.vehiculo_tercero_id);
@@ -318,7 +346,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
         descripcion:            it.descripcion,
         pax_contratado:         Number(it.pax_contratado) > 0 ? Number(it.pax_contratado) : null,
       };
-    });
+    }
   }, [cot, vehTercero]);
 
   // ── Qué se va a generar, ya resuelto por modo ───────────────────────────
@@ -394,13 +422,32 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
    * MISMA hora con el mismo nombre de ruta, así que son móviles de la misma ruta y turno:
    * el orden de la cotización es el número de móvil. Con un solo vehículo no hay móvil.
    */
+  const textoDeSlot = (idx: number) => {
+    const sl = slotsAGenerar[idx];
+    const o = etqSlot[idx] ?? {};
+    const ruta = etqRutaTocada ? etqRutaVal : (sl?.etq_ruta || etqRutaVal);
+    const turno = o.turno ?? (etqTurno.trim() || (sl?.etq_turno ? String(sl.etq_turno) : ""));
+    const movil = esAdicional ? etqMovil
+      : o.movil ?? (sl?.etq_movil ? String(sl.etq_movil) : esMultiVehiculo ? String(idx + 1) : "");
+    return { ruta, turno, movil };
+  };
+  const validacionDeSlot = (idx: number) => validarEtiquetas(textoDeSlot(idx));
   const etiquetasDeSlot = (idx: number) => {
-    if (!etqValidas.ok || !etqValidas.etiquetas) return {};
-    const movil = esAdicional ? etqValidas.etiquetas.movil : esMultiVehiculo ? idx + 1 : null;
-    return patchEtiquetas({ ...etqValidas.etiquetas, movil });
+    if (esAdicional) {
+      if (!etqValidas.ok || !etqValidas.etiquetas) return {};
+      return patchEtiquetas(etqValidas.etiquetas);
+    }
+    const v = validacionDeSlot(idx);
+    return v.ok && v.etiquetas ? patchEtiquetas(v.etiquetas) : {};
   };
   /** ¿Alguien escribió en las etiquetas? La RUTA derivada del nombre sola no cuenta. */
-  const etqTocadas = etqRutaTocada || !!etqTurno.trim() || (esAdicional && !!etqMovil.trim());
+  const etqTocadas = etqRutaTocada || !!etqTurno.trim() || (esAdicional && !!etqMovil.trim())
+    || Object.values(etqSlot).some((o) => !!(o.turno?.trim() || o.movil?.trim()));
+  /** El primer vehículo cuyas etiquetas escritas no se pueden guardar. */
+  const etqErrorSlot = !esAdicional
+    ? slotsAGenerar.map((_, i) => ({ i, v: validacionDeSlot(i) })).find(({ i, v }) =>
+        !v.ok && !!(etqSlot[i]?.turno?.trim() || etqSlot[i]?.movil?.trim() || etqTurno.trim()))
+    : undefined;
 
   const clienteNombre = (id: number | null) => {
     if (!id) return "Sin cliente";
@@ -419,7 +466,9 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
     // Unas etiquetas escritas a medias no se guardan en silencio: se dice qué falta. Las
     // que nadie tocó (la RUTA derivada del nombre sin TURNO) no frenan nada: los servicios
     // nacen sin etiqueta y se etiquetan después.
-    const etqFalta = etqTocadas && !etqValidas.ok ? `Ítem de la liquidación: ${etqValidas.error}` : null;
+    const etqFalta = etqErrorSlot && !etqErrorSlot.v.ok
+      ? `Ítem de la liquidación (vehículo ${etqErrorSlot.i + 1}): ${etqErrorSlot.v.error}`
+      : esAdicional && etqTocadas && !etqValidas.ok ? `Ítem de la liquidación: ${etqValidas.error}` : null;
     if (esAdicional) {
       if (fechasSueltas.length === 0) return "Agrega al menos una fecha.";
       if (generaRetorno && !horaRetornoEfectiva) return "Falta la hora del retorno.";
@@ -621,6 +670,19 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
       );
     }
 
+    // Las etiquetas de cada móvil vuelven a su ítem de la cotización: el próximo mes el
+    // generador las trae puestas. Best-effort — los servicios ya se crearon con ellas.
+    if (!esAdicional && totalInsertados > 0 && cot.items_json?.length && !omitidasTotal.has("ruta_etiqueta")) {
+      const nuevos = cot.items_json.map((it, i) => {
+        const idxSlot = slotsAGenerar.findIndex((sl) => sl.item_idx === i);
+        const p = idxSlot >= 0 ? (etiquetasDeSlot(idxSlot) as Record<string, unknown>) : {};
+        if (!("ruta_etiqueta" in p)) return it;
+        return { ...it, etiqueta_ruta: p.ruta_etiqueta ?? null, etiqueta_turno: p.turno ?? null, etiqueta_movil: p.movil ?? null };
+      });
+      await supabase.from("cotizaciones").update({ items_json: nuevos }).eq("id", cot.id)
+        .then(() => undefined, () => undefined);
+    }
+
     onGenerado({ lote, cantidad: totalInsertados });
     onClose();
   };
@@ -781,6 +843,18 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
                             ? <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-bold" style={{ background: "#dcfce7", color: "#166534" }}>PROPIO</span>
                             : <span className="ml-1 opacity-50">sin asignar</span>}
                         {s.precio ? <span className="font-semibold"> — S/ {Number(s.precio).toFixed(2)}/día</span> : ""}
+                        {!esAdicional && (
+                          <span className="ml-2 inline-flex items-center gap-1 align-middle">
+                            <span className="text-[9px] font-black">T</span>
+                            <input value={textoDeSlot(idx).turno} inputMode="numeric" placeholder="—"
+                              onChange={e => setEtqSlot(p => ({ ...p, [idx]: { ...p[idx], turno: e.target.value } }))}
+                              className="w-9 border rounded px-1 py-0.5 text-[10px] font-bold text-[#0b315f] bg-white" />
+                            <span className="text-[9px] font-black">M</span>
+                            <input value={textoDeSlot(idx).movil} inputMode="numeric" placeholder="—"
+                              onChange={e => setEtqSlot(p => ({ ...p, [idx]: { ...p[idx], movil: e.target.value } }))}
+                              className="w-9 border rounded px-1 py-0.5 text-[10px] font-bold text-[#0b315f] bg-white" />
+                          </span>
+                        )}
                       </p>
                     ))}
                   </div>
