@@ -917,7 +917,34 @@ export function analizarServicios(
     });
   }
 
+  // Dos servicios del MISMO día con la MISMA RUTA · TURNO · MÓVIL son el mismo renglón
+  // contado dos veces el mismo día: casi siempre un bus reasignado al que nadie le cambió
+  // el móvil. No bloquea (el importe es real), pero se nombra con los dos códigos.
+  for (const [a, b] of choquesDeEtiquetas(res.pares))
+    res.avisos.push({
+      r: b.cabeza,
+      mensaje:
+        `${ref(a.cabeza)} y ${ref(b.cabeza)} salen el mismo día con las mismas etiquetas ` +
+        `(${rotuloEtiquetas(etiquetasDelPar(a).etiquetas!)}). Si son dos buses a la vez, uno es el MÓVIL 2; ` +
+        `si es otro turno, cámbiale el TURNO con "🏷 Etiquetas".`,
+    });
+
   return res;
+}
+
+/** Pares del mismo cliente y fecha con idénticas etiquetas (RUTA·TURNO·MÓVIL). */
+export function choquesDeEtiquetas(pares: ParServicio[]): [ParServicio, ParServicio][] {
+  const vistos = new Map<string, ParServicio>();
+  const out: [ParServicio, ParServicio][] = [];
+  for (const p of pares) {
+    const e = etiquetasDelPar(p).etiquetas;
+    const fecha = (p.ida ?? p.retorno ?? p.cabeza).fecha_servicio;
+    if (!e || !fecha) continue;
+    const k = `${p.cabeza.cliente_id ?? "x"}|${fecha}|${claveEtiquetas(e)}|${origenContractual(p.cabeza)}`;
+    const ya = vistos.get(k);
+    if (ya) out.push([ya, p]); else vistos.set(k, p);
+  }
+  return out;
 }
 
 /** Avisos que NO bloquean pero conviene ver antes de emitir (van al Anexo 1). */

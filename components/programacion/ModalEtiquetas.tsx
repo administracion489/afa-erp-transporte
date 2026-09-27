@@ -3,11 +3,10 @@
 // ModalEtiquetas — poner RUTA, TURNO y MÓVIL a muchos servicios a la vez.
 //
 // Las etiquetas deciden el ítem de la liquidación (lib/liquidacion-etiquetas.ts). Nadie va
-// a teclearlas servicio por servicio, y no hace falta: el ERP las PROPONE —la RUTA sale
-// del nombre cuando el nombre dice "RUTA A/ …", el TURNO del orden de salida de cada día,
-// el MÓVIL de los buses que salen a la misma hora— y aquí una persona las revisa POR
-// GRUPOS y las guarda. Lo que el ERP no puede proponer sin adivinar sale en ámbar con su
-// motivo y los campos en blanco.
+// a teclearlas servicio por servicio: la RUTA sale del nombre cuando dice "RUTA A/ …" y el
+// MÓVIL de los buses que salen a la misma hora. El TURNO lo DECIDE el operador —es el
+// rango de horas en que trabajan los pasajeros, no el orden de salida—, así que los días
+// sin turno se agrupan POR HORA DE SALIDA y se escribe una vez por grupo.
 //
 // Tres reglas de esta pantalla:
 //   · Se escribe en los DOS tramos del día (la ida y el retorno), porque las etiquetas son
@@ -207,7 +206,8 @@ export default function ModalEtiquetas({
             Cada ítem de la liquidación es <b>RUTA + TURNO</b> (+ <b>MÓVIL</b> si salen dos buses a la vez),
             con sus <b>PAX contratados</b> y su <b>tarifa</b>. <b>La hora ya no separa ítems</b>: si el turno 1 sale
             a las 04:35 una semana y a las 05:00 la siguiente, suma en el mismo. La RUTA se toma del nombre
-            («RUTA A/ …») y el TURNO del orden de salida de cada día (el más temprano es el 1): revisa y guarda.
+            («RUTA A/ …»). <b>El TURNO lo decides tú</b>: los días van agrupados por hora de salida; escribe el turno
+            de cada grupo y guarda. Si ya etiquetaste otros días de esa ruta a esa hora, el turno se hereda.
           </p>
           <p className="text-[11px] text-gray-500 mt-1">
             <b>{cuenta.dias}</b> día(s) · <b>{cuenta.etiquetados}</b> ya etiquetado(s) · <b>{cuenta.propuestos}</b> con propuesta completa
@@ -236,7 +236,7 @@ export default function ModalEtiquetas({
           </label>
           <button onClick={marcarPropuestas}
             className="ml-auto px-2.5 py-1 rounded-lg border bg-white font-bold text-[#0b315f] hover:bg-gray-50">
-            Marcar todas las propuestas completas
+            Marcar todos los grupos completos
           </button>
         </div>
 

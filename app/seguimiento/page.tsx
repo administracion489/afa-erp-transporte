@@ -19,6 +19,7 @@ import { SIN_NOMBRE_RUTA, ETIQUETA_RECORRIDO } from "@/lib/ruta-identidad";
 import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
 import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
 import type { TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
+import { etiquetasDelDia, claveRutaTurno, type TramoConEtiquetas } from "@/lib/liquidacion-etiquetas";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -612,6 +613,8 @@ export default function SeguimientoPage() {
   const [filtroTipo,  setFiltroTipo]  = useState<"todos"|"fijo"|"eventual">("todos");
   const [filtroEstado,setFiltroEstado]= useState<"todos"|EstadoVisual>("todos");
   const [busqueda,    setBusqueda]    = useState("");
+  /** "" = todas · "sin" · "RUTA A|T1" (etiquetas del DÍA). */
+  const [filtroEtq,   setFiltroEtq]   = useState("");
   const [gpsModal,    setGpsModal]    = useState<ServicioView | null>(null);
   const [drawer,      setDrawer]      = useState<ServicioView | null>(null);
   const [descargaMasiva, setDescargaMasiva] = useState(false);
@@ -911,7 +914,18 @@ export default function SeguimientoPage() {
     return c ? (c.empresa || c.nombre) : "Sin cliente";
   }, [clientes]);
 
+  const claveEtq = (r: Reserva): string => {
+    const e = etiquetasDelDia([r, hermanoDe(r)] as unknown as TramoConEtiquetas[]).etiquetas;
+    return e ? claveRutaTurno(e) : "sin";
+  };
+  const opcionesEtq = (() => {
+    const m = new Map<string, number>();
+    for (const s of servicios) { const k = claveEtq(s.reserva); m.set(k, (m.get(k) ?? 0) + 1); }
+    return [...m.entries()].filter(([k]) => k !== "sin").sort(([a],[b]) => a.localeCompare(b, "es", { numeric: true }));
+  })();
+
   const filtrados = servicios.filter(s=>{
+    if (filtroEtq && claveEtq(s.reserva)!==filtroEtq) return false;
     if (filtroTipo==="fijo"&&s.es_eventual) return false;
     if (filtroTipo==="eventual"&&!s.es_eventual) return false;
     if (filtroEstado!=="todos"&&s.estado_visual!==filtroEstado) return false;
@@ -1048,6 +1062,13 @@ export default function SeguimientoPage() {
               <input className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#0b315f] transition-colors"
                 placeholder="Buscar por placa, conductor, cliente o ruta..." value={busqueda} onChange={e=>setBusqueda(e.target.value)}/>
             </div>
+            <select value={filtroEtq} onChange={e=>setFiltroEtq(e.target.value)}
+              className="border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-[#0b315f] bg-white"
+              title="Filtrar por las etiquetas del ítem de liquidación (RUTA · TURNO)">
+              <option value="">🏷 Toda etiqueta</option>
+              <option value="sin">Sin etiquetas</option>
+              {opcionesEtq.map(([k,n])=><option key={k} value={k}>{k.replace("|T"," · T")} ({n})</option>)}
+            </select>
             <div className="flex gap-1 bg-gray-50 rounded-xl p-1">
               {(["todos","fijo","eventual"] as const).map(t=>(
                 <button key={t} onClick={()=>setFiltroTipo(t)}
