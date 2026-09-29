@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { empresaConDefectos } from "@/lib/empresa-perfil";
+import { empresaConDefectos, logoDeFondo } from "@/lib/empresa-perfil";
 
 // Contenido por defecto (se muestra si la tabla no existe o está vacía)
 const CONTENIDO_DEFAULT = `
@@ -114,7 +114,7 @@ const CONTENIDO_DEFAULT = `
 `;
 
 export default function PrivacidadPage() {
-  const [empresa,    setEmpresa]    = useState<{nombre:string|null;logo_url:string|null;email:string|null;telefono:string|null;ruc:string|null} | null>(null);
+  const [empresa,    setEmpresa]    = useState<{nombre:string|null;logo_url:string|null;logo_claro_url?:string|null;email:string|null;telefono:string|null;ruc:string|null} | null>(null);
   const [contenido,  setContenido]  = useState<string | null>(null);
   const [titulo,     setTitulo]     = useState("Política de Privacidad y Protección de Datos Personales");
   const [updatedAt,  setUpdatedAt]  = useState<string | null>(null);
@@ -122,7 +122,16 @@ export default function PrivacidadPage() {
 
   useEffect(() => {
     Promise.all([
-      supabase.from("empresa_perfil").select("nombre,logo_url,email,telefono,ruc").eq("id", 1).maybeSingle(),
+      // `logo_claro_url` es de una migración accesoria: sin la columna se pide sin ella, para
+      // no perder también el nombre y el RUC (mismo patrón que el portal del cliente).
+      (async () => {
+        const COLS = "nombre,logo_url,email,telefono,ruc";
+        const r = await supabase.from("empresa_perfil").select(`${COLS},logo_claro_url`).eq("id", 1).maybeSingle();
+        if (r.error && /logo_claro_url/i.test(r.error.message || "")) {
+          return supabase.from("empresa_perfil").select(COLS).eq("id", 1).maybeSingle();
+        }
+        return r;
+      })(),
       supabase.from("paginas_legales").select("titulo,contenido,updated_at").eq("id", "privacidad").maybeSingle(),
     ]).then(([empRes, pgRes]) => {
       if (empRes.data) setEmpresa(empRes.data as any);
@@ -168,7 +177,8 @@ export default function PrivacidadPage() {
           position: absolute; inset: 0;
           background: radial-gradient(ellipse at top right, rgba(255,255,255,0.06) 0%, transparent 60%);
         }
-        .pv-logo { height: 52px; object-fit: contain; filter: brightness(0) invert(1); margin-bottom: 14px; }
+        .pv-logo { height: 52px; object-fit: contain; margin-bottom: 14px; }
+        .pv-logo-placa { background: #fff; border-radius: 10px; padding: 6px 12px; }
         .pv-logo-fb { width: 52px; height: 52px; background: rgba(255,255,255,0.12); border-radius: 14px; display: inline-flex; align-items: center; justify-content: center; font-size: 26px; margin-bottom: 14px; }
         .pv-header h1 { color: white; font-size: clamp(18px, 4vw, 26px); font-weight: 900; margin: 0 0 8px; line-height: 1.3; }
         .pv-header p  { color: rgba(255,255,255,0.65); font-size: 13px; margin: 0; }
@@ -244,8 +254,13 @@ export default function PrivacidadPage() {
 
         {/* ── HEADER ── */}
         <div className="pv-header">
-          {empresa?.logo_url
-            ? <img src={empresa.logo_url} alt={empNombre} className="pv-logo" />
+          {/* La cabecera es azul marino: va el logo CLARO (logoDeFondo, el mismo criterio del
+              portal). Antes se forzaba el principal a blanco con un filtro CSS, y un logo con
+              fondo opaco salía como un recuadro blanco. Sin logo claro, el principal va sobre
+              una placa blanca, que es donde se diseñó para verse. */}
+          {logoDeFondo(empresa, "oscuro")
+            ? <img src={logoDeFondo(empresa, "oscuro")!} alt={empNombre}
+                className={empresa?.logo_claro_url ? "pv-logo" : "pv-logo pv-logo-placa"} />
             : <div className="pv-logo-fb">🚌</div>
           }
           <h1>{titulo}</h1>
