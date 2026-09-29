@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { registrarLectura, corregirCapturaPorReloj, hashDeFoto } from "@/lib/odometro";
+import { firmarUrl, firmarUrls } from "@/lib/storage-firmado";
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 import { cerrarServiciosAnterioresDelVehiculo } from "@/lib/cerrar-servicio-anterior";
@@ -762,7 +763,11 @@ export async function POST(req: NextRequest) {
           .select("id, parada_id, pasajero_id, estado, pasajero:pasajeros(id, nombre, dni, empresa, qr_code, foto_url)")
           .in("parada_id", mias);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-        return NextResponse.json({ pasajeros: data || [] });
+        // `pasajeros-fotos` es privado: la foto viaja con un enlace firmado (el guardado ya no abre).
+        const filas = (data || []) as Array<{ pasajero?: { foto_url?: string | null } | null }>;
+        const fotos = await firmarUrls(admin, filas.map((f) => f.pasajero?.foto_url));
+        for (const f of filas) if (f.pasajero?.foto_url) f.pasajero.foto_url = fotos.get(f.pasajero.foto_url) ?? f.pasajero.foto_url;
+        return NextResponse.json({ pasajeros: filas });
       }
 
       // ── Chat: mensajes de los pasajeros de MI servicio (para la bandeja) ──────
@@ -838,6 +843,7 @@ export async function POST(req: NextRequest) {
         const { data, error } = await admin.from("pasajeros")
           .select("id, nombre, dni, empresa, qr_code, foto_url").eq("qr_code", qr).maybeSingle();
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        if (data?.foto_url) data.foto_url = await firmarUrl(admin, data.foto_url);
         return NextResponse.json({ pasajero: data ?? null });
       }
 
@@ -1148,7 +1154,8 @@ export async function POST(req: NextRequest) {
           if (!px) return NextResponse.json({ ok: false, noEncontrado: true });
           pasajeroId = px.id;
           // A la pantalla solo lo que pinta: cliente_id/reserva_id se usan aquí y no viajan.
-          pasajeroInfo = { id: px.id, nombre: px.nombre, empresa: px.empresa, dni: px.dni, qr_code: px.qr_code, foto_url: px.foto_url };
+          // Firmada: la ficha que sale al escanear pinta la foto, y el bucket es privado.
+          pasajeroInfo = { id: px.id, nombre: px.nombre, empresa: px.empresa, dni: px.dni, qr_code: px.qr_code, foto_url: await firmarUrl(admin, px.foto_url) };
           paxClienteId = px.cliente_id ?? null;
           paxReservaId = px.reserva_id ?? null;
         }

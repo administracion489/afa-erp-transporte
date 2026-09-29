@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { supabase } from "@/lib/supabase";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, esAppNativa, bateriaExenta, solicitarExencionBateria, type GeoWatch } from "@/lib/geo";
 import { detectarSoportePush, activarPushWeb, activarPushNativo, desactivarPush, resincronizarSuscripcion, permisoBloqueado, type SoportePush } from "@/lib/push-cliente";
 import { identidadRuta, SIN_NOMBRE_RUTA } from "@/lib/ruta-identidad";
@@ -680,6 +679,18 @@ export default function AppPasajero() {
       setPasajero(saved);
       setParaderoConfirmado(loadParaderoOk());
       void cargarMiRuta(saved.id);
+      // La foto guardada en la sesión es un enlace FIRMADO que caduca en una hora: al reabrir la
+      // app se pide uno vigente (best-effort: si falla se sigue con las iniciales).
+      if (saved.foto_url) {
+        paxApi("foto_vigente").then(({ foto_url }) => {
+          setPasajero(prev => {
+            if (!prev || prev.id !== saved.id) return prev;
+            const act = { ...prev, foto_url: foto_url ?? null };
+            saveSession(act);
+            return act;
+          });
+        }).catch(() => {});
+      }
     }
     setIniting(false);
     // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
@@ -1298,14 +1309,12 @@ export default function AppPasajero() {
       const w = Math.round(bitmap.width * ratio), h = Math.round(bitmap.height * ratio);
       const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
       const ctx = canvas.getContext("2d")!; ctx.drawImage(bitmap, 0, 0, w, h);
-      const blob = await new Promise<Blob>(res => canvas.toBlob(b => res(b!), "image/jpeg", 0.85));
-      // Nombre no adivinable (antes era foto_<timestamp>, enumerable junto al id secuencial).
-      const path = `${pasajero.id}/${crypto.randomUUID()}.jpg`;
-      const { error: upErr } = await supabase.storage.from("pasajeros-fotos").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
-      if (upErr) throw upErr;
-      const { data: { publicUrl } } = supabase.storage.from("pasajeros-fotos").getPublicUrl(path);
-      await paxApi("foto", { pid: pasajero.id, fotoUrl: publicUrl });
-      const updated = { ...pasajero, foto_url: publicUrl }; setPasajero(updated); saveSession(updated);
+      // La SUBE EL SERVIDOR (acción subir_foto): el bucket es privado y ya no admite subidas con
+      // la clave pública. Se manda el JPEG recortado en base64 y vuelve un enlace firmado, que
+      // solo se pinta — lo guardado en la base lo decide el servidor.
+      const imagen = canvas.toDataURL("image/jpeg", 0.85);
+      const { foto_url } = await paxApi("subir_foto", { imagen });
+      const updated = { ...pasajero, foto_url: foto_url ?? null }; setPasajero(updated); saveSession(updated);
     } catch (e: any) {
       setFotoErr(e?.message || "Error al subir la foto.");
     } finally { setUploading(false); }

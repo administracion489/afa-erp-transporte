@@ -13,6 +13,7 @@ import {
   type Autoridad,
 } from "@/lib/autorizacion-transporte";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -2172,7 +2173,7 @@ export default function EmpresasTercerizadasPage() {
                                 </td>
                                 <td className="p-2">
                                   {d.archivo_url
-                                    ? <a href={d.archivo_url} target="_blank" rel="noreferrer" className="text-blue-500 font-bold underline">Ver</a>
+                                    ? <EnlacePrivado href={d.archivo_url} target="_blank" rel="noreferrer" className="text-blue-500 font-bold underline">Ver</EnlacePrivado>
                                     : <span className="text-gray-300">—</span>}
                                 </td>
                                 <td className="p-2">
@@ -2406,8 +2407,8 @@ export default function EmpresasTercerizadasPage() {
                         <p className="font-bold text-sm text-gray-900">{r.empresa?.razon_social || "—"}</p>
                         <p className="text-xs text-gray-500">{etiquetaTipoDoc(r.tipo)} · {r.vehiculo?.placa ? `Unidad ${r.vehiculo.placa}` : "Empresa (general)"}</p>
                       </div>
-                      <a href={r.archivo_url} target="_blank" rel="noreferrer"
-                        className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap flex-shrink-0">Ver archivo →</a>
+                      <EnlacePrivado href={r.archivo_url} target="_blank" rel="noreferrer"
+                        className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap flex-shrink-0">Ver archivo →</EnlacePrivado>
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-xs">
                       <div className="bg-gray-50 rounded-lg px-2.5 py-1.5">

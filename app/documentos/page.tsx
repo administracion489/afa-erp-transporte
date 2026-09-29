@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { EnlacePrivado, firmarEnNavegador } from "@/components/ArchivoPrivado";
 
 type Documento = {
   id: number;
@@ -236,7 +237,8 @@ export default function DocumentosPage() {
   };
 
   const descargarArchivo = async (url: string, nombre: string | null) => {
-    const response = await fetch(url);
+    // El bucket `documentos` es privado: el enlace guardado se firma antes de bajarlo.
+    const response = await fetch(await firmarEnNavegador(url));
     const blob = await response.blob();
     const blobUrl = window.URL.createObjectURL(blob);
 
@@ -594,13 +596,13 @@ export default function DocumentosPage() {
               <div className="flex gap-2 pt-2">
                 {doc.archivo_url && (
                   <>
-                    <a
+                    <EnlacePrivado
                       href={doc.archivo_url}
                       target="_blank"
                       className="bg-slate-900 text-white px-3 py-2 rounded text-sm"
                     >
                       Ver
-                    </a>
+                    </EnlacePrivado>
 
                     <button
                       onClick={() =>

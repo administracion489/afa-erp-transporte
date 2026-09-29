@@ -11,6 +11,7 @@ import { supabase } from "@/lib/supabase";
 import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { EnlacePrivado } from "@/components/ArchivoPrivado";
 
 type Lectura = {
   id: string; km: number; fuente: string; fecha: string;
@@ -291,7 +292,7 @@ export default function OdometroTerceroModal({
                           <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: est.bg, color: est.color }}>{est.label}</span>
                         </td>
                         <td className="p-2.5 text-xs">
-                          {l.foto_url ? <a href={l.foto_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">ver</a> : "—"}
+                          {l.foto_url ? <EnlacePrivado href={l.foto_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">ver</EnlacePrivado> : "—"}
                         </td>
                         <td className="p-2.5 text-right">
                           {l.estado !== "anulada" && (

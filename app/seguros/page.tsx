@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -648,10 +649,10 @@ export default function SegurosPage() {
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         <div className="flex items-center gap-1.5">
                           {s.archivo_url && (
-                            <a href={s.archivo_url} target="_blank" rel="noopener noreferrer"
+                            <EnlacePrivado href={s.archivo_url} target="_blank" rel="noopener noreferrer"
                               className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-blue-50 text-blue-600 border-blue-100">
                               📄 PDF
-                            </a>
+                            </EnlacePrivado>
                           )}
                           <button onClick={() => editar(s)}
                             className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">
@@ -696,10 +697,10 @@ export default function SegurosPage() {
                             <div className="space-y-1.5">
                               <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Documentos</p>
                               {s.archivo_url
-                                ? <a href={s.archivo_url} target="_blank" rel="noopener noreferrer"
+                                ? <EnlacePrivado href={s.archivo_url} target="_blank" rel="noopener noreferrer"
                                     className="flex items-center gap-1.5 text-blue-600 font-bold hover:underline">
                                     📄 Ver póliza / PDF
-                                  </a>
+                                  </EnlacePrivado>
                                 : <p className="text-gray-300">Sin archivo adjunto</p>}
                               {s.observaciones && <p className="text-gray-500 italic mt-1">"{s.observaciones}"</p>}
                               {esOblig && dias !== null && dias <= 30 && (

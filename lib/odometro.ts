@@ -11,6 +11,8 @@
 //   - marcarReinicio() re-ancla el vigente cuando cambian el tablero (odómetro
 //     físico reemplazado), evitando que "el mayor gana" deje al bus ciego.
 
+import { firmarUrl, type ClienteStorage } from "@/lib/storage-firmado";
+
 export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
   | "combustible" | "checklist" | "servicio"
@@ -339,16 +341,19 @@ function aRef(f: { km: number; created_at: string; capturado_en: string | null; 
  */
 export async function hashDeFoto(
   origen: { url?: string | null; base64?: string | null },
-  opts: { timeoutMs?: number } = {}
+  opts: { timeoutMs?: number; client?: ClienteStorage } = {}
 ): Promise<string | null> {
   try {
     const { createHash } = await import("node:crypto");
     if (origen.base64) return createHash("sha256").update(Buffer.from(origen.base64, "base64")).digest("hex");
     if (!origen.url) return null;
+    // Una foto de `radar-media` (bucket privado) no se baja con su enlace guardado: con el cliente
+    // de quien registra se firma primero. Sin cliente se intenta tal cual (lo público pasa igual).
+    const url = opts.client ? ((await firmarUrl(opts.client, origen.url, 300)) ?? origen.url) : origen.url;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 8000);
     try {
-      const r = await fetch(origen.url, { signal: ctrl.signal });
+      const r = await fetch(url, { signal: ctrl.signal });
       if (!r.ok) return null;
       const buf = Buffer.from(await r.arrayBuffer());
       if (!buf.length || buf.length > 25 * 1024 * 1024) return null;
@@ -577,7 +582,7 @@ export async function registrarLectura(
   // (c) Por CONTENIDO de la foto: un reenvío de WhatsApp es un mensaje nuevo, el worker lo sube
   //     con otro nombre y (b) no lo ve — pero el binario es el mismo. El hash lo delata.
   //     Si el caller no lo trae, se calcula aquí (best-effort: null si la descarga falla).
-  const fotoHash = l.foto_hash ?? (await hashDeFoto({ url: l.foto_url }));
+  const fotoHash = l.foto_hash ?? (await hashDeFoto({ url: l.foto_url }, { client }));
   if (fotoHash) {
     const { data: yaHash, error: eHash } = await client
       .from("lecturas_odometro").select("id,estado,motivo")
