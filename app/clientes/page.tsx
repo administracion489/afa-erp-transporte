@@ -10,6 +10,7 @@ import {
   describirCadencia, avisoCadencia, ventanaDe, hoyLima,
   type Frecuencia, type Ventana,
 } from "@/lib/ocupacion/cadencia";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 /* ══════════════════════════════════════════════
    TYPES
@@ -977,7 +978,7 @@ export default function ClientesPage() {
       // Upsert via API route (service role — evita RLS)
       const res = await fetch("/api/pasajeros/upsert-nomina", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await cabecerasErp(),
         body: JSON.stringify({
           clienteId,
           pasajeros: resultado.ok.map(p => ({
@@ -1010,7 +1011,7 @@ export default function ClientesPage() {
     if (!pasajeroIds.length || (!canalEmail && !canalWhatsapp)) return;
     try {
       const res = await fetch("/api/pasajeros/invitacion", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasErp(),
         body: JSON.stringify({ pasajeroIds, canales: { email: canalEmail, whatsapp: canalWhatsapp } }),
       });
       const json = await res.json();
@@ -1041,7 +1042,7 @@ export default function ClientesPage() {
       setSavingPax(true);
       const res = await fetch("/api/pasajeros/upsert-nomina", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: await cabecerasErp(),
         body: JSON.stringify({
           id: editandoPax.id,
           campos: {
@@ -1071,7 +1072,7 @@ export default function ClientesPage() {
     setSavingPax(true);
     const res = await fetch("/api/pasajeros/upsert-nomina", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await cabecerasErp(),
       body: JSON.stringify({
         clienteId: expandidoId,
         pasajeros: [{
@@ -1102,7 +1103,7 @@ export default function ClientesPage() {
     setEnviandoCreds(new Set(ids));
     try {
       const res = await fetch("/api/pasajeros/credenciales", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasErp(),
         body: JSON.stringify({ pasajeroIds: ids }),
       });
       const json = await res.json();

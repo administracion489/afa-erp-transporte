@@ -4,11 +4,16 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { extraerPlanFabricante, type Adjunto } from "@/lib/vision-ia";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 
 export const maxDuration = 300; // Vercel lo recorta al máximo del plan; da aire en Pro
 
 export async function POST(req: NextRequest) {
   try {
+    // Gasta visión de Claude (hasta 300 s por llamada): sin sesión era un proxy gratis.
+    const auth = await verificarUsuarioApi(req, "mantenimiento");
+    if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+
     const { adjuntos } = await req.json();
     if (!Array.isArray(adjuntos) || adjuntos.length === 0) {
       return NextResponse.json({ ok: false, error: "Falta el documento del plan" }, { status: 400 });

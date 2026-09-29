@@ -42,6 +42,7 @@ import {
   type TextoEtiquetas, type TramoConEtiquetas,
 } from "@/lib/liquidacion-etiquetas";
 import { armarDias, proponerEtiquetas, type TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
 function useGoogleMapsLoaded() {
@@ -518,7 +519,7 @@ async function geocodificar(direccion: string, paradaId = 0): Promise<{ lat: num
   try {
     const res = await fetch("/api/geocodificar", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await cabecerasErp(),
       body: JSON.stringify({ paradas: [{ id: paradaId, nombre: direccion }] }),
     });
     const data = await res.json();
@@ -1338,7 +1339,7 @@ export default function ReservasPage() {
     setRenotificando(true);
     try {
       const res = await fetch("/api/notificaciones/sincronizar", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasErp(),
         body: JSON.stringify({ reserva_id: reservaId }),
       });
       const j = await res.json();

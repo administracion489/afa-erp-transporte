@@ -17,6 +17,7 @@ import { animarMarcador, animarMarcadorPorCamino } from "@/lib/anim-marker";
 import { fmtCoord } from "@/lib/coordenadas";
 import { useAvanceParadas } from "@/lib/useAvanceParadas";
 import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 declare global { interface Window { mapboxgl: any; } }
 
@@ -213,7 +214,7 @@ export default function ModalGps({
       // con el mismo nombre ya no cuesta.
       const res = await fetch("/api/geocodificar", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await cabecerasErp(),
         body: JSON.stringify({ paradas: sinCoords.map(p => ({ id: p.id, nombre: p.nombre })) }),
       });
 

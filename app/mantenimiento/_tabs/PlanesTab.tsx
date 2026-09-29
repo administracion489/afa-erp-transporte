@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -97,7 +98,7 @@ export default function PlanesTab() {
     try {
       const adj = await fileToAdjunto(archivo);
       const res = await fetch("/api/mantenimiento/leer-plan", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasErp(),
         body: JSON.stringify({ adjuntos: [adj] }),
       });
       // El servidor puede devolver una página de error NO-JSON (timeout/crash de

@@ -7,6 +7,7 @@
 // Auth: Bearer CRON_SECRET. ?force=1 ignora la regla de "día gatillo" (para pruebas).
 
 import { NextRequest, NextResponse } from "next/server";
+import { esCronAutorizado, verificarUsuarioApi } from "@/lib/api-auth";
 import { createClient } from "@supabase/supabase-js";
 import { documentosPorVencerDeEmpresa, esDiaGatillo, enviarAvisoProveedor } from "@/lib/proveedor-documentos";
 
@@ -20,9 +21,13 @@ export async function GET(req: NextRequest) { return handler(req); }
 export async function POST(req: NextRequest) { return handler(req); }
 
 async function handler(req: NextRequest) {
-  const authHeader = req.headers.get("authorization");
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+  // FAIL-CLOSED: CRON_SECRET, o un admin del ERP (Bearer de Supabase) para la corrida manual
+  // con ?force=1. Antes, sin la variable configurada, cualquiera podía dispararlo — y con
+  // force, saltarse el dedupe diario y mandar correos repetidos. El módulo "__solo_admin__"
+  // no existe en permisos_usuario: con él, solo el rol admin pasa.
+  const autorizado = esCronAutorizado(req)
+    || (!!req.headers.get("authorization") && (await verificarUsuarioApi(req, "__solo_admin__")).ok);
+  if (!autorizado) {
     return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   }
   const force = new URL(req.url).searchParams.get("force") === "1";

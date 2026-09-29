@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 import { probarAgente } from "@/lib/crm-ia";
 
 export const maxDuration = 60;
@@ -6,6 +7,10 @@ export const maxDuration = 60;
 // Prueba el agente con un mensaje suelto (no envía nada al cliente).
 export async function POST(req: NextRequest) {
   try {
+    // Gasta tokens de Claude: solo el equipo del CRM.
+    const auth = await verificarUsuarioApi(req, "crm");
+    if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+
     const { mensaje, historial = [] } = await req.json();
     if (!mensaje?.trim()) return NextResponse.json({ ok: false, error: "Falta mensaje" }, { status: 400 });
     const r = await probarAgente(mensaje.trim(), historial);

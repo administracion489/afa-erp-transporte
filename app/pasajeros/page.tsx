@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { normalizarEmpresa, claveEmpresa, agruparEmpresas } from "@/lib/empresa";
 import GruposPasajeros from "@/components/pasajeros/GruposPasajeros";
 import { useCanalesInvitacion } from "@/lib/useCanalesInvitacion";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 type Pasajero = {
   id: number;
@@ -188,7 +189,7 @@ export default function PasajerosPage() {
     if (!pasajeroIds.length || (!canalEmail && !canalWhatsapp)) return;
     try {
       await fetch("/api/pasajeros/invitacion", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasErp(),
         body: JSON.stringify({ pasajeroIds, canales: { email: canalEmail, whatsapp: canalWhatsapp } }),
       });
     } catch {}

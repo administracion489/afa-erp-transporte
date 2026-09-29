@@ -9,7 +9,7 @@
 //   - Llama a /api/portal/manifiesto (verifica cliente_id)
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { portalApi } from "@/lib/portal-sesion";
+import { portalApi, getPortalToken } from "@/lib/portal-sesion";
 import { parsearManifiesto, descargarPlantillaPortal } from "@/lib/manifiesto-csv";
 
 // ─── Paleta (misma que page.tsx) ─────────────────────────────────────────────
@@ -81,7 +81,8 @@ async function callApi(body: Record<string, unknown>): Promise<{ ok: boolean; da
   const res = await fetch("/api/portal/manifiesto", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify(body),
+    // El servidor toma el cliente del token de sesión del portal, no de `cliente_id`.
+    body:    JSON.stringify({ ...body, token: getPortalToken() }),
   });
   const data = await res.json();
   return { ok: res.ok, data };

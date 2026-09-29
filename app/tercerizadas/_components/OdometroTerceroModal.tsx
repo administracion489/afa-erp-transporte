@@ -10,6 +10,7 @@ import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 type Lectura = {
   id: string; km: number; fuente: string; fecha: string;
@@ -94,7 +95,7 @@ export default function OdometroTerceroModal({
       // Con el vehículo, el servidor aplica la guía de ESE tablero y valida el número contra
       // su km vigente (evita que entre el parcial o un dígito de más).
       const res = await fetch("/api/mantenimiento/leer-odometro", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasErp(),
         body: JSON.stringify({ adjunto: adj, vehiculo_id: vehiculo.id, flota: "tercero" }),
       });
       const raw = await res.text();

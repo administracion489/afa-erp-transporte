@@ -3,6 +3,7 @@
 // Token de refresh se guarda en tabla crm_config (clave: gmail_refresh_token)
 
 import { createClient } from "@supabase/supabase-js";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 
 const supabaseAdmin = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -11,8 +12,41 @@ const supabaseAdmin = () =>
 
 // ── OAuth helpers ─────────────────────────────────────────────────────────
 
-export function getAuthUrl(): string {
+// ── `state` firmado del flujo OAuth ────────────────────────────────────────
+// Antes el flujo no llevaba `state`: cualquiera podía abrir /api/crm/gmail/auth, o mandarle
+// a un admin un enlace al callback con SU propio `code`, y el ERP quedaba leyendo y enviando
+// correo desde la cuenta del atacante (CSRF de login OAuth). Ahora el inicio exige sesión del
+// ERP y el callback solo acepta un `state` firmado por el servidor y con 10 min de vida.
+const SECRETO_STATE = createHash("sha256")
+  .update("crm-gmail-state-v1:" + (process.env.GMAIL_OAUTH_STATE_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || ""))
+  .digest();
+const TTL_STATE_MS = 10 * 60 * 1000;
+
+export function firmarStateGmail(usuarioId: string): string {
+  const payload = Buffer.from(JSON.stringify({
+    uid: usuarioId, exp: Date.now() + TTL_STATE_MS, n: randomBytes(8).toString("hex"),
+  })).toString("base64url");
+  const firma = createHmac("sha256", SECRETO_STATE).update(payload).digest("base64url");
+  return `${payload}.${firma}`;
+}
+
+/** Devuelve el usuario que inició el flujo si el `state` es auténtico y vigente; null si no. */
+export function verificarStateGmail(state: unknown): string | null {
+  if (typeof state !== "string" || !state.includes(".")) return null;
+  const [payload, firma] = state.split(".");
+  try {
+    const esperada = createHmac("sha256", SECRETO_STATE).update(payload).digest();
+    const recibida = Buffer.from(firma, "base64url");
+    if (esperada.length !== recibida.length || !timingSafeEqual(esperada, recibida)) return null;
+    const { uid, exp } = JSON.parse(Buffer.from(payload, "base64url").toString());
+    if (typeof uid !== "string" || typeof exp !== "number" || Date.now() > exp) return null;
+    return uid;
+  } catch { return null; }
+}
+
+export function getAuthUrl(state: string): string {
   const params = new URLSearchParams({
+    state,
     client_id: process.env.GOOGLE_CLIENT_ID!,
     redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
     response_type: "code",
@@ -46,7 +80,7 @@ export async function exchangeCode(code: string): Promise<void> {
 export async function getAccessToken(): Promise<string> {
   const db = supabaseAdmin();
   const { data } = await db.from("crm_config").select("valor").eq("clave", "gmail_refresh_token").maybeSingle();
-  if (!data?.valor) throw new Error("Gmail no autorizado — visita /api/crm/gmail/auth");
+  if (!data?.valor) throw new Error("Gmail no autorizado — conéctalo desde /crm (botón «Conectar Gmail»)");
 
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { supabase } from "@/lib/supabase";
 import { attachHidScanner } from "@/lib/hid-scanner";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
@@ -19,6 +18,9 @@ type Estado =
 type Conductor = {
   id: number; nombre: string; dni: string | null;
   _tabla: "conductores" | "conductores_tercero";
+  /** Token de sesión que firma el servidor al login (lib/conductor-auth.ts). Es la ÚNICA
+   *  credencial que acepta /api/conductor: el lector ve exactamente los servicios del conductor. */
+  _token: string;
 };
 
 type PaxInfo    = { id: number; nombre: string; empresa: string | null; qr_code: string | null; };
@@ -60,19 +62,27 @@ function loadSession(): Conductor | null {
     const r = localStorage.getItem(SK); if (!r) return null;
     const { c, exp } = JSON.parse(r);
     if (Date.now() > exp) { localStorage.removeItem(SK); return null; }
+    // Sesión anterior al token: el servidor ya no la acepta → de vuelta al login, una vez.
+    if (!c || typeof c._token !== "string" || !c._token) { localStorage.removeItem(SK); return null; }
     return c;
   } catch { return null; }
 }
-function clearSession() { try { localStorage.removeItem(SK); } catch {} }
+function clearSession() { try { localStorage.removeItem(SK); } catch {} tokenSesion = null; }
+
+// Token de la sesión vigente (módulo: condApi es una función suelta). Un 401 con
+// `sesionInvalida` llama a `alSesionInvalida`, que la pantalla registra para volver al login.
+let tokenSesion: string | null = null;
+let alSesionInvalida: (() => void) | null = null;
 
 // Cliente del endpoint service_role (igual patrón que el APK conductor/pasajero).
 async function condApi(accion: string, params: Record<string, any> = {}) {
   const res = await fetch("/api/conductor", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
-    body: JSON.stringify({ accion, ...params }),
+    body: JSON.stringify({ accion, ...params, token: tokenSesion ?? undefined }),
   });
   const json = await res.json().catch(() => ({}));
+  if (accion !== "login" && res.status === 401 && json?.sesionInvalida === true) alSesionInvalida?.();
   if (!res.ok) throw new Error(json.error || "Error de red");
   return json;
 }
@@ -208,11 +218,12 @@ export default function LectorQR() {
   useEffect(() => {
     const s = loadSession();
     if (!s) { setEstado("login"); return; }
+    tokenSesion = s._token;
     setConductor(s);
     (async () => {
       setEstado("loading");
       try {
-        const { activo } = await refrescarServicios(s);
+        const { activo } = await refrescarServicios();
         if (activo) { setModoManual(false); await loadRuta(activo.id); }
         else setEstado("selector");
       } catch { setEstado("selector"); }
@@ -263,16 +274,32 @@ export default function LectorQR() {
     try {
       const r = await condApi("login", { dni: d, pin });
       if (!r.ok) { setLoginErr(r.error || "No se pudo ingresar"); setLoginLoading(false); return; }
-      const c: Conductor = { id: r.conductor.id, nombre: r.conductor.nombre, dni: r.conductor.dni, _tabla: r.conductor.tabla };
+      const c: Conductor = { id: r.conductor.id, nombre: r.conductor.nombre, dni: r.conductor.dni, _tabla: r.conductor.tabla, _token: r.token };
+      tokenSesion = r.token;
       saveSession(c); setConductor(c); setPin("");
       setEstado("loading");
-      const { activo } = await refrescarServicios(c);
+      const { activo } = await refrescarServicios();
       if (activo) { setModoManual(false); await loadRuta(activo.id); }
       else setEstado("selector");
     } catch (e: any) {
       setLoginErr(e?.message || "Error de red");
     } finally { setLoginLoading(false); }
   }
+
+  // Sesión rechazada por el servidor (token vencido o de una versión anterior) → al login, con el
+  // DNI puesto. Idempotente: el poll y una lectura pueden devolver 401 a la vez.
+  useEffect(() => {
+    alSesionInvalida = () => {
+      if (!tokenSesion && !conductorRef.current) return;
+      const dniPrevio = conductorRef.current?.dni ?? "";
+      stopScanner();
+      logout();
+      setDni(dniPrevio);
+      setLoginErr("Tu sesión venció. Ingresa el PIN de nuevo.");
+    };
+    return () => { alSesionInvalida = null; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function logout() {
     clearSession();
@@ -292,8 +319,9 @@ export default function LectorQR() {
   }
 
   // ── CARGA: servicios de hoy del conductor (devuelve la lista + el activo) ───
-  async function refrescarServicios(c: Conductor): Promise<{ lista: ReservaItem[]; activo: ReservaItem | null }> {
-    const { reservas: lista } = await condApi("lector_servicios", { cid: c.id, tabla: c._tabla, hoy: getFechaLocal() });
+  // Sin parámetro: el conductor ya no viaja, el servidor lo saca del token.
+  async function refrescarServicios(): Promise<{ lista: ReservaItem[]; activo: ReservaItem | null }> {
+    const { reservas: lista } = await condApi("lector_servicios", { hoy: getFechaLocal() });
     const arr: ReservaItem[] = lista || [];
     setReservas(arr);
     const seen = new Set<string>();
@@ -392,7 +420,7 @@ export default function LectorQR() {
     const activos = ["selector", "espera", "autorizado", "ya_registrado", "no_autorizado", "otra_empresa"];
     if (!activos.includes(est)) return;
     let activo: ReservaItem | null = null;
-    try { ({ activo } = await refrescarServicios(c)); } catch { return; }
+    try { ({ activo } = await refrescarServicios()); } catch { return; }
     const cur = reservaRef.current;
     if (activo) {
       if (!cur || cur.id !== activo.id) {
@@ -400,14 +428,23 @@ export default function LectorQR() {
         setModoManual(false);
         flash("Enganchado al servicio del conductor");
         await loadRuta(activo.id);
-      } else {
-        setModoManual(false);
-        if (est === "espera") { try { await aplicarParadas(activo.id); } catch {} }
+        return;
       }
+      setModoManual(false);
     } else if (!modoManualRef.current && cur && est === "espera") {
       // Estábamos siguiendo un servicio que el conductor finalizó.
       flash("El conductor finalizó el servicio");
       volverSelector();
+      return;
+    }
+    // Seguir las paradas del servicio abierto (también en modo manual: es lo que antes hacía el
+    // realtime). Solo en "espera": durante la tarjeta de resultado no se cambia la parada.
+    if (cur && estadoRef.current === "espera") {
+      const quedabanPendientes = todasParadasRef.current.some(p => p.estado !== "completada");
+      try {
+        const primera = await aplicarParadas(cur.id);
+        if (quedabanPendientes && primera && primera.estado === "completada") flash("Recorrido finalizado", 5000);
+      } catch {}
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aplicarParadas, flash]);
@@ -419,30 +456,13 @@ export default function LectorQR() {
     return () => clearInterval(id);
   }, [conductor]);
 
-  // ── REALTIME paradas (sigue al celular al instante; el poll es el respaldo) ─
-  useEffect(() => {
-    if (!reservaInfo?.id) return;
-    const ch = supabase
-      .channel(`lector-paradas-${reservaInfo.id}`)
-      .on("postgres_changes",
-        { event: "UPDATE", schema: "public", table: "paradas", filter: `reserva_id=eq.${reservaInfo.id}` },
-        (payload: any) => {
-          const upd: ParadaItem = payload.new;
-          const nuevasTodas = todasParadasRef.current.map(p => p.id === upd.id ? { ...p, estado: upd.estado } : p);
-          setTodasParadas(nuevasTodas);
-          const primeraIncompleta = nuevasTodas.filter(p => p.estado !== "completada").sort((a, b) => a.orden - b.orden)[0];
-          if (primeraIncompleta) {
-            if (primeraIncompleta.id !== paradaRef.current?.id) cambiarParadaRef.current?.(primeraIncompleta);
-          } else {
-            const ultima = [...nuevasTodas].sort((a, b) => b.orden - a.orden)[0];
-            if (ultima && ultima.id !== paradaRef.current?.id) cambiarParadaRef.current?.(ultima);
-            flash("Recorrido finalizado", 5000);
-          }
-        })
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reservaInfo?.id]);
+  // ── Sin REALTIME sobre `paradas` ───────────────────────────────────────────
+  // Antes la tablet se suscribía como ANÓNIMA a los UPDATE de `paradas`. Esa tabla se cierra al
+  // rol anon con RLS (el lector no tiene sesión Supabase, solo el token del conductor), así que
+  // la suscripción moriría en silencio. El seguimiento lo hace el poll de 8 s de arriba vía
+  // /api/conductor (`lector_ruta`, acotado a los servicios del conductor): mueve la parada activa
+  // a la primera pendiente —o a la última si ya no queda ninguna— y avisa el fin del recorrido,
+  // igual que hacía el handler de realtime. Cuesta hasta 8 s de retraso, no un evento perdido.
 
   // ── SCANNER ───────────────────────────────────────────────────────────────
   const stopScanner = useCallback(async () => {

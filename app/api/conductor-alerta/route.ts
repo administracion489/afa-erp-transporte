@@ -2,9 +2,16 @@
 // Maneja dos acciones desde la app conductor (ambas requieren service_role para saltear RLS):
 //   tipo = "alerta"   → INSERT en alertas_sos (retraso / SOS)
 //   tipo = "embarque" → INSERT en pasajeros_parada (pasajero fuera de manifiesto)
+//
+// Exige el token de sesión del conductor (lib/conductor-auth.ts) — el `x-afa-key` no autentica
+// nada, su valor va en el bundle. Sin token cualquiera sembraba SOS falsos en la torre o marcaba
+// abordajes en paraderos ajenos. El servicio / paradero tiene que ser DEL conductor del token.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import {
+  sesionDeRequest, sesionLegada, CUERPO_SESION_INVALIDA, reservaEsDelConductor, paradasDelConductor,
+} from "@/lib/conductor-auth";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -37,12 +44,25 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { tipo = "alerta" } = body;
 
+    let ses = sesionDeRequest(req, body);
+    // Transición del despliegue (ver sesionLegada): un SOS de la app vieja aún abierta no trae
+    // token ni conductor; se toma el conductor asignado a su servicio. Nunca para "embarque".
+    if (!ses && tipo !== "embarque" && Number(body?.reserva_id) > 0) {
+      const { data: r } = await supabaseAdmin.from("reservas")
+        .select("conductor_id, conductor_tercero_id").eq("id", Number(body.reserva_id)).maybeSingle();
+      ses = sesionLegada(req, body, r);
+    }
+    if (!ses) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
+
     // ── EMBARQUE fuera de manifiesto ────────────────────────────────────────
     if (tipo === "embarque") {
-      const { parada_id, pasajero_id, reserva_id } = body;
+      const { parada_id, pasajero_id } = body;
       if (!parada_id || !pasajero_id) {
         return NextResponse.json({ error: "parada_id y pasajero_id requeridos" }, { status: 400 });
       }
+      // El servicio es el del PARADERO (no el del body), y tiene que ser del conductor.
+      const reserva_id = (await paradasDelConductor(supabaseAdmin, ses, [parada_id])).get(Number(parada_id));
+      if (!reserva_id) return NextResponse.json({ error: "Este servicio no te pertenece" }, { status: 403 });
 
       // Verificar si ya existe (evitar duplicado)
       const { data: existe } = await supabaseAdmin
@@ -105,17 +125,23 @@ export async function POST(req: NextRequest) {
     }
 
     // ── ALERTA (retraso / SOS) ──────────────────────────────────────────────
-    const { reserva_id, lat, lng, motivo, estado = "pendiente" } = body;
+    const { lat, lng } = body;
+    const motivo = String(body.motivo ?? "").trim().slice(0, 500);
     if (!motivo) {
       return NextResponse.json({ error: "motivo requerido" }, { status: 400 });
     }
+    // Un SOS NUNCA se rechaza por el servicio: si el `reserva_id` no es suyo (p. ej. se lo
+    // reasignaron a mitad de turno) la alerta entra igual, sin enlazarse a un servicio ajeno.
+    // El estado no lo decide el conductor: toda alerta nace pendiente para la torre.
+    const reserva_id = body.reserva_id != null && await reservaEsDelConductor(supabaseAdmin, ses, body.reserva_id)
+      ? Number(body.reserva_id) : null;
 
     const { error } = await supabaseAdmin.from("alertas_sos").insert({
-      reserva_id: reserva_id ?? null,
+      reserva_id,
       lat:        lat        ?? null,
       lng:        lng        ?? null,
       motivo,
-      estado,
+      estado:     "pendiente",
     });
 
     if (error) {

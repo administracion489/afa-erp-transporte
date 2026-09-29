@@ -5,6 +5,7 @@
 //       (worker caído, timeout, fuera de horario). Bearer CRON_SECRET.
 
 import { NextRequest, NextResponse } from "next/server";
+import { esCronAutorizado } from "@/lib/api-auth";
 import { procesarPendientes } from "@/lib/radar/motor";
 
 export const maxDuration = 300;
@@ -42,9 +43,8 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  const auth = req.headers.get("authorization");
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && auth !== `Bearer ${cronSecret}`) {
+  // FAIL-CLOSED (antes, sin CRON_SECRET, el GET quedaba abierto y gastaba IA a demanda).
+  if (!esCronAutorizado(req)) {
     return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   }
   return handler(req, 30);

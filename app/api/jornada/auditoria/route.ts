@@ -12,6 +12,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 import { kmDeServicio } from "@/lib/km-servicio";
 import { desplazamientoGps, verificarConGps, type Verificacion } from "@/lib/gps-desplazamiento";
 
@@ -25,13 +26,11 @@ const admin = createClient(
 
 const UMBRALES_DEFECTO = { umbral_advertencia: 6, umbral_revision: 16, umbral_alto: 31, recordar_checkout_cada_min: 60 };
 
+// Antes bastaba con CUALQUIER usuario de Supabase (incluso uno inactivo o sin el módulo):
+// ahora usuario activo del ERP + permiso del módulo (/auditoria-jornada vive en el módulo `combustible`). Admin pasa.
 async function verificarUsuario(req: NextRequest): Promise<boolean> {
   try {
-    const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-    if (!token) return false;
-    const anon = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
-    const { data } = await anon.auth.getUser(token);
-    return !!data?.user;
+    return (await verificarUsuarioApi(req, "combustible")).ok;
   } catch {
     return false;
   }

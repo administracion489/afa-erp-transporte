@@ -18,6 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 import { kmDeServicio } from "@/lib/km-servicio";
 
 export const maxDuration = 60;
@@ -34,13 +35,11 @@ const MISMO_PUNTO_M = 400;              // < esta distancia, destino≈origen �
 
 const GKEY = process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
 
+// Antes bastaba con CUALQUIER usuario de Supabase (incluso uno inactivo o sin el módulo):
+// ahora usuario activo del ERP + permiso del módulo (la analítica de vehículo es de /mantenimiento). Admin pasa.
 async function verificarUsuario(req: NextRequest): Promise<boolean> {
   try {
-    const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-    if (!token) return false;
-    const anon = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
-    const { data } = await anon.auth.getUser(token);
-    return !!data?.user;
+    return (await verificarUsuarioApi(req, "mantenimiento")).ok;
   } catch {
     return false;
   }

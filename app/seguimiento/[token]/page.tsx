@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
-import { supabase } from "@/lib/supabase";
 import { idAfa } from "@/lib/folio";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador, animarMarcadorPorCamino } from "@/lib/anim-marker";
@@ -408,31 +407,14 @@ export default function SeguimientoPage() {
     }
   }, [ruta, mapListo]);
 
-  // ────────── 8. Realtime GPS ──────────
+  // ────────── 8. GPS en vivo · sondeo por la API ──────────
+  // Antes, además del sondeo, había una suscripción realtime ANÓNIMA a TODOS los INSERT de
+  // ubicaciones_gps (sin filtro en el servidor: se filtraba por reserva en el navegador), o
+  // sea la posición de la flota entera llegando a cualquiera con un enlace de seguimiento.
+  // Se quitó: ubicaciones_gps se cierra al rol anon (supabase/seguridad-01-rls.sql) y el
+  // punto sale solo por /api/seguimiento, que exige el token. El sondeo pasa de 60 s a 15 s.
   useEffect(() => {
     if (cargando || error || !token || !reserva) return;
-    const channel = supabase
-      .channel("passenger-gps-" + reserva.id)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps" }, (payload) => {
-        const d = payload.new as any;
-        if (d.reserva_id !== reserva.id) return;
-        const nueva: UbicacionGPS = {
-          lat: Number(d.lat), lng: Number(d.lng),
-          velocidad: Number(d.velocidad) || 0, rumbo: Number(d.rumbo) || 0,
-          estado: d.estado, created_at: d.created_at,
-          precision_m: d.precision_m != null ? Number(d.precision_m) : null,   // el snap del ícono acota la corrección con la imprecisión REAL
-        };
-        setUltimaActualizacion(new Date(nueva.created_at));   // llegó un fix fresco: frescura aparte de si su posición se rechaza abajo
-        // Filtro del fix EN VIVO: descarta el glitch de red aislado (salto imposible que se
-        // corrige solo en el siguiente fix) ANTES de mover el ícono del pasajero.
-        const tsFix = nueva.created_at ? new Date(nueva.created_at).getTime() : NaN;
-        if (!Number.isFinite(tsFix) || filtroVivoRef.current(nueva.lat, nueva.lng, tsFix)) {
-          ubicacionRef.current = nueva;
-          setUbicacion(nueva);
-        }
-      })
-      .subscribe();
-
     const poll = async () => {
       try {
         const res = await fetch(`/api/seguimiento?token=${encodeURIComponent(token)}`);
@@ -451,8 +433,8 @@ export default function SeguimientoPage() {
         }
       } catch { /* silencioso */ }
     };
-    const interval = setInterval(poll, 60000);
-    return () => { supabase.removeChannel(channel); clearInterval(interval); };
+    const interval = setInterval(() => { if (!document.hidden) poll(); }, 15000);
+    return () => { clearInterval(interval); };
   }, [token, cargando, error, reserva]);
 
   // ────────── 9. Recalcular ETA con Google Directions por intervalo ──────────

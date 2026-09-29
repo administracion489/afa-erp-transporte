@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda, redondear } from "@/lib/finanzas/dinero";
 import { asientoVenta, asientoCompra, asientoDepreciacion, guardarAsiento } from "@/lib/contabilidad/asientos";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 async function traerTodo(query: () => any): Promise<any[]> {
   const paso = 1000; let desde = 0; const acc: any[] = [];
@@ -121,13 +122,13 @@ export default function ContabilidadPage() {
     try {
       if (file.name.toLowerCase().endsWith(".xml")) {
         const xml = await file.text();
-        const res = await fetch("/api/facturas/leer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ xml, conciliar: true }) });
+        const res = await fetch("/api/facturas/leer", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ xml, conciliar: true }) });
         const j = await res.json();
         setMsg(j.ok ? `✅ ${j.conciliacion?.detalle ?? "Factura leída."}` : `⚠️ ${j.error}`);
       } else {
         const b64 = await new Promise<string>((ok, err) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(",")[1] || ""); r.onerror = err; r.readAsDataURL(file); });
         const tipo = file.type === "application/pdf" ? "pdf" : "image";
-        const res = await fetch("/api/facturas/leer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ adjunto: { tipo, media_type: file.type, data: b64 }, conciliar: true }) });
+        const res = await fetch("/api/facturas/leer", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ adjunto: { tipo, media_type: file.type, data: b64 }, conciliar: true }) });
         const j = await res.json();
         setMsg(j.ok ? `✅ ${j.conciliacion?.detalle ?? `Leída: ${j.extraida?.razon_social ?? ""} ${fmtMoneda(Number(j.extraida?.total ?? 0))}`}` : `⚠️ ${j.error}`);
       }

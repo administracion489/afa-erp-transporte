@@ -1044,6 +1044,15 @@ Matriz: `npx tsx scripts/prueba-identidad-voucher.mts`.
 - **La pantalla importa el MISMO motor que el cron** y juzga el borrador que se está editando, no la fila guardada — igual que `avisosDe` en `/programacion`. Una pantalla con su propia lógica de «esto saldrá» es el bug del semáforo de puntualidad.
 - **Sin la migración corrida, `/redes` lo DICE en ámbar nombrando el SQL** en vez de aparentar una pantalla vacía. Módulo nuevo del menú: **`redes`** — recuerda que son **TRES** listas (`menuGrupos`, `MODULOS` de crear-usuario, y `GRUPOS_MODULOS` + `nombresModulo` de `/usuarios`), más su ficha de ayuda.
 
+### Seguridad · la anon key NO es un secreto
+
+`supabase/seguridad-00-diagnostico.sql` (solo lee) + `supabase/seguridad-01-rls.sql` (**no la corre el deploy**). Nació de la alerta del Security Advisor de Supabase del 27-09-2026 (`rls_disabled_in_public`, `sensitive_columns_exposed`).
+
+- **La anon key va en el JavaScript público, así que el rol `anon` = cualquiera en internet.** Toda tabla de `public` lleva RLS con acceso solo para `authenticated` (los usuarios del ERP). Lo único legible por anon a propósito: `empresa_perfil` y `paginas_legales`. Una tabla nueva nace con `enable row level security` y su política `to authenticated` — `using (true)` SIN `to authenticated` también aplica a anon (era el caso de `crm_*` y `ordenes_compra*`). Una vista nueva lleva `revoke all on public.<vista> from anon` (las vistas se saltan el RLS de sus tablas).
+- **Las páginas públicas NO leen Supabase directo**: `/cliente`, `/seguimiento/[token]`, `/pasajero`, `/lector`, `/conductor`, conformidades y proveedor pasan por `/api/*` con su propio token (portal, pasajero, conductor, enlace), que se verifica en el servidor. Nada de `supabase.from(...)` ni realtime anónimo en esas pantallas: el realtime anónimo a `ubicaciones_gps` le entregaba a cualquiera la posición de toda la flota. `/seguimiento/gps/[id]` es interna.
+- **La API del conductor saca la identidad del TOKEN** (`sesionDeRequest`, lib/conductor-auth.ts) en toda acción salvo `login`, y verifica que el servicio/paradero sea suyo (`reservaEsDelConductor`, `paradasDelConductor`). `x-afa-key` no autentica nada: su valor es `NEXT_PUBLIC_`. `sesionLegada` es una transición del despliegue que vence el 06-10-2026: **bórrala después**.
+- **Toda ruta API que use la service-role verifica al llamante**: `verificarUsuarioApi`/`verificarUsuarioApiAlguno` (lib/api-auth.ts) para el ERP, y el navegador manda `cabecerasErp()` (lib/fetch-erp.ts). Los crons usan `esCronAutorizado` (falla cerrado sin `CRON_SECRET`). El webhook de Meta verifica `X-Hub-Signature-256` con `META_APP_SECRET` (o `INSTAGRAM_APP_SECRET`). Texto de usuario dentro de un correo HTML pasa por `escHtml` (lib/html-escape.ts).
+
 ### Conventions
 
 - `@/*` in `tsconfig.json` resolves to the repo root, so `@/lib/supabase` ≡ `lib/supabase.ts`.

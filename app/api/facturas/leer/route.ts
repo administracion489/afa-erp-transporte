@@ -10,12 +10,18 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 import { parseUblFactura, extraerFacturaPdf, conciliarFactura, type AdjuntoFactura } from "@/lib/contabilidad/factura-ia";
 
 export const maxDuration = 40;
 
 export async function POST(req: NextRequest) {
   try {
+    // Gasta visión de Claude y, con `conciliar`, ESCRIBE documentos_compra con service-role:
+    // una factura inventada entraba a CxP sin sesión. Solo quien lleva compras.
+    const auth = await verificarUsuarioApiAlguno(req, ["contabilidad", "tesoreria"]);
+    if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+
     const body = await req.json();
     let extraida;
 

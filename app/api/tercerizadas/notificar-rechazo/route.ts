@@ -8,6 +8,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { enviarEmail } from "@/lib/notificaciones";
 import { linkProveedor, tokenVigentePara } from "@/lib/proveedor-documentos";
 import { createClient } from "@supabase/supabase-js";
+import { verificarUsuarioApi } from "@/lib/api-auth";
+import { escHtml } from "@/lib/html-escape";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,15 +19,26 @@ const admin = createClient(
 
 export async function POST(req: NextRequest) {
   try {
+    // Sin sesión esto era un relé de correo con el remitente de la empresa: destinatario,
+    // asunto y cuerpo los ponía quien llamara. Ahora: sesión del ERP con el módulo de la
+    // pantalla (/tercerizadas vive en `proveedores`), el DESTINATARIO sale de la ficha de la
+    // empresa (el `email` del body se ignora) y todo texto se escapa.
+    const auth = await verificarUsuarioApi(req, "proveedores");
+    if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
     const body = await req.json();
-    const email = String(body.email ?? "").trim();
     const empresaId = Number(body.empresaId);
-    const empresaNombre = String(body.empresaNombre ?? "");
-    const tipo = String(body.tipo ?? "");
-    const motivo = String(body.motivo ?? "").trim();
-    if (!email || !empresaId || !tipo) {
+    const tipo = String(body.tipo ?? "").slice(0, 120);
+    const motivo = String(body.motivo ?? "").trim().slice(0, 2000);
+    if (!empresaId || !tipo) {
       return NextResponse.json({ error: "Faltan datos" }, { status: 400 });
     }
+
+    const { data: empresa } = await admin
+      .from("empresas_tercerizadas").select("razon_social, email").eq("id", empresaId).maybeSingle();
+    const email = String(empresa?.email ?? "").trim();
+    const empresaNombre = String(empresa?.razon_social ?? "");
+    if (!email) return NextResponse.json({ error: "La empresa no tiene correo registrado" }, { status: 400 });
 
     const token = await tokenVigentePara(admin, empresaId);
     const link = linkProveedor(token);
@@ -38,17 +51,17 @@ export async function POST(req: NextRequest) {
     <h1 style="color:white;margin:0;font-size:18px;">📄 Documento observado</h1>
   </div>
   <div style="padding:24px;">
-    <p style="color:#374151;font-size:14px;">El documento <b>${tipo}</b> que subió${empresaNombre ? ` para <b>${empresaNombre}</b>` : ""} no pudo aprobarse:</p>
-    <div style="background:#fef2f2;border-left:3px solid #991b1b;padding:12px 16px;border-radius:8px;color:#991b1b;font-size:14px;margin:12px 0;">${motivo || "No se indicó un motivo específico."}</div>
+    <p style="color:#374151;font-size:14px;">El documento <b>${escHtml(tipo)}</b> que subió${empresaNombre ? ` para <b>${escHtml(empresaNombre)}</b>` : ""} no pudo aprobarse:</p>
+    <div style="background:#fef2f2;border-left:3px solid #991b1b;padding:12px 16px;border-radius:8px;color:#991b1b;font-size:14px;margin:12px 0;">${motivo ? escHtml(motivo) : "No se indicó un motivo específico."}</div>
     <p style="color:#374151;font-size:14px;">Por favor súbalo nuevamente corregido desde el mismo enlace:</p>
     <div style="text-align:center;margin:20px 0 8px;">
-      <a href="${link}" style="background:#0b315f;color:white;text-decoration:none;padding:12px 28px;border-radius:10px;font-weight:700;font-size:14px;display:inline-block;">Subir documento corregido</a>
+      <a href="${escHtml(link)}" style="background:#0b315f;color:white;text-decoration:none;padding:12px 28px;border-radius:10px;font-weight:700;font-size:14px;display:inline-block;">Subir documento corregido</a>
     </div>
-    <p style="color:#94a3b8;font-size:11px;margin:18px 0 0;">Mensaje automático de ${empresaNombreCorto} · No responder</p>
+    <p style="color:#94a3b8;font-size:11px;margin:18px 0 0;">Mensaje automático de ${escHtml(empresaNombreCorto)} · No responder</p>
   </div>
 </div></body></html>`;
 
-    await enviarEmail({ to: email, subject: `📄 Documento observado — ${tipo}`, html });
+    await enviarEmail({ to: email, subject: `📄 Documento observado — ${tipo.replace(/[\r\n]+/g, " ")}`, html });
     return NextResponse.json({ ok: true });
   } catch (e: any) {
     return NextResponse.json({ error: String(e?.message ?? e) }, { status: 500 });

@@ -11,6 +11,7 @@ import {
 import { BarrasHorizontal } from "./_charts";
 import AnaliticaVehiculo, { type VehiculoAnalitica } from "./_AnaliticaVehiculo";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -361,7 +362,7 @@ export default function OdometroTab() {
       // Con el vehículo, el servidor aplica la guía de ESE tablero y valida el número contra
       // su km vigente (evita que entre el parcial o un dígito de más).
       const res = await fetch("/api/mantenimiento/leer-odometro", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasErp(),
         body: JSON.stringify({ adjunto: adj, vehiculo_id: Number(form.vehiculo_id) || null, flota: "propia" }),
       });
       const raw = await res.text();

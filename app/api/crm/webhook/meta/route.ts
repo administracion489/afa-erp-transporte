@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { createHmac, timingSafeEqual } from "crypto";
 import { responderConIA } from "@/lib/crm-ia";
 import { esNumeroDeAvisos } from "@/lib/whatsapp-numeros";
 import { procesarEchos, procesarHistorial, procesarContactos } from "@/lib/crm-coexistencia";
@@ -26,10 +27,41 @@ export async function GET(req: NextRequest) {
   return new Response("Forbidden", { status: 403 });
 }
 
+/**
+ * Firma de Meta: `X-Hub-Signature-256: sha256=<HMAC-SHA256(cuerpo CRUDO, app secret)>`.
+ * Sin verificarla, cualquiera que conozca la URL podía inyectar mensajes "de clientes" en el
+ * inbox (y hacer contestar a la IA, que gasta y escribe por WhatsApp). Se calcula sobre los
+ * BYTES tal cual llegaron: re-serializar el JSON cambia espacios y escapes y la firma no
+ * cuadraría nunca. Comparación en tiempo constante.
+ */
+function firmaValida(crudo: string, cabecera: string | null, secreto: string): boolean {
+  if (!cabecera?.startsWith("sha256=")) return false;
+  const recibida = Buffer.from(cabecera.slice(7), "hex");
+  const esperada = createHmac("sha256", secreto).update(crudo, "utf8").digest();
+  return recibida.length === esperada.length && timingSafeEqual(recibida, esperada);
+}
+
 // POST — mensajes entrantes (WhatsApp + Messenger + Instagram)
 export async function POST(req: NextRequest) {
+  const crudo = await req.text();
+  // Instagram configurado con "Instagram API with Instagram Login" firma con el secreto de SU
+  // app, no con el de la app de WhatsApp/Messenger: se acepta cualquiera de los dos.
+  const secretos = [process.env.META_APP_SECRET, process.env.INSTAGRAM_APP_SECRET]
+    .filter((x): x is string => !!x);
+  if (secretos.length) {
+    const cabecera = req.headers.get("x-hub-signature-256");
+    if (!secretos.some(sec => firmaValida(crudo, cabecera, sec))) {
+      console.warn("[webhook/meta] firma X-Hub-Signature-256 inválida o ausente — rechazado");
+      return new Response("Forbidden", { status: 403 });
+    }
+  } else {
+    // Sin el secreto no se puede verificar. No se tumba el inbox por una variable faltante
+    // (dejaría de entrar todo mensaje real), pero se avisa en cada entrega.
+    console.warn("[webhook/meta] META_APP_SECRET no configurada: el webhook NO verifica la firma de Meta");
+  }
+
   let body: any;
-  try { body = await req.json(); } catch { return NextResponse.json({ ok: true }); }
+  try { body = JSON.parse(crudo); } catch { return NextResponse.json({ ok: true }); }
 
   const { object, entry = [] } = body;
   const conversacionesNuevas = new Set<string>(); // hilos con mensaje entrante → atender con IA

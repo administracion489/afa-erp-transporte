@@ -1,11 +1,17 @@
 // POST /api/portal/manifiesto
 // Gestión de pasajeros del manifiesto desde el portal cliente.
 // Acciones: add | remove | bulk | assign_parada | actualizar_config
-// Seguridad: verifica que reservas.cliente_id === cliente_id y que el servicio sea editable.
+// Seguridad: el cliente sale del TOKEN del portal (body.token, lib/portal-auth.ts), nunca del
+// body. Antes se confiaba en `cliente_id` del body sin pedir nada: con un número de reserva y
+// su cliente_id (enteros consecutivos) se podía vaciar o llenar el manifiesto de otra empresa.
+// También lo puede usar el personal del ERP (Bearer de Supabase): ahí el cliente es el de la
+// propia reserva. Después se verifica que la reserva sea de ese cliente y siga editable.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { normalizarEmpresa } from "@/lib/empresa";
+import { verificarTokenPortal } from "@/lib/portal-auth";
+import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -77,10 +83,25 @@ async function setParadaAsignacion(
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, cliente_id, reserva_id } = body;
+    const { action, reserva_id } = body;
 
-    if (!action || !cliente_id || !reserva_id) {
+    if (!action || !reserva_id) {
       return NextResponse.json({ error: "Parámetros incompletos" }, { status: 400 });
+    }
+
+    let cliente_id: number;
+    const sesion = verificarTokenPortal(body.token);
+    if (sesion) {
+      cliente_id = sesion.cid;
+    } else if (req.headers.get("authorization")) {
+      const auth = await verificarUsuarioApiAlguno(req, ["clientes", "programacion"]);
+      if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+      const { data: rsv } = await supabaseAdmin
+        .from("reservas").select("cliente_id").eq("id", Number(reserva_id)).maybeSingle();
+      if (!rsv?.cliente_id) return NextResponse.json({ error: "Servicio no encontrado" }, { status: 404 });
+      cliente_id = Number(rsv.cliente_id);
+    } else {
+      return NextResponse.json({ error: "Sesión expirada" }, { status: 401 });
     }
 
     const acceso = await verificarAcceso(Number(reserva_id), Number(cliente_id));

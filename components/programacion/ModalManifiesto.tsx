@@ -20,6 +20,7 @@ import TimelineParadasEditable, { ParadaEditable } from "./TimelineParadasEditab
 import GestorParadas from "./GestorParadas";
 import CargadorUnificado from "./CargadorUnificado";
 import { useCanalesInvitacion } from "@/lib/useCanalesInvitacion";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 export type ParadaItin = {
   id: number;
@@ -91,7 +92,7 @@ async function geocodearParadas(
   try {
     const resp = await fetch("/api/geocodificar", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await cabecerasErp(),
       body: JSON.stringify({ paradas: items }),
     });
     const data = await resp.json();
@@ -132,7 +133,7 @@ export default function ModalManifiesto(props: Props) {
     if (!pasajeroIds.length || (!canalEmail && !canalWhatsapp)) return;
     try {
       await fetch("/api/pasajeros/invitacion", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasErp(),
         body: JSON.stringify({ pasajeroIds, canales: { email: canalEmail, whatsapp: canalWhatsapp } }),
       });
     } catch {}
@@ -1039,7 +1040,7 @@ export default function ModalManifiesto(props: Props) {
     try {
       const respNotif = await fetch("/api/notificaciones/sincronizar", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await cabecerasErp(),
         body: JSON.stringify({ reserva_id: reservaId }),
       });
       const datosNotif = await respNotif.json();
