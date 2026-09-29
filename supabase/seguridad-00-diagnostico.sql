@@ -24,6 +24,8 @@ select 'SIN_RLS' as hallazgo, c.relname as tabla,
  order by 2;
 
 -- 2) Políticas que dejan pasar al rol anon (o a PUBLIC, que lo incluye).
+--    Tras seguridad-01-rls.sql solo deben quedar las de lectura de empresa_perfil y
+--    paginas_legales (logo y política de privacidad: públicas a propósito).
 select 'POLITICA_ABIERTA_A_ANON' as hallazgo, tablename as tabla, policyname,
        cmd, roles, qual as using_expr, with_check
   from pg_policies
@@ -32,13 +34,13 @@ select 'POLITICA_ABIERTA_A_ANON' as hallazgo, tablename as tabla, policyname,
    and coalesce(qual, 'true') !~* '(auth\.uid|auth\.role|auth\.jwt|authenticated|fn_es_|puede_|es_admin)'
  order by 2, 3;
 
--- 3) Vistas de `public` sin security_invoker: se ejecutan con los permisos
---    del DUEÑO (postgres) y se saltan el RLS de las tablas que leen.
-select 'VISTA_SIN_SECURITY_INVOKER' as hallazgo, c.relname as vista
+-- 3) Vistas de `public` que anon puede leer. Una vista corre con los permisos de su
+--    DUEÑO (postgres) y se salta el RLS de las tablas que lee: si anon la puede
+--    consultar, ve lo que la tabla le niega.
+select 'VISTA_LEGIBLE_POR_ANON' as hallazgo, c.relname as vista
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
- where n.nspname = 'public' and c.relkind = 'v'
-   and not coalesce((select bool_or(o = 'security_invoker=true' or o = 'security_invoker=on')
-                       from unnest(c.reloptions) o), false)
+ where n.nspname = 'public' and c.relkind in ('v','m')
+   and has_table_privilege('anon', c.oid, 'SELECT')
  order by 2;
 
 -- 4) Buckets públicos de Storage (cualquiera con la URL descarga el archivo).

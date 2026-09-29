@@ -162,7 +162,7 @@ export async function POST(req: NextRequest) {
       const reservaId         = body.reservaId ?? null;
       const vehiculoId        = body.vehiculoId ?? null;
       const vehiculoTerceroId = body.vehiculoTerceroId ?? null;
-      const HCOLS = "lat,lng,velocidad,created_at,timestamp,reserva_id,vehiculo_id,vehiculo_tercero_id,precision_m,fix_ts";
+      const HCOLS = "lat,lng,velocidad,rumbo,created_at,timestamp,reserva_id,vehiculo_id,vehiculo_tercero_id,precision_m,fix_ts";
       let filas: any[] = [];
       let viaVehiculo = false; // ¿se usó la rama por-vehículo (sin reserva_id)?
       // PAGINADO (paginarFilas): PostgREST recorta toda respuesta al max-rows del servidor

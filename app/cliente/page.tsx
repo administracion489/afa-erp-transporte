@@ -9,7 +9,7 @@ import { animarMarcador, animarMarcadorPorCamino, tweenEnVuelo } from "@/lib/ani
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
+  calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM,
   pegarIconoAVia, caminoEntreSnaps, enParalelo, crearFiltroFixVivo,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
@@ -18,6 +18,21 @@ import { estadoCliente, normalizaEstado } from "@/lib/estados";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado } from "@/lib/documentos-servicio";
 import { logoDeFondo } from "@/lib/empresa-perfil";
 import { saveSession, loadSession, clearSession, getPortalToken, portalApi } from "@/lib/portal-sesion";
+
+/** Conductor y placa de una reserva DEL cliente (token del portal), por el servidor. */
+async function asignacionDeReserva(reservaId: number): Promise<{
+  conductor: { nombre: string; numero_licencia: string | null; telefono: string } | null;
+  placa: string | null;
+}> {
+  try {
+    const res = await fetch("/api/cliente/asignacion", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: getPortalToken(), reservaId }),
+    });
+    const j = await res.json();
+    return res.ok ? { conductor: j.conductor ?? null, placa: j.placa ?? null } : { conductor: null, placa: null };
+  } catch { return { conductor: null, placa: null }; }
+}
 import {
   identidadRuta, ETIQUETA_RECORRIDO, SIN_NOMBRE_RUTA, SIN_RECORRIDO,
 } from "@/lib/ruta-identidad";
@@ -778,13 +793,11 @@ export default function ClientePortal() {
       }).then(r => r.json()).then(j => { if (j?.ubicacion) setGpsActual(j.ubicacion as GPS); }).catch(() => {});
 
     }
-    if (activo?.conductor_id) {
-      supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
-        .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); });
-    }
-    if (activo?.vehiculo_id) {
-      portalApi("placas_vehiculos", { vehiculo_ids: [activo.vehiculo_id] })
-        .then(({ ok, data }) => { const placa = ok ? data?.vehiculos?.[0]?.placa : null; if (placa) setVehiculoInfo({ placa }); });
+    if (activo) {
+      asignacionDeReserva(activo.id).then(({ conductor, placa }) => {
+        if (conductor) setConductorInfo(conductor as ConductorInfo);
+        if (placa) setVehiculoInfo({ placa });
+      });
     }
     setLoading(false);
     if (activo) {
@@ -823,36 +836,16 @@ export default function ClientePortal() {
       );
     }
 
-    // Conductor: propio (conductor_id → tabla conductores) o tercerizado
-    // (conductor_tercero_id → tabla conductores_tercero, sin revelar la empresa al cliente).
-    const ra = r as any;
-    if (r.conductor_id) {
-      tasks.push(
-        supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", r.conductor_id).maybeSingle()
-          .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); })
-      );
-    } else if (ra.conductor_tercero_id) {
-      tasks.push(
-        supabase.from("conductores_tercero").select("nombre,licencia,telefono").eq("id", ra.conductor_tercero_id).maybeSingle()
-          .then(({ data }: any) => { if (data) setConductorInfo({ nombre: (data as any).nombre, numero_licencia: (data as any).licencia ?? null, telefono: (data as any).telefono || "" } as ConductorInfo); })
-      );
-    } else if (ra.empresa_tercerizada_id) {
-      setConductorInfo({ nombre: "Conductor asignado", numero_licencia: null, telefono: "" } as ConductorInfo);
-    }
-
-    // Vehículo: propio (vehiculo_id → /api/cliente, RLS bloquea vehiculos al rol
-    // anónimo) o tercerizado (vehiculo_tercero_id → vehiculos_tercero, lectura abierta).
-    if (r.vehiculo_id) {
-      tasks.push(
-        portalApi("placas_vehiculos", { vehiculo_ids: [r.vehiculo_id] })
-          .then(({ ok, data }) => { const placa = ok ? data?.vehiculos?.[0]?.placa : null; if (placa) setVehiculoInfo({ placa }); })
-      );
-    } else if (ra.vehiculo_tercero_id) {
-      tasks.push(
-        supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle()
-          .then(({ data }: any) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
-      );
-    }
+    // Conductor y placa por /api/cliente/asignacion: el cliente sale del token y la reserva
+    // tiene que ser suya. Antes se leían con el cliente ANÓNIMO directo de conductores,
+    // conductores_tercero y vehiculos_tercero, lo que obligaba a dejar esas tablas abiertas
+    // a cualquiera con la anon key. El tercerizado sigue sin revelar la empresa.
+    tasks.push(
+      asignacionDeReserva(r.id).then(({ conductor, placa }) => {
+        if (conductor) setConductorInfo(conductor as ConductorInfo);
+        if (placa) setVehiculoInfo({ placa });
+      })
+    );
 
     await Promise.all(tasks);
   }, [ppList]);
@@ -884,35 +877,16 @@ export default function ClientePortal() {
       );
     }
 
-    const ra = r as any;
-    if (r.conductor_id) {
-      // Propio: conductor desde tabla conductores
-      tasks.push(
-        supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", r.conductor_id).maybeSingle()
-          .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); })
-      );
-    } else if (ra.conductor_tercero_id) {
-      // Tercerizado con conductor asignado (no revelar empresa al cliente)
-      tasks.push(
-        supabase.from("conductores_tercero").select("nombre,telefono").eq("id", ra.conductor_tercero_id).maybeSingle()
-          .then(({ data }: any) => { if (data) setConductorInfo({ nombre: (data as any).nombre, telefono: (data as any).telefono || "" } as ConductorInfo); })
-      );
-    } else if (ra.empresa_tercerizada_id) {
-      // Tercerizado sin conductor específico aún asignado
-      setConductorInfo({ nombre: "Conductor asignado", telefono: "" } as ConductorInfo);
-    }
-
-    if (r.vehiculo_id) {
-      tasks.push(
-        portalApi("placas_vehiculos", { vehiculo_ids: [r.vehiculo_id] })
-          .then(({ ok, data }) => { const placa = ok ? data?.vehiculos?.[0]?.placa : null; if (placa) setVehiculoInfo({ placa }); })
-      );
-    } else if (ra.vehiculo_tercero_id) {
-      tasks.push(
-        supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle()
-          .then(({ data }: any) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
-      );
-    }
+    // Conductor y placa por /api/cliente/asignacion: el cliente sale del token y la reserva
+    // tiene que ser suya. Antes se leían con el cliente ANÓNIMO directo de conductores,
+    // conductores_tercero y vehiculos_tercero, lo que obligaba a dejar esas tablas abiertas
+    // a cualquiera con la anon key. El tercerizado sigue sin revelar la empresa.
+    tasks.push(
+      asignacionDeReserva(r.id).then(({ conductor, placa }) => {
+        if (conductor) setConductorInfo(conductor as ConductorInfo);
+        if (placa) setVehiculoInfo({ placa });
+      })
+    );
 
     await Promise.all(tasks);
     setGpsModalOpen(true);
@@ -1158,50 +1132,26 @@ export default function ClientePortal() {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [cliente, cargarDatos]);
 
-  // ─── Realtime GPS ─────────────────────────────────────────────────────────
-  // postgres_changes NO soporta OR de columnas. Para servicios de tercero el GPS
-  // puede llegar con vehiculo_id null (y vehiculo_tercero_id seteado) o con el id
-  // de tercero dentro de vehiculo_id (puntos viejos): por eso suscribimos por
-  // reserva_id (llave no ambigua) cuando hay reserva activa, y por vehiculo_id
-  // como fallback para los servicios propios sin reserva conocida.
+  // ─── GPS del servicio activo · sondeo por la API ──────────────────────────
+  // Antes era una suscripción realtime ANÓNIMA a ubicaciones_gps (y otra a reservas): para
+  // que llegara, esas tablas tenían que ser legibles por el rol anon, o sea por cualquiera
+  // con la anon key — la posición de toda la flota. Ahora se pregunta cada 15 s a
+  // /api/cliente/gps, que ya exige el token del portal y que la reserva sea del cliente. Los
+  // cambios de estado/conductor de las reservas los recoge el refresco silencioso de 30 s
+  // de cargarDatos (más arriba).
   useEffect(() => {
-    if (!reservaActivaId && !vehiculoActivo) return;
-    const usarReserva = reservaActivaId != null;
-    const filter = usarReserva ? `reserva_id=eq.${reservaActivaId}` : `vehiculo_id=eq.${vehiculoActivo}`;
-    const ch = supabase.channel(`cliente-gps-${usarReserva ? `r${reservaActivaId}` : `v${vehiculoActivo}`}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps", filter },
-        (payload: any) => setGpsActual(payload.new as GPS))
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [reservaActivaId, vehiculoActivo]);
-
-  // ─── Realtime reservas (cambios de estado en tiempo real) ─────────────────
-  useEffect(() => {
-    if (!cliente) return;
-    const ch = supabase.channel(`cliente-reservas-${cliente.id}`)
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "reservas", filter: `cliente_id=eq.${cliente.id}` },
-        (payload: any) => {
-          const updated = payload.new as Reserva;
-          setReservas(prev => prev.map(r => r.id === updated.id ? { ...r, ...updated } : r));
-          // Si el servicio activo ahora tiene conductor/vehículo, cargarlos
-          const hoy = getHoyPeru();
-          if (updated.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(updated.estado)) {
-            // reserva_id es la llave no ambigua para el GPS en vivo (también terceros)
-            setReservaActivaId(updated.id);
-            if (updated.conductor_id) {
-              supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", updated.conductor_id).maybeSingle()
-                .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); });
-            }
-            if (updated.vehiculo_id) {
-              setVehiculoActivo(updated.vehiculo_id);
-              portalApi("placas_vehiculos", { vehiculo_ids: [updated.vehiculo_id] })
-                .then(({ ok, data }) => { const placa = ok ? data?.vehiculos?.[0]?.placa : null; if (placa) setVehiculoInfo({ placa }); });
-            }
-          }
-        })
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [cliente]);
+    if (!reservaActivaId) return;
+    let vivo = true;
+    const tick = () => {
+      if (document.hidden) return;
+      fetch("/api/cliente/gps", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: getPortalToken(), reservaId: reservaActivaId }),
+      }).then(r => r.json()).then(j => { if (vivo && j?.ubicacion) setGpsActual(j.ubicacion as GPS); }).catch(() => {});
+    };
+    const iv = setInterval(tick, 15000);
+    return () => { vivo = false; clearInterval(iv); };
+  }, [reservaActivaId]);
 
   // ─── Cargar GPS en vivo al abrir En vivo o el Dashboard ───────────────────
   // El dashboard también lo necesita: las cards "EN CURSO" deciden qué servicios
@@ -1499,36 +1449,20 @@ export default function ClientePortal() {
     // para su card EN CURSO.
     const cargar = () => serviciosHoyRef.current.forEach(async r => {
       const ra = r as any;
-      // Conductor
-      if (!(r.id in condInfoMap)) {
-        let nombre = "", tel = "";
-        if (ra.conductor_id) {
-          const { data } = await supabase.from("conductores").select("nombre,telefono").eq("id", ra.conductor_id).maybeSingle();
-          if (data) { nombre = (data as any).nombre || ""; tel = (data as any).telefono || ""; }
-        } else if (ra.conductor_tercero_id) {
-          const { data } = await supabase.from("conductores_tercero").select("nombre,telefono").eq("id", ra.conductor_tercero_id).maybeSingle();
-          if (data) { nombre = (data as any).nombre || ""; tel = (data as any).telefono || ""; }
-        }
-        setCondInfoMap(prev => ({ ...prev, [r.id]: { nombre: nombre || "Conductor asignado", tel } }));
+      // Conductor y vehículo: por /api/cliente/asignacion (ver cargarDetalle).
+      if (!(r.id in condInfoMap) || !(r.id in vehPlacaMap)) {
+        const { conductor, placa } = await asignacionDeReserva(r.id);
+        setCondInfoMap(prev => ({ ...prev, [r.id]: { nombre: conductor?.nombre || "Conductor asignado", tel: conductor?.telefono || "" } }));
+        if (placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: placa }));
       }
-      // Vehículo: vehiculo_id → tabla vehiculos; vehiculo_tercero_id → tabla vehiculos_tercero
-      if (!(r.id in vehPlacaMap)) {
-        if (r.vehiculo_id) {
-          const { ok, data } = await portalApi("placas_vehiculos", { vehiculo_ids: [r.vehiculo_id] });
-          const placa = ok ? data?.vehiculos?.[0]?.placa : null;
-          if (placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: placa }));
-        } else if (ra.vehiculo_tercero_id) {
-          const { data } = await supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle();
-          if ((data as any)?.placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: (data as any).placa }));
-        }
-      }
-      // GPS más reciente de esta reserva
+      // GPS más reciente de esta reserva, por /api/cliente/gps (token del portal).
       // `created_at` y `estado` viajan también: sin la edad del fix no se puede distinguir un bus
       // en marcha de uno cuyo GPS murió hace una hora, y el ETA de la tarjeta se refrescaba
       // igual (comprando llamadas caras a Google para pintar una hora imposible).
-      const { data: gd } = await supabase.from("ubicaciones_gps")
-        .select("lat,lng,velocidad,estado,created_at").eq("reserva_id", r.id)
-        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      const gd = await fetch("/api/cliente/gps", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: getPortalToken(), reservaId: r.id }),
+      }).then(res => res.json()).then(j => j?.ubicacion ?? null).catch(() => null);
       const g = gd as { lat?: unknown; lng?: unknown; velocidad?: unknown; estado?: string | null; created_at?: string | null } | null;
       if (g?.lat && g?.lng) {
         setGpsCardMap(prev => ({ ...prev, [r.id]: {
@@ -1792,11 +1726,12 @@ export default function ClientePortal() {
       try {
       // PAGINADO (paginarFilas): PostgREST recorta al max-rows del servidor (1000) aunque se
       // pida .limit(5000) → la huella se congelaba en el punto 1000 en viajes largos.
-      const data = await paginarFilas(() =>
-        supabase.from("ubicaciones_gps")
-          .select("lat,lng,velocidad,rumbo,precision_m,created_at,timestamp")
-          .eq("reserva_id", rid)
-          .order("created_at", { ascending: true }).order("id", { ascending: true }));
+      // Por /api/cliente/gps (modo huella, ya paginado y acotado al servicio en el servidor):
+      // ubicaciones_gps no es legible por el rol anónimo.
+      const data: any[] = await fetch("/api/cliente/gps", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: getPortalToken(), reservaId: rid, huella: true }),
+      }).then(res => res.json()).then(j => j?.huella ?? []).catch(() => []);
       if (cancel) return;
       const filas = (data || []).filter((p: any) => p.lat && p.lng);
       // Anclar imprecisos al corredor confiable (mata el zigzag off-road) + limpieza de jitter

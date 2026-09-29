@@ -608,8 +608,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero", "/manuales", "/conformidad-cambio", "/conformidad", "/proveedor"].some(
       (r) => pathname === r || pathname.startsWith(r + "/")
     ) ||
-    // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO
-    pathname.startsWith("/seguimiento/") ||
+    // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO, y tampoco
+    // /seguimiento/gps/[id]: es una vista INTERNA (lee reservas, conductores y vehículos con
+    // la sesión del ERP) que se colaba como pública solo por compartir el prefijo.
+    (pathname.startsWith("/seguimiento/") && !pathname.startsWith("/seguimiento/gps/")) ||
     // Bancos de pruebas visuales (/dev/*) — solo existen en desarrollo
     (process.env.NODE_ENV !== "production" && pathname.startsWith("/dev/"));
 
