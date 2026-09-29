@@ -79,6 +79,12 @@ async function enCursoVivo(admin: any, r: any, hoy: string): Promise<boolean> {
   return !!data?.length;                                        // sigue emitiendo → sigue vivo
 }
 
+// Lo que /pasajero lee de la reserva (origen/destino/hora, permite_cambio_paradero) y lo que
+// este route usa para elegir el servicio vigente y resolver vehículo/conductor.
+const COLS_RESERVA_PASAJERO =
+  "id, estado, fecha_servicio, hora_servicio, origen, destino, ruta_nombre, " +
+  "vehiculo_id, vehiculo_tercero_id, conductor_id, conductor_tercero_id, permite_cambio_paradero";
+
 export async function POST(req: NextRequest) {
   try {
     // Mismo gate que /api/conductor: exige x-afa-key si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está
@@ -148,7 +154,10 @@ export async function POST(req: NextRequest) {
 
         const { data: pp, error: ppErr } = await admin
           .from("pasajeros_parada")
-          .select(`*, parada:paradas(*, reserva:reservas(*))`)
+          // Columnas EXPLÍCITAS de la reserva: `reservas(*)` le mandaba al teléfono del
+          // pasajero el precio de venta, el costo del proveedor, `token_conductor_tercero` y las
+          // notas internas. Solo lo que la app del pasajero pinta y lo que filtra aquí abajo.
+          .select(`*, parada:paradas(*, reserva:reservas(${COLS_RESERVA_PASAJERO}))`)
           .eq("pasajero_id", pid);
         if (ppErr) return NextResponse.json({ error: ppErr.message }, { status: 500 });
         if (!pp?.length) return NextResponse.json({ ruta: null });

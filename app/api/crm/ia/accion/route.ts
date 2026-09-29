@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -27,7 +28,14 @@ async function clienteIdDeContacto(sb: ReturnType<typeof db>, contacto: any): Pr
 // Aprueba (crea el registro real) o rechaza una propuesta de la IA.
 export async function POST(req: NextRequest) {
   try {
-    const { accion_id, decision, usuario_id } = await req.json();
+    // Aprobar CREA cotizaciones y reservas con service-role: sin sesión cualquiera podía
+    // fabricarlas. Y quién aprobó sale del TOKEN, no del body: un `usuario_id` del cliente
+    // permitía firmar la aprobación a nombre de otra persona.
+    const auth = await verificarUsuarioApi(req, "crm");
+    if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+    const usuario_id = auth.userId;
+
+    const { accion_id, decision } = await req.json();
     if (!accion_id || !["aprobar", "rechazar"].includes(decision))
       return NextResponse.json({ ok: false, error: "Datos inválidos" }, { status: 400 });
 
@@ -44,7 +52,7 @@ export async function POST(req: NextRequest) {
     if (decision === "rechazar") {
       await sb
         .from("crm_acciones_ia")
-        .update({ estado: "rechazada", resuelta_at: new Date().toISOString(), resuelta_por: usuario_id ?? null })
+        .update({ estado: "rechazada", resuelta_at: new Date().toISOString(), resuelta_por: usuario_id })
         .eq("id", accion_id);
       return NextResponse.json({ ok: true, estado: "rechazada" });
     }
@@ -101,7 +109,7 @@ export async function POST(req: NextRequest) {
         resultado_tipo: resultadoTipo,
         resultado_id: resultadoId,
         resuelta_at: new Date().toISOString(),
-        resuelta_por: usuario_id ?? null,
+        resuelta_por: usuario_id,
       })
       .eq("id", accion_id);
 

@@ -2,6 +2,7 @@
 // Ejecutada por Vercel Cron todos los días a las 8:00 AM Lima (hora Perú = UTC-5 = 13:00 UTC)
 
 import { NextRequest, NextResponse } from "next/server";
+import { esCronAutorizado } from "@/lib/api-auth";
 import { createClient } from "@supabase/supabase-js";
 import { notificarReserva } from "@/lib/notificaciones";
 import { reclamarEnvio, liberarEnvio } from "@/lib/alertas";
@@ -13,10 +14,10 @@ const supabaseAdmin = createClient(
 
 export async function GET(req: NextRequest) {
   // Verificar que viene de Vercel Cron (o llamada manual autorizada)
-  const authHeader = req.headers.get("authorization");
-  const cronSecret = process.env.CRON_SECRET;
-
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+  // FAIL-CLOSED: sin CRON_SECRET no corre para nadie. Antes, con la variable ausente, cualquier
+  // GET (incluido el HEAD que hace /configuracion/sistema para ver si la ruta existe) mandaba
+  // los recordatorios a todos los pasajeros de mañana.
+  if (!esCronAutorizado(req)) {
     return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   }
 

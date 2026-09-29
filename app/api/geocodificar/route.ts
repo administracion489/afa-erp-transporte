@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { guardarGasto, limitarGasto } from "@/lib/api-guard";
 import { geocodificarConCache } from "@/lib/geocode-cache";
+import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -58,6 +59,17 @@ export async function POST(req: NextRequest) {
     const excedido = limitarGasto(req, { etiqueta: "geocodificar", limite: 40 });
     if (excedido) return excedido;
 
+    // ESCRIBIR en `paradas` exige sesión del ERP. Antes cualquiera podía mandar un id real y
+    // moverle las coordenadas a un paradero ajeno (el bus iría a otro sitio en el mapa del
+    // conductor y del cliente). Sin sesión el endpoint sigue sirviendo, pero en SOLO LECTURA:
+    // las páginas públicas (/cliente, /seguimiento, /conductor) solo mandan ids sintéticos ≤ 0,
+    // así que no pierden nada. Solo se verifica si hace falta: un lote sin ids reales no paga
+    // las dos consultas.
+    const hayFilasReales = paradas.some((p) => Number(p?.id) > 0);
+    const puedeEscribir = hayFilasReales && req.headers.get("authorization")
+      ? (await verificarUsuarioApiAlguno(req, [])).ok
+      : false;
+
     const resultados: ParadaResult[] = await Promise.all(
       paradas.map(async (p) => {
         const coords = await geocodificarConCache(p.nombre);
@@ -66,7 +78,7 @@ export async function POST(req: NextRequest) {
         // Solo persistir cuando la parada es una fila real. Un id 0/negativo es una parada
         // sintética armada desde paradas_json: no hay fila que actualizar, y el resultado ya
         // quedó en geocode_cache, que es lo que evita repetir la llamada.
-        if (Number(p.id) > 0) {
+        if (puedeEscribir && Number(p.id) > 0) {
           const { error } = await supabaseAdmin
             .from("paradas")
             .update({ lat: coords.lat, lng: coords.lng })

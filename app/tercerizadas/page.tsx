@@ -12,6 +12,7 @@ import {
   AUTORIDADES, REGIONES_PERU, avisosAutorizacion, configAutoridad, etiquetaAutorizacion,
   type Autoridad,
 } from "@/lib/autorizacion-transporte";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -525,7 +526,7 @@ export default function EmpresasTercerizadasPage() {
 
       if (r.empresa?.email) {
         fetch("/api/tercerizadas/notificar-rechazo", {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: await cabecerasErp(),
           body: JSON.stringify({ email: r.empresa.email, empresaId: r.empresa_id, empresaNombre: r.empresa.razon_social, tipo: r.tipo, motivo }),
         }).catch(() => {});
       }

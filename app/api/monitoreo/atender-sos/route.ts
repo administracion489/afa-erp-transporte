@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 
 // La tabla alertas_sos tiene RLS que permite SELECT pero NO UPDATE al cliente anon,
 // por eso marcar "atendido" desde el navegador afectaba 0 filas y el SOS reaparecía al
@@ -36,6 +37,10 @@ export async function POST(request: NextRequest) {
     if (!perfil || perfil.activo === false) {
       return NextResponse.json({ error: "Usuario no autorizado" }, { status: 403 });
     }
+    // Y con el módulo donde se atiende el SOS (/monitoreo; el tablero de /seguimiento
+    // también lo ve). Cerrar una alerta de pánico sin verla es lo peor que puede pasar aquí.
+    const permiso = await verificarUsuarioApiAlguno(request, ["monitoreo", "seguimiento"]);
+    if (!permiso.ok) return NextResponse.json({ error: permiso.error }, { status: permiso.status });
 
     const body = (await request.json()) as { id?: number };
     const id = Number(body.id);

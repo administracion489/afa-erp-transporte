@@ -5,6 +5,7 @@ import {
   telefonoLegible, telefonoDeContacto, nombreEsElNumero, coincideBusquedaTelefono,
 } from "@/lib/crm-telefono";
 import { avisosAutomaticosDeTelefono, etiquetaAviso, type AvisoAutomatico } from "@/lib/crm-avisos-automaticos";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -136,11 +137,22 @@ export default function CRMPage() {
   const sincronizarGmail = async () => {
     setSincronizando(true);
     try {
-      const res = await fetch("/api/crm/gmail/sync", { method: "POST" });
+      const res = await fetch("/api/crm/gmail/sync", { method: "POST", headers: await cabecerasErp() });
       if (res.ok) { showToast("Gmail sincronizado correctamente"); cargarConvs(); }
       else showToast("Error al sincronizar Gmail", false);
     } catch { showToast("Error al sincronizar Gmail", false); }
     setSincronizando(false);
+  };
+
+  // Conectar la bandeja: el servidor devuelve la URL de Google con un `state` firmado (no se
+  // puede ir por un enlace directo porque un enlace no lleva la sesión).
+  const conectarGmail = async () => {
+    try {
+      const res = await fetch("/api/crm/gmail/auth", { method: "POST", headers: await cabecerasErp() });
+      const j = await res.json();
+      if (res.ok && j.url) window.location.href = j.url;
+      else showToast(j.error || "No se pudo iniciar la conexión con Gmail", false);
+    } catch { showToast("No se pudo iniciar la conexión con Gmail", false); }
   };
 
   // ── Cargar conversaciones ──────────────────────────────────────────────
@@ -339,7 +351,7 @@ export default function CRMPage() {
     try {
       const res = await fetch("/api/crm/ia/responder", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await cabecerasErp(),
         body: JSON.stringify({ conversacion_id: selected.id, forzar_borrador: true }),
       });
       const data = await res.json();
@@ -373,7 +385,7 @@ export default function CRMPage() {
   const resolverAccion = async (accionId: string, decision: "aprobar" | "rechazar") => {
     const res = await fetch("/api/crm/ia/accion", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await cabecerasErp(),
       body: JSON.stringify({ accion_id: accionId, decision }),
     });
     const data = await res.json();
@@ -489,6 +501,13 @@ export default function CRMPage() {
                 className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors disabled:opacity-50"
               >
                 {sincronizando ? "⏳" : "📧↻"}
+              </button>
+              <button
+                onClick={conectarGmail}
+                title="Conectar (o reconectar) la cuenta de Gmail del CRM"
+                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
+              >
+                📧+
               </button>
               <button
                 onClick={() => setConectarWaModal(true)}

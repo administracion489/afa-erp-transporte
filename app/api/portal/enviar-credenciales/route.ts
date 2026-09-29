@@ -6,6 +6,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 import path from "path";
+import { verificarUsuarioApi } from "@/lib/api-auth";
+import { escHtml } from "@/lib/html-escape";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -24,13 +26,11 @@ function getLogoBase64(): string {
 
 export async function POST(req: NextRequest) {
   try {
-    // Verificar que el llamador tiene sesión válida en el ERP
-    const authHeader = req.headers.get("authorization") ?? "";
-    const token = authHeader.replace("Bearer ", "").trim();
-    if (token) {
-      const { error: authErr } = await supabaseAdmin.auth.getUser(token);
-      if (authErr) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
-    }
+    // Sesión del ERP con el módulo `clientes` (donde se administran los usuarios del portal).
+    // Antes el token solo se verificaba SI venía: sin cabecera, cualquiera podía mandar un
+    // correo "oficial" con la contraseña que quisiera a cualquier usuario del portal.
+    const auth = await verificarUsuarioApi(req, "clientes");
+    if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
     const { usuario_id, password, tipo_doc } = await req.json();
     if (!usuario_id || !password) {
@@ -59,16 +59,18 @@ export async function POST(req: NextRequest) {
       .eq("id", usuario.cliente_id)
       .single();
 
-    const empresa      = process.env.EMPRESA_NOMBRE || "El equipo";
+    const empresaTxt   = process.env.EMPRESA_NOMBRE || "El equipo";
+    const empresa      = escHtml(empresaTxt);
     const fromAddr     = process.env.RESEND_FROM    || "onboarding@resend.dev";
     const apiKey       = process.env.RESEND_API_KEY || "";
-    const nombreEmp    = cliente?.empresa || cliente?.nombre || empresa;
-    const ruc          = cliente?.ruc ?? "";
+    const nombreEmpTxt = cliente?.empresa || cliente?.nombre || empresaTxt;
+    const nombreEmp    = escHtml(nombreEmpTxt);
+    const ruc          = escHtml(cliente?.ruc ?? "");
     const logoSrc      = getLogoBase64();
-    const tipoId       = tipo_doc || "Identificación";
-    const portalUrl    = process.env.NEXT_PUBLIC_APP_URL
+    const tipoId       = escHtml(tipo_doc || "Identificación");
+    const portalUrl    = escHtml(process.env.NEXT_PUBLIC_APP_URL
       ? `${process.env.NEXT_PUBLIC_APP_URL}/cliente`
-      : process.env.NEXT_PUBLIC_URL_BASE ? process.env.NEXT_PUBLIC_URL_BASE + "/cliente" : "";
+      : process.env.NEXT_PUBLIC_URL_BASE ? process.env.NEXT_PUBLIC_URL_BASE + "/cliente" : "");
 
     const html = `
 <!DOCTYPE html>
@@ -92,7 +94,7 @@ export async function POST(req: NextRequest) {
         <tr>
           <td style="padding:36px 36px 28px">
             <p style="margin:0 0 6px;font-size:11px;font-weight:700;color:#9AA0AC;letter-spacing:0.1em;text-transform:uppercase">Portal Cliente · Bienvenido</p>
-            <h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0A0E1A;line-height:1.25">Hola, ${usuario.nombre} 👋</h1>
+            <h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0A0E1A;line-height:1.25">Hola, ${escHtml(usuario.nombre)} 👋</h1>
             <p style="margin:0 0 28px;font-size:14.5px;color:#6B6F7C;line-height:1.65">
               Tu acceso al portal empresarial de <strong style="color:#0A0E1A">${nombreEmp}</strong> ha sido configurado.
               A continuación encontrarás tus credenciales de ingreso.
@@ -116,7 +118,7 @@ export async function POST(req: NextRequest) {
                     <span style="font-size:12px;color:#9AA0AC;font-weight:600">${tipoId}</span>
                   </td>
                   <td style="padding:8px 0;border-bottom:1px solid #D5DDEA">
-                    <span style="font-size:13px;color:#0A0E1A;font-weight:700;font-family:ui-monospace,monospace">${usuario.dni}</span>
+                    <span style="font-size:13px;color:#0A0E1A;font-weight:700;font-family:ui-monospace,monospace">${escHtml(usuario.dni)}</span>
                   </td>
                 </tr>
                 <tr>
@@ -124,7 +126,7 @@ export async function POST(req: NextRequest) {
                     <span style="font-size:12px;color:#9AA0AC;font-weight:600">Contraseña</span>
                   </td>
                   <td style="padding:8px 0">
-                    <span style="font-size:13px;color:#0A0E1A;font-weight:700;font-family:ui-monospace,monospace">${password}</span>
+                    <span style="font-size:13px;color:#0A0E1A;font-weight:700;font-family:ui-monospace,monospace">${escHtml(password)}</span>
                   </td>
                 </tr>
               </table>
@@ -170,7 +172,7 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         from:    fromAddr,
         to:      usuario.email,
-        subject: `Tus credenciales de acceso al portal — ${nombreEmp}`,
+        subject: `Tus credenciales de acceso al portal — ${nombreEmpTxt}`,
         html,
       }),
     });

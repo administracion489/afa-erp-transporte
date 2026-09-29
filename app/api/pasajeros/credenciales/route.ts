@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { enviarCredencialEmailPasajero } from "@/lib/pasajero-email";
+import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 
 const supaAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -9,6 +10,11 @@ const supaAdmin = createClient(
 );
 
 export async function POST(req: NextRequest) {
+  // Manda por correo el PIN del pasajero: sin sesión del ERP cualquiera podía disparar
+  // correos con credenciales a cualquier ficha.
+  const auth = await verificarUsuarioApiAlguno(req, ["clientes", "pasajeros"]);
+  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
   const body = await req.json();
   const pasajeroIds: number[] = body.pasajeroIds ?? [];
   if (!pasajeroIds.length)

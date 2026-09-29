@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { enviarInvitacionesPasajeros } from "@/lib/pasajero-invitacion";
+import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 
 /** POST /api/pasajeros/invitacion
  *  body: { pasajeroIds: number[], canales: { email: boolean, whatsapp: boolean } }
@@ -7,6 +8,10 @@ import { enviarInvitacionesPasajeros } from "@/lib/pasajero-invitacion";
  *  credenciales + WhatsApp de invitación (sin contraseñas), según canales habilitados.
  */
 export async function POST(req: NextRequest) {
+  // Lo llaman /clientes, /pasajeros y el manifiesto de /programacion.
+  const auth = await verificarUsuarioApiAlguno(req, ["clientes", "pasajeros", "programacion"]);
+  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
   const body = await req.json();
   const pasajeroIds: number[] = Array.isArray(body.pasajeroIds) ? body.pasajeroIds : [];
   const canales = {

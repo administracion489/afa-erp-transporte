@@ -12,6 +12,7 @@
 
 import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { esCronAutorizado, verificarUsuarioApi } from "@/lib/api-auth";
 import { distM, limpiarHuella, filasAPuntos, velocidadPorVentana, paginarFilas, type FixVel } from "@/lib/huella";
 
 const admin = () =>
@@ -29,7 +30,21 @@ const tMs = (g: any) => {
   return Math.max(a || 0, b || 0);
 };
 
+/**
+ * Herramienta de desarrollo: sirve la traza GPS completa de cualquier servicio o vehículo, y
+ * no pedía NADA. En producción solo responde a un admin del ERP (Bearer de Supabase) o al
+ * CRON_SECRET; a cualquier otro le contesta 404, como si no existiera. En local sigue abierta.
+ * El módulo "__solo_admin__" no existe en permisos_usuario: con él, solo el rol admin pasa.
+ */
+async function permitido(req: NextRequest): Promise<boolean> {
+  if (process.env.NODE_ENV !== "production") return true;
+  if (esCronAutorizado(req)) return true;
+  if (!req.headers.get("authorization")) return false;
+  return (await verificarUsuarioApi(req, "__solo_admin__")).ok;
+}
+
 export async function GET(req: NextRequest) {
+  if (!(await permitido(req))) return new Response("Not found", { status: 404 });
   const sp = req.nextUrl.searchParams;
   const reservaId = sp.get("reserva");
   const vehiculoId = sp.get("vehiculo");

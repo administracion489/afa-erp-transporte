@@ -8,6 +8,27 @@ const adminClient = () =>
     { auth: { autoRefreshToken: false, persistSession: false } }
   );
 
+// Lo que la página pública /seguimiento/[token] de verdad pinta. Este endpoint lo abre
+// cualquiera que tenga el enlace (el pasajero, y quien sea que se lo reenvíe), así que la
+// respuesta es una LISTA BLANCA: antes viajaba `reservas.*` —con `precio_cliente`,
+// `costo_proveedor`, `token_conductor_tercero` (el enlace con el que se OPERA el servicio del
+// tercero) y observaciones internas— y `vehiculos_tercero.*`.
+//
+// La lectura sigue siendo `*` a propósito (el comentario de abajo: robusta ante columnas de
+// migraciones accesorias como `codigo`), pero lo que SALE se proyecta aquí, campo por campo.
+const CAMPOS_RESERVA = [
+  "id", "codigo", "estado", "fecha_servicio", "hora_servicio",
+  "vehiculo_id", "vehiculo_tercero_id", "conductor_id", "conductor_tercero_id", "empresa_tercerizada_id",
+] as const;
+const CAMPOS_VEHICULO = ["placa", "marca", "modelo", "color", "categoria"] as const;
+
+function proyectar(fila: Record<string, unknown> | null, campos: readonly string[]): Record<string, unknown> | null {
+  if (!fila) return null;
+  const out: Record<string, unknown> = {};
+  for (const c of campos) out[c] = fila[c] ?? null;
+  return out;
+}
+
 export async function GET(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token");
   if (!token) return NextResponse.json({ error: "Token requerido" }, { status: 400 });
@@ -49,7 +70,7 @@ export async function GET(req: NextRequest) {
       .select("*")
       .eq("id", reserva.vehiculo_tercero_id)
       .maybeSingle();
-    vehiculoData = data;
+    vehiculoData = proyectar(data, CAMPOS_VEHICULO);
   }
 
   // 3. Conductor (propio o tercero)
@@ -137,7 +158,7 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json({
-    reserva: { ...reserva, vehiculo: vehiculoData, conductor: conductorData, empresa: empresaData },
+    reserva: { ...proyectar(reserva, CAMPOS_RESERVA), vehiculo: vehiculoData, conductor: conductorData, empresa: empresaData },
     paradas: paradas ?? [],
     ultimaUbicacion,
   });

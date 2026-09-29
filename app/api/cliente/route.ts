@@ -187,6 +187,24 @@ async function reservaDelCliente(reservaId: number, cid: number): Promise<boolea
 const err = (mensaje: string, status = 400) => NextResponse.json({ error: mensaje }, { status });
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
+// ── Proyección de lo que el portal puede ver ─────────────────────────────────
+// Se lee con `*` (robusto ante columnas de migraciones accesorias como modulos_permitidos)
+// pero lo que sale se elige campo por campo. NUNCA viajan codigo_acceso, reset_token ni
+// reset_expires_at.
+const CAMPOS_CLIENTE_PORTAL = ["id", "nombre", "empresa", "ruc", "email", "telefono", "created_at"] as const;
+const CAMPOS_USUARIO_PORTAL = [
+  "id", "cliente_id", "nombre", "dni", "cargo", "rol", "email", "activo", "created_at", "modulos_permitidos",
+] as const;
+
+type Fila = Record<string, unknown> | null | undefined;
+function elegir(fila: Fila, campos: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const c of campos) out[c] = fila?.[c] ?? null;
+  return out;
+}
+const publicoCliente = (c: Fila) => elegir(c, CAMPOS_CLIENTE_PORTAL);
+const publicoUsuario = (u: Fila) => ({ ...elegir(u, CAMPOS_USUARIO_PORTAL), codigo_acceso: "" });
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => null);
@@ -194,6 +212,9 @@ export async function POST(req: NextRequest) {
     const accion = body.accion as string;
 
     // ── LOGIN: RUC (o nombre de empresa) + documento + contraseña ────────────
+    // La respuesta es una LISTA BLANCA (publicoCliente / publicoUsuario): antes viajaba
+    // `clientes.*` al navegador, con el `codigo_acceso` de la empresa (la clave compartida
+    // del login legado) y cualquier columna interna de la ficha comercial.
     if (accion === "login") {
       const ruc = String(body.ruc ?? "").trim();
       const doc = String(body.doc ?? "").trim();
@@ -225,7 +246,7 @@ export async function POST(req: NextRequest) {
           activo: true, created_at: "", modulos_permitidos: null,
         };
         return NextResponse.json({
-          cliente: clienteData, usuario: tempUser,
+          cliente: publicoCliente(clienteData), usuario: tempUser,
           token: firmarToken(Number(clienteData.id), 0),
         });
       }
@@ -237,8 +258,8 @@ export async function POST(req: NextRequest) {
       if (String(usuario.codigo_acceso ?? "") !== password) return err("Contraseña incorrecta.", 401);
 
       return NextResponse.json({
-        cliente: clienteData,
-        usuario: { ...usuario, codigo_acceso: "" }, // la clave no viaja al navegador
+        cliente: publicoCliente(clienteData),
+        usuario: publicoUsuario(usuario), // la clave (ni el token de reseteo) no viaja al navegador
         token: firmarToken(Number(clienteData.id), Number(usuario.id)),
       });
     }
@@ -523,9 +544,13 @@ export async function POST(req: NextRequest) {
 
       // ── COLABORADORES: usuarios del portal del cliente ─────────────────────
       case "colaboradores_listar": {
+        // Lista blanca: `portal_usuarios.*` devolvía la contraseña (`codigo_acceso`) y el
+        // `reset_token` de cada colaborador a cualquier usuario del portal de la empresa, visor
+        // incluido. `codigo_acceso` va vacío para no romper el tipo del formulario: al guardar,
+        // vacío significa «no cambiar la clave».
         const { data } = await admin.from("portal_usuarios").select("*")
           .eq("cliente_id", cid).order("created_at");
-        return NextResponse.json({ colaboradores: data || [] });
+        return NextResponse.json({ colaboradores: (data || []).map(publicoUsuario) });
       }
 
       case "colaboradores_guardar":

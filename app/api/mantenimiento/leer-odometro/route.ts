@@ -13,6 +13,8 @@ import { createClient } from "@supabase/supabase-js";
 import { extraerOdometro, type Adjunto } from "@/lib/vision-ia";
 import { leccionesOdometro, contextoOdometro, type Flota } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
+import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
+import { sesionDeToken } from "@/lib/conductor-auth";
 
 export const maxDuration = 30;
 
@@ -23,9 +25,28 @@ function admin() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
+/**
+ * Dos clases de llamador legítimo, y ninguna anónima (gasta visión de Claude y lee el km y la
+ * guía del tablero de cualquier unidad):
+ *   - el CONDUCTOR, con el token de sesión que emite su login (lib/conductor-auth.ts). Se
+ *     acepta en `body.token` (igual que /api/conductor), en `x-conductor-token` o como Bearer;
+ *   - un usuario del ERP con Bearer de Supabase y el módulo de la pantalla que lee: odómetro
+ *     de /mantenimiento, modal de /tercerizadas (`proveedores`) o /combustible.
+ * El token del conductor se prueba PRIMERO porque es una verificación local (HMAC, sin red).
+ */
+async function autorizado(req: NextRequest, body: { token?: unknown } | null): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  const bearer = req.headers.get("authorization")?.replace("Bearer ", "") ?? null;
+  const candidatos = [body?.token, req.headers.get("x-conductor-token"), bearer];
+  if (candidatos.some(t => sesionDeToken(t))) return { ok: true };
+  const r = await verificarUsuarioApiAlguno(req, ["mantenimiento", "proveedores", "combustible"]);
+  return r.ok ? { ok: true } : { ok: false, status: r.status, error: r.error };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const auth = await autorizado(req, body);
+    if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
     const { adjunto } = body;
     if (!adjunto?.data) {
       return NextResponse.json({ ok: false, error: "Falta la foto del odómetro" }, { status: 400 });

@@ -2483,6 +2483,8 @@ export default function ConductorApp() {
         const res = await fetch("/api/mantenimiento/leer-odometro", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            // La lectura gasta visión de pago: el servidor exige la sesión del conductor.
+            token: tokenSesion ?? undefined,
             adjunto: { tipo: "image", media_type: "image/jpeg", data: base64 },
             vehiculo_id: vehiculoId ?? null,
             flota: vSel?._flota ?? "propia",

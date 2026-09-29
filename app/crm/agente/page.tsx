@@ -1,6 +1,7 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { cabecerasErp } from "@/lib/fetch-erp";
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
 type Goal = { titulo: string; instrucciones: string };
@@ -122,7 +123,7 @@ export default function AgenteIAPage() {
     try {
       const res = await fetch("/api/crm/ia/probar", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await cabecerasErp(),
         body: JSON.stringify({ mensaje: texto, historial }),
       });
       const data = await res.json();

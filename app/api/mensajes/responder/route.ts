@@ -8,6 +8,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -31,6 +32,10 @@ export async function POST(request: Request) {
     if (!perfil || perfil.activo === false) {
       return NextResponse.json({ error: "Usuario inactivo" }, { status: 403 });
     }
+    // Además del usuario activo, el módulo de la pantalla que responde (/seguimiento): un
+    // operador sin ese módulo no ve el hilo y tampoco debe poder escribirle al pasajero.
+    const permiso = await verificarUsuarioApi(request, "seguimiento");
+    if (!permiso.ok) return NextResponse.json({ error: permiso.error }, { status: permiso.status });
 
     const body = await request.json();
     const pasajeroId = Number(body.pasajero_id);

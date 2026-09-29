@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exchangeCode } from "@/lib/crm-gmail";
+import { exchangeCode, verificarStateGmail } from "@/lib/crm-gmail";
 
 // GET /api/crm/gmail/callback — Google redirige aquí con el code
 export async function GET(req: NextRequest) {
@@ -10,6 +10,12 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(
       new URL(`/crm?gmail_error=${error ?? "sin_code"}`, req.url)
     );
+  }
+
+  // Sin un `state` firmado por /api/crm/gmail/auth (y vigente) NO se canjea el code: si no,
+  // un enlace preparado conectaría la bandeja de otra persona al CRM.
+  if (!verificarStateGmail(req.nextUrl.searchParams.get("state"))) {
+    return NextResponse.redirect(new URL("/crm?gmail_error=state_invalido", req.url));
   }
 
   try {

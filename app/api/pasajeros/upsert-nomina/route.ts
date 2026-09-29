@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { normalizarEmpresa } from "@/lib/empresa";
+import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
+
+// Pantallas que editan la nómina. Antes el endpoint no pedía NADA y corre con service-role:
+// cualquiera podía crear pasajeros en la nómina de cualquier cliente o reescribir una ficha.
+const MODULOS = ["clientes", "pasajeros"];
+
+// Columnas que el PATCH puede tocar. Antes `campos` iba tal cual al UPDATE (mass-assignment):
+// se podía mover una ficha a otro cliente (`cliente_id`), atarla a una reserva o reescribir su
+// `qr_code`. `pin_acceso` SÍ está: el modal de /clientes lo edita a propósito.
+const CAMPOS_EDITABLES = ["nombre", "dni", "telefono", "empresa", "email", "pin_acceso", "edad"] as const;
 
 const supaAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -13,6 +23,9 @@ const supaAdmin = createClient(
  *  Upsert bulk — service role bypasses RLS
  */
 export async function POST(req: NextRequest) {
+  const auth = await verificarUsuarioApiAlguno(req, MODULOS);
+  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
   const { clienteId, pasajeros } = await req.json();
   if (!clienteId || !Array.isArray(pasajeros) || pasajeros.length === 0)
     return NextResponse.json({ error: "Datos inválidos" }, { status: 400 });
@@ -65,11 +78,19 @@ export async function POST(req: NextRequest) {
  *  Update individual — service role bypasses RLS
  */
 export async function PATCH(req: NextRequest) {
+  const auth = await verificarUsuarioApiAlguno(req, MODULOS);
+  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
   const { id, campos } = await req.json();
-  if (!id || !campos)
+  if (!id || !campos || typeof campos !== "object")
     return NextResponse.json({ error: "Datos inválidos" }, { status: 400 });
 
-  const { error } = await supaAdmin.from("pasajeros").update(campos).eq("id", id);
+  const limpio: Record<string, unknown> = {};
+  for (const k of CAMPOS_EDITABLES) if (k in campos) limpio[k] = campos[k];
+  if (Object.keys(limpio).length === 0)
+    return NextResponse.json({ error: "Nada que actualizar" }, { status: 400 });
+
+  const { error } = await supaAdmin.from("pasajeros").update(limpio).eq("id", id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 }
