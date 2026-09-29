@@ -12,6 +12,7 @@ import { BarrasHorizontal } from "./_charts";
 import AnaliticaVehiculo, { type VehiculoAnalitica } from "./_AnaliticaVehiculo";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -696,7 +697,7 @@ export default function OdometroTab() {
                           onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)} ${horaLectura(l).txt}`, lectura: l })}
                           className="block rounded-lg overflow-hidden border border-amber-200 hover:ring-2 hover:ring-amber-400"
                           title="Ver foto del tablero">
-                          <img src={l.foto_url} alt="Tablero" className="w-16 h-12 object-cover" />
+                          <ImgPrivada src={l.foto_url} alt="Tablero" className="w-16 h-12 object-cover" />
                         </button>
                       ) : (
                         <span className="text-[11px] text-gray-400">sin foto</span>
@@ -871,7 +872,7 @@ export default function OdometroTab() {
                               <button key={l.id} type="button" title={`${fmtNum(Number(l.km))} km · ver / corregir`}
                                 onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${j.placa} · ${fmtNum(Number(l.km))} km · ${fmtFecha(j.fecha)} ${horaLectura(l).txt}`, lectura: l as unknown as Lectura })}
                                 className={`block rounded-md overflow-hidden border hover:ring-2 hover:ring-[#0b315f]/40 ${l.esReinicio ? "border-blue-300" : "border-gray-200"}`}>
-                                <img src={l.foto_url!} alt="Tablero" className="w-10 h-8 object-cover" />
+                                <ImgPrivada src={l.foto_url!} alt="Tablero" className="w-10 h-8 object-cover" />
                               </button>
                             ))}
                             {j.lecturas.every(l => !l.foto_url) && <span className="text-[11px] text-gray-300">—</span>}
@@ -1147,10 +1148,10 @@ export default function OdometroTab() {
           onClick={() => setFotoZoom(null)}>
           <div className="flex items-center gap-3 mb-2 text-white text-sm font-bold">
             <span>{fotoZoom.titulo}</span>
-            <a href={fotoZoom.url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
-              className="text-xs font-normal underline opacity-80 hover:opacity-100">abrir original</a>
+            <EnlacePrivado href={fotoZoom.url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+              className="text-xs font-normal underline opacity-80 hover:opacity-100">abrir original</EnlacePrivado>
           </div>
-          <img src={fotoZoom.url} alt="Foto del tablero"
+          <ImgPrivada src={fotoZoom.url} alt="Foto del tablero"
             className="max-h-[75vh] max-w-full rounded-xl shadow-2xl object-contain"
             onClick={e => e.stopPropagation()} />
           <div className="mt-3 flex items-center gap-2" onClick={e => e.stopPropagation()}>

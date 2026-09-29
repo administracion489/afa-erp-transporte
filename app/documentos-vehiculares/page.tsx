@@ -5,6 +5,7 @@ import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import { supabase } from "@/lib/supabase";
 import { docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
+import { EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -582,10 +583,10 @@ export default function DocumentosVehiculosPage() {
                   <p className="text-xs font-bold text-gray-700 truncate">{form.archivo_url}</p>
                   <p className="text-[10px] text-gray-400">Archivo adjunto · clic para verificar</p>
                 </div>
-                <a href={form.archivo_url} target="_blank" rel="noreferrer"
+                <EnlacePrivado href={form.archivo_url} target="_blank" rel="noreferrer"
                   className="px-3 py-1.5 rounded-lg text-xs font-bold text-white" style={{ background: "#0b315f" }}>
                   Verificar →
-                </a>
+                </EnlacePrivado>
               </div>
             )}
           </div>
@@ -726,8 +727,8 @@ export default function DocumentosVehiculosPage() {
                       </td>
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         {d.archivo_url
-                          ? <a href={d.archivo_url} target="_blank" rel="noreferrer"
-                              className="text-blue-500 underline text-xs font-bold">📄 Ver</a>
+                          ? <EnlacePrivado href={d.archivo_url} target="_blank" rel="noreferrer"
+                              className="text-blue-500 underline text-xs font-bold">📄 Ver</EnlacePrivado>
                           : <span className="text-gray-300 text-xs">—</span>}
                       </td>
                       <td className="p-3" onClick={e => e.stopPropagation()}>
@@ -813,9 +814,9 @@ export default function DocumentosVehiculosPage() {
                           )}
                           <div className="w-2 h-2 rounded-full" style={{ background: cfg.dot }} />
                           {d.archivo_url && (
-                            <a href={d.archivo_url} target="_blank" rel="noreferrer"
+                            <EnlacePrivado href={d.archivo_url} target="_blank" rel="noreferrer"
                               onClick={e => e.stopPropagation()}
-                              className="text-[10px] text-blue-500 font-bold underline">PDF</a>
+                              className="text-[10px] text-blue-500 font-bold underline">PDF</EnlacePrivado>
                           )}
                         </div>
                       </div>

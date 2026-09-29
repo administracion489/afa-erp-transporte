@@ -6,6 +6,7 @@ import { normalizarEmpresa, claveEmpresa, agruparEmpresas } from "@/lib/empresa"
 import GruposPasajeros from "@/components/pasajeros/GruposPasajeros";
 import { useCanalesInvitacion } from "@/lib/useCanalesInvitacion";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { ImgPrivada } from "@/components/ArchivoPrivado";
 
 type Pasajero = {
   id: number;
@@ -557,7 +558,7 @@ export default function PasajerosPage() {
                           <div className="flex items-center gap-3">
                             <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-black overflow-hidden flex-shrink-0" style={{ background: "#0b315f" }}>
                               {p.foto_url ? (
-                                <img src={getFotoSrc(p.foto_url)} alt="" className="w-full h-full object-cover" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                                <ImgPrivada src={getFotoSrc(p.foto_url)} alt="" className="w-full h-full object-cover" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
                               ) : (
                                 p.nombre.charAt(0)
                               )}

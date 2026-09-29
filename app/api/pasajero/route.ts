@@ -11,6 +11,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { firmarTokenPasajero, pidDeToken, loginBloqueado, registrarIntentoFallido, limpiarIntentos } from "@/lib/pasajero-auth";
+import { firmarUrl } from "@/lib/storage-firmado";
+import { randomUUID } from "node:crypto";
+
+/** Foto de perfil: el bucket es privado. Lo que se GUARDA es el enlace público (el identificador,
+ *  ver lib/storage-privado.ts); lo que se DEVUELVE es uno firmado, que la app solo pinta. */
+const BUCKET_FOTOS = "pasajeros-fotos";
+/** Una foto de perfil llega recortada a 800 px en JPEG (≈ 50-200 KB): 3 MB es de sobra. */
+const MAX_FOTO_BYTES = 3 * 1024 * 1024;
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -134,7 +142,7 @@ export async function POST(req: NextRequest) {
         const row = {
           id: full.id, nombre: full.nombre, dni: full.dni ?? null, empresa: full.empresa ?? null,
           telefono: full.telefono ?? null, qr_code: full.qr_code ?? null,
-          foto_url: full.foto_url ?? null, edad: full.edad ?? null,
+          foto_url: await firmarUrl(admin, full.foto_url ?? null), edad: full.edad ?? null,
           email: full.email ?? null, tipo_documento: full.tipo_documento ?? null,
         };
 
@@ -282,13 +290,56 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ busPosicion: norm(data?.[0] ?? null) });
       }
 
-      // ── Guardar URL de foto de perfil ────────────────────────────────────────
+      // ── Subir la foto de perfil (la sube el SERVIDOR) ───────────────────────
+      // Antes la subía el navegador con la clave pública, y eso obligaba a dejar el bucket
+      // escribible por cualquiera: con la anon key —que va en el JavaScript— se podían subir
+      // archivos o pisar la foto de otro. Ahora el pasajero manda los bytes y el servidor los
+      // guarda en SU carpeta (la del token, no la del body).
+      case "subir_foto": {
+        const pid = pidDeToken(body.token);
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        const b64 = typeof body.imagen === "string" ? body.imagen.replace(/^data:[^,]*,/, "") : "";
+        const buf = Buffer.from(b64, "base64");
+        if (!buf.length || buf.length > MAX_FOTO_BYTES) {
+          return NextResponse.json({ error: "La foto está vacía o pesa demasiado." }, { status: 400 });
+        }
+        // Solo JPEG (lo que produce la app al recortar): la firma FF D8 FF, no la extensión.
+        if (!(buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff)) {
+          return NextResponse.json({ error: "Formato de foto no válido." }, { status: 400 });
+        }
+        // Nombre no adivinable (antes era foto_<timestamp>, enumerable junto al id secuencial).
+        const ruta = `${pid}/${randomUUID()}.jpg`;
+        const { error: upErr } = await admin.storage.from(BUCKET_FOTOS)
+          .upload(ruta, buf, { contentType: "image/jpeg", upsert: false });
+        if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
+        const publica = admin.storage.from(BUCKET_FOTOS).getPublicUrl(ruta).data.publicUrl;
+        const { error } = await admin.from("pasajeros").update({ foto_url: publica }).eq("id", pid);
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ ok: true, foto_url: await firmarUrl(admin, publica) });
+      }
+
+      // ── La foto de perfil con un enlace vigente ───────────────────────────
+      // La sesión de la app vive en el celular y el enlace firmado caduca en una hora: al
+      // reabrir la app se pide uno nuevo en vez de pintar uno vencido.
+      case "foto_vigente": {
+        const pid = pidDeToken(body.token);
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        const { data, error } = await admin.from("pasajeros").select("foto_url").eq("id", pid).maybeSingle();
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ foto_url: await firmarUrl(admin, data?.foto_url ?? null) });
+      }
+
+      // ── Guardar URL de foto de perfil (versión anterior de la app) ───────────
+      // Solo la usa una app que el celular aún tenga en caché: subía la foto con la clave
+      // pública y mandaba aquí su enlace. Se acepta SOLO dentro de la carpeta del propio
+      // pasajero — antes bastaba con que fuera de este bucket, así que se podía poner como
+      // foto de uno la de otro. Cuando el bucket se cierre (seguridad-02) esa subida anónima
+      // deja de funcionar y la app se actualiza sola al recargar.
       case "foto": {
         const pid = pidDeToken(body.token);
         const { fotoUrl } = body;
         if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
-        // Solo aceptar URLs de NUESTRO bucket (no inyectar URLs externas/trackers).
-        const prefijo = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/pasajeros-fotos/`;
+        const prefijo = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/${BUCKET_FOTOS}/${pid}/`;
         if (typeof fotoUrl !== "string" || !fotoUrl.startsWith(prefijo)) {
           return NextResponse.json({ error: "URL de foto inválida" }, { status: 400 });
         }

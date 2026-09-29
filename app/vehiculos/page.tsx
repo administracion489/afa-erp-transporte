@@ -6,6 +6,7 @@ import { docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
 import { FAMILIAS_TANQUE, parseCapacidadTanque as parseCapTanque, capacidadTanqueAForm as capTanqueAForm, faltaColumnaTanque } from "@/lib/combustible-tipos";
 import AvisoFichaCombustible from "@/components/flota/AvisoFichaCombustible";
 import { NIVEL_CFG } from "@/lib/costos/nivel-servicio";
+import { EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -941,7 +942,7 @@ export default function VehiculosPage() {
                                         </div>
                                         <div className="flex items-center gap-1.5">
                                           <span className="text-[10px] font-bold px-2 py-0.5 rounded" style={{ background: cfg.bg, color: cfg.color }}>{cfg.label}</span>
-                                          {d.archivo_url && <a href={d.archivo_url} target="_blank" rel="noreferrer" className="text-blue-500 text-[10px] font-bold underline">PDF</a>}
+                                          {d.archivo_url && <EnlacePrivado href={d.archivo_url} target="_blank" rel="noreferrer" className="text-blue-500 text-[10px] font-bold underline">PDF</EnlacePrivado>}
                                           <button onClick={() => editarDocumento(d)} className="text-gray-400 hover:text-gray-700 text-[10px]">✏️</button>
                                           <button onClick={() => eliminarDocumento(d.id)} className="text-red-400 text-[10px] font-bold">✕</button>
                                         </div>
@@ -996,7 +997,7 @@ export default function VehiculosPage() {
                       <td className="p-3 text-xs text-gray-600">{est === "sin_vencimiento" ? <span className="text-sky-700">No vence</span> : fmtFecha(d.fecha_vencimiento)}</td>
                       <td className="p-3">{dias !== null ? <span className="font-black text-xs" style={{ color: dias < 0 ? "#dc2626" : dias <= 30 ? "#d97706" : "#166534" }}>{dias < 0 ? `${Math.abs(dias)}d venc.` : `${dias}d`}</span> : "—"}</td>
                       <td className="p-3"><span className="text-xs font-bold px-2.5 py-1 rounded-lg" style={{ background: cfg.bg, color: cfg.color }}>{cfg.label}</span></td>
-                      <td className="p-3">{d.archivo_url ? <a href={d.archivo_url} target="_blank" rel="noreferrer" className="text-blue-500 underline text-xs font-bold">📄 Ver</a> : <span className="text-gray-300 text-xs">—</span>}</td>
+                      <td className="p-3">{d.archivo_url ? <EnlacePrivado href={d.archivo_url} target="_blank" rel="noreferrer" className="text-blue-500 underline text-xs font-bold">📄 Ver</EnlacePrivado> : <span className="text-gray-300 text-xs">—</span>}</td>
                       <td className="p-3"><div className="flex gap-1.5"><button onClick={() => editarDocumento(d)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️</button><button onClick={() => eliminarDocumento(d.id)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-600 border border-red-100 hover:bg-red-50">✕</button></div></td>
                     </tr>
                   );

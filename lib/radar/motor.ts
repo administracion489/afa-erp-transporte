@@ -25,6 +25,7 @@ import { transcribirAudio } from "./transcripcion";
 import { miembrosDelMismoRemitente, remitenteUtilizable } from "./cluster-remitente";
 import { CONFIG_DEFECTO, normalizarConfigRadar } from "./config";
 import { LISTA_CATEGORIAS, type CategoriaRadar, type RadarConfig, type ResumenProcesamiento } from "./tipos";
+import { firmarUrl, firmarUrls } from "@/lib/storage-firmado";
 
 // ── Cliente admin (patrón de la casa) ────────────────────────────────────────
 
@@ -497,7 +498,8 @@ async function procesarMensaje(
   if (mensaje.tipo === "audio") {
     let transcripcion: string | null = mensaje.transcripcion ?? null;
     if (!transcripcion && mensaje.media_url) {
-      transcripcion = await transcribirAudio(mensaje.media_url, mensaje.media_mime);
+      // `radar-media` es privado: el enlace guardado ya no se descarga; se firma para esta bajada.
+      transcripcion = await transcribirAudio((await firmarUrl(sb, mensaje.media_url)) ?? mensaje.media_url, mensaje.media_mime);
       if (transcripcion) await sb.from("radar_mensajes").update({ transcripcion }).eq("id", mensaje.id);
     }
     if (!transcripcion) {
@@ -564,11 +566,16 @@ async function procesarMensaje(
   let datos: any = null;
 
   if (conVisionCluster) {
-    // Imagen/PDF (uno o varios del mismo reporte): una sola llamada con visión que clasifica y extrae
+    // Imagen/PDF (uno o varios del mismo reporte): una sola llamada con visión que clasifica y extrae.
+    // `radar-media` es PRIVADO: Anthropic descarga la foto por su enlace, así que se le pasa uno
+    // FIRMADO (1 h: cubre el reintento de abajo). El guardado ya no abre nada, y sin esto cada
+    // voucher caería en "fotos no disponibles" sin que ningún error lo dijera.
+    const firmadas = await firmarUrls(sb, miembrosConMedia.map((m) => m.media_url));
+    const urlDe = (u: string) => firmadas.get(u) ?? u;
     const bloquesMedia = miembrosConMedia.map((m) =>
       m.tipo === "imagen"
-        ? { type: "image", source: { type: "url", url: m.media_url } }
-        : { type: "document", source: { type: "url", url: m.media_url } }
+        ? { type: "image", source: { type: "url", url: urlDe(m.media_url) } }
+        : { type: "document", source: { type: "url", url: urlDe(m.media_url) } }
     );
     const notaMultiple =
       bloquesMedia.length > 1

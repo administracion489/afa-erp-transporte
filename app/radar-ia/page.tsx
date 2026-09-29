@@ -28,6 +28,7 @@ import {
 import { COMBUSTIBLES, TIPOS_PARA_ELEGIR, configCombustible, unidadDeCarga } from "@/lib/combustible-tipos";
 import { fotosDeLectura, type FotoLeida } from "@/lib/radar/fotos-lectura";
 import { proponerTanqueLleno } from "@/lib/radar/tanque-lleno";
+import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -430,17 +431,16 @@ function TabFeed({ mensajes, reprocesando, onFeedback, onReprocesar }: {
                     )}
                     {m.media_url && (
                       esImagen ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={m.media_url} alt={m.media_nombre ?? "Imagen del mensaje"} className="rounded-xl max-h-64 border border-gray-100" />
+                        <ImgPrivada src={m.media_url} alt={m.media_nombre ?? "Imagen del mensaje"} className="rounded-xl max-h-64 border border-gray-100" />
                       ) : (
-                        <a
+                        <EnlacePrivado
                           href={m.media_url}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex items-center gap-1.5 text-sm font-bold text-[#1262bd] hover:underline"
                         >
                           <Ic.Externo size={14} /> Ver archivo{m.media_nombre ? ` · ${m.media_nombre}` : ""}
-                        </a>
+                        </EnlacePrivado>
                       )
                     )}
                     {extraccion && Object.entries(extraccion).some(([, v]) => v !== null && v !== undefined && v !== "") && (
@@ -886,9 +886,9 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                             </p>
                             <div className="flex flex-wrap gap-2">
                               {fotos.map((f, i) => (
-                                <a key={i} href={f.url} target="_blank" rel="noreferrer" title={f.nombre ?? "Abrir foto"} className="block">
-                                  <img src={f.url} alt={f.nombre ?? `Foto ${i + 1}`} className="h-28 w-28 object-cover rounded-xl border border-gray-200 hover:ring-2 hover:ring-[#1262bd] transition" />
-                                </a>
+                                <EnlacePrivado key={i} href={f.url} target="_blank" rel="noreferrer" title={f.nombre ?? "Abrir foto"} className="block">
+                                  <ImgPrivada src={f.url} alt={f.nombre ?? `Foto ${i + 1}`} className="h-28 w-28 object-cover rounded-xl border border-gray-200 hover:ring-2 hover:ring-[#1262bd] transition" />
+                                </EnlacePrivado>
                               ))}
                             </div>
                           </div>
@@ -1205,7 +1205,7 @@ function TabOdometro({ registros, vehiculosGuia, onRefresh, showToast }: {
       {foto && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setFoto(null)}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={foto} alt="Foto del odómetro" className="max-h-[90vh] max-w-[90vw] rounded-xl" onClick={(e) => e.stopPropagation()} />
+          <ImgPrivada src={foto} alt="Foto del odómetro" className="max-h-[90vh] max-w-[90vw] rounded-xl" onClick={(e) => e.stopPropagation()} />
         </div>
       )}
 

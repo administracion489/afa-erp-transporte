@@ -54,6 +54,7 @@ import {
 } from "@/lib/rendimiento";
 import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
 import ComparacionPeriodo from "./ComparacionPeriodo";
+import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
 // El catálogo vive en lib/combustible-tipos.ts: /radar-ia lo necesita para su columna de
@@ -118,19 +119,18 @@ function FotosDelRadar({ fotos, nota, alto = "h-40" }: { fotos: FotoLeida[]; not
       </p>
       <div className="flex flex-wrap gap-2">
         {fotos.map((f, i) => esImagenLeida(f) ? (
-          <a key={i} href={f.url} target="_blank" rel="noreferrer" title={f.nombre ?? "Abrir en tamaño real"} className="block">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={f.url} alt={f.nombre ?? `Foto ${i + 1}`}
+          <EnlacePrivado key={i} href={f.url} target="_blank" rel="noreferrer" title={f.nombre ?? "Abrir en tamaño real"} className="block">
+            <ImgPrivada src={f.url} alt={f.nombre ?? `Foto ${i + 1}`}
               className={`${alto} w-auto max-w-[240px] object-contain rounded-xl border border-blue-200 bg-white hover:ring-2 hover:ring-[#1d4ed8] transition`} />
-          </a>
+          </EnlacePrivado>
         ) : (
           // El bucket del Radar guarda también PDFs y audios: un adjunto que no es imagen se
           // ofrece como enlace y no como un <img> roto, que se lee igual que "no hay foto".
-          <a key={i} href={f.url} target="_blank" rel="noreferrer"
+          <EnlacePrivado key={i} href={f.url} target="_blank" rel="noreferrer"
             className={`${alto} w-[150px] flex flex-col items-center justify-center gap-1 rounded-xl border border-blue-200 bg-white text-center px-2 hover:ring-2 hover:ring-[#1d4ed8] transition`}>
             <span className="text-2xl">📄</span>
             <span className="text-[10px] font-bold text-[#1e40af] truncate max-w-full">{f.nombre ?? "Abrir adjunto"}</span>
-          </a>
+          </EnlacePrivado>
         ))}
       </div>
       <p className="text-[10px] text-[#1e40af]/70 mt-2">Ábrela en tamaño real y compara los números con lo que está guardado antes de corregir.</p>

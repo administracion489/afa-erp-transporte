@@ -14,6 +14,7 @@
 import React, { useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { anularLectura, MOTIVOS_ANULACION, type MotivoAnulacion } from "@/lib/odometro";
+import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 
 export type LecturaAnulable = {
   id: string; km: number; fecha: string; fuente: string; foto_url: string | null; estado: string;
@@ -103,9 +104,9 @@ export default function AnularLecturaOdometro({
 
         <div className="p-6 space-y-4">
           {lectura.foto_url && (
-            <a href={lectura.foto_url} target="_blank" rel="noreferrer" className="block">
-              <img src={lectura.foto_url} alt="Tablero" className="w-full max-h-48 object-contain rounded-xl border bg-gray-50" />
-            </a>
+            <EnlacePrivado href={lectura.foto_url} target="_blank" rel="noreferrer" className="block">
+              <ImgPrivada src={lectura.foto_url} alt="Tablero" className="w-full max-h-48 object-contain rounded-xl border bg-gray-50" />
+            </EnlacePrivado>
           )}
 
           <div>
