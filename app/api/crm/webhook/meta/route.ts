@@ -44,9 +44,13 @@ function firmaValida(crudo: string, cabecera: string | null, secreto: string): b
 // POST — mensajes entrantes (WhatsApp + Messenger + Instagram)
 export async function POST(req: NextRequest) {
   const crudo = await req.text();
-  const secreto = process.env.META_APP_SECRET;
-  if (secreto) {
-    if (!firmaValida(crudo, req.headers.get("x-hub-signature-256"), secreto)) {
+  // Instagram configurado con "Instagram API with Instagram Login" firma con el secreto de SU
+  // app, no con el de la app de WhatsApp/Messenger: se acepta cualquiera de los dos.
+  const secretos = [process.env.META_APP_SECRET, process.env.INSTAGRAM_APP_SECRET]
+    .filter((x): x is string => !!x);
+  if (secretos.length) {
+    const cabecera = req.headers.get("x-hub-signature-256");
+    if (!secretos.some(sec => firmaValida(crudo, cabecera, sec))) {
       console.warn("[webhook/meta] firma X-Hub-Signature-256 inválida o ausente — rechazado");
       return new Response("Forbidden", { status: 403 });
     }

@@ -67,6 +67,29 @@ export function sesionDeRequest(req: Request, body?: { token?: unknown } | null)
   return sesionDeToken(body?.token ?? req.headers.get("x-afa-token"));
 }
 
+/**
+ * TRANSICIÓN del despliegue que empezó a exigir el token en TODA la API del conductor.
+ * La APK y las tablets del lector cargan la web y se quedan abiertas el turno entero: con
+ * el JavaScript viejo en memoria no mandan token, y sin esto dejarían de enviar el GPS y
+ * el SOS de servicios en curso hasta que alguien recargue. Solo para esas dos cosas, solo
+ * cuando la petición NO trae ningún token (uno inválido sigue siendo 401) y solo hasta
+ * `FIN_TRANSICION`: pasada la fecha esta función devuelve null y no hace nada.
+ * BORRAR esta función y sus dos llamadas después de esa fecha.
+ */
+const FIN_TRANSICION = Date.parse("2026-10-06T23:59:59-05:00");
+export function sesionLegada(
+  req: Request, body: { token?: unknown } | null | undefined,
+  identidad: { conductor_id?: unknown; conductor_tercero_id?: unknown } | null | undefined,
+): SesionConductor | null {
+  if (Date.now() > FIN_TRANSICION) return null;
+  if (body?.token != null || req.headers.get("x-afa-token")) return null;
+  const ct = Number(identidad?.conductor_tercero_id);
+  if (Number.isFinite(ct) && ct > 0) return { cid: ct, tabla: "conductores_tercero" };
+  const c = Number(identidad?.conductor_id);
+  if (Number.isFinite(c) && c > 0) return { cid: c, tabla: "conductores" };
+  return null;
+}
+
 /** Respuesta 401 de sesión inválida. `sesionInvalida` es lo que la app lee para volver a la
  *  pantalla del PIN: un 401 SIN esa marca (el gate de x-afa-key mal configurado) no debe
  *  desloguear, porque re-loguear no lo arregla y el conductor entraría en un bucle. */

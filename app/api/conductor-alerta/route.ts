@@ -10,7 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import {
-  sesionDeRequest, CUERPO_SESION_INVALIDA, reservaEsDelConductor, paradasDelConductor,
+  sesionDeRequest, sesionLegada, CUERPO_SESION_INVALIDA, reservaEsDelConductor, paradasDelConductor,
 } from "@/lib/conductor-auth";
 
 const supabaseAdmin = createClient(
@@ -44,7 +44,14 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { tipo = "alerta" } = body;
 
-    const ses = sesionDeRequest(req, body);
+    let ses = sesionDeRequest(req, body);
+    // Transición del despliegue (ver sesionLegada): un SOS de la app vieja aún abierta no trae
+    // token ni conductor; se toma el conductor asignado a su servicio. Nunca para "embarque".
+    if (!ses && tipo !== "embarque" && Number(body?.reserva_id) > 0) {
+      const { data: r } = await supabaseAdmin.from("reservas")
+        .select("conductor_id, conductor_tercero_id").eq("id", Number(body.reserva_id)).maybeSingle();
+      ses = sesionLegada(req, body, r);
+    }
     if (!ses) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
 
     // ── EMBARQUE fuera de manifiesto ────────────────────────────────────────

@@ -23,7 +23,7 @@ import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 import { cerrarServiciosAnterioresDelVehiculo } from "@/lib/cerrar-servicio-anterior";
 import { ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import {
-  firmarTokenConductor, sesionDeRequest, CUERPO_SESION_INVALIDA,
+  firmarTokenConductor, sesionDeRequest, sesionLegada, CUERPO_SESION_INVALIDA,
   campoConductor, reservaEsDelConductor, reservasDelConductor, paradasDelConductor,
   loginBloqueado, registrarIntentoFallido, limpiarIntentos,
   type SesionConductor,
@@ -585,7 +585,11 @@ export async function POST(req: NextRequest) {
     }
 
     // ── A partir de aquí, TODO exige sesión ────────────────────────────────────
-    const ses = sesionDeRequest(req, body);
+    const ses = sesionDeRequest(req, body)
+      // Transición del despliegue (ver sesionLegada): el GPS de una app vieja aún abierta
+      // declara su conductor en cada punto.
+      ?? (accion === "ubicacion" && Array.isArray(body?.payload)
+            ? sesionLegada(req, body, body.payload[0]) : null);
     if (!ses) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
     const condField = campoConductor(ses);
     const noEsTuyo = () => NextResponse.json({ error: "Este servicio no te pertenece" }, { status: 403 });

@@ -1447,10 +1447,14 @@ export default function ClientePortal() {
     // Carga datos para TODOS los servicios de hoy (no un solo turno) y los refresca
     // cada 15s: así cualquiera que esté en ruta ahora tiene conductor/placa/GPS listos
     // para su card EN CURSO.
+    const asignados = new Set<number>();
     const cargar = () => serviciosHoyRef.current.forEach(async r => {
       const ra = r as any;
       // Conductor y vehículo: por /api/cliente/asignacion (ver cargarDetalle).
-      if (!(r.id in condInfoMap) || !(r.id in vehPlacaMap)) {
+      // `asignados` vive en el efecto: condInfoMap/vehPlacaMap llegan congelados en este
+      // cierre y, mirándolos, se volvía a pedir cada 15 s por cada servicio del día.
+      if (!asignados.has(r.id)) {
+        asignados.add(r.id);
         const { conductor, placa } = await asignacionDeReserva(r.id);
         setCondInfoMap(prev => ({ ...prev, [r.id]: { nombre: conductor?.nombre || "Conductor asignado", tel: conductor?.telefono || "" } }));
         if (placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: placa }));
