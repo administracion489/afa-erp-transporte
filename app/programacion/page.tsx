@@ -6315,22 +6315,15 @@ export default function ReservasPage() {
                         {numCot ? (
                           <button
                             onClick={() => router.push(`/cotizaciones?buscar=${encodeURIComponent(numCot)}`)}
-                            title="Abrir cotización"
+                            // El asunto ya no se pinta debajo: tenía la forma de una etiqueta
+                            // («RUTA C/ 04:35…») y se confundía con la del ítem. Queda al pasar el mouse.
+                            title={asuntoCot ? `Abrir cotización · ${asuntoCot}` : "Abrir cotización"}
                             className="font-mono font-bold text-xs text-[#0b315f] underline decoration-dotted underline-offset-2 hover:text-blue-600 transition-colors"
                           >
                             #{numCot}
                           </button>
                         ) : (
                           <span className="text-gray-300 text-xs">—</span>
-                        )}
-                        {asuntoCot && (
-                          <div
-                            title={asuntoCot}
-                            className="mt-0.5 truncate text-[9px] font-black px-1.5 py-0.5 rounded-full"
-                            style={{ background: "#f1f5f9", color: "#475569" }}
-                          >
-                            {asuntoCot}
-                          </div>
                         )}
                       </td>
 
