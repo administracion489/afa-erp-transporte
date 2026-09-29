@@ -5,6 +5,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { geocodificarConCache as geocodificar } from "@/lib/geocode-cache";
+import { sesionDeRequest, CUERPO_SESION_INVALIDA, reservaEsDelConductor } from "@/lib/conductor-auth";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -25,9 +26,18 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   }
 
+  // La credencial es el token de sesión del conductor (header `x-afa-token`, es un GET): el
+  // `x-afa-key` es público. Y la reserva tiene que ser SUYA — si no, cualquiera leía la reserva
+  // entera (`select *`, con precios) y creaba paradas en servicios ajenos gastando cuota de Maps.
+  const ses = sesionDeRequest(req);
+  if (!ses) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
+
   const { searchParams } = new URL(req.url);
   const reservaId = Number(searchParams.get("reservaId"));
   if (!reservaId) return NextResponse.json({ error: "reservaId requerido" }, { status: 400 });
+  if (!(await reservaEsDelConductor(supabaseAdmin, ses, reservaId))) {
+    return NextResponse.json({ error: "Este servicio no te pertenece" }, { status: 403 });
+  }
 
   // 1. Buscar paradas existentes
   const { data: existentes } = await supabaseAdmin

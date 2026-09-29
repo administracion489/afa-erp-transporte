@@ -5,6 +5,14 @@
 // /api/conductor-alerta y /api/conductor-tercero/*.
 //
 // Todas las acciones llegan por POST: { accion, ...params }.
+//
+// SESIÓN: salvo `login`, TODA acción exige el token que emite el login (lib/conductor-auth.ts) y
+// la identidad sale de él — el `cid`/`tabla`/`conductor_id` del body se ignoran. Antes solo cinco
+// acciones lo miraban y el resto confiaba en el body con service_role: `cambiar_pin` le cambiaba
+// el PIN a cualquiera (toma de cuenta) y `pasajeros` devolvía `pasajeros(*)` con DNI, correo,
+// teléfono y PIN de acceso de cualquier paradero. El header `x-afa-key` no protege nada: su valor
+// es NEXT_PUBLIC y viaja en el bundle. Las acciones con `reservaId`/`paradaId` comprueban además
+// que el servicio esté asignado a ESTE conductor (PERTENENCIA, en lib/conductor-auth.ts).
 
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
@@ -15,7 +23,8 @@ import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 import { cerrarServiciosAnterioresDelVehiculo } from "@/lib/cerrar-servicio-anterior";
 import { ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import {
-  firmarTokenConductor, sesionDeToken,
+  firmarTokenConductor, sesionDeRequest, CUERPO_SESION_INVALIDA,
+  campoConductor, reservaEsDelConductor, reservasDelConductor, paradasDelConductor,
   loginBloqueado, registrarIntentoFallido, limpiarIntentos,
   type SesionConductor,
 } from "@/lib/conductor-auth";
@@ -335,10 +344,10 @@ async function subirFotoOdometro(
 // (supabase/finanzas-06-gastos-caja-chica.sql). Tres acciones: `rendir_gasto`, `mi_caja_chica`
 // y `enviar_rendicion`.
 //
-// IDENTIDAD — POR TOKEN, NUNCA POR `cid`. 22 de las 24 acciones de esta ruta confían en el `cid`
-// que llega en el body; estas tres no pueden. El body decide contra QUÉ BOLSA DE DINERO se carga
-// el gasto: confiar en el `cid` sería dejar que cualquiera cargue sus peajes a la caja chica de
-// otro conductor (y que le lea sus comprobantes). Mismo patrón que suscribir_push.
+// IDENTIDAD — POR TOKEN, NUNCA POR `cid` (hoy es la regla de toda la ruta; estas tres fueron las
+// primeras). Aquí el body decidiría contra QUÉ BOLSA DE DINERO se carga el gasto: confiar en el
+// `cid` sería dejar que cualquiera cargue sus peajes a la caja chica de otro conductor (y que le
+// lea sus comprobantes).
 //
 // IDENTIDAD COMPUESTA. El conductor vive en dos tablas cuyos ids SE SOLAPAN, pero
 // caja_chica_fondos.conductor_id y caja_chica_gastos.conductor_id apuntan por FK a `conductores`
@@ -503,7 +512,8 @@ export async function POST(req: NextRequest) {
   try {
     // Gate de acceso: si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada, exigir el header
     // x-afa-key (lo manda la app sola; el conductor no escribe nada). Sin configurar →
-    // queda abierto, para no romper producción durante el despliegue.
+    // queda abierto. NO es autenticación (el valor es público, va en el bundle): solo frena
+    // tráfico basura. La credencial real es el token de sesión, más abajo.
     const KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY;
     if (KEY && req.headers.get("x-afa-key") !== KEY) {
       return NextResponse.json({ error: "No autorizado" }, { status: 401 });
@@ -512,66 +522,75 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const accion = body.accion as string;
 
-    switch (accion) {
-      // ── Login del lector web (DNI + PIN) ─────────────────────────────────────
-      // Verifica credenciales en el SERVIDOR para no exponer pin_acceso al cliente
-      // (a diferencia del login del APK, que consulta anon). Busca primero en
-      // conductores propios y luego en conductores_tercero. Mismo gate activo_app.
-      case "login": {
-        const { dni, pin } = body;
-        if (!dni || !pin) return NextResponse.json({ error: "dni y pin requeridos" }, { status: 400 });
-        const dniT = String(dni).trim();
+    // ── Login (APK conductor y lector web: DNI + PIN) ──────────────────────────
+    // ÚNICA acción sin token: es la que lo emite. Verifica el PIN en el SERVIDOR (pin_acceso
+    // nunca sale). Busca en conductores propios y luego en conductores_tercero.
+    if (accion === "login") {
+      const { dni, pin } = body;
+      if (!dni || !pin) return NextResponse.json({ error: "dni y pin requeridos" }, { status: 400 });
+      const dniT = String(dni).trim();
 
-        // Freno al brute-force de PINs de 4 dígitos (best-effort, por instancia).
-        if (loginBloqueado(dniT)) {
-          return NextResponse.json({ ok: false, error: "Demasiados intentos. Espera unos minutos." }, { status: 429 });
-        }
-
-        // Los vencimientos viajan en el login porque nada más los repuebla: cargarDatos()
-        // no toca setConductor, así que sin ellos la franja "Licencia vence en N días" y la
-        // tarjeta "Mis documentos" quedan vacías. conductores_tercero no tiene las columnas
-        // de SCTR ni examen médico, de ahí que el select vaya por tabla.
-        // Literales, no plantillas: el cliente tipado de Supabase parsea la cadena del
-        // select en tiempo de compilación y una interpolación le impide inferir la fila.
-        const COLS = {
-          conductores:
-            "id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia,sctr_salud_venc,examen_medico_venc",
-          conductores_tercero:
-            "id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia",
-        } as const;
-
-        for (const tabla of ["conductores", "conductores_tercero"] as const) {
-          const { data: c } = await admin.from(tabla)
-            .select(COLS[tabla])
-            .eq("dni", dniT).maybeSingle<Record<string, any>>();
-          if (!c) continue;
-          if (!c.activo_app) return NextResponse.json({ ok: false, error: "Acceso no activado. Llama a central." });
-          if (String(c.pin_acceso ?? "") !== String(pin)) {
-            registrarIntentoFallido(dniT);
-            return NextResponse.json({ ok: false, error: "PIN incorrecto" });
-          }
-          limpiarIntentos(dniT);
-          // El token es la credencial de sesión: las acciones sensibles derivan de él
-          // la identidad, en vez de confiar en el `cid` que mande el cliente.
-          // NUNCA se devuelve pin_acceso.
-          return NextResponse.json({
-            ok: true,
-            token: firmarTokenConductor(c.id, tabla),
-            // Campo a campo, nunca `...c`: pin_acceso viene en el select y no debe salir.
-            conductor: {
-              id: c.id, nombre: c.nombre, dni: c.dni, telefono: c.telefono, tabla,
-              licencia: c.licencia ?? null,
-              vencimiento_licencia: c.vencimiento_licencia ?? null,
-              categoria_licencia: c.categoria_licencia ?? null,
-              sctr_salud_venc: (c as any).sctr_salud_venc ?? null,
-              examen_medico_venc: (c as any).examen_medico_venc ?? null,
-            },
-          });
-        }
-        registrarIntentoFallido(dniT);
-        return NextResponse.json({ ok: false, error: "DNI no encontrado" });
+      // Freno al brute-force de PINs de 4 dígitos (best-effort, por instancia).
+      if (loginBloqueado(dniT)) {
+        return NextResponse.json({ ok: false, error: "Demasiados intentos. Espera unos minutos." }, { status: 429 });
       }
 
+      // Los vencimientos viajan en el login porque nada más los repuebla: cargarDatos()
+      // no toca setConductor, así que sin ellos la franja "Licencia vence en N días" y la
+      // tarjeta "Mis documentos" quedan vacías. conductores_tercero no tiene las columnas
+      // de SCTR ni examen médico, de ahí que el select vaya por tabla.
+      // Literales, no plantillas: el cliente tipado de Supabase parsea la cadena del
+      // select en tiempo de compilación y una interpolación le impide inferir la fila.
+      const COLS = {
+        conductores:
+          "id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia,sctr_salud_venc,examen_medico_venc",
+        conductores_tercero:
+          "id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia",
+      } as const;
+
+      // MISMO mensaje para "no existe ese DNI" y "PIN incorrecto": distinguirlos le decía a
+      // cualquiera qué DNIs son conductores (la mitad del trabajo de adivinar la cuenta). El
+      // "acceso no activado" solo se revela DESPUÉS de acertar el PIN, cuando ya no filtra nada
+      // y sí le dice al conductor legítimo a quién llamar. Un PIN vacío en la BD nunca entra.
+      // El DNI puede existir en las DOS tablas (propio y tercero): se prueba el PIN en ambas.
+      const pinT = String(pin);
+      for (const tabla of ["conductores", "conductores_tercero"] as const) {
+        const { data: c } = await admin.from(tabla)
+          .select(COLS[tabla])
+          .eq("dni", dniT).maybeSingle<Record<string, any>>();
+        if (!c) continue;
+        const pinBd = String(c.pin_acceso ?? "");
+        if (!pinBd || pinBd !== pinT) continue;
+        if (!c.activo_app) return NextResponse.json({ ok: false, error: "Acceso no activado. Llama a central." });
+        limpiarIntentos(dniT);
+        // El token es la credencial de sesión: las acciones sensibles derivan de él
+        // la identidad, en vez de confiar en el `cid` que mande el cliente.
+        // NUNCA se devuelve pin_acceso.
+        return NextResponse.json({
+          ok: true,
+          token: firmarTokenConductor(c.id, tabla),
+          // Campo a campo, nunca `...c`: pin_acceso viene en el select y no debe salir.
+          conductor: {
+            id: c.id, nombre: c.nombre, dni: c.dni, telefono: c.telefono, tabla,
+            licencia: c.licencia ?? null,
+            vencimiento_licencia: c.vencimiento_licencia ?? null,
+            categoria_licencia: c.categoria_licencia ?? null,
+            sctr_salud_venc: (c as any).sctr_salud_venc ?? null,
+            examen_medico_venc: (c as any).examen_medico_venc ?? null,
+          },
+        });
+      }
+      registrarIntentoFallido(dniT);
+      return NextResponse.json({ ok: false, error: "DNI o PIN incorrecto" });
+    }
+
+    // ── A partir de aquí, TODO exige sesión ────────────────────────────────────
+    const ses = sesionDeRequest(req, body);
+    if (!ses) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
+    const condField = campoConductor(ses);
+    const noEsTuyo = () => NextResponse.json({ error: "Este servicio no te pertenece" }, { status: 403 });
+
+    switch (accion) {
       // ── Suscripción a notificaciones push del conductor ─────────────────────
       // La identidad sale del TOKEN, jamás del body: sin esto cualquiera registraría
       // o borraría dispositivos a nombre de otro conductor (IDOR).
@@ -579,9 +598,6 @@ export async function POST(req: NextRequest) {
       // como árbitro de ON CONFLICT, así que se hace check-then-insert capturando 23505
       // (mismo patrón que /api/pasajero).
       case "suscribir_push": {
-        const ses = sesionDeToken(body.token);
-        if (!ses) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
-
         const tipo = body.tipo === "fcm" ? "fcm" : body.tipo === "webpush" ? "webpush" : null;
         if (!tipo) return NextResponse.json({ error: "tipo inválido" }, { status: 400 });
 
@@ -634,8 +650,6 @@ export async function POST(req: NextRequest) {
       }
 
       case "desuscribir_push": {
-        const ses = sesionDeToken(body.token);
-        if (!ses) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
         const claveCol = body.fcmToken ? "fcm_token" : "endpoint";
         const claveVal = String(body.fcmToken || body.endpoint || "");
         if (!claveVal) return NextResponse.json({ error: "identificador requerido" }, { status: 400 });
@@ -652,14 +666,15 @@ export async function POST(req: NextRequest) {
       // Trae las reservas del conductor (propio o tercero) con su vehículo unido,
       // sea propio (vehiculos) o tercero (vehiculos_tercero). Service_role evita que
       // RLS bloquee las lecturas de terceros.
+      // El lector (tablet de embarque) inicia sesión CON el DNI+PIN del conductor del bus, así
+      // que su alcance es exactamente el del conductor: sus servicios, nada más.
       case "lector_servicios": {
-        const { cid, tabla, hoy } = body;
-        if (!cid || !hoy) return NextResponse.json({ error: "cid y hoy requeridos" }, { status: 400 });
-        const condField = tabla === "conductores_tercero" ? "conductor_tercero_id" : "conductor_id";
+        const { hoy } = body;
+        if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
         const { data, error } = await admin.from("reservas")
           .select("id,origen,destino,fecha_servicio,hora_servicio,estado,vehiculo_id,vehiculo_tercero_id," +
             "vehiculo:vehiculos(id,placa,categoria),vehiculo_tercero:vehiculos_tercero(id,placa,categoria)")
-          .eq("fecha_servicio", hoy).eq(condField, cid).order("hora_servicio");
+          .eq("fecha_servicio", hoy).eq(condField, ses.cid).order("hora_servicio");
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ reservas: data || [] });
       }
@@ -668,6 +683,7 @@ export async function POST(req: NextRequest) {
       case "lector_ruta": {
         const { reservaId } = body;
         if (!reservaId) return NextResponse.json({ error: "reservaId requerido" }, { status: 400 });
+        if (!(await reservaEsDelConductor(admin, ses, reservaId))) return noEsTuyo();
         const [{ data: reserva, error: eR }, { data: paradas, error: eP }] = await Promise.all([
           admin.from("reservas")
             .select("id,origen,destino,fecha_servicio,hora_servicio,estado,vehiculo_id,vehiculo_tercero_id," +
@@ -684,16 +700,29 @@ export async function POST(req: NextRequest) {
 
       // ── Datos del home (reservas de hoy + vehículos + docs + checklist) ──────
       case "inicio": {
-        const { cid, tabla, hoy } = body;
-        if (!cid || !hoy) return NextResponse.json({ error: "cid y hoy requeridos" }, { status: 400 });
-        const condField = tabla === "conductores_tercero" ? "conductor_tercero_id" : "conductor_id";
+        const { hoy } = body;
+        if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
+        const cid = ses.cid;
 
-        const [vR, vTR, rR, dR, ckR] = await Promise.all([
-          admin.from("vehiculos").select("id,placa,categoria,marca,kilometraje_actual").order("placa"),
-          admin.from("vehiculos_tercero").select("id,placa,categoria,marca,kilometraje_actual").order("placa"),
-          admin.from("reservas")
-            .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id,vehiculo_tercero_id,estado")
-            .eq("fecha_servicio", hoy).eq(condField, cid).order("hora_servicio"),
+        // Las reservas van PRIMERO: la flota que se devuelve es solo la de sus servicios. Antes
+        // salía la flota entera (placas y km de todas las unidades) y la app ya la filtraba por
+        // los vehículos de sus reservas, así que el conductor ve exactamente lo mismo.
+        const rR = await admin.from("reservas")
+          .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id,vehiculo_tercero_id,estado")
+          .eq("fecha_servicio", hoy).eq(condField, cid).order("hora_servicio");
+        if (rR.error) return NextResponse.json({ error: rR.error.message }, { status: 500 });
+        const reservasHoy = (rR.data ?? []) as { vehiculo_id: number | null; vehiculo_tercero_id: number | null }[];
+        const vIds  = [...new Set(reservasHoy.map((r) => r.vehiculo_id).filter((v): v is number => !!v))];
+        const vtIds = [...new Set(reservasHoy.map((r) => r.vehiculo_tercero_id).filter((v): v is number => !!v))];
+        const sinFilas = Promise.resolve({ data: [] as Record<string, unknown>[], error: null });
+
+        const [vR, vTR, dR, ckR] = await Promise.all([
+          vIds.length
+            ? admin.from("vehiculos").select("id,placa,categoria,marca,kilometraje_actual").in("id", vIds).order("placa")
+            : sinFilas,
+          vtIds.length
+            ? admin.from("vehiculos_tercero").select("id,placa,categoria,marca,kilometraje_actual").in("id", vtIds).order("placa")
+            : sinFilas,
           admin.from("documentos_conductor").select("*").eq("conductor_id", cid).order("created_at", { ascending: false }),
           admin.from("checklist_conductor").select("id").eq("conductor_id", cid).eq("fecha", hoy).limit(1),
         ]);
@@ -719,8 +748,15 @@ export async function POST(req: NextRequest) {
       case "pasajeros": {
         const { paradaIds } = body;
         if (!Array.isArray(paradaIds) || paradaIds.length === 0) return NextResponse.json({ pasajeros: [] });
+        // Solo paraderos de SUS servicios; los ajenos se descartan en silencio (el lector y la app
+        // piden siempre los de la ruta que tienen abierta, así que no deberían llegar nunca).
+        const mias = [...(await paradasDelConductor(admin, ses, paradaIds)).keys()];
+        if (mias.length === 0) return NextResponse.json({ pasajeros: [] });
+        // Columnas EXPLÍCITAS, las que pintan la app y el lector. Antes `pasajeros(*)` mandaba al
+        // celular correo, teléfono y el PIN de acceso de cada pasajero del manifiesto.
         const { data, error } = await admin.from("pasajeros_parada")
-          .select("*, pasajero:pasajeros(*)").in("parada_id", paradaIds);
+          .select("id, parada_id, pasajero_id, estado, pasajero:pasajeros(id, nombre, dni, empresa, qr_code, foto_url)")
+          .in("parada_id", mias);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ pasajeros: data || [] });
       }
@@ -729,6 +765,7 @@ export async function POST(req: NextRequest) {
       case "mensajes_servicio": {
         const { reservaId } = body;
         if (!reservaId) return NextResponse.json({ mensajes: [] });
+        if (!(await reservaEsDelConductor(admin, ses, reservaId))) return noEsTuyo();
         const { data, error } = await admin.from("mensajes_pasajero")
           .select("id, pasajero_id, remitente, autor_nombre, tipo, mensaje, leido, leido_pasajero, created_at, " +
             "pasajero:pasajeros(id, nombre, empresa)")
@@ -741,20 +778,21 @@ export async function POST(req: NextRequest) {
 
       // ── Chat: el conductor responde a un pasajero de SU servicio ─────────────
       case "responder_mensaje": {
-        const { cid, tabla, reservaId, pasajero_id } = body;
+        const { reservaId, pasajero_id } = body;
+        const cid = ses.cid;
         const texto = String(body.texto ?? "").trim().slice(0, 1000);
-        const tablaC = tabla === "conductores_tercero" ? "conductores_tercero" : "conductores";
-        if (!cid || !reservaId || !pasajero_id) return NextResponse.json({ error: "cid, reservaId y pasajero_id requeridos" }, { status: 400 });
+        if (!reservaId || !pasajero_id) return NextResponse.json({ error: "reservaId y pasajero_id requeridos" }, { status: 400 });
         if (!texto) return NextResponse.json({ error: "mensaje vacío" }, { status: 400 });
 
-        // El conductor solo puede responder en SU servicio (evita responder ajenos).
-        const condField = tablaC === "conductores_tercero" ? "conductor_tercero_id" : "conductor_id";
-        const { data: rsv } = await admin.from("reservas").select(`id, ${condField}`).eq("id", reservaId).maybeSingle();
-        if (!rsv || Number((rsv as any)[condField]) !== Number(cid)) {
-          return NextResponse.json({ error: "Este servicio no te pertenece" }, { status: 403 });
-        }
+        // El conductor solo puede responder en SU servicio (evita responder ajenos), y solo a un
+        // pasajero que ya le escribió en ese hilo: la bandeja se arma con los mensajes, así que es
+        // exactamente a quien la app ofrece responder — y le impide mandar push a cualquier id.
+        if (!(await reservaEsDelConductor(admin, ses, reservaId))) return noEsTuyo();
+        const { data: hilo } = await admin.from("mensajes_pasajero").select("id")
+          .eq("reserva_id", Number(reservaId)).eq("pasajero_id", Number(pasajero_id)).limit(1).maybeSingle();
+        if (!hilo) return NextResponse.json({ error: "Ese pasajero no te ha escrito en este servicio" }, { status: 403 });
 
-        const { data: cond } = await admin.from(tablaC).select("nombre").eq("id", cid).maybeSingle();
+        const { data: cond } = await admin.from(ses.tabla).select("nombre").eq("id", cid).maybeSingle();
         const primerNombre = String(cond?.nombre || "").trim().split(/\s+/)[0] || "Conductor";
         const autorNombre = `Conductor ${primerNombre}`;
 
@@ -792,7 +830,9 @@ export async function POST(req: NextRequest) {
         if (!qrCode) return NextResponse.json({ error: "qrCode requerido" }, { status: 400 });
         // Normalizar para tolerar el layout del escáner BT (mayúsculas, "-"→"/", etc.).
         const qr = normalizarQr(qrCode);
-        const { data, error } = await admin.from("pasajeros").select("*").eq("qr_code", qr).maybeSingle();
+        // Columnas explícitas (nunca `*`: pin_acceso, correo y teléfono no son del conductor).
+        const { data, error } = await admin.from("pasajeros")
+          .select("id, nombre, dni, empresa, qr_code, foto_url").eq("qr_code", qr).maybeSingle();
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ pasajero: data ?? null });
       }
@@ -812,8 +852,33 @@ export async function POST(req: NextRequest) {
           return o;
         };
         const filasRaw = Array.isArray(payload) ? payload : [payload];
-        const filas = filasRaw.filter((p) => p && p.lat != null && p.lng != null).map(sanitizar);
-        if (filas.length === 0) return NextResponse.json({ error: "payload inválido" }, { status: 400 });
+        const validas = filasRaw.filter((p) => p && p.lat != null && p.lng != null);
+        if (validas.length === 0) return NextResponse.json({ error: "payload inválido" }, { status: 400 });
+
+        // IDENTIDAD DEL PUNTO = la del TOKEN. Un punto que el cuerpo atribuye a OTRO conductor se
+        // descarta (no se reasigna): es lo que queda en la cola offline de un teléfono compartido
+        // cuando inicia sesión otro chofer, y re-firmarlo con el nuevo le inventaría un recorrido.
+        // Se descarta respondiendo ok, para que la cola lo suelte en vez de reintentarlo siempre.
+        type PuntoGps = Record<string, unknown>;
+        const esTerceroSes = ses.tabla === "conductores_tercero";
+        const declarado = (p: PuntoGps) => Number(esTerceroSes ? p.conductor_tercero_id : p.conductor_id);
+        const otroDeclarado = (p: PuntoGps) => (esTerceroSes ? p.conductor_id : p.conductor_tercero_id) != null;
+        const propias = (validas as PuntoGps[]).filter((p) => {
+          const d = declarado(p);
+          return (!Number.isFinite(d) || d === ses.cid) && !otroDeclarado(p);
+        });
+        // El servicio del punto tiene que ser SUYO: el `reserva_id` alimenta el motor de proximidad
+        // (push "llega en 5 min" a los pasajeros de esa reserva). Si no lo es —p. ej. se lo
+        // reasignaron a mitad del turno— el punto se guarda igual, sin enlazarlo al servicio ajeno.
+        const misReservas = await reservasDelConductor(admin, ses, propias.map((p) => p.reserva_id));
+        const filas = propias.map((p) => {
+          const o = sanitizar(p);
+          o.conductor_id         = esTerceroSes ? null : ses.cid;
+          o.conductor_tercero_id = esTerceroSes ? ses.cid : null;
+          if (o.reserva_id != null && !misReservas.has(Number(o.reserva_id))) o.reserva_id = null;
+          return o;
+        });
+        if (filas.length === 0) return NextResponse.json({ ok: true, insertados: 0, descartados: validas.length });
         let { error } = await admin.from("ubicaciones_gps").insert(filas);
         // `simulado` es opcional (SQL ubicaciones-gps-simulado.sql). Si el build de la BD aún
         // no la tiene, se reintenta sin ella: un rastreo que se cae por una columna pendiente
@@ -839,6 +904,9 @@ export async function POST(req: NextRequest) {
       case "marcar_parada": {
         const { paradaId, horaLlegada } = body;
         if (!paradaId) return NextResponse.json({ error: "paradaId requerido" }, { status: 400 });
+        // Marcar una parada cierra el servicio y sella su hora real (lo que se factura): solo
+        // sobre paraderos de SUS servicios.
+        if (!(await paradasDelConductor(admin, ses, [paradaId])).size) return noEsTuyo();
         // `hora_llegada`: hora REAL de arribo. El nudge de auto-llegada manda la hora
         // de ENTRADA al radio del paradero; el marcado manual manda null → now(). La
         // columna es opcional (SQL paradas-hora-llegada.sql); si el build de la BD aún
@@ -960,6 +1028,7 @@ export async function POST(req: NextRequest) {
       case "anular_parada": {
         const { paradaId } = body;
         if (!paradaId) return NextResponse.json({ error: "paradaId requerido" }, { status: 400 });
+        if (!(await paradasDelConductor(admin, ses, [paradaId])).size) return noEsTuyo();
 
         // La llegada se lee ANTES de borrarla: es lo único que permite saber después si el sello
         // del servicio salió de ESTA parada (ver revertirSelloDeParada).
@@ -1001,6 +1070,8 @@ export async function POST(req: NextRequest) {
       case "llegada_geofence": {
         const { paradaId } = body;
         if (!paradaId) return NextResponse.json({ error: "paradaId requerido" }, { status: 400 });
+        // Dispara un push a los pasajeros de ese paradero: solo sobre paraderos propios.
+        if (!(await paradasDelConductor(admin, ses, [paradaId])).size) return noEsTuyo();
         after(async () => {
           try {
             const { data: p } = await admin.from("paradas").select("reserva_id, nombre").eq("id", paradaId).maybeSingle();
@@ -1015,8 +1086,16 @@ export async function POST(req: NextRequest) {
 
       // ── Embarcar pasajero en lista ───────────────────────────────────────────
       case "embarcar": {
-        const { ppId, paradaIdReal, pasajeroId, reservaId } = body;
+        const { ppId } = body;
         if (!ppId) return NextResponse.json({ error: "ppId requerido" }, { status: 400 });
+        // La fila manda: pasajero, paradero y servicio salen de la BD, no del body, y el
+        // paradero tiene que ser de un servicio del conductor.
+        const { data: ppFila } = await admin.from("pasajeros_parada")
+          .select("pasajero_id, parada_id").eq("id", ppId).maybeSingle();
+        if (!ppFila) return NextResponse.json({ error: "Registro no encontrado" }, { status: 404 });
+        const reservaDeLaFila = (await paradasDelConductor(admin, ses, [ppFila.parada_id])).get(Number(ppFila.parada_id));
+        if (!reservaDeLaFila) return noEsTuyo();
+        const pasajeroId = ppFila.pasajero_id, paradaIdReal = ppFila.parada_id, reservaId = reservaDeLaFila;
         const ahora = new Date().toISOString();
         // Acción legacy (back-compat APKs viejos): solo marca abordado. Escribe AMBAS
         // columnas de estado — `estado` (app conductor) y `estado_abordaje`/`hora_abordaje`
@@ -1044,6 +1123,15 @@ export async function POST(req: NextRequest) {
       case "embarcar_qr": {
         let { pasajeroId } = body;
         const { qrCode, paradaId, reservaId } = body;
+        if (!paradaId || !reservaId) {
+          return NextResponse.json({ error: "pasajeroId (o qrCode), paradaId y reservaId requeridos" }, { status: 400 });
+        }
+        // El bus donde sube es un servicio SUYO y el paradero es de ESE servicio. (Mover al
+        // pasajero desde otro bus del mismo horario sigue permitido: es la regla "un asiento por
+        // horario", y el QR del pasajero es la prueba de que está subiendo aquí.)
+        if ((await paradasDelConductor(admin, ses, [paradaId])).get(Number(paradaId)) !== Number(reservaId)) {
+          return noEsTuyo();
+        }
         // El lector pasa el QR directamente: resolverlo a pasajero (service_role, sin RLS).
         let pasajeroInfo: any = null;
         let paxClienteId: number | null = null;
@@ -1055,7 +1143,8 @@ export async function POST(req: NextRequest) {
             .select("id, nombre, empresa, dni, qr_code, foto_url, cliente_id, reserva_id").eq("qr_code", qr).maybeSingle();
           if (!px) return NextResponse.json({ ok: false, noEncontrado: true });
           pasajeroId = px.id;
-          pasajeroInfo = px;
+          // A la pantalla solo lo que pinta: cliente_id/reserva_id se usan aquí y no viajan.
+          pasajeroInfo = { id: px.id, nombre: px.nombre, empresa: px.empresa, dni: px.dni, qr_code: px.qr_code, foto_url: px.foto_url };
           paxClienteId = px.cliente_id ?? null;
           paxReservaId = px.reserva_id ?? null;
         }
@@ -1187,23 +1276,38 @@ export async function POST(req: NextRequest) {
       // ── Reportar incidencia ──────────────────────────────────────────────────
       case "incidencia": {
         const { incidencia } = body;
-        if (!incidencia?.conductor_id) return NextResponse.json({ error: "incidencia inválida" }, { status: 400 });
-        const { error } = await admin.from("incidencias").insert(incidencia);
+        if (!incidencia || typeof incidencia !== "object") return NextResponse.json({ error: "incidencia inválida" }, { status: 400 });
+        // Columnas en LISTA BLANCA (antes se insertaba el objeto crudo: el body podía fijar
+        // `estado`, `id` o cualquier columna). conductor_id sale del token. Un `reserva_id` que
+        // no es suyo no tumba el reporte —es una incidencia en la calle— pero no se enlaza.
+        const inc = incidencia as Record<string, unknown>;
+        const reservaInc = inc.reserva_id != null && await reservaEsDelConductor(admin, ses, inc.reserva_id)
+          ? Number(inc.reserva_id) : null;
+        const fila: Record<string, unknown> = { conductor_id: ses.cid, reserva_id: reservaInc };
+        for (const k of ["vehiculo_id", "tipo", "severidad", "descripcion", "ubicacion", "lat", "lng"]) {
+          if (inc[k] !== undefined) fila[k] = inc[k];
+        }
+        const { error } = await admin.from("incidencias").insert(fila);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true });
       }
 
       // ── Guardar checklist pre-viaje ──────────────────────────────────────────
       case "checklist": {
-        const { checklist } = body;
-        if (!checklist?.conductor_id) return NextResponse.json({ error: "checklist inválido" }, { status: 400 });
+        const { checklist: checklistBody } = body;
+        if (!checklistBody || typeof checklistBody !== "object") return NextResponse.json({ error: "checklist inválido" }, { status: 400 });
+        // conductor_id SIEMPRE del token (también en la clave de idempotencia de la lectura).
+        const checklist = { ...checklistBody, conductor_id: ses.cid };
         // `es_tercero` y `foto_adjunto` viajan en el payload pero NO son columnas de
-        // checklist_conductor: se usan aquí y se quitan antes de insertar la fila.
+        // checklist_conductor: se usan aquí. La fila se arma en LISTA BLANCA (antes era el
+        // objeto crudo del body: cualquier columna quedaba al alcance de quien llamara).
         const esTercero = checklist.es_tercero === true;
         const fotoAdjunto = checklist.foto_adjunto as { media_type?: string; data?: string } | undefined;
-        const checklistRow = { ...checklist };
-        delete checklistRow.es_tercero;
-        delete checklistRow.foto_adjunto;
+        const checklistRow: Record<string, unknown> = {};
+        for (const k of ["conductor_id", "vehiculo_id", "fecha", "items_json", "km_inicio", "km_ocr",
+                         "gps_lat", "gps_lng", "capturado_en", "observaciones", "estado"]) {
+          if (checklist[k] !== undefined) checklistRow[k] = checklist[k];
+        }
 
         // La hora de la foto la pone el reloj del celular: si está mal puesto, la jornada se
         // ordena mal y el anti-retroceso juzga contra la lectura equivocada. `_cliente_ts` mide
@@ -1283,13 +1387,18 @@ export async function POST(req: NextRequest) {
       // Espejo de "checklist". El km final alimenta el odómetro consolidado (anti-retroceso)
       // con fuente="servicio"; y se guarda la fila en checkout_conductor (best-effort).
       case "checkout": {
-        const { checkout } = body;
-        if (!checkout?.conductor_id) return NextResponse.json({ error: "checkout inválido" }, { status: 400 });
+        const { checkout: checkoutBody } = body;
+        if (!checkoutBody || typeof checkoutBody !== "object") return NextResponse.json({ error: "checkout inválido" }, { status: 400 });
+        const checkout = { ...checkoutBody, conductor_id: ses.cid };   // identidad del token
         const esTercero = checkout.es_tercero === true;
         const fotoAdjunto = checkout.foto_adjunto as { media_type?: string; data?: string } | undefined;
-        const checkoutRow = { ...checkout };
-        delete checkoutRow.reserva_id;    // solo para la lectura; no es columna
-        delete checkoutRow.foto_adjunto;  // se sube aparte; no es columna
+        // LISTA BLANCA (mismo motivo que el checklist). `es_tercero` SÍ es columna aquí;
+        // reserva_id y foto_adjunto no.
+        const checkoutRow: Record<string, unknown> = {};
+        for (const k of ["conductor_id", "vehiculo_id", "es_tercero", "fecha", "km_fin", "nivel_combustible",
+                         "observaciones", "km_ocr", "gps_lat", "gps_lng", "capturado_en", "sin_foto_motivo"]) {
+          if (checkout[k] !== undefined) checkoutRow[k] = checkout[k];
+        }
 
         // Mismo descuento del error de reloj que en el check-in (ver allí).
         const relojCheckout = corregirCapturaPorReloj({ capturado_en: checkout.capturado_en, clienteTs: body._cliente_ts });
@@ -1355,8 +1464,22 @@ export async function POST(req: NextRequest) {
       // ── Registrar documento ──────────────────────────────────────────────────
       case "documento": {
         const { documento } = body;
-        if (!documento?.conductor_id) return NextResponse.json({ error: "documento inválido" }, { status: 400 });
-        const { data, error } = await admin.from("documentos_conductor").insert(documento).select().single();
+        if (!documento || typeof documento !== "object") return NextResponse.json({ error: "documento inválido" }, { status: 400 });
+        // LISTA BLANCA + dueño del token. La URL se abre desde el ERP: un esquema que no sea
+        // http(s) (javascript:, data:) se rechaza.
+        const url = String(documento.url ?? "").trim();
+        if (!url) return NextResponse.json({ error: "documento inválido" }, { status: 400 });
+        if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !/^https?:\/\//i.test(url)) {
+          return NextResponse.json({ error: "La URL del documento debe empezar con http:// o https://" }, { status: 400 });
+        }
+        const filaDoc = {
+          conductor_id: ses.cid,
+          tipo:         documento.tipo ?? null,
+          nombre:       documento.nombre ?? null,
+          url,
+          vencimiento:  documento.vencimiento || null,
+        };
+        const { data, error } = await admin.from("documentos_conductor").insert(filaDoc).select().single();
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true, documento: data });
       }
@@ -1372,6 +1495,7 @@ export async function POST(req: NextRequest) {
         const estadosConductor = ["en_curso", "finalizada"];
         if (!estadosConductor.includes(estado))
           return NextResponse.json({ error: "El conductor solo puede marcar 'en_curso' o 'finalizada'" }, { status: 403 });
+        if (!(await reservaEsDelConductor(admin, ses, reservaId))) return noEsTuyo();
         // `.neq("estado", "cancelada")`: un servicio anulado en el ERP no se resucita desde la
         // app. El conductor puede tener la pantalla abierta desde antes de la cancelación (o
         // dispararlo el auto-finalizar por geocerco) y hasta ahora eso devolvía la reserva a
@@ -1457,7 +1581,8 @@ export async function POST(req: NextRequest) {
         const { reservaId, estadoPrevio } = body;
         if (!reservaId) return NextResponse.json({ error: "reservaId requerido" }, { status: 400 });
         const destino = (estadoPrevio === "programada" || estadoPrevio === "confirmada") ? estadoPrevio : "confirmada";
-        const { data: r, error: rErr } = await admin.from("reservas").select("estado").eq("id", reservaId).maybeSingle();
+        const { data: r, error: rErr } = await admin.from("reservas").select("estado")
+          .eq("id", reservaId).eq(condField, ses.cid).maybeSingle();   // solo SUS servicios
         if (rErr) return NextResponse.json({ error: rErr.message }, { status: 500 });
         if (!r) return NextResponse.json({ error: "Reserva no encontrada" }, { status: 404 });
         if (r.estado !== "en_curso") return NextResponse.json({ ok: true, sinCambio: true });
@@ -1467,11 +1592,27 @@ export async function POST(req: NextRequest) {
       }
 
       // ── Cambiar PIN de acceso ────────────────────────────────────────────────
+      // Antes: `{cid, tabla, pin}` del body y ninguna comprobación → cualquiera le fijaba el PIN a
+      // cualquier conductor y entraba con su cuenta. Ahora el dueño sale del token y se exige el
+      // PIN ACTUAL (un token robado de un teléfono desbloqueado no basta para quedarse la cuenta).
+      // El PIN actual cuenta como intento de login para el freno de fuerza bruta.
       case "cambiar_pin": {
-        const { cid, tabla, pin } = body;
-        if (!cid || !pin) return NextResponse.json({ error: "cid y pin requeridos" }, { status: 400 });
-        const t = tabla === "conductores_tercero" ? "conductores_tercero" : "conductores";
-        const { error } = await admin.from(t).update({ pin_acceso: pin }).eq("id", cid);
+        const pinNuevo = String(body.pin ?? "");
+        const pinActual = String(body.pinActual ?? "");
+        if (!/^\d{4}$/.test(pinNuevo)) return NextResponse.json({ error: "El PIN nuevo debe tener 4 dígitos" }, { status: 400 });
+        if (!pinActual) return NextResponse.json({ error: "Ingresa tu PIN actual" }, { status: 400 });
+        const claveFreno = `pin:${ses.tabla}:${ses.cid}`;
+        if (loginBloqueado(claveFreno)) {
+          return NextResponse.json({ error: "Demasiados intentos. Espera unos minutos." }, { status: 429 });
+        }
+        const { data: yo } = await admin.from(ses.tabla).select("pin_acceso").eq("id", ses.cid).maybeSingle();
+        const pinBd = String((yo as { pin_acceso?: unknown } | null)?.pin_acceso ?? "");
+        if (!pinBd || pinBd !== pinActual) {
+          registrarIntentoFallido(claveFreno);
+          return NextResponse.json({ error: "El PIN actual no es correcto" }, { status: 403 });
+        }
+        limpiarIntentos(claveFreno);
+        const { error } = await admin.from(ses.tabla).update({ pin_acceso: pinNuevo }).eq("id", ses.cid);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true });
       }
@@ -1479,8 +1620,6 @@ export async function POST(req: NextRequest) {
       // ── Rendir un gasto de caja chica (foto del peaje / lavado) ──────────────
       // Ver la nota larga de identidad en la cabecera de la sección de caja chica.
       case "rendir_gasto": {
-        const ses = sesionDeToken(body.token);
-        if (!ses) return NextResponse.json({ error: "Sesión vencida. Vuelve a iniciar sesión." }, { status: 401 });
 
         const g = (body.gasto ?? {}) as Record<string, unknown>;
         const monto = Number(g.monto);
@@ -1568,7 +1707,8 @@ export async function POST(req: NextRequest) {
         if (colaId) enganche.idem_key = colaId;
         if (!esTercero) enganche.conductor_id = cond.id;
         if (engancheVehiculo) enganche.vehiculo_id = engancheVehiculo;
-        if (num(g.reserva_id)) enganche.reserva_id = num(g.reserva_id);
+        // El gasto solo se ata a un servicio SUYO (si no, entra igual, sin ese enganche).
+        if (num(g.reserva_id) && await reservaEsDelConductor(admin, ses, g.reserva_id)) enganche.reserva_id = num(g.reserva_id);
 
         const insertar = (extra: Record<string, unknown>) =>
           admin.from("caja_chica_gastos").insert({ ...fila, ...extra }).select("id").single();
@@ -1603,8 +1743,6 @@ export async function POST(req: NextRequest) {
 
       // ── Resumen de caja chica del conductor (pestaña "Gastos") ───────────────
       case "mi_caja_chica": {
-        const ses = sesionDeToken(body.token);
-        if (!ses) return NextResponse.json({ error: "Sesión vencida. Vuelve a iniciar sesión." }, { status: 401 });
         const cond = await conductorDeSesion(ses);
         if (!cond) return NextResponse.json({ error: "No encontramos tu ficha de conductor." }, { status: 404 });
 
@@ -1639,8 +1777,6 @@ export async function POST(req: NextRequest) {
 
       // ── El conductor cierra su rendición y la manda a revisión ───────────────
       case "enviar_rendicion": {
-        const ses = sesionDeToken(body.token);
-        if (!ses) return NextResponse.json({ error: "Sesión vencida. Vuelve a iniciar sesión." }, { status: 401 });
         const cond = await conductorDeSesion(ses);
         if (!cond) return NextResponse.json({ error: "No encontramos tu ficha de conductor." }, { status: 404 });
 

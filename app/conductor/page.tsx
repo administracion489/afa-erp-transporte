@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
-import { supabase } from "@/lib/supabase";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, ajustesUbicacion, pedirAjustesUbicacion, esAppNativa, backgroundGpsActivo, backgroundGpsSinFixMs, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
 import { attachHidScanner } from "@/lib/hid-scanner";
 import { detectarSoportePush, permisoBloqueado, activarPushWeb, activarPushNativo, resincronizarSuscripcion } from "@/lib/push-cliente";
@@ -187,6 +186,19 @@ const AFA_KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY || "";
 // viejos). Tolerar ambos evita falsos "no subió" tras el cambio de valor canónico.
 const esAbordado = (e?: string | null) => e === "abordado" || e === "embarcado";
 
+// ── Sesión del API ──────────────────────────────────────────────────────────────
+// El servidor exige el token firmado del login en TODAS las acciones (salvo el login) y saca de
+// él la identidad: el `cid` del body ya no vale nada. Vive a nivel de módulo porque condApi es
+// una función suelta que llaman decenas de sitios (y la cola GPS lo inyecta al DRENAR, no al
+// encolar: un punto que esperó horas sin red sale con el token vigente).
+let tokenSesion: string | null = null;
+/** Lo registra la pantalla: un 401 con `sesionInvalida` (token vencido/ausente) la devuelve al
+ *  PIN. Un 401 sin esa marca (x-afa-key mal configurada) NO desloguea: re-loguear no lo arregla. */
+let alSesionInvalida: (() => void) | null = null;
+function esSesionInvalida(estado: number, json: unknown): boolean {
+  return estado === 401 && (json as { sesionInvalida?: unknown } | null)?.sesionInvalida === true;
+}
+
 // Llama al endpoint con service_role del conductor (saltea RLS — el conductor es
 // anónimo porque usa PIN, no sesión Supabase). Lanza Error con el mensaje del server.
 async function condApi(accion: string, params: Record<string, any> = {}) {
@@ -194,7 +206,10 @@ async function condApi(accion: string, params: Record<string, any> = {}) {
   // suyo para saber cuánto miente este celular y corregir las horas de captura que manda
   // (ver corregirCapturaPorReloj). Se toma aquí, en cada intento, y no al armar el payload:
   // así una lectura que estuvo horas en la cola offline mide el error del reloj, no la espera.
-  const bodyObj = { accion, ...params, _cliente_ts: new Date().toISOString() };
+  const token = params.token ?? tokenSesion ?? undefined;
+  const bodyObj = { accion, ...params, token, _cliente_ts: new Date().toISOString() };
+  const headers: Record<string, string> = { "Content-Type": "application/json", "x-afa-key": AFA_KEY };
+  if (token) headers["x-afa-token"] = token;
   // HTTP nativo (CapacitorHttp) SOLO para los envíos de GPS y SOLO cuando el plugin
   // de background está activo (APK recompilado): NO se throttlea en segundo plano
   // como el fetch del WebView. En todo lo demás y en APK viejos → fetch (probado).
@@ -205,12 +220,13 @@ async function condApi(accion: string, params: Record<string, any> = {}) {
         const base = typeof window !== "undefined" ? window.location.origin : "";
         const resp: any = await CapacitorHttp.post({
           url: `${base}/api/conductor`,
-          headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
+          headers,
           data: bodyObj,
         });
         const parsed = typeof resp?.data === "string"
           ? (() => { try { return JSON.parse(resp.data); } catch { return {}; } })()
           : (resp?.data ?? {});
+        if (esSesionInvalida(resp.status, parsed)) alSesionInvalida?.();
         if (resp.status < 200 || resp.status >= 300) throw new Error(parsed.error || `HTTP ${resp.status}`);
         return parsed;
       }
@@ -220,10 +236,11 @@ async function condApi(accion: string, params: Record<string, any> = {}) {
   }
   const res = await fetch("/api/conductor", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
+    headers,
     body: JSON.stringify(bodyObj),
   });
   const json = await res.json().catch(() => ({}));
+  if (accion !== "login" && esSesionInvalida(res.status, json)) alSesionInvalida?.();
   // El estado HTTP y el cuerpo viajan PEGADOS al Error (aditivo: ningún llamador previo los
   // lee). La cola de gastos los necesita para distinguir "sin red, reintenta luego" de un
   // rechazo definitivo — sobre todo `duplicado`, que significa "ese gasto YA entró en un
@@ -560,6 +577,10 @@ function loadSession(): Conductor | null {
     const raw = localStorage.getItem(SK); if (!raw) return null;
     const { c, exp } = JSON.parse(raw);
     if (Date.now() > exp) { localStorage.removeItem(SK); return null; }
+    // Sesión de una versión anterior al token: el servidor ya no acepta nada sin él, así que se
+    // descarta y el conductor vuelve a la pantalla del PIN (una vez) en vez de quedar en un home
+    // que falla en cada llamada.
+    if (!c || typeof c._token !== "string" || !c._token) { localStorage.removeItem(SK); return null; }
     // Higiene: una sesión creada por la versión anterior todavía trae el PIN guardado.
     // Se borra del almacenamiento en el primer arranque de esta versión.
     if (c && c.pin_acceso) {
@@ -569,7 +590,7 @@ function loadSession(): Conductor | null {
     return c;
   } catch { return null; }
 }
-function clearSession() { localStorage.removeItem(SK); }
+function clearSession() { localStorage.removeItem(SK); tokenSesion = null; }
 
 // ─── SERVICIO ACTIVO (persiste entre recargas) ────────────────────────────────
 
@@ -940,6 +961,7 @@ export default function ConductorApp() {
   const [ccEnviando,   setCcEnviando]   = useState(false);
 
   // ── Perfil ─────────────────────────────────────────────────────────────────
+  const [pinActual,    setPinActual]    = useState("");
   const [pinNuevo,     setPinNuevo]     = useState("");
   const [pinConfirm,   setPinConfirm]   = useState("");
   const [pinMsg,       setPinMsg]       = useState("");
@@ -1009,7 +1031,7 @@ export default function ConductorApp() {
 
   useEffect(() => {
     const saved = loadSession();
-    if (saved) { setConductor(saved); cargarDatos(saved.id, saved._tabla); }
+    if (saved) { tokenSesion = saved._token ?? null; setConductor(saved); cargarDatos(saved.id); }
     setIniting(false);
     // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
     if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
@@ -1082,9 +1104,10 @@ export default function ConductorApp() {
         _tabla: r.conductor.tabla,
         _token: r.token,
       };
+      tokenSesion = r.token ?? null;
       saveSession(c);
       setConductor(c);
-      await cargarDatos(c.id, c._tabla);
+      await cargarDatos(c.id);
     } catch (e: any) {
       setLoginErr(e?.message || "Error de conexión");
     } finally {
@@ -1094,7 +1117,8 @@ export default function ConductorApp() {
 
   // ─── Cargar datos ───────────────────────────────────────────────────────────
 
-  const cargarDatos = useCallback(async (cid: number, tabla?: string) => {
+  // Solo `cid` (nombra la caché local): la identidad que ve el servidor la pone el token.
+  const cargarDatos = useCallback(async (cid: number) => {
     const hoy = getFechaLocal();
     setDebugFecha(hoy);
 
@@ -1155,7 +1179,8 @@ export default function ConductorApp() {
     // 2) Refrescar desde el servidor en segundo plano.
     let data: any;
     try {
-      data = await condApi("inicio", { cid, tabla: tabla ?? "conductores", hoy });
+      // La identidad la pone el token; `cid` solo nombra la caché local.
+      data = await condApi("inicio", { hoy });
       setDebugInfo("");
       try { localStorage.setItem(cacheKey, JSON.stringify({ hoy, data })); } catch {}
     } catch (e: any) {
@@ -1177,7 +1202,7 @@ export default function ConductorApp() {
     if (!conductor) return;
     setCargandoOtraFecha(true);
     try {
-      const data = await condApi("inicio", { cid: conductor.id, tabla: conductor._tabla ?? "conductores", hoy: fecha });
+      const data = await condApi("inicio", { hoy: fecha });
       setReservasOtraFecha(data.reservas || []);
     } catch {
       setReservasOtraFecha([]);
@@ -1193,7 +1218,6 @@ export default function ConductorApp() {
     setChatEnviando(true);
     try {
       const { mensaje } = await condApi("responder_mensaje", {
-        cid: conductor.id, tabla: conductor._tabla ?? "conductores",
         reservaId: rid, pasajero_id: pasajeroId, texto: t,
       });
       if (mensaje) setChatMsgs(prev => [...prev, mensaje]);
@@ -1271,8 +1295,11 @@ export default function ConductorApp() {
 
   async function cargarParadas(reservaId: number) {
     // Usa el API endpoint que auto-crea paradas desde origen/destino si no existen
-    const res = await fetch(`/api/conductor-paradas?reservaId=${reservaId}`, { headers: { "x-afa-key": AFA_KEY } });
-    const json = await res.json();
+    const res = await fetch(`/api/conductor-paradas?reservaId=${reservaId}`, {
+      headers: { "x-afa-key": AFA_KEY, ...(tokenSesion ? { "x-afa-token": tokenSesion } : {}) },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (esSesionInvalida(res.status, json)) { alSesionInvalida?.(); return; }
     if (!res.ok) {
       alert(`No se pudieron cargar las paradas: ${json.error ?? "Error desconocido"}`);
       return;
@@ -2075,6 +2102,7 @@ export default function ConductorApp() {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
         body: JSON.stringify({
+          token:      tokenSesion,
           reserva_id: reservaActiva?.id ?? null,
           lat:        posRef.current.coords.latitude,
           lng:        posRef.current.coords.longitude,
@@ -2086,6 +2114,9 @@ export default function ConductorApp() {
         const j = await sosRes.json().catch(() => ({}));
         alert(`SOS no pudo registrarse: ${j.error ?? "error desconocido"}. Llama al +51 966 707 225.`);
         setSosPct(0);
+        // Sesión vencida: DESPUÉS del aviso (que es lo que importa en una emergencia) se vuelve
+        // al PIN, para que el próximo SOS sí salga.
+        if (esSesionInvalida(sosRes.status, j)) alSesionInvalida?.();
         return;
       }
       await enviarUbicacion(posRef.current, "sos");
@@ -2328,6 +2359,7 @@ export default function ConductorApp() {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
       body: JSON.stringify({
+        token:      tokenSesion,
         reserva_id: reservaActiva.id,
         lat:        posRef.current?.coords.latitude  ?? null,
         lng:        posRef.current?.coords.longitude ?? null,
@@ -2335,7 +2367,8 @@ export default function ConductorApp() {
         estado:     "pendiente",
       }),
     });
-    const json = await res.json();
+    const json = await res.json().catch(() => ({}));
+    if (esSesionInvalida(res.status, json)) { alSesionInvalida?.(); return; }
     if (!res.ok) { alert(`Error al notificar retraso: ${json.error}`); return; }
     setNotifEnviada(true);
     setTimeout(() => setNotifEnviada(false), 5000);
@@ -2904,14 +2937,15 @@ export default function ConductorApp() {
   // ─── Cambiar PIN ────────────────────────────────────────────────────────────
 
   async function cambiarPin() {
+    if (pinActual.length < 4) { setPinMsg("Ingresa tu PIN actual"); return; }
     if (pinNuevo.length < 4 || pinNuevo !== pinConfirm) { setPinMsg("PINs no coinciden"); return; }
     if (!conductor) return;
     try {
-      await condApi("cambiar_pin", { cid: conductor.id, tabla: conductor._tabla, pin: pinNuevo });
+      // La identidad la pone el token; el PIN actual lo exige el servidor (sin él, un token
+      // bastaba para quedarse con la cuenta). El PIN nuevo no se guarda en el dispositivo.
+      await condApi("cambiar_pin", { pin: pinNuevo, pinActual });
     } catch (e: any) { setPinMsg(`Error: ${e?.message}`); setTimeout(() => setPinMsg(""), 4000); return; }
-    const upd = { ...conductor, pin_acceso: pinNuevo };
-    saveSession(upd); setConductor(upd);
-    setPinMsg("PIN cambiado"); setPinNuevo(""); setPinConfirm("");
+    setPinMsg("PIN cambiado"); setPinActual(""); setPinNuevo(""); setPinConfirm("");
     setTimeout(() => { setPinMsg(""); setCamPin(false); }, 2000);
   }
 
@@ -2920,6 +2954,22 @@ export default function ConductorApp() {
     cleanup(); clearSession(); setConductor(null);
     setEnRuta(false); setConectado(false); setDni(""); setPin(""); setTab("ruta");
   }
+
+  // Sesión rechazada por el servidor (token vencido o de otra versión): de vuelta al PIN, sin
+  // preguntar —ya no hay nada que hacer con ella— y con el DNI puesto para re-entrar rápido.
+  // NO se borra el servicio en curso (afa_serv_v1) ni las colas offline (GPS, gastos, check-in):
+  // al volver a entrar, cargarDatos restaura el servicio y las colas se drenan con el token nuevo.
+  // Idempotente: varias llamadas en vuelo pueden devolver 401 a la vez.
+  useEffect(() => {
+    alSesionInvalida = () => {
+      if (!tokenSesion && !conductorRef.current) return;
+      const dniPrevio = conductorRef.current?.dni ?? "";
+      cleanup(); clearSession(); setConductor(null);
+      setEnRuta(false); setConectado(false); setDni(dniPrevio); setPin(""); setTab("ruta");
+      setLoginErr("Tu sesión venció. Ingresa tu PIN para continuar.");
+    };
+    return () => { alSesionInvalida = null; };
+  }, []);
 
   // ─── DERIVADOS ──────────────────────────────────────────────────────────────
 
@@ -3731,7 +3781,7 @@ export default function ConductorApp() {
                 )}
                 {!esModoOtraFecha && (
                   <SecondaryBtn
-                    onClick={() => conductor && cargarDatos(conductor.id, conductor._tabla)}
+                    onClick={() => conductor && cargarDatos(conductor.id)}
                     icon={<IconRefresh size={16} color="var(--c-ink)" />}
                     full={false}
                   >
@@ -4964,16 +5014,15 @@ export default function ConductorApp() {
               </div>
               {camPin && (
                 <div style={{ marginTop: 12 }}>
-                  {["Nuevo PIN", "Confirmar PIN"].map((ph, i) => (
+                  {["PIN actual", "Nuevo PIN", "Confirmar PIN"].map((ph, i) => (
                     <input
                       key={i} type="password" inputMode="numeric" maxLength={4}
                       placeholder={ph}
-                      value={i === 0 ? pinNuevo : pinConfirm}
-                      onChange={e =>
-                        i === 0
-                          ? setPinNuevo(e.target.value.replace(/\D/g, "").slice(0, 4))
-                          : setPinConfirm(e.target.value.replace(/\D/g, "").slice(0, 4))
-                      }
+                      value={i === 0 ? pinActual : i === 1 ? pinNuevo : pinConfirm}
+                      onChange={e => {
+                        const v = e.target.value.replace(/\D/g, "").slice(0, 4);
+                        if (i === 0) setPinActual(v); else if (i === 1) setPinNuevo(v); else setPinConfirm(v);
+                      }}
                       style={{
                         width: "100%", padding: 12, borderRadius: 12, marginBottom: 8,
                         border: "1.5px solid var(--c-line)",
