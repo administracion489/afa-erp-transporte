@@ -1305,7 +1305,12 @@ export default function CotizadorPage(){
                       {label:`Combustible (${veh.tipo_combustible_1})`,val:resultado.costoCombustible-resultado.costoUrea,color:COMB_COLOR[veh.tipo_combustible_1]||"#666"},
                       ...(resultado.costoUrea>0?[{label:`🧪 UREA (${((veh.consumo_urea_pct||0.04)*100).toFixed(0)}% diésel)`,val:resultado.costoUrea,color:"#06b6d4"}]:[]),
                       {label:`Neumáticos (${veh.n_neumaticos} unid)`,val:resultado.costoNeumaticos,color:"#8b5cf6"},
-                      {label:"Mantenimiento preventivo",val:resultado.costoMantenimiento,color:"#10b981"},
+                      // Es todo el mantenimiento (preventivo + correctivo), no solo el programado:
+                      // `mantenimiento_km` × km. Decía "preventivo" y escondía la tarifa, así que
+                      // S/ 420 en 210 km no se podía leer como lo que es: S/ 2.00/km tecleados en la
+                      // ficha del tipo. Mismo formato que el conductor y que el presupuesto de
+                      // Programación ("210 km × S/ 2/km").
+                      {label:`Mantenimiento (S/ ${fmtN(Number(veh.mantenimiento_km)||0,2)}/km)`,val:resultado.costoMantenimiento,color:"#10b981"},
                       {label:"Depreciación",val:resultado.costoDeprec,color:"#60a5fa"},
                       {label:"Seguros, SOAT, permisos",val:resultado.costoFijosKm,color:"#f87171"},
                       {label:"Reserva (5%)",val:resultado.reserva,color:"#94a3b8"},
