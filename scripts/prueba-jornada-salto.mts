@@ -2,7 +2,7 @@
 // Caso real: CWZ-371 · 12/09/2026 · 17,758 (05:31) … 24,484 (17:02) = 6,726 km "Revisar"
 // sin decir cuál de las cinco lecturas era la mala, y con su foto fuera de las miniaturas.
 // Ejecutar: npx tsx scripts/prueba-jornada-salto.mts
-import { analizarVehiculo, type LecturaCruda } from "../lib/odometro-analitica.ts";
+import { analizarVehiculo, type LecturaCruda } from "../lib/odometro-analitica";
 
 let fallos = 0;
 const ok = (c: boolean, m: string) => { console.log(`${c ? "✓" : "✗"} ${m}`); if (!c) fallos++; };
