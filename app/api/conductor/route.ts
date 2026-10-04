@@ -17,7 +17,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { registrarLectura, corregirCapturaPorReloj, hashDeFoto } from "@/lib/odometro";
+import { registrarLectura, corregirCapturaPorReloj, hashDeFoto, recalcularKmVigente } from "@/lib/odometro";
+import { cotejoGpsDelDia } from "@/lib/odometro-gps";
 import { firmarUrl, firmarUrls } from "@/lib/storage-firmado";
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
@@ -1437,7 +1438,7 @@ export async function POST(req: NextRequest) {
             const tablaVeh = esTercero ? "vehiculos_tercero" : "vehiculos";
             const { data: veh } = await admin.from(tablaVeh).select("id").eq("id", checkout.vehiculo_id).maybeSingle();
             if (veh) {
-              await registrarLectura(admin, {
+              const regFin = await registrarLectura(admin, {
                 vehiculo_id: Number(checkout.vehiculo_id),
                 km: Number(checkout.km_fin),
                 fuente: "servicio",
@@ -1451,6 +1452,27 @@ export async function POST(req: NextRequest) {
                 momento: "checkout",
                 idemKey: `checkout:${esTercero ? "t" : "p"}:${checkout.vehiculo_id}:${checkout.fecha}:${checkout.conductor_id}`,
               });
+              // Odómetro del día contra el GPS de sus servicios, DESPUÉS de responder (lee la
+              // huella entera). El GPS solo puede quedarse corto, así que un odómetro MENOR que el
+              // GPS es imposible: esa lectura no puede seguir moviendo el km vigente y pasa a
+              // "Lecturas por revisar". Un odómetro mucho MAYOR solo deja la nota (puede ser vacío).
+              if (regFin.ok && regFin.lecturaId && !regFin.duplicada) {
+                const lecturaId = regFin.lecturaId, estadoFin = regFin.estado;
+                const vid = Number(checkout.vehiculo_id), cid = Number(checkout.conductor_id);
+                after(async () => {
+                  const c = await cotejoGpsDelDia(admin, {
+                    conductorId: cid, campoConductor: condField, vehiculoId: vid, esTercero,
+                    fecha: checkout.fecha, kmFin: Number(checkout.km_fin),
+                  });
+                  if (c.codigo !== "odometro_corto" && c.codigo !== "odometro_largo") return;
+                  const { data: l } = await admin.from("lecturas_odometro").select("motivo").eq("id", lecturaId).maybeSingle();
+                  const nota = `GPS: ${c.detalle}`;
+                  const parche: Record<string, unknown> = { motivo: [nota, l?.motivo].filter(Boolean).join(" · ") };
+                  if (c.codigo === "odometro_corto" && estadoFin === "aceptada") parche.estado = "sospechosa";
+                  await admin.from("lecturas_odometro").update(parche).eq("id", lecturaId);
+                  if (parche.estado) await recalcularKmVigente(admin, { vehiculo_id: vid, flota: esTercero ? "tercero" : "propia" });
+                });
+              }
             }
           }
         } catch (e) { console.warn("[checkout] lectura odómetro:", e); }
@@ -1470,6 +1492,20 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: error.message }, { status: 500 });
         }
         return NextResponse.json({ ok: true });
+      }
+
+      // ── Cotejar el km final contra el GPS ANTES de enviarlo ─────────────────────
+      // Lo llama la pantalla de confirmación del check-out, con el tablero delante: si el
+      // odómetro del día no cuadra con lo que el GPS registró, se pide reescribir el número.
+      // Solo lee. Best-effort: sin datos devuelve `sin_gps` y la app sigue como siempre.
+      case "cotejar_km_gps": {
+        const vid = Number(body.vehiculo_id), kmFin = Number(body.km_fin);
+        const fecha = String(body.fecha ?? "");
+        if (!vid || !(kmFin > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return NextResponse.json({ ok: true, codigo: "sin_odometro", detalle: null });
+        const c = await cotejoGpsDelDia(admin, {
+          conductorId: ses.cid, campoConductor: condField, vehiculoId: vid, esTercero: body.es_tercero === true, fecha, kmFin,
+        });
+        return NextResponse.json({ ok: true, ...c });
       }
 
       // ── Registrar documento ──────────────────────────────────────────────────
