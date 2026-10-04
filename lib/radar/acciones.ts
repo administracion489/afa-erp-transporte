@@ -13,6 +13,7 @@
 // demás queda como alerta + registro para revisión humana. NUNCA se cancela un servicio
 // automáticamente.
 
+import { procedenciaPlaca } from "./procedencia-placa";
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
@@ -375,6 +376,21 @@ async function vehiculoAsignadoAlConductor(sb: any, conductorId: number, fecha: 
     return ids.length === 1 ? Number(ids[0]) : null;
   } catch {
     return null;
+  }
+}
+
+/** TODAS las unidades (ids) que un conductor tiene en servicio en una fecha. */
+async function vehiculosAsignadosAlConductor(sb: any, conductorId: number, fecha: string): Promise<number[]> {
+  try {
+    const { data } = await sb
+      .from("reservas")
+      .select("vehiculo_id")
+      .eq("conductor_id", conductorId)
+      .eq("fecha_servicio", fecha)
+      .neq("estado", "cancelada");
+    return [...new Set(((data as any[]) ?? []).map((r) => Number(r.vehiculo_id)).filter((n) => Number.isFinite(n) && n > 0))];
+  } catch {
+    return [];
   }
 }
 
@@ -1684,16 +1700,32 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   // el día del mensaje (no la fecha declarada de la lectura). Degrada limpio si no hay match.
   const fechaAsignacion = fechaLimaDeTs(mensaje.ts_mensaje) ?? fechaLima();
   let placaAsignadaOtra: string | null = null;
-  if (unidad && unidad.flota === "propia" && mensaje.remitente_wa) {
-    const cond = await matchConductor(sb, { jid: mensaje.remitente_wa, nombre: d.conductor });
+  let asignadasAlRemitente: number[] = [];
+  if (unidad && mensaje.remitente_wa) {
+    // Solo por TELÉFONO: un nombre que la IA dice haber leído no prueba quién envió la foto.
+    const cond = await matchConductor(sb, { jid: mensaje.remitente_wa });
     if (cond) {
-      const vidAsignado = await vehiculoAsignadoAlConductor(sb, cond.id, fechaAsignacion);
-      if (vidAsignado != null && vidAsignado !== unidad.id) {
-        const { data: vAsig } = await sb.from("vehiculos").select("placa").eq("id", vidAsignado).maybeSingle();
-        placaAsignadaOtra = (vAsig as any)?.placa ?? `#${vidAsignado}`;
+      asignadasAlRemitente = await vehiculosAsignadosAlConductor(sb, cond.id, fechaAsignacion);
+      // Conflicto solo con flota propia (la asignación por reserva usa vehiculo_id) y solo si
+      // la asignación del día es única: con dos unidades no se sabe cuál "debería" ser.
+      if (unidad.flota === "propia" && asignadasAlRemitente.length === 1 && asignadasAlRemitente[0] !== unidad.id) {
+        const { data: vAsig } = await sb.from("vehiculos").select("placa").eq("id", asignadasAlRemitente[0]).maybeSingle();
+        placaAsignadaOtra = (vAsig as any)?.placa ?? `#${asignadasAlRemitente[0]}`;
       }
     }
   }
+  // ¿La placa la LEYÓ alguien o la DEDUJO la IA? Un tablero no muestra placa: si no está escrita
+  // en el mensaje (o su ráfaga) y el remitente no tiene esa unidad asignada, la IA la eligió
+  // por parecido del tablero — ver lib/radar/procedencia-placa.ts (caso CWZ-371, 12/09/2026).
+  const procedencia = unidad
+    ? procedenciaPlaca({
+        placa: unidad.placa,
+        unidadId: unidad.flota === "propia" ? unidad.id : null,
+        textos: [mensaje.texto, mensaje.transcripcion, mensaje.texto_cluster],
+        asignadasAlRemitente: unidad.flota === "propia" ? asignadasAlRemitente : [],
+      })
+    : null;
+  const placaSinRespaldo = procedencia === "sin_respaldo";
   const identidadConflicto = placaAsignadaOtra != null;
 
   const bloqueos: string[] = [];
@@ -1701,6 +1733,10 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   if (lecturaDudosa) bloqueos.push(`La IA no está segura del número (confianza de lectura ${Math.round((confLectura ?? 0) * 100)}%)`);
   if (kmImplausible) bloqueos.push(`Kilometraje con ${kmDigitos} dígito(s): fuera del rango de un odómetro real`);
   if (identidadConflicto) bloqueos.push(`La foto es de ${unidad!.placa} pero quien la envió tiene asignada la ${placaAsignadaOtra} hoy — ¿foto de otra unidad?`);
+  // Va como bloqueo a propósito: aquí NO grabar es lo correcto. Un km en la unidad equivocada
+  // se vuelve su vigente y hace descartar como "retroceso" las lecturas buenas de los días
+  // siguientes; una lectura sin grabar solo cuesta teclearla en la unidad correcta.
+  else if (placaSinRespaldo) bloqueos.push(`Placa ${unidad!.placa} SIN CONFIRMAR: no está escrita en el mensaje y quien lo envió no tiene esa unidad asignada hoy — la IA la dedujo por el parecido del tablero. Registra el km a mano en la unidad correcta`);
   // OJO: el veredicto del selector NUNCA entra en `bloqueos`. Un bloqueo apaga `puedeAuto` y
   // entonces no se llama a registrarLectura, o sea que la lectura dejaría de existir como fila
   // y desaparecería de "Lecturas por revisar" — que es justo donde el operador la corrige y
@@ -1817,7 +1853,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   for (const b of bloqueos) motivos.push(b);
   if (sospechaVoucher) motivos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si era una recarga de combustible");
 
-  const titulo = `🛞 Kilometraje reportado: ${unidad?.placa ?? placaFormato(d.placa) ?? d.unidad ?? "unidad sin identificar"}${etiquetaFlota}${km != null ? ` — ${km.toLocaleString("es-PE")} km` : ""}`;
+  const titulo = `🛞 Kilometraje reportado: ${placaSinRespaldo ? `unidad sin identificar (¿${unidad!.placa}?)` : unidad?.placa ?? placaFormato(d.placa) ?? d.unidad ?? "unidad sin identificar"}${etiquetaFlota}${km != null ? ` — ${km.toLocaleString("es-PE")} km` : ""}`;
   // Si hubo señales de riesgo (foto ilegible, trip como total, otra unidad, posible voucher),
   // la alerta merece "atención"; el simple "falta registrar a mano" queda como "info".
   const severidadManual: SeveridadAlerta = bloqueos.length > 0 || sospechaVoucher ? "atencion" : "info";

@@ -694,6 +694,9 @@ async function procesarMensaje(
     ...mensaje,
     media_url: mensaje.media_url || miembrosConMedia[0]?.media_url || mensaje.media_url,
     fotos_cluster: fotosCluster,
+    // El texto de TODA la ráfaga: la placa puede venir en el mensaje de al lado de la foto, y
+    // `procedenciaPlaca` necesita verla escrita para no tomarla por adivinada.
+    texto_cluster: textoClusterCombinado,
   };
   const resultado = await ejecutarAccion({ sb, mensaje: mensajeParaAccion, categoria, datos: datos ?? {}, confianza, config });
 
