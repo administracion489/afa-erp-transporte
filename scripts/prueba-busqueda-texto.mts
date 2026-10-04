@@ -18,6 +18,9 @@ caso("OS-2026-006532 25525", "006532", true);
 caso("RUTA C/ENTRADA 06:35", "ruta c entrada", true);
 caso("cualquier cosa", "", true);                       // vacío deja pasar
 caso("cualquier cosa", "   ", true);
+caso("ABC-123 Mercedes Sprinter", "abc123", true);      // placa sin guion
+caso("ABC-123 Mercedes Sprinter", "ABC 123", true);
+caso("Juan Pérez Q-12345678 A-IIIb", "perez q12345678", true);
 // Lo que NO debe pasar: todas las palabras tienen que estar.
 caso("Compañía Hard Rock", "compania soft", false);
 caso("SNACKS AMERICA LATINA", "compania", false);
