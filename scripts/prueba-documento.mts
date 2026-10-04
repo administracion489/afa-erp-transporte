@@ -85,25 +85,28 @@ titulo("1 · El documento se renderiza");
 
 // ── 2 · El pie con el perfil de empresa vacío ──────────────────────────────
 //
-// La fila de `empresa_perfil` tiene hoy la dirección, el teléfono y el correo en cadena
-// vacía. El pie salía con tres rayas; ahora cae a los mismos valores que imprime el PDF de
-// la cotización.
-titulo("2 · El pie no sale con rayas cuando el perfil está vacío");
+// El pie salía con tres rayas (`Dir.: —`) cuando `empresa_perfil` tenía la dirección, el
+// teléfono y el correo en cadena vacía. La primera corrección las sustituyó por los datos
+// de AFA escritos en el código, y eso se revirtió a propósito (`empresaConDefectos`): el
+// ERP se vende, y un papel firmado con el domicilio de otra empresa afirma algo falso.
+// La regla de hoy es la tercera: NI raya NI dato prestado — el renglón que no tiene dato
+// no se imprime (`buildFooterPDFHtml` filtra las partes vacías).
+titulo("2 · El pie sin perfil: ni rayas ni datos de otra empresa");
 {
   const html = buildLiquidacionHtml(doc([fila({})], { telefono: "", email: "", direccion: "", web: "" }));
   const t = texto(html);
-  ok(t.includes("Chacrasana"), "imprime la dirección");
-  ok(t.includes("966 707 225"), "imprime el teléfono");
-  ok(t.includes("transporte@afatoursperu.com"), "imprime el correo");
-  ok(t.includes("www.afatoursperu.com"), "imprime la web");
-  ok(!/Dir\.:\s*—/.test(t), "y ya no hay una raya donde va la dirección");
+  ok(!/Dir\.:\s*—/.test(t), "no hay una raya donde va la dirección");
+  ok(!t.includes("Chacrasana"), "no hereda el domicilio de AFA");
+  ok(!t.includes("966 707 225"), "no hereda el teléfono de AFA");
+  ok(!t.includes("transporte@afatoursperu.com"), "no hereda el correo de AFA");
+  ok(!t.includes("www.afatoursperu.com"), "no hereda la web de AFA");
 
-  // Y si el perfil SÍ tiene datos, mandan los suyos.
+  // Y si el perfil SÍ tiene datos, se imprimen los suyos.
   const propio = texto(buildLiquidacionHtml(doc([fila({})], {
     telefono: "01 999 8888", email: "otro@afa.com", direccion: "AV. NUEVA 123", web: "afa.pe",
   })));
   ok(propio.includes("01 999 8888") && propio.includes("AV. NUEVA 123"),
-    "el dato del perfil pisa al de respaldo, no al revés");
+    "el dato del perfil se imprime tal cual");
 }
 
 // ── 3 · La columna PAX: solo la capacidad contratada ───────────────────────
@@ -214,6 +217,50 @@ titulo("6 · La firma va en la del Gerente General, y solo en esa");
   ok(!/<img class="rubrica"/.test(sinFirma), "sin firma configurada no se pinta ninguna imagen");
   ok(!/class="linea con-rubrica"/.test(sinFirma), "y la línea conserva el hueco de siempre para firmar a mano");
   ok(sinFirma.split('<div class="firma">').length - 1 === 3, "con sus tres recuadros");
+}
+
+// ── 7 · El bloque de totales no desglosa por categoría ─────────────────────
+//
+// "Servicios del periodo"/"Servicios prestados", "Adicionales" y "Falsos fletes" son
+// cortes internos de AFA y se sacaron de LOS DOS formatos: el detalle ya va renglón por
+// renglón arriba, y lo que la contraparte tiene que cuadrar es el total. Lo que RESTA sí
+// se imprime —callar un descuento es cobrar o pagar de menos sin decir por qué— y del
+// lado proveedor queda además el camino completo hasta el neto, que es con lo que coteja
+// su factura. El desglose vive en el modal "Revisar".
+titulo("7 · Los totales no desglosan por categoría, pero sí lo que resta");
+{
+  // Se busca la FILA del bloque de totales, no la palabra suelta: "Adicionales" también
+  // aparece en la descripción de un ítem, y un `includes` sobre el texto plano daría por
+  // buena una prueba que no mira nada.
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const hayFila = (html: string, label: string) =>
+    new RegExp(`<td class="k">${esc(label)}</td>`).test(html);
+
+  const conTodo = {
+    servicios: 1650, adicionales: 790, falsos_fletes: 120, descuentos: 210,
+    subtotal: 2350, igvPct: 18, igv: 423, total: 2773,
+  };
+  const cli = buildLiquidacionHtml({ ...doc([fila({})]), totales: conTodo } as any);
+  ok(!hayFila(cli, "Servicios del periodo"), "el cliente no ve el subtotal de servicios");
+  ok(!hayFila(cli, "Adicionales autorizados"), "ni el de adicionales");
+  ok(!/Falsos fletes/.test(cli), "ni el de falsos fletes");
+  ok(hayFila(cli, "Descuentos y penalidades"), "pero sí el descuento que se le resta");
+  ok(hayFila(cli, "TOTAL VALORIZADO (sin IGV)") && /TOTAL A FACTURAR/.test(cli),
+    "y el total que cuadra contra su orden de compra");
+
+  const prov = buildLiquidacionHtml({
+    ...doc([fila({})]), lado: "proveedor",
+    totales: { ...conTodo, totalComprobante: 2773, detraccionPct: 10, detraccionMonto: 277, anticipos: 500 },
+  } as any);
+  ok(!hayFila(prov, "Servicios prestados"), "el proveedor tampoco ve el subtotal de servicios");
+  ok(!hayFila(prov, "Adicionales"), "ni el de adicionales");
+  ok(!/Falsos fletes/.test(prov), "ni el de falsos fletes");
+  ok(hayFila(prov, "Penalidades y descuentos"), "pero sí lo que se le descuenta");
+  ok(hayFila(prov, "Detracción 10%") && hayFila(prov, "Anticipos ya entregados"),
+    "y la detracción y los anticipos, que también le restan");
+  ok(hayFila(prov, "Subtotal (sin IGV)") && hayFila(prov, "Total del comprobante")
+    && /NETO A PAGAR AL PROVEEDOR/.test(prov),
+    "con el camino entero hasta el neto, que es lo que coteja contra su factura");
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)\n` : "\nTODO OK\n");

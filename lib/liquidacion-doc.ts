@@ -397,23 +397,25 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
   const filaTot = (k: string, v: string, cls = "") =>
     `<tr class="${cls}"><td class="k">${esc(k)}</td><td class="v">${v}</td></tr>`;
 
-  // El formato del cliente NO desglosa el valorizado por categoría. "Servicios del
-  // periodo", "Adicionales autorizados" y "Falsos fletes" son cortes internos de AFA:
-  // al cliente se le entrega el detalle renglón por renglón en la tabla de arriba —cada
-  // adicional sale rotulado ADICIONAL, cada descuento con su cláusula— y abajo lo único
-  // que tiene que cuadrar contra su orden de compra, que es el valorizado. El desglose
-  // sigue entero donde se trabaja el documento: el botón "Revisar" (app/liquidaciones/
-  // ModalEditor.tsx) y el lado proveedor de aquí abajo. Cualquier subtotal nuevo por
-  // categoría se agrega ahí, no acá.
+  // NINGUNO DE LOS DOS FORMATOS desglosa el valorizado por categoría. "Servicios del
+  // periodo"/"Servicios prestados", "Adicionales" y "Falsos fletes" son cortes internos
+  // de AFA: la contraparte recibe el detalle renglón por renglón en la tabla de arriba
+  // —cada adicional rotulado ADICIONAL, cada descuento con su cláusula— y abajo lo único
+  // que tiene que cuadrar contra su orden de compra o contra su factura. El desglose
+  // sigue entero donde se trabaja el documento, que es el botón "Revisar"
+  // (app/liquidaciones/ModalEditor.tsx). Un subtotal nuevo por categoría se agrega ahí,
+  // no acá.
   //
-  // El falso flete además NO ES SUYO: una cancelación se le cobra al cliente en S/ 0.00
-  // pase lo que pase, y el avance que se le reconoce al proveedor es cosa de AFA con el
-  // proveedor. Imprimirle ese renglón —aunque llegue en cero— sería enseñarle un acuerdo
-  // en el que no es parte.
+  // Lo que SÍ queda en los dos: lo que RESTA —descuentos y penalidades, y del lado
+  // proveedor además detracción y anticipos—, porque no es un corte por categoría sino
+  // plata que se le quita a esa contraparte en ese documento, y callarla sería pagarle
+  // o cobrarle de menos sin decir por qué. Del lado proveedor queda también el camino
+  // completo de la resta (Subtotal → IGV → Total del comprobante → NETO), que es con lo
+  // que coteja su factura y lo que la SUNAT le obliga a cuadrar.
   //
-  // El descuento SÍ se imprime: no es un corte por categoría, es plata que se le
-  // resta a este cliente en esta factura, y callarla en el total sería cobrar sin decir
-  // por qué el importe bajó.
+  // El falso flete, además, nunca fue del cliente: una cancelación se le cobra en
+  // S/ 0.00 pase lo que pase, y el avance que se le reconoce al proveedor es cosa de AFA
+  // con el proveedor.
   const totales = d.lado === "cliente"
     ? [
         t.descuentos ? filaTot("Descuentos y penalidades", "− " + m2(t.descuentos, moneda), "neg") : "",
@@ -422,9 +424,6 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
         `<tr class="grand"><td class="k" style="background:${cp};color:#fff;border-color:${cp}">TOTAL A FACTURAR</td><td class="v" style="background:${cp};color:#fff;border-color:${cp}">${m2(t.total, moneda)}</td></tr>`,
       ]
     : [
-        filaTot("Servicios prestados", m2(t.servicios, moneda)),
-        t.adicionales ? filaTot("Adicionales", m2(t.adicionales, moneda)) : "",
-        t.falsos_fletes ? filaTot("Falsos fletes (servicios cancelados con acuerdo)", m2(t.falsos_fletes, moneda)) : "",
         t.descuentos ? filaTot("Penalidades y descuentos", "− " + m2(t.descuentos, moneda), "neg") : "",
         filaTot("Subtotal (sin IGV)", m2(t.subtotal, moneda)),
         filaTot(`IGV ${num(t.igvPct, 0)}%`, m2(t.igv, moneda)),
