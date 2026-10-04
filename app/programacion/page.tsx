@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
 import { configAutoridad, etiquetaAutorizacion, type Autoridad } from "@/lib/autorizacion-transporte";
 import { Calculator, Calendar, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
@@ -3325,8 +3326,11 @@ export default function ReservasPage() {
   const proximos7d    = resumen ? resumen.prox7d : reservas.filter(r => r.fecha_servicio && r.fecha_servicio >= hoy && r.fecha_servicio <= en7d && r.estado !== "cancelada" && r.estado !== "finalizada").length;
 
   const filtradas = useMemo(() => {
+    // Permisiva: sin importar mayúsculas, tildes, signos ni el orden de las palabras
+    // (lib/busqueda-texto.ts). Se normaliza la consulta una sola vez, no por fila.
+    const terminos = terminosBusqueda(busqueda);
     const base = reservas.filter(r => {
-      const q     = busqueda.toLowerCase();
+      const cli    = clientes.find(c => c.id === r.cliente_id);
       const numCot = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || String(r.cotizacion_id).padStart(5, "0")) : "";
       // El CÓDIGO va primero y es el que faltaba: la columna ID muestra "OS-2026-006532"
       // y el operador nombra los servicios así, pero la búsqueda solo miraba `r.id`
@@ -3334,17 +3338,19 @@ export default function ReservasPage() {
       // acabas de leer en pantalla no devolvía nada. Igual con `ruta_nombre`: el
       // recuadro dice "cliente, ruta o ID" y la ruta que se pinta es esa, no
       // origen/destino.
-      const txt = (
+      // El cliente se busca por sus DOS nombres (empresa y contacto): la columna
+      // enseña uno, pero quien busca puede recordar el otro.
+      const txt =
         (r.codigo || "") + " " + r.id + " " + numCot + " " + nombreCliente(r.cliente_id) + " " +
-        (r.ruta_nombre || "") + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")
-      ).toLowerCase();
+        (cli?.empresa || "") + " " + (cli?.nombre || "") + " " +
+        (r.ruta_nombre || "") + " " + ((r as any).origen || "") + " " + ((r as any).destino || "");
       const passServicio    = filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r));
       const passSentido     = filtroSentido === "todos" || sentidoServicio(r) === filtroSentido;
       const passOrigen      = filtroOrigen === "todos"
         || (filtroOrigen === "adicional" ? esAdicional(r) : !esAdicional(r));
       const passEtiqueta    = !filtroEtiqueta || claveFiltroEtiqueta(r) === filtroEtiqueta;
       const passPorAsignar  = !filtroPorAsignar || (r.estado === "pendiente" && !r.vehiculo_id && !r.empresa_tercerizada_id);
-      return txt.includes(q) &&
+      return coincideBusqueda(txt, terminos) &&
         passOrigen &&
         (filtroEstado === "todos" || r.estado === filtroEstado) &&
         (filtroTipo === "todos" || r.tipo === filtroTipo) &&
@@ -6203,6 +6209,20 @@ export default function ReservasPage() {
                 <tr><td colSpan={12} className="p-10 text-center text-gray-400">
                   <p className="text-3xl mb-2">🎫</p>
                   <p className="font-medium">No hay reservas</p>
+                  {/* La lista solo trae una ventana de fechas: una búsqueda sin resultados
+                      ahí NO significa que el cliente no tenga servicios. Se dice y se
+                      ofrece la salida, en vez de dejar que se lea como "no existe". */}
+                  {busqueda.trim() && !verTodo && (
+                    <div className="mt-3 text-[13px] text-gray-500">
+                      <p>La búsqueda solo mira los servicios cargados en la ventana de fechas actual.</p>
+                      <button
+                        className="mt-2 px-3 py-1.5 rounded-lg border border-amber-400 bg-amber-50 text-amber-800 font-medium hover:bg-amber-100"
+                        onClick={() => setVerTodo(true)}
+                      >
+                        🕘 Buscar «{busqueda.trim()}» en todo el historial
+                      </button>
+                    </div>
+                  )}
                 </td></tr>
               ) : filtradas.slice(0, limiteVista).map((r, idx) => {
                 const estCfg    = ESTADO_CFG[r.estado] || ESTADO_CFG.pendiente;
