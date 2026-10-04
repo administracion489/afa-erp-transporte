@@ -15,6 +15,7 @@
 //
 // Requiere haber corrido supabase/liquidaciones-v2.sql.
 // ──────────────────────────────────────────────────────────────────────────────
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
@@ -255,6 +256,7 @@ export default function LiquidacionesPage() {
    * distintas y un mismo número significaría otra empresa.
    */
   const [filtroContraparte, setFiltroContraparte] = useState("");
+  const [busquedaDoc, setBusquedaDoc] = useState("");
   /**
    * Los DOS filtros finos. A diferencia del de contraparte, estos cortan DENTRO del
    * grupo, así que no solo cambian lo que se ve: cambian lo que se va a emitir. Ver
@@ -741,12 +743,29 @@ export default function LiquidacionesPage() {
     !!filtroContraparte && !cargando && !opcionesContraparte.some((o) => o.clave === filtroContraparte);
 
   /** Los documentos emitidos, pasados por el mismo filtro. */
-  const liquidacionesVisibles = useMemo(
-    () => (filtroContraparte
+  const liquidacionesVisibles = useMemo(() => {
+    const porContraparte = filtroContraparte
       ? liquidaciones.filter((l) => claveContraparte((lado === "cliente" ? l.cliente_id : l.empresa_tercerizada_id) ?? null) === filtroContraparte)
-      : liquidaciones),
-    [liquidaciones, filtroContraparte, lado]
-  );
+      : liquidaciones;
+    // Búsqueda permisiva (lib/busqueda-texto.ts): sin importar mayúsculas, tildes, signos
+    // ni el orden de las palabras. Solo MIRA la lista de documentos ya emitidos: no toca
+    // qué entra a un cierre.
+    const terminos = terminosBusqueda(busquedaDoc);
+    if (!terminos.length) return porContraparte;
+    return porContraparte.filter((l) => {
+      const cli = clientes[l.cliente_id];
+      const ter = terceros[l.empresa_tercerizada_id];
+      const sede = sedes.find((x) => x.id === l.cliente_sede_id);
+      const txt = [
+        l.codigo, l.id, l.periodo, l.estado, l.conformidad_estado,
+        lado === "cliente" ? cli?.empresa : ter?.razon_social,
+        lado === "cliente" ? cli?.nombre : null,
+        lado === "cliente" ? cli?.ruc : ter?.ruc,
+        sede?.nombre,
+      ].filter((v) => v != null && v !== "").join(" ");
+      return coincideBusqueda(txt, terminos);
+    });
+  }, [liquidaciones, filtroContraparte, lado, busquedaDoc, clientes, terceros, sedes]);
 
   /**
    * Las rutas del periodo con su capacidad contratada. Alimenta el modal de fichas y el
@@ -1977,9 +1996,21 @@ export default function LiquidacionesPage() {
       ) : (
         /* ── Documentos emitidos ─────────────────────────────────────────── */
         <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+          <div className="p-3 border-b">
+            <input value={busquedaDoc} onChange={(e) => setBusquedaDoc(e.target.value)}
+              placeholder={`🔍 Buscar por código, ${lado === "cliente" ? "cliente, sede" : "empresa"}, RUC, periodo o estado…`}
+              className="w-full px-3 py-2 rounded-xl border text-sm focus:outline-none" />
+          </div>
           {liquidacionesVisibles.length === 0 ? (
             <div className="p-10 text-center text-gray-400 text-sm">
-              {filtroContraparte && liquidaciones.length > 0 ? (
+              {busquedaDoc.trim() && liquidaciones.length > 0 ? (
+                <>
+                  Ningún documento coincide con «{busquedaDoc.trim()}».
+                  <button onClick={() => setBusquedaDoc("")} className="ml-2 underline font-semibold text-gray-500 hover:text-gray-700">
+                    Limpiar búsqueda
+                  </button>
+                </>
+              ) : filtroContraparte && liquidaciones.length > 0 ? (
                 <>
                   {lado === "cliente" ? "Ese cliente" : "Ese proveedor"} no tiene liquidaciones emitidas.
                   <button onClick={() => setFiltroContraparte("")} className="ml-2 underline font-semibold text-gray-500 hover:text-gray-700">

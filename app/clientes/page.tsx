@@ -1,5 +1,6 @@
 "use client";
 
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
@@ -703,14 +704,14 @@ export default function ClientesPage() {
   const activos    = clientes.filter(c => c.estado === "activo").length;
   const bloqueados = clientes.filter(c => c.estado === "bloqueado").length;
 
+  const terminosCli = terminosBusqueda(busqActiva);
   const filtrados = clientes
     .filter(c => {
-      const q = busqActiva.toLowerCase();
-      const hit = !q ||
-        c.nombre.toLowerCase().includes(q) ||
-        (c.empresa||"").toLowerCase().includes(q) ||
-        (c.ruc||"").includes(q) || (c.dni||"").includes(q) ||
-        (c.email||"").toLowerCase().includes(q) || (c.ciudad||"").toLowerCase().includes(q);
+      // Permisiva (lib/busqueda-texto.ts): sin importar mayúsculas, tildes, signos ni el
+      // orden de las palabras — «compania hard» encuentra «COMPAÑÍA HARD…».
+      const hit = coincideBusqueda(
+        [c.nombre, c.empresa, c.ruc, c.dni, c.email, c.ciudad].filter(Boolean).join(" "),
+        terminosCli);
       return hit &&
         (filtroEstado === "todos" || c.estado === filtroEstado) &&
         (filtroTipo   === "todos" || c.tipo   === filtroTipo) &&
