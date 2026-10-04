@@ -1,5 +1,6 @@
 "use client";
 
+import { juzgarKmConductor, coincideReescrito, type JuicioKmConductor } from "@/lib/odometro-confirmacion";
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, ajustesUbicacion, pedirAjustesUbicacion, esAppNativa, backgroundGpsActivo, backgroundGpsSinFixMs, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
 import { attachHidScanner } from "@/lib/hid-scanner";
@@ -35,7 +36,7 @@ type Conductor = {
 // `_flota` marca de qué tabla salió el vehículo. Es imprescindible: la lista mezcla flota
 // propia y tercerizada, y los ids se SOLAPAN entre `vehiculos` y `vehiculos_tercero` (el id 5
 // es CWQ400 en una y C8Z-955 en la otra), así que un id suelto es ambiguo.
-type Vehiculo  = { id: number; placa: string; categoria: string | null; marca?: string | null; _flota?: "propia" | "tercero" };
+type Vehiculo  = { id: number; placa: string; categoria: string | null; marca?: string | null; kilometraje_actual?: number | null; _flota?: "propia" | "tercero" };
 type Reserva   = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio?: string | null; vehiculo_id?: number | null; estado?: string | null; };
 type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; hora_llegada?: string | null; };
 type Pasajero  = { id: number; nombre: string; dni: string | null; empresa: string | null; qr_code: string | null; foto_url: string | null; };
@@ -923,6 +924,11 @@ export default function ConductorApp() {
   const [checkoutHecho,   setCheckoutHecho]   = useState(false);
   const [mostrarCheckout, setMostrarCheckout] = useState(false);
   const [kmFin,           setKmFin]           = useState("");
+  // Pantalla de confirmación del km ANTES de enviarlo (check-in y check-out). El único momento
+  // en que alguien tiene el tablero delante es éste: confirmarlo en la oficina días después,
+  // desde una foto borrosa, es adivinar. Ver lib/odometro-confirmacion.ts.
+  const [confirmKm, setConfirmKm] = useState<{ kind: "checkin" | "checkout"; km: number; previewUrl: string | null; juicio: JuicioKmConductor } | null>(null);
+  const [kmReescrito, setKmReescrito] = useState("");
   const [nivelComb,       setNivelComb]       = useState("");
   const [checkoutObs,     setCheckoutObs]     = useState("");
   const [checkoutSaving,  setCheckoutSaving]  = useState(false);
@@ -2500,7 +2506,14 @@ export default function ConductorApp() {
       // prellena: es preferible que el conductor lo escriba mirando el tablero a arrastrar una
       // lectura mala hasta la bandeja del operador.
       const dudoso = data ? data.auto_ok === false : false;
-      if (data && km && data.calidad_imagen !== "mala" && !dudoso) {
+      // Solo se pre-llena una lectura NÍTIDA. Con confianza media/baja la IA está adivinando
+      // alguna cifra, y un número pre-llenado se acepta sin mirar: es preferible el campo vacío
+      // y que el conductor lo escriba leyendo el tablero. (Las dos correcciones del ERP —dígito
+      // repetido y total/parcial— sí se pre-llenan: vienen con su aviso para cotejar.)
+      const nitida = data?.confianza === "alta" || data?.codigo_seleccion === "digito_repetido" || !!data?.corregido;
+      if (data && km && data.calidad_imagen !== "mala" && !dudoso && !nitida) {
+        alert(`La IA no ve claro el número${data.motivo ? ` (${data.motivo})` : ""}.\nEscribe el kilometraje mirando el tablero — la foto ya quedó registrada.`);
+      } else if (data && km && data.calidad_imagen !== "mala" && !dudoso) {
         setKm(String(km));
         setFoto((prev) => (prev ? { ...prev, kmOcr: km } : prev));
         if (data.codigo_seleccion === "digito_repetido") {
@@ -2508,8 +2521,6 @@ export default function ConductorApp() {
           alert(`La IA leyó ${Number(data.km_ia).toLocaleString("es-PE")} y le sobra un dígito repetido.\nPusimos ${km.toLocaleString("es-PE")} km.\n\nMira el tablero y confírmalo antes de continuar.`);
         } else if (data.corregido) {
           alert(`Km leído: ${km.toLocaleString("es-PE")}.\nOjo: la foto muestra dos contadores y se tomó el total (el otro número es el parcial). Verifícalo.`);
-        } else if (data.confianza !== "alta") {
-          alert(`Km leído: ${km.toLocaleString("es-PE")}${data.motivo ? ` (${data.motivo})` : ""}.\nRevísalo y corrige si hace falta.`);
         }
       } else if (dudoso) {
         // El conductor no necesita el detalle técnico, pero sí saber QUÉ mirar: "le sobra un
@@ -2584,7 +2595,15 @@ export default function ConductorApp() {
     );
   };
 
-  async function guardarChecklist() {
+  /** Abre la confirmación del km; devuelve true si hay que esperar la respuesta del conductor. */
+  function pedirConfirmacionKm(kind: "checkin" | "checkout", km: number, previewUrl: string | null, kmOcr: number | null): boolean {
+    const v = vehiculos.find(x => x.id === vehiculoId);
+    setKmReescrito("");
+    setConfirmKm({ kind, km, previewUrl, juicio: juzgarKmConductor({ km, kmVigente: v?.kilometraje_actual ?? null, kmOcr }) });
+    return true;
+  }
+
+  async function guardarChecklist(kmConfirmado = false) {
     if (!conductor) return;
     if (!vehiculoId) { alert("Selecciona el vehículo antes de iniciar el viaje"); return; }
     // Foto del tablero OBLIGATORIA (la obligatoriedad es haberla capturado — offline-safe; la subida
@@ -2594,6 +2613,7 @@ export default function ConductorApp() {
     if (checks.some(c => c.ok === null)) {
       alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems por completar`); return;
     }
+    if (!kmConfirmado && pedirConfirmacionKm("checkin", Number(kmInicio), fotoCheckin.previewUrl, fotoCheckin.kmOcr)) return;
     // `es_tercero` enruta el odómetro en el backend hacia vehiculos_tercero. Se deriva del
     // VEHÍCULO elegido, no de la tabla del conductor: un conductor tercerizado puede manejar
     // una unidad propia, y como los ids se solapan entre las dos tablas, equivocarse aquí
@@ -2648,7 +2668,7 @@ export default function ConductorApp() {
   }
 
   // ─── Check-out de jornada (km final + nivel de combustible + observaciones) ───
-  async function guardarCheckout() {
+  async function guardarCheckout(kmConfirmado = false) {
     if (!conductor) return;
     if (!vehiculoId) { alert("Selecciona el vehículo antes de cerrar la jornada"); return; }
     // Foto obligatoria CON salida de emergencia: si la unidad quedó en taller / el tablero no
@@ -2659,6 +2679,7 @@ export default function ConductorApp() {
     if (fotoCheckout && (!kmFin || Number(kmFin) <= 0)) {
       alert("Ingresa el kilometraje final (revisa el número que leyó la foto)"); return;
     }
+    if (fotoCheckout && !kmConfirmado && pedirConfirmacionKm("checkout", Number(kmFin), fotoCheckout.previewUrl, fotoCheckout.kmOcr)) return;
     // Misma regla que en el check-in: la flota la manda el vehículo elegido, no el conductor.
     const esTercero = (vehiculos.find(v => v.id === vehiculoId)?._flota ?? (conductor._tabla === "conductores_tercero" ? "tercero" : "propia")) === "tercero";
     const payload = { checkout: {
@@ -3968,7 +3989,7 @@ export default function ConductorApp() {
                         }} />
 
                       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                        <PrimaryBtn onClick={guardarCheckout} disabled={checkoutSaving}
+                        <PrimaryBtn onClick={() => guardarCheckout()} disabled={checkoutSaving}
                           icon={<IconCheck size={16} color="#fff" sw={2.5} />} size="lg">
                           {checkoutSaving ? "Guardando…" : "Cerrar jornada"}
                         </PrimaryBtn>
@@ -4526,7 +4547,7 @@ export default function ConductorApp() {
                 )}
 
                 <PrimaryBtn
-                  onClick={guardarChecklist}
+                  onClick={() => guardarChecklist()}
                   disabled={checkSaving}
                   icon={<IconCheck size={17} color="#fff" sw={2.5} />}
                   size="lg"
@@ -6614,6 +6635,63 @@ export default function ConductorApp() {
                   </div>
                 </>
               )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* CONFIRMAR KILOMETRAJE — grande, con la foto al lado del número. Si el número tiene una
+          forma imposible o se aleja de lo esperado, no basta un toque: hay que reescribirlo. */}
+      {confirmKm && (() => {
+        const revisar = confirmKm.juicio.nivel === "revisar";
+        const okReescrito = !revisar || coincideReescrito(confirmKm.km, kmReescrito);
+        const cerrar = () => setConfirmKm(null);
+        const confirmar = () => {
+          if (!okReescrito) return;
+          const kind = confirmKm.kind;
+          setConfirmKm(null);
+          if (kind === "checkin") guardarChecklist(true); else guardarCheckout(true);
+        };
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 150, background: "rgba(11,49,95,0.85)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+            <div style={{ background: "var(--c-surface)", borderRadius: 20, padding: 20, maxWidth: 420, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)", maxHeight: "92vh", overflowY: "auto" }}>
+              <h2 style={{ margin: "0 0 6px", fontSize: 19, fontWeight: 800, textAlign: "center" }}>
+                ¿Este es el kilometraje del tablero?
+              </h2>
+              {confirmKm.previewUrl && (
+                <img src={confirmKm.previewUrl} alt="tablero" style={{ width: "100%", maxHeight: 200, objectFit: "contain", borderRadius: 12, background: "#000", margin: "8px 0" }} />
+              )}
+              <p style={{ margin: "6px 0 2px", textAlign: "center", fontFamily: FONT_MONO, fontSize: 38, fontWeight: 900, letterSpacing: 1, color: revisar ? "var(--c-danger, #b91c1c)" : "var(--c-navy)" }}>
+                {Math.round(confirmKm.km).toLocaleString("es-PE")}
+              </p>
+              <p style={{ margin: "0 0 12px", textAlign: "center", fontSize: 12.5, color: "var(--c-mute)" }}>
+                km · {String(Math.round(confirmKm.km)).length} dígitos — compáralo cifra por cifra con el tablero
+              </p>
+              {revisar && (
+                <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+                  <p style={{ margin: "0 0 6px", fontSize: 13.5, fontWeight: 800, color: "#991b1b" }}>⚠️ Este número parece estar mal</p>
+                  {confirmKm.juicio.motivos.map((m, i) => (
+                    <p key={i} style={{ margin: "0 0 4px", fontSize: 12.5, lineHeight: 1.45, color: "#7f1d1d" }}>• {m}</p>
+                  ))}
+                  <p style={{ margin: "8px 0 6px", fontSize: 12.5, fontWeight: 700, color: "#7f1d1d" }}>
+                    Si de verdad es correcto, escríbelo otra vez mirando el tablero:
+                  </p>
+                  <input type="tel" inputMode="numeric" autoFocus value={kmReescrito} onChange={e => setKmReescrito(e.target.value)}
+                    placeholder="Vuelve a escribir el km"
+                    style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: "1.5px solid #fca5a5", fontFamily: FONT_MONO, fontSize: 18, fontWeight: 800, boxSizing: "border-box", outline: "none" }} />
+                  {kmReescrito.trim() && !okReescrito && (
+                    <p style={{ margin: "6px 0 0", fontSize: 12, color: "#b91c1c", fontWeight: 700 }}>No coincide con {Math.round(confirmKm.km).toLocaleString("es-PE")}. Si el correcto es otro, toca «Corregir».</p>
+                  )}
+                </div>
+              )}
+              <button onClick={confirmar} disabled={!okReescrito}
+                style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: "var(--c-success, #15803d)", color: "#fff", fontFamily: FONT_SANS, fontSize: 16, fontWeight: 800, cursor: okReescrito ? "pointer" : "default", opacity: okReescrito ? 1 : 0.4 }}>
+                ✓ Sí, es correcto
+              </button>
+              <button onClick={cerrar}
+                style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: "1.5px solid var(--c-line)", background: "var(--c-surface)", color: "var(--c-navy)", fontFamily: FONT_SANS, fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
+                ✎ No, corregir el número
+              </button>
             </div>
           </div>
         );
