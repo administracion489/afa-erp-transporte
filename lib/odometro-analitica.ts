@@ -83,6 +83,13 @@ export type DiaRecorrido = {
   reinicio: boolean;             // hubo un cambio de tablero ese día
   anomalias: Anomalia[];
   lecturas: LecturaSana[];       // lecturas saneadas de la jornada (para ver foto / corregir)
+  /**
+   * La lectura que CIERRA el salto imposible de la jornada (más km entre dos lecturas
+   * consecutivas que los que la unidad puede hacer en un día). Sin esto la fila decía
+   * "6,726 km · Revisar" y no señalaba cuál de las cinco lecturas era la mala: el operador
+   * tenía que adivinarla, y si su foto quedaba fuera de las miniaturas ni siquiera la veía.
+   */
+  sospechosaId: string | null;
 };
 
 export type TipoAnomalia =
@@ -168,6 +175,8 @@ export function claveVehiculo(l: { vehiculo_id: number | null; vehiculo_tercero_
  * vida útil real de un bus. Configurable por si algún día hay un caso extremo.
  */
 export const KM_TOPE_ABSOLUTO = 3_000_000;
+/** Tope km/día por defecto: el mismo 1500 de `evaluarLectura` y `config_mantenimiento.km_dia_max`. */
+export const KM_DIA_MAX_DEFECTO = 1500;
 
 /**
  * Sanea las lecturas de UN vehículo: ordena por fecha+hora y devuelve la
@@ -264,7 +273,7 @@ function ordenTemporal(a: LecturaCruda, b: LecturaCruda): number {
  * retrocesos internos residuales. NO decide "excesivo/bajo": eso depende del
  * histórico y se resuelve en `anotarAnomalias`.
  */
-export function recorridosDiarios(limpias: LecturaSana[]): DiaRecorrido[] {
+export function recorridosDiarios(limpias: LecturaSana[], kmDiaMax = KM_DIA_MAX_DEFECTO): DiaRecorrido[] {
   const porDia = new Map<string, LecturaSana[]>();
   for (const l of limpias) {
     (porDia.get(l.fecha) ?? porDia.set(l.fecha, []).get(l.fecha)!).push(l);
@@ -333,6 +342,30 @@ export function recorridosDiarios(limpias: LecturaSana[]): DiaRecorrido[] {
       }
     }
 
+    // Salto imposible DENTRO de la jornada. No depende del patrón histórico (que `anotarAnomalias`
+    // solo usa con muestra suficiente): más km entre dos lecturas del mismo día que el tope
+    // diario es físicamente imposible, así que una de las dos está mal leída. Se señala la que
+    // CIERRA el salto —la que lo introduce en la cadena— y el mensaje nombra las dos, porque
+    // el error también puede estar en la primera: decide quien mira las dos fotos.
+    let sospechosaId: string | null = null;
+    if (!hayReinicio) {
+      let peor = 0, iPeor = -1;
+      for (let i = 1; i < orden.length; i++) {
+        const salto = Number(orden[i].km) - Number(orden[i - 1].km);
+        if (salto > peor) { peor = salto; iPeor = i; }
+      }
+      if (iPeor > 0 && peor > kmDiaMax) {
+        const a = orden[iPeor - 1], b = orden[iPeor];
+        const h = (l: LecturaSana) => horaLima(l.capturado_en || l.created_at) ?? "—";
+        sospechosaId = b.id;
+        anomalias.push({
+          tipo: "excesivo",
+          severidad: "critico",
+          mensaje: `Salto imposible: de ${Number(a.km).toLocaleString("es-PE")} km (${h(a)}) a ${Number(b.km).toLocaleString("es-PE")} km (${h(b)}) = +${peor.toLocaleString("es-PE")} km, más que el máximo diario (${kmDiaMax.toLocaleString("es-PE")} km). Una de las dos lecturas está mal: revisa su foto y corrígela.`,
+        });
+      }
+    }
+
     // Hora: se prefiere el rol (check-in/check-out) para etiquetar; si no, la primera/última.
     const horaIni = checkin ?? primera;
     const horaFin = checkout ?? ultima;
@@ -359,6 +392,7 @@ export function recorridosDiarios(limpias: LecturaSana[]): DiaRecorrido[] {
       reinicio: hayReinicio,
       anomalias,
       lecturas: orden,
+      sospechosaId,
     });
   }
 
@@ -439,6 +473,9 @@ export function anotarAnomalias(dias: DiaRecorrido[], rango?: RangoEsperado): Di
   for (const d of dias) {
     if (d.pendiente || d.reinicio || d.recorrido == null) continue;
     const rec = d.recorrido;
+    // El salto imposible ya se anotó con la lectura que lo causa: repetirlo como "fuera del
+    // patrón" serían dos rojos para el mismo hecho, y el genérico no nombra a nadie.
+    if (d.sospechosaId) continue;
 
     if (rec > r.max && rec > r.media * 1.5) {
       d.anomalias.push({
@@ -634,10 +671,10 @@ export function indicadoresEconomicos(
  */
 export function analizarVehiculo(
   lecturas: LecturaCruda[],
-  opts: { kmTope?: number } = {}
+  opts: { kmTope?: number; kmDiaMax?: number } = {}
 ): { dias: DiaRecorrido[]; descartadas: Descartada[]; rango: RangoEsperado } {
   const { limpias, descartadas } = sanearLecturas(lecturas, opts);
-  const dias = recorridosDiarios(limpias);
+  const dias = recorridosDiarios(limpias, opts.kmDiaMax && opts.kmDiaMax > 0 ? opts.kmDiaMax : KM_DIA_MAX_DEFECTO);
   const rango = rangoEsperado(dias);
   anotarAnomalias(dias, rango);
   return { dias, descartadas, rango };

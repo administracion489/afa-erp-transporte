@@ -292,9 +292,9 @@ export default function OdometroTab() {
       const arr = porVeh.get(k); if (arr) arr.push(l); else porVeh.set(k, [l]);
     }
     const res = new Map<string, ReturnType<typeof analizarVehiculo>>();
-    for (const [k, ls] of porVeh) res.set(k, analizarVehiculo(ls));
+    for (const [k, ls] of porVeh) res.set(k, analizarVehiculo(ls, { kmDiaMax }));
     return res;
-  }, [lecturas]);
+  }, [lecturas, kmDiaMax]);
 
   // Jornadas (recorrido diario) filtradas.
   const jornadas = useMemo(() => {
@@ -867,23 +867,47 @@ export default function OdometroTab() {
                         </td>
                         <td className="p-3 text-xs text-gray-500">{j.nLecturas}</td>
                         <td className="p-3">
-                          <div className="flex gap-1">
-                            {j.lecturas.filter(l => l.foto_url).slice(0, 4).map(l => (
-                              <button key={l.id} type="button" title={`${fmtNum(Number(l.km))} km · ver / corregir`}
-                                onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${j.placa} · ${fmtNum(Number(l.km))} km · ${fmtFecha(j.fecha)} ${horaLectura(l).txt}`, lectura: l as unknown as Lectura })}
-                                className={`block rounded-md overflow-hidden border hover:ring-2 hover:ring-[#0b315f]/40 ${l.esReinicio ? "border-blue-300" : "border-gray-200"}`}>
-                                <ImgPrivada src={l.foto_url!} alt="Tablero" className="w-10 h-8 object-cover" />
-                              </button>
-                            ))}
-                            {j.lecturas.every(l => !l.foto_url) && <span className="text-[11px] text-gray-300">—</span>}
+                          {/* TODAS las lecturas, no las 4 primeras: el corte dejaba fuera justo la
+                              última, que en una jornada con salto es la que suele estar mal. La que
+                              causa el salto imposible va con borde rojo, y una lectura SIN foto
+                              también sale (se puede corregir igual) en vez de desaparecer. */}
+                          <div className="flex gap-1 flex-wrap max-w-[260px]">
+                            {j.lecturas.map(l => {
+                              const mala = l.id === j.sospechosaId;
+                              const titulo = `${j.placa} · ${fmtNum(Number(l.km))} km · ${fmtFecha(j.fecha)} ${horaLectura(l as unknown as Lectura).txt}`;
+                              const borde = mala ? "border-red-500 ring-2 ring-red-400" : l.esReinicio ? "border-blue-300" : "border-gray-200";
+                              return l.foto_url ? (
+                                <button key={l.id} type="button" title={`${fmtNum(Number(l.km))} km · ${mala ? "PROBABLE ERROR · " : ""}ver / corregir`}
+                                  onClick={() => setFotoZoom({ url: l.foto_url!, titulo, lectura: l as unknown as Lectura })}
+                                  className={`block rounded-md overflow-hidden border hover:ring-2 hover:ring-[#0b315f]/40 ${borde}`}>
+                                  <ImgPrivada src={l.foto_url!} alt="Tablero" className="w-10 h-8 object-cover" />
+                                </button>
+                              ) : (
+                                <button key={l.id} type="button"
+                                  title={`${fmtNum(Number(l.km))} km · sin foto (${FUENTE_LABEL[l.fuente] || l.fuente}) · corregir`}
+                                  onClick={() => setAnular(l as unknown as Lectura)}
+                                  className={`w-10 h-8 rounded-md border text-[9px] leading-tight text-gray-500 bg-gray-50 hover:bg-gray-100 ${borde}`}>
+                                  sin<br />foto
+                                </button>
+                              );
+                            })}
                           </div>
                         </td>
                         <td className="p-3">
                           {sev ? (
-                            <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg" style={{ background: sev === "critico" ? "#fee2e2" : "#fef9c3", color: sev === "critico" ? "#991b1b" : "#854d0e" }}
-                              title={j.anomalias.map(a => a.mensaje).join(" · ")}>
-                              {sev === "critico" ? "❌ Revisar" : "⚠ Atención"}
-                            </span>
+                            <>
+                              <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg" style={{ background: sev === "critico" ? "#fee2e2" : "#fef9c3", color: sev === "critico" ? "#991b1b" : "#854d0e" }}
+                                title={j.anomalias.map(a => a.mensaje).join(" · ")}>
+                                {sev === "critico" ? "❌ Revisar" : "⚠ Atención"}
+                              </span>
+                              {/* El motivo del salto se LEE, no se esconde en un tooltip: nombra
+                                  las dos lecturas y cuál está marcada en rojo en la columna Foto. */}
+                              {j.sospechosaId && (
+                                <p className="mt-1 text-[10px] text-red-700 max-w-[220px] leading-snug">
+                                  {j.anomalias.find(a => a.tipo === "excesivo" && a.severidad === "critico")?.mensaje}
+                                </p>
+                              )}
+                            </>
                           ) : j.pendiente ? (
                             <span className="text-[11px] text-amber-600">⏳</span>
                           ) : (
