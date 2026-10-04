@@ -509,7 +509,7 @@ function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
   const guias = (ctx.guiasOdometro ?? []).filter((g) => g.placa?.trim() && (g.guia?.trim() || g.digitos));
   if (!guias.length) return null;
   return (
-    `Cómo se lee el odómetro de cada unidad (cada vehículo es distinto; usa la línea que corresponda a la placa que identifiques en la imagen o el texto). Si la placa que identificas NO aparece en esta lista, IGNORA todas estas líneas: son de otras unidades y describen tableros distintos.\n` +
+    `Cómo se lee el odómetro de cada unidad (cada vehículo es distinto; usa la línea que corresponda a la placa que identifiques en la imagen o el texto). Esta lista NO sirve para identificar la unidad: un tablero no muestra la placa, y varias unidades tienen el mismo modelo de tablero. Si la placa no está escrita en el mensaje ni visible en la foto, deja "placa" en null — NUNCA la elijas de esta lista por el parecido del tablero. Si la placa que identificas NO aparece en esta lista, IGNORA todas estas líneas: son de otras unidades y describen tableros distintos.\n` +
     `CUENTA LAS CIFRAS del kilometraje antes de responder: si te salen más dígitos de los que dice la línea de esa placa, te sobra un dígito y lo estás leyendo mal — vuelve a mirar la foto cifra por cifra. Un dígito de más es el error más frecuente en esta flota.\n` +
     guias
       .map((g) => {
