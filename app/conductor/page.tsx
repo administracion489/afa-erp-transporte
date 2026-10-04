@@ -1,6 +1,6 @@
 "use client";
 
-import { juzgarKmConductor, coincideReescrito, type JuicioKmConductor } from "@/lib/odometro-confirmacion";
+import { juzgarKmConductor, coincideReescrito, consejoFoto, type JuicioKmConductor, type ConsejoFoto } from "@/lib/odometro-confirmacion";
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, ajustesUbicacion, pedirAjustesUbicacion, esAppNativa, backgroundGpsActivo, backgroundGpsSinFixMs, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
 import { attachHidScanner } from "@/lib/hid-scanner";
@@ -929,6 +929,8 @@ export default function ConductorApp() {
   // desde una foto borrosa, es adivinar. Ver lib/odometro-confirmacion.ts.
   const [confirmKm, setConfirmKm] = useState<{ kind: "checkin" | "checkout"; km: number; previewUrl: string | null; juicio: JuicioKmConductor } | null>(null);
   const [kmReescrito, setKmReescrito] = useState("");
+  // Consejo de foto: SOLO cuando la IA dice que esta foto no se ve clara (ver consejoFoto).
+  const [consejoUI, setConsejoUI] = useState<{ kind: "checkin" | "checkout"; consejo: ConsejoFoto } | null>(null);
   const [nivelComb,       setNivelComb]       = useState("");
   const [checkoutObs,     setCheckoutObs]     = useState("");
   const [checkoutSaving,  setCheckoutSaving]  = useState(false);
@@ -2468,6 +2470,16 @@ export default function ConductorApp() {
   // (la obligatoriedad se cumple con esto, offline-safe: no depende de red) → OCR best-effort con tope
   // de 8s que PRELLENA el km (siempre editable). Si el OCR falla/tarda/foto mala: la foto igual queda,
   // el km se escribe a mano. Guarda km_ocr (lo que leyó la IA) para cruzarlo luego con lo tecleado.
+  /** Registra una foto que salió mal y dice si ya van 2+ en los últimos 7 días (en este celular). */
+  function fotoMalaRepetida(): boolean {
+    try {
+      const ahora = Date.now(), semana = 7 * 86400_000;
+      const prev = (JSON.parse(localStorage.getItem("afa_fotos_odo_malas") || "[]") as number[]).filter(t => ahora - t < semana);
+      localStorage.setItem("afa_fotos_odo_malas", JSON.stringify([...prev, ahora].slice(-20)));
+      return prev.length >= 2;
+    } catch { return false; }
+  }
+
   async function capturarFoto(file: File | undefined, kind: "checkin" | "checkout") {
     if (!file) return;
     const setFoto = kind === "checkin" ? setFotoCheckin : setFotoCheckout;
@@ -2511,8 +2523,13 @@ export default function ConductorApp() {
       // y que el conductor lo escriba leyendo el tablero. (Las dos correcciones del ERP —dígito
       // repetido y total/parcial— sí se pre-llenan: vienen con su aviso para cotejar.)
       const nitida = data?.confianza === "alta" || data?.codigo_seleccion === "digito_repetido" || !!data?.corregido;
-      if (data && km && data.calidad_imagen !== "mala" && !dudoso && !nitida) {
-        alert(`La IA no ve claro el número${data.motivo ? ` (${data.motivo})` : ""}.\nEscribe el kilometraje mirando el tablero — la foto ya quedó registrada.`);
+      const consejo = data ? consejoFoto({ calidad: data.calidad_imagen, confianza: nitida ? "alta" : data.confianza, motivo: data.motivo }) : null;
+      if (consejo) {
+        // En vez de un alert que se cierra sin leer: qué falló en ESTA foto y cómo arreglarlo,
+        // con el botón para tomar otra al alcance. Con fallos repetidos, la lista completa.
+        setConsejoUI({ kind, consejo: fotoMalaRepetida()
+          ? consejoFoto({ calidad: data.calidad_imagen, confianza: data.confianza, motivo: data.motivo, repetido: true })!
+          : consejo });
       } else if (data && km && data.calidad_imagen !== "mala" && !dudoso) {
         setKm(String(km));
         setFoto((prev) => (prev ? { ...prev, kmOcr: km } : prev));
@@ -2557,7 +2574,7 @@ export default function ConductorApp() {
           }}>
             <span style={{ fontSize: 26 }}>📷</span>
             {ocrLeyendo ? "Procesando la foto…" : "Toma la foto del tablero"}
-            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--c-mute)" }}>Obligatorio para continuar</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--c-mute)" }}>Obligatorio · de frente, solo el número ODO, sin reflejo</span>
             <input type="file" accept="image/*" capture="environment" hidden disabled={ocrLeyendo}
               onChange={(e) => { capturarFoto(e.target.files?.[0], kind); e.currentTarget.value = ""; }} />
           </label>
@@ -2596,11 +2613,24 @@ export default function ConductorApp() {
   };
 
   /** Abre la confirmación del km; devuelve true si hay que esperar la respuesta del conductor. */
-  function pedirConfirmacionKm(kind: "checkin" | "checkout", km: number, previewUrl: string | null, kmOcr: number | null): boolean {
+  function pedirConfirmacionKm(kind: "checkin" | "checkout", km: number, previewUrl: string | null, kmOcr: number | null, extra: string[] = []): boolean {
     const v = vehiculos.find(x => x.id === vehiculoId);
     setKmReescrito("");
-    setConfirmKm({ kind, km, previewUrl, juicio: juzgarKmConductor({ km, kmVigente: v?.kilometraje_actual ?? null, kmOcr }) });
+    const j = juzgarKmConductor({ km, kmVigente: v?.kilometraje_actual ?? null, kmOcr });
+    const motivos = [...j.motivos, ...extra];
+    setConfirmKm({ kind, km, previewUrl, juicio: { nivel: motivos.length ? "revisar" : "ok", motivos } });
     return true;
+  }
+
+  /** Odómetro del día contra el GPS de los servicios (best-effort, 6 s): un motivo más si no cuadra. */
+  async function motivoGpsCheckout(km: number, esTercero: boolean): Promise<string[]> {
+    try {
+      const r: any = await Promise.race([
+        condApi("cotejar_km_gps", { vehiculo_id: vehiculoId, es_tercero: esTercero, fecha: getFechaLocal(), km_fin: km }),
+        new Promise((res) => setTimeout(() => res(null), 6000)),
+      ]);
+      return r && (r.codigo === "odometro_corto" || r.codigo === "odometro_largo") && r.detalle ? [String(r.detalle)] : [];
+    } catch { return []; }
   }
 
   async function guardarChecklist(kmConfirmado = false) {
@@ -2679,8 +2709,15 @@ export default function ConductorApp() {
     if (fotoCheckout && (!kmFin || Number(kmFin) <= 0)) {
       alert("Ingresa el kilometraje final (revisa el número que leyó la foto)"); return;
     }
-    if (fotoCheckout && !kmConfirmado && pedirConfirmacionKm("checkout", Number(kmFin), fotoCheckout.previewUrl, fotoCheckout.kmOcr)) return;
     // Misma regla que en el check-in: la flota la manda el vehículo elegido, no el conductor.
+    const esTerceroVeh = (vehiculos.find(v => v.id === vehiculoId)?._flota ?? (conductor._tabla === "conductores_tercero" ? "tercero" : "propia")) === "tercero";
+    if (fotoCheckout && !kmConfirmado) {
+      setCheckoutSaving(true);
+      const extra = await motivoGpsCheckout(Number(kmFin), esTerceroVeh);
+      setCheckoutSaving(false);
+      pedirConfirmacionKm("checkout", Number(kmFin), fotoCheckout.previewUrl, fotoCheckout.kmOcr, extra);
+      return;
+    }
     const esTercero = (vehiculos.find(v => v.id === vehiculoId)?._flota ?? (conductor._tabla === "conductores_tercero" ? "tercero" : "propia")) === "tercero";
     const payload = { checkout: {
       conductor_id: conductor.id,
@@ -6639,6 +6676,27 @@ export default function ConductorApp() {
           </div>
         );
       })()}
+
+      {/* CONSEJO DE FOTO — solo cuando la IA no vio claro ESTA foto. */}
+      {consejoUI && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 150, background: "rgba(11,49,95,0.8)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div style={{ background: "var(--c-surface)", borderRadius: 20, padding: 20, maxWidth: 420, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
+            <h2 style={{ margin: "0 0 10px", fontSize: 18, fontWeight: 800, textAlign: "center" }}>📷 {consejoUI.consejo.titulo}</h2>
+            {consejoUI.consejo.consejos.map((c, i) => (
+              <p key={i} style={{ margin: "0 0 8px", fontSize: 14, lineHeight: 1.45, color: "var(--c-ink)" }}>• {c}</p>
+            ))}
+            <label style={{ display: "block", width: "100%", marginTop: 8, padding: "15px 0", borderRadius: 14, background: "var(--c-navy)", color: "#fff", fontFamily: FONT_SANS, fontSize: 16, fontWeight: 800, textAlign: "center", cursor: "pointer", boxSizing: "border-box" }}>
+              📷 Tomar otra foto
+              <input type="file" accept="image/*" capture="environment" hidden
+                onChange={(e) => { const k = consejoUI.kind; setConsejoUI(null); capturarFoto(e.target.files?.[0], k); e.currentTarget.value = ""; }} />
+            </label>
+            <button onClick={() => setConsejoUI(null)}
+              style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: "1.5px solid var(--c-line)", background: "var(--c-surface)", color: "var(--c-navy)", fontFamily: FONT_SANS, fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
+              Escribir el km a mano
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* CONFIRMAR KILOMETRAJE — grande, con la foto al lado del número. Si el número tiene una
           forma imposible o se aleja de lo esperado, no basta un toque: hay que reescribirlo. */}

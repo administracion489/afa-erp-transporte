@@ -13,6 +13,7 @@ import AnaliticaVehiculo, { type VehiculoAnalitica } from "./_AnaliticaVehiculo"
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
+import { rankingConductores, type FilaRanking } from "@/lib/odometro-confirmacion";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -241,7 +242,40 @@ export default function OdometroTab() {
   const [leyendo, setLeyendo]     = useState(false);
   const [guardando, setGuardando] = useState(false);
 
+  // Ranking por conductor: cuántas de sus lecturas (check-in/check-out de la app) tuvo que
+  // corregir la oficina. Consulta APARTE y best-effort: `idem_key` es de una migración accesoria,
+  // y que falte no puede dejar a esta pantalla sin lecturas.
+  const [ranking, setRanking] = useState<(FilaRanking & { nombre: string })[] | null>(null);
+  const cargarRanking = async () => {
+    try {
+      const desde = sumarDias(hoy, -60);
+      const lect = await paginarFilas(() =>
+        supabase.from("lecturas_odometro").select("id,idem_key,estado")
+          .gte("fecha", desde).like("idem_key", "check%").order("id", { ascending: true })
+      );
+      const ids = (lect || []).map((l: any) => l.id);
+      const corr: any[] = [];
+      for (let i = 0; i < ids.length; i += 200) {
+        const { data } = await supabase.from("odometro_correcciones").select("lectura_id,motivo_tipo").in("lectura_id", ids.slice(i, i + 200));
+        corr.push(...(data || []));
+      }
+      const filas = rankingConductores(lect as any[], corr);
+      const cids = [...new Set(filas.map(f => f.conductorId))];
+      const [cp, ct] = await Promise.all([
+        supabase.from("conductores").select("id,nombre").in("id", cids),
+        supabase.from("conductores_tercero").select("id,nombre").in("id", cids),
+      ]);
+      const np = new Map<number, string>((cp.data || []).map((c: any) => [Number(c.id), String(c.nombre)]));
+      const nt = new Map<number, string>((ct.data || []).map((c: any) => [Number(c.id), String(c.nombre)]));
+      // La clave guarda el id del conductor pero no su tabla (los ids se solapan entre las dos):
+      // se usa la flota del VEHÍCULO como pista, que es lo más común (tercero maneja tercero).
+      setRanking(filas.map(f => ({ ...f, nombre:
+        (f.flotaVehiculo === "tercero" ? nt.get(f.conductorId) ?? np.get(f.conductorId) : np.get(f.conductorId) ?? nt.get(f.conductorId)) ?? `Conductor #${f.conductorId}` })));
+    } catch { setRanking([]); }
+  };
+
   const cargar = async () => {
+    cargarRanking();
     setLoading(true);
     const desdeVentana = sumarDias(hoy, -VENTANA_DIAS);
     const [vRes, tRes, cRes, lecAll, sospRes] = await Promise.all([
@@ -743,6 +777,44 @@ export default function OdometroTab() {
             </table>
           </div>
         </section>
+      )}
+
+      {/* CALIDAD DE LECTURAS POR CONDUCTOR — plegado: es para capacitar, no para el día a día. */}
+      {ranking && ranking.length > 0 && (
+        <details className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+          <summary className="px-5 py-3 cursor-pointer select-none text-sm font-bold text-gray-800">
+            👤 Calidad de lecturas por conductor <span className="font-normal text-gray-400">· últimos 60 días · app del conductor</span>
+            {ranking.filter(f => !f.poca && f.tasa > 0).length > 0 && (
+              <span className="ml-2 text-[11px] font-bold px-2 py-0.5 rounded-lg bg-amber-50 text-amber-700">
+                {ranking.filter(f => !f.poca && f.tasa > 0).length} con lecturas corregidas
+              </span>
+            )}
+          </summary>
+          <div className="px-5 pb-4">
+            <p className="text-xs text-gray-500 mb-2">
+              Lecturas de inicio y fin de jornada que la oficina tuvo que anular/corregir o que siguen por revisar.
+              No cuentan las anuladas por «duplicada» o «reinicio de tablero». Con menos de 4 lecturas el % no dice nada y van al final en gris.
+            </p>
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-xs text-gray-500 uppercase">
+                <th className="py-2">Conductor</th><th>Lecturas</th><th>Corregidas</th><th>Por revisar</th><th>% con error</th>
+              </tr></thead>
+              <tbody>
+                {ranking.slice(0, 25).map(f => (
+                  <tr key={f.conductorId} className={`border-t ${f.poca ? "text-gray-400" : ""}`}>
+                    <td className="py-2 text-xs font-bold">{f.nombre}</td>
+                    <td className="text-xs">{f.lecturas}</td>
+                    <td className="text-xs">{f.corregidas}</td>
+                    <td className="text-xs">{f.porRevisar}</td>
+                    <td className="text-xs font-bold" style={{ color: f.poca ? undefined : f.tasa >= 0.2 ? "#991b1b" : f.tasa > 0 ? "#b45309" : "#166534" }}>
+                      {Math.round(f.tasa * 100)} %
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
       )}
 
       {/* FILTROS */}
