@@ -20,6 +20,7 @@ import { exportarXlsx, type Columna } from "@/lib/finanzas/exportar";
 import { PERFILES_GASTOS_GENERALES } from "@/lib/importador/perfiles-finanzas";
 import ImportadorFinanzas from "@/app/_components/ImportadorFinanzas";
 import type { GastoGeneral } from "@/lib/finanzas/tipos";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 type ConfigChip = { label: string; bg: string; color: string };
 
@@ -274,17 +275,15 @@ export default function PlanillaTab() {
   const delMes = useMemo(() => filas.filter((g) => !mes || periodoDe(g) === mes), [filas, mes, periodoDe]);
 
   const filtradas = useMemo(() => {
-    const texto = q.trim().toLowerCase();
+    // Búsqueda permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden.
+    const terminos = terminosBusqueda(q);
     return delMes.filter((g) => {
       if (fCategoria && g.categoria !== fCategoria) return false;
       if (fAprobacion && g.estado_aprobacion !== fAprobacion) return false;
       if (fPago && g.estado_pago !== fPago) return false;
-      if (!texto) return true;
-      return (
-        g.beneficiario_nombre.toLowerCase().includes(texto) ||
-        g.concepto.toLowerCase().includes(texto) ||
-        (g.codigo ?? "").toLowerCase().includes(texto) ||
-        (g.documento_identidad ?? "").includes(texto)
+      return coincideBusqueda(
+        [g.beneficiario_nombre, g.concepto, g.codigo, g.documento_identidad].filter(Boolean).join(" "),
+        terminos
       );
     });
   }, [delMes, q, fCategoria, fAprobacion, fPago]);

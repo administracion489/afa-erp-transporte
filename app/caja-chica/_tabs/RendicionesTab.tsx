@@ -23,6 +23,7 @@ import ImportadorFinanzas from "@/app/_components/ImportadorFinanzas";
 import ModalEntrega from "../ModalEntrega";
 import ModalGasto from "../ModalGasto";
 import ModalRendicion from "../ModalRendicion";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 type Props = { onCambio: () => void };
 
@@ -140,16 +141,15 @@ export default function RendicionesTab({ onCambio }: Props) {
   }, [rendiciones]);
 
   const filtradas = useMemo(() => {
-    const texto = q.trim().toLowerCase();
+    // Búsqueda permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden.
+    const terminos = terminosBusqueda(q);
     return rendiciones.filter((r) => {
       if (estado && r.estado !== estado) return false;
       if (mes && (r.fecha_entrega ?? "").slice(0, 7) !== mes) return false;
       if (soloAtrasadas && !r.atrasada) return false;
-      if (!texto) return true;
-      return (
-        (r.responsable_nombre ?? "").toLowerCase().includes(texto) ||
-        (r.codigo ?? "").toLowerCase().includes(texto) ||
-        (r.fondo_nombre ?? "").toLowerCase().includes(texto)
+      return coincideBusqueda(
+        [r.responsable_nombre, r.codigo, r.fondo_nombre].filter(Boolean).join(" "),
+        terminos
       );
     });
   }, [rendiciones, q, estado, mes, soloAtrasadas]);

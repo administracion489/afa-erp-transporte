@@ -20,6 +20,7 @@ import { PERFILES_CXP } from "@/lib/importador/perfiles-finanzas";
 import ImportadorFinanzas from "@/app/_components/ImportadorFinanzas";
 import type { CuentaPorPagar } from "@/lib/finanzas/tipos";
 import ModalCxP from "../ModalCxP";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 type ConfigChip = { label: string; bg: string; color: string };
 
@@ -182,20 +183,18 @@ export default function CuentasPorPagarTab() {
   }, [filas]);
 
   const filtradas = useMemo(() => {
-    const texto = q.trim().toLowerCase();
+    // Búsqueda permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden.
+    const terminos = terminosBusqueda(q);
     return filas.filter((d) => {
       if (fEstadoPago && d.estado_pago !== fEstadoPago) return false;
       if (fAprobacion && d.estado_aprobacion !== fAprobacion) return false;
       if (fProveedor && d.proveedor_razon_social !== fProveedor) return false;
       if (desde && d.fecha_emision < desde) return false;
       if (hasta && d.fecha_emision > hasta) return false;
-      if (!texto) return true;
-      return (
-        (d.proveedor_razon_social ?? "").toLowerCase().includes(texto) ||
-        (d.proveedor_ruc ?? "").includes(texto) ||
-        (d.numero_factura ?? "").toLowerCase().includes(texto) ||
-        (d.vehiculo_placa ?? "").toLowerCase().includes(texto) ||
-        (d.codigo_servicio ?? "").toLowerCase().includes(texto)
+      return coincideBusqueda(
+        [d.proveedor_razon_social, d.proveedor_ruc, d.numero_factura, d.vehiculo_placa, d.codigo_servicio]
+          .filter(Boolean).join(" "),
+        terminos
       );
     });
   }, [filas, q, fEstadoPago, fAprobacion, fProveedor, desde, hasta]);
