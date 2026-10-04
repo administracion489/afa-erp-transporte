@@ -11,9 +11,9 @@
 // Lo usan app/mantenimiento/_tabs/OdometroTab.tsx (flota propia) y
 // app/tercerizadas/_components/OdometroTerceroModal.tsx (terceros).
 
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { anularLectura, MOTIVOS_ANULACION, type MotivoAnulacion } from "@/lib/odometro";
+import { anularLectura, reasignarLectura, MOTIVOS_ANULACION, type MotivoAnulacion, type Flota } from "@/lib/odometro";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 
 export type LecturaAnulable = {
@@ -33,6 +33,10 @@ export default function AnularLecturaOdometro({
   const [kmOk, setKmOk]       = useState("");
   const [confirmar, setConfirmar] = useState(false);   // 2º paso: confirmación explícita
   const [guardando, setGuardando] = useState(false);
+  // "Foto de otra unidad": la lectura está BIEN leída, solo se grabó en la unidad equivocada.
+  // Se ofrece pasarla a la correcta en vez de solo anularla (y perder el km y su foto).
+  const [unidades, setUnidades] = useState<{ id: number; placa: string; flota: Flota }[] | null>(null);
+  const [destinoTxt, setDestinoTxt] = useState("");
 
   // Carriles donde el número lo propuso una lectura automática. Debe coincidir con FUENTES_IA
   // de lib/odometro.ts (leccionesOdometro): es el mismo criterio que decide qué correcciones
@@ -47,6 +51,34 @@ export default function AnularLecturaOdometro({
   const pideKm = !!motivoCfg?.corrige;                 // este motivo corrige el número
   const kmObligatorio = pideKm && motivo !== "otro";   // en "otro" el km es opcional
   const esReinicio = motivo === "reinicio";            // no anula: re-ancla el vigente a este km
+  const esOtraUnidad = motivo === "otra_unidad";
+
+  useEffect(() => {
+    if (!esOtraUnidad || unidades) return;
+    (async () => {
+      const [p, t] = await Promise.all([
+        supabase.from("vehiculos").select("id,placa").order("placa"),
+        supabase.from("vehiculos_tercero").select("id,placa").order("placa"),
+      ]);
+      setUnidades([
+        ...((p.data || []) as any[]).map(v => ({ id: Number(v.id), placa: String(v.placa), flota: "propia" as Flota })),
+        ...((t.data || []) as any[]).map(v => ({ id: Number(v.id), placa: String(v.placa), flota: "tercero" as Flota })),
+      ].filter(u => u.placa));
+    })();
+  }, [esOtraUnidad, unidades]);
+
+  const normPlaca = (x: string) => x.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  // La placa se escribe o se elige de la lista; solo vale si coincide EXACTO con una unidad, y
+  // nunca con la misma en la que ya está la lectura.
+  const destino = useMemo(() => {
+    const q = normPlaca(destinoTxt);
+    if (!q || !unidades) return null;
+    const hits = unidades.filter(u => normPlaca(u.placa) === q);
+    return hits.length === 1 ? hits[0] : null;
+  }, [destinoTxt, unidades]);
+  const destinoEsLaMisma = !!destino && normPlaca(destino.placa) === normPlaca(placa);
+  const destinoInvalido = esOtraUnidad && !!destinoTxt.trim() && (!destino || destinoEsLaMisma);
+  const vaAReasignar = esOtraUnidad && !!destino && !destinoEsLaMisma;
 
   // Validación del km correcto ingresado.
   const kmNum = kmOk.trim() ? Number(kmOk) : null;
@@ -58,7 +90,7 @@ export default function AnularLecturaOdometro({
   //  - no correctivo → basta el motivo (el km escrito, si quedó de otro motivo, se ignora).
   //  - correctivo obligatorio → km válido y distinto al mal leído.
   //  - correctivo opcional ("otro") → km vacío, o válido y distinto.
-  const puedeSeguir = !!motivo && (
+  const puedeSeguir = !!motivo && !destinoInvalido && (
     !pideKm ? true
     : kmObligatorio ? (kmValido && !kmIgual)
     : (!kmOk.trim() || (kmValido && !kmIgual))
@@ -71,6 +103,22 @@ export default function AnularLecturaOdometro({
     setGuardando(true);
     try {
       const { data: sess } = await supabase.auth.getSession();
+      if (vaAReasignar) {
+        const rr = await reasignarLectura(supabase, {
+          lecturaId: lectura.id,
+          destino: { vehiculo_id: destino!.id, flota: destino!.flota, placa: destino!.placa },
+          placaOrigen: placa,
+          nota: nota.trim() || null,
+          usuario: sess?.session?.user?.email || null,
+        });
+        if (!rr.ok) throw new Error(rr.error || "No se pudo reasignar");
+        if (rr.estadoDestino && rr.estadoDestino !== "aceptada") {
+          alert(`Se pasó a ${destino!.placa}, pero allí quedó "${rr.estadoDestino}": ${rr.motivoDestino ?? "fuera de rango"}. Revísala en "Lecturas por revisar".`);
+        }
+        onAnulada(rr.kmVigenteOrigen ?? null);
+        onClose();
+        return;
+      }
       const r = await anularLectura(supabase, {
         lecturaId: lectura.id,
         motivo_tipo: motivo,
@@ -164,6 +212,29 @@ export default function AnularLecturaOdometro({
             </div>
           )}
 
+          {esOtraUnidad && (
+            <div className="rounded-xl border-2 border-[#0b315f]/15 bg-[#0b315f]/[0.03] p-4">
+              <label className="block text-xs font-bold text-[#0b315f] mb-1.5">
+                ¿De qué unidad es? <span className="text-gray-400 font-normal">(opcional — si no lo sabes, déjalo vacío y solo se anula)</span>
+              </label>
+              <input value={destinoTxt} onChange={e => setDestinoTxt(e.target.value)} list="placas-reasignar" autoFocus
+                placeholder={unidades ? "Escribe o elige la placa, ej. BUI-272" : "Cargando unidades…"}
+                className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-base font-mono uppercase focus:outline-none focus:ring-2 focus:ring-[#0b315f]/30 focus:border-[#0b315f]" />
+              <datalist id="placas-reasignar">
+                {(unidades || []).map(u => <option key={`${u.flota}:${u.id}`} value={u.placa}>{u.flota === "tercero" ? "Tercerizada" : "Flota propia"}</option>)}
+              </datalist>
+              {destinoTxt.trim() && unidades && !destino && <p className="text-[11px] text-red-600 mt-1.5">Esa placa no está registrada ni en la flota propia ni en la tercerizada.</p>}
+              {destinoEsLaMisma && <p className="text-[11px] text-red-600 mt-1.5">Es la misma unidad en la que ya está la lectura.</p>}
+              {vaAReasignar && (
+                <p className="text-[11px] text-green-700 mt-1.5">
+                  ✓ Se pasará <b className="font-mono">{kmFmt} km</b>{lectura.foto_url ? " con esta foto" : ""} a <b className="font-mono">{destino!.placa}</b>
+                  {destino!.flota === "tercero" ? " (tercerizada)" : ""} con su misma fecha y hora, y se anulará en <b className="font-mono">{placa}</b>.
+                  En {destino!.placa} se valida igual que cualquier lectura: si no cuadra, queda por revisar.
+                </p>
+              )}
+            </div>
+          )}
+
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Detalle (opcional)</label>
             <input value={nota} onChange={e => setNota(e.target.value)} placeholder="Ej: el odómetro está debajo del texto km, antes del ícono de combustible"
@@ -176,7 +247,7 @@ export default function AnularLecturaOdometro({
               <b className="font-mono"> {kmFmt} km</b> (no se pierde: queda como reinicio).
             </p>
           )}
-          {!pideKm && !esReinicio && lectura.estado === "aceptada" && (
+          {!pideKm && !esReinicio && !vaAReasignar && lectura.estado === "aceptada" && (
             <p className="text-[11px] text-gray-500 bg-gray-50 rounded-xl p-3">
               La lectura no se borra: queda como <b>anulada</b> con su foto. El km vigente se recalcula
               con las lecturas que quedan.
@@ -189,12 +260,12 @@ export default function AnularLecturaOdometro({
           {!confirmar ? (
             <button onClick={() => setConfirmar(true)} disabled={!puedeSeguir}
               className={`px-5 py-2 rounded-xl text-sm font-bold text-white disabled:opacity-40 hover:opacity-90 ${esReinicio ? "bg-blue-600" : "bg-red-600"}`}>
-              {esReinicio ? "Marcar reinicio" : vaACorregir ? "Corregir lectura" : "Anular lectura"}
+              {esReinicio ? "Marcar reinicio" : vaAReasignar ? `Pasar a ${destino!.placa}` : vaACorregir ? "Corregir lectura" : "Anular lectura"}
             </button>
           ) : (
             <button onClick={anular} disabled={guardando || !puedeSeguir}
               className={`px-5 py-2 rounded-xl text-sm font-bold text-white disabled:opacity-60 hover:opacity-90 ${esReinicio ? "bg-blue-600" : "bg-red-600"}`}>
-              {guardando ? "Guardando…" : esReinicio ? `Confirmar: reinicio a ${kmFmt} km` : vaACorregir ? `Confirmar: corregir a ${kmOkFmt} km` : `Confirmar: anular ${kmFmt} km`}
+              {guardando ? "Guardando…" : esReinicio ? `Confirmar: reinicio a ${kmFmt} km` : vaAReasignar ? `Confirmar: pasar ${kmFmt} km a ${destino!.placa}` : vaACorregir ? `Confirmar: corregir a ${kmOkFmt} km` : `Confirmar: anular ${kmFmt} km`}
             </button>
           )}
         </div>

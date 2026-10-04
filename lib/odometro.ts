@@ -1070,3 +1070,65 @@ export function kmPorDia(lecturas: { km: number; fecha: string }[]): number | nu
   if (dias <= 0 || dkm <= 0) return null;
   return dkm / dias;
 }
+
+/**
+ * La lectura es BUENA pero se grabó en la unidad equivocada ("Foto de otra unidad" con la
+ * unidad correcta identificada). Caso real: 12/09/2026, un tablero sin placa que el Radar
+ * cargó a la CWZ-371 y era de otra unidad. Antes el modal solo dejaba ANULARLA, así que el km
+ * se perdía y había que volver a teclearlo a mano en la otra ficha, sin su foto.
+ *
+ * Dos pasos, en este orden y los dos idempotentes:
+ *   1. se REGISTRA en la unidad correcta por `registrarLectura` — la misma puerta de siempre,
+ *      con su validación: si en la unidad destino el número tampoco cuadra, queda "sospechosa"
+ *      en vez de entrar a ciegas. Conserva foto, fuente, fecha y hora de captura. `idemKey`
+ *      `reasignada:<id>` hace que un reintento no la duplique.
+ *   2. se ANULA la original con motivo `otra_unidad` (no le enseña nada a la IA: el número
+ *      estaba bien leído) y se recalcula el vigente de la unidad de origen.
+ * Si el paso 1 falla no se anula nada: mejor la lectura en la unidad equivocada y visible que
+ * perdida en ninguna.
+ */
+export async function reasignarLectura(
+  client: any,
+  opts: {
+    lecturaId: string;
+    destino: { vehiculo_id: number; flota: Flota; placa: string };
+    placaOrigen?: string | null;
+    nota?: string | null;
+    usuario?: string | null;
+  }
+): Promise<{ ok: boolean; estadoDestino?: EstadoLectura; motivoDestino?: string | null; kmVigenteOrigen?: number | null; error?: string }> {
+  const { data: l } = await client.from("lecturas_odometro").select("*").eq("id", opts.lecturaId).single();
+  if (!l) return { ok: false, error: "Lectura no encontrada" };
+  const esTercero = l.vehiculo_tercero_id != null;
+  const vidOrigen = esTercero ? l.vehiculo_tercero_id : l.vehiculo_id;
+  if (opts.destino.flota === (esTercero ? "tercero" : "propia") && Number(opts.destino.vehiculo_id) === Number(vidOrigen)) {
+    return { ok: false, error: "La unidad elegida es la misma en la que ya está la lectura" };
+  }
+
+  const reg = await registrarLectura(client, {
+    vehiculo_id: opts.destino.vehiculo_id,
+    flota: opts.destino.flota,
+    km: Number(l.km),
+    fuente: l.fuente as FuenteLectura,
+    fecha: l.fecha,
+    foto_url: l.foto_url ?? null,
+    capturado_en: l.capturado_en ?? l.created_at ?? null,
+    momento: l.momento ?? null,
+    ref_origen: `reasignada:${l.id}`,
+    idemKey: `reasignada:${l.id}`,
+    motivo: `Reasignada desde ${opts.placaOrigen ?? "otra unidad"}`,
+  });
+  if (!reg.ok) return { ok: false, error: "No se pudo registrar en la unidad correcta: " + (reg.error ?? reg.motivo ?? "error") };
+
+  const an = await anularLectura(client, {
+    lecturaId: l.id,
+    motivo_tipo: "otra_unidad",
+    nota: [`Reasignada a ${opts.destino.placa}`, opts.nota?.trim() || null].filter(Boolean).join(" — "),
+    usuario: opts.usuario ?? null,
+    placa: opts.placaOrigen ?? null,
+  });
+  if (!an.ok) {
+    return { ok: false, estadoDestino: reg.estado, error: `Se registró en ${opts.destino.placa}, pero no se pudo anular la original: ${an.error}. Reintenta: no se duplicará.` };
+  }
+  return { ok: true, estadoDestino: reg.estado, motivoDestino: reg.motivo, kmVigenteOrigen: an.kmVigente ?? null };
+}
