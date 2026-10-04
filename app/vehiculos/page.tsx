@@ -7,6 +7,7 @@ import { FAMILIAS_TANQUE, parseCapacidadTanque as parseCapTanque, capacidadTanqu
 import AvisoFichaCombustible from "@/components/flota/AvisoFichaCombustible";
 import { NIVEL_CFG } from "@/lib/costos/nivel-servicio";
 import { EnlacePrivado } from "@/components/ArchivoPrivado";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -463,9 +464,12 @@ export default function VehiculosPage() {
   const docVenc   = documentos.filter(d => estadoDocumento(d) === "vencido").length;
   const docPorV   = documentos.filter(d => estadoDocumento(d) === "por_vencer").length;
 
+  // Búsqueda permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden.
+  const terminosVeh = terminosBusqueda(busqueda);
   const filtrados = vehiculos.filter(v => {
-    const q = busqueda.toLowerCase();
-    const ok = v.placa.toLowerCase().includes(q) || (v.marca || "").toLowerCase().includes(q) || (v.modelo || "").toLowerCase().includes(q);
+    const ok = coincideBusqueda(
+      [v.placa, v.marca, v.modelo].filter(Boolean).join(" "),
+      terminosVeh);
     return ok && (filtroCat === "todas" || v.categoria === filtroCat)
               && (filtroEst === "todos" || v.estado_operativo === filtroEst)
               && (filtroEquip === "todos" || (v.equipamiento || "full_equipo") === filtroEquip);

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -289,14 +290,14 @@ export default function ConductoresPage() {
   // ── Filtrado ──────────────────────────────────────────────────────────────
 
   const filtrados = useMemo(() => conductores.filter(c => {
-    const q = busqueda.toLowerCase();
-    const txt = `${c.nombre} ${c.dni || ""} ${c.licencia} ${c.categoria_licencia || ""}`.toLowerCase();
+    // Búsqueda permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden.
+    const txt = `${c.nombre} ${c.dni || ""} ${c.licencia || ""} ${c.categoria_licencia || ""}`;
     const { score, vencidos } = calcScore(c);
     const alertaMatch =
       filtroAlerta === "todos" ? true :
       filtroAlerta === "critico" ? vencidos.length > 0 :
       filtroAlerta === "ok" ? vencidos.length === 0 : true;
-    return txt.includes(q) &&
+    return coincideBusqueda(txt, terminosBusqueda(busqueda)) &&
       (filtroEst === "todos" || c.estado === filtroEst) && alertaMatch;
   }), [conductores, busqueda, filtroEst, filtroAlerta]);
 
