@@ -1,6 +1,7 @@
 "use client";
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import { supabase } from "@/lib/supabase";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
@@ -1562,7 +1563,11 @@ export default function CotizacionesPage(){
 
   const totC=cotizas.length;const pend=cotizas.filter(c=>c.estado==="pendiente").length;const env=cotizas.filter(c=>c.estado==="enviado").length;const apr=cotizas.filter(c=>c.estado==="aprobado").length;const tasa=totC>0?Math.round(apr/totC*100):0;const pendDesc=cotizas.filter(c=>c.descuento_solicitado&&!c.descuento_autorizado).length;
   const nomCl=(id:number|null)=>{const c=clientes.find(cl=>cl.id===id);if(!c)return "Sin cliente";return c.tipo==="b2b"?(c.empresa||c.nombre):c.nombre;};
-  const filtradas=cotizas.filter(c=>{const ncl=clientes.find(cl=>cl.id===c.cliente_id);const q=busqueda.toLowerCase();return((ncl?.nombre||"").toLowerCase().includes(q)||c.origen.toLowerCase().includes(q)||c.destino.toLowerCase().includes(q)||(c.numero_cotizacion||"").includes(q)||String(c.id).padStart(5,"0").includes(q))&&(filtroEst==="todos"||c.estado===filtroEst)&&(filtroModo==="todos"||c.modo_servicio===filtroModo||(filtroModo==="eventual"&&!c.modo_servicio));});
+  // Búsqueda permisiva (lib/busqueda-texto.ts): sin importar mayúsculas, tildes, signos
+  // ni el orden de las palabras. El cliente se busca por EMPRESA, nombre y RUC — antes solo
+  // por `nombre`, así que la razón social que se ve en la lista no se encontraba.
+  const terminosCot=terminosBusqueda(busqueda);
+  const filtradas=cotizas.filter(c=>{const ncl=clientes.find(cl=>cl.id===c.cliente_id);const txt=[ncl?.empresa,ncl?.nombre,ncl?.ruc,c.origen,c.destino,c.asunto,c.atencion,c.numero_cotizacion,String(c.id).padStart(5,"0")].filter(Boolean).join(" ");return coincideBusqueda(txt,terminosCot)&&(filtroEst==="todos"||c.estado===filtroEst)&&(filtroModo==="todos"||c.modo_servicio===filtroModo||(filtroModo==="eventual"&&!c.modo_servicio));});
   const kmNum=Number(form.km)||0;const vehFloraSel=flota.find(v=>v.id===Number(form.vehiculo_flota_id));const vehTerceroSel=flotaTercero.find(v=>v.id===Number(form.vehiculo_tercero_id));const servsList=form.modo_servicio==="eventual"?SERVS_EVENTUAL:SERVS_FIJO;const esFijoForm=form.modo_servicio==="fijo";
   const esSoloIda=["solo_ida","fijo_solo_ida"].includes(form.tipo_servicio);
   const requiereParadas=["ida_retorno_paradas","fijo_multiparada"].includes(form.tipo_servicio);

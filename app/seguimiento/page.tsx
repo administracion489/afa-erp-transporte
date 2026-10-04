@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import Link from "next/link";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 import ModalGps from "@/components/seguimiento/ModalGps";
 import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
 import DescargaMasivaModal from "@/components/seguimiento/DescargaMasivaModal";
@@ -924,6 +925,7 @@ export default function SeguimientoPage() {
     return [...m.entries()].filter(([k]) => k !== "sin").sort(([a],[b]) => a.localeCompare(b, "es", { numeric: true }));
   })();
 
+  const terminosSeg = terminosBusqueda(busqueda);
   const filtrados = servicios.filter(s=>{
     if (filtroEtq && claveEtq(s.reserva)!==filtroEtq) return false;
     if (filtroTipo==="fijo"&&s.es_eventual) return false;
@@ -931,10 +933,12 @@ export default function SeguimientoPage() {
     if (filtroEstado!=="todos"&&s.estado_visual!==filtroEstado) return false;
     if (filtroNivel!=="todos"&&s.puntualidad?.nivel!==filtroNivel) return false;
     if (busqueda) {
-      const q=busqueda.toLowerCase();
       // La ruta entra a la búsqueda desde que se puede ver y editar en la lista: lo normal es
       // querer repasar de una vez todos los servicios de "RUTA B", no ir fila por fila.
-      return s.vehiculo_placa.toLowerCase().includes(q)||s.conductor_nombre.toLowerCase().includes(q)||s.cliente_nombre.toLowerCase().includes(q)||(s.reserva.ruta_nombre||"").toLowerCase().includes(q);
+      // Permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden de palabras.
+      const cli=clientes.find(x=>x.id===s.reserva.cliente_id);
+      const txt=[s.vehiculo_placa,s.conductor_nombre,s.cliente_nombre,cli?.empresa,cli?.nombre,s.reserva.ruta_nombre,s.reserva.codigo,(s.reserva as any).origen,(s.reserva as any).destino,s.reserva.id].filter(v=>v!=null&&v!=="").join(" ");
+      return coincideBusqueda(txt,terminosSeg);
     }
     return true;
   });
