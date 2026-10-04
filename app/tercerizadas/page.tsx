@@ -14,6 +14,7 @@ import {
 } from "@/lib/autorizacion-transporte";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { EnlacePrivado } from "@/components/ArchivoPrivado";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -674,21 +675,22 @@ export default function EmpresasTercerizadasPage() {
   const resultados = useMemo(() => {
     const q = busqActiva.trim();
     if (q.length < 2) return { veh: [] as typeof indices.veh, emp: [] as typeof indices.emp, cond: [] as typeof indices.cond, total: 0 };
-    const qn = norm(q);
+    // Palabras en cualquier orden, sin tildes ni signos (lib/busqueda-texto.ts).
+    const terminos = terminosBusqueda(q);
     const qp = normPlaca(q);
 
     const veh = qp.length >= 2
       ? indices.veh.filter(x => x.placaN.includes(qp)).concat(
-          indices.veh.filter(x => !x.placaN.includes(qp) && x.blob.includes(qn)))
-      : indices.veh.filter(x => x.blob.includes(qn));
+          indices.veh.filter(x => !x.placaN.includes(qp) && coincideBusqueda(x.blob, terminos)))
+      : indices.veh.filter(x => coincideBusqueda(x.blob, terminos));
     // Coincidencia exacta primero, luego por prefijo, luego el resto.
     veh.sort((a, b) => {
       const pa = a.placaN === qp ? 0 : a.placaN.startsWith(qp) ? 1 : 2;
       const pb = b.placaN === qp ? 0 : b.placaN.startsWith(qp) ? 1 : 2;
       return pa - pb || a.placaN.localeCompare(b.placaN);
     });
-    const emp  = indices.emp.filter(x => x.blob.includes(qn));
-    const cond = indices.cond.filter(x => x.blob.includes(qn));
+    const emp  = indices.emp.filter(x => coincideBusqueda(x.blob, terminos));
+    const cond = indices.cond.filter(x => coincideBusqueda(x.blob, terminos));
     return { veh, emp, cond, total: veh.length + emp.length + cond.length };
   }, [busqActiva, indices]);
 
@@ -1015,23 +1017,23 @@ export default function EmpresasTercerizadasPage() {
   // ── Listas de las pestañas ────────────────────────────────────────────────
 
   const flotaFiltrada = useMemo(() => {
-    const q = norm(busqFlota), qp = normPlaca(busqFlota);
+    const terminos = terminosBusqueda(busqFlota), qp = normPlaca(busqFlota);
     return vehEmpresa.filter(v => {
       if (filtroEstVeh !== "todos" && v.estado !== filtroEstVeh) return false;
       if (!busqFlota.trim()) return true;
-      return normPlaca(v.placa).includes(qp) || norm(`${v.marca || ""} ${v.modelo || ""} ${v.categoria || ""}`).includes(q);
+      return normPlaca(v.placa).includes(qp) || coincideBusqueda(`${v.marca || ""} ${v.modelo || ""} ${v.categoria || ""}`, terminos);
     });
   }, [vehEmpresa, busqFlota, filtroEstVeh]);
 
   const condFiltrados = useMemo(() => {
-    const q = norm(busqCond);
+    const terminos = terminosBusqueda(busqCond);
     return condEmpresa.filter(c => {
       const d = diasPara(c.vencimiento_licencia);
       if (filtroLic === "vencida"    && !(d !== null && d < 0)) return false;
       if (filtroLic === "por_vencer" && !(d !== null && d >= 0 && d <= 30)) return false;
       if (filtroLic === "app"        && !c.activo_app) return false;
       if (!busqCond.trim()) return true;
-      return norm(`${c.nombre} ${c.dni || ""} ${c.licencia || ""}`).includes(q);
+      return coincideBusqueda(`${c.nombre} ${c.dni || ""} ${c.licencia || ""}`, terminos);
     }).sort((a, b) => {
       const da = diasPara(a.vencimiento_licencia), db = diasPara(b.vencimiento_licencia);
       if (da === null && db === null) return a.nombre.localeCompare(b.nombre);

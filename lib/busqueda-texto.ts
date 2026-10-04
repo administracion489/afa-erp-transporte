@@ -13,6 +13,8 @@
  *    «OS-2026-006532»).
  *  - Las palabras se buscan en CUALQUIER orden y cada una puede ser un trozo
  *    («hard comp» encuentra «Compañía Hard…»). Todas tienen que estar.
+ *  - Guiones y espacios dentro de un código no importan: «abc123» encuentra la placa
+ *    «ABC-123» y «q12345678» la licencia «Q-12345678».
  *  - Una búsqueda vacía deja pasar todo.
  */
 
@@ -20,7 +22,7 @@
 export function normalizarBusqueda(raw?: string | number | null): string {
   return String(raw ?? "")
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")  // tildes, diéresis y la virgulilla de la ñ
+    .replace(/[\u0300-\u036f]/g, "")  // tildes, diéresis y la virgulilla de la ñ
     .toLowerCase()
     .replace(/\./g, "")               // S.A.C. → sac
     .replace(/[^a-z0-9]+/g, " ")      // cualquier otro signo separa palabras
@@ -40,6 +42,9 @@ export function terminosBusqueda(q?: string | null): string[] {
  */
 export function coincideBusqueda(texto: string | null | undefined, terminos: string[]): boolean {
   if (!terminos.length) return true;
-  const hay = " " + normalizarBusqueda(texto) + " ";
-  return terminos.every(t => hay.includes(t));
+  const n = normalizarBusqueda(texto);
+  // También se compara contra el texto SIN espacios: una placa «ABC-123» queda como
+  // «abc 123», y quien teclea «abc123» (sin guion) tiene que encontrarla igual.
+  const junto = n.replace(/ /g, "");
+  return terminos.every(t => n.includes(t) || junto.includes(t));
 }

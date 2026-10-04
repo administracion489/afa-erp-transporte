@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -132,9 +133,9 @@ export default function ProveedoresPage() {
   // ── Filtrado ──────────────────────────────────────────────────────────────
 
   const filtrados = useMemo(() => proveedores.filter(p => {
-    const q   = busqueda.toLowerCase();
-    const txt = `${p.nombre} ${p.ruc || ""} ${p.email || ""} ${p.contacto_nombre || ""}`.toLowerCase();
-    return txt.includes(q) &&
+    // Búsqueda permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden.
+    const txt = `${p.nombre} ${p.ruc || ""} ${p.email || ""} ${p.contacto_nombre || ""}`;
+    return coincideBusqueda(txt, terminosBusqueda(busqueda)) &&
       (filtroTipo === "todos" || p.tipo   === filtroTipo) &&
       (filtroEst  === "todos" || p.estado === filtroEst);
   }), [proveedores, busqueda, filtroTipo, filtroEst]);
