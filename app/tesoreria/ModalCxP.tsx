@@ -17,6 +17,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { calcularDetraccion, desdeNeto, desdeTotal, fmtMoneda, redondear } from "@/lib/finanzas/dinero";
 import type { CuentaPorPagar } from "@/lib/finanzas/tipos";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 type Props = {
   abierto: boolean;
@@ -291,13 +292,11 @@ export default function ModalCxP({ abierto, onCerrar, onGuardado, documento, usu
   const aCancelar = redondear(desglose.total - adelantos - detraccionMonto);
 
   const proveedoresFiltrados = useMemo(() => {
-    const t = form.proveedor_texto.trim().toLowerCase();
-    if (!t) return proveedores.slice(0, 8);
+    // Búsqueda permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden.
+    const terminos = terminosBusqueda(form.proveedor_texto);
+    if (!terminos.length) return proveedores.slice(0, 8);
     return proveedores
-      .filter((p) => {
-        const nombre = `${p.razon_social ?? ""} ${p.nombre ?? ""}`.toLowerCase();
-        return nombre.includes(t) || String(p.ruc ?? "").includes(t);
-      })
+      .filter((p) => coincideBusqueda(`${p.razon_social ?? ""} ${p.nombre ?? ""} ${p.ruc ?? ""}`, terminos))
       .slice(0, 8);
   }, [proveedores, form.proveedor_texto]);
 

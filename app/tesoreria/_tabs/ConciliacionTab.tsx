@@ -31,6 +31,7 @@ import {
 import { PERFILES_EXTRACTO } from "@/lib/importador/perfiles-finanzas";
 import ImportadorFinanzas from "@/app/_components/ImportadorFinanzas";
 import type { CuentaTesoreria } from "@/lib/finanzas/tipos";
+import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 const CABECERAS = ["Fecha", "N° operación", "Descripción del banco", "Cargo", "Abono", "Saldo", "Estado", "Casa con", "Acciones"];
 
@@ -156,13 +157,14 @@ export default function ConciliacionTab() {
   );
 
   const filtrados = useMemo(() => {
-    const texto = q.trim().toLowerCase();
+    // Búsqueda permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden.
+    const terminos = terminosBusqueda(q);
+    const texto = q.trim();
     return movimientos.filter((m) => {
       if (fEstado && m.estado_conciliacion !== fEstado) return false;
       if (!texto) return true;
       return (
-        (m.descripcion_banco ?? "").toLowerCase().includes(texto) ||
-        (m.nro_operacion ?? "").toLowerCase().includes(texto) ||
+        coincideBusqueda(`${m.descripcion_banco ?? ""} ${m.nro_operacion ?? ""}`, terminos) ||
         String(m.monto_cargo ?? "").includes(texto) ||
         String(m.monto_abono ?? "").includes(texto)
       );
