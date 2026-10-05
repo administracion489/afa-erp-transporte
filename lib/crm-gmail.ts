@@ -4,6 +4,10 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
+import {
+  diasRecuperacion, marcadorVencido, remitenteDe, esRemitentePropio, esDeLaBandeja, explicarErrorGoogle,
+  MAX_MENSAJES_POR_LECTURA,
+} from "@/lib/crm-gmail-reglas";
 
 const supabaseAdmin = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -100,11 +104,19 @@ export async function canjearCode(code: string): Promise<{ refresh_token: string
   return { refresh_token: data.refresh_token, access_token: data.access_token };
 }
 
-export async function exchangeCode(code: string): Promise<void> {
+export async function exchangeCode(code: string, db: any = supabaseAdmin()): Promise<void> {
   const data = await canjearCode(code);
-  await supabaseAdmin()
-    .from("crm_config")
-    .upsert({ clave: "gmail_refresh_token", valor: data.refresh_token, updated_at: new Date().toISOString() });
+  const email = await perfilGmail(data.access_token).catch(() => null);
+  const ahora = new Date().toISOString();
+  await db.from("crm_config").upsert([
+    { clave: "gmail_refresh_token", valor: data.refresh_token, updated_at: ahora },
+    { clave: "gmail_email", valor: email ?? "", updated_at: ahora },
+    { clave: "gmail_ultimo_error", valor: "", updated_at: ahora },
+  ]);
+  // RECONECTAR EMPIEZA LIMPIO. El marcador viejo pertenece a la conexión anterior —quizá a otra
+  // cuenta, o vencido después de días caída— y conservarlo era justo lo que dejaba la lectura en
+  // 0 para siempre aunque se reconectara. Sin marcador, la próxima lectura trae la última semana.
+  await db.from("crm_config").delete().in("clave", ["gmail_history_id", "gmail_ultima_sync"]);
 }
 
 /** refresh_token → access_token de una hora. */
@@ -139,8 +151,7 @@ export async function crmGmailConectado(): Promise<boolean> {
   return !!data?.valor;
 }
 
-export async function getAccessToken(): Promise<string> {
-  const db = supabaseAdmin();
+export async function getAccessToken(db: any = supabaseAdmin()): Promise<string> {
   const { data } = await db.from("crm_config").select("valor").eq("clave", "gmail_refresh_token").maybeSingle();
   if (!data?.valor) throw new Error("Gmail no autorizado — conéctalo desde /crm (botón «Conectar Gmail»)");
   return refrescarToken(data.valor);
@@ -218,127 +229,273 @@ function headerVal(headers: any[], name: string): string {
   return headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
 
-export async function syncGmailInbox(db = supabaseAdmin()): Promise<number> {
-  const token = await getAccessToken();
+export type ResultadoSyncGmail = {
+  nuevos: number;
+  revisados: number;
+  email: string | null;
+  /** historial = solo lo nuevo desde el marcador · inicial = primera conexión ·
+   *  recuperacion = el marcador había vencido y se releyó el hueco por fecha. */
+  modo: "historial" | "inicial" | "recuperacion";
+  fallidos: number;
+  /** Correos que quedaron para la próxima lectura (más de los que caben en una). */
+  pendientes: number;
+  /** Otra lectura estaba en curso: esta no hizo nada (no es un error). */
+  ocupado?: boolean;
+};
 
-  // Obtener historyId guardado para sólo traer mensajes nuevos
-  const { data: hist } = await db.from("crm_config").select("valor").eq("clave", "gmail_history_id").maybeSingle();
-  const historyId = hist?.valor;
+async function gmailGet(token: string, ruta: string): Promise<{ ok: boolean; status: number; data: any }> {
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${ruta}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  return { ok: res.ok, status: res.status, data };
+}
 
-  let messageIds: string[] = [];
+async function leerConfigCrm(db: any, claves: string[]): Promise<Map<string, string>> {
+  const { data } = await db.from("crm_config").select("clave, valor").in("clave", claves);
+  return new Map(((data as any[]) ?? []).map((r) => [String(r.clave), String(r.valor ?? "")]));
+}
 
-  if (historyId) {
-    const hRes = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=${historyId}&historyTypes=messageAdded&labelId=INBOX`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const hData = await hRes.json();
-    for (const record of hData.history ?? []) {
-      for (const ma of record.messagesAdded ?? []) {
-        if (!messageIds.includes(ma.message.id)) messageIds.push(ma.message.id);
+async function escribirConfigCrm(db: any, filas: Record<string, string>): Promise<void> {
+  const ahora = new Date().toISOString();
+  await db.from("crm_config").upsert(Object.entries(filas).map(([clave, valor]) => ({ clave, valor, updated_at: ahora })));
+}
+
+/** Cuánto se tiene una lectura por «en curso» antes de darla por muerta. */
+const CANDADO_MS = 5 * 60_000;
+/** Cuántos ids se listan como máximo para buscar los que faltan (se procesan de a 100). */
+const LISTA_MAX = 500;
+const CANDADO_LIBRE = "1970-01-01T00:00:00.000Z";
+
+/**
+ * Lee el INBOX del Gmail del CRM y lo vuelca a conversaciones. Reglas en lib/crm-gmail-reglas.ts.
+ *
+ * Lo que la versión anterior hacía mal y por lo que «el CRM no leía correos»:
+ *  1. Con el marcador vencido (Gmail lo guarda ~una semana) se quedaba en 0 PARA SIEMPRE. Ahora
+ *     un 404 relee por fecha el hueco desde la última lectura completa.
+ *  2. Avanzaba el marcador ANTES de procesar: lo que fallaba a mitad no volvía a entrar nunca.
+ *     Ahora el marcador nuevo se toma al EMPEZAR (del perfil) y se guarda solo si la lectura se
+ *     COMPLETÓ (sin fallos y sin pendientes); si no, la próxima repite el mismo tramo y lo ya
+ *     importado se descarta por id. Por eso «se reintenta solo» es cierto.
+ *  3. Un error de Google no se veía en ningún sitio. Ahora queda escrito y el CRM lo enseña.
+ *  4. Nada impedía que el cron y el botón 📧↻ leyeran a la vez: `crm_mensajes.gmail_message_id`
+ *     no es UNIQUE, así que el mismo correo podía entrar dos veces. Un candado en crm_config.
+ */
+export async function syncGmailInbox(db: any = supabaseAdmin()): Promise<ResultadoSyncGmail> {
+  const empezo = new Date().toISOString();
+
+  // ── Candado: UPDATE condicional sobre una fila que existe siempre ──────────
+  await db.from("crm_config").upsert(
+    { clave: "gmail_sync_candado", valor: CANDADO_LIBRE, updated_at: empezo },
+    { onConflict: "clave", ignoreDuplicates: true },
+  );
+  const { data: reclamo } = await db.from("crm_config")
+    .update({ valor: empezo, updated_at: empezo })
+    .eq("clave", "gmail_sync_candado")
+    .lt("valor", new Date(Date.now() - CANDADO_MS).toISOString())
+    .select("clave");
+  if (!((reclamo as any[]) ?? []).length) {
+    return { nuevos: 0, revisados: 0, email: null, modo: "historial", fallidos: 0, pendientes: 0, ocupado: true };
+  }
+
+  try {
+    const token = await getAccessToken(db);
+
+    // El perfil da la dirección del buzón y el marcador de AHORA, que es el que se guarda al final.
+    const perfil = await gmailGet(token, "/profile");
+    if (!perfil.ok) throw new Error(perfil.data?.error?.message ?? `Gmail respondió ${perfil.status}`);
+    const email: string | null = perfil.data.emailAddress ?? null;
+    const marcadorAhora = perfil.data.historyId ? String(perfil.data.historyId) : "";
+
+    const cfg = await leerConfigCrm(db, ["gmail_history_id", "gmail_ultima_sync"]);
+    const marcador = cfg.get("gmail_history_id") || "";
+    let ids: string[] = [];
+    let modo: ResultadoSyncGmail["modo"] = marcador ? "historial" : "inicial";
+
+    if (marcador) {
+      // El historial viene en orden de llegada (del más viejo al más nuevo).
+      let pageToken: string | undefined;
+      do {
+        const r = await gmailGet(token,
+          `/history?startHistoryId=${encodeURIComponent(marcador)}&historyTypes=messageAdded&labelId=INBOX&maxResults=100` +
+          (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""));
+        if (!r.ok) {
+          if (marcadorVencido(r.status, r.data?.error?.message)) { modo = "recuperacion"; ids = []; break; }
+          throw new Error(r.data?.error?.message ?? `Gmail respondió ${r.status}`);
+        }
+        for (const rec of r.data.history ?? []) {
+          for (const ma of rec.messagesAdded ?? []) if (ma?.message?.id) ids.push(ma.message.id);
+        }
+        pageToken = r.data.nextPageToken;
+      } while (pageToken && ids.length < LISTA_MAX);
+    }
+
+    if (modo !== "historial") {
+      const dias = diasRecuperacion(cfg.get("gmail_ultima_sync"), Date.now());
+      const lista: string[] = [];
+      let pageToken: string | undefined;
+      do {
+        const r = await gmailGet(token,
+          `/messages?labelIds=INBOX&maxResults=100&q=${encodeURIComponent(`newer_than:${dias}d`)}` +
+          (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""));
+        if (!r.ok) throw new Error(r.data?.error?.message ?? `Gmail respondió ${r.status}`);
+        for (const m of r.data.messages ?? []) if (m?.id) lista.push(m.id);
+        pageToken = r.data.nextPageToken;
+      } while (pageToken && lista.length < LISTA_MAX);
+      // La lista viene del más nuevo al más viejo: se da vuelta para procesar en orden de
+      // llegada, que es el orden en que el hilo se escribió.
+      ids = lista.reverse();
+    }
+
+    // Lo ya importado se descarta EN BLOQUE antes de cortar el lote. Cortar primero dejaba, con
+    // más de 100 pendientes, los mismos 100 ya importados al frente de cada lectura: no avanzaba.
+    const unicos = [...new Set(ids)];
+    const yaImportados = new Set<string>();
+    for (let k = 0; k < unicos.length; k += 100) {
+      const { data } = await db.from("crm_mensajes").select("gmail_message_id").in("gmail_message_id", unicos.slice(k, k + 100));
+      for (const r of (data as any[]) ?? []) if (r.gmail_message_id) yaImportados.add(String(r.gmail_message_id));
+    }
+    const faltan = unicos.filter((id) => !yaImportados.has(id));
+    const lote = faltan.slice(0, MAX_MENSAJES_POR_LECTURA);
+    const pendientes = faltan.length - lote.length;
+    let nuevos = 0, fallidos = 0;
+
+    for (const msgId of lote) {
+      try {
+        const r = await gmailGet(token, `/messages/${msgId}?format=full`);
+        if (!r.ok) {
+          // Borrado entre la lista y la lectura: no es un fallo de la lectura.
+          if (r.status !== 404) fallidos++;
+          continue;
+        }
+        const msg = r.data;
+        if (!esDeLaBandeja(msg.labelIds)) continue;
+
+        const headers = msg.payload?.headers ?? [];
+        const { email: fromEmail, nombre: fromName } = remitenteDe(headerVal(headers, "from"));
+        // Sin remitente no hay a quién atribuirlo: antes se creaba un contacto con el correo vacío.
+        if (!fromEmail) continue;
+        if (esRemitentePropio(fromEmail, email)) continue;
+
+        const subject = headerVal(headers, "subject") || "(Sin asunto)";
+        const threadId = msg.threadId;
+        const body = extractBody(msg.payload ?? {});
+        const fecha = msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : new Date().toISOString();
+        const noLeido = Array.isArray(msg.labelIds) && msg.labelIds.includes("UNREAD");
+
+        let { data: contacto } = await db.from("crm_contactos").select("id").eq("gmail_email", fromEmail).limit(1).maybeSingle();
+        if (!contacto) {
+          const { data: nc, error: ec } = await db
+            .from("crm_contactos")
+            .insert({ nombre: fromName, gmail_email: fromEmail, canal_origen: "gmail" })
+            .select("id")
+            .single();
+          if (ec) throw new Error(`crm_contactos: ${ec.message}`);
+          contacto = nc;
+        }
+
+        let { data: conv } = await db
+          .from("crm_conversaciones")
+          .select("id, no_leidos, ultimo_mensaje_at")
+          .eq("gmail_thread_id", threadId)
+          .limit(1)
+          .maybeSingle();
+        if (!conv) {
+          const { data: nc, error: ecv } = await db
+            .from("crm_conversaciones")
+            .insert({ contacto_id: contacto!.id, canal: "gmail", estado: "abierta", asunto: subject, gmail_thread_id: threadId })
+            .select("id, no_leidos, ultimo_mensaje_at")
+            .single();
+          if (ecv) throw new Error(`crm_conversaciones: ${ecv.message}`);
+          conv = nc;
+        }
+
+        const { error: em } = await db.from("crm_mensajes").insert({
+          conversacion_id: conv!.id,
+          direccion: "entrante",
+          tipo: "texto",
+          contenido: body || "(sin contenido)",
+          gmail_message_id: msgId,
+          // La fecha del CORREO, no la de la lectura: una recuperación de varios días no puede
+          // dejar todo el hilo con la hora de hoy. Y lo que ya se leyó en Gmail entra leído.
+          created_at: fecha,
+          leido: !noLeido,
+        });
+        if (em) throw new Error(`crm_mensajes: ${em.message}`);
+
+        // `ultimo_mensaje_at` solo AVANZA (misma regla que el historial de coexistencia): un correo
+        // viejo recuperado no puede bajar una conversación activa al fondo de la bandeja.
+        const previo = conv!.ultimo_mensaje_at ? Date.parse(conv!.ultimo_mensaje_at) : 0;
+        await db
+          .from("crm_conversaciones")
+          .update({
+            ultimo_mensaje_at: Date.parse(fecha) > previo ? fecha : conv!.ultimo_mensaje_at,
+            no_leidos: (conv!.no_leidos ?? 0) + (noLeido ? 1 : 0),
+          })
+          .eq("id", conv!.id);
+
+        nuevos++;
+      } catch (e) {
+        // Un correo que no entra no tumba la lectura de los demás.
+        console.warn("[crm-gmail] mensaje", msgId, (e as Error)?.message);
+        fallidos++;
       }
     }
-    // Guardar nuevo historyId
-    if (hData.historyId) {
-      await db.from("crm_config").upsert({ clave: "gmail_history_id", valor: String(hData.historyId) });
-    }
-  } else {
-    // Primera vez: últimos 50 mensajes no leídos de INBOX
-    const lRes = await fetch(
-      "https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&q=is:unread&maxResults=50",
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const lData = await lRes.json();
-    messageIds = (lData.messages ?? []).map((m: any) => m.id);
 
-    // Guardar historyId inicial
-    const pRes = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
-      headers: { Authorization: `Bearer ${token}` },
+    // El marcador AVANZA solo si la lectura se completó. Con fallos o pendientes se queda donde
+    // estaba —y `gmail_ultima_sync` también, porque de ella sale la ventana de una recuperación—:
+    // la próxima repite el mismo tramo y lo ya importado se descarta por id.
+    const completa = fallidos === 0 && pendientes === 0;
+    const avisos = [
+      fallidos ? `${fallidos} correo(s) no se pudieron importar; se reintentan en la próxima lectura.` : "",
+      pendientes ? `Quedan ${pendientes} correo(s) por traer: entran en las próximas lecturas (${MAX_MENSAJES_POR_LECTURA} por vez).` : "",
+    ].filter(Boolean).join(" ");
+    await escribirConfigCrm(db, {
+      ...(completa && marcadorAhora ? { gmail_history_id: marcadorAhora } : {}),
+      ...(completa ? { gmail_ultima_sync: empezo } : {}),
+      gmail_ultima_lectura: empezo,
+      // El ERROR es que la lectura entera no funcionó (y pide reconectar); un correo suelto que no
+      // entró es un AVISO: se reintenta solo, y pintarlo de rojo mandaría a reconectar en vano.
+      gmail_ultimo_error: "",
+      gmail_ultimo_aviso: avisos,
+      gmail_email: email ?? "",
     });
-    const pData = await pRes.json();
-    if (pData.historyId) {
-      await db.from("crm_config").upsert({ clave: "gmail_history_id", valor: String(pData.historyId) });
-    }
+    return { nuevos, revisados: lote.length, email, modo, fallidos, pendientes };
+  } catch (e: any) {
+    const msg = explicarErrorGoogle(e?.message);
+    await escribirConfigCrm(db, { gmail_ultimo_error: msg, gmail_ultimo_error_en: empezo }).catch(() => {});
+    throw new Error(msg);
+  } finally {
+    await db.from("crm_config").update({ valor: CANDADO_LIBRE }).eq("clave", "gmail_sync_candado");
   }
+}
 
-  let saved = 0;
-
-  for (const msgId of messageIds) {
-    // Dedup
-    const { data: existing } = await db
-      .from("crm_mensajes")
-      .select("id")
-      .eq("gmail_message_id", msgId)
-      .maybeSingle();
-    if (existing) continue;
-
-    const mRes = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}?format=full`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const msg = await mRes.json();
-
-    const headers = msg.payload?.headers ?? [];
-    const from = headerVal(headers, "from");
-    const subject = headerVal(headers, "subject") || "(Sin asunto)";
-    const threadId = msg.threadId;
-    const body = extractBody(msg.payload);
-
-    // Extraer email del remitente
-    const emailMatch = from.match(/<(.+?)>/) ?? from.match(/(\S+@\S+)/);
-    const fromEmail = emailMatch?.[1] ?? from;
-    const fromName = from.replace(/<.+>/, "").trim() || fromEmail;
-
-    // Ignorar emails enviados por nosotros mismos
-    if (fromEmail.toLowerCase().includes("afatoursperu.com")) continue;
-
-    // Buscar o crear contacto
-    let { data: contacto } = await db
-      .from("crm_contactos")
-      .select("id")
-      .eq("gmail_email", fromEmail)
-      .maybeSingle();
-
-    if (!contacto) {
-      const { data: nc } = await db
-        .from("crm_contactos")
-        .insert({ nombre: fromName, gmail_email: fromEmail, canal_origen: "gmail" })
-        .select("id")
-        .single();
-      contacto = nc;
-    }
-
-    // Buscar conversación existente por gmail_thread_id
-    let { data: conv } = await db
-      .from("crm_conversaciones")
-      .select("id, no_leidos")
-      .eq("gmail_thread_id", threadId)
-      .maybeSingle();
-
-    if (!conv) {
-      const { data: nc } = await db
-        .from("crm_conversaciones")
-        .insert({ contacto_id: contacto!.id, canal: "gmail", estado: "abierta", asunto: subject, gmail_thread_id: threadId })
-        .select("id, no_leidos")
-        .single();
-      conv = nc;
-    }
-
-    await db.from("crm_mensajes").insert({
-      conversacion_id: conv!.id,
-      direccion: "entrante",
-      tipo: "texto",
-      contenido: body || "(sin contenido)",
-      gmail_message_id: msgId,
-    });
-
-    await db
-      .from("crm_conversaciones")
-      .update({ ultimo_mensaje_at: new Date().toISOString(), no_leidos: (conv!.no_leidos ?? 0) + 1 })
-      .eq("id", conv!.id);
-
-    saved++;
-  }
-
-  return saved;
+/** Lo que la pantalla del CRM enseña del Gmail, sin llamar a Google. */
+export async function estadoGmailCrm(db = supabaseAdmin()): Promise<{
+  configurado: boolean;
+  conectado: boolean;
+  email: string | null;
+  ultima_sync: string | null;
+  ultimo_error: string | null;
+  ultimo_error_en: string | null;
+  ultimo_aviso: string | null;
+  redirect_uri: string | null;
+}> {
+  const cfg = await leerConfigCrm(db, [
+    "gmail_refresh_token", "gmail_email", "gmail_ultima_sync", "gmail_ultima_lectura", "gmail_ultimo_error", "gmail_ultimo_error_en", "gmail_ultimo_aviso",
+  ]);
+  return {
+    configurado: googleOAuthConfigurado(),
+    conectado: !!cfg.get("gmail_refresh_token"),
+    email: cfg.get("gmail_email") || null,
+    // Lo que se enseña es la última lectura que FUNCIONÓ, completa o no; `gmail_ultima_sync` es
+    // otra cosa (la última COMPLETA, de la que sale la ventana de una recuperación).
+    ultima_sync: cfg.get("gmail_ultima_lectura") || cfg.get("gmail_ultima_sync") || null,
+    ultimo_error: cfg.get("gmail_ultimo_error") || null,
+    ultimo_error_en: cfg.get("gmail_ultimo_error_en") || null,
+    ultimo_aviso: cfg.get("gmail_ultimo_aviso") || null,
+    // No es un secreto: es lo que hay que cotejar con «URI de redireccionamiento autorizados» en
+    // Google Cloud cuando Google contesta redirect_uri_mismatch.
+    redirect_uri: process.env.GOOGLE_REDIRECT_URI ?? null,
+  };
 }
