@@ -24,6 +24,7 @@
 
 import { seriesRendimiento, normalizarCantidad } from "@/lib/rendimiento";
 import { familiaCombustible, configCombustible } from "@/lib/combustible-tipos";
+import { tsEfectivoLectura, isoHoraVisible } from "@/lib/odometro-tiempo";
 
 // ─── TIPOS ───────────────────────────────────────────────────────────────────
 
@@ -43,9 +44,12 @@ export type LecturaCruda = {
   foto_url?: string | null;
 };
 
-/** Hora efectiva de una lectura: cuándo se tomó (capturado_en) o, si no, cuándo se insertó. */
+/**
+ * Hora efectiva de una lectura: cuándo se tomó (capturado_en); si no, cuándo se insertó, pero
+ * SOLO si fue el mismo día de su `fecha` — si no, el final de su día (lib/odometro-tiempo.ts).
+ */
 function tsEfectivo(l: LecturaCruda): number {
-  return new Date(l.capturado_en || l.created_at).getTime() || 0;
+  return tsEfectivoLectura(l);
 }
 
 /** Lectura ya saneada y anclada a su vehículo lógico (propia o tercero). */
@@ -356,7 +360,7 @@ export function recorridosDiarios(limpias: LecturaSana[], kmDiaMax = KM_DIA_MAX_
       }
       if (iPeor > 0 && peor > kmDiaMax) {
         const a = orden[iPeor - 1], b = orden[iPeor];
-        const h = (l: LecturaSana) => horaLima(l.capturado_en || l.created_at) ?? "—";
+        const h = (l: LecturaSana) => horaLima(isoHoraVisible(l)) ?? "sin hora";
         sospechosaId = b.id;
         anomalias.push({
           tipo: "excesivo",
@@ -369,8 +373,8 @@ export function recorridosDiarios(limpias: LecturaSana[], kmDiaMax = KM_DIA_MAX_
     // Hora: se prefiere el rol (check-in/check-out) para etiquetar; si no, la primera/última.
     const horaIni = checkin ?? primera;
     const horaFin = checkout ?? ultima;
-    const primeraHora = horaLima(horaIni.capturado_en || horaIni.created_at);
-    const ultimaHora = horaLima(horaFin.capturado_en || horaFin.created_at);
+    const primeraHora = horaLima(isoHoraVisible(horaIni));
+    const ultimaHora = horaLima(isoHoraVisible(horaFin));
     const minutosOperacion =
       orden.length >= 2
         ? Math.max(0, Math.round((tsEfectivo(ultima) - tsEfectivo(primera)) / 60000))

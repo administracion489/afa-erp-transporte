@@ -16,6 +16,7 @@
 import { procedenciaPlaca } from "./procedencia-placa";
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
+import { capturaDeRecarga } from "@/lib/odometro-tiempo";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
 import {
   familiaCombustible, capacidadTanqueDe,
@@ -1458,6 +1459,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     // Alimentar el odómetro consolidado (anti-retroceso). fuente="combustible" deja marcado que
     // esta lectura se tomó EN LA RECARGA (base para el rendimiento km/galón y la auditoría de km).
     if (km != null && km > 0) {
+      // La hora IMPRESA en el voucher manda: es la del despacho. La del mensaje es de cuándo se
+      // ENVIÓ (la foto pudo tomarse antes) y solo vale como tope si es del mismo día que la
+      // recarga — un voucher del 13 reenviado el 15 no tiene la hora del 15.
+      const cap = capturaDeRecarga({ fecha, hora: d.hora, tsMensaje: mensaje.ts_mensaje ?? null });
       await registrarLectura(sb, {
         vehiculo_id: veh!.id,
         km,
@@ -1465,9 +1470,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
         fecha,
         foto_url: mensaje.media_url ?? null,
         ref_origen: "radar_ia",
-        capturado_en: mensaje.ts_mensaje ?? null,
-        // El sello es de cuándo se ENVIÓ el mensaje: la foto del surtidor pudo tomarse antes.
-        horaEsTope: true,
+        capturado_en: cap.capturado_en,
+        horaEsTope: cap.horaEsTope,
         // el km de una recarga se ata al mensaje → reproceso no duplica la lectura
         idemKey: `radar_odo_comb:${mensaje.id}`,
       });

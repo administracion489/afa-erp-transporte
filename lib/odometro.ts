@@ -12,6 +12,7 @@
 //     físico reemplazado), evitando que "el mayor gana" deje al bus ciego.
 
 import { firmarUrl, type ClienteStorage } from "@/lib/storage-firmado";
+import { instanteLectura, finDiaLimaTs, diaLimaDeTs } from "@/lib/odometro-tiempo";
 
 export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
@@ -34,11 +35,21 @@ export type RefLectura = {
   foto_hash?: string | null;
   /** false = el instante viene de created_at (inserción), no de capturado_en: es aproximado. */
   horaExacta?: boolean;
+  /**
+   * true = de esa lectura solo se sabe el DÍA (se cargó otro día y sin hora): su instante es el
+   * final de su jornada, y nombrarla por una hora («de ~23:59») sería inventarla.
+   */
+  soloFecha?: boolean;
+  fecha?: string | null;
 };
 
 /** Etiqueta legible de una lectura de referencia: "de las 05:09 (97,271 km)". */
 function describirRef(r: RefLectura | null | undefined): string {
   if (!r) return "el km vigente";
+  if (r.soloFecha && r.fecha) {
+    const [a, m, d] = r.fecha.slice(0, 10).split("-");
+    return `del ${d}/${m}/${a}, sin hora (${Number(r.km).toLocaleString("es-PE")} km)`;
+  }
   const hora = r.ts != null ? horaLimaDeTs(r.ts) : null;
   const cuando = hora ? (r.horaExacta === false ? `de ~${hora}` : `de las ${hora}`) : "anterior";
   return `${cuando} (${Number(r.km).toLocaleString("es-PE")} km)`;
@@ -319,10 +330,15 @@ export type ContextoOdometro = {
 };
 
 /** Fila cruda de lecturas_odometro → referencia con su instante efectivo. */
-function aRef(f: { km: number; created_at: string; capturado_en: string | null; fuente?: string; momento?: string | null; foto_url?: string | null; foto_hash?: string | null }): RefLectura {
+function aRef(f: { km: number; fecha?: string | null; created_at: string; capturado_en: string | null; fuente?: string; momento?: string | null; foto_url?: string | null; foto_hash?: string | null }): RefLectura {
+  // El instante nunca sale del día de la lectura (lib/odometro-tiempo.ts): una fila cargada
+  // otro día sin hora se ubica al final de SU jornada, no en la fecha de inserción.
+  const inst = instanteLectura(f);
   return {
     km: Number(f.km),
-    ts: tsDe(f.capturado_en) ?? tsDe(f.created_at),
+    ts: inst.ts || null,
+    soloFecha: inst.origen === "fin_del_dia",
+    fecha: f.fecha ?? null,
     fuente: f.fuente ?? null,
     momento: f.momento ?? null,
     foto_url: f.foto_url ?? null,
@@ -381,6 +397,11 @@ export async function contextoOdometro(
     horaEsTope?: boolean;
     /** Kilometraje que se va a registrar: necesario para ubicar una lectura con hora-tope. */
     kmNuevo?: number | null;
+    /**
+     * La lectura solo trae FECHA: `tsRef` es el final de su día, no una hora de envío. Solo
+     * cambia la redacción de la nota de reubicación, que de otro modo diría «la foto llegó 23:59».
+     */
+    soloFecha?: boolean;
   }
 ): Promise<ContextoOdometro> {
   const vacio: ContextoOdometro = {
@@ -418,7 +439,7 @@ export async function contextoOdometro(
 
   type Fila = { km: number; fecha: string; created_at: string; capturado_en: string | null; estado: string; fuente?: string; momento?: string | null; foto_url?: string | null; foto_hash?: string | null };
   const todas = [...((prevRaw || []) as Fila[]), ...((postRaw || []) as Fila[])];
-  const conTs = todas.map((f) => ({ f, ts: tsDe(f.capturado_en) ?? tsDe(f.created_at) ?? 0 }));
+  const conTs = todas.map((f) => ({ f, ts: instanteLectura(f).ts }));
 
   // ── Ubicación temporal de la lectura ───────────────────────────────────────────────────
   // Con hora exacta, la lectura va donde dice su reloj. Con hora-TOPE (la de envío del
@@ -448,9 +469,11 @@ export async function contextoOdometro(
       // sea vieja sino que el número esté mal: no se reubica y la lectura va a revisión.
       if (tsNueva - candidato <= MAX_AJUSTE_HORA_MS) {
         tsUbicado = candidato;
-        notaHora =
-          `Hora ajustada a ${horaLimaDeTs(tsUbicado)}: la foto llegó ${horaLimaDeTs(tsNueva)} pero su kilometraje ` +
-          `exige que se tomara antes de la lectura de las ${horaLimaDeTs(sig.ts)} (${Number(sig.f.km).toLocaleString("es-PE")} km)`;
+        notaHora = opts.soloFecha
+          ? `Hora ubicada en ${horaLimaDeTs(tsUbicado)}: la lectura solo traía fecha y su kilometraje ` +
+            `la coloca antes de la lectura de las ${horaLimaDeTs(sig.ts)} (${Number(sig.f.km).toLocaleString("es-PE")} km)`
+          : `Hora ajustada a ${horaLimaDeTs(tsUbicado)}: la foto llegó ${horaLimaDeTs(tsNueva)} pero su kilometraje ` +
+            `exige que se tomara antes de la lectura de las ${horaLimaDeTs(sig.ts)} (${Number(sig.f.km).toLocaleString("es-PE")} km)`;
       }
     }
   }
@@ -614,17 +637,25 @@ export async function registrarLectura(
     if (diaReal !== fecha) fecha = diaReal;
   }
 
+  // Sin hora (solo fecha): antes se ubicaba a las 00:00 de ese día —`tsDe("2026-09-13")`—, o sea
+  // ANTES de toda la jornada, y un voucher de las 08:01 con más km que el check-in de las 05:25
+  // salía «incoherente con la lectura posterior» (CTV-370). Lo único cierto de una lectura con
+  // solo fecha es que ocurrió ese día: se trata como TOPE el final del día (o ahora, si es hoy)
+  // y su kilometraje la ubica en el hueco que le corresponde, igual que una foto de WhatsApp.
+  const soloFecha = capturadoEn == null;
+  const tsRefSinHora = soloFecha ? new Date(Math.min(finDiaLimaTs(fecha), ahoraSrv)).toISOString() : null;
+
   // Vigente + historial (horas desde la última, km/día adaptativo). Mismo cálculo de siempre,
   // ahora compartido con el selector de odómetro y con los prompts de visión.
   const ctx = await contextoOdometro(client, {
-    vehiculo_id: l.vehiculo_id, flota: l.flota, tsRef: capturadoEn ?? fecha,
-    horaEsTope: l.horaEsTope, kmNuevo: km,
+    vehiculo_id: l.vehiculo_id, flota: l.flota, tsRef: capturadoEn ?? tsRefSinHora ?? fecha,
+    horaEsTope: soloFecha ? true : l.horaEsTope, kmNuevo: km, soloFecha,
   });
   if (!ctx.existe) {
     return { ok: false, estado: "rechazada", motivo: "Vehículo no encontrado", error: "Vehículo no encontrado" };
   }
   const { kmVigente, horasDesdeUltima, anterior, posterior } = ctx;
-  let tsNueva = tsDe(capturadoEn) ?? tsDe(fecha) ?? Date.now();
+  let tsNueva = tsDe(capturadoEn) ?? tsDe(tsRefSinHora) ?? tsDe(fecha) ?? Date.now();
 
   // La hora era un tope y el kilometraje obligó a adelantarla: se guarda la hora ubicada (es la
   // mejor estimación coherente de cuándo se tomó la foto) con la explicación en el motivo.
@@ -632,7 +663,7 @@ export async function registrarLectura(
     notaReloj = [notaReloj, ctx.notaHora].filter(Boolean).join(" · ");
     tsNueva = ctx.tsUbicado;
     capturadoEn = new Date(ctx.tsUbicado).toISOString();
-    const diaUbicado = new Date(ctx.tsUbicado - 5 * 3600_000).toISOString().slice(0, 10);
+    const diaUbicado = diaLimaDeTs(ctx.tsUbicado);
     if (diaUbicado !== fecha) fecha = diaUbicado; // el ajuste cruzó la medianoche → cambia la jornada
   }
   // El caller puede fijar el tope; si no, manda el adaptativo del contexto.
@@ -750,11 +781,15 @@ export async function aceptarLectura(
   // la descartaría por "retroceder" y el operador la habría aceptado para nada. Se la reubica
   // en el hueco que su kilometraje exige, igual que al registrarla.
   const parche: Record<string, any> = { estado: "aceptada", motivo: "Aceptada manualmente" };
-  if (FUENTES_HORA_TOPE.includes(String(l.fuente))) {
+  // El tope es el instante EFECTIVO de la lectura, que nunca sale de su día: con `created_at`
+  // a secas, una recarga del 13/09 confirmada el 05/10 se reubicaba contra las lecturas del 05/10.
+  const inst = instanteLectura(l);
+  const soloFecha = inst.origen === "fin_del_dia";
+  if (FUENTES_HORA_TOPE.includes(String(l.fuente)) || soloFecha) {
     const ctx = await contextoOdometro(client, {
       vehiculo_id: vid, flota: esTercero ? "tercero" : "propia",
-      tsRef: l.capturado_en ?? l.created_at ?? l.fecha,
-      horaEsTope: true, kmNuevo: Number(l.km),
+      tsRef: inst.ts ? new Date(inst.ts).toISOString() : l.fecha,
+      horaEsTope: true, kmNuevo: Number(l.km), soloFecha,
     });
     if (ctx.notaHora) {
       parche.capturado_en = new Date(ctx.tsUbicado).toISOString();

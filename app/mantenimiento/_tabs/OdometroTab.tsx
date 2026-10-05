@@ -14,6 +14,7 @@ import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 import { rankingConductores, type FilaRanking } from "@/lib/odometro-confirmacion";
+import { instanteLectura } from "@/lib/odometro-tiempo";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -49,18 +50,28 @@ function fmtNum(n: number | null | undefined) { return n == null ? "—" : Numbe
  * puede ir minutos u horas por detrás. Se devuelve marcada con `~` para que el operador sepa
  * que esa hora es aproximada y no la use como evidencia dura.
  */
-/** Instante efectivo de una lectura: cuándo se TOMÓ, o cuándo entró al ERP si no se guardó. */
-function tsEfectivoDe(l: { capturado_en?: string | null; created_at: string }): number {
-  return new Date(l.capturado_en || l.created_at).getTime() || 0;
+/**
+ * Instante efectivo de una lectura: cuándo se TOMÓ; si no, cuándo entró al ERP, pero solo si
+ * entró el MISMO día de su fecha. Una recarga del 13/09 confirmada el 05/10 tomaba la hora del
+ * 05/10 y se comparaba contra las lecturas de ese día (lib/odometro-tiempo.ts).
+ */
+function tsEfectivoDe(l: { capturado_en?: string | null; created_at: string; fecha?: string | null }): number {
+  return instanteLectura(l).ts;
 }
 
 const TITULO_HORA_APROX =
   "Hora aproximada: la lectura no guardó cuándo se tomó, se muestra cuándo entró al ERP";
+const TITULO_SIN_HORA =
+  "Sin hora: la lectura se cargó otro día y no guardó cuándo se tomó. Se ordena al final de su día";
 
-function horaLectura(l: { capturado_en?: string | null; created_at: string }): { txt: string; exacta: boolean } {
-  const h = horaLima(l.capturado_en || l.created_at);
-  if (!h) return { txt: "—", exacta: true };
-  return l.capturado_en ? { txt: h, exacta: true } : { txt: `~${h}`, exacta: false };
+function horaLectura(l: { capturado_en?: string | null; created_at: string; fecha?: string | null }): { txt: string; exacta: boolean; titulo: string } {
+  const inst = instanteLectura(l);
+  if (inst.origen === "fin_del_dia") return { txt: "sin hora", exacta: false, titulo: TITULO_SIN_HORA };
+  const h = horaLima(inst.origen === "capturado" ? l.capturado_en : l.created_at);
+  if (!h) return { txt: "—", exacta: true, titulo: "" };
+  return inst.origen === "capturado"
+    ? { txt: h, exacta: true, titulo: "Hora en que se tomó la lectura" }
+    : { txt: `~${h}`, exacta: false, titulo: TITULO_HORA_APROX };
 }
 
 /** Celda de fecha + hora (la hora aproximada va en gris y con tooltip que lo explica). */
@@ -70,7 +81,7 @@ function CeldaFechaHora({ l }: { l: { fecha: string; capturado_en?: string | nul
     <span className="whitespace-nowrap">
       {fmtFecha(l.fecha)}
       <span className={h.exacta ? "text-gray-400" : "text-gray-300 italic"}
-        title={h.exacta ? "Hora en que se tomó la lectura" : TITULO_HORA_APROX}>
+        title={h.titulo}>
         {" · "}{h.txt}
       </span>
     </span>
