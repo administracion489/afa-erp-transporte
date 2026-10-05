@@ -6,7 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import {
   diasRecuperacion, marcadorVencido, remitenteDe, esRemitentePropio, esDeLaBandeja, explicarErrorGoogle,
-  limpiarValorEnv, diagnosticarGoogle, MAX_MENSAJES_POR_LECTURA,
+  limpiarValorEnv, diagnosticarGoogle, cuerpoDeCorreo, MAX_MENSAJES_POR_LECTURA,
   type DiagnosticoGoogle, type ProblemaRedirect, type VariableGoogle,
 } from "@/lib/crm-gmail-reglas";
 
@@ -245,20 +245,6 @@ function decodeBase64(s: string): string {
   catch { return ""; }
 }
 
-function extractBody(payload: any): string {
-  if (payload.body?.data) return decodeBase64(payload.body.data);
-  for (const part of payload.parts ?? []) {
-    if (part.mimeType === "text/html" || part.mimeType === "text/plain") {
-      if (part.body?.data) return decodeBase64(part.body.data);
-    }
-    if (part.parts) {
-      const inner = extractBody(part);
-      if (inner) return inner;
-    }
-  }
-  return "";
-}
-
 function headerVal(headers: any[], name: string): string {
   return headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
@@ -413,7 +399,9 @@ export async function syncGmailInbox(db: any = supabaseAdmin()): Promise<Resulta
 
         const subject = headerVal(headers, "subject") || "(Sin asunto)";
         const threadId = msg.threadId;
-        const body = extractBody(msg.payload ?? {});
+        // El TEXTO del correo (lib/crm-gmail-reglas.ts): la versión anterior guardaba el HTML
+        // crudo de los correos sin parte de texto, y el CRM enseñaba etiquetas.
+        const body = cuerpoDeCorreo(msg.payload, decodeBase64);
         const fecha = msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : new Date().toISOString();
         const noLeido = Array.isArray(msg.labelIds) && msg.labelIds.includes("UNREAD");
 

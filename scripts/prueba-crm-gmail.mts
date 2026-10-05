@@ -11,6 +11,7 @@
 import {
   diasRecuperacion, marcadorVencido, remitenteDe, esRemitentePropio, esDeLaBandeja, explicarErrorGoogle, haceCuanto,
   limpiarValorEnv, diagnosticarGoogle, VARIABLES_GOOGLE, RUTA_CALLBACK_GMAIL,
+  cuerpoDeCorreo, textoDeHtml, pareceHtml, textoLegible, type ParteMime,
   DIAS_VENTANA_INICIAL, DIAS_VENTANA_MAX, MAX_MENSAJES_POR_LECTURA,
 } from "../lib/crm-gmail-reglas";
 import {
@@ -74,7 +75,7 @@ class Q {
 }
 
 // ── Gmail falso ──────────────────────────────────────────────────────────────────────────────
-type Correo = { id: string; hilo: string; de: string; asunto: string; labels: string[]; fecha: number; estado?: number };
+type Correo = { id: string; hilo: string; de: string; asunto: string; labels: string[]; fecha: number; estado?: number; payload?: any };
 const DIA = 86_400_000;
 const AHORA = Date.UTC(2026, 9, 5, 15, 0, 0);
 class Gmail {
@@ -119,7 +120,10 @@ globalThis.fetch = (async (url: any, init?: any) => {
     if (c.estado && c.estado !== 200) return json(c.estado, { error: { message: "falla de Google" } });
     return json(200, {
       id: c.id, threadId: c.hilo, labelIds: c.labels, internalDate: String(c.fecha),
-      payload: { headers: [{ name: "From", value: c.de }, { name: "Subject", value: c.asunto }], body: { data: Buffer.from("hola").toString("base64") } },
+      payload: {
+        headers: [{ name: "From", value: c.de }, { name: "Subject", value: c.asunto }],
+        ...(c.payload ?? { body: { data: Buffer.from("hola").toString("base64") } }),
+      },
     });
   }
   return json(404, {});
@@ -369,6 +373,93 @@ console.log("\n7. Configuración de Google");
   chk("el origen público sale de x-forwarded-host", origenPublico(req({ "x-forwarded-host": "transportesafa.com" })) === ORIGEN);
   chk("…el primero si viene una lista", origenPublico(req({ "x-forwarded-host": "transportesafa.com, proxy.interno" })) === ORIGEN);
   chk("…y sin la cabecera, el de la petición", origenPublico(req({})) === "https://interno.vercel.app");
+}
+
+// ── 8. El cuerpo de un correo es TEXTO, no su maquetación ────────────────────────────────────
+// Visto en producción el mismo día que se conectó el Gmail: la bandeja enseñaba de vista previa
+// «<html> <body style="background-colo…» — el correo de un banco, que no trae parte de texto.
+console.log("\n8. Cuerpo del correo");
+{
+  const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64url");
+  const dec = (s: string) => Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8");
+  const HTML =
+    `<html><head><style>body{background-color:#fff}</style><title>x</title></head>` +
+    `<body style="background-color:#fff"><div>Estimado cliente:</div>` +
+    `<p>Su estado de cuenta est&aacute; disponible.<br>Saludos,<br>Interbank</p><!-- pie -->` +
+    `<script>track()</script><a href="https://x.pe/t?id=123">Ver aqu&iacute;</a></body></html>`;
+  const soloHtml: ParteMime = { mimeType: "text/html", body: { data: b64(HTML) } };
+  const altHtmlPrimero: ParteMime = { mimeType: "multipart/alternative", parts: [
+    { mimeType: "text/html", body: { data: b64(HTML) } },
+    { mimeType: "text/plain", body: { data: b64("Su estado de cuenta está disponible.") } },
+  ] };
+
+  // El algoritmo VIEJO, copiado literal: devolvía la PRIMERA parte de texto que encontraba.
+  function extractBodyViejo(payload: any): string {
+    if (payload.body?.data) return dec(payload.body.data);
+    for (const part of payload.parts ?? []) {
+      if (part.mimeType === "text/html" || part.mimeType === "text/plain") {
+        if (part.body?.data) return dec(part.body.data);
+      }
+      if (part.parts) {
+        const inner = extractBodyViejo(part);
+        if (inner) return inner;
+      }
+    }
+    return "";
+  }
+  chk("el algoritmo VIEJO reproduce el defecto: un correo solo-HTML entraba como etiquetas", /<html>|<body/.test(extractBodyViejo(soloHtml)));
+  chk("…y con el HTML primero en un multipart, tampoco elegía el texto", /<html>/.test(extractBodyViejo(altHtmlPrimero)));
+
+  const t = cuerpoDeCorreo(soloHtml, dec);
+  chk("solo-HTML → texto, sin una sola etiqueta", !/<[a-z!/]/i.test(t) && /Estimado cliente:/.test(t), JSON.stringify(t));
+  chk("…sin el CSS, el script, el título ni los comentarios", !/background|track\(|pie/.test(t) && !/^x$/m.test(t));
+  chk("…con las tildes resueltas y los saltos de línea", /está disponible\.\nSaludos,\nInterbank/.test(t));
+  chk("…y el texto del enlace sin su dirección de seguimiento", /Ver aquí/.test(t) && !/x\.pe/.test(t));
+  chk("multipart con el HTML primero: gana el text/plain", cuerpoDeCorreo(altHtmlPrimero, dec) === "Su estado de cuenta está disponible.");
+  const anidado: ParteMime = { mimeType: "multipart/mixed", parts: [
+    { mimeType: "multipart/alternative", parts: [
+      { mimeType: "text/plain", body: { data: b64("Hola, adjunto la factura.") } },
+      { mimeType: "text/html", body: { data: b64("<div>Hola, adjunto la factura.</div>") } },
+    ] },
+    { mimeType: "text/plain", filename: "notas.txt", body: { data: b64("NO SOY EL CUERPO") } },
+  ] };
+  chk("anidado: encuentra el texto en el segundo nivel", cuerpoDeCorreo(anidado, dec) === "Hola, adjunto la factura.");
+  const adjuntoPrimero: ParteMime = { mimeType: "multipart/mixed", parts: [
+    { mimeType: "text/plain", filename: "notas.txt", body: { data: b64("NO SOY EL CUERPO") } },
+    { mimeType: "text/html", body: { data: b64("<p>El cuerpo</p>") } },
+  ] };
+  chk("un adjunto .txt no es el cuerpo", cuerpoDeCorreo(adjuntoPrimero, dec) === "El cuerpo");
+  const planoVacio: ParteMime = { mimeType: "multipart/alternative", parts: [
+    { mimeType: "text/plain", body: { data: b64("   \n ") } },
+    { mimeType: "text/html", body: { data: b64("<p>Lo de verdad</p>") } },
+  ] };
+  chk("un text/plain vacío no tapa al HTML", cuerpoDeCorreo(planoVacio, dec) === "Lo de verdad");
+  chk("un cuerpo simple sin tipo declarado sigue entrando (lo de siempre)", cuerpoDeCorreo({ body: { data: b64("hola") } }, dec) === "hola");
+  chk("sin cuerpo: vacío, sin romper", cuerpoDeCorreo({ mimeType: "multipart/mixed", parts: [] }, dec) === "" && cuerpoDeCorreo(null, dec) === "");
+
+  chk("entidades numéricas y con nombre", textoDeHtml("Cami&oacute;n &#243; &#xF3; &nbsp;&amp; &euro;") === "Camión ó ó & €");
+  chk("un «&lt;b&gt;» escrito como texto no se borra como etiqueta", textoDeHtml("<p>usa &lt;b&gt; para negrita</p>") === "usa <b> para negrita");
+  chk("una entidad desconocida se deja tal cual", textoDeHtml("a &foo; b") === "a &foo; b");
+  const lista = textoDeHtml("<ul><li>uno</li><li>dos</li></ul><table><tr><td>A</td><td>B</td></tr></table>");
+  chk("listas con viñeta y una línea por fila de tabla", lista === "• uno\n• dos\nA B", JSON.stringify(lista));
+  chk("sin saltos de línea de más", !/\n{3,}/.test(textoDeHtml("<div><div><p>a</p></div></div><br><br><br><br><p>b</p>")));
+
+  chk("documento HTML → sí", pareceHtml("<html><body>x</body></html>") && pareceHtml("  <!DOCTYPE html><html>") && pareceHtml('<html> <body style="background-colo'));
+  chk("fragmento con etiqueta y cierre → sí", pareceHtml('<div dir="ltr">Hola<br></div>'));
+  chk("un mensaje escrito por una persona → no",
+    !pareceHtml("Hola, ¿cómo estás?") && !pareceHtml("precio < 100 y > 50") && !pareceHtml("<3 gracias") && !pareceHtml(""));
+  chk("textoLegible deja intacto lo que no es HTML",
+    textoLegible("Hola\n\n  mundo  ") === "Hola\n\n  mundo  " && textoLegible(null) === null && textoLegible(undefined) === undefined);
+  const x = textoLegible(HTML) as string;
+  chk("textoLegible es idempotente (se aplica al cargar y al llegar por tiempo real)", textoLegible(x) === x);
+
+  // De punta a punta: la lectura guarda TEXTO.
+  G = new Gmail();
+  G.correos = [correo(1, 1, { payload: { mimeType: "text/html", body: { data: b64(HTML) } } })];
+  const b = conectada();
+  await syncGmailInbox(b);
+  const guardado = String(b.t.crm_mensajes[0]?.contenido ?? "");
+  chk("la lectura guarda el texto del correo, no su HTML", /Estimado cliente:/.test(guardado) && !/<[a-z!/]/i.test(guardado), guardado.slice(0, 80));
 }
 
 Date.now = realNow;
