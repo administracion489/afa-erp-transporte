@@ -127,8 +127,11 @@ export default function CRMPage() {
   const [gmail, setGmail] = useState<{
     configurado: boolean; conectado: boolean; email: string | null; ultima_sync: string | null;
     ultimo_error: string | null; ultimo_aviso: string | null; redirect_uri: string | null;
+    // Qué falta del cliente OAuth y el valor EXACTO del redirect (lib/crm-gmail-reglas.ts).
+    google?: { faltan: string[]; redirect_sugerido: string | null; problema: string | null; texto: string | null };
     leido_en: number;
   } | null>(null);
+  const [copiado, setCopiado] = useState(false);
   const [gmailAviso, setGmailAviso] = useState<{ ok: boolean; texto: string } | null>(null);
   const [acciones, setAcciones] = useState<AccionIA[]>([]);
   const [avisos, setAvisos] = useState<AvisoAutomatico[]>([]);
@@ -180,14 +183,20 @@ export default function CRMPage() {
   };
 
   // Conectar la bandeja: el servidor devuelve la URL de Google con un `state` firmado (no se
-  // puede ir por un enlace directo porque un enlace no lleva la sesión).
+  // puede ir por un enlace directo porque un enlace no lleva la sesión). Si falta configurar
+  // Google, el motivo se queda en pantalla: en un toast de 3 s no se alcanza a copiar el valor.
   const conectarGmail = async () => {
     try {
       const res = await fetch("/api/crm/gmail/auth", { method: "POST", headers: await cabecerasErp() });
       const j = await res.json();
       if (res.ok && j.url) window.location.href = j.url;
-      else showToast(j.error || "No se pudo iniciar la conexión con Gmail", false);
-    } catch { showToast("No se pudo iniciar la conexión con Gmail", false); }
+      else setGmailAviso({ ok: false, texto: j.error || "No se pudo iniciar la conexión con Gmail." });
+    } catch { setGmailAviso({ ok: false, texto: "No se pudo iniciar la conexión con Gmail." }); }
+  };
+
+  const copiarRedirect = async (valor: string) => {
+    try { await navigator.clipboard.writeText(valor); setCopiado(true); setTimeout(() => setCopiado(false), 2500); }
+    catch { /* sin portapapeles el valor sigue escrito en pantalla para copiarlo a mano */ }
   };
 
   // ── Cargar conversaciones ──────────────────────────────────────────────
@@ -596,12 +605,25 @@ export default function CRMPage() {
                 !gmail.configurado || !gmail.conectado || gmail.ultimo_error ? "bg-red-50 text-red-800" : "bg-gray-50 text-gray-600"}`}
             >
               {!gmail.configurado
-                ? "📧 Gmail: falta configurar Google en Vercel (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)."
+                ? `📧 Gmail: ${gmail.google?.texto ?? "falta configurar Google en Vercel (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)."}`
                 : !gmail.conectado
                   ? "📧 Gmail sin conectar: los correos de los clientes no entran al CRM. Pulsa «📧 Conectar Gmail»."
                   : gmail.ultimo_error
                     ? `📧 ${gmail.email ?? "Gmail"}: ${gmail.ultimo_error}`
                     : `📧 ${gmail.email ?? "Gmail conectado"} · ${gmail.ultima_sync ? `leído ${haceCuanto(gmail.ultima_sync, gmail.leido_en)}` : "todavía sin leer (pulsa 📧↻)"}`}
+              {/* El valor del redirect, para pegarlo tal cual en Vercel y en Google Cloud. Solo
+                  cuando esa variable falta o está mal: con ella bien, sería ruido. */}
+              {gmail.google?.redirect_sugerido && (gmail.google.faltan.includes("GOOGLE_REDIRECT_URI") || gmail.google.problema) && (
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  <code className="bg-white/80 rounded px-1 select-all break-all">{gmail.google.redirect_sugerido}</code>
+                  <button onClick={() => copiarRedirect(gmail.google!.redirect_sugerido!)} className="font-semibold underline">
+                    {copiado ? "copiado ✓" : "copiar"}
+                  </button>
+                </div>
+              )}
+              {gmail.configurado && gmail.google?.problema === "otro_sitio" && (
+                <div className="text-amber-700">{gmail.google.texto}</div>
+              )}
               {gmail.conectado && !gmail.ultimo_error && gmail.ultimo_aviso && (
                 <div className="text-amber-700">{gmail.ultimo_aviso}</div>
               )}
