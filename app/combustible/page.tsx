@@ -41,7 +41,7 @@ type Combustible = {
 // `radar_combustible.combustible_id` y se lee al revés: del Radar hacia la carga.
 type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?: string | null };
 
-type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
+type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo" | "facturas";
 type GranPeriodo = "dia" | "semana" | "mes";
 
 import { COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
@@ -54,6 +54,8 @@ import {
 } from "@/lib/rendimiento";
 import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
 import ComparacionPeriodo from "./ComparacionPeriodo";
+import SaldoCuenta from "./SaldoCuenta";
+import FacturasCorreo from "./FacturasCorreo";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
@@ -872,6 +874,10 @@ export default function CombustiblePage() {
         </div>
       )}
 
+      {/* SALDO DE LA CUENTA PREPAGO (Primax): se deriva de la última lectura del portal + abonos
+          − cargas, y avisa por correo y WhatsApp al cruzar un escalón (lib/combustible/saldo-cuenta.ts). */}
+      <SaldoCuenta />
+
       {/* LA MÉTRICA PRINCIPAL: COSTO POR KM.
           Va sola y arriba porque es la única comparable entre las cuatro familias de la flota —
           un km/gal y un km/m³ no se pueden poner en la misma columna. El rendimiento por unidad
@@ -1155,6 +1161,7 @@ export default function CombustiblePage() {
           ["por_vehiculo",  "🚌 Por vehículo"],
           ["por_conductor", "👤 Por conductor"],
           ["por_grifo",     "🏪 Por grifo"],
+          ["facturas",      "📧 Facturas"],
         ] as [VistaActiva, string][]).map(([v, l]) => (
           <button key={v} onClick={() => setVista(v)}
             className="px-4 py-2.5 text-sm font-bold border-b-2 -mb-px transition-all whitespace-nowrap"
@@ -1163,6 +1170,8 @@ export default function CombustiblePage() {
           </button>
         ))}
       </div>
+
+      {vista === "facturas" && <FacturasCorreo />}
 
       {/* ── HISTORIAL ── */}
       {vista === "historial" && (
