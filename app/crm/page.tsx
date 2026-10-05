@@ -6,6 +6,7 @@ import {
 } from "@/lib/crm-telefono";
 import { avisosAutomaticosDeTelefono, etiquetaAviso, type AvisoAutomatico } from "@/lib/crm-avisos-automaticos";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { haceCuanto } from "@/lib/crm-gmail-reglas";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -121,6 +122,14 @@ export default function CRMPage() {
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [cargando, setCargando] = useState(true);
   const [sincronizando, setSincronizando] = useState(false);
+  // Estado del Gmail del CRM (qué cuenta, última lectura, último error). Sin esto la pantalla no
+  // tenía forma de decir por qué no entraban correos: ni si estaba conectado.
+  const [gmail, setGmail] = useState<{
+    configurado: boolean; conectado: boolean; email: string | null; ultima_sync: string | null;
+    ultimo_error: string | null; ultimo_aviso: string | null; redirect_uri: string | null;
+    leido_en: number;
+  } | null>(null);
+  const [gmailAviso, setGmailAviso] = useState<{ ok: boolean; texto: string } | null>(null);
   const [acciones, setAcciones] = useState<AccionIA[]>([]);
   const [avisos, setAvisos] = useState<AvisoAutomatico[]>([]);
   const [pidiendoIA, setPidiendoIA] = useState(false);
@@ -134,14 +143,40 @@ export default function CRMPage() {
     setTimeout(() => setToast(null), 3500);
   };
 
+  const cargarEstadoGmail = useCallback(async () => {
+    try {
+      const res = await fetch("/api/crm/gmail/estado", { headers: await cabecerasErp() });
+      const j = await res.json();
+      if (j.ok) setGmail({ ...j, leido_en: Date.now() });
+    } catch { /* sin estado la línea no se pinta; el resto del CRM sigue */ }
+  }, []);
+
+  // El resultado se DICE: cuántos correos, de qué buzón, y el error con su arreglo. Antes era
+  // «Gmail sincronizado correctamente» aunque no entrara nada, y «Error al sincronizar Gmail»
+  // tirando el motivo que el servidor sí mandaba.
   const sincronizarGmail = async () => {
     setSincronizando(true);
     try {
       const res = await fetch("/api/crm/gmail/sync", { method: "POST", headers: await cabecerasErp() });
-      if (res.ok) { showToast("Gmail sincronizado correctamente"); cargarConvs(); }
-      else showToast("Error al sincronizar Gmail", false);
-    } catch { showToast("Error al sincronizar Gmail", false); }
+      const j = await res.json().catch(() => ({}));
+      if (res.ok && j.ok && j.ocupado) {
+        setGmailAviso({ ok: true, texto: "Ya hay una lectura del Gmail en curso (la automática): en un momento aparecen los correos." });
+      } else if (res.ok && j.ok) {
+        const de = j.email ? ` en ${j.email}` : "";
+        const rec = j.modo === "recuperacion" ? " (se recuperaron los días que no se habían leído)" : "";
+        setGmailAviso({
+          ok: true,
+          texto: (j.nuevos ? `${j.nuevos} correo(s) nuevo(s)${de}${rec}.` : `No hay correos nuevos${de}${rec}.`) +
+            (j.fallidos ? ` ${j.fallidos} no se pudieron importar; se reintentan solos.` : "") +
+            (j.pendientes ? ` Quedan ${j.pendientes} por traer: entran en las próximas lecturas.` : ""),
+        });
+        cargarConvs();
+      } else {
+        setGmailAviso({ ok: false, texto: j.error ?? `Error ${res.status} al leer el Gmail.` });
+      }
+    } catch (e: any) { setGmailAviso({ ok: false, texto: e?.message ?? "Error al leer el Gmail." }); }
     setSincronizando(false);
+    cargarEstadoGmail();
   };
 
   // Conectar la bandeja: el servidor devuelve la URL de Google con un `state` firmado (no se
@@ -197,6 +232,32 @@ export default function CRMPage() {
   }, [canalFiltro, estadoFiltro, numeroFiltro]);
 
   useEffect(() => { cargarConvs(); }, [cargarConvs]);
+
+  // Al volver de Google, el callback deja `gmail_ok` o `gmail_error` en la URL. Antes nadie los
+  // leía: conectar parecía no hacer nada, saliera bien o mal. Se dicen y se limpian de la URL.
+  useEffect(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      if (p.get("gmail_ok")) setGmailAviso({ ok: true, texto: "Gmail conectado. Pulsa 📧↻ para traer los correos (o espera la lectura automática, cada 10 min)." });
+      const err = p.get("gmail_error");
+      if (err) {
+        setGmailAviso({
+          ok: false,
+          texto: err === "access_denied"
+            ? "Google no dio el permiso (se canceló, o la cuenta no está autorizada en la app de Google Cloud)."
+            : err === "state_invalido"
+              ? "La conexión tardó más de 10 minutos o no salió de este ERP: vuelve a pulsar «Conectar Gmail»."
+              : `No se conectó el Gmail: ${err}`,
+        });
+      }
+      if (p.has("gmail_ok") || p.has("gmail_error")) {
+        p.delete("gmail_ok"); p.delete("gmail_error");
+        const q = p.toString();
+        window.history.replaceState(null, "", window.location.pathname + (q ? `?${q}` : ""));
+      }
+    } catch { /* sin URL legible no hay aviso */ }
+    cargarEstadoGmail();
+  }, [cargarEstadoGmail]);
 
   // Los números de la empresa se DESCUBREN de las conversaciones, no se declaran en
   // código: al conectar uno nuevo aparece solo en el filtro. Sin filtrar por canal/estado
@@ -505,9 +566,10 @@ export default function CRMPage() {
               <button
                 onClick={conectarGmail}
                 title="Conectar (o reconectar) la cuenta de Gmail del CRM"
-                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
+                className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-colors ${
+                  gmail && (!gmail.conectado || gmail.ultimo_error) ? "border-red-300 text-red-700 bg-red-50 hover:bg-red-100" : "border-gray-200 hover:bg-gray-50"}`}
               >
-                📧+
+                {gmail && !gmail.conectado ? "📧 Conectar Gmail" : gmail?.ultimo_error ? "📧 Reconectar" : "📧+"}
               </button>
               <button
                 onClick={() => setConectarWaModal(true)}
@@ -524,6 +586,33 @@ export default function CRMPage() {
               </button>
             </div>
           </div>
+
+          {/* Estado del Gmail: qué cuenta, cuándo se leyó y qué falló. Sin esta línea, un CRM que no
+              recibía correos se veía exactamente igual que uno que no tenía correos que recibir. */}
+          {gmail && (
+            <div
+              title={gmail.redirect_uri ? `Redirect que Google Cloud debe tener autorizado: ${gmail.redirect_uri}` : undefined}
+              className={`mb-2 text-[11px] rounded-lg px-2 py-1 ${
+                !gmail.configurado || !gmail.conectado || gmail.ultimo_error ? "bg-red-50 text-red-800" : "bg-gray-50 text-gray-600"}`}
+            >
+              {!gmail.configurado
+                ? "📧 Gmail: falta configurar Google en Vercel (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)."
+                : !gmail.conectado
+                  ? "📧 Gmail sin conectar: los correos de los clientes no entran al CRM. Pulsa «📧 Conectar Gmail»."
+                  : gmail.ultimo_error
+                    ? `📧 ${gmail.email ?? "Gmail"}: ${gmail.ultimo_error}`
+                    : `📧 ${gmail.email ?? "Gmail conectado"} · ${gmail.ultima_sync ? `leído ${haceCuanto(gmail.ultima_sync, gmail.leido_en)}` : "todavía sin leer (pulsa 📧↻)"}`}
+              {gmail.conectado && !gmail.ultimo_error && gmail.ultimo_aviso && (
+                <div className="text-amber-700">{gmail.ultimo_aviso}</div>
+              )}
+            </div>
+          )}
+          {gmailAviso && (
+            <div className={`mb-2 text-[11px] rounded-lg px-2 py-1 flex gap-2 items-start ${gmailAviso.ok ? "bg-green-50 text-green-800" : "bg-red-50 text-red-800"}`}>
+              <span className="flex-1">{gmailAviso.texto}</span>
+              <button onClick={() => setGmailAviso(null)} className="font-bold opacity-60 hover:opacity-100" aria-label="Cerrar">✕</button>
+            </div>
+          )}
 
           {/* Búsqueda */}
           <input
