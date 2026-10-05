@@ -97,6 +97,125 @@ export function explicarErrorGoogle(mensaje: string | null | undefined): string 
   return m || "Error desconocido de Google.";
 }
 
+// ── La configuración del cliente OAuth de Google ─────────────────────────────────────────────
+// La pantalla decía «falta configurar Google en Vercel (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+// GOOGLE_REDIRECT_URI)» igual si faltaban las tres que si faltaba una, y no decía QUÉ valor poner
+// en la de redirección, que es la que se escribe mal: tiene que ser la dirección exacta del
+// callback de ESTA instalación, la misma en Vercel y en Google Cloud. Y «Conectar Gmail» mandaba a
+// Google de todos modos, con `client_id=undefined`, a una página de error en inglés que no nombra
+// ninguna variable. El diagnóstico se compone aquí para que el CRM, el correo de facturas y el
+// error del botón digan lo mismo.
+
+/** Las tres variables del cliente OAuth, en el orden en que se crean en Vercel. */
+export const VARIABLES_GOOGLE = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"] as const;
+export type VariableGoogle = (typeof VARIABLES_GOOGLE)[number];
+
+/** El callback del ERP (sirve a los dos buzones): es la ruta que se autoriza en Google Cloud. */
+export const RUTA_CALLBACK_GMAIL = "/api/crm/gmail/callback";
+
+/**
+ * Un valor pegado en Vercel, sin espacios ni saltos de línea en los bordes y sin comillas
+ * envolventes. Son los errores de pegado más comunes —copiar el ID desde el JSON que descarga
+ * Google trae las comillas— y son invisibles en el panel: el valor «se ve bien» y Google lo
+ * rechaza con un `invalid_client` que no dice por qué. Ninguno de los tres valores válidos lleva
+ * comillas ni espacios, así que limpiar no puede estropear uno bueno.
+ */
+export function limpiarValorEnv(v: string | null | undefined): string {
+  const s = String(v ?? "").trim();
+  const m = /^(["'])([\s\S]*)\1$/.exec(s);
+  return m ? m[2].trim() : s;
+}
+
+/** Qué le pasa a GOOGLE_REDIRECT_URI. Solo `otro_sitio` deja conectar: puede ser a propósito. */
+export type ProblemaRedirect = "invalido" | "no_https" | "otra_ruta" | "otro_sitio";
+
+export type DiagnosticoGoogle = {
+  /** Las variables vacías o ausentes, en el orden de VARIABLES_GOOGLE. */
+  faltan: VariableGoogle[];
+  /** Lo que dice GOOGLE_REDIRECT_URI, ya limpio; null si falta. */
+  redirect: string | null;
+  /** El valor exacto que debe tener GOOGLE_REDIRECT_URI para el ERP que se está usando (sale de
+   *  la dirección desde la que se abrió la pantalla); null si no se sabe. */
+  redirect_sugerido: string | null;
+  problema_redirect: ProblemaRedirect | null;
+  /** Con esto NO se puede conectar: falta una variable o el redirect no puede funcionar nunca. */
+  bloquea: boolean;
+  /** La frase entera, con el arreglo; null si no hay nada que decir. */
+  texto: string | null;
+};
+
+const esLocal = (host: string) => host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+/** `www.` no hace otro sitio: Vercel redirige el uno al otro y el callback llega igual. */
+const sinWww = (host: string) => host.toLowerCase().replace(/^www\./, "");
+const enLista = (xs: readonly string[]) =>
+  xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} y ${xs[xs.length - 1]}`;
+
+function urlHttp(v: string | null | undefined): URL | null {
+  if (!v) return null;
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" || u.protocol === "http:" ? u : null;
+  } catch { return null; }
+}
+
+/**
+ * Qué falta o qué está mal en el cliente OAuth, dicho con el arreglo. `origen` es la dirección
+ * desde la que se usa el ERP: de ahí sale el valor exacto de GOOGLE_REDIRECT_URI. Se sugiere
+ * SIEMPRE con https fuera de localhost —Google no acepta otra cosa en producción, y detrás de un
+ * proxy el servidor puede ver `http:` aunque el navegador esté en https—, y por lo mismo se
+ * compara el SITIO (host sin `www.` y puerto), no el protocolo.
+ */
+export function diagnosticarGoogle(
+  env: Partial<Record<VariableGoogle, string | null | undefined>>,
+  origen?: string | null,
+): DiagnosticoGoogle {
+  const faltan = VARIABLES_GOOGLE.filter((k) => !limpiarValorEnv(env[k]));
+  const redirect = limpiarValorEnv(env.GOOGLE_REDIRECT_URI) || null;
+  const base = urlHttp(origen);
+  const redirect_sugerido = base
+    ? `${esLocal(base.hostname) ? base.protocol : "https:"}//${base.host}${RUTA_CALLBACK_GMAIL}`
+    : null;
+  const correcto = redirect_sugerido ?? `https://TU-DOMINIO${RUTA_CALLBACK_GMAIL}`;
+
+  let problema: ProblemaRedirect | null = null;
+  const u = urlHttp(redirect);
+  if (redirect) {
+    if (!u) problema = "invalido";
+    else if (u.protocol !== "https:" && !esLocal(u.hostname)) problema = "no_https";
+    else if (u.pathname.replace(/\/+$/, "") !== RUTA_CALLBACK_GMAIL) problema = "otra_ruta";
+    else if (base && (sinWww(u.hostname) !== sinWww(base.hostname) || u.port !== base.port)) problema = "otro_sitio";
+  }
+
+  const partes: string[] = [];
+  if (faltan.length) {
+    partes.push(`Falta${faltan.length > 1 ? "n" : ""} en Vercel ${enLista(faltan)}.`);
+    if (faltan.includes("GOOGLE_REDIRECT_URI")) {
+      partes.push(`El valor de GOOGLE_REDIRECT_URI es ${correcto} (la misma dirección se autoriza en Google Cloud).`);
+    }
+  }
+  if (problema === "invalido") partes.push(`GOOGLE_REDIRECT_URI («${redirect}») no es una dirección completa: tiene que ser ${correcto}.`);
+  if (problema === "no_https") partes.push(`GOOGLE_REDIRECT_URI («${redirect}») tiene que empezar con https://: ${correcto}.`);
+  if (problema === "otra_ruta") {
+    partes.push(`GOOGLE_REDIRECT_URI («${redirect}») no lleva al ERP: tiene que terminar en ${RUTA_CALLBACK_GMAIL}, o sea ${correcto}.`);
+  }
+  if (problema === "otro_sitio" && u && base) {
+    partes.push(
+      `GOOGLE_REDIRECT_URI apunta a ${u.host} y el ERP se está usando en ${base.host}: al volver de Google se termina en ${u.host}. ` +
+      `Si no es a propósito, cámbiala a ${correcto} y autoriza esa dirección en Google Cloud.`,
+    );
+  }
+  if (partes.length) partes.push("Después de guardar en Vercel hay que hacer Redeploy: las variables solo entran en un despliegue nuevo.");
+
+  return {
+    faltan,
+    redirect,
+    redirect_sugerido,
+    problema_redirect: problema,
+    bloquea: faltan.length > 0 || (problema !== null && problema !== "otro_sitio"),
+    texto: partes.length ? partes.join(" ") : null,
+  };
+}
+
 /** «hace 5 min», «hace 3 h», «hace 2 días» — para la línea de estado. */
 export function haceCuanto(iso: string | null | undefined, ahoraMs: number): string | null {
   if (!iso) return null;

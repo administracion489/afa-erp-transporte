@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { firmarStateGmail, getAuthUrl } from "@/lib/crm-gmail";
+import { firmarStateGmail, getAuthUrl, diagnosticoGoogle, origenPublico } from "@/lib/crm-gmail";
 import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 
 // POST /api/crm/gmail/auth — devuelve la URL de consentimiento de Google con un `state`
@@ -10,6 +10,10 @@ export async function POST(req: NextRequest) {
   const auth = await verificarUsuarioApiAlguno(req, ["crm", "configuracion"]);
   if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
   try {
+    // Lo que falta se dice AQUÍ: sin las variables, Google contesta con una página de error en
+    // inglés («Missing required parameter: client_id») que no nombra ninguna.
+    const d = diagnosticoGoogle(origenPublico(req));
+    if (d.bloquea) return NextResponse.json({ error: d.texto }, { status: 400 });
     return NextResponse.json({ url: getAuthUrl(firmarStateGmail(auth.userId)) });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });

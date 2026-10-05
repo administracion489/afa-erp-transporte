@@ -6,7 +6,8 @@ import { createClient } from "@supabase/supabase-js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import {
   diasRecuperacion, marcadorVencido, remitenteDe, esRemitentePropio, esDeLaBandeja, explicarErrorGoogle,
-  MAX_MENSAJES_POR_LECTURA,
+  limpiarValorEnv, diagnosticarGoogle, MAX_MENSAJES_POR_LECTURA,
+  type DiagnosticoGoogle, type ProblemaRedirect, type VariableGoogle,
 } from "@/lib/crm-gmail-reglas";
 
 const supabaseAdmin = () =>
@@ -62,9 +63,39 @@ export function verificarStateGmail(state: unknown): string | null {
   return leerStateGmail(state)?.uid ?? null;
 }
 
-/** ¿Están las tres variables del cliente OAuth? Sin ellas Google contesta un error que no las nombra. */
+/** Las credenciales del cliente OAuth, limpias (ver `limpiarValorEnv`). TODO el flujo las lee de
+ *  aquí: si el inicio limpiara el redirect y el canje no, Google rechazaría el canje por no
+ *  coincidir con el redirect del inicio. */
+function credencialesGoogle() {
+  return {
+    id: limpiarValorEnv(process.env.GOOGLE_CLIENT_ID),
+    secreto: limpiarValorEnv(process.env.GOOGLE_CLIENT_SECRET),
+    redirect: limpiarValorEnv(process.env.GOOGLE_REDIRECT_URI),
+  };
+}
+
+/** Qué falta o qué está mal en el cliente OAuth (lib/crm-gmail-reglas.ts), con el arreglo.
+ *  `origen` = la dirección desde la que se usa el ERP (ver `origenPublico`). */
+export function diagnosticoGoogle(origen?: string | null): DiagnosticoGoogle {
+  return diagnosticarGoogle({
+    GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI,
+  }, origen);
+}
+
+/** ¿Se puede mandar a Google? Sin las tres variables (o con un redirect que no puede funcionar)
+ *  Google contesta un error que no nombra ninguna. */
 export function googleOAuthConfigurado(): boolean {
-  return !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REDIRECT_URI);
+  return !diagnosticoGoogle().bloquea;
+}
+
+/** La dirección pública desde la que se abrió la pantalla. Detrás del proxy de Vercel el host
+ *  llega en `x-forwarded-host`; `nextUrl` es el respaldo. Solo sirve para SUGERIR el redirect
+ *  y avisar si el configurado lleva a otro sitio: no decide ningún permiso. */
+export function origenPublico(req: { headers: { get(n: string): string | null }; nextUrl: { protocol: string; host: string } }): string {
+  const host = (req.headers.get("x-forwarded-host") ?? "").split(",")[0].trim() || req.nextUrl.host;
+  return `${req.nextUrl.protocol}//${host}`;
 }
 
 export const SCOPES_CRM = "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send";
@@ -72,10 +103,11 @@ export const SCOPES_CRM = "https://www.googleapis.com/auth/gmail.modify https://
 export const SCOPE_SOLO_LECTURA = "https://www.googleapis.com/auth/gmail.readonly";
 
 export function getAuthUrl(state: string, opts: { scope?: string; elegirCuenta?: boolean } = {}): string {
+  const g = credencialesGoogle();
   const params = new URLSearchParams({
     state,
-    client_id: process.env.GOOGLE_CLIENT_ID!,
-    redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
+    client_id: g.id,
+    redirect_uri: g.redirect,
     response_type: "code",
     scope: opts.scope ?? SCOPES_CRM,
     access_type: "offline",
@@ -88,14 +120,15 @@ export function getAuthUrl(state: string, opts: { scope?: string; elegirCuenta?:
 
 /** Canjea el `code` del callback. Sin `refresh_token` no hay conexión duradera: se dice. */
 export async function canjearCode(code: string): Promise<{ refresh_token: string; access_token: string }> {
+  const g = credencialesGoogle();
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       code,
-      client_id: process.env.GOOGLE_CLIENT_ID!,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET!,
-      redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
+      client_id: g.id,
+      client_secret: g.secreto,
+      redirect_uri: g.redirect,
       grant_type: "authorization_code",
     }),
   });
@@ -121,13 +154,14 @@ export async function exchangeCode(code: string, db: any = supabaseAdmin()): Pro
 
 /** refresh_token → access_token de una hora. */
 export async function refrescarToken(refreshToken: string): Promise<string> {
+  const g = credencialesGoogle();
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       refresh_token: refreshToken,
-      client_id: process.env.GOOGLE_CLIENT_ID!,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET!,
+      client_id: g.id,
+      client_secret: g.secreto,
       grant_type: "refresh_token",
     }),
   });
@@ -470,9 +504,12 @@ export async function syncGmailInbox(db: any = supabaseAdmin()): Promise<Resulta
   }
 }
 
-/** Lo que la pantalla del CRM enseña del Gmail, sin llamar a Google. */
-export async function estadoGmailCrm(db = supabaseAdmin()): Promise<{
+/** Lo que la pantalla del CRM enseña del Gmail, sin llamar a Google. `origen` = desde dónde se
+ *  usa el ERP: de ahí sale el valor exacto que tiene que llevar GOOGLE_REDIRECT_URI. */
+export async function estadoGmailCrm(db: any = supabaseAdmin(), opts: { origen?: string | null } = {}): Promise<{
   configurado: boolean;
+  /** Qué falta o qué está mal en el cliente OAuth, con el arreglo (lib/crm-gmail-reglas.ts). */
+  google: { faltan: VariableGoogle[]; redirect_sugerido: string | null; problema: ProblemaRedirect | null; texto: string | null };
   conectado: boolean;
   email: string | null;
   ultima_sync: string | null;
@@ -484,8 +521,10 @@ export async function estadoGmailCrm(db = supabaseAdmin()): Promise<{
   const cfg = await leerConfigCrm(db, [
     "gmail_refresh_token", "gmail_email", "gmail_ultima_sync", "gmail_ultima_lectura", "gmail_ultimo_error", "gmail_ultimo_error_en", "gmail_ultimo_aviso",
   ]);
+  const d = diagnosticoGoogle(opts.origen);
   return {
-    configurado: googleOAuthConfigurado(),
+    configurado: !d.bloquea,
+    google: { faltan: d.faltan, redirect_sugerido: d.redirect_sugerido, problema: d.problema_redirect, texto: d.texto },
     conectado: !!cfg.get("gmail_refresh_token"),
     email: cfg.get("gmail_email") || null,
     // Lo que se enseña es la última lectura que FUNCIONÓ, completa o no; `gmail_ultima_sync` es
@@ -496,6 +535,6 @@ export async function estadoGmailCrm(db = supabaseAdmin()): Promise<{
     ultimo_aviso: cfg.get("gmail_ultimo_aviso") || null,
     // No es un secreto: es lo que hay que cotejar con «URI de redireccionamiento autorizados» en
     // Google Cloud cuando Google contesta redirect_uri_mismatch.
-    redirect_uri: process.env.GOOGLE_REDIRECT_URI ?? null,
+    redirect_uri: d.redirect,
   };
 }

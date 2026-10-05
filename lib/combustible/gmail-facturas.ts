@@ -19,7 +19,8 @@
 // Se borra la credencial del ERP; quitar el permiso en la cuenta de Google es un paso aparte.
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { canjearCode, refrescarToken, perfilGmail, crmGmailConectado, getAccessToken, googleOAuthConfigurado } from "@/lib/crm-gmail";
+import { canjearCode, refrescarToken, perfilGmail, crmGmailConectado, getAccessToken, diagnosticoGoogle } from "@/lib/crm-gmail";
+import type { ProblemaRedirect, VariableGoogle } from "@/lib/crm-gmail-reglas";
 import { cifrar, descifrar, cifradoDisponible } from "@/lib/meta-tokens";
 import { elegirConexion, type EstadoConexion } from "@/lib/combustible/correo-conexion";
 
@@ -33,9 +34,26 @@ async function leerClaves(sb: any): Promise<Map<string, string>> {
   return new Map(((data as any[]) ?? []).map((r) => [String(r.clave), String(r.valor ?? "")]));
 }
 
-/** Lo que la pantalla necesita saber ANTES de mandar a Google. */
-export function requisitosConexion(): { google: boolean; cifrado: boolean } {
-  return { google: googleOAuthConfigurado(), cifrado: cifradoDisponible() };
+/** Lo que la pantalla necesita saber ANTES de mandar a Google. El texto de Google es el MISMO
+ *  diagnóstico que enseña el CRM (son las mismas variables): qué falta y el valor exacto del
+ *  redirect para la dirección desde la que se usa el ERP (`origen`). */
+export function requisitosConexion(origen?: string | null): {
+  google: boolean;
+  cifrado: boolean;
+  google_texto: string | null;
+  google_faltan: VariableGoogle[];
+  google_problema: ProblemaRedirect | null;
+  redirect_sugerido: string | null;
+} {
+  const d = diagnosticoGoogle(origen);
+  return {
+    google: !d.bloquea,
+    cifrado: cifradoDisponible(),
+    google_texto: d.texto,
+    google_faltan: d.faltan,
+    google_problema: d.problema_redirect,
+    redirect_sugerido: d.redirect_sugerido,
+  };
 }
 
 /** Canjea el code del callback y guarda la conexión cifrada. Devuelve el correo conectado. */

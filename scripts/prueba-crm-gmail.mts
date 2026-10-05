@@ -10,9 +10,12 @@
 // el escenario dejó de ser el que se rompió.
 import {
   diasRecuperacion, marcadorVencido, remitenteDe, esRemitentePropio, esDeLaBandeja, explicarErrorGoogle, haceCuanto,
+  limpiarValorEnv, diagnosticarGoogle, VARIABLES_GOOGLE, RUTA_CALLBACK_GMAIL,
   DIAS_VENTANA_INICIAL, DIAS_VENTANA_MAX, MAX_MENSAJES_POR_LECTURA,
 } from "../lib/crm-gmail-reglas";
-import { syncGmailInbox, exchangeCode } from "../lib/crm-gmail";
+import {
+  syncGmailInbox, exchangeCode, canjearCode, getAuthUrl, googleOAuthConfigurado, diagnosticoGoogle, origenPublico,
+} from "../lib/crm-gmail";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -81,6 +84,7 @@ class Gmail {
   historyId = "900";
   token = "ok";                     // "ok" | "revocado"
   pedidos: string[] = [];
+  cuerpoToken = "";                 // lo último que se mandó a /token (para ver qué redirect lleva)
 }
 let G = new Gmail();
 const json = (status: number, data: any) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
@@ -89,6 +93,7 @@ globalThis.fetch = (async (url: any, init?: any) => {
   G.pedidos.push(u);
   if (u.startsWith("https://oauth2.googleapis.com/token")) {
     const cuerpo = String(init?.body ?? "");
+    G.cuerpoToken = cuerpo;
     if (/grant_type=authorization_code/.test(cuerpo)) return json(200, { refresh_token: "RT-nuevo", access_token: "AT" });
     return G.token === "ok" ? json(200, { access_token: "AT" }) : json(400, { error: "invalid_grant", error_description: "Token has been expired or revoked." });
   }
@@ -275,6 +280,96 @@ chk("bandeja: INBOX sí, SPAM/papelera/borrador no, enviado no",
 chk("API apagada se nombra", /Gmail API/.test(explicarErrorGoogle("Gmail API has not been used in project 123")));
 chk("un error desconocido pasa tal cual", explicarErrorGoogle("algo raro") === "algo raro");
 chk("hace cuánto", haceCuanto(new Date(AHORA - 5 * 60_000).toISOString(), AHORA) === "hace 5 min" && haceCuanto(null, AHORA) === null);
+
+// ── 7. La configuración de Google se DICE: qué falta y el valor exacto ───────────────────────
+// Lo reportado con la pantalla delante: «falta configurar Google en Vercel (las tres)», sin decir
+// cuál faltaba ni qué valor llevaba la de redirección, y el botón mandando igual a Google.
+console.log("\n7. Configuración de Google");
+{
+  const ORIGEN = "https://transportesafa.com";
+  const BIEN = `${ORIGEN}${RUTA_CALLBACK_GMAIL}`;
+  const completo = { GOOGLE_CLIENT_ID: "123-abc.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET: "GOCSPX-secreto", GOOGLE_REDIRECT_URI: BIEN };
+
+  const nada = diagnosticarGoogle({}, ORIGEN);
+  chk("sin ninguna: faltan las tres, en el orden en que se crean", nada.faltan.join() === VARIABLES_GOOGLE.join() && nada.bloquea);
+  chk("…y la frase da el valor EXACTO del redirect para esta instalación", nada.texto!.includes(BIEN), nada.texto!);
+  chk("…y recuerda el Redeploy", /Redeploy/.test(nada.texto!));
+
+  const sinSecreto = diagnosticarGoogle({ ...completo, GOOGLE_CLIENT_SECRET: "" }, ORIGEN);
+  chk("si falta UNA, se nombra esa y ninguna otra",
+    sinSecreto.faltan.join() === "GOOGLE_CLIENT_SECRET" && /^Falta en Vercel GOOGLE_CLIENT_SECRET\./.test(sinSecreto.texto!), sinSecreto.texto!);
+  chk("…y no se repite el redirect que ya está bien", !sinSecreto.texto!.includes(RUTA_CALLBACK_GMAIL));
+
+  const ok = diagnosticarGoogle(completo, ORIGEN);
+  chk("con las tres bien: nada que decir y se puede conectar", !ok.bloquea && ok.texto === null && ok.problema_redirect === null);
+  chk("`www.` no es otro sitio (Vercel redirige el uno al otro)", diagnosticarGoogle(completo, "https://www.transportesafa.com").texto === null);
+  chk("la barra final no rompe la ruta", diagnosticarGoogle({ ...completo, GOOGLE_REDIRECT_URI: BIEN + "/" }, ORIGEN).texto === null);
+
+  const sinEsquema = diagnosticarGoogle({ ...completo, GOOGLE_REDIRECT_URI: "transportesafa.com" + RUTA_CALLBACK_GMAIL }, ORIGEN);
+  chk("sin https:// no es una dirección: bloquea y da la buena", sinEsquema.problema_redirect === "invalido" && sinEsquema.bloquea && sinEsquema.texto!.includes(BIEN));
+  const http = diagnosticarGoogle({ ...completo, GOOGLE_REDIRECT_URI: "http://transportesafa.com" + RUTA_CALLBACK_GMAIL }, ORIGEN);
+  chk("http:// fuera de localhost: bloquea", http.problema_redirect === "no_https" && http.bloquea);
+  chk("…pero localhost en desarrollo sí vale",
+    diagnosticarGoogle({ ...completo, GOOGLE_REDIRECT_URI: "http://localhost:3000" + RUTA_CALLBACK_GMAIL }, "http://localhost:3000").texto === null);
+  const ruta = diagnosticarGoogle({ ...completo, GOOGLE_REDIRECT_URI: ORIGEN + "/api/gmail/callback" }, ORIGEN);
+  chk("otra ruta no llega al ERP: bloquea y da la buena", ruta.problema_redirect === "otra_ruta" && ruta.bloquea && ruta.texto!.includes(BIEN));
+  const otro = diagnosticarGoogle({ ...completo, GOOGLE_REDIRECT_URI: "https://afa-erp-transporte.vercel.app" + RUTA_CALLBACK_GMAIL }, ORIGEN);
+  chk("otro sitio AVISA sin bloquear (puede ser a propósito)",
+    otro.problema_redirect === "otro_sitio" && !otro.bloquea && /vercel\.app/.test(otro.texto!) && otro.texto!.includes(BIEN));
+  chk("detrás de un proxy que se ve como http, la sugerencia sigue siendo https", diagnosticarGoogle({}, "http://transportesafa.com").redirect_sugerido === BIEN);
+  chk("…y un redirect https no pasa a ser «otro sitio» por eso", diagnosticarGoogle(completo, "http://transportesafa.com").texto === null);
+  chk("sin origen se dice dónde va el dominio, sin inventarlo", diagnosticarGoogle({}).texto!.includes(`https://TU-DOMINIO${RUTA_CALLBACK_GMAIL}`));
+
+  // El pegado: espacios, salto de línea y comillas (copiar desde el JSON de Google las trae).
+  chk("limpia espacios, saltos y comillas",
+    limpiarValorEnv('  "123-abc.apps.googleusercontent.com"\n') === "123-abc.apps.googleusercontent.com" && limpiarValorEnv("'x'") === "x" && limpiarValorEnv(undefined) === "");
+  chk("un valor de solo espacios cuenta como faltante", diagnosticarGoogle({ ...completo, GOOGLE_CLIENT_ID: "   " }, ORIGEN).faltan.join() === "GOOGLE_CLIENT_ID");
+  chk("un redirect pegado con comillas se lee bien", diagnosticarGoogle({ ...completo, GOOGLE_REDIRECT_URI: ` "${BIEN}" ` }, ORIGEN).texto === null);
+
+  // Barrido: la frase nombra como faltante EXACTAMENTE lo que falta, y bloquea ⟺ (falta algo ∨ el
+  // redirect no puede funcionar). Corolario: no bloquea siempre (eso cumpliría lo demás trivialmente).
+  const valores = {
+    id: ["", "  ", "id"], sec: ["", "GOCSPX-x"],
+    red: ["", "basura", "http://transportesafa.com" + RUTA_CALLBACK_GMAIL, ORIGEN + "/otra", BIEN, "https://otro.pe" + RUTA_CALLBACK_GMAIL],
+  };
+  let bien = true, conectables = 0, n = 0;
+  for (const id of valores.id) for (const sec of valores.sec) for (const red of valores.red) for (const org of [ORIGEN, null]) {
+    n++;
+    const d = diagnosticarGoogle({ GOOGLE_CLIENT_ID: id, GOOGLE_CLIENT_SECRET: sec, GOOGLE_REDIRECT_URI: red }, org);
+    const nombradas = /^Faltan? en Vercel ([^.]*)\./.exec(d.texto ?? "")?.[1] ?? "";
+    for (const v of VARIABLES_GOOGLE) if (nombradas.includes(v) !== d.faltan.includes(v)) bien = false;
+    const imposible = d.problema_redirect !== null && d.problema_redirect !== "otro_sitio";
+    if (d.bloquea !== (d.faltan.length > 0 || imposible)) bien = false;
+    if ((d.texto === null) !== (d.faltan.length === 0 && d.problema_redirect === null)) bien = false;
+    if (!d.bloquea) conectables++;
+  }
+  chk("barrido: se nombra exactamente lo que falta y solo bloquea lo que no puede funcionar", bien, `${n} combinaciones`);
+  chk("corolario: hay combinaciones que sí dejan conectar", conectables > 0, `${conectables}`);
+
+  // El inicio y el canje leen el MISMO valor limpio: si uno limpiara y el otro no, Google
+  // rechazaría el canje porque el redirect no coincide con el del inicio.
+  const guardado = VARIABLES_GOOGLE.map((k) => [k, process.env[k]] as const);
+  process.env.GOOGLE_CLIENT_ID = ' "123-abc.apps.googleusercontent.com" ';
+  process.env.GOOGLE_CLIENT_SECRET = "GOCSPX-secreto\n";
+  process.env.GOOGLE_REDIRECT_URI = `${BIEN}\n`;
+  const p = new URL(getAuthUrl("st")).searchParams;
+  chk("la URL de Google lleva los valores limpios", p.get("client_id") === "123-abc.apps.googleusercontent.com" && p.get("redirect_uri") === BIEN);
+  G = new Gmail();
+  await canjearCode("CODE");
+  const cuerpo = new URLSearchParams(G.cuerpoToken);
+  chk("…y el canje manda el MISMO redirect, y el secreto sin el salto de línea",
+    cuerpo.get("redirect_uri") === p.get("redirect_uri") && cuerpo.get("client_secret") === "GOCSPX-secreto" && cuerpo.get("client_id") === p.get("client_id"));
+  chk("con las tres puestas, el servidor se da por configurado", googleOAuthConfigurado() && diagnosticoGoogle(ORIGEN).texto === null);
+  delete process.env.GOOGLE_CLIENT_SECRET;
+  chk("…y sin el secreto no, nombrándolo", !googleOAuthConfigurado() && diagnosticoGoogle(ORIGEN).faltan.join() === "GOOGLE_CLIENT_SECRET");
+  for (const [k, v] of guardado) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+
+  // De dónde sale el origen: detrás del proxy de Vercel, el host público viene en x-forwarded-host.
+  const req = (h: Record<string, string>) => ({ headers: { get: (k: string) => h[k] ?? null }, nextUrl: { protocol: "https:", host: "interno.vercel.app" } });
+  chk("el origen público sale de x-forwarded-host", origenPublico(req({ "x-forwarded-host": "transportesafa.com" })) === ORIGEN);
+  chk("…el primero si viene una lista", origenPublico(req({ "x-forwarded-host": "transportesafa.com, proxy.interno" })) === ORIGEN);
+  chk("…y sin la cabecera, el de la petición", origenPublico(req({})) === "https://interno.vercel.app");
+}
 
 Date.now = realNow;
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde.");

@@ -12,7 +12,12 @@ import type { CodigoConexion } from "@/lib/combustible/correo-conexion";
 type Estado = {
   ok: boolean;
   error?: string;
-  requisitos: { google: boolean; cifrado: boolean };
+  // `google_texto`: qué falta del cliente OAuth y el valor exacto del redirect (el MISMO
+  // diagnóstico que enseña el CRM, lib/crm-gmail-reglas.ts).
+  requisitos: {
+    google: boolean; cifrado: boolean;
+    google_texto?: string | null; google_faltan?: string[]; google_problema?: string | null; redirect_sugerido?: string | null;
+  };
   conexion: { codigo: CodigoConexion; de: "facturas" | "crm" | null; email: string | null; detalle: string | null; fuente: string | null; conectado_en: string | null };
   descripcion: { titulo: string; detalle: string; tono: "ok" | "info" | "alerta" };
 };
@@ -178,9 +183,17 @@ export default function CorreoFacturas({ onCodigo }: { onCodigo?: (c: CodigoCone
           <b>Antes de conectar falta un paso en Vercel:</b> Settings → Environment Variables → agrega <code>TOKEN_ENCRYPTION_KEY</code> con una frase larga cualquiera (por ejemplo, 40 letras al azar) → <b>Redeploy</b>. Es la llave con la que el ERP guarda cifrada la credencial del correo; sin ella no la guarda.
         </div>
       )}
-      {!requisitos.google && (
-        <div className="text-xs text-amber-900 bg-amber-100 rounded-lg p-2">
-          <b>Falta configurar Google en Vercel</b> (<code>GOOGLE_CLIENT_ID</code>, <code>GOOGLE_CLIENT_SECRET</code>, <code>GOOGLE_REDIRECT_URI</code>): son las mismas que usa el Gmail del CRM.
+      {(!requisitos.google || requisitos.google_problema === "otro_sitio") && (
+        <div className="text-xs text-amber-900 bg-amber-100 rounded-lg p-2 space-y-1">
+          <div>
+            <b>{requisitos.google ? "Ojo con Google:" : "Falta configurar Google:"}</b>{" "}
+            {requisitos.google_texto ?? "faltan GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET y GOOGLE_REDIRECT_URI en Vercel."}{" "}
+            Son las mismas variables que usa el Gmail del CRM.
+          </div>
+          {/* Solo cuando esa variable falta o está mal: con ella bien, sería ruido. */}
+          {requisitos.redirect_sugerido && (requisitos.google_faltan?.includes("GOOGLE_REDIRECT_URI") || requisitos.google_problema) && (
+            <div>Valor de <code>GOOGLE_REDIRECT_URI</code>: <code className="bg-white rounded px-1 select-all break-all">{requisitos.redirect_sugerido}</code></div>
+          )}
         </div>
       )}
       {conexion.codigo !== "facturas" && puedeConectar && (

@@ -27,6 +27,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { errorDe, leerRespuesta, type Publicador } from "./tipos";
+import { limpiarValorEnv } from "@/lib/crm-gmail-reglas";
 
 const OAUTH = "https://oauth2.googleapis.com/token";
 const SUBIDA = "https://www.googleapis.com/upload/youtube/v3/videos";
@@ -42,8 +43,10 @@ const MAX_TITULO = 100;
  * mismo proyecto es cómo se revoca el que no era.
  */
 async function tokenDeAcceso(refresh: string): Promise<{ token?: string; error?: string }> {
-  const id = process.env.GOOGLE_CLIENT_ID;
-  const secret = process.env.GOOGLE_CLIENT_SECRET;
+  // Limpias igual que en el Gmail (espacios y comillas del pegado): con las mismas variables, que
+  // una funcione y la otra no por una comilla sería un misterio.
+  const id = limpiarValorEnv(process.env.GOOGLE_CLIENT_ID);
+  const secret = limpiarValorEnv(process.env.GOOGLE_CLIENT_SECRET);
   if (!id || !secret) return { error: "Faltan GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET en el entorno." };
 
   const res = await fetch(OAUTH, {
