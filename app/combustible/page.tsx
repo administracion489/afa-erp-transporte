@@ -229,6 +229,13 @@ export default function CombustiblePage() {
   const [tanqueFuente, setTanqueFuente] = useState<string | null>(null);
   const [expandidoId, setExpandidoId] = useState<number | null>(null);
   const [vista,       setVista]       = useState<VistaActiva>("historial");
+  // `?vista=facturas` abre directo esa pestaña: es adonde vuelve Google después de conectar el
+  // correo de facturas. Se lee de window (no useSearchParams) para no exigir un Suspense a la página.
+  useEffect(() => {
+    try {
+      if (new URLSearchParams(window.location.search).get("vista") === "facturas") setVista("facturas");
+    } catch { /* sin URL legible se queda en el historial */ }
+  }, []);
   const [granularidad,setGranularidad]= useState<GranPeriodo>("mes");
   const [busqueda,    setBusqueda]    = useState("");
   const [filtroVeh,   setFiltroVeh]   = useState("todos");

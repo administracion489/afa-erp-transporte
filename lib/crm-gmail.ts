@@ -22,42 +22,68 @@ const SECRETO_STATE = createHash("sha256")
   .digest();
 const TTL_STATE_MS = 10 * 60 * 1000;
 
-export function firmarStateGmail(usuarioId: string): string {
+// ── Para QUÉ buzón es la conexión ─────────────────────────────────────────
+// El ERP conecta DOS buzones con el MISMO cliente OAuth y el MISMO callback (el único
+// `GOOGLE_REDIRECT_URI` registrado en Google Cloud): el del CRM, que lee y envía, y el de las
+// facturas de proveedor (/combustible → Facturas), que solo lee. El destino viaja DENTRO del
+// `state` firmado: como parámetro suelto, cualquiera podría convertir una conexión del CRM en la
+// del correo de facturas —o al revés— cambiando la URL.
+export type DestinoGmail = "crm" | "facturas";
+
+export function firmarStateGmail(usuarioId: string, destino: DestinoGmail = "crm"): string {
   const payload = Buffer.from(JSON.stringify({
-    uid: usuarioId, exp: Date.now() + TTL_STATE_MS, n: randomBytes(8).toString("hex"),
+    uid: usuarioId, exp: Date.now() + TTL_STATE_MS, n: randomBytes(8).toString("hex"), d: destino,
   })).toString("base64url");
   const firma = createHmac("sha256", SECRETO_STATE).update(payload).digest("base64url");
   return `${payload}.${firma}`;
 }
 
-/** Devuelve el usuario que inició el flujo si el `state` es auténtico y vigente; null si no. */
-export function verificarStateGmail(state: unknown): string | null {
+/** Quién inició el flujo y para qué buzón, si el `state` es auténtico y vigente; null si no.
+ *  Un `state` sin destino (firmado antes de que existiera) es del CRM: era el único que había. */
+export function leerStateGmail(state: unknown): { uid: string; destino: DestinoGmail } | null {
   if (typeof state !== "string" || !state.includes(".")) return null;
   const [payload, firma] = state.split(".");
   try {
     const esperada = createHmac("sha256", SECRETO_STATE).update(payload).digest();
     const recibida = Buffer.from(firma, "base64url");
     if (esperada.length !== recibida.length || !timingSafeEqual(esperada, recibida)) return null;
-    const { uid, exp } = JSON.parse(Buffer.from(payload, "base64url").toString());
+    const { uid, exp, d } = JSON.parse(Buffer.from(payload, "base64url").toString());
     if (typeof uid !== "string" || typeof exp !== "number" || Date.now() > exp) return null;
-    return uid;
+    return { uid, destino: d === "facturas" ? "facturas" : "crm" };
   } catch { return null; }
 }
 
-export function getAuthUrl(state: string): string {
+/** Devuelve el usuario que inició el flujo si el `state` es auténtico y vigente; null si no. */
+export function verificarStateGmail(state: unknown): string | null {
+  return leerStateGmail(state)?.uid ?? null;
+}
+
+/** ¿Están las tres variables del cliente OAuth? Sin ellas Google contesta un error que no las nombra. */
+export function googleOAuthConfigurado(): boolean {
+  return !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REDIRECT_URI);
+}
+
+export const SCOPES_CRM = "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send";
+/** El correo de facturas solo se LEE: ni envía, ni borra, ni marca. El permiso mínimo. */
+export const SCOPE_SOLO_LECTURA = "https://www.googleapis.com/auth/gmail.readonly";
+
+export function getAuthUrl(state: string, opts: { scope?: string; elegirCuenta?: boolean } = {}): string {
   const params = new URLSearchParams({
     state,
     client_id: process.env.GOOGLE_CLIENT_ID!,
     redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
     response_type: "code",
-    scope: "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send",
+    scope: opts.scope ?? SCOPES_CRM,
     access_type: "offline",
-    prompt: "consent",
+    // Con varias cuentas de Google abiertas en el navegador, Google puede elegir sola la que
+    // tenga a mano —la del CRM—, y el correo de facturas acabaría conectado al buzón equivocado.
+    prompt: opts.elegirCuenta ? "select_account consent" : "consent",
   });
   return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 }
 
-export async function exchangeCode(code: string): Promise<void> {
+/** Canjea el `code` del callback. Sin `refresh_token` no hay conexión duradera: se dice. */
+export async function canjearCode(code: string): Promise<{ refresh_token: string; access_token: string }> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -70,31 +96,54 @@ export async function exchangeCode(code: string): Promise<void> {
     }),
   });
   const data = await res.json();
-  if (!res.ok || !data.refresh_token) throw new Error(data.error_description ?? "OAuth error");
+  if (!res.ok || !data.refresh_token) throw new Error(data.error_description ?? data.error ?? "OAuth error");
+  return { refresh_token: data.refresh_token, access_token: data.access_token };
+}
 
+export async function exchangeCode(code: string): Promise<void> {
+  const data = await canjearCode(code);
   await supabaseAdmin()
     .from("crm_config")
     .upsert({ clave: "gmail_refresh_token", valor: data.refresh_token, updated_at: new Date().toISOString() });
 }
 
-export async function getAccessToken(): Promise<string> {
-  const db = supabaseAdmin();
-  const { data } = await db.from("crm_config").select("valor").eq("clave", "gmail_refresh_token").maybeSingle();
-  if (!data?.valor) throw new Error("Gmail no autorizado — conéctalo desde /crm (botón «Conectar Gmail»)");
-
+/** refresh_token → access_token de una hora. */
+export async function refrescarToken(refreshToken: string): Promise<string> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      refresh_token: data.valor,
+      refresh_token: refreshToken,
       client_id: process.env.GOOGLE_CLIENT_ID!,
       client_secret: process.env.GOOGLE_CLIENT_SECRET!,
       grant_type: "refresh_token",
     }),
   });
   const token = await res.json();
-  if (!res.ok) throw new Error(token.error_description ?? "Error renovando token Gmail");
+  if (!res.ok) throw new Error(token.error_description ?? token.error ?? "Error renovando token Gmail");
   return token.access_token;
+}
+
+/** La dirección del buzón al que pertenece un token (para decir QUÉ correo se está leyendo). */
+export async function perfilGmail(accessToken: string): Promise<string | null> {
+  const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const j = await res.json().catch(() => ({}));
+  return res.ok && typeof j.emailAddress === "string" ? j.emailAddress : null;
+}
+
+/** ¿Hay un Gmail conectado al CRM? (sin gastar una llamada a Google). */
+export async function crmGmailConectado(): Promise<boolean> {
+  const { data } = await supabaseAdmin().from("crm_config").select("valor").eq("clave", "gmail_refresh_token").maybeSingle();
+  return !!data?.valor;
+}
+
+export async function getAccessToken(): Promise<string> {
+  const db = supabaseAdmin();
+  const { data } = await db.from("crm_config").select("valor").eq("clave", "gmail_refresh_token").maybeSingle();
+  if (!data?.valor) throw new Error("Gmail no autorizado — conéctalo desde /crm (botón «Conectar Gmail»)");
+  return refrescarToken(data.valor);
 }
 
 // ── Enviar email ──────────────────────────────────────────────────────────

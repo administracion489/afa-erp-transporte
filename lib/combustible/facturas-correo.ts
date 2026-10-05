@@ -1,6 +1,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 // lib/combustible/facturas-correo.ts — SOLO SERVIDOR. Trae las facturas de combustible del
-// Gmail conectado en /crm, las lee y las concilia LÍNEA POR LÍNEA contra `combustible`.
+// CORREO DE FACTURAS (lib/combustible/gmail-facturas.ts; si no hay uno, el Gmail del CRM), las
+// lee y las concilia LÍNEA POR LÍNEA contra `combustible`.
 //
 //   correo → adjunto XML (SUNAT, preferido) o PDF (visión, respaldo) → radar_facturas
 //          → documentos_compra (una vez, por la llave fiscal)
@@ -16,7 +17,8 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import * as XLSX from "xlsx";
-import { getAccessToken } from "@/lib/crm-gmail";
+import { conexionCorreoFacturas } from "@/lib/combustible/gmail-facturas";
+import { describirConexion } from "@/lib/combustible/correo-conexion";
 import { parseUblFactura, MODELO_VISION, type FacturaExtraida } from "@/lib/contabilidad/factura-ia";
 import { normalizarTipoCombustible } from "@/lib/combustible-tipos";
 import {
@@ -382,18 +384,71 @@ export type ResumenSync = {
   registradas: number;
   por_revisar: number;
   detalle: { asunto: string; estado: string; error?: string }[];
+  /** De QUÉ buzón se leyó: sin esto, «0 correos» no dice si el filtro está mal o el buzón es otro. */
+  correo?: { email: string | null; fuente: "facturas" | "crm" | null };
 };
+
+/** El token del buzón que toca, o el motivo (con la misma frase que la pantalla) de por qué no. */
+async function tokenDeLectura(sb: any): Promise<{ token: string; email: string | null; fuente: "facturas" | "crm" } | { error: string }> {
+  const con = await conexionCorreoFacturas(sb);
+  if (!con.token || !con.fuente) {
+    const d = describirConexion(con);
+    return { error: `${d.titulo}. ${d.detalle}` };
+  }
+  return { token: con.token, email: con.email, fuente: con.fuente };
+}
+
+/** La consulta de Gmail que de verdad se corre: el filtro de la cuenta + la ventana de días. */
+export function consultaGmail(filtro: string | null | undefined, dias = 45): string {
+  return `${(filtro || "").trim() || "has:attachment"} newer_than:${dias}d`;
+}
+
+export type MuestraFiltro = {
+  ok: boolean;
+  error?: string;
+  correo?: { email: string | null; fuente: "facturas" | "crm" | null };
+  consulta: string;
+  estimado: number;
+  mensajes: { id: string; fecha: string | null; de: string; asunto: string; adjuntos: string[] }[];
+};
+
+/** «Probar filtro»: qué correos encontraría la sincronización, SIN procesar ninguno. */
+export async function probarFiltro(sb: any, filtro: string | null | undefined, max = 10): Promise<MuestraFiltro> {
+  const consulta = consultaGmail(filtro);
+  const t = await tokenDeLectura(sb);
+  if ("error" in t) return { ok: false, error: t.error, consulta, estimado: 0, mensajes: [] };
+  const j = await gget(t.token, `/messages?maxResults=${max}&q=${encodeURIComponent(consulta)}`);
+  const mensajes: MuestraFiltro["mensajes"] = [];
+  for (const m of (j.messages ?? []).slice(0, max)) {
+    try {
+      const msg = await gget(t.token, `/messages/${m.id}?format=full`);
+      const hs = msg.payload?.headers;
+      mensajes.push({
+        id: m.id,
+        fecha: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : null,
+        de: header(hs, "from"),
+        asunto: header(hs, "subject") || "(sin asunto)",
+        adjuntos: adjuntosDe(msg.payload).map((a) => a.nombre).filter(Boolean),
+      });
+    } catch { /* un correo que no se pudo abrir no tumba la muestra */ }
+  }
+  return {
+    ok: true, consulta, mensajes,
+    estimado: Number(j.resultSizeEstimate ?? mensajes.length),
+    correo: { email: t.email, fuente: t.fuente },
+  };
+}
 
 export async function sincronizarFacturas(
   sb: any, cuenta: FilaCuenta, hoy: string, opts: { dias?: number; max?: number } = {},
 ): Promise<ResumenSync> {
   const res: ResumenSync = { ok: true, correos_vistos: 0, nuevas: 0, reconciliadas: 0, registradas: 0, por_revisar: 0, detalle: [] };
-  let token: string;
-  try { token = await getAccessToken(); }
-  catch (e: any) { return { ...res, ok: false, error: `Gmail: ${e.message}` }; }
+  const t = await tokenDeLectura(sb);
+  if ("error" in t) return { ...res, ok: false, error: t.error };
+  const token = t.token;
+  res.correo = { email: t.email, fuente: t.fuente };
 
-  const dias = opts.dias ?? 45;
-  const q = `${cuenta.correo_filtro || "has:attachment"} newer_than:${dias}d`;
+  const q = consultaGmail(cuenta.correo_filtro, opts.dias ?? 45);
   const ids: string[] = [];
   let pageToken: string | undefined;
   do {

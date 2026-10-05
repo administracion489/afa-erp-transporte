@@ -8,6 +8,8 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { ETIQUETA_LINEA, type LineaFactura, type PlanLinea } from "@/lib/combustible/factura-lineas";
+import type { CodigoConexion } from "@/lib/combustible/correo-conexion";
+import CorreoFacturas from "./CorreoFacturas";
 
 const S = (n: number | null | undefined) =>
   n == null ? "—" : `S/ ${Number(n).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -30,6 +32,10 @@ export default function FacturasCorreo() {
   const [sync, setSync] = useState<string | null>(null);
   const [cargando, setCargando] = useState(false);
   const [elec, setElec] = useState<Record<string, { placa: string; fecha: string }>>({});
+  // De qué buzón se lee (lo resuelve CorreoFacturas). Sin uno legible, «Leer correo ahora» no
+  // tiene a quién preguntar: el botón se apaga y DICE por qué en vez de fallar al pulsarlo.
+  const [codigoCorreo, setCodigoCorreo] = useState<CodigoConexion | null>(null);
+  const sinCorreo = codigoCorreo === "ninguna" || codigoCorreo === "rota";
 
   const cargar = useCallback(async () => {
     const { data, error } = await supabase.from("radar_facturas").select("*")
@@ -60,7 +66,8 @@ export default function FacturasCorreo() {
           vistos: a.vistos + (x.correos_vistos || 0), nuevas: a.nuevas + (x.nuevas || 0),
           reg: a.reg + (x.registradas || 0), rev: a.rev + (x.por_revisar || 0),
         }), { vistos: 0, nuevas: 0, reg: 0, rev: 0 });
-        setSync(`${t.vistos} correo(s) coinciden con el filtro · ${t.nuevas} factura(s) nuevas · ${t.reg} carga(s) registradas desde la factura · ${t.rev} línea(s) para revisar.`);
+        const buzon = (j.resultados ?? []).map((x: any) => x.correo?.email).find(Boolean);
+        setSync(`${buzon ? `${buzon}: ` : ""}${t.vistos} correo(s) coinciden con el filtro · ${t.nuevas} factura(s) nuevas · ${t.reg} carga(s) registradas desde la factura · ${t.rev} línea(s) para revisar.`);
       }
     } catch (e: any) { setSync(e.message); }
     setCargando(false);
@@ -91,15 +98,20 @@ export default function FacturasCorreo() {
 
   return (
     <section className="space-y-3">
+      <CorreoFacturas onCodigo={setCodigoCorreo} />
+
       <div className="rounded-xl border bg-white p-4 flex flex-wrap items-center gap-4">
         <div className="text-sm text-gray-700 flex-1 min-w-[260px]">
-          <b>La factura del correo es el respaldo oficial del Radar IA.</b> Cada 3 horas el ERP lee las facturas del Gmail conectado en{" "}
-          <Link href="/crm" className="text-[#1d4ed8] font-bold hover:underline">CRM</Link> (XML de SUNAT; si no llega, el PDF) y compara línea por línea con las cargas registradas.
+          <b>La factura del correo es el respaldo oficial del Radar IA.</b> Cada 3 horas el ERP lee las facturas del correo conectado arriba
+          (XML de SUNAT; si no llega, el PDF) y compara línea por línea con las cargas registradas.
           Las que faltan se registran solas (sin odómetro); las dudosas quedan aquí.
         </div>
-        <button onClick={sincronizar} disabled={cargando} className="px-4 py-2 rounded-lg text-sm font-bold text-white disabled:opacity-60" style={{ background: "#0b315f" }}>
+        <button onClick={sincronizar} disabled={cargando || sinCorreo}
+          title={sinCorreo ? "Primero conecta el correo donde llegan las facturas (arriba)." : undefined}
+          className="px-4 py-2 rounded-lg text-sm font-bold text-white disabled:opacity-60" style={{ background: "#0b315f" }}>
           {cargando ? "Sincronizando…" : "📧 Leer correo ahora"}
         </button>
+        {sinCorreo && <div className="basis-full text-xs text-amber-800">Primero conecta el correo donde llegan las facturas de Primax (bloque de arriba).</div>}
         {sync && <div className="basis-full text-xs text-gray-600">{sync}</div>}
         <div className="basis-full flex flex-wrap gap-3 text-xs">
           <span style={{ color: ETIQUETA_LINEA.ya_registrada.color }}>✓ {resumen.ya} ya registradas</span>
@@ -111,7 +123,7 @@ export default function FacturasCorreo() {
       </div>
 
       {filas == null ? <div className="text-sm text-gray-400 p-4">Cargando…</div> :
-       filas.length === 0 ? <div className="text-sm text-gray-500 p-6 text-center border rounded-xl bg-white">Todavía no hay facturas leídas. Pulsa «Leer correo ahora» (Gmail tiene que estar conectado en /crm).</div> :
+       filas.length === 0 ? <div className="text-sm text-gray-500 p-6 text-center border rounded-xl bg-white">Todavía no hay facturas leídas. Conecta el correo arriba y pulsa «Leer correo ahora».</div> :
       <div className="rounded-xl border bg-white overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-[11px] uppercase text-gray-500">

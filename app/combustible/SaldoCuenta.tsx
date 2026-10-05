@@ -239,7 +239,7 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
       <details className="text-xs" open>
         <summary className="cursor-pointer font-bold text-gray-600">Facturas por correo (respaldo del Radar)</summary>
         <div className="space-y-2 mt-2">
-          {campo("filtro", "Filtro de Gmail", "Se busca en el Gmail conectado en /crm. Si las facturas llegan a otro buzón, crea un reenvío automático hacia ese.", "from:(primax OR coesti) has:attachment")}
+          {campo("filtro", "Filtro de Gmail", "Se busca en el correo conectado en la pestaña 📧 Facturas (si no conectaste ninguno, en el Gmail del CRM). Ahí mismo puedes probarlo con «🔎 Probar filtro».", "from:(primax OR coesti) has:attachment")}
           <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={f.auto} onChange={(e) => setF({ ...f, auto: e.target.checked })} /> Registrar solas las cargas que falten (solo desde el XML de SUNAT, con placa, fecha y cuadre)</label>
           {campo("gracia", "Días de espera al Radar antes de registrar desde la factura", "El Radar trae el kilometraje y la factura no: se le da este margen para llegar primero.")}
         </div>

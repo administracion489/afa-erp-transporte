@@ -1,7 +1,7 @@
 // app/api/combustible/facturas/route.ts — Facturas de combustible por correo: el respaldo
 // oficial del Radar IA (lib/combustible/facturas-correo.ts).
 //
-//   GET  (cron, Bearer CRON_SECRET)  → sincroniza el Gmail conectado en /crm y concilia.
+//   GET  (cron, Bearer CRON_SECRET)  → lee el correo de facturas (o el Gmail del CRM) y concilia.
 //   POST (pantalla /combustible, módulo `combustible`):
 //        { accion: "sincronizar" }
 //        { accion: "confirmar_linea", factura_id, n, placa?, fecha? } → una persona confirma
