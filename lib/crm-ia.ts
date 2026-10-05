@@ -7,6 +7,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsApp, enviarMessenger, enviarInstagram } from "@/lib/crm-meta";
 import { enviarEmail } from "@/lib/crm-gmail";
+import { textoLegible } from "@/lib/crm-gmail-reglas";
 import { phonePara } from "@/lib/whatsapp-numeros";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
@@ -420,7 +421,9 @@ async function cargarHistorial(sb: SB, convId: string): Promise<Anthropic.Messag
   const out: Anthropic.MessageParam[] = [];
   for (const m of msgs) {
     const role = m.direccion === "entrante" ? "user" : "assistant";
-    const texto = m.contenido?.trim() || (m.tipo && m.tipo !== "texto" ? `[${m.tipo}]` : "");
+    // Un correo importado como HTML (antes de que la lectura lo pasara a texto) se lee como
+    // texto: si no, el agente se gasta los tokens leyendo CSS.
+    const texto = textoLegible(m.contenido)?.trim() || (m.tipo && m.tipo !== "texto" ? `[${m.tipo}]` : "");
     if (!texto) continue;
     out.push({ role, content: texto });
   }

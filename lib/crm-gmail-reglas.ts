@@ -216,6 +216,103 @@ export function diagnosticarGoogle(
   };
 }
 
+// ── El CUERPO de un correo es TEXTO, no la maquetación ───────────────────────────────────────
+// La lectura tomaba la PRIMERA parte text/plain o text/html que encontraba, sin preferir ninguna.
+// Un correo solo-HTML —casi todo lo que manda un banco, un sistema o un portal— entraba al CRM
+// como etiquetas: la bandeja enseñaba «<html> <body style="background-colo…» de vista previa, el
+// chat un muro de código, y el agente IA se gastaba los tokens leyendo CSS.
+
+/** Una parte del árbol MIME tal como la devuelve la API de Gmail (`format=full`). */
+export type ParteMime = { mimeType?: string; filename?: string; body?: { data?: string }; parts?: ParteMime[] };
+
+/**
+ * El texto del correo: la parte text/plain de CUALQUIER nivel del árbol, y si no hay (o viene
+ * vacía), la text/html pasada a texto. Un adjunto —una parte con nombre de archivo— no es el
+ * cuerpo aunque sea text/plain. `decodificar` lo pone quien llama (base64url → texto): este
+ * módulo lo importa también la pantalla, donde no hay `Buffer`.
+ */
+export function cuerpoDeCorreo(payload: ParteMime | null | undefined, decodificar: (b64: string) => string): string {
+  let plano = "", html = "";
+  const visitar = (p: ParteMime | null | undefined) => {
+    if (!p || plano.trim()) return;
+    const tipo = String(p.mimeType ?? "").toLowerCase();
+    if (!p.filename && p.body?.data) {
+      // Sin tipo declarado y sin partes es un cuerpo simple: es lo que la versión anterior devolvía.
+      if (tipo === "text/plain" || (!tipo && !p.parts?.length)) plano = decodificar(p.body.data);
+      else if (tipo === "text/html" && !html) html = decodificar(p.body.data);
+    }
+    for (const h of p.parts ?? []) visitar(h);
+  };
+  visitar(payload);
+  if (plano.trim()) return plano;
+  return html ? textoDeHtml(html) : plano;
+}
+
+/** Las entidades con nombre que de verdad salen en correos en castellano. Las numéricas se
+ *  resuelven aparte; una desconocida se deja tal cual antes que adivinarla. */
+const ENTIDADES: Record<string, string> = {
+  nbsp: " ", amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'",
+  aacute: "á", eacute: "é", iacute: "í", oacute: "ó", uacute: "ú", ntilde: "ñ", uuml: "ü",
+  Aacute: "Á", Eacute: "É", Iacute: "Í", Oacute: "Ó", Uacute: "Ú", Ntilde: "Ñ", Uuml: "Ü",
+  iexcl: "¡", iquest: "¿", ordm: "º", ordf: "ª", deg: "°", copy: "©", reg: "®", trade: "™", euro: "€",
+  hellip: "…", mdash: "—", ndash: "–", laquo: "«", raquo: "»", bull: "•", middot: "·",
+  lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”", zwnj: "", zwj: "", shy: "",
+};
+
+function decodificarEntidades(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e: string) => {
+    if (e[0] === "#") {
+      const n = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+    }
+    return ENTIDADES[e] ?? m;
+  });
+}
+
+/**
+ * HTML de correo → texto legible. No es un renderizador: quita lo que no se ve (cabecera,
+ * estilos, scripts, comentarios), convierte los bloques en saltos de línea y deja el TEXTO de los
+ * enlaces sin su dirección — en un boletín son decenas de enlaces de seguimiento de 200
+ * caracteres, y el correo original sigue entero en Gmail. Las entidades se resuelven DESPUÉS de
+ * quitar las etiquetas, para que un «&lt;b&gt;» escrito como texto no se borre como etiqueta.
+ */
+export function textoDeHtml(html: string | null | undefined): string {
+  let s = String(html ?? "");
+  s = s.replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<(head|style|script|title|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<(br|hr)\b[^>]*>/gi, "\n")
+    .replace(/<li\b[^>]*>/gi, "\n• ")
+    // `</li>` no: cada `<li>` ya abre su propia línea, y cerrar otra dejaría la lista a doble espacio.
+    .replace(/<\/(p|div|tr|ul|ol|h[1-6]|table|blockquote|section|article|header|footer|center)\s*>/gi, "\n")
+    .replace(/<\/t[dh]\s*>/gi, " ")
+    .replace(/<[^>]*>/g, "");
+  s = decodificarEntidades(s);
+  return s
+    .replace(/[​-‍﻿]/g, "")
+    .replace(/[ \t\f\v ]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * ¿Este contenido es HTML crudo? Exige una señal fuerte: un documento (`<html`, `<body`,
+ * `<!doctype`) o que empiece con una etiqueta y cierre alguna. Un mensaje escrito por una persona
+ * —«precio < 100 y > 50»— no lo es.
+ */
+export function pareceHtml(s: string | null | undefined): boolean {
+  const t = String(s ?? "").trimStart().slice(0, 4000).toLowerCase();
+  if (!t) return false;
+  if (/<!doctype html|<html[\s>]|<body[\s>]/.test(t)) return true;
+  return /^<[a-z][a-z0-9]*[\s>/]/.test(t) && /<\/[a-z][a-z0-9]*\s*>|<br\s*\/?>/.test(t);
+}
+
+/** Lo que se enseña (y se le pasa al agente IA): el texto, también de los correos que se
+ *  importaron como HTML antes de este arreglo. Lo que no es HTML pasa intacto. */
+export function textoLegible<T extends string | null | undefined>(s: T): T | string {
+  return typeof s === "string" && pareceHtml(s) ? textoDeHtml(s) : s;
+}
+
 /** «hace 5 min», «hace 3 h», «hace 2 días» — para la línea de estado. */
 export function haceCuanto(iso: string | null | undefined, ahoraMs: number): string | null {
   if (!iso) return null;

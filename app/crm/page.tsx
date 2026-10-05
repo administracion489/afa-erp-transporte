@@ -6,7 +6,7 @@ import {
 } from "@/lib/crm-telefono";
 import { avisosAutomaticosDeTelefono, etiquetaAviso, type AvisoAutomatico } from "@/lib/crm-avisos-automaticos";
 import { cabecerasErp } from "@/lib/fetch-erp";
-import { haceCuanto } from "@/lib/crm-gmail-reglas";
+import { haceCuanto, textoLegible } from "@/lib/crm-gmail-reglas";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -56,6 +56,11 @@ type Mensaje = {
   enviado_por?: string; error?: string; created_at: string;
   generado_por_ia?: boolean;
 };
+
+// Los correos que entraron como HTML crudo (antes de que la lectura los pasara a texto) se
+// enseñan como texto. Se convierte al CARGAR y no al pintar: el chat se vuelve a pintar en cada
+// tecla del cuadro de respuesta, y un boletín son decenas de KB de HTML.
+const legible = (m: Mensaje): Mensaje => ({ ...m, contenido: textoLegible(m.contenido) ?? undefined });
 
 type AccionIA = {
   id: string; conversacion_id: string; tipo: "cotizacion" | "reserva";
@@ -233,7 +238,7 @@ export default function CRMPage() {
           .order("created_at", { ascending: false })
           .limit(1)
           .maybeSingle();
-        return { ...c, _ultimo_texto: ult?.contenido };
+        return { ...c, _ultimo_texto: textoLegible(ult?.contenido) ?? undefined };
       })
     );
     setConvs(enriched as Conversacion[]);
@@ -291,7 +296,7 @@ export default function CRMPage() {
       .select("*")
       .eq("conversacion_id", convId)
       .order("created_at", { ascending: true });
-    setMensajes(data ?? []);
+    setMensajes(((data ?? []) as Mensaje[]).map(legible));
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
   }, []);
 
@@ -352,7 +357,7 @@ export default function CRMPage() {
     const ch = supabase
       .channel("crm_realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "crm_mensajes" }, (payload) => {
-        const nuevo = payload.new as Mensaje;
+        const nuevo = legible(payload.new as Mensaje);
         if (selected && nuevo.conversacion_id === selected.id) {
           setMensajes((prev) => [...prev, nuevo]);
           setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
@@ -919,7 +924,9 @@ export default function CRMPage() {
                       {m.media_url && (
                         <img src={m.media_url} alt="media" className="rounded-lg mb-1.5 max-w-full" />
                       )}
-                      <p className="whitespace-pre-wrap">{m.contenido}</p>
+                      {/* `overflow-wrap:anywhere`: un enlace de 200 caracteres sin espacios se salía de
+                          la burbuja y le ponía al chat entero una barra de desplazamiento horizontal. */}
+                      <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{m.contenido}</p>
                       <div className={`text-[10px] mt-1 text-right ${esMio ? "text-white/60" : "text-gray-400"}`}>
                         {m.generado_por_ia && <span className="mr-1" title="Generado por IA">✨</span>}
                         {fmtFechaMsg(m.created_at)}
