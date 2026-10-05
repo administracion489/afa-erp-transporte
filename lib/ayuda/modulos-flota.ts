@@ -177,11 +177,23 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
       "Saber cuánto gastas en combustible por mes, por unidad, por conductor y por grifo.",
       "Detectar solo dos cosas raras: una carga que no cabe en el tanque y un rendimiento que se desploma.",
       "Comparar grifos: la pestaña “Por grifo” te dice el precio promedio que te está cobrando cada uno.",
+      "Saber cuánto saldo queda en la cuenta prepago (Primax) y recibir un aviso por correo y WhatsApp antes de que se acabe.",
+      "Usar la factura del correo como respaldo: las cargas que el Radar IA no registró se registran desde la factura.",
       "Ver si los kilómetros de la jornada cuadran con los kilómetros de los servicios.",
       "Alimentar el costo real de la operación y, cuando corresponde, el de un servicio concreto.",
     ],
     conceptos: ["costo_directo", "centro_costo", "margen_real", "prorrateo"],
     faqs: [
+      {
+        pregunta: "¿Cómo sabe el ERP cuánto saldo me queda en Primax y cuándo me avisa?",
+        respuesta:
+          "Primax no le da al ERP una conexión para leer tu saldo, así que el ERP lo **calcula**: parte del saldo que tú lees en el portal y le resta las cargas que se registran después.\n\n**Saldo estimado = saldo leído del portal + abonos que registres − cargas de la cuenta − cargas que el Radar vio y nadie confirmó todavía.**\n\n**Cómo se usa:** en la tarjeta «Saldo de combustible» pulsa **📝 Saldo del portal** y copia el «Disponible (libre)» de Primax Solutions. Cada vez que deposites, **💵 Registrar abono**. Cuando vuelvas a mirar el portal, teclea la cifra otra vez: la lectura más reciente **manda** y corrige cualquier diferencia.\n\n**El aviso:** en **⚙ Avisos** pones los escalones (por ejemplo 500 y 300 soles), los correos y los WhatsApp. Cada hora el ERP revisa el saldo y manda **un aviso por escalón**: uno al bajar de 500, otro al bajar de 300 y otro si se agota. No te repite el mismo cada hora; cuando depositas y el saldo sube, se rearma. **✉ Probar aviso** manda uno de prueba para confirmar que llega.\n\n**Por qué puede salir un poco más bajo que el portal:** ante la duda el ERP resta (una carga del mismo día de tu lectura cuenta). Es a propósito: un aviso un día antes cuesta poco; uno tarde deja el bus sin cargar.",
+      },
+      {
+        pregunta: "¿Qué hace la pestaña «📧 Facturas»? ¿La IA registra sola las cargas que faltan?",
+        respuesta:
+          "Es el **respaldo oficial del Radar IA**. El Radar registra cargas desde las fotos de WhatsApp, pero si el conductor no mandó la foto o la lectura falló, esa carga no existe en el ERP. La **factura electrónica** que llega a tu correo sí llega siempre.\n\nCada 3 horas el ERP busca en el Gmail conectado en **CRM** los correos del grifo (filtro editable en ⚙ Avisos), lee el **XML de SUNAT** —o el PDF con IA si no hay XML— y compara **línea por línea** contra las cargas registradas:\n\n**Ya registrada** (por nota de despacho, o placa + fecha + importe): se enlaza a la factura, no se crea nada.\n**En revisión del Radar**: el Radar la vio y espera que la apruebes en Radar IA → Combustible. No se registra otra, porque se duplicaría.\n**Registrada por factura**: no estaba en ningún lado y la factura trae placa, fecha y su cuenta cuadra → se registra sola, **sin odómetro** y enlazada al comprobante.\n**Esperando al Radar**: es de ayer u hoy; se le da un día al Radar, que sí trae el kilometraje.\n**Revisar**: falta la placa, la fecha, o solo llegó el PDF. Eliges placa y fecha y pulsas **Registrar esta carga**.\n\n**Si las facturas llegan a otro buzón** (no al conectado en CRM), crea en ese buzón un reenvío automático de los correos de Primax hacia el conectado.",
+      },
       {
         pregunta: "¿Una carga de combustible se puede cargar a un servicio concreto?",
         respuesta:

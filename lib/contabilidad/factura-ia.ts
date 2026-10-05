@@ -24,7 +24,7 @@ function getAnthropic(): Anthropic {
   }
   return (_anthropic ??= new Anthropic());
 }
-const MODELO_VISION = "claude-opus-4-8";
+export const MODELO_VISION = "claude-opus-4-8";
 
 export type FacturaExtraida = {
   ruc_emisor: string | null;
