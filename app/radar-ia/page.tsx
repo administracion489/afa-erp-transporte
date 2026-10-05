@@ -9,6 +9,7 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { aceptarLectura, registrarLectura } from "@/lib/odometro";
 import { revisarKmTecleado } from "@/lib/odometro-seleccion";
+import { capturaDeRecarga } from "@/lib/odometro-tiempo";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { normalizarConfigRadar } from "@/lib/radar/config";
 import {
@@ -2576,6 +2577,11 @@ export default function RadarIAPage() {
       let notaOdo = "";
       if (ov.kilometraje != null && ov.kilometraje > 0) {
         try {
+          // La hora IMPRESA en el voucher manda (es la del despacho, cuando el grifero teclea el
+          // km); la del mensaje solo sirve de tope y solo si es del mismo día que la recarga.
+          // Antes iba solo `msg?.ts_mensaje`, y sin el mensaje cargado la lectura quedaba a las
+          // 00:00 de su fecha: antes del check-in de ese día y «incoherente» con él (CTV-370).
+          const cap = capturaDeRecarga({ fecha: fechaCarga, hora: c.hora, tsMensaje: msg?.ts_mensaje ?? null });
           const r = await registrarLectura(supabase, {
             vehiculo_id: ov.vehiculoId,
             flota: ov.tipo === "tercero" ? "tercero" : "propia",
@@ -2584,9 +2590,8 @@ export default function RadarIAPage() {
             fecha: fechaCarga,
             foto_url: fotoUrl,
             ref_origen: "radar_ia",
-            capturado_en: msg?.ts_mensaje ?? null,
-            // La hora del mensaje es la del ENVÍO: la foto del tablero pudo tomarse antes.
-            horaEsTope: true,
+            capturado_en: cap.capturado_en,
+            horaEsTope: cap.horaEsTope,
             // Por FILA del Radar, nunca por mensaje: una ráfaga con dos vouchers deja dos filas
             // con el MISMO mensaje_id (insertarRecargasAdicionales), y una clave compartida
             // haría que la segunda lectura se dedujera "ya registrada" y se perdiera entera.

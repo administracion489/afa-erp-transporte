@@ -15,6 +15,7 @@ import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { kmDeServicio } from "@/lib/km-servicio";
 import { desplazamientoGps, verificarConGps, type Verificacion } from "@/lib/gps-desplazamiento";
+import { tsEfectivoLectura } from "@/lib/odometro-tiempo";
 
 export const maxDuration = 60;
 
@@ -149,7 +150,7 @@ export async function POST(req: NextRequest) {
         const ts = lecturas
           .filter((l) => (esT ? Number(l.vehiculo_tercero_id) === g.vid : Number(l.vehiculo_id) === g.vid))
           .filter((l) => l.estado === "aceptada" || l.estado === "reinicio")
-          .map((l) => new Date(l.capturado_en || l.created_at).getTime())
+          .map((l) => tsEfectivoLectura(l))
           .filter((t) => Number.isFinite(t) && t > 0)
           .sort((a, b) => a - b);
         try {
