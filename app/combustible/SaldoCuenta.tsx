@@ -208,7 +208,8 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
       correo_filtro: f.filtro.trim() || "has:attachment",
       facturas_auto_registrar: f.auto,
       facturas_gracia_dias: Math.max(0, Math.min(15, Number(f.gracia) || 0)),
-      facturas_desfase_dias: normalizarDesfaseConfig(f.desfase === "auto" ? null : f.desfase),
+      // Sin combustible-04 la columna no existe: no se manda (el respaldo de abajo cubre el resto).
+      ...(cuenta.facturas_desfase_sin_migracion ? {} : { facturas_desfase_dias: normalizarDesfaseConfig(f.desfase === "auto" ? null : f.desfase) }),
       // Cambiar los escalones rearma el ciclo: el próximo cruce se vuelve a avisar.
       ...(umbrales.join() !== cuenta.umbrales.join() ? { ultimo_umbral_avisado: null } : {}),
       updated_at: new Date().toISOString(),
