@@ -890,6 +890,13 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "**Mientras el Radar no lea, el combustible de la cuenta de Primax no se pierde:** su factura llega al correo y la registra al día siguiente, pero **sin odómetro** y con la fecha deducida. Esas cargas quedan en **Combustible → 📧 Facturas → ✍ Cargas por completar**, donde alguien pone el km del voucher y confirma la fecha. La misma alerta sale arriba de esa pestaña.\n\n" +
           "**Lo que no llega por el correo** —cargas en otros grifos— hay que registrarlo a mano en Combustible mientras el Radar esté caído.",
       },
+      {
+        pregunta: "En la pestaña Odómetro, ¿cómo veo solo las lecturas pendientes de revisar?",
+        respuesta:
+          "Si hay alguna, la pestaña **ya se abre en ellas**: el botón **⚠ Pendientes de revisar** sale marcado. *Pendiente* es lo que espera a una persona: las **Por revisar** (se aceptan o se corrigen) y las **Rechazadas** (se corrigen). El número de la pestaña cuenta exactamente esas.\n\n" +
+          "Debajo de cada título de columna hay un **filtro**: fechas *desde/hasta* en Fecha, placa y flota en Unidad, km *desde/hasta* en Kilometraje (puedes escribir 23,980 o 23.980), con o sin foto en Foto, y en Estado el estado y el **tipo de problema** (dígito de más, retrocede, salto improbable…). Cada opción dice entre paréntesis **cuántas lecturas hay** con los otros filtros puestos. Pulsar un título **ordena** por esa columna; pulsarlo otra vez invierte el orden.\n\n" +
+          "En una lectura pendiente el **motivo se lee en la misma fila**: es lo que hay que resolver. Con varias placas pendientes, los botones **Por placa** filtran de un clic. Los filtros buscan en **todo** el historial del Radar, no solo en las lecturas más recientes; si te quedas sin filas, **Limpiar filtros** vuelve a mostrarlas todas.",
+      },
     ],
     relacionadas: [
       { etiqueta: "Inbox CRM", href: "/crm" },
