@@ -11,6 +11,8 @@ import { cabecerasErp } from "@/lib/fetch-erp";
 import { hoyLima } from "@/lib/odometro-analitica";
 import { cargarCuentas, estadoDeCuentas, type EstadoCuenta, type FilaCuenta } from "@/lib/combustible/saldo-datos";
 import { decidirAviso, umbralesValidos } from "@/lib/combustible/saldo-cuenta";
+import { MAX_DESFASE, normalizarDesfaseConfig } from "@/lib/combustible/desfase-factura";
+import { faltaColumna } from "@/lib/columna-faltante";
 
 const S = (n: number | null | undefined) =>
   n == null ? "—" : `S/ ${Number(n).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -187,6 +189,7 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
     filtro: cuenta.correo_filtro ?? "",
     auto: cuenta.facturas_auto_registrar,
     gracia: String(cuenta.facturas_gracia_dias ?? 1),
+    desfase: cuenta.facturas_desfase_dias == null ? "auto" : String(cuenta.facturas_desfase_dias),
   });
   const [guardando, setGuardando] = useState(false);
   const lista = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
@@ -194,7 +197,7 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
 
   async function guardar() {
     setGuardando(true);
-    const { error } = await supabase.from("combustible_cuentas").update({
+    const patch: Record<string, unknown> = {
       nombre: f.nombre.trim() || "Primax",
       umbrales,
       avisar_correos: f.correos.trim() || null,
@@ -205,12 +208,24 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
       correo_filtro: f.filtro.trim() || "has:attachment",
       facturas_auto_registrar: f.auto,
       facturas_gracia_dias: Math.max(0, Math.min(15, Number(f.gracia) || 0)),
+      facturas_desfase_dias: normalizarDesfaseConfig(f.desfase === "auto" ? null : f.desfase),
       // Cambiar los escalones rearma el ciclo: el próximo cruce se vuelve a avisar.
       ...(umbrales.join() !== cuenta.umbrales.join() ? { ultimo_umbral_avisado: null } : {}),
       updated_at: new Date().toISOString(),
-    }).eq("id", cuenta.id);
+    };
+    let { error } = await supabase.from("combustible_cuentas").update(patch).eq("id", cuenta.id);
+    let aviso = "";
+    if (error && faltaColumna(error, "facturas_desfase_dias")) {
+      // combustible-04 sin correr: el resto de la configuración se guarda igual, y se DICE qué no.
+      delete patch.facturas_desfase_dias;
+      ({ error } = await supabase.from("combustible_cuentas").update(patch).eq("id", cuenta.id));
+      if (!error && f.desfase !== "auto") {
+        aviso = "Se guardó todo menos el desfase fijo de la factura: falta correr supabase/combustible-04-desfase-factura.sql. Mientras tanto es automático (medido).";
+      }
+    }
     setGuardando(false);
     if (error) { alert(error.message); return; }
+    if (aviso) alert(aviso);
     onGuardado();
   }
 
@@ -241,7 +256,27 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
         <div className="space-y-2 mt-2">
           {campo("filtro", "Filtro de Gmail", "Se busca en el correo conectado en la pestaña 📧 Facturas (si no conectaste ninguno, en el Gmail del CRM). Ahí mismo puedes probarlo con «🔎 Probar filtro».", "from:(primax OR coesti) has:attachment")}
           <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={f.auto} onChange={(e) => setF({ ...f, auto: e.target.checked })} /> Registrar solas las cargas que falten (solo desde el XML de SUNAT, con placa, fecha y cuadre)</label>
-          {campo("gracia", "Días de espera al Radar antes de registrar desde la factura", "El Radar trae el kilometraje y la factura no: se le da este margen para llegar primero.")}
+          {campo("gracia", "Días de espera al Radar antes de registrar desde la factura", "Contados desde el despacho. El Radar trae el kilometraje y la factura no: se le da este margen para llegar primero.")}
+          <label className="block text-xs font-bold text-gray-500">Fecha del despacho en una factura de una sola línea
+            <select value={f.desfase} onChange={(e) => setF({ ...f, desfase: e.target.value })} disabled={cuenta.facturas_desfase_sin_migracion}
+              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal text-gray-900 disabled:bg-gray-50">
+              <option value="auto">Automático: lo mide el ERP (recomendado)</option>
+              <option value="0">La fecha de emisión de la factura (sin desfase)</option>
+              {Array.from({ length: MAX_DESFASE }, (_, i) => i + 1).map((k) => (
+                <option key={k} value={String(k)}>{k} día{k > 1 ? "s" : ""} antes de la emisión</option>
+              ))}
+            </select>
+            <span className="block font-normal text-[11px] text-gray-500 mt-0.5">
+              La factura no trae la fecha del despacho, solo la de emisión (COESTI suele emitirla al día siguiente). En automático el ERP compara las
+              recargas que el Radar leyó del voucher con su factura y usa el desfase que se repite; la pestaña 📧 Facturas dice cuál midió y con cuántas.
+              La fecha que trae la línea, o la que eliges al confirmar, no se toca.
+            </span>
+            {cuenta.facturas_desfase_sin_migracion && (
+              <span className="block font-normal text-[11px] text-amber-700 mt-0.5">
+                Para fijarlo a mano falta correr <code>supabase/combustible-04-desfase-factura.sql</code>. Mientras tanto es automático.
+              </span>
+            )}
+          </label>
         </div>
       </details>
       <div className="flex gap-2 justify-end">

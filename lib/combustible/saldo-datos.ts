@@ -4,6 +4,7 @@
 // distintos. Toda la aritmética vive en lib/combustible/saldo-cuenta.ts (puro).
 
 import { paginarFilas } from "@/lib/huella";
+import { normalizarDesfaseConfig } from "@/lib/combustible/desfase-factura";
 import {
   calcularSaldo, sumarDiasISO, umbralesValidos,
   type CuentaCombustible, type Movimiento, type CargaCuenta, type SaldoCuenta,
@@ -18,6 +19,10 @@ export type FilaCuenta = CuentaCombustible & {
   correo_filtro: string;
   facturas_auto_registrar: boolean;
   facturas_gracia_dias: number;
+  /** Días del despacho a la emisión de la factura. null = automático (medido). Migración combustible-04. */
+  facturas_desfase_dias: number | null;
+  /** La columna anterior no existe (combustible-04 sin correr): el desfase solo puede ser automático. */
+  facturas_desfase_sin_migracion: boolean;
 };
 
 export type EstadoCuenta = {
@@ -43,6 +48,10 @@ export function filaCuenta(r: any): FilaCuenta {
     ultimo_umbral_avisado: r.ultimo_umbral_avisado == null ? null : Number(r.ultimo_umbral_avisado),
     facturas_gracia_dias: Number.isFinite(Number(r.facturas_gracia_dias)) ? Number(r.facturas_gracia_dias) : 1,
     facturas_auto_registrar: r.facturas_auto_registrar !== false,
+    // Sin la migración la columna no llega: automático, que es medir antes de mover nada.
+    facturas_desfase_dias: normalizarDesfaseConfig(r.facturas_desfase_dias),
+    // `select("*")` trae la clave si y solo si la columna existe (aunque valga null).
+    facturas_desfase_sin_migracion: !("facturas_desfase_dias" in (r ?? {})),
   };
 }
 
