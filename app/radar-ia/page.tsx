@@ -36,6 +36,11 @@ import { planDeFusion, preguntaAntesDeRegistrar, claveVehiculo } from "@/lib/rad
 import { FILTRO_ESPERAN_RADAR, avisoOrdenEnRadar, facturasQueEsperan } from "@/lib/combustible/orden-revision";
 import { CODIGOS_CONEXION, credencialesRechazadas, workerVivo as latidoVivo, type SaludRadar } from "@/lib/radar/salud";
 import { leerSaludRadar } from "@/lib/radar/salud-datos";
+import {
+  ESTADOS_LECTURA, FILTRO_LECTURAS_VACIO, dirInicial, esPendiente, filtrarLecturas, hayFiltroLecturas, problemaDe,
+  type ColumnaOrden, type FiltroLecturas,
+} from "@/lib/radar/odometro-lecturas";
+import { TIPOS_REVISION, etiquetaTipo, placaComparable } from "@/lib/odometro-revision";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -1240,9 +1245,31 @@ function CampoEdit({ label, children }: { label: string; children: React.ReactNo
 // Muestra las lecturas de odómetro que el Radar registró (lecturas_odometro con
 // ref_origen='radar_ia'), de ambas flotas. La fuente de verdad y el flujo de
 // aceptar/rechazar viven en /mantenimiento > Odómetro; aquí es solo la vista del Radar.
+//
+// Un filtro POR COLUMNA (lib/radar/odometro-lecturas.ts): con lecturas pendientes la pestaña abre
+// en ellas, cada desplegable dice cuántas hay con los demás filtros puestos, y el motivo de una
+// lectura pendiente se ve en la fila en vez de esconderse detrás de un «ⓘ». La lista es el
+// historial COMPLETO del Radar (leerLecturasRadar): filtrar sobre las 60 más recientes haría que
+// una placa pareciera no tener lecturas.
 
-function TabOdometro({ registros, vehiculosGuia, onRefresh, showToast }: {
+const unidadDeLectura = (
+  r: RadarLecturaOdometro, flota: VehiculoGuiaOdometro[],
+): { placa: string | null; flota: "propio" | "tercero" | null } => {
+  if (r.vehiculo_id != null) {
+    const v = flota.find((x) => x.tipo === "propio" && x.id === r.vehiculo_id);
+    return { placa: v?.placa ?? null, flota: "propio" };
+  }
+  if (r.vehiculo_tercero_id != null) {
+    const v = flota.find((x) => x.tipo === "tercero" && x.id === r.vehiculo_tercero_id);
+    return { placa: v?.placa ?? null, flota: "tercero" };
+  }
+  return { placa: null, flota: null };
+};
+
+function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast }: {
   registros: RadarLecturaOdometro[];
+  /** false si alguna página del historial no se pudo leer: no se puede afirmar que no queda ninguna. */
+  completa: boolean;
   vehiculosGuia: VehiculoGuiaOdometro[];
   onRefresh: () => void | Promise<void>;
   showToast: (msg: string, ok?: boolean) => void;
@@ -1250,22 +1277,39 @@ function TabOdometro({ registros, vehiculosGuia, onRefresh, showToast }: {
   const [foto, setFoto] = useState<string | null>(null);
   const [aceptando, setAceptando] = useState<string | null>(null);
   const [corrigiendo, setCorrigiendo] = useState<RadarLecturaOdometro | null>(null);
+  const [fil, setFil] = useState<FiltroLecturas>(FILTRO_LECTURAS_VACIO);
+  const setF = <K extends keyof FiltroLecturas>(k: K, v: FiltroLecturas[K]) => setFil((p) => ({ ...p, [k]: v }));
+
+  const filas = useMemo(
+    () => registros.map((r) => ({ ...r, placa: unidadDeLectura(r, vehiculosGuia).placa ?? "" })),
+    [registros, vehiculosGuia],
+  );
+  const res = useMemo(() => filtrarLecturas(filas, fil), [filas, fil]);
 
   if (registros.length === 0) {
     return <CardVacia emoji="🛞" titulo="Sin lecturas de odómetro" detalle="Las fotos de tablero que lleguen a los grupos y el Radar logre registrar aparecen aquí." />;
   }
 
-  const unidadDe = (r: RadarLecturaOdometro): { placa: string | null; flota: "propio" | "tercero" | null } => {
-    if (r.vehiculo_id != null) {
-      const v = vehiculosGuia.find((x) => x.tipo === "propio" && x.id === r.vehiculo_id);
-      return { placa: v?.placa ?? null, flota: "propio" };
-    }
-    if (r.vehiculo_tercero_id != null) {
-      const v = vehiculosGuia.find((x) => x.tipo === "tercero" && x.id === r.vehiculo_tercero_id);
-      return { placa: v?.placa ?? null, flota: "tercero" };
-    }
-    return { placa: null, flota: null };
-  };
+  const unidadDe = (r: RadarLecturaOdometro) => unidadDeLectura(r, vehiculosGuia);
+  const estadoVisto = res.estadoAplicado;
+  const soloPendientes = estadoVisto === "pendientes";
+  const filtrando = hayFiltroLecturas(fil);
+  // ¿Algo recorta además del estado? Sin eso, una vista de pendientes vacía significa «no queda ninguna».
+  const otrosFiltros = hayFiltroLecturas({ ...fil, estado: "todos" });
+  // Pulsar una columna: la primera vez ordena en su dirección útil, la segunda la invierte.
+  const ordenarPor = (col: ColumnaOrden) => setFil((p) => (
+    p.orden === col ? { ...p, dir: p.dir === "asc" ? "desc" : "asc" } : { ...p, orden: col, dir: dirInicial(col) }
+  ));
+  const limpiar = () => setFil({ ...FILTRO_LECTURAS_VACIO, estado: "todos" });
+  const inputCls = "w-full border border-gray-200 rounded-lg px-2 py-1 text-xs font-normal normal-case tracking-normal text-gray-700 bg-white focus:outline-none focus:border-[#1262bd]";
+  const columnas: { titulo: string; col: ColumnaOrden | null }[] = [
+    { titulo: "Fecha", col: "fecha" },
+    { titulo: "Unidad", col: "unidad" },
+    { titulo: "Kilometraje", col: "km" },
+    { titulo: "Foto", col: null },
+    { titulo: "Estado", col: "estado" },
+    { titulo: "", col: null },
+  ];
 
   // Aceptar el proceso: valida la lectura "por revisar" y actualiza el km vigente.
   const aceptar = async (r: RadarLecturaOdometro) => {
@@ -1284,20 +1328,146 @@ function TabOdometro({ registros, vehiculosGuia, onRefresh, showToast }: {
 
   return (
     <>
+      {/* Vista rápida: lo que espera a una persona, o todo. Los conteos llevan los demás filtros puestos. */}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        {([
+          ["pendientes", `⚠ Pendientes de revisar · ${res.porEstado.pendientes}`],
+          ["aceptada", `Registradas · ${res.porEstado.aceptada}`],
+          ["todos", `Todas · ${res.porEstado.todos}`],
+        ] as const).map(([k, rotulo]) => {
+          const activo = estadoVisto === k;
+          return (
+            <button key={k} onClick={() => setF("estado", k)}
+              className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${activo ? "bg-[#0b315f] text-white border-[#0b315f]" : "bg-white text-[#0b315f] border-gray-200 hover:border-[#0b315f]"}`}>
+              {rotulo}
+            </button>
+          );
+        })}
+        <span className="text-[11px] text-gray-400">
+          {res.filas.length === res.total ? `${res.total} lectura(s)` : `${res.filas.length} de ${res.total} lectura(s)`}
+          {fil.estado === "auto" && soloPendientes && " · se abre en las pendientes porque hay alguna"}
+        </span>
+        {(filtrando || fil.orden !== "llegada") && (
+          <button onClick={limpiar} className="text-xs font-bold text-[#1262bd] hover:underline">Limpiar filtros</button>
+        )}
+      </div>
+      {/* Las placas con lecturas pendientes: un clic filtra por ella. */}
+      {soloPendientes && res.porPlaca.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+          <span className="text-[11px] text-gray-500">Por placa:</span>
+          {res.porPlaca.slice(0, 12).map(({ placa, n }) => {
+            const activa = fil.placa.trim() !== "" && placaComparable(placa) === placaComparable(fil.placa);
+            return (
+              <button key={placa} type="button" onClick={() => setF("placa", activa ? "" : placa)}
+                className={`px-2 py-0.5 rounded-full text-[11px] font-mono border ${activa ? "bg-[#B07A0F] text-white border-[#B07A0F]" : "bg-white text-[#7a5a00] border-[#F2C94C] hover:bg-[#FFF8E1]"}`}>
+                {placa} · {n}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {res.avisos.map((a) => (
+        <p key={a.codigo} className="text-xs font-bold text-[#B07A0F] mb-2">⚠ {a.texto}</p>
+      ))}
+      {!completa && (
+        <p className="text-xs font-bold text-[#B07A0F] mb-2">
+          ⚠ No se pudo leer el historial completo de lecturas del Radar: los conteos y los filtros pueden quedarse cortos. Recarga la página.
+        </p>
+      )}
       <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                {["Fecha", "Unidad", "Kilometraje", "Foto", "Estado", ""].map((h, i) => (
-                  <th key={i} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+              <tr style={{ background: "#f8fafc" }}>
+                {columnas.map(({ titulo, col }, i) => (
+                  <th key={i} className="px-3 pt-3 pb-1.5 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">
+                    {col ? (
+                      <button type="button" onClick={() => ordenarPor(col)} title="Ordenar por esta columna"
+                        className={`inline-flex items-center gap-1 uppercase tracking-wide hover:text-[#0b315f] ${fil.orden === col ? "text-[#0b315f]" : ""}`}>
+                        {titulo}
+                        <span className="text-[10px]">{fil.orden === col ? (fil.dir === "asc" ? "▲" : "▼") : "↕"}</span>
+                      </button>
+                    ) : titulo}
+                  </th>
                 ))}
+              </tr>
+              {/* Un filtro por columna. */}
+              <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                <th className="px-3 pb-3 align-top min-w-[10.5rem]">
+                  <div className="space-y-1">
+                    {([["desde", "Desde"], ["hasta", "Hasta"]] as const).map(([k, rotulo]) => (
+                      <label key={k} className="flex items-center gap-1.5 text-[10px] font-bold text-gray-400 normal-case tracking-normal">
+                        <span className="w-9 shrink-0">{rotulo}</span>
+                        <input type="date" value={fil[k]} onChange={(e) => setF(k, e.target.value)} className={inputCls} aria-label={`Fecha ${k}`} />
+                      </label>
+                    ))}
+                  </div>
+                </th>
+                <th className="px-3 pb-3 align-top min-w-[8rem]">
+                  <div className="space-y-1">
+                    <input value={fil.placa} onChange={(e) => setF("placa", e.target.value)} placeholder="Placa" className={`${inputCls} font-mono`} aria-label="Filtrar por placa" />
+                    <select value={fil.flota} onChange={(e) => setF("flota", e.target.value as FiltroLecturas["flota"])} className={inputCls} aria-label="Flota">
+                      <option value="todas">Toda la flota</option>
+                      <option value="propia">Propia ({res.porFlota.propia})</option>
+                      <option value="tercero">Tercero ({res.porFlota.tercero})</option>
+                    </select>
+                  </div>
+                </th>
+                <th className="px-3 pb-3 align-top min-w-[7rem]">
+                  <div className="space-y-1">
+                    <input value={fil.kmMin} onChange={(e) => setF("kmMin", e.target.value)} inputMode="numeric" placeholder="Km desde" className={inputCls} aria-label="Km mínimo" />
+                    <input value={fil.kmMax} onChange={(e) => setF("kmMax", e.target.value)} inputMode="numeric" placeholder="Km hasta" className={inputCls} aria-label="Km máximo" />
+                  </div>
+                </th>
+                <th className="px-3 pb-3 align-top min-w-[6.5rem]">
+                  <select value={fil.foto} onChange={(e) => setF("foto", e.target.value as FiltroLecturas["foto"])} className={inputCls} aria-label="Foto">
+                    <option value="todas">Todas</option>
+                    <option value="con">Con foto ({res.porFoto.con})</option>
+                    <option value="sin">Sin foto ({res.porFoto.sin})</option>
+                  </select>
+                </th>
+                <th className="px-3 pb-3 align-top min-w-[12.5rem]">
+                  <div className="space-y-1">
+                    <select value={estadoVisto} onChange={(e) => setF("estado", e.target.value as FiltroLecturas["estado"])} className={inputCls} aria-label="Estado">
+                      <option value="todos">Todos los estados ({res.porEstado.todos})</option>
+                      <option value="pendientes" title="Por revisar + rechazadas: lo que espera a una persona">⚠ Pendientes ({res.porEstado.pendientes})</option>
+                      {ESTADOS_LECTURA.map((e) => (
+                        <option key={e.codigo} value={e.codigo}>{e.etiqueta} ({res.porEstado[e.codigo]})</option>
+                      ))}
+                    </select>
+                    {/* El problema solo existe en una lectura pendiente: sin ninguna, el desplegable no dice nada. */}
+                    {(res.porEstado.pendientes > 0 || fil.problema !== "todos") && (
+                      <select value={fil.problema} onChange={(e) => setF("problema", e.target.value as FiltroLecturas["problema"])} className={inputCls} aria-label="Problema">
+                        <option value="todos">Cualquier problema</option>
+                        {TIPOS_REVISION.filter((t) => res.porProblema[t.codigo] > 0 || fil.problema === t.codigo).map((t) => (
+                          <option key={t.codigo} value={t.codigo} title={t.ayuda}>{t.etiqueta} ({res.porProblema[t.codigo]})</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </th>
+                <th className="px-3 pb-3 align-top" />
               </tr>
             </thead>
             <tbody>
-              {registros.map((r) => {
+              {res.filas.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="p-8 text-center text-sm">
+                    {soloPendientes && !otrosFiltros && completa ? (
+                      <span className="font-bold text-[#166534]">✓ No queda ninguna lectura del Radar por revisar.</span>
+                    ) : (
+                      <span className="text-gray-500">
+                        Ninguna lectura cumple estos filtros.{" "}
+                        <button onClick={limpiar} className="font-bold text-[#1262bd] hover:underline">Limpiar filtros</button>
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              )}
+              {res.filas.map((r) => {
                 const est = ESTADO_ODO_CFG[r.estado] ?? ESTADO_ODO_CFG.sospechosa;
                 const { placa, flota } = unidadDe(r);
+                const problema = problemaDe(r);
                 return (
                   <tr key={r.id} className="border-t hover:bg-gray-50 transition-colors" style={{ borderColor: "#f1f5f9" }}>
                     <td className="p-3 whitespace-nowrap text-gray-600">{r.fecha ? fmtFecha(r.fecha) : "—"}</td>
@@ -1313,11 +1483,21 @@ function TabOdometro({ registros, vehiculosGuia, onRefresh, showToast }: {
                         </button>
                       ) : <span className="text-xs text-gray-300">—</span>}
                     </td>
-                    <td className="p-3 whitespace-nowrap">
-                      <div className="flex items-center gap-1.5">
+                    <td className="p-3">
+                      <div className="flex items-center gap-1.5 whitespace-nowrap">
                         <ChipEstado {...est} />
-                        {r.motivo && <span className="text-[11px] text-gray-400" title={r.motivo}>ⓘ</span>}
+                        {/* En una registrada el motivo es una nota (p. ej. «solo traía fecha»): queda en el ⓘ. */}
+                        {r.motivo && !problema && <span className="text-[11px] text-gray-400" title={r.motivo}>ⓘ</span>}
                       </div>
+                      {/* En una pendiente el motivo ES lo que hay que resolver: se lee en la fila. */}
+                      {problema && (
+                        <div className="mt-1 max-w-xs">
+                          {problema !== "otro" && <p className="text-[11px] font-black text-[#7a5a00]">{etiquetaTipo(problema)}</p>}
+                          <p className="text-[11px] text-gray-500 leading-snug line-clamp-2" title={r.motivo ?? undefined}>
+                            {r.motivo || "Sin motivo escrito"}
+                          </p>
+                        </div>
+                      )}
                     </td>
                     <td className="p-3 whitespace-nowrap">
                       <div className="flex items-center gap-1.5">
@@ -2227,6 +2407,27 @@ function FilaGuiaOdometro({ v, onGuardar }: {
   );
 }
 
+// ── Carga del historial de lecturas de odómetro del Radar ────────────────────
+
+/**
+ * TODAS las lecturas de odómetro que registró el Radar, paginadas. La pestaña filtra por columna
+ * (placa, fecha, km, estado…), y filtrar sobre las 60 más recientes haría que una placa pareciera
+ * no tener lecturas, o que el contador «por revisar» dejara fuera las pendientes más viejas.
+ * `completa: false` si alguna página falló: entonces la pantalla no puede afirmar que no queda ninguna.
+ */
+async function leerLecturasRadar(): Promise<{ filas: RadarLecturaOdometro[]; completa: boolean }> {
+  const filas: RadarLecturaOdometro[] = [];
+  for (let desde = 0; desde < 20_000; desde += 1000) {
+    // Orden total (fecha de inserción + id): sin él las páginas pueden solaparse y perder filas.
+    const { data, error } = await supabase.from("lecturas_odometro").select("*").eq("ref_origen", "radar_ia")
+      .order("created_at", { ascending: false }).order("id", { ascending: true }).range(desde, desde + 999);
+    if (error) return { filas, completa: false };
+    filas.push(...((data ?? []) as RadarLecturaOdometro[]));
+    if (!data || data.length < 1000) return { filas, completa: true };
+  }
+  return { filas, completa: false };
+}
+
 // ── Carga de las recargas por revisar ────────────────────────────────────────
 
 /**
@@ -2290,6 +2491,7 @@ export default function RadarIAPage() {
   // Las recargas por revisar se leen TODAS (leerCombustiblePorRevisar); si alguna página falló, la
   // pantalla no puede decir «no queda ninguna».
   const [porRevisarCompleto, setPorRevisarCompleto] = useState(true);
+  const [odometrosCompleto, setOdometrosCompleto] = useState(true);
   // Los mensajes de origen de esas recargas que el feed (150 más recientes) no trae. El ref es la
   // caché: el realtime recarga seguido y no hay que volver a pedir los que ya llegaron.
   const mensajesExtraRef = useRef<Record<string, RadarMensaje>>({});
@@ -2339,7 +2541,7 @@ export default function RadarIAPage() {
         supabase.from("radar_mensajes").select("*").order("recibido_en", { ascending: false }).limit(150),
         supabase.from("radar_oportunidades").select("*").order("created_at", { ascending: false }).limit(60),
         supabase.from("radar_combustible").select("*").order("created_at", { ascending: false }).limit(60),
-        supabase.from("lecturas_odometro").select("*").eq("ref_origen", "radar_ia").order("created_at", { ascending: false }).limit(60),
+        leerLecturasRadar(),
         supabase.from("radar_alertas").select("*").order("created_at", { ascending: false }).limit(100),
         supabase.from("vehiculos").select("id, placa, categoria, estado, guia_odometro, kilometraje_actual"),
         supabase.from("vehiculos_tercero").select("id, placa, categoria, guia_odometro, kilometraje_actual"),
@@ -2363,7 +2565,8 @@ export default function RadarIAPage() {
       for (const c of [...((rComb.data ?? []) as RadarCombustible[]), ...porRevisar.filas]) combPorId.set(c.id, c);
       setCombustibles([...combPorId.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))));
       setPorRevisarCompleto(porRevisar.completa);
-      setOdometros(((rOdo.data ?? []) as RadarLecturaOdometro[]));
+      setOdometros(rOdo.filas);
+      setOdometrosCompleto(rOdo.completa);
       setAlertas(((rAlertas.data ?? []) as RadarAlerta[]));
       setVehiculos(((rVehiculos.data ?? []) as VehiculoLite[]));
       const guiaPropios: VehiculoGuiaOdometro[] = ((rVehiculos.data ?? []) as any[]).map((v) => ({
@@ -2475,7 +2678,8 @@ export default function RadarIAPage() {
 
   const oppNuevas = oportunidades.filter((o) => o.estado === "nueva").length;
   const combPendientes = combustibles.filter((c) => c.estado === "pendiente_revision").length;
-  const odoPorRevisar = odometros.filter((o) => o.estado === "sospechosa" || o.estado === "rechazada").length;
+  // La MISMA definición de «pendiente» que el chip y el filtro de la pestaña (lib/radar/odometro-lecturas.ts).
+  const odoPorRevisar = odometros.filter((o) => esPendiente(o.estado)).length;
 
   // Con los mensajes de origen de las recargas por revisar viejas, que el feed no trae.
   const grupoPorMensaje = useMemo(() => {
@@ -3422,7 +3626,7 @@ export default function RadarIAPage() {
               />
             )}
             {tab === "odometro" && (
-              <TabOdometro registros={odometros} vehiculosGuia={vehiculosGuia} onRefresh={cargar} showToast={showToast} />
+              <TabOdometro registros={odometros} completa={odometrosCompleto} vehiculosGuia={vehiculosGuia} onRefresh={cargar} showToast={showToast} />
             )}
             {tab === "alertas" && (
               <TabAlertas alertas={alertas} onMarcarLeida={marcarAlertaLeida} onMarcarTodas={marcarTodasLeidas} />
