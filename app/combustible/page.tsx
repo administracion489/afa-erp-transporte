@@ -45,6 +45,7 @@ type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" |
 type GranPeriodo = "dia" | "semana" | "mes";
 
 import { COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
+import { faltaAlguna } from "@/lib/columna-faltante";
 import { paginarFilas } from "@/lib/huella";
 import {
   seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
@@ -555,7 +556,10 @@ export default function CombustiblePage() {
     // Reintento sin las columnas de la migración accesoria, nombrando el SQL: registrar una
     // carga no se puede bloquear porque falte un dato del método de tanque lleno — pero un dato
     // que parece guardarse y no llega sí hay que decirlo.
-    if (error && /tanque_lleno|km_salto_motivo/i.test(error.message || "") && /does not exist/i.test(error.message || "")) {
+    // `faltaAlguna` entiende las DOS formas del error: en un INSERT/UPDATE quien rechaza la columna
+    // es PostgREST (PGRST204 «Could not find the … column»), no Postgres («does not exist»). Mirando
+    // solo la segunda, este reintento no saltaba nunca — el mismo hueco que dejó al Radar sin guardar.
+    if (error && faltaAlguna(error, ["tanque_lleno", "tanque_lleno_fuente", "km_salto_motivo"])) {
       const r2 = await escribir(base);
       error = r2.error;
       if (!error) {

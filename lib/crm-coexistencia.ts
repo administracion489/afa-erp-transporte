@@ -16,6 +16,7 @@
 // una persona, o conversaciones viejas. Contestarlos sería hablar solo.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { faltaColumna } from "@/lib/columna-faltante";
 import {
   resolverContacto,
   resolverConversacion,
@@ -44,7 +45,9 @@ async function insertarMensaje(sb: SB, fila: Record<string, unknown>, extra: Ext
   // que ya llegó en vivo.
   if (error.code === "23505") return false;
 
-  if (/column .* does not exist/i.test(error.message)) {
+  // Las dos formas del error de columna: en un INSERT la rechaza PostgREST (PGRST204, «Could not
+  // find the … column»), no Postgres. Mirando solo «does not exist» el reintento no saltaba nunca.
+  if (faltaColumna(error)) {
     const { error: err2 } = await sb.from("crm_mensajes").insert(fila);
     if (!err2) return true;
     if (err2.code === "23505") return false;
@@ -59,7 +62,7 @@ async function insertarMensaje(sb: SB, fila: Record<string, unknown>, extra: Ext
 /** Actualiza la conversación tolerando columnas que aún no existan. */
 async function actualizarConversacion(sb: SB, id: string, patch: Record<string, unknown>, extra: Extra) {
   const { error } = await sb.from("crm_conversaciones").update({ ...patch, ...extra }).eq("id", id);
-  if (error && /column .* does not exist/i.test(error.message)) {
+  if (error && faltaColumna(error)) {
     await sb.from("crm_conversaciones").update(patch).eq("id", id);
   }
 }

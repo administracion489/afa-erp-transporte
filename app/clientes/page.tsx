@@ -12,6 +12,7 @@ import {
   type Frecuencia, type Ventana,
 } from "@/lib/ocupacion/cadencia";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { faltaAlguna } from "@/lib/columna-faltante";
 
 /* ══════════════════════════════════════════════
    TYPES
@@ -591,10 +592,9 @@ export default function ClientesPage() {
       "reporte_ocupacion_activo", "reporte_ocupacion_sugerencias", "reporte_ocupacion_correos",
       "reporte_ocupacion_frecuencia", "reporte_ocupacion_ventana",
     ] as const;
-    const faltaReporte = (msg: string) => {
-      const m = msg.toLowerCase();
-      return m.includes("does not exist") && COLS_REPORTE.some(c => m.includes(c));
-    };
+    // Las dos formas del error (lib/columna-faltante.ts): al GUARDAR, quien rechaza la columna es
+    // PostgREST («Could not find the … column», PGRST204), no Postgres («does not exist»).
+    const faltaReporte = (msg: string) => faltaAlguna({ message: msg }, COLS_REPORTE) != null;
     const sinReporte = () => {
       const copia: any = { ...payload };
       for (const c of COLS_REPORTE) delete copia[c];

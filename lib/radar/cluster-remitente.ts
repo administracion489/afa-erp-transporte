@@ -102,3 +102,22 @@ export function miembrosDelMismoRemitente<T extends RemitenteRadar>(referencia: 
   if (!remitenteUtilizable(referencia)) return [];
   return candidatos.filter((c) => mismoRemitente(referencia, c));
 }
+
+// ── QUÉ puede ser parte de un reporte ────────────────────────────────────────
+// La otra mitad de «quién pertenece a una ráfaga». La usan `resolverCluster` (motor.ts), para
+// agrupar, y el reproceso (reproceso.ts), para saber qué devolver a la cola junto a un mensaje: con
+// dos definiciones, el reproceso reactivaría un mensaje que el motor después no junta, y quedaría
+// procesándose SOLO —justo lo que el reproceso con ráfaga existe para evitar—.
+
+const PALABRAS_COMBUSTIBLE =
+  /combustible|grifo|abastec|di[eé]sel|gnv|glp|gal[oó]n|litro|placa|kilometraje|od[oó]metro|voucher|v[au]cher|comprobante/i;
+
+/**
+ * ¿Este mensaje PODRÍA ser parte de un reporte de combustible/odómetro partido en varios? Una imagen
+ * o un documento siempre puede ser voucher u odómetro; un texto, solo si menciona algo del rubro.
+ */
+export function pareceCombustible(m: { tipo?: string | null; texto?: string | null }): boolean {
+  if (m.tipo === "imagen" || m.tipo === "documento") return true;
+  if (m.tipo === "texto") return PALABRAS_COMBUSTIBLE.test(String(m.texto ?? ""));
+  return false;
+}

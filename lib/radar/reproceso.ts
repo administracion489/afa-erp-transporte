@@ -28,6 +28,144 @@
 // `error` y `accion`). Un mensaje con `procesado_en` que vuelve a entrar al pipeline es, por
 // definición, un reproceso.
 
+import { miembrosDelMismoRemitente, pareceCombustible, remitenteUtilizable, type RemitenteRadar } from "./cluster-remitente";
+
+// ── El estado de un mensaje después de su acción ─────────────────────────────
+
+/**
+ * Una acción que FALLÓ deja el mensaje en `error`, nunca en `procesado`. Del 14/09 al 06/10 el motor
+ * marcó «Procesado» en verde cada recarga que no se guardó —el `error_accion` iba escondido dentro
+ * del detalle—, y la única forma de enterarse era descubrir que faltaban en /combustible.
+ */
+export function estadoTrasAccion(accion: string | null | undefined): "error" | "procesado" {
+  return accion === "error_accion" ? "error" : "procesado";
+}
+
+/**
+ * Qué mensajes FALLARON, como filtro `.or()` de PostgREST: los que terminaron en `error` y los que
+ * quedaron `procesado` con la acción fallida (así los dejó el motor antes de este arreglo). Es el
+ * MISMO filtro para la pantalla que los cuenta y para el botón que los reprocesa: si fueran dos, la
+ * pantalla podría prometer N y el botón reprocesar otros.
+ */
+export const FILTRO_FALLIDOS = "accion.eq.error_accion,estado.eq.error";
+
+// ── Reprocesar un mensaje CON su ráfaga ──────────────────────────────────────
+
+export type MensajeRafaga = RemitenteRadar & {
+  id: string;
+  estado: string;
+  accion?: string | null;
+  grupo_id?: string | null;
+  recibido_en: string;
+  /** `tipo` y `texto` deciden si el mensaje puede ser parte de un reporte (`pareceCombustible`). */
+  tipo?: string | null;
+  texto?: string | null;
+  resultado?: unknown;
+};
+
+export const fusionadoEn = (r: unknown): string =>
+  r && typeof r === "object" ? String((r as Record<string, unknown>).fusionado_en ?? "") : "";
+
+/** ¿Falló? La misma definición que FILTRO_FALLIDOS, para un mensaje ya leído. */
+export const esFallido = (m: { estado?: string | null; accion?: string | null }): boolean =>
+  m.estado === "error" || m.accion === "error_accion";
+
+/**
+ * Lo que el motor todavía no TERMINÓ: falló, o sigue en la cola. Las dos cosas cuentan como parte
+ * de una ráfaga que se reprocesa: un mensaje pendiente más antiguo que el reprocesado se llevaría al
+ * reprocesado fundido —el motor junta en el más antiguo— y nadie procesaría ese en esta llamada.
+ */
+export const sinTerminar = (m: { estado?: string | null; accion?: string | null }): boolean =>
+  m.estado !== "fusionado" && m.estado !== "procesando" && (esFallido(m) || m.estado === "pendiente");
+
+/** El mismo criterio, como filtro `.or()` de PostgREST (los de `sinTerminar` que no excluye el estado). */
+export const FILTRO_SIN_TERMINAR = `${FILTRO_FALLIDOS},estado.eq.pendiente`;
+
+/**
+ * Desde DÓNDE se reprocesa. Un mensaje `fusionado` no se relee solo: lo que traía ya viajó en la
+ * extracción de la principal en que se fundió, y leído aislado propondría una recarga hecha con UNA
+ * foto al lado de la buena. Se reprocesa la ráfaga entera, desde su principal.
+ */
+export function raizDeReproceso(m: { id: string; estado?: string | null; resultado?: unknown }): string {
+  return (m.estado === "fusionado" && fusionadoEn(m.resultado)) || m.id;
+}
+
+const instante = (m: { recibido_en: string }): number => {
+  const t = Date.parse(m.recibido_en);
+  return Number.isFinite(t) ? t : Number.NaN;
+};
+
+export type RafagaAReactivar = {
+  /** Todo lo que vuelve a `pendiente`, `principal` incluido; lo sin terminar va del más viejo al más nuevo. */
+  ids: string[];
+  /** El que se procesa primero: el MÁS ANTIGUO de la ráfaga, que es el que el motor toma como principal. */
+  primaria: string;
+};
+
+/**
+ * Qué mensajes hay que devolver a `pendiente`, y DESDE CUÁL procesar, para que `principal` se
+ * reprocese CON SU RÁFAGA.
+ *
+ * Un reporte de recarga llega en varias fotos —el tablero, el surtidor, la nota— y el motor las
+ * funde en la más antigua: las demás quedan en `fusionado`. Y la búsqueda de la ráfaga EXCLUYE a
+ * las fusionadas (`resolverCluster`), así que reprocesar la principal la analizaba SOLA: con el
+ * caption o el tablero y sin la nota de despacho, que casi siempre va al final. El reproceso de las
+ * tres semanas en que el Radar no guardó nada habría perdido justo los importes.
+ *
+ *  1. Lo SIN TERMINAR que el motor juntaría con `principal`, con la MISMA regla de `resolverCluster`
+ *     —mismo `remitente_wa` guardado (la consulta filtra así), la misma persona según
+ *     `miembrosDelMismoRemitente` (un jid vacío no junta a nadie), el mismo grupo y con pinta de
+ *     reporte (`pareceCombustible`)—, ENCADENADO: entra lo que esté a menos de una ventana de algo que
+ *     ya entró, hacia los dos lados. El motor agrupa alrededor del que procesa, así que un eslabón
+ *     suelto más viejo se llevaría fundido al resto.
+ *  2. Lo que se fundió en cualquiera de ellos (`resultado.fusionado_en`).
+ *
+ * Y SE PROCESA DESDE EL MÁS ANTIGUO, no desde el que se pulsó: reprocesar otro lo fundiría en uno que
+ * esta llamada no procesa —y cuando ese se procesara después, el recién fundido ya estaría excluido—.
+ * Quien llama procesa después, en orden, lo que haya quedado en la cola (ver `reprocesarMensaje`).
+ *
+ * `yaIntentadosHasta` es el cursor del reproceso en lote: lo FALLIDO hasta ahí ya se intentó en esta
+ * pasada y no se vuelve a pagar por arrastre (lo pendiente sí entra: nadie lo intentó).
+ */
+export function rafagaAReactivar(
+  principal: MensajeRafaga,
+  candidatos: MensajeRafaga[],
+  ventanaMs: number,
+  opts?: { yaIntentadosHasta?: string | null }
+): RafagaAReactivar {
+  const corte = opts?.yaIntentadosHasta ? Date.parse(opts.yaIntentadosHasta) : Number.NaN;
+  const juntable =
+    !!principal.grupo_id && Number.isFinite(instante(principal)) && pareceCombustible(principal) && remitenteUtilizable(principal);
+  const pool = juntable
+    ? miembrosDelMismoRemitente(
+        principal,
+        (candidatos ?? []).filter(
+          (c) =>
+            c?.id && c.id !== principal.id && sinTerminar(c) &&
+            c.grupo_id === principal.grupo_id && c.remitente_wa === principal.remitente_wa && pareceCombustible(c) &&
+            Number.isFinite(instante(c)) && !(esFallido(c) && instante(c) <= corte)
+        )
+      )
+    : [];
+
+  // Encadenado: cada uno que entra trae a los que tenga a menos de una ventana.
+  const componente: MensajeRafaga[] = [principal];
+  const resto = [...pool];
+  for (let i = 0; i < componente.length; i++) {
+    for (let j = resto.length - 1; j >= 0; j--) {
+      if (Math.abs(instante(resto[j]) - instante(componente[i])) <= ventanaMs) componente.push(...resto.splice(j, 1));
+    }
+  }
+  const orden = componente.length > 1
+    ? [...componente].sort((a, b) => instante(a) - instante(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    : componente;
+  const enComponente = new Set(orden.map((m) => m.id));
+  const fundidas = (candidatos ?? []).filter(
+    (c) => c?.id && !enComponente.has(c.id) && c.estado === "fusionado" && enComponente.has(fusionadoEn(c.resultado))
+  );
+  return { ids: [...orden, ...fundidas].map((m) => m.id), primaria: orden[0].id };
+}
+
 /** Una fila que la corrida anterior dejó, con lo justo para decidir su suerte. */
 export type ArtefactoPrevio = {
   tabla: "radar_combustible" | "radar_oportunidades" | "radar_alertas";

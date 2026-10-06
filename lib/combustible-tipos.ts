@@ -15,6 +15,8 @@
 // `gasolina` a secas se conserva como LEGADO: son las filas que ya existen en `combustible` con
 // ese valor. Quitarla las dejaría cayendo al fallback (diésel) y el histórico mentiría.
 
+import { faltaColumna } from "@/lib/columna-faltante";
+
 export type ConfigCombustible = {
   label: string;
   /** Para chips y columnas estrechas ("G. Premium"). */
@@ -207,9 +209,11 @@ export function capacidadTanqueAForm(cap: Record<string, number> | null | undefi
  * capacidad vieja se queda escrita, así que un 80 tecleado por error es corregible a otro número
  * pero no retirable. Un formulario en el que un campo no se puede vaciar miente sobre lo guardado.
  */
-export function faltaColumnaTanque(error: { message?: string } | null | undefined): boolean {
-  const m = String(error?.message ?? "").toLowerCase();
-  return m.includes("capacidad_tanque") && m.includes("does not exist");
+export function faltaColumnaTanque(error: { code?: string | null; message?: string | null } | null | undefined): boolean {
+  // Las DOS formas del error (lib/columna-faltante.ts): este se usa al GUARDAR la ficha, y ahí quien
+  // rechaza la columna es PostgREST (PGRST204), no Postgres — con solo «does not exist» el reintento
+  // no saltaba nunca.
+  return faltaColumna(error, "capacidad_tanque");
 }
 
 // ── Normalización de lo que imprime un voucher ───────────────────────────────

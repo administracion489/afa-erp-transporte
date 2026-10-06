@@ -19,10 +19,19 @@ import { createClient } from "@supabase/supabase-js";
 import { enviarEmail } from "@/lib/notificaciones";
 import { leccionesOdometro } from "@/lib/odometro";
 import { leccionesCombustible } from "./lecciones-combustible";
-import { ejecutarAccion, crearAlerta, fechaLima, horaLima } from "./acciones";
+import { ejecutarAccion, crearAlerta, fechaLima, horaLima, fechaLimaDeTs, horaLimaDeTs } from "./acciones";
+import {
+  FILTRO_FALLIDOS,
+  FILTRO_SIN_TERMINAR,
+  esFallido,
+  estadoTrasAccion,
+  rafagaAReactivar,
+  raizDeReproceso,
+  type MensajeRafaga,
+} from "./reproceso";
 import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
 import { transcribirAudio } from "./transcripcion";
-import { miembrosDelMismoRemitente, remitenteUtilizable } from "./cluster-remitente";
+import { miembrosDelMismoRemitente, pareceCombustible, remitenteUtilizable } from "./cluster-remitente";
 import { CONFIG_DEFECTO, normalizarConfigRadar } from "./config";
 import { LISTA_CATEGORIAS, type CategoriaRadar, type RadarConfig, type ResumenProcesamiento } from "./tipos";
 import { firmarUrl, firmarUrls } from "@/lib/storage-firmado";
@@ -114,10 +123,17 @@ export async function procesarPendientes(opts?: {
   limite?: number;
   soloMensajeId?: string;
   forzar?: boolean;
+  /**
+   * Si `forzar` salta también las categorías apagadas (por defecto, sí: es el botón «Reprocesar» de
+   * UN mensaje, que alguien pulsó mirándolo). El reproceso EN LOTE las respeta: un mensaje que se
+   * cayó antes de clasificarse no puede terminar ejecutando una categoría que el operador apagó.
+   */
+  forzarCategorias?: boolean;
 }): Promise<ResumenProcesamiento> {
   const sb = db();
   const limite = Math.min(50, Math.max(1, opts?.limite ?? 20));
   const forzar = opts?.forzar === true;
+  const forzarCategorias = opts?.forzarCategorias ?? forzar;
   const resumen: ResumenProcesamiento = { procesados: 0, descartados: 0, errores: 0, omitidos: 0, costo_usd: 0 };
 
   const config = await cargarConfig(sb);
@@ -211,9 +227,10 @@ export async function procesarPendientes(opts?: {
 
     try {
       const grupoInfo = mensaje.grupo_id ? gruposInfo.get(mensaje.grupo_id) ?? null : null;
-      const r = await procesarMensaje(sb, mensaje, config, forzar, grupoInfo, guiasOdometro, leccionesOdo, leccionesComb);
+      const r = await procesarMensaje(sb, mensaje, config, forzarCategorias, grupoInfo, guiasOdometro, leccionesOdo, leccionesComb);
       resumen.costo_usd += r.costo;
       if (r.estado === "procesado") resumen.procesados++;
+      else if (r.estado === "error") resumen.errores++;
       else resumen.descartados++;
     } catch (e: any) {
       resumen.errores++;
@@ -261,16 +278,9 @@ async function cargarGruposInfo(sb: any, lote: any[]): Promise<Map<string, Grupo
 // la extracción combinada, no este heurístico.
 
 // Heurística liviana: ¿este mensaje PODRÍA ser parte de un reporte de combustible/odómetro
-// fragmentado? (una imagen o documento siempre puede ser voucher u odómetro; un texto
-// solo si menciona algo del rubro). Se usa para el período de gracia y para buscar hermanos.
-const PALABRAS_COMBUSTIBLE =
-  /combustible|grifo|abastec|di[eé]sel|gnv|glp|gal[oó]n|litro|placa|kilometraje|od[oó]metro|voucher|v[au]cher|comprobante/i;
-
-function pareceCombustible(mensaje: any): boolean {
-  if (mensaje.tipo === "imagen" || mensaje.tipo === "documento") return true;
-  if (mensaje.tipo === "texto") return PALABRAS_COMBUSTIBLE.test(String(mensaje.texto ?? ""));
-  return false;
-}
+// fragmentado? Se usa para el período de gracia y para buscar hermanos. Vive en
+// cluster-remitente.ts (`pareceCombustible`) porque el reproceso tiene que decidir con la MISMA
+// regla qué mensajes vuelven a la cola junto a uno.
 
 // Antes de procesar un mensaje con pinta de combustible se espera este tiempo, para que
 // sus "hermanos" (enviados en los minutos siguientes) ya estén en la base cuando se arme
@@ -417,13 +427,14 @@ async function alertaPresupuesto(sb: any, inicioDiaUtc: string, limite: number) 
 
 // ── Procesamiento de un mensaje ──────────────────────────────────────────────
 
-type ResultadoMensaje = { estado: "procesado" | "descartado" | "fusionado"; costo: number };
+type ResultadoMensaje = { estado: "procesado" | "descartado" | "fusionado" | "error"; costo: number };
 
 async function procesarMensaje(
   sb: any,
   mensaje: any,
   config: RadarConfig,
-  forzar: boolean,
+  /** Ejecutar la categoría aunque esté apagada (global o para el grupo). */
+  forzarCategorias: boolean,
   grupoInfo: GrupoInfo | null,
   guiasOdometro: { placa: string; guia: string | null; digitos: number | null }[],
   leccionesOdo: string,
@@ -432,8 +443,12 @@ async function procesarMensaje(
   const ctx: ContextoPrompt = {
     grupo: mensaje.grupo_nombre,
     remitente: mensaje.remitente_nombre ?? mensaje.remitente_wa,
-    fechaHoy: fechaLima(),
-    horaAhora: horaLima(),
+    // "Hoy" para la IA es el día en que se MANDÓ el mensaje, no el día en que se procesa. En vivo es
+    // lo mismo (se procesa a los minutos); al reprocesar las recargas de hace tres semanas no: un
+    // caption «cargué hoy» se habría fechado el día del reproceso, y el año de un voucher se juzga
+    // contra el «hoy» que diga el prompt.
+    fechaHoy: fechaLimaDeTs(mensaje.ts_mensaje) ?? fechaLima(),
+    horaAhora: horaLimaDeTs(mensaje.ts_mensaje) ?? horaLima(),
     palabrasClave: config.palabras_clave,
     contextoGrupo: grupoInfo?.contexto ?? null,
     guiaVoucher: config.guia_voucher,
@@ -462,7 +477,7 @@ async function procesarMensaje(
   };
 
   const finalizar = async (
-    estado: "procesado" | "descartado" | "fusionado",
+    estado: ResultadoMensaje["estado"],
     campos: Record<string, unknown>
   ): Promise<ResultadoMensaje> => {
     const costo = Math.round(costoTotal * 10000) / 10000;
@@ -653,7 +668,7 @@ async function procesarMensaje(
     confianza = normalizarConfianza(triage?.confianza);
     resumenIa = String(triage?.resumen ?? "").slice(0, 300) || "Sin resumen";
 
-    if (categoria !== "otros" && (categoriasEfectivas.includes(categoria) || forzar)) {
+    if (categoria !== "otros" && (categoriasEfectivas.includes(categoria) || forzarCategorias)) {
       const e = await llamarIA(modeloExtraccion, [
         { type: "text", text: `${promptExtraccion(categoria, ctx)}\n\nMensaje:\n"""${textoParaClasificar}"""` },
       ]);
@@ -671,7 +686,7 @@ async function procesarMensaje(
       accion: "sin_relevancia",
     });
   }
-  if (!categoriasEfectivas.includes(categoria) && !forzar) {
+  if (!categoriasEfectivas.includes(categoria) && !forzarCategorias) {
     // Distingue si la bloqueó la config global o la restricción propia del grupo (para el feed).
     const bloqueadaSoloPorGrupo = config.categorias_activas.includes(categoria);
     return finalizar("descartado", {
@@ -718,7 +733,24 @@ async function procesarMensaje(
     }
   }
 
-  // 5) Notificación por correo (crítico u oportunidad) — cortesía, nunca frena
+  // 5) UNA ACCIÓN QUE FALLÓ NO ES UN MENSAJE PROCESADO. Esto terminaba en "procesado" pasara lo que
+  //    pasara, así que del 14/09 al 06/10 el feed enseñó en verde cada recarga que NO se guardó
+  //    —con `error_accion` escondido en el detalle— y nadie supo que faltaban hasta revisar
+  //    /combustible a mano. El motivo va a `error`, que es lo que la pantalla pinta en rojo, y el
+  //    resultado se conserva entero para que el reproceso sepa qué dejó escrito esta corrida.
+  const estadoFinal = estadoTrasAccion(resultado.accion);
+  if (estadoFinal === "error") {
+    return finalizar("error", {
+      categoria,
+      confianza,
+      resumen_ia: resumenIa,
+      resultado: { extraccion: datos, accion: resultado },
+      accion: resultado.accion,
+      error: String(resultado.detalle ?? "La acción falló").slice(0, 500),
+    });
+  }
+
+  // 6) Notificación por correo (crítico u oportunidad) — cortesía, nunca frena
   await notificarPorCorreo(config, mensaje, categoria, resumenIa, resultado).catch(() => {});
 
   return finalizar("procesado", {
@@ -776,4 +808,185 @@ async function notificarPorCorreo(
       console.warn("[radar/motor] email falló:", e?.message ?? e)
     );
   }
+}
+
+// ── Reproceso: un mensaje con su ráfaga, y en lote los que fallaron ──────────
+
+const COLS_RAFAGA = "id, estado, accion, grupo_id, tipo, texto, remitente_wa, remitente_nombre, recibido_en, resultado";
+
+/**
+ * Hasta dónde se buscan eslabones de una ráfaga encadenada al reprocesar (seis ventanas: una hora a
+ * cada lado). No está medido: es holgado para un reporte de recarga, que dura minutos. Lo que quede
+ * más allá no se pierde: sigue fallido y entra en la vuelta siguiente.
+ */
+const ALCANCE_RAFAGA_MS = 6 * VENTANA_CLUSTER_MS;
+
+/**
+ * Vuelve a pasar UN mensaje por el pipeline CON SU RÁFAGA (ver `rafagaAReactivar`): sin esto,
+ * reprocesar la foto principal de un reporte la analizaba sola, sin la nota de despacho que se
+ * había fundido en ella. Lo que el mensaje ya dejó escrito lo cuida `ejecutarAccion` (lo propuesto
+ * se retira, lo comprometido no se repite) y lo que otros caminos registraron —a mano o desde la
+ * factura— lo cuida el cruce contra /combustible de la acción de combustible.
+ *
+ * Devuelve `primaria`: el mensaje que de verdad se procesó (el más antiguo de la ráfaga, que puede
+ * no ser el que se pulsó). El resultado de la ráfaga entera vive en esa fila.
+ */
+export async function reprocesarMensaje(
+  mensajeId: string,
+  opts?: { forzarCategorias?: boolean; yaIntentadosHasta?: string | null }
+): Promise<ResumenProcesamiento & { reactivados: number; primaria: string }> {
+  const sb = db();
+  const leer = async (id: string): Promise<MensajeRafaga | null> => {
+    const { data, error } = await sb.from("radar_mensajes").select(COLS_RAFAGA).eq("id", id).maybeSingle();
+    if (error) throw new Error(`radar_mensajes: ${error.message}`);
+    return (data as MensajeRafaga | null) ?? null;
+  };
+  const pulsado = await leer(mensajeId);
+  if (!pulsado) throw new Error("Mensaje no encontrado");
+  // Uno fusionado se reprocesa desde la principal en que se fundió (`raizDeReproceso`); si esa ya
+  // no existe, desde él mismo.
+  const raiz = raizDeReproceso(pulsado);
+  const m = (raiz !== pulsado.id ? await leer(raiz) : null) ?? pulsado;
+  if (m.estado === "procesando") throw new Error("El mensaje se está procesando en este momento: espera un minuto y vuelve a intentarlo.");
+
+  // 1) Lo sin terminar de esa persona en ese grupo, con margen para encadenar la ráfaga: el
+  //    encadenado lo decide `rafagaAReactivar`, aquí solo se trae de dónde elegir.
+  const centro = Date.parse(m.recibido_en);
+  let cercanos: MensajeRafaga[] = [];
+  if (m.grupo_id && Number.isFinite(centro) && m.remitente_wa) {
+    const { data, error } = await sb.from("radar_mensajes").select(COLS_RAFAGA)
+      .or(FILTRO_SIN_TERMINAR).eq("grupo_id", m.grupo_id).eq("remitente_wa", m.remitente_wa)
+      .gte("recibido_en", new Date(centro - ALCANCE_RAFAGA_MS).toISOString())
+      .lte("recibido_en", new Date(centro + ALCANCE_RAFAGA_MS).toISOString());
+    if (error) throw new Error(`radar_mensajes (ráfaga): ${error.message}`);
+    cercanos = (data as MensajeRafaga[]) ?? [];
+  }
+  const ya = { yaIntentadosHasta: opts?.yaIntentadosHasta ?? null };
+  // 2) Lo fundido en CUALQUIERA de ellos, no solo en `m`: cada uno pudo ser la principal de su
+  //    propio trozo de la ráfaga.
+  const componente = rafagaAReactivar(m, cercanos, VENTANA_CLUSTER_MS, ya).ids;
+  const { data: fundidas, error: eF } = await sb.from("radar_mensajes").select(COLS_RAFAGA)
+    .eq("estado", "fusionado").in("resultado->>fusionado_en", componente);
+  if (eF) throw new Error(`radar_mensajes (ráfaga): ${eF.message}`);
+  const plan = rafagaAReactivar(m, [...cercanos, ...((fundidas as MensajeRafaga[]) ?? [])], VENTANA_CLUSTER_MS, ya);
+
+  // Volver a pendiente (permite reprocesar procesados, descartados y con error). Nunca uno que otra
+  // corrida tiene tomado: devolverlo a pendiente en mitad de su proceso lo haría correr dos veces.
+  const { error: eUpd } = await sb
+    .from("radar_mensajes")
+    .update({ estado: "pendiente", error: null, accion: null })
+    .in("id", plan.ids)
+    .neq("estado", "procesando");
+  if (eUpd) throw new Error(`radar_mensajes: ${eUpd.message}`);
+
+  const forzarCategorias = opts?.forzarCategorias ?? true;
+  const resumen = await procesarPendientes({ limite: 1, soloMensajeId: plan.primaria, forzar: true, forzarCategorias });
+
+  // 3) Lo reactivado que el motor no juntó con la primaria —una ráfaga más larga que la ventana, o
+  //    una primaria que procesó sola porque al lado había un mensaje ya terminado— se procesa aquí,
+  //    en orden, en vez de quedarse en la cola esperando al cron sin que la pantalla lo cuente.
+  const { data: quedan } = await sb.from("radar_mensajes").select("id")
+    .in("id", plan.ids).eq("estado", "pendiente").order("recibido_en", { ascending: true });
+  for (const q of (quedan as { id: string }[] | null) ?? []) {
+    const r = await procesarPendientes({ limite: 1, soloMensajeId: q.id, forzar: true, forzarCategorias });
+    resumen.procesados += r.procesados;
+    resumen.descartados += r.descartados;
+    resumen.errores += r.errores;
+    resumen.omitidos += r.omitidos;
+    resumen.costo_usd = Math.round((resumen.costo_usd + r.costo_usd) * 10000) / 10000;
+  }
+  return { ...resumen, reactivados: Math.max(0, plan.ids.length - 1), primaria: plan.primaria };
+}
+
+export type ResultadoReprocesoLote = {
+  reprocesados: number;
+  /** Terminaron bien (procesado, descartado o fundido en otro). */
+  resueltos: number;
+  /** Volvieron a fallar: siguen en la lista, con su motivo. */
+  siguen: number;
+  /** Mensajes de sus ráfagas que volvieron a la cola con ellos (fundidos o fallidos de al lado). */
+  arrastrados: number;
+  /** Fallidos que todavía no se miraron en esta pasada. */
+  quedan: number;
+  /** `recibido_en` del último mirado: la próxima llamada sigue DESPUÉS de él. */
+  ultimo: string | null;
+  costo_usd: number;
+  detalle: { id: string; primaria: string; estado: string; accion: string | null; error: string | null }[];
+};
+
+/**
+ * Reprocesa, de a uno y del más viejo al más nuevo, los mensajes que FALLARON desde `desde`
+ * (FILTRO_FALLIDOS: el mismo con que la pantalla los cuenta), cada uno CON SU RÁFAGA. Cada uno una
+ * sola vez por pasada: se avanza con un cursor, porque uno que vuelve a fallar seguiría siendo «el
+ * más viejo» y ocuparía todas las vueltas, y el cursor viaja también al reproceso de la ráfaga
+ * (`yaIntentadosHasta`) para que un fallido ya intentado no se vuelva a pagar arrastrado por el de al
+ * lado. Respeta las categorías apagadas (un mensaje que se cayó antes de clasificarse no puede
+ * terminar ejecutando lo que el operador apagó).
+ *
+ * Por tiempo, no por cantidad: una lectura con fotos tarda de segundos a un minuto, y la función
+ * tiene un techo. Pasado el presupuesto no se EMPIEZA otro: el que está en curso termina. Lo que
+ * falta lo pide la pantalla en la siguiente llamada.
+ */
+export async function reprocesarFallidos(opts: {
+  desde: string;
+  despuesDe?: string | null;
+  presupuestoMs?: number;
+}): Promise<ResultadoReprocesoLote> {
+  const sb = db();
+  const inicio = Date.now();
+  const presupuesto = opts.presupuestoMs ?? 150_000;
+  const res: ResultadoReprocesoLote = {
+    reprocesados: 0, resueltos: 0, siguen: 0, arrastrados: 0, quedan: 0, ultimo: opts.despuesDe ?? null, costo_usd: 0, detalle: [],
+  };
+  const siguiente = () => {
+    let q = sb.from("radar_mensajes").select("id, recibido_en")
+      .or(FILTRO_FALLIDOS).gte("recibido_en", opts.desde)
+      .order("recibido_en", { ascending: true }).limit(1);
+    if (res.ultimo) q = q.gt("recibido_en", res.ultimo);
+    return q;
+  };
+
+  while (Date.now() - inicio < presupuesto) {
+    const { data, error } = await siguiente();
+    if (error) throw new Error(`radar_mensajes: ${error.message}`);
+    const sig = ((data as { id: string; recibido_en: string }[]) ?? [])[0];
+    if (!sig) break;
+    const yaIntentadosHasta = res.ultimo;
+    res.ultimo = sig.recibido_en;
+    res.reprocesados++;
+    let motivo: string | null = null;
+    let primaria = sig.id;
+    let errores = 0;
+    try {
+      const r = await reprocesarMensaje(sig.id, { forzarCategorias: false, yaIntentadosHasta });
+      res.costo_usd += r.costo_usd;
+      res.arrastrados += r.reactivados;
+      primaria = r.primaria;
+      errores = r.errores;
+    } catch (e: unknown) {
+      motivo = String((e as Error)?.message ?? e).slice(0, 300);
+    }
+    // Se juzga por la PRIMARIA: si `sig` se fundió en una más antigua, su propio estado diría
+    // «fusionado» —un éxito— aunque la ráfaga entera haya vuelto a fallar.
+    const { data: fin } = await sb.from("radar_mensajes").select("estado, accion, error").eq("id", primaria).maybeSingle();
+    const final = (fin as { estado?: string; accion?: string | null; error?: string | null } | null) ?? null;
+    const estado = String(final?.estado ?? "error");
+    const quedoMal = motivo != null || errores > 0 || esFallido({ estado, accion: final?.accion ?? null });
+    if (quedoMal) res.siguen++;
+    else res.resueltos++;
+    res.detalle.push({
+      id: sig.id,
+      primaria,
+      estado,
+      accion: final?.accion ?? null,
+      error: motivo ?? final?.error ?? null,
+    });
+  }
+
+  let qc = sb.from("radar_mensajes").select("id", { count: "exact", head: true }).or(FILTRO_FALLIDOS).gte("recibido_en", opts.desde);
+  if (res.ultimo) qc = qc.gt("recibido_en", res.ultimo);
+  const { count } = await qc;
+  res.quedan = count ?? 0;
+  res.costo_usd = Math.round(res.costo_usd * 10000) / 10000;
+  return res;
 }

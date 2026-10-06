@@ -267,6 +267,22 @@ export type PlanLinea = {
   } | null;
 };
 
+/**
+ * Cómo queda marcada en `combustible.observaciones` una carga que registró la FACTURA. Lo escribe
+ * `conciliarFacturaGuardada` y lo LEE el Radar para no duplicarla: la fecha de esa carga es la de la
+ * factura, no la del voucher (que el Radar sí tiene), así que el Radar la busca con un día de margen.
+ * Una sola frase para quien escribe y quien lee — si fueran dos, el día que una cambie el Radar
+ * dejaría de reconocer las cargas de la factura y registraría la misma otra vez.
+ */
+export const MARCA_CARGA_DE_FACTURA = "Registrada desde la factura";
+
+export function observacionCargaDeFactura(ref: string, nota: string | null, extra?: string | null): string {
+  return `📧 ${MARCA_CARGA_DE_FACTURA} ${ref} (respaldo del Radar)${nota ? ` · Nota ${nota}` : ""}${extra ? ` · ${extra}` : ""} · sin odómetro`;
+}
+
+export const esCargaDeFactura = (observaciones?: string | null): boolean =>
+  String(observaciones ?? "").includes(MARCA_CARGA_DE_FACTURA);
+
 export const TOLERANCIA_MONTO = 1;          // soles: mismo criterio que buscarDuplicado
 export const TOLERANCIA_CANTIDAD = 0.05;    // galones
 export const DIAS_VENTANA = 1;              // la nota de despacho puede salir con fecha del día siguiente
