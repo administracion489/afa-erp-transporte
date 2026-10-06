@@ -2,6 +2,10 @@
 
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { porQueNoAncla, TEXTO_NO_ANCLA, otDeFila, type EstadosOT, type MotivoNoAncla } from "@/lib/mantenimiento/proximo-servicio";
+import { cargarEstadosOT } from "@/lib/mantenimiento/proximo-servicio-datos";
+
+const hoyLimaISO = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -96,6 +100,9 @@ export default function HistorialTab() {
   const [filtroTipo,  setFiltroTipo]  = useState("todos");
   const [filtroEst,   setFiltroEst]   = useState("todos");
   const [form, setForm] = useState(FORM_VACIO);
+  // Estado de las OT que nombra el libro. Con él se marca la fila de una OT eliminada o reabierta:
+  // sigue aquí, pero Próximos ya no la cuenta como servicio hecho (lib/mantenimiento/proximo-servicio.ts).
+  const [estadoOT, setEstadoOT] = useState<EstadosOT | null>(null);
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -111,6 +118,7 @@ export default function HistorialTab() {
     ]);
     setVehiculos(vRes.data || []);
     setRegistros(mRes.data || []);
+    setEstadoOT(await cargarEstadosOT(supabase, (mRes.data || []) as any[]));
     setLoading(false);
   };
 
@@ -217,6 +225,28 @@ export default function HistorialTab() {
     const d = diasPara(r.proxima_fecha);
     return d !== null && d >= 0 && d <= 15 && r.estado !== "cancelado";
   });
+
+  // Por qué un preventivo NO cuenta para Próximos. Solo lo que la fila no dice sola: «cancelado»
+  // ya se ve en la columna Estado, y un correctivo nunca ancló.
+  const hoy = hoyLimaISO();
+  const noAncla = (r: Mantenimiento): MotivoNoAncla | null => {
+    if (r.tipo !== "preventivo") return null;
+    const m = porQueNoAncla({ ...r, vehiculo_id: r.vehiculo_id ?? 0 }, { estadoOT, hoy });
+    return m === "ot_eliminada" || m === "ot_no_cerrada" || m === "futuro" ? m : null;
+  };
+  const huerfanos = registros.filter(r => noAncla(r) === "ot_eliminada");
+
+  const quitarHuerfano = async (r: Mantenimiento) => {
+    const ot = otDeFila(r.descripcion);
+    if (!confirm(
+      `Quitar del libro «${r.descripcion}»\n\n` +
+      `La OT #${ot} ya no existe, así que este servicio no ocurrió. ` +
+      `Quitarlo deja el libro igual a las órdenes de trabajo cerradas.\n\n¿Continuar?`
+    )) return;
+    const { error } = await supabase.from("mantenimiento").delete().eq("id", r.id);
+    if (error) { alert(error.message); return; }
+    cargarDatos();
+  };
 
   // ── Filtrado ──────────────────────────────────────────────────────────────
 
@@ -426,6 +456,27 @@ export default function HistorialTab() {
         </div>
       </section>
 
+      {/* SERVICIOS DE UNA OT QUE YA NO EXISTE */}
+      {huerfanos.length > 0 && (
+        <section className="rounded-2xl border px-4 py-3 text-xs space-y-2" style={{ background: "#fffbeb", borderColor: "#fde68a", color: "#92400e" }}>
+          <p className="font-bold">
+            ⚠ {huerfanos.length} servicio{huerfanos.length !== 1 ? "s" : ""} del libro {huerfanos.length !== 1 ? "son" : "es"} de una orden de trabajo que ya no existe
+          </p>
+          <p>
+            Se cerraron, la orden se eliminó después y su fila se quedó aquí. <b>Ya no cuentan para «Próximos»</b>,
+            pero conviene quitarlos para que el historial diga lo mismo que las órdenes de trabajo.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {huerfanos.map(r => (
+              <button key={r.id} onClick={() => quitarHuerfano(r)}
+                className="px-2.5 py-1 rounded-lg font-bold border bg-white hover:bg-amber-50" style={{ borderColor: "#fcd34d" }}>
+                ✕ {r.descripcion} · {fmtFecha(r.fecha)} · {r.kilometraje ? Number(r.kilometraje).toLocaleString() + " km" : "sin km"}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* TABLA */}
       <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
@@ -486,6 +537,12 @@ export default function HistorialTab() {
                       {/* Descripción */}
                       <td className="p-3 text-gray-700 max-w-[180px]">
                         <div className="truncate text-xs">{r.descripcion}</div>
+                        {noAncla(r) && (
+                          <div className="text-[10px] font-bold mt-0.5" style={{ color: "#b45309" }}
+                            title="Esta fila no cuenta como servicio hecho al calcular el próximo mantenimiento.">
+                            ⚠ No cuenta para Próximos: {TEXTO_NO_ANCLA[noAncla(r)!]}
+                          </div>
+                        )}
                       </td>
 
                       {/* Taller */}

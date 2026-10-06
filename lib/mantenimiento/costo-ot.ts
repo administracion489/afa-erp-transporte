@@ -266,9 +266,10 @@ export function cotejarFacturaConOT(total: number, importeFactura: number | null
 /**
  * El número de OT escrito dentro de `mantenimiento.descripcion` (`"OT #4 — CWZ-371"`).
  *
- * Existe SOLO para la adopción de las filas viejas y para poder probarla: es la identidad de
- * texto que nunca debió ser la única, y a partir de esta migración la verdad es el FK
- * `ordenes_trabajo.mantenimiento_id`. No se usa en ningún camino vivo.
+ * Nació para la adopción de las filas viejas: es la identidad de texto que nunca debió ser la
+ * única, y la verdad para ESCRIBIR es el FK `ordenes_trabajo.mantenimiento_id`. Tiene un segundo
+ * uso, solo de LECTURA: `porQueNoAncla` (proximo-servicio.ts) lo usa para reconocer la fila de una
+ * OT que se eliminó antes de que existiera el ancla — esa fila ya no tiene FK que la nombre.
  */
 export function otEnDescripcion(descripcion: string | null | undefined): number | null {
   const m = /(?:^|\s)OT\s*#\s*(\d+)\b/i.exec(String(descripcion || ""));

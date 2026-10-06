@@ -12,6 +12,7 @@ import { createClient } from "@supabase/supabase-js";
 import { enviarEmail } from "@/lib/notificaciones";
 import { kmPorDia } from "@/lib/odometro";
 import { ultimoServicioPorVehiculo, proximoPorKm } from "@/lib/mantenimiento/proximo-servicio";
+import { cargarEstadosOT } from "@/lib/mantenimiento/proximo-servicio-datos";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -102,12 +103,14 @@ async function handler(req: NextRequest) {
     // Último mantenimiento preventivo por vehículo (ancla de cálculo)
     const { data: mants } = await admin
       .from("mantenimiento")
-      .select("vehiculo_id, fecha, kilometraje, tipo, estado")
+      .select("vehiculo_id, fecha, kilometraje, tipo, estado, descripcion")
       .in("vehiculo_id", vehIds).eq("tipo", "preventivo")
       .order("fecha", { ascending: false });
     // Último servicio HECHO: los cancelados no anclan (lib/mantenimiento/proximo-servicio.ts, el
     // mismo motor de la pestaña Próximos).
-    const ultMant: Record<number, any> = ultimoServicioPorVehiculo((mants || []) as any[]);
+    // La fila de una OT eliminada o que ya no está cerrada tampoco ancla, ni la de fecha futura.
+    const estadoOT = await cargarEstadosOT(admin, (mants || []) as any[]);
+    const ultMant: Record<number, any> = ultimoServicioPorVehiculo((mants || []) as any[], { estadoOT, hoy });
 
     // Lecturas recientes para estimar km/día
     const desde = addMeses(hoy, -4);
