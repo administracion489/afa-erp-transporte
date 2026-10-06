@@ -8,7 +8,8 @@ import { abrirImprimible } from "@/lib/documentos-servicio";
 import { tarifaHoraMecanico, HORAS_MES_DEFECTO, type InsumosManoObra } from "@/lib/mantenimiento/lineas-costo";
 import { cargarInsumosManoObraConEstado, type EstadoInsumos } from "@/lib/mantenimiento/ot-factura";
 import { empresaConDefectos, type PerfilEmpresa } from "@/lib/empresa-perfil";
-import { ultimoServicioPorVehiculo, proximoPorKm } from "@/lib/mantenimiento/proximo-servicio";
+import { ultimoServicioPorVehiculo, proximoPorKm, type EstadosOT } from "@/lib/mantenimiento/proximo-servicio";
+import { cargarEstadosOT } from "@/lib/mantenimiento/proximo-servicio-datos";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -28,7 +29,9 @@ type Enrol = {
   notas?: string | null;
   plan: Plan | null;
 };
-type Mant = { vehiculo_id: number; fecha: string; kilometraje: number; tipo: string; estado?: string | null };
+const hoyLimaISO = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+
+type Mant = { vehiculo_id: number; fecha: string; kilometraje: number; tipo: string; estado?: string | null; descripcion?: string | null };
 type Lectura = { vehiculo_id: number; km: number; fecha: string };
 
 type Config = {
@@ -96,6 +99,8 @@ export default function ProgramaTab() {
   const [enrol, setEnrol]         = useState<Enrol[]>([]);
   const [planes, setPlanes]       = useState<Plan[]>([]);
   const [mants, setMants]         = useState<Mant[]>([]);
+  // Estado de las OT que nombra el libro: la fila de una OT eliminada o no cerrada no ancla.
+  const [estadoOT, setEstadoOT]   = useState<EstadosOT | null>(null);
   const [lecturas, setLecturas]   = useState<Lectura[]>([]);
   const [cfg, setCfg]             = useState<Config>({
     correos_alerta: "", umbral_km: 500, umbral_dias: 7, km_dia_max: 1500, alertas_activas: true,
@@ -144,7 +149,7 @@ export default function ProgramaTab() {
       // supabase/mantenimiento-programa-editable.sql). Nombrarlas rompería la
       // consulta en una base donde ese SQL todavía no se corrió.
       supabase.from("vehiculos_plan").select("*,plan:planes_mantenimiento(id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses)").eq("activo", true),
-      supabase.from("mantenimiento").select("vehiculo_id,fecha,kilometraje,tipo,estado").eq("tipo", "preventivo").order("fecha", { ascending: false }),
+      supabase.from("mantenimiento").select("vehiculo_id,fecha,kilometraje,tipo,estado,descripcion").eq("tipo", "preventivo").order("fecha", { ascending: false }),
       supabase.from("lecturas_odometro").select("vehiculo_id,km,fecha").not("vehiculo_id", "is", null).eq("estado", "aceptada").gte("fecha", desde),
       supabase.from("config_mantenimiento").select("*").eq("id", 1).maybeSingle(),
       supabase.from("planes_mantenimiento").select("id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses").order("marca"),
@@ -156,6 +161,7 @@ export default function ProgramaTab() {
     setPerfil((empRes as any)?.data ?? null);
     setEnrol((eRes.data || []).map((e: any) => ({ ...e, plan: Array.isArray(e.plan) ? e.plan[0] : e.plan })));
     setMants(mRes.data || []);
+    setEstadoOT(await cargarEstadosOT(supabase, (mRes.data || []) as Mant[]));
     setLecturas(lRes.data || []);
     if (cRes.data) setCfg({
       correos_alerta: cRes.data.correos_alerta || "",
@@ -192,7 +198,7 @@ export default function ProgramaTab() {
     const vehMap = new Map(vehiculos.map(v => [v.id, v]));
     // El último servicio HECHO (los cancelados no anclan), con el MISMO motor que el cron de OT
     // automáticas (lib/mantenimiento/proximo-servicio.ts).
-    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants);
+    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants, { estadoOT, hoy: hoyLimaISO() });
     const lectPorVeh: Record<number, Lectura[]> = {};
     for (const l of lecturas) (lectPorVeh[l.vehiculo_id] ??= []).push(l);
 
@@ -241,7 +247,7 @@ export default function ProgramaTab() {
       peso[a.estado] - peso[b.estado] ||
       ((a.faltanDias ?? a.diasPorKm ?? 9999) - (b.faltanDias ?? b.diasPorKm ?? 9999))
     );
-  }, [vehiculos, enrol, mants, lecturas, cfg.umbral_km, cfg.umbral_dias]);
+  }, [vehiculos, enrol, mants, estadoOT, lecturas, cfg.umbral_km, cfg.umbral_dias]);
 
   const nVencidos = vencimientos.filter(v => v.estado === "vencido").length;
   const nProximos = vencimientos.filter(v => v.estado === "proximo").length;
@@ -437,7 +443,7 @@ export default function ProgramaTab() {
     const vencMap = new Map(vencimientos.map(x => [x.vehiculo.id, x]));
     // El último servicio HECHO (los cancelados no anclan), con el MISMO motor que el cron de OT
     // automáticas (lib/mantenimiento/proximo-servicio.ts).
-    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants);
+    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants, { estadoOT, hoy: hoyLimaISO() });
 
     // Hoja 1: Vehículos
     const hojaVeh: any[][] = [[
@@ -505,7 +511,7 @@ export default function ProgramaTab() {
     const vencMap = new Map(vencimientos.map(x => [x.vehiculo.id, x]));
     // El último servicio HECHO (los cancelados no anclan), con el MISMO motor que el cron de OT
     // automáticas (lib/mantenimiento/proximo-servicio.ts).
-    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants);
+    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants, { estadoOT, hoy: hoyLimaISO() });
 
     const filas = sel100.map(v => {
       const x = vencMap.get(v.id);

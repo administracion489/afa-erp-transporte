@@ -19,6 +19,20 @@
 //      se cancela o se elimina), su fila se retira (`planAlSalirDeCierre`); si se vuelve a cerrar,
 //      el cierre la escribe de nuevo con el km real. Así el libro siempre dice lo que dicen las
 //      órdenes cerradas, que es la regla de oro: la OT manda y el libro lo DERIVA.
+//
+// Y una tercera, del mismo caso un día después: la OT #6 se ELIMINÓ antes de que existiera la
+// regla 2, así que su fila («OT #6 — CWZ-371») se quedó en el libro, huérfana, y siguió anclando.
+// Borrar la OT no podía arreglarla —ya no había OT que borrar—. Por eso:
+//
+//   3. UNA FILA QUE NOMBRA UNA OT QUE YA NO ESTÁ CERRADA NO ANCLA. Si la OT se eliminó, o existe
+//      pero está abierta o cancelada, ese servicio no ocurrió. Se lee con `otEnDescripcion` (el
+//      MISMO lector que usó la migración para adoptar las filas viejas) y con el estado real de
+//      esas OT, que el llamador consulta. Sin poder consultarlas (`estadoOT` ausente) no se juzga:
+//      una consulta fallida no puede convertir todo el libro en huérfano.
+//   4. LO QUE TODAVÍA NO PASÓ NO ANCLA. Una fila con fecha posterior a hoy es un servicio
+//      programado, no hecho: como «último servicio» corre el calendario por un trabajo futuro.
+
+import { otEnDescripcion } from "./costo-ot";
 
 export type FilaLibro = {
   vehiculo_id: number;
@@ -26,23 +40,74 @@ export type FilaLibro = {
   kilometraje: number | null;
   tipo?: string | null;
   estado?: string | null;
+  descripcion?: string | null;
 };
 
-/** ¿Esta fila del libro cuenta como un servicio preventivo HECHO? */
-export function esServicioHecho(m: FilaLibro): boolean {
-  if (String(m.tipo ?? "preventivo").toLowerCase() !== "preventivo") return false;
+/** Estado actual de las OT que nombra el libro, por id. Una OT que no está en el mapa NO EXISTE. */
+export type EstadosOT = Map<number, string>;
+
+export type OpcionesAncla = {
+  /** Estado de las OT mencionadas. Ausente/null = no se pudo consultar → no se juzga por OT. */
+  estadoOT?: EstadosOT | null;
+  /** Hoy en Lima (YYYY-MM-DD). Ausente = no se juzga por fecha. */
+  hoy?: string | null;
+};
+
+export type MotivoNoAncla =
+  | "no_preventivo"
+  | "cancelado"
+  | "futuro"
+  | "ot_eliminada"
+  | "ot_no_cerrada";
+
+export const TEXTO_NO_ANCLA: Record<MotivoNoAncla, string> = {
+  no_preventivo: "no es preventivo",
+  cancelado: "está cancelado",
+  futuro: "tiene fecha futura: todavía no ocurrió",
+  ot_eliminada: "su orden de trabajo ya no existe (se eliminó)",
+  ot_no_cerrada: "su orden de trabajo ya no está cerrada",
+};
+
+/** El número de OT que nombra la descripción («OT #6 — CWZ-371»). Mismo lector que la migración 05. */
+export const otDeFila = otEnDescripcion;
+
+/** Los ids de OT que nombra el libro, para consultar su estado en lote. */
+export function otsMencionadas(filas: FilaLibro[]): number[] {
+  const s = new Set<number>();
+  for (const f of filas) { const id = otDeFila(f.descripcion); if (id) s.add(id); }
+  return [...s];
+}
+
+/** Por qué esta fila NO cuenta como servicio hecho; null si cuenta (ancla). */
+export function porQueNoAncla(m: FilaLibro, opts: OpcionesAncla = {}): MotivoNoAncla | null {
+  if (String(m.tipo ?? "preventivo").toLowerCase() !== "preventivo") return "no_preventivo";
   const est = String(m.estado ?? "").toLowerCase();
-  return est !== "cancelado" && est !== "cancelada" && est !== "anulado" && est !== "anulada";
+  if (est === "cancelado" || est === "cancelada" || est === "anulado" || est === "anulada") return "cancelado";
+  if (opts.hoy && m.fecha && String(m.fecha).slice(0, 10) > opts.hoy) return "futuro";
+  if (opts.estadoOT) {
+    const ot = otDeFila(m.descripcion);
+    if (ot != null) {
+      const e = opts.estadoOT.get(ot);
+      if (e == null) return "ot_eliminada";
+      if (String(e).toLowerCase() !== "cerrada") return "ot_no_cerrada";
+    }
+  }
+  return null;
+}
+
+/** ¿Esta fila del libro cuenta como un servicio preventivo HECHO? */
+export function esServicioHecho(m: FilaLibro, opts: OpcionesAncla = {}): boolean {
+  return porQueNoAncla(m, opts) === null;
 }
 
 /**
  * Último servicio preventivo hecho de cada unidad: el de fecha más reciente y, el mismo día, el de
- * más km. Las canceladas no cuentan.
+ * más km. Las canceladas, las futuras y las de una OT eliminada o no cerrada no cuentan.
  */
-export function ultimoServicioPorVehiculo<T extends FilaLibro>(filas: T[]): Record<number, T> {
+export function ultimoServicioPorVehiculo<T extends FilaLibro>(filas: T[], opts: OpcionesAncla = {}): Record<number, T> {
   const out: Record<number, T> = {};
   for (const m of filas) {
-    if (!esServicioHecho(m)) continue;
+    if (!esServicioHecho(m, opts)) continue;
     const prev = out[m.vehiculo_id];
     if (!prev) { out[m.vehiculo_id] = m; continue; }
     const f = String(m.fecha ?? ""), fp = String(prev.fecha ?? "");
