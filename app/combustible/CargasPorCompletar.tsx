@@ -129,7 +129,9 @@ export default function CargasPorCompletar({ facturas, pendRadar, onConteo }: {
   const cargar = useCallback(() => setVersion((v) => v + 1), []);
 
   const origenes = useMemo(() => origenesDeCargas(aFacturas(facturas)), [facturas]);
-  const cola = useMemo(() => (cargas ? colaPorCompletar(cargas, origenes, hoy) : null), [cargas, origenes, hoy]);
+  // Sin las facturas todavía no se sabe de dónde salió la fecha de ninguna carga: juzgar antes de que
+  // lleguen pintaría un instante «No se encontró la factura» en todas, y un conteo inflado arriba.
+  const cola = useMemo(() => (cargas && facturas ? colaPorCompletar(cargas, origenes, hoy) : null), [cargas, facturas, origenes, hoy]);
   useEffect(() => { onConteo?.(cola ? cola.cola.length : null); }, [cola, onConteo]);
 
   const entradaDe = (x: CargaPorCompletar): Entrada => entradas[x.carga.id] ?? {
