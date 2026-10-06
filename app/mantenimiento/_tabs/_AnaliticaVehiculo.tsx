@@ -16,6 +16,7 @@ import {
 } from "@/lib/odometro-analitica";
 import { BarrasVertical, BarrasHorizontal, LineaTendencia } from "./_charts";
 import { ultimoServicioPorVehiculo, proximoPorKm } from "@/lib/mantenimiento/proximo-servicio";
+import { cargarEstadosOT } from "@/lib/mantenimiento/proximo-servicio-datos";
 
 export type VehiculoAnalitica = {
   key: string; id: number; flota: "propia" | "tercero";
@@ -125,10 +126,11 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
             // rompería la consulta en una base sin ese SQL.
             supabase.from("vehiculos_plan").select("*,plan:planes_mantenimiento(intervalo_base_km,intervalo_base_meses,marca,modelo)").eq("vehiculo_id", veh.id).eq("activo", true).maybeSingle(),
             // Varias filas y no una: la más reciente puede estar CANCELADA, y una cancelada no ancla.
-            supabase.from("mantenimiento").select("vehiculo_id,kilometraje,fecha,tipo,estado").eq("vehiculo_id", veh.id).eq("tipo", "preventivo").order("fecha", { ascending: false }).limit(50),
+            supabase.from("mantenimiento").select("vehiculo_id,kilometraje,fecha,tipo,estado,descripcion").eq("vehiculo_id", veh.id).eq("tipo", "preventivo").order("fecha", { ascending: false }).limit(50),
           ])
         : [{ data: [] }, { data: null }, { data: null }] as any;
 
+      const estadoOT = await cargarEstadosOT(supabase, ((mantRes.data as any[]) || []));
       if (!vivo) return;
       const { dias: d } = analizarVehiculo(lecturas as LecturaCruda[]);
       setDias(d);
@@ -138,7 +140,7 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
       // El intervalo por unidad manda sobre el del plan, igual que en Próximos y en el cron.
       const override = (planRes.data as any)?.intervalo_km_override;
       setPlan(pl ? { ...pl, intervalo_base_km: override ?? pl.intervalo_base_km } : null);
-      const ult = ultimoServicioPorVehiculo(((mantRes.data as any[]) || []))[veh.id];
+      const ult = ultimoServicioPorVehiculo(((mantRes.data as any[]) || []), { estadoOT, hoy })[veh.id];
       setUltServKm(ult?.kilometraje ?? null);
       setCargando(false);
     })();

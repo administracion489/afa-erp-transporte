@@ -7,7 +7,8 @@
 // reabrir, cancelar o eliminar la OT dejaba su fila del libro, que es el ancla del cálculo.
 
 import {
-  esServicioHecho, ultimoServicioPorVehiculo, proximoPorKm, planAlSalirDeCierre, type FilaLibro,
+  esServicioHecho, ultimoServicioPorVehiculo, proximoPorKm, planAlSalirDeCierre, porQueNoAncla, otsMencionadas,
+  type FilaLibro, type EstadosOT,
 } from "../lib/mantenimiento/proximo-servicio";
 
 let fallos = 0;
@@ -80,7 +81,41 @@ console.log("\n3 · Qué cuenta como servicio hecho");
   chk("dos el mismo día: gana el de más km", mismoDia.kilometraje === 5200);
 }
 
-console.log("\n4 · Barrido: sin filas canceladas, el nuevo dice lo mismo que el viejo");
+console.log("\n4 · La OT se ELIMINÓ antes del arreglo: su fila se quedó huérfana en el libro");
+{
+  // Lo que quedó en producción: OT #6 eliminada, su fila editada a mano a 20 000 km y «Pendiente».
+  const huerfana: FilaLibro = { vehiculo_id: 7, fecha: "2026-10-02", kilometraje: 20000, tipo: "preventivo", estado: "pendiente", descripcion: "OT #6 — CWZ-371" };
+  const ot3: FilaLibro = { vehiculo_id: 7, fecha: "2026-08-20", kilometraje: 15000, tipo: "preventivo", estado: "finalizado", descripcion: "OT #3 — CWZ-371" };
+  const estados: EstadosOT = new Map([[3, "cerrada"], [4, "cerrada"], [5, "abierta"]]); // la #6 no existe
+  const hoy = "2026-10-06";
+  const due = (filas: FilaLibro[], estadoOT: EstadosOT | null) =>
+    proximoPorKm({ kmActual: 19725, intervaloKm: 5000, ultimoServicioKm: ultimoServicioPorVehiculo(filas, { estadoOT, hoy })[7]?.kilometraje })?.dueKm;
+
+  chk("REGRESIÓN: sin mirar las OT, la huérfana ancla → 25 000", due([huerfana, ot3], null) === 25000);
+  chk("mirando las OT, la huérfana no ancla → 20 000 (la OT #3 manda)", due([huerfana, ot3], estados) === 20000);
+  chk("su motivo es ot_eliminada", porQueNoAncla(huerfana, { estadoOT: estados }) === "ot_eliminada");
+  chk("una fila de OT cerrada sigue anclando", porQueNoAncla(ot3, { estadoOT: estados, hoy }) === null);
+  chk("una fila de OT abierta (reabierta con el código viejo) no ancla",
+    porQueNoAncla({ ...ot3, descripcion: "OT #5 — CWZ-371" }, { estadoOT: estados }) === "ot_no_cerrada");
+  chk("una fila SIN «OT #» (servicio cargado a mano) no se juzga por OT",
+    porQueNoAncla({ ...ot3, descripcion: "Cambio de aceite taller Pérez" }, { estadoOT: estados, hoy }) === null);
+  chk("consulta de OT fallida (null) → no se juzga: nada se vuelve huérfano",
+    porQueNoAncla(huerfana, { estadoOT: null }) === null);
+  chk("otsMencionadas lee los ids sin repetir", JSON.stringify(otsMencionadas([huerfana, ot3, ot3]).sort()) === "[3,6]");
+}
+
+console.log("\n5 · Lo que todavía no pasó no ancla");
+{
+  const prog: FilaLibro = { vehiculo_id: 2, fecha: "2026-11-01", kilometraje: 30000, tipo: "preventivo", estado: "pendiente" };
+  const hecho: FilaLibro = { vehiculo_id: 2, fecha: "2026-09-01", kilometraje: 25000, tipo: "preventivo", estado: "finalizado" };
+  chk("fecha futura → futuro", porQueNoAncla(prog, { hoy: "2026-10-06" }) === "futuro");
+  chk("hoy mismo sí cuenta", porQueNoAncla({ ...prog, fecha: "2026-10-06" }, { hoy: "2026-10-06" }) === null);
+  chk("con un programado futuro, ancla el hecho anterior",
+    ultimoServicioPorVehiculo([prog, hecho], { hoy: "2026-10-06" })[2]?.kilometraje === 25000);
+  chk("sin `hoy` el comportamiento es el de antes", ultimoServicioPorVehiculo([prog, hecho])[2]?.kilometraje === 30000);
+}
+
+console.log("\n6 · Barrido: sin filas canceladas, el nuevo dice lo mismo que el viejo");
 {
   let combos = 0, distintos = 0;
   const fechas = ["2026-01-10", "2026-04-20", "2026-08-05"];
