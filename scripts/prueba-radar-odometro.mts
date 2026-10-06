@@ -191,5 +191,21 @@ console.log("\n6 · Barrido: lo que sale cumple todo, y cada conteo es lo que sa
   chk("corolario: el barrido no es trivial (hay combinaciones con filas)", noTriviales > combinaciones / 10, `${noTriviales}/${combinaciones}`);
 }
 
+console.log("\n9 · «Placa sin confirmar»: un eje aparte, en cualquier estado");
+{
+  // La lectura de Cerna del 16/09 quedó ACEPTADA en la CWZ-371: la auditoría la marca dudosa.
+  const conAudit = tabla.map((l) => ({ ...l, placaDudosa: l.id === "3" || l.id === "7" ? true : l.id === "12" ? undefined : false }));
+  const solo = (x: FiltroLecturas) => filtrarLecturas(conAudit, x).filas.map((l) => l.id).sort((a, b) => Number(a) - Number(b)).join(",");
+  chk("sin el filtro no cambia nada", solo(f({ estado: "todos" })) === filtrarLecturas(tabla, f({ estado: "todos" })).filas.map((l) => l.id).sort((a, b) => Number(a) - Number(b)).join(","));
+  chk("con el filtro: las dos dudosas, aceptada y pendiente", solo(f({ estado: "todos", identidad: "sin_confirmar" })) === "3,7");
+  chk("una lectura aún sin auditar no cuenta como dudosa", !solo(f({ estado: "todos", identidad: "sin_confirmar" })).split(",").includes("12"));
+  chk("el conteo se hace con los otros filtros y sin el suyo",
+    filtrarLecturas(conAudit, f({ estado: "todos", identidad: "sin_confirmar", placa: "cw" })).placaSinConfirmar === 2 &&
+    filtrarLecturas(conAudit, f({ estado: "todos", placa: "cwz" })).placaSinConfirmar === 1 &&
+    filtrarLecturas(conAudit, f({ estado: "pendientes", identidad: "sin_confirmar" })).placaSinConfirmar === 1);
+  chk("el conteo = lo que sale al elegirlo", filtrarLecturas(conAudit, f({ estado: "todos" })).placaSinConfirmar === filtrarLecturas(conAudit, f({ estado: "todos", identidad: "sin_confirmar" })).filas.length);
+  chk("elegirlo cuenta como filtro puesto", hayFiltroLecturas(f({ identidad: "sin_confirmar" })));
+}
+
 console.log(fallos ? `\n${fallos} prueba(s) FALLARON` : "\nTodo en verde");
 process.exit(fallos ? 1 : 0);

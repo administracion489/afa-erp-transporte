@@ -234,15 +234,22 @@ async function notificarErp(): Promise<void> {
  *
  * Baileys no siempre pone el autor en el mismo sitio: `key.participant` es lo normal en un
  * grupo, pero con la migración a LID aparece también en `key.participantPn` / `key.participantAlt`
- * y algunos eventos lo traen en `msg.participant`. Se toma el primero que venga.
+ * y algunos eventos lo traen en `msg.participant`.
+ *
+ * **SE PREFIERE EL TELÉFONO.** En un grupo con direccionamiento LID, `key.participant` es
+ * `123…@lid` —un identificador interno que no es el número— y el teléfono viaja aparte en
+ * `participantPn`. Tomar "el primero que venga" guardaba el LID, y el ERP reconoce al conductor
+ * por su número (`conductores.telefono`): con un LID nunca lo encontraba, y la foto del tablero
+ * de un conductor con su unidad asignada quedaba "sin identificar". Solo sin ningún teléfono se
+ * guarda el LID, que sigue sirviendo para agrupar la ráfaga de la misma persona.
  */
 function remitenteDe(msg: { key?: Record<string, unknown>; participant?: unknown }): string | null {
   const key = msg?.key ?? {};
-  for (const c of [key.participant, key.participantPn, key.participantAlt, msg?.participant]) {
-    const s = typeof c === "string" ? c.trim() : "";
-    if (s) return s;
-  }
-  return null;
+  const candidatos = [key.participant, key.participantPn, key.participantAlt, key.senderPn, msg?.participant]
+    .map((c) => (typeof c === "string" ? c.trim() : ""))
+    .filter(Boolean);
+  const telefono = candidatos.find((c) => /@(s\.whatsapp\.net|c\.us)$/i.test(c));
+  return telefono ?? candidatos[0] ?? null;
 }
 
 /** Extrae, sube media si corresponde e inserta la fila en radar_mensajes. Devuelve true si insertó. */

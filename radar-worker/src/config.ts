@@ -38,5 +38,8 @@ export const config = {
    *  para saber si el servidor ya tiene el código nuevo o quedó en una versión vieja). */
   // 1.3.0 — el remitente se guarda como null cuando WhatsApp no lo entrega, nunca "" (un
   // comodín compartido fusionaba las fotos de varios celulares en una sola recarga).
-  version: "1.3.0",
+  // 1.4.0 — el remitente se guarda con su TELÉFONO (`participantPn`) cuando WhatsApp lo manda
+  // aparte de un `@lid`: el ERP reconoce al conductor por su número y ata la foto de su tablero
+  // a la unidad que maneja ese día.
+  version: "1.4.0",
 };

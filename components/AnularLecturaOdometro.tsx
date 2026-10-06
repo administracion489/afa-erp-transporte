@@ -21,14 +21,20 @@ export type LecturaAnulable = {
 };
 
 export default function AnularLecturaOdometro({
-  lectura, placa, onClose, onAnulada,
+  lectura, placa, onClose, onAnulada, motivoInicial, destinoInicial, aviso,
 }: {
   lectura: LecturaAnulable;
   placa: string;
   onClose: () => void;
   onAnulada: (kmVigente: number | null) => void;
+  /** Abre con un motivo ya elegido (p. ej. «Foto de otra unidad» desde la auditoría de placas del Radar). */
+  motivoInicial?: MotivoAnulacion;
+  /** Placa propuesta para «Foto de otra unidad»: se puede cambiar o vaciar antes de confirmar. */
+  destinoInicial?: string;
+  /** Por qué se abrió el modal (la frase de la auditoría): se enseña arriba, tal cual. */
+  aviso?: string | null;
 }) {
-  const [motivo, setMotivo]   = useState<MotivoAnulacion | "">("");
+  const [motivo, setMotivo]   = useState<MotivoAnulacion | "">(motivoInicial ?? "");
   const [nota, setNota]       = useState("");
   const [kmOk, setKmOk]       = useState("");
   const [confirmar, setConfirmar] = useState(false);   // 2º paso: confirmación explícita
@@ -36,7 +42,7 @@ export default function AnularLecturaOdometro({
   // "Foto de otra unidad": la lectura está BIEN leída, solo se grabó en la unidad equivocada.
   // Se ofrece pasarla a la correcta en vez de solo anularla (y perder el km y su foto).
   const [unidades, setUnidades] = useState<{ id: number; placa: string; flota: Flota }[] | null>(null);
-  const [destinoTxt, setDestinoTxt] = useState("");
+  const [destinoTxt, setDestinoTxt] = useState(destinoInicial ?? "");
 
   // Carriles donde el número lo propuso una lectura automática. Debe coincidir con FUENTES_IA
   // de lib/odometro.ts (leccionesOdometro): es el mismo criterio que decide qué correcciones
@@ -151,6 +157,9 @@ export default function AnularLecturaOdometro({
         </div>
 
         <div className="p-6 space-y-4">
+          {aviso && (
+            <p className="text-xs text-[#7A271A] bg-[#FEF3F2] border border-[#F3B8B3] rounded-xl p-3">⚠ {aviso}</p>
+          )}
           {lectura.foto_url && (
             <EnlacePrivado href={lectura.foto_url} target="_blank" rel="noreferrer" className="block">
               <ImgPrivada src={lectura.foto_url} alt="Tablero" className="w-full max-h-48 object-contain rounded-xl border bg-gray-50" />

@@ -64,6 +64,42 @@ export function normalizarRemitente(wa?: string | null): string | null {
   return dominio ? `${usuario}${dominio}` : usuario;
 }
 
+/**
+ * El NÚMERO de teléfono del remitente (solo dígitos, con código de país si vino), o `null` si
+ * el jid no es un teléfono.
+ *
+ * Con la migración de WhatsApp a LID, en muchos grupos el autor llega como `123…@lid`: un
+ * identificador interno que NO es su número. Antes se le recortaban los últimos 9 dígitos
+ * como a cualquier jid y salía un "teléfono" que no es de nadie — así el ERP nunca reconocía al
+ * conductor por su WhatsApp, y la foto de su tablero se quedaba sin la unidad que manejaba.
+ * Un `@lid` no tiene número: es `null`, y quien lo recibe lo dice en vez de adivinar.
+ */
+export function telefonoDeRemitente(wa?: string | null): string | null {
+  const n = normalizarRemitente(wa);
+  if (!n) return null;
+  const arroba = n.indexOf("@");
+  const dominio = arroba >= 0 ? n.slice(arroba) : "";
+  if (dominio && dominio !== "@s.whatsapp.net" && dominio !== "@c.us") return null;
+  const digitos = (arroba >= 0 ? n.slice(0, arroba) : n).replace(/\D+/g, "");
+  return digitos.length >= 9 ? digitos : null;
+}
+
+/** Los últimos 9 dígitos de un teléfono peruano (mismo criterio que `tel9` del CRM). */
+export const tel9 = (s?: string | null) => String(s ?? "").replace(/\D/g, "").slice(-9);
+
+/**
+ * Los teléfonos de una ficha (`conductores.telefono`), ya en 9 dígitos. Una ficha puede llevar
+ * dos números ("961 097 763 / 987 654 321"): con un solo `tel9` del texto entero solo
+ * contaría el último.
+ */
+export function telefonosDeFicha(telefono?: string | null): string[] {
+  const out = String(telefono ?? "")
+    .split(/[\/,;|]|\s+(?:y|o)\s+/i)
+    .map((p) => tel9(p))
+    .filter((t) => t.length === 9);
+  return [...new Set(out)];
+}
+
 /** El pushName normalizado para comparar, o `null` si no vino. */
 export function normalizarNombreRemitente(nombre?: string | null): string | null {
   const n = String(nombre ?? "")
