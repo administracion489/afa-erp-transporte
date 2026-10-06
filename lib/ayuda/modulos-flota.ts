@@ -221,10 +221,21 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
           "• **El cierre de mes no se corre**: COESTI fecha el último día del mes una factura que genera el día 1 (por ejemplo, dice 30/09 y llegó el 01/10). Esa no sale en el lote de la madrugada, así que el ERP no le resta días.",
       },
       {
+        pregunta: "¿En qué orden reviso: el Radar IA o las facturas del correo?",
+        respuesta:
+          "**Primero el Radar, después las facturas.**\n\n" +
+          "**1. Radar IA → Combustible:** revisa las recargas «Por revisar» hasta que no quede ninguna: regístralas (o fusiónalas con la carga que ya entró desde su factura) o descártalas. La pestaña se abre mostrando solo las que están por revisar —todas, no solo las más recientes— y cuando no queda ninguna lo dice en verde.\n" +
+          "**2. Combustible → 📧 Facturas:** las facturas se cruzan solas con lo que registraste; confirma solo lo que quede en «Revisar».\n\n" +
+          "**Por qué en ese orden:** el voucher que lee el Radar trae lo que la factura no tiene —la fecha del despacho, el odómetro y el conductor—. Una recarga que registras en el Radar se enlaza sola a su línea de factura en la próxima lectura del correo (cada 3 horas, o con «📧 Leer correo ahora»). Mientras siga por revisar, la línea de su factura dice «En revisión del Radar» y la factura no se puede cerrar: desde la pestaña de facturas no hay nada que hacer con ella. Las recargas cuya factura ya llegó llevan la marca **📧 factura esperando**: conviene empezar por esas.\n\n" +
+          "**¿Y si lo hago al revés?** No se duplica nada, pero trabajas dos veces: lo que registres desde la factura entra sin odómetro, y cuando revises su voucher en el Radar tendrás que **fusionarlo** en vez de registrarlo. El ERP avisa en los dos lados: en la factura, si esa placa tiene una recarga del Radar por revisar cerca de esa fecha; y en el Radar, el botón **Registrar** comprueba antes si la carga ya está en Combustible y, si entró desde la factura, propone fusionarla.\n\n" +
+          "**La factura sí registra sola** lo que el Radar nunca capturó (por ejemplo, si el conductor no mandó la foto): para eso existe, y esa carga entra sin odómetro.",
+      },
+      {
         pregunta: "El Radar dice que una recarga «ya entró desde la factura». ¿La descarto?",
         respuesta:
           "**No: fusiónala.** Es la misma carga entrada por las dos puertas, y cada una sabe algo que la otra no. La factura es el comprobante legal (galones, precio e importe); el voucher trae la **fecha del despacho**, el **odómetro**, el conductor y la nota.\n\n" +
-          "Al abrir la fila en **Radar IA → Combustible** aparece **🔗 Fusionar con la carga #N**, con la lista de lo que va a cambiar (por ejemplo, la fecha del 23/09 al 22/09 y el odómetro). No se crea ninguna carga nueva ni cambia la plata: la carga de la factura solo toma lo que le faltaba. Si la carga la registró el Radar o una persona, ahí sí es un duplicado y lo correcto es descartar.",
+          "Al abrir la fila en **Radar IA → Combustible** aparece **🔗 Fusionar con la carga #N**, con la lista de lo que va a cambiar (por ejemplo, la fecha del 23/09 al 22/09 y el odómetro). No se crea ninguna carga nueva ni cambia la plata: la carga de la factura solo toma lo que le faltaba. Si la carga la registró el Radar o una persona, ahí sí es un duplicado y lo correcto es descartar.\n\n" +
+          "El recuadro aparece en **cualquier** recarga por revisar cuya carga ya esté en Combustible, aunque la factura la haya registrado después de que el Radar leyó el voucher. Y si aun así pulsas **Registrar**, el ERP vuelve a comprobarlo y te pregunta antes de contar el gasto dos veces.",
       },
       {
         pregunta: "¿Por qué las facturas de Primax no aparecen como deuda en Tesorería?",

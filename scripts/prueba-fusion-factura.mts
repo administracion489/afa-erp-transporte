@@ -13,8 +13,17 @@
 //   4. idempotente;
 //   5. después de fusionar: la conciliación la sigue encontrando, el Radar la reconoce por la nota,
 //      y «Moverlas a la fecha del despacho» no la toca;
-//   6. invariantes por barrido.
-import { planDeFusion, type CargaDeFactura, type VoucherAFusionar } from "../lib/radar/fusion-factura";
+//   6. invariantes por barrido;
+//   7. EL ORDEN AL REVÉS (lo preguntó el dueño: «¿primero el Radar y después las facturas?»): el Radar
+//      lee el voucher, la factura registra la misma carga DESPUÉS —porque la recarga del Radar quedó con
+//      un importe mal leído y no casó con su línea— y la persona corrige y pulsa «Registrar». Antes ese
+//      botón insertaba sin mirar: el mismo despacho dos veces. Ahora se vuelve a preguntar al registrar;
+//   8. dos recargas del Radar por revisar que podrían ser la misma línea: la factura ya no la registra.
+import {
+  planDeFusion, yaEstaEnCombustible, preguntaAntesDeRegistrar,
+  type CargaDeFactura, type VoucherAFusionar,
+} from "../lib/radar/fusion-factura";
+import type { CargaRegistrada } from "../lib/radar/album-recargas";
 import {
   observacionCargaDeFactura, esCargaDeFactura, esCargaFusionada, planDeLinea, MARCA_CARGA_DE_FACTURA,
   type LineaFactura, type CargaExistente,
@@ -160,6 +169,99 @@ console.log("\n6. Barridos");
     }
   chk(`(${casos}) nunca toca la plata, nunca pisa un km escrito, nunca fusiona lo que no es de factura ni a más de ${MAX_DESFASE} días, y es idempotente`, roto === 0, String(roto));
   chk("y el barrido sí fusiona (un motor que nunca fusionara cumpliría lo de arriba)", fusionables > 0, String(fusionables));
+}
+
+// ── 7. El orden al revés: la factura registra DESPUÉS de que el Radar leyó el voucher ──
+console.log("\n7. La factura registra la carga mientras la recarga del Radar sigue por revisar");
+const comoCandidata = (c: CargaDeFactura, misma = true): CargaRegistrada =>
+  ({ id: c.id, fecha: c.fecha, total: c.total, observaciones: c.observaciones, misma_unidad: misma });
+{
+  const V = { fecha: "2026-09-22", comprobante: "V97T-00001443", monto: 47.31 };
+  // (a) Cuando el Radar procesó el voucher, la carga no existía: no hubo «posible duplicado», así que
+  //     el recuadro de fusión (que antes solo salía con esa marca) no iba a aparecer nunca.
+  chk("al procesar no había nada en Combustible: sin «posible duplicado»", buscarCargaRegistrada(V, []) === null);
+  // (b) La IA leyó mal el importe y la cantidad (41.31 / 5.266): la línea de la factura no casa con la
+  //     recarga por revisar, y pasada la espera la factura la registra sola.
+  const linea: LineaFactura = {
+    n: 1, descripcion: "GLP-G", cantidad: 6.266, unidad_codigo: "GLL", precio_unitario: 7.55, total: 47.31,
+    tipo_combustible: "glp", placa: "CWQ400", fecha: "2026-09-22", fecha_origen: "emision", fecha_alterna: "2026-09-23", nota_despacho: null,
+  };
+  const malLeida: CargaExistente = { id: "uuid-radar", placa: "CWQ400", fecha: "2026-09-22", total: 41.31, cantidad: 5.266, referencia: "V97T-00001443" };
+  const pl = planDeLinea({ linea, registradas: [], radarPendientes: [malLeida], tipoComprobante: "factura", documentoId: null, fuente: "xml_ubl", hoy: "2026-09-25", graciaDias: 1, autoRegistrar: true });
+  chk("con el importe mal leído, la factura no la reconoce y la registra (el caso que esto cubre)", pl.codigo === "registrar", pl.codigo);
+  // (c) La persona corrige el importe a 47.31 y pulsa «Registrar»: AHORA se vuelve a preguntar.
+  const delCorreo: CargaDeFactura = { ...CARGA_61, fecha: "2026-09-22", observaciones: observacionCargaDeFactura("F882-0124552", null, "Fecha del despacho: emitida el 23/09/2026, 1 día(s) antes") };
+  const r = yaEstaEnCombustible(V, [comoCandidata(delCorreo)]);
+  chk("al registrar la encuentra: es la carga de la factura → FUSIONAR", r.codigo === "fusionar" && r.id === 61, `${r.codigo} ${r.detalle}`);
+  const q = preguntaAntesDeRegistrar(r);
+  chk("…y el botón pregunta antes de insertar, nombrando la carga y diciendo qué hacer", !!q && q.includes("#61") && /FUSIONAR/.test(q) && /APARTE/.test(q), q ?? "");
+  chk("con la fecha de EMISIÓN (sin desfase) también la encuentra", yaEstaEnCombustible(V, [comoCandidata(CARGA_61)]).codigo === "fusionar");
+  chk("y sin comprobante, por unidad + día + importe", yaEstaEnCombustible({ ...V, comprobante: null }, [comoCandidata(CARGA_61)]).codigo === "fusionar");
+
+  // Lo que ya está por otra puerta: se descarta, no se fusiona.
+  const delRadar: CargaDeFactura = { ...CARGA_61, observaciones: "Radar IA · Grupo AFA · ALEX · Nota V97T-00001443" };
+  const yaR = yaEstaEnCombustible(V, [comoCandidata(delRadar)]);
+  chk("registrada por el Radar (otro reporte del mismo voucher): ya_registrada → descartar", yaR.codigo === "ya_registrada" && /Radar/.test(yaR.detalle) && /DESCARTA/.test(yaR.detalle), yaR.detalle);
+  const yaF = yaEstaEnCombustible(V, [comoCandidata(fusionada)]);
+  chk("una carga de factura YA fusionada con otro voucher: ya_registrada, no se vuelve a fusionar", yaF.codigo === "ya_registrada" && /fusionó/.test(yaF.detalle), yaF.detalle);
+  const aMano = yaEstaEnCombustible({ ...V, comprobante: null }, [comoCandidata({ ...CARGA_61, fecha: "2026-09-22", observaciones: "Cargada en el grifo" })]);
+  chk("tecleada a mano el mismo día y por el mismo importe: ya_registrada", aMano.codigo === "ya_registrada" && /a mano/.test(aMano.detalle), aMano.detalle);
+  chk("…y su pregunta deja registrarla igual si de verdad es otra", /¿Registrarla igual/.test(preguntaAntesDeRegistrar(aMano) ?? ""));
+  chk("tecleada a mano un día ANTES no se acusa (quien carga S/ 100 diarios no tendría un rojo cada mañana)",
+    yaEstaEnCombustible({ ...V, comprobante: null }, [comoCandidata({ ...CARGA_61, observaciones: "Cargada en el grifo" })]).codigo === "libre");
+
+  // Lo que NO es la misma carga sigue pasando sin preguntar: el control no puede volverse paisaje.
+  chk("otro importe: libre, sin pregunta", (() => { const x = yaEstaEnCombustible({ ...V, comprobante: null, monto: 60 }, [comoCandidata(CARGA_61)]); return x.codigo === "libre" && preguntaAntesDeRegistrar(x) === null; })());
+  chk("una carga de OTRA unidad con el mismo importe, sin comprobante: libre", yaEstaEnCombustible({ ...V, comprobante: null }, [comoCandidata(CARGA_61, false)]).codigo === "libre");
+  chk("a dos días de la carga de la factura: libre (no es su desfase)", yaEstaEnCombustible({ ...V, comprobante: null, fecha: "2026-09-20" }, [comoCandidata(CARGA_61)]).codigo === "libre");
+  chk("Combustible vacío: libre", yaEstaEnCombustible(V, []).codigo === "libre");
+
+  // Si la base no contesta no se afirma que esté libre.
+  const sinLeer = yaEstaEnCombustible(V, null, "timeout");
+  chk("sin poder leer Combustible: sin_comprobar, y pregunta", sinLeer.codigo === "sin_comprobar" && /timeout/.test(sinLeer.detalle) && /¿Registrar igual\?/.test(preguntaAntesDeRegistrar(sinLeer) ?? ""));
+
+  // Barrido: la MISMA regla que el procesamiento (buscarCargaRegistrada) — dos reglas para «es la misma
+  // carga» terminan contestando distinto.
+  let casos = 0, roto = 0;
+  const vistos = new Set<string>();
+  const origenes = [CARGA_61.observaciones, fusionada.observaciones, "Radar IA · x", "Cargada a mano", null];
+  for (const obs of origenes) for (const misma of [true, false]) for (const dd of [-2, -1, 0, 1, 2]) for (const monto of [47.31, 47.9, 60, null])
+    for (const comp of ["V97T-00001443", null]) for (const conNota of [true, false]) {
+      casos++;
+      const c: CargaRegistrada = { id: 61, fecha: sumarDias("2026-09-22", dd), total: 47.31, misma_unidad: misma,
+        observaciones: obs == null ? (conNota ? "Nota V97T-00001443" : null) : conNota ? `${obs} · Nota V97T-00001443` : obs };
+      const v = { fecha: "2026-09-22", comprobante: comp, monto };
+      const x = yaEstaEnCombustible(v, [c]);
+      vistos.add(x.codigo);
+      const hallada = buscarCargaRegistrada(v, [c]);
+      if ((x.codigo === "libre") !== (hallada === null)) roto++;                 // misma regla que el procesamiento
+      if ((x.codigo === "libre") !== (preguntaAntesDeRegistrar(x) === null)) roto++; // solo «libre» registra sin preguntar
+      if (x.codigo === "fusionar" && !(esCargaDeFactura(c.observaciones) && !esCargaFusionada(c.observaciones))) roto++;
+      if (x.codigo !== "libre" && x.id !== 61) roto++;
+    }
+  chk(`(${casos}) misma regla que el Radar al procesar; solo «libre» registra sin preguntar; solo se fusiona una carga de factura sin fusionar`, roto === 0, String(roto));
+  chk("y el barrido recorre los tres veredictos (un control que nunca encontrara nada cumpliría lo de arriba)",
+    vistos.has("libre") && vistos.has("fusionar") && vistos.has("ya_registrada"), [...vistos].join(","));
+}
+
+// ── 8. Dos recargas del Radar por revisar que podrían ser la misma línea ──────
+console.log("\n8. Dos recargas del Radar por revisar casan con la línea: la factura espera");
+{
+  const linea: LineaFactura = {
+    n: 1, descripcion: "GLP-G", cantidad: 13.25, unidad_codigo: "GLL", precio_unitario: 7.55, total: 100,
+    tipo_combustible: "glp", placa: "CWQ400", fecha: "2026-09-22", nota_despacho: null,
+  };
+  const r1: CargaExistente = { id: "uuid-1", placa: "CWQ400", fecha: "2026-09-22", total: 100, cantidad: 13.25, referencia: "" };
+  const r2: CargaExistente = { id: "uuid-2", placa: "CWQ400", fecha: "2026-09-22", total: 100, cantidad: 13.25, referencia: "" };
+  const base = { linea, registradas: [], tipoComprobante: "factura", documentoId: null, fuente: "xml_ubl" as const, hoy: "2026-09-25", graciaDias: 1, autoRegistrar: true };
+  const dos = planDeLinea({ ...base, radarPendientes: [r1, r2] });
+  chk("con dos candidatas en el Radar NO se registra desde la factura: espera al Radar", dos.codigo === "en_radar_pendiente" && dos.casa_con == null, `${dos.codigo} ${dos.detalle}`);
+  chk("…y lo dice", /Dos recargas del Radar/.test(dos.detalle) && /Radar IA → Combustible/.test(dos.detalle));
+  // Lo que pasaba antes: seguir de largo era lo mismo que no ver ninguna recarga del Radar.
+  chk("antes seguía de largo y la registraba (sin recargas a la vista sale «registrar»: la prueba distingue)",
+    planDeLinea({ ...base, radarPendientes: [] }).codigo === "registrar");
+  const una = planDeLinea({ ...base, radarPendientes: [r1] });
+  chk("con UNA sigue siendo la de siempre: en revisión del Radar, enlazada a esa fila", una.codigo === "en_radar_pendiente" && una.casa_con === "uuid-1");
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

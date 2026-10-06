@@ -31,7 +31,8 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { MARCA_FUSION_VOUCHER, esCargaDeFactura, esCargaFusionada, TOLERANCIA_CANTIDAD, TOLERANCIA_MONTO } from "@/lib/combustible/factura-lineas";
-import { MAX_DESFASE, diasEntre } from "@/lib/combustible/desfase-factura";
+import { MAX_DESFASE, diasEntre, esCargaDelRadar } from "@/lib/combustible/desfase-factura";
+import { buscarCargaRegistrada, type CargaRegistrada, type CargaYaRegistrada } from "@/lib/radar/album-recargas";
 
 /** La carga que registró la factura, tal como está en `combustible`. */
 export type CargaDeFactura = {
@@ -131,7 +132,9 @@ export function planDeFusion(carga: CargaDeFactura, v: VoucherAFusionar): PlanFu
     avisos.push(`El voucher dice ${soles(v.monto)} y la factura ${soles(Number(carga.total))}: se queda el importe de la factura (es el comprobante legal).`);
   }
   if (v.cantidad != null && carga.galones != null && Math.abs(v.cantidad - Number(carga.galones)) > TOLERANCIA_CANTIDAD) {
-    avisos.push(`El voucher dice ${v.cantidad} y la factura ${carga.galones}: se queda la cantidad de la factura.`);
+    // El mismo despacho tiene la misma cantidad en el voucher y en la factura. Con el mismo importe y
+    // otra cantidad suelen ser DOS recargas (otro día, otro precio): se dice, y decide quien mira la foto.
+    avisos.push(`El voucher dice ${v.cantidad} y la factura ${carga.galones}. Si es la misma recarga, se queda la cantidad de la factura; si son dos recargas distintas (mismo importe, otro precio), no la fusiones: regístrala aparte.`);
   }
   // La marca, la nota de despacho (con ella la conciliación y el Radar la reconocen por nota) y por qué
   // cambió la fecha. Una carga con odómetro deja de decir «sin odómetro».
@@ -157,4 +160,87 @@ export function planDeFusion(carga: CargaDeFactura, v: VoucherAFusionar): PlanFu
       (toma.length ? `toma del voucher: ${toma.join(", ")}` : "queda enlazada a este voucher") +
       `; los galones, el precio y el importe siguen siendo los de la factura. No se crea ninguna carga nueva.`,
   };
+}
+
+// ── ¿Ya está en Combustible? Se pregunta al REVISAR, no solo al procesar ────────
+//
+// El Radar comprueba si la recarga ya está en `combustible` UNA vez: cuando procesa el mensaje
+// (lib/radar/acciones.ts → `posible_duplicado`). Pero una recarga puede quedarse días «Por revisar»,
+// y mientras tanto la FACTURA del correo puede registrar la misma carga: pasada la espera de un día,
+// cuando la recarga del Radar no casa con su línea —un importe mal leído, una placa sin identificar,
+// una fecha que no se leyó—. La fila del Radar no lo sabía, el recuadro de fusión no salía, y el
+// botón «Registrar» insertaba sin mirar: el mismo despacho dos veces en `combustible`, en v_egresos,
+// en el costo por km y en el saldo de la cuenta. Hacerlo «al revés» —las facturas antes que el
+// Radar— lo volvía el caso normal.
+//
+// Por eso se vuelve a preguntar AL REVISAR (el recuadro de la fila) y AL REGISTRAR (el botón), con lo
+// que la persona corrigió en el panel y con la MISMA regla del procesamiento (buscarCargaRegistrada):
+// dos reglas para «es la misma carga» terminan contestando distinto.
+
+export type CodigoYaEsta = "libre" | "fusionar" | "ya_registrada" | "sin_comprobar";
+
+export type YaEstaEnCombustible = {
+  codigo: CodigoYaEsta;
+  /** La carga encontrada (fusionar · ya_registrada). */
+  id: number | string | null;
+  /** Por qué se la encontró: mismo comprobante, mismo día e importe, o la factura con un día de margen. */
+  por: CargaYaRegistrada["por"] | null;
+  /** Para la pantalla y para el confirm() de «Registrar»: nombra la carga y dice qué hacer. */
+  detalle: string;
+};
+
+/**
+ * Qué hacer con una recarga por revisar ANTES de registrarla:
+ *   • `libre`         → no está en Combustible: se registra.
+ *   • `fusionar`      → ya entró desde la FACTURA (y nadie la fusionó todavía): se fusiona, no se registra
+ *                       otra. Registrarla aparte queda como decisión explícita, para cuando de verdad es
+ *                       OTRA recarga (mismo importe, otro día).
+ *   • `ya_registrada` → ya está, registrada por el Radar, a mano o fusionada con otro voucher: si es la
+ *                       misma recarga, se descarta.
+ *   • `sin_comprobar` → no se pudo leer Combustible. No se afirma que esté libre: se pregunta.
+ *
+ * `candidatas` en null = la consulta falló. Una lista vacía por error haría pasar por nueva una carga ya
+ * registrada (mismo criterio que la conciliación de facturas y que la acción del Radar).
+ */
+export function yaEstaEnCombustible(
+  voucher: { fecha: string | null; comprobante: string | null; monto: number | null },
+  candidatas: CargaRegistrada[] | null,
+  errorLectura?: string | null,
+): YaEstaEnCombustible {
+  if (candidatas == null) {
+    return {
+      codigo: "sin_comprobar", id: null, por: null,
+      detalle: `No se pudo comprobar si esta recarga ya está en Combustible${errorLectura ? ` (${errorLectura})` : ""}. ` +
+        `Si la factura del correo ya la registró, registrarla aquí contaría el mismo gasto dos veces.`,
+    };
+  }
+  const hallada = buscarCargaRegistrada(voucher, candidatas);
+  if (!hallada) return { codigo: "libre", id: null, por: null, detalle: "" };
+  const carga = candidatas.find((x) => String(x.id) === String(hallada.id));
+  const obs = carga?.observaciones ?? null;
+  const cual = `la carga #${hallada.id}${carga?.fecha ? ` del ${F(carga.fecha)}` : ""}${carga?.total != null ? ` por ${soles(Number(carga.total))}` : ""}`;
+  if (esCargaDeFactura(obs) && !esCargaFusionada(obs)) {
+    return {
+      codigo: "fusionar", id: hallada.id, por: hallada.por,
+      detalle: `Esta recarga ya está en Combustible: es ${cual}, que entró desde la factura del correo. Lo correcto es ` +
+        `FUSIONARLA (el recuadro de arriba, sobre los botones): esa carga toma de este voucher la fecha del despacho, el ` +
+        `odómetro y el conductor, sin contar el gasto dos veces.`,
+    };
+  }
+  const origen = esCargaFusionada(obs) ? "que entró desde la factura y ya se fusionó con otro voucher"
+    : esCargaDelRadar(obs) ? "registrada por el Radar" : esCargaDeFactura(obs) ? "registrada desde la factura" : "registrada a mano";
+  return {
+    codigo: "ya_registrada", id: hallada.id, por: hallada.por,
+    detalle: `Esta recarga ya parece estar en Combustible: ${cual}, ${origen}` +
+      `${hallada.por === "comprobante" ? ", con el mismo comprobante" : ""}. Si es la misma recarga, DESCARTA esta fila: ` +
+      `registrarla contaría el mismo gasto dos veces.`,
+  };
+}
+
+/** El confirm() de «Registrar» cuando la recarga no está libre. null = se registra sin preguntar. */
+export function preguntaAntesDeRegistrar(v: YaEstaEnCombustible): string | null {
+  if (v.codigo === "libre") return null;
+  if (v.codigo === "fusionar") return `${v.detalle}\n\n¿Registrarla APARTE de todos modos? Hazlo solo si de verdad es OTRA recarga.`;
+  if (v.codigo === "ya_registrada") return `${v.detalle}\n\n¿Registrarla igual, porque es otra recarga?`;
+  return `${v.detalle}\n\n¿Registrar igual?`;
 }

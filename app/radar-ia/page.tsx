@@ -31,8 +31,9 @@ import { fotosDeLectura, type FotoLeida } from "@/lib/radar/fotos-lectura";
 import { proponerTanqueLleno } from "@/lib/radar/tanque-lleno";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 import ReprocesoFallidos from "./ReprocesoFallidos";
-import FusionFactura, { aCargaDeFactura } from "./FusionFactura";
-import { planDeFusion } from "@/lib/radar/fusion-factura";
+import FusionFactura, { aCargaDeFactura, comprobarEnCombustible } from "./FusionFactura";
+import { planDeFusion, preguntaAntesDeRegistrar } from "@/lib/radar/fusion-factura";
+import { FILTRO_ESPERAN_RADAR, avisoOrdenEnRadar, facturasQueEsperan } from "@/lib/combustible/orden-revision";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -729,10 +730,14 @@ export type OverrideComb = {
   tanqueFuente: "operador" | "ia_aguja" | null;
 };
 
-function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar, fusionando, onFusionar, rejuzgandoKm, onRejuzgarKm }: {
+function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar, fusionando, onFusionar, rejuzgandoKm, onRejuzgarKm, porRevisarCompleto, facturaEspera }: {
   registros: RadarCombustible[];
   vehiculosGuia: VehiculoGuiaOdometro[];
   mensajesPorId: Record<string, RadarMensaje>;
+  /** Se leyeron TODAS las por revisar. Si no, la pantalla no puede decir «no queda ninguna». */
+  porRevisarCompleto: boolean;
+  /** Fila del Radar → la factura del correo que la espera (`en_radar_pendiente`). */
+  facturaEspera: Map<string, string>;
   registrando: string | null;
   onRegistrar: (c: RadarCombustible, ov: OverrideComb) => void;
   onDescartar: (id: string) => void;
@@ -745,10 +750,20 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
 }) {
   const [expandido, setExpandido] = useState<string | null>(null);
   const [edic, setEdic] = useState<Record<string, EdicionComb>>({});
+  // «auto»: con recargas por revisar se ven solo esas (es el paso 1, antes de las facturas); sin
+  // ninguna, todas. Una vez que la persona elige, manda su elección.
+  const [vista, setVista] = useState<"auto" | "por_revisar" | "todas">("auto");
 
   if (registros.length === 0) {
     return <CardVacia emoji="⛽" titulo="Sin recargas detectadas" detalle="Los vouchers de combustible que lleguen a los grupos aparecen aquí." />;
   }
+
+  // EL ORDEN DE TRABAJO: primero esto, después las facturas (lib/combustible/orden-revision.ts).
+  const porRevisar = registros.filter((c) => c.estado === "pendiente_revision");
+  const conFactura = porRevisar.filter((c) => facturaEspera.has(c.id)).length;
+  const aviso = avisoOrdenEnRadar({ pendientes: porRevisar.length, conFactura });
+  const soloPorRevisar = vista === "por_revisar" || (vista === "auto" && porRevisar.length > 0);
+  const visibles = soloPorRevisar ? porRevisar : registros;
 
   // Unidad de una recarga: por la FK que dejó el motor o, si no la trae, por la PLACA que leyó
   // la IA cruzada contra la flota (comparando solo alfanumérico, como matchVehiculo del motor).
@@ -803,6 +818,35 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
 
   return (
     <>
+    {/* EL ORDEN DE TRABAJO. Sin la lista completa no se dice «no queda ninguna»: el conteo podría estar corto. */}
+    {(aviso.tono === "pendiente" || porRevisarCompleto) && (
+      <div className={`rounded-2xl border p-4 mb-3 ${aviso.tono === "pendiente" ? "border-[#93c5fd] bg-[#eff6ff]" : "border-[#bbf7d0] bg-[#f0fdf4]"}`}>
+        <p className={`text-sm font-black ${aviso.tono === "pendiente" ? "text-[#1e3a8a]" : "text-[#166534]"}`}>
+          {aviso.tono === "pendiente" ? "① " : ""}{aviso.titulo}
+        </p>
+        <p className={`text-xs mt-1 ${aviso.tono === "pendiente" ? "text-[#1e3a8a]" : "text-[#166534]"}`}>
+          {aviso.detalle}{" "}
+          {aviso.tono === "listo" && <Link href="/combustible?vista=facturas" className="font-bold underline">Ir a las facturas →</Link>}
+        </p>
+      </div>
+    )}
+    {!porRevisarCompleto && (
+      <p className="text-xs font-bold text-[#B07A0F] mb-3">
+        ⚠ No se pudo leer la lista completa de recargas por revisar: puede haber más de las que se ven. Recarga la página.
+      </p>
+    )}
+    <div className="flex flex-wrap items-center gap-2 mb-3">
+      {([["por_revisar", `Por revisar · ${porRevisar.length}`], ["todas", "Todas"]] as const).map(([k, rotulo]) => {
+        const activo = k === "por_revisar" ? soloPorRevisar : !soloPorRevisar;
+        return (
+          <button key={k} onClick={() => setVista(k)}
+            className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${activo ? "bg-[#0b315f] text-white border-[#0b315f]" : "bg-white text-[#0b315f] border-gray-200 hover:border-[#0b315f]"}`}>
+            {rotulo}
+          </button>
+        );
+      })}
+      {!soloPorRevisar && <span className="text-[11px] text-gray-400">Las por revisar, más las 60 recargas más recientes.</span>}
+    </div>
     {kmViejos > 0 && (
       <div className="rounded-2xl border border-[#F2C94C] bg-[#FFF8E1] p-4 mb-3">
         <p className="text-sm font-black text-[#7a5a00]">
@@ -833,7 +877,10 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
             </tr>
           </thead>
           <tbody>
-            {registros.map((c) => {
+            {visibles.length === 0 && (
+              <tr><td colSpan={9} className="p-6 text-center text-sm text-gray-400">No hay recargas por revisar.</td></tr>
+            )}
+            {visibles.map((c) => {
               const est = ESTADO_COMB_CFG[c.estado];
               const abierto = expandido === c.id;
               const esPendiente = c.estado === "pendiente_revision";
@@ -940,6 +987,12 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                     <td className="p-3 whitespace-nowrap">
                       <div className="flex items-center gap-2">
                         <ChipEstado {...est} />
+                        {esPendiente && facturaEspera.has(c.id) && (
+                          <span className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-[#eff6ff] text-[#1d4ed8]"
+                            title={`La factura ${facturaEspera.get(c.id)} ya llegó y espera esta revisión para cerrarse.`}>
+                            📧 factura esperando
+                          </span>
+                        )}
                         {c.estado === "registrado" && (
                           <Link href="/combustible" onClick={(e) => e.stopPropagation()} className="text-[#1262bd] hover:underline text-xs font-bold inline-flex items-center gap-1">
                             <Ic.Externo size={12} /> Ver
@@ -1095,20 +1148,28 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           </label>
                         </div>
 
-                        {/* «Posible duplicado» porque ya entró DESDE LA FACTURA: se fusiona en vez de descartar
-                            (lib/radar/fusion-factura.ts). Juzga con lo que la persona corrigió arriba. */}
-                        {(c.anomalias ?? []).some((a) => a.codigo === "posible_duplicado") && (
-                          <FusionFactura
-                            c={c}
-                            unidad={ed.vehiculo ? { tipo: ed.vehiculo.split(":")[0] as "propio" | "tercero", id: Number(ed.vehiculo.split(":")[1]) } : null}
-                            voucher={{
-                              fecha: ed.fecha || c.fecha, kilometraje: kmEd, conductor: c.conductor, grifo: ed.grifo.trim() || c.grifo,
-                              comprobante: c.comprobante, cantidad: cantEd, monto: montoEd,
-                              tanqueLleno: tanqueFuente === null ? null : tanqueMarcado, tanqueFuente,
-                            }}
-                            ocupado={fusionando === c.id || registrando === c.id || !ed.vehiculo}
-                            onFusionar={(cargaId) => onFusionar(c, ovActual, cargaId)}
-                          />
+                        {/* ¿YA ESTÁ EN COMBUSTIBLE? En TODAS las filas por revisar, no solo en las que el Radar
+                            marcó al procesarlas: la factura del correo pudo registrar la carga después,
+                            mientras esta fila esperaba. Si entró desde la factura, se FUSIONA en vez de
+                            descartar (lib/radar/fusion-factura.ts). Juzga con lo que la persona corrigió
+                            arriba; sin la marca del Radar no dice «buscando…» (lo normal es que no haya nada). */}
+                        <FusionFactura
+                          c={c}
+                          unidad={ed.vehiculo ? { tipo: ed.vehiculo.split(":")[0] as "propio" | "tercero", id: Number(ed.vehiculo.split(":")[1]) } : null}
+                          voucher={{
+                            fecha: ed.fecha || c.fecha, kilometraje: kmEd, conductor: c.conductor, grifo: ed.grifo.trim() || c.grifo,
+                            comprobante: c.comprobante, cantidad: cantEd, monto: montoEd ?? (cantEd != null && precioEd != null ? Math.round(cantEd * precioEd * 100) / 100 : null),
+                            tanqueLleno: tanqueFuente === null ? null : tanqueMarcado, tanqueFuente,
+                          }}
+                          ocupado={fusionando === c.id || registrando === c.id || !ed.vehiculo}
+                          onFusionar={(cargaId) => onFusionar(c, ovActual, cargaId)}
+                          silencioso={!(c.anomalias ?? []).some((a) => a.codigo === "posible_duplicado")}
+                        />
+                        {facturaEspera.get(c.id) && (
+                          <p className="mt-3 text-xs font-semibold text-[#1d4ed8]">
+                            📧 La factura {facturaEspera.get(c.id)} ya llegó y espera esta revisión: al registrarla (o fusionarla) se cruza sola en la
+                            próxima lectura del correo.
+                          </p>
                         )}
 
                         <div className="flex flex-wrap items-center gap-3 mt-3">
@@ -2175,6 +2236,52 @@ function FilaGuiaOdometro({ v, onGuardar }: {
   );
 }
 
+// ── Carga de las recargas por revisar ────────────────────────────────────────
+
+/**
+ * TODAS las recargas por revisar, paginadas. La lista de la pestaña trae las 60 más recientes de
+ * cualquier estado, y después del reproceso de las tres semanas (14/09–06/10) las observadas más
+ * viejas quedaban fuera de la lista y del contador: «que no quede ninguna por revisar» —el paso 1,
+ * antes de las facturas (lib/combustible/orden-revision.ts)— no se podía comprobar desde aquí.
+ * `completa: false` si alguna página falló: entonces la pantalla no puede afirmar que no queda ninguna.
+ */
+async function leerCombustiblePorRevisar(): Promise<{ filas: RadarCombustible[]; completa: boolean }> {
+  const filas: RadarCombustible[] = [];
+  for (let desde = 0; desde < 20_000; desde += 1000) {
+    const { data, error } = await supabase.from("radar_combustible").select("*")
+      .eq("estado", "pendiente_revision").order("created_at", { ascending: false }).range(desde, desde + 999);
+    if (error) return { filas, completa: false };
+    filas.push(...((data ?? []) as RadarCombustible[]));
+    if (!data || data.length < 1000) break;
+  }
+  return { filas, completa: true };
+}
+
+/** Los mensajes de origen que la lista del feed (los 150 más recientes) no trae: la foto de respaldo,
+ *  el grupo y la hora del mensaje de una recarga vieja. Best-effort: sin ellos la fila se revisa igual. */
+async function leerMensajesPorId(ids: string[]): Promise<RadarMensaje[]> {
+  const out: RadarMensaje[] = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await supabase.from("radar_mensajes").select("*").in("id", ids.slice(i, i + 100));
+    if (error) break;
+    out.push(...((data ?? []) as RadarMensaje[]));
+  }
+  return out;
+}
+
+/** Qué factura del correo espera a cada recarga por revisar (`en_radar_pendiente`). Best-effort: es un
+ *  dato para priorizar, y sin `combustible-03` la tabla no existe. */
+async function leerFacturasQueEsperan(): Promise<Map<string, string>> {
+  try {
+    const { data, error } = await supabase.from("radar_facturas").select("serie, numero, conciliacion")
+      .in("estado", [...FILTRO_ESPERAN_RADAR.estados]).contains("conciliacion", FILTRO_ESPERAN_RADAR.conciliacion).limit(1000);
+    if (error) return new Map();
+    return facturasQueEsperan((data ?? []) as Parameters<typeof facturasQueEsperan>[0]);
+  } catch {
+    return new Map();
+  }
+}
+
 // ── Página principal ─────────────────────────────────────────────────────────
 
 export default function RadarIAPage() {
@@ -2189,6 +2296,15 @@ export default function RadarIAPage() {
   const [alertas, setAlertas] = useState<RadarAlerta[]>([]);
   const [vehiculos, setVehiculos] = useState<VehiculoLite[]>([]);
   const [vehiculosGuia, setVehiculosGuia] = useState<VehiculoGuiaOdometro[]>([]);
+  // Las recargas por revisar se leen TODAS (leerCombustiblePorRevisar); si alguna página falló, la
+  // pantalla no puede decir «no queda ninguna».
+  const [porRevisarCompleto, setPorRevisarCompleto] = useState(true);
+  // Los mensajes de origen de esas recargas que el feed (150 más recientes) no trae. El ref es la
+  // caché: el realtime recarga seguido y no hay que volver a pedir los que ya llegaron.
+  const mensajesExtraRef = useRef<Record<string, RadarMensaje>>({});
+  const [mensajesExtra, setMensajesExtra] = useState<Record<string, RadarMensaje>>({});
+  // Fila del Radar → la factura del correo que la espera (`en_radar_pendiente`).
+  const [facturaEspera, setFacturaEspera] = useState<Map<string, string>>(() => new Map());
 
   const [tab, setTab] = useState<TabId>("feed");
   const [verServidor, setVerServidor] = useState(false);
@@ -2210,7 +2326,7 @@ export default function RadarIAPage() {
   // ── Carga de datos ──
   const cargar = useCallback(async () => {
     try {
-      const [rEstado, rConfig, rGrupos, rMensajes, rOpps, rComb, rOdo, rAlertas, rVehiculos, rVehTercero] = await Promise.all([
+      const [rEstado, rConfig, rGrupos, rMensajes, rOpps, rComb, rOdo, rAlertas, rVehiculos, rVehTercero, porRevisar] = await Promise.all([
         supabase.from("radar_estado").select("*").eq("id", 1).maybeSingle(),
         supabase.from("radar_config").select("*").eq("id", 1).maybeSingle(),
         supabase.from("radar_grupos").select("*").order("nombre"),
@@ -2221,7 +2337,10 @@ export default function RadarIAPage() {
         supabase.from("radar_alertas").select("*").order("created_at", { ascending: false }).limit(100),
         supabase.from("vehiculos").select("id, placa, categoria, estado, guia_odometro, kilometraje_actual"),
         supabase.from("vehiculos_tercero").select("id, placa, categoria, guia_odometro, kilometraje_actual"),
+        leerCombustiblePorRevisar(),
       ]);
+      // Qué factura espera a cada recarga: aparte y sin esperarla, es un dato para priorizar.
+      void leerFacturasQueEsperan().then(setFacturaEspera);
       if (rEstado.error) console.warn("radar-ia: error leyendo radar_estado", rEstado.error);
       if (rConfig.error) console.warn("radar-ia: error leyendo radar_config", rConfig.error);
       setEstado((rEstado.data as RadarEstado | null) ?? null);
@@ -2233,7 +2352,11 @@ export default function RadarIAPage() {
       setGrupos(((rGrupos.data ?? []) as RadarGrupo[]));
       setMensajes(((rMensajes.data ?? []) as RadarMensaje[]));
       setOportunidades(((rOpps.data ?? []) as RadarOportunidad[]));
-      setCombustibles(((rComb.data ?? []) as RadarCombustible[]));
+      // Las 60 más recientes de cualquier estado + TODAS las por revisar, sin repetir.
+      const combPorId = new Map<string, RadarCombustible>();
+      for (const c of [...((rComb.data ?? []) as RadarCombustible[]), ...porRevisar.filas]) combPorId.set(c.id, c);
+      setCombustibles([...combPorId.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))));
+      setPorRevisarCompleto(porRevisar.completa);
       setOdometros(((rOdo.data ?? []) as RadarLecturaOdometro[]));
       setAlertas(((rAlertas.data ?? []) as RadarAlerta[]));
       setVehiculos(((rVehiculos.data ?? []) as VehiculoLite[]));
@@ -2248,6 +2371,15 @@ export default function RadarIAPage() {
       setVehiculosGuia(
         [...guiaPropios, ...guiaTerceros].sort((a, b) => (a.placa ?? "").localeCompare(b.placa ?? ""))
       );
+      // Al final, para no retrasar lo demás: los mensajes de origen de las recargas por revisar que el
+      // feed no trajo (foto de respaldo, grupo, hora del mensaje). Solo los que todavía no están.
+      const enFeed = new Set(((rMensajes.data ?? []) as RadarMensaje[]).map((m) => m.id));
+      const faltan = [...new Set(porRevisar.filas.map((c) => c.mensaje_id).filter((id): id is string => !!id))]
+        .filter((id) => !enFeed.has(id) && !mensajesExtraRef.current[id]);
+      if (faltan.length) {
+        for (const m of await leerMensajesPorId(faltan)) mensajesExtraRef.current[m.id] = m;
+        setMensajesExtra({ ...mensajesExtraRef.current });
+      }
     } catch (e) {
       console.warn("radar-ia: error cargando datos", e);
     }
@@ -2330,18 +2462,19 @@ export default function RadarIAPage() {
   const combPendientes = combustibles.filter((c) => c.estado === "pendiente_revision").length;
   const odoPorRevisar = odometros.filter((o) => o.estado === "sospechosa" || o.estado === "rechazada").length;
 
+  // Con los mensajes de origen de las recargas por revisar viejas, que el feed no trae.
   const grupoPorMensaje = useMemo(() => {
     const map: Record<string, string> = {};
-    for (const m of mensajes) if (m.grupo_nombre) map[m.id] = m.grupo_nombre;
+    for (const m of [...Object.values(mensajesExtra), ...mensajes]) if (m.grupo_nombre) map[m.id] = m.grupo_nombre;
     return map;
-  }, [mensajes]);
+  }, [mensajes, mensajesExtra]);
 
   // Para el fallback de fotos en el panel de revisión de combustible (filas viejas sin `fotos`).
   const mensajesPorId = useMemo(() => {
-    const map: Record<string, RadarMensaje> = {};
+    const map: Record<string, RadarMensaje> = { ...mensajesExtra };
     for (const m of mensajes) map[m.id] = m;
     return map;
-  }, [mensajes]);
+  }, [mensajes, mensajesExtra]);
 
   // ── Estado del worker ──
   // El latido lo escribe el proceso del servidor cada 60 s. Si está viejo, el worker NO
@@ -2750,11 +2883,22 @@ export default function RadarIAPage() {
       const grupo = (c.mensaje_id && grupoPorMensaje[c.mensaje_id]) || "WhatsApp";
       const msg = c.mensaje_id ? mensajesPorId[c.mensaje_id] ?? null : null;
       const fotoUrl = (c.fotos?.[0]?.url) ?? msg?.media_url ?? null;
-      // Guarda primero las correcciones (dataset de aprendizaje), sin frenar el registro.
-      await guardarCorreccionesCombustible(c, ov, fotoUrl);
-
       const destino = ov.tipo === "tercero" ? { vehiculo_tercero_id: ov.vehiculoId } : { vehiculo_id: ov.vehiculoId };
       const fechaCarga = ov.fecha ?? c.fecha ?? hoyISO();
+
+      // ¿YA ESTÁ EN COMBUSTIBLE? Se pregunta AQUÍ, con lo que la persona corrigió, y no solo cuando el
+      // Radar procesó el mensaje: mientras la recarga esperaba revisión, la factura del correo pudo
+      // registrar la misma carga, y este botón la insertaba otra vez (lib/radar/fusion-factura.ts).
+      const montoDeEsta = ov.monto ?? Math.round(precio * ov.cantidad * 100) / 100;
+      const { veredicto } = await comprobarEnCombustible(
+        { tipo: ov.tipo, id: ov.vehiculoId },
+        { fecha: fechaCarga, comprobante: c.comprobante, monto: montoDeEsta },
+      );
+      const pregunta = preguntaAntesDeRegistrar(veredicto);
+      if (pregunta && !window.confirm(pregunta)) return;
+
+      // Guarda primero las correcciones (dataset de aprendizaje), sin frenar el registro.
+      await guardarCorreccionesCombustible(c, ov, fotoUrl);
       // OJO: nunca escribir `total` — es columna generada (galones × precio_galon)
       const { data, error } = await supabase
         .from("combustible")
@@ -3199,6 +3343,8 @@ export default function RadarIAPage() {
                 onFusionar={fusionarConFactura}
                 rejuzgandoKm={rejuzgandoKm}
                 onRejuzgarKm={rejuzgarKmCombustible}
+                porRevisarCompleto={porRevisarCompleto}
+                facturaEspera={facturaEspera}
               />
             )}
             {tab === "odometro" && (
