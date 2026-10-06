@@ -167,7 +167,7 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
   const serieSem = useMemo(() => serieSemanal(dias, hoy, 8), [dias, hoy]);
 
   const anomalias = useMemo(
-    () => dias.filter((d) => d.anomalias.some((a) => a.tipo === "excesivo" || a.tipo === "bajo" || a.tipo === "retroceso")).slice(0, 12),
+    () => dias.filter((d) => d.anomalias.some((a) => a.tipo === "excesivo" || a.tipo === "bajo" || a.tipo === "retroceso" || a.tipo === "no_encaja")).slice(0, 12),
     [dias]
   );
 
