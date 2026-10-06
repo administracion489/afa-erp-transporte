@@ -19,6 +19,7 @@ import {
   type EntradaSalud, type MensajeTerminado, type CodigoSalud,
 } from "../lib/radar/salud";
 import { dentroDeHorario, CONFIG_DEFECTO } from "../lib/radar/config";
+import { ACCION_QUITADO_DEL_AVISO } from "../lib/radar/reproceso";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -123,6 +124,8 @@ console.log("\n3. Fallos viejos con lecturas buenas después no alarman");
     saludRadar(BASE({ ultimos: [OK_MSG(2), FALLO(60, SIN_SALDO), FALLO(70, SIN_SALDO), FALLO(80, SIN_SALDO)] })).codigo === "ok");
   chk("un descartado (la IA lo leyó y no era nada) también corta la racha",
     saludRadar(BASE({ ultimos: [{ estado: "descartado", accion: null, error: null, procesado_en: hace(2) }, FALLO(60, SIN_SALDO)] })).codigo === "ok");
+  chk("pero un fallo que alguien «quitó del aviso» sigue siendo un fallo: no esconde que no hay saldo",
+    saludRadar(BASE({ ultimos: [{ estado: "descartado", accion: ACCION_QUITADO_DEL_AVISO, error: SIN_SALDO, procesado_en: hace(2) }, OK_MSG(60)] })).codigo === "sin_credito");
 }
 
 // ── 4. Sin evidencia no se afirma nada ───────────────────────────────────────

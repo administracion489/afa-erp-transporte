@@ -31,7 +31,7 @@
 // 15 min). Sin saldo o con la clave rechazada basta UN fallo: esos no son azar, fallan todos.
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { esFallido, motivoDeFallo } from "@/lib/radar/reproceso";
+import { esFallido, motivoDeFallo, ACCION_QUITADO_DEL_AVISO } from "@/lib/radar/reproceso";
 import { dentroDeHorario } from "@/lib/radar/config";
 
 /** Sin latido en este tiempo, el worker no está corriendo. El MISMO del chip de /radar-ia. */
@@ -185,10 +185,12 @@ export function saludRadar(e: EntradaSalud): SaludRadar {
       "Los mensajes llegan pero no se leen hasta reactivarlo (Radar IA → «Radar activo»).");
   }
 
-  // 4. Lo último que terminó: ¿falló? Se cuenta la racha desde el más reciente hacia atrás.
+  // 4. Lo último que terminó: ¿falló? Se cuenta la racha desde el más reciente hacia atrás. Un fallo que
+  // alguien «quitó del aviso» sigue siendo un fallo (conserva su motivo): quitarlo de la lista de
+  // /radar-ia no puede esconder que la API se quedó sin saldo.
   if (e.ultimos && e.ultimos.length) {
     const racha: MensajeTerminado[] = [];
-    for (const m of e.ultimos) { if (!esFallido(m)) break; racha.push(m); }
+    for (const m of e.ultimos) { if (!esFallido(m) && m.accion !== ACCION_QUITADO_DEL_AVISO) break; racha.push(m); }
     if (racha.length) {
       const motivo = motivoDeFallo(racha[0]);
       const causa = causaDeFallo(motivo);
