@@ -15,6 +15,10 @@ import { cabecerasErp } from "@/lib/fetch-erp";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 import { rankingConductores, type FilaRanking } from "@/lib/odometro-confirmacion";
 import { instanteLectura, horaLimaHms } from "@/lib/odometro-tiempo";
+import {
+  filtrarRevision, hayFiltro, tipoDeRevision, etiquetaTipo, placaComparable,
+  TIPOS_REVISION, ORDENES_REVISION, FILTRO_REVISION_VACIO, type FiltroRevision,
+} from "@/lib/odometro-revision";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -241,6 +245,9 @@ export default function OdometroTab() {
   // Se teclea ANTES de aceptar: la hora suele estar impresa en el voucher o visible en la foto.
   const [editHora, setEditHora]   = useState<Record<string, string>>({});
   const [comprobando, setComprobando] = useState<string | null>(null);
+  // Filtros de la bandeja «Lecturas por revisar» (independientes de los del historial).
+  const [fRev, setFRev] = useState<FiltroRevision>(FILTRO_REVISION_VACIO);
+  const setF = <K extends keyof FiltroRevision>(k: K, v: FiltroRevision[K]) => setFRev((p) => ({ ...p, [k]: v }));
 
   // Completar una jornada PENDIENTE (solo tuvo check-in): ingresar el odómetro final a mano.
   // Solo se habilita desde las 00:00 del día siguiente a la jornada (ver botón en la tabla).
@@ -304,15 +311,19 @@ export default function OdometroTab() {
           .gte("fecha", desdeVentana)
           .order("fecha", { ascending: false })
       ),
-      // "Por revisar" completo (independiente de la ventana): pocas filas, siempre accionables.
-      supabase.from("lecturas_odometro")
-        .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,capturado_en,momento,foto_url")
-        .eq("estado", "sospechosa").order("created_at", { ascending: false }).limit(300),
+      // "Por revisar" completo (independiente de la ventana) y PAGINADO: con filtros por placa y
+      // fecha, un tope de 300 haría que una placa «no tenga nada por revisar» solo porque sus
+      // filas quedaron fuera del corte.
+      paginarFilas(() =>
+        supabase.from("lecturas_odometro")
+          .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,capturado_en,momento,foto_url")
+          .eq("estado", "sospechosa").order("created_at", { ascending: false }).order("id", { ascending: true })
+      ),
     ]);
     setVehiculos(vRes.data || []);
     setTerceros(tRes.data || []);
     setLecturas((lecAll || []) as Lectura[]);
-    setSospechosas((sospRes.data || []) as Lectura[]);
+    setSospechosas((sospRes || []) as Lectura[]);
     if (cRes.data?.km_dia_max) setKmDiaMax(cRes.data.km_dia_max);
     setLoading(false);
   };
@@ -658,7 +669,16 @@ export default function OdometroTab() {
     });
   };
 
-  const porRevisar = sospechosas;
+  // La bandeja filtrada. `ts` es el instante EFECTIVO (nunca la hora de otro día) para ordenar
+  // por fecha de la lectura; la placa se resuelve una vez para filtrar y ordenar por ella.
+  const revision = useMemo(
+    () => filtrarRevision(
+      sospechosas.map((l) => ({ ...l, ts: instanteLectura(l).ts, placa: placaDe(l) })),
+      fRev,
+    ),
+    [sospechosas, fRev, placaMap],
+  );
+  const porRevisar = revision.filas;
   const fuentesDisponibles = useMemo(() => [...new Set(lecturas.map((l) => l.fuente))], [lecturas]);
 
   /**
@@ -752,11 +772,101 @@ export default function OdometroTab() {
       </section>
 
       {/* PANEL POR REVISAR */}
-      {porRevisar.length > 0 && (
+      {sospechosas.length > 0 && (
         <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
           <div className="px-5 py-3 border-b bg-amber-50">
-            <h2 className="font-bold text-amber-800 text-sm">⚠️ Lecturas por revisar ({porRevisar.length})</h2>
+            <h2 className="font-bold text-amber-800 text-sm">
+              ⚠️ Lecturas por revisar ({hayFiltro(fRev) ? `${porRevisar.length} de ${revision.total}` : revision.total})
+            </h2>
             <p className="text-xs text-amber-700">Retroceden o saltan de forma improbable. No actualizan el km vigente hasta que decidas.</p>
+          </div>
+
+          {/* FILTROS DE LA BANDEJA */}
+          <div className="px-5 py-3 border-b space-y-2.5" style={{ borderColor: "#fde68a", background: "#fffdf5" }}>
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                Placa
+                <input value={fRev.placa} onChange={(e) => setF("placa", e.target.value)} placeholder="CTV-370"
+                  className="block mt-0.5 border rounded-lg px-2 py-1.5 text-xs font-mono font-normal normal-case w-28 bg-white" />
+              </label>
+              <label className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                Desde
+                <input type="date" value={fRev.desde} onChange={(e) => setF("desde", e.target.value)}
+                  className="block mt-0.5 border rounded-lg px-2 py-1.5 text-xs font-normal bg-white" />
+              </label>
+              <label className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                Hasta
+                <input type="date" value={fRev.hasta} onChange={(e) => setF("hasta", e.target.value)}
+                  className="block mt-0.5 border rounded-lg px-2 py-1.5 text-xs font-normal bg-white" />
+              </label>
+              <label className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                Problema
+                <select value={fRev.tipo} onChange={(e) => setF("tipo", e.target.value as FiltroRevision["tipo"])}
+                  className="block mt-0.5 border rounded-lg px-2 py-1.5 text-xs font-normal normal-case bg-white">
+                  <option value="todos">Todos</option>
+                  {TIPOS_REVISION.filter((t) => revision.porTipo[t.codigo] > 0 || fRev.tipo === t.codigo).map((t) => (
+                    <option key={t.codigo} value={t.codigo} title={t.ayuda}>{t.etiqueta} ({revision.porTipo[t.codigo]})</option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                Fuente
+                <select value={fRev.fuente} onChange={(e) => setF("fuente", e.target.value)}
+                  className="block mt-0.5 border rounded-lg px-2 py-1.5 text-xs font-normal normal-case bg-white">
+                  <option value="todas">Todas</option>
+                  {Object.entries(revision.porFuente).sort((a, b) => b[1] - a[1]).map(([fu, n]) => (
+                    <option key={fu} value={fu}>{FUENTE_LABEL[fu] || fu} ({n})</option>
+                  ))}
+                  {fRev.fuente !== "todas" && revision.porFuente[fRev.fuente] == null && (
+                    <option value={fRev.fuente}>{FUENTE_LABEL[fRev.fuente] || fRev.fuente} (0)</option>
+                  )}
+                </select>
+              </label>
+              <label className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                Flota
+                <select value={fRev.flota} onChange={(e) => setF("flota", e.target.value as FiltroRevision["flota"])}
+                  className="block mt-0.5 border rounded-lg px-2 py-1.5 text-xs font-normal normal-case bg-white">
+                  <option value="todas">Todas</option>
+                  <option value="propia">Propia</option>
+                  <option value="tercero">Tercerizada</option>
+                </select>
+              </label>
+              <label className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                Ordenar
+                <select value={fRev.orden} onChange={(e) => setF("orden", e.target.value as FiltroRevision["orden"])}
+                  className="block mt-0.5 border rounded-lg px-2 py-1.5 text-xs font-normal normal-case bg-white">
+                  {ORDENES_REVISION.map((o) => <option key={o.codigo} value={o.codigo}>{o.etiqueta}</option>)}
+                </select>
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-amber-900 pb-1.5">
+                <input type="checkbox" checked={fRev.soloConFoto} onChange={(e) => setF("soloConFoto", e.target.checked)} />
+                Solo con foto
+              </label>
+              {hayFiltro(fRev) && (
+                <button type="button" onClick={() => setFRev((p) => ({ ...FILTRO_REVISION_VACIO, orden: p.orden }))}
+                  className="pb-1.5 text-xs font-bold text-blue-700 hover:underline">
+                  Limpiar filtros
+                </button>
+              )}
+            </div>
+            {/* Las placas con más lecturas pendientes: un clic filtra por ella. */}
+            {revision.porPlaca.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-amber-700">Por placa:</span>
+                {revision.porPlaca.slice(0, 12).map(({ placa, n }) => {
+                  const activa = fRev.placa.trim() !== "" && placaComparable(placa) === placaComparable(fRev.placa);
+                  return (
+                    <button key={placa} type="button" onClick={() => setF("placa", activa ? "" : placa)}
+                      className={`px-2 py-0.5 rounded-full text-[11px] font-mono border ${activa ? "bg-amber-600 text-white border-amber-600" : "bg-white text-amber-900 border-amber-200 hover:bg-amber-50"}`}>
+                      {placa} · {n}
+                    </button>
+                  );
+                })}
+                {revision.porPlaca.length > 12 && (
+                  <span className="text-[11px] text-amber-700">y {revision.porPlaca.length - 12} más (búscalas arriba)</span>
+                )}
+              </div>
+            )}
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -765,6 +875,13 @@ export default function OdometroTab() {
                   <th key={h} className="p-3 text-left text-xs font-bold text-amber-700 uppercase tracking-wide">{h}</th>)}
               </tr></thead>
               <tbody>
+                {porRevisar.length === 0 && (
+                  <tr><td colSpan={7} className="p-6 text-center text-xs text-gray-500">
+                    Ninguna de las {revision.total} lecturas por revisar cumple estos filtros.{" "}
+                    <button type="button" onClick={() => setFRev((p) => ({ ...FILTRO_REVISION_VACIO, orden: p.orden }))}
+                      className="font-bold text-blue-700 hover:underline">Limpiar filtros</button>
+                  </td></tr>
+                )}
                 {porRevisar.map(l => (
                   <tr key={l.id} className="border-t" style={{ borderColor: "#fde68a" }}>
                     <td className="p-2">
@@ -811,7 +928,16 @@ export default function OdometroTab() {
                     </td>
                     <td className="p-3 text-xs text-gray-600">{FUENTE_LABEL[l.fuente] || l.fuente}</td>
                     <td className="p-3 text-xs text-amber-800">
-                      {l.motivo}
+                      {(() => {
+                        const t = tipoDeRevision(l.motivo);
+                        return (
+                          <span className={`inline-block mb-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${t === "lista_para_aceptar" ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-900"}`}
+                            title={TIPOS_REVISION.find((x) => x.codigo === t)?.ayuda}>
+                            {etiquetaTipo(t)}
+                          </span>
+                        );
+                      })()}
+                      <div>{l.motivo}</div>
                       {(() => {
                         const ref = refDeSospechosa.get(l.id);
                         if (!ref) return null;
