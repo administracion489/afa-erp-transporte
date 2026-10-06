@@ -427,7 +427,17 @@ export function planDeLinea(args: {
     };
   }
   const enRadar = casar(l, args.radarPendientes, args.documentoId ?? null);
-  if (enRadar && enRadar !== "ambigua") {
+  // DOS recargas del Radar por revisar que podrían ser esta línea: antes se seguía de largo y la
+  // factura la registraba —y la primera que alguien aprobara en el Radar la duplicaba—. No se elige
+  // ninguna (sin `casa_con`): se espera a que el Radar se revise, que es el orden de trabajo
+  // (lib/combustible/orden-revision.ts).
+  if (enRadar === "ambigua") {
+    return {
+      n: l.n, codigo: "en_radar_pendiente",
+      detalle: "Dos recargas del Radar por revisar (misma unidad, fecha e importe) podrían ser esta línea. Resuélvelas primero en Radar IA → Combustible: registrarla también desde la factura duplicaría una de las dos.",
+    };
+  }
+  if (enRadar) {
     return {
       n: l.n, codigo: "en_radar_pendiente", casa_con: enRadar.fila.id, por: enRadar.por,
       detalle: "El Radar la capturó y está esperando revisión en Radar IA → Combustible. Apruébala ahí: registrarla también desde la factura la duplicaría.",

@@ -18,6 +18,7 @@ import {
   sumarDias, generadaDespues, diaLima,
   type CargaPorMover, type DesfaseCuenta as DecisionDeCuenta, type ResumenMover,
 } from "@/lib/combustible/desfase-factura";
+import { avisoOrdenEnFacturas, pendientesCerca, type RecargaPorRevisar } from "@/lib/combustible/orden-revision";
 import CorreoFacturas from "./CorreoFacturas";
 
 const S = (n: number | null | undefined) =>
@@ -73,6 +74,9 @@ export default function FacturasCorreo() {
   const [desf, setDesf] = useState<DesfaseCuenta[] | null>(null);
   const [moviendo, setMoviendo] = useState(false);
   const [msgDesf, setMsgDesf] = useState<string | null>(null);
+  // EL ORDEN DE TRABAJO: primero el Radar, después las facturas (lib/combustible/orden-revision.ts).
+  // Las recargas del Radar que siguen por revisar; null = no se pudieron leer (no se afirma nada).
+  const [pendRadar, setPendRadar] = useState<RecargaPorRevisar[] | null>(null);
 
   const cargar = useCallback(async () => {
     const [{ data, error }, { data: otras }, { data: hs, error: eHist }] = await Promise.all([
@@ -106,14 +110,32 @@ export default function FacturasCorreo() {
     } catch { setDesf(null); } // es un aviso aparte: si falla, el resto de la pestaña sirve igual
   }, []);
 
+  /** TODAS las recargas del Radar por revisar, paginadas: el conteo del aviso no puede quedarse corto. */
+  const cargarPendRadar = useCallback(async () => {
+    const out: RecargaPorRevisar[] = [];
+    for (let desde = 0; desde < 20_000; desde += 1000) {
+      const { data, error } = await supabase.from("radar_combustible").select("id, placa, fecha, monto_total")
+        .eq("estado", "pendiente_revision").order("created_at", { ascending: false }).range(desde, desde + 999);
+      if (error) { setPendRadar(null); return; } // es un aviso aparte: sin él, la pestaña sirve igual
+      type Fila = { id: string | number; placa: string | null; fecha: string | null; monto_total: number | string | null };
+      out.push(...((data as Fila[] | null) ?? []).map((r) => ({
+        id: String(r.id), placa: r.placa ?? null,
+        fecha: r.fecha ? String(r.fecha).slice(0, 10) : null, monto: r.monto_total == null ? null : Number(r.monto_total),
+      })));
+      if (!data || data.length < 1000) break;
+    }
+    setPendRadar(out);
+  }, []);
+
   useEffect(() => {
     cargar();
     cargarDeuda();
     cargarDesfase();
+    cargarPendRadar();
     Promise.all([supabase.from("vehiculos").select("placa"), supabase.from("vehiculos_tercero").select("placa")]).then(([a, b]) => {
       setPlacas([...((a.data as any[]) ?? []), ...((b.data as any[]) ?? [])].map((r) => String(r.placa ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "")).filter(Boolean).sort());
     });
-  }, [cargar, cargarDeuda, cargarDesfase]);
+  }, [cargar, cargarDeuda, cargarDesfase, cargarPendRadar]);
 
   async function sincronizar() {
     setCargando("normal"); setSync("Buscando facturas en el correo…");
@@ -294,8 +316,26 @@ export default function FacturasCorreo() {
     return { reg: c("registrar"), ya: c("ya_registrada"), rev: c("revisar") - hs, hist: hs, radar: c("en_radar_pendiente"), esp: c("en_espera"), errores };
   }, [filas]);
 
+  const avisoOrden = avisoOrdenEnFacturas({ pendientesRadar: pendRadar ? pendRadar.length : null, lineasEsperando: resumen.radar });
+
   return (
     <section className="space-y-3">
+      {/* EL ORDEN DE TRABAJO, arriba de todo: lo primero que hay que saber al entrar a esta pestaña es si
+          el Radar ya está al día. Si no, lo de aquí abajo todavía va a cambiar solo. */}
+      {avisoOrden && (
+        <div className="rounded-xl border p-4"
+          style={avisoOrden.tono === "pendiente" ? { background: "#eff6ff", borderColor: "#93c5fd" } : { background: "#f0fdf4", borderColor: "#bbf7d0" }}>
+          <div className={`text-sm font-bold ${avisoOrden.tono === "pendiente" ? "text-[#1e3a8a]" : "text-[#166534]"}`}>
+            {avisoOrden.tono === "pendiente" ? "① " : ""}{avisoOrden.titulo}
+          </div>
+          <div className={`text-xs mt-1 ${avisoOrden.tono === "pendiente" ? "text-[#1e3a8a]" : "text-[#166534]"}`}>{avisoOrden.detalle}</div>
+          {avisoOrden.tono === "pendiente" && (
+            <Link href="/radar-ia?tab=combustible" className="inline-block mt-2 px-4 py-2 rounded-lg text-sm font-bold text-white" style={{ background: "#1d4ed8" }}>
+              Ir a Radar IA → Combustible
+            </Link>
+          )}
+        </div>
+      )}
       <CorreoFacturas onCodigo={setCodigoCorreo} />
 
       <div className="rounded-xl border bg-white p-4 flex flex-wrap items-center gap-4">
@@ -513,6 +553,21 @@ export default function FacturasCorreo() {
                             {p?.motivo === "sin_fecha" && f.fecha_emision && generadaDespues(f.fecha_emision, f.recibido_en) && (
                               <div className="basis-full text-[#1d4ed8]">Cierre de mes: dice {F(f.fecha_emision)} y se generó el {F(diaLima(f.recibido_en))}. Puede juntar despachos de varios días: mira cada voucher.</div>
                             )}
+                            {/* Antes de registrar desde la factura: ¿el voucher de esta carga sigue por revisar en
+                                el Radar? Si es así, lo que corresponde es registrarlo allá (trae el odómetro y la
+                                fecha del despacho) y dejar que esta línea se cruce sola. Se dice; no se bloquea. */}
+                            {confirmable && pendRadar && (() => {
+                              const placa = e.placa || l.placa;
+                              const cerca = pendientesCerca({ placa, fecha: e.fecha || despacho }, pendRadar);
+                              return cerca.length > 0 ? (
+                                <div className="basis-full text-amber-800">
+                                  ⚠ En el Radar hay {cerca.length} recarga(s) de {placa} por revisar cerca de esta fecha
+                                  ({cerca.slice(0, 4).map((r) => `${F(r.fecha)}${r.monto != null ? ` · ${S(r.monto)}` : ""}`).join("; ")}{cerca.length > 4 ? "; …" : ""}).
+                                  Si una es esta carga, regístrala allá —trae el odómetro y la fecha del despacho— y esta línea se cruzará sola.{" "}
+                                  <Link href="/radar-ia?tab=combustible" className="text-[#1d4ed8] font-bold hover:underline">Ir a Radar IA →</Link>
+                                </div>
+                              ) : null;
+                            })()}
                             {confirmable && (
                               <div className="basis-full flex flex-wrap items-center gap-2 pt-1">
                                 <select value={e.placa} onChange={(ev) => setElec({ ...elec, [k]: { ...e, placa: ev.target.value } })} className="border rounded px-2 py-1">
