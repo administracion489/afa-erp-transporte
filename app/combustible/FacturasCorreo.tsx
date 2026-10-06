@@ -14,7 +14,10 @@ import {
   type LineaFactura, type PlanLinea, type ResumenHistorico,
 } from "@/lib/combustible/factura-lineas";
 import type { CodigoConexion } from "@/lib/combustible/correo-conexion";
-import { sumarDias, type CargaPorMover, type DecisionDesfase, type ResumenMover } from "@/lib/combustible/desfase-factura";
+import {
+  sumarDias, generadaDespues, diaLima,
+  type CargaPorMover, type DesfaseCuenta as DecisionDeCuenta, type ResumenMover,
+} from "@/lib/combustible/desfase-factura";
 import CorreoFacturas from "./CorreoFacturas";
 
 const S = (n: number | null | undefined) =>
@@ -38,7 +41,7 @@ const ESTADO: Record<string, [string, string]> = {
 };
 
 type Deuda = { id: number; serie: string | null; numero: string | null; fecha_emision: string | null; total: number };
-type DesfaseCuenta = { cuenta_id: number; nombre: string; decision: DecisionDesfase; por_mover: ResumenMover; lista: CargaPorMover[] };
+type DesfaseCuenta = { cuenta_id: number; nombre: string; decision: DecisionDeCuenta; por_mover: ResumenMover; lista: CargaPorMover[] };
 
 async function post(body: Record<string, unknown>): Promise<any> {
   const r = await fetch("/api/combustible/facturas", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify(body) });
@@ -344,9 +347,23 @@ export default function FacturasCorreo() {
             <div className="text-sm text-gray-700">
               <b className={aplica ? "text-[#0b315f]" : "text-gray-600"}>📅 Fecha del despacho · {c.nombre}.</b> {d.detalle}
             </div>
+            {/* Las de VARIAS cargas tienen su propia medición (y solo automática): el desfase que se fija
+                a mano dice cuántos días, no que cada factura consolidada sea de un solo día. */}
+            {d.consolidadas && (
+              <div className={`text-sm ${d.consolidadas.fechar ? "text-[#0b315f]" : "text-gray-600"}`}>
+                <b>Facturas de varias cargas.</b> {d.consolidadas.detalle}
+              </div>
+            )}
+            {!!d.tardias && (
+              <div className="text-xs text-gray-600">
+                {d.tardias} factura(s) se generaron DESPUÉS de su fecha de emisión —el cierre de mes, que COESTI fecha el último día y emite
+                el día 1—: no cuentan en la medición y su fecha no se corre.
+              </div>
+            )}
             <div className="text-xs text-gray-500">
-              La factura no trae la fecha del despacho, solo la de emisión. Solo se corre la fecha de una factura de <b>una</b> línea: la que trae la
-              línea, o la que eliges al confirmar, no se toca. Se cambia en <b>⚙ Avisos</b> de la tarjeta «Saldo de combustible» → Facturas por correo.
+              La factura no trae la fecha del despacho, solo la de emisión. Se corre la fecha que se dedujo de la emisión: la que trae la línea,
+              o la que eliges al confirmar —que queda guardada—, no se toca. Se cambia en <b>⚙ Avisos</b> de la tarjeta «Saldo de combustible» →
+              Facturas por correo.
             </div>
             {r.cargas > 0 && (
               <div className="rounded-lg border p-3 space-y-2" style={{ background: "#eff6ff", borderColor: "#93c5fd" }}>
@@ -462,8 +479,10 @@ export default function FacturasCorreo() {
                         // Lo del historial no es un problema de la línea: es una decisión pendiente.
                         const et2 = !p ? null : p.motivo === "historico" ? { texto: "Del historial", color: "#1d4ed8" } : ETIQUETA_LINEA[p.codigo];
                         const k = `${f.id}:${l.n}`;
-                        // La fecha con que se juzgó la línea: la del despacho si se dedujo de la emisión.
-                        const despacho = p?.desfase ? sumarDias(p.desfase.emision, -p.desfase.dias) : l.fecha;
+                        // La fecha con que se juzgó la línea: la del despacho si se dedujo de la emisión (o, en una
+                        // factura de varias cargas, la de emisión cuando su medición dice «el mismo día»).
+                        const despacho = p?.desfase ? sumarDias(p.desfase.emision, -p.desfase.dias)
+                          : p?.fecha_origen === "consolidada" && f.fecha_emision ? String(f.fecha_emision).slice(0, 10) : l.fecha;
                         const e = elec[k] ?? { placa: l.placa ?? "", fecha: despacho ?? "" };
                         const confirmable = p && (p.codigo === "revisar" || p.codigo === "en_espera") && p.motivo !== "no_cuadra" && p.motivo !== "ambigua" && p.motivo !== "nota_credito";
                         return (
@@ -476,19 +495,24 @@ export default function FacturasCorreo() {
                               ? <span title={`La factura no trae la fecha del despacho: se emitió el ${F(p.desfase.emision)} y el despacho se toma ${p.desfase.dias} día(s) antes.`}>
                                   📅 {F(despacho)} <span className="text-gray-400">(emitida {F(p.desfase.emision)})</span>
                                 </span>
-                              : <span>📅 {l.fecha ? F(l.fecha) : "sin fecha"}</span>}
+                              : <span>📅 {despacho ? F(despacho) : "sin fecha"}</span>}
                             {l.nota_despacho && <span className="font-mono">{l.nota_despacho}</span>}
                             {et2 && <span className="font-bold px-2 py-0.5 rounded-full" style={{ background: et2.color + "1a", color: et2.color }}>{et2.texto}</span>}
                             {p && <div className="basis-full text-gray-600">{p.detalle}{p.codigo === "en_radar_pendiente" && <> <Link href="/radar-ia?tab=combustible" className="text-[#1d4ed8] font-bold hover:underline">Ir a Radar IA →</Link></>}</div>}
                             {/* Una factura de VARIAS líneas no trae fecha para ninguna: el desfase medido sugiere el
                                 día más probable, como TEXTO. No se precarga: una factura que junta despachos
                                 puede traer días distintos, y esa la decide quien la confirma. */}
-                            {p?.motivo === "sin_fecha" && f.fecha_emision && (() => {
+                            {/* Un cierre de mes (generada después de su fecha) no sigue el lote nocturno: ahí la pista
+                                se calla, porque «emisión − 1» sería justamente la fecha equivocada. */}
+                            {p?.motivo === "sin_fecha" && f.fecha_emision && !generadaDespues(f.fecha_emision, f.recibido_en) && (() => {
                               const dec = desf?.find((c) => c.cuenta_id === Number(f.cuenta_id))?.decision;
                               return dec && dec.dias > 0
                                 ? <div className="basis-full text-[#1d4ed8]">Lo más probable: el {F(sumarDias(String(f.fecha_emision).slice(0, 10), -dec.dias))} — la factura se emitió el {F(f.fecha_emision)} y en esta cuenta sale {dec.dias} día(s) después del despacho. Si junta despachos de días distintos, mira cada voucher.</div>
                                 : null;
                             })()}
+                            {p?.motivo === "sin_fecha" && f.fecha_emision && generadaDespues(f.fecha_emision, f.recibido_en) && (
+                              <div className="basis-full text-[#1d4ed8]">Cierre de mes: dice {F(f.fecha_emision)} y se generó el {F(diaLima(f.recibido_en))}. Puede juntar despachos de varios días: mira cada voucher.</div>
+                            )}
                             {confirmable && (
                               <div className="basis-full flex flex-wrap items-center gap-2 pt-1">
                                 <select value={e.placa} onChange={(ev) => setElec({ ...elec, [k]: { ...e, placa: ev.target.value } })} className="border rounded px-2 py-1">

@@ -11,7 +11,7 @@
 // 13/09 (antes del check-in) y se mostró con la hora del 05/10 (cuándo entró al ERP).
 
 import { instanteLectura, capturaDeRecarga, normalizarHoraVoucher, isoHoraVisible, finDiaLimaTs, capturaDeFechaHora, horaLimaHms } from "../lib/odometro-tiempo";
-import { registrarLectura, evaluarLectura, aceptarLectura, corregirHoraLectura } from "../lib/odometro";
+import { registrarLectura, evaluarLectura, aceptarLectura, corregirHoraLectura, juzgarKmDeRecarga, kmFueraDeSuMomento } from "../lib/odometro";
 import { tipoDeRevision } from "../lib/odometro-revision";
 
 let fallos = 0;
@@ -243,6 +243,35 @@ console.log("\n6 · Corregir la HORA antes de aceptar (lo que pidió el dueño c
   const s6 = db6.lecturas_odometro.find((f) => f.id === "s")!;
   chk("Aceptar SIN hora sigue como antes: se reubica antes de las 17:53",
     s6.estado === "aceptada" && new Date(s6.capturado_en).getTime() < new Date("2026-09-13T17:53:00-05:00").getTime());
+}
+
+console.log("\n9 · El «KM menor» del Radar: contra las lecturas de la fecha del voucher, no contra el km de HOY");
+{
+  // Lo reportado: «muchas dan KM MENOR AL ACTUAL, y es correcto: revisamos los vouchers días después
+  // y el km ya avanzó». El voucher del 13/09 08:01 (29,647 km) contra el vigente de HOY (31,265).
+  const db = () => ({ vehiculos: [{ id: 7, kilometraje_actual: 31265 }], lecturas_odometro: historial() as Fila[] });
+  const viejo = (km: number, vigente: number) => km < vigente; // la regla de antes (lib/radar/acciones.ts)
+  chk("REGRESIÓN: la regla vieja acusaba al voucher del 13/09 porque HOY la unidad tiene 31,265", viejo(29647, 31265));
+  const j = await juzgarKmDeRecarga(clienteFalso(db()), { vehiculo_id: 7, km: 29647, fecha: "2026-09-13", hora: "08:01:57" });
+  chk("con las lecturas de SU fecha (entre 29,612 de las 05:25 y 29,790 de las 21:05) cuadra: sin aviso", j === null, j ?? "");
+  const sinHora = await juzgarKmDeRecarga(clienteFalso(db()), { vehiculo_id: 7, km: 29647, fecha: "2026-09-13" });
+  chk("sin hora (solo fecha) también cuadra: se ubica en el hueco del día", sinHora === null, sinHora ?? "");
+  const retro = await juzgarKmDeRecarga(clienteFalso(db()), { vehiculo_id: 7, km: 29500, fecha: "2026-09-13", hora: "08:01:57" });
+  chk("un retroceso DE VERDAD frente a la lectura anterior a su hora sí se acusa, y la nombra",
+    !!retro && /ANTERIOR/.test(retro) && /05:25/.test(retro) && /112/.test(retro), retro ?? "");
+  const mayor = await juzgarKmDeRecarga(clienteFalso(db()), { vehiculo_id: 7, km: 29900, fecha: "2026-09-13", hora: "08:01:57" });
+  chk("mayor que la lectura POSTERIOR a su hora también (el odómetro no baja después)", !!mayor && /POSTERIOR/.test(mayor) && /21:05/.test(mayor), mayor ?? "");
+  const ruido = await juzgarKmDeRecarga(clienteFalso(db()), { vehiculo_id: 7, km: 29600, fecha: "2026-09-13", hora: "08:01:57" });
+  chk("12 km menos que la de las 05:25 es ruido de lectura (tolerancia de evaluarLectura): no frena la carga", ruido === null, ruido ?? "");
+  const vacia = await juzgarKmDeRecarga(clienteFalso({ vehiculos: [{ id: 7, kilometraje_actual: 31265 }], lecturas_odometro: [] }),
+    { vehiculo_id: 7, km: 29647, fecha: "2026-09-13", hora: "08:01:57" });
+  chk("sin ninguna lectura con qué comparar, cae al vigente y lo DICE", !!vacia && /no hay lecturas de esa fecha/.test(vacia), vacia ?? "");
+  chk("sin datos no acusa", (await juzgarKmDeRecarga(clienteFalso(db()), { vehiculo_id: 7, km: 0, fecha: "2026-09-13" })) === null);
+  // El juicio puro, directo.
+  const t = (h: string) => new Date(`2026-09-13T${h}-05:00`).getTime();
+  chk("puro: entre la anterior y la posterior, nada", kmFueraDeSuMomento(29647, { kmVigente: 31265, anterior: { km: 29612, ts: t("05:25:00") }, posterior: { km: 29790, ts: t("21:05:00") } }) === null);
+  chk("puro: la más antigua de la serie (solo posterior, y menor que ella) no se acusa",
+    kmFueraDeSuMomento(29000, { kmVigente: 31265, anterior: null, posterior: { km: 29612, ts: t("05:25:00") } }) === null);
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde");

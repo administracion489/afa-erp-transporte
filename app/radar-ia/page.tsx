@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
-import { aceptarLectura, registrarLectura } from "@/lib/odometro";
+import { aceptarLectura, registrarLectura, juzgarKmDeRecarga } from "@/lib/odometro";
 import { revisarKmTecleado } from "@/lib/odometro-seleccion";
 import { capturaDeRecarga } from "@/lib/odometro-tiempo";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
@@ -31,6 +31,8 @@ import { fotosDeLectura, type FotoLeida } from "@/lib/radar/fotos-lectura";
 import { proponerTanqueLleno } from "@/lib/radar/tanque-lleno";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 import ReprocesoFallidos from "./ReprocesoFallidos";
+import FusionFactura, { aCargaDeFactura } from "./FusionFactura";
+import { planDeFusion } from "@/lib/radar/fusion-factura";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -121,11 +123,17 @@ const SEVERIDAD_CFG: Record<SeveridadAlerta, { label: string; color: string; bg:
   info:     { label: "Info",     color: "#1262bd", bg: "#E8F1FB" },
 };
 
+/** La etiqueta de una anomalía. El «KM menor» viejo (sin `por_fecha`) se comparó con el km de HOY. */
+const etiquetaAnomalia = (a: { codigo: string; por_fecha?: boolean }) =>
+  a.codigo === "km_menor_al_actual" && !a.por_fecha ? "KM menor al de HOY" : ANOMALIA_LABEL[a.codigo] ?? a.codigo;
+
 const ANOMALIA_LABEL: Record<string, string> = {
   galones_exceden_tanque: "Galones exceden tanque",
   posible_duplicado:      "Posible duplicado",
   precio_fuera_de_rango:  "Precio fuera de rango",
-  km_menor_al_actual:     "KM menor al actual",
+  // Ya no compara con el km de HOY sino con las lecturas de la fecha del voucher (lib/odometro.ts →
+  // juzgarKmDeRecarga). Las filas viejas sin `por_fecha` se re-juzgan desde la pestaña.
+  km_menor_al_actual:     "KM no cuadra con su fecha",
   consumo_excesivo:       "Consumo excesivo",
   rendimiento_implausible: "Falta registrar una carga",
   recarga_madrugada:      "Recarga de madrugada",
@@ -721,13 +729,19 @@ export type OverrideComb = {
   tanqueFuente: "operador" | "ia_aguja" | null;
 };
 
-function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar }: {
+function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar, fusionando, onFusionar, rejuzgandoKm, onRejuzgarKm }: {
   registros: RadarCombustible[];
   vehiculosGuia: VehiculoGuiaOdometro[];
   mensajesPorId: Record<string, RadarMensaje>;
   registrando: string | null;
   onRegistrar: (c: RadarCombustible, ov: OverrideComb) => void;
   onDescartar: (id: string) => void;
+  /** Fusionar el voucher con la carga que ya registró la factura (lib/radar/fusion-factura.ts). */
+  fusionando: string | null;
+  onFusionar: (c: RadarCombustible, ov: OverrideComb, cargaId: number) => void;
+  /** Volver a juzgar el «KM menor» viejo (contra el km de HOY) con las lecturas de su fecha. */
+  rejuzgandoKm: boolean;
+  onRejuzgarKm: () => void;
 }) {
   const [expandido, setExpandido] = useState<string | null>(null);
   const [edic, setEdic] = useState<Record<string, EdicionComb>>({});
@@ -782,7 +796,32 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
   const setCampo = (c: RadarCombustible, campo: keyof EdicionComb, valor: string) =>
     setEdic((prev) => ({ ...prev, [c.id]: { ...edicionDe(c), [campo]: valor } }));
 
+  // «KM menor» calculado contra el km de HOY (filas de antes del arreglo): un voucher que se revisa
+  // días después SIEMPRE tiene menos km que la unidad hoy, y eso no es un error.
+  const kmViejos = registros.filter((c) => c.estado === "pendiente_revision" &&
+    (c.anomalias ?? []).some((a) => a.codigo === "km_menor_al_actual" && !a.por_fecha)).length;
+
   return (
+    <>
+    {kmViejos > 0 && (
+      <div className="rounded-2xl border border-[#F2C94C] bg-[#FFF8E1] p-4 mb-3">
+        <p className="text-sm font-black text-[#7a5a00]">
+          ⚠ {kmViejos} recarga(s) por revisar dicen «KM menor» comparando el km del voucher con el de HOY.
+        </p>
+        <p className="text-xs text-[#7a5a00] mt-1">
+          Un voucher que se revisa días después siempre tiene menos km que la unidad hoy: eso no es un error. Se juzgan otra vez
+          contra las lecturas del odómetro de SU fecha —la anterior y la posterior a la hora del voucher—: las que cuadran pierden
+          el aviso y las que no lo conservan con el motivo nuevo. No se registra nada: siguen en revisión.
+        </p>
+        <button
+          onClick={onRejuzgarKm}
+          disabled={rejuzgandoKm}
+          className="mt-3 px-4 py-2 rounded-xl text-sm font-black bg-[#0b315f] text-white hover:bg-[#1262bd] disabled:opacity-60"
+        >
+          {rejuzgandoKm ? "Juzgando…" : `Volver a juzgar las ${kmViejos} con la fecha del voucher`}
+        </button>
+      </div>
+    )}
     <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -837,6 +876,23 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const tanqueMarcado = ed.tanqueLleno === "" ? (propTanque.porDefecto ?? true) : ed.tanqueLleno === "si";
               const tanqueFuente: "operador" | "ia_aguja" | null =
                 ed.tanqueLleno !== "" ? "operador" : propTanque.fuente;
+              // Lo que la persona confirmó en el formulario: lo usan «Registrar» y «Fusionar».
+              const ovActual: OverrideComb = {
+                tipo: (ed.vehiculo.split(":")[0] as "propio" | "tercero"),
+                vehiculoId: Number(ed.vehiculo.split(":")[1]),
+                fecha: ed.fecha || null,
+                grifo: ed.grifo.trim() || null,
+                tipoCombustible: ed.tipoCombustible,
+                cantidad: cantEd,
+                esLitros,
+                precio: precioEd,
+                monto: montoEd,
+                kilometraje: kmEd,
+                // `null` cuando nadie lo afirmó y no hay aguja: la columna se
+                // queda en null, que ANCLA por la política. Igual que hoy.
+                tanqueLleno: tanqueFuente === null ? null : tanqueMarcado,
+                tanqueFuente,
+              };
               return (
                 <FragmentoFilaCombustible key={c.id}>
                   <tr
@@ -875,7 +931,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                             }`}
                             title={a.detalle}
                           >
-                            {ANOMALIA_LABEL[a.codigo] ?? a.codigo}
+                            {etiquetaAnomalia(a)}
                           </span>
                         ))}
                         {(c.anomalias ?? []).length === 0 && <span className="text-xs text-gray-300">—</span>}
@@ -926,7 +982,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                               {(c.anomalias ?? []).map((a, i) => (
                                 <li key={i} className="text-xs leading-relaxed text-[#6b5310]">
                                   <span className={`font-black ${ANOMALIA_ES_ARREGLO(a.codigo) ? "text-[#2E7D32]" : "text-[#B07A0F]"}`}>
-                                    {ANOMALIA_ES_ARREGLO(a.codigo) ? "✓ " : "• "}{ANOMALIA_LABEL[a.codigo] ?? a.codigo}:
+                                    {ANOMALIA_ES_ARREGLO(a.codigo) ? "✓ " : "• "}{etiquetaAnomalia(a)}:
                                   </span>{" "}
                                   {a.detalle}
                                 </li>
@@ -1039,27 +1095,28 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           </label>
                         </div>
 
+                        {/* «Posible duplicado» porque ya entró DESDE LA FACTURA: se fusiona en vez de descartar
+                            (lib/radar/fusion-factura.ts). Juzga con lo que la persona corrigió arriba. */}
+                        {(c.anomalias ?? []).some((a) => a.codigo === "posible_duplicado") && (
+                          <FusionFactura
+                            c={c}
+                            unidad={ed.vehiculo ? { tipo: ed.vehiculo.split(":")[0] as "propio" | "tercero", id: Number(ed.vehiculo.split(":")[1]) } : null}
+                            voucher={{
+                              fecha: ed.fecha || c.fecha, kilometraje: kmEd, conductor: c.conductor, grifo: ed.grifo.trim() || c.grifo,
+                              comprobante: c.comprobante, cantidad: cantEd, monto: montoEd,
+                              tanqueLleno: tanqueFuente === null ? null : tanqueMarcado, tanqueFuente,
+                            }}
+                            ocupado={fusionando === c.id || registrando === c.id || !ed.vehiculo}
+                            onFusionar={(cargaId) => onFusionar(c, ovActual, cargaId)}
+                          />
+                        )}
+
                         <div className="flex flex-wrap items-center gap-3 mt-3">
                           {c.conductor && <p className="text-xs text-gray-500 font-semibold">Conductor: <span className="font-bold text-gray-700">{c.conductor}</span></p>}
                           {c.comprobante && <p className="text-xs text-gray-500 font-semibold">Comprobante: <span className="font-mono">{c.comprobante}</span></p>}
                           <div className="flex items-center gap-2 ml-auto">
                             <button
-                              onClick={() => onRegistrar(c, {
-                                tipo: (ed.vehiculo.split(":")[0] as "propio" | "tercero"),
-                                vehiculoId: Number(ed.vehiculo.split(":")[1]),
-                                fecha: ed.fecha || null,
-                                grifo: ed.grifo.trim() || null,
-                                tipoCombustible: ed.tipoCombustible,
-                                cantidad: cantEd,
-                                esLitros,
-                                precio: precioEd,
-                                monto: montoEd,
-                                kilometraje: kmEd,
-                                // `null` cuando nadie lo afirmó y no hay aguja: la columna se
-                                // queda en null, que ANCLA por la política. Igual que hoy.
-                                tanqueLleno: tanqueFuente === null ? null : tanqueMarcado,
-                                tanqueFuente,
-                              })}
+                              onClick={() => onRegistrar(c, ovActual)}
                               disabled={!puedeRegistrar || registrando === c.id}
                               className="px-3 py-2 rounded-xl text-xs font-bold bg-[#0b315f] text-white hover:bg-[#1262bd] transition-colors disabled:opacity-40"
                             >
@@ -1089,6 +1146,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
         </table>
       </div>
     </section>
+    </>
   );
 }
 
@@ -2138,6 +2196,8 @@ export default function RadarIAPage() {
   const [reprocesando, setReprocesando] = useState<string | null>(null);
   const [creandoCot, setCreandoCot] = useState<string | null>(null);
   const [registrandoComb, setRegistrandoComb] = useState<string | null>(null);
+  const [fusionandoComb, setFusionandoComb] = useState<string | null>(null);
+  const [rejuzgandoKm, setRejuzgandoKm] = useState(false);
   const [guardandoConfig, setGuardandoConfig] = useState(false);
   const [solicitandoQr, setSolicitandoQr] = useState(false);
   const [sincronizandoGrupos, setSincronizandoGrupos] = useState(false);
@@ -2531,6 +2591,149 @@ export default function RadarIAPage() {
     if (error) console.warn("radar-ia: no se pudieron guardar las correcciones de combustible", error);
   }
 
+  /**
+   * El odómetro de una recarga revisada (o fusionada con su factura), por `registrarLectura`.
+   * Devuelve la nota para el aviso ("" si quedó aceptada). Nunca lanza: la carga —el gasto— ya
+   * está escrita cuando esto corre.
+   */
+  async function registrarOdometroDeRecarga(
+    c: RadarCombustible, ov: OverrideComb, fechaCarga: string, fotoUrl: string | null, msg: RadarMensaje | null,
+  ): Promise<string> {
+    if (ov.kilometraje == null || ov.kilometraje <= 0) return "";
+    try {
+      // La hora IMPRESA en el voucher manda (es la del despacho, cuando el grifero teclea el
+      // km); la del mensaje solo sirve de tope y solo si es del mismo día que la recarga.
+      // Antes iba solo `msg?.ts_mensaje`, y sin el mensaje cargado la lectura quedaba a las
+      // 00:00 de su fecha: antes del check-in de ese día y «incoherente» con él (CTV-370).
+      const cap = capturaDeRecarga({ fecha: fechaCarga, hora: c.hora, tsMensaje: msg?.ts_mensaje ?? null });
+      const r = await registrarLectura(supabase, {
+        vehiculo_id: ov.vehiculoId,
+        flota: ov.tipo === "tercero" ? "tercero" : "propia",
+        km: ov.kilometraje,
+        fuente: "combustible",
+        fecha: fechaCarga,
+        foto_url: fotoUrl,
+        ref_origen: "radar_ia",
+        capturado_en: cap.capturado_en,
+        horaEsTope: cap.horaEsTope,
+        // Por FILA del Radar, nunca por mensaje: una ráfaga con dos vouchers deja dos filas
+        // con el MISMO mensaje_id (insertarRecargasAdicionales), y una clave compartida
+        // haría que la segunda lectura se dedujera "ya registrada" y se perdiera entera.
+        idemKey: `radar_odo_comb_rev:${c.id}`,
+      });
+      if (!r.ok) return ` · el odómetro no se pudo registrar (${r.error ?? r.motivo ?? "error"})`;
+      // Dedupe: NO se escribió nada nuevo. Decirlo importa — con dos vouchers de la misma
+      // unidad en una ráfaga comparten la foto del cluster, y sin este aviso la pantalla
+      // diría "registrado" sobre un número que no quedó guardado en ninguna parte.
+      if (r.duplicada) return " · el odómetro NO se guardó: esa lectura ya estaba en el historial";
+      if (r.estado !== "aceptada") return ` · odómetro por revisar: ${r.motivo ?? r.estado}`;
+      return "";
+    } catch (e) {
+      console.warn("radar-ia: no se pudo registrar la lectura de odómetro", e);
+      return " · el odómetro no se pudo registrar";
+    }
+  }
+
+  /**
+   * FUSIONAR el voucher con la carga que ya registró la FACTURA (lib/radar/fusion-factura.ts): la
+   * carga toma del voucher la fecha del despacho, el odómetro, el conductor y la nota; los galones,
+   * el precio y el importe siguen siendo los de la factura. No se crea ninguna carga. El plan se
+   * rehace con la carga RECIÉN leída (no con la que tenía la pantalla), y el UPDATE exige que siga
+   * con la fecha que se leyó: si alguien la cambió mientras tanto, esa persona decidió.
+   */
+  async function fusionarConFactura(c: RadarCombustible, ov: OverrideComb, cargaId: number) {
+    setFusionandoComb(c.id);
+    try {
+      const { data: fila, error } = await supabase.from("combustible").select("*").eq("id", cargaId).maybeSingle();
+      if (error) throw error;
+      if (!fila) throw new Error(`la carga #${cargaId} ya no existe`);
+      const carga = aCargaDeFactura(fila as Record<string, unknown>);
+      const plan = planDeFusion(carga, {
+        fecha: ov.fecha ?? c.fecha, kilometraje: ov.kilometraje, conductor: c.conductor, grifo: ov.grifo ?? c.grifo,
+        comprobante: c.comprobante, cantidad: ov.cantidad, monto: ov.monto, tanqueLleno: ov.tanqueLleno, tanqueFuente: ov.tanqueFuente,
+      });
+      if (!plan.puede) { showToast(plan.detalle, false); return; }
+      const ok = window.confirm(
+        `Fusionar este voucher con la carga #${cargaId}, que entró desde la factura del correo.\n\n` +
+        (plan.cambios.length ? plan.cambios.map((x) => `• ${x.campo}: ${x.de} → ${x.a}`).join("\n") : "• Solo se enlaza el voucher a la carga.") +
+        `\n\nLos galones, el precio y el importe quedan los de la factura. No se crea ninguna carga nueva.` +
+        (plan.avisos.length ? `\n\n⚠ ${plan.avisos.join("\n⚠ ")}` : "") + `\n\n¿Seguir?`
+      );
+      if (!ok) return;
+      const msg = c.mensaje_id ? mensajesPorId[c.mensaje_id] ?? null : null;
+      const fotoUrl = (c.fotos?.[0]?.url) ?? msg?.media_url ?? null;
+      await guardarCorreccionesCombustible(c, ov, fotoUrl);
+      if (Object.keys(plan.patch).length) {
+        const { data: upd, error: eUpd } = await supabase.from("combustible")
+          .update(plan.patch).eq("id", cargaId).eq("fecha", carga.fecha).select("id");
+        if (eUpd) throw eUpd;
+        if (!((upd as unknown[]) ?? []).length) throw new Error(`la carga #${cargaId} cambió mientras tanto: vuelve a abrir la fila`);
+      }
+      // Columna de una migración accesoria (combustible-01): best-effort, como al registrar.
+      if (plan.patchTanque) await supabase.from("combustible").update(plan.patchTanque).eq("id", cargaId);
+      await supabase
+        .from("radar_combustible")
+        .update({
+          estado: "registrado",
+          combustible_id: cargaId,
+          vehiculo_id: ov.tipo === "propio" ? ov.vehiculoId : null,
+          vehiculo_tercero_id: ov.tipo === "tercero" ? ov.vehiculoId : null,
+        })
+        .eq("id", c.id);
+      const fechaFinal = String(plan.patch.fecha ?? carga.fecha);
+      const notaOdo = plan.patch.kilometraje != null ? await registrarOdometroDeRecarga(c, ov, fechaFinal, fotoUrl, msg) : "";
+      showToast(`Fusionada con la carga #${cargaId}: ${plan.cambios.map((x) => x.campo.toLowerCase()).join(", ") || "enlazada"}${notaOdo}`, !notaOdo);
+      cargar();
+    } catch (e) {
+      const motivo = (e as { message?: string } | null)?.message;
+      showToast(`No se pudo fusionar${motivo ? `: ${motivo}` : ""}`, false);
+    } finally {
+      setFusionandoComb(null);
+    }
+  }
+
+  /**
+   * Las recargas por revisar cuyo «KM menor» se calculó contra el km de HOY (filas de antes de
+   * `por_fecha`) se juzgan otra vez contra las lecturas de SU fecha (lib/odometro.ts →
+   * juzgarKmDeRecarga, la misma regla del Radar). Las que cuadran pierden el aviso; las que no, lo
+   * conservan con el motivo nuevo. No registra nada: quedan en revisión.
+   */
+  async function rejuzgarKmCombustible() {
+    const viejas = combustibles.filter((c) => c.estado === "pendiente_revision" &&
+      (c.anomalias ?? []).some((a) => a.codigo === "km_menor_al_actual" && !a.por_fecha));
+    if (!viejas.length) return;
+    setRejuzgandoKm(true);
+    let quitadas = 0, siguen = 0, sinDatos = 0;
+    try {
+      for (const c of viejas) {
+        const unidad = c.vehiculo_id != null ? { id: c.vehiculo_id, flota: "propia" as const }
+          : c.vehiculo_tercero_id != null ? { id: c.vehiculo_tercero_id, flota: "tercero" as const } : null;
+        const msg = c.mensaje_id ? mensajesPorId[c.mensaje_id] ?? null : null;
+        if (!unidad || !c.fecha || !(Number(c.kilometraje) > 0)) { sinDatos++; continue; }
+        const fuera = await juzgarKmDeRecarga(supabase, {
+          vehiculo_id: unidad.id, flota: unidad.flota, km: Number(c.kilometraje), fecha: c.fecha, hora: c.hora, tsMensaje: msg?.ts_mensaje ?? null,
+        });
+        const anomalias = (c.anomalias ?? []).flatMap((a) =>
+          a.codigo !== "km_menor_al_actual" || a.por_fecha ? [a] : fuera ? [{ ...a, detalle: fuera, por_fecha: true }] : []);
+        const { error } = await supabase.from("radar_combustible").update({ anomalias }).eq("id", c.id);
+        if (error) throw error;
+        if (fuera) siguen++; else quitadas++;
+      }
+      showToast(
+        `KM juzgado contra su fecha: ${quitadas} cuadraban (se quitó el aviso)` +
+        (siguen ? ` · ${siguen} siguen sin cuadrar (motivo nuevo en la fila)` : "") +
+        (sinDatos ? ` · ${sinDatos} sin unidad, fecha o km para juzgar` : ""),
+      );
+      cargar();
+    } catch (e) {
+      const motivo = (e as { message?: string } | null)?.message;
+      showToast(`Se detuvo al volver a juzgar el km${motivo ? `: ${motivo}` : ""}`, false);
+      cargar();
+    } finally {
+      setRejuzgandoKm(false);
+    }
+  }
+
   async function registrarCombustible(c: RadarCombustible, ov: OverrideComb) {
     if (!ov.vehiculoId || !ov.cantidad) {
       showToast("Faltan datos para registrar la recarga", false);
@@ -2609,41 +2812,7 @@ export default function RadarIAPage() {
       // miró— dejaba su kilometraje solo dentro de la carga, así que no llegaba a
       // lecturas_odometro ni al km vigente de la unidad, y no salía en /mantenimiento.
       // El anti-retroceso decide el estado; acá no se fuerza nada, se REPORTA el veredicto.
-      let notaOdo = "";
-      if (ov.kilometraje != null && ov.kilometraje > 0) {
-        try {
-          // La hora IMPRESA en el voucher manda (es la del despacho, cuando el grifero teclea el
-          // km); la del mensaje solo sirve de tope y solo si es del mismo día que la recarga.
-          // Antes iba solo `msg?.ts_mensaje`, y sin el mensaje cargado la lectura quedaba a las
-          // 00:00 de su fecha: antes del check-in de ese día y «incoherente» con él (CTV-370).
-          const cap = capturaDeRecarga({ fecha: fechaCarga, hora: c.hora, tsMensaje: msg?.ts_mensaje ?? null });
-          const r = await registrarLectura(supabase, {
-            vehiculo_id: ov.vehiculoId,
-            flota: ov.tipo === "tercero" ? "tercero" : "propia",
-            km: ov.kilometraje,
-            fuente: "combustible",
-            fecha: fechaCarga,
-            foto_url: fotoUrl,
-            ref_origen: "radar_ia",
-            capturado_en: cap.capturado_en,
-            horaEsTope: cap.horaEsTope,
-            // Por FILA del Radar, nunca por mensaje: una ráfaga con dos vouchers deja dos filas
-            // con el MISMO mensaje_id (insertarRecargasAdicionales), y una clave compartida
-            // haría que la segunda lectura se dedujera "ya registrada" y se perdiera entera.
-            idemKey: `radar_odo_comb_rev:${c.id}`,
-          });
-          if (!r.ok) notaOdo = ` · el odómetro no se pudo registrar (${r.error ?? r.motivo ?? "error"})`;
-          // Dedupe: NO se escribió nada nuevo. Decirlo importa — con dos vouchers de la misma
-          // unidad en una ráfaga comparten la foto del cluster, y sin este aviso la pantalla
-          // diría "registrado" sobre un número que no quedó guardado en ninguna parte.
-          else if (r.duplicada) notaOdo = " · el odómetro NO se guardó: esa lectura ya estaba en el historial";
-          else if (r.estado !== "aceptada") notaOdo = ` · odómetro por revisar: ${r.motivo ?? r.estado}`;
-        } catch (e) {
-          // Nunca tumba el registro: la carga —el gasto— ya está escrita.
-          console.warn("radar-ia: no se pudo registrar la lectura de odómetro", e);
-          notaOdo = " · el odómetro no se pudo registrar";
-        }
-      }
+      const notaOdo = await registrarOdometroDeRecarga(c, ov, fechaCarga, fotoUrl, msg);
 
       showToast(`Recarga registrada en Combustible${notaOdo}`, !notaOdo);
       cargar();
@@ -3026,6 +3195,10 @@ export default function RadarIAPage() {
                 registrando={registrandoComb}
                 onRegistrar={registrarCombustible}
                 onDescartar={descartarCombustible}
+                fusionando={fusionandoComb}
+                onFusionar={fusionarConFactura}
+                rejuzgandoKm={rejuzgandoKm}
+                onRejuzgarKm={rejuzgarKmCombustible}
               />
             )}
             {tab === "odometro" && (

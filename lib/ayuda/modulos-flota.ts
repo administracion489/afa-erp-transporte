@@ -216,7 +216,15 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
           "Ahora el ERP **mide** ese desfase: compara las recargas que el **Radar** leyó del voucher —con la fecha impresa en el papel— con la factura que les tocó. En la pestaña **📧 Facturas**, el bloque **📅 Fecha del despacho** dice qué midió y con cuántas (por ejemplo, «37 se facturaron al día siguiente, 3 el mismo día»). Si el patrón es claro (al menos 8 recargas y 8 de cada 10 iguales), la carga se registra con la fecha del despacho; si no, con la de emisión, y lo dice.\n\n" +
           "• **Solo se corre la fecha que se dedujo de la emisión** (una factura de una sola línea). Si la línea trae su fecha, o la eliges tú al confirmar, no se toca.\n\n" +
           "• **Lo puedes fijar a mano** en **⚙ Avisos** de la tarjeta «Saldo de combustible» → Facturas por correo: automático, la fecha de emisión, o 1, 2 o 3 días antes.\n\n" +
-          "• **Las cargas que ya se registraron con la fecha de emisión** aparecen en ese mismo bloque con el botón **Moverlas a la fecha del despacho**. Antes de mover te dice cuántas son, por cuánto y **cuántas pasan al mes anterior**, porque eso cambia el gasto de ese mes en Finanzas. Una que alguien ya cambió de fecha no se toca.",
+          "• **Las cargas que ya se registraron con la fecha de emisión** aparecen en ese mismo bloque con el botón **Moverlas a la fecha del despacho**. Antes de mover te dice cuántas son, por cuánto y **cuántas pasan al mes anterior**, porque eso cambia el gasto de ese mes en Finanzas. Una que alguien ya cambió de fecha no se toca.\n\n" +
+          "• **Las facturas de varias cargas** (COESTI junta en una factura lo despachado en un día) tienen su propia medición: si el ERP comprueba con el Radar que cada una junta un solo día, sus líneas también se fechan solas y se cruzan con lo que el Radar ya registró. Si no, las confirmas tú, y lo que eliges **queda guardado**.\n\n" +
+          "• **El cierre de mes no se corre**: COESTI fecha el último día del mes una factura que genera el día 1 (por ejemplo, dice 30/09 y llegó el 01/10). Esa no sale en el lote de la madrugada, así que el ERP no le resta días.",
+      },
+      {
+        pregunta: "El Radar dice que una recarga «ya entró desde la factura». ¿La descarto?",
+        respuesta:
+          "**No: fusiónala.** Es la misma carga entrada por las dos puertas, y cada una sabe algo que la otra no. La factura es el comprobante legal (galones, precio e importe); el voucher trae la **fecha del despacho**, el **odómetro**, el conductor y la nota.\n\n" +
+          "Al abrir la fila en **Radar IA → Combustible** aparece **🔗 Fusionar con la carga #N**, con la lista de lo que va a cambiar (por ejemplo, la fecha del 23/09 al 22/09 y el odómetro). No se crea ninguna carga nueva ni cambia la plata: la carga de la factura solo toma lo que le faltaba. Si la carga la registró el Radar o una persona, ahí sí es un duplicado y lo correcto es descartar.",
       },
       {
         pregunta: "¿Por qué las facturas de Primax no aparecen como deuda en Tesorería?",

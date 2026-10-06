@@ -32,9 +32,27 @@
 // LOS UMBRALES NO ESTÁN MEDIDOS Y SE DECLARAN (MIN_MUESTRAS_DESFASE, MIN_ACUERDO_DESFASE,
 // MAX_DESFASE). El lado seguro es SUBIRLOS: más altos, el ERP simplemente deja la fecha de
 // emisión, que es lo que hacía siempre.
+//
+// LO QUE MOSTRARON LAS 35 FACTURAS DE COESTI DEL 23/07 AL 04/10, una por una con su constancia
+// de SUNAT (la CDR que viene en el mismo correo):
+//   • 32 se generaron la MISMA madrugada de su fecha de emisión (casi todas entre 03:16 y 05:27):
+//     un lote nocturno que factura lo despachado el día anterior. De ahí el «1 día después».
+//   • 3 llevan la fecha del ÚLTIMO día del mes (31/07, 31/08, 30/09) y se generaron el día 1 del
+//     mes siguiente: el cierre de mes las fecha hacia atrás, y pueden juntar varios días. Una
+//     factura así (`generadaDespues`: su correo llegó un día POSTERIOR a su fecha) no vota en la
+//     medición y su fecha NO se corre: el desfase del lote nocturno no la describe.
+//   • 10 traen 2 o 3 cargas (CONSOLIDADAS) y ninguna línea trae su fecha. Antes quedaban todas en
+//     «revisar · sin fecha»; ahora se fechan solas cuando su PROPIA medición dice que cada factura
+//     junta UN solo día (`decidirConsolidadas`). Si no, se confirman a mano, como antes.
+//
+// LA MEDICIÓN ES UN CRUCE INDEPENDIENTE (`muestrasDesfase`): cada línea de factura contra los
+// vouchers que leyó el Radar —misma placa, mismo importe, de MAX_DESFASE días antes de la emisión
+// al día siguiente—, y solo cuenta el cruce ÚNICO. Antes se medía sobre los enlaces que dejó la
+// conciliación, que buscaba ±1 día alrededor de la emisión: un desfase de 2 no podía aparecer
+// nunca, y las consolidadas, que no tenían fecha con qué buscar, no daban ninguna muestra.
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { MARCA_CARGA_DE_FACTURA } from "@/lib/combustible/factura-lineas";
+import { MARCA_CARGA_DE_FACTURA, TOLERANCIA_CANTIDAD, TOLERANCIA_MONTO, normPlaca, esCargaFusionada } from "@/lib/combustible/factura-lineas";
 
 /** Más de esto no es un desfase de facturación: es otra carga. No medido, declarado. */
 export const MAX_DESFASE = 3;
@@ -43,8 +61,12 @@ export const MIN_MUESTRAS_DESFASE = 8;
 /** Parte de las muestras que tiene que reunir el desfase dominante. No medido, declarado. */
 export const MIN_ACUERDO_DESFASE = 0.8;
 
-/** De dónde salió la fecha de una línea de factura. */
-export type OrigenFecha = "linea" | "emision" | "manual";
+/**
+ * De dónde salió la fecha de una línea de factura. `consolidada` es la que se deduce para una línea
+ * de una factura de VARIAS cargas (decidirConsolidadas): se distingue de `emision` porque la mueve
+ * otra medición, y «Moverlas a la fecha del despacho» (cargasPorMover) solo corrige las `emision`.
+ */
+export type OrigenFecha = "linea" | "emision" | "manual" | "consolidada";
 
 /**
  * ¿La registró el RADAR? Las dos puertas del Radar firman igual («Radar IA · grupo · remitente» en
@@ -82,8 +104,95 @@ export function origenFechaLinea(
   lineasDeCombustible: number
 ): OrigenFecha | null {
   if (!l.fecha) return null;
-  if (l.fecha_origen === "linea" || l.fecha_origen === "emision" || l.fecha_origen === "manual") return l.fecha_origen;
+  if (l.fecha_origen === "linea" || l.fecha_origen === "emision" || l.fecha_origen === "manual" || l.fecha_origen === "consolidada") return l.fecha_origen;
   return lineasDeCombustible === 1 && !!fechaEmision && l.fecha === fechaEmision ? "emision" : "linea";
+}
+
+/** El día (Lima, UTC−5) de un instante ISO. */
+export function diaLima(iso: string | null | undefined): string | null {
+  const t = Date.parse(String(iso ?? ""));
+  return Number.isFinite(t) ? new Date(t - 5 * 3600_000).toISOString().slice(0, 10) : null;
+}
+
+/**
+ * ¿La factura se generó DESPUÉS de su propia fecha? Su correo llegó un día (Lima) posterior a la
+ * fecha de emisión. Es el cierre de mes de COESTI: F882-0130996 dice 30/09 y SUNAT la recibió el
+ * 01/10 a las 16:47 (lo mismo el 31/07 y el 31/08). Una factura así no es del lote nocturno: no
+ * vota en la medición, su fecha no se corre y, si junta varias cargas, no se fecha sola —puede
+ * juntar varios días—. Un correo que llega tarde por otra razón cae del mismo lado: la fecha de
+ * emisión, que es lo que el ERP hacía siempre. Sin dato, no se afirma nada (false).
+ */
+export function generadaDespues(fechaEmision: string | null | undefined, recibidoEn: string | null | undefined): boolean {
+  const dia = diaLima(recibidoEn);
+  return !!fechaEmision && !!dia && dia > String(fechaEmision).slice(0, 10);
+}
+
+// ── 0) El cruce: cada línea de factura contra los vouchers del Radar ─────────
+
+/** Un despacho que leyó el RADAR: su fecha es la impresa en el voucher. */
+export type VoucherRadar = { placa: string | null; fecha: string | null; total: number | null; cantidad?: number | null };
+
+export type FacturaParaMedir = {
+  fecha_emision: string | null;
+  recibido_en?: string | null;
+  lineas: {
+    n: number; placa?: string | null; total?: number | null; cantidad?: number | null;
+    tipo_combustible?: string | null; fecha?: string | null; fecha_origen?: OrigenFecha | null;
+  }[];
+};
+
+export type MuestrasDesfase = {
+  /** Diferencias emisión − despacho de las facturas de UNA línea de combustible. */
+  una: number[];
+  /** Las de las facturas de VARIAS (consolidadas). */
+  consolidada: number[];
+  /** Facturas que no votan por generarse después de su fecha (cierre de mes). */
+  tardias: number;
+};
+
+/**
+ * Las muestras del desfase. Una línea (con placa e importe, y sin fecha propia: el desfase es para
+ * las que no la traen) cuenta solo si casa con UN voucher del Radar —misma placa, importe a menos de
+ * TOLERANCIA_MONTO, fecha de emisión − MAX_DESFASE a emisión + 1—; con dos, desempata la cantidad, y
+ * si sigue habiendo dos no cuenta. Un voucher que casa con dos líneas tampoco cuenta: no se sabe de
+ * cuál es. Las facturas generadas después de su fecha no votan (`generadaDespues`).
+ */
+export function muestrasDesfase(facturas: readonly FacturaParaMedir[], vouchers: readonly VoucherRadar[]): MuestrasDesfase {
+  const vs = (vouchers ?? [])
+    .map((v) => ({ placa: normPlaca(v.placa), fecha: v.fecha ? String(v.fecha).slice(0, 10) : "", total: v.total == null ? NaN : Number(v.total), cantidad: v.cantidad == null ? NaN : Number(v.cantidad) }))
+    .filter((v) => v.placa && v.fecha && Number.isFinite(v.total));
+  const porPlaca = new Map<string, number[]>();
+  vs.forEach((v, i) => porPlaca.set(v.placa, [...(porPlaca.get(v.placa) ?? []), i]));
+  const pares: { tipo: "una" | "consolidada"; v: number; d: number }[] = [];
+  let tardias = 0;
+  for (const f of facturas ?? []) {
+    const emision = f.fecha_emision ? String(f.fecha_emision).slice(0, 10) : null;
+    if (!emision) continue;
+    if (generadaDespues(emision, f.recibido_en)) { tardias++; continue; }
+    const lineas = Array.isArray(f.lineas) ? f.lineas : [];
+    const comb = lineas.filter((l) => l.tipo_combustible);
+    const tipo = comb.length === 1 ? "una" : "consolidada";
+    const desde = sumarDias(emision, -MAX_DESFASE), hasta = sumarDias(emision, 1);
+    for (const l of comb) {
+      if (origenFechaLinea(l, emision, comb.length) === "linea") continue;
+      const placa = normPlaca(l.placa), total = l.total == null ? NaN : Number(l.total);
+      if (!placa || !Number.isFinite(total)) continue;
+      let cand = (porPlaca.get(placa) ?? []).filter((i) =>
+        vs[i].fecha >= desde && vs[i].fecha <= hasta && Math.abs(vs[i].total - total) < TOLERANCIA_MONTO);
+      if (cand.length > 1 && l.cantidad != null) {
+        cand = cand.filter((i) => Number.isFinite(vs[i].cantidad) && Math.abs(vs[i].cantidad - Number(l.cantidad)) <= TOLERANCIA_CANTIDAD);
+      }
+      if (cand.length === 1) pares.push({ tipo, v: cand[0], d: diasEntre(vs[cand[0]].fecha, emision) });
+    }
+  }
+  const usos = new Map<number, number>();
+  for (const p of pares) usos.set(p.v, (usos.get(p.v) ?? 0) + 1);
+  const unicos = pares.filter((p) => usos.get(p.v) === 1);
+  return {
+    una: unicos.filter((p) => p.tipo === "una").map((p) => p.d),
+    consolidada: unicos.filter((p) => p.tipo === "consolidada").map((p) => p.d),
+    tardias,
+  };
 }
 
 // ── 1) La medición ───────────────────────────────────────────────────────────
@@ -196,6 +305,64 @@ export function decidirDesfase(configurado: unknown, m: MedicionDesfase): Decisi
   };
 }
 
+/**
+ * Las facturas de VARIAS cargas. No traen la fecha de ninguna, y fecharlas todas igual solo es
+ * correcto si cada factura junta UN día —el lote nocturno de COESTI— y no un mes —la factura
+ * consolidada de otros grifos, que pondría el despacho del día 3 el día 30—. Eso no se supone: se
+ * mide con sus propias muestras (las de las consolidadas, no las de una línea), con los mismos
+ * umbrales, y SOLO automático. El desfase que una persona FIJA dice cuántos días; no dice que cada
+ * consolidada sea de un día, así que no las fecha. Sin evidencia, se confirman a mano, como antes.
+ */
+export type CodigoConsolidadas = "medido" | "pocos_datos" | "disperso";
+
+export type DecisionConsolidadas = {
+  /** ¿Se les pone fecha a las líneas de una factura de varias cargas? */
+  fechar: boolean;
+  /** Días que se le restan a la emisión cuando `fechar`. */
+  dias: number;
+  codigo: CodigoConsolidadas;
+  medicion: MedicionDesfase;
+  detalle: string;
+};
+
+export function decidirConsolidadas(m: MedicionDesfase): DecisionConsolidadas {
+  const evidencia = textoMedicion(m);
+  if (m.muestras < MIN_MUESTRAS_DESFASE) {
+    return {
+      fechar: false, dias: 0, codigo: "pocos_datos", medicion: m,
+      detalle: `Las facturas de varias cargas no traen la fecha de cada despacho y todavía no hay con qué comprobar que cada una junta un solo día (${evidencia}; hacen falta ${MIN_MUESTRAS_DESFASE}). Mientras tanto se confirman a mano.`,
+    };
+  }
+  if ((m.acuerdo ?? 0) < MIN_ACUERDO_DESFASE) {
+    return {
+      fechar: false, dias: 0, codigo: "disperso", medicion: m,
+      detalle: `Las facturas de varias cargas NO juntan siempre el mismo día (${evidencia}): ponerles una fecha a todas movería mal a las demás, así que se confirman a mano.`,
+    };
+  }
+  const d = m.dominante!;
+  return {
+    fechar: true, dias: d, codigo: "medido", medicion: m,
+    detalle: d
+      ? `Cada factura de varias cargas junta un solo día: el despacho fue ${d} día(s) antes de la emisión (${evidencia}). Sus líneas se fechan con la emisión − ${d} día(s) y se cruzan con el Radar como las de una sola línea.`
+      : `Cada factura de varias cargas junta un solo día: el de su emisión (${evidencia}). Sus líneas se fechan con la fecha de emisión y se cruzan con el Radar como las de una sola línea.`,
+  };
+}
+
+/** Lo que se le aplica a una cuenta: el desfase de las facturas de una línea y el de las consolidadas. */
+export type DesfaseCuenta = DecisionDesfase & {
+  consolidadas: DecisionConsolidadas;
+  /** Facturas generadas después de su fecha (cierre de mes): no votan ni se corren. */
+  tardias: number;
+};
+
+export function decidirDesfaseCuenta(configurado: unknown, muestras: MuestrasDesfase): DesfaseCuenta {
+  return {
+    ...decidirDesfase(configurado, medirDesfase(muestras.una)),
+    consolidadas: decidirConsolidadas(medirDesfase(muestras.consolidada)),
+    tardias: muestras.tardias,
+  };
+}
+
 /** La fecha de DESPACHO: la de emisión menos el desfase, y SOLO si la fecha salió de la emisión. */
 export function fechaDeDespacho(fecha: string | null | undefined, origen: OrigenFecha | null, dias: number): string | null {
   if (!fecha) return null;
@@ -210,22 +377,35 @@ type LineaConFecha = { n: number; fecha?: string | null; fecha_origen?: OrigenFe
  * se decide (lo usa la conciliación, lib/combustible/facturas-correo.ts, y lo prueba la matriz):
  *   • el origen se mira en la línea TAL COMO SE LEYÓ, antes de cualquier cambio;
  *   • la fecha que una persona eligió al confirmar (`manual.fecha`) es `manual` y no se corre;
- *   • `fecha_alterna` lleva la fecha de antes de correrla: el cruce la busca también.
+ *   • `fecha_alterna` lleva la fecha de antes de correrla: el cruce la busca también;
+ *   • una factura generada después de su fecha (`tardia`, el cierre de mes) no se corre;
+ *   • una línea SIN fecha de una factura de varias cargas recibe la emisión − `consolidada` días
+ *     (origen `consolidada`) solo si llega ese número —decidirConsolidadas lo da solo con
+ *     evidencia— y la factura no es tardía; su alterna es la emisión, donde nada la buscaba antes.
  */
 export function lineasAlDespacho<L extends LineaConFecha>(
   lineas: readonly L[],
   fechaEmision: string | null,
   dias: number,
-  manual?: { n: number; fecha?: string | null } | null
+  manual?: { n: number; fecha?: string | null } | null,
+  opts: { consolidada?: number | null; tardia?: boolean } = {}
 ): { lineas: (L & { fecha: string | null; fecha_alterna: string | null })[]; origen: Map<number, OrigenFecha | null> } {
   const nComb = lineas.filter((l) => l.tipo_combustible).length;
   const origen = new Map<number, OrigenFecha | null>();
+  const fechaConsolidada = !opts.tardia && !!fechaEmision && nComb > 1 && opts.consolidada != null &&
+    Number.isInteger(opts.consolidada) && opts.consolidada >= 0 && opts.consolidada <= MAX_DESFASE
+    ? sumarDias(fechaEmision, -opts.consolidada) : null;
   const out = lineas.map((l) => {
     const esManual = !!manual && manual.n === l.n && !!manual.fecha;
-    const o: OrigenFecha | null = esManual ? "manual" : origenFechaLinea(l, fechaEmision, nComb);
+    let o: OrigenFecha | null = esManual ? "manual" : origenFechaLinea(l, fechaEmision, nComb);
+    let base = esManual ? manual!.fecha! : (l.fecha ?? null);
+    let fecha = fechaDeDespacho(base, o, opts.tardia ? 0 : dias);
+    if (!base && o == null && fechaConsolidada && l.tipo_combustible) {
+      o = "consolidada";
+      base = fechaEmision;
+      fecha = fechaConsolidada;
+    }
     origen.set(l.n, o);
-    const base = esManual ? manual!.fecha! : (l.fecha ?? null);
-    const fecha = fechaDeDespacho(base, o, dias);
     return { ...l, fecha, fecha_alterna: fecha !== base ? base : null };
   });
   return { lineas: out, origen };
@@ -243,6 +423,8 @@ export type FacturaRegistrada = {
   serie: string | null;
   numero: string | null;
   fecha_emision: string | null;
+  /** Cuándo llegó su correo: una factura generada después de su fecha no se corre (generadaDespues). */
+  recibido_en?: string | null;
   lineas: { n: number; fecha?: string | null; fecha_origen?: OrigenFecha | null; tipo_combustible?: string | null }[];
   conciliacion: { n: number; codigo?: string; combustible_id?: number | string | null; casa_con?: number | string | null; fecha_origen?: OrigenFecha | null }[];
 };
@@ -273,7 +455,9 @@ export type CargaPorMover = {
  *   2. su fecha salió de la emisión (no la traía la línea ni la eligió una persona);
  *   3. hoy lleva EXACTAMENTE la fecha de emisión: si alguien ya la cambió, esa persona decidió;
  *   4. el desfase decidido es mayor que cero.
- * Una carga que se borró no está en `cargas` y no se propone.
+ * Una carga que se borró no está en `cargas` y no se propone, y tampoco la de una factura generada
+ * después de su fecha (el cierre de mes): esa fecha no es la del lote nocturno, y la conciliación
+ * tampoco la corre.
  */
 export function cargasPorMover(
   facturas: readonly FacturaRegistrada[],
@@ -285,6 +469,7 @@ export function cargasPorMover(
   const vistas = new Set<number>();
   for (const f of facturas ?? []) {
     if (!f.fecha_emision) continue;
+    if (generadaDespues(f.fecha_emision, f.recibido_en)) continue;
     const lineas = Array.isArray(f.lineas) ? f.lineas : [];
     const conc = Array.isArray(f.conciliacion) ? f.conciliacion : [];
     const nComb = lineas.filter((l) => l.tipo_combustible).length;
@@ -299,6 +484,9 @@ export function cargasPorMover(
       if (origen !== "emision") continue;
       const carga = cargas.get(id);
       if (!carga || !String(carga.observaciones ?? "").includes(marca)) continue;
+      // Fusionada con su voucher: la fecha ya es la del despacho impresa en el papel, aunque coincida
+      // con la emisión. Correrla sería deshacer lo que una persona confirmó contra la foto.
+      if (esCargaFusionada(carga.observaciones)) continue;
       if (carga.fecha !== f.fecha_emision) continue;
       const hacia = sumarDias(f.fecha_emision, -dias);
       vistas.add(id);

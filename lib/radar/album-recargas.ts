@@ -409,7 +409,8 @@ export function buscarCargaRegistrada(
       detalle:
         `Esta carga ya entró DESDE LA FACTURA del correo (registro #${deFactura.id}, ${soles(deFactura.total as number)}, ` +
         `fechado el ${deFactura.fecha!.slice(0, 10)}): la factura sale con su fecha de emisión, que puede ser un día después ` +
-        `del voucher. Es el mismo despacho — descarta esta fila; si de verdad fue otra carga, regístrala a mano.`,
+        `del voucher. Es el mismo despacho — FUSIÓNALA con esa carga: toma de este voucher la fecha del despacho, el odómetro ` +
+        `y el conductor, y los galones y el importe siguen siendo los de la factura. Si de verdad fue otra carga, regístrala a mano.`,
     };
   }
   return null;
