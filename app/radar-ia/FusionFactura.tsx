@@ -229,7 +229,7 @@ export default function FusionFactura({ c, unidad, voucher, ocupado, onFusionar,
       {plan.puede && !porNota && (
         <label className="flex items-start gap-2 text-gray-800 font-semibold">
           <input type="checkbox" className="mt-0.5" checked={verificada === carga.id} onChange={(e) => setVerificada(e.target.checked ? carga.id : null)} />
-          Comparé las fotos y los datos: es la misma recarga (la encontré por {v.por === "factura" ? "unidad e importe, con un día de diferencia" : "unidad, día e importe"}, sin una nota de despacho que lo pruebe).
+          Comparé las fotos y los datos: es la misma recarga. (El ERP la encontró por {v.por === "factura" ? "unidad e importe, con un día de diferencia" : "unidad, día e importe"}, sin una nota de despacho que lo pruebe.)
         </label>
       )}
       {plan.puede && (
