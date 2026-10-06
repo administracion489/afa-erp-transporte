@@ -24,7 +24,7 @@ import { normalizarTipoCombustible } from "@/lib/combustible-tipos";
 import {
   lineasUbl, completarConDocumento, planDeLinea, placasEnTexto, notasEnTexto, fechasEnTexto, normPlaca,
   elegirXmlComprobante, esNombreComprobante, DIAS_REGISTRO_AUTOMATICO, FILTRO_HISTORICO,
-  notaPrepago, esDeudaFalsaPrepago,
+  notaPrepago, esDeudaFalsaPrepago, observacionCargaDeFactura,
   type LineaFactura, type PlanLinea, type CargaExistente,
 } from "@/lib/combustible/factura-lineas";
 import type { FilaCuenta } from "@/lib/combustible/saldo-datos";
@@ -395,7 +395,7 @@ export async function conciliarFacturaGuardada(
           fecha: pr.fecha, kilometraje: 0,
           galones: pr.galones, precio_galon: pr.precio_galon,
           grifo, conductor: null, tipo_combustible: pr.tipo_combustible, unidad: pr.unidad,
-          observaciones: `📧 Registrada desde la factura ${ref} (respaldo del Radar)${l.nota_despacho ? ` · Nota ${l.nota_despacho}` : ""} · sin odómetro`,
+          observaciones: observacionCargaDeFactura(ref, l.nota_despacho),
           comprobante_serie: cab.serie, comprobante_numero: cab.numero, ruc_proveedor: cab.ruc_emisor,
           documento_compra_id: docId,
         };

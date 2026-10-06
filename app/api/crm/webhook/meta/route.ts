@@ -6,6 +6,7 @@ import { responderConIA } from "@/lib/crm-ia";
 import { esNumeroDeAvisos } from "@/lib/whatsapp-numeros";
 import { procesarEchos, procesarHistorial, procesarContactos } from "@/lib/crm-coexistencia";
 import { resolverContacto, resolverConversacion } from "@/lib/crm-ingesta";
+import { faltaColumna } from "@/lib/columna-faltante";
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -274,7 +275,8 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
   // se corrió, el mensaje se guarda igual sin la etiqueta: un webhook nunca debe
   // perder un mensaje del cliente por una columna que falta.
   const { error: errMsg } = await supabase.from("crm_mensajes").insert({ ...fila, origen: "entrante" });
-  if (errMsg && /column .* does not exist/i.test(errMsg.message)) {
+  // Las dos formas del error de columna: en un INSERT la rechaza PostgREST (PGRST204), no Postgres.
+  if (errMsg && faltaColumna(errMsg)) {
     await supabase.from("crm_mensajes").insert(fila);
   }
 

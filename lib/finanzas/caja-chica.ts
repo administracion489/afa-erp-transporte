@@ -21,6 +21,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { redondear } from "@/lib/finanzas/dinero";
+import { faltaColumna } from "@/lib/columna-faltante";
 
 // ── Estados ───────────────────────────────────────────────────────────────────
 
@@ -630,7 +631,8 @@ export async function registrarGasto(
       sb.from("caja_chica_gastos").insert({ ...fila, ...extra }).select("id").single();
 
     let { data: creado, error } = await insertar(enganche);
-    if (error && /column .* does not exist|violates foreign key/i.test(error.message ?? "")) {
+    // Columna faltante en sus DOS formas (en un INSERT la rechaza PostgREST con PGRST204, no Postgres).
+    if (error && (faltaColumna(error) || /violates foreign key/i.test(error.message ?? ""))) {
       ({ data: creado, error } = await insertar({}));
     }
 

@@ -7,6 +7,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { invalidarCacheNumeros } from "@/lib/whatsapp-numeros";
+import { faltaColumna } from "@/lib/columna-faltante";
 
 function db() {
   return createClient(
@@ -80,7 +81,8 @@ export async function registrarNumero(datos: DatosNumero): Promise<ResultadoRegi
     // Las columnas de coexistencia son de una migración posterior: si aún no se
     // corrió, se reintenta sin ellas para no bloquear el alta del número.
     // El reintento va con `extra` vacío, así que no puede volver a entrar aquí.
-    if (/column .* does not exist/i.test(error.message) && datos.extra) {
+    // Las dos formas del error de columna (en un INSERT/UPDATE la rechaza PostgREST, PGRST204).
+    if (faltaColumna(error) && datos.extra) {
       const reintento = await registrarNumero({ ...datos, extra: undefined });
       if (reintento.ok) return reintento;
     }

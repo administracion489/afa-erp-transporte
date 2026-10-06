@@ -229,7 +229,10 @@ export type AnomaliaCombustible = {
     | "tipo_no_coincide_con_producto"// el papel la contradice pero nombra varios productos: no se adivina
     | "tipo_no_coincide_con_precio"  // se pagó el precio de otro combustible (solo avisa: no reescribe el tipo)
     // ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts):
-    | "carga_parcial_probable";      // la aguja del tablero NO marca lleno: ese tramo no se mide igual
+    | "carga_parcial_probable"       // la aguja del tablero NO marca lleno: ese tramo no se mide igual
+    // La fecha del voucher contra la del mensaje (lib/radar/fecha-voucher.ts):
+    | "fecha_corregida"              // fuera de rango y UNA sola variante (año, día↔mes) la explica: se propone
+    | "fecha_fuera_de_rango";        // posterior al mensaje o demasiado vieja, y no se puede adivinar cuál era
   detalle: string;
   /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
   bloquea?: boolean;
@@ -245,7 +248,7 @@ export type AnomaliaCombustible = {
      * para 6.799→8.799. Sin él, corregir a mano un tipo ya corregido le enseñaría a la IA que se
      * equivocó en algo que nunca dijo (ver `leidoPorIA` en app/radar-ia/page.tsx).
      */
-    campo: "cantidad" | "precio" | "monto" | "tipo_combustible";
+    campo: "cantidad" | "precio" | "monto" | "tipo_combustible" | "fecha";
     /** Lo que leyó la IA. null = el campo faltaba y se derivó. */
     leido: number | string | null;
     corregido: number | string;

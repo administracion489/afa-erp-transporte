@@ -18,6 +18,7 @@ import { verificarUsuarioApi } from "@/lib/api-auth";
 import { DESTINO_PERFIL } from "@/lib/importador/perfiles-finanzas";
 import type { FilaCxP, FilaGastoGeneral, FilaCajaChica, FilaExtracto } from "@/lib/importador/perfiles-finanzas";
 import { hashMovimiento } from "@/lib/finanzas/conciliacion";
+import { faltaColumna } from "@/lib/columna-faltante";
 
 export const maxDuration = 60;
 
@@ -429,7 +430,7 @@ async function importarCajaChica(db: any, filas: FilaCajaChica[], perfil: string
       // Reintento sin las columnas de la fase 08: en una base donde no se corrió, el
       // histórico se importa igual (como "otro") en vez de perderse entero.
       let { data: nuevo, error } = await db.from("caja_chica_fondos").insert(fila).select("id, moneda").single();
-      if (error && /column .* does not exist|responsable_tipo/i.test(error.message ?? "")) {
+      if (error && (faltaColumna(error) || /responsable_tipo/i.test(error.message ?? ""))) {
         ({ data: nuevo, error } = await db
           .from("caja_chica_fondos")
           .insert({

@@ -30,6 +30,7 @@ import { COMBUSTIBLES, TIPOS_PARA_ELEGIR, configCombustible, unidadDeCarga } fro
 import { fotosDeLectura, type FotoLeida } from "@/lib/radar/fotos-lectura";
 import { proponerTanqueLleno } from "@/lib/radar/tanque-lleno";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
+import ReprocesoFallidos from "./ReprocesoFallidos";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -154,6 +155,9 @@ const ANOMALIA_LABEL: Record<string, string> = {
   // ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts)
   carga_parcial_probable: "Carga parcial (aguja)",
   tipo_no_coincide_con_precio:  "Tipo ≠ precio pagado",
+  // La fecha del voucher contra la del mensaje (lib/radar/fecha-voucher.ts)
+  fecha_corregida:        "Fecha corregida",
+  fecha_fuera_de_rango:   "Fecha lejos del mensaje",
 };
 
 /**
@@ -162,7 +166,8 @@ const ANOMALIA_LABEL: Record<string, string> = {
  * ignorarla, que es justo lo contrario de lo que se necesita.
  */
 const ANOMALIA_ES_ARREGLO = (codigo: string) =>
-  codigo === "lectura_corregida" || codigo === "dato_derivado" || codigo === "tipo_corregido_por_producto";
+  codigo === "lectura_corregida" || codigo === "dato_derivado" || codigo === "tipo_corregido_por_producto" ||
+  codigo === "fecha_corregida";
 
 const TABS = [
   { id: "feed",          label: "Feed" },
@@ -378,14 +383,25 @@ function TabFeed({ mensajes, reprocesando, onFeedback, onReprocesar }: {
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden divide-y divide-gray-100">
           {filtrados.map((m) => {
             const cat = m.categoria ? CATEGORIAS_RADAR[m.categoria] : null;
-            const est = ESTADO_MSG_CFG[m.estado] ?? ESTADO_MSG_CFG.pendiente;
+            // Una acción que FALLÓ es un Error aunque la fila diga "procesado": así quedaron las
+            // recargas del 14/09 al 06/10, en verde, sin haberse guardado. El motor ya no lo hace;
+            // esto pinta bien las que quedaron escritas así hasta que se reprocesen.
+            const est = m.accion === "error_accion"
+              ? ESTADO_MSG_CFG.error
+              : ESTADO_MSG_CFG[m.estado] ?? ESTADO_MSG_CFG.pendiente;
             const abierto = expandido === m.id;
             const extraccion = m.resultado && typeof m.resultado === "object"
               ? ((m.resultado as Record<string, unknown>)["extraccion"] as Record<string, unknown> | undefined)
               : undefined;
-            const detalleAccion = m.resultado && typeof (m.resultado as Record<string, unknown>)["detalle"] === "string"
-              ? String((m.resultado as Record<string, unknown>)["detalle"])
-              : null;
+            // El motor guarda `{ extraccion, accion: { accion, detalle, datos } }`: el detalle vive DENTRO
+            // de `accion`. Se leía de la raíz, así que el feed nunca lo enseñaba — y un "error_accion"
+            // se veía sin el motivo, que es justo lo único que dice qué arreglar.
+            const resAccion = m.resultado && typeof m.resultado === "object"
+              ? ((m.resultado as Record<string, unknown>)["accion"] as Record<string, unknown> | undefined)
+              : undefined;
+            const detalleBruto = (resAccion && typeof resAccion === "object" ? resAccion["detalle"] : undefined)
+              ?? (m.resultado as Record<string, unknown> | null)?.["detalle"];
+            const detalleAccion = typeof detalleBruto === "string" && detalleBruto !== m.error ? detalleBruto : null;
             const esImagen = m.tipo === "imagen" || (m.media_mime ?? "").startsWith("image/");
             return (
               <div key={m.id}>
@@ -2370,8 +2386,25 @@ export default function RadarIAPage() {
       });
       const data = await res.json().catch(() => ({} as Record<string, unknown>));
       if (res.ok) {
-        const detalle = typeof data.detalle === "string" ? data.detalle : typeof data.mensaje === "string" ? data.mensaje : "Mensaje reprocesado";
-        showToast(detalle);
+        // El motor responde con conteos, no con una frase: `errores` > 0 es que volvió a fallar, y
+        // decir "reprocesado" en verde sobre eso sería repetir el error que se está arreglando.
+        const reactivados = Number(data.reactivados ?? 0);
+        // Una ráfaga se procesa desde su mensaje MÁS ANTIGUO, que puede no ser el que se pulsó: el
+        // resultado (y el motivo, si vuelve a fallar) queda en ese.
+        const desdeOtro = typeof data.primaria === "string" && data.primaria !== id;
+        if (Number(data.errores ?? 0) > 0) {
+          showToast(
+            desdeOtro
+              ? "Volvió a fallar: el motivo está en el primer mensaje de su ráfaga"
+              : "Volvió a fallar: el motivo está en el detalle del mensaje",
+            false
+          );
+        } else {
+          showToast(
+            `Mensaje reprocesado${reactivados ? ` junto con ${reactivados} mensaje(s) de su ráfaga` : ""}` +
+              (desdeOtro ? " (desde el primero de la ráfaga)" : "")
+          );
+        }
         cargar();
       } else {
         showToast(typeof data.error === "string" ? data.error : "Error al reprocesar el mensaje", false);
@@ -2455,7 +2488,7 @@ export default function RadarIAPage() {
     // voucher atrapó un dígito, la fila ya trae el número arreglado y la lectura original viaja
     // en la anomalía. Sin esto, corregir a mano un valor ya corregido le enseñaría a la IA que
     // se equivocó en algo que nunca leyó — se lee por CÓDIGO, no olfateando el texto del detalle.
-    const leidoPorIA = <T,>(campo: "cantidad" | "precio" | "monto" | "tipo_combustible", enLaFila: T) =>
+    const leidoPorIA = <T,>(campo: "cantidad" | "precio" | "monto" | "tipo_combustible" | "fecha", enLaFila: T) =>
       ((c.anomalias ?? []).find((a) => a.correccion?.campo === campo)?.correccion?.leido as T | undefined) ??
       enLaFila;
     const iaCantidad = leidoPorIA("cantidad", ov.esLitros ? c.litros : c.galones);
@@ -2466,7 +2499,9 @@ export default function RadarIAPage() {
       return String(na ?? "").trim().toLowerCase() !== String(nb ?? "").trim().toLowerCase();
     };
     const campos: { campo: string; ia: unknown; correcto: unknown }[] = [
-      { campo: "fecha",  ia: c.fecha,   correcto: ov.fecha },
+      // Por `leidoPorIA`: cuando la fecha venía de otro año y el ERP la corrigió, la fila ya trae la
+      // buena y lo que leyó la IA vive en la anomalía `fecha_corregida`.
+      { campo: "fecha",  ia: leidoPorIA("fecha", c.fecha), correcto: ov.fecha },
       { campo: "grifo",  ia: c.grifo,   correcto: ov.grifo },
       { campo: ov.esLitros ? "litros" : "galones", ia: iaCantidad, correcto: ov.cantidad },
       { campo: "precio", ia: iaPrecio,  correcto: ov.precio },
@@ -2614,7 +2649,10 @@ export default function RadarIAPage() {
       cargar();
     } catch (e) {
       console.warn("radar-ia: error registrando combustible", e);
-      showToast("No se pudo registrar la recarga", false);
+      // Con el motivo: "no se pudo" a secas es lo que hace que una recarga se quede semanas en
+      // «Por revisar» sin que nadie sepa qué la frena.
+      const motivo = (e as { message?: string } | null)?.message;
+      showToast(`No se pudo registrar la recarga${motivo ? `: ${motivo}` : ""}`, false);
     } finally {
       setRegistrandoComb(null);
     }
@@ -2962,12 +3000,15 @@ export default function RadarIAPage() {
 
             {/* Contenido del tab activo */}
             {tab === "feed" && (
-              <TabFeed
-                mensajes={mensajes}
-                reprocesando={reprocesando}
-                onFeedback={marcarFeedback}
-                onReprocesar={reprocesarMensaje}
-              />
+              <div className="space-y-4">
+                <ReprocesoFallidos refrescar={mensajes[0]?.id} onTerminado={cargar} />
+                <TabFeed
+                  mensajes={mensajes}
+                  reprocesando={reprocesando}
+                  onFeedback={marcarFeedback}
+                  onReprocesar={reprocesarMensaje}
+                />
+              </div>
             )}
             {tab === "oportunidades" && (
               <TabOportunidades

@@ -24,7 +24,12 @@ import {
 } from "@/lib/combustible-tipos";
 import { resolverTipoCombustible, revisarTipoContraPrecio } from "./tipo-voucher";
 import { serieRendimiento, juzgarTramo, TECHO_FAMILIA, type CargaRendimiento } from "@/lib/rendimiento";
-import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
+import {
+  leerAlbumRecargas, buscarDuplicado, buscarCargaRegistrada, patronComprobante,
+  type RecargaAlbum, type DespachoGuardado, type CargaRegistrada,
+} from "./album-recargas";
+import { revisarFechaVoucher } from "./fecha-voucher";
+import { insertarFilaRadar, avisoColumnasQuitadas } from "./guardado-radar";
 import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
 import {
   resolverIdentidadGrifo,
@@ -72,6 +77,14 @@ export function fechaLimaDeTs(ts: string | null | undefined): string | null {
   const t = new Date(ts).getTime();
   if (!Number.isFinite(t)) return null;
   return new Date(t - 5 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+/** Hora Lima (HH:MM) de un timestamp dado, o null si el ts no es válido. */
+export function horaLimaDeTs(ts: string | null | undefined): string | null {
+  if (!ts) return null;
+  const t = new Date(ts).getTime();
+  if (!Number.isFinite(t)) return null;
+  return new Date(t - 5 * 3600 * 1000).toISOString().slice(11, 16);
 }
 
 const diasPara = (f?: string | null): number | null =>
@@ -712,6 +725,11 @@ async function accionOportunidad({ sb, mensaje, datos, previo }: ArgsAccion): Pr
 
 // ── Combustible ──────────────────────────────────────────────────────────────
 
+const sumarDiasIso = (f: string, n: number) => {
+  const t = Date.parse(f.slice(0, 10) + "T12:00:00Z");
+  return Number.isFinite(t) ? new Date(t + n * 86_400_000).toISOString().slice(0, 10) : f;
+};
+
 /**
  * Abre una fila de `radar_combustible` por cada despacho ADICIONAL del álbum (el primero ya
  * tiene la suya, con el pipeline completo). Devuelve cuántas se crearon.
@@ -729,6 +747,8 @@ async function insertarRecargasAdicionales(
     album: RecargaAlbum[];
     mensajeId: string;
     fechaPorDefecto: string;
+    /** Fecha Lima del ENVÍO del mensaje: contra ella se juzga la fecha de cada voucher. */
+    fechaMensaje: string | null;
     grifoPorDefecto: string | null;
     fotos: { url: string; mime: string | null; nombre: string | null }[];
     conductor: string | null;
@@ -742,12 +762,15 @@ async function insertarRecargasAdicionales(
     try {
       const veh = await matchVehiculo(sb, r.placa);
       const terc = veh ? null : await matchVehiculoTercero(sb, r.placa);
-      const { error } = await sb.from("radar_combustible").insert({
+      // La fecha de cada voucher del álbum se juzga igual que la del principal: un año mal leído
+      // en el segundo voucher es tan probable como en el primero.
+      const vFecha = r.fecha ? revisarFechaVoucher({ leida: r.fecha, fechaMensaje: ctx.fechaMensaje }) : null;
+      await insertarFilaRadar(sb, {
         mensaje_id: ctx.mensajeId,
         placa: placaFormato(r.placa) ?? veh?.placa ?? terc?.placa ?? null,
         vehiculo_id: veh?.id ?? null,
         vehiculo_tercero_id: terc?.id ?? null,
-        fecha: r.fecha || ctx.fechaPorDefecto,
+        fecha: vFecha?.fecha ?? ctx.fechaPorDefecto,
         hora: r.hora,
         // El grifo del álbum es el mismo salvo que el voucher diga otro: son notas de la
         // misma ráfaga, casi siempre de la misma estación.
@@ -773,10 +796,10 @@ async function insertarRecargasAdicionales(
               `pero el conductor y los controles de consumo no se le cruzaron — confírmala entera contra su foto.`,
             bloquea: true,
           },
+          ...(vFecha?.anomalia ? [vFecha.anomalia] : []),
         ],
         fotos: ctx.fotos,
       });
-      if (error) throw new Error(error.message);
       creadas++;
     } catch (e: unknown) {
       // Una extra que falla no puede tumbar el reporte principal, que ya está guardado.
@@ -801,7 +824,12 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     };
   }
   const d = datos as ExtraccionCombustible;
-  const fecha = d.fecha || fechaLimaDeTs(mensaje.ts_mensaje) || fechaLima();
+  // La fecha del voucher se COTEJA contra la del envío del mensaje (lib/radar/fecha-voucher.ts):
+  // una carga de la CTV-370 entró fechada el 13/08/2025, un año antes del mensaje que la traía.
+  // Tomarla tal cual la mandaba al fondo de la cadena de rendimiento de su unidad y fuera de su mes.
+  const fechaMensaje = fechaLimaDeTs(mensaje.ts_mensaje);
+  const vFecha = revisarFechaVoucher({ leida: d.fecha, fechaMensaje });
+  const fecha = vFecha.fecha || fechaMensaje || fechaLima();
   // La IA a veces deja una placa real (p.ej. "CUP 435" sin guion) en "unidad" en vez de
   // "placa" — placaNorm() quita espacios/guiones antes de comparar, así que probarla igual
   // contra la flota es seguro: una referencia realmente informal ("bus 45") no matchea nada.
@@ -877,6 +905,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   // contra el combustible que se creyó comprado, así que un tipo equivocado los hace mentir a los
   // tres. Es la misma razón por la que el cuadre aritmético va antes que todos los demás.
   if (vTipo.anomalia) anomalias.push(vTipo.anomalia);
+  // La fecha, igual de temprano: el duplicado, el rendimiento y el conductor del día se buscan con
+  // ella, así que una fecha de otro año los hace mentir a todos.
+  if (vFecha.anomalia) anomalias.push(vFecha.anomalia);
 
   // ── Campos del camino de VISIÓN multi-foto (opcionales; el de texto no los llena) ──
   const consumoTasa = numOpc(d.consumo_l_100km);
@@ -1046,22 +1077,57 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     }
   }
 
-  // 2) Posible duplicado: misma unidad, mismo día, monto casi idéntico
-  if (monto != null) {
-    if (veh) {
-      const { data: mismos } = await sb
-        .from("combustible")
-        .select("id, total")
-        .eq("vehiculo_id", veh.id)
-        .eq("fecha", fecha);
-      const dup = ((mismos as any[]) ?? []).find((r) => Math.abs(Number(r.total || 0) - monto) < 1);
-      if (dup) {
-        anomalias.push({
-          codigo: "posible_duplicado",
-          detalle: `Ya existe una carga del ${fecha} por ${fmtSoles(Number(dup.total || 0))} (registro #${dup.id})`,
+  // 2) ¿Ya está en /combustible? Por comprobante (de cualquier unidad), o de esta unidad por día e
+  //    importe — con un día de margen para las cargas que registró la FACTURA, que llevan su fecha de
+  //    emisión y no la del voucher (lib/radar/album-recargas.ts → buscarCargaRegistrada). Antes era
+  //    la misma fecha EXACTA y solo para la flota propia: el voucher del 03/10 no se reconocía en la
+  //    carga del 04/10 que su propia factura había registrado, y se registraba otra vez.
+  //    SI NO SE PUEDE LEER, NO SE REGISTRA SOLO: una lista vacía por error de consulta haría pasar
+  //    por nueva una carga ya registrada (mismo criterio que la conciliación de facturas).
+  if (monto != null || d.comprobante) {
+    const filasCarga: CargaRegistrada[] = [];
+    const vistas = new Set<string>();
+    const unidadCol = veh ? "vehiculo_id" : terc ? "vehiculo_tercero_id" : null;
+    const unidadId = veh?.id ?? terc?.id ?? null;
+    const sumarCargas = (rows: unknown) => {
+      for (const r of ((rows as Record<string, unknown>[]) ?? [])) {
+        const id = String(r.id ?? "");
+        if (!id || vistas.has(id)) continue;
+        vistas.add(id);
+        filasCarga.push({
+          id: Number(r.id),
+          fecha: r.fecha == null ? null : String(r.fecha).slice(0, 10),
+          total: r.total == null ? null : Number(r.total),
+          observaciones: (r.observaciones as string) ?? null,
+          misma_unidad: unidadCol != null && Number(r[unidadCol]) === Number(unidadId),
         });
       }
+    };
+    const colsCarga = "id, fecha, total, observaciones, vehiculo_id, vehiculo_tercero_id";
+    let sinLeer: string | null = null;
+    if (unidadCol && unidadId != null && monto != null) {
+      const { data, error } = await sb.from("combustible").select(colsCarga)
+        .eq(unidadCol, unidadId).gte("fecha", sumarDiasIso(fecha, -1)).lte("fecha", sumarDiasIso(fecha, 1));
+      if (error) sinLeer = error.message;
+      sumarCargas(data);
     }
+    const patron = patronComprobante(d.comprobante);
+    if (patron) {
+      const { data, error } = await sb.from("combustible").select(colsCarga).ilike("observaciones", patron).limit(50);
+      if (error) sinLeer = error.message;
+      sumarCargas(data);
+    }
+    const yaEsta = buscarCargaRegistrada({ fecha, comprobante: d.comprobante ?? null, monto }, filasCarga);
+    if (yaEsta) {
+      anomalias.push({ codigo: "posible_duplicado", detalle: yaEsta.detalle });
+    } else if (sinLeer) {
+      anomalias.push({
+        codigo: "posible_duplicado",
+        detalle: `No se pudo comprobar si esta carga ya está en Combustible (${sinLeer}): revísala antes de registrar.`,
+      });
+    }
+  }
+  if (monto != null || d.comprobante) {
     if (!anomalias.some((a) => a.codigo === "posible_duplicado")) {
       // La identidad de un despacho es su NÚMERO DE NOTA, no su placa. El chequeo anterior
       // filtraba por `placa`, así que el mismo voucher V70S-00043064 entrando dos veces —una
@@ -1353,31 +1419,6 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
         ? [{ url: mensaje.media_url, mime: mensaje.media_mime ?? null, nombre: mensaje.media_nombre ?? null }]
         : [];
 
-  /**
-   * Inserta en `radar_combustible` soltando la columna ACCESORIA que el error NOMBRA.
-   *
-   * Dos de los campos de esta fila viven en migraciones que el deploy no corre (`fotos`, de
-   * radar-ia-combustible-revision.sql, y `nivel_tanque`, de combustible-02). Que falte un SQL
-   * accesorio no puede hacer que una recarga leída se pierda entera: es el patrón de
-   * `COLUMNAS_OPCIONALES` (lib/reservas-pacto.ts), y se suelta LA QUE EL ERROR NOMBRA, no un
-   * juego fijo — con un juego fijo el mensaje acaba acusando a la migración equivocada.
-   */
-  const insertarRadar = async (fila: Record<string, unknown>, devolverId = false) => {
-    const OPCIONALES = ["fotos", "nivel_tanque"];
-    let payload = { ...fila };
-    for (let intento = 0; intento <= OPCIONALES.length; intento++) {
-      const q = sb.from("radar_combustible").insert(payload);
-      const { data, error } = devolverId ? await q.select("id").single() : await q;
-      if (!error) return { data, quitadas: Object.keys(fila).filter((k) => !(k in payload)) };
-      const msg = String(error.message ?? "");
-      const culpable = OPCIONALES.find((c) => c in payload && msg.includes(c) && /does not exist/i.test(msg));
-      if (!culpable) throw new Error(`radar_combustible: ${error.message}`);
-      const { [culpable]: _fuera, ...resto } = payload;
-      payload = resto;
-    }
-    throw new Error("radar_combustible: no se pudo insertar");
-  };
-
   // Fila base para radar_combustible (se inserta SIEMPRE, con el estado que corresponda)
   const filaRadar: Record<string, unknown> = {
     mensaje_id: mensaje.id,
@@ -1456,39 +1497,57 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     if (errComb) throw new Error(`combustible: ${errComb.message}`);
     const combustibleId = Number((comb as any)?.id);
 
+    // DESDE AQUÍ LA CARGA YA EXISTE, y nada de lo que sigue puede lanzar: un error lanzado se
+    // convierte en "error_accion" SIN el `combustible_id`, y el reproceso —que solo sabe qué
+    // comprometió la corrida anterior leyendo ese id del resultado— la registraría otra vez. Lo que
+    // falle se DICE en el resultado, que sigue llevando el id de la carga.
+    const avisos: string[] = [];
+
     // Alimentar el odómetro consolidado (anti-retroceso). fuente="combustible" deja marcado que
     // esta lectura se tomó EN LA RECARGA (base para el rendimiento km/galón y la auditoría de km).
     if (km != null && km > 0) {
-      // La hora IMPRESA en el voucher manda: es la del despacho. La del mensaje es de cuándo se
-      // ENVIÓ (la foto pudo tomarse antes) y solo vale como tope si es del mismo día que la
-      // recarga — un voucher del 13 reenviado el 15 no tiene la hora del 15.
-      const cap = capturaDeRecarga({ fecha, hora: d.hora, tsMensaje: mensaje.ts_mensaje ?? null });
-      await registrarLectura(sb, {
-        vehiculo_id: veh!.id,
-        km,
-        fuente: "combustible",
-        fecha,
-        foto_url: mensaje.media_url ?? null,
-        ref_origen: "radar_ia",
-        capturado_en: cap.capturado_en,
-        horaEsTope: cap.horaEsTope,
-        // el km de una recarga se ata al mensaje → reproceso no duplica la lectura
-        idemKey: `radar_odo_comb:${mensaje.id}`,
-      });
+      try {
+        // La hora IMPRESA en el voucher manda: es la del despacho. La del mensaje es de cuándo se
+        // ENVIÓ (la foto pudo tomarse antes) y solo vale como tope si es del mismo día que la
+        // recarga — un voucher del 13 reenviado el 15 no tiene la hora del 15.
+        const cap = capturaDeRecarga({ fecha, hora: d.hora, tsMensaje: mensaje.ts_mensaje ?? null });
+        await registrarLectura(sb, {
+          vehiculo_id: veh!.id,
+          km,
+          fuente: "combustible",
+          fecha,
+          foto_url: mensaje.media_url ?? null,
+          ref_origen: "radar_ia",
+          capturado_en: cap.capturado_en,
+          horaEsTope: cap.horaEsTope,
+          // el km de una recarga se ata al mensaje → reproceso no duplica la lectura
+          idemKey: `radar_odo_comb:${mensaje.id}`,
+        });
+      } catch (e: unknown) {
+        avisos.push(`el odómetro no se pudo registrar (${(e as Error)?.message ?? e})`);
+      }
     }
 
-    await insertarRadar({ ...filaRadar, estado: "registrado", combustible_id: combustibleId });
+    try {
+      const { quitadas } = await insertarFilaRadar(sb, { ...filaRadar, estado: "registrado", combustible_id: combustibleId });
+      const aviso = avisoColumnasQuitadas(quitadas);
+      if (aviso) avisos.push(aviso.replace(/^ · /, ""));
+    } catch (e: unknown) {
+      avisos.push(`la ficha del Radar (fotos y anomalías) no se guardó: ${(e as Error)?.message ?? e}`);
+    }
 
     return {
       accion: "combustible_registrado",
-      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${unidadCant} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}`,
-      datos: { combustible_id: combustibleId, vehiculo_id: veh!.id, conductor: conductorNombre, conductor_via: condMatch?.via ?? null, anomalias },
+      detalle:
+        `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${unidadCant} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}` +
+        (avisos.length ? ` · ⚠ ${avisos.join(" · ")}` : ""),
+      datos: { combustible_id: combustibleId, vehiculo_id: veh!.id, conductor: conductorNombre, conductor_via: condMatch?.via ?? null, anomalias, avisos },
     };
   }
 
   // Queda en revisión: registrar + alertar con los motivos
-  const { data: rcIns } = await insertarRadar(
-    { ...filaRadar, estado: "pendiente_revision", combustible_id: null }, true
+  const { data: rcIns, quitadas: quitadasRadar } = await insertarFilaRadar(
+    sb, { ...filaRadar, estado: "pendiente_revision", combustible_id: null }, true
   );
 
   // El dígito que corrigió la aritmética se guarda como LECCIÓN, igual que si lo hubiera
@@ -1519,6 +1578,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     album: album.adicionales,
     mensajeId: mensaje.id,
     fechaPorDefecto: fecha,
+    fechaMensaje,
     grifoPorDefecto: grifo,
     fotos: fotosEvidencia,
     conductor: conductorNombre,
@@ -1603,9 +1663,11 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     accion: "combustible_en_revision",
     detalle:
       `Carga capturada pero quedó en revisión: ${motivos[0] ?? "requiere revisión manual"}` +
-      (filasExtra ? ` · ${filasExtra} recarga(s) más de la misma ráfaga quedaron en filas aparte` : ""),
+      (filasExtra ? ` · ${filasExtra} recarga(s) más de la misma ráfaga quedaron en filas aparte` : "") +
+      avisoColumnasQuitadas(quitadasRadar),
     datos: {
       radar_combustible_id: (rcIns as any)?.id ?? null,
+      columnas_sin_migracion: quitadasRadar,
       alerta_id: alertaId,
       severidad,
       titulo,

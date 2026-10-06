@@ -37,6 +37,8 @@
 // nota de despacho** es la identidad del papel: dos filas con el mismo comprobante son el
 // mismo despacho, venga con la placa que venga.
 
+import { normNota, notasEnTexto, esCargaDeFactura } from "@/lib/combustible/factura-lineas";
+
 /** Una recarga adicional del álbum, con la forma mínima para darle su propia fila. */
 export type RecargaAlbum = {
   placa: string | null;
@@ -309,6 +311,107 @@ export function buscarDuplicado(
     }
   }
 
+  return null;
+}
+
+// ── ¿Y ya está en /combustible? ──────────────────────────────────────────────
+//
+// `buscarDuplicado` compara contra lo que el RADAR capturó. Esto compara contra la tabla de verdad,
+// `combustible`, donde una carga también puede haber entrado A MANO o DESDE LA FACTURA del correo.
+// El chequeo anterior pedía la MISMA fecha exacta, y la carga que registra la factura lleva la fecha
+// de la FACTURA: COESTI la emite un día después del despacho. Así que el voucher del 03/10 no se
+// reconocía en la carga del 04/10 que su propia factura había registrado, y el Radar —al
+// reprocesar las tres semanas en que no guardó nada— la habría registrado OTRA vez: el mismo gasto
+// dos veces en v_egresos, en el costo por km y en el saldo de la cuenta.
+
+/** Una fila de `combustible`, con lo justo para compararla. */
+export type CargaRegistrada = {
+  id: number | string;
+  fecha: string | null;
+  total: number | null;
+  observaciones: string | null;
+  /** De la MISMA unidad que la recarga (las de otra solo cuentan por comprobante). */
+  misma_unidad: boolean;
+};
+
+export type CargaYaRegistrada = {
+  id: number | string;
+  por: "comprobante" | "misma_fecha" | "factura";
+  detalle: string;
+};
+
+const diasEntre = (a: string, b: string) =>
+  Math.round(Math.abs(Date.parse(a.slice(0, 10) + "T12:00:00Z") - Date.parse(b.slice(0, 10) + "T12:00:00Z")) / 86_400_000);
+
+/**
+ * ¿El comprobante aparece escrito en ese texto? Una nota de despacho («V70S-00043064») se compara sin
+ * los ceros de relleno, porque cada sistema la escribe a su manera; cualquier otro número, completo y
+ * con al menos 8 caracteres — uno corto aparece dentro de cualquier texto por casualidad.
+ */
+export function comprobanteEnTexto(comprobante: unknown, texto: unknown): boolean {
+  const nota = normNota(String(comprobante ?? ""));
+  if (nota) return notasEnTexto(String(texto ?? "")).some((x) => normNota(x) === nota);
+  const c = normComprobante(comprobante);
+  return c.length >= 8 && normComprobante(texto).includes(c);
+}
+
+/** Lo que se le pide a la base para encontrar el comprobante dentro de `observaciones` (ilike). */
+export function patronComprobante(comprobante: unknown): string | null {
+  const digitos = /(\d{4,})\D*$/.exec(String(comprobante ?? ""))?.[1]?.replace(/^0+/, "") ?? "";
+  return digitos.length >= 4 ? `%${digitos}%` : null;
+}
+
+/**
+ * ¿La recarga ya está en /combustible? Del criterio más fuerte al más débil:
+ *
+ *  1. **El comprobante está escrito en la carga** (de cualquier unidad): es el mismo papel.
+ *  2. **Misma unidad, mismo día, mismo importe** (±S/ 1): el chequeo de siempre.
+ *  3. **Misma unidad, un día de diferencia, mismo importe, y la carga la registró la FACTURA.** Solo
+ *     esas: su fecha es la de emisión, no la del despacho. Con una carga del Radar o tecleada a mano
+ *     un día de diferencia NO se acusa —un conductor que carga S/ 100 todos los días la tendría en
+ *     rojo cada mañana, y un rojo que sale siempre se vuelve paisaje—.
+ *
+ * Encontrarla no borra nada ni descarta la lectura: la manda a revisión con el registro nombrado.
+ */
+export function buscarCargaRegistrada(
+  lectura: { fecha: string | null; comprobante: string | null; monto: number | null },
+  filas: CargaRegistrada[]
+): CargaYaRegistrada | null {
+  const lista = (filas ?? []).filter((f) => f && f.id != null);
+  if (lectura.comprobante) {
+    const f = lista.find((x) => comprobanteEnTexto(lectura.comprobante, x.observaciones));
+    if (f) {
+      return {
+        id: f.id,
+        por: "comprobante",
+        detalle:
+          `El comprobante ${lectura.comprobante} ya está registrado en Combustible (carga #${f.id}` +
+          `${f.fecha ? ` del ${f.fecha}` : ""}${f.total != null ? ` por ${soles(f.total)}` : ""}). Registrarlo otra vez duplicaría el gasto.`,
+      };
+    }
+  }
+  if (lectura.monto == null || !lectura.fecha) return null;
+  const mismoImporte = (f: CargaRegistrada) => f.total != null && Math.abs(f.total - (lectura.monto as number)) < 1;
+  const propias = lista.filter((f) => f.misma_unidad && f.fecha && mismoImporte(f));
+  const mismoDia = propias.find((f) => f.fecha!.slice(0, 10) === lectura.fecha);
+  if (mismoDia) {
+    return {
+      id: mismoDia.id,
+      por: "misma_fecha",
+      detalle: `Ya existe una carga del ${lectura.fecha} por ${soles(mismoDia.total as number)} (registro #${mismoDia.id})`,
+    };
+  }
+  const deFactura = propias.find((f) => esCargaDeFactura(f.observaciones) && diasEntre(f.fecha!, lectura.fecha!) <= 1);
+  if (deFactura) {
+    return {
+      id: deFactura.id,
+      por: "factura",
+      detalle:
+        `Esta carga ya entró DESDE LA FACTURA del correo (registro #${deFactura.id}, ${soles(deFactura.total as number)}, ` +
+        `fechado el ${deFactura.fecha!.slice(0, 10)}): la factura sale con su fecha de emisión, que puede ser un día después ` +
+        `del voucher. Es el mismo despacho — descarta esta fila; si de verdad fue otra carga, regístrala a mano.`,
+    };
+  }
   return null;
 }
 
