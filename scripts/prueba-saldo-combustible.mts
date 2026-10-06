@@ -17,7 +17,7 @@ import {
   type CuentaCombustible, type Movimiento, type CargaCuenta,
 } from "../lib/combustible/saldo-cuenta";
 import {
-  lineasUbl, completarConDocumento, planDeLinea, placasEnTexto, notasEnTexto, normNota,
+  lineasUbl, completarConDocumento, planDeLinea, placasEnTexto, notasEnTexto, normNota, fechasEnTexto,
   elegirXmlComprobante, esNombreComprobante, resumenHistorico, FILTRO_HISTORICO, DIAS_REGISTRO_AUTOMATICO,
   esDeudaFalsaPrepago, notaPrepago,
   type LineaFactura, type CargaExistente, type PlanLinea,
@@ -177,6 +177,9 @@ chk("dos placas en el documento → ninguna (no se adivina)",
 chk("factura de VARIAS líneas: la fecha de emisión NO se hereda",
   completarConDocumento([{ ...L[0], fecha: null }, { ...L[0], n: 2, fecha: null }], "", FLOTA, "2026-10-30").every((l) => l.fecha === null));
 chk("nota normalizada sin ceros a la izquierda", normNota("V70S-00043064") === normNota("v70s 43064"));
+chk("una fecha que no existe (31/04, 30/02) no es una fecha", fechasEnTexto("31/04/2026 · 30.02.2026 · 2026-02-29").length === 0,
+  JSON.stringify(fechasEnTexto("31/04/2026 · 30.02.2026 · 2026-02-29")));
+chk("…y las reales pasan (29/02 en año bisiesto incluido)", JSON.stringify(fechasEnTexto("10/04/2026 y 29/02/2028")) === JSON.stringify(["2026-04-10", "2028-02-29"]));
 chk("notas en texto libre", notasEnTexto("Comprobante V72S-00023776 · ok")[0] === "V72S-00023776");
 
 // ── 5. La decisión por línea ─────────────────────────────────────────────────

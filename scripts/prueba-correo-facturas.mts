@@ -11,7 +11,7 @@
 import { createHash, createHmac } from "crypto";
 import { elegirConexion, sePuedeLeer, describirConexion, type EstadoConexion } from "../lib/combustible/correo-conexion";
 import { firmarStateGmail, leerStateGmail, verificarStateGmail, getAuthUrl, SCOPES_CRM, SCOPE_SOLO_LECTURA } from "../lib/crm-gmail";
-import { consultaGmail, LECTURA_HISTORIAL } from "../lib/combustible/facturas-correo";
+import { consultaGmail, LECTURA_HISTORIAL, falloGmailTransitorio, ggetGmail } from "../lib/combustible/facturas-correo";
 import { DIAS_REGISTRO_AUTOMATICO } from "../lib/combustible/factura-lineas";
 
 let fallos = 0;
@@ -131,6 +131,63 @@ chk("la lectura normal mira los mismos días hasta los que registra sola",
   consultaGmail("x").endsWith(`newer_than:${DIAS_REGISTRO_AUTOMATICO}d`));
 chk("«Leer el último año» cubre los 12 meses anteriores", LECTURA_HISTORIAL.dias >= 365 && consultaGmail("x", LECTURA_HISTORIAL.dias).endsWith(`newer_than:${LECTURA_HISTORIAL.dias}d`));
 chk("…sin el repaso de parciales (eso lo hace el cron) y por tandas", LECTURA_HISTORIAL.revisarParciales === false && LECTURA_HISTORIAL.presupuestoMs < 300_000);
+
+// ── 5. Gmail falla a ratos: lo pasajero se reintenta, lo demás se dice ───────
+console.log("\n5. Reintentos contra Gmail");
+chk("429 (límite por usuario) → se reintenta", falloGmailTransitorio(429, "Too many requests"));
+chk("500/503 (backend de Google) → se reintenta", falloGmailTransitorio(500, "Backend Error") && falloGmailTransitorio(503, "x"));
+chk("403 por cuota → se reintenta", falloGmailTransitorio(403, "User-rate limit exceeded") && falloGmailTransitorio(403, "Quota exceeded for quota metric"));
+chk("sin respuesta (red) → se reintenta", falloGmailTransitorio(null, "fetch failed"));
+chk("404 (el correo ya no existe) → NO: esperar no lo arregla", !falloGmailTransitorio(404, "Requested entity was not found."));
+chk("401/403 de permiso → NO", !falloGmailTransitorio(401, "Invalid Credentials") && !falloGmailTransitorio(403, "Insufficient Permission"));
+chk("400 → NO", !falloGmailTransitorio(400, "Invalid id value"));
+{
+  const original = globalThis.fetch;
+  const guion = (respuestas: (() => Response)[]) => {
+    let n = 0;
+    globalThis.fetch = (async () => {
+      const r = respuestas[Math.min(n, respuestas.length - 1)];
+      n++;
+      return r();
+    }) as any;
+    return () => n;
+  };
+  const json = (status: number, cuerpo: unknown) => () => new Response(JSON.stringify(cuerpo), { status, headers: { "content-type": "application/json" } });
+  const html = (status: number) => () => new Response("<html><body>502. That's an error.</body></html>", { status });
+  const sinEspera = [0, 0, 0];
+  try {
+    let llamadas = guion([json(429, { error: { message: "Too many requests" } }), json(503, { error: { message: "Backend Error" } }), json(200, { id: "m1" })]);
+    const j = await ggetGmail("tk", "/messages/m1", sinEspera);
+    chk("dos fallos pasajeros y luego bien → devuelve el correo", j?.id === "m1" && llamadas() === 3, `llamadas ${llamadas()}`);
+
+    llamadas = guion([json(404, { error: { message: "Requested entity was not found." } })]);
+    const e404 = await ggetGmail("tk", "/x", sinEspera).then(() => null, (e) => e.message);
+    chk("404 → se dice tal cual y NO se reintenta", e404 === "Requested entity was not found." && llamadas() === 1, `${e404} · ${llamadas()}`);
+
+    llamadas = guion([html(502), json(200, { ok: 1 })]);
+    const jh = await ggetGmail("tk", "/x", sinEspera);
+    chk("una página de error sin JSON (502) se reintenta", jh?.ok === 1 && llamadas() === 2);
+
+    llamadas = guion([() => { throw new TypeError("fetch failed"); }]);
+    const ered = await ggetGmail("tk", "/x", sinEspera).then(() => null, (e) => e.message);
+    chk("la red caída se reintenta y al final se nombra con los intentos", /no respondió/.test(ered ?? "") && /tras 4 intentos/.test(ered ?? "") && llamadas() === 4, `${ered}`);
+
+    // Regresión: el gget anterior, copiado literal. Leía el JSON ANTES de mirar el estado, así que
+    // una página de error de Google se convertía en un error de JSON que no dice nada, sin reintento.
+    async function ggetViejo(token: string, ruta: string): Promise<any> {
+      const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${ruta}`, { headers: { Authorization: `Bearer ${token}` } });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error?.message ?? `Gmail ${r.status}`);
+      return j;
+    }
+    llamadas = guion([html(502), json(200, { ok: 1 })]);
+    const eViejo = await ggetViejo("tk", "/x").then(() => null, (e) => e.message);
+    chk("regresión: el viejo, ante un 502 de Google, fallaba con un error de JSON y sin reintentar",
+      !!eViejo && !/Gmail/.test(eViejo) && llamadas() === 1, `${eViejo}`);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde.");
 process.exit(fallos ? 1 : 0);

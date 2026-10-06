@@ -7,6 +7,8 @@
 //             pantalla vuelve a llamar mientras queden `pendientes`). Lo que falta del historial
 //             NO se registra solo: queda en «revisar» con motivo `historico`.
 //        { accion: "registrar_historicas" } → una persona decidió registrar todas esas juntas.
+//        { accion: "reintentar_errores", desde_id? } → vuelve a leer, por su id, los correos que
+//             quedaron en «Error» (la pantalla avanza con `ultimo_id` mientras `quedan`).
 //        { accion: "deuda_prepago" } → comprobantes de una cuenta prepago que figuran como deuda
 //             en Tesorería sin serlo (nacieron «impaga» antes de que se crearan pagados).
 //        { accion: "marcar_prepago", ids } → una persona vio esa lista y los deja pagados.
@@ -21,7 +23,7 @@ import { hoyLima } from "@/lib/alertas";
 import { cargarCuentas } from "@/lib/combustible/saldo-datos";
 import {
   sincronizarFacturas, conciliarFacturaGuardada, registrarHistoricas, LECTURA_HISTORIAL,
-  prepagoComoDeuda, marcarPrepagoPagadas,
+  prepagoComoDeuda, marcarPrepagoPagadas, reintentarErrores,
 } from "@/lib/combustible/facturas-correo";
 
 export const maxDuration = 300;
@@ -65,6 +67,12 @@ export async function POST(req: NextRequest) {
       const { cuentas, sinMigracion } = await cargarCuentas(sb);
       if (sinMigracion) return NextResponse.json({ ok: false, error: "Falta correr supabase/combustible-03-saldo-cuenta-y-facturas.sql" });
       return NextResponse.json(await registrarHistoricas(sb, cuentas, hoyLima()));
+    }
+    if (body.accion === "reintentar_errores") {
+      const { cuentas, sinMigracion } = await cargarCuentas(sb);
+      if (sinMigracion) return NextResponse.json({ ok: false, error: "Falta correr supabase/combustible-03-saldo-cuenta-y-facturas.sql" });
+      const desdeId = Number(body.desde_id);
+      return NextResponse.json(await reintentarErrores(sb, cuentas, hoyLima(), { desdeId: Number.isFinite(desdeId) ? desdeId : 0 }));
     }
     if (body.accion === "deuda_prepago") return NextResponse.json(await prepagoComoDeuda(sb));
     if (body.accion === "marcar_prepago") {
