@@ -12,7 +12,7 @@
 //     físico reemplazado), evitando que "el mayor gana" deje al bus ciego.
 
 import { firmarUrl, type ClienteStorage } from "@/lib/storage-firmado";
-import { instanteLectura, finDiaLimaTs, diaLimaDeTs } from "@/lib/odometro-tiempo";
+import { instanteLectura, finDiaLimaTs, diaLimaDeTs, capturaDeFechaHora } from "@/lib/odometro-tiempo";
 
 export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
@@ -762,7 +762,15 @@ const FUENTES_HORA_TOPE: string[] = ["whatsapp_foto", "whatsapp_manual", "combus
 /** Acepta manualmente una lectura sospechosa (desde el panel de revisión). */
 export async function aceptarLectura(
   client: any,
-  lecturaId: string
+  lecturaId: string,
+  opts: {
+    /**
+     * Hora tecleada por quien revisa ("08:01:57"), sobre la FECHA de la lectura. Es un dato
+     * que una persona leyó en el voucher o en la foto, así que se guarda TAL CUAL y no se
+     * reubica: la reubicación por kilometraje existe para cuando nadie sabe la hora.
+     */
+    hora?: string | null;
+  } = {}
 ): Promise<{ ok: boolean; error?: string }> {
   // select("*") en vez de nombrar vehiculo_tercero_id: migration-safe (si el código se
   // despliega antes de correr odometro-terceros.sql, nombrar la columna nueva haría fallar
@@ -785,7 +793,13 @@ export async function aceptarLectura(
   // a secas, una recarga del 13/09 confirmada el 05/10 se reubicaba contra las lecturas del 05/10.
   const inst = instanteLectura(l);
   const soloFecha = inst.origen === "fin_del_dia";
-  if (FUENTES_HORA_TOPE.includes(String(l.fuente)) || soloFecha) {
+  const hayHora = opts.hora != null && String(opts.hora).trim() !== "";
+  const horaManual = hayHora ? capturaDeFechaHora(l.fecha, opts.hora) : null;
+  if (hayHora && !horaManual) return { ok: false, error: `«${opts.hora}» no es una hora válida (HH:MM)` };
+  if (horaManual) {
+    parche.capturado_en = horaManual;
+    parche.motivo = `Aceptada manualmente · hora corregida a mano: ${horaLimaDeTs(new Date(horaManual).getTime())}`;
+  } else if (FUENTES_HORA_TOPE.includes(String(l.fuente)) || soloFecha) {
     const ctx = await contextoOdometro(client, {
       vehiculo_id: vid, flota: esTercero ? "tercero" : "propia",
       tsRef: inst.ts ? new Date(inst.ts).toISOString() : l.fecha,
@@ -799,13 +813,63 @@ export async function aceptarLectura(
     }
   }
 
-  await client.from("lecturas_odometro").update(parche).eq("id", lecturaId);
+  const { error: eUp } = await client.from("lecturas_odometro").update(parche).eq("id", lecturaId);
+  if (eUp) return { ok: false, error: eUp.message };
   const { data: veh } = await client
     .from(tabla).select("kilometraje_actual").eq("id", vid).single();
   if (Number(l.km) > Number(veh?.kilometraje_actual || 0)) {
     await client.from(tabla).update({ kilometraje_actual: Number(l.km) }).eq("id", vid);
   }
   return { ok: true };
+}
+
+/**
+ * Corrige la HORA de una lectura por revisar y la vuelve a JUZGAR, sin aceptarla.
+ *
+ * El caso (CTV-370): una recarga del 13/09 sin hora guardada sale «incoherente» contra las
+ * lecturas de ese día, y la hora estaba impresa en el voucher (08:01:57). Quien revisa la lee
+ * en la foto, la teclea, y ve ANTES de aceptar si con esa hora la lectura cuadra con sus
+ * vecinas. La decisión sigue siendo suya: la lectura queda en revisión con el veredicto nuevo
+ * en el motivo, y el km vigente no se mueve hasta que pulse «Aceptar».
+ *
+ * La hora va sobre la FECHA de la lectura: se corrige dentro de su día.
+ */
+export async function corregirHoraLectura(
+  client: any,
+  lecturaId: string,
+  hora: string
+): Promise<{ ok: boolean; cuadra?: boolean; motivo?: string | null; error?: string }> {
+  const { data: l } = await client.from("lecturas_odometro").select("*").eq("id", lecturaId).single();
+  if (!l) return { ok: false, error: "Lectura no encontrada" };
+  if (l.estado !== "sospechosa") return { ok: false, error: "Solo se corrige la hora de una lectura por revisar" };
+  const capturado = capturaDeFechaHora(l.fecha, hora);
+  if (!capturado) return { ok: false, error: `«${hora}» no es una hora válida (HH:MM)` };
+
+  const esTercero = l.vehiculo_tercero_id != null;
+  const vid = esTercero ? l.vehiculo_tercero_id : l.vehiculo_id;
+  const km = Number(l.km);
+  // Hora EXACTA (no tope): la tecleó una persona, así que no se reubica — se juzga donde dice.
+  const ctx = await contextoOdometro(client, {
+    vehiculo_id: vid, flota: esTercero ? "tercero" : "propia", tsRef: capturado, kmNuevo: km,
+  });
+  // Esta misma lectura está en revisión, así que no es su propia vecina (solo cuentan las vivas).
+  const evalr = evaluarLectura({
+    kmVigente: ctx.kmVigente, kmNuevo: km, kmDiaMax: ctx.kmDiaMax,
+    horasDesdeUltima: ctx.horasDesdeUltima,
+    origenIA: l.fuente === "whatsapp_foto" || l.fuente === "whatsapp_manual" || l.fuente === "combustible",
+    fechaLectura: capturado,
+    refAnterior: ctx.anterior, refPosterior: ctx.posterior,
+  });
+  const hhmm = horaLimaDeTs(new Date(capturado).getTime());
+  const cuadra = evalr.estado === "aceptada";
+  const motivo = cuadra
+    ? `Hora corregida a mano: ${hhmm} · con esa hora cuadra con las lecturas vecinas${evalr.motivo ? ` (${evalr.motivo})` : ""}`
+    : `Hora corregida a mano: ${hhmm} · ${evalr.motivo ?? "sigue sin cuadrar"}`;
+
+  const { error } = await client.from("lecturas_odometro")
+    .update({ capturado_en: capturado, motivo }).eq("id", lecturaId);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, cuadra, motivo };
 }
 
 /**
