@@ -12,6 +12,7 @@
 
 import { instanteLectura, capturaDeRecarga, normalizarHoraVoucher, isoHoraVisible, finDiaLimaTs, capturaDeFechaHora, horaLimaHms } from "../lib/odometro-tiempo";
 import { registrarLectura, evaluarLectura, aceptarLectura, corregirHoraLectura } from "../lib/odometro";
+import { tipoDeRevision } from "../lib/odometro-revision";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -216,9 +217,11 @@ console.log("\n6 · Corregir la HORA antes de aceptar (lo que pidió el dueño c
   chk("NO la acepta: la decisión sigue siendo de la persona", s.estado === "sospechosa");
   chk("el motivo dice la hora y el veredicto nuevo", /08:01/.test(s.motivo) && /cuadra/.test(s.motivo), s.motivo);
   chk("no mueve el km vigente", db.vehiculos[0].kilometraje_actual === 31265);
+  chk("la bandeja la clasifica como «lista para aceptar»", tipoDeRevision(s.motivo) === "lista_para_aceptar");
 
   const db2 = dia();
   const r2 = await corregirHoraLectura(clienteFalso(db2), "s", "19:00");
+  chk("y la que no cuadra, como su problema real", tipoDeRevision(r2.motivo) === "retroceso");
   chk("una hora que no cuadra lo DICE (retrocede frente a las 17:53)", r2.ok && r2.cuadra === false && /17:53/.test(r2.motivo ?? ""), r2.motivo ?? "");
 
   const db3 = dia();
