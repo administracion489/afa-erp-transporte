@@ -23,6 +23,11 @@
 // «Auto» en el estado: con lecturas pendientes la pestaña abre en ellas (es el trabajo); sin
 // ninguna, en todas — la misma convención que la pestaña Combustible del Radar. Una vez que la
 // persona elige, manda su elección.
+//
+// «PLACA SIN CONFIRMAR» ES OTRO EJE, NO UN ESTADO: una lectura puede estar ACEPTADA —y por eso
+// inflando el km vigente de su unidad— en una placa que la IA eligió por el parecido del tablero
+// (lib/radar/procedencia-placa.ts). La auditoría la marca en `placaDudosa`, y el filtro la busca
+// en cualquier estado.
 
 import { TIPOS_REVISION, placaComparable, tipoDeRevision, type TipoRevision } from "@/lib/odometro-revision";
 
@@ -59,13 +64,15 @@ export type FiltroLecturas = {
   foto: "todas" | "con" | "sin";
   estado: FiltroEstado;
   problema: TipoRevision | "todos";
+  /** Solo las lecturas cuya placa no respalda ni el mensaje ni el servicio de quien la mandó. */
+  identidad: "todas" | "sin_confirmar";
   orden: ColumnaOrden;
   dir: "asc" | "desc";
 };
 
 export const FILTRO_LECTURAS_VACIO: FiltroLecturas = {
   desde: "", hasta: "", placa: "", flota: "todas", kmMin: "", kmMax: "", foto: "todas",
-  estado: "auto", problema: "todos", orden: "llegada", dir: "desc",
+  estado: "auto", problema: "todos", identidad: "todas", orden: "llegada", dir: "desc",
 };
 
 export type FilaLectura = {
@@ -79,6 +86,8 @@ export type FilaLectura = {
   vehiculo_tercero_id?: number | null;
   /** La placa ya resuelta contra la flota ("" si no se encontró la unidad). */
   placa: string;
+  /** La auditoría dice que nada respalda esa placa (o que es de otra unidad). Ausente = sin juzgar. */
+  placaDudosa?: boolean;
 };
 
 /**
@@ -95,10 +104,11 @@ export function kmDeTexto(s: string | null | undefined): number | null {
 /** ¿Hay algo que recorte? El estado «auto» no cuenta: es la vista por defecto, no un filtro puesto a mano. */
 export function hayFiltroLecturas(f: FiltroLecturas): boolean {
   return !!f.desde || !!f.hasta || !!f.placa.trim() || f.flota !== "todas" || kmDeTexto(f.kmMin) != null ||
-    kmDeTexto(f.kmMax) != null || f.foto !== "todas" || (f.estado !== "auto" && f.estado !== "todos") || f.problema !== "todos";
+    kmDeTexto(f.kmMax) != null || f.foto !== "todas" || (f.estado !== "auto" && f.estado !== "todos") || f.problema !== "todos" ||
+    f.identidad !== "todas";
 }
 
-type Eje = "estado" | "problema" | "foto" | "flota" | "placa";
+type Eje = "estado" | "problema" | "foto" | "flota" | "placa" | "identidad";
 
 function pasaEstado(estado: string, filtro: Exclude<FiltroEstado, "auto">): boolean {
   if (filtro === "todos") return true;
@@ -119,6 +129,7 @@ function pasa(l: FilaLectura, f: FiltroLecturas, estado: Exclude<FiltroEstado, "
     if (f.flota === "tercero" ? !esTercero : esTercero) return false;
   }
   if (salvo !== "foto" && f.foto !== "todas" && (f.foto === "con") !== !!l.foto_url) return false;
+  if (salvo !== "identidad" && f.identidad === "sin_confirmar" && l.placaDudosa !== true) return false;
   // Sin fecha no se puede afirmar que caiga dentro del rango: con un rango puesto, queda fuera.
   const fecha = l.fecha ? l.fecha.slice(0, 10) : null;
   if (f.desde && (!fecha || fecha < f.desde)) return false;
@@ -182,6 +193,8 @@ export type ResultadoLecturas<T> = {
   porProblema: Record<TipoRevision, number>;
   porFoto: { con: number; sin: number };
   porFlota: { propia: number; tercero: number };
+  /** Lecturas con la placa sin confirmar, con los otros filtros puestos (sin el suyo). */
+  placaSinConfirmar: number;
   /** Placas con lecturas que pasan los otros filtros (sin el de placa), de más a menos. */
   porPlaca: { placa: string; n: number }[];
   avisos: AvisoFiltro[];
@@ -197,6 +210,7 @@ export function filtrarLecturas<T extends FilaLectura>(todas: T[], filtro: Filtr
   const porFoto = { con: 0, sin: 0 };
   const porFlota = { propia: 0, tercero: 0 };
   const placas = new Map<string, number>();
+  let placaSinConfirmar = 0;
   const filas: T[] = [];
 
   for (const l of todas) {
@@ -212,6 +226,7 @@ export function filtrarLecturas<T extends FilaLectura>(todas: T[], filtro: Filtr
     if (pasa(l, filtro, estadoAplicado, "foto")) porFoto[l.foto_url ? "con" : "sin"]++;
     if (pasa(l, filtro, estadoAplicado, "flota")) porFlota[l.vehiculo_tercero_id != null ? "tercero" : "propia"]++;
     if (l.placa && pasa(l, filtro, estadoAplicado, "placa")) placas.set(l.placa, (placas.get(l.placa) ?? 0) + 1);
+    if (l.placaDudosa === true && pasa(l, filtro, estadoAplicado, "identidad")) placaSinConfirmar++;
     if (pasa(l, filtro, estadoAplicado, null)) filas.push(l);
   }
 
@@ -238,6 +253,7 @@ export function filtrarLecturas<T extends FilaLectura>(todas: T[], filtro: Filtr
     porProblema,
     porFoto,
     porFlota,
+    placaSinConfirmar,
     porPlaca,
     avisos,
   };

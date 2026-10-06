@@ -41,6 +41,7 @@ import {
   type ColumnaOrden, type FiltroLecturas,
 } from "@/lib/radar/odometro-lecturas";
 import { TIPOS_REVISION, etiquetaTipo, placaComparable } from "@/lib/odometro-revision";
+import { auditarLecturasRadar, type AuditoriaLectura } from "@/lib/radar/auditoria-placas";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -224,6 +225,8 @@ type RadarLecturaOdometro = {
   momento: string | null;
   motivo: string | null;
   created_at: string;
+  /** `radar_odo:<mensaje>` (foto de tablero) o `radar_odo_comb:<mensaje>` (voucher): ata la lectura a su mensaje. */
+  idem_key?: string | null;
 };
 
 const ESTADO_ODO_CFG: Record<RadarLecturaOdometro["estado"], { label: string; color: string; bg: string }> = {
@@ -1277,14 +1280,35 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
   const [foto, setFoto] = useState<string | null>(null);
   const [aceptando, setAceptando] = useState<string | null>(null);
   const [corrigiendo, setCorrigiendo] = useState<RadarLecturaOdometro | null>(null);
+  // Corregir la UNIDAD (no el número): abre el mismo modal en «Foto de otra unidad».
+  const [cambiandoUnidad, setCambiandoUnidad] = useState<RadarLecturaOdometro | null>(null);
   const [fil, setFil] = useState<FiltroLecturas>(FILTRO_LECTURAS_VACIO);
   const setF = <K extends keyof FiltroLecturas>(k: K, v: FiltroLecturas[K]) => setFil((p) => ({ ...p, [k]: v }));
 
+  // ¿Cada lectura está en la unidad correcta? (lib/radar/auditoria-placas.ts): la MISMA regla con
+  // la que el Radar decide hoy la unidad, aplicada a lo que grabó antes de tenerla. Best-effort y
+  // después de pintar: si falla, la tabla sigue sirviendo y simplemente no se marca nada.
+  const [auditoria, setAuditoria] = useState<{ porLectura: Map<string, AuditoriaLectura>; completa: boolean; de: RadarLecturaOdometro[] } | null>(null);
+  useEffect(() => {
+    let vivo = true;
+    auditarLecturasRadar(supabase, registros).then((r) => { if (vivo) setAuditoria({ ...r, de: registros }); });
+    return () => { vivo = false; };
+  }, [registros]);
+  // Mientras se audita una lista NUEVA no se enseña la auditoría de la anterior.
+  const audit = auditoria && auditoria.de === registros ? auditoria : null;
+  const auditDe = (r: RadarLecturaOdometro) => audit?.porLectura.get(r.id) ?? null;
+
   const filas = useMemo(
-    () => registros.map((r) => ({ ...r, placa: unidadDeLectura(r, vehiculosGuia).placa ?? "" })),
-    [registros, vehiculosGuia],
+    () => registros.map((r) => {
+      const a = audit?.porLectura.get(r.id);
+      return { ...r, placa: unidadDeLectura(r, vehiculosGuia).placa ?? "", placaDudosa: a ? a.veredicto !== "respaldada" : undefined };
+    }),
+    [registros, vehiculosGuia, audit],
   );
   const res = useMemo(() => filtrarLecturas(filas, fil), [filas, fil]);
+  // Las de placa dudosa en TODA la lista: son trabajo esté la lectura en el estado que esté — una
+  // ACEPTADA es la peor, porque infla el km vigente de una unidad que no era.
+  const dudosasTotal = useMemo(() => filas.filter((l) => l.placaDudosa === true).length, [filas]);
 
   if (registros.length === 0) {
     return <CardVacia emoji="🛞" titulo="Sin lecturas de odómetro" detalle="Las fotos de tablero que lleguen a los grupos y el Radar logre registrar aparecen aquí." />;
@@ -1347,10 +1371,37 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
           {res.filas.length === res.total ? `${res.total} lectura(s)` : `${res.filas.length} de ${res.total} lectura(s)`}
           {fil.estado === "auto" && soloPendientes && " · se abre en las pendientes porque hay alguna"}
         </span>
+        {(dudosasTotal > 0 || fil.identidad === "sin_confirmar") && (
+          <button
+            onClick={() => setFil((p) => p.identidad === "sin_confirmar"
+              ? { ...p, identidad: "todas" }
+              // En cualquier estado: la más dañina es la que quedó ACEPTADA.
+              : { ...p, identidad: "sin_confirmar", estado: "todos", problema: "todos" })}
+            title="Lecturas en una placa que no está escrita en el mensaje ni sale del servicio de quien mandó la foto: la eligió la IA por el parecido del tablero"
+            className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${fil.identidad === "sin_confirmar" ? "bg-[#B42318] text-white border-[#B42318]" : "bg-white text-[#B42318] border-[#F3B8B3] hover:border-[#B42318]"}`}>
+            ⚠ Placa sin confirmar · {dudosasTotal}
+          </button>
+        )}
+        {!audit && <span className="text-[11px] text-gray-400">comprobando placas…</span>}
         {(filtrando || fil.orden !== "llegada") && (
           <button onClick={limpiar} className="text-xs font-bold text-[#1262bd] hover:underline">Limpiar filtros</button>
         )}
       </div>
+      {/* Lo que el Radar grabó antes de decidir la unidad por el número de quien manda la foto. */}
+      {dudosasTotal > 0 && fil.identidad !== "sin_confirmar" && (
+        <div className="mb-3 rounded-xl border border-[#F3B8B3] bg-[#FEF3F2] px-3 py-2 text-xs text-[#7A271A]">
+          <b>⚠ {dudosasTotal} lectura(s) están en una placa que nada respalda.</b>{" "}
+          La placa no está escrita en el mensaje ni sale de la unidad que manejaba quien mandó la foto: la eligió la IA
+          por el parecido del tablero. Si quedó aceptada, ese km es hoy el vigente de una unidad que no era.{" "}
+          <button onClick={() => setFil((p) => ({ ...p, identidad: "sin_confirmar", estado: "todos", problema: "todos" }))}
+            className="font-bold underline">Revisarlas</button>
+        </div>
+      )}
+      {audit && !audit.completa && (
+        <p className="text-xs font-bold text-[#B07A0F] mb-2">
+          ⚠ No se pudo comprobar la placa de todas las lecturas: alguna con la placa sin confirmar puede no estar marcada.
+        </p>
+      )}
       {/* Las placas con lecturas pendientes: un clic filtra por ella. */}
       {soloPendientes && res.porPlaca.length > 1 && (
         <div className="flex flex-wrap items-center gap-1.5 mb-3">
@@ -1468,12 +1519,24 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
                 const est = ESTADO_ODO_CFG[r.estado] ?? ESTADO_ODO_CFG.sospechosa;
                 const { placa, flota } = unidadDe(r);
                 const problema = problemaDe(r);
+                const aud = auditDe(r);
                 return (
                   <tr key={r.id} className="border-t hover:bg-gray-50 transition-colors" style={{ borderColor: "#f1f5f9" }}>
                     <td className="p-3 whitespace-nowrap text-gray-600">{r.fecha ? fmtFecha(r.fecha) : "—"}</td>
                     <td className="p-3 whitespace-nowrap">
                       <span className="font-mono font-black text-[#0b315f]">{placa ?? "—"}</span>
                       {flota === "tercero" && <span className="ml-1.5 text-[10px] font-black px-1.5 py-0.5 rounded-full" style={{ color: "#B07A0F", background: "#FBF1D8" }}>Tercero</span>}
+                      {aud && aud.veredicto !== "respaldada" && r.estado !== "anulada" && (
+                        <div className="mt-1 max-w-[17rem] whitespace-normal">
+                          <p className="text-[11px] font-black text-[#B42318]">
+                            ⚠ {aud.veredicto === "otra_unidad" ? `Sería de ${aud.propuesta!.placa}` : "Placa sin confirmar"}
+                          </p>
+                          <p className="text-[11px] text-gray-500 leading-snug line-clamp-3" title={aud.motivo ?? undefined}>{aud.motivo}</p>
+                          {aud.remitente && (
+                            <p className="text-[10px] text-gray-400 mt-0.5">Mandó la foto: {aud.remitente}{aud.telefono ? ` · ${aud.telefono}` : ""}</p>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="p-3 whitespace-nowrap font-black text-[#0b315f]">{r.km.toLocaleString("es-PE")} km</td>
                     <td className="p-3">
@@ -1505,6 +1568,13 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
                           <button onClick={() => aceptar(r)} disabled={aceptando === r.id}
                             className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-green-700 border border-green-200 hover:bg-green-50 disabled:opacity-50">
                             {aceptando === r.id ? "…" : "✓ Aceptar"}
+                          </button>
+                        )}
+                        {aud && aud.veredicto !== "respaldada" && r.estado !== "anulada" && (
+                          <button onClick={() => setCambiandoUnidad(r)}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white bg-[#B42318] hover:opacity-90"
+                            title="Pasar la lectura a la unidad correcta (o anularla si no se sabe cuál es)">
+                            {aud.propuesta ? `↪ Pasar a ${aud.propuesta.placa}` : "↪ Corregir unidad"}
                           </button>
                         )}
                         {r.estado !== "anulada" && (
@@ -1551,6 +1621,29 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
           onAnulada={async () => { showToast("Lectura corregida ✓"); await onRefresh(); }}
         />
       )}
+
+      {/* La lectura está bien leída pero en la unidad equivocada: pasarla a la correcta. */}
+      {cambiandoUnidad && (() => {
+        const a = auditDe(cambiandoUnidad);
+        return (
+          <AnularLecturaOdometro
+            lectura={{
+              id: cambiandoUnidad.id,
+              km: cambiandoUnidad.km,
+              fecha: cambiandoUnidad.fecha ?? "",
+              fuente: cambiandoUnidad.fuente,
+              foto_url: cambiandoUnidad.foto_url,
+              estado: cambiandoUnidad.estado,
+            }}
+            placa={unidadDe(cambiandoUnidad).placa ?? "—"}
+            motivoInicial="otra_unidad"
+            destinoInicial={a?.propuesta?.placa ?? ""}
+            aviso={a?.motivo ?? null}
+            onClose={() => setCambiandoUnidad(null)}
+            onAnulada={async () => { showToast("Lectura corregida ✓"); await onRefresh(); }}
+          />
+        );
+      })()}
     </>
   );
 }
@@ -1714,6 +1807,17 @@ function ModalServidor({ estado, onClose }: { estado: RadarEstado | null; onClos
               <p className="text-xs text-[#8a5a00] bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-lg px-2 py-1.5">
                 Este servidor está en una versión anterior a <b>1.3.0</b>: cuando WhatsApp no manda quién escribió,
                 el mensaje se guarda sin remitente y no se agrupa con el resto de su reporte. Actualízalo en el droplet
+                con <span className="font-mono">git pull &amp;&amp; pm2 restart radar-worker</span>.
+              </p>
+            )}
+            {/* 1.4.0 guarda el TELÉFONO del remitente en vez del identificador interno (@lid) de
+                WhatsApp: sin él, el ERP no reconoce al conductor y no puede atar la foto de su
+                tablero a la unidad que maneja ese día (lib/radar/procedencia-placa.ts). */}
+            {!versionMenorQue(estado?.version_worker, [1, 3, 0]) && versionMenorQue(estado?.version_worker, [1, 4, 0]) && (
+              <p className="text-xs text-[#8a5a00] bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-lg px-2 py-1.5">
+                Este servidor está en una versión anterior a <b>1.4.0</b>: en los grupos donde WhatsApp entrega al autor con
+                un identificador interno (@lid), no se guarda su número y el Radar no puede saber qué unidad manejaba ese
+                conductor — la foto de un tablero sin placa escrita queda «sin identificar». Actualízalo en el droplet
                 con <span className="font-mono">git pull &amp;&amp; pm2 restart radar-worker</span>.
               </p>
             )}
