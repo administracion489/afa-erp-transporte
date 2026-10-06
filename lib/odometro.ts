@@ -12,7 +12,7 @@
 //     físico reemplazado), evitando que "el mayor gana" deje al bus ciego.
 
 import { firmarUrl, type ClienteStorage } from "@/lib/storage-firmado";
-import { instanteLectura, finDiaLimaTs, diaLimaDeTs, capturaDeFechaHora } from "@/lib/odometro-tiempo";
+import { instanteLectura, finDiaLimaTs, diaLimaDeTs, capturaDeFechaHora, capturaDeRecarga } from "@/lib/odometro-tiempo";
 
 export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
@@ -512,6 +512,68 @@ export async function contextoOdometro(
     hayHistorial: anterior != null || posterior != null,
     anterior, posterior, tsUbicado, notaHora,
   };
+}
+
+/**
+ * ¿El kilometraje de una RECARGA cuadra con las lecturas de SU momento? Devuelve por qué no, o null.
+ * Puro: recibe lo que `contextoOdometro` ya leyó.
+ *
+ * LO REPORTADO: «muchas dan KM MENOR AL ACTUAL, y es correcto: recién revisamos los vouchers después
+ * de varios días y el km ya avanzó». El Radar comparaba el km del voucher con el km VIGENTE de la
+ * unidad —el de HOY—, así que todo voucher procesado tarde (un reproceso, una revisión de la semana
+ * pasada) salía «menor al actual», y como esa anomalía bloquea, ninguno se registraba solo. Es el
+ * mismo error que `evaluarLectura` ya corrige para el odómetro («comparar contra el km vigente
+ * acusa de retroceso a toda lectura que llega tarde pero pertenece a un momento anterior»): la
+ * referencia correcta es la lectura viva ANTERIOR a la hora del voucher, y la POSTERIOR detecta el
+ * error simétrico. Misma tolerancia que el «retroceso leve» de evaluarLectura: un par de km de ruido
+ * de lectura no frena una carga (la lectura igual queda sospechosa en el historial).
+ */
+export function kmFueraDeSuMomento(
+  km: number,
+  ctx: Pick<ContextoOdometro, "anterior" | "posterior" | "kmVigente">,
+): string | null {
+  const fmt = (n: number) => Number(n).toLocaleString("es-PE");
+  const post = ctx.posterior;
+  if (post && km > Number(post.km)) {
+    return `Kilometraje ${fmt(km)} mayor que la lectura ${describirRef(post)}, que es POSTERIOR a este voucher: el odómetro no puede bajar después`;
+  }
+  const ref = ctx.anterior;
+  const base = ref ? Number(ref.km) || 0 : (post ? 0 : Number(ctx.kmVigente || 0));
+  if (base > 0 && km < base) {
+    const retro = base - km;
+    const tol = Math.max(5, Math.round(base * 0.001));
+    if (retro > tol) {
+      return ref
+        ? `Kilometraje ${fmt(km)} menor que la lectura ${describirRef(ref)}, ANTERIOR a este voucher: retrocede ${fmt(retro)} km`
+        : `Kilometraje ${fmt(km)} menor al vigente ${fmt(base)}, y no hay lecturas de esa fecha con qué compararlo`;
+    }
+  }
+  return null;
+}
+
+/**
+ * El juicio de arriba con la lectura de la base: la hora del voucher (la impresa, o la del mensaje como
+ * tope, o solo la fecha — `capturaDeRecarga`, la misma con que se registrará el odómetro) y las
+ * lecturas vivas alrededor (`contextoOdometro`). Lo usan el Radar al procesar y la pantalla de
+ * revisión, para que los dos digan lo mismo del mismo voucher. Si no se puede leer, no acusa (null):
+ * la lectura igual pasa después por `registrarLectura`, que la juzga con la misma regla.
+ */
+export async function juzgarKmDeRecarga(
+  client: any,
+  o: { vehiculo_id: number; flota?: Flota; km: number; fecha: string; hora?: string | null; tsMensaje?: string | null },
+): Promise<string | null> {
+  try {
+    if (!o.vehiculo_id || !(o.km > 0) || !o.fecha) return null;
+    const cap = capturaDeRecarga({ fecha: o.fecha, hora: o.hora ?? null, tsMensaje: o.tsMensaje ?? null });
+    const soloFecha = cap.capturado_en == null;
+    const tsRef = cap.capturado_en ?? new Date(Math.min(finDiaLimaTs(o.fecha.slice(0, 10)), Date.now())).toISOString();
+    const ctx = await contextoOdometro(client, {
+      vehiculo_id: o.vehiculo_id, flota: o.flota, tsRef, horaEsTope: soloFecha ? true : cap.horaEsTope, kmNuevo: o.km, soloFecha,
+    });
+    return ctx.existe ? kmFueraDeSuMomento(o.km, ctx) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -71,6 +71,30 @@ export const esFallido = (m: { estado?: string | null; accion?: string | null })
   m.estado === "error" || m.accion === "error_accion";
 
 /**
+ * POR QUÉ falló, en una frase, de donde lo haya dejado el motor: un error del pipeline va en `error`;
+ * una ACCIÓN que falló, en `resultado.accion.detalle` (así lo guarda el motor). El aviso de /radar-ia
+ * decía «su motivo está en el detalle de cada mensaje» sin decir cuáles eran: un mensaje viejo no
+ * está entre los 150 que trae el feed, y uno sin clasificar no tiene filtro donde buscarlo.
+ */
+export function motivoDeFallo(m: { error?: string | null; resultado?: unknown }): string {
+  const e = String(m.error ?? "").trim();
+  if (e) return e;
+  const r = m.resultado && typeof m.resultado === "object" ? (m.resultado as Record<string, unknown>) : null;
+  const a = r?.accion && typeof r.accion === "object" ? (r.accion as Record<string, unknown>) : null;
+  const d = String(a?.detalle ?? r?.detalle ?? "").trim();
+  return d || "No quedó guardado el motivo: reprocesarlo lo vuelve a intentar y lo deja escrito.";
+}
+
+/**
+ * «Quitar del aviso»: lo que se escribe sobre un mensaje fallido que una persona decidió no reintentar
+ * (una foto que no es de combustible, una carga que ya registró a mano). Sale de FILTRO_FALLIDOS
+ * —ni `error` ni `error_accion`—, así que el aviso deja de contarlo y el lote no lo vuelve a leer. El
+ * motivo del fallo NO se borra: `error` y `resultado` quedan como estaban, para saber qué pasó.
+ */
+export const ACCION_QUITADO_DEL_AVISO = "fallo_descartado_a_mano";
+export const PATCH_QUITAR_DEL_AVISO = { estado: "descartado", accion: ACCION_QUITADO_DEL_AVISO } as const;
+
+/**
  * Lo que el motor todavía no TERMINÓ: falló, o sigue en la cola. Las dos cosas cuentan como parte
  * de una ráfaga que se reprocesa: un mensaje pendiente más antiguo que el reprocesado se llevaría al
  * reprocesado fundido —el motor junta en el más antiguo— y nadie procesaría ese en esta llamada.

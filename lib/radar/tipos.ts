@@ -237,6 +237,12 @@ export type AnomaliaCombustible = {
   /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
   bloquea?: boolean;
   /**
+   * `km_menor_al_actual` ya juzgado contra las lecturas de SU fecha (lib/odometro.ts →
+   * juzgarKmDeRecarga). Las filas viejas no lo traen: se compararon con el km de HOY, y la pantalla
+   * ofrece volver a juzgarlas.
+   */
+  por_fecha?: boolean;
+  /**
    * Qué número cambió el cuadre aritmético, en estructurado. Existe para que la pantalla y el
    * dataset de lecciones NO tengan que olfatear el texto de `detalle`: `valor_ia` de una
    * corrección humana posterior es `leido`, no lo que quedó guardado en la fila.

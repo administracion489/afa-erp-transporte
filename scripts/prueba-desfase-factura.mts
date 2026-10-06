@@ -13,15 +13,20 @@
 //   4. el caso real de punta a punta (XML → línea → plan), con el algoritmo viejo reproduciendo el bug;
 //   5. el cruce busca alrededor de las DOS fechas: nada que ya esté registrado se registra otra vez;
 //   6. qué cargas viejas se proponen mover, y cuáles NO;
-//   7. invariantes por barrido.
+//   7. invariantes por barrido;
+//   8. la factura generada DESPUÉS de su fecha (el cierre de mes) se reconoce y no se corre;
+//   9. la medición por cruce con los vouchers, sobre las 35 facturas reales de COESTI;
+//  10. las consolidadas se fechan solo con SU evidencia (y nunca por el desfase fijo);
+//  11. la decisión de una persona queda GUARDADA: una consolidada llega a «conciliada».
 import {
   medirDesfase, decidirDesfase, normalizarDesfaseConfig, origenFechaLinea, fechaDeDespacho, lineasAlDespacho,
   cargasPorMover, resumenMover, sumarDias, diasEntre, esCargaDelRadar, textoMedicion,
+  generadaDespues, diaLima, muestrasDesfase, decidirConsolidadas, decidirDesfaseCuenta,
   MIN_MUESTRAS_DESFASE, MIN_ACUERDO_DESFASE, MAX_DESFASE,
-  type FacturaRegistrada, type CargaActual, type OrigenFecha,
+  type FacturaRegistrada, type CargaActual, type OrigenFecha, type FacturaParaMedir, type VoucherRadar,
 } from "../lib/combustible/desfase-factura";
 import {
-  lineasUbl, completarConDocumento, planDeLinea, observacionCargaDeFactura, esCargaDeFactura,
+  lineasUbl, completarConDocumento, planDeLinea, observacionCargaDeFactura, esCargaDeFactura, lineasConDecision,
   type LineaFactura, type CargaExistente,
 } from "../lib/combustible/factura-lineas";
 
@@ -152,9 +157,21 @@ console.log("\n5. Nada que ya esté registrado se registra otra vez");
     const p = plan(juzgada(k), [deEstaFactura], 77);
     chk(`la carga que ESTA factura registró antes con la emisión se sigue encontrando (desfase ${k})`, p.codigo === "ya_registrada", p.codigo);
   }
-  // Sin la fecha alterna (solo la ventana alrededor del despacho), con desfase 2 se registraría otra vez.
-  const sinAlterna = plan({ ...juzgada(2), fecha_alterna: null }, [deEstaFactura], 77);
+  // Sin la fecha alterna (solo la ventana alrededor del despacho), con desfase 2 se registraría otra
+  // vez una carga tecleada a mano desde la factura con su fecha de emisión (no enlazada a ella).
+  const aMano: CargaExistente = { id: 901, placa: "CWZ371", fecha: E, total: 269.92, cantidad: 11.094 };
+  const sinAlterna = plan({ ...juzgada(2), fecha_alterna: null }, [aMano], 77);
   chk("REGRESIÓN: sin buscar también alrededor de la emisión, con desfase 2 la registraría DOS veces", sinAlterna.codigo === "registrar");
+  chk("…con la alterna se encuentra", plan(juzgada(2), [aMano], 77).codigo === "ya_registrada");
+  // La que ESTA factura registró (enlazada a su documento) se reconoce por el enlace, tenga la fecha que tenga.
+  const lejos: CargaExistente = { ...deEstaFactura, fecha: "2026-09-20" };
+  const porDoc = plan({ ...juzgada(2), fecha_alterna: null }, [lejos], 77);
+  chk("una carga YA ENLAZADA a esta factura (misma placa e importe) es esta línea aunque su fecha esté lejos",
+    porDoc.codigo === "ya_registrada" && porDoc.por === "documento", `${porDoc.codigo} ${porDoc.por}`);
+  chk("…pero enlazada a OTRA factura no", plan({ ...juzgada(2), fecha_alterna: null }, [{ ...lejos, documento_compra_id: 78 }], 77).codigo === "registrar");
+  chk("…ni con otro importe", plan({ ...juzgada(2), fecha_alterna: null }, [{ ...lejos, total: 200 }], 77).codigo === "registrar");
+  chk("…y con DOS así el enlace no decide (sigue la ventana de fechas)",
+    plan({ ...juzgada(2), fecha_alterna: null }, [lejos, { ...lejos, id: 902 }], 77).codigo === "registrar");
   // Un despacho de verdad 2 días antes (el Radar lo tiene): con la ventana vieja (solo la emisión) no se veía.
   const radarDosAntes: CargaExistente = { id: 502, placa: "CWZ371", fecha: "2026-10-02", total: 269.92, cantidad: 11.094 };
   chk("REGRESIÓN: con la fecha de emisión, un despacho de 2 días antes no se encontraba (se duplicaba)", plan(L[0], [radarDosAntes]).codigo === "registrar");
@@ -262,6 +279,215 @@ console.log("\n7. Barridos");
     if (plan(juzgada(k), [carga], 77).codigo === "registrar") duplicadas++;
   }
   chk(`(${barridos}) nunca se registra otra vez lo que ya está: ni lo del Radar ni lo que esta factura registró con la emisión`, duplicadas === 0, String(duplicadas));
+}
+
+// ── Las 35 facturas reales de COESTI (23/07–04/10/2026), leídas del correo con su CDR ────────
+// [comprobante, fecha de emisión, llegada del correo (hora Lima), líneas: placa · tipo · cantidad · total]
+type Real = [string, string, string, [string, string, number, number][]];
+const REALES: Real[] = [
+  ["F882-0088376", "2026-07-23", "2026-07-23T05:32", [["CWZ371", "diesel", 15.708, 360.03], ["CWQ400", "glp", 11.389, 85.99]]],
+  ["F882-0088983", "2026-07-26", "2026-07-26T05:31", [["CWZ371", "diesel", 8.297, 195.06], ["CWQ400", "glp", 9.626, 70.75]]],
+  ["F882-0091186", "2026-07-30", "2026-07-30T05:31", [["CWZ371", "diesel", 9.06, 220.07]]],
+  ["F882-0091447", "2026-07-31", "2026-07-31T05:48", [["CWQ400", "glp", 10.074, 74.04]]],
+  ["F882-0092457", "2026-07-31", "2026-08-01T16:20", [["CWQ400", "gasolina_premium", 5.208, 106.71], ["CWQ400", "glp", 3.511, 24.19]]],
+  ["F882-0094809", "2026-08-02", "2026-08-02T05:31", [["CWZ371", "diesel", 10.105, 249.19]]],
+  ["F882-0096012", "2026-08-05", "2026-08-05T05:31", [["CWQ400", "glp", 10.001, 74.51]]],
+  ["F882-0096243", "2026-08-06", "2026-08-06T05:31", [["CWZ371", "diesel", 9.773, 246.67]]],
+  ["F882-0098865", "2026-08-11", "2026-08-11T07:04", [["CWQ400", "glp", 10.72, 74.93]]],
+  ["F882-0099238", "2026-08-12", "2026-08-12T05:52", [["CWZ371", "diesel", 13.843, 341.92]]],
+  ["F882-0099616", "2026-08-14", "2026-08-14T06:34", [["CWQ400", "glp", 8.829, 61.71]]],
+  ["F882-0100048", "2026-08-15", "2026-08-15T08:26", [["CWZ371", "diesel", 9.072, 224.08]]],
+  ["F882-0103511", "2026-08-18", "2026-08-18T06:22", [["CWQ400", "glp", 8.13, 56.83]]],
+  ["F882-0103832", "2026-08-19", "2026-08-19T07:32", [["CWZ371", "diesel", 9.789, 242.08]]],
+  ["F882-0104213", "2026-08-21", "2026-08-21T07:17", [["CWQ400", "glp", 8.136, 55.73]]],
+  ["F882-0104658", "2026-08-22", "2026-08-22T07:33", [["CWZ371", "diesel", 9.718, 240.33]]],
+  ["F882-0106706", "2026-08-25", "2026-08-25T05:32", [["CWQ400", "glp", 0.708, 4.78]]],
+  ["F882-0107071", "2026-08-26", "2026-08-26T05:46", [["CWZ371", "diesel", 12.719, 327.39]]],
+  ["F882-0107246", "2026-08-27", "2026-08-27T05:31", [["CWQ400", "glp", 11.083, 74.81]]],
+  ["F882-0107963", "2026-08-29", "2026-08-29T07:35", [["CWZ371", "diesel", 10.618, 273.31]]],
+  ["F882-0111461", "2026-08-31", "2026-09-01T13:06", [["CWQ400", "gasolina_premium", 8.288, 185.24], ["CWZ371", "diesel", 7.56, 194.59], ["CWQ400", "glp", 11.485, 86.02]]],
+  ["F882-0113633", "2026-09-04", "2026-09-04T05:31", [["CWZ371", "diesel", 8.355, 215.06], ["CWQ400", "glp", 10.106, 76.3]]],
+  ["F882-0115754", "2026-09-08", "2026-09-08T08:09", [["CWZ371", "diesel", 9.326, 240.05], ["CWQ400", "glp", 9.417, 71.1]]],
+  ["F882-0116701", "2026-09-10", "2026-09-10T05:31", [["CWZ371", "diesel", 8.988, 235.04]]],
+  ["F882-0116994", "2026-09-11", "2026-09-11T06:01", [["CWQ400", "glp", 8.969, 67.72]]],
+  ["F882-0117638", "2026-09-13", "2026-09-13T05:32", [["CWZ371", "diesel", 8.606, 225.05]]],
+  ["F882-0119431", "2026-09-15", "2026-09-15T07:19", [["CWQ400", "glp", 8.058, 60.84]]],
+  ["F882-0121656", "2026-09-17", "2026-09-17T05:31", [["CWZ371", "diesel", 9.194, 250.08], ["CWQ400", "glp", 9.056, 68.37]]],
+  ["F882-0122152", "2026-09-19", "2026-09-19T05:31", [["CWQ400", "glp", 7.507, 56.68]]],
+  ["F882-0122454", "2026-09-20", "2026-09-20T12:17", [["CWZ371", "diesel", 9.009, 245.04]]],
+  ["F882-0124552", "2026-09-23", "2026-09-23T07:32", [["CWQ400", "glp", 6.266, 47.31]]],
+  ["F882-0124794", "2026-09-24", "2026-09-24T21:08", [["CWZ371", "diesel", 12.032, 340.02], ["CWQ400", "glp", 8.304, 62.7]]],
+  ["F882-0125628", "2026-09-27", "2026-09-27T05:32", [["CWZ371", "diesel", 8.547, 230.09], ["CWQ400", "glp", 10.777, 81.37]]],
+  ["F882-0130996", "2026-09-30", "2026-10-01T19:04", [["CWQ400", "gasolina_premium", 6.388, 152.61], ["CWZ371", "diesel", 12.071, 315.05], ["CWQ400", "glp", 11.293, 85.26]]],
+  ["F882-0132184", "2026-10-04", "2026-10-04T05:31", [["CWZ371", "diesel", 11.094, 269.92]]],
+];
+const aIso = (lima: string) => new Date(`${lima}:00-05:00`).toISOString();
+const facturaReal = ([, emision, correo, ls]: Real): FacturaParaMedir => ({
+  fecha_emision: emision, recibido_en: aIso(correo),
+  lineas: ls.map(([placa, tipo, cantidad, total], i) => ({
+    n: i + 1, placa, tipo_combustible: tipo, cantidad, total, ...(ls.length === 1 ? { fecha: emision, fecha_origen: "emision" as const } : { fecha: null }),
+  })),
+});
+const FACTURAS = REALES.map(facturaReal);
+
+// ── 8. El cierre de mes ──────────────────────────────────────────────────────
+console.log("\n8. La factura generada DESPUÉS de su fecha (cierre de mes)");
+{
+  const tardias = REALES.filter((r) => generadaDespues(r[1], aIso(r[2]))).map((r) => r[0]);
+  chk("las 3 reales: 31/07, 31/08 y 30/09, generadas el día 1", tardias.join() === "F882-0092457,F882-0111461,F882-0130996", tardias.join());
+  chk("F882-0091447 dice 31/07 y salió en el lote del 31/07: NO es tardía (fin de mes no basta)",
+    !generadaDespues("2026-07-31", aIso("2026-07-31T05:48")));
+  chk("el lote de la madrugada no es tardío (05:31 Lima = 10:31 UTC, el mismo día)", !generadaDespues("2026-10-04", "2026-10-04T10:31:39Z"));
+  chk("un correo de las 21:08 Lima (02:08 UTC del día siguiente) sigue siendo del mismo día", !generadaDespues("2026-09-24", "2026-09-25T02:08:19Z"));
+  chk("diaLima: 00:04 UTC del 02/10 es el 01/10 en Lima", diaLima("2026-10-02T00:04:40Z") === "2026-10-01");
+  chk("sin dato no se afirma nada", !generadaDespues("2026-09-30", null) && !generadaDespues(null, "2026-10-01T12:00:00Z") && !generadaDespues("2026-09-30", "x"));
+}
+
+// ── 9. La medición por cruce, sobre las 35 reales ────────────────────────────
+console.log("\n9. Cuántos días después factura COESTI, medido contra los vouchers del Radar");
+{
+  // Los vouchers: el despacho del lote nocturno es el día ANTERIOR a la emisión (lo confirman los tres
+  // pares reales de la pantalla del Radar: 22/09 → F882-0124552 del 23/09; 23/09 → F882-0124794 del 24/09).
+  const vouchers: VoucherRadar[] = REALES.flatMap((r) => r[3].map(([placa, , cantidad, total]) =>
+    ({ placa, fecha: generadaDespues(r[1], aIso(r[2])) ? r[1] : sumarDias(r[1], -1), total, cantidad })));
+  const m = muestrasDesfase(FACTURAS, vouchers);
+  chk("las 3 del cierre de mes no votan", m.tardias === 3, String(m.tardias));
+  chk("25 de una línea, todas al día siguiente", m.una.length === 25 && m.una.every((d) => d === 1), `${m.una.length}: ${[...new Set(m.una)].join()}`);
+  chk("14 líneas de 7 consolidadas, todas al día siguiente", m.consolidada.length === 14 && m.consolidada.every((d) => d === 1), `${m.consolidada.length}`);
+  const dc = decidirDesfaseCuenta(null, m);
+  chk("→ una línea: automático, 1 día", dc.codigo === "medido" && dc.dias === 1, `${dc.codigo} ${dc.dias}`);
+  chk("→ consolidadas: se fechan, 1 día", dc.consolidadas.fechar && dc.consolidadas.dias === 1 && dc.consolidadas.codigo === "medido", dc.consolidadas.detalle);
+  chk("…y lo dice con su evidencia", /14 recarga\(s\)/.test(dc.consolidadas.detalle) && /emisión − 1/.test(dc.consolidadas.detalle), dc.consolidadas.detalle);
+
+  // REGRESIÓN: lo que medía antes (solo los enlaces de la conciliación de facturas de UNA línea, ±1 día
+  // alrededor de la emisión) no veía ninguna consolidada.
+  const viejo = FACTURAS.filter((f) => f.lineas.length === 1 && !generadaDespues(f.fecha_emision, f.recibido_en)).length;
+  chk("REGRESIÓN: antes las consolidadas no daban ninguna muestra (solo había de una línea)", viejo === 25 && m.consolidada.length > 0);
+
+  const L1 = (placa: string, total: number, extra: Partial<FacturaParaMedir["lineas"][number]> = {}) =>
+    ({ n: 1, placa, total, cantidad: 10, tipo_combustible: "diesel", fecha: "2026-10-04", fecha_origen: "emision" as const, ...extra });
+  const f1 = (l = L1("CWZ371", 269.92)): FacturaParaMedir => ({ fecha_emision: "2026-10-04", recibido_en: "2026-10-04T10:31:00Z", lineas: [l] });
+  const v = (fecha: string, total = 269.92, placa = "CWZ-371", cantidad: number | null = 10): VoucherRadar => ({ placa, fecha, total, cantidad });
+  chk("la placa se compara sin guion", muestrasDesfase([f1()], [v("2026-10-03")]).una.join() === "1");
+  chk("otra placa no casa", muestrasDesfase([f1()], [v("2026-10-03", 269.92, "BUI272")]).una.length === 0);
+  chk("un sol de diferencia ya no casa", muestrasDesfase([f1()], [v("2026-10-03", 268.92)]).una.length === 0);
+  chk("90 céntimos sí", muestrasDesfase([f1()], [v("2026-10-03", 269.02)]).una.join() === "1");
+  chk(`ventana: de ${MAX_DESFASE} días antes de la emisión al día siguiente`,
+    muestrasDesfase([f1()], [v(sumarDias("2026-10-04", -MAX_DESFASE))]).una.join() === String(MAX_DESFASE) &&
+    muestrasDesfase([f1()], [v(sumarDias("2026-10-04", -MAX_DESFASE - 1))]).una.length === 0 &&
+    muestrasDesfase([f1()], [v("2026-10-05")]).una.join() === "-1" && muestrasDesfase([f1()], [v("2026-10-06")]).una.length === 0);
+  chk("dos vouchers con el mismo importe: no cuenta", muestrasDesfase([f1()], [v("2026-10-03"), v("2026-10-02")]).una.length === 0);
+  chk("…salvo que la cantidad desempate", muestrasDesfase([f1()], [v("2026-10-03"), v("2026-10-02", 269.92, "CWZ371", 11)]).una.join() === "1");
+  chk("un voucher que casa con DOS líneas no cuenta para ninguna", muestrasDesfase([f1(), f1()], [v("2026-10-03")]).una.length === 0);
+  chk("una línea que trae SU fecha no vota (el desfase no es para ella)",
+    muestrasDesfase([f1(L1("CWZ371", 269.92, { fecha: "2026-10-03", fecha_origen: "linea" }))], [v("2026-10-03")]).una.length === 0);
+  chk("la que eligió una persona sí vota (se mide con el voucher, no con su fecha)",
+    muestrasDesfase([f1(L1("CWZ371", 269.92, { fecha: "2026-10-01", fecha_origen: "manual" }))], [v("2026-10-03")]).una.join() === "1");
+  chk("sin fecha de emisión no hay muestra", muestrasDesfase([{ ...f1(), fecha_emision: null }], [v("2026-10-03")]).una.length === 0);
+  chk("un voucher sin fecha o sin importe no sirve", muestrasDesfase([f1()], [{ ...v("2026-10-03"), fecha: null }, { ...v("2026-10-03"), total: null }]).una.length === 0);
+}
+
+// ── 10. Las consolidadas se fechan solo con SU evidencia ─────────────────────
+console.log("\n10. Las facturas de varias cargas");
+{
+  const sol = medirDesfase(Array(16).fill(1));
+  chk("sin muestras suficientes: a mano", !decidirConsolidadas(medirDesfase(Array(MIN_MUESTRAS_DESFASE - 1).fill(1))).fechar &&
+    decidirConsolidadas(medirDesfase(Array(MIN_MUESTRAS_DESFASE - 1).fill(1))).codigo === "pocos_datos");
+  chk("dispersas (un mes consolidado no junta UN día): a mano",
+    decidirConsolidadas(medirDesfase([...Array(8).fill(1), 0, 2, 3])).codigo === "disperso" && !decidirConsolidadas(medirDesfase([...Array(8).fill(1), 0, 2, 3])).fechar);
+  chk("sólidas en 0: se fechan con la emisión (también es una decisión)", decidirConsolidadas(medirDesfase(Array(10).fill(0))).fechar && decidirConsolidadas(medirDesfase(Array(10).fill(0))).dias === 0);
+  for (const conf of [0, 1, 2, 3]) {
+    const d = decidirDesfaseCuenta(conf, { una: Array(20).fill(1), consolidada: [], tardias: 0 });
+    chk(`el desfase FIJO (${conf}) manda en las de una línea y NO fecha las consolidadas sin evidencia`, d.dias === conf && !d.consolidadas.fechar);
+  }
+  chk("con evidencia de las consolidadas, el fijo no las cambia", decidirDesfaseCuenta(0, { una: [], consolidada: Array(16).fill(1), tardias: 0 }).consolidadas.dias === 1);
+
+  const E2 = "2026-09-24";
+  const dos = [
+    { n: 1, fecha: null, tipo_combustible: "diesel" }, { n: 2, fecha: null, tipo_combustible: "glp" },
+  ];
+  const a = lineasAlDespacho(dos, E2, 1, null, { consolidada: 1 });
+  chk("consolidada con 1 día: sus dos líneas al 23/09, origen «consolidada», con la emisión de alterna",
+    a.lineas.every((l) => l.fecha === "2026-09-23" && l.fecha_alterna === E2) && [...a.origen.values()].every((o) => o === "consolidada"));
+  const cero = lineasAlDespacho(dos, E2, 1, null, { consolidada: 0 });
+  chk("con 0 días: la de emisión, sin alterna", cero.lineas.every((l) => l.fecha === E2 && l.fecha_alterna === null) && cero.origen.get(1) === "consolidada");
+  chk("sin evidencia (null): sin fecha, como antes", lineasAlDespacho(dos, E2, 1, null, { consolidada: null }).lineas.every((l) => l.fecha === null));
+  chk("de un cierre de mes: sin fecha (puede juntar varios días)", lineasAlDespacho(dos, E2, 1, null, { consolidada: 1, tardia: true }).lineas.every((l) => l.fecha === null));
+  chk("de un cierre de mes, la de UNA línea no se corre", lineasAlDespacho([{ n: 1, fecha: E2, tipo_combustible: "diesel" }], E2, 1, null, { tardia: true }).lineas[0].fecha === E2);
+  chk("la consolidada no toca a la de una línea", lineasAlDespacho([{ n: 1, fecha: E2, tipo_combustible: "diesel" }], E2, 2, null, { consolidada: 0 }).lineas[0].fecha === "2026-09-22");
+  const conLub = lineasAlDespacho([{ n: 1, fecha: null, tipo_combustible: "diesel" }, { n: 2, fecha: null, tipo_combustible: "glp" }, { n: 3, fecha: null, tipo_combustible: null }], E2, 1, null, { consolidada: 1 });
+  chk("una línea que no es combustible no recibe fecha", conLub.lineas[2].fecha === null && conLub.lineas[0].fecha === "2026-09-23");
+  const man = lineasAlDespacho(dos, E2, 1, { n: 2, fecha: "2026-09-20" }, { consolidada: 1 });
+  chk("la que elige una persona manda sobre la deducida", man.lineas[1].fecha === "2026-09-20" && man.origen.get(2) === "manual" && man.lineas[0].fecha === "2026-09-23");
+  chk("una consolidada nunca se propone en «Moverlas» (no es «emision»)", cargasPorMover([{
+    factura_id: 1, serie: "F882", numero: "1", fecha_emision: E2, lineas: dos,
+    conciliacion: [{ n: 1, codigo: "registrar", combustible_id: 1, fecha_origen: "consolidada" }],
+  }], new Map([[1, { id: 1, fecha: E2, observaciones: observacionCargaDeFactura("F882-1", null), total: 1, placa: "CWZ371" }]]), 1).length === 0);
+  chk("una de UNA línea de un cierre de mes tampoco se propone", cargasPorMover([{
+    factura_id: 2, serie: "F882", numero: "2", fecha_emision: "2026-09-30", recibido_en: aIso("2026-10-01T19:04"),
+    lineas: [{ n: 1, fecha: "2026-09-30", tipo_combustible: "diesel" }], conciliacion: [{ n: 1, codigo: "registrar", combustible_id: 2 }],
+  }], new Map([[2, { id: 2, fecha: "2026-09-30", observaciones: observacionCargaDeFactura("F882-2", null), total: 1, placa: "CWZ371" }]]), 1).length === 0);
+
+  // De punta a punta: F882-0124794 (24/09, dos cargas) contra lo que el Radar sí tiene del 23/09.
+  const f = FACTURAS.find((x, i) => REALES[i][0] === "F882-0124794")!;
+  const ls = lineasAlDespacho(f.lineas as LineaFactura[], f.fecha_emision, 1, null, { consolidada: 1 }).lineas as LineaFactura[];
+  const radar: CargaExistente[] = [
+    { id: 71, placa: "CWZ371", fecha: "2026-09-23", total: 340.02, cantidad: 12.032 },
+    { id: 72, placa: "CWQ400", fecha: "2026-09-23", total: 62.7, cantidad: 8.304 },
+  ];
+  const planes = ls.map((l) => planDeLinea({ ...base, linea: l, registradas: radar, radarPendientes: [], documentoId: null }));
+  chk("F882-0124794: sus dos líneas casan con las del Radar del 23/09 (antes: «revisar · sin fecha»)",
+    planes.every((p) => p.codigo === "ya_registrada"), planes.map((p) => p.codigo).join());
+  const antes = (f.lineas as LineaFactura[]).map((l) => planDeLinea({ ...base, linea: l, registradas: radar, radarPendientes: [], documentoId: null }));
+  chk("REGRESIÓN: sin fechar las consolidadas quedaban las dos en «revisar · sin fecha»", antes.every((p) => p.codigo === "revisar" && p.motivo === "sin_fecha"));
+}
+
+// ── 11. La decisión de una persona queda guardada ────────────────────────────
+console.log("\n11. Confirmar a mano una línea de una consolidada");
+{
+  const E3 = "2026-09-24";
+  const guardadas: LineaFactura[] = [
+    { n: 1, descripcion: "MAX-D", cantidad: 12.032, unidad_codigo: "GLL", precio_unitario: 28.26, total: 340.02, tipo_combustible: "diesel", placa: "CWZ371", fecha: null, nota_despacho: null },
+    { n: 2, descripcion: "GLP-G", cantidad: 8.304, unidad_codigo: "GLL", precio_unitario: 7.55, total: 62.7, tipo_combustible: "glp", placa: "CWQ400", fecha: null, nota_despacho: null },
+  ];
+  chk("lineasConDecision: guarda la fecha como «manual» y la placa, solo en esa línea", (() => {
+    const r = lineasConDecision(guardadas, { n: 2, fecha: "2026-09-23", placa: "cwq-400" })!;
+    return r[1].fecha === "2026-09-23" && r[1].fecha_origen === "manual" && r[1].placa === "CWQ400" && r[0] === guardadas[0];
+  })());
+  chk("sin nada que cambiar devuelve null (no se escribe)", lineasConDecision(guardadas, { n: 1, placa: "CWZ371" }) === null);
+  chk("una fecha mal formada no se guarda", lineasConDecision(guardadas, { n: 1, fecha: "23/09/2026" }) === null);
+
+  // El ciclo: confirmar la 1, después la 2. Antes cada confirmación deshacía la anterior.
+  const doc = 77;
+  const registradas: CargaExistente[] = [];
+  const conciliar = (lineas: LineaFactura[], manual: { n: number; fecha: string } | null, conMejoras: boolean) => {
+    const al = lineasAlDespacho(lineas, E3, 1, manual).lineas as LineaFactura[];
+    return al.map((l) => {
+      const p = planDeLinea({ ...base, linea: l, registradas: registradas.slice(), radarPendientes: [], documentoId: conMejoras ? doc : null });
+      if (p.codigo === "registrar" && p.propuesta) {
+        registradas.push({ id: 100 + l.n, placa: p.propuesta.placa, fecha: p.propuesta.fecha, total: l.total, cantidad: l.cantidad, documento_compra_id: conMejoras ? doc : null });
+      }
+      return p;
+    });
+  };
+  // VIEJO: sin guardar la decisión (ni el enlace a la factura).
+  let viejo = guardadas;
+  conciliar(viejo, { n: 1, fecha: "2026-09-23" }, false);
+  const vuelta = conciliar(viejo, { n: 2, fecha: "2026-09-23" }, false);
+  chk("REGRESIÓN: al confirmar la 2, la 1 (ya registrada) vuelve a «revisar · sin fecha»", vuelta[0].codigo === "revisar" && vuelta[0].motivo === "sin_fecha");
+  // NUEVO: la decisión se guarda en la línea y la carga se reconoce por el enlace.
+  registradas.length = 0;
+  let lineas = guardadas;
+  const p1 = conciliar(lineas, { n: 1, fecha: "2026-09-23" }, true);
+  lineas = lineasConDecision(lineas, { n: 1, fecha: "2026-09-23" }) ?? lineas;
+  const p2 = conciliar(lineas, { n: 2, fecha: "2026-09-23" }, true);
+  lineas = lineasConDecision(lineas, { n: 2, fecha: "2026-09-23" }) ?? lineas;
+  const p3 = conciliar(lineas, null, true);
+  chk("confirmar la 1 la registra", p1[0].codigo === "registrar");
+  chk("al confirmar la 2, la 1 sigue resuelta (ya registrada) y la 2 se registra", p2[0].codigo === "ya_registrada" && p2[1].codigo === "registrar", `${p2[0].codigo} ${p2[1].codigo}`);
+  chk("la pasada siguiente (el cron) deja las dos resueltas: la factura llega a «conciliada»", p3.every((p) => p.codigo === "ya_registrada"), p3.map((p) => p.codigo).join());
+  chk("y no se registró nada dos veces", registradas.length === 2, String(registradas.length));
+  chk("la fecha elegida no se corre en la pasada siguiente", (lineasAlDespacho(lineas, E3, 1).lineas[0].fecha) === "2026-09-23");
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

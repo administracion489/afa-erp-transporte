@@ -20,8 +20,8 @@ import { insertarFilaRadar, avisoColumnasQuitadas } from "../lib/radar/guardado-
 import { revisarFechaVoucher, MAX_ATRASO_DIAS, atrasoDias } from "../lib/radar/fecha-voucher";
 import { buscarCargaRegistrada, comprobanteEnTexto, patronComprobante, type CargaRegistrada } from "../lib/radar/album-recargas";
 import {
-  estadoTrasAccion, rafagaAReactivar, raizDeReproceso, sinTerminar, esFallido,
-  FILTRO_FALLIDOS, FILTRO_SIN_TERMINAR, type MensajeRafaga,
+  estadoTrasAccion, rafagaAReactivar, raizDeReproceso, sinTerminar, esFallido, motivoDeFallo,
+  FILTRO_FALLIDOS, FILTRO_SIN_TERMINAR, PATCH_QUITAR_DEL_AVISO, type MensajeRafaga,
 } from "../lib/radar/reproceso";
 import { miembrosDelMismoRemitente, pareceCombustible, remitenteUtilizable } from "../lib/radar/cluster-remitente";
 import { observacionCargaDeFactura } from "../lib/combustible/factura-lineas";
@@ -152,6 +152,19 @@ console.log("\n3. El estado del mensaje después de su acción");
     !esFallido({ estado: "procesado", accion: "combustible_en_revision" }) && !esFallido({ estado: "pendiente" }));
   chk("sinTerminar: fallido o pendiente, nunca fundido ni tomado", sinTerminar({ estado: "pendiente" }) && sinTerminar({ estado: "error" }) &&
     !sinTerminar({ estado: "fusionado" }) && !sinTerminar({ estado: "procesando" }) && !sinTerminar({ estado: "descartado" }));
+
+  // El aviso dice CUÁLES fallaron y por qué: el motivo sale de donde lo dejó el motor.
+  chk("motivo: el error del pipeline", motivoDeFallo({ error: "La IA no devolvió un JSON reconocible", resultado: null }) === "La IA no devolvió un JSON reconocible");
+  chk("motivo: el detalle de la ACCIÓN que falló (resultado.accion.detalle)",
+    motivoDeFallo({ error: null, resultado: { extraccion: {}, accion: { accion: "error_accion", detalle: "PGRST204 nivel_tanque" } } }) === "PGRST204 nivel_tanque");
+  chk("motivo: el error manda sobre el detalle", motivoDeFallo({ error: "x", resultado: { accion: { detalle: "y" } } }) === "x");
+  chk("motivo: sin nada guardado se DICE, no sale vacío", /No quedó guardado/.test(motivoDeFallo({ error: "  ", resultado: {} })));
+  // «Quitar del aviso» saca el mensaje de los fallidos y de lo que el lote vuelve a leer.
+  for (const antes of [{ estado: "error", accion: null }, { estado: "procesado", accion: "error_accion" }]) {
+    const despues = { ...antes, ...PATCH_QUITAR_DEL_AVISO };
+    chk(`quitar del aviso (${antes.estado}/${antes.accion}): deja de ser fallido y de estar sin terminar`,
+      esFallido(antes) && !esFallido(despues) && !sinTerminar(despues));
+  }
 }
 
 // ── 4. La fecha del voucher contra la del mensaje ────────────────────────────

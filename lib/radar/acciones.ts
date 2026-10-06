@@ -14,7 +14,7 @@
 // automáticamente.
 
 import { procedenciaPlaca } from "./procedencia-placa";
-import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
+import { registrarLectura, contextoOdometro, juzgarKmDeRecarga, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { capturaDeRecarga } from "@/lib/odometro-tiempo";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
@@ -1246,12 +1246,17 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     }
   }
 
-  // 4) Kilometraje menor al vigente del vehículo
-  if (veh && km != null && Number(veh.kilometraje_actual || 0) > 0 && km < Number(veh.kilometraje_actual)) {
-    anomalias.push({
-      codigo: "km_menor_al_actual",
-      detalle: `Kilometraje ${km.toLocaleString("es-PE")} menor al vigente ${Number(veh.kilometraje_actual).toLocaleString("es-PE")}`,
+  // 4) El kilometraje contra las lecturas de SU momento, no contra el km de HOY (lib/odometro.ts →
+  //    juzgarKmDeRecarga). Comparaba con el vigente: todo voucher procesado días después —un
+  //    reproceso, una revisión atrasada— salía «menor al actual» aunque cuadrara con su fecha, y como
+  //    esta anomalía bloquea, ninguno se registraba solo. El código se conserva (hay filas viejas y la
+  //    pantalla filtra por él); `por_fecha` marca que ya se juzgó con la regla buena.
+  if ((veh || terc) && km != null && km > 0) {
+    const fuera = await juzgarKmDeRecarga(sb, {
+      vehiculo_id: veh ? veh.id : terc!.id, flota: veh ? "propia" : "tercero",
+      km, fecha, hora: d.hora ?? null, tsMensaje: mensaje.ts_mensaje ?? null,
     });
+    if (fuera) anomalias.push({ codigo: "km_menor_al_actual", detalle: fuera, por_fecha: true });
   }
 
   // 5) Rendimiento del tramo, contra el patrón de la propia unidad.

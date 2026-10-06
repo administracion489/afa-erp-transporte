@@ -237,6 +237,30 @@ export function completarConDocumento(
   });
 }
 
+/**
+ * La decisión de una persona, GUARDADA en la línea. Confirmar una línea (placa y/o fecha elegidas a
+ * mano) se aplicaba solo a ESA conciliación: `lineas` no se reescribía, así que la pasada siguiente
+ * —el cron re-mira las parciales cada 3 h, y confirmar OTRA línea de la misma factura concilia la
+ * factura entera— la veía otra vez sin fecha y la devolvía a «revisar». Una factura de varias cargas
+ * no podía llegar nunca a «conciliada»: cada confirmación deshacía la anterior. Se guarda con
+ * `fecha_origen: "manual"`, que el desfase no corre. Devuelve null si no cambia nada.
+ */
+export function lineasConDecision<L extends LineaFactura>(
+  lineas: readonly L[],
+  manual: { n: number; placa?: string | null; fecha?: string | null }
+): L[] | null {
+  const placa = manual.placa ? normPlaca(manual.placa) || null : null;
+  const fecha = manual.fecha && /^\d{4}-\d{2}-\d{2}$/.test(manual.fecha) ? manual.fecha : null;
+  let cambio = false;
+  const out = (lineas ?? []).map((l) => {
+    if (l.n !== manual.n) return l;
+    const nueva: L = { ...l, ...(placa ? { placa } : {}), ...(fecha ? { fecha, fecha_origen: "manual" as const } : {}) };
+    if (nueva.placa !== l.placa || nueva.fecha !== l.fecha || nueva.fecha_origen !== l.fecha_origen) cambio = true;
+    return nueva;
+  });
+  return cambio ? out : null;
+}
+
 // ── 2) La decisión por línea ─────────────────────────────────────────────────
 
 export type CargaExistente = {
@@ -276,7 +300,7 @@ export type PlanLinea = {
   detalle: string;
   /** La carga del ERP con la que casa (ya_registrada / en_radar_pendiente). */
   casa_con?: string | number;
-  por?: "nota" | "placa_fecha_monto" | "placa_fecha_cantidad";
+  por?: "nota" | "documento" | "placa_fecha_monto" | "placa_fecha_cantidad";
   /** Payload sugerido para `combustible` (registrar/revisar con placa). */
   propuesta?: {
     placa: string;
@@ -308,6 +332,18 @@ export function observacionCargaDeFactura(ref: string, nota: string | null, extr
 export const esCargaDeFactura = (observaciones?: string | null): boolean =>
   String(observaciones ?? "").includes(MARCA_CARGA_DE_FACTURA);
 
+/**
+ * Cómo queda marcada una carga de FACTURA que se FUSIONÓ con el voucher que leyó el Radar
+ * (lib/radar/fusion-factura.ts): su fecha ya no es la de emisión sino la del despacho, impresa en el
+ * voucher. La leen «Moverlas a la fecha del despacho» (cargasPorMover no la toca: su fecha ya es la
+ * del papel) y la medición del desfase (que la cuenta como un voucher). Una sola frase para quien
+ * escribe y quien lee, como MARCA_CARGA_DE_FACTURA.
+ */
+export const MARCA_FUSION_VOUCHER = "Fusionada con el voucher del Radar";
+
+export const esCargaFusionada = (observaciones?: string | null): boolean =>
+  String(observaciones ?? "").includes(MARCA_FUSION_VOUCHER);
+
 export const TOLERANCIA_MONTO = 1;          // soles: mismo criterio que buscarDuplicado
 export const TOLERANCIA_CANTIDAD = 0.05;    // galones
 export const DIAS_VENTANA = 1;              // la nota de despacho puede salir con fecha del día siguiente
@@ -329,6 +365,15 @@ function casar(
   if (nota) {
     const porNota = libres.filter((f) => notasEnTexto(f.referencia ?? "").some((x) => normNota(x) === nota));
     if (porNota.length >= 1) return { fila: porNota[0], por: "nota" };
+  }
+  // (1b) Una carga YA ENLAZADA a esta misma factura, de la misma placa y el mismo importe, es esta
+  // línea, tenga la fecha que tenga: la registró o la enlazó una pasada anterior —o una persona al
+  // confirmarla con la fecha que eligió—. Sin esto, re-conciliar con otra fecha (la que trae ahora el
+  // desfase) no la encontraría fuera de la ventana y la registraría OTRA VEZ. Con dos así, no decide.
+  if (documentoId != null && l.placa && l.total != null) {
+    const propias = libres.filter((f) => f.documento_compra_id != null && Number(f.documento_compra_id) === documentoId &&
+      normPlaca(f.placa) === normPlaca(l.placa) && f.total != null && Math.abs(Number(f.total) - l.total!) < TOLERANCIA_MONTO);
+    if (propias.length === 1) return { fila: propias[0], por: "documento" };
   }
   if (!l.placa || !l.fecha) return null;
   // Alrededor de la fecha de la línea Y de la alterna (la emisión, si la fecha se corrió al despacho):
@@ -378,7 +423,7 @@ export function planDeLinea(args: {
   if (yaReg) {
     return {
       n: l.n, codigo: "ya_registrada", casa_con: yaReg.fila.id, por: yaReg.por,
-      detalle: `Ya está registrada (carga #${yaReg.fila.id}, por ${yaReg.por === "nota" ? "nota de despacho" : yaReg.por === "placa_fecha_monto" ? "placa + fecha + importe" : "placa + fecha + cantidad"}).`,
+      detalle: `Ya está registrada (carga #${yaReg.fila.id}, por ${yaReg.por === "nota" ? "nota de despacho" : yaReg.por === "documento" ? "estar ya enlazada a esta factura, misma placa e importe" : yaReg.por === "placa_fecha_monto" ? "placa + fecha + importe" : "placa + fecha + cantidad"}).`,
     };
   }
   const enRadar = casar(l, args.radarPendientes, args.documentoId ?? null);
