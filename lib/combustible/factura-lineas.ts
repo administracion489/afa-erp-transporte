@@ -344,6 +344,18 @@ export const MARCA_FUSION_VOUCHER = "Fusionada con el voucher del Radar";
 export const esCargaFusionada = (observaciones?: string | null): boolean =>
   String(observaciones ?? "").includes(MARCA_FUSION_VOUCHER);
 
+/**
+ * Cómo queda marcada una carga de FACTURA que una persona COMPLETÓ a mano porque su voucher nunca
+ * llegó al Radar (lib/combustible/completar-carga.ts): el odómetro tecleado —o declarado inexistente—
+ * y la fecha del despacho confirmada. La leen la cola «Cargas por completar» (ya no la vuelve a pedir)
+ * y «Moverlas a la fecha del despacho» (cargasPorMover no corre una fecha que confirmó una persona,
+ * aunque coincida con la emisión). Una sola frase para quien escribe y quien lee, como las de arriba.
+ */
+export const MARCA_COMPLETADA_A_MANO = "Completada a mano";
+
+export const esCargaCompletada = (observaciones?: string | null): boolean =>
+  String(observaciones ?? "").includes(MARCA_COMPLETADA_A_MANO);
+
 export const TOLERANCIA_MONTO = 1;          // soles: mismo criterio que buscarDuplicado
 export const TOLERANCIA_CANTIDAD = 0.05;    // galones
 export const DIAS_VENTANA = 1;              // la nota de despacho puede salir con fecha del día siguiente

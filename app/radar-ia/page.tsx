@@ -34,6 +34,8 @@ import ReprocesoFallidos from "./ReprocesoFallidos";
 import FusionFactura, { aCargaDeFactura, comprobarEnCombustible } from "./FusionFactura";
 import { planDeFusion, preguntaAntesDeRegistrar } from "@/lib/radar/fusion-factura";
 import { FILTRO_ESPERAN_RADAR, avisoOrdenEnRadar, facturasQueEsperan } from "@/lib/combustible/orden-revision";
+import { CODIGOS_CONEXION, credencialesRechazadas, workerVivo as latidoVivo, type SaludRadar } from "@/lib/radar/salud";
+import { leerSaludRadar } from "@/lib/radar/salud-datos";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -1461,28 +1463,9 @@ function TabAlertas({ alertas, onMarcarLeida, onMarcarTodas }: {
 // sostiene la sesión de WhatsApp del Radar ni cómo levantarlo cuando se cae.
 // El detalle largo vive en radar-worker/README.md; esto es el resumen operativo.
 
-/**
- * Traduce el código de cierre que dejó el worker en `detalle` cuando significa
- * "WhatsApp ya no acepta estas credenciales". Son los casos en que reintentar no
- * sirve de nada: la única salida es borrar la sesión y escanear un QR nuevo.
- * El worker 1.1.0+ lo hace solo; en versiones anteriores el 403 (número bloqueado)
- * caía en el reintento genérico y el Radar se quedaba para siempre sin mostrar QR.
- */
-function credencialesRechazadas(detalle: string | null | undefined): string | null {
-  const codigo = detalle ? /código\s+(\d{3})/i.exec(detalle)?.[1] : null;
-  switch (codigo) {
-    case "403":
-      return "WhatsApp bloqueó el número del Radar (403). Ese número no va a volver a conectar por más que se reintente: hay que vincular OTRO número dedicado con “Generar QR nuevo”.";
-    case "401":
-      return "La sesión se cerró desde el teléfono (401). Hay que volver a vincular con “Generar QR nuevo”.";
-    case "405":
-      return "WhatsApp rechazó las credenciales guardadas (405). Hay que volver a vincular con “Generar QR nuevo”.";
-    case "411":
-      return "El teléfono no tiene multi-dispositivo activo (411). Actualiza WhatsApp en el celular y vuelve a vincular.";
-    default:
-      return null;
-  }
-}
+// `credencialesRechazadas` (qué código de cierre significa «WhatsApp ya no acepta estas credenciales»)
+// vive en lib/radar/salud.ts: el aviso de salud del Radar —aquí y en la pestaña 📧 Facturas de
+// Combustible— lo usa también, y dos traducciones del mismo código terminan diciendo cosas distintas.
 
 function Cmd({ children }: { children: string }) {
   const [copiado, setCopiado] = useState(false);
@@ -2317,6 +2300,21 @@ export default function RadarIAPage() {
   const [guardandoConfig, setGuardandoConfig] = useState(false);
   const [solicitandoQr, setSolicitandoQr] = useState(false);
   const [sincronizandoGrupos, setSincronizandoGrupos] = useState(false);
+  // ¿EL RADAR ESTÁ LEYENDO? (lib/radar/salud.ts). Lo que el chip de conexión no ve: la API sin saldo, la
+  // clave rechazada, una racha de fallos, el límite diario, la cola quieta, los grupos perdidos. Va
+  // aparte del realtime —seis lecturas chicas cada minuto, no una tanda por cada mensaje que entra— y
+  // con la MISMA función que usa la pestaña 📧 Facturas de Combustible.
+  const [salud, setSalud] = useState<SaludRadar | null>(null);
+  // También al cambiar la conexión (llega por realtime): el aviso no puede quedarse un minuto diciendo
+  // «desvinculado» con el chip ya en verde.
+  const estadoConexion = estado?.estado ?? null;
+  useEffect(() => {
+    let vivo = true;
+    const leer = () => { leerSaludRadar(supabase).then((s) => { if (vivo) setSalud(s); }).catch(() => {}); };
+    leer();
+    const t = setInterval(leer, 60_000);
+    return () => { vivo = false; clearInterval(t); };
+  }, [estadoConexion]);
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -2480,8 +2478,9 @@ export default function RadarIAPage() {
   // El latido lo escribe el proceso del servidor cada 60 s. Si está viejo, el worker NO
   // está corriendo: ni el QR que se vea en pantalla sirve (los códigos de WhatsApp caducan
   // en segundos) ni el botón "Generar QR nuevo" va a ser atendido por nadie.
-  const latidoMs = estado?.ultimo_latido ? Date.now() - new Date(estado.ultimo_latido).getTime() : null;
-  const workerVivo = latidoMs !== null && latidoMs < 3 * 60 * 1000;
+  // El umbral es el MISMO del aviso de salud (lib/radar/salud.ts, LATIDO_VIVO_MS): el chip y el aviso
+  // no pueden discrepar sobre si el servidor está vivo.
+  const workerVivo = latidoVivo(estado?.ultimo_latido, Date.now());
   /** Desconexión que ningún reintento va a arreglar (la deja un worker anterior a 1.1.0). */
   const motivoRechazo = credencialesRechazadas(estado?.detalle);
 
@@ -3275,6 +3274,31 @@ export default function RadarIAPage() {
                 </p>
               </div>
             )}
+
+            {/* LA SALUD DEL RADAR (lib/radar/salud.ts). Los problemas de CONEXIÓN ya los pintan el chip y
+                los bloques de arriba: de esos solo se agrega la consecuencia. Del resto —sin saldo, clave
+                rechazada, racha de fallos, límite, cola quieta, grupos perdidos— nada más lo dice. */}
+            {salud && salud.codigo !== "ok" && salud.codigo !== "sin_datos" && (() => {
+              // El bloque grande de arriba (QR o «Worker desconectado») ya nombra la causa; un servidor
+              // que dejó de latir con la fila en «conectado» solo lo dice el chip, así que ahí va entero.
+              const conexion = CODIGOS_CONEXION.includes(salud.codigo) && (estado?.estado === "esperando_qr" || estado?.estado === "desconectado");
+              const grave = salud.tono === "grave";
+              return (
+                <div className={`rounded-2xl p-4 flex items-start gap-3 border ${grave ? "bg-[#FDECEC] border-[#EB5757]/30" : "bg-[#FFF6E5] border-[#B07A0F]/25"}`}>
+                  <span className="text-xl">{grave ? "⛔" : "⚠️"}</span>
+                  <div className={`text-sm ${grave ? "text-[#8f1f1f]" : "text-[#8a5a00]"}`}>
+                    {!conexion && <p className="font-black">{salud.titulo}</p>}
+                    {!conexion && <p className="mt-1 font-medium">{salud.detalle}</p>}
+                    <p className={`${conexion ? "" : "mt-1 "}text-xs font-semibold`}>
+                      {salud.lee === false
+                        ? "Mientras el Radar no lea, las cargas de la cuenta de combustible entran por su factura del correo al día siguiente, sin odómetro y con la fecha deducida: quedan en Combustible → 📧 Facturas → «Cargas por completar». Las de otros grifos hay que registrarlas a mano."
+                        : "Las recargas que se manden a esos grupos no llegan aquí: si son de la cuenta de combustible, entran por su factura y quedan en «Cargas por completar»."}{" "}
+                      <Link href="/combustible?vista=facturas" className="text-[#1262bd] font-black hover:underline">Ir a Facturas →</Link>
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">

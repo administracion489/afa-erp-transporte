@@ -32,7 +32,7 @@ import {
 import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
 import { transcribirAudio } from "./transcripcion";
 import { miembrosDelMismoRemitente, pareceCombustible, remitenteUtilizable } from "./cluster-remitente";
-import { CONFIG_DEFECTO, normalizarConfigRadar } from "./config";
+import { CONFIG_DEFECTO, normalizarConfigRadar, dentroDeHorario } from "./config";
 import { LISTA_CATEGORIAS, type CategoriaRadar, type RadarConfig, type ResumenProcesamiento } from "./tipos";
 import { firmarUrl, firmarUrls } from "@/lib/storage-firmado";
 
@@ -178,17 +178,12 @@ export async function procesarPendientes(opts?: {
     return resumen;
   }
 
-  // Gate 2: fuera del horario de monitoreo → el cron los recoge dentro de la ventana
-  if (config.horario_activo && !forzar) {
-    const ahora = horaLima();
-    const dentro =
-      config.hora_inicio <= config.hora_fin
-        ? ahora >= config.hora_inicio && ahora <= config.hora_fin
-        : ahora >= config.hora_inicio || ahora <= config.hora_fin; // ventana que cruza medianoche
-    if (!dentro) {
-      resumen.omitidos = lote.length;
-      return resumen;
-    }
+  // Gate 2: fuera del horario de monitoreo → el cron los recoge dentro de la ventana. La regla vive en
+  // lib/radar/config.ts (dentroDeHorario): el aviso de salud del Radar la usa para no llamar
+  // «atascada» a una cola que solo espera su horario.
+  if (!forzar && !dentroDeHorario(config, horaLima())) {
+    resumen.omitidos = lote.length;
+    return resumen;
   }
 
   // Gate 3: presupuesto diario de IA (suma de costo_usd de lo procesado hoy, hora Lima)

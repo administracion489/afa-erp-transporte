@@ -152,6 +152,14 @@ export const RATIO_DIGITO_DE_MAS = 8;
  */
 export const PISO_RATIO_DIGITO = 5000;
 
+/**
+ * Cuánto puede «retroceder» una lectura sin que sea más que ruido de lectura: ±0.1 % de la base,
+ * mínimo 5 km. La usan evaluarLectura (el retroceso leve), kmFueraDeSuMomento (el km de una recarga
+ * contra su fecha) y la cola de cargas de la factura por completar (lib/combustible/completar-carga.ts):
+ * tres sitios que juzgan el mismo número no pueden tener tres tolerancias.
+ */
+export const toleranciaRetroceso = (base: number): number => Math.max(5, Math.round(base * 0.001));
+
 export function evaluarLectura(opts: {
   kmVigente: number | null | undefined;
   kmNuevo: number;
@@ -216,7 +224,7 @@ export function evaluarLectura(opts: {
   if (kmNuevo < kmBase) {
     // Retroceso graduado: un ruido de OCR de pocos km no es lo mismo que un rollback grande.
     const retro = kmBase - kmNuevo;
-    const tol = Math.max(5, Math.round(kmBase * 0.001)); // ±0.1% de la base, mínimo 5 km
+    const tol = toleranciaRetroceso(kmBase); // ±0.1% de la base, mínimo 5 km
     const contra = ref ? `frente a la lectura ${describirRef(ref)}` : `frente al vigente ${kmBase.toLocaleString("es-PE")}`;
     return retro <= tol
       ? { estado: "sospechosa", motivo: `Retroceso leve (−${retro.toLocaleString("es-PE")} km) ${contra}: posible ruido de lectura` }
@@ -541,7 +549,7 @@ export function kmFueraDeSuMomento(
   const base = ref ? Number(ref.km) || 0 : (post ? 0 : Number(ctx.kmVigente || 0));
   if (base > 0 && km < base) {
     const retro = base - km;
-    const tol = Math.max(5, Math.round(base * 0.001));
+    const tol = toleranciaRetroceso(base);
     if (retro > tol) {
       return ref
         ? `Kilometraje ${fmt(km)} menor que la lectura ${describirRef(ref)}, ANTERIOR a este voucher: retrocede ${fmt(retro)} km`

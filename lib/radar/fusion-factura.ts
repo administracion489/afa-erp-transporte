@@ -30,7 +30,7 @@
 // la misma fecha y el mismo km no cambia.
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { MARCA_FUSION_VOUCHER, esCargaDeFactura, esCargaFusionada, TOLERANCIA_CANTIDAD, TOLERANCIA_MONTO } from "@/lib/combustible/factura-lineas";
+import { MARCA_FUSION_VOUCHER, esCargaDeFactura, esCargaFusionada, esCargaCompletada, TOLERANCIA_CANTIDAD, TOLERANCIA_MONTO } from "@/lib/combustible/factura-lineas";
 import { MAX_DESFASE, diasEntre, esCargaDelRadar } from "@/lib/combustible/desfase-factura";
 import { buscarCargaRegistrada, type CargaRegistrada, type CargaYaRegistrada } from "@/lib/radar/album-recargas";
 
@@ -104,9 +104,14 @@ export function planDeFusion(carga: CargaDeFactura, v: VoucherAFusionar): PlanFu
   const patch: Record<string, unknown> = {};
   const cambios: PlanFusion["cambios"] = [];
   const avisos: string[] = [];
+  // Una carga que una persona COMPLETÓ a mano (lib/combustible/completar-carga.ts) ya no lleva la fecha
+  // deducida de la factura: lleva la que esa persona confirmó. El voucher manda igual —es el papel—,
+  // pero el cambio se nombra como lo que es.
+  const completada = esCargaCompletada(carga.observaciones);
   if (fecha !== carga.fecha.slice(0, 10)) {
     patch.fecha = fecha;
-    cambios.push({ campo: "Fecha", de: `${F(carga.fecha)} (emisión de la factura)`, a: `${F(fecha)} (despacho, del voucher)` });
+    cambios.push({ campo: "Fecha", de: `${F(carga.fecha)} (${completada ? "confirmada a mano" : "emisión de la factura"})`, a: `${F(fecha)} (despacho, del voucher)` });
+    if (completada) avisos.push(`La fecha ${F(carga.fecha)} la confirmó una persona y el voucher dice ${F(fecha)}: mira la foto antes de fusionar.`);
   }
   const kmVoucher = v.kilometraje != null && v.kilometraje > 0 ? Math.round(v.kilometraje) : null;
   let kmNuevo: number | null = null;
