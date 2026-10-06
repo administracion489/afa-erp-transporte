@@ -10,8 +10,9 @@
 // Las dos frases eran falsas por el TIEMPO, no por el número: la lectura se ubicó a las 00:00 del
 // 13/09 (antes del check-in) y se mostró con la hora del 05/10 (cuándo entró al ERP).
 
-import { instanteLectura, capturaDeRecarga, normalizarHoraVoucher, isoHoraVisible, finDiaLimaTs } from "../lib/odometro-tiempo";
-import { registrarLectura, evaluarLectura, aceptarLectura } from "../lib/odometro";
+import { instanteLectura, capturaDeRecarga, normalizarHoraVoucher, isoHoraVisible, finDiaLimaTs, capturaDeFechaHora, horaLimaHms } from "../lib/odometro-tiempo";
+import { registrarLectura, evaluarLectura, aceptarLectura, corregirHoraLectura } from "../lib/odometro";
+import { tipoDeRevision } from "../lib/odometro-revision";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -187,6 +188,61 @@ console.log("\n5 · «Aceptar» la que ya quedó mal guardada (la fila real de l
   chk("se reubica DENTRO del 13/09, entre el check-in y el check-out (no contra el 05/10)",
     s.fecha === "2026-09-13" && t > new Date("2026-09-13T05:25:00-05:00").getTime() && t < new Date("2026-09-13T21:05:00-05:00").getTime(),
     s.capturado_en ?? "sin capturado_en");
+}
+
+
+console.log("\n6 · Corregir la HORA antes de aceptar (lo que pidió el dueño con la pantalla delante)");
+{
+  chk("capturaDeFechaHora: 08:01:57 del 13/09 → 13:01:57Z", capturaDeFechaHora("2026-09-13", "08:01:57") === "2026-09-13T13:01:57.000Z");
+  chk("capturaDeFechaHora: hora inválida → null", capturaDeFechaHora("2026-09-13", "8 y media") === null);
+  chk("horaLimaHms ida y vuelta", horaLimaHms(capturaDeFechaHora("2026-09-13", "08:01:57")) === "08:01:57");
+
+  // El día real de la CTV-370: check-in 05:25 (29,612) y una foto de WhatsApp a las 17:53 (29,674).
+  const dia = () => ({
+    vehiculos: [{ id: 7, kilometraje_actual: 31265 }],
+    lecturas_odometro: [
+      ...historial().filter((f) => f.id !== "c"),
+      lect("w", 29674, "2026-09-13", "2026-09-13T17:53:00-05:00", "2026-09-13T17:53:09-05:00", { fuente: "whatsapp_foto" }),
+      { id: "s", vehiculo_id: 7, km: 29647, fecha: "2026-09-13", capturado_en: null,
+        created_at: "2026-10-05T16:25:00-05:00", estado: "sospechosa", fuente: "combustible",
+        motivo: "Incoherente con la lectura de las 05:25 (29,612 km), que es posterior" },
+    ] as Fila[],
+  });
+
+  const db = dia();
+  const r = await corregirHoraLectura(clienteFalso(db), "s", "08:01:57");
+  const s = db.lecturas_odometro.find((f) => f.id === "s")!;
+  chk("con la hora del voucher CUADRA", r.ok && r.cuadra === true, r.motivo ?? r.error ?? "");
+  chk("guarda la hora tecleada tal cual", s.capturado_en === "2026-09-13T13:01:57.000Z");
+  chk("NO la acepta: la decisión sigue siendo de la persona", s.estado === "sospechosa");
+  chk("el motivo dice la hora y el veredicto nuevo", /08:01/.test(s.motivo) && /cuadra/.test(s.motivo), s.motivo);
+  chk("no mueve el km vigente", db.vehiculos[0].kilometraje_actual === 31265);
+  chk("la bandeja la clasifica como «lista para aceptar»", tipoDeRevision(s.motivo) === "lista_para_aceptar");
+
+  const db2 = dia();
+  const r2 = await corregirHoraLectura(clienteFalso(db2), "s", "19:00");
+  chk("y la que no cuadra, como su problema real", tipoDeRevision(r2.motivo) === "retroceso");
+  chk("una hora que no cuadra lo DICE (retrocede frente a las 17:53)", r2.ok && r2.cuadra === false && /17:53/.test(r2.motivo ?? ""), r2.motivo ?? "");
+
+  const db3 = dia();
+  const r3 = await corregirHoraLectura(clienteFalso(db3), "s", "mañana");
+  chk("hora inválida: error y no toca nada", !r3.ok && db3.lecturas_odometro.find((f) => f.id === "s")!.capturado_en === null);
+
+  const db4 = dia();
+  const r4 = await aceptarLectura(clienteFalso(db4), "s", { hora: "08:01:57" });
+  const s4 = db4.lecturas_odometro.find((f) => f.id === "s")!;
+  chk("Aceptar con la hora tecleada: aceptada CON esa hora, sin reubicar",
+    r4.ok && s4.estado === "aceptada" && s4.capturado_en === "2026-09-13T13:01:57.000Z" && /08:01/.test(s4.motivo), s4.motivo);
+
+  const db5 = dia();
+  const r5 = await aceptarLectura(clienteFalso(db5), "s", { hora: "99:99" });
+  chk("Aceptar con hora inválida NO acepta", !r5.ok && db5.lecturas_odometro.find((f) => f.id === "s")!.estado === "sospechosa");
+
+  const db6 = dia();
+  await aceptarLectura(clienteFalso(db6), "s");
+  const s6 = db6.lecturas_odometro.find((f) => f.id === "s")!;
+  chk("Aceptar SIN hora sigue como antes: se reubica antes de las 17:53",
+    s6.estado === "aceptada" && new Date(s6.capturado_en).getTime() < new Date("2026-09-13T17:53:00-05:00").getTime());
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde");

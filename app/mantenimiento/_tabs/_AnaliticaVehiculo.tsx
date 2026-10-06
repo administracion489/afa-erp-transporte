@@ -15,6 +15,7 @@ import {
   type LecturaCruda, type DiaRecorrido, type RegistroCombustible,
 } from "@/lib/odometro-analitica";
 import { BarrasVertical, BarrasHorizontal, LineaTendencia } from "./_charts";
+import { ultimoServicioPorVehiculo, proximoPorKm } from "@/lib/mantenimiento/proximo-servicio";
 
 export type VehiculoAnalitica = {
   key: string; id: number; flota: "propia" | "tercero";
@@ -120,8 +121,11 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
       const [combRes, planRes, mantRes] = veh.flota === "propia"
         ? await Promise.all([
             supabase.from("combustible").select("vehiculo_id,fecha,kilometraje,galones,precio_galon,total,tipo_combustible").eq("vehiculo_id", veh.id).gte("fecha", desde),
-            supabase.from("vehiculos_plan").select("plan:planes_mantenimiento(intervalo_base_km,intervalo_base_meses,marca,modelo)").eq("vehiculo_id", veh.id).eq("activo", true).maybeSingle(),
-            supabase.from("mantenimiento").select("kilometraje,fecha").eq("vehiculo_id", veh.id).eq("tipo", "preventivo").order("fecha", { ascending: false }).limit(1).maybeSingle(),
+            // `*` por el override de intervalo por unidad (columna de migración accesoria): nombrarla
+            // rompería la consulta en una base sin ese SQL.
+            supabase.from("vehiculos_plan").select("*,plan:planes_mantenimiento(intervalo_base_km,intervalo_base_meses,marca,modelo)").eq("vehiculo_id", veh.id).eq("activo", true).maybeSingle(),
+            // Varias filas y no una: la más reciente puede estar CANCELADA, y una cancelada no ancla.
+            supabase.from("mantenimiento").select("vehiculo_id,kilometraje,fecha,tipo,estado").eq("vehiculo_id", veh.id).eq("tipo", "preventivo").order("fecha", { ascending: false }).limit(50),
           ])
         : [{ data: [] }, { data: null }, { data: null }] as any;
 
@@ -130,8 +134,12 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
       setDias(d);
       setCombustible((combRes.data || []) as RegistroCombustible[]);
       const p = (planRes.data as any)?.plan;
-      setPlan(Array.isArray(p) ? p[0] : p || null);
-      setUltServKm((mantRes.data as any)?.kilometraje ?? null);
+      const pl = Array.isArray(p) ? p[0] : p || null;
+      // El intervalo por unidad manda sobre el del plan, igual que en Próximos y en el cron.
+      const override = (planRes.data as any)?.intervalo_km_override;
+      setPlan(pl ? { ...pl, intervalo_base_km: override ?? pl.intervalo_base_km } : null);
+      const ult = ultimoServicioPorVehiculo(((mantRes.data as any[]) || []))[veh.id];
+      setUltServKm(ult?.kilometraje ?? null);
       setCargando(false);
     })();
     return () => { vivo = false; };
@@ -172,8 +180,9 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
     if (!plan?.intervalo_base_km) return null;
     const inter = Number(plan.intervalo_base_km);
     const kmAct = Number(veh.kilometraje_actual ?? est.kmAcumulado ?? 0);
-    const dueKm = ultServKm != null ? ultServKm + inter : (Math.floor(kmAct / inter) + 1) * inter;
-    const faltanKm = dueKm - kmAct;
+    const prox = proximoPorKm({ kmActual: kmAct, intervaloKm: inter, ultimoServicioKm: ultServKm });
+    if (!prox) return null;
+    const { dueKm, faltanKm } = prox;
     const kmDia = est.historicos.prom30 ?? est.historicos.prom7 ?? null;
     const diasPara = kmDia && kmDia > 0 && faltanKm > 0 ? Math.round(faltanKm / kmDia) : null;
     return { dueKm, faltanKm, diasPara, kmDia, inter, kmAct };
