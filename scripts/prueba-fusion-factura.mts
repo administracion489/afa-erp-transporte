@@ -22,9 +22,11 @@
 //   9. EL DUPLICADO DE UNA CARGA DEL RADAR (lo pidió el dueño sobre la CWZ-371 del 14/08, S/ 224.08: la
 //      carga #15 la registró el Radar con la foto del voucher, y la fila nueva traía el tablero y el
 //      surtidor): en vez de descartarla, se FUSIONA en el modo «sumar» — enlaza sus fotos y completa lo
-//      que falta, sin mover la fecha ni la plata.
+//      que falta, sin mover la fecha ni la plata;
+//  10. UNA FUSIÓN NO CRUZA UNIDADES: la carga se encuentra por su nota en cualquier unidad (el mismo papel
+//      capturado en la BUI-272 y en la CTV-370), y fusionar así pondría el odómetro en la unidad equivocada.
 import {
-  planDeFusion, yaEstaEnCombustible, preguntaAntesDeRegistrar, modoDeFusion,
+  planDeFusion, yaEstaEnCombustible, preguntaAntesDeRegistrar, modoDeFusion, claveVehiculo, vehiculoDeCarga,
   type CargaDeFactura, type VoucherAFusionar,
 } from "../lib/radar/fusion-factura";
 import type { CargaRegistrada } from "../lib/radar/album-recargas";
@@ -350,6 +352,59 @@ console.log("\n9. Fusionar el duplicado de una carga del Radar o tecleada: se su
     }
   chk(`(${casos} combinaciones, ${sumables} en modo «sumar») nunca toca la fecha ni la plata, nunca pisa km ni conductor, avisa la otra fecha y es idempotente`,
     roto === 0 && sumables > 0, `${roto} rotos`);
+}
+
+// ── 10. Una fusión no cruza unidades ─────────────────────────────────────────
+console.log("\n10. La misma nota capturada en dos unidades: no se fusiona hasta corregir la placa");
+{
+  chk("la clave del vehículo: «propio:12» / «tercero:5», y sin tipo o sin id no hay clave",
+    claveVehiculo("propio", 12) === "propio:12" && claveVehiculo("tercero", "5") === "tercero:5" &&
+    claveVehiculo(null, 3) === null && claveVehiculo("propio", null) === null && claveVehiculo("propio", "") === null && claveVehiculo("propio", "x") === null);
+  chk("el vehículo de una fila de combustible sale de la FK que va llena",
+    vehiculoDeCarga({ vehiculo_id: 3, vehiculo_tercero_id: null }) === "propio:3" && vehiculoDeCarga({ vehiculo_id: null, vehiculo_tercero_id: 5 }) === "tercero:5" &&
+    vehiculoDeCarga({ vehiculo_id: null, vehiculo_tercero_id: null }) === null && vehiculoDeCarga({}) === null);
+
+  // El caso que dejó escrito CLAUDE.md: el voucher V70S-00043064 entró una vez en la BUI-272 y otra en la CTV-370.
+  const CARGA_BUI: CargaDeFactura = {
+    id: 40, fecha: "2026-08-20", total: 180.03, galones: 7.43, kilometraje: 0, conductor: null, grifo: "COESTI S.A.",
+    observaciones: "Radar IA · Grupo Combustible · Comprobante V70S-00043064", tanque_lleno: null, vehiculo: "propio:7", placa: "BUI-272",
+  };
+  const V_CTV: VoucherAFusionar = {
+    fecha: "2026-08-20", kilometraje: 29117, conductor: "Luis", grifo: "COESTI S.A.", comprobante: "V70S-00043064",
+    cantidad: 7.43, monto: 180.03, tanqueLleno: true, tanqueFuente: "operador", vehiculo: "propio:9", placa: "CTV-370",
+  };
+  const pu = planDeFusion(CARGA_BUI, V_CTV);
+  chk("dos unidades distintas: NO se fusiona (otra_unidad), y no se escribe nada", !pu.puede && pu.codigo === "otra_unidad" &&
+    Object.keys(pu.patch).length === 0 && pu.patchTanque == null && pu.cambios.length === 0, pu.detalle);
+  chk("…nombra las dos placas y dónde se corrige cada una", /BUI-272/.test(pu.detalle) && /CTV-370/.test(pu.detalle) &&
+    /cambia la unidad de esta fila/.test(pu.detalle) && /Combustible \(Editar carga\)/.test(pu.detalle), pu.detalle);
+  chk("…sin las placas, igual lo dice", /otra unidad que esta fila/.test(planDeFusion({ ...CARGA_BUI, placa: null }, { ...V_CTV, placa: null }).detalle));
+  chk("…y en el modo «factura» también, antes que la fecha (aunque el voucher no traiga fecha)",
+    planDeFusion({ ...CARGA_61, vehiculo: "propio:7" }, { ...VOUCHER, fecha: null, vehiculo: "tercero:7" }).codigo === "otra_unidad");
+  chk("propio:7 y tercero:7 son dos vehículos (los ids de las dos flotas se repiten)",
+    planDeFusion(CARGA_BUI, { ...V_CTV, vehiculo: "tercero:7" }).codigo === "otra_unidad");
+  const corregida = planDeFusion(CARGA_BUI, { ...V_CTV, vehiculo: "propio:7", placa: "BUI-272" });
+  chk("corregida la placa de la fila a la de la carga: se fusiona y toma el km", corregida.puede && corregida.codigo === "sumable" && corregida.patch.kilometraje === 29117, corregida.detalle);
+
+  // Sin el dato de alguna de las dos, o con el mismo vehículo, el plan es EXACTAMENTE el de antes.
+  const sin = (x: { vehiculo?: unknown; placa?: unknown }) => { const y = { ...x }; delete y.vehiculo; delete y.placa; return y; };
+  let casos = 0, roto = 0, bloqueados = 0;
+  for (const c0 of [CARGA_61, CARGA_BUI, { ...CARGA_BUI, observaciones: "Cargado en el grifo" }])
+    for (const vc of [null, "propio:7", "tercero:7"]) for (const vv of [null, "propio:7", "propio:9", "tercero:7"])
+      for (const dv of [-5, -1, 0]) for (const kmV of [null, 29117]) for (const fecha of [true, false]) {
+        casos++;
+        const c = { ...(sin(c0) as CargaDeFactura), vehiculo: vc, placa: vc ? "AAA-111" : null };
+        const v = { ...(sin(V_CTV) as VoucherAFusionar), fecha: fecha ? sumarDias(c0.fecha, dv) : null, kilometraje: kmV, vehiculo: vv, placa: vv ? "BBB-222" : null };
+        const r = planDeFusion(c, v);
+        if (vc && vv && vc !== vv) {
+          bloqueados++;
+          if (r.puede || r.codigo !== "otra_unidad" || Object.keys(r.patch).length || r.patchTanque) roto++;   // nunca escribe
+        } else if (JSON.stringify(r) !== JSON.stringify(planDeFusion(sin(c) as CargaDeFactura, sin(v) as VoucherAFusionar))) {
+          roto++;                                                                                              // idéntico a sin vehículos
+        }
+      }
+  chk(`(${casos} combinaciones, ${bloqueados} con dos vehículos) con vehículos distintos nunca escribe nada; con el mismo o sin dato, el plan es idéntico al de antes`,
+    roto === 0 && bloqueados > 0 && bloqueados < casos, `${roto} rotos`);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

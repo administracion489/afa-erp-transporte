@@ -41,6 +41,13 @@
 // Descartar sigue existiendo: es lo que corresponde cuando la fila no aporta nada. El modo `sumar` NO
 // escribe marca: lo que registra la fusión es el enlace de la fila con la carga.
 //
+// UNA FUSIÓN NO CRUZA UNIDADES (`otra_unidad`), en ninguno de los dos modos. La carga se encuentra por
+// su nota de despacho en CUALQUIER unidad, porque el mismo papel puede entrar dos veces con placas
+// distintas (el V70S-00043064, una vez en la BUI-272 y otra en la CTV-370). Ahí una de las dos placas
+// está mal, y fusionar así pondría el odómetro de este voucher en la carga de una unidad y su lectura en
+// la otra. Primero se corrige la placa equivocada —la de la fila aquí, la de la carga en Combustible—;
+// sin el dato de alguna de las dos no se juzga.
+//
 // Idempotente: la marca MARCA_FUSION_VOUCHER no se escribe dos veces, y una carga ya fusionada con la
 // misma fecha y el mismo km no cambia (al volver a fusionarla cae en `sumar`, que no tiene nada que hacer).
 // ──────────────────────────────────────────────────────────────────────────────
@@ -68,7 +75,22 @@ export type CargaDeFactura = {
   tanque_lleno?: boolean | null;
   /** Las notas de despacho que ya se conocen de la carga por sus filas del Radar (las de su observación se leen solas). */
   notas?: (string | null)[] | null;
+  /**
+   * Su vehículo (`claveVehiculo`) y su placa: una fusión no cruza unidades. Sin dato no se juzga. (No es
+   * `combustible.unidad`, que dice galones o m³.)
+   */
+  vehiculo?: string | null;
+  placa?: string | null;
 };
+
+/** El vehículo de una carga o de una fila del Radar, como clave: «propio:12» o «tercero:5». */
+export const claveVehiculo = (tipo: "propio" | "tercero" | null | undefined, id: unknown): string | null =>
+  tipo && id != null && id !== "" && Number.isFinite(Number(id)) ? `${tipo}:${Number(id)}` : null;
+
+/** El vehículo de una fila de `combustible`: de sus dos FK solo va llena una. */
+export const vehiculoDeCarga = (r: { vehiculo_id?: unknown; vehiculo_tercero_id?: unknown }): string | null =>
+  r.vehiculo_tercero_id != null ? claveVehiculo("tercero", r.vehiculo_tercero_id)
+    : r.vehiculo_id != null ? claveVehiculo("propio", r.vehiculo_id) : null;
 
 /**
  * Cómo se fusiona con una carga. `factura`: una carga de factura que todavía no tiene su voucher — toma
@@ -94,9 +116,12 @@ export type VoucherAFusionar = {
   monto: number | null;
   tanqueLleno?: boolean | null;
   tanqueFuente?: string | null;
+  /** El vehículo elegido en la fila (`claveVehiculo`) y su placa. */
+  vehiculo?: string | null;
+  placa?: string | null;
 };
 
-export type CodigoFusion = "fusionable" | "sumable" | "sin_fecha" | "fecha_lejana";
+export type CodigoFusion = "fusionable" | "sumable" | "sin_fecha" | "fecha_lejana" | "otra_unidad";
 
 export type PlanFusion = {
   codigo: CodigoFusion;
@@ -125,6 +150,19 @@ export function planDeFusion(carga: CargaDeFactura, v: VoucherAFusionar): PlanFu
   const patch: Record<string, unknown> = {};
   const cambios: PlanFusion["cambios"] = [];
   const avisos: string[] = [];
+
+  // Antes que nada: dos unidades distintas no son una carga, sea cual sea el modo (ver la cabecera).
+  if (carga.vehiculo && v.vehiculo && carga.vehiculo !== v.vehiculo) {
+    const quien = carga.placa && v.placa
+      ? `La carga #${carga.id} es de la ${carga.placa} y esta fila de la ${v.placa}`
+      : `La carga #${carga.id} es de otra unidad que esta fila`;
+    return {
+      ...vacio, codigo: "otra_unidad", puede: false,
+      detalle: `${quien}. Si es el mismo despacho, una de las dos placas está mal: si la buena es la de la carga, cambia la ` +
+        `unidad de esta fila; si es la de esta fila, corrige primero la carga en Combustible (Editar carga). Fusionarlas así ` +
+        `pondría el odómetro de este voucher en la carga de una unidad y su lectura en la otra. Si son dos despachos, no la fusiones.`,
+    };
+  }
 
   if (modo === "factura") {
     if (!fecha) {

@@ -23,7 +23,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { patronComprobante, type CargaRegistrada } from "@/lib/radar/album-recargas";
 import {
-  planDeFusion, yaEstaEnCombustible,
+  planDeFusion, yaEstaEnCombustible, claveVehiculo, vehiculoDeCarga,
   type CargaDeFactura, type VoucherAFusionar, type YaEstaEnCombustible,
 } from "@/lib/radar/fusion-factura";
 import { fotosPorCarga, type FilaConFotos, type FotoLeida, type MediaDeMensaje } from "@/lib/radar/fotos-lectura";
@@ -36,7 +36,7 @@ const F = (iso: string | null | undefined) => (iso ? iso.slice(0, 10).split("-")
 const S = (n: number | null | undefined) => (n == null ? "—" : `S/ ${Number(n).toFixed(2)}`);
 const K = (n: number | null | undefined) => (n != null && n > 0 ? `${Math.round(n).toLocaleString("es-PE")} km` : "sin odómetro");
 
-/** La carga de `combustible` tal como la necesita el planificador. */
+/** La carga de `combustible` tal como la necesita el planificador (la placa la pone quien tiene la flota). */
 export const aCargaDeFactura = (r: Record<string, unknown>): CargaDeFactura => ({
   id: Number(r.id),
   fecha: String(r.fecha ?? "").slice(0, 10),
@@ -47,6 +47,7 @@ export const aCargaDeFactura = (r: Record<string, unknown>): CargaDeFactura => (
   grifo: (r.grifo as string) ?? null,
   observaciones: (r.observaciones as string) ?? null,
   tanque_lleno: r.tanque_lleno == null ? null : Boolean(r.tanque_lleno),
+  vehiculo: vehiculoDeCarga(r),
 });
 
 export type Comprobacion = { veredicto: YaEstaEnCombustible; fila: Record<string, unknown> | null };
@@ -110,7 +111,7 @@ async function evidenciaDeCarga(cargaId: number): Promise<Evidencia> {
   }
 }
 
-export default function FusionFactura({ c, unidad, voucher, ocupado, onFusionar, silencioso }: {
+export default function FusionFactura({ c, unidad, voucher, ocupado, onFusionar, silencioso, placaDe }: {
   c: RadarCombustible;
   unidad: { tipo: "propio" | "tercero"; id: number } | null;
   voucher: VoucherAFusionar;
@@ -118,6 +119,8 @@ export default function FusionFactura({ c, unidad, voucher, ocupado, onFusionar,
   onFusionar: (cargaId: number) => void;
   /** Sin «Buscando…» mientras consulta: la fila no traía `posible_duplicado` y lo normal es que no haya nada. */
   silencioso?: boolean;
+  /** La placa de un vehículo (`claveVehiculo`), para nombrarlo: la carga puede ser de otra unidad. */
+  placaDe?: (clave: string | null) => string | null;
 }) {
   // El resultado lleva la clave con que se buscó: si la persona cambia la unidad, la fecha o el
   // importe, lo de antes ya no describe esta búsqueda y se dice «buscando» hasta que llegue lo nuevo.
@@ -159,14 +162,17 @@ export default function FusionFactura({ c, unidad, voucher, ocupado, onFusionar,
       </div>
     );
   }
-  const carga: CargaDeFactura = { ...aCargaDeFactura(r.fila), notas: ev?.notas ?? null };
-  const plan = planDeFusion(carga, voucher);
+  const base = aCargaDeFactura(r.fila);
+  const carga: CargaDeFactura = { ...base, notas: ev?.notas ?? null, placa: placaDe?.(base.vehiculo ?? null) ?? null };
+  const vehiculoFila = claveVehiculo(unidad?.tipo, unidad?.id);
+  const plan = planDeFusion(carga, { ...voucher, vehiculo: vehiculoFila, placa: placaDe?.(vehiculoFila) ?? null });
   const sumar_ = plan.modo === "sumar";
   const porNota = v.por === "comprobante";
   const listo = plan.puede && (porNota || verificada === carga.id);
   const notasCarga = [...new Set([...notasEnTexto(String(carga.observaciones ?? "")), ...(ev?.notas ?? [])])];
   const fotosFila = (c.fotos ?? []).filter((f) => f?.url).length;
   const filaComp: [string, string, string][] = [
+    ["Unidad", carga.placa ?? (carga.vehiculo && carga.vehiculo === vehiculoFila ? "la misma" : carga.vehiculo ? "otra unidad" : "—"), placaDe?.(vehiculoFila) ?? "—"],
     ["Fecha", F(carga.fecha), F(voucher.fecha)],
     ["Odómetro", K(carga.kilometraje), K(voucher.kilometraje)],
     ["Cantidad", carga.galones != null ? String(carga.galones) : "—", voucher.cantidad != null ? String(voucher.cantidad) : "—"],
@@ -181,8 +187,9 @@ export default function FusionFactura({ c, unidad, voucher, ocupado, onFusionar,
       </p>
       <p className="text-gray-700">{plan.detalle}</p>
 
-      {/* LO QUE YA TIENE LA CARGA, al lado de lo que trae esta fila: para verificar sin salir de aquí. */}
-      {sumar_ && (
+      {/* LO QUE YA TIENE LA CARGA, al lado de lo que trae esta fila: para verificar sin salir de aquí. Con
+          dos unidades distintas también: es lo que dice cuál de las dos placas está mal. */}
+      {(sumar_ || plan.codigo === "otra_unidad") && (
         <div className="rounded-lg border border-[#bfdbfe] bg-white overflow-x-auto">
           <table className="w-full text-[11px]">
             <thead className="bg-[#f8fafc] text-gray-500">

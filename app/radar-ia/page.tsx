@@ -32,7 +32,7 @@ import { proponerTanqueLleno } from "@/lib/radar/tanque-lleno";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 import ReprocesoFallidos from "./ReprocesoFallidos";
 import FusionFactura, { aCargaDeFactura, comprobarEnCombustible } from "./FusionFactura";
-import { planDeFusion, preguntaAntesDeRegistrar } from "@/lib/radar/fusion-factura";
+import { planDeFusion, preguntaAntesDeRegistrar, claveVehiculo } from "@/lib/radar/fusion-factura";
 import { FILTRO_ESPERAN_RADAR, avisoOrdenEnRadar, facturasQueEsperan } from "@/lib/combustible/orden-revision";
 import { CODIGOS_CONEXION, credencialesRechazadas, workerVivo as latidoVivo, type SaludRadar } from "@/lib/radar/salud";
 import { leerSaludRadar } from "@/lib/radar/salud-datos";
@@ -198,6 +198,13 @@ type VehiculoLite = { id: number; placa: string; categoria: string | null; estad
 // el odómetro que leyó la IA — un 239.980 sobre una unidad que va en 23.980 solo se nota si
 // los dos están a la vista.
 type VehiculoGuiaOdometro = { tipo: "propio" | "tercero"; id: number; placa: string; categoria: string | null; guia_odometro: string | null; kilometraje_actual: number | null };
+
+/** La placa de un vehículo dado como `claveVehiculo` («propio:12»); null si no está en la flota cargada. */
+const placaEnFlota = (flota: VehiculoGuiaOdometro[], clave: string | null): string | null => {
+  if (!clave) return null;
+  const [tipo, id] = clave.split(":");
+  return flota.find((v) => v.tipo === tipo && v.id === Number(id))?.placa ?? null;
+};
 
 // Lectura de odómetro que el Radar registró en lecturas_odometro (ref_origen='radar_ia').
 type RadarLecturaOdometro = {
@@ -1166,6 +1173,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           ocupado={fusionando === c.id || registrando === c.id || !ed.vehiculo}
                           onFusionar={(cargaId) => onFusionar(c, ovActual, cargaId)}
                           silencioso={!(c.anomalias ?? []).some((a) => a.codigo === "posible_duplicado")}
+                          placaDe={(clave) => placaEnFlota(vehiculosGuia, clave)}
                         />
                         {facturaEspera.get(c.id) && (
                           <p className="mt-3 text-xs font-semibold text-[#1d4ed8]">
@@ -2804,13 +2812,18 @@ export default function RadarIAPage() {
       ]);
       if (error) throw error;
       if (!fila) throw new Error(`la carga #${cargaId} ya no existe`);
+      const base = aCargaDeFactura(fila as Record<string, unknown>);
       const carga = {
-        ...aCargaDeFactura(fila as Record<string, unknown>),
+        ...base,
         notas: ((enlazadas as { comprobante: string | null }[] | null) ?? []).map((x) => x.comprobante),
+        placa: placaEnFlota(vehiculosGuia, base.vehiculo ?? null),
       };
+      // El vehículo de ESTA fila, para que la fusión no cruce unidades (planDeFusion → otra_unidad).
+      const vehiculoFila = claveVehiculo(ov.tipo, ov.vehiculoId);
       const plan = planDeFusion(carga, {
         fecha: ov.fecha ?? c.fecha, kilometraje: ov.kilometraje, conductor: c.conductor, grifo: ov.grifo ?? c.grifo,
         comprobante: c.comprobante, cantidad: ov.cantidad, monto: ov.monto, tanqueLleno: ov.tanqueLleno, tanqueFuente: ov.tanqueFuente,
+        vehiculo: vehiculoFila, placa: placaEnFlota(vehiculosGuia, vehiculoFila),
       });
       if (!plan.puede) { showToast(plan.detalle, false); return; }
       const ok = window.confirm(
