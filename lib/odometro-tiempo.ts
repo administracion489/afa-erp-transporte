@@ -148,3 +148,22 @@ export function capturaDeRecarga(opts: {
   }
   return { capturado_en: null, horaEsTope: true, fuente: "solo_fecha" };
 }
+
+/**
+ * Instante (ISO) de una hora tecleada a mano sobre la FECHA de la lectura: «08:01» del 13/09 →
+ * 2026-09-13T13:01:00Z. La hora se corrige dentro de su día; cambiar el día es otra corrección.
+ * null si la hora no es una hora.
+ */
+export function capturaDeFechaHora(fecha: string | null | undefined, hora: string | null | undefined): string | null {
+  if (!esFecha(fecha)) return null;
+  const hms = normalizarHoraVoucher(hora);
+  if (!hms) return null;
+  const ts = tsDeIso(`${fecha!.slice(0, 10)}T${hms}-05:00`);
+  return ts == null ? null : new Date(ts).toISOString();
+}
+
+/** "HH:MM:SS" Lima de un instante ISO (para precargar el campo de hora). */
+export function horaLimaHms(iso: string | null | undefined): string | null {
+  const ts = tsDeIso(iso);
+  return ts == null ? null : new Date(ts - LIMA_MS).toISOString().slice(11, 19);
+}

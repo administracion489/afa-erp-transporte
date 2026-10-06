@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
-import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
+import { registrarLectura, aceptarLectura, corregirHoraLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
 import {
   analizarVehiculo, resumenPeriodo, claveVehiculo, hoyLima, sumarDias, horaLima, diasEntreFechas,
   type LecturaCruda, type DiaRecorrido, type Anomalia,
@@ -14,7 +14,7 @@ import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 import { rankingConductores, type FilaRanking } from "@/lib/odometro-confirmacion";
-import { instanteLectura } from "@/lib/odometro-tiempo";
+import { instanteLectura, horaLimaHms } from "@/lib/odometro-tiempo";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -237,6 +237,10 @@ export default function OdometroTab() {
 
   // Anulación de una lectura (con motivo → alimenta el aprendizaje de la IA)
   const [anular, setAnular]       = useState<Lectura | null>(null);
+  // Hora que se está corrigiendo a mano en una lectura por revisar (id → "HH:MM[:SS]").
+  // Se teclea ANTES de aceptar: la hora suele estar impresa en el voucher o visible en la foto.
+  const [editHora, setEditHora]   = useState<Record<string, string>>({});
+  const [comprobando, setComprobando] = useState<string | null>(null);
 
   // Completar una jornada PENDIENTE (solo tuvo check-in): ingresar el odómetro final a mano.
   // Solo se habilita desde las 00:00 del día siguiente a la jornada (ver botón en la tabla).
@@ -487,7 +491,34 @@ export default function OdometroTab() {
 
   // ── Acciones del panel de revisión ──────────────────────────────────────────────
 
-  const aceptar = async (l: Lectura) => { await aceptarLectura(supabase, l.id); cargar(); };
+  const aceptar = async (l: Lectura) => {
+    // Con la hora abierta para corregir, se acepta CON esa hora (tal cual, sin reubicar): es la
+    // que la persona acaba de leer en el voucher. Vacía, se acepta como siempre.
+    const hora = editHora[l.id]?.trim() || null;
+    const r = await aceptarLectura(supabase, l.id, { hora });
+    if (!r.ok) { alert(`No se pudo aceptar: ${r.error}`); return; }
+    setEditHora((p) => { const n = { ...p }; delete n[l.id]; return n; });
+    cargar();
+  };
+  const abrirHora = (l: Lectura) =>
+    setEditHora((p) => ({ ...p, [l.id]: horaLimaHms(l.capturado_en) ?? "" }));
+  const cerrarHora = (id: string) =>
+    setEditHora((p) => { const n = { ...p }; delete n[id]; return n; });
+  // Guarda la hora y vuelve a juzgar la lectura contra sus vecinas, SIN aceptarla: el motivo
+  // nuevo dice si con esa hora cuadra, y la decisión sigue en «Aceptar».
+  const comprobarHora = async (l: Lectura) => {
+    const hora = editHora[l.id]?.trim();
+    if (!hora) { alert("Escribe la hora (HH:MM) que muestra el voucher o la foto"); return; }
+    setComprobando(l.id);
+    try {
+      const r = await corregirHoraLectura(supabase, l.id, hora);
+      if (!r.ok) { alert(`No se pudo corregir la hora: ${r.error}`); return; }
+      cerrarHora(l.id);
+      await cargar();
+    } finally {
+      setComprobando(null);
+    }
+  };
   // "Rechazar" ya no descarta a ciegas: abre el modal de corrección (setAnular) para
   // corregir el km + enseñar a la IA, o descartar con un motivo tipificado. Así nunca
   // se pierde la información de la lectura.
@@ -750,7 +781,34 @@ export default function OdometroTab() {
                     </td>
                     <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{vehName(l)}</td>
                     <td className="p-3 font-mono text-xs">{Number(l.km).toLocaleString("es-PE")}</td>
-                    <td className="p-3 text-xs text-gray-600"><CeldaFechaHora l={l} /></td>
+                    <td className="p-3 text-xs text-gray-600">
+                      <CeldaFechaHora l={l} />
+                      {editHora[l.id] === undefined ? (
+                        <button type="button" onClick={() => abrirHora(l)}
+                          className="block mt-1 text-[11px] font-bold text-blue-700 hover:underline"
+                          title="Corregir la hora con la que muestra el voucher o la foto, antes de aceptar">
+                          ✎ Corregir hora
+                        </button>
+                      ) : (
+                        <div className="mt-1.5 space-y-1">
+                          <input type="time" step={1} value={editHora[l.id]}
+                            onChange={(e) => setEditHora((p) => ({ ...p, [l.id]: e.target.value }))}
+                            className="border rounded-lg px-2 py-1 text-xs font-mono w-[118px]" />
+                          <div className="flex gap-1">
+                            <button type="button" onClick={() => comprobarHora(l)} disabled={comprobando === l.id || !editHora[l.id]}
+                              className="px-2 py-0.5 rounded-md text-[11px] font-bold text-blue-700 border border-blue-200 hover:bg-blue-50 disabled:opacity-50"
+                              title="Guarda la hora y vuelve a comparar la lectura con las de ese día, sin aceptarla">
+                              {comprobando === l.id ? "…" : "Comprobar"}
+                            </button>
+                            <button type="button" onClick={() => cerrarHora(l.id)}
+                              className="px-2 py-0.5 rounded-md text-[11px] text-gray-500 border hover:bg-gray-50">✕</button>
+                          </div>
+                          <p className="text-[10px] text-gray-400 leading-tight max-w-[130px]">
+                            del {fmtFecha(l.fecha)} · «Aceptar» la guarda con esta hora
+                          </p>
+                        </div>
+                      )}
+                    </td>
                     <td className="p-3 text-xs text-gray-600">{FUENTE_LABEL[l.fuente] || l.fuente}</td>
                     <td className="p-3 text-xs text-amber-800">
                       {l.motivo}
