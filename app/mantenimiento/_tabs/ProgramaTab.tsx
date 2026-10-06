@@ -8,6 +8,7 @@ import { abrirImprimible } from "@/lib/documentos-servicio";
 import { tarifaHoraMecanico, HORAS_MES_DEFECTO, type InsumosManoObra } from "@/lib/mantenimiento/lineas-costo";
 import { cargarInsumosManoObraConEstado, type EstadoInsumos } from "@/lib/mantenimiento/ot-factura";
 import { empresaConDefectos, type PerfilEmpresa } from "@/lib/empresa-perfil";
+import { ultimoServicioPorVehiculo, proximoPorKm } from "@/lib/mantenimiento/proximo-servicio";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -27,7 +28,7 @@ type Enrol = {
   notas?: string | null;
   plan: Plan | null;
 };
-type Mant = { vehiculo_id: number; fecha: string; kilometraje: number; tipo: string };
+type Mant = { vehiculo_id: number; fecha: string; kilometraje: number; tipo: string; estado?: string | null };
 type Lectura = { vehiculo_id: number; km: number; fecha: string };
 
 type Config = {
@@ -143,7 +144,7 @@ export default function ProgramaTab() {
       // supabase/mantenimiento-programa-editable.sql). Nombrarlas rompería la
       // consulta en una base donde ese SQL todavía no se corrió.
       supabase.from("vehiculos_plan").select("*,plan:planes_mantenimiento(id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses)").eq("activo", true),
-      supabase.from("mantenimiento").select("vehiculo_id,fecha,kilometraje,tipo").eq("tipo", "preventivo").order("fecha", { ascending: false }),
+      supabase.from("mantenimiento").select("vehiculo_id,fecha,kilometraje,tipo,estado").eq("tipo", "preventivo").order("fecha", { ascending: false }),
       supabase.from("lecturas_odometro").select("vehiculo_id,km,fecha").not("vehiculo_id", "is", null).eq("estado", "aceptada").gte("fecha", desde),
       supabase.from("config_mantenimiento").select("*").eq("id", 1).maybeSingle(),
       supabase.from("planes_mantenimiento").select("id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses").order("marca"),
@@ -189,8 +190,9 @@ export default function ProgramaTab() {
 
   const vencimientos: Venc[] = useMemo(() => {
     const vehMap = new Map(vehiculos.map(v => [v.id, v]));
-    const ultMant: Record<number, Mant> = {};
-    for (const m of mants) if (!ultMant[m.vehiculo_id]) ultMant[m.vehiculo_id] = m;
+    // El último servicio HECHO (los cancelados no anclan), con el MISMO motor que el cron de OT
+    // automáticas (lib/mantenimiento/proximo-servicio.ts).
+    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants);
     const lectPorVeh: Record<number, Lectura[]> = {};
     for (const l of lecturas) (lectPorVeh[l.vehiculo_id] ??= []).push(l);
 
@@ -213,13 +215,10 @@ export default function ProgramaTab() {
       const interMeses = e.intervalo_meses_override ?? plan.intervalo_base_meses ?? null;
 
       let dueKm: number | null = null, faltanKm: number | null = null, diasPorKm: number | null = null;
-      const inter = Number(interKm || 0);
-      if (inter > 0) {
-        const ultServ = um?.kilometraje ?? null;
-        dueKm = ultServ !== null
-          ? Number(ultServ) + inter
-          : (Math.floor(kmActual / inter) + 1) * inter;
-        faltanKm = dueKm - kmActual;
+      const prox = proximoPorKm({ kmActual, intervaloKm: interKm, ultimoServicioKm: um?.kilometraje ?? null });
+      if (prox) {
+        dueKm = prox.dueKm;
+        faltanKm = prox.faltanKm;
         diasPorKm = kmDia && kmDia > 0 && faltanKm > 0 ? Math.round(faltanKm / kmDia) : null;
       }
       let dueFecha: string | null = null, faltanDias: number | null = null;
@@ -436,8 +435,9 @@ export default function ProgramaTab() {
     if (sel100.length === 0 && !incluirTerceros) { alert("Selecciona al menos un vehículo"); return; }
 
     const vencMap = new Map(vencimientos.map(x => [x.vehiculo.id, x]));
-    const ultMant: Record<number, Mant> = {};
-    for (const m of mants) if (!ultMant[m.vehiculo_id]) ultMant[m.vehiculo_id] = m;
+    // El último servicio HECHO (los cancelados no anclan), con el MISMO motor que el cron de OT
+    // automáticas (lib/mantenimiento/proximo-servicio.ts).
+    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants);
 
     // Hoja 1: Vehículos
     const hojaVeh: any[][] = [[
@@ -503,8 +503,9 @@ export default function ProgramaTab() {
     const emp = empresaConDefectos(perfil);
 
     const vencMap = new Map(vencimientos.map(x => [x.vehiculo.id, x]));
-    const ultMant: Record<number, Mant> = {};
-    for (const m of mants) if (!ultMant[m.vehiculo_id]) ultMant[m.vehiculo_id] = m;
+    // El último servicio HECHO (los cancelados no anclan), con el MISMO motor que el cron de OT
+    // automáticas (lib/mantenimiento/proximo-servicio.ts).
+    const ultMant: Record<number, Mant> = ultimoServicioPorVehiculo(mants);
 
     const filas = sel100.map(v => {
       const x = vencMap.get(v.id);
