@@ -113,15 +113,24 @@ export function normNota(s?: string | null): string {
   return m ? `${m[1]}-${m[2]}` : "";
 }
 
-/** Fechas dd/mm/yyyy o yyyy-mm-dd dentro de un texto. */
+/** ¿Existe ese día en el calendario? «31/04» pasa un filtro de rangos (día ≤ 31, mes ≤ 12) y no
+ *  existe: como fecha de una carga, Postgres la rechaza y la factura entera queda en error. */
+function fechaReal(y: number, mo: number, d: number): boolean {
+  const f = new Date(Date.UTC(y, mo - 1, d));
+  return f.getUTCFullYear() === y && f.getUTCMonth() === mo - 1 && f.getUTCDate() === d;
+}
+
+/** Fechas dd/mm/yyyy o yyyy-mm-dd dentro de un texto (solo las que existen). */
 export function fechasEnTexto(texto: string): string[] {
   const out = new Set<string>();
   const t = String(texto ?? "");
   for (const m of t.matchAll(/\b(\d{1,2})[\/.-](\d{1,2})[\/.-](20\d{2})\b/g)) {
-    const d = Number(m[1]), mo = Number(m[2]);
-    if (d >= 1 && d <= 31 && mo >= 1 && mo <= 12) out.add(`${m[3]}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+    const d = Number(m[1]), mo = Number(m[2]), y = Number(m[3]);
+    if (fechaReal(y, mo, d)) out.add(`${m[3]}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
   }
-  for (const m of t.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g)) out.add(`${m[1]}-${m[2]}-${m[3]}`);
+  for (const m of t.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g)) {
+    if (fechaReal(Number(m[1]), Number(m[2]), Number(m[3]))) out.add(`${m[1]}-${m[2]}-${m[3]}`);
+  }
   return [...out];
 }
 

@@ -50,12 +50,48 @@ function adjuntosDe(payload: any): { nombre: string; mime: string; attachmentId?
 const b64url = (s: string) => Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 const header = (hs: any[], n: string) => hs?.find((h: any) => h.name?.toLowerCase() === n)?.value ?? "";
 
-async function gget(token: string, ruta: string): Promise<any> {
-  const r = await fetch(`${GMAIL}${ruta}`, { headers: { Authorization: `Bearer ${token}` } });
-  const j = await r.json();
-  if (!r.ok) throw new Error(j?.error?.message ?? `Gmail ${r.status}`);
-  return j;
+/**
+ * ¿Vale la pena reintentar? Gmail responde 429 y 5xx en ráfagas (límite por usuario, «backend
+ * error», una página de error de su front en vez de JSON), y el fetch de Node a veces pierde el
+ * socket: el correo no tiene nada malo y al rato sale. Un 404 (el correo ya no existe) o un
+ * 401/403 de permiso NO cambian por esperar: reintentarlos solo gasta el tiempo de la corrida.
+ * `status` null = no hubo respuesta (red).
+ */
+export function falloGmailTransitorio(status: number | null, mensaje: string): boolean {
+  if (status == null) return true;
+  if (status === 429 || status >= 500) return true;
+  return status === 403 && /rate ?limit|quota|too many/i.test(mensaje);
 }
+
+export const ESPERAS_GMAIL_MS = [1_000, 3_000, 7_000];
+
+/**
+ * GET a la API de Gmail. Antes leía el cuerpo como JSON ANTES de mirar el estado, así que una
+ * respuesta de error sin JSON se convertía en «Unexpected token…», y ningún fallo se reintentaba:
+ * una ráfaga de Gmail dejaba en «Error» todos los correos que pillaba. Ahora lo pasajero se
+ * reintenta con espera creciente (o la que pida `Retry-After`) y lo demás se dice tal cual.
+ */
+export async function ggetGmail(token: string, ruta: string, esperas: readonly number[] = ESPERAS_GMAIL_MS): Promise<any> {
+  for (let intento = 0; ; intento++) {
+    let status: number | null = null, mensaje = "", espera: number | null = null;
+    try {
+      const r = await fetch(`${GMAIL}${ruta}`, { headers: { Authorization: `Bearer ${token}` } });
+      const j = await r.json().catch(() => null);
+      if (r.ok && j) return j;
+      status = r.ok ? null : r.status; // un 200 con el cuerpo ilegible se trata como un tropiezo de red
+      mensaje = j?.error?.message ?? (r.ok ? "Gmail devolvió una respuesta ilegible" : `Gmail respondió ${r.status}`);
+      const ra = Number(r.headers.get("retry-after"));
+      if (Number.isFinite(ra) && ra > 0) espera = Math.min(ra * 1000, 10_000);
+    } catch (e: any) {
+      mensaje = `Gmail no respondió (${e?.cause?.code ?? e?.message ?? "red"})`;
+    }
+    if (!falloGmailTransitorio(status, mensaje) || intento >= esperas.length) {
+      throw new Error(intento ? `${mensaje} (tras ${intento + 1} intentos)` : mensaje);
+    }
+    await new Promise((ok) => setTimeout(ok, espera ?? esperas[intento]));
+  }
+}
+const gget = (token: string, ruta: string) => ggetGmail(token, ruta);
 
 /** Los XML de SUNAT suelen venir ZIPeados. SheetJS trae un lector de ZIP (CFB) — no hace
  *  falta otra dependencia. Best-effort: si falla, se sigue con lo que haya. */
@@ -506,6 +542,102 @@ export async function probarFiltro(sb: any, filtro: string | null | undefined, r
   };
 }
 
+/**
+ * Lee UN correo y concilia su factura. No lanza: lo que falla queda como fila `error` con la ETAPA
+ * en que falló, que es lo que dice dónde mirar (Gmail, el XML, la base…). Antes la fila guardaba
+ * solo el mensaje crudo, sin asunto ni fecha si el correo no llegó a abrirse, y la pantalla la
+ * pintaba con la fecha del INTENTO: «Error · 5/10» sobre una factura de abril.
+ */
+export async function procesarCorreo(
+  sb: any, token: string, id: string, cuenta: FilaCuenta, flota: Flota, hoy: string, res: ResumenSync,
+): Promise<string> {
+  let asunto = "", etapa = "abrir el correo en Gmail";
+  const meta: Record<string, unknown> = {};
+  try {
+    const msg = await gget(token, `/messages/${id}?format=full`);
+    asunto = header(msg.payload?.headers, "subject");
+    const de = header(msg.payload?.headers, "from");
+    const fecha = msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : new Date().toISOString();
+    meta.remitente_email = (de.match(/<(.+?)>/)?.[1] ?? de).slice(0, 200);
+    meta.recibido_en = fecha;
+    // Primero el XML: junto a la factura suele venir la CDR de SUNAT (otro XML), y la factura se
+    // elige por su contenido. El PDF solo se baja si no llegó la factura en XML, y solo si tiene
+    // nombre de comprobante electrónico (esNombreComprobante): una carta de precios o un estado
+    // de cuenta leídos con IA como si fueran factura inventan cargas.
+    etapa = "bajar los adjuntos de Gmail";
+    const adj = await descargarAdjuntos(token, id, msg.payload, (n) => /\.(xml|zip)$/i.test(n));
+    const xml = elegirXmlComprobante(
+      adj.filter((a) => /\.xml$/i.test(a.nombre)).map((a) => ({ ...a, texto: a.data.toString("utf-8") })),
+    );
+    const pdfComprobante = (n: string) => /\.pdf$/i.test(n) && esNombreComprobante(n);
+    const pdf = xml ? undefined
+      : adj.find((a) => pdfComprobante(a.nombre)) ?? (await descargarAdjuntos(token, id, msg.payload, pdfComprobante))[0];
+    const fila: Record<string, unknown> = { gmail_message_id: id, asunto, cuenta_id: cuenta.id, ...meta };
+    if (!xml && !pdf) {
+      // Se DICE qué trae: «sin factura» sobre un correo con tres adjuntos parece un error de lectura.
+      const nombres = adjuntosDe(msg.payload).map((a) => a.nombre).filter(Boolean);
+      const lista = nombres.slice(0, 3).join(", ") + (nombres.length > 3 ? ` y ${nombres.length - 3} más` : "");
+      const detalle = !nombres.length
+        ? "El correo no trae adjuntos (¿solo un enlace de descarga?): no hay factura que leer."
+        : `Trae ${lista}, y ninguno es el comprobante electrónico (el XML de SUNAT, o un PDF con su nombre: RUC-tipo-serie-número). No se lee con IA: una carta de precios o un estado de cuenta leídos como factura inventan cargas.`;
+      etapa = "guardar el correo";
+      await sb.from("radar_facturas").upsert(
+        { ...fila, estado: "sin_adjunto", error: null, diferencia_detalle: detalle },
+        { onConflict: "gmail_message_id" },
+      );
+      res.detalle.push({ asunto, estado: "sin_adjunto" });
+      return "sin_adjunto";
+    }
+    let cab: FacturaExtraida, lineas: LineaFactura[], costo = { in: 0, out: 0 };
+    if (xml) {
+      etapa = "leer el XML de SUNAT";
+      const texto = xml.texto;
+      cab = parseUblFactura(texto);
+      const lu = lineasUbl(texto, flota.placas);
+      lineas = completarConDocumento(lu.lineas, lu.textoDoc, flota.placas, cab.fecha_emision);
+    } else {
+      etapa = "leer el PDF con IA";
+      const r = await leerPdf(pdf!.data);
+      res.con_ia++;
+      cab = r.cab; costo = r.costo;
+      // La placa que la IA leyó se valida contra la flota igual que la del XML.
+      lineas = r.lineas.map((l) => {
+        const enFlota = l.placa && flota.placas.includes(l.placa) ? l.placa : null;
+        return { ...l, placa: enFlota };
+      });
+      lineas = completarConDocumento(lineas, "", flota.placas, cab.fecha_emision);
+    }
+    etapa = "guardar la factura";
+    const { data: ins, error } = await sb.from("radar_facturas").upsert({
+      ...fila, estado: "procesada", error: null,
+      ruc_emisor: cab.ruc_emisor, razon_social: cab.razon_social, tipo_comprobante: cab.tipo_comprobante,
+      serie: cab.serie, numero: cab.numero, fecha_emision: cab.fecha_emision, moneda: cab.moneda,
+      subtotal: cab.subtotal, igv: cab.igv, total: cab.total, confianza: cab.confianza,
+      fuente_extraccion: cab.fuente, lineas, tokens_entrada: costo.in, tokens_salida: costo.out,
+      placa_detectada: [...new Set(lineas.map((l) => l.placa).filter(Boolean))].join(", ") || null,
+    }, { onConflict: "gmail_message_id" }).select("*").single();
+    if (error) throw new Error(error.message);
+    res.nuevas++;
+    etapa = "compararla con las cargas registradas";
+    const r = await conciliarFacturaGuardada(sb, ins, cuenta, hoy);
+    res.registradas += r.plan.filter((p) => p.codigo === "registrar").length;
+    res.por_revisar += r.plan.filter((p) => p.codigo === "revisar" || p.codigo === "en_radar_pendiente").length;
+    res.historicas += r.plan.filter((p) => p.motivo === "historico").length;
+    res.detalle.push({ asunto, estado: r.estado });
+    return r.estado;
+  } catch (e: any) {
+    const texto = `No se pudo ${etapa}: ${e?.message ?? e}`.slice(0, 500);
+    res.detalle.push({ asunto, estado: "error", error: texto });
+    const filaError: Record<string, unknown> = { gmail_message_id: id, estado: "error", error: texto, cuenta_id: cuenta.id, ...meta };
+    if (asunto) filaError.asunto = asunto;
+    // ignoreDuplicates: un error de ESTA corrida no puede pisar la fila buena que dejó otra. Si la
+    // fila ya era un error, se le pone el motivo de AHORA (el del intento anterior puede ser otro).
+    await sb.from("radar_facturas").upsert(filaError, { onConflict: "gmail_message_id", ignoreDuplicates: true });
+    await sb.from("radar_facturas").update(filaError).eq("gmail_message_id", id).eq("estado", "error");
+    return "error";
+  }
+}
+
 export async function sincronizarFacturas(
   sb: any, cuenta: FilaCuenta, hoy: string,
   opts: { dias?: number; maxListar?: number; tope?: number; presupuestoMs?: number; revisarParciales?: boolean } = {},
@@ -548,81 +680,7 @@ export async function sincronizarFacturas(
   for (const id of porLeer) {
     if (leidos >= tope || (opts.presupuestoMs != null && Date.now() - t0 > opts.presupuestoMs)) break;
     leidos++;
-    let asunto = "";
-    try {
-      const msg = await gget(token, `/messages/${id}?format=full`);
-      asunto = header(msg.payload?.headers, "subject");
-      const de = header(msg.payload?.headers, "from");
-      const fecha = msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : new Date().toISOString();
-      // Primero el XML: junto a la factura suele venir la CDR de SUNAT (otro XML), y la factura se
-      // elige por su contenido. El PDF solo se baja si no llegó la factura en XML, y solo si tiene
-      // nombre de comprobante electrónico (esNombreComprobante): una carta de precios o un estado
-      // de cuenta leídos con IA como si fueran factura inventan cargas.
-      const adj = await descargarAdjuntos(token, id, msg.payload, (n) => /\.(xml|zip)$/i.test(n));
-      const xml = elegirXmlComprobante(
-        adj.filter((a) => /\.xml$/i.test(a.nombre)).map((a) => ({ ...a, texto: a.data.toString("utf-8") })),
-      );
-      const pdfComprobante = (n: string) => /\.pdf$/i.test(n) && esNombreComprobante(n);
-      const pdf = xml ? undefined
-        : adj.find((a) => pdfComprobante(a.nombre)) ?? (await descargarAdjuntos(token, id, msg.payload, pdfComprobante))[0];
-      const fila: Record<string, unknown> = {
-        gmail_message_id: id, remitente_email: (de.match(/<(.+?)>/)?.[1] ?? de).slice(0, 200), asunto, recibido_en: fecha,
-        cuenta_id: cuenta.id,
-      };
-      if (!xml && !pdf) {
-        // Se DICE qué trae: «sin factura» sobre un correo con tres adjuntos parece un error de lectura.
-        const nombres = adjuntosDe(msg.payload).map((a) => a.nombre).filter(Boolean);
-        const lista = nombres.slice(0, 3).join(", ") + (nombres.length > 3 ? ` y ${nombres.length - 3} más` : "");
-        const detalle = !nombres.length
-          ? "El correo no trae adjuntos (¿solo un enlace de descarga?): no hay factura que leer."
-          : `Trae ${lista}, y ninguno es el comprobante electrónico (el XML de SUNAT, o un PDF con su nombre: RUC-tipo-serie-número). No se lee con IA: una carta de precios o un estado de cuenta leídos como factura inventan cargas.`;
-        await sb.from("radar_facturas").upsert(
-          { ...fila, estado: "sin_adjunto", error: null, diferencia_detalle: detalle },
-          { onConflict: "gmail_message_id" },
-        );
-        res.detalle.push({ asunto, estado: "sin_adjunto" });
-        continue;
-      }
-      let cab: FacturaExtraida, lineas: LineaFactura[], costo = { in: 0, out: 0 };
-      if (xml) {
-        const texto = xml.texto;
-        cab = parseUblFactura(texto);
-        const lu = lineasUbl(texto, flota.placas);
-        lineas = completarConDocumento(lu.lineas, lu.textoDoc, flota.placas, cab.fecha_emision);
-      } else {
-        const r = await leerPdf(pdf!.data);
-        res.con_ia++;
-        cab = r.cab; costo = r.costo;
-        // La placa que la IA leyó se valida contra la flota igual que la del XML.
-        lineas = r.lineas.map((l) => {
-          const enFlota = l.placa && flota.placas.includes(l.placa) ? l.placa : null;
-          return { ...l, placa: enFlota };
-        });
-        lineas = completarConDocumento(lineas, "", flota.placas, cab.fecha_emision);
-      }
-      const { data: ins, error } = await sb.from("radar_facturas").upsert({
-        ...fila, estado: "procesada", error: null,
-        ruc_emisor: cab.ruc_emisor, razon_social: cab.razon_social, tipo_comprobante: cab.tipo_comprobante,
-        serie: cab.serie, numero: cab.numero, fecha_emision: cab.fecha_emision, moneda: cab.moneda,
-        subtotal: cab.subtotal, igv: cab.igv, total: cab.total, confianza: cab.confianza,
-        fuente_extraccion: cab.fuente, lineas, tokens_entrada: costo.in, tokens_salida: costo.out,
-        placa_detectada: [...new Set(lineas.map((l) => l.placa).filter(Boolean))].join(", ") || null,
-      }, { onConflict: "gmail_message_id" }).select("*").single();
-      if (error) throw new Error(`radar_facturas: ${error.message}`);
-      res.nuevas++;
-      const r = await conciliarFacturaGuardada(sb, ins, cuenta, hoy);
-      res.registradas += r.plan.filter((p) => p.codigo === "registrar").length;
-      res.por_revisar += r.plan.filter((p) => p.codigo === "revisar" || p.codigo === "en_radar_pendiente").length;
-      res.historicas += r.plan.filter((p) => p.motivo === "historico").length;
-      res.detalle.push({ asunto, estado: r.estado });
-    } catch (e: any) {
-      res.detalle.push({ asunto, estado: "error", error: e.message });
-      // ignoreDuplicates: un error de ESTA corrida no puede pisar la fila buena que dejó otra.
-      await sb.from("radar_facturas").upsert(
-        { gmail_message_id: id, asunto, estado: "error", error: String(e.message).slice(0, 500), cuenta_id: cuenta.id },
-        { onConflict: "gmail_message_id", ignoreDuplicates: true },
-      );
-    }
+    await procesarCorreo(sb, token, id, cuenta, flota, hoy, res);
   }
 
   res.pendientes = porLeer.length - leidos;
@@ -696,6 +754,62 @@ export async function registrarHistoricas(
   }
   res.quedan = filas.length - i;
   return res;
+}
+
+export type ResultadoReintento = {
+  ok: boolean;
+  error?: string;
+  reintentados: number;
+  resueltos: number;
+  siguen: number;
+  /** Filas con error que quedaron para la próxima tanda (tiempo). La pantalla vuelve a llamar
+   *  con `desde_id = ultimo_id` hasta que no quede ninguna. */
+  quedan: number;
+  ultimo_id: number | null;
+  correo?: { email: string | null; fuente: "facturas" | "crm" | null };
+  /** Los motivos de los que siguen fallando (la pantalla los enseña en cada fila). */
+  motivos: string[];
+};
+
+/**
+ * «Reintentar los que fallaron»: vuelve a leer, POR SU ID, los correos que quedaron en `error`.
+ * No pasa por la consulta de Gmail a propósito: la lectura normal solo mira 45 días, así que un
+ * correo de abril que falló en la lectura del año no volvería a pasar nunca. Cada fila se intenta
+ * UNA vez por pulsación: la pantalla avanza con `desdeId` en vez de volver a empezar, o los que
+ * fallan siempre ocuparían todas las tandas.
+ */
+export async function reintentarErrores(
+  sb: any, cuentas: FilaCuenta[], hoy: string, opts: { desdeId?: number; presupuestoMs?: number } = {},
+): Promise<ResultadoReintento> {
+  const t0 = Date.now();
+  const vacio: ResultadoReintento = { ok: true, reintentados: 0, resueltos: 0, siguen: 0, quedan: 0, ultimo_id: null, motivos: [] };
+  const t = await tokenDeLectura(sb);
+  if ("error" in t) return { ...vacio, ok: false, error: t.error };
+  // Solo las de ESTE módulo (llevan cuenta): la bandeja de Contabilidad escribe en la misma tabla.
+  const { data, error } = await sb.from("radar_facturas").select("id, gmail_message_id, cuenta_id")
+    .eq("estado", "error").not("gmail_message_id", "is", null).not("cuenta_id", "is", null)
+    .gt("id", opts.desdeId ?? 0).order("id").limit(500);
+  if (error) return { ...vacio, ok: false, error: error.message };
+  const filas = (data as any[]) ?? [];
+  const res: ResumenSync = {
+    ok: true, correos_vistos: 0, nuevas: 0, reconciliadas: 0, registradas: 0, por_revisar: 0, detalle: [], pendientes: 0, historicas: 0, con_ia: 0,
+  };
+  const flota = await cargarFlota(sb);
+  const out: ResultadoReintento = { ...vacio, correo: { email: t.email, fuente: t.fuente } };
+  let i = 0;
+  for (; i < filas.length; i++) {
+    if (Date.now() - t0 > (opts.presupuestoMs ?? 60_000)) break;
+    const f = filas[i];
+    const cuenta = cuentas.find((c) => c.id === Number(f.cuenta_id)) ?? cuentas.find((c) => c.activo) ?? cuentas[0];
+    if (!cuenta) break;
+    const estado = await procesarCorreo(sb, t.token, String(f.gmail_message_id), cuenta, flota, hoy, res);
+    out.reintentados++;
+    out.ultimo_id = Number(f.id);
+    if (estado === "error") out.siguen++; else out.resueltos++;
+  }
+  out.quedan = filas.length - i;
+  out.motivos = [...new Set(res.detalle.filter((d) => d.estado === "error").map((d) => d.error ?? ""))].filter(Boolean).slice(0, 5);
+  return out;
 }
 
 // ── Comprobantes de una cuenta prepago que nacieron como deuda ───────────────

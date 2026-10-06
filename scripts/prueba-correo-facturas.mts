@@ -11,7 +11,7 @@
 import { createHash, createHmac } from "crypto";
 import { elegirConexion, sePuedeLeer, describirConexion, type EstadoConexion } from "../lib/combustible/correo-conexion";
 import { firmarStateGmail, leerStateGmail, verificarStateGmail, getAuthUrl, SCOPES_CRM, SCOPE_SOLO_LECTURA } from "../lib/crm-gmail";
-import { consultaGmail, LECTURA_HISTORIAL } from "../lib/combustible/facturas-correo";
+import { consultaGmail, LECTURA_HISTORIAL, falloGmailTransitorio, ggetGmail, procesarCorreo } from "../lib/combustible/facturas-correo";
 import { DIAS_REGISTRO_AUTOMATICO } from "../lib/combustible/factura-lineas";
 
 let fallos = 0;
@@ -131,6 +131,137 @@ chk("la lectura normal mira los mismos días hasta los que registra sola",
   consultaGmail("x").endsWith(`newer_than:${DIAS_REGISTRO_AUTOMATICO}d`));
 chk("«Leer el último año» cubre los 12 meses anteriores", LECTURA_HISTORIAL.dias >= 365 && consultaGmail("x", LECTURA_HISTORIAL.dias).endsWith(`newer_than:${LECTURA_HISTORIAL.dias}d`));
 chk("…sin el repaso de parciales (eso lo hace el cron) y por tandas", LECTURA_HISTORIAL.revisarParciales === false && LECTURA_HISTORIAL.presupuestoMs < 300_000);
+
+// ── 5. Gmail falla a ratos: lo pasajero se reintenta, lo demás se dice ───────
+console.log("\n5. Reintentos contra Gmail");
+chk("429 (límite por usuario) → se reintenta", falloGmailTransitorio(429, "Too many requests"));
+chk("500/503 (backend de Google) → se reintenta", falloGmailTransitorio(500, "Backend Error") && falloGmailTransitorio(503, "x"));
+chk("403 por cuota → se reintenta", falloGmailTransitorio(403, "User-rate limit exceeded") && falloGmailTransitorio(403, "Quota exceeded for quota metric"));
+chk("sin respuesta (red) → se reintenta", falloGmailTransitorio(null, "fetch failed"));
+chk("404 (el correo ya no existe) → NO: esperar no lo arregla", !falloGmailTransitorio(404, "Requested entity was not found."));
+chk("401/403 de permiso → NO", !falloGmailTransitorio(401, "Invalid Credentials") && !falloGmailTransitorio(403, "Insufficient Permission"));
+chk("400 → NO", !falloGmailTransitorio(400, "Invalid id value"));
+{
+  const original = globalThis.fetch;
+  const guion = (respuestas: (() => Response)[]) => {
+    let n = 0;
+    globalThis.fetch = (async () => {
+      const r = respuestas[Math.min(n, respuestas.length - 1)];
+      n++;
+      return r();
+    }) as any;
+    return () => n;
+  };
+  const json = (status: number, cuerpo: unknown) => () => new Response(JSON.stringify(cuerpo), { status, headers: { "content-type": "application/json" } });
+  const html = (status: number) => () => new Response("<html><body>502. That's an error.</body></html>", { status });
+  const sinEspera = [0, 0, 0];
+  try {
+    let llamadas = guion([json(429, { error: { message: "Too many requests" } }), json(503, { error: { message: "Backend Error" } }), json(200, { id: "m1" })]);
+    const j = await ggetGmail("tk", "/messages/m1", sinEspera);
+    chk("dos fallos pasajeros y luego bien → devuelve el correo", j?.id === "m1" && llamadas() === 3, `llamadas ${llamadas()}`);
+
+    llamadas = guion([json(404, { error: { message: "Requested entity was not found." } })]);
+    const e404 = await ggetGmail("tk", "/x", sinEspera).then(() => null, (e) => e.message);
+    chk("404 → se dice tal cual y NO se reintenta", e404 === "Requested entity was not found." && llamadas() === 1, `${e404} · ${llamadas()}`);
+
+    llamadas = guion([html(502), json(200, { ok: 1 })]);
+    const jh = await ggetGmail("tk", "/x", sinEspera);
+    chk("una página de error sin JSON (502) se reintenta", jh?.ok === 1 && llamadas() === 2);
+
+    llamadas = guion([() => { throw new TypeError("fetch failed"); }]);
+    const ered = await ggetGmail("tk", "/x", sinEspera).then(() => null, (e) => e.message);
+    chk("la red caída se reintenta y al final se nombra con los intentos", /no respondió/.test(ered ?? "") && /tras 4 intentos/.test(ered ?? "") && llamadas() === 4, `${ered}`);
+
+    // Regresión: el gget anterior, copiado literal. Leía el JSON ANTES de mirar el estado, así que
+    // una página de error de Google se convertía en un error de JSON que no dice nada, sin reintento.
+    async function ggetViejo(token: string, ruta: string): Promise<any> {
+      const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${ruta}`, { headers: { Authorization: `Bearer ${token}` } });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error?.message ?? `Gmail ${r.status}`);
+      return j;
+    }
+    llamadas = guion([html(502), json(200, { ok: 1 })]);
+    const eViejo = await ggetViejo("tk", "/x").then(() => null, (e) => e.message);
+    chk("regresión: el viejo, ante un 502 de Google, fallaba con un error de JSON y sin reintentar",
+      !!eViejo && !/Gmail/.test(eViejo) && llamadas() === 1, `${eViejo}`);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+// ── 6. La fila de un correo que falla: motivo, etapa, y nunca pisa una buena ─
+console.log("\n6. Fila de error de un correo");
+{
+  // Base falsa en memoria: solo radar_facturas, con lo que usa procesarCorreo en sus caminos de
+  // error y de «sin adjunto» (upsert con/sin ignoreDuplicates, update con dos eq).
+  const filas = new Map<string, Record<string, any>>();
+  const sb = {
+    from: (_t: string) => {
+      let op: "upsert" | "update" = "upsert", carga: any = null, ignorar = false;
+      const filtros: [string, any][] = [];
+      const correr = () => {
+        if (op === "upsert") {
+          const prev = filas.get(carga.gmail_message_id);
+          if (!prev) filas.set(carga.gmail_message_id, { recibido_en: "AHORA", ...carga });
+          else if (!ignorar) filas.set(carga.gmail_message_id, { ...prev, ...carga });
+        } else {
+          for (const [k, f] of filas) if (filtros.every(([c, v]) => f[c] === v)) filas.set(k, { ...f, ...carga });
+        }
+        return { data: null, error: null };
+      };
+      const b: any = {
+        upsert: (p: any, o: any = {}) => { op = "upsert"; carga = p; ignorar = !!o.ignoreDuplicates; return b; },
+        update: (p: any) => { op = "update"; carga = p; return b; },
+        eq: (c: string, v: any) => { filtros.push([c, v]); return b; },
+        then: (ok: any, ko: any) => Promise.resolve(correr()).then(ok, ko),
+      };
+      return b;
+    },
+  };
+  const cuenta: any = { id: 1, nombre: "Primax", rucs: ["20127765279"], activo: true };
+  const flota: any = { propias: new Map(), terceros: new Map(), placas: [] };
+  const nuevoRes = (): any => ({ ok: true, correos_vistos: 0, nuevas: 0, reconciliadas: 0, registradas: 0, por_revisar: 0, detalle: [], pendientes: 0, historicas: 0, con_ia: 0 });
+  const original = globalThis.fetch;
+  const responde = (fn: (url: string) => Response) => { globalThis.fetch = (async (u: any) => fn(String(u))) as any; };
+  const json = (status: number, cuerpo: unknown) => new Response(JSON.stringify(cuerpo), { status });
+  const mensaje = (adjuntos: { filename: string; attachmentId: string }[]) => ({
+    id: "m1", internalDate: String(Date.parse("2026-04-10T12:31:45Z")),
+    payload: {
+      headers: [{ name: "Subject", value: "COESTI S.A.-Notificación Publicación de CPE-F882-0027549" }, { name: "From", value: "Factura Electrónica <factura.peru@cen.biz>" }],
+      parts: adjuntos.map((a) => ({ filename: a.filename, mimeType: "application/xml", body: { attachmentId: a.attachmentId } })),
+    },
+  });
+  try {
+    // (a) El correo no se puede abrir (404): la fila dice en qué paso y por qué, sin inventar fecha.
+    responde(() => json(404, { error: { message: "Requested entity was not found." } }));
+    const e1 = await procesarCorreo(sb, "tk", "m1", cuenta, flota, "2026-10-05", nuevoRes());
+    const f1 = filas.get("m1")!;
+    chk("no se pudo abrir → fila «error» con la etapa y el motivo de Gmail",
+      e1 === "error" && f1.estado === "error" && f1.error === "No se pudo abrir el correo en Gmail: Requested entity was not found.", f1.error);
+    chk("…sin remitente ni fecha del correo (la pantalla dirá «intento»)", !f1.remitente_email && f1.recibido_en === "AHORA");
+
+    // (b) Se abre, pero un adjunto falla: ahora la fila SÍ trae asunto, remitente y fecha del correo,
+    // y el motivo nuevo reemplaza al del intento anterior.
+    responde((u) => (/attachments/.test(u) ? json(403, { error: { message: "Insufficient Permission" } }) : json(200, mensaje([{ filename: "20127765279-01-F882-0027549.xml", attachmentId: "a1" }]))));
+    await procesarCorreo(sb, "tk", "m1", cuenta, flota, "2026-10-05", nuevoRes());
+    const f2 = filas.get("m1")!;
+    chk("falla al bajar el adjunto → lo dice, con el asunto y la fecha REAL del correo",
+      /^No se pudo bajar los adjuntos de Gmail: Insufficient Permission/.test(f2.error) && /F882-0027549/.test(f2.asunto) &&
+      f2.remitente_email === "factura.peru@cen.biz" && f2.recibido_en === "2026-04-10T12:31:45.000Z", JSON.stringify(f2));
+
+    // (c) Al reintentar sale bien (aquí: no trae factura) → la fila deja de ser error.
+    responde(() => json(200, mensaje([])));
+    const e3 = await procesarCorreo(sb, "tk", "m1", cuenta, flota, "2026-10-05", nuevoRes());
+    chk("el reintento que sale bien reemplaza la fila de error", e3 === "sin_adjunto" && filas.get("m1")!.estado === "sin_adjunto" && filas.get("m1")!.error === null);
+
+    // (d) Un fallo POSTERIOR no pisa la fila buena (ni su estado ni su motivo).
+    responde(() => json(404, { error: { message: "Requested entity was not found." } }));
+    await procesarCorreo(sb, "tk", "m1", cuenta, flota, "2026-10-05", nuevoRes());
+    chk("un fallo después de una lectura buena no la convierte en error", filas.get("m1")!.estado === "sin_adjunto" && filas.get("m1")!.error === null);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde.");
 process.exit(fallos ? 1 : 0);

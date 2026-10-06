@@ -49,7 +49,7 @@ export default function FacturasCorreo() {
   const [placas, setPlacas] = useState<string[]>([]);
   const [abierta, setAbierta] = useState<number | null>(null);
   const [sync, setSync] = useState<string | null>(null);
-  const [cargando, setCargando] = useState<"" | "normal" | "historial">("");
+  const [cargando, setCargando] = useState<"" | "normal" | "historial" | "reintento">("");
   const [elec, setElec] = useState<Record<string, { placa: string; fecha: string }>>({});
   // De qué buzón se lee (lo resuelve CorreoFacturas). Sin uno legible, «Leer correo ahora» no
   // tiene a quién preguntar: el botón se apaga y DICE por qué en vez de fallar al pulsarlo.
@@ -188,6 +188,32 @@ export default function FacturasCorreo() {
     cargar();
   }
 
+  /** «Reintentar los que fallaron»: cada correo en «Error» se vuelve a leer UNA vez por pulsación
+   *  (el servidor avanza por id). Los que siguen fallando quedan con su motivo en la fila. */
+  async function reintentarErrores() {
+    setCargando("reintento"); setSync("🔁 Volviendo a leer los correos que fallaron…");
+    const t = { reintentados: 0, resueltos: 0, siguen: 0, motivos: [] as string[] };
+    let desde = 0, cierre = "";
+    try {
+      for (let tanda = 1; tanda <= 30; tanda++) {
+        const j = await post({ accion: "reintentar_errores", desde_id: desde });
+        if (!j.ok) { cierre = `Se detuvo: ${j.error ?? "error"}.`; break; }
+        t.reintentados += Number(j.reintentados) || 0; t.resueltos += Number(j.resueltos) || 0; t.siguen += Number(j.siguen) || 0;
+        for (const m of (j.motivos ?? []) as string[]) if (!t.motivos.includes(m)) t.motivos.push(m);
+        setSync(`🔁 Reintentando… ${t.reintentados} correo(s): ${t.resueltos} leídos bien, ${t.siguen} siguen fallando.`);
+        await cargar();
+        if (!j.quedan || !j.reintentados || j.ultimo_id == null) break;
+        desde = Number(j.ultimo_id);
+      }
+    } catch (e: any) { cierre = `Se detuvo: ${e.message}.`; }
+    setSync(
+      `${cierre ? `${cierre} ` : ""}${t.reintentados} correo(s) vueltos a leer: ${t.resueltos} bien, ${t.siguen} siguen fallando.` +
+      (t.motivos.length ? ` Motivo: ${t.motivos.slice(0, 2).join(" · ")}` : ""),
+    );
+    setCargando("");
+    cargar();
+  }
+
   async function marcarPagadas() {
     if (!deuda?.docs.length) return;
     const n = deuda.docs.length;
@@ -220,7 +246,9 @@ export default function FacturasCorreo() {
     const planes = (filas ?? []).flatMap((f) => (Array.isArray(f.conciliacion) ? f.conciliacion : []) as PlanLinea[]);
     const c = (k: string) => planes.filter((p) => p.codigo === k).length;
     const hs = planes.filter((p) => p.codigo === "revisar" && p.motivo === "historico").length;
-    return { reg: c("registrar"), ya: c("ya_registrada"), rev: c("revisar") - hs, hist: hs, radar: c("en_radar_pendiente"), esp: c("en_espera") };
+    // Solo los errores de esta pestaña (llevan cuenta): la bandeja de Contabilidad usa la misma tabla.
+    const errores = (filas ?? []).filter((f) => f.estado === "error" && f.cuenta_id != null).length;
+    return { reg: c("registrar"), ya: c("ya_registrada"), rev: c("revisar") - hs, hist: hs, radar: c("en_radar_pendiente"), esp: c("en_espera"), errores };
   }, [filas]);
 
   return (
@@ -246,6 +274,13 @@ export default function FacturasCorreo() {
             className="px-4 py-2 rounded-lg text-sm font-bold border bg-white text-[#0b315f] disabled:opacity-60" style={{ borderColor: "#0b315f" }}>
             {cargando === "historial" ? "Leyendo el último año…" : "📚 Leer el último año"}
           </button>
+          {resumen.errores > 0 && (
+            <button onClick={reintentarErrores} disabled={!!cargando || registrando || sinCorreo}
+              title="Vuelve a leer, uno por uno, los correos que quedaron en «Error». Los que sigan fallando dicen por qué en su fila."
+              className="px-4 py-2 rounded-lg text-sm font-bold border bg-white text-red-700 border-red-300 disabled:opacity-60">
+              {cargando === "reintento" ? "Reintentando…" : `🔁 Reintentar los ${resumen.errores} que fallaron`}
+            </button>
+          )}
         </div>
         {sinCorreo && <div className="basis-full text-xs text-amber-800">Primero conecta el correo donde llegan las facturas de Primax (bloque de arriba).</div>}
         {cargando === "historial" && <div className="basis-full text-xs text-gray-500">Puede tardar unos minutos: deja esta pestaña abierta. Si la cierras, lo ya leído queda guardado y se sigue con el mismo botón.</div>}
@@ -314,8 +349,19 @@ export default function FacturasCorreo() {
               return (
                 <React.Fragment key={f.id}>
                   <tr className="border-t hover:bg-gray-50 cursor-pointer" onClick={() => setAbierta(abierta === f.id ? null : f.id)}>
-                    <td className="p-2 whitespace-nowrap">{f.recibido_en ? new Date(f.recibido_en).toLocaleDateString("es-PE") : "—"}</td>
-                    <td className="p-2">{f.razon_social ?? f.remitente_email ?? "—"}<div className="text-[11px] text-gray-400">{f.asunto}</div></td>
+                    <td className="p-2 whitespace-nowrap">
+                      {/* Un correo que no se llegó a abrir no tiene fecha conocida: la de la fila es la del
+                          INTENTO, y pintarla como «recibido» hace creer que fallaron las facturas de hoy. */}
+                      {f.estado === "error" && !f.remitente_email
+                        ? <span title="El correo no se pudo abrir, así que su fecha no se conoce: esta es la fecha del intento.">—<div className="text-[10px] text-gray-400">intento {f.recibido_en ? new Date(f.recibido_en).toLocaleDateString("es-PE") : ""}</div></span>
+                        : f.recibido_en ? new Date(f.recibido_en).toLocaleDateString("es-PE") : "—"}
+                    </td>
+                    <td className="p-2">
+                      {f.razon_social ?? f.remitente_email ?? (f.estado === "error" ? "Correo sin leer" : "—")}
+                      <div className="text-[11px] text-gray-400">{f.asunto}</div>
+                      {/* El motivo a la vista: «Error» a secas obliga a abrir fila por fila para saber qué pasó. */}
+                      {f.estado === "error" && f.error && <div className="text-[11px] text-red-700 line-clamp-2" title={f.error}>{f.error}</div>}
+                    </td>
                     <td className="p-2 font-mono text-xs">{f.serie && f.numero ? `${f.serie}-${f.numero}` : "—"}</td>
                     <td className="p-2 text-right font-bold">{S(f.total)}</td>
                     <td className="p-2 text-xs">{f.fuente_extraccion === "xml_ubl" ? "XML SUNAT" : f.fuente_extraccion === "vision_pdf" ? "PDF (IA)" : "—"}</td>
