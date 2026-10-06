@@ -318,6 +318,10 @@ async function resolverCluster(sb: any, mensaje: any): Promise<ResolucionCluster
     // `remitente_wa`/`remitente_nombre` viajan para poder VERIFICAR el remitente, no solo
     // filtrarlo; `media_nombre` porque es el nombre de archivo que se guarda como evidencia.
     .select("id, recibido_en, estado, tipo, texto, transcripcion, media_url, media_mime, media_nombre, remitente_wa, remitente_nombre")
+    // El jid CRUDO, a propósito: dos aparatos de la misma persona (`:NN`) no se juntan aquí aunque
+    // `mismoRemitente` los iguale. Es latente (05-10-2026: ningún remitente guardado trae sufijo, todos
+    // son `@lid`) y falla del lado barato, una fila de más. Si se cambia, el reproceso que lo copia
+    // (`rafagaAReactivar`, `reprocesarMensaje`) cambia en el mismo commit — ver CLAUDE.md, Radar IA.
     .eq("remitente_wa", mensaje.remitente_wa)
     .eq("grupo_id", mensaje.grupo_id)
     .neq("estado", "fusionado")
