@@ -2443,9 +2443,18 @@ export default function RadarIAPage() {
   ).length;
   const oppAbiertas = oportunidades.filter((o) => o.estado === "nueva" || o.estado === "revisada");
   const utilidadPotencial = oppAbiertas.reduce((s, o) => s + Number(o.utilidad_estimada ?? 0), 0);
-  const combustibleHoy = combustibles
-    .filter((c) => c.estado === "registrado" && (c.fecha ? c.fecha === hoy : fechaLocalDe(c.created_at) === hoy))
-    .reduce((s, c) => s + Number(c.monto_total ?? 0), 0);
+  // Una carga cuenta UNA vez aunque tenga varias filas del Radar enlazadas: al fusionar un duplicado, su
+  // fila queda «registrada» apuntando a la misma carga, y sumarla otra vez contaría el gasto dos veces.
+  const combustibleHoy = (() => {
+    const vistas = new Set<string>();
+    return combustibles
+      .filter((c) => c.estado === "registrado" && (c.fecha ? c.fecha === hoy : fechaLocalDe(c.created_at) === hoy))
+      .filter((c) => {
+        const clave = c.combustible_id != null ? `c${c.combustible_id}` : `r${c.id}`;
+        return vistas.has(clave) ? false : (vistas.add(clave), true);
+      })
+      .reduce((s, c) => s + Number(c.monto_total ?? 0), 0);
+  })();
   const alertasSinLeer = alertas.filter((a) => !a.leida).length;
   const fbCorrectos = mensajes.filter((m) => m.feedback === "correcto").length;
   const fbIncorrectos = mensajes.filter((m) => m.feedback === "incorrecto").length;
@@ -2767,28 +2776,47 @@ export default function RadarIAPage() {
   }
 
   /**
-   * FUSIONAR el voucher con la carga que ya registró la FACTURA (lib/radar/fusion-factura.ts): la
-   * carga toma del voucher la fecha del despacho, el odómetro, el conductor y la nota; los galones,
-   * el precio y el importe siguen siendo los de la factura. No se crea ninguna carga. El plan se
-   * rehace con la carga RECIÉN leída (no con la que tenía la pantalla), y el UPDATE exige que siga
-   * con la fecha que se leyó: si alguien la cambió mientras tanto, esa persona decidió.
+   * FUSIONAR el voucher con la carga que ya está en Combustible (lib/radar/fusion-factura.ts). Dos modos:
+   * con la carga de una FACTURA sin voucher, la carga toma del voucher la fecha del despacho, el
+   * odómetro, el conductor y la nota; con una del Radar, tecleada o ya fusionada, solo SUMA: esta fila
+   * queda enlazada —sus fotos pasan a ser evidencia de la carga— y la carga toma lo que le falta, sin
+   * mover su fecha. En los dos, la plata no se toca y no se crea ninguna carga. El plan se rehace con la
+   * carga RECIÉN leída (no con la que tenía la pantalla), y el UPDATE exige que siga con la fecha que se
+   * leyó: si alguien la cambió mientras tanto, esa persona decidió.
    */
   async function fusionarConFactura(c: RadarCombustible, ov: OverrideComb, cargaId: number) {
     setFusionandoComb(c.id);
     try {
-      const { data: fila, error } = await supabase.from("combustible").select("*").eq("id", cargaId).maybeSingle();
+      // Esta fila, recién leída: si ya se registró o se fusionó (otra pestaña, un doble clic), no se
+      // vuelve a hacer nada.
+      const { data: propia } = await supabase.from("radar_combustible").select("estado, combustible_id").eq("id", c.id).maybeSingle();
+      if (propia && (propia as { estado?: string }).estado !== "pendiente_revision") {
+        const ya = (propia as { combustible_id?: number | null }).combustible_id;
+        showToast(`Esta recarga ya no está por revisar${ya ? ` (está enlazada a la carga #${ya})` : ""}.`, false);
+        cargar();
+        return;
+      }
+      const [{ data: fila, error }, { data: enlazadas }] = await Promise.all([
+        supabase.from("combustible").select("*").eq("id", cargaId).maybeSingle(),
+        // Las notas de despacho que la carga ya tiene por sus otras filas del Radar: con ellas el plan
+        // avisa si este voucher es de OTRA nota (suelen ser dos despachos).
+        supabase.from("radar_combustible").select("comprobante").eq("combustible_id", cargaId),
+      ]);
       if (error) throw error;
       if (!fila) throw new Error(`la carga #${cargaId} ya no existe`);
-      const carga = aCargaDeFactura(fila as Record<string, unknown>);
+      const carga = {
+        ...aCargaDeFactura(fila as Record<string, unknown>),
+        notas: ((enlazadas as { comprobante: string | null }[] | null) ?? []).map((x) => x.comprobante),
+      };
       const plan = planDeFusion(carga, {
         fecha: ov.fecha ?? c.fecha, kilometraje: ov.kilometraje, conductor: c.conductor, grifo: ov.grifo ?? c.grifo,
         comprobante: c.comprobante, cantidad: ov.cantidad, monto: ov.monto, tanqueLleno: ov.tanqueLleno, tanqueFuente: ov.tanqueFuente,
       });
       if (!plan.puede) { showToast(plan.detalle, false); return; }
       const ok = window.confirm(
-        `Fusionar este voucher con la carga #${cargaId}, que entró desde la factura del correo.\n\n` +
-        (plan.cambios.length ? plan.cambios.map((x) => `• ${x.campo}: ${x.de} → ${x.a}`).join("\n") : "• Solo se enlaza el voucher a la carga.") +
-        `\n\nLos galones, el precio y el importe quedan los de la factura. No se crea ninguna carga nueva.` +
+        `Fusionar este voucher con la carga #${cargaId}.\n\n${plan.detalle}\n\n` +
+        (plan.cambios.length ? plan.cambios.map((x) => `• ${x.campo}: ${x.de} → ${x.a}`).join("\n")
+          : plan.modo === "sumar" ? "• La carga no cambia: solo se le suman las fotos de esta fila." : "• Solo se enlaza el voucher a la carga.") +
         (plan.avisos.length ? `\n\n⚠ ${plan.avisos.join("\n⚠ ")}` : "") + `\n\n¿Seguir?`
       );
       if (!ok) return;
@@ -2803,7 +2831,9 @@ export default function RadarIAPage() {
       }
       // Columna de una migración accesoria (combustible-01): best-effort, como al registrar.
       if (plan.patchTanque) await supabase.from("combustible").update(plan.patchTanque).eq("id", cargaId);
-      await supabase
+      // El ENLACE es lo que hace la fusión en el modo «sumar»: Combustible junta las fotos de todas las
+      // filas del Radar que apuntan a una carga (fotosPorCarga). Si falla, se dice: sin él las fotos no llegan.
+      const { error: eRad } = await supabase
         .from("radar_combustible")
         .update({
           estado: "registrado",
@@ -2812,9 +2842,16 @@ export default function RadarIAPage() {
           vehiculo_tercero_id: ov.tipo === "tercero" ? ov.vehiculoId : null,
         })
         .eq("id", c.id);
+      if (eRad) throw new Error(`la carga #${cargaId} se actualizó, pero esta fila no se pudo enlazar (${eRad.message}): vuelve a intentarlo`);
       const fechaFinal = String(plan.patch.fecha ?? carga.fecha);
       const notaOdo = plan.patch.kilometraje != null ? await registrarOdometroDeRecarga(c, ov, fechaFinal, fotoUrl, msg) : "";
-      showToast(`Fusionada con la carga #${cargaId}: ${plan.cambios.map((x) => x.campo.toLowerCase()).join(", ") || "enlazada"}${notaOdo}`, !notaOdo);
+      const nFotos = (c.fotos ?? []).filter((f) => f?.url).length;
+      showToast(
+        `Fusionada con la carga #${cargaId}: ` +
+        (plan.modo === "sumar" ? `${nFotos ? `${nFotos} foto(s) sumadas como evidencia` : "enlazada"}${plan.cambios.length ? ` · ${plan.cambios.map((x) => x.campo.toLowerCase()).join(", ")}` : ""}`
+          : plan.cambios.map((x) => x.campo.toLowerCase()).join(", ") || "enlazada") + notaOdo,
+        !notaOdo,
+      );
       cargar();
     } catch (e) {
       const motivo = (e as { message?: string } | null)?.message;

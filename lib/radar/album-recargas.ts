@@ -386,7 +386,8 @@ export function buscarCargaRegistrada(
         por: "comprobante",
         detalle:
           `El comprobante ${lectura.comprobante} ya está registrado en Combustible (carga #${f.id}` +
-          `${f.fecha ? ` del ${f.fecha}` : ""}${f.total != null ? ` por ${soles(f.total)}` : ""}). Registrarlo otra vez duplicaría el gasto.`,
+          `${f.fecha ? ` del ${f.fecha}` : ""}${f.total != null ? ` por ${soles(f.total)}` : ""}). Registrarlo otra vez duplicaría el gasto: ` +
+          `ábrela y fusiónala, y esa carga se queda con las fotos de esta fila.`,
       };
     }
   }
@@ -398,7 +399,8 @@ export function buscarCargaRegistrada(
     return {
       id: mismoDia.id,
       por: "misma_fecha",
-      detalle: `Ya existe una carga del ${lectura.fecha} por ${soles(mismoDia.total as number)} (registro #${mismoDia.id})`,
+      detalle: `Ya existe una carga del ${lectura.fecha} por ${soles(mismoDia.total as number)} (registro #${mismoDia.id}). ` +
+        `Si es la misma recarga, ábrela y fusiónala: esa carga se queda con las fotos de esta fila.`,
     };
   }
   const deFactura = propias.find((f) => esCargaDeFactura(f.observaciones) && diasEntre(f.fecha!, lectura.fecha!) <= 1);

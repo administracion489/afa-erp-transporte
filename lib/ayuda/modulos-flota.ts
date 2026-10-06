@@ -244,11 +244,13 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
           "En el historial de Combustible, la carga que entró por factura lleva **📧**; si todavía le falta el km, **📧✍** (un clic te lleva a completarla).",
       },
       {
-        pregunta: "El Radar dice que una recarga «ya entró desde la factura». ¿La descarto?",
+        pregunta: "El Radar dice que una recarga «ya entró desde la factura» o que es un «posible duplicado». ¿La descarto?",
         respuesta:
-          "**No: fusiónala.** Es la misma carga entrada por las dos puertas, y cada una sabe algo que la otra no. La factura es el comprobante legal (galones, precio e importe); el voucher trae la **fecha del despacho**, el **odómetro**, el conductor y la nota.\n\n" +
-          "Al abrir la fila en **Radar IA → Combustible** aparece **🔗 Fusionar con la carga #N**, con la lista de lo que va a cambiar (por ejemplo, la fecha del 23/09 al 22/09 y el odómetro). No se crea ninguna carga nueva ni cambia la plata: la carga de la factura solo toma lo que le faltaba. Si la carga la registró el Radar o una persona, ahí sí es un duplicado y lo correcto es descartar.\n\n" +
-          "El recuadro aparece en **cualquier** recarga por revisar cuya carga ya esté en Combustible, aunque la factura la haya registrado después de que el Radar leyó el voucher. Y si aun así pulsas **Registrar**, el ERP vuelve a comprobarlo y te pregunta antes de contar el gasto dos veces.",
+          "**No: fusiónala.** Es la misma carga entrada por dos puertas, y cada una sabe algo que la otra no.\n\n" +
+          "**Si la carga entró desde la factura:** la factura es el comprobante legal (galones, precio e importe); el voucher trae la **fecha del despacho**, el **odómetro**, el conductor y la nota. Al abrir la fila en **Radar IA → Combustible** aparece **🔗 Fusionar con la carga #N**, con la lista de lo que va a cambiar (por ejemplo, la fecha del 23/09 al 22/09 y el odómetro).\n\n" +
+          "**Si la carga la registró el Radar de otro reporte, o una persona:** pasa cuando el conductor manda el mismo voucher dos veces, una solo con la nota y otra con el tablero y el surtidor. Aparece **📎 Fusionar con la carga #N (sumar sus fotos)**: esta fila queda enlazada a esa carga, **sus fotos pasan a verse en Combustible** junto a las que ya tenía, y la carga toma solo lo que le falta (el odómetro, el conductor). **Su fecha no se mueve**: ya es un dato.\n\n" +
+          "**Antes de fusionar, compara.** El recuadro enseña lado a lado lo que ya tiene la carga (sus fotos, su fecha, su odómetro, su importe, su nota) y lo que trae esta fila. Si el ERP la encontró por la **misma nota de despacho**, es el mismo papel. Si la encontró solo por **misma unidad, día e importe**, tienes que marcar **«Comparé las fotos y los datos: es la misma recarga»** para poder fusionar: dos cargas de S/ 100 el mismo día también coinciden en eso. Si las notas de despacho son distintas, el recuadro lo avisa: suelen ser dos despachos, y entonces lo correcto es **registrarla** aparte.\n\n" +
+          "En ningún caso se crea una carga nueva ni cambia la plata. **Descartar** sigue disponible para cuando la fila no aporta nada. Y si pulsas **Registrar**, el ERP vuelve a comprobar si ya está en Combustible y te pregunta antes de contar el gasto dos veces.",
       },
       {
         pregunta: "¿Por qué las facturas de Primax no aparecen como deuda en Tesorería?",
