@@ -3,7 +3,7 @@
 // CORREO DE FACTURAS (lib/combustible/gmail-facturas.ts; si no hay uno, el Gmail del CRM), las
 // lee y las concilia LÍNEA POR LÍNEA contra `combustible`.
 //
-//   correo → adjunto XML (SUNAT, preferido) o PDF (visión, respaldo) → radar_facturas
+//   correo → adjunto XML (SUNAT, preferido) o PDF del comprobante (visión, respaldo) → radar_facturas
 //          → documentos_compra (una vez, por la llave fiscal)
 //          → por línea: planDeLinea (lib/combustible/factura-lineas.ts, puro)
 //              ya_registrada      → se ENLAZA la carga a la factura (UPDATE, nunca INSERT)
@@ -23,6 +23,8 @@ import { parseUblFactura, MODELO_VISION, type FacturaExtraida } from "@/lib/cont
 import { normalizarTipoCombustible } from "@/lib/combustible-tipos";
 import {
   lineasUbl, completarConDocumento, planDeLinea, placasEnTexto, notasEnTexto, fechasEnTexto, normPlaca,
+  elegirXmlComprobante, esNombreComprobante, DIAS_REGISTRO_AUTOMATICO, FILTRO_HISTORICO,
+  notaPrepago, esDeudaFalsaPrepago,
   type LineaFactura, type PlanLinea, type CargaExistente,
 } from "@/lib/combustible/factura-lineas";
 import type { FilaCuenta } from "@/lib/combustible/saldo-datos";
@@ -72,10 +74,15 @@ function desempacarZip(buf: Buffer): Adjunto[] {
   } catch { return []; }
 }
 
-async function descargarAdjuntos(token: string, msgId: string, payload: any): Promise<Adjunto[]> {
+/** Baja los adjuntos cuyo nombre acepta `acepta`. Se piden primero los XML/ZIP y el PDF solo si
+ *  no llegó la factura en XML: leer un año de historial son cientos de PDFs que no hacen falta. */
+async function descargarAdjuntos(
+  token: string, msgId: string, payload: any,
+  acepta: (nombre: string) => boolean = (n) => /\.(xml|pdf|zip)$/i.test(n),
+): Promise<Adjunto[]> {
   const out: Adjunto[] = [];
   for (const a of adjuntosDe(payload)) {
-    if (!/\.(xml|pdf|zip)$/i.test(a.nombre)) continue;
+    if (!acepta(a.nombre)) continue;
     let data: Buffer | null = null;
     if (a.data) data = b64url(a.data);
     else if (a.attachmentId) {
@@ -164,7 +171,17 @@ export type ResultadoFactura = {
   error?: string;
 };
 
-async function asegurarDocumento(sb: any, cab: FacturaExtraida, conciliado: boolean): Promise<number | null> {
+/**
+ * El comprobante fiscal (CxP) de la factura, una sola vez por llave fiscal.
+ *
+ * LA FACTURA DE UNA CUENTA PREPAGO YA ESTÁ PAGADA: la pagó el saldo que se depositó antes. Nacía
+ * con el `estado_pago` por defecto (`impaga`), y Tesorería cuenta como deuda todo lo que no está
+ * pagado: cada despacho de Primax se habría sumado a «Total deuda pendiente» y podía entrar a un
+ * lote de pago — el mismo combustible pagado dos veces, que es el error que no vuelve. Nace
+ * pagada y cubierta por el anticipo (`adelanto_1` = total, así «a cancelar» es 0), con la razón
+ * escrita. Si el comprobante YA existía (lo cargó Contabilidad), su estado de pago no se toca.
+ */
+async function asegurarDocumento(sb: any, cab: FacturaExtraida, conciliado: boolean, cuenta: FilaCuenta | null): Promise<number | null> {
   if (!cab.ruc_emisor || !cab.serie || !cab.numero) return null;
   const tipo = cab.tipo_comprobante ?? "factura";
   const { data: prev } = await sb.from("documentos_compra").select("id")
@@ -175,14 +192,24 @@ async function asegurarDocumento(sb: any, cab: FacturaExtraida, conciliado: bool
     if (conciliado) await sb.from("documentos_compra").update({ estado_conciliacion: "conciliado" }).eq("id", id).eq("estado_conciliacion", "pendiente");
     return id;
   }
-  const { data, error } = await sb.from("documentos_compra").insert({
+  const fecha = cab.fecha_emision ?? new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+  const total = cab.total ?? 0;
+  const fila: Record<string, unknown> = {
     ruc_emisor: cab.ruc_emisor, razon_social: cab.razon_social, tipo_comprobante: tipo,
-    serie: cab.serie, numero: cab.numero,
-    fecha_emision: cab.fecha_emision ?? new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10),
-    moneda: cab.moneda ?? "PEN", subtotal: cab.subtotal ?? 0, igv: cab.igv ?? 0, total: cab.total ?? 0,
+    serie: cab.serie, numero: cab.numero, fecha_emision: fecha,
+    moneda: cab.moneda ?? "PEN", subtotal: cab.subtotal ?? 0, igv: cab.igv ?? 0, total,
     detraccion_monto: 0, categoria: "combustible",
     estado_conciliacion: conciliado ? "conciliado" : "pendiente", origen: "correo_ia",
-  }).select("id").single();
+    estado_pago: "pagada", adelanto_1: total, fecha_pago: fecha,
+    observaciones: notaPrepago(cuenta?.nombre),
+  };
+  let { data, error } = await sb.from("documentos_compra").insert(fila).select("id").single();
+  if (error && /column .* does not exist|could not find .* column/i.test(error.message)) {
+    // Columnas de la fase 06 (anticipo, fecha de pago, observaciones): sin ellas el comprobante
+    // entra igual y PAGADO, que es lo que evita la deuda falsa.
+    for (const k of ["adelanto_1", "fecha_pago", "observaciones"]) delete fila[k];
+    ({ data, error } = await sb.from("documentos_compra").insert(fila).select("id").single());
+  }
   if (error) { console.warn("[facturas-correo] documentos_compra:", error.message); return null; }
   return Number((data as any).id);
 }
@@ -198,6 +225,10 @@ export async function conciliarFacturaGuardada(
   cuenta: FilaCuenta | null,
   hoy: string,
   manual?: { n: number; placa?: string | null; fecha?: string | null },
+  /** `aceptarHistoricas`: una persona decidió registrar TODO lo que el historial dejó en
+   *  «revisar» por viejo (botón «Registrar las del historial»). Solo levanta ese candado, y
+   *  solo en las líneas que lo tenían. */
+  opts: { aceptarHistoricas?: boolean } = {},
 ): Promise<ResultadoFactura> {
   // CANDADO: dos conciliaciones a la vez (el cron y el botón «Leer correo ahora») verían la
   // misma línea como faltante y la registrarían dos veces. Se reclama la factura con un UPDATE
@@ -280,6 +311,13 @@ export async function conciliarFacturaGuardada(
   const grifo = cab.razon_social || cuenta?.nombre || "Grifo";
 
   for (const l of lineas) {
+    const antes = previo.get(l.n);
+    // «Registrar las del historial» levanta el candado SOLO de las líneas que la persona vio en
+    // el resumen —las que quedaron en «revisar» por viejas—; el resto de la factura sigue sus
+    // reglas. Y para esas la decisión ya está tomada: se registran aunque el registro automático
+    // de la cuenta esté apagado, igual que una línea confirmada a mano.
+    const aceptada = !!opts.aceptarHistoricas && antes?.codigo === "revisar" && antes?.motivo === "historico";
+    const decidida = manual?.n === l.n || aceptada;
     const p = planDeLinea({
       linea: l,
       registradas: registradas.filter((r) => !usados.has(String(r.id))),
@@ -290,12 +328,13 @@ export async function conciliarFacturaGuardada(
       hoy,
       // Una persona que confirma la línea ya decidió: sin espera, sin exigir el XML.
       graciaDias: manual?.n === l.n ? 0 : cuenta?.facturas_gracia_dias ?? 1,
-      autoRegistrar: manual?.n === l.n ? true : cuenta?.facturas_auto_registrar ?? true,
+      autoRegistrar: decidida ? true : cuenta?.facturas_auto_registrar ?? true,
+      // Lo del historial no se registra solo (lib/combustible/factura-lineas.ts).
+      diasAutoRegistro: decidida ? null : DIAS_REGISTRO_AUTOMATICO,
     });
     // El candado del PDF no se salta solo por confirmar: confirmar ES leer la factura.
     const confirmada = manual?.n === l.n && p.codigo === "revisar" && p.motivo === "lectura_no_oficial";
     const final: PlanLinea & { combustible_id?: number | string } = confirmada ? { ...p, codigo: "registrar", motivo: undefined } : { ...p };
-    const antes = previo.get(l.n);
     if (final.codigo === "registrar" && manual?.n !== l.n && antes?.codigo === "registrar" && antes?.combustible_id != null) {
       // La registró esta misma factura y ya no está: alguien la borró. Volver a crearla sola
       // sería pelearse con esa persona cada 3 horas.
@@ -306,7 +345,7 @@ export async function conciliarFacturaGuardada(
 
     if (final.codigo === "registrar" && final.propuesta) {
       // El comprobante fiscal existe ANTES de la carga: la carga nace enlazada a él.
-      if (docId == null) docId = await asegurarDocumento(sb, cab, false);
+      if (docId == null) docId = await asegurarDocumento(sb, cab, false, cuenta);
       const pr = final.propuesta;
       const vehId = flota.propias.get(pr.placa) ?? null;
       const tercId = vehId == null ? flota.terceros.get(pr.placa) ?? null : null;
@@ -344,9 +383,9 @@ export async function conciliarFacturaGuardada(
   const resueltas = (c: string) => ["ya_registrada", "registrar", "no_es_combustible"].includes(c);
   const todo = plan.length > 0 && plan.every((p) => resueltas(p.codigo));
   if (docId == null && plan.some((p) => p.codigo === "ya_registrada" || p.codigo === "registrar")) {
-    docId = await asegurarDocumento(sb, cab, todo);
+    docId = await asegurarDocumento(sb, cab, todo, cuenta);
   } else if (docId != null && todo) {
-    await asegurarDocumento(sb, cab, true);
+    await asegurarDocumento(sb, cab, true, cuenta);
   }
 
   // Enlazar las ya registradas (UPDATE de la cadena existente, nunca un INSERT).
@@ -386,7 +425,19 @@ export type ResumenSync = {
   detalle: { asunto: string; estado: string; error?: string }[];
   /** De QUÉ buzón se leyó: sin esto, «0 correos» no dice si el filtro está mal o el buzón es otro. */
   correo?: { email: string | null; fuente: "facturas" | "crm" | null };
+  /** Correos que coinciden y quedaron SIN leer en esta corrida (tope o tiempo): la próxima sigue. */
+  pendientes: number;
+  /** Líneas que faltan en el ERP pero son del historial: esperan a una persona (no se registran solas). */
+  historicas: number;
+  /** Facturas que solo llegaron en PDF y se leyeron con IA (lo único de esta lectura que cuesta). */
+  con_ia: number;
 };
+
+/** La lectura del ÚLTIMO AÑO («Leer el último año»): más correos por corrida, sin el repaso de
+ *  las parciales (eso lo hace el cron) y con un presupuesto de tiempo corto, para que la pantalla
+ *  enseñe el avance tanda por tanda en vez de quedarse muda varios minutos. Leer un XML no gasta
+ *  IA; un PDF con nombre de comprobante sí, y se cuenta en `con_ia`. */
+export const LECTURA_HISTORIAL = { dias: 366, maxListar: 1000, tope: 50, presupuestoMs: 60_000, revisarParciales: false } as const;
 
 /** El token del buzón que toca, o el motivo (con la misma frase que la pantalla) de por qué no. */
 async function tokenDeLectura(sb: any): Promise<{ token: string; email: string | null; fuente: "facturas" | "crm" } | { error: string }> {
@@ -398,9 +449,23 @@ async function tokenDeLectura(sb: any): Promise<{ token: string; email: string |
   return { token: con.token, email: con.email, fuente: con.fuente };
 }
 
-/** La consulta de Gmail que de verdad se corre: el filtro de la cuenta + la ventana de días. */
-export function consultaGmail(filtro: string | null | undefined, dias = 45): string {
-  return `${(filtro || "").trim() || "has:attachment"} newer_than:${dias}d`;
+/**
+ * La consulta de Gmail que de verdad se corre: el filtro de la cuenta, MÁS los adjuntos que llevan
+ * el RUC de la cuenta, + la ventana de días.
+ *
+ * EL RUC ES LO QUE ENCUENTRA LAS FACTURAS, NO EL REMITENTE. Las de COESTI no las manda Primax:
+ * las manda el servicio de facturación electrónica (`factura.peru@cen.biz`), y el filtro por
+ * remitente no encontró ni una en un año. Pero SUNAT exige nombrar el archivo de toda factura
+ * electrónica con el RUC de quien la emite (`20127765279-01-F882-0132184.xml`), así que el RUC
+ * que la cuenta ya declara las encuentra las mande quien las mande.
+ */
+export function consultaGmail(filtro: string | null | undefined, dias = DIAS_REGISTRO_AUTOMATICO, rucs: readonly string[] = []): string {
+  const base = (filtro || "").trim() || "has:attachment";
+  // Un RUC que el filtro ya nombra no se repite (la pantalla sugería escribirlo ahí a mano).
+  const porRuc = [...new Set(rucs.map((r) => String(r).trim()).filter((r) => /^\d{11}$/.test(r) && !base.includes(r)))]
+    .map((r) => `(${r} has:attachment)`);
+  const q = porRuc.length ? `((${base}) OR ${porRuc.join(" OR ")})` : base;
+  return `${q} newer_than:${dias}d`;
 }
 
 export type MuestraFiltro = {
@@ -413,8 +478,10 @@ export type MuestraFiltro = {
 };
 
 /** «Probar filtro»: qué correos encontraría la sincronización, SIN procesar ninguno. */
-export async function probarFiltro(sb: any, filtro: string | null | undefined, max = 10): Promise<MuestraFiltro> {
-  const consulta = consultaGmail(filtro);
+export async function probarFiltro(sb: any, filtro: string | null | undefined, rucs: readonly string[] = [], max = 10): Promise<MuestraFiltro> {
+  // La MISMA consulta que corre la sincronización: si la muestra usara otra, «0 correos» no
+  // diría nada sobre lo que el ERP va a leer.
+  const consulta = consultaGmail(filtro, DIAS_REGISTRO_AUTOMATICO, rucs);
   const t = await tokenDeLectura(sb);
   if ("error" in t) return { ok: false, error: t.error, consulta, estimado: 0, mensajes: [] };
   const j = await gget(t.token, `/messages?maxResults=${max}&q=${encodeURIComponent(consulta)}`);
@@ -440,49 +507,77 @@ export async function probarFiltro(sb: any, filtro: string | null | undefined, m
 }
 
 export async function sincronizarFacturas(
-  sb: any, cuenta: FilaCuenta, hoy: string, opts: { dias?: number; max?: number } = {},
+  sb: any, cuenta: FilaCuenta, hoy: string,
+  opts: { dias?: number; maxListar?: number; tope?: number; presupuestoMs?: number; revisarParciales?: boolean } = {},
 ): Promise<ResumenSync> {
-  const res: ResumenSync = { ok: true, correos_vistos: 0, nuevas: 0, reconciliadas: 0, registradas: 0, por_revisar: 0, detalle: [] };
+  const t0 = Date.now();
+  const res: ResumenSync = {
+    ok: true, correos_vistos: 0, nuevas: 0, reconciliadas: 0, registradas: 0, por_revisar: 0, detalle: [], pendientes: 0, historicas: 0, con_ia: 0,
+  };
   const t = await tokenDeLectura(sb);
   if ("error" in t) return { ...res, ok: false, error: t.error };
   const token = t.token;
   res.correo = { email: t.email, fuente: t.fuente };
 
-  const q = consultaGmail(cuenta.correo_filtro, opts.dias ?? 45);
+  const q = consultaGmail(cuenta.correo_filtro, opts.dias ?? DIAS_REGISTRO_AUTOMATICO, cuenta.rucs ?? []);
   const ids: string[] = [];
   let pageToken: string | undefined;
   do {
-    const j = await gget(token, `/messages?maxResults=50&q=${encodeURIComponent(q)}${pageToken ? `&pageToken=${pageToken}` : ""}`);
+    const j = await gget(token, `/messages?maxResults=100&q=${encodeURIComponent(q)}${pageToken ? `&pageToken=${pageToken}` : ""}`);
     for (const m of j.messages ?? []) ids.push(m.id);
     pageToken = j.nextPageToken;
-  } while (pageToken && ids.length < (opts.max ?? 200));
+  } while (pageToken && ids.length < (opts.maxListar ?? 200));
   res.correos_vistos = ids.length;
 
-  // Un correo que dio ERROR se vuelve a intentar (su fila se reemplaza); el resto, una vez.
-  const { data: yaVistas } = ids.length
-    ? await sb.from("radar_facturas").select("gmail_message_id, estado").in("gmail_message_id", ids)
-    : { data: [] };
-  const vistas = new Set(((yaVistas as any[]) ?? []).filter((r) => r.estado !== "error").map((r) => r.gmail_message_id));
+  // Un correo que dio ERROR se vuelve a intentar (su fila se reemplaza); el resto, una vez. Los
+  // que ya fallaron van AL FINAL de la cola: si no, un correo que falla siempre ocuparía el primer
+  // puesto de cada corrida y la lectura del historial no avanzaría nunca.
+  const yaVistas: any[] = [];
+  for (let k = 0; k < ids.length; k += 200) {
+    const { data } = await sb.from("radar_facturas").select("gmail_message_id, estado").in("gmail_message_id", ids.slice(k, k + 200));
+    yaVistas.push(...((data as any[]) ?? []));
+  }
+  const vistas = new Set(yaVistas.filter((r) => r.estado !== "error").map((r) => r.gmail_message_id));
+  const fallidas = new Set(yaVistas.filter((r) => r.estado === "error").map((r) => r.gmail_message_id));
+  const porLeer = [...ids.filter((x) => !vistas.has(x) && !fallidas.has(x)), ...ids.filter((x) => fallidas.has(x))];
   const flota = await cargarFlota(sb);
 
   // Tope por corrida: la visión cuesta y la función tiene 300 s. Lo que quede, en la próxima.
-  for (const id of ids.filter((x) => !vistas.has(x)).slice(0, 15)) {
+  const tope = opts.tope ?? 15;
+  let leidos = 0;
+  for (const id of porLeer) {
+    if (leidos >= tope || (opts.presupuestoMs != null && Date.now() - t0 > opts.presupuestoMs)) break;
+    leidos++;
     let asunto = "";
     try {
       const msg = await gget(token, `/messages/${id}?format=full`);
       asunto = header(msg.payload?.headers, "subject");
       const de = header(msg.payload?.headers, "from");
       const fecha = msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : new Date().toISOString();
-      const adj = await descargarAdjuntos(token, id, msg.payload);
-      const xml = adj.find((a) => /\.xml$/i.test(a.nombre));
-      const pdf = adj.find((a) => /\.pdf$/i.test(a.nombre));
+      // Primero el XML: junto a la factura suele venir la CDR de SUNAT (otro XML), y la factura se
+      // elige por su contenido. El PDF solo se baja si no llegó la factura en XML, y solo si tiene
+      // nombre de comprobante electrónico (esNombreComprobante): una carta de precios o un estado
+      // de cuenta leídos con IA como si fueran factura inventan cargas.
+      const adj = await descargarAdjuntos(token, id, msg.payload, (n) => /\.(xml|zip)$/i.test(n));
+      const xml = elegirXmlComprobante(
+        adj.filter((a) => /\.xml$/i.test(a.nombre)).map((a) => ({ ...a, texto: a.data.toString("utf-8") })),
+      );
+      const pdfComprobante = (n: string) => /\.pdf$/i.test(n) && esNombreComprobante(n);
+      const pdf = xml ? undefined
+        : adj.find((a) => pdfComprobante(a.nombre)) ?? (await descargarAdjuntos(token, id, msg.payload, pdfComprobante))[0];
       const fila: Record<string, unknown> = {
         gmail_message_id: id, remitente_email: (de.match(/<(.+?)>/)?.[1] ?? de).slice(0, 200), asunto, recibido_en: fecha,
         cuenta_id: cuenta.id,
       };
       if (!xml && !pdf) {
+        // Se DICE qué trae: «sin factura» sobre un correo con tres adjuntos parece un error de lectura.
+        const nombres = adjuntosDe(msg.payload).map((a) => a.nombre).filter(Boolean);
+        const lista = nombres.slice(0, 3).join(", ") + (nombres.length > 3 ? ` y ${nombres.length - 3} más` : "");
+        const detalle = !nombres.length
+          ? "El correo no trae adjuntos (¿solo un enlace de descarga?): no hay factura que leer."
+          : `Trae ${lista}, y ninguno es el comprobante electrónico (el XML de SUNAT, o un PDF con su nombre: RUC-tipo-serie-número). No se lee con IA: una carta de precios o un estado de cuenta leídos como factura inventan cargas.`;
         await sb.from("radar_facturas").upsert(
-          { ...fila, estado: "sin_adjunto", error: null, diferencia_detalle: "El correo no trae XML ni PDF (¿solo un enlace de descarga?)." },
+          { ...fila, estado: "sin_adjunto", error: null, diferencia_detalle: detalle },
           { onConflict: "gmail_message_id" },
         );
         res.detalle.push({ asunto, estado: "sin_adjunto" });
@@ -490,12 +585,13 @@ export async function sincronizarFacturas(
       }
       let cab: FacturaExtraida, lineas: LineaFactura[], costo = { in: 0, out: 0 };
       if (xml) {
-        const texto = xml.data.toString("utf-8");
+        const texto = xml.texto;
         cab = parseUblFactura(texto);
         const lu = lineasUbl(texto, flota.placas);
         lineas = completarConDocumento(lu.lineas, lu.textoDoc, flota.placas, cab.fecha_emision);
       } else {
         const r = await leerPdf(pdf!.data);
+        res.con_ia++;
         cab = r.cab; costo = r.costo;
         // La placa que la IA leyó se valida contra la flota igual que la del XML.
         lineas = r.lineas.map((l) => {
@@ -517,6 +613,7 @@ export async function sincronizarFacturas(
       const r = await conciliarFacturaGuardada(sb, ins, cuenta, hoy);
       res.registradas += r.plan.filter((p) => p.codigo === "registrar").length;
       res.por_revisar += r.plan.filter((p) => p.codigo === "revisar" || p.codigo === "en_radar_pendiente").length;
+      res.historicas += r.plan.filter((p) => p.motivo === "historico").length;
       res.detalle.push({ asunto, estado: r.estado });
     } catch (e: any) {
       res.detalle.push({ asunto, estado: "error", error: e.message });
@@ -528,8 +625,11 @@ export async function sincronizarFacturas(
     }
   }
 
+  res.pendientes = porLeer.length - leidos;
+
   // Las parciales (y una «procesada» que quedó a medias) se vuelven a mirar: una línea «esperando al Radar» se registra cuando vence
   // su gracia, y una «ya registrada» puede aparecer porque alguien aprobó la del Radar.
+  if (opts.revisarParciales === false) return res;
   const { data: parciales } = await sb.from("radar_facturas").select("*")
     .in("estado", ["parcial", "procesada"]).gte("recibido_en", new Date(Date.now() - 60 * 86400000).toISOString()).limit(40);
   for (const f of (parciales as any[]) ?? []) {
@@ -545,6 +645,142 @@ export async function sincronizarFacturas(
     }
   }
   return res;
+}
+
+export type ResultadoHistoricas = {
+  ok: boolean;
+  error?: string;
+  /** Facturas conciliadas en esta corrida, y cuántas cargas se registraron en ellas. */
+  facturas: number;
+  registradas: number;
+  /** Facturas con líneas del historial que quedaron para la próxima corrida (tiempo) o porque
+   *  otra conciliación las tenía tomadas en ese momento (`ocupadas`, se reintentan en un minuto). */
+  quedan: number;
+  ocupadas: number;
+  errores: string[];
+};
+
+/**
+ * «Registrar las del historial»: una persona vio cuántas cargas son y por cuánto, y decidió
+ * registrarlas todas. Se re-concilia cada factura levantando SOLO el candado del historial: si una
+ * carga apareció en el ERP mientras tanto, la línea casa y no se duplica (es la misma conciliación
+ * de siempre, no un INSERT a ciegas desde la lista de la pantalla).
+ */
+export async function registrarHistoricas(
+  sb: any, cuentas: FilaCuenta[], hoy: string, opts: { presupuestoMs?: number } = {},
+): Promise<ResultadoHistoricas> {
+  const t0 = Date.now();
+  const res: ResultadoHistoricas = { ok: true, facturas: 0, registradas: 0, quedan: 0, ocupadas: 0, errores: [] };
+  // El MISMO filtro con el que la pantalla contó las cargas (FILTRO_HISTORICO).
+  const { data, error } = await sb.from("radar_facturas").select("*")
+    .in("estado", [...FILTRO_HISTORICO.estados])
+    .contains("conciliacion", FILTRO_HISTORICO.conciliacion)
+    .order("recibido_en", { ascending: false }).limit(1000);
+  if (error) return { ...res, ok: false, error: error.message };
+  const filas = (data as any[]) ?? [];
+  let i = 0;
+  for (; i < filas.length; i++) {
+    // Tandas cortas: la pantalla vuelve a llamar mientras `quedan`, y así enseña el avance.
+    if (Date.now() - t0 > (opts.presupuestoMs ?? 60_000)) break;
+    const f = filas[i];
+    const cuenta = cuentas.find((c) => c.id === Number(f.cuenta_id)) ?? cuentas[0] ?? null;
+    try {
+      const antes = new Set(((f.conciliacion ?? []) as any[]).filter((c) => c.codigo === "registrar").map((c) => c.n));
+      const r = await conciliarFacturaGuardada(sb, f, cuenta, hoy, undefined, { aceptarHistoricas: true });
+      if (r.error) { res.ocupadas++; continue; }
+      res.facturas++;
+      res.registradas += r.plan.filter((p) => p.codigo === "registrar" && !antes.has(p.n)).length;
+    } catch (e: any) {
+      res.errores.push(`${f.serie ?? ""}-${f.numero ?? f.id}: ${e?.message ?? e}`);
+    }
+  }
+  res.quedan = filas.length - i;
+  return res;
+}
+
+// ── Comprobantes de una cuenta prepago que nacieron como deuda ───────────────
+
+export type DeudaFalsa = {
+  id: number; serie: string | null; numero: string | null; fecha_emision: string | null;
+  total: number; cuenta_id: number | null; observaciones: string | null;
+};
+
+const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Los comprobantes de una cuenta de combustible que figuran como deuda en Tesorería sin serlo.
+ * Hasta este arreglo asegurarDocumento los creaba con el `estado_pago` por defecto («impaga»), y
+ * los de las facturas que ya se habían leído siguen así: sumando a «Total deuda pendiente» y a un
+ * clic de entrar a un lote de pago. Solo los que cuelgan de una factura leída PARA UNA CUENTA
+ * (`radar_facturas.cuenta_id`), y solo los que esDeudaFalsaPrepago deja pasar.
+ *
+ * SI ALGO NO SE PUEDE LEER, NO SE PROPONE NADA: un pago aplicado que no se pudo leer convertiría
+ * en «pagado» un comprobante sobre el que alguien ya está actuando.
+ */
+export async function prepagoComoDeuda(sb: any): Promise<{ ok: boolean; error?: string; docs: DeudaFalsa[]; total: number }> {
+  const fallo = (error: string) => ({ ok: false, error, docs: [] as DeudaFalsa[], total: 0 });
+  const { data: fs, error: e1 } = await sb.from("radar_facturas").select("documento_compra_id, cuenta_id")
+    .not("cuenta_id", "is", null).not("documento_compra_id", "is", null).limit(5000);
+  if (e1) return fallo(e1.message);
+  const cuentaDe = new Map<number, number>();
+  for (const f of (fs as any[]) ?? []) cuentaDe.set(Number(f.documento_compra_id), Number(f.cuenta_id));
+  const ids = [...cuentaDe.keys()].filter(Number.isFinite);
+  const docs: any[] = [];
+  const conPago = new Set<number>(), enLote = new Set<number>();
+  for (let k = 0; k < ids.length; k += 200) {
+    const tanda = ids.slice(k, k + 200);
+    const { data, error } = await sb.from("documentos_compra").select("*").in("id", tanda).eq("estado_pago", "impaga");
+    if (error) return fallo(error.message);
+    docs.push(...((data as any[]) ?? []));
+    const { data: ap, error: e2 } = await sb.from("pagos_aplicacion").select("documento_id")
+      .eq("documento_tipo", "documento_compra").in("documento_id", tanda);
+    if (e2) return fallo(e2.message);
+    for (const a of (ap as any[]) ?? []) conPago.add(Number(a.documento_id));
+    const { data: li, error: e3 } = await sb.from("lotes_pago_items").select("documento_id")
+      .eq("documento_tipo", "documento_compra").in("documento_id", tanda);
+    // Sin la tabla de lotes (fase 06 sin correr) no existe ningún lote: eso no es un fallo de lectura.
+    if (e3 && !/does not exist|could not find/i.test(e3.message)) return fallo(e3.message);
+    for (const x of (li as any[]) ?? []) enLote.add(Number(x.documento_id));
+  }
+  const out: DeudaFalsa[] = docs
+    .filter((d) => esDeudaFalsaPrepago(d, conPago, enLote))
+    .map((d) => ({
+      id: Number(d.id), serie: d.serie ?? null, numero: d.numero ?? null, fecha_emision: d.fecha_emision ?? null,
+      total: Number(d.total ?? 0), cuenta_id: cuentaDe.get(Number(d.id)) ?? null, observaciones: d.observaciones ?? null,
+    }))
+    .sort((a, b) => String(a.fecha_emision ?? "").localeCompare(String(b.fecha_emision ?? "")));
+  return { ok: true, docs: out, total: r2(out.reduce((s, d) => s + d.total, 0)) };
+}
+
+/**
+ * «Marcarlos como pagados»: SOLO los que la persona vio (`ids`) y que SIGUEN siendo deuda falsa
+ * ahora — la lista se recalcula aquí y no se confía en la del navegador, que pudo quedarse vieja
+ * mientras alguien les aplicaba un pago desde Tesorería. Quedan como los crea hoy asegurarDocumento:
+ * pagados, cubiertos por el anticipo y con la razón escrita.
+ */
+export async function marcarPrepagoPagadas(
+  sb: any, ids: number[], cuentas: FilaCuenta[],
+): Promise<{ ok: boolean; error?: string; marcadas: number; total: number }> {
+  const r = await prepagoComoDeuda(sb);
+  if (!r.ok) return { ok: false, error: r.error, marcadas: 0, total: 0 };
+  const pedidos = new Set(ids.map(Number));
+  let marcadas = 0, total = 0;
+  for (const d of r.docs.filter((x) => pedidos.has(x.id))) {
+    const nota = notaPrepago(cuentas.find((c) => c.id === d.cuenta_id)?.nombre ?? null);
+    const patch: Record<string, unknown> = {
+      estado_pago: "pagada", adelanto_1: d.total, fecha_pago: d.fecha_emision,
+      observaciones: d.observaciones ? `${d.observaciones} · ${nota}` : nota,
+    };
+    // `.eq("estado_pago","impaga")`: si entre la lista y el clic alguien lo movió, no se pisa.
+    let { data, error } = await sb.from("documentos_compra").update(patch).eq("id", d.id).eq("estado_pago", "impaga").select("id");
+    if (error && /column .* does not exist|could not find .* column/i.test(error.message)) {
+      for (const k of ["adelanto_1", "fecha_pago", "observaciones"]) delete patch[k];
+      ({ data, error } = await sb.from("documentos_compra").update(patch).eq("id", d.id).eq("estado_pago", "impaga").select("id"));
+    }
+    if (error) return { ok: false, error: error.message, marcadas, total: r2(total) };
+    if (((data as any[]) ?? []).length) { marcadas++; total += d.total; }
+  }
+  return { ok: true, marcadas, total: r2(total) };
 }
 
 /** Para la pantalla: re-exporta los detectores (la pantalla los usa al elegir una placa). */

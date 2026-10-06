@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import type { CodigoConexion } from "@/lib/combustible/correo-conexion";
+import { esNombreComprobante } from "@/lib/combustible/factura-lineas";
 
 type Estado = {
   ok: boolean;
@@ -52,7 +53,7 @@ export default function CorreoFacturas({ onCodigo }: { onCodigo?: (c: CodigoCone
   const [estado, setEstado] = useState<Estado | null>(null);
   const [aviso, setAviso] = useState<{ tono: "ok" | "alerta"; texto: string } | null>(null);
   const [ocupado, setOcupado] = useState<string | null>(null);
-  const [cuenta, setCuenta] = useState<{ id: number; correo_filtro: string } | null>(null);
+  const [cuenta, setCuenta] = useState<{ id: number; correo_filtro: string; rucs: string[] } | null>(null);
   const [filtro, setFiltro] = useState("");
   const [muestra, setMuestra] = useState<Muestra | null>(null);
 
@@ -87,9 +88,15 @@ export default function CorreoFacturas({ onCodigo }: { onCodigo?: (c: CodigoCone
       }
     } catch { /* sin URL legible no hay aviso que mostrar */ }
     cargar();
-    supabase.from("combustible_cuentas").select("id, correo_filtro, activo").order("id").then(({ data }: any) => {
+    supabase.from("combustible_cuentas").select("id, correo_filtro, activo, rucs").order("id").then(({ data }: any) => {
       const c = ((data as any[]) ?? []).find((x) => x.activo) ?? ((data as any[]) ?? [])[0];
-      if (c) { setCuenta({ id: Number(c.id), correo_filtro: c.correo_filtro ?? "" }); setFiltro(c.correo_filtro ?? ""); }
+      if (c) {
+        // Los RUC entran a la búsqueda aunque el filtro no los nombre (consultaGmail): se enseñan
+        // para que «0 correos» no se lea como que el RUC no se buscó.
+        const rucs = (Array.isArray(c.rucs) ? c.rucs : []).map(String).filter((r: string) => /^\d{11}$/.test(r));
+        setCuenta({ id: Number(c.id), correo_filtro: c.correo_filtro ?? "", rucs });
+        setFiltro(c.correo_filtro ?? "");
+      }
     });
   }, [cargar]);
 
@@ -219,12 +226,19 @@ export default function CorreoFacturas({ onCodigo }: { onCodigo?: (c: CodigoCone
               </button>
             )}
           </div>
+          {!!cuenta?.rucs.length && (
+            <div className="text-[11px] text-gray-600">
+              Además del filtro, siempre se buscan los correos con el RUC <b>{cuenta.rucs.join(", ")}</b>: va en el nombre de toda
+              factura electrónica de esa cuenta, la mande quien la mande (las de COESTI llegan desde el servicio de facturación, no desde Primax).
+            </div>
+          )}
           {muestra && (
             !muestra.ok ? <div className="text-xs text-red-700">{muestra.error}</div> :
             muestra.mensajes.length === 0 ? (
               <div className="text-xs text-amber-900">
                 Ningún correo de los últimos 45 días coincide con <code>{muestra.consulta}</code>{muestra.correo?.email ? <> en {muestra.correo.email}</> : null}.
-                {" "}Abre una factura de Primax en ese correo y mira el remitente: ajusta el filtro con esa dirección. También funciona buscar el RUC de COESTI, que va en toda factura de Primax: <code>20127765279 has:attachment</code>.
+                {" "}Abre una factura de Primax en ese correo y mira el remitente: ajusta el filtro con esa dirección.
+                {!cuenta?.rucs.length && <> También funciona buscar el RUC de COESTI, que va en toda factura de Primax: <code>20127765279 has:attachment</code>.</>}
               </div>
             ) : (
               <div className="text-xs space-y-1">
@@ -234,12 +248,16 @@ export default function CorreoFacturas({ onCodigo }: { onCodigo?: (c: CodigoCone
                     <span className="text-gray-500">{m.fecha ? new Date(m.fecha).toLocaleDateString("es-PE") : "—"}</span>
                     <span className="font-bold truncate max-w-[260px]">{m.de}</span>
                     <span className="truncate max-w-[360px]">{m.asunto}</span>
-                    <span className={m.adjuntos.some((a) => /\.(xml|zip)$/i.test(a)) ? "text-green-700" : m.adjuntos.length ? "text-amber-700" : "text-red-700"}>
+                    {/* El MISMO criterio que la lectura (lib/combustible/facturas-correo.ts): XML →
+                        se lee; PDF con nombre de comprobante → la IA; lo demás no es una factura. */}
+                    <span className={
+                      m.adjuntos.some((a) => /\.(xml|zip)$/i.test(a) && !/^R-/i.test(a)) ? "text-green-700"
+                        : m.adjuntos.some((a) => /\.pdf$/i.test(a) && esNombreComprobante(a)) ? "text-amber-700" : "text-gray-500"}>
                       {m.adjuntos.length ? m.adjuntos.join(", ") : "sin adjuntos"}
                     </span>
                   </div>
                 ))}
-                <div className="text-[11px] text-gray-500">Verde: trae el XML de SUNAT (se registra solo). Ámbar: solo PDF (la IA lo lee y queda para confirmar). Rojo: sin adjunto (no hay factura que leer).</div>
+                <div className="text-[11px] text-gray-500">Verde: trae el XML de SUNAT (se lee sin IA). Ámbar: solo el PDF del comprobante (la IA lo lee y queda para confirmar). Gris: no trae una factura (una carta, un estado de cuenta): no se lee.</div>
               </div>
             )
           )}

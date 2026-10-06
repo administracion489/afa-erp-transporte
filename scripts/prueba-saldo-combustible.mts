@@ -7,14 +7,20 @@
 //   · el saldo ante la duda sale MÁS BAJO (un aviso tarde deja el bus sin cargar);
 //   · un aviso por escalón y por ciclo (no uno por hora), y se rearma con un depósito;
 //   · la factura JAMÁS registra una carga que ya existe (sería el gasto dos veces), ni una
-//     que el Radar tiene en revisión, ni una sin placa/fecha/cuadre.
+//     que el Radar tiene en revisión, ni una sin placa/fecha/cuadre;
+//   · lo del HISTORIAL (más de 45 días) no se registra solo, y lo reciente sigue igual que antes;
+//   · la pantalla cuenta las cargas del historial con el MISMO filtro con que el botón las registra;
+//   · un comprobante prepago con un pago, un anticipo o un lote encima no se marca pagado.
+import { PostgrestClient } from "@supabase/postgrest-js";
 import {
   calcularSaldo, decidirAviso, perteneceACuenta, grifoCasa, posteriorAlAncla,
   type CuentaCombustible, type Movimiento, type CargaCuenta,
 } from "../lib/combustible/saldo-cuenta";
 import {
   lineasUbl, completarConDocumento, planDeLinea, placasEnTexto, notasEnTexto, normNota,
-  type LineaFactura, type CargaExistente,
+  elegirXmlComprobante, esNombreComprobante, resumenHistorico, FILTRO_HISTORICO, DIAS_REGISTRO_AUTOMATICO,
+  esDeudaFalsaPrepago, notaPrepago,
+  type LineaFactura, type CargaExistente, type PlanLinea,
 } from "../lib/combustible/factura-lineas";
 
 let fallos = 0;
@@ -230,6 +236,162 @@ chk("un lubricante no es combustible",
   }
   chk("barrido: nunca se registra lo que ya casa", ok);
   chk("corolario: el barrido sí registra lo que de verdad falta", registradas > 0, `${registradas} casos`);
+}
+
+// ── 6. El historial no se registra solo ──────────────────────────────────────
+console.log("\n6. Lo del historial (más de 45 días)");
+const hace = (dias: number) => new Date(Date.parse(`${base.hoy}T12:00:00Z`) - dias * 86400000).toISOString().slice(0, 10);
+const H = DIAS_REGISTRO_AUTOMATICO;
+{
+  const vieja = { ...linea, fecha: "2026-07-01" };
+  const p = planDeLinea({ ...base, diasAutoRegistro: H, linea: vieja, registradas: [], radarPendientes: [] });
+  chk("despacho de julio que falta → revisar/historico, NO registrar", p.codigo === "revisar" && p.motivo === "historico", `${p.codigo}/${p.motivo}`);
+  chk("…con la propuesta lista para registrarla con un clic", p.propuesta?.placa === "CWZ371" && p.propuesta?.fecha === "2026-07-01");
+  chk("…y el detalle dice por qué (gasto de un mes pasado)", /mes pasado/.test(p.detalle));
+  chk("una persona que ya decidió (diasAutoRegistro null) → registrar",
+    planDeLinea({ ...base, diasAutoRegistro: null, linea: vieja, registradas: [], radarPendientes: [] }).codigo === "registrar");
+  chk("si ya está en el ERP, casa igual (el candado no esconde nada)",
+    planDeLinea({ ...base, diasAutoRegistro: H, linea: vieja, registradas: [reg({ fecha: "2026-07-01" })], radarPendientes: [] }).codigo === "ya_registrada");
+  chk("si el Radar la tiene en revisión, se dice eso y no «historial»",
+    planDeLinea({ ...base, diasAutoRegistro: H, linea: vieja, registradas: [], radarPendientes: [reg({ id: "u", fecha: "2026-07-01" })] }).codigo === "en_radar_pendiente");
+  chk("una vieja que solo llegó en PDF sigue pidiendo confirmación de a una (no entra al lote del historial)",
+    planDeLinea({ ...base, diasAutoRegistro: H, fuente: "vision_pdf", linea: vieja, registradas: [], radarPendientes: [] }).motivo === "lectura_no_oficial");
+}
+chk(`frontera: hace ${H} días todavía se registra sola`,
+  planDeLinea({ ...base, diasAutoRegistro: H, linea: { ...linea, fecha: hace(H) }, registradas: [], radarPendientes: [] }).codigo === "registrar");
+chk(`frontera: hace ${H + 1} días ya es historial`,
+  planDeLinea({ ...base, diasAutoRegistro: H, linea: { ...linea, fecha: hace(H + 1) }, registradas: [], radarPendientes: [] }).motivo === "historico");
+// Barrido sobre 400 días atrás (y alguno a futuro): lo reciente queda BYTE A BYTE como antes del
+// candado, lo viejo jamás se registra solo — y el corolario: sin candado lo viejo sí se registra.
+{
+  let igualesRecientes = true, nuncaViejo = true, sinCandadoRegistra = 0, historicos = 0;
+  for (let d = -3; d <= 400; d++) {
+    const l = { ...linea, fecha: hace(d) };
+    for (const auto of [true, false]) for (const enReg of [false, true]) {
+      const args = { ...base, autoRegistrar: auto, linea: l, registradas: enReg ? [reg({ fecha: l.fecha })] : [], radarPendientes: [] };
+      const antes = planDeLinea(args);
+      const ahora = planDeLinea({ ...args, diasAutoRegistro: H });
+      const libre = planDeLinea({ ...args, diasAutoRegistro: null });
+      if (d <= H && JSON.stringify(antes) !== JSON.stringify(ahora)) igualesRecientes = false;
+      if (d > H && ahora.codigo === "registrar") nuncaViejo = false;
+      if (ahora.motivo === "historico") historicos++;
+      if (d > H && libre.codigo === "registrar") sinCandadoRegistra++;
+    }
+  }
+  chk("barrido: dentro de los 45 días el plan es idéntico al de antes del candado", igualesRecientes);
+  chk("barrido: más allá, nada se registra solo", nuncaViejo);
+  chk("corolario: el candado sí marca historial", historicos > 0, `${historicos}`);
+  chk("corolario: una persona que decide sí registra lo viejo", sinCandadoRegistra > 0, `${sinCandadoRegistra}`);
+}
+
+// ── 7. Qué adjunto es la factura ─────────────────────────────────────────────
+console.log("\n7. El adjunto que es la factura");
+{
+  const cdr = { nombre: "R-20127765279-01-F882-0132184.xml", texto: `<?xml version="1.0"?><ar:ApplicationResponse xmlns:ar="urn:x"><cbc:ResponseCode>0</cbc:ResponseCode></ar:ApplicationResponse>` };
+  const fac = { nombre: "20127765279-01-F882-0132184.xml", texto: xml };
+  chk("la CDR primero y la factura después → se elige la FACTURA", elegirXmlComprobante([cdr, fac]) === fac);
+  chk("…y en el otro orden también", elegirXmlComprobante([fac, cdr]) === fac);
+  chk("solo la CDR → no hay factura (no se leen líneas de una constancia)", elegirXmlComprobante([cdr]) === null);
+  chk("una CDR con nombre raro se reconoce por el contenido",
+    elegirXmlComprobante([{ ...cdr, nombre: "constancia.xml" }]) === null);
+  chk("el nombre «R-…» basta aunque el contenido no lo diga",
+    elegirXmlComprobante([{ nombre: "R-algo.xml", texto: "<x/>" }]) === null);
+  const nc = { nombre: "nc.xml", texto: `<?xml version="1.0"?><CreditNote xmlns="urn:x"><cbc:ID>FC01-1</cbc:ID></CreditNote>` };
+  const otro = { nombre: "a-otro.xml", texto: `<?xml version="1.0"?><Catalogo/>` };
+  chk("entre un XML cualquiera y una nota de crédito, la nota (por su raíz UBL)", elegirXmlComprobante([otro, nc]) === nc);
+  chk("sin raíz UBL se toma el primero que no sea CDR (lo de antes)", elegirXmlComprobante([cdr, otro]) === otro);
+
+  // Los tres adjuntos REALES de un correo de COESTI (Carvajal, factura F882-0132184).
+  const reales = ["20127765279-01-F882-0132184.pdf", "20127765279-01-F882-0132184.xml", "R-20127765279-01-F882-0132184.xml"];
+  chk("nombres reales: el PDF y el XML de la factura son comprobante", esNombreComprobante(reales[0]) && esNombreComprobante(reales[1]));
+  chk("nombres reales: la CDR NO", !esNombreComprobante(reales[2]));
+  chk("boleta y notas también (03, 07, 08)",
+    ["20127765279-03-B001-123.pdf", "20127765279-07-FC01-9.xml", "20127765279-08-FD01-77.zip"].every(esNombreComprobante));
+  chk("mayúsculas y carpeta del ZIP no importan", esNombreComprobante("docs/20127765279-01-F882-0132184.PDF"));
+  for (const n of [
+    "Carta actualizacion precios 03-10-2026.pdf", "Estado de cuenta 20127765279.pdf", "20127765279.pdf",
+    "20127765279-09-T001-1.pdf", "factura F882-0132184.pdf", "2012776527-01-F882-1.pdf", "",
+  ]) chk(`«${n || "(vacío)"}» no es un comprobante → no se lee con IA`, !esNombreComprobante(n));
+}
+
+// ── 8. Lo que el historial dejó por registrar ────────────────────────────────
+console.log("\n8. Resumen del historial y su filtro");
+// Contención de jsonb (`@>`) de Postgres, la que aplica `cs.` sobre `conciliacion`.
+const contiene = (a: any, b: any): boolean => {
+  if (Array.isArray(b)) return Array.isArray(a) && b.every((y) => a.some((x: any) => contiene(x, y)));
+  if (b && typeof b === "object") return !!a && typeof a === "object" && !Array.isArray(a) && Object.keys(b).every((k) => k in a && contiene(a[k], b[k]));
+  return a === b;
+};
+// Lo que la base guarda: el plan pasado por JSON (las claves `undefined` desaparecen).
+const comoJsonb = (p: PlanLinea[]) => JSON.parse(JSON.stringify(p));
+{
+  const vieja = (n: number, fecha: string): LineaFactura => ({ ...linea, n, fecha });
+  const planVieja = (l: LineaFactura) => planDeLinea({ ...base, diasAutoRegistro: H, linea: l, registradas: [], radarPendientes: [] });
+  const f1L = [vieja(1, "2026-03-02")];
+  const f2L = [vieja(1, "2026-05-10"), vieja(2, "2026-05-11"), { ...linea, n: 3 }];
+  const filas = [
+    { id: 1, lineas: f1L, conciliacion: comoJsonb(f1L.map(planVieja)) },
+    // La línea 2 falta en `lineas` (fila a medias): el importe sale de su propuesta.
+    { id: 2, lineas: [f2L[0], f2L[2]], conciliacion: comoJsonb([planVieja(f2L[0]), planVieja(f2L[1]), planDeLinea({ ...base, linea: f2L[2], registradas: [reg({})], radarPendientes: [] })]) },
+    { id: 3, lineas: [linea], conciliacion: comoJsonb([planDeLinea({ ...base, linea, registradas: [], radarPendientes: [] })]) },
+  ];
+  const r = resumenHistorico(filas);
+  chk("cuenta solo las líneas del historial", r.lineas === 3, String(r.lineas));
+  chk("de cuántas facturas", r.facturas === 2);
+  chk("el importe: las líneas, y sin la línea, su propuesta (cantidad × precio)", r.total === Math.round((225.05 + 225.05 + 8.61 * 26.14) * 100) / 100, String(r.total));
+  chk("desde / hasta", r.desde === "2026-03-02" && r.hasta === "2026-05-11");
+  chk("sin nada del historial: todo en cero", resumenHistorico([filas[2]]).lineas === 0 && resumenHistorico([]).total === 0);
+
+  // EL CICLO: las filas que la pantalla cuenta son exactamente las que el filtro de la base
+  // devuelve al botón (escribir con una identidad y leer con otra es el bug que este repo ya pagó).
+  const filtro = JSON.parse(FILTRO_HISTORICO.conciliacion);
+  const porFiltro = filas.filter((f) => contiene(f.conciliacion, filtro)).map((f) => f.id);
+  const porResumen = filas.filter((f) => resumenHistorico([f]).lineas > 0).map((f) => f.id);
+  chk("ciclo: el filtro de la base y el resumen de la pantalla eligen las MISMAS facturas",
+    JSON.stringify(porFiltro) === JSON.stringify(porResumen), `${porFiltro} vs ${porResumen}`);
+  chk("…y no son todas (el filtro filtra)", porFiltro.length === 2);
+  chk("una línea con otro motivo en «revisar» no cae en el filtro",
+    !contiene(comoJsonb([{ n: 1, codigo: "revisar", motivo: "sin_placa", detalle: "" }]), filtro));
+  chk("el filtro va como TEXTO (si no, supabase-js lo rompe)", typeof FILTRO_HISTORICO.conciliacion === "string");
+  chk("las facturas con historial quedan «parcial» (estado que el filtro incluye)", FILTRO_HISTORICO.estados.includes("parcial"));
+
+  // El parámetro que de verdad viaja a PostgREST.
+  const param = (v: any) =>
+    (new PostgrestClient("http://x/rest/v1").from("radar_facturas").select("id").contains("conciliacion", v) as any).url.searchParams.get("conciliacion");
+  chk("supabase-js con el texto: cs.[{…}] (contención de jsonb)",
+    param(FILTRO_HISTORICO.conciliacion) === `cs.[{"codigo":"revisar","motivo":"historico"}]`, param(FILTRO_HISTORICO.conciliacion));
+  chk("regresión: el array tal cual se convierte en cs.{[object Object]} (el bug)",
+    param([{ motivo: "historico" }]) === "cs.{[object Object]}", param([{ motivo: "historico" }]));
+}
+
+// ── 9. La factura de una cuenta prepago no es una deuda ──────────────────────
+console.log("\n9. Comprobantes prepago que nacieron como deuda");
+{
+  const doc = { id: 7, estado_pago: "impaga", estado_aprobacion: "pendiente", total: 269.92, adelanto_1: 0, adelanto_2: 0 };
+  const vacio = new Set<number>();
+  chk("impaga, sin pago, sin anticipo, fuera de lote → deuda falsa", esDeudaFalsaPrepago(doc, vacio, vacio));
+  chk("aprobada para pagar pero aún fuera de un lote → se propone igual (es justo el riesgo)",
+    esDeudaFalsaPrepago({ ...doc, estado_aprobacion: "aprobado_gerencia" }, vacio, vacio));
+  chk("con un pago aplicado → no se toca", !esDeudaFalsaPrepago(doc, new Set([7]), vacio));
+  chk("dentro de un lote → no se toca", !esDeudaFalsaPrepago(doc, vacio, new Set([7])));
+  chk("marcada «incluido_lote» → no se toca", !esDeudaFalsaPrepago({ ...doc, estado_aprobacion: "incluido_lote" }, vacio, vacio));
+  chk("con un anticipo anotado → no se toca", !esDeudaFalsaPrepago({ ...doc, adelanto_1: 50 }, vacio, vacio));
+  chk("ya pagada o parcial → no", !esDeudaFalsaPrepago({ ...doc, estado_pago: "pagada" }, vacio, vacio) && !esDeudaFalsaPrepago({ ...doc, estado_pago: "parcial" }, vacio, vacio));
+  chk("sin importe → no", !esDeudaFalsaPrepago({ ...doc, total: 0 }, vacio, vacio));
+  chk("sin las columnas de la fase 06 (anticipo/aprobación) se juzga igual", esDeudaFalsaPrepago({ id: 7, estado_pago: "impaga", total: 10 }, vacio, vacio));
+  chk("la nota nombra la cuenta y dice que no es deuda", /cuenta Primax/.test(notaPrepago("Primax")) && /no es una deuda/.test(notaPrepago(null)));
+  chk("sin cuenta no inventa un nombre", !/de la cuenta/.test(notaPrepago(null)));
+  // Barrido: jamás se propone marcar algo sobre lo que una persona ya está actuando.
+  let ok = true, propuestos = 0;
+  for (const ep of ["impaga", "parcial", "pagada", null]) for (const ap of [null, "pendiente", "aprobado_gerencia", "incluido_lote"])
+  for (const pago of [false, true]) for (const lote of [false, true]) for (const ad of [0, 25]) for (const tot of [0, 100]) {
+    const d = { id: 1, estado_pago: ep, estado_aprobacion: ap, total: tot, adelanto_1: ad };
+    const r = esDeudaFalsaPrepago(d, new Set(pago ? [1] : []), new Set(lote ? [1] : []));
+    if (r && (ep !== "impaga" || pago || lote || ad || ap === "incluido_lote" || !tot)) ok = false;
+    if (r) propuestos++;
+  }
+  chk("barrido: nunca con pago, lote, anticipo o ya pagado", ok);
+  chk("corolario: sí propone la deuda falsa de verdad", propuestos > 0, `${propuestos}`);
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde.");

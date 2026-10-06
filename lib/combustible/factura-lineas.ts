@@ -225,7 +225,19 @@ export type CodigoLinea =
   | "ya_registrada" | "en_radar_pendiente" | "registrar" | "revisar" | "en_espera" | "no_es_combustible";
 
 export type MotivoRevisar =
-  | "sin_placa" | "placa_ambigua" | "sin_fecha" | "sin_cantidad" | "no_cuadra" | "ambigua" | "nota_credito" | "auto_apagado" | "lectura_no_oficial" | "eliminada";
+  | "sin_placa" | "placa_ambigua" | "sin_fecha" | "sin_cantidad" | "no_cuadra" | "ambigua" | "nota_credito" | "auto_apagado" | "lectura_no_oficial" | "eliminada"
+  | "historico";
+
+/**
+ * Cuánto mira atrás la lectura NORMAL del correo, y hasta dónde llega el registro AUTOMÁTICO.
+ * Son el mismo número a propósito: lo que el ERP lee solo, lo registra solo; lo que se trae del
+ * HISTORIAL («leer el último año») se compara igual, pero lo que falta queda en «revisar» con
+ * motivo `historico` y lo registra una persona —de a una o todas juntas, viendo cuántas son y por
+ * cuánto—. Un año de cargas metido de golpe son gastos de meses ya cerrados: si ese combustible
+ * se había anotado por otro lado (un gasto, una caja chica), se contaría dos veces sin que nadie
+ * lo viera.
+ */
+export const DIAS_REGISTRO_AUTOMATICO = 45;
 
 export type PlanLinea = {
   n: number;
@@ -296,6 +308,9 @@ export function planDeLinea(args: {
   hoy: string;                     // YYYY-MM-DD Lima
   graciaDias: number;              // días que se espera al Radar antes de registrar desde la factura
   autoRegistrar: boolean;
+  /** Un despacho más viejo que esto no se registra solo (ver DIAS_REGISTRO_AUTOMATICO).
+   *  null/undefined = sin límite: lo usa quien ya decidió (una persona que confirma). */
+  diasAutoRegistro?: number | null;
 }): PlanLinea {
   const l = args.linea;
   if (!l.tipo_combustible) {
@@ -361,6 +376,13 @@ export function planDeLinea(args: {
   if (args.fuente !== "xml_ubl") {
     return { n: l.n, codigo: "revisar", motivo: "lectura_no_oficial", detalle: "Solo llegó el PDF (leído por IA, no el XML de SUNAT): confírmala con un clic.", propuesta: prop(l.placa, l.fecha) };
   }
+  if (args.diasAutoRegistro != null && l.fecha < args.hoy && difDias(args.hoy, l.fecha) > args.diasAutoRegistro) {
+    return {
+      n: l.n, codigo: "revisar", motivo: "historico",
+      detalle: `Despacho del ${l.fecha}, de hace más de ${args.diasAutoRegistro} días, que no está en el ERP. No se registra solo: es un gasto de un mes pasado. Regístralo si de verdad falta (o todos los del historial juntos, arriba).`,
+      propuesta: prop(l.placa, l.fecha),
+    };
+  }
   if (!args.autoRegistrar) {
     return { n: l.n, codigo: "revisar", motivo: "auto_apagado", detalle: "Falta registrarla. El registro automático está apagado: confírmala con un clic.", propuesta: prop(l.placa, l.fecha) };
   }
@@ -369,6 +391,105 @@ export function planDeLinea(args: {
     detalle: `No está en el ERP: se registra desde la factura (${l.placa}, ${l.fecha}, ${l.cantidad} × S/ ${l.precio_unitario}).`,
     propuesta: prop(l.placa, l.fecha),
   };
+}
+
+// ── 3) El adjunto que ES la factura ──────────────────────────────────────────
+
+/**
+ * El XML del COMPROBANTE entre los adjuntos. Junto a la factura suele venir la CDR de SUNAT
+ * (`R-<ruc>-01-<serie>-<número>.xml`, una ApplicationResponse): es la constancia de que SUNAT la
+ * recibió, no la factura, y no trae líneas. Se elige por el CONTENIDO —la raíz UBL—, no por el
+ * orden en que vengan los adjuntos, que cada servicio de facturación pone a su manera.
+ */
+export function elegirXmlComprobante<T extends { nombre: string; texto: string }>(xmls: T[]): T | null {
+  const cabeza = (x: T) => x.texto.slice(0, 6000);
+  const esCdr = (x: T) => /ApplicationResponse/i.test(cabeza(x)) || /^R-/i.test(x.nombre);
+  const esComprobante = (x: T) => /<(\w+:)?(Invoice|CreditNote|DebitNote)[\s>]/.test(cabeza(x));
+  return xmls.find((x) => esComprobante(x) && !esCdr(x)) ?? xmls.find((x) => !esCdr(x)) ?? null;
+}
+
+/**
+ * ¿El archivo tiene el nombre que SUNAT exige a un comprobante electrónico? `RUC-tipo-serie-número`
+ * (`20127765279-01-F882-0132184.pdf`; tipo 01 factura, 03 boleta, 07/08 notas). La CDR lleva una
+ * «R-» delante y NO lo es.
+ *
+ * DECIDE QUÉ PDF SE LEE CON IA. Al buzón de facturas también llegan PDFs que no son un comprobante
+ * —la carta de Primax con la actualización de precios, un estado de cuenta—, y leídos como factura
+ * la IA les inventa líneas. Peor que el costo: un estado de cuenta lista despachos que YA entraron
+ * por su propio XML, y confirmar esas líneas los registraría dos veces. Lo que no tiene nombre de
+ * comprobante no se lee: queda en la bandeja diciendo qué trae, con el enlace al correo.
+ */
+export function esNombreComprobante(nombre: string): boolean {
+  return /(^|[\\/])\d{11}-(01|03|07|08)-[A-Z0-9]{4}-\d{1,8}\.(xml|pdf|zip)$/i.test(String(nombre ?? "").trim());
+}
+
+// ── 4) Lo que el historial dejó por registrar ────────────────────────────────
+
+/**
+ * Cómo se encuentran EN LA BASE las facturas con líneas del historial: el MISMO filtro para la
+ * pantalla que las cuenta y para el botón que las registra. Si fueran dos, la pantalla podría
+ * prometer N cargas y el botón registrar otras.
+ *
+ * `conciliacion` es jsonb y el filtro va como TEXTO JSON a propósito: supabase-js convierte un
+ * array pasado tal cual en `cs.{[object Object]}`, que no encuentra nada —el botón diría «no
+ * quedaba nada por registrar» con la lista llena—. Como texto viaja `cs.[{…}]`, que es la
+ * contención de jsonb: «algún elemento del plan tiene estas claves».
+ */
+export const FILTRO_HISTORICO = {
+  estados: ["parcial", "procesada"],
+  conciliacion: JSON.stringify([{ codigo: "revisar", motivo: "historico" }]),
+} as const;
+
+export type ResumenHistorico = { lineas: number; facturas: number; total: number; desde: string | null; hasta: string | null };
+
+/** Cuántas cargas del historial faltan en el ERP, por cuánto y de qué fechas: lo que una persona
+ *  tiene que ver ANTES de registrarlas todas juntas. */
+export function resumenHistorico(
+  filas: { id: number | string; lineas?: LineaFactura[] | null; conciliacion?: PlanLinea[] | null }[],
+): ResumenHistorico {
+  let lineas = 0, total = 0, desde: string | null = null, hasta: string | null = null;
+  const facturas = new Set<string>();
+  for (const f of filas) {
+    const ls = Array.isArray(f.lineas) ? f.lineas : [];
+    for (const p of Array.isArray(f.conciliacion) ? f.conciliacion : []) {
+      if (p.codigo !== "revisar" || p.motivo !== "historico") continue;
+      const l = ls.find((x) => x.n === p.n);
+      const fecha = l?.fecha ?? p.propuesta?.fecha ?? null;
+      const monto = l?.total ?? (p.propuesta ? p.propuesta.galones * p.propuesta.precio_galon : 0);
+      lineas++;
+      total += Number(monto) || 0;
+      facturas.add(String(f.id));
+      if (fecha) {
+        if (!desde || fecha < desde) desde = fecha;
+        if (!hasta || fecha > hasta) hasta = fecha;
+      }
+    }
+  }
+  return { lineas, facturas: facturas.size, total: r2(total), desde, hasta };
+}
+
+// ── 5) La factura de una cuenta PREPAGO no es una deuda ──────────────────────
+
+/** La razón que queda escrita en el comprobante: al crearlo, y al corregir uno que nació como
+ *  deuda. Una sola frase para los dos caminos. */
+export function notaPrepago(cuenta?: string | null): string {
+  return `Pagada con el saldo prepago${cuenta ? ` de la cuenta ${cuenta}` : ""} (combustible): no es una deuda por pagar.`;
+}
+
+/**
+ * ¿Este comprobante de una cuenta prepago figura como deuda SIN serlo? Solo si sigue «impaga», con
+ * importe, sin anticipo anotado, sin ningún pago aplicado y fuera de todo lote de pago: con un
+ * pago, un anticipo o un lote encima, una persona ya está decidiendo sobre él y no se toca.
+ */
+export function esDeudaFalsaPrepago(
+  d: { id: number | string; estado_pago?: string | null; estado_aprobacion?: string | null; total?: number | null; adelanto_1?: number | null; adelanto_2?: number | null },
+  conPago: ReadonlySet<number>,
+  enLote: ReadonlySet<number>,
+): boolean {
+  return d.estado_pago === "impaga" && Number(d.total ?? 0) > 0
+    && !Number(d.adelanto_1 ?? 0) && !Number(d.adelanto_2 ?? 0)
+    && d.estado_aprobacion !== "incluido_lote"
+    && !conPago.has(Number(d.id)) && !enLote.has(Number(d.id));
 }
 
 export const ETIQUETA_LINEA: Record<CodigoLinea, { texto: string; color: string }> = {

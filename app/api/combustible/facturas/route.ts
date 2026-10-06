@@ -3,7 +3,13 @@
 //
 //   GET  (cron, Bearer CRON_SECRET)  → lee el correo de facturas (o el Gmail del CRM) y concilia.
 //   POST (pantalla /combustible, módulo `combustible`):
-//        { accion: "sincronizar" }
+//        { accion: "sincronizar", historial? } → historial: el ÚLTIMO AÑO, por tandas (la
+//             pantalla vuelve a llamar mientras queden `pendientes`). Lo que falta del historial
+//             NO se registra solo: queda en «revisar» con motivo `historico`.
+//        { accion: "registrar_historicas" } → una persona decidió registrar todas esas juntas.
+//        { accion: "deuda_prepago" } → comprobantes de una cuenta prepago que figuran como deuda
+//             en Tesorería sin serlo (nacieron «impaga» antes de que se crearan pagados).
+//        { accion: "marcar_prepago", ids } → una persona vio esa lista y los deja pagados.
 //        { accion: "confirmar_linea", factura_id, n, placa?, fecha? } → una persona confirma
 //             una línea que quedó en «Revisar» (con la placa/fecha que ella eligió).
 //        { accion: "descartar", factura_id }  → no es una factura de combustible.
@@ -13,7 +19,10 @@ import { createClient } from "@supabase/supabase-js";
 import { esCronAutorizado, verificarUsuarioApi } from "@/lib/api-auth";
 import { hoyLima } from "@/lib/alertas";
 import { cargarCuentas } from "@/lib/combustible/saldo-datos";
-import { sincronizarFacturas, conciliarFacturaGuardada } from "@/lib/combustible/facturas-correo";
+import {
+  sincronizarFacturas, conciliarFacturaGuardada, registrarHistoricas, LECTURA_HISTORIAL,
+  prepagoComoDeuda, marcarPrepagoPagadas,
+} from "@/lib/combustible/facturas-correo";
 
 export const maxDuration = 300;
 
@@ -22,13 +31,15 @@ const admin = () =>
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
-async function sincronizarTodo(sb: any) {
+async function sincronizarTodo(sb: any, historial = false) {
   const { cuentas, sinMigracion } = await cargarCuentas(sb);
   if (sinMigracion) return { ok: false, error: "Falta correr supabase/combustible-03-saldo-cuenta-y-facturas.sql" };
   const activas = cuentas.filter((c) => c.activo);
   if (!activas.length) return { ok: true, resultados: [], aviso: "No hay cuentas de combustible activas." };
   const resultados = [];
-  for (const c of activas) resultados.push({ cuenta: c.nombre, ...(await sincronizarFacturas(sb, c, hoyLima())) });
+  for (const c of activas) {
+    resultados.push({ cuenta: c.nombre, ...(await sincronizarFacturas(sb, c, hoyLima(), historial ? LECTURA_HISTORIAL : {})) });
+  }
   const err = resultados.find((r) => !r.ok);
   return { ok: !err, error: err?.error, resultados };
 }
@@ -49,7 +60,19 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const sb = admin();
-    if (body.accion === "sincronizar") return NextResponse.json(await sincronizarTodo(sb));
+    if (body.accion === "sincronizar") return NextResponse.json(await sincronizarTodo(sb, body.historial === true));
+    if (body.accion === "registrar_historicas") {
+      const { cuentas, sinMigracion } = await cargarCuentas(sb);
+      if (sinMigracion) return NextResponse.json({ ok: false, error: "Falta correr supabase/combustible-03-saldo-cuenta-y-facturas.sql" });
+      return NextResponse.json(await registrarHistoricas(sb, cuentas, hoyLima()));
+    }
+    if (body.accion === "deuda_prepago") return NextResponse.json(await prepagoComoDeuda(sb));
+    if (body.accion === "marcar_prepago") {
+      const ids: number[] = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];
+      if (!ids.length) return NextResponse.json({ ok: false, error: "No se indicó ningún comprobante." }, { status: 400 });
+      const { cuentas } = await cargarCuentas(sb);
+      return NextResponse.json(await marcarPrepagoPagadas(sb, ids, cuentas));
+    }
 
     const id = Number(body.factura_id);
     const { data: fila } = await sb.from("radar_facturas").select("*").eq("id", id).maybeSingle();

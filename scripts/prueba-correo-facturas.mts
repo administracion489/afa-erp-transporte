@@ -11,7 +11,8 @@
 import { createHash, createHmac } from "crypto";
 import { elegirConexion, sePuedeLeer, describirConexion, type EstadoConexion } from "../lib/combustible/correo-conexion";
 import { firmarStateGmail, leerStateGmail, verificarStateGmail, getAuthUrl, SCOPES_CRM, SCOPE_SOLO_LECTURA } from "../lib/crm-gmail";
-import { consultaGmail } from "../lib/combustible/facturas-correo";
+import { consultaGmail, LECTURA_HISTORIAL } from "../lib/combustible/facturas-correo";
+import { DIAS_REGISTRO_AUTOMATICO } from "../lib/combustible/factura-lineas";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -114,6 +115,22 @@ console.log("\n4. Consulta de Gmail");
 chk("filtro + ventana", consultaGmail("from:primax has:attachment") === "from:primax has:attachment newer_than:45d");
 chk("sin filtro: al menos con adjunto", consultaGmail("  ") === "has:attachment newer_than:45d");
 chk("ventana configurable", consultaGmail("x", 7).endsWith("newer_than:7d"));
+// Las facturas de COESTI no las manda Primax: las manda factura.peru@cen.biz. Lo que sí llevan
+// siempre es el RUC del emisor en el nombre del archivo (20127765279-01-F882-0132184.xml).
+const FILTRO = "from:(primax OR coesti OR primaxsolutions) has:attachment";
+chk("el RUC de la cuenta se SUMA al filtro (OR), no lo reemplaza",
+  consultaGmail(FILTRO, 45, ["20127765279"]) === `((${FILTRO}) OR (20127765279 has:attachment)) newer_than:45d`,
+  consultaGmail(FILTRO, 45, ["20127765279"]));
+chk("dos RUC, dos alternativas", consultaGmail("x", 45, ["20127765279", "20100128056"]) === "((x) OR (20127765279 has:attachment) OR (20100128056 has:attachment)) newer_than:45d");
+chk("un RUC repetido o con espacios cuenta una vez", consultaGmail("x", 45, ["20127765279", " 20127765279 "]).split("20127765279").length === 2);
+chk("lo que no es un RUC (11 dígitos) no entra a la consulta", consultaGmail("x", 45, ["123", "abc", "", "2012776527X"]) === "x newer_than:45d");
+chk("sin filtro y con RUC: igual con adjunto", consultaGmail("", 45, ["20127765279"]) === "((has:attachment) OR (20127765279 has:attachment)) newer_than:45d");
+chk("si el filtro ya busca ese RUC (la pantalla lo sugería), no se repite",
+  consultaGmail("20127765279 has:attachment", 45, ["20127765279"]) === "20127765279 has:attachment newer_than:45d");
+chk("la lectura normal mira los mismos días hasta los que registra sola",
+  consultaGmail("x").endsWith(`newer_than:${DIAS_REGISTRO_AUTOMATICO}d`));
+chk("«Leer el último año» cubre los 12 meses anteriores", LECTURA_HISTORIAL.dias >= 365 && consultaGmail("x", LECTURA_HISTORIAL.dias).endsWith(`newer_than:${LECTURA_HISTORIAL.dias}d`));
+chk("…sin el repaso de parciales (eso lo hace el cron) y por tandas", LECTURA_HISTORIAL.revisarParciales === false && LECTURA_HISTORIAL.presupuestoMs < 300_000);
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde.");
 process.exit(fallos ? 1 : 0);
