@@ -11,6 +11,7 @@ import { esCronAutorizado, verificarUsuarioApi } from "@/lib/api-auth";
 import { createClient } from "@supabase/supabase-js";
 import { enviarEmail } from "@/lib/notificaciones";
 import { kmPorDia } from "@/lib/odometro";
+import { ultimoServicioPorVehiculo, proximoPorKm } from "@/lib/mantenimiento/proximo-servicio";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -101,11 +102,12 @@ async function handler(req: NextRequest) {
     // Último mantenimiento preventivo por vehículo (ancla de cálculo)
     const { data: mants } = await admin
       .from("mantenimiento")
-      .select("vehiculo_id, fecha, kilometraje, tipo")
+      .select("vehiculo_id, fecha, kilometraje, tipo, estado")
       .in("vehiculo_id", vehIds).eq("tipo", "preventivo")
       .order("fecha", { ascending: false });
-    const ultMant: Record<number, any> = {};
-    for (const m of (mants || [])) if (!ultMant[m.vehiculo_id]) ultMant[m.vehiculo_id] = m;
+    // Último servicio HECHO: los cancelados no anclan (lib/mantenimiento/proximo-servicio.ts, el
+    // mismo motor de la pestaña Próximos).
+    const ultMant: Record<number, any> = ultimoServicioPorVehiculo((mants || []) as any[]);
 
     // Lecturas recientes para estimar km/día
     const desde = addMeses(hoy, -4);
@@ -160,13 +162,10 @@ async function handler(req: NextRequest) {
       // no, se toma el siguiente hito MAYOR al km actual. (Debe coincidir con la
       // pestaña Próximos en ProgramaTab.)
       let dueKm: number | null = null, faltanKm: number | null = null, diasPorKm: number | null = null;
-      const inter = Number(interKm || 0);
-      if (inter > 0) {
-        const ultServ = um?.kilometraje ?? null;
-        dueKm = ultServ !== null
-          ? Number(ultServ) + inter
-          : (Math.floor(kmActual / inter) + 1) * inter;
-        faltanKm = dueKm - kmActual;
+      const prox = proximoPorKm({ kmActual, intervaloKm: interKm, ultimoServicioKm: um?.kilometraje ?? null });
+      if (prox) {
+        dueKm = prox.dueKm;
+        faltanKm = prox.faltanKm;
         diasPorKm = kmDia && kmDia > 0 && faltanKm > 0 ? Math.round(faltanKm / kmDia) : null;
       }
 

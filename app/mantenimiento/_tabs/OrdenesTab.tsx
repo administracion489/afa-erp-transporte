@@ -11,8 +11,9 @@ import {
 } from "@/lib/mantenimiento/lineas-costo";
 import {
   guardarCostoItem, guardarCostoOT, sincronizarLibro, registrarFacturaTaller, urlFactura,
-  cargarLineas, guardarLinea, borrarLinea, tarifaDeTaller, cargarPersonalTaller, type LineaGuardada,
+  cargarLineas, guardarLinea, borrarLinea, tarifaDeTaller, cargarPersonalTaller, retirarDelLibro, type LineaGuardada,
 } from "@/lib/mantenimiento/ot-factura";
+import { planAlSalirDeCierre } from "@/lib/mantenimiento/proximo-servicio";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -217,7 +218,7 @@ export default function OrdenesTab() {
   const [perfil, setPerfil] = useState<PerfilEmpresa | null>(null);
 
   // Form OT
-  const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", fecha_apertura: new Date().toISOString().split("T")[0], fecha_programada: "", mecanico: "", taller_proveedor_id: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
+  const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", km_cierre: "", fecha_apertura: new Date().toISOString().split("T")[0], fecha_programada: "", mecanico: "", taller_proveedor_id: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
   const [formOT, setFormOT] = useState(FORM_OT_VACIO);
 
   // Form Plantilla
@@ -352,18 +353,47 @@ export default function OrdenesTab() {
     };
 
     let otId = editandoOtId;
+    // Cerrar desde el formulario pasa por el MISMO camino que el selector de la tarjeta: el cierre
+    // pide el km real y escribe el servicio en el libro. Guardar `estado: "cerrada"` a secas dejaba
+    // la orden cerrada sin servicio en el libro, y «Próximos» seguía pidiendo ese mantenimiento.
+    let abrirCierreDe: OrdenTrabajo | null = null;
 
     if (editandoOtId) {
-      await supabase.from("ordenes_trabajo").update(payload).eq("id", editandoOtId);
-      // Y el costo BAJA al libro. Sin esto, editar el importe de una OT ya cerrada se quedaba en
-      // una columna que no lee nadie más: ni el egreso, ni el margen del servicio, ni el S/km.
       const prev = ordenes.find(o => o.id === editandoOtId);
-      const r = await sincronizarLibro({
-        id: editandoOtId, estado: payload.estado, km_cierre: prev?.km_cierre ?? null,
-        costo_total: totalDerivado, mantenimiento_id: prev?.mantenimiento_id ?? null,
-        documento_compra_id: prev?.documento_compra_id ?? null,
-      }, repartoForm, facturasDeOT(prev?.documento_compra_id ?? null, lineasDeLaOT));
-      if (r.aviso) setAvisoCosto(r.aviso);
+      const antes = String(prev?.estado ?? "").toLowerCase();
+      const despues = String(payload.estado).toLowerCase();
+      if (prev && despues === "cerrada" && antes !== "cerrada") {
+        payload.estado = prev.estado;
+        abrirCierreDe = { ...prev, ...payload } as OrdenTrabajo;
+      }
+      const saleDeCierre = prev && antes === "cerrada" && despues !== "cerrada";
+      if (saleDeCierre && !confirm(
+        `La OT #${editandoOtId} deja de estar cerrada: su servicio se RETIRA del libro de mantenimiento ` +
+        `y «Próximos» vuelve a calcular el próximo servicio sin él. Si se vuelve a cerrar, se registra de nuevo.\n\n¿Continuar?`
+      )) { setGuardando(false); return; }
+
+      // El km de CIERRE se corrige aquí, solo en una orden cerrada: es el km con el que el libro
+      // ancla el próximo servicio. El de apertura es otro dato (en una OT automática, el hito del plan).
+      const kmCierre = despues === "cerrada" && antes === "cerrada" && formOT.km_cierre.trim()
+        ? Number(formOT.km_cierre) : (prev?.km_cierre ?? null);
+      if (kmCierre != null && !(kmCierre > 0)) { alert("El km de cierre tiene que ser un número mayor que 0"); setGuardando(false); return; }
+      const patch: Record<string, unknown> = { ...payload };
+      if (despues === "cerrada" && antes === "cerrada") patch.km_cierre = kmCierre;
+
+      await supabase.from("ordenes_trabajo").update(patch).eq("id", editandoOtId);
+      if (saleDeCierre) {
+        const r = await retirarDelLibro({ id: editandoOtId, estado: prev!.estado, mantenimiento_id: prev!.mantenimiento_id ?? null }, payload.estado);
+        if (r.error) alert(r.error); else if (r.aviso) setAvisoCosto(r.aviso);
+      } else {
+        // Y el costo BAJA al libro. Sin esto, editar el importe de una OT ya cerrada se quedaba en
+        // una columna que no lee nadie más: ni el egreso, ni el margen del servicio, ni el S/km.
+        const r = await sincronizarLibro({
+          id: editandoOtId, estado: payload.estado, km_cierre: kmCierre,
+          costo_total: totalDerivado, mantenimiento_id: prev?.mantenimiento_id ?? null,
+          documento_compra_id: prev?.documento_compra_id ?? null,
+        }, repartoForm, facturasDeOT(prev?.documento_compra_id ?? null, lineasDeLaOT));
+        if (r.aviso) setAvisoCosto(r.aviso);
+      }
     } else {
       const { data } = await supabase.from("ordenes_trabajo").insert(payload).select().single();
       otId = data?.id || null;
@@ -381,6 +411,7 @@ export default function OrdenesTab() {
 
     setFormOT(FORM_OT_VACIO); setEditandoOtId(null); setMostrarFormOT(false);
     cargarDatos(); setGuardando(false);
+    if (abrirCierreDe) cambiarEstadoOT(abrirCierreDe, "cerrada");
 
     // Abrir checklist de la OT recién creada
     if (otId && !editandoOtId) setOtActiva(otId);
@@ -393,8 +424,22 @@ export default function OrdenesTab() {
       setCerrarOT({ ot, km: String(veh?.kilometraje_actual ?? ot.km_apertura ?? "") });
       return;
     }
+    // Dejar de estar cerrada RETIRA su servicio del libro: esa fila es el ancla de «Próximos» y
+    // del cron de OT automáticas, y quedándose ahí el calendario corría por un trabajo que no se
+    // hizo (CWZ-371: «Próximo km 29 484» con el servicio de los 20 000 sin hacer).
+    const plan = planAlSalirDeCierre({ estado: ot.estado, mantenimiento_id: ot.mantenimiento_id ?? null }, estado);
+    if (plan.accion === "retirar" && !confirm(
+      `La OT #${ot.id} pasa a «${estado}»: su servicio se RETIRA del libro de mantenimiento y «Próximos» ` +
+      `vuelve a calcular el próximo servicio sin él${estado === "cancelada" ? " (el trabajo no se hizo)" : ""}. ` +
+      `Si la vuelves a cerrar, se registra de nuevo con el km real.\n\n¿Continuar?`
+    )) return;
     await supabase.from("ordenes_trabajo").update({ estado }).eq("id", ot.id);
     setOrdenes(prev => prev.map(o => o.id === ot.id ? { ...o, estado } : o));
+    if (String(ot.estado).toLowerCase() === "cerrada" || ot.mantenimiento_id) {
+      const r = await retirarDelLibro(ot, estado);
+      if (r.error) alert(r.error); else if (r.aviso) setAvisoCosto(r.aviso);
+      cargarDatos();
+    }
   };
 
   // Cerrar una OT re-ancla "próximo mantenimiento": sin escribir en `mantenimiento`,
@@ -427,7 +472,23 @@ export default function OrdenesTab() {
       costo_imputado: repCierre.imputado,
       documento_compra_id: facCierre.principal,
     };
-    let { data: mant, error: eMant } = await supabase.from("mantenimiento").insert(filaLibro).select("id").single();
+    // Si la orden ya tiene su fila en el libro (se reabrió antes de que el ERP la retirara sola),
+    // se REESCRIBE esa fila en vez de insertar otra: dos filas del mismo servicio contarían el
+    // egreso dos veces y la vieja seguiría anclando «Próximos» con un km que ya no es.
+    let mant: { id: number } | null = null;
+    let eMant: { message: string } | null = null;
+    if (ot.mantenimiento_id) {
+      let rU = await supabase.from("mantenimiento").update(filaLibro).eq("id", ot.mantenimiento_id).select("id").maybeSingle();
+      if (rU.error && /costo_imputado|documento_compra_id/i.test(rU.error.message)) {
+        const { costo_imputado: _ci, documento_compra_id: _dc, ...base } = filaLibro;
+        rU = await supabase.from("mantenimiento").update(base).eq("id", ot.mantenimiento_id).select("id").maybeSingle();
+      }
+      if (!rU.error && rU.data) mant = rU.data as any;
+    }
+    if (!mant) {
+      const rI = await supabase.from("mantenimiento").insert(filaLibro).select("id").single();
+      mant = rI.data as any; eMant = rI.error;
+    }
     if (eMant && /costo_imputado|documento_compra_id/i.test(eMant.message)) {
       // Se sueltan las columnas accesorias antes que perder el asiento entero. Lo que se pierde
       // se dice: sin `costo_imputado`, la mano de obra propia no cuenta para el S/km medido.
@@ -463,7 +524,17 @@ export default function OrdenesTab() {
   };
 
   const eliminarOT = async (id: number) => {
-    if (!confirm("¿Eliminar esta orden de trabajo?")) return;
+    const ot = ordenes.find(o => o.id === id);
+    const enLibro = !!ot?.mantenimiento_id;
+    if (!confirm(enLibro
+      ? `¿Eliminar la OT #${id}? Su servicio también se RETIRA del libro de mantenimiento y «Próximos» vuelve a calcular el próximo servicio sin él.`
+      : "¿Eliminar esta orden de trabajo?")) return;
+    // Primero el libro: borrada la orden ya no se sabría qué fila era suya.
+    if (ot && (enLibro || String(ot.estado).toLowerCase() === "cerrada")) {
+      const r = await retirarDelLibro(ot, "eliminada");
+      if (r.error) { alert(r.error); return; }
+      if (r.aviso) setAvisoCosto(r.aviso);
+    }
     await supabase.from("ordenes_trabajo").delete().eq("id", id);
     if (otActiva === id) setOtActiva(null);
     cargarDatos();
@@ -886,6 +957,16 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
             <Campo label="KM al abrir OT">
               <input type="number" className={inputCls("font-mono")} placeholder="Ej: 150000" value={formOT.km_apertura} onChange={fot("km_apertura")} />
             </Campo>
+            {/* El km de CIERRE es el que ancla el próximo servicio en «Próximos»: si se tecleó mal al
+                cerrar, se corrige aquí y el libro de mantenimiento se actualiza con él. Solo en una
+                orden que ya está cerrada (cerrarla pide el km en su propio paso). */}
+            {editandoOtId && String(ordenes.find(o => o.id === editandoOtId)?.estado ?? "").toLowerCase() === "cerrada"
+              && String(formOT.estado).toLowerCase() === "cerrada" && (
+              <Campo label="KM de cierre (ancla el próximo servicio)">
+                <input type="number" className={inputCls("font-mono")} placeholder="Km real al terminar el servicio"
+                  value={formOT.km_cierre} onChange={fot("km_cierre")} />
+              </Campo>
+            )}
             {/* Si los ítems de esta OT ya llevan costo, el total lo manda la SUMA y este campo se
                 bloquea: dejarlo editable invita a teclear un total que no cuadra con su propio
                 detalle, y entonces el ERP tendría dos números para el mismo dinero. */}
@@ -1064,7 +1145,7 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                         <option value="cerrada">Cerrada</option>
                         <option value="cancelada">Cancelada</option>
                       </select>
-                      <button onClick={() => { setFormOT({ vehiculo_id: String(ot.vehiculo_id || ""), plantilla_id: String(ot.plantilla_id || ""), km_apertura: String(ot.km_apertura || ""), fecha_apertura: ot.fecha_apertura, fecha_programada: ot.fecha_programada || "", mecanico: ot.mecanico || "", taller_proveedor_id: String(ot.taller_proveedor_id || ""), taller: ot.taller || "", costo_total: String(ot.costo_total || ""), estado: ot.estado, observaciones: ot.observaciones || "" }); setEditandoOtId(ot.id); setMostrarFormOT(true); setMostrarFormPl(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                      <button onClick={() => { setFormOT({ vehiculo_id: String(ot.vehiculo_id || ""), plantilla_id: String(ot.plantilla_id || ""), km_apertura: String(ot.km_apertura || ""), km_cierre: ot.km_cierre != null ? String(ot.km_cierre) : "", fecha_apertura: ot.fecha_apertura, fecha_programada: ot.fecha_programada || "", mecanico: ot.mecanico || "", taller_proveedor_id: String(ot.taller_proveedor_id || ""), taller: ot.taller || "", costo_total: String(ot.costo_total || ""), estado: ot.estado, observaciones: ot.observaciones || "" }); setEditandoOtId(ot.id); setMostrarFormOT(true); setMostrarFormPl(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}
                         className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">
                         ✏️ Editar OT
                       </button>
@@ -1133,8 +1214,24 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                             {cerrada && ot.mantenimiento_id && (
                               <span className="text-[11px] text-green-700">✓ Asentado en el libro de mantenimiento</span>
                             )}
-                            {!cerrada && (
+                            {!cerrada && !ot.mantenimiento_id && (
                               <span className="text-[11px] text-gray-400">El costo entra al libro al cerrar la orden.</span>
+                            )}
+                            {/* Una orden que ya no está cerrada y cuyo servicio SIGUE en el libro: el
+                                «Próximo km» lo está contando como hecho. Pasa con las que se reabrieron
+                                o cancelaron antes de que el ERP retirara la fila solo. */}
+                            {!cerrada && ot.mantenimiento_id && (
+                              <span className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                                ⚠ Esta orden ya no está cerrada, pero su servicio sigue en el libro y «Próximos» lo cuenta como hecho.{" "}
+                                <button type="button" className="font-bold underline"
+                                  onClick={async () => {
+                                    const r = await retirarDelLibro(ot, ot.estado);
+                                    if (r.error) alert(r.error); else if (r.aviso) setAvisoCosto(r.aviso);
+                                    cargarDatos();
+                                  }}>
+                                  Retirarlo del libro
+                                </button>
+                              </span>
                             )}
                           </div>
                           <p className="text-[11px] text-gray-400 mt-1.5">{t.detalle}</p>

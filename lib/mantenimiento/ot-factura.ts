@@ -10,6 +10,7 @@
 // que seguir abriendo órdenes de trabajo. Lo que NO se hace es callarlo — el aviso nombra la
 // migración, porque un costo que parece guardarse y no se guarda es peor que un error.
 import { supabase } from "@/lib/supabase";
+import { planAlSalirDeCierre } from "@/lib/mantenimiento/proximo-servicio";
 import {
   planDeSincronizacion, llaveFiscal, aCentimos,
   type ItemCosto, type PlanSincro,
@@ -509,4 +510,46 @@ export async function urlFactura(ruta: string | null | undefined): Promise<strin
   if (/^https?:\/\//i.test(ruta)) return ruta;      // filas viejas que guardaron una URL
   const { data } = await supabase.storage.from("comprobantes").createSignedUrl(ruta, 3600);
   return data?.signedUrl ?? null;
+}
+
+// ── La OT deja de estar cerrada ──────────────────────────────────────────────
+
+/**
+ * Retira del libro de mantenimiento la fila que escribió el cierre de esta OT y suelta el ancla.
+ *
+ * Esa fila es la que usan «Próximos» y el cron de OT automáticas como «último servicio hecho», y
+ * la que `v_egresos` cuenta como egreso. Si la orden se reabre, se cancela o se elimina, el
+ * servicio no está hecho (o se va a volver a cerrar con su km real): dejar la fila corre el
+ * calendario por un trabajo que no ocurrió — el caso CWZ-371, «Próximo km 29 484» con la unidad
+ * en 19 725 y el servicio de los 20 000 sin hacer. Cerrar de nuevo la vuelve a escribir.
+ *
+ * Solo se toca la fila ANCLADA (`mantenimiento_id`): sin ancla no se sabe cuál es, y se dice.
+ */
+export async function retirarDelLibro(
+  ot: { id: number; estado: string | null; mantenimiento_id?: number | null },
+  estadoNuevo: string | "eliminada",
+): Promise<{ ok: boolean; retirada: boolean; aviso?: string; error?: string }> {
+  const plan = planAlSalirDeCierre({ estado: ot.estado, mantenimiento_id: ot.mantenimiento_id ?? null }, estadoNuevo);
+  if (plan.accion === "nada") {
+    return {
+      ok: true, retirada: false,
+      aviso: plan.motivo === "sin_ancla"
+        ? "Esta orden se cerró antes de que existiera el vínculo con el libro, así que su servicio NO se " +
+          "retiró solo: búscalo en Mantenimiento → Historial (descripción «OT #" + ot.id + "») y márcalo " +
+          "Cancelado, o el «Próximo km» seguirá contándolo."
+        : undefined,
+    };
+  }
+  // Primero se suelta el ancla (la fila deja de ser «de» esta OT) y después se borra; con el FK
+  // `ON DELETE SET NULL` el orden da igual, pero sin la migración el FK no existe.
+  await supabase.from("ordenes_trabajo").update({ mantenimiento_id: null }).eq("id", ot.id);
+  const { error } = await supabase.from("mantenimiento").delete().eq("id", plan.mantenimientoId);
+  if (error) {
+    return {
+      ok: false, retirada: false,
+      error: `No se pudo retirar el servicio del libro de mantenimiento (#${plan.mantenimientoId}): ${error.message}. ` +
+        "Márcalo Cancelado en Mantenimiento → Historial o el «Próximo km» lo seguirá contando.",
+    };
+  }
+  return { ok: true, retirada: true };
 }

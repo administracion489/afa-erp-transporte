@@ -782,6 +782,17 @@ La fórmula estaba escrita **cinco veces**, con tres umbrales y dos criterios de
 - **Pendiente conocido, sin mezclar decisiones**: con vida útil de 10 años, el `residual_pct = 0.30` describe una unidad de 22 años valiendo el 30 % de lo que se pagó a los 12. Si resulta alto, bajarlo sube la depreciación ~0.03 S/km en un bus; es un ajuste de celda.
 - **El script del equilibrio es el termómetro de esta decisión**: después de `costos-04` las Estándar quedan POR DEBAJO del equilibrio, y tanto él como el modal lo dicen con esas palabras. La afirmación que hace el ERP es medible en cualquier momento.
 
+### El próximo servicio lo ancla el libro, y el libro lo DERIVA de las OT cerradas
+
+`lib/mantenimiento/proximo-servicio.ts` (motor PURO) + `retirarDelLibro` en `lib/mantenimiento/ot-factura.ts` + `OrdenesTab.tsx`. Matriz: `npx tsx scripts/prueba-proximo-servicio.mts`. **Sin migración.**
+
+**El caso (CWZ-371, 05/10/2026)**: una lectura de odómetro equivocada hizo que el cron abriera la OT #6 «servicio de los 20 000 km»; se cerró y el cierre dejó en `mantenimiento` un preventivo a 19 484. La unidad iba por 19 725 y ese servicio no se hizo, pero «Próximo km» decía **29 484** y nada lo corregía: reabrir, cancelar o eliminar la OT dejaba su fila del libro, que es el ANCLA de «Próximos» y del cron de OT automáticas (próximo = km del último servicio + intervalo).
+
+- **LA FILA QUE ESCRIBIÓ UN CIERRE ES DE ESE CIERRE.** Si la OT deja de estar cerrada (reabierta, cancelada) o se elimina, `planAlSalirDeCierre` + `retirarDelLibro` la BORRAN y sueltan el ancla — con `confirm()` que lo dice; si se vuelve a cerrar, el cierre la escribe de nuevo con el km real (y si encuentra el ancla todavía puesta, REESCRIBE esa fila en vez de insertar otra). Es la regla de oro: la OT manda y el libro lo deriva. **Solo se toca la fila ANCLADA**: una OT cerrada sin `mantenimiento_id` no sabe cuál es la suya y se NOMBRA (`sin_ancla`) para corregirla a mano en Historial. Una OT que ya no está cerrada pero sigue anclada (las reabiertas con el código viejo) pinta un ámbar con «Retirarlo del libro».
+- **UN SERVICIO CANCELADO NO ANCLA** (`esServicioHecho`): una fila del libro en `cancelado` —incluidas las marcadas a mano en Historial— ya no cuenta como «último servicio».
+- **El km de CIERRE se corrige en «Editar OT»** (campo solo en órdenes cerradas) y baja al libro por `sincronizarLibro`. Antes el formulario solo ofrecía el km de APERTURA, que en una OT automática es el hito del plan y no ancla nada. Y cerrar desde el formulario pasa por el mismo modal de cierre (pide el km y escribe el libro); antes guardaba `cerrada` sin servicio en el libro.
+- **Era TRES copias del cálculo** (ProgramaTab, `/api/mantenimiento/alertas` y la analítica del vehículo, que además ignoraba el `intervalo_km_override`), con comentarios pidiendo que coincidieran. Ahora las tres llaman a `ultimoServicioPorVehiculo` + `proximoPorKm`; sin filas canceladas el resultado es **idéntico** al viejo (la matriz lo barre).
+
 ### El costo de una OT se CONGELABA, y la factura del taller no tenía dónde entrar
 
 `lib/mantenimiento/costo-ot.ts` (motor PURO) + `lib/mantenimiento/ot-factura.ts` (el que lee y escribe) + `OrdenesTab.tsx`. Matriz: `npx tsx scripts/prueba-costo-ot.mts`. Migración: `supabase/mantenimiento-05-costo-factura-cxp.sql` (**no la corre el deploy**).
