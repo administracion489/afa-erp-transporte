@@ -18,9 +18,15 @@
 //      lee el voucher, la factura registra la misma carga DESPUÉS —porque la recarga del Radar quedó con
 //      un importe mal leído y no casó con su línea— y la persona corrige y pulsa «Registrar». Antes ese
 //      botón insertaba sin mirar: el mismo despacho dos veces. Ahora se vuelve a preguntar al registrar;
-//   8. dos recargas del Radar por revisar que podrían ser la misma línea: la factura ya no la registra.
+//   8. dos recargas del Radar por revisar que podrían ser la misma línea: la factura ya no la registra;
+//   9. EL DUPLICADO DE UNA CARGA DEL RADAR (lo pidió el dueño sobre la CWZ-371 del 14/08, S/ 224.08: la
+//      carga #15 la registró el Radar con la foto del voucher, y la fila nueva traía el tablero y el
+//      surtidor): en vez de descartarla, se FUSIONA en el modo «sumar» — enlaza sus fotos y completa lo
+//      que falta, sin mover la fecha ni la plata;
+//  10. UNA FUSIÓN NO CRUZA UNIDADES: la carga se encuentra por su nota en cualquier unidad (el mismo papel
+//      capturado en la BUI-272 y en la CTV-370), y fusionar así pondría el odómetro en la unidad equivocada.
 import {
-  planDeFusion, yaEstaEnCombustible, preguntaAntesDeRegistrar,
+  planDeFusion, yaEstaEnCombustible, preguntaAntesDeRegistrar, modoDeFusion, claveVehiculo, vehiculoDeCarga,
   type CargaDeFactura, type VoucherAFusionar,
 } from "../lib/radar/fusion-factura";
 import type { CargaRegistrada } from "../lib/radar/album-recargas";
@@ -70,8 +76,9 @@ const p = planDeFusion(CARGA_61, VOUCHER);
 // ── 2. Lo que no se fusiona ──────────────────────────────────────────────────
 console.log("\n2. Lo que NO se fusiona, y por qué");
 {
-  const delRadar = planDeFusion({ ...CARGA_61, observaciones: "Radar IA · Grupo · ALEX" }, VOUCHER);
-  chk("una carga que registró el Radar (o una persona) es un duplicado de verdad: no se fusiona", !delRadar.puede && delRadar.codigo === "no_es_de_factura");
+  // (Una carga que registró el Radar o una persona ya NO es «no se fusiona»: se fusiona SUMANDO la
+  // evidencia, sin mover su fecha — sección 9.)
+  chk("la carga de la factura se fusiona en el modo «factura» (toma la fecha del voucher)", p.modo === "factura" && modoDeFusion(CARGA_61.observaciones) === "factura");
   chk("sin fecha en el voucher, no", planDeFusion(CARGA_61, { ...VOUCHER, fecha: null }).codigo === "sin_fecha");
   chk("con una fecha mal formada, no", planDeFusion(CARGA_61, { ...VOUCHER, fecha: "22/09/2026" }).codigo === "sin_fecha");
   const lejos = planDeFusion(CARGA_61, { ...VOUCHER, fecha: "2025-09-22" });
@@ -157,8 +164,10 @@ console.log("\n6. Barridos");
       const r = planDeFusion(c, v);
       if (["galones", "precio_galon", "total", "tipo_combustible", "unidad"].some((k) => k in r.patch)) roto++;
       if (!r.puede && Object.keys(r.patch).length) roto++;
-      if (r.puede && !esCargaDeFactura(obs)) roto++;
-      if (r.puede && Math.abs(dv) > MAX_DESFASE) roto++;
+      if (r.modo !== modoDeFusion(obs)) roto++;
+      if (r.puede && r.modo === "factura" && !esCargaDeFactura(obs)) roto++;
+      if (r.puede && r.modo === "factura" && Math.abs(dv) > MAX_DESFASE) roto++;
+      if (r.modo === "sumar" && "fecha" in r.patch) roto++;           // sumar nunca mueve la fecha
       if ("kilometraje" in r.patch && kmC != null && kmC > 0) roto++;
       if ("fecha" in r.patch && r.patch.fecha !== v.fecha) roto++;
       if (r.puede) {
@@ -167,7 +176,7 @@ console.log("\n6. Barridos");
         if (Object.keys(otra.patch).length) roto++;
       }
     }
-  chk(`(${casos}) nunca toca la plata, nunca pisa un km escrito, nunca fusiona lo que no es de factura ni a más de ${MAX_DESFASE} días, y es idempotente`, roto === 0, String(roto));
+  chk(`(${casos}) nunca toca la plata, nunca pisa un km escrito, la fecha solo la mueve una carga de factura (a ≤ ${MAX_DESFASE} días), y es idempotente`, roto === 0, String(roto));
   chk("y el barrido sí fusiona (un motor que nunca fusionara cumpliría lo de arriba)", fusionables > 0, String(fusionables));
 }
 
@@ -201,7 +210,7 @@ const comoCandidata = (c: CargaDeFactura, misma = true): CargaRegistrada =>
   // Lo que ya está por otra puerta: se descarta, no se fusiona.
   const delRadar: CargaDeFactura = { ...CARGA_61, observaciones: "Radar IA · Grupo AFA · ALEX · Nota V97T-00001443" };
   const yaR = yaEstaEnCombustible(V, [comoCandidata(delRadar)]);
-  chk("registrada por el Radar (otro reporte del mismo voucher): ya_registrada → descartar", yaR.codigo === "ya_registrada" && /Radar/.test(yaR.detalle) && /DESCARTA/.test(yaR.detalle), yaR.detalle);
+  chk("registrada por el Radar (otro reporte del mismo voucher): ya_registrada → FUSIONAR sumando (no descartar)", yaR.codigo === "ya_registrada" && /Radar/.test(yaR.detalle) && /FUSIÓNALA/.test(yaR.detalle) && !/DESCARTA/.test(yaR.detalle), yaR.detalle);
   const yaF = yaEstaEnCombustible(V, [comoCandidata(fusionada)]);
   chk("una carga de factura YA fusionada con otro voucher: ya_registrada, no se vuelve a fusionar", yaF.codigo === "ya_registrada" && /fusionó/.test(yaF.detalle), yaF.detalle);
   const aMano = yaEstaEnCombustible({ ...V, comprobante: null }, [comoCandidata({ ...CARGA_61, fecha: "2026-09-22", observaciones: "Cargada en el grifo" })]);
@@ -262,6 +271,140 @@ console.log("\n8. Dos recargas del Radar por revisar casan con la línea: la fac
     planDeLinea({ ...base, radarPendientes: [] }).codigo === "registrar");
   const una = planDeLinea({ ...base, radarPendientes: [r1] });
   chk("con UNA sigue siendo la de siempre: en revisión del Radar, enlazada a esa fila", una.codigo === "en_radar_pendiente" && una.casa_con === "uuid-1");
+}
+
+// ── 9. El duplicado de una carga del Radar (o a mano): se SUMA la evidencia ───
+console.log("\n9. Fusionar el duplicado de una carga del Radar o tecleada: se suma, no se descarta");
+{
+  // Con la forma del caso real: la carga #15 la registró el Radar de otro reporte, solo con la foto del
+  // voucher; la fila nueva trae el tablero (odómetro), el surtidor y la nota.
+  const CARGA_15: CargaDeFactura = {
+    id: 15, fecha: "2026-08-14", total: 224.08, galones: 9.072, kilometraje: 15339, conductor: null, grifo: "COESTI S.A.",
+    observaciones: "Radar IA · Grupo Combustible · JUAN · Comprobante V67T-00015555", tanque_lleno: null,
+  };
+  const B: VoucherAFusionar = {
+    fecha: "2026-08-14", kilometraje: 15339, conductor: "Juan Pérez", grifo: "COESTI S.A.", comprobante: "V67T-00015555",
+    cantidad: 9.072, monto: 224.08, tanqueLleno: true, tanqueFuente: "operador",
+  };
+  chk("modos: carga de factura sin voucher → «factura»; del Radar, a mano, de factura ya fusionada o sin observación → «sumar»",
+    modoDeFusion(CARGA_61.observaciones) === "factura" && modoDeFusion(CARGA_15.observaciones) === "sumar" &&
+    modoDeFusion("Cargado en el grifo") === "sumar" && modoDeFusion(fusionada.observaciones) === "sumar" && modoDeFusion(null) === "sumar");
+  const p15 = planDeFusion(CARGA_15, B);
+  chk("la carga del Radar SE PUEDE fusionar (antes: «descarta esta fila» y se perdían las fotos)", p15.puede && p15.codigo === "sumable" && p15.modo === "sumar", p15.detalle);
+  chk("dice lo que pasa: la fila queda enlazada, sus fotos pasan a ser evidencia, no se crea otra carga",
+    /registró el Radar/.test(p15.detalle) && /fotos/.test(p15.detalle) && /No se crea ninguna carga/.test(p15.detalle), p15.detalle);
+  chk("la carga toma lo que le falta (el conductor) y nada más", Object.keys(p15.patch).join() === "conductor" && p15.patch.conductor === "Juan Pérez", JSON.stringify(p15.patch));
+  chk("la fecha y la plata no se tocan", !["fecha", "galones", "precio_galon", "total", "tipo_combustible", "unidad"].some((k) => k in p15.patch));
+  chk("el mismo km y la misma nota: sin avisos", p15.avisos.length === 0, p15.avisos.join(" | "));
+  chk("el tanque que afirmó la persona, si la carga no lo tenía", p15.patchTanque?.tanque_lleno === true);
+  chk("fusionarla otra vez no escribe nada (sin marcas repetidas)", Object.keys(planDeFusion(aplicar(CARGA_15, p15.patch), B).patch).length === 0);
+
+  // Lo que la carga no tenía se completa; lo que tenía, no se pisa.
+  const aMano: CargaDeFactura = { ...CARGA_15, kilometraje: 0, grifo: null, observaciones: "Cargado en el grifo, voucher en el carro" };
+  const pm = planDeFusion(aMano, B);
+  chk("a una tecleada sin km: toma el odómetro, el grifo y la nota (para que el próximo reporte la encuentre)",
+    pm.puede && pm.patch.kilometraje === 15339 && pm.patch.grifo === "COESTI S.A." && /Nota V67T-00015555/.test(String(pm.patch.observaciones)), JSON.stringify(pm.patch));
+  const despues = aplicar(aMano, pm.patch);
+  chk("…y después el Radar la reconoce por su comprobante", buscarCargaRegistrada({ fecha: "2026-08-20", comprobante: "V67T-00015555", monto: 1 },
+    [{ id: 15, fecha: despues.fecha, total: despues.total, observaciones: despues.observaciones, misma_unidad: false }])?.por === "comprobante");
+  const otroKm = planDeFusion(CARGA_15, { ...B, kilometraje: 15400 });
+  chk("un km distinto del que ya tiene no se pisa: se avisa", !("kilometraje" in otroKm.patch) && otroKm.avisos.some((a) => /15[.,]?339/.test(a) && /15[.,]?400/.test(a)));
+  chk("un conductor ya escrito no se pisa", !("conductor" in planDeFusion({ ...CARGA_15, conductor: "Otro" }, B).patch));
+
+  // Lo que hace sospechar que NO es la misma recarga se dice; nada lo bloquea (decide quien mira las fotos).
+  const otraFecha = planDeFusion(CARGA_15, { ...B, fecha: "2026-08-13" });
+  chk("otra fecha en el voucher: se puede, la carga CONSERVA la suya, y se avisa", otraFecha.puede && !("fecha" in otraFecha.patch) && otraFecha.avisos.some((a) => /conserva su fecha/.test(a)));
+  const otraNota = planDeFusion(CARGA_15, { ...B, comprobante: "V67T-00015556" });
+  chk("otra nota de despacho: se avisa que suelen ser DOS despachos", otraNota.avisos.some((a) => /dos notas de despacho distintas/.test(a) && /V67T-00015555 y este voucher de la V67T-00015556/.test(a)), otraNota.avisos.join(" | "));
+  const notaDeFila = planDeFusion({ ...aMano, notas: ["V67T-00015555"] }, { ...B, comprobante: "V67T-00099999" });
+  chk("…también con la nota que se conoce por las filas del Radar enlazadas (no solo la de la observación)", notaDeFila.avisos.some((a) => /dos notas/.test(a)));
+  const otroImporte = planDeFusion(CARGA_15, { ...B, monto: 100 });
+  chk("otro importe: se queda el de la carga y se avisa (con «la carga», no «la factura»)",
+    !("total" in otroImporte.patch) && otroImporte.avisos.some((a) => /S\/ 100\.00/.test(a) && /la carga/.test(a) && !/factura/.test(a)));
+
+  // Una carga de factura YA fusionada recibe otro reporte del mismo voucher: suma, sin volver a moverla.
+  const segunda = planDeFusion(fusionada, { ...VOUCHER, fecha: "2026-09-23" });
+  chk("a una carga de factura ya fusionada no se le vuelve a mover la fecha (ya es la del papel)", segunda.modo === "sumar" && !("fecha" in segunda.patch) && segunda.avisos.some((a) => /conserva su fecha/.test(a)));
+
+  // «Ya está en Combustible» ahora manda a fusionar, y el botón Registrar sigue preguntando.
+  const ya = yaEstaEnCombustible({ fecha: "2026-08-14", comprobante: null, monto: 224.08 },
+    [{ id: 15, fecha: "2026-08-14", total: 224.08, observaciones: CARGA_15.observaciones, misma_unidad: true }]);
+  chk("el caso real (misma unidad, día e importe): ya_registrada, por «misma_fecha», y manda a FUSIONAR", ya.codigo === "ya_registrada" && ya.por === "misma_fecha" && /FUSIÓNALA/.test(ya.detalle));
+  chk("…y Registrar aparte sigue preguntando", /¿Registrarla igual/.test(preguntaAntesDeRegistrar(ya) ?? ""));
+
+  // Barrido del modo «sumar»: lo que no se puede aflojar.
+  let casos = 0, roto = 0, sumables = 0;
+  const obsCargas = [CARGA_15.observaciones, "Cargado en el grifo", fusionada.observaciones, null, "Cargado · Nota V67T-00015555"];
+  for (const obs of obsCargas) for (const kmC of [0, null, 15339]) for (const chofer of [null, "Ana"]) for (const dv of [-3, -1, 0, 1, 10])
+    for (const kmV of [null, 15339, 15400]) for (const monto of [224.08, 100, null]) for (const comp of ["V67T-00015555", "V67T-00015556", null]) {
+      casos++;
+      const c: CargaDeFactura = { ...CARGA_15, observaciones: obs, kilometraje: kmC, conductor: chofer };
+      const v: VoucherAFusionar = { ...B, fecha: sumarDias("2026-08-14", dv), kilometraje: kmV, monto, comprobante: comp };
+      const r = planDeFusion(c, v);
+      if (r.modo !== "sumar") continue;
+      sumables++;
+      if (!r.puede) roto++;                                                        // nada lo bloquea: decide la persona
+      if (["fecha", "galones", "precio_galon", "total", "tipo_combustible", "unidad"].some((k) => k in r.patch)) roto++;
+      if ("kilometraje" in r.patch && kmC != null && kmC > 0) roto++;              // nunca pisa un km
+      if ("conductor" in r.patch && chofer) roto++;                                // ni un conductor
+      if (dv !== 0 && !r.avisos.some((a) => /conserva su fecha/.test(a))) roto++;  // otra fecha se avisa
+      if (Object.keys(planDeFusion(aplicar(c, r.patch), v).patch).length) roto++;  // idempotente
+    }
+  chk(`(${casos} combinaciones, ${sumables} en modo «sumar») nunca toca la fecha ni la plata, nunca pisa km ni conductor, avisa la otra fecha y es idempotente`,
+    roto === 0 && sumables > 0, `${roto} rotos`);
+}
+
+// ── 10. Una fusión no cruza unidades ─────────────────────────────────────────
+console.log("\n10. La misma nota capturada en dos unidades: no se fusiona hasta corregir la placa");
+{
+  chk("la clave del vehículo: «propio:12» / «tercero:5», y sin tipo o sin id no hay clave",
+    claveVehiculo("propio", 12) === "propio:12" && claveVehiculo("tercero", "5") === "tercero:5" &&
+    claveVehiculo(null, 3) === null && claveVehiculo("propio", null) === null && claveVehiculo("propio", "") === null && claveVehiculo("propio", "x") === null);
+  chk("el vehículo de una fila de combustible sale de la FK que va llena",
+    vehiculoDeCarga({ vehiculo_id: 3, vehiculo_tercero_id: null }) === "propio:3" && vehiculoDeCarga({ vehiculo_id: null, vehiculo_tercero_id: 5 }) === "tercero:5" &&
+    vehiculoDeCarga({ vehiculo_id: null, vehiculo_tercero_id: null }) === null && vehiculoDeCarga({}) === null);
+
+  // El caso que dejó escrito CLAUDE.md: el voucher V70S-00043064 entró una vez en la BUI-272 y otra en la CTV-370.
+  const CARGA_BUI: CargaDeFactura = {
+    id: 40, fecha: "2026-08-20", total: 180.03, galones: 7.43, kilometraje: 0, conductor: null, grifo: "COESTI S.A.",
+    observaciones: "Radar IA · Grupo Combustible · Comprobante V70S-00043064", tanque_lleno: null, vehiculo: "propio:7", placa: "BUI-272",
+  };
+  const V_CTV: VoucherAFusionar = {
+    fecha: "2026-08-20", kilometraje: 29117, conductor: "Luis", grifo: "COESTI S.A.", comprobante: "V70S-00043064",
+    cantidad: 7.43, monto: 180.03, tanqueLleno: true, tanqueFuente: "operador", vehiculo: "propio:9", placa: "CTV-370",
+  };
+  const pu = planDeFusion(CARGA_BUI, V_CTV);
+  chk("dos unidades distintas: NO se fusiona (otra_unidad), y no se escribe nada", !pu.puede && pu.codigo === "otra_unidad" &&
+    Object.keys(pu.patch).length === 0 && pu.patchTanque == null && pu.cambios.length === 0, pu.detalle);
+  chk("…nombra las dos placas y dónde se corrige cada una", /BUI-272/.test(pu.detalle) && /CTV-370/.test(pu.detalle) &&
+    /cambia la unidad de esta fila/.test(pu.detalle) && /Combustible \(Editar carga\)/.test(pu.detalle), pu.detalle);
+  chk("…sin las placas, igual lo dice", /otra unidad que esta fila/.test(planDeFusion({ ...CARGA_BUI, placa: null }, { ...V_CTV, placa: null }).detalle));
+  chk("…y en el modo «factura» también, antes que la fecha (aunque el voucher no traiga fecha)",
+    planDeFusion({ ...CARGA_61, vehiculo: "propio:7" }, { ...VOUCHER, fecha: null, vehiculo: "tercero:7" }).codigo === "otra_unidad");
+  chk("propio:7 y tercero:7 son dos vehículos (los ids de las dos flotas se repiten)",
+    planDeFusion(CARGA_BUI, { ...V_CTV, vehiculo: "tercero:7" }).codigo === "otra_unidad");
+  const corregida = planDeFusion(CARGA_BUI, { ...V_CTV, vehiculo: "propio:7", placa: "BUI-272" });
+  chk("corregida la placa de la fila a la de la carga: se fusiona y toma el km", corregida.puede && corregida.codigo === "sumable" && corregida.patch.kilometraje === 29117, corregida.detalle);
+
+  // Sin el dato de alguna de las dos, o con el mismo vehículo, el plan es EXACTAMENTE el de antes.
+  const sin = (x: { vehiculo?: unknown; placa?: unknown }) => { const y = { ...x }; delete y.vehiculo; delete y.placa; return y; };
+  let casos = 0, roto = 0, bloqueados = 0;
+  for (const c0 of [CARGA_61, CARGA_BUI, { ...CARGA_BUI, observaciones: "Cargado en el grifo" }])
+    for (const vc of [null, "propio:7", "tercero:7"]) for (const vv of [null, "propio:7", "propio:9", "tercero:7"])
+      for (const dv of [-5, -1, 0]) for (const kmV of [null, 29117]) for (const fecha of [true, false]) {
+        casos++;
+        const c = { ...(sin(c0) as CargaDeFactura), vehiculo: vc, placa: vc ? "AAA-111" : null };
+        const v = { ...(sin(V_CTV) as VoucherAFusionar), fecha: fecha ? sumarDias(c0.fecha, dv) : null, kilometraje: kmV, vehiculo: vv, placa: vv ? "BBB-222" : null };
+        const r = planDeFusion(c, v);
+        if (vc && vv && vc !== vv) {
+          bloqueados++;
+          if (r.puede || r.codigo !== "otra_unidad" || Object.keys(r.patch).length || r.patchTanque) roto++;   // nunca escribe
+        } else if (JSON.stringify(r) !== JSON.stringify(planDeFusion(sin(c) as CargaDeFactura, sin(v) as VoucherAFusionar))) {
+          roto++;                                                                                              // idéntico a sin vehículos
+        }
+      }
+  chk(`(${casos} combinaciones, ${bloqueados} con dos vehículos) con vehículos distintos nunca escribe nada; con el mismo o sin dato, el plan es idéntico al de antes`,
+    roto === 0 && bloqueados > 0 && bloqueados < casos, `${roto} rotos`);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

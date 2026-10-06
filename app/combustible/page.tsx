@@ -461,7 +461,6 @@ export default function CombustiblePage() {
     }
     return mapa;
   }, [lecturasRadar]);
-  const lecturaDeCarga = (id: number) => lecturasRadar.find(l => Number(l.combustible_id) === id) || null;
   // Qué cargas nacieron de una foto. Se marca la CARGA, no la foto: en una fila vieja la foto
   // se pide recién al abrirla, y de todos modos lo que dice el marcador es de dónde salió el dato.
   const cargasDelRadar = useMemo(
@@ -478,17 +477,20 @@ export default function CombustiblePage() {
     // Se guarda incluso el vacío: marca la consulta como hecha y no se vuelve a pedir.
     setMediaMensajes(prev => ({ ...prev, [mensajeId]: (data as MediaDeMensaje) ?? {} }));
   };
+  // Una carga puede tener VARIAS filas del Radar enlazadas: al fusionar el duplicado de una carga ya
+  // registrada, la fila nueva queda apuntando a la misma carga y sus fotos se suman (fotosPorCarga). De
+  // las filas viejas sin `fotos` se pide la media de su mensaje, de TODAS, no solo de la primera.
+  const filasDeCarga = (cargaId: number) => lecturasRadar.filter(l => Number(l.combustible_id) === cargaId);
   const verLoQueLeyoElRadar = (cargaId: number) => {
-    const l = lecturaDeCarga(cargaId);
-    if (l && !(l.fotos ?? []).length) asegurarMedia(l.mensaje_id);
+    for (const l of filasDeCarga(cargaId)) if (!(l.fotos ?? []).length) asegurarMedia(l.mensaje_id);
   };
   // Los cuatro estados posibles, para no afirmar "no hay foto" mientras todavía se está
   // pidiendo: en una fila vieja la media se consulta al abrir la carga.
   const estadoFotoRadar = (cargaId: number): "sin_radar" | "cargando" | "sin_foto" | "hay" => {
     if ((fotosDeCarga[cargaId] ?? []).length) return "hay";
-    const l = lecturaDeCarga(cargaId);
-    if (!l) return "sin_radar";
-    if (l.mensaje_id && mediaMensajes[l.mensaje_id] === undefined) return "cargando";
+    const filas = filasDeCarga(cargaId);
+    if (!filas.length) return "sin_radar";
+    if (filas.some(l => l.mensaje_id && mediaMensajes[l.mensaje_id] === undefined)) return "cargando";
     return "sin_foto";
   };
 
