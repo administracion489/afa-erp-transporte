@@ -19,7 +19,10 @@ import {
   type CargaPorMover, type DesfaseCuenta as DecisionDeCuenta, type ResumenMover,
 } from "@/lib/combustible/desfase-factura";
 import { avisoOrdenEnFacturas, pendientesCerca, type RecargaPorRevisar } from "@/lib/combustible/orden-revision";
+import { avisoSaludEnFacturas, type SaludRadar } from "@/lib/radar/salud";
+import { leerSaludRadar } from "@/lib/radar/salud-datos";
 import CorreoFacturas from "./CorreoFacturas";
+import CargasPorCompletar from "./CargasPorCompletar";
 
 const S = (n: number | null | undefined) =>
   n == null ? "—" : `S/ ${Number(n).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -77,6 +80,11 @@ export default function FacturasCorreo() {
   // EL ORDEN DE TRABAJO: primero el Radar, después las facturas (lib/combustible/orden-revision.ts).
   // Las recargas del Radar que siguen por revisar; null = no se pudieron leer (no se afirma nada).
   const [pendRadar, setPendRadar] = useState<RecargaPorRevisar[] | null>(null);
+  // ¿El Radar está leyendo? (lib/radar/salud.ts). Si no, las cargas de la cuenta entran por aquí sin
+  // odómetro, y lo primero que hay que saber es por qué. null = no se sabe (y no se dice nada).
+  const [salud, setSalud] = useState<SaludRadar | null>(null);
+  // Cuántas cargas registradas desde la factura esperan su odómetro y su fecha (CargasPorCompletar).
+  const [porCompletar, setPorCompletar] = useState<number | null>(null);
 
   const cargar = useCallback(async () => {
     const [{ data, error }, { data: otras }, { data: hs, error: eHist }] = await Promise.all([
@@ -132,6 +140,7 @@ export default function FacturasCorreo() {
     cargarDeuda();
     cargarDesfase();
     cargarPendRadar();
+    leerSaludRadar(supabase).then(setSalud).catch(() => setSalud(null)); // un aviso aparte: si falla, no se afirma nada
     Promise.all([supabase.from("vehiculos").select("placa"), supabase.from("vehiculos_tercero").select("placa")]).then(([a, b]) => {
       setPlacas([...((a.data as any[]) ?? []), ...((b.data as any[]) ?? [])].map((r) => String(r.placa ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "")).filter(Boolean).sort());
     });
@@ -317,9 +326,24 @@ export default function FacturasCorreo() {
   }, [filas]);
 
   const avisoOrden = avisoOrdenEnFacturas({ pendientesRadar: pendRadar ? pendRadar.length : null, lineasEsperando: resumen.radar });
+  const avisoSalud = avisoSaludEnFacturas(salud);
 
   return (
     <section className="space-y-3">
+      {/* SI EL RADAR NO ESTÁ LEYENDO, antes que nada: es la razón de que las cargas entren por aquí sin
+          odómetro, y lo único que lo arregla de verdad está en otra pantalla (lib/radar/salud.ts). */}
+      {avisoSalud && (
+        <div className="rounded-xl border p-4"
+          style={avisoSalud.tono === "grave" ? { background: "#fef2f2", borderColor: "#fca5a5" } : { background: "#fffbeb", borderColor: "#fcd34d" }}>
+          <div className={`text-sm font-bold ${avisoSalud.tono === "grave" ? "text-red-800" : "text-amber-900"}`}>
+            {avisoSalud.tono === "grave" ? "⛔ " : "⚠ "}{avisoSalud.titulo}
+          </div>
+          <div className={`text-xs mt-1 ${avisoSalud.tono === "grave" ? "text-red-800" : "text-amber-900"}`}>{avisoSalud.detalle}</div>
+          <Link href="/radar-ia" className="inline-block mt-2 px-4 py-2 rounded-lg text-sm font-bold text-white" style={{ background: avisoSalud.tono === "grave" ? "#b91c1c" : "#b45309" }}>
+            Ir a Radar IA
+          </Link>
+        </div>
+      )}
       {/* EL ORDEN DE TRABAJO, arriba de todo: lo primero que hay que saber al entrar a esta pestaña es si
           el Radar ya está al día. Si no, lo de aquí abajo todavía va a cambiar solo. */}
       {avisoOrden && (
@@ -342,7 +366,8 @@ export default function FacturasCorreo() {
         <div className="text-sm text-gray-700 flex-1 min-w-[260px]">
           <b>La factura del correo es el respaldo oficial del Radar IA.</b> Cada 3 horas el ERP lee las facturas de los últimos {DIAS_REGISTRO_AUTOMATICO} días
           del correo conectado arriba (el XML de SUNAT; si no llega, el PDF del comprobante) y compara línea por línea con las cargas registradas.
-          Las que faltan se registran solas (sin odómetro); las dudosas quedan aquí.
+          Las que faltan se registran solas —sin odómetro y con la fecha deducida, así que quedan en «Cargas por completar» hasta que alguien
+          ponga el km del voucher y confirme la fecha—; las dudosas quedan aquí.
           {" "}<b>«📚 Leer el último año»</b> trae además las de los 12 meses anteriores: lo que falte de hace más de {DIAS_REGISTRO_AUTOMATICO} días
           no se registra solo — queda abajo, con cuántas cargas son y por cuánto, para que lo decidas tú.
         </div>
@@ -375,8 +400,13 @@ export default function FacturasCorreo() {
           <span style={{ color: ETIQUETA_LINEA.en_espera.color }}>… {resumen.esp} esperando al Radar</span>
           <span style={{ color: ETIQUETA_LINEA.revisar.color }}>⚠ {resumen.rev} para revisar</span>
           {resumen.hist > 0 && <span className="text-[#1d4ed8]">📚 {resumen.hist} del historial por decidir</span>}
+          {!!porCompletar && <span className="text-amber-800 font-bold">✍ {porCompletar} carga(s) por completar (km y fecha)</span>}
         </div>
       </div>
+
+      {/* Lo que la factura registró sin su voucher: el odómetro y la fecha del despacho los pone una
+          persona (lib/combustible/completar-carga.ts). Es la otra mitad del respaldo. */}
+      <CargasPorCompletar facturas={filas} pendRadar={pendRadar} onConteo={setPorCompletar} />
 
       {desf?.map((c) => {
         const d = c.decision;

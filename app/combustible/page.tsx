@@ -57,6 +57,8 @@ import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
 import ComparacionPeriodo from "./ComparacionPeriodo";
 import SaldoCuenta from "./SaldoCuenta";
 import FacturasCorreo from "./FacturasCorreo";
+import { esCargaDeFactura } from "@/lib/combustible/factura-lineas";
+import { faltaOdometroDeFactura } from "@/lib/combustible/completar-carga";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
@@ -1275,6 +1277,16 @@ export default function CombustiblePage() {
                             {cargasDelRadar.has(r.id) && (
                               <span className="ml-1.5" title="La leyó el Radar IA de una foto — ábrela para verla">📷</span>
                             )}
+                            {/* La registró la FACTURA del correo, sin voucher: si todavía le falta el km, se dice
+                                aquí también —es donde se mira todo el día— y se completa en 📧 Facturas
+                                (lib/combustible/completar-carga.ts, la misma ventana que esa cola). */}
+                            {esCargaDeFactura(r.observaciones) && (faltaOdometroDeFactura(r, hoyLima()) ? (
+                              <button type="button" className="ml-1.5 text-amber-700 font-bold"
+                                title="La registró la factura del correo sin su voucher: le falta el odómetro. Complétala en la pestaña 📧 Facturas → «Cargas por completar»."
+                                onClick={(ev) => { ev.stopPropagation(); setVista("facturas"); }}>📧✍</button>
+                            ) : (
+                              <span className="ml-1.5" title="La registró la factura del correo (respaldo del Radar IA)">📧</span>
+                            ))}
                           </td>
                           <td className="p-3 font-mono font-black text-xs text-[#0b315f]">
                             {placaReg(r)}

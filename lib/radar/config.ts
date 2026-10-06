@@ -31,6 +31,20 @@ export const CONFIG_DEFECTO: RadarConfig = {
 };
 
 /**
+ * ¿`hora` (HH:MM, Lima) cae dentro del horario de monitoreo? Sin horario activo, siempre. La ventana
+ * puede cruzar la medianoche (22:00 → 06:00). La usan el motor —que fuera del horario deja los
+ * mensajes pendientes— y el aviso de salud del Radar —que no puede llamar «atascada» a una cola que
+ * espera su horario—: si cada uno tuviera su regla, el aviso alarmaría de noche por lo que el motor
+ * hace a propósito.
+ */
+export function dentroDeHorario(config: Pick<RadarConfig, "horario_activo" | "hora_inicio" | "hora_fin">, hora: string): boolean {
+  if (!config.horario_activo) return true;
+  return config.hora_inicio <= config.hora_fin
+    ? hora >= config.hora_inicio && hora <= config.hora_fin
+    : hora >= config.hora_inicio || hora <= config.hora_fin; // ventana que cruza medianoche
+}
+
+/**
  * Normaliza una fila cruda de radar_config a un RadarConfig completo, aplicando los
  * MISMOS defaults en todos los consumidores (motor + UI). Debe ser la única forma de
  * interpretar la fila: así lo que ve el operador == lo que ejecuta el motor.

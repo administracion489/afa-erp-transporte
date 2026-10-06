@@ -883,6 +883,13 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "El voucher trae lo que la factura no tiene: la **fecha del despacho**, el **odómetro** y el **conductor**. Lo que registras aquí se enlaza solo a su línea de factura en la próxima lectura del correo; mientras siga por revisar, esa línea dice «En revisión del Radar» y la factura no se cierra. Las que llevan **📧 factura esperando** son las que ya tienen su factura en el correo: empieza por esas.\n\n" +
           "Si se hace al revés no se duplica nada —el botón **Registrar** comprueba antes si la carga ya entró desde la factura y, si es así, propone **fusionarla**—, pero se trabaja dos veces.",
       },
+      {
+        pregunta: "¿Cómo sé si el Radar está leyendo? ¿Y qué pasa con el combustible si deja de leer?",
+        respuesta:
+          "El chip de arriba dice si **WhatsApp** está conectado y si el **servidor** late. Pero el Radar también puede dejar de leer con el chip en verde: si la **API de IA se queda sin saldo** o rechaza la clave, si se llega al **límite de gasto de hoy**, si los mensajes **se quedan en la cola**, o si sacaron al número de algunos **grupos**. Para eso hay un recuadro debajo del chip que nombra la causa y dice dónde se arregla — por ejemplo: «La API de IA del Radar se quedó sin saldo: desde hoy 14:05 no se puede leer ningún mensaje. Recarga la cuenta de Anthropic y después reprocesa los que fallaron».\n\n" +
+          "**Mientras el Radar no lea, el combustible de la cuenta de Primax no se pierde:** su factura llega al correo y la registra al día siguiente, pero **sin odómetro** y con la fecha deducida. Esas cargas quedan en **Combustible → 📧 Facturas → ✍ Cargas por completar**, donde alguien pone el km del voucher y confirma la fecha. La misma alerta sale arriba de esa pestaña.\n\n" +
+          "**Lo que no llega por el correo** —cargas en otros grifos— hay que registrarlo a mano en Combustible mientras el Radar esté caído.",
+      },
     ],
     relacionadas: [
       { etiqueta: "Inbox CRM", href: "/crm" },

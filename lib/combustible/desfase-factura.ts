@@ -52,7 +52,7 @@
 // nunca, y las consolidadas, que no tenían fecha con qué buscar, no daban ninguna muestra.
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { MARCA_CARGA_DE_FACTURA, TOLERANCIA_CANTIDAD, TOLERANCIA_MONTO, normPlaca, esCargaFusionada } from "@/lib/combustible/factura-lineas";
+import { MARCA_CARGA_DE_FACTURA, TOLERANCIA_CANTIDAD, TOLERANCIA_MONTO, normPlaca, esCargaFusionada, esCargaCompletada } from "@/lib/combustible/factura-lineas";
 
 /** Más de esto no es un desfase de facturación: es otra carga. No medido, declarado. */
 export const MAX_DESFASE = 3;
@@ -485,8 +485,9 @@ export function cargasPorMover(
       const carga = cargas.get(id);
       if (!carga || !String(carga.observaciones ?? "").includes(marca)) continue;
       // Fusionada con su voucher: la fecha ya es la del despacho impresa en el papel, aunque coincida
-      // con la emisión. Correrla sería deshacer lo que una persona confirmó contra la foto.
-      if (esCargaFusionada(carga.observaciones)) continue;
+      // con la emisión. Correrla sería deshacer lo que una persona confirmó contra la foto. Lo mismo
+      // una COMPLETADA a mano (lib/combustible/completar-carga.ts): una persona confirmó esa fecha.
+      if (esCargaFusionada(carga.observaciones) || esCargaCompletada(carga.observaciones)) continue;
       if (carga.fecha !== f.fecha_emision) continue;
       const hacia = sumarDias(f.fecha_emision, -dias);
       vistas.add(id);
