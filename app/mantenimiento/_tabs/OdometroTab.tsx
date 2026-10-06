@@ -211,6 +211,16 @@ function peorSeveridad(anoms: Anomalia[]): "critico" | "advertencia" | null {
 
 const VENTANA_DIAS = 180; // histórico cargado para la analítica/jornadas
 
+// Por qué una lectura del periodo no entró al recorrido (motivos de `sanearLecturas`).
+const MOTIVO_FUERA: Record<string, string> = {
+  no_aceptada: "por revisar (bandeja de arriba)",
+  rechazada: "anulada(s) o rechazada(s)",
+  invalida: "inválida(s) o con fecha futura",
+  absurda: "con un km absurdo",
+  retrocede: "que retroceden",
+  no_encaja: "que no encajan (lista roja de arriba)",
+};
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function OdometroTab() {
@@ -305,11 +315,13 @@ export default function OdometroTab() {
       supabase.from("vehiculos_tercero").select("id,placa,categoria,marca,modelo,kilometraje_actual").order("placa"),
       supabase.from("config_mantenimiento").select("km_dia_max").eq("id", 1).maybeSingle(),
       // Ambas flotas, todos los estados, ventana de 180 días (paginado para no truncar a 1000).
+      // Orden TOTAL (fecha + id): ordenando solo por fecha, las lecturas de un mismo día pueden
+      // salir en orden distinto en cada página, y en el corte se repiten unas y se PIERDEN otras.
       paginarFilas(() =>
         supabase.from("lecturas_odometro")
           .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,capturado_en,momento,foto_url")
           .gte("fecha", desdeVentana)
-          .order("fecha", { ascending: false })
+          .order("fecha", { ascending: false }).order("id", { ascending: true })
       ),
       // "Por revisar" completo (independiente de la ventana) y PAGINADO: con filtros por placa y
       // fecha, un tope de 300 haría que una placa «no tenga nada por revisar» solo porque sus
@@ -369,6 +381,39 @@ export default function OdometroTab() {
       }
     }
     return rows.sort((a, b) => (a.fecha !== b.fecha ? (a.fecha < b.fecha ? 1 : -1) : a.placa.localeCompare(b.placa)));
+  }, [analisisPorVeh, flota, buscar, desde, hasta, placaMap]);
+
+  // Lecturas ACEPTADAS que no encajan con la secuencia del odómetro (lib/odometro-analitica.ts →
+  // `no_encaja`): más altas que las que vinieron después. Antes una sola de estas borraba todas las
+  // jornadas siguientes; ahora quedan fuera del recorrido, pero siguen aceptadas e inflando el km
+  // vigente (de ahí salen Próximos y las OT automáticas), así que se listan para anularlas. Sin
+  // filtro de fecha a propósito: una del mes pasado sigue moviendo el km vigente de hoy.
+  const noEncajan = useMemo(() => {
+    const rows: { lectura: Lectura; placa: string; detalle: string }[] = [];
+    for (const [k, a] of analisisPorVeh) {
+      if (!pasaFlota(k)) continue;
+      const placa = placaDeKey(k);
+      if (!pasaBuscar(placa)) continue;
+      for (const d of a.descartadas) {
+        if (d.motivo === "no_encaja") rows.push({ lectura: d.lectura as unknown as Lectura, placa, detalle: d.detalle });
+      }
+    }
+    return rows.sort((a, b) => (a.lectura.fecha < b.lectura.fecha ? 1 : a.lectura.fecha > b.lectura.fecha ? -1 : a.placa.localeCompare(b.placa)));
+  }, [analisisPorVeh, flota, buscar, placaMap]);
+
+  // Por qué las lecturas del periodo no entraron al recorrido (para el estado vacío: «Sin jornadas»
+  // con lecturas en el periodo se leía como que la unidad no registró nada).
+  const fueraDelRecorrido = useMemo(() => {
+    const porMotivo: Record<string, number> = {};
+    for (const [k, a] of analisisPorVeh) {
+      if (!pasaFlota(k)) continue;
+      if (!pasaBuscar(placaDeKey(k))) continue;
+      for (const d of a.descartadas) {
+        if (d.lectura.fecha < desde || d.lectura.fecha > hasta) continue;
+        porMotivo[d.motivo] = (porMotivo[d.motivo] ?? 0) + 1;
+      }
+    }
+    return porMotivo;
   }, [analisisPorVeh, flota, buscar, desde, hasta, placaMap]);
 
   // Historial plano filtrado.
@@ -1087,6 +1132,42 @@ export default function OdometroTab() {
             ))}
           </section>
 
+          {/* LECTURAS QUE NO ENCAJAN: una aceptada más alta que las posteriores. Quedan fuera del
+              recorrido para no borrar las jornadas siguientes, pero siguen aceptadas: hay que anularlas. */}
+          {noEncajan.length > 0 && (
+            <section className="rounded-2xl border border-red-200 bg-red-50 overflow-hidden">
+              <div className="px-5 py-3 border-b border-red-200">
+                <h2 className="font-bold text-red-800 text-sm">
+                  ❌ {noEncajan.length} lectura(s) aceptada(s) no encajan con el resto del odómetro
+                </h2>
+                <p className="text-xs text-red-700 mt-0.5">
+                  Son más altas que las lecturas que vinieron después: casi siempre un dígito de más o la foto de otra unidad.
+                  Quedan fuera del recorrido por jornada para no borrar los días siguientes, pero <b>siguen aceptadas</b> y
+                  suben el km vigente de la unidad (de ahí salen Próximos y las OT automáticas). Revisa la foto y anúlala o corrígela.
+                </p>
+              </div>
+              <div className="divide-y divide-red-100">
+                {noEncajan.map(({ lectura: l, placa, detalle }) => (
+                  <div key={l.id} className="px-5 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+                    <span className="font-mono font-bold text-[#0b315f] w-20">{placa}</span>
+                    <span className="text-gray-600 w-32">{fmtFecha(l.fecha)} {horaLectura(l).txt}</span>
+                    <span className="font-mono font-black text-red-800 w-24">{fmtNum(Number(l.km))} km</span>
+                    <span className="text-red-700 flex-1 min-w-[220px]">{detalle}</span>
+                    <span className="flex gap-2">
+                      {l.foto_url && (
+                        <button onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${placa} · ${fmtNum(Number(l.km))} km · ${fmtFecha(l.fecha)}`, lectura: l })}
+                          className="font-bold text-[#1262bd] hover:underline">Ver foto</button>
+                      )}
+                      <button onClick={() => setAnular(l)} className="font-bold text-red-700 border border-red-200 bg-white rounded-lg px-2 py-1 hover:bg-red-100">
+                        Anular o corregir
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           {/* TABLA JORNADAS */}
           <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
             <div className="px-5 py-3 border-b flex items-center justify-between">
@@ -1103,6 +1184,12 @@ export default function OdometroTab() {
                   {jornadas.length === 0 ? (
                     <tr><td colSpan={9} className="p-10 text-center text-gray-400">
                       <p className="text-3xl mb-2">🚌</p><p className="font-medium">Sin jornadas en el filtro</p>
+                      {Object.keys(fueraDelRecorrido).length > 0 && (
+                        <p className="text-xs mt-2 text-gray-500">
+                          Hay lecturas en el periodo, pero ninguna entra al recorrido:{" "}
+                          {Object.entries(fueraDelRecorrido).map(([m, n]) => `${n} ${MOTIVO_FUERA[m] ?? m}`).join(" · ")}.
+                        </p>
+                      )}
                     </td></tr>
                   ) : jornadas.map((j) => {
                     const sev = peorSeveridad(j.anomalias);
@@ -1158,6 +1245,23 @@ export default function OdometroTab() {
                                 </button>
                               );
                             })}
+                            {/* Las que no encajan quedan fuera del recorrido, pero se ven aquí para corregirlas. */}
+                            {j.fueraDeSecuencia.map(l => {
+                              const titulo = `${j.placa} · ${fmtNum(Number(l.km))} km · ${fmtFecha(j.fecha)} ${horaLectura(l as unknown as Lectura).txt}`;
+                              return l.foto_url ? (
+                                <button key={l.id} type="button" title={`${fmtNum(Number(l.km))} km · NO ENCAJA, fuera del recorrido · ver / corregir`}
+                                  onClick={() => setFotoZoom({ url: l.foto_url!, titulo, lectura: l as unknown as Lectura })}
+                                  className="block rounded-md overflow-hidden border border-red-500 ring-2 ring-red-400 opacity-70 hover:opacity-100">
+                                  <ImgPrivada src={l.foto_url!} alt="Tablero" className="w-10 h-8 object-cover" />
+                                </button>
+                              ) : (
+                                <button key={l.id} type="button" title={`${fmtNum(Number(l.km))} km · NO ENCAJA, fuera del recorrido · corregir`}
+                                  onClick={() => setAnular(l as unknown as Lectura)}
+                                  className="w-10 h-8 rounded-md border border-red-500 ring-2 ring-red-400 text-[9px] leading-tight text-red-700 bg-red-50">
+                                  no<br />encaja
+                                </button>
+                              );
+                            })}
                           </div>
                         </td>
                         <td className="p-3">
@@ -1174,6 +1278,9 @@ export default function OdometroTab() {
                                   {j.anomalias.find(a => a.tipo === "excesivo" && a.severidad === "critico")?.mensaje}
                                 </p>
                               )}
+                              {j.anomalias.filter(a => a.tipo === "no_encaja").map((a, i) => (
+                                <p key={i} className="mt-1 text-[10px] text-red-700 max-w-[220px] leading-snug">{a.mensaje}</p>
+                              ))}
                             </>
                           ) : j.pendiente ? (
                             <span className="text-[11px] text-amber-600">⏳</span>
