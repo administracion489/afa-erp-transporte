@@ -548,7 +548,7 @@ export async function probarFiltro(sb: any, filtro: string | null | undefined, r
  * solo el mensaje crudo, sin asunto ni fecha si el correo no llegó a abrirse, y la pantalla la
  * pintaba con la fecha del INTENTO: «Error · 5/10» sobre una factura de abril.
  */
-async function procesarCorreo(
+export async function procesarCorreo(
   sb: any, token: string, id: string, cuenta: FilaCuenta, flota: Flota, hoy: string, res: ResumenSync,
 ): Promise<string> {
   let asunto = "", etapa = "abrir el correo en Gmail";
