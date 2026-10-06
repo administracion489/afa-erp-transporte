@@ -223,8 +223,8 @@ export function yaEstaEnCombustible(
     return {
       codigo: "fusionar", id: hallada.id, por: hallada.por,
       detalle: `Esta recarga ya está en Combustible: es ${cual}, que entró desde la factura del correo. Lo correcto es ` +
-        `FUSIONARLA (el recuadro azul): esa carga toma de este voucher la fecha del despacho, el odómetro y el conductor, ` +
-        `sin contar el gasto dos veces.`,
+        `FUSIONARLA (el recuadro de arriba, sobre los botones): esa carga toma de este voucher la fecha del despacho, el ` +
+        `odómetro y el conductor, sin contar el gasto dos veces.`,
     };
   }
   const origen = esCargaFusionada(obs) ? "que entró desde la factura y ya se fusionó con otro voucher"
