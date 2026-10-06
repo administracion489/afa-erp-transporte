@@ -70,12 +70,12 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.accion === "probar_filtro") {
-      let filtro: string | null = typeof body.filtro === "string" && body.filtro.trim() ? body.filtro.trim() : null;
-      if (!filtro) {
-        const { cuentas } = await cargarCuentas(sb);
-        filtro = (cuentas.find((c) => c.activo) ?? cuentas[0])?.correo_filtro ?? null;
-      }
-      return NextResponse.json(await probarFiltro(sb, filtro));
+      // Los RUC de la cuenta entran a la consulta igual que en la sincronización: son los que
+      // encuentran las facturas electrónicas, las mande quien las mande.
+      const { cuentas } = await cargarCuentas(sb);
+      const cuenta = cuentas.find((c) => c.activo) ?? cuentas[0];
+      const filtro: string | null = typeof body.filtro === "string" && body.filtro.trim() ? body.filtro.trim() : cuenta?.correo_filtro ?? null;
+      return NextResponse.json(await probarFiltro(sb, filtro, cuenta?.rucs ?? []));
     }
 
     return NextResponse.json({ ok: false, error: "Acción desconocida" }, { status: 400 });

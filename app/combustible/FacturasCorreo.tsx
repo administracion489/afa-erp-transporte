@@ -1,99 +1,226 @@
 "use client";
 // app/combustible/FacturasCorreo.tsx — Pestaña «📧 Facturas»: lo que llegó al correo y qué
 // hizo el ERP con cada línea (lib/combustible/factura-lineas.ts declara los códigos).
-// Lo que quedó en «Revisar» se confirma aquí con un clic, eligiendo placa y fecha.
+// Lo que quedó en «Revisar» se confirma aquí con un clic, eligiendo placa y fecha; lo que la
+// lectura del último año dejó por registrar, todo junto, viendo antes cuántas cargas son y por
+// cuánto.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
-import { ETIQUETA_LINEA, type LineaFactura, type PlanLinea } from "@/lib/combustible/factura-lineas";
+import {
+  ETIQUETA_LINEA, FILTRO_HISTORICO, DIAS_REGISTRO_AUTOMATICO, resumenHistorico,
+  type LineaFactura, type PlanLinea, type ResumenHistorico,
+} from "@/lib/combustible/factura-lineas";
 import type { CodigoConexion } from "@/lib/combustible/correo-conexion";
 import CorreoFacturas from "./CorreoFacturas";
 
 const S = (n: number | null | undefined) =>
   n == null ? "—" : `S/ ${Number(n).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const F = (iso: string | null | undefined) => (iso ? iso.slice(0, 10).split("-").reverse().join("/") : "—");
+
+// Un año de facturas son unas 200 filas: se traen todas, para que los conteos de arriba digan
+// lo mismo que la tabla.
+const LIMITE = 500;
 
 const ESTADO: Record<string, [string, string]> = {
   conciliada:     ["Conciliada", "#15803d"],
   parcial:        ["Con pendientes", "#b45309"],
   procesada:      ["Leída", "#1d4ed8"],
   con_diferencia: ["Sin líneas legibles", "#b91c1c"],
-  sin_adjunto:    ["Sin XML ni PDF", "#b91c1c"],
+  // No es un error: casi siempre es un correo que no trae una factura (una carta, un estado de cuenta).
+  sin_adjunto:    ["Sin factura adjunta", "#6b7280"],
   error:          ["Error", "#b91c1c"],
   descartada:     ["Descartada", "#9ca3af"],
   pendiente:      ["Pendiente", "#6b7280"],
 };
+
+type Deuda = { id: number; serie: string | null; numero: string | null; fecha_emision: string | null; total: number };
+
+async function post(body: Record<string, unknown>): Promise<any> {
+  const r = await fetch("/api/combustible/facturas", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify(body) });
+  return r.json().catch(() => ({ ok: false, error: `Error ${r.status}` }));
+}
+const suma = (xs: any[], k: string) => xs.reduce((a, x) => a + (Number(x?.[k]) || 0), 0);
 
 export default function FacturasCorreo() {
   const [filas, setFilas] = useState<any[] | null>(null);
   const [placas, setPlacas] = useState<string[]>([]);
   const [abierta, setAbierta] = useState<number | null>(null);
   const [sync, setSync] = useState<string | null>(null);
-  const [cargando, setCargando] = useState(false);
+  const [cargando, setCargando] = useState<"" | "normal" | "historial">("");
   const [elec, setElec] = useState<Record<string, { placa: string; fecha: string }>>({});
   // De qué buzón se lee (lo resuelve CorreoFacturas). Sin uno legible, «Leer correo ahora» no
   // tiene a quién preguntar: el botón se apaga y DICE por qué en vez de fallar al pulsarlo.
   const [codigoCorreo, setCodigoCorreo] = useState<CodigoConexion | null>(null);
   const sinCorreo = codigoCorreo === "ninguna" || codigoCorreo === "rota";
+  // Lo que el historial dejó por registrar (resumenHistorico) y el botón que lo registra.
+  const [hist, setHist] = useState<ResumenHistorico | null>(null);
+  const [registrando, setRegistrando] = useState(false);
+  const [msgHist, setMsgHist] = useState<string | null>(null);
+  // Comprobantes de la cuenta prepago que nacieron como deuda antes de este arreglo.
+  const [deuda, setDeuda] = useState<{ docs: Deuda[]; total: number } | null>(null);
+  const [marcando, setMarcando] = useState(false);
+  const [msgDeuda, setMsgDeuda] = useState<string | null>(null);
 
   const cargar = useCallback(async () => {
-    const { data, error } = await supabase.from("radar_facturas").select("*")
-      .not("lineas", "is", null).order("recibido_en", { ascending: false }).limit(80);
-    const { data: otras } = await supabase.from("radar_facturas").select("*")
-      .in("estado", ["sin_adjunto", "error"]).order("recibido_en", { ascending: false }).limit(20);
+    const [{ data, error }, { data: otras }, { data: hs, error: eHist }] = await Promise.all([
+      supabase.from("radar_facturas").select("*")
+        .not("lineas", "is", null).order("recibido_en", { ascending: false }).limit(LIMITE),
+      supabase.from("radar_facturas").select("*")
+        .in("estado", ["sin_adjunto", "error"]).order("recibido_en", { ascending: false }).limit(100),
+      // El MISMO filtro con el que el botón las registra (FILTRO_HISTORICO): lo que se promete en
+      // el resumen es exactamente lo que se registra.
+      supabase.from("radar_facturas").select("id, lineas, conciliacion")
+        .in("estado", [...FILTRO_HISTORICO.estados]).contains("conciliacion", FILTRO_HISTORICO.conciliacion).limit(1000),
+    ]);
     if (error) { setFilas([]); setSync(/lineas/.test(error.message) ? "Falta correr supabase/combustible-03-saldo-cuenta-y-facturas.sql." : error.message); return; }
     const todas = [...((data as any[]) ?? []), ...((otras as any[]) ?? []).filter((o) => !((data as any[]) ?? []).some((d) => d.id === o.id))];
     todas.sort((a, b) => String(b.recibido_en).localeCompare(String(a.recibido_en)));
     setFilas(todas);
+    setHist(eHist ? null : resumenHistorico((hs as any[]) ?? []));
+  }, []);
+
+  const cargarDeuda = useCallback(async () => {
+    try {
+      const j = await post({ accion: "deuda_prepago" });
+      setDeuda(j?.ok ? { docs: j.docs ?? [], total: Number(j.total ?? 0) } : null);
+    } catch { setDeuda(null); } // es un aviso aparte: si falla, el resto de la pestaña sirve igual
   }, []);
 
   useEffect(() => {
     cargar();
+    cargarDeuda();
     Promise.all([supabase.from("vehiculos").select("placa"), supabase.from("vehiculos_tercero").select("placa")]).then(([a, b]) => {
       setPlacas([...((a.data as any[]) ?? []), ...((b.data as any[]) ?? [])].map((r) => String(r.placa ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "")).filter(Boolean).sort());
     });
-  }, [cargar]);
+  }, [cargar, cargarDeuda]);
 
   async function sincronizar() {
-    setCargando(true); setSync("Buscando facturas en el correo…");
+    setCargando("normal"); setSync("Buscando facturas en el correo…");
     try {
-      const r = await fetch("/api/combustible/facturas", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ accion: "sincronizar" }) });
-      const j = await r.json();
-      if (!j.ok) setSync(`No se pudo: ${j.error ?? r.status}`);
+      const j = await post({ accion: "sincronizar" });
+      if (!j.ok) setSync(`No se pudo: ${j.error}`);
       else {
-        const t = (j.resultados ?? []).reduce((a: any, x: any) => ({
-          vistos: a.vistos + (x.correos_vistos || 0), nuevas: a.nuevas + (x.nuevas || 0),
-          reg: a.reg + (x.registradas || 0), rev: a.rev + (x.por_revisar || 0),
-        }), { vistos: 0, nuevas: 0, reg: 0, rev: 0 });
-        const buzon = (j.resultados ?? []).map((x: any) => x.correo?.email).find(Boolean);
-        setSync(`${buzon ? `${buzon}: ` : ""}${t.vistos} correo(s) coinciden con el filtro · ${t.nuevas} factura(s) nuevas · ${t.reg} carga(s) registradas desde la factura · ${t.rev} línea(s) para revisar.`);
+        const rs: any[] = j.resultados ?? [];
+        const buzon = rs.map((x) => x.correo?.email).find(Boolean);
+        const pend = suma(rs, "pendientes"), ia = suma(rs, "con_ia"), hs = suma(rs, "historicas");
+        setSync(
+          `${buzon ? `${buzon}: ` : ""}${suma(rs, "correos_vistos")} correo(s) coinciden con el filtro · ${suma(rs, "nuevas")} factura(s) nuevas · ` +
+          `${suma(rs, "registradas")} carga(s) registradas desde la factura · ${suma(rs, "por_revisar")} línea(s) para revisar.` +
+          (hs ? ` ${hs} del historial esperan tu decisión (abajo).` : "") +
+          (ia ? ` ${ia} leída(s) del PDF con IA.` : "") +
+          (pend ? ` Quedan ${pend} correo(s) por leer: se leen en el próximo ciclo, o vuelve a pulsar.` : ""),
+        );
       }
     } catch (e: any) { setSync(e.message); }
-    setCargando(false);
+    setCargando("");
     cargar();
   }
 
+  /** «Leer el último año»: el servidor lee por tandas (LECTURA_HISTORIAL) y la pantalla vuelve a
+   *  llamar mientras queden correos y la cola avance. Lo ya leído queda guardado tanda por tanda:
+   *  cortar a la mitad no pierde nada, se sigue con el mismo botón. */
+  async function leerHistorial() {
+    setCargando("historial"); setSync("📚 Buscando las facturas del último año…");
+    const t = { nuevas: 0, reg: 0, hist: 0, ia: 0, err: 0 };
+    let previo = Number.POSITIVE_INFINITY, cierre = "", buzon: string | undefined;
+    try {
+      for (let tanda = 1; tanda <= 40; tanda++) {
+        const j = await post({ accion: "sincronizar", historial: true });
+        if (!j.ok) { cierre = `Se detuvo: ${j.error ?? "error"}. Lo ya leído quedó guardado; vuelve a pulsar para seguir.`; break; }
+        const rs: any[] = j.resultados ?? [];
+        buzon = rs.map((x) => x.correo?.email).find(Boolean) ?? buzon;
+        const vistos = suma(rs, "correos_vistos"), pend = suma(rs, "pendientes");
+        t.nuevas += suma(rs, "nuevas"); t.reg += suma(rs, "registradas"); t.hist += suma(rs, "historicas"); t.ia += suma(rs, "con_ia");
+        t.err += rs.reduce((a, x) => a + ((x.detalle ?? []) as any[]).filter((d) => d.estado === "error").length, 0);
+        setSync(`📚 Leyendo el último año${buzon ? ` de ${buzon}` : ""}… ${vistos - pend} de ${vistos} correo(s) revisados.`);
+        await cargar();
+        if (pend === 0) { cierre = `📚 Último año leído${buzon ? ` (${buzon})` : ""}: ${vistos} correo(s) revisados.`; break; }
+        if (pend >= previo) { cierre = `Se detuvo con ${pend} correo(s) sin leer porque no avanzaba. Lo ya leído quedó guardado; vuelve a pulsar en un rato.`; break; }
+        previo = pend;
+      }
+    } catch (e: any) { cierre = `Se detuvo: ${e.message}. Lo ya leído quedó guardado; vuelve a pulsar para seguir.`; }
+    setSync(
+      `${cierre} ${t.nuevas} factura(s) leídas en esta pasada · ${t.reg} carga(s) recientes registradas desde la factura.` +
+      (t.hist ? ` ${t.hist} carga(s) de hace más de ${DIAS_REGISTRO_AUTOMATICO} días no están en el ERP: esperan tu decisión (abajo).` : "") +
+      (t.ia ? ` ${t.ia} leída(s) del PDF con IA.` : "") +
+      (t.err ? ` ${t.err} correo(s) con error: se reintentan solos.` : ""),
+    );
+    setCargando("");
+    cargar();
+  }
+
+  /** «Registrar las del historial»: una persona vio cuántas son y por cuánto. El servidor
+   *  re-concilia cada factura (si una carga apareció mientras tanto, se enlaza y no se duplica). */
+  async function registrarHistorial() {
+    const h = hist;
+    if (!h?.lineas) return;
+    if (!confirm(
+      `¿Registrar ${h.lineas} carga(s) de combustible del historial, por ${S(h.total)}, del ${F(h.desde)} al ${F(h.hasta)}?\n\n` +
+      "• Entran SIN odómetro: la factura no lo trae.\n" +
+      "• Se suman a los gastos de esos meses en Finanzas. Si ese combustible ya lo anotaste por otro lado (un gasto, una caja chica), se contaría dos veces: en ese caso, revísalas una por una abajo.\n" +
+      "• Si alguna ya apareció en el ERP, se enlaza a su factura y no se duplica.",
+    )) return;
+    setRegistrando(true); setMsgHist("Registrando…");
+    const t = { reg: 0, fact: 0, ocupadas: 0, errores: [] as string[] };
+    let previo = Number.POSITIVE_INFINITY;
+    try {
+      for (let tanda = 1; tanda <= 30; tanda++) {
+        const j = await post({ accion: "registrar_historicas" });
+        if (!j.ok) { t.errores.push(j.error ?? "error"); break; }
+        t.reg += Number(j.registradas) || 0; t.fact += Number(j.facturas) || 0;
+        t.ocupadas = Number(j.ocupadas) || 0; // las ocupadas se vuelven a intentar en la tanda siguiente
+        t.errores.push(...((j.errores ?? []) as string[]));
+        setMsgHist(`Registrando… ${t.reg} carga(s) registradas.`);
+        const quedan = Number(j.quedan) || 0;
+        if (!quedan || quedan >= previo) break;
+        previo = quedan;
+      }
+    } catch (e: any) { t.errores.push(e.message); }
+    setMsgHist(
+      `${t.reg} carga(s) registradas desde ${t.fact} factura(s).` +
+      (t.ocupadas ? ` ${t.ocupadas} factura(s) se estaban procesando en ese momento: vuelve a pulsar en un minuto.` : "") +
+      (t.errores.length ? ` No se pudo con ${t.errores.length}: ${t.errores.slice(0, 3).join(" · ")}` : ""),
+    );
+    setRegistrando(false);
+    cargar();
+  }
+
+  async function marcarPagadas() {
+    if (!deuda?.docs.length) return;
+    const n = deuda.docs.length;
+    const ej = deuda.docs.slice(0, 6).map((d) => `${d.serie ?? ""}-${d.numero ?? ""} (${S(d.total)})`).join(", ");
+    if (!confirm(
+      `¿Marcar como PAGADOS ${n} comprobante(s) de combustible, por ${S(deuda.total)}?\n\n${ej}${n > 6 ? ` y ${n - 6} más` : ""}\n\n` +
+      "Son facturas de una cuenta prepago: se pagaron con el saldo que se depositó antes. Hoy figuran como deuda en Tesorería y podrían entrar a un lote de pago: el mismo combustible pagado dos veces.\n" +
+      "No se toca ninguno con un pago aplicado, un anticipo anotado o dentro de un lote.",
+    )) return;
+    setMarcando(true); setMsgDeuda(null);
+    const j = await post({ accion: "marcar_prepago", ids: deuda.docs.map((d) => d.id) });
+    setMsgDeuda(j.ok ? `${j.marcadas} comprobante(s) quedaron pagados (${S(j.total)}): ya no figuran como deuda en Tesorería.` : `No se pudo: ${j.error}`);
+    setMarcando(false);
+    cargarDeuda();
+  }
+
   async function confirmar(f: any, n: number, e: { placa: string; fecha: string }) {
-    const r = await fetch("/api/combustible/facturas", {
-      method: "POST", headers: await cabecerasErp(),
-      body: JSON.stringify({ accion: "confirmar_linea", factura_id: f.id, n, placa: e.placa || null, fecha: e.fecha || null }),
-    });
-    const j = await r.json().catch(() => ({}));
+    const j = await post({ accion: "confirmar_linea", factura_id: f.id, n, placa: e.placa || null, fecha: e.fecha || null });
     if (!j.ok) alert(j.linea?.detalle ?? j.error ?? "No se pudo registrar");
     cargar();
   }
 
   async function descartar(f: any) {
     if (!confirm("¿Descartar este correo? No es una factura de combustible y no se volverá a mirar.")) return;
-    await fetch("/api/combustible/facturas", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ accion: "descartar", factura_id: f.id }) });
+    await post({ accion: "descartar", factura_id: f.id });
     cargar();
   }
 
   const resumen = useMemo(() => {
     const planes = (filas ?? []).flatMap((f) => (Array.isArray(f.conciliacion) ? f.conciliacion : []) as PlanLinea[]);
     const c = (k: string) => planes.filter((p) => p.codigo === k).length;
-    return { reg: c("registrar"), ya: c("ya_registrada"), rev: c("revisar"), radar: c("en_radar_pendiente"), esp: c("en_espera") };
+    const hs = planes.filter((p) => p.codigo === "revisar" && p.motivo === "historico").length;
+    return { reg: c("registrar"), ya: c("ya_registrada"), rev: c("revisar") - hs, hist: hs, radar: c("en_radar_pendiente"), esp: c("en_espera") };
   }, [filas]);
 
   return (
@@ -102,16 +229,26 @@ export default function FacturasCorreo() {
 
       <div className="rounded-xl border bg-white p-4 flex flex-wrap items-center gap-4">
         <div className="text-sm text-gray-700 flex-1 min-w-[260px]">
-          <b>La factura del correo es el respaldo oficial del Radar IA.</b> Cada 3 horas el ERP lee las facturas del correo conectado arriba
-          (XML de SUNAT; si no llega, el PDF) y compara línea por línea con las cargas registradas.
+          <b>La factura del correo es el respaldo oficial del Radar IA.</b> Cada 3 horas el ERP lee las facturas de los últimos {DIAS_REGISTRO_AUTOMATICO} días
+          del correo conectado arriba (el XML de SUNAT; si no llega, el PDF del comprobante) y compara línea por línea con las cargas registradas.
           Las que faltan se registran solas (sin odómetro); las dudosas quedan aquí.
+          {" "}<b>«📚 Leer el último año»</b> trae además las de los 12 meses anteriores: lo que falte de hace más de {DIAS_REGISTRO_AUTOMATICO} días
+          no se registra solo — queda abajo, con cuántas cargas son y por cuánto, para que lo decidas tú.
         </div>
-        <button onClick={sincronizar} disabled={cargando || sinCorreo}
-          title={sinCorreo ? "Primero conecta el correo donde llegan las facturas (arriba)." : undefined}
-          className="px-4 py-2 rounded-lg text-sm font-bold text-white disabled:opacity-60" style={{ background: "#0b315f" }}>
-          {cargando ? "Sincronizando…" : "📧 Leer correo ahora"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={sincronizar} disabled={!!cargando || registrando || sinCorreo}
+            title={sinCorreo ? "Primero conecta el correo donde llegan las facturas (arriba)." : undefined}
+            className="px-4 py-2 rounded-lg text-sm font-bold text-white disabled:opacity-60" style={{ background: "#0b315f" }}>
+            {cargando === "normal" ? "Sincronizando…" : "📧 Leer correo ahora"}
+          </button>
+          <button onClick={leerHistorial} disabled={!!cargando || registrando || sinCorreo}
+            title={sinCorreo ? "Primero conecta el correo donde llegan las facturas (arriba)." : "Lee las facturas de los últimos 12 meses, por tandas."}
+            className="px-4 py-2 rounded-lg text-sm font-bold border bg-white text-[#0b315f] disabled:opacity-60" style={{ borderColor: "#0b315f" }}>
+            {cargando === "historial" ? "Leyendo el último año…" : "📚 Leer el último año"}
+          </button>
+        </div>
         {sinCorreo && <div className="basis-full text-xs text-amber-800">Primero conecta el correo donde llegan las facturas de Primax (bloque de arriba).</div>}
+        {cargando === "historial" && <div className="basis-full text-xs text-gray-500">Puede tardar unos minutos: deja esta pestaña abierta. Si la cierras, lo ya leído queda guardado y se sigue con el mismo botón.</div>}
         {sync && <div className="basis-full text-xs text-gray-600">{sync}</div>}
         <div className="basis-full flex flex-wrap gap-3 text-xs">
           <span style={{ color: ETIQUETA_LINEA.ya_registrada.color }}>✓ {resumen.ya} ya registradas</span>
@@ -119,12 +256,52 @@ export default function FacturasCorreo() {
           <span style={{ color: ETIQUETA_LINEA.en_radar_pendiente.color }}>⏳ {resumen.radar} en revisión del Radar</span>
           <span style={{ color: ETIQUETA_LINEA.en_espera.color }}>… {resumen.esp} esperando al Radar</span>
           <span style={{ color: ETIQUETA_LINEA.revisar.color }}>⚠ {resumen.rev} para revisar</span>
+          {resumen.hist > 0 && <span className="text-[#1d4ed8]">📚 {resumen.hist} del historial por decidir</span>}
         </div>
       </div>
 
+      {!!hist?.lineas && (
+        <div className="rounded-xl border p-4 space-y-2" style={{ background: "#eff6ff", borderColor: "#93c5fd" }}>
+          <div className="text-sm text-[#1e3a8a]">
+            <b>📚 Del historial: {hist.lineas} carga(s) que no están en el ERP</b> — {hist.facturas} factura(s), del {F(hist.desde)} al {F(hist.hasta)}, por <b>{S(hist.total)}</b>.
+          </div>
+          <div className="text-xs text-gray-700">
+            No se registraron solas porque son de hace más de {DIAS_REGISTRO_AUTOMATICO} días: son gastos de meses pasados. Si de verdad faltan
+            (el Radar no las capturó), regístralas todas juntas. Si ese combustible ya lo anotaste por otro lado (un gasto, una caja chica),
+            revísalas una por una abajo: cada línea del historial tiene su propio botón.
+          </div>
+          <button onClick={registrarHistorial} disabled={registrando || !!cargando}
+            className="px-4 py-2 rounded-lg text-sm font-bold text-white disabled:opacity-60" style={{ background: "#1d4ed8" }}>
+            {registrando ? "Registrando…" : `Registrar las ${hist.lineas} cargas del historial`}
+          </button>
+        </div>
+      )}
+      {msgHist && <div className="text-xs text-gray-700 px-1">{msgHist}</div>}
+
+      {!!deuda?.docs.length && (
+        <div className="rounded-xl border p-4 space-y-2" style={{ background: "#fffbeb", borderColor: "#fcd34d" }}>
+          <div className="text-sm text-amber-900">
+            <b>⚠ {deuda.docs.length} comprobante(s) de combustible figuran como deuda en Tesorería ({S(deuda.total)}) y no lo son.</b>{" "}
+            Son de una cuenta prepago: se pagaron con el saldo depositado antes. Se crearon así antes de este arreglo; las facturas que se lean desde ahora nacen pagadas.
+          </div>
+          <details className="text-xs text-amber-900">
+            <summary className="cursor-pointer font-bold">Ver cuáles</summary>
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+              {deuda.docs.map((d) => <span key={d.id} className="font-mono">{d.serie}-{d.numero} · {F(d.fecha_emision)} · {S(d.total)}</span>)}
+            </div>
+          </details>
+          <button onClick={marcarPagadas} disabled={marcando}
+            className="px-4 py-2 rounded-lg text-sm font-bold text-white disabled:opacity-60" style={{ background: "#b45309" }}>
+            {marcando ? "Marcando…" : "Marcarlos como pagados con el saldo prepago"}
+          </button>
+        </div>
+      )}
+      {msgDeuda && <div className="text-xs text-gray-700 px-1">{msgDeuda}</div>}
+
       {filas == null ? <div className="text-sm text-gray-400 p-4">Cargando…</div> :
-       filas.length === 0 ? <div className="text-sm text-gray-500 p-6 text-center border rounded-xl bg-white">Todavía no hay facturas leídas. Conecta el correo arriba y pulsa «Leer correo ahora».</div> :
+       filas.length === 0 ? <div className="text-sm text-gray-500 p-6 text-center border rounded-xl bg-white">Todavía no hay facturas leídas. Conecta el correo arriba y pulsa «Leer correo ahora» (o «📚 Leer el último año»).</div> :
       <div className="rounded-xl border bg-white overflow-x-auto">
+        {filas.length >= LIMITE && <div className="text-[11px] text-gray-500 px-3 pt-2">Se muestran las {LIMITE} más recientes.</div>}
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-[11px] uppercase text-gray-500">
             <tr><th className="p-2 text-left">Recibido</th><th className="p-2 text-left">Emisor</th><th className="p-2 text-left">Comprobante</th><th className="p-2 text-right">Total</th><th className="p-2 text-left">Fuente</th><th className="p-2 text-left">Estado</th><th></th></tr>
@@ -152,7 +329,8 @@ export default function FacturasCorreo() {
                       {f.gmail_message_id && <a href={`https://mail.google.com/mail/u/0/#all/${f.gmail_message_id}`} target="_blank" rel="noreferrer" className="text-xs text-[#1d4ed8] font-bold hover:underline">Abrir el correo en Gmail ↗</a>}
                       {lineas.map((l) => {
                         const p = plan.find((x) => x.n === l.n);
-                        const et2 = p ? ETIQUETA_LINEA[p.codigo] : null;
+                        // Lo del historial no es un problema de la línea: es una decisión pendiente.
+                        const et2 = !p ? null : p.motivo === "historico" ? { texto: "Del historial", color: "#1d4ed8" } : ETIQUETA_LINEA[p.codigo];
                         const k = `${f.id}:${l.n}`;
                         const e = elec[k] ?? { placa: l.placa ?? "", fecha: l.fecha ?? "" };
                         const confirmable = p && (p.codigo === "revisar" || p.codigo === "en_espera") && p.motivo !== "no_cuadra" && p.motivo !== "ambigua" && p.motivo !== "nota_credito";
