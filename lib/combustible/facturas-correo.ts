@@ -29,6 +29,11 @@ import {
 } from "@/lib/combustible/factura-lineas";
 import type { FilaCuenta } from "@/lib/combustible/saldo-datos";
 import { sumarDiasISO } from "@/lib/combustible/saldo-cuenta";
+import {
+  origenFechaLinea, lineasAlDespacho, medirDesfase, decidirDesfase, diasEntre, esCargaDelRadar,
+  notaFechaDespacho, cargasPorMover, normalizarDesfaseConfig,
+  type DecisionDesfase, type FacturaRegistrada, type CargaActual, type CargaPorMover,
+} from "@/lib/combustible/desfase-factura";
 
 const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 
@@ -263,8 +268,8 @@ export async function conciliarFacturaGuardada(
   manual?: { n: number; placa?: string | null; fecha?: string | null },
   /** `aceptarHistoricas`: una persona decidió registrar TODO lo que el historial dejó en
    *  «revisar» por viejo (botón «Registrar las del historial»). Solo levanta ese candado, y
-   *  solo en las líneas que lo tenían. */
-  opts: { aceptarHistoricas?: boolean } = {},
+   *  solo en las líneas que lo tenían. `desfase`: el de la cuenta, si quien llama ya lo tiene. */
+  opts: { aceptarHistoricas?: boolean; desfase?: DecisionDesfase } = {},
 ): Promise<ResultadoFactura> {
   // CANDADO: dos conciliaciones a la vez (el cron y el botón «Leer correo ahora») verían la
   // misma línea como faltante y la registrarían dos veces. Se reclama la factura con un UPDATE
@@ -287,15 +292,24 @@ export async function conciliarFacturaGuardada(
     subtotal: fila.subtotal, igv: fila.igv, total: fila.total, detraccion_monto: null, placa_detectada: null,
     fuente: fila.fuente_extraccion === "xml_ubl" ? "xml_ubl" : "vision_pdf", confianza: Number(fila.confianza ?? 0),
   };
-  let lineas: LineaFactura[] = Array.isArray(fila.lineas) ? fila.lineas : [];
-  if (manual) {
-    lineas = lineas.map((l) => l.n === manual.n
-      ? { ...l, placa: manual.placa ? normPlaca(manual.placa) : l.placa, fecha: manual.fecha || l.fecha }
-      : l);
+  // LA FACTURA NO TRAE LA FECHA DEL DESPACHO. La deducida de la emisión se corre al despacho por el
+  // desfase de la cuenta —medido sobre las recargas del Radar que casaron con su factura, o el que
+  // configuró una persona—; la que trae la línea o eligió una persona no se toca
+  // (lib/combustible/desfase-factura.ts → lineasAlDespacho). Toda la conciliación —el cruce con lo
+  // registrado, la espera al Radar, el corte del historial y la carga que se registra— juzga con la
+  // fecha del DESPACHO, y el cruce busca también alrededor de la de emisión (`fecha_alterna`).
+  const emision: string | null = fila.fecha_emision ? String(fila.fecha_emision).slice(0, 10) : null;
+  const desfase = opts.desfase ?? (await desfaseDeCuenta(sb, cuenta));
+  const alDespacho = lineasAlDespacho<LineaFactura>(Array.isArray(fila.lineas) ? fila.lineas : [], emision, desfase.dias, manual);
+  const origenDe = alDespacho.origen;
+  let lineas: LineaFactura[] = alDespacho.lineas;
+  if (manual?.placa) {
+    lineas = lineas.map((l) => (l.n === manual.n ? { ...l, placa: normPlaca(manual.placa) } : l));
   }
+  const corrida = (n: number) => origenDe.get(n) === "emision" && desfase.dias > 0 && !!emision;
 
-  // Candidatos: cargas en la ventana de fechas de la factura (±3 días).
-  const fechas = lineas.map((l) => l.fecha).filter(Boolean) as string[];
+  // Candidatos: cargas en la ventana de fechas de la factura (±3 días), las alternas incluidas.
+  const fechas = lineas.flatMap((l) => [l.fecha, l.fecha_alterna]).filter(Boolean) as string[];
   const base = fechas.length ? fechas.sort() : [cab.fecha_emision ?? hoy];
   const desde = sumarDiasISO(base[0], -35); // una factura consolidada del mes puede traer cargas sin fecha
   const hasta = sumarDiasISO(base[base.length - 1], 3);
@@ -378,6 +392,15 @@ export async function conciliarFacturaGuardada(
       final.detalle = `La carga #${antes.combustible_id} que se registró desde esta factura ya no existe (¿se borró a mano?). Si falta de verdad, confírmala otra vez.`;
     }
     if (final.casa_con != null) usados.add(String(final.casa_con));
+    // Qué fecha se usó y por qué: la pantalla la enseña junto a la de emisión, y la corrección de
+    // las cargas viejas (cargasPorMover) lee el origen de aquí antes que inferirlo.
+    final.fecha_origen = origenDe.get(l.n) ?? null;
+    if (corrida(l.n)) {
+      final.desfase = { emision: emision!, dias: desfase.dias };
+      if (final.codigo !== "ya_registrada" && final.codigo !== "en_radar_pendiente" && final.codigo !== "no_es_combustible") {
+        final.detalle += ` Fecha del despacho ${l.fecha}: la factura se emitió el ${emision} (${desfase.codigo === "fijo" ? "desfase configurado" : "desfase medido"} de ${desfase.dias} día(s)).`;
+      }
+    }
 
     if (final.codigo === "registrar" && final.propuesta) {
       // El comprobante fiscal existe ANTES de la carga: la carga nace enlazada a él.
@@ -395,7 +418,8 @@ export async function conciliarFacturaGuardada(
           fecha: pr.fecha, kilometraje: 0,
           galones: pr.galones, precio_galon: pr.precio_galon,
           grifo, conductor: null, tipo_combustible: pr.tipo_combustible, unidad: pr.unidad,
-          observaciones: observacionCargaDeFactura(ref, l.nota_despacho),
+          // Una carga fechada por el desfase dice por qué no lleva la fecha de su factura.
+          observaciones: observacionCargaDeFactura(ref, l.nota_despacho, corrida(l.n) ? notaFechaDespacho(emision!, desfase.dias) : null),
           comprobante_serie: cab.serie, comprobante_numero: cab.numero, ruc_proveedor: cab.ruc_emisor,
           documento_compra_id: docId,
         };
@@ -810,6 +834,155 @@ export async function reintentarErrores(
   out.quedan = filas.length - i;
   out.motivos = [...new Set(res.detalle.filter((d) => d.estado === "error").map((d) => d.error ?? ""))].filter(Boolean).slice(0, 5);
   return out;
+}
+
+// ── El desfase entre el despacho y la emisión de la factura ──────────────────
+
+/**
+ * Las diferencias emisión − despacho de la cuenta (lib/combustible/desfase-factura.ts): cada línea
+ * de factura con la fecha DEDUCIDA de la emisión que casó con una recarga que leyó el RADAR. La fecha
+ * del Radar es la del voucher, impresa en el papel; ni las cargas que registró una factura (llevan la
+ * emisión) ni las tecleadas a mano (pudieron teclearse desde la factura) son evidencia.
+ */
+export async function diferenciasDesfase(sb: any, cuenta: FilaCuenta): Promise<number[]> {
+  const { data, error } = await sb.from("radar_facturas").select("fecha_emision, lineas, conciliacion")
+    .eq("cuenta_id", cuenta.id).in("estado", ["conciliada", "parcial"])
+    .order("recibido_en", { ascending: false }).limit(1000);
+  if (error) throw new Error(`radar_facturas: ${error.message}`);
+  const pares: { emision: string; clave: string }[] = [];
+  const ids = { combustible: new Set<number>(), radar: new Set<string>() };
+  for (const f of (data as any[]) ?? []) {
+    if (!f.fecha_emision) continue;
+    const emision = String(f.fecha_emision).slice(0, 10);
+    const lineas: LineaFactura[] = Array.isArray(f.lineas) ? f.lineas : [];
+    const nComb = lineas.filter((l) => l.tipo_combustible).length;
+    for (const c of (Array.isArray(f.conciliacion) ? f.conciliacion : []) as any[]) {
+      if (c?.casa_con == null || (c.codigo !== "ya_registrada" && c.codigo !== "en_radar_pendiente")) continue;
+      const l = lineas.find((x) => x.n === c.n);
+      // Solo lo que el desfase corrige: la fecha deducida de la emisión.
+      if (!l || origenFechaLinea(l, emision, nComb) !== "emision") continue;
+      if (c.codigo === "ya_registrada") {
+        const id = Number(c.casa_con);
+        if (!Number.isFinite(id)) continue;
+        ids.combustible.add(id);
+        pares.push({ emision, clave: `c${id}` });
+      } else {
+        ids.radar.add(String(c.casa_con));
+        pares.push({ emision, clave: `r${c.casa_con}` });
+      }
+    }
+  }
+  const fechaDe = new Map<string, string>();
+  const comb = [...ids.combustible];
+  for (let k = 0; k < comb.length; k += 200) {
+    const { data: cs, error: e } = await sb.from("combustible").select("id, fecha, observaciones").in("id", comb.slice(k, k + 200));
+    if (e) throw new Error(`combustible: ${e.message}`);
+    for (const r of (cs as any[]) ?? []) if (r.fecha && esCargaDelRadar(r.observaciones)) fechaDe.set(`c${r.id}`, String(r.fecha).slice(0, 10));
+  }
+  const rad = [...ids.radar];
+  for (let k = 0; k < rad.length; k += 200) {
+    const { data: rs, error: e } = await sb.from("radar_combustible").select("id, fecha").in("id", rad.slice(k, k + 200));
+    if (e) throw new Error(`radar_combustible: ${e.message}`);
+    for (const r of (rs as any[]) ?? []) if (r.fecha) fechaDe.set(`r${r.id}`, String(r.fecha).slice(0, 10));
+  }
+  return pares
+    .map((p) => { const f = fechaDe.get(p.clave); return f ? diasEntre(f, p.emision) : Number.NaN; })
+    .filter(Number.isFinite);
+}
+
+// Una medición por cuenta cada 5 min: una sincronización concilia decenas de facturas seguidas.
+const memoDesfase = new Map<number, { t: number; d: DecisionDesfase }>();
+
+/**
+ * El desfase que se le aplica a la cuenta AHORA. Si la medición no se puede leer, se decide con cero
+ * muestras —`pocos_datos`: la fecha de emisión, como siempre—: un fallo de lectura nunca corre
+ * fechas por su cuenta.
+ */
+export async function desfaseDeCuenta(sb: any, cuenta: FilaCuenta | null, opts: { fresco?: boolean } = {}): Promise<DecisionDesfase> {
+  if (!cuenta) return decidirDesfase(null, medirDesfase([]));
+  const configurado = normalizarDesfaseConfig(cuenta.facturas_desfase_dias);
+  const m = memoDesfase.get(cuenta.id);
+  if (!opts.fresco && m && Date.now() - m.t < 5 * 60_000 && m.d.configurado === configurado) return m.d;
+  let dif: number[] = [];
+  try { dif = await diferenciasDesfase(sb, cuenta); }
+  catch (e: any) { console.warn("[facturas-correo] desfase:", e?.message ?? e); }
+  const d = decidirDesfase(configurado, medirDesfase(dif));
+  memoDesfase.set(cuenta.id, { t: Date.now(), d });
+  return d;
+}
+
+/** Las cargas de la cuenta que una factura registró con la fecha de EMISIÓN y que el desfase movería. */
+export async function cargasPorMoverDeCuenta(sb: any, cuenta: FilaCuenta, dias: number): Promise<CargaPorMover[]> {
+  if (!(dias > 0)) return [];
+  const { data, error } = await sb.from("radar_facturas").select("id, serie, numero, fecha_emision, lineas, conciliacion")
+    .eq("cuenta_id", cuenta.id).not("conciliacion", "is", null)
+    .order("recibido_en", { ascending: false }).limit(2000);
+  if (error) throw new Error(`radar_facturas: ${error.message}`);
+  const facturas: FacturaRegistrada[] = ((data as any[]) ?? []).map((f) => ({
+    factura_id: Number(f.id), serie: f.serie ?? null, numero: f.numero ?? null,
+    fecha_emision: f.fecha_emision ? String(f.fecha_emision).slice(0, 10) : null,
+    lineas: Array.isArray(f.lineas) ? f.lineas : [],
+    conciliacion: Array.isArray(f.conciliacion) ? f.conciliacion : [],
+  }));
+  const ids = [...new Set(facturas.flatMap((f) => f.conciliacion.map((c) =>
+    Number(c.codigo === "registrar" ? c.combustible_id : c.codigo === "ya_registrada" ? c.casa_con : NaN))))].filter(Number.isFinite);
+  const flota = await cargarFlota(sb);
+  const placaDe = new Map<string, string>();
+  for (const [p, id] of flota.propias) placaDe.set(`p${id}`, p);
+  for (const [p, id] of flota.terceros) placaDe.set(`t${id}`, p);
+  const cargas = new Map<number, CargaActual>();
+  for (let k = 0; k < ids.length; k += 200) {
+    const { data: cs, error: e } = await sb.from("combustible")
+      .select("id, fecha, observaciones, total, vehiculo_id, vehiculo_tercero_id").in("id", ids.slice(k, k + 200));
+    if (e) throw new Error(`combustible: ${e.message}`);
+    for (const r of (cs as any[]) ?? []) {
+      cargas.set(Number(r.id), {
+        id: Number(r.id), fecha: String(r.fecha).slice(0, 10), observaciones: r.observaciones ?? null,
+        total: r.total == null ? null : Number(r.total),
+        placa: r.vehiculo_id != null ? placaDe.get(`p${r.vehiculo_id}`) ?? null : r.vehiculo_tercero_id != null ? placaDe.get(`t${r.vehiculo_tercero_id}`) ?? null : null,
+      });
+    }
+  }
+  return cargasPorMover(facturas, cargas, dias);
+}
+
+export type ResultadoMover = { ok: boolean; error?: string; movidas: number; total: number; cruzan_mes: number };
+
+/**
+ * «Moverlas a la fecha del despacho»: SOLO las que la persona vio (`ids`) y con el MISMO desfase que
+ * vio (`dias`). La lista se recalcula aquí —no se confía en la del navegador— y si el desfase cambió
+ * entre la pantalla y el clic, no se mueve nada: la persona aprobó otra cosa. Cada UPDATE exige que la
+ * carga siga con la fecha de emisión: si alguien la cambió mientras tanto, esa persona decidió.
+ */
+export async function moverCargasADespacho(
+  sb: any, cuentas: FilaCuenta[], ids: number[], dias: number,
+): Promise<ResultadoMover> {
+  const pedidos = new Set(ids.map(Number));
+  const res: ResultadoMover = { ok: true, movidas: 0, total: 0, cruzan_mes: 0 };
+  for (const cuenta of cuentas.filter((c) => c.activo)) {
+    // La lista con el desfase que la persona VIO; si la cuenta tiene alguna de esas cargas y su
+    // desfase ya no es ese, no se mueve nada: aprobó otra cosa.
+    const lista = (await cargasPorMoverDeCuenta(sb, cuenta, dias)).filter((x) => pedidos.has(x.combustible_id));
+    if (!lista.length) continue;
+    const d = await desfaseDeCuenta(sb, cuenta, { fresco: true });
+    if (d.dias !== dias) {
+      return { ...res, ok: false, error: `El desfase de ${cuenta.nombre} cambió (ahora ${d.dias} día(s), en pantalla ${dias}): vuelve a cargar la pestaña antes de mover.` };
+    }
+    for (const x of lista) {
+      const nota = notaFechaDespacho(x.fecha_emision, d.dias);
+      const obs = String(x.observaciones ?? "");
+      const { data, error } = await sb.from("combustible")
+        .update({ fecha: x.hacia, observaciones: obs.includes(nota) ? obs : obs ? `${obs} · ${nota}` : nota })
+        .eq("id", x.combustible_id).eq("fecha", x.desde).select("id");
+      if (error) return { ...res, ok: false, error: error.message };
+      if (((data as any[]) ?? []).length) {
+        res.movidas++;
+        res.total = r2(res.total + (Number(x.total) || 0));
+        if (x.cruza_mes) res.cruzan_mes++;
+      }
+    }
+  }
+  return res;
 }
 
 // ── Comprobantes de una cuenta prepago que nacieron como deuda ───────────────

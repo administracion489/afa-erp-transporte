@@ -14,6 +14,7 @@ import {
   type LineaFactura, type PlanLinea, type ResumenHistorico,
 } from "@/lib/combustible/factura-lineas";
 import type { CodigoConexion } from "@/lib/combustible/correo-conexion";
+import { sumarDias, type CargaPorMover, type DecisionDesfase, type ResumenMover } from "@/lib/combustible/desfase-factura";
 import CorreoFacturas from "./CorreoFacturas";
 
 const S = (n: number | null | undefined) =>
@@ -37,6 +38,7 @@ const ESTADO: Record<string, [string, string]> = {
 };
 
 type Deuda = { id: number; serie: string | null; numero: string | null; fecha_emision: string | null; total: number };
+type DesfaseCuenta = { cuenta_id: number; nombre: string; decision: DecisionDesfase; por_mover: ResumenMover; lista: CargaPorMover[] };
 
 async function post(body: Record<string, unknown>): Promise<any> {
   const r = await fetch("/api/combustible/facturas", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify(body) });
@@ -63,6 +65,11 @@ export default function FacturasCorreo() {
   const [deuda, setDeuda] = useState<{ docs: Deuda[]; total: number } | null>(null);
   const [marcando, setMarcando] = useState(false);
   const [msgDeuda, setMsgDeuda] = useState<string | null>(null);
+  // Cuántos días después del despacho sale la factura (medido o configurado), y las cargas que una
+  // factura registró con la fecha de EMISIÓN (lib/combustible/desfase-factura.ts).
+  const [desf, setDesf] = useState<DesfaseCuenta[] | null>(null);
+  const [moviendo, setMoviendo] = useState(false);
+  const [msgDesf, setMsgDesf] = useState<string | null>(null);
 
   const cargar = useCallback(async () => {
     const [{ data, error }, { data: otras }, { data: hs, error: eHist }] = await Promise.all([
@@ -89,13 +96,21 @@ export default function FacturasCorreo() {
     } catch { setDeuda(null); } // es un aviso aparte: si falla, el resto de la pestaña sirve igual
   }, []);
 
+  const cargarDesfase = useCallback(async () => {
+    try {
+      const j = await post({ accion: "desfase" });
+      setDesf(j?.ok ? (j.cuentas ?? []) : null);
+    } catch { setDesf(null); } // es un aviso aparte: si falla, el resto de la pestaña sirve igual
+  }, []);
+
   useEffect(() => {
     cargar();
     cargarDeuda();
+    cargarDesfase();
     Promise.all([supabase.from("vehiculos").select("placa"), supabase.from("vehiculos_tercero").select("placa")]).then(([a, b]) => {
       setPlacas([...((a.data as any[]) ?? []), ...((b.data as any[]) ?? [])].map((r) => String(r.placa ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "")).filter(Boolean).sort());
     });
-  }, [cargar, cargarDeuda]);
+  }, [cargar, cargarDeuda, cargarDesfase]);
 
   async function sincronizar() {
     setCargando("normal"); setSync("Buscando facturas en el correo…");
@@ -117,6 +132,7 @@ export default function FacturasCorreo() {
     } catch (e: any) { setSync(e.message); }
     setCargando("");
     cargar();
+    cargarDesfase();
   }
 
   /** «Leer el último año»: el servidor lee por tandas (LECTURA_HISTORIAL) y la pantalla vuelve a
@@ -150,6 +166,7 @@ export default function FacturasCorreo() {
     );
     setCargando("");
     cargar();
+    cargarDesfase();
   }
 
   /** «Registrar las del historial»: una persona vio cuántas son y por cuánto. El servidor
@@ -186,6 +203,7 @@ export default function FacturasCorreo() {
     );
     setRegistrando(false);
     cargar();
+    cargarDesfase();
   }
 
   /** «Reintentar los que fallaron»: cada correo en «Error» se vuelve a leer UNA vez por pulsación
@@ -211,6 +229,28 @@ export default function FacturasCorreo() {
       (t.motivos.length ? ` Motivo: ${t.motivos.slice(0, 2).join(" · ")}` : ""),
     );
     setCargando("");
+    cargar();
+  }
+
+  /** «Moverlas a la fecha del despacho»: una persona vio cuáles, de qué fecha a cuál y cuántas cambian
+   *  de mes. El servidor recalcula la lista y no mueve nada si el desfase cambió entre tanto. */
+  async function moverADespacho(c: DesfaseCuenta) {
+    const r = c.por_mover;
+    if (!r.cargas) return;
+    const ej = c.lista.slice(0, 5).map((x) => `${x.placa ?? "—"} ${F(x.desde)} → ${F(x.hacia)} (${S(x.total)})`).join("\n");
+    if (!confirm(
+      `¿Mover ${r.cargas} carga(s) de combustible de ${c.nombre} a la fecha del despacho, ${c.decision.dias} día(s) antes de su factura?\n\n${ej}${r.cargas > 5 ? `\n… y ${r.cargas - 5} más` : ""}\n\n` +
+      `• Las registró la factura del correo con su fecha de EMISIÓN, porque la factura no trae la del despacho.\n` +
+      (r.cruzan_mes ? `• ${r.cruzan_mes} pasan al MES ANTERIOR: cambia el gasto de ese mes en Finanzas.\n` : "") +
+      `• Cada una queda con una nota que dice de qué fecha se movió. Una que alguien ya cambió de fecha no se toca.`,
+    )) return;
+    setMoviendo(true); setMsgDesf(null);
+    const j = await post({ accion: "mover_a_despacho", ids: c.lista.map((x) => x.combustible_id), dias: c.decision.dias });
+    setMsgDesf(j.ok
+      ? `${j.movidas} carga(s) movidas a la fecha del despacho (${S(j.total)})${j.cruzan_mes ? `; ${j.cruzan_mes} pasaron al mes anterior` : ""}.`
+      : `No se pudo: ${j.error}`);
+    setMoviendo(false);
+    cargarDesfase();
     cargar();
   }
 
@@ -295,6 +335,50 @@ export default function FacturasCorreo() {
         </div>
       </div>
 
+      {desf?.map((c) => {
+        const d = c.decision;
+        const r = c.por_mover;
+        const aplica = d.dias > 0;
+        return (
+          <div key={c.cuenta_id} className="rounded-xl border bg-white p-4 space-y-2">
+            <div className="text-sm text-gray-700">
+              <b className={aplica ? "text-[#0b315f]" : "text-gray-600"}>📅 Fecha del despacho · {c.nombre}.</b> {d.detalle}
+            </div>
+            <div className="text-xs text-gray-500">
+              La factura no trae la fecha del despacho, solo la de emisión. Solo se corre la fecha de una factura de <b>una</b> línea: la que trae la
+              línea, o la que eliges al confirmar, no se toca. Se cambia en <b>⚙ Avisos</b> de la tarjeta «Saldo de combustible» → Facturas por correo.
+            </div>
+            {r.cargas > 0 && (
+              <div className="rounded-lg border p-3 space-y-2" style={{ background: "#eff6ff", borderColor: "#93c5fd" }}>
+                <div className="text-sm text-[#1e3a8a]">
+                  <b>{r.cargas} carga(s) registradas desde la factura llevan la fecha de EMISIÓN</b> — del {F(r.desde)} al {F(r.hasta)}, por {S(r.total)}.
+                  Con el desfase de {d.dias} día(s), el despacho fue {d.dias} día(s) antes.
+                </div>
+                {r.cruzan_mes > 0 && (
+                  <div className="text-xs text-amber-800">⚠ {r.cruzan_mes} de ellas pasan al mes anterior: cambia el gasto de ese mes en Finanzas.</div>
+                )}
+                <details className="text-xs text-gray-700">
+                  <summary className="cursor-pointer font-bold">Ver cuáles</summary>
+                  <div className="mt-1 space-y-0.5">
+                    {c.lista.map((x) => (
+                      <div key={x.combustible_id} className="font-mono">
+                        {x.placa ?? "—"} · {x.comprobante} · {F(x.desde)} → <b>{F(x.hacia)}</b> · {S(x.total)}{x.cruza_mes ? " · cambia de mes" : ""}
+                      </div>
+                    ))}
+                    {r.cargas > c.lista.length && <div className="text-gray-500">… y {r.cargas - c.lista.length} más.</div>}
+                  </div>
+                </details>
+                <button onClick={() => moverADespacho(c)} disabled={moviendo || !!cargando || registrando}
+                  className="px-4 py-2 rounded-lg text-sm font-bold text-white disabled:opacity-60" style={{ background: "#1d4ed8" }}>
+                  {moviendo ? "Moviendo…" : `Moverlas a la fecha del despacho`}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {msgDesf && <div className="text-xs text-gray-700 px-1">{msgDesf}</div>}
+
       {!!hist?.lineas && (
         <div className="rounded-xl border p-4 space-y-2" style={{ background: "#eff6ff", borderColor: "#93c5fd" }}>
           <div className="text-sm text-[#1e3a8a]">
@@ -378,7 +462,9 @@ export default function FacturasCorreo() {
                         // Lo del historial no es un problema de la línea: es una decisión pendiente.
                         const et2 = !p ? null : p.motivo === "historico" ? { texto: "Del historial", color: "#1d4ed8" } : ETIQUETA_LINEA[p.codigo];
                         const k = `${f.id}:${l.n}`;
-                        const e = elec[k] ?? { placa: l.placa ?? "", fecha: l.fecha ?? "" };
+                        // La fecha con que se juzgó la línea: la del despacho si se dedujo de la emisión.
+                        const despacho = p?.desfase ? sumarDias(p.desfase.emision, -p.desfase.dias) : l.fecha;
+                        const e = elec[k] ?? { placa: l.placa ?? "", fecha: despacho ?? "" };
                         const confirmable = p && (p.codigo === "revisar" || p.codigo === "en_espera") && p.motivo !== "no_cuadra" && p.motivo !== "ambigua" && p.motivo !== "nota_credito";
                         return (
                           <div key={l.n} className="rounded-lg border bg-white p-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -386,10 +472,23 @@ export default function FacturasCorreo() {
                             <span className="min-w-[160px]">{l.descripcion || "—"}</span>
                             <span>{l.cantidad ?? "—"} {l.unidad_codigo ?? ""} × {l.precio_unitario ?? "—"} = <b>{S(l.total)}</b></span>
                             <span>🚌 {l.placa ?? "sin placa"}</span>
-                            <span>📅 {l.fecha ?? "sin fecha"}</span>
+                            {p?.desfase
+                              ? <span title={`La factura no trae la fecha del despacho: se emitió el ${F(p.desfase.emision)} y el despacho se toma ${p.desfase.dias} día(s) antes.`}>
+                                  📅 {F(despacho)} <span className="text-gray-400">(emitida {F(p.desfase.emision)})</span>
+                                </span>
+                              : <span>📅 {l.fecha ? F(l.fecha) : "sin fecha"}</span>}
                             {l.nota_despacho && <span className="font-mono">{l.nota_despacho}</span>}
                             {et2 && <span className="font-bold px-2 py-0.5 rounded-full" style={{ background: et2.color + "1a", color: et2.color }}>{et2.texto}</span>}
                             {p && <div className="basis-full text-gray-600">{p.detalle}{p.codigo === "en_radar_pendiente" && <> <Link href="/radar-ia?tab=combustible" className="text-[#1d4ed8] font-bold hover:underline">Ir a Radar IA →</Link></>}</div>}
+                            {/* Una factura de VARIAS líneas no trae fecha para ninguna: el desfase medido sugiere el
+                                día más probable, como TEXTO. No se precarga: una factura que junta despachos
+                                puede traer días distintos, y esa la decide quien la confirma. */}
+                            {p?.motivo === "sin_fecha" && f.fecha_emision && (() => {
+                              const dec = desf?.find((c) => c.cuenta_id === Number(f.cuenta_id))?.decision;
+                              return dec && dec.dias > 0
+                                ? <div className="basis-full text-[#1d4ed8]">Lo más probable: el {F(sumarDias(String(f.fecha_emision).slice(0, 10), -dec.dias))} — la factura se emitió el {F(f.fecha_emision)} y en esta cuenta sale {dec.dias} día(s) después del despacho. Si junta despachos de días distintos, mira cada voucher.</div>
+                                : null;
+                            })()}
                             {confirmable && (
                               <div className="basis-full flex flex-wrap items-center gap-2 pt-1">
                                 <select value={e.placa} onChange={(ev) => setElec({ ...elec, [k]: { ...e, placa: ev.target.value } })} className="border rounded px-2 py-1">

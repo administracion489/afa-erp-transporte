@@ -26,6 +26,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { normalizarTipoCombustible, unidadDeCarga } from "@/lib/combustible-tipos";
+import type { OrigenFecha } from "@/lib/combustible/desfase-factura";
 
 // ── 1) Líneas del XML UBL 2.1 ────────────────────────────────────────────────
 
@@ -40,6 +41,19 @@ export type LineaFactura = {
   placa: string | null;
   fecha: string | null;             // YYYY-MM-DD del despacho, si la línea la trae
   nota_despacho: string | null;     // V72S-00023776
+  /**
+   * De dónde salió `fecha`: la trae la línea, o se DEDUJO de la emisión (factura de una sola
+   * línea). Solo la deducida se corre por el desfase de facturación (lib/combustible/desfase-factura.ts).
+   * Las líneas leídas antes de este campo se infieren con `origenFechaLinea`.
+   */
+  fecha_origen?: OrigenFecha | null;
+  /**
+   * Otra fecha con la que la MISMA carga puede estar registrada: la de emisión, cuando `fecha` se
+   * corrió al despacho. No se guarda; la pone la conciliación. El cruce busca alrededor de las DOS,
+   * porque una carga que una factura registró antes con la fecha de emisión tiene que seguir
+   * encontrándose —si no, se registraría otra vez—.
+   */
+  fecha_alterna?: string | null;
 };
 
 function tag(xml: string, name: string): string | null {
@@ -197,6 +211,9 @@ export function lineasUbl(xml: string, flota: string[] = []): { lineas: LineaFac
  * fecha de emisión solo si la factura tiene UNA línea (factura por despacho). Una factura
  * consolidada del mes con la fecha de emisión en cada carga pondría el despacho del día 3
  * el día 30 — se deja sin fecha y va a revisión.
+ *
+ * La fecha deducida de la emisión queda MARCADA (`fecha_origen: "emision"`): no es la del
+ * despacho, y el desfase de facturación (lib/combustible/desfase-factura.ts) solo corre esa.
  */
 export function completarConDocumento(
   lineas: LineaFactura[],
@@ -208,12 +225,16 @@ export function completarConDocumento(
   const notasDoc = notasEnTexto(textoDoc);
   const combustibles = lineas.filter((l) => l.tipo_combustible);
   const unaSola = combustibles.length === 1;
-  return lineas.map((l) => ({
-    ...l,
-    placa: l.placa ?? (placasDoc.length === 1 ? placasDoc[0] : null),
-    nota_despacho: l.nota_despacho ?? (unaSola && notasDoc.length === 1 ? notasDoc[0] : null),
-    fecha: l.fecha ?? (unaSola ? fechaEmision : null),
-  }));
+  return lineas.map((l) => {
+    const deEmision = !l.fecha && unaSola && !!fechaEmision;
+    return {
+      ...l,
+      placa: l.placa ?? (placasDoc.length === 1 ? placasDoc[0] : null),
+      nota_despacho: l.nota_despacho ?? (unaSola && notasDoc.length === 1 ? notasDoc[0] : null),
+      fecha: l.fecha ?? (unaSola ? fechaEmision : null),
+      fecha_origen: l.fecha ? (l.fecha_origen ?? "linea") : deEmision ? "emision" : null,
+    };
+  });
 }
 
 // ── 2) La decisión por línea ─────────────────────────────────────────────────
@@ -265,6 +286,10 @@ export type PlanLinea = {
     tipo_combustible: string;
     unidad: string;
   } | null;
+  /** De dónde salió la fecha con que se juzgó la línea (lo escribe la conciliación). */
+  fecha_origen?: OrigenFecha | null;
+  /** La fecha se corrió de la emisión al despacho: cuál era la emisión y cuántos días. */
+  desfase?: { emision: string; dias: number } | null;
 };
 
 /**
@@ -306,7 +331,12 @@ function casar(
     if (porNota.length >= 1) return { fila: porNota[0], por: "nota" };
   }
   if (!l.placa || !l.fecha) return null;
-  const cerca = libres.filter((f) => normPlaca(f.placa) === l.placa && difDias(f.fecha, l.fecha!) <= DIAS_VENTANA);
+  // Alrededor de la fecha de la línea Y de la alterna (la emisión, si la fecha se corrió al despacho):
+  // la unión nunca encuentra MENOS que antes. Un candidato de más termina en «ambigua» → revisar;
+  // uno de menos termina en «registrar» → la misma carga dos veces.
+  const cerca = libres.filter((f) => normPlaca(f.placa) === l.placa && (
+    difDias(f.fecha, l.fecha!) <= DIAS_VENTANA || (!!l.fecha_alterna && difDias(f.fecha, l.fecha_alterna) <= DIAS_VENTANA)
+  ));
   // (2) Misma placa, fecha ±1 día, mismo importe.
   if (l.total != null) {
     const m = cerca.filter((f) => f.total != null && Math.abs(Number(f.total) - l.total!) < TOLERANCIA_MONTO);

@@ -15,6 +15,10 @@
 //        { accion: "confirmar_linea", factura_id, n, placa?, fecha? } → una persona confirma
 //             una línea que quedó en «Revisar» (con la placa/fecha que ella eligió).
 //        { accion: "descartar", factura_id }  → no es una factura de combustible.
+//        { accion: "desfase" } → por cuenta: cuántos días después del despacho sale la factura
+//             (medido o configurado, lib/combustible/desfase-factura.ts) y qué cargas registradas
+//             con la fecha de EMISIÓN movería.
+//        { accion: "mover_a_despacho", ids, dias } → una persona vio esa lista y las mueve.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -24,7 +28,9 @@ import { cargarCuentas } from "@/lib/combustible/saldo-datos";
 import {
   sincronizarFacturas, conciliarFacturaGuardada, registrarHistoricas, LECTURA_HISTORIAL,
   prepagoComoDeuda, marcarPrepagoPagadas, reintentarErrores,
+  desfaseDeCuenta, cargasPorMoverDeCuenta, moverCargasADespacho,
 } from "@/lib/combustible/facturas-correo";
+import { resumenMover } from "@/lib/combustible/desfase-factura";
 
 export const maxDuration = 300;
 
@@ -73,6 +79,27 @@ export async function POST(req: NextRequest) {
       if (sinMigracion) return NextResponse.json({ ok: false, error: "Falta correr supabase/combustible-03-saldo-cuenta-y-facturas.sql" });
       const desdeId = Number(body.desde_id);
       return NextResponse.json(await reintentarErrores(sb, cuentas, hoyLima(), { desdeId: Number.isFinite(desdeId) ? desdeId : 0 }));
+    }
+    if (body.accion === "desfase") {
+      const { cuentas, sinMigracion } = await cargarCuentas(sb);
+      if (sinMigracion) return NextResponse.json({ ok: false, error: "Falta correr supabase/combustible-03-saldo-cuenta-y-facturas.sql" });
+      const out = [];
+      for (const c of cuentas.filter((x) => x.activo)) {
+        // Fresco: es lo que la persona va a mirar antes de decidir.
+        const decision = await desfaseDeCuenta(sb, c, { fresco: true });
+        const lista = await cargasPorMoverDeCuenta(sb, c, decision.dias);
+        out.push({ cuenta_id: c.id, nombre: c.nombre, decision, por_mover: resumenMover(lista), lista: lista.slice(0, 300) });
+      }
+      return NextResponse.json({ ok: true, cuentas: out });
+    }
+    if (body.accion === "mover_a_despacho") {
+      const ids: number[] = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];
+      const dias = Number(body.dias);
+      if (!ids.length || !Number.isInteger(dias) || dias <= 0) {
+        return NextResponse.json({ ok: false, error: "No se indicó qué cargas mover ni con qué desfase." }, { status: 400 });
+      }
+      const { cuentas } = await cargarCuentas(sb);
+      return NextResponse.json(await moverCargasADespacho(sb, cuentas, ids, dias));
     }
     if (body.accion === "deuda_prepago") return NextResponse.json(await prepagoComoDeuda(sb));
     if (body.accion === "marcar_prepago") {
