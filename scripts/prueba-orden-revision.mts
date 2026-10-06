@@ -114,6 +114,10 @@ console.log("\n5. pendientesCerca");
   chk("otra placa no", !cerca.some((r) => r.id === "3"));
   chk("sin placa o sin fecha en la línea, nada (no se adivina)", pendientesCerca({ placa: null, fecha: "2026-09-22" }, pend).length === 0 && pendientesCerca({ placa: "CWQ400", fecha: null }, pend).length === 0);
   chk("una recarga sin fecha no se ofrece", !pendientesCerca({ placa: "CWQ400", fecha: "2026-09-22" }, pend, 30).some((r) => r.id === "4"));
+  // La línea que la factura YA registró usa ±1 día: la ventana con que el Radar reconoce la carga de una
+  // factura para fusionarla (buscarCargaRegistrada). Más allá, el Radar no la propondría.
+  const deFactura = [{ id: "a", placa: "CWQ400", fecha: "2026-09-21", monto: 47.31 }, { id: "b", placa: "CWQ400", fecha: "2026-09-20", monto: 47.31 }];
+  chk("con ±1 día: la del día anterior sí, la de dos días antes no", pendientesCerca({ placa: "CWQ400", fecha: "2026-09-22" }, deFactura, 1).map((r) => r.id).join() === "a");
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

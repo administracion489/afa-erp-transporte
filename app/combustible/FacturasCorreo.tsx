@@ -556,6 +556,18 @@ export default function FacturasCorreo() {
                             {/* Antes de registrar desde la factura: ¿el voucher de esta carga sigue por revisar en
                                 el Radar? Si es así, lo que corresponde es registrarlo allá (trae el odómetro y la
                                 fecha del despacho) y dejar que esta línea se cruce sola. Se dice; no se bloquea. */}
+                            {/* Y si la factura YA la registró sola: su voucher, si sigue por revisar en el Radar, se
+                                FUSIONA allá con esta carga (±1 día: la ventana con que el Radar la reconoce). */}
+                            {p?.codigo === "registrar" && pendRadar && (() => {
+                              const cerca = pendientesCerca({ placa: l.placa, fecha: despacho }, pendRadar, 1);
+                              return cerca.length > 0 ? (
+                                <div className="basis-full text-[#1d4ed8]">
+                                  🔗 En el Radar hay {cerca.length} recarga(s) de {l.placa} por revisar del {cerca.slice(0, 3).map((r) => F(r.fecha)).join(", ")}:
+                                  si una es esta carga, allá aparece para <b>fusionarla</b> con esta (toma la fecha del despacho y el odómetro). No la registres aparte.{" "}
+                                  <Link href="/radar-ia?tab=combustible" className="font-bold hover:underline">Ir a Radar IA →</Link>
+                                </div>
+                              ) : null;
+                            })()}
                             {confirmable && pendRadar && (() => {
                               const placa = e.placa || l.placa;
                               const cerca = pendientesCerca({ placa, fecha: e.fecha || despacho }, pendRadar);
