@@ -272,13 +272,32 @@ export async function veredictosDelDia(
   }
   if (!enFoco.length) return { veredictos, reservas, cfg, previos };
 
-  const { data: parRows } = await admin
-    .from("paradas")
-    .select("id, reserva_id, orden, nombre, lat, lng, hora_estimada, estado, hora_llegada")
-    .in("reserva_id", enFoco.map((r) => r.id))
-    .order("orden");
+  // Paginado y con orden TOTAL: desde que los servicios de hoy nacen con paraderos de madrugada
+  // (app/api/paradas/materializar), los de la ventana pueden pasar de las 1000 filas que corta
+  // PostgREST, y cortar por `orden` se comía los ÚLTIMOS paraderos de cada servicio — el objetivo
+  // de uno en ruta desaparecía y se leía como «ya pasó todos los paraderos».
+  const parRows: any[] = [];
+  const idsFoco = enFoco.map((r) => r.id);
+  for (let i = 0; i < idsFoco.length; i += 200) {
+    const lote: any[] = [];
+    let fallo = false;
+    for (let desde = 0; ; desde += 1000) {
+      const { data, error } = await admin
+        .from("paradas")
+        .select("id, reserva_id, orden, nombre, lat, lng, hora_estimada, estado, hora_llegada")
+        .in("reserva_id", idsFoco.slice(i, i + 200))
+        .order("reserva_id").order("orden").order("id")
+        .range(desde, desde + 999);
+      if (error) { fallo = true; break; }
+      lote.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+    // Un lote a medias dejaría a un servicio con su itinerario recortado, que es justo el error de
+    // arriba: se descarta entero (como antes, sin paraderos el veredicto no inventa un objetivo).
+    if (!fallo) parRows.push(...lote);
+  }
   const paradasPor = new Map<number, ParadaPuntual[]>();
-  for (const p of (parRows || []) as any[]) {
+  for (const p of parRows) {
     const l = paradasPor.get(p.reserva_id) || [];
     l.push(p); paradasPor.set(p.reserva_id, l);
   }

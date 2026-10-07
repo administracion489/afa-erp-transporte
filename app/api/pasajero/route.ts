@@ -13,6 +13,7 @@ import { createClient } from "@supabase/supabase-js";
 import { firmarTokenPasajero, pidDeToken, loginBloqueado, registrarIntentoFallido, limpiarIntentos } from "@/lib/pasajero-auth";
 import { firmarUrl } from "@/lib/storage-firmado";
 import { ofrecibleEnAutoseleccion } from "@/lib/reservas-autoseleccion";
+import { ESTADOS_SIN_INICIAR } from "@/lib/paradas-materializar";
 import { CUERPO_SESION_INVALIDA } from "@/lib/pasajero-sesion";
 import { randomUUID } from "node:crypto";
 
@@ -543,7 +544,9 @@ export async function POST(req: NextRequest) {
           // (incluye nocturnos que cruzan medianoche; mismo criterio que la acción "ruta").
           // El en_curso va acotado a hoy/ayer: si no, un servicio que el conductor nunca
           // cerró seguiría ofreciéndose como elegible para siempre.
-          .or(`and(fecha_servicio.eq.${hoy},estado.in.(pendiente,programada,confirmada)),and(estado.eq.en_curso,fecha_servicio.gte.${ayerDe(hoy)})`);
+          // Los estados «sin iniciar» son los MISMOS con que el cron de la madrugada
+          // (app/api/paradas/materializar) crea los paraderos de los servicios de hoy.
+          .or(`and(fecha_servicio.eq.${hoy},estado.in.(${ESTADOS_SIN_INICIAR.join(",")})),and(estado.eq.en_curso,fecha_servicio.gte.${ayerDe(hoy)})`);
         if (rErr) return NextResponse.json({ error: rErr.message }, { status: 500 });
         if (!reservasRaw?.length) return NextResponse.json({ reservas: [] });
 

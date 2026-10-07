@@ -741,11 +741,17 @@ export default function SeguimientoPage() {
   }, []);
 
   useEffect(()=>{
+    // UNA recarga por ráfaga, no una por evento: crear los paraderos de un servicio son N filas y N
+    // eventos (más el UPDATE de origen/destino que dispara cada una), y el cron de la madrugada
+    // (app/api/paradas/materializar) crea los de todos los servicios de hoy. Cada `cargar()` son
+    // siete consultas; recargar cientos de veces seguidas congelaría la torre.
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const programar = () => { if (t) clearTimeout(t); t = setTimeout(() => { t = null; cargar(); }, 800); };
     const ch = supabase.channel("seguimiento-reservas")
-      .on("postgres_changes",{event:"*",schema:"public",table:"reservas"},()=>cargar())
-      .on("postgres_changes",{event:"*",schema:"public",table:"paradas"},()=>cargar())
+      .on("postgres_changes",{event:"*",schema:"public",table:"reservas"},programar)
+      .on("postgres_changes",{event:"*",schema:"public",table:"paradas"},programar)
       .subscribe();
-    return ()=>{ supabase.removeChannel(ch); };
+    return ()=>{ if (t) clearTimeout(t); supabase.removeChannel(ch); };
   },[cargar]);
 
   const serviciosBase: ServicioView[] = useMemo(()=>{

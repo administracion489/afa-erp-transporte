@@ -51,6 +51,10 @@
     {
       "path": "/api/combustible/facturas",
       "schedule": "40 */3 * * *"
+    },
+    {
+      "path": "/api/paradas/materializar",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

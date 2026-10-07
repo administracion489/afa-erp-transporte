@@ -15,6 +15,7 @@
 
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
+import { ordenarTramo } from "@/lib/paradas-materializar";
 
 export type ParadaHuella = { orden?: number | null; nombre?: string | null; lat?: number | null; lng?: number | null };
 
@@ -39,15 +40,10 @@ export function huellaRuta(lista: ParadaHuella[] | undefined | null): string {
 /** Un paradero tal como viaja dentro de `paradas_json` (snapshot, no la tabla `paradas`). */
 export type ParadaJson = ParadaHuella & { tipo?: string | null };
 
-/** Ordena un `paradas_json` como lo hace resolverParadasJSON: inicio → intermedia → destino. */
-export function ordenarTramo<T extends { tipo?: string | null }>(arr: T[]): T[] {
-  return [
-    ...arr.filter((p) => p.tipo === "inicio"),
-    ...arr.filter((p) => p.tipo === "intermedia"),
-    ...arr.filter((p) => p.tipo === "destino"),
-    ...arr.filter((p) => !["inicio", "intermedia", "destino"].includes(String(p.tipo))),
-  ];
-}
+/** Ordena un `paradas_json` como lo hace resolverParadasJSON: inicio → intermedia → destino.
+ *  Vive en lib/paradas-materializar.ts (el motor que convierte una semilla en filas): un solo
+ *  orden para el que compara rutas y el que crea los paraderos. */
+export { ordenarTramo };
 
 /**
  * Los dos ejes por los que un operador reconoce "los demas dias de esta misma ruta":

@@ -85,9 +85,10 @@ export async function insertarServicioNuevo<T extends Record<string, unknown>>(
 /**
  * ¿Se puede ofrecer este servicio en «Elige tu ruta de hoy»? Solo si tiene paraderos.
  *
- * Al nacer marcados, los servicios que todavía no tienen filas en `paradas` (un programa fijo las
- * materializa la primera vez que alguien abre el servicio; el despachador y el CRM no las crean)
- * entrarían a la lista como «0 paraderos»: el pasajero los elige y no tiene paradero que
+ * Al nacer marcados, los servicios que todavía no tienen filas en `paradas` (las crea el cron de
+ * la madrugada para los de HOY —app/api/paradas/materializar—, o quien abra el servicio; el
+ * despachador y el CRM no tienen semilla y no las crean) entrarían a la lista como «0 paraderos»:
+ * el pasajero los elige y no tiene paradero que
  * confirmar. Peor: la lista agrupa por `hora|coordenadas`, y dos servicios sin paraderos a la misma
  * hora (RUTA A 17:00 y RUTA B 17:00) compartirían la clave `"17:00|"` y saldría uno solo — el
  * pasajero podía terminar viendo la ruta equivocada. Sin paraderos no hay nada que elegir.
