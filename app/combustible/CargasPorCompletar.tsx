@@ -25,6 +25,7 @@ import {
 } from "@/lib/combustible/completar-carga";
 import { configCombustible } from "@/lib/combustible-tipos";
 import { pendientesCerca, type RecargaPorRevisar } from "@/lib/combustible/orden-revision";
+import { BotonesFactura } from "@/components/combustible/FacturaDelCorreo";
 
 const S = (n: number | null | undefined) =>
   n == null ? "—" : `S/ ${Number(n).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -285,6 +286,11 @@ export default function CargasPorCompletar({ facturas, pendRadar, onConteo }: {
                     </div>
                   )}
                   <div className="text-gray-600">{x.por_que_fecha}</div>
+                  {/* La factura que la registró, a un clic: la fecha y el importe se confirman contra el papel. */}
+                  {(() => {
+                    const fac = x.origen ? (facturas ?? []).find((f) => Number(f.id) === x.origen!.factura_id) : null;
+                    return fac ? <BotonesFactura factura={fac as Parameters<typeof BotonesFactura>[0]["factura"]} /> : null;
+                  })()}
                   <div className="flex flex-wrap items-end gap-2">
                     {x.falta_km ? (
                       <label className="flex flex-col gap-0.5">

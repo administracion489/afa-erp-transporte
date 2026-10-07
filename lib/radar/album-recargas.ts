@@ -361,6 +361,15 @@ export function patronComprobante(comprobante: unknown): string | null {
   return digitos.length >= 4 ? `%${digitos}%` : null;
 }
 
+/** Qué se hace con una recarga que la factura ya registró. La escribe `buscarCargaRegistrada` y la pone
+ *  al día `detalleVigente`: una sola frase para los dos. */
+export const INSTRUCCION_FUSIONAR_FACTURA =
+  "Es el mismo despacho — FUSIÓNALA con esa carga: toma de este voucher la fecha del despacho, el odómetro " +
+  "y el conductor, y los galones y el importe siguen siendo los de la factura. Si de verdad fue otra carga, regístrala a mano.";
+
+/** Lo que decía antes de que existiera la fusión (de 38ae35c a facdc51): mandaba a DESCARTAR la fila. */
+export const INSTRUCCION_VIEJA_DESCARTAR = "Es el mismo despacho — descarta esta fila; si de verdad fue otra carga, regístrala a mano.";
+
 /**
  * ¿La recarga ya está en /combustible? Del criterio más fuerte al más débil:
  *
@@ -411,11 +420,23 @@ export function buscarCargaRegistrada(
       detalle:
         `Esta carga ya entró DESDE LA FACTURA del correo (registro #${deFactura.id}, ${soles(deFactura.total as number)}, ` +
         `fechado el ${deFactura.fecha!.slice(0, 10)}): la factura sale con su fecha de emisión, que puede ser un día después ` +
-        `del voucher. Es el mismo despacho — FUSIÓNALA con esa carga: toma de este voucher la fecha del despacho, el odómetro ` +
-        `y el conductor, y los galones y el importe siguen siendo los de la factura. Si de verdad fue otra carga, regístrala a mano.`,
+        `del voucher. ${INSTRUCCION_FUSIONAR_FACTURA}`,
     };
   }
   return null;
+}
+
+/**
+ * El detalle de una anomalía GUARDADA, con su instrucción al día. `posible_duplicado` se escribe UNA vez,
+ * al procesar el mensaje, y las recargas que el Radar procesó antes de que existiera la fusión siguen por
+ * revisar diciendo «descarta esta fila» justo encima del recuadro que propone fusionarla: descartarla
+ * tira el voucher —la fecha del despacho, el odómetro, las fotos—, que es lo que la fusión existe para
+ * no perder. Se reemplaza SOLO esa frase, que escribió este mismo módulo y se conoce entera; el resto
+ * del texto (qué carga, cuánto, de qué fecha) es el dato de cuando se procesó y no se toca.
+ */
+export function detalleVigente(codigo: string, detalle: string | null | undefined): string {
+  const texto = String(detalle ?? "");
+  return codigo === "posible_duplicado" ? texto.replace(INSTRUCCION_VIEJA_DESCARTAR, INSTRUCCION_FUSIONAR_FACTURA) : texto;
 }
 
 function detalleAlbum(

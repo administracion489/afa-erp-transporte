@@ -32,6 +32,8 @@ import { proponerTanqueLleno } from "@/lib/radar/tanque-lleno";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 import ReprocesoFallidos from "./ReprocesoFallidos";
 import FusionFactura, { aCargaDeFactura, comprobarEnCombustible } from "./FusionFactura";
+import FacturaDelCorreo from "@/components/combustible/FacturaDelCorreo";
+import { detalleVigente } from "@/lib/radar/album-recargas";
 import { planDeFusion, preguntaAntesDeRegistrar, claveVehiculo } from "@/lib/radar/fusion-factura";
 import { FILTRO_ESPERAN_RADAR, avisoOrdenEnRadar, facturasQueEsperan } from "@/lib/combustible/orden-revision";
 import { CODIGOS_CONEXION, credencialesRechazadas, workerVivo as latidoVivo, type SaludRadar } from "@/lib/radar/salud";
@@ -993,7 +995,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                             className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${
                               ANOMALIA_ES_ARREGLO(a.codigo) ? "bg-[#E8F5E9] text-[#2E7D32]" : "bg-[#FDECEC] text-[#EB5757]"
                             }`}
-                            title={a.detalle}
+                            title={detalleVigente(a.codigo, a.detalle)}
                           >
                             {etiquetaAnomalia(a)}
                           </span>
@@ -1054,7 +1056,8 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                                   <span className={`font-black ${ANOMALIA_ES_ARREGLO(a.codigo) ? "text-[#2E7D32]" : "text-[#B07A0F]"}`}>
                                     {ANOMALIA_ES_ARREGLO(a.codigo) ? "✓ " : "• "}{etiquetaAnomalia(a)}:
                                   </span>{" "}
-                                  {a.detalle}
+                                  {/* Las filas procesadas antes de la fusión mandaban a DESCARTAR: se dice lo de hoy. */}
+                                  {detalleVigente(a.codigo, a.detalle)}
                                 </li>
                               ))}
                             </ul>
@@ -1184,10 +1187,15 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           placaDe={(clave) => placaEnFlota(vehiculosGuia, clave)}
                         />
                         {facturaEspera.get(c.id) && (
-                          <p className="mt-3 text-xs font-semibold text-[#1d4ed8]">
-                            📧 La factura {facturaEspera.get(c.id)} ya llegó y espera esta revisión: al registrarla (o fusionarla) se cruza sola en la
-                            próxima lectura del correo.
-                          </p>
+                          <div className="mt-3 space-y-1.5">
+                            <p className="text-xs font-semibold text-[#1d4ed8]">
+                              📧 La factura {facturaEspera.get(c.id)} ya llegó y espera esta revisión: al registrarla (o fusionarla) se cruza sola en la
+                              próxima lectura del correo.
+                            </p>
+                            {/* Su línea y su documento: el importe y la cantidad que dice el papel, para corregir
+                                lo que la IA leyó mal ANTES de registrar. */}
+                            <FacturaDelCorreo busqueda={{ recarga: c.id }} />
+                          </div>
                         )}
 
                         <div className="flex flex-wrap items-center gap-3 mt-3">
