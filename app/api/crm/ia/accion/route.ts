@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
+import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -96,7 +97,10 @@ export async function POST(req: NextRequest) {
         precio_cliente: p.precio_cliente ?? null,
         observaciones: `Creada por Agente IA (CRM)${p.observaciones ? ` — ${p.observaciones}` : ""}`,
       };
-      const { data, error } = await sb.from("reservas").insert(fila).select("id").single();
+      // Nace con «Permitir autoselección» (lib/reservas-autoseleccion.ts).
+      const { data, error } = await insertarServicioNuevo(
+        (f) => sb.from("reservas").insert(f).select("id").single(), fila,
+      );
       if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
       resultadoTipo = "reservas";
       resultadoId = data!.id;

@@ -103,6 +103,8 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
   // ── Config de ruta ────────────────────────────────────────────────────────
   const [mostrarConfig,         setMostrarConfig]         = useState(false);
   const [rutaNombre,            setRutaNombre]            = useState("");
+  // Lo último que dijo la base: el nombre solo se guarda al salir del campo si CAMBIÓ.
+  const rutaNombreGuardado = useRef("");
   const [permiteAutoseleccion,  setPermiteAutoseleccion]  = useState(false);
   const [permiteCambioParadero, setPermiteCambioParadero] = useState(false);
   const [configGuardando,       setConfigGuardando]       = useState(false);
@@ -123,6 +125,7 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
       if (!ok) return;
       if (data.config) {
         setRutaNombre(data.config.ruta_nombre || "");
+        rutaNombreGuardado.current = data.config.ruta_nombre || "";
         setPermiteAutoseleccion(!!data.config.permite_autoseleccion);
         setPermiteCambioParadero(!!data.config.permite_cambio_paradero);
       }
@@ -300,7 +303,21 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
   async function guardarConfig(patch: { ruta_nombre?: string; permite_autoseleccion?: boolean; permite_cambio_paradero?: boolean }) {
     setConfigGuardando(true);
     try {
-      await callApi({ action: "actualizar_config", cliente_id: clienteId, reserva_id: reservaId, ...patch });
+      // Un interruptor que se ve apagado y no se guardó deja el servicio ofreciéndose en la app del
+      // pasajero sin que nadie lo sepa: se dice, y la pantalla vuelve a lo que dice la base. Cubre
+      // también la red caída o una respuesta que no es JSON (callApi lanza en esos casos).
+      let motivo: string | null = null;
+      try {
+        const { ok, data } = await callApi({ action: "actualizar_config", cliente_id: clienteId, reserva_id: reservaId, ...patch });
+        if (!ok) motivo = data?.error ?? "error desconocido";
+        else if (patch.ruta_nombre !== undefined) rutaNombreGuardado.current = patch.ruta_nombre;
+      } catch (e: unknown) {
+        motivo = e instanceof Error ? e.message : "sin conexión";
+      }
+      if (motivo) {
+        alert(`No se guardó la configuración: ${motivo}`);
+        await cargar();
+      }
     } finally {
       setConfigGuardando(false);
     }
@@ -459,7 +476,11 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
                 <input
                   value={rutaNombre}
                   onChange={e => setRutaNombre(e.target.value)}
-                  onBlur={e => guardarConfig({ ruta_nombre: e.target.value.trim() })}
+                  onBlur={e => {
+                    const v = e.target.value.trim();
+                    if (v === rutaNombreGuardado.current.trim()) return;
+                    void guardarConfig({ ruta_nombre: v });
+                  }}
                   placeholder="Ej. RUTA A CHORRILLOS - CALLAO"
                   style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: `1px solid ${C.navyTint2}`, fontSize: 12, fontFamily: C.fontSans, outline: "none", boxSizing: "border-box", background: C.surface }}
                 />
