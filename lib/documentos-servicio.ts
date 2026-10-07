@@ -12,8 +12,9 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 // Fuente de verdad del abordaje en TODO el ERP: pasajeros_parada (estado + estado_abordaje,
-// sincronizadas por trigger en BD). boarding_log se agregó después y está sin backfill, así
-// que NO sirve para contar embarcados de servicios históricos. Misma lógica que conductor/lector.
+// sincronizadas por trigger en BD). boarding_log se agregó después, está sin backfill y no
+// recibió ninguna fila hasta el 06-10-2026 (lib/boarding-log.ts), así que NO sirve para contar
+// embarcados de servicios históricos. Misma lógica que conductor/lector.
 export const esAbordado = (
   pp?: { estado?: string | null; estado_abordaje?: string | null } | null,
 ): boolean =>
@@ -254,7 +255,7 @@ function reporteServicioBody(d: DatosServicioDoc): string {
   const ps = d.paradas || [];
   const bl = d.boarding || [];   // boarding_log: solo para método/hora si existe
   const pp = d.pasajeros || [];
-  // El abordaje se determina por pasajeros_parada.estado_abordaje (boarding_log está vacía).
+  // El abordaje se determina por pasajeros_parada.estado_abordaje (boarding_log, sin backfill).
   const totalEsp = pp.length, totalEmb = pp.filter(esAbordado).length;
   const pct = totalEsp > 0 ? Math.min(100, Math.round((totalEmb / totalEsp) * 100)) : 0;
   const noEmb = pp.filter(p => !esAbordado(p));
@@ -388,7 +389,7 @@ function manifiestoMtcBody(d: DatosServicioDoc): string {
 
   let filas = "";
   pp.forEach((x, idx) => {
-    // Abordaje por estado_abordaje (boarding_log está vacía); hora desde hora_abordaje.
+    // Abordaje por estado_abordaje (boarding_log, sin backfill); hora desde hora_abordaje.
     const embarco    = esAbordado(x);
     const blRow      = bl.find(b => b.pasajero_id === x.pasajero_id);
     const horaAb     = x.hora_abordaje || blRow?.timestamp || null;

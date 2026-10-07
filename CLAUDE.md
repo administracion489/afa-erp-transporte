@@ -1202,6 +1202,7 @@ Matriz: `npx tsx scripts/prueba-identidad-voucher.mts`.
 ### Conventions
 
 - `@/*` in `tsconfig.json` resolves to the repo root, so `@/lib/supabase` ≡ `lib/supabase.ts`.
+- **supabase-js no lanza: devuelve `{ error }`.** Un `try/catch` alrededor de un insert no atrapa una columna inexistente, un FK ni un CHECK: hay que LEER el error. `boarding_log` no recibió ninguna fila hasta el 06-10-2026 por eso — los dos escritores mandaban `created_at` (la columna es `"timestamp"`) y el error se perdía. Se escribe solo por `lib/boarding-log.ts` (matriz: `npx tsx scripts/prueba-boarding-log.mts`).
 - Almost every page is a Client Component (`"use client"`) that fetches Supabase directly. Server Components are rare; don't refactor a page to a Server Component without rechecking the auth/permission flow above.
 - Date handling assumes Peru (UTC-5). Don't rely on `new Date().toISOString()` for "today" — see `getFechaLocal()` in `app/conductor/page.tsx` and the Lima offset math in `app/api/notificaciones/recordatorio/route.ts`.
 - CSV/Excel parsing for paradas/manifiesto goes through `lib/paradas-csv.ts`, `lib/manifiesto-csv.ts`, and `lib/manifiesto-unificado-csv.ts` (uses `xlsx`).

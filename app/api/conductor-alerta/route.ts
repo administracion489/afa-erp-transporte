@@ -12,6 +12,7 @@ import { createClient } from "@supabase/supabase-js";
 import {
   sesionDeRequest, sesionLegada, CUERPO_SESION_INVALIDA, reservaEsDelConductor, paradasDelConductor,
 } from "@/lib/conductor-auth";
+import { registrarAbordaje } from "@/lib/boarding-log";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -19,18 +20,10 @@ const supabaseAdmin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
-// Bitácora de abordaje real (tabla boarding_log). Best-effort: si falla, no debe
-// bloquear el embarque. La lee el reporte del portal cliente por reserva_id.
-async function logBoarding(pasajero_id: number, parada_id: number, reserva_id: number | null) {
-  try {
-    await supabaseAdmin.from("boarding_log").insert({
-      pasajero_id, parada_id, reserva_id: reserva_id ?? null,
-      metodo: "qr_conductor", created_at: new Date().toISOString(),
-    });
-  } catch (e: any) {
-    console.warn("[conductor-alerta] boarding_log no registrado:", e?.message);
-  }
-}
+// Bitácora de abordaje (tabla boarding_log, lib/boarding-log.ts). Best-effort: si falla, no
+// bloquea el embarque. La lee el reporte del portal cliente por reserva_id (columna «Método»).
+const logBoarding = (pasajero_id: number, parada_id: number, reserva_id: number | null) =>
+  registrarAbordaje(supabaseAdmin, pasajero_id, parada_id, reserva_id, "conductor-alerta");
 
 export async function POST(req: NextRequest) {
   try {

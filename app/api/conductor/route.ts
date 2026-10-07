@@ -32,6 +32,7 @@ import {
 } from "@/lib/conductor-auth";
 import { CATEGORIAS_CAJA_CHICA, enviarARevision, hoyLima } from "@/lib/finanzas/caja-chica";
 import { redondear } from "@/lib/finanzas/dinero";
+import { registrarAbordaje } from "@/lib/boarding-log";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -53,23 +54,10 @@ function normalizarQr(raw: string): string {
   return s; // no parece UUID: usar tal cual (al menos trim + minúsculas)
 }
 
-// Bitácora de abordaje real (tabla boarding_log). Best-effort: si falla, no debe
-// bloquear el embarque. La lee el reporte del portal cliente por reserva_id.
-async function logBoarding(
-  pasajero_id: number | null,
-  parada_id: number | null,
-  reserva_id: number | null,
-) {
-  if (!pasajero_id || !parada_id) return;
-  try {
-    await admin.from("boarding_log").insert({
-      pasajero_id, parada_id, reserva_id: reserva_id ?? null,
-      metodo: "qr_conductor", created_at: new Date().toISOString(),
-    });
-  } catch (e: any) {
-    console.warn("[api/conductor] boarding_log no registrado:", e?.message);
-  }
-}
+// Bitácora de abordaje (tabla boarding_log, lib/boarding-log.ts). Best-effort: si falla, no
+// bloquea el embarque. La lee el reporte del portal cliente por reserva_id (columna «Método»).
+const logBoarding = (pasajero_id: number | null, parada_id: number | null, reserva_id: number | null) =>
+  registrarAbordaje(admin, pasajero_id, parada_id, reserva_id, "api/conductor");
 
 // Push "embarque confirmado" al pasajero escaneado. Corre en after() (post-respuesta):
 // jamás retrasa ni rompe el embarque. Dedupe por (reserva, 'embarcado', pasajero) en

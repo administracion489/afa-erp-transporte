@@ -4695,7 +4695,7 @@ export default function ClientePortal() {
             {(() => {
               const pp  = ppList[reservaSel.id] || [];
               // El abordaje se cuenta desde pasajeros_parada.estado_abordaje (boarding_log
-              // está vacía). Clamp defensivo por si hubiera datos inconsistentes.
+              // está sin backfill). Clamp defensivo por si hubiera datos inconsistentes.
               const abordados = pp.filter(esAbordado).length;
               const pct = pp.length > 0 ? Math.min(100, Math.round((abordados / pp.length) * 100)) : 0;
               const noAsistieron = Math.max(0, pp.length - abordados);
