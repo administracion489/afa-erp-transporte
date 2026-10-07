@@ -1378,35 +1378,79 @@ export default function CotizacionesPage(){
       alert(`Sin cambios — no quedó ningún servicio que propagar.\n${lineasFuera.join("\n")}`);return;
     }
 
-    // Actualizar paradas_json en reservas (batch)
-    for(let i=0;i<idsIda.length;i+=BATCH)await supabase.from("reservas").update({paradas_json:paradasIda}).in("id",idsIda.slice(i,i+BATCH));
-    for(let i=0;i<idsRet.length;i+=BATCH)await supabase.from("reservas").update({paradas_json:tramoRet}).in("id",idsRet.slice(i,i+BATCH));
-
-    // Borrar paradas existentes (batch)
-    for(let i=0;i<idsAfectar.length;i+=BATCH)await supabase.from("paradas").delete().in("reserva_id",idsAfectar.slice(i,i+BATCH));
-
-    // Insertar nuevas paradas (batch de 200 filas)
-    const filasIda=idsIda.flatMap(rid=>paradasIda.map((p,i)=>({reserva_id:rid,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));
-    const filasRet=idsRet.flatMap(rid=>tramoRet.map((p,i)=>({reserva_id:rid,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));
-    const todasFilas=[...filasIda,...filasRet];
-    for(let i=0;i<todasFilas.length;i+=200)await supabase.from("paradas").insert(todasFilas.slice(i,i+200));
-
     // Sincronizar origen/destino y hora de salida (copias denormalizadas que se muestran en
     // programación/seguimiento). La hora del servicio ES la del primer paradero de su tramo:
     // al reeditar los horarios en la cotización, reservas.hora_servicio se quedaba con la hora
     // vieja y Programación seguía mostrándola aunque los paraderos ya tuvieran la nueva.
     const syncOD=async(ids:number[],tramo:typeof paradasIda)=>{
-      if(ids.length===0||tramo.length===0)return;
+      if(ids.length===0||tramo.length===0)return null;
       const od:Record<string,any>={origen:tramo[0].nombre,destino:tramo[tramo.length-1].nombre};
       const horaSalida=(tramo[0].hora||"").trim();
       if(horaSalida)od.hora_servicio=horaSalida;  // sin hora en el primer paradero no se pisa la actual
-      for(let i=0;i<ids.length;i+=BATCH)await supabase.from("reservas").update(od).in("id",ids.slice(i,i+BATCH));
+      const{error}=await supabase.from("reservas").update(od).in("id",ids);
+      return error?error.message:null;
     };
-    await syncOD(idsIda,paradasIda);
-    await syncOD(idsRet,tramoRet);
+    const filaDe=(rid:number,p:any,i:number)=>({reserva_id:rid,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"});
+    const esRet=new Set(idsRet);
+
+    // Lote por lote, y cada lote COMPLETO (semilla → borrar → insertar → origen/destino) antes del
+    // siguiente. Borrar todo y después insertar todo dejaba segundos entre las dos cosas, y en ese
+    // hueco el cron de la madrugada (o quien abriera el servicio) veía el servicio sin paraderos y
+    // los creaba: al terminar, el itinerario quedaba DOBLE. Y justo antes de borrar se vuelve a
+    // mirar si alguien eligió su paradero mientras tanto: ese servicio se salta.
+    const LOTE_ESCRITURA=50;
+    let hechos=0,conPasajerosTarde=0;const fallos:string[]=[];
+    for(let i=0;i<idsAfectar.length;i+=LOTE_ESCRITURA){
+      let lote=idsAfectar.slice(i,i+LOTE_ESCRITURA);
+      const tomados=new Set<number>();
+      try{
+        const paradaDe=new Map<number,number>();
+        for(let d=0;;d+=1000){
+          const{data,error}=await supabase.from("paradas").select("id,reserva_id").in("reserva_id",lote).order("id").range(d,d+999);
+          if(error)throw new Error(error.message);
+          (data||[]).forEach((p:any)=>paradaDe.set(Number(p.id),Number(p.reserva_id)));
+          if(!data||data.length<1000)break;
+        }
+        const pids=[...paradaDe.keys()];
+        for(let j=0;j<pids.length;j+=200){
+          for(let d=0;;d+=1000){
+            const{data,error}=await supabase.from("pasajeros_parada").select("id,parada_id").in("parada_id",pids.slice(j,j+200)).order("id").range(d,d+999);
+            if(error)throw new Error(error.message);
+            (data||[]).forEach((pp:any)=>{const rid=paradaDe.get(Number(pp.parada_id));if(rid!=null)tomados.add(rid);});
+            if(!data||data.length<1000)break;
+          }
+        }
+      }catch(e:any){
+        fallos.push(`No se pudo volver a comprobar los pasajeros (${e?.message||"error"}); se detuvo en el servicio ${i+1} de ${idsAfectar.length}.`);
+        break;
+      }
+      conPasajerosTarde+=tomados.size;
+      lote=lote.filter(id=>!tomados.has(id));
+      if(lote.length===0)continue;
+      const loteIda=lote.filter(id=>!esRet.has(id)),loteRet=lote.filter(id=>esRet.has(id));
+
+      const eSemIda=loteIda.length?(await supabase.from("reservas").update({paradas_json:paradasIda}).in("id",loteIda)).error:null;
+      const eSemRet=loteRet.length?(await supabase.from("reservas").update({paradas_json:tramoRet}).in("id",loteRet)).error:null;
+      if(eSemIda||eSemRet){fallos.push(`${lote.length} servicio(s) sin tocar: no se pudo guardar su semilla (${(eSemIda||eSemRet)!.message}).`);continue;}
+
+      const{error:eDel}=await supabase.from("paradas").delete().in("reserva_id",lote);
+      if(eDel){fallos.push(`${lote.length} servicio(s) con sus paraderos de antes: no se pudieron borrar (${eDel.message}).`);continue;}
+
+      const filas=lote.flatMap(rid=>(esRet.has(rid)?tramoRet:paradasIda).map((p,k)=>filaDe(rid,p,k)));
+      // UNA sentencia por lote: o entran todas las filas del lote o ninguna (nunca medio itinerario).
+      const{error:eIns}=filas.length?await supabase.from("paradas").insert(filas):{error:null};
+      if(eIns){fallos.push(`${lote.length} servicio(s) quedaron SIN paraderos: se borraron y no se pudieron crear (${eIns.message}). Su semilla ya es la nueva: se vuelven a crear al abrirlos (y los de hoy que se ofrecen al pasajero, solos en unos minutos).`);continue;}
+
+      const eOD=(await syncOD(loteIda,paradasIda))||(await syncOD(loteRet,tramoRet));
+      if(eOD)fallos.push(`${lote.length} servicio(s) con paraderos nuevos pero sin actualizar origen/destino/hora (${eOD}).`);
+      hechos+=lote.length;
+    }
 
     setModalPropagar(null);setPropagando(false);
-    alert(`✅ Propagación completada\n• ${idsAfectar.length} servicio${idsAfectar.length!==1?"s":""} actualizado${idsAfectar.length!==1?"s":""}${lineasFuera.length?`\n${lineasFuera.join("\n")}`:""}`);
+    const lineas=[...lineasFuera];
+    if(conPasajerosTarde>0)lineas.push(`• ${conPasajerosTarde} sin tocar: alguien eligió su paradero mientras se propagaba`);
+    fallos.forEach(f=>lineas.push(`⚠ ${f}`));
+    alert(`${fallos.length?"⚠ Propagación con problemas":"✅ Propagación completada"}\n• ${hechos} servicio${hechos!==1?"s":""} actualizado${hechos!==1?"s":""}${lineas.length?`\n${lineas.join("\n")}`:""}`);
   };
   const eliminarCotizacion=async(pass:string):Promise<string|null>=>{
     if(!modalEliminar)return null;

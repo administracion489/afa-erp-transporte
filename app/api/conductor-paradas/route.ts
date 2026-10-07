@@ -48,6 +48,20 @@ export async function GET(req: NextRequest) {
     .order("orden");
 
   if (existentes && existentes.length > 0) {
+    // Las que ya existen pueden venir sin coordenadas: el cron de la madrugada
+    // (app/api/paradas/materializar) crea los paraderos de hoy antes de que nadie pulse
+    // «Iniciar», y si Google no respondió a esa hora quedaron sin ellas. Antes este endpoint
+    // creaba y geocodificaba en el mismo paso; ahora completa lo que falte. Sin coordenadas no
+    // hay geocerca, ni llegada, ni paradero de origen para el semáforo.
+    for (const parada of existentes) {
+      if (!parada.lat || !parada.lng) {
+        const coords = await geocodificar(parada.nombre);
+        if (coords) {
+          await supabaseAdmin.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+          parada.lat = coords.lat; parada.lng = coords.lng;
+        }
+      }
+    }
     return NextResponse.json({ paradas: existentes, creadas: false });
   }
 

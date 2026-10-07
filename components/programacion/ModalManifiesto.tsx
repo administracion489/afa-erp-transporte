@@ -9,6 +9,7 @@ import { paginarFilas } from "@/lib/huella";
 // La huella de ruta ya no se define aquí: la comparten esta pantalla y el renombrado en lote
 // de la torre de control. Dos definiciones de "la misma ruta" daban dos lotes distintos.
 import { huellaRuta } from "@/lib/ruta-equivalente";
+import { fechaLima } from "@/lib/alertas-horario";
 import { normalizarEmpresa } from "@/lib/empresa";
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
 // Quién es una persona de un cliente se contesta en UN solo sitio: su fila de `pasajeros`
@@ -1291,7 +1292,9 @@ export default function ModalManifiesto(props: Props) {
       let reservasFallidas = 0;
       let reservasOmitidas = 0;   // descartadas por tener una ruta distinta
       let reservasSinParadas = 0; // aún sin `paradas` materializadas (no se abrieron)
+      let reservasConElegidos = 0; // de hoy (o antes) y con pasajeros que ya eligieron su paradero
       let reservasCopiadas = 0;
+      const hoy = fechaLima(Date.now());
 
       for (const rd of reservasDestino) {
         // Load paradas for this target reserva ordered by orden (con nombre/coords)
@@ -1318,6 +1321,14 @@ export default function ModalManifiesto(props: Props) {
 
         // Delete existing pasajeros_parada for this reserva to avoid duplicates
         const destParadaIds = paradasDest.map((p: any) => p.id);
+        // Un servicio de HOY ya tiene sus paraderos desde la madrugada (app/api/paradas/materializar),
+        // así que puede tener pasajeros que lo eligieron en «Elige tu ruta de hoy». Reemplazar su
+        // manifiesto los dejaría sin asiento sin que nadie se entere: ese día no se toca.
+        if (String(rd.fecha_servicio).slice(0, 10) <= hoy) {
+          const { data: ya, error: eYa } = await supabase.from("pasajeros_parada")
+            .select("id").in("parada_id", destParadaIds).limit(1);
+          if (eYa || (ya || []).length > 0) { reservasConElegidos++; continue; }
+        }
         await supabase.from("pasajeros_parada").delete().in("parada_id", destParadaIds);
 
         // Build rows mapping by orden
@@ -1341,9 +1352,10 @@ export default function ModalManifiesto(props: Props) {
         }
       }
 
-      if (reservasCopiadas === 0 && (reservasOmitidas > 0 || reservasSinParadas > 0 || reservasFallidas > 0)) {
+      if (reservasCopiadas === 0 && (reservasOmitidas > 0 || reservasSinParadas > 0 || reservasFallidas > 0 || reservasConElegidos > 0)) {
         const motivos = [
           reservasSinParadas ? `${reservasSinParadas} sin paraderos aún (ábrelos primero para generar sus paradas)` : "",
+          reservasConElegidos ? `${reservasConElegidos} de hoy con pasajeros ya asignados (no se reemplazan)` : "",
           reservasOmitidas ? `${reservasOmitidas} con paraderos distintos o en otro orden` : "",
           reservasFallidas ? `${reservasFallidas} con error de inserción` : "",
         ].filter(Boolean).join(" · ");
@@ -1353,6 +1365,7 @@ export default function ModalManifiesto(props: Props) {
           reservasFallidas ? `${reservasFallidas} con error` : "",
           reservasOmitidas ? `${reservasOmitidas} omitido(s) por ruta distinta` : "",
           reservasSinParadas ? `${reservasSinParadas} sin paraderos aún` : "",
+          reservasConElegidos ? `${reservasConElegidos} de hoy con pasajeros ya asignados (no se reemplazan)` : "",
         ].filter(Boolean).join(" · ");
         const msg = `Copiado a ${reservasCopiadas} servicio(s) · ${totalInsertados} asignaciones${extras ? ` · ${extras}` : ""} ✓`;
         setMensaje({ tipo: "ok", texto: msg });
@@ -2096,7 +2109,8 @@ export default function ModalManifiesto(props: Props) {
                   </div>
                 </div>
                 <p className="text-xs text-gray-400">
-                  Se reemplazarán las asignaciones existentes en cada día destino. Solo se copia a
+                  Se reemplazarán las asignaciones existentes en cada día destino, salvo en los servicios de
+                  hoy que ya tienen pasajeros (pueden haber elegido su paradero en la app). Solo se copia a
                   servicios con la <span className="font-semibold text-gray-500">misma ruta</span>:
                   mismos paraderos (nombre y coordenadas) y en el mismo orden. Los días con una ruta
                   distinta o invertida se omiten.

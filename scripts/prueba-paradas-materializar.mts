@@ -6,15 +6,16 @@
 //      mismo que los originales copiados literal (sortLeg, la cascada de app/api/conductor-paradas
 //      y de resolverParadasJSON, y el `.map` de las filas).
 //   2. El cron solo crea paraderos para un servicio de hoy que «Elige tu ruta de hoy» ofrecería, que
-//      no los tiene y que tiene semilla — y NUNCA para un retorno que lleva la lista de la ida.
+//      no los tiene y que tiene semilla con nombres — y a un retorno de cotización SOLO la lista de
+//      retorno de su cotización: nunca la de la ida, ni la actual ni una vieja.
 //   3. Tras una carrera solo se borran filas NUESTRAS.
 //   4. Propagar no toca servicios con actividad o pasajeros, ni retornos sin lista, ni idas sin lista;
 //      y con las dos listas puestas hace exactamente lo que hacía antes.
 
 import {
   ordenarTramo, semillaDeServicio, filasDeSemilla, tieneParaderosDeRetorno, firmaNombres,
-  retornoHeredaIda, esCandidatoDeHoy, ESTADOS_SIN_INICIAR, planDeServicio, MOTIVO_MATERIALIZAR,
-  sobrantesTrasCarrera, faltanCoordenadas, avisoRetornoSinLista, AVISO_GENERADOR_SIN_RETORNO,
+  estadoRetorno, semillaConNombres, esCandidatoDeHoy, ESTADOS_SIN_INICIAR, planDeServicio, MOTIVO_MATERIALIZAR,
+  sobrantesTrasCarrera, faltanCoordenadas, avisoRetorno, AVISO_GENERADOR_SIN_RETORNO,
   planDePropagacion, MOTIVO_NO_PROPAGA,
   type ServicioSemilla, type CotizacionSemilla, type CodigoMaterializar, type MotivoNoPropaga,
 } from "../lib/paradas-materializar";
@@ -171,29 +172,45 @@ console.log("\n4. faltanCoordenadas ≡ `!parada.lat || !parada.lng` del «Inici
   b.fin();
 }
 
-console.log("\n5. Un retorno NO se deduce de la ida (retornoHeredaIda)");
+console.log("\n5. Un retorno NO se deduce de la ida (estadoRetorno)");
 {
   const cotSinRet: CotizacionSemilla = { paradas_json: IDA, paradas_retorno_json: [] };
   const cotConRet: CotizacionSemilla = { paradas_json: IDA, paradas_retorno_json: RET };
-  const ret = (paradas_json: unknown) => ({ paradas_json, direccion_servicio: "retorno" });
-  ok(!retornoHeredaIda({ paradas_json: null, direccion_servicio: "ida" }, cotSinRet), "una IDA nunca «hereda»");
-  ok(!retornoHeredaIda(ret(null), null), "sin cotización no se afirma nada (lo decide planDeServicio)");
-  ok(!retornoHeredaIda(ret(null), cotConRet), "con lista de retorno en la cotización, no hereda");
-  ok(!retornoHeredaIda(ret(null), { paradas_json: [], paradas_retorno_json: [] }), "sin lista de ida tampoco hay nada que heredar");
-  ok(retornoHeredaIda(ret(null), cotSinRet), "sin semilla propia caería a la ida → hereda");
-  ok(retornoHeredaIda(ret([]), cotSinRet), "semilla vacía → hereda");
-  ok(retornoHeredaIda(ret(IDA), cotSinRet), "la semilla que escribe el generador (la ida tal cual) → hereda");
-  ok(retornoHeredaIda(ret(IDA.map((p) => ({ ...p, nombre: `  ${p.nombre.toUpperCase()}  ` }))), cotSinRet),
-    "mismos nombres con otras mayúsculas o espacios → hereda");
-  ok(retornoHeredaIda(ret([IDA[2], IDA[0], IDA[1]]), cotSinRet), "misma lista en otro orden de array (mismo orden por tipo) → hereda");
-  ok(retornoHeredaIda(ret(IDA.map((p) => ({ ...p, hora: "17:00", lat: null }))), cotSinRet),
-    "con otras horas o sin coordenadas sigue siendo la lista de la ida (la firma es por nombre)");
-  ok(!retornoHeredaIda(ret(RET), cotSinRet), "una lista propia distinta (alguien la escribió para el retorno) → vale");
-  ok(!retornoHeredaIda(ret([IDA[0], IDA[1]]), cotSinRet), "una lista propia más corta es otra lista → vale");
+  const ret = (paradas_json: unknown, cotizacion_id: number | null = 240) => ({ paradas_json, direccion_servicio: "retorno", cotizacion_id });
+  ok(estadoRetorno({ paradas_json: null, direccion_servicio: "ida", cotizacion_id: 240 }, cotSinRet) === "no_aplica", "una IDA no se juzga");
+  ok(estadoRetorno(ret(RET, null), null) === "no_aplica", "un retorno suelto (sin cotización) usa su semilla");
+  ok(estadoRetorno(ret(null), null) === "sin_cotizacion", "con cotización que no se pudo leer: no se afirma nada");
+  ok(estadoRetorno(ret(null), cotSinRet) === "sin_lista", "cotización sin lista de retorno → no");
+  ok(estadoRetorno(ret(IDA), cotSinRet) === "sin_lista", "la semilla que escribe el generador (la ida tal cual) → no");
+  ok(estadoRetorno(ret(RET), cotSinRet) === "sin_lista", "ni con una semilla distinta: sin lista de retorno no hay contra qué probarla");
+  ok(estadoRetorno(ret(null), cotConRet) === "ok", "sin semilla propia la cascada toma la lista de retorno → sí");
+  ok(estadoRetorno(ret([]), cotConRet) === "ok", "semilla vacía → sí");
+  ok(estadoRetorno(ret(RET), cotConRet) === "ok", "semilla = la lista de retorno → sí");
+  ok(estadoRetorno(ret(RET.map((p) => ({ ...p, nombre: `  ${p.nombre.toUpperCase()}  `, hora: "17:30", lat: null }))), cotConRet) === "ok",
+    "mismos nombres con otras mayúsculas, espacios, horas o sin coordenadas → sí (la firma es por nombre)");
+  ok(estadoRetorno(ret([RET[2], RET[0], RET[1]]), cotConRet) === "ok", "misma lista en otro orden de array (mismo orden por tipo) → sí");
+  // Revisión: los dos caminos por los que un retorno guarda la ida aunque la ida «actual» sea otra.
+  const idaEditada = [IDA[0], P("Óvalo Santa Anita", "intermedia", { hora: "05:30" }), IDA[2]];
+  ok(estadoRetorno(ret(IDA), { paradas_json: idaEditada, paradas_retorno_json: [] }) === "sin_lista",
+    "caso A: la ida se editó y se propagó, el retorno quedó con la ida VIEJA → no");
+  ok(estadoRetorno(ret(IDA), cotConRet) === "semilla_distinta",
+    "caso B: la cotización ganó su lista de retorno pero no se propagó (el retorno guarda la ida) → no");
+  ok(estadoRetorno(ret([RET[0], RET[2]]), cotConRet) === "semilla_distinta", "una versión vieja de la lista de retorno → no (falta propagar)");
   ok(tieneParaderosDeRetorno(cotConRet) && !tieneParaderosDeRetorno(cotSinRet) && !tieneParaderosDeRetorno(null)
     && !tieneParaderosDeRetorno({ paradas_retorno_json: "x" }), "tieneParaderosDeRetorno exige una lista no vacía");
   ok(firmaNombres(IDA as any) === "ate › puente santa anita › planta lurín", "la firma va por nombre, en el orden del tramo");
   ok(firmaNombres(null) === "", "firma de nada = vacía");
+}
+
+console.log("\n5b. Semillas sin nombre (el formato del Cotizador)");
+{
+  const cotizador = [{ id: "a", tipo: "inicio", texto: "Ate", place: { lat: -12, lng: -76.9 } }, { id: "b", tipo: "destino", texto: "Lurín", place: null }];
+  ok(!semillaConNombres(cotizador as any), "los puntos del Cotizador (texto/place, sin nombre) no sirven");
+  ok(!semillaConNombres([P("Ate", "inicio"), { tipo: "destino", nombre: "  " }] as any), "un solo paradero sin nombre basta para no servir");
+  ok(semillaConNombres(IDA as any) && semillaConNombres([]), "una semilla con todos sus nombres sirve");
+  const plan = planDeServicio({ id: 9, fecha_servicio: HOY, estado: "programada", permite_autoseleccion: true, cliente_id: 3,
+    cotizacion_id: 300, direccion_servicio: "ida", paradas_json: cotizador }, HOY, false, { paradas_json: cotizador });
+  ok(plan.codigo === "semilla_sin_nombres" && plan.filas.length === 0, "el cron no crea paraderos sin nombre para ofrecerlos al pasajero");
 }
 
 console.log("\n6. esCandidatoDeHoy = la rama «hoy» de «Elige tu ruta de hoy»");
@@ -233,11 +250,13 @@ console.log("\n7. planDeServicio · el caso del 06-10");
   // El retorno de una cotización SIN lista de retorno (lo que prohibió el dueño).
   const cotSinRet: CotizacionSemilla = { id: 250, paradas_json: IDA, paradas_retorno_json: [] };
   const her = planDeServicio({ ...base, id: 5, cotizacion_id: 250, direccion_servicio: "retorno", paradas_json: IDA }, HOY, false, cotSinRet);
-  ok(her.codigo === "retorno_hereda_ida" && her.filas.length === 0, "retorno con la lista de la ida → NO se materializa");
-  ok(planDeServicio({ ...base, id: 5, cotizacion_id: 250, direccion_servicio: "retorno", paradas_json: null }, HOY, false, cotSinRet).codigo === "retorno_hereda_ida",
+  ok(her.codigo === "retorno_sin_lista" && her.filas.length === 0, "retorno con la lista de la ida → NO se materializa");
+  ok(planDeServicio({ ...base, id: 5, cotizacion_id: 250, direccion_servicio: "retorno", paradas_json: null }, HOY, false, cotSinRet).codigo === "retorno_sin_lista",
     "ni aunque no tenga semilla (la cascada caería a la ida)");
-  ok(planDeServicio({ ...base, id: 5, cotizacion_id: 250, direccion_servicio: "retorno", paradas_json: RET }, HOY, false, cotSinRet).codigo === "crear",
-    "un retorno con una lista PROPIA distinta sí se materializa: alguien la escribió para él");
+  ok(planDeServicio({ ...base, id: 5, cotizacion_id: 250, direccion_servicio: "retorno", paradas_json: RET }, HOY, false, cotSinRet).codigo === "retorno_sin_lista",
+    "ni con otra lista guardada: sin lista de retorno en la cotización no hay con qué probarla");
+  ok(planDeServicio({ ...base, id: 5, direccion_servicio: "retorno", paradas_json: IDA }, HOY, false, cot).codigo === "retorno_semilla_distinta",
+    "la cotización tiene lista de retorno pero este retorno guarda la ida (no se propagó) → NO");
   ok(planDeServicio({ ...base, id: 5, cotizacion_id: 250, direccion_servicio: "retorno", paradas_json: IDA }, HOY, false, undefined).codigo === "retorno_sin_cotizacion",
     "sin poder leer la cotización no se materializa un retorno");
   ok(planDeServicio({ ...base, id: 5, cotizacion_id: null, direccion_servicio: "retorno", paradas_json: RET }, HOY, false, undefined).codigo === "crear",
@@ -251,7 +270,7 @@ console.log("\n7. planDeServicio · el caso del 06-10");
 
 console.log("\n8. planDeServicio · invariantes por barrido");
 {
-  const semillas: unknown[] = [null, [], IDA, RET, [IDA[0], IDA[1]], "x"];
+  const semillas: unknown[] = [null, [], IDA, RET, [IDA[0], IDA[1]], "x", [{ tipo: "inicio", texto: "Ate" }]];
   const cots: (CotizacionSemilla | null | undefined)[] = [
     undefined, null,
     { paradas_json: IDA, paradas_retorno_json: RET },
@@ -262,10 +281,10 @@ console.log("\n8. planDeServicio · invariantes por barrido");
   ];
   const vistos = new Set<CodigoMaterializar>();
   const bFilas = barrido("filas > 0 ⟺ codigo = crear");
-  const bCrear = barrido("crear ⟹ candidato ∧ sin paraderos ∧ semilla ∧ no hereda la ida");
+  const bCrear = barrido("crear ⟹ candidato ∧ sin paraderos ∧ semilla con nombres ∧ retorno probado");
   const bConPar = barrido("un servicio con paraderos NUNCA se materializa");
   const bIgual = barrido("lo que crea el cron ≡ lo que crearía el «Iniciar» (original literal)");
-  const bIda = barrido("ningún retorno de una cotización sin lista de retorno se crea con la lista de la ida");
+  const bIda = barrido("un retorno de cotización solo se crea con la lista de RETORNO de su cotización");
   const bSinCot = barrido("retorno con cotización ilegible ⟹ retorno_sin_cotizacion (si es candidato y sin paraderos)");
   for (const fecha of [HOY, "2026-10-07"]) for (const estado of ["programada", "en_curso"])
   for (const permite of [true, false]) for (const cliente of [3, null])
@@ -278,14 +297,16 @@ console.log("\n8. planDeServicio · invariantes por barrido");
     vistos.add(plan.codigo);
     const det = () => JSON.stringify({ fecha, estado, permite, cliente, dir, cotizacion_id, pj: Array.isArray(pj) ? pj.length : pj, cot: cot && Object.values(cot).map((v) => Array.isArray(v) ? v.length : v), conParaderos, codigo: plan.codigo });
     bFilas.check((plan.filas.length > 0) === (plan.codigo === "crear"), det);
-    const heredaria = retornoHeredaIda(r, cotPasada);
+    const estRet = estadoRetorno(r, cotPasada);
     const semilla = semillaDeServicio(r, cotPasada).semilla;
-    bCrear.check(plan.codigo !== "crear" || (esCandidatoDeHoy(r, HOY) && !conParaderos && semilla.length > 0 && !heredaria), det);
+    bCrear.check(plan.codigo !== "crear" || (esCandidatoDeHoy(r, HOY) && !conParaderos && semilla.length > 0
+      && semillaConNombres(semilla) && (estRet === "ok" || estRet === "no_aplica")), det);
     bConPar.check(!conParaderos || plan.codigo === "no_candidato" || plan.codigo === "ya_tiene_paraderos", det);
     if (plan.codigo === "crear") bIgual.check(igual(plan.filas, filasViejas(77, cascadaVieja(r, cotPasada ?? null))), det);
     const c = cotPasada;
-    if (plan.codigo === "crear" && dir === "retorno" && c && !tieneParaderosDeRetorno(c) && Array.isArray(c.paradas_json) && c.paradas_json.length) {
-      bIda.check(firmaNombres(plan.filas.map((f) => ({ nombre: f.nombre }))) !== firmaNombres(c.paradas_json as any), det);
+    if (plan.codigo === "crear" && dir === "retorno" && cotizacion_id != null) {
+      bIda.check(!!c && tieneParaderosDeRetorno(c)
+        && firmaNombres(plan.filas.map((f) => ({ nombre: f.nombre }))) === firmaNombres(c.paradas_retorno_json as any), det);
     }
     if (dir === "retorno" && cotizacion_id != null && !cot && esCandidatoDeHoy(r, HOY) && !conParaderos) {
       bSinCot.check(plan.codigo === "retorno_sin_cotizacion", det);
@@ -375,11 +396,26 @@ console.log("\n10. planDePropagacion · qué rehace Propagar");
 
 console.log("\n11. Lo que se le dice al operador");
 {
-  const a = avisoRetornoSinLista("COT-0240");
-  ok(a.chip === "SIN PARADEROS DE RETORNO", "el chip nombra lo que falta");
-  ok(a.detalle.includes("COT-0240") && /no los deduce de la ida/.test(a.detalle), "el detalle nombra la cotización y la regla");
+  const a = avisoRetorno("sin_lista", "COT-0240")!;
+  ok(a.chip === "SIN PARADEROS DE RETORNO", "sin lista: el chip nombra lo que falta");
+  ok(a.detalle.includes("COT-0240") && /no deduce los paraderos de un retorno/.test(a.detalle), "el detalle nombra la cotización y la regla");
   ok(/Propagar/.test(a.detalle), "y dice dónde se arregla");
-  ok(avisoRetornoSinLista(null).detalle.startsWith("Su cotización"), "sin número no imprime «null»");
+  ok(avisoRetorno("sin_lista", null)!.detalle.startsWith("Su cotización"), "sin número no imprime «null»");
+  const d = avisoRetorno("semilla_distinta", "COT-0240")!;
+  ok(d.chip === "PARADEROS DE RETORNO SIN PROPAGAR" && /Propagar/.test(d.detalle), "semilla distinta: su propio chip, y el arreglo es propagar");
+  ok(avisoRetorno("ok", "x") === null && avisoRetorno("no_aplica", "x") === null && avisoRetorno("sin_cotizacion", "x") === null,
+    "sin nada que decir (o sin poder juzgar) no hay chip");
+  // El chip y el cron dicen lo mismo: hay chip ⟺ el cron se niega por el retorno.
+  const b = barrido("chip ⟺ el cron no materializa por el retorno (sin lista o semilla distinta)");
+  for (const pj of [null, [], IDA, RET, [RET[0]]]) for (const cr of [[], RET, null] as unknown[]) {
+    const r: ServicioSemilla = { id: 1, fecha_servicio: HOY, estado: "programada", permite_autoseleccion: true, cliente_id: 3,
+      cotizacion_id: 240, direccion_servicio: "retorno", paradas_json: pj };
+    const cotX = { paradas_json: IDA, paradas_retorno_json: cr };
+    const chip = avisoRetorno(estadoRetorno(r, cotX), null) !== null;
+    const codigo = planDeServicio(r, HOY, false, cotX).codigo;
+    b.check(chip === (codigo === "retorno_sin_lista" || codigo === "retorno_semilla_distinta"), () => JSON.stringify({ pj, cr, codigo }));
+  }
+  b.fin();
   ok(/no los deduce de la ida/.test(AVISO_GENERADOR_SIN_RETORNO) && /Elige tu ruta de hoy/.test(AVISO_GENERADOR_SIN_RETORNO),
     "el generador dice la MISMA regla y su consecuencia");
 }

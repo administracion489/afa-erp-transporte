@@ -46,7 +46,7 @@ import { armarDias, proponerEtiquetas, type TramoEtq } from "@/lib/liquidacion-e
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { paginarFilas } from "@/lib/huella";
 import { avisosAutoseleccion, unirContexto, cotizacionesAJuzgar, textoAvisoAutoseleccion, vigenteParaAutoseleccion, COLS_AUTOSELECCION, type FilaAutoseleccion } from "@/lib/reservas-autoseleccion-aviso";
-import { semillaDeServicio, filasDeSemilla, tieneParaderosDeRetorno, avisoRetornoSinLista } from "@/lib/paradas-materializar";
+import { semillaDeServicio, filasDeSemilla, estadoRetorno, avisoRetorno } from "@/lib/paradas-materializar";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
 function useGoogleMapsLoaded() {
@@ -581,8 +581,11 @@ export default function ReservasPage() {
   const [verTodo,      setVerTodo]      = useState(false);                // true = histórico completo (fuera de la ventana)
   const [limiteVista,  setLimiteVista]  = useState(100);                  // filas renderizadas ("Cargar más")
   const [cotMapNum,    setCotMapNum]    = useState<Record<number, string>>({}); // cotizacion_id → numero_cotizacion
-  // Cotizaciones SIN lista de paraderos de retorno: sus retornos no se materializan solos (lib/paradas-materializar.ts).
-  const [cotSinRetorno, setCotSinRetorno] = useState<Set<number>>(new Set());
+  // Lista de paraderos de RETORNO de cada cotización (null = no tiene) y la semilla de los retornos
+  // vigentes: con las dos se juzga, con el MISMO estadoRetorno del cron (lib/paradas-materializar.ts),
+  // si un retorno se le va a ofrecer al pasajero o no.
+  const [cotRetorno,   setCotRetorno]   = useState<Record<number, unknown[] | null>>({});
+  const [semillasRet,  setSemillasRet]  = useState<Record<number, unknown>>({});
   const [cotMapAsunto, setCotMapAsunto] = useState<Record<number, string>>({}); // cotizacion_id → asunto
   const [ocupacionMap, setOcupacionMap] = useState<Record<number, Ocupacion>>({});
   // reserva_id → asientos CONTRATADOS (y de dónde salieron). Es el denominador que el
@@ -863,22 +866,39 @@ export default function ReservasPage() {
   // y se trocea la consulta `.in()` para no reventar el largo de la URL.
   const cargarNumerosCotizacion = async (rows: Reserva[]) => {
     const cotIds = [...new Set(rows.map(r => r.cotizacion_id).filter((v): v is number => v != null))];
-    if (cotIds.length === 0) { setCotMapNum({}); setCotMapAsunto({}); setCotSinRetorno(new Set()); return; }
+    if (cotIds.length === 0) { setCotMapNum({}); setCotMapAsunto({}); setCotRetorno({}); setSemillasRet({}); return; }
     const m: Record<number, string> = {};
     const ma: Record<number, string> = {};
-    const sinRet = new Set<number>();
+    const ret: Record<number, unknown[] | null> = {};
     for (let i = 0; i < cotIds.length; i += 300) {
       const chunk = cotIds.slice(i, i + 300);
       const { data } = await supabase.from("cotizaciones").select("id,numero_cotizacion,asunto,paradas_retorno_json").in("id", chunk);
       (data || []).forEach((c: any) => {
         if (c.numero_cotizacion != null) m[c.id] = String(c.numero_cotizacion);
         if (c.asunto) ma[c.id] = String(c.asunto);
-        if (!tieneParaderosDeRetorno(c)) sinRet.add(Number(c.id));
+        ret[Number(c.id)] = Array.isArray(c.paradas_retorno_json) && c.paradas_retorno_json.length ? c.paradas_retorno_json : null;
       });
     }
     setCotMapNum(m);
     setCotMapAsunto(ma);
-    setCotSinRetorno(sinRet);
+    setCotRetorno(ret);
+    cargarSemillasRetorno(rows, ret);
+  };
+
+  /** La semilla (`paradas_json`, que no viaja en la lista) de los retornos vigentes cuya cotización SÍ
+   *  tiene lista de retorno: es lo único que dice si guardan esa lista o una vieja / la de la ida.
+   *  Después de pintar y best-effort: sin ella simplemente no sale el chip. */
+  const cargarSemillasRetorno = async (rows: Reserva[], ret: Record<number, unknown[] | null>) => {
+    const hoyL = fechaLima();
+    const ids = rows.filter(r => r.direccion_servicio === "retorno" && r.cotizacion_id != null
+      && ret[Number(r.cotizacion_id)] && vigenteParaAutoseleccion(r, hoyL)).map(r => r.id);
+    const acc: Record<number, unknown> = {};
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await supabase.from("reservas").select("id,paradas_json").in("id", ids.slice(i, i + 200));
+      if (error) return;
+      (data || []).forEach((x: any) => { acc[Number(x.id)] = x.paradas_json; });
+    }
+    setSemillasRet(acc);
   };
 
   /** Evidencia FUERA de la ventana para el aviso de autoselección: solo las filas ENCENDIDAS de los
@@ -2898,7 +2918,11 @@ export default function ReservasPage() {
       if (error) errores.push(`reserva_vinculada_id: ${error.message}`);
     }
 
-    // 4. las reservas mismas
+    // 4. las reservas mismas. Antes, otra pasada sobre `paradas`: el cron de la madrugada
+    //    (app/api/paradas/materializar) crea los paraderos de los servicios de hoy que no los
+    //    tienen, y pudo recrearlos durante los pasos de arriba; sin esto el borrado de la reserva
+    //    fallaría por la clave foránea. Esas filas recién creadas no tienen pasajeros.
+    await borrarPor("paradas", "reserva_id", ids);
     for (let i = 0; i < ids.length; i += CHUNK) {
       const { error } = await supabase.from("reservas").delete().in("id", ids.slice(i, i + CHUNK));
       if (error) errores.push(`reservas: ${error.message}`);
@@ -3488,12 +3512,18 @@ export default function ReservasPage() {
       >⚠ {t.chip}</button>
     );
   };
-  /** Retorno vigente cuya cotización no tiene lista de retorno: el cron no le crea paraderos (no se
-   *  deducen de la ida) y sus pasajeros no lo ven en «Elige tu ruta de hoy». */
+  /** Retorno vigente que el cron NO materializa porque no puede probar que sus paraderos sean de
+   *  retorno (sin lista en la cotización, o guarda otra lista): sus pasajeros no lo verán en «Elige
+   *  tu ruta de hoy». Mismo juicio que el cron (estadoRetorno). */
   const chipSinRetorno = (r: Reserva) => {
     if (r.direccion_servicio !== "retorno" || r.cotizacion_id == null) return null;
-    if (!cotSinRetorno.has(Number(r.cotizacion_id)) || !vigenteParaAutoseleccion(r, hoy)) return null;
-    const t = avisoRetornoSinLista(cotMapNum[Number(r.cotizacion_id)] ?? null);
+    const cid = Number(r.cotizacion_id);
+    if (!(cid in cotRetorno) || !vigenteParaAutoseleccion(r, hoy)) return null;
+    const estado = estadoRetorno(
+      { direccion_servicio: r.direccion_servicio, cotizacion_id: cid, paradas_json: semillasRet[r.id] ?? r.paradas_json },
+      { paradas_retorno_json: cotRetorno[cid] });
+    const t = avisoRetorno(estado, cotMapNum[cid] ?? null);
+    if (!t) return null;
     return (
       <span title={t.detalle} onClick={e => e.stopPropagation()}
         className="text-[9px] font-black px-1.5 py-0.5 rounded-full cursor-help"

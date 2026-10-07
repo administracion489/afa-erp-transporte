@@ -166,16 +166,20 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "Y si el servicio ya estaba sincronizado, te seguirá preguntando **“¿Re-notificar a los pasajeros?”**: se les avisó la hora anterior.",
       },
       {
-        pregunta: "Un retorno sale con el aviso “SIN PARADEROS DE RETORNO”. ¿Qué hago?",
+        pregunta: "Un retorno sale con el aviso “SIN PARADEROS DE RETORNO” o “PARADEROS DE RETORNO SIN PROPAGAR”. ¿Qué hago?",
         respuesta:
-          "Significa que **su cotización no tiene lista de paraderos de retorno**, solo la de ida.\n\n" +
+          "El primero significa que **su cotización no tiene lista de paraderos de retorno**, solo la de ida. El segundo, " +
+          "que la cotización sí la tiene pero **este servicio guarda otra lista** (casi siempre la de la ida, o una versión " +
+          "vieja): se cargó la lista de retorno y no se propagó.\n\n" +
           "Los paraderos de los servicios de **hoy** se crean solos de madrugada, para que los pasajeros los vean en " +
           "*Elige tu ruta de hoy* sin que nadie tenga que abrirlos. Pero el retorno **no se deduce de la ida**: el paradero " +
           "de vuelta suele estar al otro lado de la pista (Puente Santa Anita hacia el norte no es el mismo que hacia el sur) " +
-          "y tiene su propia hora. Así que a ese retorno el ERP no le crea paraderos, y **sus pasajeros no lo verán** en la lista.\n\n" +
-          "**Cómo se arregla**: en **Cotizaciones**, edita la cotización, carga los paraderos de retorno con sus horas, guarda y " +
-          "acepta *Propagar a futuros*. Desde ahí los retornos nuevos y los ya programados llevan su lista.\n\n" +
-          "Mientras tanto, si alguien abre ese servicio o el conductor lo inicia, recibe los paraderos de la ida, como siempre.",
+          "y tiene su propia hora. Así que a ese retorno el ERP no le crea paraderos hasta comprobar que son los de retorno, y " +
+          "mientras tanto **sus pasajeros no lo verán** en la lista.\n\n" +
+          "**Cómo se arregla** (los dos): en **Cotizaciones**, edita la cotización, revisa que tenga los paraderos de retorno con " +
+          "sus horas, guarda y acepta *Propagar a futuros* (no *Solo esta cotización*). Desde ahí los retornos nuevos y los ya " +
+          "programados llevan su lista.\n\n" +
+          "Mientras tanto, si alguien abre ese servicio o el conductor lo inicia, recibe la lista que tenga guardada, como siempre.",
       },
       {
         pregunta: "¿Qué es el bloque violeta “Cierre administrativo”?",

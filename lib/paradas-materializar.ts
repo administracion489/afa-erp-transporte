@@ -23,10 +23,12 @@
 // generador le pone al retorno la lista de la ida (sin invertir, con las horas de la mañana).
 // «No se puede suponer que el retorno y la ida comparten paraderos y ubicaciones: Puente Santa
 // Anita hacia el norte es otro paradero que hacia el sur, hay un muro entre las pistas. Lo mismo
-// con la hora.» Esos retornos NO se materializan solos (`retorno_hereda_ida`): no hay paraderos
-// válidos que ofrecer, y creados así el semáforo mediría la salida desde el primer paradero de
-// la ida con el bus esperando en la planta. Se arregla dándole a la cotización su lista de
-// retorno y propagándola.
+// con la hora.» Por eso el cron solo materializa un retorno de cotización cuando PRUEBA que sus
+// paraderos son de retorno (`estadoRetorno`): la cotización tiene lista de retorno y la semilla
+// del servicio es esa lista (o está vacía y la cascada la toma). Si no, no hay paraderos válidos
+// que ofrecer, y creados así el semáforo mediría la salida desde el primer paradero de la ida con
+// el bus esperando en la planta. Se arregla dándole a la cotización su lista de retorno y
+// propagándola.
 // ──────────────────────────────────────────────────────────────────────────────
 
 /** Un paradero tal como viaja en `paradas_json` (cotización o reserva). */
@@ -138,22 +140,33 @@ export function firmaNombres(arr: ParadaSemilla[] | null | undefined): string {
   return ordenarTramo(arr ?? []).map((p) => claveNombre(p.nombre)).join(" › ");
 }
 
+export type EstadoRetorno =
+  | "no_aplica"          // no es un retorno de una cotización
+  | "sin_cotizacion"     // es de una cotización que no se pudo leer
+  | "sin_lista"          // su cotización no tiene paraderos de retorno
+  | "semilla_distinta"   // guarda una lista que NO es la de retorno de su cotización
+  | "ok";                // sin semilla propia (toma la de retorno) o con la misma lista de retorno
+
 /**
- * ¿Este retorno lleva, en vez de paraderos propios, la lista de la ida? Solo se afirma con
- * evidencia: es un retorno, su cotización NO tiene lista de retorno, y su semilla es la de la ida
- * (vacía —la cascada caería a la ida— o con los mismos nombres en el mismo orden). Una semilla
- * propia distinta es una lista que alguien escribió para ese retorno, y vale.
+ * ¿Los paraderos que recibiría este retorno son DE RETORNO? Solo se afirma con evidencia: su
+ * cotización tiene lista de retorno, y la semilla propia está vacía (la cascada toma esa lista) o
+ * lleva los mismos nombres en el mismo orden. Cualquier otra semilla no se puede distinguir de la
+ * ida: el generador le pone la de la ida cuando la cotización no tiene lista de retorno, y esa
+ * semilla se queda ahí aunque después la ida se edite (Propagar no toca esos retornos) o la
+ * cotización gane su lista sin propagarla. Comparar contra la ida ACTUAL no la reconoce en ninguno
+ * de los dos casos; comparar contra la lista de retorno sí.
  */
-export function retornoHeredaIda(
-  r: Pick<ServicioSemilla, "paradas_json" | "direccion_servicio">,
+export function estadoRetorno(
+  r: Pick<ServicioSemilla, "paradas_json" | "direccion_servicio" | "cotizacion_id">,
   cot: CotizacionSemilla | null | undefined,
-): boolean {
-  if (r.direccion_servicio !== "retorno" || !cot) return false;
-  if (tieneParaderosDeRetorno(cot)) return false;
-  const ida = noVacia(cot.paradas_json);
-  if (!ida) return false;
+): EstadoRetorno {
+  if (r.direccion_servicio !== "retorno" || r.cotizacion_id == null) return "no_aplica";
+  if (!cot) return "sin_cotizacion";
+  const ret = noVacia(cot.paradas_retorno_json);
+  if (!ret) return "sin_lista";
   const propia = noVacia(r.paradas_json);
-  return !propia || firmaNombres(propia) === firmaNombres(ida);
+  if (propia && firmaNombres(propia) !== firmaNombres(ret)) return "semilla_distinta";
+  return "ok";
 }
 
 // ── Qué servicios de hoy se materializan ─────────────────────────────────────
@@ -179,7 +192,9 @@ export type CodigoMaterializar =
   | "no_candidato"
   | "ya_tiene_paraderos"
   | "sin_semilla"
-  | "retorno_hereda_ida"
+  | "semilla_sin_nombres"
+  | "retorno_sin_lista"
+  | "retorno_semilla_distinta"
   | "retorno_sin_cotizacion";
 
 export const MOTIVO_MATERIALIZAR: Record<CodigoMaterializar, string> = {
@@ -187,7 +202,9 @@ export const MOTIVO_MATERIALIZAR: Record<CodigoMaterializar, string> = {
   no_candidato: "no es un servicio de hoy que se ofrezca al pasajero",
   ya_tiene_paraderos: "ya tiene sus paraderos",
   sin_semilla: "no tiene paraderos en su semilla ni en su cotización (se crean al abrirlo)",
-  retorno_hereda_ida: "es un retorno y su cotización no tiene paraderos de retorno: no se deducen de la ida",
+  semilla_sin_nombres: "su semilla tiene paraderos sin nombre (p. ej. el formato del Cotizador): no se ofrecen al pasajero",
+  retorno_sin_lista: "es un retorno y su cotización no tiene paraderos de retorno: no se deducen de la ida",
+  retorno_semilla_distinta: "es un retorno y guarda una lista que no es la de retorno de su cotización (la de la ida, o una vieja): falta propagar",
   retorno_sin_cotizacion: "es un retorno y no se encontró su cotización: no se puede comprobar que sus paraderos sean del retorno",
 };
 
@@ -215,13 +232,14 @@ export function planDeServicio(
     ({ ...base, codigo, fuente, filas: [] });
   if (!esCandidatoDeHoy(r, hoy)) return no("no_candidato");
   if (conParaderos) return no("ya_tiene_paraderos");
-  // Sin la cotización no se puede comprobar si el retorno trae paraderos propios o los de la ida.
-  if (r.direccion_servicio === "retorno" && r.cotizacion_id != null && !cot) {
-    return no("retorno_sin_cotizacion");
-  }
-  if (retornoHeredaIda(r, cot)) return no("retorno_hereda_ida");
+  // Un retorno de cotización solo se materializa si se PRUEBA que sus paraderos son de retorno.
+  const ret = estadoRetorno(r, cot);
+  if (ret === "sin_cotizacion") return no("retorno_sin_cotizacion");
+  if (ret === "sin_lista") return no("retorno_sin_lista");
+  if (ret === "semilla_distinta") return no("retorno_semilla_distinta");
   const { semilla, fuente } = semillaDeServicio(r, cot);
   if (!semilla.length) return no("sin_semilla");
+  if (!semillaConNombres(semilla)) return no("semilla_sin_nombres", fuente);
   return { ...base, codigo: "crear", fuente, filas: filasDeSemilla(r.id, semilla) };
 }
 
@@ -237,6 +255,16 @@ export function sobrantesTrasCarrera(insertadas: number[], actuales: number[]): 
   return ajenas.length > 0 ? actuales.filter((id) => nuestras.has(id)) : [];
 }
 
+/**
+ * ¿Todos los paraderos tienen nombre? El Cotizador guarda sus puntos como `{tipo:"parada", texto,
+ * place}`, sin `nombre`; copiada tal cual a un servicio, esa semilla da filas sin nombre que el
+ * pasajero vería como «—» y que no se pueden geocodificar. El «Iniciar» las crearía igual; el cron,
+ * que nadie mira, no.
+ */
+export function semillaConNombres(semilla: ParadaSemilla[]): boolean {
+  return semilla.every((p) => typeof p.nombre === "string" && p.nombre.trim() !== "");
+}
+
 /** ¿A esta fila le faltan coordenadas? (`!lat || !lng`, la misma prueba del «Iniciar»). */
 export function faltanCoordenadas(f: { lat?: number | string | null; lng?: number | string | null }): boolean {
   return !f.lat || !f.lng;
@@ -246,17 +274,31 @@ export function faltanCoordenadas(f: { lat?: number | string | null; lng?: numbe
 // Los textos viven aquí y no en cada pantalla: el chip de Programación, el generador y Propagar
 // describen la MISMA regla, y compuestos en tres TSX terminan diciéndola de tres formas.
 
-/** Chip de Programación en un retorno cuya cotización no tiene lista de retorno. */
-export function avisoRetornoSinLista(numeroCotizacion: string | null): { chip: string; detalle: string } {
+/**
+ * Chip de Programación para un retorno que el cron NO materializa porque no puede probar que sus
+ * paraderos sean de retorno. Se juzga con el MISMO `estadoRetorno` del cron: un chip con su propia
+ * condición terminaría avisando donde el cron sí crea, o callando donde no crea. Null = nada que decir.
+ */
+export function avisoRetorno(
+  estado: EstadoRetorno, numeroCotizacion: string | null,
+): { chip: string; detalle: string } | null {
   const cot = numeroCotizacion ? `La cotización ${numeroCotizacion}` : "Su cotización";
-  return {
+  const cotMin = numeroCotizacion ? `la cotización ${numeroCotizacion}` : "su cotización";
+  const regla = "El ERP no deduce los paraderos de un retorno de los de la ida —cada sentido puede tener " +
+    "su paradero en otro lado de la pista, y su propia hora—, así que no le crea solo los paraderos a este " +
+    "retorno: mientras no los tenga, sus pasajeros no lo verán en «Elige tu ruta de hoy».";
+  if (estado === "sin_lista") return {
     chip: "SIN PARADEROS DE RETORNO",
-    detalle: `${cot} no tiene paraderos de RETORNO. El ERP no los deduce de la ida —cada sentido puede ` +
-      `tener su paradero en otro lado de la pista, y su propia hora—, así que no le crea solo los paraderos ` +
-      `a este retorno: mientras no los tenga, sus pasajeros no lo verán en «Elige tu ruta de hoy». Si alguien ` +
-      `abre el servicio o el conductor lo inicia, recibe los de la ida. Agrega la lista de retorno en ` +
-      `Cotizaciones (editar → Guardar → Propagar).`,
+    detalle: `${cot} no tiene paraderos de RETORNO. ${regla} Si alguien abre el servicio o el conductor ` +
+      `lo inicia, recibe los de la ida. Agrega la lista de retorno en Cotizaciones (editar → Guardar → Propagar).`,
   };
+  if (estado === "semilla_distinta") return {
+    chip: "PARADEROS DE RETORNO SIN PROPAGAR",
+    detalle: `Este retorno guarda una lista de paraderos que no es la de retorno de ${cotMin} (suele ser la ` +
+      `de la ida, o una versión vieja). ${regla} Si alguien abre el servicio o el conductor lo inicia, recibe ` +
+      `esa lista guardada. En Cotizaciones, abre la cotización, Guardar → Propagar.`,
+  };
+  return null;
 }
 
 /** Línea del generador cuando va a crear retornos de una cotización sin lista de retorno. */

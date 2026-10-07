@@ -2,16 +2,20 @@
 //
 //   GET (cron cada 10 min, Bearer CRON_SECRET) → para cada servicio de hoy que «Elige tu ruta de
 //        hoy» podría ofrecer y que todavía no tiene filas en `paradas`, las crea desde su semilla
-//        con las MISMAS reglas que el «Iniciar» del conductor (lib/paradas-materializar.ts), y
-//        geocodifica las que vengan sin coordenadas, igual que él.
+//        con las MISMAS reglas que el «Iniciar» del conductor (lib/paradas-materializar.ts). Después
+//        geocodifica, por nombre como él, los paraderos de esos servicios que sigan sin coordenadas
+//        — los recién creados y los de antes: el «Iniciar» devuelve tal cual las filas que ya
+//        existen, así que lo que este cron cree sin coordenadas lo tiene que completar él.
 //
 // Por qué al empezar el día y no al generar el programa: ver la cabecera del motor. Es, a todos
 // los efectos, alguien abriendo cada servicio de hoy de madrugada.
 //
 // LO QUE NO HACE, A PROPÓSITO:
 //   · No toca servicios con paraderos (ni los completa ni los reordena).
-//   · No crea paraderos de un retorno con la lista de la ida (`retorno_hereda_ida`): el dueño lo
-//     prohibió con razón — cada sentido tiene su paradero, y su hora. Se listan en la respuesta.
+//   · No crea paraderos de un retorno de cotización salvo que PRUEBE que son de retorno
+//     (`estadoRetorno`): el dueño prohibió deducirlos de la ida — cada sentido tiene su paradero, y
+//     su hora. Se listan en la respuesta, por cotización y con su motivo.
+//   · No crea paraderos sin nombre (`semilla_sin_nombres`, el formato del Cotizador).
 //   · No inventa paraderos desde `origen`/`destino` de texto libre (el respaldo del «Iniciar»):
 //     sin semilla no hay paraderos definidos que ofrecer, y geocodificar texto suelto de
 //     madrugada sin nadie mirando no es lo mismo que hacerlo con el conductor delante.
@@ -36,10 +40,9 @@ const admin = () =>
   });
 type Admin = ReturnType<typeof admin>;
 
-/** Deja de empezar servicios nuevos pasado esto: el próximo tick (10 min) sigue donde quedó. */
+/** Deja de empezar trabajo nuevo pasado esto (servicio o geocodificación): el próximo tick (10 min)
+ *  sigue donde quedó. Lo que no se alcanza a geocodificar queda sin coordenadas y se reintenta. */
 const PRESUPUESTO_MS = 45_000;
-/** Nombres distintos que se le preguntan a Google por corrida (la caché responde el resto). */
-const MAX_GEOCODIFICAR = 60;
 const LOTE = 150;
 const PAG = 1000;
 
@@ -99,23 +102,23 @@ async function correr(sb: Admin, hoy: string) {
 
   const porCodigo: Partial<Record<CodigoMaterializar, number>> = {};
   const contar = (c: CodigoMaterializar) => { porCodigo[c] = (porCodigo[c] ?? 0) + 1; };
-  const retornosSinLista = new Map<number | null, number[]>();
+  const retornosSinLista = new Map<string, { cotizacion_id: number | null; motivo: CodigoMaterializar; reservas: number[] }>();
   const errores: string[] = [];
   let creados = 0, filasCreadas = 0, carreras = 0, geocodificadas = 0, sinCoordenadas = 0, pendientes = 0;
-  const memoGeo = new Map<string, { lat: number; lng: number } | null>();
-  let preguntasGoogle = 0;
+  const fueraDeTiempo = () => Date.now() - t0 > PRESUPUESTO_MS;
 
   for (const plan of planes) {
     if (plan.codigo !== "crear") {
       contar(plan.codigo);
-      if (plan.codigo === "retorno_hereda_ida" || plan.codigo === "retorno_sin_cotizacion") {
-        const arr = retornosSinLista.get(plan.cotizacion_id) ?? [];
-        arr.push(plan.reserva_id);
-        retornosSinLista.set(plan.cotizacion_id, arr);
+      if (plan.codigo === "retorno_sin_lista" || plan.codigo === "retorno_semilla_distinta" || plan.codigo === "retorno_sin_cotizacion") {
+        const k = `${plan.cotizacion_id}|${plan.codigo}`;
+        const g = retornosSinLista.get(k) ?? { cotizacion_id: plan.cotizacion_id, motivo: plan.codigo, reservas: [] };
+        g.reservas.push(plan.reserva_id);
+        retornosSinLista.set(k, g);
       }
       continue;
     }
-    if (Date.now() - t0 > PRESUPUESTO_MS) { pendientes++; continue; }
+    if (fueraDeTiempo()) { pendientes++; continue; }
 
     // a. Justo antes de escribir: ¿alguien los creó mientras tanto?
     const ya = await sb.from("paradas").select("id").eq("reserva_id", plan.reserva_id).limit(1);
@@ -123,12 +126,14 @@ async function correr(sb: Admin, hoy: string) {
     if ((ya.data || []).length > 0) { contar("ya_tiene_paraderos"); continue; }
 
     // b. Todas las filas del servicio en UNA sentencia: o entran todas o ninguna.
-    const ins = await sb.from("paradas").insert(plan.filas).select("id,nombre,lat,lng");
+    const ins = await sb.from("paradas").insert(plan.filas).select("id");
     if (ins.error) { errores.push(`#${plan.reserva_id}: ${ins.error.message}`); continue; }
-    const nuevas = (ins.data || []) as { id: number; nombre: string | null; lat: number | null; lng: number | null }[];
+    const nuevas = (ins.data || []) as { id: number }[];
 
     // c. ¿Otro camino los creó a la vez? Entonces sobran los NUESTROS (las otras pueden tener ya
-    //    un pasajero). Nunca se borra una fila que no hayamos insertado.
+    //    un pasajero). Nunca se borra una fila que no hayamos insertado. Si dos corridas del cron
+    //    chocan, las dos borran las suyas y el servicio queda sin paraderos hasta el próximo tick:
+    //    se prefiere ese hueco de 10 minutos a un itinerario duplicado que nadie limpia.
     const act = await sb.from("paradas").select("id").eq("reserva_id", plan.reserva_id);
     if (act.error) { errores.push(`#${plan.reserva_id} (comprobación): ${act.error.message}`); }
     else {
@@ -148,22 +153,45 @@ async function correr(sb: Admin, hoy: string) {
     creados++;
     filasCreadas += nuevas.length;
     contar("crear");
+  }
 
-    // d. Coordenadas que falten, como el «Iniciar»: por nombre, con la caché compartida.
-    for (const f of nuevas) {
+  // 5. Coordenadas que falten, como el «Iniciar»: por nombre, con la caché compartida (que también
+  //    memoriza los nombres irresolubles, así que repetirlos cada tick no vuelve a pagar a Google).
+  //    Sobre TODOS los candidatos con paraderos —los de este tick y los de antes—, acotado por
+  //    tiempo y no por cantidad: un tope de nombres dejaba atascados los mismos irresolubles al
+  //    frente de la cola, y lo que no se alcanza hoy lo recoge el próximo tick.
+  const memoGeo = new Map<string, { lat: number; lng: number } | null>();
+  const conRows = candidatos.map((r) => r.id);
+  geocodificar:
+  for (let i = 0; i < conRows.length; i += LOTE) {
+    if (fueraDeTiempo()) break;
+    let sinCoords: { id: number; nombre: string | null; lat: number | null; lng: number | null }[];
+    try {
+      sinCoords = await todasLasPaginas((d, h) =>
+        sb.from("paradas").select("id,nombre,lat,lng")
+          .in("reserva_id", conRows.slice(i, i + LOTE))
+          .or("lat.is.null,lng.is.null,lat.eq.0,lng.eq.0")
+          .order("id").range(d, h));
+    } catch (e: any) {
+      // Los paraderos ya están creados; solo se pierde la geocodificación de este lote hasta el próximo tick.
+      errores.push(`coordenadas (lectura): ${e?.message ?? e}`);
+      continue;
+    }
+    for (const f of sinCoords) {
       if (!faltanCoordenadas(f)) continue;
+      if (fueraDeTiempo()) break geocodificar;
       const nombre = String(f.nombre ?? "").trim();
       if (!nombre) { sinCoordenadas++; continue; }
       let coords = memoGeo.get(nombre);
       if (coords === undefined) {
-        if (preguntasGoogle >= MAX_GEOCODIFICAR) { sinCoordenadas++; continue; }
-        preguntasGoogle++;
         const g = await geocodificarConCache(nombre);
         coords = g ? { lat: g.lat, lng: g.lng } : null;
         memoGeo.set(nombre, coords);
       }
       if (!coords) { sinCoordenadas++; continue; }
-      const up = await sb.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", f.id);
+      // Solo si sigue sin coordenadas: alguien pudo ponerlas a mano mientras tanto.
+      const up = await sb.from("paradas").update({ lat: coords.lat, lng: coords.lng })
+        .eq("id", f.id).or("lat.is.null,lng.is.null,lat.eq.0,lng.eq.0");
       if (up.error) { sinCoordenadas++; errores.push(`parada ${f.id}: ${up.error.message}`); }
       else geocodificadas++;
     }
@@ -180,7 +208,7 @@ async function correr(sb: Admin, hoy: string) {
     sin_coordenadas: sinCoordenadas,
     carreras,
     pendientes,
-    retornos_sin_paraderos_propios: [...retornosSinLista.entries()].map(([cotizacion_id, reservas]) => ({ cotizacion_id, reservas })),
+    retornos_sin_paraderos_propios: [...retornosSinLista.values()],
     errores,
   };
 }
@@ -192,7 +220,7 @@ export async function GET(req: NextRequest) {
     if (r.errores.length) console.error("[paradas/materializar]", r.errores.slice(0, 20));
     return NextResponse.json(r);
   } catch (e: any) {
-    // Una lectura falló: no se escribió nada (ver todasLasPaginas).
+    // Una lectura de la fase de planificación falló: no se escribió nada (ver todasLasPaginas).
     console.error("[paradas/materializar] lectura:", e?.message);
     return NextResponse.json({ ok: false, error: e?.message ?? "error" }, { status: 500 });
   }
