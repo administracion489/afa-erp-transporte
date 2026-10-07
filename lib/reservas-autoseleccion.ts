@@ -31,7 +31,7 @@ import { faltaColumna, type ErrorSupabase } from "@/lib/columna-faltante";
 /** Con qué valor nace la casilla «Permitir autoselección» de un servicio nuevo. */
 export const AUTOSELECCION_AL_NACER = true;
 
-export const COLUMNA_AUTOSELECCION = "permite_autoseleccion";
+export const COLUMNA_AUTOSELECCION = "permite_autoseleccion" as const;
 
 /** La fila de un servicio nuevo, con la casilla encendida. No pisa un valor ya puesto. */
 export function conAutoseleccionAlNacer<T extends Record<string, unknown>>(
@@ -44,10 +44,12 @@ export function conAutoseleccionAlNacer<T extends Record<string, unknown>>(
 }
 
 /** La misma fila sin la casilla (para reintentar en una base que no tiene la columna). */
-export function sinAutoseleccion<T extends Record<string, unknown>>(fila: T): T {
-  const copia = { ...fila };
+export function sinAutoseleccion<T extends Record<string, unknown>>(
+  fila: T,
+): Omit<T, typeof COLUMNA_AUTOSELECCION> {
+  const copia: Record<string, unknown> = { ...fila };
   delete copia[COLUMNA_AUTOSELECCION];
-  return copia;
+  return copia as Omit<T, typeof COLUMNA_AUTOSELECCION>;
 }
 
 /**
@@ -63,7 +65,7 @@ export type ResultadoInsercion = { data: any; error: ErrorSupabase | null };
  * entonces), reintenta sin ella y lo declara en `sinColumna`, para que quien llama pueda decirlo.
  */
 export async function insertarServicioNuevo<T extends Record<string, unknown>>(
-  insertar: (fila: T & { permite_autoseleccion?: boolean }) => PromiseLike<ResultadoInsercion>,
+  insertar: (fila: Omit<T, typeof COLUMNA_AUTOSELECCION> & { permite_autoseleccion?: boolean }) => PromiseLike<ResultadoInsercion>,
   fila: T,
 ): Promise<ResultadoInsercion & { sinColumna: boolean }> {
   const primero = await insertar(conAutoseleccionAlNacer(fila));

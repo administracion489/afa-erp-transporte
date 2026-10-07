@@ -27,14 +27,24 @@
 --      (ModalManifiesto y el portal) siempre escriben un booleano. Encenderlo
 --      es exactamente la regla: «marcado salvo que un operador lo desmarque».
 --
+--   4. Enciende los servicios DE HOY EN ADELANTE que nacieron en false por el
+--      default viejo y que NADIE TOCÓ después. Se reconocen sin adivinar: el
+--      trigger de nacimiento (pacto-03) sella `actualizado_at` al crear la fila
+--      y el de estados lo vuelve a sellar en CADA update, así que una fila cuyo
+--      `actualizado_at` sigue pegado a su `created_at` no la editó nadie — y
+--      sin edición no hubo operador que la desmarcara. Los 10 minutos de margen
+--      cubren el enlace ida↔retorno que el generador escribe segundos después de
+--      crear las idas. Es el caso de los retornos RUTA A 17:00 del 06-10.
+--
 -- LO QUE NO HACE, A PROPÓSITO
 --
--- No toca los false. Un false puede ser de un operador que lo desmarcó o del
--- default viejo, y la base no guarda cuál: cambiarlos en bloque pisaría
--- decisiones de alguien. Para los servicios futuros que nacieron en false (como
--- los retornos de la RUTA A), ver la consulta de revisión al final y
--- corregirlos desde /programacion → Manifiesto → «Aplicar a rango de fechas»
--- abierto desde un RETORNO (el rango solo alcanza al mismo sentido).
+-- No toca los false de filas que alguien editó después de crearlas: ese false
+-- puede ser de un operador que desmarcó la casilla, o del default viejo en una
+-- fila que después se reprogramó, y ahí la base ya no distingue. Para esos, la
+-- consulta de revisión del final da los ids, y se corrigen con un UPDATE
+-- dirigido a esos ids. NO con «Aplicar a rango»: ese botón escribe además el
+-- nombre de ruta y «cambio de paradero» del servicio de referencia sobre todo
+-- el rango, y renombraría servicios con otra hora.
 --
 -- El deploy NO corre este archivo: se ejecuta a mano en el SQL Editor.
 -- ────────────────────────────────────────────────────────────────────────────
@@ -50,8 +60,32 @@ update public.reservas
  where permite_autoseleccion is null
    and fecha_servicio >= (now() at time zone 'America/Lima')::date;
 
+-- Paso 4. Solo si existen las dos columnas de sello (pacto-02/03 y la de
+-- creación): sin ellas no hay forma de probar que nadie tocó la fila, y no se
+-- cambia nada.
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'public' and table_name = 'reservas' and column_name = 'actualizado_at')
+     and exists (select 1 from information_schema.columns
+              where table_schema = 'public' and table_name = 'reservas' and column_name = 'created_at') then
+    execute $u$
+      update public.reservas
+         set permite_autoseleccion = true
+       where permite_autoseleccion = false
+         and estado <> 'cancelada'
+         and fecha_servicio >= (now() at time zone 'America/Lima')::date
+         and created_at is not null
+         and actualizado_at is not null
+         and actualizado_at <= created_at + interval '10 minutes'
+    $u$;
+  end if;
+end $$;
+
 -- ── Revisión (solo lee): servicios futuros que siguen desmarcados ───────────
--- Cada fila es un false que puede ser de un operador o del default viejo.
+-- Lo que queda después del paso 4: filas editadas después de crearse, cuyo
+-- false puede ser de un operador. Si alguno debe ir encendido:
+--   update public.reservas set permite_autoseleccion = true where id in (...);
 --
 -- select r.fecha_servicio, to_char(r.hora_servicio, 'HH24:MI') as hora, r.id,
 --        r.ruta_nombre, r.cotizacion_id

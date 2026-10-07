@@ -405,7 +405,12 @@ export default function ModalManifiesto(props: Props) {
       .select("ruta_nombre,permite_autoseleccion,permite_cambio_paradero,fecha_servicio")
       .eq("id", reservaId).maybeSingle();
     const cfg = res.data;
-    if (!cfg) return;
+    if (!cfg) {
+      // Sin la fila no se sabe qué dicen los interruptores: «Aplicar a rango» queda esperando y
+      // se vuelve a intentar al pulsarlo, en vez de quedar bloqueado sin decir por qué.
+      if (res.error) setMensaje({ tipo: "err", texto: `No se pudo leer la configuración del servicio: ${res.error.message}` });
+      return;
+    }
     setRutaNombre(cfg.ruta_nombre || "");
     setPermiteAutoseleccion(!!cfg.permite_autoseleccion);
     setPermiteCambioParadero(!!cfg.permite_cambio_paradero);
@@ -1537,11 +1542,15 @@ export default function ModalManifiesto(props: Props) {
                     <div className="flex-[0_0_auto] flex flex-col justify-end">
                       <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Aplicar en lote</p>
                       <button
-                        onClick={() => setModalConfigRango(true)}
-                        disabled={!configCargada}
-                        title={configCargada ? undefined : "Cargando la configuración de este servicio…"}
-                        className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors whitespace-nowrap disabled:opacity-50"
-                        style={{ borderColor: "#0b315f", background: "white", color: "#0b315f" }}
+                        onClick={async () => {
+                          // Sin la configuración cargada, los interruptores dicen «apagado» por defecto
+                          // y aplicarlos desmarcaría el rango: primero se vuelve a leer.
+                          if (!configCargada) { await cargarConfig(); return; }
+                          setModalConfigRango(true);
+                        }}
+                        title={configCargada ? undefined : "Todavía no se leyó la configuración de este servicio: pulsa para reintentar"}
+                        className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors whitespace-nowrap"
+                        style={{ opacity: configCargada ? 1 : 0.6, borderColor: "#0b315f", background: "white", color: "#0b315f" }}
                       >
                         📅 Aplicar a rango de fechas
                       </button>

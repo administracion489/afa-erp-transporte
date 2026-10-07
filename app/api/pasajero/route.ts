@@ -550,9 +550,32 @@ export async function POST(req: NextRequest) {
         // Sin paraderos no hay nada que elegir: un servicio recién creado (que ya nace con
         // «Permitir autoselección») saldría como «0 paraderos» y, con otro igual a la misma hora,
         // compartiría la clave de agrupación de abajo. Ver ofrecibleEnAutoseleccion.
-        const reservas: any[] = Array.from(
+        const conParaderos: any[] = Array.from(
           new Map(reservasRaw.map((r: any) => [r.id, r])).values()
         ).filter(ofrecibleEnAutoseleccion);
+
+        // Para servicios EN CURSO, ocultar los paraderos que el bus ya pasó
+        // (paradas.estado === "completada", que escribe el conductor al marcar la parada).
+        // Si ya pasó todos, el servicio deja de ser elegible — no tiene sentido subirse a
+        // un paradero que quedó atrás. Los servicios no iniciados pasan sin tocar.
+        const soloVigentes = (r: any): any | null => {
+          if (r.estado !== "en_curso") return r;
+          const ps = (r.paradas || []).filter((p: any) => p.estado !== "completada");
+          if (ps.length === 0) return null;
+          return { ...r, paradas: ps };
+        };
+
+        // Un en_curso que ya no puede estar en ruta (abandonado: el conductor no lo cerró) o
+        // que ya pasó todos sus paraderos se descarta ANTES de agrupar, con el mismo
+        // `enCursoVivo` que usan 'ruta' y 'autoseleccionar'. Agrupado, podía quedar como el
+        // representante de su grupo —misma hora y mismos paraderos que el servicio de hoy— y
+        // tapar al de hoy; ahora que todo servicio nace con la autoselección encendida, el
+        // abandonado de ayer también entra a la consulta.
+        const reservas: any[] = (await Promise.all(conParaderos.map(async (r: any) => {
+          if (r.estado !== "en_curso") return r;
+          if (!soloVigentes(r)) return null;
+          return (await enCursoVivo(admin, r, hoy)) ? r : null;
+        }))).filter(Boolean);
 
         const paradaIds = reservas.flatMap((r: any) => (r.paradas || []).map((p: any) => p.id));
 
@@ -598,17 +621,6 @@ export async function POST(req: NextRequest) {
           return { ...r, capacidad: cap, ocupacion: ocupacion.get(r.id) || 0 };
         });
 
-        // Para servicios EN CURSO, ocultar los paraderos que el bus ya pasó
-        // (paradas.estado === "completada", que escribe el conductor al marcar la parada).
-        // Si ya pasó todos, el servicio deja de ser elegible — no tiene sentido subirse a
-        // un paradero que quedó atrás. Los servicios no iniciados pasan sin tocar.
-        const soloVigentes = (r: any): any | null => {
-          if (r.estado !== "en_curso") return r;
-          const ps = (r.paradas || []).filter((p: any) => p.estado !== "completada");
-          if (ps.length === 0) return null;
-          return { ...r, paradas: ps };
-        };
-
         // Si el operador pre-asignó al pasajero a una reserva específica de hoy,
         // mostrar solo esa reserva sin consolidación. Así su elección de paradero
         // actualiza directamente el manifiesto del bus correcto.
@@ -618,10 +630,10 @@ export async function POST(req: NextRequest) {
             !yaAsignados.has(r.id) &&
             (r.capacidad === null || r.ocupacion < r.capacidad)
           );
-          if (preAsignada) {
-            const f = soloVigentes(preAsignada);
-            return NextResponse.json({ reservas: f ? [f] : [] });
-          }
+          // Si ya no sirve (pasó todos sus paraderos), se sigue a la agrupación en vez de
+          // devolver una lista vacía: el pasajero tiene que poder elegir el servicio siguiente.
+          const f = preAsignada ? soloVigentes(preAsignada) : null;
+          if (f) return NextResponse.json({ reservas: [f] });
         }
 
         // Sin pre-asignación: agrupar por hora de salida + secuencia exacta de coordenadas
