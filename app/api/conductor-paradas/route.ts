@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { geocodificarConCache as geocodificar } from "@/lib/geocode-cache";
 import { sesionDeRequest, CUERPO_SESION_INVALIDA, reservaEsDelConductor } from "@/lib/conductor-auth";
+import { semillaDeServicio, filasDeSemilla } from "@/lib/paradas-materializar";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -63,35 +64,21 @@ export async function GET(req: NextRequest) {
   // 2a. PREFERIR los paraderos completos del JSON, POR TRAMO (ida/retorno).
   // La programación masiva guarda paradas_json por tramo en cada reserva; si falta,
   // se reconstruye desde la cotización según direccion_servicio. Así el conductor
-  // crea los paraderos completos (no solo origen/destino).
-  const sortLeg = (arr: any[]) => [
-    ...arr.filter((p: any) => p.tipo === "inicio"),
-    ...arr.filter((p: any) => p.tipo === "intermedia"),
-    ...arr.filter((p: any) => p.tipo === "destino"),
-    ...arr.filter((p: any) => !["inicio", "intermedia", "destino"].includes(p.tipo)),
-  ];
-  let jsonParadas: any[] = [];
-  if (Array.isArray(reserva.paradas_json) && reserva.paradas_json.length > 0) {
-    jsonParadas = sortLeg(reserva.paradas_json);
-  } else if (reserva.cotizacion_id) {
-    const { data: cot } = await supabaseAdmin.from("cotizaciones")
+  // crea los paraderos completos (no solo origen/destino). La cascada, el orden y el
+  // mapeo viven en lib/paradas-materializar.ts: son los mismos con que el cron de la
+  // madrugada crea los paraderos de los servicios de hoy que nadie abrió.
+  let cot: { paradas_json?: unknown; paradas_retorno_json?: unknown } | null = null;
+  const propia = Array.isArray(reserva.paradas_json) && reserva.paradas_json.length > 0;
+  if (!propia && reserva.cotizacion_id) {
+    const { data } = await supabaseAdmin.from("cotizaciones")
       .select("paradas_json, paradas_retorno_json").eq("id", reserva.cotizacion_id).maybeSingle();
-    if (reserva.direccion_servicio === "retorno") {
-      const ret = Array.isArray(cot?.paradas_retorno_json) && cot.paradas_retorno_json.length > 0
-        ? cot.paradas_retorno_json : cot?.paradas_json;
-      if (Array.isArray(ret)) jsonParadas = sortLeg(ret);
-    } else if (Array.isArray(cot?.paradas_json)) {
-      jsonParadas = sortLeg(cot.paradas_json);
-    }
+    cot = data;
   }
+  const jsonParadas = semillaDeServicio(reserva, cot).semilla;
 
   if (jsonParadas.length > 0) {
     const { data: nuevasJ, error: errJ } = await supabaseAdmin.from("paradas").insert(
-      jsonParadas.map((p: any, i: number) => ({
-        reserva_id: reservaId, orden: i + 1, nombre: p.nombre, direccion: p.direccion || null,
-        lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
-        hora_estimada: p.hora || null, estado: "pendiente",
-      }))
+      filasDeSemilla(reservaId, jsonParadas)
     ).select();
     if (errJ) return NextResponse.json({ error: errJ.message }, { status: 500 });
     if (nuevasJ && nuevasJ.length > 0) {

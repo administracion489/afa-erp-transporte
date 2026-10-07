@@ -8,6 +8,7 @@ import { validarEtiquetas, rotuloEtiquetas, patchEtiquetas } from "@/lib/liquida
 import { rutaDelNombre } from "@/lib/liquidacion-etiquetas-propuesta";
 import { AUTOSELECCION_AL_NACER, herenciaAutoseleccion, camposDeHerencia, avisoHerencia, NACE_MARCADO, type Herencia } from "@/lib/reservas-autoseleccion";
 import { leerAnterioresDelContrato } from "@/lib/reservas-autoseleccion-datos";
+import { tieneParaderosDeRetorno, AVISO_GENERADOR_SIN_RETORNO } from "@/lib/paradas-materializar";
 import { sentidoDeReserva } from "@/lib/liquidacion-agrupacion";
 
 type ItemCot = {
@@ -537,6 +538,8 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
         if (texto) lineasAutosel.push(texto);
       });
     }
+    // Retornos de una cotización sin lista de retorno: no se ofrecerán al pasajero (lib/paradas-materializar.ts).
+    if (generaRetorno && !tieneParaderosDeRetorno(cot)) lineasAutosel.push(AVISO_GENERADOR_SIN_RETORNO);
     const textoAutosel = lineasAutosel.length ? "\n\n" + lineasAutosel.join("\n\n") : "";
 
     const lineasMsg = esMultiVehiculo
@@ -873,7 +876,10 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
                     <b>Ruta RETORNO:</b>{" "}
                     {cot.paradas_retorno_json?.length
                       ? nombreRuta(cot.paradas_retorno_json)
-                      : <span className="italic opacity-60">mismas paradas en sentido inverso</span>}
+                      // Antes decía «mismas paradas en sentido inverso», y no era cierto: el retorno se
+                      // genera con la lista de la IDA tal cual. Y no se puede suponer — cada sentido
+                      // puede tener su paradero en otro lado de la pista, y su propia hora.
+                      : <span className="font-semibold" style={{ color: "#92400e" }}>sin paraderos de retorno en la cotización</span>}
                   </p>
                 )}
 

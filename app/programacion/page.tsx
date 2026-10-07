@@ -45,7 +45,8 @@ import {
 import { armarDias, proponerEtiquetas, type TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { paginarFilas } from "@/lib/huella";
-import { avisosAutoseleccion, unirContexto, cotizacionesAJuzgar, textoAvisoAutoseleccion, COLS_AUTOSELECCION, type FilaAutoseleccion } from "@/lib/reservas-autoseleccion-aviso";
+import { avisosAutoseleccion, unirContexto, cotizacionesAJuzgar, textoAvisoAutoseleccion, vigenteParaAutoseleccion, COLS_AUTOSELECCION, type FilaAutoseleccion } from "@/lib/reservas-autoseleccion-aviso";
+import { semillaDeServicio, filasDeSemilla, tieneParaderosDeRetorno, avisoRetornoSinLista } from "@/lib/paradas-materializar";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
 function useGoogleMapsLoaded() {
@@ -580,6 +581,8 @@ export default function ReservasPage() {
   const [verTodo,      setVerTodo]      = useState(false);                // true = histórico completo (fuera de la ventana)
   const [limiteVista,  setLimiteVista]  = useState(100);                  // filas renderizadas ("Cargar más")
   const [cotMapNum,    setCotMapNum]    = useState<Record<number, string>>({}); // cotizacion_id → numero_cotizacion
+  // Cotizaciones SIN lista de paraderos de retorno: sus retornos no se materializan solos (lib/paradas-materializar.ts).
+  const [cotSinRetorno, setCotSinRetorno] = useState<Set<number>>(new Set());
   const [cotMapAsunto, setCotMapAsunto] = useState<Record<number, string>>({}); // cotizacion_id → asunto
   const [ocupacionMap, setOcupacionMap] = useState<Record<number, Ocupacion>>({});
   // reserva_id → asientos CONTRATADOS (y de dónde salieron). Es el denominador que el
@@ -860,19 +863,22 @@ export default function ReservasPage() {
   // y se trocea la consulta `.in()` para no reventar el largo de la URL.
   const cargarNumerosCotizacion = async (rows: Reserva[]) => {
     const cotIds = [...new Set(rows.map(r => r.cotizacion_id).filter((v): v is number => v != null))];
-    if (cotIds.length === 0) { setCotMapNum({}); setCotMapAsunto({}); return; }
+    if (cotIds.length === 0) { setCotMapNum({}); setCotMapAsunto({}); setCotSinRetorno(new Set()); return; }
     const m: Record<number, string> = {};
     const ma: Record<number, string> = {};
+    const sinRet = new Set<number>();
     for (let i = 0; i < cotIds.length; i += 300) {
       const chunk = cotIds.slice(i, i + 300);
-      const { data } = await supabase.from("cotizaciones").select("id,numero_cotizacion,asunto").in("id", chunk);
+      const { data } = await supabase.from("cotizaciones").select("id,numero_cotizacion,asunto,paradas_retorno_json").in("id", chunk);
       (data || []).forEach((c: any) => {
         if (c.numero_cotizacion != null) m[c.id] = String(c.numero_cotizacion);
         if (c.asunto) ma[c.id] = String(c.asunto);
+        if (!tieneParaderosDeRetorno(c)) sinRet.add(Number(c.id));
       });
     }
     setCotMapNum(m);
     setCotMapAsunto(ma);
+    setCotSinRetorno(sinRet);
   };
 
   /** Evidencia FUERA de la ventana para el aviso de autoselección: solo las filas ENCENDIDAS de los
@@ -1118,32 +1124,19 @@ export default function ReservasPage() {
   // cotización según direccion_servicio. NUNCA se combinan ambos tramos.
   // Ordenada inicio → intermedia → destino.
   const resolverParadasJSON = async (reservaId: number): Promise<any[]> => {
-    const sortLeg = (arr: any[]) => [
-      ...arr.filter((p: any) => p.tipo === "inicio"),
-      ...arr.filter((p: any) => p.tipo === "intermedia"),
-      ...arr.filter((p: any) => p.tipo === "destino"),
-      ...arr.filter((p: any) => !["inicio", "intermedia", "destino"].includes(p.tipo)),
-    ];
+    // La cascada (reserva → cotización por sentido) y el orden viven en lib/paradas-materializar.ts:
+    // son los mismos del «Iniciar» del conductor y del cron que materializa los servicios de hoy.
     const { data: rRow } = await supabase.from("reservas")
       .select("paradas_json, cotizacion_id, direccion_servicio").eq("id", reservaId).maybeSingle();
-
-    // 1) El paradas_json propio de la reserva ya viene por tramo (ida o retorno).
-    if (Array.isArray(rRow?.paradas_json) && rRow.paradas_json.length > 0)
-      return sortLeg(rRow.paradas_json);
-
-    // 2) Fallback: reconstruir desde la cotización según el tramo de la reserva.
-    if (rRow?.cotizacion_id) {
-      const { data: cot } = await supabase.from("cotizaciones")
+    if (!rRow) return [];
+    let cot: { paradas_json?: unknown; paradas_retorno_json?: unknown } | null = null;
+    const propia = Array.isArray(rRow.paradas_json) && rRow.paradas_json.length > 0;
+    if (!propia && rRow.cotizacion_id) {
+      const { data } = await supabase.from("cotizaciones")
         .select("paradas_json, paradas_retorno_json").eq("id", rRow.cotizacion_id).maybeSingle();
-      if (rRow.direccion_servicio === "retorno") {
-        const ret = Array.isArray(cot?.paradas_retorno_json) && cot.paradas_retorno_json.length > 0
-          ? cot.paradas_retorno_json : cot?.paradas_json;
-        if (Array.isArray(ret)) return sortLeg(ret);
-      } else if (Array.isArray(cot?.paradas_json)) {
-        return sortLeg(cot.paradas_json);
-      }
+      cot = data;
     }
-    return [];
+    return semillaDeServicio(rRow, cot).semilla;
   };
 
   // Crea/rehace las paradas de la reserva desde los paraderos de la cotización.
@@ -1155,11 +1148,7 @@ export default function ReservasPage() {
       if (!confirm(`Esta reserva ya tiene ${ex.length} parada(s). ¿Reemplazarlas por los ${todas.length} paraderos de la cotización?`)) return;
       await supabase.from("paradas").delete().eq("reserva_id", reservaId);
     }
-    await supabase.from("paradas").insert(todas.map((p: any, i: number) => ({
-      reserva_id: reservaId, orden: i + 1, nombre: p.nombre, direccion: p.direccion || null,
-      lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
-      hora_estimada: p.hora || null, estado: "pendiente",
-    })));
+    await supabase.from("paradas").insert(filasDeSemilla(reservaId, todas));
     const { data: nuevas } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
     // Geocodificar las que falten
     if (nuevas && nuevas.length > 0) {
@@ -1193,11 +1182,7 @@ export default function ReservasPage() {
       const jsonParadas = await resolverParadasJSON(reservaId);
 
       if (jsonParadas.length > 0) {
-        await supabase.from("paradas").insert(jsonParadas.map((p: any, i: number) => ({
-          reserva_id: reservaId, orden: i + 1, nombre: p.nombre, direccion: p.direccion || null,
-          lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
-          hora_estimada: p.hora || null, estado: "pendiente",
-        })));
+        await supabase.from("paradas").insert(filasDeSemilla(reservaId, jsonParadas));
         const { data: creadas } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
         // Geocodificar las que vengan sin coordenadas
         if (creadas && creadas.length > 0) {
@@ -1605,10 +1590,14 @@ export default function ReservasPage() {
   const cargarRutas = async (ids: number[]) => {
     if (ids.length === 0) { setRutaMap({}); return; }
     const acc: Record<number, { o: string; d: string }> = {};
+    // Paginado y con orden TOTAL: con los servicios de hoy materializados de madrugada, 300
+    // servicios × 5 paraderos pasan de las 1000 filas que corta PostgREST, y cortar por `orden`
+    // dejaba como «destino» un paradero intermedio.
     for (let i = 0; i < ids.length; i += 300) {
-      const { data } = await supabase.from("paradas")
-        .select("reserva_id,orden,nombre").in("reserva_id", ids.slice(i, i + 300)).order("orden");
-      for (const p of (data || []) as any[]) {
+      const filas = await paginarFilas(() => supabase.from("paradas")
+        .select("reserva_id,orden,nombre").in("reserva_id", ids.slice(i, i + 300))
+        .order("reserva_id").order("orden").order("id"));
+      for (const p of filas as any[]) {
         const cur = acc[p.reserva_id];
         if (!cur) acc[p.reserva_id] = { o: p.nombre, d: p.nombre };
         else cur.d = p.nombre; // llegan ordenadas por `orden`: la última pisa el destino
@@ -3497,6 +3486,19 @@ export default function ReservasPage() {
         className="text-[9px] font-black px-1.5 py-0.5 rounded-full"
         style={{ background: "#fef3c7", color: "#92400e" }}
       >⚠ {t.chip}</button>
+    );
+  };
+  /** Retorno vigente cuya cotización no tiene lista de retorno: el cron no le crea paraderos (no se
+   *  deducen de la ida) y sus pasajeros no lo ven en «Elige tu ruta de hoy». */
+  const chipSinRetorno = (r: Reserva) => {
+    if (r.direccion_servicio !== "retorno" || r.cotizacion_id == null) return null;
+    if (!cotSinRetorno.has(Number(r.cotizacion_id)) || !vigenteParaAutoseleccion(r, hoy)) return null;
+    const t = avisoRetornoSinLista(cotMapNum[Number(r.cotizacion_id)] ?? null);
+    return (
+      <span title={t.detalle} onClick={e => e.stopPropagation()}
+        className="text-[9px] font-black px-1.5 py-0.5 rounded-full cursor-help"
+        style={{ background: "#fef3c7", color: "#92400e" }}
+      >⚠ {t.chip}</span>
     );
   };
 
@@ -6045,7 +6047,7 @@ export default function ReservasPage() {
                                           {origenDe(r)}
                                         </span>
                                       )}
-                                      {chipAutoseleccion(r.id)}
+                                      {chipAutoseleccion(r.id)}{chipSinRetorno(r)}
                                     </div>
                                   </td>
                                   <td className="px-4 py-2.5 capitalize text-gray-500">{diaSem}</td>
@@ -6189,7 +6191,7 @@ export default function ReservasPage() {
                             return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-white" style={{ border: `1.5px solid ${cfg.color}`, color: cfg.color }}>🧾 {cfg.label}</span>;
                           })()}
                           {sob && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">SOBRECUPO</span>}
-                          {chipAutoseleccion(r.id)}
+                          {chipAutoseleccion(r.id)}{chipSinRetorno(r)}
                         </div>
                         <div className="text-xs text-gray-400 mt-0.5 truncate">{rutaDe(r).o} → {rutaDe(r).d}</div>
                         <div className="text-xs text-gray-400 mt-0.5">
@@ -6425,7 +6427,7 @@ export default function ReservasPage() {
                               </span>
                             );
                           })()}
-                          {chipAutoseleccion(r.id)}
+                          {chipAutoseleccion(r.id)}{chipSinRetorno(r)}
                         </div>
                       </td>
 

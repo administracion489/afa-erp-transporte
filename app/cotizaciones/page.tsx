@@ -27,6 +27,7 @@ import {
   planDeNivel, cotejarUnidadConNivel, etiquetaNivel, type NivelServicio,
 } from "@/lib/costos/nivel-servicio";
 import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
+import { planDePropagacion, MOTIVO_NO_PROPAGA, type MotivoNoPropaga } from "@/lib/paradas-materializar";
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -1324,29 +1325,64 @@ export default function CotizacionesPage(){
       const lote=todosIds.slice(i,i+BATCH);
       for(let d=0;d<20000;d+=1000){
         const{data,error:eAct}=await supabase.from("paradas").select("reserva_id").in("reserva_id",lote).eq("estado","completada").order("id").range(d,d+999);
-        if(eAct)break;
+        // Una lectura fallida NO es «sin actividad»: seguir pisaría las paradas de un servicio en curso.
+        if(eAct){setModalPropagar(null);setPropagando(false);alert("No se pudo comprobar qué servicios tienen paradas escaneadas, así que no se propagó nada: "+eAct.message);return;}
         (data||[]).forEach((p:any)=>idsConActividad.add(p.reserva_id));
         if(!data||data.length<1000)break;
       }
     }
-    const reservasAfectar=reservas.filter(r=>!idsConActividad.has(r.id));
-    const saltadas=reservas.length-reservasAfectar.length;
-
-    if(reservasAfectar.length===0){
+    // Servicios con PASAJEROS asignados a sus paraderos: borrar y reinsertar las paradas los dejaría
+    // sin paradero (o duplicaría el itinerario, según la clave foránea). Desde que los servicios de
+    // hoy nacen con paraderos de madrugada (app/api/paradas/materializar), uno de hoy puede tener ya
+    // pasajeros que eligieron su paradero. Si no se puede comprobar, no se propaga NADA.
+    const idsConPasajeros=new Set<number>();
+    try{
+      const candidatos=reservas.filter(r=>!idsConActividad.has(r.id)).map(r=>r.id);
+      for(let i=0;i<candidatos.length;i+=BATCH){
+        const lote=candidatos.slice(i,i+BATCH);
+        const paradaDe=new Map<number,number>();
+        for(let d=0;;d+=1000){
+          const{data,error}=await supabase.from("paradas").select("id,reserva_id").in("reserva_id",lote).order("id").range(d,d+999);
+          if(error)throw new Error(error.message);
+          (data||[]).forEach((p:any)=>paradaDe.set(Number(p.id),Number(p.reserva_id)));
+          if(!data||data.length<1000)break;
+        }
+        const pids=[...paradaDe.keys()];
+        for(let j=0;j<pids.length;j+=200){
+          const trozo=pids.slice(j,j+200);
+          for(let d=0;;d+=1000){
+            const{data,error}=await supabase.from("pasajeros_parada").select("id,parada_id").in("parada_id",trozo).order("id").range(d,d+999);
+            if(error)throw new Error(error.message);
+            (data||[]).forEach((pp:any)=>{const rid=paradaDe.get(Number(pp.parada_id));if(rid!=null)idsConPasajeros.add(rid);});
+            if(!data||data.length<1000)break;
+          }
+        }
+      }
+    }catch(e:any){
       setModalPropagar(null);setPropagando(false);
-      alert("Sin cambios — todos los servicios ya tienen actividad registrada.");return;
+      alert("No se pudo comprobar qué servicios tienen pasajeros asignados, así que no se propagó nada: "+(e?.message||"error"));return;
     }
 
-    const tramoRet=paradasRet.length>0?paradasRet:paradasIda;
-    const idsIda=reservasAfectar.filter(r=>r.direccion_servicio!=="retorno").map(r=>r.id);
-    const idsRet=reservasAfectar.filter(r=>r.direccion_servicio==="retorno").map(r=>r.id);
+    // Qué se toca y qué no, con su motivo (lib/paradas-materializar.ts). Un retorno sin lista
+    // propia ya NO recibe la de la ida: cada sentido tiene su paradero, y su hora.
+    const plan=planDePropagacion(reservas,{ida:paradasIda,retorno:paradasRet},idsConActividad,idsConPasajeros);
+    const idsIda=plan.ida,idsRet=plan.retorno,tramoRet=paradasRet;
+    const fueraPor=(m:MotivoNoPropaga)=>plan.fuera.filter(f=>f.motivo===m).length;
+    const lineasFuera=(Object.keys(MOTIVO_NO_PROPAGA) as MotivoNoPropaga[])
+      .map(m=>[m,fueraPor(m)] as const).filter(([,n])=>n>0)
+      .map(([m,n])=>`• ${n} sin tocar: ${MOTIVO_NO_PROPAGA[m]}`);
+    const idsAfectar=[...idsIda,...idsRet];
+
+    if(idsAfectar.length===0){
+      setModalPropagar(null);setPropagando(false);
+      alert(`Sin cambios — no quedó ningún servicio que propagar.\n${lineasFuera.join("\n")}`);return;
+    }
 
     // Actualizar paradas_json en reservas (batch)
     for(let i=0;i<idsIda.length;i+=BATCH)await supabase.from("reservas").update({paradas_json:paradasIda}).in("id",idsIda.slice(i,i+BATCH));
     for(let i=0;i<idsRet.length;i+=BATCH)await supabase.from("reservas").update({paradas_json:tramoRet}).in("id",idsRet.slice(i,i+BATCH));
 
     // Borrar paradas existentes (batch)
-    const idsAfectar=reservasAfectar.map(r=>r.id);
     for(let i=0;i<idsAfectar.length;i+=BATCH)await supabase.from("paradas").delete().in("reserva_id",idsAfectar.slice(i,i+BATCH));
 
     // Insertar nuevas paradas (batch de 200 filas)
@@ -1370,7 +1406,7 @@ export default function CotizacionesPage(){
     await syncOD(idsRet,tramoRet);
 
     setModalPropagar(null);setPropagando(false);
-    alert(`✅ Propagación completada\n• ${reservasAfectar.length} servicio${reservasAfectar.length!==1?"s":""} actualizado${reservasAfectar.length!==1?"s":""}${saltadas>0?`\n• ${saltadas} saltado${saltadas!==1?"s":""} (ya tienen actividad registrada)`:""}`);
+    alert(`✅ Propagación completada\n• ${idsAfectar.length} servicio${idsAfectar.length!==1?"s":""} actualizado${idsAfectar.length!==1?"s":""}${lineasFuera.length?`\n${lineasFuera.join("\n")}`:""}`);
   };
   const eliminarCotizacion=async(pass:string):Promise<string|null>=>{
     if(!modalEliminar)return null;
@@ -1595,6 +1631,10 @@ export default function CotizacionesPage(){
               <p className="font-bold">¿Aplicar los nuevos paraderos a esos servicios?</p>
               <p>• Los servicios <strong>ya ejecutados o en curso</strong> NO serán modificados.</p>
               <p>• Los servicios con <strong>paradas ya escaneadas</strong> tampoco se tocarán.</p>
+              <p>• Los servicios con <strong>pasajeros asignados</strong> tampoco: cámbialos desde su Manifiesto.</p>
+              {modalPropagar.paradasRet.length===0&&modalPropagar.reservas.some(r=>r.direccion_servicio==="retorno")&&(
+                <p>• Esta cotización no tiene <strong>paraderos de retorno</strong>: sus retornos no se tocan (no se deducen de la ida).</p>
+              )}
               <p>• Esta acción reemplaza las paradas de cada servicio futuro.</p>
               <p>• La <strong>hora de salida</strong> de cada servicio se ajusta a la del primer paradero de su tramo.</p>
             </div>
