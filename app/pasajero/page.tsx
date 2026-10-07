@@ -688,6 +688,9 @@ export default function AppPasajero() {
   const busMarker    = useRef<mapboxgl.Marker | null>(null);
   const paradaMks    = useRef<mapboxgl.Marker[]>([]);
   const busPosicionRef = useRef<UbicacionBus | null>(null);
+  const reservaActualRef = useRef<number | null>(null); // reserva cuyo bus pinta hoy la pantalla
+  const rutaSeqRef       = useRef(0);                   // descarta respuestas de "ruta" desordenadas o de otra sesión
+  const selRutaIdRef     = useRef<number | null>(null); // la ruta que el pasajero está eligiendo (ver cargarMiRuta)
   const ultimoEtaRef   = useRef(0);   // ms del último pedido de ETA a Google (anti doble cobro)
   const meMk         = useRef<mapboxgl.Marker | null>(null);  // marcador pasajero
   const [mapListo,   setMapListo]           = useState(false);
@@ -1140,7 +1143,10 @@ export default function AppPasajero() {
       if (document.hidden) return; // no pollear GPS con la app en segundo plano (batería/datos)
       try {
         const { busPosicion } = await paxApi("bus_posicion", { reservaId: rid });
-        if (activo && busPosicion) setBusPosicion(busPosicion as UbicacionBus);
+        // `activo` baja recién cuando React limpia el efecto, uno o dos cuadros DESPUÉS de cambiar
+        // de servicio: el ref ya cambió en ese mismo lote, así que una respuesta tardía del servicio
+        // anterior no vuelve a pintar su bus sobre la ruta nueva.
+        if (activo && busPosicion && reservaActualRef.current === rid) setBusPosicion(busPosicion as UbicacionBus);
       } catch { /* reintentará en el próximo tick */ }
     };
     tick();
@@ -1236,12 +1242,13 @@ export default function AppPasajero() {
     if (r?.credencialesInvalidas) { setLoginErr("Documento o PIN incorrecto. ¿Problemas? Llama a soporte: 01 345 3707"); setLoginLoad(false); return; }
     const data = r?.pasajero;
     if (!data || !r?.token) { setLoginErr("No se pudo iniciar sesión. Intenta de nuevo."); setLoginLoad(false); return; }
-    saveSession(data, r.token); setPasajero(data); await cargarMiRuta(data.id); setLoginLoad(false);
+    saveSession(data, r.token); setPasajero(data); setFotoErr(""); await cargarMiRuta(data.id); setLoginLoad(false);
+    // Teléfono compartido: si la sesión anterior se cerró sola (token vencido), la suscripción push
+    // de este aparato sigue a nombre de quien estaba. Re-sincronizarla la pasa a esta persona
+    // (suscribir_push reasigna la fila) y deja el interruptor diciendo la verdad.
+    void resincronizarSuscripcion(paxApi).then((ok) => setPushActivo(ok)).catch(() => setPushActivo(false));
   }
 
-  const reservaActualRef = useRef<number | null>(null); // reserva cuyo bus pinta hoy la pantalla
-  const rutaSeqRef       = useRef(0);                   // descarta respuestas de "ruta" desordenadas o de otra sesión
-  const selRutaIdRef     = useRef<number | null>(null); // la ruta que el pasajero está eligiendo (ver cargarMiRuta)
   useEffect(() => { selRutaIdRef.current = selRutaId; }, [selRutaId]);
 
   // Todo lo que describe EL BUS de un servicio. Se llama solo cuando cambia la reserva (o deja de
@@ -1274,6 +1281,8 @@ export default function AppPasajero() {
     setMostrarReporte(false); setChatMsgs([]); setChatSinLeer(0);
     setMostrarNavModal(false); setMostrarParadasModal(false);
     setMostrarPromptPush(false); setMostrarGuiaIOS(false); setFotoErr("");
+    setReporteMensaje(""); setParaderoModalSel(null);       // ni un borrador ni una elección de otra persona
+    setMostrarModalGPS(false); setMostrarGuiaBateria(false); setMostrarGuiaBloqueado(false);
     setPinInput(""); setLoginLoad(false);
     setDniInput(aviso?.dni ?? "");
     setLoginErr(aviso ? AVISO_SESION_VENCIDA : "");
@@ -1303,7 +1312,10 @@ export default function AppPasajero() {
       return;
     }
     if (!vigente()) return;
-    if (!r || r.ruta === null || !r.miParada) {
+    // El servidor contesta SIEMPRE { ruta: null } o { miParada, … }. Cualquier otra cosa (un 200
+    // sin cuerpo JSON detrás de un proxy, que paxApi deja en {}) no es «sin servicio»: no se toca.
+    if (!r || (r.ruta !== null && !r.miParada)) return;
+    if (r.ruta === null) {
       // Respuesta del servidor «sin servicio vigente» (su servicio terminó, o lo sacaron de él):
       // nada del servicio anterior sigue en pantalla. Antes miParada quedaba puesta, el bus
       // anterior seguía en el mapa y la lista «Elige tu ruta de hoy» nunca se veía.
@@ -1413,6 +1425,7 @@ export default function AppPasajero() {
   }
   async function uploadFoto(file: File) {
     if (!pasajero) return;
+    const tok = _token;
     setFotoErr(""); setUploading(true);
     try {
       const bitmap = await createImageBitmap(file);
@@ -1425,10 +1438,11 @@ export default function AppPasajero() {
       // solo se pinta — lo guardado en la base lo decide el servidor.
       const imagen = canvas.toDataURL("image/jpeg", 0.85);
       const { foto_url } = await paxApi("subir_foto", { imagen });
-      if (!_token) return; // la sesión se cerró mientras subía: no revivirla en pantalla
+      // La sesión se cerró (o se cerró y se abrió OTRA) mientras subía: no tocar la que hay ahora.
+      if (!_token || _token !== tok) return;
       const updated = { ...pasajero, foto_url: foto_url ?? null }; setPasajero(updated); saveSession(updated);
     } catch (e: any) {
-      setFotoErr(e?.message || "Error al subir la foto.");
+      if (_token && _token === tok) setFotoErr(e?.message || "Error al subir la foto.");
     } finally { setUploading(false); }
   }
   // Sincroniza el formulario "Mis datos" con los valores guardados (al login / cambios).
@@ -1461,15 +1475,17 @@ export default function AppPasajero() {
     if (edad !== null && (!Number.isFinite(edad) || edad < 0 || edad > 120)) { setDatosErr("La edad debe estar entre 0 y 120."); return; }
 
     setSavingDatos(true); setDatosOk(false); setDatosErr("");
+    const tok = _token;
     try {
       await paxApi("perfil", { nombre, tipo_documento: tipoDocInput, edad, email: emailT || null });
-      if (!_token) return; // la sesión se cerró mientras guardaba: no revivirla en pantalla
+      // La sesión se cerró (o se cerró y se abrió OTRA) mientras guardaba: no tocar la que hay ahora.
+      if (!_token || _token !== tok) return;
       const updated = { ...pasajero, nombre, tipo_documento: tipoDocInput, edad, email: emailT || null };
       setPasajero(updated); saveSession(updated);
       setDatosOk(true);
       setTimeout(() => setDatosOk(false), 2000);
     } catch (e: any) {
-      setDatosErr(e?.message || "No se pudo guardar. Reintenta.");
+      if (_token && _token === tok) setDatosErr(e?.message || "No se pudo guardar. Reintenta.");
     } finally { setSavingDatos(false); }
   }
   // Carga el hilo del pasajero (sus mensajes + respuestas de central/conductor).
@@ -1644,6 +1660,7 @@ export default function AppPasajero() {
 
   async function cambiarParadero() {
     if (!pasajero || !paraderoModalSel) return;
+    const tok = _token;
     setCambioParaderoLoad(true);
     try {
       await paxApi("cambiar_paradero", {
@@ -1655,8 +1672,9 @@ export default function AppPasajero() {
       console.error("[cambiarParadero]", e?.message);
     } finally {
       setCambioParaderoLoad(false);
-      // Con la sesión cerrada (401), no marcar el paradero como confirmado para el próximo ingreso.
-      if (_token) {
+      // Con la sesión cerrada (401) —o cerrada y abierta OTRA—, no marcar el paradero como
+      // confirmado para el próximo ingreso.
+      if (_token && _token === tok) {
         saveParaderoOk();
         setParaderoConfirmado(true);
         setMostrarConfirmarParadero(false);

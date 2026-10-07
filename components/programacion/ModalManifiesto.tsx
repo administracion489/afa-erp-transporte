@@ -74,7 +74,7 @@ type Props = {
   /** Abrir con ⚙ Configurar ruta desplegado (viene del aviso ámbar). */
   abrirConfigRuta?: boolean;
   /** Avisa a la lista lo que se guardó, para que el aviso ámbar no quede viejo. */
-  onConfigGuardada?: (ids: number[], patch: Partial<{ ruta_nombre: string | null; permite_autoseleccion: boolean; permite_cambio_paradero: boolean }>) => void;
+  onConfigGuardada?: (ids: number[], patch: Partial<{ ruta_nombre: string | null; permite_autoseleccion: boolean; permite_cambio_paradero: boolean; autoseleccion_apagada_en: string | null }>) => void;
 };
 
 const ESTADO_PAX: Record<string, { bg: string; color: string }> = {
@@ -179,7 +179,9 @@ export default function ModalManifiesto(props: Props) {
   const [permiteCambioParadero, setPermiteCambioParadero] = useState(false);
   const [configGuardando,       setConfigGuardando]       = useState(false);
   const [fechaServicio,         setFechaServicio]         = useState("");
-  const [configCargada,         setConfigCargada]         = useState(false);
+  // De QUÉ servicio es la configuración leída: con otro reservaId, todavía no se leyó la suya.
+  const [configLeidaDe,         setConfigLeidaDe]         = useState<number | null>(null);
+  const configCargada = configLeidaDe === reservaId;
   // Cuándo un OPERADOR desmarcó la autoselección (null = no hay registro; undefined = la base no
   // tiene la columna). Ver lib/reservas-autoseleccion.ts.
   const [apagadaEn,             setApagadaEn]             = useState<string | null | undefined>(undefined);
@@ -437,17 +439,21 @@ export default function ModalManifiesto(props: Props) {
     setPermiteCambioParadero(!!cfg.permite_cambio_paradero);
     setFechaServicio(cfg.fecha_servicio || "");
     setApagadaEn(conRegistro ? (cfg[COLUMNA_APAGADA_EN] ?? null) : undefined);
-    setConfigCargada(true);
+    setConfigLeidaDe(reservaId);
   }, [reservaId]);
-  useEffect(() => { setConfigCargada(false); void cargarConfig(); }, [cargarConfig]);
+  useEffect(() => { void cargarConfig(); }, [cargarConfig]);
 
   const avisoAuto = useMemo(() => {
     const ctx = contextoAutoseleccion ?? [];
     const yo = ctx.find(f => f.id === reservaId);
     if (!yo || !hoyLima || !configCargada) return null;
-    const v = juzgarAutoseleccion({ ...yo, permite_autoseleccion: permiteAutoseleccion }, ctx, hoyLima);
+    // Lo que dice ESTE modal manda sobre la fila de la lista (puede ir un paso por detrás).
+    const v = juzgarAutoseleccion({
+      ...yo, permite_autoseleccion: permiteAutoseleccion,
+      ...(apagadaEn !== undefined ? { autoseleccion_apagada_en: apagadaEn } : {}),
+    }, ctx, hoyLima);
     return v.avisa ? v : null;
-  }, [contextoAutoseleccion, hoyLima, reservaId, configCargada, permiteAutoseleccion]);
+  }, [contextoAutoseleccion, hoyLima, reservaId, configCargada, permiteAutoseleccion, apagadaEn]);
 
   // Preview (parte pesada): calcula, al cambiar el rango/servicio, qué reservas
   // comparten la MISMA ruta que el actual (mismos paraderos + coordenadas, mismo
@@ -1175,7 +1181,11 @@ export default function ModalManifiesto(props: Props) {
         setMensaje({ tipo: "err", texto: `No se guardó la configuración: ${error.message}` });
         await cargarConfig();
       } else {
-        onConfigGuardada?.([reservaId], patch); // la lista y su aviso ámbar siguen al interruptor
+        // La lista y su aviso ámbar siguen al interruptor, con la fecha si quedó escrita (un
+        // desmarcado con fecha es una decisión y deja de avisar).
+        const escrito: Record<string, unknown> = { ...completo };
+        if (sinRegistro) delete escrito[COLUMNA_APAGADA_EN];
+        onConfigGuardada?.([reservaId], escrito);
       }
       if (!error && COLUMNA_APAGADA_EN in completo) {
         setApagadaEn(sinRegistro ? undefined : (completo[COLUMNA_APAGADA_EN] as string | null));
@@ -1193,19 +1203,19 @@ export default function ModalManifiesto(props: Props) {
     try {
       // Aplicar «Inactivo» al rango es una decisión de operador (el resumen la muestra antes de
       // aplicar): queda con fecha y la hereda el próximo programa. «Activo» borra las fechas.
-      const { error } = await actualizarAutoseleccion(
-        (p) => supabase.from("reservas").update(p).in("id", previewIds),
-        {
-          ruta_nombre:             rutaNombre.trim() || null,
-          permite_cambio_paradero: permiteCambioParadero,
-          ...patchAutoseleccionDeOperador(permiteAutoseleccion),
-        });
-      if (error) throw error;
-      onConfigGuardada?.(previewIds, {
-        ruta_nombre: rutaNombre.trim() || null,
-        permite_autoseleccion: permiteAutoseleccion,
+      const patchRango: Record<string, unknown> = {
+        ruta_nombre:             rutaNombre.trim() || null,
         permite_cambio_paradero: permiteCambioParadero,
-      });
+        ...patchAutoseleccionDeOperador(permiteAutoseleccion),
+      };
+      const { error, sinRegistro } = await actualizarAutoseleccion(
+        (p) => supabase.from("reservas").update(p).in("id", previewIds), patchRango);
+      if (error) throw error;
+      if (sinRegistro) delete patchRango[COLUMNA_APAGADA_EN];
+      onConfigGuardada?.(previewIds, patchRango);
+      if (previewIds.includes(reservaId)) {
+        setApagadaEn(sinRegistro ? undefined : (patchRango[COLUMNA_APAGADA_EN] as string | null));
+      }
       setMensaje({ tipo: "ok", texto: `Config aplicada a ${previewIds.length} servicio(s) ✓` });
       setModalConfigRango(false);
       setConfigDesde(""); setConfigHasta("");
@@ -1569,9 +1579,12 @@ export default function ModalManifiesto(props: Props) {
                     <label className="flex items-center gap-3 cursor-pointer select-none">
                       <button
                         type="button"
+                        // Hasta leer la fila, el interruptor dice «apagado» por defecto: tocarlo ahí
+                        // guardaría un valor que nadie vio, y la lectura tardía lo taparía en pantalla.
+                        disabled={!configCargada}
                         onClick={() => { const v = !permiteAutoseleccion; setPermiteAutoseleccion(v); guardarConfig({ permite_autoseleccion: v }); }}
                         className="relative flex-shrink-0 transition-colors rounded-full"
-                        style={{ width: 36, height: 20, background: permiteAutoseleccion ? "#0b315f" : "#cbd5e1" }}
+                        style={{ width: 36, height: 20, background: permiteAutoseleccion ? "#0b315f" : "#cbd5e1", opacity: configCargada ? 1 : 0.5 }}
                       >
                         <span className="absolute top-1 transition-all rounded-full bg-white"
                           style={{ width: 14, height: 14, left: permiteAutoseleccion ? 18 : 3, boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />

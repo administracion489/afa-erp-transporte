@@ -140,9 +140,12 @@ export type FilaAnterior = {
  * `sin_anterior` · `anterior_marcado`: no hay nada que heredar.
  * `anterior_sin_registro`: el anterior está desmarcado pero NO por un operador (default viejo) → nace marcado.
  * `anterior_mixto`: ese día unos móviles estaban desmarcados por un operador y otros no → nace marcado.
+ * `anterior_incompleto`: sin móvil propio que mirar, ese día hubo MENOS servicios que los que se van a
+ *   generar (un bus cancelado o ausente): no se sabe qué decidió el que falta → nace marcado.
  * `heredado`: un operador desmarcó todo lo que se juzga → nace DESMARCADO.
  */
-export type CodigoHerencia = "sin_anterior" | "anterior_marcado" | "anterior_sin_registro" | "anterior_mixto" | "heredado";
+export type CodigoHerencia =
+  | "sin_anterior" | "anterior_marcado" | "anterior_sin_registro" | "anterior_mixto" | "anterior_incompleto" | "heredado";
 export type Herencia = {
   codigo: CodigoHerencia;
   permite: boolean;
@@ -155,29 +158,39 @@ export const desmarcadaPorOperador = (f: Pick<FilaAnterior, "permite_autoselecci
   f.permite_autoseleccion === false && !!f.autoseleccion_apagada_en;
 
 /**
- * Con qué nace un servicio NUEVO del contrato en ese sentido. Se mira el ÚLTIMO día anterior (no
- * cancelado, no adicional: un servicio adicional desmarcado no puede apagar el contrato del mes
- * siguiente) y, si el móvil es conocido y ese día hay filas de ese móvil, solo esas. Se hereda el
- * desmarcado solo si TODO lo juzgado lo desmarcó un operador; ante la duda, nace marcado.
+ * Con qué nace un servicio NUEVO del contrato en ese sentido. Se hereda el desmarcado solo si TODO lo
+ * juzgado lo desmarcó un operador; ante la duda, nace marcado (el error caro es el otro: un servicio
+ * desmarcado no sale en «Elige tu ruta de hoy» y sus pasajeros no ven el bus).
+ *
+ * Qué se juzga (nunca cancelados ni adicionales: un adicional desmarcado no apaga el contrato):
+ *   - Móvil conocido y con historia propia → el ÚLTIMO día de ESE móvil, y solo sus filas.
+ *   - Si no → el último día del contrato en ese sentido, y además ese día tiene que haber al menos
+ *     `esperadas` servicios (los que se van a generar). Si un bus faltó o se canceló ese día, el
+ *     desmarcado de otro bus no puede decidir por él: elegir el día entre TODOS los buses y juzgar
+ *     solo a los que quedaron le contagiaba el desmarcado de un bus a todo el programa.
  */
 export function herenciaAutoseleccion(
   anteriores: FilaAnterior[],
   sentido: "IDA" | "RETORNO",
   movil?: number | null,
+  esperadas = 1,
 ): Herencia {
   const candidatas = anteriores.filter((f) =>
     f.sentido === sentido &&
     normalizaEstado(f.estado) !== "cancelada" &&
     String(f.origen_contractual ?? "contrato") !== "adicional" &&
     /^\d{4}-\d{2}-\d{2}/.test(String(f.fecha_servicio ?? "")));
-  if (!candidatas.length) return NACE_MARCADO;
-  const fecha = candidatas.reduce((m, f) => (f.fecha_servicio > m ? f.fecha_servicio : m), "");
-  const delDia = candidatas.filter((f) => f.fecha_servicio === fecha);
-  const delMovil = movil != null ? delDia.filter((f) => f.movil === movil) : [];
-  const grupo = delMovil.length ? delMovil : delDia;
+  const propias = movil != null ? candidatas.filter((f) => f.movil === movil) : [];
+  const base = propias.length ? propias : candidatas;
+  if (!base.length) return NACE_MARCADO;
+  const fecha = base.reduce((m, f) => (f.fecha_servicio > m ? f.fecha_servicio : m), "");
+  const grupo = base.filter((f) => f.fecha_servicio === fecha);
   const desmarcadas = grupo.filter(desmarcadaPorOperador);
   const fuente = { fecha, ids: grupo.map((f) => f.id), desmarcadas: desmarcadas.length, total: grupo.length };
   if (desmarcadas.length === grupo.length) {
+    if (!propias.length && grupo.length < Math.max(1, esperadas)) {
+      return { codigo: "anterior_incompleto", permite: true, apagadaEn: null, fuente };
+    }
     const apagadaEn = desmarcadas
       .map((f) => f.autoseleccion_apagada_en as string)
       .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
@@ -223,6 +236,10 @@ export function avisoHerencia(h: Herencia, rotulo: string, n: number): string | 
   if (h.codigo === "anterior_mixto" && f) {
     return `ℹ ${rotulo}: nacen MARCADOS. El ${ddmm(f.fecha)} los móviles del contrato no coincidían ` +
       `(${f.desmarcadas} desmarcado(s) por un operador, ${f.total - f.desmarcadas} marcado(s)).`;
+  }
+  if (h.codigo === "anterior_incompleto" && f) {
+    return `ℹ ${rotulo}: nacen MARCADOS. El ${ddmm(f.fecha)} un operador desmarcó ${f.total} servicio(s) del contrato ` +
+      `(#${f.ids.join(", #")}), pero ese día faltó o se canceló algún otro y no se sabe qué decidió para él.`;
   }
   if (h.codigo === "anterior_sin_registro" && f) {
     return `ℹ ${rotulo}: nacen MARCADOS aunque el servicio anterior (#${f.ids.join(", #")} · ${ddmm(f.fecha)}) está ` +

@@ -68,6 +68,13 @@ update public.reservas
  where permite_autoseleccion is null
    and fecha_servicio >= (now() at time zone 'America/Lima')::date;
 
+-- Paso 5 (va ANTES que el 4: el 4 lo lee).
+alter table public.reservas
+  add column if not exists autoseleccion_apagada_en timestamptz;
+
+comment on column public.reservas.autoseleccion_apagada_en is
+  'Cuándo un OPERADOR desmarcó «Permitir autoselección». NULL con permite_autoseleccion=false = valor por defecto viejo: no se hereda. En un servicio que lo heredó, es la fecha de la decisión original.';
+
 -- Paso 4. Solo si existen las dos columnas de sello (pacto-02/03 y la de
 -- creación): sin ellas no hay forma de probar que nadie tocó la fila, y no se
 -- cambia nada.
@@ -86,16 +93,13 @@ begin
          and created_at is not null
          and actualizado_at is not null
          and actualizado_at <= created_at + interval '10 minutes'
+         -- Un desmarcado CON fecha es de un operador (o heredado de uno): nace así y el generador
+         -- lo enlaza en segundos, así que parecería «no tocado». Volver a correr este archivo no
+         -- puede reencenderlo.
+         and autoseleccion_apagada_en is null
     $u$;
   end if;
 end $$;
-
--- Paso 5.
-alter table public.reservas
-  add column if not exists autoseleccion_apagada_en timestamptz;
-
-comment on column public.reservas.autoseleccion_apagada_en is
-  'Cuándo un OPERADOR desmarcó «Permitir autoselección». NULL con permite_autoseleccion=false = valor por defecto viejo: no se hereda. En un servicio que lo heredó, es la fecha de la decisión original.';
 
 -- ── Revisión (solo lee): servicios futuros que siguen desmarcados ───────────
 -- Lo que queda después del paso 4: filas editadas después de crearse, cuyo
@@ -103,7 +107,8 @@ comment on column public.reservas.autoseleccion_apagada_en is
 --   update public.reservas set permite_autoseleccion = true where id in (...);
 --
 -- select r.fecha_servicio, to_char(r.hora_servicio, 'HH24:MI') as hora, r.id,
---        r.ruta_nombre, r.cotizacion_id
+--        r.ruta_nombre, r.cotizacion_id,
+--        r.autoseleccion_apagada_en   -- con fecha: lo desmarcó un operador (déjalo)
 --   from public.reservas r
 --  where r.fecha_servicio >= (now() at time zone 'America/Lima')::date
 --    and r.estado <> 'cancelada'

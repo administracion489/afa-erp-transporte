@@ -141,6 +141,31 @@ console.log("\n4. Herencia: solo se hereda el desmarcado de un OPERADOR");
   ok(herenciaAutoseleccion(mixto, "RETORNO", 1).codigo === "heredado", "móvil 1 conocido → hereda solo el del móvil 1");
   ok(herenciaAutoseleccion(mixto, "RETORNO", 2).codigo === "anterior_marcado", "móvil 2 conocido → marcado");
   ok(herenciaAutoseleccion([], "IDA") .codigo === "sin_anterior", "sin servicio anterior → nace marcado");
+  // Un bus que FALTÓ el último día no hereda el desmarcado de otro (revisión): contrato de 2 buses,
+  // el operador desmarcó el móvil 1; el 31-10 el retorno del móvil 2 se canceló.
+  const huecos = [
+    F(1, { fecha_servicio: "2026-10-30", movil: 1, permite_autoseleccion: false, autoseleccion_apagada_en: T }),
+    F(2, { fecha_servicio: "2026-10-30", movil: 2, permite_autoseleccion: true }),
+    F(3, { fecha_servicio: "2026-10-31", movil: 1, permite_autoseleccion: false, autoseleccion_apagada_en: T }),
+    F(4, { fecha_servicio: "2026-10-31", movil: 2, estado: "cancelada", permite_autoseleccion: true }),
+  ];
+  ok(herenciaAutoseleccion(huecos, "RETORNO", 2, 2).codigo === "anterior_marcado",
+    "móvil 2 conocido: se mira SU último día (30-10, marcado), no el del móvil 1");
+  ok(herenciaAutoseleccion(huecos, "RETORNO", 1, 2).codigo === "heredado", "  …y el móvil 1 sí hereda su propio desmarcado");
+  ok(herenciaAutoseleccion(huecos, "RETORNO", null, 2).codigo === "anterior_incompleto",
+    "móvil desconocido y el último día tiene 1 de 2 buses → nace MARCADO (no se contagia)");
+  ok(herenciaAutoseleccion(huecos, "RETORNO", 3, 2).codigo === "anterior_incompleto",
+    "móvil nuevo sin historia propia → la misma regla del día completo");
+  const sinMovil = huecos.map((f) => ({ ...f, movil: null }));
+  ok(herenciaAutoseleccion(sinMovil, "RETORNO", null, 2).permite === true, "sin etiquetas de móvil (lo común) → tampoco se contagia");
+  ok(herenciaAutoseleccion(sinMovil, "RETORNO", null, 1).codigo === "heredado", "  …y con un solo bus el día está completo: hereda");
+  const completo = [
+    F(1, { fecha_servicio: "2026-10-31", permite_autoseleccion: false, autoseleccion_apagada_en: T }),
+    F(2, { fecha_servicio: "2026-10-31", permite_autoseleccion: false, autoseleccion_apagada_en: T }),
+  ];
+  ok(herenciaAutoseleccion(completo, "RETORNO", null, 2).codigo === "heredado", "los 2 buses desmarcados por un operador → hereda");
+  ok(avisoHerencia(herenciaAutoseleccion(huecos, "RETORNO", null, 2), "RETORNO", 30)?.includes("MARCADOS") === true,
+    "el incompleto lo dice en el confirm");
   // Textos: solo los que dicen algo.
   ok(avisoHerencia(h2, "RETORNO", 30)?.includes("DESMARCADA") === true, "aviso del heredado nombra el desmarcado");
   ok(avisoHerencia(h1, "RETORNO", 30)?.includes("MARCADOS") === true, "aviso del default viejo dice que nacen marcados");
@@ -156,9 +181,9 @@ console.log("\n4. Herencia: solo se hereda el desmarcado de un OPERADOR");
   for (const p2 of permites) for (const f2 of fechas) {
     const filas = [F(1, { permite_autoseleccion: p1, autoseleccion_apagada_en: f1, estado: e1, origen_contractual: o1, sentido: s1 }),
                    F(2, { permite_autoseleccion: p2, autoseleccion_apagada_en: f2 })];
-    for (const n of [1, 2]) {
+    for (const n of [1, 2]) for (const esp of [1, 2, 3]) {
       const usadas = filas.slice(0, n);
-      const h = herenciaAutoseleccion(usadas, "RETORNO");
+      const h = herenciaAutoseleccion(usadas, "RETORNO", null, esp);
       combos++;
       if ((h.permite === false) !== (h.codigo === "heredado")) malos++;
       if (h.codigo === "heredado") {
@@ -166,6 +191,7 @@ console.log("\n4. Herencia: solo se hereda el desmarcado de un OPERADOR");
         if (!h.apagadaEn) malos++;
         const grupo = usadas.filter((f) => h.fuente?.ids.includes(f.id));
         if (!grupo.every(desmarcadaPorOperador)) malos++;
+        if (grupo.length < esp) malos++;   // nunca se hereda de un día con menos buses que los que se generan
       }
       // Sin ninguna fecha en ninguna fila, jamás nace desmarcado.
       if (usadas.every((f) => !f.autoseleccion_apagada_en) && h.permite === false) malos++;
@@ -250,6 +276,14 @@ console.log("\n6. Aviso ámbar: apagada aquí, encendida en sus vecinos del cont
   ok(cotizacionesAJuzgar([S(1, { permite_autoseleccion: true })], HOY).length === 0, "todo encendido → no se consulta nada");
   ok(cotizacionesAJuzgar([S(1, { permite_autoseleccion: undefined })], HOY).length === 0, "sin la columna → no se consulta nada");
   ok(JSON.stringify(cotizacionesAJuzgar([S(1)], HOY)) === "[7]", "una apagada vigente → se consulta su contrato");
+  // Un desmarcado CON fecha de operador es una decisión: no avisa (ni el heredado por el generador).
+  const conFecha = juzgarAutoseleccion(S(1, { autoseleccion_apagada_en: "2026-10-05T20:00:00.000Z" }), [S(2, { permite_autoseleccion: true })], HOY);
+  ok(conFecha.codigo === "desmarcada_por_operador" && !conFecha.avisa, "desmarcada por un operador → no avisa aunque los vecinos estén encendidos");
+  ok(cotizacionesAJuzgar([S(1, { autoseleccion_apagada_en: "2026-10-05T20:00:00.000Z" })], HOY).length === 0, "  …y su contrato no se consulta");
+  ok(juzgarAutoseleccion(S(1, { autoseleccion_apagada_en: null }), [S(2, { permite_autoseleccion: true })], HOY).avisa,
+    "sin fecha (default viejo) sigue avisando");
+  ok(juzgarAutoseleccion(S(1, { permite_autoseleccion: true, autoseleccion_apagada_en: "2026-10-05T20:00:00.000Z" }), [], HOY).codigo === "encendida",
+    "encendida manda sobre una fecha vieja");
 }
 
 console.log(`\n${total - fallos}/${total} ${fallos ? "— FALLA" : "✓"}`);

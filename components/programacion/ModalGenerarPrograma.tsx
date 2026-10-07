@@ -517,7 +517,10 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
     } as Parameters<typeof sentidoDeReserva>[0]);
     const herenciaDe = (sentido: "IDA" | "RETORNO", idxSlot: number): Herencia =>
       lectura?.estado === "ok"
-        ? herenciaAutoseleccion(lectura.filas, sentido, (etiquetasDeSlot(idxSlot) as { movil?: number | null }).movil ?? null)
+        // `esperadas`: cuántos buses se generan. Sin móvil propio que mirar, el día anterior tiene que
+        // tener al menos esos servicios; si faltó uno, su desmarcado no se deduce del de otro.
+        ? herenciaAutoseleccion(lectura.filas, sentido, (etiquetasDeSlot(idxSlot) as { movil?: number | null }).movil ?? null,
+            slotsAGenerar.length)
         : NACE_MARCADO;
     const lineasAutosel: string[] = [];
     if (lectura?.estado === "error") {

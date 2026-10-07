@@ -255,6 +255,7 @@ type Reserva = {
   movil?: number | null;
   /** «Permitir autoselección» (undefined = la columna no llegó). Ver lib/reservas-autoseleccion-aviso.ts. */
   permite_autoseleccion?: boolean | null;
+  autoseleccion_apagada_en?: string | null;
 };
 
 type Ocupacion = {
@@ -337,12 +338,16 @@ const COLS_LISTA =
   "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
   "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
   "lote_generacion,origen,destino,ruta_nombre,origen_contractual,precio_cotizado," +
-  "capacidad_contratada,falso_flete,falso_flete_motivo,ruta_etiqueta,turno,movil,permite_autoseleccion";
+  "capacidad_contratada,falso_flete,falso_flete_motivo,ruta_etiqueta,turno,movil,permite_autoseleccion," +
+  "autoseleccion_apagada_en";
 
 // Columnas de `reservas` cuya migración es OPCIONAL. PostgREST rechaza el select
 // entero por una columna desconocida, así que pedirlas sin red dejaría la pantalla
 // de Reservas en blanco en cualquier entorno donde el SQL todavía no se corrió.
 // Se reintenta sin ellas: la lista se pinta igual, solo sin el chip de origen.
+/** Cuánto hacia atrás se busca evidencia de que el contrato tiene la autoselección encendida. */
+const DIAS_EVIDENCIA_AUTO = 90;
+
 const COLS_OPCIONALES = [
   "origen_contractual", "precio_cotizado", "capacidad_contratada",
   "falso_flete", "falso_flete_motivo",
@@ -350,6 +355,8 @@ const COLS_OPCIONALES = [
   // «Permitir autoselección»: ningún SQL del repo la declaraba hasta reservas-06. Sin ella, el
   // aviso ámbar simplemente no sale (la fila llega sin el campo y el motor no la juzga).
   "permite_autoseleccion",
+  // Quién la desmarcó (reservas-06): sin ella, un desmarcado a propósito también sale en ámbar.
+  "autoseleccion_apagada_en",
 ];
 
 const quitarColumna = (cols: string, col: string) =>
@@ -582,6 +589,7 @@ export default function ReservasPage() {
   // Servicios ENCENDIDOS de los contratos con algo que juzgar, fuera de la ventana cargada: hacen
   // que el aviso ámbar de autoselección no dependa del filtro de fechas.
   const [vecinosFuera, setVecinosFuera] = useState<FilaAutoseleccion[]>([]);
+  const vecinosSeqRef = useRef(0); // turno de la última carga de vecinos (ver cargarVecinosAutoseleccion)
   const [manifiestoConConfig, setManifiestoConConfig] = useState(false);
   const [loading,      setLoading]      = useState(true); // arranca cargando (evita parpadeo "No hay reservas")
   const [guardando,    setGuardando]    = useState(false);
@@ -867,6 +875,33 @@ export default function ReservasPage() {
     setCotMapAsunto(ma);
   };
 
+  /** Evidencia FUERA de la ventana para el aviso de autoselección: solo las filas ENCENDIDAS de los
+   *  contratos que tienen algo que juzgar (casi nunca hay: entonces no se consulta nada), y solo de
+   *  los últimos `DIAS_EVIDENCIA_AUTO` en adelante — la intención se lee en lo reciente, y un contrato
+   *  de años no tiene por qué traerse entero para contar vecinos. Best-effort: si falla, el aviso se
+   *  queda con lo cargado. `vecinosSeqRef` descarta la respuesta de una carga que ya no es la última. */
+  const cargarVecinosAutoseleccion = async (rows: Reserva[]) => {
+    const seq = ++vecinosSeqRef.current;
+    try {
+      const hoyL = fechaLima();
+      const cotIds = cotizacionesAJuzgar(rows, hoyL);
+      if (!cotIds.length) { if (seq === vecinosSeqRef.current) setVecinosFuera([]); return; }
+      const d = new Date(hoyL + "T00:00:00Z");
+      d.setUTCDate(d.getUTCDate() - DIAS_EVIDENCIA_AUTO);
+      const desde = d.toISOString().slice(0, 10);
+      const enLista = new Set(rows.map(r => r.id));
+      const out: FilaAutoseleccion[] = [];
+      for (let i = 0; i < cotIds.length; i += 100) {
+        const trozo = cotIds.slice(i, i + 100);
+        const filas = await paginarFilas(() => supabase.from("reservas").select(COLS_AUTOSELECCION)
+          .in("cotizacion_id", trozo).eq("permite_autoseleccion", true).neq("estado", "cancelada")
+          .gte("fecha_servicio", desde).order("id"));
+        for (const f of filas) if (!enLista.has(f.id)) out.push(f);
+      }
+      if (seq === vecinosSeqRef.current) setVecinosFuera(out);
+    } catch { if (seq === vecinosSeqRef.current) setVecinosFuera([]); }
+  };
+
   /**
    * Los asientos CONTRATADOS de cada fila visible, con la MISMA cascada que el
    * formulario (`resolverPaxDeServicio`). No es una segunda definición: es la de
@@ -884,25 +919,6 @@ export default function ReservasPage() {
    * Best-effort de punta a punta: si falla, la celda se queda con el número de la
    * unidad —lo de antes— y la lista se pinta igual.
    */
-  /** Evidencia FUERA de la ventana para el aviso de autoselección: solo las filas ENCENDIDAS de los
-   *  contratos que tienen algo que juzgar (casi nunca hay: entonces no se consulta nada).
-   *  Best-effort: si falla, el aviso se queda con lo cargado. */
-  const cargarVecinosAutoseleccion = async (rows: Reserva[]) => {
-    try {
-      const cotIds = cotizacionesAJuzgar(rows, fechaLima());
-      if (!cotIds.length) { setVecinosFuera([]); return; }
-      const enLista = new Set(rows.map(r => r.id));
-      const out: FilaAutoseleccion[] = [];
-      for (let i = 0; i < cotIds.length; i += 100) {
-        const trozo = cotIds.slice(i, i + 100);
-        const filas = await paginarFilas(() => supabase.from("reservas").select(COLS_AUTOSELECCION)
-          .in("cotizacion_id", trozo).eq("permite_autoseleccion", true).neq("estado", "cancelada").order("id"));
-        for (const f of filas) if (!enLista.has(f.id)) out.push(f);
-      }
-      setVecinosFuera(out);
-    } catch { setVecinosFuera([]); }
-  };
-
   const cargarPaxContratado = async (rows: Reserva[]) => {
     try {
       const cotIds = [...new Set(rows.map(r => r.cotizacion_id).filter((v): v is number => v != null))];

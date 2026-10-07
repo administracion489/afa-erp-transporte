@@ -280,7 +280,8 @@ export async function POST(req: NextRequest) {
       if (ruta_nombre !== undefined)             patch.ruta_nombre             = ruta_nombre || null;
       // Desmarcar deja la fecha (con el reloj del servidor) y la hereda el próximo programa del
       // contrato; marcar la borra. Ver lib/reservas-autoseleccion.ts.
-      if (permite_autoseleccion !== undefined)   Object.assign(patch, patchAutoseleccionDeOperador(Boolean(permite_autoseleccion)));
+      // Solo un booleano: un null colado no puede convertirse en un desmarcado con fecha.
+      if (typeof permite_autoseleccion === "boolean") Object.assign(patch, patchAutoseleccionDeOperador(permite_autoseleccion));
       if (permite_cambio_paradero !== undefined) patch.permite_cambio_paradero = Boolean(permite_cambio_paradero);
       if (Object.keys(patch).length === 0) return NextResponse.json({ ok: true });
 
