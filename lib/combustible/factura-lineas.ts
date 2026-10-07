@@ -333,6 +333,15 @@ export const esCargaDeFactura = (observaciones?: string | null): boolean =>
   String(observaciones ?? "").includes(MARCA_CARGA_DE_FACTURA);
 
 /**
+ * El comprobante (`serie-número`) que `observacionCargaDeFactura` dejó escrito, o null. Vive pegado a
+ * quien lo escribe: la cola de cargas por completar y el enlace a la factura lo leen por aquí.
+ */
+export function referenciaEnObservacion(observaciones?: string | null): string | null {
+  const ref = new RegExp(`${MARCA_CARGA_DE_FACTURA}\\s+(\\S+)`).exec(String(observaciones ?? ""))?.[1] ?? null;
+  return ref && ref !== "-" ? ref : null;
+}
+
+/**
  * Cómo queda marcada una carga de FACTURA que se FUSIONÓ con el voucher que leyó el Radar
  * (lib/radar/fusion-factura.ts): su fecha ya no es la de emisión sino la del despacho, impresa en el
  * voucher. La leen «Moverlas a la fecha del despacho» (cargasPorMover no la toca: su fecha ya es la

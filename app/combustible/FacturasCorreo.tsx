@@ -23,6 +23,7 @@ import { avisoSaludEnFacturas, type SaludRadar } from "@/lib/radar/salud";
 import { leerSaludRadar } from "@/lib/radar/salud-datos";
 import CorreoFacturas from "./CorreoFacturas";
 import CargasPorCompletar from "./CargasPorCompletar";
+import { BotonesFactura } from "@/components/combustible/FacturaDelCorreo";
 
 const S = (n: number | null | undefined) =>
   n == null ? "—" : `S/ ${Number(n).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -543,7 +544,10 @@ export default function FacturasCorreo() {
                     <tr className="bg-gray-50"><td colSpan={7} className="p-3 space-y-2">
                       {f.error && <div className="text-xs text-red-700">{f.error}</div>}
                       {f.diferencia_detalle && <div className="text-xs text-amber-800">{f.diferencia_detalle}</div>}
-                      {f.gmail_message_id && <a href={`https://mail.google.com/mail/u/0/#all/${f.gmail_message_id}`} target="_blank" rel="noreferrer" className="text-xs text-[#1d4ed8] font-bold hover:underline">Abrir el correo en Gmail ↗</a>}
+                      {/* El documento, bajado del correo por el ERP, y el correo en la cuenta del buzón (antes
+                          `u/0`: con dos cuentas abiertas Gmail lo buscaba en la equivocada). Un correo que no
+                          trae la factura no ofrece «Ver la factura»: ya se sabe que no hay qué ver. */}
+                      {f.gmail_message_id && <BotonesFactura factura={f} conDocumento={f.estado !== "sin_adjunto"} />}
                       {lineas.map((l) => {
                         const p = plan.find((x) => x.n === l.n);
                         // Lo del historial no es un problema de la línea: es una decisión pendiente.

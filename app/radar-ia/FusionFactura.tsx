@@ -11,7 +11,9 @@
 // las fotos del tablero y del surtidor. Aquí se busca la carga con la MISMA regla con que el Radar la
 // encontró (buscarCargaRegistrada) y se enseña, ANTES del clic, lo que ya tiene la carga al lado de lo
 // que trae esta fila. Si no se encontró por la nota de despacho —misma unidad, día e importe— quien
-// revisa marca que comparó las fotos antes de poder fusionar. Escribe la página (onFusionar).
+// revisa marca que comparó las fotos antes de poder fusionar. Escribe la página (onFusionar). Si a la
+// carga la registró (o la respalda) una factura del correo, su documento está a un clic
+// (components/combustible/FacturaDelCorreo.tsx): se compara contra el papel sin salir de aquí.
 //
 // SE PREGUNTA EN CADA FILA POR REVISAR, no solo en las que el Radar marcó al procesarlas: la factura
 // puede registrar la carga DESPUÉS, mientras la recarga sigue esperando revisión, y entonces la fila
@@ -29,6 +31,7 @@ import {
 import { fotosPorCarga, type FilaConFotos, type FotoLeida, type MediaDeMensaje } from "@/lib/radar/fotos-lectura";
 import { notasEnTexto } from "@/lib/combustible/factura-lineas";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
+import FacturaDelCorreo from "@/components/combustible/FacturaDelCorreo";
 import type { RadarCombustible } from "@/lib/radar/tipos";
 
 const sumar = (f: string, n: number) => new Date(Date.parse(`${f}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
@@ -186,6 +189,15 @@ export default function FusionFactura({ c, unidad, voucher, ocupado, onFusionar,
         🔗 Es la carga #{carga.id} {sumar_ ? "que ya está en Combustible" : "que entró desde la factura del correo"} ({F(carga.fecha)}{carga.total != null ? `, S/ ${carga.total.toFixed(2)}` : ""}).
       </p>
       <p className="text-gray-700">{plan.detalle}</p>
+
+      {/* La factura del correo que la registró (o la respalda), con el documento a un clic: verificar
+          contra el papel sin ir a Combustible → Facturas a buscarla entre cientos. */}
+      <FacturaDelCorreo busqueda={{ carga: {
+        id: carga.id,
+        observaciones: carga.observaciones,
+        comprobante_serie: (r.fila.comprobante_serie as string) ?? null,
+        comprobante_numero: (r.fila.comprobante_numero as string) ?? null,
+      } }} />
 
       {/* LO QUE YA TIENE LA CARGA, al lado de lo que trae esta fila: para verificar sin salir de aquí. Con
           dos unidades distintas también: es lo que dice cuál de las dos placas está mal. */}

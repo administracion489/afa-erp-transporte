@@ -34,6 +34,9 @@ type Combustible = {
   tanque_lleno?: boolean | null;
   tanque_lleno_fuente?: string | null;
   km_salto_motivo?: string | null;
+  // Columnas fiscales (finanzas-02): las escribe la conciliación de la factura del correo.
+  comprobante_serie?: string | null;
+  comprobante_numero?: string | null;
 };
 
 // Lo que el Radar IA guarda de la carga que él mismo registró. `combustible` no guarda NADA
@@ -57,6 +60,7 @@ import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
 import ComparacionPeriodo from "./ComparacionPeriodo";
 import SaldoCuenta from "./SaldoCuenta";
 import FacturasCorreo from "./FacturasCorreo";
+import FacturaDelCorreo from "@/components/combustible/FacturaDelCorreo";
 import { esCargaDeFactura } from "@/lib/combustible/factura-lineas";
 import { faltaOdometroDeFactura } from "@/lib/combustible/completar-carga";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
@@ -1470,6 +1474,13 @@ export default function CombustiblePage() {
                                   </p>
                                 );
                               })()}
+                              {/* La factura del correo que la registró o la respalda, con su documento a un clic. */}
+                              <div className="mt-3">
+                                <FacturaDelCorreo busqueda={{ carga: {
+                                  id: r.id, observaciones: r.observaciones,
+                                  comprobante_serie: r.comprobante_serie ?? null, comprobante_numero: r.comprobante_numero ?? null,
+                                } }} />
+                              </div>
                             </td>
                           </tr>
                         )}
