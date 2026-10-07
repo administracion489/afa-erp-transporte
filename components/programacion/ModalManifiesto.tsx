@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
 // La huella de ruta ya no se define aquí: la comparten esta pantalla y el renombrado en lote
@@ -167,6 +167,7 @@ export default function ModalManifiesto(props: Props) {
   const [permiteCambioParadero, setPermiteCambioParadero] = useState(false);
   const [configGuardando,       setConfigGuardando]       = useState(false);
   const [fechaServicio,         setFechaServicio]         = useState("");
+  const [configCargada,         setConfigCargada]         = useState(false);
 
   // ── Aplicar config a rango de fechas ────────────────────────────────────
   const [modalConfigRango, setModalConfigRango] = useState(false);
@@ -395,20 +396,23 @@ export default function ModalManifiesto(props: Props) {
 
   useEffect(() => { cargar(); /* eslint-disable-next-line */ }, [reservaId]);
 
-  // Carga los 3 campos de config + fecha_servicio al abrir el modal
-  useEffect(() => {
-    supabase.from("reservas")
+  // Carga los 3 campos de config + fecha_servicio al abrir el modal. `configCargada` existe para
+  // «Aplicar a rango»: escribe en lote lo que dicen los interruptores, y antes de que llegue la
+  // fila esos dicen «apagado» por defecto — aplicarlo ahí desmarcaría la autoselección de todo un
+  // rango sin que ningún operador la desmarcara (ver lib/reservas-autoseleccion.ts).
+  const cargarConfig = useCallback(async () => {
+    const res: any = await supabase.from("reservas")
       .select("ruta_nombre,permite_autoseleccion,permite_cambio_paradero,fecha_servicio")
-      .eq("id", reservaId).maybeSingle()
-      .then((res: any) => {
-        const cfg = res.data;
-        if (!cfg) return;
-        setRutaNombre(cfg.ruta_nombre || "");
-        setPermiteAutoseleccion(!!cfg.permite_autoseleccion);
-        setPermiteCambioParadero(!!cfg.permite_cambio_paradero);
-        setFechaServicio(cfg.fecha_servicio || "");
-      });
+      .eq("id", reservaId).maybeSingle();
+    const cfg = res.data;
+    if (!cfg) return;
+    setRutaNombre(cfg.ruta_nombre || "");
+    setPermiteAutoseleccion(!!cfg.permite_autoseleccion);
+    setPermiteCambioParadero(!!cfg.permite_cambio_paradero);
+    setFechaServicio(cfg.fecha_servicio || "");
+    setConfigCargada(true);
   }, [reservaId]);
+  useEffect(() => { setConfigCargada(false); void cargarConfig(); }, [cargarConfig]);
 
   // Preview (parte pesada): calcula, al cambiar el rango/servicio, qué reservas
   // comparten la MISMA ruta que el actual (mismos paraderos + coordenadas, mismo
@@ -1123,7 +1127,15 @@ export default function ModalManifiesto(props: Props) {
 
   const guardarConfig = async (patch: Partial<{ ruta_nombre: string | null; permite_autoseleccion: boolean; permite_cambio_paradero: boolean }>) => {
     setConfigGuardando(true);
-    try { await supabase.from("reservas").update(patch).eq("id", reservaId); }
+    try {
+      const { error } = await supabase.from("reservas").update(patch).eq("id", reservaId);
+      // Un interruptor que se ve apagado y no se guardó deja el servicio ofreciéndose en
+      // /pasajero sin que nadie lo sepa: se dice, y la pantalla vuelve a lo que dice la base.
+      if (error) {
+        setMensaje({ tipo: "err", texto: `No se guardó la configuración: ${error.message}` });
+        await cargarConfig();
+      }
+    }
     finally { setConfigGuardando(false); }
   };
 
@@ -1526,7 +1538,9 @@ export default function ModalManifiesto(props: Props) {
                       <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Aplicar en lote</p>
                       <button
                         onClick={() => setModalConfigRango(true)}
-                        className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors whitespace-nowrap"
+                        disabled={!configCargada}
+                        title={configCargada ? undefined : "Cargando la configuración de este servicio…"}
+                        className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors whitespace-nowrap disabled:opacity-50"
                         style={{ borderColor: "#0b315f", background: "white", color: "#0b315f" }}
                       >
                         📅 Aplicar a rango de fechas

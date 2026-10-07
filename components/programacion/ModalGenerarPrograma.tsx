@@ -6,6 +6,7 @@ import { X, Calendar, RefreshCw, ArrowRight, ArrowLeftRight, Layers, Signpost, P
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { validarEtiquetas, rotuloEtiquetas, patchEtiquetas } from "@/lib/liquidacion-etiquetas";
 import { rutaDelNombre } from "@/lib/liquidacion-etiquetas-propuesta";
+import { AUTOSELECCION_AL_NACER } from "@/lib/reservas-autoseleccion";
 
 type ItemCot = {
   descripcion: string;
@@ -107,6 +108,9 @@ const COLUMNAS_OPCIONALES = [
   "ruta_etiqueta",
   "turno",
   "movil",
+  // «Permitir autoselección» (lib/reservas-autoseleccion.ts): ningún SQL del repo declara la
+  // columna, así que una base sin ella pierde la casilla, nunca el programa.
+  "permite_autoseleccion",
 ] as const;
 
 type ResultadoInsert = { data: any[] | null; error: any; omitidas: string[] };
@@ -563,6 +567,9 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
         cotizacion_id:         cot.id,
         cliente_id:            cot.cliente_id,
         estado:                "pendiente",
+        // Nace marcado: los pasajeros rotan y eligen su servicio en /pasajero. Solo un operador
+        // lo desmarca (ver lib/reservas-autoseleccion.ts). Va en la ida Y en el retorno.
+        permite_autoseleccion: AUTOSELECCION_AL_NACER,
         costo_proveedor:       0,
         tipo_servicio_detalle: cot.tipo_servicio || "transporte_personal",
         lote_generacion:       lote,

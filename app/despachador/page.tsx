@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { etiquetaEstado } from "@/lib/estados";
+import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
@@ -438,7 +439,9 @@ export default function DespachadorPage() {
     const vehiculoIdFinal       = form.tipo_asignacion === "propio"      && form.vehiculo_id ? Number(form.vehiculo_id) : null;
     const vehiculoTerceroIdFinal = form.tipo_asignacion === "tercerizado" && form.vehiculo_id ? Number(form.vehiculo_id) : null;
 
-    const { error: resErr } = await supabase.from("reservas").insert({
+    // Nace con «Permitir autoselección» (lib/reservas-autoseleccion.ts). Sin paraderos no se
+    // ofrece en /pasajero hasta que alguien se los cargue: ver ofrecibleEnAutoseleccion.
+    const { error: resErr } = await insertarServicioNuevo((fila) => supabase.from("reservas").insert(fila), {
       cliente_id:              clienteId,
       conductor_id:            condPropioId,
       vehiculo_id:             vehiculoIdFinal,

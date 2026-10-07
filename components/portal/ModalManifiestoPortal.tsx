@@ -300,7 +300,13 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
   async function guardarConfig(patch: { ruta_nombre?: string; permite_autoseleccion?: boolean; permite_cambio_paradero?: boolean }) {
     setConfigGuardando(true);
     try {
-      await callApi({ action: "actualizar_config", cliente_id: clienteId, reserva_id: reservaId, ...patch });
+      const { ok, data } = await callApi({ action: "actualizar_config", cliente_id: clienteId, reserva_id: reservaId, ...patch });
+      // Un interruptor que se ve apagado y no se guardó deja el servicio ofreciéndose en la app del
+      // pasajero sin que nadie lo sepa: se dice, y la pantalla vuelve a lo que dice la base.
+      if (!ok) {
+        alert(`No se guardó la configuración: ${data?.error ?? "error desconocido"}`);
+        await cargar();
+      }
     } finally {
       setConfigGuardando(false);
     }

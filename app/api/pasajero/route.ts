@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { firmarTokenPasajero, pidDeToken, loginBloqueado, registrarIntentoFallido, limpiarIntentos } from "@/lib/pasajero-auth";
 import { firmarUrl } from "@/lib/storage-firmado";
+import { ofrecibleEnAutoseleccion } from "@/lib/reservas-autoseleccion";
 import { randomUUID } from "node:crypto";
 
 /** Foto de perfil: el bucket es privado. Lo que se GUARDA es el enlace público (el identificador,
@@ -546,9 +547,12 @@ export async function POST(req: NextRequest) {
         if (!reservasRaw?.length) return NextResponse.json({ reservas: [] });
 
         // Dedup por reserva.id por si la query devolviera duplicados
+        // Sin paraderos no hay nada que elegir: un servicio recién creado (que ya nace con
+        // «Permitir autoselección») saldría como «0 paraderos» y, con otro igual a la misma hora,
+        // compartiría la clave de agrupación de abajo. Ver ofrecibleEnAutoseleccion.
         const reservas: any[] = Array.from(
           new Map(reservasRaw.map((r: any) => [r.id, r])).values()
-        );
+        ).filter(ofrecibleEnAutoseleccion);
 
         const paradaIds = reservas.flatMap((r: any) => (r.paradas || []).map((p: any) => p.id));
 
