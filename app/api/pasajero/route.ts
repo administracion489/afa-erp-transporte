@@ -12,6 +12,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { firmarTokenPasajero, pidDeToken, loginBloqueado, registrarIntentoFallido, limpiarIntentos } from "@/lib/pasajero-auth";
 import { firmarUrl } from "@/lib/storage-firmado";
+import { ofrecibleEnAutoseleccion } from "@/lib/reservas-autoseleccion";
+import { CUERPO_SESION_INVALIDA } from "@/lib/pasajero-sesion";
 import { randomUUID } from "node:crypto";
 
 /** Foto de perfil: el bucket es privado. Lo que se GUARDA es el enlace público (el identificador,
@@ -156,7 +158,7 @@ export async function POST(req: NextRequest) {
       case "ruta": {
         const pid = pidDeToken(body.token);
         const { hoy } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
         if (!fechaValida(hoy)) return NextResponse.json({ error: "hoy inválido" }, { status: 400 });
 
@@ -273,7 +275,7 @@ export async function POST(req: NextRequest) {
       case "bus_posicion": {
         const pid = pidDeToken(body.token);
         const { reservaId } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!reservaId) return NextResponse.json({ busPosicion: null });
 
         // Pertenencia: el pasajero debe tener una parada en esa reserva.
@@ -297,7 +299,7 @@ export async function POST(req: NextRequest) {
       // guarda en SU carpeta (la del token, no la del body).
       case "subir_foto": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const b64 = typeof body.imagen === "string" ? body.imagen.replace(/^data:[^,]*,/, "") : "";
         const buf = Buffer.from(b64, "base64");
         if (!buf.length || buf.length > MAX_FOTO_BYTES) {
@@ -323,7 +325,7 @@ export async function POST(req: NextRequest) {
       // reabrir la app se pide uno nuevo en vez de pintar uno vencido.
       case "foto_vigente": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const { data, error } = await admin.from("pasajeros").select("foto_url").eq("id", pid).maybeSingle();
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ foto_url: await firmarUrl(admin, data?.foto_url ?? null) });
@@ -338,7 +340,7 @@ export async function POST(req: NextRequest) {
       case "foto": {
         const pid = pidDeToken(body.token);
         const { fotoUrl } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const prefijo = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/${BUCKET_FOTOS}/${pid}/`;
         if (typeof fotoUrl !== "string" || !fotoUrl.startsWith(prefijo)) {
           return NextResponse.json({ error: "URL de foto inválida" }, { status: 400 });
@@ -355,7 +357,7 @@ export async function POST(req: NextRequest) {
       // Solo se actualizan los campos presentes en el body (whitelist), nunca `dni`.
       case "perfil": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
 
         const updates: Record<string, any> = {};
 
@@ -408,7 +410,7 @@ export async function POST(req: NextRequest) {
       // ── Mensaje / reporte al operador ────────────────────────────────────────
       case "mensaje": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const m = body.mensaje || {};
         const texto = String(m.mensaje ?? "").trim().slice(0, 1000);
         if (!texto) return NextResponse.json({ error: "mensaje vacío" }, { status: 400 });
@@ -431,7 +433,7 @@ export async function POST(req: NextRequest) {
       // ── Hilo de chat del pasajero (sus mensajes + respuestas de central/conductor) ──
       case "mensajes": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         let q = admin.from("mensajes_pasajero")
           .select("id, remitente, autor_nombre, tipo, mensaje, leido_pasajero, created_at, reserva_id")
           .eq("pasajero_id", pid)
@@ -446,7 +448,7 @@ export async function POST(req: NextRequest) {
       // ── Marcar como leídas las respuestas de central/conductor ───────────────
       case "mensajes_leidos": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         let q = admin.from("mensajes_pasajero")
           .update({ leido_pasajero: true, leido_pasajero_at: new Date().toISOString() })
           .eq("pasajero_id", pid)
@@ -462,7 +464,7 @@ export async function POST(req: NextRequest) {
       case "cambiar_paradero": {
         const pid = pidDeToken(body.token);
         const { nombreParada, hoy } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!nombreParada || !hoy) return NextResponse.json({ error: "nombreParada y hoy requeridos" }, { status: 400 });
         if (!fechaValida(hoy)) return NextResponse.json({ error: "hoy inválido" }, { status: 400 });
 
@@ -520,7 +522,7 @@ export async function POST(req: NextRequest) {
       case "reservas_disponibles": {
         const pid = pidDeToken(body.token);
         const { hoy } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
 
         const { data: pax } = await admin
@@ -546,9 +548,35 @@ export async function POST(req: NextRequest) {
         if (!reservasRaw?.length) return NextResponse.json({ reservas: [] });
 
         // Dedup por reserva.id por si la query devolviera duplicados
-        const reservas: any[] = Array.from(
+        // Sin paraderos no hay nada que elegir: un servicio recién creado (que ya nace con
+        // «Permitir autoselección») saldría como «0 paraderos» y, con otro igual a la misma hora,
+        // compartiría la clave de agrupación de abajo. Ver ofrecibleEnAutoseleccion.
+        const conParaderos: any[] = Array.from(
           new Map(reservasRaw.map((r: any) => [r.id, r])).values()
-        );
+        ).filter(ofrecibleEnAutoseleccion);
+
+        // Para servicios EN CURSO, ocultar los paraderos que el bus ya pasó
+        // (paradas.estado === "completada", que escribe el conductor al marcar la parada).
+        // Si ya pasó todos, el servicio deja de ser elegible — no tiene sentido subirse a
+        // un paradero que quedó atrás. Los servicios no iniciados pasan sin tocar.
+        const soloVigentes = (r: any): any | null => {
+          if (r.estado !== "en_curso") return r;
+          const ps = (r.paradas || []).filter((p: any) => p.estado !== "completada");
+          if (ps.length === 0) return null;
+          return { ...r, paradas: ps };
+        };
+
+        // Un en_curso que ya no puede estar en ruta (abandonado: el conductor no lo cerró) o
+        // que ya pasó todos sus paraderos se descarta ANTES de agrupar, con el mismo
+        // `enCursoVivo` que usan 'ruta' y 'autoseleccionar'. Agrupado, podía quedar como el
+        // representante de su grupo —misma hora y mismos paraderos que el servicio de hoy— y
+        // tapar al de hoy; ahora que todo servicio nace con la autoselección encendida, el
+        // abandonado de ayer también entra a la consulta.
+        const reservas: any[] = (await Promise.all(conParaderos.map(async (r: any) => {
+          if (r.estado !== "en_curso") return r;
+          if (!soloVigentes(r)) return null;
+          return (await enCursoVivo(admin, r, hoy)) ? r : null;
+        }))).filter(Boolean);
 
         const paradaIds = reservas.flatMap((r: any) => (r.paradas || []).map((p: any) => p.id));
 
@@ -594,17 +622,6 @@ export async function POST(req: NextRequest) {
           return { ...r, capacidad: cap, ocupacion: ocupacion.get(r.id) || 0 };
         });
 
-        // Para servicios EN CURSO, ocultar los paraderos que el bus ya pasó
-        // (paradas.estado === "completada", que escribe el conductor al marcar la parada).
-        // Si ya pasó todos, el servicio deja de ser elegible — no tiene sentido subirse a
-        // un paradero que quedó atrás. Los servicios no iniciados pasan sin tocar.
-        const soloVigentes = (r: any): any | null => {
-          if (r.estado !== "en_curso") return r;
-          const ps = (r.paradas || []).filter((p: any) => p.estado !== "completada");
-          if (ps.length === 0) return null;
-          return { ...r, paradas: ps };
-        };
-
         // Si el operador pre-asignó al pasajero a una reserva específica de hoy,
         // mostrar solo esa reserva sin consolidación. Así su elección de paradero
         // actualiza directamente el manifiesto del bus correcto.
@@ -614,10 +631,10 @@ export async function POST(req: NextRequest) {
             !yaAsignados.has(r.id) &&
             (r.capacidad === null || r.ocupacion < r.capacidad)
           );
-          if (preAsignada) {
-            const f = soloVigentes(preAsignada);
-            return NextResponse.json({ reservas: f ? [f] : [] });
-          }
+          // Si ya no sirve (pasó todos sus paraderos), se sigue a la agrupación en vez de
+          // devolver una lista vacía: el pasajero tiene que poder elegir el servicio siguiente.
+          const f = preAsignada ? soloVigentes(preAsignada) : null;
+          if (f) return NextResponse.json({ reservas: [f] });
         }
 
         // Sin pre-asignación: agrupar por hora de salida + secuencia exacta de coordenadas
@@ -656,7 +673,7 @@ export async function POST(req: NextRequest) {
       case "autoseleccionar": {
         const pid = pidDeToken(body.token);
         const { parada_id } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!parada_id) return NextResponse.json({ error: "parada_id requerido" }, { status: 400 });
 
         // Obtener cliente_id del pasajero
@@ -743,7 +760,7 @@ export async function POST(req: NextRequest) {
       // (un familiar se loguea en el mismo teléfono), la fila se reasigna al pid nuevo.
       case "suscribir_push": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const tipo = body.tipo === "fcm" ? "fcm" : body.tipo === "webpush" ? "webpush" : null;
         if (!tipo) return NextResponse.json({ error: "tipo inválido" }, { status: 400 });
 
@@ -794,7 +811,7 @@ export async function POST(req: NextRequest) {
       // ── Desactivar suscripción push (solo las filas del propio pasajero) ─────
       case "desuscribir_push": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const endpoint = typeof body.endpoint === "string" ? body.endpoint : null;
         const fcmToken = typeof body.fcmToken === "string" ? body.fcmToken : null;
         if (!endpoint && !fcmToken) return NextResponse.json({ error: "endpoint o fcmToken requerido" }, { status: 400 });

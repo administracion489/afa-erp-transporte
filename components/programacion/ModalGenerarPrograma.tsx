@@ -6,6 +6,9 @@ import { X, Calendar, RefreshCw, ArrowRight, ArrowLeftRight, Layers, Signpost, P
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { validarEtiquetas, rotuloEtiquetas, patchEtiquetas } from "@/lib/liquidacion-etiquetas";
 import { rutaDelNombre } from "@/lib/liquidacion-etiquetas-propuesta";
+import { AUTOSELECCION_AL_NACER, herenciaAutoseleccion, camposDeHerencia, avisoHerencia, NACE_MARCADO, type Herencia } from "@/lib/reservas-autoseleccion";
+import { leerAnterioresDelContrato } from "@/lib/reservas-autoseleccion-datos";
+import { sentidoDeReserva } from "@/lib/liquidacion-agrupacion";
 
 type ItemCot = {
   descripcion: string;
@@ -107,6 +110,10 @@ const COLUMNAS_OPCIONALES = [
   "ruta_etiqueta",
   "turno",
   "movil",
+  // «Permitir autoselección» (lib/reservas-autoseleccion.ts): ningún SQL del repo declara la
+  // columna, así que una base sin ella pierde la casilla, nunca el programa.
+  "permite_autoseleccion",
+  "autoseleccion_apagada_en",
 ] as const;
 
 type ResultadoInsert = { data: any[] | null; error: any; omitidas: string[] };
@@ -495,12 +502,49 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
   const confirmar = async () => {
     if (!puedeGenerar || !cot) return;
 
+    // «Permitir autoselección» nace marcado, SALVO que un OPERADOR la haya desmarcado en el último
+    // servicio anterior del contrato en ese sentido (lib/reservas-autoseleccion.ts). Se lee ANTES
+    // del confirm, para que el operador lo vea antes de crear nada. El adicional no hereda: es un
+    // pedido suelto, fuera del contrato.
+    setGenerando(true);
+    const lectura = esAdicional || !fechas.length ? null : await leerAnterioresDelContrato(supabase, cot.id, fechas[0]);
+    setGenerando(false);
+    // El sentido de la ida nueva, con la MISMA función con que se clasificaron las anteriores (un
+    // fijo sin retorno no escribe direccion_servicio: lo decide el nombre, en los dos lados).
+    const sentidoIda = sentidoDeReserva({
+      direccion_servicio: generaRetorno || esAdicional ? "ida" : null,
+      ruta_nombre: nombreIda.trim() || null,
+    } as Parameters<typeof sentidoDeReserva>[0]);
+    const herenciaDe = (sentido: "IDA" | "RETORNO", idxSlot: number): Herencia =>
+      lectura?.estado === "ok"
+        // `esperadas`: cuántos buses se generan. Sin móvil propio que mirar, el día anterior tiene que
+        // tener al menos esos servicios; si faltó uno, su desmarcado no se deduce del de otro.
+        ? herenciaAutoseleccion(lectura.filas, sentido, (etiquetasDeSlot(idxSlot) as { movil?: number | null }).movil ?? null,
+            slotsAGenerar.length)
+        : NACE_MARCADO;
+    const lineasAutosel: string[] = [];
+    if (lectura?.estado === "error") {
+      lineasAutosel.push(`ℹ No se pudo comprobar si el servicio anterior del contrato tenía «Permitir autoselección» desmarcada (${lectura.mensaje}): todos nacen MARCADOS.`);
+    }
+    const tramosNuevos: ("IDA" | "RETORNO")[] = [...(generaIda ? [sentidoIda] : []), ...(generaRetorno ? ["RETORNO" as const] : [])];
+    for (const sentido of tramosNuevos) {
+      const herencias = slotsAGenerar.map((_, i) => herenciaDe(sentido, i));
+      const todasIguales = herencias.every((h) => h.codigo === herencias[0]?.codigo);
+      herencias.forEach((h, i) => {
+        if (todasIguales && i > 0) return;   // una línea por sentido cuando todos los vehículos coinciden
+        const rotulo = todasIguales || !esMultiVehiculo ? sentido : `${sentido} · vehículo ${i + 1}`;
+        const texto = avisoHerencia(h, rotulo, fechas.length * (todasIguales ? slotsAGenerar.length : 1));
+        if (texto) lineasAutosel.push(texto);
+      });
+    }
+    const textoAutosel = lineasAutosel.length ? "\n\n" + lineasAutosel.join("\n\n") : "";
+
     const lineasMsg = esMultiVehiculo
       ? `${numItems} vehículos × ${fechas.length} días`
       : `${fechas.length} ${esAdicional ? "fecha(s)" : "días"}`;
     const retMsg = tramosPorDia === 2 ? " × IDA+RETORNO" : generaRetorno ? " (solo RETORNO)" : "";
     const encabezado = esAdicional ? "¿Generar el ADICIONAL?" : "";
-    if (!confirm(`${encabezado}\n${lineasMsg}${retMsg} = ${totalServicios} servicios en total.`)) return;
+    if (!confirm(`${encabezado}\n${lineasMsg}${retMsg} = ${totalServicios} servicios en total.${textoAutosel}`)) return;
 
     setGenerando(true);
 
@@ -563,6 +607,9 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
         cotizacion_id:         cot.id,
         cliente_id:            cot.cliente_id,
         estado:                "pendiente",
+        // Nace marcado: los pasajeros rotan y eligen su servicio en /pasajero. Solo un operador
+        // lo desmarca (ver lib/reservas-autoseleccion.ts). Va en la ida Y en el retorno.
+        permite_autoseleccion: AUTOSELECCION_AL_NACER,
         costo_proveedor:       0,
         tipo_servicio_detalle: cot.tipo_servicio || "transporte_personal",
         lote_generacion:       lote,
@@ -574,6 +621,9 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
 
       const camposIda = {
         ...camposComunes,
+        // Hereda el DESMARCADO de un operador (lib/reservas-autoseleccion.ts). Va DESPUÉS de los
+        // comunes: pisa el true. Ida y retorno se juzgan por separado.
+        ...camposDeHerencia(herenciaDe(sentidoIda, idxSlot)),
         // Snapshot de lo CONTRATADO: es lo que imprimirá la liquidación, y tiene que
         // sobrevivir a que el contrato se renegocie más adelante.
         capacidad_contratada:  slot.pax_contratado,
@@ -591,6 +641,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
 
       const camposRet = {
         ...camposComunes,
+        ...camposDeHerencia(herenciaDe("RETORNO", idxSlot)),
         // El retorno solo lleva la capacidad contratada cuando ES el servicio (el
         // adicional de solo salida). En un par la lleva la ida, que es la cabeza que
         // lee la liquidación.

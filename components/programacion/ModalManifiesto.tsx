@@ -1,7 +1,10 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { patchAutoseleccionDeOperador, actualizarAutoseleccion, COLUMNA_APAGADA_EN } from "@/lib/reservas-autoseleccion";
+import { faltaColumna } from "@/lib/columna-faltante";
+import { juzgarAutoseleccion, textoAvisoAutoseleccion, type FilaAutoseleccion } from "@/lib/reservas-autoseleccion-aviso";
 import { paginarFilas } from "@/lib/huella";
 // La huella de ruta ya no se define aquí: la comparten esta pantalla y el renombrado en lote
 // de la torre de control. Dos definiciones de "la misma ruta" daban dos lotes distintos.
@@ -64,6 +67,14 @@ type Props = {
   vehiculoTerceroId?: number | null;
   onClose: () => void;
   onChange?: () => void;
+  /** Filas del MISMO contrato, del motor de la lista (lib/reservas-autoseleccion-aviso.ts). */
+  contextoAutoseleccion?: FilaAutoseleccion[];
+  /** Fecha de Lima, la misma con la que juzga la lista. */
+  hoyLima?: string;
+  /** Abrir con ⚙ Configurar ruta desplegado (viene del aviso ámbar). */
+  abrirConfigRuta?: boolean;
+  /** Avisa a la lista lo que se guardó, para que el aviso ámbar no quede viejo. */
+  onConfigGuardada?: (ids: number[], patch: Partial<{ ruta_nombre: string | null; permite_autoseleccion: boolean; permite_cambio_paradero: boolean; autoseleccion_apagada_en: string | null }>) => void;
 };
 
 const ESTADO_PAX: Record<string, { bg: string; color: string }> = {
@@ -108,7 +119,8 @@ async function geocodearParadas(
 
 export default function ModalManifiesto(props: Props) {
   const { reservaId, clienteId, capacidad, sincronizadoApp, fechaSincronizacion,
-    origen, destino, puntoRetorno, paradasJson, cotizacionId, vehiculoId, vehiculoTerceroId, onClose, onChange } = props;
+    origen, destino, puntoRetorno, paradasJson, cotizacionId, vehiculoId, vehiculoTerceroId, onClose, onChange,
+    contextoAutoseleccion, hoyLima, abrirConfigRuta, onConfigGuardada } = props;
 
   const [tab, setTab] = useState<Tab>("pasajeros");
   const [pasajeros, setPasajeros] = useState<PasajeroManifiesto[]>([]);
@@ -161,12 +173,18 @@ export default function ModalManifiesto(props: Props) {
   const [copiando, setCopiando] = useState(false);
 
   // ── Config de ruta ───────────────────────────────────────────────────────
-  const [mostrarConfigRuta,     setMostrarConfigRuta]     = useState(false);
+  const [mostrarConfigRuta,     setMostrarConfigRuta]     = useState(!!abrirConfigRuta);
   const [rutaNombre,            setRutaNombre]            = useState("");
   const [permiteAutoseleccion,  setPermiteAutoseleccion]  = useState(false);
   const [permiteCambioParadero, setPermiteCambioParadero] = useState(false);
   const [configGuardando,       setConfigGuardando]       = useState(false);
   const [fechaServicio,         setFechaServicio]         = useState("");
+  // De QUÉ servicio es la configuración leída: con otro reservaId, todavía no se leyó la suya.
+  const [configLeidaDe,         setConfigLeidaDe]         = useState<number | null>(null);
+  const configCargada = configLeidaDe === reservaId;
+  // Cuándo un OPERADOR desmarcó la autoselección (null = no hay registro; undefined = la base no
+  // tiene la columna). Ver lib/reservas-autoseleccion.ts.
+  const [apagadaEn,             setApagadaEn]             = useState<string | null | undefined>(undefined);
 
   // ── Aplicar config a rango de fechas ────────────────────────────────────
   const [modalConfigRango, setModalConfigRango] = useState(false);
@@ -395,20 +413,47 @@ export default function ModalManifiesto(props: Props) {
 
   useEffect(() => { cargar(); /* eslint-disable-next-line */ }, [reservaId]);
 
-  // Carga los 3 campos de config + fecha_servicio al abrir el modal
-  useEffect(() => {
-    supabase.from("reservas")
-      .select("ruta_nombre,permite_autoseleccion,permite_cambio_paradero,fecha_servicio")
-      .eq("id", reservaId).maybeSingle()
-      .then((res: any) => {
-        const cfg = res.data;
-        if (!cfg) return;
-        setRutaNombre(cfg.ruta_nombre || "");
-        setPermiteAutoseleccion(!!cfg.permite_autoseleccion);
-        setPermiteCambioParadero(!!cfg.permite_cambio_paradero);
-        setFechaServicio(cfg.fecha_servicio || "");
-      });
+  // Carga los 3 campos de config + fecha_servicio al abrir el modal. `configCargada` existe para
+  // «Aplicar a rango»: escribe en lote lo que dicen los interruptores, y antes de que llegue la
+  // fila esos dicen «apagado» por defecto — aplicarlo ahí desmarcaría la autoselección de todo un
+  // rango sin que ningún operador la desmarcara (ver lib/reservas-autoseleccion.ts).
+  const cargarConfig = useCallback(async () => {
+    // La fecha del desmarcado es de una migración accesoria (reservas-06): sin ella se lee lo demás,
+    // o «Aplicar a rango» quedaría esperando una fila que nunca llega.
+    const base = "ruta_nombre,permite_autoseleccion,permite_cambio_paradero,fecha_servicio";
+    let res: any = await supabase.from("reservas").select(`${base},${COLUMNA_APAGADA_EN}`).eq("id", reservaId).maybeSingle();
+    let conRegistro = true;
+    if (res.error && faltaColumna(res.error, COLUMNA_APAGADA_EN)) {
+      conRegistro = false;
+      res = await supabase.from("reservas").select(base).eq("id", reservaId).maybeSingle();
+    }
+    const cfg = res.data;
+    if (!cfg) {
+      // Sin la fila no se sabe qué dicen los interruptores: «Aplicar a rango» queda esperando y
+      // se vuelve a intentar al pulsarlo, en vez de quedar bloqueado sin decir por qué.
+      if (res.error) setMensaje({ tipo: "err", texto: `No se pudo leer la configuración del servicio: ${res.error.message}` });
+      return;
+    }
+    setRutaNombre(cfg.ruta_nombre || "");
+    setPermiteAutoseleccion(!!cfg.permite_autoseleccion);
+    setPermiteCambioParadero(!!cfg.permite_cambio_paradero);
+    setFechaServicio(cfg.fecha_servicio || "");
+    setApagadaEn(conRegistro ? (cfg[COLUMNA_APAGADA_EN] ?? null) : undefined);
+    setConfigLeidaDe(reservaId);
   }, [reservaId]);
+  useEffect(() => { void cargarConfig(); }, [cargarConfig]);
+
+  const avisoAuto = useMemo(() => {
+    const ctx = contextoAutoseleccion ?? [];
+    const yo = ctx.find(f => f.id === reservaId);
+    if (!yo || !hoyLima || !configCargada) return null;
+    // Lo que dice ESTE modal manda sobre la fila de la lista (puede ir un paso por detrás).
+    const v = juzgarAutoseleccion({
+      ...yo, permite_autoseleccion: permiteAutoseleccion,
+      ...(apagadaEn !== undefined ? { autoseleccion_apagada_en: apagadaEn } : {}),
+    }, ctx, hoyLima);
+    return v.avisa ? v : null;
+  }, [contextoAutoseleccion, hoyLima, reservaId, configCargada, permiteAutoseleccion, apagadaEn]);
 
   // Preview (parte pesada): calcula, al cambiar el rango/servicio, qué reservas
   // comparten la MISMA ruta que el actual (mismos paraderos + coordenadas, mismo
@@ -1123,7 +1168,32 @@ export default function ModalManifiesto(props: Props) {
 
   const guardarConfig = async (patch: Partial<{ ruta_nombre: string | null; permite_autoseleccion: boolean; permite_cambio_paradero: boolean }>) => {
     setConfigGuardando(true);
-    try { await supabase.from("reservas").update(patch).eq("id", reservaId); }
+    try {
+      // Desmarcar la autoselección deja la fecha (la hereda el próximo programa del contrato);
+      // marcarla la borra. El nombre y el cambio de paradero no tocan la fecha.
+      const completo: Record<string, unknown> = typeof patch.permite_autoseleccion === "boolean"
+        ? { ...patch, ...patchAutoseleccionDeOperador(patch.permite_autoseleccion) } : patch;
+      const { error, sinRegistro } = await actualizarAutoseleccion(
+        (p) => supabase.from("reservas").update(p).eq("id", reservaId), completo);
+      // Un interruptor que se ve apagado y no se guardó deja el servicio ofreciéndose en
+      // /pasajero sin que nadie lo sepa: se dice, y la pantalla vuelve a lo que dice la base.
+      if (error) {
+        setMensaje({ tipo: "err", texto: `No se guardó la configuración: ${error.message}` });
+        await cargarConfig();
+      } else {
+        // La lista y su aviso ámbar siguen al interruptor, con la fecha si quedó escrita (un
+        // desmarcado con fecha es una decisión y deja de avisar).
+        const escrito: Record<string, unknown> = { ...completo };
+        if (sinRegistro) delete escrito[COLUMNA_APAGADA_EN];
+        onConfigGuardada?.([reservaId], escrito);
+      }
+      if (!error && COLUMNA_APAGADA_EN in completo) {
+        setApagadaEn(sinRegistro ? undefined : (completo[COLUMNA_APAGADA_EN] as string | null));
+        if (sinRegistro && patch.permite_autoseleccion === false) {
+          setMensaje({ tipo: "warn", texto: "Se desmarcó, pero la base no tiene la columna de supabase/reservas-06-autoseleccion-por-defecto.sql: los programas que se generen después para este contrato nacerán MARCADOS igual." });
+        }
+      }
+    }
     finally { setConfigGuardando(false); }
   };
 
@@ -1131,12 +1201,21 @@ export default function ModalManifiesto(props: Props) {
     if (!previewIds.length) return;
     setAplicandoConfig(true);
     try {
-      const { error } = await supabase.from("reservas").update({
+      // Aplicar «Inactivo» al rango es una decisión de operador (el resumen la muestra antes de
+      // aplicar): queda con fecha y la hereda el próximo programa. «Activo» borra las fechas.
+      const patchRango: Record<string, unknown> = {
         ruta_nombre:             rutaNombre.trim() || null,
-        permite_autoseleccion:   permiteAutoseleccion,
         permite_cambio_paradero: permiteCambioParadero,
-      }).in("id", previewIds);
+        ...patchAutoseleccionDeOperador(permiteAutoseleccion),
+      };
+      const { error, sinRegistro } = await actualizarAutoseleccion(
+        (p) => supabase.from("reservas").update(p).in("id", previewIds), patchRango);
       if (error) throw error;
+      if (sinRegistro) delete patchRango[COLUMNA_APAGADA_EN];
+      onConfigGuardada?.(previewIds, patchRango);
+      if (previewIds.includes(reservaId)) {
+        setApagadaEn(sinRegistro ? undefined : (patchRango[COLUMNA_APAGADA_EN] as string | null));
+      }
       setMensaje({ tipo: "ok", texto: `Config aplicada a ${previewIds.length} servicio(s) ✓` });
       setModalConfigRango(false);
       setConfigDesde(""); setConfigHasta("");
@@ -1340,6 +1419,17 @@ export default function ModalManifiesto(props: Props) {
           </div>
         </div>
 
+        {/* Autoselección apagada aquí y encendida en el resto del contrato. Lee el interruptor EN VIVO:
+            desaparece en cuanto el operador lo enciende. Mientras no cargó la configuración, no juzga. */}
+        {avisoAuto && (
+          <div className="mx-6 mt-3 rounded-xl px-4 py-2.5 text-xs flex items-start gap-3 bg-amber-50 border border-amber-200 text-amber-900">
+            <span className="flex-1">⚠ {textoAvisoAutoseleccion(avisoAuto).detalle}</span>
+            <button onClick={() => { setTab("pasajeros"); setMostrarConfigRuta(true); }} className="font-bold underline whitespace-nowrap">
+              ⚙ Configurar ruta
+            </button>
+          </div>
+        )}
+
         {/* TABS */}
         <div className="px-6 pt-3 border-b flex gap-1" style={{ borderColor: "#e2e8f0" }}>
           <button
@@ -1489,9 +1579,12 @@ export default function ModalManifiesto(props: Props) {
                     <label className="flex items-center gap-3 cursor-pointer select-none">
                       <button
                         type="button"
+                        // Hasta leer la fila, el interruptor dice «apagado» por defecto: tocarlo ahí
+                        // guardaría un valor que nadie vio, y la lectura tardía lo taparía en pantalla.
+                        disabled={!configCargada}
                         onClick={() => { const v = !permiteAutoseleccion; setPermiteAutoseleccion(v); guardarConfig({ permite_autoseleccion: v }); }}
                         className="relative flex-shrink-0 transition-colors rounded-full"
-                        style={{ width: 36, height: 20, background: permiteAutoseleccion ? "#0b315f" : "#cbd5e1" }}
+                        style={{ width: 36, height: 20, background: permiteAutoseleccion ? "#0b315f" : "#cbd5e1", opacity: configCargada ? 1 : 0.5 }}
                       >
                         <span className="absolute top-1 transition-all rounded-full bg-white"
                           style={{ width: 14, height: 14, left: permiteAutoseleccion ? 18 : 3, boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
@@ -1525,9 +1618,15 @@ export default function ModalManifiesto(props: Props) {
                     <div className="flex-[0_0_auto] flex flex-col justify-end">
                       <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Aplicar en lote</p>
                       <button
-                        onClick={() => setModalConfigRango(true)}
+                        onClick={async () => {
+                          // Sin la configuración cargada, los interruptores dicen «apagado» por defecto
+                          // y aplicarlos desmarcaría el rango: primero se vuelve a leer.
+                          if (!configCargada) { await cargarConfig(); return; }
+                          setModalConfigRango(true);
+                        }}
+                        title={configCargada ? undefined : "Todavía no se leyó la configuración de este servicio: pulsa para reintentar"}
                         className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors whitespace-nowrap"
-                        style={{ borderColor: "#0b315f", background: "white", color: "#0b315f" }}
+                        style={{ opacity: configCargada ? 1 : 0.6, borderColor: "#0b315f", background: "white", color: "#0b315f" }}
                       >
                         📅 Aplicar a rango de fechas
                       </button>
@@ -1831,6 +1930,16 @@ export default function ModalManifiesto(props: Props) {
                   <p className="text-gray-700">
                     <span className="font-bold">Cambio paradero:</span> {permiteCambioParadero ? "Activo" : "Inactivo"}
                   </p>
+                  {/* Aplicar «Inactivo» queda como decisión de un operador y la heredan los programas que
+                      se generen después: un false del valor por defecto viejo no se convierte en eso en silencio. */}
+                  {!permiteAutoseleccion && (
+                    <p className="mt-2 text-[11px] rounded-lg px-2 py-1" style={{ background: "#fef3c7", color: "#854d0e" }}>
+                      {apagadaEn === null && "Este servicio está desmarcado desde antes de que el ERP registrara quién desmarca. "}
+                      Al aplicar, la autoselección quedará DESMARCADA por un operador en {previewIds.length} servicio(s)
+                      {apagadaEn !== undefined && ", y los programas que se generen después para este contrato y sentido nacerán desmarcados"}.
+                      Si solo querías aplicar el nombre, marca primero «Permitir que pasajeros elijan su paradero».
+                    </p>
+                  )}
                 </div>
 
                 {/* Accesos rápidos */}

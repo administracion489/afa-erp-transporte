@@ -26,6 +26,7 @@ import {
   NIVELES, NIVEL_CFG, nivelDeEquipamiento, equipamientoDeNivel, nivelDeFicha, fichasDelNivel,
   planDeNivel, cotejarUnidadConNivel, etiquetaNivel, type NivelServicio,
 } from "@/lib/costos/nivel-servicio";
+import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -1401,7 +1402,8 @@ export default function CotizacionesPage(){
     const basePayload={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:cot.destino,fecha_servicio:cot.fecha_servicio||new Date().toISOString().split("T")[0],hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null,costo_proveedor:0,ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:cot.paradas_json,hora:pI?.hora||cot.hora_ida,sentido:"ida"})||null};
     const insertParadas=async(reservaId:number)=>{if(ps.length<1)return;await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:reservaId,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));};
     if(!useMulti){
-      const{data:r,error}=await supabase.from("reservas").insert({...basePayload,precio_cliente:cot.precio_cliente,vehiculo_id:cot.vehiculo_flota_id||null,vehiculo_tercero_id:cot.vehiculo_tercero_id||null}).select().single();
+      // Nace con «Permitir autoselección» (lib/reservas-autoseleccion.ts).
+      const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:cot.precio_cliente,vehiculo_id:cot.vehiculo_flota_id||null,vehiculo_tercero_id:cot.vehiculo_tercero_id||null});
       if(error){alert(error.message);return;}
       if(r)await insertParadas(r.id);
       alert(`✅ Reserva creada${ps.length>0?` con ${ps.length} paradas`:""}`);
@@ -1412,7 +1414,7 @@ export default function CotizacionesPage(){
         const{total:gTotal}=calcItems(gItems,cot.incluye_igv!==false);
         const vehFlotaId=k.startsWith("f_")?Number(k.slice(2)):(k==="sin"?cot.vehiculo_flota_id||null:null);
         const vehTercId=k.startsWith("t_")?Number(k.slice(2)):(k==="sin"?cot.vehiculo_tercero_id||null:null);
-        const{data:r,error}=await supabase.from("reservas").insert({...basePayload,precio_cliente:gTotal,vehiculo_id:vehFlotaId,vehiculo_tercero_id:vehTercId}).select().single();
+        const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:gTotal,vehiculo_id:vehFlotaId,vehiculo_tercero_id:vehTercId});
         if(error){alert(error.message);return;}
         if(r&&count===0)await insertParadas(r.id);
         count++;

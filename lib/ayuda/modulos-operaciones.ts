@@ -890,6 +890,30 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "**Mientras el Radar no lea, el combustible de la cuenta de Primax no se pierde:** su factura llega al correo y la registra al día siguiente, pero **sin odómetro** y con la fecha deducida. Esas cargas quedan en **Combustible → 📧 Facturas → ✍ Cargas por completar**, donde alguien pone el km del voucher y confirma la fecha. La misma alerta sale arriba de esa pestaña.\n\n" +
           "**Lo que no llega por el correo** —cargas en otros grifos— hay que registrarlo a mano en Combustible mientras el Radar esté caído.",
       },
+      {
+        pregunta: "En la pestaña Odómetro, ¿cómo veo solo las lecturas pendientes de revisar?",
+        respuesta:
+          "Si hay alguna, la pestaña **ya se abre en ellas**: el botón **⚠ Pendientes de revisar** sale marcado. *Pendiente* es lo que espera a una persona: las **Por revisar** (se aceptan o se corrigen) y las **Rechazadas** (se corrigen). El número de la pestaña cuenta exactamente esas.\n\n" +
+          "Debajo de cada título de columna hay un **filtro**: fechas *desde/hasta* en Fecha, placa y flota en Unidad, km *desde/hasta* en Kilometraje (puedes escribir 23,980 o 23.980), con o sin foto en Foto, y en Estado el estado y el **tipo de problema** (dígito de más, retrocede, salto improbable…). Cada opción dice entre paréntesis **cuántas lecturas hay** con los otros filtros puestos. Pulsar un título **ordena** por esa columna; pulsarlo otra vez invierte el orden.\n\n" +
+          "En una lectura pendiente el **motivo se lee en la misma fila**: es lo que hay que resolver. Con varias placas pendientes, los botones **Por placa** filtran de un clic. Los filtros buscan en **todo** el historial del Radar, no solo en las lecturas más recientes; si te quedas sin filas, **Limpiar filtros** vuelve a mostrarlas todas.",
+      },
+      {
+        pregunta: "Un conductor mandó la foto del tablero sin escribir la placa, ¿a qué unidad la asigna el Radar?",
+        respuesta:
+          "**El tablero no muestra la placa, así que el Radar nunca la elige por cómo se ve la foto.** Busca la unidad en este orden:\n\n" +
+          "1. La placa **escrita** en el mensaje o en los mensajes de al lado (\"placa BUI 2 7 2\", \"cwz-371\").\n" +
+          "2. Si no está escrita, el **número de celular** de quien mandó la foto: lo busca en la ficha de los conductores —propios y de terceros— y toma la **unidad que ese conductor tenía en servicio ese día** en Programación.\n" +
+          "3. Si el número no está en ninguna ficha, el conductor no tenía servicio ese día o tenía dos unidades, la lectura **no se graba sola**: llega una alerta «unidad sin identificar» que dice cuál de esas tres cosas pasó y dónde se arregla.\n\n" +
+          "Para que funcione, el **celular de cada conductor tiene que estar en su ficha**, y el servidor del Radar en la versión **1.4.0** o superior (en los grupos nuevos de WhatsApp, las versiones anteriores no guardan el número de quien escribe).",
+      },
+      {
+        pregunta: "¿Qué significa «⚠ Placa sin confirmar» en la pestaña Odómetro?",
+        respuesta:
+          "Que la lectura está en una placa que **nada respalda**: no está escrita en el mensaje y no es la unidad que manejaba quien mandó la foto. Son lecturas que el Radar grabó **antes** de decidir la unidad por el celular del conductor: la IA eligió la placa por el parecido del tablero. Si quedó **Registrada**, ese km es hoy el **vigente** de una unidad que no era, y puede estar haciendo descartar como «retroceso» las lecturas buenas de los días siguientes.\n\n" +
+          "El botón **⚠ Placa sin confirmar** las muestra todas, en cualquier estado. En cada una:\n" +
+          "- **↪ Pasar a XXX** aparece cuando el Radar sabe de qué unidad es (el conductor tenía esa unidad en servicio ese día). Abre la corrección con la placa ya puesta: la lectura se registra en la unidad correcta con su foto, fecha y hora —y allí se valida como cualquier otra— y se anula en la equivocada.\n" +
+          "- **↪ Corregir unidad** aparece cuando no se sabe: mira la foto y escribe la placa correcta, o déjala vacía para solo anularla.",
+      },
     ],
     relacionadas: [
       { etiqueta: "Inbox CRM", href: "/crm" },

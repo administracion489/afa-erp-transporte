@@ -13,7 +13,12 @@
 // demás queda como alerta + registro para revisión humana. NUNCA se cancela un servicio
 // automáticamente.
 
-import { procedenciaPlaca } from "./procedencia-placa";
+import {
+  decidirUnidad, escritasEnTexto, placaEnTexto, mismaUnidad, motivoDecision,
+  type Remitente, type UnidadRef,
+} from "./procedencia-placa";
+import { cargarFlotaUnidades, remitentesPorDia, claveRemitenteDia } from "./remitente-unidades";
+import { telefonoDeRemitente } from "./cluster-remitente";
 import { registrarLectura, contextoOdometro, juzgarKmDeRecarga, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { capturaDeRecarga } from "@/lib/odometro-tiempo";
@@ -322,10 +327,13 @@ export type ConductorMatch = {
   via: "telefono" | "nombre" | "asignacion";
 };
 
-/** Teléfono peruano (9 díg.) desde un JID de WhatsApp: recorta el device (:NN) y el dominio (@...). */
+/**
+ * Teléfono peruano (9 díg.) desde un JID de WhatsApp, o "" si el jid no es un teléfono. Un
+ * `…@lid` es un identificador interno de WhatsApp, no un número: recortarle los últimos 9
+ * dígitos daba un "teléfono" que no es de nadie (lib/radar/cluster-remitente.ts).
+ */
 function telDeJid(jid?: string | null): string {
-  const base = String(jid ?? "").split("@")[0].split(":")[0];
-  return base.replace(/\D/g, "").slice(-9);
+  return tel9(telefonoDeRemitente(jid));
 }
 
 /**
@@ -390,21 +398,6 @@ async function vehiculoAsignadoAlConductor(sb: any, conductorId: number, fecha: 
     return ids.length === 1 ? Number(ids[0]) : null;
   } catch {
     return null;
-  }
-}
-
-/** TODAS las unidades (ids) que un conductor tiene en servicio en una fecha. */
-async function vehiculosAsignadosAlConductor(sb: any, conductorId: number, fecha: string): Promise<number[]> {
-  try {
-    const { data } = await sb
-      .from("reservas")
-      .select("vehiculo_id")
-      .eq("conductor_id", conductorId)
-      .eq("fecha_servicio", fecha)
-      .neq("estado", "cancelada");
-    return [...new Set(((data as any[]) ?? []).map((r) => Number(r.vehiculo_id)).filter((n) => Number.isFinite(n) && n > 0))];
-  } catch {
-    return [];
   }
 }
 
@@ -1717,9 +1710,45 @@ const SENALES_COMPRA = /voucher|v[au]cher|comprobante|factura|boleta|importe|\bm
 
 async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionOdometro;
-  // Mismo fallback que en combustible: si la IA dejó la placa en "unidad" (p.ej. "CUP 435"
-  // sin guion), el match normalizado la encuentra igual; una referencia informal no matchea nada.
-  const unidad = (await resolverUnidadOdometro(sb, d.placa)) ?? (await resolverUnidadOdometro(sb, d.unidad));
+  // Lo que PROPUSO la IA: una placa que leyó en el texto… o una que eligió por el parecido del
+  // tablero. Aquí todavía no decide nada (ver el bloque siguiente). Mismo fallback que en
+  // combustible: si la dejó en "unidad" ("CUP 435" sin guion), el match normalizado la encuentra.
+  const unidadIA = (await resolverUnidadOdometro(sb, d.placa)) ?? (await resolverUnidadOdometro(sb, d.unidad));
+
+  // ── ¿De qué unidad es el tablero? Lo decide el ERP, no la IA ──────────────────────────
+  // lib/radar/procedencia-placa.ts (casos de "~Cerna", 12/09 y 16/09/2026): la placa ESCRITA en
+  // el mensaje o su ráfaga; si no hay, el NÚMERO de quien mandó la foto y la unidad que ese
+  // conductor —propio o de tercero— tenía en servicio el día del mensaje; si tampoco, la unidad
+  // queda sin identificar y no se graba sola. El parecido del tablero no decide nunca.
+  const fechaAsignacion = fechaLimaDeTs(mensaje.ts_mensaje) ?? fechaLima();
+  const textos = [mensaje.texto, mensaje.transcripcion, mensaje.texto_cluster];
+  const flotaUnidades = await cargarFlotaUnidades(sb);
+  const remitente: Remitente = flotaUnidades
+    ? (await remitentesPorDia(sb, [{ wa: mensaje.remitente_wa, fecha: fechaAsignacion }], flotaUnidades))
+        .get(claveRemitenteDia(mensaje.remitente_wa, fechaAsignacion)) ?? { codigo: "no_se_pudo_leer" }
+    : { codigo: "no_se_pudo_leer" };
+  const refIA: UnidadRef | null = unidadIA ? { flota: unidadIA.flota, id: unidadIA.id, placa: unidadIA.placa } : null;
+  const decision = decidirUnidad({
+    // Sin la flota a mano, al menos se mira si la que propuso la IA está escrita.
+    escritas: flotaUnidades ? escritasEnTexto(flotaUnidades, textos) : refIA && placaEnTexto(refIA.placa, textos) ? [refIA] : [],
+    unidadIA: refIA,
+    remitente,
+  });
+  const unidad: UnidadOdometro | null = decision.unidad
+    ? {
+        id: decision.unidad.id,
+        placa: decision.unidad.placa,
+        flota: decision.unidad.flota,
+        kilometraje_actual:
+          flotaUnidades?.find((x) => mismaUnidad(x, decision.unidad))?.kilometraje_actual
+          ?? (mismaUnidad(refIA, decision.unidad) ? unidadIA!.kilometraje_actual : null),
+      }
+    : null;
+  const motivoUnidad = motivoDecision(decision, { remitente, nombre: mensaje.remitente_nombre, fecha: fechaAsignacion });
+  // La unidad salió del servicio del remitente y la IA había propuesto OTRA por el parecido:
+  // queda dicho, porque es justo lo que este bloque existe para corregir.
+  const iaPropusoOtra =
+    decision.codigo === "asignacion" && decision.propuestaIA != null && !mismaUnidad(decision.propuestaIA, decision.unidad);
 
   // ── ¿Cuál de los números del tablero es el odómetro? ──────────────────────────────────
   // La IA transcribe bien el total y el parcial pero a veces los intercambia de campo (caso
@@ -1766,48 +1795,15 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   // Un odómetro real tiene 3–7 dígitos (una unidad nueva puede ir en cientos de km).
   const kmImplausible = km != null && (kmDigitos < 3 || kmDigitos > 7);
 
-  // Identidad: ¿la unidad de la foto es la que el conductor remitente tenía asignada el día en
-  // que ENVIÓ el mensaje? Solo flota propia (la asignación por reserva usa vehiculo_id). Se usa
-  // el día del mensaje (no la fecha declarada de la lectura). Degrada limpio si no hay match.
-  const fechaAsignacion = fechaLimaDeTs(mensaje.ts_mensaje) ?? fechaLima();
-  let placaAsignadaOtra: string | null = null;
-  let asignadasAlRemitente: number[] = [];
-  if (unidad && mensaje.remitente_wa) {
-    // Solo por TELÉFONO: un nombre que la IA dice haber leído no prueba quién envió la foto.
-    const cond = await matchConductor(sb, { jid: mensaje.remitente_wa });
-    if (cond) {
-      asignadasAlRemitente = await vehiculosAsignadosAlConductor(sb, cond.id, fechaAsignacion);
-      // Conflicto solo con flota propia (la asignación por reserva usa vehiculo_id) y solo si
-      // la asignación del día es única: con dos unidades no se sabe cuál "debería" ser.
-      if (unidad.flota === "propia" && asignadasAlRemitente.length === 1 && asignadasAlRemitente[0] !== unidad.id) {
-        const { data: vAsig } = await sb.from("vehiculos").select("placa").eq("id", asignadasAlRemitente[0]).maybeSingle();
-        placaAsignadaOtra = (vAsig as any)?.placa ?? `#${asignadasAlRemitente[0]}`;
-      }
-    }
-  }
-  // ¿La placa la LEYÓ alguien o la DEDUJO la IA? Un tablero no muestra placa: si no está escrita
-  // en el mensaje (o su ráfaga) y el remitente no tiene esa unidad asignada, la IA la eligió
-  // por parecido del tablero — ver lib/radar/procedencia-placa.ts (caso CWZ-371, 12/09/2026).
-  const procedencia = unidad
-    ? procedenciaPlaca({
-        placa: unidad.placa,
-        unidadId: unidad.flota === "propia" ? unidad.id : null,
-        textos: [mensaje.texto, mensaje.transcripcion, mensaje.texto_cluster],
-        asignadasAlRemitente: unidad.flota === "propia" ? asignadasAlRemitente : [],
-      })
-    : null;
-  const placaSinRespaldo = procedencia === "sin_respaldo";
-  const identidadConflicto = placaAsignadaOtra != null;
-
   const bloqueos: string[] = [];
   if (calidadMala)   bloqueos.push("Foto del tablero ilegible (borrosa/reflejo/oscura) — pedir una nueva foto");
   if (lecturaDudosa) bloqueos.push(`La IA no está segura del número (confianza de lectura ${Math.round((confLectura ?? 0) * 100)}%)`);
   if (kmImplausible) bloqueos.push(`Kilometraje con ${kmDigitos} dígito(s): fuera del rango de un odómetro real`);
-  if (identidadConflicto) bloqueos.push(`La foto es de ${unidad!.placa} pero quien la envió tiene asignada la ${placaAsignadaOtra} hoy — ¿foto de otra unidad?`);
-  // Va como bloqueo a propósito: aquí NO grabar es lo correcto. Un km en la unidad equivocada
-  // se vuelve su vigente y hace descartar como "retroceso" las lecturas buenas de los días
-  // siguientes; una lectura sin grabar solo cuesta teclearla en la unidad correcta.
-  else if (placaSinRespaldo) bloqueos.push(`Placa ${unidad!.placa} SIN CONFIRMAR: no está escrita en el mensaje y quien lo envió no tiene esa unidad asignada hoy — la IA la dedujo por el parecido del tablero. Registra el km a mano en la unidad correcta`);
+  // La unidad no se pudo atar al mensaje ni al servicio del remitente (o se contradicen). Va como
+  // bloqueo a propósito: aquí NO grabar es lo correcto. Un km en la unidad equivocada se vuelve su
+  // vigente y hace descartar como "retroceso" las lecturas buenas de los días siguientes; una
+  // lectura sin grabar solo cuesta teclearla en la unidad correcta.
+  if (motivoUnidad) bloqueos.push(motivoUnidad);
   // OJO: el veredicto del selector NUNCA entra en `bloqueos`. Un bloqueo apaga `puedeAuto` y
   // entonces no se llama a registrarLectura, o sea que la lectura dejaría de existir como fila
   // y desaparecería de "Lecturas por revisar" — que es justo donde el operador la corrige y
@@ -1864,6 +1860,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       if (kmCorregido) avisos.push(`Lectura corregida automáticamente: ${veredicto.motivo}`);
       if (esPrimeraLectura) avisos.push("Es la PRIMERA lectura de esta unidad: se aceptó como base sin poder validarla — confirmar que el número es correcto");
       if (sospechaVoucher) avisos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si en realidad era una recarga de combustible y no solo el odómetro");
+      if (iaPropusoOtra) avisos.push(`La placa no estaba escrita: se registró en ${unidad!.placa}, la unidad que ${mensaje.remitente_nombre?.trim() || "quien mandó la foto"} tenía en servicio ese día. La IA había propuesto ${decision.propuestaIA!.placa} por el parecido del tablero y no se usó`);
       let alertaId: string | null = null;
       if (avisos.length) {
         alertaId = await crearAlerta(sb, {
@@ -1878,7 +1875,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       return {
         accion: "odometro_registrado",
         detalle: `Lectura de ${unidad!.placa}${etiquetaFlota} registrada: ${km!.toLocaleString("es-PE")} km${avisos.length ? " (con aviso de revisión)" : ""}`,
-        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, primera_lectura: esPrimeraLectura, sospecha_voucher: sospechaVoucher, veredicto },
+        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, primera_lectura: esPrimeraLectura, sospecha_voucher: sospechaVoucher, veredicto, unidad_por: decision.codigo, propuesta_ia: decision.propuestaIA?.placa ?? null },
       };
     }
     if (res.ok) {
@@ -1898,7 +1895,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       return {
         accion: "odometro_en_revision",
         detalle: `Lectura capturada pero quedó "${res.estado}" — revisar en ${dondeRevisar}`,
-        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, estado_lectura: res.estado, veredicto },
+        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, estado_lectura: res.estado, veredicto, unidad_por: decision.codigo, propuesta_ia: decision.propuestaIA?.placa ?? null },
       };
     }
     errorRegistro = res.error ?? "error desconocido";
@@ -1908,14 +1905,11 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   const motivos: string[] = [];
   if (config.acciones_automaticas?.odometro !== true) motivos.push("Registro automático de odómetro desactivado en la configuración");
   if (errorRegistro) motivos.push(`No se pudo grabar automáticamente: ${errorRegistro}`);
-  if (!unidad) {
-    if (d.placa) {
-      motivos.push(`Placa ${placaFormato(d.placa)} no está registrada ni en la flota propia ni en la tercerizada`);
-    } else if (d.unidad) {
-      motivos.push(`"${d.unidad}" no coincide con ninguna placa de la flota propia ni tercerizada`);
-    } else {
-      motivos.push("Mensaje sin placa identificable");
-    }
+  // Una placa que la IA nombró y que no existe en ninguna flota también se dice (el porqué de
+  // la unidad sin identificar va en `bloqueos`, con su arreglo).
+  if (!unidad && !unidadIA) {
+    if (d.placa) motivos.push(`Placa ${placaFormato(d.placa)} no está registrada ni en la flota propia ni en la tercerizada`);
+    else if (d.unidad) motivos.push(`"${d.unidad}" no coincide con ninguna placa de la flota propia ni tercerizada`);
   }
   if (km == null) motivos.push("Sin lectura de kilometraje");
   if (!veredicto.autoOk && veredicto.motivo) motivos.push(veredicto.motivo);
@@ -1924,7 +1918,9 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   for (const b of bloqueos) motivos.push(b);
   if (sospechaVoucher) motivos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si era una recarga de combustible");
 
-  const titulo = `🛞 Kilometraje reportado: ${placaSinRespaldo ? `unidad sin identificar (¿${unidad!.placa}?)` : unidad?.placa ?? placaFormato(d.placa) ?? d.unidad ?? "unidad sin identificar"}${etiquetaFlota}${km != null ? ` — ${km.toLocaleString("es-PE")} km` : ""}`;
+  // Sin unidad identificada el título NO nombra la placa que propuso la IA: sería volver a poner,
+  // en la pantalla de quien registra a mano, la placa del parecido del tablero.
+  const titulo = `🛞 Kilometraje reportado: ${unidad?.placa ?? "unidad sin identificar"}${etiquetaFlota}${km != null ? ` — ${km.toLocaleString("es-PE")} km` : ""}`;
   // Si hubo señales de riesgo (foto ilegible, trip como total, otra unidad, posible voucher),
   // la alerta merece "atención"; el simple "falta registrar a mano" queda como "info".
   const severidadManual: SeveridadAlerta = bloqueos.length > 0 || sospechaVoucher ? "atencion" : "info";
@@ -1940,7 +1936,12 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   return {
     accion: "odometro_pendiente",
     detalle: motivos[0] ?? `Requiere registro manual en ${dondeRevisar}`,
-    datos: { alerta_id: alertaId, motivos, kilometraje: km, flota: unidad?.flota ?? null, veredicto },
+    datos: {
+      alerta_id: alertaId, motivos, kilometraje: km, flota: unidad?.flota ?? null, veredicto,
+      unidad_por: decision.codigo, candidatas: decision.candidatas.map((u) => u.placa),
+      // Lo que propuso la IA queda como dato (para auditar el guard), nunca en la alerta.
+      propuesta_ia: decision.propuestaIA?.placa ?? null,
+    },
   };
 }
 

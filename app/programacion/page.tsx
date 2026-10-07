@@ -44,6 +44,8 @@ import {
 } from "@/lib/liquidacion-etiquetas";
 import { armarDias, proponerEtiquetas, type TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { paginarFilas } from "@/lib/huella";
+import { avisosAutoseleccion, unirContexto, cotizacionesAJuzgar, textoAvisoAutoseleccion, COLS_AUTOSELECCION, type FilaAutoseleccion } from "@/lib/reservas-autoseleccion-aviso";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
 function useGoogleMapsLoaded() {
@@ -251,6 +253,9 @@ type Reserva = {
   ruta_etiqueta?: string | null;
   turno?: number | null;
   movil?: number | null;
+  /** «Permitir autoselección» (undefined = la columna no llegó). Ver lib/reservas-autoseleccion-aviso.ts. */
+  permite_autoseleccion?: boolean | null;
+  autoseleccion_apagada_en?: string | null;
 };
 
 type Ocupacion = {
@@ -333,16 +338,25 @@ const COLS_LISTA =
   "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
   "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
   "lote_generacion,origen,destino,ruta_nombre,origen_contractual,precio_cotizado," +
-  "capacidad_contratada,falso_flete,falso_flete_motivo,ruta_etiqueta,turno,movil";
+  "capacidad_contratada,falso_flete,falso_flete_motivo,ruta_etiqueta,turno,movil,permite_autoseleccion," +
+  "autoseleccion_apagada_en";
 
 // Columnas de `reservas` cuya migración es OPCIONAL. PostgREST rechaza el select
 // entero por una columna desconocida, así que pedirlas sin red dejaría la pantalla
 // de Reservas en blanco en cualquier entorno donde el SQL todavía no se corrió.
 // Se reintenta sin ellas: la lista se pinta igual, solo sin el chip de origen.
+/** Cuánto hacia atrás se busca evidencia de que el contrato tiene la autoselección encendida. */
+const DIAS_EVIDENCIA_AUTO = 90;
+
 const COLS_OPCIONALES = [
   "origen_contractual", "precio_cotizado", "capacidad_contratada",
   "falso_flete", "falso_flete_motivo",
   "ruta_etiqueta", "turno", "movil",
+  // «Permitir autoselección»: ningún SQL del repo la declaraba hasta reservas-06. Sin ella, el
+  // aviso ámbar simplemente no sale (la fila llega sin el campo y el motor no la juzga).
+  "permite_autoseleccion",
+  // Quién la desmarcó (reservas-06): sin ella, un desmarcado a propósito también sale en ámbar.
+  "autoseleccion_apagada_en",
 ];
 
 const quitarColumna = (cols: string, col: string) =>
@@ -572,6 +586,11 @@ export default function ReservasPage() {
   // cliente ve en su portal; la capacidad de la unidad asignada es OTRO número y vive
   // en `capacidadDe`. Ver el comentario de la celda de pasajeros.
   const [paxListaMap,  setPaxListaMap]  = useState<Record<number, PaxResuelto>>({});
+  // Servicios ENCENDIDOS de los contratos con algo que juzgar, fuera de la ventana cargada: hacen
+  // que el aviso ámbar de autoselección no dependa del filtro de fechas.
+  const [vecinosFuera, setVecinosFuera] = useState<FilaAutoseleccion[]>([]);
+  const vecinosSeqRef = useRef(0); // turno de la última carga de vecinos (ver cargarVecinosAutoseleccion)
+  const [manifiestoConConfig, setManifiestoConConfig] = useState(false);
   const [loading,      setLoading]      = useState(true); // arranca cargando (evita parpadeo "No hay reservas")
   const [guardando,    setGuardando]    = useState(false);
   const [paradasMap,   setParadasMap]   = useState<Record<number, any[]>>({});
@@ -854,6 +873,33 @@ export default function ReservasPage() {
     }
     setCotMapNum(m);
     setCotMapAsunto(ma);
+  };
+
+  /** Evidencia FUERA de la ventana para el aviso de autoselección: solo las filas ENCENDIDAS de los
+   *  contratos que tienen algo que juzgar (casi nunca hay: entonces no se consulta nada), y solo de
+   *  los últimos `DIAS_EVIDENCIA_AUTO` en adelante — la intención se lee en lo reciente, y un contrato
+   *  de años no tiene por qué traerse entero para contar vecinos. Best-effort: si falla, el aviso se
+   *  queda con lo cargado. `vecinosSeqRef` descarta la respuesta de una carga que ya no es la última. */
+  const cargarVecinosAutoseleccion = async (rows: Reserva[]) => {
+    const seq = ++vecinosSeqRef.current;
+    try {
+      const hoyL = fechaLima();
+      const cotIds = cotizacionesAJuzgar(rows, hoyL);
+      if (!cotIds.length) { if (seq === vecinosSeqRef.current) setVecinosFuera([]); return; }
+      const d = new Date(hoyL + "T00:00:00Z");
+      d.setUTCDate(d.getUTCDate() - DIAS_EVIDENCIA_AUTO);
+      const desde = d.toISOString().slice(0, 10);
+      const enLista = new Set(rows.map(r => r.id));
+      const out: FilaAutoseleccion[] = [];
+      for (let i = 0; i < cotIds.length; i += 100) {
+        const trozo = cotIds.slice(i, i + 100);
+        const filas = await paginarFilas(() => supabase.from("reservas").select(COLS_AUTOSELECCION)
+          .in("cotizacion_id", trozo).eq("permite_autoseleccion", true).neq("estado", "cancelada")
+          .gte("fecha_servicio", desde).order("id"));
+        for (const f of filas) if (!enLista.has(f.id)) out.push(f);
+      }
+      if (seq === vecinosSeqRef.current) setVecinosFuera(out);
+    } catch { if (seq === vecinosSeqRef.current) setVecinosFuera([]); }
   };
 
   /**
@@ -1706,6 +1752,7 @@ export default function ReservasPage() {
     cargarRutas(filas.map((r: any) => r.id));
     // Después de pintar: el contrato es un dato de contraste, no puede retrasar la lista.
     cargarPaxContratado(filas);
+    cargarVecinosAutoseleccion(filas);
   };
 
   // Refresco tras una mutación (guardar, eliminar, aplicar masivo…): lista + totales.
@@ -1733,8 +1780,9 @@ export default function ReservasPage() {
   };
 
   // Abre el modal de manifiesto asegurando que paradas_json esté hidratado primero.
-  const abrirManifiesto = async (id: number) => {
+  const abrirManifiesto = async (id: number, opts?: { config?: boolean }) => {
     await hidratarParadasJson(id);
+    setManifiestoConConfig(!!opts?.config); // desde el aviso de autoselección: abre ⚙ Configurar ruta
     setModalReservaId(id);
   };
 
@@ -3434,6 +3482,23 @@ export default function ReservasPage() {
   }, [filtradas, hoy]);
 
   const reservaModal = modalReservaId ? reservas.find(r => r.id === modalReservaId) : null;
+  // Aviso ámbar: «Permitir autoselección» apagada aquí y encendida en el resto del contrato.
+  const contextoAuto = useMemo(() => unirContexto(reservas, vecinosFuera), [reservas, vecinosFuera]);
+  const autoMap      = useMemo(() => avisosAutoseleccion(contextoAuto, hoy), [contextoAuto, hoy]);
+  /** El chip ámbar de la fila: abre el Manifiesto con ⚙ Configurar ruta desplegado. */
+  const chipAutoseleccion = (id: number) => {
+    const v = autoMap.get(id);
+    if (!v?.avisa) return null;
+    const t = textoAvisoAutoseleccion(v);
+    return (
+      <button
+        onClick={e => { e.stopPropagation(); abrirManifiesto(id, { config: true }); }}
+        title={t.detalle}
+        className="text-[9px] font-black px-1.5 py-0.5 rounded-full"
+        style={{ background: "#fef3c7", color: "#92400e" }}
+      >⚠ {t.chip}</button>
+    );
+  };
 
   return (
     <main className="p-6 space-y-5 max-w-7xl mx-auto">
@@ -4813,6 +4878,15 @@ export default function ReservasPage() {
           cotizacionId={reservaModal.cotizacion_id}
           vehiculoId={reservaModal.vehiculo_id}
           vehiculoTerceroId={(reservaModal as any).vehiculo_tercero_id ?? null}
+          contextoAutoseleccion={reservaModal.cotizacion_id != null ? contextoAuto.filter(f => f.cotizacion_id === reservaModal.cotizacion_id) : []}
+          hoyLima={hoy}
+          abrirConfigRuta={manifiestoConConfig}
+          onConfigGuardada={(ids, patch) => {
+            // La lista y el aviso ámbar siguen al interruptor sin recargar.
+            const set = new Set(ids);
+            setReservas(prev => prev.map(r => set.has(r.id) ? { ...r, ...patch } : r));
+            setVecinosFuera(prev => prev.map(v => set.has(v.id) ? { ...v, ...patch } : v));
+          }}
           onClose={() => setModalReservaId(null)}
           onChange={async () => {
             await cargarOcupaciones();
@@ -4967,6 +5041,21 @@ export default function ReservasPage() {
               <button onClick={() => setMsgPacto("")} className="text-amber-500 hover:text-amber-700">×</button>
             </div>
           )}
+
+          {/* Autoselección apagada mientras el resto del contrato la tiene encendida. No va en
+              avisosDe: no es dinero, y este formulario no escribe esa casilla (vive en el Manifiesto). */}
+          {(() => {
+            const v = editandoId ? autoMap.get(editandoId) : undefined;
+            if (!v?.avisa) return null;
+            return (
+              <div className="rounded-xl px-4 py-3 text-xs bg-amber-50 border border-amber-200 text-amber-800 flex items-start gap-3">
+                <span className="flex-1">⚠ {textoAvisoAutoseleccion(v).detalle}</span>
+                <button onClick={() => abrirManifiesto(editandoId!, { config: true })} className="font-bold underline whitespace-nowrap">
+                  Abrir Pax → ⚙ Configurar ruta
+                </button>
+              </div>
+            );
+          })()}
 
           {/* Lo que ya está pactado, leído del propio servicio: el operador ve con quién
               y en cuánto se quedó antes de tocar nada. */}
@@ -5833,6 +5922,7 @@ export default function ReservasPage() {
                 const pendientesG  = filas.filter(r => r.estado === "pendiente").length;
                 const programadasG = filas.filter(r => r.estado === "programada").length;
                 const finalizadasG = filas.filter(r => r.estado === "finalizada").length;
+                const sinAutoG     = filas.filter(r => autoMap.get(r.id)?.avisa).length;
                 const totalIngreso  = filas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
                 // Precio/día = ingreso total ÷ fechas únicas (correcto para multi-vehículo e IDA+RETORNO)
                 const fechasUnicas  = new Set(filas.map(r => r.fecha_servicio)).size;
@@ -5874,6 +5964,12 @@ export default function ReservasPage() {
                           {pendientesG > 0  && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={{ background: "#fef9c3", color: "#854d0e" }}>{pendientesG} pendientes</span>}
                           {programadasG > 0 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={{ background: "#e0f2fe", color: "#0369a1" }}>{programadasG} programadas</span>}
                           {finalizadasG > 0 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={{ background: "#ede9fe", color: "#6d28d9" }}>{finalizadasG} finalizadas</span>}
+                          {sinAutoG > 0 && (
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#92400e" }}
+                              title="Servicios vigentes con «Permitir que pasajeros elijan su paradero» apagada mientras otros del mismo contrato y sentido la tienen encendida">
+                              ⚠ {sinAutoG} sin autoselección
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -5949,6 +6045,7 @@ export default function ReservasPage() {
                                           {origenDe(r)}
                                         </span>
                                       )}
+                                      {chipAutoseleccion(r.id)}
                                     </div>
                                   </td>
                                   <td className="px-4 py-2.5 capitalize text-gray-500">{diaSem}</td>
@@ -6092,6 +6189,7 @@ export default function ReservasPage() {
                             return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-white" style={{ border: `1.5px solid ${cfg.color}`, color: cfg.color }}>🧾 {cfg.label}</span>;
                           })()}
                           {sob && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">SOBRECUPO</span>}
+                          {chipAutoseleccion(r.id)}
                         </div>
                         <div className="text-xs text-gray-400 mt-0.5 truncate">{rutaDe(r).o} → {rutaDe(r).d}</div>
                         <div className="text-xs text-gray-400 mt-0.5">
@@ -6327,6 +6425,7 @@ export default function ReservasPage() {
                               </span>
                             );
                           })()}
+                          {chipAutoseleccion(r.id)}
                         </div>
                       </td>
 

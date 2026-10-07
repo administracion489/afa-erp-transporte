@@ -61,6 +61,12 @@ export type MotivoDescarte =
   | "invalida"
   | "absurda"
   | "retrocede"
+  /**
+   * Aceptada, pero MÁS ALTA que las lecturas que vinieron después: casi siempre una lectura
+   * equivocada (dígito de más, foto de otra unidad). Queda fuera del recorrido para no borrar
+   * todas las jornadas siguientes, y se NOMBRA: mientras siga aceptada infla el km vigente.
+   */
+  | "no_encaja"
   | "duplicada_exacta";
 
 export type Descartada = { lectura: LecturaCruda; motivo: MotivoDescarte; detalle: string };
@@ -94,6 +100,12 @@ export type DiaRecorrido = {
    * tenía que adivinarla, y si su foto quedaba fuera de las miniaturas ni siquiera la veía.
    */
   sospechosaId: string | null;
+  /**
+   * Lecturas ACEPTADAS de ese día que quedaron fuera del recorrido porque son más altas que las
+   * posteriores (`no_encaja`). Viajan aparte de `lecturas` —no cuentan para primera/última ni
+   * para `nLecturas`— pero se enseñan en la fila para poder corregirlas.
+   */
+  fueraDeSecuencia: LecturaCruda[];
 };
 
 export type TipoAnomalia =
@@ -101,6 +113,7 @@ export type TipoAnomalia =
   | "bajo"
   | "retroceso"
   | "duplicada"
+  | "no_encaja"
   | "sin_recorrido";
 
 export type Severidad = "info" | "advertencia" | "critico";
@@ -193,7 +206,20 @@ export const KM_DIA_MAX_DEFECTO = 1500;
  *   - rechazada
  *   - inválida (no numérica, ≤ 0)
  *   - absurda (> tope absoluto)
- *   - retrocede (km < base vigente y no es reinicio) → posible error/manipulación
+ *   - retrocede (km por debajo de la secuencia y no es reinicio) → posible error/manipulación
+ *   - no_encaja (km por ENCIMA de las lecturas posteriores) → casi siempre una lectura equivocada
+ *
+ * LA SECUENCIA ES LA CADENA COHERENTE MÁS LARGA, NO UN TRINQUETE. Antes se tomaba el km más alto
+ * visto como base y se descartaba todo lo que viniera por debajo: UNA sola lectura alta equivocada
+ * y aceptada —el 24,484 de la CWZ-371 del 12/09 (foto de otra unidad), o el que abrió la OT #6
+ * «servicio de los 20 000 km»— borraba TODAS las jornadas siguientes como «retroceso», sin aviso:
+ * «Sin jornadas en el filtro» con la unidad trabajando y leyendo odómetro cada día. Ahora se elige
+ * la secuencia no decreciente con MÁS lecturas (y, entre las de igual largo, la que conserva las
+ * más tempranas): la lectura aislada que contradice a todas las demás es la que sale.
+ *
+ * Cuando el trinquete ya daba la cadena más larga —todo historial sin una lectura alta suelta—,
+ * el resultado es IDÉNTICO al de antes, lectura por lectura y con el mismo texto
+ * (scripts/prueba-saneo-odometro.mts lo compara contra el algoritmo viejo copiado literal).
  */
 export function sanearLecturas(
   lecturas: LecturaCruda[],
@@ -203,64 +229,128 @@ export function sanearLecturas(
   const soloAceptadas = opts.soloAceptadas !== false; // default true
 
   const ordenadas = [...(lecturas || [])].sort(ordenTemporal);
-
-  const limpias: LecturaSana[] = [];
-  const descartadas: Descartada[] = [];
-  let base = 0; // km vigente de la secuencia saneada
   const hoy = hoyLima();
 
-  for (const l of ordenadas) {
+  // Paso 1 · filtros por fila (no dependen de las demás). Lo que pasa es candidato a la secuencia.
+  const veredicto: (Descartada | null)[] = new Array(ordenadas.length).fill(null);
+  const candidatas: number[] = []; // índices en `ordenadas`
+  ordenadas.forEach((l, i) => {
     const km = Number(l.km);
-    const key = claveVehiculo(l);
-
     if (l.estado === "rechazada" || l.estado === "anulada") {
-      descartadas.push({ lectura: l, motivo: "rechazada", detalle: l.estado === "anulada" ? "Lectura anulada" : "Lectura rechazada" });
-      continue;
+      veredicto[i] = { lectura: l, motivo: "rechazada", detalle: l.estado === "anulada" ? "Lectura anulada" : "Lectura rechazada" };
+    } else if (!Number.isFinite(km) || km <= 0) {
+      veredicto[i] = { lectura: l, motivo: "invalida", detalle: "Kilometraje inválido o ≤ 0" };
+    } else if (km > kmTope) {
+      veredicto[i] = { lectura: l, motivo: "absurda", detalle: `Valor absurdo: ${km.toLocaleString("es-PE")} km` };
+    } else if (l.fecha > hoy) {
+      // Lectura del futuro (reloj adelantado): no debe mover el vigente ni la jornada.
+      // (Solo se descartan las de fecha estrictamente posterior a hoy-Lima; el mismo día vale.)
+      veredicto[i] = { lectura: l, motivo: "invalida", detalle: `Fecha futura (${l.fecha}) — revisar reloj del dispositivo` };
+    } else if (l.estado !== "reinicio" && soloAceptadas && l.estado !== "aceptada") {
+      veredicto[i] = { lectura: l, motivo: "no_aceptada", detalle: "Pendiente de revisión (no aceptada)" };
+    } else {
+      candidatas.push(i);
     }
-    if (!Number.isFinite(km) || km <= 0) {
-      descartadas.push({ lectura: l, motivo: "invalida", detalle: "Kilometraje inválido o ≤ 0" });
-      continue;
-    }
-    if (km > kmTope) {
-      descartadas.push({ lectura: l, motivo: "absurda", detalle: `Valor absurdo: ${km.toLocaleString("es-PE")} km` });
-      continue;
-    }
-    // Lectura del futuro (reloj adelantado): no debe mover el vigente ni la jornada.
-    // (Solo se descartan las de fecha estrictamente posterior a hoy-Lima; el mismo día vale.)
-    if (l.fecha > hoy) {
-      descartadas.push({ lectura: l, motivo: "invalida", detalle: `Fecha futura (${l.fecha}) — revisar reloj del dispositivo` });
-      continue;
-    }
+  });
 
-    // Reinicio de tablero: re-ancla la base (aunque sea menor) y se conserva.
-    if (l.estado === "reinicio") {
-      base = km;
-      limpias.push({ ...l, key, esReinicio: true });
-      continue;
+  // Paso 2 · la secuencia, por tramos. Un reinicio de tablero abre un tramo nuevo: se conserva
+  // siempre y es el PISO de lo que sigue (aunque sea menor que lo anterior).
+  const conserva = new Set<number>();
+  const tramos: { piso: number; idx: number[] }[] = [{ piso: 0, idx: [] }];
+  for (const i of candidatas) {
+    if (ordenadas[i].estado === "reinicio") {
+      conserva.add(i);
+      tramos.push({ piso: Number(ordenadas[i].km), idx: [] });
+    } else {
+      tramos[tramos.length - 1].idx.push(i);
     }
+  }
+  for (const t of tramos) {
+    const kms = t.idx.map((i) => Number(ordenadas[i].km));
+    const sigue = cadenaMasLarga(kms, t.piso);
+    t.idx.forEach((i, j) => { if (sigue[j]) conserva.add(i); });
 
-    if (soloAceptadas && l.estado !== "aceptada") {
-      descartadas.push({ lectura: l, motivo: "no_aceptada", detalle: "Pendiente de revisión (no aceptada)" });
-      continue;
-    }
-
-    if (base > 0 && km < base) {
-      descartadas.push({
+    // Lo que no entró se clasifica contra la cadena: por debajo de lo ya conservado → retrocede
+    // (mismo texto de siempre: el km frente a la base vigente en ese momento); por encima de lo
+    // que vino después → no encaja. Una lectura que cabe entre sus vecinas nunca queda fuera:
+    // la cadena es la más larga, así que la habría incluido.
+    let base = t.piso;
+    t.idx.forEach((i, j) => {
+      const km = kms[j];
+      if (sigue[j]) { if (km > base) base = km; return; }
+      const l = ordenadas[i];
+      if (km < base) {
+        veredicto[i] = { lectura: l, motivo: "retrocede", detalle: `Retrocede: ${km.toLocaleString("es-PE")} < ${base.toLocaleString("es-PE")}` };
+        return;
+      }
+      const posteriores = t.idx.slice(j + 1).filter((x, n) => sigue[j + 1 + n] && kms[j + 1 + n] < km);
+      const sig = posteriores.length ? ordenadas[posteriores[0]] : null;
+      veredicto[i] = {
         lectura: l,
-        motivo: "retrocede",
-        detalle: `Retrocede: ${km.toLocaleString("es-PE")} < ${base.toLocaleString("es-PE")}`,
-      });
-      continue;
-    }
+        motivo: "no_encaja",
+        detalle: sig
+          ? `No encaja: ${km.toLocaleString("es-PE")} km es más que ${posteriores.length} lectura(s) posterior(es) — la siguiente, ${Number(sig.km).toLocaleString("es-PE")} km del ${sig.fecha.slice(8, 10)}/${sig.fecha.slice(5, 7)}/${sig.fecha.slice(0, 4)}. Probable lectura equivocada: anúlala o corrígela.`
+          : `No encaja con la secuencia del odómetro (${km.toLocaleString("es-PE")} km). Probable lectura equivocada: anúlala o corrígela.`,
+      };
+    });
+  }
 
+  // Paso 3 · en orden temporal, como siempre.
+  const limpias: LecturaSana[] = [];
+  const descartadas: Descartada[] = [];
+  ordenadas.forEach((l, i) => {
     // Los duplicados exactos (mismo km) se CONSERVAN: un bus parqueado con check-in y
     // check-out iguales es una jornada legítima de 0 km. La jornada los marca como anomalía
     // 'duplicada' en recorridosDiarios (no se descartan aquí para no romper ese caso).
-    limpias.push({ ...l, key, esReinicio: false });
-    if (km > base) base = km;
-  }
-
+    if (conserva.has(i)) limpias.push({ ...l, key: claveVehiculo(l), esReinicio: l.estado === "reinicio" });
+    else if (veredicto[i]) descartadas.push(veredicto[i]!);
+  });
   return { limpias, descartadas };
+}
+
+/**
+ * La subsecuencia NO DECRECIENTE más larga de `kms` con todo ≥ `piso`; entre las de igual largo,
+ * la lexicográficamente menor por posición (la que conserva las lecturas más tempranas). Esa
+ * regla de desempate es la que hace que coincida con el trinquete de antes siempre que el
+ * trinquete ya fuera óptimo: el trinquete toma, en cada paso, la lectura más temprana que no baja.
+ * O(n log n): el largo de la mejor cadena que EMPIEZA en cada posición, con un árbol de Fenwick
+ * de máximos sobre los km comprimidos, recorriendo de derecha a izquierda.
+ */
+function cadenaMasLarga(kms: number[], piso: number): boolean[] {
+  const n = kms.length;
+  const sigue = new Array<boolean>(n).fill(false);
+  if (!n) return sigue;
+  const valores = [...new Set(kms)].sort((a, b) => a - b);
+  const m = valores.length;
+  // Rango invertido: el km más alto va primero, así «km ≥ x» es un prefijo del árbol.
+  const rango = (km: number) => m - lowerBound(valores, km); // 1..m
+  const arbol = new Array<number>(m + 1).fill(0);
+  const consultar = (r: number) => { let s = 0; for (; r > 0; r -= r & -r) s = Math.max(s, arbol[r]); return s; };
+  const actualizar = (r: number, v: number) => { for (; r <= m; r += r & -r) arbol[r] = Math.max(arbol[r], v); };
+
+  const largo = new Array<number>(n).fill(0); // mejor cadena que empieza en i
+  for (let i = n - 1; i >= 0; i--) {
+    if (kms[i] < piso) continue;
+    const r = rango(kms[i]);
+    largo[i] = 1 + consultar(r);
+    actualizar(r, largo[i]);
+  }
+  let falta = Math.max(0, ...largo);
+  let ultimo = piso;
+  for (let i = 0; i < n && falta > 0; i++) {
+    if (kms[i] >= ultimo && largo[i] === falta) {
+      sigue[i] = true;
+      ultimo = kms[i];
+      falta--;
+    }
+  }
+  return sigue;
+}
+
+function lowerBound(a: number[], x: number): number {
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
 }
 
 /** Orden temporal estable: por fecha (día) y luego por hora efectiva de captura. */
@@ -397,6 +487,7 @@ export function recorridosDiarios(limpias: LecturaSana[], kmDiaMax = KM_DIA_MAX_
       anomalias,
       lecturas: orden,
       sospechosaId,
+      fueraDeSecuencia: [],
     });
   }
 
@@ -681,5 +772,16 @@ export function analizarVehiculo(
   const dias = recorridosDiarios(limpias, opts.kmDiaMax && opts.kmDiaMax > 0 ? opts.kmDiaMax : KM_DIA_MAX_DEFECTO);
   const rango = rangoEsperado(dias);
   anotarAnomalias(dias, rango);
+  // La lectura que no encaja se cuelga de SU jornada: quedó fuera del recorrido, pero la fila
+  // tiene que enseñarla para poder corregirla. (Si ese día no le queda ninguna otra lectura, no
+  // hay jornada que la lleve: la pantalla la lista aparte, desde `descartadas`.)
+  const porFecha = new Map(dias.map((d) => [d.fecha, d]));
+  for (const x of descartadas) {
+    if (x.motivo !== "no_encaja") continue;
+    const d = porFecha.get(x.lectura.fecha);
+    if (!d) continue;
+    d.fueraDeSecuencia.push(x.lectura);
+    d.anomalias.push({ tipo: "no_encaja", severidad: "critico", mensaje: x.detalle });
+  }
   return { dias, descartadas, rango };
 }
