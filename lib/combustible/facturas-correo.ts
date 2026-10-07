@@ -29,6 +29,7 @@ import {
 } from "@/lib/combustible/factura-lineas";
 import type { FilaCuenta } from "@/lib/combustible/saldo-datos";
 import { sumarDiasISO } from "@/lib/combustible/saldo-cuenta";
+import { elegirDocumentoFactura } from "@/lib/combustible/factura-de-carga";
 import {
   lineasAlDespacho, esCargaDelRadar, generadaDespues, muestrasDesfase, decidirDesfaseCuenta, diaLima,
   notaFechaDespacho, cargasPorMover, normalizarDesfaseConfig, MAX_DESFASE, sumarDias,
@@ -592,6 +593,64 @@ export async function probarFiltro(sb: any, filtro: string | null | undefined, r
     estimado: Number(j.resultSizeEstimate ?? mensajes.length),
     correo: { email: t.email, fuente: t.fuente },
   };
+}
+
+// ── El documento de una factura, para revisarlo (lib/combustible/factura-de-carga.ts) ──
+
+export type DocumentoFactura =
+  | { ok: true; nombre: string; tipo: "pdf" | "xml"; data: Buffer }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Baja del correo el documento de una factura ya leída —el PDF del comprobante; si no llegó, su
+ * XML— con la MISMA credencial con que se leyó, para enseñarlo junto a la carga que respalda. Nada
+ * se guarda en el ERP: el papel vive en el correo, y una copia sería un segundo original que puede
+ * quedar distinto (y otro bucket más con datos fiscales). Lo que falla se dice con la etapa.
+ */
+export async function documentoDeFactura(sb: Parameters<typeof tokenDeLectura>[0], facturaId: number): Promise<DocumentoFactura> {
+  const { data: f, error } = await sb.from("radar_facturas").select("id, gmail_message_id").eq("id", facturaId).maybeSingle();
+  if (error) return { ok: false, status: 500, error: `No se pudo leer la factura: ${error.message}` };
+  if (!f) return { ok: false, status: 404, error: "Esa factura ya no está en la bandeja del correo." };
+  const id = String(f.gmail_message_id ?? "").trim();
+  if (!id) return { ok: false, status: 409, error: "Esta factura no guarda de qué correo salió." };
+  const t = await tokenDeLectura(sb);
+  if ("error" in t) return { ok: false, status: 409, error: `No se puede abrir el correo: ${t.error}` };
+  const motivo = (e: unknown) => String((e as { message?: string } | null)?.message ?? e);
+  let msg: { payload?: unknown };
+  try {
+    msg = await gget(t.token, `/messages/${encodeURIComponent(id)}?format=full`);
+  } catch (e) {
+    const m = motivo(e);
+    return /not found|invalid id/i.test(m)
+      ? { ok: false, status: 404, error: `El correo ya no está en ${t.email ?? "el buzón conectado"}: se borró, o esta factura se leyó desde otro buzón.` }
+      : { ok: false, status: 502, error: `Gmail no lo entregó: ${m}` };
+  }
+  let adj: Adjunto[];
+  try {
+    adj = await descargarAdjuntos(t.token, id, msg.payload, (n) => /\.(pdf|xml|zip)$/i.test(n));
+  } catch (e) {
+    return { ok: false, status: 502, error: `No se pudieron bajar los adjuntos de Gmail: ${motivo(e)}` };
+  }
+  const elegido = elegirDocumentoFactura(adj.map((a) => ({
+    nombre: a.nombre,
+    texto: /\.xml$/i.test(a.nombre) ? a.data.toString("utf-8") : null,
+    inicio: a.data.subarray(0, 5).toString("latin1"),
+  })));
+  if (!elegido) {
+    const nombres = adjuntosDe(msg.payload).map((a) => a.nombre).filter(Boolean);
+    return {
+      ok: false, status: 404,
+      error: nombres.length ? `El correo trae ${nombres.join(", ")}, y ninguno es el PDF ni el XML de la factura.` : "El correo no trae adjuntos.",
+    };
+  }
+  const a = adj[elegido.indice];
+  return { ok: true, nombre: a.nombre, tipo: elegido.tipo, data: a.data };
+}
+
+/** Qué buzón se lee hoy, para abrir sus correos en ESA cuenta de Gmail. Sin pedir el token del CRM. */
+export async function buzonDeFacturas(sb: Parameters<typeof conexionCorreoFacturas>[0]): Promise<{ email: string | null; fuente: "facturas" | "crm" | null }> {
+  const con = await conexionCorreoFacturas(sb, { conToken: false });
+  return { email: con.email ?? null, fuente: con.fuente ?? null };
 }
 
 /**

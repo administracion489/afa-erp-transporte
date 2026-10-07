@@ -48,8 +48,8 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import {
-  DIAS_REGISTRO_AUTOMATICO, MARCA_CARGA_DE_FACTURA, MARCA_COMPLETADA_A_MANO,
-  esCargaDeFactura, esCargaFusionada, esCargaCompletada,
+  DIAS_REGISTRO_AUTOMATICO, MARCA_COMPLETADA_A_MANO,
+  esCargaDeFactura, esCargaFusionada, esCargaCompletada, referenciaEnObservacion,
 } from "@/lib/combustible/factura-lineas";
 import {
   MAX_DESFASE, diasEntre, sumarDias, origenFechaLinea, generadaDespues,
@@ -196,8 +196,7 @@ export function porQueFecha(carga: { fecha: string }, origen: OrigenDeCarga | nu
 }
 
 const notaEnObs = (obs: string | null): string | null => /\bNota\s+([A-Z0-9][A-Z0-9-]*)/i.exec(String(obs ?? ""))?.[1] ?? null;
-const comprobanteEnObs = (obs: string | null): string | null =>
-  new RegExp(`${MARCA_CARGA_DE_FACTURA}\\s+(\\S+)`).exec(String(obs ?? ""))?.[1] ?? null;
+const comprobanteEnObs = (obs: string | null): string | null => referenciaEnObservacion(obs);
 
 /**
  * La cola de cargas por completar. `hoy` es el día Lima (YYYY-MM-DD) —se pasa, no se calcula: el
