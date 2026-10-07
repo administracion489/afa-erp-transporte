@@ -12,6 +12,7 @@ import { createClient } from "@supabase/supabase-js";
 import { normalizarEmpresa } from "@/lib/empresa";
 import { verificarTokenPortal } from "@/lib/portal-auth";
 import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
+import { patchAutoseleccionDeOperador, actualizarAutoseleccion } from "@/lib/reservas-autoseleccion";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -277,11 +278,14 @@ export async function POST(req: NextRequest) {
       const { ruta_nombre, permite_autoseleccion, permite_cambio_paradero } = body;
       const patch: Record<string, unknown> = {};
       if (ruta_nombre !== undefined)             patch.ruta_nombre             = ruta_nombre || null;
-      if (permite_autoseleccion !== undefined)   patch.permite_autoseleccion   = Boolean(permite_autoseleccion);
+      // Desmarcar deja la fecha (con el reloj del servidor) y la hereda el próximo programa del
+      // contrato; marcar la borra. Ver lib/reservas-autoseleccion.ts.
+      if (permite_autoseleccion !== undefined)   Object.assign(patch, patchAutoseleccionDeOperador(Boolean(permite_autoseleccion)));
       if (permite_cambio_paradero !== undefined) patch.permite_cambio_paradero = Boolean(permite_cambio_paradero);
       if (Object.keys(patch).length === 0) return NextResponse.json({ ok: true });
 
-      const { error } = await supabaseAdmin.from("reservas").update(patch).eq("id", reserva_id);
+      const { error } = await actualizarAutoseleccion(
+        (p) => supabaseAdmin.from("reservas").update(p).eq("id", reserva_id), patch);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       return NextResponse.json({ ok: true });
     }

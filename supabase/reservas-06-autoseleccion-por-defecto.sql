@@ -36,6 +36,14 @@
 --      cubren el enlace ida↔retorno que el generador escribe segundos después de
 --      crear las idas. Es el caso de los retornos RUTA A 17:00 del 06-10.
 --
+--   5. QUIÉN DESMARCÓ: agrega `autoseleccion_apagada_en`. Desde ahora, cada vez
+--      que un OPERADOR desmarca la casilla (Manifiesto, «Aplicar a rango», el
+--      portal) se guarda cuándo; al marcarla se borra. El generador de
+--      programas HEREDA solo ese desmarcado: un servicio nuevo nace desmarcado
+--      si el último día anterior del mismo contrato y sentido lo desmarcó un
+--      operador. Un false SIN fecha (default viejo) no se hereda. Sin relleno:
+--      de un false anterior no se sabe quién lo puso.
+--
 -- LO QUE NO HACE, A PROPÓSITO
 --
 -- No toca los false de filas que alguien editó después de crearlas: ese false
@@ -81,6 +89,13 @@ begin
     $u$;
   end if;
 end $$;
+
+-- Paso 5.
+alter table public.reservas
+  add column if not exists autoseleccion_apagada_en timestamptz;
+
+comment on column public.reservas.autoseleccion_apagada_en is
+  'Cuándo un OPERADOR desmarcó «Permitir autoselección». NULL con permite_autoseleccion=false = valor por defecto viejo: no se hereda. En un servicio que lo heredó, es la fecha de la decisión original.';
 
 -- ── Revisión (solo lee): servicios futuros que siguen desmarcados ───────────
 -- Lo que queda después del paso 4: filas editadas después de crearse, cuyo

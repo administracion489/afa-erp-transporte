@@ -13,6 +13,7 @@ import { createClient } from "@supabase/supabase-js";
 import { firmarTokenPasajero, pidDeToken, loginBloqueado, registrarIntentoFallido, limpiarIntentos } from "@/lib/pasajero-auth";
 import { firmarUrl } from "@/lib/storage-firmado";
 import { ofrecibleEnAutoseleccion } from "@/lib/reservas-autoseleccion";
+import { CUERPO_SESION_INVALIDA } from "@/lib/pasajero-sesion";
 import { randomUUID } from "node:crypto";
 
 /** Foto de perfil: el bucket es privado. Lo que se GUARDA es el enlace público (el identificador,
@@ -157,7 +158,7 @@ export async function POST(req: NextRequest) {
       case "ruta": {
         const pid = pidDeToken(body.token);
         const { hoy } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
         if (!fechaValida(hoy)) return NextResponse.json({ error: "hoy inválido" }, { status: 400 });
 
@@ -274,7 +275,7 @@ export async function POST(req: NextRequest) {
       case "bus_posicion": {
         const pid = pidDeToken(body.token);
         const { reservaId } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!reservaId) return NextResponse.json({ busPosicion: null });
 
         // Pertenencia: el pasajero debe tener una parada en esa reserva.
@@ -298,7 +299,7 @@ export async function POST(req: NextRequest) {
       // guarda en SU carpeta (la del token, no la del body).
       case "subir_foto": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const b64 = typeof body.imagen === "string" ? body.imagen.replace(/^data:[^,]*,/, "") : "";
         const buf = Buffer.from(b64, "base64");
         if (!buf.length || buf.length > MAX_FOTO_BYTES) {
@@ -324,7 +325,7 @@ export async function POST(req: NextRequest) {
       // reabrir la app se pide uno nuevo en vez de pintar uno vencido.
       case "foto_vigente": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const { data, error } = await admin.from("pasajeros").select("foto_url").eq("id", pid).maybeSingle();
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ foto_url: await firmarUrl(admin, data?.foto_url ?? null) });
@@ -339,7 +340,7 @@ export async function POST(req: NextRequest) {
       case "foto": {
         const pid = pidDeToken(body.token);
         const { fotoUrl } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const prefijo = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/${BUCKET_FOTOS}/${pid}/`;
         if (typeof fotoUrl !== "string" || !fotoUrl.startsWith(prefijo)) {
           return NextResponse.json({ error: "URL de foto inválida" }, { status: 400 });
@@ -356,7 +357,7 @@ export async function POST(req: NextRequest) {
       // Solo se actualizan los campos presentes en el body (whitelist), nunca `dni`.
       case "perfil": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
 
         const updates: Record<string, any> = {};
 
@@ -409,7 +410,7 @@ export async function POST(req: NextRequest) {
       // ── Mensaje / reporte al operador ────────────────────────────────────────
       case "mensaje": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const m = body.mensaje || {};
         const texto = String(m.mensaje ?? "").trim().slice(0, 1000);
         if (!texto) return NextResponse.json({ error: "mensaje vacío" }, { status: 400 });
@@ -432,7 +433,7 @@ export async function POST(req: NextRequest) {
       // ── Hilo de chat del pasajero (sus mensajes + respuestas de central/conductor) ──
       case "mensajes": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         let q = admin.from("mensajes_pasajero")
           .select("id, remitente, autor_nombre, tipo, mensaje, leido_pasajero, created_at, reserva_id")
           .eq("pasajero_id", pid)
@@ -447,7 +448,7 @@ export async function POST(req: NextRequest) {
       // ── Marcar como leídas las respuestas de central/conductor ───────────────
       case "mensajes_leidos": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         let q = admin.from("mensajes_pasajero")
           .update({ leido_pasajero: true, leido_pasajero_at: new Date().toISOString() })
           .eq("pasajero_id", pid)
@@ -463,7 +464,7 @@ export async function POST(req: NextRequest) {
       case "cambiar_paradero": {
         const pid = pidDeToken(body.token);
         const { nombreParada, hoy } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!nombreParada || !hoy) return NextResponse.json({ error: "nombreParada y hoy requeridos" }, { status: 400 });
         if (!fechaValida(hoy)) return NextResponse.json({ error: "hoy inválido" }, { status: 400 });
 
@@ -521,7 +522,7 @@ export async function POST(req: NextRequest) {
       case "reservas_disponibles": {
         const pid = pidDeToken(body.token);
         const { hoy } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
 
         const { data: pax } = await admin
@@ -672,7 +673,7 @@ export async function POST(req: NextRequest) {
       case "autoseleccionar": {
         const pid = pidDeToken(body.token);
         const { parada_id } = body;
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         if (!parada_id) return NextResponse.json({ error: "parada_id requerido" }, { status: 400 });
 
         // Obtener cliente_id del pasajero
@@ -759,7 +760,7 @@ export async function POST(req: NextRequest) {
       // (un familiar se loguea en el mismo teléfono), la fila se reasigna al pid nuevo.
       case "suscribir_push": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const tipo = body.tipo === "fcm" ? "fcm" : body.tipo === "webpush" ? "webpush" : null;
         if (!tipo) return NextResponse.json({ error: "tipo inválido" }, { status: 400 });
 
@@ -810,7 +811,7 @@ export async function POST(req: NextRequest) {
       // ── Desactivar suscripción push (solo las filas del propio pasajero) ─────
       case "desuscribir_push": {
         const pid = pidDeToken(body.token);
-        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!pid) return NextResponse.json(CUERPO_SESION_INVALIDA, { status: 401 });
         const endpoint = typeof body.endpoint === "string" ? body.endpoint : null;
         const fcmToken = typeof body.fcmToken === "string" ? body.fcmToken : null;
         if (!endpoint && !fcmToken) return NextResponse.json({ error: "endpoint o fcmToken requerido" }, { status: 400 });

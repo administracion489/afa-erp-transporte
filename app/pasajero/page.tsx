@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, esAppNativa, bateriaExenta, solicitarExencionBateria, type GeoWatch } from "@/lib/geo";
 import { detectarSoportePush, activarPushWeb, activarPushNativo, desactivarPush, resincronizarSuscripcion, permisoBloqueado, type SoportePush } from "@/lib/push-cliente";
 import { identidadRuta, SIN_NOMBRE_RUTA } from "@/lib/ruta-identidad";
+import { AVISO_SESION_VENCIDA, esSesionInvalida, expDeToken, vencimientoSesion } from "@/lib/pasajero-sesion";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
@@ -48,16 +49,29 @@ const SK = "afa_pasajero_v3";
 let _token: string | null = null;  // token de sesión firmado; paxApi lo adjunta en cada request
 function saveSession(p: Pasajero, token?: string) {
   if (token) _token = token;  // en refrescos (foto/edad) se omite y se reusa el token vigente
-  localStorage.setItem(SK, JSON.stringify({ p, token: _token, exp: Date.now()+86400000 }));
+  if (!_token) return;        // sin token no hay sesión que guardar (la cerró alSesionInvalida)
+  let prev: Record<string, unknown> = {};
+  if (!token) { try { prev = JSON.parse(localStorage.getItem(SK) || "{}") ?? {}; } catch {} }
+  // El vencimiento es el DEL TOKEN, nunca "ahora + 24 h": cada refresco (foto vigente al abrir,
+  // subir foto, guardar datos) estiraba la sesión local un día más mientras el token del servidor
+  // vencía a su hora → app "logueada" y todo devolvía 401. Ver lib/pasajero-sesion.ts.
+  const exp = expDeToken(_token) ?? (typeof prev.exp === "number" ? prev.exp : Date.now() + 86_400_000);
+  // `...prev` (solo en refrescos) conserva paraderoOk; un login nuevo empieza limpio, como antes.
+  localStorage.setItem(SK, JSON.stringify({ ...prev, p, token: _token, exp }));
 }
-function loadSession(): Pasajero | null {
+/** La sesión guardada, o la que VENCIÓ (para avisarlo y dejar el documento puesto en el login). */
+function loadSession(): { p: Pasajero | null; vencida: Pasajero | null } {
   try {
-    const r = localStorage.getItem(SK); if(!r) return null;
-    const {p,token,exp}=JSON.parse(r);
-    if(!token || Date.now()>exp){localStorage.removeItem(SK);return null;}
+    const r = localStorage.getItem(SK); if (!r) return { p: null, vencida: null };
+    const { p, token, exp } = JSON.parse(r);
+    // min(guardado, exp del token): corrige también las sesiones ya estiradas por la versión vieja.
+    if (!token || Date.now() > vencimientoSesion(exp, token)) {
+      localStorage.removeItem(SK);
+      return { p: null, vencida: token ? (p ?? null) : null };
+    }
     _token = token;
-    return p;
-  } catch{return null;}
+    return { p, vencida: null };
+  } catch { return { p: null, vencida: null }; }
 }
 function clearSession() { _token = null; localStorage.removeItem(SK); }
 function loadParaderoOk(): boolean {
@@ -72,13 +86,25 @@ function saveParaderoOk() {
 // NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada.
 const AFA_KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY || "";
 
+/** Lo registra la pantalla: un 401 con `sesionInvalida` la devuelve al login con el aviso.
+ *  Un 401 SIN la marca (el de la llave x-afa-key) NO desloguea. */
+let alSesionInvalida: (() => void) | null = null;
+
 async function paxApi(accion: string, params: Record<string, any> = {}) {
+  const tokenEnviado = _token;
   const res = await fetch("/api/pasajero", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
-    body: JSON.stringify({ accion, token: _token, ...params }),
+    body: JSON.stringify({ accion, token: tokenEnviado, ...params }),
   });
   const json = await res.json().catch(() => ({}));
+  // Solo si el token RECHAZADO es el VIGENTE: varias consultas en vuelo (bus 5 s, ruta 30 s, chat)
+  // devuelven 401 a la vez; la primera cierra la sesión (deja _token en null) y las demás ya no
+  // coinciden. Así una respuesta vieja no cierra una sesión nueva, y una consulta sin token no
+  // dispara nada: no hay bucle posible.
+  if (accion !== "login" && tokenEnviado && tokenEnviado === _token && esSesionInvalida(res.status, json)) {
+    alSesionInvalida?.();
+  }
   if (!res.ok) throw new Error(json.error || "Error de red");
   return json;
 }
@@ -111,6 +137,15 @@ function ahoraLimaMin(): number {
 function ini(n:string): string { return n.split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 // href tel: con el número saneado (solo dígitos y +), tolera valores crudos de la BD.
 function telHref(tel: string | null | undefined): string { return `tel:${String(tel || "").replace(/[^\d+]/g, "")}`; }
+// Estado inicial del seguimiento direccional del bus (ver segRef).
+const segInicial = () => ({ minDist: Infinity, lastD: null as number | null, lastTs: 0, lastLat: null as number | null, lastLng: null as number | null, recStreak: 0, apprStreak: 0 });
+// Quita del mapa la línea de ruta (la directa y la de Google).
+function borrarLineaRuta(m: mapboxgl.Map) {
+  try { if (m.getLayer("ruta-sombra")) m.removeLayer("ruta-sombra"); } catch {}
+  try { if (m.getLayer("ruta-line"))   m.removeLayer("ruta-line"); } catch {}
+  try { if (m.getSource("ruta"))        m.removeSource("ruta"); } catch {}
+  try { if (m.getSource("ruta-google")) m.removeSource("ruta-google"); } catch {}
+}
 
 // Detectar si es iOS
 function esIOS(): boolean {
@@ -645,9 +680,7 @@ export default function AppPasajero() {
   //   lastTs   = timestamp de la última muestra GPS procesada (dedupe del polling)
   //   lastLat/lastLng = última posición del bus aceptada (para descartar saltos imposibles)
   //   recStreak/apprStreak = muestras consecutivas alejándose / acercándose
-  const segRef = useRef<{ minDist: number; lastD: number | null; lastTs: number; lastLat: number | null; lastLng: number | null; recStreak: number; apprStreak: number }>(
-    { minDist: Infinity, lastD: null, lastTs: 0, lastLat: null, lastLng: null, recStreak: 0, apprStreak: 0 }
-  );
+  const segRef = useRef<ReturnType<typeof segInicial>>(segInicial());
   const watchRef     = useRef<GeoWatch | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -674,7 +707,12 @@ export default function AppPasajero() {
   }, [tab, pasajero?.qr_code]);
 
   useEffect(() => {
-    const saved = loadSession();
+    const { p: saved, vencida } = loadSession();
+    if (vencida) {
+      // La sesión guardada venció: al login con el aviso y el documento ya puesto.
+      setDniInput(String(vencida.dni ?? "").replace(/\D/g, "").slice(0, 12));
+      setLoginErr(AVISO_SESION_VENCIDA);
+    }
     if (saved) {
       setPasajero(saved);
       setParaderoConfirmado(loadParaderoOk());
@@ -848,7 +886,12 @@ export default function AppPasajero() {
 
   // Bus marker + ETA
   useEffect(() => {
-    if (!mapListo || !map.current || !busPosicion) return;
+    if (!mapListo || !map.current) return;
+    // Sin bus (servicio nuevo sin GPS, o ya no hay servicio): fuera el marcador del anterior.
+    if (!busPosicion) {
+      if (busMarker.current) { try { busMarker.current.remove(); } catch {} busMarker.current = null; }
+      return;
+    }
     if (busMarker.current) {
       busMarker.current.setLngLat([Number(busPosicion.lng), Number(busPosicion.lat)]);
       // Semitransparente si sin señal
@@ -1045,16 +1088,14 @@ export default function AppPasajero() {
 
   // Línea de ruta — fallback inmediato con coords directas, mejora con Google Directions
   useEffect(() => {
-    if (!mapListo || !map.current || rutaParadas.length < 2) return;
+    if (!mapListo || !map.current) return;
     const coords = rutaParadas.filter(p => p.lat && p.lng);
-    if (coords.length < 2) return;
+    // Sin servicio, o sin dos paraderos con coordenadas: fuera la línea del servicio anterior.
+    if (coords.length < 2) { borrarLineaRuta(map.current); return; }
 
     const drawRuta = (coordenadas: [number, number][]) => {
       if (!map.current) return;
-      try { if (map.current.getLayer("ruta-sombra")) map.current.removeLayer("ruta-sombra"); } catch {}
-      try { if (map.current.getLayer("ruta-line"))   map.current.removeLayer("ruta-line"); } catch {}
-      try { if (map.current.getSource("ruta"))        map.current.removeSource("ruta"); } catch {}
-      try { if (map.current.getSource("ruta-google")) map.current.removeSource("ruta-google"); } catch {}
+      borrarLineaRuta(map.current);
       try {
         map.current.addSource("ruta-google", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: coordenadas } } });
         map.current.addLayer({ id: "ruta-sombra", type: "line", source: "ruta-google", paint: { "line-color": "#0b315f", "line-width": 12, "line-opacity": 0.10, "line-blur": 6 } });
@@ -1112,7 +1153,7 @@ export default function AppPasajero() {
 
   // Resetear el seguimiento direccional al cambiar de servicio/parada (o si ya abordó).
   useEffect(() => {
-    segRef.current = { minDist: Infinity, lastD: null, lastTs: 0, lastLat: null, lastLng: null, recStreak: 0, apprStreak: 0 };
+    segRef.current = segInicial();
     setBusPasoMiParada(false);
     setBusAlejando(false);
     setPasoDismiss(false);
@@ -1198,20 +1239,82 @@ export default function AppPasajero() {
     saveSession(data, r.token); setPasajero(data); await cargarMiRuta(data.id); setLoginLoad(false);
   }
 
+  const reservaActualRef = useRef<number | null>(null); // reserva cuyo bus pinta hoy la pantalla
+  const rutaSeqRef       = useRef(0);                   // descarta respuestas de "ruta" desordenadas o de otra sesión
+  const selRutaIdRef     = useRef<number | null>(null); // la ruta que el pasajero está eligiendo (ver cargarMiRuta)
+  useEffect(() => { selRutaIdRef.current = selRutaId; }, [selRutaId]);
+
+  // Todo lo que describe EL BUS de un servicio. Se llama solo cuando cambia la reserva (o deja de
+  // haberla), nunca en el refresco idempotente: así no parpadea. Va en el MISMO lote que el
+  // servicio nuevo: un efecto correría después del render y pintaría un cuadro con el bus del
+  // servicio anterior sobre la ruta nueva (y pediría a Google un ETA desde ese bus).
+  const limpiarBusDelServicio = useCallback(() => {
+    if (busMarker.current) { try { busMarker.current.remove(); } catch {} busMarker.current = null; } // su popup lleva la placa vieja
+    busPosicionRef.current = null; ultimoEtaRef.current = 0;
+    setBusPosicion(null); setVehiculo(null); setConductor(null);
+    setEtaMin(null); setEtaLlegadaTs(null); setDistM(null);
+    setEstadoBus("no_iniciado"); setAgoMin(0);
+    alertaRef.current = false; setAlerta5min(false); setAlertaDismiss(false);
+    segRef.current = segInicial();
+    setBusPasoMiParada(false); setBusAlejando(false); setPasoDismiss(false);
+    setAvisadoSinSenal(false);
+  }, []);
+
+  // Lo que se borra al dejar de haber sesión, por salir() o porque el servidor la rechazó.
+  // UNA lista para los dos caminos.
+  const cerrarSesionLocal = useCallback((aviso: { dni: string } | null) => {
+    rutaSeqRef.current++;            // una "ruta" en vuelo ya no puede repintar nada
+    reservaActualRef.current = null;
+    clearSession();
+    limpiarBusDelServicio();
+    setPasajero(null); setMiParada(null); setRutaParadas([]); setMiEstado("esperando");
+    setReservasDisp([]); setSelRutaId(null); setSelParadaId(null);
+    setGpsPropio(null); setGpsPermiso("unknown"); setTab("ruta");
+    setParaderoConfirmado(false); setParaderoPostpuesto(false); setMostrarConfirmarParadero(false);
+    setMostrarReporte(false); setChatMsgs([]); setChatSinLeer(0);
+    setMostrarNavModal(false); setMostrarParadasModal(false);
+    setMostrarPromptPush(false); setMostrarGuiaIOS(false); setFotoErr("");
+    setPinInput(""); setLoginLoad(false);
+    setDniInput(aviso?.dni ?? "");
+    setLoginErr(aviso ? AVISO_SESION_VENCIDA : "");
+  }, [limpiarBusDelServicio]);
+
+  // El servidor rechazó la sesión (token vencido): al login con el aviso y el documento puesto,
+  // en vez de dejar la pantalla congelada. No toca el push: la suscripción sigue siendo de esta
+  // persona, y desuscribirla exige un token vigente.
+  useEffect(() => {
+    alSesionInvalida = () => cerrarSesionLocal({ dni: String(pasajero?.dni ?? "").replace(/\D/g, "").slice(0, 12) });
+    return () => { alSesionInvalida = null; };
+  }, [pasajero?.dni, cerrarSesionLocal]);
+
   const cargarMiRuta = useCallback(async (pid: number) => {
     const hoy = getFechaLocal();
+    const seq = ++rutaSeqRef.current;
+    const tok = _token;
+    // Una respuesta que llega después de otra más nueva, o después de cerrar la sesión, no pinta.
+    const vigente = () => seq === rutaSeqRef.current && tok !== null && tok === _token;
     let r: any;
     try {
       // Via service_role (saltea RLS) — el pasajero es anónimo.
       r = await paxApi("ruta", { pid, hoy });
     } catch (e: any) {
+      // Red, timeout o 401: NO se toca nada (el 401 con marca ya lo cerró alSesionInvalida).
       console.error("[cargarMiRuta]", e?.message);
       return;
     }
+    if (!vigente()) return;
     if (!r || r.ruta === null || !r.miParada) {
+      // Respuesta del servidor «sin servicio vigente» (su servicio terminó, o lo sacaron de él):
+      // nada del servicio anterior sigue en pantalla. Antes miParada quedaba puesta, el bus
+      // anterior seguía en el mapa y la lista «Elige tu ruta de hoy» nunca se veía.
+      if (reservaActualRef.current !== null) { reservaActualRef.current = null; limpiarBusDelServicio(); }
+      setMiParada(null);
+      setRutaParadas(prev => (prev.length ? [] : prev));   // idempotente en el refresco de 30 s
+      setMiEstado("esperando");
       // Sin ruta asignada: buscar reservas disponibles para autoselección
       try {
         const { reservas } = await paxApi("reservas_disponibles", { pid, hoy });
+        if (!vigente()) return;
         const disponibles: any[] = reservas || [];
         // Dedup defensivo por id en el cliente
         const unicos = Array.from(new Map(disponibles.map((r: any) => [r.id, r])).values());
@@ -1222,14 +1325,22 @@ export default function AppPasajero() {
         const ordenadas = unicos.slice().sort(
           (a: any, b: any) => minutosDelDia(a.hora_servicio) - minutosDelDia(b.hora_servicio)
         );
-        // Si solo hay una opción, ir directo al paso 2 (elegir paradero)
-        if (ordenadas.length === 1) {
+        // Si solo hay una opción, ir directo al paso 2 (elegir paradero). Solo si no la tenía ya
+        // elegida: el refresco de 30 s borraba el paradero que el pasajero estaba marcando.
+        if (ordenadas.length === 1 && selRutaIdRef.current !== ordenadas[0].id) {
           setSelRutaId(ordenadas[0].id);
           setSelParadaId(null);
         }
         setReservasDisp(ordenadas);
       } catch { /* silencioso */ }
       return;
+    }
+    const rid: number | null = r.miParada.reserva_id ?? null;
+    if (reservaActualRef.current !== rid) {
+      // Cambió el SERVICIO: el bus, la placa, el conductor y el ETA del anterior se van. En el
+      // mismo lote, lo que traiga el servicio nuevo los vuelve a llenar; si no trae, quedan vacíos.
+      if (reservaActualRef.current !== null) limpiarBusDelServicio();
+      reservaActualRef.current = rid;
     }
     setReservasDisp([]);
     setSelRutaId(null);
@@ -1250,7 +1361,7 @@ export default function AppPasajero() {
     if (r.vehiculo)    setVehiculo(r.vehiculo);
     if (r.busPosicion) setBusPosicion(r.busPosicion);
     if (r.conductor)   setConductor(r.conductor);
-  }, []);
+  }, [limpiarBusDelServicio]);
 
   // Refresco automático de la asignación. El operador puede mover al pasajero a otro servicio
   // desde el ERP; el pasajero es anónimo (DNI+PIN), así que Realtime queda bloqueado por RLS
@@ -1314,6 +1425,7 @@ export default function AppPasajero() {
       // solo se pinta — lo guardado en la base lo decide el servidor.
       const imagen = canvas.toDataURL("image/jpeg", 0.85);
       const { foto_url } = await paxApi("subir_foto", { imagen });
+      if (!_token) return; // la sesión se cerró mientras subía: no revivirla en pantalla
       const updated = { ...pasajero, foto_url: foto_url ?? null }; setPasajero(updated); saveSession(updated);
     } catch (e: any) {
       setFotoErr(e?.message || "Error al subir la foto.");
@@ -1351,6 +1463,7 @@ export default function AppPasajero() {
     setSavingDatos(true); setDatosOk(false); setDatosErr("");
     try {
       await paxApi("perfil", { nombre, tipo_documento: tipoDocInput, edad, email: emailT || null });
+      if (!_token) return; // la sesión se cerró mientras guardaba: no revivirla en pantalla
       const updated = { ...pasajero, nombre, tipo_documento: tipoDocInput, edad, email: emailT || null };
       setPasajero(updated); saveSession(updated);
       setDatosOk(true);
@@ -1541,12 +1654,15 @@ export default function AppPasajero() {
     } catch (e: any) {
       console.error("[cambiarParadero]", e?.message);
     } finally {
-      saveParaderoOk();
-      setParaderoConfirmado(true);
-      setMostrarConfirmarParadero(false);
       setCambioParaderoLoad(false);
-      await cargarMiRuta(pasajero.id);
-      ofrecerPush();
+      // Con la sesión cerrada (401), no marcar el paradero como confirmado para el próximo ingreso.
+      if (_token) {
+        saveParaderoOk();
+        setParaderoConfirmado(true);
+        setMostrarConfirmarParadero(false);
+        await cargarMiRuta(pasajero.id);
+        ofrecerPush();
+      }
     }
   }
 
@@ -1572,12 +1688,8 @@ export default function AppPasajero() {
     // el servidor poda la suscripción sola con 410 en el próximo envío.
     try { if (pushActivo) await desactivarPush(paxApi); } catch {}
     try { localStorage.removeItem(PUSH_PROMPT_LS); } catch {} // el silencio de 7 días era del usuario anterior
-    clearSession(); setPasajero(null); setMiParada(null); setBusPosicion(null); setRutaParadas([]);
-    setVehiculo(null); setConductor(null); setGpsPropio(null); setGpsPermiso("unknown");
-    setDniInput(""); setPinInput("");
-    alertaRef.current = false; setAlerta5min(false); setTab("ruta");
-    setParaderoConfirmado(false); setParaderoPostpuesto(false); setMostrarConfirmarParadero(false);
-    setPushActivo(false); setPushDenegado(false); setMostrarPromptPush(false); setMostrarGuiaIOS(false);
+    setPushActivo(false); setPushDenegado(false);
+    cerrarSesionLocal(null); // la misma lista que cuando el servidor cierra la sesión
   }
 
   // Derivados

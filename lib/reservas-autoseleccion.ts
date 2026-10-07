@@ -18,8 +18,13 @@
 //
 // Los caminos que crean una reserva son cuatro (mapeados por búsqueda exhaustiva): el generador de
 // programas (fijo y adicional), «Convertir a reserva» de /cotizaciones, el despachador y la
-// aprobación de una reserva del agente IA del CRM. Ninguno copia una reserva existente, así que no
-// hay un «false» de operador que se pueda heredar por accidente.
+// aprobación de una reserva del agente IA del CRM. Ninguno copia una reserva existente.
+//
+// LA HERENCIA (pedida por el dueño): el generador de programas FIJOS hereda el desmarcado del
+// servicio anterior del mismo contrato y sentido — pero SOLO si lo desmarcó un OPERADOR. Desde
+// ahora cada operador que desmarca deja la fecha en `autoseleccion_apagada_en`; un false SIN esa
+// fecha viene del default viejo (es el de los retornos RUTA A del 06-10) y heredarlo reviviría el
+// defecto en cada programa nuevo. Ver `herenciaAutoseleccion`.
 //
 // La columna no está en ningún SQL del repo (se creó desde el panel): en una base que no la tenga,
 // crear el servicio importa más que la casilla, así que se reintenta sin ella — y se suelta SOLO
@@ -27,6 +32,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { faltaColumna, type ErrorSupabase } from "@/lib/columna-faltante";
+import { normalizaEstado } from "@/lib/estados";
 
 /** Con qué valor nace la casilla «Permitir autoselección» de un servicio nuevo. */
 export const AUTOSELECCION_AL_NACER = true;
@@ -88,4 +94,139 @@ export async function insertarServicioNuevo<T extends Record<string, unknown>>(
  */
 export function ofrecibleEnAutoseleccion(r: { paradas?: unknown[] | null }): boolean {
   return Array.isArray(r.paradas) && r.paradas.length > 0;
+}
+
+// ── La decisión del OPERADOR, y su herencia ─────────────────────────────────
+
+export const COLUMNA_APAGADA_EN = "autoseleccion_apagada_en" as const;
+
+/** Lo que escribe un OPERADOR al tocar la casilla: desmarcar deja la fecha; marcar la borra. */
+export function patchAutoseleccionDeOperador(permite: boolean, ahora: Date = new Date()) {
+  return { permite_autoseleccion: permite, [COLUMNA_APAGADA_EN]: permite ? null : ahora.toISOString() };
+}
+
+/**
+ * UPDATE con respaldo: si (y SOLO si) el error nombra la columna de la fecha —la migración no se
+ * corrió—, reintenta sin ella. La casilla se guarda igual; lo que se pierde es la herencia, y se
+ * declara en `sinRegistro` para que la pantalla pueda decirlo.
+ */
+export async function actualizarAutoseleccion(
+  actualizar: (patch: Record<string, unknown>) => PromiseLike<{ error: ErrorSupabase | null }>,
+  patch: Record<string, unknown>,
+): Promise<{ error: ErrorSupabase | null; sinRegistro: boolean }> {
+  const primero = await actualizar(patch);
+  if (!primero.error || !(COLUMNA_APAGADA_EN in patch) || !faltaColumna(primero.error, COLUMNA_APAGADA_EN)) {
+    return { error: primero.error ?? null, sinRegistro: false };
+  }
+  const resto: Record<string, unknown> = { ...patch };
+  delete resto[COLUMNA_APAGADA_EN];
+  const segundo = await actualizar(resto);
+  return { error: segundo.error ?? null, sinRegistro: true };
+}
+
+/** Un servicio anterior del contrato, con el sentido ya resuelto por quien lee (sentidoDeReserva). */
+export type FilaAnterior = {
+  id: number;
+  fecha_servicio: string;
+  estado?: string | null;
+  sentido: "IDA" | "RETORNO";
+  permite_autoseleccion: boolean | null;
+  autoseleccion_apagada_en: string | null;
+  movil?: number | null;
+  origen_contractual?: string | null;
+};
+
+/**
+ * `sin_anterior` · `anterior_marcado`: no hay nada que heredar.
+ * `anterior_sin_registro`: el anterior está desmarcado pero NO por un operador (default viejo) → nace marcado.
+ * `anterior_mixto`: ese día unos móviles estaban desmarcados por un operador y otros no → nace marcado.
+ * `heredado`: un operador desmarcó todo lo que se juzga → nace DESMARCADO.
+ */
+export type CodigoHerencia = "sin_anterior" | "anterior_marcado" | "anterior_sin_registro" | "anterior_mixto" | "heredado";
+export type Herencia = {
+  codigo: CodigoHerencia;
+  permite: boolean;
+  apagadaEn: string | null;
+  fuente: { fecha: string; ids: number[]; desmarcadas: number; total: number } | null;
+};
+export const NACE_MARCADO: Herencia = { codigo: "sin_anterior", permite: AUTOSELECCION_AL_NACER, apagadaEn: null, fuente: null };
+
+export const desmarcadaPorOperador = (f: Pick<FilaAnterior, "permite_autoseleccion" | "autoseleccion_apagada_en">) =>
+  f.permite_autoseleccion === false && !!f.autoseleccion_apagada_en;
+
+/**
+ * Con qué nace un servicio NUEVO del contrato en ese sentido. Se mira el ÚLTIMO día anterior (no
+ * cancelado, no adicional: un servicio adicional desmarcado no puede apagar el contrato del mes
+ * siguiente) y, si el móvil es conocido y ese día hay filas de ese móvil, solo esas. Se hereda el
+ * desmarcado solo si TODO lo juzgado lo desmarcó un operador; ante la duda, nace marcado.
+ */
+export function herenciaAutoseleccion(
+  anteriores: FilaAnterior[],
+  sentido: "IDA" | "RETORNO",
+  movil?: number | null,
+): Herencia {
+  const candidatas = anteriores.filter((f) =>
+    f.sentido === sentido &&
+    normalizaEstado(f.estado) !== "cancelada" &&
+    String(f.origen_contractual ?? "contrato") !== "adicional" &&
+    /^\d{4}-\d{2}-\d{2}/.test(String(f.fecha_servicio ?? "")));
+  if (!candidatas.length) return NACE_MARCADO;
+  const fecha = candidatas.reduce((m, f) => (f.fecha_servicio > m ? f.fecha_servicio : m), "");
+  const delDia = candidatas.filter((f) => f.fecha_servicio === fecha);
+  const delMovil = movil != null ? delDia.filter((f) => f.movil === movil) : [];
+  const grupo = delMovil.length ? delMovil : delDia;
+  const desmarcadas = grupo.filter(desmarcadaPorOperador);
+  const fuente = { fecha, ids: grupo.map((f) => f.id), desmarcadas: desmarcadas.length, total: grupo.length };
+  if (desmarcadas.length === grupo.length) {
+    const apagadaEn = desmarcadas
+      .map((f) => f.autoseleccion_apagada_en as string)
+      .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+    return { codigo: "heredado", permite: false, apagadaEn, fuente };
+  }
+  if (desmarcadas.length) return { codigo: "anterior_mixto", permite: true, apagadaEn: null, fuente };
+  return {
+    codigo: grupo.some((f) => f.permite_autoseleccion === false) ? "anterior_sin_registro" : "anterior_marcado",
+    permite: true, apagadaEn: null, fuente,
+  };
+}
+
+/**
+ * Los campos a poner DESPUÉS de los comunes (que ya llevan true). Vacío salvo al heredar: entonces
+ * va false con la fecha de la decisión ORIGINAL, no la de hoy — así la cadena sigue mes a mes hasta
+ * que un operador vuelva a marcarla, y un heredado se distingue (su fecha es anterior a su creación).
+ */
+export function camposDeHerencia(h: Herencia): Record<string, unknown> {
+  return h.codigo === "heredado" ? { permite_autoseleccion: false, [COLUMNA_APAGADA_EN]: h.apagadaEn } : {};
+}
+
+/** dd/mm en Lima (UTC-5), aritmética fija para que la prueba sea determinista. */
+function ddmm(iso: string): string {
+  const [, m, d] = iso.slice(0, 10).split("-");
+  return `${d}/${m}`;
+}
+function ddmmhhmmLima(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const l = new Date(t - 5 * 3_600_000).toISOString();
+  return `${l.slice(8, 10)}/${l.slice(5, 7)} ${l.slice(11, 16)}`;
+}
+
+/** El texto que el generador enseña ANTES de crear nada. Null cuando no hay nada que decir. */
+export function avisoHerencia(h: Herencia, rotulo: string, n: number): string | null {
+  const f = h.fuente;
+  if (h.codigo === "heredado" && f) {
+    return `⚠ ${rotulo}: ${n} servicio(s) nacerán con «Permitir autoselección» DESMARCADA. ` +
+      `Un operador la desmarcó en el servicio anterior del contrato (#${f.ids.join(", #")} · ${ddmm(f.fecha)}, ` +
+      `desmarcada el ${ddmmhhmmLima(h.apagadaEn ?? "")}). Los pasajeros que rotan NO los verán en «Elige tu ruta de hoy». ` +
+      `Si ya no corresponde, márcala después en el Manifiesto de esos servicios.`;
+  }
+  if (h.codigo === "anterior_mixto" && f) {
+    return `ℹ ${rotulo}: nacen MARCADOS. El ${ddmm(f.fecha)} los móviles del contrato no coincidían ` +
+      `(${f.desmarcadas} desmarcado(s) por un operador, ${f.total - f.desmarcadas} marcado(s)).`;
+  }
+  if (h.codigo === "anterior_sin_registro" && f) {
+    return `ℹ ${rotulo}: nacen MARCADOS aunque el servicio anterior (#${f.ids.join(", #")} · ${ddmm(f.fecha)}) está ` +
+      `desmarcado: no hay registro de que lo desmarcara un operador (viene del valor por defecto anterior).`;
+  }
+  return null;
 }
