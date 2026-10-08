@@ -10,7 +10,10 @@ import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
-import { cabecerasErp } from "@/lib/fetch-erp";
+import { leerOdometroDeFoto } from "@/lib/odometro-leer-foto";
+import { capturaDeFechaHora, normalizarHoraVoucher } from "@/lib/odometro-tiempo";
+import { subirEvidencias, preguntaSinRespaldo } from "@/lib/evidencia";
+import EvidenciaPicker from "@/components/EvidenciaPicker";
 import { EnlacePrivado } from "@/components/ArchivoPrivado";
 
 type Lectura = {
@@ -39,21 +42,6 @@ function fmtFecha(f: string | null | undefined) {
 }
 function hoyISO() { return new Date().toISOString().split("T")[0]; }
 
-function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string; data: string }> {
-  return new Promise((resolve, reject) => {
-    if (file.size > 20 * 1024 * 1024) return reject(new Error("La foto supera 20 MB"));
-    if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
-      return reject(new Error("Formato no soportado (usa JPG, PNG o WEBP)"));
-    }
-    const r = new FileReader();
-    r.onload = () => {
-      const res = String(r.result || "");
-      resolve({ tipo: "image", media_type: file.type || "image/jpeg", data: res.includes(",") ? res.split(",")[1] : res });
-    };
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
 
 export default function OdometroTerceroModal({
   vehiculo, onClose, onSaved,
@@ -67,8 +55,10 @@ export default function OdometroTerceroModal({
   const [kmDiaMax, setKmDiaMax] = useState(1500);
   const [loading, setLoading] = useState(true);
 
-  const [form, setForm] = useState({ km: "", fecha: hoyISO(), fuente: "manual" as FuenteLectura });
-  const [foto, setFoto] = useState<File | null>(null);
+  const [form, setForm] = useState({ km: "", fecha: hoyISO(), hora: "", fuente: "manual" as FuenteLectura });
+  // Respaldo OPCIONAL de la lectura: foto del tablero o de la constancia (lib/evidencia.ts).
+  const [fotos, setFotos] = useState<File[]>([]);
+  const foto = fotos[0] ?? null;
   const [leyendo, setLeyendo] = useState(false);
   const [guardando, setGuardando] = useState(false);
   const [anular, setAnular] = useState<Lectura | null>(null);
@@ -92,44 +82,10 @@ export default function OdometroTerceroModal({
     if (!foto) { alert("Selecciona una foto del odómetro"); return; }
     setLeyendo(true);
     try {
-      const adj = await fileToAdjunto(foto);
-      // Con el vehículo, el servidor aplica la guía de ESE tablero y valida el número contra
-      // su km vigente (evita que entre el parcial o un dígito de más).
-      const res = await fetch("/api/mantenimiento/leer-odometro", {
-        method: "POST", headers: await cabecerasErp(),
-        body: JSON.stringify({ adjunto: adj, vehiculo_id: vehiculo.id, flota: "tercero" }),
-      });
-      const raw = await res.text();
-      let data: any;
-      try { data = JSON.parse(raw); }
-      catch {
-        if (res.status === 504 || /timeout|FUNCTION_INVOCATION/i.test(raw))
-          throw new Error("El servidor tardó demasiado leyendo la foto. Intenta de nuevo con una imagen más nítida.");
-        throw new Error(`El servidor respondió ${res.status}. ${raw.slice(0, 140)}`);
-      }
-      if (!res.ok || !data.ok) throw new Error(data?.error || `Error ${res.status}`);
-      if (!data.km) { alert("La IA no pudo leer el km con seguridad. Ingrésalo manualmente."); }
-      else if (data.auto_ok === false) {
-        // No se pre-llena: el número no cuadra con el kilometraje de esta unidad. El titular
-        // sale del CÓDIGO (mismo criterio que /mantenimiento), no de olfatear el motivo.
-        const titular = data.codigo_seleccion === "digito_de_mas"
-          ? `A la lectura de la IA (${Number(data.km).toLocaleString("es-PE")}) le SOBRA UN DÍGITO para esta unidad`
-          : `El número leído (${Number(data.km).toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad`;
-        alert(`${titular}${data.motivo_seleccion ? `:\n${data.motivo_seleccion}` : "."}\nRevisa la foto e ingrésalo a mano.`);
-      } else {
-        setForm(f => ({ ...f, km: String(data.km), fuente: "whatsapp_foto" }));
-        alert(
-          // Mismo criterio que /mantenimiento: un número deducido se pre-llena, pero se dicen
-          // los DOS para que la persona lo coteje contra la foto que tiene delante.
-          data.codigo_seleccion === "digito_repetido"
-            ? `La IA leyó ${Number(data.km_ia).toLocaleString("es-PE")} y le sobra un dígito repetido.\n` +
-              `Se propone ${Number(data.km).toLocaleString("es-PE")} km, el único valor posible para esta unidad.\n\n` +
-              `COMPRUÉBALO CONTRA LA FOTO antes de registrar: lo dedujo el sistema, no lo leyó nadie.`
-            : data.corregido
-              ? `Leído: ${Number(data.km).toLocaleString("es-PE")} km.\nLa foto mostraba dos contadores: se tomó el total y se descartó el parcial. Revisa antes de registrar.`
-              : `Leído: ${Number(data.km).toLocaleString("es-PE")} km (confianza ${data.confianza}). Revisa antes de registrar.`
-        );
-      }
+      // Mismo helper que /mantenimiento (lib/odometro-leer-foto.ts): mismo número, misma frase.
+      const r = await leerOdometroDeFoto(foto, { vehiculoId: vehiculo.id, flota: "tercero" });
+      if (r.km != null) setForm(f => ({ ...f, km: String(r.km), fuente: "whatsapp_foto" }));
+      alert(r.mensaje);
     } catch (e: any) {
       alert("Error: " + e.message);
     } finally {
@@ -139,20 +95,24 @@ export default function OdometroTerceroModal({
 
   const registrar = async () => {
     if (!form.km) { alert("Ingresa el km"); return; }
+    const horaHms = form.hora.trim() ? normalizarHoraVoucher(form.hora) : null;
+    if (form.hora.trim() && !horaHms) { alert(`La hora «${form.hora}» no se entiende: escríbela como 17:08.`); return; }
     setGuardando(true);
     try {
+      // La foto NO se pierde callada: si no sube, se pregunta (antes `if (!up.error)` la soltaba).
       let fotoUrl: string | null = null;
       if (foto) {
-        const ext = foto.name.split(".").pop() || "jpg";
-        const path = `odometro-tercero/${vehiculo.id}/${Date.now()}.${ext}`;
-        const up = await supabase.storage.from("vehiculos-fotos").upload(path, foto, { upsert: true });
-        if (!up.error) fotoUrl = supabase.storage.from("vehiculos-fotos").getPublicUrl(path).data.publicUrl;
+        const sub = await subirEvidencias(supabase, [{ archivo: foto, clase: "tablero" }], `odometro-tercero/${vehiculo.id}`);
+        if (sub.fallidas.length && !confirm(preguntaSinRespaldo(sub.fallidas, "la lectura"))) return;
+        fotoUrl = sub.subidas[0]?.url ?? null;
       }
       const r = await registrarLectura(supabase, {
         vehiculo_id: vehiculo.id,
         km: Number(form.km),
         fuente: form.fuente,
         fecha: form.fecha,
+        capturado_en: horaHms ? capturaDeFechaHora(form.fecha, horaHms) : null,
+        horaEsTope: false,
         foto_url: fotoUrl,
         kmDiaMax,
         flota: "tercero",
@@ -160,8 +120,8 @@ export default function OdometroTerceroModal({
       if (!r.ok) throw new Error(r.error || "No se pudo registrar");
       if (r.estado === "sospechosa") alert(`Registrada pero marcada para revisión: ${r.motivo}`);
       else alert("Lectura registrada ✓");
-      setForm({ km: "", fecha: hoyISO(), fuente: "manual" });
-      setFoto(null);
+      setForm({ km: "", fecha: hoyISO(), hora: "", fuente: "manual" });
+      setFotos([]);
       await cargar();
       onSaved();
     } catch (e: any) {
@@ -205,7 +165,7 @@ export default function OdometroTerceroModal({
           {/* FORM REGISTRO */}
           <section className="space-y-3">
             <p className="text-xs text-gray-400">Sube la foto del odómetro y léela con IA, o ingresa el km a mano.</p>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Kilometraje *</label>
                 <input type="number" className={inputCls("font-mono")} placeholder="Ej: 152340" value={form.km}
@@ -217,6 +177,11 @@ export default function OdometroTerceroModal({
                   onChange={e => setForm(f => ({ ...f, fecha: e.target.value }))} />
               </div>
               <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Hora (opcional)</label>
+                <input type="time" className={inputCls()} value={form.hora}
+                  onChange={e => setForm(f => ({ ...f, hora: e.target.value }))} />
+              </div>
+              <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Fuente</label>
                 <select className={inputCls()} value={form.fuente}
                   onChange={e => setForm(f => ({ ...f, fuente: e.target.value as FuenteLectura }))}>
@@ -226,9 +191,9 @@ export default function OdometroTerceroModal({
                 </select>
               </div>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <input type="file" accept="image/*" capture="environment" onChange={e => setFoto(e.target.files?.[0] || null)}
-                className="text-sm file:mr-3 file:px-4 file:py-2 file:rounded-xl file:border-0 file:bg-gray-100 file:text-gray-700 file:font-bold file:text-xs" />
+            <div className="flex flex-wrap items-end gap-3">
+              <EvidenciaPicker titulo="Foto del tablero o de la constancia (opcional)" soloImagen max={1}
+                archivos={fotos} onChange={setFotos} deshabilitado={guardando} />
               <button onClick={leerFoto} disabled={!foto || leyendo}
                 className="px-4 py-2 rounded-xl font-bold text-sm border text-[#0b315f] disabled:opacity-50 hover:bg-gray-50">
                 {leyendo ? "Leyendo…" : "🤖 Leer foto con IA"}
