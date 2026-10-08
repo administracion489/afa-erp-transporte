@@ -30,6 +30,7 @@ import {
 import type { FilaCuenta } from "@/lib/combustible/saldo-datos";
 import { sumarDiasISO } from "@/lib/combustible/saldo-cuenta";
 import { elegirDocumentoFactura } from "@/lib/combustible/factura-de-carga";
+import { pareceCombustible } from "@/lib/radar/cluster-remitente";
 import {
   lineasAlDespacho, esCargaDelRadar, generadaDespues, muestrasDesfase, decidirDesfaseCuenta, diaLima,
   notaFechaDespacho, cargasPorMover, normalizarDesfaseConfig, MAX_DESFASE, sumarDias,
@@ -276,16 +277,40 @@ export async function conciliarFacturaGuardada(
   // CANDADO: dos conciliaciones a la vez (el cron y el botón «Leer correo ahora») verían la
   // misma línea como faltante y la registrarían dos veces. Se reclama la factura con un UPDATE
   // condicional; quien no la consigue no toca nada.
+  //
+  // `procesada_en` es a la vez el candado y la hora de la última conciliación, así que el reclamo
+  // escribe el VENCIMIENTO del candado (ahora + 60 s, por si la función muere a mitad) y el final
+  // escribe la hora real, que ya quedó atrás: la factura se suelta EN CUANTO termina. Antes el
+  // reclamo exigía «más de 60 s desde procesada_en» y el final escribía «ahora», así que cada
+  // conciliación terminada dejaba la factura bloqueada otro minuto entero: registrar la segunda
+  // línea de una factura de tres cargas decía «otra conciliación en curso» sin que hubiera ninguna.
   const ahora = new Date().toISOString();
-  const libreDesde = new Date(Date.now() - 60_000).toISOString();
-  const { data: reclamo } = await sb.from("radar_facturas").update({ procesada_en: ahora })
-    .eq("id", fila.id).or(`procesada_en.is.null,procesada_en.lt.${libreDesde}`).select("id");
+  const vence = new Date(Date.now() + 60_000).toISOString();
+  const { data: reclamo } = await sb.from("radar_facturas").update({ procesada_en: vence })
+    .eq("id", fila.id).or(`procesada_en.is.null,procesada_en.lt.${ahora}`).select("id");
   if (!((reclamo as any[]) ?? []).length) {
     return {
       factura_id: Number(fila.id), estado: fila.estado, plan: Array.isArray(fila.conciliacion) ? fila.conciliacion : [],
-      error: "Otra conciliación de esta factura está en curso: reintenta en un minuto.",
+      error: "Otra conciliación de esta factura está en curso: reintenta en unos segundos.",
     };
   }
+  try {
+    return await conciliarReclamada(sb, fila, cuenta, hoy, manual, opts);
+  } catch (e) {
+    // Si falla a mitad, se suelta igual: esperar el vencimiento sería otro minuto bloqueado.
+    await sb.from("radar_facturas").update({ procesada_en: new Date().toISOString() }).eq("id", fila.id);
+    throw e;
+  }
+}
+
+async function conciliarReclamada(
+  sb: Parameters<typeof conciliarFacturaGuardada>[0],
+  fila: Parameters<typeof conciliarFacturaGuardada>[1],
+  cuenta: FilaCuenta | null,
+  hoy: string,
+  manual: { n: number; placa?: string | null; fecha?: string | null } | undefined,
+  opts: { aceptarHistoricas?: boolean; desfase?: DesfaseCuenta },
+): Promise<ResultadoFactura> {
 
   const flota = await cargarFlota(sb);
   const cab: FacturaExtraida = {
@@ -367,6 +392,28 @@ export async function conciliarFacturaGuardada(
       referencia: r.comprobante ?? "",
     }));
 
+  // LA ESPERA AL RADAR SE DECIDE POR LO QUE TIENE EN COLA, NO POR DÍAS FIJOS. El voucher llega
+  // por WhatsApp antes que la factura (lote nocturno del grifo): si el Radar no tiene ningún
+  // mensaje sin procesar desde el día del despacho y la carga no está, no va a llegar por ahí y
+  // esperar solo deja el gasto y el saldo fuera del ERP. Se leen una vez los mensajes que pueden
+  // ser un reporte de combustible (`pareceCombustible`, la misma regla del motor) y aún no se
+  // procesaron. Si la consulta falla, null: se espera el tope, como antes.
+  const fechasDespacho = lineas.map((l) => l.fecha).filter(Boolean).sort() as string[];
+  let colaRadar: string[] | null = [];
+  if (fechasDespacho.length) {
+    const { data: enCola, error: eCola } = await sb.from("radar_mensajes")
+      .select("recibido_en, tipo, texto")
+      .in("estado", ["pendiente", "procesando"])
+      .gte("recibido_en", `${fechasDespacho[0]}T05:00:00Z`)
+      .limit(1000);
+    colaRadar = eCola ? null
+      : ((enCola as { recibido_en: string; tipo: string | null; texto: string | null }[] | null) ?? [])
+        .filter(pareceCombustible).map((m) => String(m.recibido_en));
+  }
+  // Desde las 00:00 Lima del día del despacho (UTC-5).
+  const enColaDesde = (fecha: string | null): number | null =>
+    colaRadar == null ? null : !fecha ? 0 : colaRadar.filter((t) => Date.parse(t) >= Date.parse(`${fecha}T05:00:00Z`)).length;
+
   let docId: number | null = fila.documento_compra_id ?? null;
   const usados = new Set<string>();
   const plan: ResultadoFactura["plan"] = [];
@@ -390,6 +437,7 @@ export async function conciliarFacturaGuardada(
       hoy,
       // Una persona que confirma la línea ya decidió: sin espera, sin exigir el XML.
       graciaDias: manual?.n === l.n ? 0 : cuenta?.facturas_gracia_dias ?? 1,
+      radarEnCola: enColaDesde(l.fecha),
       autoRegistrar: decidida ? true : cuenta?.facturas_auto_registrar ?? true,
       // Lo del historial no se registra solo (lib/combustible/factura-lineas.ts).
       diasAutoRegistro: decidida ? null : DIAS_REGISTRO_AUTOMATICO,

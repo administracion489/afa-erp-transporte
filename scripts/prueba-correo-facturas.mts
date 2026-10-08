@@ -11,7 +11,7 @@
 import { createHash, createHmac } from "crypto";
 import { elegirConexion, sePuedeLeer, describirConexion, type EstadoConexion } from "../lib/combustible/correo-conexion";
 import { firmarStateGmail, leerStateGmail, verificarStateGmail, getAuthUrl, SCOPES_CRM, SCOPE_SOLO_LECTURA } from "../lib/crm-gmail";
-import { consultaGmail, LECTURA_HISTORIAL, falloGmailTransitorio, ggetGmail, procesarCorreo } from "../lib/combustible/facturas-correo";
+import { consultaGmail, LECTURA_HISTORIAL, falloGmailTransitorio, ggetGmail, procesarCorreo, conciliarFacturaGuardada } from "../lib/combustible/facturas-correo";
 import { DIAS_REGISTRO_AUTOMATICO } from "../lib/combustible/factura-lineas";
 
 let fallos = 0;
@@ -261,6 +261,67 @@ console.log("\n6. Fila de error de un correo");
   } finally {
     globalThis.fetch = original;
   }
+}
+
+
+// ── El candado de la conciliación se SUELTA al terminar ──────────────────────
+// Antes, cada conciliación terminada dejaba la factura bloqueada un minuto más (el final escribía
+// procesada_en = ahora y el reclamo exigía 60 s desde ahí): registrar la segunda línea de una
+// factura de tres cargas decía «otra conciliación de esta factura está en curso» sin que hubiera
+// ninguna. Base falsa: solo radar_facturas; leer la flota falla, así la conciliación muere a mitad
+// y se comprueba también que una que falla suelta el candado.
+{
+  console.log("\nCandado de la conciliación");
+  const fila: { id: number; procesada_en: string | null } = { id: 1, procesada_en: null };
+  const reclamos: boolean[] = [];
+  const sbFalso = {
+    from(tabla: string) {
+      if (tabla !== "radar_facturas") {
+        return { select: () => Promise.reject(new Error("la flota no se pudo leer")) };
+      }
+      return {
+        update(cambio: { procesada_en: string }) {
+          let condicion: string | null = null;
+          const aplicar = () => {
+            let ok = true;
+            if (condicion) {
+              const lt = condicion.match(/procesada_en\.lt\.([^,]+)/)?.[1];
+              ok = fila.procesada_en == null || (!!lt && Date.parse(fila.procesada_en) < Date.parse(lt));
+            }
+            if (ok) fila.procesada_en = cambio.procesada_en;
+            return ok;
+          };
+          const b: any = {
+            eq: () => b,
+            or: (c: string) => { condicion = c; return b; },
+            select: () => { const ok = aplicar(); reclamos.push(ok); return Promise.resolve({ data: ok ? [{ id: 1 }] : [] }); },
+            then: (res: (v: unknown) => unknown) => { aplicar(); return Promise.resolve({ error: null }).then(res); },
+          };
+          return b;
+        },
+      };
+    },
+  };
+  const intentar = async () => {
+    try { return await conciliarFacturaGuardada(sbFalso, { ...fila, lineas: [] }, null, "2026-10-08"); }
+    catch (e) { return { lanzo: e instanceof Error ? e.message : String(e) }; }
+  };
+  const r1 = await intentar();
+  chk("la primera reclama la factura", reclamos[0] === true && "lanzo" in r1);
+  chk("una conciliación que falla a mitad SUELTA el candado (no lo deja 60 s)",
+    fila.procesada_en != null && Date.parse(fila.procesada_en) <= Date.now(), String(fila.procesada_en));
+  await new Promise((r) => setTimeout(r, 5));
+  const r2 = await intentar();
+  chk("el clic siguiente entra en seguida, sin «otra conciliación en curso»", reclamos[1] === true && !("error" in r2 && (r2 as { error?: string }).error));
+  // Una conciliación de verdad en curso: el candado vence en el futuro.
+  fila.procesada_en = new Date(Date.now() + 30_000).toISOString();
+  const r3 = await intentar();
+  chk("mientras otra está EN CURSO, se dice y no se toca nada",
+    reclamos[2] === false && /en curso/.test(String((r3 as { error?: string }).error ?? "")));
+  // Un candado de una función que murió sin soltarlo vence solo.
+  fila.procesada_en = new Date(Date.now() - 1).toISOString();
+  await intentar();
+  chk("un candado vencido se puede volver a reclamar", reclamos[3] === true);
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde.");
