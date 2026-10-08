@@ -11,10 +11,12 @@ import {
 import { BarrasHorizontal } from "./_charts";
 import AnaliticaVehiculo, { type VehiculoAnalitica } from "./_AnaliticaVehiculo";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
-import { cabecerasErp } from "@/lib/fetch-erp";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 import { rankingConductores, type FilaRanking } from "@/lib/odometro-confirmacion";
-import { instanteLectura, horaLimaHms } from "@/lib/odometro-tiempo";
+import { instanteLectura, horaLimaHms, capturaDeFechaHora, normalizarHoraVoucher } from "@/lib/odometro-tiempo";
+import { leerOdometroDeFoto } from "@/lib/odometro-leer-foto";
+import { subirEvidencias, retirarSubidas, preguntaSinRespaldo } from "@/lib/evidencia";
+import EvidenciaPicker from "@/components/EvidenciaPicker";
 import {
   filtrarRevision, hayFiltro, tipoDeRevision, etiquetaTipo, placaComparable,
   TIPOS_REVISION, ORDENES_REVISION, FILTRO_REVISION_VACIO, type FiltroRevision,
@@ -92,21 +94,6 @@ function CeldaFechaHora({ l }: { l: { fecha: string; capturado_en?: string | nul
   );
 }
 
-function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string; data: string }> {
-  return new Promise((resolve, reject) => {
-    if (file.size > 20 * 1024 * 1024) return reject(new Error("La foto supera 20 MB"));
-    if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
-      return reject(new Error("Formato no soportado (usa JPG, PNG o WEBP)"));
-    }
-    const r = new FileReader();
-    r.onload = () => {
-      const res = String(r.result || "");
-      resolve({ tipo: "image", media_type: file.type || "image/jpeg", data: res.includes(",") ? res.split(",")[1] : res });
-    };
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
 
 // ─── COMPLETAR UNA JORNADA A MEDIAS ───────────────────────────────────────────
 // Una jornada con UNA sola lectura puede estar coja por cualquiera de los dos extremos: si esa
@@ -265,12 +252,15 @@ export default function OdometroTab() {
     (DiaRecorrido & { placa: string; falta: ExtremoFalta; seguro: boolean; propuesta: PropuestaKm | null }) | null
   >(null);
   const [cKm, setCKm]             = useState("");
-  const [cFoto, setCFoto]         = useState<File | null>(null);
+  const [cFotos, setCFotos]       = useState<File[]>([]);
+  const cFoto = cFotos[0] ?? null;
   const [cGuardando, setCGuardando] = useState(false);
 
   // Registro
-  const [form, setForm] = useState({ vehiculo_id: "", km: "", fecha: hoy, fuente: "manual" as FuenteLectura });
-  const [foto, setFoto] = useState<File | null>(null);
+  const [form, setForm] = useState({ vehiculo_id: "", km: "", fecha: hoy, hora: "", fuente: "manual" as FuenteLectura });
+  // La foto del tablero o de la constancia: respaldo OPCIONAL de la lectura (lib/evidencia.ts).
+  const [fotos, setFotos] = useState<File[]>([]);
+  const foto = fotos[0] ?? null;
   const [leyendo, setLeyendo]     = useState(false);
   const [guardando, setGuardando] = useState(false);
 
@@ -464,46 +454,11 @@ export default function OdometroTab() {
     if (!foto) { alert("Selecciona una foto del odómetro"); return; }
     setLeyendo(true);
     try {
-      const adj = await fileToAdjunto(foto);
       // Con el vehículo, el servidor aplica la guía de ESE tablero y valida el número contra
-      // su km vigente (evita que entre el parcial o un dígito de más).
-      const res = await fetch("/api/mantenimiento/leer-odometro", {
-        method: "POST", headers: await cabecerasErp(),
-        body: JSON.stringify({ adjunto: adj, vehiculo_id: Number(form.vehiculo_id) || null, flota: "propia" }),
-      });
-      const raw = await res.text();
-      let data: any;
-      try { data = JSON.parse(raw); }
-      catch {
-        if (res.status === 504 || /timeout|FUNCTION_INVOCATION/i.test(raw))
-          throw new Error("El servidor tardó demasiado leyendo la foto. Intenta de nuevo con una imagen más nítida.");
-        throw new Error(`El servidor respondió ${res.status}. ${raw.slice(0, 140)}`);
-      }
-      if (!res.ok || !data.ok) throw new Error(data?.error || `Error ${res.status}`);
-      if (!data.km) { alert("La IA no pudo leer el km con seguridad. Ingrésalo manualmente."); }
-      else if (data.auto_ok === false) {
-        // No se pre-llena: el número no cuadra con el kilometraje de esta unidad. El titular
-        // sale del CÓDIGO, no de olfatear el motivo: un dígito de más se arregla mirando la
-        // foto cifra por cifra, y decirlo así ahorra deducirlo de dos números grandes.
-        const titular = data.codigo_seleccion === "digito_de_mas"
-          ? `A la lectura de la IA (${Number(data.km).toLocaleString("es-PE")}) le SOBRA UN DÍGITO para esta unidad`
-          : `El número leído (${Number(data.km).toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad`;
-        alert(`${titular}${data.motivo_seleccion ? `:\n${data.motivo_seleccion}` : "."}\nRevisa la foto e ingrésalo a mano.`);
-      } else {
-        setForm(f => ({ ...f, km: String(data.km), fuente: "whatsapp_foto" }));
-        alert(
-          data.codigo_seleccion === "digito_repetido"
-            // El número no lo transcribió el modelo: lo dedujo el ERP. Se pre-llena porque la
-            // persona tiene la foto delante en este mismo momento, que es cuando cotejarlo
-            // cuesta diez segundos — pero se dicen los DOS números para que pueda cotejarlo.
-            ? `La IA leyó ${Number(data.km_ia).toLocaleString("es-PE")} y le sobra un dígito repetido.\n` +
-              `Se propone ${Number(data.km).toLocaleString("es-PE")} km, el único valor posible para esta unidad.\n\n` +
-              `COMPRUÉBALO CONTRA LA FOTO antes de registrar: lo dedujo el sistema, no lo leyó nadie.`
-            : data.corregido
-              ? `Leído: ${Number(data.km).toLocaleString("es-PE")} km.\nLa foto mostraba dos contadores: se tomó el total y se descartó el parcial. Revisa antes de registrar.`
-              : `Leído: ${Number(data.km).toLocaleString("es-PE")} km (confianza ${data.confianza}). Revisa antes de registrar.`
-        );
-      }
+      // su km vigente (evita que entre el parcial o un dígito de más). lib/odometro-leer-foto.ts.
+      const r = await leerOdometroDeFoto(foto, { vehiculoId: Number(form.vehiculo_id) || null, flota: "propia" });
+      if (r.km != null) setForm(f => ({ ...f, km: String(r.km), fuente: "whatsapp_foto" }));
+      alert(r.mensaje);
     } catch (e: any) {
       alert("Error: " + e.message);
     } finally {
@@ -515,28 +470,35 @@ export default function OdometroTab() {
 
   const registrar = async () => {
     if (!form.vehiculo_id || !form.km) { alert("Selecciona vehículo e ingresa el km"); return; }
+    const horaHms = form.hora.trim() ? normalizarHoraVoucher(form.hora) : null;
+    if (form.hora.trim() && !horaHms) { alert(`La hora «${form.hora}» no se entiende: escríbela como 17:08.`); return; }
     setGuardando(true);
     try {
+      // La foto NO se pierde callada: si no sube, se pregunta (antes `if (!up.error)` la soltaba).
       let fotoUrl: string | null = null;
       if (foto) {
-        const ext = foto.name.split(".").pop() || "jpg";
-        const path = `odometro/${form.vehiculo_id}/${Date.now()}.${ext}`;
-        const up = await supabase.storage.from("vehiculos-fotos").upload(path, foto, { upsert: true });
-        if (!up.error) fotoUrl = supabase.storage.from("vehiculos-fotos").getPublicUrl(path).data.publicUrl;
+        const sub = await subirEvidencias(supabase, [{ archivo: foto, clase: "tablero" }], `odometro/${form.vehiculo_id}`);
+        if (sub.fallidas.length && !confirm(preguntaSinRespaldo(sub.fallidas, "la lectura"))) return;
+        fotoUrl = sub.subidas[0]?.url ?? null;
       }
       const r = await registrarLectura(supabase, {
         vehiculo_id: Number(form.vehiculo_id),
         km: Number(form.km),
         fuente: form.fuente,
         fecha: form.fecha,
+        // Con la hora (la del voucher o la de la foto) la lectura queda EXACTA en su día; sin
+        // ella, solo se sabe la fecha (lib/odometro-tiempo.ts).
+        capturado_en: horaHms ? capturaDeFechaHora(form.fecha, horaHms) : null,
+        horaEsTope: false,
         foto_url: fotoUrl,
         kmDiaMax,
       });
+      if (!r.ok && fotoUrl) await retirarSubidas(supabase, [{ url: fotoUrl, nombre: "", mime: "", clase: "tablero" }]);
       if (!r.ok) throw new Error(r.error || "No se pudo registrar");
       if (r.estado === "sospechosa") alert(`Registrada pero marcada para revisión: ${r.motivo}`);
       else alert("Lectura registrada ✓");
-      setForm({ vehiculo_id: "", km: "", fecha: hoy, fuente: "manual" });
-      setFoto(null);
+      setForm({ vehiculo_id: "", km: "", fecha: hoy, hora: "", fuente: "manual" });
+      setFotos([]);
       await cargar();
     } catch (e: any) {
       alert("Error: " + e.message);
@@ -599,7 +561,7 @@ export default function OdometroTab() {
     // Se precarga SOLO si la jornada vecina es del día contiguo; con días sin registro en medio
     // ese número arrastra kilómetros de otros días y no puede darse por bueno (ver proponerKm).
     setCKm(propuesta?.contiguo ? String(propuesta.km) : "");
-    setCFoto(null);
+    setCFotos([]);
   };
 
   /** Cambia de extremo sin cerrar el modal (para la jornada cuya lectura es ambigua). */
@@ -648,16 +610,10 @@ export default function OdometroTab() {
       const id = Number(completar.key.slice(2));
       let fotoUrl: string | null = null;
       if (cFoto) {
-        if (cFoto.size > 20 * 1024 * 1024) { alert("La foto supera 20 MB — usa una más liviana o registra sin foto."); setCGuardando(false); return; }
-        const ext = cFoto.name.split(".").pop() || "jpg";
-        const path = `odometro/${esTercero ? "t" : "p"}${id}/${Date.now()}.${ext}`;
-        const up = await supabase.storage.from("vehiculos-fotos").upload(path, cFoto, { upsert: true });
-        if (up.error) {
-          // No tragar el fallo: la foto es evidencia. Que el operador decida.
-          if (!confirm("No se pudo subir la foto del tablero. ¿Registrar la jornada sin foto?")) { setCGuardando(false); return; }
-        } else {
-          fotoUrl = supabase.storage.from("vehiculos-fotos").getPublicUrl(path).data.publicUrl;
-        }
+        // No tragar el fallo: la foto es evidencia. Que el operador decida (lib/evidencia.ts).
+        const sub = await subirEvidencias(supabase, [{ archivo: cFoto, clase: "tablero" }], `odometro/${esTercero ? "t" : "p"}${id}`);
+        if (sub.fallidas.length && !confirm(preguntaSinRespaldo(sub.fallidas, "la jornada"))) { setCGuardando(false); return; }
+        fotoUrl = sub.subidas[0]?.url ?? null;
       }
       // Completado RETROACTIVO de una jornada pasada = backfill histórico confiable (el número ya
       // se validó contra el extremo que existe y contra el día anterior). Se FUERZA a 'aceptada':
@@ -773,7 +729,7 @@ export default function OdometroTab() {
             <p className="text-xs text-gray-400">Sube la foto del odómetro y léela con IA, o ingresa el km a mano</p>
           </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Vehículo *</label>
             <select className={inputCls()} value={form.vehiculo_id} onChange={e => setForm(f => ({ ...f, vehiculo_id: e.target.value }))}>
@@ -792,6 +748,10 @@ export default function OdometroTab() {
             <input type="date" className={inputCls()} value={form.fecha} onChange={e => setForm(f => ({ ...f, fecha: e.target.value }))} />
           </div>
           <div>
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Hora (opcional)</label>
+            <input type="time" className={inputCls()} value={form.hora} onChange={e => setForm(f => ({ ...f, hora: e.target.value }))} />
+          </div>
+          <div>
             <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Fuente</label>
             <select className={inputCls()} value={form.fuente} onChange={e => setForm(f => ({ ...f, fuente: e.target.value as FuenteLectura }))}>
               <option value="manual">Manual</option>
@@ -801,9 +761,10 @@ export default function OdometroTab() {
             </select>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <input type="file" accept="image/*" capture="environment" onChange={e => setFoto(e.target.files?.[0] || null)}
-            className="text-sm file:mr-3 file:px-4 file:py-2 file:rounded-xl file:border-0 file:bg-gray-100 file:text-gray-700 file:font-bold file:text-xs" />
+        <div className="flex flex-wrap items-end gap-3">
+          <EvidenciaPicker titulo="Foto del tablero o de la constancia (opcional)" soloImagen max={1}
+            ayuda="Queda como respaldo de la lectura. Si es del tablero, «Leer foto con IA» propone el km."
+            archivos={fotos} onChange={setFotos} deshabilitado={guardando} />
           <button onClick={leerFoto} disabled={!foto || leyendo}
             className="px-4 py-2 rounded-xl font-bold text-sm border text-[#0b315f] disabled:opacity-50 hover:bg-gray-50">
             {leyendo ? "Leyendo…" : "🤖 Leer foto con IA"}
@@ -1520,11 +1481,8 @@ export default function OdometroTab() {
                 </p>
               )}
 
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Foto del tablero (opcional)</label>
-                <input type="file" accept="image/*" capture="environment" onChange={e => setCFoto(e.target.files?.[0] || null)}
-                  className="text-sm file:mr-3 file:px-4 file:py-2 file:rounded-xl file:border-0 file:bg-gray-100 file:text-gray-700 file:font-bold file:text-xs" />
-              </div>
+              <EvidenciaPicker titulo="Foto del tablero o de la constancia (opcional)" soloImagen max={1}
+                archivos={cFotos} onChange={setCFotos} deshabilitado={cGuardando} />
 
               <div className="flex items-center gap-2 pt-1">
                 <button onClick={() => setCompletar(null)} disabled={cGuardando}

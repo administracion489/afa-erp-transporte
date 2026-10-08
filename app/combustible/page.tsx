@@ -39,6 +39,9 @@ type Combustible = {
   comprobante_numero?: string | null;
   // Migración accesoria (supabase/combustible-05-hora-carga.sql): la hora del despacho, «HH:MM:SS».
   hora?: string | null;
+  // Migración accesoria (supabase/combustible-06-evidencias.sql): el respaldo adjunto a mano
+  // (voucher, constancia, foto del tablero). jsonb; se lee con `normalizarEvidencias`.
+  evidencias?: unknown;
 };
 
 // Lo que el Radar IA guarda de la carga que él mismo registró. `combustible` no guarda NADA
@@ -68,6 +71,12 @@ import FacturaDelCorreo from "@/components/combustible/FacturaDelCorreo";
 import { esCargaDeFactura } from "@/lib/combustible/factura-lineas";
 import { faltaOdometroDeFactura } from "@/lib/combustible/completar-carga";
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
+import EvidenciaPicker from "@/components/EvidenciaPicker";
+import {
+  subirEvidencias, retirarSubidas, preguntaSinRespaldo, normalizarEvidencias, fotoDeTablero,
+  esImagenEvidencia, ETIQUETA_CLASE, type Evidencia,
+} from "@/lib/evidencia";
+import { leerOdometroDeFoto } from "@/lib/odometro-leer-foto";
 
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
 // El catálogo vive en lib/combustible-tipos.ts: /radar-ia lo necesita para su columna de
@@ -231,6 +240,12 @@ export default function CombustiblePage() {
   const [loading,     setLoading]     = useState(false);
   const [guardando,   setGuardando]   = useState(false);
   const [editandoId,  setEditandoId]  = useState<number | null>(null);
+  // El RESPALDO de la carga (lib/evidencia.ts): lo nuevo se sube al guardar; lo guardado viene de la fila.
+  const [vouchersNuevos, setVouchersNuevos] = useState<File[]>([]);
+  const [tableroNuevo,   setTableroNuevo]   = useState<File[]>([]);
+  const [evidGuardadas,  setEvidGuardadas]  = useState<Evidencia[]>([]);
+  const [evidOriginales, setEvidOriginales] = useState(0);
+  const [leyendoKm,      setLeyendoKm]      = useState(false);
   const [mostrarForm, setMostrarForm] = useState(false);
   // QUIÉN AFIRMA EL TANQUE NO ES SIEMPRE QUIEN GUARDA, y por eso la fuente no se puede fijar en
   // el payload. Abrir una carga vieja para corregirle el precio no es afirmar nada sobre el
@@ -536,7 +551,28 @@ export default function CombustiblePage() {
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  const limpiar = () => { setForm({ ...FORM_VACIO, fecha: hoyLima() }); setEditandoId(null); setTanqueFuente(null); setMostrarForm(false); };
+  const limpiar = () => {
+    setForm({ ...FORM_VACIO, fecha: hoyLima() }); setEditandoId(null); setTanqueFuente(null); setMostrarForm(false);
+    setVouchersNuevos([]); setTableroNuevo([]); setEvidGuardadas([]); setEvidOriginales(0);
+  };
+
+  // «🤖 Leer km con IA» sobre la foto del tablero: el MISMO helper de /mantenimiento → Odómetro.
+  // Propone el km; nunca lo guarda solo.
+  const leerKmDeTablero = async () => {
+    const f = tableroNuevo[0];
+    const u = unidadDe(form.vehiculo_id);
+    if (!f) { alert("Adjunta primero la foto del tablero"); return; }
+    setLeyendoKm(true);
+    try {
+      const r = await leerOdometroDeFoto(f, { vehiculoId: u?.id ?? null, flota: u?.tipo === "tercero" ? "tercero" : "propia" });
+      if (r.km != null) setForm(p => ({ ...p, kilometraje: String(r.km) }));
+      alert(r.mensaje);
+    } catch (e: unknown) {
+      alert("Error: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setLeyendoKm(false);
+    }
+  };
 
   const guardar = async () => {
     if (!form.vehiculo_id || !form.fecha) { alert("Selecciona vehículo y fecha"); return; }
@@ -568,6 +604,28 @@ export default function CombustiblePage() {
     }
 
     setGuardando(true);
+
+    // EL RESPALDO SE SUBE ANTES DE ESCRIBIR LA CARGA, y si algo no sube se PREGUNTA: una evidencia
+    // que parece adjunta y no está es peor que ninguna (lib/evidencia.ts).
+    let nuevas: Evidencia[] = [];
+    const porSubir = [
+      ...vouchersNuevos.map(archivo => ({ archivo, clase: "voucher" as const })),
+      ...tableroNuevo.map(archivo => ({ archivo, clase: "tablero" as const })),
+    ];
+    if (porSubir.length) {
+      const sub = await subirEvidencias(supabase, porSubir, `combustible/${form.vehiculo_id}`);
+      if (sub.fallidas.length && !confirm(preguntaSinRespaldo(sub.fallidas, "la carga"))) {
+        await retirarSubidas(supabase, sub.subidas);
+        setGuardando(false);
+        return;
+      }
+      nuevas = sub.subidas;
+    }
+    const evidencias = [...evidGuardadas, ...nuevas];
+    // Se manda cuando hay algo que decir: con archivos, o al editar una carga que ya tenía (así
+    // quitarlos BORRA). Una carga sin respaldo no toca la columna, y sin la migración no paga un reintento.
+    const mandarEvidencias = evidencias.length > 0 || (editandoId != null && evidOriginales > 0);
+
     const base = {
       vehiculo_id:         esTercero ? null : uSel.id,
       vehiculo_tercero_id: esTercero ? uSel.id : null,
@@ -594,6 +652,7 @@ export default function CombustiblePage() {
       km_salto_motivo: form.km_salto_motivo.trim() || null,
       // Se manda siempre, incluso en null: vaciar el campo tiene que poder BORRAR una hora mal puesta.
       hora: horaHms,
+      ...(mandarEvidencias ? { evidencias } : {}),
     };
 
     const escribir = (p: Record<string, unknown>) =>
@@ -601,38 +660,49 @@ export default function CombustiblePage() {
         ? supabase.from("combustible").update(p).eq("id", editandoId)
         : supabase.from("combustible").insert(p);
 
-    let { error } = await escribir(payload);
-    // Sin combustible-05 la carga se guarda igual, sin su hora (la lectura de odómetro sí la lleva).
-    let sinColumnaHora = false;
-    if (error && faltaAlguna(error, ["hora"])) {
-      const { hora: _h, ...sinHora } = payload;
-      void _h;
-      sinColumnaHora = true;
-      ({ error } = await escribir(sinHora));
-    }
-    // Reintento sin las columnas de la migración accesoria, nombrando el SQL: registrar una
-    // carga no se puede bloquear porque falte un dato del método de tanque lleno — pero un dato
-    // que parece guardarse y no llega sí hay que decirlo.
-    // `faltaAlguna` entiende las DOS formas del error: en un INSERT/UPDATE quien rechaza la columna
-    // es PostgREST (PGRST204 «Could not find the … column»), no Postgres («does not exist»). Mirando
-    // solo la segunda, este reintento no saltaba nunca — el mismo hueco que dejó al Radar sin guardar.
-    if (error && faltaAlguna(error, ["tanque_lleno", "tanque_lleno_fuente", "km_salto_motivo", "hora"])) {
-      const r2 = await escribir(base);
-      error = r2.error;
-      if (!error) {
-        alert(
-          "La carga se guardó, PERO sin «tanque lleno» ni el motivo del salto de km: falta correr " +
-          "supabase/combustible-01-tanque-lleno.sql en Supabase.\n\nHasta entonces el rendimiento se " +
-          "mide como antes (cada carga cuenta como tanque lleno)."
-        );
-      }
+    // Reintento soltando SOLO la columna accesoria que el error NOMBRA, y diciendo qué se perdió:
+    // registrar una carga no se puede bloquear porque falte un SQL accesorio, pero un dato que parece
+    // guardarse y no llega sí hay que decirlo. `faltaAlguna` entiende las DOS formas del error: en un
+    // INSERT/UPDATE quien rechaza la columna es PostgREST (PGRST204 «Could not find the … column»), no
+    // Postgres («does not exist») — el mismo hueco que dejó al Radar sin guardar.
+    const OPCIONALES = ["evidencias", "hora", "tanque_lleno", "tanque_lleno_fuente", "km_salto_motivo"] as const;
+    const intento: Record<string, unknown> = { ...payload };
+    const soltadas = new Set<string>();
+    let { error } = await escribir(intento);
+    for (let i = 0; i < OPCIONALES.length && error; i++) {
+      const col = faltaAlguna(error, OPCIONALES.filter(c => c in intento));
+      if (!col) break;
+      delete intento[col];
+      soltadas.add(col);
+      ({ error } = await escribir(intento));
     }
 
-    if (error) { alert(error.message); setGuardando(false); return; }
-    if (sinColumnaHora && horaHms) {
+    if (error) {
+      // Nada quedó escrito: lo recién subido no lo enlazaría nadie.
+      await retirarSubidas(supabase, nuevas);
+      alert(error.message); setGuardando(false); return;
+    }
+    if (soltadas.has("tanque_lleno") || soltadas.has("tanque_lleno_fuente") || soltadas.has("km_salto_motivo")) {
+      alert(
+        "La carga se guardó, PERO sin «tanque lleno» ni el motivo del salto de km: falta correr " +
+        "supabase/combustible-01-tanque-lleno.sql en Supabase.\n\nHasta entonces el rendimiento se " +
+        "mide como antes (cada carga cuenta como tanque lleno)."
+      );
+    }
+    if (soltadas.has("hora") && horaHms) {
       alert(
         "La carga se guardó, PERO sin la hora: falta correr supabase/combustible-05-hora-carga.sql en Supabase.\n\n" +
         "La lectura de odómetro sí queda con su hora."
+      );
+    }
+    if (soltadas.has("evidencias") && evidencias.length) {
+      // El voucher sin columna no lo enlaza nadie: se retira. La foto del tablero sí sigue sirviendo,
+      // porque va a la lectura de odómetro (que tiene su propia columna).
+      await retirarSubidas(supabase, nuevas.filter(e => e.clase !== "tablero"));
+      alert(
+        "La carga se guardó, PERO sin el voucher ni la constancia adjuntos: falta correr " +
+        "supabase/combustible-06-evidencias.sql en Supabase." +
+        (fotoDeTablero(evidencias) && !editandoId ? "\n\nLa foto del tablero sí queda en la lectura de odómetro." : "")
       );
     }
 
@@ -668,6 +738,8 @@ export default function CombustiblePage() {
           // antes y la de después de esa hora. Sin hora, solo se sabe el día.
           capturado_en: horaHms ? capturaDeFechaHora(form.fecha, horaHms) : null,
           horaEsTope: false,
+          // La foto del tablero adjunta es la evidencia de ESTA lectura (se ve en Mantenimiento → Odómetro).
+          foto_url: fotoDeTablero(evidencias),
           ref_origen: "combustible",
         });
       }
@@ -695,6 +767,9 @@ export default function CombustiblePage() {
       km_salto_motivo:  r.km_salto_motivo || "",
     });
     setTanqueFuente(r.tanque_lleno_fuente ?? null);
+    const evs = normalizarEvidencias(r.evidencias);
+    setEvidGuardadas(evs); setEvidOriginales(evs.length);
+    setVouchersNuevos([]); setTableroNuevo([]);
     setEditandoId(r.id); setMostrarForm(true);
     verLoQueLeyoElRadar(r.id);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
@@ -1238,6 +1313,35 @@ export default function CombustiblePage() {
             )}
           </div>
 
+          {/* RESPALDO DE LA CARGA (opcional): el voucher del grifo o una constancia, y la foto del
+              tablero. Se ve después en el historial; la del tablero acompaña a la lectura de odómetro. */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Respaldo (opcional)</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <EvidenciaPicker titulo="Voucher o constancia" max={4}
+                ayuda="Foto o PDF del voucher del grifo, la factura o cualquier constancia de la carga."
+                archivos={vouchersNuevos} onChange={setVouchersNuevos}
+                guardadas={evidGuardadas.filter(e => e.clase !== "tablero")}
+                onQuitarGuardada={url => setEvidGuardadas(p => p.filter(e => e.url !== url))}
+                deshabilitado={guardando} />
+              <div>
+                <EvidenciaPicker titulo="Foto del tablero (odómetro)" soloImagen max={1}
+                  ayuda={editandoId ? "Queda como respaldo de esta carga." : "Respalda el km de la carga y queda en su lectura de odómetro."}
+                  archivos={tableroNuevo} onChange={setTableroNuevo}
+                  guardadas={evidGuardadas.filter(e => e.clase === "tablero")}
+                  onQuitarGuardada={url => setEvidGuardadas(p => p.filter(e => e.url !== url))}
+                  deshabilitado={guardando} />
+                {tableroNuevo.length > 0 && (
+                  <button type="button" onClick={leerKmDeTablero} disabled={leyendoKm || !form.vehiculo_id}
+                    title={!form.vehiculo_id ? "Elige primero el vehículo" : undefined}
+                    className="mt-2 px-3 py-2 rounded-xl text-xs font-bold border text-[#0b315f] hover:bg-gray-50 disabled:opacity-50">
+                    {leyendoKm ? "Leyendo…" : "🤖 Leer km con IA"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
           <Campo label="Observaciones" span={3}>
             <input className={inputCls()} placeholder="Notas adicionales..." value={form.observaciones}
               onChange={e => setForm(p => ({ ...p, observaciones: e.target.value }))} />
@@ -1365,6 +1469,9 @@ export default function CombustiblePage() {
                           <td className="p-3 text-xs text-gray-600 font-medium whitespace-nowrap">
                             {fmtFecha(r.fecha)}
                             {r.hora && <span className="ml-1 text-gray-400">{String(r.hora).slice(0, 5)}</span>}
+                            {normalizarEvidencias(r.evidencias).length > 0 && (
+                              <span className="ml-1.5" title="Tiene respaldo adjunto (voucher, constancia o foto del tablero) — ábrela para verlo">📎</span>
+                            )}
                             {cargasDelRadar.has(r.id) && (
                               <span className="ml-1.5" title="La leyó el Radar IA de una foto — ábrela para verla">📷</span>
                             )}
@@ -1557,6 +1664,28 @@ export default function CombustiblePage() {
                                       ? "Buscando la foto que leyó el Radar IA…"
                                       : "📷 La registró el Radar IA, pero no quedó guardada la foto que leyó."}
                                   </p>
+                                );
+                              })()}
+                              {/* El respaldo adjunto a mano: voucher, constancia, foto del tablero. */}
+                              {(() => {
+                                const evs = normalizarEvidencias(r.evidencias);
+                                if (!evs.length) return null;
+                                return (
+                                  <div className="mt-4">
+                                    <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">📎 Respaldo adjunto</p>
+                                    <div className="flex flex-wrap gap-2">
+                                      {evs.map(e => (
+                                        <EnlacePrivado key={e.url} href={e.url} target="_blank" rel="noreferrer"
+                                          title={`${ETIQUETA_CLASE[e.clase]} · ${e.nombre}`}
+                                          className="block rounded-lg border overflow-hidden bg-white hover:shadow">
+                                          {esImagenEvidencia(e)
+                                            ? <ImgPrivada src={e.url} alt={e.nombre} className="h-28 w-auto max-w-[200px] object-cover" />
+                                            : <div className="h-28 w-32 flex flex-col items-center justify-center text-xs text-blue-700 px-2 text-center">📄<span className="truncate w-full">{e.nombre}</span></div>}
+                                          <div className="px-2 py-0.5 text-[10px] font-bold text-gray-500 bg-gray-50">{ETIQUETA_CLASE[e.clase]}</div>
+                                        </EnlacePrivado>
+                                      ))}
+                                    </div>
+                                  </div>
                                 );
                               })()}
                               {/* La factura del correo que la registró o la respalda, con su documento a un clic. */}
