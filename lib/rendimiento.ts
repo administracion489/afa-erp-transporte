@@ -253,9 +253,28 @@ export type Tramo = {
    * disciplina de `CostoUnidad.fuentes`: el número sale, y dice sobre qué se apoya.
    */
   tanqueConfirmado: boolean;
+  /**
+   * La unidad tiene un combustible AUXILIAR (ver `auxiliarDeUnidad`): este rendimiento ya está
+   * CORREGIDO por la energía que puso ese combustible, y `detalle` lo dice. Ausente = sin corrección.
+   */
+  auxiliar?: Auxiliar;
   techo: number | null;
   detalle: string;
 };
+
+/** Un combustible que la unidad usa poco: cuánto de su energía aporta y cuál es. */
+export type Auxiliar = { participacion: number; familias: string[] };
+
+/**
+ * La cantidad del tramo para dividir km entre ella. Sin auxiliar es la cantidad tal cual; con
+ * auxiliar, la EQUIVALENTE (lo cargado del principal más la energía del auxiliar, expresada en el
+ * principal): `km / esto` es exactamente el rendimiento corregido del tramo. Los ratios agrupados
+ * (ventana móvil, ventanas del periodo) la usan para decir lo mismo que la fila.
+ */
+export function cantidadParaRendimiento(t: Pick<Tramo, "cantidad" | "auxiliar">): number {
+  const q = num(t.cantidad);
+  return t.auxiliar ? q / (1 - t.auxiliar.participacion) : q;
+}
 
 export type ResumenUnidad = {
   unidad: string;
@@ -422,7 +441,13 @@ export function serieRendimiento(
    * camión diésel que carga urea no es bicombustible —la urea no mueve el bus— y contarla
    * borraría el rendimiento de media flota.
    */
-  otrasFamilias: MarcaOtraFamilia[] = []
+  otrasFamilias: MarcaOtraFamilia[] = [],
+  /**
+   * La unidad usa los OTROS combustibles solo como AUXILIAR (`auxiliarDeUnidad`): sus repostajes
+   * no bloquean el tramo, y el rendimiento se CORRIGE por la energía que aportaron. Ausente = la
+   * regla de siempre (el tramo cruzado no se mide).
+   */
+  auxiliar: Auxiliar | null = null
 ): Serie {
   const primera = cargas[0];
   const familia = familiaCombustible(primera?.tipo);
@@ -579,7 +604,9 @@ export function serieRendimiento(
       continue;
     }
 
-    const valor = delta / cantidadTramo;
+    // Con un combustible AUXILIAR, parte de la energía que movió estos km vino de él: el km/gal
+    // del principal se descuenta en esa proporción (ver `auxiliarDeUnidad`).
+    const valor = (delta / cantidadTramo) * (auxiliar ? 1 - auxiliar.participacion : 1);
 
     if (saltadas.length) {
       tramos.push({
@@ -598,7 +625,7 @@ export function serieRendimiento(
     // repostaje que nunca faltó, y en el Radar BLOQUEANDO el voucher por ello.
     const fechaPrev = previa.fecha;
     const cruces = otrasFamilias.filter((m) => cruzaElTramo(m, kmPrev, km, fechaPrev, c.fecha));
-    if (cruces.length) {
+    if (cruces.length && !auxiliar) {
       tramos.push({
         ...base, rendimiento: null, motivo: "familia_cruzada", crudo: valor,
         detalle: detalleDe("familia_cruzada", { ...base, crudo: valor, cruces }),
@@ -627,7 +654,9 @@ export function serieRendimiento(
       continue;
     }
 
-    tramos.push({ ...base, rendimiento: valor, motivo: null, detalle: "" });
+    tramos.push(auxiliar
+      ? { ...base, rendimiento: valor, motivo: null, auxiliar, detalle: detalleAuxiliar(auxiliar, familia, cruces.length) }
+      : { ...base, rendimiento: valor, motivo: null, detalle: "" });
     previa = c;
   }
 
@@ -657,7 +686,7 @@ export function serieRendimiento(
           ? Math.min(techoFamilia, med * FACTOR_TECHO_UNIDAD)
           : techoFamilia,
       kmMedido: buenos.reduce((s, t) => s + num(t.km), 0),
-      cantidadMedida: buenos.reduce((s, t) => s + num(t.cantidad), 0),
+      cantidadMedida: buenos.reduce((s, t) => s + cantidadParaRendimiento(t), 0),
       cargasSinOdometro,
       tramosDescartados: tramos.filter(
         (t) =>
@@ -706,6 +735,7 @@ export function seriesRendimiento(cargas: CargaRendimiento[]): Map<string, Serie
   // Los ADITIVOS quedan fuera de las marcas: la urea no mueve el bus, así que un camión diésel
   // que la carga NO es bicombustible. Contarla borraría el rendimiento de media flota.
   const marcas = new Map<string, MarcaOtraFamilia[]>();
+  const porUnidad = new Map<string, CargaRendimiento[]>();
   for (const c of cargas) {
     const fam = familiaCombustible(c.tipo);
     if (techoDeFamilia(fam) === null) continue;
@@ -713,15 +743,88 @@ export function seriesRendimiento(cargas: CargaRendimiento[]): Map<string, Serie
     const m: MarcaOtraFamilia = { id: c.id, fecha: c.fecha, kilometraje: c.kilometraje, familia: fam };
     if (arr) arr.push(m);
     else marcas.set(c.unidad, [m]);
+    const pu = porUnidad.get(c.unidad);
+    if (pu) pu.push(c);
+    else porUnidad.set(c.unidad, [c]);
   }
 
   const out = new Map<string, Serie>();
   for (const [k, arr] of cubos) {
     const familia = familiaCombustible(arr[0]?.tipo);
     const otras = (marcas.get(arr[0]?.unidad) ?? []).filter((m) => m.familia !== familia);
-    out.set(k, serieRendimiento(arr, otras));
+    const aux = otras.length ? auxiliarDeUnidad(porUnidad.get(arr[0]?.unidad) ?? [], familia) : null;
+    out.set(k, serieRendimiento(arr, otras, aux));
   }
   return out;
+}
+
+// ─── EL COMBUSTIBLE AUXILIAR ──────────────────────────────────────────────────
+//
+// LO PIDIÓ EL DUEÑO sobre la CWQ400 (GLP + gasolina): «la gasolina solo se usa para el aire
+// acondicionado y un mínimo para el arranque; por eso pasan meses entre tanqueos de gasolina. El
+// consumo principal es GLP: debería medir su rendimiento». Tiene razón: bloquear todo tramo de GLP
+// que envuelve una carga de gasolina dejaba a la unidad sin medir casi nunca, por un combustible
+// que aporta una fracción menor.
+//
+// PERO ESA GASOLINA TAMBIÉN MOVIÓ LA VAN, y no se puede saber en qué tramo se quemó (una carga dura
+// meses). Lo que SÍ se sabe es cuánta energía aportó en toda la historia de la unidad: el km/gal
+// del principal se publica DESCONTADO en esa proporción. Si el 8 % de la energía vino de la
+// gasolina, cada km/gal de GLP medido se multiplica por 0.92. Es el lado seguro: sin descontarlo,
+// el km/gal de GLP saldría alto y el costo por km, corto.
+//
+// SOLO CUANDO ES DE VERDAD AUXILIAR: los otros combustibles, juntos, aportan como mucho
+// `UMBRAL_AUXILIAR` de la energía. Una unidad que usa los dos en serio (o que cambió de uno a otro)
+// sigue con la regla de siempre: el tramo cruzado no se mide. Y la serie del AUXILIAR no se mide
+// nunca así: sus tramos envuelven meses del principal.
+
+/**
+ * Energía por unidad canónica de cada familia, relativa a un galón de gasolina (poder calorífico
+ * inferior, tablas estándar: gasolina ≈ 120 000 BTU/gal, diésel ≈ 133 000, GLP ≈ 91 000, GNV ≈
+ * 35 000 BTU/m³). Son constantes FÍSICAS, no medidas en la flota; con el gasohol o una mezcla de
+ * GLP distinta varían unos puntos, que es mucho menos que el error de no descontar nada.
+ */
+export const ENERGIA_RELATIVA: Record<string, number> = { gasolina: 1, diesel: 1.11, glp: 0.76, gnv: 0.29 };
+
+/**
+ * Hasta qué parte de la energía total pueden aportar los otros combustibles para considerarse
+ * AUXILIARES. **No está medido**: es el punto donde descontar una proporción promedio sigue siendo
+ * una aproximación honesta. El lado seguro es BAJARLO (más unidades vuelven a «bicombustible»).
+ */
+export const UMBRAL_AUXILIAR = 0.2;
+
+/**
+ * ¿Los otros combustibles de la unidad son AUXILIARES de `familia`? Devuelve cuánto aportan (y
+ * cuáles) o null. Exige poder medir TODA la energía: una carga de la unidad sin cantidad o en una
+ * unidad que no se sabe convertir deja la cuenta incompleta, y entonces no se afirma nada.
+ */
+export function auxiliarDeUnidad(cargasDeLaUnidad: CargaRendimiento[], familia: string): Auxiliar | null {
+  let principal = 0;
+  let otras = 0;
+  const familias = new Set<string>();
+  for (const c of cargasDeLaUnidad) {
+    const fam = familiaCombustible(c.tipo);
+    if (techoDeFamilia(fam) === null) continue; // aditivos: no mueven el bus
+    const factor = ENERGIA_RELATIVA[fam];
+    const q = normalizarCantidad(c.cantidad, c.unidadCantidad, fam);
+    if (factor == null || q === null) return null;
+    if (fam === familia) principal += q * factor;
+    else { otras += q * factor; familias.add(fam); }
+  }
+  const total = principal + otras;
+  if (!(otras > 0) || !(total > 0)) return null;
+  const participacion = otras / total;
+  return participacion <= UMBRAL_AUXILIAR ? { participacion, familias: [...familias].sort() } : null;
+}
+
+function detalleAuxiliar(a: Auxiliar, familia: string, cruces: number): string {
+  const otras = a.familias.join(" y ");
+  const pct = Math.round(a.participacion * 1000) / 10;
+  return (
+    `Unidad bicombustible con ${otras} como AUXILIAR: aporta el ${pct} % de la energía de toda su historia, ` +
+    `así que este km/${familia === "gnv" ? "m³" : "gal"} ya está descontado en esa proporción` +
+    (cruces ? ` (en este tramo repostó ${cruces} vez/veces de ${otras})` : "") +
+    `. Si ${otras} llega a aportar más del ${Math.round(UMBRAL_AUXILIAR * 100)} %, los tramos que la envuelven dejan de medirse.`
+  );
 }
 
 /** Índice carga → su tramo y el resumen de su serie. Es lo que pinta una fila de tabla. */
@@ -791,7 +894,7 @@ export function ventanaMovil(serie: Serie, n: number = MIN_TRAMOS_CONFIABLE): Ma
   for (let i = 0; i < buenos.length; i++) {
     const ventana = buenos.slice(Math.max(0, i - n + 1), i + 1);
     const km = ventana.reduce((s, t) => s + num(t.km), 0);
-    const cantidad = ventana.reduce((s, t) => s + num(t.cantidad), 0);
+    const cantidad = ventana.reduce((s, t) => s + cantidadParaRendimiento(t), 0);
     if (!(cantidad > 0)) continue;
     const rendimiento = km / cantidad;
     out.set(buenos[i].cargaId, {
@@ -1189,7 +1292,9 @@ export function resumirVentana(
       //    sumando exacto.
       if (t.rendimiento === null || t.km == null || t.cantidad == null) continue;
       km += t.km;
-      cantidad += t.cantidad;
+      // Con combustible auxiliar, la cantidad EQUIVALENTE (la fila y el agregado dicen lo mismo).
+      // La descomposición sigue sumando exacto: gasto = km × (cantidad/km) × (gasto/cantidad).
+      cantidad += cantidadParaRendimiento(t);
       gasto += gastoDe.get(t.cargaId) ?? 0;
       medidas++;
       familias.add(s.resumen.familia);

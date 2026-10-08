@@ -22,6 +22,7 @@
 // 30.47 — justo por encima del rendimiento real de la unidad. Siete filas sanas marcadas y
 // la única rota en verde, porque el color solo miraba hacia abajo.
 import {
+  auxiliarDeUnidad, UMBRAL_AUXILIAR, claveSerie, cantidadParaRendimiento,
   serieRendimiento,
   seriesRendimiento,
   tramosPorCarga,
@@ -712,6 +713,61 @@ const cargaBi = (
   ]);
   chk("una carga del otro combustible sin odómetro se ubica por fecha",
     sinKm.tramos[1].motivo === "familia_cruzada", String(sinKm.tramos[1].motivo));
+}
+
+// ── EL COMBUSTIBLE AUXILIAR ──────────────────────────────────────────────────
+// Lo pidió el dueño sobre la CWQ400: la gasolina es solo para el aire y el arranque (pasan meses
+// entre tanqueos), el consumo principal es GLP y SU rendimiento se tiene que medir. Cuando los otros
+// combustibles aportan poca energía, el tramo de GLP se mide aunque envuelva una carga de gasolina,
+// DESCONTADO por la energía que esa gasolina puso.
+{
+  // 11 cargas de GLP de 10 gal cada 300 km; una de gasolina de 5 gal a mitad.
+  const cargas: CargaRendimiento[] = [];
+  for (let i = 0; i <= 10; i++) cargas.push(cargaBi(100 + i, `2026-03-${String(i + 1).padStart(2, "0")}`, 20000 + i * 300, 10, "glp"));
+  cargas.push(cargaBi(200, "2026-03-05", 21250, 5, "gasolina_premium"));
+  const aux = auxiliarDeUnidad(cargas, "glp");
+  const esperado = 5 / (110 * 0.76 + 5);
+  chk("CWQ400: la gasolina aporta poca energía → es AUXILIAR del GLP", aux !== null && Math.abs(aux.participacion - esperado) < 1e-9,
+    String(aux?.participacion));
+  chk("…y la gasolina NO tiene auxiliar (su serie envuelve meses de GLP)", auxiliarDeUnidad(cargas, "gasolina") === null);
+  const series = seriesRendimiento(cargas);
+  const porCarga = tramosPorCarga(series);
+  const cruzado = porCarga[105].tramo; // 21200 → 21500, envuelve la gasolina del km 21250
+  chk("el tramo de GLP que envuelve la gasolina AHORA se mide", cruzado.motivo === null && cruzado.rendimiento !== null, String(cruzado.motivo));
+  chk("…descontado por la energía de la gasolina (30 km/gal × (1 − parte))",
+    Math.abs((cruzado.rendimiento ?? 0) - 30 * (1 - esperado)) < 1e-9, String(cruzado.rendimiento));
+  chk("…y TODOS sus tramos llevan el mismo descuento (la gasolina se quema a lo largo de meses)",
+    [101, 102, 103, 109, 110].every((id) => Math.abs((porCarga[id].tramo.rendimiento ?? 0) - 30 * (1 - esperado)) < 1e-9));
+  chk("…y lo dice en el detalle", /AUXILIAR/.test(cruzado.detalle) && /descontado/.test(cruzado.detalle), cruzado.detalle);
+  chk("el tramo de GASOLINA sigue sin medirse (bicombustible)", porCarga[200].tramo.motivo === "familia_cruzada" || porCarga[200].tramo.motivo === "primera_carga",
+    String(porCarga[200].tramo.motivo));
+  const glp = series.get(claveSerie("CWQ400", "glp"))!;
+  chk("la mediana de la unidad es la corregida", Math.abs((glp.resumen.mediana ?? 0) - 30 * (1 - esperado)) < 1e-9);
+  const mov = ventanaMovil(glp).get(110);
+  chk("la ventana móvil dice lo mismo que las filas (cantidad equivalente)", Math.abs((mov?.rendimiento ?? 0) - 30 * (1 - esperado)) < 1e-9, String(mov?.rendimiento));
+  chk("cantidadParaRendimiento sin auxiliar es la cantidad tal cual", cantidadParaRendimiento({ cantidad: 7, auxiliar: undefined }) === 7);
+  chk("la invariante se mantiene: rendimiento XOR motivo",
+    [...series.values()].every((x) => x.tramos.every((t) => (t.rendimiento != null) !== (t.motivo != null))));
+}
+// EL LADO QUE NO SE AFLOJA: con la gasolina en serio (más del umbral), la regla de siempre.
+{
+  const cargas = [
+    cargaBi(1, "2026-01-01", 10000, 9.4, "glp"),
+    cargaBi(2, "2026-01-05", 10200, 5.0, "gasolina_regular"),
+    cargaBi(3, "2026-01-20", 10840, 9.4, "glp"),
+  ];
+  const aux = auxiliarDeUnidad(cargas, "glp");
+  chk("gasolina por encima del umbral → no es auxiliar", aux === null && UMBRAL_AUXILIAR < 5 / (18.8 * 0.76 + 5));
+  chk("…y el tramo cruzado sigue sin medirse", tramosPorCarga(seriesRendimiento(cargas))[3].tramo.motivo === "familia_cruzada");
+  // Sin poder medir toda la energía (una carga sin cantidad) no se afirma nada.
+  const sinCant = [...cargas.slice(0, 1), cargaBi(2, "2026-01-05", 10200, 0, "gasolina_regular"), cargaBi(3, "2026-01-20", 10840, 9.4, "glp")];
+  chk("con una carga sin cantidad no se calcula el auxiliar", auxiliarDeUnidad(sinCant, "glp") === null);
+  // Una unidad de un solo combustible: nada cambia.
+  const solo = [cargaBi(1, "2026-01-01", 10000, 10, "glp"), cargaBi(2, "2026-01-10", 10300, 10, "glp")];
+  const t = tramosPorCarga(seriesRendimiento(solo))[2].tramo;
+  chk("un solo combustible: sin auxiliar y sin descuento", t.auxiliar === undefined && t.rendimiento === 30 && t.detalle === "");
+  // La urea no cuenta como energía (no mueve el bus): un diésel con AdBlue no tiene auxiliar.
+  chk("la urea no es un auxiliar", auxiliarDeUnidad([cargaBi(1, "2026-01-01", 1, 50, "diesel"), cargaBi(2, "2026-01-02", 2, 20, "urea")], "diesel") === null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
