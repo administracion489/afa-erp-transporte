@@ -56,7 +56,7 @@ type GranPeriodo = "dia" | "semana" | "mes";
 import { coincideTipo, COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
 import { faltaAlguna } from "@/lib/columna-faltante";
 import { paginarFilas } from "@/lib/huella";
-import {
+import { cantidadParaRendimiento,
   seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
   resumirVentana, compararVentanas, MIN_TRAMOS_CONFIABLE,
   movilesPorCarga, revisarSaltoKm, claveSerie, normalizarCantidad,
@@ -997,7 +997,7 @@ export default function CombustiblePage() {
         // mismas filas — y solo se PUBLICA si todo lo filtrado es de una sola familia.
         if (t && t.rendimiento !== null && t.km != null && t.cantidad != null) {
           b.km += t.km;
-          b.galones += t.cantidad;
+          b.galones += cantidadParaRendimiento(t); // con combustible auxiliar, la equivalente
         }
       }
     }
@@ -1536,8 +1536,9 @@ export default function CombustiblePage() {
                               al desplegar la fila. */}
                           <td className="p-3 text-xs font-bold">
                             {rend !== null ? (
-                              <span style={{ color: colorRend }}>
+                              <span style={{ color: colorRend }} title={tramo?.auxiliar ? tramo.detalle : undefined}>
                                 {fmtNum(rend, 1)} {resumen?.label ?? cfg.rendimientoLabel}
+                                {tramo?.auxiliar && <span className="text-gray-400 font-medium" title={tramo.detalle}> *</span>}
                               </span>
                             ) : tramo?.motivo ? (
                               <span className="text-gray-400 font-medium" title={tramo.detalle}>
@@ -1635,7 +1636,7 @@ export default function CombustiblePage() {
                                         </p>
                                         <p><span className="text-gray-400">Cap. tanque:</span> {cap} {unidLbl}</p>
                                         {/* El porqué del "—", en la fila donde se puede arreglar. */}
-                                        {tramo?.motivo && tramo.detalle && (
+                                        {(tramo?.motivo || tramo?.auxiliar) && tramo.detalle && (
                                           <p className="text-[11px] text-gray-500 leading-snug pt-1">{tramo.detalle}</p>
                                         )}
                                         {resumen && resumen.cargasSinOdometro > 0 && (
