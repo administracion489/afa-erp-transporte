@@ -25,6 +25,20 @@
 //    depósito un día antes. Por eso una carga del MISMO día de la lectura cuenta si se
 //    registró después de leer (puede que ya estuviera dentro del saldo del portal: si es
 //    así, el saldo sale más bajo de lo real, que es el lado seguro).
+//
+// 4) SOLO DESCUENTA LO PROPIO (decisión del dueño, 08/10/2026). La cuenta prepago la usan las
+//    unidades de AFA. El combustible de una unidad TERCERIZADA lo paga su dueño aunque cargue en
+//    una estación Primax, y el ERP lo registra igual (rendimiento, odómetro): que salga del mismo
+//    grifo no lo vuelve de la cuenta. El grifo dice DÓNDE se cargó; QUIÉN pagó lo dice la unidad,
+//    y la unidad la dice el FK escrito (vehiculo_id XOR vehiculo_tercero_id), no un nombre.
+//    Hasta esa fecha una casilla de la cuenta («las cargas de unidades tercerizadas también salen
+//    de esta cuenta») permitía lo contrario; se retiró y `incluye_terceros` ya no se lee: no hay
+//    configuración con la que una carga de tercero descuente.
+//    Lo que no se puede afirmar propio TAMPOCO descuenta —una recarga del Radar sin unidad
+//    identificada, una placa que figura en las DOS flotas—, y no es aflojar la regla 3: aquella
+//    es la duda sobre CUÁNDO, ésta sobre DE QUIÉN, y el dueño contestó esa. Todo lo que no
+//    descuenta se publica aparte, con su motivo (`cargasExcluidas`): un número sin su lista no
+//    se puede cotejar, y una lista es lo único que deja ver si una unidad está mal fichada.
 // ──────────────────────────────────────────────────────────────────────────────
 
 export type CuentaCombustible = {
@@ -36,11 +50,12 @@ export type CuentaCombustible = {
   /** RUC del vendedor (combustible.ruc_proveedor). Si coincide, pertenece aunque el
    *  nombre del grifo venga escrito de otra forma. */
   rucs: string[];
-  /** Si las cargas de unidades TERCERIZADAS también salen de esta cuenta. */
-  incluye_terceros: boolean;
   /** Umbrales de aviso en soles, p. ej. [500, 300]. */
   umbrales: number[];
 };
+
+/** De qué flota es la unidad de una carga. Solo `propia` descuenta del saldo (regla 4). */
+export type FlotaCarga = "propia" | "tercero" | "dos_flotas" | "sin_unidad";
 
 export type Movimiento = {
   id: number;
@@ -57,7 +72,13 @@ export type CargaCuenta = {
   total: number;
   grifo?: string | null;
   ruc_proveedor?: string | null;
-  es_tercero?: boolean;
+  /** De qué flota es la unidad (`unidadDeCarga`). Sin el dato no se sabe de quién es, y lo que
+   *  no se puede afirmar propio no descuenta. */
+  flota?: FlotaCarga;
+  /** Lo que sigue solo sirve para ENSEÑAR la carga; no decide nada. */
+  placa?: string | null;
+  /** Serie-número de la factura a la que está enlazada, si alguna. */
+  comprobante?: string | null;
 };
 
 // ── ¿Esta carga sale de esta cuenta? ─────────────────────────────────────────
@@ -82,28 +103,150 @@ export function grifoCasa(grifo: string | null | undefined, patron: string): boo
   return g.includes(` ${p} `);
 }
 
+/** ¿La carga se hizo en un grifo de esta cuenta? Solo mira el GRIFO (RUC o nombre): dice
+ *  dónde se cargó, no quién pagó. Si descuenta lo decide `juzgarCarga`. */
 export function perteneceACuenta(c: CargaCuenta, cuenta: CuentaCombustible): boolean {
-  if (c.es_tercero && !cuenta.incluye_terceros) return false;
   const ruc = soloDigitos(c.ruc_proveedor);
   if (ruc && cuenta.rucs.some((r) => soloDigitos(r) === ruc)) return true;
   return cuenta.patrones_grifo.some((p) => grifoCasa(c.grifo, p));
 }
 
+/** Qué hace el saldo con una carga. Solo `descuenta` resta; los demás se enseñan aparte. */
+export type MotivoCarga = "descuenta" | "otro_grifo" | "tercero" | "dos_flotas" | "sin_unidad";
+
+export function juzgarCarga(c: CargaCuenta, cuenta: CuentaCombustible): MotivoCarga {
+  if (!perteneceACuenta(c, cuenta)) return "otro_grifo";
+  // Un `switch` sobre la flota, sin rama por defecto que descuente: un valor que no se conoce
+  // (o ninguno) no es propio.
+  switch (c.flota) {
+    case "propia": return "descuenta";
+    case "tercero": return "tercero";
+    case "dos_flotas": return "dos_flotas";
+    default: return "sin_unidad";
+  }
+}
+
+/** Por qué una carga de un grifo de la cuenta NO descuenta. La pantalla y el correo dicen lo mismo. */
+export const MOTIVO_NO_DESCUENTA: Record<Exclude<MotivoCarga, "descuenta" | "otro_grifo">, { corto: string; detalle: string }> = {
+  tercero: {
+    corto: "unidad tercerizada",
+    detalle: "Es de una unidad tercerizada: su combustible lo paga su dueño, no la cuenta.",
+  },
+  dos_flotas: {
+    corto: "placa en las dos flotas",
+    detalle: "La placa figura vigente en Vehículos y en Tercerizadas, así que no se sabe de quién es. Marca como inactiva la ficha de la flota a la que ya no pertenece; mientras tanto no se descuenta.",
+  },
+  sin_unidad: {
+    corto: "sin unidad identificada",
+    detalle: "El Radar no supo de qué unidad es. Cuando se confirme con una unidad propia, se descuenta.",
+  },
+};
+
+// ── ¿De qué flota es la unidad? ──────────────────────────────────────────────
+
+const normPlaca = (p?: string | null) => String(p ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+const idNum = (v: unknown): number | null =>
+  v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+
+/** La flota conocida, en la forma que necesita `unidadDeCarga`. Los ids de `vehiculos` y de
+ *  `vehiculos_tercero` SE SOLAPAN (el 7 existe en las dos), así que van en mapas separados. */
+export type FlotaConocida = {
+  propias: Map<number, string>;
+  terceros: Map<number, string>;
+  /** Placas normalizadas de las fichas VIGENTES (estado ≠ inactivo). */
+  vigentesPropias: Set<string>;
+  vigentesTerceros: Set<string>;
+  /** Todas las placas normalizadas, vigentes o no. */
+  todasPropias: Set<string>;
+  todasTerceros: Set<string>;
+};
+
+type FichaUnidad = { id: unknown; placa?: string | null; estado?: string | null };
+const esVigente = (v: FichaUnidad) => String(v.estado ?? "").trim().toLowerCase() !== "inactivo";
+
+export function flotaConocida(propias: FichaUnidad[], terceros: FichaUnidad[]): FlotaConocida {
+  const f: FlotaConocida = {
+    propias: new Map(), terceros: new Map(),
+    vigentesPropias: new Set(), vigentesTerceros: new Set(), todasPropias: new Set(), todasTerceros: new Set(),
+  };
+  const cargar = (lista: FichaUnidad[], ids: Map<number, string>, vigentes: Set<string>, todas: Set<string>) => {
+    for (const v of lista ?? []) {
+      const id = idNum(v.id), p = normPlaca(v.placa);
+      if (id != null && v.placa) ids.set(id, v.placa);
+      if (!p) continue;
+      todas.add(p);
+      if (esVigente(v)) vigentes.add(p);
+    }
+  };
+  cargar(propias, f.propias, f.vigentesPropias, f.todasPropias);
+  cargar(terceros, f.terceros, f.vigentesTerceros, f.todasTerceros);
+  return f;
+}
+
+/**
+ * De qué flota es la unidad de una carga (de `combustible` o de `radar_combustible`).
+ *
+ * MANDA EL FK ESCRITO: una carga es de `vehiculo_id` XOR `vehiculo_tercero_id` (el CHECK
+ * `combustible_una_flota`), y el FK de tercero gana si alguna fila trajera los dos. La placa solo
+ * decide sola cuando no hay FK —una recarga del Radar que no encontró la unidad—, y tiene que casar
+ * EXACTA con una ficha.
+ *
+ * SALVO QUE LA PLACA SEA DE UNA FICHA VIGENTE DE LA OTRA FLOTA. Pasa cuando una unidad cambió de
+ * manos y la ficha vieja sigue donde estaba: el Radar y la factura buscan primero en la flota
+ * propia, así que la carga del tercero que hoy opera un bus que fue de AFA entra con el FK propio.
+ *   · la ficha del FK está inactiva y la de la otra flota vigente → es de la otra flota (la unidad
+ *     ya cambió de manos; marcar inactiva la ficha que sobra es justo lo que hay que hacer);
+ *   · las dos vigentes → `dos_flotas`: no se sabe de quién es, y no se descuenta hasta corregirlo.
+ * Una ficha INACTIVA de la otra flota no disputa nada: es la de antes del cambio de manos.
+ */
+export function unidadDeCarga(
+  c: { vehiculo_id?: unknown; vehiculo_tercero_id?: unknown; placa?: string | null },
+  f: FlotaConocida,
+): { flota: FlotaCarga; placa: string | null } {
+  const idT = idNum(c.vehiculo_tercero_id), idP = idNum(c.vehiculo_id);
+  const porFk: "propia" | "tercero" | null = idT != null ? "tercero" : idP != null ? "propia" : null;
+  const placa = (idT != null ? f.terceros.get(idT) : idP != null ? f.propias.get(idP) : undefined) ?? c.placa ?? null;
+  const p = normPlaca(placa);
+  const vP = !!p && f.vigentesPropias.has(p), vT = !!p && f.vigentesTerceros.has(p);
+  if (porFk) {
+    const otraVigente = porFk === "propia" ? vT : vP;
+    if (!otraVigente) return { flota: porFk, placa };
+    const mismaVigente = porFk === "propia" ? vP : vT;
+    return { flota: mismaVigente ? "dos_flotas" : porFk === "propia" ? "tercero" : "propia", placa };
+  }
+  if (!p) return { flota: "sin_unidad", placa: null };
+  if (vP || vT) return { flota: vP && vT ? "dos_flotas" : vP ? "propia" : "tercero", placa };
+  const aP = f.todasPropias.has(p), aT = f.todasTerceros.has(p);
+  return { flota: aP && aT ? "dos_flotas" : aP ? "propia" : aT ? "tercero" : "sin_unidad", placa };
+}
+
 // ── El saldo ─────────────────────────────────────────────────────────────────
+
+/** Una carga de un grifo de la cuenta, posterior a la lectura, que NO descuenta. */
+export type CargaExcluida = CargaCuenta & {
+  motivo: Exclude<MotivoCarga, "descuenta" | "otro_grifo">;
+  /** true = recarga del Radar en revisión; false = registrada en `combustible`. */
+  delRadar: boolean;
+};
 
 export type SaldoCuenta = {
   /** null = no hay ninguna lectura del portal: no se puede afirmar un saldo. */
   saldo: number | null;
   ancla: Movimiento | null;
   abonos: number;            // suma de abonos posteriores al ancla
-  consumido: number;         // cargas registradas posteriores
-  porConfirmar: number;      // cargas del Radar en revisión posteriores
+  consumido: number;         // cargas PROPIAS registradas posteriores
+  porConfirmar: number;      // cargas PROPIAS del Radar en revisión posteriores
   nCargas: number;
   nPorConfirmar: number;
-  /** Consumo promedio por día (últimos `diasRitmo` días con al menos una carga). */
+  /** Consumo promedio por día (últimos `diasRitmo` días con al menos una carga propia). */
   consumoDiario: number | null;
   /** Días que alcanza el saldo al ritmo actual. */
   diasRestantes: number | null;
+  /** Las cargas detrás de `consumido` y de `porConfirmar`, para enseñarlas. */
+  cargasDescontadas: CargaCuenta[];
+  cargasPorConfirmar: CargaCuenta[];
+  /** Las de los grifos de la cuenta, posteriores a la lectura, que no descuentan (regla 4). */
+  cargasExcluidas: CargaExcluida[];
 };
 
 /** ¿La carga ocurrió DESPUÉS de la lectura? Día posterior → sí. Mismo día → si se
@@ -134,10 +277,13 @@ export function calcularSaldo(args: {
   const lecturas = movs.filter((m) => m.tipo === "lectura");
   const ancla = lecturas.length ? lecturas[lecturas.length - 1] : null;
 
-  const propias = (args.cargas ?? []).filter((c) => perteneceACuenta(c, cuenta));
-  const pend = (args.porConfirmar ?? []).filter((c) => perteneceACuenta(c, cuenta));
+  const cargas = args.cargas ?? [];
+  const radar = args.porConfirmar ?? [];
+  const propias = cargas.filter((c) => juzgarCarga(c, cuenta) === "descuenta");
+  const pend = radar.filter((c) => juzgarCarga(c, cuenta) === "descuenta");
 
-  // Ritmo: no depende del ancla. Se mide sobre las cargas registradas de los últimos N días.
+  // Ritmo: no depende del ancla. Se mide sobre las cargas PROPIAS registradas de los últimos N
+  // días: el de un tercero no gasta la cuenta, y contarlo acortaría los días que «alcanza».
   const desde = sumarDiasISO(hoy, -diasRitmo + 1);
   const ventana = propias.filter((c) => c.fecha >= desde && c.fecha <= hoy);
   const totalVentana = ventana.reduce((s, c) => s + (Number(c.total) || 0), 0);
@@ -147,6 +293,7 @@ export function calcularSaldo(args: {
     return {
       saldo: null, ancla: null, abonos: 0, consumido: 0, porConfirmar: 0,
       nCargas: 0, nPorConfirmar: 0, consumoDiario, diasRestantes: null,
+      cargasDescontadas: [], cargasPorConfirmar: [], cargasExcluidas: [],
     };
   }
 
@@ -159,6 +306,17 @@ export function calcularSaldo(args: {
   const porConfirmar = pendPost.reduce((s, c) => s + (Number(c.total) || 0), 0);
   const saldo = r2(Number(ancla.monto) + abonos - consumido - porConfirmar);
 
+  // Lo que se cargó en un grifo de la cuenta después de la lectura y NO resta: se enseña con su
+  // motivo, para que nadie tenga que adivinar si una carga de tercero se está descontando.
+  const excluidas: CargaExcluida[] = [];
+  for (const [lista, delRadar] of [[cargas, false], [radar, true]] as const) {
+    for (const c of lista) {
+      const m = juzgarCarga(c, cuenta);
+      if (m === "descuenta" || m === "otro_grifo" || !posteriorAlAncla(c, ancla)) continue;
+      excluidas.push({ ...c, motivo: m, delRadar });
+    }
+  }
+
   return {
     saldo,
     ancla,
@@ -169,7 +327,42 @@ export function calcularSaldo(args: {
     nPorConfirmar: pendPost.length,
     consumoDiario,
     diasRestantes: consumoDiario && consumoDiario > 0 ? Math.max(0, Math.floor(saldo / consumoDiario)) : null,
+    cargasDescontadas: posteriores,
+    cargasPorConfirmar: pendPost,
+    cargasExcluidas: excluidas,
   };
+}
+
+/** «No se descuentan: 2 carga(s) de unidades tercerizadas (S/ 412.10) · 1 sin unidad
+ *  identificada (S/ 50.00).» — o null si no hay ninguna. La pantalla y el correo la comparten. */
+export function fraseExcluidas(s: Pick<SaldoCuenta, "cargasExcluidas">): string | null {
+  const ex = s.cargasExcluidas ?? [];
+  if (!ex.length) return null;
+  const orden: CargaExcluida["motivo"][] = ["tercero", "dos_flotas", "sin_unidad"];
+  const partes = orden.flatMap((m) => {
+    const de = ex.filter((c) => c.motivo === m);
+    if (!de.length) return [];
+    const total = de.reduce((t, c) => t + (Number(c.total) || 0), 0);
+    const quien = m === "tercero" ? "de unidades tercerizadas" : m === "dos_flotas" ? "con la placa en las dos flotas" : "sin unidad identificada";
+    return [`${de.length} carga(s) ${quien} (${fmt(r2(total))})`];
+  });
+  return `No se descuentan: ${partes.join(" · ")}.`;
+}
+
+/**
+ * Lo único de las excluidas que merece un aviso: una carga que NO descuenta pero viene en una
+ * FACTURA de la cuenta (la que el correo de facturas concilió). La regla del dueño es que de la
+ * cuenta solo cargan las unidades propias; si una carga de tercero aparece facturada a la empresa,
+ * o el portal ya la cobró —y el saldo del ERP sale más alto que el real, el lado caro— o la unidad
+ * está mal fichada. No se descuenta igual: se DICE, y la lectura del portal lo corrige.
+ */
+export function avisoExcluidasEnFactura(s: Pick<SaldoCuenta, "cargasExcluidas">): string | null {
+  const ex = (s.cargasExcluidas ?? []).filter((c) => !c.delRadar && !!c.comprobante);
+  if (!ex.length) return null;
+  const total = ex.reduce((t, c) => t + (Number(c.total) || 0), 0);
+  const quien = ex.length === 1 ? "Una de las que no se descuentan viene" : `${ex.length} de las que no se descuentan vienen`;
+  return `${quien} en una factura de la cuenta (${fmt(r2(total))}): si se pagó con el saldo, el portal ya la cobró — ` +
+    `vuelve a leer el saldo del portal y revisa de quién es esa unidad.`;
 }
 
 export function sumarDiasISO(fecha: string, dias: number): string {
@@ -234,7 +427,7 @@ export function textoAviso(cuenta: { nombre: string }, s: SaldoCuenta, escalon: 
     partes.push(`Al ritmo de ${fmt(s.consumoDiario)}/día alcanza para ~${s.diasRestantes} día(s).`);
   }
   if (s.nPorConfirmar > 0) {
-    partes.push(`Incluye ${fmt(s.porConfirmar)} de ${s.nPorConfirmar} carga(s) del Radar aún sin confirmar.`);
+    partes.push(`Incluye ${fmt(s.porConfirmar)} de ${s.nPorConfirmar} carga(s) de unidades propias que el Radar vio y aún nadie confirmó.`);
   }
   partes.push(escalon === 0 ? "Recarga YA: las unidades no podrán abastecer." : "Programa la recarga del saldo.");
   return { titulo, detalle: partes.join(" ") };

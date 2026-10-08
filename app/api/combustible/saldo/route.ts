@@ -18,7 +18,7 @@ import { esCronAutorizado, verificarUsuarioApi } from "@/lib/api-auth";
 import { enviarEmail, enviarAvisoWhatsApp } from "@/lib/notificaciones";
 import { hoyLima } from "@/lib/alertas";
 import { escHtml } from "@/lib/html-escape";
-import { decidirAviso, textoAviso, type SaldoCuenta } from "@/lib/combustible/saldo-cuenta";
+import { decidirAviso, textoAviso, fraseExcluidas, type SaldoCuenta } from "@/lib/combustible/saldo-cuenta";
 import {
   cargarCuentas, estadoDeCuentas, correosDeTexto, telefonosDeTexto, type FilaCuenta,
 } from "@/lib/combustible/saldo-datos";
@@ -46,9 +46,10 @@ async function enviarAviso(cuenta: FilaCuenta, saldo: SaldoCuenta, escalon: numb
       <table style="font-size:13px;color:#374151;border-collapse:collapse;margin-top:8px">
         <tr><td style="padding:2px 12px 2px 0">Último saldo leído del portal</td><td><b>S/ ${escHtml(saldo.ancla?.monto.toFixed(2) ?? "—")}</b> (${escHtml(saldo.ancla?.fecha ?? "—")})</td></tr>
         <tr><td style="padding:2px 12px 2px 0">+ Abonos posteriores</td><td>S/ ${saldo.abonos.toFixed(2)}</td></tr>
-        <tr><td style="padding:2px 12px 2px 0">− Cargas registradas</td><td>S/ ${saldo.consumido.toFixed(2)} (${saldo.nCargas})</td></tr>
-        <tr><td style="padding:2px 12px 2px 0">− Cargas del Radar sin confirmar</td><td>S/ ${saldo.porConfirmar.toFixed(2)} (${saldo.nPorConfirmar})</td></tr>
+        <tr><td style="padding:2px 12px 2px 0">− Cargas de unidades propias</td><td>S/ ${saldo.consumido.toFixed(2)} (${saldo.nCargas})</td></tr>
+        <tr><td style="padding:2px 12px 2px 0">− Del Radar, propias sin confirmar</td><td>S/ ${saldo.porConfirmar.toFixed(2)} (${saldo.nPorConfirmar})</td></tr>
       </table>
+      ${fraseExcluidas(saldo) ? `<p style="font-size:12px;color:#6b7280;margin-top:8px">${escHtml(fraseExcluidas(saldo)!)} Solo descuentan las unidades propias.</p>` : ""}
       <p style="font-size:12px;color:#6b7280;margin-top:12px">Es un saldo ESTIMADO por el ERP. Cuando recargues, registra el abono en /combustible; si el portal dice otra cifra, actualiza el saldo leído y el ERP cuenta desde ahí.</p>
     </div>`;
   for (const to of correos) {
