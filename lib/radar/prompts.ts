@@ -9,6 +9,7 @@
 // Este archivo solo construye strings: no toca BD ni secretos.
 
 import type { CategoriaRadar } from "./tipos";
+import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables } from "../odometro-prompt";
 
 // ── Contexto que el motor pasa a cada prompt ─────────────────────────────────
 
@@ -48,7 +49,8 @@ LECTURA DEL TABLERO (aplica a las categorías "odometro" y "combustible"): si ve
 - El odómetro TOTAL es el número MAYOR de kilómetros de la pantalla y va sin decimales. El "Trip"/parcial es el MENOR y casi siempre lleva un decimal (p. ej. "1803.6").
 - Nunca conviertas el parcial en el total ni al revés. Si dudas de cuál es cuál, pon los DOS: el mayor en "kilometraje" y el otro en "trip_km".
 - "16.3 L/100km" es una tasa de consumo, y la temperatura ("28.0°C") y la hora ("20:25") no son kilómetros.
-- CUENTA LAS CIFRAS Y NO REPITAS NINGUNA. El error medido en esta flota no es inventar un dígito cualquiera: es leer DOS VECES el mismo. Casos reales, tablero → lo que se devolvió mal: 23980→239980 · 23379→233379 · 560473→5600473. Si tu número tiene dos cifras iguales seguidas ("99", "33", "00"), vuelve a contarlas sobre la imagen antes de responder. Si no puedes decidir si son una o dos, deja "kilometraje" en null y dilo en "observaciones": una lectura menos no cuesta nada, un kilometraje diez veces mayor contamina el mantenimiento y el rendimiento de la unidad.`;
+- CUENTA LAS CIFRAS Y NO REPITAS NINGUNA. ${PATRON_DIGITO_REPETIDO} Si tu número tiene dos cifras iguales seguidas ("99", "33", "00"), vuelve a contarlas sobre la imagen antes de responder. Si no puedes decidir si son una o dos, deja "kilometraje" en null y dilo en "observaciones": una lectura menos no cuesta nada, un kilometraje diez veces mayor contamina el mantenimiento y el rendimiento de la unidad.
+- ${NUMERO_SOLO_DE_LA_FOTO} Abstenerse es dejar "kilometraje" en null.`;
 
 /** Bloque de "errores que ya cometiste" para inyectar en la lectura de odómetro. */
 function lineaLeccionesOdometro(ctx: ContextoPrompt): string {
@@ -116,7 +118,7 @@ const GLOSARIO = `Jerga frecuente en estos grupos (español peruano informal):
 
 const DESCRIPCION_CATEGORIAS = `- "oportunidad_comercial": alguien pide o consulta un servicio de transporte que AFA Transportes podría cubrir con su flota (cotización, disponibilidad, "¿tienen van para mñn?", full day, traslado, recojo de personal). Incluye pedidos de apoyo/subcontrato de otro transportista SI implican que AFA cubra el servicio con su propia flota.
 - "combustible": recarga de combustible o voucher de grifo DE UNA UNIDAD DE LA FLOTA DE AFA (propia o tercerizada bajo contrato con AFA) — CON datos de la COMPRA (galones, litros, diésel, GNV, GLP, urea, precio, importe, grifo). No es de la flota de AFA si no hay ninguna señal de que la unidad/conductor pertenece a la operación de AFA. Si el mensaje trae el kilometraje pero NINGÚN dato de compra, es "odometro" en cambio.
-- "odometro": el conductor SOLO informa el kilometraje actual de una unidad de LA FLOTA DE AFA (foto del tablero/odómetro, o texto tipo "unidad 45 va en 82,300 km") — SIN monto, SIN grifo, SIN galones. Si además hay datos de una recarga de combustible, usa "combustible" en su lugar (ahí también se captura el kilometraje).
+- "odometro": el conductor SOLO informa el kilometraje actual de una unidad de LA FLOTA DE AFA (foto del tablero/odómetro, o texto tipo "unidad 45 va en AB,CDE km") — SIN monto, SIN grifo, SIN galones. Si además hay datos de una recarga de combustible, usa "combustible" en su lugar (ahí también se captura el kilometraje).
 - "mantenimiento": trabajos de taller o mecánica sobre una unidad DE LA FLOTA DE AFA (cambio de aceite, frenos, llantas, repuestos, "la unidad está en el mecánico", scanner, soldadura).
 - "operaciones": novedades de un servicio QUE AFA ESTÁ OPERANDO ese día con su propia flota o la tercerizada bajo contrato ("ya salí", "iniciando ruta", "llegué al punto", "pasajeros abordados", "terminé el servicio", retrasos, cancelaciones).
 - "incidencias": choques, averías en ruta, robos, reclamos de clientes, accidentes, unidad varada — DE LA OPERACIÓN DE AFA.
@@ -333,7 +335,7 @@ Ejemplo de lo que NO se puede hacer: dos notas de COESTI del mismo día, una de 
 UNA DISCREPANCIA ES UN DESACUERDO, NO EL RELATO DE CÓMO LEÍSTE:
 "discrepancias" es SOLO para valores que NO coinciden. Si contrastaste dos fuentes y **dan lo mismo**, no hay discrepancia: deja la lista vacía. Si lo que quieres contar es cómo resolviste una lectura dudosa —cuál de los dos números del tablero era el total, un dígito borroso, una foto en diagonal— eso va en "notas_extraccion", que es para eso. Cada discrepancia lleva sus dos valores (valor_a / valor_b) y el ERP los compara: reportar dos números iguales como discrepancia pinta una alerta roja sobre una recarga correcta, y un rojo falso enseña a ignorar los rojos de verdad.
 
-SEPARADOR DE MILES EN PERÚ: en la nota, la COMA separa los miles y el PUNTO los decimales. "Kilometraje: 175,445" son **175445 km** (ciento setenta y cinco mil), NO 175.445. Un tablero que muestra 175445 y una nota que dice 175,445 tienen el MISMO odómetro — no lo reportes como diferencia. Los importes van al revés de lo que parece por la misma razón: "S/ 1,234.56" son mil doscientos treinta y cuatro soles con 56.
+SEPARADOR DE MILES EN PERÚ: en la nota, la COMA separa los miles y el PUNTO los decimales. "Kilometraje: ABC,DEF" son seis cifras seguidas, **ABCDEF km** (cientos de miles), NO un número con decimales. Un tablero que muestra ABCDEF y una nota que dice ABC,DEF tienen el MISMO odómetro (las letras están en lugar de las cifras a propósito: ningún número de estas instrucciones es el kilometraje de una unidad) — no lo reportes como diferencia. Los importes van al revés de lo que parece por la misma razón: "S/ 1,234.56" son mil doscientos treinta y cuatro soles con 56.
 
 ${CUADRE_VOUCHER}`;
 
@@ -516,7 +518,9 @@ function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
         // La forma del número es la señal que desambigua parcial vs total sin dar una
         // cifra copiable: un trip de 4 dígitos no puede ser un total de 6.
         const forma = g.digitos ? `el odómetro TOTAL es un número de ${g.digitos} dígitos` : "";
-        const guia = g.guia?.trim() ?? "";
+        // La guía la teclea una persona: si trae un kilometraje («el ODO marca 24618»), viaja
+        // con sus cifras tapadas — dónde mirar se entiende igual y no queda un número copiable.
+        const guia = sinCifrasCopiables(g.guia?.trim() ?? "");
         return `- ${g.placa}: ${[forma, guia].filter(Boolean).join(" · ")}`;
       })
       .join("\n")
