@@ -136,6 +136,27 @@ export default function FacturasCorreo() {
     setPendRadar(out);
   }, []);
 
+  // AL ABRIR, LAS FACTURAS PENDIENTES SE VUELVEN A CRUZAR con lo registrado hoy (sin leer el
+  // correo). Sin esto, una carga tecleada a mano en Combustible que ES una línea de la factura
+  // seguía como «Esperando al Radar» hasta el próximo ciclo del correo, con un botón que invita a
+  // registrarla otra vez. Best-effort: si falla, la pantalla enseña lo guardado.
+  const [cruzando, setCruzando] = useState(true);
+  useEffect(() => {
+    let vivo = true;
+    post({ accion: "reconciliar" }).then((j) => {
+      if (!vivo || !j?.ok) return;
+      const enl = Number(j.enlazadas) || 0, reg = Number(j.registradas) || 0;
+      if (enl || reg) {
+        setSync(
+          (enl ? `${enl} línea(s) de factura se enlazaron con cargas que ya estaban registradas (no se creó ninguna otra). ` : "") +
+          (reg ? `${reg} carga(s) que faltaban se registraron desde la factura.` : ""),
+        );
+      }
+      if (Number(j.reconciliadas) > 0) cargar();
+    }).catch(() => {}).finally(() => { if (vivo) setCruzando(false); });
+    return () => { vivo = false; };
+  }, [cargar]);
+
   useEffect(() => {
     cargar();
     cargarDeuda();
@@ -319,13 +340,18 @@ export default function FacturasCorreo() {
     const esta = previa.then(async () => {
       setEnCurso((m) => ({ ...m, [k]: "registrando" }));
       try {
-        let j: { ok?: boolean; error?: string; linea?: { detalle?: string } } | null = null;
+        let j: { ok?: boolean; error?: string; linea?: { detalle?: string; codigo?: string; casa_con?: number | string } } | null = null;
         for (let intento = 0; intento < 5; intento++) {
           j = await post({ accion: "confirmar_linea", factura_id: f.id, n, placa: e.placa || null, fecha: e.fecha || null });
           if (j?.ok || !/en curso/i.test(String(j?.error ?? ""))) break;
           await new Promise((r) => setTimeout(r, 3000));
         }
         if (!j?.ok) alert(j?.linea?.detalle ?? j?.error ?? "No se pudo registrar");
+        // La confirmación cruza primero con lo registrado: si la carga YA estaba (tecleada a mano o
+        // por el Radar), se enlaza y no se crea otra. Se dice, para que nadie la busque duplicada.
+        else if (j?.linea?.codigo === "ya_registrada") {
+          alert(`No se creó otra carga: ya estaba registrada (carga #${j.linea.casa_con ?? "?"}). Quedó enlazada a esta factura.`);
+        }
       } catch (err: unknown) {
         alert(err instanceof Error ? err.message : "No se pudo registrar");
       } finally {
@@ -418,6 +444,7 @@ export default function FacturasCorreo() {
         </div>
         {sinCorreo && <div className="basis-full text-xs text-amber-800">Primero conecta el correo donde llegan las facturas de Primax (bloque de arriba).</div>}
         {cargando === "historial" && <div className="basis-full text-xs text-gray-500">Puede tardar unos minutos: deja esta pestaña abierta. Si la cierras, lo ya leído queda guardado y se sigue con el mismo botón.</div>}
+        {cruzando && <div className="basis-full text-xs text-gray-500">Cruzando las facturas pendientes con las cargas registradas…</div>}
         {sync && <div className="basis-full text-xs text-gray-600">{sync}</div>}
         <div className="basis-full flex flex-wrap gap-3 text-xs">
           <span style={{ color: ETIQUETA_LINEA.ya_registrada.color }}>✓ {resumen.ya} ya registradas</span>

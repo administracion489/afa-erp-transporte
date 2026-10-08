@@ -245,6 +245,22 @@ chk("muy reciente y sin saber la cola del Radar → espera al Radar (como antes)
   }
   chk("sin poder leer la cola, la espera es la de antes (barrido de fechas × topes)", igual);
 }
+// El caso real (CWZ-371, F882-0134358): la factura quedó «Esperando al Radar» y la carga se
+// tecleó A MANO en /combustible (10.53 gal, S/ 260.33, 07/10, sin nota de despacho). Al volver a
+// cruzar la factura —al abrir la pestaña, al guardar la carga o al confirmar la línea— se ENLAZA:
+// nunca se registra otra. Va antes que cualquier espera o candado.
+{
+  const lineaReal: LineaFactura = { ...linea, placa: "CWZ371", fecha: "2026-10-07", cantidad: 10.531, precio_unitario: 24.7203, total: 260.33, nota_despacho: null };
+  const aMano = reg({ id: 512, fecha: "2026-10-07", total: 260.33, cantidad: 10.53, referencia: "" });
+  let siempre = true;
+  for (const cola of [null, 0, 3]) for (const hoy of ["2026-10-08", "2026-10-09", "2026-10-20"]) for (const gracia of [0, 2]) {
+    const p = planDeLinea({ ...base, graciaDias: gracia, hoy, linea: lineaReal, registradas: [aMano], radarPendientes: [], radarEnCola: cola });
+    if (p.codigo !== "ya_registrada" || p.casa_con !== 512) siempre = false;
+  }
+  chk("CWZ-371: la carga tecleada a mano se ENLAZA con la línea de la factura, nunca se registra otra", siempre);
+  chk("…también al CONFIRMAR la línea a mano (gracia 0, como el botón)",
+    planDeLinea({ ...base, graciaDias: 0, hoy: "2026-10-08", linea: lineaReal, registradas: [aMano], radarPendientes: [] }).codigo === "ya_registrada");
+}
 chk("solo PDF (IA) → revisar, no se registra solo",
   planDeLinea({ ...base, fuente: "vision_pdf", linea, registradas: [], radarPendientes: [] }).motivo === "lectura_no_oficial");
 chk("auto-registro apagado → revisar",

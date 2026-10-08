@@ -847,21 +847,58 @@ export async function sincronizarFacturas(
   // Las parciales (y una «procesada» que quedó a medias) se vuelven a mirar: una línea «esperando al Radar» se registra cuando vence
   // su gracia, y una «ya registrada» puede aparecer porque alguien aprobó la del Radar.
   if (opts.revisarParciales === false) return res;
+  const r = await reconciliarPendientes(sb, () => cuenta, hoy);
+  res.reconciliadas += r.reconciliadas;
+  res.registradas += r.registradas;
+  for (const e of r.errores) res.detalle.push({ asunto: e.asunto, estado: "error", error: e.error });
+  return res;
+}
+
+export type ResultadoReconciliar = {
+  reconciliadas: number;
+  /** Líneas que en esta pasada se registraron desde la factura (no lo estaban antes). */
+  registradas: number;
+  /** Líneas que en esta pasada se ENLAZARON con una carga ya registrada (a mano, o por el Radar). */
+  enlazadas: number;
+  /** Facturas que otra conciliación tenía tomadas: quedan para la próxima. */
+  ocupadas: number;
+  errores: { asunto: string; error: string }[];
+};
+
+/**
+ * Vuelve a cruzar las facturas con líneas pendientes contra lo que HOY está registrado, sin leer
+ * el correo. Lo hace el cron (dentro de la sincronización) y la pestaña Facturas al abrirse, y
+ * después de registrar una carga a mano en /combustible: sin esto, una carga tecleada a mano que
+ * ES una línea de la factura seguía apareciendo como «Esperando al Radar» hasta el próximo ciclo
+ * del correo (3 h), con un botón que invita a registrarla otra vez. No inventa ninguna regla:
+ * es `conciliarFacturaGuardada`, la misma de siempre, que enlaza lo que casa por nota de despacho
+ * o placa + fecha + importe y solo registra lo que de verdad falta.
+ */
+export async function reconciliarPendientes(
+  sb: Parameters<typeof conciliarFacturaGuardada>[0],
+  cuentaDe: (factura: { cuenta_id?: number | string | null }) => FilaCuenta | null,
+  hoy: string,
+  opts: { presupuestoMs?: number } = {},
+): Promise<ResultadoReconciliar> {
+  const t0 = Date.now();
+  const out: ResultadoReconciliar = { reconciliadas: 0, registradas: 0, enlazadas: 0, ocupadas: 0, errores: [] };
   const { data: parciales } = await sb.from("radar_facturas").select("*")
     .in("estado", ["parcial", "procesada"]).gte("recibido_en", new Date(Date.now() - 60 * 86400000).toISOString()).limit(40);
   for (const f of (parciales as any[]) ?? []) {
     if (!Array.isArray(f.lineas)) continue;
+    if (opts.presupuestoMs != null && Date.now() - t0 > opts.presupuestoMs) break;
     try {
-      const r = await conciliarFacturaGuardada(sb, f, cuenta, hoy);
-      if (r.error) continue; // la acaba de conciliar esta misma corrida (o otra en paralelo)
-      res.reconciliadas++;
-      const antes = new Set(((f.conciliacion ?? []) as any[]).filter((c) => c.codigo === "registrar").map((c) => c.n));
-      res.registradas += r.plan.filter((p) => p.codigo === "registrar" && !antes.has(p.n)).length;
-    } catch (e: any) {
-      res.detalle.push({ asunto: f.asunto ?? `#${f.id}`, estado: "error", error: e.message });
+      const r = await conciliarFacturaGuardada(sb, f, cuentaDe(f), hoy);
+      if (r.error) { out.ocupadas++; continue; } // la acaba de conciliar esta misma corrida (o otra en paralelo)
+      out.reconciliadas++;
+      const previo = new Map<number, string>(((f.conciliacion ?? []) as any[]).map((c) => [Number(c.n), String(c.codigo)]));
+      out.registradas += r.plan.filter((p) => p.codigo === "registrar" && previo.get(p.n) !== "registrar").length;
+      out.enlazadas += r.plan.filter((p) => p.codigo === "ya_registrada" && previo.get(p.n) !== "ya_registrada").length;
+    } catch (e: unknown) {
+      out.errores.push({ asunto: f.asunto ?? `#${f.id}`, error: e instanceof Error ? e.message : String(e) });
     }
   }
-  return res;
+  return out;
 }
 
 export type ResultadoHistoricas = {

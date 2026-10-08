@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { cabecerasErp } from "@/lib/fetch-erp";
 import { registrarLectura } from "@/lib/odometro";
 import { sincronizarPrecioDesdeCarga } from "@/lib/precios-combustible";
 import {
@@ -744,6 +745,14 @@ export default function CombustiblePage() {
         });
       }
     }
+    // Si esta carga ES una línea de una factura del correo que esperaba (al Radar o a revisión), se
+    // cruza ya y queda enlazada, en vez de seguir figurando «pendiente» hasta el próximo ciclo del
+    // correo (3 h) con un botón que invita a registrarla otra vez. En segundo plano: no frena nada.
+    void (async () => {
+      try {
+        await fetch("/api/combustible/facturas", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ accion: "reconciliar" }) });
+      } catch { /* best-effort: la pestaña Facturas lo vuelve a intentar al abrirse */ }
+    })();
     limpiar(); cargarDatos(); setGuardando(false);
   };
 
