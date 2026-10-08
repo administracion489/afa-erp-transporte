@@ -37,6 +37,8 @@ type Combustible = {
   // Columnas fiscales (finanzas-02): las escribe la conciliación de la factura del correo.
   comprobante_serie?: string | null;
   comprobante_numero?: string | null;
+  // Migración accesoria (supabase/combustible-05-hora-carga.sql): la hora del despacho, «HH:MM:SS».
+  hora?: string | null;
 };
 
 // Lo que el Radar IA guarda de la carga que él mismo registró. `combustible` no guarda NADA
@@ -57,6 +59,8 @@ import {
   type CargaRendimiento, type Tramo, type ResumenUnidad, type VeredictoSalto,
 } from "@/lib/rendimiento";
 import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
+import { capturaDeFechaHora, normalizarHoraVoucher } from "@/lib/odometro-tiempo";
+import { rangoKmDelDia, kmFueraDelRango, type LecturaOdometroBD, type RangoKmDelDia } from "@/lib/combustible/completar-carga";
 import ComparacionPeriodo from "./ComparacionPeriodo";
 import SaldoCuenta from "./SaldoCuenta";
 import FacturasCorreo from "./FacturasCorreo";
@@ -204,7 +208,9 @@ function clavePeriodo(fecha: string, gran: GranPeriodo): { key: string; label: s
 }
 
 const FORM_VACIO = {
-  vehiculo_id: "", fecha: new Date().toISOString().split("T")[0],
+  // `hoyLima()`, no `toISOString()`: el navegador da la fecha UTC, y desde las 19:00 de Lima el
+  // formulario abría con la fecha de MAÑANA.
+  vehiculo_id: "", fecha: hoyLima(), hora: "",
   kilometraje: "", galones: "", precio_galon: "",
   tipo_combustible: "diesel", unidad: "galones",
   grifo: "", conductor: "", observaciones: "",
@@ -249,7 +255,7 @@ export default function CombustiblePage() {
   const [filtroFlota, setFiltroFlota] = useState<"todos" | "propio" | "tercero">("todos");
   const [filtroTipo,  setFiltroTipo]  = useState("todos");
   const [filtroMes,   setFiltroMes]   = useState("todos");
-  const [form, setForm] = useState(FORM_VACIO);
+  const [form, setForm] = useState(() => ({ ...FORM_VACIO, fecha: hoyLima() }));
   // Lo que leyó el Radar IA de las cargas que él registró, para poder corregirlas mirando el
   // papel. `mediaMensajes` es el respaldo de las filas viejas (sin `fotos`) y se pide de a una
   // al abrir la carga: son ids de mensajes, y pedirlos todos de golpe sería una URL kilométrica.
@@ -356,6 +362,36 @@ export default function CombustiblePage() {
   }, [form.vehiculo_id, form.kilometraje, form.tipo_combustible, form.fecha, editandoId, registros, unidades, seriesRend]);
 
   const faltaMotivoSalto = saltoKm.estado === "salto" && !form.km_salto_motivo.trim();
+
+  // ── EL KM AL CARGAR, CONTRA LAS LECTURAS DE ESE MOMENTO ───────────────────
+  //
+  // El campo es el odómetro EN LA CARGA (el del voucher o el tablero), no el de hoy: las cargas se
+  // registran días después y para entonces la unidad ya avanzó. Se enseñan las lecturas de esa
+  // unidad alrededor de la fecha (la anterior, las del día, la posterior) con el MISMO
+  // `rangoKmDelDia` de «Cargas por completar», y se avisa si el número se sale. Es REFERENCIA:
+  // nunca un «usar este» (copiar el check-out sería fabricar una lectura que nadie tomó) y no
+  // bloquea — `registrarLectura` juzga igual y deja la lectura por revisar si no cuadra.
+  const uFormRango = form.vehiculo_id ? unidadDe(form.vehiculo_id) : undefined;
+  const claveLecturas = uFormRango && /^\d{4}-\d{2}-\d{2}$/.test(form.fecha) ? `${uFormRango.uid}:${form.fecha}` : null;
+  const [lecturasForm, setLecturasForm] = useState<{ clave: string; filas: LecturaOdometroBD[] } | null>(null);
+  useEffect(() => {
+    if (!claveLecturas || !uFormRango) return;
+    let vivo = true;
+    const fk = uFormRango.tipo === "tercero" ? "vehiculo_tercero_id" : "vehiculo_id";
+    supabase.from("lecturas_odometro").select("*").eq(fk, uFormRango.id)
+      .gte("fecha", sumarDias(form.fecha, -5)).lte("fecha", sumarDias(form.fecha, 5)).order("fecha").limit(200)
+      .then(({ data, error: e }: { data: unknown; error: unknown }) => {
+        if (vivo) setLecturasForm({ clave: claveLecturas, filas: e ? [] : ((data as LecturaOdometroBD[]) ?? []) });
+      });
+    return () => { vivo = false; };
+    // La búsqueda depende solo de la unidad y la fecha (la clave).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [claveLecturas]);
+  const rangoForm: RangoKmDelDia | null = claveLecturas && lecturasForm?.clave === claveLecturas
+    ? rangoKmDelDia(lecturasForm.filas, form.fecha, form.hora.trim() || null) : null;
+  const kmTecleado = Number(form.kilometraje);
+  const kmFueraForm = kmTecleado > 0 ? kmFueraDelRango(Math.round(kmTecleado), rangoForm) : null;
+  const horaIlegible = !!form.hora.trim() && !normalizarHoraVoucher(form.hora);
 
   // ── ¿ESTE PRECIO PUEDE SER DE ESTA UNIDAD? ────────────────────────────────
   //
@@ -500,11 +536,14 @@ export default function CombustiblePage() {
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setTanqueFuente(null); setMostrarForm(false); };
+  const limpiar = () => { setForm({ ...FORM_VACIO, fecha: hoyLima() }); setEditandoId(null); setTanqueFuente(null); setMostrarForm(false); };
 
   const guardar = async () => {
     if (!form.vehiculo_id || !form.fecha) { alert("Selecciona vehículo y fecha"); return; }
     if (!form.galones || !form.precio_galon) { alert("Ingresa cantidad y precio"); return; }
+    // La hora es opcional, pero una que no se entiende no se guarda en silencio como «sin hora».
+    const horaHms = form.hora.trim() ? normalizarHoraVoucher(form.hora) : null;
+    if (form.hora.trim() && !horaHms) { alert(`La hora «${form.hora}» no se entiende: escríbela como 17:08.`); return; }
 
     // Unidad seleccionada (flota propia o tercerizada, según el prefijo del uid).
     const uSel = unidadDe(form.vehiculo_id);
@@ -553,6 +592,8 @@ export default function CombustiblePage() {
       // valen lo mismo, y el rendimiento construido sobre cada uno tiene que poder declararlo.
       tanque_lleno_fuente: tanqueFuente ?? "politica",
       km_salto_motivo: form.km_salto_motivo.trim() || null,
+      // Se manda siempre, incluso en null: vaciar el campo tiene que poder BORRAR una hora mal puesta.
+      hora: horaHms,
     };
 
     const escribir = (p: Record<string, unknown>) =>
@@ -561,13 +602,21 @@ export default function CombustiblePage() {
         : supabase.from("combustible").insert(p);
 
     let { error } = await escribir(payload);
+    // Sin combustible-05 la carga se guarda igual, sin su hora (la lectura de odómetro sí la lleva).
+    let sinColumnaHora = false;
+    if (error && faltaAlguna(error, ["hora"])) {
+      const { hora: _h, ...sinHora } = payload;
+      void _h;
+      sinColumnaHora = true;
+      ({ error } = await escribir(sinHora));
+    }
     // Reintento sin las columnas de la migración accesoria, nombrando el SQL: registrar una
     // carga no se puede bloquear porque falte un dato del método de tanque lleno — pero un dato
     // que parece guardarse y no llega sí hay que decirlo.
     // `faltaAlguna` entiende las DOS formas del error: en un INSERT/UPDATE quien rechaza la columna
     // es PostgREST (PGRST204 «Could not find the … column»), no Postgres («does not exist»). Mirando
     // solo la segunda, este reintento no saltaba nunca — el mismo hueco que dejó al Radar sin guardar.
-    if (error && faltaAlguna(error, ["tanque_lleno", "tanque_lleno_fuente", "km_salto_motivo"])) {
+    if (error && faltaAlguna(error, ["tanque_lleno", "tanque_lleno_fuente", "km_salto_motivo", "hora"])) {
       const r2 = await escribir(base);
       error = r2.error;
       if (!error) {
@@ -580,6 +629,12 @@ export default function CombustiblePage() {
     }
 
     if (error) { alert(error.message); setGuardando(false); return; }
+    if (sinColumnaHora && horaHms) {
+      alert(
+        "La carga se guardó, PERO sin la hora: falta correr supabase/combustible-05-hora-carga.sql en Supabase.\n\n" +
+        "La lectura de odómetro sí queda con su hora."
+      );
+    }
 
     // La carga real es la fuente de precio más actual → actualiza el precio vigente
     // que usa /configuracion/costos (Cotizador). No bloquea el guardado si falla.
@@ -609,6 +664,10 @@ export default function CombustiblePage() {
           km: Number(form.kilometraje),
           fuente: "combustible",
           fecha: form.fecha,
+          // Con la hora del voucher la lectura es EXACTA (no un tope): se juzga contra la lectura de
+          // antes y la de después de esa hora. Sin hora, solo se sabe el día.
+          capturado_en: horaHms ? capturaDeFechaHora(form.fecha, horaHms) : null,
+          horaEsTope: false,
           ref_origen: "combustible",
         });
       }
@@ -620,6 +679,7 @@ export default function CombustiblePage() {
     setForm({
       vehiculo_id:      uidReg(r),
       fecha:            r.fecha        || "",
+      hora:             r.hora ? String(r.hora).slice(0, 5) : "",
       kilometraje:      r.kilometraje  ? String(r.kilometraje)  : "",
       galones:          r.galones      ? String(r.galones)      : "",
       precio_galon:     r.precio_galon ? String(r.precio_galon) : "",
@@ -1039,12 +1099,36 @@ export default function CombustiblePage() {
                 <input type="date" className={inputCls()} value={form.fecha}
                   onChange={e => setForm(p => ({ ...p, fecha: e.target.value }))} />
               </Campo>
-              <Campo label="Kilometraje actual">
-                <input type="number" className={inputCls(`font-mono ${saltoKm.estado === "salto" ? "border-amber-400 bg-amber-50" : ""}`)}
-                  placeholder="Ej: 150000" value={form.kilometraje}
+              <Campo label="Hora de la carga">
+                <input type="time" className={inputCls(horaIlegible ? "border-amber-400 bg-amber-50" : "")}
+                  value={form.hora}
+                  onChange={e => setForm(p => ({ ...p, hora: e.target.value }))} />
+              </Campo>
+              <Campo label="Kilometraje al cargar" span={2}>
+                <input type="number" className={inputCls(`font-mono ${saltoKm.estado === "salto" || kmFueraForm ? "border-amber-400 bg-amber-50" : ""}`)}
+                  placeholder="El odómetro en el momento de la carga (del voucher o del tablero)" value={form.kilometraje}
                   onChange={e => setForm(p => ({ ...p, kilometraje: e.target.value }))} />
               </Campo>
             </div>
+
+            {/* Las lecturas de esa unidad alrededor de la carga: REFERENCIA, nunca un «usar este». */}
+            {uFormRango && (
+              <div className="mt-2 text-xs text-gray-500 leading-relaxed">
+                {!rangoForm ? "Buscando las lecturas de odómetro de esa unidad…"
+                  : !rangoForm.antes && !rangoForm.despues && !rangoForm.delDia.length
+                    ? "No hay lecturas de odómetro de esa unidad cerca de esa fecha."
+                    : <>
+                        Lecturas de {uFormRango.placa}:
+                        {rangoForm.antes && <> antes, <b className="font-mono">{fmtNum(rangoForm.antes.km, 0)}</b> ({rangoForm.antes.etiqueta}, {fmtFecha(rangoForm.antes.fecha)}{rangoForm.antes.hora ? ` ${rangoForm.antes.hora}` : ""});</>}
+                        {rangoForm.delDia.length > 0 && <> ese día, {rangoForm.delDia.map(l => `${fmtNum(l.km, 0)} (${l.etiqueta}${l.hora ? ` ${l.hora}` : ""})`).join(", ")};</>}
+                        {rangoForm.despues && <> después, <b className="font-mono">{fmtNum(rangoForm.despues.km, 0)}</b> ({rangoForm.despues.etiqueta}, {fmtFecha(rangoForm.despues.fecha)}{rangoForm.despues.hora ? ` ${rangoForm.despues.hora}` : ""}).</>}
+                        {" "}El km de la carga tiene que caer entre la anterior y la posterior
+                        {rangoForm.delDia.length > 0 && !form.hora.trim() ? "; con la hora, las del mismo día también lo acotan." : "."}
+                      </>}
+                {horaIlegible && <p className="mt-1 font-bold text-amber-800">La hora no se entiende: escríbela como 17:08.</p>}
+                {kmFueraForm && <p className="mt-1 font-bold text-amber-800">⚠ {kmFueraForm} Se guarda igual, y la lectura queda por revisar en Mantenimiento → Odómetro.</p>}
+              </div>
+            )}
 
             {/* EL TANQUE LLENO ES LO QUE HACE VÁLIDA LA MEDICIÓN.
                 Si el tanque queda a tope en los dos extremos, lo despachado al cerrar es
@@ -1280,6 +1364,7 @@ export default function CombustiblePage() {
                           <td className="p-3 text-gray-300 text-xs">{expandido ? "▼" : "▶"}</td>
                           <td className="p-3 text-xs text-gray-600 font-medium whitespace-nowrap">
                             {fmtFecha(r.fecha)}
+                            {r.hora && <span className="ml-1 text-gray-400">{String(r.hora).slice(0, 5)}</span>}
                             {cargasDelRadar.has(r.id) && (
                               <span className="ml-1.5" title="La leyó el Radar IA de una foto — ábrela para verla">📷</span>
                             )}
@@ -1396,7 +1481,7 @@ export default function CombustiblePage() {
                               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                                 <div className="space-y-1">
                                   <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Carga</p>
-                                  <p><span className="text-gray-400">Fecha:</span> {fmtFecha(r.fecha)}</p>
+                                  <p><span className="text-gray-400">Fecha:</span> {fmtFecha(r.fecha)}{r.hora ? ` · ${String(r.hora).slice(0, 5)}` : ""}</p>
                                   <p><span className="text-gray-400">Vehículo:</span> <b>{placaReg(r)}</b></p>
                                   <p><span className="text-gray-400">KM:</span> <span className="font-mono">{r.kilometraje ? fmtNum(Number(r.kilometraje), 0) : "—"}</span></p>
                                   <p><span className="text-gray-400">Conductor:</span> {r.conductor || "—"}</p>
