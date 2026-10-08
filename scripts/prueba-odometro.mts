@@ -26,6 +26,7 @@
 import { elegirOdometro, digitosDe, corregirDigitoRepetido, revisarKmTecleado } from "../lib/odometro-seleccion";
 import { evaluarLectura, RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "../lib/odometro";
 import { promptOdometro } from "../lib/vision-ia";
+import { sinCifrasCopiables } from "../lib/odometro-prompt";
 import { promptExtraccionMedia, type ContextoPrompt } from "../lib/radar/prompts";
 
 let fallos = 0;
@@ -304,12 +305,142 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
 }
 
 // ── 9. El prompt nombra el patrón real, no uno genérico ─────────────────────
+// …pero con LETRAS. Hasta el 08/10 citaba los casos con sus cifras (23980→239980), y 23980 es el
+// odómetro de la CUP-435: la CTV-370, que iba por 29,8xx, registró dos veces 23,980 (sección 11).
 {
   const p = promptOdometro({ digitos: 5, placa: "CUP-435" });
   chk("el prompt prohíbe REPETIR un dígito", /NO REPITAS UN D[IÍ]GITO/.test(p));
-  chk("…con los casos medidos de esta flota", p.includes("23980→239980") && p.includes("560473→5600473"));
+  chk("…con la FORMA del caso medido (letras, no cifras)", p.includes("«ABCCDE»") && p.includes("«ABCDDEF»"));
   const radar = promptExtraccionMedia({ fechaHoy: "2026-09-11", horaAhora: "00:15" });
   chk("Radar · también lo prohíbe", /NO REPITAS NINGUNA/.test(radar));
+  chk("Radar · con la misma forma", radar.includes("«ABCCDE»"));
+}
+
+// ── 10. EL NÚMERO SE JUZGA CONTRA LAS LECTURAS DE SU FECHA, NO CONTRA EL VIGENTE DE HOY ──
+// El Radar procesa y REPROCESA fotos de días atrás, y `elegirOdometro` armaba la banda con el km
+// vigente — el máximo de HOY —, mientras que `evaluarLectura` (quien guarda) ya usaba la lectura
+// anterior a la foto. Con la CUP-435 en 24,618 hoy, el tablero del 07/09 (240,035, repetición
+// «00» → 24,035) quedaba «por debajo de lo posible»: sin propuesta, «dígito de más» a secas. El
+// del 15/09 (248,871 → 24,871) sí cabía y sí se corregía. Mismo error, dos resultados.
+{
+  const hoy = 24618;
+  const viejo = leer({ kmIA: 240035, kmVigente: hoy, horasDesdeUltima: 48 });
+  chk("bug reproducido · contra el vigente de hoy, el 07/09 no se puede colapsar",
+    viejo.codigo === "digito_de_mas" && viejo.km === 240035, `codigo=${viejo.codigo} km=${viejo.km}`);
+
+  const v = leer({ kmIA: 240035, kmVigente: hoy, horasDesdeUltima: 48, vecinas: { anterior: 23980, posterior: hoy } });
+  chk("CUP-435 07/09 · con las lecturas de su fecha, 240,035 → 24,035 (repetición «00»)",
+    v.km === 24035 && v.codigo === "digito_repetido", `codigo=${v.codigo} km=${v.km}`);
+  chk("CUP-435 07/09 · …y lo confirma una persona", v.confirmar === true);
+  chk("CUP-435 07/09 · el motivo nombra la lectura anterior, no el vigente de hoy",
+    !!v.motivo && v.motivo.includes("lectura anterior 23,980") && !v.motivo.includes("vigente"), v.motivo ?? "");
+
+  const v8 = leer({ kmIA: 242241, kmVigente: hoy, horasDesdeUltima: 24, vecinas: { anterior: 24035, posterior: hoy } });
+  chk("CUP-435 08/09 · 242,241 → 24,241 (repetición «22»)", v8.km === 24241 && v8.confirmar === true, `km=${v8.km}`);
+
+  // El lado que no se puede aflojar: un número BUENO de esa fecha no es «imposible» porque hoy
+  // la unidad vaya más adelante.
+  const bueno = leer({ kmIA: 24100, kmVigente: hoy, horasDesdeUltima: 24, vecinas: { anterior: 23980, posterior: hoy } });
+  chk("un km correcto de días atrás pasa tal cual", bueno.km === 24100 && bueno.autoOk && bueno.codigo === null,
+    `codigo=${bueno.codigo} autoOk=${bueno.autoOk}`);
+  chk("…y antes del arreglo salía «imposible»",
+    leer({ kmIA: 24100, kmVigente: hoy, horasDesdeUltima: 24 }).codigo === "fuera_de_banda");
+
+  // Y la lectura que vino DESPUÉS pone techo: nada puede superarla.
+  const sobrePost = leer({ kmIA: 24700, kmVigente: hoy, horasDesdeUltima: 24, vecinas: { anterior: 23980, posterior: hoy } });
+  chk("un km por encima de la lectura posterior no está en banda", !sobrePost.autoOk && sobrePost.codigo === "fuera_de_banda",
+    `codigo=${sobrePost.codigo}`);
+  // …y el techo de la posterior es lo que deja UN solo colapso posible donde antes había varios.
+  chk("sin anterior (la más antigua de la serie), la posterior acota igual",
+    leer({ kmIA: 240035, kmVigente: hoy, horasDesdeUltima: null, hayHistorial: true, vecinas: { anterior: null, posterior: hoy } }).km === 24035);
+}
+{
+  // SIN vecinas, o con la anterior igual al vigente (una foto de AHORA), el resultado es el de
+  // siempre: km, código, origen, autoOk y confirmar idénticos sobre toda la rejilla.
+  let distintos = 0;
+  for (const vig of [6000, 23980, 174000, 568287]) {
+    for (const f of [0.99, 1, 1.01, 1.2, 2, 5, 7.9, 8, 10, 100]) {
+      for (const horas of [null, 6, 24, 240]) {
+        for (const hayHistorial of [true, false]) {
+          const base = { kmIA: Math.round(vig * f), tripIA: null, textoLeido: null, kmVigente: vig, kmDiaMax: 1500, horasDesdeUltima: horas, hayHistorial };
+          const a = elegirOdometro(base);
+          const b = elegirOdometro({ ...base, vecinas: { anterior: vig, posterior: null } });
+          const c = elegirOdometro({ ...base, vecinas: { anterior: null, posterior: null } });
+          const firma = (x: typeof a) => `${x.km}|${x.codigo}|${x.origen}|${x.autoOk}|${x.confirmar ?? false}`;
+          if (firma(a) !== firma(b) || firma(a) !== firma(c) || a.motivo !== c.motivo) distintos++;
+        }
+      }
+    }
+  }
+  chk("una foto de ahora (anterior = vigente) se juzga exactamente igual que antes", distintos === 0, `${distintos} distinto(s)`);
+}
+{
+  // EL CRUCE: lo que el lector deja pasar con las vecinas, el escritor —con las MISMAS vecinas—
+  // no lo puede acusar de dígito de más, salto imposible, retroceso o incoherencia con la posterior.
+  // Antes eran dos bases distintas (el vigente de hoy y la lectura anterior) para el mismo número.
+  let choques = 0, juzgados = 0;
+  const ref = (km: number, ts: number) => ({ km, ts, horaExacta: true });
+  for (const ant of [6000, 23980, 174000]) {
+    for (const post of [null, ant + 300, ant + 3000]) {
+      for (const f of [0.99, 1, 1.005, 1.02, 1.2, 2, 8, 10]) {
+        for (const horas of [12, 24, 72]) {
+          const hoy = ant + 9000; // la unidad sigue avanzando: el vigente de HOY es otro número
+          const lector = elegirOdometro({
+            kmIA: Math.round(ant * f), tripIA: null, textoLeido: null, kmVigente: hoy,
+            kmDiaMax: 1500, horasDesdeUltima: horas, hayHistorial: true, vecinas: { anterior: ant, posterior: post },
+          });
+          if (!lector.autoOk || lector.km == null) continue;
+          juzgados++;
+          const t0 = Date.parse("2026-09-07T10:00:00-05:00");
+          const escritor = evaluarLectura({
+            kmVigente: hoy, kmNuevo: lector.km, kmDiaMax: 1500, horasDesdeUltima: horas,
+            refAnterior: ref(ant, t0 - horas * 3600_000),
+            refPosterior: post != null ? ref(post, t0 + 3600_000) : null,
+          });
+          if (/d[ií]gito de m[aá]s|Salto improbable|Retrocede \d|Incoherente/.test(escritor.motivo ?? "")) {
+            choques++;
+            console.log(`      choque: anterior ${ant} · posterior ${post} · IA ${Math.round(ant * f)} → registra ${lector.km} → "${escritor.motivo}"`);
+          }
+        }
+      }
+    }
+  }
+  chk(`con las mismas vecinas, lector y escritor no se contradicen (${juzgados} casos)`, choques === 0 && juzgados > 0, `${choques} choque(s)`);
+}
+
+// ── 11. AL PROMPT NO VA NINGÚN KILOMETRAJE, NI SIQUIERA DE EJEMPLO ──────────
+// La CTV-370 iba por 29,8xx y registró DOS veces exactamente 23,980 (12/09 y 17/09): el número del
+// ejemplo del prompt, que es el odómetro de la CUP-435 del 05/09. Un número en el prompt es un
+// número que el modelo copia cuando no logra leer la foto.
+{
+  const KM_DE_EJEMPLO = ["23980", "239980", "23379", "233379", "560473", "5600473", "175445", "82300"];
+  const conSeparadores = (n: string) => [n, Number(n).toLocaleString("es-PE"), Number(n).toLocaleString("de-DE")];
+  const enTexto = (t: string) => KM_DE_EJEMPLO.filter((n) => conSeparadores(n).some((v) => t.includes(v)));
+
+  const vision = promptOdometro({ digitos: 5, placa: "CUP-435", guia: "el total está abajo, junto a ODO", lecciones: "- [CUP-435] Añadiste o perdiste un dígito." });
+  chk("app/mantenimiento · el prompt no lleva ningún kilometraje de ejemplo", enTexto(vision).length === 0, enTexto(vision).join(", "));
+  chk("app/mantenimiento · y dice que el número sale solo de la foto", /sale SOLO de la foto/.test(vision));
+
+  const radar = promptExtraccionMedia({
+    fechaHoy: "2026-09-17", horaAhora: "20:56",
+    guiasOdometro: [{ placa: "CTV-370", guia: null, digitos: 5 }, { placa: "CUP-435", guia: null, digitos: 5 }],
+  });
+  chk("Radar · el prompt no lleva ningún kilometraje de ejemplo", enTexto(radar).length === 0, enTexto(radar).join(", "));
+  chk("Radar · y dice que el número sale solo de la foto", /sale SOLO de la foto/.test(radar));
+  chk("Radar · la coma de miles se sigue enseñando (con letras)", radar.includes("ABC,DEF"));
+
+  // Lo que teclea una persona (la nota de una corrección, la guía del tablero) entra con sus cifras
+  // largas tapadas: la forma enseña lo mismo y no deja un número copiable.
+  chk("la nota del operador pierde sus kilometrajes y conserva su forma",
+    sinCifrasCopiables("el tablero dice 23980, no 239,980") === "el tablero dice #####, no ###,###",
+    sinCifrasCopiables("el tablero dice 23980, no 239,980"));
+  chk("…el trip con decimal también se tapa", sinCifrasCopiables("el 1803.6 es el trip") === "el ####.# es el trip");
+  chk("…y lo corto sigue legible (placa, dígitos, hora)",
+    sinCifrasCopiables("CUP-435: 5 dígitos, foto de las 20:25") === "CUP-435: 5 dígitos, foto de las 20:25");
+  const conGuiaNumerica = promptOdometro({ digitos: 5, placa: "CUP-435", guia: "el ODO de abajo, marcaba 24618" });
+  chk("app/mantenimiento · la guía con un km lo lleva tapado", conGuiaNumerica.includes("marcaba #####") && !conGuiaNumerica.includes("24618"));
+  const radarGuia = promptExtraccionMedia({ fechaHoy: "2026-09-17", horaAhora: "20:56", guiasOdometro: [{ placa: "CUP-435", guia: "abajo, marcaba 24618", digitos: 5 }] });
+  chk("Radar · la guía con un km lo lleva tapado", radarGuia.includes("marcaba #####") && !radarGuia.includes("24618"));
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) fallaron` : "\nTodo en verde");

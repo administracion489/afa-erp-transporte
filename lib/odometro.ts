@@ -13,6 +13,7 @@
 
 import { firmarUrl, type ClienteStorage } from "@/lib/storage-firmado";
 import { instanteLectura, finDiaLimaTs, diaLimaDeTs, capturaDeFechaHora, capturaDeRecarga } from "@/lib/odometro-tiempo";
+import { sinCifrasCopiables } from "@/lib/odometro-prompt";
 
 export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
@@ -1215,7 +1216,10 @@ export async function leccionesOdometro(
   return elegidas
     .map((c) => {
       const placa = c.placa ? `[${c.placa}] ` : "";
-      const nota = String(c.nota ?? "").trim().slice(0, 200);
+      // La nota la escribió una persona y suele traer el número bueno («el tablero dice 23980»):
+      // va con sus cifras tapadas, o el modelo la usa de respaldo cuando no lee la foto
+      // (lib/odometro-prompt.ts — las dos lecturas de 23,980 en la CTV-370).
+      const nota = sinCifrasCopiables(String(c.nota ?? "").trim()).slice(0, 200);
       const cab = encabezadoLeccion(String(c.motivo_tipo));
       // Nota que describe una foto ilegible → la lección es abstenerse, no adivinar.
       if (!cab && nota && NOTA_ILEGIBLE.test(nota)) {

@@ -1773,6 +1773,9 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
     kmDiaMax: ctxOdo?.kmDiaMax ?? 1500,
     horasDesdeUltima: ctxOdo?.horasDesdeUltima ?? null,
     hayHistorial: ctxOdo?.hayHistorial ?? false,
+    // Las lecturas de la FECHA de la foto, no el vigente de hoy: el Radar procesa (y reprocesa)
+    // fotos de días atrás, y registrarLectura las juzga contra esas mismas vecinas al guardar.
+    vecinas: ctxOdo ? { anterior: ctxOdo.anterior?.km ?? null, posterior: ctxOdo.posterior?.km ?? null } : null,
   });
   const km = veredicto.km;
   const kmCorregido = veredicto.origen === "corregido";

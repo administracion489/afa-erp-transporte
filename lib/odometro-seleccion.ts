@@ -192,6 +192,20 @@ export function elegirOdometro(e: {
   kmDiaMax: number;
   horasDesdeUltima: number | null;
   hayHistorial: boolean;
+  /**
+   * Las lecturas vivas ALREDEDOR DEL MOMENTO de la foto (`contextoOdometro().anterior/posterior`),
+   * en km. Con ellas la banda se arma igual que la arma `evaluarLectura` al guardar; sin ellas
+   * (`undefined`) manda el km vigente, que es el comportamiento de siempre.
+   *
+   * POR QUÉ EXISTE: el km vigente es el MÁXIMO de HOY, y el Radar procesa —o reprocesa— fotos de
+   * días atrás. Contra el vigente de hoy, el tablero del 07/09 de la CUP-435 (240,035, con la
+   * repetición «00» que colapsa a 24,035) tenía la banda en 24,594 o más: el colapso caía «por
+   * debajo de lo posible» y la lectura quedaba como «dígito de más» sin propuesta, mientras que
+   * el 15/09 (248,871 → 24,871) sí se corregía. Y un número BUENO de esa fecha salía «imposible».
+   * Es el mismo error que `evaluarLectura` y `kmFueraDeSuMomento` ya corrigieron del lado del que
+   * escribe; con el lector todavía en el vigente, los dos juzgaban el mismo número con dos bases.
+   */
+  vecinas?: { anterior: number | null; posterior: number | null } | null;
 }): VeredictoOdometro {
   const kmIA = e.kmIA != null && Number.isFinite(e.kmIA) && e.kmIA > 0 ? Math.round(e.kmIA) : null;
   const neutro = (motivo: string | null = null, autoOk = true): VeredictoOdometro => ({
@@ -201,23 +215,36 @@ export function elegirOdometro(e: {
   // (1) La abstención del modelo manda: si no leyó un número, aquí no se fabrica uno.
   if (kmIA == null) return neutro(null, false);
 
-  // (2) Sin ancla no hay nada contra qué comparar → exactamente el comportamiento de hoy.
+  // (2) El ancla. Con vecinas, la MISMA base que `evaluarLectura`: la lectura anterior a la
+  //     foto; sin anterior pero con posterior, esta es la más antigua de la serie (no hay piso,
+  //     solo el techo de la que vino después); sin ninguna de las dos, el vigente.
   const kmVigente = Number(e.kmVigente || 0);
-  if (kmVigente <= 0) return neutro();
+  const vec = e.vecinas ?? null;
+  const kmAnt = vec && Number(vec.anterior) > 0 ? Number(vec.anterior) : null;
+  const kmPost = vec && Number(vec.posterior) > 0 ? Number(vec.posterior) : null;
+  const base = kmAnt ?? (kmPost != null ? 0 : kmVigente);
+  // Sin ancla no hay nada contra qué comparar → exactamente el comportamiento de hoy.
+  if (base <= 0 && kmPost == null) return neutro();
+  // Cómo se nombra el ancla en el motivo: «vigente» solo cuando de verdad es el vigente.
+  const ancla = kmAnt != null
+    ? `lectura anterior ${fmt(kmAnt)}`
+    : base > 0 ? `vigente ${fmt(kmVigente)}` : `lectura posterior ${fmt(kmPost!)}`;
+  // La forma del número (cuántas cifras) sale del ancla, o de la posterior si es lo único que hay.
+  const kmForma = base > 0 ? base : kmPost!;
 
   // ── Banda de lo posible para ESTA unidad ───────────────────────────────────────────────
   // Piso: el odómetro no retrocede (con la misma tolerancia de ruido que evaluarLectura).
   // Techo: el mismo presupuesto km/día del anti-salto, con el fallback de 30 días cuando no
   // se sabe cuánto tiempo pasó (si se usara 1 día se estrecharía 30 veces y rechazaría
   // lecturas legítimas de unidades sin historial reciente).
-  const tol = Math.max(5, Math.round(kmVigente * 0.001));
-  const piso = kmVigente - tol;
+  const tol = base > 0 ? Math.max(5, Math.round(base * 0.001)) : 0;
+  const piso = base > 0 ? base - tol : 1;
   const dias = e.horasDesdeUltima != null && e.horasDesdeUltima > 0
     ? Math.max(e.horasDesdeUltima / 24, 1)
     : 30;
   // Una unidad dada de alta con su odómetro a mano (sin ninguna lectura) no tiene ritmo que
   // medir: no se le aplica el techo de km/día, que la dejaría ciega.
-  const techoRitmo = e.hayHistorial ? kmVigente + (e.kmDiaMax > 0 ? e.kmDiaMax : 1500) * dias : Infinity;
+  const techoRitmo = e.hayHistorial && base > 0 ? base + (e.kmDiaMax > 0 ? e.kmDiaMax : 1500) * dias : Infinity;
   // …pero SÍ el de orden de magnitud, que es el mismo que evaluarLectura aplica al escribir y
   // que no necesita ninguna historia: le basta el km vigente. Sin él, `hayHistorial === false`
   // dejaba el techo en Infinity y un 239.980 sobre una unidad que va en 23.980 salía "en banda"
@@ -226,8 +253,11 @@ export function elegirOdometro(e: {
   // ya tecleada. Y `hayHistorial` no es solo "unidad nueva": una unidad cuyas lecturas van
   // TODAS a sospechosa se queda sin ninguna viva, así que el agujero se realimentaba —
   // el segundo dígito de más entraba tan liso como el primero.
-  const techoRatio = kmVigente >= PISO_RATIO_DIGITO ? kmVigente * RATIO_DIGITO_DE_MAS - 1 : Infinity;
-  const techo = Math.min(techoRitmo, techoRatio);
+  const techoRatio = base >= PISO_RATIO_DIGITO ? base * RATIO_DIGITO_DE_MAS - 1 : Infinity;
+  // Y nunca por encima de una lectura que vino DESPUÉS: el odómetro solo avanza (evaluarLectura
+  // la marcaría «incoherente con la lectura posterior»).
+  const techoPost = kmPost ?? Infinity;
+  const techo = Math.min(techoRitmo, techoRatio, techoPost);
 
   // ── Candidatos ─────────────────────────────────────────────────────────────────────────
   const bruto: CandidatoOdometro[] = [];
@@ -264,7 +294,7 @@ export function elegirOdometro(e: {
     // arreglo propio: sobra un dígito. Decir solo "imposible para esta unidad" obliga a deducir
     // qué pasó mirando dos números grandes; decir "leyó 6 dígitos y esta unidad tiene 5" es una
     // instrucción. Lo que NO se hace es adivinar cuál sobra (ver la regla 5 de la cabecera).
-    const dIA = digitosDe(kmIA), dVig = digitosDe(kmVigente);
+    const dIA = digitosDe(kmIA), dVig = digitosDe(kmForma);
     if (dIA > dVig) {
       // …salvo que el dígito que sobra esté DUPLICADO y colapsarlo dé un único número posible.
       // Entonces no es una adivinanza: es deshacer un error concreto, y se PROPONE (nunca se da
@@ -277,20 +307,20 @@ export function elegirOdometro(e: {
           motivo:
             `la IA devolvió ${fmt(kmIA)} (${dIA} dígitos, y esta unidad tiene ${dVig}): le sobra un ` +
             `dígito REPETIDO. Colapsarlo da ${fmt(reparado)}, el único valor posible para esta unidad ` +
-            `(vigente ${fmt(kmVigente)}) — confírmalo contra la foto antes de registrarlo`,
+            `(${ancla}) — confírmalo contra la foto antes de registrarlo`,
         };
       }
       return {
         km: kmIA, kmIA, origen: "ia", autoOk: false, codigo: "digito_de_mas", candidatos: bruto,
         motivo:
           `la IA devolvió ${fmt(kmIA)}: ${dIA} dígitos, y el odómetro de esta unidad tiene ${dVig} ` +
-          `(vigente ${fmt(kmVigente)}). Sobra un dígito — el número está entre ${fmt(piso)} y ` +
+          `(${ancla}). Sobra un dígito — el número está entre ${fmt(piso)} y ` +
           `${Number.isFinite(techo) ? fmt(techo) : "el que muestre el tablero"}: míralo en la foto y escríbelo`,
       };
     }
     const detalle = enBanda.length
-      ? `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)}), y ningún número leído del tablero encaja`
-      : `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)})`;
+      ? `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (${ancla}), y ningún número leído del tablero encaja`
+      : `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (${ancla})`;
     return { km: kmIA, kmIA, origen: "ia", autoOk: false, motivo: detalle, codigo: "fuera_de_banda", candidatos: bruto };
   }
 
@@ -300,14 +330,14 @@ export function elegirOdometro(e: {
   const finalistas = sinDecimal.length ? sinDecimal : elegibles;
   const ganador = finalistas.reduce((a, b) => (b.valor > a.valor ? b : a));
 
-  // Guard anti-eco: un candidato que CLAVA el vigente no es una lectura, es el modelo
+  // Guard anti-eco: un candidato que CLAVA el ancla no es una lectura, es el modelo
   // repitiendo un número que ya conocía. Se exige coincidencia casi exacta (≤2 km): la
   // tolerancia del piso (0,1% = 174 km en un odómetro de 174.000) es más que un día de
   // recorrido, y usarla aquí descartaría avances reales como si fueran ecos.
-  if (Math.abs(ganador.valor - kmVigente) <= 2) {
+  if (Math.abs(ganador.valor - kmForma) <= 2) {
     return {
       km: kmIA, kmIA, origen: "ia", autoOk: false, codigo: "eco",
-      motivo: `la IA devolvió ${fmt(kmIA)} y el único número compatible (${fmt(ganador.valor)}) coincide con el km vigente — puede ser un eco, no una lectura`,
+      motivo: `la IA devolvió ${fmt(kmIA)} y el único número compatible (${fmt(ganador.valor)}) coincide con ${kmAnt != null ? "la lectura anterior" : "el km vigente"} — puede ser un eco, no una lectura`,
       candidatos: bruto,
     };
   }
@@ -318,7 +348,7 @@ export function elegirOdometro(e: {
     origen: "corregido",
     autoOk: true,
     codigo: "parcial",
-    motivo: `la IA devolvió ${fmt(kmIA)} (${ganador.fuente === "trip" ? "el parcial/trip" : "un valor imposible"}); el sistema registró ${fmt(ganador.valor)}, el único número del tablero coherente con el vigente ${fmt(kmVigente)}`,
+    motivo: `la IA devolvió ${fmt(kmIA)} (${ganador.fuente === "trip" ? "el parcial/trip" : "un valor imposible"}); el sistema registró ${fmt(ganador.valor)}, el único número del tablero coherente con ${kmAnt != null ? "la" : "el"} ${ancla}`,
     candidatos: bruto,
   };
 }
