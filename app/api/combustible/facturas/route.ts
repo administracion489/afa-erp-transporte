@@ -19,6 +19,8 @@
 //             (medido o configurado, lib/combustible/desfase-factura.ts) y qué cargas registradas
 //             con la fecha de EMISIÓN movería.
 //        { accion: "mover_a_despacho", ids, dias } → una persona vio esa lista y las mueve.
+//        { accion: "reconciliar" } → vuelve a cruzar las facturas con líneas pendientes contra lo
+//             registrado HOY, sin leer el correo (al abrir la pestaña y tras registrar a mano).
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -28,7 +30,7 @@ import { cargarCuentas } from "@/lib/combustible/saldo-datos";
 import {
   sincronizarFacturas, conciliarFacturaGuardada, registrarHistoricas, LECTURA_HISTORIAL,
   prepagoComoDeuda, marcarPrepagoPagadas, reintentarErrores,
-  desfaseDeCuenta, cargasPorMoverDeCuenta, moverCargasADespacho,
+  desfaseDeCuenta, cargasPorMoverDeCuenta, moverCargasADespacho, reconciliarPendientes,
 } from "@/lib/combustible/facturas-correo";
 import { resumenMover } from "@/lib/combustible/desfase-factura";
 
@@ -100,6 +102,13 @@ export async function POST(req: NextRequest) {
       }
       const { cuentas } = await cargarCuentas(sb);
       return NextResponse.json(await moverCargasADespacho(sb, cuentas, ids, dias));
+    }
+    if (body.accion === "reconciliar") {
+      const { cuentas, sinMigracion } = await cargarCuentas(sb);
+      if (sinMigracion) return NextResponse.json({ ok: false, error: "Falta correr supabase/combustible-03-saldo-cuenta-y-facturas.sql" });
+      // La cuenta de la factura (la misma resolución que «confirmar_linea»).
+      const cuentaDe = (f: { cuenta_id?: number | string | null }) => cuentas.find((c) => c.id === Number(f.cuenta_id)) ?? cuentas[0] ?? null;
+      return NextResponse.json({ ok: true, ...(await reconciliarPendientes(sb, cuentaDe, hoyLima(), { presupuestoMs: 45_000 })) });
     }
     if (body.accion === "deuda_prepago") return NextResponse.json(await prepagoComoDeuda(sb));
     if (body.accion === "marcar_prepago") {
