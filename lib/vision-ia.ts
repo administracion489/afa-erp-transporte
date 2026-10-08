@@ -6,7 +6,7 @@
 // Reusa el patrón de lib/crm-ia.ts (SDK Anthropic, ANTHROPIC_API_KEY del entorno).
 
 import Anthropic from "@anthropic-ai/sdk";
-import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables } from "@/lib/odometro-prompt";
+import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro } from "@/lib/odometro-prompt";
 
 // Cliente perezoso. Si ANTHROPIC_API_KEY no está configurada, NO debe reventar al
 // cargar el módulo: eso haría que el route devuelva un 500 SIN JSON (antes del
@@ -132,6 +132,8 @@ export type ContextoLecturaOdometro = {
   guia?: string | null;      // vehiculos(_tercero).guia_odometro: dónde mirar en ESE tablero
   placa?: string | null;
   digitos?: number | null;   // cuántos dígitos tiene su odómetro (nunca el km exacto: sería copiable)
+  /** El km está cerca de la cifra siguiente (`formaOdometro`): la frase admite un dígito más. */
+  puedeSubir?: boolean;
 };
 
 /**
@@ -151,14 +153,19 @@ export type ContextoLecturaOdometro = {
  */
 function bloqueFormaOdometro(c: ContextoLecturaOdometro): string | null {
   if (!c.digitos || c.digitos <= 0) return null;
+  // Lejos de la cifra siguiente, N+1 es imposible; cerca, la frase admite N+1 solo si empieza por
+  // «10» (lib/odometro-prompt.ts). Antes decía que pasar a la cifra siguiente «exige un salto
+  // enorme desde la última lectura», que es falso: de 99,950 a 100,020 hay 70 km.
+  const f = { cifras: c.digitos, puedeSubir: c.puedeSubir === true };
+  const admite = f.puedeSubir
+    ? `si te salen más de ${f.cifras + 1}, o ${f.cifras + 1} que no empiezan por «10», te sobra un dígito`
+    : `si te salen más de ${f.cifras}, te sobra un dígito`;
   return (
-    `FORMA DEL NÚMERO EN ESTA UNIDAD${c.placa ? ` (${c.placa})` : ""}: el odómetro TOTAL es un número de ` +
-    `${c.digitos} dígitos (el ERP lo sabe por el historial de la unidad; el parcial/trip tiene menos).\n` +
-    `Antes de responder, CUENTA las cifras del número que ibas a poner en "km": si te salen más de ` +
-    `${c.digitos}, te sobra un dígito — vuelve a mirar la foto cifra por cifra en vez de confirmar tu ` +
-    `primera lectura. Un dígito de más es el error más frecuente en esta flota. Solo puede tener ` +
-    `${c.digitos + 1} si el odómetro acaba de pasar de ${"9".repeat(c.digitos)} a 1${"0".repeat(c.digitos)} km, ` +
-    `lo que exige un salto enorme desde la última lectura; si no es el caso, es un error de lectura.`
+    `FORMA DEL NÚMERO EN ESTA UNIDAD${c.placa ? ` (${c.placa})` : ""} (el ERP lo sabe por el historial de la ` +
+    `unidad; el parcial/trip tiene menos): ${fraseFormaOdometro(f)}.\n` +
+    `Antes de responder, CUENTA las cifras del número que ibas a poner en "km": ${admite} — vuelve a ` +
+    `mirar la foto cifra por cifra en vez de confirmar tu primera lectura. Un dígito de más es el error ` +
+    `más frecuente en esta flota.`
   );
 }
 

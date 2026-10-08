@@ -19,8 +19,9 @@ import {
 } from "./procedencia-placa";
 import { cargarFlotaUnidades, remitentesPorDia, claveRemitenteDia } from "./remitente-unidades";
 import { telefonoDeRemitente } from "./cluster-remitente";
-import { registrarLectura, contextoOdometro, juzgarKmDeRecarga, type Flota, type ContextoOdometro } from "@/lib/odometro";
-import { elegirOdometro } from "@/lib/odometro-seleccion";
+import { registrarLectura, contextoOdometro, contextoDeRecarga, juzgarKmDeRecarga, type Flota, type ContextoOdometro } from "@/lib/odometro";
+import { elegirOdometro, type VeredictoOdometro } from "@/lib/odometro-seleccion";
+import { kmDeRecarga } from "./km-recarga";
 import { capturaDeRecarga } from "@/lib/odometro-tiempo";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
 import {
@@ -881,7 +882,34 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   let cantidad = numOpc(d.galones) ?? numOpc(d.litros);
   let precioUnit = numOpc(d.precio_galon) ?? numOpc(d.precio_litro);
   let monto = numOpc(d.monto_total);
-  const km = numOpc(d.kilometraje);
+  // El km del tablero pasa por el MISMO selector que una foto de odómetro suelta (lib/radar/
+  // km-recarga.ts): antes iba tal cual a la carga, a la fila del Radar y a lecturas_odometro, sin
+  // el colapso del dígito repetido ni el aviso «sobra un dígito». Se juzga contra las lecturas del
+  // momento del voucher (contextoDeRecarga), no contra el km de hoy. Best-effort: si la consulta
+  // falla, el km queda como lo leyó la IA y lo juzgan los controles de siempre.
+  const kmIA = numOpc(d.kilometraje);
+  const tripKm = numOpc(d.trip_km);
+  let veredictoKm: VeredictoOdometro | null = null;
+  const unidadKm = veh ? { id: veh.id, flota: "propia" as Flota } : terc ? { id: terc.id, flota: "tercero" as Flota } : null;
+  if (unidadKm && kmIA != null && kmIA > 0) {
+    try {
+      const ctxKm = await contextoDeRecarga(sb, {
+        vehiculo_id: unidadKm.id, flota: unidadKm.flota, fecha, hora: d.hora ?? null, tsMensaje: mensaje.ts_mensaje ?? null,
+      });
+      if (ctxKm.existe) {
+        veredictoKm = elegirOdometro({
+          kmIA, tripIA: tripKm, textoLeido: null,
+          kmVigente: ctxKm.kmVigente, kmDiaMax: ctxKm.kmDiaMax,
+          horasDesdeUltima: ctxKm.horasDesdeUltima, hayHistorial: ctxKm.hayHistorial,
+          vecinas: { anterior: ctxKm.anterior?.km ?? null, posterior: ctxKm.posterior?.km ?? null },
+        });
+      }
+    } catch {
+      veredictoKm = null;
+    }
+  }
+  const vKm = kmDeRecarga(kmIA, veredictoKm);
+  const km = vKm.km;
   // La cantidad se guarda en la columna que la IA usó (galones XOR litros). Se lleva aparte
   // para que una corrección aterrice en la misma columna de la que salió.
   let galonesFila = numOpc(d.galones);
@@ -901,10 +929,11 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   // La fecha, igual de temprano: el duplicado, el rendimiento y el conductor del día se buscan con
   // ella, así que una fecha de otro año los hace mentir a todos.
   if (vFecha.anomalia) anomalias.push(vFecha.anomalia);
+  // El km, igual de temprano: el tramo de rendimiento y el «no cuadra con su fecha» lo usan.
+  if (vKm.anomalia) anomalias.push(vKm.anomalia);
 
   // ── Campos del camino de VISIÓN multi-foto (opcionales; el de texto no los llena) ──
   const consumoTasa = numOpc(d.consumo_l_100km);
-  const tripKm = numOpc(d.trip_km);
   const vioNota = d.vio_nota === true;
   const vioSurtidor = d.vio_surtidor === true;
   const vioTablero = d.vio_tablero === true;
@@ -952,11 +981,12 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       bloquea: true,
     });
   }
-  // Guard: el "Trip"/viaje parcial del tablero no es el odómetro total.
-  if (km != null && tripKm != null && km === tripKm) {
+  // Guard: el "Trip"/viaje parcial del tablero no es el odómetro total. Sobre lo que leyó la IA:
+  // si el selector intercambió trip y total, `km` ya es el otro número y no hay confusión que avisar.
+  if (kmIA != null && tripKm != null && kmIA === tripKm) {
     anomalias.push({
       codigo: "trip_como_odometro",
-      detalle: `El kilometraje (${km.toLocaleString("es-PE")}) coincide con el "Trip"/viaje parcial — probable confusión con el odómetro total`,
+      detalle: `El kilometraje (${kmIA.toLocaleString("es-PE")}) coincide con el "Trip"/viaje parcial — probable confusión con el odómetro total`,
       bloquea: true,
     });
   }
@@ -1360,13 +1390,14 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   //    odómetro no comparten dígitos por azar; cuando coinciden, es confusión de campos. Se
   //    manda a revisión aunque cantidad × precio "cuadre" con el total (ese chequeo puede
   //    pasar por casualidad cuando galones y precio están mal a la vez).
-  if (cantidad != null && km != null) {
+  // Contra lo que leyó la IA (`kmIA`): la confusión de campos es del modelo, no del km corregido.
+  if (cantidad != null && kmIA != null) {
     const soloDigitos = (n: number) => String(n).replace(/[^0-9]/g, "");
     const dc = soloDigitos(cantidad);
-    if (dc.length >= 3 && dc === soloDigitos(km)) {
+    if (dc.length >= 3 && dc === soloDigitos(kmIA)) {
       anomalias.push({
         codigo: "galones_coinciden_km",
-        detalle: `La cantidad (${cantidad}) tiene los mismos dígitos que el kilometraje (${km.toLocaleString("es-PE")}) — probable confusión: la lectura del odómetro se registró como galones`,
+        detalle: `La cantidad (${cantidad}) tiene los mismos dígitos que el kilometraje (${kmIA.toLocaleString("es-PE")}) — probable confusión: la lectura del odómetro se registró como galones`,
       });
     }
   }
@@ -1613,6 +1644,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       a.codigo === "marca_kit_como_grifo" ||
       a.codigo === "tasa_como_cantidad" ||
       a.codigo === "trip_como_odometro" ||
+      // Sobra un dígito en el km y no se puede deducir cuál: un km diez veces mayor. El colapsado
+      // (`km_corregido`) no entra: deja el número propuesto, solo hay que confirmarlo.
+      a.codigo === "km_digito_de_mas" ||
       a.codigo === "voucher_no_leido" ||
       // Los números del voucher se contradicen y NADA los explica: la plata que se va a
       // registrar no es la del papel. Una corrección resuelta ("lectura_corregida") no

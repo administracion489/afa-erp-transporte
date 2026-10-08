@@ -38,6 +38,61 @@ export const NUMERO_SOLO_DE_LA_FOTO =
   `si no lo lees, abstente.`;
 
 /**
+ * CUÁNTAS CIFRAS TIENE EL ODÓMETRO — y cuándo deja de ser seguro decirlo.
+ *
+ * Decirle al modelo «esta unidad tiene 5 cifras» es lo que frena el dígito de más, el error más
+ * frecuente de la flota. Pero un odómetro SUBE de cifra: de 99,950 pasa a 100,020 con 70 km de
+ * recorrido, y con la regla dicha a secas («si te salen 6, te sobra una») el modelo dudaría de la
+ * única lectura correcta de ese día. El texto anterior lo sabía a medias: decía que pasar a la
+ * cifra siguiente «exige un salto enorme desde la última lectura», que es falso.
+ *
+ * Por eso la forma se DERIVA del km con su margen: lejos de la cifra siguiente se dice el número
+ * de cifras tal cual; cerca, se dice que puede tener una más y CÓMO es ese número — tras dar la
+ * vuelta empieza por «10» (100,0xx · 1,000,0xx), así que el freno sigue funcionando: un dígito de
+ * más sobre 95,950 da 959,950, que no empieza por 10.
+ *
+ * La validación del ERP no depende de esto: `elegirOdometro` y `evaluarLectura` juzgan el VALOR
+ * contra las lecturas de la unidad, y aceptan 99,950 → 100,020 tal cual. Esto solo cuida lo que
+ * se le dice al modelo.
+ */
+export type FormaOdometro = {
+  /** Cifras del km que el ERP tiene de la unidad. */
+  cifras: number;
+  /** El km está a menos de UMBRAL_CAMBIO_DE_CIFRA de la cifra siguiente: puede tener una más. */
+  puedeSubir: boolean;
+};
+
+/**
+ * Desde qué fracción de la cifra siguiente se avisa que el odómetro puede tener una más: 90 % es
+ * 90,000 km en un odómetro de 5 cifras (10,000 km antes del cambio) y 900,000 en uno de 6.
+ * NO está medido y se declara: el margen cubre que el km del ERP se quede atrás (lecturas por
+ * revisar que no se aceptaron) sin que la frase quede vieja el día del cambio. Bajarlo da más
+ * margen a cambio de un freno menos estricto en la última franja; el lado seguro es bajarlo.
+ */
+export const UMBRAL_CAMBIO_DE_CIFRA = 0.9;
+
+/** La forma del odómetro a partir del km que el ERP tiene de la unidad. null sin km. */
+export function formaOdometro(kmVigente: number | null | undefined): FormaOdometro | null {
+  const km = Math.round(Math.abs(Number(kmVigente) || 0));
+  if (km <= 0) return null;
+  const cifras = String(km).length;
+  return { cifras, puedeSubir: km >= Math.pow(10, cifras) * UMBRAL_CAMBIO_DE_CIFRA };
+}
+
+/**
+ * La frase que describe la forma, LA MISMA en los dos carriles. Sin cifras copiables: la cantidad
+ * de dígitos y el «10» con que empieza tras el cambio no son el kilometraje de nadie.
+ */
+export function fraseFormaOdometro(f: FormaOdometro): string {
+  if (!f.puedeSubir) return `el odómetro TOTAL es un número de ${f.cifras} dígitos`;
+  return (
+    `el odómetro TOTAL es un número de ${f.cifras} dígitos y está cerca de pasar a ${f.cifras + 1}: ` +
+    `un número de ${f.cifras + 1} dígitos solo es válido si empieza por «10» (el odómetro acaba de dar ` +
+    `la vuelta); cualquier otro de ${f.cifras + 1} dígitos es un dígito de más`
+  );
+}
+
+/**
  * Desde cuántas cifras un número es copiable como kilometraje. Con 4 quedan tapados un trip
  * («1803.6»), un odómetro de cinco cifras y uno de siete, y siguen legibles las cosas cortas que
  * sí enseñan algo: «5 dígitos», una placa (CUP-435), una hora (20:25).

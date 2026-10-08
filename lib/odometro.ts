@@ -573,16 +573,30 @@ export async function juzgarKmDeRecarga(
 ): Promise<string | null> {
   try {
     if (!o.vehiculo_id || !(o.km > 0) || !o.fecha) return null;
-    const cap = capturaDeRecarga({ fecha: o.fecha, hora: o.hora ?? null, tsMensaje: o.tsMensaje ?? null });
-    const soloFecha = cap.capturado_en == null;
-    const tsRef = cap.capturado_en ?? new Date(Math.min(finDiaLimaTs(o.fecha.slice(0, 10)), Date.now())).toISOString();
-    const ctx = await contextoOdometro(client, {
-      vehiculo_id: o.vehiculo_id, flota: o.flota, tsRef, horaEsTope: soloFecha ? true : cap.horaEsTope, kmNuevo: o.km, soloFecha,
-    });
+    const ctx = await contextoDeRecarga(client, o);
     return ctx.existe ? kmFueraDeSuMomento(o.km, ctx) : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Lo que el ERP sabe del odómetro EN EL MOMENTO de una recarga: la hora del voucher (la impresa, o
+ * la del mensaje como tope, o solo la fecha — `capturaDeRecarga`) y las lecturas vivas alrededor.
+ * La comparten `juzgarKmDeRecarga` y el selector del Radar (`elegirOdometro` con sus vecinas), para
+ * que los dos hablen del mismo instante. Sin `km` no se reubica la hora: es lo que se llama ANTES
+ * de saber cuál es el número.
+ */
+export async function contextoDeRecarga(
+  client: any,
+  o: { vehiculo_id: number; flota?: Flota; km?: number | null; fecha: string; hora?: string | null; tsMensaje?: string | null },
+): Promise<ContextoOdometro> {
+  const cap = capturaDeRecarga({ fecha: o.fecha, hora: o.hora ?? null, tsMensaje: o.tsMensaje ?? null });
+  const soloFecha = cap.capturado_en == null;
+  const tsRef = cap.capturado_en ?? new Date(Math.min(finDiaLimaTs(o.fecha.slice(0, 10)), Date.now())).toISOString();
+  return contextoOdometro(client, {
+    vehiculo_id: o.vehiculo_id, flota: o.flota, tsRef, horaEsTope: soloFecha ? true : cap.horaEsTope, kmNuevo: o.km ?? null, soloFecha,
+  });
 }
 
 /**

@@ -9,9 +9,15 @@
 // Este archivo solo construye strings: no toca BD ni secretos.
 
 import type { CategoriaRadar } from "./tipos";
-import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables } from "../odometro-prompt";
+import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro } from "../odometro-prompt";
 
 // ── Contexto que el motor pasa a cada prompt ─────────────────────────────────
+
+/**
+ * Cómo se lee el odómetro de una unidad. `puedeSubir` = su km está cerca de la cifra siguiente
+ * (`formaOdometro`, lib/odometro-prompt.ts): la línea dice entonces que puede tener una más.
+ */
+export type GuiaOdometro = { placa: string; guia: string | null; digitos: number | null; puedeSubir?: boolean };
 
 export type ContextoPrompt = {
   grupo?: string | null;       // nombre del grupo de WhatsApp
@@ -33,7 +39,7 @@ export type ContextoPrompt = {
    * que los dígitos salen siempre de `kilometraje_actual`. Una unidad puede traer la forma sin
    * la guía — antes esa fila ni se cargaba, y el modelo leía ese tablero sin ninguna referencia.
    */
-  guiasOdometro?: { placa: string; guia: string | null; digitos: number | null }[];
+  guiasOdometro?: GuiaOdometro[];
   leccionesOdometro?: string | null; // correcciones humanas previas de lectura de odómetro (para no repetir errores)
   leccionesCombustible?: string | null; // correcciones humanas previas de lectura de vouchers de grifo (grifo/cantidad/precio/monto)
 };
@@ -512,12 +518,14 @@ function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
   if (!guias.length) return null;
   return (
     `Cómo se lee el odómetro de cada unidad (cada vehículo es distinto; usa la línea que corresponda a la placa que identifiques en la imagen o el texto). Esta lista NO sirve para identificar la unidad: un tablero no muestra la placa, y varias unidades tienen el mismo modelo de tablero. Si la placa no está escrita en el mensaje ni visible en la foto, deja "placa" en null — NUNCA la elijas de esta lista por el parecido del tablero. Si la placa que identificas NO aparece en esta lista, IGNORA todas estas líneas: son de otras unidades y describen tableros distintos.\n` +
-    `CUENTA LAS CIFRAS del kilometraje antes de responder: si te salen más dígitos de los que dice la línea de esa placa, te sobra un dígito y lo estás leyendo mal — vuelve a mirar la foto cifra por cifra. Un dígito de más es el error más frecuente en esta flota.\n` +
+    `CUENTA LAS CIFRAS del kilometraje antes de responder: si te salen más dígitos de los que admite la línea de esa placa, te sobra un dígito y lo estás leyendo mal — vuelve a mirar la foto cifra por cifra. Un dígito de más es el error más frecuente en esta flota.\n` +
     guias
       .map((g) => {
         // La forma del número es la señal que desambigua parcial vs total sin dar una
         // cifra copiable: un trip de 4 dígitos no puede ser un total de 6.
-        const forma = g.digitos ? `el odómetro TOTAL es un número de ${g.digitos} dígitos` : "";
+        // Cerca de la cifra siguiente la línea admite una más (fraseFormaOdometro): dicho a secas,
+        // el día que el odómetro da la vuelta el modelo dudaría de la única lectura correcta.
+        const forma = g.digitos ? fraseFormaOdometro({ cifras: g.digitos, puedeSubir: g.puedeSubir === true }) : "";
         // La guía la teclea una persona: si trae un kilometraje («el ODO marca 24618»), viaja
         // con sus cifras tapadas — dónde mirar se entiende igual y no queda un número copiable.
         const guia = sinCifrasCopiables(g.guia?.trim() ?? "");

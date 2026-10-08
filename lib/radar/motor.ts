@@ -29,7 +29,8 @@ import {
   raizDeReproceso,
   type MensajeRafaga,
 } from "./reproceso";
-import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
+import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt, type GuiaOdometro } from "./prompts";
+import { formaOdometro } from "@/lib/odometro-prompt";
 import { transcribirAudio } from "./transcripcion";
 import { miembrosDelMismoRemitente, pareceCombustible, remitenteUtilizable } from "./cluster-remitente";
 import { CONFIG_DEFECTO, normalizarConfigRadar, dentroDeHorario } from "./config";
@@ -374,7 +375,7 @@ function seleccionarMediaCluster(candidatos: any[], cap: number): any[] {
  * `bloqueFormaOdometro` en lib/vision-ia.ts, el mismo agujero en el otro carril de lectura).
  * Cuesta una línea corta de prompt por unidad; leer mal un odómetro cuesta bastante más.
  */
-async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string | null; digitos: number | null }[]> {
+async function cargarGuiasOdometro(sb: any): Promise<GuiaOdometro[]> {
   try {
     // Se manda la cantidad de dígitos, nunca el km exacto (ver ContextoPrompt.guiasOdometro).
     const [{ data: propios }, { data: terceros }] = await Promise.all([
@@ -384,11 +385,14 @@ async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: stri
     const filas = [...((propios as any[]) ?? []), ...((terceros as any[]) ?? [])];
     return filas
       .map((f) => {
-        const km = Number(f.kilometraje_actual ?? 0);
+        // La forma sale del km con su margen: cerca de la cifra siguiente la línea admite una más
+        // (lib/odometro-prompt.ts → formaOdometro). El km mismo no viaja.
+        const forma = formaOdometro(Number(f.kilometraje_actual ?? 0));
         return {
           placa: String(f.placa ?? "").trim(),
           guia: String(f.guia_odometro ?? "").trim() || null,
-          digitos: km > 0 ? Math.round(km).toString().length : null,
+          digitos: forma?.cifras ?? null,
+          puedeSubir: forma?.puedeSubir ?? false,
         };
       })
       // Una unidad sin placa no se puede nombrar, y una sin guía NI dígitos no aporta nada.
@@ -431,7 +435,7 @@ async function procesarMensaje(
   /** Ejecutar la categoría aunque esté apagada (global o para el grupo). */
   forzarCategorias: boolean,
   grupoInfo: GrupoInfo | null,
-  guiasOdometro: { placa: string; guia: string | null; digitos: number | null }[],
+  guiasOdometro: GuiaOdometro[],
   leccionesOdo: string,
   leccionesComb: string
 ): Promise<ResultadoMensaje> {

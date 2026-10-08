@@ -177,6 +177,9 @@ const ANOMALIA_LABEL: Record<string, string> = {
   // La fecha del voucher contra la del mensaje (lib/radar/fecha-voucher.ts)
   fecha_corregida:        "Fecha corregida",
   fecha_fuera_de_rango:   "Fecha lejos del mensaje",
+  // El km del tablero por el mismo selector que el odómetro (lib/radar/km-recarga.ts)
+  km_corregido:           "KM corregido",
+  km_digito_de_mas:       "KM con un dígito de más",
 };
 
 /**
@@ -186,7 +189,7 @@ const ANOMALIA_LABEL: Record<string, string> = {
  */
 const ANOMALIA_ES_ARREGLO = (codigo: string) =>
   codigo === "lectura_corregida" || codigo === "dato_derivado" || codigo === "tipo_corregido_por_producto" ||
-  codigo === "fecha_corregida";
+  codigo === "fecha_corregida" || codigo === "km_corregido";
 
 const TABS = [
   { id: "feed",          label: "Feed" },
@@ -3013,7 +3016,7 @@ export default function RadarIAPage() {
     // voucher atrapó un dígito, la fila ya trae el número arreglado y la lectura original viaja
     // en la anomalía. Sin esto, corregir a mano un valor ya corregido le enseñaría a la IA que
     // se equivocó en algo que nunca leyó — se lee por CÓDIGO, no olfateando el texto del detalle.
-    const leidoPorIA = <T,>(campo: "cantidad" | "precio" | "monto" | "tipo_combustible" | "fecha", enLaFila: T) =>
+    const leidoPorIA = <T,>(campo: "cantidad" | "precio" | "monto" | "tipo_combustible" | "fecha" | "kilometraje", enLaFila: T) =>
       ((c.anomalias ?? []).find((a) => a.correccion?.campo === campo)?.correccion?.leido as T | undefined) ??
       enLaFila;
     const iaCantidad = leidoPorIA("cantidad", ov.esLitros ? c.litros : c.galones);
@@ -3040,7 +3043,9 @@ export default function RadarIAPage() {
       // (ver la sección "Lectura del odómetro" del CLAUDE.md), y cada corrección humana entra al
       // prompt de la próxima foto. El 0 de una fila vieja se manda como "no leyó nada": cero
       // kilómetros no es una lectura equivocada, es la ausencia de lectura.
-      { campo: "kilometraje", ia: c.kilometraje != null && c.kilometraje > 0 ? c.kilometraje : null, correcto: ov.kilometraje },
+      // Por `leidoPorIA` también: si el ERP colapsó un dígito repetido, la fila ya trae el km
+      // propuesto y lo que leyó la IA vive en la anomalía `km_corregido`.
+      { campo: "kilometraje", ia: leidoPorIA("kilometraje", c.kilometraje != null && c.kilometraje > 0 ? c.kilometraje : null), correcto: ov.kilometraje },
     ];
     const filas = campos
       .filter((x) => x.correcto != null && distinto(x.ia, x.correcto))
