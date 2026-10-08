@@ -19,6 +19,8 @@
 //             (medido o configurado, lib/combustible/desfase-factura.ts) y qué cargas registradas
 //             con la fecha de EMISIÓN movería.
 //        { accion: "mover_a_despacho", ids, dias } → una persona vio esa lista y las mueve.
+//        { accion: "tipos_distintos" } → cargas rotuladas con otro combustible que su factura.
+//        { accion: "corregir_tipos", ids } → una persona vio esa lista y las corrige.
 //        { accion: "reconciliar" } → vuelve a cruzar las facturas con líneas pendientes contra lo
 //             registrado HOY, sin leer el correo (al abrir la pestaña y tras registrar a mano).
 
@@ -31,6 +33,7 @@ import {
   sincronizarFacturas, conciliarFacturaGuardada, registrarHistoricas, LECTURA_HISTORIAL,
   prepagoComoDeuda, marcarPrepagoPagadas, reintentarErrores,
   desfaseDeCuenta, cargasPorMoverDeCuenta, moverCargasADespacho, reconciliarPendientes,
+  tiposPorCorregirDesdeFacturas, corregirTiposDesdeFacturas,
 } from "@/lib/combustible/facturas-correo";
 import { resumenMover } from "@/lib/combustible/desfase-factura";
 
@@ -102,6 +105,12 @@ export async function POST(req: NextRequest) {
       }
       const { cuentas } = await cargarCuentas(sb);
       return NextResponse.json(await moverCargasADespacho(sb, cuentas, ids, dias));
+    }
+    if (body.accion === "tipos_distintos") return NextResponse.json({ ok: true, lista: await tiposPorCorregirDesdeFacturas(sb) });
+    if (body.accion === "corregir_tipos") {
+      const ids: number[] = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];
+      if (!ids.length) return NextResponse.json({ ok: false, error: "No se indicó qué cargas corregir." }, { status: 400 });
+      return NextResponse.json(await corregirTiposDesdeFacturas(sb, ids));
     }
     if (body.accion === "reconciliar") {
       const { cuentas, sinMigracion } = await cargarCuentas(sb);

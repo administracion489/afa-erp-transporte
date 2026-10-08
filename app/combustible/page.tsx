@@ -53,7 +53,7 @@ type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo" | "facturas";
 type GranPeriodo = "dia" | "semana" | "mes";
 
-import { COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
+import { coincideTipo, COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
 import { faltaAlguna } from "@/lib/columna-faltante";
 import { paginarFilas } from "@/lib/huella";
 import {
@@ -467,7 +467,7 @@ export default function CombustiblePage() {
       return txt.includes(q) &&
         (filtroFlota === "todos" || (u?.tipo ?? "propio") === filtroFlota) &&
         (filtroVeh === "todos" || uidReg(r) === filtroVeh) &&
-        (filtroTipo === "todos" || (r.tipo_combustible || "diesel") === filtroTipo);
+        coincideTipo(r.tipo_combustible, filtroTipo);
     }).map(r => cargaParaRendimiento(r, uidReg(r)));
 
     // Las series se rehacen sobre el universo filtrado: si se filtra un tipo, la cadena
@@ -484,7 +484,7 @@ export default function CombustiblePage() {
     if (filtroVeh !== "todos") return [];
     return unidades.map(u => {
       const suyas = registros
-        .filter(r => uidReg(r) === u.uid && (filtroTipo === "todos" || (r.tipo_combustible || "diesel") === filtroTipo))
+        .filter(r => uidReg(r) === u.uid && coincideTipo(r.tipo_combustible, filtroTipo))
         .map(r => cargaParaRendimiento(r, u.uid));
       if (!suyas.length) return null;
       const series = seriesRendimiento(suyas);
@@ -857,7 +857,7 @@ export default function CombustiblePage() {
     return txt.includes(q) &&
       (filtroFlota === "todos" || (u?.tipo ?? "propio") === filtroFlota) &&
       (filtroVeh  === "todos" || uidReg(r) === filtroVeh) &&
-      (filtroTipo === "todos" || (r.tipo_combustible || "diesel") === filtroTipo) &&
+      coincideTipo(r.tipo_combustible, filtroTipo) &&
       (filtroMes  === "todos" || r.fecha?.slice(0, 7) === filtroMes);
   }), [registros, busqueda, filtroFlota, filtroVeh, filtroTipo, filtroMes, unidades]);
 
@@ -1415,7 +1415,7 @@ export default function CombustiblePage() {
             </select>
             <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
               <option value="todos">Todos los tipos</option>
-              {Object.entries(COMBUSTIBLES).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
+              {Object.entries(COMBUSTIBLES).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}{v.legado ? " (todas)" : ""}</option>)}
             </select>
             <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroMes} onChange={e => setFiltroMes(e.target.value)}>
               <option value="todos">Todos los meses</option>
