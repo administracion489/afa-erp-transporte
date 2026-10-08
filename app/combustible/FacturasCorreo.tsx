@@ -5,7 +5,7 @@
 // lectura del último año dejó por registrar, todo junto, viendo antes cuántas cargas son y por
 // cuánto.
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
@@ -305,10 +305,35 @@ export default function FacturasCorreo() {
     cargarDeuda();
   }
 
-  async function confirmar(f: any, n: number, e: { placa: string; fecha: string }) {
-    const j = await post({ accion: "confirmar_linea", factura_id: f.id, n, placa: e.placa || null, fecha: e.fecha || null });
-    if (!j.ok) alert(j.linea?.detalle ?? j.error ?? "No se pudo registrar");
-    cargar();
+  // Las líneas de UNA factura se registran EN FILA: cada confirmación reconcilia la factura entera
+  // y el servidor la reclama con un candado, así que dos clics seguidos sobre la misma factura
+  // chocaban («otra conciliación de esta factura está en curso»). Aquí el segundo clic espera a
+  // que termine el primero, y si el candado lo tiene otro (el cron), se reintenta solo unas veces.
+  const colaFactura = useRef(new Map<number, Promise<void>>());
+  const [enCurso, setEnCurso] = useState<Record<string, "espera" | "registrando">>({});
+  function confirmar(f: any, n: number, e: { placa: string; fecha: string }) {
+    const k = `${f.id}-${n}`;
+    if (enCurso[k]) return;
+    setEnCurso((m) => ({ ...m, [k]: "espera" }));
+    const previa = colaFactura.current.get(f.id) ?? Promise.resolve();
+    const esta = previa.then(async () => {
+      setEnCurso((m) => ({ ...m, [k]: "registrando" }));
+      try {
+        let j: { ok?: boolean; error?: string; linea?: { detalle?: string } } | null = null;
+        for (let intento = 0; intento < 5; intento++) {
+          j = await post({ accion: "confirmar_linea", factura_id: f.id, n, placa: e.placa || null, fecha: e.fecha || null });
+          if (j?.ok || !/en curso/i.test(String(j?.error ?? ""))) break;
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        if (!j?.ok) alert(j?.linea?.detalle ?? j?.error ?? "No se pudo registrar");
+      } catch (err: unknown) {
+        alert(err instanceof Error ? err.message : "No se pudo registrar");
+      } finally {
+        setEnCurso((m) => { const c = { ...m }; delete c[k]; return c; });
+        cargar();
+      }
+    });
+    colaFactura.current.set(f.id, esta);
   }
 
   async function descartar(f: any) {
@@ -621,8 +646,10 @@ export default function FacturasCorreo() {
                                   {placas.map((pl) => <option key={pl} value={pl}>{pl}</option>)}
                                 </select>
                                 <input type="date" value={e.fecha} onChange={(ev) => setElec({ ...elec, [k]: { ...e, fecha: ev.target.value } })} className="border rounded px-2 py-1" />
-                                <button disabled={!e.placa || !e.fecha} onClick={() => confirmar(f, l.n, e)}
-                                  className="px-3 py-1 rounded font-bold text-white disabled:opacity-50" style={{ background: "#1d4ed8" }}>Registrar esta carga</button>
+                                <button disabled={!e.placa || !e.fecha || !!enCurso[`${f.id}-${l.n}`]} onClick={() => confirmar(f, l.n, e)}
+                                  className="px-3 py-1 rounded font-bold text-white disabled:opacity-50" style={{ background: "#1d4ed8" }}>
+                                  {enCurso[`${f.id}-${l.n}`] === "registrando" ? "Registrando…" : enCurso[`${f.id}-${l.n}`] === "espera" ? "En cola…" : "Registrar esta carga"}
+                                </button>
                                 <span className="text-gray-500">Se registra sin odómetro, enlazada a esta factura.</span>
                               </div>
                             )}

@@ -330,7 +330,7 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
         <div className="space-y-2 mt-2">
           {campo("filtro", "Filtro de Gmail", "Se busca en el correo conectado en la pestaña 📧 Facturas (si no conectaste ninguno, en el Gmail del CRM). Ahí mismo puedes probarlo con «🔎 Probar filtro».", "from:(primax OR coesti) has:attachment")}
           <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={f.auto} onChange={(e) => setF({ ...f, auto: e.target.checked })} /> Registrar solas las cargas que falten (solo desde el XML de SUNAT, con placa, fecha y cuadre)</label>
-          {campo("gracia", "Días de espera al Radar antes de registrar desde la factura", "Contados desde el despacho. El Radar trae el kilometraje y la factura no: se le da este margen para llegar primero.")}
+          {campo("gracia", "Máximo de días de espera al Radar antes de registrar desde la factura", "Solo se espera si el Radar todavía tiene mensajes SIN PROCESAR desde el día del despacho (pueden traer el voucher, con el kilometraje). Si el Radar está al día y no tiene la carga, se registra desde la factura en cuanto llega; si el voucher aparece después, el Radar propone fusionarlo con ella. Contados desde el despacho.")}
           <label className="block text-xs font-bold text-gray-500">Fecha del despacho en una factura de una sola línea
             <select value={f.desfase} onChange={(e) => setF({ ...f, desfase: e.target.value })} disabled={cuenta.facturas_desfase_sin_migracion}
               className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal text-gray-900 disabled:bg-gray-50">

@@ -15,8 +15,8 @@
 //   registrar            → no está en ningún sitio y la línea trae todo lo necesario:
 //                          se registra desde la factura (respaldo).
 //   revisar              → falta algo para registrarla sin adivinar (placa, fecha, cuadre…).
-//   en_espera            → es muy reciente: se le da tiempo al Radar (que trae el km) y se
-//                          vuelve a mirar en la próxima sincronización.
+//   en_espera            → el Radar todavía tiene mensajes sin procesar que pueden traer este
+//                          voucher (con el km): se espera a que termine, con un tope en días.
 //   no_es_combustible    → la línea no es un combustible (un servicio, un lubricante).
 //
 // LA ASIMETRÍA DE SIEMPRE: registrar de más es contar el mismo gasto DOS veces (y el saldo
@@ -427,7 +427,19 @@ export function planDeLinea(args: {
   documentoId?: number | null;
   fuente: "xml_ubl" | "vision_pdf";
   hoy: string;                     // YYYY-MM-DD Lima
-  graciaDias: number;              // días que se espera al Radar antes de registrar desde la factura
+  graciaDias: number;              // TOPE de días que se espera al Radar antes de registrar desde la factura
+  /**
+   * Cuántos mensajes del Radar que pueden ser un reporte de combustible siguen SIN PROCESAR
+   * (pendiente/procesando) desde el día del despacho. Decide si se espera:
+   *  - 0 → no hay nada por llegar: se registra YA. El voucher llega por WhatsApp ANTES que la
+   *    factura (que COESTI emite en un lote nocturno), así que si el Radar está al día y no la
+   *    tiene, esperar días solo deja el gasto y el saldo de la cuenta fuera del ERP. Si el
+   *    voucher aparece después (el Radar estaba caído y se reconecta), el Radar reconoce la
+   *    carga de la factura y propone FUSIONARLA, sumándole el odómetro: no se duplica.
+   *  - > 0 → se espera a que el Radar termine, hasta el tope `graciaDias`.
+   *  - null/undefined → no se pudo leer la cola: se espera el tope, como antes.
+   */
+  radarEnCola?: number | null;
   autoRegistrar: boolean;
   /** Un despacho más viejo que esto no se registra solo (ver DIAS_REGISTRO_AUTOMATICO).
    *  null/undefined = sin límite: lo usa quien ya decidió (una persona que confirma). */
@@ -497,10 +509,14 @@ export function planDeLinea(args: {
       propuesta: prop(l.placa, l.fecha),
     };
   }
-  if (difDias(args.hoy, l.fecha) < args.graciaDias && l.fecha <= args.hoy) {
+  const cola = args.radarEnCola;
+  const dentroDelTope = difDias(args.hoy, l.fecha) < args.graciaDias && l.fecha <= args.hoy;
+  if (dentroDelTope && cola !== 0) {
     return {
       n: l.n, codigo: "en_espera",
-      detalle: `Despacho del ${l.fecha}: se espera ${args.graciaDias} día(s) a que lo registre el Radar (que trae el kilometraje). Si no llega, se registra desde la factura.`,
+      detalle: cola == null
+        ? `Despacho del ${l.fecha}: se espera hasta ${args.graciaDias} día(s) a que lo registre el Radar (que trae el kilometraje). Si no llega, se registra desde la factura.`
+        : `El Radar todavía tiene ${cola} mensaje(s) sin procesar desde el ${l.fecha}, que pueden traer este voucher con el kilometraje: se espera a que termine (como máximo ${args.graciaDias} día(s) desde el despacho). Si no lo trae, se registra desde la factura.`,
       propuesta: prop(l.placa, l.fecha),
     };
   }
@@ -519,7 +535,10 @@ export function planDeLinea(args: {
   }
   return {
     n: l.n, codigo: "registrar",
-    detalle: `No está en el ERP: se registra desde la factura (${l.placa}, ${l.fecha}, ${l.cantidad} × S/ ${l.precio_unitario}).`,
+    detalle: `No está en el ERP: se registra desde la factura (${l.placa}, ${l.fecha}, ${l.cantidad} × S/ ${l.precio_unitario}).` +
+      (cola === 0 && dentroDelTope
+        ? " El Radar está al día y no tiene esta recarga: si su voucher llega después, el Radar propondrá fusionarlo con esta carga (y le sumará el odómetro)."
+        : ""),
     propuesta: prop(l.placa, l.fecha),
   };
 }

@@ -218,8 +218,33 @@ chk("enlazada a ESTA factura sí (reproceso idempotente)",
   chk("no está en ningún lado → registrar", p.codigo === "registrar");
   chk("la propuesta trae unidad y precio con IGV", p.propuesta?.unidad === "galones" && p.propuesta?.precio_galon === 26.14);
 }
-chk("muy reciente → espera al Radar",
+chk("muy reciente y sin saber la cola del Radar → espera al Radar (como antes)",
   planDeLinea({ ...base, hoy: "2026-10-04", linea, registradas: [], radarPendientes: [] }).codigo === "en_espera");
+// La espera al Radar se decide por lo que tiene EN COLA, no por días fijos. El voucher llega por
+// WhatsApp antes que la factura: con el Radar al día y sin la carga, esperar no trae nada.
+{
+  const g2 = { ...base, graciaDias: 2, linea, registradas: [], radarPendientes: [] };
+  const alDia = planDeLinea({ ...g2, hoy: "2026-10-05", radarEnCola: 0 });
+  chk("Radar al día (cola 0) y la carga no está → se registra YA, sin esperar el tope", alDia.codigo === "registrar");
+  chk("…y dice que si el voucher llega después se fusiona", /fusionar/.test(alDia.detalle));
+  const enCola = planDeLinea({ ...g2, hoy: "2026-10-05", radarEnCola: 3 });
+  chk("Radar con mensajes sin procesar desde el despacho → espera, y dice cuántos", enCola.codigo === "en_espera" && /3 mensaje/.test(enCola.detalle));
+  chk("…pero no más allá del tope", planDeLinea({ ...g2, hoy: "2026-10-06", radarEnCola: 3 }).codigo === "registrar");
+  chk("cola 0 NO salta la revisión del Radar: si la tiene por revisar, no se registra otra",
+    planDeLinea({ ...g2, hoy: "2026-10-05", radarEnCola: 0, radarPendientes: [reg({ id: "uuid" })] }).codigo === "en_radar_pendiente");
+  chk("cola 0 NO salta las demás reglas (solo PDF sigue pidiendo confirmación)",
+    planDeLinea({ ...g2, fuente: "vision_pdf", hoy: "2026-10-05", radarEnCola: 0 }).motivo === "lectura_no_oficial");
+  chk("cola 0 con el registro automático apagado → revisar, no registra",
+    planDeLinea({ ...g2, autoRegistrar: false, hoy: "2026-10-05", radarEnCola: 0 }).motivo === "auto_apagado");
+  // Barrido: con la cola sin leer (null/undefined) el resultado es el de antes, byte a byte.
+  let igual = true;
+  for (const hoy of ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-09"]) for (const gracia of [0, 1, 2, 5]) {
+    const a = planDeLinea({ ...base, graciaDias: gracia, hoy, linea, registradas: [], radarPendientes: [] });
+    const b = planDeLinea({ ...base, graciaDias: gracia, hoy, linea, registradas: [], radarPendientes: [], radarEnCola: null });
+    if (a.codigo !== b.codigo || a.detalle !== b.detalle) igual = false;
+  }
+  chk("sin poder leer la cola, la espera es la de antes (barrido de fechas × topes)", igual);
+}
 chk("solo PDF (IA) → revisar, no se registra solo",
   planDeLinea({ ...base, fuente: "vision_pdf", linea, registradas: [], radarPendientes: [] }).motivo === "lectura_no_oficial");
 chk("auto-registro apagado → revisar",
