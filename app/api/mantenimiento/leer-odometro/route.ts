@@ -13,6 +13,7 @@ import { createClient } from "@supabase/supabase-js";
 import { extraerOdometro, type Adjunto } from "@/lib/vision-ia";
 import { leccionesOdometro, contextoOdometro, type Flota } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
+import { formaOdometro } from "@/lib/odometro-prompt";
 import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 import { sesionDeToken } from "@/lib/conductor-auth";
 
@@ -83,7 +84,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const r = await extraerOdometro(adjunto as Adjunto, { lecciones, guia, placa, digitos: ctxOdo?.kmVigente ? Math.round(ctxOdo.kmVigente).toString().length : null });
+    // La FORMA del número, nunca el km: cuántas cifras y si está por pasar a la siguiente
+    // (lib/odometro-prompt.ts → formaOdometro).
+    const forma = formaOdometro(ctxOdo?.kmVigente);
+    const r = await extraerOdometro(adjunto as Adjunto, { lecciones, guia, placa, digitos: forma?.cifras ?? null, puedeSubir: forma?.puedeSubir ?? false });
 
     // El número leído contra lo que el ERP sabe de la unidad: si la IA cruzó el parcial con el
     // total, aquí se corrige; si devolvió algo imposible, se avisa (auto_ok=false) para que la

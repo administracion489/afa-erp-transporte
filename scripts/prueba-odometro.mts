@@ -26,7 +26,9 @@
 import { elegirOdometro, digitosDe, corregirDigitoRepetido, revisarKmTecleado } from "../lib/odometro-seleccion";
 import { evaluarLectura, RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "../lib/odometro";
 import { promptOdometro } from "../lib/vision-ia";
-import { sinCifrasCopiables } from "../lib/odometro-prompt";
+import { sinCifrasCopiables, formaOdometro, UMBRAL_CAMBIO_DE_CIFRA } from "../lib/odometro-prompt";
+import { kmDeRecarga } from "../lib/radar/km-recarga";
+import { readFileSync } from "node:fs";
 import { promptExtraccionMedia, type ContextoPrompt } from "../lib/radar/prompts";
 
 let fallos = 0;
@@ -413,7 +415,8 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
 // ejemplo del prompt, que es el odómetro de la CUP-435 del 05/09. Un número en el prompt es un
 // número que el modelo copia cuando no logra leer la foto.
 {
-  const KM_DE_EJEMPLO = ["23980", "239980", "23379", "233379", "560473", "5600473", "175445", "82300"];
+  // 99999 / 100000: el texto viejo de la forma decía «de 99999 a 100000 km», también copiable.
+  const KM_DE_EJEMPLO = ["23980", "239980", "23379", "233379", "560473", "5600473", "175445", "82300", "99999", "100000"];
   const conSeparadores = (n: string) => [n, Number(n).toLocaleString("es-PE"), Number(n).toLocaleString("de-DE")];
   const enTexto = (t: string) => KM_DE_EJEMPLO.filter((n) => conSeparadores(n).some((v) => t.includes(v)));
 
@@ -441,6 +444,94 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
   chk("app/mantenimiento · la guía con un km lo lleva tapado", conGuiaNumerica.includes("marcaba #####") && !conGuiaNumerica.includes("24618"));
   const radarGuia = promptExtraccionMedia({ fechaHoy: "2026-09-17", horaAhora: "20:56", guiasOdometro: [{ placa: "CUP-435", guia: "abajo, marcaba 24618", digitos: 5 }] });
   chk("Radar · la guía con un km lo lleva tapado", radarGuia.includes("marcaba #####") && !radarGuia.includes("24618"));
+}
+
+// ── 12. EL ODÓMETRO SUBE DE CIFRA: la frase lo admite cuando está cerca, y solo entonces ──
+// Decirle al modelo «5 cifras» a secas es lo que frena el dígito de más, pero el día que la unidad
+// pasa de 99,950 a 100,020 (70 km) la única lectura correcta tiene 6. El texto viejo decía que eso
+// «exige un salto enorme desde la última lectura», que es falso.
+{
+  chk("lejos de la cifra siguiente: 5 cifras y no puede subir",
+    JSON.stringify(formaOdometro(23980)) === JSON.stringify({ cifras: 5, puedeSubir: false }));
+  chk("justo antes del umbral, todavía no", formaOdometro(Math.pow(10, 5) * UMBRAL_CAMBIO_DE_CIFRA - 1)?.puedeSubir === false);
+  chk("en el umbral (90 % de la cifra siguiente) ya puede subir", formaOdometro(90000)?.puedeSubir === true);
+  chk("99,950 puede subir a 6", JSON.stringify(formaOdometro(99950)) === JSON.stringify({ cifras: 5, puedeSubir: true }));
+  chk("…y lo mismo en el paso de 6 a 7 cifras", JSON.stringify(formaOdometro(999900)) === JSON.stringify({ cifras: 6, puedeSubir: true }));
+  chk("sin km no hay forma", formaOdometro(0) === null && formaOdometro(null) === null);
+  // Barrido: puedeSubir ⟺ km ≥ 90 % de la cifra siguiente, en las tres formas de la flota.
+  let malas = 0;
+  for (const cifras of [5, 6, 7]) {
+    for (let k = Math.pow(10, cifras - 1); k < Math.pow(10, cifras); k += Math.pow(10, cifras - 3)) {
+      const f = formaOdometro(k);
+      if (!f || f.cifras !== cifras || f.puedeSubir !== (k >= Math.pow(10, cifras) * UMBRAL_CAMBIO_DE_CIFRA)) malas++;
+    }
+  }
+  chk("barrido · puedeSubir ⟺ km ≥ 90 % de la cifra siguiente", malas === 0, `${malas} mala(s)`);
+
+  const lejos = promptOdometro({ digitos: 5, placa: "CUP-435", puedeSubir: false });
+  const cerca = promptOdometro({ digitos: 5, placa: "ABC-123", puedeSubir: true });
+  chk("app · lejos del cambio, la frase dice 5 y no ofrece 6", /5 d[ií]gitos/.test(lejos) && !lejos.includes("«10»"));
+  chk("app · ya no afirma que el cambio exige un salto enorme", !/salto enorme/.test(lejos) && !/salto enorme/.test(cerca));
+  chk("app · cerca del cambio, admite 6 solo si empieza por «10»", /pasar a 6/.test(cerca) && cerca.includes("«10»"));
+  const radar = promptExtraccionMedia({
+    fechaHoy: "2026-10-08", horaAhora: "10:00",
+    guiasOdometro: [{ placa: "CUP-435", guia: null, digitos: 5, puedeSubir: false }, { placa: "ABC-123", guia: null, digitos: 5, puedeSubir: true }],
+  });
+  chk("Radar · la unidad lejos del cambio conserva su línea de siempre",
+    /CUP-435: el odómetro TOTAL es un número de 5 dígitos\n/.test(radar));
+  chk("Radar · la unidad cerca del cambio admite 6 si empieza por «10»", /ABC-123:[^\n]*pasar a 6[^\n]*«10»/.test(radar));
+  chk("Radar · sin `puedeSubir` (filas viejas) se comporta como lejos",
+    !promptExtraccionMedia({ fechaHoy: "2026-10-08", horaAhora: "10:00", guiasOdometro: [{ placa: "XYZ-999", guia: null, digitos: 5 }] }).includes("«10»"));
+
+  // Y la validación del ERP nunca dependió de la cantidad de cifras: juzga el VALOR.
+  for (const [ant, nuevo] of [[99950, 100020], [999900, 1000040]]) {
+    const v = leer({ kmIA: nuevo, kmVigente: ant, vecinas: { anterior: ant, posterior: null } });
+    const w = evaluarLectura({ kmVigente: ant, kmNuevo: nuevo, horasDesdeUltima: 24 });
+    chk(`el cambio de cifra ${ant.toLocaleString("es-PE")} → ${nuevo.toLocaleString("es-PE")} pasa limpio`,
+      v.km === nuevo && v.codigo === null && w.estado === "aceptada", `selector=${v.codigo} base=${w.estado}`);
+  }
+  // …y un dígito de más cerca del cambio se sigue atrapando (no empieza por 10, y se colapsa).
+  const cercaMal = leer({ kmIA: 959950, kmVigente: 95950, vecinas: { anterior: 95950, posterior: null } });
+  chk("cerca del cambio, 959,950 sobre 95,950 sigue siendo un dígito de más",
+    cercaMal.km !== 959950 && cercaMal.codigo === "digito_repetido", `km=${cercaMal.km} codigo=${cercaMal.codigo}`);
+}
+
+// ── 13. EL KM DE UNA RECARGA PASA POR EL MISMO SELECTOR ─────────────────────
+// La ruta de combustible del Radar escribía el km del tablero tal cual —en la carga, en la fila del
+// Radar y en lecturas_odometro—, sin colapsar el dígito repetido ni avisar que sobra uno.
+{
+  const v = leer({ kmIA: 240035, kmVigente: 24618, horasDesdeUltima: 48, vecinas: { anterior: 23980, posterior: 24618 } });
+  const r = kmDeRecarga(240035, v);
+  chk("recarga · 240,035 → 24,035, como en la foto de odómetro suelta", r.km === 24035, `km=${r.km}`);
+  chk("recarga · el colapsado BLOQUEA el auto-registro (lo confirma una persona)",
+    r.anomalia?.codigo === "km_corregido" && r.anomalia.bloquea === true);
+  chk("recarga · lo que leyó la IA viaja en la anomalía, no en la fila",
+    r.anomalia?.correccion?.campo === "kilometraje" && r.anomalia.correccion.leido === 240035 && r.anomalia.correccion.corregido === 24035);
+
+  const sinRep = kmDeRecarga(247368, leer({ kmIA: 247368, kmVigente: 24618, horasDesdeUltima: 24, vecinas: { anterior: 24618, posterior: null } }));
+  chk("recarga · sin cifra repetida no se adivina: queda lo leído y BLOQUEA",
+    sinRep.km === 247368 && sinRep.anomalia?.codigo === "km_digito_de_mas" && sinRep.anomalia.bloquea === true,
+    `${sinRep.km} ${sinRep.anomalia?.codigo}`);
+
+  const trip = kmDeRecarga(1803, leer({ kmIA: 1803, tripIA: 174159, kmVigente: 174000 }));
+  chk("recarga · trip y total intercambiados: se usa el total y NO bloquea (el modelo sí lo transcribió)",
+    trip.km === 174159 && trip.anomalia?.codigo === "km_corregido" && trip.anomalia.bloquea === false);
+
+  // El lado que no se puede aflojar: lo que estaba bien sigue igual, sin anomalía nueva.
+  const bueno = kmDeRecarga(24100, leer({ kmIA: 24100, kmVigente: 24618, horasDesdeUltima: 24, vecinas: { anterior: 23980, posterior: 24618 } }));
+  chk("recarga · un km correcto queda tal cual y sin anomalía", bueno.km === 24100 && bueno.anomalia === null);
+  chk("recarga · sin unidad o sin contexto (veredicto null) es exactamente lo de antes",
+    kmDeRecarga(239980, null).km === 239980 && kmDeRecarga(239980, null).anomalia === null);
+  chk("recarga · sin km leído no se fabrica uno", kmDeRecarga(null, null).km === null);
+  // Lo fuera de banda que no es de cifras (un retroceso, un salto) lo siguen juzgando los
+  // controles de siempre: aquí no se levanta nada nuevo.
+  const fuera = kmDeRecarga(23000, leer({ kmIA: 23000, kmVigente: 24618, horasDesdeUltima: 24, vecinas: { anterior: 24618, posterior: null } }));
+  chk("recarga · un retroceso no levanta una anomalía de cifras", fuera.km === 23000 && fuera.anomalia === null);
+
+  // Un código sin etiqueta en /radar-ia imprime el código crudo.
+  const pagina = readFileSync(new URL("../app/radar-ia/page.tsx", import.meta.url), "utf8");
+  chk("las dos anomalías nuevas tienen etiqueta en /radar-ia",
+    /\bkm_corregido:\s*"/.test(pagina) && /\bkm_digito_de_mas:\s*"/.test(pagina));
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) fallaron` : "\nTodo en verde");
