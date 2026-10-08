@@ -14,7 +14,8 @@
 import { PostgrestClient } from "@supabase/postgrest-js";
 import {
   calcularSaldo, decidirAviso, perteneceACuenta, grifoCasa, posteriorAlAncla,
-  type CuentaCombustible, type Movimiento, type CargaCuenta,
+  juzgarCarga, unidadDeCarga, flotaConocida, fraseExcluidas, avisoExcluidasEnFactura, MOTIVO_NO_DESCUENTA,
+  type CuentaCombustible, type Movimiento, type CargaCuenta, type FlotaCarga,
 } from "../lib/combustible/saldo-cuenta";
 import {
   lineasUbl, completarConDocumento, planDeLinea, placasEnTexto, notasEnTexto, normNota, fechasEnTexto,
@@ -31,7 +32,7 @@ const chk = (nombre: string, ok: boolean, extra = "") => {
 
 const cuenta: CuentaCombustible = {
   id: 1, nombre: "Primax", patrones_grifo: ["PRIMAX", "COESTI"], rucs: ["20127765279"],
-  incluye_terceros: false, umbrales: [500, 300],
+  umbrales: [500, 300],
 };
 
 // ── 1. Qué carga sale de la cuenta ───────────────────────────────────────────
@@ -42,16 +43,22 @@ chk("«PRIMAXIMO» NO (palabra completa, nunca contiene a secas)", !grifoCasa("P
 chk("RUC 20127765279 pertenece aunque el nombre venga raro",
   perteneceACuenta({ id: 1, fecha: "2026-10-01", total: 10, grifo: "EST. 1234", ruc_proveedor: "20127765279" }, cuenta));
 chk("Repsol NO pertenece", !perteneceACuenta({ id: 1, fecha: "2026-10-01", total: 10, grifo: "REPSOL" }, cuenta));
-chk("tercero excluido si la cuenta no los incluye",
-  !perteneceACuenta({ id: 1, fecha: "2026-10-01", total: 10, grifo: "COESTI", es_tercero: true }, cuenta));
-chk("tercero incluido si la cuenta los incluye",
-  perteneceACuenta({ id: 1, fecha: "2026-10-01", total: 10, grifo: "COESTI", es_tercero: true }, { ...cuenta, incluye_terceros: true }));
+chk("propia en COESTI → descuenta", juzgarCarga({ id: 1, fecha: "2026-10-01", total: 10, grifo: "COESTI", flota: "propia" }, cuenta) === "descuenta");
+chk("propia en Repsol → otro grifo", juzgarCarga({ id: 1, fecha: "2026-10-01", total: 10, grifo: "REPSOL", flota: "propia" }, cuenta) === "otro_grifo");
+chk("tercero en COESTI → NO descuenta", juzgarCarga({ id: 1, fecha: "2026-10-01", total: 10, grifo: "COESTI", flota: "tercero" }, cuenta) === "tercero");
+chk("tercero NO descuenta ni con la columna vieja `incluye_terceros = true` en la cuenta",
+  juzgarCarga({ id: 1, fecha: "2026-10-01", total: 10, grifo: "COESTI", flota: "tercero" }, { ...cuenta, incluye_terceros: true } as CuentaCombustible) === "tercero");
+chk("placa en las dos flotas → NO descuenta", juzgarCarga({ id: 1, fecha: "2026-10-01", total: 10, grifo: "COESTI", flota: "dos_flotas" }, cuenta) === "dos_flotas");
+chk("sin el dato de la flota → no se afirma propia: NO descuenta",
+  juzgarCarga({ id: 1, fecha: "2026-10-01", total: 10, grifo: "COESTI" }, cuenta) === "sin_unidad");
 
 // ── 2. El saldo ──────────────────────────────────────────────────────────────
 console.log("\n2. Saldo derivado");
 const lect = (monto: number, fecha: string, creado = `${fecha}T15:00:00Z`, id = 1): Movimiento => ({ id, tipo: "lectura", monto, fecha, creado_en: creado });
 const abono = (monto: number, fecha: string, id = 10): Movimiento => ({ id, tipo: "abono", monto, fecha, creado_en: `${fecha}T16:00:00Z` });
-const carga = (total: number, fecha: string, creado?: string, grifo = "COESTI S.A."): CargaCuenta => ({ id: Math.random(), fecha, total, grifo, creado_en: creado ?? `${fecha}T20:00:00Z` });
+// Por defecto una carga PROPIA: las secciones 2 y 3 prueban el saldo; la flota es la sección 10.
+const carga = (total: number, fecha: string, creado?: string, grifo = "COESTI S.A.", flota: FlotaCarga = "propia"): CargaCuenta =>
+  ({ id: Math.random(), fecha, total, grifo, creado_en: creado ?? `${fecha}T20:00:00Z`, flota });
 
 {
   const s = calcularSaldo({ cuenta, movimientos: [], cargas: [carga(100, "2026-10-01")], hoy: "2026-10-05" });
@@ -395,6 +402,145 @@ console.log("\n9. Comprobantes prepago que nacieron como deuda");
   }
   chk("barrido: nunca con pago, lote, anticipo o ya pagado", ok);
   chk("corolario: sí propone la deuda falsa de verdad", propuestos > 0, `${propuestos}`);
+}
+
+// ── 10. SOLO DESCUENTA LO PROPIO (reporte del 08/10/2026) ─────────────────────
+// «El saldo de combustible solo debe descontarse de vehículos propios de la flota de AFA, no de
+// vehículos tercerizados.» La cuenta prepago la usan las unidades de AFA; un tercero que carga en
+// una estación Primax paga su combustible, y el ERP lo registra igual (rendimiento, odómetro).
+console.log("\n10. Solo descuentan las unidades propias");
+{
+  const flota = flotaConocida(
+    [{ id: 7, placa: "CWZ-371" }, { id: 8, placa: "CWQ-400" }, { id: 9, placa: "ABC-111" }],
+    // El 7 existe en las DOS tablas (los ids se solapan) y ABC-111 figura en las dos flotas.
+    [{ id: 7, placa: "BUI-272" }, { id: 5, placa: "CTV-370" }, { id: 6, placa: "ABC111" }],
+  );
+  const u = (c: Parameters<typeof unidadDeCarga>[0]) => unidadDeCarga(c, flota);
+  chk("vehiculo_id 7 → propia, CWZ-371", u({ vehiculo_id: 7 }).flota === "propia" && u({ vehiculo_id: 7 }).placa === "CWZ-371");
+  chk("vehiculo_tercero_id 7 → tercero, BUI-272 (el mismo id en la otra tabla es otra unidad)",
+    u({ vehiculo_tercero_id: 7 }).flota === "tercero" && u({ vehiculo_tercero_id: 7 }).placa === "BUI-272");
+  chk("el FK de tercero gana si una fila trajera los dos", u({ vehiculo_id: 7, vehiculo_tercero_id: 5 }).flota === "tercero");
+  chk("FK propio con la placa también en Tercerizadas → dos flotas, no propia", u({ vehiculo_id: 9 }).flota === "dos_flotas");
+  chk("id como texto se lee igual", u({ vehiculo_id: "8" }).flota === "propia");
+  chk("FK propio de una ficha que ya no está → sigue siendo propia (el FK lo dice)", u({ vehiculo_id: 99 }).flota === "propia");
+  chk("sin FK, placa «cwz 371» → propia", u({ placa: "cwz 371" }).flota === "propia");
+  chk("sin FK, placa de tercero → tercero", u({ placa: "CTV370" }).flota === "tercero");
+  chk("sin FK, placa en las dos flotas → dos flotas", u({ placa: "ABC-111" }).flota === "dos_flotas");
+  chk("sin FK, placa desconocida → sin unidad", u({ placa: "ZZZ-999" }).flota === "sin_unidad");
+  chk("sin FK ni placa → sin unidad", u({ placa: null }).flota === "sin_unidad" && u({}).flota === "sin_unidad");
+
+  // Unidades que cambiaron de manos: solo una ficha VIGENTE de la otra flota disputa la placa.
+  const f2 = flotaConocida(
+    [{ id: 1, placa: "AAA-111", estado: "disponible" }, { id: 2, placa: "BBB-222", estado: "inactivo" }, { id: 3, placa: "CCC-333", estado: "inactivo" }],
+    [{ id: 1, placa: "AAA-111", estado: "inactivo" }, { id: 2, placa: "BBB-222", estado: "activo" }, { id: 3, placa: "CCC-333", estado: "inactivo" }],
+  );
+  const u2 = (c: Parameters<typeof unidadDeCarga>[0]) => unidadDeCarga(c, f2).flota;
+  chk("AFA le compró el bus al tercero (su ficha de tercero inactiva): FK propio → propia", u2({ vehiculo_id: 1 }) === "propia");
+  chk("…y una carga que entró con el FK del tercero viejo también es propia", u2({ vehiculo_tercero_id: 1 }) === "propia");
+  chk("AFA vendió el bus (su ficha propia inactiva) y la carga entró con el FK propio → tercero", u2({ vehiculo_id: 2 }) === "tercero");
+  chk("…y con el FK del tercero, tercero", u2({ vehiculo_tercero_id: 2 }) === "tercero");
+  chk("sin FK, la placa la decide la ficha vigente", u2({ placa: "AAA111" }) === "propia" && u2({ placa: "BBB-222" }) === "tercero");
+  chk("las dos fichas inactivas: con FK manda el FK; sin FK no se sabe", u2({ vehiculo_id: 3 }) === "propia" && u2({ placa: "CCC-333" }) === "dos_flotas");
+}
+{
+  // El caso de la pantalla: lectura del portal S/ 5,392.76 el 05/10 a las 16:06; después, las dos
+  // cargas de las facturas de la cuenta (F882-0133538 y F882-0134358; en la pantalla sumaban
+  // S/ 330.54) y dos recargas de unidades TERCERIZADAS en estaciones COESTI.
+  const ancla = lect(5392.76, "2026-10-05", "2026-10-05T21:06:00Z");
+  const propias = [
+    { ...carga(70.22, "2026-10-05", "2026-10-06T12:30:00Z"), placa: "CWQ-400", comprobante: "F882-0133538" },
+    { ...carga(260.32, "2026-10-07", "2026-10-08T12:20:00Z"), placa: "CWZ-371", comprobante: "F882-0134358" },
+  ];
+  const terceros = [
+    { ...carga(180.03, "2026-10-06", undefined, "COESTI S.A.", "tercero"), placa: "CTV-370" },
+    { ...carga(240.56, "2026-10-07", undefined, "COESTI S.A.", "tercero"), placa: "BUI-272" },
+  ];
+  const s = calcularSaldo({ cuenta, hoy: "2026-10-08", movimientos: [ancla], cargas: [...propias, ...terceros] });
+  chk("saldo = lectura − las dos propias (5,062.22)", s.saldo === 5062.22, String(s.saldo));
+  chk("las cargas de terceros no restan ni cuentan en el número de cargas", s.nCargas === 2 && s.consumido === 330.54, `${s.nCargas} · ${s.consumido}`);
+  chk("…pero se ENSEÑAN, con su motivo", s.cargasExcluidas.length === 2 && s.cargasExcluidas.every((c) => c.motivo === "tercero" && !c.delRadar));
+  chk("la lista de las que restan es la de las dos facturas", s.cargasDescontadas.map((c) => c.comprobante).join(",") === "F882-0133538,F882-0134358");
+  chk("la frase nombra cuántas y cuánto no se descuenta",
+    fraseExcluidas(s) === "No se descuentan: 2 carga(s) de unidades tercerizadas (S/ 420.59).", String(fraseExcluidas(s)));
+  chk("sin terceros facturados, no hay aviso de factura", avisoExcluidasEnFactura(s) === null);
+  const soloPropias = calcularSaldo({ cuenta, hoy: "2026-10-08", movimientos: [ancla], cargas: propias });
+  chk("el ritmo diario no lo mueven los terceros", s.consumoDiario === soloPropias.consumoDiario, `${s.consumoDiario} vs ${soloPropias.consumoDiario}`);
+
+  // El algoritmo VIEJO, copiado literal: descontaba al tercero en cuanto la cuenta tenía marcada
+  // la casilla «las cargas de unidades tercerizadas también salen de esta cuenta», y a la recarga
+  // del Radar sin unidad identificada SIEMPRE (su `es_tercero` salía de la placa, y sin placa: no).
+  const soloDig = (x?: string | null) => String(x ?? "").replace(/\D/g, "");
+  const perteneceViejo = (c: { es_tercero?: boolean; ruc_proveedor?: string | null; grifo?: string | null }, cta: CuentaCombustible & { incluye_terceros: boolean }) => {
+    if (c.es_tercero && !cta.incluye_terceros) return false;
+    const ruc = soloDig(c.ruc_proveedor);
+    if (ruc && cta.rucs.some((r) => soloDig(r) === ruc)) return true;
+    return cta.patrones_grifo.some((p) => grifoCasa(c.grifo, p));
+  };
+  const saldoViejo = (incluye: boolean, cargas: CargaCuenta[], radar: CargaCuenta[]) => {
+    const cta = { ...cuenta, incluye_terceros: incluye };
+    const resta = (l: CargaCuenta[]) => l
+      .map((c) => ({ ...c, es_tercero: c.flota === "tercero" }))
+      .filter((c) => perteneceViejo(c, cta) && posteriorAlAncla(c, ancla))
+      .reduce((t, c) => t + c.total, 0);
+    return Math.round((ancla.monto - resta(cargas) - resta(radar)) * 100) / 100;
+  };
+  const radarSinUnidad = [{ ...carga(95.5, "2026-10-08", undefined, "COESTI S.A.", "sin_unidad"), placa: null }];
+  chk("el viejo con la casilla marcada REPRODUCE el defecto (descuenta a los terceros)",
+    saldoViejo(true, [...propias, ...terceros], []) === 4641.63, String(saldoViejo(true, [...propias, ...terceros], [])));
+  chk("el viejo descontaba la recarga del Radar sin unidad, con o sin la casilla",
+    saldoViejo(false, propias, radarSinUnidad) === 4966.72, String(saldoViejo(false, propias, radarSinUnidad)));
+  const n = calcularSaldo({ cuenta: { ...cuenta, incluye_terceros: true } as CuentaCombustible, hoy: "2026-10-08", movimientos: [ancla], cargas: [...propias, ...terceros], porConfirmar: radarSinUnidad });
+  chk("el nuevo no descuenta ni a los terceros ni a la recarga sin unidad, diga lo que diga la cuenta", n.saldo === 5062.22 && n.nPorConfirmar === 0, String(n.saldo));
+  chk("…y la recarga sin unidad sale aparte, como del Radar", n.cargasExcluidas.some((c) => c.motivo === "sin_unidad" && c.delRadar));
+}
+{
+  // Un tercero que aparece en una FACTURA de la cuenta: la regla dice que no descuenta, y se AVISA
+  // (o el portal ya lo cobró —el ERP sale más alto que el real— o la unidad está mal fichada).
+  const ancla = lect(1000, "2026-10-01");
+  const t = { ...carga(150, "2026-10-02", undefined, "COESTI S.A.", "tercero"), placa: "CTV-370", comprobante: "F882-0000001" };
+  const s = calcularSaldo({ cuenta, hoy: "2026-10-03", movimientos: [ancla], cargas: [t] });
+  chk("tercero en una factura de la cuenta: no descuenta…", s.saldo === 1000);
+  chk("…y se avisa, con el importe", /Una de las que no se descuentan viene en una factura de la cuenta \(S\/ 150\.00\)/.test(avisoExcluidasEnFactura(s) ?? ""), String(avisoExcluidasEnFactura(s)));
+  const s2 = calcularSaldo({ cuenta, hoy: "2026-10-03", movimientos: [ancla], cargas: [t, { ...t, id: 2, total: 50 }] });
+  chk("con dos, en plural y sumadas", /^2 de las que no se descuentan vienen en una factura de la cuenta \(S\/ 200\.00\)/.test(avisoExcluidasEnFactura(s2) ?? ""), String(avisoExcluidasEnFactura(s2)));
+  chk("los tres motivos tienen su explicación", (["tercero", "dos_flotas", "sin_unidad"] as const).every((m) => MOTIVO_NO_DESCUENTA[m].corto && MOTIVO_NO_DESCUENTA[m].detalle));
+  chk("sin nada excluido, la tarjeta no dice nada de más", fraseExcluidas(calcularSaldo({ cuenta, hoy: "2026-10-03", movimientos: [ancla], cargas: [] })) === null);
+}
+{
+  // Barrido: flota × grifo × momento × origen, una carga a la vez y todas juntas.
+  const ancla = lect(1000, "2026-10-05", "2026-10-05T15:00:00Z");
+  const flotas: (FlotaCarga | undefined)[] = ["propia", "tercero", "dos_flotas", "sin_unidad", undefined];
+  const grifos = ["COESTI S.A.", "REPSOL"];
+  const momentos = [
+    { fecha: "2026-10-04", creado: "2026-10-04T20:00:00Z", posterior: false },
+    { fecha: "2026-10-05", creado: "2026-10-05T14:00:00Z", posterior: false },
+    { fecha: "2026-10-05", creado: "2026-10-05T16:00:00Z", posterior: true },
+    { fecha: "2026-10-06", creado: "2026-10-06T20:00:00Z", posterior: true },
+  ];
+  let ok = true, deducidas = 0, total = 0;
+  const todasC: CargaCuenta[] = [], todasR: CargaCuenta[] = [];
+  let k = 0, esperadoTodas = 1000;
+  for (const fl of flotas) for (const g of grifos) for (const mo of momentos) for (const delRadar of [false, true]) {
+    const c: CargaCuenta = { id: ++k, fecha: mo.fecha, creado_en: mo.creado, total: 10 + k, grifo: g, flota: fl };
+    const s = calcularSaldo({ cuenta, hoy: "2026-10-07", movimientos: [ancla], cargas: delRadar ? [] : [c], porConfirmar: delRadar ? [c] : [] });
+    const debe = fl === "propia" && g === "COESTI S.A." && mo.posterior;
+    const enLista = [...s.cargasDescontadas, ...s.cargasPorConfirmar, ...s.cargasExcluidas].filter((x) => x.id === c.id).length;
+    const visible = g === "COESTI S.A." && mo.posterior;
+    if (s.saldo !== Math.round((1000 - (debe ? c.total : 0)) * 100) / 100) ok = false;
+    if (enLista !== (visible ? 1 : 0)) ok = false;
+    if (debe && !(delRadar ? s.cargasPorConfirmar : s.cargasDescontadas).some((x) => x.id === c.id)) ok = false;
+    if (debe) { deducidas++; esperadoTodas -= c.total; }
+    total++;
+    (delRadar ? todasR : todasC).push(c);
+  }
+  chk(`barrido (${total} casos): resta ⟺ propia ∧ grifo de la cuenta ∧ posterior a la lectura, y se lista una vez`, ok);
+  // propia × grifo de la cuenta × 2 momentos posteriores × 2 orígenes = 4.
+  chk("corolario: lo propio SÍ descuenta (un motor que nunca descontara cumpliría lo anterior)", deducidas === 4, `${deducidas}`);
+  const s = calcularSaldo({ cuenta, hoy: "2026-10-07", movimientos: [ancla], cargas: todasC, porConfirmar: todasR });
+  chk("todas juntas: el saldo es la lectura menos SOLO las propias", s.saldo === Math.round(esperadoTodas * 100) / 100, `${s.saldo} vs ${esperadoTodas}`);
+  const sinAjenas = calcularSaldo({ cuenta, hoy: "2026-10-07", movimientos: [ancla],
+    cargas: todasC.filter((c) => c.flota === "propia"), porConfirmar: todasR.filter((c) => c.flota === "propia") });
+  chk("quitar todas las cargas ajenas no mueve ni el saldo ni el ritmo", s.saldo === sinAjenas.saldo && s.consumoDiario === sinAjenas.consumoDiario);
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde.");

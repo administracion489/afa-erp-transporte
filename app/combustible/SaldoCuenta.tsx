@@ -10,7 +10,10 @@ import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { hoyLima } from "@/lib/odometro-analitica";
 import { cargarCuentas, estadoDeCuentas, type EstadoCuenta, type FilaCuenta } from "@/lib/combustible/saldo-datos";
-import { decidirAviso, umbralesValidos } from "@/lib/combustible/saldo-cuenta";
+import {
+  decidirAviso, umbralesValidos, fraseExcluidas, avisoExcluidasEnFactura, MOTIVO_NO_DESCUENTA,
+  type SaldoCuenta as Saldo, type CargaCuenta, type CargaExcluida,
+} from "@/lib/combustible/saldo-cuenta";
 import { MAX_DESFASE, normalizarDesfaseConfig } from "@/lib/combustible/desfase-factura";
 import { faltaColumna } from "@/lib/columna-faltante";
 
@@ -25,6 +28,8 @@ export default function SaldoCuenta() {
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal>(null);
   const [aviso, setAviso] = useState<string | null>(null);
+  // Qué tarjetas tienen abierta la lista de cargas (por id de cuenta).
+  const [detalle, setDetalle] = useState<Record<number, boolean>>({});
 
   const cargar = useCallback(async () => {
     try {
@@ -78,17 +83,24 @@ export default function SaldoCuenta() {
             <div>
               <div className="text-[11px] font-bold tracking-widest uppercase" style={{ color: col[1] }}>Saldo de combustible · {cuenta.nombre}</div>
               <div className="text-4xl font-black" style={{ color: col[1] }}>{s == null ? "—" : S(s)}</div>
-              <div className="text-xs" style={{ color: col[1] }}>
+              <div className="text-xs" style={{ color: col[1] }} title="Ritmo: lo que cargaron las unidades propias en los grifos de la cuenta en los últimos 14 días.">
                 {s == null ? "Registra el saldo que dice el portal para empezar." :
                   saldo.diasRestantes != null ? `~${saldo.diasRestantes} día(s) al ritmo de ${S(saldo.consumoDiario)}/día` : "estimado"}
               </div>
             </div>
             {saldo.ancla && (
-              <div className="text-xs text-gray-700 leading-5">
+              <div className="text-xs text-gray-700 leading-5 max-w-md">
                 <div>Saldo leído del portal: <b>{S(saldo.ancla.monto)}</b> ({saldo.ancla.fecha})</div>
                 <div>+ Abonos posteriores: <b>{S(saldo.abonos)}</b></div>
-                <div>− Cargas registradas: <b>{S(saldo.consumido)}</b> ({saldo.nCargas})</div>
-                {saldo.nPorConfirmar > 0 && <div>− Cargas del Radar sin confirmar: <b>{S(saldo.porConfirmar)}</b> ({saldo.nPorConfirmar})</div>}
+                <div>− Cargas de unidades propias: <b>{S(saldo.consumido)}</b> ({saldo.nCargas})</div>
+                {saldo.nPorConfirmar > 0 && <div>− Del Radar, propias sin confirmar: <b>{S(saldo.porConfirmar)}</b> ({saldo.nPorConfirmar})</div>}
+                {fraseExcluidas(saldo) && <div className="text-gray-500">{fraseExcluidas(saldo)}</div>}
+                {avisoExcluidasEnFactura(saldo) && <div className="text-amber-700 font-bold">⚠ {avisoExcluidasEnFactura(saldo)}</div>}
+                {saldo.cargasDescontadas.length + saldo.cargasPorConfirmar.length + saldo.cargasExcluidas.length > 0 && (
+                  <button onClick={() => setDetalle((d) => ({ ...d, [cuenta.id]: !d[cuenta.id] }))} className="mt-0.5 text-[#0b315f] font-bold hover:underline">
+                    {detalle[cuenta.id] ? "▾ Ocultar las cargas" : "▸ Ver las cargas desde la lectura"}
+                  </button>
+                )}
               </div>
             )}
             <div className="text-xs text-gray-600 max-w-xs">
@@ -103,6 +115,7 @@ export default function SaldoCuenta() {
               <button onClick={() => prueba(cuenta)} className="px-3 py-2 rounded-lg text-xs font-bold border bg-white">✉ Probar aviso</button>
             </div>
             {aviso && <div className="basis-full text-xs text-gray-700">{aviso}</div>}
+            {detalle[cuenta.id] && saldo.ancla && <DetalleCargas saldo={saldo} />}
           </section>
         );
       })}
@@ -110,6 +123,64 @@ export default function SaldoCuenta() {
         ? <ModalConfig cuenta={modal.cuenta} onCerrar={() => setModal(null)} onGuardado={() => { setModal(null); cargar(); }} />
         : <ModalMovimiento tipo={modal.tipo} cuenta={modal.cuenta} onCerrar={() => setModal(null)} onGuardado={async () => { setModal(null); await comprobar(); cargar(); }} />)}
     </>
+  );
+}
+
+/**
+ * Las cargas detrás del número: las que restan y las de los mismos grifos que NO restan, con su
+ * motivo. Sin esta lista «− Cargas: S/ 330.54 (2)» no se puede cotejar, y la única forma de saber
+ * si una unidad de tercero se está descontando era adivinar cuáles eran esas dos.
+ */
+function DetalleCargas({ saldo }: { saldo: Saldo }) {
+  // `radar`: la fila es de radar_combustible (id uuid) y no de combustible (id número).
+  type Fila = CargaCuenta & { tag: "descuenta" | "radar" | CargaExcluida["motivo"]; radar: boolean };
+  const filas: Fila[] = [
+    ...saldo.cargasDescontadas.map((c) => ({ ...c, tag: "descuenta" as const, radar: false })),
+    ...saldo.cargasPorConfirmar.map((c) => ({ ...c, tag: "radar" as const, radar: true })),
+    ...saldo.cargasExcluidas.map((c) => ({ ...c, tag: c.motivo, radar: c.delRadar })),
+  ].sort((a, b) => {
+    // Lo más reciente arriba. Comparación binaria de las claves ISO, no `localeCompare`.
+    const ka = `${a.fecha}|${a.creado_en ?? ""}`, kb = `${b.fecha}|${b.creado_en ?? ""}`;
+    return ka === kb ? 0 : ka < kb ? 1 : -1;
+  });
+  return (
+    <div className="basis-full overflow-x-auto">
+      <table className="w-full text-xs bg-white/70 rounded-lg">
+        <thead>
+          <tr className="text-left text-[10px] uppercase tracking-wider text-gray-500">
+            <th className="px-2 py-1">Fecha</th>
+            <th className="px-2 py-1">Unidad</th>
+            <th className="px-2 py-1">Grifo</th>
+            <th className="px-2 py-1">Factura</th>
+            <th className="px-2 py-1 text-right">Importe</th>
+            <th className="px-2 py-1">¿Descuenta?</th>
+          </tr>
+        </thead>
+        <tbody>
+          {filas.map((c) => {
+            const no = c.tag !== "descuenta" && c.tag !== "radar";
+            return (
+              <tr key={`${c.radar ? "r" : "c"}${c.id}`} className={`border-t ${no ? "text-gray-500" : ""}`}>
+                <td className="px-2 py-1 whitespace-nowrap">{c.fecha}</td>
+                <td className="px-2 py-1 whitespace-nowrap font-mono">{c.placa ?? "—"}</td>
+                <td className="px-2 py-1">{c.grifo ?? "—"}</td>
+                <td className="px-2 py-1 whitespace-nowrap">{c.comprobante ?? "—"}</td>
+                <td className={`px-2 py-1 text-right whitespace-nowrap ${no ? "line-through" : "font-bold"}`}>{S(c.total)}</td>
+                <td className="px-2 py-1">
+                  {c.tag === "descuenta" ? <span className="text-green-700 font-bold">Sí · unidad propia</span>
+                    : c.tag === "radar" ? <span className="text-amber-700 font-bold">Sí · propia, del Radar sin confirmar</span>
+                    : <span title={MOTIVO_NO_DESCUENTA[c.tag].detalle}>No · {MOTIVO_NO_DESCUENTA[c.tag].corto}{c.radar ? " (Radar)" : ""}</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="text-[11px] text-gray-500 mt-1">
+        Solo descuentan las unidades <b>propias</b> (Vehículos): el combustible de una unidad tercerizada lo paga su dueño, aunque cargue en una estación de la cuenta.
+        Lo cargado antes de la lectura del {saldo.ancla?.fecha} ya está dentro del saldo del portal.
+      </p>
+    </div>
   );
 }
 
@@ -185,7 +256,6 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
     telefonos: cuenta.avisar_telefonos ?? "",
     patrones: cuenta.patrones_grifo.join(", "),
     rucs: cuenta.rucs.join(", "),
-    terceros: cuenta.incluye_terceros,
     filtro: cuenta.correo_filtro ?? "",
     auto: cuenta.facturas_auto_registrar,
     gracia: String(cuenta.facturas_gracia_dias ?? 1),
@@ -204,7 +274,6 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
       avisar_telefonos: f.telefonos.trim() || null,
       patrones_grifo: lista(f.patrones),
       rucs: lista(f.rucs),
-      incluye_terceros: f.terceros,
       correo_filtro: f.filtro.trim() || "has:attachment",
       facturas_auto_registrar: f.auto,
       facturas_gracia_dias: Math.max(0, Math.min(15, Number(f.gracia) || 0)),
@@ -249,7 +318,11 @@ function ModalConfig({ cuenta, onCerrar, onGuardado }: { cuenta: FilaCuenta; onC
         <div className="space-y-2 mt-2">
           {campo("patrones", "Nombre del grifo contiene", "Palabras completas. COESTI S.A. opera las estaciones Primax.", "PRIMAX, COESTI")}
           {campo("rucs", "RUC del grifo", undefined, "20127765279")}
-          <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={f.terceros} onChange={(e) => setF({ ...f, terceros: e.target.checked })} /> Las cargas de unidades tercerizadas también salen de esta cuenta</label>
+          <p className="text-[11px] text-gray-600">
+            Y de esas, <b>solo las de unidades propias</b> (Vehículos). Las de unidades tercerizadas se registran en Combustible pero no salen de
+            esta cuenta: aunque carguen en una estación Primax, su combustible lo paga su dueño. Tampoco descuenta una recarga del Radar sin
+            unidad identificada ni una placa activa en las dos flotas — la tarjeta las enseña aparte en «Ver las cargas».
+          </p>
         </div>
       </details>
       <details className="text-xs" open>
