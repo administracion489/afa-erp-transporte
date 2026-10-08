@@ -32,6 +32,10 @@ import { sumarDiasISO } from "@/lib/combustible/saldo-cuenta";
 import { elegirDocumentoFactura } from "@/lib/combustible/factura-de-carga";
 import { pareceCombustible } from "@/lib/radar/cluster-remitente";
 import {
+  tiposPorCorregir, notaTipoCorregido,
+  type TipoPorCorregir, type FacturaParaTipo, type CargaParaTipo,
+} from "@/lib/combustible/tipo-desde-factura";
+import {
   lineasAlDespacho, esCargaDelRadar, generadaDespues, muestrasDesfase, decidirDesfaseCuenta, diaLima,
   notaFechaDespacho, cargasPorMover, normalizarDesfaseConfig, MAX_DESFASE, sumarDias,
   type DesfaseCuenta, type MuestrasDesfase, type VoucherRadar, type FacturaParaMedir,
@@ -1273,3 +1277,71 @@ export async function marcarPrepagoPagadas(
 
 /** Para la pantalla: re-exporta los detectores (la pantalla los usa al elegir una placa). */
 export { placasEnTexto, notasEnTexto, fechasEnTexto };
+
+// ── Cargas rotuladas con otro combustible que su factura ─────────────────────
+// (lib/combustible/tipo-desde-factura.ts). Se PROPONEN con la lista a la vista y las corrige una
+// persona; el servidor recalcula la lista antes de escribir y solo toca la carga que sigue
+// diciendo lo que la persona vio.
+
+type Sb = Parameters<typeof conciliarFacturaGuardada>[0];
+type FilaCargaTipo = CargaParaTipo & { observaciones: string | null };
+
+async function leerTiposPorCorregir(sb: Sb): Promise<{ lista: TipoPorCorregir[]; obs: Map<number, string | null> }> {
+  const facturas: FacturaParaTipo[] = [];
+  for (let desde = 0; ; desde += 500) {
+    const { data, error } = await sb.from("radar_facturas")
+      .select("id, serie, numero, lineas, conciliacion")
+      .in("estado", ["conciliada", "parcial", "procesada", "con_diferencia"])
+      .order("id").range(desde, desde + 499);
+    if (error) throw new Error(`No se pudieron leer las facturas: ${error.message}`);
+    const filas = (data as { id: number; serie: string | null; numero: string | null; lineas: FacturaParaTipo["lineas"] | null; conciliacion: FacturaParaTipo["conciliacion"] | null }[] | null) ?? [];
+    for (const f of filas) facturas.push({ id: Number(f.id), serie: f.serie, numero: f.numero, lineas: f.lineas ?? [], conciliacion: f.conciliacion ?? [] });
+    if (filas.length < 500) break;
+  }
+  const ids = [...new Set(facturas.flatMap((f) => (Array.isArray(f.conciliacion) ? f.conciliacion : [])
+    .filter((p) => p.codigo === "ya_registrada" || p.codigo === "registrar")
+    .map((p) => Number(p.combustible_id ?? p.casa_con)).filter(Number.isFinite)))];
+  const flota = await cargarFlota(sb);
+  const placaDeId = new Map<string, string>();
+  for (const [p, id] of flota.propias) placaDeId.set(`p${id}`, p);
+  for (const [p, id] of flota.terceros) placaDeId.set(`t${id}`, p);
+  const cargas = new Map<number, FilaCargaTipo>();
+  for (let k = 0; k < ids.length; k += 200) {
+    const { data, error } = await sb.from("combustible")
+      .select("id, tipo_combustible, unidad, galones, total, fecha, vehiculo_id, vehiculo_tercero_id, observaciones")
+      .in("id", ids.slice(k, k + 200));
+    if (error) throw new Error(`No se pudieron leer las cargas: ${error.message}`);
+    for (const r of (data as { id: number; tipo_combustible: string | null; unidad: string | null; galones: number | null; total: number | null; fecha: string; vehiculo_id: number | null; vehiculo_tercero_id: number | null; observaciones: string | null }[] | null) ?? []) {
+      cargas.set(Number(r.id), {
+        id: Number(r.id), tipo_combustible: r.tipo_combustible ?? null, unidad: r.unidad ?? null,
+        galones: r.galones == null ? null : Number(r.galones), total: r.total == null ? null : Number(r.total),
+        fecha: String(r.fecha).slice(0, 10), observaciones: r.observaciones ?? null,
+        placa: r.vehiculo_id != null ? placaDeId.get(`p${r.vehiculo_id}`) ?? null : r.vehiculo_tercero_id != null ? placaDeId.get(`t${r.vehiculo_tercero_id}`) ?? null : null,
+      });
+    }
+  }
+  return { lista: tiposPorCorregir(facturas, cargas), obs: new Map([...cargas].map(([id, c]) => [id, c.observaciones])) };
+}
+
+export async function tiposPorCorregirDesdeFacturas(sb: Sb): Promise<TipoPorCorregir[]> {
+  return (await leerTiposPorCorregir(sb)).lista;
+}
+
+export async function corregirTiposDesdeFacturas(sb: Sb, ids: number[]): Promise<{ ok: boolean; corregidas: number; error?: string }> {
+  const pedidos = new Set(ids.map(Number));
+  const { lista, obs } = await leerTiposPorCorregir(sb);
+  let corregidas = 0;
+  for (const x of lista.filter((y) => pedidos.has(y.carga_id))) {
+    const nota = notaTipoCorregido(x.tipo_carga, x.comprobante);
+    const antes = String(obs.get(x.carga_id) ?? "");
+    let q = sb.from("combustible")
+      .update({ tipo_combustible: x.tipo_factura, unidad: x.unidad_factura, observaciones: antes.includes(nota) ? antes : antes ? `${antes} · ${nota}` : nota })
+      .eq("id", x.carga_id);
+    // Solo si sigue diciendo lo que la persona vio: si alguien la cambió mientras tanto, decidió.
+    q = x.tipo_carga == null ? q.is("tipo_combustible", null) : q.eq("tipo_combustible", x.tipo_carga);
+    const { data, error } = await q.select("id");
+    if (error) return { ok: false, corregidas, error: error.message };
+    if (((data as unknown[] | null) ?? []).length) corregidas++;
+  }
+  return { ok: true, corregidas };
+}

@@ -18,6 +18,8 @@ import {
   sumarDias, generadaDespues, diaLima,
   type CargaPorMover, type DesfaseCuenta as DecisionDeCuenta, type ResumenMover,
 } from "@/lib/combustible/desfase-factura";
+import type { TipoPorCorregir } from "@/lib/combustible/tipo-desde-factura";
+import { configCombustible } from "@/lib/combustible-tipos";
 import { avisoOrdenEnFacturas, pendientesCerca, type RecargaPorRevisar } from "@/lib/combustible/orden-revision";
 import { avisoSaludEnFacturas, type SaludRadar } from "@/lib/radar/salud";
 import { leerSaludRadar } from "@/lib/radar/salud-datos";
@@ -140,6 +142,29 @@ export default function FacturasCorreo() {
   // correo). Sin esto, una carga tecleada a mano en Combustible que ES una línea de la factura
   // seguía como «Esperando al Radar» hasta el próximo ciclo del correo, con un botón que invita a
   // registrarla otra vez. Best-effort: si falla, la pantalla enseña lo guardado.
+  // Cargas rotuladas con otro combustible que su factura (lib/combustible/tipo-desde-factura.ts).
+  const [tipos, setTipos] = useState<TipoPorCorregir[] | null>(null);
+  const [corrigiendo, setCorrigiendo] = useState(false);
+  const [msgTipos, setMsgTipos] = useState<string | null>(null);
+  const cargarTipos = useCallback(async () => {
+    const j = await post({ accion: "tipos_distintos" }).catch(() => null);
+    setTipos(j?.ok ? (j.lista as TipoPorCorregir[]) : null); // si falla, no se afirma nada
+  }, []);
+  async function corregirTipos(lista: TipoPorCorregir[]) {
+    const etq = (t: string | null) => (t ? configCombustible(t).label : "sin tipo");
+    if (!confirm(
+      `Corregir el combustible de ${lista.length} carga(s) según su factura:\n\n` +
+      lista.slice(0, 12).map((x) => `• ${x.placa ?? "—"} ${x.fecha} · ${S(x.total)}: ${etq(x.tipo_carga)} → ${etq(x.tipo_factura)}`).join("\n") +
+      (lista.length > 12 ? `\n… y ${lista.length - 12} más` : "") +
+      `\n\nNo cambia importes, galones ni fechas: solo el tipo (y su unidad). La carga pasa a contar en la serie de ese combustible.`
+    )) return;
+    setCorrigiendo(true); setMsgTipos(null);
+    const j = await post({ accion: "corregir_tipos", ids: lista.map((x) => x.carga_id) });
+    setMsgTipos(j.ok ? `${j.corregidas} carga(s) corregidas según su factura.` : `No se pudo: ${j.error}`);
+    setCorrigiendo(false);
+    cargarTipos();
+  }
+
   const [cruzando, setCruzando] = useState(true);
   useEffect(() => {
     let vivo = true;
@@ -153,9 +178,9 @@ export default function FacturasCorreo() {
         );
       }
       if (Number(j.reconciliadas) > 0) cargar();
-    }).catch(() => {}).finally(() => { if (vivo) setCruzando(false); });
+    }).catch(() => {}).finally(() => { if (vivo) { setCruzando(false); cargarTipos(); } });
     return () => { vivo = false; };
-  }, [cargar]);
+  }, [cargar, cargarTipos]);
 
   useEffect(() => {
     cargar();
@@ -518,6 +543,29 @@ export default function FacturasCorreo() {
         );
       })}
       {msgDesf && <div className="text-xs text-gray-700 px-1">{msgDesf}</div>}
+
+      {!!tipos?.length && (
+        <div className="rounded-xl border p-4 space-y-2" style={{ background: "#fffbeb", borderColor: "#fcd34d" }}>
+          <div className="text-sm text-amber-900">
+            <b>{tipos.length} carga(s) registradas con otro combustible que el de su factura</b> — mismo despacho (placa, fecha,
+            importe y cantidad), pero rotuladas con otro producto. Mientras sigan así cuentan en la serie equivocada (rendimiento,
+            tanque y precio de referencia) y no aparecen al filtrar por su combustible. La factura es el documento legal del producto.
+          </div>
+          <div className="text-xs text-gray-700 space-y-0.5">
+            {tipos.map((x) => (
+              <div key={x.carga_id} className="font-mono">
+                {x.placa ?? "—"} · {x.fecha} · carga #{x.carga_id} · {S(x.total)} · dice <b>{x.tipo_carga ? configCombustible(x.tipo_carga).label : "sin tipo"}</b> →
+                factura {x.comprobante}: <b>{configCombustible(x.tipo_factura).label}</b>{x.producto ? ` («${x.producto}»)` : ""}
+              </div>
+            ))}
+          </div>
+          <button onClick={() => corregirTipos(tipos)} disabled={corrigiendo}
+            className="px-4 py-2 rounded-lg text-sm font-bold text-white disabled:opacity-60" style={{ background: "#b45309" }}>
+            {corrigiendo ? "Corrigiendo…" : `Corregir según la factura (${tipos.length})`}
+          </button>
+        </div>
+      )}
+      {msgTipos && <div className="text-xs text-gray-700 px-1">{msgTipos}</div>}
 
       {!!hist?.lineas && (
         <div className="rounded-xl border p-4 space-y-2" style={{ background: "#eff6ff", borderColor: "#93c5fd" }}>

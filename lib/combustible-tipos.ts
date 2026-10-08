@@ -429,3 +429,17 @@ export function unidadDeCarga(
   if (d === "galones" || d === "gal") return "galones";
   return canonica;
 }
+
+/**
+ * ¿La carga entra en el filtro de tipo? El tipo legado («Gasolina» a secas) es el de la FAMILIA y
+ * abarca la regular y la premium: antes el filtro comparaba la clave exacta, así que «Gasolina»
+ * solo encontraba las cargas viejas sin octanaje y una van que carga premium salía con «0
+ * resultados». Los demás tipos siguen siendo exactos (elegir «Gasolina premium» no trae la regular).
+ * Una carga sin tipo se lee como diésel, igual que en el resto de la pantalla.
+ */
+export function coincideTipo(tipoCarga: string | null | undefined, filtro: string): boolean {
+  if (!filtro || filtro === "todos") return true;
+  const t = tipoCarga || "diesel";
+  if (t === filtro) return true;
+  return !!COMBUSTIBLES[filtro]?.legado && familiaCombustible(t) === COMBUSTIBLES[filtro].familia;
+}
