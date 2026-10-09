@@ -6,7 +6,7 @@
 // Reusa el patrón de lib/crm-ia.ts (SDK Anthropic, ANTHROPIC_API_KEY del entorno).
 
 import Anthropic from "@anthropic-ai/sdk";
-import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro } from "@/lib/odometro-prompt";
+import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro, reglaTamborDecimal } from "@/lib/odometro-prompt";
 
 // Cliente perezoso. Si ANTHROPIC_API_KEY no está configurada, NO debe reventar al
 // cargar el módulo: eso haría que el route devuelva un 500 SIN JSON (antes del
@@ -117,9 +117,10 @@ const PROMPT_ODO = `Te paso la foto del ODÓMETRO (cuentakilómetros) del tabler
 Devuelve SOLO un JSON:
 {"km": number, "trip_km": number|null, "confianza": "alta"|"media"|"baja", "calidad_imagen": "buena"|"regular"|"mala", "motivo": string, "texto_leido": string}.
 "km" es el kilometraje TOTAL del vehículo (entero, sin decimales).
+${reglaTamborDecimal('"texto_leido"', '"motivo"')}
 "trip_km" es el cuentakilómetros PARCIAL/trip. Si la pantalla muestra DOS contadores de km, este campo NUNCA debe ser null: pon aquí el otro número que viste.
 ANTI-INVERSIÓN: en un mismo tablero el TOTAL es SIEMPRE el número MAYOR y va sin decimales; el parcial es el MENOR y suele llevar un decimal (p. ej. "1803.6"). Si el número que ibas a poner en "km" es MENOR que otro número de kilómetros de la pantalla, los estás intercambiando.
-CUENTA LAS CIFRAS: en "texto_leido" transcribe el número del odómetro tal como se ve, dígito a dígito, y comprueba que "km" tiene EXACTAMENTE esas cifras y no una más. Añadir un dígito es el error más caro de esta lectura y el más fácil de cometer: «ABCDE» y «ABCCDE» se parecen en una pantalla borrosa y son diez veces distinto en el ERP. Ante un dígito dudoso —un 8 con un segmento apagado, dos cifras pegadas— no lo desdobles: baja la confianza y dilo en "motivo".
+CUENTA LAS CIFRAS: en "texto_leido" transcribe el número del odómetro tal como se ve, dígito a dígito, y comprueba que "km" tiene EXACTAMENTE esas cifras —sin el tambor de décimas— y no una más. Añadir un dígito es el error más caro de esta lectura y el más fácil de cometer: «ABCDE» y «ABCCDE» se parecen en una pantalla borrosa y son diez veces distinto en el ERP. Ante un dígito dudoso —un 8 con un segmento apagado, dos cifras pegadas— no lo desdobles: baja la confianza y dilo en "motivo".
 NO REPITAS UN DÍGITO. ${PATRON_DIGITO_REPETIDO} Antes de responder, mira si tu número tiene dos cifras iguales seguidas ("99", "33", "00") y vuelve a contarlas sobre la imagen: en un odómetro de verdad también ocurren, pero es justo ahí donde se cuela la de más. Si no logras decidir si son una o dos, devuelve "km": null y explícalo en "motivo" — una lectura menos no cuesta nada, un kilometraje diez veces mayor contamina el mantenimiento y el rendimiento de la unidad.
 La temperatura ("28.0°C"), la hora ("20:25") y una tasa de consumo ("16.3 L/100km") NO son kilómetros.
 "calidad_imagen"="mala" si la foto está borrosa, con reflejo/brillo que tape dígitos, muy oscura, o el odómetro no es legible; "regular" si se lee con algo de esfuerzo; "buena" si es nítida.

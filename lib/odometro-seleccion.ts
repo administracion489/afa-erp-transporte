@@ -41,8 +41,11 @@ export type CandidatoOdometro = {
  *   - `parcial`        se registró otro número del tablero porque la IA entregó el trip.
  *   - `digito_repetido` el dígito que sobraba estaba DUPLICADO y colapsarlo da un único número
  *                      posible: se propone ese, para que una persona lo confirme contra la foto.
+ *   - `decimal_como_entero` el tambor de DÉCIMAS de un odómetro mecánico entró como una cifra más:
+ *                      la propia transcripción de la IA lo trae tras un punto («56129.2») y su
+ *                      kilometraje es ese número sin el punto (561,292). Se registra la parte entera.
  */
-export type CodigoOdometro = "digito_de_mas" | "fuera_de_banda" | "eco" | "parcial" | "digito_repetido";
+export type CodigoOdometro = "digito_de_mas" | "fuera_de_banda" | "eco" | "parcial" | "digito_repetido" | "decimal_como_entero";
 
 export type VeredictoOdometro = {
   /** El km a registrar. null solo si la IA no leyó nada. */
@@ -107,6 +110,37 @@ export function corregirDigitoRepetido(kmIA: number, piso: number, techo: number
     if (v >= piso && v <= techo) candidatos.add(v);
   }
   return candidatos.size === 1 ? [...candidatos][0] : null;
+}
+
+/**
+ * EL TAMBOR DE DÉCIMAS LEÍDO COMO UNA CIFRA MÁS (B4N-968, octubre 2026).
+ *
+ * Un odómetro mecánico de rodillos muestra «5 6 1 2 9 [2]» con el último tambor en otro color:
+ * son 56,129.2 km. El modelo lo transcribe bien en el texto («56129.2») y aun así devuelve en el
+ * número 561,292 — la misma cifra sin el punto, diez veces el kilometraje.
+ *
+ * Esto NO es adivinar qué dígito sobra (la regla 5 de la cabecera): es leer la transcripción que
+ * el propio modelo escribió. Solo se acepta cuando el texto trae un número con UN decimal cuyas
+ * cifras, sin separadores, son EXACTAMENTE las del kilometraje devuelto: la parte entera es lo que
+ * el modelo leyó como kilómetros y el último dígito, lo que él mismo marcó como décima. Por eso
+ * no lleva `confirmar` — igual que `parcial`, el número lo transcribió el modelo, solo que lo
+ * puso en el campo con otra forma.
+ *
+ * Un número con dos o tres cifras tras el separador no entra: «174,159» son miles, y «1803.65»
+ * no es un tambor de décimas. Con dos transcripciones que lo explicarían distinto, ninguna.
+ */
+export function decimalComoEntero(kmIA: number | null, textoLeido: string | null | undefined): number | null {
+  if (kmIA == null || !(kmIA > 0) || !textoLeido) return null;
+  const objetivo = String(Math.round(kmIA));
+  const hallados = new Set<number>();
+  for (const m of String(textoLeido).matchAll(/\d[\d.,]*/g)) {
+    const crudo = m[0].replace(/[.,]+$/, "");
+    if (!/[.,]\d$/.test(crudo)) continue;
+    if (crudo.replace(/\D/g, "") !== objetivo) continue;
+    const entero = Number(crudo.slice(0, -2).replace(/\D/g, ""));
+    if (Number.isFinite(entero) && entero > 0) hallados.add(entero);
+  }
+  return hallados.size === 1 ? [...hallados][0] : null;
 }
 
 /** Un odómetro plausible tiene entre 3 y 7 dígitos (mismo criterio que ya usaba el Radar). */
@@ -215,6 +249,12 @@ export function elegirOdometro(e: {
   // (1) La abstención del modelo manda: si no leyó un número, aquí no se fabrica uno.
   if (kmIA == null) return neutro(null, false);
 
+  // (1b) El tambor de décimas que entró como cifra: se resuelve con la transcripción del propio
+  //      modelo y ANTES de mirar la banda, porque la banda puede estar en la escala equivocada —
+  //      si la unidad lleva meses leyéndose así, su historial entero está ×10 y el número malo
+  //      cae «dentro de lo posible». Lo que sí se mira es la banda, para decirlo.
+  const sinDecima = decimalComoEntero(kmIA, e.textoLeido);
+
   // (2) El ancla. Con vecinas, la MISMA base que `evaluarLectura`: la lectura anterior a la
   //     foto; sin anterior pero con posterior, esta es la más antigua de la serie (no hay piso,
   //     solo el techo de la que vino después); sin ninguna de las dos, el vigente.
@@ -223,8 +263,15 @@ export function elegirOdometro(e: {
   const kmAnt = vec && Number(vec.anterior) > 0 ? Number(vec.anterior) : null;
   const kmPost = vec && Number(vec.posterior) > 0 ? Number(vec.posterior) : null;
   const base = kmAnt ?? (kmPost != null ? 0 : kmVigente);
+  const porDecima = (motivoExtra: string | null, autoOk: boolean): VeredictoOdometro => ({
+    km: sinDecima, kmIA, origen: "corregido", autoOk, codigo: "decimal_como_entero", candidatos: [],
+    motivo:
+      `la IA leyó ${fmt(sinDecima!)}.${String(kmIA).slice(-1)} en el tablero y devolvió ${fmt(kmIA)}: el último ` +
+      `tambor es de DÉCIMAS de kilómetro, no una cifra más. Se registra ${fmt(sinDecima!)}` +
+      (motivoExtra ? ` — ${motivoExtra}` : ""),
+  });
   // Sin ancla no hay nada contra qué comparar → exactamente el comportamiento de hoy.
-  if (base <= 0 && kmPost == null) return neutro();
+  if (base <= 0 && kmPost == null) return sinDecima != null ? porDecima(null, true) : neutro();
   // Cómo se nombra el ancla en el motivo: «vigente» solo cuando de verdad es el vigente.
   const ancla = kmAnt != null
     ? `lectura anterior ${fmt(kmAnt)}`
@@ -277,6 +324,24 @@ export function elegirOdometro(e: {
 
   for (const c of bruto) c.enBanda = c.valor >= piso && c.valor <= techo;
   const enBanda = bruto.filter((c) => c.enBanda);
+
+  if (sinDecima != null) {
+    if (sinDecima >= piso && sinDecima <= techo) return porDecima(null, true);
+    // Fuera de la banda. Si el modelo puso el total en el campo del parcial, ese número sí cuadra
+    // y el punto que vio era el del trip: se sigue el camino de siempre (el rescate del parcial).
+    const tripEnBanda = bruto.some((c) => c.fuente === "trip" && c.enBanda);
+    if (!tripEnBanda) {
+      // El número CON la décima sí cuadra: la unidad lleva su historial en la escala equivocada.
+      const escala = kmIA >= piso && kmIA <= techo;
+      return porDecima(
+        escala
+          ? `no cuadra con ${ancla}, que está en la escala de las décimas (diez veces mayor): el historial ` +
+            `de esta unidad registró el tambor de décimas como kilómetros y hay que corregirlo`
+          : `no cuadra con ${ancla}: revísalo contra la foto`,
+        false,
+      );
+    }
+  }
 
   const kmIAEnBanda = enBanda.some((c) => c.valor === kmIA);
 

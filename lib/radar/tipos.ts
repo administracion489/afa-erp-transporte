@@ -415,6 +415,12 @@ export type ExtraccionCombustible = {
    * el ERP puede contrastar la primera (ver lib/radar/coherencia-voucher.ts).
    */
   texto_cantidad?: string | null;
+  /**
+   * Los dígitos del odómetro del tablero tal cual se ven, con el tambor de décimas de un odómetro
+   * mecánico tras un punto ("ABCDE.F"). Lo lee `elegirOdometro` para deshacer el tambor de décimas
+   * leído como una cifra más (`decimal_como_entero`).
+   */
+  texto_kilometraje?: string | null;
 };
 
 /**

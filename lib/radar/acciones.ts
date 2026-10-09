@@ -898,7 +898,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       });
       if (ctxKm.existe) {
         veredictoKm = elegirOdometro({
-          kmIA, tripIA: tripKm, textoLeido: null,
+          kmIA, tripIA: tripKm, textoLeido: d.texto_kilometraje ?? null,
           kmVigente: ctxKm.kmVigente, kmDiaMax: ctxKm.kmDiaMax,
           horasDesdeUltima: ctxKm.horasDesdeUltima, hayHistorial: ctxKm.hayHistorial,
           vecinas: { anterior: ctxKm.anterior?.km ?? null, posterior: ctxKm.posterior?.km ?? null },

@@ -81,6 +81,8 @@ export async function leerOdometroDeFoto(
       ? `La IA leyó ${fmt(data.km_ia)} y le sobra un dígito repetido.\n` +
         `Se propone ${fmt(data.km)} km, el único valor posible para esta unidad.\n\n` +
         `COMPRUÉBALO CONTRA LA FOTO antes de registrar: lo dedujo el sistema, no lo leyó nadie.`
+      : data.codigo_seleccion === "decimal_como_entero"
+        ? `Leído: ${fmt(data.km)} km.\nEl último tambor del odómetro es de DÉCIMAS: la IA lo había sumado como una cifra más (${fmt(data.km_ia)}) y se quitó. Revisa antes de registrar.`
       : data.corregido
         ? `Leído: ${fmt(data.km)} km.\nLa foto mostraba dos contadores: se tomó el total y se descartó el parcial. Revisa antes de registrar.`
         : `Leído: ${fmt(data.km)} km (confianza ${data.confianza}). Revisa antes de registrar.`,

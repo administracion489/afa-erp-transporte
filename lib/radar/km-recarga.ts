@@ -17,6 +17,8 @@
 //     transcribió, y lo confirma una persona contra la foto (el `forzarRevision` del odómetro).
 //   · `parcial` → el modelo cruzó el trip y el total: se usa el otro número que SÍ transcribió y
 //     no bloquea (en la ruta del odómetro tampoco pide revisión), pero queda dicho.
+//   · `decimal_como_entero` → el tambor de décimas entró como cifra y la transcripción del modelo
+//     lo trae tras un punto: se usa la parte entera, como `parcial`; bloquea solo si no cuadra.
 //   · `digito_de_mas` → sobra un dígito y no se puede deducir cuál: el número se deja como lo leyó
 //     la IA y BLOQUEA. Auto-registrarlo escribiría un km diez veces mayor en la cadena de rendimiento
 //     y en el odómetro de la unidad.
@@ -36,8 +38,10 @@ export function kmDeRecarga(kmIA: number | null, v: VeredictoOdometro | null): K
   const sinCambio: KmDeRecarga = { km: kmIA, anomalia: null };
   if (kmIA == null || !v || v.km == null) return sinCambio;
 
-  if (v.origen === "corregido" && (v.codigo === "digito_repetido" || v.codigo === "parcial")) {
-    const deducido = v.codigo === "digito_repetido";
+  if (v.origen === "corregido" && (v.codigo === "digito_repetido" || v.codigo === "parcial" || v.codigo === "decimal_como_entero")) {
+    // El colapso lo DEDUJO el ERP; el tambor de décimas lo transcribió el modelo, pero si no cuadra
+    // con las lecturas de la unidad (historial en la escala de las décimas) tampoco se registra solo.
+    const deducido = v.codigo === "digito_repetido" || !v.autoOk;
     return {
       km: v.km,
       anomalia: {

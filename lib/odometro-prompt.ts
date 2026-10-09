@@ -38,6 +38,37 @@ export const NUMERO_SOLO_DE_LA_FOTO =
   `si no lo lees, abstente.`;
 
 /**
+ * EL ÚLTIMO TAMBOR DE UN ODÓMETRO MECÁNICO SON DÉCIMAS, NO KILÓMETROS.
+ *
+ * El caso (B4N-968, octubre 2026): el tablero es de rodillos y muestra «5 6 1 2 9 [2]», con el
+ * último tambor en otro color. Ese tambor marca décimas: la unidad va en 56,129 km. La IA lo leyó
+ * como una cifra más y devolvió 561,292 (y con un dígito repetido, 5,612,926) — diez o cien veces
+ * el kilometraje. Y como pasó desde las primeras lecturas, el historial de la unidad quedó entero
+ * en la escala equivocada: el km vigente decía «6 cifras» y el prompt EMPUJABA a leer el tambor
+ * de décimas como kilómetros. Los dos prompts decían «el total va sin decimales», que es cierto
+ * en una pantalla digital y no le dice nada al modelo frente a un tambor sin punto ni coma.
+ *
+ * La regla pide además TRANSCRIBIR el tambor después de un punto en el texto leído: así, si el
+ * modelo igual lo mete en el número, el ERP tiene su propia transcripción para deshacerlo
+ * (`decimalComoEntero`, lib/odometro-seleccion.ts) sin adivinar nada.
+ *
+ * `campoTexto` y `campoMotivo` (ya entre comillas) cambian entre carriles (texto_leido/motivo en la
+ * app, texto_leido/observaciones o texto_kilometraje en el Radar); la regla es UNA.
+ */
+export function reglaTamborDecimal(campoTexto: string, campoMotivo: string): string {
+  return (
+    `ODÓMETRO DE TAMBORES (mecánico, con rodillos de números): el ÚLTIMO tambor de la derecha casi siempre ` +
+    `marca DÉCIMAS de kilómetro, no kilómetros. Se reconoce porque tiene OTRO COLOR que los demás (fondo ` +
+    `blanco o rojo, o los colores invertidos), va separado por un marco o una línea, o es más pequeño. Ese ` +
+    `dígito NO es parte del kilometraje: déjalo FUERA del número y, en ${campoTexto}, escríbelo después de ` +
+    `un punto («ABCDE.F»). Un tablero de seis tambores «ABCDE[F]» con el último de décimas marca ABCDE km: ` +
+    `leerlo como ABCDEF es multiplicar el kilometraje por diez. Que el total tenga un tambor de décimas NO lo ` +
+    `convierte en el parcial/trip: sigue siendo el total. Si no logras distinguir si el último tambor ` +
+    `es de décimas, baja la confianza y dilo en ${campoMotivo}.`
+  );
+}
+
+/**
  * CUÁNTAS CIFRAS TIENE EL ODÓMETRO — y cuándo deja de ser seguro decirlo.
  *
  * Decirle al modelo «esta unidad tiene 5 cifras» es lo que frena el dígito de más, el error más
@@ -79,14 +110,17 @@ export function formaOdometro(kmVigente: number | null | undefined): FormaOdomet
   return { cifras, puedeSubir: km >= Math.pow(10, cifras) * UMBRAL_CAMBIO_DE_CIFRA };
 }
 
+/** Las cifras de la forma son de KILÓMETROS: el tambor de décimas de un odómetro mecánico no cuenta. */
+const SIN_DECIMAS = " (sin contar el tambor de décimas, si lo tiene)";
+
 /**
  * La frase que describe la forma, LA MISMA en los dos carriles. Sin cifras copiables: la cantidad
  * de dígitos y el «10» con que empieza tras el cambio no son el kilometraje de nadie.
  */
 export function fraseFormaOdometro(f: FormaOdometro): string {
-  if (!f.puedeSubir) return `el odómetro TOTAL es un número de ${f.cifras} dígitos`;
+  if (!f.puedeSubir) return `el odómetro TOTAL es un número de ${f.cifras} dígitos${SIN_DECIMAS}`;
   return (
-    `el odómetro TOTAL es un número de ${f.cifras} dígitos y está cerca de pasar a ${f.cifras + 1}: ` +
+    `el odómetro TOTAL es un número de ${f.cifras} dígitos${SIN_DECIMAS} y está cerca de pasar a ${f.cifras + 1}: ` +
     `un número de ${f.cifras + 1} dígitos solo es válido si empieza por «10» (el odómetro acaba de dar ` +
     `la vuelta); cualquier otro de ${f.cifras + 1} dígitos es un dígito de más`
   );

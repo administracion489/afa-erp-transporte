@@ -9,7 +9,7 @@
 // Este archivo solo construye strings: no toca BD ni secretos.
 
 import type { CategoriaRadar } from "./tipos";
-import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro } from "../odometro-prompt";
+import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro, reglaTamborDecimal } from "../odometro-prompt";
 
 // ── Contexto que el motor pasa a cada prompt ─────────────────────────────────
 
@@ -53,6 +53,7 @@ const CASO_ODOMETRO = `
 
 LECTURA DEL TABLERO (aplica a las categorías "odometro" y "combustible"): si ves una foto del tablero sin ningún dato de recarga (sin monto, sin grifo, sin galones/litros), la categoría es "odometro". Al leerlo:
 - El odómetro TOTAL es el número MAYOR de kilómetros de la pantalla y va sin decimales. El "Trip"/parcial es el MENOR y casi siempre lleva un decimal (p. ej. "1803.6").
+- ${reglaTamborDecimal('"texto_leido" (o "texto_kilometraje" si es una recarga de combustible)', '"observaciones"')}
 - Nunca conviertas el parcial en el total ni al revés. Si dudas de cuál es cuál, pon los DOS: el mayor en "kilometraje" y el otro en "trip_km".
 - "16.3 L/100km" es una tasa de consumo, y la temperatura ("28.0°C") y la hora ("20:25") no son kilómetros.
 - CUENTA LAS CIFRAS Y NO REPITAS NINGUNA. ${PATRON_DIGITO_REPETIDO} Si tu número tiene dos cifras iguales seguidas ("99", "33", "00"), vuelve a contarlas sobre la imagen antes de responder. Si no puedes decidir si son una o dos, deja "kilometraje" en null y dilo en "observaciones": una lectura menos no cuesta nada, un kilometraje diez veces mayor contamina el mantenimiento y el rendimiento de la unidad.
@@ -206,6 +207,7 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
   "precio_litro": number|null,
   "monto_total": number|null,           // importe pagado — usa el de la NOTA (comprobante) como valor oficial
   "kilometraje": number|null,           // odómetro TOTAL del tablero (ignora "Trip"/viaje). El tablero manda sobre la nota
+  "texto_kilometraje": string|null,     // los dígitos del odómetro del tablero TAL CUAL se ven; un tambor de décimas va tras un punto ("ABCDE.F")
   "conductor": string|null,
   "consumo_l_100km": number|null,       // TASA de consumo del viaje (p.ej. 16.3). Informativo. JAMÁS en galones/litros/monto
   "trip_km": number|null,               // cuentakm PARCIAL del tablero. Informativo, NO es el odómetro
@@ -361,7 +363,7 @@ const FORMA_ODOMETRO = `{
   "conductor": string|null,             // nombre del conductor si se menciona
   "calidad_imagen": "buena"|"regular"|"mala"|null,  // SOLO si viste una foto del tablero: "mala" = borrosa/reflejo/oscura/ilegible; null si es texto
   "confianza_lectura": number|null,     // 0..1 qué tan seguro estás del NÚMERO del odómetro (null si es texto claro)
-  "texto_leido": string|null,           // los dígitos crudos que leíste en el odómetro (para poder verificar)
+  "texto_leido": string|null,           // los dígitos crudos que leíste en el odómetro (para poder verificar); un tambor de décimas va tras un punto ("ABCDE.F")
   "observaciones": string|null          // cualquier detalle relevante adicional
 }`;
 
