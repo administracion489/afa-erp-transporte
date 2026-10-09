@@ -618,13 +618,15 @@ Lo reportó el dueño: *«quiero enviar solo a un cliente y solo a AFA para prob
 
 ### «Rastreo %» se mide contra el SERVICIO, no contra el trecho entre dos señales
 
-`coberturaRastreo` + `largoLineaM` en `lib/huella.ts` (PURO) + el resumen del viaje de `components/seguimiento/ModalGps.tsx` y de `/cliente`. Matriz: `npx tsx scripts/prueba-cobertura-rastreo.mts`. **Sin migración.**
+`coberturaRastreo` + `largoLineaM` en `lib/huella.ts` (PURO) + el resumen del viaje de `components/seguimiento/ModalGps.tsx`. Matriz: `npx tsx scripts/prueba-cobertura-rastreo.mts`. **Sin migración.**
+
+**AL CLIENTE NO SE LE ENSEÑA EL PORCENTAJE DE RASTREO** (decisión del dueño, 09-10-2026): ni el badge ni sus notas, ni en la tarjeta «Resumen del viaje» de `/cliente` ni en el modal GPS abierto con `modoCliente`. Es un indicador interno de la calidad del GPS; en el portal se leía como un juicio sobre el servicio. El resto del resumen (km, duración, velocidad, salida y última señal) sí se ve.
 
 **El caso** (reserva #6166, VFC-962): «Rastreo 100%» con 0.4 km y 3 min de huella (4:08–4:11) sobre una ruta prevista de 55 min, al lado de «Todas las paradas cubiertas». El % era `medido / (medido + estimado)` y el estimado solo rellena huecos ENTRE dos señales: lo que pasa DESPUÉS de la última no entraba en ningún lado, así que un GPS que se calla a los 400 m daba 100 %.
 
 - **Con el servicio TERMINADO** (todas las paradas cubiertas —la misma condición de la tarjeta verde— o finalizado) el denominador es el MAYOR entre la ruta prevista y lo dibujado: un desvío o la ida a la cochera no bajan el %. La nota nombra los km sin ninguna señal y la hora de la última.
 - **EN CURSO, o sin ruta prevista, el % es byte a byte el de antes** (la matriz lo barre contra la fórmula vieja copiada literal): a mitad de camino no se sabe cuánto lleva recorrido sin señal, y medir contra la ruta entera pintaría de rojo un servicio sano. Si además no hay señal, la tarjeta DICE que el % solo mide hasta la última.
-- `ResumenViaje` lleva `medidoM`/`estimadoM` aparte del % porque la ruta y el avance son estado de la pantalla, no del loop de la huella. Al cliente no se le imputa al conductor: la causa probable («pantalla bloqueada o app cerrada») solo se le dice a operación.
+- `ResumenViaje` lleva `medidoM`/`estimadoM` aparte del % porque la ruta y el avance son estado de la pantalla, no del loop de la huella.
 
 ### Lectura del odómetro · el dígito de más (`lib/odometro-seleccion.ts`, `lib/vision-ia.ts`)
 

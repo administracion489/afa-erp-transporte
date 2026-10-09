@@ -1931,8 +1931,9 @@ export default function ModalGps({
               <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400">Resumen del viaje</p>
-                  {/* Badge de calidad de rastreo: % del SERVICIO con huella medida (coberturaRastreo). */}
-                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                  {/* Badge de calidad de rastreo: % del SERVICIO con huella medida (coberturaRastreo).
+                      Solo para operación: al cliente no se le enseña (decisión del dueño, 09-10-2026). */}
+                  {!modoCliente && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
                     title={cobertura?.referencia === "ruta_prevista"
                       ? `Medido sobre la ruta prevista del servicio (${cobertura.referenciaKm} km)`
                       : "Medido sobre el trayecto entre la primera y la última señal"}
@@ -1941,7 +1942,7 @@ export default function ModalGps({
                       color: rastreoPct >= 90 ? "#15803d" : rastreoPct >= 70 ? "#a16207" : "#b91c1c",
                     }}>
                     Rastreo {rastreoPct}%
-                  </span>
+                  </span>}
                 </div>
                 <div className="grid grid-cols-2 gap-x-2 gap-y-2">
                   <div><p className="text-[9px] text-gray-400 uppercase font-bold">Recorrido</p><p className="text-sm font-black text-gray-800">{resumen.kmRecorridos} km</p></div>
@@ -1955,13 +1956,13 @@ export default function ModalGps({
                   <span>Salida <b className="text-gray-700">{fmtHoraTs(resumen.horaSalida)}</b></span>
                   <span>Última señal <b className="text-gray-700">{fmtHoraTs(resumen.horaLlegada)}</b></span>
                 </div>
-                {cobertura?.referencia === "ruta_prevista" && rastreoPct < 90 ? (
+                {modoCliente ? null : cobertura?.referencia === "ruta_prevista" && rastreoPct < 90 ? (
                   // Servicio terminado con la huella corta: lo que falta NO es un hueco entre dos
                   // señales, es que el GPS dejó de transmitir y el servicio siguió.
                   <p className="text-[9px] text-red-700 mt-1.5 leading-snug">
                     Medido {cobertura.medidoKm} km de los {cobertura.referenciaKm} km de la ruta prevista.
                     {cobertura.sinHuellaKm > 0 && <> {cobertura.sinHuellaKm} km sin ninguna señal: el GPS dejó de transmitir a las {fmtHoraTs(resumen.horaLlegada)} y el servicio siguió.</>}
-                    {!modoCliente && " Lo más común: la pantalla del teléfono se bloqueó o la app del conductor se cerró."}
+                    {" Lo más común: la pantalla del teléfono se bloqueó o la app del conductor se cerró."}
                   </p>
                 ) : rastreoPct < 90 ? (
                   <p className="text-[9px] text-gray-400 mt-1.5 leading-snug">
@@ -1970,7 +1971,7 @@ export default function ModalGps({
                 ) : null}
                 {/* En curso y sin señal: el % solo describe hasta la última señal. La ruta entera no
                     sirve de referencia aquí (no se sabe cuánto lleva recorrido), así que se DICE. */}
-                {!servicioTerminado && sinSenal && (
+                {!modoCliente && !servicioTerminado && sinSenal && (
                   <p className="text-[9px] text-amber-700 mt-1.5 leading-snug">
                     El porcentaje mide solo hasta la última señal ({fmtHoraTs(resumen.horaLlegada)}); desde entonces no llegan posiciones.
                   </p>
