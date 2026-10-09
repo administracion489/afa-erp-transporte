@@ -15,8 +15,9 @@
 // voucher de combustible (`radar_odo_comb:`) llevan la placa impresa en la nota de despacho.
 
 import {
-  auditarUnidadLectura, decidirUnidad, escritasEnTexto, motivoAuditoria, telefonoLegible,
-  type DecisionUnidad, type Remitente, type UnidadRef, type VeredictoPlaca,
+  auditarUnidadLectura, confirmacionDe, confirmaUnidad, decidirUnidad, escritasEnTexto, motivoAuditoria,
+  resultadoConConfirmacion, telefonoLegible,
+  type ConfirmacionUnidad, type DecisionUnidad, type Remitente, type UnidadRef, type VeredictoPlaca,
 } from "./procedencia-placa";
 import { cargarFlotaUnidades, claveRemitenteDia, remitentesPorDia } from "./remitente-unidades";
 
@@ -40,6 +41,12 @@ export type AuditoriaLectura = {
   telefono: string | null;
   /** Día (Lima) en que se mandó el mensaje: es el día cuyo servicio decide la unidad. */
   fechaMensaje: string | null;
+  /** El mensaje de origen (donde se guarda la confirmación de una persona). */
+  mensajeId: string;
+  /** La unidad donde está HOY la lectura. */
+  actual: UnidadRef | null;
+  /** Una persona confirmó, mirando la foto, que es de esta unidad (y por eso está respaldada). */
+  confirmada: ConfirmacionUnidad | null;
 };
 
 const ID_TABLERO = /^radar_odo:([0-9a-f-]{36})$/i;
@@ -151,12 +158,19 @@ export async function auditarLecturasRadar(
         unidadIA: actual ? { flota: actual.flota, id: actual.id, placa: actual.placa } : null,
         remitente,
       });
-      const { veredicto, propuesta } = auditarUnidadLectura(actual, decision);
+      const auditada = auditarUnidadLectura(actual, decision);
+      // Una persona que miró la foto y confirmó ESTA unidad manda sobre la falta de respaldo.
+      const conf = confirmacionDe(m.resultado);
+      const confirmada = confirmaUnidad(conf, actual) ? conf : null;
+      const { veredicto, propuesta } = confirmada ? { veredicto: "respaldada" as const, propuesta: null } : auditada;
       porLectura.set(l.id, {
         veredicto,
         propuesta,
         decision,
-        motivo: motivoAuditoria(actual, decision, { remitente, nombre: m.remitente_nombre, fecha }),
+        mensajeId: m.id,
+        actual: actual ? { flota: actual.flota, id: actual.id, placa: actual.placa } : null,
+        confirmada,
+        motivo: confirmada ? null : motivoAuditoria(actual, decision, { remitente, nombre: m.remitente_nombre, fecha }),
         remitente: m.remitente_nombre ?? null,
         telefono: remitente.codigo === "identificado" || remitente.codigo === "no_registrado" ? telefonoLegible(remitente.telefono) : null,
         fechaMensaje: fecha,
@@ -166,4 +180,22 @@ export async function auditarLecturasRadar(
   } catch {
     return { porLectura, completa: false };
   }
+}
+
+/**
+ * Una persona confirma, mirando la foto, que la lectura ES de la unidad donde está. Se guarda en el
+ * mensaje de origen (sin migración). Lee el `resultado` actual antes de escribir para no pisar lo
+ * que el motor dejó ahí. Si el mensaje se reprocesa, el motor reescribe `resultado` y la
+ * confirmación se pierde a propósito: el reproceso vuelve a decidir la unidad desde cero.
+ */
+export async function confirmarUnidadLectura(
+  sb: Parameters<typeof auditarLecturasRadar>[0], mensajeId: string, unidad: UnidadRef, por: string | null,
+): Promise<{ ok: boolean; error?: string }> {
+  const { data, error } = await sb.from("radar_mensajes").select("resultado").eq("id", mensajeId).maybeSingle();
+  if (error) return { ok: false, error: error.message };
+  if (!data) return { ok: false, error: "No se encontró el mensaje de origen de esta lectura." };
+  const { error: e2 } = await sb.from("radar_mensajes")
+    .update({ resultado: resultadoConConfirmacion(data.resultado, unidad, por, new Date().toISOString()) })
+    .eq("id", mensajeId);
+  return e2 ? { ok: false, error: e2.message } : { ok: true };
 }
