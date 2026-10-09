@@ -58,8 +58,6 @@ type Props = {
   vehiculoTerceroId?: number | null;
   vehiculoPlaca: string; conductorNombre: string;
   conductorTel: string; clienteNombre: string;
-  /** Proveedor de un servicio tercerizado. Se pinta DEBAJO del conductor, nunca en su lugar. */
-  conductorEmpresa?: string | null;
   /** Veredicto de RASTREO del servicio, el MISMO de la columna de /seguimiento
    *  (/api/seguimiento/rastreo → lib/gps-cobertura.ts). El modal no calcula el suyo: dos
    *  porcentajes con el mismo nombre en dos sitios terminan diciendo cosas distintas. */
@@ -107,7 +105,7 @@ const fmtHoraTs = (ts: number) => // sin segundos, para el resumen del viaje
 
 export default function ModalGps({
   reservaId, vehiculoId, vehiculoTerceroId = null, vehiculoPlaca, conductorNombre,
-  conductorTel, conductorEmpresa = null, rastreo = null, clienteNombre, paradas, paradasJson, origen, destino, modoCliente = false, onClose,
+  conductorTel, rastreo = null, clienteNombre, paradas, paradasJson, origen, destino, modoCliente = false, onClose,
 }: Props) {
   const mapRef    = useRef<HTMLDivElement>(null);
   const mapInst   = useRef<any>(null);
@@ -1903,7 +1901,6 @@ export default function ModalGps({
                 </div>
                 <div className="min-w-0">
                   <p className="text-gray-900 font-bold text-sm truncate">{conductorNombre}</p>
-                  {conductorEmpresa && <p className="text-gray-400 text-[10px] truncate" title={conductorEmpresa}>{conductorEmpresa}</p>}
                   {conductorTel
                     ? <a href={`tel:${conductorTel}`} className="text-green-600 text-[11px] font-bold">{conductorTel}</a>
                     : <p className="text-gray-400 text-[10px]">Sin teléfono</p>}

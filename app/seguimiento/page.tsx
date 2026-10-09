@@ -581,9 +581,16 @@ function FilaServicio({ s, hermano, rastreo, rastreoEstado, onOpen, onGps, onRut
           <div className="text-[9px] font-bold uppercase text-gray-400">Pasaj.</div>
           <div className="text-xs font-black text-[#0b315f]">{s.pasajeros_abordados}<span className="text-gray-300 font-normal">/{s.pasajeros_total_real || "?"}</span></div>
         </div>
-        <div className="w-16">
-          <div className="text-[9px] font-bold uppercase text-gray-400 text-center mb-1 leading-none">{progreso}%</div>
-          <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${progreso}%`, background: progreso === 100 ? "#16a34a" : "#0b315f" }} /></div>
+        {/* PARADAS: las que el conductor marcó como completadas sobre el total. Iba sin rótulo y
+            como "100%", y al lado de la columna RASTREO se leía como otro porcentaje de GPS. */}
+        <div className="w-16 text-center" title={s.paradas_total > 0 ? `Paradas marcadas por el conductor: ${s.paradas_completadas} de ${s.paradas_total} (${progreso} %)` : "El servicio no tiene paradas cargadas"}>
+          <div className="text-[9px] font-bold uppercase text-gray-400">Paradas</div>
+          <div className="text-xs font-black text-[#0b315f] leading-tight">
+            {s.paradas_total > 0 ? <>{s.paradas_completadas}<span className="text-gray-300 font-normal">/{s.paradas_total}</span></> : <span className="text-gray-300">—</span>}
+          </div>
+          {s.paradas_total > 0 && (
+            <div className="h-1 bg-gray-100 rounded-full overflow-hidden mt-0.5"><div className="h-full rounded-full" style={{ width: `${progreso}%`, background: progreso === 100 ? "#16a34a" : "#0b315f" }} /></div>
+          )}
         </div>
       </div>
       {alertas.length > 0 && (
@@ -1283,7 +1290,6 @@ export default function SeguimientoPage() {
           vehiculoPlaca={gpsModal.vehiculo_placa}
           conductorNombre={gpsModal.conductor_nombre}
           conductorTel={gpsModal.conductor_tel}
-          conductorEmpresa={gpsModal.empresa_nombre}
           rastreo={rastreoMapa?.[gpsModal.reserva.id] ?? null}
           clienteNombre={gpsModal.cliente_nombre}
           origen={gpsModal.paradas[0]?.nombre ?? gpsModal.reserva.origen ?? null}
