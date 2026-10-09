@@ -32,6 +32,9 @@ type EstadoVisual  = "programado"|"en_ruta"|"finalizado"|"alerta"|"cancelado";
 type Reserva = {
   id: number; codigo?: string|null; cliente_id: number|null; vehiculo_id: number|null; conductor_id: number|null;
   empresa_tercerizada_id: number|null; vehiculo_tercero_id: number|null;
+  // El conductor de un servicio tercerizado. Ya venía en el `select("*")`; sin declararlo, la fila
+  // y el modal GPS enseñaban la razón social de la empresa en el lugar del conductor.
+  conductor_tercero_id?: number|null;
   tipo: string; tipo_asignacion: string|null; tipo_servicio_detalle: string|null;
   estado: EstadoReserva; fecha_servicio: string|null; hora_servicio: string|null;
   hora_real_inicio?: string|null; hora_real_fin?: string|null;
@@ -64,6 +67,7 @@ type Reserva = {
 type Cliente   = { id: number; nombre: string; empresa?: string|null };
 type Vehiculo  = { id: number; placa: string; capacidad_pasajeros?: number|null };
 type Conductor = { id: number; nombre: string; telefono?: string|null };
+type CondTer   = { id: number; nombre: string; telefono?: string|null };
 type EmpTer    = { id: number; razon_social: string; telefono?: string|null };
 type VehTer    = { id: number; placa: string };
 // `hora_llegada` (timestamptz) la escribe el conductor al entrar al geocerco del paradero
@@ -76,6 +80,9 @@ type DocVeh    = { id: number; vehiculo_id: number; tipo: string; fecha_vencimie
 type ServicioView = {
   reserva: Reserva; cliente_nombre: string; vehiculo_placa: string;
   conductor_nombre: string; conductor_tel: string; es_eventual: boolean;
+  /** Razón social del proveedor en un servicio tercerizado (null en flota propia). Va APARTE del
+   *  conductor: antes ocupaba su lugar y el modal decía «Conductor: TRANS TOURS …». */
+  empresa_nombre: string|null;
   estado_visual: EstadoVisual; paradas: Parada[]; paradas_total: number;
   paradas_completadas: number; pasajeros_total: number; pasajeros_abordados: number;
   pasajeros_total_real: number; seguro_vence_hoy: boolean;
@@ -546,6 +553,7 @@ function FilaServicio({ s, hermano, onOpen, onGps, onRutaNombre, onRutaMasiva }:
           <span className="font-mono font-bold text-gray-400">{s.vehiculo_placa}</span>
           <span className="text-gray-200">·</span>
           <span className="truncate">{s.conductor_nombre}</span>
+          {s.empresa_nombre && <><span className="text-gray-200">·</span><span className="truncate text-gray-400">{s.empresa_nombre}</span></>}
         </div>
       </div>
       <div className="hidden sm:flex items-center gap-4 flex-shrink-0">
@@ -603,6 +611,7 @@ export default function SeguimientoPage() {
   const [conductores, setConductores] = useState<Conductor[]>([]);
   const [empresas,    setEmpresas]    = useState<EmpTer[]>([]);
   const [vehsTer,     setVehsTer]     = useState<VehTer[]>([]);
+  const [condsTer,    setCondsTer]    = useState<CondTer[]>([]);
   const [paradas,     setParadas]     = useState<Parada[]>([]);
   const [pasajPar,    setPasajPar]    = useState<{parada_id:number; pasajero_id:number; estado?:string|null; estado_abordaje?:string|null; hora_abordaje?:string|null}[]>([]);
   const [paxAdhoc,    setPaxAdhoc]    = useState<{id:number; reserva_id:number}[]>([]);
@@ -681,7 +690,7 @@ export default function SeguimientoPage() {
     // `reservas` va sin paginar a propósito: está acotada a UNA fecha (≈20 servicios/día medidos
     // sobre 30 días) y su `.order("hora_servicio")` no es único, así que paginarla sería menos
     // seguro, no más. Todo lo demás sí pagina: ver el comentario de `enLotesPaginado`.
-    const [rRes,clRes,vRes,cRes,etRes,vtRes,dtRes] = await Promise.all([
+    const [rRes,clRes,vRes,cRes,etRes,vtRes,dtRes,ctRes] = await Promise.all([
       supabase.from("reservas").select("*").eq("fecha_servicio",fechaFiltro).in("estado",["programada","confirmada","en_curso","finalizada","cancelada"]).order("hora_servicio",{ascending:true}),
       tablaPaginada("clientes","id,nombre,empresa"),
       tablaPaginada("vehiculos","id,placa,capacidad_pasajeros"),
@@ -691,12 +700,13 @@ export default function SeguimientoPage() {
       // 240 proveedores × varios documentos obligatorios pasa de 1000 filas sin despeinarse, y
       // truncarla apagaría avisos de documento vencido justo en los últimos proveedores.
       tablaPaginada("documentos_tercero","id,empresa_id,tipo,fecha_vencimiento"),
+      tablaPaginada("conductores_tercero","id,nombre,telefono"),
     ]);
     const reservasData = (rRes.data as Reserva[])||[];
     setReservas(reservasData); setClientes(clRes as Cliente[]);
     setVehiculos(vRes as Vehiculo[]); setConductores(cRes as Conductor[]);
     setEmpresas(etRes as EmpTer[]); setVehsTer(vtRes as VehTer[]);
-    setDocsTer(dtRes as DocTer[]);
+    setDocsTer(dtRes as DocTer[]); setCondsTer(ctRes as CondTer[]);
 
     const reservaIds = reservasData.map(r => r.id);
     if (reservaIds.length > 0) {
@@ -779,9 +789,12 @@ export default function SeguimientoPage() {
       const esTer          = r.tipo==="tercerizada";
       const vehiculo_placa = esTer?(vehsTer.find(v=>v.id===r.vehiculo_tercero_id)?.placa||"—"):(vehiculos.find(v=>v.id===r.vehiculo_id)?.placa||"—");
       const empresa        = esTer ? empresas.find(e=>e.id===r.empresa_tercerizada_id) : null;
-      const conductor      = !esTer ? conductores.find(c=>c.id===r.conductor_id) : null;
-      const conductor_nombre = esTer?(empresa?.razon_social||"Tercero"):(conductor?.nombre||"—");
-      const conductor_tel    = esTer?(empresa?.telefono||""):(conductor?.telefono||"");
+      // Tercerizado: el conductor es el de `conductores_tercero`, nunca la empresa. Sin conductor
+      // asignado se dice "—" (igual que en flota propia), no se pone la razón social en su lugar.
+      const conductor      = esTer ? condsTer.find(c=>c.id===r.conductor_tercero_id) : conductores.find(c=>c.id===r.conductor_id);
+      const conductor_nombre = conductor?.nombre||"—";
+      const conductor_tel    = conductor?.telefono||"";
+      const empresa_nombre   = esTer ? (empresa?.razon_social||null) : null;
       const paradasR         = paradas.filter(p=>p.reserva_id===r.id);
       const idsParadaR       = new Set(paradasR.map(p=>p.id));
       const esperadosN       = esperados[r.id]?.size || 0;
@@ -805,7 +818,7 @@ export default function SeguimientoPage() {
         ahoraMs,
       }).inicio;
       return {
-        reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel, puntualidad: punt, salida,
+        reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel, empresa_nombre, puntualidad: punt, salida,
         es_eventual: esEventual(r), estado_visual: calcularEstadoVisual(r, punt, !!salida),
         paradas: paradasR, paradas_total: paradasR.length,
         paradas_completadas: paradasR.filter(p=>p.estado==="completada").length,
@@ -815,7 +828,7 @@ export default function SeguimientoPage() {
         gastos_total: gastosPorReserva[r.id]||0, docs_vencidos,
       };
     });
-  },[reservas,clientes,vehiculos,conductores,empresas,vehsTer,paradas,pasajPar,paxAdhoc,gastosRows,docsTer,docsVeh,puntActiva]);
+  },[reservas,clientes,vehiculos,conductores,condsTer,empresas,vehsTer,paradas,pasajPar,paxAdhoc,gastosRows,docsTer,docsVeh,puntActiva]);
 
   // Segundo paso: alertas que dependen de TODOS los servicios del día (solape de recurso, jornada).
   const servicios: ServicioView[] = useMemo(()=>{
@@ -943,7 +956,7 @@ export default function SeguimientoPage() {
       // querer repasar de una vez todos los servicios de "RUTA B", no ir fila por fila.
       // Permisiva (lib/busqueda-texto.ts): sin mayúsculas, tildes, signos ni orden de palabras.
       const cli=clientes.find(x=>x.id===s.reserva.cliente_id);
-      const txt=[s.vehiculo_placa,s.conductor_nombre,s.cliente_nombre,cli?.empresa,cli?.nombre,s.reserva.ruta_nombre,s.reserva.codigo,(s.reserva as any).origen,(s.reserva as any).destino,s.reserva.id].filter(v=>v!=null&&v!=="").join(" ");
+      const txt=[s.vehiculo_placa,s.conductor_nombre,s.empresa_nombre,s.cliente_nombre,cli?.empresa,cli?.nombre,s.reserva.ruta_nombre,s.reserva.codigo,(s.reserva as any).origen,(s.reserva as any).destino,s.reserva.id].filter(v=>v!=null&&v!=="").join(" ");
       return coincideBusqueda(txt,terminosSeg);
     }
     return true;
@@ -1146,6 +1159,7 @@ export default function SeguimientoPage() {
           vehiculoPlaca={gpsModal.vehiculo_placa}
           conductorNombre={gpsModal.conductor_nombre}
           conductorTel={gpsModal.conductor_tel}
+          conductorEmpresa={gpsModal.empresa_nombre}
           clienteNombre={gpsModal.cliente_nombre}
           origen={gpsModal.paradas[0]?.nombre ?? gpsModal.reserva.origen ?? null}
           destino={(gpsModal.paradas.length > 1 ? gpsModal.paradas[gpsModal.paradas.length - 1].nombre : null) ?? gpsModal.reserva.destino ?? null}
