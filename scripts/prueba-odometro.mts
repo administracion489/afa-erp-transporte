@@ -23,7 +23,7 @@
 // lectura legítima (unidad nueva sin historial, salto grande tras una parada larga), y NADIE
 // adivina qué dígito sobra — de 239.980 salen tres borrados posibles dentro de la banda.
 
-import { elegirOdometro, digitosDe, corregirDigitoRepetido, revisarKmTecleado } from "../lib/odometro-seleccion";
+import { elegirOdometro, digitosDe, corregirDigitoRepetido, revisarKmTecleado, decimalComoEntero } from "../lib/odometro-seleccion";
 import { evaluarLectura, RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "../lib/odometro";
 import { promptOdometro } from "../lib/vision-ia";
 import { sinCifrasCopiables, formaOdometro, UMBRAL_CAMBIO_DE_CIFRA } from "../lib/odometro-prompt";
@@ -478,7 +478,7 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
     guiasOdometro: [{ placa: "CUP-435", guia: null, digitos: 5, puedeSubir: false }, { placa: "ABC-123", guia: null, digitos: 5, puedeSubir: true }],
   });
   chk("Radar · la unidad lejos del cambio conserva su línea de siempre",
-    /CUP-435: el odómetro TOTAL es un número de 5 dígitos\n/.test(radar));
+    /CUP-435: el odómetro TOTAL es un número de 5 dígitos \(sin contar el tambor de décimas, si lo tiene\)\n/.test(radar));
   chk("Radar · la unidad cerca del cambio admite 6 si empieza por «10»", /ABC-123:[^\n]*pasar a 6[^\n]*«10»/.test(radar));
   chk("Radar · sin `puedeSubir` (filas viejas) se comporta como lejos",
     !promptExtraccionMedia({ fechaHoy: "2026-10-08", horaAhora: "10:00", guiasOdometro: [{ placa: "XYZ-999", guia: null, digitos: 5 }] }).includes("«10»"));
@@ -532,6 +532,63 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
   const pagina = readFileSync(new URL("../app/radar-ia/page.tsx", import.meta.url), "utf8");
   chk("las dos anomalías nuevas tienen etiqueta en /radar-ia",
     /\bkm_corregido:\s*"/.test(pagina) && /\bkm_digito_de_mas:\s*"/.test(pagina));
+}
+
+
+// ── 14. El tambor de DÉCIMAS leído como una cifra más (B4N-968, octubre 2026) ──
+// Tablero mecánico «5 6 1 2 9 [2]», el último tambor en otro color: 56,129.2 km. La IA devolvía
+// 561,292. Y como venía pasando desde antes, el historial de la unidad quedó en esa escala.
+console.log("\n14. Tambor de décimas");
+{
+  chk("decimalComoEntero · «56129.2» con km 561292 → 56129", decimalComoEntero(561292, "56129.2") === 56129);
+  chk("…también con separador de miles («56,129.2»)", decimalComoEntero(561292, "ODO 56,129.2 km") === 56129);
+  chk("…con coma decimal («56129,2»)", decimalComoEntero(561292, "56129,2") === 56129);
+  chk("«174,159» son MILES, no una décima", decimalComoEntero(174159, "174,159") === null);
+  chk("sin punto en el texto no se deduce nada", decimalComoEntero(561292, "561292") === null);
+  chk("una décima de OTRO número (el trip) no toca el km", decimalComoEntero(174159, "1803.6 y 174159") === null);
+  chk("sin texto, nada", decimalComoEntero(561292, null) === null);
+
+  // Con el historial ya corregido (en kilómetros): se registra la parte entera, sin pedir confirmación.
+  const ok = leer({ kmIA: 561292, textoLeido: "56129.2", kmVigente: 56050, vecinas: { anterior: 56050, posterior: null } });
+  chk("B4N-968 · se registra 56,129, no 561,292", ok.km === 56129 && ok.codigo === "decimal_como_entero", `km=${ok.km} codigo=${ok.codigo}`);
+  chk("…cuadra con la unidad: sigue el curso normal", ok.autoOk === true && ok.origen === "corregido");
+  chk("…no lleva `confirmar`: lo transcribió el modelo, no lo dedujo el ERP", ok.confirmar !== true);
+  chk("…el motivo dice que el último tambor son décimas", /D[ÉE]CIMAS/i.test(ok.motivo ?? ""));
+
+  // Con el historial CONTAMINADO (las décimas como kilómetros): el número malo cae «en banda».
+  // Antes se aceptaba tal cual y seguía alimentando la escala equivocada.
+  const sucio = leer({ kmIA: 561292, textoLeido: "56129.2", kmVigente: 560287, vecinas: { anterior: 560287, posterior: null } });
+  const antes = leer({ kmIA: 561292, kmVigente: 560287, vecinas: { anterior: 560287, posterior: null } });
+  chk("regresión · sin la transcripción, el ×10 se acepta como bueno (el defecto)", antes.km === 561292 && antes.autoOk === true);
+  chk("historial ×10 · con la transcripción se registra 56,129 igual", sucio.km === 56129 && sucio.codigo === "decimal_como_entero");
+  chk("…pero NO pasa de largo: hay que mirarlo", sucio.autoOk === false);
+  chk("…y el motivo nombra el historial en la escala de las décimas", /historial/.test(sucio.motivo ?? "") && /décimas/.test(sucio.motivo ?? ""));
+
+  // Sin ancla: la parte entera, con el curso normal.
+  const nuevo = leer({ kmIA: 561292, textoLeido: "56129.2", kmVigente: 0, hayHistorial: false });
+  chk("unidad sin km · se registra la parte entera", nuevo.km === 56129 && nuevo.autoOk === true);
+
+  // Lo que NO se toca.
+  const bien = leer({ kmIA: 56129, textoLeido: "56129.2", kmVigente: 56050, vecinas: { anterior: 56050, posterior: null } });
+  chk("la IA ya dejó fuera la décima → nada que corregir", bien.km === 56129 && bien.codigo === null && bien.origen === "ia");
+  const trip = leer({ kmIA: 18036, tripIA: 174159, textoLeido: "1803.6 · 174159", kmVigente: 174100, vecinas: { anterior: 174100, posterior: null } });
+  chk("el punto era del TRIP y el total cuadra → el rescate de siempre", trip.km === 174159 && trip.codigo === "parcial", `km=${trip.km} codigo=${trip.codigo}`);
+  const cup = leer({ kmIA: 239980, tripIA: 388, kmVigente: 23980 });
+  chk("CUP-435 sigue siendo el dígito repetido", cup.km === 23980 && cup.codigo === "digito_repetido");
+
+  // La recarga usa el mismo veredicto.
+  const rOk = kmDeRecarga(561292, ok);
+  chk("recarga · km 56,129 sin bloquear", rOk.km === 56129 && rOk.anomalia?.codigo === "km_corregido" && rOk.anomalia?.bloquea === false);
+  const rSucio = kmDeRecarga(561292, sucio);
+  chk("recarga · con el historial ×10, corrige y BLOQUEA", rSucio.km === 56129 && rSucio.anomalia?.bloquea === true);
+
+  // La regla está en los dos carriles, y la forma no cuenta el tambor.
+  const app = promptOdometro({ digitos: 5, placa: "B4N-968" });
+  chk("app · el prompt explica el tambor de décimas", /TAMBORES/.test(app) && /DÉCIMAS/.test(app) && /«ABCDE\.F»/.test(app));
+  chk("app · la forma de 5 cifras no cuenta el tambor", /5 dígitos \(sin contar el tambor de décimas/.test(app));
+  const radar = promptExtraccionMedia({ fechaHoy: "2026-10-09", horaAhora: "10:00" });
+  chk("Radar · la lectura del tablero explica el tambor de décimas", /TAMBORES/.test(radar) && /texto_kilometraje/.test(radar));
+  chk("app · sin cifras copiables en la regla", !/\d{4,}/.test(app.match(/ODÓMETRO DE TAMBORES[^\n]*/)?.[0] ?? "x1234"));
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) fallaron` : "\nTodo en verde");
