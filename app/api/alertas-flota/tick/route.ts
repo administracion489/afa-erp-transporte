@@ -21,6 +21,8 @@ import {
   hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, canalesConductor, type AlertaConfig,
 } from "@/lib/alertas";
 import { horarioDe, limaAUtcMs, planDeEnvioConductor } from "@/lib/alertas-horario";
+import { planRecordarCheckout, cadenciaEfectiva, escalaAlDirectorio, type LecturaCheckout } from "@/lib/alertas-checkout";
+import { tsEfectivoLectura } from "@/lib/odometro-tiempo";
 import {
   enViaRecordatorio as enViaRecordatorioPuro,
   enVentanaHoraFija as enVentanaHoraFijaPuro,
@@ -756,43 +758,110 @@ async function handler(req: NextRequest) {
       }
     }
 
-    // ── BLOQUE 5b: recordar CHECK-OUT de jornada ────────────────────────────────
-    // Cuando un conductor TERMINÓ todos sus servicios de hoy (todas finalizada) pero aún NO
-    // registró su check-out (no hay fila en checkout_conductor del día). Se repite cada HORA
-    // (dedupe por bucket horario) hasta que lo complete; al registrar el check-out deja de
-    // matchear y el recordatorio para solo.
+    // ── BLOQUE 5b: recordar CHECK-OUT de jornada (el odómetro final) ────────────
+    // La decisión la toma `planRecordarCheckout` (lib/alertas-checkout.ts, PURO): cuando el
+    // conductor cerró su último servicio del día (los cancelados no cuentan), pasado el tiempo de
+    // espera (`umbral`) y sin check-out NI lectura de odómetro de la unidad después de ese
+    // servicio —venga de la app, del grupo de WhatsApp (Radar) o de una carga a mano—, se le
+    // recuerda; y se repite cada `jornada_config.recordar_checkout_cada_min` hasta que cumpla.
+    // Tras ESCALAR_TRAS_RECORDATORIOS sin respuesta se avisa UNA vez al directorio marcado.
     {
       const cfg = activa("recordar_checkout");
       if (cfg && cfg.notifica_conductor) {
-        const graciaMin = cfg.umbral ?? 60; // min tras el último servicio antes de empezar a recordar
-        const hoyRes = todas.filter((r) => r.fecha_servicio === hoy && r.conductor_id);
-        const porConductor = new Map<number, any[]>();
-        for (const r of hoyRes) {
-          if (!porConductor.has(r.conductor_id)) porConductor.set(r.conductor_id, []);
-          porConductor.get(r.conductor_id)!.push(r);
+        // Servicios de hoy por conductor. Los ids de las dos tablas de conductores se solapan:
+        // la clave lleva la tabla.
+        type FilaServicio = (typeof todas)[number];
+        const porConductor = new Map<string, { ref: RefCond; servicios: FilaServicio[] }>();
+        for (const r of todas) {
+          if (r.fecha_servicio !== hoy) continue;
+          const ref = condDe(r);
+          if (!ref) continue;
+          const k = `${ref.tabla}:${ref.id}`;
+          if (!porConductor.has(k)) porConductor.set(k, { ref, servicios: [] });
+          porConductor.get(k)!.servicios.push(r);
         }
-        // ¿Quién ya hizo check-out hoy? (query aparte → si la tabla nueva no existe, set vacío)
-        const { data: cos } = await admin.from("checkout_conductor").select("conductor_id").eq("fecha", hoy);
-        const yaCheckout = new Set<number>((cos ?? []).map((c: any) => Number(c.conductor_id)));
-        const horaBucket = `${hoy.replace(/-/g, "")}-${String(Math.floor(ahora / 60)).padStart(2, "0")}`; // YYYYMMDD-HH (Lima)
-        const hoyBonito = `${hoy.slice(8, 10)}/${hoy.slice(5, 7)}`; // "20/07" — legible en el mensaje (hoy sigue en ISO para las queries de arriba)
-        let n = 0;
-        for (const [cid, servicios] of porConductor) {
-          if (yaCheckout.has(cid)) continue;                       // ya cerró la jornada
-          if (!servicios.every((s) => s.estado === "finalizada")) continue; // aún tiene servicios abiertos
-          const tiempos = servicios
-            .map((s) => finServicioMs(s))
-            .filter((t): t is number => Number.isFinite(t as any) && (t as number) > 0);
-          const finMs = tiempos.length ? Math.max(...tiempos) : 0;
-          if (finMs > 0 && (Date.now() - finMs) / 60000 < graciaMin) continue; // aún dentro de la gracia
-          // Cadencia HORARIA: el bucket en el ref hace que cada hora sea un envío nuevo.
-          if (!(await reclamarEnvio("recordar_checkout", `${cid}:${horaBucket}`))) continue;
-          const rc = await aConductor(cfg, cid, [nombreCorto(condMap.get(cid)?.nombre), hoyBonito]);
-          if (rc === "fallo") { await liberarEnvio("recordar_checkout", `${cid}:${horaBucket}`); continue; } // transitorio → reintentar
-          if (rc === "enviado") n++;
-          // sin_canal (sin teléfono/plantilla): se deja reclamado para no reintentar en bucle.
+        const vehDe = (r: { vehiculo_id?: number | null; vehiculo_tercero_id?: number | null }): string | null =>
+          r.vehiculo_id ? `propio:${r.vehiculo_id}` : r.vehiculo_tercero_id ? `tercero:${r.vehiculo_tercero_id}` : null;
+
+        // ¿Quién ya hizo check-out hoy? Si la tabla no existe, nadie (la lectura cubre igual).
+        const { data: cos } = await admin.from("checkout_conductor").select("conductor_id, es_tercero").eq("fecha", hoy);
+        const yaCheckout = new Set<string>(((cos ?? []) as { conductor_id: number; es_tercero: boolean | null }[]).map((c) =>
+          `${c.es_tercero ? "conductores_tercero" : "conductores"}:${Number(c.conductor_id)}`));
+
+        // Lecturas de hoy de las unidades en juego. Si la consulta falla NO se recuerda en este
+        // tick: sin saber si mandó la foto al grupo, el recordatorio podría llegarle a quien ya
+        // cumplió (el próximo tick vuelve a intentarlo).
+        const vProp = [...new Set(todas.filter((r) => r.fecha_servicio === hoy && r.vehiculo_id).map((r) => r.vehiculo_id))];
+        const vTer = [...new Set(todas.filter((r) => r.fecha_servicio === hoy && r.vehiculo_tercero_id).map((r) => r.vehiculo_tercero_id))];
+        const lecturas: LecturaCheckout[] = [];
+        let lecturasOk = true;
+        for (const [col, ids, pre] of [["vehiculo_id", vProp, "propio"], ["vehiculo_tercero_id", vTer, "tercero"]] as const) {
+          if (!ids.length) continue;
+          const { data, error } = await admin.from("lecturas_odometro")
+            .select(`${col}, estado, capturado_en, created_at, fecha`)
+            .eq("fecha", hoy).in(col, ids as number[]);
+          if (error) { lecturasOk = false; break; }
+          for (const l of (data ?? []) as unknown as Record<string, string | number | null>[]) {
+            lecturas.push({
+              vehiculo: `${pre}:${l[col]}`,
+              ts: tsEfectivoLectura(l as { capturado_en?: string | null; created_at?: string | null; fecha?: string | null }),
+              anulada: l.estado === "anulada",
+            });
+          }
+        }
+
+        // Cadencia: la que se configura en /auditoria-jornada («Recordar cada (min)»).
+        const { data: jc } = await admin.from("jornada_config").select("recordar_checkout_cada_min").eq("id", 1).maybeSingle();
+        const cadenciaMin = cadenciaEfectiva(jc?.recordar_checkout_cada_min);
+
+        const hoyBonito = `${hoy.slice(8, 10)}/${hoy.slice(5, 7)}`; // "20/07" — legible en el mensaje
+        let n = 0, escalados = 0;
+        if (lecturasOk) for (const [k, { ref, servicios }] of porConductor) {
+          const plan = planRecordarCheckout({
+            servicios: servicios.map((s) => ({ estado: s.estado, finMs: finServicioMs(s), vehiculo: vehDe(s) })),
+            checkoutHecho: yaCheckout.has(k),
+            lecturas,
+            ahoraMs,
+            esperaMin: cfg.umbral ?? 60,
+            cadenciaMin,
+          });
+          if (plan.codigo !== "recordar") continue;
+          const nombre = nombreCorto(datosCond(ref)?.nombre);
+          const refEnvio = `${k}:${plan.turno}`;
+          if (await reclamarEnvio("recordar_checkout", refEnvio)) {
+            const rc = await aConductor(cfg, ref, [nombre, hoyBonito]);
+            if (rc === "fallo") await liberarEnvio("recordar_checkout", refEnvio); // transitorio → reintentar
+            else if (rc === "enviado") n++;
+            // sin_canal (sin teléfono/plantilla, o tercerizado con el aviso apagado): queda
+            // reclamado para no reintentar en bucle.
+          }
+          // Escalar UNA vez por día al directorio marcado en la alerta («También avisar a»).
+          if (escalaAlDirectorio(plan.ronda) && directorioDe(cfg, destinatarios).length) {
+            const refDir = `dir:${k}`;
+            if (await reclamarEnvio("recordar_checkout", refDir)) {
+              // La clave de la unidad («propio:12») no es una placa: se busca solo al escalar.
+              let placa = "su unidad";
+              const [flota, idTxt] = (plan.vehiculo ?? "").split(":");
+              if (idTxt) {
+                const { data: v } = await admin.from(flota === "tercero" ? "vehiculos_tercero" : "vehiculos")
+                  .select("placa").eq("id", Number(idTxt)).maybeSingle();
+                if (v?.placa) placa = v.placa;
+              }
+              const fin = plan.finMs != null
+                ? new Date(plan.finMs).toLocaleTimeString("es-PE", { timeZone: "America/Lima", hour: "2-digit", minute: "2-digit", hour12: false })
+                : "-";
+              const rd = await aDirectorio(cfg, [
+                "Falta odómetro final", nombre, `Último servicio ${fin}`,
+                `No envió el check-out ni la foto del tablero (${placa}). Ya recibió ${(plan.ronda ?? 0) + 1} recordatorios.`,
+              ]);
+              if (rd.enviados === 0 && rd.fallos > 0) await liberarEnvio("recordar_checkout", refDir);
+              else if (rd.enviados > 0) escalados++;
+            }
+          }
         }
         res.recordar_checkout = n;
+        res.recordar_checkout_escalados = escalados;
+        if (!lecturasOk) res.recordar_checkout_sin_lecturas = 1;
       }
     }
 
