@@ -888,8 +888,14 @@ export default function SeguimientoPage() {
   },[serviciosBase]);
 
   // El drawer guarda una instantánea; al recargar datos, refrescarla con la versión vigente.
+  // El modal GPS también: sin esto le llegaban las paradas tal como estaban al ABRIRLO, y una marca
+  // posterior del conductor no existía para él — ni para el avance de paradas ni para el juicio de
+  // la detención (lib/gps-detencion.ts: «el conductor ya marcó un paradero posterior» es lo que
+  // separa una espera de un teléfono olvidado). No encarece: `paradasGps` va por firma y la ruta
+  // del modal se re-pide solo si cambia una parada, con la caché del servidor por coordenadas.
   useEffect(() => {
     setDrawer(prev => prev ? (servicios.find(s => s.reserva.id === prev.reserva.id) ?? prev) : prev);
+    setGpsModal(prev => prev ? (servicios.find(s => s.reserva.id === prev.reserva.id) ?? prev) : prev);
   }, [servicios]);
 
   // Ir al detalle de un servicio desde el panel de mensajes de pasajeros.
