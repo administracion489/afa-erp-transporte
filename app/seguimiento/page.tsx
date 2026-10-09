@@ -15,7 +15,8 @@ import { idAfa } from "@/lib/folio";
 import { esAbordado } from "@/lib/documentos-servicio";
 import { paginarFilas } from "@/lib/huella";
 import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
-import { derivarTiempos, procedencia, type Instante } from "@/lib/servicio-tiempos";
+import { derivarTiempos, procedencia, hhmmLima, type Instante } from "@/lib/servicio-tiempos";
+import { resumenRastreo, BANDA_CON_CORTES, BANDA_ACEPTABLE, type VeredictoRastreo, type ProblemaRastreo, type ItemRastreo } from "@/lib/gps-cobertura";
 import { SIN_NOMBRE_RUTA, ETIQUETA_RECORRIDO } from "@/lib/ruta-identidad";
 import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
 import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
@@ -522,7 +523,7 @@ function CeldaRuta({ s, hermano, onGuardado, onMasivo }: { s: ServicioView; herm
   );
 }
 
-function FilaServicio({ s, hermano, onOpen, onGps, onRutaNombre, onRutaMasiva }:{ s: ServicioView; hermano?: Reserva|null; onOpen: () => void; onGps: () => void; onRutaNombre: (id: number, valor: string|null) => void; onRutaMasiva: (r: Reserva, nombre: string) => void }) {
+function FilaServicio({ s, hermano, rastreo, rastreoEstado, onOpen, onGps, onRutaNombre, onRutaMasiva }:{ s: ServicioView; hermano?: Reserva|null; rastreo?: VeredictoRastreo|null; rastreoEstado: "cargando"|"listo"|"error"; onOpen: () => void; onGps: () => void; onRutaNombre: (id: number, valor: string|null) => void; onRutaMasiva: (r: Reserva, nombre: string) => void }) {
   const est      = ESTADO_VIS[s.estado_visual];
   const progreso = s.paradas_total > 0 ? Math.round((s.paradas_completadas / s.paradas_total) * 100) : 0;
   const alertas  = chipsAlerta(s);
@@ -564,6 +565,17 @@ function FilaServicio({ s, hermano, onOpen, onGps, onRutaNombre, onRutaMasiva }:
           <div className={`text-xs font-black ${s.salida ? (s.salida.estimado ? "text-gray-500 italic" : "text-green-600") : "text-gray-300"}`}>
             {s.salida ? s.salida.hhmm : "—"}
           </div>
+        </div>
+        {/* RASTREO: % del servicio con GPS (lib/gps-cobertura.ts, el mismo cálculo de /gps-salud).
+            Mientras se mide dice "…": nunca se afirma un vacío mientras se está buscando. */}
+        <div className="text-center w-[70px]" title={rastreo ? rastreo.detalle : rastreoEstado === "error" ? "No se pudo medir el rastreo" : rastreoEstado === "cargando" ? "Midiendo el rastreo…" : ""}>
+          <div className="text-[9px] font-bold uppercase text-gray-400">Rastreo</div>
+          {rastreo && rastreo.codigo !== "no_aplica" && rastreo.codigo !== "recien_iniciado" && rastreo.codigo !== "sin_medir" ? (
+            <span className={`inline-block text-[10px] font-black px-1.5 py-0.5 rounded-md whitespace-nowrap ${rastreo.problema === "urgente" ? "animate-pulse" : ""}`}
+              style={{ color: rastreo.color, background: rastreo.bg }}>{rastreo.celda}</span>
+          ) : (
+            <div className="text-xs font-black text-gray-300">{rastreoEstado === "cargando" && !rastreo ? "…" : rastreo?.celda ?? "—"}</div>
+          )}
         </div>
         <div className="text-center w-14">
           <div className="text-[9px] font-bold uppercase text-gray-400">Pasaj.</div>
@@ -626,6 +638,10 @@ export default function SeguimientoPage() {
   /** "" = todas · "sin" · "RUTA A|T1" (etiquetas del DÍA). */
   const [filtroEtq,   setFiltroEtq]   = useState("");
   const [gpsModal,    setGpsModal]    = useState<ServicioView | null>(null);
+  // RASTREO GPS por servicio (/api/seguimiento/rastreo). Se guarda CON su fecha: al cambiar de
+  // día, el mapa viejo no puede pintarse sobre los servicios del nuevo mientras llega el suyo.
+  const [rastreoDia, setRastreoDia] = useState<{ fecha: string; mapa: Record<number, VeredictoRastreo>; error: boolean } | null>(null);
+  const [filtroRastreo, setFiltroRastreo] = useState<"todos"|Exclude<ProblemaRastreo, null>>("todos");
   const [drawer,      setDrawer]      = useState<ServicioView | null>(null);
   const [descargaMasiva, setDescargaMasiva] = useState(false);
   // Renombrado en lote del nombre de ruta. Vive en la PÁGINA, no en la fila: el modal tapa la
@@ -672,6 +688,29 @@ export default function SeguimientoPage() {
     const t = setInterval(traer, 45_000);   // > TTL de caché del endpoint (20 s)
     return () => { vivo = false; clearInterval(t); };
   }, [fechaFiltro, esHoy]);
+
+  // ── Rastreo GPS ─────────────────────────────────────────────────────────────────
+  // También días pasados (revisar ayer es la mitad del uso). HOY se refresca cada minuto.
+  useEffect(() => {
+    let vivo = true;
+    const traer = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.access_token) return;
+        const r = await fetch(`/api/seguimiento/rastreo?fecha=${fechaFiltro}`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const j = r.ok ? await r.json() : null;
+        if (!vivo) return;
+        setRastreoDia({ fecha: fechaFiltro, mapa: j?.rastreo || {}, error: !r.ok || !!j?.error });
+      } catch { if (vivo) setRastreoDia({ fecha: fechaFiltro, mapa: {}, error: true }); }
+    };
+    traer();
+    const t = esHoy ? setInterval(traer, 60_000) : null;
+    return () => { vivo = false; if (t) clearInterval(t); };
+  }, [fechaFiltro, esHoy]);
+  const rastreoMapa = rastreoDia?.fecha === fechaFiltro ? rastreoDia.mapa : null;
+  const rastreoEstado: "cargando"|"listo"|"error" = !rastreoMapa ? "cargando" : rastreoDia?.error ? "error" : "listo";
 
   // Los veredictos solo aplican a HOY. Se filtra al LEER en vez de limpiar el estado
   // dentro del efecto (eso disparaba un render en cascada), con identidad estable para
@@ -893,6 +932,13 @@ export default function SeguimientoPage() {
   const docsVenc        = servicios.filter(s=>s.docs_vencidos.length>0).length;
   const conflictos      = servicios.filter(s=>s.conflicto_vehiculo||s.conflicto_conductor).length;
   const fatigaCount     = servicios.filter(s=>s.jornada_extensa).length;
+  // Aviso de rastreo: UNA función (resumenRastreo) decide quién es urgente, quién quedó sin
+  // rastreo útil y cuántas UNIDADES distintas son — el aviso, la columna y el filtro leen lo mismo.
+  const rastreoRes = resumenRastreo(servicios.flatMap((s): ItemRastreo[] => {
+    const v = rastreoMapa?.[s.reserva.id];
+    return v ? [{ reservaId: s.reserva.id, placa: s.vehiculo_placa, conductor: s.conductor_nombre, v }] : [];
+  }));
+  const telDe = (reservaId: number) => servicios.find(s=>s.reserva.id===reservaId)?.conductor_tel || "";
 
   // ModalGps redibuja la ruta con Google Directions cada vez que cambia la IDENTIDAD del array
   // `paradas`. Como esta página se re-renderiza en cada evento realtime de reservas/paradas,
@@ -951,6 +997,7 @@ export default function SeguimientoPage() {
     if (filtroTipo==="eventual"&&!s.es_eventual) return false;
     if (filtroEstado!=="todos"&&s.estado_visual!==filtroEstado) return false;
     if (filtroNivel!=="todos"&&s.puntualidad?.nivel!==filtroNivel) return false;
+    if (filtroRastreo!=="todos"&&rastreoMapa?.[s.reserva.id]?.problema!==filtroRastreo) return false;
     if (busqueda) {
       // La ruta entra a la búsqueda desde que se puede ver y editar en la lista: lo normal es
       // querer repasar de una vez todos los servicios de "RUTA B", no ir fila por fila.
@@ -1060,6 +1107,83 @@ export default function SeguimientoPage() {
           </div>
         )}
 
+        {/* ── RASTREO GPS ──
+            Separa lo que se arregla AHORA (en ruta sin señal: se llama al conductor) de lo que ya
+            quedó en el registro (servicios terminados sin rastreo útil). El número del titular son
+            UNIDADES distintas, no servicios: una misma unidad con el teléfono mal configurado
+            falla en todos sus viajes del día y es UN problema, no cuatro. Cada contador filtra. */}
+        {rastreoEstado === "error" && (
+          <p className="text-[11px] text-gray-400 px-1">No se pudo medir el rastreo GPS de este día. La columna Rastreo dice «?» y se reintenta sola.</p>
+        )}
+        {(rastreoRes.urgentes.length > 0 || rastreoRes.incompletos.length > 0 || rastreoRes.conCortes.length > 0) && (
+          <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4 shadow-sm">
+            <div className="flex items-center gap-2 mb-3 flex-wrap">
+              <div className="w-7 h-7 rounded-lg bg-[#FEF2F2] flex items-center justify-center"><Ic.Map size={15} color="#991b1b"/></div>
+              <p className="font-black text-[#0b315f] text-sm">
+                Rastreo GPS{rastreoRes.unidadesConProblema > 0
+                  ? ` · ${esHoy ? "Hoy" : "Ese día"}, ${rastreoRes.unidadesConProblema} ${rastreoRes.unidadesConProblema === 1 ? "unidad" : "unidades"} con rastreo incompleto`
+                  : ""}
+              </p>
+              {filtroRastreo !== "todos" && (
+                <button onClick={()=>setFiltroRastreo("todos")} className="text-[10px] font-bold text-gray-400 hover:text-[#0b315f] underline">quitar filtro</button>
+              )}
+            </div>
+
+            {rastreoRes.urgentes.length > 0 && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 mb-3">
+                <p className="text-xs font-black text-red-800 mb-1.5">🔴 En ruta sin señal ahora: {rastreoRes.urgentes.length} — llama al conductor</p>
+                <div className="space-y-1">
+                  {rastreoRes.urgentes.map(i => {
+                    const tel = telDe(i.reservaId);
+                    return (
+                      <div key={i.reservaId} className="flex items-center gap-2 text-xs text-red-900 flex-wrap">
+                        <span className="font-mono font-black">{i.placa}</span>
+                        <span>· {i.conductor}</span>
+                        <span className="text-red-700">· {i.v.ultimaSenalTs != null ? `sin señal desde las ${hhmmLima(i.v.ultimaSenalTs)}` : "no ha llegado ninguna posición"}</span>
+                        {tel && <a href={`tel:${tel}`} className="font-bold text-green-700 underline">{tel}</a>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              {([
+                { k: "urgente" as const,    n: rastreoRes.urgentes.length,    label: "En ruta sin señal",     color: "#991b1b", bg: "#fee2e2" },
+                { k: "incompleto" as const, n: rastreoRes.incompletos.length, label: "Rastreo incompleto",    color: "#991b1b", bg: "#fee2e2" },
+                { k: "cortes" as const,     n: rastreoRes.conCortes.length,   label: "Con cortes de señal",   color: "#92400e", bg: "#fef3c7" },
+              ]).filter(x => x.n > 0).map(x => {
+                const activo = filtroRastreo === x.k;
+                return (
+                  <button key={x.k} onClick={()=>setFiltroRastreo(activo ? "todos" : x.k)}
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl border transition-all"
+                    style={{ background: x.bg, borderColor: `${x.color}33`, ...(activo ? { boxShadow: `0 0 0 2px ${x.color}` } : {}) }}>
+                    <span className="font-black text-lg leading-none" style={{ color: x.color }}>{x.n}</span>
+                    <span className="text-[11px] font-bold" style={{ color: x.color }}>{x.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {rastreoRes.incompletos.length > 0 && (
+              <div className="mt-3 space-y-1">
+                {rastreoRes.incompletos.map(i => (
+                  <p key={i.reservaId} className="text-[11px] text-gray-600 leading-snug">
+                    <span className="font-mono font-black text-[#0b315f]">{i.placa}</span> · {i.conductor} — <span className="font-bold" style={{ color: i.v.color }}>{i.v.celda}</span> · {i.v.detalle}
+                  </p>
+                ))}
+              </div>
+            )}
+
+            <p className="text-[11px] text-gray-400 mt-3 leading-snug">
+              <b>Rastreo</b> = qué parte del tiempo del servicio llegó posición GPS, desde que el conductor lo inicia hasta que llega al último paradero.
+              {" "}<b className="text-red-800">Incompleto</b> = menos de {BANDA_CON_CORTES} %: el viaje no se puede reconstruir (casi siempre el teléfono cerró la app o bloqueó la ubicación).
+              {" "}<b className="text-amber-800">Con cortes</b> = de {BANDA_CON_CORTES} a {BANDA_ACEPTABLE - 1} %. Por equipo y conductor, en <Link href="/gps-salud" className="underline font-bold">Salud del GPS</Link>.
+            </p>
+          </div>
+        )}
+
         {(conflictos > 0 || fatigaCount > 0 || docsVenc > 0) && (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3.5 flex items-start gap-3">
             <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center flex-shrink-0"><Ic.Shield size={16} color="#b45309"/></div>
@@ -1142,7 +1266,7 @@ export default function SeguimientoPage() {
               </div>
               <div className="divide-y divide-gray-50">
                 {[...filtrados].sort((a,b)=>(a.reserva.hora_servicio||"").localeCompare(b.reserva.hora_servicio||"")).map(s=>(
-                  <FilaServicio key={s.reserva.id} s={s} hermano={hermanoDe(s.reserva)} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRutaNombre={patchRutaNombre} onRutaMasiva={(r,n)=>setRutaMasiva({reserva:r,nombre:n})} />
+                  <FilaServicio key={s.reserva.id} s={s} hermano={hermanoDe(s.reserva)} rastreo={rastreoMapa?.[s.reserva.id] ?? null} rastreoEstado={rastreoEstado} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRutaNombre={patchRutaNombre} onRutaMasiva={(r,n)=>setRutaMasiva({reserva:r,nombre:n})} />
                 ))}
               </div>
             </div>
@@ -1160,6 +1284,7 @@ export default function SeguimientoPage() {
           conductorNombre={gpsModal.conductor_nombre}
           conductorTel={gpsModal.conductor_tel}
           conductorEmpresa={gpsModal.empresa_nombre}
+          rastreo={rastreoMapa?.[gpsModal.reserva.id] ?? null}
           clienteNombre={gpsModal.cliente_nombre}
           origen={gpsModal.paradas[0]?.nombre ?? gpsModal.reserva.origen ?? null}
           destino={(gpsModal.paradas.length > 1 ? gpsModal.paradas[gpsModal.paradas.length - 1].nombre : null) ?? gpsModal.reserva.destino ?? null}

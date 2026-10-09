@@ -544,10 +544,6 @@ export type ResumenViaje = {
   velMaxKmh: number; paradas: number;
   horaSalida: number; horaLlegada: number;            // ms epoch (la UI formatea en hora Perú)
   medidoPct: number; precisionMedianaM: number; puntosTotales: number;
-  // Metros de la geometría DIBUJADA (los pone quien llama, tras el loop de puentes): la línea de
-  // velocidad y los tramos estimados. Viajan aparte del % para que la pantalla pueda medirlos
-  // contra la RUTA del servicio (coberturaRastreo) cuando el servicio ya terminó.
-  medidoM?: number; estimadoM?: number;
 };
 export function resumenViaje(limpia: HuellaPt[], crudos: HuellaPt[]): ResumenViaje | null {
   const cru = (crudos || []).filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && c.ts > 0).sort((a, b) => a.ts - b.ts);
@@ -600,66 +596,6 @@ export function resumenViaje(limpia: HuellaPt[], crudos: HuellaPt[]): ResumenVia
     precisionMedianaM: Math.round(accs[Math.floor(accs.length / 2)]),
     puntosTotales: cru.length,
   };
-}
-
-// ── ¿QUÉ PARTE DEL SERVICIO TIENE HUELLA? ───────────────────────────────────
-// El badge "Rastreo %" medía `medido / (medido + estimado)`, y el estimado solo rellena huecos
-// ENTRE dos señales. Lo que pasa DESPUÉS de la última señal no entra en ninguno de los dos, así
-// que un GPS que transmite 3 minutos y se calla daba 100 %: 0.4 km medidos sobre 0.4 km de
-// trayecto. Caso real: reserva #6166 (VFC-962), «Rastreo 100%» con la huella cortada a los 400 m
-// de una ruta de 55 min que el conductor terminó marcando todas las paradas.
-//
-// La referencia correcta es el SERVICIO, no el trecho entre la primera y la última señal. Cuando
-// el servicio ya terminó (todas las paradas cubiertas o finalizado), el bus recorrió como mínimo
-// la ruta prevista entre sus paradas, así que el denominador es el MAYOR de los dos: la ruta
-// prevista o lo dibujado (que puede ser más largo: desvíos, ida a la cochera). Con el servicio
-// EN CURSO no se sabe cuánto lleva recorrido sin señal, y medir contra la ruta entera pintaría en
-// rojo un servicio sano a mitad de camino: ahí se mide el trayecto, como siempre — y la pantalla
-// dice aparte que no hay señal.
-//
-// Sin ruta prevista o con el servicio en curso el resultado es IDÉNTICO al de antes (lo fija
-// scripts/prueba-cobertura-rastreo.mts contra la fórmula vieja copiada literal).
-export type CoberturaRastreo = {
-  pct: number;                                // 0..100, lo medido sobre la referencia
-  referencia: "trayecto" | "ruta_prevista";   // contra qué se midió
-  referenciaKm: number;
-  medidoKm: number;                           // la línea de velocidad (señal real)
-  conLineaKm: number;                         // medido + estimado: lo que el mapa dibuja
-  sinHuellaKm: number;                        // parte de la ruta prevista sin ninguna línea
-};
-export function coberturaRastreo(p: {
-  medidoM: number; estimadoM: number;
-  rutaPrevistaM?: number | null;   // largo de la ruta planificada entre las paradas del servicio
-  servicioTerminado: boolean;      // todas las paradas cubiertas, o el servicio finalizado
-}): CoberturaRastreo | null {
-  const medido = Number.isFinite(p.medidoM) && p.medidoM > 0 ? p.medidoM : 0;
-  const estimado = Number.isFinite(p.estimadoM) && p.estimadoM > 0 ? p.estimadoM : 0;
-  const conLinea = medido + estimado;
-  const ruta = p.servicioTerminado && Number.isFinite(p.rutaPrevistaM) && (p.rutaPrevistaM as number) > 0
-    ? (p.rutaPrevistaM as number) : 0;
-  const referencia = Math.max(conLinea, ruta);
-  if (!(referencia > 0)) return null;
-  const km = (m: number) => Math.round(m / 100) / 10;
-  return {
-    pct: Math.round((medido / referencia) * 100),
-    referencia: ruta > conLinea ? "ruta_prevista" : "trayecto",
-    referenciaKm: km(referencia),
-    medidoKm: km(medido),
-    conLineaKm: km(conLinea),
-    sinHuellaKm: ruta > conLinea ? km(ruta - conLinea) : 0,
-  };
-}
-
-/** Largo en metros de una polilínea [lng, lat] (convención Mapbox). */
-export function largoLineaM(coords: [number, number][] | null | undefined): number {
-  let m = 0;
-  for (let k = 1; k < (coords?.length || 0); k++) {
-    const a = coords![k - 1], b = coords![k];
-    if (Number.isFinite(a?.[0]) && Number.isFinite(a?.[1]) && Number.isFinite(b?.[0]) && Number.isFinite(b?.[1])) {
-      m += distM(a[1], a[0], b[1], b[0]);
-    }
-  }
-  return m;
 }
 
 // ── PUENTE AZUL DE HUECOS (Idea 1) ──────────────────────────────────────────

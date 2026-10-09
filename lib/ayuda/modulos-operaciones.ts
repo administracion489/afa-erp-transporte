@@ -378,6 +378,18 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "Exacto, y por eso el ERP **la deduce de lo que el conductor sí dejó**: la hora en que marcó la primera parada, la hora del primer abordaje con QR, el aviso de salida a los pasajeros o el primer punto GPS del viaje.\n\nEn la columna **Salió**, la hora sale en **verde** cuando es un dato firme y en **gris y cursiva** cuando es una estimación. Pasa el cursor por encima y te dice de dónde salió: *“marcado por el conductor 05:12”*, *“abordaje QR 05:14”*, *“estimado por GPS ~05:16”*. **Ese “~” no es adorno: marca que la hora está inferida y que no debería facturarse como si fuera un dato duro** — el reloj de un teléfono puede estar desfasado.\n\nEl contador **Sin hora de salida** cuenta los servicios donde no hay ninguna evidencia. Suele ser un teléfono con el rastreo apagado, no un bus que no salió — revísalo en **Salud del GPS**.",
       },
       {
+        pregunta: "¿Qué mide la columna Rastreo y el aviso «unidades con rastreo incompleto»?",
+        respuesta:
+          "**Qué parte del tiempo del servicio llegó posición GPS**, desde que el conductor lo inicia hasta que llega al último paradero. No mide el tramo entre la primera y la última señal: si el teléfono deja de transmitir a los 3 minutos de una ruta de 55, el servicio sale con un 5 %, no con un 100 %.\n\n" +
+          "• **Completo** (95 % o más) y **Aceptable** (90 %) — el viaje se puede reconstruir.\n" +
+          "• **Con cortes** (70 a 89 %) — hubo huecos de señal.\n" +
+          "• **Incompleto** (menos de 70 %) — el viaje no se puede reconstruir.\n" +
+          "• **Sin señal** — el servicio se hizo y no llegó ninguna posición.\n" +
+          "• **Inmóvil** — llegaron posiciones, pero todas en el mismo punto mientras el recorrido avanzaba: el teléfono no iba en el bus.\n\n" +
+          "El aviso separa dos cosas que se atienden distinto: **En ruta sin señal ahora** (más de 5 minutos sin posición con el servicio en curso: llama al conductor, casi siempre es la app cerrada o el teléfono bloqueado) y **Rastreo incompleto**, que ya quedó en el registro del viaje. El titular cuenta **unidades**, no servicios: una unidad con el teléfono mal configurado falla en todos sus viajes y es un solo problema. Cada contador filtra la lista.\n\n" +
+          "Es el mismo cálculo de **Salud del GPS**, donde ves el historial por conductor para saber a quién hay que configurarle el teléfono.",
+      },
+      {
         pregunta: "Me sale “Riesgos de flota detectados”. ¿Qué tan grave es?",
         respuesta:
           "Depende de cuál de los tres sea, y la propia pantalla te lo aclara:\n\n• **Documentos vencidos** — esto sí es duro: SOAT, revisión técnica o habilitación vencidos **bloquean la salida**. Si sale y lo paran, es multa y servicio caído.\n• **Posible solape de unidad o conductor** — el mismo bus o el mismo chofer en dos servicios que parecen pisarse. Es una **estimación**: la reserva no guarda cuánto dura el servicio, así que el ERP no puede afirmarlo. Verifícalo en cada servicio marcado.\n• **Jornada extensa del conductor** — misma advertencia: es una estimación, no una medición de horas de manejo.\n\nEn resumen: el primero actúalo, los otros dos revísalos.",
@@ -435,7 +447,7 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       {
         pregunta: "En “Salud del rastreo” un conductor sale al 38 %. ¿Me está engañando?",
         respuesta:
-          "Lo más probable es que **no**. La columna **Cobertura** mide cuánto del viaje quedó rastreado, y un valor así es la firma clásica de un teléfono mal configurado, no de un conductor haciendo trampa:\n\n• el permiso de ubicación en **“Solo mientras se usa la app”** en vez de “Permitir siempre”, o\n• el **ahorro de batería** del fabricante matando la app en segundo plano.\n\nLa pantalla te lo clasifica sola: **Bien** de 95 % para arriba, **Aceptable** desde 90, **Irregular** desde 70 y **Mal** por debajo. Los equipos bien configurados dan 100 %, y los que tienen el permiso mal puesto rondan justo ese 35-40 %. Por eso la solución es configurarle el equipo, no llamarle la atención.\n\n**La excepción sí es grave:** si aparece el aviso rojo de **“Ubicación simulada detectada”**, esos puntos los generó una app de GPS falso, no el teléfono. Ahí sí hay que verificar el equipo antes de sacar conclusiones.",
+          "Lo más probable es que **no**. La columna **Cobertura** mide cuánto del viaje quedó rastreado, y un valor así es la firma clásica de un teléfono mal configurado, no de un conductor haciendo trampa:\n\n• el permiso de ubicación en **“Solo mientras se usa la app”** en vez de “Permitir siempre”, o\n• el **ahorro de batería** del fabricante matando la app en segundo plano.\n\nLa pantalla te lo clasifica sola: **Completo** de 95 % para arriba, **Aceptable** desde 90, **Con cortes** desde 70 e **Incompleto** por debajo. Son las mismas bandas y el mismo cálculo de la columna **Rastreo** de Seguimiento. Los equipos bien configurados dan 100 %, y los que tienen el permiso mal puesto rondan justo ese 35-40 %. Por eso la solución es configurarle el equipo, no llamarle la atención.\n\n**La excepción sí es grave:** si aparece el aviso rojo de **“Ubicación simulada detectada”**, esos puntos los generó una app de GPS falso, no el teléfono. Ahí sí hay que verificar el equipo antes de sacar conclusiones.",
       },
       {
         pregunta: "¿Para qué me sirve saber los “kilómetros a ciegas”?",

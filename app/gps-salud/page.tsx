@@ -12,6 +12,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { bandaCobertura } from "@/lib/gps-cobertura";
 
 type Conductor = {
   clave: string; nombre: string; telefono: string | null; tercero: boolean;
@@ -34,14 +35,9 @@ type Respuesta = {
 const hoyLima = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
 const diasAntes = (f: string, n: number) => new Date(Date.parse(f) - n * 86400000).toISOString().slice(0, 10);
 
-/** Semáforo de cobertura. Los cortes de la banda salen de la medición real de la flota:
- *  los equipos sanos dan 100% y los que tienen el permiso mal puesto rondan el 35-40%. */
-const banda = (c: number | null) =>
-  c === null ? { label: "Sin datos", color: "#6b7280", bg: "#f3f4f6" }
-  : c >= 95   ? { label: "Bien",     color: "#166534", bg: "#dcfce7" }
-  : c >= 90   ? { label: "Aceptable",color: "#3f6212", bg: "#ecfccb" }
-  : c >= 70   ? { label: "Irregular",color: "#92400e", bg: "#fef3c7" }
-  :             { label: "Mal",      color: "#991b1b", bg: "#fee2e2" };
+/** Semáforo de cobertura: las bandas y sus nombres viven en lib/gps-cobertura.ts, las mismas de
+ *  la columna RASTREO de /seguimiento (antes Bien / Aceptable / Irregular / Mal). */
+const banda = bandaCobertura;
 
 export default function GpsSaludPage() {
   const [hasta, setHasta] = useState(hoyLima());
