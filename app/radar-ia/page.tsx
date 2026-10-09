@@ -43,7 +43,7 @@ import {
   type ColumnaOrden, type FiltroLecturas,
 } from "@/lib/radar/odometro-lecturas";
 import { TIPOS_REVISION, etiquetaTipo, placaComparable } from "@/lib/odometro-revision";
-import { auditarLecturasRadar, type AuditoriaLectura } from "@/lib/radar/auditoria-placas";
+import { auditarLecturasRadar, confirmarUnidadLectura, type AuditoriaLectura } from "@/lib/radar/auditoria-placas";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -1300,20 +1300,64 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
   // la que el Radar decide hoy la unidad, aplicada a lo que grabó antes de tenerla. Best-effort y
   // después de pintar: si falla, la tabla sigue sirviendo y simplemente no se marca nada.
   const [auditoria, setAuditoria] = useState<{ porLectura: Map<string, AuditoriaLectura>; completa: boolean; de: RadarLecturaOdometro[] } | null>(null);
+  const [reauditar, setReauditar] = useState(0);
   useEffect(() => {
     let vivo = true;
     auditarLecturasRadar(supabase, registros).then((r) => { if (vivo) setAuditoria({ ...r, de: registros }); });
     return () => { vivo = false; };
-  }, [registros]);
-  // Mientras se audita una lista NUEVA no se enseña la auditoría de la anterior.
-  const audit = auditoria && auditoria.de === registros ? auditoria : null;
-  const auditDe = (r: RadarLecturaOdometro) => audit?.porLectura.get(r.id) ?? null;
+  }, [registros, reauditar]);
+
+  // «✓ Sí es la XXX»: quien mira la foto confirma que la lectura ES de la unidad donde está. Sin
+  // esto, una placa sin respaldo escrito ni servicio del remitente quedaba «sin confirmar» para
+  // siempre y la única salida era cambiarla. Se guarda en el mensaje de origen y se re-audita.
+  const [confirmandoUnidad, setConfirmandoUnidad] = useState<string | null>(null);
+  async function confirmarUnidad(r: RadarLecturaOdometro, aud: AuditoriaLectura) {
+    if (!aud.actual) return;
+    const otra = aud.veredicto === "otra_unidad" && aud.propuesta
+      ? `\n\nOjo: ${aud.decision.codigo === "asignacion" ? "quien mandó la foto tenía en servicio" : "el mensaje dice"} la ${aud.propuesta.placa}. Confirma solo si en la foto se ve que es la ${aud.actual.placa}.`
+      : "";
+    if (!confirm(
+      `¿Confirmas que la lectura de ${r.km.toLocaleString("es-PE")} km${aud.fechaMensaje ? ` (foto del ${fmtFecha(aud.fechaMensaje)}` : " ("}` +
+      `${aud.remitente ? `, mandada por ${aud.remitente}` : ""}) ES de la ${aud.actual.placa}?\n\n` +
+      `Revisa la foto antes: la lectura se queda en esta unidad y deja de marcarse como «placa sin confirmar».${otra}`
+    )) return;
+    setConfirmandoUnidad(r.id);
+    const { data: u } = await supabase.auth.getUser();
+    const res = await confirmarUnidadLectura(supabase, aud.mensajeId, aud.actual, u?.user?.email ?? null);
+    setConfirmandoUnidad(null);
+    if (!res.ok) { alert(`No se pudo guardar la confirmación: ${res.error}`); return; }
+    // Se pinta ya (sin esperar a la auditoría nueva) y después se re-audita con la base.
+    const actual = aud.actual;
+    setAuditoria((prev) => {
+      if (!prev) return prev;
+      const m = new Map(prev.porLectura);
+      m.set(r.id, { ...aud, veredicto: "respaldada", propuesta: null, motivo: null, confirmada: { ...actual, por: u?.user?.email ?? null, en: new Date().toISOString() } });
+      return { ...prev, porLectura: m };
+    });
+    setReauditar((n) => n + 1);
+  }
+  // La lista se RECARGA sola (realtime, sondeo) y cada recarga es un array nuevo: antes la
+  // auditoría de la lista anterior se tiraba mientras se calculaba la nueva, y en ese rato el
+  // filtro «Placa sin confirmar» quedaba en 0 y las filas desaparecían. Ahora se sigue usando la
+  // última auditoría, pero cada entrada solo si sigue describiendo ESA lectura: misma unidad y no
+  // anulada. Una lectura que se movió de unidad o que es nueva espera a la auditoría fresca.
+  const audit = auditoria;
+  const auditando = !auditoria || auditoria.de !== registros;
+  const auditDe = (r: RadarLecturaOdometro): AuditoriaLectura | null => {
+    const a = audit?.porLectura.get(r.id);
+    if (!a || r.estado === "anulada") return null;
+    const flota = r.vehiculo_tercero_id != null ? "tercero" : "propia";
+    const id = Number(r.vehiculo_tercero_id ?? r.vehiculo_id);
+    if (a.actual && (a.actual.flota !== flota || a.actual.id !== id)) return null;
+    return a;
+  };
 
   const filas = useMemo(
     () => registros.map((r) => {
-      const a = audit?.porLectura.get(r.id);
+      const a = auditDe(r);
       return { ...r, placa: unidadDeLectura(r, vehiculosGuia).placa ?? "", placaDudosa: a ? a.veredicto !== "respaldada" : undefined };
     }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [registros, vehiculosGuia, audit],
   );
   const res = useMemo(() => filtrarLecturas(filas, fil), [filas, fil]);
@@ -1393,7 +1437,7 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
             ⚠ Placa sin confirmar · {dudosasTotal}
           </button>
         )}
-        {!audit && <span className="text-[11px] text-gray-400">comprobando placas…</span>}
+        {auditando && <span className="text-[11px] text-gray-400">comprobando placas…</span>}
         {(filtrando || fil.orden !== "llegada") && (
           <button onClick={limpiar} className="text-xs font-bold text-[#1262bd] hover:underline">Limpiar filtros</button>
         )}
@@ -1537,6 +1581,11 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
                     <td className="p-3 whitespace-nowrap">
                       <span className="font-mono font-black text-[#0b315f]">{placa ?? "—"}</span>
                       {flota === "tercero" && <span className="ml-1.5 text-[10px] font-black px-1.5 py-0.5 rounded-full" style={{ color: "#B07A0F", background: "#FBF1D8" }}>Tercero</span>}
+                      {aud?.confirmada && r.estado !== "anulada" && (
+                        <p className="mt-1 text-[10px] font-bold text-green-700" title={aud.confirmada.en ? `Confirmada el ${fmtFecha(aud.confirmada.en.slice(0, 10))}` : undefined}>
+                          ✓ Unidad confirmada{aud.confirmada.por ? ` por ${aud.confirmada.por}` : ""}
+                        </p>
+                      )}
                       {aud && aud.veredicto !== "respaldada" && r.estado !== "anulada" && (
                         <div className="mt-1 max-w-[17rem] whitespace-normal">
                           <p className="text-[11px] font-black text-[#B42318]">
@@ -1579,6 +1628,13 @@ function TabOdometro({ registros, completa, vehiculosGuia, onRefresh, showToast 
                           <button onClick={() => aceptar(r)} disabled={aceptando === r.id}
                             className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-green-700 border border-green-200 hover:bg-green-50 disabled:opacity-50">
                             {aceptando === r.id ? "…" : "✓ Aceptar"}
+                          </button>
+                        )}
+                        {aud && aud.veredicto !== "respaldada" && r.estado !== "anulada" && aud.actual && (
+                          <button onClick={() => confirmarUnidad(r, aud)} disabled={confirmandoUnidad === r.id}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-green-700 border border-green-200 hover:bg-green-50 disabled:opacity-50"
+                            title="Revisaste la foto y SÍ es de esta unidad: deja de marcarse como «placa sin confirmar»">
+                            {confirmandoUnidad === r.id ? "…" : `✓ Sí es la ${aud.actual.placa}`}
                           </button>
                         )}
                         {aud && aud.veredicto !== "respaldada" && r.estado !== "anulada" && (

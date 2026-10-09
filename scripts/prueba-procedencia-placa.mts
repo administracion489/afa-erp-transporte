@@ -6,7 +6,8 @@
 // Ejecutar: npx tsx scripts/prueba-procedencia-placa.mts
 import {
   placaEnTexto, escritasEnTexto, decidirUnidad, auditarUnidadLectura, motivoDecision, motivoAuditoria,
-  mismaUnidad, telefonoLegible, type Remitente, type UnidadRef, type DecisionUnidad,
+  mismaUnidad, telefonoLegible, confirmacionDe, confirmaUnidad, resultadoConConfirmacion,
+  type Remitente, type UnidadRef, type DecisionUnidad,
 } from "../lib/radar/procedencia-placa";
 import { telefonoDeRemitente, telefonosDeFicha } from "../lib/radar/cluster-remitente";
 
@@ -187,6 +188,23 @@ ok(telefonoLegible("51961097763") === "+51 961 097 763", "teléfono legible");
   ok(autoSinUnidad === 0, "nunca se graba sola sin unidad");
   ok(sinUnidadConServicio === 0, "con una sola unidad en servicio y nada escrito, siempre hay unidad");
   ok(autos > combinaciones / 4, `corolario: sí se graba sola en los casos respaldados (${autos} de ${combinaciones})`);
+}
+
+// ── La persona CONFIRMA la unidad (sin respaldo escrito ni servicio) ─────────
+{
+  const cwz: UnidadRef = { flota: "propia", id: 7, placa: "CWZ-371" };
+  const bui: UnidadRef = { flota: "tercero", id: 7, placa: "BUI-272" }; // mismo id, otra flota
+  const previo = { accion: "lectura_registrada", lectura_id: "x" };
+  const escrito = resultadoConConfirmacion(previo, cwz, "admin@afa", "2026-10-08T20:00:00Z");
+  ok(escrito.accion === "lectura_registrada" && escrito.lectura_id === "x", "confirmar no pisa lo que el motor dejó en resultado");
+  const leida = confirmacionDe(escrito);
+  ok(!!leida && leida.placa === "CWZ-371" && leida.por === "admin@afa", "el ciclo escribir → leer devuelve la misma confirmación");
+  ok(confirmaUnidad(leida, cwz), "la confirmación respalda la unidad donde está la lectura");
+  ok(!confirmaUnidad(leida, bui), "…pero NO a la de otra flota con el mismo id (si la lectura se movió, se vuelve a auditar)");
+  ok(!confirmaUnidad(leida, null), "sin unidad actual no hay nada que confirmar");
+  ok(confirmacionDe(null) === null && confirmacionDe({}) === null && confirmacionDe({ unidad_confirmada: { flota: "x", id: 1 } }) === null,
+    "un resultado sin confirmación (o mal formada) no confirma nada");
+  ok(confirmacionDe(resultadoConConfirmacion(null, cwz, null, "t"))?.por === null, "sin usuario se guarda igual, con por = null");
 }
 
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo en verde");

@@ -246,3 +246,49 @@ export function motivoAuditoria(
   const placa = actual ? `la ${actual.placa}` : "la unidad";
   return `Nada respalda que sea de ${placa}: no está escrita en el mensaje, así que la eligió la IA mirando la foto — y un tablero no muestra la placa.${porQue ? ` ${porQue}` : ""}`;
 }
+
+// ── La persona CONFIRMA la unidad ────────────────────────────────────────────
+//
+// La auditoría solo sabe respaldar una placa con lo que está ESCRITO (el mensaje) o con el
+// SERVICIO del remitente. Cuando no hay nada de eso —el conductor no es de la flota, no tenía
+// servicio, el número llegó como @lid— la lectura queda «sin confirmar» para siempre aunque sea de
+// esa unidad, y la única salida que ofrecía la pantalla era CAMBIARLA. Quien mira la foto puede
+// saber que sí es esa unidad (el tablero, la hora, el conductor que la usa): esa es la tercera
+// fuente, y la escribe una persona.
+//
+// Se guarda en el MENSAJE de origen (`radar_mensajes.resultado.unidad_confirmada`), sin migración:
+// la confirmación es sobre la unidad que se decidió para ESE mensaje, y la auditoría ya lo lee. Vale
+// solo para la unidad confirmada: si la lectura se pasa después a otra, vuelve a auditarse.
+
+export type ConfirmacionUnidad = UnidadRef & {
+  /** Quién la confirmó (correo del usuario del ERP), si se sabe. */
+  por: string | null;
+  /** Cuándo (ISO). */
+  en: string;
+};
+
+/** La confirmación guardada en el `resultado` de un mensaje, o null. Sin confiar en su forma. */
+export function confirmacionDe(resultado: unknown): ConfirmacionUnidad | null {
+  const c = resultado && typeof resultado === "object" ? (resultado as Record<string, unknown>).unidad_confirmada : null;
+  if (!c || typeof c !== "object") return null;
+  const o = c as Record<string, unknown>;
+  const flota = o.flota === "tercero" ? "tercero" : o.flota === "propia" ? "propia" : null;
+  const id = Number(o.id);
+  if (!flota || !Number.isFinite(id) || id <= 0) return null;
+  return {
+    flota, id, placa: typeof o.placa === "string" ? o.placa : "",
+    por: typeof o.por === "string" && o.por ? o.por : null,
+    en: typeof o.en === "string" ? o.en : "",
+  };
+}
+
+/** ¿La confirmación respalda la unidad donde está HOY la lectura? */
+export const confirmaUnidad = (c: ConfirmacionUnidad | null, actual: UnidadRef | null): boolean =>
+  !!c && !!actual && mismaUnidad(c, actual);
+
+/** El `resultado` con la confirmación puesta (lo demás intacto). */
+export function resultadoConConfirmacion(resultado: unknown, unidad: UnidadRef, por: string | null, en: string): Record<string, unknown> {
+  const base = resultado && typeof resultado === "object" && !Array.isArray(resultado) ? { ...(resultado as Record<string, unknown>) } : {};
+  base.unidad_confirmada = { flota: unidad.flota, id: unidad.id, placa: unidad.placa, por, en };
+  return base;
+}
