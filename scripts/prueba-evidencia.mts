@@ -9,7 +9,7 @@
 // que subió.
 import {
   revisarArchivo, mimeDe, rutaEvidencia, normalizarEvidencias, fotoDeTablero, esImagenEvidencia,
-  subirEvidencias, retirarSubidas, preguntaSinRespaldo, bucketDe, MAX_BYTES_EVIDENCIA,
+  subirEvidencias, retirarSubidas, preguntaSinRespaldo, bucketDe, MAX_BYTES_EVIDENCIA, motivoDeSubida,
 } from "../lib/evidencia";
 
 let fallos = 0;
@@ -113,6 +113,14 @@ function clienteFalso(opts: { fallaEn?: string } = {}) {
   const c3 = { storage: { from: () => ({ upload: async () => { throw new Error("Failed to fetch"); }, getPublicUrl: () => ({ data: {} }) }) } };
   const r3 = await subirEvidencias(c3, [{ archivo: arch("a.jpg", "image/jpeg"), clase: "voucher" }], "x");
   chk("sin conexión NO lanza: lo dice", r3.subidas.length === 0 && /Failed to fetch/.test(r3.fallidas[0]?.motivo ?? ""));
+}
+
+// ── 5. El rechazo de Storage por permisos se NOMBRA, no se pinta crudo ─────────
+{
+  const m = motivoDeSubida("new row violates row-level security policy", "documentos");
+  chk("RLS de Storage → dice qué bucket y qué SQL lo arregla", /documentos/.test(m) && /seguridad-02/.test(m) && !/row-level/.test(m), m);
+  chk("otro error pasa tal cual", motivoDeSubida("Payload too large", "documentos") === "Payload too large");
+  chk("sin mensaje no queda vacío", motivoDeSubida("", "documentos") === "no se pudo subir");
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTODO OK");
