@@ -5,6 +5,7 @@ import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponib
 import { detectarSoportePush, activarPushWeb, activarPushNativo, desactivarPush, resincronizarSuscripcion, permisoBloqueado, type SoportePush } from "@/lib/push-cliente";
 import { identidadRuta, SIN_NOMBRE_RUTA } from "@/lib/ruta-identidad";
 import { AVISO_SESION_VENCIDA, esSesionInvalida, expDeToken, vencimientoSesion } from "@/lib/pasajero-sesion";
+import { segInicial, pasoSeguimiento, bloqueaAvisoLlegada, lecturaPasajero, type SeguimientoPasajero, type TendenciaPresente } from "@/lib/pasajero-alejamiento";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
@@ -137,8 +138,6 @@ function ahoraLimaMin(): number {
 function ini(n:string): string { return n.split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 // href tel: con el número saneado (solo dígitos y +), tolera valores crudos de la BD.
 function telHref(tel: string | null | undefined): string { return `tel:${String(tel || "").replace(/[^\d+]/g, "")}`; }
-// Estado inicial del seguimiento direccional del bus (ver segRef).
-const segInicial = () => ({ minDist: Infinity, lastD: null as number | null, lastTs: 0, lastLat: null as number | null, lastLng: null as number | null, recStreak: 0, apprStreak: 0 });
 // Quita del mapa la línea de ruta (la directa y la de Google).
 function borrarLineaRuta(m: mapboxgl.Map) {
   try { if (m.getLayer("ruta-sombra")) m.removeLayer("ruta-sombra"); } catch {}
@@ -612,6 +611,12 @@ export default function AppPasajero() {
   // Estado "blando": el bus se aleja de mi paradero (tendencia sostenida) pero aún sin
   // confirmación fuerte de que "pasó". Basta para dejar de mostrar una cuenta regresiva engañosa.
   const [busAlejando,    setBusAlejando]    = useState(false);
+  // Qué hizo la distancia a mi paradero en el último minuto: "aleja" | "viene" | "quieto" | null
+  // (sin evidencia). `busAlejando` es HISTÓRICO: la racha que lo enciende no se borra con el bus
+  // quieto ni cuando vuelve a venir desde más lejos que su mínimo (reserva #30204: esperando 16 min
+  // en el paradero anterior, el pasajero veía «SE ALEJA»). Qué se afirma con los dos lo decide
+  // `lecturaPasajero` (lib/pasajero-alejamiento.ts), no esta página.
+  const [presente,       setPresente]       = useState<TendenciaPresente>(null);
   const [agoMin,         setAgoMin]         = useState<number>(0); // minutos desde última señal del bus
   const [avisadoSinSenal, setAvisadoSinSenal] = useState(false);
   const [copiado,        setCopiado]        = useState(false);
@@ -674,13 +679,9 @@ export default function AppPasajero() {
   const [mostrarParadasModal, setMostrarParadasModal] = useState(false);
 
   const alertaRef    = useRef(false);
-  // Seguimiento direccional del bus respecto a MI paradero (ver efecto de busPosicion):
-  //   minDist  = distancia mínima (punto más cercano) alcanzada, en m
-  //   lastD    = última distancia procesada, en m
-  //   lastTs   = timestamp de la última muestra GPS procesada (dedupe del polling)
-  //   lastLat/lastLng = última posición del bus aceptada (para descartar saltos imposibles)
-  //   recStreak/apprStreak = muestras consecutivas alejándose / acercándose
-  const segRef = useRef<ReturnType<typeof segInicial>>(segInicial());
+  // Seguimiento direccional del bus respecto a MI paradero (ver efecto de busPosicion). La máquina
+  // y el significado de cada campo viven en lib/pasajero-alejamiento.ts (SeguimientoPasajero).
+  const segRef = useRef<SeguimientoPasajero>(segInicial());
   const watchRef     = useRef<GeoWatch | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -940,9 +941,13 @@ export default function AppPasajero() {
       const d   = dist(Number(busPosicion.lat), Number(busPosicion.lng), Number(paradaDestino.lat), Number(paradaDestino.lng));
       const eta = calcETA(d, busPosicion.velocidad);
       setDistM(d); setEtaMin(eta);
-      // No dispares "tu bus está llegando" si el bus cruza la banda de ≤5 min ALEJÁNDOSE
-      // (recStreak alto = tendencia sostenida de alejamiento del paradero).
-      if (eta <= 5 && !alertaRef.current && miEstado !== "embarcado" && segRef.current.recStreak < 3) {
+      // No dispares "tu bus está llegando" (un solo aviso por servicio) si el bus no viene: con
+      // «YA PASÓ», o con la racha de alejamiento sostenida y sin la distancia BAJANDO ahora. Detenido
+      // tras alejarse NO cuenta como venir (ver bloqueaAvisoLlegada en lib/pasajero-alejamiento.ts).
+      // `busPasoMiParada` se lee del render a propósito, sin ir a las dependencias: este efecto corre
+      // con cada fila nueva y ve el «YA PASÓ» que dejó la anterior; re-correrlo al cambiar ese flag
+      // solo volvería a encuadrar el mapa.
+      if (eta <= 5 && !alertaRef.current && miEstado !== "embarcado" && !bloqueaAvisoLlegada(segRef.current, miParada, busPasoMiParada)) {
         alertaRef.current = true; setAlerta5min(true); setAlertaDismiss(false);
         if ("vibrate" in navigator) navigator.vibrate([300, 100, 300]);
       }
@@ -970,65 +975,34 @@ export default function AppPasajero() {
     if (miEstado === "esperando" && miParada?.lat && miParada?.lng) {
       const dMia = dist(Number(busPosicion.lat), Number(busPosicion.lng), Number(miParada.lat), Number(miParada.lng));
       const ts   = new Date(busPosicion.timestamp ?? busPosicion.created_at ?? 0).getTime();
-      const s    = segRef.current;
+      const busLat = Number(busPosicion.lat), busLng = Number(busPosicion.lng);
 
-      // El polling repite la misma fila GPS entre envíos del conductor (~10 s): solo
-      // procesamos muestras NUEVAS para no contar la misma posición varias veces.
-      if (ts > 0 && ts !== s.lastTs) {
-        const busLat = Number(busPosicion.lat), busLng = Number(busPosicion.lng);
-        const dt       = s.lastTs ? (ts - s.lastTs) / 1000 : 0;
-        const saltoBus = s.lastLat != null ? dist(s.lastLat, s.lastLng!, busLat, busLng) : 0;
-        // Descartar muestras físicamente imposibles (glitch de GPS): un bus urbano no supera
-        // ~120 km/h (34 m/s). Sin este filtro una lectura errónea que caiga cerca de mi paradero
-        // envenenaría minDist (mínimo monótono) y dispararía un falso "ya pasó" con el bus aún viniendo.
-        const glitch = s.lastLat != null && dt > 0 && saltoBus > 400 && saltoBus / dt > 34;
-        if (!glitch) {
-          if (dMia < s.minDist) s.minDist = dMia;   // punto más cercano alcanzado
-          const gap = dMia - s.minDist;             // cuánto se alejó de ese punto más cercano
+      // Paradero SIGUIENTE al mío en la ruta (rutaParadas llega ordenada por `orden`). Su distancia
+      // alimenta la señal A de "ya pasó" (el bus quedó más cerca del siguiente que del mío).
+      const idxMia = rutaParadas.findIndex((p) => p.id === miParada.id);
+      const paradaSiguiente = idxMia >= 0 && idxMia < rutaParadas.length - 1 ? rutaParadas[idxMia + 1] : null;
+      const dSiguiente = paradaSiguiente?.lat != null && paradaSiguiente?.lng != null
+        ? dist(busLat, busLng, Number(paradaSiguiente.lat), Number(paradaSiguiente.lng))
+        : null;
 
-          // Tendencia medida contra el punto MÁS CERCANO (no contra la muestra previa): así un
-          // bus lento en tráfico que se aleja de a pocos (<40 m por muestra) igual acumula
-          // alejamiento — el bug original se daba justo con buses lentos que "se despegaban" poco a poco.
-          const bajando = s.lastD != null && dMia < s.lastD - 40;   // se acercó vs. la muestra previa
-          if      (gap > 60)            { s.recStreak++;  s.apprStreak = 0; }  // se aleja de su mínimo
-          else if (gap < 25 || bajando) { s.apprStreak++; s.recStreak  = 0; }  // en su mínimo o regresando
-          // zona intermedia (25–60 m sin acercarse): conservar las rachas
-          s.lastD = dMia; s.lastTs = ts; s.lastLat = busLat; s.lastLng = busLng;
-
-          // Paradero SIGUIENTE al mío en la ruta (rutaParadas llega ordenada por `orden`).
-          const idxMia = rutaParadas.findIndex((p) => p.id === miParada.id);
-          const paradaSiguiente = idxMia >= 0 && idxMia < rutaParadas.length - 1 ? rutaParadas[idxMia + 1] : null;
-
-          // Señales de que el bus quedó "aguas abajo" de mi paradero (para el aviso ROJO):
-          //  A) ahora está MÁS CERCA del paradero siguiente que del mío → avanzó por la ruta
-          //     (robusto a coords imprecisas; distingue "pasó de verdad" de "fue al retorno").
-          //  B) se acercó de verdad (<450 m) y ya quedó MUY atrás (+600 m, más que un retorno típico
-          //     de una avenida con separador, para no gritar "ya pasó" cuando el bus da la vuelta a recoger).
-          const masCercaDelSiguiente = paradaSiguiente?.lat != null && paradaSiguiente?.lng != null &&
-            dist(busLat, busLng, Number(paradaSiguiente.lat), Number(paradaSiguiente.lng)) < dMia;
-          const dejoAtrasClaro = s.minDist < 450 && gap > 600;
-          const sostenido = s.recStreak >= 3;   // ~3 muestras seguidas alejándose
-
-          if (sostenido && (masCercaDelSiguiente || dejoAtrasClaro)) {
-            // Confianza alta: el bus pasó mi paradero y sigue de largo → aviso rojo + cortar cuenta regresiva.
-            setBusPasoMiParada(true);
-            setBusAlejando(true);
-          } else if (sostenido) {
-            // Alejamiento sostenido sin confirmación locacional fuerte (p. ej. sobrepasa hacia un
-            // retorno): no mostramos cuenta regresiva engañosa, pero aún no el aviso rojo de "ya pasó".
-            setBusAlejando(true);
-          } else if (s.apprStreak >= 2 && dMia < 400) {
-            // El bus REGRESÓ y está cerca otra vez (fue al retorno / dio la vuelta a recoger):
-            // limpiar AMBOS avisos y re-sembrar el mínimo. Exigir cercanía (<400 m) distingue un
-            // retorno real (el bus vuelve al paradero) de una curva de la vía que solo acorta la
-            // distancia en línea recta mientras el bus se va de verdad → así no borramos un "ya pasó" legítimo.
-            setBusAlejando(false);
-            setBusPasoMiParada(false);
-            s.minDist = dMia;
-            s.recStreak = 0;
-          }
-        }
+      // La máquina (dedupe por ts, filtro de glitch, rachas, "ya pasó"/"se aleja"/"regresó") vive
+      // en lib/pasajero-alejamiento.ts, extraída tal cual estaba aquí. Devuelve qué setState hacer.
+      const r = pasoSeguimiento(segRef.current, { lat: busLat, lng: busLng, ts, dMia, dSiguiente, miParada });
+      segRef.current = r.estado;
+      if (r.accion === "paso") {
+        // Confianza alta: el bus pasó mi paradero y sigue de largo → aviso rojo + cortar cuenta regresiva.
+        setBusPasoMiParada(true);
+        setBusAlejando(true);
+      } else if (r.accion === "alejando") {
+        // Alejamiento sostenido sin confirmación locacional fuerte: sin cuenta regresiva engañosa.
+        setBusAlejando(true);
+      } else if (r.accion === "regreso") {
+        // El bus REGRESÓ y está cerca otra vez: limpiar AMBOS avisos.
+        setBusAlejando(false);
+        setBusPasoMiParada(false);
       }
+      // La lectura EN PRESENTE se asigna siempre (también en el dedupe: la ventana no cambió).
+      setPresente(r.presente);
     }
   }, [busPosicion, mapListo, miParada, vehiculo, conductor, miEstado, rutaParadas]);
 
@@ -1162,6 +1136,7 @@ export default function AppPasajero() {
     segRef.current = segInicial();
     setBusPasoMiParada(false);
     setBusAlejando(false);
+    setPresente(null);
     setPasoDismiss(false);
   }, [miParada?.id, miEstado]);
 
@@ -1263,7 +1238,7 @@ export default function AppPasajero() {
     setEstadoBus("no_iniciado"); setAgoMin(0);
     alertaRef.current = false; setAlerta5min(false); setAlertaDismiss(false);
     segRef.current = segInicial();
-    setBusPasoMiParada(false); setBusAlejando(false); setPasoDismiss(false);
+    setBusPasoMiParada(false); setBusAlejando(false); setPresente(null); setPasoDismiss(false);
     setAvisadoSinSenal(false);
   }, []);
 
@@ -1718,11 +1693,15 @@ export default function AppPasajero() {
   // congelarse afirmando movimiento cuando el GPS quedó obsoleto. "Ya pasó" es una
   // conclusión durable y conserva su prioridad.
   const esperando = miEstado === "esperando";
-  const yaPaso    = esperando && busPasoMiParada;
-  const seAleja   = esperando && busAlejando && estadoBus !== "sin_señal" && estadoBus !== "finalizado";
-  // El bus ya pasó o se aleja de mi paradero: NO mostrar cuenta regresiva ni hora de
-  // llegada "en vivo" (evita el bug de "recalcula como si aún viniera / pudiera regresar").
-  const busYaNoViene = yaPaso || seAleja;
+  // Qué se afirma sobre la dirección lo decide UNA función pura (lib/pasajero-alejamiento.ts), con
+  // la racha histórica (busAlejando) leída junto al presente: «SE ALEJA» exige ver la distancia
+  // crecer (reserva #30204: esperando en el paradero anterior se pintaba «SE ALEJA»), y la cuenta
+  // regresiva y «Tu bus está llegando» vuelven solo viéndola bajar — detenido tras alejarse, la
+  // pantalla queda neutral. `busYaNoViene`: sin cuenta regresiva ni hora de llegada "en vivo".
+  const { yaPaso, seAleja, busYaNoViene, escondeLlegada } = lecturaPasajero({
+    esperando, busPasoMiParada, busAlejando, presente,
+    senalViva: estadoBus !== "sin_señal" && estadoBus !== "finalizado",
+  });
   const mostrarEta   = busActivo && etaMin !== null && !busYaNoViene;
   // Instante de llegada (ms epoch) a pintar, o null si el bus ya no viene.
   const llegadaEnVivo = busYaNoViene ? null : etaLlegadaTs;
@@ -1999,7 +1978,7 @@ export default function AppPasajero() {
                                     <span className="afa-para-tag-e">
                                       <IconBus sz={10} c="var(--warn)" /> Se aleja
                                     </span>
-                                  ) : etaMin !== null && etaMin > 0 ? (
+                                  ) : !busYaNoViene && etaMin !== null && etaMin > 0 ? (
                                     <span className="afa-para-tag-e">
                                       <IconClock sz={10} c="var(--warn)" /> En {fmtETA(etaMin)}
                                     </span>
@@ -2405,7 +2384,7 @@ export default function AppPasajero() {
             </div>
 
             {/* Arrival banner (≤5 min) */}
-            {alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada && !busAlejando && (
+            {alerta5min && !alertaDismiss && miEstado !== "embarcado" && !escondeLlegada && (
               <div style={{ position: "absolute", top: 78, left: 14, right: 14, zIndex: 4, background: "var(--navy)", color: "white", borderRadius: 18, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 10px 30px rgba(11,49,95,0.4)", animation: "sheetIn 0.4s cubic-bezier(.2,.7,.3,1)" }}>
                 <div style={{ width: 38, height: 38, borderRadius: 12, background: "rgba(255,255,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                   <IconBell sz={20} c="white" />
@@ -2448,7 +2427,7 @@ export default function AppPasajero() {
 
             {/* GPS denied banner */}
             {gpsPermiso === "denied" && !mostrarModalGPS && (
-              <div style={{ position: "absolute", top: (busPasoMiParada && !pasoDismiss && miEstado === "esperando") ? 188 : (alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada && !busAlejando) ? 144 : 78, left: 14, right: 14, zIndex: 3, background: "var(--warn-tint)", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
+              <div style={{ position: "absolute", top: (busPasoMiParada && !pasoDismiss && miEstado === "esperando") ? 188 : (alerta5min && !alertaDismiss && miEstado !== "embarcado" && !escondeLlegada) ? 144 : 78, left: 14, right: 14, zIndex: 3, background: "var(--warn-tint)", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
                 <IconPin sz={16} c="var(--warn)" />
                 <p style={{ flex: 1, margin: 0, fontSize: 12, color: "var(--warn)", fontWeight: 600 }}>GPS desactivado — actívalo para ver tu posición</p>
                 <button onClick={() => void solicitarGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "4px 10px", color: "white", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>Activar</button>
@@ -2722,6 +2701,7 @@ export default function AppPasajero() {
                         : seAleja ? "El bus se aleja de tu paradero"
                         : estadoBus === "no_iniciado" || !busPosicion ? "Bus aún no inicia"
                         : estadoBus === "retrasado" ? "Bus detenido · tráfico"
+                        : busYaNoViene ? "El bus no se acerca a tu paradero"
                         : "En camino a tu paradero"}
                     </Eyebrow>
                   </div>
@@ -3251,7 +3231,7 @@ export default function AppPasajero() {
         {/* ── BOTTOM NAV ── */}
         <nav className="afa-nav">
           {([
-            { id: "ruta" as Tab, lbl: "Mi ruta",  Icon: IconMap,  badge: alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada && !busAlejando },
+            { id: "ruta" as Tab, lbl: "Mi ruta",  Icon: IconMap,  badge: alerta5min && !alertaDismiss && miEstado !== "embarcado" && !escondeLlegada },
             { id: "qr"   as Tab, lbl: "Pase",      Icon: IconQR,   badge: false },
             { id: "perfil" as Tab, lbl: "Perfil",  Icon: IconUser, badge: gpsPermiso === "denied" },
           ]).map(t => {

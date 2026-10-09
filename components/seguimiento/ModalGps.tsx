@@ -19,6 +19,7 @@ import { useAvanceParadas } from "@/lib/useAvanceParadas";
 import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import type { VeredictoRastreo } from "@/lib/gps-cobertura";
+import { juzgarDetencion, medirQuietud, rotuloDetencion, type FilaQuietud } from "@/lib/gps-detencion";
 
 declare global { interface Window { mapboxgl: any; } }
 
@@ -124,7 +125,12 @@ export default function ModalGps({
   const [congeladoMin,   setCongeladoMin]   = useState(0); // min con la MISMA coord Y buena precisión = fix viejo reenviado (GPS congelado real)
   const [precBajaM,      setPrecBajaM]      = useState(0); // ±m cuando la coord está fija por baja precisión (red/FUSED, bus quieto) — NO es congelado
   const [precDebilM,     setPrecDebilM]     = useState(0); // ±m: precisión mediana reciente de RED (≥60m) — cubre el bus EN MOVIMIENTO con GPS débil (equipo del conductor)
-  const [sinMovMin,      setSinMovMin]      = useState(0); // min que la unidad lleva SIN DESPLAZARSE (>150 m) con servicio en curso — caso "teléfono quedó en la cochera" (#951: 75 min clavado en el origen con las paradas completándose)
+  // Quietud de la unidad (lib/gps-detencion.ts, `medirQuietud`): min SIN DESPLAZARSE (>150 m) y,
+  // del MISMO cálculo, dónde está detenida, con qué precisión y si la posición está clavada byte a
+  // byte — caso #951 (motor de ubicación colgado: 75 min clavado en el origen con las paradas
+  // completándose). null = no lleva más de 10 min quieta. Un solo estado a propósito: el lugar y
+  // los minutos tienen que salir del mismo ciclo de huella, o al arrancar el bus se contradicen.
+  const [quietud,        setQuietud]        = useState<{ min: number; ancla: { lat: number; lng: number } | null; accM: number | null; clavadaMs: number; clavadaFixes: number } | null>(null);
   const [mapListo,       setMapListo]       = useState(false);
   const [ruta,              setRuta]              = useState<RutaData | null>(null);
   // ¿La `ruta` que se está mostrando se pidió CON tráfico? La carga automática va SIN tráfico (SKU
@@ -564,24 +570,19 @@ export default function ModalGps({
         const medAccRec = accsRec.length ? accsRec[Math.floor(accsRec.length / 2)] : 0;
         if (!cancel) setPrecDebilM(medAccRec >= 60 ? Math.round(medAccRec) : 0);
 
-        // UNIDAD SIN MOVIMIENTO (caso #951: el teléfono quedó en la cochera y el bus hizo la ruta
-        // sin rastreo — 75 min clavado en el origen con fix_ts avanzando, así que NI congelado NI
-        // sin-señal disparan). Mide hace cuántos minutos la posición NO se aleja >150 m de la
-        // actual. El header lo muestra solo con servicio EN CURSO (ubic.estado === "en_ruta"):
-        // parado en carga/embarque es normal unos minutos; >10 min merece la atención del operador.
-        const sinMov = (() => {
-          const pts = (arr as any[])
-            .map(r => ({ t: new Date(r.created_at || r.timestamp || 0).getTime(), lat: Number(r.lat), lng: Number(r.lng) }))
-            .filter(p => p.t > 0 && Number.isFinite(p.lat) && Number.isFinite(p.lng))
-            .sort((a, b) => a.t - b.t);
-          if (pts.length < 3) return 0;
-          const cur = pts[pts.length - 1];
-          for (let i = pts.length - 1; i >= 0; i--) {
-            if (distM(pts[i].lat, pts[i].lng, cur.lat, cur.lng) > 150) return cur.t - pts[i].t; // último movimiento real
-          }
-          return cur.t - pts[0].t; // nunca se movió en toda la ventana
-        })();
-        if (!cancel) setSinMovMin(sinMov > 10 * 60000 ? Math.floor(sinMov / 60000) : 0);
+        // UNIDAD SIN MOVIMIENTO (caso #951: el motor de ubicación del teléfono se colgó y siguió
+        // mandando el mismo punto — 75 min clavado en el origen con fix_ts avanzando, así que NI
+        // congelado NI sin-señal disparan). `medirQuietud` (lib/gps-detencion.ts) mide hace cuántos
+        // minutos la posición NO se aleja >150 m de la actual —el cálculo que vivía aquí, extraído
+        // y con su matriz— y, en el MISMO paso, el centro de la detención, su precisión mediana y
+        // si la posición está clavada byte a byte: con eso el header decide si es una espera en un
+        // paradero (#30204) o la alarma de siempre. El header lo muestra solo con servicio EN
+        // CURSO (ubic.estado === "en_ruta"): parado en carga/embarque es normal unos minutos;
+        // >10 min merece la atención del operador.
+        const q = medirQuietud(arr as FilaQuietud[]);
+        if (!cancel) setQuietud(q.ms > 10 * 60000
+          ? { min: Math.floor(q.ms / 60000), ancla: q.ancla, accM: q.accM, clavadaMs: q.clavada.ms, clavadaFixes: q.clavada.fixes }
+          : null);
 
         // Anclar los fixes IMPRECISOS al corredor de los confiables ANTES de todo (mata el zigzag
         // off-road de un fix de red de ±100 m). Luego limpiar UNA sola vez (colapsa rachas detenidas
@@ -1096,6 +1097,41 @@ export default function ModalGps({
     if (!p || p.lat == null || p.lng == null) return null;
     return distM(Number(ubic.lat), Number(ubic.lng), p.lat, p.lng);
   }, [proximaIdx, ubic, paradasAvance]);
+
+  // ¿DÓNDE está detenida la unidad? (lib/gps-detencion.ts). Se pregunta cuando el detector de
+  // quietud ya disparó: esperar en un paradero (#30204) no es lo mismo que un motor de ubicación
+  // colgado (#951), y solo lo segundo merece la alarma ámbar.
+  // Coordenadas y marca del conductor salen de `paradasAvance` y el NOMBRE de `paradasDisplay`:
+  // se pueden emparejar por índice porque paradasAvance ES `paradasDisplay.map(...)` (mismo
+  // largo, mismo orden, coordenadas ya rellenadas desde la geocodificación por id/nombre). NO
+  // valdría con `paradasResueltas`, que pierde las que no geocodifican (ver motivoPorParada).
+  // LA POSICIÓN ES EL CENTRO DE LA DETENCIÓN, NO EL FIX EN VIVO: sale del mismo ciclo de huella
+  // que los minutos (`quietud`). Con `ubic` —que llega cada pocos segundos— el bus que arrancaba
+  // salía del radio antes de que la huella pusiera la quietud en cero, y el header saltaba de
+  // «Detenida en X» a «GPS pegado» justo al empezar a moverse; y un solo fix de red en el borde
+  // del umbral de precisión retiraba y volvía a poner la alarma con cada actualización.
+  const paradasDetencion = useMemo(
+    () => paradasAvance.map((p, i) => ({ ...p, nombre: paradasDisplay[i]?.nombre ?? null })),
+    [paradasAvance, paradasDisplay]
+  );
+  const sinMovMin = quietud?.min ?? 0;
+  // "Sin movimiento" solo con servicio EN CURSO: quieto en carga/embarque unos min es normal.
+  const quietoEnRuta = sinMovMin > 0 && ubic?.estado === "en_ruta";
+  const detencion = useMemo(
+    () => quietud
+      ? juzgarDetencion(
+          { lat: quietud.ancla?.lat, lng: quietud.ancla?.lng, accM: quietud.accM },
+          paradasDetencion,
+          { clavadaMs: quietud.clavadaMs, clavadaFixes: quietud.clavadaFixes })
+      : null,
+    [quietud, paradasDetencion]
+  );
+  // La unidad está detenida EN el paradero que el panel derecho iba a anunciar como «próximo».
+  // Sin esto el header decía «Detenida en Av. Los Frutales» y el panel, «Vehículo en camino a Av.
+  // Los Frutales · llega en 1 min»: la misma pantalla diciendo dos cosas del mismo paradero.
+  const detenidaEnObjetivo = quietoEnRuta && detencion != null
+    && (detencion.codigo === "en_paradero" || detencion.codigo === "en_destino")
+    && detencion.idx === proximaIdx;
   // Se cuentan sobre paradasDisplay y no sobre el prop `paradas`: en el portal del cliente
   // `paradas` puede venir vacío (todo sale de paradasResueltas) y el contador se quedaba
   // permanentemente en "0/N · 0%".
@@ -1651,24 +1687,44 @@ export default function ModalGps({
               <div className="flex items-center gap-2 flex-wrap">
                 {(() => {
                   const debilM = Math.max(precBajaM, precDebilM);
-                  // "Sin movimiento" solo con servicio EN CURSO: quieto en carga/embarque unos min
-                  // es normal; >10 min en_ruta = teléfono fuera del bus (#951) o unidad varada.
-                  const quieto = sinMovMin > 0 && ubic?.estado === "en_ruta";
-                  const alerta = (congeladoMin > 0 || debilM > 0 || quieto) && !sinSenal;
+                  // DÓNDE está quieta decide si es una alarma (lib/gps-detencion.ts): detenida EN
+                  // un paradero sin marcas posteriores es una espera de embarque o de la hora de
+                  // salida (#30204) y no alarma; en el destino, «servicio sin cerrar»; en cualquier
+                  // otro caso —posición clavada byte a byte incluida— el texto y el ámbar de
+                  // siempre (#951). Texto, title, alarma y ÁMBAR salen del motor, no se componen
+                  // aquí: también la versión del CLIENTE, que no recibe la imputación al conductor.
+                  const rotQuieto = quietoEnRuta && detencion
+                    ? rotuloDetencion({ veredicto: detencion, minutos: sinMovMin, modoCliente, debilM })
+                    : null;
+                  // El title de la ESPERA solo acompaña a su propio texto: con «GPS congelado» o
+                  // «Sin señal» en pantalla, un title que habla de embarque contradiría la línea.
+                  // El de la alarma se conserva como estaba (salía siempre que había quietud).
+                  const textoEsQuieto = !!rotQuieto && !esperandoInicio && !sinSenal && congeladoMin === 0;
+                  // Con la línea de quietud en pantalla, el ámbar lo decide `rotQuieto.ambar`: el
+                  // motor ya suma ahí el GPS débil del operador —que la línea NOMBRA— y lo deja
+                  // fuera del cliente, cuyo texto no lo menciona. Sumar `debilM` por fuera pintaba
+                  // un ámbar pulsante sobre «Detenida en X» en el portal del cliente sin que nada lo
+                  // explicara. En las demás líneas, la regla de siempre.
+                  const alerta = !sinSenal && (congeladoMin > 0
+                    || (rotQuieto && textoEsQuieto ? rotQuieto.ambar : debilM > 0 || !!rotQuieto?.alarma));
                   return (
                 <p
                   className={`text-[11px] flex items-center gap-2 ${alerta ? "text-amber-300 font-bold" : "text-blue-200"}`}
-                  title={quieto ? "La unidad no se desplaza con el servicio en curso. Causas: GPS del teléfono PEGADO (pídele apagar/encender la Ubicación; si sigue, reiniciar el celular — caso #951), teléfono fuera del vehículo, o unidad varada. El conductor ya ve esta alerta en su pantalla." : debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
+                  title={rotQuieto && (rotQuieto.alarma || textoEsQuieto) ? rotQuieto.title : debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
                 >
-                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${esperandoInicio ? "bg-blue-300" : sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : "bg-green-400 animate-pulse"}`} />
+                  {/* Detenida SIN ámbar (en paradero con buen GPS, o la versión del cliente): punto
+                      azul FIJO, el mismo de «Aún no inicia» — es una espera, y el pulso verde de «en
+                      vivo» sobre una posición que lleva minutos sin cambiar diría algo que no está
+                      pasando. Con GPS débil en operación gana el ámbar, porque la línea lo nombra. */}
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${esperandoInicio ? "bg-blue-300" : sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : rotQuieto ? "bg-blue-300" : "bg-green-400 animate-pulse"}`} />
                   {esperandoInicio
                     ? `Aún no inicia${horaSalidaTxt ? ` · sale ${horaSalidaTxt}` : ""}`
                     : sinSenal
                     ? "Sin señal GPS"
                     : congeladoMin > 0
                       ? `⚠ GPS del conductor congelado · hace ${congeladoMin} min`
-                      : quieto
-                        ? `⚠ Unidad sin movimiento · hace ${sinMovMin} min${debilM > 0 ? ` · ±${debilM}m` : ""} — GPS pegado o teléfono fuera del bus`
+                      : rotQuieto
+                        ? rotQuieto.texto
                         : ultimaActualiz
                           ? `GPS en vivo · hace ${segsDesdeUlt}s${debilM > 0 ? ` · ⚠ GPS débil ±${debilM}m (activar Alta precisión)` : ""}`
                           : "Conectando..."}
@@ -1838,6 +1894,7 @@ export default function ModalGps({
                   : "linear-gradient(135deg, #0b315f 0%, #1d4ed8 100%)" }}>
                 <p className="text-[10px] font-bold uppercase tracking-wider opacity-80 mb-1">
                   {seAleja ? "El vehículo se aleja de"
+                    : detenidaEnObjetivo ? (detencion?.codigo === "en_destino" ? "Detenida en el destino final" : "Detenida en")
                     : proximaIdx === 0 ? "Vehículo en camino a"
                     : proximaIdx === paradasDisplay.length - 1 ? "Destino final"
                     : "Próxima parada"}
@@ -1853,6 +1910,18 @@ export default function ModalGps({
                       <p className="text-[11px] opacity-75 mt-0.5">
                         {distObjetivoM != null ? `A ${fmtDistancia(distObjetivoM)} en línea recta. ` : ""}
                         Sin hora de llegada mientras no vuelva a acercarse.
+                      </p>
+                    </div>
+                  ) : detenidaEnObjetivo ? (
+                    // Detenida EN este paradero (el mismo veredicto del header): una cuenta
+                    // regresiva «llega en 1 min» a un paradero en el que la unidad ya lleva
+                    // minutos parada contradice la línea de arriba. Se dice cuánto lleva y a
+                    // qué distancia del punto, que es lo que el operador puede comprobar en el mapa.
+                    <div className="flex-1">
+                      <p className="text-sm font-bold leading-tight">Detenida hace {sinMovMin} min</p>
+                      <p className="text-[11px] opacity-75 mt-0.5">
+                        {detencion && "distanciaM" in detencion ? `A ${fmtDistancia(detencion.distanciaM)} del paradero. ` : ""}
+                        Sin cuenta regresiva: ya está en él.
                       </p>
                     </div>
                   ) : etaMinVis != null ? (

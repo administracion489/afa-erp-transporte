@@ -7,9 +7,10 @@
 // miente: se le pide a Google la ruta HACIA ATRÁS (vuelta en U), la "hora de llegada" es
 // una hora inventada y salta en cada refresco.
 //
-// Es el MISMO bug que app/pasajero/page.tsx:906-975 ya corrigió para "mi paradero"
-// (commit db0ef14). Aquí se porta esa máquina —mismos umbrales, misma filosofía— y se
-// generaliza de "mi paradero" a "cada parada de la ruta".
+// Es el MISMO bug que la app del pasajero ya corrigió para "mi paradero" (commit db0ef14; esa
+// máquina vivía dentro de app/pasajero/page.tsx y hoy está extraída, tal cual, en
+// lib/pasajero-alejamiento.ts → `pasoSeguimiento`). Aquí se porta —mismos umbrales, misma
+// filosofía— y se generaliza de "mi paradero" a "cada parada de la ruta".
 //
 // PROPIEDAD DE SEGURIDAD (lo que hace esto desplegable): el marcado del conductor sigue
 // siendo la AUTORIDAD MÁXIMA. El GPS solo añade un PISO inferido:
@@ -43,9 +44,14 @@
 
 import { distM } from "./huella";
 
-// ── CONSTANTES PORTADAS VERBATIM de app/pasajero/page.tsx:926-971 ────────────────────
-// No se re-justifican aquí: se citan. Cambiarlas es cambiar una máquina ya validada en
-// producción, y hoy NO hay test runner en el repo (`npm run lint` y nada más).
+// ── CONSTANTES PORTADAS VERBATIM de la máquina del pasajero ─────────────────────────
+// Vivían en app/pasajero/page.tsx; hoy están DUPLICADAS, con los mismos literales, en
+// lib/pasajero-alejamiento.ts (la matriz scripts/prueba-pasajero-alejamiento.mts exige paridad
+// exacta con el original, y por eso allá se repiten en vez de importarse). No se re-justifican
+// aquí: se citan. Cambiarlas es cambiar una máquina ya validada en producción.
+// OJO con GAP_ALEJA_M: allá decide la RACHA del pasajero y aquí, además, la lectura EN PRESENTE
+// (`tendenciaPresente`), que el pasajero importa de este archivo. Si se ajusta una copia sin la
+// otra, la misma pantalla mediría «alejarse» con dos umbrales distintos.
 const SALTO_GLITCH_M = 400;   // salto mínimo para sospechar teletransporte (línea 926)
 const VEL_GLITCH_MS  = 34;    // ~122 km/h: techo físico de un bus urbano (líneas 923-925)
 const GAP_ALEJA_M    = 60;    // gap > 60 → cuenta como alejarse (línea 935)
@@ -223,7 +229,12 @@ const VETO_THROTTLE_MS = 20_000;
 // 60 s = GLITCH_MAX_DT_S: el mismo corte con el que este motor decide que dos muestras siguen
 // siendo seguimiento continuo, y el mismo con el que el modal declara «sin señal» — una posición
 // de hace más de un minuto ya no describe el ahora.
-const VENTANA_PRESENTE_MS = GLITCH_MAX_DT_S * 1000;
+//
+// SE EXPORTA, junto con `registrarReciente` y `tendenciaPresente`, porque la app del pasajero
+// (lib/pasajero-alejamiento.ts) tenía el mismo defecto con su propia máquina direccional. Dos
+// definiciones de «el último minuto» terminan contestando distinto la misma pregunta —el modal
+// diría «se aleja» y el teléfono del pasajero no, o al revés—, así que hay UNA y vive aquí.
+export const VENTANA_PRESENTE_MS = GLITCH_MAX_DT_S * 1000;
 
 // ── Tipos ────────────────────────────────────────────────────────────────────────────
 
@@ -313,8 +324,11 @@ export type EstadoAvance = {
   rachaAlejaVigente: number;
   // Muestras ACEPTADAS del último minuto (VENTANA_PRESENTE_MS que termina en la última). Solo las
   // lee `leerAvance` para afirmar «se aleja» en presente; el motor no decide nada con ellas.
-  recientes: { lat: number; lng: number; ts: number }[];
+  recientes: MuestraReciente[];
 };
+
+/** Una muestra de la ventana «en presente» (ver VENTANA_PRESENTE_MS y `registrarReciente`). */
+export type MuestraReciente = { lat: number; lng: number; ts: number };
 
 export type MotivoPaso = "conductor" | "gps" | "arrastre" | null;
 
@@ -474,8 +488,13 @@ const clonar = (e: EstadoAvance): EstadoAvance => ({
 // `p.lat != null` es obligatorio ANTES del isFinite: Number(null) es 0, así que sin este chequeo
 // una parada sin geocodificar (lat/lng null — "habitual, no excepcional" según ModalGps) entraba
 // a la máquina como si estuviera en (0,0) y envenenaba minDist/gap con una distancia de ~8800 km.
-const tieneCoords = (p: ParadaAvance | undefined): boolean =>
+// Recibe solo las coordenadas (no `completada`) para que `tendenciaPresente` sirva también con el
+// paradero del pasajero, que no es una ParadaAvance. Con una ParadaAvance da lo mismo que antes.
+const tieneCoords = (p: CoordsParada | null | undefined): boolean =>
   !!p && p.lat != null && p.lng != null && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng));
+
+/** Lo único que `tendenciaPresente` necesita de un paradero. */
+export type CoordsParada = { lat: number | string | null; lng: number | string | null };
 
 /** Piso inferido por GPS: 1 + el índice más alto declarado "pasada". */
 function pisoDeGps(e: EstadoAvance): number {
@@ -740,29 +759,97 @@ export function avanzarAvance(
   // 6. COMMIT ATÓMICO — solo si la muestra superó las puertas 1-3.
   e.lastTs = fix.ts; e.lastLat = fix.lat; e.lastLng = fix.lng;
   // Las quietas también entran: un bus detenido es justo lo que la ventana tiene que ver.
-  e.recientes.push({ lat: fix.lat, lng: fix.lng, ts: fix.ts });
-  while (e.recientes.length && e.recientes[0].ts < fix.ts - VENTANA_PRESENTE_MS) e.recientes.shift();
+  e.recientes = registrarReciente(e.recientes, fix);
   return e;
 }
 
 /**
- * ¿La distancia a la parada CRECIÓ en el último minuto? Es la mitad «en presente» de `seAleja`
- * (ver VENTANA_PRESENTE_MS). Sin coords, o con menos de dos muestras en la ventana, no hay con
- * qué afirmarlo y devuelve false.
+ * Agrega una muestra ACEPTADA a la ventana «en presente» y descarta las que quedaron más de
+ * VENTANA_PRESENTE_MS por detrás de ella. PURA: devuelve un array NUEVO y no toca el que recibe
+ * (el motor lo llama sobre su clon; el pasajero, sobre el estado que todavía está en su ref).
  *
- * Con 4+ muestras se toma la PEOR pareja de cada extremo —el más lejano de los dos primeros
- * contra el más cercano de los dos últimos—, así que un solo fix desviado, al principio o al
- * final de la ventana, no fabrica un alejamiento. Dos muestras es la evidencia mínima creíble del
- * repo (RACHA_REGRESO, RACHA_ALEJA_FINA). Con 2-3 se comparan los extremos.
+ * Es la ÚNICA definición de «el último minuto»: la usan el motor del operador (paso 6 de
+ * `avanzarAvance`) y la máquina del pasajero (lib/pasajero-alejamiento.ts). Qué muestras se le
+ * pasan lo decide cada uno con sus propias puertas; cómo se arma la ventana, no.
+ *
+ * UNA MUESTRA QUE NO ES MÁS NUEVA QUE LA ÚLTIMA DE LA VENTANA NO ENTRA. La ventana es una
+ * secuencia en el tiempo y `tendenciaPresente` compara sus extremos POR POSICIÓN: una muestra vieja
+ * pegada al final pasaría por «lo más reciente» y, con 2-3 muestras, un bus que se ACERCA se
+ * leería como alejándose. En el motor esto es inalcanzable —la puerta 1 exige ts > lastTs + gateMs
+ * con el gate por defecto, y nadie lo llama con gateMs = 0—, así que su salida es idéntica a la de
+ * antes. En el pasajero sí ocurre: su dedupe es `ts !== lastTs` y la carrera entre el sondeo de 5 s
+ * y la ruta de 30 s puede traer la fila anterior; esa fila sigue alimentando su racha (el original
+ * lo hacía y se conserva), pero no describe el presente.
  */
-function distanciaCrecio(recientes: EstadoAvance["recientes"] | undefined, p: ParadaAvance | undefined): boolean {
-  if (!recientes || recientes.length < 2 || !tieneCoords(p)) return false;
+export function registrarReciente(
+  recientes: readonly MuestraReciente[] | null | undefined,
+  fix: MuestraReciente,
+): MuestraReciente[] {
+  const previas = recientes ?? [];
+  const ultima = previas.length ? previas[previas.length - 1] : null;
+  if (ultima && !(fix.ts > ultima.ts)) return previas.slice();
+  const out = previas.concat({ lat: fix.lat, lng: fix.lng, ts: fix.ts });
+  let desde = 0;
+  while (desde < out.length && out[desde].ts < fix.ts - VENTANA_PRESENTE_MS) desde++;
+  return desde ? out.slice(desde) : out;
+}
+
+/**
+ * Qué hizo la distancia a un paradero en la ventana «en presente» (VENTANA_PRESENTE_MS):
+ *   "aleja"  → CRECIÓ más de GAP_ALEJA_M        (evidencia de que se va)
+ *   "viene"  → BAJÓ más de GAP_ALEJA_M          (evidencia de que se acerca)
+ *   "quieto" → hay evidencia y no se movió ni lo uno ni lo otro (detenido, o de costado)
+ *   null     → SIN EVIDENCIA: menos de dos muestras en la ventana, o el paradero sin coordenadas
+ *
+ * POR QUÉ CUATRO Y NO UN BOOLEANO. `distanciaCrecio` contesta solo «¿creció?», y su `false` junta
+ * tres mundos que se atienden al revés. La app del pasajero lo pagó: tratar «no creció» como
+ * «viene» devolvía la cuenta regresiva y el «Tu bus está llegando» a un bus que acababa de pasar y
+ * estaba parado en un semáforo; y tratar «no hay muestras» como «no se aleja» callaba el «SE ALEJA»
+ * de un teléfono que envía cada 65 s (la ventana nunca tiene dos). Quien lee esto decide qué hace
+ * con cada caso; este archivo solo declara cuál es.
+ *
+ * LA MISMA REGLA EN LOS DOS SENTIDOS, y es lo que la hace confiable: con 4+ muestras se toma la
+ * PEOR pareja de cada extremo —para «aleja», el más lejano de los dos primeros contra el más
+ * cercano de los dos últimos; para «viene», el espejo—, así que un solo fix desviado, al principio
+ * o al final de la ventana, no fabrica ni un alejamiento ni un acercamiento. Con 2-3 se comparan
+ * los extremos. Dos muestras es la evidencia mínima creíble del repo (RACHA_REGRESO,
+ * RACHA_ALEJA_FINA). «aleja» y «viene» son EXCLUYENTES por construcción: exigir los dos a la vez
+ * pide que el mínimo de un extremo supere en 60 m al máximo del otro, y al revés.
+ *
+ * El umbral de «viene» es el MISMO GAP_ALEJA_M: no hay un dato nuevo que calibrar, y un umbral
+ * propio haría la regla asimétrica: la misma velocidad se leería «quieto» alejándose y «viene»
+ * acercándose, o al revés.
+ *
+ * `p.lat != null` antes del isFinite lo hace `tieneCoords` (Number(null) es 0).
+ */
+export type TendenciaPresente = "aleja" | "viene" | "quieto" | null;
+
+export function tendenciaPresente(recientes: readonly MuestraReciente[] | null | undefined, p: CoordsParada | null | undefined): TendenciaPresente {
+  if (!recientes || recientes.length < 2 || !tieneCoords(p)) return null;
   const pLat = Number(p!.lat), pLng = Number(p!.lng);
   const d = (q: { lat: number; lng: number }) => distM(q.lat, q.lng, pLat, pLng);
   const n = recientes.length;
-  const ini = n >= 4 ? Math.max(d(recientes[0]), d(recientes[1])) : d(recientes[0]);
-  const fin = n >= 4 ? Math.min(d(recientes[n - 2]), d(recientes[n - 1])) : d(recientes[n - 1]);
-  return fin - ini > GAP_ALEJA_M;
+  const d0 = d(recientes[0]), dn = d(recientes[n - 1]);
+  // Con 4+, los dos de cada punta; con 2-3, una sola por punta (repetida, para la misma cuenta).
+  const d1 = n >= 4 ? d(recientes[1]) : d0;
+  const dm = n >= 4 ? d(recientes[n - 2]) : dn;
+  if (Math.min(dm, dn) - Math.max(d0, d1) > GAP_ALEJA_M) return "aleja";
+  if (Math.min(d0, d1) - Math.max(dm, dn) > GAP_ALEJA_M) return "viene";
+  return "quieto";
+}
+
+/**
+ * ¿La distancia a la parada CRECIÓ en el último minuto? Es la mitad «en presente» de `seAleja`
+ * en el modal del operador (ver VENTANA_PRESENTE_MS). Sin coords, o con menos de dos muestras en
+ * la ventana, no hay con qué afirmarlo y devuelve false — para el modal eso es correcto: su «sin
+ * señal» es el mismo minuto, así que sin muestras ya no está afirmando nada.
+ *
+ * Es `tendenciaPresente(...) === "aleja"` y nada más: UNA definición de «creció», con dos
+ * lectores. La matriz scripts/prueba-pasajero-alejamiento.mts corre la versión anterior copiada
+ * literal contra esta sobre ventanas al azar y exige el mismo resultado en cada una.
+ */
+export function distanciaCrecio(recientes: readonly MuestraReciente[] | null | undefined, p: CoordsParada | null | undefined): boolean {
+  return tendenciaPresente(recientes, p) === "aleja";
 }
 
 /**
@@ -848,8 +935,10 @@ export function leerAvance(estado: EstadoAvance, paradas: ParadaAvance[]): Avanc
   };
 }
 
-/** Lectura para "¿pasó MI paradero?" — la pregunta del app pasajero. Misma máquina, otra
- *  lectura. Existe para que la futura migración de app/pasajero no necesite un motor propio. */
+/** Lectura para "¿pasó MI paradero?" con ESTA máquina (la del operador). La app del pasajero NO
+ *  la usa: conserva su propia máquina, extraída tal cual en lib/pasajero-alejamiento.ts, porque
+ *  migrarla cambiaría su veredicto «YA PASÓ» (otra puerta de cadencia, otra de precisión). Lo único
+ *  que comparten es la lectura EN PRESENTE (`registrarReciente`, `tendenciaPresente`). */
 export function leerParada(
   estado: EstadoAvance,
   paradas: ParadaAvance[],
