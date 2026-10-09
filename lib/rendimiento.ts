@@ -263,7 +263,16 @@ export type Tramo = {
 };
 
 /** Un combustible que la unidad usa poco: cuánto de su energía aporta y cuál es. */
-export type Auxiliar = { participacion: number; familias: string[] };
+export type Auxiliar = {
+  participacion: number;
+  familias: string[];
+  /** Los tramos con el auxiliar dentro que salen dentro de lo normal y SÍ se miden. Ausente = todos. */
+  aceptados?: number[];
+  /** El techo de lo normal de la unidad (valla de Tukey de sus tramos limpios, sin descontar). */
+  limite?: number;
+  /** Cuántos tramos envuelven una carga del auxiliar. */
+  cruzadosTotal?: number;
+};
 
 /**
  * La cantidad del tramo para dividir km entre ella. Sin auxiliar es la cantidad tal cual; con
@@ -606,7 +615,8 @@ export function serieRendimiento(
 
     // Con un combustible AUXILIAR, parte de la energía que movió estos km vino de él: el km/gal
     // del principal se descuenta en esa proporción (ver `auxiliarDeUnidad`).
-    const valor = (delta / cantidadTramo) * (auxiliar ? 1 - auxiliar.participacion : 1);
+    const bruto = delta / cantidadTramo;
+    const valor = bruto * (auxiliar ? 1 - auxiliar.participacion : 1);
 
     if (saltadas.length) {
       tramos.push({
@@ -625,10 +635,17 @@ export function serieRendimiento(
     // repostaje que nunca faltó, y en el Radar BLOQUEANDO el voucher por ello.
     const fechaPrev = previa.fecha;
     const cruces = otrasFamilias.filter((m) => cruzaElTramo(m, kmPrev, km, fechaPrev, c.fecha));
-    if (cruces.length && !auxiliar) {
+    const aceptado = !!auxiliar && (!auxiliar.aceptados || auxiliar.aceptados.includes(c.id));
+    if (cruces.length && !aceptado) {
       tramos.push({
-        ...base, rendimiento: null, motivo: "familia_cruzada", crudo: valor,
-        detalle: detalleDe("familia_cruzada", { ...base, crudo: valor, cruces }),
+        // El crudo SIN descontar: es el que se comparó con lo normal de la unidad.
+        ...base, rendimiento: null, motivo: "familia_cruzada", crudo: bruto,
+        detalle: detalleDe("familia_cruzada", { ...base, crudo: bruto, cruces }) +
+          (auxiliar
+            ? ` En esta unidad la ${cruces.map((m) => m.familia).filter((f, k, a) => a.indexOf(f) === k).join(" y ")} es auxiliar, ` +
+              `pero en ESTE tramo se notó: sin descontar sale por encima de lo normal de la unidad ` +
+              `(hasta ${fmt(num(auxiliar.limite))}), así que no se publica.`
+            : ""),
       });
       previa = c;
       continue;
@@ -752,8 +769,10 @@ export function seriesRendimiento(cargas: CargaRendimiento[]): Map<string, Serie
   for (const [k, arr] of cubos) {
     const familia = familiaCombustible(arr[0]?.tipo);
     const otras = (marcas.get(arr[0]?.unidad) ?? []).filter((m) => m.familia !== familia);
-    const aux = otras.length ? auxiliarDeUnidad(porUnidad.get(arr[0]?.unidad) ?? [], familia) : null;
-    out.set(k, serieRendimiento(arr, otras, aux));
+    const estricta = serieRendimiento(arr, otras);
+    const candidato = otras.length ? auxiliarDeUnidad(porUnidad.get(arr[0]?.unidad) ?? [], familia) : null;
+    const aux = candidato ? decidirAuxiliar(estricta, candidato) : null;
+    out.set(k, aux ? serieRendimiento(arr, otras, aux) : estricta);
   }
   return out;
 }
@@ -772,10 +791,26 @@ export function seriesRendimiento(cargas: CargaRendimiento[]): Map<string, Serie
 // gasolina, cada km/gal de GLP medido se multiplica por 0.92. Es el lado seguro: sin descontarlo,
 // el km/gal de GLP saldría alto y el costo por km, corto.
 //
-// SOLO CUANDO ES DE VERDAD AUXILIAR: los otros combustibles, juntos, aportan como mucho
-// `UMBRAL_AUXILIAR` de la energía. Una unidad que usa los dos en serio (o que cambió de uno a otro)
-// sigue con la regla de siempre: el tramo cruzado no se mide. Y la serie del AUXILIAR no se mide
-// nunca así: sus tramos envuelven meses del principal.
+// SOLO CUANDO ES DE VERDAD AUXILIAR, Y ESO SE MIDE CON LOS REGISTROS DE LA UNIDAD, no con un
+// porcentaje fijo (la primera versión usaba un 20 % elegido a mano; el dueño preguntó si se podía
+// calcular con los datos, y sí). Ningún registro dice cuántos km hizo la gasolina, pero su EFECTO
+// sí se ve: si la gasolina fuera de verdad marginal, los tramos de GLP que envuelven una carga de
+// gasolina saldrían como los que no la envuelven; si se usa en serio, salen inflados (los km de la
+// gasolina caen en el delta y no en el denominador). La prueba (`decidirAuxiliar`):
+//
+//   1. Los otros aportan MENOS DE LA MITAD de la energía (`MAX_PARTE_AUXILIAR`). No es un umbral
+//      ajustado: es la definición de «principal».
+//   2. Hay al menos `MIN_TRAMOS_CONFIABLE` tramos LIMPIOS (sin gasolina dentro) — el mismo mínimo
+//      con el que el módulo ya decide que un patrón es un patrón. Con menos, no hay contra qué comparar.
+//   3. El techo de lo normal es el de la propia unidad: la valla superior de Tukey de sus tramos
+//      limpios (Q3 + 1.5 × rango intercuartil), la regla estadística estándar para «fuera de lo
+//      habitual». Un tramo con gasolina por debajo de ese techo se mide; por encima, en ESE tramo la
+//      gasolina sí se notó y no se mide.
+//   4. Si la MAYORÍA de los tramos con gasolina salen dentro de lo normal, la gasolina se reparte de
+//      verdad y la unidad tiene auxiliar (descuento a todos los tramos). Si la mayoría salen
+//      inflados, la gasolina se usa en serio en esos tramos: rige la regla de siempre, sin descuento.
+//
+// La serie del AUXILIAR no se mide nunca así: sus tramos envuelven meses del principal.
 
 /**
  * Energía por unidad canónica de cada familia, relativa a un galón de gasolina (poder calorífico
@@ -785,17 +820,14 @@ export function seriesRendimiento(cargas: CargaRendimiento[]): Map<string, Serie
  */
 export const ENERGIA_RELATIVA: Record<string, number> = { gasolina: 1, diesel: 1.11, glp: 0.76, gnv: 0.29 };
 
-/**
- * Hasta qué parte de la energía total pueden aportar los otros combustibles para considerarse
- * AUXILIARES. **No está medido**: es el punto donde descontar una proporción promedio sigue siendo
- * una aproximación honesta. El lado seguro es BAJARLO (más unidades vuelven a «bicombustible»).
- */
-export const UMBRAL_AUXILIAR = 0.2;
+/** «Principal» es el que pone la MAYOR parte de la energía. Definición, no un umbral ajustado. */
+export const MAX_PARTE_AUXILIAR = 0.5;
 
 /**
- * ¿Los otros combustibles de la unidad son AUXILIARES de `familia`? Devuelve cuánto aportan (y
- * cuáles) o null. Exige poder medir TODA la energía: una carga de la unidad sin cantidad o en una
- * unidad que no se sabe convertir deja la cuenta incompleta, y entonces no se afirma nada.
+ * El candidato: cuánta energía aportan los otros combustibles de la unidad (y cuáles), si son
+ * menos que el principal. Exige poder medir TODA la energía: una carga sin cantidad o en una unidad
+ * que no se sabe convertir deja la cuenta incompleta, y entonces no se afirma nada. Que sea
+ * candidato no lo hace auxiliar: lo decide la evidencia de los tramos (`decidirAuxiliar`).
  */
 export function auxiliarDeUnidad(cargasDeLaUnidad: CargaRendimiento[], familia: string): Auxiliar | null {
   let principal = 0;
@@ -813,17 +845,44 @@ export function auxiliarDeUnidad(cargasDeLaUnidad: CargaRendimiento[], familia: 
   const total = principal + otras;
   if (!(otras > 0) || !(total > 0)) return null;
   const participacion = otras / total;
-  return participacion <= UMBRAL_AUXILIAR ? { participacion, familias: [...familias].sort() } : null;
+  return participacion < MAX_PARTE_AUXILIAR ? { participacion, familias: [...familias].sort() } : null;
+}
+
+/** Cuartil por interpolación lineal (el método habitual de las hojas de cálculo). */
+function cuartil(xs: number[], q: number): number {
+  const v = [...xs].sort((a, b) => a - b);
+  const pos = (v.length - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  return v[lo] + (v[hi] - v[lo]) * (pos - lo);
+}
+
+/**
+ * ¿El candidato es de verdad auxiliar? Se decide con la serie ESTRICTA (sin auxiliar: los tramos
+ * con gasolina dentro salen `familia_cruzada` con su número crudo). Devuelve el auxiliar con la
+ * evidencia (qué tramos con gasolina se aceptan, el techo, cuántos) o null: la regla de siempre.
+ */
+export function decidirAuxiliar(estricta: Serie, candidato: Auxiliar): Auxiliar | null {
+  const limpios = estricta.tramos.filter((t) => t.rendimiento !== null).map((t) => t.rendimiento as number);
+  if (limpios.length < MIN_TRAMOS_CONFIABLE) return null;
+  const q1 = cuartil(limpios, 0.25), q3 = cuartil(limpios, 0.75);
+  const limite = q3 + 1.5 * (q3 - q1);
+  const cruzados = estricta.tramos.filter((t) => t.motivo === "familia_cruzada" && t.crudo !== null);
+  const aceptados = cruzados.filter((t) => (t.crudo as number) <= limite).map((t) => t.cargaId);
+  if (cruzados.length && aceptados.length * 2 < cruzados.length) return null;
+  return { ...candidato, aceptados, limite, cruzadosTotal: cruzados.length };
 }
 
 function detalleAuxiliar(a: Auxiliar, familia: string, cruces: number): string {
   const otras = a.familias.join(" y ");
   const pct = Math.round(a.participacion * 1000) / 10;
+  const u = familia === "gnv" ? "m³" : "gal";
+  const evidencia = a.cruzadosTotal
+    ? ` Medido con los registros de la unidad: de ${a.cruzadosTotal} tramo(s) que envuelven ${otras}, ${a.aceptados?.length ?? 0} salen dentro de lo normal (hasta ${fmt(num(a.limite))} km/${u} sin descontar).`
+    : "";
   return (
     `Unidad bicombustible con ${otras} como AUXILIAR: aporta el ${pct} % de la energía de toda su historia, ` +
-    `así que este km/${familia === "gnv" ? "m³" : "gal"} ya está descontado en esa proporción` +
-    (cruces ? ` (en este tramo repostó ${cruces} vez/veces de ${otras})` : "") +
-    `. Si ${otras} llega a aportar más del ${Math.round(UMBRAL_AUXILIAR * 100)} %, los tramos que la envuelven dejan de medirse.`
+    `así que este km/${u} ya está descontado en esa proporción` +
+    (cruces ? ` (en este tramo repostó ${cruces} vez/veces de ${otras})` : "") + "." + evidencia
   );
 }
 
