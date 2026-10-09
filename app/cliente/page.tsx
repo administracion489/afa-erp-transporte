@@ -8,7 +8,7 @@ import "mapbox-gl/dist/mapbox-gl.css";   // el CSS sí es estático (no arrastra
 import { animarMarcador, animarMarcadorPorCamino, tweenEnVuelo } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
-  puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
+  puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje, coberturaRastreo, largoLineaM,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM,
   pegarIconoAVia, caminoEntreSnaps, enParalelo, crearFiltroFixVivo,
 } from "@/lib/huella";
@@ -1869,6 +1869,8 @@ export default function ClientePortal() {
       const estimadoMC = largoFeatsC(feats);
       const rvC = resumenViaje(limpio, crudos);
       if (rvC && medidoMC + estimadoMC > 0) rvC.medidoPct = Math.round((medidoMC / (medidoMC + estimadoMC)) * 100);
+      // Los metros viajan aparte: al pintar se miden contra la RUTA del servicio si ya terminó (coberturaRastreo).
+      if (rvC) { rvC.medidoM = medidoMC; rvC.estimadoM = estimadoMC; }
       if (!cancel) setResumenMap(prev => ({ ...prev, [rid]: rvC }));
       } finally { cargandoHuellaCliRef.current = false; }
     };
@@ -3871,8 +3873,18 @@ export default function ClientePortal() {
             {/* Resumen del viaje (datos reales) del servicio seleccionado */}
             {servicioSel && resumenMap[servicioSel.id] && resumenMap[servicioSel.id]!.kmRecorridos > 0 && (() => {
               const r = resumenMap[servicioSel.id]!;
-              const badgeBg = r.medidoPct >= 90 ? "#dcfce7" : r.medidoPct >= 70 ? "#fef9c3" : "#fee2e2";
-              const badgeFg = r.medidoPct >= 90 ? "#15803d" : r.medidoPct >= 70 ? "#a16207" : "#b91c1c";
+              // Con el servicio TERMINADO el % se mide contra la ruta prevista, no contra el trecho entre
+              // la primera y la última señal: un GPS que se calla a los 3 min daba "100 %" (lib/huella.ts).
+              const cob = r.medidoM != null
+                ? coberturaRastreo({
+                    medidoM: r.medidoM, estimadoM: r.estimadoM ?? 0,
+                    rutaPrevistaM: largoLineaM(rutasEnVivoMap[servicioSel.id]),
+                    servicioTerminado: esFinalizado(servicioSel.estado) || rutaCompleta(servicioSel),
+                  })
+                : null;
+              const pct = cob?.pct ?? r.medidoPct;
+              const badgeBg = pct >= 90 ? "#dcfce7" : pct >= 70 ? "#fef9c3" : "#fee2e2";
+              const badgeFg = pct >= 90 ? "#15803d" : pct >= 70 ? "#a16207" : "#b91c1c";
               // Función (no componente): se invoca como Item({...}), sin crear un fiber nuevo por render.
               const Item = (l: string, v: string) => (
                 <div key={l}><p style={{ fontSize: 9, color: C.mute, fontWeight: 700, textTransform: "uppercase" as const, margin: 0 }}>{l}</p><p style={{ fontSize: 14, color: C.ink, fontWeight: 800, margin: "1px 0 0" }}>{v}</p></div>
@@ -3881,7 +3893,7 @@ export default function ClientePortal() {
                 <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                     <p style={{ fontWeight: 700, fontSize: 12, color: C.ink, margin: 0 }}>Resumen del viaje</p>
-                    <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: badgeBg, color: badgeFg }}>Rastreo {r.medidoPct}% medido</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: badgeBg, color: badgeFg }}>Rastreo {pct}% medido</span>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
                     {Item("Recorrido", `${r.kmRecorridos} km`)}
@@ -3895,11 +3907,15 @@ export default function ClientePortal() {
                     <span>Salida <b style={{ color: C.ink }}>{fmtHoraPe(r.horaSalida)}</b></span>
                     <span>Última señal <b style={{ color: C.ink }}>{fmtHoraPe(r.horaLlegada)}</b></span>
                   </div>
-                  {r.medidoPct < 90 && (
+                  {cob?.referencia === "ruta_prevista" && pct < 90 ? (
                     <p style={{ fontSize: 10, color: C.mute, margin: "8px 0 0", lineHeight: 1.4 }}>
-                      {100 - r.medidoPct}% del trayecto sin señal (huecos de GPS). Precisión mediana ±{r.precisionMedianaM} m.
+                      Medido {cob.medidoKm} km de los {cob.referenciaKm} km de la ruta prevista{cob.sinHuellaKm > 0 ? `: el GPS dejó de transmitir a las ${fmtHoraPe(r.horaLlegada)} y ${cob.sinHuellaKm} km del recorrido no tienen señal` : ""}.
                     </p>
-                  )}
+                  ) : pct < 90 ? (
+                    <p style={{ fontSize: 10, color: C.mute, margin: "8px 0 0", lineHeight: 1.4 }}>
+                      {100 - pct}% del trayecto sin señal (huecos de GPS). Precisión mediana ±{r.precisionMedianaM} m.
+                    </p>
+                  ) : null}
                 </div>
               );
             })()}

@@ -8,7 +8,7 @@ import { supabase } from "@/lib/supabase";
 import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
-  puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
+  puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje, coberturaRastreo, largoLineaM,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
   pegarIconoAVia, viasCercanasTilequery, esAccCruda, MAX_SEG_M, caminoEntreSnaps, enParalelo,
   crearFiltroFixVivo,
@@ -741,6 +741,9 @@ export default function ModalGps({
         const estimadoM = largoFeats(feats);
         const rv = resumenViaje(limpio, crudos);
         if (rv && medidoM + estimadoM > 0) rv.medidoPct = Math.round((medidoM / (medidoM + estimadoM)) * 100);
+        // Los metros viajan aparte: el badge se mide al pintar contra la RUTA del servicio cuando
+        // ya terminó (coberturaRastreo), y eso depende de la ruta y del avance, que son estado.
+        if (rv) { rv.medidoM = medidoM; rv.estimadoM = estimadoM; }
         if (!cancel) setResumen(rv);
       } catch { /* conservar estela previa */ }
       finally { cargandoHuellaRef.current = false; }
@@ -1106,6 +1109,15 @@ export default function ModalGps({
   // permanentemente en "0/N · 0%".
   const paradasComp   = avance.pasadas.filter(Boolean).length;
   const compConductor = avance.motivo.filter(m => m === "conductor").length;
+  // Badge "Rastreo %": con el servicio TERMINADO se mide contra la ruta prevista, no contra el
+  // trecho entre la primera y la última señal (lib/huella.ts → coberturaRastreo). Terminado es
+  // lo mismo que pinta la tarjeta verde «Todas las paradas cubiertas», o el servicio finalizado.
+  const rutaPrevistaM = useMemo(() => largoLineaM(ruta?.coordenadas), [ruta?.coordenadas]);
+  const servicioTerminado = (proximaParada == null && paradasDisplay.length > 0) || ubic?.estado === "finalizado";
+  const cobertura = useMemo(() => (resumen && resumen.medidoM != null)
+    ? coberturaRastreo({ medidoM: resumen.medidoM, estimadoM: resumen.estimadoM ?? 0, rutaPrevistaM, servicioTerminado })
+    : null, [resumen, rutaPrevistaM, servicioTerminado]);
+  const rastreoPct = cobertura?.pct ?? resumen?.medidoPct ?? 0;
   // "gps" (el motor la vio pasar) y "arrastre" (quedó detrás del piso, sin evidencia propia) son
   // cosas distintas y NO pueden contarse juntas: el arrastre también lo produce el marcado del
   // conductor, así que sumarlas hacía que un servicio sin GPS anunciara "7 detectadas por GPS".
@@ -1919,13 +1931,16 @@ export default function ModalGps({
               <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400">Resumen del viaje</p>
-                  {/* Badge de calidad de rastreo: % del recorrido efectivamente medido (vs huecos). */}
+                  {/* Badge de calidad de rastreo: % del SERVICIO con huella medida (coberturaRastreo). */}
                   <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                    title={cobertura?.referencia === "ruta_prevista"
+                      ? `Medido sobre la ruta prevista del servicio (${cobertura.referenciaKm} km)`
+                      : "Medido sobre el trayecto entre la primera y la última señal"}
                     style={{
-                      background: resumen.medidoPct >= 90 ? "#dcfce7" : resumen.medidoPct >= 70 ? "#fef9c3" : "#fee2e2",
-                      color: resumen.medidoPct >= 90 ? "#15803d" : resumen.medidoPct >= 70 ? "#a16207" : "#b91c1c",
+                      background: rastreoPct >= 90 ? "#dcfce7" : rastreoPct >= 70 ? "#fef9c3" : "#fee2e2",
+                      color: rastreoPct >= 90 ? "#15803d" : rastreoPct >= 70 ? "#a16207" : "#b91c1c",
                     }}>
-                    Rastreo {resumen.medidoPct}%
+                    Rastreo {rastreoPct}%
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-x-2 gap-y-2">
@@ -1940,9 +1955,24 @@ export default function ModalGps({
                   <span>Salida <b className="text-gray-700">{fmtHoraTs(resumen.horaSalida)}</b></span>
                   <span>Última señal <b className="text-gray-700">{fmtHoraTs(resumen.horaLlegada)}</b></span>
                 </div>
-                {resumen.medidoPct < 90 && (
+                {cobertura?.referencia === "ruta_prevista" && rastreoPct < 90 ? (
+                  // Servicio terminado con la huella corta: lo que falta NO es un hueco entre dos
+                  // señales, es que el GPS dejó de transmitir y el servicio siguió.
+                  <p className="text-[9px] text-red-700 mt-1.5 leading-snug">
+                    Medido {cobertura.medidoKm} km de los {cobertura.referenciaKm} km de la ruta prevista.
+                    {cobertura.sinHuellaKm > 0 && <> {cobertura.sinHuellaKm} km sin ninguna señal: el GPS dejó de transmitir a las {fmtHoraTs(resumen.horaLlegada)} y el servicio siguió.</>}
+                    {!modoCliente && " Lo más común: la pantalla del teléfono se bloqueó o la app del conductor se cerró."}
+                  </p>
+                ) : rastreoPct < 90 ? (
                   <p className="text-[9px] text-gray-400 mt-1.5 leading-snug">
-                    {100 - resumen.medidoPct}% estimado (sin señal o GPS débil, dibujado sobre la ruta prevista). Precisión mediana ±{resumen.precisionMedianaM} m.
+                    {100 - rastreoPct}% estimado (sin señal o GPS débil, dibujado sobre la ruta prevista). Precisión mediana ±{resumen.precisionMedianaM} m.
+                  </p>
+                ) : null}
+                {/* En curso y sin señal: el % solo describe hasta la última señal. La ruta entera no
+                    sirve de referencia aquí (no se sabe cuánto lleva recorrido), así que se DICE. */}
+                {!servicioTerminado && sinSenal && (
+                  <p className="text-[9px] text-amber-700 mt-1.5 leading-snug">
+                    El porcentaje mide solo hasta la última señal ({fmtHoraTs(resumen.horaLlegada)}); desde entonces no llegan posiciones.
                   </p>
                 )}
               </div>

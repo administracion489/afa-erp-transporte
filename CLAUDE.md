@@ -616,6 +616,16 @@ Lo reportó el dueño: *«quiero enviar solo a un cliente y solo a AFA para prob
 - **Lo que NO se aflojó, y es la mitad que importa**: un retraso de verdad sigue saliendo, contra el paradero correcto y con los minutos reales. Callarlo sería peor que el falso positivo.
 - Matriz: `npx tsx scripts/prueba-retrasos.mts` — trae el caso #25526 dentro, **conserva el bug como prueba de regresión** (si deja de reproducir, el escenario dejó de ser el que se rompió) y fija que sin dato de avance el veredicto es idéntico al de antes.
 
+### «Rastreo %» se mide contra el SERVICIO, no contra el trecho entre dos señales
+
+`coberturaRastreo` + `largoLineaM` en `lib/huella.ts` (PURO) + el resumen del viaje de `components/seguimiento/ModalGps.tsx` y de `/cliente`. Matriz: `npx tsx scripts/prueba-cobertura-rastreo.mts`. **Sin migración.**
+
+**El caso** (reserva #6166, VFC-962): «Rastreo 100%» con 0.4 km y 3 min de huella (4:08–4:11) sobre una ruta prevista de 55 min, al lado de «Todas las paradas cubiertas». El % era `medido / (medido + estimado)` y el estimado solo rellena huecos ENTRE dos señales: lo que pasa DESPUÉS de la última no entraba en ningún lado, así que un GPS que se calla a los 400 m daba 100 %.
+
+- **Con el servicio TERMINADO** (todas las paradas cubiertas —la misma condición de la tarjeta verde— o finalizado) el denominador es el MAYOR entre la ruta prevista y lo dibujado: un desvío o la ida a la cochera no bajan el %. La nota nombra los km sin ninguna señal y la hora de la última.
+- **EN CURSO, o sin ruta prevista, el % es byte a byte el de antes** (la matriz lo barre contra la fórmula vieja copiada literal): a mitad de camino no se sabe cuánto lleva recorrido sin señal, y medir contra la ruta entera pintaría de rojo un servicio sano. Si además no hay señal, la tarjeta DICE que el % solo mide hasta la última.
+- `ResumenViaje` lleva `medidoM`/`estimadoM` aparte del % porque la ruta y el avance son estado de la pantalla, no del loop de la huella. Al cliente no se le imputa al conductor: la causa probable («pantalla bloqueada o app cerrada») solo se le dice a operación.
+
 ### Lectura del odómetro · el dígito de más (`lib/odometro-seleccion.ts`, `lib/vision-ia.ts`)
 
 **El ERP sabe cuántos dígitos tiene el odómetro de cada unidad y se lo estaba callando.** El caso real (CUP-435, 05/09/2026): el tablero marca `ODO 23980 km` / `TRIP 388.0` y la IA devolvió **239.980** en dos lecturas seguidas. Un dígito de más, diez veces el número, y el km de una unidad envenena después el vencimiento de mantenimiento y el rendimiento km/gal de todos sus tramos.
