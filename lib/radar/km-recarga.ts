@@ -15,6 +15,8 @@
 // Las reglas son las de `accionOdometro`, una por una:
 //   · `digito_repetido` → se PROPONE el número colapsado y BLOQUEA: el ERP lo dedujo, nadie lo
 //     transcribió, y lo confirma una persona contra la foto (el `forzarRevision` del odómetro).
+//     Salvo que OTRA lectura diga lo mismo (`testigo`, ver `testigoDe` en odometro-seleccion.ts):
+//     entonces se usa sin bloquear, igual que la ruta del odómetro lo registra sin pedir revisión.
 //   · `parcial` → el modelo cruzó el trip y el total: se usa el otro número que SÍ transcribió y
 //     no bloquea (en la ruta del odómetro tampoco pide revisión), pero queda dicho.
 //   · `decimal_como_entero` → el tambor de décimas entró como cifra y la transcripción del modelo
@@ -41,7 +43,9 @@ export function kmDeRecarga(kmIA: number | null, v: VeredictoOdometro | null): K
   if (v.origen === "corregido" && (v.codigo === "digito_repetido" || v.codigo === "parcial" || v.codigo === "decimal_como_entero")) {
     // El colapso lo DEDUJO el ERP; el tambor de décimas lo transcribió el modelo, pero si no cuadra
     // con las lecturas de la unidad (historial en la escala de las décimas) tampoco se registra solo.
-    const deducido = v.codigo === "digito_repetido" || !v.autoOk;
+    // Se lee `confirmar` y no el código: es la MISMA bandera que decide el `forzarRevision` de la
+    // foto de odómetro suelta, así que un colapso con testigo no bloquea en un carril y en el otro sí.
+    const deducido = v.confirmar === true || !v.autoOk;
     return {
       km: v.km,
       anomalia: {

@@ -10,6 +10,7 @@
 
 import { tipoDeRevision, filtrarRevision, FILTRO_REVISION_VACIO, TIPOS_REVISION, hayFiltro, type FiltroRevision, type TipoRevision } from "../lib/odometro-revision";
 import { evaluarLectura } from "../lib/odometro";
+import { elegirOdometro } from "../lib/odometro-seleccion";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -43,6 +44,31 @@ console.log("\n1 · Los motivos que escribe el motor se clasifican (ninguno cae 
     tipoDeRevision(`Hora corregida a mano: 19:00 · Retrocede 27 km frente a la lectura de las 17:53 (29,674 km) (posible manipulación)`) === "retroceso");
   chk("nota del GPS (check-out) → gps", tipoDeRevision("GPS: el odómetro del día (40 km) es menor que lo recorrido por GPS (120 km)") === "gps");
   chk("sin motivo → otro (se ve, no se esconde)", tipoDeRevision(null) === "otro");
+
+  // El dígito repetido que corrige el Radar: el motivo lo compone `elegirOdometro` y acciones.ts le
+  // antepone «Corregido por el sistema:». Caía en «Otros» (CTV-370, 09/10/2026).
+  const radar = (v: { motivo: string | null }) => `Corregido por el sistema: ${v.motivo}`;
+  const comun = { tripIA: null, textoLeido: null, kmDiaMax: 1500, horasDesdeUltima: 24, hayHistorial: true };
+  const sinTestigo = elegirOdometro({ ...comun, kmIA: 314482, kmVigente: 31400, vecinas: { anterior: 31400, posterior: null } });
+  chk("dígito repetido sin testigo → corregida por el sistema",
+    sinTestigo.confirmar === true && tipoDeRevision(radar(sinTestigo)) === "corregida_sistema", radar(sinTestigo));
+  // La fila de la captura, tal cual: quedó antes de que un testigo bastara, y evaluarLectura ya
+  // dijo que coincide con la anterior → solo espera el clic.
+  const captura = "Corregido por el sistema: la IA devolvió 314,482 (6 dígitos, y esta unidad tiene 5): le sobra un dígito REPETIDO. Colapsarlo da 31,482, el único valor posible para esta unidad (lectura anterior 31,482) — confírmalo contra la foto antes de registrarlo · "
+    + evaluarLectura({ kmVigente: 31482, kmNuevo: 31482, origenIA: true, ahora, refAnterior: ref(31482, "2026-10-08T16:03:00-05:00") }).motivo;
+  chk("la fila de la captura (CTV-370) → lista para aceptar", tipoDeRevision(captura) === "lista_para_aceptar", captura);
+  chk("…con «Confirmada» (otra fuente) también",
+    tipoDeRevision(`${radar(sinTestigo)} · ${evaluarLectura({ kmVigente: 31482, kmNuevo: 31482, corroborada: true, ahora, refAnterior: ref(31482, "2026-10-08T16:03:00-05:00") }).motivo}`) === "lista_para_aceptar");
+  // Lo que hay que arreglar manda sobre «corregida»: la misma foto, o un retroceso.
+  const dup = evaluarLectura({ kmVigente: 31482, kmNuevo: 31482, duplicadoProbable: true, ahora, refAnterior: ref(31482, "2026-10-08T16:03:00-05:00") }).motivo;
+  chk("dígito repetido + misma foto → duplicada", tipoDeRevision(`${radar(sinTestigo)} · ${dup}`) === "duplicada");
+  const retro = evaluarLectura({ kmVigente: 31483, kmNuevo: 31482, ahora, refAnterior: ref(31483, "2026-10-08T16:03:00-05:00") }).motivo;
+  chk("dígito repetido + retroceso → retroceso", tipoDeRevision(`${radar(sinTestigo)} · ${retro}`) === "retroceso");
+  // El motivo con testigo nunca llega aquí (la lectura entra aceptada), pero si llegara por otra
+  // razón no se lee como «lista»: es la otra razón la que manda.
+  const conTestigo = elegirOdometro({ ...comun, kmIA: 314482, kmVigente: 31482, vecinas: { anterior: 31482, posterior: null } });
+  chk("el motivo con testigo también se reconoce como corrección del sistema",
+    conTestigo.testigo === "anterior" && tipoDeRevision(radar(conTestigo)) === "corregida_sistema");
 }
 
 type F = Parameters<typeof filtrarRevision>[0][number];

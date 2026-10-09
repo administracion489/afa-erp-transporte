@@ -20,6 +20,7 @@
 
 export type TipoRevision =
   | "lista_para_aceptar"
+  | "corregida_sistema"
   | "digito_de_mas"
   | "fecha_futura"
   | "duplicada"
@@ -30,7 +31,8 @@ export type TipoRevision =
   | "otro";
 
 export const TIPOS_REVISION: { codigo: TipoRevision; etiqueta: string; ayuda: string }[] = [
-  { codigo: "lista_para_aceptar", etiqueta: "✅ Listas para aceptar", ayuda: "Se les corrigió la hora y con esa hora ya cuadran" },
+  { codigo: "lista_para_aceptar", etiqueta: "✅ Listas para aceptar", ayuda: "Ya cuadran: se les corrigió la hora, o el km que corrigió el sistema coincide con otra lectura" },
+  { codigo: "corregida_sistema", etiqueta: "🤖 Corregida por el sistema", ayuda: "La IA leyó una cifra dos veces y el sistema la quitó: compara el km con la foto y acepta" },
   { codigo: "digito_de_mas", etiqueta: "🔢 Dígito de más", ayuda: "El km es ~10× el anterior: casi siempre una cifra repetida" },
   { codigo: "incoherente_posterior", etiqueta: "⏱ Más km que una lectura posterior", ayuda: "Suele ser la HORA: corrígela con la del voucher o la foto" },
   { codigo: "retroceso", etiqueta: "↩ Retrocede", ayuda: "Menos km que la lectura anterior" },
@@ -53,6 +55,14 @@ export function etiquetaTipo(t: TipoRevision): string {
 export function tipoDeRevision(motivo: string | null | undefined): TipoRevision {
   const m = String(motivo ?? "");
   if (/con esa hora cuadra/i.test(m)) return "lista_para_aceptar";
+  // El dígito repetido que el sistema colapsó (`elegirOdometro`, en el Radar se antepone
+  // «Corregido por el sistema:»). Si el propio evaluarLectura dijo además que coincide con la
+  // lectura anterior —«Sin avance» o «Confirmada»—, la única razón de que esté aquí es que nadie
+  // la había confirmado: son las que quedaron antes de que un testigo bastara (`testigoDe`, lib/
+  // odometro-seleccion.ts), y solo esperan el clic. Esas dos frases solo salen cuando la lectura
+  // quedó ACEPTADA, así que no pueden tapar un retroceso ni una foto duplicada.
+  const repetido = /d[ií]gito REPETIDO/i.test(m);
+  if (repetido && /Sin avance:|Confirmada: coincide/.test(m) && !/GPS:/.test(m)) return "lista_para_aceptar";
   if (/Salto ×\d+/.test(m) || /d[ií]gito de m[aá]s/i.test(m)) return "digito_de_mas";
   if (/Fecha\/hora futura/i.test(m)) return "fecha_futura";
   if (/Duplicada/i.test(m)) return "duplicada";
@@ -60,6 +70,9 @@ export function tipoDeRevision(motivo: string | null | undefined): TipoRevision 
   if (/Retroce(de|so)/i.test(m)) return "retroceso";
   if (/Salto improbable/i.test(m)) return "salto_improbable";
   if (/GPS:/.test(m)) return "gps";
+  // Al final: un dígito repetido que además retrocede o es la misma foto se clasifica por ESO,
+  // que es lo que hay que arreglar; aquí solo quedan los que esperan que alguien mire la foto.
+  if (repetido) return "corregida_sistema";
   return "otro";
 }
 
