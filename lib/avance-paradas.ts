@@ -204,6 +204,27 @@ const RACHA_ALEJA_FINA = 2;
 // polilínea es O(vértices) y durante una siembra completa se llamaría por cada muestra.
 const VETO_THROTTLE_MS = 20_000;
 
+// ── «SE ALEJA» ES UNA AFIRMACIÓN EN PRESENTE ─────────────────────────────────────────
+// El caso (reserva #30204, PIERIPLAST, 09-10-2026): el bus llegó al PRIMER paradero y esperó
+// ahí, quieto, 16 minutos; el modal decía «El vehículo se aleja de [paradero 2] · Se está
+// alejando · a 6.1 km», con el header de la misma pantalla diciendo «Unidad sin movimiento».
+//
+// La racha de alejamiento de una parada mide «está lejos de lo más cerca que llegó a estar»,
+// no «la distancia está creciendo». El paradero 2 acumuló su racha MIENTRAS el bus iba hacia el
+// paradero 1 (ese tramo lo alejaba del 2, sin que el 2 fuera todavía el objetivo), y la racha no
+// se borra con el bus detenido: las muestras quietas no aportan dirección (MOV_MIN_M) y las que
+// el jitter mueve vuelven a sumar, porque siguen lejos del mínimo. Cuando el conductor marcó el
+// paradero 1, el 2 pasó a ser el objetivo con la racha ya hecha.
+//
+// Por eso la lectura en presente exige ADEMÁS que la distancia al objetivo haya CRECIDO en la
+// última ventana. Es puramente SUSTRACTIVO: solo puede apagar un «se aleja» que la racha ya
+// afirmaba, nunca encender uno; y no toca ninguna transición del motor (pasada, piso, rachas).
+//
+// 60 s = GLITCH_MAX_DT_S: el mismo corte con el que este motor decide que dos muestras siguen
+// siendo seguimiento continuo, y el mismo con el que el modal declara «sin señal» — una posición
+// de hace más de un minuto ya no describe el ahora.
+const VENTANA_PRESENTE_MS = GLITCH_MAX_DT_S * 1000;
+
 // ── Tipos ────────────────────────────────────────────────────────────────────────────
 
 export type ParadaAvance = {
@@ -290,6 +311,9 @@ export type EstadoAvance = {
   // en 3, con GPS bueno una parada podría estar declarada pasada (racha 2) mientras el panel
   // sigue diciendo que el bus no se aleja — el estado se contradiría en pantalla.
   rachaAlejaVigente: number;
+  // Muestras ACEPTADAS del último minuto (VENTANA_PRESENTE_MS que termina en la última). Solo las
+  // lee `leerAvance` para afirmar «se aleja» en presente; el motor no decide nada con ellas.
+  recientes: { lat: number; lng: number; ts: number }[];
 };
 
 export type MotivoPaso = "conductor" | "gps" | "arrastre" | null;
@@ -435,6 +459,7 @@ export function estadoAvanceVacio(n: number): EstadoAvance {
     })),
     lastTs: 0, lastLat: null, lastLng: null, lastMovLat: null, lastMovLng: null,
     muestras: 0, accReciente: [], resiembras: 0, rachaAlejaVigente: RACHA_ALEJA,
+    recientes: [],
   };
 }
 
@@ -442,6 +467,8 @@ const clonar = (e: EstadoAvance): EstadoAvance => ({
   ...e,
   porParada: e.porParada.map((s) => ({ ...s })),
   accReciente: e.accReciente.slice(),
+  // `?? []`: un estado construido por una versión anterior del módulo no trae el campo.
+  recientes: (e.recientes ?? []).slice(),
 });
 
 // `p.lat != null` es obligatorio ANTES del isFinite: Number(null) es 0, así que sin este chequeo
@@ -712,7 +739,30 @@ export function avanzarAvance(
 
   // 6. COMMIT ATÓMICO — solo si la muestra superó las puertas 1-3.
   e.lastTs = fix.ts; e.lastLat = fix.lat; e.lastLng = fix.lng;
+  // Las quietas también entran: un bus detenido es justo lo que la ventana tiene que ver.
+  e.recientes.push({ lat: fix.lat, lng: fix.lng, ts: fix.ts });
+  while (e.recientes.length && e.recientes[0].ts < fix.ts - VENTANA_PRESENTE_MS) e.recientes.shift();
   return e;
+}
+
+/**
+ * ¿La distancia a la parada CRECIÓ en el último minuto? Es la mitad «en presente» de `seAleja`
+ * (ver VENTANA_PRESENTE_MS). Sin coords, o con menos de dos muestras en la ventana, no hay con
+ * qué afirmarlo y devuelve false.
+ *
+ * Con 4+ muestras se toma la PEOR pareja de cada extremo —el más lejano de los dos primeros
+ * contra el más cercano de los dos últimos—, así que un solo fix desviado, al principio o al
+ * final de la ventana, no fabrica un alejamiento. Dos muestras es la evidencia mínima creíble del
+ * repo (RACHA_REGRESO, RACHA_ALEJA_FINA). Con 2-3 se comparan los extremos.
+ */
+function distanciaCrecio(recientes: EstadoAvance["recientes"] | undefined, p: ParadaAvance | undefined): boolean {
+  if (!recientes || recientes.length < 2 || !tieneCoords(p)) return false;
+  const pLat = Number(p!.lat), pLng = Number(p!.lng);
+  const d = (q: { lat: number; lng: number }) => distM(q.lat, q.lng, pLat, pLng);
+  const n = recientes.length;
+  const ini = n >= 4 ? Math.max(d(recientes[0]), d(recientes[1])) : d(recientes[0]);
+  const fin = n >= 4 ? Math.min(d(recientes[n - 2]), d(recientes[n - 1])) : d(recientes[n - 1]);
+  return fin - ini > GAP_ALEJA_M;
 }
 
 /**
@@ -782,7 +832,11 @@ export function leerAvance(estado: EstadoAvance, paradas: ParadaAvance[]): Avanc
   // veredicto "ya pasó" se declara con 2 muestras y este flag debe poder acompañarlo.
   // `|| RACHA_ALEJA` cubre un estado construido por una versión anterior del módulo (campo
   // ausente → undefined), que de otro modo haría el flag siempre verdadero.
-  const seAleja = !!sProx?.alejando && sProx.recStreak >= (estado.rachaAlejaVigente || RACHA_ALEJA);
+  // Y la racha sola NO basta: con el bus detenido queda congelada en alto (ver
+  // VENTANA_PRESENTE_MS), así que además la distancia al objetivo tiene que haber CRECIDO en el
+  // último minuto. Solo resta: donde la racha no afirmaba «se aleja», esto tampoco.
+  const rachaVigente = !!sProx?.alejando && sProx.recStreak >= (estado.rachaAlejaVigente || RACHA_ALEJA);
+  const seAleja = rachaVigente && proximaIdx != null && distanciaCrecio(estado.recientes, paradas[proximaIdx]);
 
   return {
     proximaIdx, pasadas, motivo,
