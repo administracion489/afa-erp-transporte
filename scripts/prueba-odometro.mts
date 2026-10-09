@@ -23,7 +23,7 @@
 // lectura legítima (unidad nueva sin historial, salto grande tras una parada larga), y NADIE
 // adivina qué dígito sobra — de 239.980 salen tres borrados posibles dentro de la banda.
 
-import { elegirOdometro, digitosDe, corregirDigitoRepetido, revisarKmTecleado, decimalComoEntero } from "../lib/odometro-seleccion";
+import { elegirOdometro, digitosDe, corregirDigitoRepetido, revisarKmTecleado, decimalComoEntero, CERCANIA_ANCLA_KM } from "../lib/odometro-seleccion";
 import { evaluarLectura, RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "../lib/odometro";
 import { promptOdometro } from "../lib/vision-ia";
 import { sinCifrasCopiables, formaOdometro, UMBRAL_CAMBIO_DE_CIFRA } from "../lib/odometro-prompt";
@@ -55,7 +55,12 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
   // 23.998 también caben en la banda y no son la lectura.
   chk("CUP-435 · se propone 23,980, que es lo que dice la foto", v.km === 23980, `km=${v.km}`);
   chk("CUP-435 · y NO uno de los otros borrados que también caben", v.km !== 23990 && v.km !== 23998);
-  chk("CUP-435 · marcado para que lo confirme una persona", v.confirmar === true);
+  // Con el vigente ya en 23,980, otra lectura dice lo mismo que el colapso: tiene testigo y no
+  // pide a nadie (sección 15). Con la unidad en marcha desde la última lectura, sí.
+  chk("CUP-435 · con el vigente en 23,980 el colapso tiene testigo", v.testigo === "vigente" && v.confirmar === false);
+  const enMarcha = leer({ kmIA: 239980, tripIA: 388, kmVigente: 23900 });
+  chk("CUP-435 · con avance desde la última lectura, lo confirma una persona",
+    enMarcha.km === 23980 && enMarcha.confirmar === true && !enMarcha.testigo, `km=${enMarcha.km}`);
   // El parcial (388.0) tampoco puede colarse como total: está por debajo del vigente.
   chk("CUP-435 · el trip no se promueve a total", v.km !== 388);
 }
@@ -265,7 +270,10 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
     }
     chk(`${c.placa} · ${c.ia.toLocaleString("es-PE")} → ${c.espera.toLocaleString("es-PE")} colapsando la repetición`,
       v.km === c.espera && v.origen === "corregido" && v.codigo === "digito_repetido", `km=${v.km} codigo=${v.codigo}`);
-    chk(`${c.placa} · …y se marca para que lo CONFIRME una persona`, v.confirmar === true);
+    // Sin testigo lo confirma una persona; el primero colapsa justo sobre su anterior (sección 15).
+    const conTestigo = c.espera - c.ant >= 0 && c.espera - c.ant <= CERCANIA_ANCLA_KM;
+    chk(`${c.placa} · …${conTestigo ? "coincide con la anterior: no pide confirmación" : "y se marca para que lo CONFIRME una persona"}`,
+      conTestigo ? v.confirmar === false && v.testigo === "vigente" : v.confirmar === true && !v.testigo);
     if (c.foto != null) {
       chk(`${c.placa} · …y coincide con lo que dice la foto (${c.foto.toLocaleString("es-PE")})`, v.km === c.foto);
     }
@@ -299,7 +307,8 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
   chk("el caso base de esa lectura sería 'aceptada'", conRevision.estado === "aceptada", conRevision.estado);
   // La bajada a sospechosa la hace registrarLectura (toca BD); aquí se fija el contrato que usa:
   // un veredicto con confirmar=true es el que la dispara.
-  const v = leer({ kmIA: 239980, kmVigente: 23980 });
+  // Con avance desde la última lectura (23,900 → 23,980): nadie más dice ese número.
+  const v = leer({ kmIA: 239980, kmVigente: 23900 });
   chk("el veredicto del dígito repetido es el que pide revisión", v.confirmar === true && v.origen === "corregido");
   const parcial = leer({ kmIA: 1803, tripIA: 174159, kmVigente: 174000 });
   chk("el rescate del trip NO pide revisión (ese número sí lo transcribió el modelo)",
@@ -589,6 +598,111 @@ console.log("\n14. Tambor de décimas");
   const radar = promptExtraccionMedia({ fechaHoy: "2026-10-09", horaAhora: "10:00" });
   chk("Radar · la lectura del tablero explica el tambor de décimas", /TAMBORES/.test(radar) && /texto_kilometraje/.test(radar));
   chk("app · sin cifras copiables en la regla", !/\d{4,}/.test(app.match(/ODÓMETRO DE TAMBORES[^\n]*/)?.[0] ?? "x1234"));
+}
+
+// ── 15. UN NÚMERO DEDUCIDO QUE OTRA LECTURA ATESTIGUA YA NO PIDE A UNA PERSONA ──
+// CTV-370, 09/10/2026 06:42: la IA leyó 314,482, el colapso dio 31,482 y la lectura de las 16:03
+// del día anterior (otra foto) decía 31,482 — la unidad durmió en la cochera. Igual quedó en
+// «Lecturas por revisar» y alguien tuvo que abrir la foto para confirmar lo que dos tableros ya
+// decían. Lo que esta sección fija del lado que NO se afloja: sin testigo sigue pidiendo a una
+// persona, y con testigo el número no puede mover el km vigente más de CERCANIA_ANCLA_KM.
+console.log("\n15. Dígito repetido con testigo");
+{
+  const ctv = leer({ kmIA: 314482, kmVigente: 31482, horasDesdeUltima: 14.65, vecinas: { anterior: 31482, posterior: null } });
+  chk("CTV-370 · 314,482 → 31,482", ctv.km === 31482 && ctv.codigo === "digito_repetido", `km=${ctv.km} codigo=${ctv.codigo}`);
+  chk("CTV-370 · la lectura anterior es el testigo", ctv.testigo === "anterior", String(ctv.testigo));
+  chk("CTV-370 · …y ya NO pide confirmación", ctv.confirmar === false);
+  chk("CTV-370 · el motivo dice con quién coincide", /coincide con la lectura anterior 31,482/.test(ctv.motivo ?? ""), ctv.motivo ?? "");
+  // Lo que hará registrarLectura con ese número: el mismo km que la anterior, otra foto → aceptada.
+  const t0 = Date.parse("2026-10-09T06:42:00-05:00");
+  const escrito = evaluarLectura({
+    kmVigente: 31482, kmNuevo: ctv.km!, origenIA: true, horasDesdeUltima: 14.65,
+    refAnterior: { km: 31482, ts: Date.parse("2026-10-08T16:03:00-05:00"), horaExacta: true, fuente: "whatsapp_foto" },
+    ahora: new Date(t0),
+  });
+  chk("CTV-370 · quien escribe la acepta («Sin avance»)", escrito.estado === "aceptada" && /Sin avance/.test(escrito.motivo ?? ""), `${escrito.estado} · ${escrito.motivo}`);
+  // El contrato con el Radar: `forzarRevision` sale de `confirmar`, no del código.
+  const acciones = readFileSync(new URL("../lib/radar/acciones.ts", import.meta.url), "utf8");
+  chk("Radar · forzarRevision se lee de `confirmar`", /forzarRevision:\s*veredicto\.confirmar === true/.test(acciones));
+
+  // El sentido en que avanza el odómetro: hasta 2 km POR ENCIMA de la anterior.
+  const mas2 = leer({ kmIA: 314482, kmVigente: 31480, vecinas: { anterior: 31480, posterior: null } });
+  chk("+2 km sobre la anterior → testigo", mas2.km === 31482 && mas2.testigo === "anterior" && mas2.confirmar === false);
+  const mas3 = leer({ kmIA: 314482, kmVigente: 31479, vecinas: { anterior: 31479, posterior: null } });
+  chk("+3 km → sin testigo: lo confirma una persona", mas3.km === 31482 && !mas3.testigo && mas3.confirmar === true);
+  const menos1 = leer({ kmIA: 314482, kmVigente: 31483, vecinas: { anterior: 31483, posterior: null } });
+  chk("1 km POR DEBAJO de la anterior no es un testigo (es un retroceso)", menos1.km === 31482 && !menos1.testigo && menos1.confirmar === true,
+    `km=${menos1.km} testigo=${menos1.testigo}`);
+
+  // La lectura POSTERIOR (un reproceso de una foto vieja) también atestigua, hasta 2 km por debajo.
+  const post = leer({ kmIA: 314482, kmVigente: 31600, horasDesdeUltima: 24, vecinas: { anterior: 31300, posterior: 31483 } });
+  chk("posterior a 1 km → testigo", post.km === 31482 && post.testigo === "posterior" && post.confirmar === false, `testigo=${post.testigo}`);
+  const postLejos = leer({ kmIA: 314482, kmVigente: 31600, horasDesdeUltima: 24, vecinas: { anterior: 31300, posterior: 31490 } });
+  chk("posterior a 8 km → sin testigo", postLejos.km === 31482 && !postLejos.testigo && postLejos.confirmar === true);
+
+  // Sin vecinas (una foto de ahora, en pantalla) el ancla es el vigente, igual que para la banda.
+  const ahora = leer({ kmIA: 314482, kmVigente: 31482 });
+  chk("sin vecinas · el km vigente es el testigo", ahora.testigo === "vigente" && ahora.confirmar === false);
+
+  // Los casos reales con avance (sección 7): la unidad se movió, nadie más lo dice → una persona.
+  for (const c of [
+    { ia: 239980, ant: 23900, horas: 24, espera: 23980 },
+    { ia: 233379, ant: 23272, horas: 15, espera: 23379 },
+    { ia: 5600473, ant: 559997, horas: 24, espera: 560473 },
+  ]) {
+    const v = leer({ kmIA: c.ia, kmVigente: c.ant, horasDesdeUltima: c.horas, vecinas: { anterior: c.ant, posterior: null } });
+    chk(`${c.ia.toLocaleString("es-PE")} → ${c.espera.toLocaleString("es-PE")} con avance · sigue pidiendo confirmación`,
+      v.km === c.espera && v.confirmar === true && !v.testigo, `km=${v.km} testigo=${v.testigo}`);
+  }
+
+  // La recarga lee la misma bandera: con testigo usa el número sin bloquear.
+  const rec = kmDeRecarga(314482, ctv);
+  chk("recarga · con testigo: 31,482 y NO bloquea", rec.km === 31482 && rec.anomalia?.codigo === "km_corregido" && rec.anomalia.bloquea === false);
+  chk("recarga · sin testigo: sigue bloqueando", kmDeRecarga(314482, mas3).anomalia?.bloquea === true);
+
+  // EL BARRIDO. Dos hipótesis de cómo llegó el número de la IA: (a) repitió una cifra del km real
+  // —la que el colapso deshace—; (b) el tambor de décimas entró como cifra y no hubo transcripción
+  // que lo delatara —la hipótesis en la que el colapso PUEDE equivocarse—. En las dos, lo que se
+  // exige es lo que hace seguro aceptarlo: con testigo, el número queda a ≤ 2 km sobre la anterior
+  // o por debajo de la posterior, así que no puede subir el km vigente más de 2 km.
+  let juzgados = 0, conTestigo = 0, testigoMal = 0, rompeVigente = 0, bandera = 0, sinTestigoConAvance = 0, avanceJuzgado = 0;
+  for (const ant of [6000, 23980, 31482, 174000, 559997]) {
+    for (const delta of [0, 1, 2, 3, 5, 40, 300]) {
+      const V = ant + delta;
+      for (const post of [null, V, V + 2, V + 3, V + 400]) {
+        const entradas: { kmIA: number; hipotesis: "repite" | "decima" }[] = [];
+        const s = String(V);
+        for (let i = 0; i < s.length; i++) entradas.push({ kmIA: Number(s.slice(0, i + 1) + s.slice(i)), hipotesis: "repite" });
+        for (let d = 0; d <= 9; d++) entradas.push({ kmIA: V * 10 + d, hipotesis: "decima" });
+        for (const e of entradas) {
+          const v = leer({ kmIA: e.kmIA, kmVigente: post ?? V, horasDesdeUltima: 24, vecinas: { anterior: ant, posterior: post } });
+          if (v.codigo !== "digito_repetido" || v.km == null) continue;
+          juzgados++;
+          if ((v.confirmar === true) === !!v.testigo) bandera++;          // exactamente una de las dos
+          if (!v.testigo) continue;
+          conTestigo++;
+          // El vigente es el máximo de las lecturas vivas, y aquí las vivas son la anterior y la posterior.
+          if (v.km > Math.max(ant, post ?? ant) + CERCANIA_ANCLA_KM) rompeVigente++;
+          if (e.hipotesis === "repite" && v.km !== V) testigoMal++;
+        }
+        // El lado que no se afloja: con avance (≥ 3 km) y sin una posterior pegada, nadie atestigua.
+        if (delta >= 3 && (post == null || post - V >= 3)) {
+          for (let i = 0; i < s.length; i++) {
+            const v = leer({ kmIA: Number(s.slice(0, i + 1) + s.slice(i)), kmVigente: post ?? V, horasDesdeUltima: 24, vecinas: { anterior: ant, posterior: post } });
+            if (v.codigo !== "digito_repetido" || v.km !== V) continue;
+            avanceJuzgado++;
+            if (v.testigo) sinTestigoConAvance++;
+          }
+        }
+      }
+    }
+  }
+  chk(`barrido · confirmar ⟺ sin testigo (${juzgados} colapsos)`, bandera === 0 && juzgados > 0, `${bandera} contradicción(es)`);
+  chk("barrido · con testigo, el número nunca sube el vigente más de 2 km", rompeVigente === 0, `${rompeVigente}`);
+  chk("barrido · si la IA repitió una cifra, el testigo nunca confirma un número equivocado", testigoMal === 0, `${testigoMal}`);
+  chk(`barrido · con avance y sin posterior pegada, nadie atestigua (${avanceJuzgado} casos)`, sinTestigoConAvance === 0 && avanceJuzgado > 0, `${sinTestigoConAvance}`);
+  // Corolario: un motor que nunca diera testigo cumpliría todo lo anterior de forma trivial.
+  chk(`barrido · y el testigo SÍ aparece (${conTestigo} veces)`, conTestigo > 0);
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) fallaron` : "\nTodo en verde");

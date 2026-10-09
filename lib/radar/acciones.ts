@@ -1886,7 +1886,9 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       motivo: kmCorregido ? `Corregido por el sistema: ${veredicto.motivo}` : null,
       // Aquí no hay nadie mirando la foto. Un número que el ERP DEDUJO (el dígito repetido) se
       // guarda para revisarlo, no se da por bueno: a diferencia del parcial/trip —que el modelo
-      // sí transcribió del tablero— esta cifra no la escribió nadie.
+      // sí transcribió del tablero— esta cifra no la escribió nadie. Salvo que otra lectura diga
+      // lo mismo (`veredicto.testigo`): entonces `confirmar` ya viene en false y entra como
+      // cualquier lectura, con evaluarLectura juzgándola igual.
       forzarRevision: veredicto.confirmar === true,
     });
     if (res.ok && res.estado === "aceptada") {
@@ -1894,7 +1896,10 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       // lectura de una unidad (se aceptó sin poder validarla) y un posible voucher mal
       // clasificado. En esos casos se deja también una alerta (el km ya quedó grabado igual).
       const avisos: string[] = [];
-      if (kmCorregido) avisos.push(`Lectura corregida automáticamente: ${veredicto.motivo}`);
+      // Con testigo no hay nada que revisar: dos lecturas ya dicen lo mismo, y una alerta que pide
+      // mirar lo que está bien enseña a ignorar las alertas. El rastro queda en el motivo de la
+      // lectura («Corregido por el sistema: …»).
+      if (kmCorregido && !veredicto.testigo) avisos.push(`Lectura corregida automáticamente: ${veredicto.motivo}`);
       if (esPrimeraLectura) avisos.push("Es la PRIMERA lectura de esta unidad: se aceptó como base sin poder validarla — confirmar que el número es correcto");
       if (sospechaVoucher) avisos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si en realidad era una recarga de combustible y no solo el odómetro");
       if (iaPropusoOtra) avisos.push(`La placa no estaba escrita: se registró en ${unidad!.placa}, la unidad que ${mensaje.remitente_nombre?.trim() || "quien mandó la foto"} tenía en servicio ese día. La IA había propuesto ${decision.propuestaIA!.placa} por el parecido del tablero y no se usó`);
@@ -1911,7 +1916,10 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       }
       return {
         accion: "odometro_registrado",
-        detalle: `Lectura de ${unidad!.placa}${etiquetaFlota} registrada: ${km!.toLocaleString("es-PE")} km${avisos.length ? " (con aviso de revisión)" : ""}`,
+        detalle:
+          `Lectura de ${unidad!.placa}${etiquetaFlota} registrada: ${km!.toLocaleString("es-PE")} km` +
+          (veredicto.testigo ? ` (la IA leyó ${Number(veredicto.kmIA).toLocaleString("es-PE")}; corregida y confirmada por otra lectura)` : "") +
+          (avisos.length ? " (con aviso de revisión)" : ""),
         datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, primera_lectura: esPrimeraLectura, sospecha_voucher: sospechaVoucher, veredicto, unidad_por: decision.codigo, propuesta_ia: decision.propuestaIA?.placa ?? null },
       };
     }

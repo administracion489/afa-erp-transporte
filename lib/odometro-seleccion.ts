@@ -40,7 +40,8 @@ export type CandidatoOdometro = {
  *                      repitió un dato que ya conocía en vez de leer la foto.
  *   - `parcial`        se registró otro número del tablero porque la IA entregó el trip.
  *   - `digito_repetido` el dígito que sobraba estaba DUPLICADO y colapsarlo da un único número
- *                      posible: se propone ese, para que una persona lo confirme contra la foto.
+ *                      posible: se propone ese, para que una persona lo confirme contra la foto
+ *                      — salvo que otra lectura diga lo mismo (`testigo`), ver `testigoDe`.
  *   - `decimal_como_entero` el tambor de DÉCIMAS de un odómetro mecánico entró como una cifra más:
  *                      la propia transcripción de la IA lo trae tras un punto («56129.2») y su
  *                      kilometraje es ese número sin el punto (561,292). Se registra la parte entera.
@@ -67,10 +68,69 @@ export type VeredictoOdometro = {
    * del tablero y solo lo puso en el campo equivocado. Aquí el ERP reconstruye una cifra que el
    * modelo nunca escribió, y un km inventado envenena el vencimiento de mantenimiento y el
    * rendimiento km/gal de todos los tramos siguientes.
+   *
+   * Un número deducido que OTRA lectura atestigua (`testigo`) ya no lo lleva: ver `testigoDe`.
    */
   confirmar?: boolean;
+  /**
+   * Qué lectura dice lo mismo que el número deducido (a ≤ `CERCANIA_ANCLA_KM`, en el sentido en
+   * que avanza el odómetro). Solo lo lleva un `digito_repetido`, y es lo que le quita el
+   * `confirmar`: el número ya no descansa solo en la deducción del ERP.
+   */
+  testigo?: TestigoOdometro;
   candidatos: CandidatoOdometro[];
 };
+
+/** La lectura que coincide con un número deducido. `vigente` solo cuando no hay vecinas. */
+export type TestigoOdometro = "anterior" | "vigente" | "posterior";
+
+/**
+ * «Coincide con el ancla»: a cuántos km un número se considera EL MISMO que una lectura ya
+ * guardada. Heredado del guard anti-eco (que lo usaba como literal), no elegido: es la misma
+ * pregunta —¿este número es el del ancla?— y dos respuestas distintas a la misma pregunta es
+ * cómo el lector y el escritor terminan discrepando.
+ */
+export const CERCANIA_ANCLA_KM = 2;
+
+/**
+ * UN NÚMERO DEDUCIDO QUE OTRA LECTURA ATESTIGUA YA NO NECESITA QUE LO CONFIRME UNA PERSONA.
+ *
+ * El caso (CTV-370, 09/10/2026 06:42): la IA leyó 314,482; el colapso dio 31,482; la lectura de
+ * la tarde anterior (16:03, otra foto) decía 31,482 — la unidad durmió en la cochera. El ERP la
+ * mandó igual a «Lecturas por revisar» y una persona tuvo que abrir la foto para confirmar lo que
+ * dos tableros ya decían. Por qué aquí sí, y en un número deducido a secas no:
+ *
+ *   1. ES EVIDENCIA INDEPENDIENTE. El modelo no ve ningún kilometraje (lib/odometro-prompt.ts) y
+ *      no devolvió el ancla: devolvió OTRO número, de seis cifras. Que el colapso caiga justo
+ *      sobre lo que marcó la lectura anterior es lo que pasaría si el colapso es correcto y casi
+ *      nunca si no lo es: equivocado, puede caer en cualquier punto de la banda (cientos de km).
+ *      Es la razón inversa del guard anti-eco, y no se contradicen: aquel sospecha de un número
+ *      que el MODELO escribió igual al ancla; aquí lo escribió distinto y la coincidencia la
+ *      produjo una operación exacta del ERP.
+ *   2. ACEPTARLO NO PUEDE ENVENENAR NADA. El daño de un deducido equivocado es mover el km
+ *      vigente y mandar a «retroceso» las lecturas buenas de los días siguientes. Un número a
+ *      ≤ 2 km de una lectura que ya existe no mueve el vigente más de 2 km, y con la anterior
+ *      igual no lo mueve en absoluto.
+ *
+ * Solo en el sentido en que avanza el odómetro: [ancla, ancla + 2] o [posterior − 2, posterior].
+ * Dos km por DEBAJO de la anterior son un retroceso (evaluarLectura lo dirá), no un testigo.
+ *
+ * El ancla es la MISMA que usa la banda: la lectura anterior a la foto, o el km vigente cuando no
+ * hay vecinas (una foto de ahora, en pantalla). La misma imagen contada dos veces no es un testigo,
+ * y de eso se ocupa quien escribe: `registrarLectura` no inserta una foto que ya tiene (URL o
+ * hash) y, si la coincidencia es con la misma imagen, la marca «Duplicada».
+ *
+ * Cuando la unidad se movió desde la última lectura no hay testigo, y el número sigue pidiendo
+ * a una persona: ahí lo único que lo respalda es la deducción, y si está mal es justo el que
+ * envenena el vigente.
+ */
+export function testigoDe(reparado: number, ancla: { base: number; kmPost: number | null; deVigente: boolean }): TestigoOdometro | null {
+  if (ancla.base > 0 && reparado >= ancla.base && reparado - ancla.base <= CERCANIA_ANCLA_KM) {
+    return ancla.deVigente ? "vigente" : "anterior";
+  }
+  if (ancla.kmPost != null && reparado <= ancla.kmPost && ancla.kmPost - reparado <= CERCANIA_ANCLA_KM) return "posterior";
+  return null;
+}
 
 /**
  * EL DÍGITO QUE SOBRA ESTÁ DUPLICADO, Y ESO SÍ SE PUEDE DESHACER.
@@ -93,7 +153,8 @@ export type VeredictoOdometro = {
  * ÚNICO (con dos colapsos posibles dentro de la banda, adivinar sería escribir al azar).
  *
  * Módulo puro: recibe la banda ya calculada y devuelve un número o null. No decide qué se
- * hace con él — eso es de `elegirOdometro`, que lo marca `confirmar: true`.
+ * hace con él — eso es de `elegirOdometro`, que lo marca `confirmar: true` salvo que otra lectura
+ * lo atestigüe (`testigoDe`).
  */
 export function corregirDigitoRepetido(kmIA: number, piso: number, techo: number): number | null {
   const s = Math.round(Math.abs(kmIA)).toString();
@@ -362,17 +423,28 @@ export function elegirOdometro(e: {
     const dIA = digitosDe(kmIA), dVig = digitosDe(kmForma);
     if (dIA > dVig) {
       // …salvo que el dígito que sobra esté DUPLICADO y colapsarlo dé un único número posible.
-      // Entonces no es una adivinanza: es deshacer un error concreto, y se PROPONE (nunca se da
-      // por bueno solo — `confirmar: true`).
+      // Entonces no es una adivinanza: es deshacer un error concreto, y se PROPONE (no se da por
+      // bueno solo — `confirmar: true`) salvo que otra lectura diga lo mismo (`testigoDe`).
       const reparado = corregirDigitoRepetido(kmIA, piso, techo);
       if (reparado != null) {
+        const testigo = testigoDe(reparado, { base, kmPost, deVigente: kmAnt == null && kmPost == null });
+        const inicio =
+          `la IA devolvió ${fmt(kmIA)} (${dIA} dígitos, y esta unidad tiene ${dVig}): le sobra un ` +
+          `dígito REPETIDO. Colapsarlo da ${fmt(reparado)}`;
+        if (testigo) {
+          const conQuien = testigo === "posterior"
+            ? `la lectura posterior ${fmt(kmPost!)}`
+            : testigo === "anterior" ? `la lectura anterior ${fmt(base)}` : `el km vigente ${fmt(base)}`;
+          return {
+            km: reparado, kmIA, origen: "corregido", autoOk: true,
+            codigo: "digito_repetido", confirmar: false, testigo, candidatos: bruto,
+            motivo: `${inicio}, y coincide con ${conQuien}: dos lecturas dicen lo mismo, no hace falta confirmarlo`,
+          };
+        }
         return {
           km: reparado, kmIA, origen: "corregido", autoOk: true,
           codigo: "digito_repetido", confirmar: true, candidatos: bruto,
-          motivo:
-            `la IA devolvió ${fmt(kmIA)} (${dIA} dígitos, y esta unidad tiene ${dVig}): le sobra un ` +
-            `dígito REPETIDO. Colapsarlo da ${fmt(reparado)}, el único valor posible para esta unidad ` +
-            `(${ancla}) — confírmalo contra la foto antes de registrarlo`,
+          motivo: `${inicio}, el único valor posible para esta unidad (${ancla}) — confírmalo contra la foto antes de registrarlo`,
         };
       }
       return {
@@ -399,7 +471,7 @@ export function elegirOdometro(e: {
   // repitiendo un número que ya conocía. Se exige coincidencia casi exacta (≤2 km): la
   // tolerancia del piso (0,1% = 174 km en un odómetro de 174.000) es más que un día de
   // recorrido, y usarla aquí descartaría avances reales como si fueran ecos.
-  if (Math.abs(ganador.valor - kmForma) <= 2) {
+  if (Math.abs(ganador.valor - kmForma) <= CERCANIA_ANCLA_KM) {
     return {
       km: kmIA, kmIA, origen: "ia", autoOk: false, codigo: "eco",
       motivo: `la IA devolvió ${fmt(kmIA)} y el único número compatible (${fmt(ganador.valor)}) coincide con ${kmAnt != null ? "la lectura anterior" : "el km vigente"} — puede ser un eco, no una lectura`,
