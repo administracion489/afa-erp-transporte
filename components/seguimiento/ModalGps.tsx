@@ -8,7 +8,7 @@ import { supabase } from "@/lib/supabase";
 import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
-  puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje, coberturaRastreo, largoLineaM,
+  puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
   pegarIconoAVia, viasCercanasTilequery, esAccCruda, MAX_SEG_M, caminoEntreSnaps, enParalelo,
   crearFiltroFixVivo,
@@ -18,6 +18,7 @@ import { fmtCoord } from "@/lib/coordenadas";
 import { useAvanceParadas } from "@/lib/useAvanceParadas";
 import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import type { VeredictoRastreo } from "@/lib/gps-cobertura";
 
 declare global { interface Window { mapboxgl: any; } }
 
@@ -59,6 +60,10 @@ type Props = {
   conductorTel: string; clienteNombre: string;
   /** Proveedor de un servicio tercerizado. Se pinta DEBAJO del conductor, nunca en su lugar. */
   conductorEmpresa?: string | null;
+  /** Veredicto de RASTREO del servicio, el MISMO de la columna de /seguimiento
+   *  (/api/seguimiento/rastreo → lib/gps-cobertura.ts). El modal no calcula el suyo: dos
+   *  porcentajes con el mismo nombre en dos sitios terminan diciendo cosas distintas. */
+  rastreo?: VeredictoRastreo | null;
   paradas: Parada[];
   paradasJson?: any[] | null;
   origen?: string | null;
@@ -102,7 +107,7 @@ const fmtHoraTs = (ts: number) => // sin segundos, para el resumen del viaje
 
 export default function ModalGps({
   reservaId, vehiculoId, vehiculoTerceroId = null, vehiculoPlaca, conductorNombre,
-  conductorTel, conductorEmpresa = null, clienteNombre, paradas, paradasJson, origen, destino, modoCliente = false, onClose,
+  conductorTel, conductorEmpresa = null, rastreo = null, clienteNombre, paradas, paradasJson, origen, destino, modoCliente = false, onClose,
 }: Props) {
   const mapRef    = useRef<HTMLDivElement>(null);
   const mapInst   = useRef<any>(null);
@@ -730,22 +735,9 @@ export default function ModalGps({
         const mLen = matchedRef.current?.length || 0;
         if (colaClean >= 0 && colaClean < mLen - 1) suprimir.push([colaClean + 1, mLen - 1]);
         if (!cancel) { setPuentes(feats); setSuprimirCrudo(suprimir); setColaClean(colaClean); }
-        // Badge HONESTO desde la geometría realmente dibujada: medido = línea medida (sin los tramos
-        // crudos que se rutearon); estimado = todos los tramos petróleo (huecos + crudo ruteado). Así el
-        // "Rastreo %" NO infla lo medido con la ruta asumida (baja en servicios degradados = correcto).
-        const largoCoords = (cs: any[]) => { let m = 0; for (let k = 1; k < (cs?.length || 0); k++) m += distM(cs[k - 1][1], cs[k - 1][0], cs[k][1], cs[k][0]); return m; };
-        const largoFeats = (fs: any[]) => fs.reduce((a, f) => a + largoCoords(f.geometry?.coordinates || []), 0);
-        const huellaColor = limpio.map((p) => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad }));
-        // Badge HONESTO desde la geometría dibujada: medido = línea de velocidad; estimado = tramos
-        // petróleo por ruta. El crudo largo ya no se dibuja (ni gris ni medido) — lo cubre el estimado.
-        const featsColoreados = colorearMatched(matchedRef.current || [], huellaColor, suprimir, ajustador.leerEsCrudo());
-        const medidoM = largoFeats(featsColoreados);
-        const estimadoM = largoFeats(feats);
+        // El porcentaje de rastreo ya NO sale de aquí: lo trae el prop `rastreo` (el mismo cálculo de
+        // la columna de /seguimiento y de /gps-salud, lib/gps-cobertura.ts).
         const rv = resumenViaje(limpio, crudos);
-        if (rv && medidoM + estimadoM > 0) rv.medidoPct = Math.round((medidoM / (medidoM + estimadoM)) * 100);
-        // Los metros viajan aparte: el badge se mide al pintar contra la RUTA del servicio cuando
-        // ya terminó (coberturaRastreo), y eso depende de la ruta y del avance, que son estado.
-        if (rv) { rv.medidoM = medidoM; rv.estimadoM = estimadoM; }
         if (!cancel) setResumen(rv);
       } catch { /* conservar estela previa */ }
       finally { cargandoHuellaRef.current = false; }
@@ -1111,15 +1103,9 @@ export default function ModalGps({
   // permanentemente en "0/N · 0%".
   const paradasComp   = avance.pasadas.filter(Boolean).length;
   const compConductor = avance.motivo.filter(m => m === "conductor").length;
-  // Badge "Rastreo %": con el servicio TERMINADO se mide contra la ruta prevista, no contra el
-  // trecho entre la primera y la última señal (lib/huella.ts → coberturaRastreo). Terminado es
-  // lo mismo que pinta la tarjeta verde «Todas las paradas cubiertas», o el servicio finalizado.
-  const rutaPrevistaM = useMemo(() => largoLineaM(ruta?.coordenadas), [ruta?.coordenadas]);
-  const servicioTerminado = (proximaParada == null && paradasDisplay.length > 0) || ubic?.estado === "finalizado";
-  const cobertura = useMemo(() => (resumen && resumen.medidoM != null)
-    ? coberturaRastreo({ medidoM: resumen.medidoM, estimadoM: resumen.estimadoM ?? 0, rutaPrevistaM, servicioTerminado })
-    : null, [resumen, rutaPrevistaM, servicioTerminado]);
-  const rastreoPct = cobertura?.pct ?? resumen?.medidoPct ?? 0;
+  // El badge «Rastreo» solo se pinta con un veredicto MEDIDO; sin él (cliente, o aún midiendo)
+  // no se pinta nada en vez de un porcentaje propio.
+  const rastreoVisible = !modoCliente && !!rastreo && rastreo.codigo !== "no_aplica" && rastreo.codigo !== "sin_medir" && rastreo.codigo !== "recien_iniciado";
   // "gps" (el motor la vio pasar) y "arrastre" (quedó detrás del piso, sin evidencia propia) son
   // cosas distintas y NO pueden contarse juntas: el arrastre también lo produce el marcado del
   // conductor, así que sumarlas hacía que un servicio sin GPS anunciara "7 detectadas por GPS".
@@ -1934,17 +1920,11 @@ export default function ModalGps({
               <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400">Resumen del viaje</p>
-                  {/* Badge de calidad de rastreo: % del SERVICIO con huella medida (coberturaRastreo).
+                  {/* Badge de rastreo: el MISMO veredicto de la columna de /seguimiento.
                       Solo para operación: al cliente no se le enseña (decisión del dueño, 09-10-2026). */}
-                  {!modoCliente && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
-                    title={cobertura?.referencia === "ruta_prevista"
-                      ? `Medido sobre la ruta prevista del servicio (${cobertura.referenciaKm} km)`
-                      : "Medido sobre el trayecto entre la primera y la última señal"}
-                    style={{
-                      background: rastreoPct >= 90 ? "#dcfce7" : rastreoPct >= 70 ? "#fef9c3" : "#fee2e2",
-                      color: rastreoPct >= 90 ? "#15803d" : rastreoPct >= 70 ? "#a16207" : "#b91c1c",
-                    }}>
-                    Rastreo {rastreoPct}%
+                  {rastreoVisible && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                    title={rastreo!.detalle} style={{ background: rastreo!.bg, color: rastreo!.color }}>
+                    Rastreo {rastreo!.celda}
                   </span>}
                 </div>
                 <div className="grid grid-cols-2 gap-x-2 gap-y-2">
@@ -1959,26 +1939,18 @@ export default function ModalGps({
                   <span>Salida <b className="text-gray-700">{fmtHoraTs(resumen.horaSalida)}</b></span>
                   <span>Última señal <b className="text-gray-700">{fmtHoraTs(resumen.horaLlegada)}</b></span>
                 </div>
-                {modoCliente ? null : cobertura?.referencia === "ruta_prevista" && rastreoPct < 90 ? (
-                  // Servicio terminado con la huella corta: lo que falta NO es un hueco entre dos
-                  // señales, es que el GPS dejó de transmitir y el servicio siguió.
-                  <p className="text-[9px] text-red-700 mt-1.5 leading-snug">
-                    Medido {cobertura.medidoKm} km de los {cobertura.referenciaKm} km de la ruta prevista.
-                    {cobertura.sinHuellaKm > 0 && <> {cobertura.sinHuellaKm} km sin ninguna señal: el GPS dejó de transmitir a las {fmtHoraTs(resumen.horaLlegada)} y el servicio siguió.</>}
-                    {" Lo más común: la pantalla del teléfono se bloqueó o la app del conductor se cerró."}
-                  </p>
-                ) : rastreoPct < 90 ? (
-                  <p className="text-[9px] text-gray-400 mt-1.5 leading-snug">
-                    {100 - rastreoPct}% estimado (sin señal o GPS débil, dibujado sobre la ruta prevista). Precisión mediana ±{resumen.precisionMedianaM} m.
-                  </p>
-                ) : null}
-                {/* En curso y sin señal: el % solo describe hasta la última señal. La ruta entera no
-                    sirve de referencia aquí (no se sabe cuánto lleva recorrido), así que se DICE. */}
-                {!modoCliente && !servicioTerminado && sinSenal && (
-                  <p className="text-[9px] text-amber-700 mt-1.5 leading-snug">
-                    El porcentaje mide solo hasta la última señal ({fmtHoraTs(resumen.horaLlegada)}); desde entonces no llegan posiciones.
-                  </p>
+                {rastreoVisible && rastreo!.problema && (
+                  <p className="text-[9px] mt-1.5 leading-snug" style={{ color: rastreo!.color }}>{rastreo!.detalle}</p>
                 )}
+              </div>
+            )}
+
+            {/* Sin huella no hay «Resumen del viaje», pero un servicio sin señal es justo el que
+                más necesita decirlo. */}
+            {rastreoVisible && rastreo!.problema && !(resumen && resumen.kmRecorridos > 0) && (
+              <div className="rounded-xl border p-3" style={{ borderColor: `${rastreo!.color}33`, background: rastreo!.bg }}>
+                <p className="text-[9px] font-bold uppercase tracking-widest mb-1" style={{ color: rastreo!.color }}>Rastreo · {rastreo!.celda}</p>
+                <p className="text-[11px] leading-snug" style={{ color: rastreo!.color }}>{rastreo!.detalle}</p>
               </div>
             )}
 
