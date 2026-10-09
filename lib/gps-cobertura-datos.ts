@@ -80,7 +80,8 @@ async function todas(armar: () => any): Promise<any[]> {
   return out;
 }
 
-const LOTE = 8;   // reservas en paralelo, como /api/gps-salud
+const LOTE = 8;            // reservas en paralelo, como /api/gps-salud
+const MAX_RESERVAS = 150;  // techo de trabajo por día (≈ 20-40 servicios reales): el resto sale `sin_medir`
 
 /**
  * Veredicto de rastreo de cada servicio de `fecha`. Solo lee el GPS de los que corrieron o
@@ -129,6 +130,11 @@ export async function rastreoDelDia(fecha: string, hoy: string, ahoraMs: number)
       inicioTs, ahoraMs,
     });
   };
-  for (let i = 0; i < reservas.length; i += LOTE) await Promise.all(reservas.slice(i, i + LOTE).map(medir));
+  const lote = reservas.slice(0, MAX_RESERVAS);
+  for (let i = 0; i < lote.length; i += LOTE) await Promise.all(lote.slice(i, i + LOTE).map(medir));
+  // Lo que pasa del techo NO se mide y lo dice: nunca un 0 % por no haberlo mirado.
+  for (const r of reservas.slice(MAX_RESERVAS)) {
+    out[r.id] = veredictoRastreo({ aplica: true, enCurso: false, traza: null, medicion: null, avanzo: false, inmovil: false, inicioTs: null, ahoraMs });
+  }
   return out;
 }

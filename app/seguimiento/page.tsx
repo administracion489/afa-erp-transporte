@@ -640,7 +640,7 @@ export default function SeguimientoPage() {
   const [gpsModal,    setGpsModal]    = useState<ServicioView | null>(null);
   // RASTREO GPS por servicio (/api/seguimiento/rastreo). Se guarda CON su fecha: al cambiar de
   // día, el mapa viejo no puede pintarse sobre los servicios del nuevo mientras llega el suyo.
-  const [rastreoDia, setRastreoDia] = useState<{ fecha: string; mapa: Record<number, VeredictoRastreo>; error: boolean } | null>(null);
+  const [rastreoDia, setRastreoDia] = useState<{ fecha: string; mapa: Record<number, VeredictoRastreo>; error: boolean; motivo?: string } | null>(null);
   const [filtroRastreo, setFiltroRastreo] = useState<"todos"|Exclude<ProblemaRastreo, null>>("todos");
   const [drawer,      setDrawer]      = useState<ServicioView | null>(null);
   const [descargaMasiva, setDescargaMasiva] = useState(false);
@@ -700,9 +700,9 @@ export default function SeguimientoPage() {
         const r = await fetch(`/api/seguimiento/rastreo?fecha=${fechaFiltro}`, {
           headers: { Authorization: `Bearer ${session.access_token}` },
         });
-        const j = r.ok ? await r.json() : null;
+        const j = await r.json().catch(() => null);
         if (!vivo) return;
-        setRastreoDia({ fecha: fechaFiltro, mapa: j?.rastreo || {}, error: !r.ok || !!j?.error });
+        setRastreoDia({ fecha: fechaFiltro, mapa: (r.ok && j?.rastreo) || {}, error: !r.ok || !!j?.error, motivo: r.status === 400 ? j?.error : undefined });
       } catch { if (vivo) setRastreoDia({ fecha: fechaFiltro, mapa: {}, error: true }); }
     };
     traer();
@@ -1113,7 +1113,7 @@ export default function SeguimientoPage() {
             UNIDADES distintas, no servicios: una misma unidad con el teléfono mal configurado
             falla en todos sus viajes del día y es UN problema, no cuatro. Cada contador filtra. */}
         {rastreoEstado === "error" && (
-          <p className="text-[11px] text-gray-400 px-1">No se pudo medir el rastreo GPS de este día. La columna Rastreo dice «?» y se reintenta sola.</p>
+          <p className="text-[11px] text-gray-400 px-1">{rastreoDia?.motivo || "No se pudo medir el rastreo GPS de este día. La columna Rastreo dice «?» y se reintenta sola."}</p>
         )}
         {(rastreoRes.urgentes.length > 0 || rastreoRes.incompletos.length > 0 || rastreoRes.conCortes.length > 0) && (
           <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4 shadow-sm">
