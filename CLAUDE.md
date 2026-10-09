@@ -26,6 +26,12 @@ Si un cambio necesita una **migración SQL** de `supabase/`, el deploy NO la cor
 
 Tras el deploy, si la pantalla sigue igual: `Ctrl+Shift+R`. `public/sw.js` solo cachea la navegación de `/conductor` y `/pasajero` y los chunks de Next llevan hash de build, así que el resto del ERP va siempre a la red — súbele `VERSION` solo si tocas esas dos apps.
 
+## Equipo de agentes (`.claude/agents/`)
+
+Cinco subagentes, uno por especialidad: `arquitecto` (diseña y reparte, no escribe código), `backend` (`app/api`, `lib/`, motores puros y matrices), `frontend` (páginas y componentes React), `datos-sql` (migraciones de `supabase/`, RLS, índices, consultas) y `seguridad-appsec` (audita, no modifica salvo que se le pida).
+
+**La sesión principal es la que coordina**: un subagente no puede lanzar a otro. El flujo para un cambio que cruza áreas es `arquitecto` → la sesión despacha cada tarea de su plan al agente indicado (datos-sql → backend → frontend; lo independiente en paralelo) → `seguridad-appsec` sobre el diff si tocó API, auth, tokens, RLS, Storage o HTML generado → verificación y merge según la sección anterior. Un arreglo chico y local no necesita al arquitecto.
+
 ## High-level architecture
 
 ERP interno (Spanish-language UI) para AFA Transportes (operador de transporte en Perú). Next.js App Router + Supabase Auth/Postgres + Tailwind v4. UI strings, DB columns, and route segments are in Spanish — keep that convention.
