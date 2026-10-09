@@ -48,6 +48,9 @@ const UMBRAL_LABEL: Record<string, string> = {
   gps_silencio: "Min. sin señal",
   doc_vence: "Días de anticipación",
   jornada: "Horas máx. de jornada",
+  // Minutos desde que cierra su ÚLTIMO servicio del día. La repetición se configura en
+  // /auditoria-jornada («Recordar cada (min)»); el aviso al directorio sale tras 3 sin respuesta.
+  recordar_checkout: "Min. de espera tras el último servicio",
 };
 
 /** Chip on/off de un canal de envío. */
