@@ -22,7 +22,7 @@
 // 30.47 — justo por encima del rendimiento real de la unidad. Siete filas sanas marcadas y
 // la única rota en verde, porque el color solo miraba hacia abajo.
 import {
-  auxiliarDeUnidad, UMBRAL_AUXILIAR, claveSerie, cantidadParaRendimiento,
+  auxiliarDeUnidad, decidirAuxiliar, MAX_PARTE_AUXILIAR, claveSerie, cantidadParaRendimiento,
   serieRendimiento,
   seriesRendimiento,
   tramosPorCarga,
@@ -738,7 +738,8 @@ const cargaBi = (
     Math.abs((cruzado.rendimiento ?? 0) - 30 * (1 - esperado)) < 1e-9, String(cruzado.rendimiento));
   chk("…y TODOS sus tramos llevan el mismo descuento (la gasolina se quema a lo largo de meses)",
     [101, 102, 103, 109, 110].every((id) => Math.abs((porCarga[id].tramo.rendimiento ?? 0) - 30 * (1 - esperado)) < 1e-9));
-  chk("…y lo dice en el detalle", /AUXILIAR/.test(cruzado.detalle) && /descontado/.test(cruzado.detalle), cruzado.detalle);
+  chk("…y lo dice en el detalle, con la evidencia de los registros", /AUXILIAR/.test(cruzado.detalle) && /descontado/.test(cruzado.detalle)
+    && /Medido con los registros/.test(cruzado.detalle), cruzado.detalle);
   chk("el tramo de GASOLINA sigue sin medirse (bicombustible)", porCarga[200].tramo.motivo === "familia_cruzada" || porCarga[200].tramo.motivo === "primera_carga",
     String(porCarga[200].tramo.motivo));
   const glp = series.get(claveSerie("CWQ400", "glp"))!;
@@ -749,18 +750,67 @@ const cargaBi = (
   chk("la invariante se mantiene: rendimiento XOR motivo",
     [...series.values()].every((x) => x.tramos.every((t) => (t.rendimiento != null) !== (t.motivo != null))));
 }
-// EL LADO QUE NO SE AFLOJA: con la gasolina en serio (más del umbral), la regla de siempre.
+// LO QUE DECIDE ES LA EVIDENCIA DE LA UNIDAD, NO UN PORCENTAJE FIJO. Una GLP con km/gal que varía
+// entre 28 y 32 en sus tramos limpios; cambia solo qué pasa en los tramos que envuelven gasolina.
+{
+  const base = [30, 28, 32, 29, 31, 30, 29, 31]; // tramos limpios: 300 km / (300 / r) gal
+  const armar = (crudosCruzados: number[]) => {
+    const cargas: CargaRendimiento[] = [];
+    let km = 50000, id = 1, dia = 1;
+    const f = () => `2026-05-${String(dia++).padStart(2, "0")}`;
+    cargas.push(cargaBi(id++, f(), km, 10, "glp"));
+    for (const r of base) { km += 300; cargas.push(cargaBi(id++, f(), km, 300 / r, "glp")); }
+    for (const r of crudosCruzados) {
+      cargas.push(cargaBi(900 + id, f(), km + 10, 0.4, "gasolina_premium")); // poca gasolina: candidato
+      km += 300; cargas.push(cargaBi(id++, f(), km, 300 / r, "glp"));
+    }
+    return cargas;
+  };
+  const tramosCruzados = (cargas: CargaRendimiento[]) => {
+    const pc = tramosPorCarga(seriesRendimiento(cargas));
+    return cargas.filter((c) => c.tipo === "glp").map((c) => pc[c.id].tramo).slice(-3);
+  };
+
+  // (a) Los tramos con gasolina salen como los limpios → auxiliar, se miden.
+  const parejos = armar([30, 31, 29]);
+  const ta = tramosCruzados(parejos);
+  chk("tramos con gasolina parejos a los limpios → se miden (auxiliar)", ta.every((t) => t.motivo === null && t.auxiliar), ta.map((t) => t.motivo).join(","));
+
+  // (b) La MAYORÍA sale inflada → la gasolina se usa en serio: regla de siempre, sin descuento.
+  const inflados = armar([45, 50, 31]);
+  const tb = tramosCruzados(inflados);
+  chk("si la mayoría sale inflada → NO es auxiliar: siguen sin medirse", tb[0].motivo === "familia_cruzada" && tb[1].motivo === "familia_cruzada", tb.map((t) => t.motivo).join(","));
+  const limpioB = tramosPorCarga(seriesRendimiento(inflados))[2].tramo;
+  chk("…y los tramos limpios NO se descuentan (no hay auxiliar)", limpioB.auxiliar === undefined && Math.abs((limpioB.rendimiento ?? 0) - 30) < 1e-9, String(limpioB.rendimiento));
+
+  // (c) Uno de tres se pasa de lo normal → auxiliar, pero ESE tramo no se mide y dice por qué.
+  const uno = armar([30, 31, 48]);
+  const tc = tramosCruzados(uno);
+  chk("auxiliar, y el tramo donde la gasolina se notó no se publica", tc[0].motivo === null && tc[1].motivo === null && tc[2].motivo === "familia_cruzada",
+    tc.map((t) => t.motivo).join(","));
+  chk("…y explica que en ese tramo se notó", /se notó/.test(tc[2].detalle), tc[2].detalle);
+
+  // (d) Sin suficientes tramos limpios no hay contra qué comparar → regla de siempre.
+  const pocos = [
+    cargaBi(1, "2026-01-01", 10000, 10, "glp"), cargaBi(2, "2026-01-02", 10300, 10, "glp"),
+    cargaBi(3, "2026-01-03", 10310, 0.4, "gasolina_premium"), cargaBi(4, "2026-01-04", 10600, 10, "glp"),
+  ];
+  chk("con menos de 5 tramos limpios no se decide → bicombustible como siempre",
+    tramosPorCarga(seriesRendimiento(pocos))[4].tramo.motivo === "familia_cruzada");
+  const estr = serieRendimiento(pocos.filter((c) => c.tipo === "glp"), [{ id: 3, fecha: "2026-01-03", kilometraje: 10310, familia: "gasolina" }]);
+  chk("decidirAuxiliar devuelve null sin evidencia", decidirAuxiliar(estr, { participacion: 0.01, familias: ["gasolina"] }) === null);
+}
+// EL LADO QUE NO SE AFLOJA: el principal es el que pone la MAYOR parte de la energía.
 {
   const cargas = [
     cargaBi(1, "2026-01-01", 10000, 9.4, "glp"),
-    cargaBi(2, "2026-01-05", 10200, 5.0, "gasolina_regular"),
+    cargaBi(2, "2026-01-05", 10200, 16.0, "gasolina_regular"),
     cargaBi(3, "2026-01-20", 10840, 9.4, "glp"),
   ];
-  const aux = auxiliarDeUnidad(cargas, "glp");
-  chk("gasolina por encima del umbral → no es auxiliar", aux === null && UMBRAL_AUXILIAR < 5 / (18.8 * 0.76 + 5));
+  chk("la gasolina pone más energía que el GLP → no hay candidato", auxiliarDeUnidad(cargas, "glp") === null && 16 / (18.8 * 0.76 + 16) >= MAX_PARTE_AUXILIAR);
   chk("…y el tramo cruzado sigue sin medirse", tramosPorCarga(seriesRendimiento(cargas))[3].tramo.motivo === "familia_cruzada");
   // Sin poder medir toda la energía (una carga sin cantidad) no se afirma nada.
-  const sinCant = [...cargas.slice(0, 1), cargaBi(2, "2026-01-05", 10200, 0, "gasolina_regular"), cargaBi(3, "2026-01-20", 10840, 9.4, "glp")];
+  const sinCant = [cargas[0], cargaBi(2, "2026-01-05", 10200, 0, "gasolina_regular"), cargas[2]];
   chk("con una carga sin cantidad no se calcula el auxiliar", auxiliarDeUnidad(sinCant, "glp") === null);
   // Una unidad de un solo combustible: nada cambia.
   const solo = [cargaBi(1, "2026-01-01", 10000, 10, "glp"), cargaBi(2, "2026-01-10", 10300, 10, "glp")];
