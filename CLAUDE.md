@@ -629,6 +629,18 @@ Lo reportó el dueño: *«quiero enviar solo a un cliente y solo a AFA para prob
 - **Un fallo de LECTURA nunca acusa**: la traza se lee entera o lanza, y sale `sin_medir` («?»), jamás 0 %. Mientras mide, la columna dice «…». Un servicio que no salió es `no_aplica` y no se lee su GPS.
 - **El modal no calcula su %**: recibe el veredicto por prop (`rastreo`) desde `/seguimiento`. Al cliente **no se le enseña el porcentaje de rastreo** (decisión del dueño, 09-10-2026): ni en `/cliente` ni en el modal con `modoCliente`.
 
+### «El vehículo se aleja de…» es una afirmación en PRESENTE
+
+`leerAvance` + `distanciaCrecio` en `lib/avance-paradas.ts` (el motor que alimenta el panel de la parada objetivo del modal GPS). Matriz: `npx tsx scripts/prueba-se-aleja.mts`. **Sin migración.**
+
+**El caso** (reserva #30204, PIERIPLAST, 09-10-2026): el bus llegó al PRIMER paradero y esperó ahí; el modal decía «Se está alejando · a 6.1 km» del paradero 2, con el header de la misma pantalla diciendo «Unidad sin movimiento · hace 16 min».
+
+- **LA RACHA NO MIDE «SE ALEJA», MIDE «ESTÁ LEJOS DE LO MÁS CERCA QUE LLEGÓ A ESTAR».** El paradero 2 la acumuló mientras el bus iba HACIA el 1 (ese tramo lo alejaba del 2, sin que el 2 fuera aún el objetivo), y con el bus detenido no se borra: las muestras quietas no aportan dirección y las que mueve el jitter vuelven a sumar, porque siguen lejos del mínimo. Al marcar el conductor el 1, el 2 pasó a objetivo con la racha hecha. Por la misma razón, un bus que se ACERCA despacio (menos de 40 m por muestra) desde más lejos que su mínimo también salía «alejándose».
+- **Ahora además la distancia al objetivo tiene que haber CRECIDO en el último minuto** (`recientes`: las muestras aceptadas de los últimos 60 s = `GLITCH_MAX_DT_S`, el mismo corte del «sin señal» del modal), en más de `GAP_ALEJA_M` y comparando la peor pareja de cada extremo, para que un fix desviado no fabrique el alejamiento.
+- **Es SUSTRACTIVO y no toca el motor**: ninguna transición (pasada, piso, rachas) lee el campo nuevo; solo puede apagar un «se aleja» que la racha ya afirmaba. La matriz lo barre (nuevo ⇒ viejo en 100 000 muestras) y fija el lado que no se afloja: un bus que se va en sentido contrario lo sigue diciendo, también 30 s parado en un semáforo; a los 90 s detenido ya no.
+- **Límite declarado**: en el primer minuto tras detenerse, la ventana aún contiene el tramo en que se alejaba — es cierto que se alejó en el último minuto.
+- **La app del pasajero tiene su PROPIA copia de la máquina** (`app/pasajero/page.tsx`, «El bus se aleja de tu paradero») y no se tocó: sin el `bajando` primero y sin la puerta de quietud, puede tener el mismo defecto.
+
 ### Lectura del odómetro · el dígito de más (`lib/odometro-seleccion.ts`, `lib/vision-ia.ts`)
 
 **El ERP sabe cuántos dígitos tiene el odómetro de cada unidad y se lo estaba callando.** El caso real (CUP-435, 05/09/2026): el tablero marca `ODO 23980 km` / `TRIP 388.0` y la IA devolvió **239.980** en dos lecturas seguidas. Un dígito de más, diez veces el número, y el km de una unidad envenena después el vencimiento de mantenimiento y el rendimiento km/gal de todos sus tramos.
