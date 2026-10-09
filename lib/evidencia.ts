@@ -161,7 +161,7 @@ export async function subirEvidencias(
     const mime = mimeDe(archivo);
     try {
       const up = await client.storage.from(bucket).upload(ruta, archivo, { upsert: false, contentType: mime || undefined });
-      if (up?.error) { fallidas.push({ nombre, motivo: up.error.message || "no se pudo subir" }); continue; }
+      if (up?.error) { fallidas.push({ nombre, motivo: motivoDeSubida(up.error.message, bucket) }); continue; }
       const url = client.storage.from(bucket).getPublicUrl(ruta)?.data?.publicUrl;
       if (!url) { fallidas.push({ nombre, motivo: "no se obtuvo su enlace" }); continue; }
       subidas.push({ url, nombre, mime, clase });
@@ -170,6 +170,21 @@ export async function subirEvidencias(
     }
   }
   return { subidas, fallidas };
+}
+
+/**
+ * El motivo de una subida rechazada, en palabras que digan DÓNDE se arregla. «new row violates
+ * row-level security policy» es Storage diciendo que ese bucket no tiene la política de subida
+ * para los usuarios del ERP: no es un archivo malo y reintentar no lo arregla, así que se nombra
+ * el SQL que la crea.
+ */
+export function motivoDeSubida(mensaje: string | null | undefined, bucket: string): string {
+  const m = String(mensaje ?? "").trim();
+  if (/row-level security|violates.*policy|unauthorized|403/i.test(m)) {
+    return `el almacenamiento «${bucket}» no deja subir archivos a los usuarios del ERP (falta su permiso de subida: ` +
+      `corre la parte 1 de supabase/seguridad-02-buckets-privados.sql en Supabase)`;
+  }
+  return m || "no se pudo subir";
 }
 
 /** Si quien registra decide NO guardar, lo ya subido se retira (best-effort): nadie lo enlazaría. */
