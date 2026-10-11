@@ -11,7 +11,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
-import { rastreoDelDia } from "@/lib/gps-cobertura-datos";
+import { rastreoDelDia, DIAS_RASTREO } from "@/lib/gps-cobertura-datos";
 import { hoyLimaFecha } from "@/lib/retrasos-datos";
 
 export const dynamic = "force-dynamic";
@@ -24,12 +24,11 @@ const cache = new Map<string, { at: number; payload: any }>();
 const enVuelo = new Map<string, Promise<any>>();
 
 // Topes contra el abuso (auditoría AppSec): cada día medido lee la traza ENTERA de sus servicios.
-//  · Solo los últimos DIAS_ATRAS días: la torre revisa el día y los recientes; lo histórico por
-//    conductor vive en /gps-salud.
+//  · Solo los últimos DIAS_RASTREO días (lib/gps-cobertura-datos.ts, el mismo tope del modal de
+//    diagnóstico): la torre revisa el día y los recientes; lo histórico por conductor vive en /gps-salud.
 //  · A lo sumo MAX_CALCULOS días midiéndose a la vez entre TODAS las fechas: pedir 30 fechas en
 //    paralelo no lanza 30 lecturas pesadas.
 //  · La caché guarda a lo sumo MAX_CACHE fechas.
-const DIAS_ATRAS = 90;
 const MAX_CALCULOS = 2;
 const MAX_CACHE = 40;
 let calculando = 0;
@@ -64,8 +63,8 @@ export async function GET(req: NextRequest) {
   }
   // Un día futuro no tiene nada que medir: se responde vacío sin leer GPS.
   if (fecha > hoy) return NextResponse.json({ fecha, rastreo: {} });
-  if (fecha < restarDias(hoy, DIAS_ATRAS)) {
-    return NextResponse.json({ error: `El rastreo se mide solo de los últimos ${DIAS_ATRAS} días. Para el historial por conductor, usa Salud del GPS.` }, { status: 400 });
+  if (fecha < restarDias(hoy, DIAS_RASTREO)) {
+    return NextResponse.json({ error: `El rastreo se mide solo de los últimos ${DIAS_RASTREO} días. Para el historial por conductor, usa Salud del GPS.` }, { status: 400 });
   }
 
   const ttl = fecha === hoy ? TTL_HOY_MS : TTL_OTRO_DIA_MS;

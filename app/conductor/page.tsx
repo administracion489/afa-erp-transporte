@@ -2,7 +2,14 @@
 
 import { juzgarKmConductor, coincideReescrito, consejoFoto, type JuicioKmConductor, type ConsejoFoto } from "@/lib/odometro-confirmacion";
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, ajustesUbicacion, pedirAjustesUbicacion, esAppNativa, backgroundGpsActivo, backgroundGpsSinFixMs, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, ajustesUbicacion, pedirAjustesUbicacion, esAppNativa, backgroundGpsActivo, backgroundGpsSinFixMs, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision, type AjustesUbicacion } from "@/lib/geo";
+import { Capacitor } from "@capacitor/core";
+import {
+  ACC_RED_M, LATIDO_VIEJO_MS, GUIA_AJUSTES_GPS, FABRICANTES_AGRESIVOS, fabricanteDeUA,
+  firmaEstado, PLUGINS_EQUIPO, CLAVE_DISPOSITIVO, CLAVE_PAUSA_EQUIPO,
+  LATIDO_EQUIPO_MS, MIN_ENTRE_ENVIOS_MS, REINTENTO_EQUIPO_MS, PAUSA_SIN_MIGRACION_MS,
+  type ReporteEquipo, type MotivoReporte, type PlataformaEquipo, type PluginEquipo,
+} from "@/lib/gps-equipo";
 import { attachHidScanner } from "@/lib/hid-scanner";
 import { detectarSoportePush, permisoBloqueado, activarPushWeb, activarPushNativo, resincronizarSuscripcion } from "@/lib/push-cliente";
 import {
@@ -398,12 +405,8 @@ function intervaloEnvioMs(kmh: number, cercaParadero: boolean, emergencia: boole
   return 3000;                      // carretera
 }
 
-// Umbral "esto NO es satélite, es ubicación de red". Medido sobre la flota (4 días, conductores con
-// ≥100 fixes): los equipos que entregan GNSS real dan mediana 1.8-7.7 m; los que salen por antena/
-// WiFi, 15.9-200 m. El hueco entre 7.7 y 15.9 es limpio → 12 m separa sin falsos positivos. ANTES
-// estaba en 60 m: por eso el semáforo estuvo VERDE toda la noche del servicio #24738, que corrió a
-// 22 m de mediana (ubicación de red pura) con huecos de hasta 11,7 min y el bus en movimiento.
-const ACC_RED_M = 12;
+// `ACC_RED_M` (12 m: "esto NO es satélite, es ubicación de red", medido sobre la flota) vive en
+// lib/gps-equipo.ts: el diagnóstico del rastreo en la oficina tiene que cortar en el MISMO número.
 
 // true si la posición está a < UMBRAL_PARADERO_M de alguna parada con coordenadas.
 const UMBRAL_PARADERO_M = 150;
@@ -478,60 +481,10 @@ async function notificarLlegadaNativa(tipo: "suave" | "fuerte", titulo: string, 
 }
 
 // ─── GUÍA DE AJUSTES DEL EQUIPO (para que el fabricante no mate el rastreo) ──────
-// Android NO deja que una app active autostart / batería sin restricciones / bloqueo
-// en Recientes por su cuenta: son ajustes del usuario. Lo máximo es DETECTAR la marca
-// y GUIAR al conductor paso a paso (él toca los toggles). Esto sube la disponibilidad
-// real más que cualquier watchdog (la causa #1 de cortes es el matado por fabricante).
-type PasoAjuste = { titulo: string; detalle: string };
-type GuiaFabricante = { marca: string; pasos: PasoAjuste[] };
-
-function detectarFabricanteGps(): string {
-  const ua = (typeof navigator !== "undefined" ? navigator.userAgent : "").toLowerCase();
-  if (/xiaomi|redmi|poco|miui|hyperos/.test(ua)) return "xiaomi";
-  if (/samsung|sm-/.test(ua))                    return "samsung";
-  if (/oppo|cph/.test(ua))                        return "oppo";
-  if (/vivo/.test(ua))                            return "vivo";
-  if (/realme|rmx/.test(ua))                      return "realme";
-  if (/huawei|honor|\bhry\b|\blio\b/.test(ua))   return "huawei";
-  if (/motorola|moto\b|\bmoto /.test(ua))         return "motorola";
-  return "generico";
-}
-
-const PASOS_COMUNES: PasoAjuste[] = [
-  { titulo: "Ubicación: “Permitir todo el tiempo”", detalle: "Ajustes → Apps → AFA Conductores → Permisos → Ubicación → Permitir todo el tiempo." },
-  { titulo: "Batería: “Sin restricciones”", detalle: "Ajustes → Apps → AFA Conductores → Batería → Sin restricciones (o “No optimizar”)." },
-  { titulo: "Bloquea la app en Recientes", detalle: "Abre Recientes (multitarea), mantén presionada AFA Conductores y toca el candado para que el sistema no la cierre." },
-];
-
-const GUIA_AJUSTES_GPS: Record<string, GuiaFabricante> = {
-  xiaomi: { marca: "Xiaomi / Redmi / POCO (MIUI/HyperOS)", pasos: [
-    { titulo: "Inicio automático: ACTIVADO", detalle: "Ajustes → Apps → Gestión de apps → AFA Conductores → Inicio automático → Activar. (También en Seguridad → Permisos → Inicio automático.)" },
-    { titulo: "Ahorro de batería: “Sin restricciones”", detalle: "En la misma pantalla de la app → Ahorro de batería → Sin restricciones." },
-    ...PASOS_COMUNES,
-  ]},
-  samsung: { marca: "Samsung (One UI)", pasos: [
-    { titulo: "Quita “Poner en suspensión”", detalle: "Ajustes → Batería → Límites de uso en segundo plano → asegúrate que AFA Conductores NO esté en “Apps en suspensión” ni “Suspensión profunda”." },
-    ...PASOS_COMUNES,
-  ]},
-  oppo:    { marca: "Oppo / OnePlus (ColorOS)", pasos: [
-    { titulo: "Inicio automático: ACTIVADO", detalle: "Ajustes → Gestión de batería/apps → AFA Conductores → permitir inicio automático y ejecución en segundo plano." },
-    ...PASOS_COMUNES,
-  ]},
-  vivo:    { marca: "Vivo (Funtouch/OriginOS)", pasos: [
-    { titulo: "Inicio automático y alto consumo: PERMITIR", detalle: "Ajustes → Batería → Consumo alto en segundo plano → permitir AFA Conductores; y permitir inicio automático." },
-    ...PASOS_COMUNES,
-  ]},
-  realme:  { marca: "Realme (Realme UI)", pasos: [
-    { titulo: "Inicio automático: ACTIVADO", detalle: "Ajustes → Apps → AFA Conductores → permitir inicio automático y actividad en segundo plano." },
-    ...PASOS_COMUNES,
-  ]},
-  huawei:  { marca: "Huawei / Honor (EMUI/MagicOS)", pasos: [
-    { titulo: "Gestión manual de la app", detalle: "Ajustes → Batería → Inicio de apps → AFA Conductores → Gestionar manualmente → activar Inicio automático, Inicio secundario y Ejecución en segundo plano." },
-    ...PASOS_COMUNES,
-  ]},
-  motorola:{ marca: "Motorola", pasos: PASOS_COMUNES },
-  generico:{ marca: "tu equipo", pasos: PASOS_COMUNES },
-};
+// La guía por marca (`GUIA_AJUSTES_GPS`, `PASOS_COMUNES`), la detección de la marca
+// (`fabricanteDeUA`, que era `detectarFabricanteGps()`) y la lista de fabricantes agresivos se
+// MUDARON sin reescribirse a lib/gps-equipo.ts: el modal del rastreo en la oficina enseña los
+// MISMOS pasos que esta app le enseña al conductor.
 
 // ─── CHAT CON PASAJEROS ───────────────────────────────────────────────────────
 
@@ -640,6 +593,301 @@ function encolar(p: PuntoGps) { const c = leerCola(); c.push(p); guardarCola(c);
 function nuevoQid(): string {
   try { return crypto.randomUUID(); }
   catch { return `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+}
+
+// ─── ESTADO DEL TELÉFONO → OFICINA (acción `equipo_gps`) ────────────────────────
+// La app sabe si la batería está exenta, si la ubicación es precisa, si tiene «todo el tiempo»,
+// si el servicio de fondo entrega y si el GPS sale débil o pegado — y hasta ahora lo sabía SOLO
+// aquí. Este reporte lo lleva a /api/conductor (tabla `gps_equipo_reportes`) para que el modal del
+// rastreo en /seguimiento diga POR QUÉ se cortó el GPS, no solo cuánto. Reglas:
+//   • TRI-ESTADO: lo que no se pudo comprobar viaja null, NUNCA false (false es afirmar una falta).
+//   • No toca la cola GPS ni enviarUbicacion, no le muestra nada al conductor y no re-pinta la
+//     pantalla (todo vive en refs y en variables del efecto). Cualquier fallo se traga: el reporte
+//     es un extra y el rastreo es lo único que no puede romperse.
+//   • El contrato y la firma («¿cambió el estado?») son los de lib/gps-equipo.ts, los mismos con los
+//     que el servidor decide si estira la última fila o abre otra.
+
+// Lo que había al CARGAR la página, leído UNA sola vez y antes de cualquier efecto. Tiene que ser
+// aquí: el watchdog re-escribe el latido en cuanto se arma, y `evaluarAjustesGps` lo consume (con la
+// batería exenta lo BORRA sin mirarlo), así que leído después ya no dice si el sistema mató la app.
+// No borra nada: el aviso al conductor sigue funcionando exactamente igual.
+const CARGA_EQUIPO: { cargaMs: number; latido: number; hayServicio: boolean } = (() => {
+  if (typeof window === "undefined") return { cargaMs: 0, latido: 0, hayServicio: false };   // SSR
+  const cargaMs = Date.now();
+  try {
+    return { cargaMs, latido: Number(localStorage.getItem("afa_gps_latido")) || 0, hayServicio: !!loadServicio() };
+  } catch { return { cargaMs, latido: 0, hayServicio: false }; }
+})();
+
+/** Un `corte` se fecha con la hora del ENVÍO (`_cliente_ts`, la pone condApi). Si el primer envío
+ *  se demora (sin datos al reabrir), pasado esto ya no describe el momento del reinicio y sale como
+ *  `arranque`. Mismo valor que `TOL_REINICIO_MS` de lib/gps-diagnostico.ts (= SENAL_PERDIDA_MIN),
+ *  la tolerancia con que el diagnóstico lo cruza con el final de un tramo; no se importa para no
+ *  meter el motor del diagnóstico (y sus dependencias) en el bundle de la app. */
+const VENTANA_CORTE_MS = 5 * 60_000;
+/** NO MEDIDO: tope de espera de un envío del reporte (el fetch de condApi no trae límite propio). */
+const LIMITE_ENVIO_EQUIPO_MS = 45_000;
+
+/** Misma regla que evaluarAjustesGps (cold start + servicio guardado + latido viejo = el sistema
+ *  mató la app a mitad de un servicio), medida contra la hora de CARGA y no la del envío: un login
+ *  posterior no puede convertir en viejo un latido que al abrir estaba fresco. */
+function cargaFueCorte(): boolean {
+  return CARGA_EQUIPO.hayServicio && CARGA_EQUIPO.latido > 0
+    && CARGA_EQUIPO.cargaMs - CARGA_EQUIPO.latido > LATIDO_VIEJO_MS;
+}
+
+/** Lo que vale para toda la CARGA de la página, no por conductor ni por efecto. */
+const REPORTE_EQUIPO: { arranqueHecho: boolean; dispositivoMem: string | null } = { arranqueHecho: false, dispositivoMem: null };
+
+const RE_DISPOSITIVO = /^[A-Za-z0-9-]{8,64}$/;   // el CHECK de gps_equipo_reportes.dispositivo
+/** Identifica el APARATO: se crea una vez y NO se borra al cerrar sesión (clearSession solo borra
+ *  la sesión). Sin almacenamiento, uno en memoria para esta carga. */
+function dispositivoEquipo(): string {
+  try {
+    const v = localStorage.getItem(CLAVE_DISPOSITIVO);
+    if (v && RE_DISPOSITIVO.test(v)) return v;
+  } catch { /* sin almacenamiento */ }
+  if (!REPORTE_EQUIPO.dispositivoMem) {
+    const id = nuevoQid();
+    REPORTE_EQUIPO.dispositivoMem = RE_DISPOSITIVO.test(id)
+      ? id : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+  try { localStorage.setItem(CLAVE_DISPOSITIVO, REPORTE_EQUIPO.dispositivoMem); } catch { /* noop */ }
+  return REPORTE_EQUIPO.dispositivoMem;
+}
+
+/** ¿Pausa vigente tras `sin_migracion`? Acotada: un reloj que saltó hacia atrás no la estira. */
+function equipoEnPausa(ahora: number): boolean {
+  try {
+    const hasta = Number(localStorage.getItem(CLAVE_PAUSA_EQUIPO)) || 0;
+    return hasta > ahora && hasta - ahora <= PAUSA_SIN_MIGRACION_MS;
+  } catch { return false; }
+}
+
+/** Resuelve SIEMPRE, con `porDefecto` si falla o se cuelga: varias lecturas nativas no traen
+ *  límite propio y el reporte no puede quedarse esperando para siempre. */
+function conLimite<T>(f: () => Promise<T>, ms: number, porDefecto: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const t = setTimeout(() => resolve(porDefecto), ms);
+    Promise.resolve().then(f).then(
+      (v) => { clearTimeout(t); resolve(v); },
+      () => { clearTimeout(t); resolve(porDefecto); },
+    );
+  });
+}
+
+type AjustesEquipo = Pick<ReporteEquipo, "bateria_exenta" | "precision_ubicacion" | "todo_el_tiempo" | "ajustes_alta_precision">;
+const AJUSTES_DESCONOCIDOS: AjustesEquipo = { bateria_exenta: null, precision_ubicacion: null, todo_el_tiempo: null, ajustes_alta_precision: null };
+
+/** Las cuatro lecturas nativas, todas de SOLO LECTURA (ninguna abre un diálogo). Fuera del APK,
+ *  o si el plugin no contesta, null: no se afirma nada que no se comprobó. */
+async function leerAjustesEquipo(): Promise<AjustesEquipo> {
+  if (!esAppNativa()) return AJUSTES_DESCONOCIDOS;
+  const [bat, prec, todo, aj] = await Promise.all([
+    conLimite(bateriaExenta, 6000, null),
+    conLimite<GeoPrecision>(precisionUbicacion, 8000, "desconocida"),
+    conLimite(ubicacionTodoElTiempo, 6000, null),
+    conLimite<AjustesUbicacion | null>(ajustesUbicacion, 8000, null),
+  ]);
+  return {
+    bateria_exenta: typeof bat === "boolean" ? bat : null,
+    precision_ubicacion: prec === "precisa" || prec === "aproximada" ? prec : null,   // «desconocida» → null
+    todo_el_tiempo: typeof todo === "boolean" ? todo : null,
+    // Sin Google Play Services (o APK viejo sin el método) `disponible` es false: no se sabe.
+    ajustes_alta_precision: aj && aj.disponible ? aj.satisfecho : null,
+  };
+}
+
+/** Modelo según el propio navegador (Client Hints), best-effort con 2 s de límite: el UA de
+ *  Chrome viene REDUCIDO («Android 10; K») y no lo dice. */
+async function leerModeloEquipo(): Promise<string | null> {
+  try {
+    if (typeof navigator === "undefined") return null;
+    type ClientHints = { getHighEntropyValues?: (h: string[]) => Promise<{ model?: unknown }> };
+    const uad = (navigator as Navigator & { userAgentData?: ClientHints }).userAgentData;
+    const leer = uad?.getHighEntropyValues;
+    if (!uad || typeof leer !== "function") return null;
+    const v = await conLimite(() => leer.call(uad, ["model"]), 2000, null);
+    const m = typeof v?.model === "string" ? v.model.trim() : "";
+    return m || null;
+  } catch { return null; }
+}
+
+function plataformaEquipo(): PlataformaEquipo {
+  try {
+    const p = Capacitor.getPlatform();
+    return p === "android" ? "apk" : p === "ios" ? "ios" : "navegador";
+  } catch { return "navegador"; }
+}
+
+/** Qué plugins nativos trae ESTE APK (su versión no se puede leer: se deduce de esto y de qué
+ *  comprobaciones contestan). Los nombres son los registrados: `@CapacitorPlugin(name = "AfaNative")`
+ *  y `registerPlugin('BackgroundGeolocation')` de @capgo/background-geolocation. */
+function pluginsEquipo(): PluginEquipo[] {
+  try {
+    if (!Capacitor.isNativePlatform()) return [];
+    return PLUGINS_EQUIPO.filter((n) => Capacitor.isPluginAvailable(n));
+  } catch { return []; }
+}
+
+/**
+ * Reporta el estado del teléfono a la oficina, solo con sesión. Al arrancar manda `arranque` (o
+ * `corte`, ver cargaFueCorte); después `cambio` cuando cambia la firma (mín MIN_ENTRE_ENVIOS_MS
+ * entre envíos) y `latido` cada LATIDO_EQUIPO_MS solo mientras comparte. Un fallo espera
+ * REINTENTO_EQUIPO_MS; `reintentar` (freno del servidor) reintenta después sin perder el cambio;
+ * `sin_migracion` pausa PAUSA_SIN_MIGRACION_MS, persistida para que una recarga no insista.
+ */
+function useReporteEquipoGps(p: {
+  conductorId: number | null;
+  token: string | null;
+  compartiendo: boolean;
+  reservaId: number | null;
+  gpsAtascado: boolean;
+  bgMedidoRef: { readonly current: boolean | null };
+  gpsDebilMedidoRef: { readonly current: number | null };
+}) {
+  const { conductorId, token, compartiendo, reservaId, gpsAtascado, bgMedidoRef, gpsDebilMedidoRef } = p;
+  const vivoRef = useRef({ compartiendo, reservaId, gpsAtascado });
+  const revisarRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => { vivoRef.current = { compartiendo, reservaId, gpsAtascado }; }, [compartiendo, reservaId, gpsAtascado]);
+  // Conectarse/desconectarse o cambiar de servicio se reporta YA; lo demás, en el repaso de 60 s.
+  useEffect(() => { revisarRef.current?.(); }, [compartiendo, reservaId]);
+
+  useEffect(() => {
+    if (!conductorId || !token) return;
+    let activo = true;
+    let enVuelo = false;
+    let leyendo = false;
+    let listo = false;                        // ajustes y modelo ya leídos (o vencido su límite)
+    let ajustes: AjustesEquipo = AJUSTES_DESCONOCIDOS;
+    let modelo: string | null = null;
+    let firmaServidor: string | null = null;  // la última que el servidor CONFIRMÓ
+    let ultimoEnvio = 0;                      // último intento, salga bien o no: separa los envíos
+    let ultimoExito = 0;                      // marca el ritmo del latido
+    let noAntesDe = 0;                        // espera tras un fallo o un `reintentar`
+    let reintentos = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const programar = (ms: number) => {
+      if (timer || !activo) return;
+      timer = setTimeout(() => { timer = null; revisar(); }, Math.max(1000, ms));
+    };
+
+    const enviar = async (snap: Omit<ReporteEquipo, "motivo" | "pendientes_cola">, motivo: MotivoReporte, firma: string) => {
+      enVuelo = true;
+      ultimoEnvio = Date.now();
+      let pendientes: number | null = null;
+      try { pendientes = leerCola().length; } catch { /* no se sabe */ }
+      let datos: { ok?: unknown; sin_migracion?: unknown; reintentar?: unknown } | null = null;
+      let estado: number | null = null;
+      let limite: ReturnType<typeof setTimeout> | null = null;
+      try {
+        // Un fetch colgado no puede dejar el reporte callado para siempre (`enVuelo`): pasado el
+        // límite se da por fallido y se reintenta como cualquier otro fallo.
+        datos = await Promise.race([
+          condApi("equipo_gps", { ...snap, motivo, pendientes_cola: pendientes, token }),
+          new Promise<never>((_, rechazar) => { limite = setTimeout(() => rechazar(new Error("tiempo agotado")), LIMITE_ENVIO_EQUIPO_MS); }),
+        ]);
+      } catch (e) {
+        const er = errorApi(e);
+        datos = (er.datos as typeof datos) ?? null;
+        estado = er.estado ?? 0;   // 0 = no hubo respuesta (sin red o tiempo agotado)
+      } finally {
+        if (limite) clearTimeout(limite);
+        enVuelo = false;
+      }
+      try {
+        const ahora = Date.now();
+        if (estado == null && datos?.ok === true) {
+          REPORTE_EQUIPO.arranqueHecho = true;
+          firmaServidor = firma; ultimoExito = ahora; reintentos = 0;
+        } else if (datos?.sin_migracion === true) {
+          // Falta correr supabase/gps-equipo-01.sql: no insistir. Pasada la pausa, un `corte` ya no
+          // fecharía el reinicio, así que el arranque se da por hecho.
+          try { localStorage.setItem(CLAVE_PAUSA_EQUIPO, String(ahora + PAUSA_SIN_MIGRACION_MS)); } catch { /* noop */ }
+          noAntesDe = ahora + PAUSA_SIN_MIGRACION_MS;
+          REPORTE_EQUIPO.arranqueHecho = true;
+          firmaServidor = null;
+        } else if (datos?.reintentar === true) {
+          // Freno del servidor: el cambio NO se perdió; se manda después, con espera creciente.
+          reintentos = Math.min(reintentos + 1, 8);
+          noAntesDe = ahora + Math.min(REINTENTO_EQUIPO_MS, MIN_ENTRE_ENVIOS_MS * reintentos);
+        } else if (estado != null && estado >= 400 && estado < 500 && estado !== 408 && estado !== 429) {
+          // Un rechazo que repetir no arregla (acción desconocida, llave mal puesta…): se vuelve a
+          // probar al ritmo del latido, no cada REINTENTO_EQUIPO_MS.
+          noAntesDe = ahora + LATIDO_EQUIPO_MS;
+        } else {
+          noAntesDe = ahora + REINTENTO_EQUIPO_MS;   // sin red, 5xx o respuesta rara
+        }
+      } catch { /* noop */ }
+      if (activo) revisar();   // lo que cambió mientras viajaba (sale con su espera, nunca en bucle)
+    };
+
+    const revisar = () => {
+      if (!activo || !listo || enVuelo) return;
+      try {
+        const ahora = Date.now();
+        if (equipoEnPausa(ahora)) return;
+        const v = vivoRef.current;
+        const snap: Omit<ReporteEquipo, "motivo" | "pendientes_cola"> = {
+          dispositivo: dispositivoEquipo(),
+          reserva_id: v.reservaId,
+          plataforma: plataformaEquipo(),
+          modelo,
+          plugins: pluginsEquipo(),
+          compartiendo: v.compartiendo,
+          ...ajustes,
+          servicio_fondo: bgMedidoRef.current,
+          gps_debil_m: gpsDebilMedidoRef.current,
+          gps_atascado: v.compartiendo ? v.gpsAtascado : null,   // el detector solo corre compartiendo
+        };
+        const firma = firmaEstado(snap);
+        let motivo: MotivoReporte | null = null;
+        if (!REPORTE_EQUIPO.arranqueHecho) {
+          motivo = cargaFueCorte() && ahora - CARGA_EQUIPO.cargaMs <= VENTANA_CORTE_MS ? "corte" : "arranque";
+        } else if (firma !== firmaServidor) {
+          motivo = "cambio";
+        } else if (v.compartiendo && ahora - ultimoExito >= LATIDO_EQUIPO_MS) {
+          motivo = "latido";
+        }
+        if (!motivo) return;
+        const espera = Math.max(noAntesDe, ultimoEnvio + MIN_ENTRE_ENVIOS_MS) - ahora;
+        if (espera > 0) { programar(espera); return; }
+        void enviar(snap, motivo, firma);
+      } catch { /* el reporte nunca molesta */ }
+    };
+
+    // Lecturas nativas: al arrancar, al volver a primer plano y cada latido. El modelo, una vez.
+    const refrescar = async () => {
+      if (leyendo || !activo) return;
+      leyendo = true;
+      try {
+        const [a, m] = await Promise.all([leerAjustesEquipo(), listo ? Promise.resolve(modelo) : leerModeloEquipo()]);
+        if (!activo) return;
+        ajustes = a; modelo = m;
+      } catch { /* lo que no se leyó sigue null */ }
+      finally { leyendo = false; listo = true; }
+      revisar();
+    };
+
+    revisarRef.current = revisar;
+    void refrescar();   // el arranque sale con los ajustes y el modelo ya leídos
+    const tick = setInterval(revisar, 60_000);
+    const ivAjustes = setInterval(() => { void refrescar(); }, LATIDO_EQUIPO_MS);
+    const onVis = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") void refrescar();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      activo = false;
+      revisarRef.current = null;
+      clearInterval(tick);
+      clearInterval(ivAjustes);
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [conductorId, token, bgMedidoRef, gpsDebilMedidoRef]);
 }
 
 // ─── Deslizable "Conectarse" (estilo Uber/Cabify) ──────────────────────────────
@@ -1005,6 +1253,12 @@ export default function ConductorApp() {
   // diferencia de exentaBat (config), esto mide si REALMENTE está activo AHORA. Optimista
   // por defecto (true) para no parpadear mientras arranca.
   const [bgServicioActivo, setBgServicioActivo] = useState(true);
+  // Lo MISMO, medido de verdad y tri-estado, para el reporte a la oficina (`equipo_gps`): el
+  // estado de arriba nace en `true` por diseño (el chip no parpadea mientras arranca) y por eso
+  // no se puede reportar tal cual. null = no se sabe (navegador, sin compartir o en la gracia del
+  // arranque); true = el servicio de fondo entrega; false = 2 lecturas caídas seguidas. Ref: el
+  // reporte lo lee al armar el snapshot y no tiene por qué re-pintar la pantalla.
+  const bgMedidoRef = useRef<boolean | null>(null);
   // Expandir los pasos manuales (en equipos no-agresivos van colapsados tras "ver pasos").
   const [verPasosGps, setVerPasosGps] = useState(false);
   // Paso de ONBOARDING "batería" (APK 28+ con plugin): pantalla breve + botón que dispara el
@@ -1021,6 +1275,10 @@ export default function ConductorApp() {
   // ve satélites (guantera / parabrisas polarizado / ahorro de batería). Caso real: BVI124 dio
   // ±1.8 m el 17-jun y ±100 m desde el 19-jun con el MISMO permiso. Esto mide lo que LLEGA.
   const [gpsDebilM, setGpsDebilM] = useState(0);
+  // El mismo detector para el reporte a la oficina, sin las dos cosas que `gpsDebilM` mezcla en
+  // el 0: null = no hay muestras frescas (o no comparte); número = la mediana medida, SIN cortar
+  // en ACC_RED_M (un 5 es "bien medido", que el chip no necesita distinguir de "sin datos").
+  const gpsDebilMedidoRef = useRef<number | null>(null);
   const [showFinViaje,   setShowFinViaje]   = useState(false);
   const [showFinOverlay, setShowFinOverlay] = useState(false);
   const [datosFinViaje,  setDatosFinViaje]  = useState<{
@@ -1744,15 +2002,17 @@ export default function ConductorApp() {
   // ubicación por red (sin satélite): el conductor debe reubicar el teléfono con vista al
   // cielo / quitar ahorro de batería. Mide la CALIDAD REAL entregada, no el permiso.
   useEffect(() => {
+    gpsDebilMedidoRef.current = null;   // al (des)conectar no se arrastra la mediana de la sesión anterior
     if (!conductor || !compartiendo) { setGpsDebilM(0); accsRecRef.current = []; return; }
     const evaluar = () => {
       // No acusar con datos VIEJOS: si el GPS calló (>60 s sin fix), eso ya lo cubren el
       // watchdog/gpsAtascado — el array conserva accuracies rancias que no describen el ahora.
-      if (Date.now() - (ultimoFixRef.current || 0) > 60_000) { setGpsDebilM(0); return; }
+      if (Date.now() - (ultimoFixRef.current || 0) > 60_000) { setGpsDebilM(0); gpsDebilMedidoRef.current = null; return; }
       const a = [...accsRecRef.current].sort((x, y) => x - y);
-      if (a.length < 5) { setGpsDebilM(0); return; }   // muestras insuficientes: no acusar
+      if (a.length < 5) { setGpsDebilM(0); gpsDebilMedidoRef.current = null; return; }   // muestras insuficientes: no acusar
       const med = a[Math.floor(a.length / 2)];
       setGpsDebilM(med >= ACC_RED_M ? Math.round(med) : 0);
+      gpsDebilMedidoRef.current = Math.round(med);
     };
     const iv = setInterval(evaluar, 20_000);
     return () => clearInterval(iv);
@@ -1780,6 +2040,7 @@ export default function ConductorApp() {
   // exige 2 lecturas falsas seguidas antes de marcar inactivo (un re-armado del watchdog deja
   // _bgActivo en false por 1-2 s → sin esto parpadearía). Solo aplica en la app nativa.
   useEffect(() => {
+    bgMedidoRef.current = null;   // fuera de nativo, sin compartir o en la gracia: no se sabe
     if (!esAppNativa() || !compartiendo) { setBgServicioActivo(true); return; }
     setBgServicioActivo(true); // optimista mientras el servicio arranca
     const desde = Date.now();
@@ -1794,12 +2055,23 @@ export default function ConductorApp() {
       if (Date.now() - desde < 8000) return; // gracia: no juzgar antes de que arranque
       const sinFix = backgroundGpsSinFixMs();
       const vivo = backgroundGpsActivo() && !(sinFix !== null && sinFix > SIN_FIX_MAX_MS);
-      if (vivo) { fallosSeguidos = 0; setBgServicioActivo(true); }
-      else { fallosSeguidos += 1; if (fallosSeguidos >= 2) setBgServicioActivo(false); }
+      if (vivo) { fallosSeguidos = 0; setBgServicioActivo(true); bgMedidoRef.current = true; }
+      else { fallosSeguidos += 1; if (fallosSeguidos >= 2) { setBgServicioActivo(false); bgMedidoRef.current = false; } }
     }, 4000);
-    return () => clearInterval(iv);
+    return () => { clearInterval(iv); bgMedidoRef.current = null; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compartiendo]);
+
+  // El estado del teléfono, a la oficina (modal del rastreo en /seguimiento). No pinta nada aquí.
+  useReporteEquipoGps({
+    conductorId: conductor?.id ?? null,
+    token: conductor?._token ?? null,
+    compartiendo,
+    reservaId: reservaActiva?.id ?? null,
+    gpsAtascado,
+    bgMedidoRef,
+    gpsDebilMedidoRef,
+  });
 
   // Decide si mostrar la guía de ajustes — "detectar, no asumir":
   //  • Si el equipo YA está exento de batería → NUNCA molestar (limpia los flags).
@@ -1828,7 +2100,7 @@ export default function ConductorApp() {
       // ¿La app murió a mitad de un servicio? Cold start + servicio activo + latido viejo.
       const srv = loadServicio();
       const latido = Number(localStorage.getItem("afa_gps_latido") || 0);
-      if (srv && latido && Date.now() - latido > 240_000) {
+      if (srv && latido && Date.now() - latido > LATIDO_VIEJO_MS) {
         localStorage.setItem("afa_gps_corte_pendiente", "1");
       }
       localStorage.removeItem("afa_gps_latido"); // consumido: este cold start ya se evaluó
@@ -5447,11 +5719,11 @@ export default function ConductorApp() {
 
       {/* Guía de ajustes del equipo para que el fabricante no corte el rastreo */}
       {mostrarAjustesGps && (() => {
-        const fab = detectarFabricanteGps();
+        const fab = fabricanteDeUA(typeof navigator !== "undefined" ? navigator.userAgent : "");
         const guia = GUIA_AJUSTES_GPS[fab] ?? GUIA_AJUSTES_GPS.generico;
         // OEM agresivos: el 1-toque de batería NO basta (también piden inicio automático, etc.)
         // → los pasos van expandidos. En el resto, el 1-toque resuelve → pasos colapsados.
-        const agresivo = ["xiaomi", "oppo", "vivo", "realme", "huawei"].includes(fab);
+        const agresivo = FABRICANTES_AGRESIVOS.includes(fab);
         const mostrarPasos = verPasosGps || agresivo;
         const cerrar = () => {
           try { localStorage.setItem("afa_gps_ajustes_v1", "1"); localStorage.removeItem("afa_gps_corte_pendiente"); } catch {}

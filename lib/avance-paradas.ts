@@ -189,9 +189,9 @@ const GAP_ATRAS_CERCA_M = 350;
 // ── Umbrales adaptativos a la calidad real del GPS ───────────────────────────────────
 // Los umbrales de arriba están dimensionados para el PEOR GPS que el motor acepta (hasta
 // ACC_MAX_M = 150 m). Con ±4-10 m —lo que entrega un equipo con GNSS sano, y la mediana típica
-// de buena parte de la flota según ACC_RED_M en app/conductor— ese margen es puro seguro contra
+// de buena parte de la flota según ACC_RED_M (lib/gps-equipo.ts)— ese margen es puro seguro contra
 // un ruido que no existe, pagado en latencia.
-// ACC_BUENA_M = 15 m se ancla a ACC_RED_M (12 m, app/conductor/page.tsx:278), el corte MEDIDO
+// ACC_BUENA_M = 15 m se ancla a ACC_RED_M (12 m, lib/gps-equipo.ts), el corte MEDIDO
 // sobre la flota entre GNSS real (mediana 1.8-7.7 m) y ubicación de red (15.9-200 m), con un
 // pelo de holgura para no oscilar en el borde. Por debajo de esto las puertas de 25/60 m del gap
 // están MUY por encima del ruido y la señal es confiable con menos evidencia.

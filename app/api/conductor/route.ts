@@ -32,12 +32,28 @@ import {
 } from "@/lib/conductor-auth";
 import { CATEGORIAS_CAJA_CHICA, enviarARevision, hoyLima } from "@/lib/finanzas/caja-chica";
 import { redondear } from "@/lib/finanzas/dinero";
+import {
+  normalizarReporte, firmaEstado, relojCliente, recortarUA, accionDeReporte, FRENO_EQUIPO_MS,
+  MAX_ESCRITURAS_CONDUCTOR_MIN,
+} from "@/lib/gps-equipo";
+import { tablaFaltante } from "@/lib/columna-faltante";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
+
+// Freno del reporte del teléfono (`equipo_gps`), POR INSTANCIA: una escritura cada FRENO_EQUIPO_MS por
+// (tabla, conductor, aparato). La app ya espera 15 s entre envíos; esto frena un cliente que se
+// desboque (o un token robado) sin tocar la base. Clave → instante de la última escritura aceptada.
+const frenoEquipo = new Map<string, number>();
+const FRENO_EQUIPO_MAX_CLAVES = 5000;
+// Tope POR CONDUCTOR (MAX_ESCRITURAS_CONDUCTOR_MIN por minuto), sea cual sea el aparato: el freno de
+// arriba lo eludía un cliente que rotara `dispositivo`. Clave (tabla:conductor) → instantes de las
+// escrituras aceptadas en el último minuto. Es por instancia; entre instancias lo cubre el conteo en
+// la base antes de cada INSERT (ver `equipo_gps`).
+const escriturasEquipo = new Map<string, number[]>();
 
 // Normaliza el QR escaneado para tolerar el desajuste de layout de un escáner BT (teclado
 // HID): puede teclear el UUID en MAYÚSCULAS y con el guion mal mapeado (p. ej. "-" → "/")
@@ -909,6 +925,127 @@ export async function POST(req: NextRequest) {
           after(() => Promise.allSettled(reservaIds.map((rid) => evaluarProximidad(rid))));
         }
         return NextResponse.json({ ok: true, insertados: filas.length });
+      }
+
+      // ── Estado del TELÉFONO del conductor (lib/gps-equipo.ts, supabase/gps-equipo-01.sql) ──
+      // La app manda cómo está configurado el teléfono (batería, permisos, servicio de fondo, GPS),
+      // para que el modal de diagnóstico del rastreo de /seguimiento pueda decir si un corte es la
+      // configuración o el equipo. Una fila por PERIODO sin cambios: un reporte con la misma firma
+      // solo ESTIRA `visto_hasta` de la última fila de ese conductor en ese aparato.
+      //   · La identidad sale del TOKEN (`ses`), nunca del cuerpo.
+      //   · `reserva_id` solo si el servicio es SUYO; si no, null (no se descarta el reporte).
+      //   · El user-agent sale de la cabecera, recortado; la hora del teléfono, de `_cliente_ts`.
+      // Respuestas: 400 reporte inválido · 200 {ok:false, reintentar:true} frenado (NO «omitido»: la app
+      // perdería el cambio) · 200 {ok:false, sin_migracion:true, sql} sin la tabla (la app se pausa) ·
+      // 200 {ok:true, accion:"insertado"|"estirado"} · 500 cualquier otro error de base.
+      case "equipo_gps": {
+        const rep = normalizarReporte(body);
+        if (!rep) return NextResponse.json({ error: "Reporte del teléfono inválido" }, { status: 400 });
+        const ahora = Date.now();
+        const claveFreno = `${ses.tabla}:${ses.cid}:${rep.dispositivo}`;
+        const previo = frenoEquipo.get(claveFreno);
+        if (previo != null && ahora - previo < FRENO_EQUIPO_MS) {
+          return NextResponse.json({ ok: false, reintentar: true });
+        }
+        const claveConductor = `${ses.tabla}:${ses.cid}`;
+        const recientes = (escriturasEquipo.get(claveConductor) ?? []).filter((t) => ahora - t < 60_000);
+        if (recientes.length >= MAX_ESCRITURAS_CONDUCTOR_MIN) {
+          escriturasEquipo.set(claveConductor, recientes);
+          return NextResponse.json({ ok: false, reintentar: true });
+        }
+        escriturasEquipo.set(claveConductor, [...recientes, ahora]);
+        frenoEquipo.set(claveFreno, ahora);
+        if (frenoEquipo.size > FRENO_EQUIPO_MAX_CLAVES) {
+          for (const [k, t] of frenoEquipo) if (ahora - t >= FRENO_EQUIPO_MS) frenoEquipo.delete(k);
+        }
+        if (escriturasEquipo.size > FRENO_EQUIPO_MAX_CLAVES) {
+          for (const [k, ts] of escriturasEquipo) if (!ts.some((t) => ahora - t < 60_000)) escriturasEquipo.delete(k);
+        }
+        const sinMigracion = () => NextResponse.json({ ok: false, sin_migracion: true, sql: "supabase/gps-equipo-01.sql" });
+        // El detalle de Postgres va al log, no al teléfono: nombra tablas y restricciones.
+        const falloBase = (donde: string, e: { message?: string }) => {
+          console.error(`[equipo_gps] ${donde}:`, e?.message);
+          return NextResponse.json({ error: "No se pudo guardar el reporte del teléfono" }, { status: 500 });
+        };
+
+        const reservaId = rep.reserva_id != null && await reservaEsDelConductor(admin, ses, rep.reserva_id)
+          ? rep.reserva_id : null;
+        const reporte = { ...rep, reserva_id: reservaId };
+        const firma = firmaEstado(reporte);
+        const clienteTs = relojCliente(body._cliente_ts, ahora);
+        const clienteIso = clienteTs != null ? new Date(clienteTs).toISOString() : null;
+
+        // La última fila de ESTE conductor en ESTE aparato: ¿se estira o se abre otra?
+        const { data: ultima, error: eUlt } = await admin.from("gps_equipo_reportes")
+          .select("id, firma, visto_hasta")
+          .eq(condField, ses.cid).eq("dispositivo", rep.dispositivo)
+          .order("reportado_en", { ascending: false }).order("id", { ascending: false })
+          .limit(1).maybeSingle<{ id: number; firma: string; visto_hasta: string }>();
+        if (eUlt) {
+          if (tablaFaltante(eUlt, "gps_equipo_reportes")) return sinMigracion();
+          return falloBase("leer la última fila", eUlt);
+        }
+
+        if (ultima && accionDeReporte(ultima, { firma, motivo: rep.motivo }, ahora) === "estirar") {
+          // `visto_hasta` nunca retrocede (dos instancias pueden tener relojes apenas distintos), y así
+          // sigue cumpliendo el CHECK visto_hasta >= reportado_en.
+          const vistoPrevio = Date.parse(ultima.visto_hasta);
+          const visto = Number.isFinite(vistoPrevio) ? Math.max(ahora, vistoPrevio) : ahora;
+          const { error } = await admin.from("gps_equipo_reportes")
+            .update({
+              visto_hasta: new Date(visto).toISOString(),
+              visto_cliente_en: clienteIso,
+              pendientes_cola: reporte.pendientes_cola,
+              gps_debil_m: reporte.gps_debil_m,
+            })
+            .eq("id", ultima.id).eq(condField, ses.cid);
+          if (error) {
+            if (tablaFaltante(error, "gps_equipo_reportes")) return sinMigracion();
+            return falloBase("estirar", error);
+          }
+          return NextResponse.json({ ok: true, accion: "estirado" });
+        }
+
+        // Tope por conductor ENTRE INSTANCIAS: el Map de arriba es de esta instancia. Solo antes de
+        // INSERTAR, que es lo que hace crecer la tabla (estirar no). Si el conteo falla, se sigue: es
+        // un freno, no una condición para guardar.
+        const { count: nRecientes } = await admin.from("gps_equipo_reportes")
+          .select("id", { count: "exact", head: true })
+          .eq(condField, ses.cid)
+          .gt("reportado_en", new Date(ahora - 60_000).toISOString());
+        if ((nRecientes ?? 0) >= MAX_ESCRITURAS_CONDUCTOR_MIN) {
+          return NextResponse.json({ ok: false, reintentar: true });
+        }
+
+        // `reportado_en` y `visto_hasta` los pone la base (default now()): el mismo reloj para los dos.
+        const { error } = await admin.from("gps_equipo_reportes").insert({
+          conductor_id: ses.tabla === "conductores_tercero" ? null : ses.cid,
+          conductor_tercero_id: ses.tabla === "conductores_tercero" ? ses.cid : null,
+          reserva_id: reporte.reserva_id,
+          dispositivo: reporte.dispositivo,
+          motivo: reporte.motivo,
+          plataforma: reporte.plataforma,
+          user_agent: recortarUA(req.headers.get("user-agent")),
+          modelo: reporte.modelo,
+          plugins: reporte.plugins,
+          compartiendo: reporte.compartiendo,
+          bateria_exenta: reporte.bateria_exenta,
+          precision_ubicacion: reporte.precision_ubicacion,
+          todo_el_tiempo: reporte.todo_el_tiempo,
+          ajustes_alta_precision: reporte.ajustes_alta_precision,
+          servicio_fondo: reporte.servicio_fondo,
+          gps_debil_m: reporte.gps_debil_m,
+          gps_atascado: reporte.gps_atascado,
+          pendientes_cola: reporte.pendientes_cola,
+          firma,
+          reportado_cliente_en: clienteIso,
+          visto_cliente_en: clienteIso,
+        });
+        if (error) {
+          if (tablaFaltante(error, "gps_equipo_reportes")) return sinMigracion();
+          return falloBase("insertar", error);
+        }
+        return NextResponse.json({ ok: true, accion: "insertado" });
       }
 
       // ── Marcar parada completada ─────────────────────────────────────────────

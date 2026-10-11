@@ -15,11 +15,21 @@
 //      cerró a las 07:39 sin pasar por los últimos paraderos, llegada prevista 08:05. Salía 50 %
 //      («el servicio siguió 25 min más sin rastreo»); con el punto 'finalizado' sale 100 %. Y el
 //      lado que no se afloja: un corte real sigue saliendo aunque el conductor cierre después.
+//   9. LOS TRAMOS DEL MODAL DE DIAGNÓSTICO salen del MISMO bucle que el %: con y sin extensiones,
+//      cubierto + tramos + (cabeza y cola de ≤ 60 s) = la ventana; los tramos en movimiento son los
+//      `cortes`, sus metros son `kmACiegas` y el mayor es `peorHuecoMin`. Y NINGUNA cifra que ya
+//      existía cambió: se compara contra el `medirCobertura` anterior copiado literal. Las filas de
+//      diagnóstico (`acc.filas`) solo existen si se piden, y no cambian la traza.
+//  10. LA EXTRACCIÓN DEL VEREDICTO: el `medir` interno de rastreoDelDia (lib/gps-cobertura-datos.ts),
+//      copiado literal, contra `contextoServicio` + `veredictoDeServicio` sobre reservas, paradas y
+//      trazas al azar: veredicto idéntico. Es lo que garantiza que el modal y la celda digan lo mismo.
 import {
   medirCobertura, finYDestino, acumularFilasGps, trazaVacia, veredictoRastreo, resumenRastreo,
   trazaInmovil, bandaCobertura, metros as metrosMod, limaMs as limaMsMod,
-  type PuntoCobertura, type TrazaSaneada,
+  contextoServicio, veredictoDeServicio,
+  type PuntoCobertura, type TrazaSaneada, type FinVentana, type VeredictoRastreo,
 } from "../lib/gps-cobertura";
+import { derivarTiempos } from "../lib/servicio-tiempos";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -340,6 +350,246 @@ console.log("\n8. Reserva #29811: el conductor cerró antes de la llegada previs
   ], true);
   chk("el saneo toma el ÚLTIMO 'finalizado', aunque sea impreciso, y no lo mete como posición",
     acc.cierreTs === Date.parse("2026-10-10T12:39:00Z") && acc.pts.length === 2 && acc.porAntena === 1, `cierre=${acc.cierreTs}`);
+}
+
+// ══ 9. Los tramos del diagnóstico ═══════════════════════════════════════════════════
+console.log("\n9. Tramos sin rastreo: del mismo bucle que el %, y ninguna cifra existente cambia");
+// El medirCobertura ANTERIOR a los tramos, copiado literal (con sus extensiones de /seguimiento).
+function medirCoberturaAntes(e: {
+  pts: PuntoCobertura[];
+  destino?: { lat: number; lng: number } | null;
+  finPrevistoTs?: number | null;
+  inicioTs?: number | null;
+  finTs?: number | null;
+  hastaTs?: number | null;
+  cierreTs?: number | null;
+}) {
+  const t = e.pts;
+  if (!t || t.length < 2) return null;
+  const ini0 = t[0].ts;
+  const ini = e.inicioTs != null && Number.isFinite(e.inicioTs) && e.inicioTs < ini0 ? e.inicioTs : ini0;
+  const ultimo = t[t.length - 1];
+  const dest = e.destino;
+  const llego = dest ? metros(ultimo.lat, ultimo.lng, dest.lat, dest.lng) <= AVANCE_CAIDO_M : false;
+  const cierre = e.cierreTs != null && Number.isFinite(e.cierreTs) && e.cierreTs >= ultimo.ts - HUECO_MIN_S * 1000
+    ? e.cierreTs : null;
+  const marcas = e.finTs != null && Number.isFinite(e.finTs) ? e.finTs : null;
+  let fin: number, finPor: FinVentana;
+  if (e.hastaTs != null && Number.isFinite(e.hastaTs)) { fin = Math.max(ultimo.ts, e.hastaTs); finPor = "en_curso"; }
+  else if (llego) { fin = ultimo.ts; finPor = "llegada"; }
+  else if (cierre !== null) {
+    fin = Math.max(ultimo.ts, cierre, marcas ?? 0);
+    finPor = marcas !== null && marcas > Math.max(ultimo.ts, cierre) ? "marcas" : "cierre";
+  } else {
+    fin = Math.max(ultimo.ts, e.finPrevistoTs ?? 0, marcas ?? 0);
+    finPor = fin === ultimo.ts ? "traza" : fin === marcas ? "marcas" : "previsto";
+  }
+  const ventanaS = Math.max(1, (fin - ini) / 1000);
+
+  let cubiertoS = 0, cortes = 0, peorS = 0, metrosCiegos = 0;
+  for (let i = 1; i < t.length; i++) {
+    const gapS = (t[i].ts - t[i - 1].ts) / 1000;
+    if (gapS <= HUECO_MIN_S) { cubiertoS += gapS; continue; }
+    if (gapS > peorS) peorS = gapS;
+    const avance = metros(t[i - 1].lat, t[i - 1].lng, t[i].lat, t[i].lng);
+    if (avance >= AVANCE_CAIDO_M && avance <= AVANCE_MAX_M) { cortes++; metrosCiegos += avance; }
+  }
+  const colaS = (fin - ultimo.ts) / 1000;
+  if (colaS > HUECO_MIN_S && peorS < colaS) peorS = colaS;
+  const cabezaS = (ini0 - ini) / 1000;
+  if (cabezaS > HUECO_MIN_S && peorS < cabezaS) peorS = cabezaS;
+
+  return {
+    ventanaIniTs: ini, ventanaFinTs: fin, finPor,
+    durMin: Math.round(ventanaS / 60),
+    cobertura: Math.max(0, Math.min(100, Math.round((cubiertoS / ventanaS) * 100))),
+    cortes,
+    peorHuecoMin: Math.round(peorS / 60),
+    kmACiegas: Math.round(metrosCiegos / 100) / 10,
+    primeraTs: ini0, ultimaTs: ultimo.ts,
+  };
+}
+{
+  let suma = true, movimiento = true, km = true, peor = true, orden = true, sinCambio = true, conTramos = 0, conCabeza = 0, conCola = 0;
+  const CLAVES = ["ventanaIniTs", "ventanaFinTs", "finPor", "durMin", "cobertura", "cortes", "peorHuecoMin", "kmACiegas", "primeraTs", "ultimaTs"] as const;
+  for (let k = 0; k < 3000; k++) {
+    const t = trazaAzar();
+    const ult = t[t.length - 1].ts;
+    const conExt = k % 2 === 1;
+    const args = {
+      pts: t,
+      destino: rnd() < 0.5 ? { lat: LAT0 + 30_000 / M, lng: LNG0 } : null,
+      finPrevistoTs: rnd() < 0.6 ? ult + Math.floor((rnd() - 0.2) * 3_600_000) : null,
+      ...(conExt ? {
+        inicioTs: rnd() < 0.6 ? t[0].ts - Math.floor(rnd() * 1_800_000) : null,
+        finTs: rnd() < 0.4 ? ult + Math.floor((rnd() - 0.5) * 3_600_000) : null,
+        hastaTs: rnd() < 0.25 ? ult + Math.floor(rnd() * 1_800_000) : null,
+        cierreTs: rnd() < 0.3 ? ult + Math.floor((rnd() - 0.1) * 3_600_000) : null,
+      } : {}),
+    };
+    const m = medirCobertura(args)!;
+    const a = medirCoberturaAntes(args)!;
+    for (const c of CLAVES) if ((m as any)[c] !== (a as any)[c]) sinCambio = false;
+    const ventanaS = (m.ventanaFinTs - m.ventanaIniTs) / 1000;
+    const cabezaS = (m.primeraTs - m.ventanaIniTs) / 1000, colaS = (m.ventanaFinTs - m.ultimaTs) / 1000;
+    const chicos = (cabezaS <= HUECO_MIN_S ? cabezaS : 0) + (colaS <= HUECO_MIN_S ? colaS : 0);
+    const sumaTramos = m.tramos.reduce((x, tr) => x + tr.durS, 0);
+    if (Math.abs(m.cubiertoS + sumaTramos + chicos - ventanaS) > 1e-6) suma = false;
+    const enMov = m.tramos.filter((tr) => tr.enMovimiento);
+    if (enMov.length !== m.cortes) movimiento = false;
+    if (Math.round(enMov.reduce((x, tr) => x + (tr.avanceM ?? 0), 0) / 100) / 10 !== m.kmACiegas) km = false;
+    const mayor = m.tramos.reduce((x, tr) => Math.max(x, tr.durS), 0);
+    if (Math.round(mayor / 60) !== m.peorHuecoMin) peor = false;
+    // cabeza primero, cola al final, huecos en orden; cabeza y cola solo si superan HUECO_MIN_S
+    const tipos = m.tramos.map((tr) => tr.tipo);
+    if (tipos.indexOf("cabeza") > 0 || (tipos.includes("cola") && tipos.lastIndexOf("cola") !== tipos.length - 1)) orden = false;
+    if (m.tramos.some((tr) => tr.durS <= HUECO_MIN_S || tr.hastaTs < tr.desdeTs)) orden = false;
+    if (m.tramos.some((tr) => tr.tipo !== "hueco" && (tr.enMovimiento || tr.avanceM !== null))) orden = false;
+    if (m.tramos.length) conTramos++;
+    if (tipos.includes("cabeza")) conCabeza++;
+    if (tipos.includes("cola")) conCola++;
+  }
+  chk("barrido: cubierto + Σ tramos + cabeza/cola ≤ 60 s = la ventana", suma);
+  chk("barrido: tramos en movimiento = cortes", movimiento);
+  chk("barrido: Σ metros de los tramos en movimiento = kmACiegas", km);
+  chk("barrido: el tramo más largo = peorHuecoMin", peor);
+  chk("barrido: cabeza primero, cola al final, todos > 60 s, solo el hueco mide avance", orden);
+  chk("barrido: ninguna cifra existente cambió (vs medirCobertura anterior, con y sin extensiones)", sinCambio);
+  chk("corolario: hay tramos, cabezas y colas en el barrido (no es un motor que nunca los reporta)",
+    conTramos > 500 && conCabeza > 50 && conCola > 100, `${conTramos} con tramos · ${conCabeza} cabezas · ${conCola} colas`);
+
+  // El caso #6166: un solo tramo, la cola hasta la llegada marcada.
+  const m6166 = medirCobertura({ pts: traza6166, destino: destino6166, finPrevistoTs: fin6166, finTs: fin6166 })!;
+  chk("#6166: un solo tramo, la cola de 04:11 a 05:03, por marcas", m6166.tramos.length === 1 && m6166.tramos[0].tipo === "cola"
+    && m6166.tramos[0].hastaTs === fin6166 && m6166.finPor === "marcas", JSON.stringify(m6166.tramos.map((t) => [t.tipo, Math.round(t.durS)])));
+
+  // Las filas de diagnóstico: solo si se piden, con la misma clasificación, y sin tocar la traza.
+  const filasCrudas = [
+    { created_at: "2026-10-09T09:08:00Z", lat: LAT0, lng: LNG0, precision_m: 10, recibido_en: "2026-10-09T09:08:02Z", fix_ts: "2026-10-09T09:07:59Z", conductor_id: 7, conductor_tercero_id: null },
+    { created_at: "2026-10-09T09:08:05Z", lat: LAT0, lng: LNG0, precision_m: 400, recibido_en: null, fix_ts: null, conductor_id: "7" },
+    { created_at: "2026-10-09T09:08:10Z", lat: null, lng: LNG0, precision_m: 10 },
+    { created_at: "nada", lat: LAT0, lng: LNG0 },
+    { created_at: "2026-10-09T09:08:15Z", lat: LAT0, lng: LNG0, simulado: true, conductor_tercero_id: 3 },
+  ];
+  const sinFilas = trazaVacia();
+  acumularFilasGps(sinFilas, filasCrudas, true);
+  const conFilas = { ...trazaVacia(), filas: [] as any[] };
+  acumularFilasGps(conFilas, filasCrudas, true);
+  chk("trazaVacia() no trae filas, y sin pedirlas no aparecen", !("filas" in trazaVacia()) && sinFilas.filas === undefined);
+  chk("con filas pedidas, la traza es idéntica", JSON.stringify({ ...conFilas, filas: undefined }) === JSON.stringify({ ...sinFilas, filas: undefined }));
+  const f = conFilas.filas!;
+  chk("filas: las 3 con coordenadas y fecha válidas, útil/antena con la misma regla", f.length === 3
+    && f[0].util && !f[0].antena && !f[1].util && f[1].antena && f[2].util, JSON.stringify(f.map((x: any) => [x.util, x.antena])));
+  chk("filas: recibido, fix y conductor leídos; ausentes → null (nunca 0)", f[0].recibidoTs === Date.parse("2026-10-09T09:08:02Z")
+    && f[0].fixTs === Date.parse("2026-10-09T09:07:59Z") && f[0].conductorId === 7 && f[0].conductorTerceroId === null
+    && f[1].recibidoTs === null && f[1].fixTs === null && f[1].conductorId === 7 && f[1].precisionM === 400
+    && f[2].conductorTerceroId === 3 && f[2].precisionM === null);
+}
+
+// ══ 10. La extracción del veredicto por servicio ════════════════════════════════════
+console.log("\n10. contextoServicio + veredictoDeServicio = el `medir` de rastreoDelDia");
+{
+  // `medir` de lib/gps-cobertura-datos.ts (rastreoDelDia), copiado literal. Lo único que cambia es
+  // el entorno de su clausura: `trazaDe` lee de un mapa (lanza para simular un fallo de lectura).
+  const harness = async (r: any, fecha: string, hoy: string, ahoraMs: number, paradasDe: Map<number, any[]>, trazas: Map<number, TrazaSaneada | null>) => {
+    const out: Record<number, VeredictoRastreo> = {};
+    const trazaDe = async (id: number) => { const t = trazas.get(id); if (!t) throw new Error("no se pudo leer"); return t; };
+    const medir = async (r: any) => {
+      const ps = paradasDe.get(r.id) ?? [];
+      const completadas = ps.filter((p) => p.estado === "completada").length;
+      const terminado = r.estado === "finalizada" || (ps.length > 0 && completadas === ps.length);
+      // Un servicio "en curso" de OTRO día que nadie cerró no está en ruta: medirlo hasta ahora lo
+      // hundiría por horas que no son de servicio. Se juzga como terminado, con su evidencia.
+      const enCurso = fecha === hoy && r.estado === "en_curso" && !terminado;
+      const aplica = terminado || r.estado === "en_curso" || completadas > 0;
+      const t = derivarTiempos({ reserva: r, paradas: ps, ahoraMs, hoy });
+      const inicioTs = t.inicio && !t.inicio.estimado ? t.inicio.ts : null;
+      const finTs = t.finParadero && !t.finParadero.estimado ? t.finParadero.ts : null;
+      if (!aplica) {
+        out[r.id] = veredictoRastreo({ aplica: false, enCurso, traza: trazaVacia(), medicion: null, avanzo: false, inmovil: false, inicioTs, ahoraMs });
+        return;
+      }
+      let traza: TrazaSaneada | null = null;
+      try { traza = await trazaDe(r.id); } catch { traza = null; }
+      const { finPrevistoTs, destino } = finYDestino(ps, r.fecha_servicio, r.hora_servicio);
+      const medicion = traza
+        ? medirCobertura({ pts: traza.pts, destino, finPrevistoTs, inicioTs, finTs, hastaTs: enCurso ? ahoraMs : null, cierreTs: traza.cierreTs })
+        : null;
+      out[r.id] = veredictoRastreo({
+        aplica: true, enCurso, traza, medicion,
+        avanzo: terminado || completadas >= 2,
+        inmovil: traza ? trazaInmovil(traza.pts, ps) : false,
+        inicioTs, ahoraMs,
+      });
+    };
+    await medir(r);
+    return out[r.id];
+  };
+
+  const HOY = "2026-10-09", AYER = "2026-10-08";
+  const ESTADOS = ["finalizada", "en_curso", "programada", "confirmada", "pendiente", "cancelada"];
+  const hhmm = (min: number) => `${String(Math.floor(min / 60) % 24).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+  const iso = (fecha: string, min: number) => new Date(Date.parse(`${fecha}T00:00:00-05:00`) + min * 60_000).toISOString();
+  let iguales = 0, total = 0, codigos = new Set<string>(), noLeidas = 0;
+  for (let k = 0; k < 2500; k++) {
+    const fecha = rnd() < 0.7 ? HOY : AYER;
+    const horaMin = Math.floor(rnd() * 1440);
+    const r: any = {
+      id: k + 1,
+      estado: ESTADOS[Math.floor(rnd() * ESTADOS.length)],
+      fecha_servicio: fecha,
+      hora_servicio: rnd() < 0.95 ? hhmm(horaMin) + (rnd() < 0.5 ? ":00" : "") : null,
+      hora_real_inicio: rnd() < 0.3 ? hhmm(horaMin + Math.floor(rnd() * 20)) + ":00" : null,
+      hora_real_fin: rnd() < 0.2 ? hhmm(horaMin + 60 + Math.floor(rnd() * 60)) + ":00" : null,
+      inicio_real_ts: rnd() < 0.15 ? iso(fecha, horaMin + Math.floor(rnd() * 15)) : null,
+      inicio_real_fuente: rnd() < 0.5 ? "parada" : "operador",
+    };
+    const n = Math.floor(rnd() * 7);
+    const ps = Array.from({ length: n }, (_, i) => {
+      const est = horaMin + i * 12;
+      const completada = rnd() < 0.6;
+      return {
+        id: (k + 1) * 10 + i, reserva_id: k + 1, orden: i + 1,
+        estado: completada ? "completada" : "pendiente",
+        hora_estimada: rnd() < 0.85 ? hhmm(est) : null,
+        hora_llegada: completada && rnd() < 0.8 ? iso(fecha, est + Math.floor((rnd() - 0.3) * 20)) : null,
+        lat: rnd() < 0.85 ? LAT0 + i * 0.02 : null, lng: rnd() < 0.85 ? LNG0 + i * 0.01 : null,
+      };
+    });
+    // Traza alrededor de la hora del servicio; a veces no se pudo leer, a veces vacía, a veces con cierre.
+    const base = Date.parse(`${fecha}T00:00:00-05:00`) + horaMin * 60_000;
+    let traza: TrazaSaneada | null = null;
+    const u = rnd();
+    if (u < 0.1) { traza = null; noLeidas++; }
+    else if (u < 0.2) traza = trazaVacia();
+    else {
+      const desplazo = base - T0 + Math.floor((rnd() - 0.3) * 1_200_000);
+      const pts = trazaAzar().map((p) => ({ ...p, ts: p.ts + desplazo }));
+      traza = { pts, totalCrudo: pts.length + (rnd() < 0.2 ? 5 : 0), porAntena: 0, simulados: 0,
+        cierreTs: rnd() < 0.3 ? pts[pts.length - 1].ts + Math.floor((rnd() - 0.1) * 1_800_000) : null };
+      if (rnd() < 0.05) traza = { ...traza, pts: traza.pts.slice(0, 1) };   // < 2 puntos útiles
+    }
+    const ahoraMs = base + Math.floor((rnd() - 0.2) * 6 * 3_600_000);
+    const trazas = new Map<number, TrazaSaneada | null>([[r.id, traza]]);
+    const viejo = await harness(r, fecha, HOY, ahoraMs, new Map([[r.id, ps]]), trazas);
+    const ctx = contextoServicio(r, ps, { hoy: HOY, ahoraMs });
+    const nuevo = veredictoDeServicio(ctx, traza, ps, ahoraMs).veredicto;
+    total++;
+    if (JSON.stringify(viejo) === JSON.stringify(nuevo)) iguales++;
+    codigos.add(nuevo.codigo);
+  }
+  chk(`${iguales}/${total} veredictos idénticos`, iguales === total);
+  chk("corolario: el barrido cubre los veredictos de la torre (no solo uno)", codigos.size >= 7, [...codigos].sort().join(", "));
+  chk("…incluidas trazas que no se pudieron leer", noLeidas > 50, `${noLeidas}`);
+
+  // La medición que devuelve es la que juzgó el veredicto (el modal enseña ESA).
+  const ps = [{ id: 1, estado: "completada", hora_estimada: "04:10", lat: LAT0, lng: LNG0 }, { id: 2, estado: "completada", hora_estimada: "05:03", lat: destino6166.lat, lng: destino6166.lng, hora_llegada: new Date(fin6166).toISOString() }];
+  const ctx = contextoServicio({ id: 6166, estado: "finalizada", fecha_servicio: "2026-10-09", hora_servicio: "04:08" }, ps, { hoy: "2026-10-09", ahoraMs: fin6166 + 3_600_000 });
+  const { veredicto, medicion } = veredictoDeServicio(ctx, { ...trazaVacia(), pts: traza6166, totalCrudo: 37 }, ps, fin6166 + 3_600_000);
+  chk("#6166 por la ruta nueva: Incompleto, y la medición es la que juzgó (cobertura = pct)", veredicto.codigo === "incompleto" && medicion?.cobertura === veredicto.pct,
+    `${veredicto.codigo} · ${veredicto.celda}`);
+  const noSale = veredictoDeServicio(contextoServicio({ id: 1, estado: "programada", fecha_servicio: "2026-10-09", hora_servicio: "23:00" }, [], { hoy: "2026-10-09", ahoraMs: T0 }), null, [], T0);
+  chk("un servicio que no salió es no_aplica aunque la traza no se pudiera leer (no se lee)", noSale.veredicto.codigo === "no_aplica" && noSale.medicion === null);
 }
 
 console.log(fallos ? `\n✗ ${fallos} prueba(s) fallaron` : "\n✓ todo en verde");
