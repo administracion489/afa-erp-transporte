@@ -628,6 +628,7 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
         respuesta:
           "No hace falta Twilio. Una llamada telefónica normal —la que suena aunque el teléfono no tenga datos— siempre sale por la línea de un operador, eso no lo evita nadie; lo que se evita es pagarle a un intermediario por cada minuto. La hace una **central propia**: un equipo de la oficina con un chip de **llamadas ilimitadas**, y el costo es el plan del chip.\n\n" +
           "El ERP ya está listo: si el servicio sigue sin iniciar **3 minutos después de la hora**, pone la llamada en cola; la central la toma, llama y devuelve lo que pasó. Antes de marcar se vuelve a mirar el servicio (si ya inició, no se llama), si no contesta se intenta una vez más a los 2 minutos, y si el conductor marca **2** les llega un WhatsApp a los contactos marcados en la tarjeta.\n\n" +
+          "La central puede ser de dos tipos, y el ERP es el mismo para las dos. Un **celular Android** con el chip es lo más simple y lo recomendado para empezar: **solo hace sonar** el teléfono del conductor, que guarda ese número en sus contactos como «AFA – PULSA INICIAR». Un **gateway con Asterisk** cuesta bastante más, pero **habla**: dice el mensaje y lee «marca 1 / marca 2».\n\n" +
           "La tarjeta **«Llamada: aún no inicia»** nace **apagada** y dice si la central está conectada: enciéndela recién cuando lo esté, porque sin central las llamadas se quedan en cola y vencen sin salir. Qué comprar y cómo se instala está en la guía de la central de llamadas.",
       },
       {
