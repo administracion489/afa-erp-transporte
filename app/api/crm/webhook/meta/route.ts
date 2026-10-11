@@ -7,6 +7,7 @@ import { esNumeroDeAvisos } from "@/lib/whatsapp-numeros";
 import { procesarEchos, procesarHistorial, procesarContactos } from "@/lib/crm-coexistencia";
 import { resolverContacto, resolverConversacion } from "@/lib/crm-ingesta";
 import { faltaColumna } from "@/lib/columna-faltante";
+import { registrarEstadosEntrega, type EstadoMeta } from "@/lib/entrega-whatsapp";
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -68,6 +69,8 @@ export async function POST(req: NextRequest) {
   const conversacionesNuevas = new Set<string>(); // hilos con mensaje entrante → atender con IA
   // Webhooks de coexistencia apartados para procesarlos después de responder 200.
   const coexistencia: { campo: string; value: any }[] = [];
+  // Estados de entrega de los avisos (lib/entrega-whatsapp.ts), también después del 200.
+  const estadosEntrega: EstadoMeta[] = [];
 
   for (const e of entry) {
     // ── WhatsApp ──────────────────────────────────────────────────────────
@@ -95,6 +98,13 @@ export async function POST(req: NextRequest) {
         // bot de ventas: se registra el mensaje y el opt-in/baja, pero sin IA.
         const phoneId  = val.metadata?.phone_number_id;
         const esAvisos = await esNumeroDeAvisos(phoneId);
+
+        // Estados de entrega (entregado / leído / falló) de lo que SALIÓ del número de
+        // avisos: es lo que contesta «¿le llegó el aviso al conductor?». Los del número del
+        // CRM no se registran en ningún sitio, así que no se escriben (no hay fila que casar).
+        if (esAvisos && Array.isArray(val.statuses) && val.statuses.length) {
+          estadosEntrega.push(...val.statuses);
+        }
 
         for (const msg of val.messages ?? []) {
           const convId = await processarMensaje({
@@ -157,9 +167,13 @@ export async function POST(req: NextRequest) {
   // decisión tiene que estar tomada antes de que el agente se plantee responder,
   // o el cliente recibe dos respuestas al mismo mensaje. Con dos after() por
   // separado el orden no está garantizado.
-  if (coexistencia.length > 0 || conversacionesNuevas.size > 0) {
+  if (coexistencia.length > 0 || conversacionesNuevas.size > 0 || estadosEntrega.length > 0) {
     after(async () => {
       const sb = db();
+      if (estadosEntrega.length > 0) {
+        // Nunca lanza: un estado que no se pudo escribir no tumba el resto del lote.
+        await registrarEstadosEntrega(sb, estadosEntrega);
+      }
       for (const { campo, value } of coexistencia) {
         try {
           if (campo === "smb_message_echoes") await procesarEchos(sb, value);

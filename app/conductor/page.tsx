@@ -11,7 +11,10 @@ import {
   type ReporteEquipo, type MotivoReporte, type PlataformaEquipo, type PluginEquipo,
 } from "@/lib/gps-equipo";
 import { attachHidScanner } from "@/lib/hid-scanner";
-import { detectarSoportePush, permisoBloqueado, activarPushWeb, activarPushNativo, resincronizarSuscripcion } from "@/lib/push-cliente";
+import { detectarSoportePush, permisoBloqueado, permisoPushNativo, activarPushWeb, activarPushNativo, resincronizarSuscripcion, type SoportePush } from "@/lib/push-cliente";
+import HojaNotificaciones, {
+  FranjaNotificacionesApagadas, hojaPospuesta, posponerHoja, pushPendiente, type EstadoPushConductor,
+} from "@/components/conductor/HojaNotificaciones";
 import {
   CondorMark,
   IconActivity, IconAlert, IconArrowLeft, IconArrowRight, IconBell, IconBus,
@@ -1315,19 +1318,50 @@ export default function ConductorApp() {
       condApi(accion, { ...params, token: conductor?._token }),
     [conductor?._token],
   );
-  const [pushEstado, setPushEstado] = useState<"desconocido" | "activo" | "inactivo" | "bloqueado">("desconocido");
+  const [pushEstado, setPushEstado] = useState<EstadoPushConductor>("desconocido");
+  const [soportePush, setSoportePush] = useState<SoportePush | null>(null);
+  // Hoja «Activa las notificaciones» al entrar, como Uber (components/conductor/HojaNotificaciones).
+  const [hojaPush, setHojaPush] = useState(false);
+  const [activandoPush, setActivandoPush] = useState(false);
+  const [errorPush, setErrorPush] = useState(false);
+
+  // Lee el estado REAL del aparato y, si el permiso ya está dado, suscribe sin preguntar nada.
+  const leerEstadoPush = useCallback(async (): Promise<EstadoPushConductor> => {
+    const soporte = detectarSoportePush();
+    setSoportePush(soporte);
+    if (soporte === "fcm") {
+      // En el app nativo NO existe `Notification` dentro del WebView: el permiso lo sabe el
+      // plugin. Antes este camino devolvía siempre «inactivo» y el token no se re-sincronizaba.
+      const perm = await permisoPushNativo();
+      if (perm === "denied") return "bloqueado";
+      if (perm === "granted") {
+        // El permiso ya está (lo concede también el de los avisos de llegada): se suscribe
+        // solo. Los avisos de inicio son operativos — no hay botón de «desactivar».
+        if (await resincronizarSuscripcion(pushApi)) return "activo";
+        return (await activarPushNativo(pushApi)) === "activo" ? "activo" : "inactivo";
+      }
+      return "inactivo";
+    }
+    if (soporte === "webpush") {
+      if (permisoBloqueado()) return "bloqueado";
+      if (Notification.permission === "granted") {
+        // Ya autorizó antes: re-sincroniza por si el token/endpoint rotó.
+        return (await resincronizarSuscripcion(pushApi)) ? "activo" : "inactivo";
+      }
+    }
+    return "inactivo";
+  }, [pushApi]);
 
   useEffect(() => {
     if (!conductor?._token) return;
-    if (typeof Notification === "undefined") { setPushEstado("inactivo"); return; }
-    if (permisoBloqueado()) { setPushEstado("bloqueado"); return; }
-    if (Notification.permission === "granted") {
-      // Ya autorizó antes: re-sincroniza por si el token/endpoint rotó.
-      resincronizarSuscripcion(pushApi).then((ok) => setPushEstado(ok ? "activo" : "inactivo")).catch(() => {});
-    } else {
-      setPushEstado("inactivo");
-    }
-  }, [conductor?._token, pushApi]);
+    let vivo = true;
+    leerEstadoPush().then((estado) => {
+      if (!vivo) return;
+      setPushEstado(estado);
+      if (estado !== "activo" && !hojaPospuesta()) setHojaPush(true);
+    }).catch(() => {});
+    return () => { vivo = false; };
+  }, [conductor?._token, leerEstadoPush]);
 
   async function activarNotificaciones() {
     const soporte = detectarSoportePush();
@@ -1335,9 +1369,48 @@ export default function ConductorApp() {
       setPushEstado("inactivo");
       return;
     }
-    const r = soporte === "fcm" ? await activarPushNativo(pushApi) : await activarPushWeb(pushApi);
-    setPushEstado(r === "activo" ? "activo" : r === "denegado" ? "bloqueado" : "inactivo");
+    setActivandoPush(true);
+    setErrorPush(false);
+    try {
+      const r = soporte === "fcm" ? await activarPushNativo(pushApi) : await activarPushWeb(pushApi);
+      const estado = r === "activo" ? "activo" : r === "denegado" ? "bloqueado" : "inactivo";
+      setPushEstado(estado);
+      setErrorPush(r === "error");
+      if (estado === "activo") setHojaPush(false);
+    } finally {
+      setActivandoPush(false);
+    }
   }
+
+  // Con el app ABIERTA, Android no pinta la notificación remota (FCM se la entrega al app y
+  // calla). Un «Tu servicio empieza en 5 min» que llega justo mientras el conductor mira el
+  // app es el que más importa ver: se repinta como notificación local, con sonido.
+  useEffect(() => {
+    if (!esAppNativa() || pushEstado !== "activo") return;
+    let quitar: (() => void) | undefined;
+    let vivo = true;
+    (async () => {
+      try {
+        const { PushNotifications } = await import("@capacitor/push-notifications");
+        const h1 = await PushNotifications.addListener("pushNotificationReceived", async (n: { title?: string; body?: string }) => {
+          try {
+            const { LocalNotifications } = await import("@capacitor/local-notifications");
+            await LocalNotifications.schedule({ notifications: [{
+              id: Math.floor(Date.now() % 2_000_000_000),
+              title: n?.title || "AFA Conductores",
+              body: n?.body || "",
+              channelId: "afa_conductor",
+            }] });
+          } catch { /* sin plugin de avisos locales: queda la vibración */ }
+          try { navigator.vibrate?.([300, 100, 300]); } catch { /* noop */ }
+        });
+        const h2 = await PushNotifications.addListener("pushNotificationActionPerformed", () => setTab("ruta"));
+        const q = () => { try { h1.remove(); h2.remove(); } catch { /* noop */ } };
+        if (vivo) quitar = q; else q();
+      } catch { /* APK sin el plugin */ }
+    })();
+    return () => { vivo = false; quitar?.(); };
+  }, [pushEstado]);
 
   function cleanup() {
     if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
@@ -3663,6 +3736,11 @@ export default function ConductorApp() {
         {/* ═══ HOY ═══ */}
         {tab === "ruta" && (
           <section style={{ padding: "16px 18px 0" }}>
+            {/* Sin notificaciones del app no le llegan los avisos de inicio (5 min antes, ya
+                debió iniciar): la hoja se puede posponer, este recordatorio no. */}
+            {!hojaPush && pushPendiente(pushEstado, soportePush) && (
+              <FranjaNotificacionesApagadas onAbrir={() => setHojaPush(true)} />
+            )}
             {/* Fila vehículo asignado + estado de pre-viaje (estilo 2b). Solo fuera de ruta:
                 en ruta el vehículo ya se ve en el chip del header superior. */}
             {!enRuta && (
@@ -6824,6 +6902,20 @@ export default function ConductorApp() {
           Leyendo…
         </div>
       )}
+
+      {/* ── NOTIFICACIONES DEL APP: se piden al entrar, como Uber ── */}
+      <HojaNotificaciones
+        abierta={hojaPush && !escanear}
+        estado={pushEstado}
+        soporte={soportePush}
+        activando={activandoPush}
+        error={errorPush}
+        onActivar={() => { void activarNotificaciones(); }}
+        onCerrar={() => { posponerHoja(); setHojaPush(false); }}
+        onReintentar={() => {
+          void leerEstadoPush().then((e) => { setPushEstado(e); if (e === "activo") setHojaPush(false); });
+        }}
+      />
 
       {/* ── CHAT CON PASAJEROS: botón flotante (solo en servicio activo) ── */}
       {conductor && reservaActiva && enRuta && !chatOpen && !escanear && (

@@ -7,6 +7,7 @@ import { enviarPushAPasajeros, enviarPushAConductores, payloadConductor, payload
 import { telefonoContingencia, cargarCanalesPasajero, type CanalesConductor, type CanalesPasajero } from "@/lib/alertas";
 import { emailDesdePlantilla } from "@/lib/plantilla-texto";
 import { phonePara } from "@/lib/whatsapp-numeros";
+import { faltaAlguna } from "@/lib/columna-faltante";
 
 // Admin client para escribir logs sin RLS
 const supabaseAdmin = createClient(
@@ -272,6 +273,14 @@ export async function enviarAConductor(args: {
   pushTexto?: string;
   reservaId?: number;
   trigger: TipoTrigger;
+  /** Clave del aviso del motor (`alerta_config.clave`): queda en el registro. */
+  alertaClave?: string;
+  /**
+   * Cómo sale la notificación del app. Los avisos de inicio la piden URGENTE (alta prioridad
+   * de FCM: suena, sale sobre la pantalla y en la pantalla bloqueada, como Uber) y con vida
+   * corta: un «inicia ahora» que llega una hora tarde no sirve. Sin esto, la de siempre.
+   */
+  push?: { titulo?: string; urgencia?: "high" | "normal"; ttl?: number; requireInteraction?: boolean };
 }): Promise<{ estado: ResultadoCanal; detalle?: string }> {
   const { conductor, plantilla, parametros, canales, botones, enlaces, titulo, trigger } = args;
   const tabla = args.tabla ?? "conductores";
@@ -280,8 +289,8 @@ export async function enviarAConductor(args: {
   // ha verificado que reserva_id admita NULL. Mismo comportamiento que hoy (el envío
   // suelto por WhatsApp tampoco loguea).
   const puedeLoguear = typeof args.reservaId === "number" && args.reservaId > 0;
-  const logBase = { reservaId: args.reservaId ?? 0, conductorId: conductor.id, trigger };
-  const log = async (extra: { tipo: TipoCanal; estado: string; destinatario?: string; error?: string }) => {
+  const logBase = { reservaId: args.reservaId ?? 0, conductorId: conductor.id, trigger, alertaClave: args.alertaClave ?? null };
+  const log = async (extra: { tipo: TipoCanal; estado: string; destinatario?: string; error?: string; wamid?: string | null }) => {
     if (!puedeLoguear) return;
     await logNotificacion({ ...logBase, ...extra });
   };
@@ -295,9 +304,9 @@ export async function enviarAConductor(args: {
       intentado++;
       const tel = normalizarTelefono(conductor.telefono);
       try {
-        await enviarWhatsAppPlantilla(tel, plantilla, PLANTILLA_IDIOMA, parametros, phoneWa, botones);
+        const wamid = await enviarWhatsAppPlantilla(tel, plantilla, PLANTILLA_IDIOMA, parametros, phoneWa, botones);
         entregado++;
-        await log({ tipo: "whatsapp", estado: "enviado", destinatario: tel });
+        await log({ tipo: "whatsapp", estado: "enviado", destinatario: tel, wamid });
       } catch (e: any) {
         await log({ tipo: "whatsapp", estado: "error", destinatario: tel, error: e.message });
       }
@@ -320,10 +329,15 @@ export async function enviarAConductor(args: {
   if (canales.push) {
     intentado++;
     try {
+      // El tag lleva la clave del aviso: con el mismo tag, el «inicia ahora» REEMPLAZARÍA en
+      // la bandeja al «recuerda iniciar» en vez de volver a sonar como uno nuevo.
+      const tag = `cond-${args.alertaClave ?? trigger}-${args.reservaId ?? 0}`;
       const rPush = await enviarPushAConductores(
         [conductor.id], tabla,
-        payloadConductor(titulo, args.pushTexto ?? titulo, `cond-${trigger}-${args.reservaId ?? 0}`, args.reservaId),
-        { ttl: 43200 },
+        payloadConductor(args.push?.titulo ?? titulo, args.pushTexto ?? titulo, tag, args.reservaId, {
+          requireInteraction: args.push?.requireInteraction,
+        }),
+        { ttl: args.push?.ttl ?? 43200, urgencia: args.push?.urgencia },
       );
       if (rPush.enviados > 0) {
         entregado++;
@@ -1117,8 +1131,14 @@ export async function avisarLlegadaWhatsApp(
 
 // ─── LOG ─────────────────────────────────────────────────────────────────────
 
+// Columnas de supabase/alertas-escalera-inicio.sql (migración accesoria). Solo viajan cuando
+// hay valor, y si el error nombra alguna se reintenta SIN ellas: perder el id del WhatsApp o
+// la clave del aviso es perder el «¿le llegó?»; perder la fila entera rompería el dedupe del
+// cron de pasajeros (duplicados masivos).
+const COLS_LOG_ACCESORIAS = ["wamid", "alerta_clave"] as const;
+
 export async function logNotificacion({
-  reservaId, pasajeroId, conductorId, tipo, estado, destinatario, trigger, error,
+  reservaId, pasajeroId, conductorId, tipo, estado, destinatario, trigger, error, wamid, alertaClave,
 }: {
   reservaId:    number;
   pasajeroId?:  number;
@@ -1128,8 +1148,12 @@ export async function logNotificacion({
   trigger:      TipoTrigger;
   destinatario?: string;
   error?:       string;
+  /** Id del mensaje de WhatsApp: con él se le casan los estados entregado/leído del webhook. */
+  wamid?:       string | null;
+  /** Qué aviso del motor es (`alerta_config.clave`), para leer la escalera por servicio. */
+  alertaClave?: string | null;
 }) {
-  const { error: eLog } = await supabaseAdmin.from("notificaciones_enviadas").insert({
+  const fila: Record<string, unknown> = {
     reserva_id:     reservaId,
     pasajero_id:    pasajeroId ?? null,
     // Solo incluir conductor_id cuando aplica: si la migración aún no corrió, la
@@ -1141,7 +1165,14 @@ export async function logNotificacion({
     destinatario:   destinatario ?? null,
     trigger_origen: trigger,
     error_detalle:  error ?? null,
-  });
+    ...(wamid ? { wamid } : {}),
+    ...(alertaClave ? { alerta_clave: alertaClave } : {}),
+  };
+  let { error: eLog } = await supabaseAdmin.from("notificaciones_enviadas").insert(fila);
+  if (eLog && faltaAlguna(eLog, COLS_LOG_ACCESORIAS)) {
+    for (const c of COLS_LOG_ACCESORIAS) delete fila[c];
+    ({ error: eLog } = await supabaseAdmin.from("notificaciones_enviadas").insert(fila));
+  }
   // No tragar el error en silencio: si un CHECK de la tabla rechaza un tipo nuevo
   // (p.ej. 'push'), el dedupe diario del cron dejaría de ver la reserva sin ruido.
   if (eLog) console.warn("[notificaciones] log falló:", eLog.message);

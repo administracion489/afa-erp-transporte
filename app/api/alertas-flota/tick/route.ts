@@ -29,6 +29,8 @@ import {
 } from "@/lib/alertas-modo-tiempo";
 import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
+import { textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
+import { resumenAvisosDeReserva } from "@/lib/escalera-inicio-datos";
 
 export const maxDuration = 60;
 
@@ -182,7 +184,14 @@ async function handler(req: NextRequest) {
     // (canal_conductor_* en alerta_config). Ver lib/notificaciones.ts::enviarAConductor.
     async function aConductor(
       cfg: AlertaConfig, ref: RefCond | number | null, params: string[],
-      extra?: { titulo?: string; reservaId?: number },
+      extra?: {
+        titulo?: string;
+        /** Con la reserva, el aviso queda en `notificaciones_enviadas` con su clave: es lo
+         *  que permite contestar después «¿le llegó?» (lib/escalera-inicio.ts). */
+        reservaId?: number;
+        /** Notificación del app de la escalera de inicio: urgente, con hora y punto. */
+        push?: TextoPush;
+      },
     ): Promise<ResultadoEnvio> {
       // Compat: los llamadores viejos pasan un id suelto = conductor propio.
       const r0: RefCond | null = typeof ref === "number" ? { id: ref, tabla: "conductores" } : ref;
@@ -199,6 +208,13 @@ async function handler(req: NextRequest) {
         titulo: extra?.titulo ?? cfg.nombre,
         reservaId: extra?.reservaId,
         trigger: "manual",
+        alertaClave: cfg.clave,
+        ...(extra?.push
+          ? {
+              pushTexto: extra.push.cuerpo,
+              push: { titulo: extra.push.titulo, urgencia: "high" as const, ttl: extra.push.ttl, requireInteraction: extra.push.requireInteraction },
+            }
+          : {}),
       });
       return r.estado;
     }
@@ -455,10 +471,15 @@ async function handler(req: NextRequest) {
         if (!["programada", "confirmada"].includes(r.estado)) continue; // aún no inició
         if (!enViaRecordatorio(cfg, r, hoy, manana, ahora, force)) continue;
         if (!(await reclamarEnvio(clave, r.id))) continue;
-        const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
+        // `ref`, no `r.conductor_id`: con el id suelto, un conductor TERCERIZADO nunca recibía
+        // este aviso aunque su tarjeta dijera «avisar también a tercerizados».
+        const nombre = nombreCorto(datosCond(ref)?.nombre);
         const hora = horaCorta(r.hora_servicio);
         const origenTexto = r.origen || rutaDe(r);
-        const rc = await aConductor(cfg, r.conductor_id, [nombre, hora, origenTexto]);
+        const rc = await aConductor(cfg, ref, [nombre, hora, origenTexto], {
+          reservaId: r.id,
+          push: textoPushInicio(clave, { hora, origen: r.origen || rutaDe(r) }),
+        });
         if (rc === "enviado") n++;
         else if (rc === "fallo") await liberarEnvio(clave, r.id); // transitorio → reintentar
         // "sin_canal" (sin teléfono/plantilla) queda reclamado: evita reintentar en bucle.
@@ -509,7 +530,11 @@ async function handler(req: NextRequest) {
           const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
           const hora = horaCorta(r.hora_servicio);
           const ruta = rutaDe(r);
-          const rd = await aDirectorio(cfg, ["Falta iniciar recorrido", nombre, `${ruta} ${hora}`, "Faltan ~25 min y el conductor aún no confirma salida (sin GPS) en la app."]);
+          // Lo que ya se le mandó y si le llegó: con «ningún WhatsApp le llegó» el coordinador
+          // sabe que el teléfono no tiene datos y que lo que sirve es llamarlo.
+          const evidencia = (await resumenAvisosDeReserva(r.id, ahoraMs)).texto;
+          const rd = await aDirectorio(cfg, ["Falta iniciar recorrido", nombre, `${ruta} ${hora}`,
+            `Faltan ~25 min y el conductor aún no confirma salida (sin GPS) en la app.${evidencia ? ` ${evidencia}` : ""}`]);
           if (rd.enviados > 0) n++;
           else if (rd.fallos > 0) await liberarEnvio("alerta_no_inicio_previa", r.id); // transitorio → reintentar
         }
@@ -561,13 +586,20 @@ async function handler(req: NextRequest) {
           if (cfgEnPunto && vere(r.id)?.nivel === "en_punto_sin_iniciar") continue;
           if (!(await reclamarEnvio("no_inicio", r.id))) continue;
           const ruta = rutaDe(r); const hora = horaCorta(r.hora_servicio);
-          const nombre = r.conductor_id ? nombreCorto(condMap.get(r.conductor_id)?.nombre) : "Conductor";
+          // `condDe`: con `r.conductor_id` solo, el TERCERIZADO no recibía este aviso nunca.
+          const ref = condDe(r);
+          const nombre = ref ? nombreCorto(datosCond(ref)?.nombre) : "Conductor";
           let exitos = 0, fallos = 0;
-          if (cfg.notifica_conductor && r.conductor_id) {
-            const rc = await aConductor(cfg, r.conductor_id, [nombre, hora, ruta, telConting]);
+          if (cfg.notifica_conductor && ref) {
+            const rc = await aConductor(cfg, ref, [nombre, hora, ruta, telConting], {
+              reservaId: r.id,
+              push: textoPushInicio("no_inicio", { hora, origen: r.origen || ruta }),
+            });
             if (rc === "enviado") exitos++; else if (rc === "fallo") fallos++;
           }
-          const rd = await aDirectorio(cfg, ["No inició a tiempo", nombre, `${ruta} ${hora}`, `Pasaron ${gracia}+ min de la hora y no marcó inicio.`]);
+          const evidencia = (await resumenAvisosDeReserva(r.id, ahoraMs)).texto;
+          const rd = await aDirectorio(cfg, ["No inició a tiempo", nombre, `${ruta} ${hora}`,
+            `Pasaron ${gracia}+ min de la hora y no marcó inicio.${evidencia ? ` ${evidencia}` : ""}`]);
           exitos += rd.enviados; fallos += rd.fallos;
           if (exitos === 0 && fallos > 0) { await liberarEnvio("no_inicio", r.id); continue; } // transitorio → reintentar
           n++;
@@ -597,7 +629,10 @@ async function handler(req: NextRequest) {
 
         // 1) Empujón al conductor (una vez por servicio y día).
         if (cfgEnPunto.notifica_conductor && ref && await reclamarEnvio("en_punto_sin_iniciar", r.id)) {
-          const rc = await aConductor(cfgEnPunto, ref, [nombre, hora, r.origen || rutaDe(r)]);
+          const rc = await aConductor(cfgEnPunto, ref, [nombre, hora, r.origen || rutaDe(r)], {
+            reservaId: r.id,
+            push: textoPushInicio("en_punto_sin_iniciar", { hora, origen: r.origen || rutaDe(r) }),
+          });
           if (rc === "enviado") n++;
           else if (rc === "fallo") await liberarEnvio("en_punto_sin_iniciar", r.id); // transitorio
         }

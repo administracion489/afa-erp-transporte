@@ -86,6 +86,26 @@ export function permisoBloqueado(): boolean {
   return typeof Notification !== "undefined" && Notification.permission === "denied";
 }
 
+/**
+ * Permiso de notificaciones en el APP NATIVO. Dentro del WebView de Android NO existe
+ * `window.Notification`, así que mirar ese objeto (como hace el navegador) daba siempre
+ * «inactivo» en el app: el conductor veía «Activar» aunque ya estuviera suscrito, y la
+ * suscripción no se re-sincronizaba al rotar el token de FCM. El permiso lo sabe el plugin.
+ * Null = no es el app nativo o el plugin no respondió (no se afirma nada).
+ */
+export async function permisoPushNativo(): Promise<"granted" | "denied" | "prompt" | null> {
+  try {
+    if (!esAppNativa() || !Capacitor.isPluginAvailable("PushNotifications")) return null;
+    const { PushNotifications } = await import("@capacitor/push-notifications");
+    const p = await PushNotifications.checkPermissions();
+    if (p.receive === "granted") return "granted";
+    if (p.receive === "denied") return "denied";
+    return "prompt";
+  } catch {
+    return null;
+  }
+}
+
 // ── WEB PUSH (navegador / PWA) ────────────────────────────────────────────────
 
 export async function activarPushWeb(api: PaxApi): Promise<ResultadoActivar> {
