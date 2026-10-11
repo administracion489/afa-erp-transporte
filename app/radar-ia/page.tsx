@@ -10,7 +10,7 @@ import { supabase } from "@/lib/supabase";
 import { faltaAlguna } from "@/lib/columna-faltante";
 import { aceptarLectura, registrarLectura, juzgarKmDeRecarga } from "@/lib/odometro";
 import { revisarKmTecleado } from "@/lib/odometro-seleccion";
-import { capturaDeRecarga } from "@/lib/odometro-tiempo";
+import { capturaDeRecarga, normalizarHoraVoucher } from "@/lib/odometro-tiempo";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { normalizarConfigRadar } from "@/lib/radar/config";
 import {
@@ -714,6 +714,12 @@ function TabOportunidades({ oportunidades, creando, onCrearCotizacion, onCambiar
 type EdicionComb = {
   vehiculo: string;   // fleet-encoded: "propio:12" | "tercero:5" | ""
   fecha: string;      // YYYY-MM-DD
+  /**
+   * La hora del DESPACHO impresa en el voucher («HH:MM:SS»), la que leyó la IA. Va a
+   * `combustible.hora` y ubica el odómetro entre los registros del día. Vacía = sin hora (nunca
+   * se rellena con la del mensaje: esa es un tope, no la hora de la carga).
+   */
+  hora: string;
   grifo: string;
   tipoCombustible: string; // clave del catálogo de lib/combustible-tipos.ts
   cantidad: string;   // galones o litros (según esLitros)
@@ -737,6 +743,8 @@ export type OverrideComb = {
   tipo: "propio" | "tercero";
   vehiculoId: number;
   fecha: string | null;
+  /** «HH:MM:SS» confirmada por el revisor, o null. */
+  hora: string | null;
   grifo: string | null;
   /** Tipo de combustible confirmado por el revisor: es lo que se registra. */
   tipoCombustible: string;
@@ -818,6 +826,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
     return {
       vehiculo: u ? `${u.tipo}:${u.id}` : "",
       fecha: c.fecha ?? "",
+      hora: normalizarHoraVoucher(c.hora) ?? "",
       grifo: c.grifo ?? "",
       // Vacío cuando la IA no lo leyó: antes se registraba TODO como diésel en silencio.
       tipoCombustible: c.tipo_combustible ?? "",
@@ -952,6 +961,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                 tipo: (ed.vehiculo.split(":")[0] as "propio" | "tercero"),
                 vehiculoId: Number(ed.vehiculo.split(":")[1]),
                 fecha: ed.fecha || null,
+                hora: normalizarHoraVoucher(ed.hora),
                 grifo: ed.grifo.trim() || null,
                 tipoCombustible: ed.tipoCombustible,
                 cantidad: cantEd,
@@ -971,7 +981,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                     style={{ borderColor: "#f1f5f9" }}
                     onClick={() => { if (esPendiente) setExpandido(abierto ? null : c.id); }}
                   >
-                    <td className="p-3 whitespace-nowrap text-gray-600">{c.fecha ? fmtFecha(c.fecha) : "—"}{c.hora ? ` · ${c.hora}` : ""}</td>
+                    <td className="p-3 whitespace-nowrap text-gray-600">{c.fecha ? fmtFecha(c.fecha) : "—"}{c.hora ? ` · ${String(c.hora).slice(0, 5)}` : ""}</td>
                     <td className="p-3 whitespace-nowrap">
                       <span className="font-mono font-black text-[#0b315f]">{placaMatch ?? c.placa ?? "—"}</span>
                       {!placaMatch && c.placa && <span className="ml-1.5 text-[10px] font-bold text-[#B07A0F]">sin match</span>}
@@ -1073,6 +1083,9 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                           <CampoEdit label="Fecha">
                             <input type="date" value={ed.fecha} onChange={(e) => setCampo(c, "fecha", e.target.value)} className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
+                          </CampoEdit>
+                          <CampoEdit label="Hora (del voucher)">
+                            <input type="time" step={1} value={ed.hora} onChange={(e) => setCampo(c, "hora", e.target.value)} title="La hora impresa junto a la fecha en la nota de despacho. Vacía si no se ve: no pongas la del mensaje." className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
                           </CampoEdit>
                           <CampoEdit label="Unidad">
                             <select value={ed.vehiculo} onChange={(e) => setCampo(c, "vehiculo", e.target.value)} className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] bg-white">
@@ -1182,7 +1195,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           c={c}
                           unidad={ed.vehiculo ? { tipo: ed.vehiculo.split(":")[0] as "propio" | "tercero", id: Number(ed.vehiculo.split(":")[1]) } : null}
                           voucher={{
-                            fecha: ed.fecha || c.fecha, kilometraje: kmEd, conductor: c.conductor, grifo: ed.grifo.trim() || c.grifo,
+                            fecha: ed.fecha || c.fecha, hora: normalizarHoraVoucher(ed.hora), kilometraje: kmEd, conductor: c.conductor, grifo: ed.grifo.trim() || c.grifo,
                             comprobante: c.comprobante, cantidad: cantEd, monto: montoEd ?? (cantEd != null && precioEd != null ? Math.round(cantEd * precioEd * 100) / 100 : null),
                             tanqueLleno: tanqueFuente === null ? null : tanqueMarcado, tanqueFuente,
                           }}
@@ -3133,7 +3146,8 @@ export default function RadarIAPage() {
       // km); la del mensaje solo sirve de tope y solo si es del mismo día que la recarga.
       // Antes iba solo `msg?.ts_mensaje`, y sin el mensaje cargado la lectura quedaba a las
       // 00:00 de su fecha: antes del check-in de ese día y «incoherente» con él (CTV-370).
-      const cap = capturaDeRecarga({ fecha: fechaCarga, hora: c.hora, tsMensaje: msg?.ts_mensaje ?? null });
+      // La que confirmó el revisor (vaciarla es decir «no se ve»: queda el mensaje como tope).
+      const cap = capturaDeRecarga({ fecha: fechaCarga, hora: ov.hora, tsMensaje: msg?.ts_mensaje ?? null });
       const r = await registrarLectura(supabase, {
         vehiculo_id: ov.vehiculoId,
         flota: ov.tipo === "tercero" ? "tercero" : "propia",
@@ -3200,7 +3214,7 @@ export default function RadarIAPage() {
       // El vehículo de ESTA fila, para que la fusión no cruce unidades (planDeFusion → otra_unidad).
       const vehiculoFila = claveVehiculo(ov.tipo, ov.vehiculoId);
       const plan = planDeFusion(carga, {
-        fecha: ov.fecha ?? c.fecha, kilometraje: ov.kilometraje, conductor: c.conductor, grifo: ov.grifo ?? c.grifo,
+        fecha: ov.fecha ?? c.fecha, hora: ov.hora, kilometraje: ov.kilometraje, conductor: c.conductor, grifo: ov.grifo ?? c.grifo,
         comprobante: c.comprobante, cantidad: ov.cantidad, monto: ov.monto, tanqueLleno: ov.tanqueLleno, tanqueFuente: ov.tanqueFuente,
         vehiculo: vehiculoFila, placa: placaEnFlota(vehiculosGuia, vehiculoFila),
       });
@@ -3223,6 +3237,8 @@ export default function RadarIAPage() {
       }
       // Columna de una migración accesoria (combustible-01): best-effort, como al registrar.
       if (plan.patchTanque) await supabase.from("combustible").update(plan.patchTanque).eq("id", cargaId);
+      // La hora del voucher (combustible-05): también best-effort; sin la columna el plan no la propone.
+      if (plan.patchHora) await supabase.from("combustible").update(plan.patchHora).eq("id", cargaId);
       // El ENLACE es lo que hace la fusión en el modo «sumar»: Combustible junta las fotos de todas las
       // filas del Radar que apuntan a una carga (fotosPorCarga). Si falla, se dice: sin él las fotos no llegan.
       const { error: eRad } = await supabase
@@ -3356,14 +3372,26 @@ export default function RadarIAPage() {
           // GALONES cada carga de GNV —el 70 % de la flota— con un número que son m³, y con la
           // unidad mal escrita ni el rendimiento ni la banda de precio pueden juzgarla.
           unidad: unidadDeCarga(ov.tipoCombustible || c.tipo_combustible, ov.esLitros ? "litros" : "galones"),
+          // La hora del DESPACHO que confirmó el revisor (la impresa en el voucher). Antes no viajaba:
+          // la fila del Radar la tenía y la carga nacía sin hora, y había que teclearla en /combustible.
+          hora: ov.hora,
       };
-      let { data, error } = await supabase.from("combustible").insert(payloadCarga).select("id").single();
-      // `ruc_proveedor` es de finanzas-02: sin la migración la carga entra igual, sin el RUC.
-      if (error && faltaAlguna(error, ["ruc_proveedor"])) {
-        const { ruc_proveedor: _sinRuc, ...sinRuc } = payloadCarga;
-        ({ data, error } = await supabase.from("combustible").insert(sinRuc).select("id").single());
+      // Columnas de migraciones accesorias (`ruc_proveedor`: finanzas-02; `hora`: combustible-05): si
+      // falta una, se suelta LA QUE EL ERROR NOMBRA y la carga entra igual.
+      const OPCIONALES_CARGA = ["ruc_proveedor", "hora"] as const;
+      const filaCarga: Record<string, unknown> = { ...payloadCarga };
+      const soltadas: string[] = [];
+      let { data, error } = await supabase.from("combustible").insert(filaCarga).select("id").single();
+      for (let intento = 0; error && intento < OPCIONALES_CARGA.length; intento++) {
+        const col = faltaAlguna(error, OPCIONALES_CARGA);
+        if (!col || !(col in filaCarga)) break;
+        delete filaCarga[col];
+        soltadas.push(col);
+        ({ data, error } = await supabase.from("combustible").insert(filaCarga).select("id").single());
       }
       if (error || !data) throw error ?? new Error("no se pudo insertar en combustible");
+      const avisoHora = ov.hora && soltadas.includes("hora")
+        ? " · la carga quedó sin la hora: falta correr supabase/combustible-05-hora-carga.sql" : "";
       // ¿Quedó lleno el tanque? Va en una escritura APARTE y best-effort a propósito: es de una
       // migración accesoria (`combustible-01-tanque-lleno.sql`) y una recarga confirmada contra
       // la foto no se puede perder porque falte un SQL. Solo se escribe cuando alguien lo
@@ -3393,7 +3421,7 @@ export default function RadarIAPage() {
       // El anti-retroceso decide el estado; acá no se fuerza nada, se REPORTA el veredicto.
       const notaOdo = await registrarOdometroDeRecarga(c, ov, fechaCarga, fotoUrl, msg);
 
-      showToast(`Recarga registrada en Combustible${notaOdo}`, !notaOdo);
+      showToast(`Recarga registrada en Combustible${notaOdo}${avisoHora}`, !notaOdo && !avisoHora);
       cargar();
     } catch (e) {
       console.warn("radar-ia: error registrando combustible", e);

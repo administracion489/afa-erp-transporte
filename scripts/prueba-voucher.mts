@@ -371,5 +371,17 @@ const chk = (nombre: string, ok: boolean, extra = "") => {
   chk("el prompt del voucher dictado tampoco", enTexto(texto).length === 0, enTexto(texto).join(", "));
 }
 
+// ── 26. LA HORA DEL DESPACHO SE PIDE, Y NO ES LA DEL MENSAJE ──────────────────
+// La CWZ-371 del 11/10/2026 imprimía «11/10/2026 07:55:41» y entró sin hora: el esquema decía solo
+// "hora": "HH:MM" sin decir de dónde, y el prompt le da al modelo la hora del mensaje («son las 07:58»).
+{
+  const media = promptExtraccionMedia({ fechaHoy: "2026-10-11", horaAhora: "07:58" });
+  chk("el prompt de visión dice dónde está la hora (junto a la fecha de la nota)", /FECHA Y LA HORA DEL DESPACHO/.test(media) && /DD\/MM\/AAAA HH:MM:SS/.test(media));
+  chk("…que va en 24 h y con segundos", /"hora": "HH:MM"\|"HH:MM:SS"\|null/.test(media));
+  chk("…y que NO es la hora del mensaje", /NO es la de este mensaje/.test(media) && /NUNCA la hora de este mensaje/.test(media));
+  const texto = promptExtraccion("combustible", { fechaHoy: "2026-10-11", horaAhora: "07:58" });
+  chk("el dictado también lo dice", /NO es la hora de este mensaje/.test(texto));
+}
+
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
 process.exit(fallos ? 1 : 0);

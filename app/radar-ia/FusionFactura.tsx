@@ -50,6 +50,8 @@ export const aCargaDeFactura = (r: Record<string, unknown>): CargaDeFactura => (
   grifo: (r.grifo as string) ?? null,
   observaciones: (r.observaciones as string) ?? null,
   tanque_lleno: r.tanque_lleno == null ? null : Boolean(r.tanque_lleno),
+  // Sin la columna (combustible-05 sin correr) la fila no la trae: `undefined`, y la fusión no la escribe.
+  hora: "hora" in r ? (r.hora == null ? null : String(r.hora)) : undefined,
   vehiculo: vehiculoDeCarga(r),
 });
 
@@ -177,6 +179,7 @@ export default function FusionFactura({ c, unidad, voucher, ocupado, onFusionar,
   const filaComp: [string, string, string][] = [
     ["Unidad", carga.placa ?? (carga.vehiculo && carga.vehiculo === vehiculoFila ? "la misma" : carga.vehiculo ? "otra unidad" : "—"), placaDe?.(vehiculoFila) ?? "—"],
     ["Fecha", F(carga.fecha), F(voucher.fecha)],
+    ["Hora", carga.hora ? String(carga.hora).slice(0, 5) : "—", voucher.hora ? String(voucher.hora).slice(0, 5) : "—"],
     ["Odómetro", K(carga.kilometraje), K(voucher.kilometraje)],
     ["Cantidad", carga.galones != null ? String(carga.galones) : "—", voucher.cantidad != null ? String(voucher.cantidad) : "—"],
     ["Importe", S(carga.total), S(voucher.monto)],
