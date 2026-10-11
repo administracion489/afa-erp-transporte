@@ -34,8 +34,8 @@
 // es la decisión que `montoDe` rechaza con el falso flete. Lo único correcto es DECIRLO
 // antes de guardar. Misma conclusión que la ventana invertida de `alertas-horario.ts`.
 //
-// Y LA OTRA MITAD: quince de los veinticinco tipos NO leen el modo en absoluto (ciclo de
-// vida, semáforo de puntualidad, GPS, checkout, abandono, y los dos avisos al pasajero que
+// Y LA OTRA MITAD: dieciséis de los veintiséis tipos NO leen el modo en absoluto (ciclo de
+// vida, semáforo de puntualidad, GPS, checkout, abandono, la llamada de la central, y los dos avisos al pasajero que
 // despacha `lib/notificaciones.ts`). Ofrecerles el selector es ofrecer un
 // control que el sistema no lee — el mismo defecto que `multiples_recargas_en_cluster`
 // declarado y sin emitir. `leeElModo()` lo DERIVA de esta tabla en vez de depender de que
@@ -119,6 +119,8 @@ export const VIA_DE_ALERTA: Record<string, ViaDespacho> = {
   no_inicio: "ignora_modo",
   // «Ya debió iniciar»: su reloj es la hora del servicio + su umbral (cron de 1 min).
   debio_iniciar: "ignora_modo",
+  // La llamada de la central propia: mismo reloj, hora + umbral (lib/llamadas-central.ts).
+  llamada_inicio: "ignora_modo",
   gps_silencio: "ignora_modo",
   recordar_checkout: "ignora_modo",
   servicio_abandonado: "ignora_modo",

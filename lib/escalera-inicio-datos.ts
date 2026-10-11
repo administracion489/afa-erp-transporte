@@ -3,7 +3,9 @@
 // regla vive en lib/escalera-inicio.ts (puro); aquí solo se lee.
 
 import { createClient } from "@supabase/supabase-js";
-import { LARGO_EVIDENCIA_COORDINADOR, resumenAvisosConductor, type FilaAviso, type ResumenAvisos } from "@/lib/escalera-inicio";
+import { LARGO_EVIDENCIA_COORDINADOR, type FilaAviso, type ResumenAvisos } from "@/lib/escalera-inicio";
+import { evidenciaConLlamada } from "@/lib/llamadas-central";
+import { llamadasDeReserva } from "@/lib/llamadas-central-datos";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -31,7 +33,8 @@ export async function resumenAvisosDeReserva(reservaId: number, ahoraMs = Date.n
       .order("created_at", { ascending: true })
       .limit(100);
     if (error || !data) return VACIO;
-    return resumenAvisosConductor(data as FilaAviso[], ahoraMs, maxLargo);
+    // La llamada de la central propia, si la hubo, va al final y entera.
+    return evidenciaConLlamada(data as FilaAviso[], await llamadasDeReserva(reservaId), ahoraMs, maxLargo);
   } catch {
     return VACIO;
   }

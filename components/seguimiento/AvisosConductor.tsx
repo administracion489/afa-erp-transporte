@@ -19,6 +19,7 @@ import {
   estadoEntrega, etiquetaAviso, horaLimaDeIso, reclamosSinDetalle, resumenAvisosConductor,
   type FilaAviso, type Reclamo,
 } from "@/lib/escalera-inicio";
+import { lecturaLlamada, type CodigoLectura, type FilaLlamada } from "@/lib/llamadas-central";
 
 const ETIQUETA_TRIGGER: Record<string, string> = {
   asignacion: "Servicio asignado",
@@ -38,10 +39,25 @@ const TONO: Record<string, string> = {
 };
 
 type Fila = FilaAviso & { id?: number; trigger_origen?: string | null; destinatario?: string | null };
+type Llamada = FilaLlamada & { id?: number };
+
+/** El tono de cada lectura de la llamada: lo mismo que se dice, en color. */
+const TONO_LLAMADA: Partial<Record<CodigoLectura, string>> = {
+  contestada: "text-emerald-700",
+  no_contesto: "text-amber-700",
+  ocupado: "text-amber-700",
+  fallida: "text-red-600",
+  vencida: "text-red-600",
+  cancelada: "text-gray-500",
+  pendiente: "text-gray-500",
+  marcando: "text-[#0b315f]",
+};
 
 export default function AvisosConductor({ reservaId }: { reservaId: number }) {
   const [filas, setFilas] = useState<Fila[] | null>(null);
   const [reclamos, setReclamos] = useState<Reclamo[]>([]);
+  // Las llamadas de la central propia (supabase/llamadas-01-central.sql). Sin la tabla, ninguna.
+  const [llamadas, setLlamadas] = useState<Llamada[]>([]);
   const [fallo, setFallo] = useState(false);
   // El instante de la lectura: «ningún WhatsApp le llegó» se juzga contra él (render puro).
   const [leidoEn, setLeidoEn] = useState(0);
@@ -51,17 +67,21 @@ export default function AvisosConductor({ reservaId }: { reservaId: number }) {
     (async () => {
       // `*`: las columnas de entrega son de una migración accesoria
       // (supabase/alertas-escalera-inicio.sql); pedirlas por nombre tumbaría la consulta sin ella.
-      const [n, a] = await Promise.all([
+      const [n, a, l] = await Promise.all([
         supabase.from("notificaciones_enviadas").select("*")
           .eq("reserva_id", reservaId).not("conductor_id", "is", null)
           .order("created_at", { ascending: true }).limit(200),
         supabase.from("alerta_enviada").select("clave, created_at").eq("ref", String(reservaId)),
+        supabase.from("llamadas_conductor")
+          .select("id, estado, intentos, created_at, tomada_en, terminada_en, proximo_intento_en, duracion_seg, opcion, detalle, motivo")
+          .eq("reserva_id", reservaId).order("created_at", { ascending: true }).limit(20),
       ]);
       if (!vivo) return;
       if (n.error) { setFallo(true); setFilas([]); return; }
       setLeidoEn(Date.now());
       setFilas((n.data ?? []) as Fila[]);
       setReclamos(a.error ? [] : ((a.data ?? []) as Reclamo[]));
+      setLlamadas(l.error ? [] : ((l.data ?? []) as Llamada[]));
     })().catch(() => { if (vivo) { setFallo(true); setFilas([]); } });
     return () => { vivo = false; };
   }, [reservaId]);
@@ -74,6 +94,7 @@ export default function AvisosConductor({ reservaId }: { reservaId: number }) {
   const items = [
     ...filas.map((f) => ({ tipo: "fila" as const, t: String(f.created_at ?? ""), f })),
     ...viejos.map((r) => ({ tipo: "reclamo" as const, t: String(r.created_at ?? ""), r })),
+    ...llamadas.map((l) => ({ tipo: "llamada" as const, t: String(l.created_at ?? ""), l })),
   ].sort((x, y) => x.t.localeCompare(y.t));
 
   if (items.length === 0) {
@@ -89,6 +110,19 @@ export default function AvisosConductor({ reservaId }: { reservaId: number }) {
       )}
       <ul className="space-y-1.5">
         {items.map((it, i) => {
+          if (it.tipo === "llamada") {
+            const lec = lecturaLlamada(it.l);
+            return (
+              <li key={`l${it.l.id ?? i}`} className="flex items-start gap-2 text-xs">
+                <span className="w-11 flex-shrink-0 font-mono text-gray-400">{horaLimaDeIso(it.l.created_at) ?? "—"}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="font-semibold text-gray-700">{it.l.motivo === "prueba" ? "Llamada de prueba" : "Llamada de la central"}</span>
+                  <span className="ml-1.5 inline-block rounded-full bg-gray-100 px-1.5 py-px text-[10px] font-semibold text-gray-500">Llamada</span>
+                  <span className={`block ${TONO_LLAMADA[lec.codigo] ?? "text-gray-500"}`}>{lec.texto}</span>
+                </span>
+              </li>
+            );
+          }
           if (it.tipo === "reclamo") {
             return (
               <li key={`r${i}`} className="flex items-start gap-2 text-xs">

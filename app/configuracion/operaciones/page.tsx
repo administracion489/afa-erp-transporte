@@ -9,6 +9,8 @@ import { MARGEN_URGENTE_MIN, describirHorario, hhmmAMinutos, ventanaCubreMadruga
 // tendría su propia copia y sería el primero en quedarse atrás.
 import { cotejarModoTiempo, leeElModo, type ModoTiempo } from "@/lib/alertas-modo-tiempo";
 import PruebaAvisos from "./PruebaAvisos";
+// La llamada de la central propia: su tarjeta no tiene canales de mensaje, tiene una central.
+import { CLAVE_LLAMADA, estadoCentral } from "@/lib/llamadas-central";
 
 type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean; es_contingencia?: boolean };
 type AlertaCfg = {
@@ -48,6 +50,8 @@ const UMBRAL_LABEL: Record<string, string> = {
   no_inicio: "Min. de gracia tras la hora",
   // «Ya debió iniciar»: minutos DESPUÉS de la hora del servicio (cron de 1 minuto).
   debio_iniciar: "Min. después de la hora",
+  // La llamada de la central propia: minutos después de la hora (3 = dos después del WhatsApp).
+  llamada_inicio: "Min. después de la hora",
   gps_silencio: "Min. sin señal",
   doc_vence: "Días de anticipación",
   jornada: "Horas máx. de jornada",
@@ -91,14 +95,21 @@ export default function ConfigOperacionesPage() {
   // PostgREST rechaza la fila ENTERA si una columna no existe, así que incluirlos
   // dejaría sin guardar también los canales y el resto de la tarjeta.
   const [faltaHorario, setFaltaHorario] = useState(false);
+  // Último contacto de la central de llamadas (supabase/llamadas-01-central.sql). `undefined` =
+  // todavía no se sabe; `null` = no hay tabla o nunca se conectó.
+  const [central, setCentral] = useState<{ ultimo_latido: string | null; equipo: string | null } | null | undefined>(undefined);
+  const [ahoraCentral, setAhoraCentral] = useState(0);
 
   const showToast = (msg: string, ok = true) => { setToast({ msg, ok }); setTimeout(() => setToast(null), 3500); };
 
   const cargar = useCallback(async () => {
-    const [c, d] = await Promise.all([
+    const [c, d, cen] = await Promise.all([
       supabase.from("alerta_config").select("*").order("clave"),
       supabase.from("alerta_destinatarios").select("*").order("id"),
+      supabase.from("central_llamadas_estado").select("ultimo_latido, equipo").eq("id", 1).maybeSingle(),
     ]);
+    setCentral(cen.error ? null : ((cen.data ?? null) as { ultimo_latido: string | null; equipo: string | null } | null));
+    setAhoraCentral(Date.now());
     if (c.error || d.error) { setFaltaTabla(true); setCargando(false); return; }
     const filas = (c.data ?? []) as any[];
     // ¿La migración de canales ya corrió? (columna presente en la primera fila)
@@ -408,8 +419,8 @@ export default function ConfigOperacionesPage() {
                 tabla del motor en vez de depender de que alguien mantenga a mano la columna
                 `tiempo_editable` — que sigue mandando cuando dice false (es un AND), pero ya
                 no hace falta correr un SQL para que un control inerte deje de ofrecerse.
-                Catorce de los veintitrés tipos no lo leen: ciclo de vida, semáforo de
-                puntualidad, GPS, checkout, abandono y los dos avisos al pasajero que
+                Dieciséis de los veintiséis tipos no lo leen: ciclo de vida, semáforo de
+                puntualidad, GPS, checkout, abandono, la llamada y los dos avisos al pasajero que
                 despacha `lib/notificaciones.ts` tienen su propio disparador. */}
             {(() => { const modoVisible = c.tiempo_editable && leeElModo(c.clave); return (
             <div className="grid md:grid-cols-4 gap-3">
@@ -474,7 +485,40 @@ export default function ConfigOperacionesPage() {
               <div className="mt-3 border-t border-gray-100 pt-3 space-y-2">
                 <label className={label}>¿Por dónde se envía?</label>
 
-                {c.notifica_conductor && (
+                {c.notifica_conductor && c.clave === CLAVE_LLAMADA && (() => {
+                  // No es un mensaje: la hace la central propia (docs/central-llamadas.md). Lo que
+                  // importa aquí es si esa central está conectada — con la tarjeta encendida y la
+                  // central caída, las llamadas se quedan en cola y vencen sin salir.
+                  const ec = central === undefined ? null : estadoCentral(central?.ultimo_latido ?? null, ahoraCentral);
+                  return (
+                    <div className="space-y-1.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-gray-500 w-20 shrink-0">Conductor</span>
+                        <span className="text-xs text-gray-700">📞 Llamada telefónica desde la central propia</span>
+                        {ec && (
+                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${ec.conectada ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}`}>
+                            {ec.conectada ? `● Conectada${central?.equipo ? ` · ${central.equipo}` : ""}` : "○ Sin conectar"}
+                          </span>
+                        )}
+                      </div>
+                      {central === null && (
+                        <p className="pl-20 text-[11px] text-amber-800">
+                          Falta correr <code className="font-mono">supabase/llamadas-01-central.sql</code>: sin él no hay cola de llamadas.
+                        </p>
+                      )}
+                      {ec && !ec.conectada && (
+                        <p className={`pl-20 text-[11px] ${c.activo ? "text-amber-800" : "text-gray-500"}`}>
+                          {ec.texto}{" "}
+                          {c.activo
+                            ? "Con la tarjeta encendida, las llamadas se quedan en cola y vencen sin salir."
+                            : "Enciende la tarjeta cuando la central esté instalada (docs/central-llamadas.md)."}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {c.notifica_conductor && c.clave !== CLAVE_LLAMADA && (
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs text-gray-500 w-20 shrink-0">Conductor</span>
                     <Canal on={c.canal_conductor_whatsapp} set={(v) => setCfg(c.clave, { canal_conductor_whatsapp: v })}>💬 WhatsApp</Canal>
@@ -488,7 +532,7 @@ export default function ConfigOperacionesPage() {
                     DETECTA el cambio, y como solo mira hoy/mañana, un programa fijo
                     hecho con antelación se detecta a MEDIANOCHE — que es exactamente
                     por qué llegaban a las 00:00. Aquí se elige a qué hora sale. */}
-                {c.notifica_conductor && !faltaHorario && (
+                {c.notifica_conductor && !faltaHorario && c.clave !== CLAVE_LLAMADA && (
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     <span className="text-xs text-gray-500 w-20 shrink-0">Horario</span>
                     <label className="flex items-center gap-1 text-xs text-gray-600"
@@ -561,7 +605,9 @@ export default function ConfigOperacionesPage() {
                 `tiempo_editable` con el selector "Cuándo". */}
             {dests.length > 0 && c.usa_directorio && (
               <div className="mt-3">
-                <label className={label}>También avisar a (directorio):</label>
+                <label className={label}>
+                  {c.clave === CLAVE_LLAMADA ? "Si el conductor marca 2 («hablar con el coordinador»), avisar a:" : "También avisar a (directorio):"}
+                </label>
                 <div className="flex flex-wrap gap-2">
                   {dests.filter((d) => d.activo).map((d) => (
                     <label key={d.id} className={`text-xs px-2.5 py-1 rounded-full border cursor-pointer ${c.destinatarios.includes(d.id) ? "bg-[#0b315f] text-white border-[#0b315f]" : "bg-gray-50 text-gray-600 border-gray-200"}`}>

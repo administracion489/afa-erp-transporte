@@ -11,12 +11,11 @@
 
 import { useMemo, useState } from "react";
 import { cabecerasErp } from "@/lib/fetch-erp";
-import { fechaLima } from "@/lib/alertas-horario";
 import { datosDeMuestra, planDeMuestra, telefonoDeMuestra, type CfgMuestra, type CodigoMuestra } from "@/lib/escalera-muestra";
 
 type CfgPantalla = CfgMuestra & { destinatarios: number[] };
 type DestPantalla = { id: number; activo: boolean; telefono: string | null };
-type Resultado = { ok: boolean; error?: string };
+type Resultado = { ok: boolean; error?: string; nota?: string };
 
 const CLAVE_TEL = "afa_prueba_avisos_tel";
 
@@ -40,12 +39,15 @@ export default function PruebaAvisos({ cfgs, dests }: { cfgs: CfgPantalla[]; des
   const plan = useMemo(() => {
     const vivos = new Set(dests.filter((d) => d.activo && String(d.telefono ?? "").trim()).map((d) => d.id));
     const conContactos = cfgs.map((c) => ({ ...c, contactos: c.destinatarios.filter((id) => vivos.has(id)).length }));
-    return planDeMuestra(conContactos, datosDeMuestra({ nombreUsuario: null, fecha: fechaLima(Date.now()), telContingencia: "" }));
+    // La fecha solo fecha la evidencia del coordinador, que esta lista no enseña (el texto lo arma
+    // el servidor): una fija mantiene el render puro.
+    return planDeMuestra(conContactos, datosDeMuestra({ nombreUsuario: null, fecha: "2000-01-01", telContingencia: "" }));
   }, [cfgs, dests]);
 
   const seleccion = elegidos ?? new Set(plan.filter((m) => m.marcado).map((m) => m.id));
   const tel = telefonoDeMuestra(telefono);
   const n = plan.filter((m) => m.enviable && seleccion.has(m.id)).length;
+  const conLlamada = plan.some((m) => m.canal === "llamada" && m.enviable && seleccion.has(m.id));
 
   const abrir = () => {
     setAbierto(true);
@@ -60,9 +62,12 @@ export default function PruebaAvisos({ cfgs, dests }: { cfgs: CfgPantalla[]; des
 
   const enviar = async () => {
     if (!tel.ok || n === 0) return;
+    const wa = conLlamada ? n - 1 : n;
     if (!confirm(
-      `Se enviarán ${n} WhatsApp de prueba a ${tel.visible}, desde el número de avisos y en el orden en que llegan, ` +
-      "con datos de ejemplo (tu nombre como conductor y un servicio de las 06:30 desde «Paradero de prueba»).\n\n¿Continuar?",
+      `Se enviarán ${wa} WhatsApp de prueba a ${tel.visible}, desde el número de avisos y en el orden en que llegan, ` +
+      "con datos de ejemplo (tu nombre como conductor y un servicio de las 06:30 desde «Paradero de prueba»)." +
+      (conLlamada ? "\n\nY se pondrá en la cola de la central una LLAMADA de prueba a ese número." : "") +
+      "\n\n¿Continuar?",
     )) return;
     setEnviando(true);
     setMensaje(null);
@@ -79,7 +84,7 @@ export default function PruebaAvisos({ cfgs, dests }: { cfgs: CfgPantalla[]; des
         return;
       }
       const r: Record<string, Resultado> = {};
-      for (const x of (j.resultados ?? []) as ({ id: string } & Resultado)[]) r[x.id] = { ok: x.ok, error: x.error };
+      for (const x of (j.resultados ?? []) as ({ id: string } & Resultado)[]) r[x.id] = { ok: x.ok, error: x.error, nota: x.nota };
       setResultados(r);
       const ok = Object.values(r).filter((x) => x.ok).length;
       const mal = Object.values(r).length - ok;
@@ -146,14 +151,17 @@ export default function PruebaAvisos({ cfgs, dests }: { cfgs: CfgPantalla[]; des
                       <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${m.para === "conductor" ? "bg-blue-50 text-blue-700" : "bg-purple-50 text-purple-700"}`}>
                         {m.para === "conductor" ? "Conductor" : "Coordinador"}
                       </span>
-                      <span className="text-sm font-semibold text-gray-800">{m.titulo}</span>
+                      <span className="text-sm font-semibold text-gray-800">{m.canal === "llamada" ? "📞 " : ""}{m.titulo}</span>
                       {m.plantilla && <span className="text-[10px] font-mono text-gray-400">{m.plantilla}</span>}
                     </div>
                     <p className={`text-[11px] mt-0.5 ${AMBAR.includes(m.codigo) ? "text-amber-700" : "text-gray-500"}`}>{m.nota}</p>
+                    {r?.nota && (
+                      <p className={`text-[11px] mt-0.5 font-semibold ${/no saldrá/.test(r.nota) ? "text-amber-700" : "text-green-700"}`}>{r.nota}</p>
+                    )}
                   </div>
                   {r && (
                     <span className={`text-[11px] font-semibold shrink-0 max-w-[40%] text-right ${r.ok ? "text-green-700" : "text-red-600"}`}>
-                      {r.ok ? "✓ Enviado" : `✗ ${r.error}`}
+                      {r.ok ? (m.canal === "llamada" ? "✓ En cola" : "✓ Enviado") : `✗ ${r.error}`}
                     </span>
                   )}
                 </label>
