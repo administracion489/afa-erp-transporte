@@ -48,6 +48,23 @@ export async function POST(req: NextRequest) {
   );
   if (pedidos.size === 0) return NextResponse.json({ error: "Elige al menos un mensaje." }, { status: 400 });
 
+  // ¿A QUÉ NÚMERO? Un administrador, a cualquier celular. Los demás, solo a uno del Directorio de
+  // contactos: los mensajes salen del número de AVISOS, y si los reporta como spam alguien que no
+  // los pidió, baja la calificación de ese número en Meta — el que lleva los avisos reales.
+  if (auth.rol !== "admin") {
+    const { data: dirs } = await adminAlertas.from("alerta_destinatarios").select("telefono").eq("activo", true);
+    const permitidos = new Set(
+      ((dirs ?? []) as { telefono?: string | null }[])
+        .map((d) => telefonoDeMuestra(d.telefono))
+        .flatMap((t) => (t.ok ? [t.e164] : [])),
+    );
+    if (!permitidos.has(tel.e164)) {
+      return NextResponse.json({
+        error: "Ese número no está en el Directorio de contactos. Agrégalo arriba (activo) o pide la prueba a un administrador.",
+      }, { status: 403 });
+    }
+  }
+
   // ── Freno, entre instancias ──
   const hoy = hoyLima();
   const { count } = await adminAlertas

@@ -22,6 +22,8 @@ import { cotejoGpsDelDia } from "@/lib/odometro-gps";
 import { firmarUrl, firmarUrls } from "@/lib/storage-firmado";
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat, enviarPushAConductores, payloadConductor } from "@/lib/push";
 import { ESPERA_PUSH_PRUEBA_SEG, textoPushPrueba } from "@/lib/escalera-muestra";
+import { endpointPushValido } from "@/lib/push-endpoint";
+import { reclamarEnvio } from "@/lib/alertas";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 import { cerrarServiciosAnterioresDelVehiculo } from "@/lib/cerrar-servicio-anterior";
 import { ESTADO_ADMIN_INICIAL } from "@/lib/estados";
@@ -642,7 +644,8 @@ export async function POST(req: NextRequest) {
           const endpoint = String(sub.endpoint || "");
           const p256dh = String(sub.keys?.p256dh || "");
           const auth = String(sub.keys?.auth || "");
-          if (!endpoint.startsWith("https://") || endpoint.length > 1000 ||
+          // Solo servicios push reales: el servidor le hace un POST a este endpoint en cada aviso.
+          if (!endpointPushValido(endpoint) ||
               !p256dh || p256dh.length > 300 || !auth || auth.length > 100) {
             return NextResponse.json({ error: "Suscripción inválida" }, { status: 400 });
           }
@@ -699,17 +702,22 @@ export async function POST(req: NextRequest) {
       case "probar_push": {
         const k = `${ses.tabla}:${ses.cid}`;
         const ahora = Date.now();
-        if (ahora - (frenoPruebaPush.get(k) ?? 0) < PRUEBA_PUSH_CADA_MS) {
-          return NextResponse.json({ ok: false, error: "Espera un minuto para volver a probar." }, { status: 429 });
-        }
+        const espera = () => NextResponse.json({ ok: false, error: "Espera un minuto para volver a probar." }, { status: 429 });
+        // El freno se marca ANTES de cualquier await: con la marca después, varias peticiones
+        // simultáneas pasaban todas la comprobación.
+        if (ahora - (frenoPruebaPush.get(k) ?? 0) < PRUEBA_PUSH_CADA_MS) return espera();
+        if (frenoPruebaPush.size > 5000) frenoPruebaPush.clear();
+        frenoPruebaPush.set(k, ahora);
         const { count } = await admin.from("push_suscripciones")
           .select("id", { count: "exact", head: true })
           .eq("conductor_id", ses.cid).eq("conductor_tabla", ses.tabla).eq("activo", true);
         if (!count) {
+          frenoPruebaPush.delete(k);   // que pueda probar en cuanto las active
           return NextResponse.json({ ok: false, sinSuscripcion: true, error: "Este teléfono todavía no tiene las notificaciones activas." });
         }
-        if (frenoPruebaPush.size > 5000) frenoPruebaPush.clear();
-        frenoPruebaPush.set(k, ahora);
+        // Y entre instancias, en la base: una por minuto y conductor (mismo freno que la prueba
+        // de WhatsApp de /configuracion/operaciones).
+        if (!(await reclamarEnvio("prueba_push", `${k}:${Math.floor(ahora / 60_000)}`))) return espera();
         const t = textoPushPrueba();
         const cid = ses.cid, tabla = ses.tabla;
         after(async () => {

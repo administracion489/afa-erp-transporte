@@ -17,6 +17,7 @@
 import { createClient } from "@supabase/supabase-js";
 import webpush from "web-push";
 import { JWT } from "google-auth-library";
+import { endpointPushValido } from "@/lib/push-endpoint";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -99,6 +100,9 @@ async function marcarSana(s: Suscripcion) {
 
 async function enviarWebPush(s: Suscripcion, payload: PushPayload, op: OpcionesEnvio): Promise<boolean> {
   if (!vapidOk() || !s.endpoint || !s.p256dh || !s.auth) return false;
+  // Solo a servicios push reales (lib/push-endpoint.ts): una fila vieja con otra dirección no
+  // hace que el servidor le mande un POST a quien la haya escrito.
+  if (!endpointPushValido(s.endpoint)) return false;
   try {
     await webpush.sendNotification(
       { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },

@@ -168,7 +168,8 @@ export default function PruebaAvisos({ cfgs, dests }: { cfgs: CfgPantalla[]; des
           )}
 
           <p className="text-[11px] text-gray-500">
-            Salen desde el número de avisos con las plantillas reales. La <strong>notificación del app</strong> (la que suena
+            Salen desde el número de avisos con las plantillas reales. Un administrador puede probar con cualquier
+            celular; los demás, con un número del <strong>Directorio de contactos</strong>. La <strong>notificación del app</strong> (la que suena
             como Uber) no llega a un número: solo a un teléfono con el app del conductor. Para verla, abre el app →
             <strong> Perfil → Notificaciones → Probar</strong>.
           </p>
