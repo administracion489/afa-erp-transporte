@@ -31,6 +31,8 @@ import type { FilaCuenta } from "@/lib/combustible/saldo-datos";
 import { sumarDiasISO } from "@/lib/combustible/saldo-cuenta";
 import { elegirDocumentoFactura } from "@/lib/combustible/factura-de-carga";
 import { pareceCombustible } from "@/lib/radar/cluster-remitente";
+import { construirCatalogoGrifos, resolverGrifo, grifoPorRuc } from "@/lib/combustible/grifo-canonico";
+import { catalogoGrifosMemo } from "@/lib/combustible/grifo-canonico-datos";
 import {
   tiposPorCorregir, notaTipoCorregido,
   type TipoPorCorregir, type FacturaParaTipo, type CargaParaTipo,
@@ -421,7 +423,11 @@ async function conciliarReclamada(
   let docId: number | null = fila.documento_compra_id ?? null;
   const usados = new Set<string>();
   const plan: ResultadoFactura["plan"] = [];
-  const grifo = cab.razon_social || cuenta?.nombre || "Grifo";
+  // El nombre del grifo: la razón social con que el ERP ya conoce ese RUC (la más repetida en sus
+  // facturas: un PDF leído por IA que la escribió de otra forma no parte la empresa en dos), y si el
+  // RUC es nuevo, la de esta factura. lib/combustible/grifo-canonico.ts.
+  const razonCanonica = grifoPorRuc(await catalogoGrifosMemo(sb), cab.ruc_emisor) ?? (cab.razon_social?.trim() || null);
+  const grifo = razonCanonica || cuenta?.nombre || "Grifo";
 
   for (const l of lineas) {
     const antes = previo.get(l.n);
@@ -534,6 +540,7 @@ async function conciliarReclamada(
         await sb.from("radar_combustible").update({ documento_compra_id: docId }).eq("id", p.casa_con).is("documento_compra_id", null);
       }
     }
+    await nombrarGrifoDesdeFactura(sb, { ruc_emisor: cab.ruc_emisor, razon_social: razonCanonica }, plan.filter((p) => p.codigo === "ya_registrada" && p.casa_con != null).map((p) => p.casa_con!));
   }
 
   // LA DECISIÓN DE LA PERSONA SE GUARDA EN LA LÍNEA (lineasConDecision), y solo si tomó efecto —la
@@ -1344,4 +1351,35 @@ export async function corregirTiposDesdeFacturas(sb: Sb, ids: number[]): Promise
     if (((data as unknown[] | null) ?? []).length) corregidas++;
   }
   return { ok: true, corregidas };
+}
+
+
+/**
+ * La FACTURA es el respaldo oficial, también del NOMBRE del grifo. Una carga que la factura reconoce
+ * como suya (`ya_registrada`) toma la razón social del XML si no tenía grifo —el Radar la dejó en
+ * blanco— o si el que tenía es la MISMA empresa escrita de otra forma («CORATI SA COESTI» →
+ * «COESTI S.A.»: lib/combustible/grifo-canonico.ts). Lo que una persona escribió y no se reconoce
+ * como esa empresa («Primax - Ate») no se toca. Best-effort: el nombre no frena la conciliación.
+ */
+async function nombrarGrifoDesdeFactura(sb: any, cab: { ruc_emisor?: string | null; razon_social?: string | null }, ids: (number | string)[]): Promise<void> {
+  const razon = String(cab.razon_social ?? "").trim();
+  if (!razon || !ids.length) return;
+  const cat = construirCatalogoGrifos({ facturas: [{ ruc_emisor: cab.ruc_emisor ?? null, razon_social: razon }] });
+  if (!cat.porRuc.size) return; // sin un RUC válido no hay identidad que afirmar
+  try {
+    const { data, error } = await sb.from("combustible").select("id, grifo").in("id", ids);
+    if (error) return;
+    for (const c of ((data as { id: number; grifo: string | null }[] | null) ?? [])) {
+      const actual = String(c.grifo ?? "").trim();
+      if (actual === razon) continue;
+      const mismaEmpresa = !actual || resolverGrifo({ nombre: actual }, cat).por === "nombre";
+      if (!mismaEmpresa) continue;
+      // Condicional sobre lo leído: si alguien lo cambió entre medio, se respeta.
+      let q = sb.from("combustible").update({ grifo: razon }).eq("id", c.id);
+      q = c.grifo == null ? q.is("grifo", null) : q.eq("grifo", c.grifo);
+      await q;
+    }
+  } catch {
+    // el nombre del grifo es un extra de la conciliación
+  }
 }
