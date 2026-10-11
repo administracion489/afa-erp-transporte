@@ -3,7 +3,7 @@
 // regla vive en lib/escalera-inicio.ts (puro); aquí solo se lee.
 
 import { createClient } from "@supabase/supabase-js";
-import { resumenAvisosConductor, type FilaAviso, type ResumenAvisos } from "@/lib/escalera-inicio";
+import { LARGO_EVIDENCIA_COORDINADOR, resumenAvisosConductor, type FilaAviso, type ResumenAvisos } from "@/lib/escalera-inicio";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -18,7 +18,7 @@ const VACIO: ResumenAvisos = { texto: "", sinEntregar: false, conEstados: false 
  * Best-effort: si la lectura falla, vacío — el aviso al coordinador sale igual, sin la
  * evidencia, en vez de no salir.
  */
-export async function resumenAvisosDeReserva(reservaId: number, ahoraMs = Date.now(), maxLargo = 260): Promise<ResumenAvisos> {
+export async function resumenAvisosDeReserva(reservaId: number, ahoraMs = Date.now(), maxLargo = LARGO_EVIDENCIA_COORDINADOR): Promise<ResumenAvisos> {
   try {
     // `*` y no una lista: las columnas de entrega son de una migración accesoria
     // (alertas-escalera-inicio.sql) y pedirlas por nombre tumbaría la consulta sin ella.

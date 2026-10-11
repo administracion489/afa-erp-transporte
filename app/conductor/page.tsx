@@ -1324,6 +1324,10 @@ export default function ConductorApp() {
   const [hojaPush, setHojaPush] = useState(false);
   const [activandoPush, setActivandoPush] = useState(false);
   const [errorPush, setErrorPush] = useState(false);
+  // «Probar» (Perfil → Notificaciones): la prueba sale a los pocos segundos, para bloquear el
+  // teléfono y verla como llega de verdad. El texto de abajo dice qué pasó.
+  const [probandoPush, setProbandoPush] = useState(false);
+  const [pruebaPush, setPruebaPush] = useState<{ texto: string; ok: boolean } | null>(null);
 
   // Lee el estado REAL del aparato y, si el permiso ya está dado, suscribe sin preguntar nada.
   const leerEstadoPush = useCallback(async (): Promise<EstadoPushConductor> => {
@@ -1379,6 +1383,25 @@ export default function ConductorApp() {
       if (estado === "activo") setHojaPush(false);
     } finally {
       setActivandoPush(false);
+    }
+  }
+
+  async function probarNotificacion() {
+    setProbandoPush(true);
+    setPruebaPush(null);
+    try {
+      const r = await pushApi("probar_push");
+      if (r?.ok) {
+        const s = Number(r.enSegundos) || 10;
+        setPruebaPush({ ok: true, texto: `Bloquea el teléfono: en ${s} segundos te llega una notificación de prueba, sonando como los avisos de inicio.` });
+      } else {
+        setPruebaPush({ ok: false, texto: r?.error || "No se pudo enviar la prueba." });
+        if (r?.sinSuscripcion) setPushEstado("inactivo");
+      }
+    } catch (e) {
+      setPruebaPush({ ok: false, texto: e instanceof Error ? e.message : "No se pudo enviar la prueba." });
+    } finally {
+      setProbandoPush(false);
     }
   }
 
@@ -5401,7 +5424,28 @@ export default function ConductorApp() {
                     Activar
                   </button>
                 )}
+                {pushEstado === "activo" && conductor?._token && (
+                  <button
+                    onClick={probarNotificacion}
+                    disabled={probandoPush}
+                    style={{
+                      background: "none", border: "none", cursor: probandoPush ? "default" : "pointer",
+                      color: "var(--c-navy)", fontWeight: 700, fontSize: 13, fontFamily: FONT_SANS,
+                      opacity: probandoPush ? 0.5 : 1,
+                    }}
+                  >
+                    {probandoPush ? "Enviando…" : "Probar"}
+                  </button>
+                )}
               </div>
+              {pruebaPush && (
+                <p style={{
+                  margin: "10px 0 0", fontSize: 12, lineHeight: 1.4,
+                  color: pruebaPush.ok ? "var(--c-navy)" : "#b91c1c",
+                }}>
+                  {pruebaPush.texto}
+                </p>
+              )}
             </div>
 
             {/* Cambiar PIN */}

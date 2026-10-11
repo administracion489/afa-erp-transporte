@@ -513,7 +513,8 @@ async function handler(req: NextRequest) {
     }
 
     // ── BLOQUE 3c: alerta PREVIA al Coordinador (antes de la hora) — el conductor ya
-    //    recibió 2 recordatorios (90/30 min) y sigue sin iniciar el recorrido en la
+    //    recibió el aviso de 90 min (y el de 30, si su tarjeta está encendida — el dueño lo
+    //    apagó el 11-10-2026) y sigue sin iniciar el recorrido en la
     //    app (sin GPS, sin confirmar salida). A diferencia de "no_inicio" (que dispara
     //    DESPUÉS de la hora), esta es la escalada PREVENTIVA para que Operaciones
     //    pueda llamarlo antes de que el servicio arranque tarde. Reusa la plantilla
