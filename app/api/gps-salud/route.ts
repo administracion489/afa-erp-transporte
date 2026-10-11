@@ -129,8 +129,9 @@ export async function GET(req: NextRequest) {
     const medir = async (r: any) => {
       let t: Punto[] = [];
       let totalCrudo = 0, porAntena = 0, simulados = 0;
+      let cierreTs: number | null = null;
       let fallo: string | null = null;
-      try { const tz = await trazaDe(r.id); t = tz.pts; totalCrudo = tz.totalCrudo; porAntena = tz.porAntena; simulados = tz.simulados; } catch (e: any) { fallo = e?.message ?? "error al leer la traza"; }
+      try { const tz = await trazaDe(r.id); t = tz.pts; totalCrudo = tz.totalCrudo; porAntena = tz.porAntena; simulados = tz.simulados; cierreTs = tz.cierreTs ?? null; } catch (e: any) { fallo = e?.message ?? "error al leer la traza"; }
       const base = { ...quien(r), reservaId: r.id, fecha: r.fecha_servicio, hora: r.hora_servicio, origen: r.origen, destino: r.destino };
 
       // Ventana del servicio: del primer punto hasta la hora prevista de llegada (o el último
@@ -141,7 +142,9 @@ export async function GET(req: NextRequest) {
         // con todos los puntos descartados. Distinto de "no emitió nada".
         return { ...base, puntos: t.length, puntosCrudos: totalCrudo, pctAntena, simulados, durMin: 0, cobertura: totalCrudo ? 0 : null, cortes: 0, peorHuecoMin: 0, kmACiegas: 0, fallo };
       }
-      const m = medirCobertura({ pts: t, destino: destinoDe.get(r.id) ?? null, finPrevistoTs: finPrevisto.get(r.id) ?? null })!;
+      // `cierreTs`: si el conductor cerró antes de la llegada prevista con el GPS vivo, la ventana
+      // termina en su cierre — el mismo número que la columna Rastreo de /seguimiento.
+      const m = medirCobertura({ pts: t, destino: destinoDe.get(r.id) ?? null, finPrevistoTs: finPrevisto.get(r.id) ?? null, cierreTs })!;
       return {
         ...base,
         puntos: t.length,

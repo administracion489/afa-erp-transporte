@@ -381,6 +381,7 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
         pregunta: "¿Qué mide la columna Rastreo y el aviso «unidades con rastreo incompleto»?",
         respuesta:
           "**Qué parte del tiempo del servicio llegó posición GPS**, desde que el conductor lo inicia hasta que llega al último paradero. No mide el tramo entre la primera y la última señal: si el teléfono deja de transmitir a los 3 minutos de una ruta de 55, el servicio sale con un 5 %, no con un 100 %.\n\n" +
+          "Si el conductor **cierra el servicio antes** desde su app (por ejemplo, ya no quedaban pasajeros en los últimos paraderos), la medición termina en ese cierre y no en la llegada prevista: después de Finalizar la app deja de transmitir a propósito, y eso no es un GPS malo. Pasa el cursor sobre el porcentaje y te dice de dónde sale el final: el cierre del conductor, la última parada que marcó o la hora prevista.\n\n" +
           "• **Completo** (95 % o más) y **Aceptable** (90 %) — el viaje se puede reconstruir.\n" +
           "• **Con cortes** (70 a 89 %) — hubo huecos de señal.\n" +
           "• **Incompleto** (menos de 70 %) — el viaje no se puede reconstruir.\n" +
