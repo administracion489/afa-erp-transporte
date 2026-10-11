@@ -23,7 +23,10 @@ import { registrarLectura, contextoOdometro, contextoDeRecarga, juzgarKmDeRecarg
 import { elegirOdometro, type VeredictoOdometro } from "@/lib/odometro-seleccion";
 import { kmDeRecarga } from "./km-recarga";
 import { capturaDeRecarga } from "@/lib/odometro-tiempo";
-import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
+import {
+  revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio,
+  precioSegunImporte, toleranciaCuadre, umbralImporteInconsistente,
+} from "./coherencia-voucher";
 import {
   familiaCombustible, capacidadTanqueDe,
   tipoDeEtiquetaPrecio, precioReferencialDe, revisarPrecioUnitario, unidadDeCarga,
@@ -36,6 +39,9 @@ import {
 } from "./album-recargas";
 import { revisarFechaVoucher } from "./fecha-voucher";
 import { insertarFilaRadar, avisoColumnasQuitadas } from "./guardado-radar";
+import { faltaAlguna } from "@/lib/columna-faltante";
+import { resolverGrifo, grifoPorRuc, type CatalogoGrifos } from "@/lib/combustible/grifo-canonico";
+import { catalogoGrifosMemo } from "@/lib/combustible/grifo-canonico-datos";
 import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
 import {
   resolverIdentidadGrifo,
@@ -744,6 +750,10 @@ async function insertarRecargasAdicionales(
     /** Fecha Lima del ENVÍO del mensaje: contra ella se juzga la fecha de cada voucher. */
     fechaMensaje: string | null;
     grifoPorDefecto: string | null;
+    /** RUC del grifo del voucher principal (ya validado), para las notas de la misma estación. */
+    rucPorDefecto: string | null;
+    /** Para que el grifo de cada nota extra quede con el MISMO nombre canónico que el principal. */
+    catalogoGrifos: CatalogoGrifos;
     fotos: { url: string; mime: string | null; nombre: string | null }[];
     conductor: string | null;
     proveedor: string | null;
@@ -759,6 +769,8 @@ async function insertarRecargasAdicionales(
       // La fecha de cada voucher del álbum se juzga igual que la del principal: un año mal leído
       // en el segundo voucher es tan probable como en el primero.
       const vFecha = r.fecha ? revisarFechaVoucher({ leida: r.fecha, fechaMensaje: ctx.fechaMensaje }) : null;
+      // Una identidad por empresa también en las notas extra (lib/combustible/grifo-canonico.ts).
+      const g = r.grifo ? resolverGrifo({ nombre: r.grifo }, ctx.catalogoGrifos) : null;
       await insertarFilaRadar(sb, {
         mensaje_id: ctx.mensajeId,
         placa: placaFormato(r.placa) ?? veh?.placa ?? terc?.placa ?? null,
@@ -768,7 +780,8 @@ async function insertarRecargasAdicionales(
         hora: r.hora,
         // El grifo del álbum es el mismo salvo que el voucher diga otro: son notas de la
         // misma ráfaga, casi siempre de la misma estación.
-        grifo: r.grifo ?? ctx.grifoPorDefecto,
+        grifo: g ? g.nombre : ctx.grifoPorDefecto,
+        ruc_grifo: g ? g.ruc : ctx.rucPorDefecto,
         tipo_combustible: r.tipoCombustible,
         galones: r.galones,
         litros: r.litros,
@@ -959,17 +972,33 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   // hasta AFA TOURS PERÚ S.A.C. El ERP tiene la evidencia que el modelo no puede tener: sabe
   // cómo se llama y quiénes son sus tercerizadas, y ninguna puede venderle combustible a AFA
   // en su propio voucher. Ver lib/radar/identidad-voucher.ts.
-  // `radar_combustible` no guarda el RUC, así que del resultado solo se aplican el nombre y la
-  // dirección; el RUC entra igual porque es la otra mitad de la prueba (el nombre puede estar
-  // bien y el RUC salir del bloque del cliente, y ahí lo que sobra es la dirección).
+  // El RUC entra porque es la otra mitad de la prueba (el nombre puede estar bien y el RUC salir del
+  // bloque del cliente, y ahí lo que sobra es la dirección); el que sobrevive se valida abajo y se
+  // guarda en `radar_combustible.ruc_grifo`.
+  // El catálogo de grifos (RUC → razón social de su factura SUNAT) entra acá dos veces: para NOMBRAR
+  // al grifo por su RUC cuando el nombre leído resultó ser el del comprador, y para que la misma
+  // empresa quede escrita UNA sola forma (ver abajo).
+  const catGrifos = await catalogoGrifosMemo(sb);
   const identidad = resolverIdentidadGrifo(
     { grifo, proveedor, ruc: d.ruc ?? null, direccionGrifo, clienteEnNota: d.cliente_en_nota ?? null },
-    await cargarEmpresasConocidas(sb)
+    await cargarEmpresasConocidas(sb),
+    { grifoPorRuc: (r) => grifoPorRuc(catGrifos, r) }
   );
   grifo = identidad.grifo;
   proveedor = identidad.proveedor;
   direccionGrifo = identidad.direccionGrifo;
   if (identidad.anomalia) anomalias.push(identidad.anomalia);
+
+  // UNA IDENTIDAD POR EMPRESA (lib/combustible/grifo-canonico.ts). «COESTI», «COESTI S.A.» y
+  // «CORATI SA COESTI» son la misma empresa, y «Por grifo» y el saldo de la cuenta las partían en
+  // tres. El RUC del encabezado manda (11 cifras con dígito verificador) y el nombre que se guarda es
+  // la razón social de su factura SUNAT; sin RUC, el nombre leído que contiene esa razón social. Y si
+  // la IA dejó el grifo en blanco pero leyó el RUC —la CWZ-371 del 11/10, con «COESTI S.A. - RUC:
+  // 20127765279» legible en el papel—, el grifo sale del RUC.
+  const grifoRes = resolverGrifo({ nombre: grifo ?? proveedor, ruc: identidad.ruc }, catGrifos);
+  grifo = grifoRes.nombre;
+  const rucGrifo = grifoRes.ruc;
+  if (grifoRes.por === "ruc" || grifoRes.por === "nombre") proveedor = grifoRes.nombre;
 
   // Guard determinista (no confiar solo en el prompt): "16.3 L/100km" es una TASA de consumo,
   // no una cantidad cargada. 16.3 es un galonaje plausible → sin este freno pasaría todos los
@@ -1019,6 +1048,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   // La corrección NUNCA auto-registra (bloquea: true): es una propuesta que una persona
   // confirma contra la foto, con el número ya puesto en el formulario.
   const cantidadIA = cantidad; // lo que la IA extrajo, antes de que el cuadre lo toque
+  const montoLeido = monto;    // el importe impreso, para medir si el descuadre cae en la banda fina
   const cuadre = revisarCoherenciaVoucher({
     cantidad,
     precio: precioUnit,
@@ -1048,11 +1078,40 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       // (`precioFinal = monto / cantidad` en el auto-registro, y `combustible.total` es una
       // columna generada): mandar a revisión lo que antes pasaba solo sería castigar al
       // operador con cola nueva por hacer explícita una cuenta que ya se hacía.
-      bloquea: cuadre.estado === "corregible" || corr.campo === "cantidad",
+      // La BANDA FINA: un precio corregido cuyo descuadre cabía en la tolerancia vieja (4 por mil)
+      // no bloquea. Esos vouchers se registraban solos con el precio mal leído —la tolerancia los
+      // daba por buenos— y corregirlos solo alinea el gasto con el importe impreso: mandarlos ahora
+      // a revisión sería cola nueva por céntimos. La cantidad y el importe corregidos SÍ bloquean.
+      bloquea:
+        corr.campo === "cantidad" ||
+        (cuadre.estado === "corregible" &&
+          !(corr.campo === "precio" && montoLeido != null && Math.abs(cuadre.diferencia ?? Infinity) <= toleranciaCuadre(montoLeido))),
       correccion: { campo: corr.campo, leido: corr.leido, corregido: corr.corregido, unidad: unidadCant },
     });
   } else if (cuadre.estado === "ambiguo") {
     anomalias.push({ codigo: "cuadre_ambiguo", detalle: cuadre.detalle, bloquea: true });
+  } else {
+    // EL IMPORTE MANDA SOBRE EL PRECIO (lib/radar/coherencia-voucher.ts → precioSegunImporte). Un
+    // descuadre que ningún dígito explica y que no llega a `monto_inconsistente` pasaba en silencio
+    // con el precio LEÍDO, y como `combustible.total` es galones × precio, el gasto guardado no era
+    // el del comprobante: la CWZ-371 del 11/10 entró a S/ 259.39 con el papel diciendo S/ 260.23,
+    // porque la IA copió el precio del ejemplo del prompt. Ahora se guarda el precio que reproduce
+    // el importe. No bloquea —es la cuenta que el ERP ya hace con un precio no leído— pero se ve.
+    const ajuste = precioSegunImporte(
+      { cantidad, precio: precioUnit, monto, unidad: unidadCant },
+      cuadre
+    );
+    if (ajuste) {
+      precioUnit = ajuste.precio;
+      if (esLitros) precioLitroFila = ajuste.precio;
+      else precioGalonFila = ajuste.precio;
+      anomalias.push({
+        codigo: "precio_segun_importe",
+        detalle: ajuste.detalle,
+        bloquea: false,
+        correccion: { campo: "precio", leido: ajuste.leido, corregido: ajuste.precio, unidad: unidadCant },
+      });
+    }
   }
 
   // La transcripción literal ("8.799x" copiado del papel) es una SEGUNDA lectura del mismo
@@ -1379,7 +1438,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   //    Si el cuadre corrigió, los números de acá ya cuadran y esta anomalía no se levanta.
   if (cuadre.estado === "descuadra") {
     const calc = cantidad! * precioUnit!;
-    if (Math.abs(calc - monto!) > Math.max(2, 0.05 * monto!)) {
+    if (Math.abs(calc - monto!) > umbralImporteInconsistente(monto!)) {
       anomalias.push({ codigo: "monto_inconsistente", detalle: cuadre.detalle });
     }
   }
@@ -1457,6 +1516,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     fecha,
     hora: d.hora ?? null,
     grifo,
+    // El RUC del vendedor, validado (columna de combustible-07-ruc-grifo-radar.sql): el panel de
+    // revisión lo pasa a `combustible.ruc_proveedor` al registrar, que es con lo que el saldo de la
+    // cuenta reconoce sus cargas sin depender de cómo se escribió el nombre.
+    ruc_grifo: rucGrifo,
     // La ya resuelta, no la cruda: cuando el "grifo" resultó ser el comprador, esta dirección
     // salía del mismo bloque "RAZ.SOC / RUC / DIRECC" y es la del cliente, no la de la estación.
     direccion_grifo: direccionGrifo,
@@ -1504,9 +1567,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       (d.comprobante ? ` · Comprobante ${d.comprobante}` : "") +
       (direccionGrifo ? ` · ${direccionGrifo}` : "");
 
-    const { data: comb, error: errComb } = await sb
-      .from("combustible")
-      .insert({
+    const payloadCarga: Record<string, unknown> = {
         vehiculo_id: veh!.id,
         fecha,
         kilometraje: km ?? 0,
@@ -1520,9 +1581,16 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
         // "litros" : "galones"` que había aquí rotulaba en GALONES cada carga de GNV —el
         // 70 % de la flota— con un número que son METROS CÚBICOS.
         unidad: unidadDeCarga(tipoComb, esLitros ? "litros" : "galones"),
-      })
-      .select("id")
-      .single();
+        // El RUC del grifo: el saldo de la cuenta prepago reconoce sus cargas por él
+        // (lib/combustible/saldo-cuenta.ts → perteneceACuenta). Columna de finanzas-02: si falta,
+        // se suelta y la carga entra igual.
+        ruc_proveedor: rucGrifo,
+    };
+    let { data: comb, error: errComb } = await sb.from("combustible").insert(payloadCarga).select("id").single();
+    if (errComb && faltaAlguna(errComb, ["ruc_proveedor"])) {
+      const { ruc_proveedor: _sinRuc, ...sinRuc } = payloadCarga;
+      ({ data: comb, error: errComb } = await sb.from("combustible").insert(sinRuc).select("id").single());
+    }
     if (errComb) throw new Error(`combustible: ${errComb.message}`);
     const combustibleId = Number((comb as any)?.id);
 
@@ -1609,6 +1677,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     fechaPorDefecto: fecha,
     fechaMensaje,
     grifoPorDefecto: grifo,
+    rucPorDefecto: rucGrifo,
+    catalogoGrifos: catGrifos,
     fotos: fotosEvidencia,
     conductor: conductorNombre,
     proveedor,

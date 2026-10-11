@@ -86,11 +86,50 @@ export type CoherenciaVoucher = {
 // ── Tolerancia ───────────────────────────────────────────────────────────────
 // El voucher imprime el importe redondeado a céntimos y el precio a 3 decimales, así
 // que el producto nunca da exacto: 8.799 × 24.640 = 216.80736 y el papel dice 216.81.
-// 4 por mil (con piso de 5 céntimos) absorbe ese redondeo y sigue detectando un dígito
-// mal leído, que mueve el importe mucho más que eso.
+//
+// HAY DOS TOLERANCIAS Y HACEN TRABAJOS DISTINTOS.
+//  · `toleranciaRedondeo` decide si el voucher CUADRA: lo único que puede separar el producto del
+//    importe sin que nada esté mal leído es el redondeo de los tres números. Se acota con la mitad
+//    de la SEGUNDA cifra decimal de la cantidad y del precio (holgada a propósito: un precio impreso
+//    con 2 decimales, o una cantidad que la IA devolvió redondeada a 2, siguen cuadrando) más medio
+//    céntimo del importe.
+//  · `toleranciaCuadre` (4 por mil, piso de 5 céntimos) era la que decidía lo anterior, y era
+//    demasiado ancha: en una carga de S/ 260 dejaba pasar S/ 1.04. La nota de la CWZ-371 del
+//    11/10/2026 imprimía `10.527x 24.720 = 260.23` y la IA leyó el precio como 24.64 —el del ejemplo
+//    del prompt—: 10.527 × 24.64 = 259.39, ochenta y cuatro céntimos menos, «cuadraba», y la carga
+//    se guardó con el precio de otra nota y S/ 0.84 menos de gasto (combustible.total es
+//    galones × precio). Ahora solo marca la «banda fina»: lo que antes se daba por bueno y hoy se
+//    corrige sin mandar a revisión (ver acciones.ts).
 
 export const TOLERANCIA_MINIMA = 0.05;
 export const TOLERANCIA_RELATIVA = 0.004;
+
+/** Media unidad de la segunda cifra decimal: lo más que se mueve un número al redondearlo a 2. */
+export const MEDIA_UNIDAD_REDONDEO = 0.005;
+/** Piso de la tolerancia de redondeo (céntimos de holgura para la aritmética en coma flotante). */
+export const TOLERANCIA_REDONDEO_MIN = 0.02;
+
+/**
+ * Cuánto pueden separarse `cantidad × precio` y el importe impreso SOLO por redondeo: medio céntimo
+ * del importe, más lo que mueve redondear la cantidad y el precio a 2 decimales (cada uno pesa por el
+ * otro). Más allá de esto algún número está mal leído —o el grifo hizo un descuento—, aunque la
+ * diferencia sea de céntimos.
+ */
+export function toleranciaRedondeo(cantidad: number, precio: number): number {
+  return Math.max(
+    TOLERANCIA_REDONDEO_MIN,
+    MEDIA_UNIDAD_REDONDEO + MEDIA_UNIDAD_REDONDEO * (Math.abs(cantidad) + Math.abs(precio))
+  );
+}
+
+/**
+ * Desde cuánto un descuadre que ningún dígito explica es `monto_inconsistente` (bloquea) en vez de
+ * corregirse tomando el importe como el dato que manda. Vivía en acciones.ts como un literal; está
+ * aquí porque `precioSegunImporte` lo usa de techo y las dos reglas tienen que decir lo mismo.
+ */
+export function umbralImporteInconsistente(monto: number): number {
+  return Math.max(2, 0.05 * Math.abs(monto));
+}
 
 // ── Qué tan cerca del precio referencial hay que estar para que cuente como evidencia ────
 // Las usa `detectarInversionCantidadPrecio` (¿el precio y la cantidad están cambiados?) y
@@ -254,8 +293,8 @@ export function revisarCoherenciaVoucher(l: LecturaVoucher): CoherenciaVoucher {
 
   const producto = redondear(cantidad! * precio!, 2);
   const diferencia = redondear(producto - monto!, 2);
-  const tol = toleranciaCuadre(monto!);
-  if (Math.abs(diferencia) <= tol) {
+  // Con el producto SIN redondear: redondear a céntimos antes de comparar le regala medio céntimo.
+  if (Math.abs(cantidad! * precio! - monto!) <= toleranciaRedondeo(cantidad!, precio!)) {
     return { estado: "cuadra", producto, diferencia, correccion: null, candidatos: [], detalle: "" };
   }
 
@@ -285,7 +324,7 @@ export function revisarCoherenciaVoucher(l: LecturaVoucher): CoherenciaVoucher {
         h.campo === "cantidad" ? [corregido, precio!, monto!]
         : h.campo === "precio" ? [cantidad!, corregido, monto!]
         : [cantidad!, precio!, corregido];
-      if (Math.abs(trio[0] * trio[1] - trio[2]) > toleranciaCuadre(trio[2])) continue;
+      if (Math.abs(trio[0] * trio[1] - trio[2]) > toleranciaRedondeo(trio[0], trio[1])) continue;
 
       const err = diferenciaDeLectura(h.leido, corregido);
       if (!err) continue;
@@ -404,6 +443,65 @@ function derivar(
   return null;
 }
 
+// ── EL IMPORTE MANDA SOBRE EL PRECIO ─────────────────────────────────────────
+
+export type AjustePrecio = {
+  /** Lo que leyó la IA. */
+  leido: number;
+  /** El precio que reproduce el importe impreso: importe ÷ cantidad, a 3 decimales. */
+  precio: number;
+  detalle: string;
+};
+
+/** Un precio con hasta 3 decimales, que es como lo imprime el voucher (S/ 24.72, S/ 7.549). */
+const precioTexto = (n: number) =>
+  `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 3 })}`;
+
+/**
+ * Cuando el voucher no cuadra y NINGÚN dígito mal leído lo explica, ¿qué se guarda?
+ *
+ * Hasta ahora, el precio leído. Y `combustible.total` es una columna GENERADA
+ * (`galones × precio_galon`), así que guardar el precio leído es guardar un gasto que no es el del
+ * comprobante: la carga de la CWZ-371 entró a S/ 259.39 con el papel diciendo S/ 260.23, porque el
+ * precio era el del ejemplo del prompt. De los tres números, el IMPORTE es el que manda: es el dato
+ * del comprobante (se imprime dos veces, en la línea y en el TOTAL, y el surtidor lo muestra), es lo
+ * que se pagó, y el prompt ya le pide a la IA usarlo como valor oficial. Entonces el precio que se
+ * guarda es el que lo reproduce: importe ÷ cantidad.
+ *
+ * Eso es mejor en los tres casos que producen un descuadre así —un precio mal leído en más de un
+ * dígito, una cantidad mal leída en más de uno, o un descuento del grifo—: en los tres el gasto
+ * queda igual al comprobante, y en el tercero el precio guardado es el que de verdad se pagó. Solo
+ * empeoraría con un IMPORTE mal leído en dos cifras a la vez, y es el número más redundante del papel.
+ *
+ * Por debajo de `umbralImporteInconsistente`, que es exactamente donde hasta hoy el descuadre pasaba
+ * en SILENCIO con el precio leído. Por encima, sigue siendo `monto_inconsistente` y lo decide una
+ * persona. No bloquea —es la misma cuenta que el ERP ya hace con un precio que no se leyó (`dato_derivado`)—
+ * pero queda escrito en la fila, con los dos precios.
+ */
+export function precioSegunImporte(l: LecturaVoucher, r: CoherenciaVoucher): AjustePrecio | null {
+  if (r.estado !== "descuadra") return null;
+  const cantidad = pos(l.cantidad);
+  const precio = pos(l.precio);
+  const monto = pos(l.monto);
+  if (cantidad == null || precio == null || monto == null) return null;
+  const producto = cantidad * precio;
+  const dif = producto - monto;
+  if (Math.abs(dif) > umbralImporteInconsistente(monto)) return null;
+  const nuevo = redondear(monto / cantidad, 3);
+  if (!(nuevo > 0) || nuevo === precio) return null;
+  const unidad = (l.unidad ?? "gal").trim() || "gal";
+  return {
+    leido: precio,
+    precio: nuevo,
+    detalle:
+      `Con el precio leído (${precioTexto(precio)}) el voucher no cuadra: ${conUnidad(cantidad, unidad)} × ${precioTexto(precio)} = ` +
+      `${soles(redondear(producto, 2))} contra ${soles(monto)} impresos (${soles(Math.abs(redondear(dif, 2)))} de diferencia), ` +
+      `y ningún dígito mal leído lo explica. El importe es el dato del comprobante —se imprime dos veces y es lo que se pagó—, ` +
+      `así que manda: se guardó el precio que lo reproduce, ${precioTexto(nuevo)} (${soles(monto)} ÷ ${conUnidad(cantidad, unidad)}). ` +
+      `Si fue un descuento del grifo, ese es el precio efectivo; si la mal leída fue la cantidad, el precio también lo está: compruébalo contra la foto.`,
+  };
+}
+
 // ── La inversión que el cuadre NO puede ver ──────────────────────────────────
 
 export type InversionVoucher = {
@@ -457,6 +555,26 @@ export function detectarInversionCantidadPrecio(
       `así que lo despachado son ${p} ${unidad} a ${soles(c)}. El cuadre no lo detecta solo: ` +
       `${c} × ${p} da el mismo total que ${p} × ${c}. Se corrigió — confírmalo contra la foto.`,
   };
+}
+
+/**
+ * Cómo se equivocó una lectura numérica, dicho SIN los números: es lo que viaja al prompt como
+ * lección (lib/radar/lecciones-combustible.ts). Un «lo correcto era 24.720» en el prompt es un
+ * precio que el modelo copia en el voucher siguiente — el mismo eco que dejó una carga a S/ 24.64
+ * por el ejemplo de las instrucciones. «Un solo dígito distinto (6→8)» enseña el error y no deja
+ * nada que copiar. `null` si no hay UN error de lectura que lo explique.
+ */
+export function errorDeLecturaSinCifras(leido: number, correcto: number): string | null {
+  if (!(leido > 0) || !(correcto > 0)) return null;
+  const e = diferenciaDeLectura(leido, correcto);
+  if (!e) return null;
+  if (e.tipo === "decimal") return "el punto decimal quedó corrido";
+  if (e.tipo === "digito") {
+    const m = /^(\d)→(\d)$/.exec(e.cambio);
+    return m ? `un solo dígito distinto (leíste un ${m[1]} donde el papel decía ${m[2]})` : "un solo dígito distinto";
+  }
+  // "sobra la cifra "9"" / "falta la cifra "2"": una cifra suelta no es un número copiable.
+  return e.tipo === "digito_de_mas" ? `una cifra de más (${e.cambio})` : `una cifra de menos (${e.cambio})`;
 }
 
 /** ¿`leido` y `corregido` se explican por UN error de lectura? */

@@ -157,7 +157,20 @@ export type ResolucionIdentidad = {
  *  - El nombre del grifo está bien pero el RUC es el del comprador → se suelta solo el RUC y
  *    la dirección, sin bloquear: el gasto está bien imputado, solo sobra un dato del cliente.
  */
-export function resolverIdentidadGrifo(l: IdentidadLeida, conocidas: EmpresasConocidas): ResolucionIdentidad {
+export function resolverIdentidadGrifo(
+  l: IdentidadLeida,
+  conocidas: EmpresasConocidas,
+  opts: {
+    /**
+     * Razón social del GRIFO al que pertenece un RUC, si el ERP ya lo conoce como vendedor de
+     * combustible (lib/combustible/grifo-canonico.ts: las facturas SUNAT, la cuenta prepago y las
+     * cargas). Es lo que permite NOMBRAR al grifo cuando el nombre leído resultó ser el del
+     * comprador: el RUC del encabezado sobrevive aunque el nombre no. Sin él, el comportamiento es
+     * el de siempre (se deja en blanco).
+     */
+    grifoPorRuc?: (ruc: string) => string | null;
+  } = {}
+): ResolucionIdentidad {
   const intacto: ResolucionIdentidad = {
     grifo: l.grifo,
     proveedor: l.proveedor,
@@ -167,8 +180,57 @@ export function resolverIdentidadGrifo(l: IdentidadLeida, conocidas: EmpresasCon
   };
   if (!conocidas.nombres.length && !conocidas.rucs.length) return intacto;
 
-  const porNombre = esEmpresaConocida(l.grifo, conocidas) ?? esEmpresaConocida(l.proveedor, conocidas);
+  // El grifo y el proveedor se juzgan POR SEPARADO. Antes bastaba con que UNO de los dos fuera el
+  // comprador para borrar los DOS, y el modelo confunde sobre todo el "proveedor" (el campo de la
+  // nota se llama "RAZ.SOC", razón social): con `grifo: "COESTI S.A."` y `proveedor: "AFA TOURS PERÚ
+  // S.A.C."`, el guard tiraba el COESTI que estaba bien y dejaba la carga sin grifo.
+  const grifoEsCliente = esEmpresaConocida(l.grifo, conocidas);
+  const proveedorEsCliente = esEmpresaConocida(l.proveedor, conocidas);
+  const sinGrifo = !String(l.grifo ?? "").trim();
+  const porNombre = grifoEsCliente ?? (sinGrifo ? proveedorEsCliente : null);
   const rucDelCliente = esRucConocido(l.ruc, conocidas);
+
+  if (!porNombre && proveedorEsCliente) {
+    // El grifo leído es otra empresa y solo el proveedor es el comprador: se suelta el proveedor
+    // (sale del bloque "RAZ.SOC") y el grifo se queda. El gasto está bien imputado: no bloquea.
+    return {
+      grifo: l.grifo,
+      proveedor: l.grifo,
+      ruc: rucDelCliente ? null : l.ruc,
+      direccionGrifo: rucDelCliente ? null : l.direccionGrifo,
+      anomalia: {
+        codigo: "cliente_como_grifo",
+        detalle:
+          `"${String(l.proveedor).trim()}" es ${quienEs(proveedorEsCliente, conocidas)}: en la nota es el CLIENTE ("RAZ.SOC"), ` +
+          `no el proveedor. Se conservó el grifo leído del encabezado ("${String(l.grifo).trim()}")` +
+          `${rucDelCliente ? " y se soltó el RUC, que era el del cliente" : ""}.`,
+        bloquea: false,
+      },
+    };
+  }
+
+  // El RUC del encabezado sobrevive al nombre equivocado si es el de un grifo que el ERP conoce.
+  const rucLeido = soloDigitos(l.ruc);
+  const grifoDelRuc = porNombre && !rucDelCliente && rucLeido.length === 11 ? opts.grifoPorRuc?.(rucLeido) ?? null : null;
+  if (porNombre && grifoDelRuc) {
+    const nombreLeido = (l.grifo ?? l.proveedor ?? porNombre).trim();
+    return {
+      grifo: grifoDelRuc,
+      proveedor: grifoDelRuc,
+      ruc: rucLeido,
+      // La dirección no se puede atribuir: pudo salir del bloque del cliente junto con el nombre.
+      direccionGrifo: null,
+      anomalia: {
+        codigo: "cliente_como_grifo",
+        detalle:
+          `"${nombreLeido}" es ${quienEs(porNombre, conocidas)}: en la nota es el CLIENTE ("RAZ.SOC"), no la estación que vendió. ` +
+          `El grifo se identificó por el RUC del encabezado, ${rucLeido}, que es el de ${grifoDelRuc} en las facturas y cargas del ERP.`,
+        // No bloquea: el vendedor quedó identificado por un dato exacto (11 cifras con su dígito
+        // verificador, que coinciden con un vendedor ya conocido), no por un parecido.
+        bloquea: false,
+      },
+    };
+  }
 
   if (porNombre) {
     const nombreLeido = (l.grifo ?? l.proveedor ?? porNombre).trim();

@@ -17,8 +17,14 @@ import {
   revisarCoherenciaVoucher,
   numeroDeTranscripcion,
   toleranciaCuadre,
+  toleranciaRedondeo,
+  umbralImporteInconsistente,
+  precioSegunImporte,
+  errorDeLecturaSinCifras,
   detectarInversionCantidadPrecio,
 } from "../lib/radar/coherencia-voucher";
+import { textoLeccion } from "../lib/radar/lecciones-combustible";
+import { promptExtraccionMedia, promptExtraccion } from "../lib/radar/prompts";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -240,6 +246,129 @@ const chk = (nombre: string, ok: boolean, extra = "") => {
 {
   // El precio dentro de rango nunca es inversión, aunque la cantidad se parezca al referencial.
   chk("precio dentro de rango no se toca", detectarInversionCantidadPrecio(7.1, 7.4, 7.0) === null);
+}
+
+// ── 20. EL CASO CWZ-371 (11/10/2026): el precio del EJEMPLO del prompt ─────
+// La nota imprimía `040002019 UGL 10.527x 24.720` y `MAX-D DIESEL B5 S50 UV 260.23`, con el surtidor
+// diciendo 260.23 y 10.527. La IA guardó el precio a S/ 24.64 —el `24.640` de la nota de ejemplo que
+// el prompt enseñaba dos veces, mismo grifo y misma línea—. 10.527 × 24.64 = 259.39: ochenta y cuatro
+// céntimos que la tolerancia de 4 por mil (S/ 1.04 en S/ 260) daba por buenos, y la carga quedó con el
+// precio de otra nota y S/ 0.84 menos de gasto (combustible.total = galones × precio).
+{
+  const caso = { cantidad: 10.527, precio: 24.64, monto: 260.23 };
+  // El defecto, conservado: con la tolerancia vieja ESTO CUADRABA. Si deja de ser así, el escenario
+  // dejó de ser el que se rompió.
+  chk("regresión: con la tolerancia vieja (4 por mil) la diferencia pasaba como cuadre",
+    Math.abs(caso.cantidad * caso.precio - caso.monto) <= toleranciaCuadre(caso.monto));
+  const r = revisarCoherenciaVoucher(caso);
+  chk("ahora NO cuadra: el redondeo no explica 84 céntimos", r.estado !== "cuadra", r.estado);
+  chk("ningún dígito mal leído lo explica (24.64 → 24.72 son dos cifras)", r.estado === "descuadra", r.estado);
+  const aj = precioSegunImporte(caso, r);
+  chk("el importe manda: se guarda el precio que lo reproduce", aj?.precio === 24.72, String(aj?.precio));
+  chk("y se conserva lo que leyó la IA", aj?.leido === 24.64);
+  chk("el precio nuevo reproduce el importe dentro del redondeo",
+    aj != null && Math.abs(caso.cantidad * aj.precio - caso.monto) <= toleranciaRedondeo(caso.cantidad, aj.precio));
+  chk("el detalle nombra los dos precios y el importe", !!aj && aj.detalle.includes("24.64") && aj.detalle.includes("24.72") && aj.detalle.includes("260.23"));
+  console.log(`        ${aj?.detalle}`);
+}
+
+// ── 21. UN VOUCHER BIEN LEÍDO NUNCA DEJA DE CUADRAR (el lado que no se puede aflojar) ──
+// Apretar la tolerancia no puede mandar a revisión una lectura buena. Se barren cantidades con 3
+// decimales y precios con 2 y 3, el importe redondeado a céntimos como lo imprime el papel, y además
+// la cantidad y el precio que la IA devuelve REDONDEADOS a 2 decimales (o sin los ceros del final).
+{
+  let casos = 0, falsos = 0;
+  const ejemplo: string[] = [];
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const r3 = (n: number) => Math.round(n * 1000) / 1000;
+  for (let c = 0.731; c < 120; c = r3(c * 1.173 + 0.389)) {
+    for (const p of [1.69, 1.739, 6.99, 7.549, 7.55, 14.5, 16.5, 23.88, 24.64, 24.72, 25.739, 26.1]) {
+      const monto = r2(c * p);
+      for (const [cl, pl] of [[c, p], [r2(c), p], [c, r2(p)], [r2(c), r2(p)]]) {
+        casos++;
+        const v = revisarCoherenciaVoucher({ cantidad: cl, precio: pl, monto });
+        if (v.estado !== "cuadra") { falsos++; if (ejemplo.length < 3) ejemplo.push(`${cl}×${pl} vs ${monto}: ${v.estado}`); }
+      }
+    }
+  }
+  chk(`ninguna lectura buena deja de cuadrar (${casos} combinaciones)`, falsos === 0 && casos > 1000, `${falsos} falsas · ${ejemplo.join(" | ")}`);
+}
+
+// ── 22. LA BANDA FINA: lo que antes «cuadraba» y era un dígito mal leído ────
+{
+  // El precio 24.720 leído como 24.70 (un solo dígito): S/ 0.21 en S/ 260, dentro de la tolerancia vieja.
+  const caso = { cantidad: 10.527, precio: 24.7, monto: 260.23 };
+  const r = revisarCoherenciaVoucher(caso);
+  chk("un dígito del precio en la banda fina se corrige", r.estado === "corregible" && r.correccion?.campo === "precio" && r.correccion?.corregido === 24.72,
+    `${r.estado} ${r.correccion?.campo} ${r.correccion?.corregido}`);
+  // acciones.ts NO bloquea un precio corregido cuyo descuadre cabía en la tolerancia vieja: antes se
+  // registraba solo con el precio malo; ahora se registra solo con el bueno.
+  chk("y cae dentro de la tolerancia vieja (por eso no bloquea)", Math.abs(r.diferencia ?? Infinity) <= toleranciaCuadre(caso.monto));
+  // Una cantidad mal leída en la banda fina SÍ bloquea (el galonaje alimenta el rendimiento). Ojo: un
+  // error en la TERCERA cifra decimal de la cantidad cabe en la tolerancia de redondeo (es lo que mueve
+  // una cantidad que la IA devolvió redondeada a 2) y no se puede separar de él; en la segunda, sí.
+  const rc = revisarCoherenciaVoucher({ cantidad: 10.547, precio: 24.72, monto: 260.23 });
+  chk("una cifra de la cantidad en la banda fina también se detecta", rc.estado === "corregible" && rc.correccion?.campo === "cantidad" && rc.correccion?.corregido === 10.527,
+    `${rc.estado} ${rc.correccion?.campo} ${rc.correccion?.corregido}`);
+}
+
+// ── 23. EL IMPORTE MANDA, PERO SOLO HASTA `monto_inconsistente` ─────────────
+{
+  const desc = { cantidad: 10, precio: 15, monto: 145 }; // vale de descuento: S/ 5 en S/ 145
+  const r = revisarCoherenciaVoucher(desc);
+  const aj = precioSegunImporte(desc, r);
+  chk("un descuento del grifo guarda el precio EFECTIVO", aj?.precio === 14.5, String(aj?.precio));
+  chk("el umbral de monto_inconsistente es max(S/ 2, 5 %)", umbralImporteInconsistente(145) === 7.25 && umbralImporteInconsistente(20) === 2);
+  const grande = { cantidad: 10, precio: 15, monto: 120 }; // S/ 30 de diferencia: lo decide una persona
+  chk("por encima del umbral no se toca (es monto_inconsistente)", precioSegunImporte(grande, revisarCoherenciaVoucher(grande)) === null);
+  chk("un voucher que cuadra no se ajusta", precioSegunImporte({ cantidad: 8.799, precio: 24.64, monto: 216.81 }, revisarCoherenciaVoucher({ cantidad: 8.799, precio: 24.64, monto: 216.81 })) === null);
+  chk("una corrección de un dígito tampoco (ya la hizo el cuadre)", precioSegunImporte({ cantidad: 6.799, precio: 24.64, monto: 216.81 }, revisarCoherenciaVoucher({ cantidad: 6.799, precio: 24.64, monto: 216.81 })) === null);
+  chk("sin los tres números no hay ajuste", precioSegunImporte({ cantidad: 10, precio: null, monto: 145 }, revisarCoherenciaVoucher({ cantidad: 10, precio: null, monto: 145 })) === null);
+  // Barrido: todo ajuste reproduce el importe y nunca se aplica fuera del umbral.
+  let malos = 0, ajustes = 0;
+  for (let c = 1.237; c < 80; c *= 1.37) for (let p = 1.5; p < 30; p *= 1.29) for (const f of [0.9, 0.97, 0.995, 1.004, 1.03, 1.2]) {
+    const monto = Math.round(c * p * f * 100) / 100;
+    const l = { cantidad: Math.round(c * 1000) / 1000, precio: Math.round(p * 1000) / 1000, monto };
+    const aj2 = precioSegunImporte(l, revisarCoherenciaVoucher(l));
+    if (!aj2) continue;
+    ajustes++;
+    if (Math.abs(l.cantidad * aj2.precio - monto) > toleranciaRedondeo(l.cantidad, aj2.precio)) malos++;
+    if (Math.abs(l.cantidad * l.precio - monto) > umbralImporteInconsistente(monto)) malos++;
+  }
+  chk(`todo ajuste reproduce el importe y respeta el umbral (${ajustes} ajustes)`, malos === 0 && ajustes > 0, `${malos} malos`);
+}
+
+// ── 24. LAS LECCIONES DE UN NÚMERO SE DICEN SIN EL NÚMERO ────────────────────
+// «Para el precio leíste "24.64" y lo correcto era "24.720"» deja en el prompt un precio que el modelo
+// copia en la nota siguiente. Se describe el ERROR, no el valor.
+{
+  const precio = textoLeccion({ campo: "precio", valor_ia: "24.64", valor_correcto: "24.72", nota: null });
+  chk("la lección del precio no lleva ningún precio", !/24[.,]6|24[.,]7/.test(precio), precio);
+  const cant = textoLeccion({ campo: "galones", valor_ia: "6.799", valor_correcto: "8.799", nota: "lo detectó el cuadre · 6→8" });
+  chk("la del dígito dice cuál, sin el número", cant.includes("leíste un 6 donde el papel decía 8") && !cant.includes("6.799") && !cant.includes("8.799"), cant);
+  const km = textoLeccion({ campo: "kilometraje", valor_ia: "239980", valor_correcto: "23980", nota: "decía 23980 en el tablero" });
+  chk("la del km: una cifra de más, y la nota con sus cifras tapadas", km.includes("una cifra de más") && !km.includes("23980") && !km.includes("239980"), km);
+  const grifo = textoLeccion({ campo: "grifo", valor_ia: "CORATI SA COESTI", valor_correcto: "COESTI S.A.", nota: null });
+  chk("la del grifo sí conserva los nombres (no son números copiables)", grifo.includes("COESTI S.A."), grifo);
+  chk("errorDeLecturaSinCifras: el punto corrido", errorDeLecturaSinCifras(8548, 8.548) === "el punto decimal quedó corrido");
+  chk("errorDeLecturaSinCifras: dos cifras no es UN error", errorDeLecturaSinCifras(24.64, 24.72) === null);
+}
+
+// ── 25. AL PROMPT DEL VOUCHER NO VA NINGÚN NÚMERO DE UNA NOTA REAL ──────────
+// Las cifras de los ejemplos (las notas V72S-00023776 y V87T-00008182, el álbum de las dos placas, los
+// RUC del encabezado y del cliente, el comprobante de muestra) son números que el modelo copia cuando
+// no logra leer la foto — o cuando la nota se parece al ejemplo, que es lo que pasó.
+{
+  const COPIABLES = ["24.640", "24.64", "8.799", "216.81", "8.829", "6.990", "6.99", "61.71", "9.417", "7.550", "7.55",
+    "71.10", "20127765279", "20611105291", "180.03", "240.56", "CTV370", "BUI272", "CTV-370", "BUI-272", "B001-004521", "8.548", "1,234.56"];
+  const enTexto = (t: string) => COPIABLES.filter((n) => t.includes(n));
+  const media = promptExtraccionMedia({ fechaHoy: "2026-10-11", horaAhora: "07:58", guiaVoucher: "en COESTI el precio va a la derecha, hoy 24.720, RUC 20127765279" });
+  chk("el prompt de visión no lleva ninguna cifra de una nota real", enTexto(media).length === 0, enTexto(media).join(", "));
+  chk("…y la guía del operador viaja con sus cifras tapadas", media.includes("##.###") && !media.includes("24.720"));
+  chk("…y sigue enseñando la forma de la línea (con letras)", media.includes("C.CCCx") && media.includes("PP.PPP"));
+  chk("…y dice que el precio sale del papel", /precio unitario se lee del papel/i.test(media));
+  const texto = promptExtraccion("combustible", { fechaHoy: "2026-10-11", horaAhora: "07:58" });
+  chk("el prompt del voucher dictado tampoco", enTexto(texto).length === 0, enTexto(texto).join(", "));
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

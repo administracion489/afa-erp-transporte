@@ -37,6 +37,9 @@ type Combustible = {
   km_salto_motivo?: string | null;
   // Columnas fiscales (finanzas-02): las escribe la conciliación de la factura del correo.
   comprobante_serie?: string | null;
+  // El RUC del grifo (finanzas-02): lo escriben la factura y el Radar. Con él «Por grifo» agrupa la
+  // misma empresa aunque el nombre esté escrito de otra forma (lib/combustible/grifo-canonico.ts).
+  ruc_proveedor?: string | null;
   comprobante_numero?: string | null;
   // Migración accesoria (supabase/combustible-05-hora-carga.sql): la hora del despacho, «HH:MM:SS».
   hora?: string | null;
@@ -48,13 +51,16 @@ type Combustible = {
 // Lo que el Radar IA guarda de la carga que él mismo registró. `combustible` no guarda NADA
 // del Radar (ni el id de la lectura, ni la foto, ni el nº de nota), así que el puente es
 // `radar_combustible.combustible_id` y se lee al revés: del Radar hacia la carga.
-type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?: string | null };
+type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?: string | null; monto_total?: number | null };
 
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo" | "facturas";
 type GranPeriodo = "dia" | "semana" | "mes";
 
 import { coincideTipo, COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
 import { faltaAlguna } from "@/lib/columna-faltante";
+import { construirCatalogoGrifos, claveAgrupacionGrifo, resolverGrifo, rucValido, type FuentesCatalogo } from "@/lib/combustible/grifo-canonico";
+import { cargarFuentesCatalogo } from "@/lib/combustible/grifo-canonico-datos";
+import { toleranciaRedondeo } from "@/lib/radar/coherencia-voucher";
 import { paginarFilas } from "@/lib/huella";
 import { cantidadParaRendimiento,
   seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
@@ -172,8 +178,10 @@ function FotosDelRadar({ fotos, nota, alto = "h-40" }: { fotos: FotoLeida[]; not
 async function cargarLecturasRadar(): Promise<LecturaRadar[]> {
   const pedir = (cols: string) =>
     supabase.from("radar_combustible").select(cols).not("combustible_id", "is", null);
-  let res = await pedir("combustible_id, mensaje_id, comprobante, fotos");
-  if (res.error && /fotos/i.test(res.error.message || "")) res = await pedir("combustible_id, mensaje_id, comprobante");
+  // `monto_total`: el importe que el Radar leyó del voucher, para avisar en «Editar carga» si la
+  // cuenta galones × precio ya no da lo que dice el papel.
+  let res = await pedir("combustible_id, mensaje_id, comprobante, monto_total, fotos");
+  if (res.error && /fotos/i.test(res.error.message || "")) res = await pedir("combustible_id, mensaje_id, comprobante, monto_total");
   if (res.error || !res.data) return [];
   return res.data as unknown as LecturaRadar[];
 }
@@ -276,6 +284,9 @@ export default function CombustiblePage() {
   // papel. `mediaMensajes` es el respaldo de las filas viejas (sin `fotos`) y se pide de a una
   // al abrir la carga: son ids de mensajes, y pedirlos todos de golpe sería una URL kilométrica.
   const [lecturasRadar, setLecturasRadar] = useState<LecturaRadar[]>([]);
+  // Las facturas y la cuenta prepago, para el catálogo de grifos (las cargas ya están en `registros`).
+  const [fuentesGrifo, setFuentesGrifo] = useState<FuentesCatalogo>({});
+  const [unificando, setUnificando] = useState<string | null>(null);
   const [mediaMensajes, setMediaMensajes] = useState<Record<string, MediaDeMensaje>>({});
 
   const fuelCfg = COMBUSTIBLES[form.tipo_combustible] || COMBUSTIBLES.diesel;
@@ -302,6 +313,8 @@ export default function CombustiblePage() {
       supabase.from("conductores").select("id,nombre").order("nombre"),
       cargarLecturasRadar(),
     ]);
+    // Best-effort y aparte: el catálogo de grifos solo nombra y agrupa, no puede retrasar la lista.
+    cargarFuentesCatalogo(supabase, { sinCargas: true }).then(setFuentesGrifo).catch(() => {});
     setVehiculos(vRes.data || []);
     setVehiculosTercero(vtRes.data || []);
     setRegistros(cRes.data || []);
@@ -514,6 +527,16 @@ export default function CombustiblePage() {
     for (const l of lecturasRadar) {
       const id = Number(l.combustible_id);
       if (Number.isFinite(id) && l.comprobante && !mapa[id]) mapa[id] = l.comprobante;
+    }
+    return mapa;
+  }, [lecturasRadar]);
+  // El importe que el Radar leyó del voucher de cada carga (el de la primera fila que lo traiga).
+  const importeDeCarga = useMemo(() => {
+    const mapa: Record<number, number> = {};
+    for (const l of lecturasRadar) {
+      const id = Number(l.combustible_id);
+      const m = Number(l.monto_total);
+      if (Number.isFinite(id) && m > 0 && mapa[id] == null) mapa[id] = m;
     }
     return mapa;
   }, [lecturasRadar]);
@@ -950,13 +973,72 @@ export default function CombustiblePage() {
     };
   }).sort((a, b) => b.costo - a.costo);
 
-  // Datos por grifo
-  const grifosUsados = [...new Set(registros.map(r => r.grifo).filter(Boolean))] as string[];
-  const datosGrifo = grifosUsados.map(g => {
-    const regs = registros.filter(r => r.grifo === g);
-    const precProm = regs.reduce((s, r) => s + Number(r.precio_galon || 0), 0) / regs.length;
-    return { grifo: g, cargas: regs.length, costo: regs.reduce((s, r) => s + Number(r.total || 0), 0), precProm };
-  }).sort((a, b) => b.costo - a.costo);
+  // Datos por grifo — UNA FILA POR EMPRESA, no una por redacción (lib/combustible/grifo-canonico.ts).
+  // Antes se agrupaba por el texto exacto: «COESTI», «COESTI S.A.» y «CORATI SA COESTI» eran tres
+  // grifos. Ahora agrupa el RUC (el de la carga, o el del grifo que su nombre reconoce) y el nombre
+  // que se enseña es la razón social de su factura SUNAT.
+  const catGrifos = useMemo(
+    () => construirCatalogoGrifos({ ...fuentesGrifo, cargas: registros }),
+    [fuentesGrifo, registros]
+  );
+  const datosGrifo = useMemo(() => {
+    const grupos = new Map<string, Combustible[]>();
+    for (const r of registros) {
+      const k = claveAgrupacionGrifo(r, catGrifos);
+      if (k) grupos.set(k, [...(grupos.get(k) ?? []), r]);
+    }
+    return [...grupos.entries()].map(([clave, regs]) => {
+      const formas = new Map<string, number>();
+      for (const r of regs) { const f = (r.grifo ?? "").trim() || "(sin nombre)"; formas.set(f, (formas.get(f) ?? 0) + 1); }
+      const variantes = [...formas.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+      const ruc = clave.startsWith("ruc:") ? clave.slice(4) : null;
+      // El nombre: la razón social del RUC; si no, el que el catálogo reconoce; si no, la redacción más usada.
+      const masUsada = variantes.find(([f]) => f !== "(sin nombre)")?.[0] ?? null;
+      const canonico = (ruc ? catGrifos.porRuc.get(ruc)?.nombre : null)
+        ?? (masUsada ? resolverGrifo({ nombre: masUsada }, catGrifos).nombre : null)
+        ?? masUsada;
+      const porUnificar = canonico ? regs.filter(r => (r.grifo ?? "").trim() !== canonico) : [];
+      const precProm = regs.reduce((s, r) => s + Number(r.precio_galon || 0), 0) / regs.length;
+      return {
+        clave, grifo: canonico ?? "(sin nombre)", ruc, variantes, porUnificar,
+        cargas: regs.length, costo: regs.reduce((s, r) => s + Number(r.total || 0), 0), precProm,
+      };
+    }).sort((a, b) => b.costo - a.costo);
+  }, [registros, catGrifos]);
+
+  // Deja las cargas de una empresa escritas UNA forma. Solo cambia el nombre (y completa el RUC donde
+  // falta): ni importes, ni galones, ni fechas. Lo pulsa una persona que ve la lista de redacciones.
+  const unificarGrifo = async (d: (typeof datosGrifo)[number]) => {
+    if (!d.porUnificar.length || d.grifo === "(sin nombre)") return;
+    const lista = d.variantes.filter(([f]) => f !== d.grifo).map(([f, n]) => `  · «${f}» — ${n} carga(s)`).join("\n");
+    if (!window.confirm(
+      `¿Dejar ${d.porUnificar.length} carga(s) con el grifo «${d.grifo}»?\n\nHoy están escritas así:\n${lista}\n\n` +
+      `Son la misma empresa${d.ruc ? ` (RUC ${d.ruc})` : ""}. Solo cambia el nombre del grifo: no toca importes, galones ni fechas.`
+    )) return;
+    setUnificando(d.clave);
+    try {
+      const ids = d.porUnificar.map(r => r.id);
+      for (let i = 0; i < ids.length; i += 100) {
+        const { error } = await supabase.from("combustible").update({ grifo: d.grifo }).in("id", ids.slice(i, i + 100));
+        if (error) throw error;
+      }
+      // El RUC donde falta: con él la carga se reconoce sin depender del nombre (saldo de la cuenta).
+      const rucBueno = rucValido(d.ruc);
+      if (rucBueno) {
+        const sinRuc = d.porUnificar.filter(r => !rucValido(r.ruc_proveedor)).map(r => r.id);
+        for (let i = 0; i < sinRuc.length; i += 100) {
+          const { error } = await supabase.from("combustible").update({ ruc_proveedor: rucBueno }).in("id", sinRuc.slice(i, i + 100));
+          if (error && !faltaAlguna(error, ["ruc_proveedor"])) throw error;
+          if (error) break; // sin la columna (finanzas-02) el nombre ya quedó; el RUC no se puede guardar
+        }
+      }
+      await cargarDatos();
+    } catch (e) {
+      alert(`No se pudo unificar: ${(e as { message?: string })?.message ?? e}`);
+    } finally {
+      setUnificando(null);
+    }
+  };
 
   // ── Análisis por período (gasto + rendimiento km/gal por día/semana/mes) ──────
   // Respeta los filtros de arriba (vehículo/tipo/mes/búsqueda). El km recorrido de cada
@@ -1281,10 +1363,42 @@ export default function CombustiblePage() {
                 {precioSospechoso && (
                   <p className="text-[11px] text-amber-800 mt-1 leading-snug">{precioSospechoso}</p>
                 )}
+                {/* El importe del voucher que leyó el Radar, cuando la cuenta ya no lo reproduce. Va PEGADO al
+                    precio, a todo el ancho: dentro de la franja del total, en el celular, quedaba apretado
+                    entre tres columnas. Es lo que se pagó: `total` es galones × precio, así que un precio mal
+                    leído guarda otro gasto. Se dice qué precio lo reproduce; se teclea, sin botón «usar este». */}
+                {(() => {
+                  const imp = editandoId != null ? importeDeCarga[editandoId] : undefined;
+                  const cant = Number(form.galones || 0);
+                  const precio = Number(form.precio_galon || 0);
+                  if (!imp || !(cant > 0) || !(precio > 0)) return null;
+                  if (Math.abs(cant * precio - imp) <= toleranciaRedondeo(cant, precio)) return null;
+                  const reproduce = Math.round((imp / cant) * 1000) / 1000;
+                  return (
+                    <div className="mt-1.5 rounded-lg bg-amber-50 border border-amber-300 px-3 py-2 text-[11px] text-amber-900 leading-snug">
+                      <b>El voucher dice {fmtSoles(imp)}</b> y {form.galones} {fuelCfg.unidadLabel} × {fmtSoles(precio)} da {fmtSoles(cant * precio)}.
+                      El importe del comprobante es lo que se pagó: el precio que lo reproduce es{" "}
+                      <b>S/ {reproduce.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 3 })}</b>.
+                      Compruébalo en la foto de la nota.
+                    </div>
+                  );
+                })()}
               </Campo>
               <Campo label="Grifo / Estación">
-                <input className={inputCls()} placeholder="Ej: Primax - Ate" value={form.grifo}
+                <input className={inputCls()} placeholder="Ej: Primax - Ate" value={form.grifo} list="grifos-conocidos"
                   onChange={e => setForm(p => ({ ...p, grifo: e.target.value }))} />
+                <datalist id="grifos-conocidos">
+                  {[...new Set([...catGrifos.porRuc.values()].map(g => g.nombre).filter(Boolean) as string[])].map(n => <option key={n} value={n} />)}
+                </datalist>
+                {/* Lo que teclea una persona no se reescribe solo; se le dice que es la misma empresa. */}
+                {(() => {
+                  const r = form.grifo.trim() ? resolverGrifo({ nombre: form.grifo }, catGrifos) : null;
+                  return r && r.por === "nombre" && r.cambio ? (
+                    <p className="text-[11px] text-amber-800 mt-1 leading-snug">
+                      Es la misma empresa que «{r.nombre}»: escríbelo así para que no salga como otro grifo en «Por grifo».
+                    </p>
+                  ) : null;
+                })()}
               </Campo>
               <Campo label="Conductor">
                 <select className={inputCls()} value={form.conductor}
@@ -2017,12 +2131,26 @@ export default function CombustiblePage() {
               {datosGrifo.length === 0 ? (
                 <tr><td colSpan={5} className="p-10 text-center text-gray-400">Sin grifos registrados</td></tr>
               ) : datosGrifo.map(d => (
-                <tr key={d.grifo} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
-                  <td className="p-3 font-bold text-gray-800">🏪 {d.grifo}</td>
+                <tr key={d.clave} className="border-t hover:bg-gray-50 align-top" style={{ borderColor: "#f1f5f9" }}>
+                  <td className="p-3">
+                    <p className="font-bold text-gray-800">🏪 {d.grifo}</p>
+                    {d.ruc && <p className="text-[11px] text-gray-400">RUC {d.ruc}</p>}
+                    {/* La misma empresa escrita de varias formas: se dice cuáles y se ofrece dejarla en una. */}
+                    {d.porUnificar.length > 0 && d.grifo !== "(sin nombre)" && (
+                      <div className="mt-1.5 rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1.5 text-[11px] text-amber-900 leading-snug">
+                        Escrito de {d.variantes.length} forma{d.variantes.length === 1 ? "" : "s"}:{" "}
+                        {d.variantes.map(([f, n]) => `«${f}» (${n})`).join(" · ")}
+                        <button disabled={unificando === d.clave} onClick={() => unificarGrifo(d)}
+                          className="ml-2 font-bold text-amber-900 underline disabled:opacity-50">
+                          {unificando === d.clave ? "Unificando…" : `Dejar ${d.porUnificar.length} como «${d.grifo}»`}
+                        </button>
+                      </div>
+                    )}
+                  </td>
                   <td className="p-3 text-gray-600">{d.cargas}</td>
                   <td className="p-3 font-bold text-red-700">{fmtSoles(d.costo)}</td>
                   <td className="p-3 font-bold text-gray-700">{fmtSoles(d.precProm)}</td>
-                  <td className="p-3"><button onClick={() => { setVista("historial"); setBusqueda(d.grifo); }} className="text-xs font-bold text-[#0b315f] hover:underline">Ver →</button></td>
+                  <td className="p-3"><button onClick={() => { setVista("historial"); setBusqueda(d.grifo === "(sin nombre)" ? "" : d.grifo); }} className="text-xs font-bold text-[#0b315f] hover:underline">Ver →</button></td>
                 </tr>
               ))}
             </tbody>

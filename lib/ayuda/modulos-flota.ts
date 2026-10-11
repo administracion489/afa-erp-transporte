@@ -202,7 +202,7 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
     paraQueSirve: [
       "Saber cuánto gastas en combustible por mes, por unidad, por conductor y por grifo.",
       "Detectar solo dos cosas raras: una carga que no cabe en el tanque y un rendimiento que se desploma.",
-      "Comparar grifos: la pestaña “Por grifo” te dice el precio promedio que te está cobrando cada uno.",
+      "Comparar grifos: la pestaña “Por grifo” te dice el precio promedio que te está cobrando cada uno. Agrupa por EMPRESA, no por cómo se escribió: «COESTI», «COESTI S.A.» y «CORATI SA COESTI» salen en una sola fila (la reconoce por su RUC y por la razón social de sus facturas). Si la misma empresa quedó escrita de varias formas, la fila lo dice y ofrece dejarlas todas con el nombre de la factura — solo cambia el nombre, nunca importes ni fechas.",
       "Saber cuánto saldo queda en la cuenta prepago (Primax) y recibir un aviso por correo y WhatsApp antes de que se acabe.",
       "Usar la factura del correo como respaldo: las cargas que el Radar IA no registró se registran desde la factura.",
       "Ver si los kilómetros de la jornada cuadran con los kilómetros de los servicios.",
