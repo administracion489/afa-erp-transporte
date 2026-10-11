@@ -8,6 +8,7 @@ import { MARGEN_URGENTE_MIN, describirHorario, hhmmAMinutos, ventanaCubreMadruga
 // de ahí sus dos predicados. Sin eso, el guard que existe para que la pantalla no mienta
 // tendría su propia copia y sería el primero en quedarse atrás.
 import { cotejarModoTiempo, leeElModo, type ModoTiempo } from "@/lib/alertas-modo-tiempo";
+import PruebaAvisos from "./PruebaAvisos";
 
 type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean; es_contingencia?: boolean };
 type AlertaCfg = {
@@ -350,6 +351,9 @@ export default function ConfigOperacionesPage() {
           y recarga.
         </div>
       )}
+
+      {/* Probar la escalera de inicio: los mismos WhatsApp, a un número, como llegan. */}
+      <PruebaAvisos cfgs={cfgs} dests={dests} />
 
       {/* Directorio de contactos */}
       <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">

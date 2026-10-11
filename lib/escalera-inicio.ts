@@ -11,7 +11,8 @@
 //
 // LOS PELDAÑOS, todos SOLO mientras el servicio siga sin iniciar:
 //   · proximo_inicio   (90 min antes, tick de 10 min)  — se conserva, decisión del dueño.
-//   · recuerda_iniciar (30 min antes, tick de 10 min)
+//   · recuerda_iniciar (30 min antes, tick de 10 min)  — APAGADO por el dueño (11-10-2026): ya
+//                      se avisó a los 90 y a los 5 sale «inicia ahora». La tarjeta se conserva.
 //   · inicia_ahora     ( 5 min antes, cron de 1 min)   — NUEVO
 //   · debio_iniciar    ( 1 min después, cron de 1 min) — NUEVO
 //   · no_inicio        (10 min después, tick)          — al conductor y al coordinador
@@ -294,6 +295,13 @@ const CANAL: Record<string, string> = { whatsapp: "WhatsApp", push: "app", email
  */
 export const ESPERA_ENTREGA_MIN = 2;
 
+/**
+ * Largo máximo de la evidencia que viaja en el parámetro del aviso al coordinador. Lo usan el
+ * motor (lib/escalera-inicio-datos.ts) y la prueba de avisos (lib/escalera-muestra.ts): una
+ * prueba con otro tope mostraría un mensaje que nunca llega así.
+ */
+export const LARGO_EVIDENCIA_COORDINADOR = 260;
+
 export type ResumenAvisos = {
   /** Una sola línea (los parámetros de una plantilla de WhatsApp no admiten saltos). */
   texto: string;
@@ -349,9 +357,19 @@ export function resumenAvisosConductor(filas: FilaAviso[], ahoraMs: number, maxL
   const sinEntregar = conEstados && maduros.length > 0
     && maduros.every((f) => !f.entregado_en && !f.leido_en);
 
-  let texto = `Avisos al conductor: ${partes.join(" · ")}.`;
-  if (sinEntregar) texto += " Ningún WhatsApp le llegó: teléfono sin datos o apagado, llámalo.";
-  texto = texto.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ");
+  // Si no cabe, se quitan los avisos MÁS ANTIGUOS (diciendo cuántos), nunca la conclusión ni
+  // el último: recortar por el final se comía justo «ningún WhatsApp le llegó… llámalo», que es
+  // lo único que le dice al coordinador qué hacer — y aparece precisamente cuando la escalera
+  // es larga (lo encontró scripts/prueba-escalera-muestra.mts).
+  const limpio = (s: string) => s.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ");
+  const cierre = sinEntregar ? " Ningún WhatsApp le llegó: teléfono sin datos o apagado, llámalo." : "";
+  const armar = (omitidos: number) => limpio(
+    `Avisos al conductor: ${omitidos > 0 ? `${omitidos} anterior${omitidos === 1 ? "" : "es"} · ` : ""}` +
+    `${partes.slice(omitidos).join(" · ")}.${cierre}`,
+  );
+  let omitidos = 0;
+  let texto = armar(0);
+  while (texto.length > maxLargo && omitidos < partes.length - 1) texto = armar(++omitidos);
   if (texto.length > maxLargo) texto = `${texto.slice(0, maxLargo - 1)}…`;
   return { texto, sinEntregar, conEstados };
 }
