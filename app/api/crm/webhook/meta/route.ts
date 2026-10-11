@@ -103,7 +103,8 @@ export async function POST(req: NextRequest) {
         // avisos: es lo que contesta «¿le llegó el aviso al conductor?». Los del número del
         // CRM no se registran en ningún sitio, así que no se escriben (no hay fila que casar).
         if (esAvisos && Array.isArray(val.statuses) && val.statuses.length) {
-          estadosEntrega.push(...val.statuses);
+          // Tope por lote: un array desmedido no puede reventar la pila del `push(...)`.
+          for (const st of val.statuses.slice(0, 1000)) estadosEntrega.push(st);
         }
 
         for (const msg of val.messages ?? []) {
@@ -171,8 +172,13 @@ export async function POST(req: NextRequest) {
     after(async () => {
       const sb = db();
       if (estadosEntrega.length > 0) {
-        // Nunca lanza: un estado que no se pudo escribir no tumba el resto del lote.
-        await registrarEstadosEntrega(sb, estadosEntrega);
+        // Un estado que no se pudo escribir no puede dejar sin procesar la coexistencia ni la
+        // respuesta de la IA a los mensajes que viajaban en el mismo POST.
+        try {
+          await registrarEstadosEntrega(sb, estadosEntrega);
+        } catch (err) {
+          console.error("[webhook] estados de entrega:", err);
+        }
       }
       for (const { campo, value } of coexistencia) {
         try {

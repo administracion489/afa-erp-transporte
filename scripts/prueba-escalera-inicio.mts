@@ -236,6 +236,9 @@ const SERV = { estado: "programada", fecha_servicio: HOY, hora_servicio: "06:30:
   chk("failed guarda código y motivo sin repetir", de("wamid.D", "fallo_entrega")[0]?.valor === "131026 · Message undeliverable",
     de("wamid.D", "fallo_entrega")[0]?.valor);
   chk("sin id no se escribe nada", ops.every((o) => !!o.wamid));
+  let lanza = false, raro: ReturnType<typeof estadosAOperaciones> = [];
+  try { raro = estadosAOperaciones([{ id: "w", status: "read", timestamp: "1e20" }], Date.parse("2026-10-11T12:00:00Z")); } catch { lanza = true; }
+  chk("un timestamp absurdo no lanza: cae a «ahora»", !lanza && raro.length === 2 && raro.every((o) => o.valor === "2026-10-11T12:00:00.000Z"));
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

@@ -34,9 +34,12 @@ export type OperacionEntrega = {
   soloSiVacio: boolean;
 };
 
+/** Límite de `Date` (±8.64e15 ms): fuera de él `toISOString()` lanza. */
+const MAX_FECHA_MS = 8.64e15;
+
 function isoDe(ts: EstadoMeta["timestamp"], ahoraMs: number): string {
   const n = Number(ts);
-  const ms = Number.isFinite(n) && n > 0 ? n * 1000 : ahoraMs;
+  const ms = Number.isFinite(n) && n > 0 && n * 1000 <= MAX_FECHA_MS ? n * 1000 : ahoraMs;
   return new Date(ms).toISOString();
 }
 
@@ -83,7 +86,8 @@ let avisadoSinMigracion = false;
  * tumbar el webhook (Meta lo reintentaría y duplicaría los mensajes entrantes del lote).
  */
 export async function registrarEstadosEntrega(sb: SupabaseClient, estados: EstadoMeta[]): Promise<number> {
-  const ops = estadosAOperaciones(estados);
+  let ops: OperacionEntrega[];
+  try { ops = estadosAOperaciones(estados); } catch { return 0; }
   let escritas = 0;
   for (const op of ops) {
     try {

@@ -36,6 +36,7 @@ const admin = createClient(
 );
 
 const DIA_MS = 86_400_000;
+const PAGINA = 1000;
 
 type Tabla = "conductores" | "conductores_tercero";
 type RefCond = { id: number; tabla: Tabla };
@@ -80,17 +81,26 @@ async function handler(req: NextRequest) {
     const ayer = fechaLima(ahoraMs - DIA_MS);   // un servicio de las 23:58 de ayer: su «debió iniciar» es hoy
     const reloj = { ahoraMs, hoy, manana };
 
-    const { data, error } = await admin
-      .from("reservas")
-      .select("id, fecha_servicio, hora_servicio, estado, conductor_id, conductor_tercero_id, origen, destino")
-      .in("fecha_servicio", [ayer, hoy, manana])
-      .in("estado", [...ESTADOS_SIN_INICIAR]);
-    if (error) throw new Error(error.message);
+    // Paginado y con orden total: PostgREST corta en 1000 filas, y sin orden el corte cae en
+    // cualquier parte — algunos servicios se quedarían sin aviso sin que nada lo dijera.
+    const data: FilaReserva[] = [];
+    for (let desde = 0; ; desde += PAGINA) {
+      const { data: pag, error } = await admin
+        .from("reservas")
+        .select("id, fecha_servicio, hora_servicio, estado, conductor_id, conductor_tercero_id, origen, destino")
+        .in("fecha_servicio", [ayer, hoy, manana])
+        .in("estado", [...ESTADOS_SIN_INICIAR])
+        .order("id", { ascending: true })
+        .range(desde, desde + PAGINA - 1);
+      if (error) throw new Error(error.message);
+      data.push(...((pag ?? []) as FilaReserva[]));
+      if (!pag || pag.length < PAGINA) break;
+    }
 
     // Qué toca a cada servicio en ESTE minuto.
     const tareas: { r: FilaReserva; clave: string; cfg: AlertaConfig; ref: RefCond }[] = [];
     let sinConductor = 0;
-    for (const r of (data ?? []) as FilaReserva[]) {
+    for (const r of data) {
       const pasos = pasosQueTocan(r, { iniciaAhora: cfgAhora, debioIniciar: cfgDebio }, reloj);
       if (pasos.length === 0) continue;
       const ref = condDe(r);

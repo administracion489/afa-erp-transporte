@@ -11,7 +11,7 @@ import {
   type ReporteEquipo, type MotivoReporte, type PlataformaEquipo, type PluginEquipo,
 } from "@/lib/gps-equipo";
 import { attachHidScanner } from "@/lib/hid-scanner";
-import { detectarSoportePush, permisoBloqueado, permisoPushNativo, activarPushWeb, activarPushNativo, resincronizarSuscripcion, type SoportePush } from "@/lib/push-cliente";
+import { detectarSoportePush, permisoBloqueado, permisoPushNativo, activarPushWeb, activarPushNativo, resincronizarSuscripcion, desactivarPush, type SoportePush } from "@/lib/push-cliente";
 import HojaNotificaciones, {
   FranjaNotificacionesApagadas, hojaPospuesta, posponerHoja, pushPendiente, type EstadoPushConductor,
 } from "@/components/conductor/HojaNotificaciones";
@@ -3358,6 +3358,12 @@ export default function ConductorApp() {
 
   function cerrarSesion() {
     if ((enRuta || conectado) && !confirm("Estás compartiendo tu ubicación. ¿Cerrar sesión igual?")) return;
+    // Suelta la suscripción de ESTE aparato antes de borrar el token (la API lo necesita): en un
+    // teléfono compartido, los avisos urgentes del conductor que salió —con hora y punto de
+    // recojo, visibles en la pantalla bloqueada— seguirían sonando hasta que entrara otro.
+    // Sin await: cerrar sesión no espera a la red. El próximo que entre se suscribe solo.
+    void desactivarPush(pushApi).catch(() => {});
+    setPushEstado("desconocido"); setHojaPush(false);
     cleanup(); clearSession(); setConductor(null);
     setEnRuta(false); setConectado(false); setDni(""); setPin(""); setTab("ruta");
   }
