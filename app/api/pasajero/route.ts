@@ -15,6 +15,7 @@ import { firmarUrl } from "@/lib/storage-firmado";
 import { ofrecibleEnAutoseleccion } from "@/lib/reservas-autoseleccion";
 import { ESTADOS_SIN_INICIAR } from "@/lib/paradas-materializar";
 import { CUERPO_SESION_INVALIDA } from "@/lib/pasajero-sesion";
+import { endpointPushValido } from "@/lib/push-endpoint";
 import { randomUUID } from "node:crypto";
 
 /** Foto de perfil: el bucket es privado. Lo que se GUARDA es el enlace público (el identificador,
@@ -778,7 +779,9 @@ export async function POST(req: NextRequest) {
           const endpoint = String(sub.endpoint || "");
           const p256dh = String(sub.keys?.p256dh || "");
           const auth = String(sub.keys?.auth || "");
-          if (!endpoint.startsWith("https://") || endpoint.length > 1000 ||
+          // Solo servicios push reales (lib/push-endpoint.ts): el servidor le hace un POST a este
+          // endpoint en cada aviso.
+          if (!endpointPushValido(endpoint) ||
               !p256dh || p256dh.length > 300 || !auth || auth.length > 100) {
             return NextResponse.json({ error: "Suscripción inválida" }, { status: 400 });
           }

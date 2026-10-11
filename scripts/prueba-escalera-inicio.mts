@@ -175,6 +175,27 @@ const SERV = { estado: "programada", fecha_servicio: HOY, hora_servicio: "06:30:
     created_at: `2026-10-11T1${i % 10}:00:00Z`, entregado_en: null, leido_en: null,
   })), ahora, 120);
   chk("se recorta al largo pedido", largo.texto.length <= 120, `${largo.texto.length}`);
+
+  // EL DEFECTO QUE ENCONTRÓ LA PRUEBA DE AVISOS: recortar por el final se comía la conclusión
+  // «ningún WhatsApp le llegó… llámalo», que aparece justo cuando la escalera es LARGA. Ahora se
+  // quitan los avisos más antiguos (diciendo cuántos) y la conclusión y el último quedan enteros.
+  const escalera = ["proximo_inicio", "recuerda_iniciar", "inicia_ahora", "debio_iniciar", "no_inicio"];
+  const horas = ["10:00", "11:00", "11:25", "11:31", "11:40"];
+  const sinDatos = resumenAvisosConductor(escalera.map((k, i) => ({
+    tipo: "whatsapp", estado: "enviado", alerta_clave: k,
+    created_at: `2026-10-11T${horas[i]}:00Z`, entregado_en: null, leido_en: null,
+  })), Date.parse("2026-10-11T11:45:00Z"), 260);
+  chk("escalera larga sin entregar: la conclusión «llámalo» SIEMPRE llega entera", sinDatos.sinEntregar
+    && sinDatos.texto.endsWith("Ningún WhatsApp le llegó: teléfono sin datos o apagado, llámalo."), sinDatos.texto);
+  chk("…con el último aviso completo", /No inició 06:40 WhatsApp sin confirmar entrega\. Ningún/.test(sinDatos.texto), sinDatos.texto);
+  chk("…y lo que se quitó, contado (los más antiguos)", /^Avisos al conductor: \d+ anteriores? · /.test(sinDatos.texto)
+    && !sinDatos.texto.includes("Próximo a iniciar"), sinDatos.texto);
+  chk("…dentro del largo", sinDatos.texto.length <= 260, `${sinDatos.texto.length}`);
+  const corto = resumenAvisosConductor(escalera.slice(0, 2).map((k, i) => ({
+    tipo: "whatsapp", estado: "enviado", alerta_clave: k,
+    created_at: `2026-10-11T${horas[i]}:00Z`, entregado_en: `2026-10-11T${horas[i]}:05Z`, leido_en: null,
+  })), Date.parse("2026-10-11T11:45:00Z"), 260);
+  chk("si cabe, no se quita nada", corto.texto.startsWith("Avisos al conductor: Próximo a iniciar"), corto.texto);
 }
 
 // ── 7. Intentos viejos sin detalle ────────────────────────────────────────────

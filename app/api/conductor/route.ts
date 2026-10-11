@@ -20,7 +20,10 @@ import { createClient } from "@supabase/supabase-js";
 import { registrarLectura, corregirCapturaPorReloj, hashDeFoto, recalcularKmVigente } from "@/lib/odometro";
 import { cotejoGpsDelDia } from "@/lib/odometro-gps";
 import { firmarUrl, firmarUrls } from "@/lib/storage-firmado";
-import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
+import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat, enviarPushAConductores, payloadConductor } from "@/lib/push";
+import { ESPERA_PUSH_PRUEBA_SEG, textoPushPrueba } from "@/lib/escalera-muestra";
+import { endpointPushValido } from "@/lib/push-endpoint";
+import { reclamarEnvio } from "@/lib/alertas";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 import { cerrarServiciosAnterioresDelVehiculo } from "@/lib/cerrar-servicio-anterior";
 import { ESTADO_ADMIN_INICIAL } from "@/lib/estados";
@@ -54,6 +57,12 @@ const FRENO_EQUIPO_MAX_CLAVES = 5000;
 // escrituras aceptadas en el último minuto. Es por instancia; entre instancias lo cubre el conteo en
 // la base antes de cada INSERT (ver `equipo_gps`).
 const escriturasEquipo = new Map<string, number[]>();
+
+// Freno de la notificación de PRUEBA (Perfil → Notificaciones → Probar): una por minuto y por
+// conductor, POR INSTANCIA. Solo le llega a sus propios dispositivos, así que el daño de un
+// cliente desbocado se limita a su teléfono; el freno evita una ráfaga de envíos a FCM.
+const frenoPruebaPush = new Map<string, number>();
+const PRUEBA_PUSH_CADA_MS = 60_000;
 
 // Normaliza el QR escaneado para tolerar el desajuste de layout de un escáner BT (teclado
 // HID): puede teclear el UUID en MAYÚSCULAS y con el guion mal mapeado (p. ej. "-" → "/")
@@ -635,7 +644,8 @@ export async function POST(req: NextRequest) {
           const endpoint = String(sub.endpoint || "");
           const p256dh = String(sub.keys?.p256dh || "");
           const auth = String(sub.keys?.auth || "");
-          if (!endpoint.startsWith("https://") || endpoint.length > 1000 ||
+          // Solo servicios push reales: el servidor le hace un POST a este endpoint en cada aviso.
+          if (!endpointPushValido(endpoint) ||
               !p256dh || p256dh.length > 300 || !auth || auth.length > 100) {
             return NextResponse.json({ error: "Suscripción inválida" }, { status: 400 });
           }
@@ -682,6 +692,43 @@ export async function POST(req: NextRequest) {
           .eq("conductor_id", ses.cid)
           .eq("conductor_tabla", ses.tabla);
         return NextResponse.json({ ok: true });
+      }
+
+      // ── Notificación de PRUEBA a este conductor (Perfil → Notificaciones → Probar) ──
+      // Para ver cómo suena el aviso de inicio (urgente, estilo Uber) sin esperar a un servicio.
+      // Sale a los ESPERA_PUSH_PRUEBA_SEG segundos, en `after`: el tiempo de bloquear el teléfono
+      // y verla como llega de verdad, sobre la pantalla bloqueada. Solo a SUS dispositivos (la
+      // identidad sale del token): no hay forma de mandarle una prueba a otro conductor.
+      case "probar_push": {
+        const k = `${ses.tabla}:${ses.cid}`;
+        const ahora = Date.now();
+        const espera = () => NextResponse.json({ ok: false, error: "Espera un minuto para volver a probar." }, { status: 429 });
+        // El freno se marca ANTES de cualquier await: con la marca después, varias peticiones
+        // simultáneas pasaban todas la comprobación.
+        if (ahora - (frenoPruebaPush.get(k) ?? 0) < PRUEBA_PUSH_CADA_MS) return espera();
+        if (frenoPruebaPush.size > 5000) frenoPruebaPush.clear();
+        frenoPruebaPush.set(k, ahora);
+        const { count } = await admin.from("push_suscripciones")
+          .select("id", { count: "exact", head: true })
+          .eq("conductor_id", ses.cid).eq("conductor_tabla", ses.tabla).eq("activo", true);
+        if (!count) {
+          frenoPruebaPush.delete(k);   // que pueda probar en cuanto las active
+          return NextResponse.json({ ok: false, sinSuscripcion: true, error: "Este teléfono todavía no tiene las notificaciones activas." });
+        }
+        // Y entre instancias, en la base: una por minuto y conductor (mismo freno que la prueba
+        // de WhatsApp de /configuracion/operaciones).
+        if (!(await reclamarEnvio("prueba_push", `${k}:${Math.floor(ahora / 60_000)}`))) return espera();
+        const t = textoPushPrueba();
+        const cid = ses.cid, tabla = ses.tabla;
+        after(async () => {
+          await new Promise((r) => setTimeout(r, ESPERA_PUSH_PRUEBA_SEG * 1000));
+          await enviarPushAConductores(
+            [cid], tabla,
+            payloadConductor(t.titulo, t.cuerpo, `cond-prueba-${ahora}`, undefined, { requireInteraction: t.requireInteraction }),
+            { ttl: t.ttl, urgencia: "high" },
+          );
+        });
+        return NextResponse.json({ ok: true, enSegundos: ESPERA_PUSH_PRUEBA_SEG });
       }
 
       // ── Servicios de HOY de un conductor (para el selector del lector) ───────
