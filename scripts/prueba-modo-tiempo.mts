@@ -75,7 +75,7 @@ const MODOS: ModoTiempo[] = ["evento", "anticipacion", "hora_fija"];
 {
   console.log("\n— Activa y muda: el modo que el bloque de recordatorios no sabe disparar —");
   const claves = Object.entries(VIA_DE_ALERTA).filter(([, v]) => v === "recordatorio").map(([k]) => k);
-  chk("hay seis avisos por la vía recordatorio", claves.length === 6, claves.join(", "));
+  chk("hay siete avisos por la vía recordatorio (con inicia_ahora)", claves.length === 7, claves.join(", "));
   for (const clave of claves) {
     const m = cotejarModoTiempo({ clave, modo_tiempo: "evento" });
     chk(`${clave} en 'evento' se denuncia como mudo`, m.codigo === "evento_mudo" && m.alarma, m.codigo);
@@ -97,9 +97,9 @@ const MODOS: ModoTiempo[] = ["evento", "anticipacion", "hora_fija"];
 
 // ── 3. Los doce que NO leen el modo ────────────────────────────────────────────
 {
-  console.log("\n— Catorce avisos tienen su propio disparador: su selector no lo lee nadie —");
+  console.log("\n— Quince avisos tienen su propio disparador: su selector no lo lee nadie —");
   const inertes = Object.entries(VIA_DE_ALERTA).filter(([, v]) => v === "ignora_modo").map(([k]) => k);
-  chk("son catorce", inertes.length === 14, `${inertes.length}: ${inertes.join(", ")}`);
+  chk("son quince (con debio_iniciar, que cuenta desde la hora del servicio)", inertes.length === 15, `${inertes.length}: ${inertes.join(", ")}`);
   chk("los cuatro de ciclo de vida están entre ellos",
     ["asignacion", "desasignacion", "cambio", "cancelacion"].every((k) => inertes.includes(k)));
   // Estos dos no los despacha el tick: los manda `lib/notificaciones.ts` cuando ocurre el

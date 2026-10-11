@@ -96,6 +96,7 @@ import {
   ESTADOS_RESERVA, ESTADOS_ADMIN, ESTADO_ADMIN_INICIAL, normalizaEstado, esEstadoTerminal,
 } from "@/lib/estados";
 import { ModalGastos, ModalChecklist, ModalReemplazo } from "./ModalesServicio";
+import AvisosConductor from "./AvisosConductor";
 import { idAfa } from "@/lib/folio";
 import {
   manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado,
@@ -1537,6 +1538,15 @@ export default function FichaServicio({
               </div>
             </div>
           </Seccion>
+
+          {/* ══ 4a · AVISOS AL CONDUCTOR ════════════════════════════════════════
+              «¿Le llegaron los avisos para que no olvide iniciar?»: cada aviso con su canal y
+              si se entregó o se leyó (components/seguimiento/AvisosConductor.tsx). */}
+          {rid != null && (
+            <Seccion titulo="Avisos al conductor" icono={<I.Phone size={12} color="#0b315f" />}>
+              <AvisosConductor reservaId={rid} />
+            </Seccion>
+          )}
 
           {/* ══ 4b · OPERADOR TERCERIZADO ═══════════════════════════════════════
               La empresa y el conductor tercero son DOS entidades distintas y se muestran

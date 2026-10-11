@@ -137,6 +137,12 @@ async function enviarFcm(s: Suscripcion, payload: PushPayload, op: OpcionesEnvio
                 channel_id: op.canal ?? "afa_viaje",
                 tag: payload.tag,
                 notification_priority: op.urgencia === "high" ? "PRIORITY_MAX" : "PRIORITY_DEFAULT",
+                // Urgente = como Uber: sonido y vibración del sistema, y visible ENTERA en la
+                // pantalla bloqueada. En Android 8+ el sonido lo decide el canal (creado con
+                // importancia máxima en lib/push-cliente.ts); esto cubre los Android viejos.
+                ...(op.urgencia === "high"
+                  ? { default_sound: true, default_vibrate_timings: true, visibility: "PUBLIC" }
+                  : {}),
               },
             },
             data: { url: payload.url },
@@ -244,14 +250,17 @@ export async function enviarPushAConductores(
 }
 
 /** Payload genérico de aviso al conductor (deep-link a su app). */
-export function payloadConductor(titulo: string, cuerpo: string, tag: string, reservaId?: number): PushPayload {
+export function payloadConductor(
+  titulo: string, cuerpo: string, tag: string, reservaId?: number,
+  opts: { requireInteraction?: boolean } = {},
+): PushPayload {
   return {
     title: titulo,
     body: cuerpo,
     tag,
     url: reservaId ? `/conductor?reserva=${reservaId}` : "/conductor",
     renotify: true,
-    requireInteraction: false,
+    requireInteraction: !!opts.requireInteraction,
   };
 }
 

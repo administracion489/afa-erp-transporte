@@ -45,6 +45,8 @@ const label = "block text-[11px] font-semibold text-gray-500 mb-1";
 // Etiqueta contextual del campo "umbral" según el tipo de alerta.
 const UMBRAL_LABEL: Record<string, string> = {
   no_inicio: "Min. de gracia tras la hora",
+  // «Ya debió iniciar»: minutos DESPUÉS de la hora del servicio (cron de 1 minuto).
+  debio_iniciar: "Min. después de la hora",
   gps_silencio: "Min. sin señal",
   doc_vence: "Días de anticipación",
   jornada: "Horas máx. de jornada",

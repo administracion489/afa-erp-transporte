@@ -34,7 +34,7 @@
 // es la decisión que `montoDe` rechaza con el falso flete. Lo único correcto es DECIRLO
 // antes de guardar. Misma conclusión que la ventana invertida de `alertas-horario.ts`.
 //
-// Y LA OTRA MITAD: catorce de los veintitrés tipos NO leen el modo en absoluto (ciclo de
+// Y LA OTRA MITAD: quince de los veinticinco tipos NO leen el modo en absoluto (ciclo de
 // vida, semáforo de puntualidad, GPS, checkout, abandono, y los dos avisos al pasajero que
 // despacha `lib/notificaciones.ts`). Ofrecerles el selector es ofrecer un
 // control que el sistema no lee — el mismo defecto que `multiples_recargas_en_cluster`
@@ -96,6 +96,9 @@ export const VIA_DE_ALERTA: Record<string, ViaDespacho> = {
   recuerda_iniciar: "recordatorio",
   llamar_conductor: "recordatorio",
   alerta_no_inicio_previa: "recordatorio",
+  // El «inicia ahora» lo despacha el cron de UN minuto (/api/alertas-flota/inicio), pero por
+  // el MISMO predicado: `juzgarIniciaAhora` (lib/escalera-inicio.ts) llama a `enViaRecordatorio`.
+  inicia_ahora: "recordatorio",
   // ── Bloques 6/7: pasan por `enVentanaHoraFija` ──
   doc_vence: "hora_fija",
   solape: "hora_fija",
@@ -114,6 +117,8 @@ export const VIA_DE_ALERTA: Record<string, ViaDespacho> = {
   // ── Bloques con su propio reloj: la hora del servicio, el silencio del GPS, la cadencia
   //    horaria del checkout, el techo de duración del abandono. ──
   no_inicio: "ignora_modo",
+  // «Ya debió iniciar»: su reloj es la hora del servicio + su umbral (cron de 1 min).
+  debio_iniciar: "ignora_modo",
   gps_silencio: "ignora_modo",
   recordar_checkout: "ignora_modo",
   servicio_abandonado: "ignora_modo",

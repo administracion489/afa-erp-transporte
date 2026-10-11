@@ -354,10 +354,21 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       "Imprimir el Manifiesto MTC y el Reporte de Servicio de cada viaje.",
       "Detectar servicios finalizados que nunca arrancaron su cierre administrativo.",
       "Etiquetar RUTA, TURNO y MÓVIL de los servicios del día (🏷 Etiquetas): deciden los ítems de la liquidación.",
+      "Saber, en la ficha de cada servicio, qué avisos se le mandaron al conductor para que no olvide INICIAR y si le llegaron o los leyó (bloque «Avisos al conductor»).",
       "Saber si los cortes de rastreo de un conductor son por su teléfono, por la configuración o por la red, y qué le falta configurar (clic en el % de Rastreo).",
     ],
     conceptos: ["estado_admin", "conformidad", "liquidacion_cliente", "tercerizado"],
     faqs: [
+      {
+        pregunta: "¿Le llegaron al conductor los avisos para que no olvide iniciar el servicio?",
+        respuesta:
+          "Ábrelo en la ficha del servicio, bloque **Avisos al conductor**. Cada aviso sale con su hora, su canal (WhatsApp o la notificación del app) y lo que se sabe de él: **Leído**, **Entregado, sin confirmación de lectura**, **Enviado, sin confirmación de entrega** o **No se entregó** con el motivo de Meta.\n\n" +
+          "Mientras el servicio siga sin iniciar, al conductor le llegan, en este orden: el aviso de 90 min antes, el de 30 min antes, **«Inicia ahora»** 5 min antes, **«Ya debió iniciar»** 1 min después de la hora y, si sigue igual, **«No inició»** a los 10 min (que también le llega al coordinador, con el resumen de lo que ya se le mandó). Cada uno se configura en **Configuración → Operaciones**.\n\n" +
+          "Dos cosas para leerlo bien:\n\n" +
+          "• **«Entregado» sin «leído» no significa que lo ignoró**: quien apaga la confirmación de lectura en WhatsApp nunca manda «leído».\n" +
+          "• **Si ningún WhatsApp le llegó**, la ficha lo dice en ámbar: el teléfono no tenía datos o estaba apagado, y sin datos el app tampoco funciona. Ahí lo que sirve es **llamarlo**.\n\n" +
+          "Los avisos procesados antes de este registro salen como «procesado por el sistema, sin detalle»: se intentaron, pero entonces no se guardaba por dónde ni si llegaron.",
+      },
       {
         pregunta: "¿Qué es el botón «🏷 Etiquetas» y el chip azul debajo de la ruta?",
         respuesta:
