@@ -354,6 +354,7 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       "Imprimir el Manifiesto MTC y el Reporte de Servicio de cada viaje.",
       "Detectar servicios finalizados que nunca arrancaron su cierre administrativo.",
       "Etiquetar RUTA, TURNO y MÓVIL de los servicios del día (🏷 Etiquetas): deciden los ítems de la liquidación.",
+      "Saber si los cortes de rastreo de un conductor son por su teléfono, por la configuración o por la red, y qué le falta configurar (clic en el % de Rastreo).",
     ],
     conceptos: ["estado_admin", "conformidad", "liquidacion_cliente", "tercerizado"],
     faqs: [
@@ -388,7 +389,26 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "• **Sin señal** — el servicio se hizo y no llegó ninguna posición.\n" +
           "• **Inmóvil** — llegaron posiciones, pero todas en el mismo punto mientras el recorrido avanzaba: el teléfono no iba en el bus.\n\n" +
           "El aviso separa dos cosas que se atienden distinto: **En ruta sin señal ahora** (más de 5 minutos sin posición con el servicio en curso: llama al conductor, casi siempre es la app cerrada o el teléfono bloqueado) y **Rastreo incompleto**, que ya quedó en el registro del viaje. El titular cuenta **unidades**, no servicios: una unidad con el teléfono mal configurado falla en todos sus viajes y es un solo problema. Cada contador filtra la lista.\n\n" +
+          "**Haz clic sobre el porcentaje** (o sobre una fila del aviso) y se abre el **diagnóstico** de ese servicio: por qué se cortó cada tramo y cómo estaba configurado el teléfono del conductor. Está explicado en la pregunta siguiente.\n\n" +
           "Es el mismo cálculo de **Salud del GPS**, donde ves el historial por conductor para saber a quién hay que configurarle el teléfono.",
+      },
+      {
+        pregunta: "¿Qué me dice el clic sobre el porcentaje de Rastreo?",
+        respuesta:
+          "Abre el **diagnóstico del rastreo** de ese servicio sin salir de la pantalla. Contesta lo que el porcentaje no dice: **por qué se cortó, y qué hay que hacer**. El porcentaje de arriba es el mismo de la celda: sale del mismo cálculo.\n\n" +
+          "**Cada tramo sin rastreo lleva su causa:**\n" +
+          "• **App detenida** — el teléfono dejó de enviar mientras el servicio seguía: el sistema cerró la app o la durmió. Casi siempre es la configuración del teléfono.\n" +
+          "• **Por antena** — el teléfono sí enviaba, pero sin satélite: posiciones imprecisas que no sirven para seguir el viaje.\n" +
+          "• **Sin datos móviles** — las posiciones se guardaron en el teléfono, llegaron tarde y parte se perdió.\n" +
+          "• **No se sabe** — no hay prueba de que el servicio siguiera (la señal se cortó y el conductor no cerró ni marcó nada después).\n\n" +
+          "Aparte van dos cosas que **no restan del porcentaje**:\n" +
+          "• **GPS congelado** — llegaron posiciones repetidas y después el bus apareció más allá. Ese tiempo cuenta como rastreado, pero el recorrido real no quedó registrado.\n" +
+          "• **Llegadas tardías** — sin datos móviles el teléfono guarda las posiciones y las manda al recuperar señal. Llegan tarde, pero el registro del viaje está completo.\n\n" +
+          "**Su teléfono:** la app del conductor reporta cómo está configurado —app instalada o navegador, batería sin restricciones, ubicación «todo el tiempo», rastreo en segundo plano, ubicación precisa y alta precisión— y el modal lo pinta con ✓ o ✗. Lo que **no se pudo comprobar** (navegador, app antigua, el teléfono no contestó) sale como **«— no se pudo comprobar»** en gris, **nunca como ✗**: no saber no es lo mismo que estar mal.\n\n" +
+          "**Qué le falta configurar** pone primero lo que explica el corte, cada cosa con su arreglo, y después los pasos para la marca de su teléfono. Ojo: el **inicio automático** y **bloquear la app en Recientes** son ajustes del fabricante que la app **no puede leer**. Si todo lo demás está bien y la app igual se detuvo, es ahí donde hay que mirar con el conductor.\n\n" +
+          "**No hace falta reinstalar la app** para que reporte: basta con que el conductor la abra. Solo si el modal dice **«APK antiguo»** conviene instalar la versión actual.\n\n" +
+          "Abajo salen **sus últimos servicios**, para saber si el corte es de este viaje o le pasa siempre, con un enlace a **Salud del GPS**.\n\n" +
+          "Si el modal avisa en ámbar que falta **supabase/gps-equipo-01.sql**, el teléfono del conductor todavía no puede reportar su configuración (esa parte sale vacía) y tampoco se puede saber qué llegó tarde.",
       },
       {
         pregunta: "Me sale “Riesgos de flota detectados”. ¿Qué tan grave es?",

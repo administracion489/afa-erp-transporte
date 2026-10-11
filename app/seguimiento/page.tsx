@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import Link from "next/link";
 import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 import ModalGps from "@/components/seguimiento/ModalGps";
+import ModalDiagnosticoRastreo from "@/components/seguimiento/ModalDiagnosticoRastreo";
 import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
 import DescargaMasivaModal from "@/components/seguimiento/DescargaMasivaModal";
 import FichaServicioNueva from "@/components/seguimiento/FichaServicio";
@@ -523,10 +524,14 @@ function CeldaRuta({ s, hermano, onGuardado, onMasivo }: { s: ServicioView; herm
   );
 }
 
-function FilaServicio({ s, hermano, rastreo, rastreoEstado, onOpen, onGps, onRutaNombre, onRutaMasiva }:{ s: ServicioView; hermano?: Reserva|null; rastreo?: VeredictoRastreo|null; rastreoEstado: "cargando"|"listo"|"error"; onOpen: () => void; onGps: () => void; onRutaNombre: (id: number, valor: string|null) => void; onRutaMasiva: (r: Reserva, nombre: string) => void }) {
+/** La pista del title de la celda RASTREO: el clic abre el diagnóstico. */
+const PISTA_RASTREO = "Clic: por qué se cortó y cómo está configurado el teléfono del conductor.";
+
+function FilaServicio({ s, hermano, rastreo, rastreoEstado, onOpen, onGps, onRastreo, onRutaNombre, onRutaMasiva }:{ s: ServicioView; hermano?: Reserva|null; rastreo?: VeredictoRastreo|null; rastreoEstado: "cargando"|"listo"|"error"; onOpen: () => void; onGps: () => void; onRastreo: () => void; onRutaNombre: (id: number, valor: string|null) => void; onRutaMasiva: (r: Reserva, nombre: string) => void }) {
   const est      = ESTADO_VIS[s.estado_visual];
   const progreso = s.paradas_total > 0 ? Math.round((s.paradas_completadas / s.paradas_total) * 100) : 0;
   const alertas  = chipsAlerta(s);
+  const tituloRastreo = rastreo ? rastreo.detalle : rastreoEstado === "error" ? "No se pudo medir el rastreo" : rastreoEstado === "cargando" ? "Midiendo el rastreo…" : "";
   return (
     <div onClick={onOpen} role="button" tabIndex={0}
       onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
@@ -567,16 +572,25 @@ function FilaServicio({ s, hermano, rastreo, rastreoEstado, onOpen, onGps, onRut
           </div>
         </div>
         {/* RASTREO: % del servicio con GPS (lib/gps-cobertura.ts, el mismo cálculo de /gps-salud).
-            Mientras se mide dice "…": nunca se afirma un vacío mientras se está buscando. */}
-        <div className="text-center w-[70px]" title={rastreo ? rastreo.detalle : rastreoEstado === "error" ? "No se pudo medir el rastreo" : rastreoEstado === "cargando" ? "Midiendo el rastreo…" : ""}>
-          <div className="text-[9px] font-bold uppercase text-gray-400">Rastreo</div>
+            Mientras se mide dice "…": nunca se afirma un vacío mientras se está buscando.
+            Es un BOTÓN: abre el diagnóstico (por qué se cortó y cómo está el teléfono del
+            conductor). Corta el clic y las teclas para que la fila —que también es un botón—
+            no abra además la ficha. Se puede pulsar con cualquier código, también midiendo:
+            el modal pide lo suyo y dice «Midiendo…» mientras tanto. */}
+        <button type="button"
+          onClick={e => { e.stopPropagation(); onRastreo(); }}
+          onKeyDown={e => e.stopPropagation()}
+          title={tituloRastreo ? `${tituloRastreo}\n\n${PISTA_RASTREO}` : PISTA_RASTREO}
+          aria-label={`Diagnóstico del rastreo GPS${rastreo ? ` (${rastreo.celda})` : ""}`}
+          className="text-center w-[70px] rounded-md py-0.5 cursor-pointer transition-colors hover:bg-[#e6eef8] focus-visible:outline-2 focus-visible:outline-[#0b315f]">
+          <span className="block text-[9px] font-bold uppercase text-gray-400">Rastreo</span>
           {rastreo && rastreo.codigo !== "no_aplica" && rastreo.codigo !== "recien_iniciado" && rastreo.codigo !== "sin_medir" ? (
             <span className={`inline-block text-[10px] font-black px-1.5 py-0.5 rounded-md whitespace-nowrap ${rastreo.problema === "urgente" ? "animate-pulse" : ""}`}
               style={{ color: rastreo.color, background: rastreo.bg }}>{rastreo.celda}</span>
           ) : (
-            <div className="text-xs font-black text-gray-300">{rastreoEstado === "cargando" && !rastreo ? "…" : rastreo?.celda ?? "—"}</div>
+            <span className="block text-xs font-black text-gray-300">{rastreoEstado === "cargando" && !rastreo ? "…" : rastreo?.celda ?? "—"}</span>
           )}
-        </div>
+        </button>
         <div className="text-center w-14">
           <div className="text-[9px] font-bold uppercase text-gray-400">Pasaj.</div>
           <div className="text-xs font-black text-[#0b315f]">{s.pasajeros_abordados}<span className="text-gray-300 font-normal">/{s.pasajeros_total_real || "?"}</span></div>
@@ -645,6 +659,8 @@ export default function SeguimientoPage() {
   /** "" = todas · "sin" · "RUTA A|T1" (etiquetas del DÍA). */
   const [filtroEtq,   setFiltroEtq]   = useState("");
   const [gpsModal,    setGpsModal]    = useState<ServicioView | null>(null);
+  // Diagnóstico del rastreo (clic en el % de la columna RASTREO o en una fila del aviso).
+  const [rastreoModal, setRastreoModal] = useState<ServicioView | null>(null);
   // RASTREO GPS por servicio (/api/seguimiento/rastreo). Se guarda CON su fecha: al cambiar de
   // día, el mapa viejo no puede pintarse sobre los servicios del nuevo mientras llega el suyo.
   const [rastreoDia, setRastreoDia] = useState<{ fecha: string; mapa: Record<number, VeredictoRastreo>; error: boolean; motivo?: string } | null>(null);
@@ -896,6 +912,7 @@ export default function SeguimientoPage() {
   useEffect(() => {
     setDrawer(prev => prev ? (servicios.find(s => s.reserva.id === prev.reserva.id) ?? prev) : prev);
     setGpsModal(prev => prev ? (servicios.find(s => s.reserva.id === prev.reserva.id) ?? prev) : prev);
+    setRastreoModal(prev => prev ? (servicios.find(s => s.reserva.id === prev.reserva.id) ?? prev) : prev);
   }, [servicios]);
 
   // Ir al detalle de un servicio desde el panel de mensajes de pasajeros.
@@ -952,6 +969,7 @@ export default function SeguimientoPage() {
     return v ? [{ reservaId: s.reserva.id, placa: s.vehiculo_placa, conductor: s.conductor_nombre, v }] : [];
   }));
   const telDe = (reservaId: number) => servicios.find(s=>s.reserva.id===reservaId)?.conductor_tel || "";
+  const abrirRastreo = (reservaId: number) => { const s = servicios.find(x=>x.reserva.id===reservaId); if (s) setRastreoModal(s); };
 
   // ModalGps redibuja la ruta con Google Directions cada vez que cambia la IDENTIDAD del array
   // `paradas`. Como esta página se re-renderiza en cada evento realtime de reservas/paradas,
@@ -1150,9 +1168,13 @@ export default function SeguimientoPage() {
                     const tel = telDe(i.reservaId);
                     return (
                       <div key={i.reservaId} className="flex items-center gap-2 text-xs text-red-900 flex-wrap">
-                        <span className="font-mono font-black">{i.placa}</span>
-                        <span>· {i.conductor}</span>
-                        <span className="text-red-700">· {i.v.ultimaSenalTs != null ? `sin señal desde las ${hhmmLima(i.v.ultimaSenalTs)}` : "no ha llegado ninguna posición"}</span>
+                        {/* La fila abre el diagnóstico; el teléfono sigue siendo su propio enlace (fuera del botón). */}
+                        <button type="button" onClick={()=>abrirRastreo(i.reservaId)} title="Ver el diagnóstico del rastreo"
+                          className="flex items-center gap-2 flex-wrap text-left rounded-md px-1 -mx-1 hover:bg-red-100 cursor-pointer transition-colors">
+                          <span className="font-mono font-black">{i.placa}</span>
+                          <span>· {i.conductor}</span>
+                          <span className="text-red-700">· {i.v.ultimaSenalTs != null ? `sin señal desde las ${hhmmLima(i.v.ultimaSenalTs)}` : "no ha llegado ninguna posición"}</span>
+                        </button>
                         {tel && <a href={`tel:${tel}`} className="font-bold text-green-700 underline">{tel}</a>}
                       </div>
                     );
@@ -1182,9 +1204,10 @@ export default function SeguimientoPage() {
             {rastreoRes.incompletos.length > 0 && (
               <div className="mt-3 space-y-1">
                 {rastreoRes.incompletos.map(i => (
-                  <p key={i.reservaId} className="text-[11px] text-gray-600 leading-snug">
+                  <button key={i.reservaId} type="button" onClick={()=>abrirRastreo(i.reservaId)} title="Ver el diagnóstico del rastreo"
+                    className="block w-full text-left text-[11px] text-gray-600 leading-snug rounded-md px-1 -mx-1 py-0.5 hover:bg-gray-50 cursor-pointer transition-colors">
                     <span className="font-mono font-black text-[#0b315f]">{i.placa}</span> · {i.conductor} — <span className="font-bold" style={{ color: i.v.color }}>{i.v.celda}</span> · {i.v.detalle}
-                  </p>
+                  </button>
                 ))}
               </div>
             )}
@@ -1279,7 +1302,7 @@ export default function SeguimientoPage() {
               </div>
               <div className="divide-y divide-gray-50">
                 {[...filtrados].sort((a,b)=>(a.reserva.hora_servicio||"").localeCompare(b.reserva.hora_servicio||"")).map(s=>(
-                  <FilaServicio key={s.reserva.id} s={s} hermano={hermanoDe(s.reserva)} rastreo={rastreoMapa?.[s.reserva.id] ?? null} rastreoEstado={rastreoEstado} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRutaNombre={patchRutaNombre} onRutaMasiva={(r,n)=>setRutaMasiva({reserva:r,nombre:n})} />
+                  <FilaServicio key={s.reserva.id} s={s} hermano={hermanoDe(s.reserva)} rastreo={rastreoMapa?.[s.reserva.id] ?? null} rastreoEstado={rastreoEstado} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRastreo={()=>setRastreoModal(s)} onRutaNombre={patchRutaNombre} onRutaMasiva={(r,n)=>setRutaMasiva({reserva:r,nombre:n})} />
                 ))}
               </div>
             </div>
@@ -1302,6 +1325,25 @@ export default function SeguimientoPage() {
           destino={(gpsModal.paradas.length > 1 ? gpsModal.paradas[gpsModal.paradas.length - 1].nombre : null) ?? gpsModal.reserva.destino ?? null}
           paradas={paradasGps}
           onClose={() => setGpsModal(null)}
+        />
+      )}
+
+      {/* ── MODAL: DIAGNÓSTICO DEL RASTREO ──
+          Por qué se cortó cada tramo y cómo estaba configurado el teléfono del conductor. Solo
+          aquí: no se importa en /cliente ni en /seguimiento/[token] (al cliente no se le enseña el
+          % de rastreo). «Ver el recorrido en el mapa» lo cierra y abre el modal GPS. */}
+      {rastreoModal && (
+        <ModalDiagnosticoRastreo
+          reservaId={rastreoModal.reserva.id}
+          fecha={rastreoModal.reserva.fecha_servicio}
+          placa={rastreoModal.vehiculo_placa}
+          conductorNombre={rastreoModal.conductor_nombre}
+          conductorTel={rastreoModal.conductor_tel}
+          horaServicio={rastreoModal.reserva.hora_servicio}
+          clienteNombre={rastreoModal.cliente_nombre}
+          rastreo={rastreoMapa?.[rastreoModal.reserva.id] ?? null}
+          onAbrirGps={() => { const s = rastreoModal; setRastreoModal(null); setGpsModal(s); }}
+          onClose={() => setRastreoModal(null)}
         />
       )}
 
