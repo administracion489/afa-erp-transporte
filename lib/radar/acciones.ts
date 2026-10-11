@@ -37,7 +37,7 @@ import {
   leerAlbumRecargas, buscarDuplicado, buscarCargaRegistrada, patronComprobante,
   type RecargaAlbum, type DespachoGuardado, type CargaRegistrada,
 } from "./album-recargas";
-import { revisarFechaVoucher } from "./fecha-voucher";
+import { revisarFechaVoucher, revisarHoraVoucher } from "./fecha-voucher";
 import { insertarFilaRadar, avisoColumnasQuitadas } from "./guardado-radar";
 import { faltaAlguna } from "@/lib/columna-faltante";
 import { resolverGrifo, grifoPorRuc, type CatalogoGrifos } from "@/lib/combustible/grifo-canonico";
@@ -749,6 +749,8 @@ async function insertarRecargasAdicionales(
     fechaPorDefecto: string;
     /** Fecha Lima del ENVÍO del mensaje: contra ella se juzga la fecha de cada voucher. */
     fechaMensaje: string | null;
+    /** Instante del envío: la hora de cada voucher no puede ser posterior. */
+    tsMensaje: string | null;
     grifoPorDefecto: string | null;
     /** RUC del grifo del voucher principal (ya validado), para las notas de la misma estación. */
     rucPorDefecto: string | null;
@@ -769,6 +771,9 @@ async function insertarRecargasAdicionales(
       // La fecha de cada voucher del álbum se juzga igual que la del principal: un año mal leído
       // en el segundo voucher es tan probable como en el primero.
       const vFecha = r.fecha ? revisarFechaVoucher({ leida: r.fecha, fechaMensaje: ctx.fechaMensaje }) : null;
+      const fechaExtra = vFecha?.fecha ?? ctx.fechaPorDefecto;
+      // Y su hora, con la misma regla que la del principal (revisarHoraVoucher).
+      const vHora = revisarHoraVoucher({ leida: r.hora, fecha: fechaExtra, tsMensaje: ctx.tsMensaje });
       // Una identidad por empresa también en las notas extra (lib/combustible/grifo-canonico.ts).
       const g = r.grifo ? resolverGrifo({ nombre: r.grifo }, ctx.catalogoGrifos) : null;
       await insertarFilaRadar(sb, {
@@ -776,8 +781,8 @@ async function insertarRecargasAdicionales(
         placa: placaFormato(r.placa) ?? veh?.placa ?? terc?.placa ?? null,
         vehiculo_id: veh?.id ?? null,
         vehiculo_tercero_id: terc?.id ?? null,
-        fecha: vFecha?.fecha ?? ctx.fechaPorDefecto,
-        hora: r.hora,
+        fecha: fechaExtra,
+        hora: vHora.hora,
         // El grifo del álbum es el mismo salvo que el voucher diga otro: son notas de la
         // misma ráfaga, casi siempre de la misma estación.
         grifo: g ? g.nombre : ctx.grifoPorDefecto,
@@ -804,6 +809,7 @@ async function insertarRecargasAdicionales(
             bloquea: true,
           },
           ...(vFecha?.anomalia ? [vFecha.anomalia] : []),
+          ...(vHora.anomalia ? [vHora.anomalia] : []),
         ],
         fotos: ctx.fotos,
       });
@@ -837,6 +843,12 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   const fechaMensaje = fechaLimaDeTs(mensaje.ts_mensaje);
   const vFecha = revisarFechaVoucher({ leida: d.fecha, fechaMensaje });
   const fecha = vFecha.fecha || fechaMensaje || fechaLima();
+  // La HORA del despacho (la impresa junto a la fecha), normalizada a «HH:MM:SS» y cotejada con el
+  // envío de la foto por la MISMA regla que ubica el odómetro (lib/radar/fecha-voucher.ts). Es la
+  // que se guarda en la fila del Radar y en `combustible.hora`; sin hora impresa, null — nunca la
+  // del mensaje, que es un tope y no la hora de la carga.
+  const vHora = revisarHoraVoucher({ leida: d.hora, fecha, tsMensaje: mensaje.ts_mensaje ?? null });
+  const hora = vHora.hora;
   // La IA a veces deja una placa real (p.ej. "CUP 435" sin guion) en "unidad" en vez de
   // "placa" — placaNorm() quita espacios/guiones antes de comparar, así que probarla igual
   // contra la flota es seguro: una referencia realmente informal ("bus 45") no matchea nada.
@@ -907,7 +919,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   if (unidadKm && kmIA != null && kmIA > 0) {
     try {
       const ctxKm = await contextoDeRecarga(sb, {
-        vehiculo_id: unidadKm.id, flota: unidadKm.flota, fecha, hora: d.hora ?? null, tsMensaje: mensaje.ts_mensaje ?? null,
+        vehiculo_id: unidadKm.id, flota: unidadKm.flota, fecha, hora, tsMensaje: mensaje.ts_mensaje ?? null,
       });
       if (ctxKm.existe) {
         veredictoKm = elegirOdometro({
@@ -942,6 +954,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   // La fecha, igual de temprano: el duplicado, el rendimiento y el conductor del día se buscan con
   // ella, así que una fecha de otro año los hace mentir a todos.
   if (vFecha.anomalia) anomalias.push(vFecha.anomalia);
+  if (vHora.anomalia) anomalias.push(vHora.anomalia);
   // El km, igual de temprano: el tramo de rendimiento y el «no cuadra con su fecha» lo usan.
   if (vKm.anomalia) anomalias.push(vKm.anomalia);
 
@@ -1336,7 +1349,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   if ((veh || terc) && km != null && km > 0) {
     const fuera = await juzgarKmDeRecarga(sb, {
       vehiculo_id: veh ? veh.id : terc!.id, flota: veh ? "propia" : "tercero",
-      km, fecha, hora: d.hora ?? null, tsMensaje: mensaje.ts_mensaje ?? null,
+      km, fecha, hora, tsMensaje: mensaje.ts_mensaje ?? null,
     });
     if (fuera) anomalias.push({ codigo: "km_menor_al_actual", detalle: fuera, por_fecha: true });
   }
@@ -1423,11 +1436,11 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   }
 
   // 6) Recarga de madrugada (00:00–04:59)
-  const hMatch = /^(\d{1,2}):\d{2}/.exec(String(d.hora ?? ""));
+  const hMatch = /^(\d{1,2}):\d{2}/.exec(String(hora ?? ""));
   if (hMatch) {
     const h = Number(hMatch[1]);
     if (h >= 0 && h <= 4) {
-      anomalias.push({ codigo: "recarga_madrugada", detalle: `Recarga a las ${d.hora} (madrugada)` });
+      anomalias.push({ codigo: "recarga_madrugada", detalle: `Recarga a las ${(hora ?? "").slice(0, 5)} (madrugada)` });
     }
   }
 
@@ -1514,7 +1527,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     vehiculo_id: veh?.id ?? null,
     vehiculo_tercero_id: terc?.id ?? null,
     fecha,
-    hora: d.hora ?? null,
+    hora,
     grifo,
     // El RUC del vendedor, validado (columna de combustible-07-ruc-grifo-radar.sql): el panel de
     // revisión lo pasa a `combustible.ruc_proveedor` al registrar, que es con lo que el saldo de la
@@ -1585,11 +1598,23 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
         // (lib/combustible/saldo-cuenta.ts → perteneceACuenta). Columna de finanzas-02: si falta,
         // se suelta y la carga entra igual.
         ruc_proveedor: rucGrifo,
+        // La hora IMPRESA del despacho (combustible-05). Faltaba aquí: la fila del Radar la tenía y
+        // la carga nacía sin hora, así que /combustible la enseñaba vacía y el operador la tecleaba
+        // a mano mirando la foto (CWZ-371, 11/10/2026).
+        hora,
     };
-    let { data: comb, error: errComb } = await sb.from("combustible").insert(payloadCarga).select("id").single();
-    if (errComb && faltaAlguna(errComb, ["ruc_proveedor"])) {
-      const { ruc_proveedor: _sinRuc, ...sinRuc } = payloadCarga;
-      ({ data: comb, error: errComb } = await sb.from("combustible").insert(sinRuc).select("id").single());
+    // Columnas de migraciones accesorias: si falta una, se suelta LA QUE EL ERROR NOMBRA y la carga
+    // entra igual — un SQL sin correr no puede perder un gasto ya leído.
+    const OPCIONALES_CARGA = ["ruc_proveedor", "hora"] as const;
+    const filaCarga: Record<string, unknown> = { ...payloadCarga };
+    const soltadasCarga: string[] = [];
+    let { data: comb, error: errComb } = await sb.from("combustible").insert(filaCarga).select("id").single();
+    for (let intento = 0; errComb && intento < OPCIONALES_CARGA.length; intento++) {
+      const col = faltaAlguna(errComb, OPCIONALES_CARGA);
+      if (!col || !(col in filaCarga)) break;
+      delete filaCarga[col];
+      soltadasCarga.push(col);
+      ({ data: comb, error: errComb } = await sb.from("combustible").insert(filaCarga).select("id").single());
     }
     if (errComb) throw new Error(`combustible: ${errComb.message}`);
     const combustibleId = Number((comb as any)?.id);
@@ -1599,6 +1624,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     // comprometió la corrida anterior leyendo ese id del resultado— la registraría otra vez. Lo que
     // falle se DICE en el resultado, que sigue llevando el id de la carga.
     const avisos: string[] = [];
+    if (hora && soltadasCarga.includes("hora")) {
+      avisos.push(`la carga quedó sin la hora del voucher (${hora.slice(0, 5)}): falta correr supabase/combustible-05-hora-carga.sql (la lectura de odómetro sí la lleva)`);
+    }
 
     // Alimentar el odómetro consolidado (anti-retroceso). fuente="combustible" deja marcado que
     // esta lectura se tomó EN LA RECARGA (base para el rendimiento km/galón y la auditoría de km).
@@ -1607,7 +1635,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
         // La hora IMPRESA en el voucher manda: es la del despacho. La del mensaje es de cuándo se
         // ENVIÓ (la foto pudo tomarse antes) y solo vale como tope si es del mismo día que la
         // recarga — un voucher del 13 reenviado el 15 no tiene la hora del 15.
-        const cap = capturaDeRecarga({ fecha, hora: d.hora, tsMensaje: mensaje.ts_mensaje ?? null });
+        const cap = capturaDeRecarga({ fecha, hora, tsMensaje: mensaje.ts_mensaje ?? null });
         await registrarLectura(sb, {
           vehiculo_id: veh!.id,
           km,
@@ -1676,6 +1704,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     mensajeId: mensaje.id,
     fechaPorDefecto: fecha,
     fechaMensaje,
+    tsMensaje: mensaje.ts_mensaje ?? null,
     grifoPorDefecto: grifo,
     rucPorDefecto: rucGrifo,
     catalogoGrifos: catGrifos,

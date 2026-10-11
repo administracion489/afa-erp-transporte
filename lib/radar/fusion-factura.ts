@@ -58,6 +58,7 @@ import {
 } from "@/lib/combustible/factura-lineas";
 import { MAX_DESFASE, diasEntre, esCargaDelRadar } from "@/lib/combustible/desfase-factura";
 import { buscarCargaRegistrada, comprobanteEnTexto, type CargaRegistrada, type CargaYaRegistrada } from "@/lib/radar/album-recargas";
+import { normalizarHoraVoucher } from "@/lib/odometro-tiempo";
 
 /**
  * La carga de `combustible` con la que se fusiona: la que registró una factura, el Radar o una persona.
@@ -73,6 +74,11 @@ export type CargaDeFactura = {
   grifo: string | null;
   observaciones: string | null;
   tanque_lleno?: boolean | null;
+  /**
+   * `combustible.hora` (combustible-05). `undefined` = la columna no existe (la migración no se corrió)
+   * y no se propone escribirla; `null` = la carga no tiene hora.
+   */
+  hora?: string | null;
   /** Las notas de despacho que ya se conocen de la carga por sus filas del Radar (las de su observación se leen solas). */
   notas?: (string | null)[] | null;
   /**
@@ -116,6 +122,8 @@ export type VoucherAFusionar = {
   monto: number | null;
   tanqueLleno?: boolean | null;
   tanqueFuente?: string | null;
+  /** La hora del despacho impresa en el voucher. */
+  hora?: string | null;
   /** El vehículo elegido en la fila (`claveVehiculo`) y su placa. */
   vehiculo?: string | null;
   placa?: string | null;
@@ -131,6 +139,8 @@ export type PlanFusion = {
   patch: Record<string, unknown>;
   /** `tanque_lleno` es de una migración accesoria: escritura aparte y best-effort, como al registrar. */
   patchTanque: Record<string, unknown> | null;
+  /** `hora` es de otra migración accesoria (combustible-05): también aparte y best-effort. */
+  patchHora: Record<string, unknown> | null;
   /** Para la pantalla: qué cambia, de qué a qué. */
   cambios: { campo: string; de: string; a: string }[];
   avisos: string[];
@@ -145,7 +155,7 @@ const soles = (n: number) => `S/ ${n.toFixed(2)}`;
 
 export function planDeFusion(carga: CargaDeFactura, v: VoucherAFusionar): PlanFusion {
   const modo = modoDeFusion(carga.observaciones);
-  const vacio = { modo, patch: {}, patchTanque: null, cambios: [], avisos: [], cruzaMes: false };
+  const vacio = { modo, patch: {}, patchTanque: null, patchHora: null, cambios: [], avisos: [], cruzaMes: false };
   const fecha = v.fecha && /^\d{4}-\d{2}-\d{2}$/.test(v.fecha.slice(0, 10)) ? v.fecha.slice(0, 10) : null;
   const patch: Record<string, unknown> = {};
   const cambios: PlanFusion["cambios"] = [];
@@ -209,6 +219,20 @@ export function planDeFusion(carga: CargaDeFactura, v: VoucherAFusionar): PlanFu
     patch.grifo = v.grifo;
     cambios.push({ campo: "Grifo", de: "—", a: v.grifo });
   }
+  // La HORA del despacho: la que imprime el voucher, si la carga no tiene ninguna (una carga de factura
+  // nace sin hora: la factura solo dice cuándo se EMITIÓ). La que ya tiene la carga es un dato: se deja,
+  // y si no coincide se dice. Sin la columna (`undefined`) no se propone nada.
+  const horaVoucher = normalizarHoraVoucher(v.hora);
+  let patchHora: Record<string, unknown> | null = null;
+  if (horaVoucher && carga.hora !== undefined) {
+    const horaCarga = normalizarHoraVoucher(carga.hora);
+    if (!horaCarga) {
+      patchHora = { hora: horaVoucher };
+      cambios.push({ campo: "Hora", de: "—", a: horaVoucher.slice(0, 5) });
+    } else if (horaCarga.slice(0, 5) !== horaVoucher.slice(0, 5)) {
+      avisos.push(`La carga dice las ${horaCarga.slice(0, 5)} y el voucher las ${horaVoucher.slice(0, 5)}: se deja la de la carga. Si no es la misma recarga, no la fusiones.`);
+    }
+  }
   // Galones, precio e importe: los de la factura (o los de la carga que ya existe). Si el voucher dice
   // otra cosa, se dice.
   const deQuien = modo === "factura" ? "la factura" : "la carga";
@@ -263,14 +287,14 @@ export function planDeFusion(carga: CargaDeFactura, v: VoucherAFusionar): PlanFu
   const toma = cambios.map((c) => c.campo.toLowerCase());
   if (modo === "sumar") {
     return {
-      codigo: "sumable", puede: true, modo, patch, patchTanque, cambios, avisos, cruzaMes,
+      codigo: "sumable", puede: true, modo, patch, patchTanque, patchHora, cambios, avisos, cruzaMes,
       detalle: `Es la misma recarga que la carga #${carga.id}, ${origenDeCarga(obs)}. Al fusionar, esta fila queda enlazada a esa ` +
         `carga —sus fotos pasan a ser evidencia de ella en Combustible—` + (toma.length ? ` y la carga toma de este voucher: ${toma.join(", ")}` : "") +
         `. La fecha, los galones, el precio y el importe de la carga no cambian. No se crea ninguna carga nueva.`,
     };
   }
   return {
-    codigo: "fusionable", puede: true, modo, patch, patchTanque, cambios, avisos, cruzaMes,
+    codigo: "fusionable", puede: true, modo, patch, patchTanque, patchHora, cambios, avisos, cruzaMes,
     detalle: `Es la misma recarga que la carga #${carga.id}, registrada desde la factura del correo. Al fusionar, esa carga ` +
       (toma.length ? `toma del voucher: ${toma.join(", ")}` : "queda enlazada a este voucher") +
       `; los galones, el precio y el importe siguen siendo los de la factura. No se crea ninguna carga nueva.`,

@@ -16,7 +16,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { registrarLectura } from "@/lib/odometro";
-import { capturaDeFechaHora } from "@/lib/odometro-tiempo";
+import { capturaDeFechaHora, normalizarHoraVoucher } from "@/lib/odometro-tiempo";
 import { MARCA_CARGA_DE_FACTURA, DIAS_REGISTRO_AUTOMATICO } from "@/lib/combustible/factura-lineas";
 import { sumarDias } from "@/lib/combustible/desfase-factura";
 import {
@@ -191,6 +191,12 @@ export default function CargasPorCompletar({ facturas, pendRadar, onConteo }: {
         .update(plan.patch).eq("id", carga.id).eq("fecha", carga.fecha).select("id");
       if (eU) throw eU;
       if (!((upd as unknown[]) ?? []).length) throw new Error(`la carga #${carga.id} cambió mientras tanto: vuelve a abrirla`);
+      // La hora del voucher también a la carga (`combustible.hora`, combustible-05), no solo a la lectura
+      // y a la observación. Aparte y best-effort: sin la columna la fila no la trae y no se escribe.
+      const horaHms = normalizarHoraVoucher(e.hora);
+      if (horaHms && "hora" in (fila as Record<string, unknown>)) {
+        await supabase.from("combustible").update({ hora: horaHms }).eq("id", carga.id);
+      }
       // El odómetro, por la misma puerta que el resto del ERP. La carga —el gasto— ya quedó escrita: un
       // fallo aquí se DICE, no deshace nada.
       let nota = "";

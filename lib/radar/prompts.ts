@@ -168,7 +168,7 @@ const FORMA_COMBUSTIBLE = `{
   "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
   "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
   "fecha": "YYYY-MM-DD"|null,           // fecha de la recarga (del voucher si la hay)
-  "hora": "HH:MM"|null,
+  "hora": "HH:MM"|"HH:MM:SS"|null,      // hora de la RECARGA en 24 h (la impresa en el voucher, o la que el mensaje da como hora de la carga). null si no la dice: NO es la hora de este mensaje
   "grifo": string|null,                 // nombre del grifo/estación (ej "Primax", "Repsol")
   "direccion_grifo": string|null,       // dirección impresa en el voucher
   "tipo_combustible": "diesel"|"glp"|"gnv"|"gasolina_regular"|"gasolina_premium"|"urea"|"biodiesel"|null,  // del PRODUCTO impreso, jamás de la unidad ("UGL" es galones, no GLP)
@@ -190,8 +190,8 @@ const FORMA_COMBUSTIBLE = `{
 const FORMA_COMBUSTIBLE_MEDIA = `{
   "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
   "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
-  "fecha": "YYYY-MM-DD"|null,
-  "hora": "HH:MM"|null,
+  "fecha": "YYYY-MM-DD"|null,           // fecha impresa en la NOTA (viene como día/mes/año: conviértela)
+  "hora": "HH:MM"|"HH:MM:SS"|null,      // hora impresa JUNTO a la fecha en la NOTA, en 24 h y con segundos si los trae. null si no se ve: NUNCA la hora de este mensaje
   "grifo": string|null,                 // quien VENDE: el ENCABEZADO de la nota. NUNCA el "RAZ.SOC"/cliente ni una marca del tablero (LANDI RENZO, BRC…)
   "direccion_grifo": string|null,       // dirección de la ESTACIÓN (encabezado). NO la del "DIRECC" del cliente
   "ruc": string|null,                   // RUC del GRIFO (el del encabezado). NO el que va junto a "RAZ.SOC"
@@ -233,7 +233,7 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
   ],
   "comprobantes_vistos": [ string ],    // TODOS los nº de nota/comprobante distintos que ves en el álbum. Uno solo en el caso normal
   "recargas_adicionales": [             // SOLO si el álbum trae MÁS DE UN despacho distinto (2 notas ≠). [] en el caso normal
-    { "placa": string|null, "comprobante": string|null, "fecha": "YYYY-MM-DD"|null, "hora": "HH:MM"|null,
+    { "placa": string|null, "comprobante": string|null, "fecha": "YYYY-MM-DD"|null, "hora": "HH:MM"|"HH:MM:SS"|null,
       "grifo": string|null, "tipo_combustible": "diesel"|"glp"|"gnv"|"gasolina_regular"|"gasolina_premium"|"urea"|"biodiesel"|null,  // del PRODUCTO impreso, jamás de la unidad ("UGL" es galones, no GLP)
   "producto_voucher": string|null,      // la descripción del producto TAL CUAL la imprime el voucher ("MAX-D DIESEL B5 S50 UV", "GLP-G", "GASOHOL 95")
       "galones": number|null, "litros": number|null, "precio_galon": number|null, "precio_litro": number|null,
@@ -290,6 +290,7 @@ Un reporte de recarga suele venir como VARIAS fotos con ROLES distintos; combina
 - NIVEL DE COMBUSTIBLE (aguja del tablero, a veces antes y después): solo evidencia visual; no aporta números duros.
 - SURTIDOR del grifo (pantalla digital de 7 segmentos): galones/litros despachados, soles y a veces el precio. Transcríbelo dígito a dígito; cuida las confusiones 8↔0↔6↔9 y la posición del punto decimal (C.CCC gal ≠ CCCC).
 - NOTA DE DESPACHO / voucher (papel impreso por el grifo): grifo, dirección, RUC, razón social, N° de comprobante (serie-correlativo), placa, kilometraje, galones, precio, total, fecha y hora.
+- LA FECHA Y LA HORA DEL DESPACHO van impresas JUNTAS en la nota, casi siempre en la misma línea y cerca del N° de comprobante («FECHA: DD/MM/AAAA HH:MM:SS»; a veces rotuladas aparte, «FECHA EMISIÓN» y «HORA»). Cópialas las DOS: la fecha (es día/mes/año) en "fecha" y la hora en "hora", en 24 h y con los segundos si los imprime. Son el momento en que el grifero imprimió el voucher y tecleó el kilometraje: el ERP las usa para ubicar el odómetro entre los registros del día. **La hora del despacho NO es la de este mensaje** ni la "hora actual" de arriba: si la nota no la muestra o no se lee, "hora": null.
 
 JERARQUÍA DE FUENTES (rellena "fuentes" con la que usaste en cada campo):
 - Cantidad y precio: manda el SURTIDOR; si no se ve, la NOTA.

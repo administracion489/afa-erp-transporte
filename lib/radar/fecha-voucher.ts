@@ -23,6 +23,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import type { AnomaliaCombustible } from "./tipos";
+import { capturaDeRecarga, normalizarHoraVoucher } from "@/lib/odometro-tiempo";
 
 /**
  * Cuántos días antes del mensaje puede ser un voucher sin que se pregunte. NO está medido y se
@@ -147,4 +148,71 @@ export function revisarFechaVoucher(args: {
       bloquea: true,
     },
   };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// LA HORA DEL DESPACHO (el caso CWZ-371, 11/10/2026: la nota imprimía «11/10/2026 07:55:41» y la
+// carga quedó sin hora; el operador la tecleó a mano en /combustible).
+//
+// La hora impresa es la del DESPACHO: el grifero teclea el kilometraje en ese momento, y es la que
+// ubica el odómetro de la carga entre los check-in y check-out del día. Se escribe en
+// `radar_combustible.hora` y en `combustible.hora`, y es la MISMA que usa `capturaDeRecarga` para
+// la lectura: se valida con esa función, no con una regla aparte — si la lectura la descartara y la
+// carga no, la carga diría 09:10 y su odómetro estaría a las 07:58.
+//
+// LO QUE NO SE HACE: poner la hora del MENSAJE en su lugar. Esa hora es un tope (la foto se mandó
+// en o después del despacho), no la del despacho, y en la carga afirmaría algo que nadie leyó. Sin
+// hora impresa la carga queda sin hora y la lectura usa el mensaje como tope, como siempre.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type CodigoHora =
+  | "ok"                    // impresa, legible y posible: es la del despacho
+  | "sin_hora"              // la IA no leyó ninguna
+  | "ilegible"              // lo leído no es una hora
+  | "posterior_al_mensaje"; // misma fecha y posterior al envío de la foto: está mal leída
+
+export type VeredictoHora = {
+  codigo: CodigoHora;
+  /** «HH:MM:SS» que se guarda, o null. */
+  hora: string | null;
+  /** Lo que leyó la IA, tal cual (null si no leyó nada). */
+  leida: string | null;
+  /** Solo cuando se descartó una hora leída: el revisor tiene que saber por qué el campo va vacío. */
+  anomalia?: AnomaliaCombustible;
+};
+
+export function revisarHoraVoucher(args: {
+  leida: unknown;
+  /** La fecha que se va a guardar en la carga (la del voucher, corregida o la del mensaje). */
+  fecha: string | null | undefined;
+  /** Instante del ENVÍO del mensaje (ts_mensaje). */
+  tsMensaje: string | null | undefined;
+}): VeredictoHora {
+  const leida = args.leida == null ? "" : String(args.leida).trim();
+  if (!leida) return { codigo: "sin_hora", hora: null, leida: null };
+  const hms = normalizarHoraVoucher(leida);
+  if (!hms) {
+    return {
+      codigo: "ilegible", hora: null, leida,
+      anomalia: {
+        codigo: "observacion_lectura",
+        detalle: `La hora leída del voucher («${leida}») no es una hora: la carga queda sin hora. Escríbela mirando la foto.`,
+        bloquea: false,
+      },
+    };
+  }
+  const fecha = fechaIso(args.fecha);
+  if (fecha && capturaDeRecarga({ fecha, hora: hms, tsMensaje: args.tsMensaje ?? null }).fuente !== "voucher") {
+    return {
+      codigo: "posterior_al_mensaje", hora: null, leida,
+      anomalia: {
+        codigo: "observacion_lectura",
+        detalle:
+          `La hora leída del voucher (${hms.slice(0, 5)} del ${legible(fecha)}) es POSTERIOR al envío de la foto: ningún voucher ` +
+          `se fotografía antes de imprimirse, está mal leída. La carga queda sin hora; escríbela mirando la foto.`,
+        bloquea: false,
+      },
+    };
+  }
+  return { codigo: "ok", hora: hms, leida };
 }

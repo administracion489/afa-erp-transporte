@@ -24,7 +24,9 @@
 //      surtidor): en vez de descartarla, se FUSIONA en el modo «sumar» — enlaza sus fotos y completa lo
 //      que falta, sin mover la fecha ni la plata;
 //  10. UNA FUSIÓN NO CRUZA UNIDADES: la carga se encuentra por su nota en cualquier unidad (el mismo papel
-//      capturado en la BUI-272 y en la CTV-370), y fusionar así pondría el odómetro en la unidad equivocada.
+//      capturado en la BUI-272 y en la CTV-370), y fusionar así pondría el odómetro en la unidad equivocada;
+//  11. LA HORA DEL DESPACHO: la carga sin hora toma la del voucher (aparte y best-effort, porque es de
+//      combustible-05); la que ya tiene es un dato y se deja; sin la columna no se propone nada.
 import {
   planDeFusion, yaEstaEnCombustible, preguntaAntesDeRegistrar, modoDeFusion, claveVehiculo, vehiculoDeCarga,
   type CargaDeFactura, type VoucherAFusionar,
@@ -405,6 +407,28 @@ console.log("\n10. La misma nota capturada en dos unidades: no se fusiona hasta 
       }
   chk(`(${casos} combinaciones, ${bloqueados} con dos vehículos) con vehículos distintos nunca escribe nada; con el mismo o sin dato, el plan es idéntico al de antes`,
     roto === 0 && bloqueados > 0 && bloqueados < casos, `${roto} rotos`);
+}
+
+// ── 11. La hora del despacho ─────────────────────────────────────────────────
+console.log("\n11. La hora del voucher en la fusión");
+{
+  const conColumna: CargaDeFactura = { ...CARGA_61, hora: null };
+  const ph = planDeFusion(conColumna, { ...VOUCHER, hora: "17:08:42" });
+  chk("la carga de factura sin hora toma la del voucher", ph.puede && ph.patchHora?.hora === "17:08:42", JSON.stringify(ph.patchHora));
+  chk("…en una escritura APARTE: el patch con la fecha no la lleva (sin la columna fallaría entero)", !("hora" in ph.patch));
+  chk("…y se enseña como un cambio", ph.cambios.some((c) => c.campo === "Hora" && c.a === "17:08"));
+  chk("una hora escrita como «5:08 pm» se guarda normalizada", planDeFusion(conColumna, { ...VOUCHER, hora: "5:08 pm" }).patchHora?.hora === "17:08:00");
+  chk("sin la columna (la fila no la trae) no se propone nada", planDeFusion(CARGA_61, { ...VOUCHER, hora: "17:08:42" }).patchHora === null);
+  const misma = planDeFusion({ ...conColumna, hora: "17:08:00" }, { ...VOUCHER, hora: "17:08:42" });
+  chk("la carga ya tiene la hora (mismo minuto): no se toca y no se avisa", misma.patchHora === null && !misma.avisos.some((a) => /dice las/.test(a)));
+  const otra = planDeFusion({ ...conColumna, hora: "09:00:00" }, { ...VOUCHER, hora: "17:08:42" });
+  chk("la carga dice otra hora: se deja la suya y se AVISA", otra.patchHora === null && otra.avisos.some((a) => /09:00.*17:08/.test(a)));
+  chk("el voucher sin hora no escribe nada", planDeFusion(conColumna, { ...VOUCHER, hora: null }).patchHora === null);
+  chk("una hora ilegible del voucher tampoco", planDeFusion(conColumna, { ...VOUCHER, hora: "tarde" }).patchHora === null);
+  const sumarH = planDeFusion({ ...conColumna, observaciones: "Radar IA · grupo Flota" }, { ...VOUCHER, hora: "17:08:42" });
+  chk("en el modo «sumar» también completa la hora que falta", sumarH.modo === "sumar" && sumarH.patchHora?.hora === "17:08:42");
+  const bloqueada = planDeFusion({ ...conColumna, vehiculo: "propio:1" }, { ...VOUCHER, hora: "17:08:42", vehiculo: "propio:2" });
+  chk("una fusión que no procede no propone la hora", !bloqueada.puede && bloqueada.patchHora === null);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

@@ -51,7 +51,7 @@ type Combustible = {
 // Lo que el Radar IA guarda de la carga que él mismo registró. `combustible` no guarda NADA
 // del Radar (ni el id de la lectura, ni la foto, ni el nº de nota), así que el puente es
 // `radar_combustible.combustible_id` y se lee al revés: del Radar hacia la carga.
-type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?: string | null; monto_total?: number | null };
+type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?: string | null; monto_total?: number | null; hora?: string | null };
 
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo" | "facturas";
 type GranPeriodo = "dia" | "semana" | "mes";
@@ -180,8 +180,10 @@ async function cargarLecturasRadar(): Promise<LecturaRadar[]> {
     supabase.from("radar_combustible").select(cols).not("combustible_id", "is", null);
   // `monto_total`: el importe que el Radar leyó del voucher, para avisar en «Editar carga» si la
   // cuenta galones × precio ya no da lo que dice el papel.
-  let res = await pedir("combustible_id, mensaje_id, comprobante, monto_total, fotos");
-  if (res.error && /fotos/i.test(res.error.message || "")) res = await pedir("combustible_id, mensaje_id, comprobante, monto_total");
+  // `hora`: la que el Radar leyó junto a la fecha de la nota, para abrir «Editar carga» con ella cuando
+  // la carga nació sin hora (antes la hora no viajaba de la fila del Radar a la carga).
+  let res = await pedir("combustible_id, mensaje_id, comprobante, monto_total, hora, fotos");
+  if (res.error && /fotos/i.test(res.error.message || "")) res = await pedir("combustible_id, mensaje_id, comprobante, monto_total, hora");
   if (res.error || !res.data) return [];
   return res.data as unknown as LecturaRadar[];
 }
@@ -540,6 +542,17 @@ export default function CombustiblePage() {
     }
     return mapa;
   }, [lecturasRadar]);
+  // La hora que el Radar leyó del voucher de cada carga (la primera válida). Solo sirve para las cargas
+  // que nacieron sin hora: hasta este arreglo la hora se quedaba en la fila del Radar.
+  const horaRadarDeCarga = useMemo(() => {
+    const mapa: Record<number, string> = {};
+    for (const l of lecturasRadar) {
+      const id = Number(l.combustible_id);
+      const h = normalizarHoraVoucher(l.hora);
+      if (Number.isFinite(id) && h && mapa[id] == null) mapa[id] = h;
+    }
+    return mapa;
+  }, [lecturasRadar]);
   // Qué cargas nacieron de una foto. Se marca la CARGA, no la foto: en una fila vieja la foto
   // se pide recién al abrirla, y de todos modos lo que dice el marcador es de dónde salió el dato.
   const cargasDelRadar = useMemo(
@@ -783,7 +796,9 @@ export default function CombustiblePage() {
     setForm({
       vehiculo_id:      uidReg(r),
       fecha:            r.fecha        || "",
-      hora:             r.hora ? String(r.hora).slice(0, 5) : "",
+      // Con segundos (el input los admite): abrir y guardar sin tocarla no puede borrárselos. Si la carga
+      // nació sin hora y el Radar la leyó del voucher, se abre con esa (la nota de abajo lo dice).
+      hora:             r.hora ? String(r.hora).slice(0, 8) : (horaRadarDeCarga[r.id] ?? ""),
       kilometraje:      r.kilometraje  ? String(r.kilometraje)  : "",
       galones:          r.galones      ? String(r.galones)      : "",
       precio_galon:     r.precio_galon ? String(r.precio_galon) : "",
@@ -1266,9 +1281,13 @@ export default function CombustiblePage() {
                   onChange={e => setForm(p => ({ ...p, fecha: e.target.value }))} />
               </Campo>
               <Campo label="Hora de la carga">
-                <input type="time" className={inputCls(horaIlegible ? "border-amber-400 bg-amber-50" : "")}
+                <input type="time" step={1} className={inputCls(horaIlegible ? "border-amber-400 bg-amber-50" : "")}
                   value={form.hora}
                   onChange={e => setForm(p => ({ ...p, hora: e.target.value }))} />
+                {editandoId != null && !registros.find(x => x.id === editandoId)?.hora && horaRadarDeCarga[editandoId]
+                  && form.hora === horaRadarDeCarga[editandoId] && (
+                  <p className="mt-1 text-[11px] text-gray-500">📷 La leyó el Radar en el voucher. Compruébala con la foto; se guarda al guardar.</p>
+                )}
               </Campo>
               <Campo label="Kilometraje al cargar" span={2}>
                 <input type="number" className={inputCls(`font-mono ${saltoKm.estado === "salto" || kmFueraForm ? "border-amber-400 bg-amber-50" : ""}`)}

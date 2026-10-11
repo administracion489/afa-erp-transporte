@@ -11,13 +11,16 @@
 //   2. el guardado suelta la columna accesoria que el error nombra, y SOLO esa;
 //   3. una acción fallida deja el mensaje en ERROR, nunca en procesado;
 //   4. la fecha del voucher se coteja contra la del mensaje (la CTV-370 fechada en 2025);
+//   4b. la HORA del voucher se guarda normalizada y solo si es posible (la CWZ-371 del 11/10, que
+//       imprimía 07:55:41 y entró sin hora), con la MISMA regla que ubica su odómetro;
 //   5. lo que ya está en /combustible —también lo que registró la FACTURA con un día de
 //      diferencia— se reconoce y no se registra otra vez;
 //   6. reprocesar un mensaje trae de vuelta SU ráfaga y nada más.
 import { PostgrestClient } from "@supabase/postgrest-js";
 import { columnaFaltante, faltaColumna, faltaAlguna } from "../lib/columna-faltante";
 import { insertarFilaRadar, avisoColumnasQuitadas } from "../lib/radar/guardado-radar";
-import { revisarFechaVoucher, MAX_ATRASO_DIAS, atrasoDias } from "../lib/radar/fecha-voucher";
+import { revisarFechaVoucher, revisarHoraVoucher, MAX_ATRASO_DIAS, atrasoDias } from "../lib/radar/fecha-voucher";
+import { capturaDeRecarga, normalizarHoraVoucher } from "../lib/odometro-tiempo";
 import { buscarCargaRegistrada, comprobanteEnTexto, patronComprobante, type CargaRegistrada } from "../lib/radar/album-recargas";
 import {
   estadoTrasAccion, rafagaAReactivar, raizDeReproceso, sinTerminar, esFallido, motivoDeFallo,
@@ -223,6 +226,49 @@ console.log("\n4. La fecha del voucher contra la fecha del mensaje");
   chk(`barrido (${casos}): una fecha en rango no se toca NUNCA`, enRangoTocadas === 0, String(enRangoTocadas));
   chk("toda corrección cae en rango, cambia la fecha y bloquea", roto === 0, String(roto));
   chk("y el barrido sí corrige (un motor que no corrigiera cumpliría lo de arriba)", corregidas > 0, String(corregidas));
+}
+
+// ── 4b. La hora del voucher ──────────────────────────────────────────────────
+console.log("\n4b. La hora impresa del voucher");
+{
+  // CWZ-371, nota V96T-00015944: «11/10/2026 07:55:41», mandada por WhatsApp a las 07:58 (12:58 UTC).
+  const msg = "2026-10-11T12:58:00Z";
+  const cwz = revisarHoraVoucher({ leida: "07:55:41", fecha: "2026-10-11", tsMensaje: msg });
+  chk("CWZ-371: 07:55:41 se guarda tal cual", cwz.codigo === "ok" && cwz.hora === "07:55:41" && !cwz.anomalia, `${cwz.codigo} ${cwz.hora}`);
+  chk("…y es la misma que ubica su odómetro (exacta, no un tope)",
+    capturaDeRecarga({ fecha: "2026-10-11", hora: cwz.hora, tsMensaje: msg }).capturado_en === "2026-10-11T12:55:41.000Z");
+  chk("«7:55» → 07:55:00", revisarHoraVoucher({ leida: "7:55", fecha: "2026-10-11", tsMensaje: msg }).hora === "07:55:00");
+  chk("el reloj del grifo adelantado 12 min no la descarta",
+    revisarHoraVoucher({ leida: "08:10", fecha: "2026-10-11", tsMensaje: msg }).codigo === "ok");
+  const tarde = revisarHoraVoucher({ leida: "07:55 p. m.", fecha: "2026-10-11", tsMensaje: msg });
+  chk("posterior al envío de la foto → sin hora, con el motivo, SIN bloquear", tarde.codigo === "posterior_al_mensaje" && tarde.hora === null &&
+    tarde.anomalia?.bloquea === false && /POSTERIOR/.test(tarde.anomalia?.detalle ?? ""));
+  chk("el voucher de ayer a las 23:10 mandado hoy a las 07:58 → normal",
+    revisarHoraVoucher({ leida: "23:10:05", fecha: "2026-10-10", tsMensaje: msg }).hora === "23:10:05");
+  const sin = revisarHoraVoucher({ leida: null, fecha: "2026-10-11", tsMensaje: msg });
+  chk("sin hora leída → null, sin anomalía (NUNCA la del mensaje)", sin.codigo === "sin_hora" && sin.hora === null && !sin.anomalia);
+  const ileg = revisarHoraVoucher({ leida: "en la mañana", fecha: "2026-10-11", tsMensaje: msg });
+  chk("lo que no es una hora no se guarda como otra cosa, y se dice", ileg.codigo === "ilegible" && ileg.hora === null && ileg.anomalia?.bloquea === false);
+  chk("sin el instante del mensaje se respeta la leída", revisarHoraVoucher({ leida: "21:40", fecha: "2026-10-11", tsMensaje: null }).hora === "21:40:00");
+
+  // Barrido: la carga y su lectura dicen la MISMA hora — guardada ⟺ la lectura la usa como exacta.
+  let casos = 0, desacuerdo = 0, inventadas = 0, guardadas = 0;
+  const horas = ["00:05", "04:59:59", "06:30", "07:55:41", "08:10", "08:14", "08:20", "12:00", "17:08:42", "23:59:59", "7:05 pm", "12:30 am", "25:00", "x", null];
+  for (const fecha of ["2026-10-09", "2026-10-10", "2026-10-11", "2026-10-12"]) {
+    for (const ts of ["2026-10-11T05:30:00Z", "2026-10-11T12:58:00Z", "2026-10-11T23:59:00Z", "2026-10-12T04:10:00Z", null]) {
+      for (const h of horas) {
+        casos++;
+        const v = revisarHoraVoucher({ leida: h, fecha, tsMensaje: ts });
+        const cap = capturaDeRecarga({ fecha, hora: h, tsMensaje: ts });
+        if ((v.hora != null) !== (cap.fuente === "voucher")) desacuerdo++;
+        if (v.hora != null && v.hora !== normalizarHoraVoucher(h)) inventadas++;
+        if (v.hora != null) guardadas++;
+      }
+    }
+  }
+  chk(`barrido (${casos}): la hora de la carga y la de su lectura nunca discrepan`, desacuerdo === 0, String(desacuerdo));
+  chk("…y la guardada es siempre la leída, normalizada (nunca otra)", inventadas === 0, String(inventadas));
+  chk("…y de verdad guarda horas (un motor que nunca guardara cumpliría lo de arriba)", guardadas > casos / 3, `${guardadas}/${casos}`);
 }
 
 // ── 5. ¿Ya está en /combustible? ─────────────────────────────────────────────
