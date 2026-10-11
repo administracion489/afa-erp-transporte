@@ -338,6 +338,9 @@ export function diagnosticarRastreo(e: {
   reinicios: number[];
   /** existe ubicaciones_gps.recibido_en (supabase/gps-equipo-01.sql corrida) */
   recibidoMedible: boolean;
+  /** OPCIONAL: no existe `gps_equipo_reportes` (supabase/gps-equipo-01.sql sin correr). Sin estado del
+   *  teléfono, el detalle no puede decir «no reportó»: no PUDO reportar. Omitido = como antes. */
+  sinTablaEquipo?: boolean;
 }): DiagnosticoRastreo {
   const filas = e.filas ? [...e.filas].sort((a, b) => a.ts - b.ts) : null;
   const { estado: entregas, baseMs } = entregasConBase(filas, e.recibidoMedible);
@@ -432,6 +435,10 @@ export function diagnosticarRastreo(e: {
     : (v === "solo_antena" ? "Todas las posiciones llegaron por antena, sin satélite" : `${minTxt(causaS)} con posiciones por antena, sin satélite`);
   const relevantes = dominante === "app_detenida" ? CAMPOS_APP_DETENIDA : CAMPOS_POR_ANTENA;
   if (!estado) {
+    if (e.sinTablaEquipo) {
+      return armar("no_se_sabe", dominante, "No se puede consultar la configuración del teléfono",
+        `${causaTxt}. Falta correr supabase/gps-equipo-01.sql: sin esa tabla el ERP no recibe cómo está configurado el teléfono del conductor, y no se puede decir si es la configuración o el teléfono.`);
+    }
     return armar("no_se_sabe", dominante, "El teléfono no reportó su configuración",
       `${causaTxt}. La app del conductor no ha enviado cómo está configurado su teléfono (versión anterior de la app, o la usa desde otro aparato): no se puede decir si es la configuración o el teléfono.`);
   }
