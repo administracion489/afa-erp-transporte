@@ -34,6 +34,7 @@ import { CATEGORIAS_CAJA_CHICA, enviarARevision, hoyLima } from "@/lib/finanzas/
 import { redondear } from "@/lib/finanzas/dinero";
 import {
   normalizarReporte, firmaEstado, relojCliente, recortarUA, accionDeReporte, FRENO_EQUIPO_MS,
+  MAX_ESCRITURAS_CONDUCTOR_MIN,
 } from "@/lib/gps-equipo";
 import { tablaFaltante } from "@/lib/columna-faltante";
 
@@ -48,6 +49,11 @@ const admin = createClient(
 // desboque (o un token robado) sin tocar la base. Clave → instante de la última escritura aceptada.
 const frenoEquipo = new Map<string, number>();
 const FRENO_EQUIPO_MAX_CLAVES = 5000;
+// Tope POR CONDUCTOR (MAX_ESCRITURAS_CONDUCTOR_MIN por minuto), sea cual sea el aparato: el freno de
+// arriba lo eludía un cliente que rotara `dispositivo`. Clave (tabla:conductor) → instantes de las
+// escrituras aceptadas en el último minuto. Es por instancia; entre instancias lo cubre el conteo en
+// la base antes de cada INSERT (ver `equipo_gps`).
+const escriturasEquipo = new Map<string, number[]>();
 
 // Normaliza el QR escaneado para tolerar el desajuste de layout de un escáner BT (teclado
 // HID): puede teclear el UUID en MAYÚSCULAS y con el guion mal mapeado (p. ej. "-" → "/")
@@ -941,11 +947,26 @@ export async function POST(req: NextRequest) {
         if (previo != null && ahora - previo < FRENO_EQUIPO_MS) {
           return NextResponse.json({ ok: false, reintentar: true });
         }
+        const claveConductor = `${ses.tabla}:${ses.cid}`;
+        const recientes = (escriturasEquipo.get(claveConductor) ?? []).filter((t) => ahora - t < 60_000);
+        if (recientes.length >= MAX_ESCRITURAS_CONDUCTOR_MIN) {
+          escriturasEquipo.set(claveConductor, recientes);
+          return NextResponse.json({ ok: false, reintentar: true });
+        }
+        escriturasEquipo.set(claveConductor, [...recientes, ahora]);
         frenoEquipo.set(claveFreno, ahora);
         if (frenoEquipo.size > FRENO_EQUIPO_MAX_CLAVES) {
           for (const [k, t] of frenoEquipo) if (ahora - t >= FRENO_EQUIPO_MS) frenoEquipo.delete(k);
         }
+        if (escriturasEquipo.size > FRENO_EQUIPO_MAX_CLAVES) {
+          for (const [k, ts] of escriturasEquipo) if (!ts.some((t) => ahora - t < 60_000)) escriturasEquipo.delete(k);
+        }
         const sinMigracion = () => NextResponse.json({ ok: false, sin_migracion: true, sql: "supabase/gps-equipo-01.sql" });
+        // El detalle de Postgres va al log, no al teléfono: nombra tablas y restricciones.
+        const falloBase = (donde: string, e: { message?: string }) => {
+          console.error(`[equipo_gps] ${donde}:`, e?.message);
+          return NextResponse.json({ error: "No se pudo guardar el reporte del teléfono" }, { status: 500 });
+        };
 
         const reservaId = rep.reserva_id != null && await reservaEsDelConductor(admin, ses, rep.reserva_id)
           ? rep.reserva_id : null;
@@ -962,7 +983,7 @@ export async function POST(req: NextRequest) {
           .limit(1).maybeSingle<{ id: number; firma: string; visto_hasta: string }>();
         if (eUlt) {
           if (tablaFaltante(eUlt, "gps_equipo_reportes")) return sinMigracion();
-          return NextResponse.json({ error: eUlt.message }, { status: 500 });
+          return falloBase("leer la última fila", eUlt);
         }
 
         if (ultima && accionDeReporte(ultima, { firma, motivo: rep.motivo }, ahora) === "estirar") {
@@ -980,9 +1001,20 @@ export async function POST(req: NextRequest) {
             .eq("id", ultima.id).eq(condField, ses.cid);
           if (error) {
             if (tablaFaltante(error, "gps_equipo_reportes")) return sinMigracion();
-            return NextResponse.json({ error: error.message }, { status: 500 });
+            return falloBase("estirar", error);
           }
           return NextResponse.json({ ok: true, accion: "estirado" });
+        }
+
+        // Tope por conductor ENTRE INSTANCIAS: el Map de arriba es de esta instancia. Solo antes de
+        // INSERTAR, que es lo que hace crecer la tabla (estirar no). Si el conteo falla, se sigue: es
+        // un freno, no una condición para guardar.
+        const { count: nRecientes } = await admin.from("gps_equipo_reportes")
+          .select("id", { count: "exact", head: true })
+          .eq(condField, ses.cid)
+          .gt("reportado_en", new Date(ahora - 60_000).toISOString());
+        if ((nRecientes ?? 0) >= MAX_ESCRITURAS_CONDUCTOR_MIN) {
+          return NextResponse.json({ ok: false, reintentar: true });
         }
 
         // `reportado_en` y `visto_hasta` los pone la base (default now()): el mismo reloj para los dos.
@@ -1011,7 +1043,7 @@ export async function POST(req: NextRequest) {
         });
         if (error) {
           if (tablaFaltante(error, "gps_equipo_reportes")) return sinMigracion();
-          return NextResponse.json({ error: error.message }, { status: 500 });
+          return falloBase("insertar", error);
         }
         return NextResponse.json({ ok: true, accion: "insertado" });
       }

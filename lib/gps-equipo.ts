@@ -54,6 +54,14 @@ export const DEDUPE_LATIDOS = 2;
 export const RELOJ_CLIENTE_MAX_MS = 48 * 3600_000;
 /** Freno por instancia del servidor: una escritura cada esto por (tabla, conductor, aparato). */
 export const FRENO_EQUIPO_MS = 5_000;
+/**
+ * Tope POR CONDUCTOR, sea cual sea el aparato: como mucho esto de escrituras por minuto. El freno de
+ * arriba es por (conductor, aparato), y el aparato lo declara el cliente: rotándolo, un token podía
+ * insertar filas sin límite (auditoría de seguridad). Un teléfono legítimo manda a lo sumo 4 por
+ * minuto (`MIN_ENTRE_ENVIOS_MS`); 6 deja sitio a un segundo teléfono. NO medido; el lado seguro es
+ * subirlo, porque lo frenado responde `reintentar` y la app lo vuelve a mandar después.
+ */
+export const MAX_ESCRITURAS_CONDUCTOR_MIN = 6;
 /** Cliente: mínimo entre dos envíos por cambio de firma. */
 export const MIN_ENTRE_ENVIOS_MS = 15_000;
 /** Cliente: espera tras un envío fallido. */
@@ -118,10 +126,18 @@ function normMotivo(x: unknown): MotivoReporte | null {
 function normPlataforma(x: unknown): PlataformaEquipo | null {
   return typeof x === "string" && (PLATAFORMAS as readonly string[]).includes(x) ? (x as PlataformaEquipo) : null;
 }
-/** Texto libre: sin caracteres de control, espacios colapsados, recortado. Vacío → null. */
+/**
+ * Texto libre: sin caracteres de control, espacios colapsados, recortado. Vacío → null.
+ * Se recorta por CARACTERES COMPLETOS y se quitan los sustitutos sueltos: `.slice` corta por
+ * unidades UTF-16 y podía dejar medio emoji, que Postgres rechaza al leer el JSON de PostgREST —
+ * el reporte entero se caía con un 500 y el teléfono reintentaba para siempre.
+ */
 function normTexto(x: unknown, max: number): string | null {
   if (typeof x !== "string") return null;
-  const t = x.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max).trim();
+  const limpio = x
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  const t = Array.from(limpio).slice(0, max).join("").trim();
   return t ? t : null;
 }
 function normModelo(x: unknown): string | null { return normTexto(x, MODELO_MAX); }

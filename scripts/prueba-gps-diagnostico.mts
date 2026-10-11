@@ -192,6 +192,16 @@ const snapBueno = (): Record<string, unknown> => ({
   chk("números: 11.6 → 12, -1 → null; reserva en texto de dígitos → número", r.gps_debil_m === 12 && r.pendientes_cola === null && r.reserva_id === 6166);
   chk("reserva inválida → null (no tumba el reporte)", [-5, 0, 1.5, "abc", "12a", 1e20].every((x) => normalizarReporte({ ...snapBueno(), reserva_id: x })!.reserva_id === null));
   chk("modelo > 60 se recorta a 60", normalizarReporte({ ...snapBueno(), modelo: "M".repeat(90) })!.modelo!.length === 60);
+  // Auditoría de seguridad: `.slice` cortaba por unidades UTF-16 y dejaba medio emoji, que Postgres
+  // rechaza al leer el JSON → 500 con el mensaje crudo y la app reintentando para siempre.
+  const sueltos = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  const mCorte = normalizarReporte({ ...snapBueno(), modelo: "x".repeat(59) + "😀😀" })!.modelo!;
+  chk("el recorte no parte un emoji: 60 caracteres completos, sin sustitutos sueltos",
+    Array.from(mCorte).length === 60 && !sueltos.test(mCorte) && mCorte.endsWith("😀"), JSON.stringify(mCorte.slice(-4)));
+  const mSuelto = normalizarReporte({ ...snapBueno(), modelo: "SM-A\uD83D045M" })!.modelo;
+  chk("un sustituto suelto en la entrada se quita", mSuelto === "SM-A045M", JSON.stringify(mSuelto));
+  const uaSuelto = recortarUA("Mozilla/5.0 (Linux; Android 13; " + "\uDE00".repeat(3) + "SM-A045M)");
+  chk("el user agent tampoco guarda sustitutos sueltos", !!uaSuelto && !sueltos.test(uaSuelto));
   chk("gps_debil_m absurdo → null", [Infinity, NaN, 2e5, "15"].every((x) => normalizarReporte({ ...snapBueno(), gps_debil_m: x })!.gps_debil_m === null));
   chk("recortarUA: 300 caracteres, sin control", recortarUA("a\u0007b".padEnd(500, "z"))!.length === 300 && !/\u0007/.test(recortarUA("a\u0007b")!));
 
