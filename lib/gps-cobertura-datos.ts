@@ -7,7 +7,8 @@
 // `rastreoDelDia` arma el veredicto de cada servicio de un día para la torre. Usa la evidencia
 // del conductor (lib/servicio-tiempos.ts, SIN pasarle el GPS: el fin del servicio no puede
 // salir de la propia traza que se está juzgando, o un GPS que se calla a los 3 minutos volvería
-// a medir 100 %).
+// a medir 100 %). El cierre SÍ sale de la traza, pero no de una posición: es el punto que la app
+// fuerza al pulsar «Finalizar» (`cierreTs`, ver lib/gps-cobertura.ts) y lleva la hora del clic.
 
 import { createClient } from "@supabase/supabase-js";
 import {
@@ -33,7 +34,7 @@ export async function trazaDe(reservaId: number): Promise<TrazaSaneada> {
   for (let off = 0; off < 20000; off += 1000) {
     const { data, error } = await admin
       .from("ubicaciones_gps")
-      .select("created_at, lat, lng, precision_m, simulado")
+      .select("created_at, lat, lng, precision_m, simulado, estado")
       .eq("reserva_id", reservaId)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
@@ -50,11 +51,11 @@ export async function trazaDe(reservaId: number): Promise<TrazaSaneada> {
   }
   // Reintento sin la columna nueva si la BD aún no la tiene.
   if (sinColumnaSimulado) {
-    acc.pts.length = 0; acc.totalCrudo = 0; acc.porAntena = 0;
+    acc.pts.length = 0; acc.totalCrudo = 0; acc.porAntena = 0; acc.cierreTs = null;
     for (let off = 0; off < 20000; off += 1000) {
       const { data, error } = await admin
         .from("ubicaciones_gps")
-        .select("created_at, lat, lng, precision_m")
+        .select("created_at, lat, lng, precision_m, estado")
         .eq("reserva_id", reservaId)
         .order("created_at", { ascending: true })
         .order("id", { ascending: true })
@@ -121,7 +122,7 @@ export async function rastreoDelDia(fecha: string, hoy: string, ahoraMs: number)
     try { traza = await trazaDe(r.id); } catch { traza = null; }
     const { finPrevistoTs, destino } = finYDestino(ps, r.fecha_servicio, r.hora_servicio);
     const medicion = traza
-      ? medirCobertura({ pts: traza.pts, destino, finPrevistoTs, inicioTs, finTs, hastaTs: enCurso ? ahoraMs : null })
+      ? medirCobertura({ pts: traza.pts, destino, finPrevistoTs, inicioTs, finTs, hastaTs: enCurso ? ahoraMs : null, cierreTs: traza.cierreTs })
       : null;
     out[r.id] = veredictoRastreo({
       aplica: true, enCurso, traza, medicion,

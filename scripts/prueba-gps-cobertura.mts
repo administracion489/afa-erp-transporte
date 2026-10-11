@@ -11,6 +11,10 @@
 //      conductor terminó marcando todas las paradas. Sale «Incompleto», nunca 100 %.
 //   3. Los veredictos de la torre, uno por uno, y el lado que no se puede aflojar: un fallo de
 //      LECTURA nunca acusa (`sin_medir`), y lo urgente solo existe con el servicio en curso.
+//   4. EL CIERRE DEL CONDUCTOR (reserva #29811, CWQ400): GPS vivo de 07:13 a 07:39, el conductor
+//      cerró a las 07:39 sin pasar por los últimos paraderos, llegada prevista 08:05. Salía 50 %
+//      («el servicio siguió 25 min más sin rastreo»); con el punto 'finalizado' sale 100 %. Y el
+//      lado que no se afloja: un corte real sigue saliendo aunque el conductor cierre después.
 import {
   medirCobertura, finYDestino, acumularFilasGps, trazaVacia, veredictoRastreo, resumenRastreo,
   trazaInmovil, bandaCobertura, metros as metrosMod, limaMs as limaMsMod,
@@ -255,6 +259,87 @@ console.log("\n7. Saneo de filas, GPS inmóvil y resumen del aviso");
   ]);
   chk("cuenta UNIDADES distintas con problema (2 viajes de la misma placa = 1)", r.unidadesConProblema === 2, String(r.unidadesConProblema));
   chk("separa urgentes, incompletos y con cortes", r.urgentes.length === 1 && r.incompletos.length === 2 && r.conCortes.length === 1);
+}
+
+// ══ 8. El cierre del conductor ══════════════════════════════════════════════════════
+console.log("\n8. Reserva #29811: el conductor cerró antes de la llegada prevista, con el GPS vivo");
+{
+  const T7 = Date.parse("2026-10-10T12:13:00Z");                  // 07:13 Lima
+  const C739 = T7 + 26 * 60_000;                                    // 07:39 Lima
+  const P805 = Date.parse("2026-10-10T13:05:00Z");                  // 08:05 Lima (llegada prevista)
+  const vivo: PuntoCobertura[] = Array.from({ length: 157 }, (_, i) => ({ ts: T7 + i * 10_000, lat: LAT0 + i * 15 / M, lng: LNG0 }));
+  const lejos = { lat: LAT0 + 12_000 / M, lng: LNG0 + 0.05 };      // el último paradero, sin pasar por él
+  const tr = (pts: PuntoCobertura[], cierreTs: number | null = null): TrazaSaneada => ({ pts, totalCrudo: pts.length, porAntena: 0, simulados: 0, cierreTs });
+  const ver = (m: any, t: TrazaSaneada) => veredictoRastreo({ aplica: true, enCurso: false, traza: t, medicion: m, avanzo: true, inmovil: false, inicioTs: T7, ahoraMs: P805 + 2 * 3_600_000 });
+
+  const sinCierre = medirCobertura({ pts: vivo, destino: lejos, finPrevistoTs: P805 })!;
+  chk("el defecto se reproduce SIN el cierre: 50 % hasta la llegada prevista", sinCierre.cobertura === 50 && sinCierre.finPor === "previsto", `${sinCierre.cobertura} % · ${sinCierre.finPor}`);
+  const vSin = ver(sinCierre, tr(vivo));
+  chk("…y sin cierre el texto ya no afirma que «el servicio siguió»", !/siguió/.test(vSin.detalle) && /prevista a las 08:05/.test(vSin.detalle), vSin.detalle);
+
+  const conCierre = medirCobertura({ pts: vivo, destino: lejos, finPrevistoTs: P805, cierreTs: C739 })!;
+  chk("con el punto 'finalizado' a las 07:39: 100 %, la ventana termina en el cierre", conCierre.cobertura === 100 && conCierre.ventanaFinTs === C739 && conCierre.finPor === "cierre", `${conCierre.cobertura} %`);
+  const vCon = ver(conCierre, tr(vivo, C739));
+  chk("veredicto Completo, sin problema", vCon.codigo === "completo" && vCon.problema === null, `${vCon.codigo} · ${vCon.celda}`);
+  chk("el detalle dice que la ventana acaba en el cierre del conductor", /07:39, cuando el conductor cerró el servicio/.test(vCon.detalle), vCon.detalle);
+
+  const imprecisoDespues = medirCobertura({ pts: vivo, destino: lejos, finPrevistoTs: P805, cierreTs: C739 + 20_000 })!;
+  chk("punto 'finalizado' por antena (fuera de la traza) 20 s después: sigue ≥ 98 %", imprecisoDespues.cobertura >= 98, `${imprecisoDespues.cobertura} %`);
+
+  // ── Lo que NO se afloja ──
+  // App muerta a las 07:39; el conductor la reabrió lejos y cerró a las 08:05. El punto
+  // 'finalizado' lleva la hora del CLIC, así que el hueco cuenta igual.
+  const reabierta = [...vivo, { ts: P805, lat: LAT0 + 9_000 / M, lng: LNG0 + 0.03 }];
+  const mReab = medirCobertura({ pts: reabierta, destino: lejos, finPrevistoTs: P805, cierreTs: P805 })!;
+  chk("app muerta y cierre a las 08:05: sigue 50 %, con el corte contado", mReab.cobertura === 50 && mReab.cortes === 1, `${mReab.cobertura} % · ${mReab.cortes} corte(s)`);
+  const mReabAntena = medirCobertura({ pts: vivo, destino: lejos, finPrevistoTs: P805, cierreTs: P805 })!;
+  chk("…igual si el punto del cierre era impreciso (no entra a la traza)", mReabAntena.cobertura === 50 && mReabAntena.finPor === "cierre", `${mReabAntena.cobertura} %`);
+  const vReab = ver(mReabAntena, tr(vivo, P805));
+  chk("…y el texto nombra el cierre tardío, no una hora prevista", /cerró el servicio a las 08:05: 26 min sin rastreo/.test(vReab.detalle), vReab.detalle);
+
+  const marcasDespues = medirCobertura({ pts: vivo, destino: lejos, finPrevistoTs: P805, cierreTs: C739, finTs: P805 })!;
+  chk("cerró 07:39 pero marcó paraderos hasta 08:05: 50 %, por las marcas", marcasDespues.cobertura === 50 && marcasDespues.finPor === "marcas", `${marcasDespues.cobertura} % · ${marcasDespues.finPor}`);
+  chk("…y el texto dice que siguió marcando paraderos", /siguió marcando paraderos hasta las 08:05/.test(ver(marcasDespues, tr(vivo, C739)).detalle));
+
+  const cierreViejo = medirCobertura({ pts: vivo, destino: lejos, finPrevistoTs: P805, cierreTs: T7 + 5 * 60_000 })!;
+  chk("un cierre seguido de más posiciones (se reanudó) NO es el fin: regla de siempre", cierreViejo.cobertura === sinCierre.cobertura && cierreViejo.finPor === "previsto");
+
+  const m6166 = medirCobertura({ pts: traza6166, destino: destino6166, finPrevistoTs: fin6166, cierreTs: fin6166 })!;
+  chk("#6166 con el cierre a la hora real (05:03): sigue Incompleto", m6166.cobertura <= 6, `${m6166.cobertura} %`);
+
+  // Barrido: con un cierre válido la ventana es EXACTAMENTE max(última, cierre, marcas); nunca
+  // supera la cobertura de la traza sola (no inventa señal), y con un cierre anterior a la traza
+  // el resultado es idéntico al de sin cierre.
+  let exacto = true, noInventa = true, igualSinCierre = true, subio = 0;
+  for (let k = 0; k < 3000; k++) {
+    const t = trazaAzar();
+    const ult = t[t.length - 1].ts;
+    const dest = rnd() < 0.5 ? { lat: LAT0 + 30_000 / M, lng: LNG0 } : null;
+    const finPrev = rnd() < 0.7 ? ult + Math.floor((rnd() - 0.2) * 3_600_000) : null;
+    const finTs = rnd() < 0.4 ? ult + Math.floor((rnd() - 0.5) * 3_600_000) : null;
+    const cierreTs = ult + Math.floor((rnd() - 0.1) * 3_600_000);
+    const sinC = medirCobertura({ pts: t, destino: dest, finPrevistoTs: finPrev, finTs })!;
+    const conC = medirCobertura({ pts: t, destino: dest, finPrevistoTs: finPrev, finTs, cierreTs })!;
+    const base = medirCobertura({ pts: t })!;
+    if (conC.cobertura > base.cobertura) noInventa = false;
+    if (cierreTs >= ult - 60_000) {
+      if (conC.ventanaFinTs !== Math.max(ult, cierreTs, finTs ?? 0)) exacto = false;
+      if (conC.cobertura > sinC.cobertura) subio++;
+    } else if (conC.cobertura !== sinC.cobertura || conC.ventanaFinTs !== sinC.ventanaFinTs) igualSinCierre = false;
+  }
+  chk("barrido: con cierre, la ventana acaba en max(última señal, cierre, marcas)", exacto);
+  chk("barrido: el cierre nunca da más cobertura que la traza sola", noInventa);
+  chk("barrido: un cierre anterior a la traza no cambia nada", igualSinCierre);
+  chk("corolario: el cierre sí corrige casos (no es una extensión muerta)", subio > 0, `${subio} casos suben`);
+
+  const acc = trazaVacia();
+  acumularFilasGps(acc, [
+    { created_at: "2026-10-10T12:13:00Z", lat: LAT0, lng: LNG0, precision_m: 10, estado: "en_ruta" },
+    { created_at: "2026-10-10T12:39:00Z", lat: LAT0, lng: LNG0, precision_m: 900, estado: "finalizado" },   // por antena
+    { created_at: "2026-10-10T12:20:00Z", lat: LAT0, lng: LNG0, precision_m: 10, estado: "finalizado" },    // un cierre anterior
+  ], true);
+  chk("el saneo toma el ÚLTIMO 'finalizado', aunque sea impreciso, y no lo mete como posición",
+    acc.cierreTs === Date.parse("2026-10-10T12:39:00Z") && acc.pts.length === 2 && acc.porAntena === 1, `cierre=${acc.cierreTs}`);
 }
 
 console.log(fallos ? `\n✗ ${fallos} prueba(s) fallaron` : "\n✓ todo en verde");

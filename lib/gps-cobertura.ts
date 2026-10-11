@@ -25,7 +25,21 @@
 //     de ruta, es la prueba de hasta dónde siguió el servicio aunque la parada no tenga hora
 //     estimada. No aplica si la traza termina junto al destino (el bus llegó).
 //   · `hastaTs`: servicio EN CURSO → la ventana llega hasta ahora.
-// Sin esos tres campos el resultado es byte a byte el de /gps-salud.
+// Sin esos tres campos (ni `cierreTs`, abajo) el resultado es byte a byte el algoritmo original.
+//
+// ── EL CIERRE DEL CONDUCTOR TERMINA LA VENTANA (`cierreTs`, lo pasan las DOS pantallas) ──
+// La extensión hasta la llegada prevista castigaba al conductor que CIERRA ANTES. Caso real
+// (reserva #29811, CWQ400): pasajeros hasta el paradero 6, el conductor siguió un tramo y
+// finalizó a las 07:39 con el GPS vivo todo el viaje; la ventana se estiró hasta la llegada
+// prevista (08:05) y el modal publicó «Rastreo 50 % … el servicio siguió 25 min más sin
+// rastreo», o sea: acusó de GPS malo a un equipo sano. Al pulsar «Finalizar» la app FUERZA un
+// punto con estado='finalizado' (app/conductor/page.tsx, `forzar`) y deja de transmitir POR
+// DISEÑO: ese punto es el cierre visto por el MISMO reloj que la traza, y con él la hora prevista
+// deja de ser el fin. No se puede usar para tapar un corte real: si la app murió a las 07:39 y el
+// conductor la reabrió para cerrar a las 08:05, el punto lleva 08:05 (created_at = el clic) y el
+// hueco cuenta igual. Las marcas de paradero posteriores al cierre (`finTs`) también alargan.
+// Solo cuenta si el cierre ES el final de la traza: con posiciones de este servicio más de un
+// minuto después (se reanudó), manda la regla de siempre.
 
 import { hhmmLima } from "./servicio-tiempos";
 
@@ -50,10 +64,15 @@ export function limaMs(fecha: string, hora: string | null): number | null {
 }
 
 export type PuntoCobertura = { ts: number; lat: number; lng: number };
-export type TrazaSaneada = { pts: PuntoCobertura[]; totalCrudo: number; porAntena: number; simulados: number };
+export type TrazaSaneada = {
+  pts: PuntoCobertura[]; totalCrudo: number; porAntena: number; simulados: number;
+  /** created_at del ÚLTIMO punto con estado='finalizado': el conductor pulsó «Finalizar».
+   *  Se toma aunque el punto sea impreciso: lo que prueba es el ACTO, no la posición. */
+  cierreTs?: number | null;
+};
 
 export function trazaVacia(): TrazaSaneada {
-  return { pts: [], totalCrudo: 0, porAntena: 0, simulados: 0 };
+  return { pts: [], totalCrudo: 0, porAntena: 0, simulados: 0, cierreTs: null };
 }
 
 /**
@@ -68,6 +87,7 @@ export function acumularFilasGps(acc: TrazaSaneada, filas: any[], contarSimulado
     const lat = Number(f.lat), lng = Number(f.lng);
     const prec = f.precision_m == null ? null : Number(f.precision_m);
     if (!Number.isFinite(ts) || ts <= 0) continue;
+    if (f.estado === "finalizado" && (acc.cierreTs == null || ts > acc.cierreTs)) acc.cierreTs = ts;
     // `f.lat == null` explícito: Number(null) es 0, que ES finito — el original lo dejaba pasar
     // pese a su propio comentario y medía un punto en la isla nula (divergencia declarada).
     if (f.lat == null || f.lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
@@ -101,8 +121,19 @@ export function finYDestino(
   return { finPrevistoTs: fin, destino };
 }
 
+/** De dónde salió el FIN de la ventana. El texto del veredicto lo nombra en vez de afirmar
+ *  «el servicio siguió» cuando lo único que se sabe es la hora PREVISTA. */
+export type FinVentana =
+  | "en_curso"   // servicio en ruta: hasta ahora
+  | "llegada"    // la traza termina junto al destino: el bus llegó
+  | "cierre"     // el conductor pulsó «Finalizar» (punto 'finalizado')
+  | "marcas"     // el conductor marcó paraderos después de la última señal
+  | "previsto"   // la traza murió lejos del destino y sin cierre: hasta la llegada prevista
+  | "traza";     // nada la alarga: termina en la última posición
+
 export type MedicionCobertura = {
   ventanaIniTs: number; ventanaFinTs: number;
+  finPor: FinVentana;
   durMin: number;
   cobertura: number;        // 0..100
   cortes: number;
@@ -119,6 +150,7 @@ export function medirCobertura(e: {
   inicioTs?: number | null;
   finTs?: number | null;
   hastaTs?: number | null;
+  cierreTs?: number | null;
 }): MedicionCobertura | null {
   const t = e.pts;
   if (!t || t.length < 2) return null;
@@ -128,12 +160,25 @@ export function medirCobertura(e: {
   // ¿La traza acaba porque el bus LLEGÓ, o porque el rastreo se murió en ruta? Si el último
   // punto cae junto a la última parada, el conductor llegó y cerró — aunque fuera antes de la
   // hora prevista, y penalizarlo por puntual sería absurdo. Solo cuando el rastreo se apaga
-  // LEJOS del destino la ventana se extiende hasta la hora prevista (o la llegada marcada).
+  // LEJOS del destino —y sin que el conductor haya cerrado— la ventana se extiende hasta la hora
+  // prevista (o la llegada marcada).
   const dest = e.destino;
   const llego = dest ? metros(ultimo.lat, ultimo.lng, dest.lat, dest.lng) <= AVANCE_CAIDO_M : false;
-  const fin = e.hastaTs != null && Number.isFinite(e.hastaTs)
-    ? Math.max(ultimo.ts, e.hastaTs)
-    : llego ? ultimo.ts : Math.max(ultimo.ts, e.finPrevistoTs ?? 0, e.finTs ?? 0);
+  // El cierre del conductor solo es el fin si nada de ESTE servicio llegó después (ver cabecera).
+  const cierre = e.cierreTs != null && Number.isFinite(e.cierreTs) && e.cierreTs >= ultimo.ts - HUECO_MIN_S * 1000
+    ? e.cierreTs : null;
+  const marcas = e.finTs != null && Number.isFinite(e.finTs) ? e.finTs : null;
+  let fin: number, finPor: FinVentana;
+  if (e.hastaTs != null && Number.isFinite(e.hastaTs)) { fin = Math.max(ultimo.ts, e.hastaTs); finPor = "en_curso"; }
+  else if (llego) { fin = ultimo.ts; finPor = "llegada"; }
+  else if (cierre !== null) {
+    // La hora prevista NO entra: el conductor cerró, el servicio terminó ahí.
+    fin = Math.max(ultimo.ts, cierre, marcas ?? 0);
+    finPor = marcas !== null && marcas > Math.max(ultimo.ts, cierre) ? "marcas" : "cierre";
+  } else {
+    fin = Math.max(ultimo.ts, e.finPrevistoTs ?? 0, marcas ?? 0);
+    finPor = fin === ultimo.ts ? "traza" : fin === marcas ? "marcas" : "previsto";
+  }
   const ventanaS = Math.max(1, (fin - ini) / 1000);
 
   let cubiertoS = 0, cortes = 0, peorS = 0, metrosCiegos = 0;
@@ -153,7 +198,7 @@ export function medirCobertura(e: {
   if (cabezaS > HUECO_MIN_S && peorS < cabezaS) peorS = cabezaS;
 
   return {
-    ventanaIniTs: ini, ventanaFinTs: fin,
+    ventanaIniTs: ini, ventanaFinTs: fin, finPor,
     durMin: Math.round(ventanaS / 60),
     cobertura: Math.max(0, Math.min(100, Math.round((cubiertoS / ventanaS) * 100))),
     cortes,
@@ -290,9 +335,24 @@ export function veredictoRastreo(e: {
     : m.cobertura >= BANDA_ACEPTABLE ? "aceptable"
     : m.cobertura >= BANDA_CON_CORTES ? "con_cortes" : "incompleto";
   const problema: ProblemaRastreo = codigo === "incompleto" ? "incompleto" : codigo === "con_cortes" ? "cortes" : null;
-  const partes: string[] = [`${m.cobertura} % del servicio con GPS (de ${hhmm(m.ventanaIniTs)} a ${e.enCurso ? "ahora" : hhmm(m.ventanaFinTs)}).`];
   const colaMin = Math.round((m.ventanaFinTs - m.ultimaTs) / 60000);
-  if (!e.enCurso && colaMin > 1) partes.push(`La señal se cortó a las ${hhmm(m.ultimaTs)} y el servicio siguió ${colaMin} min más sin rastreo.`);
+  const hayCola = !e.enCurso && colaMin > 1;
+  // Si la ventana termina en el cierre y la señal llegó hasta él, se dice: explica por qué la
+  // ventana acaba antes de la llegada prevista.
+  const finTxt = e.enCurso ? "ahora"
+    : m.finPor === "cierre" && !hayCola ? `${hhmm(m.ventanaFinTs)}, cuando el conductor cerró el servicio`
+    : hhmm(m.ventanaFinTs);
+  const partes: string[] = [`${m.cobertura} % del servicio con GPS (de ${hhmm(m.ventanaIniTs)} a ${finTxt}).`];
+  // La cola se describe con lo que de verdad se sabe de ella: no es lo mismo que el conductor
+  // haya seguido marcando paraderos (el servicio siguió, seguro) que una hora solo PREVISTA.
+  if (hayCola) {
+    const corte = hhmm(m.ultimaTs), finH = hhmm(m.ventanaFinTs);
+    partes.push(
+      m.finPor === "cierre" ? `La señal se cortó a las ${corte} y el conductor cerró el servicio a las ${finH}: ${colaMin} min sin rastreo.`
+      : m.finPor === "marcas" ? `La señal se cortó a las ${corte} y el conductor siguió marcando paraderos hasta las ${finH}: ${colaMin} min sin rastreo.`
+      : `La señal se cortó a las ${corte} y no volvió; la llegada estaba prevista a las ${finH} (${colaMin} min sin rastreo).`,
+    );
+  }
   const cabezaMin = Math.round((m.primeraTs - m.ventanaIniTs) / 60000);
   if (cabezaMin > 1) partes.push(`El GPS empezó ${cabezaMin} min después de iniciar el servicio.`);
   if (m.cortes > 0) partes.push(`${m.cortes} corte(s) en movimiento: ${m.kmACiegas} km sin señal.`);

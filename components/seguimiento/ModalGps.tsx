@@ -1501,6 +1501,13 @@ export default function ModalGps({
   // con sinSenal (>60s) y con el color del pulso (edad del punto).
   const fechaPunto    = ubic ? (ubic.created_at || ubic.timestamp) : null;
   const segsDesdeUlt  = fechaPunto ? Math.floor((Date.now() - new Date(fechaPunto).getTime()) / 1000) : null;
+  // El conductor CERRÓ el servicio: el último punto de este servicio es el que la app fuerza al
+  // pulsar «Finalizar», y desde ahí deja de transmitir POR DISEÑO. «Sin señal GPS» en rojo sobre
+  // eso acusaba a un equipo sano (reserva #29811, cerrada 07:39 con el GPS vivo todo el viaje):
+  // pasado un minuto, `sinSenal` es SIEMPRE cierto en un servicio cerrado. Lo que se apaga es la
+  // ALARMA; la hora de la última señal se sigue diciendo.
+  const finalizado    = ubic?.estado === "finalizado";
+  const alarmaSinSenal = sinSenal && !finalizado;
   // Solo tiene sentido comparar si la ruta se pidió CON tráfico: sin él, /api/ruta rellena
   // duracion_trafico_min con duracion_min y la resta da 0 SIEMPRE (no "no hay tráfico", sino
   // "no se preguntó"). Ver el botón «Recalcular con tráfico actual» del panel derecho.
@@ -1699,26 +1706,28 @@ export default function ModalGps({
                   // El title de la ESPERA solo acompaña a su propio texto: con «GPS congelado» o
                   // «Sin señal» en pantalla, un title que habla de embarque contradiría la línea.
                   // El de la alarma se conserva como estaba (salía siempre que había quietud).
-                  const textoEsQuieto = !!rotQuieto && !esperandoInicio && !sinSenal && congeladoMin === 0;
+                  const textoEsQuieto = !!rotQuieto && !esperandoInicio && !finalizado && !sinSenal && congeladoMin === 0;
                   // Con la línea de quietud en pantalla, el ámbar lo decide `rotQuieto.ambar`: el
                   // motor ya suma ahí el GPS débil del operador —que la línea NOMBRA— y lo deja
                   // fuera del cliente, cuyo texto no lo menciona. Sumar `debilM` por fuera pintaba
                   // un ámbar pulsante sobre «Detenida en X» en el portal del cliente sin que nada lo
                   // explicara. En las demás líneas, la regla de siempre.
-                  const alerta = !sinSenal && (congeladoMin > 0
+                  const alerta = !sinSenal && !finalizado && (congeladoMin > 0
                     || (rotQuieto && textoEsQuieto ? rotQuieto.ambar : debilM > 0 || !!rotQuieto?.alarma));
                   return (
                 <p
                   className={`text-[11px] flex items-center gap-2 ${alerta ? "text-amber-300 font-bold" : "text-blue-200"}`}
-                  title={rotQuieto && (rotQuieto.alarma || textoEsQuieto) ? rotQuieto.title : debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
+                  title={finalizado ? undefined : rotQuieto && (rotQuieto.alarma || textoEsQuieto) ? rotQuieto.title : debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
                 >
                   {/* Detenida SIN ámbar (en paradero con buen GPS, o la versión del cliente): punto
                       azul FIJO, el mismo de «Aún no inicia» — es una espera, y el pulso verde de «en
                       vivo» sobre una posición que lleva minutos sin cambiar diría algo que no está
                       pasando. Con GPS débil en operación gana el ámbar, porque la línea lo nombra. */}
-                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${esperandoInicio ? "bg-blue-300" : sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : rotQuieto ? "bg-blue-300" : "bg-green-400 animate-pulse"}`} />
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${esperandoInicio ? "bg-blue-300" : finalizado ? "bg-gray-300" : sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : rotQuieto ? "bg-blue-300" : "bg-green-400 animate-pulse"}`} />
                   {esperandoInicio
                     ? `Aún no inicia${horaSalidaTxt ? ` · sale ${horaSalidaTxt}` : ""}`
+                    : finalizado
+                    ? `Servicio finalizado${fechaPunto ? ` · última señal ${fmtHoraTs(new Date(fechaPunto).getTime())}` : ""}`
                     : sinSenal
                     ? "Sin señal GPS"
                     : congeladoMin > 0
@@ -1809,7 +1818,7 @@ export default function ModalGps({
               </div>
             )}
 
-            {sinSenal && !esperandoInicio && !errorMapa && !errorRuta && (
+            {alarmaSinSenal && !esperandoInicio && !errorMapa && !errorRuta && (
               <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-red-600/90 backdrop-blur-sm rounded-xl px-3 py-2 shadow-lg pointer-events-none">
                 <p className="text-white text-xs font-bold">📡 Sin señal GPS del conductor</p>
               </div>
@@ -1941,8 +1950,8 @@ export default function ModalGps({
                   ) : (
                     <p className="text-sm opacity-80">
                       {esperandoInicio ? `El servicio aún no inicia${horaSalidaTxt ? ` — sale ${horaSalidaTxt}` : ""}`
+                        : finalizado ? "Servicio finalizado"
                         : sinSenal ? "Sin señal GPS — no se puede estimar"
-                        : ubic?.estado === "finalizado" ? "Servicio finalizado"
                         : etaSinRuta ? "Sin ruta directa: el destino quedó detrás del vehículo"
                         : "Calculando tiempo estimado…"}
                     </p>
@@ -2146,11 +2155,15 @@ export default function ModalGps({
 
             <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
               <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-2">Señal GPS</p>
-              <div className={`flex items-center gap-2 px-3 py-2 rounded-lg mb-2 ${sinSenal ? "bg-red-50" : "bg-green-50"}`}>
-                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${sinSenal ? "bg-red-500" : "bg-green-500 animate-pulse"}`} />
-                <p className={`text-xs font-bold ${sinSenal ? "text-red-600" : "text-green-700"}`}>{sinSenal ? "Sin señal" : "En vivo"}</p>
+              <div className={`flex items-center gap-2 px-3 py-2 rounded-lg mb-2 ${finalizado ? "bg-gray-100" : sinSenal ? "bg-red-50" : "bg-green-50"}`}>
+                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${finalizado ? "bg-gray-400" : sinSenal ? "bg-red-500" : "bg-green-500 animate-pulse"}`} />
+                <p className={`text-xs font-bold ${finalizado ? "text-gray-600" : sinSenal ? "text-red-600" : "text-green-700"}`}>
+                  {finalizado ? `Servicio finalizado${fechaPunto ? ` · ${fmtHoraTs(new Date(fechaPunto).getTime())}` : ""}` : sinSenal ? "Sin señal" : "En vivo"}
+                </p>
               </div>
-              {ultimaActualiz && <p className="text-[9px] text-gray-400">Última señal: {ultimaActualiz.toLocaleTimeString("es-PE")}</p>}
+              {/* `ultimaActualiz` es cuándo ESTA pantalla vio el punto: en un servicio cerrado sería la
+                  hora de abrir el modal, al lado de la hora real del cierre de arriba. */}
+              {ultimaActualiz && !finalizado && <p className="text-[9px] text-gray-400">Última señal: {ultimaActualiz.toLocaleTimeString("es-PE")}</p>}
               <p className="text-[9px] text-gray-400 mt-1">Actualiza cada 10 segundos</p>
             </div>
 
