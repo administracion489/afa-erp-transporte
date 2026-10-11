@@ -1363,6 +1363,26 @@ export default function CombustiblePage() {
                 {precioSospechoso && (
                   <p className="text-[11px] text-amber-800 mt-1 leading-snug">{precioSospechoso}</p>
                 )}
+                {/* El importe del voucher que leyó el Radar, cuando la cuenta ya no lo reproduce. Va PEGADO al
+                    precio, a todo el ancho: dentro de la franja del total, en el celular, quedaba apretado
+                    entre tres columnas. Es lo que se pagó: `total` es galones × precio, así que un precio mal
+                    leído guarda otro gasto. Se dice qué precio lo reproduce; se teclea, sin botón «usar este». */}
+                {(() => {
+                  const imp = editandoId != null ? importeDeCarga[editandoId] : undefined;
+                  const cant = Number(form.galones || 0);
+                  const precio = Number(form.precio_galon || 0);
+                  if (!imp || !(cant > 0) || !(precio > 0)) return null;
+                  if (Math.abs(cant * precio - imp) <= toleranciaRedondeo(cant, precio)) return null;
+                  const reproduce = Math.round((imp / cant) * 1000) / 1000;
+                  return (
+                    <div className="mt-1.5 rounded-lg bg-amber-50 border border-amber-300 px-3 py-2 text-[11px] text-amber-900 leading-snug">
+                      <b>El voucher dice {fmtSoles(imp)}</b> y {form.galones} {fuelCfg.unidadLabel} × {fmtSoles(precio)} da {fmtSoles(cant * precio)}.
+                      El importe del comprobante es lo que se pagó: el precio que lo reproduce es{" "}
+                      <b>S/ {reproduce.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 3 })}</b>.
+                      Compruébalo en la foto de la nota.
+                    </div>
+                  );
+                })()}
               </Campo>
               <Campo label="Grifo / Estación">
                 <input className={inputCls()} placeholder="Ej: Primax - Ate" value={form.grifo} list="grifos-conocidos"
@@ -1399,25 +1419,6 @@ export default function CombustiblePage() {
                 <div className="text-xs" style={{ color: fuelCfg.color + "88" }}>
                   {form.galones} {fuelCfg.unidadLabel} × {fmtSoles(Number(form.precio_galon))} / {fuelCfg.unidadLabel}
                 </div>
-                {/* El importe del voucher que leyó el Radar, cuando la cuenta ya no lo reproduce. Es lo que se
-                    pagó: `total` es galones × precio, así que un precio mal leído guarda otro gasto. Se dice
-                    qué precio lo reproduce; se teclea, no hay botón «usar este». */}
-                {(() => {
-                  const imp = editandoId != null ? importeDeCarga[editandoId] : undefined;
-                  const cant = Number(form.galones || 0);
-                  const precio = Number(form.precio_galon || 0);
-                  if (!imp || !(cant > 0) || !(precio > 0)) return null;
-                  if (Math.abs(cant * precio - imp) <= toleranciaRedondeo(cant, precio)) return null;
-                  const reproduce = Math.round((imp / cant) * 1000) / 1000;
-                  return (
-                    <div className="rounded-lg bg-amber-50 border border-amber-300 px-3 py-2 text-[11px] text-amber-900 leading-snug max-w-xs">
-                      <b>El voucher dice {fmtSoles(imp)}</b> y esta cuenta da {fmtSoles(cant * precio)}. El importe del comprobante es lo
-                      que se pagó: con {form.galones} {fuelCfg.unidadLabel}, el precio que lo reproduce es{" "}
-                      <b>S/ {reproduce.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 3 })}</b>.
-                      Compruébalo en la foto de la nota.
-                    </div>
-                  );
-                })()}
                 {/* Rendimiento esperado */}
                 {form.vehiculo_id && !fuelCfg.esAditivo && (() => {
                   const s = seriesRend.get(`${form.vehiculo_id}|${familiaCombustible(form.tipo_combustible)}`);
