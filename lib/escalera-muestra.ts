@@ -19,10 +19,11 @@
 // el SQL que falta. Mandar los apagados como si salieran haría creer que salen.
 
 import {
-  LARGO_EVIDENCIA_COORDINADOR, minutosIniciaAhora, minutosDebioIniciar, resumenAvisosConductor,
+  LARGO_EVIDENCIA_COORDINADOR, minutosIniciaAhora, minutosDebioIniciar,
   type FilaAviso, type TextoPush,
 } from "@/lib/escalera-inicio";
 import { hhmmAMinutos, limaAUtcMs } from "@/lib/alertas-horario";
+import { CLAVE_LLAMADA, evidenciaConLlamada, minutosLlamada, type FilaLlamada } from "@/lib/llamadas-central";
 
 /** Lo que el plan necesita de cada fila de `alerta_config` (más cuántos contactos la reciben). */
 export type CfgMuestra = {
@@ -60,6 +61,8 @@ export type DatosMuestra = {
 };
 
 export type Para = "conductor" | "coordinador";
+/** Por dónde sale: un WhatsApp de plantilla, o la llamada de la central propia. */
+export type CanalMuestra = "whatsapp" | "llamada";
 
 /** Por qué un mensaje sale o no sale HOY. Se declara: la pantalla enruta por código. */
 export type CodigoMuestra =
@@ -88,7 +91,11 @@ export type MensajeMuestra = {
   codigo: CodigoMuestra;
   /** Qué significa el código, en una frase. */
   nota: string;
-  /** Hay plantilla: se puede mandar, aunque hoy no salga (vista previa de su texto). */
+  canal: CanalMuestra;
+  /**
+   * Se puede mandar, aunque hoy no salga (vista previa de su texto): un WhatsApp con plantilla, o
+   * la llamada si su fila existe (la de prueba se pone en la cola de la central).
+   */
   enviable: boolean;
   /** Marcado por defecto: solo lo que hoy SALE. */
   marcado: boolean;
@@ -98,6 +105,8 @@ export type MensajeMuestra = {
 export const SQL_ESCALERA = "supabase/alertas-escalera-inicio.sql";
 /** El que crea las filas de los avisos pre-inicio y del coordinador. */
 export const SQL_OPERATIVAS = "supabase/alertas-operativas.sql";
+/** El que crea la cola y la tarjeta de la llamada de la central propia. */
+export const SQL_LLAMADAS = "supabase/llamadas-01-central.sql";
 
 /** Plantilla del coordinador cuando la tarjeta no declara una (la misma caída del tick). */
 const PLANTILLA_COORDINADOR = "coordinador_alerta";
@@ -142,6 +151,7 @@ type Paso = {
   id: string;
   clave: string;
   para: Para;
+  canal?: CanalMuestra;
   titulo: string;
   reloj: Reloj;
   sql: string;
@@ -187,6 +197,12 @@ const PASOS: Paso[] = [
     parametros: (d) => [d.nombre, d.hora, rutaDe(d), d.telContingencia],
   },
   {
+    // Cron de un minuto: la llamada va a la COLA de la central propia (no es una plantilla).
+    id: "llamada_inicio", clave: CLAVE_LLAMADA, para: "conductor", canal: "llamada", titulo: "Llamada de la central",
+    reloj: { tipo: "despues", defecto: 3, minutos: (cfg) => minutosLlamada(cfg) }, sql: SQL_LLAMADAS,
+    parametros: () => [],
+  },
+  {
     // Tick, bloque 4: al conductor [nombre, hora, ruta, telConting]…
     id: "no_inicio", clave: "no_inicio", para: "conductor", titulo: "No inició",
     reloj: { tipo: "despues", defecto: 10 }, sql: SQL_OPERATIVAS,
@@ -215,6 +231,8 @@ const NOTA: Record<CodigoMuestra, string> = {
   sin_plantilla: "Su tarjeta no tiene plantilla de WhatsApp: no hay texto que mandar.",
   sin_config: "Este aviso todavía no existe en la base.",
 };
+/** La llamada dice otra cosa cuando sale: depende de que la central esté conectada. */
+const NOTA_LLAMADA_SALE = "Hoy sale así, si la central de llamadas está conectada. La de prueba se pone en su cola.";
 
 function cfgDe(cfgs: CfgMuestra[] | Map<string, CfgMuestra>, clave: string): CfgMuestra | null {
   if (cfgs instanceof Map) return cfgs.get(clave) ?? null;
@@ -254,25 +272,26 @@ export function planDeMuestra(cfgs: CfgMuestra[] | Map<string, CfgMuestra>, d: D
   const base = PASOS.map((p) => {
     const cfg = cfgDe(cfgs, p.clave);
     const { cuando, minuto, mudo } = relojDe(p, cfg, horaMin);
-    const plantilla = !cfg ? null
+    const canal: CanalMuestra = p.canal ?? "whatsapp";
+    const plantilla = !cfg || canal === "llamada" ? null
       : p.para === "conductor" ? (cfg.plantilla || null)
       : (cfg.plantilla_directorio || PLANTILLA_COORDINADOR);
     let codigo: CodigoMuestra;
     if (!cfg) codigo = "sin_config";
-    else if (!plantilla) codigo = "sin_plantilla";
+    else if (canal === "whatsapp" && !plantilla) codigo = "sin_plantilla";
     else if (!cfg.activo) codigo = "apagado";
     else if (mudo) codigo = "mudo";
     else if (p.para === "conductor" && cfg.notifica_conductor === false) codigo = "no_al_conductor";
-    else if (p.para === "conductor" && cfg.canal_conductor_whatsapp === false) codigo = "sin_whatsapp";
+    else if (canal === "whatsapp" && p.para === "conductor" && cfg.canal_conductor_whatsapp === false) codigo = "sin_whatsapp";
     else if (p.para === "coordinador" && (cfg.usa_directorio === false || !(Number(cfg.contactos) > 0))) codigo = "sin_contactos";
     else if (p.reloj.tipo === "gps") codigo = "solo_si_gps";
     else codigo = "sale";
-    return { p, cfg, cuando, minuto, plantilla, codigo };
+    return { p, cfg, canal, cuando, minuto, plantilla, codigo };
   });
 
   // Filas de registro de ejemplo de lo que ya le llegó al conductor: WhatsApp entregado (el
-  // primero, además, leído). Es lo que el motor lee de `notificaciones_enviadas` para la
-  // evidencia, y con la MISMA función (`resumenAvisosConductor`).
+  // primero, además, leído). Es lo que el motor lee de `notificaciones_enviadas` (y de la cola
+  // de llamadas) para la evidencia, y con la MISMA función (`evidenciaConLlamada`).
   const filaDe = (minuto: number, clave: string, primero: boolean, recien: boolean): FilaAviso => {
     const enviado = inicioMs + minuto * 60_000;
     return {
@@ -284,21 +303,29 @@ export function planDeMuestra(cfgs: CfgMuestra[] | Map<string, CfgMuestra>, d: D
   };
   const evidenciaPara = (minutoCoord: number, clave: string): string => {
     const previos = base
-      .filter((b) => b.p.para === "conductor" && b.codigo === "sale"
+      .filter((b) => b.p.para === "conductor" && b.canal === "whatsapp" && b.codigo === "sale"
         && (b.minuto < minutoCoord || (b.minuto === minutoCoord && b.p.clave === clave)))
       .sort((a, b) => a.minuto - b.minuto);
-    if (previos.length === 0) return "";
     // En el tick, el aviso al conductor de ESTE peldaño sale justo antes de leer la evidencia:
     // aparece recién enviado, sin confirmación de entrega todavía.
     const filas = previos.map((b, i) => filaDe(b.minuto, b.p.clave, i === 0, b.minuto === minutoCoord));
-    return resumenAvisosConductor(filas, inicioMs + minutoCoord * 60_000 + 5_000, LARGO_EVIDENCIA_COORDINADOR).texto;
+    // La llamada, si sale antes: de ejemplo, que no contestó en sus dos intentos.
+    const llamada = base.find((b) => b.canal === "llamada" && b.codigo === "sale" && b.minuto < minutoCoord);
+    const llamadas: FilaLlamada[] = llamada ? [{
+      estado: "no_contesto", intentos: 2, motivo: CLAVE_LLAMADA,
+      created_at: new Date(inicioMs + llamada.minuto * 60_000).toISOString(),
+      terminada_en: new Date(inicioMs + (llamada.minuto + 3) * 60_000).toISOString(),
+    }] : [];
+    return evidenciaConLlamada(filas, llamadas, inicioMs + minutoCoord * 60_000 + 5_000, LARGO_EVIDENCIA_COORDINADOR).texto;
   };
 
   const lista: MensajeMuestra[] = base.map((b) => {
     const cfg: CfgMuestra = b.cfg ?? { clave: b.p.clave, activo: false };
     const evidencia = b.p.para === "coordinador" ? evidenciaPara(b.minuto, b.p.clave) : "";
     const parametros = b.plantilla ? b.p.parametros(d, cfg, evidencia) : [];
-    const nota = b.codigo === "sin_config" ? `${NOTA.sin_config} Falta correr ${b.p.sql}.` : NOTA[b.codigo];
+    const nota = b.codigo === "sin_config" ? `${NOTA.sin_config} Falta correr ${b.p.sql}.`
+      : b.canal === "llamada" && b.codigo === "sale" ? NOTA_LLAMADA_SALE
+      : NOTA[b.codigo];
     return {
       id: b.p.id,
       clave: b.p.clave,
@@ -310,7 +337,8 @@ export function planDeMuestra(cfgs: CfgMuestra[] | Map<string, CfgMuestra>, d: D
       parametros,
       codigo: b.codigo,
       nota,
-      enviable: !!b.plantilla,
+      canal: b.canal,
+      enviable: b.canal === "llamada" ? !!b.cfg : !!b.plantilla,
       marcado: b.codigo === "sale",
     };
   });

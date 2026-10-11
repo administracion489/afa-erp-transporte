@@ -20,7 +20,9 @@ import { enviarAvisoWhatsApp } from "@/lib/notificaciones";
 import {
   adminAlertas, cargarMotor, directorioDe, hoyLima, reclamarEnvio, telefonoContingencia,
 } from "@/lib/alertas";
-import { datosDeMuestra, planDeMuestra, telefonoDeMuestra, type CfgMuestra } from "@/lib/escalera-muestra";
+import { SQL_LLAMADAS, datosDeMuestra, planDeMuestra, telefonoDeMuestra, type CfgMuestra } from "@/lib/escalera-muestra";
+import { estadoCentral } from "@/lib/llamadas-central";
+import { encolarLlamada } from "@/lib/llamadas-central-datos";
 
 export const maxDuration = 60;
 
@@ -30,6 +32,30 @@ const CLAVE_FRENO = "prueba_avisos";
 const MAX_PRUEBAS_DIA = 15;
 /** Pausa entre mensajes: enviados de corrido pueden llegar desordenados al teléfono. */
 const PAUSA_MS = 800;
+/** La llamada de prueba vence a los 10 min: si la central no la toma, no sale nunca. */
+const VENCE_LLAMADA_PRUEBA_MIN = 10;
+/** Llamadas de prueba por administrador y día. No medido: alcanza para probar la central. */
+const MAX_LLAMADAS_PRUEBA_DIA = 5;
+
+/**
+ * ¿Puede este usuario pedir una llamada de prueba ahora? Solo un ADMINISTRADOR (una llamada suena
+ * a cualquier hora en el teléfono de otra persona: no es un WhatsApp que se lee cuando se quiere),
+ * una a la vez y con tope diario. El freno se cuenta en `llamadas_conductor`, que solo escribe el
+ * servidor: un freno en una tabla que el usuario puede borrar no frena a nadie.
+ */
+async function motivoSinLlamadaDePrueba(userId: string, rol: string, hoyIso: string): Promise<string | null> {
+  if (rol !== "admin") return "Solo un administrador puede pedir una llamada de prueba.";
+  const base = () => adminAlertas.from("llamadas_conductor").select("id", { count: "exact", head: true })
+    .eq("motivo", "prueba").eq("creado_por", userId);
+  const [enCurso, delDia] = await Promise.all([
+    base().in("estado", ["pendiente", "marcando"]),
+    base().gte("created_at", `${hoyIso}T05:00:00.000Z`),   // 00:00 de Lima
+  ]);
+  if (enCurso.error || delDia.error) return null;   // sin tabla: lo dirá el encolado (falta el SQL)
+  if ((enCurso.count ?? 0) > 0) return "Ya hay una llamada de prueba en cola: espera a que termine.";
+  if ((delDia.count ?? 0) >= MAX_LLAMADAS_PRUEBA_DIA) return `Ya pediste ${MAX_LLAMADAS_PRUEBA_DIA} llamadas de prueba hoy.`;
+  return null;
+}
 
 const pausa = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -89,19 +115,46 @@ export async function POST(req: NextRequest) {
       // Cuántos del directorio lo recibirían de verdad: la MISMA selección que el tick.
       contactos: directorioDe(c, destinatarios).length,
     }));
-    const plan = planDeMuestra(cfgs, datosDeMuestra({
+    const datos = datosDeMuestra({
       nombreUsuario: (perfil.data as { nombre?: string | null } | null)?.nombre ?? null,
       fecha: hoy,
       telContingencia: telConting,
-    }));
-    const elegidos = plan.filter((m) => m.enviable && m.plantilla && pedidos.has(m.id));
+    });
+    const plan = planDeMuestra(cfgs, datos);
+    const elegidos = plan.filter((m) => m.enviable && pedidos.has(m.id) && (m.canal === "llamada" || !!m.plantilla));
     if (elegidos.length === 0) {
-      return NextResponse.json({ error: "Ninguno de los mensajes elegidos tiene plantilla para enviar." }, { status: 400 });
+      return NextResponse.json({ error: "Ninguno de los mensajes elegidos se puede mandar." }, { status: 400 });
     }
 
-    const resultados: { id: string; ok: boolean; error?: string }[] = [];
+    const resultados: { id: string; ok: boolean; error?: string; nota?: string }[] = [];
     for (let i = 0; i < elegidos.length; i++) {
       const m = elegidos[i];
+      if (m.canal === "llamada") {
+        // La llamada de prueba va a la COLA de la central propia, como una real: la hace la
+        // central cuando la toma. Un intento, y vence en 10 min si nadie la toma.
+        const no = await motivoSinLlamadaDePrueba(auth.userId, auth.rol, hoy);
+        if (no) { resultados.push({ id: m.id, ok: false, error: no }); continue; }
+        const rc = await encolarLlamada({
+          reservaId: null, fechaServicio: null, motivo: "prueba",
+          conductor: { id: null, tabla: null, nombre: datos.nombre, telefono: tel.e164 },
+          hora: datos.hora, origen: datos.origen, destino: datos.destino,
+          venceMs: Date.now() + VENCE_LLAMADA_PRUEBA_MIN * 60_000, maxIntentos: 1, creadoPor: auth.userId,
+        });
+        if (rc === "encolada") {
+          const { data: cen } = await adminAlertas.from("central_llamadas_estado").select("ultimo_latido").eq("id", 1).maybeSingle();
+          const ec = estadoCentral((cen as { ultimo_latido?: string | null } | null)?.ultimo_latido ?? null, Date.now());
+          resultados.push({
+            id: m.id, ok: true,
+            nota: ec.conectada
+              ? "En cola: la central te llama en unos segundos."
+              : `En cola, pero no saldrá: ${ec.texto.charAt(0).toLowerCase()}${ec.texto.slice(1)} Vence en ${VENCE_LLAMADA_PRUEBA_MIN} min.`,
+          });
+        } else {
+          resultados.push({ id: m.id, ok: false, error: rc === "sin_tabla" ? `Falta correr ${SQL_LLAMADAS}.` : "No se pudo poner en la cola de llamadas." });
+        }
+        if (i < elegidos.length - 1) await pausa(PAUSA_MS);
+        continue;
+      }
       const r = await enviarAvisoWhatsApp(tel.e164, m.plantilla!, m.parametros);
       resultados.push(r.ok ? { id: m.id, ok: true } : { id: m.id, ok: false, error: r.error || "No salió" });
       if (i < elegidos.length - 1) await pausa(PAUSA_MS);

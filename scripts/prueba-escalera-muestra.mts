@@ -8,7 +8,7 @@
 // copiados LITERAL abajo (`delMotor`): si el motor cambia uno y la muestra no, esta prueba falla.
 
 import {
-  IDS_MUESTRA, SQL_ESCALERA, datosDeMuestra, planDeMuestra, telefonoDeMuestra, textoPushPrueba,
+  IDS_MUESTRA, SQL_ESCALERA, SQL_LLAMADAS, datosDeMuestra, planDeMuestra, telefonoDeMuestra, textoPushPrueba,
   type CfgMuestra, type DatosMuestra, type MensajeMuestra,
 } from "../lib/escalera-muestra";
 import { LARGO_EVIDENCIA_COORDINADOR } from "../lib/escalera-inicio";
@@ -32,6 +32,8 @@ function cfgsAfa(cambios: Partial<Record<string, Partial<CfgMuestra> | null>> = 
     { clave: "en_punto_sin_iniciar", activo: true, modo_tiempo: "evento", umbral: 10, plantilla: "conductor_recuerda_iniciar", plantilla_directorio: "coordinador_alerta", notifica_conductor: true, canal_conductor_whatsapp: true, contactos: 2 },
     { clave: "debio_iniciar", activo: true, modo_tiempo: "evento", umbral: 1, plantilla: "conductor_no_inicio", notifica_conductor: true, canal_conductor_whatsapp: true },
     { clave: "no_inicio", activo: true, modo_tiempo: "evento", umbral: 10, plantilla: "conductor_no_inicio", plantilla_directorio: "coordinador_alerta", notifica_conductor: true, canal_conductor_whatsapp: true, contactos: 2, usa_directorio: true },
+    // La llamada de la central propia, como la deja supabase/llamadas-01-central.sql: APAGADA.
+    { clave: "llamada_inicio", activo: false, modo_tiempo: "evento", umbral: 3, plantilla: null, notifica_conductor: true, canal_conductor_whatsapp: false, canal_conductor_push: false, contactos: 1, usa_directorio: true } as CfgMuestra,
   ];
   const out: CfgMuestra[] = [];
   for (const c of base) {
@@ -99,12 +101,12 @@ function evidenciaDe(m: MensajeMuestra): string {
   chk("salen todos los ids, una vez cada uno", plan.length === IDS_MUESTRA.length
     && new Set(plan.map((m) => m.id)).size === IDS_MUESTRA.length && IDS_MUESTRA.every((id) => plan.some((m) => m.id === id)));
   chk("en el orden en que llegan", plan.map((m) => m.id).join(",") ===
-    "proximo_inicio,recuerda_iniciar,alerta_no_inicio_previa,inicia_ahora,en_punto_sin_iniciar,debio_iniciar,no_inicio,no_inicio:coordinador",
+    "proximo_inicio,recuerda_iniciar,alerta_no_inicio_previa,inicia_ahora,en_punto_sin_iniciar,debio_iniciar,llamada_inicio,no_inicio,no_inicio:coordinador",
     plan.map((m) => m.id).join(","));
   chk("cuándo llega cada uno", plan.map((m) => m.cuando).join(" | ") ===
-    "90 min antes | 30 min antes | 25 min antes | 5 min antes | si el GPS lo ve en el paradero | 1 min después | 10 min después | 10 min después",
+    "90 min antes | 30 min antes | 25 min antes | 5 min antes | si el GPS lo ve en el paradero | 1 min después | 3 min después | 10 min después | 10 min después",
     plan.map((m) => m.cuando).join(" | "));
-  for (const m of plan) {
+  for (const m of plan.filter((x) => x.canal === "whatsapp")) {
     const cfg = cfgs.find((c) => c.clave === m.clave)!;
     const esperado = delMotor(m, cfg, evidenciaDe(m));
     chk(`${m.id}: los MISMOS parámetros que el motor`, JSON.stringify(m.parametros) === JSON.stringify(esperado),
@@ -112,7 +114,10 @@ function evidenciaDe(m: MensajeMuestra): string {
     const plantilla = m.para === "conductor" ? cfg.plantilla : (cfg.plantilla_directorio || "coordinador_alerta");
     chk(`${m.id}: la MISMA plantilla`, m.plantilla === plantilla, String(m.plantilla));
   }
-  chk("todos salen hoy menos el de GPS", plan.every((m) => (m.id === "en_punto_sin_iniciar") === (m.codigo !== "sale")));
+  chk("todos los WhatsApp salen hoy menos el de GPS", plan.filter((m) => m.canal === "whatsapp").every((m) => (m.id === "en_punto_sin_iniciar") === (m.codigo !== "sale")));
+  const ll = plan.find((m) => m.id === "llamada_inicio")!;
+  chk("la llamada nace apagada (como la deja su SQL), sin plantilla, y se puede pedir de prueba",
+    ll.canal === "llamada" && ll.codigo === "apagado" && !ll.marcado && ll.enviable && ll.plantilla === null && ll.parametros.length === 0);
   chk("el de GPS se lista pero sale desmarcado", plan.find((m) => m.id === "en_punto_sin_iniciar")!.codigo === "solo_si_gps"
     && !plan.find((m) => m.id === "en_punto_sin_iniciar")!.marcado);
 
@@ -129,6 +134,24 @@ function evidenciaDe(m: MensajeMuestra): string {
   const evPrevia = evidenciaDe(previa);
   chk("la alerta previa (25 min antes) solo cuenta lo que ya salió a esa hora", evPrevia.includes("Próximo a iniciar")
     && evPrevia.includes("Recuerda iniciar") && !evPrevia.includes("Inicia ahora"), evPrevia);
+}
+
+// ── 1b. La llamada encendida ──────────────────────────────────────────────────
+{
+  console.log("\n— Con la llamada de la central encendida —");
+  const plan = planDeMuestra(cfgsAfa({ recuerda_iniciar: { activo: false }, llamada_inicio: { activo: true } }), D);
+  const ll = plan.find((m) => m.id === "llamada_inicio")!;
+  chk("sale y va marcada, con su nota (depende de la central)", ll.codigo === "sale" && ll.marcado && /central/.test(ll.nota), ll.nota);
+  const ev = evidenciaDe(plan.find((m) => m.id === "no_inicio:coordinador")!);
+  chk("al coordinador le llega también la llamada, al final y entera", ev.endsWith("Llamada 06:36: no contestó (2 intentos)."), ev);
+  chk("…con lo que se le mandó por WhatsApp delante", /Avisos al conductor: .*Ya debió iniciar 06:31/.test(ev), ev);
+  chk("…dentro del largo del motor", ev.length <= LARGO_EVIDENCIA_COORDINADOR, String(ev.length));
+  const previa = evidenciaDe(plan.find((m) => m.id === "alerta_no_inicio_previa")!);
+  chk("la alerta previa (antes de la llamada) no la menciona", !previa.includes("Llamada"), previa);
+  const sinTabla = planDeMuestra(cfgsAfa({ llamada_inicio: null }), D).find((m) => m.id === "llamada_inicio")!;
+  chk("sin su SQL se nombra y no se puede pedir", sinTabla.codigo === "sin_config" && !sinTabla.enviable && sinTabla.nota.includes(SQL_LLAMADAS));
+  const sinCond = planDeMuestra(cfgsAfa({ llamada_inicio: { activo: true, notifica_conductor: false } }), D).find((m) => m.id === "llamada_inicio")!;
+  chk("con «Conductor» desmarcado no le sale", sinCond.codigo === "no_al_conductor");
 }
 
 // ── 2. «Como está»: lo apagado se ve apagado ──────────────────────────────────
@@ -187,7 +210,7 @@ function evidenciaDe(m: MensajeMuestra): string {
   let casos = 0, malos = 0, primero = "";
   for (let i = 0; i < 4000; i++) {
     const cambios: Record<string, Partial<CfgMuestra> | null> = {};
-    for (const clave of ["proximo_inicio", "recuerda_iniciar", "alerta_no_inicio_previa", "inicia_ahora", "en_punto_sin_iniciar", "debio_iniciar", "no_inicio"]) {
+    for (const clave of ["proximo_inicio", "recuerda_iniciar", "alerta_no_inicio_previa", "inicia_ahora", "en_punto_sin_iniciar", "debio_iniciar", "no_inicio", "llamada_inicio"]) {
       if (rnd() < 0.1) { cambios[clave] = null; continue; }
       cambios[clave] = {
         activo: uno([true, false]),
@@ -210,7 +233,8 @@ function evidenciaDe(m: MensajeMuestra): string {
     for (const m of plan) {
       if (m.marcado !== (m.codigo === "sale")) problemas.push(`${m.id}: marcado ⟺ sale`);
       if (m.marcado && !m.enviable) problemas.push(`${m.id}: marcado sin poder mandarse`);
-      if (m.enviable !== !!m.plantilla) problemas.push(`${m.id}: enviable ⟺ plantilla`);
+      if (m.canal === "whatsapp" && m.enviable !== !!m.plantilla) problemas.push(`${m.id}: enviable ⟺ plantilla`);
+      if (m.canal === "llamada" && (m.plantilla !== null || m.parametros.length > 0 || m.enviable !== (m.codigo !== "sin_config"))) problemas.push(`${m.id}: la llamada no es una plantilla`);
       if (m.codigo === "sin_config" && (m.enviable || m.parametros.length)) problemas.push(`${m.id}: sin_config mandable`);
       if (m.enviable) {
         for (const p of m.parametros) {
@@ -224,7 +248,7 @@ function evidenciaDe(m: MensajeMuestra): string {
     for (let k = 1; k < plan.length; k++) if (plan[k].minuto < plan[k - 1].minuto) problemas.push("orden");
     if (problemas.length) { malos++; if (!primero) primero = problemas[0]; }
   }
-  chk(`${casos} configuraciones: marcado ⟺ sale, enviable ⟺ plantilla, parámetros válidos para Meta, orden por minuto`, malos === 0, primero);
+  chk(`${casos} configuraciones: marcado ⟺ sale, enviable ⟺ plantilla (WhatsApp), parámetros válidos para Meta, orden por minuto`, malos === 0, primero);
 }
 
 // ── 6. El número de prueba ────────────────────────────────────────────────────

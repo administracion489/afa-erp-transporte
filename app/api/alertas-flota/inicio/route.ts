@@ -14,6 +14,10 @@
 // reintenta; «sin canal» (sin teléfono ni suscripción) queda reclamado para no reintentar en
 // bucle.
 //
+// LA LLAMADA (lib/llamadas-central.ts): si sigue sin iniciar a la hora + su umbral (3 min), la
+// llamada se pone en COLA para la central propia (/api/llamadas/central); este cron no llama a
+// nadie. Se reclama igual que un aviso, y aquí mismo se limpia la cola (vencidas, colgadas).
+//
 // Auth: Bearer CRON_SECRET (fail-closed).
 
 import { NextRequest, NextResponse } from "next/server";
@@ -26,6 +30,8 @@ import {
   CLAVE_DEBIO_INICIAR, CLAVE_INICIA_AHORA, ESTADOS_SIN_INICIAR,
   minutosIniciaAhora, pasosQueTocan, textoPushInicio,
 } from "@/lib/escalera-inicio";
+import { CLAVE_LLAMADA, juzgarLlamada, venceLlamadaMs } from "@/lib/llamadas-central";
+import { encolarLlamada, limpiarCola } from "@/lib/llamadas-central-datos";
 
 export const maxDuration = 60;
 
@@ -70,12 +76,16 @@ async function handler(req: NextRequest) {
     const { configs } = await cargarMotor();
     const cfgAhora = configs.get(CLAVE_INICIA_AHORA) ?? null;
     const cfgDebio = configs.get(CLAVE_DEBIO_INICIAR) ?? null;
-    if (!cfgAhora?.activo && !cfgDebio?.activo) {
+    const cfgLlamada = configs.get(CLAVE_LLAMADA) ?? null;
+    const ahoraMs = Date.now();
+    // La cola de llamadas se limpia aunque la tarjeta esté apagada: lo que ya estaba en cola
+    // (o una llamada de prueba) tiene que terminar en un estado que se pueda leer.
+    if (cfgLlamada) await limpiarCola(ahoraMs);
+    if (!cfgAhora?.activo && !cfgDebio?.activo && !cfgLlamada?.activo) {
       // Sin la migración (supabase/alertas-escalera-inicio.sql) las filas no existen.
       return NextResponse.json({ ok: true, apagado: true, falta_config: !cfgAhora && !cfgDebio });
     }
 
-    const ahoraMs = Date.now();
     const hoy = fechaLima(ahoraMs);
     const manana = fechaLima(ahoraMs + DIA_MS);
     const ayer = fechaLima(ahoraMs - DIA_MS);   // un servicio de las 23:58 de ayer: su «debió iniciar» es hoy
@@ -99,10 +109,12 @@ async function handler(req: NextRequest) {
 
     // Qué toca a cada servicio en ESTE minuto.
     const tareas: { r: FilaReserva; clave: string; cfg: AlertaConfig; ref: RefCond }[] = [];
+    const llamadas: { r: FilaReserva; ref: RefCond }[] = [];
     let sinConductor = 0;
     for (const r of data) {
       const pasos = pasosQueTocan(r, { iniciaAhora: cfgAhora, debioIniciar: cfgDebio }, reloj);
-      if (pasos.length === 0) continue;
+      const llamar = juzgarLlamada(r, cfgLlamada, reloj) === "toca";
+      if (pasos.length === 0 && !llamar) continue;
       const ref = condDe(r);
       if (!ref) { sinConductor++; continue; }
       for (const clave of pasos) {
@@ -112,13 +124,21 @@ async function handler(req: NextRequest) {
         if (ref.tabla === "conductores_tercero" && cfg.notifica_conductor_tercero !== true) continue;
         tareas.push({ r, clave, cfg, ref });
       }
+      if (llamar && cfgLlamada!.notifica_conductor !== false
+          && (ref.tabla === "conductores" || cfgLlamada!.notifica_conductor_tercero === true)) {
+        llamadas.push({ r, ref });
+      }
     }
-    const res: Record<string, number> = { [CLAVE_INICIA_AHORA]: 0, [CLAVE_DEBIO_INICIAR]: 0, sin_canal: 0, fallos: 0, sin_conductor: sinConductor };
-    if (tareas.length === 0) return NextResponse.json({ ok: true, ...res });
+    const res: Record<string, number> = {
+      [CLAVE_INICIA_AHORA]: 0, [CLAVE_DEBIO_INICIAR]: 0, sin_canal: 0, fallos: 0, sin_conductor: sinConductor,
+      llamadas_en_cola: 0, llamadas_sin_telefono: 0,
+    };
+    if (tareas.length === 0 && llamadas.length === 0) return NextResponse.json({ ok: true, ...res });
 
     // Datos de los conductores, cada id en SU tabla: los ids de `conductores` y
     // `conductores_tercero` se solapan.
-    const ids = (t: Tabla) => [...new Set(tareas.filter((x) => x.ref.tabla === t).map((x) => x.ref.id))];
+    const refs = [...tareas.map((x) => x.ref), ...llamadas.map((x) => x.ref)];
+    const ids = (t: Tabla) => [...new Set(refs.filter((x) => x.tabla === t).map((x) => x.id))];
     const mapas: Record<Tabla, Map<number, DatosCond>> = { conductores: new Map(), conductores_tercero: new Map() };
     if (ids("conductores").length) {
       const { data: cs } = await admin.from("conductores").select("id, nombre, telefono, email").in("id", ids("conductores"));
@@ -173,6 +193,27 @@ async function handler(req: NextRequest) {
       if (estado === "enviado") res[clave]++;
       else if (estado === "sin_canal") res.sin_canal++;
       else { res.fallos++; await liberarEnvio(clave, r.id, r.fecha_servicio); }   // transitorio → el próximo minuto
+    }
+
+    // ── La llamada: a la COLA de la central propia (ella marca; aquí no se llama a nadie) ──
+    for (const { r, ref } of llamadas) {
+      const c = mapas[ref.tabla].get(ref.id);
+      const vence = venceLlamadaMs(r, cfgLlamada);
+      if (!c || vence == null) continue;
+      if (!(await reclamarEnvio(CLAVE_LLAMADA, r.id, r.fecha_servicio))) continue;   // ya está en cola
+      const rc = await encolarLlamada({
+        reservaId: r.id,
+        fechaServicio: r.fecha_servicio,
+        conductor: { id: ref.id, tabla: ref.tabla, nombre: c.nombre, telefono: c.telefono },
+        hora: horaCorta(r.hora_servicio),
+        origen: r.origen || rutaDe(r),
+        destino: r.destino,
+        venceMs: vence,
+      });
+      if (rc === "encolada" || rc === "ya_estaba") res.llamadas_en_cola++;
+      else if (rc === "sin_telefono") res.llamadas_sin_telefono++;      // queda reclamada: reintentar no cambia nada
+      else if (rc === "error") { res.fallos++; await liberarEnvio(CLAVE_LLAMADA, r.id, r.fecha_servicio); }
+      // "sin_tabla": falta la migración de la central; queda reclamada para no insistir cada minuto.
     }
 
     return NextResponse.json({ ok: true, ...res });
