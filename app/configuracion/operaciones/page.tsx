@@ -108,7 +108,8 @@ export default function ConfigOperacionesPage() {
       supabase.from("alerta_destinatarios").select("*").order("id"),
       supabase.from("central_llamadas_estado").select("ultimo_latido, equipo").eq("id", 1).maybeSingle(),
     ]);
-    setCentral(cen.error ? null : ((cen.data ?? null) as { ultimo_latido: string | null; equipo: string | null } | null));
+    // Error = no hay tabla (falta el SQL); sin fila = la central nunca se conectó. No son lo mismo.
+    setCentral(cen.error ? null : ((cen.data ?? { ultimo_latido: null, equipo: null }) as { ultimo_latido: string | null; equipo: string | null }));
     setAhoraCentral(Date.now());
     if (c.error || d.error) { setFaltaTabla(true); setCargando(false); return; }
     const filas = (c.data ?? []) as any[];
