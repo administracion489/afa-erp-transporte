@@ -47,29 +47,102 @@ del app, pero una llamada normal sí.
 
 ## 2. Qué comprar
 
-### Recomendado: central con voz
+Hay dos centrales posibles y **el ERP es el mismo para las dos**: se puede empezar con una y
+pasar a la otra sin tocar nada del sistema.
 
-| Qué | Para qué | Costo |
+Precios consultados el **11-10-2026**. Son referenciales y cambian seguido.
+
+### Para empezar (recomendado): un celular Android, que solo hace sonar
+
+| Qué | Para qué | Costo aprox. |
 |---|---|---|
-| **Gateway celular de 1 chip** (VoIP-GSM/4G) | Convierte un chip en una línea que una computadora puede marcar | Una vez, ~US$ 100–250 |
-| **Chip nuevo con llamadas ilimitadas** | La línea por donde salen las llamadas. **Solo para esto**: no el de avisos ni el del Radar | Plan mensual, ~S/ 30–50 |
-| **Una computadora pequeña** (mini-PC, Raspberry Pi o una PC vieja con Linux) | Corre **Asterisk**, la central telefónica (libre y gratuita), y el programa que habla con el ERP | La que haya, o ~US$ 80–150 |
+| **Un celular Android 10 o más nuevo, comprado en una tienda en Perú** (o uno que la empresa ya tenga) | Hace las llamadas. Queda **solo para esto**, en la oficina | El que haya, o uno básico nuevo |
+| **Chip nuevo con llamadas ilimitadas**, a nombre de la empresa | La línea por donde salen las llamadas. **No** el de avisos ni el del Radar | Desde ~S/ 29.90 al mes en los cuatro operadores |
+| **La app «AFA Central»** | Pregunta al ERP a quién llamar, marca y cuenta si contestó | No se compra. **Pendiente de programar** cuando se elija esta opción |
 
-Hace exactamente lo pedido: llama, dice con voz *«Hola Sergio. Te llama la central de AFA.
-Tu servicio de las seis y treinta de la mañana, desde Puente Santa Anita, ya debió iniciar.
-Abre el app del conductor y pulsa INICIAR»*, lee *«marca 1 si ya estás en ruta, marca 2 para
-hablar con el coordinador»* y sabe si contestó y cuánto duró.
+**Qué hace**: hace sonar el teléfono del conductor y sabe si contestó. **No le habla**:
+Android no deja que una app ponga una voz dentro de una llamada.
 
-El gateway y la computadora van juntos en la oficina, en la misma red, con corriente
-estable (mejor con un pequeño UPS: los servicios empiezan de madrugada).
+**Para que el timbre ya diga qué hacer**, cada conductor guarda el número de la central en
+sus contactos como **«AFA – PULSA INICIAR»**. Aunque no conteste, la pantalla de la llamada
+ya le dice qué hacer.
 
-### Alternativa sin comprar equipo: un celular Android
+**Por qué conviene empezar por aquí:**
 
-Un celular Android viejo con el chip y una app de AFA instalada. **Solo hace sonar** el
-teléfono del conductor («AFA Central» llamando) y sabe si contestó o no: **no puede
-hablarle ni leer teclas**, porque Android no deja que una app ponga una voz dentro de una
-llamada. Sirve como primer paso si el conductor ya sabe que «si me llama la Central, tengo
-que pulsar INICIAR».
+- **Cuesta casi nada y no necesita técnico**: se instala la app, se pone la clave y se deja
+  enchufado.
+- **Aguanta un corte de luz**, porque tiene batería, **y un corte de internet**: si se cae el
+  WiFi de la oficina, usa los datos de su propio chip. Los servicios empiezan de madrugada.
+- **Para el operador es un celular común.** Si se compró en una tienda formal en Perú, la
+  tienda lo registra en la lista blanca de OSIPTEL (ver el punto 3 de la lista del gateway).
+- **Mide antes de invertir.** Si en un mes la ficha de cada servicio muestra que los
+  conductores contestan y aun así no pulsan INICIAR, recién vale la pena pagar la voz. En
+  ese caso el celular queda de respaldo.
+
+**Cómo dejarlo instalado:**
+
+- Siempre enchufado y con WiFi.
+- La app como **app de teléfono predeterminada** de ese celular. Así sabe con exactitud
+  cuándo contestaron.
+- La app **sin ahorro de batería**. Si no, Android la duerme y deja de preguntar.
+
+### Con voz: gateway celular + Asterisk
+
+Un **gateway** es una cajita con una ranura para un chip, como un celular sin pantalla. Se
+conecta por cable a la red de la oficina y deja que una computadora haga llamadas normales
+por ese chip.
+
+La computadora corre **Asterisk**, la central telefónica (libre y gratuita), y con eso hace
+exactamente lo pedido:
+
+- Llama y dice con voz: *«Hola Sergio. Te llama la central de AFA. Tu servicio de las seis
+  y treinta de la mañana, desde Puente Santa Anita, ya debió iniciar. Abre el app del
+  conductor y pulsa INICIAR»*.
+- Lee *«marca 1 si ya estás en ruta, marca 2 para hablar con el coordinador»*.
+- Sabe si contestó y cuánto duró.
+
+| Qué | Costo aprox. |
+|---|---|
+| **Gateway 4G** (ver la lista de abajo) | De S/ 2,900 a 3,300 en Lima. Importado: ~€ 300 (Portech) o ~US$ 550 (Yeastar 4G), más envío e impuestos |
+| **Computadora pequeña con disco SSD** (una mini-PC, o una PC vieja con Linux) | La que haya. Mejor con SSD que un Raspberry Pi con tarjeta de memoria, que se daña con los cortes de luz |
+| **Chip con llamadas ilimitadas**, a nombre de la empresa | Desde ~S/ 29.90 al mes |
+| **Un UPS pequeño** para el gateway, la computadora y el router | Los servicios empiezan de madrugada |
+| **Un técnico de Asterisk o Issabel** que lo instale | Cotizar |
+
+El gateway y la computadora van juntos en la oficina, en la misma red.
+
+**Lo que se encontró a la venta (octubre 2026):**
+
+- **Yeastar TG200** (2 chips): **S/ 2,906 a 3,301 en Lima**, en Arteus (Cyber Plaza) y en
+  Tienda de Cómputo Perú. Es una marca conocida y compatible con Asterisk. **Confirmar con el
+  vendedor si es la versión 3G o la 4G (LTE)**: las de Lima se anuncian como GSM/3G.
+- **Yeastar TG200 LTE-A** (4G; el fabricante anuncia VoLTE): **~US$ 549 en EE. UU.**, más
+  envío e impuestos. Sus bandas 4G son la 2, la 4 y la 12: sirven para Movistar, Entel y
+  Claro, no para Bitel.
+- **Portech MV-370-4G** (1 chip, 4G): **~€ 293 a 337 sin IVA en Alemania**, más envío e
+  impuestos. Tiene bandas 4G amplias (incluye la 2, 4, 7 y 28). **No dice si hace VoLTE**:
+  hay que preguntarlo.
+- **Yeastar TG100** (1 chip): **solo 2G/3G, no 4G**.
+- **GoIP-1** (S/ 780 a 899 en Mercado Libre Perú): **no comprar**. Los que se ofrecen son 2G
+  (GSM), la red más vieja y la primera que se apaga en todo el mundo.
+
+**Antes de comprar un gateway, preguntarle al vendedor:**
+
+1. **¿Hace las llamadas por 4G (VoLTE) o necesita 3G?** El 2G y el 3G se están apagando en
+   el mundo. No se encontró un calendario de apagado en Perú, pero un equipo que depende del
+   3G se queda mudo el día que lo apaguen.
+2. **¿Funciona con las bandas 4G de mi operador?** Movistar y Entel usan la banda 4 (y la
+   28); Claro, la 2 (y la 28 y la 7); Bitel usa otras.
+3. **¿Su IMEI está en la lista blanca de OSIPTEL (RENTESEG)?** OSIPTEL bloquea los equipos
+   que no están en esa lista o tienen el IMEI alterado: en 2026 ya van más de un millón.
+   - Si se compra en Perú, lo registra el vendedor formal.
+   - Si se importa, se registra con el operador.
+   - Se comprueba en <https://checatuimei.renteseg.osiptel.gob.pe>.
+4. **¿Es compatible con Asterisk (SIP)?** Los modelos de arriba lo son.
+
+**Con el operador**: conviene contarle para qué es la línea. Un equipo que solo hace
+llamadas, siempre desde el mismo sitio, se parece a los «SIM box» que se usan para desviar
+tráfico. El uso indebido es causal de suspensión de la línea.
 
 ---
 
@@ -125,6 +198,8 @@ llamadas reales y después las de prueba.
   mensaje una vez si no marca nada.
 - **No reintentar por su cuenta**: los reintentos los decide el ERP (vuelve a dar la
   llamada en `tomar` cuando toque).
+- **Una central que solo hace sonar (Android)** ignora `mensaje` y `menu`, corta a los
+  ~30 segundos de timbre (o a los pocos segundos de que contesten) y nunca manda `opcion`.
 
 ### Contar lo que pasó (siempre, también si falló)
 
