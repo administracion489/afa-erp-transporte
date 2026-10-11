@@ -11,6 +11,9 @@
 // El segundo es el que cierra el ciclo solo: sin él, un 6 leído donde decía 8 seguía
 // apareciendo mes tras mes hasta que alguien se tomara el trabajo de corregirlo a mano.
 
+import { errorDeLecturaSinCifras } from "./coherencia-voucher";
+import { sinCifrasCopiables } from "../odometro-prompt";
+
 /** Etiqueta legible por campo corregido, para el texto de la lección. */
 const CAMPO_LABEL: Record<string, string> = {
   grifo:   "el grifo/proveedor",
@@ -24,6 +27,47 @@ const CAMPO_LABEL: Record<string, string> = {
   kilometraje: "el kilometraje del odómetro",
   tipo_combustible: "el tipo de combustible",
 };
+
+/**
+ * Los campos NUMÉRICOS de un voucher. Su lección se dice sin el número: «para el precio leíste
+ * "24.64" y lo correcto era "24.720"» deja en el prompt un precio que el modelo copia en la nota
+ * siguiente —la de otra semana, con otro precio—, que es justo el eco que este archivo existe para
+ * cortar. Se describe el ERROR (un dígito distinto, el punto corrido, una cifra de más) y no el valor,
+ * con la misma regla que las lecciones del odómetro (lib/odometro-prompt.ts → sinCifrasCopiables).
+ */
+const CAMPOS_NUMERICOS = new Set(["galones", "litros", "precio", "monto", "kilometraje"]);
+
+const aNumero = (v: string | null | undefined): number | null => {
+  const t = String(v ?? "").trim().replace(/[^0-9.,-]/g, "");
+  if (!t) return null;
+  // Un solo separador: coma o punto decimal. Con los dos, la coma es de miles (forma peruana).
+  const n = Number(t.includes(".") && t.includes(",") ? t.replace(/,/g, "") : t.replace(",", "."));
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/** La lección de UNA corrección, en una línea, sin cifras copiables. Exportada para la matriz. */
+export function textoLeccion(c: { campo: string; valor_ia: string | null; valor_correcto: string | null; nota: string | null }): string {
+  const campo = CAMPO_LABEL[c.campo] ?? c.campo;
+  const nota = c.nota ? sinCifrasCopiables(String(c.nota).trim()).slice(0, 200) : "";
+  const cola = nota ? ` (${nota})` : "";
+  if (CAMPOS_NUMERICOS.has(c.campo)) {
+    const leido = aNumero(c.valor_ia);
+    const correcto = aNumero(c.valor_correcto);
+    if (leido == null) return `- En ${campo} no leíste nada y el papel sí lo traía${cola}.`;
+    if (correcto == null) return `- En ${campo} el número que diste estaba mal${cola}.`;
+    const err = errorDeLecturaSinCifras(leido, correcto);
+    return err
+      ? `- En ${campo} te equivocaste en ${err}: vuelve a leerlo cifra por cifra${cola}.`
+      : `- En ${campo} diste un número que no era el impreso: léelo de la foto y compruébalo con el cuadre, nunca lo completes con uno de otra nota${cola}.`;
+  }
+  const leido = c.valor_ia != null && String(c.valor_ia).trim() !== ""
+    ? `leíste "${String(c.valor_ia).trim()}"`
+    : "no leíste nada";
+  const corr = c.valor_correcto != null && String(c.valor_correcto).trim() !== ""
+    ? `y lo correcto era "${String(c.valor_correcto).trim()}"`
+    : "y estaba mal";
+  return `- Para ${campo} ${leido} ${corr}${cola}.`;
+}
 
 /**
  * Cuántas de las lecciones pueden venir del cuadre aritmético en vez de una persona.
@@ -80,16 +124,5 @@ export async function leccionesCombustible(client: any, limite = 12): Promise<st
     String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""))
   );
   if (!filas.length) return "";
-  return filas
-    .map((c) => {
-      const campo = CAMPO_LABEL[c.campo] ?? c.campo;
-      const leido = c.valor_ia != null && String(c.valor_ia).trim() !== ""
-        ? `leíste "${String(c.valor_ia).trim()}"`
-        : "no leíste nada";
-      const corr = c.valor_correcto != null && String(c.valor_correcto).trim() !== ""
-        ? `y lo correcto era "${String(c.valor_correcto).trim()}"`
-        : "y estaba mal";
-      return `- Para ${campo} ${leido} ${corr}${c.nota ? ` (${c.nota})` : ""}.`;
-    })
-    .join("\n");
+  return filas.map(textoLeccion).join("\n");
 }

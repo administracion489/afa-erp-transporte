@@ -261,5 +261,63 @@ const CONOCIDAS: EmpresasConocidas = {
   chk("y coincide con 11.22", esFalsaDiscrepancia(d));
 }
 
+// ── 14. EL PROVEEDOR COMPRADOR YA NO SE LLEVA AL GRIFO BUENO (CWZ-371, 11/10/2026) ──
+// La nota tenía «COESTI S.A. - RUC: 20127765279» legible y la carga quedó sin grifo. El modelo confunde
+// sobre todo el "proveedor" (el campo de la nota se llama "RAZ.SOC"), y el guard borraba los DOS
+// campos si cualquiera era el comprador.
+{
+  const r = resolverIdentidadGrifo(
+    { grifo: "COESTI S.A.", proveedor: "AFA TOURS PERU S.A.C.", ruc: "20127765279", direccionGrifo: "AV. CIRC. GOLF LOS INCAS 134", clienteEnNota: "AFA TOURS PERU S.A.C." },
+    CONOCIDAS
+  );
+  chk("el grifo leído del encabezado se conserva", r.grifo === "COESTI S.A.", r.grifo ?? "—");
+  chk("y el proveedor deja de ser el comprador", r.proveedor === "COESTI S.A.", r.proveedor ?? "—");
+  chk("con su RUC y su dirección", r.ruc === "20127765279" && r.direccionGrifo != null);
+  chk("no bloquea: el gasto está bien imputado", r.anomalia?.bloquea === false, r.anomalia?.codigo ?? "—");
+}
+{
+  // Proveedor comprador + RUC del comprador: el grifo se queda, el RUC se va.
+  const r = resolverIdentidadGrifo(
+    { grifo: "COESTI S.A.", proveedor: "GLOBAL BUS PERU S.A.C.", ruc: "20611105291", direccionGrifo: "PJ. SANTA ISABEL 380", clienteEnNota: null },
+    CONOCIDAS
+  );
+  chk("con el RUC del cliente, el grifo se queda y el RUC se suelta", r.grifo === "COESTI S.A." && r.ruc === null && r.direccionGrifo === null);
+}
+{
+  // Sin grifo y con el comprador en "proveedor": es el caso de siempre (no hay grifo que conservar).
+  const r = resolverIdentidadGrifo(
+    { grifo: null, proveedor: "AFA TOURS PERU S.A.C.", ruc: null, direccionGrifo: null, clienteEnNota: null },
+    CONOCIDAS
+  );
+  chk("sin grifo leído, el comprador en proveedor sigue bloqueando", r.grifo === null && r.anomalia?.bloquea === true);
+}
+
+// ── 15. EL RUC DEL ENCABEZADO NOMBRA AL GRIFO CUANDO EL NOMBRE ERA DEL COMPRADOR ──
+{
+  const grifoPorRuc = (r: string) => (r === "20127765279" ? "COESTI S.A." : null);
+  const r = resolverIdentidadGrifo(
+    { grifo: "AFA TOURS PERU S.A.C.", proveedor: null, ruc: "20127765279", direccionGrifo: "MZA. F LOTE 2", clienteEnNota: null },
+    CONOCIDAS,
+    { grifoPorRuc }
+  );
+  chk("el grifo sale del RUC conocido", r.grifo === "COESTI S.A." && r.ruc === "20127765279", `${r.grifo} ${r.ruc}`);
+  chk("la dirección no se atribuye (pudo ser la del cliente)", r.direccionGrifo === null);
+  chk("y no bloquea: lo identificó un dato exacto", r.anomalia?.codigo === "cliente_como_grifo" && r.anomalia?.bloquea === false);
+  // El RUC del cliente nunca nombra a nadie, aunque el catálogo lo conociera.
+  const r2 = resolverIdentidadGrifo(
+    { grifo: "AFA TOURS PERU S.A.C.", proveedor: null, ruc: "20611105291", direccionGrifo: null, clienteEnNota: null },
+    CONOCIDAS,
+    { grifoPorRuc: () => "OTRO GRIFO" }
+  );
+  chk("con el RUC del comprador sigue en blanco y bloquea", r2.grifo === null && r2.anomalia?.bloquea === true);
+  // Un RUC desconocido tampoco: se suelta como siempre.
+  const r3 = resolverIdentidadGrifo(
+    { grifo: "AFA TOURS PERU S.A.C.", proveedor: null, ruc: "20100128218", direccionGrifo: null, clienteEnNota: null },
+    CONOCIDAS,
+    { grifoPorRuc }
+  );
+  chk("con un RUC que no es de un grifo conocido, el de siempre", r3.grifo === null && r3.ruc === null && r3.anomalia?.bloquea === true);
+}
+
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
 process.exit(fallos ? 1 : 0);

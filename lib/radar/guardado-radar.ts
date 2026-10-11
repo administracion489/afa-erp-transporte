@@ -19,6 +19,7 @@ export const OPCIONALES_RADAR = {
   fotos: "radar-ia-combustible-revision.sql",
   vehiculo_tercero_id: "radar-ia-combustible-revision.sql",
   nivel_tanque: "combustible-02-nivel-tanque-radar.sql",
+  ruc_grifo: "combustible-07-ruc-grifo-radar.sql",
 } as const;
 export type OpcionalRadar = keyof typeof OPCIONALES_RADAR;
 

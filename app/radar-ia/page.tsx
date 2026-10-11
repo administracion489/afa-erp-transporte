@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { faltaAlguna } from "@/lib/columna-faltante";
 import { aceptarLectura, registrarLectura, juzgarKmDeRecarga } from "@/lib/odometro";
 import { revisarKmTecleado } from "@/lib/odometro-seleccion";
 import { capturaDeRecarga } from "@/lib/odometro-tiempo";
@@ -168,6 +169,7 @@ const ANOMALIA_LABEL: Record<string, string> = {
   cuadre_ambiguo:         "No cuadra (ambiguo)",
   cantidad_no_coincide_texto: "Cantidad ≠ transcripción",
   cantidad_precio_invertidos: "Cantidad y precio invertidos",
+  precio_segun_importe:   "Precio según el importe",
   // Qué combustible se compró (lib/radar/tipo-voucher.ts)
   tipo_corregido_por_producto:  "Tipo corregido por el producto",
   tipo_no_coincide_con_producto: "Tipo ≠ producto del voucher",
@@ -189,7 +191,7 @@ const ANOMALIA_LABEL: Record<string, string> = {
  */
 const ANOMALIA_ES_ARREGLO = (codigo: string) =>
   codigo === "lectura_corregida" || codigo === "dato_derivado" || codigo === "tipo_corregido_por_producto" ||
-  codigo === "fecha_corregida" || codigo === "km_corregido";
+  codigo === "fecha_corregida" || codigo === "km_corregido" || codigo === "precio_segun_importe";
 
 const TABS = [
   { id: "feed",          label: "Feed" },
@@ -3326,9 +3328,8 @@ export default function RadarIAPage() {
       // Guarda primero las correcciones (dataset de aprendizaje), sin frenar el registro.
       await guardarCorreccionesCombustible(c, ov, fotoUrl);
       // OJO: nunca escribir `total` — es columna generada (galones × precio_galon)
-      const { data, error } = await supabase
-        .from("combustible")
-        .insert({
+      const grifoFinal = ov.grifo ?? c.grifo;
+      const payloadCarga: Record<string, unknown> = {
           ...destino,
           fecha: fechaCarga,
           // El que confirmó el revisor mirando la foto, no el que leyó la IA. Antes era
@@ -3339,7 +3340,11 @@ export default function RadarIAPage() {
           kilometraje: ov.kilometraje ?? 0,
           galones: ov.cantidad,
           precio_galon: precio,
-          grifo: ov.grifo ?? c.grifo,
+          grifo: grifoFinal,
+          // El RUC que el Radar leyó del encabezado viaja con la carga mientras el grifo sea el mismo
+          // que leyó: si el revisor escribió OTRO grifo, ese RUC ya no es el suyo y no se adivina.
+          // Con él el saldo de la cuenta reconoce la carga sin depender de cómo se escribió el nombre.
+          ruc_proveedor: c.ruc_grifo && grifoFinal === c.grifo ? c.ruc_grifo : null,
           conductor: c.conductor,
           observaciones: `Radar IA (manual${ov.tipo === "tercero" ? " · tercero" : ""}) · grupo ${grupo}`,
           // El que confirmó el revisor. Antes era `c.tipo_combustible ?? "diesel"`: una recarga
@@ -3351,9 +3356,13 @@ export default function RadarIAPage() {
           // GALONES cada carga de GNV —el 70 % de la flota— con un número que son m³, y con la
           // unidad mal escrita ni el rendimiento ni la banda de precio pueden juzgarla.
           unidad: unidadDeCarga(ov.tipoCombustible || c.tipo_combustible, ov.esLitros ? "litros" : "galones"),
-        })
-        .select("id")
-        .single();
+      };
+      let { data, error } = await supabase.from("combustible").insert(payloadCarga).select("id").single();
+      // `ruc_proveedor` es de finanzas-02: sin la migración la carga entra igual, sin el RUC.
+      if (error && faltaAlguna(error, ["ruc_proveedor"])) {
+        const { ruc_proveedor: _sinRuc, ...sinRuc } = payloadCarga;
+        ({ data, error } = await supabase.from("combustible").insert(sinRuc).select("id").single());
+      }
       if (error || !data) throw error ?? new Error("no se pudo insertar en combustible");
       // ¿Quedó lleno el tanque? Va en una escritura APARTE y best-effort a propósito: es de una
       // migración accesoria (`combustible-01-tanque-lleno.sql`) y una recarga confirmada contra

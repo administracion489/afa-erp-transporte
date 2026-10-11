@@ -164,6 +164,8 @@ export type RadarCombustible = {
   fecha: string | null;
   hora: string | null;
   grifo: string | null;
+  /** RUC del grifo, validado (combustible-07-ruc-grifo-radar.sql). Ausente sin la migración. */
+  ruc_grifo?: string | null;
   direccion_grifo: string | null;
   tipo_combustible: string | null;
   galones: number | null;
@@ -224,6 +226,7 @@ export type AnomaliaCombustible = {
     | "dato_derivado"                // faltaba uno de los tres números y se calculó de los otros dos
     | "cantidad_no_coincide_texto"   // el número extraído contradice la transcripción literal de la IA
     | "cantidad_precio_invertidos"   // se leyó el precio como cantidad y viceversa (el cuadre no lo ve: es conmutativo)
+    | "precio_segun_importe"         // no cuadra, ningún dígito lo explica: se guardó el precio que reproduce el importe
     // Qué combustible se compró (lib/radar/tipo-voucher.ts):
     | "tipo_corregido_por_producto"  // la IA dijo un tipo y el producto impreso dice otro: manda el papel
     | "tipo_no_coincide_con_producto"// el papel la contradice pero nombra varios productos: no se adivina
