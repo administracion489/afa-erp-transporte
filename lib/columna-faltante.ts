@@ -57,3 +57,40 @@ export function faltaAlguna<T extends string>(error: ErrorSupabase, columnas: re
   if (!c) return null;
   return columnas.find((x) => x.toLowerCase() === c) ?? null;
 }
+
+// ── ¿FALTA UNA TABLA ENTERA? ────────────────────────────────────────────────────────────
+// Una tabla de una migración que el deploy no corre (p. ej. supabase/gps-equipo-01.sql) tiene que
+// poder faltar sin que la pantalla o el endpoint se caigan: quien la usa responde «falta correr tal
+// SQL» en vez de un 500. Las dos formas, igual que con las columnas:
+//   • PostgREST, antes de llegar a la base → PGRST205 · Could not find the table 'public.x' in the schema cache
+//   • Postgres (una vista o una función que la nombra) → 42P01 · relation "public.x" does not exist
+// NO responde a un error de COLUMNA (PGRST204 / 42703): el mensaje de Postgres para una columna
+// («column "c" of relation "t" does not exist») también contiene «relation … does not exist», y
+// confundirlos haría que una columna faltante se leyera como «falta la migración entera».
+
+const RE_TABLA_POSTGREST = /could not find the table ['"]?([\w.]+)['"]? in the schema cache/i;
+const RE_TABLA_POSTGRES = /relation ["']?([\w.]+)["']? does not exist/i;
+
+/** El nombre (sin esquema) de la tabla que el error dice que no existe; `""` si es seguro que falta
+ *  una tabla pero el mensaje no dice cuál; null si el error es OTRA cosa (incluida una columna). */
+export function tablaQueFalta(error: ErrorSupabase): string | null {
+  if (!error) return null;
+  if (error.code === "PGRST204" || error.code === "42703" || columnaFaltante(error) != null) return null;
+  const msg = String(error.message ?? "");
+  const m = RE_TABLA_POSTGREST.exec(msg) ?? RE_TABLA_POSTGRES.exec(msg);
+  if (m) {
+    const partes = m[1].split(".");
+    return partes[partes.length - 1].toLowerCase();
+  }
+  if (error.code === "PGRST205" || error.code === "42P01") return "";
+  return null;
+}
+
+/** ¿Falta una tabla? Con `tabla`, solo si el error nombra ESA (o no nombra ninguna). */
+export function tablaFaltante(error: ErrorSupabase, tabla?: string): boolean {
+  const t = tablaQueFalta(error);
+  if (t == null) return false;
+  if (!tabla || t === "") return true;
+  const buscada = tabla.split(".").pop()!.toLowerCase();
+  return t === buscada;
+}

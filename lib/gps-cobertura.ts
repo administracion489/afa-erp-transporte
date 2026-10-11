@@ -41,7 +41,7 @@
 // Solo cuenta si el cierre ES el final de la traza: con posiciones de este servicio más de un
 // minuto después (se reanudó), manda la regla de siempre.
 
-import { hhmmLima } from "./servicio-tiempos";
+import { hhmmLima, derivarTiempos, type ReservaTiempos, type ParadaTiempos } from "./servicio-tiempos";
 
 export const HUECO_MIN_S = 60;       // por debajo de esto es cadencia normal, no un corte
 export const AVANCE_CAIDO_M = 500;   // si el bus avanzó esto durante el hueco, el rastreo estaba muerto
@@ -64,11 +64,33 @@ export function limaMs(fecha: string, hora: string | null): number | null {
 }
 
 export type PuntoCobertura = { ts: number; lat: number; lng: number };
+
+/**
+ * Una fila de ubicaciones_gps con lo que hace falta para DIAGNOSTICAR un corte (lib/gps-diagnostico.ts),
+ * no para medirlo: la medición sigue saliendo solo de `pts`. Se guarda la fila útil Y la de antena
+ * (con su clasificación, la misma de `acumularFilasGps`), porque «el teléfono siguió mandando, pero
+ * por antena» y «el teléfono no mandó nada» son dos causas distintas del mismo hueco.
+ *   · `recibidoTs`: ubicaciones_gps.recibido_en, la hora en que llegó al SERVIDOR (null = fila
+ *     anterior a supabase/gps-equipo-01.sql, o columna no leída). `ts` es created_at, que pone el
+ *     TELÉFONO: la diferencia entre los dos es lo que delata una cola que se mandó tarde.
+ *   · `fixTs`: ubicaciones_gps.fix_ts, la hora del último fix REAL del proveedor (null en APK viejos).
+ */
+export type FilaGpsDiag = {
+  ts: number; lat: number; lng: number;
+  util: boolean; antena: boolean;
+  precisionM: number | null;
+  recibidoTs: number | null; fixTs: number | null;
+  conductorId: number | null; conductorTerceroId: number | null;
+};
+
 export type TrazaSaneada = {
   pts: PuntoCobertura[]; totalCrudo: number; porAntena: number; simulados: number;
   /** created_at del ÚLTIMO punto con estado='finalizado': el conductor pulsó «Finalizar».
    *  Se toma aunque el punto sea impreciso: lo que prueba es el ACTO, no la posición. */
   cierreTs?: number | null;
+  /** OPCIONAL: solo existe si quien lee la traza lo pidió (creando `acc.filas = []` antes de
+   *  acumular). Sin él, la traza es byte a byte la de siempre. */
+  filas?: FilaGpsDiag[];
 };
 
 export function trazaVacia(): TrazaSaneada {
@@ -93,9 +115,35 @@ export function acumularFilasGps(acc: TrazaSaneada, filas: any[], contarSimulado
     if (f.lat == null || f.lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     acc.totalCrudo++;
     if (contarSimulados && f.simulado === true) acc.simulados++;   // fix inyectado por una app de GPS falso
-    if (prec !== null && Number.isFinite(prec) && prec > PRECISION_MAX_M) { acc.porAntena++; continue; }
+    const antena = prec !== null && Number.isFinite(prec) && prec > PRECISION_MAX_M;
+    // Las filas de diagnóstico se llenan SOLO si quien lee las pidió, y con la MISMA clasificación
+    // de abajo (útil o antena): dos criterios para «esta fila es de antena» serían dos motores.
+    if (acc.filas) acc.filas.push(filaDiag(f, ts, lat, lng, prec, antena));
+    if (antena) { acc.porAntena++; continue; }
     acc.pts.push({ ts, lat, lng });
   }
+}
+
+/** Número finito o null (Number(null) es 0: un id o una hora ausentes no pueden volverse 0). */
+function numONull(x: unknown): number | null {
+  if (x == null || x === "") return null;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+}
+function tsONull(x: unknown): number | null {
+  if (x == null || x === "") return null;
+  const t = Date.parse(String(x));
+  return Number.isFinite(t) && t > 0 ? t : null;
+}
+function filaDiag(f: Record<string, unknown>, ts: number, lat: number, lng: number, prec: number | null, antena: boolean): FilaGpsDiag {
+  return {
+    ts, lat, lng, util: !antena, antena,
+    precisionM: prec !== null && Number.isFinite(prec) ? prec : null,
+    recibidoTs: tsONull(f.recibido_en),
+    fixTs: tsONull(f.fix_ts),
+    conductorId: numONull(f.conductor_id),
+    conductorTerceroId: numONull(f.conductor_tercero_id),
+  };
 }
 
 /**
@@ -131,6 +179,26 @@ export type FinVentana =
   | "previsto"   // la traza murió lejos del destino y sin cierre: hasta la llegada prevista
   | "traza";     // nada la alarga: termina en la última posición
 
+/**
+ * Un tramo de la ventana SIN posición útil que RESTA del %: exactamente lo que `medirCobertura`
+ * deja fuera de `cubiertoS`, sacado del MISMO bucle que cuenta `cortes`, `peorHuecoMin` y
+ * `kmACiegas` (una segunda pasada sería una segunda definición de «hueco»).
+ *   · `hueco`: entre dos posiciones, más de HUECO_MIN_S.
+ *   · `cabeza`: del inicio que marcó el conductor a la primera posición (solo si > HUECO_MIN_S).
+ *   · `cola`: de la última posición al fin de la ventana (solo si > HUECO_MIN_S).
+ * `enMovimiento` es el criterio de `cortes` (el bus avanzó ≥ AVANCE_CAIDO_M durante el hueco), así
+ * que la cabeza y la cola nunca lo son: no hay posición al otro lado con qué medir el avance. La
+ * matriz lo fija: los tramos en movimiento son `cortes` y sus metros son `kmACiegas`.
+ * OJO: el % descuenta TODO tramo, también con el bus quieto; «cortes» solo cuenta los que avanzaron.
+ */
+export type TramoSinRastreo = {
+  tipo: "cabeza" | "hueco" | "cola";
+  desdeTs: number; hastaTs: number; durS: number;
+  /** metros entre las dos posiciones del hueco; null en cabeza y cola */
+  avanceM: number | null;
+  enMovimiento: boolean;
+};
+
 export type MedicionCobertura = {
   ventanaIniTs: number; ventanaFinTs: number;
   finPor: FinVentana;
@@ -140,6 +208,10 @@ export type MedicionCobertura = {
   peorHuecoMin: number;
   kmACiegas: number;
   primeraTs: number; ultimaTs: number;
+  /** segundos de la ventana con GPS (el numerador del %, sin redondear) */
+  cubiertoS: number;
+  /** los tramos que restan del %, en orden: cabeza, huecos, cola */
+  tramos: TramoSinRastreo[];
 };
 
 /** Mide la cobertura de una traza saneada. `pts` en orden ascendente; requiere ≥ 2 puntos. */
@@ -182,12 +254,15 @@ export function medirCobertura(e: {
   const ventanaS = Math.max(1, (fin - ini) / 1000);
 
   let cubiertoS = 0, cortes = 0, peorS = 0, metrosCiegos = 0;
+  const huecos: TramoSinRastreo[] = [];
   for (let i = 1; i < t.length; i++) {
     const gapS = (t[i].ts - t[i - 1].ts) / 1000;
     if (gapS <= HUECO_MIN_S) { cubiertoS += gapS; continue; }
     if (gapS > peorS) peorS = gapS;
     const avance = metros(t[i - 1].lat, t[i - 1].lng, t[i].lat, t[i].lng);
-    if (avance >= AVANCE_CAIDO_M && avance <= AVANCE_MAX_M) { cortes++; metrosCiegos += avance; }
+    const enMovimiento = avance >= AVANCE_CAIDO_M && avance <= AVANCE_MAX_M;
+    if (enMovimiento) { cortes++; metrosCiegos += avance; }
+    huecos.push({ tipo: "hueco", desdeTs: t[i - 1].ts, hastaTs: t[i].ts, durS: gapS, avanceM: avance, enMovimiento });
   }
   // La cola sin puntos (el rastreo murió y no volvió) queda fuera de `cubiertoS` por
   // construcción: es lo que hace que este caso ya no puntúe 100%. Igual la cabeza, si el GPS
@@ -196,6 +271,12 @@ export function medirCobertura(e: {
   if (colaS > HUECO_MIN_S && peorS < colaS) peorS = colaS;
   const cabezaS = (ini0 - ini) / 1000;
   if (cabezaS > HUECO_MIN_S && peorS < cabezaS) peorS = cabezaS;
+  // Cabeza y cola cuentan como tramo con el MISMO corte que `peorS`: por debajo de HUECO_MIN_S
+  // tampoco son un hueco (quedan fuera del % y de la lista, igual que antes quedaban fuera de peorS).
+  const tramos: TramoSinRastreo[] = [];
+  if (cabezaS > HUECO_MIN_S) tramos.push({ tipo: "cabeza", desdeTs: ini, hastaTs: ini0, durS: cabezaS, avanceM: null, enMovimiento: false });
+  tramos.push(...huecos);
+  if (colaS > HUECO_MIN_S) tramos.push({ tipo: "cola", desdeTs: ultimo.ts, hastaTs: fin, durS: colaS, avanceM: null, enMovimiento: false });
 
   return {
     ventanaIniTs: ini, ventanaFinTs: fin, finPor,
@@ -205,6 +286,8 @@ export function medirCobertura(e: {
     peorHuecoMin: Math.round(peorS / 60),
     kmACiegas: Math.round(metrosCiegos / 100) / 10,
     primeraTs: ini0, ultimaTs: ultimo.ts,
+    cubiertoS,
+    tramos,
   };
 }
 
@@ -357,6 +440,84 @@ export function veredictoRastreo(e: {
   if (cabezaMin > 1) partes.push(`El GPS empezó ${cabezaMin} min después de iniciar el servicio.`);
   if (m.cortes > 0) partes.push(`${m.cortes} corte(s) en movimiento: ${m.kmACiegas} km sin señal.`);
   return { ...b, codigo, pct: m.cobertura, problema, celda: `${m.cobertura} %`, color: banda.color, bg: banda.bg, detalle: partes.join(" ") };
+}
+
+// ── EL VEREDICTO DE UN SERVICIO, DE PUNTA A PUNTA (la celda RASTREO y el modal) ─────────
+// Vivía como la función interna `medir` de `rastreoDelDia` (lib/gps-cobertura-datos.ts). El modal de
+// diagnóstico tiene que enseñar EXACTAMENTE el número de la celda, y la forma segura de que lo haga
+// es que las dos pantallas llamen a las mismas dos funciones —no que el modal arme las suyas—. Se
+// EXTRAJO, no se reescribió: scripts/prueba-gps-cobertura.mts corre el `medir` viejo copiado literal
+// y exige veredicto idéntico. Partida en dos porque entre una y otra está la lectura de la traza
+// (servidor): `contextoServicio` dice si hay que leerla; `veredictoDeServicio` la juzga.
+//
+// UNA DIVERGENCIA DECLARADA, Y ES NULA: el original decía `fecha === hoy`, con `fecha` el filtro
+// de la consulta (`fecha_servicio = fecha`); aquí, sin consulta, se pregunta `r.fecha_servicio ===
+// hoy`, que para toda fila que esa consulta devolvía es el mismo valor.
+
+export type ContextoServicio = {
+  /** el servicio corrió o está corriendo: si no, no se lee su GPS */
+  aplica: boolean;
+  enCurso: boolean;
+  terminado: boolean;
+  completadas: number;
+  /** inicio que dejó el conductor (no estimado) */
+  inicioTs: number | null;
+  /** llegada al último paradero marcada (no estimada) */
+  finTs: number | null;
+  finPrevistoTs: number | null;
+  destino: { lat: number; lng: number } | null;
+};
+
+/** Lo que dice la evidencia del CONDUCTOR (lib/servicio-tiempos.ts), SIN pasarle el GPS: el fin del
+ *  servicio no puede salir de la propia traza que se está juzgando. */
+export function contextoServicio(
+  r: ReservaTiempos,
+  ps: (ParadaTiempos & { lat?: unknown; lng?: unknown })[],
+  o: { hoy: string; ahoraMs: number },
+): ContextoServicio {
+  const paradas = ps ?? [];
+  const completadas = paradas.filter((p) => p.estado === "completada").length;
+  const terminado = r.estado === "finalizada" || (paradas.length > 0 && completadas === paradas.length);
+  // Un servicio "en curso" de OTRO día que nadie cerró no está en ruta: medirlo hasta ahora lo
+  // hundiría por horas que no son de servicio. Se juzga como terminado, con su evidencia.
+  const enCurso = r.fecha_servicio === o.hoy && r.estado === "en_curso" && !terminado;
+  const aplica = terminado || r.estado === "en_curso" || completadas > 0;
+  const t = derivarTiempos({ reserva: r, paradas, ahoraMs: o.ahoraMs, hoy: o.hoy });
+  const inicioTs = t.inicio && !t.inicio.estimado ? t.inicio.ts : null;
+  const finTs = t.finParadero && !t.finParadero.estimado ? t.finParadero.ts : null;
+  const { finPrevistoTs, destino } = finYDestino(paradas, r.fecha_servicio as string, r.hora_servicio ?? null);
+  return { aplica, enCurso, terminado, completadas, inicioTs, finTs, finPrevistoTs, destino };
+}
+
+/**
+ * El veredicto de la celda y la medición de la que sale. `traza` null = no se pudo leer
+ * (→ `sin_medir`, nunca 0 %). Si el servicio no aplica la traza se ignora: no hace falta leerla.
+ */
+export function veredictoDeServicio(
+  ctx: ContextoServicio,
+  traza: TrazaSaneada | null,
+  ps: { lat?: unknown; lng?: unknown }[],
+  ahoraMs: number,
+): { veredicto: VeredictoRastreo; medicion: MedicionCobertura | null } {
+  if (!ctx.aplica) {
+    return {
+      veredicto: veredictoRastreo({ aplica: false, enCurso: ctx.enCurso, traza: trazaVacia(), medicion: null, avanzo: false, inmovil: false, inicioTs: ctx.inicioTs, ahoraMs }),
+      medicion: null,
+    };
+  }
+  const medicion = traza
+    ? medirCobertura({
+      pts: traza.pts, destino: ctx.destino, finPrevistoTs: ctx.finPrevistoTs,
+      inicioTs: ctx.inicioTs, finTs: ctx.finTs, hastaTs: ctx.enCurso ? ahoraMs : null, cierreTs: traza.cierreTs,
+    })
+    : null;
+  const veredicto = veredictoRastreo({
+    aplica: true, enCurso: ctx.enCurso, traza, medicion,
+    avanzo: ctx.terminado || ctx.completadas >= 2,
+    inmovil: traza ? trazaInmovil(traza.pts, ps ?? []) : false,
+    inicioTs: ctx.inicioTs, ahoraMs,
+  });
+  return { veredicto, medicion };
 }
 
 // ── RESUMEN PARA EL AVISO DE LA TORRE ─────────────────────────────────────────────────
