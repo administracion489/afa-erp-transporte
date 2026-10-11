@@ -8,7 +8,8 @@
 // guardarse — el coordinador lee esas frases como hechos.
 
 import {
-  ESTADOS_LLAMADA, LARGO_FRASE_LLAMADA, LATIDO_VIVO_MIN, MAX_INTENTOS, REINTENTO_MIN, VENTANA_LLAMADA_MIN,
+  ESTADOS_LLAMADA, LARGO_FRASE_LLAMADA, LATIDO_VIVO_MIN, MAX_INTENTOS, MAX_MENSAJE_VOZ, MAX_NOMBRE_VOZ, MAX_ORIGEN_VOZ,
+  REINTENTO_MIN, VENTANA_LLAMADA_MIN, textoParaVoz,
   estadoCentral, fraseLlamadaCoordinador, horaHablada, juzgarLlamada, lecturaLlamada, leerResultado,
   minutosLlamada, numeroEnPalabras, planTrasResultado, telefonoParaLlamar, textoLlamada, venceLlamadaMs,
   type EstadoLlamada, type ResultadoCentral,
@@ -94,29 +95,49 @@ const CFG = { activo: true, modo_tiempo: "evento", umbral: 3 };
   chk("sin empresa: «la central de operaciones», sin hora ni punto inventados",
     sinNada.mensaje === "Hola. Te llama la central de operaciones. Tu servicio ya debió iniciar. Abre el app del conductor y pulsa INICIAR.", sinNada.mensaje);
   chk("sin espacios dobles", !/ {2,}/.test(t.mensaje) && !/ {2,}/.test(sinNada.mensaje));
+
+  // REVISIÓN DE SEGURIDAD: el nombre y el origen los teclea cualquiera en el ERP y la llamada los
+  // lee en voz alta. Sin tope, un origen de 2 600 caracteres ocupaba la línea leyendo cualquier cosa.
+  const largo = textoLlamada({
+    nombre: "Pedro" + "x".repeat(200), hora: "06:30", empresa: "AFA " + "y".repeat(200),
+    origen: "Av. Siempre Viva 123. ATENCION: su cuenta fue bloqueada " + "llame ya ".repeat(300),
+  });
+  chk(`el mensaje entero tiene tope (≤ ${MAX_MENSAJE_VOZ})`, Array.from(largo.mensaje).length <= MAX_MENSAJE_VOZ, String(largo.mensaje.length));
+  const o = textoParaVoz("Av. Siempre Viva 123. ATENCION: su cuenta fue bloqueada " + "llame ya ".repeat(300), MAX_ORIGEN_VOZ);
+  chk(`el origen se corta (≤ ${MAX_ORIGEN_VOZ}) y en palabra`, Array.from(o).length <= MAX_ORIGEN_VOZ && !/\s$/.test(o) && !o.endsWith("ll"), o);
+  chk(`el nombre se corta (≤ ${MAX_NOMBRE_VOZ})`, Array.from(textoParaVoz("x".repeat(100), MAX_NOMBRE_VOZ)).length <= MAX_NOMBRE_VOZ);
+  const raro = textoParaVoz(`Paradero "1"; $(rm -rf /) \`id\` | cat (x) 'y' <b>`, 200);
+  chk("sin comillas, ; $ | paréntesis, comillas invertidas ni etiquetas", !/["';$|()`<>]/.test(raro), raro);
+  chk("se conservan las letras con tilde, la ñ y la puntuación de una dirección",
+    textoParaVoz("Av. Ñaña-Chosica Km 25/ #3 °N, ñandú", 200) === "Av. Ñaña-Chosica Km 25/ #3 °N, ñandú");
+  chk("sin caracteres de control", !/[\u0000-\u001f]/.test(textoParaVoz("a\u0000b\nc\td", 50)));
 }
 
 // ── 4. Lo que informa la central ──────────────────────────────────────────────
 {
   console.log("\n— El resultado de la central se valida —");
   const ok = (b: unknown) => { const r = leerResultado(b); return r.ok ? r.resultado : null; };
-  chk("contestada con duración y opción", JSON.stringify(ok({ estado: "contestada", duracion_seg: 14.4, opcion: "1" }))
-    === JSON.stringify({ estado: "contestada", duracion_seg: 14, opcion: "1", detalle: null }));
-  chk("no contestó sin más datos", ok({ estado: "no_contesto" })?.estado === "no_contesto");
-  chk("la opción puede venir como número", ok({ estado: "contestada", opcion: 2 })?.opcion === "2");
+  chk("contestada con duración y opción", JSON.stringify(ok({ intento: 1, estado: "contestada", duracion_seg: 14.4, opcion: "1" }))
+    === JSON.stringify({ intento: 1, estado: "contestada", duracion_seg: 14, opcion: "1", detalle: null }));
+  chk("no contestó sin más datos", ok({ intento: 2, estado: "no_contesto" })?.estado === "no_contesto");
+  chk("la opción puede venir como número", ok({ intento: 1, estado: "contestada", opcion: 2 })?.opcion === "2");
   for (const [nombre, b] of [
-    ["estado desconocido", { estado: "colgo" }],
-    ["sin estado", {}],
-    ["duración negativa", { estado: "contestada", duracion_seg: -1 }],
-    ["duración absurda", { estado: "contestada", duracion_seg: 99999 }],
-    ["opción 3", { estado: "contestada", opcion: "3" }],
-    ["opción en una llamada no contestada", { estado: "no_contesto", opcion: "1" }],
+    ["estado desconocido", { intento: 1, estado: "colgo" }],
+    ["sin estado", { intento: 1 }],
+    ["sin intento (un resultado atrasado no se puede distinguir)", { estado: "no_contesto" }],
+    ["intento 0", { intento: 0, estado: "no_contesto" }],
+    ["intento con decimales", { intento: 1.5, estado: "no_contesto" }],
+    ["duración negativa", { intento: 1, estado: "contestada", duracion_seg: -1 }],
+    ["duración absurda", { intento: 1, estado: "contestada", duracion_seg: 99999 }],
+    ["opción 3", { intento: 1, estado: "contestada", opcion: "3" }],
+    ["opción en una llamada no contestada", { intento: 1, estado: "no_contesto", opcion: "1" }],
     ["cuerpo nulo", null],
   ] as [string, unknown][]) {
     chk(`se rechaza: ${nombre}`, !leerResultado(b).ok);
   }
-  const d = ok({ estado: "fallida", detalle: "sin\nseñal\t" + "x".repeat(400) });
-  chk("el detalle va en una línea y recortado", !!d?.detalle && !/[\r\n\t]/.test(d.detalle) && Array.from(d.detalle).length <= 200);
+  const d = ok({ intento: 1, estado: "fallida", detalle: "sin\nseñal\t\u0000" + "x".repeat(400) });
+  chk("el detalle va en una línea, sin caracteres de control y recortado",
+    !!d?.detalle && !/[\u0000-\u001f]/.test(d.detalle) && Array.from(d.detalle).length <= 200);
 }
 
 // ── 5. Qué queda después de cada intento ──────────────────────────────────────

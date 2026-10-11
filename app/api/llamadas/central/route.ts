@@ -50,8 +50,12 @@ type Fila = {
 export async function POST(req: NextRequest) {
   if (!centralAutorizada(req)) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
-  let body: Record<string, unknown>;
-  try { body = await req.json(); } catch { return NextResponse.json({ error: "Cuerpo inválido" }, { status: 400 }); }
+  let crudo: unknown;
+  try { crudo = await req.json(); } catch { return NextResponse.json({ error: "Cuerpo inválido" }, { status: 400 }); }
+  if (!crudo || typeof crudo !== "object" || Array.isArray(crudo)) {
+    return NextResponse.json({ error: "Cuerpo inválido" }, { status: 400 });
+  }
+  const body = crudo as Record<string, unknown>;
   const accion = String(body.accion ?? "");
   const equipo = texto(body.equipo, 60);
   const ahoraMs = Date.now();
@@ -70,12 +74,20 @@ export async function POST(req: NextRequest) {
 
       // ── tomar ──
       await limpiarCola(ahoraMs);
-      const { data: cands, error: eSel } = await admin.from("llamadas_conductor")
-        .select("id, reserva_id, telefono, mensaje, menu, datos, intentos, max_intentos, estado, vence_en")
-        .eq("estado", "pendiente").lte("proximo_intento_en", ahora).gt("vence_en", ahora)
-        .order("proximo_intento_en", { ascending: true }).order("id", { ascending: true }).limit(5);
-      if (eSel) throw new Error(eSel.message);
-      for (const c of (cands ?? []) as Fila[]) {
+      // Primero las REALES y después las de prueba: con una central de una sola línea, una cola
+      // de pruebas no puede dejar atrás la llamada a un conductor (su ventana es corta).
+      const candidatas = async (dePrueba: boolean) => {
+        let q = admin.from("llamadas_conductor")
+          .select("id, reserva_id, telefono, mensaje, menu, datos, intentos, max_intentos, estado, vence_en")
+          .eq("estado", "pendiente").lte("proximo_intento_en", ahora).gt("vence_en", ahora);
+        q = dePrueba ? q.eq("motivo", "prueba") : q.neq("motivo", "prueba");
+        const { data, error } = await q.order("proximo_intento_en", { ascending: true }).order("id", { ascending: true }).limit(5);
+        if (error) throw new Error(error.message);
+        return (data ?? []) as Fila[];
+      };
+      const reales = await candidatas(false);
+      const cands = reales.length > 0 ? reales : await candidatas(true);
+      for (const c of cands) {
         // ANTES DE MARCAR SE VUELVE A MIRAR: si el servicio ya se inició, no se llama.
         if (c.reserva_id != null) {
           const { data: r } = await admin.from("reservas").select("estado").eq("id", c.reserva_id).maybeSingle();
@@ -92,11 +104,12 @@ export async function POST(req: NextRequest) {
           .eq("id", c.id).eq("estado", "pendiente").eq("intentos", c.intentos)
           .select("id").maybeSingle();
         if (!tomada) continue;
+        // Solo lo que la central necesita para llamar: ni el nombre completo ni la ruta.
         return NextResponse.json({
           ok: true,
           llamada: {
             id: c.id, telefono: c.telefono, mensaje: c.mensaje, menu: c.menu,
-            intento: c.intentos + 1, max_intentos: c.max_intentos, datos: c.datos ?? {},
+            intento: c.intentos + 1, max_intentos: c.max_intentos,
           },
         });
       }
@@ -115,6 +128,10 @@ export async function POST(req: NextRequest) {
       const fila = f as Fila | null;
       if (!fila) return NextResponse.json({ error: "Esa llamada no existe" }, { status: 404 });
       if (fila.estado !== "marcando") return NextResponse.json({ ok: false, error: "Esa llamada no está en curso" }, { status: 409 });
+      // Un resultado ATRASADO (el del intento 1 que llegó cuando ya se marca el 2) no cierra nada.
+      if (fila.intentos !== v.resultado.intento) {
+        return NextResponse.json({ ok: false, error: "Ese resultado es de otro intento" }, { status: 409 });
+      }
 
       let sigue = true;
       if (fila.reserva_id != null) {
@@ -130,7 +147,7 @@ export async function POST(req: NextRequest) {
         detalle: v.resultado.detalle,
         terminada_en: final ? ahora : null,
         ...(plan.proximoIntentoMs ? { proximo_intento_en: new Date(plan.proximoIntentoMs).toISOString() } : {}),
-      }).eq("id", id).eq("estado", "marcando").select("id").maybeSingle();
+      }).eq("id", id).eq("estado", "marcando").eq("intentos", v.resultado.intento).select("id").maybeSingle();
       if (!hecho) return NextResponse.json({ ok: false, error: "Esa llamada no está en curso" }, { status: 409 });
 
       // Marcó 2: quiere hablar con el coordinador. Se le avisa a quien la tarjeta diga.
@@ -153,7 +170,7 @@ async function avisarCoordinador(f: Fila): Promise<void> {
     if (!cfg) return;
     const d = (f.datos ?? {}) as { nombre?: string | null; hora?: string | null; origen?: string | null; destino?: string | null };
     const nombre = String(d.nombre ?? "").trim().split(/\s+/).slice(0, 2).join(" ") || "Conductor";
-    const ruta = [d.origen, d.destino].filter(Boolean).join(" → ") || "Servicio";
+    const ruta = Array.from([d.origen, d.destino].filter(Boolean).join(" → ") || "Servicio").slice(0, 120).join("");
     const tel = f.telefono.replace(/^\+51(\d{3})(\d{3})(\d{3})$/, "+51 $1 $2 $3");
     for (const c of directorioDe(cfg, destinatarios)) {
       await enviarAvisoWhatsApp(c.telefono, cfg.plantilla_directorio || "coordinador_alerta", [

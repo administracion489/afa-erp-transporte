@@ -34,6 +34,28 @@ const MAX_PRUEBAS_DIA = 15;
 const PAUSA_MS = 800;
 /** La llamada de prueba vence a los 10 min: si la central no la toma, no sale nunca. */
 const VENCE_LLAMADA_PRUEBA_MIN = 10;
+/** Llamadas de prueba por administrador y día. No medido: alcanza para probar la central. */
+const MAX_LLAMADAS_PRUEBA_DIA = 5;
+
+/**
+ * ¿Puede este usuario pedir una llamada de prueba ahora? Solo un ADMINISTRADOR (una llamada suena
+ * a cualquier hora en el teléfono de otra persona: no es un WhatsApp que se lee cuando se quiere),
+ * una a la vez y con tope diario. El freno se cuenta en `llamadas_conductor`, que solo escribe el
+ * servidor: un freno en una tabla que el usuario puede borrar no frena a nadie.
+ */
+async function motivoSinLlamadaDePrueba(userId: string, rol: string, hoyIso: string): Promise<string | null> {
+  if (rol !== "admin") return "Solo un administrador puede pedir una llamada de prueba.";
+  const base = () => adminAlertas.from("llamadas_conductor").select("id", { count: "exact", head: true })
+    .eq("motivo", "prueba").eq("creado_por", userId);
+  const [enCurso, delDia] = await Promise.all([
+    base().in("estado", ["pendiente", "marcando"]),
+    base().gte("created_at", `${hoyIso}T05:00:00.000Z`),   // 00:00 de Lima
+  ]);
+  if (enCurso.error || delDia.error) return null;   // sin tabla: lo dirá el encolado (falta el SQL)
+  if ((enCurso.count ?? 0) > 0) return "Ya hay una llamada de prueba en cola: espera a que termine.";
+  if ((delDia.count ?? 0) >= MAX_LLAMADAS_PRUEBA_DIA) return `Ya pediste ${MAX_LLAMADAS_PRUEBA_DIA} llamadas de prueba hoy.`;
+  return null;
+}
 
 const pausa = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -110,6 +132,8 @@ export async function POST(req: NextRequest) {
       if (m.canal === "llamada") {
         // La llamada de prueba va a la COLA de la central propia, como una real: la hace la
         // central cuando la toma. Un intento, y vence en 10 min si nadie la toma.
+        const no = await motivoSinLlamadaDePrueba(auth.userId, auth.rol, hoy);
+        if (no) { resultados.push({ id: m.id, ok: false, error: no }); continue; }
         const rc = await encolarLlamada({
           reservaId: null, fechaServicio: null, motivo: "prueba",
           conductor: { id: null, tabla: null, nombre: datos.nombre, telefono: tel.e164 },

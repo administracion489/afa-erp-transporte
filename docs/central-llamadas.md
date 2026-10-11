@@ -108,14 +108,14 @@ Respuesta sin nada que hacer: `{ "ok": true, "llamada": null }`. Con una llamada
     "mensaje": "Hola Sergio. Te llama la central de AFA. Tu servicio de las seis y treinta de la mañana, desde Puente Santa Anita, ya debió iniciar. Abre el app del conductor y pulsa INICIAR.",
     "menu": "Si ya estás en ruta, marca uno. Para hablar con el coordinador, marca dos.",
     "intento": 1,
-    "max_intentos": 2,
-    "datos": { "nombre": "Sergio Pérez", "hora": "06:30", "origen": "Puente Santa Anita", "destino": "…" }
+    "max_intentos": 2
   }
 }
 ```
 
 La llamada queda **tomada** por esa central (nadie más la toma). Preguntar también cuenta
-como latido: con eso la pantalla sabe que la central está conectada.
+como latido: con eso la pantalla sabe que la central está conectada. Primero salen las
+llamadas reales y después las de prueba.
 
 ### Marcar
 
@@ -129,9 +129,11 @@ como latido: con eso la pantalla sabe que la central está conectada.
 ### Contar lo que pasó (siempre, también si falló)
 
 ```json
-{ "accion": "resultado", "id": 123, "estado": "contestada", "duracion_seg": 14, "opcion": "1" }
+{ "accion": "resultado", "id": 123, "intento": 1, "estado": "contestada", "duracion_seg": 14, "opcion": "1" }
 ```
 
+- `intento`: el que dio `tomar`. **Obligatorio**: un resultado atrasado del intento 1 que
+  llega cuando ya se está marcando el 2 se rechaza (409) en vez de cerrar la llamada.
 - `estado`: `contestada` · `no_contesto` · `ocupado` · `fallida` (no se pudo marcar: sin
   señal, sin saldo…; explicar en `detalle`, hasta 200 caracteres).
 - `opcion`: `"1"` o `"2"`, solo en una `contestada`, y solo si la central lee teclas.
@@ -144,10 +146,20 @@ como latido: con eso la pantalla sabe que la central está conectada.
 { "accion": "latido", "equipo": "central-oficina", "version": "1.0.0", "detalle": "señal 4/5" }
 ```
 
+### Seguridad del programa de la central
+
+- **`mensaje` y `menu` son texto, nunca código.** El ERP ya deja solo letras, números y la
+  puntuación de una dirección, y los acorta, pero la central igual debe pasarlos a la voz
+  como texto: **nunca** interpolarlos en un comando de shell, en el dialplan de Asterisk ni
+  en un AGI.
+- El secreto vive solo en la central y en Vercel. Si se filtra, se cambia en los dos sitios.
+  Mejor aún: que la central salga a internet desde una IP fija y limitar a ella la puerta.
+
 ---
 
 ## 5. Probar
 
 En Configuración → Alertas y Mensajes, la tarjeta «Llamada: aún no inicia» muestra si la
-central está conectada. Con la central instalada, una llamada de prueba se pide igual que
-los WhatsApp de prueba (🧪 Probar los avisos).
+central está conectada. Con la central instalada, un **administrador** pide una llamada de
+prueba igual que los WhatsApp de prueba (🧪 Probar los avisos): una a la vez y hasta 5 al
+día.

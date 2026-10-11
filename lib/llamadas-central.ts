@@ -167,20 +167,49 @@ export type TextoLlamada = {
   menu: string;
 };
 
+/** Topes de lo que se lee en voz alta (caracteres). */
+export const MAX_NOMBRE_VOZ = 20;
+export const MAX_ORIGEN_VOZ = 60;
+export const MAX_EMPRESA_VOZ = 40;
+export const MAX_MENSAJE_VOZ = 320;
+
+/**
+ * Lo que va a la voz, LIMPIO Y CORTO. El nombre y el punto de salida los teclea cualquiera en el
+ * ERP, y la llamada los lee en voz alta a un número: sin tope, un «origen» de dos mil caracteres
+ * ocupaba la única línea de la central leyendo lo que alguien escribió (revisión de seguridad,
+ * 11-10-2026). Solo letras, números, espacios y la puntuación de una dirección (. , - / # °); lo
+ * demás se quita — también es lo que hace seguro pasarle el texto a la central, que no debe
+ * recibir comillas, `;`, `$`, `|`, paréntesis ni comillas invertidas. Se corta en palabra.
+ */
+export function textoParaVoz(v: unknown, max: number): string {
+  const limpio = String(v ?? "")
+    .normalize("NFC")
+    .replace(/[^\p{L}\p{N} .,\-/#°]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const letras = Array.from(limpio);
+  if (letras.length <= max) return limpio;
+  const corte = letras.slice(0, max).join("");
+  const espacio = corte.lastIndexOf(" ");
+  return (espacio > max / 2 ? corte.slice(0, espacio) : corte).replace(/[ .,\-/#]+$/u, "").trim();
+}
+
 /**
  * El texto de la llamada. De tú, como los WhatsApp al conductor. El nombre de la empresa sale del
- * perfil (este ERP se vende); sin él, «la central de operaciones».
+ * perfil (este ERP se vende); sin él, «la central de operaciones». Todo lo que viene de fuera pasa
+ * por `textoParaVoz`, y el mensaje entero tiene tope.
  */
 export function textoLlamada(d: { nombre?: string | null; hora?: string | null; origen?: string | null; empresa?: string | null }): TextoLlamada {
-  const nombre = String(d.nombre ?? "").trim().split(/\s+/)[0] || "";
-  const quien = String(d.empresa ?? "").trim() ? `la central de ${String(d.empresa).trim()}` : "la central de operaciones";
+  const nombre = textoParaVoz(String(d.nombre ?? "").trim().split(/\s+/)[0] ?? "", MAX_NOMBRE_VOZ);
+  const empresa = textoParaVoz(d.empresa, MAX_EMPRESA_VOZ);
+  const quien = empresa ? `la central de ${empresa}` : "la central de operaciones";
   const hora = horaHablada(d.hora);
-  const origen = String(d.origen ?? "").trim();
+  const origen = textoParaVoz(d.origen, MAX_ORIGEN_VOZ);
   const servicio = `Tu servicio${hora ? ` de ${hora}` : ""}${origen ? `, desde ${origen},` : ""} ya debió iniciar.`;
   const mensaje = `Hola${nombre ? ` ${nombre}` : ""}. Te llama ${quien}. ${servicio} Abre el app del conductor y pulsa INICIAR.`
     .replace(/\s+/g, " ").trim();
   return {
-    mensaje,
+    mensaje: Array.from(mensaje).slice(0, MAX_MENSAJE_VOZ).join(""),
     menu: "Si ya estás en ruta, marca uno. Para hablar con el coordinador, marca dos.",
   };
 }
@@ -188,6 +217,8 @@ export function textoLlamada(d: { nombre?: string | null; hora?: string | null; 
 // ─── LO QUE INFORMA LA CENTRAL ────────────────────────────────────────────────
 
 export type ResultadoLeido = {
+  /** De qué intento es: un resultado atrasado del intento 1 no puede cerrar el intento 2. */
+  intento: number;
   estado: ResultadoCentral;
   duracion_seg: number | null;
   opcion: Opcion | null;
@@ -199,7 +230,9 @@ export type ResultadoLeido = {
  * es peor que ninguno, porque el coordinador lo lee como un hecho.
  */
 export function leerResultado(b: unknown): { ok: true; resultado: ResultadoLeido } | { ok: false; error: string } {
-  const o = (b ?? {}) as Record<string, unknown>;
+  const o = (b && typeof b === "object" ? b : {}) as Record<string, unknown>;
+  const intento = Number(o.intento);
+  if (!Number.isInteger(intento) || intento < 1 || intento > 10) return { ok: false, error: "intento inválido (el que dio «tomar»)" };
   const estado = String(o.estado ?? "") as ResultadoCentral;
   if (!RESULTADOS_CENTRAL.includes(estado)) return { ok: false, error: `estado inválido (usa: ${RESULTADOS_CENTRAL.join(", ")})` };
   let duracion: number | null = null;
@@ -215,8 +248,10 @@ export function leerResultado(b: unknown): { ok: true; resultado: ResultadoLeido
     if (estado !== "contestada") return { ok: false, error: "una opción solo se marca en una llamada contestada" };
     opcion = s;
   }
-  const detalle = o.detalle == null ? null : Array.from(String(o.detalle).replace(/[\r\n\t]+/g, " ").trim()).slice(0, 200).join("") || null;
-  return { ok: true, resultado: { estado, duracion_seg: duracion, opcion, detalle } };
+  // Sin caracteres de control (un NUL hace que Postgres rechace la fila y el resultado se pierda).
+  const detalle = o.detalle == null ? null
+    : Array.from(String(o.detalle).replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim()).slice(0, 200).join("") || null;
+  return { ok: true, resultado: { intento, estado, duracion_seg: duracion, opcion, detalle } };
 }
 
 /**

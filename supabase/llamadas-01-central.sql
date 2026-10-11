@@ -62,7 +62,13 @@ alter table public.llamadas_conductor enable row level security;
 drop policy if exists llamadas_conductor_lectura on public.llamadas_conductor;
 create policy llamadas_conductor_lectura on public.llamadas_conductor
   for select to authenticated using (true);
-revoke all on public.llamadas_conductor from anon;
+-- Y solo las COLUMNAS que la ficha enseña: el teléfono, el texto y quién la pidió no. Una llamada
+-- de prueba va a un número del directorio, que solo ve quien tiene el módulo de configuración
+-- (revisión de seguridad, 11-10-2026). Las vistas del servidor usan service-role y no cambian.
+revoke all on public.llamadas_conductor from anon, authenticated;
+grant select (id, reserva_id, estado, intentos, created_at, tomada_en, terminada_en,
+              proximo_intento_en, duracion_seg, opcion, detalle, motivo)
+  on public.llamadas_conductor to authenticated;
 
 -- ── 2) El último contacto de la central ───────────────────────────────────────
 -- Fila única. Con ella la pantalla dice «central conectada / no se conecta desde hace X».
@@ -78,7 +84,8 @@ alter table public.central_llamadas_estado enable row level security;
 drop policy if exists central_llamadas_estado_lectura on public.central_llamadas_estado;
 create policy central_llamadas_estado_lectura on public.central_llamadas_estado
   for select to authenticated using (true);
-revoke all on public.central_llamadas_estado from anon;
+revoke all on public.central_llamadas_estado from anon, authenticated;
+grant select on public.central_llamadas_estado to authenticated;
 
 -- ── 3) El peldaño de la escalera ──────────────────────────────────────────────
 -- `umbral` = minutos después de la hora (3: dos minutos después del «ya debió iniciar»).
