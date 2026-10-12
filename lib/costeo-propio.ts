@@ -191,6 +191,36 @@ function combustiblePorKm(p0: ParametrosUnidad, precios: PreciosCombustible, fac
 }
 
 /**
+ * El VOLUMEN de combustible por kilómetro (galones, o m³ en GNV: la unidad del rendimiento), por
+ * tipo. Es `combustiblePorKm` sin los precios: las MISMAS ramas exactas —el primer combustible con
+ * `rendimiento_1 > 0 ? pct_uso_1 / rendimiento_1 : 0`, el segundo solo si `tipo_combustible_2 &&
+ * rendimiento_2 && pct_uso_2`— y el mismo `factor` de carretera aplicado al rendimiento.
+ *
+ * NO lleva la urea: es un aditivo, se compra por litro y no mueve el bus (no es combustible del
+ * recorrido ni emite CO₂ como tal). Su costo sigue saliendo solo de `calcularCostoUnidad`.
+ *
+ * Existe para la estadística por servicio (cuánto combustible gastó un recorrido medido por GPS) y
+ * NO cambia nada de este motor: scripts/prueba-costeo.mts comprueba que
+ * Σ(cantidadPorKm × precio[tipo]) + urea = costoCombustible / km sobre toda la rejilla. Dos tipos
+ * se devuelven por separado aunque sean de la misma familia: sumarlos es de quien llama, y nunca
+ * entre familias (galones con m³).
+ */
+export function consumoPorKm(p0: ParametrosUnidad, factor = 1): { tipo: string; cantidadPorKm: number }[] {
+  const p = factor === 1 ? p0 : {
+    ...p0,
+    rendimiento_1: p0.rendimiento_1 * factor,
+    rendimiento_2: p0.rendimiento_2 != null ? p0.rendimiento_2 * factor : p0.rendimiento_2,
+  };
+  const out: { tipo: string; cantidadPorKm: number }[] = [
+    { tipo: p.tipo_combustible_1, cantidadPorKm: p.rendimiento_1 > 0 ? p.pct_uso_1 / p.rendimiento_1 : 0 },
+  ];
+  if (p.tipo_combustible_2 && p.rendimiento_2 && p.pct_uso_2) {
+    out.push({ tipo: p.tipo_combustible_2, cantidadPorKm: p.pct_uso_2 / p.rendimiento_2 });
+  }
+  return out;
+}
+
+/**
  * El costo de un servicio con unidad propia. Devuelve `null` cuando no hay km: sin
  * recorrido no hay nada que costear, y un cero se leería como "gratis".
  */

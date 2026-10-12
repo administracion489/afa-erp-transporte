@@ -21,13 +21,18 @@
 //
 //   · El color NO es "sube malo, baja bueno" en todas las fichas. Más km es NEUTRO (es
 //     trabajo). Menos rendimiento es rojo. Más costo/km es rojo. Cada ficha declara su
-//     sentido; deducirlo del signo pintaría de rojo un mes en que se trabajó más.
+//     sentido; deducirlo del signo pintaría de rojo un mes en que se trabajó más. El tono
+//     lo decide `tonoVariacion` (lib/rendimiento.ts) dentro de components/analitica/FichaComparada.
 //   · Sin filtro de vehículo el total ESCONDE la anomalía: con diez unidades, una que
 //     empeoró 25 % mueve el agregado un 2.5 % y nadie la ve. Por eso debajo va la lista
 //     por unidad, que es "dónde mirar".
 
 import React from "react";
 import type { Comparacion } from "@/lib/rendimiento";
+// `Delta` y `Ficha` vivían aquí, privados; se sacaron a components/analitica para que Uso de
+// flota y Seguridad vial pinten la variación con la MISMA regla de color (el sentido lo declara
+// cada ficha y el tono lo decide `tonoVariacion` del motor).
+import { Delta, Ficha } from "@/components/analitica/FichaComparada";
 
 const fmtSoles = (n: number) =>
   `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -35,42 +40,6 @@ const fmtNum = (n: number, dec = 1) =>
   n.toLocaleString("es-PE", { minimumFractionDigits: dec, maximumFractionDigits: dec });
 const fmtFecha = (f: string) =>
   new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "short" });
-
-/** Qué significa que el número suba. `neutro` = no es ni bueno ni malo (más trabajo). */
-type Sentido = "subir_malo" | "bajar_malo" | "neutro";
-
-function colorDelta(v: number | null, sentido: Sentido): string {
-  if (v === null || Math.abs(v) < 0.05) return "#64748b";
-  if (sentido === "neutro") return "#334155";
-  const malo = sentido === "subir_malo" ? v > 0 : v < 0;
-  return malo ? "#b91c1c" : "#166534";
-}
-
-function Delta({ v, sentido }: { v: number | null; sentido: Sentido }) {
-  if (v === null) return <span className="text-gray-300 text-[11px]">sin comparación</span>;
-  const cero = Math.abs(v) < 0.05;
-  return (
-    <span className="text-[11px] font-bold tabular-nums" style={{ color: colorDelta(v, sentido) }}>
-      {cero ? "=" : v > 0 ? "↑" : "↓"} {cero ? "igual" : `${fmtNum(Math.abs(v), 1)} %`}
-    </span>
-  );
-}
-
-function Ficha({ label, valor, previo, delta, sentido, nota }: {
-  label: string; valor: string; previo: string; delta: number | null; sentido: Sentido; nota?: string;
-}) {
-  return (
-    <div className="rounded-xl border p-3 bg-white">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">{label}</p>
-      <p className="text-xl font-black mt-0.5 leading-tight text-[#0b315f] tabular-nums">{valor}</p>
-      <div className="flex items-baseline gap-1.5 mt-1 flex-wrap">
-        <Delta v={delta} sentido={sentido} />
-        <span className="text-[10px] text-gray-400">antes {previo}</span>
-      </div>
-      {nota && <p className="text-[10px] text-gray-400 mt-0.5 leading-snug">{nota}</p>}
-    </div>
-  );
-}
 
 export default function ComparacionPeriodo({ c, porUnidad, onVerUnidad }: {
   c: Comparacion;

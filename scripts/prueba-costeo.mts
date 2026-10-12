@@ -10,9 +10,11 @@
 // antes del cambio. No se toca ni se "mejora": está aquí para discrepar.
 
 import { aplicarPisoHora, escenariosPrecio as escP,
-  calcularCostoUnidad, escenariosPrecio,
+  calcularCostoUnidad, escenariosPrecio, consumoPorKm, RECORRIDO_CARRETERA,
   type ParametrosUnidad, type PreciosCombustible,
 } from "../lib/costeo-propio";
+import { preciosParaCosteo, calcularPresupuesto, type ContextoCosteo } from "../lib/costeo-servicio";
+import { decidirRendimiento, type MedicionPlaca } from "../lib/costos/rendimiento-aplica";
 
 // ── REFERENCIA: la función original, copiada tal cual ─────────────────────────
 const IGV = 0.18, OVERHEAD = 0.10, RESERVA = 0.05;
@@ -182,6 +184,131 @@ console.log("\n── Piso por hora ──");
   ok(alto.sinIgv.est === escP(5000, 50).sinIgv.est && !alto.pisoAplica.est, "el piso nunca baja un precio");
   ok(JSON.stringify(aplicarPisoHora(e, 50, 0, 180).sinIgv) === JSON.stringify(e.sinIgv), "sin horas no hay piso");
   ok(JSON.stringify(aplicarPisoHora(e, 50, 8, null).sinIgv) === JSON.stringify(e.sinIgv), "sin tarifa no hay piso");
+}
+
+// ── consumoPorKm (aditivo): el VOLUMEN que, a los precios del motor, cuesta lo que costea ──
+// La estadística por servicio necesita galones (o m³) por km, no soles. `consumoPorKm` repite las
+// ramas de `combustiblePorKm` sin los precios; si alguna rama divergiera, multiplicar el volumen por
+// el precio dejaría de dar el renglón de combustible. Se barre una rejilla de parámetros (bimodales,
+// rendimientos en cero, segundo combustible a medias, con y sin urea), de precios (con y sin el del
+// tipo, con y sin urea) y de recorrido, y se exige
+//     Σ(cantidadPorKm × precio[tipo]) + costoUrea / km  =  costoCombustible / km   (± 1e-9)
+console.log("\n── consumoPorKm: volumen × precio + urea = costoCombustible / km ──");
+{
+  const variantes: ParametrosUnidad[] = [];
+  for (const base of [BUS, VAN]) {
+    for (const r1 of [base.rendimiento_1, 0, 3.7]) {
+      for (const dos of [
+        { tipo_combustible_2: null, rendimiento_2: null, pct_uso_2: null },
+        { tipo_combustible_2: "Gasolina", rendimiento_2: 30, pct_uso_2: 0.3 },
+        { tipo_combustible_2: "Gasolina", rendimiento_2: 0, pct_uso_2: 0.3 },
+        { tipo_combustible_2: "Gasolina", rendimiento_2: 25, pct_uso_2: 0 },
+        { tipo_combustible_2: "", rendimiento_2: 25, pct_uso_2: 0.4 },
+        { tipo_combustible_2: "GLP", rendimiento_2: null, pct_uso_2: 0.2 },
+      ]) {
+        for (const urea of [
+          { usa_urea: true, consumo_urea_pct: 0.04, tipo_combustible_1: "Diésel" },
+          { usa_urea: true, consumo_urea_pct: null, tipo_combustible_1: "Diésel" },
+          { usa_urea: true, consumo_urea_pct: 0.04, tipo_combustible_1: base.tipo_combustible_1 },
+          { usa_urea: false, consumo_urea_pct: null, tipo_combustible_1: base.tipo_combustible_1 },
+        ]) {
+          for (const pct1 of [base.pct_uso_1, 1, 0.55]) {
+            variantes.push({ ...base, rendimiento_1: r1, pct_uso_1: pct1, ...dos, ...urea } as ParametrosUnidad);
+          }
+        }
+      }
+    }
+  }
+  const preciosVar: PreciosCombustible[] = [
+    PRECIOS,
+    { "Diésel": 16.4, "Gasolina": 18.2, "GLP": 7.65 },     // sin urea
+    { "Gasolina": 18.2, "UREA": 12.0 },                     // sin el diésel ni el GLP: precio 0
+    {},
+  ];
+  let casos = 0, iguales = 0, sinUrea = true, peor = 0;
+  for (const p of variantes) for (const pr of preciosVar) for (const recorrido of ["urbano", "carretera"] as const) for (const km of [37, 624]) {
+    const c = calcularCostoUnidad(p, pr, { km, dias: 1, peajes: 0, otros: 0, pernocte: 0, viaticos: 0, recorrido });
+    if (!c) continue;
+    const factor = recorrido === "carretera" ? RECORRIDO_CARRETERA.factorRendimiento : 1;
+    const vol = consumoPorKm(p, factor);
+    if (vol.some((v) => v.tipo === "UREA" && p.tipo_combustible_1 !== "UREA" && p.tipo_combustible_2 !== "UREA")) sinUrea = false;
+    const soles = vol.reduce((s, v) => s + v.cantidadPorKm * (pr[v.tipo] || 0), 0) + c.costoUrea / km;
+    const dif = Math.abs(soles - c.costoCombustible / km);
+    peor = Math.max(peor, dif);
+    casos++;
+    if (dif < 1e-9) iguales++;
+  }
+  ok(iguales === casos && casos > 1000, `Σ vol × precio + urea = costoCombustible/km en toda la rejilla`, `${iguales}/${casos} · peor ${peor.toExponential(2)}`);
+  ok(sinUrea, "consumoPorKm no devuelve la urea (es un aditivo: su costo sale solo del motor)");
+
+  const bus = consumoPorKm(BUS);
+  ok(bus.length === 1 && bus[0].tipo === "Diésel" && Math.abs(bus[0].cantidadPorKm - 1 / 8) < 1e-12, "bus diésel a 8 km/gal: 0.125 gal/km, un solo tipo", JSON.stringify(bus));
+  const van = consumoPorKm(VAN);
+  ok(van.length === 2 && Math.abs(van[0].cantidadPorKm - 0.7 / 22) < 1e-12 && Math.abs(van[1].cantidadPorKm - 0.3 / 30) < 1e-12,
+     "bimodal GLP/gasolina: dos tipos por separado, cada uno con su parte", JSON.stringify(van));
+  const car = consumoPorKm(BUS, RECORRIDO_CARRETERA.factorRendimiento);
+  ok(Math.abs(car[0].cantidadPorKm - bus[0].cantidadPorKm / RECORRIDO_CARRETERA.factorRendimiento) < 1e-12, "en carretera el volumen baja por el mismo factor del rendimiento");
+  const cero = consumoPorKm({ ...BUS, rendimiento_1: 0 });
+  ok(cero[0].cantidadPorKm === 0 && Number.isFinite(cero[0].cantidadPorKm), "rendimiento en 0 = no consume (no Infinity), igual que el motor");
+  ok(JSON.stringify(consumoPorKm(BUS)) === JSON.stringify(consumoPorKm(BUS, 1)), "factor 1 por defecto");
+  // El motor congelado no se movió: el renglón de combustible del bus sigue saliendo igual.
+  const ref = calcularCostoUnidad(BUS, PRECIOS, { km: 100, dias: 1, peajes: 0, otros: 0, pernocte: 0, viaticos: 0 })!;
+  ok(Math.abs(ref.costoCombustible - (100 / 8) * 16.4 - ref.costoUrea) < 1e-9, "calcularCostoUnidad no cambió al agregar consumoPorKm");
+}
+
+// ── preciosParaCosteo (extraído de calcularPresupuesto): ningún número cambia ──────
+// La regla «el precio de la última carga manda sobre el de referencia» vivía como dos líneas dentro
+// de `calcularPresupuesto`. Se extrajo para que la estadística por servicio costee con los MISMOS
+// precios. Abajo, esas dos líneas copiadas literal, y el ciclo: el renglón de combustible del
+// presupuesto sale de `calcularCostoUnidad` con los precios viejos.
+console.log("\n── preciosParaCosteo = la regla de calcularPresupuesto, copiada literal ──");
+{
+  // REFERENCIA, tal cual estaba en calcularPresupuesto (lib/costeo-servicio.ts):
+  //   const precios: PreciosCombustible = { ...ctx.precios };
+  //   if (params && ctx.precioUltimaCarga) precios[params.tipo_combustible_1] = ctx.precioUltimaCarga.precio;
+  const preciosViejos = (ctxPrecios: PreciosCombustible, params: ParametrosUnidad | null, ultima: { precio: number; fecha: string } | null) => {
+    const precios: PreciosCombustible = { ...ctxPrecios };
+    if (params && ultima) precios[params.tipo_combustible_1] = ultima.precio;
+    return precios;
+  };
+  const medidas: (MedicionPlaca | null)[] = [
+    null,
+    { kmGal: 9.4, tramos: 7, familia: "diesel", label: "km/gal", confiable: true },
+    { kmGal: 9.4, tramos: 2, familia: "diesel", label: "km/gal", confiable: false },
+    { kmGal: 31, tramos: 9, familia: "glp", label: "km/gal", confiable: true },
+  ];
+  const ultimas = [null, { precio: 22.5, fecha: "2026-10-01" }, { precio: 5.5, fecha: "2026-10-02" }];
+  const preciosVar: PreciosCombustible[] = [PRECIOS, {}, { "Gasolina": 18.2 }];
+  let casos = 0, iguales = 0, ciclo = 0, cicloOk = 0, inmutable = true;
+  for (const params of [null, BUS, VAN]) for (const ultima of ultimas) for (const pr of preciosVar) {
+    const copia = JSON.stringify(pr);
+    const viejo = preciosViejos(pr, params, ultima);
+    const nuevo = preciosParaCosteo(pr, params, ultima);
+    if (JSON.stringify(pr) !== copia) inmutable = false;
+    casos++;
+    if (JSON.stringify(viejo) === JSON.stringify(nuevo)) iguales++;
+    if (!params) continue;
+    for (const med of medidas) for (const km of [0, 48, 612]) {
+      const ctx: ContextoCosteo = {
+        parametros: params, precios: pr, rendimientoMedido: med, precioUltimaCarga: ultima,
+        deprecKm: null, conductor: null, diasConServicio: 0, serviciosDelDia: 1, diasLaborablesMes: 26,
+        kmSugerido: null, placa: "ABC-123",
+      };
+      const pres = calcularPresupuesto(ctx, { km, kmFuente: "gps", dias: 1, peajes: 0, viaticos: 0, estacionamiento: 0, pernocte: 0, otros: 0 });
+      const linea = pres.lineas.find((l) => l.concepto === "combustible");
+      const dec = decidirRendimiento(params, med);
+      const c = calcularCostoUnidad({ ...params, rendimiento_1: dec.valor }, preciosViejos(pr, params, ultima),
+        { km, dias: 1, peajes: 0, otros: 0, pernocte: 0, viaticos: 0 });
+      ciclo++;
+      const esperado = c ? Math.round(c.costoCombustible * 100) / 100 : null;
+      if ((linea?.monto ?? null) === esperado) cicloOk++;
+    }
+  }
+  ok(iguales === casos, "mismos precios que la regla vieja en toda la rejilla", `${iguales}/${casos}`);
+  ok(inmutable, "no muta los precios de referencia que recibe");
+  ok(cicloOk === ciclo && ciclo > 50, "el renglón de combustible del presupuesto = calcularCostoUnidad con los precios de siempre", `${cicloOk}/${ciclo}`);
+  ok(preciosParaCosteo(PRECIOS, BUS, { precio: 22.5 })["Diésel"] === 22.5, "con última carga, manda el precio pagado (corolario: la regla sí hace algo)");
+  ok(preciosParaCosteo(PRECIOS, null, { precio: 22.5 })["Diésel"] === 16.4, "sin parámetros no se toca nada");
 }
 
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);

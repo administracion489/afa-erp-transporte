@@ -94,3 +94,38 @@ export function tablaFaltante(error: ErrorSupabase, tabla?: string): boolean {
   const buscada = tabla.split(".").pop()!.toLowerCase();
   return t === buscada;
 }
+
+// ── ¿FALTA UNA FUNCIÓN (RPC)? ───────────────────────────────────────────────────────────
+// Una función de una migración que el deploy no corre (p. ej. supabase/gps-analitica-01-excesos.sql)
+// tiene que poder faltar sin que el endpoint caiga a un recorrido pesado ni a un 500: quien la llama
+// responde «falta correr tal SQL». Las dos formas, igual que con las columnas y las tablas:
+//   • PostgREST, antes de llegar a la base → PGRST202 · Could not find the function
+//     public.fn_x(p_a, p_b) in the schema cache   (o «…public.fn_x without parameters…»)
+//   • Postgres, desde otra función o una vista que la llama → 42883 · function fn_x(integer) does not exist
+// OJO con 42883: Postgres usa el MISMO código para un OPERADOR que no existe («operator does not
+// exist: text = integer»), que es un error de tipos en la consulta, no una migración sin correr. Ese
+// caso devuelve null. Tampoco responde a un error de columna ni de tabla: una función instalada cuya
+// tabla falta es «falta la tabla», no «falta la función».
+
+const RE_FUNCION_POSTGREST = /could not find the function ['"]?([\w.]+)/i;
+const RE_FUNCION_POSTGRES = /function ["']?([\w.]+)["']?\s*\([^)]*\)\s+does not exist/i;
+const RE_OPERADOR = /operator does not exist/i;
+
+/** El nombre (sin esquema) de la función que el error dice que no existe; `""` si es seguro que
+ *  falta una función pero el mensaje no dice cuál; null si el error es OTRA cosa (una columna, una
+ *  tabla, un operador, un permiso, la red). */
+export function funcionQueFalta(error: ErrorSupabase): string | null {
+  if (!error) return null;
+  const code = String(error.code ?? "");
+  if (code === "PGRST204" || code === "42703" || code === "PGRST205" || code === "42P01") return null;
+  if (columnaFaltante(error) != null || tablaQueFalta(error) != null) return null;
+  const msg = String(error.message ?? "");
+  if (RE_OPERADOR.test(msg)) return null;
+  const m = RE_FUNCION_POSTGREST.exec(msg) ?? RE_FUNCION_POSTGRES.exec(msg);
+  if (m) {
+    const partes = m[1].split(".");
+    return partes[partes.length - 1].toLowerCase();
+  }
+  if (code === "PGRST202" || code === "42883") return "";
+  return null;
+}

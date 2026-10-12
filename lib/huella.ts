@@ -110,7 +110,9 @@ export function filasAPuntos(filas: any[]): HuellaPt[] {
 // da ~3-8 m). Por encima es red/torre: la posición cruda puede estar a 50-700 m de la real. El
 // usuario pidió "±10", pero el GPS satelital sano jitterea hasta ~10-12 m; 20 m separa limpio el
 // satélite (≤8 m en los datos) del degradado (≥48 m) sin tocar el jitter normal.
-const ACC_CONFIABLE_M = 20;
+// Exportada para lib/flota/excesos.ts (la precisión con la que un episodio de velocidad se da por
+// corroborado): es el MISMO corte, no uno parecido.
+export const ACC_CONFIABLE_M = 20;
 // Precisión mediana reciente por encima de la cual la cola se considera DEGRADADA (la que zigzaguea):
 // activa el Map Matching rápido (12 s) y el umbral de movimiento consciente del jitter. Entre el
 // confiable (20) y el aviso de "GPS débil" al operador (60).
@@ -596,6 +598,26 @@ export function resumenViaje(limpia: HuellaPt[], crudos: HuellaPt[]): ResumenVia
     precisionMedianaM: Math.round(accs[Math.floor(accs.length / 2)]),
     puntosTotales: cru.length,
   };
+}
+
+/**
+ * El resumen del viaje a partir de las FILAS de `ubicaciones_gps` de un servicio, por la MISMA
+ * tubería que mide el km en la Auditoría de km (`kmDeServicio`, lib/km-servicio.ts): filas →
+ * `filasAPuntos` → `anclarImprecisos` → `limpiarHuella` → `resumenViaje`. Lo único que agrega es
+ * `conVelocidadColor` sobre la huella limpia, que es lo que hace el modal GPS: solo toca la
+ * VELOCIDAD de cada punto (la deriva cuando el equipo no da Doppler), así que el km, el % medido y
+ * las horas de salida y llegada son idénticos a los de `kmDeServicio` —scripts/prueba-km-gps.mts
+ * lo compara contra esa tubería copiada literal— y la «Vel. máx (p95)» es la del modal.
+ *
+ * Existe para que la estadística por servicio lea la traza UNA vez (lib/gps-cobertura-datos.ts,
+ * `conHuella`) y saque de las mismas filas el rastreo y el km, en vez de volver a leerla con
+ * `kmDeServicio`. `lib/km-servicio.ts` no se toca: lo importa la app del conductor.
+ */
+export function resumenDeFilas(filas: any[]): ResumenViaje | null {
+  const crudos = filasAPuntos(filas);
+  if (crudos.length < 2) return null;   // lo mismo que el corte de kmDeServicio, antes de limpiar
+  const limpia = conVelocidadColor(limpiarHuella(anclarImprecisos(crudos)));
+  return resumenViaje(limpia, crudos);
 }
 
 // ── PUENTE AZUL DE HUECOS (Idea 1) ──────────────────────────────────────────
