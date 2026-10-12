@@ -1324,8 +1324,8 @@ export type TonoVariacion = "sin_dato" | "igual" | "neutro" | "malo" | "bueno";
 
 /**
  * El tono de una variación en puntos porcentuales (`variacionPct`) según el sentido de su métrica.
- * Es la lógica de `colorDelta` de app/combustible/ComparacionPeriodo.tsx, copiada LITERAL y sin los
- * colores (scripts/prueba-km-gps.mts la compara contra el original): menos de 0.05 puntos es
+ * Es la lógica de `colorDelta`, que vivía privada en app/combustible/ComparacionPeriodo.tsx, copiada
+ * LITERAL y sin los colores (scripts/prueba-km-gps.mts la compara contra el original): menos de 0.05 puntos es
  * `igual`, una métrica neutra nunca es buena ni mala, y sin variación (null) no se afirma nada.
  */
 export function tonoVariacion(v: number | null, s: SentidoVariacion): TonoVariacion {

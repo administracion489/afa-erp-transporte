@@ -11,7 +11,7 @@
 //   2. `kmPublicable`: el mapeo del veredicto RASTREO al km es TOTAL y ÚNICO; `km != null ⟺ medido|piso`;
 //      `piso ⟺ código piso ⟹ veredicto con_cortes`. Corolario: un servicio completo publica su km.
 //   3. `funcionQueFalta`: las dos formas del error dan el nombre; columna, tabla u operador dan null.
-//   4. `tonoVariacion` = `colorDelta` de app/combustible/ComparacionPeriodo.tsx, copiado literal.
+//   4. `tonoVariacion` = `colorDelta`, que vivía en app/combustible/ComparacionPeriodo.tsx, copiado literal.
 //   5. `leerTraza(…, { conHuella })`: pide velocidad, rumbo, timestamp y el conductor, guarda las filas
 //      crudas, y la medición NO cambia; sin la opción, el select y el resultado son los de siempre.
 //   6. `medirServicio` / `medirReservas` = el `rastreoDelDia` viejo copiado literal (veredicto idéntico,
@@ -271,7 +271,7 @@ console.log("\n3. `funcionQueFalta`: las dos formas del error, y nada más");
 // ══ 4. tonoVariacion = colorDelta ════════════════════════════════════════════════════════
 console.log("\n4. `tonoVariacion` = `colorDelta` de ComparacionPeriodo.tsx, copiado literal");
 {
-  // ── app/combustible/ComparacionPeriodo.tsx, copiado LITERAL ──
+  // ── app/combustible/ComparacionPeriodo.tsx (antes de mudar el tono al motor), copiado LITERAL ──
   type Sentido = "subir_malo" | "bajar_malo" | "neutro";
   function colorDelta(v: number | null, sentido: Sentido): string {
     if (v === null || Math.abs(v) < 0.05) return "#64748b";
@@ -413,7 +413,8 @@ console.log("\n6. `medirServicio` / `medirReservas` = el bucle de `rastreoDelDia
   const ESTADOS = ["finalizada", "en_curso", "programada", "confirmada", "pendiente"];
   const hhmm = (min: number) => `${String(Math.floor(min / 60) % 24).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
   const iso = (fecha: string, min: number) => new Date(Date.parse(`${fecha}T00:00:00-05:00`) + min * 60_000).toISOString();
-  let diasIguales = 0, dias = 0, reservasTotal = 0, codigos = new Set<string>(), sinOpcion = true, lecturasDeMas = 0, conTecho = 0;
+  let diasIguales = 0, dias = 0, reservasTotal = 0, sinOpcion = true, lecturasDeMas = 0, conTecho = 0;
+  const codigos = new Set<string>();
   for (let d = 0; d < 14; d++) {
     const n = d === 13 ? MAX_RESERVAS + 12 : 5 + Math.floor(rnd() * 40);
     if (n > MAX_RESERVAS) conTecho++;
