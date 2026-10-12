@@ -25,6 +25,12 @@ import {
 import { familiaCombustible } from "@/lib/combustible-tipos";
 import { serieRendimiento, TECHO_FAMILIA } from "@/lib/rendimiento";
 import { decidirRendimiento, type MedicionPlaca } from "@/lib/costos/rendimiento-aplica";
+import { familiaDeParametro } from "@/lib/costos/rendimiento-tipo";
+import {
+  ultimaCargaDeFamilia, textoPrecioUltimaCarga, motivoSinUltimaCarga, CARGAS_LEIDAS_ULTIMA,
+  type UltimaCarga, type ResultadoUltimaCarga, type CodigoUltimaCarga,
+} from "@/lib/costos/precio-ultima-carga";
+import { faltaAlguna } from "@/lib/columna-faltante";
 
 export type ReservaCosteable = {
   id: number;
@@ -72,8 +78,12 @@ export type ContextoCosteo = {
    *  su unidad y si tiene tramos suficientes para fiarse. Que exista NO significa que se
    *  use: eso lo decide `decidirRendimiento` (lib/costos/rendimiento-aplica.ts). */
   rendimientoMedido: MedicionPlaca | null;
-  /** Precio realmente pagado en la última carga de esa unidad. */
-  precioUltimaCarga: { precio: number; fecha: string } | null;
+  /** Precio realmente pagado en la última carga de esa unidad DEL COMBUSTIBLE DEL PARÁMETRO, ya en
+   *  su unidad canónica (lib/costos/precio-ultima-carga.ts decide cuál sirve). */
+  precioUltimaCarga: UltimaCarga | null;
+  /** Por qué no hay última carga que mande (el renglón lo dice). Opcional: los contextos armados a
+   *  mano, sin él, se leen como siempre. */
+  ultimaCargaCodigo?: CodigoUltimaCarga | null;
   /** Depreciación contable de esa placa, en soles por kilómetro. */
   deprecKm: { valor: number; fuente: "contable" } | null;
   conductor: { datos: DatosConductor; regimen: RegimenLaboral; nombre: string } | null;
@@ -200,20 +210,39 @@ export async function rendimientoMedido(
     : null;
 }
 
-/** Lo que de verdad se pagó por el galón en la última carga de esa unidad. */
+/**
+ * Lo que de verdad se pagó en la última carga de esa unidad DEL COMBUSTIBLE DEL PARÁMETRO, ya en la
+ * unidad canónica de su familia. Antes tomaba la última carga con precio de CUALQUIER combustible y
+ * unidad (una urea a S/ 5.50 el litro ponía el precio del diésel); la regla vive ahora en
+ * lib/costos/precio-ultima-carga.ts y aquí solo se leen las filas.
+ *
+ * `familia` es `familiaDeParametro(parametros.tipo_combustible_1)`: null = no se reconoce, y entonces
+ * no se lee nada (manda el precio de referencia). Un ERROR de lectura devuelve null —«no se sabe»—,
+ * nunca `sin_cargas`, que afirmaría que la placa no carga.
+ */
 export async function precioUltimaCarga(
-  sb: any, vehiculoId: number
-): Promise<{ precio: number; fecha: string } | null> {
+  sb: any, vehiculoId: number, familia: string | null,
+): Promise<ResultadoUltimaCarga | null> {
   if (!vehiculoId) return null;
-  const { data } = await sb
-    .from("combustible")
-    .select("fecha,precio_galon")
-    .eq("vehiculo_id", vehiculoId)
-    .gt("precio_galon", 0)
-    .order("fecha", { ascending: false })
-    .limit(1);
-  const f = ((data as any[]) ?? [])[0];
-  return f ? { precio: Number(f.precio_galon), fecha: String(f.fecha) } : null;
+  if (!familia) return ultimaCargaDeFamilia([], null);
+  let cols = ["id", "fecha", "tipo_combustible", "precio_galon", "unidad"];
+  for (let intento = 0; intento < 2; intento++) {
+    const { data, error } = await sb
+      .from("combustible")
+      .select(cols.join(","))
+      .eq("vehiculo_id", vehiculoId)
+      .gt("precio_galon", 0)
+      .order("fecha", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(CARGAS_LEIDAS_ULTIMA);
+    if (error) {
+      // `unidad` es de una migración accesoria: sin ella cada fila va en la canónica, como en todo el ERP.
+      if (faltaAlguna(error, ["unidad"] as const)) { cols = cols.filter((c) => c !== "unidad"); continue; }
+      return null;
+    }
+    return ultimaCargaDeFamilia((data as any[]) ?? [], familia);
+  }
+  return null;
 }
 
 /**
@@ -290,7 +319,9 @@ export async function cargarContextoCosteo(sb: any, r: ReservaCosteable): Promis
 
   const [rend, ultima, deprec, kmRuta] = await Promise.all([
     r.vehiculo_id ? rendimientoMedido(sb, r.vehiculo_id) : Promise.resolve(null),
-    r.vehiculo_id ? precioUltimaCarga(sb, r.vehiculo_id) : Promise.resolve(null),
+    r.vehiculo_id && parametros
+      ? precioUltimaCarga(sb, r.vehiculo_id, familiaDeParametro(parametros.tipo_combustible_1))
+      : Promise.resolve(null),
     r.vehiculo_id && parametros ? deprecContableKm(sb, r.vehiculo_id, Number(parametros.km_anio)) : Promise.resolve(null),
     kmDeRutaConocida(sb, r.ruta_nombre),
   ]);
@@ -343,7 +374,8 @@ export async function cargarContextoCosteo(sb: any, r: ReservaCosteable): Promis
     parametros,
     precios,
     rendimientoMedido: rend,
-    precioUltimaCarga: ultima,
+    precioUltimaCarga: ultima?.carga ?? null,
+    ultimaCargaCodigo: ultima?.codigo ?? null,
     deprecKm: deprec,
     conductor,
     diasConServicio,
@@ -363,10 +395,10 @@ export async function cargarContextoCosteo(sb: any, r: ReservaCosteable): Promis
  *
  * No muta `precios`: devuelve una copia. Sin parámetros o sin última carga, la copia es idéntica.
  *
- * OJO, hallazgo heredado y sin resolver aquí: `precioUltimaCarga` toma la última carga con precio de
- * CUALQUIER combustible y unidad de la placa. Si fue urea (S/ por litro) o una carga en litros, ese
- * precio se aplica al combustible principal. Se conserva tal cual porque el presupuesto ya lo hace;
- * cambiarlo movería los presupuestos guardados.
+ * `ultima.precio` tiene que venir YA en la unidad canónica de la familia del parámetro —la misma de
+ * `precios_combustible`—: lo garantiza `ultimaCargaDeFamilia` (lib/costos/precio-ultima-carga.ts),
+ * que descarta la urea, las cargas de otra familia y los precios imposibles, y pasa los litros a
+ * galones. Esta función no vuelve a juzgar nada: solo sustituye.
  */
 export function preciosParaCosteo(
   precios: PreciosCombustible,
@@ -445,9 +477,12 @@ export function calcularPresupuesto(ctx: ContextoCosteo, e: EntradaCosteo): Pres
     // km/m³ rotulado en galones. La unidad la pone ahora `decidirRendimiento` desde el
     // catálogo, y el texto dice además POR QUÉ no se usó lo medido cuando no se usó.
     const fuenteRend = decision!.base;
+    const sinUltima = ctx.precioUltimaCarga
+      ? null
+      : motivoSinUltimaCarga(ctx.ultimaCargaCodigo, familiaDeParametro(params!.tipo_combustible_1));
     const fuentePrecio = ctx.precioUltimaCarga
-      ? `S/ ${ctx.precioUltimaCarga.precio.toFixed(2)} de la última carga`
-      : `S/ ${(precios[params!.tipo_combustible_1] ?? 0).toFixed(2)} de referencia`;
+      ? textoPrecioUltimaCarga(ctx.precioUltimaCarga)
+      : `S/ ${(precios[params!.tipo_combustible_1] ?? 0).toFixed(2)} de referencia${sinUltima ? ` (${sinUltima})` : ""}`;
     agregar("combustible", costo.costoCombustible, `${km} km · ${fuenteRend} · ${fuentePrecio}`, false, 10);
     agregar("mantenimiento", costo.costoMantenimiento, `${km} km × S/ ${params!.mantenimiento_km}/km`, false, 70);
     agregar("neumaticos", costo.costoNeumaticos,

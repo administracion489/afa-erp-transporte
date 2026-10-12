@@ -23,9 +23,10 @@
 //   3 · Unidades tercerizadas con y sin `tipo_vehiculo_costeo` (sin él, su servicio no tiene
 //       combustible ni CO₂ estimado).
 //   4 · Unidades propias sin `tipo_vehiculo_costeo`.
-//   5 · EL HALLAZGO DE `precioUltimaCarga` (lib/costeo-servicio.ts): cuántas unidades tienen como
-//       última carga con precio una de OTRA familia que su parámetro, o en litros, o urea. El
-//       presupuesto de su servicio costea el combustible a ese precio.
+//   5 · EL PRECIO DE LA ÚLTIMA CARGA (lib/costos/precio-ultima-carga.ts): por placa, el precio con
+//       que el presupuesto costeaba el combustible ANTES (la última carga con precio, de cualquier
+//       combustible y unidad) y el de AHORA (la última de la familia del parámetro, en su unidad
+//       canónica y con un precio posible). Las que cambian son las que movió el arreglo.
 //   6 · El km de ELIA, viejo (`max − min` de las aceptadas) contra nuevo (jornadas saneadas), por placa,
 //       con lo que explica la diferencia: lecturas que no encajan o retroceden, jornadas con salto
 //       imposible y km entre jornadas (de noche, o en días sin lectura completa).
@@ -39,7 +40,7 @@ import {
 } from "../lib/flota/uso-flota";
 import { sanearLecturas, recorridosDiarios, sumarDias, type LecturaCruda } from "../lib/odometro-analitica";
 import { familiaDeParametro } from "../lib/costos/rendimiento-tipo";
-import { COMBUSTIBLES } from "../lib/combustible-tipos";
+import { ultimaCargaDeFamilia, textoPrecioUltimaCarga, CARGAS_LEIDAS_ULTIMA } from "../lib/costos/precio-ultima-carga";
 
 // ── Credenciales ──────────────────────────────────────────────────────────────
 function variable(k: string): string {
@@ -153,34 +154,42 @@ console.log(sinTipoP.length
   ? `   ${sinTipoP.length} propia(s) activa(s) sin tipo_vehiculo_costeo: ${sinTipoP.map((v: any) => v.placa).join(", ")}`
   : "   Todas las propias activas tienen tipo de costeo.");
 
-// ── 5 · El hallazgo de precioUltimaCarga ─────────────────────────────────────
-linea("5 · ÚLTIMA CARGA CON PRECIO DE OTRA FAMILIA O EN LITROS (precioUltimaCarga)");
-console.log("   `precioUltimaCarga` toma la última carga con precio de CUALQUIER combustible y unidad: si fue de otra");
-console.log("   familia, urea o en litros, el presupuesto del servicio costea el combustible a ese precio.\n");
-const famParam = new Map<string, string | null>(params.map((p: any) => [String(p.tipo_vehiculo), familiaDeParametro(p.tipo_combustible_1)]));
-const ultima = new Map<number, any>();
-for (const c of cargas) { const v = Number(c.vehiculo_id); if (!ultima.has(v)) ultima.set(v, c); }   // ya viene por fecha desc
-let afectadas = 0, revisadas = 0;
+// ── 5 · El precio de la última carga, antes y ahora ──────────────────────────
+linea("5 · PRECIO DE LA ÚLTIMA CARGA: ANTES (cualquier carga) Y AHORA (su familia, en su unidad)");
+console.log("   Antes: la última carga con precio de CUALQUIER combustible y unidad (una urea por litro ponía el precio");
+console.log("   del diésel). Ahora: la última del combustible del parámetro, pasada a su unidad canónica y dentro de la");
+console.log("   banda física de su tipo. Solo se listan las placas en que los dos difieren.\n");
+const paramDe = new Map<string, any>(params.map((p: any) => [String(p.tipo_vehiculo), p]));
+const cargasPorVeh = new Map<number, any[]>();
+for (const c of cargas) {   // ya viene por fecha desc, id desc
+  const v = Number(c.vehiculo_id);
+  const l = cargasPorVeh.get(v) ?? [];
+  if (l.length < CARGAS_LEIDAS_ULTIMA) l.push(c);
+  cargasPorVeh.set(v, l);
+}
+let cambian = 0, revisadas = 0;
 for (const v of propios) {
   if (v.estado === "inactivo") continue;
-  const c = ultima.get(Number(v.id));
-  if (!c) continue;
+  const p = paramDe.get(String(v.tipo_vehiculo_costeo ?? ""));
+  if (!p) continue;
+  const lista = cargasPorVeh.get(Number(v.id)) ?? [];
+  const vieja = lista[0] ?? null;
+  const nueva = ultimaCargaDeFamilia(lista, familiaDeParametro(p.tipo_combustible_1));
   revisadas++;
-  const famP = famParam.get(String(v.tipo_vehiculo_costeo ?? "")) ?? null;
-  const famC = familiaEstrictaDeCarga(c.tipo_combustible);
-  const canon = famC ? Object.values(COMBUSTIBLES).find((x) => x.familia === famC)?.unidad : null;
-  const unidad = String(c.unidad ?? "").trim().toLowerCase();
-  const motivos: string[] = [];
-  if (famC === "urea") motivos.push("es urea");
-  else if (famP && famC && famP !== famC) motivos.push(`es ${famC} y el parámetro costea ${famP}`);
-  else if (!famC) motivos.push(`tipo «${c.tipo_combustible ?? "—"}» desconocido`);
-  if (unidad && canon && unidad !== canon && !(canon === "m3")) motivos.push(`en ${unidad} (la familia va en ${canon})`);
-  if (motivos.length) {
-    afectadas++;
-    console.log(`   ${String(v.placa).padEnd(10)} ${c.fecha} · S/ ${Number(c.precio_galon).toFixed(3)} · ${motivos.join("; ")}`);
-  }
+  const precioViejo = vieja ? Number(vieja.precio_galon) : null;
+  const precioNuevo = nueva.carga?.precio ?? null;
+  if (precioViejo != null && precioNuevo != null && Math.abs(precioViejo - precioNuevo) < 0.005) continue;
+  if (precioViejo == null && precioNuevo == null) continue;
+  cambian++;
+  const famC = vieja ? familiaEstrictaDeCarga(vieja.tipo_combustible) : null;
+  const antes = vieja ? `S/ ${precioViejo!.toFixed(3)} (${vieja.fecha} · ${famC ?? `«${vieja.tipo_combustible ?? "—"}»`}${vieja.unidad ? ` · ${vieja.unidad}` : ""})` : "—";
+  const ahora = nueva.carga
+    ? textoPrecioUltimaCarga(nueva.carga, { conFecha: true })
+    : `precio de referencia «${p.tipo_combustible_1}» (${nueva.codigo})`;
+  console.log(`   ${String(v.placa).padEnd(10)} param ${String(p.tipo_combustible_1).padEnd(9)} antes ${antes}`);
+  console.log(`   ${"".padEnd(10)} ${"".padEnd(15)} ahora ${ahora}`);
 }
-console.log(`\n   ${afectadas} de ${revisadas} unidad(es) con cargas tienen la última carga con precio fuera de su familia o unidad.`);
+console.log(`\n   ${cambian} de ${revisadas} unidad(es) propias con parámetro cambian el precio con que se costea su combustible.`);
 
 // ── 6 · km de ELIA, viejo contra nuevo ───────────────────────────────────────
 linea("6 · KM DE ELIA: VIEJO (max − min de las aceptadas) CONTRA NUEVO (jornadas saneadas)");

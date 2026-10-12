@@ -11,7 +11,9 @@
 //   · `vehiculos` / `vehiculos_tercero` → `tipo_vehiculo_costeo` y placa;
 //   · `parametros_costos` de esos tipos y `precios_combustible`, una sola lectura cada uno;
 //   · para las PROPIAS, `rendimientoMedido` y `precioUltimaCarga` de lib/costeo-servicio.ts
-//     (IMPORTADOS, no copiados: es la misma cascada del presupuesto del servicio);
+//     (IMPORTADOS, no copiados: es la misma cascada del presupuesto del servicio). La última carga se
+//     pide con la FAMILIA del parámetro (`familiaDeParametro`): solo una carga de ese combustible, en
+//     su unidad canónica y con un precio posible pone el precio (lib/costos/precio-ultima-carga.ts);
 //   · para los TERCEROS, nada de medición ni de costo (`contextoCombustible` lo decide).
 //
 // UN FALLO DE LECTURA NO ES UN CERO: si no se pudo leer la unidad o su parámetro, ese servicio sale
@@ -20,8 +22,7 @@
 //
 // HEREDADO SIN CAMBIAR (y declarado): `rendimientoMedido` y `precioUltimaCarga` devuelven null ante un
 // error de lectura, así que ahí el costo cae al rendimiento del parámetro y al precio de referencia —
-// lo mismo que hace hoy el presupuesto. Y `precioUltimaCarga` toma la última carga con precio de
-// CUALQUIER combustible de la placa (hallazgo del plan, sin resolver aquí: moverlo cambia el presupuesto).
+// lo mismo que hace hoy el presupuesto.
 //
 // No devuelve teléfonos ni identificadores de aparato.
 
@@ -29,6 +30,8 @@
 import { createClient } from "@supabase/supabase-js";
 import { medirServiciosDelDia, todas, MAX_RESERVAS } from "../gps-cobertura-datos";
 import { rendimientoMedido, precioUltimaCarga } from "../costeo-servicio";
+import { familiaDeParametro } from "../costos/rendimiento-tipo";
+import type { UltimaCarga } from "../costos/precio-ultima-carga";
 import type { ParametrosUnidad, PreciosCombustible } from "../costeo-propio";
 import type { MedicionPlaca } from "../costos/rendimiento-aplica";
 import {
@@ -118,7 +121,7 @@ async function contextosDeUnidades(unidades: Unidad[], avisos: string[]): Promis
   }
 
   // 3 · Lo MEDIDO de cada propia con parámetro: la misma cascada del presupuesto (importada).
-  const medida = new Map<string, { medicion: MedicionPlaca | null; ultima: { precio: number; fecha: string } | null }>();
+  const medida = new Map<string, { medicion: MedicionPlaca | null; ultima: UltimaCarga | null }>();
   const propias = unidades.filter((u) => {
     if (u.flota !== "propia") return false;
     const f = fichas.get(u.clave);
@@ -126,11 +129,12 @@ async function contextosDeUnidades(unidades: Unidad[], avisos: string[]): Promis
   });
   for (let i = 0; i < propias.length; i += LOTE_UNIDADES) {
     await Promise.all(propias.slice(i, i + LOTE_UNIDADES).map(async (u) => {
+      const p = parametros.get(fichas.get(u.clave)!.tipoCosteo!)!;
       const [medicion, ultima] = await Promise.all([
         rendimientoMedido(admin, u.id).catch(() => null),
-        precioUltimaCarga(admin, u.id).catch(() => null),
+        precioUltimaCarga(admin, u.id, familiaDeParametro(p.tipo_combustible_1)).catch(() => null),
       ]);
-      medida.set(u.clave, { medicion, ultima });
+      medida.set(u.clave, { medicion, ultima: ultima?.carga ?? null });
     }));
   }
 
