@@ -1036,31 +1036,57 @@ export default function ModalManifiesto(props: Props) {
     }
   };
 
-  // ─── SINCRONIZAR + NOTIFICAR ───────────────────────────────────────────────
-  const sincronizar = async () => {
+  // ─── ACTUALIZAR LA APP · y, solo si se pide, AVISAR A LOS PASAJEROS ─────────
+  // Antes era UN botón «Sincronizar» (y «Sincronizar y Cerrar» al pie) que además le
+  // escribía a cada pasajero: se pulsaba para guardar y salían WhatsApp de pago, repetidos
+  // y hasta de servicios ya pasados. Ahora son dos acciones con su nombre, y a quién se avisa
+  // lo decide el servidor (lib/notificaciones-manual.ts): nunca un servicio pasado, nunca dos
+  // veces a quien ya recibió el aviso de este servicio.
+  const sincronizar = async (avisar: boolean): Promise<boolean> => {
     if (paradas.length === 0) {
-      setMensaje({ tipo: "warn", texto: "El itinerario no tiene paradas. Agrega paradas antes de sincronizar." });
-      return;
+      setMensaje({ tipo: "warn", texto: "El itinerario no tiene paradas. Agrega paradas antes de actualizar la app." });
+      return false;
     }
     if (total === 0) {
       setMensaje({ tipo: "warn", texto: "El manifiesto esta vacio." });
-      return;
+      return false;
     }
     if (sobrecupo) {
-      const ok = confirm("SOBRECUPO: " + total + " pasajeros vs capacidad " + capacidad + ". Sincronizar de todas formas?");
-      if (!ok) return;
+      const ok = confirm("SOBRECUPO: " + total + " pasajeros vs capacidad " + capacidad + ". ¿Continuar de todas formas?");
+      if (!ok) return false;
     }
 
     const sinCoords = paradas.filter((p) => p.lat === null || p.lng === null);
     if (sinCoords.length > 0) {
       const ok = confirm(sinCoords.length + " parada(s) sin coordenadas GPS no funcionaran en la app movil. Continuar de todas formas?");
-      if (!ok) return;
+      if (!ok) return false;
+    }
+
+    if (avisar) {
+      // Antes de mandar nada: a cuántos se les va a escribir, dicho con el MISMO plan del servidor.
+      try {
+        const rp = await fetch("/api/notificaciones/sincronizar?reserva_id=" + reservaId, { headers: await cabecerasErp() });
+        const plan = await rp.json();
+        if (!rp.ok) { setMensaje({ tipo: "err", texto: plan.error || "No se pudo comprobar a quién avisar." }); return false; }
+        if (plan.codigo !== "avisar") {
+          setMensaje({ tipo: "warn", texto: plan.texto + " Si solo cambiaste datos, usa «Actualizar app»." });
+          return false;
+        }
+        const ok = confirm(
+          plan.texto + "\n\nSe les envía el aviso del servicio por la app, correo o WhatsApp (cada WhatsApp se cobra)." +
+          "\nLa app del pasajero se actualiza igual aunque no avises.\n\n¿Avisar ahora?",
+        );
+        if (!ok) return false;
+      } catch {
+        setMensaje({ tipo: "err", texto: "No se pudo comprobar a quién avisar. No se envió nada." });
+        return false;
+      }
     }
 
     setSincronizando(true);
     setMensaje(null);
 
-    // 1. Actualizar sincronizado_app en Supabase (igual que antes)
+    // 1. La app del pasajero lee el manifiesto al día (sin escribirle a nadie).
     const payload = JSON.stringify({
       paradas: paradas.map((p) => ({ id: p.id, orden: p.orden, nombre: p.nombre, lat: p.lat, lng: p.lng })),
       pasajeros: pasajeros.map((p) => ({ id: p.id, dni: p.dni, parada: asignaciones[p.id]?.parada_id || null })),
@@ -1079,39 +1105,40 @@ export default function ModalManifiesto(props: Props) {
     if (respSync.error) {
       setMensaje({ tipo: "err", texto: respSync.error.message });
       setSincronizando(false);
-      return;
+      return false;
     }
 
-    // 2. Enviar notificaciones a los pasajeros via API
+    if (!avisar) {
+      setMensaje({ tipo: "ok", texto: "App actualizada · no se avisó a los pasajeros." });
+      setSincronizando(false);
+      if (onChange) onChange();
+      return true;
+    }
+
+    // 2. Avisar a los pasajeros que aún no recibieron el aviso de este servicio.
     try {
       const respNotif = await fetch("/api/notificaciones/sincronizar", {
         method: "POST",
         headers: await cabecerasErp(),
-        body: JSON.stringify({ reserva_id: reservaId }),
+        body: JSON.stringify({ reserva_id: reservaId, avisar: true, motivo: "manifiesto" }),
       });
       const datosNotif = await respNotif.json();
-
       if (!respNotif.ok) {
-        // Sincronizacion OK, pero notificaciones fallaron — avisar sin bloquear
-        setMensaje({
-          tipo: "warn",
-          texto: "Manifiesto sincronizado. Advertencia en notificaciones: " + (datosNotif.error || "error desconocido"),
-        });
+        setMensaje({ tipo: "warn", texto: "App actualizada. El aviso a pasajeros falló: " + (datosNotif.error || "error desconocido") });
       } else {
-        const { enviados, sinCanal, total: totalPax } = datosNotif.resumen;
-        const partes = ["Manifiesto sincronizado"];
-        if (enviados > 0)    partes.push(enviados + " notificacion(es) enviadas");
-        if (sinCanal > 0)    partes.push(sinCanal + " pasajero(s) sin email ni telefono");
-        if (totalPax === 0)  partes.push("(sin pasajeros con contacto registrado)");
-        setMensaje({ tipo: "ok", texto: partes.join(" · ") });
+        const sinCanal = datosNotif.resumen?.sinCanal ?? 0;
+        setMensaje({
+          tipo: "ok",
+          texto: "App actualizada · " + datosNotif.mensaje + (sinCanal > 0 ? " · " + sinCanal + " sin app, correo ni teléfono" : ""),
+        });
       }
     } catch {
-      // Si la API de notificaciones no está configurada aún, no romper el flujo
-      setMensaje({ tipo: "ok", texto: "Manifiesto sincronizado. (Notificaciones: API no disponible aun)" });
+      setMensaje({ tipo: "warn", texto: "App actualizada. No se pudo confirmar el aviso a pasajeros." });
     }
 
     setSincronizando(false);
     if (onChange) onChange();
+    return true;
   };
 
   const ocupBg = sobrecupo ? "#fee2e2" : "#dcfce7";
@@ -1418,17 +1445,29 @@ export default function ModalManifiesto(props: Props) {
           </div>
           <div className="rounded-xl p-2.5 border flex flex-col justify-between" style={{ background: syncBg, borderColor: syncBd }}>
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-wide" style={{ color: syncColor }}>{sincronizadoApp ? "Sincronizado" : "Pendiente sync"}</p>
+              <p className="text-[10px] font-bold uppercase tracking-wide" style={{ color: syncColor }}>{sincronizadoApp ? "App al día" : "App sin actualizar"}</p>
               {fechaSincronizacion ? <p className="text-[9px] text-gray-500">{new Date(fechaSincronizacion).toLocaleString("es-PE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</p> : null}
             </div>
-            <button
-              onClick={sincronizar}
-              disabled={sincronizando || total === 0}
-              className="mt-1 text-[10px] font-bold px-2 py-1 rounded-lg text-white disabled:opacity-50"
-              style={{ background: sincronizando ? "#6b7280" : sincronizadoApp ? "#0b315f" : "#16a34a" }}
-            >
-              {sincronizando ? "Enviando..." : sincronizadoApp ? "Re-sincronizar" : "Sincronizar"}
-            </button>
+            <div className="mt-1 flex flex-col gap-1">
+              <button
+                onClick={() => sincronizar(false)}
+                disabled={sincronizando || total === 0}
+                title="Guarda el manifiesto para la app del pasajero. No le escribe a nadie."
+                className="text-[10px] font-bold px-2 py-1 rounded-lg text-white disabled:opacity-50"
+                style={{ background: sincronizando ? "#6b7280" : "#0b315f" }}
+              >
+                {sincronizando ? "Guardando..." : "Actualizar app"}
+              </button>
+              <button
+                onClick={() => sincronizar(true)}
+                disabled={sincronizando || total === 0}
+                title="Además le envía el aviso del servicio a los pasajeros que aún no lo recibieron (app, correo o WhatsApp de pago)."
+                className="text-[10px] font-bold px-2 py-1 rounded-lg border disabled:opacity-50"
+                style={{ borderColor: "#16a34a", color: "#166534", background: "#fff" }}
+              >
+                Actualizar y avisar…
+              </button>
+            </div>
           </div>
         </div>
 
@@ -2189,17 +2228,17 @@ export default function ModalManifiesto(props: Props) {
               className="px-4 py-2 rounded-xl font-bold text-sm border text-gray-500 hover:bg-gray-100 transition-colors"
               style={{ borderColor: "#e2e8f0" }}
             >
-              Cerrar sin sincronizar
+              Cerrar sin actualizar
             </button>
             <button
-              onClick={async () => { await sincronizar(); onClose(); }}
+              onClick={async () => { if (await sincronizar(false)) onClose(); }}
               disabled={sincronizando || total === 0}
               className="px-5 py-2 rounded-xl font-bold text-sm text-white flex items-center gap-2 disabled:opacity-50 transition-colors"
               style={{ background: sincronizando ? "#6b7280" : "#16a34a" }}
             >
               {sincronizando
-                ? <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Sincronizando...</>
-                : <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>Sincronizar y Cerrar</>
+                ? <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Guardando...</>
+                : <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>Actualizar app y cerrar</>
               }
             </button>
           </div>
