@@ -927,6 +927,11 @@ export function vistaRespuesta(r: RespuestaExcesos, incluirFueraDeServicio: bool
  * los episodios ya vienen asignados por inicio, así que se juntan sin duplicar, y el ranking se VUELVE A
  * CALCULAR con la exposición unida (un servicio prestado en una tanda y tocado en otra cuenta una vez).
  * Tandas con distinto umbral, o que se solapan, LANZAN: unirlas contaría distinto o dos veces.
+ *
+ * Límite declarado: el velocímetro de cada tanda se consulta para SUS conductores y SU rango, y se combina
+ * con `combinarVelocimetro`. Un conductor que en una tanda no tuvo servicios ni excesos no se consultó
+ * ahí: si su teléfono reportó velocidad SOLO en esa tanda, la unión puede decir «sin velocímetro» (en las
+ * tandas donde trabajó, su teléfono no la reportó). Nunca dice «con velocímetro» de más.
  */
 export function unirRespuestasExcesos(rs: readonly RespuestaExcesos[]): RespuestaExcesos {
   if (!rs.length) throw new Error("unirRespuestasExcesos: no hay tandas que unir");

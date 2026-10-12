@@ -214,9 +214,12 @@ export type UnidadUso = {
   kmPiso: boolean;
   /** días por fuente del km */
   kmFuentes: Record<FuenteKmDia, number>;
-  horas: number;
+  /** null = tuvo servicios terminados y ninguno con duración */
+  horas: number | null;
   serviciosSinHora: number;
-  gasto: number;
+  /** null = no se leyeron las cargas, o tuvo cargas y ninguna con importe */
+  gasto: number | null;
+  /** null = no se leyeron las cargas, o tuvo cargas que emiten y ninguna estimable; 0 sin cargas */
   co2Kg: number | null;
   cargas: number;
   porFamilia: { familia: string; unidadLabel: string; cantidad: number }[];
@@ -458,6 +461,13 @@ function tipoEstricto(t: string | null | undefined): string | null {
   return n && Object.prototype.hasOwnProperty.call(COMBUSTIBLES, n) ? n : null;
 }
 
+/** La familia de una carga por su tipo, SIN caer al diésel (null = tipo desconocido). La usa también
+ *  scripts/diagnostico-uso-flota.mts para medir el hallazgo de `precioUltimaCarga`. */
+export function familiaEstrictaDeCarga(t: string | null | undefined): string | null {
+  const tipo = tipoEstricto(t);
+  return tipo ? COMBUSTIBLES[tipo].familia : null;
+}
+
 /** La unidad canónica de una familia (la del primer tipo del catálogo con esa familia). */
 function unidadDeFamilia(familia: string): { unidad: "galones" | "litros" | "m3"; label: string } {
   const t = Object.keys(COMBUSTIBLES).find((k) => COMBUSTIBLES[k].familia === familia);
@@ -511,15 +521,15 @@ function juzgarCarga(c: CargaUso): CargaJuzgada {
 type AcumUnidad = {
   servicios: number; prestados: number; dias: Set<string>;
   km: number; kmConocido: boolean; kmPiso: boolean; kmFuentes: Record<FuenteKmDia, number>;
-  horasMin: number; sinHora: number;
-  gasto: number; co2: number; co2Conocido: boolean; cargas: number;
+  horasMin: number; conHora: number; sinHora: number;
+  gasto: number; conImporte: number; co2: number; co2Conocido: boolean; co2Falta: number; cargas: number;
   porFamilia: Map<string, number>;
 };
 const acumVacio = (): AcumUnidad => ({
   servicios: 0, prestados: 0, dias: new Set(),
   km: 0, kmConocido: false, kmPiso: false, kmFuentes: { odometro: 0, gps: 0, gps_parcial: 0, sin_dato: 0, tope: 0 },
-  horasMin: 0, sinHora: 0,
-  gasto: 0, co2: 0, co2Conocido: false, cargas: 0, porFamilia: new Map(),
+  horasMin: 0, conHora: 0, sinHora: 0,
+  gasto: 0, conImporte: 0, co2: 0, co2Conocido: false, co2Falta: 0, cargas: 0, porFamilia: new Map(),
 });
 
 /** El uso de flota del periodo. */
@@ -567,7 +577,7 @@ export function resumenUso(e: EntradaUso): ResumenUso {
     if (t.duracionMin != null && Number.isFinite(t.duracionMin)) {
       conHora++; horasMin += t.duracionMin;
       if (d) { d.conHora++; d.horasMin += t.duracionMin; }
-      if (a) a.horasMin += t.duracionMin;
+      if (a) { a.horasMin += t.duracionMin; a.conHora++; }
     } else if (contextoServicio(r, ps, { hoy: e.hoy, ahoraMs: e.ahoraMs }).terminado) {
       // Terminado y sin duración: se CUENTA, no se inventa.
       sinHora++;
@@ -621,7 +631,7 @@ export function resumenUso(e: EntradaUso): ResumenUso {
       const a = acum(j.vehiculoId);
       comb.cargas++; a.cargas++;
       if (j.gasto != null) {
-        gasto += j.gasto; a.gasto += j.gasto;
+        gasto += j.gasto; a.gasto += j.gasto; a.conImporte++;
         if (d) { d.gasto += j.gasto; d.conImporte++; }
       } else {
         comb.cargasSinImporte++;
@@ -634,10 +644,10 @@ export function resumenUso(e: EntradaUso): ResumenUso {
         comb.cargasSinFactor++;
         if (j.aditivo) comb.cargasAditivo++;
         // La urea no se quema: no deja el CO₂ del día «sin dato». Un tipo desconocido o el biodiésel sí.
-        else { co2Falta++; if (d) d.co2Falta++; }
+        else { co2Falta++; a.co2Falta++; if (d) d.co2Falta++; }
       } else {
         comb.cargasSinCantidad++;
-        co2Falta++;
+        co2Falta++; a.co2Falta++;
         if (d) d.co2Falta++;
       }
       if (j.familia) {
@@ -708,10 +718,10 @@ export function resumenUso(e: EntradaUso): ResumenUso {
       km: a.kmConocido ? a.km : null,
       kmPiso: a.kmPiso,
       kmFuentes: { ...a.kmFuentes },
-      horas: a.horasMin / 60,
+      horas: a.sinHora > 0 && a.conHora === 0 ? null : a.horasMin / 60,
       serviciosSinHora: a.sinHora,
-      gasto: a.gasto,
-      co2Kg: a.co2Conocido ? a.co2 : null,
+      gasto: e.cargas == null || (a.cargas > 0 && a.conImporte === 0) ? null : a.gasto,
+      co2Kg: e.cargas == null ? null : a.co2Conocido || a.co2Falta === 0 ? a.co2 : null,
       cargas: a.cargas,
       porFamilia: [...a.porFamilia.entries()].map(([familia, cantidad]) => ({ familia, unidadLabel: unidadDeFamilia(familia).label, cantidad })),
     };
@@ -975,6 +985,7 @@ export type RespuestaUso = {
 };
 
 export type CodigoErrorUso =
+  | "sin_sesion" | "sin_permiso"
   | "fecha_invalida" | "rango_invertido" | "rango_largo" | "futuro" | "cola_llena" | "lectura_fallida";
 
 export type ErrorUso = { ok: false; codigo: CodigoErrorUso; error: string; reintentar?: boolean };

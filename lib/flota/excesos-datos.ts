@@ -220,7 +220,7 @@ export async function excesosDelRango(
       }
     }
   } catch (e) {
-    console.error("[flota/excesos] velocímetro:", e instanceof FalloRpc ? e.detalle : e);
+    if (!(e instanceof FaltaMigracion)) console.error("[flota/excesos] velocímetro:", e instanceof FalloRpc ? e.detalle : e);
     avisos.push(e instanceof FaltaMigracion
       ? `Falta la función ${RPC_VELOCIMETRO} (${MIGRACION_EXCESOS}): no se puede comprobar qué teléfonos reportan la velocidad.`
       : "No se pudo comprobar qué teléfonos reportan la velocidad: esos conductores salen «no se sabe».");
