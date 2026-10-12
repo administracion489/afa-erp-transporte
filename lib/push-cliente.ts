@@ -18,10 +18,13 @@
 // del SO sigue "granted" tras quitar) y evita auto-suscribir en Android ≤ 12
 // (sin POST_NOTIFICATIONS, checkPermissions devuelve granted de fábrica).
 
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, registerPlugin } from "@capacitor/core";
 import { esAppNativa } from "@/lib/geo";
 
-export type SoportePush = "fcm" | "webpush" | "ios-instalar" | "app-desactualizada" | "no-soportado";
+// "app-sin-avisos" solo lo devuelve soportePushConductor(): el APK del conductor trae el
+// plugin pero no Firebase, así que no hay nada que el conductor pueda activar.
+export type SoportePush =
+  | "fcm" | "webpush" | "ios-instalar" | "app-desactualizada" | "app-sin-avisos" | "no-soportado";
 export type ResultadoActivar = "activo" | "denegado" | "error";
 
 type PaxApi = (accion: string, params?: Record<string, any>) => Promise<any>;
@@ -79,6 +82,44 @@ export function detectarSoportePush(): SoportePush {
   }
   if (esIOSNav() && !esStandalone()) return "ios-instalar";
   return "no-soportado";
+}
+
+// ── ¿EL APK DEL CONDUCTOR TRAE FIREBASE? ──────────────────────────────────────
+// El APK del conductor (android/ de este repo) se publicó SIN android/app/google-services.json
+// (docs/push-conductor-apk.md). En ese APK el plugin de push SÍ está, pero su register() llama
+// a FirebaseMessaging.getInstance() con Firebase sin inicializar: la excepción es NATIVA, el
+// puente de Capacitor la relanza como RuntimeException y Android CIERRA EL APP. Desde JS no se
+// puede atrapar. Por eso al app del conductor solo se le llama register() cuando el propio APK
+// declara que trae Firebase (AfaNative.pushNativoDisponible). Un APK sin ese método —todos los
+// publicados hasta hoy— contesta «no implementado» → false → register() no se llama nunca.
+// SOLO PARA EL CONDUCTOR: el APK del pasajero (com.transportesafa.pasajero) sí trae Firebase
+// y no tiene AfaNative; preguntarle esto le apagaría los avisos.
+let firebaseConductor: Promise<boolean> | null = null;
+
+export function firebaseEnApkConductor(): Promise<boolean> {
+  if (!esAppNativa()) return Promise.resolve(false);
+  firebaseConductor ??= (async () => {
+    try {
+      const AfaNative = registerPlugin<{
+        pushNativoDisponible: () => Promise<{ disponible?: boolean }>;
+      }>("AfaNative");
+      const r = await Promise.race([
+        AfaNative.pushNativoDisponible(),
+        new Promise<null>((res) => setTimeout(() => res(null), 4000)),
+      ]);
+      return r?.disponible === true;
+    } catch {
+      return false; // APK sin el método: no trae Firebase
+    }
+  })();
+  return firebaseConductor;
+}
+
+/** detectarSoportePush() para el app del CONDUCTOR: «fcm» solo si el APK trae Firebase. */
+export async function soportePushConductor(): Promise<SoportePush> {
+  const s = detectarSoportePush();
+  if (s === "fcm" && !(await firebaseEnApkConductor())) return "app-sin-avisos";
+  return s;
 }
 
 /** ¿El permiso del navegador ya está bloqueado? (para mostrar el hint correcto) */
