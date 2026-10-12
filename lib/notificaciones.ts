@@ -6,7 +6,8 @@ import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
 import { enviarPushAPasajeros, enviarPushAConductores, payloadConductor, payloadsViaje } from "@/lib/push";
 import { telefonoContingencia, cargarCanalesPasajero, type CanalesConductor, type CanalesPasajero } from "@/lib/alertas";
 import { emailDesdePlantilla } from "@/lib/plantilla-texto";
-import { phonePara } from "@/lib/whatsapp-numeros";
+import { phonePara, wabaPara } from "@/lib/whatsapp-numeros";
+import { enviarConIdiomaCorrecto, type IdiomaEnMeta, type MemoIdiomas } from "@/lib/plantilla-idioma";
 import { faltaAlguna } from "@/lib/columna-faltante";
 
 // Admin client para escribir logs sin RLS
@@ -196,6 +197,55 @@ export async function phoneAvisos(): Promise<string | undefined> {
   return phonePara("avisos");
 }
 
+// ── El idioma de cada plantilla del número de avisos (lib/plantilla-idioma.ts) ──
+// Se manda en «es»; si Meta contesta 132001, se mira la lista de la cuenta y se reintenta en el
+// idioma en que la plantilla SÍ está aprobada, o el error pasa a decir que no existe. Memo de proceso:
+// un aviso a 10 contactos del directorio no repite 10 veces el intento fallido ni la consulta.
+const memoIdiomaAvisos: MemoIdiomas = new Map();
+const memoListaAvisos = new Map<string, { idiomas: IdiomaEnMeta[]; hasta: number }>();
+const TTL_LISTA_MS = 10 * 60 * 1000;
+
+async function idiomasEnMetaAvisos(nombre: string): Promise<IdiomaEnMeta[] | null> {
+  const enMemo = memoListaAvisos.get(nombre);
+  if (enMemo && enMemo.hasta > Date.now()) return enMemo.idiomas;
+  const token = process.env.META_WA_TOKEN;
+  const waba = await wabaPara("avisos");
+  if (!token || !waba) return null;
+  try {
+    const res = await fetch(
+      // `name` filtra en Meta (por coincidencia parcial); el exacto se hace abajo.
+      `https://graph.facebook.com/v25.0/${waba}/message_templates?fields=name,language,status&limit=200&name=${encodeURIComponent(nombre)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!res.ok) return null;
+    const j = await res.json();
+    const idiomas: IdiomaEnMeta[] = ((j?.data ?? []) as { name?: string; language?: string; status?: string }[])
+      .filter((t) => t?.name === nombre)
+      .map((t) => ({ codigo: String(t.language ?? ""), estado: String(t.status ?? "") }));
+    memoListaAvisos.set(nombre, { idiomas, hasta: Date.now() + TTL_LISTA_MS });
+    return idiomas;
+  } catch {
+    return null;
+  }
+}
+
+/** Plantilla desde el número de avisos, en el idioma en que está aprobada. Lanza con un motivo claro. */
+async function plantillaAvisos(
+  to: string,
+  plantilla: string,
+  parametros: string[],
+  phone: string,
+  botones?: { index: number; texto: string }[],
+): Promise<string | null> {
+  return enviarConIdiomaCorrecto({
+    plantilla,
+    enviar: (idioma) => enviarWhatsAppPlantilla(to, plantilla, idioma, parametros, phone, botones),
+    consultar: () => idiomasEnMetaAvisos(plantilla),
+    memo: memoIdiomaAvisos,
+    ahoraMs: Date.now(),
+  });
+}
+
 /**
  * Envío de bajo nivel para el motor de alertas operativas: manda una plantilla al
  * teléfono dado desde el 2do número (avisos). Normaliza el teléfono, no lanza.
@@ -210,7 +260,7 @@ export async function enviarAvisoWhatsApp(
   if (!phone) return { ok: false, error: "META_PHONE_NUMBER_ID_AVISOS no configurado" };
   if (!telefonoRaw?.trim()) return { ok: false, error: "sin teléfono" };
   try {
-    await enviarWhatsAppPlantilla(normalizarTelefono(telefonoRaw), plantilla, PLANTILLA_IDIOMA, parametros, phone);
+    await plantillaAvisos(normalizarTelefono(telefonoRaw), plantilla, parametros, phone);
     return { ok: true };
   } catch (e: any) {
     return { ok: false, error: e.message };
@@ -304,7 +354,7 @@ export async function enviarAConductor(args: {
       intentado++;
       const tel = normalizarTelefono(conductor.telefono);
       try {
-        const wamid = await enviarWhatsAppPlantilla(tel, plantilla, PLANTILLA_IDIOMA, parametros, phoneWa, botones);
+        const wamid = await plantillaAvisos(tel, plantilla, parametros, phoneWa, botones);
         entregado++;
         await log({ tipo: "whatsapp", estado: "enviado", destinatario: tel, wamid });
       } catch (e: any) {

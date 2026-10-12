@@ -11,6 +11,9 @@ import { cotejarModoTiempo, leeElModo, type ModoTiempo } from "@/lib/alertas-mod
 import PruebaAvisos from "./PruebaAvisos";
 // La llamada de la central propia: su tarjeta no tiene canales de mensaje, tiene una central.
 import { CLAVE_LLAMADA, estadoCentral } from "@/lib/llamadas-central";
+// Las plantillas que las alertas usan y que hay que crear en Meta: el texto y sus variables en el
+// orden en que el motor las manda.
+import { SUGERIDA_COORDINADOR_ALERTA, SUGERIDA_NO_INICIO, SUGERIDA_RECUERDA_INICIAR } from "@/lib/plantillas-sugeridas";
 
 type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean; es_contingencia?: boolean };
 type AlertaCfg = {
@@ -262,6 +265,9 @@ export default function ConfigOperacionesPage() {
     botonTexto: "",
     botonUrl: "",
   };
+  // Las tres de la escalera de inicio (y de toda alerta al coordinador) viven en un módulo PURO:
+  // la matriz scripts/prueba-plantilla-idioma.mts comprueba que su número de variables es el que el
+  // motor manda, y que Meta no las rechazaría.
 
   const [nuevaTpl, setNuevaTpl] = useState<NuevaPlantilla | null>(null);
   const [creandoTpl, setCreandoTpl] = useState(false);
@@ -679,6 +685,15 @@ export default function ConfigOperacionesPage() {
               </button>
               <button onClick={() => setNuevaTpl({ ...PLANTILLA_ASIGNACION_MULTIPLE })} className="text-xs font-semibold text-[#0b315f] hover:underline">
                 Prellenar: varios servicios asignados
+              </button>
+              <button onClick={() => setNuevaTpl({ ...SUGERIDA_RECUERDA_INICIAR })} className="text-xs font-semibold text-[#0b315f] hover:underline">
+                Prellenar: inicia ahora (conductor_recuerda_iniciar)
+              </button>
+              <button onClick={() => setNuevaTpl({ ...SUGERIDA_NO_INICIO })} className="text-xs font-semibold text-[#0b315f] hover:underline">
+                Prellenar: ya debió iniciar (conductor_no_inicio)
+              </button>
+              <button onClick={() => setNuevaTpl({ ...SUGERIDA_COORDINADOR_ALERTA })} className="text-xs font-semibold text-[#0b315f] hover:underline">
+                Prellenar: alerta al coordinador (coordinador_alerta)
               </button>
             </div>
           )}
