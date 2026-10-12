@@ -18,7 +18,7 @@ import { Ficha } from "@/components/analitica/FichaComparada";
 import SerieComparada from "@/components/graficos/SerieComparada";
 import { sumarDias, diasEntreFechas } from "@/lib/odometro-analitica";
 import {
-  FUENTES_KM_DIA,
+  FUENTES_KM_DIA, DIAS_ATRAS_MAX_USO,
   type RespuestaUso, type ResumenUso, type FuenteKmDia, type UnidadUso, type DiaSerieUso, type ProcedenciaConstante,
 } from "@/lib/flota/uso-flota";
 import {
@@ -155,6 +155,8 @@ export default function UsoFlotaResumen({ hoy, periodoDeInicio, onPeriodo }: {
     return out;
   }, [hoy]);
 
+  // El tope de la API (`desde` ≥ hoy − DIAS_ATRAS_MAX_USO): se ofrece como mínimo del calendario.
+  const minimo = sumarDias(hoy, -DIAS_ATRAS_MAX_USO);
   const rangoInvalido = !borrador.desde || !borrador.hasta || borrador.desde > borrador.hasta;
 
   return (
@@ -198,13 +200,13 @@ export default function UsoFlotaResumen({ hoy, periodoDeInicio, onPeriodo }: {
           <div className="flex flex-wrap items-end gap-2">
             <label className="text-[11px] font-bold uppercase text-gray-400">
               Desde
-              <input type="date" value={borrador.desde} max={hoy}
+              <input type="date" value={borrador.desde} min={minimo} max={hoy}
                 onChange={(e) => setBorrador((b) => ({ ...b, desde: e.target.value }))}
                 className="block mt-1 border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 font-normal normal-case min-h-[40px]" />
             </label>
             <label className="text-[11px] font-bold uppercase text-gray-400">
               Hasta
-              <input type="date" value={borrador.hasta} max={hoy}
+              <input type="date" value={borrador.hasta} min={minimo} max={hoy}
                 onChange={(e) => setBorrador((b) => ({ ...b, hasta: e.target.value }))}
                 className="block mt-1 border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 font-normal normal-case min-h-[40px]" />
             </label>
@@ -230,8 +232,10 @@ export default function UsoFlotaResumen({ hoy, periodoDeInicio, onPeriodo }: {
               <b className="text-gray-700">{fmtFecha(d.anteriorDesde)} – {fmtFecha(d.anteriorHasta)}</b>
               {" "}(el periodo anterior del mismo largo)
             </>
-          ) : (
+          ) : cargando ? (
             <>Midiendo {fmtFecha(periodo.desde)} – {fmtFecha(periodo.hasta)} y el periodo anterior del mismo largo…</>
+          ) : (
+            <>{fmtFecha(periodo.desde)} – {fmtFecha(periodo.hasta)}: no se pudo medir (abajo, por qué).</>
           )}
         </p>
       </section>
@@ -496,7 +500,7 @@ function Contenido({ d, metrica, setMetrica }: { d: RespuestaUso; metrica: Metri
             </table>
           </div>
         </div>
-        <p className="text-gray-400">Medido el {new Date(d.medidoEn).toLocaleString("es-PE", { timeZone: "America/Lima" })}.</p>
+        <p className="text-gray-400">Medido el {new Date(d.medidoEn).toLocaleString("es-PE", { timeZone: "America/Lima" })} (hora de Lima)</p>
       </ComoSeMide>
     </>
   );

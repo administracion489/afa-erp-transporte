@@ -16,7 +16,10 @@
 // EL VELOCÍMETRO (tri-estado) sale de `fn_gps_velocimetro` para los conductores asignados y los que
 // aparecen en los puntos. Si no se puede leer, cada uno queda «no se sabe» y se avisa: nunca un «0».
 //
-// No devuelve teléfonos.
+// No devuelve teléfonos. Y lo de FUERA de servicio (la app abierta sin servicio: el auto de alguien) se
+// trata como dato personal: el pico de esos excesos sale aproximado a ~1 km (`conPicoAproximado`, lo
+// aplica `armarRespuestaExcesos` a toda respuesta), y quien SOLO aparece por ellos está en el directorio
+// únicamente para fuera=1 — con fuera=0, `vistaRespuesta` lo recorta.
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- el cliente de Supabase del ERP va sin tipos generados: las filas llegan como `any` */
 import { createClient } from "@supabase/supabase-js";

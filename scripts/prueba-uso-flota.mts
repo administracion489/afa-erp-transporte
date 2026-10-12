@@ -21,6 +21,8 @@
 //   9. SENTIDO_METRICA: km, servicios, horas, gasto y CO₂ neutros; unidades sin uso subir_malo.
 //  10. Corolario: una semana con actividad da km, servicios, horas, gasto y CO₂ distintos de cero
 //      (un motor que devolviera ceros cumpliría todo lo de arriba de forma trivial).
+//  11. La ruta: un `desde` anterior a hoy − DIAS_ATRAS_MAX_USO es 400 `rango_antiguo` sin leer nada (el
+//      borde exacto pasa), y la cola de cálculos es de 6.
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- filas sintéticas con la forma de las de Supabase */
 import {
@@ -682,6 +684,57 @@ console.log("\n11 · corolario: una semana con actividad da números distintos d
   chk("CWZ-371: 7 jornadas × 120 km por odómetro; la otra unidad sin odómetro deja el total como piso",
     r.porUnidad.find((u) => u.placa === "CWZ-371")?.km === 840 && r.km.esPiso && r.porUnidad.find((u) => u.placa === "B4N-968")?.km === null);
   chk("las dos unidades activas, ninguna sin uso", r.unidades.activas === 2 && r.unidades.sinUso.length === 0);
+}
+
+// ══ La ruta: los topes contra el abuso, contra un Supabase falso por HTTP ═══════════════════════
+// `desde` no puede ser anterior a hoy − DIAS_ATRAS_MAX_USO (400 `rango_antiguo`, sin leer nada), y la
+// cola es de 6. Los clientes de lib/api-auth.ts y lib/flota/uso-flota-datos.ts se crean al cargarse,
+// así que el servidor falso se levanta antes de importar la ruta. Toda tabla responde vacía.
+console.log("\nLa ruta /api/flota/uso: periodo antiguo y cola");
+{
+  const http = await import("node:http");
+  const fs = await import("node:fs");
+  const { DIAS_ATRAS_MAX_USO } = await import("../lib/flota/uso-flota");
+  const fuente = fs.readFileSync(new URL("../app/api/flota/uso/route.ts", import.meta.url), "utf8");
+  chk("la cola es de 6 (una de 20 no cabe en maxDuration = 60 s)", fuente.includes("crearTurno(2, 6)") && !/crearTurno\(2, 20\)/.test(fuente));
+  const pedidas: string[] = [];
+  const srv = http.createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      pedidas.push(`${req.method} ${req.url?.split("?")[0]}`);
+      const json = (st: number, o: unknown) => { res.writeHead(st, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
+      if (req.url?.startsWith("/auth/v1/user")) return json(200, { id: "u-admin", aud: "authenticated", role: "authenticated" });
+      if (req.url?.startsWith("/rest/v1/usuarios")) {
+        const o = { rol: "admin", activo: true };
+        return json(200, String(req.headers.accept).includes("pgrst.object") ? o : [o]);
+      }
+      if (req.url?.startsWith("/rest/v1/")) return json(200, []);
+      json(404, {});
+    });
+  });
+  await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", () => ok()));
+  process.env.NEXT_PUBLIC_SUPABASE_URL = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "prueba";
+  try {
+    const { GET } = await import("../app/api/flota/uso/route");
+    const { NextRequest } = await import("next/server");
+    const { fechaLima } = await import("../lib/alertas-horario");
+    const pedir = async (q: string) => {
+      const r = await GET(new NextRequest(`http://localhost/api/flota/uso${q}`, { headers: { authorization: "Bearer admin" } }));
+      return { status: r.status, body: await r.json() as any };
+    };
+    const hoyR = fechaLima(Date.now());
+    const minimo = sumarDias(hoyR, -DIAS_ATRAS_MAX_USO);
+    const viejo = await pedir(`?desde=${sumarDias(minimo, -1)}&hasta=${sumarDias(minimo, 5)}`);
+    chk("desde anterior a hoy − 400 días → 400 `rango_antiguo` que nombra el límite",
+      viejo.status === 400 && viejo.body.codigo === "rango_antiguo" && viejo.body.ok === false && viejo.body.error.includes(minimo), viejo.body.error);
+    chk("…sin leer ninguna tabla para rechazarlo", !pedidas.some((x) => x.startsWith("GET /rest/v1/") && !x.includes("/usuarios")));
+    const borde = await pedir(`?desde=${minimo}&hasta=${sumarDias(minimo, 5)}`);
+    chk("desde = hoy − 400 días → pasa la validación (no es `rango_antiguo`)", borde.body.codigo !== "rango_antiguo" && borde.status !== 400, `${borde.status} ${borde.body.codigo ?? "ok"}`);
+  } finally {
+    srv.close();
+  }
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) FALLARON` : "\nTodo en verde");

@@ -4,7 +4,8 @@
 //
 // LO QUE FIJAN:
 //   0. Las constantes dicen lo mismo que sus fuentes: VMAX_BUS_KMH de lib/huella.ts, ACC_CONFIABLE_M, el
-//      piso y el techo del SQL (supabase/gps-analitica-01-excesos.sql), su tope de puntos y de horas.
+//      piso y el techo del SQL (supabase/gps-analitica-01-excesos.sql), su tope de puntos y de horas,
+//      DIAS_RASTREO; y la API acepta exactamente 15 umbrales (de PASO_UMBRAL_KMH en PASO_UMBRAL_KMH).
 //   1. Los casos de libro: el fantasma FUSED (bus parado a «95 km/h») → sin_corroborar; el pico suelto →
 //      breve; la precisión nula → impreciso; > 130 → imposible; GPS simulado → simulado; p:5 y t:5 nunca
 //      se juntan; un hueco > 10 s parte el episodio (10 s justos no); un teléfono sin Doppler → ningún
@@ -23,11 +24,16 @@
 //   5. El lector: sin la migración → `sin_migracion` y ningún episodio, sin leer nada más; otro error →
 //      lanza un mensaje para una persona (nunca un «0»); el resultado completo cuadra con el motor; unir
 //      dos tandas ≡ medir el rango entero; validación de la consulta y tandas de la pantalla.
+//      PRIVACIDAD FUERA DE SERVICIO: (a) ningún exceso fuera de servicio sale con más de 2 decimales en el
+//      pico (los de servicio, exactos); (b) con fuera=0 el directorio (`conductores`, `unidades`) no nombra
+//      a nadie sin servicio ni exceso en servicio en la respuesta — con un caso a mano donde SÍ hay a quién
+//      recortar (si no, la invariante se cumpliría de forma trivial).
 //   6. Corolario: un bus a 100 km/h durante 60 s, con buena precisión, se detecta para todo umbral ≤ 95
 //      y toda cadencia de 1 a 10 s (un motor que nunca detectara nada pasaría todo lo de arriba).
 //   7. La ruta, de punta a punta con el supabase-js de verdad contra un Supabase falso por HTTP: 401/403,
-//      400 de validación, `sin_migracion` ante el 404 PGRST202 de PostgREST (sin leer nada más ni
-//      cachearlo) y, ante otro error, 200 con `error` y total null.
+//      400 de validación (umbral que no es de 5 en 5, `desde` anterior a hoy − DIAS_RASTREO), `sin_migracion`
+//      ante el 404 PGRST202 de PostgREST (sin leer nada más ni cachearlo), ante otro error 200 con `error` y
+//      total null, y el TTL decidido por el «hoy» del CÁLCULO con el reloj simulado.
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- la base falsa imita al cliente sin tipos de Supabase */
 import fs from "node:fs";

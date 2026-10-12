@@ -72,7 +72,9 @@ export default function UsoFlotaServicios({ hoy, fechaInicial, reservaResaltada,
   const [fin, setFin] = useState<{ clave: string; cancelado?: boolean; error?: string } | null>(null);
   const [progreso, setProgreso] = useState<{ clave: string; hechos: number; total: number } | null>(null);
   const acRef = useRef<AbortController | null>(null);
-  const corriendo = dias.length > 0 && fin?.clave !== claveRun;
+  const pendientesAhora = dias.filter((f) => !diaBueno(cache[k(f)])).length;
+  // Con todo lo pedido ya medido no hay nada corriendo, aunque la ronda todavía no haya cerrado.
+  const corriendo = dias.length > 0 && pendientesAhora > 0 && fin?.clave !== claveRun;
 
   useEffect(() => {
     if (!dias.length) return;
@@ -108,7 +110,6 @@ export default function UsoFlotaServicios({ hoy, fechaInicial, reservaResaltada,
     setRonda((x) => x + 1);
   };
 
-  const pendientesAhora = dias.filter((f) => !diaBueno(cache[k(f)])).length;
   const hechos = progreso?.clave === claveRun ? progreso.hechos : 0;
   const total = progreso?.clave === claveRun ? progreso.total : pendientesAhora;
   const finActual = fin?.clave === claveRun ? fin : null;
@@ -243,7 +244,7 @@ export default function UsoFlotaServicios({ hoy, fechaInicial, reservaResaltada,
             Servicios{buenos.length ? ` (${filas.length})` : ""}
           </h3>
           <p className="text-[11px] text-gray-400">
-            Combustible, costo y CO₂ son <b>estimados</b> sobre el km del GPS: pasa el puntero por una celda para ver de dónde sale.
+            Combustible, costo y CO₂ son <b>estimados</b> sobre el km del GPS: cada celda dice de dónde sale al pasarle el puntero.
           </p>
         </div>
         <div className="overflow-x-auto">
