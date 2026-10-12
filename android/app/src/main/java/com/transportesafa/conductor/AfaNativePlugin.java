@@ -44,6 +44,26 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 @CapacitorPlugin(name = "AfaNative")
 public class AfaNativePlugin extends Plugin {
 
+    // ¿Este APK trae Firebase? El plugin de push está compilado SIEMPRE, pero sin
+    // google-services.json su register() lanza una excepción nativa que CIERRA el app.
+    // El plugin de Google genera el recurso "google_app_id" solo cuando el JSON está, y es el
+    // mismo dato con el que Firebase se inicializa al arrancar. El JS (lib/push-cliente.ts →
+    // firebaseEnApkConductor) no llama a register() hasta que esto devuelva true.
+    @PluginMethod
+    public void pushNativoDisponible(PluginCall call) {
+        JSObject ret = new JSObject();
+        boolean disponible = false;
+        try {
+            int id = getContext().getResources()
+                .getIdentifier("google_app_id", "string", getContext().getPackageName());
+            disponible = id != 0;
+        } catch (Exception e) {
+            disponible = false;
+        }
+        ret.put("disponible", disponible);
+        call.resolve(ret);
+    }
+
     @PluginMethod
     public void isIgnoringBatteryOptimizations(PluginCall call) {
         JSObject ret = new JSObject();

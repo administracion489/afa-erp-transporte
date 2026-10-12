@@ -30,6 +30,16 @@ Estado verificado del proyecto Android:
 
 ---
 
+> **Por qué el app no ofrece «Activar» hoy (desde el 12-10-2026).** Sin Firebase, el
+> `register()` del plugin de push lanza una excepción nativa que **cierra el app**: el
+> 11-10 los conductores con el permiso de notificaciones dado veían el app cerrarse al
+> abrirla. Ahora el JS solo llama a `register()` si el APK contesta
+> `AfaNative.pushNativoDisponible() → true` (`lib/push-cliente.ts` →
+> `firebaseEnApkConductor`), y ese método **solo existe desde el AAB que se compile con
+> este repo**, que además devuelve `true` únicamente si el build trae `google-services.json`.
+> Mientras tanto el perfil dice que los avisos llegan por WhatsApp. Al publicar el AAB de
+> esta guía, el «Activar» vuelve solo, sin tocar código.
+
 ## Paso 1 — Crear la app Android en Firebase
 
 1. Entra a [console.firebase.google.com](https://console.firebase.google.com) con la

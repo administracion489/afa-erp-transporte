@@ -10,6 +10,8 @@
 //                          que se dice DÓNDE se enciende (Ajustes del teléfono).
 //   · app-desactualizada → este APK no trae el módulo de notificaciones: hay que actualizarlo.
 //   · ios-instalar       → en iPhone solo funciona instalada en la pantalla de inicio.
+//   · app-sin-avisos     → el APK no trae Firebase: no hay nada que activar (llegan por
+//                          WhatsApp) y la hoja NO se abre — «Activar» ahí cerraba el app.
 // «Ahora no» la pospone (12 h): una hoja que vuelve en cada apertura se aprende a cerrar sin leer.
 
 import { IconBell, IconClose } from "@/app/_components/icons";
@@ -31,7 +33,7 @@ export function posponerHoja(): void {
 /** ¿Hay algo que el conductor pueda hacer para recibir las notificaciones? */
 export function pushPendiente(estado: EstadoPushConductor, soporte: SoportePush | null): boolean {
   if (estado === "activo" || estado === "desconocido") return false;
-  return soporte !== null && soporte !== "no-soportado";
+  return soporte !== null && soporte !== "no-soportado" && soporte !== "app-sin-avisos";
 }
 
 const EJEMPLOS = [

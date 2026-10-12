@@ -11,7 +11,7 @@ import {
   type ReporteEquipo, type MotivoReporte, type PlataformaEquipo, type PluginEquipo,
 } from "@/lib/gps-equipo";
 import { attachHidScanner } from "@/lib/hid-scanner";
-import { detectarSoportePush, permisoBloqueado, permisoPushNativo, activarPushWeb, activarPushNativo, resincronizarSuscripcion, desactivarPush, type SoportePush } from "@/lib/push-cliente";
+import { detectarSoportePush, soportePushConductor, firebaseEnApkConductor, permisoBloqueado, permisoPushNativo, activarPushWeb, activarPushNativo, resincronizarSuscripcion, desactivarPush, type SoportePush } from "@/lib/push-cliente";
 import HojaNotificaciones, {
   FranjaNotificacionesApagadas, hojaPospuesta, posponerHoja, pushPendiente, type EstadoPushConductor,
 } from "@/components/conductor/HojaNotificaciones";
@@ -1331,7 +1331,10 @@ export default function ConductorApp() {
 
   // Lee el estado REAL del aparato y, si el permiso ya está dado, suscribe sin preguntar nada.
   const leerEstadoPush = useCallback(async (): Promise<EstadoPushConductor> => {
-    const soporte = detectarSoportePush();
+    // soportePushConductor, NO detectarSoportePush: en un APK sin Firebase el register() de
+    // abajo CIERRA EL APP (lib/push-cliente.ts → firebaseEnApkConductor). Pasó el 11-10-2026:
+    // los conductores con el permiso de notificaciones dado veían el app cerrarse al abrirla.
+    const soporte = await soportePushConductor();
     setSoportePush(soporte);
     if (soporte === "fcm") {
       // En el app nativo NO existe `Notification` dentro del WebView: el permiso lo sabe el
@@ -1371,6 +1374,13 @@ export default function ConductorApp() {
     const soporte = detectarSoportePush();
     if (soporte === "no-soportado" || soporte === "ios-instalar" || soporte === "app-desactualizada") {
       setPushEstado("inactivo");
+      return;
+    }
+    // Mismo candado que leerEstadoPush: sin Firebase en el APK, register() cierra el app.
+    if (soporte === "fcm" && !(await firebaseEnApkConductor())) {
+      setSoportePush("app-sin-avisos");
+      setPushEstado("inactivo");
+      setHojaPush(false);
       return;
     }
     setActivandoPush(true);
@@ -5407,13 +5417,14 @@ export default function ConductorApp() {
                     <p style={{ margin: 0, fontWeight: 700, fontSize: 14 }}>Notificaciones</p>
                     <p style={{ margin: 0, fontSize: 11, color: "var(--c-muted)" }}>
                       {pushEstado === "activo"    ? "Activas en este dispositivo"
+                       : soportePush === "app-sin-avisos" ? "Esta versión del app aún no las recibe: tus avisos llegan por WhatsApp"
                        : pushEstado === "bloqueado" ? "Bloqueadas — actívalas en los ajustes del teléfono"
                        : !conductor?._token        ? "Vuelve a iniciar sesión para activarlas"
                        : "Recibe tus servicios al instante"}
                     </p>
                   </div>
                 </div>
-                {pushEstado !== "activo" && pushEstado !== "bloqueado" && conductor?._token && (
+                {pushEstado !== "activo" && pushEstado !== "bloqueado" && soportePush !== "app-sin-avisos" && conductor?._token && (
                   <button
                     onClick={activarNotificaciones}
                     style={{
