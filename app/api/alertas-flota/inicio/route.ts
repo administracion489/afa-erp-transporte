@@ -164,8 +164,10 @@ async function handler(req: NextRequest) {
       const nombre = nombreCorto(c.nombre);
       const hora = horaCorta(r.hora_servicio);
       const origen = r.origen || rutaDe(r);
-      // Los parámetros son los de la plantilla que la migración le asigna a cada clave
-      // (las mismas que ya salen hoy en «Recuerda iniciar» y en «No inició»).
+      // Los parámetros son los de la plantilla que la migración le asigna a cada clave (las
+      // mismas de «Recuerda iniciar» y «No inició»). Tienen que existir APROBADAS en la cuenta
+      // de avisos: el 11-10-2026 no existían (#132001) y se crean con «Prellenar» en
+      // /configuracion/operaciones (lib/plantillas-sugeridas.ts).
       const parametros = clave === CLAVE_INICIA_AHORA
         ? [nombre, hora, origen]
         : [nombre, hora, rutaDe(r), telConting];

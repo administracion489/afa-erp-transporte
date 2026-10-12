@@ -37,9 +37,10 @@ create index if not exists idx_notif_reserva_creado
   on public.notificaciones_enviadas (reserva_id, created_at);
 
 -- ── 2) Los dos peldaños nuevos ────────────────────────────────────────────────
--- SE INSERTAN ENCENDIDOS: los pidió el dueño (11-10-2026). Usan plantillas que ya existen
--- y ya salen hoy (las mismas de «Recuerda iniciar» y de «No inició»), así que no hay que
--- aprobar nada en Meta. Para apagarlos: su tarjeta en /configuracion/operaciones.
+-- SE INSERTAN ENCENDIDOS: los pidió el dueño (11-10-2026). Usan las plantillas de «Recuerda
+-- iniciar» y de «No inició», que tienen que existir APROBADAS en la cuenta de avisos de Meta
+-- (la prueba del 11-10-2026 dio #132001: NO existían). Se crean desde /configuracion/operaciones
+-- → Crear plantilla nueva → «Prellenar». Para apagarlos: su tarjeta en esa misma pantalla.
 --   · inicia_ahora  → conductor_recuerda_iniciar ({{1}} nombre, {{2}} hora, {{3}} origen)
 --   · debio_iniciar → conductor_no_inicio ({{1}} nombre, {{2}} hora, {{3}} ruta, {{4}} teléfono
 --                      de contingencia)
