@@ -126,6 +126,26 @@ export function minutosDebioIniciar(cfg: CfgPaso): number {
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : DEBIO_INICIAR_MIN_DEFECTO;
 }
 
+/** Gracia de `no_inicio` en minutos después de la hora: la MISMA lectura que el tick (`umbral ?? 10`). */
+export const NO_INICIO_MIN_DEFECTO = 10;
+export function minutosNoInicio(cfg: CfgPaso | null | undefined): number {
+  const n = Number(cfg?.umbral ?? NO_INICIO_MIN_DEFECTO);
+  return Number.isFinite(n) && n >= 0 ? n : NO_INICIO_MIN_DEFECTO;
+}
+
+/**
+ * ¿El «No inició» al CONDUCTOR repite el «Ya debió iniciar»? Los dos usan la plantilla
+ * `conductor_no_inicio` con los mismos parámetros, así que si «No inició» está configurado en el
+ * mismo minuto (o antes) que «Ya debió iniciar», el conductor recibe el MISMO texto dos veces
+ * seguidas. Pasó el 12-10-2026: la tarjeta «No inició» quedó en 1 min, igual que el peldaño nuevo.
+ * Con «Ya debió iniciar» apagado no repite nada (el «No inició» es el único que le llega).
+ * Solo se callan los mensajes al conductor: al coordinador le sigue llegando su alerta.
+ */
+export function noInicioRepiteDebio(noInicio: CfgPaso | null | undefined, debio: CfgPaso | null | undefined): boolean {
+  if (!debio?.activo) return false;
+  return minutosNoInicio(noInicio) <= minutosDebioIniciar(debio);
+}
+
 /**
  * «Inicia ahora»: X min antes de la hora y hasta la hora. Pasa por `enViaRecordatorio`, el
  * MISMO predicado de los avisos pre-inicio del tick — la tabla de `alertas-modo-tiempo.ts`

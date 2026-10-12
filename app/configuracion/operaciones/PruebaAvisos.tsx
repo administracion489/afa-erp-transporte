@@ -20,7 +20,7 @@ type Resultado = { ok: boolean; error?: string; nota?: string };
 const CLAVE_TEL = "afa_prueba_avisos_tel";
 
 /** Los códigos que piden atención (algo no está como se cree): el resto es informativo. */
-const AMBAR: CodigoMuestra[] = ["mudo", "sin_config", "sin_plantilla"];
+const AMBAR: CodigoMuestra[] = ["mudo", "sin_config", "sin_plantilla", "repite_debio"];
 
 function telGuardado(): string {
   try { return localStorage.getItem(CLAVE_TEL) ?? ""; } catch { return ""; }

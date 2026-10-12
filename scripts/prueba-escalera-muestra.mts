@@ -190,6 +190,12 @@ function evidenciaDe(m: MensajeMuestra): string {
   chk("la tarjeta no le escribe al conductor → no_al_conductor", de({ debio_iniciar: { notifica_conductor: false } }, "debio_iniciar").codigo === "no_al_conductor");
   chk("al coordinador sin contactos → sin_contactos", de({ no_inicio: { contactos: 0 } }, "no_inicio:coordinador").codigo === "sin_contactos");
   chk("con «usa_directorio» apagado → sin_contactos", de({ no_inicio: { usa_directorio: false } }, "no_inicio:coordinador").codigo === "sin_contactos");
+  // 12-10-2026: «No inició» quedó en 1 min, el minuto de «Ya debió iniciar», con la misma plantilla.
+  const rep = de({ no_inicio: { umbral: 1 } }, "no_inicio");
+  chk("«No inició» en el minuto de «Ya debió iniciar» → repite_debio, desmarcado", rep.codigo === "repite_debio" && !rep.marcado && rep.enviable, rep.codigo);
+  chk("…pero al coordinador le sigue saliendo", de({ no_inicio: { umbral: 1 } }, "no_inicio:coordinador").codigo === "sale");
+  chk("con 10 min (el diseño) sale normal", de({ no_inicio: { umbral: 10 } }, "no_inicio").codigo === "sale");
+  chk("con «Ya debió iniciar» apagado no repite nada", de({ no_inicio: { umbral: 1 }, debio_iniciar: { activo: false } }, "no_inicio").codigo === "sale");
   chk("sin plantilla en el conductor → sin_plantilla y no se puede mandar", (() => {
     const m = de({ inicia_ahora: { plantilla: null } }, "inicia_ahora");
     return m.codigo === "sin_plantilla" && !m.enviable;
