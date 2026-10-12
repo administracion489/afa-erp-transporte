@@ -4,6 +4,10 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
+// Guarda fina de una pantalla por módulo. EL ROL `admin` PASA SIEMPRE, igual que en el
+// layout (que le da todos los módulos del menú) y en `verificarUsuarioApi` (lib/api-auth.ts):
+// el administrador original no tiene filas en `permisos_usuario`, y sin esta rama el hook lo
+// mandaba al dashboard — por eso Tesorería, Caja chica y /gps-salud lo esquivaban.
 export function usePermiso(modulo: string) {
   const router = useRouter();
   const [validando, setValidando] = useState(true);
@@ -16,6 +20,18 @@ export function usePermiso(modulo: string) {
 
       if (!session) {
         router.replace("/login");
+        return;
+      }
+
+      const { data: perfil } = await supabase
+        .from("usuarios")
+        .select("rol")
+        .eq("id", session.user.id)
+        .maybeSingle();
+
+      if (perfil?.rol === "admin") {
+        setPermitido(true);
+        setValidando(false);
         return;
       }
 
