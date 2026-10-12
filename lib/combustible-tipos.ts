@@ -257,6 +257,22 @@ export function normalizarTipoCombustible(texto?: string | null): string | null 
   return null;
 }
 
+/**
+ * El tipo del catálogo de una carga, SIN caer al diésel: un tipo vacío o que no se reconoce es
+ * `null` (desconocido). `configCombustible`/`familiaCombustible` caen al diésel a propósito —es la
+ * convención de PANTALLA para las cargas viejas sin tipo—, pero donde el tipo decide plata (qué
+ * precio sustituye al de referencia, cuánto CO₂ se publica) adivinar «diésel» es inventar el
+ * producto. Primero la clave exacta del catálogo y después la lectura del texto («Diésel»,
+ * «Gasohol 90»). La usan lib/flota/uso-flota.ts y lib/costos/precio-ultima-carga.ts.
+ */
+export function tipoEstrictoDeCarga(t: string | null | undefined): string | null {
+  const s = String(t ?? "").trim().toLowerCase();
+  if (!s) return null;
+  if (Object.prototype.hasOwnProperty.call(COMBUSTIBLES, s)) return s;
+  const n = normalizarTipoCombustible(t);
+  return n && Object.prototype.hasOwnProperty.call(COMBUSTIBLES, n) ? n : null;
+}
+
 // ── EL PUENTE CON `precios_combustible` ──────────────────────────────────────
 //
 // EL ERROR QUE ESTO MATA, Y LLEVABA MESES VIVO: `precios_combustible.tipo` guarda la etiqueta
