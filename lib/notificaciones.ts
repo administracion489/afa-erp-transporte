@@ -601,6 +601,9 @@ export async function notificarReserva(
   /** Clave de alerta_config que gobierna los canales de este envío. Si se omite se
    *  deduce del trigger (recordatorio vs confirmación). */
   claveAlerta?: string,
+  /** Si viene, solo se le escribe a estos pasajeros (el aviso manual no repite a quien ya
+   *  lo recibió: lib/notificaciones-manual.ts). */
+  opts?: { soloPasajeros?: number[] },
 ): Promise<{
   ok: boolean;
   resumen: { enviados: number; errores: number; sinCanal: number; total: number };
@@ -664,7 +667,11 @@ export async function notificarReserva(
     };
   }
 
-  const pasajeroIds = [...new Set(asignaciones.map(a => a.pasajero_id))];
+  const solo = opts?.soloPasajeros ? new Set(opts.soloPasajeros) : null;
+  const pasajeroIds = [...new Set(asignaciones.map(a => a.pasajero_id))].filter(id => !solo || solo.has(id));
+  if (pasajeroIds.length === 0) {
+    return { ok: true, resumen: { enviados: 0, errores: 0, sinCanal: 0, total: 0 }, detalle: [] };
+  }
 
   const { data: pasajeros } = await supabaseAdmin
     .from("pasajeros")

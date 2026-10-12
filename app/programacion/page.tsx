@@ -1392,7 +1392,9 @@ export default function ReservasPage() {
     try {
       const res = await fetch("/api/notificaciones/sincronizar", {
         method: "POST", headers: await cabecerasErp(),
-        body: JSON.stringify({ reserva_id: reservaId }),
+        // cambio_hora: el aviso anterior quedó con la hora vieja, así que repetirlo a quien
+        // ya lo recibió es corregirlo (lib/notificaciones-manual.ts). Un servicio pasado no se avisa.
+        body: JSON.stringify({ reserva_id: reservaId, motivo: "cambio_hora" }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || "No se pudo re-notificar");
