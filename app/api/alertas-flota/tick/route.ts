@@ -518,7 +518,9 @@ async function handler(req: NextRequest) {
     //    app (sin GPS, sin confirmar salida). A diferencia de "no_inicio" (que dispara
     //    DESPUÉS de la hora), esta es la escalada PREVENTIVA para que Operaciones
     //    pueda llamarlo antes de que el servicio arranque tarde. Reusa la plantilla
-    //    genérica `coordinador_alerta` — no requiere aprobar una plantilla nueva.
+    //    genérica `coordinador_alerta`, que tiene que existir APROBADA en la cuenta de
+    //    avisos (el 11-10-2026 no existía y ninguna alerta al coordinador salía: se crea
+    //    con «Prellenar» en /configuracion/operaciones, lib/plantillas-sugeridas.ts).
     {
       const cfg = activa("alerta_no_inicio_previa");
       if (cfg) {

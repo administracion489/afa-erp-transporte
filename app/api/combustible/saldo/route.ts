@@ -56,8 +56,9 @@ async function enviarAviso(cuenta: FilaCuenta, saldo: SaldoCuenta, escalon: numb
     try { await enviarEmail({ to, subject: t, html }); r.correos++; }
     catch (e: any) { r.fallos.push(`${to}: ${e.message}`); }
   }
-  // Plantilla genérica `coordinador_alerta` (la misma de las alertas operativas): no
-  // requiere aprobar una plantilla nueva en Meta. {{1}} título · {{2}} sujeto · {{3}} referencia · {{4}} detalle.
+  // Plantilla genérica `coordinador_alerta` (la misma de las alertas operativas). Tiene que existir
+  // APROBADA en la cuenta de avisos: se crea con «Prellenar» en /configuracion/operaciones
+  // (lib/plantillas-sugeridas.ts). {{1}} título · {{2}} sujeto · {{3}} referencia · {{4}} detalle.
   const params = [
     prueba ? "PRUEBA saldo combustible" : escalon === 0 ? "Saldo combustible AGOTADO" : "Saldo combustible bajo",
     cuenta.nombre,
