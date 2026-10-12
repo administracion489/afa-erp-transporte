@@ -12,7 +12,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
-import { hoyLima } from "@/lib/alertas";
+import { fechaLima } from "@/lib/alertas-horario";
 import { crearTurno, ColaLlena } from "@/lib/turno-calculo";
 import { calcularUso, LecturaFallida } from "@/lib/flota/uso-flota-datos";
 import { diasEntreFechas, sumarDias } from "@/lib/odometro-analitica";
@@ -49,12 +49,17 @@ const error = (status: number, codigo: CodigoErrorUso, mensaje: string, extra: P
 
 export async function GET(req: NextRequest) {
   const auth = await verificarUsuarioApi(req, "vehiculos");
-  if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  if (!auth.ok) {
+    return error(auth.status, auth.status === 401 ? "sin_sesion" : "sin_permiso",
+      auth.status === 401 ? "Tu sesión no es válida: vuelve a ingresar."
+        : `${auth.error}. El uso de flota necesita un usuario activo con el permiso del módulo Vehículos (lo da un administrador en Usuarios).`);
+  }
 
-  const hoy = hoyLima();
+  const hoy = fechaLima(Date.now());
   const sp = new URL(req.url).searchParams;
   const hasta = sp.get("hasta") || hoy;
-  const desde = sp.get("desde") || sumarDias(hasta, -6);
+  // `hasta` se valida ANTES de derivar el `desde` por defecto (sumarDias lanza con una fecha inválida).
+  const desde = sp.get("desde") || (fechaValida(hasta) ? sumarDias(hasta, -6) : "");
   if (!fechaValida(desde) || !fechaValida(hasta)) {
     return error(400, "fecha_invalida", "Fecha inválida: se espera AAAA-MM-DD (por ejemplo 2026-10-05).");
   }
@@ -74,7 +79,9 @@ export async function GET(req: NextRequest) {
   // Peticiones simultáneas del mismo periodo comparten UN cálculo.
   let promesa = enVuelo.get(clave);
   if (!promesa) {
-    promesa = turno(() => calcularUso(desde, hasta, hoy, Date.now())).finally(() => enVuelo.delete(clave));
+    // «Ahora» se toma al EMPEZAR el cálculo (puede haber esperado su turno), y «hoy» con él.
+    promesa = turno(() => { const ahora = Date.now(); return calcularUso(desde, hasta, fechaLima(ahora), ahora); })
+      .finally(() => enVuelo.delete(clave));
     enVuelo.set(clave, promesa);
   }
   try {
