@@ -217,7 +217,7 @@ export default function UsoFlotaResumen({ hoy, periodoDeInicio, onPeriodo }: {
             <p className="w-full text-[11px] text-gray-400">
               {rangoInvalido
                 ? "Falta elegir las dos fechas, y «desde» no puede ir después de «hasta»."
-                : `${diasEntreFechas(borrador.desde, borrador.hasta) + 1} día(s). Hasta 31 días por consulta, y nada posterior a hoy.`}
+                : `${diasEntreFechas(borrador.desde, borrador.hasta) + 1} día(s), comparados con los ${diasEntreFechas(borrador.desde, borrador.hasta) + 1} anteriores. Si el servidor no acepta el largo, lo dice.`}
             </p>
           </div>
         )}
@@ -513,7 +513,7 @@ function FilaUnidad({ u, leido }: { u: UnidadUso; leido: boolean }) {
       </td>
       <td className="px-3 py-2 text-right tabular-nums">
         {u.servicios}
-        {u.servicios > 0 && <span className="block text-[10px] text-gray-400">{u.prestados} prestado(s)</span>}
+        {u.servicios > 0 && <span className="block text-[10px] text-gray-400 whitespace-nowrap">{u.prestados} prestado(s)</span>}
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{u.diasActivos}</td>
       <td className="px-3 py-2 text-right tabular-nums font-bold text-gray-800 whitespace-nowrap">

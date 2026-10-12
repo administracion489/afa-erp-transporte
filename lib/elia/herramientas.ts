@@ -1857,7 +1857,14 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
         const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
         const inicio = inicioMeses(meses);
         const hoy = fechaLima();
-        return utilizacionParaElia(await entradaUsoParaElia(inicio, hoy, hoy, Date.now()));
+        try {
+          return utilizacionParaElia(await entradaUsoParaElia(inicio, hoy, hoy, Date.now()));
+        } catch (e) {
+          // El detalle (que puede traer el texto crudo de Postgres) va al log; al modelo, una frase que
+          // pueda repetir sin inventar la causa.
+          console.error("[elia/utilizacion_flota]", e);
+          return { paraModelo: JSON.stringify({ error: "No pude leer los datos de uso de la flota en este momento." }) };
+        }
       }
 
       // ────────────────────────────────────────────────────────────────────

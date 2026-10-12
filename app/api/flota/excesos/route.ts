@@ -3,9 +3,12 @@
 //
 // GET ?desde=AAAA-MM-DD&hasta=AAAA-MM-DD&umbral=60..130&fuera=0|1
 //   · como mucho 7 días por consulta (la pantalla pide un mes en tandas y las une con
-//     `unirRespuestasExcesos`, lib/flota/excesos.ts), nada en el futuro;
-//   · umbral entero entre 60 y 130 km/h (90 por defecto);
-//   · fuera=1 lista además los excesos FUERA de servicio (siempre se cuentan; nunca suman al ranking).
+//     `unirRespuestasExcesos`, lib/flota/excesos.ts), nada en el futuro y nada anterior a hoy −
+//     DIAS_RASTREO (90): cada día lee las posiciones rápidas de TODA la flota;
+//   · umbral entre 60 y 130 km/h de PASO_UMBRAL_KMH en PASO_UMBRAL_KMH (60, 65… 130; 90 por defecto;
+//     otro → 400). Entra en la clave de la caché: con cualquier entero bastaba con variarlo para esquivarla;
+//   · fuera=1 lista además los excesos FUERA de servicio (siempre se cuentan; nunca suman al ranking),
+//     con el pico aproximado a ~1 km. Con fuera=0, el directorio no nombra a quien solo aparece por ellos.
 //
 // Responde `RespuestaExcesos` (lib/flota/excesos.ts). Sin la migración responde 200 con `sin_migracion`
 // (la pantalla nombra el SQL). Un error de cálculo responde 200 con `error` y las listas vacías: NUNCA
@@ -18,6 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { fechaLima } from "@/lib/alertas-horario";
+import { DIAS_RASTREO } from "@/lib/gps-cobertura-datos";
 import { crearTurno, ColaLlena } from "@/lib/turno-calculo";
 import { excesosDelRango, ErrorLecturaExcesos } from "@/lib/flota/excesos-datos";
 import { respuestaVacia, validarConsultaExcesos, vistaRespuesta, type RespuestaExcesos } from "@/lib/flota/excesos";
@@ -29,14 +33,17 @@ export const maxDuration = 60;
 const TTL_CON_HOY_MS = 2 * 60_000;
 const TTL_CERRADO_MS = 15 * 60_000;
 const MAX_CACHE = 20;
-const cache = new Map<string, { at: number; ttl: number; payload: RespuestaExcesos }>();
-const enVuelo = new Map<string, Promise<RespuestaExcesos>>();
-// A lo sumo 2 rangos midiéndose a la vez por instancia; 20 esperando; más → 503 con `reintentar`.
-const turno = crearTurno(2, 20);
+/** Un cálculo con el «hoy» de Lima con que se hizo: de él sale el TTL, no del momento de leerlo. */
+type Calculo = { payload: RespuestaExcesos; hoyCalculo: string };
+const cache = new Map<string, { at: number; ttl: number; hoyCalculo: string; payload: RespuestaExcesos }>();
+const enVuelo = new Map<string, Promise<Calculo>>();
+// A lo sumo 2 rangos midiéndose a la vez por instancia; 6 esperando (una cola más larga no cabe en
+// maxDuration = 60 s); más → 503 con `reintentar`.
+const turno = crearTurno(2, 6);
 
-function guardar(clave: string, ttl: number, payload: RespuestaExcesos) {
+function guardar(clave: string, hasta: string, c: Calculo) {
   cache.delete(clave);
-  cache.set(clave, { at: Date.now(), ttl, payload });
+  cache.set(clave, { at: Date.now(), ttl: hasta >= c.hoyCalculo ? TTL_CON_HOY_MS : TTL_CERRADO_MS, hoyCalculo: c.hoyCalculo, payload: c.payload });
   while (cache.size > MAX_CACHE) cache.delete(cache.keys().next().value as string);
 }
 
@@ -46,24 +53,32 @@ export async function GET(req: NextRequest) {
 
   const hoy = fechaLima(Date.now());
   const sp = new URL(req.url).searchParams;
-  const v = validarConsultaExcesos({ desde: sp.get("desde"), hasta: sp.get("hasta"), umbral: sp.get("umbral"), fuera: sp.get("fuera") }, hoy);
+  const v = validarConsultaExcesos({ desde: sp.get("desde"), hasta: sp.get("hasta"), umbral: sp.get("umbral"), fuera: sp.get("fuera") }, hoy, DIAS_RASTREO);
   if (!v.ok) return NextResponse.json({ error: v.error }, { status: 400 });
   const { desde, hasta, umbral, incluirFueraDeServicio } = v.consulta;
 
   const clave = `${desde}|${hasta}|${umbral}`;
   const cacheado = cache.get(clave);
-  if (cacheado && Date.now() - cacheado.at < cacheado.ttl) return NextResponse.json(vistaRespuesta(cacheado.payload, incluirFueraDeServicio));
+  // Una entrada calculada con otro «hoy» (se cruzó la medianoche) no se sirve: se vuelve a medir.
+  if (cacheado && Date.now() - cacheado.at < cacheado.ttl && cacheado.hoyCalculo === hoy) {
+    return NextResponse.json(vistaRespuesta(cacheado.payload, incluirFueraDeServicio));
+  }
 
   // Peticiones simultáneas del mismo rango comparten UN cálculo.
   let promesa = enVuelo.get(clave);
   if (!promesa) {
-    promesa = turno(() => excesosDelRango({ desde, hasta, umbral })).finally(() => enVuelo.delete(clave));
+    // «Hoy» se toma al EMPEZAR el cálculo (puede haber esperado su turno): decide si el rango estaba abierto.
+    promesa = turno(async (): Promise<Calculo> => {
+      const hoyCalculo = fechaLima(Date.now());
+      return { payload: await excesosDelRango({ desde, hasta, umbral }), hoyCalculo };
+    }).finally(() => enVuelo.delete(clave));
     enVuelo.set(clave, promesa);
   }
   try {
-    const payload = await promesa;
+    const c = await promesa;
+    const payload = c.payload;
     // Sin la migración no se cachea: en cuanto alguien la corra, la próxima consulta ya mide.
-    if (!payload.sin_migracion) guardar(clave, hasta >= hoy ? TTL_CON_HOY_MS : TTL_CERRADO_MS, payload);
+    if (!payload.sin_migracion) guardar(clave, hasta, c);
     return NextResponse.json(vistaRespuesta(payload, incluirFueraDeServicio));
   } catch (e) {
     if (e instanceof ColaLlena) {

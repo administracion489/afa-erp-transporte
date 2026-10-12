@@ -112,6 +112,23 @@ seccion("0 · constantes");
   chk("el umbral por defecto es 90 y se declara elegible", X.UMBRAL_DEFECTO_KMH === 90 && X.CONSTANTES_EXCESOS[0].procedencia === "valor_por_defecto");
   chk("TEXTO_EPISODIO: solo `exceso` cuenta", X.CODIGOS_EPISODIO.every((c) => X.TEXTO_EPISODIO[c].cuenta === (c === "exceso")));
   chk("CODIGOS_DESCARTE = CODIGOS_EPISODIO sin exceso, en el mismo orden", J(X.CODIGOS_DESCARTE) === J(X.CODIGOS_EPISODIO.filter((c) => c !== "exceso")));
+  // Los topes contra el abuso de la API (la caché no se esquiva variando el umbral ni yendo atrás).
+  const cob = fs.readFileSync(path.join(process.cwd(), "lib/gps-cobertura-datos.ts"), "utf8");
+  const diasRastreo = /export const DIAS_RASTREO = (\d+);/.exec(cob)?.[1];
+  chk("DIAS_ATRAS_MAX_EXCESOS = DIAS_RASTREO de lib/gps-cobertura-datos.ts", Number(diasRastreo) === X.DIAS_ATRAS_MAX_EXCESOS, `gps-cobertura-datos dice ${diasRastreo}`);
+  const ruta = fs.readFileSync(path.join(process.cwd(), "app/api/flota/excesos/route.ts"), "utf8");
+  chk("la ruta valida con DIAS_RASTREO y su cola es de 6", ruta.includes("}, hoy, DIAS_RASTREO);") && ruta.includes("crearTurno(2, 6)") && !/crearTurno\(2, 20\)/.test(ruta));
+  chk("15 umbrales aceptados, de 5 en 5, del piso al techo, con el defecto dentro",
+    X.PASO_UMBRAL_KMH === 5 && X.UMBRALES_ACEPTADOS.length === 15 && X.UMBRALES_ACEPTADOS[0] === X.UMBRAL_MIN_KMH
+    && X.UMBRALES_ACEPTADOS[X.UMBRALES_ACEPTADOS.length - 1] === X.UMBRAL_MAX_KMH
+    && X.UMBRALES_ACEPTADOS.every((u, i) => u % X.PASO_UMBRAL_KMH === 0 && (i === 0 || u - X.UMBRALES_ACEPTADOS[i - 1] === X.PASO_UMBRAL_KMH))
+    && X.UMBRALES_ACEPTADOS.includes(X.UMBRAL_DEFECTO_KMH));
+  let soloEsos = true;
+  for (let n = 0; n <= 999; n++) {
+    const l = X.leerUmbral(String(n));
+    if (l.ok !== X.UMBRALES_ACEPTADOS.includes(n) || (l.ok && l.umbral !== n)) { soloEsos = false; console.log(`   leerUmbral("${n}") → ${J(l)}`); }
+  }
+  chk("leerUmbral acepta exactamente esos 15 (barrido de 0 a 999)", soloEsos);
 }
 
 // ══ 1) Casos de libro ══════════════════════════════════════════════════════════════════════
@@ -663,6 +680,53 @@ const sinHora = (r: RespuestaExcesos) => J({ ...r, medidoEn: null });
   chk("vistaRespuesta(fuera=1) devuelve todo", X.vistaRespuesta(r, true) === r);
   chk("unir una vista fuera=0 con una fuera=1 no afirma la lista completa", !X.unirRespuestasExcesos([X.vistaRespuesta(a, false), b]).incluyeFueraDeServicio);
 
+  // PRIVACIDAD FUERA DE SERVICIO.
+  // (a) ningún exceso fuera de servicio sale con más de 2 decimales en el pico (~1 km); los de servicio, exactos.
+  // (b) con fuera=0, el directorio no nombra a nadie sin servicio ni exceso en servicio en la respuesta.
+  const dosDecimales = (x: number) => Math.round(x * 100) / 100 === x && Number(x.toFixed(2)) === x;
+  const picoAproximado = (rr: RespuestaExcesos) => rr.resumen.fueraDeServicio.every((e) => dosDecimales(e.latPico) && dosDecimales(e.lngPico));
+  const nombraSoloEnServicio = (rr: RespuestaExcesos) => {
+    const c = new Set<string>(), u = new Set<string>();
+    for (const s of rr.servicios) { if (s.conductor) c.add(s.conductor); if (s.vehiculo) u.add(s.vehiculo); }
+    for (const e of rr.episodios) { if (e.conductor) c.add(e.conductor); if (e.vehiculo) u.add(e.vehiculo); }
+    return rr.conductores.every((x) => c.has(x.clave)) && rr.unidades.every((x) => u.has(x.clave));
+  };
+  const vistas = [r, unida, a, b, X.unirRespuestasExcesos([X.vistaRespuesta(a, false), b])];
+  chk("(a) el lector, las tandas y su unión: todo pico fuera de servicio con ≤ 2 decimales", vistas.every(picoAproximado) && r.resumen.fueraDeServicio.length > 0,
+    `${r.resumen.fueraDeServicio.length} fuera de servicio`);
+  chk("(a) …y los de servicio salen con su posición exacta (alguno con más de 2 decimales)", r.episodios.some((e) => !dosDecimales(e.latPico) || !dosDecimales(e.lngPico)));
+  chk("(b) el lector, las tandas y su unión con fuera=0: el directorio solo nombra a quien está en servicio",
+    vistas.every((x) => nombraSoloEnServicio(X.vistaRespuesta(x, false))));
+  chk("(b) …sin perder a nadie que sí esté en servicio", vistas.every((x) => {
+    const v = X.vistaRespuesta(x, false);
+    const enServ = (k: string) => x.servicios.some((s) => s.conductor === k) || x.episodios.some((e) => e.conductor === k);
+    return x.conductores.filter((c) => enServ(c.clave)).length === v.conductores.length;
+  }));
+  // El caso hecho a mano: p:3 SOLO aparece por un exceso fuera de servicio (en un sitio exacto).
+  const epi = (o: Partial<Episodio>): Episodio => ({
+    codigo: "exceso", conductor: "p:1", vehiculo: "p:10", reservaId: 10, fueraDeServicio: false, inicioTs: T0 + 3_600_000, finTs: T0 + 3_660_000,
+    durS: 60, puntos: 21, velMaxSensor: 104, velMediaSensor: 100, velGeom: 99, precisionMediana: 6, latPico: -12.0461234, lngPico: -77.0312987,
+    cortado: false, detalle: "x", ...o,
+  });
+  const serv = (id: number, c: string, v: string): ServicioExpuesto => ({ ...r.servicios[0], reservaId: id, prestado: true, estado: "finalizada", conductor: c, vehiculo: v });
+  const manual = X.armarRespuestaExcesos({
+    desde: "2026-10-05", hasta: "2026-10-05", umbral: 90, medidoEn: null,
+    episodios: [epi({}), epi({ conductor: "p:3", vehiculo: "p:30", reservaId: null, fueraDeServicio: true, inicioTs: T0 + 7_200_000, finTs: T0 + 7_260_000 })],
+    servicios: [serv(10, "p:1", "p:10"), serv(11, "p:2", "p:20")],
+    conductores: ["p:1", "p:2", "p:3"].map((k) => ({ clave: k, nombre: `C ${k}`, tercero: false, velocimetro: "con_velocimetro" as Velocimetro })),
+    unidades: ["p:10", "p:20", "p:30"].map((k) => ({ clave: k, placa: `PL ${k}`, tercero: false })),
+  });
+  const fueraManual = manual.resumen.fueraDeServicio[0];
+  chk("(a) a mano: el pico fuera de servicio sale redondeado a ~1 km (-12.05, -77.03)", fueraManual?.latPico === -12.05 && fueraManual?.lngPico === -77.03, J(fueraManual && [fueraManual.latPico, fueraManual.lngPico]));
+  chk("(a) a mano: el de servicio, exacto", manual.episodios[0].latPico === -12.0461234 && manual.episodios[0].lngPico === -77.0312987);
+  chk("(a) redondear es idempotente", J(X.conPicoAproximado(fueraManual)) === J(fueraManual));
+  const m0 = X.vistaRespuesta(manual, false), m1 = X.vistaRespuesta(manual, true);
+  chk("(b) a mano, fuera=0: p:3 y su unidad p:30 no se nombran; p:1, p:2 y sus unidades sí",
+    J(m0.conductores.map((c) => c.clave)) === J(["p:1", "p:2"]) && J(m0.unidades.map((u) => u.clave)) === J(["p:10", "p:20"]) && nombraSoloEnServicio(m0));
+  chk("(b) …pero se sigue contando el exceso fuera de servicio", m0.resumen.fueraDeServicioTotal === 1 && m0.resumen.fueraDeServicio.length === 0);
+  chk("(b) a mano, fuera=1: p:3 sí se nombra (es a quien se lista)", m1 === manual && m1.conductores.some((c) => c.clave === "p:3") && m1.resumen.fueraDeServicio.length === 1);
+  chk("(b) recortar el directorio no mueve el ranking", J(m0.resumen.porConductor) === J(manual.resumen.porConductor) && J(m0.resumen.totales) === J(manual.resumen.totales));
+
   // Falta solo fn_gps_velocimetro: se mide igual, todos «no se sabe», con aviso.
   const sinVel = await D.excesosDelRango({ desde, hasta, umbral: 90 }, clienteFalso(tablas, { errorRpc: { fn_gps_velocimetro: { code: "PGRST202", message: "Could not find the function public.fn_gps_velocimetro in the schema cache" } } }));
   chk("sin fn_gps_velocimetro: se mide, todos «no se sabe», y se avisa nombrando el SQL",
@@ -699,6 +763,16 @@ const sinHora = (r: RespuestaExcesos) => J({ ...r, medidoEn: null });
   chk("fecha que no existe → error", !v({ desde: "2026-02-30", hasta: "2026-03-01" }).ok);
   chk("umbral 59 / 131 / 90.5 / abc → error", ["59", "131", "90.5", "abc", "-90"].every((u) => !v({ umbral: u }).ok));
   chk("umbral 60 y 130 → ok", v({ umbral: "60" }).ok && v({ umbral: "130" }).ok);
+  chk("umbral 93 → error que dice el paso y propone 90 o 95 (esquivar la caché variando el umbral)", (() => {
+    const x = v({ umbral: "93" }); return !x.ok && /de 5 en 5/.test(x.error) && /90 o 95/.test(x.error);
+  })(), (() => { const x = v({ umbral: "93" }); return x.ok ? "" : x.error; })());
+  chk("umbral 95 → ok", (() => { const x = v({ umbral: "95" }); return x.ok && x.consulta.umbral === 95; })());
+  chk("desde anterior a hoy − 90 días → error que nombra el límite", (() => {
+    const x = v({ desde: X.sumarDias(hoy, -91), hasta: X.sumarDias(hoy, -88) }); return !x.ok && /90 días/.test(x.error) && x.error.includes(X.sumarDias(hoy, -90));
+  })());
+  chk("desde = hoy − 90 días → ok", v({ desde: X.sumarDias(hoy, -90), hasta: X.sumarDias(hoy, -84) }).ok);
+  chk("los días atrás los decide quien llama (la ruta pasa DIAS_RASTREO)", !X.validarConsultaExcesos({ desde: X.sumarDias(hoy, -10), hasta: X.sumarDias(hoy, -9) }, hoy, 7).ok
+    && X.validarConsultaExcesos({ desde: X.sumarDias(hoy, -10), hasta: X.sumarDias(hoy, -9) }, hoy, 10).ok);
   chk("fuera 1 → incluye; fuera 2 → error", (() => { const x = v({ fuera: "1" }); return x.ok && x.consulta.incluirFueraDeServicio && !v({ fuera: "2" }).ok; })());
   chk("los mensajes de error están en español", (() => { const x = v({ desde: "x" }); return !x.ok && /inválidas/.test(x.error); })());
   const t = X.tandasDeRango("2026-09-01", "2026-09-30");
@@ -729,7 +803,7 @@ seccion("6 · corolario");
 seccion("7 · la ruta /api/flota/excesos");
 {
   const http = await import("node:http");
-  let modoRpc: "falta" | "error" = "falta";
+  let modoRpc: "falta" | "error" | "vacio" = "falta";
   const pedidas: string[] = [];
   const srv = http.createServer((req, res) => {
     req.on("data", () => {});
@@ -747,10 +821,12 @@ seccion("7 · la ruta /api/flota/excesos");
       }
       if (req.url?.startsWith("/rest/v1/permisos_usuario")) return json(200, []);
       if (req.url?.startsWith("/rest/v1/rpc/fn_gps_puntos_rapidos")) {
+        if (modoRpc === "vacio") return json(200, { puntos: [], recortado: false });
         return modoRpc === "falta"
           ? json(404, { code: "PGRST202", details: "Searched for the function public.fn_gps_puntos_rapidos", hint: null, message: "Could not find the function public.fn_gps_puntos_rapidos(p_desde, p_hasta, p_umbral) in the schema cache" })
           : json(500, { code: "57014", details: null, hint: null, message: "canceling statement due to statement timeout" });
       }
+      if (req.url?.startsWith("/rest/v1/reservas")) return json(200, []);
       json(404, { code: "PGRST205", message: "?" });
     });
   });
@@ -765,24 +841,60 @@ seccion("7 · la ruta /api/flota/excesos");
     const r = await GET(new NextRequest(`http://localhost/api/flota/excesos${q}`, { headers: quien ? { authorization: `Bearer ${quien}` } : {} }));
     return { status: r.status, body: await r.json() as any };
   };
+  // Las fechas van relativas a HOY: la ruta no acepta nada anterior a hoy − DIAS_RASTREO.
+  const HOY = X.diaLima(Date.now());
+  const dia = (n: number) => X.sumarDias(HOY, n);
+  const R = `?desde=${dia(-7)}&hasta=${dia(-6)}`;
+  const reloj = Date.now;
   try {
-    chk("sin sesión → 401", (await pedir("?desde=2026-10-05&hasta=2026-10-06")).status === 401);
-    const sinPermiso = await pedir("?desde=2026-10-05&hasta=2026-10-06", "operador");
+    chk("sin sesión → 401", (await pedir(R)).status === 401);
+    const sinPermiso = await pedir(R, "operador");
     chk("sin el módulo monitoreo → 403", sinPermiso.status === 403 && /monitoreo/.test(sinPermiso.body.error));
-    chk("más de 7 días → 400 con el motivo", (await pedir("?desde=2026-10-01&hasta=2026-10-09", "admin")).status === 400);
-    chk("umbral fuera de 60..130 → 400", (await pedir("?desde=2026-10-05&hasta=2026-10-06&umbral=50", "admin")).status === 400);
+    chk("más de 7 días → 400 con el motivo", (await pedir(`?desde=${dia(-11)}&hasta=${dia(-3)}`, "admin")).status === 400);
+    chk("umbral fuera de 60..130 → 400", (await pedir(`${R}&umbral=50`, "admin")).status === 400);
+    const u93 = await pedir(`${R}&umbral=93`, "admin");
+    chk("umbral que no es múltiplo de 5 → 400 que dice el paso (la caché no se esquiva variando el umbral)", u93.status === 400 && /de 5 en 5/.test(u93.body.error), u93.body.error);
+    const viejo = await pedir(`?desde=${dia(-91)}&hasta=${dia(-89)}`, "admin");
+    chk("desde anterior a hoy − DIAS_RASTREO → 400 que nombra el límite", viejo.status === 400 && /90 días/.test(viejo.body.error), viejo.body.error);
     chk("en el futuro → 400", (await pedir("?desde=2099-01-01&hasta=2099-01-02", "admin")).status === 400);
-    const m = await pedir("?desde=2026-10-05&hasta=2026-10-06&umbral=90", "admin");
+    chk("…sin leer nada para rechazarlo", pedidas.every((x) => !x.includes("/rest/v1/rpc/")));
+    const m = await pedir(`${R}&umbral=90`, "admin");
     chk("falta la función (404 PGRST202 de PostgREST) → 200 con sin_migracion, sin episodios",
       m.status === 200 && m.body.sin_migracion === X.MIGRACION_EXCESOS && m.body.episodios.length === 0 && m.body.resumen.totales.excesos === null && m.body.error === null);
     chk("…sin leer reservas ni nada más", pedidas.every((x) => !x.includes("/rest/v1/reservas")));
     modoRpc = "error";
-    const e = await pedir("?desde=2026-10-05&hasta=2026-10-06&umbral=90", "admin");
+    const e = await pedir(`${R}&umbral=90`, "admin");
     chk("sin migración NO se cachea: corrida la migración, la siguiente consulta ya mide", e.body.sin_migracion === null);
     chk("otro error → 200 con `error` en español, listas vacías y total null (nunca «0 excesos»)",
       e.status === 200 && /No se pudieron leer las posiciones/.test(e.body.error) && !/statement/.test(e.body.error)
       && e.body.episodios.length === 0 && e.body.resumen.totales.excesos === null, e.body.error);
+
+    // El TTL lo decide el «hoy» del CÁLCULO: un rango que incluía hoy, medido a las 23:59, no se sirve
+    // como cerrado pasada la medianoche (todavía le faltaba el final del día). Reloj simulado.
+    modoRpc = "vacio";
+    const medianoche = Date.parse(`${dia(1)}T05:00:00Z`);          // 00:00 de mañana en Lima
+    let ahora = medianoche - 30_000;                               // 23:59:30 de hoy
+    Date.now = () => ahora;
+    const rpcs = () => pedidas.filter((x) => x.includes("/rpc/fn_gps_puntos_rapidos")).length;
+    const RH = `?desde=${dia(-1)}&hasta=${dia(0)}&umbral=95`;
+    const n0 = rpcs();
+    const h1 = await pedir(RH, "admin");
+    const n1 = rpcs();
+    chk("medido a las 23:59:30 (el rango incluye hoy) → 200 y mide", h1.status === 200 && h1.body.error === null && n1 > n0, `${n1 - n0} lecturas`);
+    await pedir(RH, "admin");
+    chk("…al instante sale de la caché", rpcs() === n1);
+    ahora = medianoche + 30_000;                                   // 00:00:30 de mañana
+    const h2 = await pedir(RH, "admin");
+    const n2 = rpcs();
+    chk("pasada la medianoche NO se sirve lo medido como «hoy»: se vuelve a medir", h2.status === 200 && n2 > n1);
+    ahora += 10 * 60_000;
+    await pedir(RH, "admin");
+    chk("medido ya cerrado → caché larga (10 min después sigue sirviéndose)", rpcs() === n2);
+    ahora += 10 * 60_000;
+    await pedir(RH, "admin");
+    chk("…y vence a los 15 min", rpcs() > n2);
   } finally {
+    Date.now = reloj;
     srv.close();
   }
 }

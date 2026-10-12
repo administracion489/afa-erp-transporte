@@ -54,25 +54,29 @@ import { COMBUSTIBLES, co2DeCantidad, FACTOR_CO2, FUENTE_FACTOR_CO2, type Codigo
 import { identidadRuta, type IdentidadRuta } from "../ruta-identidad";
 import { conductorDeLaTraza } from "../gps-diagnostico-api";
 import {
-  detectarExcesos, puntosDeCrudas, velocimetroDe,
-  UMBRAL_DEFECTO_KMH, UMBRAL_MIN_KMH, UMBRAL_MAX_KMH,
+  detectarExcesos, leerUmbral, puntosDeCrudas, velocimetroDe,
+  PASO_UMBRAL_KMH, UMBRAL_DEFECTO_KMH, UMBRAL_MIN_KMH, UMBRAL_MAX_KMH,
   type CodigoDescarte,
 } from "./excesos";
 
 // ══ Umbral de excesos ════════════════════════════════════════════════════════════════════
 
-/** El umbral de velocidad de los excesos del servicio: los MISMOS límites que /seguridad-vial
- *  (lib/flota/excesos.ts), para que un exceso cuente igual en las dos pantallas. */
-export const UMBRAL_SERVICIO = { defecto: UMBRAL_DEFECTO_KMH, min: UMBRAL_MIN_KMH, max: UMBRAL_MAX_KMH } as const;
+/** El umbral de velocidad de los excesos del servicio: los MISMOS límites y el MISMO paso que
+ *  /seguridad-vial (lib/flota/excesos.ts), para que un exceso cuente igual en las dos pantallas. */
+export const UMBRAL_SERVICIO = { defecto: UMBRAL_DEFECTO_KMH, min: UMBRAL_MIN_KMH, max: UMBRAL_MAX_KMH, paso: PASO_UMBRAL_KMH } as const;
 
-/** El umbral de la petición: vacío → el defecto; un entero dentro de [min, max] → ese; cualquier
- *  otra cosa → null (la ruta responde 400: no se «corrige» un umbral que alguien escribió mal). */
+/** El umbral de la petición con su motivo: es `leerUmbral` de lib/flota/excesos.ts (la regla de
+ *  /api/flota/excesos), con los espacios del borde recortados. Vacío → el defecto; un entero dentro de
+ *  [min, max] múltiplo de `paso` → ese; cualquier otra cosa → el motivo, para el 400. */
+export function validarUmbral(texto: string | null | undefined): { ok: true; umbral: number } | { ok: false; error: string } {
+  return leerUmbral(String(texto ?? "").trim());
+}
+
+/** El umbral de la petición: el de `validarUmbral`, o null si no vale (la ruta responde 400: no se
+ *  «corrige» un umbral que alguien escribió mal). */
 export function normalizarUmbral(texto: string | null | undefined): number | null {
-  const t = String(texto ?? "").trim();
-  if (!t) return UMBRAL_SERVICIO.defecto;
-  if (!/^\d{1,3}$/.test(t)) return null;
-  const n = Number(t);
-  return n >= UMBRAL_SERVICIO.min && n <= UMBRAL_SERVICIO.max ? n : null;
+  const v = validarUmbral(texto);
+  return v.ok ? v.umbral : null;
 }
 
 // ══ Contexto de combustible de la UNIDAD ═════════════════════════════════════════════════

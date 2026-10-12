@@ -5,8 +5,10 @@
 //
 // GET /api/flota/uso?desde=AAAA-MM-DD&hasta=AAAA-MM-DD   (por defecto, los últimos 7 días)
 //   · módulo `vehiculos` (son métricas de la flota);
-//   · 31 días como máximo y nada futuro: cada consulta puede leer hasta MAX_TRAZAS_RELLENO trazas;
-//   · a lo sumo 2 cálculos a la vez por instancia y 20 esperando (lib/turno-calculo.ts); con más, 503;
+//   · 31 días como máximo, nada futuro y nada anterior a hoy − DIAS_ATRAS_MAX_USO (400): cada consulta
+//     puede leer hasta MAX_TRAZAS_RELLENO trazas, y la caché es por periodo;
+//   · a lo sumo 2 cálculos a la vez por instancia y 6 esperando (lib/turno-calculo.ts; una cola más
+//     larga no cabe en maxDuration = 60 s); con más, 503;
 //   · caché en memoria: 2 min si el periodo incluye hoy, 15 min si no; a lo sumo MAX_CACHE periodos.
 // LEE, no escribe nada. El motor es lib/flota/uso-flota.ts (puro) y el lector lib/flota/uso-flota-datos.ts.
 
@@ -16,7 +18,7 @@ import { fechaLima } from "@/lib/alertas-horario";
 import { crearTurno, ColaLlena } from "@/lib/turno-calculo";
 import { calcularUso, LecturaFallida } from "@/lib/flota/uso-flota-datos";
 import { diasEntreFechas, sumarDias } from "@/lib/odometro-analitica";
-import type { RespuestaUso, ErrorUso, CodigoErrorUso } from "@/lib/flota/uso-flota";
+import { DIAS_ATRAS_MAX_USO, type RespuestaUso, type ErrorUso, type CodigoErrorUso } from "@/lib/flota/uso-flota";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -29,7 +31,7 @@ const MAX_CACHE = 30;
 
 const cache = new Map<string, { at: number; ttl: number; payload: RespuestaUso }>();
 const enVuelo = new Map<string, Promise<RespuestaUso>>();
-const turno = crearTurno(2, 20);
+const turno = crearTurno(2, 6);
 
 function guardar(clave: string, ttl: number, payload: RespuestaUso) {
   cache.delete(clave);
@@ -65,6 +67,10 @@ export async function GET(req: NextRequest) {
   }
   if (desde > hasta) return error(400, "rango_invertido", `El periodo empieza (${desde}) después de terminar (${hasta}).`);
   if (hasta > hoy) return error(400, "futuro", `El periodo no puede pasar de hoy (${hoy}): lo futuro no tiene uso que medir.`);
+  const minimo = sumarDias(hoy, -DIAS_ATRAS_MAX_USO);
+  if (desde < minimo) {
+    return error(400, "rango_antiguo", `El uso de flota se consulta de los últimos ${DIAS_ATRAS_MAX_USO} días: el periodo no puede empezar antes del ${minimo}.`);
+  }
   if (diasEntreFechas(desde, hasta) + 1 > MAX_DIAS) {
     return error(400, "rango_largo", `El periodo puede tener ${MAX_DIAS} días como máximo; pediste ${diasEntreFechas(desde, hasta) + 1}.`);
   }

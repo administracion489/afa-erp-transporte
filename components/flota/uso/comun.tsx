@@ -80,9 +80,9 @@ export const fmtKm = (n: number) => `${fmtNum(n, Math.abs(n) >= 100 ? 0 : 1)} km
 
 export const fmtSoles = (n: number) => `S/ ${fmtNum(n, 2)}`;
 
-export const fmtKg = (n: number) => `${fmtNum(n, Math.abs(n) >= 100 ? 0 : 1)} kg`;
+export const fmtKg = (n: number) => `${fmtNum(n, n === 0 || Math.abs(n) >= 100 ? 0 : 1)} kg`;
 
-export const fmtHoras = (h: number) => `${fmtNum(h, 1)} h`;
+export const fmtHoras = (h: number) => `${fmtNum(h, h === 0 ? 0 : 1)} h`;
 
 /** 75 → «1 h 15 min», 40 → «40 min». */
 export function fmtMin(m: number): string {

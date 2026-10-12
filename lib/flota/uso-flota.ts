@@ -72,6 +72,11 @@ export const DIAS_ANCLA_LECTURAS = 30;
 /** Puntos de cobertura del odómetro entre un periodo y otro a partir de los que la comparación del km
  *  se AVISA (la variación puede ser de registro, no de trabajo). NO MEDIDO: el lado seguro es bajarlo. */
 export const UMBRAL_CAMBIO_COBERTURA_PTS = 10;
+/** Hasta cuántos días atrás puede empezar un periodo de /api/flota/uso (`desde` ≥ hoy − esto; si no,
+ *  400 `rango_antiguo`). OPERATIVO, no medido: un tope contra el abuso —cada consulta lee además el
+ *  periodo anterior del mismo largo, hasta MAX_TRAZAS_RELLENO trazas de GPS y la caché es por periodo—
+ *  que deja comparar un mes con el mismo mes del año pasado. */
+export const DIAS_ATRAS_MAX_USO = 400;
 
 export type ProcedenciaConstante = "operativo" | "heredado" | "no_medido";
 export type ConstanteUso = { clave: string; valor: number; unidad: string; procedencia: ProcedenciaConstante; texto: string };
@@ -987,7 +992,7 @@ export type RespuestaUso = {
 
 export type CodigoErrorUso =
   | "sin_sesion" | "sin_permiso"
-  | "fecha_invalida" | "rango_invertido" | "rango_largo" | "futuro" | "cola_llena" | "lectura_fallida";
+  | "fecha_invalida" | "rango_invertido" | "rango_largo" | "rango_antiguo" | "futuro" | "cola_llena" | "lectura_fallida";
 
 export type ErrorUso = { ok: false; codigo: CodigoErrorUso; error: string; reintentar?: boolean };
 

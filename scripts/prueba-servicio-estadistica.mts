@@ -23,18 +23,48 @@
 //  10. De punta a punta sobre una traza: el corolario (una propia diésel con km medido y tipo asignado
 //      publica km, combustible, costo y CO₂), el conductor del teléfono, la traza sin filas y la que
 //      rompe el cálculo.
-//  11. `normalizarUmbral` y la respuesta de error.
+//  11. `normalizarUmbral`: solo los 15 umbrales de 5 en 5 (otro → 400 con el motivo), y la respuesta de error.
+//  12. La ruta /api/flota/servicios contra un Supabase falso por HTTP: el 400 del umbral, la cola de 6 y
+//      el TTL decidido por el «hoy» del CÁLCULO (un día medido a las 23:59 no se sirve como cerrado
+//      pasada la medianoche), con el reloj simulado.
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- la base falsa imita al cliente sin tipos de Supabase */
-process.env.NEXT_PUBLIC_SUPABASE_URL ||= "http://127.0.0.1:9";
-process.env.SUPABASE_SERVICE_ROLE_KEY ||= "prueba";
+// El Supabase falso de la sección 12 se levanta ANTES de importar nada: lib/gps-cobertura-datos.ts,
+// lib/flota/servicio-estadistica-datos.ts y lib/api-auth.ts crean su cliente al cargarse. Las demás
+// secciones no lo tocan (la traza se les inyecta). Toda tabla responde vacía.
+const http = await import("node:http");
+const pedidas: string[] = [];
+const srv = http.createServer((req, res) => {
+  req.on("data", () => {});
+  req.on("end", () => {
+    pedidas.push(`${req.method} ${req.url?.split("?")[0]}`);
+    const json = (st: number, o: unknown) => { res.writeHead(st, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
+    if (req.url?.startsWith("/auth/v1/user")) {
+      return req.headers.authorization === "Bearer admin"
+        ? json(200, { id: "u-admin", aud: "authenticated", role: "authenticated" })
+        : json(401, { code: 401, msg: "invalid JWT" });
+    }
+    if (req.url?.startsWith("/rest/v1/usuarios")) {
+      const o = { rol: "admin", activo: true };
+      return json(200, String(req.headers.accept).includes("pgrst.object") ? o : [o]);
+    }
+    if (req.url?.startsWith("/rest/v1/")) return json(200, []);
+    json(404, {});
+  });
+});
+await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", () => ok()));
+process.env.NEXT_PUBLIC_SUPABASE_URL = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon";
+process.env.SUPABASE_SERVICE_ROLE_KEY = "prueba";
 
 const SE = await import("../lib/flota/servicio-estadistica");
 const {
   contextoCombustible, combustibleEstimado, costoCombustibleEstimado, co2Estimado, unidadDeFamilia,
   huellaDeServicio, componerEstadistica, estadisticaDeServicio, resumirPorCliente, totalDelDia,
-  normalizarUmbral, respuestaConError, textoCantidades, CODIGOS_COMBUSTIBLE, UMBRAL_SERVICIO, HUELLA_PUBLICA,
+  normalizarUmbral, validarUmbral, respuestaConError, textoCantidades, CODIGOS_COMBUSTIBLE, UMBRAL_SERVICIO, HUELLA_PUBLICA,
 } = SE;
+const { PASO_UMBRAL_KMH, UMBRALES_ACEPTADOS, sumarDias } = await import("../lib/flota/excesos");
+const { fechaLima } = await import("../lib/alertas-horario");
 const { kmPublicable, KM_GPS_PUBLICA } = await import("../lib/flota/km-gps");
 const { calcularPresupuesto } = await import("../lib/costeo-servicio");
 const { calcularCostoUnidad, consumoPorKm } = await import("../lib/costeo-propio");
@@ -609,10 +639,67 @@ console.log("\n11. `normalizarUmbral` y la respuesta de error");
   chk("enteros dentro del rango pasan", normalizarUmbral("60") === 60 && normalizarUmbral("130") === 130 && normalizarUmbral("95") === 95);
   chk("fuera del rango, decimales, signos o texto → null (400)",
     ["59", "131", "90.5", "-90", "abc", "1e2", "0090", " 9 0"].every((t) => normalizarUmbral(t) === null));
+  chk("el mismo paso que /seguridad-vial", UMBRAL_SERVICIO.paso === PASO_UMBRAL_KMH && PASO_UMBRAL_KMH === 5);
+  let soloEsos = true;
+  for (let n = 0; n <= 999; n++) {
+    const u = normalizarUmbral(String(n));
+    if ((u != null) !== UMBRALES_ACEPTADOS.includes(n) || (u != null && u !== n)) soloEsos = false;
+  }
+  chk("solo pasan los 15 umbrales de 5 en 5 (barrido de 0 a 999), con espacios al borde también", soloEsos && UMBRALES_ACEPTADOS.length === 15 && normalizarUmbral(" 95 ") === 95);
+  const v93 = validarUmbral("93");
+  chk("93 → el motivo dice el paso y propone 90 o 95", !v93.ok && /de 5 en 5/.test(v93.error) && /90 o 95/.test(v93.error), v93.ok ? "" : v93.error);
   const er = respuestaConError("2026-10-09", 90, "No se pudo medir", 150);
   chk("la respuesta de error lleva el motivo, la lista vacía y un total en cero (no un «0 servicios» sin decir por qué)",
     er.error === "No se pudo medir" && er.servicios.length === 0 && er.total.servicios === 0 && er.medidoEn === null && er.metodo.factoresCo2.length === 4);
 }
+
+// ══ 12. La ruta, con el reloj simulado ══════════════════════════════════════════════════════
+console.log("\n12. La ruta /api/flota/servicios: umbral, cola y el TTL del «hoy» del cálculo");
+{
+  const fs = await import("node:fs");
+  const fuente = fs.readFileSync(new URL("../app/api/flota/servicios/route.ts", import.meta.url), "utf8");
+  chk("la cola es de 6 (una de 20 no cabe en maxDuration = 60 s)", fuente.includes("crearTurno(2, 6)") && !/crearTurno\(2, 20\)/.test(fuente));
+  const { GET } = await import("../app/api/flota/servicios/route");
+  const { NextRequest } = await import("next/server");
+  const pedir = async (q: string) => {
+    const r = await GET(new NextRequest(`http://localhost/api/flota/servicios${q}`, { headers: { authorization: "Bearer admin" } }));
+    return { status: r.status, body: await r.json() as any };
+  };
+  const reloj = Date.now;
+  try {
+    const hoyReal = fechaLima(Date.now());
+    const u93 = await pedir(`?fecha=${hoyReal}&umbral=93`);
+    chk("umbral 93 → 400 que dice el paso (la caché no se esquiva variando el umbral)", u93.status === 400 && /de 5 en 5/.test(u93.body.error), u93.body.error);
+    chk("…sin leer nada para rechazarlo", !pedidas.some((x) => x.includes("/rest/v1/reservas")));
+    const viejo = await pedir(`?fecha=${sumarDias(hoyReal, -91)}`);
+    chk("un día de hace más de DIAS_RASTREO → 400", viejo.status === 400);
+
+    const medianoche = Date.parse(`${sumarDias(hoyReal, 1)}T05:00:00Z`);   // 00:00 de mañana en Lima
+    let ahora = medianoche - 30_000;                                        // 23:59:30 de hoy
+    Date.now = () => ahora;
+    const lecturas = () => pedidas.filter((x) => x.includes("/rest/v1/reservas")).length;
+    const Q = `?fecha=${hoyReal}&umbral=95`;
+    const n0 = lecturas();
+    const a = await pedir(Q);
+    const n1 = lecturas();
+    chk("hoy a las 23:59:30 → 200 y mide", a.status === 200 && !a.body.error && a.body.umbral === 95 && n1 > n0, a.body.error ?? "");
+    await pedir(Q);
+    chk("…al instante sale de la caché", lecturas() === n1);
+    ahora = medianoche + 30_000;                                            // 00:00:30 de mañana
+    await pedir(Q);
+    const n2 = lecturas();
+    chk("pasada la medianoche NO se sirve como día cerrado lo medido mientras era hoy: se vuelve a medir", n2 > n1);
+    ahora += 10 * 60_000;
+    await pedir(Q);
+    chk("medido ya cerrado → caché larga (10 min después sigue sirviéndose)", lecturas() === n2);
+    ahora += 25 * 60_000;
+    await pedir(Q);
+    chk("…y vence a los 30 min", lecturas() > n2);
+  } finally {
+    Date.now = reloj;
+  }
+}
+srv.close();
 
 console.log(fallos ? `\n${fallos} FALLA(S)` : "\nTodo en verde.");
 process.exit(fallos ? 1 : 0);

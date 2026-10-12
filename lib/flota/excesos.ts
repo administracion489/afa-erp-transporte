@@ -84,6 +84,21 @@ export const EXTENSION_MS = 2 * 3_600_000;
 export const MAX_EXTENSIONES = 6;
 /** Rango máximo de una consulta a /api/flota/excesos (la pantalla pide un mes en tandas de 7 días). */
 export const MAX_DIAS_CONSULTA = 7;
+/** OPERATIVO (contrato de la API): el umbral de /api/flota/excesos y /api/flota/servicios solo se
+ *  acepta de este paso en este paso (60, 65, 70… 130: 15 valores). No es una regla del motor —
+ *  `detectarExcesos` juzga con cualquier número—: es un tope contra el abuso. El umbral entra en la
+ *  clave de la caché de las dos rutas, y con cualquier entero entre 60 y 130 bastaba con variarlo para
+ *  esquivarla y obligar a leer la traza de toda la flota otra vez. Las pantallas ofrecen este mismo paso. */
+export const PASO_UMBRAL_KMH = 5;
+/** HEREDADO: `DIAS_RASTREO` de lib/gps-cobertura-datos.ts (90), el mismo límite de la torre y de
+ *  /api/flota/servicios. `desde` no puede ser anterior a hoy − esto. No se importa de allí porque ese
+ *  módulo crea el cliente service-role al cargarse y este se usa en el navegador; la ruta le pasa
+ *  `DIAS_RASTREO` a `validarConsultaExcesos` y la matriz coteja que los dos literales sigan iguales. */
+export const DIAS_ATRAS_MAX_EXCESOS = 90;
+/** Decimales con que sale el PICO de un exceso FUERA de servicio (~1 km). Sin servicio no hay nada que
+ *  pruebe que el teléfono iba en el bus: es la app abierta en el auto de alguien, y la posición exacta
+ *  (su casa, su barrio) no le sirve a la seguridad vial de la flota. Los de servicio salen exactos. */
+export const DECIMALES_PICO_FUERA = 2;
 /** Tope de puntos por llamada de `fn_gps_puntos_rapidos` (si se alcanza, el día sale `recortado`). */
 export const TOPE_PUNTOS_LLAMADA = 60_000;
 /** La migración que crea las dos funciones. La pantalla la nombra cuando falta. */
@@ -878,6 +893,15 @@ export function armarRespuestaExcesos(d: {
   return armarDesdeConteo({ ...d, conteo, incluyeFueraDeServicio: true });
 }
 
+/** El pico de un exceso FUERA de servicio, redondeado a DECIMALES_PICO_FUERA (~1 km); uno con
+ *  servicio sale tal cual. Idempotente: redondear lo ya redondeado no lo mueve. */
+export function conPicoAproximado(e: Episodio): Episodio {
+  if (!e.fueraDeServicio && e.reservaId != null) return e;
+  const f = 10 ** DECIMALES_PICO_FUERA;
+  const r = (x: number) => Math.round(x * f) / f;
+  return { ...e, latPico: r(e.latPico), lngPico: r(e.lngPico) };
+}
+
 function armarDesdeConteo(d: {
   desde: string; hasta: string; umbral: number; medidoEn: string | null; conteo: ConteoEpisodios; incluyeFueraDeServicio: boolean;
   servicios: readonly ServicioExpuesto[]; conductores: readonly ConductorExcesos[]; unidades: readonly UnidadExcesos[];
@@ -886,7 +910,10 @@ function armarDesdeConteo(d: {
 }): RespuestaExcesos {
   const velocimetro = new Map(d.conductores.map((c) => [c.clave, c.velocimetro] as const));
   const servicios = [...d.servicios].sort((a, b) => a.reservaId - b.reservaId);
-  const resumen = resumirConteo(d.conteo, { servicios, velocimetro }, { incluirFueraDeServicio: d.incluyeFueraDeServicio });
+  // Toda respuesta pasa por aquí (la del lector, la vacía y la unión de tandas): el pico de un exceso
+  // fuera de servicio sale aproximado SIEMPRE, se pidan o no, y aunque la pantalla los recorte después.
+  const conteo: ConteoEpisodios = { ...d.conteo, fueraDeServicio: d.conteo.fueraDeServicio.map(conPicoAproximado) };
+  const resumen = resumirConteo(conteo, { servicios, velocimetro }, { incluirFueraDeServicio: d.incluyeFueraDeServicio });
   return {
     desde: d.desde, hasta: d.hasta, umbral: d.umbral, medidoEn: d.medidoEn,
     sin_migracion: d.sin_migracion ?? null,
@@ -916,10 +943,26 @@ export function respuestaVacia(d: { desde: string; hasta: string; umbral: number
   });
 }
 
-/** Lo que se le responde a quien NO pidió los excesos fuera de servicio: se cuentan, no se listan. */
+/**
+ * Lo que se le responde a quien NO pidió los excesos fuera de servicio: se cuentan, no se listan. Y el
+ * directorio (`conductores`, `unidades`) se recorta a quien la respuesta nombra en SERVICIO —un servicio
+ * del rango, un exceso con servicio o una fila del ranking—: alguien que solo aparece por un exceso fuera
+ * de servicio no sale nombrado en una respuesta que no lista ese exceso.
+ */
 export function vistaRespuesta(r: RespuestaExcesos, incluirFueraDeServicio: boolean): RespuestaExcesos {
-  if (incluirFueraDeServicio || !r.incluyeFueraDeServicio) return r;
-  return { ...r, incluyeFueraDeServicio: false, resumen: { ...r.resumen, fueraDeServicio: [] } };
+  if (incluirFueraDeServicio) return r;
+  const resumen = r.resumen.fueraDeServicio.length ? { ...r.resumen, fueraDeServicio: [] } : r.resumen;
+  const conductoresVistos = new Set<string>(), unidadesVistas = new Set<string>();
+  const ver = (c: string | null, u: string | null) => { if (c) conductoresVistos.add(c); if (u) unidadesVistas.add(u); };
+  for (const s of r.servicios) ver(s.conductor, s.vehiculo);
+  for (const e of r.episodios) ver(e.conductor, e.vehiculo);
+  for (const f of resumen.porServicio) ver(f.conductor, f.vehiculo);
+  for (const f of resumen.porConductor) ver(f.conductor, null);
+  for (const f of resumen.porUnidad) ver(null, f.unidad);
+  const conductores = r.conductores.filter((c) => conductoresVistos.has(c.clave));
+  const unidades = r.unidades.filter((u) => unidadesVistas.has(u.clave));
+  if (!r.incluyeFueraDeServicio && resumen === r.resumen && conductores.length === r.conductores.length && unidades.length === r.unidades.length) return r;
+  return { ...r, incluyeFueraDeServicio: false, resumen, conductores, unidades };
 }
 
 /**
@@ -1022,27 +1065,61 @@ export function tandasDeRango(desde: string, hasta: string, maxDias = MAX_DIAS_C
 
 export type ConsultaExcesos = { desde: string; hasta: string; umbral: number; incluirFueraDeServicio: boolean };
 
-/** Valida los parámetros de /api/flota/excesos. `hoy` es el día de Lima. Mensajes para una persona. */
+/** Los umbrales que aceptan las APIs: de PASO_UMBRAL_KMH en PASO_UMBRAL_KMH entre el piso y el techo. */
+export const UMBRALES_ACEPTADOS: readonly number[] = (() => {
+  const out: number[] = [];
+  for (let u = UMBRAL_MIN_KMH; u <= UMBRAL_MAX_KMH; u += PASO_UMBRAL_KMH) out.push(u);
+  return out;
+})();
+
+/**
+ * El umbral de una petición (texto del query): vacío → el defecto; un entero entre UMBRAL_MIN_KMH y
+ * UMBRAL_MAX_KMH múltiplo de PASO_UMBRAL_KMH → ese; cualquier otra cosa → el motivo, para un 400. No se
+ * «corrige» un umbral que alguien escribió mal: se dice cuáles valen. Lo usan /api/flota/excesos y
+ * /api/flota/servicios (por `validarUmbral`, lib/flota/servicio-estadistica.ts), así que las dos aceptan lo mismo.
+ */
+export function leerUmbral(texto: string | null | undefined): { ok: true; umbral: number } | { ok: false; error: string } {
+  if (texto == null || texto === "") return { ok: true, umbral: UMBRAL_DEFECTO_KMH };
+  if (!/^\d{1,3}$/.test(texto)) return { ok: false, error: `El umbral es un entero en km/h, entre ${UMBRAL_MIN_KMH} y ${UMBRAL_MAX_KMH}.` };
+  const umbral = Number(texto);
+  if (umbral < UMBRAL_MIN_KMH || umbral > UMBRAL_MAX_KMH) {
+    return { ok: false, error: `El umbral tiene que estar entre ${UMBRAL_MIN_KMH} y ${UMBRAL_MAX_KMH} km/h.` };
+  }
+  if (umbral % PASO_UMBRAL_KMH !== 0) {
+    const abajo = umbral - (umbral % PASO_UMBRAL_KMH);
+    return {
+      ok: false,
+      error: `El umbral va de ${PASO_UMBRAL_KMH} en ${PASO_UMBRAL_KMH} km/h (${UMBRAL_MIN_KMH}, ${UMBRAL_MIN_KMH + PASO_UMBRAL_KMH}, ${UMBRAL_MIN_KMH + 2 * PASO_UMBRAL_KMH}… ${UMBRAL_MAX_KMH}): ${umbral} no es uno de ellos. Elige ${abajo} o ${abajo + PASO_UMBRAL_KMH}.`,
+    };
+  }
+  return { ok: true, umbral };
+}
+
+/**
+ * Valida los parámetros de /api/flota/excesos. `hoy` es el día de Lima; `diasAtras` es hasta cuántos días
+ * atrás puede empezar el rango (la ruta pasa DIAS_RASTREO; por defecto, DIAS_ATRAS_MAX_EXCESOS, su copia).
+ * Mensajes para una persona.
+ */
 export function validarConsultaExcesos(
   q: { desde?: string | null; hasta?: string | null; umbral?: string | null; fuera?: string | null },
   hoy: string,
+  diasAtras: number = DIAS_ATRAS_MAX_EXCESOS,
 ): { ok: true; consulta: ConsultaExcesos } | { ok: false; error: string } {
   const hasta = q.hasta || hoy;
   const desde = q.desde || sumarDias(hasta, -(MAX_DIAS_CONSULTA - 1));
   if (!fechaValida(desde) || !fechaValida(hasta)) return { ok: false, error: "Fechas inválidas (se espera AAAA-MM-DD)." };
   if (desde > hasta) return { ok: false, error: "El rango empieza después de terminar." };
   if (hasta > hoy) return { ok: false, error: "El rango no puede terminar en el futuro." };
+  const minimo = sumarDias(hoy, -diasAtras);
+  if (desde < minimo) {
+    return { ok: false, error: `Los excesos se miden de los últimos ${diasAtras} días: el rango no puede empezar antes del ${minimo}.` };
+  }
   if (diasEntre(desde, hasta) + 1 > MAX_DIAS_CONSULTA) {
     return { ok: false, error: `Se mide como mucho ${MAX_DIAS_CONSULTA} días por consulta; un rango mayor se pide en tandas.` };
   }
-  let umbral = UMBRAL_DEFECTO_KMH;
-  if (q.umbral != null && q.umbral !== "") {
-    if (!/^\d{1,3}$/.test(q.umbral)) return { ok: false, error: `El umbral es un entero en km/h, entre ${UMBRAL_MIN_KMH} y ${UMBRAL_MAX_KMH}.` };
-    umbral = Number(q.umbral);
-  }
-  if (umbral < UMBRAL_MIN_KMH || umbral > UMBRAL_MAX_KMH) {
-    return { ok: false, error: `El umbral tiene que estar entre ${UMBRAL_MIN_KMH} y ${UMBRAL_MAX_KMH} km/h.` };
-  }
+  const lu = leerUmbral(q.umbral);
+  if (!lu.ok) return { ok: false, error: lu.error };
+  const umbral = lu.umbral;
   const fuera = q.fuera ?? "0";
   if (fuera !== "0" && fuera !== "1") return { ok: false, error: "El parámetro «fuera» es 0 o 1." };
   return { ok: true, consulta: { desde, hasta, umbral, incluirFueraDeServicio: fuera === "1" } };
