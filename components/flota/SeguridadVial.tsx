@@ -8,8 +8,9 @@
 //
 //   · Un mes se pide en tandas de MAX_DIAS_CONSULTA días (`tandasDeRango`), de a una, y se une con
 //     `unirRespuestasExcesos`, que vuelve a calcular el ranking con la exposición de todo el rango.
-//   · Se pide SIEMPRE con fuera=1 y se recorta aquí con `vistaRespuesta`: encender «incluir fuera de
-//     servicio» no vuelve a medir.
+//   · «Incluir fuera de servicio» viaja como fuera=0|1: con la casilla apagada el servidor no manda
+//     esos episodios (ni a quien solo tuvo esos). El servidor tiene la medición en caché, así que
+//     cambiarla no vuelve a leer posiciones. `vistaRespuesta` se aplica igual sobre la unión.
 //   · El filtro de flota vuelve a pedirle el ranking al motor (`vistaPorFlota`), no cuenta por su cuenta.
 //   · Mientras mide dice «Midiendo…» y NO enseña el resultado del rango anterior; sin la migración, o
 //     si la medición falló, no se pinta ningún número: unas listas vacías no son «0 excesos».
@@ -28,7 +29,7 @@ import {
 } from "@/lib/flota/excesos";
 import { ETIQUETA_RECORRIDO, ETIQUETA_RUTA, SIN_NOMBRE_RUTA, SIN_RECORRIDO } from "@/lib/ruta-identidad";
 import {
-  ETIQUETA_FLOTA, MAX_DIAS_RANGO, esTercero, fechaCorta, horaLima, leerParametros, opcionesUmbral, problemaDeRango,
+  ETIQUETA_FLOTA, MAX_DIAS_RANGO, esTercero, fechaCorta, horaLima, leerParametros, minimoDesde, opcionesUmbral, problemaDeRango,
   vistaPorFlota, type FiltroFlota,
 } from "./excesos-vista";
 import {
@@ -68,8 +69,8 @@ const pareceRespuesta = (j: unknown): j is RespuestaExcesos => {
     && Array.isArray(r.conductores) && !!r.resumen && typeof r.resumen === "object" && Array.isArray(r.constantes);
 };
 
-async function pedirTanda(t: { desde: string; hasta: string }, umbral: number, signal: AbortSignal, intento = 0): Promise<RespuestaExcesos> {
-  const qs = new URLSearchParams({ desde: t.desde, hasta: t.hasta, umbral: String(umbral), fuera: "1" });
+async function pedirTanda(t: { desde: string; hasta: string }, umbral: number, fuera: boolean, signal: AbortSignal, intento = 0): Promise<RespuestaExcesos> {
+  const qs = new URLSearchParams({ desde: t.desde, hasta: t.hasta, umbral: String(umbral), fuera: fuera ? "1" : "0" });
   const res = await fetch(`/api/flota/excesos?${qs}`, { headers: await cabecerasErp(), cache: "no-store", signal });
   // El texto primero: un corte de la plataforma llega como HTML y r.json() reventaría sin decir nada.
   const texto = await res.text();
@@ -83,7 +84,7 @@ async function pedirTanda(t: { desde: string; hasta: string }, umbral: number, s
     throw new FalloMedicion("Te falta el permiso del módulo Monitoreo para ver los excesos de velocidad. Pídeselo a un administrador en Usuarios.", "permiso");
   }
   if (res.status === 503) {
-    if (intento === 0) { await esperar(ESPERA_REINTENTO_MS, signal); return pedirTanda(t, umbral, signal, 1); }
+    if (intento === 0) { await esperar(ESPERA_REINTENTO_MS, signal); return pedirTanda(t, umbral, fuera, signal, 1); }
     throw new FalloMedicion(errorApi ?? "Hay demasiadas mediciones en curso en el servidor.", "ocupado");
   }
   if (res.status === 502 || res.status === 504) {
@@ -146,7 +147,7 @@ function Cuerpo({ search }: { search: string }) {
 
   const problema = problemaDeRango(desde, hasta, hoy);
   const tandas = useMemo(() => (problema ? [] : tandasDeRango(desde, hasta, MAX_DIAS_CONSULTA)), [desde, hasta, problema]);
-  const clave = problema ? null : `${desde}|${hasta}|${umbral}|${intento}`;
+  const clave = problema ? null : `${desde}|${hasta}|${umbral}|${incluirFuera ? 1 : 0}|${intento}`;
 
   useEffect(() => {
     if (!clave || !tandas.length) return;
@@ -154,7 +155,7 @@ function Cuerpo({ search }: { search: string }) {
     const medir = async () => {
       const rs: RespuestaExcesos[] = [];
       for (let i = 0; i < tandas.length; i++) {
-        rs.push(await pedirTanda(tandas[i], umbral, ctrl.signal));
+        rs.push(await pedirTanda(tandas[i], umbral, incluirFuera, ctrl.signal));
         if (ctrl.signal.aborted) return;
         setProgreso({ clave, hechas: i + 1 });
       }
@@ -163,7 +164,7 @@ function Cuerpo({ search }: { search: string }) {
     };
     medir().catch((e: unknown) => {
       if (ctrl.signal.aborted) return;
-      console.error("[seguridad-vial]", e);
+      if (!(e instanceof FalloMedicion)) console.error("[seguridad-vial]", e);
       setResultado(e instanceof FalloMedicion
         ? { clave, ok: false, mensaje: e.message, tipo: e.tipo }
         : e instanceof TypeError
@@ -171,7 +172,7 @@ function Cuerpo({ search }: { search: string }) {
           : { clave, ok: false, mensaje: `No se pudieron juntar las tandas del rango (${e instanceof Error ? e.message : String(e)}).`, tipo: "otro" });
     });
     return () => ctrl.abort();
-  }, [clave, tandas, umbral]);
+  }, [clave, tandas, umbral, incluirFuera]);
 
   // El rango y el umbral quedan en la URL: el enlace que se copia mide lo mismo.
   useEffect(() => {
@@ -186,6 +187,8 @@ function Cuerpo({ search }: { search: string }) {
   const actual = resultado && resultado.clave === clave ? resultado : null;
   const midiendo = clave != null && !actual;
   const hechas = progreso && progreso.clave === clave ? progreso.hechas : 0;
+  /** La tanda que se está midiendo ahora (1..N): «Midiendo 2/5». */
+  const enCurso = Math.min(hechas + 1, Math.max(tandas.length, 1));
   const unida = actual?.ok ? actual.unida : null;
   const respuesta = useMemo(() => (unida ? vistaRespuesta(unida, incluirFuera) : null), [unida, incluirFuera]);
   const vista = useMemo(() => (respuesta ? vistaPorFlota(respuesta, flota) : null), [respuesta, flota]);
@@ -233,17 +236,17 @@ function Cuerpo({ search }: { search: string }) {
       <Encabezado medidoEn={hayDatos ? unida?.medidoEn : null} />
 
       {/* ── Filtros ─────────────────────────────────────────────────────────── */}
-      <section className="bg-white rounded-2xl border shadow-sm p-4 space-y-3">
+      <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-3">
         <div className="flex flex-wrap items-end gap-3">
           <div className="flex flex-wrap items-end gap-2">
             <label className="text-xs font-bold uppercase text-gray-400">
               Desde
-              <input type="date" value={desde} max={hasta || hoy} onChange={(e) => setDesde(e.target.value)}
+              <input type="date" value={desde} min={minimoDesde(hoy)} max={hasta || hoy} onChange={(e) => setDesde(e.target.value)}
                 className="mt-1 block border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 font-normal normal-case" />
             </label>
             <label className="text-xs font-bold uppercase text-gray-400">
               Hasta
-              <input type="date" value={hasta} max={hoy} onChange={(e) => setHasta(e.target.value)}
+              <input type="date" value={hasta} min={desde || minimoDesde(hoy)} max={hoy} onChange={(e) => setHasta(e.target.value)}
                 className="mt-1 block border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 font-normal normal-case" />
             </label>
             <div className="flex gap-1 pb-0.5">
@@ -277,7 +280,7 @@ function Cuerpo({ search }: { search: string }) {
           </label>
           <button type="button" onClick={() => setIntento((n) => n + 1)} disabled={midiendo || !!problema}
             className="ml-auto rounded-xl px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60" style={{ background: AZUL }}>
-            {midiendo ? `Midiendo ${hechas}/${tandas.length}…` : "Volver a medir"}
+            {midiendo ? `Midiendo ${enCurso}/${tandas.length}…` : "Volver a medir"}
           </button>
         </div>
         {problema && <p className="text-sm font-semibold text-red-700">{problema}</p>}
@@ -293,8 +296,8 @@ function Cuerpo({ search }: { search: string }) {
 
       {/* ── Estado de la medición ───────────────────────────────────────────── */}
       {midiendo && (
-        <div className="rounded-2xl border bg-white px-4 py-6 text-center">
-          <p className="font-bold text-[#0b315f]">Midiendo {hechas}/{tandas.length}…</p>
+        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-center">
+          <p className="font-bold text-[#0b315f]">Midiendo {enCurso}/{tandas.length}…</p>
           <p className="text-xs text-gray-500 mt-1">
             Se lee de a {MAX_DIAS_CONSULTA} días; un mes son {Math.ceil(MAX_DIAS_RANGO / MAX_DIAS_CONSULTA)} tandas. Puede tardar varios segundos cada una.
           </p>
@@ -413,8 +416,13 @@ function Kpis({ vista, r, umbral, flota }: { vista: NonNullable<ReturnType<typeo
     },
     {
       k: "Conductores con exceso",
-      v: t.conductoresJuzgables > 0 ? `${t.conductoresConExceso} de ${t.conductoresJuzgables}` : "—",
-      sub: t.conductoresJuzgables > 0 ? "de los que se pueden juzgar" : "ningún conductor se puede juzgar",
+      // «X de Y» solo si X cabe en Y: un exceso de un conductor cuyo velocímetro no se pudo comprobar
+      // cuenta en X sin estar en Y, y «4 de 3» se leería como un error de la pantalla.
+      v: t.conductoresJuzgables > 0 && t.conductoresConExceso <= t.conductoresJuzgables
+        ? `${t.conductoresConExceso} de ${t.conductoresJuzgables}` : t.conductoresJuzgables > 0 || t.conductoresConExceso > 0 ? String(t.conductoresConExceso) : "—",
+      sub: t.conductoresJuzgables > 0
+        ? (t.conductoresConExceso <= t.conductoresJuzgables ? "de los que se pueden juzgar" : `${t.conductoresJuzgables} se pueden juzgar`)
+        : t.conductoresConExceso > 0 ? "ninguno con velocímetro comprobado" : "ningún conductor se puede juzgar",
       tono: t.conductoresConExceso > 0 ? "rojo" : t.conductoresJuzgables > 0 ? "azul" : "gris",
     },
     {
@@ -437,11 +445,11 @@ function Kpis({ vista, r, umbral, flota }: { vista: NonNullable<ReturnType<typeo
   } as const;
   const noJuzgables = pv.sin_velocimetro;
   return (
-    <section className="space-y-2">
+    <section className="space-y-2 @container">
       {flota !== "todas" && (
         <p className="text-xs font-bold text-[#0b315f]">Mostrando: {ETIQUETA_FLOTA[flota]}</p>
       )}
-      <div className="grid grid-cols-1 min-[420px]:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 @min-[21rem]:grid-cols-2 @3xl:grid-cols-4 gap-3">
         {tarjetas.map((c) => (
           <div key={c.k} className="rounded-2xl p-4 min-w-0" style={{ background: TONO[c.tono].bg }}>
             <p className="text-[11px] font-bold uppercase tracking-wide" style={{ color: TONO[c.tono].color, opacity: 0.8 }}>{c.k}</p>
@@ -460,8 +468,8 @@ function Kpis({ vista, r, umbral, flota }: { vista: NonNullable<ReturnType<typeo
         ) : pv.con_velocimetro > 0 && pv.no_se_sabe === 0 ? (
           <p>Todos los conductores del rango que mandaron GPS reportan la velocidad del sensor.</p>
         ) : null}
-        {pv.no_se_sabe > 0 && <p>{pv.no_se_sabe} conductor{pv.no_se_sabe === 1 ? "" : "es"}: {TEXTO_VELOCIMETRO.no_se_sabe.titulo.toLowerCase()}. {TEXTO_VELOCIMETRO.no_se_sabe.detalle}</p>}
-        {pv.sin_gps > 0 && <p>{pv.sin_gps} conductor{pv.sin_gps === 1 ? "" : "es"}: {TEXTO_VELOCIMETRO.sin_gps.titulo.toLowerCase()}. {TEXTO_VELOCIMETRO.sin_gps.detalle}</p>}
+        {pv.no_se_sabe > 0 && <p><strong>{pv.no_se_sabe} conductor{pv.no_se_sabe === 1 ? "" : "es"} · {TEXTO_VELOCIMETRO.no_se_sabe.titulo}.</strong> {TEXTO_VELOCIMETRO.no_se_sabe.detalle}</p>}
+        {pv.sin_gps > 0 && <p><strong>{pv.sin_gps} conductor{pv.sin_gps === 1 ? "" : "es"} · {TEXTO_VELOCIMETRO.sin_gps.titulo}.</strong> {TEXTO_VELOCIMETRO.sin_gps.detalle}</p>}
         <p>
           {vista.resumen.fueraDeServicioTotal} exceso{vista.resumen.fueraDeServicioTotal === 1 ? "" : "s"} fuera de servicio
           {vista.fueraDeTodas && flota !== "todas" ? " (de todas las flotas)" : ""}: no suman al ranking.

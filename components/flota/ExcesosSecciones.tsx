@@ -70,7 +70,7 @@ function Th<K extends string>({ label, k, orden, setOrden, alinear = "left", tit
 
 function Tarjeta({ titulo, sub, children }: { titulo: string; sub?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section className="bg-white rounded-2xl border shadow-sm min-w-0">
+    <section className="bg-white rounded-2xl border border-slate-200 shadow-sm min-w-0">
       <div className="px-4 pt-4 pb-2">
         <h2 className="text-base font-bold text-gray-800">{titulo}</h2>
         {sub && <p className="text-xs text-gray-500 mt-0.5">{sub}</p>}
@@ -82,6 +82,45 @@ function Tarjeta({ titulo, sub, children }: { titulo: string; sub?: React.ReactN
 
 const Vacio = ({ texto, cols }: { texto: string; cols: number }) => (
   <tr><td colSpan={cols} className="p-6 text-center text-sm text-gray-400">{texto}</td></tr>
+);
+
+/** El selector de orden de las tarjetas (móvil): las cabeceras de la tabla no se ven ahí. */
+function OrdenMovil<K extends string>({ id, orden, setOrden, opciones }: {
+  id: string; orden: Orden<K>; setOrden: (o: Orden<K>) => void; opciones: { clave: K | null; sentido: Sentido; etiqueta: string }[];
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 pb-2 text-xs text-gray-500">
+      <label htmlFor={id}>Ordenar:</label>
+      <select
+        id={id}
+        value={`${orden.clave ?? ""}|${orden.sentido}`}
+        onChange={(ev) => {
+          const [k, sd] = ev.target.value.split("|");
+          setOrden({ clave: (k || null) as K | null, sentido: sd as Sentido });
+        }}
+        className="border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white"
+      >
+        {!opciones.some((o) => o.clave === orden.clave && o.sentido === orden.sentido) && (
+          <option value={`${orden.clave ?? ""}|${orden.sentido}`}>Por defecto</option>
+        )}
+        {opciones.map((o) => <option key={`${o.clave}|${o.sentido}`} value={`${o.clave ?? ""}|${o.sentido}`}>{o.etiqueta}</option>)}
+      </select>
+    </div>
+  );
+}
+
+/** «2 / 5 (40 %)»: servicios con exceso / prestados. Sin juicio, el numerador es «—», nunca 0. */
+function Servicios({ con, prestados, tasa }: { con: number | null; prestados: number; tasa: number | null }) {
+  return (
+    <>
+      {con == null ? "—" : con} / {prestados}
+      {pct(tasa) && <span className="ml-1 text-[11px] text-gray-400">({pct(tasa)})</span>}
+    </>
+  );
+}
+
+const Dato = ({ k, children }: { k: string; children: React.ReactNode }) => (
+  <div className="min-w-0"><dt className="text-gray-400">{k}</dt><dd className="font-semibold text-gray-800">{children}</dd></div>
 );
 
 // ── Por conductor ─────────────────────────────────────────────────────────────
@@ -97,12 +136,13 @@ export function SeccionConductores({ filas, dir, umbral }: { filas: readonly Fil
       : (x: FilaConductorExcesos) => x[k];
     return ordenarPor(filas, f, orden.sentido);
   }, [filas, orden, dir]);
+  const vacio = "Ningún conductor con servicios prestados ni excesos en el rango.";
   return (
     <Tarjeta
       titulo="Por conductor"
       sub={<>Quien llevaba el teléfono, no el asignado. «Servicios» = con exceso / prestados en el rango. Umbral {umbral} km/h.</>}
     >
-      <div className="overflow-x-auto">
+      <div className="hidden md:block overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-slate-50 border-y border-slate-200">
@@ -116,17 +156,16 @@ export function SeccionConductores({ filas, dir, umbral }: { filas: readonly Fil
             </tr>
           </thead>
           <tbody>
-            {lista.length === 0 ? <Vacio cols={7} texto="Ningún conductor con servicios prestados ni excesos en el rango." /> : lista.map((f) => {
+            {lista.length === 0 ? <Vacio cols={7} texto={vacio} /> : lista.map((f) => {
               const c = dir.conductor(f.conductor);
-              const juzgable = f.excesos != null;
               return (
                 <tr key={f.conductor} className="border-t border-slate-100 hover:bg-gray-50">
-                  <td className="p-3">
+                  <td className="p-3 min-w-[12rem]">
                     <div className="font-semibold text-gray-800">{c.nombre}<EtiquetaFlota tercero={c.tercero} /></div>
                   </td>
-                  {juzgable ? (
+                  {f.excesos != null ? (
                     <>
-                      <td className={`p-3 text-right font-bold ${f.excesos! > 0 ? "text-red-700" : "text-gray-700"}`}>{f.excesos}</td>
+                      <td className={`p-3 text-right font-bold ${f.excesos > 0 ? "text-red-700" : "text-gray-700"}`}>{f.excesos}</td>
                       <td className="p-3 text-right text-gray-700 whitespace-nowrap">{f.segundos ? textoDuracion(f.segundos) : "—"}</td>
                     </>
                   ) : (
@@ -137,8 +176,7 @@ export function SeccionConductores({ filas, dir, umbral }: { filas: readonly Fil
                   <td className="p-3 text-right text-gray-700 whitespace-nowrap">{kmh(f.velPico)}</td>
                   <td className="p-3 text-right text-gray-700 whitespace-nowrap">{kmh(f.velSostenida)}</td>
                   <td className="p-3 text-right text-gray-700 whitespace-nowrap">
-                    {f.serviciosConExceso == null ? "—" : f.serviciosConExceso} / {f.serviciosPrestados}
-                    {pct(f.tasa) && <span className="ml-1 text-[11px] text-gray-400">({pct(f.tasa)})</span>}
+                    <Servicios con={f.serviciosConExceso} prestados={f.serviciosPrestados} tasa={f.tasa} />
                   </td>
                   <td className="p-3"><ChipVelocimetro v={f.velocimetro} /></td>
                 </tr>
@@ -147,6 +185,43 @@ export function SeccionConductores({ filas, dir, umbral }: { filas: readonly Fil
           </tbody>
         </table>
       </div>
+
+      <div className="md:hidden px-3 pb-3">
+        <OrdenMovil id="orden-conductores" orden={orden} setOrden={setOrden} opciones={[
+          { clave: "excesos", sentido: "desc", etiqueta: "Más excesos primero" },
+          { clave: "segundos", sentido: "desc", etiqueta: "Más tiempo en exceso" },
+          { clave: "velSostenida", sentido: "desc", etiqueta: "Mayor velocidad sostenida" },
+          { clave: "tasa", sentido: "desc", etiqueta: "Mayor proporción de servicios" },
+          { clave: "nombre", sentido: "asc", etiqueta: "Por nombre" },
+        ]} />
+        {lista.length === 0 ? <p className="p-4 text-center text-sm text-gray-400">{vacio}</p> : (
+          <ul className="space-y-2">
+            {lista.map((f) => {
+              const c = dir.conductor(f.conductor);
+              return (
+                <li key={f.conductor} className="rounded-xl border border-slate-200 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0 text-sm font-semibold text-gray-800 break-words">{c.nombre}<EtiquetaFlota tercero={c.tercero} /></div>
+                    <ChipVelocimetro v={f.velocimetro} />
+                  </div>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                    {f.excesos != null ? (
+                      <>
+                        <Dato k="Excesos"><span className={f.excesos > 0 ? "text-red-700" : ""}>{f.excesos}</span></Dato>
+                        <Dato k="Tiempo">{f.segundos ? textoDuracion(f.segundos) : "—"}</Dato>
+                      </>
+                    ) : (
+                      <div className="col-span-2 text-gray-500" title={TEXTO_VELOCIMETRO[f.velocimetro].detalle}>No se puede juzgar (ver su velocímetro).</div>
+                    )}
+                    <Dato k="Pico · sostenida">{kmh(f.velPico)} · {kmh(f.velSostenida)}</Dato>
+                    <Dato k="Servicios con exceso / prestados"><Servicios con={f.serviciosConExceso} prestados={f.serviciosPrestados} tasa={f.tasa} /></Dato>
+                  </dl>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     </Tarjeta>
   );
 }
@@ -154,6 +229,8 @@ export function SeccionConductores({ filas, dir, umbral }: { filas: readonly Fil
 // ── Por unidad ────────────────────────────────────────────────────────────────
 
 type ClaveUnidad = "placa" | "excesos" | "segundos" | "velPico" | "velSostenida" | "tasa";
+
+const UNIDAD_NO_JUZGABLE = "Ninguno de los conductores de sus servicios tiene un teléfono que reporte la velocidad del sensor.";
 
 export function SeccionUnidades({ filas, dir }: { filas: readonly FilaUnidadExcesos[]; dir: Directorio }) {
   const [orden, setOrden] = useState<Orden<ClaveUnidad>>({ clave: null, sentido: "desc" });
@@ -164,9 +241,10 @@ export function SeccionUnidades({ filas, dir }: { filas: readonly FilaUnidadExce
       : (x: FilaUnidadExcesos) => x[k];
     return ordenarPor(filas, f, orden.sentido);
   }, [filas, orden, dir]);
+  const vacio = "Ninguna unidad con servicios prestados ni excesos en el rango.";
   return (
     <Tarjeta titulo="Por unidad" sub="La unidad escrita en el servicio. Se puede juzgar si alguno de sus servicios lo manejó alguien con velocímetro.">
-      <div className="overflow-x-auto">
+      <div className="hidden md:block overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-slate-50 border-y border-slate-200">
@@ -179,7 +257,7 @@ export function SeccionUnidades({ filas, dir }: { filas: readonly FilaUnidadExce
             </tr>
           </thead>
           <tbody>
-            {lista.length === 0 ? <Vacio cols={6} texto="Ninguna unidad con servicios prestados ni excesos en el rango." /> : lista.map((f) => {
+            {lista.length === 0 ? <Vacio cols={6} texto={vacio} /> : lista.map((f) => {
               const u = dir.unidad(f.unidad);
               return (
                 <tr key={f.unidad} className="border-t border-slate-100 hover:bg-gray-50">
@@ -190,21 +268,51 @@ export function SeccionUnidades({ filas, dir }: { filas: readonly FilaUnidadExce
                       <td className="p-3 text-right text-gray-700 whitespace-nowrap">{f.segundos ? textoDuracion(f.segundos) : "—"}</td>
                     </>
                   ) : (
-                    <td colSpan={2} className="p-3 text-right text-xs text-gray-500" title="Ninguno de los conductores de sus servicios tiene un teléfono que reporte la velocidad del sensor.">
-                      No se puede juzgar
-                    </td>
+                    <td colSpan={2} className="p-3 text-right text-xs text-gray-500" title={UNIDAD_NO_JUZGABLE}>No se puede juzgar</td>
                   )}
                   <td className="p-3 text-right text-gray-700 whitespace-nowrap">{kmh(f.velPico)}</td>
                   <td className="p-3 text-right text-gray-700 whitespace-nowrap">{kmh(f.velSostenida)}</td>
                   <td className="p-3 text-right text-gray-700 whitespace-nowrap">
-                    {f.serviciosConExceso == null ? "—" : f.serviciosConExceso} / {f.serviciosPrestados}
-                    {pct(f.tasa) && <span className="ml-1 text-[11px] text-gray-400">({pct(f.tasa)})</span>}
+                    <Servicios con={f.serviciosConExceso} prestados={f.serviciosPrestados} tasa={f.tasa} />
                   </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+      </div>
+
+      <div className="md:hidden px-3 pb-3">
+        <OrdenMovil id="orden-unidades" orden={orden} setOrden={setOrden} opciones={[
+          { clave: "excesos", sentido: "desc", etiqueta: "Más excesos primero" },
+          { clave: "segundos", sentido: "desc", etiqueta: "Más tiempo en exceso" },
+          { clave: "velSostenida", sentido: "desc", etiqueta: "Mayor velocidad sostenida" },
+          { clave: "placa", sentido: "asc", etiqueta: "Por placa" },
+        ]} />
+        {lista.length === 0 ? <p className="p-4 text-center text-sm text-gray-400">{vacio}</p> : (
+          <ul className="space-y-2">
+            {lista.map((f) => {
+              const u = dir.unidad(f.unidad);
+              return (
+                <li key={f.unidad} className="rounded-xl border border-slate-200 p-3">
+                  <div className="text-sm font-semibold text-gray-800">{u.placa}<EtiquetaFlota tercero={u.tercero} /></div>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                    {f.excesos != null ? (
+                      <>
+                        <Dato k="Excesos"><span className={f.excesos > 0 ? "text-red-700" : ""}>{f.excesos}</span></Dato>
+                        <Dato k="Tiempo">{f.segundos ? textoDuracion(f.segundos) : "—"}</Dato>
+                      </>
+                    ) : (
+                      <div className="col-span-2 text-gray-500">No se puede juzgar: {UNIDAD_NO_JUZGABLE.charAt(0).toLowerCase() + UNIDAD_NO_JUZGABLE.slice(1)}</div>
+                    )}
+                    <Dato k="Pico · sostenida">{kmh(f.velPico)} · {kmh(f.velSostenida)}</Dato>
+                    <Dato k="Servicios con exceso / prestados"><Servicios con={f.serviciosConExceso} prestados={f.serviciosPrestados} tasa={f.tasa} /></Dato>
+                  </dl>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
     </Tarjeta>
   );
@@ -222,7 +330,7 @@ function ServicioDe({ e, dir, compacto = false }: { e: Episodio; dir: Directorio
   const cab = [`#${s.reservaId}`, s.codigo, s.fecha ? `${fechaCorta(s.fecha)}${s.hora ? ` ${s.hora}` : ""}` : null, s.cliente].filter(Boolean).join(" · ");
   return (
     <div className={`min-w-0 ${compacto ? "" : "max-w-[300px]"}`}>
-      <div className="text-xs text-gray-500 truncate" title={cab}>{cab}</div>
+      <div className="text-xs text-gray-500 break-words">{cab}</div>
       <div className="text-xs mt-0.5 break-words">
         <span className="font-bold text-gray-500">{ETIQUETA_RUTA}:</span>{" "}
         <span className={s.ruta.nombre ? "text-gray-800 font-semibold" : "text-gray-400 italic"}>{s.ruta.nombre ?? SIN_NOMBRE_RUTA}</span>
@@ -316,23 +424,12 @@ export function SeccionEpisodios({ titulo, sub, episodios, dir, resaltar, vacio 
 
       {/* Móvil y tableta: tarjetas, sin desplazamiento horizontal. */}
       <div className="lg:hidden px-3 pb-3">
-        <div className="flex flex-wrap items-center gap-2 pb-2 text-xs text-gray-500">
-          <label htmlFor={`orden-${titulo}`}>Ordenar:</label>
-          <select
-            id={`orden-${titulo}`}
-            value={`${orden.clave ?? ""}|${orden.sentido}`}
-            onChange={(ev) => {
-              const [k, s] = ev.target.value.split("|");
-              setOrden({ clave: (k || null) as ClaveEpisodio | null, sentido: s as Sentido });
-            }}
-            className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white"
-          >
-            <option value="|asc">Por hora de inicio</option>
-            <option value="durS|desc">Más largos primero</option>
-            <option value="velMediaSensor|desc">Más rápidos primero</option>
-            <option value="conductor|asc">Por conductor</option>
-          </select>
-        </div>
+        <OrdenMovil id={`orden-${titulo}`} orden={orden} setOrden={setOrden} opciones={[
+          { clave: null, sentido: "asc", etiqueta: "Por hora de inicio" },
+          { clave: "durS", sentido: "desc", etiqueta: "Más largos primero" },
+          { clave: "velMediaSensor", sentido: "desc", etiqueta: "Más rápidos primero" },
+          { clave: "conductor", sentido: "asc", etiqueta: "Por conductor" },
+        ]} />
         {lista.length === 0 ? <p className="p-4 text-center text-sm text-gray-400">{vacio}</p> : (
           <ul className="space-y-2">
             {lista.map((e, i) => {
@@ -374,7 +471,7 @@ export function SeccionDescartados({ enServicio, fuera, deTodas }: {
   const total = CODIGOS_DESCARTE.reduce((s, k) => s + enServicio[k], 0);
   const totalFuera = CODIGOS_DESCARTE.reduce((s, k) => s + fuera[k], 0);
   return (
-    <details className="bg-white rounded-2xl border shadow-sm group">
+    <details className="bg-white rounded-2xl border border-slate-200 shadow-sm group">
       <summary className="cursor-pointer list-none px-4 py-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-gray-800">Descartados: no cuentan como exceso</h2>
@@ -425,7 +522,7 @@ const PROCEDENCIA: Record<ProcedenciaConstante, string> = {
 
 export function ComoSeMide({ constantes }: { constantes: readonly ConstanteExcesos[] }) {
   return (
-    <details className="bg-white rounded-2xl border shadow-sm group">
+    <details className="bg-white rounded-2xl border border-slate-200 shadow-sm group">
       <summary className="cursor-pointer list-none px-4 py-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-gray-800">Cómo se mide</h2>

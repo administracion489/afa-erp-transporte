@@ -15,7 +15,7 @@
 
 import {
   fechaValida, diasEntre, sumarDias, resumirConteo,
-  MAX_DIAS_CONSULTA, UMBRAL_DEFECTO_KMH, UMBRAL_MIN_KMH, UMBRAL_MAX_KMH,
+  MAX_DIAS_CONSULTA, UMBRAL_DEFECTO_KMH, UMBRAL_MIN_KMH, UMBRAL_MAX_KMH, PASO_UMBRAL_KMH, DIAS_ATRAS_MAX_EXCESOS,
   type ConteoEpisodios, type Episodio, type RespuestaExcesos, type ResumenExcesos, type ServicioExpuesto,
 } from "@/lib/flota/excesos";
 import { fechaLima, minutoDelDiaLima, minutosAHhmm } from "@/lib/alertas-horario";
@@ -25,24 +25,33 @@ import { fechaLima, minutoDelDiaLima, minutosAHhmm } from "@/lib/alertas-horario
 /** Lo más largo que la pantalla pide de una vez: un mes. La API mide como mucho
  *  MAX_DIAS_CONSULTA días por llamada, así que un mes son 5 tandas (`tandasDeRango`). */
 export const MAX_DIAS_RANGO = 31;
-/** Las opciones del selector: de 5 en 5 desde el piso del índice hasta 120. La API admite hasta
- *  UMBRAL_MAX_KMH; un umbral de la URL fuera de esta lista se agrega como opción. */
+/** El contrato de la API, tal como lo declara el motor: el umbral de PASO en PASO, y `desde` no
+ *  más atrás que hoy − DIAS_ATRAS_MAX (si no, 400). Se importan: una copia aquí se quedaría atrás. */
+const PASO_UMBRAL = PASO_UMBRAL_KMH;
+export const DIAS_ATRAS_MAX = DIAS_ATRAS_MAX_EXCESOS;
+/** Las opciones del selector: de PASO_UMBRAL en PASO_UMBRAL desde el piso del índice hasta 120. La
+ *  API admite hasta UMBRAL_MAX_KMH; un umbral válido de la URL fuera de esta lista se agrega. */
 export const UMBRAL_TOPE_SELECTOR = 120;
+
+export const umbralValido = (u: number) =>
+  Number.isInteger(u) && u >= UMBRAL_MIN_KMH && u <= UMBRAL_MAX_KMH && u % PASO_UMBRAL === 0;
 
 export function opcionesUmbral(actual: number): number[] {
   const out: number[] = [];
-  for (let u = UMBRAL_MIN_KMH; u <= UMBRAL_TOPE_SELECTOR; u += 5) out.push(u);
+  for (let u = UMBRAL_MIN_KMH; u <= UMBRAL_TOPE_SELECTOR; u += PASO_UMBRAL) out.push(u);
   if (umbralValido(actual) && !out.includes(actual)) out.push(actual);
   return out.sort((a, b) => a - b);
 }
 
-export const umbralValido = (u: number) => Number.isInteger(u) && u >= UMBRAL_MIN_KMH && u <= UMBRAL_MAX_KMH;
+/** El día más antiguo que se puede pedir. */
+export const minimoDesde = (hoy: string) => sumarDias(hoy, -DIAS_ATRAS_MAX);
 
 /** null si el rango se puede medir; si no, la frase que lo explica. */
 export function problemaDeRango(desde: string, hasta: string, hoy: string): string | null {
   if (!fechaValida(desde) || !fechaValida(hasta)) return "Elige las dos fechas del rango.";
   if (desde > hasta) return "La fecha «desde» es posterior a «hasta».";
   if (hasta > hoy) return "El rango no puede terminar en el futuro.";
+  if (desde < minimoDesde(hoy)) return `Se puede medir hasta ${DIAS_ATRAS_MAX} días atrás (desde el ${fechaCorta(minimoDesde(hoy))}).`;
   const dias = diasEntre(desde, hasta) + 1;
   if (dias > MAX_DIAS_RANGO) return `Se mide como mucho ${MAX_DIAS_RANGO} días a la vez (elegiste ${dias}).`;
   return null;
@@ -56,12 +65,12 @@ export function leerParametros(search: string, hoy: string): ParametrosUrl {
   const sp = new URLSearchParams(search);
   const avisos: string[] = [];
   let hasta = sp.get("hasta") || hoy;
-  if (!fechaValida(hasta) || hasta > hoy) {
+  if (!fechaValida(hasta) || hasta > hoy || hasta < minimoDesde(hoy)) {
     if (sp.get("hasta")) avisos.push(`La fecha «hasta» del enlace (${sp.get("hasta")}) no es válida: se mide hasta hoy.`);
     hasta = hoy;
   }
   let desde = sp.get("desde") || sumarDias(hasta, -(MAX_DIAS_CONSULTA - 1));
-  if (!fechaValida(desde) || desde > hasta || diasEntre(desde, hasta) + 1 > MAX_DIAS_RANGO) {
+  if (!fechaValida(desde) || desde > hasta || diasEntre(desde, hasta) + 1 > MAX_DIAS_RANGO || desde < minimoDesde(hoy)) {
     if (sp.get("desde")) avisos.push(`La fecha «desde» del enlace (${sp.get("desde")}) no es válida para este rango: se miden los últimos ${MAX_DIAS_CONSULTA} días.`);
     desde = sumarDias(hasta, -(MAX_DIAS_CONSULTA - 1));
   }
