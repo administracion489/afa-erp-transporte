@@ -29,7 +29,7 @@ import {
 } from "@/lib/alertas-modo-tiempo";
 import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
-import { textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
+import { noInicioRepiteDebio, textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
 import { resumenAvisosDeReserva } from "@/lib/escalera-inicio-datos";
 
 export const maxDuration = 60;
@@ -575,6 +575,9 @@ async function handler(req: NextRequest) {
       const cfg = activa("no_inicio");
       if (cfg) {
         const gracia = cfg.umbral ?? 10;
+        // Con «No inició» en el mismo minuto (o antes) que «Ya debió iniciar», al conductor le
+        // llegaría el MISMO texto dos veces: se le calla a él; el coordinador sigue avisado.
+        const repiteDebio = noInicioRepiteDebio(cfg, activa("debio_iniciar"));
         let n = 0;
         for (const r of todas) {
           if (r.fecha_servicio !== hoy) continue;
@@ -593,7 +596,7 @@ async function handler(req: NextRequest) {
           const ref = condDe(r);
           const nombre = ref ? nombreCorto(datosCond(ref)?.nombre) : "Conductor";
           let exitos = 0, fallos = 0;
-          if (cfg.notifica_conductor && ref) {
+          if (cfg.notifica_conductor && ref && !repiteDebio) {
             const rc = await aConductor(cfg, ref, [nombre, hora, ruta, telConting], {
               reservaId: r.id,
               push: textoPushInicio("no_inicio", { hora, origen: r.origen || ruta }),

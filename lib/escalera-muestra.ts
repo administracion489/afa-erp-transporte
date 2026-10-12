@@ -19,7 +19,7 @@
 // el SQL que falta. Mandar los apagados como si salieran haría creer que salen.
 
 import {
-  LARGO_EVIDENCIA_COORDINADOR, minutosIniciaAhora, minutosDebioIniciar,
+  CLAVE_DEBIO_INICIAR, LARGO_EVIDENCIA_COORDINADOR, minutosIniciaAhora, minutosDebioIniciar, noInicioRepiteDebio,
   type FilaAviso, type TextoPush,
 } from "@/lib/escalera-inicio";
 import { hhmmAMinutos, limaAUtcMs } from "@/lib/alertas-horario";
@@ -73,6 +73,7 @@ export type CodigoMuestra =
   | "sin_whatsapp"     // al conductor le sale por el app o el correo, no por WhatsApp
   | "sin_contactos"    // al coordinador: ningún contacto marcado en su tarjeta
   | "solo_si_gps"      // depende de que el GPS vea al conductor en el paradero
+  | "repite_debio"     // «No inició» al conductor en el minuto de «Ya debió iniciar»: mismo texto
   | "sin_plantilla"    // la tarjeta no tiene plantilla: no hay texto que mandar
   | "sin_config";      // la fila no existe en la base (falta un SQL)
 
@@ -228,6 +229,7 @@ const NOTA: Record<CodigoMuestra, string> = {
   sin_whatsapp: "Al conductor le sale por el app o el correo, no por WhatsApp.",
   sin_contactos: "Ningún contacto marcado en su tarjeta: hoy no le llega a nadie.",
   solo_si_gps: "Sale solo si el GPS ve al conductor en el paradero sin haber pulsado INICIAR.",
+  repite_debio: "Está en el mismo minuto (o antes) que «Ya debió iniciar» y lleva el mismo texto: al conductor no se le manda para no repetirlo. Ponle 10 min en la tarjeta «No inició».",
   sin_plantilla: "Su tarjeta no tiene plantilla de WhatsApp: no hay texto que mandar.",
   sin_config: "Este aviso todavía no existe en la base.",
 };
@@ -285,6 +287,7 @@ export function planDeMuestra(cfgs: CfgMuestra[] | Map<string, CfgMuestra>, d: D
     else if (canal === "whatsapp" && p.para === "conductor" && cfg.canal_conductor_whatsapp === false) codigo = "sin_whatsapp";
     else if (p.para === "coordinador" && (cfg.usa_directorio === false || !(Number(cfg.contactos) > 0))) codigo = "sin_contactos";
     else if (p.reloj.tipo === "gps") codigo = "solo_si_gps";
+    else if (p.id === "no_inicio" && noInicioRepiteDebio(cfg, cfgDe(cfgs, CLAVE_DEBIO_INICIAR))) codigo = "repite_debio";
     else codigo = "sale";
     return { p, cfg, canal, cuando, minuto, plantilla, codigo };
   });

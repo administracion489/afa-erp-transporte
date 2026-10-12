@@ -1069,7 +1069,7 @@ export default function ModalManifiesto(props: Props) {
         const plan = await rp.json();
         if (!rp.ok) { setMensaje({ tipo: "err", texto: plan.error || "No se pudo comprobar a quién avisar." }); return false; }
         if (plan.codigo !== "avisar") {
-          setMensaje({ tipo: "warn", texto: plan.texto + " Si solo cambiaste datos, usa «Actualizar app»." });
+          setMensaje({ tipo: "warn", texto: plan.texto + " Si solo cambiaste datos, usa «Actualizar app y cerrar»." });
           return false;
         }
         const ok = confirm(
@@ -1448,26 +1448,9 @@ export default function ModalManifiesto(props: Props) {
               <p className="text-[10px] font-bold uppercase tracking-wide" style={{ color: syncColor }}>{sincronizadoApp ? "App al día" : "App sin actualizar"}</p>
               {fechaSincronizacion ? <p className="text-[9px] text-gray-500">{new Date(fechaSincronizacion).toLocaleString("es-PE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</p> : null}
             </div>
-            <div className="mt-1 flex flex-col gap-1">
-              <button
-                onClick={() => sincronizar(false)}
-                disabled={sincronizando || total === 0}
-                title="Guarda el manifiesto para la app del pasajero. No le escribe a nadie."
-                className="text-[10px] font-bold px-2 py-1 rounded-lg text-white disabled:opacity-50"
-                style={{ background: sincronizando ? "#6b7280" : "#0b315f" }}
-              >
-                {sincronizando ? "Guardando..." : "Actualizar app"}
-              </button>
-              <button
-                onClick={() => sincronizar(true)}
-                disabled={sincronizando || total === 0}
-                title="Además le envía el aviso del servicio a los pasajeros que aún no lo recibieron (app, correo o WhatsApp de pago)."
-                className="text-[10px] font-bold px-2 py-1 rounded-lg border disabled:opacity-50"
-                style={{ borderColor: "#16a34a", color: "#166534", background: "#fff" }}
-              >
-                Actualizar y avisar…
-              </button>
-            </div>
+            {/* Solo informa: las acciones viven en el pie. Los cambios ya están en la base; esto es
+                la marca de «revisado y entregado a la app», que se pone al cerrar. */}
+            <p className="text-[9px] text-gray-500 mt-1 leading-tight">Los cambios ya están guardados · se marca al pie</p>
           </div>
         </div>
 
@@ -2220,15 +2203,29 @@ export default function ModalManifiesto(props: Props) {
         )}
 
         {/* Footer */}
-        <div className="px-6 py-3 border-t flex items-center justify-between gap-3" style={{ borderColor: "#e2e8f0", background: "#f8fafc" }}>
-          <p className="text-[11px] text-gray-400">{pasajeros.length} pasajero(s) · {paradas.length} parada(s) en itinerario</p>
+        {/* Tres acciones, todas aquí. «Avisar» va a la IZQUIERDA, lejos del botón principal, y no
+            cierra el modal: su resultado (a cuántos les llegó) solo se lee en el mensaje. */}
+        <div className="px-6 py-3 border-t flex flex-wrap items-center justify-between gap-3" style={{ borderColor: "#e2e8f0", background: "#f8fafc" }}>
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-[11px] text-gray-400">{pasajeros.length} pasajero(s) · {paradas.length} parada(s) en itinerario</p>
+            <button
+              onClick={() => sincronizar(true)}
+              disabled={sincronizando || total === 0}
+              title="Envía el aviso del servicio a quien aún no lo recibió (app, correo o WhatsApp de pago). Antes te dice a cuántos."
+              className="px-3 py-1.5 rounded-xl font-bold text-xs border disabled:opacity-50 hover:bg-green-50 transition-colors"
+              style={{ borderColor: "#16a34a", color: "#166534", background: "#fff" }}
+            >
+              Avisar a pasajeros…
+            </button>
+          </div>
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
+              title={sincronizadoApp ? undefined : "Lo que cambiaste ya quedó guardado; solo la marca «App al día» queda sin poner."}
               className="px-4 py-2 rounded-xl font-bold text-sm border text-gray-500 hover:bg-gray-100 transition-colors"
               style={{ borderColor: "#e2e8f0" }}
             >
-              Cerrar sin actualizar
+              Cerrar
             </button>
             <button
               onClick={async () => { if (await sincronizar(false)) onClose(); }}
