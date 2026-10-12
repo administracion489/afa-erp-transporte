@@ -775,14 +775,15 @@ export const METRICAS_USO: readonly MetricaUso[] = [
 /**
  * Qué significa que cada métrica SUBA. Más km, servicios, horas, gasto y CO₂ es más TRABAJO: neutro
  * (pintarlo de rojo castigaría una semana con más demanda). Más unidades sin uso es la anomalía; y
- * menos unidades activas es la misma anomalía vista desde el otro lado (las dos cuentan la misma flota
- * de hoy). El % tercerizado es una decisión comercial, no un error: neutro.
+ * las unidades ACTIVAS son volumen, como el km: neutras. Pintarlas también sería contar dos veces la
+ * misma anomalía (las dos cuentan la misma flota de hoy), y un rojo repetido enseña a ignorar los
+ * rojos. El % tercerizado es una decisión comercial, no un error: neutro.
  */
 export const SENTIDO_METRICA: Record<MetricaUso, SentidoVariacion> = {
   km: "neutro",
   servicios: "neutro",
   horas: "neutro",
-  unidadesActivas: "bajar_malo",
+  unidadesActivas: "neutro",
   unidadesSinUso: "subir_malo",
   gastoCombustible: "neutro",
   co2: "neutro",

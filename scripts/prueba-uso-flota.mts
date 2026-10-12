@@ -598,10 +598,10 @@ console.log("\n8 · combustible: gasto y CO₂ de lo comprado");
 // ══ 9 · El sentido de cada métrica y la comparación ═══════════════════════════════════════════════
 console.log("\n9 · SENTIDO_METRICA y compararUso");
 {
-  const neutras: MetricaUso[] = ["km", "servicios", "horas", "gastoCombustible", "co2", "pctTercerizado"];
-  chk("km, servicios, horas, gasto, CO₂ y % tercerizado son neutros", neutras.every((m) => SENTIDO_METRICA[m] === "neutro"));
-  chk("más unidades sin uso es malo; menos activas también (la misma flota vista desde el otro lado)",
-    SENTIDO_METRICA.unidadesSinUso === "subir_malo" && SENTIDO_METRICA.unidadesActivas === "bajar_malo");
+  const neutras: MetricaUso[] = ["km", "servicios", "horas", "unidadesActivas", "gastoCombustible", "co2", "pctTercerizado"];
+  chk("km, servicios, horas, unidades activas, gasto, CO₂ y % tercerizado son neutros", neutras.every((m) => SENTIDO_METRICA[m] === "neutro"));
+  chk("más unidades sin uso es malo (es la única métrica que alarma; las activas no repiten el rojo)",
+    SENTIDO_METRICA.unidadesSinUso === "subir_malo");
   chk("todas las métricas tienen sentido", METRICAS_USO.every((m) => SENTIDO_METRICA[m] != null) && Object.keys(SENTIDO_METRICA).length === METRICAS_USO.length);
 
   const hoy = "2026-09-14";
@@ -623,8 +623,8 @@ console.log("\n9 · SENTIDO_METRICA y compararUso");
   const a = resumenUso(mk("2026-09-08", "2026-09-14")), p = resumenUso(mk("2026-09-01", "2026-09-07"));
   const cmp = compararUso(a, p);
   chk("servicios suben de 7 a 15 (+114 %) y el tono es neutro", cmp.variaciones.servicios.actual === 15 && cmp.variaciones.servicios.previa === 7 && cmp.variaciones.servicios.tono === "neutro");
-  chk("unidades sin uso bajan de 2 a 1: tono bueno; activas suben de 1 a 2: tono bueno",
-    cmp.variaciones.unidadesSinUso.tono === "bueno" && cmp.variaciones.unidadesActivas.tono === "bueno");
+  chk("unidades sin uso bajan de 2 a 1: tono bueno; activas suben de 1 a 2: tono neutro",
+    cmp.variaciones.unidadesSinUso.tono === "bueno" && cmp.variaciones.unidadesActivas.tono === "neutro");
   chk("el tono sale de tonoVariacion con el sentido declarado", METRICAS_USO.every((m) => cmp.variaciones[m].tono === tonoVariacion(cmp.variaciones[m].pct, SENTIDO_METRICA[m])));
   chk("la cobertura del odómetro pasó de 100 % a 50 %: se avisa", cmp.avisos.some((x) => x.codigo === "cobertura_odometro_cambio") && cmp.motivo != null, cmp.motivo ?? "");
   chk("el km es un piso en el periodo actual: se avisa y la variación lo marca", cmp.variaciones.km.piso && cmp.avisos.some((x) => x.codigo === "km_es_piso"));
