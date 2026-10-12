@@ -1313,6 +1313,30 @@ export function variacionPct(actual: number | null, previa: number | null): numb
 }
 
 /**
+ * Qué significa que una métrica SUBA. El color de una variación no es «sube = malo»: más km es más
+ * trabajo (`neutro`), menos rendimiento es la anomalía (`bajar_malo`), más costo por km es plata que
+ * se va (`subir_malo`). Lo declara quien publica la métrica, nunca la pantalla deduciéndolo del signo.
+ */
+export type SentidoVariacion = "subir_malo" | "bajar_malo" | "neutro";
+
+/** El tono de una variación, sin colores: la pantalla elige cómo pintarlo. */
+export type TonoVariacion = "sin_dato" | "igual" | "neutro" | "malo" | "bueno";
+
+/**
+ * El tono de una variación en puntos porcentuales (`variacionPct`) según el sentido de su métrica.
+ * Es la lógica de `colorDelta`, que vivía privada en app/combustible/ComparacionPeriodo.tsx, copiada
+ * LITERAL y sin los colores (scripts/prueba-km-gps.mts la compara contra el original): menos de 0.05 puntos es
+ * `igual`, una métrica neutra nunca es buena ni mala, y sin variación (null) no se afirma nada.
+ */
+export function tonoVariacion(v: number | null, s: SentidoVariacion): TonoVariacion {
+  if (v === null) return "sin_dato";
+  if (Math.abs(v) < 0.05) return "igual";
+  if (s === "neutro") return "neutro";
+  const malo = s === "subir_malo" ? v > 0 : v < 0;
+  return malo ? "malo" : "bueno";
+}
+
+/**
  * Resume una ventana de fechas. `series` se calcula sobre TODO el historial (el km
  * entre dos cargas es un hecho del vehículo y no cambia porque se esté filtrando un
  * mes); aquí solo se recortan los tramos cuya carga cae dentro de [desde, hasta].

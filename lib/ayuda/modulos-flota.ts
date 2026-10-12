@@ -206,6 +206,7 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
       "Saber cuánto saldo queda en la cuenta prepago (Primax) y recibir un aviso por correo y WhatsApp antes de que se acabe.",
       "Usar la factura del correo como respaldo: las cargas que el Radar IA no registró se registran desde la factura.",
       "Ver si los kilómetros de la jornada cuadran con los kilómetros de los servicios.",
+      "Ver en un gráfico (📈 Análisis) qué tramos de cada unidad rindieron fuera de lo normal, un punto por tramo.",
       "Alimentar el costo real de la operación y, cuando corresponde, el de un servicio concreto.",
     ],
     conceptos: ["costo_directo", "centro_costo", "margen_real", "prorrateo"],
@@ -331,6 +332,11 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
           "Al final de todas las recargas hay una ficha que compara **este periodo contra el anterior**: con el filtro de mes en «agosto» compara agosto contra julio, y con «todos los meses» los **últimos 30 días contra los 30 anteriores**.\n\n**Lo importante no son los totales, es el reparto de abajo.** Cuando el gasto de combustible sube hay tres causas posibles y se atienden de forma muy distinta:\n\n• **Recorrió más kilómetros** — no es una anomalía, es más trabajo. Y más trabajo es más facturación.\n\n• **La unidad rinde menos km/gal** — **esto sí es una anomalía**, y es lo único de los tres que se puede arreglar: mecánica, forma de manejar, o combustible que no está llegando al tanque.\n\n• **El combustible subió de precio** — es del mercado. Cuando el diésel pasa de S/ 24.70 a S/ 25.74, el gasto sube un 4 % sin que nadie haya hecho nada mal.\n\nLa ficha reparte la diferencia entre esas tres, **cada una en soles**, y suman exacto. Por eso el renglón del rendimiento lleva la marca «lo único que se puede arreglar»: es donde mirar.\n\n**Los colores no siguen la regla de «subir es malo».** Más kilómetros sale en gris (es neutro, es trabajo); menos rendimiento y más costo por kilómetro salen en rojo.\n\n**Si tienes varias unidades**, debajo aparece la lista ordenada por cuánto se movió el rendimiento de cada una, peor primero. Sin ella el promedio esconde el problema: con diez unidades, una que empeoró 25 % mueve el total apenas un 2.5 % y no la ve nadie. Toca una placa para filtrar el historial por ella.\n\n**Cuando no se puede comparar, lo dice y explica qué falta.** Un periodo con cargas pero sin dos seguidas que tengan kilometraje no se puede medir — y ponerle el odómetro a esas filas hace aparecer la comparación.",
       },
       {
+        pregunta: "¿Cómo leo el gráfico de galones contra km de «📈 Análisis»?",
+        respuesta:
+          "Cada punto es un **tramo**: lo que la unidad recorrió entre dos cargas de **su mismo combustible**. Abajo van los km; a la izquierda, lo que cargó al cerrar el tramo. Tócalo y te lleva a esa carga en el historial.\n\nLos colores son los mismos veredictos de la columna de rendimiento —el gráfico no juzga nada por su cuenta— y cada uno tiene además su forma, para distinguirlos sin depender del color:\n\n• **Azul** — normal: rindió dentro de lo habitual de su unidad.\n• **Rojo** — consumió de más: queda **por encima** de la recta de su unidad. Plata que se fue.\n• **Ámbar** — falta registrar una carga: queda **por debajo**, rindió más de lo posible. Casi siempre es combustible comprado que no está en el libro.\n• **× gris oscuro** — implausible, descartado: pasa el techo físico de su combustible. Se dibuja para que lo veas, pero no es una medición.\n• **Círculo hueco gris** — tramo incompleto: sus km son de fiar, pero el combustible de la cuenta no está completo (una unidad bicombustible, o una carga sin km en medio). No se mide.\n\n**Ningún tramo desaparece**: los que no tienen punto (primera carga, carga sin km, tanque parcial, un km imposible) se cuentan debajo del gráfico con su motivo.\n\n**Un gráfico por combustible.** Un galón y un m³ no son la misma cantidad, así que nunca comparten eje: si en lo filtrado hay varios combustibles, unos botones arriba eligen cuál ver.\n\n**La recta de referencia** —la mediana de la unidad, con sus límites de «consumió de más» y «falta una carga»— sale solo al elegir **UNA unidad** que tenga al menos 5 tramos medidos. Una «mediana de la flota» no existe en ningún sitio del ERP, y con menos tramos el ERP todavía no marca ninguno como bajo o alto. Cuando no hay recta, el gráfico dice por qué.\n\n**La unidad, la flota, el tipo y el mes sí recortan el gráfico; la búsqueda de texto no.** Y aunque elijas un mes, el color de cada punto se juzga con **toda la historia** de su unidad, igual que en el historial: el mes solo decide qué puntos se ven.",
+      },
+      {
         pregunta: "¿Qué significa la columna KM del historial?",
         respuesta:
           "Son **dos números**: arriba en pequeño el **odómetro** tal como se registró en esa carga, y abajo en grande los **kilómetros recorridos desde la carga anterior** de esa misma unidad.\n\nEl de abajo es el que sirve. Un odómetro suelto (103,915) no dice nada; lo que se lee de un vistazo es «recorrió 246 km con esta carga».\n\n**Si no hay kilometraje, sale «—», nunca un cero.** Un cero se leería como «no recorrió», que es otra cosa muy distinta a «nadie lo anotó». Esas filas son además las que rompen el rendimiento de su tramo: ponerles el odómetro es la corrección que más rinde en esta pantalla.",
@@ -367,6 +373,84 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
       { etiqueta: "Odómetro y lecturas", href: "/mantenimiento?tab=odometro" },
       { etiqueta: "Capacidad de tanque por unidad", href: "/vehiculos" },
       { etiqueta: "Precios de combustible para costeo", href: "/configuracion/costos" },
+      { etiqueta: "Uso de flota (km, servicios y CO₂)", href: "/uso-flota" },
+    ],
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // USO DE FLOTA · KM, SERVICIOS Y CO₂
+  // ══════════════════════════════════════════════════════════════════════════
+  {
+    clave: "uso-flota",
+    rutas: ["/uso-flota"],
+    titulo: "Uso de flota · cuánto trabajó la flota y qué gastó",
+    resumen:
+      "Dos pestañas. **Resumen**: km, servicios, horas, unidades sin uso, gasto y CO₂ de la flota propia en un periodo, contra el periodo anterior del mismo largo. **Servicios**: la estadística de cada servicio de un día —km por GPS, tiempo en marcha, excesos y el combustible, costo y CO₂ estimados— con su corte por cliente. Lo medido y lo estimado van siempre separados.",
+    paraQueSirve: [
+      "Ver si la flota trabajó más o menos que el periodo anterior, y qué unidades se quedaron paradas.",
+      "Saber cuántos km hizo cada servicio según el GPS y cuánto combustible y CO₂ le corresponden, estimados.",
+      "Sumar por cliente los km, el combustible, el costo y el CO₂ de sus servicios.",
+      "Encontrar los servicios que quedaron sin cerrar.",
+    ],
+    conceptos: ["co2_estimado", "exceso_sostenido", "presupuesto_servicio"],
+    faqs: [
+      {
+        pregunta: "¿De dónde sale el kilometraje?",
+        respuesta:
+          "En el **Resumen**, del **odómetro**: la primera y la última lectura de cada día de cada unidad, después de dejar fuera las lecturas que no encajan con las demás (una foto de otra unidad, un dígito de más). El odómetro mide el día entero, incluidos los traslados en vacío.\n\nSi un día con servicios no tiene esas dos lecturas, el ERP usa el **km que el GPS puede demostrar** de sus servicios. Ese número es un **mínimo**: el GPS solo puede quedarse corto (pierde señal y no ve los km en vacío). Por eso el total lleva **«≥»** y al lado la **cobertura del odómetro**, o sea qué parte de los días salió del odómetro. Si la cobertura cambió mucho de un periodo al otro, la pantalla lo avisa: la diferencia de km puede ser de registro, no de trabajo.\n\nEn **Servicios**, el km es el del GPS de cada servicio y se publica según su rastreo, el mismo de la columna Rastreo de Seguimiento: **Completo** o **Aceptable** → el número; **Con cortes** → «≥ N km»; peor que eso, no hay número y la celda dice por qué. Es el mismo km de la Auditoría de km.",
+      },
+      {
+        pregunta: "¿Por qué el CO₂ del Resumen no cuadra con la suma de la pestaña Servicios?",
+        respuesta:
+          "Porque responden **dos preguntas distintas** y no tienen por qué dar lo mismo.\n\n• El del **Resumen** es el CO₂ de lo **COMPRADO**: cada carga de la flota propia por el factor de su combustible. Una carga se compra un día y se quema durante varios, y también mueve los traslados en vacío, el taller y el grifo.\n• El de **Servicios** es el CO₂ de lo **RECORRIDO en servicio**, estimado: los km del GPS convertidos en combustible con el rendimiento de la categoría de la unidad. No cuenta los km en vacío, y sí incluye a las unidades tercerizadas.\n\nPor eso, mirando solo la flota propia, lo comprado suele salir **mayor** que la suma de sus servicios.",
+      },
+      {
+        pregunta: "¿Qué significan «sin uso» y «sin cerrar»?",
+        respuesta:
+          "**Sin uso** son las unidades de la flota propia que no tuvieron **ningún servicio** (no cancelado) en el periodo. Cada una dice por qué —**En mantenimiento** según su ficha, o **Sin servicios en el periodo**— y cuándo fue su último servicio.\n\nLa flota es **la de hoy**: el ERP no guarda el historial de altas y bajas, así que una unidad dada de baja después no aparece como «sin uso» en un periodo anterior.\n\n**Sin cerrar** son servicios de un día que ya pasó y que siguen como programados, confirmados, pendientes o «en curso» de otro día: no se sabe si salieron. Cuentan entre los servicios del periodo, pero se señalan aparte para que alguien los cierre en Programación o en Seguimiento.",
+      },
+      {
+        pregunta: "¿Por qué las variaciones no salen en verde o en rojo?",
+        respuesta:
+          "Porque aquí **subir no es malo**. Más km, más servicios, más horas, más gasto y más CO₂ casi siempre son **más trabajo**, y más trabajo es más facturación. Pintarlo de rojo enseñaría a desconfiar de un buen mes.\n\nPor eso esas variaciones salen en un color **neutro**, con su porcentaje. La única que se pinta como alerta cuando sube es **unidades sin uso**: una unidad parada cuesta seguro, SOAT y depreciación sin facturar nada.\n\nEl costo por km y el rendimiento no se repiten aquí: están en **Combustible → 📈 Análisis** (el botón «⛽ Costo por km y rendimiento»).",
+      },
+      {
+        pregunta: "¿Por qué una unidad tercerizada no tiene costo de combustible?",
+        respuesta:
+          "Porque **no es un costo de AFA**: al tercero se le paga su factura, y su combustible ya va dentro de ese precio. Ponerle además un costo de combustible lo contaría dos veces. Por eso su celda de costo dice **«Factura del proveedor»** en vez de un número.\n\nSí tiene **CO₂**, si su categoría de costeo tiene rendimiento: las emisiones del recorrido existen las pague quien las pague.",
+      },
+      {
+        pregunta: "¿Por qué la pestaña Servicios mide de a un día, y como mucho 7?",
+        respuesta:
+          "Porque medir un servicio es leer **todo su recorrido GPS**: miles de posiciones por servicio. Un día de la flota son decenas de servicios, y una semana entera en una sola consulta se pasaría del tiempo límite del servidor.\n\nPor eso la pantalla pide **un día por vez**: con «7 días» hace siete consultas seguidas, una tras otra, con su avance y un botón para **Cancelar**. Lo que ya salió bien se conserva: el botón de los días que faltan no repite un día ya medido.\n\nSe puede mirar hasta **90 días atrás**, el mismo límite del rastreo de Seguimiento. Para periodos largos está el **Resumen**, que trabaja con el odómetro y llega hasta algo más de un año atrás.",
+      },
+      {
+        pregunta: "¿Qué quiere decir «estimado»?",
+        respuesta:
+          "Que **no se midió: se calculó**. El combustible de un servicio no se puede medir —se carga por tanque, no por viaje—, así que el ERP lo estima: **km del GPS × consumo por km de la categoría de la unidad**, con el mismo rendimiento y el mismo precio que usa el presupuesto del servicio. El costo es ese combustible por su precio, y el CO₂, ese combustible por su factor de emisión.\n\nPasa el puntero por la celda y te dice de dónde salió el número. Si el km es un mínimo («≥»), el combustible, el costo y el CO₂ también lo son.\n\nCuando no hay número, la celda dice por qué: la unidad no tiene categoría de costeo, la categoría no tiene parámetros, no hay precio, o el km no se pudo medir. **Nunca es un cero.**",
+      },
+      {
+        pregunta: "¿Por qué no hay «ralentí» como en los sistemas de telemetría?",
+        respuesta:
+          "Porque el GPS de este ERP es **el teléfono del conductor**, no un equipo conectado al motor. El teléfono sabe que el bus está **quieto**, pero no si el motor está **encendido**: un bus apagado en la cochera y uno con el motor en marcha en un paradero se ven igual.\n\nPor eso la pantalla dice **«Detenido»** y nunca «ralentí». Y por lo mismo no hay consumo **medido** por viaje: el combustible se deduce de las cargas, tanque a tanque.",
+      },
+    ],
+    comoHacer: [
+      {
+        titulo: "Ver la estadística de un servicio",
+        pasos: [
+          "En Seguimiento, abre la ficha del servicio y, abajo en «Analítica», pulsa «📊 Estadística del servicio». Se abre en otra pestaña con el día elegido y el servicio resaltado.",
+          "O aquí mismo: pestaña «🚌 Servicios», elige el día y busca la fila.",
+          "Pasa el puntero por el combustible, el costo o el CO₂ para ver de dónde sale cada número.",
+          "«Ver recorrido ↗» abre el mapa del servicio.",
+        ],
+      },
+    ],
+    relacionadas: [
+      { etiqueta: "Combustible · costo por km y rendimiento", href: "/combustible?vista=analisis" },
+      { etiqueta: "Auditoría km (GPS vs odómetro)", href: "/auditoria-jornada" },
+      { etiqueta: "Seguridad vial (excesos de velocidad)", href: "/seguridad-vial" },
+      { etiqueta: "Odómetro y lecturas", href: "/mantenimiento?tab=odometro" },
     ],
   },
 

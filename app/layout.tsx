@@ -321,6 +321,9 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       // Reusa el módulo "monitoreo" a propósito: quien vigila la flota es quien debe ver si a
       // un conductor se le corta el rastreo. Así no hay que dar un permiso nuevo a nadie.
       { href: "/gps-salud",    label: "Salud del GPS", sub: "Rastreo por conductor", icon: Ic.Radio,        modulo: "monitoreo"    },
+      // También "monitoreo": los excesos se juzgan con el mismo GPS en vivo que vigila /gps-salud
+      // (su API, /api/flota/excesos, exige este módulo). No hay permiso nuevo que repartir.
+      { href: "/seguridad-vial", label: "Seguridad vial", sub: "Excesos de velocidad", icon: Ic.AlertTriangle, modulo: "monitoreo" },
       { href: "/pasajeros",    label: "Pasajeros",    sub: "Base de pasajeros",     icon: Ic.Users,         modulo: "pasajeros"    },
       { href: "/comunicados",  label: "Comunicados",  sub: "Envíos masivos WhatsApp/Correo", icon: Ic.MessageSquare, modulo: "comunicados" },
       { href: "/multas",       label: "Multas",       sub: "Infracciones",          icon: Ic.Fine,          modulo: "multas"       },
@@ -336,6 +339,9 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/neumaticos",             label: "Neumáticos",         sub: "Vida útil",           icon: Ic.Circle,    modulo: "neumaticos"   },
       { href: "/combustible",            label: "Combustible",        sub: "Consumo",             icon: Ic.Fuel,      modulo: "combustible"  },
       { href: "/auditoria-jornada",      label: "Auditoría km",       sub: "Jornada vs servicio", icon: Ic.Scale,     modulo: "combustible"  },
+      // "vehiculos" y no un módulo nuevo: son métricas de la flota, y un módulo propio obligaría a
+      // tocar las tres listas de módulos (layout, crear-usuario y /usuarios) sin que nadie lo pida.
+      { href: "/uso-flota",              label: "Uso de flota",       sub: "Km · servicios · CO₂", icon: Ic.BarChart, modulo: "vehiculos"   },
       { href: "/seguros",                label: "Seguros",            sub: "Pólizas",             icon: Ic.Shield,    modulo: "seguros"      },
     ],
   },

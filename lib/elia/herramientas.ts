@@ -9,6 +9,8 @@ import { etiquetaEstado, etiquetaAdmin } from "@/lib/estados";
 import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
 import { seriesRendimiento, juzgarTramo, normalizarCantidad } from "@/lib/rendimiento";
 import { familiaCombustible, configCombustible, capacidadTanqueDe } from "@/lib/combustible-tipos";
+import { utilizacionParaElia } from "@/lib/flota/uso-flota";
+import { entradaUsoParaElia } from "@/lib/flota/uso-flota-datos";
 import type {
   BloqueUI,
   ServicioUI,
@@ -115,9 +117,12 @@ export const RUTAS_MODULO: { href: string; etiqueta: string; modulo: string; ali
   { href: "/programacion", etiqueta: "Programación", modulo: "programacion", alias: ["programacion", "reservas", "servicios"] },
   { href: "/seguimiento", etiqueta: "Seguimiento", modulo: "seguimiento", alias: ["seguimiento", "torre de control", "estado"] },
   { href: "/monitoreo", etiqueta: "Monitoreo", modulo: "monitoreo", alias: ["monitoreo", "mapa", "gps", "en vivo"] },
+  { href: "/seguridad-vial", etiqueta: "Seguridad vial", modulo: "monitoreo", alias: ["seguridad vial", "excesos de velocidad", "exceso de velocidad", "excesos", "velocidad"] },
   { href: "/pasajeros", etiqueta: "Pasajeros", modulo: "pasajeros", alias: ["pasajeros", "pasajero"] },
   { href: "/multas", etiqueta: "Multas", modulo: "multas", alias: ["multas", "infracciones", "papeletas"] },
   { href: "/incidencias", etiqueta: "Incidencias", modulo: "incidencias", alias: ["incidencias", "eventos", "alertas"] },
+  // Antes de /vehiculos: su alias «flota» está dentro de «uso de flota» y `find` se queda con la primera.
+  { href: "/uso-flota", etiqueta: "Uso de flota", modulo: "vehiculos", alias: ["uso de flota", "uso flota", "utilizacion de flota", "utilización de flota", "km semanal", "co2", "co₂", "emisiones"] },
   { href: "/vehiculos", etiqueta: "Vehículos", modulo: "vehiculos", alias: ["vehiculos", "flota", "unidades"] },
   { href: "/documentos-vehiculares", etiqueta: "Docs. Vehiculares", modulo: "vehiculos", alias: ["documentos vehiculares", "soat", "citv", "revision tecnica"] },
   { href: "/mantenimiento", etiqueta: "Mantenimiento", modulo: "mantenimiento", alias: ["mantenimiento", "taller", "ot", "odometro"] },
@@ -1846,97 +1851,20 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
 
       // ────────────────────────────────────────────────────────────────────
       case "utilizacion_flota": {
+        // El motor vive en lib/flota/uso-flota.ts (el mismo de /uso-flota). Mismas claves y mismos
+        // bloques que antes; el km pasa de `max − min` de las lecturas aceptadas —que una lectura alta
+        // equivocada inflaba— a la suma de las jornadas saneadas del odómetro (scripts/prueba-uso-flota.mts).
         const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
         const inicio = inicioMeses(meses);
         const hoy = fechaLima();
-
-        const [{ data: vehs }, filas, lecturas] = await Promise.all([
-          sb.from("vehiculos").select("id, placa, categoria, estado"),
-          fetchPaginado((d, h) =>
-            sb
-              .from("reservas")
-              .select("vehiculo_id, vehiculo_tercero_id, tipo_asignacion, fecha_servicio, estado")
-              .gte("fecha_servicio", inicio)
-              .lte("fecha_servicio", hoy)
-              .neq("estado", "cancelada")
-              .range(d, h)
-          ),
-          fetchPaginado((d, h) =>
-            sb
-              .from("lecturas_odometro")
-              .select("vehiculo_id, km, fecha")
-              .not("vehiculo_id", "is", null)   // solo flota propia (terceros tienen vehiculo_id NULL)
-              .gte("fecha", inicio)
-              .eq("estado", "aceptada")
-              .range(d, h)
-          ),
-        ]);
-        const vehiculos = (vehs as any[]) ?? [];
-        if (filas.length === 0)
-          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "Sin servicios en el rango." }) };
-
-        const kmPorVeh: Record<number, { min: number; max: number }> = {};
-        for (const l of lecturas) {
-          const k = (kmPorVeh[l.vehiculo_id] ||= { min: Number(l.km), max: Number(l.km) });
-          k.min = Math.min(k.min, Number(l.km));
-          k.max = Math.max(k.max, Number(l.km));
+        try {
+          return utilizacionParaElia(await entradaUsoParaElia(inicio, hoy, hoy, Date.now()));
+        } catch (e) {
+          // El detalle (que puede traer el texto crudo de Postgres) va al log; al modelo, una frase que
+          // pueda repetir sin inventar la causa.
+          console.error("[elia/utilizacion_flota]", e);
+          return { paraModelo: JSON.stringify({ error: "No pude leer los datos de uso de la flota en este momento." }) };
         }
-
-        const uso: Record<number, { servicios: number; dias: Set<string> }> = {};
-        let tercerizados = 0;
-        for (const r of filas) {
-          if (r.tipo_asignacion === "tercerizado" || r.vehiculo_tercero_id) tercerizados++;
-          if (r.vehiculo_id) {
-            const u = (uso[r.vehiculo_id] ||= { servicios: 0, dias: new Set() });
-            u.servicios++;
-            u.dias.add(r.fecha_servicio);
-          }
-        }
-        const pctTerceros = Math.round((tercerizados / filas.length) * 100);
-
-        const porUnidad = vehiculos
-          .map((v) => ({
-            placa: v.placa,
-            categoria: v.categoria,
-            estado: v.estado,
-            servicios: uso[v.id]?.servicios || 0,
-            dias_activos: uso[v.id]?.dias.size || 0,
-            km_recorridos: kmPorVeh[v.id] ? Math.max(0, kmPorVeh[v.id].max - kmPorVeh[v.id].min) : null,
-          }))
-          .sort((a, b) => b.servicios - a.servicios);
-        const ociosas = porUnidad.filter((u) => u.servicios === 0 && u.estado !== "inactivo");
-
-        return {
-          paraModelo: JSON.stringify({
-            desde: inicio,
-            hasta: hoy,
-            servicios_totales: filas.length,
-            tercerizados,
-            pct_tercerizado: pctTerceros,
-            por_unidad: porUnidad,
-            unidades_sin_uso: ociosas.map((u) => u.placa),
-          }),
-          ui: [
-            {
-              tipo: "kpis",
-              items: [
-                { label: "Servicios", valor: String(filas.length), sub: `desde ${inicio}`, intent: "info" },
-                { label: "Tercerizados", valor: `${pctTerceros}%`, sub: `${tercerizados} servicios`, intent: pctTerceros > 40 ? "warn" : "ok" },
-                { label: "Unidades sin uso", valor: String(ociosas.length), sub: ociosas.slice(0, 3).map((u) => u.placa).join(", ") || undefined, intent: ociosas.length ? "warn" : "ok" },
-              ],
-            },
-            {
-              tipo: "ranking",
-              titulo: "Unidades más utilizadas",
-              items: porUnidad.slice(0, 5).map((u, i) => ({
-                puesto: i + 1,
-                nombre: u.placa,
-                valor: `${u.servicios} serv.`,
-                sub: `${u.dias_activos} días activos${u.km_recorridos ? ` · ${u.km_recorridos.toLocaleString("es-PE")} km` : ""}`,
-              })),
-            },
-          ],
-        };
       }
 
       // ────────────────────────────────────────────────────────────────────

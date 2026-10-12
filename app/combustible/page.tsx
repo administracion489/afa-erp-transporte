@@ -56,7 +56,7 @@ type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo" | "facturas";
 type GranPeriodo = "dia" | "semana" | "mes";
 
-import { coincideTipo, COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
+import { coincideTipo, COMBUSTIBLES, configCombustible, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
 import { faltaAlguna } from "@/lib/columna-faltante";
 import { construirCatalogoGrifos, claveAgrupacionGrifo, resolverGrifo, rucValido, type FuentesCatalogo } from "@/lib/combustible/grifo-canonico";
 import { cargarFuentesCatalogo } from "@/lib/combustible/grifo-canonico-datos";
@@ -72,6 +72,8 @@ import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
 import { capturaDeFechaHora, normalizarHoraVoucher } from "@/lib/odometro-tiempo";
 import { rangoKmDelDia, kmFueraDelRango, type LecturaOdometroBD, type RangoKmDelDia } from "@/lib/combustible/completar-carga";
 import ComparacionPeriodo from "./ComparacionPeriodo";
+import GraficoDispersion from "@/components/graficos/Dispersion";
+import { dispersionDeTramos, familiaPorDefecto } from "@/lib/combustible/dispersion";
 import SaldoCuenta from "./SaldoCuenta";
 import FacturasCorreo from "./FacturasCorreo";
 import FacturaDelCorreo from "@/components/combustible/FacturaDelCorreo";
@@ -269,13 +271,18 @@ export default function CombustiblePage() {
   const [expandidoId, setExpandidoId] = useState<number | null>(null);
   const [vista,       setVista]       = useState<VistaActiva>("historial");
   // `?vista=facturas` abre directo esa pestaña: es adonde vuelve Google después de conectar el
-  // correo de facturas. Se lee de window (no useSearchParams) para no exigir un Suspense a la página.
+  // correo de facturas. `?vista=analisis` abre el 📈 Análisis: es adonde enlaza /uso-flota para el
+  // costo por km y el rendimiento. Se lee de window (no useSearchParams) para no exigir un Suspense.
   useEffect(() => {
     try {
-      if (new URLSearchParams(window.location.search).get("vista") === "facturas") setVista("facturas");
+      const v = new URLSearchParams(window.location.search).get("vista");
+      if (v === "facturas" || v === "analisis") setVista(v);
     } catch { /* sin URL legible se queda en el historial */ }
   }, []);
   const [granularidad,setGranularidad]= useState<GranPeriodo>("mes");
+  // El combustible que eligió la persona en la dispersión de «Análisis». `null` = el del motor
+  // (`familiaPorDefecto`); si con los filtros deja de haber tramos de él, se vuelve al defecto.
+  const [familiaDisp, setFamiliaDisp] = useState<string | null>(null);
   const [busqueda,    setBusqueda]    = useState("");
   const [filtroVeh,   setFiltroVeh]   = useState("todos");
   const [filtroFlota, setFiltroFlota] = useState<"todos" | "propio" | "tercero">("todos");
@@ -1107,6 +1114,73 @@ export default function CombustiblePage() {
       .sort((a, b) => b.key.localeCompare(a.key));
   }, [filtrados, rendDeCarga, granularidad]);
 
+  // ── Dispersión galones (o m³) vs km por tramo (vista Análisis) ─────────────
+  //
+  // Los puntos y su clase los decide lib/combustible/dispersion.ts con el veredicto del motor de
+  // rendimiento; aquí solo se le traducen los filtros de la pantalla. Recibe las series ENTERAS
+  // (`seriesRend`, toda la historia): la clase de cada punto se juzga con la mediana de toda la
+  // historia de su unidad —igual que en el historial— y el mes solo decide qué puntos se ven.
+  //
+  // Las unidades salen con el MISMO predicado que `filtrados` (incluido el `?? "propio"` de una
+  // carga sin unidad conocida): el gráfico y la tabla de arriba no pueden filtrar distinto.
+  // `undefined` = todas; un Set vacío = ninguna (un vehículo de una flota con la otra puesta).
+  // Con un vehículo elegido el Set lo lleva aunque no tenga cargas, para que el motor diga «sin
+  // medición» de ESA unidad y no «elige una sola unidad».
+  const unidadesDisp = useMemo<Set<string> | undefined>(() => {
+    if (filtroVeh === "todos" && filtroFlota === "todos") return undefined;
+    const tipoDe = new Map(unidades.map(u => [u.uid, u.tipo]));
+    const pasaFlota = (uid: string) => filtroFlota === "todos" || (tipoDe.get(uid) ?? "propio") === filtroFlota;
+    if (filtroVeh !== "todos") return new Set(pasaFlota(filtroVeh) ? [filtroVeh] : []);
+    const set = new Set<string>();
+    for (const s of seriesRend.values()) if (pasaFlota(s.resumen.unidad)) set.add(s.resumen.unidad);
+    return set;
+  }, [seriesRend, unidades, filtroVeh, filtroFlota]);
+  // El tipo filtrado FIJA el combustible del gráfico, leído como su familia: regular y premium
+  // son el mismo tanque y la misma serie. Sin tipo, manda la que eligió la persona mientras siga
+  // habiendo tramos de ella en lo filtrado; si no, la del motor. Un galón y un m³ nunca se mezclan.
+  const familiaFijaDisp = filtroTipo !== "todos" ? familiaCombustible(filtroTipo) : null;
+  const dispersion = useMemo(() => {
+    const rango = filtroMes === "todos" ? undefined : { desde: ventanas.actual.desde, hasta: ventanas.actual.hasta };
+    const base = { unidades: unidadesDisp, desde: rango?.desde, hasta: rango?.hasta };
+    if (familiaFijaDisp) return dispersionDeTramos(seriesRend, { familia: familiaFijaDisp, ...base });
+    const porDefecto = familiaPorDefecto(seriesRend, unidadesDisp, rango);
+    if (!porDefecto) return null;
+    const d = dispersionDeTramos(seriesRend, { familia: porDefecto, ...base });
+    if (familiaDisp && familiaDisp !== porDefecto && d.familiasDisponibles.some(f => f.familia === familiaDisp)) {
+      return dispersionDeTramos(seriesRend, { familia: familiaDisp, ...base });
+    }
+    return d;
+  }, [seriesRend, unidadesDisp, filtroMes, ventanas, familiaFijaDisp, familiaDisp]);
+  const nombreUnidadDisp = (uid: string) => unidadDe(uid)?.placa ?? (uid ? "Unidad sin ficha" : "Sin unidad");
+
+  // Del punto a su carga: al historial, con la fila desplegada (lo mismo que hace el clic en la
+  // fila) y a la vista. El punto es la carga que CIERRA el tramo. La fila tiene que estar en la
+  // lista, y solo dos filtros pueden esconderla: la búsqueda de texto (el gráfico no la aplica) y
+  // un grado de gasolina (el gráfico es de la familia). Solo esos dos se aflojan, y solo si la
+  // esconden; vehículo, flota y mes son los mismos del gráfico.
+  const abrirCargaDelGrafico = (cargaId: number) => {
+    const r = registros.find(x => x.id === cargaId);
+    if (!r) return;
+    if (!filtrados.some(x => x.id === cargaId)) {
+      setBusqueda("");
+      if (!coincideTipo(r.tipo_combustible, filtroTipo)) {
+        const fam = familiaCombustible(filtroTipo);
+        setFiltroTipo(coincideTipo(r.tipo_combustible, fam) ? fam : "todos");
+      }
+    }
+    setExpandidoId(cargaId);
+    verLoQueLeyoElRadar(cargaId);
+    setVista("historial");
+    // La fila existe recién cuando el historial se pinta: se busca unas cuantas veces.
+    let intentos = 0;
+    const ir = () => {
+      const fila = document.getElementById(`carga-${cargaId}`);
+      if (fila) fila.scrollIntoView({ behavior: "smooth", block: "start" });
+      else if (++intentos < 10) setTimeout(ir, 60);
+    };
+    setTimeout(ir, 60);
+  };
+
   // ─── RENDER ───────────────────────────────────────────────────────────────
 
   return (
@@ -1604,7 +1678,7 @@ export default function CombustiblePage() {
 
                     return (
                       <React.Fragment key={r.id}>
-                        <tr className={`border-t transition-colors cursor-pointer ${tieneAnomalia ? "bg-red-50/40" : "hover:bg-gray-50"}`}
+                        <tr id={`carga-${r.id}`} className={`border-t transition-colors cursor-pointer ${tieneAnomalia ? "bg-red-50/40" : "hover:bg-gray-50"}`}
                           style={{ borderColor: "#f1f5f9" }}
                           onClick={() => { setExpandidoId(expandido ? null : r.id); if (!expandido) verLoQueLeyoElRadar(r.id); }}>
                           <td className="p-3 text-gray-300 text-xs">{expandido ? "▼" : "▶"}</td>
@@ -2132,6 +2206,97 @@ export default function CombustiblePage() {
             Los km recorridos y el rendimiento se calculan con el odómetro registrado en cada carga (Radar IA, check-in o registro manual).
             En la Fase 3 (Check-in/Check-out) se separará el <b>km de servicio</b> del <b>km fantasma</b> para el costeo por servicio.
           </p>
+
+          {/* ── Dispersión: galones (o m³) contra km, un punto por tramo ──
+              El gráfico no juzga nada: clase, leyenda, tramos sin punto y el porqué de que no haya
+              recta los pone el componente con lo que dice lib/combustible/dispersion.ts. */}
+          <div className="bg-white rounded-2xl border shadow-sm p-4 space-y-3">
+            {(() => {
+              const uq = dispersion?.unidadCantidad;
+              const cantidad = uq === "m³" ? "m³" : uq === "lt" ? "Litros" : "Galones";
+              const cfgFam = dispersion ? configCombustible(dispersion.familia) : null;
+              const familias = !familiaFijaDisp && dispersion ? dispersion.familiasDisponibles : [];
+              const otros = [
+                filtroFlota === "propio" ? "solo flota propia" : filtroFlota === "tercero" ? "solo tercerizadas" : null,
+                filtroTipo !== "todos"
+                  ? `tipo ${COMBUSTIBLES[filtroTipo]?.label ?? filtroTipo}${familiaFijaDisp && familiaFijaDisp !== filtroTipo
+                    ? ` (se dibuja toda la ${configCombustible(familiaFijaDisp).label.toLowerCase()}: es la misma serie)` : ""}`
+                  : null,
+                filtroMes !== "todos" ? `mes ${filtroMes}` : null,
+              ].filter(Boolean);
+              return (
+                <>
+                  <div className="flex flex-col sm:flex-row sm:items-start gap-3">
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-sm font-black text-gray-800">
+                        {dispersion ? `${cantidad} vs km por tramo` : "Galones (o m³) vs km por tramo"}
+                        {cfgFam && (
+                          <span className="ml-2 text-xs font-bold px-2 py-0.5 rounded-full align-middle whitespace-nowrap"
+                            style={{ background: cfgFam.bg, color: cfgFam.color }}>
+                            {cfgFam.icon} {cfgFam.label}
+                          </span>
+                        )}
+                      </h3>
+                      {dispersion && (
+                        <p className="text-[11px] text-gray-400 mt-0.5 tabular-nums">
+                          {dispersion.puntos.length} punto(s) de {dispersion.tramos} tramo(s) · {filtroMes === "todos" ? "toda la historia" : filtroMes}
+                        </p>
+                      )}
+                    </div>
+                    {/* El mismo filtro de vehículo de la pantalla: la recta de referencia es de UNA
+                        unidad, y sin este selector habría que ir al historial a elegirla. */}
+                    <label className="flex items-center gap-2 min-w-0">
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-gray-400 whitespace-nowrap">Unidad</span>
+                      <select className="flex-1 sm:flex-none min-w-0 border rounded-xl px-3 py-2 text-sm" value={filtroVeh} onChange={e => setFiltroVeh(e.target.value)}>
+                        <option value="todos">Todas las unidades</option>
+                        <optgroup label="Flota propia">
+                          {unidades.filter(u => u.tipo === "propio").map(u => <option key={u.uid} value={u.uid}>{u.placa}</option>)}
+                        </optgroup>
+                        <optgroup label="Tercerizadas">
+                          {unidades.filter(u => u.tipo === "tercero").map(u => <option key={u.uid} value={u.uid}>{u.placa}</option>)}
+                        </optgroup>
+                      </select>
+                    </label>
+                  </div>
+
+                  {familias.length > 1 && (
+                    <div className="flex flex-wrap gap-2" role="group" aria-label="Combustible del gráfico">
+                      {familias.map(f => {
+                        const c = configCombustible(f.familia);
+                        const activa = f.familia === dispersion?.familia;
+                        return (
+                          <button key={f.familia} type="button" aria-pressed={activa} onClick={() => setFamiliaDisp(f.familia)}
+                            title={`${f.puntos} punto(s) de ${f.tramos} tramo(s) en lo filtrado`}
+                            className="px-3 py-2 rounded-xl border text-sm font-bold transition-all"
+                            style={activa
+                              ? { background: "#0b315f", color: "#fff", borderColor: "#0b315f" }
+                              : { background: "#fff", color: "#4b5563" }}>
+                            {c.icon} {c.label}
+                            <span className="ml-1.5 text-xs font-normal opacity-75 tabular-nums">{f.puntos}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-gray-500 leading-snug">
+                    Un gráfico por combustible: un galón y un m³ no son la misma cantidad, así que nunca comparten eje.
+                    La recta de referencia es la mediana de UNA unidad y aparece al filtrar una sola.
+                    {otros.length > 0 && <> También aplica, desde el historial: {otros.join(" · ")}.</>}
+                    {busqueda.trim() && <> La búsqueda «{busqueda.trim()}» no recorta este gráfico.</>}
+                  </p>
+
+                  {dispersion ? (
+                    <GraficoDispersion datos={dispersion} nombreUnidad={nombreUnidadDisp} onPunto={abrirCargaDelGrafico} cargando={loading} />
+                  ) : (
+                    <div className="h-24 flex items-center justify-center text-xs text-gray-400 bg-gray-50 rounded-xl px-4 text-center">
+                      {loading ? "Midiendo…" : "Nada que dibujar con estos filtros: un tramo une dos cargas de la misma unidad y del mismo combustible."}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
         </section>
       )}
 

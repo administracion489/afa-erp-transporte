@@ -354,6 +354,30 @@ export async function cargarContextoCosteo(sb: any, r: ReservaCosteable): Promis
   };
 }
 
+/**
+ * Los precios con los que se costea el combustible de un servicio: los de referencia
+ * (`precios_combustible`), salvo el del combustible PRINCIPAL del tipo, que toma el precio realmente
+ * pagado en la última carga de la placa cuando se conoce. Es la regla que vivía dentro de
+ * `calcularPresupuesto`, EXTRAÍDA sin cambiar ningún número: la estadística por servicio costea su
+ * km recorrido con los MISMOS precios que el renglón de combustible del presupuesto.
+ *
+ * No muta `precios`: devuelve una copia. Sin parámetros o sin última carga, la copia es idéntica.
+ *
+ * OJO, hallazgo heredado y sin resolver aquí: `precioUltimaCarga` toma la última carga con precio de
+ * CUALQUIER combustible y unidad de la placa. Si fue urea (S/ por litro) o una carga en litros, ese
+ * precio se aplica al combustible principal. Se conserva tal cual porque el presupuesto ya lo hace;
+ * cambiarlo movería los presupuestos guardados.
+ */
+export function preciosParaCosteo(
+  precios: PreciosCombustible,
+  params: ParametrosUnidad | null,
+  ultima: { precio: number } | null,
+): PreciosCombustible {
+  const out: PreciosCombustible = { ...precios };
+  if (params && ultima) out[params.tipo_combustible_1] = ultima.precio;
+  return out;
+}
+
 /** Lo que el operador puede tocar en el modal. */
 export type EntradaCosteo = {
   km: number;
@@ -387,9 +411,8 @@ export function calcularPresupuesto(ctx: ContextoCosteo, e: EntradaCosteo): Pres
     ? { ...ctx.parametros, rendimiento_1: decision!.valor }
     : null;
 
-  // Y el precio realmente pagado manda sobre el de referencia.
-  const precios: PreciosCombustible = { ...ctx.precios };
-  if (params && ctx.precioUltimaCarga) precios[params.tipo_combustible_1] = ctx.precioUltimaCarga.precio;
+  // Y el precio realmente pagado manda sobre el de referencia (`preciosParaCosteo`, arriba).
+  const precios: PreciosCombustible = preciosParaCosteo(ctx.precios, params, ctx.precioUltimaCarga);
 
   // El conductor se calcula aparte y se INYECTA, para que el motor del vehículo
   // no tenga que saber nada de regímenes laborales.

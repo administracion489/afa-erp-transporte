@@ -443,3 +443,73 @@ export function coincideTipo(tipoCarga: string | null | undefined, filtro: strin
   if (t === filtro) return true;
   return !!COMBUSTIBLES[filtro]?.legado && familiaCombustible(t) === COMBUSTIBLES[filtro].familia;
 }
+
+// ── CO₂ DE LA COMBUSTIÓN ─────────────────────────────────────────────────────
+//
+// El factor de emisión es una propiedad del COMBUSTIBLE, en la unidad canónica de su FAMILIA —la que
+// este catálogo ya decide (`unidad`)—, así que vive aquí y no en cada pantalla que lo pinte.
+//
+// FUENTE: EPA, GHG Emission Factors Hub, combustión móvil, **solo CO₂** (no CO₂e: el CH₄ y el N₂O
+// dependen del motor y del control de emisiones, que el ERP no conoce):
+//   · diésel   10.21 kg/gal
+//   · gasolina  8.78 kg/gal
+//   · GLP       5.68 kg/gal (propano)
+//   · GNV       0.05444 kg/scf × 35.3147 scf/m³ = 1.9225 kg/m³
+//
+// LÍMITES DECLARADOS:
+//   · el diésel B5 y el gasohol peruanos llevan una fracción biológica; se usa el factor del producto
+//     fósil (el lado de NO subestimar), y el m³ de GNV es el estándar, no el despachado a presión;
+//   · la urea es un aditivo: no es combustible del recorrido → null;
+//   · el biodiésel puro es null A PROPÓSITO: contar su CO₂ biogénico como cero o como fósil es una
+//     decisión de reporte que nadie ha tomado, y el ERP no la toma por su cuenta.
+// Una familia que este mapa no conoce da `sin_factor`: **nunca cae al diésel** (`familiaCombustible`
+// sí cae al diésel ante un tipo desconocido; aquí eso sería inventar emisiones).
+
+export type FactorCo2 = { kgPorUnidad: number; unidad: "galones" | "m3" };
+
+export const FACTOR_CO2: Record<string, FactorCo2 | null> = {
+  diesel:    { kgPorUnidad: 10.21, unidad: "galones" },
+  gasolina:  { kgPorUnidad: 8.78, unidad: "galones" },
+  glp:       { kgPorUnidad: 5.68, unidad: "galones" },
+  gnv:       { kgPorUnidad: 0.05444 * 35.3147, unidad: "m3" },
+  urea:      null,
+  biodiesel: null,
+};
+
+export const FUENTE_FACTOR_CO2 =
+  "EPA, GHG Emission Factors Hub, combustión móvil, solo CO₂ (no CO₂e): diésel 10.21 kg/gal, " +
+  "gasolina 8.78 kg/gal, GLP 5.68 kg/gal, GNV 0.05444 kg/scf × 35.3147 = 1.9225 kg/m³. " +
+  "El diésel B5 y el gasohol se calculan con el factor del producto fósil; la urea y el biodiésel no se cuentan.";
+
+export type CodigoCo2 = "estimado" | "sin_factor" | "sin_cantidad";
+
+/** La familia de CO₂ de un texto: la clave de familia tal cual, la familia de un TIPO del catálogo, o
+ *  la de una etiqueta de `precios_combustible`/`parametros_costos` («Diésel», «Gasohol 90») por el
+ *  MISMO puente que ya usa el ERP (`tipoDeEtiquetaPrecio`), que devuelve null cuando no hay señal.
+ *  Nunca el respaldo al diésel de `configCombustible`. */
+function familiaCo2(familia: string): string | null {
+  const f = String(familia ?? "").trim().toLowerCase();
+  if (!f) return null;
+  if (Object.prototype.hasOwnProperty.call(FACTOR_CO2, f)) return f;
+  if (Object.prototype.hasOwnProperty.call(COMBUSTIBLES, f)) return COMBUSTIBLES[f].familia;
+  const cod = tipoDeEtiquetaPrecio(familia);
+  return cod && Object.prototype.hasOwnProperty.call(COMBUSTIBLES, cod) ? COMBUSTIBLES[cod].familia : null;
+}
+
+/**
+ * Kilos de CO₂ de una cantidad de combustible ya expresada en la unidad CANÓNICA de su familia
+ * (galones; m³ en GNV). Acepta la familia (`diesel`), un tipo del catálogo (`gasolina_premium`) o una
+ * etiqueta de precios/parámetros (`Diésel`).
+ *   · familia desconocida, aditivo o sin factor declarado → `sin_factor` (kg null)
+ *   · cantidad ausente, no finita o negativa            → `sin_cantidad` (kg null)
+ *   · lo demás → `estimado`; una cantidad 0 es un dato y da 0 kg.
+ */
+export function co2DeCantidad(familia: string, cantidadCanonica: number | null): { kg: number | null; codigo: CodigoCo2 } {
+  const f = familiaCo2(familia);
+  const factor = f ? FACTOR_CO2[f] : null;
+  if (!factor) return { kg: null, codigo: "sin_factor" };
+  if (cantidadCanonica == null || !Number.isFinite(cantidadCanonica) || cantidadCanonica < 0) {
+    return { kg: null, codigo: "sin_cantidad" };
+  }
+  return { kg: cantidadCanonica * factor.kgPorUnidad, codigo: "estimado" };
+}

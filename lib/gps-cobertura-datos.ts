@@ -12,12 +12,17 @@
 // fuerza al pulsar «Finalizar» (`cierreTs`, ver lib/gps-cobertura.ts) y lleva la hora del clic.
 // El veredicto lo dan `contextoServicio` + `veredictoDeServicio` (lib/gps-cobertura.ts): las MISMAS
 // dos funciones que usa el modal de diagnóstico, para que el modal enseñe el número de la celda.
+//
+// El bucle de `rastreoDelDia` vive en `medirServiciosDelDia` / `medirServicio` (extraídos, no
+// reescritos): la estadística por servicio y el uso de flota (lib/flota/*) miden con el MISMO
+// conjunto de servicios, el mismo techo y el mismo veredicto que la torre, y con `conHuella` sacan
+// el km de la misma lectura de la traza en vez de leerla dos veces.
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- el cliente de Supabase del ERP va sin tipos generados: las filas de reservas/paradas llegan como `any` */
 import { createClient } from "@supabase/supabase-js";
 import {
   acumularFilasGps, trazaVacia, veredictoRastreo, contextoServicio, veredictoDeServicio,
-  type TrazaSaneada, type VeredictoRastreo,
+  type TrazaSaneada, type VeredictoRastreo, type ContextoServicio, type MedicionCobertura,
 } from "./gps-cobertura";
 import { faltaAlguna } from "./columna-faltante";
 
@@ -34,8 +39,14 @@ const admin = createClient(
 export const DIAS_RASTREO = 90;
 
 /** Una traza leída por `trazaDe`. `sinRecibido` existe SOLO si se pidieron las filas: `true` si la
- *  columna `recibido_en` no está (supabase/gps-equipo-01.sql sin correr) y hubo que soltarla. */
-export type TrazaLeida = TrazaSaneada & { sinRecibido?: boolean };
+ *  columna `recibido_en` no está (supabase/gps-equipo-01.sql sin correr) y hubo que soltarla.
+ *  `crudas` existe SOLO si se pidió la huella (`conHuella`): las filas de ubicaciones_gps TAL CUAL
+ *  llegaron, en el orden de la lectura (created_at + id), para sacar de la MISMA lectura el km
+ *  (`resumenDeFilas`, lib/huella.ts) y los excesos de velocidad sin volver a leer la traza. */
+export type TrazaLeida = TrazaSaneada & { sinRecibido?: boolean; crudas?: any[] };
+
+/** Qué se pide además de la medición. Sin ninguna de las dos, la lectura es la de siempre. */
+export type OpcionesTraza = { conFilas?: boolean; conHuella?: boolean };
 
 // Columnas de migraciones accesorias que se pueden SOLTAR si el error las nombra: el rastreo se mide
 // igual sin ellas. `simulado` (supabase/ubicaciones-gps-simulado.sql) es el antifraude; `fix_ts` y
@@ -57,7 +68,7 @@ type ColOpcional = (typeof COLS_OPCIONALES)[number];
  * sin una columna mediría distinto la mitad de la traza. Antes era un regex `/simulado/` sobre el
  * mensaje, que cubría una sola columna y también se tragaba cualquier otro error que la mencionara.
  */
-export async function trazaDe(reservaId: number, opciones?: { conFilas?: boolean }): Promise<TrazaLeida> {
+export async function trazaDe(reservaId: number, opciones?: OpcionesTraza): Promise<TrazaLeida> {
   return leerTraza(admin as unknown as ClienteTraza, reservaId, opciones);
 }
 
@@ -65,9 +76,14 @@ export async function trazaDe(reservaId: number, opciones?: { conFilas?: boolean
 export type ClienteTraza = { from: (tabla: string) => { select: (columnas: string) => any } };
 
 /** El cuerpo de `trazaDe`, con el cliente inyectado: scripts/prueba-gps-diagnostico-api.mts lo corre
- *  contra una base falsa (las columnas que pide, el reintento al soltar una, el acumulador limpio). */
-export async function leerTraza(cliente: ClienteTraza, reservaId: number, opciones?: { conFilas?: boolean }): Promise<TrazaLeida> {
+ *  contra una base falsa (las columnas que pide, el reintento al soltar una, el acumulador limpio).
+ *
+ *  `conHuella` pide además `velocidad, rumbo, timestamp` y el conductor de cada fila, y guarda las
+ *  filas crudas en `crudas` (scripts/prueba-km-gps.mts). No cambia la medición: `acumularFilasGps`
+ *  no mira esas columnas. Al soltar una columna accesoria, `crudas` también se relee desde cero. */
+export async function leerTraza(cliente: ClienteTraza, reservaId: number, opciones?: OpcionesTraza): Promise<TrazaLeida> {
   const conFilas = opciones?.conFilas === true;
+  const conHuella = opciones?.conHuella === true;
   const pedidas = new Set<ColOpcional>(conFilas ? COLS_OPCIONALES : ["simulado"]);
   const nueva = (): TrazaSaneada => {
     const acc = trazaVacia();
@@ -75,6 +91,7 @@ export async function leerTraza(cliente: ClienteTraza, reservaId: number, opcion
     return acc;
   };
   let acc = nueva();
+  let crudas: any[] = [];
   // Una vuelta por cada columna que se pueda soltar, más la buena: nunca un bucle sin fin.
   for (let intento = 0; intento <= COLS_OPCIONALES.length; intento++) {
     const cols = ["created_at", "lat", "lng", "precision_m"];
@@ -85,7 +102,11 @@ export async function leerTraza(cliente: ClienteTraza, reservaId: number, opcion
       if (pedidas.has("recibido_en")) cols.push("recibido_en");
       cols.push("conductor_id", "conductor_tercero_id");
     }
-    // Sin `conFilas` es exactamente el select de siempre: "created_at, lat, lng, precision_m, simulado, estado".
+    if (conHuella) {
+      cols.push("velocidad", "rumbo", "timestamp");
+      if (!conFilas) cols.push("conductor_id", "conductor_tercero_id");
+    }
+    // Sin `conFilas` ni `conHuella` es exactamente el select de siempre: "created_at, lat, lng, precision_m, simulado, estado".
     const select = cols.join(", ");
     let soltada: ColOpcional | null = null;
     for (let off = 0; off < 20000; off += 1000) {
@@ -103,16 +124,19 @@ export async function leerTraza(cliente: ClienteTraza, reservaId: number, opcion
       }
       if (!data?.length) break;
       acumularFilasGps(acc, data, pedidas.has("simulado"));
+      if (conHuella) crudas.push(...data);
       if (data.length < 1000) break;
     }
     if (!soltada) {
       const out: TrazaLeida = { ...acc, pts: acc.pts.sort((a, b) => a.ts - b.ts) };
       if (conFilas) out.sinRecibido = !pedidas.has("recibido_en");
+      if (conHuella) out.crudas = crudas;
       return out;
     }
     // Reintento sin la columna que falta, desde cero.
     pedidas.delete(soltada);
     acc = nueva();
+    crudas = [];
   }
   throw new Error(`traza ${reservaId}: no se pudo leer ni soltando las columnas opcionales`);
 }
@@ -150,30 +174,103 @@ const LOTE = 8;            // reservas en paralelo, como /api/gps-salud
 /** Techo de trabajo por día (≈ 20-40 servicios reales): el resto sale `sin_medir`. */
 export const MAX_RESERVAS = 150;
 
+/** Un servicio medido: la reserva, sus paradas, la evidencia del conductor, la traza leída (null si
+ *  no aplica o no se pudo leer) y el veredicto de la celda RASTREO con la medición de la que sale. */
+export type ServicioMedido = {
+  reserva: any;
+  paradas: any[];
+  ctx: ContextoServicio;
+  traza: TrazaLeida | null;
+  veredicto: VeredictoRastreo;
+  medicion: MedicionCobertura | null;
+};
+
+/** Quién lee la traza (la matriz le pasa uno falso). Por defecto, `trazaDe`. */
+export type LectorTraza = (reservaId: number, opciones?: OpcionesTraza) => Promise<TrazaLeida>;
+
+/**
+ * El veredicto de rastreo de UN servicio, de punta a punta. Es la función interna `medir` de
+ * `rastreoDelDia`, EXTRAÍDA sin reescribirla (scripts/prueba-km-gps.mts la compara contra el `medir`
+ * viejo copiado literal): la torre, la estadística por servicio y el uso de flota miden el mismo
+ * servicio con el mismo número. Solo se lee el GPS de lo que corrió o está corriendo; una traza que
+ * no se pudo leer sale `sin_medir` (nunca 0 %).
+ *
+ * `conHuella` pide además las filas crudas (`traza.crudas`) para sacar el km y los excesos de la
+ * MISMA lectura; el veredicto no cambia por pedirlas.
+ */
+export async function medirServicio(
+  r: any,
+  ps: any[],
+  o: { hoy: string; ahoraMs: number; conHuella?: boolean },
+  leer: LectorTraza = trazaDe,
+): Promise<ServicioMedido> {
+  const paradas = ps ?? [];
+  const ctx = contextoServicio(r, paradas, { hoy: o.hoy, ahoraMs: o.ahoraMs });
+  // Solo se lee el GPS de lo que corrió o está corriendo: `veredictoDeServicio` ignora la traza
+  // de un servicio que no aplica.
+  let traza: TrazaLeida | null = null;
+  if (ctx.aplica) {
+    try { traza = await (o.conHuella ? leer(r.id, { conHuella: true }) : leer(r.id)); } catch { traza = null; }
+  }
+  const { veredicto, medicion } = veredictoDeServicio(ctx, traza, paradas, o.ahoraMs);
+  return { reserva: r, paradas, ctx, traza, veredicto, medicion };
+}
+
+/**
+ * Mide cada servicio de `fecha` (sin cancelados, por id, hasta MAX_RESERVAS) y entrega cada uno a
+ * `alMedir` en cuanto termina: así las filas crudas de `conHuella` no se acumulan en memoria. Lo que
+ * pasa del techo NO se mide y vuelve en `fueraDelTecho` (quien llama lo publica `sin_medir`, nunca
+ * como un 0). Es el bucle de `rastreoDelDia`, extraído: el conjunto de servicios, el techo y el lote
+ * son los de la torre.
+ */
+export async function medirServiciosDelDia(
+  fecha: string,
+  hoy: string,
+  ahoraMs: number,
+  o: { conHuella?: boolean; alMedir: (s: ServicioMedido) => void },
+): Promise<{ fueraDelTecho: number[] }> {
+  const reservas = await todas(() => admin.from("reservas").select("*")
+    .eq("fecha_servicio", fecha).neq("estado", "cancelada").order("id", { ascending: true }));
+  const paradasDe = await paradasDeReservas(reservas.map((r) => r.id));
+  return medirReservas(reservas, paradasDe, hoy, ahoraMs, o);
+}
+
+/**
+ * El bucle de `medirServiciosDelDia` sobre reservas ya leídas (por id, sin canceladas), con la
+ * lectura de la traza inyectada: scripts/prueba-km-gps.mts lo corre contra datos falsos y lo compara
+ * con el `rastreoDelDia` viejo copiado literal (lote de LOTE en paralelo, techo MAX_RESERVAS).
+ */
+export async function medirReservas(
+  reservas: any[],
+  paradasDe: Map<number, any[]>,
+  hoy: string,
+  ahoraMs: number,
+  o: { conHuella?: boolean; alMedir: (s: ServicioMedido) => void },
+  leer: LectorTraza = trazaDe,
+): Promise<{ fueraDelTecho: number[] }> {
+  const medir = async (r: any) => {
+    o.alMedir(await medirServicio(r, paradasDe.get(r.id) ?? [], { hoy, ahoraMs, conHuella: o.conHuella }, leer));
+  };
+  const lote = reservas.slice(0, MAX_RESERVAS);
+  for (let i = 0; i < lote.length; i += LOTE) await Promise.all(lote.slice(i, i + LOTE).map(medir));
+  return { fueraDelTecho: reservas.slice(MAX_RESERVAS).map((r) => r.id as number) };
+}
+
 /**
  * Veredicto de rastreo de cada servicio de `fecha`. Solo lee el GPS de los que corrieron o
  * están corriendo; el resto sale `no_aplica` sin consulta. Una traza que no se pudo leer sale
  * `sin_medir` (nunca 0 %): un fallo de lectura no puede acusar a un conductor.
+ *
+ * Es un envoltorio de `medirServiciosDelDia` con la MISMA salida de siempre: la columna RASTREO de
+ * /seguimiento, el modal de diagnóstico y /gps-salud dependen de ella.
  */
 export async function rastreoDelDia(fecha: string, hoy: string, ahoraMs: number): Promise<Record<number, VeredictoRastreo>> {
-  const reservas = await todas(() => admin.from("reservas").select("*")
-    .eq("fecha_servicio", fecha).neq("estado", "cancelada").order("id", { ascending: true }));
-  const paradasDe = await paradasDeReservas(reservas.map((r) => r.id));
-
   const out: Record<number, VeredictoRastreo> = {};
-  const medir = async (r: any) => {
-    const ps = paradasDe.get(r.id) ?? [];
-    const ctx = contextoServicio(r, ps, { hoy, ahoraMs });
-    // Solo se lee el GPS de lo que corrió o está corriendo: `veredictoDeServicio` ignora la traza
-    // de un servicio que no aplica.
-    let traza: TrazaSaneada | null = null;
-    if (ctx.aplica) { try { traza = await trazaDe(r.id); } catch { traza = null; } }
-    out[r.id] = veredictoDeServicio(ctx, traza, ps, ahoraMs).veredicto;
-  };
-  const lote = reservas.slice(0, MAX_RESERVAS);
-  for (let i = 0; i < lote.length; i += LOTE) await Promise.all(lote.slice(i, i + LOTE).map(medir));
+  const { fueraDelTecho } = await medirServiciosDelDia(fecha, hoy, ahoraMs, {
+    alMedir: (s) => { out[s.reserva.id] = s.veredicto; },
+  });
   // Lo que pasa del techo NO se mide y lo dice: nunca un 0 % por no haberlo mirado.
-  for (const r of reservas.slice(MAX_RESERVAS)) out[r.id] = veredictoFueraDelTecho(ahoraMs);
+  for (const id of fueraDelTecho) out[id] = veredictoFueraDelTecho(ahoraMs);
   return out;
 }
 

@@ -490,7 +490,74 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
     ],
     relacionadas: [
       { etiqueta: "Seguimiento operativo", href: "/seguimiento" },
+      { etiqueta: "Seguridad vial (excesos de velocidad)", href: "/seguridad-vial" },
       { etiqueta: "Incidencias", href: "/incidencias" },
+      { etiqueta: "Conductores", href: "/conductores" },
+    ],
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SEGURIDAD VIAL · EXCESOS DE VELOCIDAD
+  // ══════════════════════════════════════════════════════════════════════════
+  {
+    clave: "seguridad-vial",
+    rutas: ["/seguridad-vial"],
+    titulo: "Seguridad vial · excesos de velocidad sostenidos y comprobados",
+    resumen:
+      "Quién manejó por encima del límite, cuánto tiempo y en qué servicio. Solo cuenta un exceso **sostenido** (al menos 30 segundos) y **confirmado por las posiciones** del GPS: un pico suelto o la velocidad fantasma de un teléfono con el bus detenido no acusan a nadie.",
+    paraQueSirve: [
+      "Ver qué conductores y qué unidades tuvieron excesos en un periodo, con el tiempo total, el pico y la velocidad sostenida.",
+      "Comparar con justicia: el ranking cuenta servicios con exceso sobre servicios prestados, no excesos sueltos.",
+      "Revisar un servicio concreto desde su ficha en Seguimiento (enlace «🚦 Excesos»).",
+      "Saber a qué conductores no se les puede medir, porque su teléfono no reporta la velocidad.",
+    ],
+    conceptos: ["exceso_sostenido"],
+    faqs: [
+      {
+        pregunta: "Un conductor sale sin excesos. ¿Quiere decir que maneja bien?",
+        respuesta:
+          "No necesariamente, y la pantalla lo separa con cuidado.\n\nLa velocidad la mide **el teléfono del conductor**, no el bus. Hay teléfonos —sobre todo los que usan la app desde el navegador— que **no reportan la velocidad del sensor**: mandan siempre 0. Ese conductor no puede tener excesos aunque vaya a 120, así que **no sale como «0 excesos»**: sale como **«Sin velocímetro: no se puede juzgar»**. Decir cero sería afirmar algo que nadie midió.\n\nLo mismo con **«Sin GPS en el periodo»** (no mandó ninguna posición) y **«No se pudo comprobar»** (la consulta falló).\n\nY aun con velocímetro, «sin excesos» quiere decir eso y nada más: que no pasó del umbral elegido de forma sostenida. No mide frenadas, curvas ni la distancia con el vehículo de adelante.\n\nLos teléfonos sin velocímetro se revisan en **Salud del GPS**: el aviso gris de la pantalla trae el enlace.",
+      },
+      {
+        pregunta: "¿Por qué el umbral es 90 km/h?",
+        respuesta:
+          "Es el **límite habitual para buses de pasajeros en carretera** según el Reglamento Nacional de Tránsito, y es solo el valor con el que abre la pantalla: lo cambias en **Umbral**, de 60 a 130 km/h.\n\nNo se cita el artículo exacto porque no se pudo cotejar con el texto oficial vigente, y un número de artículo mal puesto en una pantalla que sirve para llamarle la atención a alguien es peor que no ponerlo.",
+      },
+      {
+        pregunta: "¿Por qué no veo un exceso de 70 km/h dentro de la ciudad?",
+        respuesta:
+          "Porque el ERP juzga con **un solo umbral para toda vía**. El GPS dice dónde está el bus, no cuál es el límite de esa calle, así que no distingue una avenida de una vía expresa o de la Panamericana.\n\nCon 90, un bus a 70 en una zona de 50 no aparece, y un paseo escolar se juzga igual que un viaje interprovincial.\n\nPara revisar la ciudad, **baja el umbral** (a 60 o 65) y mira qué servicios aparecen: lo que salga en una ruta urbana es justo lo que estás buscando. No baja de 60 porque la búsqueda rápida de la base solo mira los puntos desde esa velocidad.",
+      },
+      {
+        pregunta: "¿Qué es «sin corroborar» y los demás descartados?",
+        respuesta:
+          "Antes de contar un exceso, el ERP lo pasa por cinco filtros, en este orden, y el primero que falla lo descarta. Los descartados **no se esconden**: van en su propia lista, «Descartados: no cuentan como exceso», cada uno con su motivo.\n\n• **GPS simulado** — alguna posición vino de una app de ubicación falsa. No se juzga; se revisa en Salud del GPS.\n• **Velocidad imposible** — el sensor o las posiciones pasan de 130 km/h. Eso no es un bus, es un error del GPS.\n• **Pico breve** — duró menos de 30 segundos o tuvo menos de 3 lecturas. No alcanza para decir que manejó así.\n• **GPS impreciso** — la precisión de las posiciones fue peor que 20 metros, o no se conoce: no pueden confirmar nada.\n• **Sin corroborar** (en pantalla, «Las posiciones no lo confirman») — el sensor marcó la velocidad, pero midiendo la distancia entre posiciones el bus avanzó a menos del 90 % del umbral. Es la firma de la **velocidad fantasma**: hay teléfonos que reportan velocidad con el bus detenido en un paradero.\n\nEsa distancia entre posiciones se mide en línea recta, y una curva siempre es más larga que su recta: por eso la comprobación **nunca acusa de más**.\n\nSolo lo que pasa los cinco filtros cuenta como **exceso**.",
+      },
+      {
+        pregunta: "¿Por qué lo que pasa fuera de servicio no cuenta?",
+        respuesta:
+          "Una posición fuera de servicio es la app abierta **sin ningún servicio iniciado**. Nada prueba que el teléfono iba en el bus: puede ser el conductor volviendo a su casa en su propio auto.\n\nPor eso esos excesos **no suman al ranking** de nadie. Si marcas **«Incluir fuera de servicio»** se listan aparte, para que los veas, pero con el lugar **aproximado a un kilómetro**: la ubicación exacta de la casa de alguien no le sirve a la seguridad vial de la flota.",
+      },
+      {
+        pregunta: "Me sale un aviso ámbar de que falta correr una migración. ¿Qué hago?",
+        respuesta:
+          "La pantalla necesita dos funciones en la base de datos, que se crean con el archivo **supabase/gps-analitica-01-excesos.sql**. El despliegue no las crea solo: alguien con acceso a Supabase tiene que correr ese SQL una vez.\n\nMientras tanto la pantalla **no muestra ningún número** —unas listas vacías se leerían como «0 excesos», que sería falso— y lo dice en ámbar. Los excesos de un servicio sí se ven en **Uso de flota → Servicios**, que lee el recorrido completo de cada servicio.\n\nOjo al correrlo: crea un índice sobre la tabla de posiciones y, mientras lo construye, frena el registro del GPS de los conductores. Hazlo en hora valle.",
+      },
+      {
+        pregunta: "¿Por qué el umbral solo va de 5 en 5?",
+        respuesta:
+          "Porque cada medición lee las posiciones rápidas de **toda la flota** en el rango, y el resultado se guarda un rato para no repetir ese trabajo. Si el umbral aceptara cualquier número, bastaría con cambiarlo de 90 a 91, 92, 93… para obligar a releerlo todo cada vez y saturar el servidor.\n\nCon pasos de 5 hay 15 valores posibles (60, 65 … 130), más precisión de la que da el GPS de un teléfono. Uso de flota → Servicios acepta exactamente los mismos.",
+      },
+      {
+        pregunta: "¿Hasta cuándo puedo mirar para atrás, y por qué tarda?",
+        respuesta:
+          "Se puede medir hasta **90 días atrás** y como mucho **31 días a la vez**. Un mes se mide en tandas de 7 días, una detrás de otra —verás «Midiendo 2/5…»— y al final se juntan en un solo ranking.\n\nMientras mide, la pantalla no enseña el resultado del rango anterior: se leería como si fuera el nuevo.",
+      },
+    ],
+    relacionadas: [
+      { etiqueta: "Salud del GPS (teléfonos sin velocímetro)", href: "/gps-salud" },
+      { etiqueta: "Uso de flota · estadística por servicio", href: "/uso-flota?tab=servicios" },
+      { etiqueta: "Seguimiento operativo", href: "/seguimiento" },
       { etiqueta: "Conductores", href: "/conductores" },
     ],
   },

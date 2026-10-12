@@ -45,6 +45,8 @@ with huella(orden, modulo, script, objeto, tipo, para_que) as (values
   (2, 'Mantenimiento · OT automática', 'mantenimiento-ot-automatica.sql',             'ordenes_trabajo.origen',            'columna', 'Que el cron abra sola una orden de trabajo al llegar al umbral. Sin esto, esa parte de la configuración no se guarda.'),
   (2, 'Autorización y ámbito',         'tercerizadas-autorizacion-ambito.sql',        'empresas_tercerizadas.autoridad_habilitante', 'columna', 'Quién autoriza a cada proveedor y hasta dónde puede circular. SIN ESTO no se puede guardar la autoridad.'),
   (2, 'Nombres TUC/TIVE (opcional)',   'documentos-tive-y-nombres.sql',               'fn_norm_tipo_doc',                  'función', 'Limpieza de nombres y de fechas inventadas en la tarjeta de propiedad. El ERP funciona igual sin ella.'),
+  (2, 'Seguridad vial · excesos',      'gps-analitica-01-excesos.sql',                'fn_gps_puntos_rapidos',             'función', 'Que /seguridad-vial lea los puntos GPS rápidos de toda la flota. Sin esto esa pantalla avisa en ámbar y no mide nada; los excesos por servicio de /uso-flota → Servicios sí se ven.'),
+  (2, 'Seguridad vial · índice',       'gps-analitica-01-excesos.sql',                'idx_gps_rapidos',                   'índice',  'Que buscar los puntos a 60 km/h o más de un día no recorra la tabla GPS entera. Sin él las funciones responden igual pero lentas. Su CREATE INDEX bloquea los INSERT de GPS: hora valle, o CONCURRENTLY por psql (ver la cabecera del script). Antes, correr diagnostico-gps-analitica.sql.'),
 
   -- ── MÓDULOS QUE SE INSTALAN POR SEPARADO ─────────────────────────────────────
   (3, 'Autoservicio de proveedores',   'proveedor-documentos-autoservicio.sql',       'documentos_tercero_revisiones',     'tabla',   'Link público para que el proveedor suba documentos y un operador los apruebe.'),
@@ -98,9 +100,17 @@ estado as (
       -- Hace falta porque hay migraciones cuyo único artefacto es un índice (una RESTRICCIÓN,
       -- no una tabla nueva), y sin esta rama caían en el `else false` de abajo y salían
       -- "❌ FALTA" para siempre, aunque se hubieran corrido.
+      -- Y tiene que ser VÁLIDO: un CREATE INDEX CONCURRENTLY que falla a mitad (el camino sin
+      -- bloqueo que ofrecen los scripts de índices sobre ubicaciones_gps) deja el índice con
+      -- su nombre pero inválido — el planificador no lo usa y no impone su restricción. Darlo
+      -- por instalado sería la pantalla diciendo lo contrario de lo que hace la base.
       when 'índice' then exists (
-        select 1 from pg_indexes
-         where schemaname = 'public' and indexname = h.objeto)
+        select 1 from pg_indexes pi
+          join pg_class c     on c.relname = pi.indexname
+          join pg_namespace n on n.oid = c.relnamespace and n.nspname = pi.schemaname
+          join pg_index i     on i.indexrelid = c.oid
+         where pi.schemaname = 'public' and pi.indexname = h.objeto
+           and i.indisvalid)
       -- Una vista sí está en information_schema, pero en `views`, no en `tables`. Se pregunta
       -- aparte para que la columna "se comprueba mirando" diga la verdad sobre qué es el objeto.
       when 'vista' then exists (

@@ -25,6 +25,9 @@ import {
   revisarPrecioUnitario,
   unidadDeCarga,
   LITROS_POR_GALON,
+  FACTOR_CO2,
+  FUENTE_FACTOR_CO2,
+  co2DeCantidad,
 } from "../lib/combustible-tipos";
 import { resolverTipoCombustible, revisarTipoContraPrecio, tiposEnTexto } from "../lib/radar/tipo-voucher";
 
@@ -301,6 +304,58 @@ const chk = (nombre: string, ok: boolean, extra = "") => {
   }
   chk("la urea declarada en litros queda en litros", unidadDeCarga("urea", "litros") === "litros");
   chk("y la abreviatura de pantalla también se entiende", unidadDeCarga("diesel", "lt") === "litros");
+}
+
+// ── 9. EL CO₂ ES DEL COMBUSTIBLE, EN LA UNIDAD DE SU FAMILIA ────────────────
+//
+// El factor de emisión vive en el catálogo. Lo que no se puede aflojar: una familia que no se conoce
+// NO cae al diésel (eso inventaría emisiones), y la unidad del factor es la que el catálogo ya
+// declara para la familia (el m³ del GNV no se multiplica por un factor por galón).
+{
+  const familias = [...new Set(TIPOS_COMBUSTIBLE.map((t) => COMBUSTIBLES[t].familia))];
+  const sinClave = familias.filter((f) => !Object.prototype.hasOwnProperty.call(FACTOR_CO2, f));
+  chk("toda familia del catálogo tiene su fila en FACTOR_CO2 (con factor o null declarado)", sinClave.length === 0, sinClave.join(", "));
+  for (const f of familias) {
+    const cfg = configCombustible(f);
+    const fac = FACTOR_CO2[f];
+    if (cfg.esAditivo || f === "biodiesel") {
+      chk(`${f}: factor null (${cfg.esAditivo ? "aditivo" : "CO₂ biogénico: decisión no tomada"})`, fac === null);
+      continue;
+    }
+    chk(`${f}: tiene factor > 0`, !!fac && fac.kgPorUnidad > 0, JSON.stringify(fac));
+    chk(`${f}: el factor va en la unidad canónica de la familia (${cfg.unidad})`, !!fac && fac.unidad === cfg.unidad);
+  }
+  chk("urea y biodiésel son null", FACTOR_CO2.urea === null && FACTOR_CO2.biodiesel === null);
+  chk("GNV = 0.05444 kg/scf × 35.3147 = 1.9225 kg/m³ (± 1e-3)", Math.abs((FACTOR_CO2.gnv?.kgPorUnidad ?? 0) - 1.9225) < 1e-3,
+    String(FACTOR_CO2.gnv?.kgPorUnidad));
+  chk("diésel 10.21 · gasolina 8.78 · GLP 5.68 kg/gal (EPA, solo CO₂)",
+    FACTOR_CO2.diesel?.kgPorUnidad === 10.21 && FACTOR_CO2.gasolina?.kgPorUnidad === 8.78 && FACTOR_CO2.glp?.kgPorUnidad === 5.68);
+  chk("la fuente está declarada", /EPA/.test(FUENTE_FACTOR_CO2) && /CO₂e/.test(FUENTE_FACTOR_CO2));
+
+  // co2DeCantidad: cantidad × factor exacto, por familia o por tipo del catálogo.
+  const d = co2DeCantidad("diesel", 12.5);
+  chk("12.5 gal de diésel = 127.625 kg", d.codigo === "estimado" && d.kg === 12.5 * 10.21, JSON.stringify(d));
+  chk("un TIPO del catálogo usa el factor de su familia (gasolina_premium → gasolina)",
+    co2DeCantidad("gasolina_premium", 10).kg === co2DeCantidad("gasolina", 10).kg && co2DeCantidad("gasolina_premium", 10).codigo === "estimado");
+  chk("GNV en m³", Math.abs((co2DeCantidad("gnv", 100).kg ?? 0) - 192.25) < 0.1);
+  chk("la etiqueta de precios_combustible/parametros_costos («Diésel», «GNV») se entiende por el puente del catálogo",
+    co2DeCantidad("Diésel", 10).kg === co2DeCantidad("diesel", 10).kg && co2DeCantidad("Gasohol 90", 10).kg === co2DeCantidad("gasolina", 10).kg
+    && co2DeCantidad("GNV", 1).kg === co2DeCantidad("gnv", 1).kg);
+  chk("EL LADO QUE NO SE AFLOJA: una familia desconocida NO cae al diésel",
+    co2DeCantidad("hidrogeno", 10).codigo === "sin_factor" && co2DeCantidad("hidrogeno", 10).kg === null
+    && co2DeCantidad("", 10).codigo === "sin_factor" && co2DeCantidad("COMBUSTIBLE X", 10).codigo === "sin_factor",
+    JSON.stringify(co2DeCantidad("hidrogeno", 10)));
+  chk("urea y biodiésel → sin_factor, nunca 0 kg", co2DeCantidad("urea", 5).codigo === "sin_factor" && co2DeCantidad("biodiesel", 5).kg === null);
+  chk("sin cantidad (null, NaN, negativa) → sin_cantidad, nunca 0 kg",
+    [null, NaN, -1, Infinity].every((c) => { const r = co2DeCantidad("diesel", c as number | null); return r.codigo === "sin_cantidad" && r.kg === null; }));
+  chk("una cantidad 0 es un dato: 0 kg", co2DeCantidad("glp", 0).kg === 0 && co2DeCantidad("glp", 0).codigo === "estimado");
+  // Invariante por barrido: kg != null ⟺ estimado.
+  let inv = true;
+  for (const f of [...familias, ...TIPOS_COMBUSTIBLE, "x", "", "DIESEL"]) for (const c of [null, -2, 0, 1.5, 300, NaN]) {
+    const r = co2DeCantidad(f, c as number | null);
+    if ((r.kg != null) !== (r.codigo === "estimado")) inv = false;
+  }
+  chk("kg != null ⟺ código estimado, en todo el barrido", inv);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
