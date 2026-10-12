@@ -863,4 +863,29 @@ export const GLOSARIO: Record<string, Concepto> = {
       "El presupuesto **nunca se escribe en el costo del proveedor**. Ese campo es lo que le debes a un tercero, y en flota propia no hay tercero: ponerlo ahí contaría los mismos soles dos veces y levantaría actas de compra contra un proveedor que no existe. Y el presupuesto **no es un asiento contable**: no hay obligación ni comprobante que registrar. Lo que va a Contabilidad es el gasto real.",
     verTambien: ["utilidad_servicio", "costo_empresa", "regla_oro"],
   },
+
+  // ── Flota: velocidad y emisiones ────────────────────────────────────────────
+
+  exceso_sostenido: {
+    clave: "exceso_sostenido",
+    termino: "Exceso de velocidad sostenido",
+    definicion:
+      "Es ir por encima del umbral (90 km/h por defecto) **durante al menos 30 segundos y 3 lecturas seguidas**, con buena precisión del GPS y con las posiciones confirmando que el bus de verdad avanzaba a esa velocidad.\nUn número suelto del velocímetro no basta: algunos teléfonos marcan velocidad con el bus detenido (la «velocidad fantasma»), y un pico de un segundo es ruido.",
+    ejemplo:
+      "Con 90 km/h: el sensor marca 94, 97 y 95 km/h durante 45 segundos y las posiciones dicen que el bus avanzó a 92 km/h → **cuenta**. Un 104 de un solo segundo → **pico breve**, no cuenta. Un 95 con el bus parado en un paradero, sin moverse entre posiciones → **las posiciones no lo confirman**, no cuenta.",
+    ojo:
+      "Que un conductor no tenga excesos **no siempre quiere decir que no corrió**: si su teléfono no reporta la velocidad del sensor, sale como «sin velocímetro, no se puede juzgar», nunca como cero. Y es **un solo umbral para toda vía**: con 90 no se ve un 70 en una calle de 50. Lo que pasa fuera de servicio (la app abierta sin servicio iniciado) se lista aparte y no suma al ranking.",
+  },
+
+  co2_estimado: {
+    clave: "co2_estimado",
+    termino: "CO₂ estimado",
+    definicion:
+      "Es el dióxido de carbono que sale del escape, **calculado** a partir del combustible: cantidad × un factor de emisión de ese combustible. No lo mide ningún sensor.\nEn el ERP hay **dos**, y responden preguntas distintas: el de lo **comprado** (las cargas de la flota propia en un periodo) y el de lo **recorrido** por un servicio (su km del GPS convertido en combustible con el rendimiento de su categoría). No tienen por qué cuadrar.",
+    ejemplo:
+      "Un servicio de 120 km en un bus diésel que rinde 8 km/gal: 120 ÷ 8 = 15 galones estimados × 10.21 kg = **153 kg de CO₂**. La misma distancia en una van a GLP que rinde 25 km/gal: 4.8 galones × 5.68 kg = **27 kg**.",
+    ojo:
+      "Los factores son de la EPA de Estados Unidos (combustión en vehículos, **solo CO₂**): diésel 10.21 kg por galón, gasolina 8.78, GLP 5.68 y GNV 1.92 kg por m³. El diésel B5 y el gasohol se calculan como si fueran 100 % fósiles, así que salen un poco altos; la urea y el biodiésel no se cuentan. Es un dato de gestión interna: no está pensado como certificado para un cliente, y por ahora no se publica en su portal.",
+    verTambien: ["presupuesto_servicio"],
+  },
 };

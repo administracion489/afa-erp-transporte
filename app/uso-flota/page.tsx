@@ -10,11 +10,11 @@
 //   ?tab=resumen|servicios  &desde&hasta (Resumen)  &fecha&reserva (Servicios)
 // Las pestañas reescriben la URL con history.replaceState: un enlace copiado abre lo mismo.
 //
-// EL PERMISO. El gate es el layout: la ruta va en `menuGrupos` con el módulo `vehiculos`, y el
-// layout le da al administrador todos los módulos en memoria. NO se usa `usePermiso` aquí porque
-// redirige a /dashboard a quien no tiene FILA en permisos_usuario, que es el caso del rol admin
-// (lo mismo documenta /gps-salud). Las dos APIs re-verifican el módulo `vehiculos` y, si falta, la
-// pantalla NOMBRA el permiso en vez de enseñar un «403».
+// EL PERMISO. Tres capas, como /seguridad-vial: el layout (la ruta va en `menuGrupos` con el
+// módulo `vehiculos`), la guarda de esta pantalla con `usePermiso("vehiculos")` —que ya deja pasar
+// al rol admin, sin filas en permisos_usuario: antes no lo hacía y por eso aquí no se usaba— y las
+// dos APIs, que re-verifican el módulo en cada llamada y, si falta, la pantalla NOMBRA el permiso en
+// vez de enseñar un «403». La guarda va en un componente aparte para no condicionar los hooks.
 //
 // La pantalla no calcula nada que el motor ya decida: ver components/flota/uso/*.
 
@@ -22,6 +22,7 @@ import React, { useCallback, useState, useSyncExternalStore } from "react";
 import { fechaLima } from "@/lib/alertas-horario";
 import UsoFlotaResumen, { EnlacesResumen, periodoInicial, type Periodo } from "@/components/flota/uso/UsoFlotaResumen";
 import UsoFlotaServicios from "@/components/flota/uso/UsoFlotaServicios";
+import { usePermiso } from "@/lib/usePermiso";
 
 type Tab = "resumen" | "servicios";
 
@@ -70,6 +71,13 @@ function escribirUrl(cambios: Record<string, string | null>) {
 }
 
 export default function UsoFlotaPage() {
+  const { validando, permitido } = usePermiso("vehiculos");
+  if (validando) return <p className="p-2 text-sm text-gray-500">Verificando permisos…</p>;
+  if (!permitido) return null;
+  return <UsoFlota />;
+}
+
+function UsoFlota() {
   // Solo en el navegador: en el servidor (y durante la hidratación) se pinta el esqueleto, así el
   // HTML coincide y la lectura de window.location no depende de un efecto.
   const enNavegador = useSyncExternalStore(suscribirNada, () => true, () => false);

@@ -2,6 +2,8 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { usePuedeVer } from "@/lib/usePuedeVer";
+import { DIAS_ATRAS_MAX_EXCESOS, sumarDias } from "@/lib/flota/excesos";
 
 type Fila = {
   unidad: string; flota: "propia" | "tercero";
@@ -43,6 +45,29 @@ const GPS_CLASE: Record<Fila["gps_veredicto"], { label: string; color: string; b
 const hoyLima = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
 const fmt = (n: number | null, dec = 0) =>
   n == null ? "—" : n.toLocaleString("es-PE", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+
+/**
+ * A la estadística por servicio del mismo día en /uso-flota (km por GPS de cada servicio, que es el
+ * «km de servicio» de esta pantalla visto servicio por servicio). Solo con el módulo `vehiculos`, que
+ * es el de /uso-flota: esta pantalla es del módulo `combustible` y no todos tienen los dos. Se
+ * pregunta con `usePuedeVer`, que NO redirige (`usePermiso` sacaría de aquí a quien no lo tiene).
+ * Con un día fuera de lo que mide su API (futuro, o más viejo que DIAS_ATRAS_MAX_EXCESOS) el enlace
+ * va al Resumen, sin día. `<a>` y no `<Link>`: /uso-flota lee sus parámetros de la URL al cargar.
+ */
+const MODULO_USO_FLOTA = ["vehiculos"] as const;
+function EnlaceUsoFlota({ fecha }: { fecha: string }) {
+  const puede = usePuedeVer(MODULO_USO_FLOTA);
+  if (!puede?.vehiculos) return null;
+  const hoy = hoyLima();
+  const conDia = fecha <= hoy && fecha >= sumarDias(hoy, -DIAS_ATRAS_MAX_EXCESOS);
+  return (
+    <a href={conDia ? `/uso-flota?tab=servicios&fecha=${fecha}` : "/uso-flota"}
+      title="Uso de flota: km por GPS, marcha, excesos, combustible y CO₂ estimados de cada servicio"
+      className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-[#0b315f] hover:underline">
+      📊 {conDia ? "Estadística por servicio de este día" : "Uso de flota"} (km por GPS, excesos, CO₂) →
+    </a>
+  );
+}
 
 export default function AuditoriaJornadaPage() {
   const [fecha, setFecha] = useState(hoyLima());
@@ -100,6 +125,7 @@ export default function AuditoriaJornadaPage() {
           <p className="text-gray-400 text-sm mt-1">
             Km de jornada vs km de servicio (GPS) vs km no justificado (traslados en vacío / fantasma). Nunca acusa: muestra la diferencia objetiva para revisión.
           </p>
+          <EnlaceUsoFlota fecha={fecha} />
         </div>
         <div className="flex items-center gap-2">
           <input type="date" value={fecha} onChange={e => setFecha(e.target.value)}

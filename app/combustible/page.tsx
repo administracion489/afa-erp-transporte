@@ -271,10 +271,12 @@ export default function CombustiblePage() {
   const [expandidoId, setExpandidoId] = useState<number | null>(null);
   const [vista,       setVista]       = useState<VistaActiva>("historial");
   // `?vista=facturas` abre directo esa pestaña: es adonde vuelve Google después de conectar el
-  // correo de facturas. Se lee de window (no useSearchParams) para no exigir un Suspense a la página.
+  // correo de facturas. `?vista=analisis` abre el 📈 Análisis: es adonde enlaza /uso-flota para el
+  // costo por km y el rendimiento. Se lee de window (no useSearchParams) para no exigir un Suspense.
   useEffect(() => {
     try {
-      if (new URLSearchParams(window.location.search).get("vista") === "facturas") setVista("facturas");
+      const v = new URLSearchParams(window.location.search).get("vista");
+      if (v === "facturas" || v === "analisis") setVista(v);
     } catch { /* sin URL legible se queda en el historial */ }
   }, []);
   const [granularidad,setGranularidad]= useState<GranPeriodo>("mes");

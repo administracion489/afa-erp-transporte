@@ -21,6 +21,7 @@
 
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { usePuedeVer } from "@/lib/usePuedeVer";
 import { fechaLima } from "@/lib/alertas-horario";
 import {
   CONSTANTES_EXCESOS, MAX_DIAS_CONSULTA, TEXTO_SIN_TOTAL, TEXTO_VELOCIMETRO, TOPE_PUNTOS_LLAMADA,
@@ -129,7 +130,11 @@ type Resultado =
   | { clave: string; ok: true; unida: RespuestaExcesos; conError: number; total: number }
   | { clave: string; ok: false; mensaje: string; tipo: TipoFallo };
 
+/** El enlace a Uso de flota solo se ofrece con su módulo: sin él, el layout rebotaría al dashboard. */
+const MODULOS_ENLACE = ["vehiculos"] as const;
+
 function Cuerpo({ search }: { search: string }) {
+  const puedeVer = usePuedeVer(MODULOS_ENLACE);
   // Se monta solo en el cliente (ver `SeguridadVial`): leer la hora y la URL aquí es seguro.
   const [inicial] = useState(() => {
     const hoy = fechaLima(Date.now());
@@ -322,7 +327,9 @@ function Cuerpo({ search }: { search: string }) {
           <p className="font-semibold">Falta correr la migración <code className="font-mono text-xs">{sinMigracion}</code> en Supabase.</p>
           <p className="mt-0.5">
             Sin ella no se pueden leer las posiciones rápidas de toda la flota, así que aquí no se mide nada (y no se afirma «0 excesos»).
-            Los excesos por servicio sí se ven en <a href="/uso-flota" className="font-bold underline">Uso de flota → Servicios</a>, que lee la traza de cada servicio.
+            Los excesos por servicio sí se ven en {puedeVer?.vehiculos
+              ? <a href="/uso-flota?tab=servicios" className="font-bold underline">Uso de flota → Servicios</a>
+              : <span className="font-bold">Uso de flota → Servicios</span>}, que lee la traza de cada servicio{puedeVer && !puedeVer.vehiculos ? " (necesita el módulo Vehículos)" : ""}.
           </p>
         </div>
       )}

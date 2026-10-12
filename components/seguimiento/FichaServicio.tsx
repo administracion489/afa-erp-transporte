@@ -97,6 +97,7 @@ import {
 } from "@/lib/estados";
 import { ModalGastos, ModalChecklist, ModalReemplazo } from "./ModalesServicio";
 import AvisosConductor from "./AvisosConductor";
+import EnlacesAnalitica from "./EnlacesAnalitica";
 import { idAfa } from "@/lib/folio";
 import {
   manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado,
@@ -1733,6 +1734,9 @@ export default function FichaServicio({
                   </p>
                 )}
               </div>
+
+              {/* A su estadística y a sus excesos, cada enlace solo con el módulo del destino. */}
+              <EnlacesAnalitica reservaId={rid} fecha={r?.fecha_servicio} cancelado={cancelado} />
             </div>
           </Seccion>
 

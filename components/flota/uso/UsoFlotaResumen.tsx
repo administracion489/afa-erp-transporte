@@ -14,6 +14,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { usePuedeVer } from "@/lib/usePuedeVer";
 import { Ficha } from "@/components/analitica/FichaComparada";
 import SerieComparada from "@/components/graficos/SerieComparada";
 import { sumarDias, diasEntreFechas } from "@/lib/odometro-analitica";
@@ -547,8 +548,13 @@ function FilaUnidad({ u, leido }: { u: UnidadUso; leido: boolean }) {
   );
 }
 
-/** Los enlaces de la cabecera: lo que esta pantalla NO duplica. */
+/** Los enlaces de la cabecera: lo que esta pantalla NO duplica. Los dos destinos son del módulo
+ *  `combustible` (este es de `vehiculos`): se pintan solo si el usuario lo tiene, preguntado con
+ *  `usePuedeVer`, que no redirige. Mientras se consulta, no se pinta nada. */
+const MODULO_ENLACES = ["combustible"] as const;
 export function EnlacesResumen() {
+  const puede = usePuedeVer(MODULO_ENLACES);
+  if (!puede?.combustible) return null;
   return (
     <div className="flex flex-wrap gap-2 text-xs">
       <Link href="/combustible?vista=analisis" prefetch={false}

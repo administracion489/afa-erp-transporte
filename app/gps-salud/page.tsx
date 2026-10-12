@@ -81,8 +81,8 @@ export default function GpsSaludPage() {
   }, [hasta, dias]);
 
   // El acceso lo controla el layout: /gps-salud está en menuGrupos con módulo "monitoreo",
-  // así que oculta el enlace y bloquea la ruta a quien no lo tenga — y a diferencia de
-  // usePermiso trata bien al rol admin, que no tiene filas en permisos_usuario.
+  // así que oculta el enlace y bloquea la ruta a quien no lo tenga (al rol admin le da todos
+  // los módulos). La API vuelve a verificar el módulo en cada llamada.
   useEffect(() => { void cargar(); }, [cargar]);
 
   const t = data?.totales;
@@ -96,6 +96,15 @@ export default function GpsSaludPage() {
             Cuánto del viaje se rastreó de verdad, por conductor. Un valor bajo casi siempre significa
             que el teléfono tiene la ubicación en <strong>“Solo mientras se usa la app”</strong> o el
             ahorro de batería activo — no que el conductor haga nada mal.
+          </p>
+          {/* A Seguridad vial, que es del MISMO módulo (`monitoreo`): quien ve esta pantalla puede
+              ver aquella, así que no hace falta preguntar el permiso. El vínculo es de ida y vuelta:
+              allí un conductor «sin velocímetro» no se puede juzgar, y su teléfono se arregla aquí. */}
+          <p style={{ margin: "8px 0 0", fontSize: 13, color: "#6b7280", maxWidth: 620 }}>
+            <a href="/seguridad-vial" style={{ color: "#0b315f", fontWeight: 700, textDecoration: "underline" }}>
+              🚦 Excesos de velocidad en Seguridad vial
+            </a>
+            {" "}— los conductores que allí salen «sin velocímetro» (su teléfono no reporta la velocidad) se revisan aquí.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
