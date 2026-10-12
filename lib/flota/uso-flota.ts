@@ -55,7 +55,7 @@ import {
 import {
   variacionPct, tonoVariacion, normalizarCantidad, type SentidoVariacion, type TonoVariacion,
 } from "../rendimiento";
-import { COMBUSTIBLES, normalizarTipoCombustible, unidadDeCarga, co2DeCantidad } from "../combustible-tipos";
+import { COMBUSTIBLES, tipoEstrictoDeCarga, unidadDeCarga, co2DeCantidad } from "../combustible-tipos";
 import { contextoServicio } from "../gps-cobertura";
 import { derivarTiempos } from "../servicio-tiempos";
 import type { KmGps } from "./km-gps";
@@ -457,17 +457,12 @@ function flotaDeHoy(propios: PropiaUso[]): PropiaUso[] {
 
 // ─── COMBUSTIBLE ──────────────────────────────────────────────────────────────
 
-/** El tipo del catálogo de una carga, SIN caer al diésel: un tipo que no se reconoce es desconocido. */
-function tipoEstricto(t: string | null | undefined): string | null {
-  const s = String(t ?? "").trim().toLowerCase();
-  if (!s) return null;
-  if (Object.prototype.hasOwnProperty.call(COMBUSTIBLES, s)) return s;
-  const n = normalizarTipoCombustible(t);
-  return n && Object.prototype.hasOwnProperty.call(COMBUSTIBLES, n) ? n : null;
-}
+/** El tipo del catálogo de una carga, SIN caer al diésel. Vive en el catálogo (`tipoEstrictoDeCarga`):
+ *  la usa también el precio de la última carga del presupuesto, y dos copias terminan discrepando. */
+const tipoEstricto = tipoEstrictoDeCarga;
 
 /** La familia de una carga por su tipo, SIN caer al diésel (null = tipo desconocido). La usa también
- *  scripts/diagnostico-uso-flota.mts para medir el hallazgo de `precioUltimaCarga`. */
+ *  scripts/diagnostico-uso-flota.mts. */
 export function familiaEstrictaDeCarga(t: string | null | undefined): string | null {
   const tipo = tipoEstricto(t);
   return tipo ? COMBUSTIBLES[tipo].familia : null;

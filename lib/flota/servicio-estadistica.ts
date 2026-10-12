@@ -50,6 +50,7 @@ import { consumoPorKm, calcularCostoUnidad, type ParametrosUnidad, type PreciosC
 import { preciosParaCosteo } from "../costeo-servicio";
 import { decidirRendimiento, type DecisionRendimiento, type MedicionPlaca } from "../costos/rendimiento-aplica";
 import { familiaDeParametro } from "../costos/rendimiento-tipo";
+import { textoPrecioUltimaCarga, type UltimaCarga } from "../costos/precio-ultima-carga";
 import { COMBUSTIBLES, co2DeCantidad, FACTOR_CO2, FUENTE_FACTOR_CO2, type CodigoCo2 } from "../combustible-tipos";
 import { identidadRuta, type IdentidadRuta } from "../ruta-identidad";
 import { conductorDeLaTraza } from "../gps-diagnostico-api";
@@ -97,8 +98,9 @@ export type ContextoCombustibleUnidad = {
   decision: DecisionRendimiento | null;
   /** Ya pasados por `preciosParaCosteo`: la última carga de la placa manda sobre el de referencia. */
   precios: PreciosCombustible;
-  /** La última carga cuyo precio mandó (solo para el texto de la base). */
-  precioUltimaCarga?: { precio: number; fecha: string } | null;
+  /** La última carga cuyo precio mandó (solo para el texto de la base). Ya es del combustible del
+   *  parámetro y en su unidad canónica: lo decide lib/costos/precio-ultima-carga.ts. */
+  precioUltimaCarga?: UltimaCarga | null;
   /** Falló la lectura de la unidad o de su parámetro: no se afirma nada (nunca «sin tipo»). */
   fallo?: string | null;
   /** Falló la lectura de los precios: el volumen y el CO₂ se estiman; el costo no. */
@@ -121,7 +123,7 @@ export function contextoCombustible(e: {
   tipoCosteo: string | null;
   parametros: ParametrosUnidad | null;
   medicion: MedicionPlaca | null;
-  precioUltimaCarga: { precio: number; fecha: string } | null;
+  precioUltimaCarga: UltimaCarga | null;
   preciosReferencia: PreciosCombustible;
   fallo?: string | null;
   falloPrecios?: string | null;
@@ -351,7 +353,7 @@ export function costoCombustibleEstimado(km: KmGps, ctx: ContextoCombustibleUnid
   }
   const principal = p.tipo_combustible_1;
   const fuentePrecio = c.precioUltimaCarga
-    ? `S/ ${c.precioUltimaCarga.precio.toFixed(2)} de la última carga (${c.precioUltimaCarga.fecha})`
+    ? textoPrecioUltimaCarga(c.precioUltimaCarga, { conFecha: true })
     : `S/ ${(Number(c.precios[principal]) || 0).toFixed(2)} de referencia`;
   return {
     codigo: "estimado",
