@@ -21,6 +21,8 @@ type AlertaCfg = {
   modo_tiempo: ModoTiempo; min_anticipacion: number | null; hora_fija: string | null; umbral: number | null;
   notifica_conductor: boolean; notifica_pasajero: boolean; notifica_conductor_tercero: boolean;
   destinatarios: number[]; plantilla: string | null;
+  /** Plantilla de lo que va al directorio; sin valor, el motor usa `coordinador_alerta`. */
+  plantilla_directorio?: string | null;
   // Canales por tipo (supabase/canales-por-tipo.sql)
   canal_conductor_whatsapp: boolean; canal_conductor_email: boolean; canal_conductor_push: boolean;
   canal_pasajero_push: boolean;
@@ -84,6 +86,8 @@ export default function ConfigOperacionesPage() {
   const [cargando, setCargando] = useState(true);
   const [faltaTabla, setFaltaTabla] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  // Buscador de «Tipos de mensaje»: con 26 tarjetas, encontrar la de una plantilla era recorrerlas todas.
+  const [buscarTipo, setBuscarTipo] = useState("");
 
   // Alta de destinatario
   const [nNombre, setNNombre] = useState("");
@@ -335,6 +339,19 @@ export default function ConfigOperacionesPage() {
   };
   const setDest = (id: number, patch: Partial<Destinatario>) => setDests((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
 
+  // Las tarjetas por NOMBRE (la base las trae por clave interna, que no es lo que se lee) y
+  // filtradas por el buscador: nombre, descripción, clave o plantilla, sin tildes ni mayúsculas.
+  const claveBusqueda = (s: string | null | undefined) =>
+    String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const qTipo = claveBusqueda(buscarTipo).trim();
+  const tiposVisibles = [...cfgs]
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"))
+    .filter((c) => !qTipo || claveBusqueda([
+      c.nombre, c.descripcion, c.clave, c.plantilla,
+      // La del directorio solo cuenta si de verdad le escribe a alguien (la misma condición del chip).
+      c.usa_directorio !== false && c.destinatarios.length > 0 ? (c.plantilla_directorio || "coordinador_alerta") : "",
+    ].join(" ")).includes(qTipo));
+
   if (cargando) return <div className="p-8 text-sm text-gray-400">Cargando…</div>;
   if (faltaTabla) return (
     <div className="p-8 max-w-2xl">
@@ -409,13 +426,34 @@ export default function ConfigOperacionesPage() {
         y el push son <strong>aditivos</strong>: solo llegan a quien tenga correo registrado o la app con
         notificaciones activadas — el WhatsApp sigue siendo el canal que llega a todos.
       </p>
+      <input
+        value={buscarTipo}
+        onChange={(e) => setBuscarTipo(e.target.value)}
+        placeholder="Buscar por nombre o plantilla (ej. no_inicio, coordinador_alerta, Inicia ahora)…"
+        className={input + " mb-3"}
+      />
       <div className="space-y-3">
-        {cfgs.map((c) => (
+        {tiposVisibles.length === 0 && (
+          <p className="text-xs text-gray-500">Ningún tipo de mensaje coincide con «{buscarTipo}».</p>
+        )}
+        {tiposVisibles.map((c) => (
           <div key={c.clave} className="bg-white border border-gray-200 rounded-2xl p-4">
             <div className="flex items-center justify-between gap-3 mb-3">
               <div>
                 <span className="font-semibold text-gray-800 text-sm">{c.nombre}</span>
                 {c.descripcion && <p className="text-[12px] text-gray-500">{c.descripcion}</p>}
+                <div className="flex flex-wrap gap-1.5 mt-1">
+                  {c.plantilla && (
+                    <span className="font-mono text-[10px] text-gray-500 bg-gray-100 rounded px-1.5 py-0.5" title="Plantilla de WhatsApp que usa este aviso">
+                      📄 {c.plantilla}
+                    </span>
+                  )}
+                  {c.usa_directorio !== false && c.destinatarios.length > 0 && (
+                    <span className="font-mono text-[10px] text-purple-700 bg-purple-50 rounded px-1.5 py-0.5" title="Plantilla de lo que reciben los contactos del directorio">
+                      👥 {c.plantilla_directorio || "coordinador_alerta"}
+                    </span>
+                  )}
+                </div>
               </div>
               <label className="flex items-center gap-2 text-xs font-semibold shrink-0">
                 <input type="checkbox" checked={c.activo} onChange={(e) => setCfg(c.clave, { activo: e.target.checked })} />
