@@ -307,8 +307,14 @@ function clasificarTramo(
       if (Math.abs(r - t.hastaTs) <= TOL_REINICIO_MS && (reinicio == null || Math.abs(r - t.hastaTs) < Math.abs(reinicio - t.hastaTs))) reinicio = r;
     }
     const txtReinicio = reinicio != null ? ` La app se volvió a abrir a las ${hh(reinicio)}: el sistema la había cerrado.` : "";
+    // Un hueco con el bus QUIETO se dice: sin eso se lee como un corte en carretera (reserva #27107,
+    // 7 min esperando la hora de salida). Sigue restando del %, a propósito y por decisión del dueño
+    // (13-10-2026): esos minutos nadie veía el bus, y es el mismo fallo que en ruta pierde km.
+    const quieto = !t.enMovimiento && t.avanceM != null && t.avanceM < AVANCE_CAIDO_M;
     const texto = t.tipo === "hueco"
-      ? `La app no envió ninguna posición en ${minTxt(t.durS)}${t.enMovimiento && t.avanceM != null ? ` mientras el bus avanzó ${distTxt(t.avanceM)}` : ""}: se detuvo y volvió a enviar a las ${hh(t.hastaTs)}.`
+      ? quieto
+        ? `La app no envió ninguna posición en ${minTxt(t.durS)} con el bus detenido (se movió ${distTxt(t.avanceM as number)}): la app se detuvo y volvió a enviar a las ${hh(t.hastaTs)}. No se perdió recorrido, pero resta del % igual: en esos minutos ni la torre ni los pasajeros veían el bus.`
+        : `La app no envió ninguna posición en ${minTxt(t.durS)}${t.enMovimiento && t.avanceM != null ? ` mientras el bus avanzó ${distTxt(t.avanceM)}` : ""}: se detuvo y volvió a enviar a las ${hh(t.hastaTs)}.`
       : t.tipo === "cabeza"
         ? `El conductor inició el servicio a las ${hh(t.desdeTs)} y la primera posición llegó a las ${hh(t.hastaTs)}: la app no estaba enviando.`
         : finPor === "cierre"
