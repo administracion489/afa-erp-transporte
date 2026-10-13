@@ -30,6 +30,12 @@ import {
 } from "@/lib/costos/nivel-servicio";
 import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
 import { planDePropagacion, MOTIVO_NO_PROPAGA, type MotivoNoPropaga } from "@/lib/paradas-materializar";
+import dynamic from "next/dynamic";
+import { estadoMarca, firmaParaderos, indiceDeInsercion, type HoraCalc, type FilaPlan } from "@/lib/paradas-horario";
+import { useRutaParaderos, coordsOk } from "@/components/cotizaciones/useRutaParaderos";
+import BarraHorasParaderos, { etiquetaDiaCorta, type ContextoHoras } from "@/components/cotizaciones/BarraHorasParaderos";
+// El mapa arrastra el CSS de Mapbox y su motor se baja al abrirlo (lib/mapbox-carga.ts).
+const MapaParaderos = dynamic(() => import("@/components/cotizaciones/MapaParaderos"), { ssr: false });
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -46,7 +52,9 @@ type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;c
 type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;};
 type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;cuentas_bancarias?:{banco:string;cuenta:string;cci:string}[]|null;};
 type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
-type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;};
+// `hora_calc` = la marca que deja «⏱ Calcular horas» (lib/paradas-horario.ts): con qué se calculó
+// la hora y para qué paraderos. Viaja en paradas_json (jsonb), sin migración.
+type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;hora_calc?:HoraCalc;};
 type Tarifa={id:number;origen:string;destino:string;tipo_vehiculo:string;equipamiento:string;tipo_servicio:string;modo:string;precio:number;moneda:string;confidencial:boolean;incluye_guia:boolean;incluye_peajes:boolean;incluye_alimentacion:boolean;notas:string|null;};
 type VehiculoFlota={id:number;placa:string;categoria:string|null;marca:string|null;modelo:string|null;anio:number|null;capacidad_pasajeros:number|null;equipamiento:string|null;foto_externa_url:string|null;foto_interna_url:string|null;descripcion_unidad:string|null;tipo_vehiculo_costeo:string|null;};
 type VehiculoTerceroFlota={id:number;empresa_id:number;placa:string;categoria:string|null;marca:string|null;modelo:string|null;capacidad:number|null;estado:string;empresa_nombre?:string;foto_externa_url:string|null;foto_interna_url:string|null;descripcion_unidad:string|null;tipo_vehiculo_costeo:string|null;};
@@ -266,7 +274,8 @@ function ModalPlantilla({cot,plantillaActual,onElegir,onGenerar,onCancelar}:{cot
 }
 
 // ── CardParada: FUERA de ParadasBuilder para evitar pérdida de foco al escribir ──
-function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, onDragStart, onDragOver, onDrop, onDragEnd, isDragging, isOver }: {
+// `marca` = estadoMarca(p, firma) de lib/paradas-horario.ts: la pantalla solo la rotula.
+function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, onDragStart, onDragOver, onDrop, onDragEnd, isDragging, isOver, marca, aviso, movida, onActualizarDireccion, dirEstado }: {
   p: ParadaTP; lbl: string; col: string;
   onUpd: (id: string, k: keyof ParadaTP, v: string) => void;
   onSel: (id: string, r: PlaceResultCot) => void;
@@ -279,8 +288,15 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
   onDragEnd?: () => void;
   isDragging?: boolean;
   isOver?: boolean;
+  marca?: "manual" | "vigente" | "desactualizada";
+  aviso?: string;
+  /** Se arrastró en el mapa: la dirección escrita puede ya no describir el punto. */
+  movida?: boolean;
+  onActualizarDireccion?: () => void;
+  dirEstado?: { cargando?: boolean; error?: string };
 }) {
   const inp = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f] bg-white";
+  const hc = p.hora_calc;
   return (
     <div
       className="bg-white rounded-2xl border-2 overflow-hidden transition-all"
@@ -301,7 +317,7 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
         {onDel && <button type="button" onClick={onDel} className="text-white/60 hover:text-white font-bold text-xs leading-none px-1">✕</button>}
       </div>
       <div className="p-4 grid gap-3" style={{ gridTemplateColumns: "1fr 120px" }}>
-        <div>
+        <div className="min-w-0">
           <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lugar</label>
           {mapsLoaded ? (
             <LocationInputCot placeholder={p.tipo==="intermedia"?"Buscar parada…":"Nombre del punto"} value={p.nombre} mapsLoaded={mapsLoaded}
@@ -315,32 +331,87 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
               📍 <a href={urlMapsPunto(p.lat, p.lng)} target="_blank" rel="noreferrer" className="hover:text-blue-500 hover:underline">{fmtCoord(p.lat, p.lng)}</a>
             </p>
           )}
+          {movida && onActualizarDireccion && (
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <button type="button" onClick={onActualizarDireccion} disabled={dirEstado?.cargando}
+                className="text-[10px] font-bold text-[#0b315f] border border-[#0b315f]/30 rounded-lg px-2 py-0.5 hover:bg-blue-50 disabled:opacity-50">
+                {dirEstado?.cargando ? "⏳ Buscando dirección…" : "↻ Actualizar dirección"}
+              </button>
+              <span className="text-[9px] text-gray-400">Lo moviste en el mapa: el nombre sigue siendo el que estaba.</span>
+              {dirEstado?.error && <span className="text-[10px] text-red-600 w-full">⚠ {dirEstado.error}</span>}
+            </div>
+          )}
         </div>
         <div>
           <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label>
           <input type="time" className={inp} value={p.hora} onChange={e => onUpd(p.id, "hora", e.target.value)} />
+          {hc && marca === "vigente" && (
+            <span className="inline-block mt-1 text-[9px] font-bold rounded-full px-1.5 py-0.5 bg-sky-50 text-sky-800 border border-sky-200"
+              title={hc.modo === "trafico" ? `Calculada con el tráfico previsto del ${etiquetaDiaCorta(hc.fecha_ref)} (Google, best_guess) y ${hc.espera_min} min de embarque por paradero.` : `Calculada con la ruta sin tráfico y ${hc.espera_min} min de embarque por paradero.`}>
+              {hc.modo === "trafico" ? `🚦 previsto ${etiquetaDiaCorta(hc.fecha_ref)}` : "≈ sin tráfico"}{hc.dia === 1 ? " (+1)" : ""}
+            </span>
+          )}
+          {hc && marca === "desactualizada" && (
+            <span className="inline-block mt-1 text-[9px] font-bold rounded-full px-1.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-300"
+              title="La hora se calculó con otros paraderos. «Calcular horas» respeta las horas escritas: usa «Recalcular todas» para rehacerla.">
+              ⚠ desactualizada (moviste un paradero){hc.dia === 1 ? " (+1)" : ""}
+            </span>
+          )}
         </div>
+        {aviso && <p className="col-span-2 text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">⚠ {aviso}</p>}
       </div>
     </div>
   );
 }
 
-function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, origenNombre, destinoNombre, origenLat, origenLng, destinoLat, destinoLng, horaIda, horaRetorno }: {
+/** Inicio, intermedios en su orden, destino: el orden del recorrido (y de la ruta y las horas). */
+function ordenarParadas(ps: ParadaTP[]): ParadaTP[] {
+  const ini = ps.find(p => p.tipo === "inicio");
+  const fin = ps.find(p => p.tipo === "destino");
+  return [...(ini ? [ini] : []), ...ps.filter(p => p.tipo === "intermedia"), ...(fin ? [fin] : [])];
+}
+
+async function direccionDePunto(lat: number, lng: number): Promise<string | null> {
+  const r = await fetch("/api/geocodificar-inverso", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lng }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+  return typeof d?.direccion === "string" && d.direccion.trim() ? d.direccion.trim() : null;
+}
+
+function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, origenNombre, destinoNombre, origenLat, origenLng, destinoLat, destinoLng, horaIda, horaRetorno, contexto, onMoverExtremo }: {
   paradas: ParadaTP[]; onChange: (p: ParadaTP[]) => void; tipo?: string;
   mapsLoaded?: boolean; origenNombre?: string; destinoNombre?: string;
   origenLat?: string; origenLng?: string; destinoLat?: string; destinoLng?: string;
   horaIda?: string; horaRetorno?: string;
+  /** Para «⏱ Calcular horas»: modo y fecha del servicio, sentido y salidas. */
+  contexto?: ContextoHoras;
+  /** El paradero 1 o el último se arrastró en el mapa (solo la ida: los ata al origen/destino del formulario). */
+  onMoverExtremo?: (tipo: "inicio" | "destino", lat: number, lng: number) => void;
 }) {
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [overIdx, setOverIdx] = useState<number | null>(null);
   const droppedRef = useRef(false);
 
+  // ── Ruta, mapa y horas ──────────────────────────────────────────────────────
+  const ord = useMemo(() => ordenarParadas(paradas), [paradas]);
+  const ruta = useRutaParaderos(ord);
+  const firmaActual = firmaParaderos(ord);
+  const [verMapa, setVerMapa] = useState(true);
+  const [avisos, setAvisos] = useState<{ firma: string; porId: Record<string, string> }>({ firma: "", porId: {} });
+  const [movidas, setMovidas] = useState<Record<string, true>>({});
+  const [dirEstado, setDirEstado] = useState<Record<string, { cargando?: boolean; error?: string }>>({});
+  // Lo que se lee DESPUÉS de un await (geocodificar, insertar): la lista de ahora, no la del clic.
+  const vivo = useRef({ paradas, onChange });
+  useEffect(() => { vivo.current = { paradas, onChange }; }, [paradas, onChange]);
+
   const nId = () => Math.random().toString(36).slice(2, 8);
   const upd = (id: string, k: keyof ParadaTP, v: string) =>
     onChange(paradas.map(p => p.id === id ? { ...p, [k]: v } : p));
   // Actualización atómica de nombre+lat+lng para evitar stale closure con 3 setState seguidos
-  const sel = (id: string, r: PlaceResultCot) =>
+  const sel = (id: string, r: PlaceResultCot) => {
     onChange(paradas.map(p => p.id === id ? { ...p, nombre: r.address, lat: String(r.lat), lng: String(r.lng) } : p));
+    setMovidas(prev => { const n = { ...prev }; delete n[id]; return n; });
+  };
   const inicio = paradas.find(p => p.tipo === "inicio");
   const fin    = paradas.find(p => p.tipo === "destino");
   const meds   = paradas.filter(p => p.tipo === "intermedia");
@@ -350,6 +421,65 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
     const a = [...paradas]; a.splice(idx < 0 ? a.length : idx, 0, n); onChange(a);
   };
   const esTP = tipo === "transporte_personal" || tipo === "fijo_multiparada";
+
+  /** Al soltar un marcador: nuevas coordenadas, el MISMO nombre (no se re-geocodifica solo). */
+  const moverEnMapa = (id: string, lat: number, lng: number) => {
+    const la = Number(lat.toFixed(6)), ln = Number(lng.toFixed(6));
+    const actual = vivo.current.paradas;
+    const p = actual.find(x => x.id === id);
+    if (!p) return;
+    vivo.current.onChange(actual.map(x => x.id === id ? { ...x, lat: String(la), lng: String(ln) } : x));
+    setMovidas(prev => ({ ...prev, [id]: true }));
+    setDirEstado(prev => { const n = { ...prev }; delete n[id]; return n; });
+    if (onMoverExtremo && (p.tipo === "inicio" || p.tipo === "destino")) onMoverExtremo(p.tipo, la, ln);
+  };
+  const actualizarDireccion = async (id: string) => {
+    const p = vivo.current.paradas.find(x => x.id === id);
+    if (!p || !coordsOk(p)) return;
+    setDirEstado(prev => ({ ...prev, [id]: { cargando: true } }));
+    try {
+      const dir = await direccionDePunto(Number(p.lat), Number(p.lng));
+      if (!dir) { setDirEstado(prev => ({ ...prev, [id]: { error: "Google no devolvió una dirección para ese punto: escribe el nombre a mano." } })); return; }
+      const ahora = vivo.current.paradas;
+      vivo.current.onChange(ahora.map(x => x.id === id ? { ...x, nombre: dir } : x));
+      setMovidas(prev => { const n = { ...prev }; delete n[id]; return n; });
+      setDirEstado(prev => { const n = { ...prev }; delete n[id]; return n; });
+    } catch (e: any) {
+      setDirEstado(prev => ({ ...prev, [id]: { error: `No se pudo buscar la dirección (${e?.message || "sin respuesta"}). Escribe el nombre a mano.` } }));
+    }
+  };
+  /** «＋ Paradero aquí»: dónde va lo decide indiceDeInsercion sobre la ruta; el nombre se propone UNA vez. */
+  const insertarEnMapa = (punto: [number, number]) => {
+    const lista = ordenarParadas(vivo.current.paradas);
+    const conC = lista.filter(coordsOk);
+    if (conC.length < 2) return;
+    const poli = ruta.vigente && ruta.ruta ? ruta.ruta.poli : [];
+    const k = indiceDeInsercion(poli, conC.map(p => ({ lat: Number(p.lat), lng: Number(p.lng) })), punto);
+    const antesDe = conC[k];
+    const idx = antesDe ? lista.indexOf(antesDe) : lista.length - 1;
+    const nuevo: ParadaTP = { id: nId(), tipo: "intermedia", nombre: "", direccion: "", lat: String(Number(punto[1].toFixed(6))), lng: String(Number(punto[0].toFixed(6))), hora: "" };
+    const a = [...lista]; a.splice(Math.max(1, idx), 0, nuevo);
+    vivo.current.onChange(a);
+    direccionDePunto(Number(nuevo.lat), Number(nuevo.lng)).then(dir => {
+      if (!dir) return;
+      const ahora = vivo.current.paradas;
+      // Solo si nadie le escribió un nombre mientras tanto.
+      if (ahora.some(x => x.id === nuevo.id && !x.nombre.trim())) vivo.current.onChange(ahora.map(x => x.id === nuevo.id ? { ...x, nombre: dir } : x));
+    }).catch(() => { /* el paradero queda con coordenadas y sin nombre: el campo vacío lo pide */ });
+  };
+  const aplicarHoras = (filas: FilaPlan[], firma: string, porId: Record<string, string>) => {
+    const porFila = new Map(filas.map(f => [f.id, f]));
+    const actual = vivo.current.paradas;
+    vivo.current.onChange(actual.map(p => {
+      const f = porFila.get(p.id);
+      return f && f.hora_calc ? { ...p, hora: f.hora, hora_calc: f.hora_calc } : p;
+    }));
+    setAvisos({ firma, porId });
+  };
+  const ponerSalida = (h: string) => {
+    const actual = vivo.current.paradas;
+    vivo.current.onChange(actual.map(p => p.tipo === "inicio" ? { ...p, hora: h } : p));
+  };
 
   const handleDrop = (toIdx: number) => {
     droppedRef.current = true;
@@ -382,9 +512,37 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
     </div>
   );
 
+  const puntosMapa = ord.filter(coordsOk).map(p => ({ id: p.id, nombre: p.nombre, lat: Number(p.lat), lng: Number(p.lng), numero: ord.indexOf(p) + 1, tipo: p.tipo }));
+  const extra = (p: ParadaTP) => ({
+    marca: estadoMarca(p, firmaActual),
+    aviso: avisos.firma === firmaActual ? avisos.porId[p.id] : undefined,
+    movida: !!movidas[p.id],
+    onActualizarDireccion: () => actualizarDireccion(p.id),
+    dirEstado: dirEstado[p.id],
+  });
+
   return (
     <div className="space-y-3">
-      {inicio && <CardParada p={inicio} lbl={esTP ? "🟢 Paradero 1" : "🟢 Inicio"} col="#16a34a" onUpd={upd} onSel={sel} mapsLoaded={mapsLoaded} />}
+      {puntosMapa.length >= 2 && (
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-black text-gray-600">🗺 Mapa de la ruta</span>
+            {verMapa && <span className="text-[10px] text-gray-400">Arrastra un número para mover ese paradero · clic en la línea para agregar uno</span>}
+            {ruta.cargando && <span className="text-[10px] text-gray-400">· trazando la ruta…</span>}
+            <button type="button" onClick={() => setVerMapa(v => !v)} className="ml-auto text-[10px] font-bold text-[#0b315f] hover:underline">{verMapa ? "Ocultar mapa" : "Ver mapa"}</button>
+          </div>
+          {ruta.error && <p className="text-[10px] text-red-600">⚠ No se pudo trazar la ruta: {ruta.error}</p>}
+          {!ruta.completo && <p className="text-[10px] text-gray-500">El mapa y la ruta solo incluyen los paraderos con coordenadas ({puntosMapa.length} de {ord.length}).</p>}
+          {verMapa && (
+            <MapaParaderos puntos={puntosMapa} poli={ruta.ruta?.poli ?? null} onMover={moverEnMapa} onInsertar={insertarEnMapa}
+              colorRuta={contexto?.sentido === "retorno" ? "#5b21b6" : "#0b315f"} />
+          )}
+        </div>
+      )}
+      {contexto && ord.length >= 2 && (
+        <BarraHorasParaderos paradas={ord} contexto={contexto} ruta={ruta} onAplicar={aplicarHoras} onPonerSalida={ponerSalida} />
+      )}
+      {inicio && <CardParada p={inicio} lbl={esTP ? "🟢 Paradero 1" : "🟢 Inicio"} col="#16a34a" onUpd={upd} onSel={sel} mapsLoaded={mapsLoaded} {...extra(inicio)} />}
       {meds.map((p, i) => (
         <CardParada
           key={p.id}
@@ -402,12 +560,13 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
           onDragEnd={handleDragEnd}
           isDragging={dragIdx === i}
           isOver={overIdx === i && dragIdx !== null && dragIdx !== i}
+          {...extra(p)}
         />
       ))}
       <button type="button" onClick={addMed} className="w-full py-2.5 rounded-xl border-2 border-dashed font-bold text-sm hover:bg-blue-50 transition-colors" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
         + {esTP ? "Paradero intermedio" : "Parada intermedia"}
       </button>
-      {fin && <CardParada p={fin} lbl={esTP ? "🔴 Último Paradero" : "🔴 Destino"} col="#dc2626" onUpd={upd} onSel={sel} mapsLoaded={mapsLoaded} />}
+      {fin && <CardParada p={fin} lbl={esTP ? "🔴 Último Paradero" : "🔴 Destino"} col="#dc2626" onUpd={upd} onSel={sel} mapsLoaded={mapsLoaded} {...extra(fin)} />}
     </div>
   );
 }
@@ -2123,6 +2282,11 @@ export default function CotizacionesPage(){
                 origenLat={origenPlace?.lat?String(origenPlace.lat):""} origenLng={origenPlace?.lng?String(origenPlace.lng):""}
                 destinoLat={destinoPlace?.lat?String(destinoPlace.lat):""} destinoLng={destinoPlace?.lng?String(destinoPlace.lng):""}
                 horaIda={form.hora_ida} horaRetorno={form.hora_retorno}
+                contexto={{modoServicio:form.modo_servicio,fechaServicio:form.fecha_servicio||null,sentido:"ida",horaSalidaForm:form.hora_ida}}
+                // El paradero 1 y el último están atados al origen/destino del formulario (el efecto
+                // de sincronización les copia sus coordenadas): arrastrarlos mueve ESE punto, o el
+                // efecto los devolvería a su sitio. placeId vacío: mandan las coordenadas.
+                onMoverExtremo={(t,lat,lng)=>t==="inicio"?setOrigenPlace({placeId:"",lat,lng}):setDestinoPlace({placeId:"",lat,lng})}
               />
             </div>
 
@@ -2145,6 +2309,8 @@ export default function CotizacionesPage(){
                   origenLat={destinoPlace?.lat?String(destinoPlace.lat):""} origenLng={destinoPlace?.lng?String(destinoPlace.lng):""}
                   destinoLat={origenPlace?.lat?String(origenPlace.lat):""} destinoLng={origenPlace?.lng?String(origenPlace.lng):""}
                   horaIda={form.hora_retorno} horaRetorno=""
+                  // Sin onMoverExtremo: los extremos del retorno no están atados al formulario.
+                  contexto={{modoServicio:form.modo_servicio,fechaServicio:form.fecha_servicio||null,sentido:"retorno",horaSalidaIda:paradas.find(p=>p.tipo==="inicio")?.hora||form.hora_ida||null,horaSalidaForm:form.hora_retorno}}
                 />
               </div>
             )}

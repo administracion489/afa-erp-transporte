@@ -82,9 +82,9 @@ export default function MapaParaderos({ puntos, poli, onMover, onInsertar, color
         });
         setListo(true);
       });
-      m.on("error", (e: any) => {
+      m.on("error", (e) => {
         // Un 401 del estilo es el token inválido: dicho, no un recuadro en blanco.
-        const st = e?.error?.status;
+        const st = (e?.error as { status?: number } | undefined)?.status;
         if (st === 401 || st === 403) setError("Mapbox rechazó el token (NEXT_PUBLIC_MAPBOX_TOKEN). Revisa la variable en Vercel.");
       });
       mapRef.current = m;

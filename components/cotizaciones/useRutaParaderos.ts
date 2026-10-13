@@ -45,7 +45,7 @@ async function pedirRuta(pts: PuntoRuta[], firma: string): Promise<RutaParaderos
   return {
     firma,
     poli: Array.isArray(d?.coordenadas) ? d.coordenadas : [],
-    tramosS: Array.isArray(d?.tramos) ? d.tramos.map((t: any) => segundosDeTramoRuta(t)) : [],
+    tramosS: Array.isArray(d?.tramos) ? d.tramos.map((t: { duracion_s?: number | null; duracion_min?: number | null }) => segundosDeTramoRuta(t)) : [],
   };
 }
 
@@ -56,7 +56,7 @@ export function useRutaParaderos(paradas: PuntoRuta[]) {
 
   const [ruta, setRuta] = useState<RutaParaderos | null>(null);
   const [cargando, setCargando] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ firma: string; msg: string } | null>(null);
 
   const firmaRef = useRef(firma);
   const puntosRef = useRef(conCoords);
@@ -70,18 +70,18 @@ export function useRutaParaderos(paradas: PuntoRuta[]) {
     const p = pedirRuta(puntosRef.current, f);
     vuelo.current = { firma: f, p };
     setCargando(true);
-    setError("");
+    setError(null);
     p.then(r => { if (firmaRef.current === f) setRuta(r); })
-      .catch(e => { if (firmaRef.current === f) setError(e?.message || "No se pudo trazar la ruta."); })
+      .catch(e => { if (firmaRef.current === f) setError({ firma: f, msg: e?.message || "No se pudo trazar la ruta." }); })
       .finally(() => {
-        if (vuelo.current?.p === p) vuelo.current = null;
-        if (firmaRef.current === f) setCargando(false);
+        // Solo la consulta más reciente apaga el «cargando»: una vieja que termina tarde no.
+        if (vuelo.current?.p === p) { vuelo.current = null; setCargando(false); }
       });
     return p;
   }, []);
 
   useEffect(() => {
-    if (!firma) { setCargando(false); setError(""); return; }
+    if (!firma) return;
     if (ruta?.firma === firma) return;
     const t = setTimeout(() => { lanzar(firma).catch(() => {}); }, DEBOUNCE_MS);
     return () => clearTimeout(t);
@@ -100,5 +100,6 @@ export function useRutaParaderos(paradas: PuntoRuta[]) {
   // La ruta dibujada se conserva mientras se pide la nueva (el mapa no parpadea); `vigente`
   // dice si describe los paraderos de AHORA.
   const vigente = !!ruta && ruta.firma === firma;
-  return { ruta: firma ? ruta : null, vigente, cargando, error, firma, completo, conCoords, asegurar };
+  // Sin dos paraderos con coordenadas no hay consulta: ni «cargando» ni el error de una vieja.
+  return { ruta: firma ? ruta : null, vigente, cargando: !!firma && cargando, error: firma && error?.firma === firma ? error.msg : "", firma, completo, conCoords, asegurar };
 }

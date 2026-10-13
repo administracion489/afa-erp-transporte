@@ -335,6 +335,22 @@ export function requisitosHoras(paradas: { nombre: string; lat: string | number;
  * la API consultó a la salida que da esta misma cadena). Nada se calcula a medias: con
  * cualquier requisito sin cumplir, `filas` sale vacía.
  */
+/**
+ * La hora que el cálculo RESPETA en un paradero, o null si la puede (re)calcular.
+ *
+ * Solo una hora escrita por una persona es un dato. Una hora que puso el propio sistema
+ * (`hora_calc.hora === hora`) no lo es — vigente o desactualizada—, así que «solo vacías» la
+ * vuelve a calcular: si no, mover un paradero dejaría para siempre la hora vieja tratada como
+ * escrita. La pantalla arma las `fijas` del endpoint con ESTA función, la misma que usa el plan.
+ */
+export function horaFijaDe(p: Pick<ParadaHorario, "hora" | "hora_calc">, modo: "vacias" | "todas"): string | null {
+  if (modo !== "vacias") return null;
+  const escrita = horaEscrita(p.hora);
+  if (escrita == null) return null;
+  if (p.hora_calc && horaEscrita(p.hora_calc.hora) === escrita) return null;
+  return escrita;
+}
+
 export function planHoras(a: {
   paradas: ParadaHorario[];
   tramosS: number[];
@@ -360,7 +376,7 @@ export function planHoras(a: {
     const p = a.paradas[i];
     const escrita = horaEscrita(p.hora);
     const esIntermedia = i < n - 1;
-    const fija = a.modo === "vacias" ? escrita : null;
+    const fija = horaFijaDe(p, a.modo);
     const paso = pasoCadena(prev, a.tramosS[i - 1], a.esperaMin, esIntermedia, fija);
 
     // Se redondea AL FINAL, sobre el total en minutos (la cadena va en segundos).
@@ -379,7 +395,8 @@ export function planHoras(a: {
       });
       ultima = escrita!;
     } else {
-      const pisa = a.modo === "todas" && escrita != null && escrita !== hora;
+      const deSistema = !!p.hora_calc && horaEscrita(p.hora_calc.hora) === escrita;
+      const pisa = escrita != null && escrita !== hora && !deSistema;
       if (pisa) pisaria++;
       filas.push({
         id: p.id,

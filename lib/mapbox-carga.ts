@@ -21,7 +21,7 @@ export function cargarMapbox(): Promise<MapboxAPI> {
   if (gl) return Promise.resolve(gl);
   if (!carga) {
     carga = import("mapbox-gl").then(mod => {
-      const m = ((mod as any).default ?? mod) as MapboxAPI;
+      const m = ((mod as { default?: MapboxAPI }).default ?? mod) as MapboxAPI;
       m.accessToken = tokenMapbox();
       gl = m;
       return m;

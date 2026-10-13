@@ -12,7 +12,7 @@
 //   · EL COROLARIO: el motor SÍ llena algo cuando hay datos. Un motor que no escribiera nunca
 //     ninguna hora cumpliría de forma trivial todo lo anterior.
 import {
-  planHoras, pasoCadena, estadoMarca, indiceDeInsercion, validarSalida, fechaReferencia,
+  planHoras, horaFijaDe, pasoCadena, estadoMarca, indiceDeInsercion, validarSalida, fechaReferencia,
   firmaParaderos, modoRecomendado, requisitosHoras, segundosDeTramoRuta, costoEstimado,
   ESPERA_DEFECTO_MIN, MAX_PARADEROS_TRAFICO, PRECIO_USD,
   type ParadaHorario, type HoraCalc,
@@ -267,6 +267,23 @@ sec("11. Barrido: invariantes y corolario");
   }
   chk("la salida de referencia siempre se puede consultar (futura, ≤ 90 días) y el fijo cae en hábil", pasadas === 0, `${pasadas} malas`);
   chk("COROLARIO: produce fechas válidas", validas === 3000);
+}
+
+// ── Una hora que puso el SISTEMA no es un dato: «solo vacías» la recalcula ─────────────
+{
+  const viejo = { ...CALC, hora: "06:20", firma: "otra" };
+  const calcSistema = { ...P("b", "intermedia", "06:20"), hora_calc: viejo };
+  const manual = P("c", "intermedia", "06:45");
+  const editada = { ...P("d", "destino", "07:30"), hora_calc: { ...CALC, hora: "07:10" } };
+  chk("horaFijaDe: hora calculada (aunque desactualizada) no es fija", horaFijaDe(calcSistema, "vacias") === null);
+  chk("horaFijaDe: hora escrita a mano es fija", horaFijaDe(manual, "vacias") === "06:45");
+  chk("horaFijaDe: calculada y luego editada a mano es fija", horaFijaDe(editada, "vacias") === "07:30");
+  chk("horaFijaDe: en «todas» nada es fijo", horaFijaDe(manual, "todas") === null);
+  const r = planHoras({ paradas: [P("a", "inicio", "06:00"), calcSistema, manual, editada], tramosS: [600, 600, 600], esperaMin: 0, modo: "vacias", calc: CALC });
+  chk("vacías: recalcula la hora del sistema (06:10, no 06:20)", r.filas[1].hora === "06:10" && r.filas[1].codigo === "calculada");
+  chk("vacías: conserva la escrita a mano", r.filas[2].hora === "06:45" && r.filas[2].codigo === "conservada_manual");
+  const t = planHoras({ paradas: [P("a", "inicio", "06:00"), calcSistema, manual, editada], tramosS: [600, 600, 600], esperaMin: 0, modo: "todas", calc: CALC });
+  chk("todas: «pisaria» solo cuenta las horas escritas por una persona", t.pisaria === 2, `pisaria=${t.pisaria}`);
 }
 
 console.log(fallos ? `\n✗ ${fallos} prueba(s) fallaron` : "\n✓ todas las pruebas pasaron");
