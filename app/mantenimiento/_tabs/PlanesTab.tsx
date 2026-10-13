@@ -33,7 +33,8 @@ type Vehiculo = { id: number; placa: string; marca?: string; modelo?: string; ca
 function inputCls(extra = "") {
   return `w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all ${extra}`;
 }
-function hoyISO() { return new Date().toISOString().split("T")[0]; }
+// Hoy en Lima, no en UTC (desde las 19:00 UTC ya es mañana).
+function hoyISO() { return new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10); }
 
 /** File → {tipo, media_type, base64} para el endpoint de visión */
 function fileToAdjunto(file: File): Promise<{ tipo: "image" | "pdf"; media_type: string; data: string }> {

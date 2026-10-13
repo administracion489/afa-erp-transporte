@@ -115,6 +115,23 @@ console.log("\n5 · Lo que todavía no pasó no ancla");
   chk("sin `hoy` el comportamiento es el de antes", ultimoServicioPorVehiculo([prog, hecho])[2]?.kilometraje === 30000);
 }
 
+console.log("\n5b · Una OT cerrada ancla aunque su fila diga mañana (CWZ-371, OT #7)");
+{
+  // El cierre de las 21:30 de Lima del 12/10 fechó la fila con la fecha UTC: 13/10.
+  const viejaOT: FilaLibro = { vehiculo_id: 4, fecha: "2026-08-21", kilometraje: 10000, tipo: "preventivo", estado: "finalizado" };
+  const ot7: FilaLibro = { vehiculo_id: 4, fecha: "2026-10-13", kilometraje: 20244, tipo: "preventivo", estado: "finalizado", descripcion: "OT #7 — CWZ-371" };
+  const est: EstadosOT = new Map([[7, "cerrada"]]);
+  const hoy = "2026-10-12";
+  chk("con la OT cerrada, la fila de mañana ancla", porQueNoAncla(ot7, { estadoOT: est, hoy }) === null);
+  chk("y el próximo pasa de 20 000 (vencido) a 30 244",
+    proximoPorKm({ kmActual: 20244, intervaloKm: 10000,
+      ultimoServicioKm: ultimoServicioPorVehiculo([ot7, viejaOT], { estadoOT: est, hoy })[4]?.kilometraje })?.dueKm === 30244);
+  chk("el defecto se reproduce sin mirar las OT (fecha sola → futuro)",
+    porQueNoAncla(ot7, { hoy }) === "futuro");
+  chk("con la OT reabierta sigue sin anclar", porQueNoAncla(ot7, { estadoOT: new Map([[7, "abierta"]]), hoy }) === "ot_no_cerrada");
+  chk("un programado SIN OT sigue siendo futuro", porQueNoAncla({ ...ot7, descripcion: "Servicio programado" }, { estadoOT: est, hoy }) === "futuro");
+}
+
 console.log("\n6 · Barrido: sin filas canceladas, el nuevo dice lo mismo que el viejo");
 {
   let combos = 0, distintos = 0;
