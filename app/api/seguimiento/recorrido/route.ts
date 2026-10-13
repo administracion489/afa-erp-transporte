@@ -37,7 +37,7 @@ export const maxDuration = 60;
 // como cerrado pasada la medianoche.
 const TTL_HOY_MS = 30_000;
 const TTL_OTRO_DIA_MS = 10 * 60_000;
-const MAX_CACHE = 200;
+const MAX_CACHE = 100;
 type Entrada = { at: number; ttl: number; hoy: string; payload: RecorridoServicio };
 const cache = new Map<string, Entrada>();
 const enVuelo = new Map<string, Promise<RecorridoServicio | null>>();

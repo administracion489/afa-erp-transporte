@@ -7,9 +7,11 @@
 //   1. el rojo del mapa es la columna «Excesos» de /uso-flota: los episodios que cuentan son tantos
 //      como `excesos.n`, y sin `medido` no se publica ninguno;
 //   2. cada exceso se dibuja con las posiciones de SU racha, dentro de su ventana y en orden;
-//   3. la traza se corta en los huecos (> MAX_SEG_M) y se decima sin perder los extremos;
+//   3. la huella medida se corta en los saltos (> MAX_SEG_M) y en los «sin señal», y se decima sin
+//      perder los extremos (decimarTramos = el de antes, copiado literal);
 //   4. la URL: lo que compone `urlRecorrido` lo lee `leerInicio`/`leerUmbral` (el ciclo, no una mitad);
-//   5. la página y el mapa no cargan Google Maps ni piden rutas a Google;
+//   5. la página y el mapa no cargan Google Maps ni piden rutas a Google, y el servidor del recorrido
+//      (motor, lector y ruta) no llama a NINGÚN tercero;
 //   6. la huella del modal GPS extraída (huellaDeFilas, segmentosHuella/huellaCrudaFeatures, la rampa de
 //      velocidad y rumboCardinal) = el bloque original copiado literal; divergencia declarada: una fila
 //      sin coordenadas utilizables ya no entra como el punto (0,0);
@@ -18,8 +20,16 @@
 //      (quien escribe en rutas_cache y quien lee derivan la misma clave);
 //   8. el ciclo de la firma de la ruta prevista: firmaRuta(paradasParaFirma(…).lista) = la clave con
 //      que /api/ruta guarda lo que pide el modal; y leerRutasCache (una consulta, misma vigencia, lanza);
-//  10. hechosDeParadas = las líneas de derivarTiempos copiadas literal.
-//   (9, 11 y 12 quedan para el armado del recorrido.)
+//  10. hechosDeParadas = las líneas de derivarTiempos copiadas literal;
+//   9. el recorrido armado por la cadena real (lector con lectores falsos): el «sin señal» ES el de la
+//      celda RASTREO, ningún segmento medido pasa de 300 m ni cruza un «sin señal», ningún hueco tiene
+//      línea, los estimados son solo los que validarPuente aprobó, UNA consulta a rutas_cache; y el
+//      corolario: el corte viejo por distancia (copiado literal) acusaba donde la medición da 0;
+//      9b. cada código de la ruta prevista guardada;
+//  11. la etiqueta de cada exceso: tri-estado contra un oráculo escrito aparte, y el conteo y la lista
+//      de episodios idénticos con y sin etiqueta;
+//  12. el peso de la respuesta en el peor caso de los topes.
+//   DETALLE=1 imprime los números de cada comprobación.
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ||= "https://x.supabase.co";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||= "x";
@@ -38,10 +48,16 @@ type CodigoRastreo = VeredictoRastreo["codigo"];
 
 let ok = 0, fallas = 0;
 function chk(nombre: string, cond: boolean, detalle?: string) {
+  if (process.env.DETALLE && detalle) console.log(`  · ${nombre} — ${detalle}`);   // DETALLE=1: ver los números
   if (cond) ok++;
   else { fallas++; console.log(`  ✗ ${nombre}${detalle ? ` — ${detalle}` : ""}`); }
 }
-const seccion = (t: string) => console.log(`\n── ${t}`);
+let okSeccion = 0;
+const seccion = (t: string) => {
+  if (process.env.DETALLE && ok + fallas > 0) console.log(`   (${ok + fallas - okSeccion} comprobaciones en la sección anterior)`);
+  okSeccion = ok + fallas;
+  console.log(`\n── ${t}`);
+};
 
 // PRNG determinista.
 let semilla = 20261013;
@@ -68,6 +84,16 @@ function tramo(desdeMs: number, segs: number, kmh: number, o: { conductor?: numb
 }
 const ver = (codigo: CodigoRastreo, enCurso = false): VeredictoRastreo =>
   ({ codigo, pct: 98, problema: null, celda: "", color: "", bg: "", detalle: "", ultimaSenalTs: null, enCurso });
+
+const GC = await import("../lib/gps-cobertura");
+/** La traza saneada y la medición de cobertura de unas filas, como las arma la celda RASTREO (sin la
+ *  evidencia del conductor, que en las secciones 0-3 no hace falta). */
+function medirFilas(filas: Fila[]) {
+  const tr = GC.trazaVacia();
+  GC.acumularFilasGps(tr, filas, true);
+  tr.pts.sort((a, b) => a.ts - b.ts);
+  return { tr, med: GC.medirCobertura({ pts: tr.pts, cierreTs: tr.cierreTs }) };
+}
 
 /** Una traza de servicio al azar: tramos seguidos de velocidades y duraciones variadas. */
 function trazaAlAzar(): Fila[] {
@@ -191,12 +217,12 @@ seccion("1 · los episodios que cuentan son los de excesosDelServicio");
 
   // Sin velocímetro: la traza se dibuja igual, sin rojo y sin decir «0 excesos».
   const sinVel = R.recorridoDeServicio({ reservaId: 9, crudas: filas.map((f) => ({ ...f, velocidad: 0 })), aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90 });
-  chk("sin velocímetro: traza sí, episodios no, código sin_velocimetro", sinVel.tramos.length > 0 && sinVel.episodios.length === 0 && sinVel.excesos.codigo === "sin_velocimetro" && sinVel.excesos.n === null);
+  chk("sin velocímetro: traza sí, episodios no, código sin_velocimetro", sinVel.medido.length > 0 && sinVel.episodios.length === 0 && sinVel.excesos.codigo === "sin_velocimetro" && sinVel.excesos.n === null);
   // No salió / no se leyó: nada.
   const noSalio = R.recorridoDeServicio({ reservaId: 9, crudas: filas, aplica: false, trazaLeida: false, rastreo: ver("no_aplica"), umbral: 90 });
-  chk("no salió: sin traza ni episodios", noSalio.tramos.length === 0 && noSalio.episodios.length === 0 && noSalio.excesos.codigo === "no_aplica");
+  chk("no salió: sin traza ni episodios", noSalio.medido.length === 0 && noSalio.episodios.length === 0 && noSalio.excesos.codigo === "no_aplica");
   const noLeida = R.recorridoDeServicio({ reservaId: 9, crudas: null, aplica: true, trazaLeida: false, rastreo: ver("sin_medir"), umbral: 90 });
-  chk("traza sin leer: sin_medir, nada dibujado", noLeida.tramos.length === 0 && noLeida.excesos.codigo === "sin_medir");
+  chk("traza sin leer: sin_medir, nada dibujado", noLeida.medido.length === 0 && noLeida.excesos.codigo === "sin_medir");
 }
 
 // ══ 2 · cada exceso con las posiciones de su racha ═════════════════════════════════════════
@@ -220,23 +246,34 @@ seccion("2 · las coordenadas de cada episodio");
   chk(`${eps} episodios: sus coordenadas son las de su ventana, en orden, y un exceso tiene 2+`, buenos === eps && eps > 50, `${eps - buenos}`);
 }
 
-// ══ 3 · tramos, huecos y decimado ══════════════════════════════════════════════════════════
-seccion("3 · la traza se corta en los huecos y se decima sin perder extremos");
+// ══ 3 · la huella medida, los «sin señal» y el decimado ═════════════════════════════════════
+// (Antes: `tramos`/`huecos` por distancia. El contrato cambió en T3: `medido` se corta en los saltos
+// de más de MAX_SEG_M Y en los «sin señal» de la celda RASTREO, que van aparte, sin línea.)
+seccion("3 · la huella medida se corta en los saltos y en los «sin señal», y se decima sin perder extremos");
 {
-  let casos = 0, cortesBien = 0;
+  let casos = 0, bien = 0, conSinSenal = 0;
   for (let i = 0; i < 300; i++) {
     const filas = trazaAlAzar();
-    const rec = R.recorridoDeServicio({ reservaId: 2, crudas: filas, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90 });
+    const { tr, med } = medirFilas(filas);
+    const rec = R.recorridoDeServicio({ reservaId: 2, crudas: filas, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90, medicion: med, ptsCobertura: tr.pts });
     casos++;
-    const sinSaltos = rec.tramos.every((t) => t.length >= 2 && t.every((c, j) => j === 0 || distM(t[j - 1][1], t[j - 1][0], c[1], c[0]) <= MAX_SEG_M));
-    const huecosLargos = rec.huecos.every((h) => h.metros > MAX_SEG_M);
-    if (sinSaltos && huecosLargos) cortesBien++;
+    const sinSaltos = !rec.medidoDecimado && rec.medido.every((t) => t.coords.length >= 2 && t.vel.length === t.coords.length
+      && t.coords.every((c, j) => j === 0 || distM(t.coords[j - 1][1], t.coords[j - 1][0], c[1], c[0]) <= MAX_SEG_M));
+    const cuadra = rec.sinSenalTotal === (med ? med.tramos.length : null) && rec.sinSenal.length === (med ? med.tramos.length : 0);
+    if (sinSaltos && cuadra) bien++;
+    if ((rec.sinSenalTotal ?? 0) > 0) conSinSenal++;
   }
-  chk(`ningún tramo salta más de ${MAX_SEG_M} m y todo hueco lo hace (${casos})`, cortesBien === casos, `${casos - cortesBien}`);
+  chk(`ningún tramo medido salta más de ${MAX_SEG_M} m y los «sin señal» son los de la medición (${casos})`, bien === casos, `${casos - bien}`);
+  chk("el barrido tiene tramos sin señal (no es trivial)", conSinSenal > 30, `${conSinSenal}`);
 
   const conHueco = [...tramo(T0, 60, 60, { conductor: 5 }), ...tramo(T0 + 200_000, 60, 60, { conductor: 5, lat0: -12.03 })];
-  const rh = R.recorridoDeServicio({ reservaId: 2, crudas: conHueco, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90 });
-  chk("un salto de ~2 km: 2 tramos y 1 hueco con su tiempo", rh.tramos.length === 2 && rh.huecos.length === 1 && (rh.huecos[0].segundos ?? 0) > 100, JSON.stringify({ t: rh.tramos.length, h: rh.huecos }));
+  const mh = medirFilas(conHueco);
+  const rh = R.recorridoDeServicio({ reservaId: 2, crudas: conHueco, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90, medicion: mh.med, ptsCobertura: mh.tr.pts });
+  const h0 = rh.sinSenal[0];
+  chk("un salto de ~2 km con 140 s sin posición: 2 tramos medidos y 1 «sin señal» con sus dos extremos, sin línea ni estimado",
+    rh.medido.length === 2 && rh.sinSenal.length === 1 && h0.tipo === "hueco" && h0.durS > 100 && !!h0.desde && !!h0.hasta
+    && h0.enMovimiento && !h0.estimado && rh.estimados.length === 0 && rh.cortesEnMovimiento === 1,
+    JSON.stringify({ m: rh.medido.length, s: rh.sinSenal }));
 
   const largos: [number, number][][] = [Array.from({ length: 4000 }, (_, i) => [i, 0] as [number, number]), Array.from({ length: 3000 }, (_, i) => [i, 1] as [number, number])];
   const d = R.decimarTramos(largos, 1000);
@@ -274,16 +311,52 @@ seccion("3 · la traza se corta en los huecos y se decima sin perder extremos");
       || r.tramos.some((t) => t.length < 2)) { barridoOk = false; console.log("   ", { n, max, tot, om: r.omitidos }); break; }
   }
   chk("barrido de 300 repartos: nunca pasa del tope, nada se pierde sin contarse", barridoOk);
+  // decimarTramos se construye ahora sobre planDecimado (el mismo plan que decima la huella con su
+  // velocidad): tiene que dar EXACTAMENTE lo que daba antes.
+  // ── COPIA LITERAL de decimarTramos de lib/flota/recorrido.ts ANTES de T3 ──
+  function decimarTramosViejo(tramos: [number, number][][], max = 5000): { tramos: [number, number][][]; decimada: boolean; omitidos: number } {
+    const contarVertices = (ts: readonly [number, number][][]) => ts.reduce((acc, t) => acc + t.length, 0);
+    const largoM = (t: readonly [number, number][]) => { let m = 0; for (let i = 1; i < t.length; i++) m += distM(t[i - 1][1], t[i - 1][0], t[i][1], t[i][0]); return m; };
+    const total = contarVertices(tramos);
+    if (total <= max) return { tramos, decimada: false, omitidos: 0 };
+    const masLargo = tramos.reduce((acc, t) => Math.max(acc, t.length), 0);
+    const decimar = (paso: number) => tramos.map((t) => t.filter((_, i) => i === 0 || i === t.length - 1 || i % paso === 0));
+    let paso = Math.max(2, Math.ceil(total / max));
+    let out = decimar(paso);
+    while (contarVertices(out) > max && paso < masLargo) {
+      paso += Math.max(1, Math.floor(paso / 4));
+      out = decimar(paso);
+    }
+    if (contarVertices(out) <= max) return { tramos: out, decimada: true, omitidos: 0 };
+    const orden = out.map((t, i) => ({ i, m: largoM(tramos[i]) })).sort((a, b) => b.m - a.m || a.i - b.i);
+    const quedan = new Set<number>();
+    let usados = 0;
+    for (const { i } of orden) {
+      if (usados + out[i].length > max) continue;
+      quedan.add(i);
+      usados += out[i].length;
+    }
+    return { tramos: out.filter((_, i) => quedan.has(i)), decimada: true, omitidos: out.length - quedan.size };
+  }
+  let decN = 0, decIg = 0;
+  for (let i = 0; i < 400; i++) {
+    const n = 1 + Math.floor(rnd() * 300);
+    const ts = Array.from({ length: n }, (_, k) => Array.from({ length: 1 + Math.floor(rnd() * 80) }, (_, j) => [-77 + k * 1e-4 + rnd() * 1e-3, -12 + j * 1e-4] as [number, number]));
+    const max = 10 + Math.floor(rnd() * 3000);
+    decN++;
+    if (JSON.stringify(R.decimarTramos(ts, max)) === JSON.stringify(decimarTramosViejo(ts, max))) decIg++;
+  }
+  chk(`decimarTramos (sobre planDecimado) = el de antes, copiado literal (${decN} repartos)`, decIg === decN, `${decN - decIg}`);
 
-  // Huecos: se quedan los más largos, en orden, y se cuentan los que no.
-  const muchos = Array.from({ length: 900 }, (_, k) => ({ desde: [0, 0] as [number, number], hasta: [1, 1] as [number, number], segundos: k, metros: 301 + ((k * 37) % 900) }));
-  const th = R.toparHuecos(muchos);
-  const minH = Math.min(...th.huecos.map((h) => h.metros));
-  const fueraH = muchos.filter((h) => !th.huecos.includes(h));
-  chk(`900 huecos: quedan ${R.MAX_HUECOS}, los más largos, en orden, y ${900 - R.MAX_HUECOS} omitidos`,
-    th.huecos.length === R.MAX_HUECOS && th.omitidos === 900 - R.MAX_HUECOS
-    && fueraH.every((h) => h.metros <= minH) && th.huecos.every((h, i) => i === 0 || (th.huecos[i - 1].segundos ?? 0) < (h.segundos ?? 0)));
-  chk("pocos huecos: intactos", R.toparHuecos(muchos.slice(0, 3)).omitidos === 0 && R.toparHuecos(muchos.slice(0, 3)).huecos.length === 3);
+  // «Sin señal»: se quedan los más LARGOS (duración), en orden, y se cuentan los que no.
+  const muchos = Array.from({ length: 900 }, (_, k) => ({ tipo: "hueco" as const, desdeTs: k * 1000, hastaTs: k * 1000 + 61_000, durS: 61 + ((k * 37) % 900), avanceM: 10, enMovimiento: false }));
+  const th = R.toparSinSenal(muchos);
+  const minH = Math.min(...th.tramos.map((h) => h.durS));
+  const fueraH = muchos.filter((h) => !th.tramos.includes(h));
+  chk(`900 «sin señal»: quedan ${R.MAX_HUECOS}, los más largos, en orden, y ${900 - R.MAX_HUECOS} omitidos`,
+    th.tramos.length === R.MAX_HUECOS && th.omitidos === 900 - R.MAX_HUECOS
+    && fueraH.every((h) => h.durS <= minH) && th.tramos.every((h, i) => i === 0 || th.tramos[i - 1].desdeTs < h.desdeTs));
+  chk("pocos «sin señal»: intactos", R.toparSinSenal(muchos.slice(0, 3)).omitidos === 0 && R.toparSinSenal(muchos.slice(0, 3)).tramos.length === 3);
 
   // Coordenadas de un episodio: muestreo con los extremos dentro.
   const serie = Array.from({ length: 2000 }, (_, k) => [k, k] as [number, number]);
@@ -298,11 +371,13 @@ seccion("3 · la traza se corta en los huecos y se decima sin perder extremos");
     created_at: new Date(T0 + k * 2000).toISOString(), lat: -12.05 + (k % 2) * 0.004 + Math.floor(k / 2) * 1e-6, lng: -77.03,
     precision_m: 5, simulado: null, estado: "en_ruta", velocidad: 40, rumbo: 0, timestamp: null, conductor_id: 5, conductor_tercero_id: null,
   }));
-  const rs = R.recorridoDeServicio({ reservaId: 3, crudas: salton, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90 });
-  const vRs = rs.tramos.reduce((a, t) => a + t.length, 0);
+  const ms = medirFilas(salton);
+  const rs = R.recorridoDeServicio({ reservaId: 3, crudas: salton, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90, medicion: ms.med, ptsCobertura: ms.tr.pts });
+  const vRs = rs.medido.reduce((a, t) => a + t.coords.length, 0);
   const bytes = JSON.stringify(rs).length;
-  chk(`traza de 20 000 saltos: ≤ ${R.MAX_VERTICES_TRAZA} vértices, ≤ ${R.MAX_HUECOS} huecos y respuesta acotada`,
-    vRs <= R.MAX_VERTICES_TRAZA && rs.huecos.length <= R.MAX_HUECOS && bytes < 400_000, `${vRs} · ${rs.huecos.length} · ${bytes} B`);
+  chk(`traza de 20 000 saltos: ≤ ${R.MAX_VERTICES_TRAZA} vértices, ≤ ${R.MAX_HUECOS} «sin señal», ≤ ${R.MAX_PUNTOS_DATO} puntitos y respuesta acotada`,
+    vRs <= R.MAX_VERTICES_TRAZA && rs.sinSenal.length <= R.MAX_HUECOS && rs.puntos.length <= R.MAX_PUNTOS_DATO && bytes < 400_000,
+    `${vRs} · ${rs.sinSenal.length} · ${rs.puntos.length} · ${bytes} B`);
 }
 
 // ══ 4 · la URL: el ciclo ═══════════════════════════════════════════════════════════════════
@@ -339,13 +414,29 @@ seccion("5 · la página y el mapa no cargan Google Maps ni piden rutas a Google
     const src = fs.readFileSync(path.join(raiz, f), "utf8");
     chk(`${f}: el enlace se compone con urlRecorrido`, src.includes("urlRecorrido(") && !src.includes("`/seguimiento/gps/${"));
   }
+
+  // El servidor del recorrido NO llama a ningún tercero: ni Directions, ni Map Matching, ni Tilequery,
+  // ni geocodificación, ni un fetch cualquiera. La ruta prevista y los puentes se leen de rutas_cache.
+  // Se mira el CÓDIGO (sin comentarios de bloque, de línea ni al final de una línea).
+  const sinComentarios = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").split("\n")
+    .filter((l) => !/^\s*\/\//.test(l)).map((l) => l.replace(/\s\/\/.*$/, "")).join("\n");
+  const PROHIBIDO = /google-directions|consultarDirections|\/api\/ruta|matching\/v5|tilequery|geocodificar|fetch\(|mapMatchTrail|matchVentana|crearAjustadorHuella/i;
+  for (const f of ["lib/flota/recorrido.ts", "lib/flota/recorrido-datos.ts", "app/api/seguimiento/recorrido/route.ts"]) {
+    const codigo = sinComentarios(fs.readFileSync(path.join(raiz, f), "utf8"));
+    const m = codigo.match(PROHIBIDO);
+    chk(`${f}: sin Directions, /api/ruta, Map Matching, Tilequery, geocodificar ni fetch(`, !m, m?.[0]);
+  }
+  // …y el detector no es ciego: lo encuentra en un archivo que sí llama.
+  chk("el detector encuentra las llamadas en lib/huella.ts (no es trivial)", PROHIBIDO.test(sinComentarios(fs.readFileSync(path.join(raiz, "lib/huella.ts"), "utf8"))));
+  chk("la caché del recorrido es de 100 entradas", /const MAX_CACHE = 100;/.test(fs.readFileSync(path.join(raiz, "app/api/seguimiento/recorrido/route.ts"), "utf8")));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 // 6-8 y 10 · LAS EXTRACCIONES PARA «VER RECORRIDO» SIN LLAMADAS PAGADAS
-// Cada pieza se compara contra el bloque ORIGINAL copiado literal (del modal GPS, de las dos rutas
-// que escriben `rutas_cache` y de derivarTiempos), en barridos con el PRNG determinista de arriba.
-// Las secciones 9, 11 y 12 quedan para el armado del recorrido.
+// Cada pieza se compara contra el bloque ORIGINAL copiado literal (del modal GPS tal como estaba en
+// HEAD 6924a54, antes de que T2 lo pasara a importar estas extracciones; de las dos rutas que
+// escriben `rutas_cache` y de derivarTiempos), en barridos con el PRNG determinista de arriba.
+// Las secciones 9, 11 y 12 (al final) prueban el armado del recorrido.
 // ═════════════════════════════════════════════════════════════════════════════════════════
 const H = await import("../lib/huella");
 const RF = await import("../lib/ruta-firma");
@@ -463,7 +554,7 @@ function ensuciar(filas: Fila[]): Fila[] {
 // ══ 6 · la huella del modal ═══════════════════════════════════════════════════════════════
 seccion("6 · la huella del modal: huellaDeFilas, segmentosHuella y la rampa de velocidad");
 {
-  // ── COPIA LITERAL de components/seguimiento/ModalGps.tsx 591-602 (la canalización) ──
+  // ── COPIA LITERAL del modal (components/seguimiento/ModalGps.tsx en HEAD 6924a54, antes de T2), líneas 591-602 (la canalización) ──
   function huellaModalViejo(arr: any[]) {
     const brutos = H.filasAPuntos(arr);
     const crudos = H.anclarImprecisos(brutos);
@@ -595,7 +686,7 @@ seccion("6 · la huella del modal: huellaDeFilas, segmentosHuella y la rampa de 
     JSON.stringify(H.ETIQUETAS_VELOCIDAD) === JSON.stringify(["Parado", "Lento", "Moderado", "Rápido"])
     && JSON.stringify(H.RAMPA_VELOCIDAD.map((r) => r.claseLeyenda)) === JSON.stringify(["bg-red-500", "bg-amber-400", "bg-yellow-300", "bg-green-500"]));
   chk("el verde petróleo del tramo estimado", H.COLOR_TRAMO_ESTIMADO === "#0f766e");
-  // ── COPIA LITERAL de ModalGps.tsx 94-97 ──
+  // ── COPIA LITERAL del modal (ModalGps.tsx en HEAD 6924a54, antes de T2), líneas 94-97 ──
   const rumboCardinalViejo = (deg: number) => {
     const dirs = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
     return dirs[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
@@ -663,7 +754,7 @@ seccion("7 · los puentes del modal: fixesDelHueco, la fase 1, la respuesta de D
     const u = rnd();
     const rutaRef = { current: (u < 0.6 ? { coordenadas: ruta } : u < 0.7 ? null : u < 0.8 ? { coordenadas: [] } : u < 0.9 ? { coordenadas: correr(ruta, 150) } : { coordenadas: [...ruta].reverse() }) as any };
 
-    // ── COPIA LITERAL de ModalGps.tsx 630 y 637-667 ──
+    // ── COPIA LITERAL del modal (ModalGps.tsx en HEAD 6924a54, antes de T2), líneas 630 y 637-667 ──
     const MAX_PUENTES = 30;
     const fixesDelTramo = (c: any): { lat: number; lng: number }[] => {
       if (c.origen === "crudo") {
@@ -710,7 +801,7 @@ seccion("7 · los puentes del modal: fixesDelHueco, la fase 1, la respuesta de D
     for (const ci of porGoogle) {
       const c = cands[ci];
       const j = respuestaAlAzar(c, ruta);
-      // ── COPIA LITERAL de ModalGps.tsx 686-706 ──
+      // ── COPIA LITERAL del modal (ModalGps.tsx en HEAD 6924a54, antes de T2), líneas 686-706 ──
       let rr: any;
       if (j?.ocultar || j?.status !== "OK") {
         rr = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
@@ -733,7 +824,7 @@ seccion("7 · los puentes del modal: fixesDelHueco, la fase 1, la respuesta de D
       if (rr.nivel === "ocultar" && expira !== undefined) transitorios++;
       if (rr.nivel === "ocultar" && expira === undefined) permanentes++;
 
-      // ── COPIA LITERAL de ModalGps.tsx 674 y 715-723 (el dibujo, con la entrada de caché `r`) ──
+      // ── COPIA LITERAL del modal (ModalGps.tsx en HEAD 6924a54, antes de T2), líneas 674 y 715-723 (el dibujo, con la entrada de caché `r`) ──
       const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
       const r = rr;
       let slotViejo: any = null;
@@ -799,7 +890,7 @@ seccion("7 · los puentes del modal: fixesDelHueco, la fase 1, la respuesta de D
 // ══ 8 · la ruta prevista en rutas_cache ═══════════════════════════════════════════════════
 seccion("8 · la clave de la ruta prevista (paradasParaFirma ↔ /api/ruta) y leerRutasCache");
 {
-  // ── COPIA LITERAL de ModalGps.tsx 303-355 (cargarRuta) + 220-251 (geocodificarParadas, con la
+  // ── COPIA LITERAL del modal (ModalGps.tsx en HEAD 6924a54, antes de T2): líneas 303-355 (cargarRuta) + 220-251 (geocodificarParadas, con la
   //    respuesta de /api/geocodificar cuando Google no encuentra ninguna) + 383-390 (el cuerpo) y de
   //    app/api/ruta/route.ts 58-81 (cómo lo lee el servidor). Cada `fallo(...); return;` devuelve su
   //    motivo en vez de pintar el error. ──
@@ -1154,5 +1245,485 @@ seccion("10 · hechosDeParadas = las líneas de derivarTiempos (copiadas literal
     srcT.includes("} = hechosDeParadas({") && srcT.split("const abordajesConHora =").length === 2 && srcT.split("const idsParada =").length === 2);
 }
 
+// ═════════════════════════════════════════════════════════════════════════════════════════
+// 9, 11 y 12 · EL RECORRIDO ARMADO (T3): el modal sin llamadas pagadas
+// ═════════════════════════════════════════════════════════════════════════════════════════
+const RD = await import("../lib/flota/recorrido-datos");
+const GD = await import("../lib/gps-cobertura-datos");
+const iso = (ms: number) => new Date(ms).toISOString();
+const MIN_MS = 60_000;
+
+/** Un cliente falso de ubicaciones_gps: lo mínimo que usa `leerTraza` (las filas ya vienen en orden). */
+const clienteTraza = (filas: Fila[]): any => ({
+  from: () => ({
+    select: () => {
+      const q: any = { eq: () => q, order: () => q, range: (a: number, b: number) => Promise.resolve({ data: filas.slice(a, b + 1), error: null }) };
+      return q;
+    },
+  }),
+});
+const lectorDe = (filas: Fila[]) => (id: number, op?: any) => GD.leerTraza(clienteTraza(filas), id, op);
+const HOY = "2026-10-13", AHORA = Date.UTC(2026, 9, 13, 17, 0, 0);
+
+/** Paradas de la reserva sobre la propia traza (el conductor marca al pasar), en orden. */
+function paradasSobre(filas: Fila[]): any[] {
+  // El paradero 1 cae entre el 5 % y el 60 % de la traza (lo de antes es el camino a recoger) y el
+  // último cerca del final: así hay excesos antes, durante y después del servicio.
+  const n = 2 + Math.floor(rnd() * 4);
+  const ini = 0.05 + 0.55 * rnd(), fin = 0.8 + 0.2 * rnd();
+  const idx = Array.from({ length: n }, (_, k) => Math.floor((ini + ((fin - ini) * k) / (n - 1)) * (filas.length - 1))).sort((a, b) => a - b);
+  return idx.map((k, j) => {
+    const f = filas[k];
+    const marcada = rnd() < 0.85;
+    const sinCoord = rnd() < 0.08;
+    return {
+      id: 500 + j, reserva_id: 77, orden: j + 1, nombre: `P${j + 1}`,
+      lat: sinCoord ? null : Number(f.lat), lng: sinCoord ? null : Number(f.lng),
+      estado: marcada ? "completada" : "pendiente", hora_llegada: marcada ? f.created_at : null,
+      hora_estimada: rnd() < 0.5 ? "16:30" : null,
+    };
+  });
+}
+
+// ══ 9 · el recorrido armado ═══════════════════════════════════════════════════════════════
+seccion("9 · el recorrido: «sin señal» = la celda RASTREO, el medido no lo cruza, estimados solo validados");
+{
+  /** Una polilínea recta y densa de A a B, en [lng, lat]. */
+  const linea = (c: any, n: number): [number, number][] =>
+    Array.from({ length: n + 1 }, (_, k) => [c.aLng + (c.bLng - c.aLng) * (k / n), c.aLat + (c.bLat - c.aLat) * (k / n)] as [number, number]);
+  /** Un rodeo absurdo (10 veces la recta): validarPuente lo tiene que rechazar. */
+  const rodeo = (c: any): [number, number][] => {
+    const out: [number, number][] = [];
+    for (let k = 0; k <= 40; k++) {
+      const f = k / 40, lado = k % 2 ? 1 : -1;
+      out.push([c.aLng + (c.bLng - c.aLng) * f + lado * 0.012, c.aLat + (c.bLat - c.aLat) * f]);
+    }
+    return out;
+  };
+
+  let trazas = 0, rastreoIg = 0, conteosIg = 0, tramosIg = 0, bordesBien = 0, medidoBien = 0, cruzan = 0, largos = 0, igualConstructor = 0;
+  let conSinSenal = 0, conEstimado = 0, cubiertos = 0, soloExtremos = 0, estValidos = 0, estTotal = 0, malosDibujados = 0, rechazados = 0;
+  let unaConsulta = 0, fallas = 0, fallaSinEstimados = 0, codigos: Record<string, number> = {}, etiquetados = 0, porRuta = 0, porPuente = 0, huecoConLinea = 0;
+  const errorOriginal = console.error;
+  console.error = () => {};   // las caídas simuladas de rutas_cache y pasajeros_parada se registran: aquí, ruido
+  for (let i = 0; i < 400; i++) {
+    const ruta = rutaAlAzar();
+    // Las filas son de ESTA reserva y llevan su conductor (lo fuerza el servidor con el token).
+    const filas: Fila[] = trazaSobreRuta(ruta).map((f) => ({ ...f, reserva_id: 77, conductor_id: 5, conductor_tercero_id: null }));
+    const ps = paradasSobre(filas);
+    const r = {
+      id: 77, estado: "finalizada", fecha_servicio: "2026-10-09", hora_servicio: "16:00", vehiculo_id: 3, conductor_id: 5,
+      origen: "Origen", destino: "Destino",
+      paradas_json: rnd() < 0.5 ? ps.map((p) => ({ nombre: p.nombre, lat: Number(filas[0].lat), lng: Number(filas[0].lng) })) : null,
+    };
+    const lector = lectorDe(filas);
+    const extremos = { origen: ps[0]?.nombre ?? r.origen, destino: (ps.length > 1 ? ps[ps.length - 1].nombre : null) ?? r.destino };
+    const claves = R.clavesRutaPrevista(ps, r.paradas_json, extremos);
+    const huella = H.huellaDeFilas(filas);
+    const cands = R.candidatosPuente(huella.limpio);
+
+    // rutas_cache: lo que el modal habría guardado (o no), y la consulta que puede fallar.
+    const guardado = new Map<string, any>();
+    const u = rnd();
+    if (claves.variantes.length && u < 0.65) guardado.set(claves.variantes[0].firma, { coordenadas: ruta });
+    else if (claves.variantes.length > 1 && u < 0.75) guardado.set(claves.variantes[1].firma, { coordenadas: ruta });
+    const malas = new Set<string>();
+    for (const c of cands) {
+      const k = RF.clavePuente(c.aLat, c.aLng, c.bLat, c.bLng);
+      const v = rnd();
+      if (v < 0.35) guardado.set(k, { coords: linea(c, 20), roadM: c.dRecta * 1.1, rutasM: [c.dRecta * 1.1], status: "OK" });
+      else if (v < 0.5) { guardado.set(k, { coords: rodeo(c), roadM: c.dRecta * 1.5, rutasM: [c.dRecta * 1.5], status: "OK" }); malas.add(k); }
+    }
+    const falla = rnd() < 0.06;
+    let llamadas = 0, pedidas: string[] = [];
+    const rutasCache = async (cl: string[]) => {
+      llamadas++; pedidas = cl;
+      if (falla) throw new Error("rutas_cache caída");
+      return new Map(cl.filter((k) => guardado.has(k)).map((k) => [k, guardado.get(k)] as [string, any]));
+    };
+    const abordajes = async (ids: number[]) => {
+      if (rnd() < 0.08) throw new Error("pasajeros_parada caída");
+      return ps.filter((p) => ids.includes(p.id) && p.hora_llegada && rnd() < 0.5).map((p) => ({ parada_id: p.id, hora_abordaje: p.hora_llegada }));
+    };
+
+    const celda = await GD.medirServicio(r, ps, { hoy: HOY, ahoraMs: AHORA }, lector);   // la celda: sin conHuella
+    // Umbral de 60: las trazas van de 18 a 73 km/h, y así hay excesos que etiquetar.
+    const rec = await RD.armarRecorrido(r, ps, { hoy: HOY, ahoraMs: AHORA, umbral: 60 }, { traza: lector, rutasCache, abordajes });
+    const med = celda.medicion;
+    trazas++;
+    codigos[rec.rutaPrevista.codigo] = (codigos[rec.rutaPrevista.codigo] ?? 0) + 1;
+
+    // A. el veredicto y los conteos son los de la celda
+    if (JSON.stringify(rec.rastreo) === JSON.stringify(celda.veredicto)) rastreoIg++;
+    if (med && rec.sinSenalTotal === med.tramos.length && rec.cortesEnMovimiento === med.cortes && rec.kmACiegas === med.kmACiegas) conteosIg++;
+    if (med && med.tramos.length) conSinSenal++;
+    // B. los tramos son EXACTAMENTE los de la medición (avanceM en metros enteros)
+    if (med && rec.sinSenal.length === med.tramos.length && rec.sinSenal.every((t, k) => {
+      const m = med.tramos[k];
+      return t.tipo === m.tipo && t.desdeTs === m.desdeTs && t.hastaTs === m.hastaTs && t.durS === m.durS
+        && t.enMovimiento === m.enMovimiento && t.avanceM === (m.avanceM == null ? null : Math.round(m.avanceM));
+    })) tramosIg++;
+    // C. los bordes de cada hueco son posiciones de la traza; la cabeza no tiene inicio ni la cola fin
+    const pts = celda.traza?.pts ?? [];
+    const en = (ts: number) => pts.filter((p) => p.ts === ts).map((p) => `${R.coordR(p.lng, p.lat)}`);
+    if (rec.sinSenal.every((t) => (t.tipo === "hueco"
+      ? !!t.desde && !!t.hasta && en(t.desdeTs).includes(`${t.desde}`) && en(t.hastaTs).includes(`${t.hasta}`)
+      : t.tipo === "cabeza" ? t.desde === null && !!t.hasta : !!t.desde && t.hasta === null))) bordesBien++;
+    // D. el medido: ningún segmento de más de 300 m ni que cruce un «sin señal» (mirado con la hora de
+    //    cada vértice, que da el constructor), y la respuesta es el constructor sin la hora
+    const cons = R.medidoDeHuella(huella.limpio, med?.tramos ?? []);
+    const corta = R.cortaPorSinSenal(med?.tramos ?? []);
+    if (cons.some((t) => t.ts.some((x, j) => j > 0 && corta({ ts: t.ts[j - 1] }, { ts: x })))) cruzan++;
+    if (cons.some((t) => t.ts.some((x, j) => j > 0 && (med?.tramos ?? []).some((m) => Math.max(t.ts[j - 1], m.desdeTs) < Math.min(x, m.hastaTs))))) cruzan++;
+    if (!rec.medidoDecimado && rec.medido.some((t) => t.coords.some((c, j) => j > 0 && distM(t.coords[j - 1][1], t.coords[j - 1][0], c[1], c[0]) > MAX_SEG_M))) largos++;
+    if (!rec.medidoDecimado && JSON.stringify(rec.medido) === JSON.stringify(cons.map(({ ts, ...t }) => t))) igualConstructor++;
+    if (rec.medido.every((t) => t.coords.length >= 2 && t.vel.length === t.coords.length && t.vel.every((v) => Number.isInteger(v)))) medidoBien++;
+    // E. ningún hueco tiene línea propia: ningún segmento medido une sus dos bordes
+    for (const t of rec.sinSenal) {
+      if (!t.desde || !t.hasta) continue;
+      if (rec.medido.some((l) => l.coords.some((c, j) => j > 0 && `${l.coords[j - 1]}` === `${t.desde}` && `${c}` === `${t.hasta}`))) huecoConLinea++;
+    }
+    // F. los estimados: solo los que validarPuente aprobó; ninguno de los guardados «malos»
+    const { ruta: rutaUsada } = R.resolverRutaPrevista(claves, falla ? null : new Map([...guardado].filter(([k]) => pedidas.includes(k))));
+    const internos = R.estimadosDeHuella(huella, rutaUsada, falla ? null : guardado);
+    for (const x of internos) {
+      estTotal++;
+      const c = x.cand;
+      if (H.validarPuente(x.crudas, { lat: c.aLat, lng: c.aLng }, { lat: c.bLat, lng: c.bLng }, x.fixes, c.dt, c.dRecta)) estValidos++;
+      if (x.fuente === "puente_guardado" && malas.has(RF.clavePuente(c.aLat, c.aLng, c.bLat, c.bLng))) malosDibujados++;
+      if (x.fuente === "ruta_prevista") porRuta++; else porPuente++;
+    }
+    for (const c of cands) if (malas.has(RF.clavePuente(c.aLat, c.aLng, c.bLat, c.bLng))) rechazados++;
+    if (!rec.estimadosDecimados && rec.estimados.length === internos.length) conEstimado += rec.estimados.length ? 1 : 0;
+    else if (!rec.estimadosDecimados) estTotal += 1000;   // fuerza el fallo: la respuesta no es el constructor
+    // G. cada hueco: o un estimado DIBUJADO lo cubre entero (y lo dice), o solo sus extremos
+    for (const t of rec.sinSenal) {
+      const cubre = internos.some((x) => x.desdeTs <= t.desdeTs && t.hastaTs <= x.hastaTs);
+      if (t.estimado !== cubre) estTotal += 1000;
+      if (t.estimado) { cubiertos++; if (!rec.estimados.some((e) => e.sinSenal)) estTotal += 1000; } else soloExtremos++;
+    }
+    // H. UNA sola consulta a rutas_cache con la ruta y TODOS los puentes candidatos
+    const esperadas = [...claves.variantes.map((v) => v.firma), ...cands.map((c) => RF.clavePuente(c.aLat, c.aLng, c.bLat, c.bLng))];
+    if ((esperadas.length ? llamadas === 1 : llamadas === 0) && esperadas.every((k) => pedidas.includes(k))) unaConsulta++;
+    // I. si la consulta falla: «no se pudo leer», nunca «no guardada», y ningún estimado
+    if (falla) {
+      fallas++;
+      if (rec.estimados.length === 0 && (claves.variantes.length === 0 || rec.rutaPrevista.codigo === "no_se_pudo_leer")) fallaSinEstimados++;
+    }
+    etiquetados += rec.episodios.filter((e) => e.contexto.codigo !== "sin_dato").length;
+  }
+  console.error = errorOriginal;
+  chk(`el veredicto es el de la celda RASTREO, tal cual (${trazas})`, rastreoIg === trazas, `${trazas - rastreoIg}`);
+  chk("sinSenalTotal, cortesEnMovimiento y kmACiegas = los de la medición", conteosIg === trazas, `${trazas - conteosIg}`);
+  chk("los tramos «sin señal» son EXACTAMENTE medicion.tramos (avanceM en metros enteros)", tramosIg === trazas, `${trazas - tramosIg}`);
+  chk("cada hueco lleva las posiciones de la traza en sus dos bordes (cabeza sin inicio, cola sin fin)", bordesBien === trazas, `${trazas - bordesBien}`);
+  chk("ningún segmento medido cruza un «sin señal» (con la hora de cada vértice)", cruzan === 0, `${cruzan}`);
+  chk(`ningún segmento medido pasa de ${MAX_SEG_M} m`, largos === 0, `${largos}`);
+  chk("el medido de la respuesta es el del constructor; vértices con su velocidad entera", igualConstructor === trazas && medidoBien === trazas, `${trazas - igualConstructor} · ${trazas - medidoBien}`);
+  chk("ningún hueco tiene línea propia (ningún segmento une sus dos bordes)", huecoConLinea === 0, `${huecoConLinea}`);
+  chk(`los estimados son solo los que validarPuente aprobó (${estTotal})`, estValidos === estTotal && malosDibujados === 0, `${estTotal - estValidos} · malos ${malosDibujados}`);
+  chk("cada hueco: o lo cubre entero un estimado dibujado, o solo sus extremos", cubiertos + soloExtremos > 0);
+  chk(`UNA sola consulta a rutas_cache con la ruta y todos los puentes (${trazas})`, unaConsulta === trazas, `${trazas - unaConsulta}`);
+  chk("si rutas_cache falla: «no se pudo leer» y ningún estimado", fallas > 5 && fallaSinEstimados === fallas, `${fallas} · ${fallaSinEstimados}`);
+  chk("barrido no trivial: huecos, estimados por la ruta Y por puente guardado, rodeos rechazados, huecos cubiertos y solo con extremos, excesos etiquetados",
+    conSinSenal > 100 && porRuta > 100 && porPuente > 100 && rechazados > 50 && cubiertos > 50 && soloExtremos > 50 && etiquetados > 20,
+    JSON.stringify({ conSinSenal, porRuta, porPuente, rechazados, cubiertos, soloExtremos, etiquetados }));
+  chk("la ruta prevista sale guardada, no guardada, con paraderos sin coordenadas y sin poder leerse",
+    (codigos.guardada ?? 0) > 50 && (codigos.no_guardada ?? 0) > 20 && (codigos.paraderos_sin_coordenadas ?? 0) > 5 && (codigos.no_se_pudo_leer ?? 0) > 5,
+    JSON.stringify(codigos));
+
+  // ── COROLARIO: el «sin señal» por distancia acusaba donde la celda dice 100 % ──
+  // ── COPIA LITERAL de `tramosDeTraza` y del corte de la traza de lib/flota/recorrido.ts ANTES de T3 ──
+  const coordValidaVieja = (lat: number, lng: number) =>
+    Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
+  function tramosDeTrazaVieja(limpia: readonly { lat: number; lng: number; ts: number }[]): { tramos: [number, number][][]; huecos: { desde: [number, number]; hasta: [number, number]; segundos: number | null; metros: number }[] } {
+    const pts = limpia.filter((p) => coordValidaVieja(p.lat, p.lng));
+    const tramos: [number, number][][] = [];
+    const huecos: { desde: [number, number]; hasta: [number, number]; segundos: number | null; metros: number }[] = [];
+    let actual: [number, number][] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (i > 0) {
+        const a = pts[i - 1];
+        const d = distM(a.lat, a.lng, p.lat, p.lng);
+        if (d > MAX_SEG_M) {
+          if (actual.length >= 2) tramos.push(actual);
+          const dt = a.ts > 0 && p.ts > a.ts ? (p.ts - a.ts) / 1000 : null;
+          huecos.push({ desde: [a.lng, a.lat], hasta: [p.lng, p.lat], segundos: dt, metros: Math.round(d) });
+          actual = [];
+        }
+      }
+      actual.push([p.lng, p.lat]);
+    }
+    if (actual.length >= 2) tramos.push(actual);
+    return { tramos, huecos };
+  }
+  const huecosViejos = (crudas: any[]) => tramosDeTrazaVieja(H.limpiarHuella(H.filasAPuntos(crudas).filter((p) => coordValidaVieja(p.lat, p.lng)).sort((a, b) => a.ts - b.ts))).huecos;
+
+  let rapidas = 0, viejoAcusa = 0, medicionCero = 0, nuevoCero = 0;
+  for (let i = 0; i < 60; i++) {
+    // 100 km/h, una posición cada 12 a 25 s: cada salto pasa de 300 m y ninguno de 60 s.
+    const filas: Fila[] = [];
+    let t = 0, lat = -12.2;
+    while (t < 1800) {
+      filas.push({ created_at: iso(T0 + Math.round(t * 1000)), lat, lng: -77.03, precision_m: 5, simulado: null, estado: "en_ruta",
+        velocidad: 100, rumbo: 0, timestamp: null, conductor_id: 5, conductor_tercero_id: null });
+      const dt = 12 + rnd() * 13;
+      t += dt; lat += ((100 / 3.6) * dt) / 111_320;
+    }
+    const { tr, med } = medirFilas(filas);
+    const rec = R.recorridoDeServicio({ reservaId: 9, crudas: filas, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90, medicion: med, ptsCobertura: tr.pts });
+    rapidas++;
+    if (huecosViejos(filas).length > 0) viejoAcusa++;
+    if (med && med.tramos.length === 0) medicionCero++;
+    if (rec.sinSenalTotal === 0 && rec.sinSenal.length === 0) nuevoCero++;
+  }
+  chk(`COROLARIO (${rapidas} trazas a 100 km/h con saltos de 12 a 25 s): el corte viejo por distancia acusaba «sin señal» donde la medición da 0`,
+    viejoAcusa === rapidas && medicionCero === rapidas, `${viejoAcusa} · ${medicionCero}`);
+  chk("…y el recorrido nuevo da 0 «sin señal» en esas mismas trazas", nuevoCero === rapidas, `${nuevoCero}`);
+
+  // DIVERGENCIA (a): un «sin señal» de más de 60 s con menos de 300 m de avance (bus lento) también corta.
+  const lento = [...tramo(T0, 120, 8, { conductor: 5 }), ...tramo(T0 + 210_000, 120, 8, { conductor: 5, lat0: -12.05 + (8 / 3.6) * 213 / 111_320 })];
+  const ml = medirFilas(lento);
+  const rl = R.recorridoDeServicio({ reservaId: 9, crudas: lento, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90, medicion: ml.med, ptsCobertura: ml.tr.pts });
+  const sinCorte = R.medidoDeHuella(H.huellaDeFilas(lento).limpio, []);
+  chk("DIVERGENCIA (a): 90 s sin posición con ~200 m de avance — el corte por distancia no corta; el recorrido sí, y lo marca",
+    huecosViejos(lento).length === 0 && sinCorte.length === 1 && rl.medido.length === 2 && rl.sinSenal.length === 1 && !rl.sinSenal[0].enMovimiento,
+    JSON.stringify({ viejo: huecosViejos(lento).length, sinCorte: sinCorte.length, m: rl.medido.length, s: rl.sinSenal.length }));
+}
+
+// ══ 9b · la ruta prevista guardada: cada código, uno por uno ══════════════════════════════
+seccion("9b · la ruta prevista: las claves del modal y cada código de rutaPrevista");
+{
+  const p = (id: number, orden: number, lat: any, lng: any, nombre = `P${id}`) => ({ id, orden, nombre, lat, lng, estado: "pendiente", hora_estimada: null });
+  const A = p(1, 1, -12.0464, -77.0428), B = p(2, 2, -12.05, -77.03), C = p(3, 3, -12.07, -77.01);
+  const ruta = [[-77.0428, -12.0464], [-77.03, -12.05], [-77.01, -12.07]];
+  const firmaModal = (ps: any[], pj: any, ex: any) => RF.firmaRuta(RF.paradasParaFirma(ps, pj, ex).lista);
+  // La variante sin paradas_json es la clave con que el modal de /seguimiento guarda (sección 8 cierra el ciclo).
+  const k1 = R.clavesRutaPrevista([A, B, C], null, { origen: "P1", destino: "P3" });
+  chk("con todas las coordenadas: UNA clave, la del modal de /seguimiento, sin probar paradas_json",
+    k1.variantes.length === 1 && k1.variantes[0].firma === firmaModal([A, B, C], null, null) && !k1.variantes[0].conParadasJson
+    && R.clavesRutaPrevista([A, B, C], [{ nombre: "P2", lat: -1, lng: -1 }], null).variantes.length === 1);
+  const g = R.resolverRutaPrevista(k1, new Map([[k1.variantes[0].firma, { coordenadas: ruta }]]));
+  chk("guardada: devuelve la polilínea", g.estado.codigo === "guardada" && g.ruta?.length === 3);
+  chk("no está en la caché: no_guardada (nadie abrió el modal)", R.resolverRutaPrevista(k1, new Map()).estado.codigo === "no_guardada");
+  chk("guardada sin geometría utilizable: no_guardada", R.resolverRutaPrevista(k1, new Map([[k1.variantes[0].firma, { coordenadas: [[1, "x"]] }]])).estado.codigo === "no_guardada");
+  chk("la consulta falló: no_se_pudo_leer, nunca no_guardada", R.resolverRutaPrevista(k1, null).estado.codigo === "no_se_pudo_leer" && R.resolverRutaPrevista(k1, null).ruta === null);
+  // Una parada sin coordenadas: se prueba también la variante rellenada desde paradas_json.
+  const Bsin = p(2, 2, null, null);
+  const k2 = R.clavesRutaPrevista([A, Bsin, C], [{ nombre: " p2 ", lat: -12.05, lng: -77.03 }], null);
+  chk("con una parada sin coordenadas: dos claves, primero la que no tiene faltantes (paradas_json)",
+    k2.variantes.length === 2 && k2.variantes[0].conParadasJson && k2.variantes[0].sinCoordenadas === 0 && k2.variantes[1].sinCoordenadas === 1
+    && k2.variantes[0].firma === firmaModal([A, Bsin, C], [{ nombre: " p2 ", lat: -12.05, lng: -77.03 }], null)
+    && k2.variantes[1].firma === firmaModal([A, Bsin, C], null, null));
+  chk("se encuentra por cualquiera de las dos", R.resolverRutaPrevista(k2, new Map([[k2.variantes[1].firma, { coordenadas: ruta }]])).estado.codigo === "guardada");
+  const k3 = R.clavesRutaPrevista([A, Bsin, C], null, null);
+  chk("con faltantes y sin encontrarla: paraderos_sin_coordenadas (no se geocodifica)", R.resolverRutaPrevista(k3, new Map()).estado.codigo === "paraderos_sin_coordenadas");
+  chk("sin paraderos ni origen/destino: sin_paraderos", R.resolverRutaPrevista(R.clavesRutaPrevista([], null, { origen: null, destino: null }), null).estado.codigo === "sin_paraderos");
+  chk("solo origen/destino (sin coordenadas): paraderos_sin_coordenadas, también si la consulta falla",
+    R.resolverRutaPrevista(R.clavesRutaPrevista([], null, { origen: "A", destino: "B" }), null).estado.codigo === "paraderos_sin_coordenadas");
+  chk("primer y último paradero en el mismo punto: no_guardada (el modal no pide ruta)",
+    R.resolverRutaPrevista(R.clavesRutaPrevista([A, B, p(9, 9, -12.0464, -77.0428)], null, null), new Map()).estado.codigo === "no_guardada");
+  chk("sin paradas pero con paradas_json: la lista sale de la cotización",
+    R.clavesRutaPrevista([], [{ nombre: "X", lat: -12.04, lng: -77.04 }, { nombre: "Y", lat: -12.06, lng: -77.02 }], { origen: "A", destino: "B" }).variantes[0]?.conParadasJson === true);
+  const detalles = [R.resolverRutaPrevista(k1, null), R.resolverRutaPrevista(k1, new Map()), R.resolverRutaPrevista(k3, new Map())].map((x) => x.estado.detalle);
+  const ptsD = [{ ts: 10, lat: -12.1, lng: -77.1 }, { ts: 20, lat: -12.2, lng: -77.2 }, { ts: 20, lat: -12.3, lng: -77.3 }, { ts: 30, lat: -12.4, lng: -77.4 }];
+  chk("posicionEnTs: la posición de ESE instante (con varias: la primera o la última), o null",
+    `${R.posicionEnTs(ptsD, 20)}` === `${R.coordR(-77.2, -12.2)}` && `${R.posicionEnTs(ptsD, 20, "ultimo")}` === `${R.coordR(-77.3, -12.3)}`
+    && R.posicionEnTs(ptsD, 25) === null && R.posicionEnTs(ptsD, 31) === null && R.posicionEnTs([], 10) === null && R.posicionEnTs(null, 10) === null);
+  chk("cortaPorSinSenal: corta solo si el segmento se solapa con un «sin señal», y sin hora no corta",
+    (() => { const c = R.cortaPorSinSenal([{ desdeTs: 100, hastaTs: 200 }, { desdeTs: 300, hastaTs: 400 }]);
+      return c({ ts: 100 }, { ts: 200 }) && c({ ts: 150 }, { ts: 160 }) && c({ ts: 50 }, { ts: 350 }) && !c({ ts: 50 }, { ts: 100 })
+        && !c({ ts: 200 }, { ts: 300 }) && !c({ ts: 400 }, { ts: 500 }) && !c({ ts: 0 }, { ts: 150 }) && !R.cortaPorSinSenal(null)({ ts: 1 }, { ts: 2 }); })());
+  chk("cada detalle dice qué pasó y dónde se arregla, en castellano", detalles.every((d) => d.length > 40) && /Programación/.test(detalles[2]) && /intentarlo/.test(detalles[0]));
+}
+
+// ══ 11 · la etiqueta de cada exceso ═══════════════════════════════════════════════════════
+seccion("11 · la etiqueta de cada exceso: tri-estado, ninguna afirmación sin su hecho, y no cambia el conteo ni la lista");
+{
+  const M = R.MARGEN_RELOJ_ETIQUETA_MS;
+  chk("el margen de reloj es de 2 min", M === 2 * MIN_MS);
+  const P1 = T0 + 20 * MIN_MS, FIN = T0 + 80 * MIN_MS;
+  type Hechos = import("../lib/flota/recorrido").HechosContexto;
+  const p1s: Hechos["paradero1"][] = [null, { ts: P1, nombre: "Puente Santa Anita" }];
+  const fines: Hechos["fin"][] = [null, { ts: FIN, por: "ultimo_paradero", nombre: "BSF" }, { ts: FIN, por: "cierre", nombre: null },
+    { ts: P1 - 5 * MIN_MS, por: "cierre", nombre: null }];   // el último: contradice (fin antes del paradero 1)
+  const abs: (number[] | null)[] = [null, [], [P1 - 30 * MIN_MS], [P1 - MIN_MS], [P1 + 2 * MIN_MS], [P1 + 30 * MIN_MS], [FIN + 10 * MIN_MS], [P1 + 5 * MIN_MS, FIN + 5 * MIN_MS]];
+  // EL ORÁCULO: la regla escrita otra vez, aparte.
+  function esperado(ep: { inicioTs: number; finTs: number }, h: Hechos): string {
+    const p1 = h.paradero1?.ts ?? null, fin = h.fin?.ts ?? null, ab = h.abordajesTs;
+    const A = p1 !== null && ep.finTs < p1 - M;
+    const D = fin !== null && ep.inicioTs > fin + M;
+    const S = p1 !== null && fin !== null && ep.inicioTs > p1 + M && ep.finTs < fin - M;
+    if ([A, D, S].filter(Boolean).length !== 1) return "sin_dato";
+    if (A) return ab !== null && ab.every((a) => a > ep.finTs + M) ? "antes_paradero_1" : "sin_dato";
+    if (D) return ab === null || ab.every((a) => a <= fin! + M) ? "despues_ultimo_paradero" : "sin_dato";
+    if (ab === null) return "sin_dato";
+    const a0 = ab.length ? Math.min(...ab) : null;
+    if (a0 !== null && a0 < ep.inicioTs - M) return "en_servicio_con_pasajeros";
+    if (a0 === null || a0 > ep.inicioTs + M) return "en_servicio";
+    return "sin_dato";
+  }
+  let n = 0, igual = 0, sinHecho = 0, textoBien = 0;
+  const vistos: Record<string, number> = {};
+  for (const paradero1 of p1s) for (const fin of fines) for (const abordajesTs of abs) {
+    const h: Hechos = { paradero1, paradero1Falta: paradero1 ? null : "el paradero 1 no está marcado como llegado", fin, abordajesTs };
+    for (let ini = T0 - 10 * MIN_MS; ini <= T0 + 100 * MIN_MS; ini += 30_000) for (const dur of [20, 90, 300]) {
+      const ep = { inicioTs: ini, finTs: ini + dur * 1000 };
+      const c = R.contextoDeExceso(ep, h);
+      n++;
+      if (c.codigo === esperado(ep, h)) igual++;
+      vistos[c.codigo] = (vistos[c.codigo] ?? 0) + 1;
+      // Ninguna afirmación sin su hecho.
+      const necesitaP1 = c.codigo === "antes_paradero_1" || c.codigo.startsWith("en_servicio");
+      const necesitaFin = c.codigo === "despues_ultimo_paradero" || c.codigo.startsWith("en_servicio");
+      const necesitaAb = c.codigo === "antes_paradero_1" || c.codigo.startsWith("en_servicio");
+      if ((necesitaP1 && !paradero1) || (necesitaFin && !fin) || (necesitaAb && abordajesTs === null)) sinHecho++;
+      if (c.codigo === "sin_dato" ? c.texto === null && c.motivo.length > 10 : c.texto === (R.TEXTO_CONTEXTO as any)[c.codigo] && c.motivo.length > 10) textoBien++;
+    }
+  }
+  chk(`la etiqueta = el oráculo escrito aparte (${n} combinaciones de hechos × posición × duración)`, igual === n, `${n - igual}`);
+  chk("ninguna afirmación sin su hecho (paradero 1, fin del servicio, abordajes leídos)", sinHecho === 0, `${sinHecho}`);
+  chk("texto ⟺ etiqueta (sin_dato sin texto) y siempre con su motivo", textoBien === n, `${n - textoBien}`);
+  chk("COROLARIO: las cuatro etiquetas aparecen (un motor que dijera siempre «sin dato» no pasa)",
+    ["antes_paradero_1", "en_servicio_con_pasajeros", "en_servicio", "despues_ultimo_paradero", "sin_dato"].every((k) => (vistos[k] ?? 0) > 100), JSON.stringify(vistos));
+  chk("sin hechos: sin_dato", R.contextoDeExceso({ inicioTs: T0, finTs: T0 + 60_000 }, null).codigo === "sin_dato");
+  const hc: Hechos = { paradero1: { ts: P1, nombre: null }, paradero1Falta: null, fin: { ts: FIN, por: "ultimo_paradero", nombre: null }, abordajesTs: [] };
+  chk("en el margen de la llegada al paradero 1: sin_dato (y lo dice)",
+    R.contextoDeExceso({ inicioTs: P1 - 3 * MIN_MS, finTs: P1 - 90_000 }, hc).codigo === "sin_dato"
+    && /menos de 2 min/.test(R.contextoDeExceso({ inicioTs: P1 - 3 * MIN_MS, finTs: P1 - 90_000 }, hc).motivo)
+    && R.contextoDeExceso({ inicioTs: P1 - 5 * MIN_MS, finTs: P1 - 2 * MIN_MS - 1 }, hc).codigo === "antes_paradero_1");
+
+  // hechosDelServicio = hechosDeParadas: el paradero de menor orden, su llegada CREÍBLE, el último, y los
+  // abordajes de ESTA reserva.
+  const res = { fecha_servicio: "2026-10-09" };
+  const AH = Date.UTC(2026, 9, 13);
+  const par = (id: number, orden: number, estado: string, hora: number | null, nombre = `P${id}`) => ({ id, orden, nombre, estado, hora_llegada: hora == null ? null : iso(hora) });
+  const h1 = R.hechosDelServicio({ reserva: res, paradas: [par(3, 3, "completada", FIN), par(1, 1, "completada", P1, "Inicio"), par(2, 2, "pendiente", null)],
+    abordajes: [{ parada_id: 1, hora_abordaje: iso(P1 + MIN_MS) }, { parada_id: 999, hora_abordaje: iso(T0) }], ahoraMs: AH });
+  chk("paradero 1 = el de menor orden (aunque llegue desordenado), fin = el último marcado, abordajes solo de esta reserva",
+    h1.paradero1?.ts === P1 && h1.paradero1?.nombre === "Inicio" && h1.fin?.ts === FIN && h1.fin?.por === "ultimo_paradero"
+    && JSON.stringify(h1.abordajesTs) === JSON.stringify([P1 + MIN_MS]));
+  const h2 = R.hechosDelServicio({ reserva: res, paradas: [par(1, 1, "pendiente", null), par(2, 2, "pendiente", null)], abordajes: null, ahoraMs: AH, cierreTs: FIN });
+  chk("paradero 1 sin marcar: null con su motivo; sin el último marcado, el fin es el «Finalizar»; abordajes sin leer: null",
+    h2.paradero1 === null && /no está marcado/.test(h2.paradero1Falta ?? "") && h2.fin?.por === "cierre" && h2.fin.ts === FIN && h2.abordajesTs === null);
+  const h3 = R.hechosDelServicio({ reserva: res, paradas: [par(1, 1, "completada", P1 + 3 * 86_400_000), par(2, 2, "completada", FIN)], abordajes: [], ahoraMs: AH + 5 * 86_400_000 });
+  chk("una llegada fuera de la ventana de sanidad no es un hecho", h3.paradero1 === null && /creíble/.test(h3.paradero1Falta ?? ""));
+  chk("sin paradas ni cierre: ni paradero 1 ni fin", (() => { const h = R.hechosDelServicio({ reserva: res, paradas: [], abordajes: [], ahoraMs: AH }); return h.paradero1 === null && h.fin === null; })());
+
+  // El conteo y la lista de episodios son IDÉNTICOS con y sin etiqueta.
+  let trazas = 0, iguales = 0, conEps = 0, etiq = 0, sinHechosSinDato = 0;
+  for (let i = 0; i < 300; i++) {
+    const filas = trazaAlAzar();
+    const { tr, med } = medirFilas(filas);
+    const ts = filas.map((f) => Date.parse(String(f.created_at)));
+    const t0 = ts[0], t1 = ts[ts.length - 1];
+    const hechos: Hechos = {
+      paradero1: rnd() < 0.85 ? { ts: t0 + (t1 - t0) * rnd() * 0.6, nombre: null } : null, paradero1Falta: null,
+      fin: rnd() < 0.85 ? { ts: t1 - (t1 - t0) * rnd() * 0.3, por: "ultimo_paradero", nombre: null } : null,
+      abordajesTs: rnd() < 0.1 ? null : rnd() < 0.5 ? [] : [t0 + (t1 - t0) * rnd()],
+    };
+    const base = { reservaId: 5, crudas: filas, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90, vehiculo: "p:1", medicion: med, ptsCobertura: tr.pts };
+    const con = R.recorridoDeServicio({ ...base, hechos });
+    const sin = R.recorridoDeServicio(base);
+    trazas++;
+    const quitar = (r: any) => JSON.stringify({ ...r, episodios: r.episodios.map(({ contexto, ...x }: any) => x) });
+    if (quitar(con) === quitar(sin)) iguales++;
+    if (con.episodios.length) conEps++;
+    etiq += con.episodios.filter((e) => e.contexto.codigo !== "sin_dato").length;
+    if (sin.episodios.every((e) => e.contexto.codigo === "sin_dato")) sinHechosSinDato++;
+  }
+  chk(`con y sin etiqueta, la respuesta es la misma salvo la etiqueta: conteo, lista y todo lo demás (${trazas})`, iguales === trazas, `${trazas - iguales}`);
+  chk("sin hechos, toda etiqueta es sin_dato", sinHechosSinDato === trazas);
+  chk("barrido no trivial: hay excesos y etiquetas (trazas cortas: el margen de 2 min deja muchas en sin_dato)", conEps > 100 && etiq > 15, `${conEps} · ${etiq}`);
+}
+
+// ══ 12 · el peso de la respuesta en el peor caso de los topes ═════════════════════════════
+seccion("12 · la respuesta en el peor caso de todos los topes pesa menos de 450 KB");
+{
+  const TOPE_BYTES = 450_000;
+  const peso = (x: unknown) => JSON.stringify(x).length;
+
+  // ── A · por la cadena real: una traza que llena TODOS los topes a la vez ──
+  // 650 tramos de 30 posiciones (cada 3 s a 60 km/h) separados por 65 s sin señal con el bus avanzando:
+  // ~19 500 vértices medidos, 649 «sin señal», ~9 400 puntitos y 30 puentes guardados de 150 vértices.
+  // 21 de los tramos (uno de cada 32) van a 100 km/h: 21 excesos, etiquetados salvo el que cruza el paradero 1.
+  const filas: Fila[] = [];
+  let t = 0, lat = -12.05, lng = -77.03;
+  for (let k = 0; k < 650; k++) {
+    const kmh = k % 32 === 5 ? 100 : 60;
+    for (let j = 0; j < 30; j++) {
+      filas.push({ created_at: iso(T0 + t * 1000), lat, lng, precision_m: 4.7, simulado: null, estado: "en_ruta",
+        velocidad: kmh + (j % 3) * 0.37, rumbo: 359.5, timestamp: null, reserva_id: 77, conductor_id: 5, conductor_tercero_id: null });
+      t += 3; lat += ((kmh / 3.6) * 3) / 111_320 * 0.8; lng += ((kmh / 3.6) * 3) / 111_320 * 0.6;
+    }
+    t += 65; lat += ((60 / 3.6) * 65) / 111_320 * 0.8; lng += ((60 / 3.6) * 65) / 111_320 * 0.6;
+  }
+  const { tr, med } = medirFilas(filas);
+  const huella = H.huellaDeFilas(filas);
+  const guardados = new Map<string, any>();
+  for (const c of R.candidatosPuente(huella.limpio)) {
+    const coords = Array.from({ length: 150 }, (_, k) => [c.aLng + (c.bLng - c.aLng) * (k / 149), c.aLat + (c.bLat - c.aLat) * (k / 149)]);
+    guardados.set(RF.clavePuente(c.aLat, c.aLng, c.bLat, c.bLng), { coords, roadM: c.dRecta, rutasM: [c.dRecta], status: "OK" });
+  }
+  const ts = filas.map((f) => Date.parse(String(f.created_at)));
+  const hechos = { paradero1: { ts: ts[0] + 3 * 3_600_000, nombre: "Paradero con un nombre bastante largo de la ruta" }, paradero1Falta: null,
+    fin: { ts: ts[ts.length - 1] - 3 * 3_600_000, por: "ultimo_paradero" as const, nombre: "Último paradero con un nombre bastante largo" }, abordajesTs: [ts[0] + 4 * 3_600_000] };
+  const recA = R.recorridoDeServicio({
+    reservaId: 77, crudas: filas, aplica: true, trazaLeida: true, umbral: 90, vehiculo: "p:3",
+    rastreo: { ...ver("incompleto"), detalle: "x".repeat(300) }, medicion: med, ptsCobertura: tr.pts,
+    ruta: null, estadoRuta: R.resolverRutaPrevista({ variantes: [{ firma: "f", conParadasJson: false, sinCoordenadas: 0 }], sinRuta: null, sinCoordenadas: 0 }, new Map()).estado,
+    puentesGuardados: guardados, hechos,
+  });
+  const vM = recA.medido.reduce((a, l) => a + l.coords.length + R.COSTO_TRAMO_MEDIDO, 0);
+  // Decimar conserva la velocidad de cada vértice que queda y los dos extremos de cada tramo.
+  const cons = R.medidoDeHuella(huella.limpio, med?.tramos ?? []);
+  const velDe = new Map<string, number>();
+  const extremosCons = new Set<string>();
+  for (const l of cons) { l.coords.forEach((x, j) => velDe.set(`${x}`, l.vel[j])); extremosCons.add(`${l.coords[0]}>${l.coords[l.coords.length - 1]}`); }
+  chk("el decimado de la huella conserva la velocidad de cada vértice y los extremos de cada tramo",
+    recA.medido.every((l) => l.coords.every((x, j) => velDe.get(`${x}`) === l.vel[j]) && extremosCons.has(`${l.coords[0]}>${l.coords[l.coords.length - 1]}`)));
+  const vE = recA.estimados.reduce((a, l) => a + l.coords.length, 0);
+  const bA = peso(recA);
+  const partes = (r: any) => Object.fromEntries(Object.keys(r).map((k) => [k, peso(r[k])]));
+  if (process.env.DETALLE) console.log("   A:", JSON.stringify(partes(recA)));
+  chk(`A · la cadena real llena los cuatro topes a la vez (medido ${vM}/${R.MAX_VERTICES_TRAZA}, estimados ${vE}/${R.MAX_VERTICES_ESTIMADO}, «sin señal» ${recA.sinSenal.length}/${R.MAX_HUECOS}, puntitos ${recA.puntos.length}/${R.MAX_PUNTOS_DATO})`,
+    // El decimado va por pasos enteros: puede quedar bastante por debajo del tope, nunca por encima.
+    recA.medidoDecimado && vM <= R.MAX_VERTICES_TRAZA && vM > R.MAX_VERTICES_TRAZA / 2
+    && recA.estimadosDecimados && vE <= R.MAX_VERTICES_ESTIMADO && vE > R.MAX_VERTICES_ESTIMADO / 2
+    && recA.sinSenal.length === R.MAX_HUECOS && recA.sinSenalOmitidos === (recA.sinSenalTotal ?? 0) - R.MAX_HUECOS && recA.sinSenalOmitidos > 0
+    && recA.puntos.length === R.MAX_PUNTOS_DATO && recA.puntosTotal > R.MAX_PUNTOS_DATO,
+    JSON.stringify({ vM, vE, s: recA.sinSenal.length, om: recA.sinSenalOmitidos, p: recA.puntos.length, pt: recA.puntosTotal }));
+  chk(`A · con 21 excesos (20 etiquetados), pesa ${bA} B (< ${TOPE_BYTES})`,
+    recA.excesos.n === 21 && recA.episodios.filter((e) => e.cuenta && e.contexto.codigo !== "sin_dato").length >= 20 && bA < TOPE_BYTES, `${bA} B · ${recA.excesos.n} excesos`);
+
+  // ── B · la cota: cada lista topada llena con su elemento MÁS PESADO posible ──
+  const c: [number, number] = R.coordR(-77.123456, -12.123456);
+  const tsMax = 9_999_999_999_999;
+  const medidoFrag = Array.from({ length: Math.floor(R.MAX_VERTICES_TRAZA / (2 + R.COSTO_TRAMO_MEDIDO)) }, () => ({ coords: [c, c], vel: [130, 130] }));
+  const medidoLargo = [{ coords: Array.from({ length: R.MAX_VERTICES_TRAZA - R.COSTO_TRAMO_MEDIDO }, () => c), vel: Array.from({ length: R.MAX_VERTICES_TRAZA - R.COSTO_TRAMO_MEDIDO }, () => 130) }];
+  const estimados = Array.from({ length: H.MAX_PUENTES }, () => ({ coords: Array.from({ length: R.MAX_VERTICES_ESTIMADO / H.MAX_PUENTES }, () => c), km: 99.9, min: 300, sinSenal: false, fuente: "puente_guardado" }));
+  const sinSenal = Array.from({ length: R.MAX_HUECOS }, () => ({ tipo: "hueco", desdeTs: tsMax, hastaTs: tsMax, durS: 99999.999, avanceM: 49999, enMovimiento: false, desde: c, hasta: c, estimado: false }));
+  const puntos = Array.from({ length: R.MAX_PUNTOS_DATO }, () => ({ c, ts: tsMax, vel: 130, velReal: false, rumbo: 359, rumboReal: false, acc: 1500 }));
+  // El resto (excesos, veredicto, ruta prevista, contadores) tal como sale de A, sin episodios.
+  const fijo = { ...recA, medido: [], estimados: [], sinSenal: [], puntos: [], episodios: [] };
+  const cotaSinEpisodios = Math.max(peso({ ...fijo, medido: medidoFrag }), peso({ ...fijo, medido: medidoLargo })) + peso(estimados) + peso(sinSenal) + peso(puntos);
+  // Un episodio en su tope de posiciones, con coordenadas crudas de 17 cifras y los textos más largos.
+  const crudo: [number, number] = [-77.03123456789012, -12.046512345678901];
+  const epMax = { ...recA.episodios[0], codigo: "sin_corroborar", velMaxSensor: 123.45678901234, velMediaSensor: 98.765432109876, velGeom: 87.654321098765,
+    precisionMediana: 12.345678901234, latPico: crudo[1], lngPico: crudo[0], detalle: "x".repeat(220),
+    coords: Array.from({ length: R.MAX_COORDS_EPISODIO }, () => crudo), contexto: { codigo: "sin_dato", texto: null, motivo: "y".repeat(260) } };
+  const pesoEp = peso(epMax) + 1;
+  const caben = Math.floor((TOPE_BYTES - cotaSinEpisodios) / pesoEp);
+  if (process.env.DETALLE) console.log(`   B: cota sin episodios ${cotaSinEpisodios} B · episodio en su tope ${pesoEp} B · caben ${caben}`);
+  chk(`B · cada lista topada llena con su elemento más pesado: ${cotaSinEpisodios} B, y caben ${caben} episodios en su tope de ${R.MAX_COORDS_EPISODIO} posiciones antes de ${TOPE_BYTES} B`,
+    cotaSinEpisodios < TOPE_BYTES && caben >= 3, `${cotaSinEpisodios} · ${pesoEp} · ${caben}`);
+  // La envoltura de cada tramo cuenta: sin ella, la huella partida en tramos de 2 vértices pesaría bastante más.
+  const fragSinCosto = Array.from({ length: Math.floor(R.MAX_VERTICES_TRAZA / 2) }, () => ({ coords: [c, c], vel: [130, 130] }));
+  chk("la envoltura de cada tramo medido cuenta contra el tope (sin eso, una huella partida pesaba ~40 % más)",
+    peso(fragSinCosto) > peso(medidoFrag) * 1.4 && R.COSTO_TRAMO_MEDIDO === 1, `${peso(fragSinCosto)} vs ${peso(medidoFrag)}`);
+}
+
+if (process.env.DETALLE) console.log(`   (${ok + fallas - okSeccion} comprobaciones en la sección anterior)`);
 console.log(`\n${fallas ? "❌" : "✅"} prueba-recorrido: ${ok} ok, ${fallas} fallas`);
 if (fallas) process.exit(1);
