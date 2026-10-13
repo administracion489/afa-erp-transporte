@@ -64,6 +64,56 @@ export function paradasParaFirma(
   paradasJson?: readonly any[] | null,
   extremos?: { origen?: string | null; destino?: string | null } | null,
 ): { lista: ParadaFirma[]; sinCoordenadas: number; sinRuta: SinRutaFirma | null } {
+  const listaParadas = listaParadasDeRuta(paradas, paradasJson, extremos);
+  if (listaParadas == null) return { lista: [], sinCoordenadas: 0, sinRuta: "sin_paradas" };
+
+  // Lo que el modal mandaría a geocodificar. Sin geocodificar, quedan fuera: es lo que pasa en el
+  // modal cuando /api/geocodificar no resuelve una parada (le pone lat/lng null y el filtro
+  // `!== null` la saca).
+  const sinCoordenadas = listaParadas.filter((p: any) => !p.lat || !p.lng).length;
+  const paradasConCoords = listaParadas.filter((p: any) => p.lat && p.lng);
+
+  if (paradasConCoords.length < 2) return { lista: [], sinCoordenadas, sinRuta: "menos_de_dos" };
+  const orig = paradasConCoords[0];
+  const dest = paradasConCoords[paradasConCoords.length - 1];
+  if (orig.lat === dest.lat && orig.lng === dest.lng) return { lista: [], sinCoordenadas, sinRuta: "mismo_punto" };
+
+  // ── 4: el cuerpo que manda el modal, por JSON, y la conversión de /api/ruta ────────────
+  // El JSON no es un detalle: un NaN viaja como null y el servidor lo lee como 0.
+  const cuerpo = JSON.parse(JSON.stringify({ paradas: paradasConCoords.map(paradaParaApiRuta) }));
+  const lista: ParadaFirma[] = (cuerpo.paradas as any[]).map((p: any) => ({
+    nombre: p.nombre || "Parada",
+    lat:    typeof p.lat === "string" ? parseFloat(p.lat) : Number(p.lat),
+    lng:    typeof p.lng === "string" ? parseFloat(p.lng) : Number(p.lng),
+  }));
+  if (lista.some((p) => isNaN(p.lat) || isNaN(p.lng))) return { lista: [], sinCoordenadas, sinRuta: "coordenada_invalida" };
+  return { lista, sinCoordenadas, sinRuta: null };
+}
+
+/**
+ * Cada parada tal como el modal GPS la pone en el cuerpo de /api/ruta (`cargarRuta`, el
+ * `paradasConCoords.map(...)` del fetch). Exportada para que el modal la use en vez de su copia:
+ * si el modal convirtiera de otra forma, la clave con que se guarda la ruta y la que se usa para
+ * leerla dejarían de coincidir.
+ */
+export function paradaParaApiRuta(p: any): { lat: any; lng: any; nombre: any } {
+  return {
+    lat:    typeof p.lat === "string" ? parseFloat(p.lat) : p.lat,
+    lng:    typeof p.lng === "string" ? parseFloat(p.lng) : p.lng,
+    nombre: p.nombre,
+  };
+}
+
+/**
+ * Pasos 1-3 de `paradasParaFirma`: la lista de paradas del modal GPS ANTES de geocodificar (orden,
+ * relleno desde `paradas_json`, respaldo origen → destino). `null` = no hay nada con que armar una
+ * ruta (`sin_paradas`). Exportada para que el modal arme su lista con esta y no con su copia.
+ */
+export function listaParadasDeRuta(
+  paradas: readonly any[] | null | undefined,
+  paradasJson?: readonly any[] | null,
+  extremos?: { origen?: string | null; destino?: string | null } | null,
+): any[] | null {
   // ── 1-3: el armado de `listaParadas` del modal, línea a línea ──────────────────────────
   let listaParadas: any[] = [...(paradas || [])].sort((a: any, b: any) => a.orden - b.orden);
 
@@ -93,38 +143,11 @@ export function paradasParaFirma(
 
   if (listaParadas.length === 0) {
     const origen = extremos?.origen, destino = extremos?.destino;
-    if (!(origen && destino)) return { lista: [], sinCoordenadas: 0, sinRuta: "sin_paradas" };
+    if (!(origen && destino)) return null;
     listaParadas = [
       { id: -1, nombre: origen,  lat: null, lng: null, hora_estimada: null, estado: "pendiente", orden: 1 },
       { id: -2, nombre: destino, lat: null, lng: null, hora_estimada: null, estado: "pendiente", orden: 2 },
     ];
   }
-
-  // Lo que el modal mandaría a geocodificar. Sin geocodificar, quedan fuera: es lo que pasa en el
-  // modal cuando /api/geocodificar no resuelve una parada (le pone lat/lng null y el filtro
-  // `!== null` la saca).
-  const sinCoordenadas = listaParadas.filter((p: any) => !p.lat || !p.lng).length;
-  const paradasConCoords = listaParadas.filter((p: any) => p.lat && p.lng);
-
-  if (paradasConCoords.length < 2) return { lista: [], sinCoordenadas, sinRuta: "menos_de_dos" };
-  const orig = paradasConCoords[0];
-  const dest = paradasConCoords[paradasConCoords.length - 1];
-  if (orig.lat === dest.lat && orig.lng === dest.lng) return { lista: [], sinCoordenadas, sinRuta: "mismo_punto" };
-
-  // ── 4: el cuerpo que manda el modal, por JSON, y la conversión de /api/ruta ────────────
-  // El JSON no es un detalle: un NaN viaja como null y el servidor lo lee como 0.
-  const cuerpo = JSON.parse(JSON.stringify({
-    paradas: paradasConCoords.map((p: any) => ({
-      lat:    typeof p.lat === "string" ? parseFloat(p.lat) : p.lat,
-      lng:    typeof p.lng === "string" ? parseFloat(p.lng) : p.lng,
-      nombre: p.nombre,
-    })),
-  }));
-  const lista: ParadaFirma[] = (cuerpo.paradas as any[]).map((p: any) => ({
-    nombre: p.nombre || "Parada",
-    lat:    typeof p.lat === "string" ? parseFloat(p.lat) : Number(p.lat),
-    lng:    typeof p.lng === "string" ? parseFloat(p.lng) : Number(p.lng),
-  }));
-  if (lista.some((p) => isNaN(p.lat) || isNaN(p.lng))) return { lista: [], sinCoordenadas, sinRuta: "coordenada_invalida" };
-  return { lista, sinCoordenadas, sinRuta: null };
+  return listaParadas;
 }
