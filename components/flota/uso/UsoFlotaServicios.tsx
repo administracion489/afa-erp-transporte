@@ -18,6 +18,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { urlRecorrido } from "@/lib/flota/recorrido-url";
 import { sumarDias } from "@/lib/odometro-analitica";
 import { hhmmLima } from "@/lib/servicio-tiempos";
 import { etiquetaEstado } from "@/lib/estados";
@@ -480,7 +481,7 @@ function FilaServicio({ s, umbral, resaltada, refFila }: {
       </td>
       {/* Ver recorrido */}
       <td className="px-3 py-2 whitespace-nowrap">
-        <Link href={`/seguimiento/gps/${s.reservaId}`} prefetch={false} target="_blank" rel="noopener"
+        <Link href={urlRecorrido(s.reservaId, { umbral })} prefetch={false} target="_blank" rel="noopener"
           className="text-[11px] font-bold text-[#0b315f] hover:underline">
           Ver recorrido ↗
         </Link>

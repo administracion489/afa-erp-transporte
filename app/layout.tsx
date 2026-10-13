@@ -739,10 +739,18 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       }
       setPermisos(listaPermisos);
 
+      // «Ver recorrido» (/seguimiento/gps/[id]) lo abren tres pantallas: Seguimiento, Seguridad vial
+      // (monitoreo) y Uso de flota (vehiculos). Su API (/api/seguimiento/recorrido) acepta cualquiera
+      // de los tres, y la pantalla tiene que aceptar los mismos: si no, quien llega desde Seguridad vial
+      // sin el módulo Seguimiento termina en el dashboard.
+      const MODULOS_RECORRIDO = ["seguimiento", "monitoreo", "vehiculos"];
       const rutaActual = menu.find(
         (item) => pathname === item.href || pathname.startsWith(`${item.href}/`)
       );
-      if (rutaActual && !listaPermisos.includes(rutaActual.modulo)) {
+      const permitida = pathname.startsWith("/seguimiento/gps/")
+        ? MODULOS_RECORRIDO.some((m) => listaPermisos.includes(m))
+        : !rutaActual || listaPermisos.includes(rutaActual.modulo);
+      if (!permitida) {
         router.replace("/dashboard");
         return;
       }

@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 // Módulo PURO (no lee la base): la frase y el aviso salen de los MISMOS números que usa
 // el motor del tick, para que la pantalla no pueda describir la ventana al revés.
-import { MARGEN_URGENTE_MIN, describirHorario, hhmmAMinutos, ventanaCubreMadrugada } from "@/lib/alertas-horario";
+import { MARGEN_URGENTE_MIN, describirHorario, hhmmAMinutos, ventanaCubreMadrugada, ventanaPorDefecto } from "@/lib/alertas-horario";
 // La MISMA tabla que usa el tick para decidir qué modo aplica a qué aviso: el motor importa
 // de ahí sus dos predicados. Sin eso, el guard que existe para que la pantalla no mienta
 // tendría su propia copia y sería el primero en quedarse atrás.
@@ -162,13 +162,15 @@ export default function ConfigOperacionesPage() {
   const guardarCfg = async (c: AlertaCfg) => {
     const canales = Object.fromEntries(COLS_CANAL.map((k) => [k, (c as any)[k] ?? false]));
     // Si la migración del horario no corrió, estas tres NO viajan (ver `faltaHorario`).
-    // Con la casilla marcada y sin horas se guardan las 12:00–22:00 que siembra el SQL:
+    // Con la casilla marcada y sin horas se guarda la ventana que la pantalla mostraba
+    // (`ventanaPorDefecto`: 12:00–22:00 al conductor, 07:00–21:00 a los contactos):
     // dejarlas en null sería una espera que nunca abre, y el motor lo leería como
     // "sin ventana" — o sea, la casilla diría una cosa y el sistema haría otra.
+    const def = ventanaPorDefecto(controlesDe(c).horario === "contactos" ? "contactos" : "conductor");
     const horario = faltaHorario ? {} : {
       respeta_horario: c.respeta_horario,
-      horario_desde: c.respeta_horario ? (c.horario_desde || "12:00") : c.horario_desde,
-      horario_hasta: c.respeta_horario ? (c.horario_hasta || "22:00") : c.horario_hasta,
+      horario_desde: c.respeta_horario ? (c.horario_desde || def.desde) : c.horario_desde,
+      horario_hasta: c.respeta_horario ? (c.horario_hasta || def.hasta) : c.horario_hasta,
       horario_margen_min: c.horario_margen_min ?? MARGEN_URGENTE_MIN,
     };
     const { error } = await supabase.from("alerta_config").update({
@@ -636,7 +638,7 @@ export default function ConfigOperacionesPage() {
                     por qué llegaban a las 00:00. Aquí se elige a qué hora sale. */}
                 {/* Solo el bloque de ciclo de vida (asignación, cambio, cancelación, desasignación) lee
                     el horario: en las demás tarjetas la casilla no hacía nada. */}
-                {alConductor && ctl.horario && !faltaHorario && (
+                {alConductor && ctl.horario === "conductor" && !faltaHorario && (
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     <span className="text-xs text-gray-500 w-20 shrink-0">Horario</span>
                     <label className="flex items-center gap-1 text-xs text-gray-600"
@@ -721,6 +723,43 @@ export default function ConfigOperacionesPage() {
                     </label>
                   ))}
                 </div>
+                {/* HORARIO DEL AVISO A LOS CONTACTOS («Servicio sin cerrar»). Cuenta algo que YA
+                    pasó, así que no tiene urgencia ni margen: fuera del horario espera siempre y
+                    sale en un solo mensaje al abrir (lib/servicio-abandonado.ts). Lo pidió el dueño
+                    el 13-10-2026: «falta respetar la hora de sueño del coordinador». */}
+                {ctl.horario === "contactos" && !faltaHorario && (() => {
+                  const def = ventanaPorDefecto("contactos");
+                  const d = hhmmAMinutos(c.horario_desde ?? def.desde), h = hhmmAMinutos(c.horario_hasta ?? def.hasta);
+                  return (
+                    <div className="flex flex-wrap items-center gap-2 pt-2">
+                      <label className="flex items-center gap-1 text-xs text-gray-600"
+                        title="Fuera de este horario el aviso espera a que abra la ventana en vez de despertar a los contactos.">
+                        <input type="checkbox" checked={c.respeta_horario}
+                          onChange={(e) => setCfg(c.clave, { respeta_horario: e.target.checked })} />
+                        🕐 Enviar solo dentro de un horario
+                      </label>
+                      {c.respeta_horario && (
+                        <>
+                          <span className="text-[11px] font-semibold text-gray-600">Enviar de</span>
+                          <input type="time" className={input + " w-28"} value={c.horario_desde ?? def.desde}
+                            onChange={(e) => setCfg(c.clave, { horario_desde: e.target.value })} />
+                          <span className="text-[11px] font-semibold text-gray-600">a</span>
+                          <input type="time" className={input + " w-28"} value={c.horario_hasta ?? def.hasta}
+                            onChange={(e) => setCfg(c.clave, { horario_hasta: e.target.value })} />
+                          <div className="basis-full text-[11px] text-gray-500">
+                            {describirHorario(d, h, null, { sinUrgencia: true })}
+                          </div>
+                          {ventanaCubreMadrugada(d, h) && (
+                            <div className="basis-full text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                              ⚠️ Este horario <strong>permite</strong> escribirles de madrugada. Si lo que quieres es lo
+                              contrario, el rango es el de <strong>envío</strong>: prueba <strong>{def.desde} a {def.hasta}</strong>.
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             )}
             <div className="mt-3 flex justify-end">
