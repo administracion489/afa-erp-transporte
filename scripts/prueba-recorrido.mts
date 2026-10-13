@@ -31,6 +31,8 @@
 //  12. el peso de la respuesta: el peor caso de las listas topadas (< 450 KB con hasta 3 episodios en su
 //      tope), el tope de posiciones de TODOS los episodios (lista y conteo idénticos) y la cota dura
 //      lineal en la cantidad de episodios (la lista no se topa: 200 episodios pesan ~700 KB);
+//  13. el tope de episodios descartados: una traza de 10 h con un punto rápido cada 11 s ya no lista
+//      miles; los que cuentan y el conteo, idénticos.
 //   DETALLE=1 imprime los números de cada comprobación.
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ||= "https://x.supabase.co";
@@ -1823,6 +1825,65 @@ seccion("12 · el peso: cada lista topada, el dibujo de los episodios topado, y 
   const fragSinCosto = Array.from({ length: Math.floor(R.MAX_VERTICES_TRAZA / 2) }, () => ({ coords: [c, c], vel: [130, 130] }));
   chk("la envoltura de cada tramo medido cuenta contra el tope (sin eso, una huella partida pesaba ~40 % más)",
     peso(fragSinCosto) > peso(medidoFrag) * 1.4 && R.COSTO_TRAMO_MEDIDO === 1, `${peso(fragSinCosto)} vs ${peso(medidoFrag)}`);
+}
+
+// ══ 13 · el tope de episodios DESCARTADOS (hallazgo de seguridad de T5) ════════════════════
+seccion("13 · una traza con un punto rápido cada 11 s ya no fabrica miles de descartados: ≤ 300, los que cuentan intactos");
+{
+  const peso = (x: unknown) => JSON.stringify(x).length;
+  chk("MAX_EPISODIOS_DESCARTADOS = 300", R.MAX_EPISODIOS_DESCARTADOS === 300);
+  // toparDescartados: los que cuentan quedan TODOS y en su sitio; de los otros, los más largos en su orden.
+  let n = 0, bien = 0, activos = 0;
+  for (let i = 0; i < 400; i++) {
+    const eps = Array.from({ length: Math.floor(rnd() * 900) }, (_, k) => ({ k, cuenta: rnd() < 0.2, durS: Math.floor(rnd() * 120) }));
+    const max = rnd() < 0.5 ? R.MAX_EPISODIOS_DESCARTADOS : Math.floor(rnd() * 500);
+    const { episodios: out, omitidos } = R.toparDescartados(eps, max);
+    const desc = eps.filter((e) => !e.cuenta), descOut = out.filter((e) => !e.cuenta);
+    const fuera = desc.filter((e) => !out.includes(e));
+    n++;
+    if (omitidos) activos++;
+    if (JSON.stringify(out.filter((e) => e.cuenta)) === JSON.stringify(eps.filter((e) => e.cuenta))
+      && descOut.length === Math.min(desc.length, max) && omitidos === desc.length - descOut.length
+      && out.every((e, j) => j === 0 || out[j - 1].k < e.k)
+      && (!descOut.length || fuera.every((f) => f.durS <= Math.min(...descOut.map((d) => d.durS))))) bien++;
+  }
+  chk(`toparDescartados (${n} listas): los que cuentan, todos y en su sitio; de los descartados quedan los más largos, en orden, y se cuentan los demás`,
+    bien === n && activos > 100, `${n - bien} · activos ${activos}`);
+
+  // 10 h de traza: a 30 km/h una posición cada 5,5 s y, cada 11 s, una a 100 km/h (un `breve` cada una).
+  // En medio, 6 excesos sostenidos de verdad (2 min a 100 km/h cada uno).
+  const filas: Fila[] = [];
+  let t = 0, lat = -12.3, k = 0;
+  const empujar = (vel: number, mov: number, paso: number) => {
+    filas.push({ created_at: iso(T0 + Math.round(t * 1000)), lat, lng: -77.03, precision_m: 4, simulado: null, estado: "en_ruta",
+      velocidad: vel, rumbo: 0, timestamp: null, reserva_id: 77, conductor_id: 5, conductor_tercero_id: null });
+    t += paso; lat += ((mov / 3.6) * paso) / 111_320;
+  };
+  while (t < 10 * 3600) {
+    if (k % 600 === 300) { for (let j = 0; j < 40; j++) empujar(100, 100, 3); }   // exceso sostenido
+    empujar(k % 2 ? 100 : 30, 30, 5.5);
+    k++;
+  }
+  const { episodios: crudos } = SE.episodiosDeTraza({ reservaId: 77, crudas: filas, umbral: 90, vehiculo: "p:3" });
+  const cuentanMotor = crudos.filter((e) => e.codigo === "exceso").sort((a, b) => a.inicioTs - b.inicioTs);
+  const descMotor = crudos.length - cuentanMotor.length;
+  const rec = R.recorridoDeServicio({ reservaId: 77, crudas: filas, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90, vehiculo: "p:3" });
+  const descRec = rec.episodios.filter((e) => !e.cuenta), cuentanRec = rec.episodios.filter((e) => e.cuenta);
+  const bytes = peso(rec);
+  if (process.env.DETALLE) console.log(`   10 h: ${filas.length} posiciones · ${descMotor} descartados del motor → ${descRec.length} listados (${rec.episodiosDescartadosOmitidos} omitidos) · ${cuentanRec.length} que cuentan · ${bytes} B`);
+  chk(`ANTES: el motor fabrica miles de descartados (${descMotor}); AHORA se listan ≤ ${R.MAX_EPISODIOS_DESCARTADOS} y el resto se cuenta`,
+    descMotor > 2000 && descRec.length === R.MAX_EPISODIOS_DESCARTADOS && rec.episodiosDescartadosOmitidos === descMotor - R.MAX_EPISODIOS_DESCARTADOS,
+    `${descMotor} · ${descRec.length} · ${rec.episodiosDescartadosOmitidos}`);
+  const campos = (e: any) => JSON.stringify([e.codigo, e.inicioTs, e.finTs, e.durS, e.puntos, e.velMaxSensor, e.velMediaSensor, e.velGeom, e.precisionMediana, e.latPico, e.lngPico, e.cortado, e.detalle]);
+  chk(`el conteo y los que cuentan son los mismos con y sin el tope (${cuentanMotor.length} excesos)`,
+    cuentanMotor.length >= 6 && rec.excesos.n === cuentanMotor.length
+    && JSON.stringify(cuentanRec.map(campos)) === JSON.stringify(cuentanMotor.map((e) => campos({ ...e }))),
+    `${cuentanMotor.length} · n ${rec.excesos.n} · ${cuentanRec.length}`);
+  chk(`y la respuesta queda acotada: ${bytes} B (< 1 MB, el tope de lo que se cachea)`, bytes < 1_000_000, `${bytes}`);
+
+  const srcRuta = fs.readFileSync(path.join(process.cwd(), "app/api/seguimiento/recorrido/route.ts"), "utf8");
+  chk("la ruta no cachea un recorrido de más de 1 MB (y lo sirve igual)",
+    /const MAX_BYTES_CACHE = 1_000_000;/.test(srcRuta) && srcRuta.includes("if (JSON.stringify(payload).length > MAX_BYTES_CACHE) return;"));
 }
 
 if (process.env.DETALLE) console.log(`   (${ok + fallas - okSeccion} comprobaciones en la sección anterior)`);

@@ -46,8 +46,12 @@ function leerCache(k: string, hoy: string): RecorridoServicio | null {
   const e = cache.get(k);
   return e && e.hoy === hoy && Date.now() - e.at < e.ttl ? e.payload : null;
 }
+/** Un recorrido de más de esto (JSON) se sirve pero NO se cachea. Operativo, no medido: MAX_CACHE
+ *  cuenta entradas, no bytes, y cien respuestas enormes llenarían la memoria de la instancia. */
+const MAX_BYTES_CACHE = 1_000_000;
 function guardarCache(k: string, hoy: string, payload: RecorridoServicio, ttl: number) {
   cache.delete(k);
+  if (JSON.stringify(payload).length > MAX_BYTES_CACHE) return;
   cache.set(k, { at: Date.now(), ttl, hoy, payload });
   while (cache.size > MAX_CACHE) cache.delete(cache.keys().next().value as string);
 }

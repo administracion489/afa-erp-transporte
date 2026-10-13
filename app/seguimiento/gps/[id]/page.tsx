@@ -251,6 +251,7 @@ export default function GpsServicioPage() {
     // Los tramos «sin señal» omitidos se dicen junto a su lista (r.sinSenalTotal > sinSenal.length).
     if (r.puntosTotal > puntosVistos) notasDibujo.push(`datos por punto: se muestran ${puntosVistos.toLocaleString("es-PE")} de ${r.puntosTotal.toLocaleString("es-PE")}`);
     if (epsDecimados) notasDibujo.push("posiciones de los excesos muestreadas para dibujarlas");
+    if ((r.episodiosDescartadosOmitidos ?? 0) > 0) notasDibujo.push(`${plural(r.episodiosDescartadosOmitidos, "exceso descartado no se lista", "excesos descartados no se listan")}`);
   }
 
   return (
