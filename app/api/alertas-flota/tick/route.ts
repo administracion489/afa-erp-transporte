@@ -20,7 +20,7 @@ import {
   cargarMotor, directorioDe, reclamarEnvio, liberarEnvio, cargarEstados, upsertEstado,
   hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, canalesConductor, type AlertaConfig,
 } from "@/lib/alertas";
-import { horarioDe, limaAUtcMs, planDeEnvioConductor } from "@/lib/alertas-horario";
+import { horarioDe, limaAUtcMs, minutosAHhmm, planDeEnvioConductor } from "@/lib/alertas-horario";
 import { planRecordarCheckout, cadenciaEfectiva, escalaAlDirectorio, detalleEscaladaCheckout, type AlcanceRecordatorio, type LecturaCheckout } from "@/lib/alertas-checkout";
 import { tsEfectivoLectura } from "@/lib/odometro-tiempo";
 import {
@@ -28,7 +28,7 @@ import {
   enViaRecordatorio as enViaRecordatorioPuro,
   enVentanaHoraFija as enVentanaHoraFijaPuro,
 } from "@/lib/alertas-modo-tiempo";
-import { detectarSolapesJornada, MAX_SERVICIOS_JORNADA, type ReservaFlota } from "@/lib/alertas-flota";
+import { detectarSolapesJornada, itinerarioDe, type ReservaFlota } from "@/lib/alertas-flota";
 import { UMBRAL_DEFECTO } from "@/lib/alertas-tarjeta";
 import { CLAVE_ESPERA_ABANDONADO, paramsAvisoAbandonados, planDePendientes, type ServicioCerrado } from "@/lib/servicio-abandonado";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
@@ -87,6 +87,44 @@ function finServicioMs(r: {
   if (ini == null) return fin;
   const corregido = fin < ini ? fin + DIA_MS : fin;
   return corregido - ini <= DURACION_MAX_MS ? corregido : ini;
+}
+
+/**
+ * Lo que la jornada de conducción necesita de cada servicio y `todas` no trae: la salida real
+ * (`hora_real_inicio`, la sellan los endpoints del conductor) y el itinerario —primer y último
+ * paradero— de las filas de `paradas` o, si aún no se materializaron, de la semilla
+ * `paradas_json` (`itinerarioDe`, el mismo que usa la torre). null si ALGUNA lectura falla:
+ * medir la mitad de los servicios con 4 h estimadas sería volver a alarmar por falta de datos.
+ */
+async function itinerariosDeHoy(
+  ids: number[],
+): Promise<Map<number, Pick<ReservaFlota, "hora_real_inicio" | "plan_inicio" | "plan_fin">> | null> {
+  const out = new Map<number, Pick<ReservaFlota, "hora_real_inicio" | "plan_inicio" | "plan_fin">>();
+  if (!ids.length) return out;
+  const { data: rs, error: eR } = await admin
+    .from("reservas").select("id, hora_real_inicio, paradas_json").in("id", ids);
+  if (eR) { console.error("[tick] jornada: reservas", eR.message); return null; }
+  // Paradas paginadas con orden TOTAL: cortar una página a mitad de un servicio movería su último
+  // paradero y con él la duración.
+  const filas: { reserva_id: number; orden: number | null; hora_estimada: string | null }[] = [];
+  for (let desde = 0; ; desde += 1000) {
+    const { data, error } = await admin
+      .from("paradas").select("reserva_id, orden, hora_estimada").in("reserva_id", ids)
+      .order("reserva_id").order("orden").order("id").range(desde, desde + 999);
+    if (error) { console.error("[tick] jornada: paradas", error.message); return null; }
+    filas.push(...((data ?? []) as typeof filas));
+    if (!data || data.length < 1000) break;
+  }
+  const porReserva = new Map<number, typeof filas>();
+  for (const f of filas) {
+    const l = porReserva.get(f.reserva_id) ?? [];
+    l.push(f); porReserva.set(f.reserva_id, l);
+  }
+  for (const r of (rs ?? []) as { id: number; hora_real_inicio: string | null; paradas_json: unknown }[]) {
+    const it = itinerarioDe(porReserva.get(r.id), r.paradas_json);
+    out.set(r.id, { hora_real_inicio: r.hora_real_inicio, plan_inicio: it.inicio, plan_fin: it.fin });
+  }
+  return out;
 }
 
 export async function GET(req: NextRequest) { return handler(req); }
@@ -992,15 +1030,31 @@ async function handler(req: NextRequest) {
       }
     }
 
-    // ── BLOQUE 7: solape / jornada extensa (hoy, respeta hora fija) ─────────────
+    // ── BLOQUE 7: solape / jornada de conducción (hoy, respeta hora fija) ───────
+    // La jornada se juzga en HORAS DE CONDUCCIÓN (RENAT art. 30, lib/alertas-flota.ts): el
+    // horario partido —entrada de madrugada, retorno por la tarde, descanso en medio— no es
+    // jornada extensa. Para medir cuánto maneja cada servicio hace falta su salida real y su
+    // itinerario (primer y último paradero), que `todas` no trae: se leen aquí, solo de los
+    // servicios propios de hoy con conductor y solo si la alerta está en ventana.
     {
       const cSol = activa("solape"), cJor = activa("jornada");
       const solOn = cSol && enVentanaHoraFija(cSol, ahora, force);
       const jorOn = cJor && enVentanaHoraFija(cJor, ahora, force);
       if (solOn || jorOn) {
-        const hoyRes = todas.filter((r) => r.fecha_servicio === hoy && r.tipo_asignacion === "propio") as ReservaFlota[];
-        const jornadaMaxH = cJor?.umbral ?? UMBRAL_DEFECTO.jornada;
-        const { solape, jornada } = detectarSolapesJornada(hoyRes, { jornadaMaxH, maxServicios: MAX_SERVICIOS_JORNADA });
+        let hoyRes = todas.filter((r) => r.fecha_servicio === hoy && r.tipo_asignacion === "propio") as ReservaFlota[];
+        // Sin el itinerario cada servicio contaría 4 h y el horario partido volvería a alarmar:
+        // si no se pudo leer, ESTE tick no juzga la jornada (el solape no lo necesita).
+        let jornadaLeida = true;
+        if (jorOn) {
+          const conItinerario = await itinerariosDeHoy(hoyRes.filter((r) => r.conductor_id && r.estado !== "cancelada").map((r) => r.id));
+          // Un servicio EN CURSO lleva conduciendo al menos hasta ahora, vaya o no atrasado.
+          if (conItinerario) hoyRes = hoyRes.map((r) => ({
+            ...r, ...conItinerario.get(r.id), en_curso_ahora: r.estado === "en_curso" ? minutosAHhmm(ahora) : null,
+          }));
+          else { jornadaLeida = false; res.jornada_sin_itinerario = 1; }
+        }
+        const acumuladaMaxH = cJor?.umbral ?? UMBRAL_DEFECTO.jornada;
+        const { solape, jornada, veredictos } = detectarSolapesJornada(hoyRes, { acumuladaMaxH });
         let nS = 0, nJ = 0;
         if (solOn) {
           for (const [reservaId, condId] of solape) {
@@ -1010,12 +1064,14 @@ async function handler(req: NextRequest) {
             nS++;
           }
         }
-        if (jorOn) {
+        if (jorOn && jornadaLeida) {
           const yaCond = new Set<number>();
           for (const [, condId] of jornada) {
             if (yaCond.has(condId)) continue; yaCond.add(condId);
             if (!(await reclamarEnvio("jornada", condId))) continue;
-            const rd = await aDirectorio(cJor!, ["Jornada extensa", nombreCorto(condMap.get(condId)?.nombre), "Servicios de hoy", "Supera la jornada máxima o el nº de servicios."]);
+            // El motivo lo redacta el motor (una línea, sin saltos: va como parámetro de plantilla).
+            const motivo = veredictos.get(condId)?.motivo ?? "Pasa los topes de conducción del día.";
+            const rd = await aDirectorio(cJor!, ["Jornada de conducción", nombreCorto(condMap.get(condId)?.nombre), "Servicios de hoy", motivo]);
             if (rd.enviados === 0 && rd.fallos > 0) { await liberarEnvio("jornada", condId); continue; }
             nJ++;
           }
