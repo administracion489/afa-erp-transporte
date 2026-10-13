@@ -21,6 +21,8 @@ import { cargarFlotaUnidades, remitentesPorDia, claveRemitenteDia } from "./remi
 import { telefonoDeRemitente } from "./cluster-remitente";
 import { registrarLectura, contextoOdometro, contextoDeRecarga, juzgarKmDeRecarga, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro, type VeredictoOdometro } from "@/lib/odometro-seleccion";
+import type { TamborDecimas } from "@/lib/odometro-decimas";
+import { tamborDecimasDeUnidad } from "@/lib/odometro-decimas-datos";
 import { kmDeRecarga } from "./km-recarga";
 import { capturaDeRecarga } from "@/lib/odometro-tiempo";
 import {
@@ -918,15 +920,20 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   const unidadKm = veh ? { id: veh.id, flota: "propia" as Flota } : terc ? { id: terc.id, flota: "tercero" as Flota } : null;
   if (unidadKm && kmIA != null && kmIA > 0) {
     try {
-      const ctxKm = await contextoDeRecarga(sb, {
-        vehiculo_id: unidadKm.id, flota: unidadKm.flota, fecha, hora, tsMensaje: mensaje.ts_mensaje ?? null,
-      });
+      const [ctxKm, tamborKm] = await Promise.all([
+        contextoDeRecarga(sb, {
+          vehiculo_id: unidadKm.id, flota: unidadKm.flota, fecha, hora, tsMensaje: mensaje.ts_mensaje ?? null,
+        }),
+        // ¿El último tambor de esta unidad marca décimas? (lo dijo una persona al corregir)
+        tamborDecimasDeUnidad(sb, { vehiculo_id: unidadKm.id, flota: unidadKm.flota }),
+      ]);
       if (ctxKm.existe) {
         veredictoKm = elegirOdometro({
           kmIA, tripIA: tripKm, textoLeido: d.texto_kilometraje ?? null,
           kmVigente: ctxKm.kmVigente, kmDiaMax: ctxKm.kmDiaMax,
           horasDesdeUltima: ctxKm.horasDesdeUltima, hayHistorial: ctxKm.hayHistorial,
           vecinas: { anterior: ctxKm.anterior?.km ?? null, posterior: ctxKm.posterior?.km ?? null },
+          tamborDecimas: tamborKm,
         });
       }
     } catch {
@@ -1889,11 +1896,16 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   // vigente de la unidad desempata sin ambigüedad. Degrada limpio: sin unidad o si la consulta
   // falla, el veredicto es neutro y el comportamiento es exactamente el de antes.
   let ctxOdo: ContextoOdometro | null = null;
+  // ¿El último tambor de esta unidad marca décimas? Lo dijo una persona al corregir una lectura
+  // suya (lib/odometro-decimas.ts); con eso, la décima metida como cifra se quita sin que el modelo
+  // tenga que haber transcrito el punto. Best-effort: null es el comportamiento de antes.
+  let tamborOdo: TamborDecimas | null = null;
   if (unidad) {
     try {
-      ctxOdo = await contextoOdometro(sb, {
-        vehiculo_id: unidad.id, flota: unidad.flota, tsRef: mensaje.ts_mensaje ?? null,
-      });
+      [ctxOdo, tamborOdo] = await Promise.all([
+        contextoOdometro(sb, { vehiculo_id: unidad.id, flota: unidad.flota, tsRef: mensaje.ts_mensaje ?? null }),
+        tamborDecimasDeUnidad(sb, { vehiculo_id: unidad.id, flota: unidad.flota }),
+      ]);
     } catch {
       ctxOdo = null;
     }
@@ -1909,6 +1921,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
     // Las lecturas de la FECHA de la foto, no el vigente de hoy: el Radar procesa (y reprocesa)
     // fotos de días atrás, y registrarLectura las juzga contra esas mismas vecinas al guardar.
     vecinas: ctxOdo ? { anterior: ctxOdo.anterior?.km ?? null, posterior: ctxOdo.posterior?.km ?? null } : null,
+    tamborDecimas: tamborOdo,
   });
   const km = veredicto.km;
   const kmCorregido = veredicto.origen === "corregido";

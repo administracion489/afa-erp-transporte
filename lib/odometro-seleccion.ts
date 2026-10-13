@@ -21,6 +21,7 @@
 //      EXCEPCIÓN MEDIDA: cuando el dígito que sobra está DUPLICADO, ver `corregirDigitoRepetido`.
 
 import { RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "./odometro";
+import { sinDecimaDeUnidad, fraseTambor, type TamborDecimas } from "./odometro-decimas";
 
 export type CandidatoOdometro = {
   valor: number;
@@ -40,9 +41,11 @@ export type CandidatoOdometro = {
  *   - `digito_repetido` el dígito que sobraba estaba DUPLICADO y colapsarlo da un único número
  *                      posible: se propone ese, para que una persona lo confirme contra la foto
  *                      — salvo que otra lectura diga lo mismo (`testigo`), ver `testigoDe`.
- *   - `decimal_como_entero` el tambor de DÉCIMAS de un odómetro mecánico entró como una cifra más:
- *                      la propia transcripción de la IA lo trae tras un punto («56129.2») y su
- *                      kilometraje es ese número sin el punto (561,292). Se registra la parte entera.
+ *   - `decimal_como_entero` el tambor de DÉCIMAS de un odómetro mecánico entró como una cifra más.
+ *                      Se sabe por una de dos vías: la propia transcripción de la IA lo trae tras un
+ *                      punto («560243.2» con kilometraje 5,602,432), o la unidad TIENE ese tambor
+ *                      porque lo dijo una persona al corregir (`tamborDecimas`, lib/odometro-decimas.ts).
+ *                      Se registra la parte entera.
  */
 export type CodigoOdometro = "digito_de_mas" | "fuera_de_banda" | "parcial" | "digito_repetido" | "decimal_como_entero";
 
@@ -138,7 +141,10 @@ export function testigoDe(reparado: number, ancla: { base: number; kmPost: numbe
  *
  *   239.980 → 23.9̶9̶80    (la foto dice 23.980 — verificado)
  *   233.379 → 23.3̶3̶79     (anterior 23.272 ese mismo día)
- *   5.600.473 → 56.0̶0̶473   (anterior 559.997 el día antes)
+ *   5.600.473 → 56.0̶0̶473   (anterior 559.997 el día antes) — OJO: ese tablero (B4N-968) tiene
+ *                           un tambor de DÉCIMAS, así que lo más probable es que marcara 560,047.3:
+ *                           el colapso «cuadraba» y era el error equivocado. Con la unidad conocida
+ *                           (`tamborDecimas` en `elegirOdometro`), la décima se resuelve antes.
  *   2.320.206 → sin dígitos adyacentes iguales: NO se toca (la foto dice 23.206)
  *
  * La diferencia con borrar un dígito cualquiera es lo que decide que esto sea legítimo y
@@ -174,9 +180,10 @@ export function corregirDigitoRepetido(kmIA: number, piso: number, techo: number
 /**
  * EL TAMBOR DE DÉCIMAS LEÍDO COMO UNA CIFRA MÁS (B4N-968, octubre 2026).
  *
- * Un odómetro mecánico de rodillos muestra «5 6 1 2 9 [2]» con el último tambor en otro color:
- * son 56,129.2 km. El modelo lo transcribe bien en el texto («56129.2») y aun así devuelve en el
- * número 561,292 — la misma cifra sin el punto, diez veces el kilometraje.
+ * Un odómetro mecánico de rodillos muestra «5 6 0 2 4 3 [2]» con el último tambor en otro color:
+ * son 560,243.2 km. Cuando el modelo lo transcribe bien en el texto («560243.2») y aun así devuelve
+ * en el número 5,602,432 —la misma cifra sin el punto, diez veces el kilometraje—, esto lo deshace.
+ * Cuando NO transcribe el punto, lo deshace el tambor conocido de la unidad (lib/odometro-decimas.ts).
  *
  * Esto NO es adivinar qué dígito sobra (la regla 5 de la cabecera): es leer la transcripción que
  * el propio modelo escribió. Solo se acepta cuando el texto trae un número con UN decimal cuyas
@@ -299,6 +306,13 @@ export function elegirOdometro(e: {
    * escribe; con el lector todavía en el vigente, los dos juzgaban el mismo número con dos bases.
    */
   vecinas?: { anterior: number | null; posterior: number | null } | null;
+  /**
+   * El tablero de ESTA unidad tiene tambor de décimas (lib/odometro-decimas.ts → tamborDecimasDe):
+   * lo dijo una persona al corregir una de sus lecturas. Con él, un número de una cifra más que el
+   * tablero es la décima metida como cifra aunque el modelo no haya transcrito el punto. Sin él
+   * (`undefined`/null), el comportamiento de siempre.
+   */
+  tamborDecimas?: TamborDecimas | null;
 }): VeredictoOdometro {
   const kmIA = e.kmIA != null && Number.isFinite(e.kmIA) && e.kmIA > 0 ? Math.round(e.kmIA) : null;
   const neutro = (motivo: string | null = null, autoOk = true): VeredictoOdometro => ({
@@ -313,6 +327,15 @@ export function elegirOdometro(e: {
   //      si la unidad lleva meses leyéndose así, su historial entero está ×10 y el número malo
   //      cae «dentro de lo posible». Lo que sí se mira es la banda, para decirlo.
   const sinDecima = decimalComoEntero(kmIA, e.textoLeido);
+
+  // (1c) …y sin la transcripción: la unidad TIENE tambor de décimas porque lo dijo una persona
+  //      al corregir una lectura suya (B4N-968: seis tambores de km y uno de décimas; el 26/08
+  //      marcaba 560,243.2 y entró como 5,602,432). Ese es un hecho del tablero, no de la foto, así
+  //      que no hace falta que el modelo vuelva a ver el punto. Va ANTES del colapso del dígito
+  //      repetido: con siete cifras y un par repetido —5,600,473— el colapso daba 560,473 cuando el
+  //      tablero, con su décima, decía 560,047.3.
+  const tambor = e.tamborDecimas ?? null;
+  const sinDecimaUnidad = sinDecima == null ? sinDecimaDeUnidad(kmIA, tambor) : null;
 
   // (2) El ancla. Con vecinas, la MISMA base que `evaluarLectura`: la lectura anterior a la
   //     foto; sin anterior pero con posterior, esta es la más antigua de la serie (no hay piso,
@@ -329,8 +352,18 @@ export function elegirOdometro(e: {
       `tambor es de DÉCIMAS de kilómetro, no una cifra más. Se registra ${fmt(sinDecima!)}` +
       (motivoExtra ? ` — ${motivoExtra}` : ""),
   });
-  // Sin ancla no hay nada contra qué comparar → exactamente el comportamiento de hoy.
-  if (base <= 0 && kmPost == null) return sinDecima != null ? porDecima(null, true) : neutro();
+  const porTambor = (motivoExtra: string | null, autoOk: boolean): VeredictoOdometro => ({
+    km: sinDecimaUnidad, kmIA, origen: "corregido", autoOk, codigo: "decimal_como_entero", candidatos: [],
+    motivo:
+      `el último tambor del tablero de esta unidad marca DÉCIMAS (${fraseTambor(tambor!)}): la IA devolvió ` +
+      `${fmt(kmIA)} con la décima metida como una cifra más. Se registra ${fmt(sinDecimaUnidad!)}` +
+      (motivoExtra ? ` — ${motivoExtra}` : ""),
+  });
+  // Sin ancla no hay nada contra qué comparar → exactamente el comportamiento de hoy. (El tambor ya
+  // trae su propia escala: `sinDecimaDeUnidad` exige que el número caiga en la de la corrección.)
+  if (base <= 0 && kmPost == null) {
+    return sinDecima != null ? porDecima(null, true) : sinDecimaUnidad != null ? porTambor(null, true) : neutro();
+  }
   // Cómo se nombra el ancla en el motivo: «vigente» solo cuando de verdad es el vigente.
   const ancla = kmAnt != null
     ? `lectura anterior ${fmt(kmAnt)}`
@@ -383,6 +416,20 @@ export function elegirOdometro(e: {
 
   for (const c of bruto) c.enBanda = c.valor >= piso && c.valor <= techo;
   const enBanda = bruto.filter((c) => c.enBanda);
+
+  if (sinDecimaUnidad != null) {
+    if (sinDecimaUnidad >= piso && sinDecimaUnidad <= techo) return porTambor(null, true);
+    // El número CON la décima cuadra: el ancla también la lleva. Se registra el bueno, sin pasar
+    // de largo — al guardarlo, `evaluarLectura` lo verá retroceder contra esas lecturas infladas.
+    const escala = kmIA >= piso && kmIA <= techo;
+    return porTambor(
+      escala
+        ? `no cuadra con ${ancla}, que también lleva la décima como cifra: el historial de esta unidad tiene ` +
+          `lecturas diez veces mayores — «¿Qué pasó con esta lectura?» las ofrece para corregirlas juntas`
+        : `no cuadra con ${ancla}: revísalo contra la foto`,
+      false,
+    );
+  }
 
   if (sinDecima != null) {
     if (sinDecima >= piso && sinDecima <= techo) return porDecima(null, true);

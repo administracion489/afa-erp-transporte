@@ -9,7 +9,7 @@
 // Este archivo solo construye strings: no toca BD ni secretos.
 
 import type { CategoriaRadar } from "./tipos";
-import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro, reglaTamborDecimal } from "../odometro-prompt";
+import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro, reglaTamborDecimal, fraseTamborDeLaUnidad } from "../odometro-prompt";
 
 // ── Contexto que el motor pasa a cada prompt ─────────────────────────────────
 
@@ -17,7 +17,11 @@ import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fra
  * Cómo se lee el odómetro de una unidad. `puedeSubir` = su km está cerca de la cifra siguiente
  * (`formaOdometro`, lib/odometro-prompt.ts): la línea dice entonces que puede tener una más.
  */
-export type GuiaOdometro = { placa: string; guia: string | null; digitos: number | null; puedeSubir?: boolean };
+export type GuiaOdometro = {
+  placa: string; guia: string | null; digitos: number | null; puedeSubir?: boolean;
+  /** Su tablero tiene tambor de décimas: lo dijo una persona al corregir (lib/odometro-decimas.ts). */
+  tamborDecimas?: boolean;
+};
 
 export type ContextoPrompt = {
   grupo?: string | null;       // nombre del grupo de WhatsApp
@@ -522,7 +526,7 @@ Responde únicamente el JSON.`;
  * evidente un dígito de más.
  */
 function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
-  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.placa?.trim() && (g.guia?.trim() || g.digitos));
+  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.placa?.trim() && (g.guia?.trim() || g.digitos || g.tamborDecimas));
   if (!guias.length) return null;
   return (
     `Cómo se lee el odómetro de cada unidad (cada vehículo es distinto; usa la línea que corresponda a la placa que identifiques en la imagen o el texto). Esta lista NO sirve para identificar la unidad: un tablero no muestra la placa, y varias unidades tienen el mismo modelo de tablero. Si la placa no está escrita en el mensaje ni visible en la foto, deja "placa" en null — NUNCA la elijas de esta lista por el parecido del tablero. Si la placa que identificas NO aparece en esta lista, IGNORA todas estas líneas: son de otras unidades y describen tableros distintos.\n` +
@@ -537,7 +541,8 @@ function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
         // La guía la teclea una persona: si trae un kilometraje («el ODO marca 24618»), viaja
         // con sus cifras tapadas — dónde mirar se entiende igual y no queda un número copiable.
         const guia = sinCifrasCopiables(g.guia?.trim() ?? "");
-        return `- ${g.placa}: ${[forma, guia].filter(Boolean).join(" · ")}`;
+        const tambor = g.tamborDecimas ? fraseTamborDeLaUnidad('"texto_leido" (o "texto_kilometraje")') : "";
+        return `- ${g.placa}: ${[forma, tambor, guia].filter(Boolean).join(" · ")}`;
       })
       .join("\n")
   );

@@ -31,7 +31,7 @@ export type TipoRevision =
   | "otro";
 
 export const TIPOS_REVISION: { codigo: TipoRevision; etiqueta: string; ayuda: string }[] = [
-  { codigo: "lista_para_aceptar", etiqueta: "✅ Listas para aceptar", ayuda: "Ya cuadran: se les corrigió la hora, o el km que corrigió el sistema coincide con otra lectura" },
+  { codigo: "lista_para_aceptar", etiqueta: "✅ Listas para aceptar", ayuda: "Ya cuadran: se les corrigió la hora o se les quitó la décima, o el km que corrigió el sistema coincide con otra lectura" },
   { codigo: "corregida_sistema", etiqueta: "🤖 Corregida por el sistema", ayuda: "La IA leyó una cifra dos veces y el sistema la quitó: compara el km con la foto y acepta" },
   { codigo: "digito_de_mas", etiqueta: "🔢 Dígito de más", ayuda: "El km es ~10× el anterior: casi siempre una cifra repetida" },
   { codigo: "incoherente_posterior", etiqueta: "⏱ Más km que una lectura posterior", ayuda: "Suele ser la HORA: corrígela con la del voucher o la foto" },
@@ -54,7 +54,9 @@ export function etiquetaTipo(t: TipoRevision): string {
  */
 export function tipoDeRevision(motivo: string | null | undefined): TipoRevision {
   const m = String(motivo ?? "");
-  if (/con esa hora cuadra/i.test(m)) return "lista_para_aceptar";
+  // La hora corregida a mano (`corregirHoraLectura`) o la décima quitada en lote (`rejuzgarLectura`)
+  // con las que la lectura ya cuadra: solo esperan el clic.
+  if (/con esa hora cuadra|con ese km cuadra/i.test(m)) return "lista_para_aceptar";
   // El dígito repetido que el sistema colapsó (`elegirOdometro`, en el Radar se antepone
   // «Corregido por el sistema:»). Si el propio evaluarLectura dijo además que coincide con la
   // lectura anterior —«Sin avance» o «Confirmada»—, la única razón de que esté aquí es que nadie

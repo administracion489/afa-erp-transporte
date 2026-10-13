@@ -31,6 +31,8 @@ import {
 } from "./reproceso";
 import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt, type GuiaOdometro } from "./prompts";
 import { formaOdometro } from "@/lib/odometro-prompt";
+import { kmEnEscala } from "@/lib/odometro-decimas";
+import { tamboresDecimasDeFlota, claveUnidad } from "@/lib/odometro-decimas-datos";
 import { transcribirAudio } from "./transcripcion";
 import { miembrosDelMismoRemitente, pareceCombustible, remitenteUtilizable } from "./cluster-remitente";
 import { CONFIG_DEFECTO, normalizarConfigRadar, dentroDeHorario } from "./config";
@@ -378,25 +380,33 @@ function seleccionarMediaCluster(candidatos: any[], cap: number): any[] {
 async function cargarGuiasOdometro(sb: any): Promise<GuiaOdometro[]> {
   try {
     // Se manda la cantidad de dígitos, nunca el km exacto (ver ContextoPrompt.guiasOdometro).
-    const [{ data: propios }, { data: terceros }] = await Promise.all([
-      sb.from("vehiculos").select("placa, guia_odometro, kilometraje_actual"),
-      sb.from("vehiculos_tercero").select("placa, guia_odometro, kilometraje_actual"),
+    const [{ data: propios }, { data: terceros }, tambores] = await Promise.all([
+      sb.from("vehiculos").select("id, placa, guia_odometro, kilometraje_actual"),
+      sb.from("vehiculos_tercero").select("id, placa, guia_odometro, kilometraje_actual"),
+      // Las unidades cuyo último tambor marca décimas (lo dijo una persona al corregir).
+      tamboresDecimasDeFlota(sb),
     ]);
-    const filas = [...((propios as any[]) ?? []), ...((terceros as any[]) ?? [])];
+    const filas = [
+      ...((propios as any[]) ?? []).map((f) => ({ ...f, flota: "propia" as const })),
+      ...((terceros as any[]) ?? []).map((f) => ({ ...f, flota: "tercero" as const })),
+    ];
     return filas
       .map((f) => {
+        const tambor = tambores.get(claveUnidad(f.flota, Number(f.id))) ?? null;
         // La forma sale del km con su margen: cerca de la cifra siguiente la línea admite una más
-        // (lib/odometro-prompt.ts → formaOdometro). El km mismo no viaja.
-        const forma = formaOdometro(Number(f.kilometraje_actual ?? 0));
+        // (lib/odometro-prompt.ts → formaOdometro). El km mismo no viaja. Con el tambor conocido,
+        // de la escala buena: un vigente inflado por la décima diría una cifra de más.
+        const forma = formaOdometro(kmEnEscala(f.kilometraje_actual, tambor));
         return {
           placa: String(f.placa ?? "").trim(),
           guia: String(f.guia_odometro ?? "").trim() || null,
           digitos: forma?.cifras ?? null,
           puedeSubir: forma?.puedeSubir ?? false,
+          tamborDecimas: tambor != null,
         };
       })
       // Una unidad sin placa no se puede nombrar, y una sin guía NI dígitos no aporta nada.
-      .filter((f) => f.placa && (f.guia || f.digitos));
+      .filter((f) => f.placa && (f.guia || f.digitos || f.tamborDecimas));
   } catch {
     return [];
   }
