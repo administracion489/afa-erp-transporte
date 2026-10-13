@@ -40,13 +40,16 @@ export const NUMERO_SOLO_DE_LA_FOTO =
 /**
  * EL ÚLTIMO TAMBOR DE UN ODÓMETRO MECÁNICO SON DÉCIMAS, NO KILÓMETROS.
  *
- * El caso (B4N-968, octubre 2026): el tablero es de rodillos y muestra «5 6 1 2 9 [2]», con el
- * último tambor en otro color. Ese tambor marca décimas: la unidad va en 56,129 km. La IA lo leyó
- * como una cifra más y devolvió 561,292 (y con un dígito repetido, 5,612,926) — diez o cien veces
- * el kilometraje. Y como pasó desde las primeras lecturas, el historial de la unidad quedó entero
- * en la escala equivocada: el km vigente decía «6 cifras» y el prompt EMPUJABA a leer el tambor
- * de décimas como kilómetros. Los dos prompts decían «el total va sin decimales», que es cierto
- * en una pantalla digital y no le dice nada al modelo frente a un tambor sin punto ni coma.
+ * El caso (B4N-968): el tablero es de rodillos, seis tambores de kilómetros y un séptimo de décimas
+ * en otro color. El 26/08/2026 marcaba «5 6 0 2 4 3 [2]» = 560,243.2 km y la IA lo leyó como una
+ * cifra más: 5,602,432, diez veces el kilometraje. (La primera versión de esta regla describió el
+ * tablero como «5 6 1 2 9 [2]» = 56,129.2: seis tambores en vez de siete. La unidad va por los 560
+ * mil; lo dejó escrito el dueño al corregir la lectura el 13/10/2026.) Las lecturas así infladas
+ * empujan el km vigente a siete cifras, y la línea de «cuántas cifras» del prompt EMPUJABA a leer el
+ * tambor de décimas como kilómetros — por eso, con el tambor conocido, la forma sale de la escala
+ * buena (`kmEnEscala`, lib/odometro-decimas.ts). Los dos prompts decían «el total va sin
+ * decimales», que es cierto en una pantalla digital y no le dice nada al modelo frente a un tambor
+ * sin punto ni coma.
  *
  * La regla pide además TRANSCRIBIR el tambor después de un punto en el texto leído: así, si el
  * modelo igual lo mete en el número, el ERP tiene su propia transcripción para deshacerlo
@@ -65,6 +68,19 @@ export function reglaTamborDecimal(campoTexto: string, campoMotivo: string): str
     `leerlo como ABCDEF es multiplicar el kilometraje por diez. Que el total tenga un tambor de décimas NO lo ` +
     `convierte en el parcial/trip: sigue siendo el total. Si no logras distinguir si el último tambor ` +
     `es de décimas, baja la confianza y dilo en ${campoMotivo}.`
+  );
+}
+
+/**
+ * LA UNIDAD QUE YA SE SABE QUE TIENE TAMBOR DE DÉCIMAS: lo dijo una persona al corregir una de sus
+ * lecturas (lib/odometro-decimas.ts). La regla general de arriba dice «casi siempre»; para esta
+ * unidad no hay duda, y se le dice así al modelo. La frase es LA MISMA en los dos carriles.
+ */
+export function fraseTamborDeLaUnidad(campoTexto: string): string {
+  return (
+    `ESTE TABLERO TIENE TAMBOR DE DÉCIMAS (lo confirmó el equipo al corregir una lectura): el último ` +
+    `rodillo de la derecha marca décimas. Déjalo FUERA del kilometraje y escríbelo tras un punto en ` +
+    `${campoTexto}; si cuentas una cifra más de las que dice la forma de esta unidad, esa cifra es la décima`
   );
 }
 

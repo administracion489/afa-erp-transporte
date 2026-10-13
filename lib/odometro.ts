@@ -14,6 +14,7 @@
 import { firmarUrl, type ClienteStorage } from "@/lib/storage-firmado";
 import { instanteLectura, finDiaLimaTs, diaLimaDeTs, capturaDeFechaHora, capturaDeRecarga } from "@/lib/odometro-tiempo";
 import { sinCifrasCopiables } from "@/lib/odometro-prompt";
+import { MOTIVO_DECIMAS } from "@/lib/odometro-decimas";
 
 export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
@@ -65,9 +66,11 @@ function horaLimaDeTs(ts: number): string | null {
 /**
  * Margen por debajo del cual un desfase de reloj es indistinguible de la latencia normal
  * (subida de la foto, cola de reintentos, redondeos). Corregir dentro de este margen sería
- * ruido; por encima, el reloj del dispositivo está realmente mal puesto.
+ * ruido; por encima, el reloj del dispositivo está realmente mal puesto. Lo HEREDA
+ * `MARGEN_RELOJ_FUTURO_MS` de lib/monitoreo-estado.ts (scripts/prueba-monitoreo-estado.mts coteja
+ * los dos): si se cambia uno, se cambia el otro.
  */
-const TOLERANCIA_RELOJ_MS = 5 * 60_000;
+export const TOLERANCIA_RELOJ_MS = 5 * 60_000;
 
 /**
  * Cuánto puede adelantarse la hora de una lectura con hora-tope para que su kilometraje encaje.
@@ -930,21 +933,8 @@ export async function corregirHoraLectura(
   const capturado = capturaDeFechaHora(l.fecha, hora);
   if (!capturado) return { ok: false, error: `«${hora}» no es una hora válida (HH:MM)` };
 
-  const esTercero = l.vehiculo_tercero_id != null;
-  const vid = esTercero ? l.vehiculo_tercero_id : l.vehiculo_id;
-  const km = Number(l.km);
   // Hora EXACTA (no tope): la tecleó una persona, así que no se reubica — se juzga donde dice.
-  const ctx = await contextoOdometro(client, {
-    vehiculo_id: vid, flota: esTercero ? "tercero" : "propia", tsRef: capturado, kmNuevo: km,
-  });
-  // Esta misma lectura está en revisión, así que no es su propia vecina (solo cuentan las vivas).
-  const evalr = evaluarLectura({
-    kmVigente: ctx.kmVigente, kmNuevo: km, kmDiaMax: ctx.kmDiaMax,
-    horasDesdeUltima: ctx.horasDesdeUltima,
-    origenIA: l.fuente === "whatsapp_foto" || l.fuente === "whatsapp_manual" || l.fuente === "combustible",
-    fechaLectura: capturado,
-    refAnterior: ctx.anterior, refPosterior: ctx.posterior,
-  });
+  const evalr = await juzgarContraVecinas(client, l, capturado);
   const hhmm = horaLimaDeTs(new Date(capturado).getTime());
   const cuadra = evalr.estado === "aceptada";
   const motivo = cuadra
@@ -953,6 +943,57 @@ export async function corregirHoraLectura(
 
   const { error } = await client.from("lecturas_odometro")
     .update({ capturado_en: capturado, motivo }).eq("id", lecturaId);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, cuadra, motivo };
+}
+
+/**
+ * Juzga una lectura POR REVISAR contra sus vecinas vivas en el instante `tsRef`, sin tocarla. La
+ * comparten `corregirHoraLectura` (con la hora tecleada) y `rejuzgarLectura` (con la suya).
+ * La lectura está en revisión, así que no es su propia vecina (solo cuentan las vivas).
+ */
+async function juzgarContraVecinas(client: any, l: any, tsRef: string): Promise<EvalLectura> {
+  const esTercero = l.vehiculo_tercero_id != null;
+  const vid = esTercero ? l.vehiculo_tercero_id : l.vehiculo_id;
+  const km = Number(l.km);
+  const ctx = await contextoOdometro(client, {
+    vehiculo_id: vid, flota: esTercero ? "tercero" : "propia", tsRef, kmNuevo: km,
+  });
+  return evaluarLectura({
+    kmVigente: ctx.kmVigente, kmNuevo: km, kmDiaMax: ctx.kmDiaMax,
+    horasDesdeUltima: ctx.horasDesdeUltima,
+    origenIA: l.fuente === "whatsapp_foto" || l.fuente === "whatsapp_manual" || l.fuente === "combustible",
+    fechaLectura: tsRef,
+    refAnterior: ctx.anterior, refPosterior: ctx.posterior,
+  });
+}
+
+/**
+ * Vuelve a JUZGAR una lectura por revisar cuyo km se corrigió, SIN aceptarla. Lo usa la corrección
+ * en lote de las décimas: la lectura que estaba por revisar con 5,602,432 km sigue por revisar con
+ * 560,243, y su motivo viejo («Salto ×10…») ya no describe nada. Con el km bueno, el motivo nuevo
+ * dice si cuadra con sus vecinas (y la bandeja la pone en «Listas para aceptar») o qué le pasa.
+ * La decisión sigue siendo de una persona: el km vigente no se mueve aquí.
+ *
+ * `prefijo` va delante del veredicto («Décima quitada (5,602,432 → 560,243)»): sin él la lectura
+ * aparece por revisar sin decir por qué cambió su número.
+ */
+export async function rejuzgarLectura(
+  client: any,
+  lecturaId: string,
+  prefijo: string,
+): Promise<{ ok: boolean; cuadra?: boolean; motivo?: string | null; error?: string }> {
+  const { data: l } = await client.from("lecturas_odometro").select("*").eq("id", lecturaId).single();
+  if (!l) return { ok: false, error: "Lectura no encontrada" };
+  if (l.estado !== "sospechosa") return { ok: true, cuadra: l.estado === "aceptada", motivo: l.motivo ?? null };
+  const inst = instanteLectura(l);
+  const tsRef = inst.ts ? new Date(inst.ts).toISOString() : String(l.fecha);
+  const evalr = await juzgarContraVecinas(client, l, tsRef);
+  const cuadra = evalr.estado === "aceptada";
+  const motivo = cuadra
+    ? `${prefijo} · con ese km cuadra con las lecturas vecinas${evalr.motivo ? ` (${evalr.motivo})` : ""}`
+    : `${prefijo} · ${evalr.motivo ?? "sigue sin cuadrar"}`;
+  const { error } = await client.from("lecturas_odometro").update({ motivo }).eq("id", lecturaId);
   if (error) return { ok: false, error: error.message };
   return { ok: true, cuadra, motivo };
 }
@@ -991,6 +1032,10 @@ export async function marcarReinicio(
 export const MOTIVOS_ANULACION = [
   { id: "ia_digito",   label: "La IA leyó mal un dígito",      ensena: true,  corrige: true  },
   { id: "ia_trip",     label: "La IA leyó el parcial (trip)",  ensena: true,  corrige: true  },
+  // El último tambor del tablero marca DÉCIMAS y la IA lo leyó como un km más (B4N-968: 560,243.2
+  // entró como 5,602,432). Además de corregir, DECLARA que ese tablero tiene el tambor: desde ahí la
+  // décima se quita sola en las lecturas siguientes de la unidad (lib/odometro-decimas.ts).
+  { id: MOTIVO_DECIMAS, label: "La IA leyó la décima como km", ensena: true,  corrige: true  },
   { id: "tipeo",       label: "Se leyó/tecleó mal el número",  ensena: false, corrige: true  },
   { id: "otra_unidad", label: "Foto de otra unidad",           ensena: false, corrige: false },
   { id: "duplicada",   label: "Lectura duplicada",             ensena: false, corrige: false },
@@ -1046,6 +1091,13 @@ export async function anularLectura(
     km_correcto?: number | null;
     usuario?: string | null;
     placa?: string | null;
+    /**
+     * Estado de la lectura corregida. Por defecto `aceptada`: una persona miró la foto y tecleó el
+     * número. `sospechosa` es para la corrección EN LOTE de las décimas (`lecturasConDecima`): ahí
+     * nadie revisó cada lectura, así que la que estaba por revisar sigue por revisar —con el número
+     * bueno— y la vuelve a juzgar `rejuzgarLectura`.
+     */
+    estadoCorregida?: "aceptada" | "sospechosa";
   }
 ): Promise<{ ok: boolean; kmVigente?: number | null; lecturaCorregidaId?: string | null; error?: string }> {
   const { data: l } = await client.from("lecturas_odometro").select("*").eq("id", opts.lecturaId).single();
@@ -1057,10 +1109,11 @@ export async function anularLectura(
   const fk = esTercero ? "vehiculo_tercero_id" : "vehiculo_id";
 
   // km correcto normalizado: se registra una lectura corregida solo si es un entero
-  // positivo y DISTINTO al mal leído (si coincide, no hay nada que corregir).
+  // positivo y DISTINTO al mal leído (si coincide, no hay nada que corregir). La columna es INT:
+  // una décima («560243.2») se TRUNCA, nunca se redondea — 560,243.7 km todavía no son 560,244.
   const kmC = opts.km_correcto;
   const kmCorrecto =
-    kmC != null && Number.isFinite(Number(kmC)) && Number(kmC) > 0 ? Math.round(Number(kmC)) : null;
+    kmC != null && Number.isFinite(Number(kmC)) && Number(kmC) > 0 ? Math.floor(Number(kmC)) : null;
   const hayCorreccion = kmCorrecto != null && kmCorrecto !== Number(l.km);
 
   // Registra (o recupera) la lectura CORREGIDA: clon del original con el número bueno,
@@ -1080,8 +1133,10 @@ export async function anularLectura(
       foto_url: l.foto_url ?? null,
       momento: l.momento ?? null,
       created_at: l.created_at,                 // conserva la posición temporal en la jornada
+      // …y la hora de la captura, si la tenía (columna accesoria: solo viaja si existe y trae valor).
+      ...(l.capturado_en != null ? { capturado_en: l.capturado_en } : {}),
       ref_origen: refCorreccion,                // trazabilidad + idempotencia
-      estado: "aceptada",
+      estado: opts.estadoCorregida ?? "aceptada",
       motivo: `Corregida desde ${Number(l.km).toLocaleString("es-PE")} km`,
     }).select("id").single();
     if (error) return { ok: false, error: error.message };
@@ -1176,6 +1231,7 @@ const NOTA_ILEGIBLE = /no se ve|no se lee|no logr|borros|no est[aá] clar|no se 
 function encabezadoLeccion(motivo: string): string {
   if (motivo === "ia_trip") return "Confundiste el parcial/trip con el odómetro TOTAL.";
   if (motivo === "ia_digito") return "Añadiste o perdiste un dígito al leer el número.";
+  if (motivo === MOTIVO_DECIMAS) return "El último tambor de este tablero marca DÉCIMAS y lo leíste como un kilómetro más: déjalo fuera del número.";
   if (motivo === "tipeo") return "El número quedó mal leído.";
   return "";
 }

@@ -30,6 +30,11 @@ import { sinCifrasCopiables, formaOdometro, UMBRAL_CAMBIO_DE_CIFRA } from "../li
 import { kmDeRecarga } from "../lib/radar/km-recarga";
 import { readFileSync } from "node:fs";
 import { promptExtraccionMedia, type ContextoPrompt } from "../lib/radar/prompts";
+import {
+  correccionDeDecimas, tamborDecimasDe, sinDecimaDeUnidad, kmEnEscala, leerKmConDecima, esDecimaLeidaComoKm,
+  lecturasConDecima, MOTIVO_DECIMAS, type TamborDecimas,
+} from "../lib/odometro-decimas";
+import { MOTIVOS_ANULACION } from "../lib/odometro";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -275,6 +280,9 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
   const casos = [
     { placa: "CUP-435", ia: 239980,  ant: 23980,  horas: 24, espera: 23980,  foto: 23980 },  // verificado contra la foto
     { placa: "CUP-435", ia: 233379,  ant: 23272,  horas: 15, espera: 23379,  foto: null  },
+    // OJO: el tablero de B4N-968 tiene tambor de DÉCIMAS (sección 16); sin saberlo, el colapso da
+    // 560,473, y lo más probable es que marcara 560,047.3. Se conserva: es lo que hace el motor
+    // cuando no conoce el tambor de la unidad.
     { placa: "B4N-968", ia: 5600473, ant: 559997, horas: 24, espera: 560473, foto: null  },
     { placa: "CUP-435", ia: 2320206, ant: 23206,  horas: 24, espera: null,   foto: 23206 },  // sin cifras repetidas
   ];
@@ -561,9 +569,11 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
 }
 
 
-// ── 14. El tambor de DÉCIMAS leído como una cifra más (B4N-968, octubre 2026) ──
-// Tablero mecánico «5 6 1 2 9 [2]», el último tambor en otro color: 56,129.2 km. La IA devolvía
-// 561,292. Y como venía pasando desde antes, el historial de la unidad quedó en esa escala.
+// ── 14. El tambor de DÉCIMAS leído como una cifra más, CON la transcripción del modelo ──
+// Un tablero mecánico de seis tambores «5 6 1 2 9 [2]», el último en otro color: 56,129.2 km, y la
+// IA devuelve 561,292 transcribiendo «56129.2». (Esta sección nació con B4N-968, descrito así; ese
+// tablero tiene en realidad SIETE tambores y va por los 560 mil — sección 16. La lógica que fija
+// esta sección es la misma con cualquier número de tambores.)
 console.log("\n14. Tambor de décimas");
 {
   chk("decimalComoEntero · «56129.2» con km 561292 → 56129", decimalComoEntero(561292, "56129.2") === 56129);
@@ -576,7 +586,7 @@ console.log("\n14. Tambor de décimas");
 
   // Con el historial ya corregido (en kilómetros): se registra la parte entera, sin pedir confirmación.
   const ok = leer({ kmIA: 561292, textoLeido: "56129.2", kmVigente: 56050, vecinas: { anterior: 56050, posterior: null } });
-  chk("B4N-968 · se registra 56,129, no 561,292", ok.km === 56129 && ok.codigo === "decimal_como_entero", `km=${ok.km} codigo=${ok.codigo}`);
+  chk("seis tambores · se registra 56,129, no 561,292", ok.km === 56129 && ok.codigo === "decimal_como_entero", `km=${ok.km} codigo=${ok.codigo}`);
   chk("…cuadra con la unidad: sigue el curso normal", ok.autoOk === true && ok.origen === "corregido");
   chk("…no lleva `confirmar`: lo transcribió el modelo, no lo dedujo el ERP", ok.confirmar !== true);
   chk("…el motivo dice que el último tambor son décimas", /D[ÉE]CIMAS/i.test(ok.motivo ?? ""));
@@ -609,7 +619,7 @@ console.log("\n14. Tambor de décimas");
   chk("recarga · con el historial ×10, corrige y BLOQUEA", rSucio.km === 56129 && rSucio.anomalia?.bloquea === true);
 
   // La regla está en los dos carriles, y la forma no cuenta el tambor.
-  const app = promptOdometro({ digitos: 5, placa: "B4N-968" });
+  const app = promptOdometro({ digitos: 5, placa: "XYZ-123" });
   chk("app · el prompt explica el tambor de décimas", /TAMBORES/.test(app) && /DÉCIMAS/.test(app) && /«ABCDE\.F»/.test(app));
   chk("app · la forma de 5 cifras no cuenta el tambor", /5 dígitos \(sin contar el tambor de décimas/.test(app));
   const radar = promptExtraccionMedia({ fechaHoy: "2026-10-09", horaAhora: "10:00" });
@@ -720,6 +730,140 @@ console.log("\n15. Dígito repetido con testigo");
   chk(`barrido · con avance y sin posterior pegada, nadie atestigua (${avanceJuzgado} casos)`, sinTestigoConAvance === 0 && avanceJuzgado > 0, `${sinTestigoConAvance}`);
   // Corolario: un motor que nunca diera testigo cumpliría todo lo anterior de forma trivial.
   chk(`barrido · y el testigo SÍ aparece (${conTestigo} veces)`, conTestigo > 0);
+}
+
+// ── 16. LA UNIDAD CUYO TABLERO TIENE TAMBOR DE DÉCIMAS (B4N-968, 13/10/2026) ─────────
+// Seis tambores de km y uno de décimas. El 26/08 marcaba 560,243.2 y entró como 5,602,432: la IA
+// leyó bien las cifras y metió la décima en el número, SIN transcribir el punto — así que la
+// sección 14 no tenía con qué deshacerlo. El dueño la corrigió escribiendo «560243.2». Desde esa
+// corrección el ERP sabe que ese tablero tiene el tambor y lo aplica solo (lib/odometro-decimas.ts).
+console.log("\n16. Unidad con tambor de décimas");
+{
+  // 16.1 Qué corrección declara el tambor.
+  chk("motivo «decimas» → lo declara", correccionDeDecimas({ motivo_tipo: MOTIVO_DECIMAS, km_leido: 5602432, km_correcto: 560243 }) === "motivo");
+  chk("«Otro» con el km sin su última cifra → se reconoce por la forma (la corrección del dueño)",
+    correccionDeDecimas({ motivo_tipo: "otro", km_leido: 5602432, km_correcto: 560243 }) === "forma");
+  chk("…pero NO si las dos últimas cifras son iguales (también es el colapso de un dígito repetido)",
+    correccionDeDecimas({ motivo_tipo: "otro", km_leido: 5602433, km_correcto: 560243 }) === null);
+  chk("…salvo que el motivo lo declare", correccionDeDecimas({ motivo_tipo: MOTIVO_DECIMAS, km_leido: 5602433, km_correcto: 560243 }) === "motivo");
+  chk("un dígito repetido corregido (CUP-435) no declara nada",
+    correccionDeDecimas({ motivo_tipo: "ia_digito", km_leido: 239980, km_correcto: 23980 }) === null);
+  chk("sin km correcto no hay escala que fijar", correccionDeDecimas({ motivo_tipo: MOTIVO_DECIMAS, km_leido: 5602432, km_correcto: null }) === null);
+  chk("un número de tres cifras no se juzga por la forma", correccionDeDecimas({ motivo_tipo: "otro", km_leido: 123, km_correcto: 12 }) === null);
+
+  const t = tamborDecimasDe([
+    { motivo_tipo: "otro", km_leido: 5602432, km_correcto: 560243, created_at: "2026-10-13T16:24:00Z" },
+    { motivo_tipo: "ia_trip", km_leido: 1803, km_correcto: 559000, created_at: "2026-10-14T10:00:00Z" },
+  ]);
+  chk("tamborDecimasDe · la unidad tiene el tambor, con seis cifras de km", !!t && t.cifras === 6 && t.kmCorrecto === 560243 && t.por === "forma");
+  chk("sin correcciones de décima → sin tambor", tamborDecimasDe([{ motivo_tipo: "ia_digito", km_leido: 239980, km_correcto: 23980 }]) === null);
+  const tb: TamborDecimas = t!;
+
+  chk("sinDecimaDeUnidad · 5,602,432 → 560,243", sinDecimaDeUnidad(5602432, tb) === 560243);
+  chk("…y nunca redondea: 5,602,439 → 560,243", sinDecimaDeUnidad(5602439, tb) === 560243);
+  chk("…un número ya en kilómetros no se toca", sinDecimaDeUnidad(561292, tb) === null);
+  const tViejo: TamborDecimas = { kmCorrecto: 999000, cifras: 6, fecha: null, por: "motivo" };
+  chk("…y el 1,000,050 legítimo de un odómetro que acaba de pasar a siete cifras NO se divide",
+    sinDecimaDeUnidad(1000050, tViejo) === null);
+  chk("kmEnEscala · el vigente inflado (5,612,926) vuelve a seis cifras", kmEnEscala(5612926, tb) === 561292 && kmEnEscala(561292, tb) === 561292);
+  chk("kmEnEscala · sin tambor, tal cual", kmEnEscala(5612926, null) === 5612926);
+
+  // 16.2 Lo que escribe una persona en el modal.
+  const L = (x: string) => JSON.stringify(leerKmConDecima(x));
+  chk("«560243.2» → 560,243 con décima 2", L("560243.2") === JSON.stringify({ km: 560243, decima: 2 }));
+  chk("«560243,2» → igual (coma decimal)", L("560243,2") === JSON.stringify({ km: 560243, decima: 2 }));
+  chk("«560,243.2» → igual (miles y décima)", L("560,243.2") === JSON.stringify({ km: 560243, decima: 2 }));
+  chk("«560 243.2» → igual (con espacio)", L("560 243.2") === JSON.stringify({ km: 560243, decima: 2 }));
+  chk("«560,243» y «560.243» son MILES", L("560,243") === JSON.stringify({ km: 560243, decima: null }) && L("560.243") === JSON.stringify({ km: 560243, decima: null }));
+  chk("«560243» entero", L("560243") === JSON.stringify({ km: 560243, decima: null }));
+  chk("«560243.25» no es ni miles ni décima → null", leerKmConDecima("560243.25") === null);
+  chk("vacío o texto → null", leerKmConDecima("") === null && leerKmConDecima("abc") === null && leerKmConDecima("0") === null);
+  chk("esDecimaLeidaComoKm · 5,602,432 y «560243.2» → sí", esDecimaLeidaComoKm(5602432, leerKmConDecima("560243.2")));
+  chk("…«560243» sin décima → no", !esDecimaLeidaComoKm(5602432, leerKmConDecima("560243")));
+  chk("…«560244.2» (otro número) → no", !esDecimaLeidaComoKm(5602432, leerKmConDecima("560244.2")));
+  chk("MOTIVOS_ANULACION trae el motivo de la décima, que corrige y enseña",
+    MOTIVOS_ANULACION.some((m) => m.id === MOTIVO_DECIMAS && m.corrige && m.ensena));
+
+  // 16.3 Las OTRAS lecturas de la unidad con la décima metida.
+  const otras = lecturasConDecima([
+    { id: "a", km: 5612926, estado: "aceptada", fecha: "2026-09-20" },
+    { id: "b", km: 5602432, estado: "sospechosa", fecha: "2026-08-26" },
+    { id: "c", km: 561100, estado: "aceptada", fecha: "2026-09-19" },
+    { id: "d", km: 5600473, estado: "anulada", fecha: "2026-08-20" },
+    { id: "e", km: 5620000, estado: "reinicio", fecha: "2026-10-01" },
+    { id: "f", km: 5605001, estado: "aceptada", fecha: "2026-09-01", ref_origen: "correccion:zz" },
+    { id: "g", km: 5603001, estado: "rechazada", fecha: "2026-08-27" },
+  ], tb, "g");
+  chk("lecturasConDecima · solo las vivas con una cifra de más, sin la excluida ni las corregidas",
+    otras.map((o) => o.id).join(",") === "b,a", otras.map((o) => o.id).join(","));
+  chk("…con el km que les corresponde", otras[0]?.kmNuevo === 560243 && otras[1]?.kmNuevo === 561292);
+
+  // 16.4 El selector con el tambor conocido.
+  const caso = leer({ kmIA: 5602432, kmVigente: 559997, horasDesdeUltima: 72, vecinas: { anterior: 559997, posterior: null }, tamborDecimas: tb });
+  chk("B4N-968 · 5,602,432 sin el punto transcrito → se registra 560,243", caso.km === 560243 && caso.codigo === "decimal_como_entero", `km=${caso.km} codigo=${caso.codigo}`);
+  chk("…sigue el curso normal, sin pedir confirmación (el tambor lo dijo una persona)", caso.autoOk === true && caso.confirmar !== true);
+  chk("…y el motivo nombra el tambor de décimas", /DÉCIMAS/.test(caso.motivo ?? "") && /tablero de esta unidad/.test(caso.motivo ?? ""));
+  const sinTambor = leer({ kmIA: 5602432, kmVigente: 559997, horasDesdeUltima: 72, vecinas: { anterior: 559997, posterior: null } });
+  chk("regresión · sin conocer el tambor, 5,602,432 no se corrige (el defecto reportado)", sinTambor.km !== 560243, `km=${sinTambor.km} codigo=${sinTambor.codigo}`);
+
+  const agosto = leer({ kmIA: 5600473, kmVigente: 559997, horasDesdeUltima: 24, tamborDecimas: tb });
+  chk("5,600,473 con el tambor conocido → 560,047 (la décima), NO el colapso 560,473", agosto.km === 560047 && agosto.codigo === "decimal_como_entero", `km=${agosto.km} codigo=${agosto.codigo}`);
+
+  const bien = leer({ kmIA: 560243, kmVigente: 559997, horasDesdeUltima: 72, tamborDecimas: tb });
+  chk("la IA ya dejó fuera la décima → nada que corregir", bien.km === 560243 && bien.codigo === null && bien.origen === "ia");
+
+  const sucio = leer({ kmIA: 5612926, kmVigente: 5612000, horasDesdeUltima: 24, vecinas: { anterior: 5612000, posterior: null }, tamborDecimas: tb });
+  chk("historial con la décima metida · se registra 561,292 igual", sucio.km === 561292 && sucio.codigo === "decimal_como_entero");
+  chk("…pero NO pasa de largo, y dice que hay lecturas diez veces mayores", sucio.autoOk === false && /diez veces mayores/.test(sucio.motivo ?? ""));
+
+  const nuevo = leer({ kmIA: 5602432, kmVigente: 0, hayHistorial: false, tamborDecimas: tb });
+  chk("sin ancla · la escala de la corrección basta", nuevo.km === 560243 && nuevo.autoOk === true);
+  const nuevoSinTambor = leer({ kmIA: 5602432, kmVigente: 0, hayHistorial: false });
+  chk("sin ancla y sin tambor · como siempre (el número de la IA)", nuevoSinTambor.km === 5602432 && nuevoSinTambor.codigo === null);
+
+  const sieteCifras = leer({ kmIA: 1000050, kmVigente: 999950, horasDesdeUltima: 24, tamborDecimas: tViejo });
+  chk("el odómetro que pasa a siete cifras NO se divide aunque el tambor sea de seis", sieteCifras.km === 1000050 && sieteCifras.codigo === null, `km=${sieteCifras.km} codigo=${sieteCifras.codigo}`);
+
+  const conPunto = leer({ kmIA: 5602432, textoLeido: "560243.2", kmVigente: 559997, horasDesdeUltima: 72, tamborDecimas: tb });
+  chk("con el punto transcrito manda la transcripción (mismo resultado)", conPunto.km === 560243 && conPunto.codigo === "decimal_como_entero");
+
+  const rec = kmDeRecarga(5602432, caso);
+  chk("recarga · km 560,243 sin bloquear", rec.km === 560243 && rec.anomalia?.codigo === "km_corregido" && rec.anomalia?.bloquea === false);
+  chk("recarga · con el historial inflado, corrige y BLOQUEA", kmDeRecarga(5612926, sucio).anomalia?.bloquea === true);
+
+  // 16.5 Barrido: con el tambor conocido, toda lectura con la décima metida cae en su km, y toda
+  // lectura ya en kilómetros queda como está. Sin tambor, el motor es el de antes.
+  let mal = 0, juzgadas = 0, igualSinTambor = 0, distintoSinTambor = 0;
+  for (const ant of [559997, 560243, 561000, 563999]) {
+    for (let delta = 0; delta <= 1400; delta += 37) {
+      const V = ant + delta;
+      for (let d = 0; d <= 9; d++) {
+        const conDecima = leer({ kmIA: V * 10 + d, kmVigente: ant, horasDesdeUltima: 24, vecinas: { anterior: ant, posterior: null }, tamborDecimas: tb });
+        const enKm = leer({ kmIA: V, kmVigente: ant, horasDesdeUltima: 24, vecinas: { anterior: ant, posterior: null }, tamborDecimas: tb });
+        juzgadas += 2;
+        if (conDecima.km !== V || !conDecima.autoOk) mal++;
+        if (enKm.km !== V || enKm.origen !== "ia") mal++;
+        const a = leer({ kmIA: V * 10 + d, kmVigente: ant, horasDesdeUltima: 24, vecinas: { anterior: ant, posterior: null } });
+        const b = leer({ kmIA: V * 10 + d, kmVigente: ant, horasDesdeUltima: 24, vecinas: { anterior: ant, posterior: null }, tamborDecimas: null });
+        if (JSON.stringify(a) === JSON.stringify(b)) igualSinTambor++; else distintoSinTambor++;
+      }
+    }
+  }
+  chk(`barrido · con el tambor, la décima se quita y el km queda (${juzgadas} lecturas)`, mal === 0 && juzgadas > 0, `${mal} mal`);
+  chk(`barrido · sin tambor (null o ausente) el motor es exactamente el de antes (${igualSinTambor})`, distintoSinTambor === 0, `${distintoSinTambor} distintos`);
+
+  // 16.6 Los dos carriles se lo dicen al modelo, sin cifras copiables.
+  const app = promptOdometro({ digitos: 6, placa: "B4N-968", tamborDecimas: true });
+  const linea = app.match(/ESTE TABLERO TIENE TAMBOR DE DÉCIMAS[^\n]*/)?.[0] ?? "";
+  chk("app · el prompt de la unidad dice que su tablero tiene tambor de décimas", !!linea && /"texto_leido"/.test(linea));
+  chk("app · sin cifras copiables en esa línea", !!linea && !/\d{4,}/.test(linea));
+  chk("app · sin tambor, la línea no aparece", !/ESTE TABLERO TIENE TAMBOR/.test(promptOdometro({ digitos: 6, placa: "B4N-968" })));
+  const radar = promptExtraccionMedia({
+    fechaHoy: "2026-10-13", horaAhora: "10:00",
+    guiasOdometro: [{ placa: "B4N-968", guia: null, digitos: 6, puedeSubir: false, tamborDecimas: true }],
+  } as ContextoPrompt);
+  chk("Radar · la línea de B4N-968 dice que su tablero tiene tambor de décimas",
+    /- B4N-968: [^\n]*ESTE TABLERO TIENE TAMBOR DE DÉCIMAS/.test(radar));
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) fallaron` : "\nTodo en verde");

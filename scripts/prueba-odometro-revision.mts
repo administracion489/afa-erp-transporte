@@ -40,6 +40,11 @@ console.log("\n1 · Los motivos que escribe el motor se clasifican (ninguno cae 
   chk("una nota de reloj delante no cambia el tipo", tipoDeRevision(conReloj) === "retroceso");
   // Lo que escribe corregirHoraLectura (lib/odometro.ts) con la hora del voucher.
   chk("hora corregida que cuadra → lista para aceptar", tipoDeRevision("Hora corregida a mano: 08:01 · con esa hora cuadra con las lecturas vecinas") === "lista_para_aceptar");
+  // La décima quitada en lote (rejuzgarLectura, lib/odometro.ts): las mismas dos salidas.
+  chk("décima quitada que cuadra → lista para aceptar",
+    tipoDeRevision("Décima quitada (5,602,432 → 560,243) · con ese km cuadra con las lecturas vecinas") === "lista_para_aceptar");
+  chk("décima quitada que no cuadra → su problema real",
+    tipoDeRevision(`Décima quitada (5,602,432 → 560,243) · ${evaluarLectura({ kmVigente: 560500, kmNuevo: 560243, ahora: new Date("2026-08-26T17:00:00-05:00"), refAnterior: ref(560500, "2026-08-26T08:00:00-05:00") }).motivo}`) === "retroceso");
   chk("hora corregida que no cuadra → su problema real",
     tipoDeRevision(`Hora corregida a mano: 19:00 · Retrocede 27 km frente a la lectura de las 17:53 (29,674 km) (posible manipulación)`) === "retroceso");
   chk("nota del GPS (check-out) → gps", tipoDeRevision("GPS: el odómetro del día (40 km) es menor que lo recorrido por GPS (120 km)") === "gps");

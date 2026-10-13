@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from "react";
 import { Manrope, JetBrains_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabase";
 import EliaPanel from "./_components/elia";
@@ -410,6 +410,29 @@ const menu = menuGrupos.flatMap((g) => g.items);
 // Grupos que arrancan abiertos por defecto
 const GRUPOS_ABIERTOS_DEFAULT = ["Principal", "Comercial", "CRM", "Operaciones", "Flota"];
 
+// Pantallas que dibujan un mapa a ALTO COMPLETO: su <main> mide exactamente el alto
+// visible y no lleva padding, así el mapa llena la pantalla y el documento no scrollea.
+// La página tiene que usar `h-full` (no `h-screen`): con h-screen dentro de un main con
+// padding sobraba alto y, al desplazar, aparecía el hueco en blanco debajo del mapa.
+// Coincide la ruta exacta o cualquier sub-ruta (`ruta + "/"`).
+const RUTAS_PANTALLA_COMPLETA = ["/monitoreo"];
+
+// Celular: el menú arranca colapsado y se vuelve a colapsar al navegar. Se lee con
+// useSyncExternalStore y no en el render: en el servidor no hay `window`, y el snapshot
+// del servidor (false) es el que React usa al hidratar, así que no hay desajuste.
+const CONSULTA_PANTALLA_CHICA = "(max-width: 767px)";
+function suscribirPantallaChica(aviso: () => void) {
+  const mq = window.matchMedia(CONSULTA_PANTALLA_CHICA);
+  mq.addEventListener("change", aviso);
+  return () => mq.removeEventListener("change", aviso);
+}
+const esPantallaChicaAhora = () => window.matchMedia(CONSULTA_PANTALLA_CHICA).matches;
+const esPantallaChicaEnServidor = () => false;
+
+// Cuánto contenido del menú tiene que quedar por debajo para pintar la pista inferior.
+// Unos pocos px de redondeo de subpíxel no son "más ítems".
+const MENU_RESTO_MIN_PX = 4;
+
 // ─── Logo ───────────────────────────────────────────────────────────────────
 function LogoAFA({ collapsed }: { collapsed: boolean }) {
   if (collapsed) {
@@ -628,6 +651,50 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [cargando, setCargando]           = useState(true);
   const [collapsed, setCollapsed]         = useState(false);
 
+  // En celular el menú no usa `collapsed` (que es el de escritorio, y ahí todo sigue
+  // igual): va colapsado salvo que la persona lo abra a mano, y CADA navegación lo vuelve
+  // a colapsar (también volver a una ruta donde ya se había abierto). El reinicio se hace
+  // durante el render al ver otro pathname, no en un efecto: así no hay un cuadro con el
+  // menú abierto tapando la pantalla nueva.
+  const pantallaChica = useSyncExternalStore(suscribirPantallaChica, esPantallaChicaAhora, esPantallaChicaEnServidor);
+  const [menuAbiertoEnCelular, setMenuAbiertoEnCelular] = useState(false);
+  const [rutaDelMenu, setRutaDelMenu] = useState(pathname);
+  if (rutaDelMenu !== pathname) {
+    setRutaDelMenu(pathname);
+    setMenuAbiertoEnCelular(false);
+  }
+  const menuColapsado = pantallaChica ? !menuAbiertoEnCelular : collapsed;
+  const alternarMenu = () => {
+    if (pantallaChica) setMenuAbiertoEnCelular((v) => !v);
+    else setCollapsed((v) => !v);
+  };
+
+  const esPantallaCompleta = RUTAS_PANTALLA_COMPLETA.some(
+    (r) => pathname === r || pathname.startsWith(r + "/")
+  );
+
+  // Pista de "hay más menú abajo": la barra de scroll del <nav> está oculta, así que sin
+  // el degradado no se nota que hay ítems por debajo del borde. Se mide al desplazar y
+  // cuando cambia el alto del nav o de su contenido (abrir un grupo, colapsar el menú).
+  const navMenuRef = useRef<HTMLElement | null>(null);
+  const [menuSigueAbajo, setMenuSigueAbajo] = useState(false);
+  const medirMenu = useCallback(() => {
+    const nav = navMenuRef.current;
+    if (!nav) return;
+    setMenuSigueAbajo(nav.scrollHeight - nav.scrollTop - nav.clientHeight > MENU_RESTO_MIN_PX);
+  }, []);
+  const montarNavMenu = useCallback((nav: HTMLElement | null) => {
+    navMenuRef.current = nav;
+    if (!nav || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(medirMenu);
+    ro.observe(nav);
+    if (nav.firstElementChild) ro.observe(nav.firstElementChild);
+    return () => {
+      ro.disconnect();
+      navMenuRef.current = null;
+    };
+  }, [medirMenu]);
+
   // Mensajes de pasajeros sin atender — global, para el badge del menú y el
   // notificador (toast/sonido/aviso), sin importar en qué módulo esté el operador.
   const { noLeidos: mensajesNoLeidos, ultimo: ultimoMensaje } =
@@ -720,28 +787,37 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </div>
 
         ) : (
-          <div className="min-h-screen flex bg-[#eef3f8]">
+          <div className="min-h-dvh flex bg-[#eef3f8]">
 
+            {/*
+              El aside mide el alto VISIBLE y se queda pegado arriba (sticky): con ~54 ítems
+              y sin alto propio estiraba el documento más allá de la pantalla, y en /monitoreo
+              aparecía un hueco en blanco enorme al desplazar. El menú scrollea por dentro
+              (nav con min-h-0); el documento sigue siendo el que scrollea en el resto del ERP.
+              `sticky` crea su propio contexto de apilamiento: z-20 es el z que ya tenía el
+              botón de colapsar, así sigue tapando lo mismo que antes y todo modal (z-40+) lo
+              sigue cubriendo. También es el contexto de posicionamiento de ese botón.
+            */}
             <aside
               className={`
-                relative flex flex-col flex-shrink-0
+                sticky top-0 z-20 h-dvh self-start flex flex-col flex-shrink-0
                 bg-gradient-to-b from-[#0c2d52] via-[#091f3a] to-[#040f1e]
                 text-white shadow-2xl
                 transition-all duration-300 ease-in-out
-                ${collapsed ? "w-[64px]" : "w-[210px]"}
+                ${menuColapsado ? "w-[64px]" : "w-[210px]"}
               `}
             >
               <button
-                onClick={() => setCollapsed((v) => !v)}
+                onClick={alternarMenu}
                 className="
                   absolute -right-3 top-[68px] z-20
                   w-6 h-6 rounded-full bg-[#2f8ee9] shadow-lg
                   flex items-center justify-center
                   hover:bg-[#1262bd] transition-colors
                 "
-                title={collapsed ? "Expandir menú" : "Colapsar menú"}
+                title={menuColapsado ? "Expandir menú" : "Colapsar menú"}
               >
-                {collapsed
+                {menuColapsado
                   ? <Ic.PanelOpen  size={11} strokeWidth={2} className="text-white" />
                   : <Ic.PanelClose size={11} strokeWidth={2} className="text-white" />
                 }
@@ -750,12 +826,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <div className={`
                 flex items-center border-b border-white/8
                 transition-all duration-300
-                ${collapsed ? "p-2.5 justify-center" : "p-3"}
+                ${menuColapsado ? "p-2.5 justify-center" : "p-3"}
               `}>
-                <LogoAFA collapsed={collapsed} />
+                <LogoAFA collapsed={menuColapsado} />
               </div>
 
-              {!collapsed && (
+              {!menuColapsado && (
                 <div className="px-3 py-2 border-b border-white/5">
                   <div className="flex items-center gap-2 bg-white/5 rounded-lg px-2.5 py-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
@@ -767,28 +843,46 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 </div>
               )}
 
-              <nav
-                className={`flex-1 overflow-y-auto overflow-x-hidden py-2 ${collapsed ? "px-1.5" : "px-2"}`}
-                style={{ scrollbarWidth: "none" }}
-              >
-                {menuGrupos.map((g) => (
-                  <GrupoMenu
-                    key={g.grupo}
-                    grupo={g.grupo}
-                    items={g.items}
-                    pathname={pathname}
-                    permisos={permisos}
-                    collapsed={collapsed}
-                    badges={badgesMenu}
-                  />
-                ))}
-              </nav>
+              <div className="relative flex-1 min-h-0 flex flex-col">
+                <nav
+                  ref={montarNavMenu}
+                  onScroll={medirMenu}
+                  className={`flex-1 min-h-0 overflow-y-auto overflow-x-hidden py-2 ${menuColapsado ? "px-1.5" : "px-2"}`}
+                  style={{ scrollbarWidth: "none" }}
+                >
+                  {/* Envoltorio solo para medir el alto del contenido (pista inferior). */}
+                  <div>
+                    {menuGrupos.map((g) => (
+                      <GrupoMenu
+                        key={g.grupo}
+                        grupo={g.grupo}
+                        items={g.items}
+                        pathname={pathname}
+                        permisos={permisos}
+                        collapsed={menuColapsado}
+                        badges={badgesMenu}
+                      />
+                    ))}
+                  </div>
+                </nav>
+                {/* Pista de "hay más ítems abajo": la barra de scroll está oculta. Mismo tono
+                    que el fondo del aside a esa altura; no captura clics. */}
+                <div
+                  aria-hidden="true"
+                  className={`
+                    pointer-events-none absolute inset-x-0 bottom-0 h-10
+                    bg-gradient-to-t from-[#061326] to-transparent
+                    transition-opacity duration-200
+                    ${menuSigueAbajo ? "opacity-100" : "opacity-0"}
+                  `}
+                />
+              </div>
 
               <div className={`
                 border-t border-white/8 bg-black/15 transition-all duration-300
-                ${collapsed ? "p-2" : "p-3"}
+                ${menuColapsado ? "p-2" : "p-3"}
               `}>
-                {collapsed ? (
+                {menuColapsado ? (
                   <div className="flex flex-col items-center gap-2">
                     <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#2f8ee9] to-[#0b315f] text-white flex items-center justify-center font-black text-sm shadow">
                       {nombreUsuario.charAt(0).toUpperCase()}
@@ -827,7 +921,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </div>
             </aside>
 
-            <main className="flex-1 overflow-y-auto p-6">{children}</main>
+            {/* El documento es el que scrollea (los window.scrollTo del ERP dependen de eso):
+                el <main> normal NO es el contenedor de scroll. Solo las pantallas de mapa a
+                alto completo (RUTAS_PANTALLA_COMPLETA) miden el alto visible, sin padding.
+                min-w-0: un hijo ancho no empuja el layout (aquí no cambia nada visible: con
+                overflow distinto de visible el mínimo automático de un ítem flex ya es 0). */}
+            <main
+              className={
+                esPantallaCompleta
+                  ? "flex-1 min-w-0 h-dvh overflow-hidden"
+                  : "flex-1 min-w-0 overflow-y-auto p-6"
+              }
+            >
+              {children}
+            </main>
 
             {/* ELIA — asistente de operaciones (solo usuarios internos autenticados) */}
             <EliaPanel nombre={nombreUsuario} rol={rolUsuario} permisos={permisos} />
