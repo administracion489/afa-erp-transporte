@@ -25,8 +25,9 @@ export default function MapaParaderos({ puntos, poli, onMover, onInsertar, color
   puntos: PuntoMapa[];
   poli: [number, number][] | null;
   onMover: (id: string, lat: number, lng: number) => void;
-  /** Clic en «＋ Paradero aquí»: el punto, en [lng, lat]. */
-  onInsertar: (punto: [number, number]) => void;
+  /** Clic en «＋ Paradero aquí»: el punto, en [lng, lat]. Sin él la línea no ofrece insertar
+   *  (el mapa de la «Ruta del servicio» no tiene una lista de paraderos donde meterlo). */
+  onInsertar?: (punto: [number, number]) => void;
   colorRuta?: string;
 }) {
   const contRef = useRef<HTMLDivElement>(null);
@@ -60,6 +61,8 @@ export default function MapaParaderos({ puntos, poli, onMover, onInsertar, color
         m.addSource("ruta", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [] } } });
         m.addLayer({ id: "ruta-borde", type: "line", source: "ruta", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#ffffff", "line-width": 7 } });
         m.addLayer({ id: "ruta", type: "line", source: "ruta", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": colorRuta, "line-width": 4 } });
+        setListo(true);
+        if (!cb.current.onInsertar) return;
         // Capa invisible y ancha: un clic sobre una línea de 4 px es difícil con el dedo.
         m.addLayer({ id: "ruta-clic", type: "line", source: "ruta", paint: { "line-color": "#000000", "line-width": 18, "line-opacity": 0 } });
         m.on("mouseenter", "ruta-clic", () => { m.getCanvas().style.cursor = "copy"; });
@@ -78,10 +81,9 @@ export default function MapaParaderos({ puntos, poli, onMover, onInsertar, color
           nota.style.cssText = "margin:6px 0 0;color:#64748b;font-size:10px;max-width:170px";
           caja.append(btn, nota);
           const pop = new gl.Popup({ closeButton: true, offset: 8, maxWidth: "220px" }).setLngLat(punto).setDOMContent(caja).addTo(m);
-          btn.onclick = () => { pop.remove(); cb.current.onInsertar(punto); };
+          btn.onclick = () => { pop.remove(); cb.current.onInsertar?.(punto); };
           popupRef.current = pop;
         });
-        setListo(true);
       });
       m.on("error", (e) => {
         // Un 401 del estilo es el token inválido: dicho, no un recuadro en blanco.

@@ -36,6 +36,8 @@ import dynamic from "next/dynamic";
 import { estadoMarca, firmaParaderos, indiceDeInsercion, type HoraCalc, type FilaPlan } from "@/lib/paradas-horario";
 import { useRutaParaderos, coordsOk } from "@/components/cotizaciones/useRutaParaderos";
 import BarraHorasParaderos, { etiquetaDiaCorta, type ContextoHoras } from "@/components/cotizaciones/BarraHorasParaderos";
+import { coordValida, resolverRestauracion, rutaCoordsParaGuardar, rotuloFuente, type PuntoRuta, type Extremo } from "@/lib/cotizacion-ruta-coords";
+import { faltaColumna } from "@/lib/columna-faltante";
 // El mapa arrastra el CSS de Mapbox y su motor se baja al abrirlo (lib/mapbox-carga.ts).
 const MapaParaderos = dynamic(() => import("@/components/cotizaciones/MapaParaderos"), { ssr: false });
 
@@ -51,7 +53,7 @@ type ModoServ="eventual"|"fijo";
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;pax_contratado?:number|null;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;ciudad?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;};
 type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;cuentas_bancarias?:{banco:string;cuenta:string;cci:string}[]|null;};
 type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
 // `hora_calc` = la marca que deja «⏱ Calcular horas» (lib/paradas-horario.ts): con qué se calculó
@@ -979,6 +981,64 @@ function PlacesInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputCls
   );
 }
 
+/**
+ * Las coordenadas de un punto de la «Ruta del servicio», con de dónde salieron. Antes no se
+ * enseñaban nunca: no había forma de saber si un punto tenía coordenadas (y sin ellas no hay km
+ * ni mapa) o solo un texto. La frase de la fuente la compone el módulo puro, no esta pantalla.
+ */
+function CoordsDePunto({place,texto,buscando,fallo,vacioDice}:{place:PuntoRuta|null;texto:string;buscando:boolean;fallo:boolean;vacioDice?:string}){
+  if(place&&coordValida(place.lat,place.lng)){
+    const r=rotuloFuente(place.fuente);
+    return(
+      <p className={`text-[10px] leading-tight ${r.aproximada?"text-amber-600":"text-gray-500"}`}>
+        📍 <span className="font-mono">{place.lat.toFixed(6)}, {place.lng.toFixed(6)}</span>{r.texto&&<> · {r.texto}</>}
+        {" · "}<a href={`https://www.google.com/maps/search/?api=1&query=${place.lat},${place.lng}`} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">Ver en Maps</a>
+      </p>
+    );
+  }
+  if(buscando)return <p className="text-[10px] text-gray-400">⏳ Buscando las coordenadas de este texto…</p>;
+  if(!texto.trim())return vacioDice?<p className="text-[10px] text-gray-400">{vacioDice}</p>:null;
+  return <p className="text-[10px] text-amber-600 leading-tight">⚠ Sin coordenadas{fallo?" (Google no encontró este texto)":""}: elige el punto de la lista o usa «Usar coordenadas». Sin ellas no se calcula el km.</p>;
+}
+
+/**
+ * El mapa de la ruta ORIGEN → DESTINO (→ RETORNO) cuando no hay paraderos que lo dibujen. Usa la
+ * misma consulta de ruta y el mismo mapa que los paraderos: arrastrar un punto lo corrige (el
+ * nombre no cambia, igual que en los paraderos), y no ofrece insertar — aquí no hay lista.
+ * Sin punto de retorno, la vuelta se dibuja al origen: es lo que mide el km.
+ */
+function MapaRutaServicio({origen,destino,retorno,vuelve,nombres,onMover}:{
+  origen:PuntoRuta;destino:PuntoRuta;retorno:PuntoRuta|null;vuelve:boolean;
+  nombres:{origen:string;destino:string;retorno:string};
+  onMover:(e:Extremo,lat:number,lng:number)=>void;
+}){
+  const conRetorno=vuelve&&!!retorno&&coordValida(retorno.lat,retorno.lng);
+  const fin=vuelve?(conRetorno?retorno!:origen):null;
+  const finLat=fin?.lat??null,finLng=fin?.lng??null;
+  const ptsRuta=useMemo(()=>{
+    const l=[{id:"origen",nombre:nombres.origen||"Origen",lat:String(origen.lat),lng:String(origen.lng)},{id:"destino",nombre:nombres.destino||"Destino",lat:String(destino.lat),lng:String(destino.lng)}];
+    if(finLat!==null&&finLng!==null)l.push({id:conRetorno?"retorno":"vuelta",nombre:conRetorno?(nombres.retorno||"Retorno"):(nombres.origen||"Origen"),lat:String(finLat),lng:String(finLng)});
+    return l;
+  },[origen.lat,origen.lng,destino.lat,destino.lng,finLat,finLng,conRetorno,nombres.origen,nombres.destino,nombres.retorno]);
+  const ruta=useRutaParaderos(ptsRuta);
+  const puntos=[
+    {id:"origen",nombre:nombres.origen,lat:origen.lat,lng:origen.lng,numero:1,tipo:"inicio" as const},
+    {id:"destino",nombre:nombres.destino,lat:destino.lat,lng:destino.lng,numero:2,tipo:(conRetorno?"intermedia":"destino") as "intermedia"|"destino"},
+    ...(conRetorno?[{id:"retorno",nombre:nombres.retorno,lat:retorno!.lat,lng:retorno!.lng,numero:3,tipo:"destino" as const}]:[]),
+  ];
+  return(
+    <div className="md:col-span-3 space-y-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">🗺 Ruta en el mapa</p>
+        {ruta.cargando&&<span className="text-[10px] text-gray-400">trazando…</span>}
+        {ruta.error&&<span className="text-[10px] text-red-500">⚠ {ruta.error}</span>}
+      </div>
+      <p className="text-[10px] text-gray-400">1 origen · 2 destino{conRetorno?" · 3 retorno":vuelve?" · la vuelta llega al origen":""}. Arrastra un punto para corregirlo; el nombre no cambia y el km se vuelve a medir.</p>
+      <MapaParaderos puntos={puntos} poli={ruta.ruta?.poli??null} onMover={(id,lat,lng)=>onMover(id as Extremo,lat,lng)}/>
+    </div>
+  );
+}
+
 function LocationInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputCls}:{
   placeholder:string;value:string;
   onChange:(v:string)=>void;onSelect:(r:PlaceResultCot)=>void;
@@ -1107,8 +1167,18 @@ export default function CotizacionesPage(){
   // Se lee de window.location (cliente) para no requerir <Suspense> de useSearchParams.
   useEffect(()=>{if(typeof window==="undefined")return;const b=new URLSearchParams(window.location.search).get("buscar");if(b)setBusqueda(b);},[]);
   const mapsLoaded=useGoogleMapsCot();
-  const [origenPlace,setOrigenPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
-  const [destinoPlace,setDestinoPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
+  const [origenPlace,setOrigenPlace]=useState<PuntoRuta|null>(null);
+  const [destinoPlace,setDestinoPlace]=useState<PuntoRuta|null>(null);
+  /**
+   * EL KM GUARDADO NO SE PISA AL REABRIR (lib/cotizacion-ruta-coords.ts). Restaurar los puntos es
+   * cambiarlos, y sin este freno abrir una cotización reescribiría su km —que pudo corregirse a
+   * mano— con el de unas coordenadas que a veces son aproximadas. Congelado = no se mide mientras el
+   * servicio vuelva igual y el retorno tenga el mismo texto; tocar un punto lo descongela.
+   */
+  const [kmCongelado,setKmCongelado]=useState<{vuelve:boolean;ret:string}|null>(null);
+  /** Puntos que al reabrir no tenían coordenadas guardadas: se buscan por el texto (aproximadas). */
+  const [porGeocodificar,setPorGeocodificar]=useState<Extremo[]>([]);
+  const [geoFallo,setGeoFallo]=useState<Extremo[]>([]);
   // `null` = todavía no hay km calculado por Maps (0 sí es un valor válido: tramos < 500 m).
   const [kmBase,setKmBase]=useState<number|null>(null);
   /**
@@ -1121,7 +1191,7 @@ export default function CotizacionesPage(){
    * vacío). `null` = sin calcular o Google no pudo: entonces se estima igual a la ida y se dice.
    */
   const [kmRet,setKmRet]=useState<number|null>(null);
-  const [retornoPlace,setRetornoPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
+  const [retornoPlace,setRetornoPlace]=useState<PuntoRuta|null>(null);
   const [calculandoKm,setCalculandoKm]=useState(false);
   const [errorKm,setErrorKm]=useState("");
   const [avisoRet,setAvisoRet]=useState("");
@@ -1134,6 +1204,7 @@ export default function CotizacionesPage(){
     let cancelado=false;
     // Sin ruta completa no hay consulta en vuelo: se libera el bloqueo de guardado.
     if(!mapsLoaded||!origenPlace||!destinoPlace){setCalculandoKm(false);return;}
+    if(kmCongelado&&kmCongelado.vuelve===vuelve&&kmCongelado.ret===form.punto_retorno.trim()){setCalculandoKm(false);return;}
     const finRet:PuntoKmCot|null=!vuelve?null:retornoPlace??(textoRet?{texto:textoRet}:origenPlace);
     setErrorKm("");setCalculandoKm(true);
     // Con el retorno escrito a mano se espera a que se deje de teclear: una consulta por tecla
@@ -1152,11 +1223,61 @@ export default function CotizacionesPage(){
       setCalculandoKm(false);
     },finRet&&"texto" in finRet?700:0);
     return()=>{cancelado=true;clearTimeout(espera);};
-  },[mapsLoaded,origenPlace?.placeId,origenPlace?.lat,origenPlace?.lng,destinoPlace?.placeId,destinoPlace?.lat,destinoPlace?.lng,retornoPlace?.placeId,retornoPlace?.lat,retornoPlace?.lng,textoRet,vuelve]);
+  },[mapsLoaded,origenPlace?.placeId,origenPlace?.lat,origenPlace?.lng,destinoPlace?.placeId,destinoPlace?.lat,destinoPlace?.lng,retornoPlace?.placeId,retornoPlace?.lat,retornoPlace?.lng,textoRet,vuelve,kmCongelado,form.punto_retorno]);
   useEffect(()=>{
     if(kmBase===null)return;
     setForm(p=>({...p,km:String(vuelve?kmBase+(kmRet??kmBase):kmBase)}));
   },[kmBase,kmRet,vuelve]);
+
+  /** Al reabrir (cotización o borrador): las coordenadas por la cascada de lib/cotizacion-ruta-coords.ts. */
+  const restaurarRuta=(c:{origen:string|null;destino:string|null;punto_retorno:string|null;tipo_servicio:string|null;km?:number|string|null;ruta_coords_json?:unknown;paradas_json?:ParadaTP[]|null})=>{
+    const vuelveC=!["solo_ida","fijo_solo_ida"].includes(c.tipo_servicio||"solo_ida");
+    const r=resolverRestauracion(c,vuelveC);
+    setOrigenPlace(r.origen);setDestinoPlace(r.destino);setRetornoPlace(r.retorno);
+    setPorGeocodificar(r.porGeocodificar);setGeoFallo([]);
+    setKmCongelado(Number(c.km)>0?{vuelve:vuelveC,ret:String(c.punto_retorno||"").trim()}:null);
+  };
+  // Lo que el operador tiene escrito AHORA: una búsqueda por texto que vuelve tarde no pisa un
+  // punto que ya cambió.
+  const textosRuta=useRef({origen:"",destino:"",retorno:""});
+  useEffect(()=>{textosRuta.current={origen:form.origen,destino:form.destino,retorno:form.punto_retorno};},[form.origen,form.destino,form.punto_retorno]);
+  useEffect(()=>{
+    // Una cotización vieja (sin coordenadas guardadas ni paraderos) solo tiene el texto: se busca
+    // en Google y se marca APROXIMADA. Una consulta por punto, solo al reabrir.
+    if(!mapsLoaded||porGeocodificar.length===0)return;
+    type Geo={geocode:(r:{address:string;region:string;language:string})=>Promise<{results?:{geometry?:{location?:{lat:()=>number;lng:()=>number}}}[]}>};
+    const G=(window as unknown as {google?:{maps?:{Geocoder?:new()=>Geo}}}).google?.maps?.Geocoder;
+    if(!G)return;
+    let vivo=true;
+    const pedidos={...textosRuta.current};
+    const geocoder=new G();
+    (async()=>{
+      const fallos:Extremo[]=[];
+      for(const e of porGeocodificar){
+        const texto=pedidos[e].trim();
+        if(!texto)continue;
+        try{
+          const resp=await geocoder.geocode({address:texto,region:"PE",language:"es"});
+          const loc=resp?.results?.[0]?.geometry?.location;
+          if(!vivo)return;
+          if(!loc){fallos.push(e);continue;}
+          if(textosRuta.current[e]!==pedidos[e])continue;
+          const pt:PuntoRuta={placeId:"",lat:loc.lat(),lng:loc.lng(),fuente:"texto"};
+          const poner=(prev:PuntoRuta|null)=>prev??pt;
+          if(e==="origen")setOrigenPlace(poner);else if(e==="destino")setDestinoPlace(poner);else setRetornoPlace(poner);
+        }catch{fallos.push(e);}
+      }
+      if(vivo){setPorGeocodificar([]);setGeoFallo(fallos);}
+    })();
+    return()=>{vivo=false;};
+  },[mapsLoaded,porGeocodificar]);
+  /** Arrastrar un punto en el mapa de la ruta: mandan las coordenadas, el nombre se queda. */
+  const moverPuntoRuta=(e:Extremo,lat:number,lng:number)=>{
+    const pt:PuntoRuta={placeId:"",lat,lng,fuente:"mapa"};
+    setKmCongelado(null);
+    if(e==="origen")setOrigenPlace(pt);else if(e==="destino")setDestinoPlace(pt);else setRetornoPlace(pt);
+  };
+  const [faltaMigracionCoords,setFaltaMigracionCoords]=useState(false);
 
   const f=(k:keyof typeof FORM0)=>(e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>)=>setForm(p=>({...p,[k]:e.target.value}));
   useEffect(()=>{
@@ -1271,6 +1392,7 @@ export default function CotizacionesPage(){
       if(d.consid)setConsid(d.consid);
       if(d.paradas?.length)setParadas(d.paradas);
       if(d.paradasRetorno?.length)setParadasRetorno(d.paradasRetorno);
+      restaurarRuta({...d.form,ruta_coords_json:d.rutaCoords,paradas_json:d.paradas});
       if(d.fechasMultidia?.length)setFechasMultidia(d.fechasMultidia);
       if(d.editandoId)setEditandoId(d.editandoId);
       if(d.diasCond)setDiasCond(d.diasCond);
@@ -1285,8 +1407,9 @@ export default function CotizacionesPage(){
   useEffect(()=>{
     if(!mostrarForm)return;
     if(!form.origen&&!form.destino&&!form.cliente_id&&!editandoId)return;
-    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,savedAt:new Date().toISOString()}));}catch{}
-  },[form,items,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF]);
+    const rutaCoords=rutaCoordsParaGuardar(origenPlace,destinoPlace,retornoPlace,{origen:form.origen,destino:form.destino,retorno:form.punto_retorno},vuelve);
+    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,rutaCoords,savedAt:new Date().toISOString()}));}catch{}
+  },[form,items,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF,origenPlace,destinoPlace,retornoPlace,vuelve]);
 
   // Auto-construir descripción del primer ítem cuando cambia modo/tipo/equipamiento
   useEffect(()=>{
@@ -1362,7 +1485,7 @@ export default function CotizacionesPage(){
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.equipamiento||"full_equipo",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
@@ -1445,7 +1568,24 @@ export default function CotizacionesPage(){
       precio_sugerido:costoCalc?(esFijo?costoCalc.diaEstIGV:costoCalc.totalEst20):null,
       modo_precio:tarifaEnc?"tarifario":"cotizador",incluye_igv:form.incluye_igv,
       itinerario_texto:form.itinerario_texto.trim()||null,
+      ruta_coords_json:rutaCoordsParaGuardar(origenPlace,destinoPlace,retornoPlace,{origen:form.origen,destino:form.destino,retorno:form.punto_retorno},!esSoloIda),
     } as any;
+  };
+
+  /**
+   * Guarda la cotización. `ruta_coords_json` es de una migración accesoria
+   * (supabase/cotizaciones-02-ruta-coords.sql): sin ella se guarda igual y la pantalla lo DICE —
+   * las coordenadas no se perderían en silencio.
+   */
+  const escribirCotizacion=async(payload:Record<string,unknown>)=>{
+    const ir=(p:Record<string,unknown>)=>editandoId?supabase.from("cotizaciones").update(p).eq("id",editandoId):supabase.from("cotizaciones").insert(p);
+    let r=await ir(payload);
+    if(r.error&&faltaColumna(r.error,"ruta_coords_json")){
+      const resto={...payload};delete resto.ruta_coords_json;
+      r=await ir(resto);
+      if(!r.error)setFaltaMigracionCoords(true);
+    }
+    return r;
   };
 
   const guardarBorrador=async()=>{
@@ -1454,7 +1594,7 @@ export default function CotizacionesPage(){
     setGuardando(true);
     let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
     const payload={...buildPayload("borrador"),creado_por:nombreCreador||null};
-    const{error}=editandoId?await supabase.from("cotizaciones").update(payload).eq("id",editandoId):await supabase.from("cotizaciones").insert(payload);
+    const{error}=await escribirCotizacion(payload);
     if(error){alert(error.message);setGuardando(false);return;}
     limpiar();cargar();setGuardando(false);
   };
@@ -1472,7 +1612,7 @@ export default function CotizacionesPage(){
     let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
     const esFijo=form.modo_servicio==="fijo";
     const payload={...buildPayload(form.estado==="borrador"?"pendiente":undefined),creado_por:nombreCreador||null};
-    const{error}=editandoId?await supabase.from("cotizaciones").update(payload).eq("id",editandoId):await supabase.from("cotizaciones").insert(payload);
+    const{error}=await escribirCotizacion(payload);
     if(error){alert(error.message);setGuardando(false);return;}
     // Capturar antes de limpiar() para la propagación
     const cotIdGuardado=editandoId;
@@ -1710,7 +1850,9 @@ export default function CotizacionesPage(){
   };
   const duplicarCotizacion=async(c:Cotizacion)=>{
     const payload:any={cliente_id:c.cliente_id,origen:c.origen,destino:c.destino,km:c.km,precio_cliente:c.precio_cliente,costo_estimado:c.costo_estimado,margen_estimado:c.margen_estimado,estado:"pendiente",numero_cotizacion:null,atencion:c.atencion,asunto:c.asunto?`COPIA — ${c.asunto}`:null,punto_retorno:c.punto_retorno,fecha_servicio:c.fecha_servicio,fecha_retorno:c.fecha_retorno,hora_ida:c.hora_ida,hora_retorno:c.hora_retorno,descuento_pct:c.descuento_pct||0,items_json:c.items_json,tipo_vehiculo:c.tipo_vehiculo,tipo_servicio:c.tipo_servicio,equipamiento:c.equipamiento,vehiculo_flota_id:c.vehiculo_flota_id,vehiculo_tercero_id:c.vehiculo_tercero_id,consideraciones_json:c.consideraciones_json,paradas_json:c.paradas_json,paradas_retorno_json:c.paradas_retorno_json,modo_servicio:c.modo_servicio,dias_servicio:c.dias_servicio||1,horas_servicio:c.horas_servicio||8,pernocte_costo:c.pernocte_costo,precio_dia:c.precio_dia,precio_mes_estimado:c.precio_mes_estimado,precio_tarifario:c.precio_tarifario,precio_cotizador:c.precio_cotizador,precio_sugerido:c.precio_sugerido,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto,fechas_multidia_json:c.fechas_multidia_json,plantilla_pdf:c.plantilla_pdf||"corporativo"};
-    const{error}=await supabase.from("cotizaciones").insert(payload);
+    if(c.ruta_coords_json)payload.ruta_coords_json=c.ruta_coords_json;
+    let{error}=await supabase.from("cotizaciones").insert(payload);
+    if(error&&faltaColumna(error,"ruta_coords_json")){delete payload.ruta_coords_json;({error}=await supabase.from("cotizaciones").insert(payload));}
     if(error){alert(error.message);return;}
     alert(`✅ Cotización #${c.numero_cotizacion||c.id} duplicada correctamente`);
     cargar();
@@ -1749,7 +1891,7 @@ export default function CotizacionesPage(){
     }
     cargar();
   };
-  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+  const editarCot=(c:Cotizacion)=>{restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
     const cl=clientes.find(c=>c.id===cot.cliente_id);
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
@@ -2106,18 +2248,21 @@ export default function CotizacionesPage(){
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <Campo label="Punto de origen" req>
                   <LocationInputCot placeholder="Av. República de Panamá 3623" value={form.origen} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,origen:v,km:""}));setOrigenPlace(null);setKmBase(null);setErrorKm("");}}
-                    onSelect={p=>{setOrigenPlace(p.placeId?{placeId:p.placeId,lat:p.lat,lng:p.lng}:{placeId:"",lat:p.lat,lng:p.lng});if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,origen:v,km:""}));setOrigenPlace(null);setKmCongelado(null);setKmBase(null);setErrorKm("");}}
+                    onSelect={p=>{setKmCongelado(null);setOrigenPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
+                  <CoordsDePunto place={origenPlace} texto={form.origen} buscando={porGeocodificar.includes("origen")} fallo={geoFallo.includes("origen")}/>
                 </Campo>
                 <Campo label="Punto de destino" req>
                   <LocationInputCot placeholder="Planta Cajamarquilla" value={form.destino} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,destino:v,km:""}));setDestinoPlace(null);setKmBase(null);setErrorKm("");}}
-                    onSelect={p=>{setDestinoPlace(p.placeId?{placeId:p.placeId,lat:p.lat,lng:p.lng}:{placeId:"",lat:p.lat,lng:p.lng});if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,destino:v,km:""}));setDestinoPlace(null);setKmCongelado(null);setKmBase(null);setErrorKm("");}}
+                    onSelect={p=>{setKmCongelado(null);setDestinoPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
+                  <CoordsDePunto place={destinoPlace} texto={form.destino} buscando={porGeocodificar.includes("destino")} fallo={geoFallo.includes("destino")}/>
                 </Campo>
                 {!esSoloIda&&<Campo label="Punto de retorno">
                   <LocationInputCot placeholder="Igual al origen" value={form.punto_retorno} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,punto_retorno:v}));setRetornoPlace(null);}}
-                    onSelect={p=>{setRetornoPlace({placeId:p.placeId||"",lat:p.lat,lng:p.lng});if(p.address)setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,punto_retorno:v}));setRetornoPlace(null);setKmCongelado(null);}}
+                    onSelect={p=>{setKmCongelado(null);setRetornoPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
+                  <CoordsDePunto place={retornoPlace} texto={form.punto_retorno} buscando={porGeocodificar.includes("retorno")} fallo={geoFallo.includes("retorno")} vacioDice="Vacío: la vuelta llega al punto de origen."/>
                 </Campo>}
                 <Campo label={form.tipo_servicio==="multi_dia"?"Fecha inicio (Día 1)":"Fecha de servicio"}><input type="date" className={iCls()} value={form.fecha_servicio} onChange={f("fecha_servicio")}/></Campo>
                 {["ida_retorno","ida_retorno_paradas","multi_dia"].includes(form.tipo_servicio)&&(
@@ -2189,6 +2334,11 @@ export default function CotizacionesPage(){
                     </div>
                   </div>
                 </div>}
+                {origenPlace&&destinoPlace&&coordValida(origenPlace.lat,origenPlace.lng)&&coordValida(destinoPlace.lat,destinoPlace.lng)&&paradas.filter(coordsOk).length<2&&(
+                  <MapaRutaServicio origen={origenPlace} destino={destinoPlace} retorno={retornoPlace} vuelve={vuelve}
+                    nombres={{origen:form.origen,destino:form.destino,retorno:form.punto_retorno}} onMover={moverPuntoRuta}/>
+                )}
+                {faltaMigracionCoords&&<p className="md:col-span-3 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">⚠ La cotización se guardó, pero SIN las coordenadas de la ruta: falta correr <span className="font-mono">supabase/cotizaciones-02-ruta-coords.sql</span>. Al reabrirla se buscarán de nuevo por el texto.</p>}
               </div>
             </div>
 
@@ -2287,7 +2437,7 @@ export default function CotizacionesPage(){
                 // El paradero 1 y el último están atados al origen/destino del formulario (el efecto
                 // de sincronización les copia sus coordenadas): arrastrarlos mueve ESE punto, o el
                 // efecto los devolvería a su sitio. placeId vacío: mandan las coordenadas.
-                onMoverExtremo={(t,lat,lng)=>t==="inicio"?setOrigenPlace({placeId:"",lat,lng}):setDestinoPlace({placeId:"",lat,lng})}
+                onMoverExtremo={(t,lat,lng)=>moverPuntoRuta(t==="inicio"?"origen":"destino",lat,lng)}
               />
             </div>
 
