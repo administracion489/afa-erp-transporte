@@ -279,7 +279,7 @@ function ModalPlantilla({cot,plantillaActual,onElegir,onGenerar,onCancelar}:{cot
 
 // ── CardParada: FUERA de ParadasBuilder para evitar pérdida de foco al escribir ──
 // `marca` = estadoMarca(p, firma) de lib/paradas-horario.ts: la pantalla solo la rotula.
-function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, onDragStart, onDragOver, onDrop, onDragEnd, isDragging, isOver, marca, aviso, movida, onActualizarDireccion, dirEstado }: {
+function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, onDragStart, onDragOver, onDrop, onDragEnd, isDragging, isOver, marca, aviso, renombre, onVolverNombre, onReintentarDireccion }: {
   p: ParadaTP; lbl: string; col: string;
   onUpd: (id: string, k: keyof ParadaTP, v: string) => void;
   onSel: (id: string, r: PlaceResultCot) => void;
@@ -294,10 +294,10 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
   isOver?: boolean;
   marca?: "manual" | "vigente" | "desactualizada";
   aviso?: string;
-  /** Se arrastró en el mapa: la dirección escrita puede ya no describir el punto. */
-  movida?: boolean;
-  onActualizarDireccion?: () => void;
-  dirEstado?: { cargando?: boolean; error?: string };
+  /** Se arrastró en el mapa: su dirección se busca sola (ver AvisoRenombreMapa). */
+  renombre?: RenombreMapa;
+  onVolverNombre?: () => void;
+  onReintentarDireccion?: () => void;
 }) {
   const inp = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f] bg-white";
   const hc = p.hora_calc;
@@ -335,15 +335,8 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
               📍 <a href={urlMapsPunto(p.lat, p.lng)} target="_blank" rel="noreferrer" className="hover:text-blue-500 hover:underline">{fmtCoord(p.lat, p.lng)}</a>
             </p>
           )}
-          {movida && onActualizarDireccion && (
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <button type="button" onClick={onActualizarDireccion} disabled={dirEstado?.cargando}
-                className="text-[10px] font-bold text-[#0b315f] border border-[#0b315f]/30 rounded-lg px-2 py-0.5 hover:bg-blue-50 disabled:opacity-50">
-                {dirEstado?.cargando ? "⏳ Buscando dirección…" : "↻ Actualizar dirección"}
-              </button>
-              <span className="text-[9px] text-gray-400">Lo moviste en el mapa: el nombre sigue siendo el que estaba.</span>
-              {dirEstado?.error && <span className="text-[10px] text-red-600 w-full">⚠ {dirEstado.error}</span>}
-            </div>
+          {onVolverNombre && onReintentarDireccion && (
+            <AvisoRenombreMapa estado={renombre} onVolver={onVolverNombre} onReintentar={onReintentarDireccion} />
           )}
         </div>
         <div>
@@ -375,11 +368,51 @@ function ordenarParadas(ps: ParadaTP[]): ParadaTP[] {
   return [...(ini ? [ini] : []), ...ps.filter(p => p.tipo === "intermedia"), ...(fin ? [fin] : [])];
 }
 
-async function direccionDePunto(lat: number, lng: number): Promise<string | null> {
-  const r = await fetch("/api/geocodificar-inverso", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lng }) });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
-  return typeof d?.direccion === "string" && d.direccion.trim() ? d.direccion.trim() : null;
+/**
+ * La dirección de un punto (Google, por el servidor). Una sola consulta por punto: arrastrar el
+ * paradero 1 renombra a la vez el paradero y el «Punto de origen», y los dos piden lo mismo.
+ * Un fallo no se recuerda (el reintento vuelve a consultar).
+ */
+const direccionesPedidas = new Map<string, Promise<string | null>>();
+function direccionDePunto(lat: number, lng: number): Promise<string | null> {
+  const clave = `${lat.toFixed(6)},${lng.toFixed(6)}`;
+  const ya = direccionesPedidas.get(clave);
+  if (ya) return ya;
+  const p = (async () => {
+    const r = await fetch("/api/geocodificar-inverso", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lng }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+    return typeof d?.direccion === "string" && d.direccion.trim() ? d.direccion.trim() : null;
+  })();
+  direccionesPedidas.set(clave, p);
+  p.catch(() => direccionesPedidas.delete(clave));
+  return p;
+}
+
+/** Lo que pasó con el nombre de un punto arrastrado en el mapa. */
+type RenombreMapa = { cargando?: boolean; error?: string; anterior?: string; puesto?: string };
+
+/**
+ * Debajo del nombre de un punto arrastrado: buscando, el error con su reintento, o la dirección
+ * nueva con la vuelta al nombre de antes (un «Punta Hermosa» escrito a mano no se pierde por
+ * mover el marcador unos metros).
+ */
+function AvisoRenombreMapa({ estado, onVolver, onReintentar }: { estado?: RenombreMapa; onVolver: () => void; onReintentar: () => void }) {
+  if (!estado) return null;
+  if (estado.cargando) return <p className="mt-1 text-[10px] text-gray-400">⏳ Buscando la dirección del punto que moviste…</p>;
+  if (estado.error) return (
+    <div className="mt-1 flex flex-wrap items-center gap-2">
+      <span className="text-[10px] text-red-600">⚠ {estado.error}</span>
+      <button type="button" onClick={onReintentar} className="text-[10px] font-bold text-[#0b315f] border border-[#0b315f]/30 rounded-lg px-2 py-0.5 hover:bg-blue-50">↻ Reintentar</button>
+    </div>
+  );
+  if (estado.puesto && estado.anterior?.trim()) return (
+    <div className="mt-1 flex flex-wrap items-center gap-2">
+      <span className="text-[10px] text-sky-700">📍 Dirección tomada del mapa.</span>
+      <button type="button" onClick={onVolver} className="text-[10px] font-bold text-[#0b315f] hover:underline">↩ Volver a «{estado.anterior}»</button>
+    </div>
+  );
+  return null;
 }
 
 function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, origenNombre, destinoNombre, origenLat, origenLng, destinoLat, destinoLng, horaIda, horaRetorno, contexto, onMoverExtremo }: {
@@ -402,19 +435,22 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
   const firmaActual = firmaParaderos(ord);
   const [verMapa, setVerMapa] = useState(true);
   const [avisos, setAvisos] = useState<{ firma: string; porId: Record<string, string> }>({ firma: "", porId: {} });
-  const [movidas, setMovidas] = useState<Record<string, true>>({});
-  const [dirEstado, setDirEstado] = useState<Record<string, { cargando?: boolean; error?: string }>>({});
+  const [renombres, setRenombres] = useState<Record<string, RenombreMapa>>({});
   // Lo que se lee DESPUÉS de un await (geocodificar, insertar): la lista de ahora, no la del clic.
   const vivo = useRef({ paradas, onChange });
   useEffect(() => { vivo.current = { paradas, onChange }; }, [paradas, onChange]);
 
   const nId = () => Math.random().toString(36).slice(2, 8);
-  const upd = (id: string, k: keyof ParadaTP, v: string) =>
+  const olvidarRenombre = (id: string) => setRenombres(prev => { if (!prev[id]) return prev; const n = { ...prev }; delete n[id]; return n; });
+  const upd = (id: string, k: keyof ParadaTP, v: string) => {
     onChange(paradas.map(p => p.id === id ? { ...p, [k]: v } : p));
+    // Quien escribe el nombre decide: la vuelta al anterior ya no aplica.
+    if (k === "nombre") olvidarRenombre(id);
+  };
   // Actualización atómica de nombre+lat+lng para evitar stale closure con 3 setState seguidos
   const sel = (id: string, r: PlaceResultCot) => {
     onChange(paradas.map(p => p.id === id ? { ...p, nombre: r.address, lat: String(r.lat), lng: String(r.lng) } : p));
-    setMovidas(prev => { const n = { ...prev }; delete n[id]; return n; });
+    olvidarRenombre(id);
   };
   const inicio = paradas.find(p => p.tipo === "inicio");
   const fin    = paradas.find(p => p.tipo === "destino");
@@ -426,31 +462,52 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
   };
   const esTP = tipo === "transporte_personal" || tipo === "fijo_multiparada";
 
-  /** Al soltar un marcador: nuevas coordenadas, el MISMO nombre (no se re-geocodifica solo). */
+  /**
+   * Al soltar un marcador: nuevas coordenadas y, sola, la dirección de Google como nombre.
+   * Se aplica solo si al volver el paradero sigue en ESE punto y nadie le cambió el nombre
+   * mientras tanto; el nombre de antes queda a un clic («↩ Volver a…»).
+   */
+  const buscarDireccion = async (id: string, lat: string, lng: string, nombreAlSoltar: string) => {
+    setRenombres(prev => ({ ...prev, [id]: { ...prev[id], cargando: true, error: undefined } }));
+    const sigueIgual = () => {
+      const x = vivo.current.paradas.find(q => q.id === id);
+      return !!x && x.lat === lat && x.lng === lng && x.nombre === nombreAlSoltar;
+    };
+    try {
+      const dir = await direccionDePunto(Number(lat), Number(lng));
+      if (!sigueIgual()) {
+        // Lo movieron otra vez: esa búsqueda manda. Si solo le escribieron el nombre, se calla.
+        const x = vivo.current.paradas.find(q => q.id === id);
+        if (x && x.lat === lat && x.lng === lng) olvidarRenombre(id);
+        return;
+      }
+      if (!dir) { setRenombres(prev => ({ ...prev, [id]: { ...prev[id], cargando: false, error: "Google no devolvió una dirección para ese punto: el nombre quedó como estaba." } })); return; }
+      if (dir !== nombreAlSoltar) vivo.current.onChange(vivo.current.paradas.map(x => x.id === id ? { ...x, nombre: dir } : x));
+      // El «anterior» es el último nombre que NO puso el mapa: arrastrar dos veces no lo pierde.
+      setRenombres(prev => ({ ...prev, [id]: { anterior: prev[id]?.puesto === nombreAlSoltar ? prev[id]?.anterior : nombreAlSoltar, puesto: dir } }));
+    } catch (e) {
+      if (!sigueIgual()) { const x = vivo.current.paradas.find(q => q.id === id); if (x && x.lat === lat && x.lng === lng) olvidarRenombre(id); return; }
+      setRenombres(prev => ({ ...prev, [id]: { ...prev[id], cargando: false, error: `No se pudo buscar la dirección (${e instanceof Error ? e.message : "sin respuesta"}): el nombre quedó como estaba.` } }));
+    }
+  };
   const moverEnMapa = (id: string, lat: number, lng: number) => {
     const la = Number(lat.toFixed(6)), ln = Number(lng.toFixed(6));
     const actual = vivo.current.paradas;
     const p = actual.find(x => x.id === id);
     if (!p) return;
     vivo.current.onChange(actual.map(x => x.id === id ? { ...x, lat: String(la), lng: String(ln) } : x));
-    setMovidas(prev => ({ ...prev, [id]: true }));
-    setDirEstado(prev => { const n = { ...prev }; delete n[id]; return n; });
     if (onMoverExtremo && (p.tipo === "inicio" || p.tipo === "destino")) onMoverExtremo(p.tipo, la, ln);
+    buscarDireccion(id, String(la), String(ln), p.nombre);
   };
-  const actualizarDireccion = async (id: string) => {
+  const reintentarDireccion = (id: string) => {
     const p = vivo.current.paradas.find(x => x.id === id);
-    if (!p || !coordsOk(p)) return;
-    setDirEstado(prev => ({ ...prev, [id]: { cargando: true } }));
-    try {
-      const dir = await direccionDePunto(Number(p.lat), Number(p.lng));
-      if (!dir) { setDirEstado(prev => ({ ...prev, [id]: { error: "Google no devolvió una dirección para ese punto: escribe el nombre a mano." } })); return; }
-      const ahora = vivo.current.paradas;
-      vivo.current.onChange(ahora.map(x => x.id === id ? { ...x, nombre: dir } : x));
-      setMovidas(prev => { const n = { ...prev }; delete n[id]; return n; });
-      setDirEstado(prev => { const n = { ...prev }; delete n[id]; return n; });
-    } catch (e: any) {
-      setDirEstado(prev => ({ ...prev, [id]: { error: `No se pudo buscar la dirección (${e?.message || "sin respuesta"}). Escribe el nombre a mano.` } }));
-    }
+    if (p && coordsOk(p)) buscarDireccion(id, p.lat, p.lng, p.nombre);
+  };
+  const volverNombre = (id: string) => {
+    const ant = renombres[id]?.anterior;
+    if (ant === undefined) return;
+    vivo.current.onChange(vivo.current.paradas.map(x => x.id === id ? { ...x, nombre: ant } : x));
+    olvidarRenombre(id);
   };
   /** «＋ Paradero aquí»: dónde va lo decide indiceDeInsercion sobre la ruta; el nombre se propone UNA vez. */
   const insertarEnMapa = (punto: [number, number]) => {
@@ -520,9 +577,9 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
   const extra = (p: ParadaTP) => ({
     marca: estadoMarca(p, firmaActual),
     aviso: avisos.firma === firmaActual ? avisos.porId[p.id] : undefined,
-    movida: !!movidas[p.id],
-    onActualizarDireccion: () => actualizarDireccion(p.id),
-    dirEstado: dirEstado[p.id],
+    renombre: renombres[p.id],
+    onVolverNombre: () => volverNombre(p.id),
+    onReintentarDireccion: () => reintentarDireccion(p.id),
   });
 
   return (
@@ -1003,8 +1060,8 @@ function CoordsDePunto({place,texto,buscando,fallo,vacioDice}:{place:PuntoRuta|n
 
 /**
  * El mapa de la ruta ORIGEN → DESTINO (→ RETORNO) cuando no hay paraderos que lo dibujen. Usa la
- * misma consulta de ruta y el mismo mapa que los paraderos: arrastrar un punto lo corrige (el
- * nombre no cambia, igual que en los paraderos), y no ofrece insertar — aquí no hay lista.
+ * misma consulta de ruta y el mismo mapa que los paraderos: arrastrar un punto lo corrige (y su
+ * texto pasa a ser la dirección de Google, igual que en los paraderos), y no ofrece insertar — aquí no hay lista.
  * Sin punto de retorno, la vuelta se dibuja al origen: es lo que mide el km.
  */
 function MapaRutaServicio({origen,destino,retorno,vuelve,nombres,onMover}:{
@@ -1033,7 +1090,7 @@ function MapaRutaServicio({origen,destino,retorno,vuelve,nombres,onMover}:{
         {ruta.cargando&&<span className="text-[10px] text-gray-400">trazando…</span>}
         {ruta.error&&<span className="text-[10px] text-red-500">⚠ {ruta.error}</span>}
       </div>
-      <p className="text-[10px] text-gray-400">1 origen · 2 destino{conRetorno?" · 3 retorno":vuelve?" · la vuelta llega al origen":""}. Arrastra un punto para corregirlo; el nombre no cambia y el km se vuelve a medir.</p>
+      <p className="text-[10px] text-gray-400">1 origen · 2 destino{conRetorno?" · 3 retorno":vuelve?" · la vuelta llega al origen":""}. Arrastra un punto para corregirlo: su dirección se actualiza sola (puedes volver al texto de antes) y el km se vuelve a medir.</p>
       <MapaParaderos puntos={puntos} poli={ruta.ruta?.poli??null} onMover={(id,lat,lng)=>onMover(id as Extremo,lat,lng)}/>
     </div>
   );
@@ -1234,7 +1291,7 @@ export default function CotizacionesPage(){
     const vuelveC=!["solo_ida","fijo_solo_ida"].includes(c.tipo_servicio||"solo_ida");
     const r=resolverRestauracion(c,vuelveC);
     setOrigenPlace(r.origen);setDestinoPlace(r.destino);setRetornoPlace(r.retorno);
-    setPorGeocodificar(r.porGeocodificar);setGeoFallo([]);
+    setPorGeocodificar(r.porGeocodificar);setGeoFallo([]);setRenombreRuta({});
     setKmCongelado(Number(c.km)>0?{vuelve:vuelveC,ret:String(c.punto_retorno||"").trim()}:null);
   };
   // Lo que el operador tiene escrito AHORA: una búsqueda por texto que vuelve tarde no pisa un
@@ -1271,11 +1328,52 @@ export default function CotizacionesPage(){
     })();
     return()=>{vivo=false;};
   },[mapsLoaded,porGeocodificar]);
-  /** Arrastrar un punto en el mapa de la ruta: mandan las coordenadas, el nombre se queda. */
+  /**
+   * Arrastrar un punto de la ruta (en su mapa, o el paradero 1 / último de la ida): mandan las
+   * coordenadas nuevas y el texto del punto pasa a ser la dirección de Google, sola. Se aplica solo
+   * si al volver el punto sigue ahí y nadie tocó el texto; el texto de antes queda a un clic.
+   */
+  const [renombreRuta,setRenombreRuta]=useState<Partial<Record<Extremo,RenombreMapa>>>({});
+  const placesRuta=useRef<Record<Extremo,PuntoRuta|null>>({origen:null,destino:null,retorno:null});
+  useEffect(()=>{placesRuta.current={origen:origenPlace,destino:destinoPlace,retorno:retornoPlace};},[origenPlace,destinoPlace,retornoPlace]);
+  const campoDe=(e:Extremo)=>e==="retorno"?"punto_retorno" as const:e;
+  const olvidarRenombreRuta=(e:Extremo)=>setRenombreRuta(prev=>{if(!prev[e])return prev;const n={...prev};delete n[e];return n;});
+  const buscarNombreRuta=async(e:Extremo,lat:number,lng:number,textoAlSoltar:string)=>{
+    setRenombreRuta(prev=>({...prev,[e]:{...prev[e],cargando:true,error:undefined}}));
+    const mismoPunto=()=>{const q=placesRuta.current[e];return!!q&&q.lat===lat&&q.lng===lng;};
+    const sigueIgual=()=>mismoPunto()&&textosRuta.current[e]===textoAlSoltar;
+    try{
+      const dir=await direccionDePunto(lat,lng);
+      if(!sigueIgual()){if(mismoPunto())olvidarRenombreRuta(e);return;}
+      if(!dir){setRenombreRuta(prev=>({...prev,[e]:{...prev[e],cargando:false,error:"Google no devolvió una dirección para ese punto: el texto quedó como estaba."}}));return;}
+      if(dir!==textoAlSoltar){
+        const campo=campoDe(e);
+        // Se escribe el texto sin pasar por el onChange del campo, que soltaría las coordenadas.
+        textosRuta.current={...textosRuta.current,[e]:dir};
+        setForm(p=>({...p,[campo]:dir}));
+      }
+      setRenombreRuta(prev=>({...prev,[e]:{anterior:prev[e]?.puesto===textoAlSoltar?prev[e]?.anterior:textoAlSoltar,puesto:dir}}));
+    }catch(err){
+      if(!sigueIgual()){if(mismoPunto())olvidarRenombreRuta(e);return;}
+      const msg=err instanceof Error?err.message:"sin respuesta";
+      setRenombreRuta(prev=>({...prev,[e]:{...prev[e],cargando:false,error:`No se pudo buscar la dirección (${msg}): el texto quedó como estaba.`}}));
+    }
+  };
   const moverPuntoRuta=(e:Extremo,lat:number,lng:number)=>{
     const pt:PuntoRuta={placeId:"",lat,lng,fuente:"mapa"};
     setKmCongelado(null);
+    placesRuta.current={...placesRuta.current,[e]:pt};
     if(e==="origen")setOrigenPlace(pt);else if(e==="destino")setDestinoPlace(pt);else setRetornoPlace(pt);
+    buscarNombreRuta(e,lat,lng,textosRuta.current[e]);
+  };
+  const reintentarNombreRuta=(e:Extremo)=>{const q=placesRuta.current[e];if(q&&coordValida(q.lat,q.lng))buscarNombreRuta(e,q.lat,q.lng,textosRuta.current[e]);};
+  const volverNombreRuta=(e:Extremo)=>{
+    const ant=renombreRuta[e]?.anterior;
+    if(ant===undefined)return;
+    const campo=campoDe(e);
+    textosRuta.current={...textosRuta.current,[e]:ant};
+    setForm(p=>({...p,[campo]:ant}));
+    olvidarRenombreRuta(e);
   };
   const [faltaMigracionCoords,setFaltaMigracionCoords]=useState(false);
 
@@ -2254,21 +2352,24 @@ export default function CotizacionesPage(){
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <Campo label="Punto de origen" req>
                   <LocationInputCot placeholder="Av. República de Panamá 3623" value={form.origen} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,origen:v,km:""}));setOrigenPlace(null);setKmCongelado(null);setKmBase(null);setErrorKm("");}}
-                    onSelect={p=>{setKmCongelado(null);setOrigenPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,origen:v,km:""}));setOrigenPlace(null);olvidarRenombreRuta("origen");setKmCongelado(null);setKmBase(null);setErrorKm("");}}
+                    onSelect={p=>{setKmCongelado(null);olvidarRenombreRuta("origen");setOrigenPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
                   <CoordsDePunto place={origenPlace} texto={form.origen} buscando={porGeocodificar.includes("origen")} fallo={geoFallo.includes("origen")}/>
+                  <AvisoRenombreMapa estado={renombreRuta.origen} onVolver={()=>volverNombreRuta("origen")} onReintentar={()=>reintentarNombreRuta("origen")}/>
                 </Campo>
                 <Campo label="Punto de destino" req>
                   <LocationInputCot placeholder="Planta Cajamarquilla" value={form.destino} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,destino:v,km:""}));setDestinoPlace(null);setKmCongelado(null);setKmBase(null);setErrorKm("");}}
-                    onSelect={p=>{setKmCongelado(null);setDestinoPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,destino:v,km:""}));setDestinoPlace(null);olvidarRenombreRuta("destino");setKmCongelado(null);setKmBase(null);setErrorKm("");}}
+                    onSelect={p=>{setKmCongelado(null);olvidarRenombreRuta("destino");setDestinoPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
                   <CoordsDePunto place={destinoPlace} texto={form.destino} buscando={porGeocodificar.includes("destino")} fallo={geoFallo.includes("destino")}/>
+                  <AvisoRenombreMapa estado={renombreRuta.destino} onVolver={()=>volverNombreRuta("destino")} onReintentar={()=>reintentarNombreRuta("destino")}/>
                 </Campo>
                 {!esSoloIda&&<Campo label="Punto de retorno">
                   <LocationInputCot placeholder="Igual al origen" value={form.punto_retorno} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,punto_retorno:v}));setRetornoPlace(null);setKmCongelado(null);}}
-                    onSelect={p=>{setKmCongelado(null);setRetornoPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,punto_retorno:v}));setRetornoPlace(null);olvidarRenombreRuta("retorno");setKmCongelado(null);}}
+                    onSelect={p=>{setKmCongelado(null);olvidarRenombreRuta("retorno");setRetornoPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
                   <CoordsDePunto place={retornoPlace} texto={form.punto_retorno} buscando={porGeocodificar.includes("retorno")} fallo={geoFallo.includes("retorno")} vacioDice="Vacío: la vuelta llega al punto de origen."/>
+                  <AvisoRenombreMapa estado={renombreRuta.retorno} onVolver={()=>volverNombreRuta("retorno")} onReintentar={()=>reintentarNombreRuta("retorno")}/>
                 </Campo>}
                 <Campo label={form.tipo_servicio==="multi_dia"?"Fecha inicio (Día 1)":"Fecha de servicio"}><input type="date" className={iCls()} value={form.fecha_servicio} onChange={f("fecha_servicio")}/></Campo>
                 {["ida_retorno","ida_retorno_paradas","multi_dia"].includes(form.tipo_servicio)&&(
