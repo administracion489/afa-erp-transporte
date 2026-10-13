@@ -1,15 +1,15 @@
-// lib/alertas-flota.ts — Lógica PURA (sin React/DOM) de detección de solape de
-// conductor y de la JORNADA DE CONDUCCIÓN. La usan el motor de alertas
-// (/api/alertas-flota/tick) y la torre (/seguimiento): dos pantallas que contestan
-// "¿este conductor maneja de más?" tienen que contestar con el mismo motor.
-// El SOLAPE es una heurística de ADVERTENCIA (no hay campo de duración en reservas; el
-// fin se estima con un bloque por defecto cuando no hay hora_real_fin).
+// lib/alertas-flota.ts — Lógica PURA (sin React/DOM) del SOLAPE (unidad o conductor en dos
+// servicios que no se pueden hacer seguidos) y de la JORNADA DE CONDUCCIÓN. La usan el motor de
+// alertas (/api/alertas-flota/tick) y la torre (/seguimiento): dos pantallas que contestan
+// "¿este conductor maneja de más?" o "¿esta unidad llega?" tienen que contestar con el mismo motor.
+// Las dos parten de la MISMA ventana por servicio (`ventanaConduccion`), que va de lo real al
+// itinerario de paraderos y solo sin itinerario al bloque de 4 h — y entonces lo declara.
 //
 // OJO con `hora_real_fin`: llevaba un año VACÍA (0 de 575 servicios en 30 días), así que este
 // módulo caía SIEMPRE al bloque estimado. Desde que los endpoints del conductor la sellan, el
 // valor entra de verdad — y es "HH:MM:SS" sin fecha, con dos formas de mentir (cruce de
-// medianoche y cierre anticipado). Ver `duracionMin`: que el dato mejore no puede empeorar la
-// alerta.
+// medianoche y cierre anticipado). Ver `ventanaConduccion`: que el dato mejore no puede empeorar
+// la alerta.
 //
 // ── LA JORNADA SE MIDE EN HORAS DE CONDUCCIÓN, NO EN «PRIMERA SALIDA → ÚLTIMO FIN» ──────────
 // Lo reportó el dueño el 13-10-2026 con la torre delante: los conductores de I.C. LOGÍSTICA
@@ -44,7 +44,11 @@
 // lo mismo que medido.
 
 import { minutosAHhmm, textoDuracion } from "@/lib/alertas-horario";
+import { distM } from "@/lib/huella";
 import { ordenarTramo } from "@/lib/paradas-materializar";
+
+/** Un punto del mapa (paradero). */
+export type PuntoGeo = { lat: number; lng: number };
 
 export type ReservaFlota = {
   id: number;
@@ -66,6 +70,12 @@ export type ReservaFlota = {
    * sigue sumando). Sin fin real; con fin real no se usa.
    */
   en_curso_ahora?: string | null;
+  /** Coordenadas del PRIMER paradero del itinerario (`itinerarioDe`): de dónde sale. */
+  plan_origen?: PuntoGeo | null;
+  /** Coordenadas del ÚLTIMO paradero del itinerario (`itinerarioDe`): dónde termina. */
+  plan_destino?: PuntoGeo | null;
+  /** Cómo nombrar este servicio en el texto del solape («OS-2026-006599 · 17:50»). */
+  rotulo?: string | null;
 };
 
 const DUR_ESTIMADA_MIN = 240; // 4 h: bloque por defecto para estimar el fin de un servicio
@@ -139,25 +149,6 @@ function aMin(hhmm?: string | null): number | null {
   return Number.isNaN(h) ? null : h * 60 + (m || 0);
 }
 
-/**
- * Minutos que dura el bloque a reservar para una reserva, a partir de su inicio pactado.
- *
- * `hora_real_fin` es "HH:MM:SS" DEL DÍA, SIN fecha (misma trampa que documenta
- * lib/servicio-tiempos.ts:67). Un nocturno que sale 22:00 y cierra 01:30 da fin=90 < ini=1320:
- * antes `Math.max(fin, ini + 1)` lo colapsaba a UN minuto y el detector se quedaba ciego justo
- * en ese servicio. Aquí un fin ANTERIOR al inicio se lee como cruce de medianoche (+24 h) y solo
- * se acepta si la duración cabe en el techo de 26 h; si no cabe —o si es implausiblemente corta—
- * se cae al bloque estimado, que es el comportamiento previo.
- */
-function duracionMin(r: ReservaFlota, ini: number): number {
-  const finCrudo = aMin(r.hora_real_fin);
-  if (finCrudo == null) return DUR_ESTIMADA_MIN;
-  const fin = finCrudo < ini ? finCrudo + DIA_MIN : finCrudo;
-  const dur = fin - ini;
-  if (dur > DURACION_MAX_MIN || dur < DUR_MIN_FIABLE_MIN) return DUR_ESTIMADA_MIN;
-  return dur;
-}
-
 // ══════════════════════════════════════════════════════════════════════════════════════
 // LA VENTANA DE CONDUCCIÓN DE UN SERVICIO
 // ══════════════════════════════════════════════════════════════════════════════════════
@@ -187,30 +178,46 @@ function alinear(x: number, ref: number): number {
   return v;
 }
 
-type ParadaPlan = { orden?: number | null; hora_estimada?: string | null };
+type ParadaPlan = {
+  orden?: number | null; hora_estimada?: string | null;
+  lat?: number | string | null; lng?: number | string | null;
+};
+
+/** Un par lat/lng utilizable, o null (vacío, no numérico o el (0,0) de un dato sin poner). */
+function puntoDe(lat: unknown, lng: unknown): PuntoGeo | null {
+  if (lat == null || lng == null || lat === "" || lng === "") return null;
+  const a = Number(lat), b = Number(lng);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || (a === 0 && b === 0)) return null;
+  if (Math.abs(a) > 90 || Math.abs(b) > 180) return null;
+  return { lat: a, lng: b };
+}
 
 /**
- * Hora planificada del primer y del último paradero. Primero las filas de `paradas` (en orden),
- * y si no traen hora, la semilla `paradas_json` (ordenada como el «Iniciar», `ordenarTramo`).
- * Hacen falta DOS horas distintas: con una sola no hay duración que medir.
+ * El itinerario planificado: hora del primer y del último paradero, y DÓNDE están. Primero las
+ * filas de `paradas` (en orden), y si no traen el dato, la semilla `paradas_json` (ordenada como
+ * el «Iniciar», `ordenarTramo`). Para la duración hacen falta DOS horas distintas: con una sola no
+ * hay nada que medir. El origen y el destino son el primer y el último paradero de la lista, y
+ * solo si ESE paradero tiene coordenadas: tomar el siguiente que las tenga movería el extremo.
  */
 export function itinerarioDe(
   paradas: ParadaPlan[] | null | undefined,
   semilla?: unknown,
-): { inicio: string | null; fin: string | null } {
+): { inicio: string | null; fin: string | null; origen: PuntoGeo | null; destino: PuntoGeo | null } {
   const deLista = (horas: (string | null | undefined)[]) => {
     const validas = horas.filter((h): h is string => aMin(h) != null);
     return validas.length >= 2 ? { inicio: validas[0], fin: validas[validas.length - 1] } : null;
   };
   const filas = [...(paradas ?? [])].sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0));
-  const deFilas = deLista(filas.map((p) => p.hora_estimada));
-  if (deFilas) return deFilas;
-  if (Array.isArray(semilla)) {
-    const orden = ordenarTramo(semilla as { tipo?: string | null; hora?: string | null }[]);
-    const deSemilla = deLista(orden.map((p) => (typeof p?.hora === "string" ? p.hora : null)));
-    if (deSemilla) return deSemilla;
-  }
-  return { inicio: null, fin: null };
+  const orden = Array.isArray(semilla)
+    ? ordenarTramo(semilla as { tipo?: string | null; hora?: string | null; lat?: unknown; lng?: unknown }[])
+    : [];
+  const horas = deLista(filas.map((p) => p.hora_estimada))
+    ?? deLista(orden.map((p) => (typeof p?.hora === "string" ? p.hora : null)))
+    ?? { inicio: null, fin: null };
+  const extremos = (l: { lat?: unknown; lng?: unknown }[]) =>
+    l.length ? { origen: puntoDe(l[0]?.lat, l[0]?.lng), destino: puntoDe(l[l.length - 1]?.lat, l[l.length - 1]?.lng) } : null;
+  const geo = extremos(filas) ?? extremos(orden) ?? { origen: null, destino: null };
+  return { ...horas, ...geo };
 }
 
 /**
@@ -244,8 +251,10 @@ export function ventanaConduccion(r: ReservaFlota): VentanaConduccion | null {
     return null;
   }
 
-  // Fin REAL: las mismas reglas que `duracionMin` (cruce de medianoche, techo de 26 h y un piso
-  // de 30 min por debajo del cual el sello no se cree).
+  // Fin REAL: un fin anterior al inicio se lee como cruce de medianoche (un nocturno 22:00 →
+  // 01:30 no dura un minuto), con techo de 26 h y un piso de 30 min por debajo del cual el sello
+  // no se cree (`hora_real_fin` se sella con el último paradero MARCADO: si solo se marcó el
+  // primero, la ventana colapsaría y el detector quedaría ciego).
   const finCrudo = aMin(r.hora_real_fin);
   if (finCrudo != null) {
     const finAl = alinear(finCrudo, ini);
@@ -413,33 +422,168 @@ export function evaluarJornada(
   };
 }
 
+// ══════════════════════════════════════════════════════════════════════════════════════
+// EL SOLAPE: ¿LA MISMA UNIDAD (O EL MISMO CONDUCTOR) PUEDE HACER LOS DOS SERVICIOS?
+// ══════════════════════════════════════════════════════════════════════════════════════
+//
+// Lo reportó el dueño el 13-10-2026: «Posible solape de unidad» en servicios que la unidad SÍ
+// alcanza a cubrir, «incluso con tráfico». La regla vieja suponía que todo servicio sin hora de
+// fin real duraba 4 h desde su hora programada, así que una ENTRADA de las 05:50 y su RETORNO de
+// las 07:00 —40 minutos de recorrido y una hora libre en la planta— salían como solape toda la
+// mañana, hasta que el primero se cerraba. Y no miraba DÓNDE termina uno y empieza el otro.
+//
+// Ahora cada servicio usa la MISMA ventana que la jornada (`ventanaConduccion`: lo real, si no el
+// itinerario de paraderos, y solo sin itinerario el bloque de 4 h) y el juicio va de la evidencia
+// al supuesto, con su nivel declarado:
+//   · `cruce`: los recorridos se pisan con duraciones conocidas (o salen con menos de 30 min de
+//     diferencia, que ninguna duración salva). La unidad no puede estar en los dos.
+//   · `traslado_justo`: no se pisan, pero entre el último paradero de uno y el primero del
+//     siguiente no da el tiempo ni a velocidad de ciudad (`trasladoMin`).
+//   · `posible`: se pisan SOLO porque uno no tiene itinerario ni hora de fin y se le supusieron
+//     4 h. No se afirma: se dice qué falta para saberlo.
+// Sin coordenadas en algún extremo el traslado no se juzga (no se acusa por falta de un dato).
+
 /**
- * Detecta, sobre las reservas de un día, qué conductores tienen servicios que se cruzan
- * (solape) y cuáles pasan los topes de conducción (`evaluarJornada`).
+ * Velocidad con la que se estima un traslado entre servicios, ya con tráfico de Lima, y cuánto
+ * más larga es la calle que la línea recta. NO MEDIDOS y declarados: con ellos 10 km en línea
+ * recta son ~31 min. Es una cota para decir «no llega», no un ETA: el lado que evita falsos
+ * avisos es SUBIR la velocidad; el que no deja pasar un doble agendamiento, bajarla.
+ */
+export const VEL_TRASLADO_KMH = 25;
+export const FACTOR_RUTA = 1.3;
+
+/** Minutos estimados de traslado entre dos puntos, o null sin coordenadas. */
+export function trasladoMin(a: PuntoGeo | null | undefined, b: PuntoGeo | null | undefined): number | null {
+  if (!a || !b) return null;
+  const km = (distM(a.lat, a.lng, b.lat, b.lng) / 1000) * FACTOR_RUTA;
+  return Math.round((km / VEL_TRASLADO_KMH) * 60);
+}
+
+export type NivelSolape = "cruce" | "traslado_justo" | "posible";
+/** Cuánto pesa cada nivel: el que se enseña es el peor de una reserva. */
+const PESO_SOLAPE: Record<NivelSolape, number> = { posible: 1, traslado_justo: 2, cruce: 3 };
+
+export type SolapeReserva = {
+  nivel: NivelSolape;
+  /** las otras reservas con las que choca */
+  con: number[];
+  /** una línea por choque, lista para la ficha y el título del chip; la PRIMERA es la del choque
+   *  más grave (la que va en el WhatsApp) */
+  detalle: string[];
+};
+
+/**
+ * Juzga, para cada grupo (una unidad, un conductor), qué servicios no se pueden hacer seguidos.
+ * `clave` dice a qué grupo va cada reserva (null = no se juzga). Las canceladas no cuentan.
+ */
+export function juzgarSolapes(
+  reservas: ReservaFlota[],
+  clave: (r: ReservaFlota) => string | null,
+): Map<number, SolapeReserva> {
+  const out = new Map<number, SolapeReserva>();
+  const grupos = new Map<string, { r: ReservaFlota; v: VentanaConduccion }[]>();
+  for (const r of reservas) {
+    if (r.estado === "cancelada") continue;
+    const k = clave(r); if (!k) continue;
+    const v = ventanaConduccion(r); if (!v) continue;
+    const g = grupos.get(k) ?? [];
+    g.push({ r, v }); grupos.set(k, g);
+  }
+  const marcar = (id: number, otro: number, nivel: NivelSolape, texto: string) => {
+    const x = out.get(id) ?? { nivel, con: [], detalle: [] };
+    if (!x.con.includes(otro)) x.con.push(otro);
+    // El texto del choque más grave va PRIMERO: es el que viaja en el WhatsApp (detalle[0]).
+    if (PESO_SOLAPE[nivel] > PESO_SOLAPE[x.nivel]) { x.nivel = nivel; x.detalle.unshift(texto); }
+    else x.detalle.push(texto);
+    out.set(id, x);
+  };
+  const nombre = (r: ReservaFlota) => r.rotulo || `Reserva #${r.id}`;
+
+  for (const g of grupos.values()) {
+    g.sort((x, y) => x.v.ini - y.v.ini || x.v.fin - y.v.fin);
+    for (let i = 0; i < g.length; i++) {
+      for (let j = i + 1; j < g.length; j++) {
+        const A = g[i], B = g[j];
+        const finConocido = A.v.fuente !== "estimado";
+        const arranqueJunto = B.v.ini - A.v.ini < DUR_MIN_FIABLE_MIN;
+        let nivel: NivelSolape | null = null;
+        let texto = "";
+        if (B.v.ini < A.v.fin) {
+          if (finConocido || arranqueJunto) {
+            nivel = "cruce";
+            // Un servicio EN CURSO lleva su fin hasta ahora (`ventanaConduccion`): ese fin no es
+            // una hora de término, es que sigue abierto. Decir «termina a las…» sería inventarla.
+            const sigueAbierto = A.r.hora_real_fin == null && aMin(A.r.en_curso_ahora) != null
+              && alinear(aMin(A.r.en_curso_ahora)!, A.v.ini) === A.v.fin;
+            texto = arranqueJunto && !finConocido
+              ? `Sale a las ${hh(B.v.ini)}, ${B.v.ini - A.v.ini} min después de ${nombre(A.r)} (${hh(A.v.ini)}): no da tiempo a terminar uno y empezar el otro.`
+              : sigueAbierto
+                ? `${nombre(A.r)} sigue en curso a las ${hh(A.v.fin)} y este debía salir a las ${hh(B.v.ini)}: o se va a atrasar, o aquel no se cerró en el app.`
+                : `${nombre(A.r)} termina a las ${hh(A.v.fin)} y este sale a las ${hh(B.v.ini)}: los recorridos se pisan ${A.v.fin - B.v.ini} min.`;
+          } else {
+            nivel = "posible";
+            texto = `${nombre(A.r)} (${hh(A.v.ini)}) no tiene itinerario ni hora de fin: se le supusieron ${textoDuracion(DUR_ESTIMADA_MIN)} y con eso se pisaría con este (${hh(B.v.ini)}). ` +
+              "Con sus paraderos y horas, o al cerrarse, se sabrá si de verdad se cruzan.";
+          }
+        } else if (j === i + 1 && finConocido) {
+          // Solo el siguiente inmediato: el traslado se juzga entre servicios consecutivos.
+          const t = trasladoMin(A.r.plan_destino, B.r.plan_origen);
+          const libre = B.v.ini - A.v.fin;
+          if (t != null && libre < t) {
+            nivel = "traslado_justo";
+            texto = `${nombre(A.r)} termina a las ${hh(A.v.fin)} y este sale a las ${hh(B.v.ini)}: ${textoDuracion(libre)} para un traslado ` +
+              `que se estima en ${textoDuracion(t)} a velocidad de ciudad.`;
+          }
+        }
+        if (nivel) {
+          marcar(A.r.id, B.r.id, nivel, texto);
+          marcar(B.r.id, A.r.id, nivel, texto);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Los niveles que de verdad afirman un choque (los que avisan por WhatsApp). */
+export function solapeAfirmado(s: SolapeReserva | null | undefined): boolean {
+  return !!s && s.nivel !== "posible";
+}
+
+/**
+ * El titular de un solape para la torre y la ficha. Vive aquí, junto a los niveles, para que la
+ * fila y la ficha digan lo mismo y ninguna vuelva a llamar «posible» a un choque afirmado (ni al
+ * revés: afirmar uno que solo sale de suponer 4 h).
+ */
+export function tituloSolape(nivel: NivelSolape, recurso: "unidad" | "conductor"): string {
+  const sujeto = recurso === "unidad" ? "La unidad" : "El conductor";
+  switch (nivel) {
+    case "cruce": return `${sujeto} tiene dos servicios que se pisan`;
+    case "traslado_justo": return `${sujeto} no llega a tiempo de un servicio al siguiente`;
+    case "posible": return `Solape de ${recurso} sin confirmar: falta el itinerario de un servicio`;
+  }
+}
+
+/**
+ * Detecta, sobre las reservas de un día, qué conductores tienen servicios que no se pueden hacer
+ * seguidos (`juzgarSolapes`) y cuáles pasan los topes de conducción (`evaluarJornada`).
  *
  * `solape` y `jornada` devuelven, por reserva marcada, el conductor_id involucrado — para poder
- * notificar. `veredictos` trae el juicio de CADA conductor (pase o no), con su evidencia.
- *
- * El solape NO cambió con la jornada: sigue con la hora del servicio y el bloque de 4 h, que es
- * lo prudente para avisar de un doble agendamiento (el itinerario no cuenta el traslado entre
- * servicios). La matriz lo fija contra el algoritmo anterior.
+ * notificar. `solape` lleva SOLO los choques afirmados (`cruce`, `traslado_justo`): el `posible`
+ * es falta de un dato, no un choque, y por WhatsApp sería ruido. `solapes` trae el detalle de
+ * todos y `veredictos` el juicio de jornada de CADA conductor (pase o no), con su evidencia.
  */
 export function detectarSolapesJornada(
   reservas: ReservaFlota[],
   opts: { acumuladaMaxH: number },
-): { solape: Map<number, number>; jornada: Map<number, number>; veredictos: Map<number, VeredictoJornada> } {
+): {
+  solape: Map<number, number>; jornada: Map<number, number>;
+  solapes: Map<number, SolapeReserva>; veredictos: Map<number, VeredictoJornada>;
+} {
   const solape = new Map<number, number>();  // reserva_id → conductor_id
   const jornada = new Map<number, number>();
   const veredictos = new Map<number, VeredictoJornada>(); // conductor_id → veredicto
   const acumuladaMaxMin = Math.round(opts.acumuladaMaxH * 60);
-
-  const intervalo = (r: ReservaFlota): [number, number] | null => {
-    const ini = aMin(r.hora_servicio);
-    if (ini == null) return null;
-    // El fin puede pasar de 1440 (nocturno que cierra al día siguiente): las comparaciones de
-    // solape son restas, así que aguantan valores > 24 h sin más.
-    return [ini, ini + duracionMin(r, ini)];
-  };
 
   // Agrupar por conductor (solo propios con conductor asignado, no cancelados).
   const grupos = new Map<number, ReservaFlota[]>();
@@ -451,17 +595,12 @@ export function detectarSolapesJornada(
     g.push(r);
   }
 
+  const solapes = juzgarSolapes(reservas, (r) => (r.conductor_id ? `c${r.conductor_id}` : null));
+  for (const r of reservas) {
+    if (r.conductor_id && solapeAfirmado(solapes.get(r.id))) solape.set(r.id, r.conductor_id);
+  }
+
   for (const [condId, g] of grupos) {
-    // Solape: pares de servicios cuyos intervalos se cruzan.
-    for (let i = 0; i < g.length; i++) {
-      for (let j = i + 1; j < g.length; j++) {
-        const a = intervalo(g[i]), b = intervalo(g[j]);
-        if (a && b && a[0] < b[1] && b[0] < a[1]) {
-          solape.set(g[i].id, condId);
-          solape.set(g[j].id, condId);
-        }
-      }
-    }
     // Jornada de CONDUCCIÓN (no la amplitud del día ni el número de servicios).
     const ventanas = g.map(ventanaConduccion).filter((v): v is VentanaConduccion => !!v);
     const v = evaluarJornada(ventanas, { acumuladaMaxMin, sinHora: g.length - ventanas.length });
@@ -469,5 +608,5 @@ export function detectarSolapesJornada(
     if (v.excede) for (const r of g) jornada.set(r.id, condId);
   }
 
-  return { solape, jornada, veredictos };
+  return { solape, jornada, solapes, veredictos };
 }

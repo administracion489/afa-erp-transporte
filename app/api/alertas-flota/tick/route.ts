@@ -90,26 +90,25 @@ function finServicioMs(r: {
 }
 
 /**
- * Lo que la jornada de conducción necesita de cada servicio y `todas` no trae: la salida real
- * (`hora_real_inicio`, la sellan los endpoints del conductor) y el itinerario —primer y último
- * paradero— de las filas de `paradas` o, si aún no se materializaron, de la semilla
- * `paradas_json` (`itinerarioDe`, el mismo que usa la torre). null si ALGUNA lectura falla:
- * medir la mitad de los servicios con 4 h estimadas sería volver a alarmar por falta de datos.
+ * Lo que la jornada y el solape necesitan de cada servicio y `todas` no trae: la salida real
+ * (`hora_real_inicio`, la sellan los endpoints del conductor) y el itinerario —hora y lugar del
+ * primer y del último paradero— de las filas de `paradas` o, si aún no se materializaron, de la
+ * semilla `paradas_json` (`itinerarioDe`, el mismo que usa la torre). null si ALGUNA lectura
+ * falla: medir la mitad de los servicios con 4 h estimadas sería volver a alarmar por falta de datos.
  */
-async function itinerariosDeHoy(
-  ids: number[],
-): Promise<Map<number, Pick<ReservaFlota, "hora_real_inicio" | "plan_inicio" | "plan_fin">> | null> {
-  const out = new Map<number, Pick<ReservaFlota, "hora_real_inicio" | "plan_inicio" | "plan_fin">>();
+type Itinerario = Pick<ReservaFlota, "hora_real_inicio" | "plan_inicio" | "plan_fin" | "plan_origen" | "plan_destino">;
+async function itinerariosDeHoy(ids: number[]): Promise<Map<number, Itinerario> | null> {
+  const out = new Map<number, Itinerario>();
   if (!ids.length) return out;
   const { data: rs, error: eR } = await admin
     .from("reservas").select("id, hora_real_inicio, paradas_json").in("id", ids);
   if (eR) { console.error("[tick] jornada: reservas", eR.message); return null; }
   // Paradas paginadas con orden TOTAL: cortar una página a mitad de un servicio movería su último
   // paradero y con él la duración.
-  const filas: { reserva_id: number; orden: number | null; hora_estimada: string | null }[] = [];
+  const filas: { reserva_id: number; orden: number | null; hora_estimada: string | null; lat: number | null; lng: number | null }[] = [];
   for (let desde = 0; ; desde += 1000) {
     const { data, error } = await admin
-      .from("paradas").select("reserva_id, orden, hora_estimada").in("reserva_id", ids)
+      .from("paradas").select("reserva_id, orden, hora_estimada, lat, lng").in("reserva_id", ids)
       .order("reserva_id").order("orden").order("id").range(desde, desde + 999);
     if (error) { console.error("[tick] jornada: paradas", error.message); return null; }
     filas.push(...((data ?? []) as typeof filas));
@@ -122,7 +121,10 @@ async function itinerariosDeHoy(
   }
   for (const r of (rs ?? []) as { id: number; hora_real_inicio: string | null; paradas_json: unknown }[]) {
     const it = itinerarioDe(porReserva.get(r.id), r.paradas_json);
-    out.set(r.id, { hora_real_inicio: r.hora_real_inicio, plan_inicio: it.inicio, plan_fin: it.fin });
+    out.set(r.id, {
+      hora_real_inicio: r.hora_real_inicio, plan_inicio: it.inicio, plan_fin: it.fin,
+      plan_origen: it.origen, plan_destino: it.destino,
+    });
   }
   return out;
 }
@@ -1031,40 +1033,44 @@ async function handler(req: NextRequest) {
     }
 
     // ── BLOQUE 7: solape / jornada de conducción (hoy, respeta hora fija) ───────
-    // La jornada se juzga en HORAS DE CONDUCCIÓN (RENAT art. 30, lib/alertas-flota.ts): el
-    // horario partido —entrada de madrugada, retorno por la tarde, descanso en medio— no es
-    // jornada extensa. Para medir cuánto maneja cada servicio hace falta su salida real y su
-    // itinerario (primer y último paradero), que `todas` no trae: se leen aquí, solo de los
-    // servicios propios de hoy con conductor y solo si la alerta está en ventana.
+    // Los dos se juzgan con la MISMA ventana por servicio (lib/alertas-flota.ts): lo real, si no el
+    // itinerario de paraderos, y solo sin itinerario el bloque de 4 h. La jornada cuenta HORAS DE
+    // CONDUCCIÓN (RENAT art. 30): el horario partido no es jornada extensa. El solape avisa solo lo
+    // que AFIRMA (recorridos que se pisan, o un traslado que no da entre el último paradero de uno
+    // y el primero del siguiente): antes cada servicio sin hora de fin «duraba» 4 h y una entrada y
+    // su retorno salían como solape. La salida real, el itinerario y sus coordenadas no vienen en
+    // `todas`: se leen aquí, solo de los servicios propios de hoy con conductor y solo si alguna de
+    // las dos alertas está en ventana.
     {
       const cSol = activa("solape"), cJor = activa("jornada");
       const solOn = cSol && enVentanaHoraFija(cSol, ahora, force);
       const jorOn = cJor && enVentanaHoraFija(cJor, ahora, force);
       if (solOn || jorOn) {
         let hoyRes = todas.filter((r) => r.fecha_servicio === hoy && r.tipo_asignacion === "propio") as ReservaFlota[];
-        // Sin el itinerario cada servicio contaría 4 h y el horario partido volvería a alarmar:
-        // si no se pudo leer, ESTE tick no juzga la jornada (el solape no lo necesita).
-        let jornadaLeida = true;
-        if (jorOn) {
-          const conItinerario = await itinerariosDeHoy(hoyRes.filter((r) => r.conductor_id && r.estado !== "cancelada").map((r) => r.id));
-          // Un servicio EN CURSO lleva conduciendo al menos hasta ahora, vaya o no atrasado.
-          if (conItinerario) hoyRes = hoyRes.map((r) => ({
-            ...r, ...conItinerario.get(r.id), en_curso_ahora: r.estado === "en_curso" ? minutosAHhmm(ahora) : null,
-          }));
-          else { jornadaLeida = false; res.jornada_sin_itinerario = 1; }
-        }
+        // Sin el itinerario cada servicio contaría 4 h y el horario partido volvería a alarmar (las
+        // dos alertas): si no se pudo leer, ESTE tick no juzga ninguna.
+        const conItinerario = await itinerariosDeHoy(hoyRes.filter((r) => r.conductor_id && r.estado !== "cancelada").map((r) => r.id));
+        const leido = !!conItinerario;
+        // Un servicio EN CURSO lleva conduciendo al menos hasta ahora, vaya o no atrasado.
+        if (conItinerario) hoyRes = hoyRes.map((r) => ({
+          ...r, ...conItinerario.get(r.id),
+          en_curso_ahora: r.estado === "en_curso" ? minutosAHhmm(ahora) : null,
+        }));
+        else res.flota_sin_itinerario = 1;
         const acumuladaMaxH = cJor?.umbral ?? UMBRAL_DEFECTO.jornada;
-        const { solape, jornada, veredictos } = detectarSolapesJornada(hoyRes, { acumuladaMaxH });
+        const { solape, solapes, jornada, veredictos } = detectarSolapesJornada(hoyRes, { acumuladaMaxH });
         let nS = 0, nJ = 0;
-        if (solOn) {
+        if (solOn && leido) {
           for (const [reservaId, condId] of solape) {
             if (!(await reclamarEnvio("solape", reservaId))) continue;
-            const rd = await aDirectorio(cSol!, ["Solape de conductor", nombreCorto(condMap.get(condId)?.nombre), `Reserva #${reservaId}`, "Tiene servicios que se cruzan en horario."]);
+            // El detalle lo redacta el motor (una línea por choque): va el primero.
+            const detalle = solapes.get(reservaId)?.detalle[0] ?? "Tiene servicios que no se pueden hacer seguidos.";
+            const rd = await aDirectorio(cSol!, ["Solape de conductor", nombreCorto(condMap.get(condId)?.nombre), `Reserva #${reservaId}`, detalle]);
             if (rd.enviados === 0 && rd.fallos > 0) { await liberarEnvio("solape", reservaId); continue; }
             nS++;
           }
         }
-        if (jorOn && jornadaLeida) {
+        if (jorOn && leido) {
           const yaCond = new Set<number>();
           for (const [, condId] of jornada) {
             if (yaCond.has(condId)) continue; yaCond.add(condId);

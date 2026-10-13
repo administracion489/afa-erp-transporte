@@ -17,7 +17,11 @@ import { esAbordado } from "@/lib/documentos-servicio";
 import { paginarFilas } from "@/lib/huella";
 import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
 import { derivarTiempos, procedencia, hhmmLima, type Instante } from "@/lib/servicio-tiempos";
-import { CONDUCCION_ACUMULADA_MAX_H, detectarSolapesJornada, itinerarioDe, type ReservaFlota, type VeredictoJornada } from "@/lib/alertas-flota";
+import {
+  CONDUCCION_ACUMULADA_MAX_H, FACTOR_RUTA, VEL_TRASLADO_KMH, detectarSolapesJornada, itinerarioDe, juzgarSolapes,
+  solapeAfirmado, tituloSolape,
+  type ReservaFlota, type SolapeReserva, type VeredictoJornada,
+} from "@/lib/alertas-flota";
 import { resumenRastreo, BANDA_CON_CORTES, BANDA_ACEPTABLE, type VeredictoRastreo, type ProblemaRastreo, type ItemRastreo } from "@/lib/gps-cobertura";
 import { SIN_NOMBRE_RUTA, ETIQUETA_RECORRIDO } from "@/lib/ruta-identidad";
 import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
@@ -91,7 +95,10 @@ type ServicioView = {
   pasajeros_total_real: number; seguro_vence_hoy: boolean;
   gastos_total: number; docs_vencidos: string[];
   // Alertas de flota cruzadas (se rellenan en un segundo memo sobre todos los servicios):
-  conflicto_vehiculo?: boolean; conflicto_conductor?: boolean; jornada_extensa?: boolean;
+  /** Solape de la UNIDAD y del CONDUCTOR con su nivel y su porqué (lib/alertas-flota.ts,
+   *  `juzgarSolapes`, el mismo motor del aviso del tick). null = sin choque. */
+  solape_vehiculo?: SolapeReserva | null; solape_conductor?: SolapeReserva | null;
+  jornada_extensa?: boolean;
   /** Juicio de la jornada de CONDUCCIÓN de su conductor (lib/alertas-flota.ts, el mismo motor
    *  del tick). Solo flota propia con conductor; null en el resto. */
   jornada?: VeredictoJornada | null;
@@ -267,14 +274,15 @@ function docsVencidosEmpresa(docs: DocTer[], empresaId: number|null): string[] {
   return docs.filter(d => d.empresa_id === empresaId && obligVencido(d)).map(d => etiquetaTipoDoc(d.tipo));
 }
 
-// ── Alertas de flota cruzadas entre servicios (solape de recurso) ──
-// No hay campo de duración en reservas, así que el fin se estima con un bloque por defecto
-// cuando aún no hay hora_real_fin. Son alertas ADVERTENCIA (heurística), no certezas.
-// La JORNADA ya no se decide aquí: era «1ª salida → último fin > 13 h, o ≥ 4 servicios», y eso
-// marcaba como fatiga todo horario partido (entrada de madrugada, retorno por la tarde y descanso
-// en medio). Ahora la juzga lib/alertas-flota.ts en horas de CONDUCCIÓN (RENAT art. 30) — el
-// mismo motor que el aviso del tick, para que la torre y el WhatsApp digan lo mismo.
-const DUR_ESTIMADA_MIN        = 240; // 4 h: bloque por defecto para estimar el fin de un servicio
+// ── Alertas de flota cruzadas entre servicios (solape de recurso y jornada) ──
+// Ninguna de las dos se decide aquí: las juzga lib/alertas-flota.ts, el mismo motor que el aviso
+// del tick, para que la torre y el WhatsApp digan lo mismo.
+// · El SOLAPE suponía que todo servicio sin hora de fin real duraba 4 h y no miraba la distancia,
+//   así que una entrada de las 05:50 y su retorno de las 07:00 salían «UNIDAD×2» toda la mañana
+//   aunque a la unidad le sobrara tiempo. Ahora usa la duración del itinerario y el traslado entre
+//   el último paradero de uno y el primero del siguiente, con su nivel declarado.
+// · La JORNADA era «1ª salida → último fin > 13 h, o ≥ 4 servicios», y eso marcaba como fatiga
+//   todo horario partido. Ahora cuenta horas de CONDUCCIÓN (RENAT art. 30).
 
 function aMin(hhmm?: string|null): number|null {
   if (!hhmm) return null;
@@ -282,38 +290,11 @@ function aMin(hhmm?: string|null): number|null {
   return Number.isNaN(h) ? null : h * 60 + (m || 0);
 }
 
-function detectarAlertasFlota(base: ServicioView[]): { vehiculo: Set<number>; conductor: Set<number> } {
-  const vehiculo = new Set<number>(), conductor = new Set<number>();
-  const intervalo = (s: ServicioView): [number, number] | null => {
-    const ini = aMin(s.reserva.hora_servicio);
-    if (ini == null) return null;
-    const fin = aMin(s.reserva.hora_real_fin) ?? ini + DUR_ESTIMADA_MIN;
-    return [ini, Math.max(fin, ini + 1)];
-  };
-  const agrupar = (key: (s: ServicioView) => string | null, marca: Set<number>) => {
-    const grupos: Record<string, ServicioView[]> = {};
-    base.forEach(s => {
-      if (s.reserva.estado === "cancelada") return;
-      const k = key(s); if (!k) return;
-      (grupos[k] ||= []).push(s);
-    });
-    Object.values(grupos).forEach(g => {
-      for (let i = 0; i < g.length; i++) for (let j = i + 1; j < g.length; j++) {
-        const a = intervalo(g[i]), b = intervalo(g[j]);
-        if (a && b && a[0] < b[1] && b[0] < a[1]) { marca.add(g[i].reserva.id); marca.add(g[j].reserva.id); }
-      }
-    });
-    return grupos;
-  };
-  agrupar(s => s.reserva.vehiculo_id ? `v${s.reserva.vehiculo_id}` : s.reserva.vehiculo_tercero_id ? `vt${s.reserva.vehiculo_tercero_id}` : null, vehiculo);
-  agrupar(s => s.reserva.conductor_id ? `c${s.reserva.conductor_id}` : null, conductor);
-  return { vehiculo, conductor };
-}
-
 /**
- * Lo que el motor de jornada necesita de cada servicio de la torre. La salida y el fin REALES
- * salen de la evidencia que el lote ya trajo (derivarTiempos); el itinerario, de los paraderos
- * cargados o de la semilla `paradas_json` (itinerarioDe, el mismo que usa el tick).
+ * Lo que los motores de solape y jornada necesitan de cada servicio de la torre. La salida y el
+ * fin REALES salen de la evidencia que el lote ya trajo (derivarTiempos); el itinerario y sus
+ * extremos en el mapa, de los paraderos cargados o de la semilla `paradas_json` (itinerarioDe, el
+ * mismo que usa el tick).
  */
 function aReservaFlota(s: ServicioView, ahoraHhmm: string | null): ReservaFlota {
   const r = s.reserva;
@@ -325,8 +306,19 @@ function aReservaFlota(s: ServicioView, ahoraHhmm: string | null): ReservaFlota 
     hora_real_inicio: s.salida?.hhmm ?? r.hora_real_inicio ?? null,
     hora_real_fin: s.fin_real?.hhmm ?? r.hora_real_fin ?? null,
     plan_inicio: it.inicio, plan_fin: it.fin,
+    plan_origen: it.origen, plan_destino: it.destino,
     en_curso_ahora: r.estado === "en_curso" ? ahoraHhmm : null,
+    rotulo: idAfa(r),
   };
+}
+
+/** Chip de solape: el nivel decide el tono, y el porqué del motor va en el título. */
+function chipSolape(sol: SolapeReserva, recurso: "unidad" | "conductor") {
+  const base = recurso === "unidad" ? "UNIDAD×2" : "CHOFER×2";
+  const titulo = `${tituloSolape(sol.nivel, recurso)}\n${sol.detalle.join("\n")}`;
+  if (sol.nivel === "cruce")          return { label: base,       color: "#b91c1c", bg: "#fee2e2", title: titulo };
+  if (sol.nivel === "traslado_justo") return { label: base,       color: "#b45309", bg: "#fef3c7", title: titulo };
+  return                                     { label: `${base}?`, color: "#6b7280", bg: "#f3f4f6", title: titulo };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -374,8 +366,8 @@ function chipsAlerta(s: ServicioView): { label: string; color: string; bg: strin
   } else if (!p && s.estado_visual === "alerta") {
     out.push({ label: "RETRASO", color: "#dc2626", bg: "#fef2f2", title: "No inició a la hora pactada" });
   }
-  if (s.conflicto_vehiculo)       out.push({ label: "UNIDAD×2", color: "#b45309", bg: "#fef3c7", title: "Posible solape: el vehículo está en otro servicio a la misma hora" });
-  if (s.conflicto_conductor)      out.push({ label: "CHOFER×2", color: "#b45309", bg: "#fef3c7", title: "Posible solape: el conductor está en otro servicio a la misma hora" });
+  if (s.solape_vehiculo)          out.push(chipSolape(s.solape_vehiculo, "unidad"));
+  if (s.solape_conductor)         out.push(chipSolape(s.solape_conductor, "conductor"));
   if (s.jornada_extensa)          out.push({ label: "JORNADA",  color: "#9a3412", bg: "#ffedd5", title: `Jornada de conducción sobre el tope — ${s.jornada?.motivo ?? ""}${s.jornada?.detalle.length ? `\n${s.jornada.detalle.join("\n")}` : ""}` });
   if (s.seguro_vence_hoy)         out.push({ label: "SOAT HOY", color: "#dc2626", bg: "#fef2f2", title: "El seguro de la unidad vence hoy" });
   return out;
@@ -933,22 +925,26 @@ export default function SeguimientoPage() {
   // La jornada la juzga el MISMO motor que el aviso del tick (lib/alertas-flota.ts), con el mismo
   // tope de la tarjeta «jornada» de /configuracion/operaciones.
   const servicios: ServicioView[] = useMemo(()=>{
-    const { vehiculo, conductor } = detectarAlertasFlota(serviciosBase);
     const m = ahoraLimaMin();
     const ahoraHhmm = esHoy ? `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}` : null;
-    // Solo flota propia, con el MISMO filtro que el aviso del tick (la tarjeta declara «solo propios»).
+    const flota = serviciosBase.map(s => aReservaFlota(s, ahoraHhmm));
+    // Solape de UNIDAD: toda la flota del día, propia y tercerizada (los ids se solapan entre las
+    // dos tablas, por eso la clave lleva el prefijo). De CONDUCTOR: el de flota propia asignado.
+    const solVeh = juzgarSolapes(flota, r => r.vehiculo_id ? `v${r.vehiculo_id}` : r.vehiculo_tercero_id ? `vt${r.vehiculo_tercero_id}` : null);
+    const solCond = juzgarSolapes(flota, r => r.conductor_id ? `c${r.conductor_id}` : null);
+    // La jornada, solo flota propia, con el MISMO filtro que el aviso del tick (la tarjeta declara «solo propios»).
     const esPropia = (s: ServicioView) => s.reserva.tipo_asignacion === "propio";
-    const propias = serviciosBase.filter(esPropia).map(s => aReservaFlota(s, ahoraHhmm));
+    const propias = flota.filter((_, i) => esPropia(serviciosBase[i]));
     const { veredictos } = detectarSolapesJornada(propias, { acumuladaMaxH: umbralJornadaH });
     return serviciosBase.map(s => {
       const cid = esPropia(s) && s.reserva.estado !== "cancelada" ? s.reserva.conductor_id : null;
       const jornada = cid ? veredictos.get(cid) ?? null : null;
       return {
         ...s,
-        conflicto_vehiculo:  vehiculo.has(s.reserva.id),
-        conflicto_conductor: conductor.has(s.reserva.id),
+        solape_vehiculo:  solVeh.get(s.reserva.id) ?? null,
+        solape_conductor: solCond.get(s.reserva.id) ?? null,
         jornada,
-        jornada_extensa:     !!jornada?.excede,
+        jornada_extensa:  !!jornada?.excede,
       };
     });
   },[serviciosBase, esHoy, umbralJornadaH]);
@@ -1010,7 +1006,11 @@ export default function SeguimientoPage() {
   ).length;
   const seguroHoy       = servicios.filter(s=>s.seguro_vence_hoy).length;
   const docsVenc        = servicios.filter(s=>s.docs_vencidos.length>0).length;
-  const conflictos      = servicios.filter(s=>s.conflicto_vehiculo||s.conflicto_conductor).length;
+  // Solape: se cuentan aparte los AFIRMADOS (se pisan, o no da el traslado) y los que solo salen de
+  // suponer 4 h a un servicio sin itinerario — eso es un dato que falta, no un choque.
+  const conflictos      = servicios.filter(s=>solapeAfirmado(s.solape_vehiculo)||solapeAfirmado(s.solape_conductor)).length;
+  const solapesDudosos  = servicios.filter(s=>(s.solape_vehiculo||s.solape_conductor)
+    && !solapeAfirmado(s.solape_vehiculo) && !solapeAfirmado(s.solape_conductor)).length;
   // Se cuentan CONDUCTORES, no servicios: un conductor que pasa el tope marca todos sus servicios.
   const fatigaCount     = new Set(servicios.filter(s=>s.jornada_extensa).map(s=>s.reserva.conductor_id)).size;
   // Aviso de rastreo: UNA función (resumenRastreo) decide quién es urgente, quién quedó sin
@@ -1271,7 +1271,7 @@ export default function SeguimientoPage() {
           </div>
         )}
 
-        {(conflictos > 0 || fatigaCount > 0 || docsVenc > 0) && (
+        {(conflictos > 0 || solapesDudosos > 0 || fatigaCount > 0 || docsVenc > 0) && (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3.5 flex items-start gap-3">
             <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center flex-shrink-0"><Ic.Shield size={16} color="#b45309"/></div>
             <div className="text-sm">
@@ -1279,11 +1279,12 @@ export default function SeguimientoPage() {
               <p className="text-amber-700 text-xs mt-0.5">
                 {[
                   docsVenc>0    ? `${docsVenc} con documentos vencidos`            : null,
-                  conflictos>0  ? `${conflictos} con posible solape de unidad/conductor` : null,
+                  conflictos>0  ? `${conflictos} con solape de unidad/conductor` : null,
+                  solapesDudosos>0 ? `${solapesDudosos} con solape sin confirmar (falta su itinerario)` : null,
                   fatigaCount>0 ? `${fatigaCount} conductor(es) sobre el tope de conducción` : null,
                 ].filter(Boolean).join("  ·  ")}
               </p>
-              <p className="text-amber-600/80 text-[11px] mt-1">Documentos vencidos bloquean la salida. El solape es una estimación (no hay duración registrada en la reserva): verifícalo en cada servicio marcado. La jornada cuenta las horas al volante de cada servicio según el RENAT (5 h seguidas de día, 4 h de noche, descanso de 1 h, tope del día): el descanso del horario partido no cuenta.</p>
+              <p className="text-amber-600/80 text-[11px] mt-1">Documentos vencidos bloquean la salida. El solape mide cada servicio de su primer a su último paradero (o lo real, si ya se hizo) y el traslado entre el último paradero de uno y el primero del siguiente (distancia en línea recta × {FACTOR_RUTA}, a {VEL_TRASLADO_KMH} km/h): se marca si los recorridos se pisan o si no da el tiempo. Sin itinerario se le suponen 4 h y sale «sin confirmar». La jornada cuenta las horas al volante de cada servicio según el RENAT (5 h seguidas de día, 4 h de noche, descanso de 1 h, tope del día): el descanso del horario partido no cuenta.</p>
             </div>
           </div>
         )}

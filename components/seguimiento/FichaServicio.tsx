@@ -115,6 +115,7 @@ import {
 // (lo produce /api/seguimiento/retrasos con lib/retrasos.ts). De ese módulo solo se importa
 // la PALETA, para que el mismo nivel no tenga un color en la lista y otro en la ficha.
 import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
+import { FACTOR_RUTA, VEL_TRASLADO_KMH, tituloSolape, type SolapeReserva } from "@/lib/alertas-flota";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ICONOS
@@ -295,11 +296,13 @@ function Plegable({ resumen, abierto = false, children }: {
 
 /** Tarjeta de hallazgo de la sección "Requiere atención". */
 function Hallazgo({ tono, titulo, detalle, icono }: {
-  tono: "rojo" | "ambar"; titulo: string; detalle?: React.ReactNode; icono?: React.ReactNode;
+  tono: "rojo" | "ambar" | "gris"; titulo: string; detalle?: React.ReactNode; icono?: React.ReactNode;
 }) {
   const c = tono === "rojo"
     ? { bg: "bg-red-50", borde: "border-red-200", txt: "text-red-700", sub: "text-red-600" }
-    : { bg: "bg-amber-50", borde: "border-amber-200", txt: "text-amber-800", sub: "text-amber-700" };
+    : tono === "gris"
+      ? { bg: "bg-gray-50", borde: "border-gray-200", txt: "text-gray-700", sub: "text-gray-600" }
+      : { bg: "bg-amber-50", borde: "border-amber-200", txt: "text-amber-800", sub: "text-amber-700" };
   return (
     <div className={`${c.bg} border ${c.borde} rounded-2xl px-3 py-2.5 flex items-start gap-2.5`}>
       <span className="mt-0.5 flex-shrink-0">{icono}</span>
@@ -308,6 +311,25 @@ function Hallazgo({ tono, titulo, detalle, icono }: {
         {detalle && <div className={`text-[11px] mt-1 leading-snug ${c.sub}`}>{detalle}</div>}
       </div>
     </div>
+  );
+}
+
+/** El solape de unidad o de conductor, con el nivel y el porqué que redacta el motor. */
+function HallazgoSolape({ sol, recurso, icono }: {
+  sol: SolapeReserva; recurso: "unidad" | "conductor"; icono: (color: string) => React.ReactNode;
+}) {
+  const tono = sol.nivel === "cruce" ? "rojo" : sol.nivel === "traslado_justo" ? "ambar" : "gris";
+  const color = tono === "rojo" ? "#b91c1c" : tono === "ambar" ? "#b45309" : "#6b7280";
+  return (
+    <Hallazgo tono={tono} icono={icono(color)} titulo={tituloSolape(sol.nivel, recurso)}
+      detalle={
+        <div>
+          <ul className="space-y-0.5">{sol.detalle.map((d, i) => <li key={i}>· {d}</li>)}</ul>
+          {sol.nivel === "traslado_justo" && (
+            <p className="mt-1 italic">El traslado es una estimación ({FACTOR_RUTA} × la línea recta a {VEL_TRASLADO_KMH} km/h), no un ETA: confírmalo antes de mover nada.</p>
+          )}
+        </div>
+      } />
   );
 }
 
@@ -795,7 +817,7 @@ export default function FichaServicio({
   const avisosDoc: HallazgoDoc[] = aptitud?.avisos ?? [];
   const hayAtencion =
     bloqueantes.length > 0 || avisosDoc.length > 0 || fallos.length > 0 ||
-    !!r.unidad_reemplazo_placa || !!s?.conflicto_vehiculo || !!s?.conflicto_conductor || !!s?.jornada_extensa;
+    !!r.unidad_reemplazo_placa || !!s?.solape_vehiculo || !!s?.solape_conductor || !!s?.jornada_extensa;
 
   // ── Sección 3 · contadores del roster (el orden se calculó arriba, con los hooks) ──
   const roster: DocPasajero[] = datos?.roster ?? [];
@@ -1076,17 +1098,15 @@ export default function FichaServicio({
                     detalle={`Programada ${placa || "sin unidad"}${r.reemplazo_motivo ? ` · motivo: ${r.reemplazo_motivo}` : " · sin motivo registrado"}. Verificar que la facturación al cliente use la unidad real.`} />
                 )}
 
-                {/* Alertas cruzadas que YA trae el servicio (las calcula el tablero sobre
-                    todos los servicios del día). Son heurísticas — se dicen como tales. */}
-                {s?.conflicto_vehiculo && (
-                  <Hallazgo tono="ambar" icono={<I.Bus size={14} color="#b45309" />}
-                    titulo="Posible solape de unidad"
-                    detalle="El vehículo aparece en otro servicio a la misma hora. Es una advertencia calculada sobre las horas programadas, no una certeza: confírmalo antes de mover nada." />
+                {/* Alertas cruzadas que YA trae el servicio (las calcula el tablero sobre todos los
+                    servicios del día con lib/alertas-flota.ts, el motor del aviso del tick). El
+                    nivel y el porqué los declara el motor: «se pisan» y «no da el traslado» son
+                    afirmaciones; «sin confirmar» es que a un servicio le falta el itinerario. */}
+                {s?.solape_vehiculo && (
+                  <HallazgoSolape sol={s.solape_vehiculo as SolapeReserva} recurso="unidad" icono={(c) => <I.Bus size={14} color={c} />} />
                 )}
-                {s?.conflicto_conductor && (
-                  <Hallazgo tono="ambar" icono={<I.Users size={14} color="#b45309" />}
-                    titulo="Posible solape de conductor"
-                    detalle="El conductor aparece en otro servicio a la misma hora." />
+                {s?.solape_conductor && (
+                  <HallazgoSolape sol={s.solape_conductor as SolapeReserva} recurso="conductor" icono={(c) => <I.Users size={14} color={c} />} />
                 )}
                 {/* La jornada se juzga en HORAS AL VOLANTE (lib/alertas-flota.ts, RENAT art. 30),
                     no en «primera salida → último fin»: el descanso del horario partido no cuenta.
