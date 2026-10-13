@@ -119,11 +119,12 @@ export type TramoSinSenal = TramoSinRastreo & { desde: Coord | null; hasta: Coor
  *  si no, es aproximado. Nunca se interpola una posición: cada puntito es una muestra real. */
 export type PuntoDato = { c: Coord; ts: number; vel: number; velReal: boolean; rumbo: number; rumboReal: boolean; acc: number };
 
-/** ¿Hay ruta prevista guardada para este servicio? Cinco códigos, cada uno con su arreglo:
+/** ¿Hay ruta prevista guardada para este servicio? Seis códigos, cada uno con su arreglo:
  *  `guardada` · `no_guardada` (nadie abrió el modal GPS en 30 días, o la ruta no tiene geometría) ·
+ *  `mismo_punto` (primer y último paradero en el mismo sitio: el modal no pide ruta, y abrirlo no la guarda) ·
  *  `sin_paraderos` · `paraderos_sin_coordenadas` · `no_se_pudo_leer` (la consulta falló: nunca se
  *  lee como «no guardada»). */
-export type CodigoRutaPrevista = "guardada" | "no_guardada" | "sin_paraderos" | "paraderos_sin_coordenadas" | "no_se_pudo_leer";
+export type CodigoRutaPrevista = "guardada" | "no_guardada" | "mismo_punto" | "sin_paraderos" | "paraderos_sin_coordenadas" | "no_se_pudo_leer";
 export type EstadoRutaPrevista = { codigo: CodigoRutaPrevista; detalle: string };
 
 /** Dónde ocurrió un exceso respecto del servicio. Informativo: no cambia el conteo. */
@@ -487,7 +488,7 @@ export function resolverRutaPrevista(claves: ClavesRuta, mapa: ReadonlyMap<strin
       return ninguna({ codigo: "sin_paraderos", detalle: "El servicio no tiene paraderos ni origen y destino: no hay ruta prevista. Los paraderos se agregan en Programación." });
     }
     if (claves.sinRuta === "mismo_punto") {
-      return ninguna({ codigo: "no_guardada", detalle: "El primer y el último paradero están en el mismo punto: el modal GPS no pide ruta prevista para este servicio. Se revisa en Programación." });
+      return ninguna({ codigo: "mismo_punto", detalle: "El primer y el último paradero están en el mismo punto: el modal GPS no pide ruta prevista para este servicio. Se revisa en Programación." });
     }
     return ninguna({
       codigo: "paraderos_sin_coordenadas",

@@ -1548,8 +1548,8 @@ seccion("9b · la ruta prevista: las claves del modal y cada código de rutaPrev
   chk("sin paraderos ni origen/destino: sin_paraderos", R.resolverRutaPrevista(R.clavesRutaPrevista([], null, { origen: null, destino: null }), null).estado.codigo === "sin_paraderos");
   chk("solo origen/destino (sin coordenadas): paraderos_sin_coordenadas, también si la consulta falla",
     R.resolverRutaPrevista(R.clavesRutaPrevista([], null, { origen: "A", destino: "B" }), null).estado.codigo === "paraderos_sin_coordenadas");
-  chk("primer y último paradero en el mismo punto: no_guardada (el modal no pide ruta)",
-    R.resolverRutaPrevista(R.clavesRutaPrevista([A, B, p(9, 9, -12.0464, -77.0428)], null, null), new Map()).estado.codigo === "no_guardada");
+  chk("primer y último paradero en el mismo punto: mismo_punto (el modal no pide ruta; no se manda a abrirlo)",
+    R.resolverRutaPrevista(R.clavesRutaPrevista([A, B, p(9, 9, -12.0464, -77.0428)], null, null), new Map()).estado.codigo === "mismo_punto");
   chk("sin paradas pero con paradas_json: la lista sale de la cotización",
     R.clavesRutaPrevista([], [{ nombre: "X", lat: -12.04, lng: -77.04 }, { nombre: "Y", lat: -12.06, lng: -77.02 }], { origen: "A", destino: "B" }).variantes[0]?.conParadasJson === true);
   const detalles = [R.resolverRutaPrevista(k1, null), R.resolverRutaPrevista(k1, new Map()), R.resolverRutaPrevista(k3, new Map())].map((x) => x.estado.detalle);
