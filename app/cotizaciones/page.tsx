@@ -738,6 +738,28 @@ type PlaceResultCot={address:string;lat:number;lng:number;placeId:string;};
 // coordenada redondeada (~1 m) y devolverían el km del otro.
 const cacheTramosCot=new Map<string,number>();
 const clavePuntoCot=(p:{placeId?:string;lat:number;lng:number})=>p.placeId||`${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
+// Un extremo de tramo: un lugar elegido de la lista (o por coordenadas), o el TEXTO de una
+// dirección que nadie eligió de la lista — Google también lo acepta y lo geocodifica él.
+type PuntoKmCot={placeId:string;lat:number;lng:number}|{texto:string};
+const claveKmCot=(p:PuntoKmCot)=>"texto" in p?`t:${p.texto.trim().toLowerCase()}`:clavePuntoCot(p);
+const refKmCot=(p:PuntoKmCot)=>"texto" in p?p.texto:p.placeId?{placeId:p.placeId}:{location:{lat:p.lat,lng:p.lng}};
+/** Km por carretera de un tramo (redondeado), con caché. `null` = Google no pudo calcularlo. */
+function kmTramoCot(a:PuntoKmCot,b:PuntoKmCot):Promise<number|null>{
+  const clave=`${claveKmCot(a)}>${claveKmCot(b)}`;
+  const hit=cacheTramosCot.get(clave);
+  // `undefined` = el par no está en caché; un 0 cacheado sí es un km real.
+  if(hit!==undefined)return Promise.resolve(hit);
+  return new Promise(resolve=>{
+    try{
+      const g=(window as any).google.maps;
+      new g.DistanceMatrixService().getDistanceMatrix({origins:[refKmCot(a)],destinations:[refKmCot(b)],travelMode:g.TravelMode.DRIVING,unitSystem:g.UnitSystem.METRIC},(resp:any)=>{
+        const el=resp?.rows?.[0]?.elements?.[0];
+        if(el?.status==="OK"){const km=Math.round(el.distance.value/1000);cacheTramosCot.set(clave,km);resolve(km);}
+        else resolve(null);
+      });
+    }catch{resolve(null);}
+  });
+}
 
 function useGoogleMapsCot(){
   const[loaded,setLoaded]=useState(false);
@@ -915,43 +937,52 @@ export default function CotizacionesPage(){
   const [destinoPlace,setDestinoPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
   // `null` = todavía no hay km calculado por Maps (0 sí es un valor válido: tramos < 500 m).
   const [kmBase,setKmBase]=useState<number|null>(null);
+  /**
+   * EL KM DEL SERVICIO ES IDA + RETORNO, Y EL RETORNO SE MIDE, NO SE SUPONE.
+   *
+   * Antes solo «Ida y Retorno» y «Transporte personal» duplicaban el tramo de ida; los demás
+   * tipos con retorno (con paraderos, retén, full day, multi-día…) costeaban SOLO la ida aunque
+   * el formulario pidiera el punto de retorno, y ese punto no se consultaba nunca. Ahora todo
+   * servicio que no es «Solo ida» suma el tramo destino → punto de retorno (el origen si está
+   * vacío). `null` = sin calcular o Google no pudo: entonces se estima igual a la ida y se dice.
+   */
+  const [kmRet,setKmRet]=useState<number|null>(null);
+  const [retornoPlace,setRetornoPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
   const [calculandoKm,setCalculandoKm]=useState(false);
   const [errorKm,setErrorKm]=useState("");
+  const [avisoRet,setAvisoRet]=useState("");
+  const vuelve=!["solo_ida","fijo_solo_ida"].includes(form.tipo_servicio);
+  // El texto tecleado solo cuenta mientras no se eligió un lugar de la lista.
+  const textoRet=retornoPlace?"":form.punto_retorno.trim();
   useEffect(()=>{
     // `cancelado` evita que la respuesta de un destino ya cambiado pise el km
     // del destino actual (quedaría un kilometraje equivocado en la cotización).
     let cancelado=false;
-    const limpiar=()=>{cancelado=true;};
     // Sin ruta completa no hay consulta en vuelo: se libera el bloqueo de guardado.
-    if(!mapsLoaded||!origenPlace||!destinoPlace){setCalculandoKm(false);return limpiar;}
-    // Si ya conocemos este par no se vuelve a pedir a Google.
-    const clave=`${clavePuntoCot(origenPlace)}>${clavePuntoCot(destinoPlace)}`;
-    const hit=cacheTramosCot.get(clave);
-    // `undefined` = el par no está en caché; un 0 cacheado sí es un km real y debe escribirse.
-    if(hit!==undefined){setErrorKm("");setCalculandoKm(false);setKmBase(hit);return limpiar;}
-    const svc=new (window as any).google.maps.DistanceMatrixService();
-    const orig=origenPlace.placeId?{placeId:origenPlace.placeId}:{location:{lat:origenPlace.lat,lng:origenPlace.lng}};
-    const dest=destinoPlace.placeId?{placeId:destinoPlace.placeId}:{location:{lat:destinoPlace.lat,lng:destinoPlace.lng}};
+    if(!mapsLoaded||!origenPlace||!destinoPlace){setCalculandoKm(false);return;}
+    const finRet:PuntoKmCot|null=!vuelve?null:retornoPlace??(textoRet?{texto:textoRet}:origenPlace);
     setErrorKm("");setCalculandoKm(true);
-    svc.getDistanceMatrix({origins:[orig],destinations:[dest],travelMode:(window as any).google.maps.TravelMode.DRIVING,unitSystem:(window as any).google.maps.UnitSystem.METRIC},(resp:any)=>{
-      const el=resp?.rows?.[0]?.elements?.[0];
-      if(el?.status==="OK"){
-        const km=Math.round(el.distance.value/1000);cacheTramosCot.set(clave,km);
-        if(!cancelado){setKmBase(km);setErrorKm("");setCalculandoKm(false);}
-      }else{
+    // Con el retorno escrito a mano se espera a que se deje de teclear: una consulta por tecla
+    // es una llamada pagada a Google por letra.
+    const espera=setTimeout(async()=>{
+      const [ida,ret]=await Promise.all([kmTramoCot(origenPlace,destinoPlace),finRet?kmTramoCot(destinoPlace,finRet):Promise.resolve(null)]);
+      if(cancelado)return;
+      if(ida===null){
         // Sin respuesta útil (OVER_QUERY_LIMIT, REQUEST_DENIED, red caída, ZERO_RESULTS o
         // NOT_FOUND de campamentos y destinos rurales). Se borra el km para no conservar
         // el del destino anterior y se avisa para que se ingrese a mano.
-        if(!cancelado){setKmBase(null);setForm(p=>({...p,km:""}));setErrorKm("⚠️ Google Maps no pudo calcular el kilometraje de esta ruta. Ingrésalo a mano.");setCalculandoKm(false);}
+        setKmBase(null);setKmRet(null);setAvisoRet("");setForm(p=>({...p,km:""}));setErrorKm("⚠️ Google Maps no pudo calcular el kilometraje de esta ruta. Ingrésalo a mano.");setCalculandoKm(false);return;
       }
-    });
-    return limpiar;
-  },[mapsLoaded,origenPlace?.placeId,origenPlace?.lat,origenPlace?.lng,destinoPlace?.placeId,destinoPlace?.lat,destinoPlace?.lng]);
+      setKmRet(ret);setKmBase(ida);
+      setAvisoRet(finRet&&ret===null?"⚠️ Google Maps no pudo calcular el tramo de retorno: se estimó igual a la ida. Revisa el punto de retorno o corrige el km a mano.":"");
+      setCalculandoKm(false);
+    },finRet&&"texto" in finRet?700:0);
+    return()=>{cancelado=true;clearTimeout(espera);};
+  },[mapsLoaded,origenPlace?.placeId,origenPlace?.lat,origenPlace?.lng,destinoPlace?.placeId,destinoPlace?.lat,destinoPlace?.lng,retornoPlace?.placeId,retornoPlace?.lat,retornoPlace?.lng,textoRet,vuelve]);
   useEffect(()=>{
     if(kmBase===null)return;
-    const mult=(form.tipo_servicio==="ida_retorno"||form.tipo_servicio==="transporte_personal")?2:1;
-    setForm(p=>({...p,km:String(kmBase*mult)}));
-  },[kmBase,form.tipo_servicio]);
+    setForm(p=>({...p,km:String(vuelve?kmBase+(kmRet??kmBase):kmBase)}));
+  },[kmBase,kmRet,vuelve]);
 
   const f=(k:keyof typeof FORM0)=>(e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>)=>setForm(p=>({...p,[k]:e.target.value}));
   useEffect(()=>{
@@ -1116,7 +1147,7 @@ export default function CotizacionesPage(){
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setKmBase(null);setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.equipamiento||"full_equipo",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
@@ -1503,7 +1534,7 @@ export default function CotizacionesPage(){
     }
     cargar();
   };
-  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setKmBase(null);setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
     const cl=clientes.find(c=>c.id===cot.cliente_id);
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
@@ -1867,8 +1898,8 @@ export default function CotizacionesPage(){
                 </Campo>
                 {!esSoloIda&&<Campo label="Punto de retorno">
                   <LocationInputCot placeholder="Igual al origen" value={form.punto_retorno} mapsLoaded={mapsLoaded}
-                    onChange={v=>setForm(p=>({...p,punto_retorno:v}))}
-                    onSelect={p=>{setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,punto_retorno:v}));setRetornoPlace(null);}}
+                    onSelect={p=>{setRetornoPlace({placeId:p.placeId||"",lat:p.lat,lng:p.lng});if(p.address)setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
                 </Campo>}
                 <Campo label={form.tipo_servicio==="multi_dia"?"Fecha inicio (Día 1)":"Fecha de servicio"}><input type="date" className={iCls()} value={form.fecha_servicio} onChange={f("fecha_servicio")}/></Campo>
                 {["ida_retorno","ida_retorno_paradas","multi_dia"].includes(form.tipo_servicio)&&(
@@ -1946,7 +1977,7 @@ export default function CotizacionesPage(){
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Parámetros de costing</p>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <Campo label={esFijoForm?"Km diarios":"Km del servicio"} req hint={calculandoKm?"⏳ Calculando con Google Maps...":errorKm||(kmBase!==null?"📍 Calculado con Google Maps":undefined)}><input type="number" min={0} className={iCls("font-mono"+(errorKm?" border-red-300 bg-red-50":calculandoKm?" border-amber-300 bg-amber-50":kmBase!==null?" border-green-300 bg-green-50":""))} placeholder="0" value={form.km} onChange={e=>{setForm(p=>({...p,km:e.target.value}));setKmBase(null);setErrorKm("");}}/></Campo>
+                <Campo label={esFijoForm?"Km diarios":"Km del servicio"} req hint={calculandoKm?"⏳ Calculando con Google Maps...":errorKm||avisoRet||(kmBase!==null?(vuelve?`📍 Google Maps: ida ${kmBase} km + retorno ${kmRet??kmBase} km${kmRet===null?" (estimado igual a la ida)":""}`:"📍 Calculado con Google Maps"):undefined)}><input type="number" min={0} className={iCls("font-mono"+(errorKm?" border-red-300 bg-red-50":avisoRet?" border-amber-300 bg-amber-50":calculandoKm?" border-amber-300 bg-amber-50":kmBase!==null?" border-green-300 bg-green-50":""))} placeholder="0" value={form.km} onChange={e=>{setForm(p=>({...p,km:e.target.value}));setKmBase(null);setErrorKm("");}}/></Campo>
                 <Campo label="Días de conductor"><div className="flex items-center gap-1"><button onClick={()=>setDiasCond(Math.max(1,diasCond-1))} className="w-9 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">-</button><span className="flex-1 text-center font-black text-[#0b315f]">{diasCond}</span><button onClick={()=>setDiasCond(Math.min(30,diasCond+1))} className="w-9 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">+</button></div></Campo>
                 <Campo label="Peajes S/"><input type="number" min={0} className={iCls()} placeholder="0" value={peajesF||""} onChange={e=>setPeajesF(Number(e.target.value))}/></Campo>
                 <Campo label="Costo interno S/"><input type="number" min={0} className={iCls()} placeholder="0" value={form.costo_estimado} onChange={f("costo_estimado")}/></Campo>
