@@ -22,6 +22,13 @@ export type ReservaFlota = {
 
 const DUR_ESTIMADA_MIN = 240; // 4 h: bloque por defecto para estimar el fin de un servicio
 
+/**
+ * Servicios en el día a partir de los cuales la jornada de un conductor se avisa como extensa,
+ * aunque no pase de las horas de `jornada.umbral`. Vivía como un `4` literal en el tick; aquí
+ * para que la tarjeta de /configuracion/operaciones lo diga con el mismo número.
+ */
+export const MAX_SERVICIOS_JORNADA = 4;
+
 const DIA_MIN = 24 * 60;
 
 // Techo de duración. 26 h y no 12: hay tours full day de hasta 24 h — mismo techo que

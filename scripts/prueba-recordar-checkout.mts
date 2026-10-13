@@ -1,7 +1,7 @@
 // Pruebas del recordatorio de CHECK-OUT (lib/alertas-checkout.ts). No tocan la base.
 // Uso:  npx tsx scripts/prueba-recordar-checkout.mts
 import {
-  planRecordarCheckout, cadenciaEfectiva, escalaAlDirectorio,
+  planRecordarCheckout, cadenciaEfectiva, escalaAlDirectorio, detalleEscaladaCheckout,
   TOLERANCIA_LECTURA_ANTES_MS, ESCALAR_TRAS_RECORDATORIOS,
   type ServicioCheckout, type LecturaCheckout,
 } from "../lib/alertas-checkout";
@@ -103,6 +103,19 @@ const plan = (o: Partial<Parameters<typeof planRecordarCheckout>[0]> = {}) => pl
         }
   chk("barrido: no se recuerda a quien cumplió ni a quien sigue en ruta, y sí a todo el que falta", malos === 0, `${malos} mal`);
   chk("…y el barrido recuerda de verdad (no es trivial)", recordados > 0, `${recordados}`);
+}
+
+// ── La escalada dice si los recordatorios le pudieron llegar (13-10-2026) ──────────────────
+{
+  const d = (alcance: Parameters<typeof detalleEscaladaCheckout>[0]["alcance"]) =>
+    detalleEscaladaCheckout({ placa: "ABC-123", ronda: ESCALAR_TRAS_RECORDATORIOS - 1, alcance });
+  chk("recordado: cuenta los recordatorios", /Ya recibió 3 recordatorios/.test(d("recordado")), d("recordado"));
+  chk("tercerizado sin aviso: NO dice que los recibió, dice que nadie se lo recordó",
+    !/recibió/.test(d("tercerizado_sin_aviso")) && /tercerizado/.test(d("tercerizado_sin_aviso")) && /nadie se lo recordó/.test(d("tercerizado_sin_aviso")));
+  chk("sin plantilla y sin canal: tampoco afirma recordatorios",
+    !/recibió/.test(d("sin_plantilla")) && !/recibió/.test(d("sin_canal")) && /plantilla/.test(d("sin_plantilla")) && /teléfono/.test(d("sin_canal")));
+  chk("los cuatro nombran la placa y son una sola línea (parámetro de plantilla)",
+    (["recordado", "tercerizado_sin_aviso", "sin_plantilla", "sin_canal"] as const).every((a) => /ABC-123/.test(d(a)) && !/[\n\t]| {4}/.test(d(a))));
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) fallaron` : "\nTodo en verde");

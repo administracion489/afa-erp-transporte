@@ -53,10 +53,15 @@ export type ModoTiempo = "evento" | "anticipacion" | "hora_fija";
  */
 export const VENTANA_HORA_FIJA_MIN = 120;
 
-/** Minutos de anticipación por defecto cuando la fila no los declara (el del tick). */
-const ANTICIPACION_DEFECTO_MIN = 90;
-/** Hora fija por defecto cuando la fila no la declara: 08:00 (el del tick). */
-const HORA_FIJA_DEFECTO_MIN = 480;
+/**
+ * Minutos de anticipación por defecto cuando la fila no los declara (el del tick). Exportado
+ * para que la descripción de la tarjeta (lib/alertas-tarjeta.ts) diga el MISMO número que usa
+ * `enViaRecordatorio`, y no el de la semilla SQL.
+ */
+export const ANTICIPACION_DEFECTO_MIN = 90;
+/** Hora fija por defecto cuando la fila no la declara: 08:00 (el del tick). Solo en la vía
+ *  «recordatorio»: en los barridos diarios, sin hora no hay ventana (`enVentanaHoraFija`). */
+export const HORA_FIJA_DEFECTO_MIN = 480;
 
 /**
  * "HH:MM" → minutos del día, con la MISMA laxitud que `hhmmAMin` (lib/alertas.ts), que es
@@ -65,7 +70,7 @@ const HORA_FIJA_DEFECTO_MIN = 480;
  * `hhmmAMinutos` de `alertas-horario.ts` (que sí valida) porque la extracción tiene que
  * comportarse byte a byte como el original, incluso ante un valor imposible.
  */
-function hhmmAMinLaxo(hhmm?: string | null): number | null {
+export function hhmmAMinLaxo(hhmm?: string | null): number | null {
   if (!hhmm) return null;
   const [h, m] = hhmm.split(":").map(Number);
   return Number.isFinite(h) ? h * 60 + (m || 0) : null;

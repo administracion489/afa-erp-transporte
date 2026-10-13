@@ -42,6 +42,9 @@ const CFG = { activo: true, modo_tiempo: "evento", umbral: 3 };
   chk("cancelado → no", juzgarLlamada({ ...SERV, estado: "cancelada" }, CFG, reloj("06:35")) === "fuera_de_estado");
   chk("sin hora no hay a qué anclarla", juzgarLlamada({ ...SERV, hora_servicio: null }, CFG, reloj("06:35")) === "sin_hora");
   chk("sin umbral usa 3", minutosLlamada({ activo: true }) === 3 && minutosLlamada({ activo: true, umbral: -1 }) === 3);
+  // `Number(null)` es 0: la columna vacía se leía como «en la hora» mientras la tarjeta decía 3.
+  chk("umbral null (columna vacía) también usa 3, y un 0 escrito se respeta",
+    minutosLlamada({ activo: true, umbral: null }) === 3 && minutosLlamada({ activo: true, umbral: 0 }) === 0);
   chk("el umbral manda", juzgarLlamada(SERV, { ...CFG, umbral: 5 }, reloj("06:34")) === "aun_no"
     && juzgarLlamada(SERV, { ...CFG, umbral: 5 }, reloj("06:35")) === "toca");
   chk("vence a la hora + umbral + ventana", venceLlamadaMs(SERV, CFG) === inicioDe(SERV)! + (3 + VENTANA_LLAMADA_MIN) * 60_000);
