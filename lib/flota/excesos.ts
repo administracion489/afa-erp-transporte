@@ -101,8 +101,14 @@ export const DIAS_ATRAS_MAX_EXCESOS = 90;
 export const DECIMALES_PICO_FUERA = 2;
 /** Tope de puntos por llamada de `fn_gps_puntos_rapidos` (si se alcanza, el día sale `recortado`). */
 export const TOPE_PUNTOS_LLAMADA = 60_000;
-/** La migración que crea las dos funciones. La pantalla la nombra cuando falta. */
-export const MIGRACION_EXCESOS = "supabase/gps-analitica-01-excesos.sql";
+/** La que crea `fn_gps_puntos_rapidos`: sin ella /seguridad-vial no mide nada, y la pantalla la nombra.
+ *  La migración son tres archivos de menos de 100 líneas (supabase/gps-analitica-01-notas.md): uno de
+ *  más de 100 llegaba cortado al SQL Editor. */
+export const MIGRACION_EXCESOS = "supabase/gps-analitica-01a-puntos-rapidos.sql";
+/** La que crea `fn_gps_velocimetro`: sin ella se mide igual, con el velocímetro «no se sabe». */
+export const MIGRACION_VELOCIMETRO = "supabase/gps-analitica-01b-velocimetro.sql";
+/** La del índice parcial `idx_gps_rapidos` (hora valle): sin ella se mide igual, más lento. */
+export const MIGRACION_INDICES_EXCESOS = "supabase/gps-analitica-01c-indices.sql";
 export const RPC_PUNTOS_RAPIDOS = "fn_gps_puntos_rapidos";
 export const RPC_VELOCIMETRO = "fn_gps_velocimetro";
 

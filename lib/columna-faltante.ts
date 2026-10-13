@@ -96,7 +96,7 @@ export function tablaFaltante(error: ErrorSupabase, tabla?: string): boolean {
 }
 
 // ── ¿FALTA UNA FUNCIÓN (RPC)? ───────────────────────────────────────────────────────────
-// Una función de una migración que el deploy no corre (p. ej. supabase/gps-analitica-01-excesos.sql)
+// Una función de una migración que el deploy no corre (p. ej. supabase/gps-analitica-01a-puntos-rapidos.sql)
 // tiene que poder faltar sin que el endpoint caiga a un recorrido pesado ni a un 500: quien la llama
 // responde «falta correr tal SQL». Las dos formas, igual que con las columnas y las tablas:
 //   • PostgREST, antes de llegar a la base → PGRST202 · Could not find the function

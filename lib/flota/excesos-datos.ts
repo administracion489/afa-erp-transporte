@@ -1,7 +1,7 @@
 // lib/flota/excesos-datos.ts — SOLO SERVIDOR. Lee lo que mide lib/flota/excesos.ts (puro).
 //
 // LOS PUNTOS SE LEEN CON UN ÍNDICE, NUNCA RECORRIENDO LA TABLA: `fn_gps_puntos_rapidos`
-// (supabase/gps-analitica-01-excesos.sql) devuelve los puntos con velocidad ≥ umbral de UN día en un solo
+// (supabase/gps-analitica-01a-puntos-rapidos.sql) devuelve los puntos con velocidad ≥ umbral de UN día en un solo
 // valor JSON —esquiva el corte de 1000 filas de PostgREST— sobre el índice parcial `idx_gps_rapidos`.
 // Si la función FALTA (`funcionQueFalta`), se responde `sin_migracion` y NO se cae a leer la tabla entera:
 // sería un recorrido completo de la tabla más grande del ERP, compitiendo con la torre.
@@ -28,7 +28,7 @@ import { identidadRuta } from "../ruta-identidad";
 import {
   armarRespuestaExcesos, claveConductor, claveUnidad, completarConServicios, detectarEnRango, diaLima, diasEntre,
   fechaValida, puntosDeRpc, rangoLimaMs, respuestaVacia, velocimetroDe,
-  COLCHON_S, MAX_DIAS_CONSULTA, MIGRACION_EXCESOS, RPC_PUNTOS_RAPIDOS, RPC_VELOCIMETRO, UMBRAL_MAX_KMH, UMBRAL_MIN_KMH,
+  COLCHON_S, MAX_DIAS_CONSULTA, MIGRACION_EXCESOS, MIGRACION_VELOCIMETRO, RPC_PUNTOS_RAPIDOS, RPC_VELOCIMETRO, UMBRAL_MAX_KMH, UMBRAL_MIN_KMH,
   type ConductorExcesos, type DiaRecortado, type Episodio, type LecturaPuntos, type RespuestaExcesos,
   type ServicioExpuesto, type UnidadExcesos, type Velocimetro,
 } from "./excesos";
@@ -225,7 +225,7 @@ export async function excesosDelRango(
   } catch (e) {
     if (!(e instanceof FaltaMigracion)) console.error("[flota/excesos] velocímetro:", e instanceof FalloRpc ? e.detalle : e);
     avisos.push(e instanceof FaltaMigracion
-      ? `Falta la función ${RPC_VELOCIMETRO} (${MIGRACION_EXCESOS}): no se puede comprobar qué teléfonos reportan la velocidad.`
+      ? `Falta la función ${RPC_VELOCIMETRO} (${MIGRACION_VELOCIMETRO}): no se puede comprobar qué teléfonos reportan la velocidad.`
       : "No se pudo comprobar qué teléfonos reportan la velocidad: esos conductores salen «no se sabe».");
     velocimetro.clear();
   }

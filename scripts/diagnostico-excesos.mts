@@ -1,7 +1,7 @@
 // Excesos de velocidad sobre los datos REALES: ¿qué dirían los umbrales no medidos del motor?
 //
 // Toma hasta 60 servicios FINALIZADOS del rango, lee la traza de cada uno POR RESERVA (el mismo
-// `trazaDe(…, { conHuella: true })` de la torre: NO necesita supabase/gps-analitica-01-excesos.sql) y
+// `trazaDe(…, { conHuella: true })` de la torre: NO necesita supabase/gps-analitica-01a…01c) y
 // corre `detectarExcesos` (lib/flota/excesos.ts) con umbral 80, 90 y 100. Imprime:
 //   · la distribución de códigos (exceso / breve / impreciso / sin_corroborar / imposible / simulado);
 //   · la razón velocidad geométrica / velocidad del sensor por código (¿el fantasma FUSED se separa del
