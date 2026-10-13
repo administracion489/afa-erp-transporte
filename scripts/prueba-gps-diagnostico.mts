@@ -367,6 +367,17 @@ console.log("\n5. Causa de cada tramo, congelados y llegadas tardías");
   const d = diag(tr, m);
   chk("hueco sin nada en medio → app_detenida, y en movimiento", d.tramos.length === 1 && d.tramos[0].causa === "app_detenida" && d.tramos[0].enMovimiento, d.tramos[0]?.texto);
   chk("los tramos del diagnóstico son los de la medición, uno a uno", JSON.stringify(d.tramos.map((t) => [t.tipo, t.desdeTs, t.hastaTs, t.durS])) === JSON.stringify(m.tramos.map((t) => [t.tipo, t.desdeTs, t.hastaTs, t.durS])));
+  chk("…en movimiento el texto da los km y no dice «detenido»", /mientras el bus avanzó/.test(d.tramos[0].texto) && !/detenido/.test(d.tramos[0].texto), d.tramos[0].texto);
+
+  // Reserva #27107: 7 min sin posiciones con el bus esperando la hora de salida (se movió ~120 m).
+  // Sigue siendo app_detenida y sigue restando del % (decisión del dueño); el texto dice que estaba quieto.
+  const q1 = tramoMovil(T0, 60, LAT0, { mps: 0.5 });
+  const q2 = tramoMovil(T0 + 480_000, 600, LAT0 + 120 / M);
+  const trQ = trazaCon([...q1, ...q2]);
+  const mQ = medirCobertura({ pts: trQ.pts })!;
+  const dQ = diag(trQ, mQ);
+  chk("hueco con el bus quieto → app_detenida, sin movimiento, y resta del %", dQ.tramos.length === 1 && dQ.tramos[0].causa === "app_detenida" && !dQ.tramos[0].enMovimiento && mQ.cobertura < 100, `${mQ.cobertura} % · ${dQ.tramos[0]?.texto}`);
+  chk("…el texto dice que estaba detenido, cuánto se movió y que resta igual", /con el bus detenido \(se movió \d+ m\)/.test(dQ.tramos[0].texto) && /resta del %/.test(dQ.tramos[0].texto), dQ.tramos[0].texto);
 
   // El mismo hueco, con el teléfono mandando por antena cada 15 s → por_antena.
   const antena: Crudo[] = [];
