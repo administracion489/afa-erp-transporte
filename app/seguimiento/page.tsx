@@ -17,6 +17,7 @@ import { esAbordado } from "@/lib/documentos-servicio";
 import { paginarFilas } from "@/lib/huella";
 import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
 import { derivarTiempos, procedencia, hhmmLima, type Instante } from "@/lib/servicio-tiempos";
+import { CONDUCCION_ACUMULADA_MAX_H, detectarSolapesJornada, itinerarioDe, type ReservaFlota, type VeredictoJornada } from "@/lib/alertas-flota";
 import { resumenRastreo, BANDA_CON_CORTES, BANDA_ACEPTABLE, type VeredictoRastreo, type ProblemaRastreo, type ItemRastreo } from "@/lib/gps-cobertura";
 import { SIN_NOMBRE_RUTA, ETIQUETA_RECORRIDO } from "@/lib/ruta-identidad";
 import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
@@ -91,11 +92,17 @@ type ServicioView = {
   gastos_total: number; docs_vencidos: string[];
   // Alertas de flota cruzadas (se rellenan en un segundo memo sobre todos los servicios):
   conflicto_vehiculo?: boolean; conflicto_conductor?: boolean; jornada_extensa?: boolean;
+  /** Juicio de la jornada de CONDUCCIÓN de su conductor (lib/alertas-flota.ts, el mismo motor
+   *  del tick). Solo flota propia con conductor; null en el resto. */
+  jornada?: VeredictoJornada | null;
   // Semáforo de puntualidad (lo calcula el servidor: /api/seguimiento/retrasos):
   puntualidad?: Puntualidad;
   /** Hora real de salida DERIVADA de la evidencia del conductor, con su procedencia.
    *  null = no hay hora, que no es lo mismo que "no salió" (ver el memo que la calcula). */
   salida?: Instante | null;
+  /** Fin REAL derivado de la misma evidencia, SOLO de un servicio finalizado: en uno en curso
+   *  el «último paradero marcado» no es el fin y acortaría su conducción. */
+  fin_real?: Instante | null;
 };
 
 /** Veredicto de puntualidad tal como llega del endpoint (espejo de lib/retrasos.ts). */
@@ -260,12 +267,14 @@ function docsVencidosEmpresa(docs: DocTer[], empresaId: number|null): string[] {
   return docs.filter(d => d.empresa_id === empresaId && obligVencido(d)).map(d => etiquetaTipoDoc(d.tipo));
 }
 
-// ── Alertas de flota cruzadas entre servicios (solape de recurso + jornada del conductor) ──
+// ── Alertas de flota cruzadas entre servicios (solape de recurso) ──
 // No hay campo de duración en reservas, así que el fin se estima con un bloque por defecto
 // cuando aún no hay hora_real_fin. Son alertas ADVERTENCIA (heurística), no certezas.
+// La JORNADA ya no se decide aquí: era «1ª salida → último fin > 13 h, o ≥ 4 servicios», y eso
+// marcaba como fatiga todo horario partido (entrada de madrugada, retorno por la tarde y descanso
+// en medio). Ahora la juzga lib/alertas-flota.ts en horas de CONDUCCIÓN (RENAT art. 30) — el
+// mismo motor que el aviso del tick, para que la torre y el WhatsApp digan lo mismo.
 const DUR_ESTIMADA_MIN        = 240; // 4 h: bloque por defecto para estimar el fin de un servicio
-const JORNADA_MAX_H           = 13;  // jornada (1ª salida → último fin) que dispara alerta de fatiga
-const MAX_SERVICIOS_CONDUCTOR = 4;   // nº de servicios/día que dispara alerta de fatiga
 
 function aMin(hhmm?: string|null): number|null {
   if (!hhmm) return null;
@@ -273,8 +282,8 @@ function aMin(hhmm?: string|null): number|null {
   return Number.isNaN(h) ? null : h * 60 + (m || 0);
 }
 
-function detectarAlertasFlota(base: ServicioView[]): { vehiculo: Set<number>; conductor: Set<number>; fatiga: Set<number> } {
-  const vehiculo = new Set<number>(), conductor = new Set<number>(), fatiga = new Set<number>();
+function detectarAlertasFlota(base: ServicioView[]): { vehiculo: Set<number>; conductor: Set<number> } {
+  const vehiculo = new Set<number>(), conductor = new Set<number>();
   const intervalo = (s: ServicioView): [number, number] | null => {
     const ini = aMin(s.reserva.hora_servicio);
     if (ini == null) return null;
@@ -297,15 +306,27 @@ function detectarAlertasFlota(base: ServicioView[]): { vehiculo: Set<number>; co
     return grupos;
   };
   agrupar(s => s.reserva.vehiculo_id ? `v${s.reserva.vehiculo_id}` : s.reserva.vehiculo_tercero_id ? `vt${s.reserva.vehiculo_tercero_id}` : null, vehiculo);
-  const gruposCond = agrupar(s => s.reserva.conductor_id ? `c${s.reserva.conductor_id}` : null, conductor);
-  Object.values(gruposCond).forEach(g => {
-    const inicios = g.map(s => aMin(s.reserva.hora_servicio)).filter((x): x is number => x != null);
-    const fines   = g.map(s => intervalo(s)?.[1]).filter((x): x is number => x != null);
-    if (!inicios.length || !fines.length) return;
-    const spanH = (Math.max(...fines) - Math.min(...inicios)) / 60;
-    if (spanH > JORNADA_MAX_H || g.length >= MAX_SERVICIOS_CONDUCTOR) g.forEach(s => fatiga.add(s.reserva.id));
-  });
-  return { vehiculo, conductor, fatiga };
+  agrupar(s => s.reserva.conductor_id ? `c${s.reserva.conductor_id}` : null, conductor);
+  return { vehiculo, conductor };
+}
+
+/**
+ * Lo que el motor de jornada necesita de cada servicio de la torre. La salida y el fin REALES
+ * salen de la evidencia que el lote ya trajo (derivarTiempos); el itinerario, de los paraderos
+ * cargados o de la semilla `paradas_json` (itinerarioDe, el mismo que usa el tick).
+ */
+function aReservaFlota(s: ServicioView, ahoraHhmm: string | null): ReservaFlota {
+  const r = s.reserva;
+  const it = itinerarioDe(s.paradas, r.paradas_json);
+  return {
+    id: r.id, estado: r.estado, conductor_id: r.conductor_id,
+    vehiculo_id: r.vehiculo_id, vehiculo_tercero_id: r.vehiculo_tercero_id,
+    hora_servicio: r.hora_servicio,
+    hora_real_inicio: s.salida?.hhmm ?? r.hora_real_inicio ?? null,
+    hora_real_fin: s.fin_real?.hhmm ?? r.hora_real_fin ?? null,
+    plan_inicio: it.inicio, plan_fin: it.fin,
+    en_curso_ahora: r.estado === "en_curso" ? ahoraHhmm : null,
+  };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -355,7 +376,7 @@ function chipsAlerta(s: ServicioView): { label: string; color: string; bg: strin
   }
   if (s.conflicto_vehiculo)       out.push({ label: "UNIDAD×2", color: "#b45309", bg: "#fef3c7", title: "Posible solape: el vehículo está en otro servicio a la misma hora" });
   if (s.conflicto_conductor)      out.push({ label: "CHOFER×2", color: "#b45309", bg: "#fef3c7", title: "Posible solape: el conductor está en otro servicio a la misma hora" });
-  if (s.jornada_extensa)          out.push({ label: "JORNADA",  color: "#9a3412", bg: "#ffedd5", title: "Jornada del conductor extensa o demasiados servicios — riesgo de fatiga" });
+  if (s.jornada_extensa)          out.push({ label: "JORNADA",  color: "#9a3412", bg: "#ffedd5", title: `Jornada de conducción sobre el tope — ${s.jornada?.motivo ?? ""}${s.jornada?.detalle.length ? `\n${s.jornada.detalle.join("\n")}` : ""}` });
   if (s.seguro_vence_hoy)         out.push({ label: "SOAT HOY", color: "#dc2626", bg: "#fef2f2", title: "El seguro de la unidad vence hoy" });
   return out;
 }
@@ -681,6 +702,18 @@ export default function SeguimientoPage() {
   const [empresaPerfil, setEmpresaPerfil] = useState<EmpresaPerfil | null>(null);
   const [puntualidad, setPuntualidad] = useState<Record<number, Puntualidad>>({});
   const [resumenPunt, setResumenPunt] = useState<ResumenPuntualidad | null>(null);
+  // Tope de conducción del día: el de la tarjeta «jornada» (el mismo que lee el tick). Sin fila o
+  // si no se pudo leer, el de la norma — la torre no puede quedarse sin juicio por un SELECT.
+  const [umbralJornadaH, setUmbralJornadaH] = useState<number>(CONDUCCION_ACUMULADA_MAX_H);
+  useEffect(() => {
+    let vivo = true;
+    supabase.from("alerta_config").select("umbral").eq("clave", "jornada").maybeSingle()
+      .then(({ data }: { data: { umbral: number | null } | null }) => {
+        const u = Number(data?.umbral);
+        if (vivo && data?.umbral != null && Number.isFinite(u) && u > 0) setUmbralJornadaH(u);
+      });
+    return () => { vivo = false; };
+  }, []);
   const [filtroNivel, setFiltroNivel] = useState<NivelRetraso | "todos">("todos");
 
   // ── Semáforo de puntualidad ───────────────────────────────────────────────────
@@ -873,14 +906,18 @@ export default function SeguimientoPage() {
       // motor — sin GPS, "no hay evidencia" y "no la miré" son indistinguibles, y acusar con
       // eso sería repetir el bug con otro campo. El rojo lo decide el semáforo de puntualidad
       // del servidor (/api/seguimiento/retrasos), que sí mira dónde está el bus.
-      const salida = derivarTiempos({
+      const tiempos = derivarTiempos({
         reserva: r,
         paradas: paradasR,
         abordajes: pasajPar.filter(pp => idsParadaR.has(pp.parada_id)),
         ahoraMs,
-      }).inicio;
+      });
+      const salida = tiempos.inicio;
+      // El fin solo de un servicio CERRADO: en uno en curso, `fin` es el último paradero marcado
+      // hasta ahora, y como fin de la conducción le restaría todo lo que falta del recorrido.
+      const fin_real = r.estado === "finalizada" ? tiempos.fin : null;
       return {
-        reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel, empresa_nombre, puntualidad: punt, salida,
+        reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel, empresa_nombre, puntualidad: punt, salida, fin_real,
         es_eventual: esEventual(r), estado_visual: calcularEstadoVisual(r, punt, !!salida),
         paradas: paradasR, paradas_total: paradasR.length,
         paradas_completadas: paradasR.filter(p=>p.estado==="completada").length,
@@ -893,15 +930,28 @@ export default function SeguimientoPage() {
   },[reservas,clientes,vehiculos,conductores,condsTer,empresas,vehsTer,paradas,pasajPar,paxAdhoc,gastosRows,docsTer,docsVeh,puntActiva]);
 
   // Segundo paso: alertas que dependen de TODOS los servicios del día (solape de recurso, jornada).
+  // La jornada la juzga el MISMO motor que el aviso del tick (lib/alertas-flota.ts), con el mismo
+  // tope de la tarjeta «jornada» de /configuracion/operaciones.
   const servicios: ServicioView[] = useMemo(()=>{
-    const { vehiculo, conductor, fatiga } = detectarAlertasFlota(serviciosBase);
-    return serviciosBase.map(s => ({
-      ...s,
-      conflicto_vehiculo:  vehiculo.has(s.reserva.id),
-      conflicto_conductor: conductor.has(s.reserva.id),
-      jornada_extensa:     fatiga.has(s.reserva.id),
-    }));
-  },[serviciosBase]);
+    const { vehiculo, conductor } = detectarAlertasFlota(serviciosBase);
+    const m = ahoraLimaMin();
+    const ahoraHhmm = esHoy ? `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}` : null;
+    // Solo flota propia, con el MISMO filtro que el aviso del tick (la tarjeta declara «solo propios»).
+    const esPropia = (s: ServicioView) => s.reserva.tipo_asignacion === "propio";
+    const propias = serviciosBase.filter(esPropia).map(s => aReservaFlota(s, ahoraHhmm));
+    const { veredictos } = detectarSolapesJornada(propias, { acumuladaMaxH: umbralJornadaH });
+    return serviciosBase.map(s => {
+      const cid = esPropia(s) && s.reserva.estado !== "cancelada" ? s.reserva.conductor_id : null;
+      const jornada = cid ? veredictos.get(cid) ?? null : null;
+      return {
+        ...s,
+        conflicto_vehiculo:  vehiculo.has(s.reserva.id),
+        conflicto_conductor: conductor.has(s.reserva.id),
+        jornada,
+        jornada_extensa:     !!jornada?.excede,
+      };
+    });
+  },[serviciosBase, esHoy, umbralJornadaH]);
 
   // El drawer guarda una instantánea; al recargar datos, refrescarla con la versión vigente.
   // El modal GPS también: sin esto le llegaban las paradas tal como estaban al ABRIRLO, y una marca
@@ -961,7 +1011,8 @@ export default function SeguimientoPage() {
   const seguroHoy       = servicios.filter(s=>s.seguro_vence_hoy).length;
   const docsVenc        = servicios.filter(s=>s.docs_vencidos.length>0).length;
   const conflictos      = servicios.filter(s=>s.conflicto_vehiculo||s.conflicto_conductor).length;
-  const fatigaCount     = servicios.filter(s=>s.jornada_extensa).length;
+  // Se cuentan CONDUCTORES, no servicios: un conductor que pasa el tope marca todos sus servicios.
+  const fatigaCount     = new Set(servicios.filter(s=>s.jornada_extensa).map(s=>s.reserva.conductor_id)).size;
   // Aviso de rastreo: UNA función (resumenRastreo) decide quién es urgente, quién quedó sin
   // rastreo útil y cuántas UNIDADES distintas son — el aviso, la columna y el filtro leen lo mismo.
   const rastreoRes = resumenRastreo(servicios.flatMap((s): ItemRastreo[] => {
@@ -1229,10 +1280,10 @@ export default function SeguimientoPage() {
                 {[
                   docsVenc>0    ? `${docsVenc} con documentos vencidos`            : null,
                   conflictos>0  ? `${conflictos} con posible solape de unidad/conductor` : null,
-                  fatigaCount>0 ? `${fatigaCount} con jornada extensa del conductor`     : null,
+                  fatigaCount>0 ? `${fatigaCount} conductor(es) sobre el tope de conducción` : null,
                 ].filter(Boolean).join("  ·  ")}
               </p>
-              <p className="text-amber-600/80 text-[11px] mt-1">Documentos vencidos bloquean la salida. El solape y la jornada son estimaciones (no hay duración registrada en la reserva): verifícalos en cada servicio marcado.</p>
+              <p className="text-amber-600/80 text-[11px] mt-1">Documentos vencidos bloquean la salida. El solape es una estimación (no hay duración registrada en la reserva): verifícalo en cada servicio marcado. La jornada cuenta las horas al volante de cada servicio según el RENAT (5 h seguidas de día, 4 h de noche, descanso de 1 h, tope del día): el descanso del horario partido no cuenta.</p>
             </div>
           </div>
         )}

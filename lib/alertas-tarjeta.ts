@@ -39,7 +39,9 @@ import {
   CLAVE_LLAMADA, LLAMADA_MIN_DEFECTO, REINTENTO_MIN, minutosLlamada, type Opcion,
 } from "@/lib/llamadas-central";
 import { ESCALAR_TRAS_RECORDATORIOS, cadenciaEfectiva } from "@/lib/alertas-checkout";
-import { MAX_SERVICIOS_JORNADA } from "@/lib/alertas-flota";
+import {
+  CONDUCCION_ACUMULADA_MAX_H, CONTINUA_DIURNA_MAX_MIN, CONTINUA_NOCTURNA_MAX_MIN, DESCANSO_MIN, REFERENCIA_NORMA,
+} from "@/lib/alertas-flota";
 import { horarioDe, minutosAHhmm, textoDuracion } from "@/lib/alertas-horario";
 
 // ─── TIPOS ─────────────────────────────────────────────────────────────────────
@@ -153,7 +155,8 @@ export const UMBRAL_DEFECTO = {
   gps_silencio: 8,
   recordar_checkout: 60,
   doc_vence: 15,
-  jornada: 13,
+  /** Horas de CONDUCCIÓN acumuladas en el día (RENAT art. 30.2/30.9), no la amplitud del día. */
+  jornada: CONDUCCION_ACUMULADA_MAX_H,
   servicio_abandonado: 30,
 } as const satisfies Record<string, number>;
 
@@ -422,10 +425,13 @@ export const TARJETAS: Record<string, FichaTarjeta> = {
     (c) => `A los contactos marcados, ${cuandoBarrido(c)}: conductores de flota propia con servicios de hoy que se cruzan en horario.`,
     { tercerizados: "solo_propios", usa: ["hora_fija"] },
   ),
+  // Bloque 7 + lib/alertas-flota.ts (evaluarJornada): horas al VOLANTE, no la amplitud del día.
   jornada: aContactos(
-    (c) => `A los contactos marcados, ${cuandoBarrido(c)}: conductores de flota propia cuya jornada de hoy pasa de ` +
-      `${n(umbralEfectivo(c))} h o suma ${MAX_SERVICIOS_JORNADA} servicios o más.`,
-    { tercerizados: "solo_propios", umbral: { etiqueta: "Horas máx. de jornada" }, usa: ["umbral", "hora_fija"] },
+    (c) => `A los contactos marcados, ${cuandoBarrido(c)}: conductores de flota propia que hoy conducen más de ` +
+      `${textoDuracion(CONTINUA_DIURNA_MAX_MIN)} seguidas (${textoDuracion(CONTINUA_NOCTURNA_MAX_MIN)} de noche) sin un descanso de ` +
+      `${textoDuracion(DESCANSO_MIN)}, o más de ${n(umbralEfectivo(c))} h al volante en el día. Se cuentan las horas de conducción ` +
+      "de cada servicio: la espera entre una entrada y su retorno (horario partido) es descanso, no jornada.",
+    { tercerizados: "solo_propios", umbral: { etiqueta: "Horas máx. de conducción en el día" }, usa: ["umbral", "hora_fija"] },
   ),
   // El cierre corre SIEMPRE, a cualquier hora; la tarjeta decide el aviso, su umbral y su
   // horario (bloque 7 + lib/servicio-abandonado.ts: fuera del horario el aviso espera).
@@ -637,15 +643,17 @@ export type CodigoNota =
   /** ÁMBAR: activa y hoy no le llega a nadie. */
   | "sin_destinatarios"
   /** ÁMBAR: recordar_checkout con «Conductor» desmarcado no sale, ni a los contactos. */
-  | "conductor_apaga_todo";
+  | "conductor_apaga_todo"
+  /** ÁMBAR: el tope de conducción configurado en «jornada» pasa el del RENAT. */
+  | "umbral_sobre_norma";
 
 export type NotaTarjeta = { codigo: CodigoNota; alarma: boolean; texto: string };
 
-/** Solo estos dos pintan ámbar: cambian lo que hace el sistema y nada más lo dice. */
+/** Solo estos pintan ámbar: cambian lo que hace el sistema (o lo dejan fuera de la norma) y nada más lo dice. */
 const ALARMA: Record<CodigoNota, boolean> = {
   repite_debio: false, llega_no_inicio: false, silencia_no_inicio: false, lo_atiende_en_punto: false,
   reemplaza_no_inicio: false, horario_de_asignacion: false,
-  sin_destinatarios: true, conductor_apaga_todo: true,
+  sin_destinatarios: true, conductor_apaga_todo: true, umbral_sobre_norma: true,
 };
 
 const nota = (codigo: CodigoNota, texto: string): NotaTarjeta => ({ codigo, alarma: ALARMA[codigo], texto });
@@ -668,7 +676,7 @@ function motivoNadie(clave: string, cfg: CfgTarjeta, f: FichaTarjeta, cfgs: Map<
 
 /**
  * Lo que la pantalla tiene que decir de esta tarjeta HOY, mirando todas. Todo en gris salvo
- * `sin_destinatarios` y `conductor_apaga_todo`; una tarjeta apagada nunca alarma.
+ * `sin_destinatarios`, `conductor_apaga_todo` y `umbral_sobre_norma`; una tarjeta apagada nunca alarma.
  */
 export function notasHoy(clave: string, cfgs: Map<string, CfgTarjeta>, ctx: CtxTarjeta): NotaTarjeta[] {
   const cfg = cfgs.get(clave);
@@ -721,6 +729,17 @@ export function notasHoy(clave: string, cfgs: Map<string, CfgTarjeta>, ctx: CtxT
   if (clave === "desasignacion" && cfgs.get("asignacion")?.activo) {
     out.push(nota("horario_de_asignacion",
       "Mientras «Servicio asignado» esté activo, manda el horario de esa tarjeta: este aviso sale junto con el del nuevo conductor."));
+  }
+
+  // El umbral de «jornada» era la AMPLITUD del día (sembrado en 13 h) y ahora son horas de
+  // CONDUCCIÓN: un 13 que nadie tocó deja pasar 3 h más de lo que permite la norma. Se dice.
+  if (clave === "jornada" && on) {
+    const u = umbralEfectivo(cfg);
+    if (u != null && u > CONDUCCION_ACUMULADA_MAX_H) {
+      out.push(nota("umbral_sobre_norma",
+        `El tope configurado (${n(u)} h de conducción en el día) pasa el de la norma, ${textoDuracion(CONDUCCION_ACUMULADA_MAX_H * 60)} en 24 h ` +
+        `(${REFERENCIA_NORMA}). Bájalo salvo que una norma vigente diga otra cosa.`));
+    }
   }
 
   let apagaTodo = false;
