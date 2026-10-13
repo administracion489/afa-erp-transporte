@@ -119,6 +119,61 @@ const tsDe = (x: unknown): number | null => {
   return Number.isFinite(t) ? t : null;
 };
 
+type LecturaCatalogos = {
+  catalogos: { [K in keyof Catalogos]: Catalogos[K] | null };
+  error: string | null;
+};
+
+/** Flota, conductores y proveedores. Lo que falle viaja en null (se conserva lo anterior). */
+async function leerCatalogos(): Promise<LecturaCatalogos> {
+  const [v, vt, c, ct, e] = await Promise.all([
+    leerConOpcional<Vehiculo>("vehiculos", "id,placa,categoria,marca,modelo", "estado"),
+    leerConOpcional<VehiculoTercero>("vehiculos_tercero", "id,placa,categoria,marca,modelo,empresa_id", "estado"),
+    supabase.from("conductores").select("id,nombre,telefono"),
+    supabase.from("conductores_tercero").select("id,nombre,telefono"),
+    supabase.from("empresas_tercerizadas").select("id,razon_social"),
+  ]);
+  const error = v.error && vt.error
+    ? "No se pudo leer la flota (vehículos propios y tercerizados). Pulsa actualizar para reintentar."
+    : v.error || vt.error
+      ? `No se pudo leer la flota ${v.error ? "propia" : "tercerizada"}: la lista está incompleta.`
+      : null;
+  return {
+    error,
+    catalogos: {
+      vehiculos: v.error ? null : v.data,
+      vehiculosTercero: vt.error ? null : vt.data,
+      conductores: c.error ? null : (c.data ?? []) as Conductor[],
+      conductoresTercero: ct.error ? null : (ct.data ?? []) as Conductor[],
+      empresas: e.error ? null : (e.data ?? []) as EmpresaTercero[],
+    },
+  };
+}
+
+/** Servicios de HOY y de AYER sin cerrar (el motor acota la ventana del «no inició»). «Hoy» en hora
+ *  de Lima: con toISOString(), desde las 19:00 ya es mañana en UTC. null = no se pudo leer. */
+async function leerReservas(): Promise<ReservaMon[] | null> {
+  const t = Date.now();
+  const { data, error } = await supabase
+    .from("reservas")
+    .select("id,fecha_servicio,hora_servicio,estado,vehiculo_id,vehiculo_tercero_id,tipo_servicio_detalle")
+    .in("fecha_servicio", [fechaLima(t - DIA_MS), fechaLima(t)])
+    .in("estado", ["programada", "confirmada", "en_curso"]);
+  return error ? null : (data ?? []) as ReservaMon[];
+}
+
+/** Las SOS pendientes SIN límite ni corte por antigüedad (una pendiente vieja no puede quedar tapada
+ *  por atendidas más recientes: pasó con 4 alertas de un mes) y las 20 últimas atendidas. */
+async function leerSOS(): Promise<AlertaSOS[] | null> {
+  const [p, h] = await Promise.all([
+    supabase.from("alertas_sos").select("*").eq("estado", "pendiente").order("created_at", { ascending: false }),
+    supabase.from("alertas_sos").select("*").eq("estado", "atendida").order("created_at", { ascending: false }).limit(20),
+  ]);
+  if (p.error) return null;
+  return [...((p.data ?? []) as AlertaSOS[]), ...((h.data ?? []) as AlertaSOS[])]
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+}
+
 /** El pitido del SOS: dos tonos en dos osciladores (un oscilador solo puede arrancar UNA vez). */
 function pitarSOS() {
   try {
@@ -168,8 +223,14 @@ export default function MonitoreoPage() {
   const [posiciones, setPosiciones] = useState<ReadonlyMap<string, PosicionUnidad>>(() => new Map());
   const [personas, setPersonas] = useState<ReadonlyMap<string, Persona>>(() => new Map());
   const [estadoPos, setEstadoPos] = useState<"cargando" | "listo" | "fallo">("cargando");
-  const [meta, setMeta] = useState<{ sinLeer: Set<string>; parcial: boolean; columnas: string[]; noInicioMin: number }>(
-    () => ({ sinLeer: new Set(), parcial: false, columnas: [], noInicioMin: NO_INICIO_MIN_DEFECTO }));
+  /** De la última respuesta buena: qué unidades se LEYERON (`unidades`), cuáles fallaron (`sinLeer`)
+   *  y cuándo calculó el servidor (`generadoMs`, para saber si el realtime trajo algo más nuevo). */
+  const [meta, setMeta] = useState<{
+    leidas: Set<string>; sinLeer: Set<string>; parcial: boolean; columnas: string[]; noInicioMin: number; generadoMs: number;
+  }>(() => ({ leidas: new Set(), sinLeer: new Set(), parcial: false, columnas: [], noInicioMin: NO_INICIO_MIN_DEFECTO, generadoMs: 0 }));
+  /** Cuándo movió el realtime cada unidad por última vez (evidencia más nueva que el sondeo). */
+  const realtimeVivo = useRef(new Map<string, number>());
+  const [realtime, setRealtime] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [errorPos, setErrorPos] = useState<ErrorPosiciones>(null);
   const [ultimaOk, setUltimaOk] = useState<number | null>(null);
   const [actualizando, setActualizando] = useState(false);
@@ -195,6 +256,7 @@ export default function MonitoreoPage() {
     for (const [k, p] of personasVivo.current) if (t - p.ts > PERSONA_VIDA_MS) personasVivo.current.delete(k);
     setPosiciones(new Map(vivo.current));
     setPersonas(new Map(personasVivo.current));
+    setRealtime(new Map(realtimeVivo.current));
     setAhora(t);
   }, []);
   const programarPublicacion = useCallback(() => {
@@ -226,7 +288,7 @@ export default function MonitoreoPage() {
     // Los marcadores son DOM: no necesitan el estilo. Se ponen al cargar, o a los 2.5 s aunque el
     // mapa base no haya llegado (red lenta, token caído): las unidades se ubican igual.
     const listo = () => setMapListo(true);
-    m.on("load", listo);
+    m.on("load", () => { setMapaBaseFallo(false); listo(); });
     const respaldo = setTimeout(listo, 2500);
     m.on("error", (e: { error?: { status?: number; message?: string } }) => {
       console.error("[monitoreo] mapa:", e?.error?.message ?? e);
@@ -250,51 +312,21 @@ export default function MonitoreoPage() {
     };
   }, []);
 
-  // ══ CATÁLOGOS (al montar y con «Actualizar») ══════════════════════════════
-  const cargarCatalogos = useCallback(async () => {
-    const [v, vt, c, ct, e] = await Promise.all([
-      leerConOpcional<Vehiculo>("vehiculos", "id,placa,categoria,marca,modelo", "estado"),
-      leerConOpcional<VehiculoTercero>("vehiculos_tercero", "id,placa,categoria,marca,modelo,empresa_id", "estado"),
-      supabase.from("conductores").select("id,nombre,telefono"),
-      supabase.from("conductores_tercero").select("id,nombre,telefono"),
-      supabase.from("empresas_tercerizadas").select("id,razon_social"),
-    ]);
-    if (v.error && vt.error) {
-      setErrorCatalogos("No se pudo leer la flota (vehículos propios y tercerizados). Pulsa actualizar para reintentar.");
+  // ══ CATÁLOGOS, SERVICIOS Y SOS (los lectores viven fuera del componente) ═══
+  const aplicarCatalogos = useCallback((r: LecturaCatalogos) => {
+    if (r.error && !r.catalogos.vehiculos && !r.catalogos.vehiculosTercero) {
+      setErrorCatalogos(r.error);
       return;
     }
-    setErrorCatalogos(v.error || vt.error ? `No se pudo leer la flota ${v.error ? "propia" : "tercerizada"}: la lista está incompleta.` : null);
+    setErrorCatalogos(r.error);
+    // Lo que no se pudo leer conserva lo último que se tenía.
     setCatalogos((prev) => ({
-      vehiculos: v.error ? prev?.vehiculos ?? [] : v.data,
-      vehiculosTercero: vt.error ? prev?.vehiculosTercero ?? [] : vt.data,
-      conductores: c.error ? prev?.conductores ?? [] : (c.data ?? []) as Conductor[],
-      conductoresTercero: ct.error ? prev?.conductoresTercero ?? [] : (ct.data ?? []) as Conductor[],
-      empresas: e.error ? prev?.empresas ?? [] : (e.data ?? []) as EmpresaTercero[],
+      vehiculos: r.catalogos.vehiculos ?? prev?.vehiculos ?? [],
+      vehiculosTercero: r.catalogos.vehiculosTercero ?? prev?.vehiculosTercero ?? [],
+      conductores: r.catalogos.conductores ?? prev?.conductores ?? [],
+      conductoresTercero: r.catalogos.conductoresTercero ?? prev?.conductoresTercero ?? [],
+      empresas: r.catalogos.empresas ?? prev?.empresas ?? [],
     }));
-  }, []);
-
-  // Servicios de HOY y de AYER sin cerrar (el motor acota la ventana del «no inició»).
-  // «Hoy» en hora de Lima: con toISOString(), desde las 19:00 ya es mañana en UTC.
-  const cargarReservas = useCallback(async () => {
-    const t = Date.now();
-    const { data, error } = await supabase
-      .from("reservas")
-      .select("id,fecha_servicio,hora_servicio,estado,vehiculo_id,vehiculo_tercero_id,tipo_servicio_detalle")
-      .in("fecha_servicio", [fechaLima(t - DIA_MS), fechaLima(t)])
-      .in("estado", ["programada", "confirmada", "en_curso"]);
-    if (!error) setReservas((data ?? []) as ReservaMon[]);
-  }, []);
-
-  const cargarSOS = useCallback(async () => {
-    // Las pendientes SIN límite ni corte por antigüedad: una pendiente vieja no puede quedar
-    // tapada por atendidas más recientes (pasó con 4 alertas de un mes).
-    const [{ data: pendientes }, { data: historial }] = await Promise.all([
-      supabase.from("alertas_sos").select("*").eq("estado", "pendiente").order("created_at", { ascending: false }),
-      supabase.from("alertas_sos").select("*").eq("estado", "atendida").order("created_at", { ascending: false }).limit(20),
-    ]);
-    const combinadas = [...((pendientes ?? []) as AlertaSOS[]), ...((historial ?? []) as AlertaSOS[])]
-      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
-    setAlertasSOS(combinadas);
   }, []);
 
   // ══ POSICIONES: sondeo a /api/monitoreo/flota ═════════════════════════════
@@ -337,9 +369,22 @@ export default function MonitoreoPage() {
           vivo.current.set(p.unidad, { ...actual, enlaceTs: p.enlaceTs });
         }
       }
-      for (const [k, p] of vivo.current) if (p.posicionTs < vigencia) vivo.current.delete(k);
+      const generadoMs = Date.parse(datos.generado_en) || t;
+      const conPosicion = new Set((datos.posiciones ?? []).map((p) => p.unidad));
+      const sinLeer = new Set(datos.sin_leer ?? []);
+      const leidas = new Set(datos.unidades ?? []);
+      for (const [k, p] of vivo.current) {
+        if (p.posicionTs < vigencia) { vivo.current.delete(k); continue; }
+        // Leída y SIN posición según el servidor: lo que se tenía ya no vale, salvo que el realtime
+        // la haya movido después de que el servidor calculara.
+        const leidaSinPosicion = !conPosicion.has(k) && !sinLeer.has(k) && leidas.has(k);
+        if (leidaSinPosicion && (realtimeVivo.current.get(k) ?? 0) <= generadoMs) vivo.current.delete(k);
+      }
+      for (const [k, ts] of realtimeVivo.current) if (ts < generadoMs - 5 * 60_000) realtimeVivo.current.delete(k);
       setMeta({
-        sinLeer: new Set(datos.sin_leer ?? []),
+        leidas,
+        generadoMs,
+        sinLeer,
         parcial: datos.parcial === true,
         columnas: datos.columnas_faltantes ?? [],
         noInicioMin: Number.isFinite(datos.no_inicio_min) ? datos.no_inicio_min : NO_INICIO_MIN_DEFECTO,
@@ -354,29 +399,39 @@ export default function MonitoreoPage() {
     }
   }, [publicar]);
 
-  const actualizarTodo = useCallback(() => {
-    void cargarCatalogos();
-    void cargarSOS();
-    void cargarReservas();
+  /** Botón «Actualizar»: todo de nuevo. */
+  const actualizarTodo = async () => {
     void actualizarPosiciones();
-  }, [cargarCatalogos, cargarSOS, cargarReservas, actualizarPosiciones]);
+    const [c, r, a] = await Promise.all([leerCatalogos(), leerReservas(), leerSOS()]);
+    aplicarCatalogos(c);
+    if (r) setReservas(r);
+    if (a) setAlertasSOS(a);
+  };
 
   // Al montar: todo. Cada 60 s (solo con la pestaña visible): posiciones y servicios. Al volver a
-  // la pestaña, uno inmediato.
+  // la pestaña, uno inmediato. El estado se escribe en los `then` (react-hooks/set-state-in-effect).
   useEffect(() => {
-    actualizarTodo();
+    let montado = true;
+    void actualizarPosiciones();
+    void Promise.all([leerCatalogos(), leerReservas(), leerSOS()]).then(([c, r, a]) => {
+      if (!montado) return;
+      aplicarCatalogos(c);
+      if (r) setReservas(r);
+      if (a) setAlertasSOS(a);
+    });
     const sondeo = () => {
       if (document.visibilityState !== "visible") return;
       void actualizarPosiciones();
-      void cargarReservas();
+      void leerReservas().then((r) => { if (montado && r) setReservas(r); });
     };
     const iv = setInterval(sondeo, SONDEO_MS);
     document.addEventListener("visibilitychange", sondeo);
     return () => {
+      montado = false;
       clearInterval(iv);
       document.removeEventListener("visibilitychange", sondeo);
     };
-  }, [actualizarTodo, actualizarPosiciones, cargarReservas]);
+  }, [actualizarPosiciones, aplicarCatalogos]);
 
   // El reloj re-juzga todo sin recargar nada.
   useEffect(() => {
@@ -401,6 +456,7 @@ export default function MonitoreoPage() {
             const despues = fusionarPosicion(antes, fila, t);
             if (despues && despues !== antes) {
               vivo.current.set(unidad, despues);
+              realtimeVivo.current.set(unidad, t);
               // El marcador se mueve YA; color, lista y contadores llegan en el lote.
               const reg = marcadores.current.get("u:" + unidad);
               const destino = `${despues.lng},${despues.lat}`;
@@ -429,7 +485,6 @@ export default function MonitoreoPage() {
 
   // ══ REALTIME: alertas SOS (nuevas, y atendidas por otro operador) ══════════
   useEffect(() => {
-    void cargarSOS();
     const ch = supabase.channel("monitoreo-sos")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "alertas_sos" },
         (payload: { new: AlertaSOS }) => {
@@ -451,7 +506,7 @@ export default function MonitoreoPage() {
         })
       .subscribe();
     return () => { void supabase.removeChannel(ch); };
-  }, [cargarSOS]);
+  }, []);
 
   const atenderSOS = async (id: number) => {
     // El UPDATE directo lo bloquea RLS: se persiste por la API con service-role.
@@ -534,9 +589,11 @@ export default function MonitoreoPage() {
     return base.map((u) => {
       const posicion = posiciones.get(u.clave) ?? null;
       const servs = servicios.porUnidad.get(u.clave) ?? [];
-      // Si la lectura de ESTA unidad falló pero ya teníamos su posición (de un sondeo anterior o del
-      // realtime), se juzga con esa: es una posición real y su edad sigue creciendo.
-      const lecturaOk = estadoPos === "fallo" ? posicion != null : !meta.sinLeer.has(u.clave) || posicion != null;
+      // Contrato de /api/monitoreo/flota: en `sin_leer`, o una unidad que el servidor no quiso leer
+      // (no está en `unidades`: alta reciente, otra vigencia), NO se leyó — nunca es «sin posición».
+      // La única evidencia que la rescata es el realtime: un punto que llegó DESPUÉS del cálculo.
+      const leida = estadoPos === "listo" && meta.leidas.has(u.clave) && !meta.sinLeer.has(u.clave);
+      const lecturaOk = leida || (realtime.get(u.clave) ?? 0) > meta.generadoMs;
       const veredicto = estadoPos === "cargando" ? null : juzgarUnidad({
         posicion, lecturaOk, servicios: servs, sosPendiente: sosPorUnidad.has(u.clave), ahoraMs: ahora, noInicioMin: meta.noInicioMin,
       });
@@ -553,7 +610,7 @@ export default function MonitoreoPage() {
         tipoServicio: manda ? (TIPOS_SERVICIO_FIJO.has(manda.tipo ?? "") ? "fijo" : "eventual") : null,
       };
     });
-  }, [catalogos, posiciones, servicios, sosPorUnidad, estadoPos, meta, ahora, indices, conductorDe]);
+  }, [catalogos, posiciones, realtime, servicios, sosPorUnidad, estadoPos, meta, ahora, indices, conductorDe]);
 
   // Filtros que NO son la clase (los chips se cuentan con ellos puestos y sin el suyo).
   const terminos = useMemo(() => terminosBusqueda(busqueda), [busqueda]);
@@ -729,7 +786,7 @@ export default function MonitoreoPage() {
   // Primera vez que hay posiciones: encuadrar la flota (sin ninguna, se queda en Lima).
   useEffect(() => {
     const m = mapa.current;
-    if (!mapListo || !m || ajustado.current || estadoPos !== "listo") return;
+    if (!mapListo || !m || ajustado.current || estadoPos !== "listo" || !catalogos) return;
     ajustado.current = true;
     const puntos = unidades.filter((u) => u.veredicto?.dibujar && u.posicion).map((u) => [u.posicion!.lng, u.posicion!.lat] as [number, number]);
     if (!puntos.length) return;
@@ -738,7 +795,7 @@ export default function MonitoreoPage() {
     for (const p of puntos) b.extend(p);
     const celular = window.matchMedia("(max-width: 767px)").matches;
     m.fitBounds(b, { padding: celular ? 48 : 80, maxZoom: 14, duration: 0 });
-  }, [mapListo, estadoPos, unidades]);
+  }, [mapListo, estadoPos, unidades, catalogos]);
 
   // ══ ELEGIR una unidad (lista → mapa) ══════════════════════════════════════
   const elegir = (clave: string) => {
@@ -763,22 +820,25 @@ export default function MonitoreoPage() {
   }, [seleccion]);
 
   // ══ TEXTOS DE ESTADO ══════════════════════════════════════════════════════
-  const hayFiltros = filtroClase != null || filtroFlota !== "todos" || filtroServicio !== "todos" || terminos.length > 0;
+  const otrosFiltros = filtroClase != null || filtroFlota !== "todos" || filtroServicio !== "todos";
   const vacioLista = !catalogos
     ? (errorCatalogos ?? "Cargando la flota…")
     : busqueda.trim()
-      ? `Ninguna unidad coincide con «${busqueda.trim()}»${hayFiltros && terminos.length && (filtroClase || filtroFlota !== "todos" || filtroServicio !== "todos") ? " con los filtros puestos" : ""}`
-      : hayFiltros ? "Ninguna unidad con estos filtros" : "No hay unidades vigentes en la flota";
-  const sinLeerConPos = useMemo(() => [...meta.sinLeer].filter((k) => posiciones.has(k)).length, [meta.sinLeer, posiciones]);
+      ? `Ninguna unidad coincide con «${busqueda.trim()}»${otrosFiltros ? " con los filtros puestos" : ""}`
+      : otrosFiltros ? "Ninguna unidad con estos filtros" : "No hay unidades vigentes en la flota";
+  // Unidades de la lista que no se pudieron leer (en `sin_leer` o fuera de lo que el servidor leyó).
+  const noLeidas = useMemo(() => unidades.filter((u) => u.veredicto?.codigo === "no_se_pudo_leer").length, [unidades]);
   const avisosLectura: string[] = [];
-  if (meta.sinLeer.size > 0) {
+  if (estadoPos === "listo" && noLeidas > 0) {
     avisosLectura.push(
-      `${meta.sinLeer.size} unidad${meta.sinLeer.size === 1 ? "" : "es"} no se ${meta.sinLeer.size === 1 ? "pudo" : "pudieron"} leer en la última actualización` +
+      `${noLeidas} unidad${noLeidas === 1 ? "" : "es"} no se ${noLeidas === 1 ? "pudo" : "pudieron"} leer en la última actualización` +
       (meta.parcial ? " (se acabó el tiempo de lectura)" : "") +
-      (sinLeerConPos ? `; de ${sinLeerConPos} se muestra la posición anterior` : "") + ". Se reintenta en el próximo minuto.");
-  } else if (meta.parcial) {
+      ": figura" + (noLeidas === 1 ? "" : "n") + " como «No se pudo leer» y se reintenta en el próximo minuto.");
+  } else if (estadoPos === "listo" && meta.parcial) {
     avisosLectura.push("La lectura de posiciones quedó a medias (se acabó el tiempo). Se reintenta en el próximo minuto.");
   }
+  const columnasGps = meta.columnas.filter((c) => !c.includes("."));
+  const columnasFlota = meta.columnas.filter((c) => c.includes("."));
   const textoCanal = canal === "vivo" ? "En vivo" : canal === "reconectando" ? "Reconectando…" : "Conectando…";
   const colorCanal = canal === "vivo" ? "#22c55e" : "#f59e0b";
   const ningunaConPosicion = estadoPos === "listo" && conPosicion === 0 && personas.size === 0;
@@ -825,7 +885,7 @@ export default function MonitoreoPage() {
               ⚠ SOS {sosPendientes.length}
             </button>
           )}
-          <button type="button" onClick={actualizarTodo} title="Actualizar ahora" aria-label="Actualizar ahora"
+          <button type="button" onClick={() => void actualizarTodo()} title="Actualizar ahora" aria-label="Actualizar ahora"
             className="w-11 h-11 md:w-9 md:h-9 flex items-center justify-center rounded-lg border border-blue-400/60 hover:bg-blue-500/20 transition-colors">
             <span className={actualizando ? "animate-spin" : ""} style={{ display: "inline-flex" }}><IconRefresh size={16} color="#dbeafe" /></span>
           </button>
@@ -922,18 +982,25 @@ export default function MonitoreoPage() {
                 Además, {personasEnMapa.length} conductor{personasEnMapa.length === 1 ? "" : "es"} conectado{personasEnMapa.length === 1 ? "" : "s"} sin unidad asignada (solo en el mapa).
               </p>
             )}
-            {meta.columnas.length > 0 && (
+            {columnasGps.length > 0 && (
               <p className="text-[10.5px] text-slate-500 px-2 pt-2 leading-snug">
-                La base no tiene {meta.columnas.join(", ")} en ubicaciones_gps: la edad se mide con menos datos
-                {meta.columnas.some((c) => SQL_COLUMNA[c]) ? ` (${meta.columnas.filter((c) => SQL_COLUMNA[c]).map((c) => SQL_COLUMNA[c]).join(", ")})` : ""}.
+                La base no tiene {columnasGps.join(", ")} en ubicaciones_gps: la edad de la posición se mide con menos datos
+                {columnasGps.some((c) => SQL_COLUMNA[c]) ? ` (falta correr ${columnasGps.filter((c) => SQL_COLUMNA[c]).map((c) => SQL_COLUMNA[c]).join(", ")})` : ""}.
+              </p>
+            )}
+            {columnasFlota.length > 0 && (
+              <p className="text-[10.5px] text-slate-500 px-2 pt-2 leading-snug">
+                La base no tiene {columnasFlota.join(", ")}: todas esas unidades cuentan como vigentes.
               </p>
             )}
           </div>
         </section>
 
         {/* MAPA */}
-        <div className="absolute inset-0 md:static md:flex-1 md:min-w-0 md:relative isolate">
-          <div ref={contenedorMapa} className="afa-mon absolute inset-0" />
+        <div className="absolute inset-0 md:relative md:inset-auto md:flex-1 md:min-w-0">
+          {/* isolate: los marcadores llevan z-index de millones (su prioridad) y no pueden tapar
+              la leyenda, los avisos ni el panel, que viven fuera de este contexto de apilamiento. */}
+          <div ref={contenedorMapa} className="afa-mon w-full h-full isolate" />
 
           <LeyendaMapa abierta={leyenda} onAbierta={setLeyenda} />
 
