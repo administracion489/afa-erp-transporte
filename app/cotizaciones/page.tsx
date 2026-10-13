@@ -9,6 +9,8 @@ import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
 import SelectorCliente from "@/components/SelectorCliente";
+import SelectorVehiculo from "@/components/SelectorVehiculo";
+import { usoPorVehiculo, recientesVehiculos } from "@/lib/vehiculos-buscador";
 import { rotuloCliente, usoPorCliente, recientesDe, esBloqueado, type ClienteBuscable } from "@/lib/clientes-buscador";
 
 /**
@@ -1222,6 +1224,11 @@ export default function CotizacionesPage(){
   const contactosCl=contactosDe.id===form.cliente_id?contactosDe.lista:[];
   const usoCl=useMemo(()=>usoPorCliente(cotizas),[cotizas]);
   const recientesCl=useMemo(()=>recientesDe(cotizas,8),[cotizas]);
+  // Buscadores de unidad: uso y recientes derivados de las cotizaciones (no se guarda nada).
+  const usoVehP=useMemo(()=>usoPorVehiculo(cotizas,"vehiculo_flota_id"),[cotizas]);
+  const recVehP=useMemo(()=>recientesVehiculos(cotizas,"vehiculo_flota_id",8),[cotizas]);
+  const usoVehT=useMemo(()=>usoPorVehiculo(cotizas,"vehiculo_tercero_id"),[cotizas]);
+  const recVehT=useMemo(()=>recientesVehiculos(cotizas,"vehiculo_tercero_id",8),[cotizas]);
   const abrirAltaCliente=(texto:string)=>{
     const t=texto.trim();const dig=t.replace(/\s+/g,"");
     const qs=/^\d{8}(\d{3})?$/.test(dig)?`&doc=${encodeURIComponent(dig)}`:t?`&nombre=${encodeURIComponent(t)}`:"";
@@ -1889,7 +1896,7 @@ export default function CotizacionesPage(){
   // por `nombre`, así que la razón social que se ve en la lista no se encontraba.
   const terminosCot=terminosBusqueda(busqueda);
   const filtradas=cotizas.filter(c=>{const ncl=clientes.find(cl=>cl.id===c.cliente_id);const txt=[ncl?.empresa,ncl?.nombre,ncl?.ruc,c.origen,c.destino,c.asunto,c.atencion,c.numero_cotizacion,String(c.id).padStart(5,"0")].filter(Boolean).join(" ");return coincideBusqueda(txt,terminosCot)&&(filtroEst==="todos"||c.estado===filtroEst)&&(filtroModo==="todos"||c.modo_servicio===filtroModo||(filtroModo==="eventual"&&!c.modo_servicio));});
-  const kmNum=Number(form.km)||0;const vehFloraSel=flota.find(v=>v.id===Number(form.vehiculo_flota_id));const vehTerceroSel=flotaTercero.find(v=>v.id===Number(form.vehiculo_tercero_id));const servsList=form.modo_servicio==="eventual"?SERVS_EVENTUAL:SERVS_FIJO;const esFijoForm=form.modo_servicio==="fijo";
+  const kmNum=Number(form.km)||0;const vehFloraSel=flota.find(v=>v.id===Number(form.vehiculo_flota_id));const vehTerceroSel=flotaTercero.find(v=>v.id===Number(form.vehiculo_tercero_id));const tarifaNombreSel=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo;const servsList=form.modo_servicio==="eventual"?SERVS_EVENTUAL:SERVS_FIJO;const esFijoForm=form.modo_servicio==="fijo";
   const esSoloIda=["solo_ida","fijo_solo_ida"].includes(form.tipo_servicio);
   const requiereParadas=["ida_retorno_paradas","fijo_multiparada"].includes(form.tipo_servicio);
   const esTurismo=["full_day","multi_dia"].includes(form.tipo_servicio);
@@ -2081,16 +2088,10 @@ export default function CotizacionesPage(){
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Unidad de flota <span className="normal-case font-normal text-blue-500">→ fotos en PDF</span></p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Campo label={`Vehículo propio (${flota.length})`}>
-                  <select className={iCls()} value={form.vehiculo_flota_id} onChange={e=>selVeh(e.target.value)}>
-                    <option value="">Sin vehículo propio</option>
-                    {flota.map(v=><option key={v.id} value={v.id}>{v.placa} — {v.categoria} {v.marca} {v.modelo} {v.capacidad_pasajeros?`(${v.capacidad_pasajeros}p)`:""}{v.foto_externa_url?" · 📸":""}</option>)}
-                  </select>
+                  <SelectorVehiculo tipo="propio" vehiculos={flota} valor={form.vehiculo_flota_id} onElegir={selVeh} uso={usoVehP} recientes={recVehP} tarifaTipo={form.tipo_vehiculo} tarifaNombre={tarifaNombreSel} cargando={loading}/>
                 </Campo>
-                <Campo label={`Vehículo tercerizado (${flotaTercero.length})`}>
-                  <select className={iCls()} value={form.vehiculo_tercero_id} onChange={e=>selVehTercero(e.target.value)}>
-                    <option value="">Sin vehículo tercerizado</option>
-                    {flotaTercero.map(v=><option key={v.id} value={v.id}>{v.placa} — {v.empresa_nombre||"Tercero"} · {v.categoria||""} {v.marca||""}{v.capacidad?` (${v.capacidad}p)`:""}</option>)}
-                  </select>
+                <Campo label={`Vehículo tercerizado (${flotaTercero.length} activos)`}>
+                  <SelectorVehiculo tipo="tercero" vehiculos={flotaTercero} valor={form.vehiculo_tercero_id} onElegir={selVehTercero} uso={usoVehT} recientes={recVehT} tarifaTipo={form.tipo_vehiculo} tarifaNombre={tarifaNombreSel} cargando={loading}/>
                 </Campo>
                 {vehFloraSel&&<div className="rounded-xl border-2 p-3" style={{background:"#eef3f8",borderColor:"#0b315f33"}}><p className="text-[10px] font-bold uppercase text-[#0b315f] mb-1">🚌 {vehFloraSel.placa}</p><p className="text-xs text-gray-500">{vehFloraSel.marca} {vehFloraSel.modelo}</p><div className="flex gap-2 text-[10px] mt-1">{vehFloraSel.foto_externa_url&&<span className="text-green-600 font-bold">📸 Exterior ✓</span>}{vehFloraSel.foto_interna_url&&<span className="text-green-600 font-bold">📸 Interior ✓</span>}</div></div>}
                 {vehTerceroSel&&<div className="rounded-xl border-2 p-3" style={{background:"#fef9c3",borderColor:"#ca8a0433"}}><p className="text-[10px] font-bold uppercase text-amber-700 mb-1">🤝 {vehTerceroSel.placa} · Tercero</p><p className="text-xs text-gray-500">{vehTerceroSel.empresa_nombre}</p><p className="text-[10px] text-gray-400 mt-0.5">{vehTerceroSel.categoria} {vehTerceroSel.marca}{vehTerceroSel.capacidad?` · ${vehTerceroSel.capacidad} pax`:""}</p></div>}
