@@ -1,6 +1,9 @@
 // lib/google-directions.ts — SOLO SERVIDOR (lee la API key de Google; ningún archivo
-// "use client" puede importarlo). El repo no tiene el paquete `server-only`, así que la
-// regla se sostiene por convención y por esta cabecera.
+// "use client" puede importarlo). `import "server-only"` lo hace cumplir en el build: Next
+// resuelve ese módulo con su copia interna (next/dist/compiled/server-only), así que no hace
+// falta el paquete. Ningún scripts/*.mts importa este archivo; si alguno llegara a hacerlo con
+// tsx, el import fallaría (ahí no existe el alias) — mover lo puro a otro módulo, no quitarlo.
+import "server-only";
 //
 // La llamada a Google Directions vivía dentro de app/api/ruta/route.ts. Se EXTRAJO —el
 // fetch, la verificación del estado HTTP y del `status` de Google, y la traducción de los
@@ -25,6 +28,14 @@ export type ErrorDirections = { estado: number; cuerpo: { error: string; google_
 export function esErrorDirections(e: unknown): e is ErrorDirections {
   return !!e && typeof e === "object" && "estado" in e && "cuerpo" in e;
 }
+
+/**
+ * Cuánto se espera a Google por consulta. NO MEDIDO: una Directions responde en 0.3-1 s; 8 s
+ * es holgura de sobra y deja que una ruta de varios tramos quepa en el `maxDuration` de 60 s.
+ * Sin tope, un Google colgado tenía la función abierta hasta que Vercel la mataba, y el
+ * llamador recibía un corte sin JSON.
+ */
+export const TIMEOUT_GOOGLE_MS = 8_000;
 
 /** Mensajes amigables para los `status` de Google más comunes. */
 const MENSAJES: Record<string, string> = {
@@ -51,14 +62,38 @@ export async function consultarDirections(
   const qs = new URLSearchParams({ ...params, key: opciones.key });
   const url = `https://maps.googleapis.com/maps/api/directions/json?${qs}`;
 
-  const res = await fetch(url, { cache: "no-store" });
+  // El aborto por tiempo y el error de red se traducen a la MISMA forma `{ estado, cuerpo }`
+  // que el resto: /api/ruta y horas-paraderos los devuelven tal cual (504) en vez de caer en
+  // su 500 genérico. El mensaje nunca lleva la URL (lleva la key).
+  let res: Response;
+  try {
+    res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(TIMEOUT_GOOGLE_MS) });
+  } catch (e: any) {
+    const porTiempo = e?.name === "TimeoutError" || e?.name === "AbortError";
+    console.error(`[${etq}] ${porTiempo ? "Google no respondió en" : "error de red tras"} ${TIMEOUT_GOOGLE_MS} ms:`, e?.name);
+    throw {
+      estado: 504,
+      cuerpo: { error: porTiempo ? "Google no respondió a tiempo" : "No se pudo conectar con Google (error de red). Vuelve a intentarlo." },
+    } satisfies ErrorDirections;
+  }
 
   if (!res.ok) {
     console.error(`[${etq}] HTTP error:`, res.status, res.statusText);
     throw { estado: 502, cuerpo: { error: `Google HTTP ${res.status}: ${res.statusText}` } } satisfies ErrorDirections;
   }
 
-  const data = await res.json();
+  let data: any;
+  try {
+    data = await res.json();
+  } catch (e: any) {
+    // El tope de tiempo también corre mientras se lee el cuerpo.
+    const porTiempo = e?.name === "TimeoutError" || e?.name === "AbortError";
+    console.error(`[${etq}] respuesta de Google ${porTiempo ? "cortada por tiempo" : "ilegible"}:`, e?.name);
+    throw {
+      estado: porTiempo ? 504 : 502,
+      cuerpo: { error: porTiempo ? "Google no respondió a tiempo" : "Google devolvió una respuesta ilegible. Vuelve a intentarlo." },
+    } satisfies ErrorDirections;
+  }
   console.log(`[${etq}] Google status:`, data.status);
 
   if (data.status !== "OK") {
