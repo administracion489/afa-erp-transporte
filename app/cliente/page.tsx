@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabase";
 import type { Map as MapboxMap, Marker as MapboxMarker } from "mapbox-gl"; // solo tipos: `import type` no emite JS
 import "mapbox-gl/dist/mapbox-gl.css";   // el CSS sí es estático (no arrastra el motor)
+import { cargarMapbox as cargarMapboxCompartido, type MapboxAPI } from "@/lib/mapbox-carga";
 import { animarMarcador, animarMarcadorPorCamino, tweenEnVuelo } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
@@ -60,21 +61,11 @@ const ModalManifiestoPortal = dynamic(() => import("@/components/portal/ModalMan
 // ANTES de que el portal pudiera pedir su primer dato, en las seis pestañas por igual.
 // Ahora se carga al entrar al mapa. Todos los usos de `mapboxgl` en este archivo están
 // detrás de `mapListoEnVivo`, que solo se enciende cuando el mapa ya se creó — es decir,
-// después de este cargador.
-type MapboxAPI = (typeof import("mapbox-gl"))["default"];
+// después de este cargador. El cargador vive en lib/mapbox-carga.ts (lo comparte /cotizaciones);
+// aquí solo se guarda la referencia que usan los bloques síncronos de esta página.
 let mapboxgl!: MapboxAPI;
-let cargaMapbox: Promise<MapboxAPI> | null = null;
 function cargarMapbox(): Promise<MapboxAPI> {
-  if (mapboxgl) return Promise.resolve(mapboxgl);
-  if (!cargaMapbox) {
-    cargaMapbox = import("mapbox-gl").then(mod => {
-      const gl = ((mod as any).default ?? mod) as MapboxAPI;
-      gl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
-      mapboxgl = gl;
-      return gl;
-    });
-  }
-  return cargaMapbox;
+  return cargarMapboxCompartido().then(gl => (mapboxgl = gl));
 }
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────
