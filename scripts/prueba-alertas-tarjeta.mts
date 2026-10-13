@@ -59,6 +59,8 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
     "llamada_inicio", "en_punto_sin_iniciar", "recordar_checkout", "asignacion", "desasignacion", "cambio", "cancelacion"];
   const TERCERO_SERVICIOS = ["alerta_no_inicio_previa"];
   const HORARIO = ["asignacion", "desasignacion", "cambio", "cancelacion"];
+  // El bloque 7 retiene el aviso de «Servicio sin cerrar» con planDeEnvioAviso (lib/servicio-abandonado.ts).
+  const HORARIO_CONTACTOS = ["servicio_abandonado"];
   const UMBRAL = ["debio_iniciar", "no_inicio", "llamada_inicio", "riesgo_retraso", "retraso_en_ruta", "sin_rastreo_previo",
     "gps_silencio", "recordar_checkout", "doc_vence", "jornada", "servicio_abandonado"];
   const PASAJERO: Record<string, string> = {
@@ -81,7 +83,8 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
       if (c.tercerizados && TERCERO_SERVICIOS.includes(clave) && !c.tercerizados.independienteDeConductor) malos.push(`${clave}: casilla de servicios atada a Conductor`);
       if (c.tercerizados && SIEMPRE.includes(clave) && !c.tercerizados.independienteDeConductor) malos.push(`${clave}: sin casilla Conductor y tercerizados atado a ella`);
       if (c.tercerizados && LEE_CASILLA.includes(clave) && c.tercerizados.independienteDeConductor) malos.push(`${clave}: tercerizados suelto de Conductor`);
-      if (c.horario !== HORARIO.includes(clave)) malos.push(`${clave}: horario`);
+      const esperaHorario = HORARIO.includes(clave) ? "conductor" : HORARIO_CONTACTOS.includes(clave) ? "contactos" : null;
+      if (c.horario !== esperaHorario) malos.push(`${clave}: horario ${c.horario} ≠ ${esperaHorario}`);
       if (!!c.umbral !== UMBRAL.includes(clave)) malos.push(`${clave}: umbral`);
       if (c.umbral && c.umbral.defecto !== UMBRAL_DEF[clave]) malos.push(`${clave}: defecto ${c.umbral.defecto} ≠ ${UMBRAL_DEF[clave]}`);
       const pas = c.canalesPasajero ? (["push", "email", "whatsapp"] as const).filter((k) => c.canalesPasajero![k]).join(",") : "";
@@ -396,7 +399,7 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
   const c = controlesDe(cfg);
   chk("ofrece los controles de siempre (el lado seguro)",
     c.conductor === "casilla" && !!c.tercerizados && !c.tercerizados.independienteDeConductor && c.canalesConductor
-    && c.horario && !!c.umbral && c.minAnticipacionDefecto === ANTICIPACION_DEFECTO_MIN && c.activo === "interruptor", JSON.stringify(c));
+    && c.horario === "conductor" && !!c.umbral && c.minAnticipacionDefecto === ANTICIPACION_DEFECTO_MIN && c.activo === "interruptor", JSON.stringify(c));
   chk("y no afirma nada en sus notas", notasHoy("aviso_nuevo", new Map([["aviso_nuevo", cfg]]), ctx2).length === 0);
 }
 
