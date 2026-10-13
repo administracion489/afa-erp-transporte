@@ -24,6 +24,8 @@ Con dos condiciones, que son las que hacen que esto sea seguro y no temerario:
 
 Si un cambio necesita una **migración SQL** de `supabase/`, el deploy NO la corre: dilo explícitamente al entregar, porque hasta que alguien la ejecute la pantalla nueva se comporta como si la columna no existiera.
 
+**Las ramas `claude/*` no se despliegan en Vercel** (`vercel.json` → `git.deploymentEnabled`): sus vistas previas fallaban todas con `supabaseUrl is required`, porque las variables de Supabase están cargadas solo para *Production*, y cada rama nueva mandaba un correo «Preview deployment failed». La regla la lee Vercel del `vercel.json` del commit que se sube, así que una rama creada antes de este cambio sigue intentándolo hasta que trae `main`. No hay vista previa: lo que se verifica se verifica en local (tsc, build y matrices) antes de fusionar.
+
 Tras el deploy, si la pantalla sigue igual: `Ctrl+Shift+R`. `public/sw.js` solo cachea la navegación de `/conductor` y `/pasajero` y los chunks de Next llevan hash de build, así que el resto del ERP va siempre a la red — súbele `VERSION` solo si tocas esas dos apps.
 
 ## Equipo de agentes (`.claude/agents/`)
