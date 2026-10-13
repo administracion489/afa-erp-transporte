@@ -396,7 +396,15 @@ export default function GpsServicioPage() {
             {r && r.posiciones > 0 && r.primeraTs != null && r.ultimaTs != null && (
               <p className="text-blue-500 text-[10px] mt-3">
                 {r.posiciones.toLocaleString("es-PE")} posiciones GPS · {horaLima(r.primeraTs)} → {horaLima(r.ultimaTs)}
-                {r.huecos.length ? ` · ${r.huecos.length} tramo${r.huecos.length === 1 ? "" : "s"} sin señal` : ""}
+                {r.huecos.length + r.huecosOmitidos ? ` · ${r.huecos.length + r.huecosOmitidos} tramo${r.huecos.length + r.huecosOmitidos === 1 ? "" : "s"} sin señal` : ""}
+              </p>
+            )}
+            {r && (r.decimada || r.tramosOmitidos > 0 || r.huecosOmitidos > 0) && (
+              <p className="text-blue-500 text-[10px] mt-1">
+                Traza simplificada para dibujarla
+                {r.tramosOmitidos > 0 ? ` · ${r.tramosOmitidos} tramo${r.tramosOmitidos === 1 ? "" : "s"} corto${r.tramosOmitidos === 1 ? "" : "s"} sin dibujar` : ""}
+                {r.huecosOmitidos > 0 ? ` · ${r.huecosOmitidos} hueco${r.huecosOmitidos === 1 ? "" : "s"} corto${r.huecosOmitidos === 1 ? "" : "s"} sin dibujar` : ""}
+                . Los excesos se miden con todas las posiciones.
               </p>
             )}
           </div>

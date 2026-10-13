@@ -235,6 +235,64 @@ seccion("3 · la traza se corta en los huecos y se decima sin perder extremos");
     d.decimada && total <= 1000 + 2 * largos.length
     && d.tramos.every((t, k) => t[0] === largos[k][0] && t[t.length - 1] === largos[k][largos[k].length - 1]), `${total}`);
   chk("sin pasar del tope no se decima", R.decimarTramos([[[0, 0], [1, 1]]], 10).decimada === false);
+
+  // TOPE DURO (revisión de seguridad): con miles de tramos cortos los extremos solos pasaban del tope
+  // (10 000 tramos de 2 vértices = 20 000 vértices sobre un «tope» de 5 000).
+  const cortos: [number, number][][] = Array.from({ length: 10_000 }, (_, k) =>
+    [[-77 + k * 1e-5, -12], [-77 + k * 1e-5, -12 + (1 + (k % 7)) * 1e-4]] as [number, number][]);
+  const dc = R.decimarTramos(cortos);
+  const tc = dc.tramos.reduce((a, t) => a + t.length, 0);
+  chk(`10 000 tramos de 2 vértices: no pasa de ${R.MAX_VERTICES_TRAZA} y cuenta los omitidos`,
+    dc.decimada && tc <= R.MAX_VERTICES_TRAZA && dc.omitidos === cortos.length - dc.tramos.length && dc.omitidos > 0, `${tc} · ${dc.omitidos}`);
+  const largoDe = (t: [number, number][]) => distM(t[0][1], t[0][0], t[t.length - 1][1], t[t.length - 1][0]);
+  const minQueda = Math.min(...dc.tramos.map(largoDe));
+  const quedanSet = new Set(dc.tramos.map((t) => `${t[0][0]}`));
+  const maxFuera = Math.max(...cortos.filter((t) => !quedanSet.has(`${t[0][0]}`)).map(largoDe));
+  chk("se quedan los tramos más largos", minQueda >= maxFuera - 1e-6, `${minQueda} vs ${maxFuera}`);
+  const posiciones = dc.tramos.map((t) => cortos.findIndex((c) => c[0][0] === t[0][0]));
+  chk("y en su orden original", posiciones.every((p, i) => i === 0 || posiciones[i - 1] < p));
+  // Barrido: ningún reparto de tramos pasa del tope, y sin pasarlo no se omite nada.
+  let barridoOk = true;
+  for (let i = 0; i < 300; i++) {
+    const n = 1 + Math.floor(rnd() * 400);
+    const ts = Array.from({ length: n }, (_, k) => Array.from({ length: 2 + Math.floor(rnd() * 60) }, (_, j) => [k, j] as [number, number]));
+    const max = 20 + Math.floor(rnd() * 2000);
+    const r = R.decimarTramos(ts, max);
+    const tot = r.tramos.reduce((a, t) => a + t.length, 0);
+    const antes = ts.reduce((a, t) => a + t.length, 0);
+    if (tot > max || (antes <= max && (r.decimada || r.omitidos)) || r.tramos.length + r.omitidos !== n
+      || r.tramos.some((t) => t.length < 2)) { barridoOk = false; console.log("   ", { n, max, tot, om: r.omitidos }); break; }
+  }
+  chk("barrido de 300 repartos: nunca pasa del tope, nada se pierde sin contarse", barridoOk);
+
+  // Huecos: se quedan los más largos, en orden, y se cuentan los que no.
+  const muchos = Array.from({ length: 900 }, (_, k) => ({ desde: [0, 0] as [number, number], hasta: [1, 1] as [number, number], segundos: k, metros: 301 + ((k * 37) % 900) }));
+  const th = R.toparHuecos(muchos);
+  const minH = Math.min(...th.huecos.map((h) => h.metros));
+  const fueraH = muchos.filter((h) => !th.huecos.includes(h));
+  chk(`900 huecos: quedan ${R.MAX_HUECOS}, los más largos, en orden, y ${900 - R.MAX_HUECOS} omitidos`,
+    th.huecos.length === R.MAX_HUECOS && th.omitidos === 900 - R.MAX_HUECOS
+    && fueraH.every((h) => h.metros <= minH) && th.huecos.every((h, i) => i === 0 || (th.huecos[i - 1].segundos ?? 0) < (h.segundos ?? 0)));
+  chk("pocos huecos: intactos", R.toparHuecos(muchos.slice(0, 3)).omitidos === 0 && R.toparHuecos(muchos.slice(0, 3)).huecos.length === 3);
+
+  // Coordenadas de un episodio: muestreo con los extremos dentro.
+  const serie = Array.from({ length: 2000 }, (_, k) => [k, k] as [number, number]);
+  const mu = R.muestrear(serie, R.MAX_COORDS_EPISODIO);
+  chk(`muestrear: ${R.MAX_COORDS_EPISODIO} puntos, primero y último incluidos, en orden`,
+    mu.length === R.MAX_COORDS_EPISODIO && mu[0] === serie[0] && mu[mu.length - 1] === serie[serie.length - 1]
+    && mu.every((c, i) => i === 0 || mu[i - 1][0] < c[0]));
+  chk("muestrear sin pasar del tope: copia igual", JSON.stringify(R.muestrear(serie.slice(0, 5), 300)) === JSON.stringify(serie.slice(0, 5)));
+
+  // Una traza que salta de lado a lado (> 300 m) en cada punto: la respuesta queda acotada.
+  const salton: Fila[] = Array.from({ length: 20_000 }, (_, k) => ({
+    created_at: new Date(T0 + k * 2000).toISOString(), lat: -12.05 + (k % 2) * 0.004 + Math.floor(k / 2) * 1e-6, lng: -77.03,
+    precision_m: 5, simulado: null, estado: "en_ruta", velocidad: 40, rumbo: 0, timestamp: null, conductor_id: 5, conductor_tercero_id: null,
+  }));
+  const rs = R.recorridoDeServicio({ reservaId: 3, crudas: salton, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90 });
+  const vRs = rs.tramos.reduce((a, t) => a + t.length, 0);
+  const bytes = JSON.stringify(rs).length;
+  chk(`traza de 20 000 saltos: ≤ ${R.MAX_VERTICES_TRAZA} vértices, ≤ ${R.MAX_HUECOS} huecos y respuesta acotada`,
+    vRs <= R.MAX_VERTICES_TRAZA && rs.huecos.length <= R.MAX_HUECOS && bytes < 400_000, `${vRs} · ${rs.huecos.length} · ${bytes} B`);
 }
 
 // ══ 4 · la URL: el ciclo ═══════════════════════════════════════════════════════════════════

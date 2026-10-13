@@ -37,6 +37,13 @@ export type Coord = [number, number];
  *  servicio de dos horas son cientos de puntos; esto solo evita mandar decenas de miles si una
  *  reserva quedó abierta un día entero. Se decima conservando los extremos de cada tramo. */
 export const MAX_VERTICES_TRAZA = 5000;
+/** Tope de huecos que viajan (se quedan los más largos). Operativo, no medido: una traza sana tiene
+ *  pocos; cientos solo salen de un teléfono que salta de posición en posición, y dibujarlos todos no
+ *  dice nada que no diga el conteo. */
+export const MAX_HUECOS = 500;
+/** Tope de posiciones por episodio (se muestrea conservando los extremos). Operativo, no medido: a
+ *  una posición cada pocos segundos, 300 son más de diez minutos seguidos sobre el umbral. */
+export const MAX_COORDS_EPISODIO = 300;
 
 export type EpisodioMapa = {
   codigo: Episodio["codigo"];
@@ -73,6 +80,10 @@ export type RecorridoServicio = {
   ultimaTs: number | null;
   /** se decimó la traza para no pasar de MAX_VERTICES_TRAZA */
   decimada: boolean;
+  /** tramos que no caben ni con solo sus extremos (los más cortos): no se dibujan */
+  tramosOmitidos: number;
+  /** huecos que pasan de MAX_HUECOS (los más cortos): no se dibujan */
+  huecosOmitidos: number;
   /** el resumen: el MISMO de la columna «Excesos» de /uso-flota → Servicios */
   excesos: ExcesosServicio;
   /** todos los episodios (los que cuentan y los descartados), por hora de inicio */
@@ -124,19 +135,64 @@ export function tramosDeTraza(limpia: readonly { lat: number; lng: number; ts: n
   return { tramos, huecos };
 }
 
-/** Decima los tramos para no pasar de `max` vértices en total, conservando los extremos de cada uno. */
-export function decimarTramos(tramos: Coord[][], max = MAX_VERTICES_TRAZA): { tramos: Coord[][]; decimada: boolean } {
-  const total = tramos.reduce((acc, t) => acc + t.length, 0);
-  if (total <= max) return { tramos, decimada: false };
-  const paso = Math.ceil(total / max);
-  return {
-    decimada: true,
-    tramos: tramos.map((t) => t.filter((_, i) => i === 0 || i === t.length - 1 || i % paso === 0)),
-  };
+/** `n` elementos repartidos a lo largo de `xs`, con el primero y el último siempre dentro. */
+export function muestrear<T>(xs: readonly T[], n: number): T[] {
+  if (xs.length <= n) return [...xs];
+  if (n <= 1) return xs.slice(0, Math.max(0, n));
+  return Array.from({ length: n }, (_, k) => xs[Math.round((k * (xs.length - 1)) / (n - 1))]);
+}
+
+const contarVertices = (ts: readonly Coord[][]) => ts.reduce((acc, t) => acc + t.length, 0);
+const largoM = (t: readonly Coord[]) => {
+  let m = 0;
+  for (let i = 1; i < t.length; i++) m += distM(t[i - 1][1], t[i - 1][0], t[i][1], t[i][0]);
+  return m;
+};
+
+/**
+ * Decima los tramos para no pasar de `max` vértices en total, conservando los extremos de cada uno.
+ * Es un TOPE DURO: si con solo los extremos los tramos siguen sin caber (cientos de tramos cortos, un
+ * teléfono que salta de posición en posición), se quedan los más LARGOS en metros y el resto se cuenta
+ * en `omitidos`. Sin pasar del tope devuelve los mismos tramos, sin tocar.
+ */
+export function decimarTramos(tramos: Coord[][], max = MAX_VERTICES_TRAZA): { tramos: Coord[][]; decimada: boolean; omitidos: number } {
+  const total = contarVertices(tramos);
+  if (total <= max) return { tramos, decimada: false, omitidos: 0 };
+  const masLargo = tramos.reduce((acc, t) => Math.max(acc, t.length), 0);
+  const decimar = (paso: number) => tramos.map((t) => t.filter((_, i) => i === 0 || i === t.length - 1 || i % paso === 0));
+  let paso = Math.max(2, Math.ceil(total / max));
+  let out = decimar(paso);
+  // Los extremos no se deciman: con muchos tramos el primer paso no basta. Se agranda hasta que cada
+  // tramo quede en sus dos extremos.
+  while (contarVertices(out) > max && paso < masLargo) {
+    paso += Math.max(1, Math.floor(paso / 4));
+    out = decimar(paso);
+  }
+  if (contarVertices(out) <= max) return { tramos: out, decimada: true, omitidos: 0 };
+  // Ni con solo los extremos: se quedan los tramos más largos, en su orden original.
+  const orden = out.map((t, i) => ({ i, m: largoM(tramos[i]) })).sort((a, b) => b.m - a.m || a.i - b.i);
+  const quedan = new Set<number>();
+  let usados = 0;
+  for (const { i } of orden) {
+    if (usados + out[i].length > max) continue;
+    quedan.add(i);
+    usados += out[i].length;
+  }
+  return { tramos: out.filter((_, i) => quedan.has(i)), decimada: true, omitidos: out.length - quedan.size };
+}
+
+/** Topa los huecos a `max`: se quedan los más LARGOS, en su orden original. */
+export function toparHuecos(huecos: HuecoMapa[], max = MAX_HUECOS): { huecos: HuecoMapa[]; omitidos: number } {
+  if (huecos.length <= max) return { huecos, omitidos: 0 };
+  const quedan = new Set(
+    huecos.map((h, i) => ({ i, m: h.metros })).sort((a, b) => b.m - a.m || a.i - b.i).slice(0, max).map((x) => x.i),
+  );
+  return { huecos: huecos.filter((_, i) => quedan.has(i)), omitidos: huecos.length - max };
 }
 
 const vacio = (reservaId: number, umbral: number, excesos: ExcesosServicio): RecorridoServicio => ({
-  reservaId, umbral, tramos: [], huecos: [], posiciones: 0, primeraTs: null, ultimaTs: null, decimada: false, excesos, episodios: [],
+  reservaId, umbral, tramos: [], huecos: [], posiciones: 0, primeraTs: null, ultimaTs: null, decimada: false,
+  tramosOmitidos: 0, huecosOmitidos: 0, excesos, episodios: [],
 });
 
 /**
@@ -158,7 +214,8 @@ export function recorridoDeServicio(e: {
   // La traza se dibuja aunque el teléfono no tenga velocímetro: el recorrido existe igual.
   const limpia = limpiarHuella(filasAPuntos(e.crudas).filter((p) => coordValida(p.lat, p.lng)).sort((a, b) => a.ts - b.ts));
   const cortada = tramosDeTraza(limpia);
-  const { tramos, decimada } = decimarTramos(cortada.tramos);
+  const { tramos, decimada, omitidos: tramosOmitidos } = decimarTramos(cortada.tramos);
+  const { huecos, omitidos: huecosOmitidos } = toparHuecos(cortada.huecos);
 
   const { puntos, episodios } = episodiosDeTraza({ reservaId: e.reservaId, crudas: e.crudas, umbral: e.umbral, vehiculo: e.vehiculo });
   const conCoord = puntos.filter((p) => coordValida(p.lat, p.lng));
@@ -182,7 +239,7 @@ export function recorridoDeServicio(e: {
       lngPico: ep.lngPico,
       cortado: ep.cortado,
       detalle: ep.detalle,
-      coords: coordsDeEpisodio(puntos, ep),
+      coords: muestrear(coordsDeEpisodio(puntos, ep), MAX_COORDS_EPISODIO),
     }))
     .sort((a, b) => a.inicioTs - b.inicioTs);
 
@@ -190,11 +247,13 @@ export function recorridoDeServicio(e: {
     reservaId: e.reservaId,
     umbral: e.umbral,
     tramos,
-    huecos: cortada.huecos,
+    huecos,
     posiciones: conCoord.length,
-    primeraTs: tss.length ? Math.min(...tss) : null,
-    ultimaTs: tss.length ? Math.max(...tss) : null,
+    primeraTs: tss.length ? tss.reduce((a, b) => Math.min(a, b)) : null,
+    ultimaTs: tss.length ? tss.reduce((a, b) => Math.max(a, b)) : null,
     decimada,
+    tramosOmitidos,
+    huecosOmitidos,
     excesos,
     episodios: eps,
   };
