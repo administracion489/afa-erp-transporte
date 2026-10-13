@@ -459,18 +459,34 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
     rutas: ["/monitoreo", "/gps-salud"],
     titulo: "Monitoreo GPS · dónde están las unidades",
     resumen:
-      "Dos pantallas hermanas. **Monitoreo** es el mapa en vivo: dónde está cada bus ahora y qué alertas SOS hay abiertas. **Salud del rastreo** responde la otra pregunta: a qué conductores se les corta la señal durante el servicio, y por qué.",
+      "Dos pantallas hermanas. **Monitoreo** es el mapa en vivo: dónde está cada unidad, cuáles hay que atender y qué alertas SOS hay abiertas. **Salud del rastreo** responde la otra pregunta: a qué conductores se les corta la señal durante el servicio, y por qué.",
     paraQueSirve: [
-      "Ver en el mapa la flota propia y la tercerizada, con su placa y su estado de señal.",
+      "Ver en el mapa la flota propia y la tercerizada, con su placa y su estado; las que no transmiten siguen en su última posición, en gris y con su edad.",
+      "Saber de un vistazo qué hay que atender: SOS, servicios que no se iniciaron y unidades en ruta sin señal.",
       "Atender alertas SOS que manda el conductor desde su app.",
-      "Contestar al cliente “¿dónde está mi bus?” sin llamar al conductor.",
+      "Contestar al cliente “¿dónde está mi bus?” sin llamar al conductor, también desde el celular.",
       "Descubrir qué teléfonos están mal configurados y dejan viajes sin rastro.",
     ],
     faqs: [
       {
         pregunta: "Un bus salió pero no aparece en el mapa. ¿Está mal el GPS?",
         respuesta:
-          "Casi nunca es el GPS del vehículo: el rastreo lo hace **el teléfono del conductor a través de su app**, y solo mientras el servicio está iniciado.\n\nRevisa en este orden:\n1. ¿El conductor **inició el servicio** en la app? Sin iniciar, no manda nada.\n2. ¿El servicio está **sincronizado** desde Programación? Si no, ni siquiera le aparece en su lista.\n3. ¿El teléfono tiene el permiso de ubicación en **“Permitir siempre”**? Si está en “Solo mientras uso la app”, el sistema operativo corta el rastreo apenas el conductor bloquea la pantalla.\n\nLos colores del panel te ubican: **En línea** (señal de hace menos de 2 minutos), **Hace Nm** (entre 2 y 10), **Sin señal** (más de 10 minutos) y **Sin GPS** (nunca mandó nada).",
+          "Casi nunca es el GPS del vehículo: el rastreo lo hace **el teléfono del conductor a través de su app**, y solo mientras el servicio está iniciado.\n\nRevisa en este orden:\n1. ¿El conductor **inició el servicio** en la app? Sin iniciar, no manda nada.\n2. ¿El servicio está **sincronizado** desde Programación? Si no, ni siquiera le aparece en su lista.\n3. ¿El teléfono tiene el permiso de ubicación en **“Permitir siempre”**? Si está en “Solo mientras uso la app”, el sistema operativo corta el rastreo apenas el conductor bloquea la pantalla.\n\nOjo: una unidad que **dejó de transmitir no desaparece**: se queda en gris en su última posición. Si una unidad no está en el mapa es porque **no tiene ninguna posición en los últimos 30 días** (en la lista dice «Sin posición»), o porque esta vez **no se pudo leer** (dice «No se pudo leer» y se reintenta cada minuto: no quiere decir que no tenga posición).",
+      },
+      {
+        pregunta: "¿Qué significa cada color del mapa?",
+        respuesta:
+          "**Verde · En línea**: mandó su posición hace 2 minutos o menos.\n\n**Ámbar · Demora**: está en servicio y lleva entre 2 y 5 minutos sin posición nueva. Todavía no es una alarma: suele ser un túnel o una zona sin datos.\n\n**Rojo · Atender**: hay que hacer algo. Es una de tres cosas: una **alerta SOS** sin atender, un servicio cuya hora ya pasó y el conductor **no pulsó Iniciar** (aunque su teléfono esté transmitiendo), o una unidad **en servicio y más de 5 minutos sin señal**. El detalle de cada unidad dice cuál de las tres es.\n\n**Gris · Estacionada o Cerró servicio**: no tiene ningún servicio en curso. Se dibuja en su **última posición conocida**, atenuada y con su edad debajo de la placa (“hace 3 h”, “ayer 18:40”). Gris no es una falla: una unidad guardada en la cochera tiene que verse gris.\n\nLos contadores de arriba (**Atender · En línea · Demora · Estacionadas · Sin dato**) también son filtros: tócalos para dejar en la lista y en el mapa solo esa clase, y vuelve a tocarlo para verlas todas. **Sin dato** junta las que no tienen posición en 30 días y las que no se pudieron leer.",
+      },
+      {
+        pregunta: "Hay demasiados grises en el mapa. ¿Puedo ocultarlos?",
+        respuesta:
+          "Sí. El interruptor **Estacionadas en el mapa** quita los grises del **mapa** (la lista los sigue mostrando, para que no se pierdan de vista). La elección se recuerda en este navegador.\n\nAdemás, con el mapa **alejado** las placas de los grises se ocultan solas y solo queda el ícono; acerca el mapa para leerlas. Si tocas una unidad gris en la lista, se ve igual aunque el interruptor esté apagado.",
+      },
+      {
+        pregunta: "¿Cómo se usa desde el celular?",
+        respuesta:
+          "Arriba tienes dos botones: **Mapa** y **Lista**. En la lista están el buscador (placa, marca, proveedor o conductor), los filtros de flota y de tipo de servicio, y todas las unidades ordenadas de lo más urgente a lo menos. **Toca una unidad** y la pantalla vuelve al mapa, la centra y abre su ficha con el botón para **llamar al conductor**.\n\nLos contadores de colores quedan siempre a la vista, debajo de Mapa y Lista, y también filtran. La leyenda de colores se abre con el botón **ⓘ** de la esquina del mapa.",
       },
       {
         pregunta: "Llegó una alerta SOS. ¿Qué pasa cuando la marco como atendida?",
