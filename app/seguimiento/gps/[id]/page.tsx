@@ -240,8 +240,7 @@ export default function GpsServicioPage() {
   const descartados = eps.filter((e) => !e.cuenta);
   const sinSenal: TramoSinSenal[] = r?.sinSenal ?? [];
   const vered       = r?.rastreo ?? null;
-  // Opcional en el contrato: un servidor anterior no lo manda.
-  const epsDecimados = (r as (RecorridoServicio & { episodiosCoordsDecimadas?: boolean }) | null)?.episodiosCoordsDecimadas === true;
+  const epsDecimados = r?.episodiosCoordsDecimadas === true;
   const puntosVistos = r?.puntos?.length ?? 0;
   const notasDibujo: string[] = [];
   if (r) {
