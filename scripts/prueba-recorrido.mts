@@ -28,7 +28,9 @@
 //      9b. cada código de la ruta prevista guardada;
 //  11. la etiqueta de cada exceso: tri-estado contra un oráculo escrito aparte, y el conteo y la lista
 //      de episodios idénticos con y sin etiqueta;
-//  12. el peso de la respuesta en el peor caso de los topes.
+//  12. el peso de la respuesta: el peor caso de las listas topadas (< 450 KB con hasta 3 episodios en su
+//      tope), el tope de posiciones de TODOS los episodios (lista y conteo idénticos) y la cota dura
+//      lineal en la cantidad de episodios (la lista no se topa: 200 episodios pesan ~700 KB);
 //   DETALLE=1 imprime los números de cada comprobación.
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ||= "https://x.supabase.co";
@@ -1303,6 +1305,7 @@ seccion("9 · el recorrido: «sin señal» = la celda RASTREO, el medido no lo c
 
   let trazas = 0, rastreoIg = 0, conteosIg = 0, tramosIg = 0, bordesBien = 0, medidoBien = 0, cruzan = 0, largos = 0, igualConstructor = 0;
   let conSinSenal = 0, conEstimado = 0, cubiertos = 0, soloExtremos = 0, estValidos = 0, estTotal = 0, malosDibujados = 0, rechazados = 0;
+  let fueras = 0, fuerasBien = 0, techoMal = 0;
   let unaConsulta = 0, fallas = 0, fallaSinEstimados = 0, codigos: Record<string, number> = {}, etiquetados = 0, porRuta = 0, porPuente = 0, huecoConLinea = 0;
   const errorOriginal = console.error;
   console.error = () => {};   // las caídas simuladas de rutas_cache y pasajeros_parada se registran: aquí, ruido
@@ -1348,17 +1351,37 @@ seccion("9 · el recorrido: «sin señal» = la celda RASTREO, el medido no lo c
 
     const celda = await GD.medirServicio(r, ps, { hoy: HOY, ahoraMs: AHORA }, lector);   // la celda: sin conHuella
     // Umbral de 60: las trazas van de 18 a 73 km/h, y así hay excesos que etiquetar.
-    const rec = await RD.armarRecorrido(r, ps, { hoy: HOY, ahoraMs: AHORA, umbral: 60 }, { traza: lector, rutasCache, abordajes });
-    const med = celda.medicion;
+    // Uno de cada ~15 queda fuera del techo diario de la torre (MAX_RESERVAS): su celda dice `sin_medir`.
+    const fuera = rnd() < 0.07;
+    let techoPedido: any = null;
+    const fueraDelTecho = async (x: any) => { techoPedido = x; return fuera; };
+    const rec = await RD.armarRecorrido(r, ps, { hoy: HOY, ahoraMs: AHORA, umbral: 60 }, { traza: lector, rutasCache, abordajes, fueraDelTecho });
     trazas++;
+    if (techoPedido?.id !== 77 || techoPedido?.fecha_servicio !== "2026-10-09") techoMal++;
+    if (fuera) {
+      // Fuera del techo: el veredicto ES el de su celda (`sin_medir`), sin medición («no se pudo medir»,
+      // nunca 0), y la traza y los excesos se dibujan igual.
+      fueras++;
+      const sinCorte = R.medidoDeHuella(huella.limpio, []).map(({ ts, ...t }) => t);
+      const exc = SE.excesosDelServicio({ reservaId: 77, crudas: filas, aplica: true, trazaLeida: true, rastreo: GD.veredictoFueraDelTecho(AHORA), umbral: 60, vehiculo: "p:3" });
+      if (JSON.stringify(rec.rastreo) === JSON.stringify(GD.veredictoFueraDelTecho(AHORA)) && rec.rastreo.codigo === "sin_medir"
+        && rec.sinSenal.length === 0 && rec.sinSenalTotal === null && rec.cortesEnMovimiento === null && rec.kmACiegas === null
+        && (rec.medidoDecimado || JSON.stringify(rec.medido) === JSON.stringify(sinCorte)) && rec.medido.length > 0
+        && JSON.stringify(rec.excesos) === JSON.stringify(exc)) fuerasBien++;
+      continue;
+    }
+    const med = celda.medicion;
     codigos[rec.rutaPrevista.codigo] = (codigos[rec.rutaPrevista.codigo] ?? 0) + 1;
 
     // A. el veredicto y los conteos son los de la celda
     if (JSON.stringify(rec.rastreo) === JSON.stringify(celda.veredicto)) rastreoIg++;
-    if (med && rec.sinSenalTotal === med.tramos.length && rec.cortesEnMovimiento === med.cortes && rec.kmACiegas === med.kmACiegas) conteosIg++;
+    // Sin medición (menos de dos posiciones útiles): los conteos en null, nunca 0.
+    if (med ? rec.sinSenalTotal === med.tramos.length && rec.cortesEnMovimiento === med.cortes && rec.kmACiegas === med.kmACiegas
+      : rec.sinSenalTotal === null && rec.cortesEnMovimiento === null && rec.kmACiegas === null) conteosIg++;
     if (med && med.tramos.length) conSinSenal++;
     // B. los tramos son EXACTAMENTE los de la medición (avanceM en metros enteros)
-    if (med && rec.sinSenal.length === med.tramos.length && rec.sinSenal.every((t, k) => {
+    if (!med && rec.sinSenal.length === 0) tramosIg++;
+    else if (med && rec.sinSenal.length === med.tramos.length && rec.sinSenal.every((t, k) => {
       const m = med.tramos[k];
       return t.tipo === m.tipo && t.desdeTs === m.desdeTs && t.hastaTs === m.hastaTs && t.durS === m.durS
         && t.enMovimiento === m.enMovimiento && t.avanceM === (m.avanceM == null ? null : Math.round(m.avanceM));
@@ -1413,17 +1436,20 @@ seccion("9 · el recorrido: «sin señal» = la celda RASTREO, el medido no lo c
     etiquetados += rec.episodios.filter((e) => e.contexto.codigo !== "sin_dato").length;
   }
   console.error = errorOriginal;
-  chk(`el veredicto es el de la celda RASTREO, tal cual (${trazas})`, rastreoIg === trazas, `${trazas - rastreoIg}`);
-  chk("sinSenalTotal, cortesEnMovimiento y kmACiegas = los de la medición", conteosIg === trazas, `${trazas - conteosIg}`);
-  chk("los tramos «sin señal» son EXACTAMENTE medicion.tramos (avanceM en metros enteros)", tramosIg === trazas, `${trazas - tramosIg}`);
-  chk("cada hueco lleva las posiciones de la traza en sus dos bordes (cabeza sin inicio, cola sin fin)", bordesBien === trazas, `${trazas - bordesBien}`);
+  const dentro = trazas - fueras;
+  chk(`el veredicto es el de la celda RASTREO, tal cual (${dentro})`, rastreoIg === dentro, `${dentro - rastreoIg}`);
+  chk("sinSenalTotal, cortesEnMovimiento y kmACiegas = los de la medición", conteosIg === dentro, `${dentro - conteosIg}`);
+  chk("los tramos «sin señal» son EXACTAMENTE medicion.tramos (avanceM en metros enteros)", tramosIg === dentro, `${dentro - tramosIg}`);
+  chk("cada hueco lleva las posiciones de la traza en sus dos bordes (cabeza sin inicio, cola sin fin)", bordesBien === dentro, `${dentro - bordesBien}`);
+  chk(`FUERA DEL TECHO DIARIO (${fueras}): rastreo = sin_medir como su celda, sin «sin señal» y conteos en null, traza y excesos dibujados`,
+    fueras > 10 && fuerasBien === fueras && techoMal === 0, `${fueras} · ${fuerasBien} · pedido mal ${techoMal}`);
   chk("ningún segmento medido cruza un «sin señal» (con la hora de cada vértice)", cruzan === 0, `${cruzan}`);
   chk(`ningún segmento medido pasa de ${MAX_SEG_M} m`, largos === 0, `${largos}`);
-  chk("el medido de la respuesta es el del constructor; vértices con su velocidad entera", igualConstructor === trazas && medidoBien === trazas, `${trazas - igualConstructor} · ${trazas - medidoBien}`);
+  chk("el medido de la respuesta es el del constructor; vértices con su velocidad entera", igualConstructor === dentro && medidoBien === dentro, `${dentro - igualConstructor} · ${dentro - medidoBien}`);
   chk("ningún hueco tiene línea propia (ningún segmento une sus dos bordes)", huecoConLinea === 0, `${huecoConLinea}`);
   chk(`los estimados son solo los que validarPuente aprobó (${estTotal})`, estValidos === estTotal && malosDibujados === 0, `${estTotal - estValidos} · malos ${malosDibujados}`);
   chk("cada hueco: o lo cubre entero un estimado dibujado, o solo sus extremos", cubiertos + soloExtremos > 0);
-  chk(`UNA sola consulta a rutas_cache con la ruta y todos los puentes (${trazas})`, unaConsulta === trazas, `${trazas - unaConsulta}`);
+  chk(`UNA sola consulta a rutas_cache con la ruta y todos los puentes (${dentro})`, unaConsulta === dentro, `${dentro - unaConsulta}`);
   chk("si rutas_cache falla: «no se pudo leer» y ningún estimado", fallas > 5 && fallaSinEstimados === fallas, `${fallas} · ${fallaSinEstimados}`);
   chk("barrido no trivial: huecos, estimados por la ruta Y por puente guardado, rodeos rechazados, huecos cubiertos y solo con extremos, excesos etiquetados",
     conSinSenal > 100 && porRuta > 100 && porPuente > 100 && rechazados > 50 && cubiertos > 50 && soloExtremos > 50 && etiquetados > 20,
@@ -1639,7 +1665,7 @@ seccion("11 · la etiqueta de cada exceso: tri-estado, ninguna afirmación sin s
 }
 
 // ══ 12 · el peso de la respuesta en el peor caso de los topes ═════════════════════════════
-seccion("12 · la respuesta en el peor caso de todos los topes pesa menos de 450 KB");
+seccion("12 · el peso: cada lista topada, el dibujo de los episodios topado, y la cota dura según cuántos episodios haya");
 {
   const TOPE_BYTES = 450_000;
   const peso = (x: unknown) => JSON.stringify(x).length;
@@ -1718,6 +1744,81 @@ seccion("12 · la respuesta en el peor caso de todos los topes pesa menos de 450
   if (process.env.DETALLE) console.log(`   B: cota sin episodios ${cotaSinEpisodios} B · episodio en su tope ${pesoEp} B · caben ${caben}`);
   chk(`B · cada lista topada llena con su elemento más pesado: ${cotaSinEpisodios} B, y caben ${caben} episodios en su tope de ${R.MAX_COORDS_EPISODIO} posiciones antes de ${TOPE_BYTES} B`,
     cotaSinEpisodios < TOPE_BYTES && caben >= 3, `${cotaSinEpisodios} · ${pesoEp} · ${caben}`);
+  // ── C · el tope de posiciones de TODOS los episodios (la lista y el conteo no se topan) ──
+  chk("MAX_COORDS_EPISODIOS_TOTAL = 3000", R.MAX_COORDS_EPISODIOS_TOTAL === 3000);
+  let topN = 0, topBien = 0, topActivo = 0;
+  const sub = (a: [number, number][], b: [number, number][]) => { let j = 0; for (const x of a) { while (j < b.length && b[j] !== x) j++; if (j === b.length) return false; j++; } return true; };
+  for (let i = 0; i < 400; i++) {
+    const n = Math.floor(rnd() * 250);
+    const eps = Array.from({ length: n }, (_, k) => ({ id: k, otro: `x${k}`, coords: Array.from({ length: Math.floor(rnd() * (R.MAX_COORDS_EPISODIO + 1)) }, (_, j) => [k, j] as [number, number]) }));
+    const max = rnd() < 0.5 ? R.MAX_COORDS_EPISODIOS_TOTAL : 10 + Math.floor(rnd() * 4000);
+    const { episodios: out, decimadas } = R.toparCoordsEpisodios(eps, max);
+    const antes = eps.reduce((a, e) => a + e.coords.length, 0), despues = out.reduce((a, e) => a + e.coords.length, 0);
+    topN++;
+    if (decimadas) topActivo++;
+    const ok = out.length === eps.length && out.every((e, k) => e.id === eps[k].id && e.otro === eps[k].otro)
+      && despues <= Math.max(max, eps.reduce((a, e) => a + Math.min(2, e.coords.length), 0))
+      && out.every((e, k) => sub(e.coords, eps[k].coords)
+        && (eps[k].coords.length === 0 || (e.coords[0] === eps[k].coords[0] && e.coords[e.coords.length - 1] === eps[k].coords[eps[k].coords.length - 1])))
+      && decimadas === (antes > max) && (antes > max || out.every((e, k) => e === eps[k]));
+    if (ok) topBien++;
+  }
+  chk(`toparCoordsEpisodios (${topN} repartos): misma lista y mismos campos, cada uno con sus dos extremos y en orden; total ≤ máx(tope, 2 por episodio); sin pasarse, intacto`,
+    topBien === topN && topActivo > 100, `${topN - topBien} · activos ${topActivo}`);
+
+  // Por la cadena real: 15 excesos largos (> 300 posiciones cada uno) → más de 3000 posiciones en total.
+  const largas: Fila[] = [];
+  let tL = 0, latL = -12.05;
+  for (let k = 0; k < 31; k++) {
+    const rapido = k % 2 === 1, n = rapido ? 320 : 20;
+    for (let j = 0; j < n; j++) {
+      largas.push({ created_at: iso(T0 + tL * 1000), lat: latL, lng: -77.03, precision_m: 4, simulado: null, estado: "en_ruta",
+        velocidad: rapido ? 100 : 30, rumbo: 0, timestamp: null, reserva_id: 77, conductor_id: 5, conductor_tercero_id: null });
+      const kmh = rapido ? 100 : 30;
+      tL += 3; latL += ((kmh / 3.6) * 3) / 111_320;
+    }
+  }
+  const recL = R.recorridoDeServicio({ reservaId: 77, crudas: largas, aplica: true, trazaLeida: true, rastreo: ver("completo"), umbral: 90, vehiculo: "p:3" });
+  const { puntos: ptsL, episodios: epsL } = SE.episodiosDeTraza({ reservaId: 77, crudas: largas, umbral: 90, vehiculo: "p:3" });
+  const sinTope = epsL.map((ep) => R.muestrear(R.coordsDeEpisodio(ptsL, ep), R.MAX_COORDS_EPISODIO));
+  const totalSinTope = sinTope.reduce((a, c) => a + c.length, 0), totalCon = recL.episodios.reduce((a, e) => a + e.coords.length, 0);
+  // Los campos de cada episodio (todos menos `coords`) son los del motor de excesos, en el mismo orden.
+  const ordenados = [...epsL].sort((a, b) => a.inicioTs - b.inicioTs);
+  const camposIg = recL.episodios.length === ordenados.length && recL.episodios.every((e, k) => {
+    const o = ordenados[k];
+    return e.codigo === o.codigo && e.cuenta === (o.codigo === "exceso") && e.inicioTs === o.inicioTs && e.finTs === o.finTs
+      && e.durS === o.durS && e.puntos === o.puntos && e.velMaxSensor === o.velMaxSensor && e.velMediaSensor === o.velMediaSensor
+      && e.velGeom === o.velGeom && e.precisionMediana === o.precisionMediana && e.latPico === o.latPico && e.lngPico === o.lngPico
+      && e.cortado === o.cortado && e.detalle === o.detalle;
+  });
+  const txt = (xs: [number, number][]) => xs.map((x) => `${x}`);
+  const dibujoIg = recL.episodios.every((e, k) => {
+    const o = txt(sinTope[epsL.indexOf(ordenados[k])]), c = txt(e.coords);
+    return sub(c as any, o as any) && c[0] === o[0] && c[c.length - 1] === o[o.length - 1];
+  });
+  chk(`con el tope, el conteo y la lista (sin coords) son los mismos: ${recL.episodios.length} episodios, ${totalSinTope} → ${totalCon} posiciones`,
+    recL.episodiosCoordsDecimadas && totalSinTope > R.MAX_COORDS_EPISODIOS_TOTAL && totalCon <= R.MAX_COORDS_EPISODIOS_TOTAL
+    && recL.excesos.n === epsL.filter((e) => e.codigo === "exceso").length && camposIg && dibujoIg,
+    JSON.stringify({ n: recL.episodios.length, totalSinTope, totalCon, flag: recL.episodiosCoordsDecimadas, camposIg, dibujoIg }));
+  chk("sin pasarse del tope, las posiciones son las de siempre y no se marca nada",
+    recA.episodiosCoordsDecimadas === false && recA.episodios.every((e) => e.coords.length <= R.MAX_COORDS_EPISODIO));
+
+  // La cota DURA del dibujo de los episodios: sea cual sea la cantidad, sus posiciones no pasan de
+  // MAX_COORDS_EPISODIOS_TOTAL (o de 2 por episodio). Lo que NO se topa es la lista: cada episodio pesa
+  // además su ficha (~0,7 KB), y con 200 eso solo ya pasa del margen que dejan las otras listas.
+  const epsMuchos = Array.from({ length: 200 }, () => ({ ...epMax }));
+  const topados = R.toparCoordsEpisodios(epsMuchos).episodios;
+  const pesoSinTope = peso(epsMuchos), pesoTopados = peso(topados);
+  const fichaEp = peso({ ...epMax, coords: [] }) + 1;
+  const cotaDibujo = R.MAX_COORDS_EPISODIOS_TOTAL * (peso([crudo]) - 1);
+  const total200 = cotaSinEpisodios + pesoTopados;
+  if (process.env.DETALLE) console.log(`   C: 200 episodios en su tope: ${pesoSinTope} B sin el tope de posiciones, ${pesoTopados} B con él (fichas ${200 * fichaEp} B); respuesta ${total200} B`);
+  chk(`200 episodios en su tope: el dibujo queda en ≤ ${cotaDibujo} B (sin el tope serían ${pesoSinTope} B)`,
+    topados.reduce((a, e) => a + e.coords.length, 0) <= R.MAX_COORDS_EPISODIOS_TOTAL && pesoTopados <= 200 * fichaEp + cotaDibujo && pesoSinTope > 2_000_000,
+    `${pesoTopados} · ${pesoSinTope}`);
+  chk(`la cota dura de la respuesta es lineal en la cantidad de episodios: listas topadas + ${fichaEp} B por ficha + ${cotaDibujo} B de dibujo`,
+    total200 <= cotaSinEpisodios + 200 * fichaEp + cotaDibujo, `${total200}`);
+
   // La envoltura de cada tramo cuenta: sin ella, la huella partida en tramos de 2 vértices pesaría bastante más.
   const fragSinCosto = Array.from({ length: Math.floor(R.MAX_VERTICES_TRAZA / 2) }, () => ({ coords: [c, c], vel: [130, 130] }));
   chk("la envoltura de cada tramo medido cuenta contra el tope (sin eso, una huella partida pesaba ~40 % más)",

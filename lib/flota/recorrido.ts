@@ -83,6 +83,11 @@ export const MAX_HUECOS = 500;
 /** Posiciones por episodio (se muestrea conservando los extremos). A una posición cada pocos
  *  segundos, 300 son más de diez minutos seguidos sobre el umbral. */
 export const MAX_COORDS_EPISODIO = 300;
+/** Posiciones de TODOS los episodios juntos. Operativo, no medido. La LISTA de episodios no se topa
+ *  (es la de la columna «Excesos»): lo que se recorta es su dibujo. Si se pasa, cada episodio se
+ *  muestrea en proporción a su largo conservando sus dos extremos (`toparCoordsEpisodios`). Con más de
+ *  MAX_COORDS_EPISODIOS_TOTAL / 2 episodios el total queda en 2 por episodio. */
+export const MAX_COORDS_EPISODIOS_TOTAL = 3000;
 /** Holgura entre relojes al ubicar un exceso respecto de un paradero. El exceso lleva la hora del
  *  TELÉFONO; la llegada al paradero y el abordaje, la del SERVIDOR. NO medido: el lado seguro es
  *  subirlo (más excesos quedan `sin_dato`, ninguno con una etiqueta falsa). */
@@ -190,6 +195,9 @@ export type RecorridoServicio = {
   estimadosOmitidos: number;
   /** tramos «sin señal» que pasan de MAX_HUECOS (los más cortos): no se dibujan, sí se cuentan */
   sinSenalOmitidos: number;
+  /** las posiciones de los episodios se muestrearon para no pasar de MAX_COORDS_EPISODIOS_TOTAL
+   *  (la lista, el conteo y los demás campos de cada episodio no cambian) */
+  episodiosCoordsDecimadas: boolean;
   /** el resumen: el MISMO de la columna «Excesos» de /uso-flota → Servicios */
   excesos: ExcesosServicio;
   /** todos los episodios (los que cuentan y los descartados), por hora de inicio */
@@ -638,6 +646,26 @@ export function coordsDeEpisodio(puntos: readonly PuntoVel[], ep: Episodio): Coo
     .map((p) => [p.lng, p.lat] as Coord);
 }
 
+/**
+ * Topa las posiciones de TODOS los episodios a `max` sin tocar la lista ni ningún otro campo: cada uno
+ * conserva sus dos extremos (o las que tenga, si son menos) y el resto del cupo se reparte en
+ * proporción a lo que le sobra a cada uno, muestreado con `muestrear`. Total ≤ max(max, 2 × episodios).
+ */
+export function toparCoordsEpisodios<T extends { coords: Coord[] }>(eps: readonly T[], max = MAX_COORDS_EPISODIOS_TOTAL): { episodios: T[]; decimadas: boolean } {
+  const total = eps.reduce((a, e) => a + e.coords.length, 0);
+  if (total <= max) return { episodios: [...eps], decimadas: false };
+  const base = eps.map((e) => Math.min(e.coords.length, 2));
+  const resto = Math.max(0, max - base.reduce((a, b) => a + b, 0));
+  const sobra = eps.reduce((a, e, i) => a + (e.coords.length - base[i]), 0);
+  return {
+    episodios: eps.map((e, i) => {
+      const n = Math.min(e.coords.length, base[i] + (sobra > 0 ? Math.floor(((e.coords.length - base[i]) * resto) / sobra) : 0));
+      return n === e.coords.length ? e : { ...e, coords: muestrear(e.coords, n) };
+    }),
+    decimadas: true,
+  };
+}
+
 /** Lo que recibe `recorridoDeServicio`. Las seis últimas las arma el lector; sin ellas el recorrido
  *  sale sin «sin señal» (conteos en null), sin estimados y con los excesos `sin_dato`. */
 export type EntradaRecorrido = {
@@ -670,7 +698,7 @@ const vacio = (e: EntradaRecorrido, excesos: ExcesosServicio): RecorridoServicio
   puntos: [], puntosTotal: 0, rastreo: e.rastreo, rutaPrevista: e.estadoRuta ?? SIN_ESTADO_RUTA,
   posiciones: 0, primeraTs: null, ultimaTs: null,
   medidoDecimado: false, medidoOmitidos: 0, estimadosDecimados: false, estimadosOmitidos: 0, sinSenalOmitidos: 0,
-  excesos, episodios: [],
+  episodiosCoordsDecimadas: false, excesos, episodios: [],
 });
 
 /**
@@ -740,7 +768,7 @@ export function recorridoDeServicio(e: EntradaRecorrido): RecorridoServicio {
 
   // Los episodios solo se publican cuando el resumen es `medido`: con otro código el resumen no
   // afirma ninguno, y el mapa no puede decir otra cosa que la columna.
-  const eps: EpisodioMapa[] = excesos.codigo !== "medido" ? [] : episodios
+  const todos: EpisodioMapa[] = excesos.codigo !== "medido" ? [] : episodios
     .map((ep) => ({
       codigo: ep.codigo,
       cuenta: ep.codigo === "exceso",
@@ -760,6 +788,7 @@ export function recorridoDeServicio(e: EntradaRecorrido): RecorridoServicio {
       contexto: contextoDeExceso(ep, e.hechos),
     }))
     .sort((a, b) => a.inicioTs - b.inicioTs);
+  const { episodios: eps, decimadas: episodiosCoordsDecimadas } = toparCoordsEpisodios(todos);
 
   return {
     reservaId: e.reservaId,
@@ -782,6 +811,7 @@ export function recorridoDeServicio(e: EntradaRecorrido): RecorridoServicio {
     estimadosDecimados: planE.decimada,
     estimadosOmitidos: planE.omitidos,
     sinSenalOmitidos,
+    episodiosCoordsDecimadas,
     excesos,
     episodios: eps,
   };

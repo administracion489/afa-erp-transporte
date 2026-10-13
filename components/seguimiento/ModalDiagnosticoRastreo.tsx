@@ -156,7 +156,7 @@ const CAUSA: Record<CausaCorte, { label: string; color: string; bg: string }> = 
 };
 const CONGELADO = { label: "GPS congelado", ...AMBAR };
 // «hueco» = entre dos posiciones, con el bus en marcha o quieto: «En ruta» se leía como carretera.
-const TIPO_TRAMO: Record<string, string> = { cabeza: "Al iniciar", hueco: "Entre dos posiciones", cola: "Al final" };
+export const TIPO_TRAMO: Record<string, string> = { cabeza: "Al iniciar", hueco: "Entre dos posiciones", cola: "Al final" };
 
 const PLATAFORMA: Record<PlataformaEquipo, string> = { apk: "App instalada (APK)", ios: "iPhone", navegador: "Navegador web" };
 

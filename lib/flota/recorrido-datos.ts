@@ -13,7 +13,9 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- el cliente de Supabase del ERP va sin tipos generados: las filas de ubicaciones_gps, reservas y paradas y los payloads de rutas_cache llegan como `any` */
 import { createClient } from "@supabase/supabase-js";
-import { medirServicio, paradasDeReservas, todas, trazaDe, type LectorTraza } from "../gps-cobertura-datos";
+import {
+  medirServicio, paradasDeReservas, todas, trazaDe, fueraDelTecho, veredictoFueraDelTecho, type LectorTraza,
+} from "../gps-cobertura-datos";
 import { leerReservaDiag, type FilaReservaDiag } from "../gps-diagnostico-datos";
 import { leerRutasCache } from "../rutas-cache";
 import { vehiculoDeReserva } from "./servicio-estadistica";
@@ -58,6 +60,8 @@ export type LectoresRecorrido = {
   rutasCache?: (claves: string[]) => Promise<Map<string, any>>;
   /** LANZA si falla */
   abordajes?: (paradaIds: number[]) => Promise<AbordajeTiempos[]>;
+  /** ¿la torre dejó esta reserva fuera de su techo diario (MAX_RESERVAS)? best-effort: false si falla */
+  fueraDelTecho?: (r: { id: number; fecha_servicio?: string | null }) => Promise<boolean>;
 };
 
 /**
@@ -74,9 +78,15 @@ export async function armarRecorrido(
   const leerTraza = lectores.traza ?? trazaDe;
   const leerCache = lectores.rutasCache ?? ((claves: string[]) => leerRutasCache(claves));
   const leerAbordajes = lectores.abordajes ?? abordajesDe;
+  const techo = lectores.fueraDelTecho ?? fueraDelTecho;
 
   // Un servicio cancelado no se mide (la torre ni lo consulta): no hay recorrido que dibujar.
   const cancelado = r.estado === "cancelada";
+  // EL TECHO DIARIO DE LA CELDA: `rastreoDelDia` mide solo las primeras MAX_RESERVAS reservas de su día
+  // y al resto le da `sin_medir`. Aquí igual que en el modal de diagnóstico: el veredicto es `sin_medir`
+  // y NO hay medición (sinSenal vacío, conteos en null: «no se pudo medir», nunca 0). La traza y los
+  // excesos se dibujan igual: no dependen de la cobertura.
+  const fuera = !cancelado && await techo({ id: Number(r.id), fecha_servicio: r.fecha_servicio ?? null });
   const m = cancelado ? null : await medirServicio(r, ps, { hoy: o.hoy, ahoraMs: o.ahoraMs, conHuella: true }, leerTraza);
   const crudas = m?.traza && Array.isArray(m.traza.crudas) ? m.traza.crudas : null;
   const aplica = !cancelado && !!m?.ctx.aplica;
@@ -124,11 +134,11 @@ export async function armarRecorrido(
     crudas,
     aplica,
     trazaLeida: !!m?.traza,
-    rastreo: m ? m.veredicto : CANCELADO,
+    rastreo: !m ? CANCELADO : fuera ? veredictoFueraDelTecho(o.ahoraMs) : m.veredicto,
     umbral: o.umbral,
     vehiculo: vehiculoDeReserva(r)?.clave ?? null,
-    medicion: m?.medicion ?? null,
-    ptsCobertura: m?.traza?.pts ?? null,
+    medicion: fuera ? null : m?.medicion ?? null,
+    ptsCobertura: fuera ? null : m?.traza?.pts ?? null,
     ruta,
     estadoRuta,
     puentesGuardados: mapa,
