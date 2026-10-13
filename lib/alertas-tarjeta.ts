@@ -40,7 +40,7 @@ import {
 } from "@/lib/llamadas-central";
 import { ESCALAR_TRAS_RECORDATORIOS, cadenciaEfectiva } from "@/lib/alertas-checkout";
 import { MAX_SERVICIOS_JORNADA } from "@/lib/alertas-flota";
-import { minutosAHhmm, textoDuracion } from "@/lib/alertas-horario";
+import { horarioDe, minutosAHhmm, textoDuracion } from "@/lib/alertas-horario";
 
 // ─── TIPOS ─────────────────────────────────────────────────────────────────────
 
@@ -66,6 +66,10 @@ export type CfgTarjeta = {
   canal_pasajero_push?: boolean | null;
   canal_pasajero_email?: boolean | null;
   canal_pasajero_whatsapp?: boolean | null;
+  // Horario de envío (supabase/alertas-horario-conductor.sql). Sin ellos, el motor no retiene.
+  respeta_horario?: boolean | null;
+  horario_desde?: string | null;
+  horario_hasta?: string | null;
 };
 
 /** Lo que no está en la fila y la tarjeta necesita para describirse. */
@@ -105,8 +109,14 @@ export type FichaTarjeta = {
   tercerizados: Tercerizados;
   /** Canales del pasajero que el motor LEE para este tipo (null: no le escribe al pasajero). */
   alPasajero: null | { push: boolean; email: boolean; whatsapp: boolean };
-  /** El horario de envío al conductor: propio, o el de «Servicio asignado» mientras esté activo. */
-  horario: null | "propio" | "el_de_asignacion";
+  /**
+   * El horario de envío:
+   *  · `propio`: el del mensaje AL CONDUCTOR (ciclo de vida), con su margen de urgencia.
+   *  · `el_de_asignacion`: el de «Servicio asignado» mientras esté activo (la desasignación).
+   *  · `contactos`: el del aviso a los CONTACTOS de algo que ya pasó, sin urgencia
+   *    (`planDeEnvioAviso`): fuera del horario espera y sale en un solo mensaje.
+   */
+  horario: null | "propio" | "el_de_asignacion" | "contactos";
   /** El bloque lee `umbral`: con qué etiqueta se ofrece. */
   umbral: null | { etiqueta: string };
   /** false: el interruptor «Activo» no lo apaga (lo dispara otra parte del ERP). */
@@ -222,6 +232,20 @@ export function cuandoBarrido(cfg: CfgTarjeta): string {
 
 /** Un número de la fila, tal como lo usa el motor (no se redondea lo que el motor no redondea). */
 const n = (x: number | null) => String(x ?? "");
+
+/**
+ * Cuándo sale un aviso con horario de CONTACTOS, con la MISMA lectura que `planDeEnvioAviso`:
+ * sin la casilla, o con una ventana incompleta o de longitud cero, sale al cerrar — y eso se
+ * dice con su consecuencia (de madrugada también), porque es justo lo que la casilla evita.
+ */
+function horarioDelAviso(c: CfgTarjeta): string {
+  const h = horarioDe(c);
+  if (!h.respeta || h.desdeMin == null || h.hastaMin == null || h.desdeMin === h.hastaMin) {
+    return " en el momento del cierre, también de madrugada (marca «Enviar solo dentro de un horario» para que espere).";
+  }
+  const d = minutosAHhmm(h.desdeMin), hh = minutosAHhmm(h.hastaMin);
+  return ` solo entre las ${d} y las ${hh}: lo cerrado fuera de ese horario espera a las ${d} y sale en un solo mensaje.`;
+}
 
 // ─── LAS FICHAS ───────────────────────────────────────────────────────────────
 
@@ -403,13 +427,16 @@ export const TARJETAS: Record<string, FichaTarjeta> = {
       `${n(umbralEfectivo(c))} h o suma ${MAX_SERVICIOS_JORNADA} servicios o más.`,
     { tercerizados: "solo_propios", umbral: { etiqueta: "Horas máx. de jornada" }, usa: ["umbral", "hora_fija"] },
   ),
-  // El cierre corre SIEMPRE; la tarjeta solo decide el aviso (y su umbral, si está activa).
+  // El cierre corre SIEMPRE, a cualquier hora; la tarjeta decide el aviso, su umbral y su
+  // horario (bloque 7 + lib/servicio-abandonado.ts: fuera del horario el aviso espera).
   servicio_abandonado: aContactos(
     (c) => `Un servicio de un día anterior que sigue «en curso» ${n(umbralEfectivo(c))} h después de su hora se cierra ` +
-      "solo como finalizado. Con esta tarjeta activa, además se avisa a los contactos marcados" +
-      (c.activo ? "." : " (apagada, el umbral de abajo no se usa)."),
+      "solo como finalizado, a cualquier hora. " +
+      (c.activo
+        ? `Además se avisa a los contactos marcados${horarioDelAviso(c)}`
+        : "Con esta tarjeta activa, además se avisa a los contactos marcados (apagada, el umbral de abajo no se usa)."),
     {
-      umbral: { etiqueta: "Horas en curso antes de cerrarlo" }, usa: ["umbral"],
+      umbral: { etiqueta: "Horas en curso antes de cerrarlo" }, usa: ["umbral"], horario: "contactos",
       textoActivo: "Apagada sigue cerrando los servicios abandonados: solo deja de avisar.",
     },
   ),
@@ -453,8 +480,11 @@ export type ControlesTarjeta = {
   canalesConductor: boolean;
   /** Los canales del pasajero que se leen (null: ninguno). Nunca hay casilla «Pasajero». */
   canalesPasajero: FichaTarjeta["alPasajero"];
-  /** El bloque «Enviar solo dentro de un horario». */
-  horario: boolean;
+  /**
+   * El bloque «Enviar solo dentro de un horario»: el del mensaje al conductor (con margen de
+   * urgencia), el del aviso a los contactos (sin urgencia), o ninguno.
+   */
+  horario: null | "conductor" | "contactos";
   /** El campo del umbral, con su etiqueta y el número que usa el motor sin dato. */
   umbral: null | { etiqueta: string; defecto: number };
   /** El número que usa el motor sin `min_anticipacion` (null: no lo lee). */
@@ -472,7 +502,7 @@ export function controlesDe(cfg: CfgTarjeta): ControlesTarjeta {
       tercerizados: { etiqueta: "Incluir tercerizados", independienteDeConductor: false },
       canalesConductor: true,
       canalesPasajero: { ...PASAJERO_TODOS },
-      horario: true,
+      horario: "conductor",
       umbral: { etiqueta: "Umbral", defecto: 0 },
       minAnticipacionDefecto: ANTICIPACION_DEFECTO_MIN,
       activo: "interruptor",
@@ -491,7 +521,7 @@ export function controlesDe(cfg: CfgTarjeta): ControlesTarjeta {
     // La llamada no es un mensaje: no tiene canales.
     canalesConductor: conductor !== "oculto" && cfg.clave !== CLAVE_LLAMADA,
     canalesPasajero: f.alPasajero ? { ...f.alPasajero } : null,
-    horario: f.horario !== null,
+    horario: f.horario === null ? null : f.horario === "contactos" ? "contactos" : "conductor",
     umbral: f.umbral ? { etiqueta: f.umbral.etiqueta, defecto: umbralDefecto(cfg.clave) ?? 0 } : null,
     minAnticipacionDefecto: via === "recordatorio"
       ? (cfg.clave === CLAVE_INICIA_AHORA ? INICIA_AHORA_MIN_DEFECTO : ANTICIPACION_DEFECTO_MIN)

@@ -30,6 +30,7 @@ import {
 } from "@/lib/alertas-modo-tiempo";
 import { detectarSolapesJornada, MAX_SERVICIOS_JORNADA, type ReservaFlota } from "@/lib/alertas-flota";
 import { UMBRAL_DEFECTO } from "@/lib/alertas-tarjeta";
+import { CLAVE_ESPERA_ABANDONADO, paramsAvisoAbandonados, planDePendientes, type ServicioCerrado } from "@/lib/servicio-abandonado";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
 import { detalleAlertaPrevia, listaEnUnaLinea, noInicioRepiteDebio, textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
 import { resumenAvisosDeReserva } from "@/lib/escalera-inicio-datos";
@@ -1033,12 +1034,19 @@ async function handler(req: NextRequest) {
     // ("GPS sin señal, hace 9441 min") mientras el operador veía el bus real.
     // Este bloque corre SIEMPRE (no depende de una fila de config): es una
     // salvaguarda de integridad, no una alerta.
+    //
+    // EL AVISO, EN CAMBIO, RESPETA EL HORARIO DE SU TARJETA (lib/servicio-abandonado.ts). El
+    // umbral se cruza a cualquier hora y el aviso despertaba al coordinador de madrugada. El
+    // cierre deja un MARCADOR en alerta_enviada y el WhatsApp sale desde los marcadores, dentro
+    // del horario y en un solo mensaje: una vez cerrado, el servicio ya no es «en curso» y
+    // ningún tick lo volvería a encontrar.
     {
+      const cfgAb = activa("servicio_abandonado");
       // 30 h por defecto: cubre full day de 24 h y nocturnos.
-      const horasMax = activa("servicio_abandonado")?.umbral ?? UMBRAL_DEFECTO.servicio_abandonado;
+      const horasMax = cfgAb?.umbral ?? UMBRAL_DEFECTO.servicio_abandonado;
       const { data: colgadas } = await admin
         .from("reservas")
-        .select("id, fecha_servicio, hora_servicio, conductor_id, origen, destino")
+        .select("id, fecha_servicio, hora_servicio")
         .eq("estado", "en_curso")
         .lt("fecha_servicio", hoy);
 
@@ -1046,31 +1054,29 @@ async function handler(req: NextRequest) {
         const inicioMs = limaAUtcMs(r.fecha_servicio, horaCorta(r.hora_servicio));
         // Sin hora utilizable: la fecha ya es anterior a hoy → se cierra igual.
         if (!inicioMs) return true;
-        return (Date.now() - inicioMs) / 3600000 > horasMax;
+        return (ahoraMs - inicioMs) / 3600000 > horasMax;
       });
 
       let nAb = 0;
       if (abandonadas.length) {
-        const { error: errCierre } = await admin
+        const { data: cerradas, error: errCierre } = await admin
           .from("reservas")
           .update({ estado: "finalizada" })
           .in("id", abandonadas.map((r: any) => r.id))
-          .eq("estado", "en_curso"); // no pisar un cambio hecho entre el SELECT y el UPDATE
+          .eq("estado", "en_curso") // no pisar un cambio hecho entre el SELECT y el UPDATE
+          .select("id");
         if (!errCierre) {
-          nAb = abandonadas.length;
-          // Avisar al operador SOLO si la alerta está configurada; el cierre ya ocurrió.
-          const cfgAb = activa("servicio_abandonado");
-          if (cfgAb) {
-            for (const r of abandonadas) {
-              if (!(await reclamarEnvio("servicio_abandonado", r.id))) continue;
-              const nombre = r.conductor_id ? nombreCorto(condMap.get(r.conductor_id)?.nombre) : "Conductor";
-              const rd = await aDirectorio(cfgAb, [
-                "Servicio sin cerrar",
-                nombre,
-                rutaDe(r),
-                `Quedó "en curso" desde el ${r.fecha_servicio}. Se cerró automáticamente.`,
-              ]);
-              if (rd.enviados === 0 && rd.fallos > 0) await liberarEnvio("servicio_abandonado", r.id);
+          nAb = (cerradas ?? []).length;
+          // Solo con la tarjeta activa queda un aviso pendiente; el cierre ya ocurrió.
+          if (cfgAb && nAb) {
+            const { error: eEspera } = await admin.from("alerta_enviada").upsert(
+              ((cerradas ?? []) as { id: number }[]).map((r) => ({ clave: CLAVE_ESPERA_ABANDONADO, ref: String(r.id), fecha: hoy })),
+              { onConflict: "clave,ref,fecha", ignoreDuplicates: true },
+            );
+            // Sin marcador no hay aviso: se publica para que «¿por qué no me avisó?» tenga respuesta.
+            if (eEspera) {
+              console.error("[alertas-flota/tick] no se pudo dejar el aviso de servicio abandonado en espera:", eEspera.message);
+              res.servicio_abandonado_sin_aviso = nAb;
             }
           }
         } else {
@@ -1078,6 +1084,94 @@ async function handler(req: NextRequest) {
         }
       }
       res.servicios_abandonados_cerrados = nAb;
+
+      // ── El aviso: desde los marcadores, en cada tick, haya cerrado algo ahora o no ──
+      const { data: marcas, error: eMarcas } = await admin
+        .from("alerta_enviada")
+        .select("ref, fecha, created_at")
+        .eq("clave", CLAVE_ESPERA_ABANDONADO)
+        .limit(500);
+      type Marca = { ref: string | number; fecha: string; created_at: string | null };
+      const lista = (marcas ?? []) as Marca[];
+      if (eMarcas) console.error("[alertas-flota/tick] no se pudieron leer los avisos de servicio abandonado en espera:", eMarcas.message);
+      else if (lista.length) {
+        const plan = planDePendientes({
+          ahoraMs, activa: !!cfgAb, horario: horarioDe(cfgAb ?? {}),
+          pendientes: lista.map((m) => ({ ref: String(m.ref), fecha: String(m.fecha) })),
+        });
+        const cerradoMs = new Map<string, number>();
+        for (const m of lista) {
+          const t = Date.parse(String(m.created_at ?? ""));
+          if (Number.isFinite(t)) cerradoMs.set(String(m.ref), t);
+        }
+        const borrar = new Set<string>(plan.descartar.map((d) => d.p.ref));
+
+        if (cfgAb && plan.enviar.length) {
+          // El reclamo de siempre, con la fecha del CIERRE: idempotente por servicio aunque el
+          // aviso salga al día siguiente, y compatible con lo que ya quedó reclamado antes.
+          const reclamados: { ref: string; fecha: string }[] = [];
+          for (const p of plan.enviar) {
+            if (await reclamarEnvio("servicio_abandonado", p.ref, p.fecha)) reclamados.push(p);
+            else borrar.add(p.ref); // ya lo mandó otro tick
+          }
+          if (reclamados.length) {
+            const ids = reclamados.map((p) => Number(p.ref)).filter(Number.isFinite);
+            type FilaAb = {
+              id: number; fecha_servicio: string; hora_servicio: string | null;
+              conductor_id: number | null; conductor_tercero_id: number | null; origen: string | null; destino: string | null;
+            };
+            const { data: filasData, error: eFilas } = await admin
+              .from("reservas")
+              .select("id, fecha_servicio, hora_servicio, conductor_id, conductor_tercero_id, origen, destino")
+              .in("id", ids);
+            // Una lectura fallida no es «la reserva ya no existe»: se suelta el reclamo, el
+            // marcador se queda y el próximo tick lo intenta otra vez.
+            if (eFilas) {
+              console.error("[alertas-flota/tick] no se pudieron leer los servicios abandonados a avisar:", eFilas.message);
+              for (const p of reclamados) await liberarEnvio("servicio_abandonado", p.ref, p.fecha);
+            }
+            const filas = (eFilas ? [] : (filasData ?? [])) as FilaAb[];
+            const porId = new Map<number, FilaAb>(filas.map((r) => [r.id, r]));
+            // Los conductores de estos servicios no están en condMap/terMap (son de días
+            // anteriores): se leen aquí, cada id en su tabla.
+            const nomP = new Map<number, string>(), nomT = new Map<number, string>();
+            const idsP = [...new Set(filas.map((r) => r.conductor_id).filter((x): x is number => x != null))];
+            const idsT = [...new Set(filas.map((r) => r.conductor_tercero_id).filter((x): x is number => x != null))];
+            if (idsP.length) for (const c of (await admin.from("conductores").select("id, nombre").in("id", idsP)).data ?? []) nomP.set(c.id, c.nombre);
+            if (idsT.length) for (const c of (await admin.from("conductores_tercero").select("id, nombre").in("id", idsT)).data ?? []) nomT.set(c.id, c.nombre);
+
+            const items: ServicioCerrado[] = [];
+            for (const p of eFilas ? [] : reclamados) {
+              const r = porId.get(Number(p.ref));
+              if (!r) { borrar.add(p.ref); continue; } // la reserva ya no existe
+              items.push({
+                fecha: r.fecha_servicio,
+                hora: r.hora_servicio ? horaCorta(r.hora_servicio) : null,
+                conductor: nombreCorto(r.conductor_id ? nomP.get(r.conductor_id) : r.conductor_tercero_id ? nomT.get(r.conductor_tercero_id) : null),
+                ruta: rutaDe(r),
+                cerradoMs: cerradoMs.get(p.ref) ?? null,
+              });
+            }
+            if (items.length) {
+              const rd = await aDirectorio(cfgAb, paramsAvisoAbandonados(items, ahoraMs));
+              if (rd.enviados === 0 && rd.fallos > 0) {
+                // Transitorio: se suelta el reclamo y el marcador se queda — el próximo tick reintenta.
+                for (const p of reclamados) await liberarEnvio("servicio_abandonado", p.ref, p.fecha);
+              } else {
+                // Salió, o no había a quién (sin contactos): no se reintenta en bucle.
+                for (const p of reclamados) borrar.add(p.ref);
+                res.servicio_abandonado_avisados = items.length;
+              }
+            }
+          }
+        }
+        res.servicio_abandonado_en_espera = plan.esperan.length;
+        if (borrar.size) {
+          const { error: eBorrar } = await admin.from("alerta_enviada").delete()
+            .eq("clave", CLAVE_ESPERA_ABANDONADO).in("ref", [...borrar]);
+          if (eBorrar) console.error("[alertas-flota/tick] no se pudieron limpiar los avisos de servicio abandonado:", eBorrar.message);
+        }
+      }
     }
 
     return NextResponse.json({ ok: true, hoy, ahora, force, resultados: res });

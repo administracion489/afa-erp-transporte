@@ -213,6 +213,7 @@ export function ventanaCubreMadrugada(desdeMin: number | null, hastaMin: number 
  */
 export function describirHorario(
   desdeMin: number | null, hastaMin: number | null, margenMin?: number | null,
+  opciones?: { sinUrgencia?: boolean },
 ): string {
   if (desdeMin == null || hastaMin == null) {
     return "Horario incompleto: el aviso sale al instante, como si la casilla estuviera apagada.";
@@ -221,12 +222,30 @@ export function describirHorario(
     return "La ventana no dura nada: el aviso sale al instante, como si la casilla estuviera apagada.";
   }
   const d = minutosAHhmm(desdeMin), h = minutosAHhmm(hastaMin);
+  // Un aviso que cuenta algo que YA pasó (planDeEnvioAviso) no tiene urgencia: no hay servicio
+  // por delante que la espera pueda tapar, así que tampoco hay margen que describir.
+  if (opciones?.sinUrgencia) {
+    return `Se ENVÍA entre las ${d} y las ${h}. Lo ocurrido fuera de ese rango espera a las ${d} y sale en un solo mensaje.`;
+  }
   const m = Number.isFinite(Number(margenMin)) && Number(margenMin) >= 0
     ? Number(margenMin) : MARGEN_URGENTE_MIN;
   const urgencia = m === 0
     ? " Nada se considera urgente: todo lo detectado fuera del rango espera."
     : ` Salvo que al abrir ya falte menos de ${textoDuracion(m)} para el servicio: eso es urgente y sale al instante, sea la hora que sea.`;
   return `Se ENVÍA entre las ${d} y las ${h}. Detectado fuera de ese rango, el aviso espera a las ${d}.${urgencia}`;
+}
+
+/**
+ * La ventana que la pantalla propone al marcar la casilla sin horas escritas. Vive aquí y no en
+ * el TSX para que la casilla, el guardado y la frase digan el mismo número.
+ *  · conductor: 12:00–22:00 — las 12:00 las pidió el dueño; las 22:00 NO están medidas (ver la
+ *    sección del horario del conductor en CLAUDE.md).
+ *  · contactos: 07:00–21:00 — la misma que la pantalla ya sugiere cuando una ventana permite
+ *    escribir de madrugada. NO MEDIDA: a las 07:00 hay alguien en operaciones y a las 21:00 ya
+ *    no se le escribe a nadie por algo que puede esperar a la mañana.
+ */
+export function ventanaPorDefecto(para: "conductor" | "contactos"): { desde: string; hasta: string } {
+  return para === "contactos" ? { desde: "07:00", hasta: "21:00" } : { desde: "12:00", hasta: "22:00" };
 }
 
 /** "90 min" → "1 h 30 min". Solo para texto de pantalla. */
@@ -308,6 +327,41 @@ export function planDeEnvioConductor(args: {
       : `al abrir el horario faltarían ${antelacionMin} min para el servicio`);
   }
 
+  return {
+    enviar: false,
+    codigo: "fuera_de_horario",
+    motivo: `fuera del horario de envío (${minutosAHhmm(desdeMin)}–${minutosAHhmm(hastaMin)})`,
+    abreMs,
+    abreTexto: `${fechaLima(abreMs)} ${minutosAHhmm(desdeMin)}`,
+  };
+}
+
+/**
+ * ¿Sale ahora un aviso que cuenta algo que YA PASÓ, o espera a que abra la ventana?
+ *
+ * Es la misma ventana de `planDeEnvioConductor` —reglas 1, 2 y 3 idénticas, y la matriz lo
+ * cruza minuto a minuto— SIN las reglas 4 y 5. La urgencia de aquella existe porque el aviso
+ * anuncia un servicio que todavía no empieza, y esperar puede taparlo. Aquí no hay nada por
+ * delante: «Servicio sin cerrar» avisa de un servicio de un día anterior que el motor ya
+ * cerró. Despertar al coordinador a las 02:00 no cambia nada de lo que va a hacer al leerlo,
+ * así que fuera del horario espera siempre.
+ *
+ * Nació del reporte del dueño (13-10-2026): «aquí falta respetar la hora de sueño del
+ * coordinador». El cierre de esos servicios sigue ocurriendo a cualquier hora (es integridad:
+ * sin él, la app del pasajero se queda anclada al servicio de ayer); lo que espera es el
+ * WhatsApp.
+ */
+export function planDeEnvioAviso(args: { ahoraMs: number; horario: Horario }): PlanEnvio {
+  const { ahoraMs, horario } = args;
+  if (!horario.respeta) return sale("no_difiere", "este tipo de aviso no espera horario");
+  const { desdeMin, hastaMin } = horario;
+  if (desdeMin == null || hastaMin == null || desdeMin === hastaMin) {
+    return sale("sin_ventana", "sin horario de envío declarado");
+  }
+  if (dentroDeVentana(minutoDelDiaLima(ahoraMs), desdeMin, hastaMin)) {
+    return sale("en_ventana", `dentro del horario ${minutosAHhmm(desdeMin)}–${minutosAHhmm(hastaMin)}`);
+  }
+  const abreMs = proximaAperturaMs(ahoraMs, desdeMin);
   return {
     enviar: false,
     codigo: "fuera_de_horario",
