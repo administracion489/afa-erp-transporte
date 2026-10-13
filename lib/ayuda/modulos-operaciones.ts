@@ -553,6 +553,11 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
         respuesta:
           "Se puede medir hasta **90 días atrás** y como mucho **31 días a la vez**. Un mes se mide en tandas de 7 días, una detrás de otra —verás «Midiendo 2/5…»— y al final se juntan en un solo ranking.\n\nMientras mide, la pantalla no enseña el resultado del rango anterior: se leería como si fuera el nuevo.",
       },
+      {
+        pregunta: "¿Dónde fue el exceso? ¿Cómo lo veo en el mapa?",
+        respuesta:
+          "Pulsa **«Ver recorrido ↗»** al lado del exceso. Se abre el mapa del servicio con el **recorrido real que marcó el GPS** en azul y, encima, **en rojo**, el tramo donde se pasó del umbral, con una etiqueta con su velocidad. El mapa llega ya centrado en ESE exceso, y a la derecha está la lista de todos los del servicio: tocando uno, el mapa va a él.\n\nEl mapa usa el **mismo umbral** que tenías puesto en esta pantalla, y los excesos que pinta son exactamente los que cuenta la columna «Excesos» de Uso de flota. Las líneas **grises punteadas** son huecos de señal: ahí no llegó posición y el mapa no inventa por dónde fue el bus.\n\nEs un mapa de **Mapbox**, el mismo de toda la operación: abrirlo no consulta ninguna ruta a Google.",
+      },
     ],
     relacionadas: [
       { etiqueta: "Salud del GPS (teléfonos sin velocímetro)", href: "/gps-salud" },
