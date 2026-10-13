@@ -8,6 +8,8 @@ import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
 import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from "@/lib/coordenadas";
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
+import SelectorCliente from "@/components/SelectorCliente";
+import { rotuloCliente, usoPorCliente, recientesDe, esBloqueado, type ClienteBuscable } from "@/lib/clientes-buscador";
 
 /**
  * Quién EMITE la cotización, resuelto por el escalón único del ERP.
@@ -40,7 +42,7 @@ type ModoServ="eventual"|"fijo";
 // Vive dentro de items_json (jsonb), así que no necesitó migración.
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;pax_contratado?:number|null;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
-type Cliente={id:number;nombre:string;empresa?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
+type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;ciudad?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
 type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;};
 type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;cuentas_bancarias?:{banco:string;cuenta:string;cci:string}[]|null;};
 type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
@@ -68,8 +70,8 @@ function extraerNombreApellido(nombre:string):string{const p=nombre.toUpperCase(
 const enHorario=()=>{const l=new Date(new Date().toLocaleString("en-US",{timeZone:"America/Lima"}));return l.getDay()>=1&&l.getDay()<=5&&l.getHours()>=8&&l.getHours()<18;};
 const GRUPO_COLOR:{[k:string]:{color:string;bg:string}}={Ligeros:{color:"#6366f1",bg:"#eef2ff"},Vans:{color:"#0891b2",bg:"#ecfeff"},Buses:{color:"#0b315f",bg:"#eef3f8"},Otros:{color:"#6b7280",bg:"#f3f4f6"}};
 
-function Campo({label,span,req,hint,children}:{label:string;span?:number;req?:boolean;hint?:string;children:React.ReactNode}){
-  return(<div className={span===2?"md:col-span-2":span===3?"md:col-span-3":""}><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{label}{req&&<span className="text-red-400 ml-0.5">*</span>}</label>{children}{hint&&<p className="text-[10px] text-gray-400 mt-0.5">{hint}</p>}</div>);
+function Campo({label,span,req,hint,extra,children}:{label:string;span?:number;req?:boolean;hint?:string;extra?:React.ReactNode;children:React.ReactNode}){
+  return(<div className={span===2?"md:col-span-2":span===3?"md:col-span-3":""}><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{label}{req&&<span className="text-red-400 ml-0.5">*</span>}{extra}</label>{children}{hint&&<p className="text-[10px] text-gray-400 mt-0.5">{hint}</p>}</div>);
 }
 
 function calcCostoVeh(p:ParamCosto,pr:Record<string,number>,km:number,dias:number,peajes:number,pernocte:number,viaticos:number){
