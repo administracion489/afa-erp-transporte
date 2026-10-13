@@ -57,7 +57,7 @@ import { conductorDeLaTraza } from "../gps-diagnostico-api";
 import {
   detectarExcesos, leerUmbral, puntosDeCrudas, velocimetroDe,
   PASO_UMBRAL_KMH, UMBRAL_DEFECTO_KMH, UMBRAL_MIN_KMH, UMBRAL_MAX_KMH,
-  type CodigoDescarte,
+  type CodigoDescarte, type Episodio, type PuntoVel, type Velocimetro,
 } from "./excesos";
 
 // ══ Umbral de excesos ════════════════════════════════════════════════════════════════════
@@ -418,6 +418,34 @@ export type ExcesosServicio = {
 };
 
 /**
+ * Los episodios de velocidad de UN servicio, sacados de su propia traza: el núcleo de
+ * `excesosDelServicio`, extraído para que el mapa del recorrido (lib/flota/recorrido.ts) dibuje
+ * EXACTAMENTE los episodios que cuenta la columna «Excesos» de /uso-flota → Servicios. Dos
+ * definiciones de «qué es un exceso de este servicio» terminarían contando distinto.
+ *
+ * A cada punto se le pone la reserva (y la unidad) de ESTE servicio: la traza se leyó por reserva y
+ * sus filas no traen esas columnas. Sin la reserva, el motor los leería como «fuera de servicio».
+ * El velocímetro es tri-estado, con la MISMA regla que /seguridad-vial (`velocimetroDe`): hay
+ * posiciones si llegó alguna con coordenadas y hora; hay velocímetro si alguna trae la velocidad del
+ * sensor (> 0). Sin velocímetro no se detecta nada (`episodios` vacío): no es «0 excesos».
+ */
+export function episodiosDeTraza(e: {
+  reservaId: number;
+  crudas: any[];
+  umbral: number;
+  vehiculo?: string | null;
+}): { velocimetro: Velocimetro; puntos: PuntoVel[]; episodios: Episodio[] } {
+  const puntos = puntosDeCrudas(e.crudas, { reservaId: e.reservaId, vehiculo: e.vehiculo ?? null });
+  const hayPuntos = filasDeConductor(e.crudas).length > 0;
+  const hayVelocidad = puntos.some((p) => p.velocidad > 0);
+  const velocimetro = velocimetroDe(hayPuntos, hayPuntos ? hayVelocidad : null);
+  const episodios = velocimetro === "con_velocimetro"
+    ? detectarExcesos(puntos, e.umbral).filter((x) => x.reservaId === e.reservaId)
+    : [];
+  return { velocimetro, puntos, episodios };
+}
+
+/**
  * Los excesos de UN servicio: los episodios de `detectarExcesos` (lib/flota/excesos.ts, el motor de
  * /seguridad-vial) sobre SU traza, restringidos a su reserva. Las filas de `conHuella` no traen
  * `reserva_id` (se leyeron POR reserva), así que a cada punto se le pone el de este servicio: sin
@@ -442,20 +470,12 @@ export function excesosDelServicio(e: {
     ({ codigo, n: null, segundos: null, velMax: null, descartados: {}, umbral: e.umbral, piso: false, base });
   if (!e.aplica) return vacio("no_aplica", "El servicio no salió: no hay velocidad que juzgar.");
   if (!e.trazaLeida || !e.crudas) return vacio("sin_medir", "No se pudo leer el GPS de este servicio: no se afirma ningún exceso.");
-  // A cada punto se le pone la reserva (y la unidad) de ESTE servicio: la traza se leyó por reserva y
-  // sus filas no traen esas columnas. Sin la reserva, el motor los leería como «fuera de servicio».
-  const puntos = puntosDeCrudas(e.crudas, { reservaId: e.reservaId, vehiculo: e.vehiculo ?? null });
-  // Tri-estado, con la MISMA regla que /seguridad-vial (`velocimetroDe`): hay posiciones si llegó
-  // alguna con coordenadas y hora; hay velocímetro si alguna trae la velocidad del sensor (> 0).
-  const hayPuntos = filasDeConductor(e.crudas).length > 0;
-  const hayVelocidad = puntos.some((p) => p.velocidad > 0);
-  const vel = velocimetroDe(hayPuntos, hayPuntos ? hayVelocidad : null);
+  const { velocimetro: vel, episodios: eps } = episodiosDeTraza({ reservaId: e.reservaId, crudas: e.crudas, umbral: e.umbral, vehiculo: e.vehiculo });
   if (vel === "sin_gps") return vacio("sin_posiciones", "El servicio corrió y no llegó ninguna posición GPS: no hay velocidad que juzgar.");
   if (vel === "sin_velocimetro") {
     return vacio("sin_velocimetro", "El teléfono no reporta la velocidad del sensor (siempre 0): este servicio no se puede juzgar, y no es «0 excesos».");
   }
   if (vel !== "con_velocimetro") return vacio("sin_medir", "No se pudo saber si el teléfono reporta velocidad: no se afirma ningún exceso.");
-  const eps = detectarExcesos(puntos, e.umbral).filter((x) => x.reservaId === e.reservaId);
   const cuentan = eps.filter((x) => x.codigo === "exceso");
   const descartados: Partial<Record<CodigoDescarte, number>> = {};
   for (const x of eps) if (x.codigo !== "exceso") descartados[x.codigo] = (descartados[x.codigo] ?? 0) + 1;

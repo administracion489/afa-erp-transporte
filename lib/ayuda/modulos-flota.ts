@@ -442,7 +442,7 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
           "En Seguimiento, abre la ficha del servicio y, abajo en «Analítica», pulsa «📊 Estadística del servicio». Se abre en otra pestaña con el día elegido y el servicio resaltado.",
           "O aquí mismo: pestaña «🚌 Servicios», elige el día y busca la fila.",
           "Pasa el puntero por el combustible, el costo o el CO₂ para ver de dónde sale cada número.",
-          "«Ver recorrido ↗» abre el mapa del servicio.",
+          "«Ver recorrido ↗» abre el mapa del servicio: el recorrido real del GPS en azul y los excesos de velocidad en rojo, con el mismo umbral de esta pantalla.",
         ],
       },
     ],

@@ -12,6 +12,7 @@ import {
   type ProcedenciaConstante, type ServicioExpuesto, type Velocimetro,
 } from "@/lib/flota/excesos";
 import { ETIQUETA_RECORRIDO, ETIQUETA_RUTA, SIN_NOMBRE_RUTA, SIN_RECORRIDO } from "@/lib/ruta-identidad";
+import { urlRecorrido } from "@/lib/flota/recorrido-url";
 import { fechaCorta, fechaHoraLima, ordenarPor, type Sentido } from "./excesos-vista";
 
 // ── Directorio: de una clave a lo que se lee ─────────────────────────────────
@@ -343,8 +344,9 @@ function ServicioDe({ e, dir, compacto = false }: { e: Episodio; dir: Directorio
   );
 }
 
-const enlaceRecorrido = (e: Episodio) => e.reservaId != null ? (
-  <a href={`/seguimiento/gps/${e.reservaId}`} target="_blank" rel="noopener noreferrer"
+// El mapa abre ENFOCADO en este exceso y con el umbral de la pantalla (lib/flota/recorrido-url.ts).
+const enlaceRecorrido = (e: Episodio, umbral?: number) => e.reservaId != null ? (
+  <a href={urlRecorrido(e.reservaId, { umbral, inicioTs: e.inicioTs })} target="_blank" rel="noopener noreferrer"
     className="inline-block rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-bold text-[#0b315f] hover:bg-blue-50 whitespace-nowrap">
     Ver recorrido ↗
   </a>
@@ -352,8 +354,10 @@ const enlaceRecorrido = (e: Episodio) => e.reservaId != null ? (
 
 type ClaveEpisodio = "inicio" | "durS" | "velMediaSensor" | "velMaxSensor" | "velGeom" | "conductor";
 
-export function SeccionEpisodios({ titulo, sub, episodios, dir, resaltar, vacio }: {
+export function SeccionEpisodios({ titulo, sub, episodios, dir, resaltar, vacio, umbral }: {
   titulo: string; sub?: React.ReactNode; episodios: readonly Episodio[]; dir: Directorio; resaltar: number | null; vacio: string;
+  /** el umbral de la pantalla: el mapa «Ver recorrido» lo usa para pintar los mismos excesos */
+  umbral?: number;
 }) {
   const [orden, setOrden] = useState<Orden<ClaveEpisodio>>({ clave: null, sentido: "asc" });
   const lista = useMemo(() => {
@@ -410,7 +414,7 @@ export function SeccionEpisodios({ titulo, sub, episodios, dir, resaltar, vacio 
                     </td>
                     <td className="p-3 text-right whitespace-nowrap text-gray-700">{kmh(e.velGeom)}</td>
                     <td className="p-3 text-right whitespace-nowrap text-gray-700">{e.precisionMediana == null ? "—" : `${Math.round(e.precisionMediana)} m`}</td>
-                    <td className="p-3 text-right">{enlaceRecorrido(e)}</td>
+                    <td className="p-3 text-right">{enlaceRecorrido(e, umbral)}</td>
                   </tr>
                   <tr className={m ? "bg-blue-50" : ""}>
                     <td colSpan={8} className="px-3 pb-3 pt-0 text-xs text-gray-500">{e.detalle}</td>
@@ -443,7 +447,7 @@ export function SeccionEpisodios({ titulo, sub, episodios, dir, resaltar, vacio 
                       <div className="text-sm font-semibold text-gray-800">{c.nombre}<EtiquetaFlota tercero={c.tercero} /></div>
                       <div className="text-xs text-gray-500">{u.placa} · {fechaHoraLima(e.inicioTs)}</div>
                     </div>
-                    {enlaceRecorrido(e)}
+                    {enlaceRecorrido(e, umbral)}
                   </div>
                   <div className="mt-2"><ServicioDe e={e} dir={dir} compacto /></div>
                   <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
