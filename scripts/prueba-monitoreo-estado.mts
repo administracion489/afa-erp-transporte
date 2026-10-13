@@ -16,7 +16,8 @@
 //      aparece con un servicio en curso y la posición vieja (un motor que nunca alarmara cumpliría
 //      lo demás de forma trivial).
 //   4. `ultimaPosicion`: descarta lo inválido, aplica la edad (fix_ts / recibido_en / ahora) y la
-//      regla del cierre impreciso. CICLO: plegar `fusionarPosicion` en CUALQUIER orden de llegada
+//      regla del cierre impreciso. Una precisión ≤ 0 o no numérica es DESCONOCIDA (la app del
+//      tercerizado escribe 0 cuando no la sabe, y siempre en el cierre): mismo trato que null. CICLO: plegar `fusionarPosicion` en CUALQUIER orden de llegada
 //      (y pasando por JSON entre fila y fila, como viaja de la API al navegador) da lo mismo.
 //   5. Los ids se solapan: la unidad 12 propia y la 12 tercerizada son dos claves.
 //   6. `resumenFlota` es disjunto y exhaustivo.
@@ -322,7 +323,7 @@ const veredictos: VeredictoUnidad[] = [];
 {
   const EDADES = [-MIN, 0, 30_000, 2 * MIN, 2 * MIN + 1000, 4 * MIN, 5 * MIN, 5 * MIN + 1000, 20 * MIN, 3 * H, 26 * H, 29 * DIA];
   const ESTADOS = ["en_ruta", "disponible", "finalizado", "sos", null];
-  const PRECS = [10, 400, null];
+  const PRECS = [10, 400, null, 0];
   const RESERVAS = [50, 60, null];
   const SERVICIOS: ServicioUnidad[][] = [
     [],
@@ -439,6 +440,26 @@ console.log("\n4. ultimaPosicion y fusión");
   chk("un cierre preciso usa su propia posición, no aproximada", finoCierre.lat === -12.3 && !finoCierre.aproximada && finoCierre.respaldo === null);
   chk("un punto normal impreciso (400 m) es aproximado; uno sin precisión declarada, no",
     posDe(0, { precision_m: 400 }).aproximada && !posDe(0, { precision_m: null }).aproximada && !posDe(0).aproximada);
+  // precision_m = 0 (la app del TERCERIZADO cuando no la conoce, y siempre al finalizar) = desconocida.
+  const ter = { vehiculo_id: null, vehiculo_tercero_id: 12, conductor_id: null, conductor_tercero_id: 12 };
+  const previaTer = fila(4 * MIN, { ...ter, lat: -12.1, lng: -77.1, precision_m: 8, reserva_id: 50 });
+  const cierreTer = fila(2 * MIN, { ...ter, lat: -12.3, lng: -77.3, precision_m: 0, estado: "finalizado", reserva_id: 50 });
+  const ct = ultimaPosicion([previaTer, cierreTer], T)!;
+  chk("cierre del TERCERIZADO con precision_m 0: posición del fix preciso del MISMO servicio, aproximada",
+    ct.unidad === "t:12" && ct.lat === -12.1 && ct.lng === -77.1 && ct.precisionM === 8 && ct.aproximada && ct.estado === "finalizado");
+  chk("…igual que un cierre con precisión null", JSON.stringify(ct) === JSON.stringify(ultimaPosicion([previaTer, { ...cierreTer, precision_m: null }], T)));
+  const ctOtro = ultimaPosicion([{ ...previaTer, reserva_id: 49 }, cierreTer], T)!;
+  chk("…sin fix preciso de ESE servicio: su propia posición, aproximada (no «exacta»)", ctOtro.lat === -12.3 && ctOtro.aproximada && ctOtro.precisionM === null);
+  chk("…y el veredicto lo dice: «· posición aproximada»", juzgar(ct).detalle.endsWith("posición aproximada"), juzgar(ct).detalle);
+  chk("cierre con precisión negativa o no numérica: también desconocida",
+    ultimaPosicion([previa, { ...cierre, precision_m: -5 }], T)!.lat === -12.1 && ultimaPosicion([previa, { ...cierre, precision_m: "abc" }], T)!.lat === -12.1);
+  const cero = posDe(0, { precision_m: 0 });
+  chk("punto normal con precision_m 0: precisión desconocida (null) y NO aproximada, igual que null",
+    cero.precisionM === null && !cero.aproximada && JSON.stringify(cero) === JSON.stringify(posDe(0, { precision_m: null })));
+  chk("«0» en texto (como lo devuelve PostgREST) también es desconocida", posDe(0, { precision_m: "0" }).precisionM === null);
+  chk("un fix con precisión 0 NO sirve de respaldo de un cierre impreciso",
+    ultimaPosicion([{ ...previa, precision_m: 0 }, cierre], T)!.lat === -12.3);
+  chk("una precisión real y chica (0.5 m) sí es precisa", posDe(0, { precision_m: 0.5 }).precisionM === 0.5);
   const soloCierre = ultimaPosicion([cierre], T)!;
   chk("cierre impreciso sin fix preciso anterior: su posición, aproximada", soloCierre.lat === -12.3 && soloCierre.aproximada);
   const llega = fusionarPosicion(soloCierre, previa, T)!;
@@ -454,7 +475,7 @@ console.log("\n4. ultimaPosicion y fusión");
       const creado = T10(Math.floor(rnd() * 40));            // grilla gruesa: fuerza empates
       const o: Partial<FilaGpsMonitoreo> = {
         estado: elegir(["en_ruta", "finalizado", "disponible", "finalizado"]),
-        precision_m: elegir([8, 30, 400, null]),
+        precision_m: elegir([8, 30, 400, null, 0, 0]),
         reserva_id: elegir([50, 51, null]),
         conductor_id: elegir([1, 2]),
         lat: elegir([-12.1, -12.2, -12.3]), lng: elegir([-77.1, -77.2]),

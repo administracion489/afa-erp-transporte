@@ -22,6 +22,10 @@
 //   7. El umbral del «no inició»: el de la base si es un número ≥ 0; si no, o si falla, el defecto.
 //   8. La respuesta trae EXACTAMENTE las claves del contrato (y cada posición, las suyas): nada de
 //      placas, nombres ni teléfonos, aunque el motor algún día añadiera un campo.
+//   9. `unidades`: posiciones[].unidad ∪ sin_leer ⊆ unidades, las dos disjuntas, y una unidad que no
+//      está en ninguna de las dos es «leída sin posición» (null en el lector). En todos los escenarios
+//      de arriba, y también si una lectura incoherente llegara a armarRespuestaFlota. Sin el `estado`
+//      de la flota, `columnas_faltantes` lo NOMBRA («vehiculos_tercero.estado»).
 import {
   unidadesVigentes, leerUltimasPosiciones, umbralNoInicio, flotaMonitoreo, armarRespuestaFlota,
   proyectarPosicion, COLS_OPCIONALES_GPS, type ClienteMonitoreo, type UnidadMonitoreo,
@@ -426,6 +430,18 @@ seccion("6. La flota: paginada, sin `estado`, y un error que LANZA");
   chk("sin la columna `estado` en vehiculos_tercero: todas vigentes (también la que decía inactivo)",
     unidades.some((u) => u.clave === "t:5") && unidades.some((u) => u.clave === "t:12"));
   chk("…y las propias siguen filtrando por su estado", !unidades.some((u) => u.clave === "p:3"));
+  const r = await flotaMonitoreo(cliente(db), { ahoraMs: T });
+  chk("columnas_faltantes NOMBRA «vehiculos_tercero.estado» (no queda callado)",
+    r.columnas_faltantes.includes("vehiculos_tercero.estado") && !r.columnas_faltantes.includes("vehiculos.estado"), r.columnas_faltantes.join(","));
+  const errores = db.respuestasConError;
+  await unidadesVigentes(cliente(db));
+  chk("…y se memoriza: la siguiente lectura de la flota ya no paga el error", db.respuestasConError === errores);
+  const db2 = new BaseFalsa(baseNormal(), { columnas: { vehiculos: ["id", "placa"], vehiculos_tercero: ["id", "placa"] } });
+  const r2 = await flotaMonitoreo(cliente(db2), { ahoraMs: T });
+  chk("sin `estado` en las dos: se nombran las dos, junto a las del GPS si faltaran",
+    igualJson(r2.columnas_faltantes, ["vehiculos.estado", "vehiculos_tercero.estado"]), r2.columnas_faltantes.join(","));
+  chk("con la flota completa, columnas_faltantes no inventa nada",
+    (await flotaMonitoreo(cliente(new BaseFalsa(baseNormal())), { ahoraMs: T })).columnas_faltantes.length === 0);
 }
 {
   const db = new BaseFalsa(baseNormal(), { error: (c) => (c.tabla === "vehiculos" ? { code: "57014", message: "canceling statement due to statement timeout" } : null) });
@@ -459,7 +475,7 @@ seccion("7. Umbral del «no inició»");
 // ══ 8. LA RESPUESTA ═══════════════════════════════════════════════════════════════════════
 
 seccion("8. La respuesta trae EXACTAMENTE el contrato");
-const CLAVES_RESPUESTA = ["generado_en", "hoy", "ventana_dias", "no_inicio_min", "fuente_no_inicio", "posiciones", "sin_leer", "parcial", "columnas_faltantes"];
+const CLAVES_RESPUESTA = ["generado_en", "hoy", "ventana_dias", "no_inicio_min", "fuente_no_inicio", "unidades", "posiciones", "sin_leer", "parcial", "columnas_faltantes"];
 const CLAVES_POSICION = ["unidad", "lat", "lng", "posicionTs", "enlaceTs", "estado", "reservaId", "conductor", "velocidadKmh", "precisionM", "aproximada", "cierreTs", "ultimo", "respaldo"];
 const CLAVES_PUNTO = ["lat", "lng", "posicionTs", "puntoTs", "enlaceTs", "estado", "reservaId", "conductor", "velocidadKmh", "precisionM", "orden"];
 const mismas = (o: object, claves: string[]) => igualJson(Object.keys(o).sort(), [...claves].sort());
@@ -492,7 +508,7 @@ const mismas = (o: object, claves: string[]) => igualJson(Object.keys(o).sort(),
     mismas(limpia, CLAVES_POSICION) && mismas(limpia.ultimo, CLAVES_PUNTO) && !JSON.stringify(limpia).includes("999888777"));
   const r = armarRespuestaFlota({
     ahoraMs: T, noInicio: { min: 10, fuente: "defecto" },
-    lectura: { posiciones: new Map<string, PosicionUnidad | null>([["p:1", sucia], ["p:2", null]]), sinLeer: ["t:9"], columnasFaltantes: ["simulado"], parcial: true },
+    lectura: { unidades: ["p:1", "p:2", "t:9"], posiciones: new Map<string, PosicionUnidad | null>([["p:1", sucia], ["p:2", null]]), sinLeer: ["t:9"], columnasFaltantes: ["simulado"], parcial: true },
   });
   chk("armarRespuestaFlota: claves exactas, null fuera, sin_leer/parcial/columnas tal cual",
     mismas(r, CLAVES_RESPUESTA) && r.posiciones.length === 1 && !JSON.stringify(r).includes("telefono")
@@ -502,6 +518,65 @@ const mismas = (o: object, claves: string[]) => igualJson(Object.keys(o).sort(),
   const unidades: UnidadMonitoreo[] = [];
   const r = await flotaMonitoreo(cliente(new BaseFalsa({ ...baseNormal(), vehiculos: [], vehiculos_tercero: [] })), { ahoraMs: T });
   chk("flota vacía: respuesta válida, sin posiciones y sin parcial", r.posiciones.length === 0 && r.sin_leer.length === 0 && !r.parcial && unidades.length === 0);
+}
+
+// ══ 9. UNIDADES: LO QUE EL SERVIDOR QUISO LEER ════════════════════════════════════════════
+
+seccion("9. `unidades`: posiciones ∪ sin_leer ⊆ unidades, disjuntas; el resto, leídas sin posición");
+/** Comprueba la invariante sobre una respuesta y, si se da, el mapa del lector del que salió. */
+function invariantesUnidades(r: { unidades: string[]; posiciones: { unidad: string }[]; sin_leer: string[] }): string | null {
+  const U = new Set(r.unidades), P = r.posiciones.map((p) => p.unidad), S = r.sin_leer;
+  if (U.size !== r.unidades.length) return "unidades repetidas";
+  if (new Set(P).size !== P.length) return "una unidad con dos posiciones";
+  if (P.some((k) => !U.has(k))) return "una posición fuera de unidades";
+  if (S.some((k) => !U.has(k))) return "un sin_leer fuera de unidades";
+  if (P.some((k) => S.includes(k))) return "posición y sin_leer se cruzan";
+  return null;
+}
+{
+  const escenarios: { nombre: string; db: BaseFalsa; o?: { topeConsultaMs?: number; presupuestoMs?: number; concurrencia?: number } }[] = [
+    { nombre: "normal", db: new BaseFalsa(baseNormal()) },
+    { nombre: "una falla", db: new BaseFalsa(baseNormal(), { error: (c) => (c.tabla === "ubicaciones_gps" && c.unidad === "p:12" ? { code: "08006", message: "red" } : null) }) },
+    { nombre: "una cuelga", db: new BaseFalsa(baseNormal(), { cuelga: (c) => c.tabla === "ubicaciones_gps" && c.unidad === "t:12" }), o: { topeConsultaMs: 30 } },
+    { nombre: "faltan columnas", db: new BaseFalsa(baseNormal(), { columnas: { ubicaciones_gps: COLUMNAS_GPS.filter((c) => c !== "fix_ts"), vehiculos: ["id"] } }) },
+    { nombre: "presupuesto", db: new BaseFalsa(baseNormal(), { retardoMs: (c) => (c.tabla === "ubicaciones_gps" ? 40 : 0) }), o: { presupuestoMs: 50, concurrencia: 1 } },
+    { nombre: "filas ajenas", db: new BaseFalsa(baseNormal(), { ignorarFiltroUnidad: true }) },
+  ];
+  let malos = 0, conSinPosicion = 0, conSinLeer = 0;
+  for (const e of escenarios) {
+    const cl = cliente(e.db);
+    const vig = await unidadesVigentes(cl);
+    const lec = await leerUltimasPosiciones(cl, vig, { ahoraMs: T, ...e.o });
+    const r = armarRespuestaFlota({ ahoraMs: T, noInicio: { min: 10, fuente: "defecto" }, lectura: lec });
+    const mal = invariantesUnidades(r);
+    // unidades = exactamente las vigentes que el servidor quiso leer.
+    const mismas = igualJson(r.unidades, vig.map((u) => u.clave).sort());
+    // El resto (ni posición ni sin_leer) es «leída sin posición»: null en el mapa del lector.
+    const resto = r.unidades.filter((k) => !r.sin_leer.includes(k) && !r.posiciones.some((p) => p.unidad === k));
+    const restoNull = resto.every((k) => lec.posiciones.has(k) && lec.posiciones.get(k) === null);
+    if (mal || !mismas || !restoNull) { malos++; console.log(`   ${e.nombre}: ${mal ?? ""} ${mismas ? "" : "unidades ≠ vigentes"} ${restoNull ? "" : "resto no es null"}`); }
+    if (resto.length) conSinPosicion++;
+    if (r.sin_leer.length) conSinLeer++;
+  }
+  chk(`en los ${escenarios.length} escenarios: ⊆ unidades, disjuntas, unidades = vigentes y el resto, leídas sin posición`, malos === 0, `${malos} mal`);
+  chk("COROLARIO: los escenarios ejercitan las dos ramas (alguna leída sin posición, algún sin_leer)", conSinPosicion > 0 && conSinLeer > 0);
+}
+{
+  // Una lectura INCOHERENTE no rompe la respuesta: sin_leer gana y unidades contiene todo.
+  const pos = ultimaPosicion([gps({ p: 1 }, MIN) as FilaGpsMonitoreo], T)!;
+  const pos7 = ultimaPosicion([gps({ p: 7 }, MIN) as FilaGpsMonitoreo], T)!;
+  const r = armarRespuestaFlota({
+    ahoraMs: T, noInicio: { min: 10, fuente: "defecto" },
+    lectura: {
+      unidades: ["p:1", "p:2"],
+      posiciones: new Map<string, PosicionUnidad | null>([["p:1", pos], ["p:7", pos7], ["p:2", null]]),
+      sinLeer: ["p:1", "t:3", "t:3"], columnasFaltantes: [], parcial: false,
+    },
+  });
+  chk("lectura incoherente: la invariante se cumple por construcción", invariantesUnidades(r) === null, invariantesUnidades(r) ?? "");
+  chk("…una unidad en posiciones Y sin_leer: gana sin_leer (no se dibuja)", r.sin_leer.includes("p:1") && !r.posiciones.some((p) => p.unidad === "p:1"));
+  chk("…una posición o un sin_leer fuera de `unidades` se suma a unidades (no se esconde)",
+    igualJson(r.unidades, ["p:1", "p:2", "p:7", "t:3"]) && igualJson(r.sin_leer, ["p:1", "t:3"]));
 }
 
 console.log(fallos ? `\n✗ ${fallos} prueba(s) fallaron` : "\n✓ todo en verde");
