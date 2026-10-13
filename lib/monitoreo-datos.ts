@@ -23,6 +23,14 @@
 // MEMORIZA por cliente (en la ruta, por instancia del servidor): la siguiente petición ya no paga el
 // error. Ante cualquier otro error NO se reintenta a ciegas: la unidad va a `sinLeer`.
 //
+// ── UNA HORA DEL FUTURO NO OCUPA EL CUPO ───────────────────────────────────────────────────
+// `created_at` lo manda el teléfono sin validar. La consulta pide `created_at` entre ahora − 30 días
+// y ahora + MARGEN_RELOJ_FUTURO_MS: sin el tope de arriba, un reloj adelantado (o un cliente
+// malicioso) dejaba cinco filas del futuro primeras para siempre y las reales nunca se leían. Lo que
+// el motor hace con una hora del futuro que sí llegue (por el realtime) está en lib/monitoreo-estado.ts.
+// Límite declarado: un teléfono con el reloj adelantado más que el margen no aparece en el sondeo
+// (sus filas quedan fuera): se ve con su última fila de hora creíble, envejeciendo.
+//
 // ── LA IDENTIDAD, IGUAL QUE EL MOTOR ───────────────────────────────────────────────────────
 // `claveUnidad` (lib/flota/excesos.ts) le da precedencia al TERCERO: una fila con los dos ids es de
 // «t:ID». Por eso la consulta de una unidad propia pide además `vehiculo_tercero_id is null` (si no,
@@ -35,7 +43,7 @@ import { faltaAlguna } from "./columna-faltante";
 import { claveUnidad } from "./flota/excesos";
 import { fechaLima } from "./alertas-horario";
 import {
-  DIAS_ULTIMA_POSICION, FILAS_POR_UNIDAD, NO_INICIO_MIN_DEFECTO,
+  DIAS_ULTIMA_POSICION, FILAS_POR_UNIDAD, MARGEN_RELOJ_FUTURO_MS, NO_INICIO_MIN_DEFECTO,
   ultimaPosicion, unidadDeFila, unidadVigente,
   type FilaGpsMonitoreo, type PosicionUnidad, type PuntoMonitoreo, type RespuestaFlotaMonitoreo,
 } from "./monitoreo-estado";
@@ -234,6 +242,10 @@ export async function leerUltimasPosiciones(
   const presupuestoMs = Math.max(0, Number(o.presupuestoMs ?? PRESUPUESTO_MS));
   const reloj = o.reloj ?? Date.now;
   const desdeIso = new Date(ahoraMs - DIAS_ULTIMA_POSICION * DIA_MS).toISOString();
+  // `created_at` lo pone el TELÉFONO: sin este tope, cinco filas con la hora en el futuro quedarían
+  // primeras en el `order desc` y ocuparían para siempre las FILAS_POR_UNIDAD (las reales no se
+  // leerían nunca). Mismo índice (vehiculo_id, created_at desc): es el otro extremo del rango.
+  const hastaIso = new Date(ahoraMs + MARGEN_RELOJ_FUTURO_MS).toISOString();
   const faltan = faltantesDe(admin);
   const inicio = reloj();
   const quedaPresupuesto = () => reloj() - inicio < presupuestoMs;
@@ -246,7 +258,7 @@ export async function leerUltimasPosiciones(
       let q = admin.from("ubicaciones_gps").select(columnas.join(", "))
         .eq(u.tabla === "vehiculos" ? "vehiculo_id" : "vehiculo_tercero_id", u.id);
       if (u.tabla === "vehiculos") q = q.is("vehiculo_tercero_id", null);
-      q = q.gte("created_at", desdeIso).not("lat", "is", null);
+      q = q.gte("created_at", desdeIso).lte("created_at", hastaIso).not("lat", "is", null);
       if (!faltan.has("simulado")) q = q.or("simulado.is.null,simulado.eq.false");
       q = q.order("created_at", { ascending: false }).limit(FILAS_POR_UNIDAD);
       const { data, error } = await ejecutar(conAbort(q, topeMs), topeMs);

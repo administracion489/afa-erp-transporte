@@ -20,13 +20,30 @@
 // ── LA EDAD DE UNA POSICIÓN (`timestamp` NO se usa) ─────────────────────────────────────────
 //   posicionTs = min(fix_ts ?? created_at, recibido_en ?? ∞, ahora)
 //   enlaceTs   = min(max(created_at, recibido_en), ahora)
+// (con las horas del FUTURO ya tratadas: ver abajo — nunca se acotan a «ahora» más allá del margen)
 // `created_at` lo pone el TELÉFONO; `fix_ts` es la hora del último fix REAL (solo avanza si el
 // contenido del fix avanza: un GPS congelado que re-envía el mismo punto no rejuvenece);
 // `recibido_en` lo pone la BASE (gps-equipo-01) y acota un reloj de teléfono adelantado. El enlace
 // es otra pregunta: «¿el teléfono sigue hablando con el servidor?» — con el enlace fresco y la
 // posición vieja, lo que falla es el GPS, no los datos.
-// Límite declarado: sin `recibido_en` (migración sin correr) un teléfono con el reloj ADELANTADO se
-// ve fresco hasta que su reloj alcanza al real; uno ATRASADO se ve más viejo de lo que es.
+//
+// UNA HORA DEL FUTURO NO SE ACOTA A «AHORA»: SE DESCARTA O SE REEMPLAZA. `created_at` y `fix_ts` los
+// manda el teléfono sin validar. Acotarlos a «ahora» (lo que se hacía) convertía un reloj adelantado
+// unas horas —o un cliente malicioso— en una unidad «En línea» con edad 0 PARA SIEMPRE en esa
+// posición: el rojo «Sin señal en ruta» no salía nunca y cada sondeo devolvía ese marcador aunque el
+// realtime trajera el real. Hallazgo de seguridad-appsec, 13-10-2026. La regla, con
+// MARGEN_RELOJ_FUTURO_MS (5 min) de tolerancia para un reloj que va un poco adelantado:
+//   · `created_at` más allá de ahora + margen: si la fila trae `recibido_en` (hora del SERVIDOR), esa
+//     es la hora de la posición y de su enlace (y su `fix_ts`, del mismo reloj, se ignora); si no lo
+//     trae, la fila se DESCARTA y la unidad se ve con su última fila de hora creíble.
+//   · `fix_ts` posterior a `created_at` + margen, o a ahora + margen: se ignora (manda `created_at`).
+//   · `recibido_en` más allá de ahora + margen tampoco es creíble (lo pone la base; no debería pasar).
+// Dentro del margen sí se acota a «ahora», y eso está acotado: la fila tiene una hora fija y a los
+// pocos minutos envejece como cualquier otra. El lector (lib/monitoreo-datos.ts) además pide
+// `created_at <= ahora + margen`, para que cinco filas del futuro no ocupen para siempre las
+// FILAS_POR_UNIDAD de la consulta.
+// Límite declarado: sin `recibido_en` (migración sin correr) un teléfono con el reloj ATRASADO se ve
+// más viejo de lo que es; uno ADELANTADO más allá del margen no se ve (sus filas se descartan).
 //
 // ── EL ORDEN DE LAS FILAS Y LA FUSIÓN EN VIVO ──────────────────────────────────────────────
 // La «última» fila es la de mayor (posicionTs, puntoTs, enlaceTs, contenido): un orden TOTAL. Eso
@@ -78,6 +95,12 @@ export const DIAS_ULTIMA_POSICION = 30;
 /** OPERATIVO. Filas por unidad que pide el lector: la última más las previas para encontrar el fix
  *  preciso anterior a un cierre impreciso. */
 export const FILAS_POR_UNIDAD = 5;
+/** HEREDADO de `TOLERANCIA_RELOJ_MS` de lib/odometro.ts (5 min): el margen con el que el ERP ya
+ *  acepta que un dispositivo diga que algo pasó DESPUÉS de llegar al servidor («nada puede haberse
+ *  capturado después de llegar aquí», registrarLectura). Una hora del teléfono más allá de ahora +
+ *  esto no es creíble: no se acota, se descarta o se reemplaza por `recibido_en`. El lector usa el
+ *  mismo número en su `.lte("created_at", …)`. La matriz coteja los dos literales. */
+export const MARGEN_RELOJ_FUTURO_MS = 5 * 60_000;
 /** NO MEDIDO. Cuánto tiempo, después de hora + umbral, sigue en rojo un servicio que no se inició.
  *  Pasado eso, el servicio probablemente se hizo sin el app o se reprogramó: gritarlo todo el día
  *  enseña a ignorar el rojo. El lado seguro es subirlo. */
@@ -204,7 +227,17 @@ function leerFila(f: FilaGpsMonitoreo, ahoraMs: number): Leida | null {
   if (lat == null || lng == null) return null;
   if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
   if (lat === 0 && lng === 0) return null;                   // la «isla nula»: un GPS sin dato
-  const creado = tsDe(f.created_at), recibido = tsDe(f.recibido_en), fix = tsDe(f.fix_ts);
+  // Una hora del FUTURO no se acota a «ahora»: se descarta o se reemplaza (cabecera, «LA EDAD…»).
+  const limite = ahoraMs + MARGEN_RELOJ_FUTURO_MS;
+  const creible = (t: number | null): number | null => (t != null && t <= limite ? t : null);
+  const recibido = creible(tsDe(f.recibido_en));
+  const creadoTel = tsDe(f.created_at);
+  const creadoFuturo = creadoTel != null && creadoTel > limite;
+  if (creadoFuturo && recibido == null) return null;          // reloj adelantado y sin hora del servidor
+  const creado = creadoFuturo ? recibido : creadoTel;          // la del servidor en lugar de la del teléfono
+  // fix_ts es del mismo reloj: con created_at del futuro no vale, y nunca después de created_at + margen.
+  let fix = creadoFuturo ? null : creible(tsDe(f.fix_ts));
+  if (fix != null && creado != null && fix > creado + MARGEN_RELOJ_FUTURO_MS) fix = null;
   const base = fix ?? creado;
   if (base == null && recibido == null) return null;
   const posicionTs = Math.min(base ?? Infinity, recibido ?? Infinity, ahoraMs);
@@ -259,8 +292,8 @@ function armar(unidad: string, ultimo: PuntoMonitoreo, respaldo: PuntoMonitoreo 
 
 /**
  * La última posición de UNA unidad a partir de sus filas (las que pide el lector, en cualquier
- * orden). Descarta simulados, lat/lng nulos o no numéricos, (0,0), filas sin vehículo y posiciones
- * de más de DIAS_ULTIMA_POSICION. Si llegaran filas de varias unidades, manda la de la fila más
+ * orden). Descarta simulados, lat/lng nulos o no numéricos, (0,0), filas sin vehículo, posiciones
+ * de más de DIAS_ULTIMA_POSICION y filas con `created_at` del futuro sin `recibido_en`. Si llegaran filas de varias unidades, manda la de la fila más
  * reciente y las otras se ignoran. null = ninguna posición válida.
  */
 export function ultimaPosicion(filas: FilaGpsMonitoreo[], ahoraMs: number): PosicionUnidad | null {

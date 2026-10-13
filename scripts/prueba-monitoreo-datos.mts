@@ -17,7 +17,9 @@
 //   4. El PRESUPUESTO corta y marca `parcial`; lo no leído va a sinLeer. posiciones y sinLeer son
 //      DISJUNTOS y EXHAUSTIVOS sobre las unidades. La concurrencia nunca pasa del tope.
 //   5. La identidad: una fila con los dos ids es del TERCERO; la posición nunca es de otra unidad,
-//      aunque la base devolviera filas ajenas.
+//      aunque la base devolviera filas ajenas. Y la hora del TELÉFONO no ocupa el cupo: cinco filas
+//      con `created_at` del futuro no tapan a las reales (la consulta lleva `.lte(created_at, ahora +
+//      MARGEN_RELOJ_FUTURO_MS)`).
 //   6. La flota se pagina (más de 1000 fichas); sin la columna `estado`, todas vigentes; otro error LANZA.
 //   7. El umbral del «no inició»: el de la base si es un número ≥ 0; si no, o si falla, el defecto.
 //   8. La respuesta trae EXACTAMENTE las claves del contrato (y cada posición, las suyas): nada de
@@ -31,7 +33,7 @@ import {
   proyectarPosicion, COLS_OPCIONALES_GPS, type ClienteMonitoreo, type UnidadMonitoreo,
 } from "../lib/monitoreo-datos";
 import {
-  DIAS_ULTIMA_POSICION, FILAS_POR_UNIDAD, NO_INICIO_MIN_DEFECTO, ultimaPosicion, unidadDeFila,
+  DIAS_ULTIMA_POSICION, FILAS_POR_UNIDAD, MARGEN_RELOJ_FUTURO_MS, NO_INICIO_MIN_DEFECTO, ultimaPosicion, unidadDeFila,
   type FilaGpsMonitoreo, type PosicionUnidad,
 } from "../lib/monitoreo-estado";
 
@@ -52,7 +54,7 @@ const dormir = (ms: number) => new Promise<void>((ok) => setTimeout(ok, ms));
 
 type Fila = Record<string, unknown>;
 type ErrorFalso = { code: string; message: string };
-type Filtro = { op: "eq" | "is" | "gte" | "not"; col: string; val: unknown };
+type Filtro = { op: "eq" | "is" | "gte" | "lte" | "not"; col: string; val: unknown };
 
 const COLUMNAS_GPS = [
   "id", "lat", "lng", "created_at", "fix_ts", "recibido_en", "simulado", "precision_m", "estado", "reserva_id",
@@ -118,6 +120,7 @@ class BaseFalsa {
       if (f.op === "eq") filas = filas.filter((r) => r[f.col] != null && String(r[f.col]) === String(f.val));
       else if (f.op === "is") filas = filas.filter((r) => (f.val === null ? r[f.col] == null : r[f.col] === f.val));
       else if (f.op === "gte") filas = filas.filter((r) => r[f.col] != null && String(r[f.col]) >= String(f.val));
+      else if (f.op === "lte") filas = filas.filter((r) => r[f.col] != null && String(r[f.col]) <= String(f.val));
       else if (f.op === "not") filas = filas.filter((r) => r[f.col] != null);
     }
     if (c.orFiltro) {
@@ -153,6 +156,7 @@ class Consulta {
   eq(col: string, val: unknown) { this.filtros.push({ op: "eq", col, val }); return this; }
   is(col: string, val: unknown) { this.filtros.push({ op: "is", col, val }); return this; }
   gte(col: string, val: unknown) { this.filtros.push({ op: "gte", col, val }); return this; }
+  lte(col: string, val: unknown) { this.filtros.push({ op: "lte", col, val }); return this; }
   not(col: string, _op: string, val: unknown) { this.filtros.push({ op: "not", col, val }); return this; }
   or(s: string) { this.orFiltro = s; return this; }
   order(col: string, o?: { ascending?: boolean }) { this.orden.push({ col, asc: o?.ascending !== false }); return this; }
@@ -208,7 +212,7 @@ function baseNormal(): Record<string, Fila[]> {
 const consultasGps = (db: BaseFalsa) => db.consultas.filter((c) => c.tabla === "ubicaciones_gps");
 const filasDe = (db: BaseFalsa, clave: string): FilaGpsMonitoreo[] =>
   (db.tablas.ubicaciones_gps as FilaGpsMonitoreo[]).filter((f) => unidadDeFila(f) === clave && f.simulado !== true
-    && String(f.created_at) >= iso(T - DIAS_ULTIMA_POSICION * DIA));
+    && String(f.created_at) >= iso(T - DIAS_ULTIMA_POSICION * DIA) && String(f.created_at) <= iso(T + MARGEN_RELOJ_FUTURO_MS));
 const igualJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 // ══ 1. LECTURA NORMAL ═════════════════════════════════════════════════════════════════════
@@ -226,8 +230,9 @@ seccion("1. Lectura normal");
   chk("una consulta de GPS por unidad", qs.length === unidades.length, String(qs.length));
   chk("todas con tope (abortSignal), limit FILAS_POR_UNIDAD y order created_at desc",
     qs.every((c) => c.conAbort && c.limite === FILAS_POR_UNIDAD && c.orden.length === 1 && c.orden[0].col === "created_at" && !c.orden[0].asc));
-  chk("todas con la ventana de DIAS_ULTIMA_POSICION, lat no nula y sin simulados",
+  chk("todas con la ventana de DIAS_ULTIMA_POSICION hasta ahora + MARGEN_RELOJ_FUTURO_MS, lat no nula y sin simulados",
     qs.every((c) => c.filtros.some((f) => f.op === "gte" && f.col === "created_at" && f.val === iso(T - DIAS_ULTIMA_POSICION * DIA))
+      && c.filtros.some((f) => f.op === "lte" && f.col === "created_at" && f.val === iso(T + MARGEN_RELOJ_FUTURO_MS))
       && c.filtros.some((f) => f.op === "not" && f.col === "lat") && c.orFiltro === "simulado.is.null,simulado.eq.false"));
   chk("las propias piden vehiculo_tercero_id is null; las tercerizadas no",
     qs.every((c) => (c.unidad?.startsWith("p:") ? c.filtros.some((f) => f.op === "is" && f.col === "vehiculo_tercero_id" && f.val === null)
@@ -409,6 +414,29 @@ seccion("5. La posición nunca es de otra unidad");
   const lec = await leerUltimasPosiciones(cl, unidades, { ahoraMs: T });
   chk("una base que devuelve filas AJENAS: cada posición es de su unidad o null",
     unidades.every((u) => { const p = lec.posiciones.get(u.clave); return p == null || p.unidad === u.clave; }));
+}
+{
+  // Hallazgo de seguridad (b): un teléfono con el reloj 3 h adelantado mandó ayer cinco filas (la base
+  // las recibió ayer). Hoy su reloj está bien y transmite. Sin el tope, esas cinco quedarían primeras
+  // en el `order desc` para siempre y la posición real no se leería nunca.
+  const tablas = baseNormal();
+  const futuro = iso(T + 3 * H);
+  for (let i = 0; i < FILAS_POR_UNIDAD; i++) {
+    tablas.ubicaciones_gps.push(gps({ p: 1 }, 0, { created_at: futuro, fix_ts: futuro, recibido_en: iso(T - 20 * H - i * MIN), lat: -12.9 }));
+  }
+  const db = new BaseFalsa(tablas);
+  const cl = cliente(db);
+  const lec = await leerUltimasPosiciones(cl, await unidadesVigentes(cl), { ahoraMs: T });
+  const p1 = lec.posiciones.get("p:1");
+  chk("cinco filas con created_at del futuro NO tapan a las reales: p:1 sale con su fila de hace 1 min",
+    p1 != null && p1.posicionTs === T - MIN && p1.lat !== -12.9, p1 ? `${iso(p1.posicionTs)} · ${p1.lat}` : "null");
+  chk("…porque la consulta las deja FUERA (no llegaron al motor)",
+    !consultasGps(db).some((c) => c.unidad === "p:1" && db.resolver(c) && (db.resolver(c) as Fila[]).some((f) => f.lat === -12.9)));
+  const tablas2 = baseNormal();
+  tablas2.ubicaciones_gps = [gps({ p: 1 }, 0, { created_at: iso(T + 3 * MIN), fix_ts: null, recibido_en: null })];
+  const db2 = new BaseFalsa(tablas2);
+  const lec2 = await leerUltimasPosiciones(cliente(db2), [{ clave: "p:1", tabla: "vehiculos", id: 1 }], { ahoraMs: T });
+  chk("un reloj adelantado DENTRO del margen (3 min) sí se lee", lec2.posiciones.get("p:1")?.posicionTs === T);
 }
 
 // ══ 6. LA FLOTA ═══════════════════════════════════════════════════════════════════════════

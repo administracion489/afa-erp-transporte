@@ -17,13 +17,18 @@
 //      lo demás de forma trivial).
 //   4. `ultimaPosicion`: descarta lo inválido, aplica la edad (fix_ts / recibido_en / ahora) y la
 //      regla del cierre impreciso. Una precisión ≤ 0 o no numérica es DESCONOCIDA (la app del
-//      tercerizado escribe 0 cuando no la sabe, y siempre en el cierre): mismo trato que null. CICLO: plegar `fusionarPosicion` en CUALQUIER orden de llegada
-//      (y pasando por JSON entre fila y fila, como viaja de la API al navegador) da lo mismo.
+//      tercerizado escribe 0 cuando no la sabe, y siempre en el cierre): mismo trato que null.
+//      Una hora del FUTURO más allá de MARGEN_RELOJ_FUTURO_MS no se acota a «ahora» (hallazgo de
+//      seguridad: dejaba la unidad «En línea» para siempre): sin recibido_en la fila se descarta, con
+//      recibido_en manda la hora del servidor, y un fix_ts del futuro se ignora; dentro del margen
+//      sigue funcionando. CICLO: plegar `fusionarPosicion` en CUALQUIER orden de llegada (y pasando
+//      por JSON entre fila y fila, como viaja de la API al navegador) da lo mismo, también con filas
+//      del futuro en la mezcla.
 //   5. Los ids se solapan: la unidad 12 propia y la 12 tercerizada son dos claves.
 //   6. `resumenFlota` es disjunto y exhaustivo.
 //   7. Los rótulos de tiempo alrededor de la medianoche de LIMA (no de UTC).
 import {
-  EN_LINEA_MIN, DIAS_ULTIMA_POSICION, FILAS_POR_UNIDAD, VENTANA_NO_INICIO_MIN,
+  EN_LINEA_MIN, DIAS_ULTIMA_POSICION, FILAS_POR_UNIDAD, VENTANA_NO_INICIO_MIN, MARGEN_RELOJ_FUTURO_MS,
   SENAL_PERDIDA_MIN as SENAL_RE, PRECISION_MAX_M as PRECISION_RE, NO_INICIO_MIN_DEFECTO as NO_INICIO_RE,
   CODIGOS_MONITOREO, CLASES_MONITOREO, TEXTO_CODIGO, COLOR_CLASE,
   unidadDeFila, unidadVigente, ultimaPosicion, fusionarPosicion, inicioServicioMs,
@@ -33,6 +38,7 @@ import {
 import { SENAL_PERDIDA_MIN, PRECISION_MAX_M } from "../lib/gps-cobertura";
 import { NO_INICIO_MIN_DEFECTO } from "../lib/escalera-inicio";
 import { claveUnidad } from "../lib/flota/excesos";
+import { TOLERANCIA_RELOJ_MS } from "../lib/odometro";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -77,6 +83,7 @@ chk("EN_LINEA_MIN 2 · DIAS_ULTIMA_POSICION 30 · FILAS_POR_UNIDAD 5 · VENTANA_
 chk("SENAL_PERDIDA_MIN es el de lib/gps-cobertura.ts (5), no una copia", SENAL_RE === SENAL_PERDIDA_MIN && SENAL_RE === 5);
 chk("PRECISION_MAX_M es el de lib/gps-cobertura.ts (150)", PRECISION_RE === PRECISION_MAX_M && PRECISION_RE === 150);
 chk("NO_INICIO_MIN_DEFECTO es el de lib/escalera-inicio.ts (10)", NO_INICIO_RE === NO_INICIO_MIN_DEFECTO && NO_INICIO_RE === 10);
+chk("MARGEN_RELOJ_FUTURO_MS es el TOLERANCIA_RELOJ_MS de lib/odometro.ts (5 min), no una copia suelta", MARGEN_RELOJ_FUTURO_MS === TOLERANCIA_RELOJ_MS && MARGEN_RELOJ_FUTURO_MS === 5 * MIN);
 chk("los colores del plan", COLOR_CLASE.atender === "#dc2626" && COLOR_CLASE.vivo === "#16a34a" && COLOR_CLASE.demora === "#d97706"
   && COLOR_CLASE.reposo === "#64748b" && COLOR_CLASE.sin_dato === "#94a3b8");
 chk("TEXTO_CODIGO cubre los 9 códigos y su color es el de su clase",
@@ -321,7 +328,7 @@ function oraculo(p: PosicionUnidad | null, servicios: ServicioUnidad[], sos: boo
 }
 const veredictos: VeredictoUnidad[] = [];
 {
-  const EDADES = [-MIN, 0, 30_000, 2 * MIN, 2 * MIN + 1000, 4 * MIN, 5 * MIN, 5 * MIN + 1000, 20 * MIN, 3 * H, 26 * H, 29 * DIA];
+  const EDADES = [-3 * H, -(MARGEN_RELOJ_FUTURO_MS + 1000), -MIN, 0, 30_000, 2 * MIN, 2 * MIN + 1000, 4 * MIN, 5 * MIN, 5 * MIN + 1000, 20 * MIN, 3 * H, 26 * H, 29 * DIA];
   const ESTADOS = ["en_ruta", "disponible", "finalizado", "sos", null];
   const PRECS = [10, 400, null, 0];
   const RESERVAS = [50, 60, null];
@@ -343,11 +350,20 @@ const veredictos: VeredictoUnidad[] = [];
   let rojoEnCurso = 0, rojoTransmitiendo = 0, grisDibujado = 0, malAtender = 0, malSinNada = 0;
   const codigos = new Set<CodigoMonitoreo>();
   const casos: { p: PosicionUnidad | null; s: ServicioUnidad[] }[] = [];
-  for (const e of EDADES) for (const est of ESTADOS) for (const pr of PRECS) for (const res of RESERVAS) for (const congelado of [false, true]) {
+  let futuroMal = 0, futuroDescartado = 0, adelantadoUsado = 0;
+  for (const e of EDADES) for (const est of ESTADOS) for (const pr of PRECS) for (const res of RESERVAS) for (const modo of ["normal", "congelado", "adelantado"] as const) {
     const o: Partial<FilaGpsMonitoreo> = { estado: est, precision_m: pr, reserva_id: res };
-    const p = congelado
+    // «adelantado»: el reloj del teléfono 3 h por delante; la hora del servidor dice hace `e`.
+    const p = modo === "congelado"
       ? ultimaPosicion([fila(Math.min(e, 10_000), { ...o, fix_ts: iso(T - e) })], T)
-      : ultimaPosicion([fila(e, o)], T);
+      : modo === "adelantado"
+        ? ultimaPosicion([fila(e, { ...o, created_at: iso(T + 3 * H), fix_ts: iso(T + 3 * H), recibido_en: iso(T - e) })], T)
+        : ultimaPosicion([fila(e, o)], T);
+    // Ninguna posición con hora del futuro; ninguna que salga de una hora del teléfono más allá del margen.
+    if (p && (p.posicionTs > T || p.enlaceTs > T || p.ultimo.puntoTs > T)) futuroMal++;
+    if (modo === "normal" && e < -MARGEN_RELOJ_FUTURO_MS) { if (p !== null) futuroMal++; else futuroDescartado++; }
+    if (modo === "adelantado" && p && e >= 0 && (p.posicionTs !== T - e || p.enlaceTs !== T - e)) futuroMal++;
+    if (modo === "adelantado" && p && e >= 0) adelantadoUsado++;
     for (const s of SERVICIOS) casos.push({ p, s });
   }
   for (const s of SERVICIOS) casos.push({ p: null, s });
@@ -387,6 +403,8 @@ const veredictos: VeredictoUnidad[] = [];
   chk("corolario: el no-inició sale aunque la unidad transmita", rojoTransmitiendo > 10, `${rojoTransmitiendo}`);
   chk("corolario: lo viejo sin servicio se DIBUJA en gris (no desaparece)", grisDibujado > 100, `${grisDibujado}`);
   chk("el barrido cubre los 9 códigos", codigos.size === 9, [...codigos].join(", "));
+  chk("horas del futuro: ninguna posición/enlace en el futuro; sin recibido_en más allá del margen, descartada; con recibido_en, su hora", futuroMal === 0, `${futuroMal}`);
+  chk("corolario: el barrido de verdad descarta filas del futuro y usa la hora del servidor", futuroDescartado > 50 && adelantadoUsado > 100, `${futuroDescartado} · ${adelantadoUsado}`);
 }
 
 // ══ 4. ultimaPosicion Y LA FUSIÓN ═════════════════════════════════════════════════════════
@@ -407,11 +425,40 @@ console.log("\n4. ultimaPosicion y fusión");
   const p1 = ultimaPosicion([fila(0, { created_at: iso(T - 10_000), fix_ts: iso(T - 7 * MIN), recibido_en: iso(T - 9_000) })], T)!;
   chk("posicionTs = fix_ts cuando es anterior (GPS congelado)", p1.posicionTs === T - 7 * MIN);
   chk("enlaceTs = la llegada (max(created_at, recibido_en))", p1.enlaceTs === T - 9_000);
-  const p2 = ultimaPosicion([fila(0, { created_at: iso(T + H), fix_ts: null, recibido_en: iso(T - 20_000) })], T)!;
-  chk("reloj del teléfono adelantado: recibido_en acota la edad", p2.posicionTs === T - 20_000);
-  chk("…y el enlace no queda en el futuro (acotado a ahora)", p2.enlaceTs === T);
-  const p3 = ultimaPosicion([fila(0, { created_at: iso(T + H), fix_ts: null, recibido_en: null })], T)!;
-  chk("sin recibido_en, una hora del futuro se acota a ahora", p3.posicionTs === T && juzgar(p3).edadMin === 0);
+  // ── Horas del FUTURO (hallazgo de seguridad): no se acotan a «ahora» más allá del margen ──
+  const p2 = ultimaPosicion([fila(0, { created_at: iso(T + H), fix_ts: iso(T + H), recibido_en: iso(T - 20_000) })], T)!;
+  chk("reloj adelantado 1 h CON recibido_en: la hora de la posición es la del SERVIDOR (fix_ts del mismo reloj, ignorado)", p2.posicionTs === T - 20_000);
+  chk("…y la del enlace y la del punto también (no «ahora»)", p2.enlaceTs === T - 20_000 && p2.ultimo.puntoTs === T - 20_000);
+  chk("…y ENVEJECE: 10 min después, con un servicio en curso, es «Sin señal en ruta»",
+    juzgar(p2, [svc(50, "en_curso", T - H)], { ahora: T + 10 * MIN }).codigo === "senal_perdida");
+  const futSin = fila(0, { created_at: iso(T + H), fix_ts: iso(T + H), recibido_en: null, lat: -12.9 });
+  chk("reloj adelantado 1 h SIN recibido_en: la fila se DESCARTA (antes: «En línea» con edad 0 para siempre)", ultimaPosicion([futSin], T) === null);
+  const real = fila(10 * MIN);
+  const conFut = ultimaPosicion([real, futSin], T)!;
+  chk("…y la unidad muestra su ÚLTIMA FILA REAL (posición y edad)", conFut.lat === real.lat && conFut.posicionTs === T - 10 * MIN);
+  chk("…así que el rojo «Sin señal en ruta» ya no se apaga con un reloj adelantado",
+    juzgar(conFut, [svc(50, "en_curso", T - H)]).codigo === "senal_perdida");
+  chk("…también por el realtime: la fila del futuro no mueve la posición", fusionarPosicion(posDe(10 * MIN), futSin, T) !== null
+    && JSON.stringify(fusionarPosicion(posDe(10 * MIN), futSin, T)) === JSON.stringify(posDe(10 * MIN)));
+  chk("la frontera: ahora + margen se acepta; ahora + margen + 1 s (sin recibido_en) se descarta",
+    ultimaPosicion([fila(0, { created_at: iso(T + MARGEN_RELOJ_FUTURO_MS), fix_ts: null, recibido_en: null })], T) !== null
+    && ultimaPosicion([fila(0, { created_at: iso(T + MARGEN_RELOJ_FUTURO_MS + 1000), fix_ts: null, recibido_en: null })], T) === null);
+  const dentro = ultimaPosicion([fila(0, { created_at: iso(T + 3 * MIN), fix_ts: null, recibido_en: null })], T)!;
+  chk("reloj adelantado DENTRO del margen (3 min), sin recibido_en: sigue funcionando (edad 0 ahora)", dentro.posicionTs === T && juzgar(dentro).edadMin === 0);
+  chk("…y ese «ahora» es FIJO: 10 min después ya no está en línea", juzgar(dentro, [], { ahora: T + 10 * MIN }).codigo === "reposo"
+    && juzgar(dentro, [], { ahora: T + 10 * MIN }).edadMin === 10);
+  chk("reloj adelantado dentro del margen CON recibido_en: manda la hora del servidor",
+    ultimaPosicion([fila(0, { created_at: iso(T + 3 * MIN), fix_ts: iso(T + 3 * MIN), recibido_en: iso(T - 1000) })], T)!.posicionTs === T - 1000);
+  const fixFut = posDe(3 * MIN, { fix_ts: iso(T + H) });
+  chk("fix_ts del futuro (más allá de ahora + margen): se ignora, manda created_at", fixFut.posicionTs === T - 3 * MIN);
+  const fixAdelante = posDe(20 * MIN, { fix_ts: iso(T - 10 * MIN), recibido_en: null });
+  chk("fix_ts posterior a created_at + margen: se ignora (no rejuvenece la posición)", fixAdelante.posicionTs === T - 20 * MIN);
+  chk("fix_ts ANTERIOR a created_at (GPS congelado) sigue mandando", posDe(MIN, { fix_ts: iso(T - 7 * MIN) }).posicionTs === T - 7 * MIN);
+  const recFut = posDe(2 * MIN, { recibido_en: iso(T + H) });
+  chk("recibido_en del futuro (no debería pasar: lo pone la base) tampoco es creíble: manda created_at",
+    recFut.posicionTs === T - 2 * MIN && recFut.enlaceTs === T - 2 * MIN);
+  chk("sin created_at ni fix_ts y con recibido_en del futuro: no hay ninguna hora creíble, se descarta",
+    ultimaPosicion([fila(0, { created_at: null, fix_ts: null, recibido_en: iso(T + H) })], T) === null);
   const p4 = ultimaPosicion([fila(0, { created_at: null, fix_ts: null, recibido_en: iso(T - 4 * MIN) })], T)!;
   chk("sin created_at ni fix_ts, la edad sale de recibido_en", p4.posicionTs === T - 4 * MIN);
   const p5 = ultimaPosicion([fila(0, { created_at: "2026-10-13 16:55:00+00", fix_ts: null, recibido_en: null })], T)!;
@@ -487,6 +534,12 @@ console.log("\n4. ultimaPosicion y fusión");
       if (rnd() < 0.1) filas.push(fila(creado, { ...o, simulado: true }));              // basura que se ignora
       if (rnd() < 0.1) filas.push(fila(creado, { ...o, lat: null }));
       if (rnd() < 0.05) filas.push(fila(creado, { ...o, vehiculo_id: null }));
+      if (rnd() < 0.12) {                                                                // reloj adelantado
+        const futuro = iso(T + elegir([2 * MIN, 6 * MIN, 3 * H]));
+        filas.push(fila(creado, { ...o, created_at: futuro, fix_ts: rnd() < 0.5 ? futuro : null,
+          recibido_en: rnd() < 0.5 ? null : iso(T - creado + T10(Math.floor(rnd() * 3)) - 30_000) }));
+      }
+      if (rnd() < 0.05) filas.push(fila(creado, { ...o, fix_ts: iso(T + H) }));             // fix_ts del futuro
     }
     const lote = ultimaPosicion(filas, T);
     if (lote && lote.estado === "finalizado" && lote.aproximada && lote.respaldo && lote.lat === lote.respaldo.lat && lote.posicionTs === lote.respaldo.posicionTs) conSustitucion++;
