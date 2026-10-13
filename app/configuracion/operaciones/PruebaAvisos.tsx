@@ -13,14 +13,14 @@ import { useMemo, useState } from "react";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { datosDeMuestra, planDeMuestra, telefonoDeMuestra, type CfgMuestra, type CodigoMuestra } from "@/lib/escalera-muestra";
 
-type CfgPantalla = CfgMuestra & { destinatarios: number[] };
+type CfgPantalla = CfgMuestra & { destinatarios: number[]; nombre?: string };
 type DestPantalla = { id: number; activo: boolean; telefono: string | null };
 type Resultado = { ok: boolean; error?: string; nota?: string };
 
 const CLAVE_TEL = "afa_prueba_avisos_tel";
 
 /** Los códigos que piden atención (algo no está como se cree): el resto es informativo. */
-const AMBAR: CodigoMuestra[] = ["mudo", "sin_config", "sin_plantilla", "repite_debio"];
+const AMBAR: CodigoMuestra[] = ["mudo", "sin_config", "sin_plantilla"];
 
 function telGuardado(): string {
   try { return localStorage.getItem(CLAVE_TEL) ?? ""; } catch { return ""; }
@@ -152,6 +152,14 @@ export default function PruebaAvisos({ cfgs, dests }: { cfgs: CfgPantalla[]; des
                         {m.para === "conductor" ? "Conductor" : "Coordinador"}
                       </span>
                       <span className="text-sm font-semibold text-gray-800">{m.canal === "llamada" ? "📞 " : ""}{m.titulo}</span>
+                      {/* La fila dice el TÍTULO del mensaje; la tarjeta que se configura puede llamarse
+                          distinto («Falta iniciar recorrido» vive en «Alerta previa al coordinador»). */}
+                      {(() => {
+                        const tarjeta = cfgs.find((c) => c.clave === m.clave)?.nombre;
+                        return tarjeta && tarjeta !== m.titulo
+                          ? <span className="text-[10px] text-gray-400">tarjeta «{tarjeta}»</span>
+                          : null;
+                      })()}
                       {m.plantilla && <span className="text-[10px] font-mono text-gray-400">{m.plantilla}</span>}
                     </div>
                     <p className={`text-[11px] mt-0.5 ${AMBAR.includes(m.codigo) ? "text-amber-700" : "text-gray-500"}`}>{m.nota}</p>

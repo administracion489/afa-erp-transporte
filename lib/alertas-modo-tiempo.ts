@@ -336,3 +336,52 @@ function limaAUtcMsLocal(fecha?: string | null, horaHHMM?: string | null): numbe
   if (!y || !m || !d || !Number.isFinite(hh)) return null;
   return Date.UTC(y, m - 1, d, hh + 5, mm || 0);
 }
+
+// ─── ¿ESTE AVISO LE ESCRIBE AL DIRECTORIO? ─────────────────────────────────────
+
+/**
+ * Qué tipos le escriben de verdad al directorio de contactos (llaman a `aDirectorio` en el tick,
+ * o al directorio en la llamada de la central). La tarjeta de los que NO lo hacen escondía y sigue
+ * escondiendo el selector «También avisar a (directorio)»: marcar ahí a alguien no le mandaba nada
+ * — un control que el sistema no lee (revisión del 13-10-2026). Se DERIVA de aquí en vez de exigir
+ * que alguien ponga `usa_directorio = false` a mano en cada fila; esa columna sigue mandando cuando
+ * dice false (es un AND), igual que `tiempo_editable` con `leeElModo`.
+ *
+ * Una clave que no esté aquí devuelve null y CONSERVA su selector: el lado seguro es no esconder lo
+ * que no se pudo juzgar. Al agregar un tipo nuevo, decláralo aquí.
+ */
+export const LEE_DIRECTORIO: Record<string, boolean> = {
+  // Le escriben al directorio (tick, bloques 3b-2, 3c, 4, 4b-4e, 5, 5b, 7, 8 y la central).
+  llamar_conductor: true,
+  alerta_no_inicio_previa: true,
+  no_inicio: true,
+  en_punto_sin_iniciar: true,
+  riesgo_retraso: true,
+  retraso_en_ruta: true,
+  sin_rastreo_previo: true,
+  gps_silencio: true,
+  recordar_checkout: true,
+  solape: true,
+  jornada: true,
+  servicio_abandonado: true,
+  llamada_inicio: true,
+  // Solo le escriben al conductor o al pasajero.
+  asignacion: false,
+  cambio: false,
+  cancelacion: false,
+  desasignacion: false,
+  recordatorio_conductor: false,
+  recordatorio_pasajero: false,
+  proximo_inicio: false,
+  recuerda_iniciar: false,
+  inicia_ahora: false,
+  debio_iniciar: false,
+  doc_vence: false,
+  confirmacion_pasajero: false,
+  llegada_pasajero: false,
+};
+
+/** true/false si se conoce; null si la clave no está declarada (se conserva el selector). */
+export function leeElDirectorio(clave: string): boolean | null {
+  return Object.prototype.hasOwnProperty.call(LEE_DIRECTORIO, clave) ? LEE_DIRECTORIO[clave] : null;
+}

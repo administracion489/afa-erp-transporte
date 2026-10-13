@@ -14,6 +14,7 @@ import {
   reclamosSinDetalle, resumenAvisosConductor, textoPushInicio, type CfgPaso, type FilaAviso,
 } from "../lib/escalera-inicio";
 import { VIA_DE_ALERTA, leeElModo } from "../lib/alertas-modo-tiempo";
+import { detalleAlertaPrevia, listaEnUnaLinea, noInicioRepiteDebio } from "../lib/escalera-inicio";
 import { estadosAOperaciones } from "../lib/entrega-whatsapp";
 import { limaAUtcMs } from "../lib/alertas-horario";
 
@@ -260,6 +261,34 @@ const SERV = { estado: "programada", fecha_servicio: HOY, hora_servicio: "06:30:
   let lanza = false, raro: ReturnType<typeof estadosAOperaciones> = [];
   try { raro = estadosAOperaciones([{ id: "w", status: "read", timestamp: "1e20" }], Date.parse("2026-10-11T12:00:00Z")); } catch { lanza = true; }
   chk("un timestamp absurdo no lanza: cae a «ahora»", !lanza && raro.length === 2 && raro.every((o) => o.valor === "2026-10-11T12:00:00.000Z"));
+}
+
+// ── Revisión del 13-10-2026 ───────────────────────────────────────────────────
+{
+  console.log("\n— «No inició» no le repite al conductor el «Ya debió iniciar» —");
+  const debio = { activo: true, notifica_conductor: true, notifica_conductor_tercero: false };
+  chk("propio con «Ya debió iniciar» encendido → no se le repite", noInicioRepiteDebio(debio, false));
+  chk("tercerizado sin «Incluir tercerizados» en «Ya debió iniciar» → SÍ recibe «No inició»", !noInicioRepiteDebio(debio, true));
+  chk("tercerizado con la casilla → no se le repite", noInicioRepiteDebio({ ...debio, notifica_conductor_tercero: true }, true));
+  chk("«Ya debió iniciar» apagado → «No inició» sale", !noInicioRepiteDebio({ ...debio, activo: false }, false));
+  chk("«Ya debió iniciar» sin «Conductor» → «No inició» sale", !noInicioRepiteDebio({ ...debio, notifica_conductor: false }, false));
+  chk("sin fila de «Ya debió iniciar» → «No inició» sale", !noInicioRepiteDebio(null, false));
+
+  console.log("\n— Alerta previa: los minutos de verdad, sin «(sin GPS)» —");
+  const t = detalleAlertaPrevia(30, "");
+  chk("dice los minutos que faltan", t.startsWith("Faltan 30 min"), t);
+  chk("nombra el botón real", t.includes("INICIAR RECORRIDO") && !t.includes("sin GPS"), t);
+  chk("nunca minutos negativos ni decimales", detalleAlertaPrevia(-3.4, "").startsWith("Faltan 0 min") && detalleAlertaPrevia(19.6, "").startsWith("Faltan 20 min"));
+  chk("la evidencia va al final", detalleAlertaPrevia(25, "Avisos al conductor: x.").endsWith(" Avisos al conductor: x."));
+
+  console.log("\n— Una sola línea para el coordinador —");
+  chk("une con « · »", listaEnUnaLinea(["06:30 Juan (RUTA A)", "06:35 Pedro (RUTA B)"]) === "06:30 Juan (RUTA A) · 06:35 Pedro (RUTA B)");
+  const muchas = Array.from({ length: 60 }, (_, i) => `06:${String(i).padStart(2, "0")} Conductor número ${i} (RUTA X)`);
+  const l = listaEnUnaLinea(muchas, 300);
+  chk("respeta el largo y dice cuántos faltan", l.length <= 300 && /y \d+ más$/.test(l), `${l.length}: ${l}`);
+  const nTotal = (l.match(/ · /g) ?? []).length + Number(/y (\d+) más$/.exec(l)?.[1] ?? 0);
+  chk("no se pierde ninguno en la cuenta", nTotal === 60, String(nTotal));
+  chk("sin saltos de línea (los parámetros de Meta no los admiten)", !/\n/.test(listaEnUnaLinea(["a\nb", "c"])));
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

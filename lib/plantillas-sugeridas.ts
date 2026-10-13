@@ -28,7 +28,7 @@ const BOTON_APP = { botonTexto: "Abrir app conductor", botonUrl: "https://transp
 export const SUGERIDA_RECUERDA_INICIAR: PlantillaSugerida = {
   name: "conductor_recuerda_iniciar",
   category: "UTILITY",
-  body: "Hola {{1}} 👋, tu servicio de las {{2}} desde {{3}} está por empezar.\n\n⏱️ Abre la app AFA conductor y pulsa *INICIAR* al comenzar el recorrido. Así tus pasajeros ven el bus en el mapa.",
+  body: "Hola {{1}} 👋, tu servicio de las {{2}} desde {{3}} está por empezar.\n\n✅ Abre la app AFA Conductor, haz tu *CHECK-IN* y pulsa *INICIAR RECORRIDO* al salir de la cochera.\n📍 En cada paradero pulsa *MARCAR LLEGADA*: así tus pasajeros ven el bus en el mapa.",
   ejemplos: ["Carlos", "06:30", "Puente Santa Anita"],
   ...BOTON_APP,
 };
@@ -37,7 +37,7 @@ export const SUGERIDA_RECUERDA_INICIAR: PlantillaSugerida = {
 export const SUGERIDA_NO_INICIO: PlantillaSugerida = {
   name: "conductor_no_inicio",
   category: "UTILITY",
-  body: "Hola {{1}}, tu servicio de las {{2}} ({{3}}) ya debió iniciar y todavía no está marcado en la app.\n\n🚨 Abre la app AFA conductor y pulsa *INICIAR* ahora.\n☎️ Si tienes algún problema, llama al Coordinador de Operaciones: {{4}}.\n\nGracias.",
+  body: "Hola {{1}}, tu servicio de las {{2}} ({{3}}) ya debió iniciar y todavía no está marcado en la app.\n\n🚨 Abre la app AFA Conductor, haz tu *CHECK-IN* y pulsa *INICIAR RECORRIDO* ahora.\n☎️ Si tienes algún problema, llama al Coordinador de Operaciones: {{4}}.\n\nGracias.",
   ejemplos: ["Carlos", "06:30", "Santa Anita → Planta Lurín", "+51 999 888 777"],
   ...BOTON_APP,
 };

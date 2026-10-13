@@ -78,6 +78,8 @@ export type CfgPaso = {
   hora_fija?: string | null;
   min_anticipacion?: number | null;
   umbral?: number | null;
+  notifica_conductor?: boolean | null;
+  notifica_conductor_tercero?: boolean | null;
 } | null | undefined;
 
 /** Por qué un peldaño sale o no sale. Se DECLARA para poder contestar «¿por qué no le llegó?». */
@@ -134,16 +136,53 @@ export function minutosNoInicio(cfg: CfgPaso | null | undefined): number {
 }
 
 /**
- * ¿El «No inició» al CONDUCTOR repite el «Ya debió iniciar»? Los dos usan la plantilla
- * `conductor_no_inicio` con los mismos parámetros, así que si «No inició» está configurado en el
- * mismo minuto (o antes) que «Ya debió iniciar», el conductor recibe el MISMO texto dos veces
- * seguidas. Pasó el 12-10-2026: la tarjeta «No inició» quedó en 1 min, igual que el peldaño nuevo.
- * Con «Ya debió iniciar» apagado no repite nada (el «No inició» es el único que le llega).
+ * ¿El «No inició» al CONDUCTOR repite el «Ya debió iniciar»? Los dos le mandan la plantilla
+ * `conductor_no_inicio` con los mismos parámetros, así que si «Ya debió iniciar» le llega a ESE
+ * conductor, el «No inició» le repetiría el mismo texto minutos después — un WhatsApp cobrado que
+ * no dice nada nuevo y que enseña a ignorar los avisos (revisión del 13-10-2026; antes solo se
+ * callaba si los dos caían en el mismo minuto, lo que pasó el 12-10-2026).
+ *
+ * Solo se calla si «Ya debió iniciar» de verdad le escribe a ese conductor: encendido, con
+ * «Conductor» marcado y, si es TERCERIZADO, con «Incluir tercerizados» marcado. Si no, el «No
+ * inició» es el primer aviso después de la hora que recibe, y callarlo lo dejaría sin ninguno.
  * Solo se callan los mensajes al conductor: al coordinador le sigue llegando su alerta.
  */
-export function noInicioRepiteDebio(noInicio: CfgPaso | null | undefined, debio: CfgPaso | null | undefined): boolean {
+export function noInicioRepiteDebio(debio: CfgPaso | null | undefined, esTercero = false): boolean {
   if (!debio?.activo) return false;
-  return minutosNoInicio(noInicio) <= minutosDebioIniciar(debio);
+  if (debio.notifica_conductor === false) return false;
+  if (esTercero && debio.notifica_conductor_tercero !== true) return false;
+  return true;
+}
+
+/**
+ * El detalle de la «Alerta previa al coordinador». Los minutos son los que FALTAN de verdad (el tick
+ * los mide contra la hora del servicio; la prueba usa los de la tarjeta): antes decía «~25 min»
+ * fijo aunque la tarjeta se cambiara a 30, y «(sin GPS)» aunque el código no mirara el GPS.
+ * Lo usan el tick y la prueba de avisos, para que digan lo mismo.
+ */
+export function detalleAlertaPrevia(faltanMin: number, evidencia: string): string {
+  const n = Math.max(0, Math.round(faltanMin));
+  return `Faltan ${n} min y el conductor aún no pulsa INICIAR RECORRIDO en la app.${evidencia ? ` ${evidencia}` : ""}`;
+}
+
+/**
+ * Varias líneas en UNA (los parámetros de una plantilla de Meta no admiten saltos de línea),
+ * separadas por « · » y sin pasar de `max` caracteres: lo que no cabe se nombra («y N más») en vez
+ * de cortarse a mitad de un nombre.
+ */
+export function listaEnUnaLinea(lineas: string[], max = 600): string {
+  const limpias = lineas.map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const out: string[] = [];
+  for (let i = 0; i < limpias.length; i++) {
+    const resto = limpias.length - i - 1;
+    const cola = resto > 0 ? ` · y ${resto} más` : "";
+    const candidato = [...out, limpias[i]].join(" · ");
+    if (candidato.length + (resto > 0 ? cola.length : 0) > max && out.length > 0) {
+      return `${out.join(" · ")} · y ${limpias.length - i} más`;
+    }
+    out.push(limpias[i]);
+  }
+  return out.join(" · ");
 }
 
 /**
@@ -226,20 +265,20 @@ export function textoPushInicio(
   const desde = origen ? ` · ${origen}` : "";
   switch (clave) {
     case "proximo_inicio":
-      return { titulo: `🚌 Servicio de las ${hora}`, cuerpo: `Tienes un servicio pronto${desde}. Al salir, abre el app y pulsa INICIAR.`, requireInteraction: false, ttl: 3600 };
+      return { titulo: `🚌 Servicio de las ${hora}`, cuerpo: `Tienes un servicio pronto${desde}. Al salir de la cochera, haz tu check-in y pulsa INICIAR RECORRIDO.`, requireInteraction: false, ttl: 3600 };
     case "recuerda_iniciar":
-      return { titulo: `⏰ Recuerda INICIAR · ${hora}`, cuerpo: `Tu servicio empieza en ~30 min${desde}. Toca aquí y pulsa INICIAR.`, requireInteraction: false, ttl: 1800 };
+      return { titulo: `⏰ Recuerda INICIAR · ${hora}`, cuerpo: `Tu servicio empieza en ~30 min${desde}. Toca aquí y pulsa INICIAR RECORRIDO.`, requireInteraction: false, ttl: 1800 };
     case CLAVE_INICIA_AHORA: {
       const m = Number(datos.minutos);
       const enCuanto = Number.isFinite(m) && m > 0 ? `en ${Math.round(m)} min` : "ya";
-      return { titulo: `🚨 Tu servicio empieza ${enCuanto}`, cuerpo: `Servicio de las ${hora}${desde}. Toca aquí y pulsa INICIAR ahora.`, requireInteraction: true, ttl: 900 };
+      return { titulo: `🚨 Tu servicio empieza ${enCuanto}`, cuerpo: `Servicio de las ${hora}${desde}. Toca aquí y pulsa INICIAR RECORRIDO ahora.`, requireInteraction: true, ttl: 900 };
     }
     case CLAVE_DEBIO_INICIAR:
-      return { titulo: "⛔ Ya debiste INICIAR tu servicio", cuerpo: `Servicio de las ${hora}${desde}. Ábrelo ahora y pulsa INICIAR.`, requireInteraction: true, ttl: 900 };
+      return { titulo: "⛔ Ya debiste INICIAR tu servicio", cuerpo: `Servicio de las ${hora}${desde}. Ábrelo ahora y pulsa INICIAR RECORRIDO.`, requireInteraction: true, ttl: 900 };
     case "en_punto_sin_iniciar":
-      return { titulo: "📍 Ya estás en el punto", cuerpo: `Pulsa INICIAR para el servicio de las ${hora}${desde}.`, requireInteraction: true, ttl: 900 };
+      return { titulo: "📍 Ya estás en el punto", cuerpo: `Pulsa INICIAR RECORRIDO para el servicio de las ${hora}${desde}.`, requireInteraction: true, ttl: 900 };
     case "no_inicio":
-      return { titulo: `⛔ Tu servicio de las ${hora} sigue sin iniciar`, cuerpo: `${origen ? `${origen}. ` : ""}Abre el app y pulsa INICIAR ahora, o llama a operaciones.`, requireInteraction: true, ttl: 1800 };
+      return { titulo: `⛔ Tu servicio de las ${hora} sigue sin iniciar`, cuerpo: `${origen ? `${origen}. ` : ""}Abre el app y pulsa INICIAR RECORRIDO ahora, o llama a operaciones.`, requireInteraction: true, ttl: 1800 };
     default:
       return { titulo: "AFA · Aviso de servicio", cuerpo: `Servicio de las ${hora}${desde}.`, requireInteraction: false, ttl: 3600 };
   }

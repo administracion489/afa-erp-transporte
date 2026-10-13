@@ -63,7 +63,7 @@ function delMotor(m: MensajeMuestra, cfg: CfgMuestra, evidencia: string): string
     case "alerta_no_inicio_previa": {
       const ruta = rutaDe(r);
       return ["Falta iniciar recorrido", nombre, `${ruta} ${hora}`,
-        `Faltan ~25 min y el conductor aún no confirma salida (sin GPS) en la app.${evidencia ? ` ${evidencia}` : ""}`];
+        `Faltan ${Number(cfg.min_anticipacion ?? 25)} min y el conductor aún no pulsa INICIAR RECORRIDO en la app.${evidencia ? ` ${evidencia}` : ""}`];
     }
     case "inicia_ahora":
     case "debio_iniciar": {
@@ -114,7 +114,9 @@ function evidenciaDe(m: MensajeMuestra): string {
     const plantilla = m.para === "conductor" ? cfg.plantilla : (cfg.plantilla_directorio || "coordinador_alerta");
     chk(`${m.id}: la MISMA plantilla`, m.plantilla === plantilla, String(m.plantilla));
   }
-  chk("todos los WhatsApp salen hoy menos el de GPS", plan.filter((m) => m.canal === "whatsapp").every((m) => (m.id === "en_punto_sin_iniciar") === (m.codigo !== "sale")));
+  // «No inició» al conductor no sale: «Ya debió iniciar» ya le mandó el mismo texto (13-10-2026).
+  const noSalen = ["en_punto_sin_iniciar", "no_inicio"];
+  chk("todos los WhatsApp salen hoy menos el de GPS y el «No inició» al conductor", plan.filter((m) => m.canal === "whatsapp").every((m) => noSalen.includes(m.id) === (m.codigo !== "sale")));
   const ll = plan.find((m) => m.id === "llamada_inicio")!;
   chk("la llamada nace apagada (como la deja su SQL), sin plantilla, y se puede pedir de prueba",
     ll.canal === "llamada" && ll.codigo === "apagado" && !ll.marcado && ll.enviable && ll.plantilla === null && ll.parametros.length === 0);
@@ -124,11 +126,11 @@ function evidenciaDe(m: MensajeMuestra): string {
   const coord = plan.find((m) => m.id === "no_inicio:coordinador")!;
   const ev = evidenciaDe(coord);
   chk("al coordinador le llega la evidencia de lo que ya se le mandó", ev.startsWith("Avisos al conductor:")
-    && ["Recuerda iniciar", "Inicia ahora", "Ya debió iniciar", "No inició"].every((t) => ev.includes(t)), ev);
-  chk("…con el aviso de este mismo peldaño recién enviado, completo (sin confirmar entrega)",
-    /No inició 06:40 WhatsApp sin confirmar entrega\.$/.test(ev), ev);
+    && ["Recuerda iniciar", "Inicia ahora", "Ya debió iniciar"].every((t) => ev.includes(t)), ev);
+  chk("…sin un «No inició» al conductor (no se le repite)", !/No inició \d/.test(ev), ev);
+  chk("…y el último es el «Ya debió iniciar»", /Ya debió iniciar 06:31 WhatsApp entregado sin leer\.$/.test(ev), ev);
   chk("…y los anteriores entregados", /Inicia ahora 06:25 WhatsApp entregado sin leer/.test(ev), ev);
-  chk("con los cinco peldaños no cabe: se quita el MÁS ANTIGUO y se dice cuántos", /^Avisos al conductor: 1 anterior · Recuerda iniciar/.test(ev), ev);
+  chk("con los cuatro peldaños cabe entera", /^Avisos al conductor: Próximo a iniciar/.test(ev), ev);
   chk("la evidencia respeta el largo del motor", ev.length <= LARGO_EVIDENCIA_COORDINADOR, String(ev.length));
   const previa = plan.find((m) => m.id === "alerta_no_inicio_previa")!;
   const evPrevia = evidenciaDe(previa);
@@ -164,7 +166,7 @@ function evidenciaDe(m: MensajeMuestra): string {
   const ev = evidenciaDe(plan.find((m) => m.id === "no_inicio:coordinador")!);
   chk("y no aparece en la evidencia del coordinador (no se le mandó)", !ev.includes("Recuerda iniciar") && ev.includes("Inicia ahora"), ev);
   chk("con cuatro peldaños la evidencia cabe ENTERA (el primero, leído)", ev.startsWith("Avisos al conductor: Próximo a iniciar 05:00 WhatsApp leído 05:02")
-    && ev.endsWith("No inició 06:40 WhatsApp sin confirmar entrega."), ev);
+    && ev.endsWith("Ya debió iniciar 06:31 WhatsApp entregado sin leer."), ev);
 }
 
 // ── 3. Sin la migración de la escalera ────────────────────────────────────────
@@ -191,11 +193,14 @@ function evidenciaDe(m: MensajeMuestra): string {
   chk("al coordinador sin contactos → sin_contactos", de({ no_inicio: { contactos: 0 } }, "no_inicio:coordinador").codigo === "sin_contactos");
   chk("con «usa_directorio» apagado → sin_contactos", de({ no_inicio: { usa_directorio: false } }, "no_inicio:coordinador").codigo === "sin_contactos");
   // 12-10-2026: «No inició» quedó en 1 min, el minuto de «Ya debió iniciar», con la misma plantilla.
-  const rep = de({ no_inicio: { umbral: 1 } }, "no_inicio");
-  chk("«No inició» en el minuto de «Ya debió iniciar» → repite_debio, desmarcado", rep.codigo === "repite_debio" && !rep.marcado && rep.enviable, rep.codigo);
-  chk("…pero al coordinador le sigue saliendo", de({ no_inicio: { umbral: 1 } }, "no_inicio:coordinador").codigo === "sale");
-  chk("con 10 min (el diseño) sale normal", de({ no_inicio: { umbral: 10 } }, "no_inicio").codigo === "sale");
-  chk("con «Ya debió iniciar» apagado no repite nada", de({ no_inicio: { umbral: 1 }, debio_iniciar: { activo: false } }, "no_inicio").codigo === "sale");
+  // 13-10-2026: «Ya debió iniciar» y «No inició» le mandan al conductor la MISMA plantilla con los
+  // mismos datos. Si el primero le llega, el +10 va solo al coordinador (antes: solo en el mismo minuto).
+  const rep = de({}, "no_inicio");
+  chk("«No inició» al conductor con «Ya debió iniciar» encendido → repite_debio, desmarcado", rep.codigo === "repite_debio" && !rep.marcado && rep.enviable, rep.codigo);
+  chk("…pero al coordinador le sigue saliendo", de({}, "no_inicio:coordinador").codigo === "sale");
+  chk("en el mismo minuto, igual (el caso del 12-10)", de({ no_inicio: { umbral: 1 } }, "no_inicio").codigo === "repite_debio");
+  chk("si «Ya debió iniciar» no le escribe al conductor, «No inició» sí sale", de({ debio_iniciar: { notifica_conductor: false } }, "no_inicio").codigo === "sale");
+  chk("con «Ya debió iniciar» apagado no repite nada", de({ debio_iniciar: { activo: false } }, "no_inicio").codigo === "sale");
   chk("sin plantilla en el conductor → sin_plantilla y no se puede mandar", (() => {
     const m = de({ inicia_ahora: { plantilla: null } }, "inicia_ahora");
     return m.codigo === "sin_plantilla" && !m.enviable;
