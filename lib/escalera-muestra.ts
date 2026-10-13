@@ -24,6 +24,7 @@ import {
 } from "@/lib/escalera-inicio";
 import { hhmmAMinutos, limaAUtcMs } from "@/lib/alertas-horario";
 import { CLAVE_LLAMADA, evidenciaConLlamada, minutosLlamada, type FilaLlamada } from "@/lib/llamadas-central";
+import { UMBRAL_DEFECTO, escribeAlConductor } from "@/lib/alertas-tarjeta";
 
 /** Lo que el plan necesita de cada fila de `alerta_config` (más cuántos contactos la reciben). */
 export type CfgMuestra = {
@@ -173,7 +174,8 @@ const PASOS: Paso[] = [
     parametros: (d) => [d.nombre, d.hora, d.origen || rutaDe(d)],
   },
   {
-    // Tick, bloque 3c: solo conductores PROPIOS (el bloque filtra tipo_asignacion = propio).
+    // Tick, bloque 3c: propios siempre; tercerizados solo si la tarjeta marca «Incluir servicios
+    // tercerizados» (`notifica_conductor_tercero`). Nunca le escribe al conductor.
     id: "alerta_no_inicio_previa", clave: "alerta_no_inicio_previa", para: "coordinador", titulo: "Falta iniciar recorrido",
     reloj: { tipo: "antes", defecto: 25 }, sql: SQL_OPERATIVAS,
     // Tick, bloque 3c: en la prueba «faltan» los minutos de la tarjeta (el momento en que sale).
@@ -215,7 +217,7 @@ const PASOS: Paso[] = [
     id: "no_inicio:coordinador", clave: "no_inicio", para: "coordinador", titulo: "No inició a tiempo",
     reloj: { tipo: "despues", defecto: 10 }, sql: SQL_OPERATIVAS,
     parametros: (d, cfg, ev) => ["No inició a tiempo", d.nombre, `${rutaDe(d)} ${d.hora}`,
-      `Pasaron ${cfg.umbral ?? 10}+ min de la hora y no marcó inicio.${ev ? ` ${ev}` : ""}`],
+      `Pasaron ${cfg.umbral ?? UMBRAL_DEFECTO.no_inicio}+ min de la hora y no marcó inicio.${ev ? ` ${ev}` : ""}`],
   },
 ];
 
@@ -284,7 +286,9 @@ export function planDeMuestra(cfgs: CfgMuestra[] | Map<string, CfgMuestra>, d: D
     else if (canal === "whatsapp" && !plantilla) codigo = "sin_plantilla";
     else if (!cfg.activo) codigo = "apagado";
     else if (mudo) codigo = "mudo";
-    else if (p.para === "conductor" && cfg.notifica_conductor === false) codigo = "no_al_conductor";
+    // Solo donde el motor LEE la casilla «Conductor», y como la lee él (lib/alertas-tarjeta.ts): los
+    // avisos pre-inicio del tick le escriben al conductor propio aunque esté desmarcada.
+    else if (p.para === "conductor" && !escribeAlConductor(p.clave, cfg)) codigo = "no_al_conductor";
     else if (canal === "whatsapp" && p.para === "conductor" && cfg.canal_conductor_whatsapp === false) codigo = "sin_whatsapp";
     else if (p.para === "coordinador" && (cfg.usa_directorio === false || !(Number(cfg.contactos) > 0))) codigo = "sin_contactos";
     else if (p.reloj.tipo === "gps") codigo = "solo_si_gps";

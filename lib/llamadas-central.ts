@@ -86,9 +86,9 @@ export const SIGNIFICADO_OPCION: Record<Opcion, string> = {
 
 // ─── ¿TOCA LLAMAR? ─────────────────────────────────────────────────────────────
 
-/** Minutos después de la hora efectivos (≥ 0). */
+/** Minutos después de la hora efectivos (≥ 0). Una columna vacía (null) usa el default: `Number(null)` es 0. */
 export function minutosLlamada(cfg: CfgPaso): number {
-  const n = Number(cfg?.umbral);
+  const n = cfg?.umbral == null ? NaN : Number(cfg.umbral);
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : LLAMADA_MIN_DEFECTO;
 }
 

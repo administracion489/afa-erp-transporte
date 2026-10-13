@@ -15,7 +15,8 @@
 //                      se avisó a los 90 y a los 5 sale «inicia ahora». La tarjeta se conserva.
 //   · inicia_ahora     ( 5 min antes, cron de 1 min)   — NUEVO
 //   · debio_iniciar    ( 1 min después, cron de 1 min) — NUEVO
-//   · no_inicio        (10 min después, tick)          — al conductor y al coordinador
+//   · no_inicio        (10 min después, tick)          — al coordinador; al conductor solo si
+//                      «Ya debió iniciar» no se lo dijo antes (`noInicioRepiteDebio`)
 //
 // LO QUE ESCALA ES «NO INICIÓ», NO «NO LEYÓ». El objetivo es el toque de Iniciar, no la
 // lectura; y la confirmación de lectura de WhatsApp es desactivable por el usuario, así que
@@ -80,6 +81,8 @@ export type CfgPaso = {
   umbral?: number | null;
   notifica_conductor?: boolean | null;
   notifica_conductor_tercero?: boolean | null;
+  /** Plantilla de WhatsApp del aviso al conductor: sin ella el cron de un minuto no lo manda. */
+  plantilla?: string | null;
 } | null | undefined;
 
 /** Por qué un peldaño sale o no sale. Se DECLARA para poder contestar «¿por qué no le llegó?». */
@@ -122,9 +125,13 @@ export function minutosIniciaAhora(cfg: CfgPaso): number {
   return Number.isFinite(n) && n >= 1 ? Math.round(n) : INICIA_AHORA_MIN_DEFECTO;
 }
 
-/** Minutos después de la hora efectivos del «ya debió iniciar» (≥ 0). */
+/**
+ * Minutos después de la hora efectivos del «ya debió iniciar» (≥ 0). Una columna vacía (null) es
+ * «sin dato» y usa el default: `Number(null)` es 0, y leerlo así hacía salir el aviso EN la hora
+ * en vez de al minuto, mientras la tarjeta enseñaba el default.
+ */
 export function minutosDebioIniciar(cfg: CfgPaso): number {
-  const n = Number(cfg?.umbral);
+  const n = cfg?.umbral == null ? NaN : Number(cfg.umbral);
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : DEBIO_INICIAR_MIN_DEFECTO;
 }
 
@@ -143,13 +150,19 @@ export function minutosNoInicio(cfg: CfgPaso | null | undefined): number {
  * callaba si los dos caían en el mismo minuto, lo que pasó el 12-10-2026).
  *
  * Solo se calla si «Ya debió iniciar» de verdad le escribe a ese conductor: encendido, con
- * «Conductor» marcado y, si es TERCERIZADO, con «Incluir tercerizados» marcado. Si no, el «No
- * inició» es el primer aviso después de la hora que recibe, y callarlo lo dejaría sin ninguno.
- * Solo se callan los mensajes al conductor: al coordinador le sigue llegando su alerta.
+ * «Conductor» marcado, CON PLANTILLA y, si es TERCERIZADO, con «Incluir tercerizados» marcado.
+ * Si no, el «No inició» es el primer aviso después de la hora que recibe, y callarlo lo dejaría
+ * sin ninguno. Solo se callan los mensajes al conductor: al coordinador le sigue llegando su alerta.
+ *
+ * Las condiciones son, una por una, las del cron de un minuto (/api/alertas-flota/inicio:
+ * `!cfg.notifica_conductor || !cfg.plantilla` → no se manda): «Conductor» se lee como allí (un
+ * null no escribe) y la plantilla también, porque sin ella «Ya debió iniciar» no sale y callar el
+ * «No inició» dejaba al conductor sin ningún aviso después de la hora.
  */
 export function noInicioRepiteDebio(debio: CfgPaso | null | undefined, esTercero = false): boolean {
   if (!debio?.activo) return false;
-  if (debio.notifica_conductor === false) return false;
+  if (!debio.notifica_conductor) return false;
+  if (!debio.plantilla) return false;
   if (esTercero && debio.notifica_conductor_tercero !== true) return false;
   return true;
 }
@@ -266,8 +279,14 @@ export function textoPushInicio(
   switch (clave) {
     case "proximo_inicio":
       return { titulo: `🚌 Servicio de las ${hora}`, cuerpo: `Tienes un servicio pronto${desde}. Al salir de la cochera, haz tu check-in y pulsa INICIAR RECORRIDO.`, requireInteraction: false, ttl: 3600 };
-    case "recuerda_iniciar":
-      return { titulo: `⏰ Recuerda INICIAR · ${hora}`, cuerpo: `Tu servicio empieza en ~30 min${desde}. Toca aquí y pulsa INICIAR RECORRIDO.`, requireInteraction: false, ttl: 1800 };
+    case "recuerda_iniciar": {
+      // Los minutos de la TARJETA (los pasa el tick), no un «~30» fijo que mentía al cambiarla.
+      // «~» porque el tick corre cada 10 min: puede salir hasta 10 min después de su minuto.
+      // Sin minutos (tarjeta a una hora fija: sale la víspera) no se promete ninguno.
+      const m = Number(datos.minutos);
+      const enCuanto = Number.isFinite(m) && m > 0 ? `en ~${Math.round(m)} min` : "pronto";
+      return { titulo: `⏰ Recuerda INICIAR · ${hora}`, cuerpo: `Tu servicio empieza ${enCuanto}${desde}. Toca aquí y pulsa INICIAR RECORRIDO.`, requireInteraction: false, ttl: 1800 };
+    }
     case CLAVE_INICIA_AHORA: {
       const m = Number(datos.minutos);
       const enCuanto = Number.isFinite(m) && m > 0 ? `en ${Math.round(m)} min` : "ya";

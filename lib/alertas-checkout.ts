@@ -130,3 +130,33 @@ export function planRecordarCheckout(e: {
 /** ¿En esta ronda toca avisar también al directorio? Una sola vez por día (lo garantiza su clave). */
 export const escalaAlDirectorio = (ronda: number | null): boolean =>
   ronda != null && ronda >= ESCALAR_TRAS_RECORDATORIOS - 1;
+
+/**
+ * ¿Le pudieron llegar los recordatorios? Lo decide el tick con lo que sabe del conductor:
+ *  · `recordado`: el aviso le escribe y tiene por dónde.
+ *  · `tercerizado_sin_aviso`: es tercerizado y la tarjeta no tiene «Incluir tercerizados».
+ *  · `sin_plantilla`: la tarjeta no tiene plantilla de WhatsApp (sin ella no sale por ningún canal).
+ *  · `sin_canal`: el envío volvió «sin canal» (sin teléfono ni otro canal activo).
+ */
+export type AlcanceRecordatorio = "recordado" | "tercerizado_sin_aviso" | "sin_plantilla" | "sin_canal";
+
+/**
+ * El detalle de la escalada al directorio. Decía SIEMPRE «Ya recibió N recordatorios», también
+ * por un tercerizado al que esta tarjeta no le escribe (13-10-2026): el coordinador leía que el
+ * conductor ignoró tres avisos que nunca le llegaron. La escalada se conserva —el odómetro sigue
+ * faltando y el coordinador es el único que puede llamarlo—, pero dice la verdad.
+ * UNA línea: es un parámetro de plantilla.
+ */
+export function detalleEscaladaCheckout(e: { placa: string; ronda: number | null; alcance: AlcanceRecordatorio }): string {
+  const falta = `No envió el check-out ni la foto del tablero (${e.placa}).`;
+  switch (e.alcance) {
+    case "recordado":
+      return `${falta} Ya recibió ${(e.ronda ?? 0) + 1} recordatorios.`;
+    case "tercerizado_sin_aviso":
+      return `${falta} Es tercerizado y este aviso no le escribe (sin «Incluir tercerizados»): nadie se lo recordó, llámalo.`;
+    case "sin_plantilla":
+      return `${falta} No se le pudo recordar: la tarjeta «Recordar check-out» no tiene plantilla de WhatsApp. Llámalo.`;
+    case "sin_canal":
+      return `${falta} No se le pudo recordar: no tiene teléfono ni otro canal activo. Llámalo.`;
+  }
+}

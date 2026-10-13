@@ -22,6 +22,29 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    // LA TARJETA MANDA (13-10-2026). Con la fila `recordatorio_pasajero` en alerta_config, el
+    // recordatorio al pasajero lo despacha /api/alertas-flota/tick con su «Activo» y su «Cuándo».
+    // Este cron no la miraba: con la tarjeta APAGADA el recordatorio salía igual, y en «Antes
+    // del servicio» salía DOS veces — el candado de reclamarEnvio es por (clave, reserva, fecha
+    // de HOY) y el cron (la víspera a las 08:00) y el tick (el mismo día) reclaman en días
+    // distintos. Sin la fila (instalación sin las migraciones de alertas) sigue como respaldo.
+    // Si la consulta falla por otra causa, también: un recordatorio de más se nota; uno que no
+    // sale, no.
+    {
+      const { data: fila, error: eCfg } = await supabaseAdmin
+        .from("alerta_config").select("clave, activo").eq("clave", "recordatorio_pasajero").maybeSingle();
+      if (eCfg) console.warn("[notificaciones/recordatorio] no se pudo leer la tarjeta:", eCfg.message);
+      if (!eCfg && fila) {
+        return NextResponse.json({
+          ok: true,
+          delegado_al_motor: true,
+          tarjeta_activa: fila.activo === true,
+          mensaje: "El recordatorio al pasajero lo envía el motor de alertas según la tarjeta «Recordatorio al pasajero» de /configuracion/operaciones.",
+          procesadas: 0,
+        });
+      }
+    }
+
     // Fecha de mañana en zona Peru (UTC-5)
     const ahora    = new Date();
     const mañana   = new Date(ahora);

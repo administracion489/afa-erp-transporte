@@ -21,13 +21,15 @@ import {
   hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, canalesConductor, type AlertaConfig,
 } from "@/lib/alertas";
 import { horarioDe, limaAUtcMs, planDeEnvioConductor } from "@/lib/alertas-horario";
-import { planRecordarCheckout, cadenciaEfectiva, escalaAlDirectorio, type LecturaCheckout } from "@/lib/alertas-checkout";
+import { planRecordarCheckout, cadenciaEfectiva, escalaAlDirectorio, detalleEscaladaCheckout, type AlcanceRecordatorio, type LecturaCheckout } from "@/lib/alertas-checkout";
 import { tsEfectivoLectura } from "@/lib/odometro-tiempo";
 import {
+  ANTICIPACION_DEFECTO_MIN,
   enViaRecordatorio as enViaRecordatorioPuro,
   enVentanaHoraFija as enVentanaHoraFijaPuro,
 } from "@/lib/alertas-modo-tiempo";
-import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
+import { detectarSolapesJornada, MAX_SERVICIOS_JORNADA, type ReservaFlota } from "@/lib/alertas-flota";
+import { UMBRAL_DEFECTO } from "@/lib/alertas-tarjeta";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
 import { detalleAlertaPrevia, listaEnUnaLinea, noInicioRepiteDebio, textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
 import { resumenAvisosDeReserva } from "@/lib/escalera-inicio-datos";
@@ -476,9 +478,12 @@ async function handler(req: NextRequest) {
         const nombre = nombreCorto(datosCond(ref)?.nombre);
         const hora = horaCorta(r.hora_servicio);
         const origenTexto = r.origen || rutaDe(r);
+        // Los minutos de la tarjeta (el push de «Recuerda iniciar» los dice): solo con
+        // «Antes del servicio»; a una hora fija sale la víspera y no se promete ninguno.
+        const minutos = cfg.modo_tiempo === "anticipacion" ? (cfg.min_anticipacion ?? ANTICIPACION_DEFECTO_MIN) : null;
         const rc = await aConductor(cfg, ref, [nombre, hora, origenTexto], {
           reservaId: r.id,
-          push: textoPushInicio(clave, { hora, origen: r.origen || rutaDe(r) }),
+          push: textoPushInicio(clave, { hora, origen: r.origen || rutaDe(r), minutos }),
         });
         if (rc === "enviado") n++;
         else if (rc === "fallo") await liberarEnvio(clave, r.id); // transitorio → reintentar
@@ -601,7 +606,7 @@ async function handler(req: NextRequest) {
     {
       const cfg = activa("no_inicio");
       if (cfg) {
-        const gracia = cfg.umbral ?? 10;
+        const gracia = cfg.umbral ?? UMBRAL_DEFECTO.no_inicio;
         // Si «Ya debió iniciar» ya le escribió a este conductor el MISMO texto, el +10 va solo
         // al coordinador (noInicioRepiteDebio, por conductor: propio o tercerizado).
         const cfgDebio = activa("debio_iniciar");
@@ -694,7 +699,7 @@ async function handler(req: NextRequest) {
         if (r.fecha_servicio !== hoy) continue;
         const v = vere(r.id);
         if (v?.nivel !== "riesgo" || !v.escala) continue;
-        if ((v.minutos ?? 0) < (cfgRiesgo.umbral ?? 8)) continue;
+        if ((v.minutos ?? 0) < (cfgRiesgo.umbral ?? UMBRAL_DEFECTO.riesgo_retraso)) continue;
         if (!(await reclamarEnvio("riesgo_retraso", r.id))) continue;
         const ref = condDe(r);
         const nombre = ref ? nombreCorto(datosCond(ref)?.nombre) : "Conductor";
@@ -719,7 +724,7 @@ async function handler(req: NextRequest) {
         if (r.fecha_servicio !== hoy || r.estado !== "en_curso") continue;
         const v = vere(r.id);
         if (v?.nivel !== "retraso_en_ruta") continue;
-        if ((v.minutos ?? 0) < (cfgEnRuta.umbral ?? 10)) continue;
+        if ((v.minutos ?? 0) < (cfgEnRuta.umbral ?? UMBRAL_DEFECTO.retraso_en_ruta)) continue;
         if (!(await reclamarEnvio("retraso_en_ruta", r.id))) continue;
         const ref = condDe(r);
         const nombre = ref ? nombreCorto(datosCond(ref)?.nombre) : "Conductor";
@@ -742,7 +747,7 @@ async function handler(req: NextRequest) {
     // también a la empresa proveedora (decisión del operador, 2026-08-20) y queda en
     // retraso_evento para el reporte mensual de cumplimiento.
     if (cfgSinRastreo) {
-      const antelacion = cfgSinRastreo.umbral ?? 30;
+      const antelacion = cfgSinRastreo.umbral ?? UMBRAL_DEFECTO.sin_rastreo_previo;
       const candidatos = todas.filter((r) => {
         if (r.fecha_servicio !== hoy) return false;
         if (vere(r.id)?.nivel !== "sin_rastreo") return false;
@@ -790,7 +795,7 @@ async function handler(req: NextRequest) {
     {
       const cfg = activa("gps_silencio");
       if (cfg) {
-        const silencioMin = cfg.umbral ?? 8;
+        const silencioMin = cfg.umbral ?? UMBRAL_DEFECTO.gps_silencio;
         const enCurso = todas.filter((r) => r.estado === "en_curso");
         // Estados propios de estos en_curso (incluye TERCERIZADOS, que no están en `estados`
         // que se cargó solo para propias) — necesario para deduplicar el re-envío.
@@ -890,14 +895,15 @@ async function handler(req: NextRequest) {
             checkoutHecho: yaCheckout.has(k),
             lecturas,
             ahoraMs,
-            esperaMin: cfg.umbral ?? 60,
+            esperaMin: cfg.umbral ?? UMBRAL_DEFECTO.recordar_checkout,
             cadenciaMin,
           });
           if (plan.codigo !== "recordar") continue;
           const nombre = nombreCorto(datosCond(ref)?.nombre);
           const refEnvio = `${k}:${plan.turno}`;
+          let rc: ResultadoEnvio | null = null;
           if (await reclamarEnvio("recordar_checkout", refEnvio)) {
-            const rc = await aConductor(cfg, ref, [nombre, hoyBonito]);
+            rc = await aConductor(cfg, ref, [nombre, hoyBonito]);
             if (rc === "fallo") await liberarEnvio("recordar_checkout", refEnvio); // transitorio → reintentar
             else if (rc === "enviado") n++;
             // sin_canal (sin teléfono/plantilla, o tercerizado con el aviso apagado): queda
@@ -918,9 +924,15 @@ async function handler(req: NextRequest) {
               const fin = plan.finMs != null
                 ? new Date(plan.finMs).toLocaleTimeString("es-PE", { timeZone: "America/Lima", hour: "2-digit", minute: "2-digit", hour12: false })
                 : "-";
+              // ¿Le pudieron llegar los recordatorios? Lo mismo que mira `aConductor` antes de enviar,
+              // y el «sin canal» del envío de este tick si lo hubo.
+              const alcance: AlcanceRecordatorio = !cfg.plantilla ? "sin_plantilla"
+                : !avisaA(cfg, ref) ? "tercerizado_sin_aviso"
+                : rc === "sin_canal" ? "sin_canal"
+                : "recordado";
               const rd = await aDirectorio(cfg, [
                 "Falta odómetro final", nombre, `Último servicio ${fin}`,
-                `No envió el check-out ni la foto del tablero (${placa}). Ya recibió ${(plan.ronda ?? 0) + 1} recordatorios.`,
+                detalleEscaladaCheckout({ placa, ronda: plan.ronda, alcance }),
               ]);
               if (rd.enviados === 0 && rd.fallos > 0) await liberarEnvio("recordar_checkout", refDir);
               else if (rd.enviados > 0) escalados++;
@@ -937,7 +949,7 @@ async function handler(req: NextRequest) {
     {
       const cfg = activa("doc_vence");
       if (cfg && enVentanaHoraFija(cfg, ahora, force)) {
-        const dias = cfg.umbral ?? 15;
+        const dias = cfg.umbral ?? UMBRAL_DEFECTO.doc_vence;
         const limite = new Date(); limite.setUTCHours(limite.getUTCHours() - 5); limite.setDate(limite.getDate() + dias);
         const limiteISO = limite.toISOString().split("T")[0];
         const { data: conds } = await admin
@@ -986,8 +998,8 @@ async function handler(req: NextRequest) {
       const jorOn = cJor && enVentanaHoraFija(cJor, ahora, force);
       if (solOn || jorOn) {
         const hoyRes = todas.filter((r) => r.fecha_servicio === hoy && r.tipo_asignacion === "propio") as ReservaFlota[];
-        const jornadaMaxH = cJor?.umbral ?? 13;
-        const { solape, jornada } = detectarSolapesJornada(hoyRes, { jornadaMaxH, maxServicios: 4 });
+        const jornadaMaxH = cJor?.umbral ?? UMBRAL_DEFECTO.jornada;
+        const { solape, jornada } = detectarSolapesJornada(hoyRes, { jornadaMaxH, maxServicios: MAX_SERVICIOS_JORNADA });
         let nS = 0, nJ = 0;
         if (solOn) {
           for (const [reservaId, condId] of solape) {
@@ -1022,7 +1034,8 @@ async function handler(req: NextRequest) {
     // Este bloque corre SIEMPRE (no depende de una fila de config): es una
     // salvaguarda de integridad, no una alerta.
     {
-      const horasMax = activa("servicio_abandonado")?.umbral ?? 30; // 30 h: cubre full day de 24 h y nocturnos
+      // 30 h por defecto: cubre full day de 24 h y nocturnos.
+      const horasMax = activa("servicio_abandonado")?.umbral ?? UMBRAL_DEFECTO.servicio_abandonado;
       const { data: colgadas } = await admin
         .from("reservas")
         .select("id, fecha_servicio, hora_servicio, conductor_id, origen, destino")

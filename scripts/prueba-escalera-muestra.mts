@@ -201,6 +201,14 @@ function evidenciaDe(m: MensajeMuestra): string {
   chk("en el mismo minuto, igual (el caso del 12-10)", de({ no_inicio: { umbral: 1 } }, "no_inicio").codigo === "repite_debio");
   chk("si «Ya debió iniciar» no le escribe al conductor, «No inició» sí sale", de({ debio_iniciar: { notifica_conductor: false } }, "no_inicio").codigo === "sale");
   chk("con «Ya debió iniciar» apagado no repite nada", de({ debio_iniciar: { activo: false } }, "no_inicio").codigo === "sale");
+  // Sin plantilla «Ya debió iniciar» no sale (cron de un minuto): «No inició» es su primer aviso.
+  chk("si «Ya debió iniciar» no tiene plantilla, «No inició» sí sale", de({ debio_iniciar: { plantilla: null } }, "no_inicio").codigo === "sale");
+  // Los avisos pre-inicio del tick (bloque 3b) NO leen «Conductor»: le escriben al propio igual.
+  chk("«Próximo a iniciar» con «Conductor» desmarcado sigue saliendo (el tick no lee la casilla)",
+    de({ proximo_inicio: { notifica_conductor: false } }, "proximo_inicio").codigo === "sale");
+  chk("…y «Recuerda iniciar» igual", de({ recuerda_iniciar: { notifica_conductor: false } }, "recuerda_iniciar").codigo === "sale");
+  chk("«En el punto» con «Conductor» desmarcado → no_al_conductor (el tick sí la lee)",
+    de({ en_punto_sin_iniciar: { notifica_conductor: false } }, "en_punto_sin_iniciar").codigo === "no_al_conductor");
   chk("sin plantilla en el conductor → sin_plantilla y no se puede mandar", (() => {
     const m = de({ inicia_ahora: { plantilla: null } }, "inicia_ahora");
     return m.codigo === "sin_plantilla" && !m.enviable;
