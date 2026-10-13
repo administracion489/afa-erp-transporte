@@ -541,7 +541,7 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       {
         pregunta: "Me sale un aviso ámbar de que falta correr una migración. ¿Qué hago?",
         respuesta:
-          "La pantalla necesita dos funciones en la base de datos, que se crean con el archivo **supabase/gps-analitica-01-excesos.sql**. El despliegue no las crea solo: alguien con acceso a Supabase tiene que correr ese SQL una vez.\n\nMientras tanto la pantalla **no muestra ningún número** —unas listas vacías se leerían como «0 excesos», que sería falso— y lo dice en ámbar. Los excesos de un servicio sí se ven en **Uso de flota → Servicios**, que lee el recorrido completo de cada servicio.\n\nOjo al correrlo: crea un índice sobre la tabla de posiciones y, mientras lo construye, frena el registro del GPS de los conductores. Hazlo en hora valle.",
+          "La pantalla necesita dos funciones en la base de datos, que se crean con **supabase/gps-analitica-01a-puntos-rapidos.sql** y **supabase/gps-analitica-01b-velocimetro.sql**. El despliegue no las crea solo: alguien con acceso a Supabase tiene que pegar cada archivo **entero** en el editor SQL y correrlo, una vez.\n\nMientras tanto la pantalla **no muestra ningún número** —unas listas vacías se leerían como «0 excesos», que sería falso— y lo dice en ámbar. Los excesos de un servicio sí se ven en **Uso de flota → Servicios**, que lee el recorrido completo de cada servicio.\n\nEl tercer archivo, **supabase/gps-analitica-01c-indices.sql**, crea el índice que hace rápida la lectura. Mientras lo construye frena el registro del GPS de los conductores unos segundos: córrelo en hora valle.",
       },
       {
         pregunta: "¿Por qué el umbral solo va de 5 en 5?",

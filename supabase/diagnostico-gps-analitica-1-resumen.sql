@@ -1,6 +1,6 @@
 -- ══ diagnostico-gps-analitica-1-resumen.sql · SOLO LEE · a cualquier hora ═══════
--- ¿Cuánto pesa ubicaciones_gps, qué índices tiene y si gps-analitica-01 ya está? Antes y
--- después de esa migración. SQL Editor: pega el archivo ENTERO y Run. No recorre filas.
+-- ¿Cuánto pesa ubicaciones_gps, qué índices tiene y si gps-analitica-01a/b/c ya están? Antes
+-- y después de esa migración. SQL Editor: pega el archivo ENTERO y Run. No recorre filas.
 -- Termina con «-- FIN». Si sale «syntax error at end of input», se pegó cortado.
 with t as (
   select c.oid, c.reltuples, pg_total_relation_size(c.oid) as total,
@@ -18,11 +18,11 @@ st as (
     from pg_stat_user_tables s where s.relid = (select oid from t)
 ),
 fn as (
-  select x.orden, x.nombre, to_regprocedure(x.firma) as oid
+  select x.orden, x.nombre, x.parte, to_regprocedure(x.firma) as oid
     from (values
-      (8, 'fn_gps_puntos_rapidos', 'public.fn_gps_puntos_rapidos(timestamptz, timestamptz, integer)'),
-      (9, 'fn_gps_velocimetro',    'public.fn_gps_velocimetro(timestamptz, timestamptz, bigint[], bigint[])')
-    ) x(orden, nombre, firma)
+      (8, 'fn_gps_puntos_rapidos', 'public.fn_gps_puntos_rapidos(timestamptz, timestamptz, integer)', '01a'),
+      (9, 'fn_gps_velocimetro',    'public.fn_gps_velocimetro(timestamptz, timestamptz, bigint[], bigint[])', '01b')
+    ) x(orden, nombre, firma, parte)
 ),
 col as (
   select column_name from information_schema.columns
@@ -32,8 +32,8 @@ filas(orden, pregunta, respuesta, como_se_lee) as (
   select 1, 'Tamaño de ubicaciones_gps',
          coalesce((select pg_size_pretty(total) || ' en total · ' || pg_size_pretty(datos) || ' de datos · '
                           || pg_size_pretty(indices) || ' de índices' from t), 'LA TABLA NO EXISTE'),
-         'El CREATE INDEX de gps-analitica-01 lee la tabla entera con los INSERT de GPS bloqueados. '
-         || 'Con más de ~1 GB de datos, mejor por psql con CONCURRENTLY (ver sus NOTAS).'
+         'El CREATE INDEX de gps-analitica-01c lee la tabla entera con los INSERT de GPS bloqueados. '
+         || 'Con más de ~1 GB de datos, mejor por psql con CONCURRENTLY (gps-analitica-01-notas.md).'
   union all
   select 2, 'Filas (estimado, sin recorrer la tabla)',
          (select case when reltuples < 0 then 'sin estadísticas: la tabla nunca se analizó'
@@ -58,19 +58,19 @@ filas(orden, pregunta, respuesta, como_se_lee) as (
          'Uno de toda la tabla (sin «parcial») haría baratos los diagnósticos 3 y 4. idx_gps_rapidos es '
          || 'parcial: solo sirve para buscar puntos a 60 km/h o más.'
   union all
-  select 6, 'idx_gps_rapidos (gps-analitica-01)',
+  select 6, 'idx_gps_rapidos (gps-analitica-01c)',
          coalesce((select case when valido then 'instalado y válido' else 'INVÁLIDO: existe pero no se usa' end
                      from idx where nombre = 'idx_gps_rapidos'), 'falta'),
          'Falta = /seguridad-vial lee la tabla entera por cada día que mide. INVÁLIDO = un CONCURRENTLY '
-         || 'que no terminó: borrarlo y crearlo de nuevo por psql (NOTAS de gps-analitica-01).'
+         || 'que no terminó: borrarlo y crearlo de nuevo por psql (gps-analitica-01-notas.md).'
   union all
   select 7, 'Índices por conductor (retrasos.sql)',
          (select string_agg(x.nombre || ': ' || coalesce((select case when valido then 'válido' else 'INVÁLIDO' end
                                from idx where idx.nombre = x.nombre), 'falta'), ' · ')
             from (values ('idx_gps_conductor_fecha'), ('idx_gps_conductor_ter_fecha')) x(nombre)),
-         'Los usa fn_gps_velocimetro (y el semáforo de puntualidad). gps-analitica-01 los crea si faltan.'
+         'Los usa fn_gps_velocimetro (y el semáforo de puntualidad). gps-analitica-01c los crea si faltan.'
   union all
-  select f.orden, f.nombre || ' (gps-analitica-01)',
+  select f.orden, f.nombre || ' (gps-analitica-' || f.parte || ')',
          case when f.oid is null then 'falta'
               else 'instalada · anon: '
                    || case when has_function_privilege('anon', f.oid, 'execute') then 'PUEDE EJECUTARLA' else 'no' end
@@ -78,7 +78,7 @@ filas(orden, pregunta, respuesta, como_se_lee) as (
                    || case when has_function_privilege('authenticated', f.oid, 'execute') then 'PUEDE EJECUTARLA' else 'no' end
          end,
          'Falta = /seguridad-vial avisa en ámbar y no mide nada. Si anon o authenticated pueden ejecutarla, '
-         || 'devuelve posiciones de toda la flota a quien la llame: vuelve a correr gps-analitica-01.'
+         || 'devuelve posiciones de toda la flota a quien la llame: vuelve a correr su archivo (01a o 01b).'
     from fn f
   union all
   select 10, 'Columnas opcionales de ubicaciones_gps',

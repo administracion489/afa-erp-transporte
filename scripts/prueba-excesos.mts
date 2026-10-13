@@ -4,7 +4,7 @@
 //
 // LO QUE FIJAN:
 //   0. Las constantes dicen lo mismo que sus fuentes: VMAX_BUS_KMH de lib/huella.ts, ACC_CONFIABLE_M, el
-//      piso y el techo del SQL (supabase/gps-analitica-01-excesos.sql), su tope de puntos y de horas,
+//      piso y el techo del SQL (supabase/gps-analitica-01a/01b/01c), su tope de puntos y de horas,
 //      DIAS_RASTREO; y la API acepta exactamente 15 umbrales (de PASO_UMBRAL_KMH en PASO_UMBRAL_KMH).
 //   1. Los casos de libro: el fantasma FUSED (bus parado a «95 km/h») → sin_corroborar; el pico suelto →
 //      breve; la precisión nula → impreciso; > 130 → imposible; GPS simulado → simulado; p:5 y t:5 nunca
@@ -102,7 +102,27 @@ seccion("0 · constantes");
   const vmax = /const VMAX_BUS_KMH = (\d+)/.exec(huella)?.[1];
   chk("UMBRAL_MAX_KMH = VMAX_BUS_KMH de lib/huella.ts", Number(vmax) === X.UMBRAL_MAX_KMH, `huella dice ${vmax}`);
   chk("PRECISION_CORROBORA_M = ACC_CONFIABLE_M", X.PRECISION_CORROBORA_M === ACC_CONFIABLE_M && ACC_CONFIABLE_M === 20);
-  const sql = fs.readFileSync(path.join(process.cwd(), "supabase/gps-analitica-01-excesos.sql"), "utf8");
+  // La migración son tres archivos (supabase/gps-analitica-01-notas.md); las constantes se buscan en
+  // el que las usa, y se comprueba que cada uno se pueda pegar ENTERO en el SQL Editor.
+  const leerSql = (n: string) => fs.readFileSync(path.join(process.cwd(), "supabase", n), "utf8");
+  const PARTES = [X.MIGRACION_EXCESOS, X.MIGRACION_VELOCIMETRO, X.MIGRACION_INDICES_EXCESOS].map((m) => m.replace(/^supabase\//, ""));
+  const partes = PARTES.map((n) => ({ n, sql: leerSql(n) }));
+  const sql = partes.map((p) => p.sql).join("\n");
+  for (const p of partes) {
+    const lineas = p.sql.replace(/\n+$/, "").split("\n");
+    chk(`${p.n}: menos de 100 líneas (el visor del que se copia corta en la 100)`, lineas.length < 100, `${lineas.length} líneas`);
+    chk(`${p.n}: termina en «-- FIN de ${p.n}»`, lineas[lineas.length - 1] === `-- FIN de ${p.n}`);
+    const codigo = p.sql.split("\n").filter((l) => !/^\s*--/.test(l)).join("\n");
+    chk(`${p.n}: sin «SELECT … INTO» (el editor lo toma por una tabla sin RLS y pregunta)`, !/\binto\b/i.test(codigo));
+    const funciones = [...codigo.matchAll(/create or replace function (public\.\w+)\(/g)].map((m) => m[1]);
+    chk(`${p.n}: cada función que crea se revoca y se concede a service_role en el MISMO archivo`,
+      funciones.every((f) => new RegExp(`revoke all on function ${f.replace(".", "\\.")}\\([^)]*\\)\\s+from public, anon, authenticated;`).test(codigo)
+        && new RegExp(`grant execute on function ${f.replace(".", "\\.")}\\([^)]*\\)\\s+to service_role;`).test(codigo)));
+  }
+  chk("01a y 01b crean una función cada uno; 01c, ninguna",
+    J(partes.map((p) => (p.sql.match(/create or replace function/g) ?? []).length)) === J([1, 1, 0]));
+  chk("solo 01c toca la tabla con un candado (lock_timeout e índices)",
+    partes.every((p, i) => (i === 2) === /set lock_timeout/.test(p.sql)) && partes.every((p, i) => (i === 2) === /create index/.test(p.sql)));
   chk("el SQL lee con el literal del piso", sql.includes(`g.velocidad >= ${X.UMBRAL_MIN_KMH} `) && sql.includes(`where velocidad >= ${X.UMBRAL_MIN_KMH};`));
   chk("el SQL valida el mismo rango de umbral", sql.includes(`p_umbral < ${X.UMBRAL_MIN_KMH} or p_umbral > ${X.UMBRAL_MAX_KMH}`));
   chk("el SQL tiene el mismo tope de puntos", sql.includes(`c_tope      constant integer := ${X.TOPE_PUNTOS_LLAMADA};`));
@@ -736,7 +756,7 @@ const sinHora = (r: RespuestaExcesos) => J({ ...r, medidoEn: null });
   // Falta solo fn_gps_velocimetro: se mide igual, todos «no se sabe», con aviso.
   const sinVel = await D.excesosDelRango({ desde, hasta, umbral: 90 }, clienteFalso(tablas, { errorRpc: { fn_gps_velocimetro: { code: "PGRST202", message: "Could not find the function public.fn_gps_velocimetro in the schema cache" } } }));
   chk("sin fn_gps_velocimetro: se mide, todos «no se sabe», y se avisa nombrando el SQL",
-    sinVel.episodios.length === r.episodios.length && sinVel.conductores.every((c) => c.velocimetro === "no_se_sabe") && sinVel.avisos.some((x) => x.includes(X.MIGRACION_EXCESOS)));
+    sinVel.episodios.length === r.episodios.length && sinVel.conductores.every((c) => c.velocimetro === "no_se_sabe") && sinVel.avisos.some((x) => x.includes(X.MIGRACION_VELOCIMETRO)));
   // Un día recortado se dice.
   const recortado = await D.excesosDelRango({ desde: "2026-10-05", hasta: "2026-10-05", umbral: 60 }, clienteFalso(tablas, { tope: 50 }));
   chk("un día recortado se dice", recortado.diasRecortados.some((d) => d.fecha === "2026-10-05"));
