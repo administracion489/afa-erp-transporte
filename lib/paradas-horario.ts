@@ -168,8 +168,12 @@ export function fechaReferencia(a: {
   let fecha: string;
   let motivo = "";
   if (String(a.modoServicio || "").toLowerCase() === "fijo") {
-    const base = fServ && fServ > manana ? fServ : manana;
-    fecha = primerHabilDesde(base);
+    // El primer hábil desde el inicio del contrato, si todavía se puede consultar; si no (a
+    // más de 90 días), el primer hábil desde mañana.
+    const desdeServicio = fServ && fServ > manana ? primerHabilDesde(fServ) : null;
+    fecha = desdeServicio && consultable(desdeServicio) ? desdeServicio : primerHabilDesde(manana);
+    // A las 23:58 una salida de las 00:01 de mañana ya no admite el margen: el siguiente hábil.
+    for (let k = 0; k < 7 && !consultable(fecha); k++) fecha = primerHabilDesde(sumarDias(fecha, 1));
     motivo = "día hábil típico del contrato";
   } else if (fServ && consultable(fServ)) {
     fecha = fServ;
@@ -177,9 +181,11 @@ export function fechaReferencia(a: {
     const dow = diaSemana(fServ);
     fecha = manana;
     while (diaSemana(fecha) !== dow) fecha = sumarDias(fecha, 1);
+    if (!consultable(fecha)) fecha = sumarDias(fecha, 7);
     motivo = `el ${etiquetaFecha(fServ)} ya no se puede consultar: mismo día de la semana`;
   } else {
     fecha = primerHabilDesde(manana);
+    for (let k = 0; k < 7 && !consultable(fecha); k++) fecha = primerHabilDesde(sumarDias(fecha, 1));
     motivo = "sin fecha de servicio: próximo día hábil";
   }
 
@@ -307,13 +313,12 @@ function coordValida(v: string | number | null | undefined): boolean {
 export function requisitosHoras(paradas: { nombre: string; lat: string | number; lng: string | number; hora?: string | null }[]):
   { codigo: Exclude<CodigoPlan, "tramos_no_cuadran">; faltanCoords: string[] } {
   if (!Array.isArray(paradas) || paradas.length < 2) return { codigo: "pocos_puntos", faltanCoords: [] };
-  const faltan = paradas.filter((p) => !coordValida(p.lat) || !coordValida(p.lng)).map((p, i) => p.nombre?.trim() || `Paradero ${i + 1}`);
   // No se calcula a medias: un paradero sin coordenadas deja sin sentido a todos los siguientes.
-  if (faltan.length) {
-    const nombres = paradas.map((p, i) => ({ p, i })).filter(({ p }) => !coordValida(p.lat) || !coordValida(p.lng))
-      .map(({ p, i }) => p.nombre?.trim() || `Paradero ${i + 1}`);
-    return { codigo: "sin_coordenadas", faltanCoords: nombres };
-  }
+  const faltan = paradas
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => !coordValida(p.lat) || !coordValida(p.lng))
+    .map(({ p, i }) => p.nombre?.trim() || `Paradero ${i + 1}`);
+  if (faltan.length) return { codigo: "sin_coordenadas", faltanCoords: faltan };
   if (horaEscrita(paradas[0].hora) == null) return { codigo: "sin_hora_salida", faltanCoords: [] };
   return { codigo: "ok", faltanCoords: [] };
 }
