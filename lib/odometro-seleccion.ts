@@ -36,8 +36,6 @@ export type CandidatoOdometro = {
  *                      Es el error más frecuente de esta flota y tiene arreglo propio: mirar
  *                      la foto y teclear el número (nadie puede deducir cuál dígito sobra).
  *   - `fuera_de_banda` el número es imposible para la unidad por otra razón (retrocede, salta).
- *   - `eco`            el único número compatible clava el vigente: huele a que el modelo
- *                      repitió un dato que ya conocía en vez de leer la foto.
  *   - `parcial`        se registró otro número del tablero porque la IA entregó el trip.
  *   - `digito_repetido` el dígito que sobraba estaba DUPLICADO y colapsarlo da un único número
  *                      posible: se propone ese, para que una persona lo confirme contra la foto
@@ -46,7 +44,7 @@ export type CandidatoOdometro = {
  *                      la propia transcripción de la IA lo trae tras un punto («56129.2») y su
  *                      kilometraje es ese número sin el punto (561,292). Se registra la parte entera.
  */
-export type CodigoOdometro = "digito_de_mas" | "fuera_de_banda" | "eco" | "parcial" | "digito_repetido" | "decimal_como_entero";
+export type CodigoOdometro = "digito_de_mas" | "fuera_de_banda" | "parcial" | "digito_repetido" | "decimal_como_entero";
 
 export type VeredictoOdometro = {
   /** El km a registrar. null solo si la IA no leyó nada. */
@@ -74,8 +72,9 @@ export type VeredictoOdometro = {
   confirmar?: boolean;
   /**
    * Qué lectura dice lo mismo que el número deducido (a ≤ `CERCANIA_ANCLA_KM`, en el sentido en
-   * que avanza el odómetro). Solo lo lleva un `digito_repetido`, y es lo que le quita el
-   * `confirmar`: el número ya no descansa solo en la deducción del ERP.
+   * que avanza el odómetro). Lo lleva un `digito_repetido` —y es lo que le quita el `confirmar`:
+   * el número ya no descansa solo en la deducción del ERP— o un `parcial` cuyo total rescatado
+   * coincide con la lectura anterior (unidad detenida): ahí no hay nada que revisar.
    */
   testigo?: TestigoOdometro;
   candidatos: CandidatoOdometro[];
@@ -86,9 +85,9 @@ export type TestigoOdometro = "anterior" | "vigente" | "posterior";
 
 /**
  * «Coincide con el ancla»: a cuántos km un número se considera EL MISMO que una lectura ya
- * guardada. Heredado del guard anti-eco (que lo usaba como literal), no elegido: es la misma
- * pregunta —¿este número es el del ancla?— y dos respuestas distintas a la misma pregunta es
- * cómo el lector y el escritor terminan discrepando.
+ * guardada. Heredado del antiguo guard anti-eco (que lo usaba como literal), no elegido: es la
+ * misma pregunta —¿este número es el del ancla?— y dos respuestas distintas a la misma pregunta
+ * es cómo el lector y el escritor terminan discrepando.
  */
 export const CERCANIA_ANCLA_KM = 2;
 
@@ -104,9 +103,8 @@ export const CERCANIA_ANCLA_KM = 2;
  *      no devolvió el ancla: devolvió OTRO número, de seis cifras. Que el colapso caiga justo
  *      sobre lo que marcó la lectura anterior es lo que pasaría si el colapso es correcto y casi
  *      nunca si no lo es: equivocado, puede caer en cualquier punto de la banda (cientos de km).
- *      Es la razón inversa del guard anti-eco, y no se contradicen: aquel sospecha de un número
- *      que el MODELO escribió igual al ancla; aquí lo escribió distinto y la coincidencia la
- *      produjo una operación exacta del ERP.
+ *      (El antiguo guard anti-eco sospechaba de la coincidencia; se retiró porque al prompt ya
+ *      no va ningún kilometraje que copiar — ver el final de `elegirOdometro`.)
  *   2. ACEPTARLO NO PUEDE ENVENENAR NADA. El daño de un deducido equivocado es mover el km
  *      vigente y mandar a «retroceso» las lecturas buenas de los días siguientes. Un número a
  *      ≤ 2 km de una lectura que ya existe no mueve el vigente más de 2 km, y con la anterior
@@ -467,17 +465,23 @@ export function elegirOdometro(e: {
   const finalistas = sinDecimal.length ? sinDecimal : elegibles;
   const ganador = finalistas.reduce((a, b) => (b.valor > a.valor ? b : a));
 
-  // Guard anti-eco: un candidato que CLAVA el ancla no es una lectura, es el modelo
-  // repitiendo un número que ya conocía. Se exige coincidencia casi exacta (≤2 km): la
-  // tolerancia del piso (0,1% = 174 km en un odómetro de 174.000) es más que un día de
-  // recorrido, y usarla aquí descartaría avances reales como si fueran ecos.
-  if (Math.abs(ganador.valor - kmForma) <= CERCANIA_ANCLA_KM) {
-    return {
-      km: kmIA, kmIA, origen: "ia", autoOk: false, codigo: "eco",
-      motivo: `la IA devolvió ${fmt(kmIA)} y el único número compatible (${fmt(ganador.valor)}) coincide con ${kmAnt != null ? "la lectura anterior" : "el km vigente"} — puede ser un eco, no una lectura`,
-      candidatos: bruto,
-    };
-  }
+  // EL TOTAL QUE COINCIDE CON EL ANCLA ES UN TESTIGO, NO UN ECO.
+  //
+  // Aquí había un «guard anti-eco»: si el número rescatado clavaba el ancla (≤ 2 km) se daba por
+  // copiado y se registraba el PARCIAL que la IA había puesto en «kilometraje». Nació cuando el
+  // prompt llevaba el km vigente; desde que al prompt no va ningún kilometraje (lib/odometro-prompt.ts)
+  // el modelo no tiene de dónde copiarlo, y el guard castigaba justo el caso más común de la flota:
+  // la foto del tablero mandada al grupo un minuto después del check-out de la app, con la unidad
+  // detenida. Caso BUI-272, 12/10/2026: check-out 17:05 con 181,135; foto 17:06 al grupo; la IA
+  // cruzó parcial y total, el rescate encontró 181,135… y el guard registró 3,555 («Retrocede
+  // 177,580 km»). Además era incoherente: el mismo 181,135 en el campo correcto pasaba sin guard.
+  //
+  // Coincidir con la lectura anterior es lo que pasaría si el rescate es correcto: es la misma
+  // razón de `testigoDe` con el dígito repetido, y con la misma cercanía y dirección.
+  const testigo = testigoDe(ganador.valor, { base, kmPost, deVigente: kmAnt == null && kmPost == null });
+  const conQuien = testigo === "posterior"
+    ? `la lectura posterior ${fmt(kmPost!)}`
+    : testigo === "anterior" ? `la lectura anterior ${fmt(base)}` : `el km vigente ${fmt(base)}`;
 
   return {
     km: ganador.valor,
@@ -485,7 +489,11 @@ export function elegirOdometro(e: {
     origen: "corregido",
     autoOk: true,
     codigo: "parcial",
-    motivo: `la IA devolvió ${fmt(kmIA)} (${ganador.fuente === "trip" ? "el parcial/trip" : "un valor imposible"}); el sistema registró ${fmt(ganador.valor)}, el único número del tablero coherente con ${kmAnt != null ? "la" : "el"} ${ancla}`,
+    ...(testigo ? { testigo } : {}),
+    motivo: `la IA devolvió ${fmt(kmIA)} (${ganador.fuente === "trip" ? "el parcial/trip" : "un valor imposible"}); el sistema registró ${fmt(ganador.valor)}, ` +
+      (testigo
+        ? `el total del tablero, que coincide con ${conQuien} (unidad detenida)`
+        : `el único número del tablero coherente con ${kmAnt != null ? "la" : "el"} ${ancla}`),
     candidatos: bruto,
   };
 }
