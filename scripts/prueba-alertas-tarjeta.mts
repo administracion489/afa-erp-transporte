@@ -24,7 +24,7 @@ import {
 } from "../lib/escalera-inicio";
 import { REINTENTO_MIN, minutosLlamada } from "../lib/llamadas-central";
 import { ESCALAR_TRAS_RECORDATORIOS } from "../lib/alertas-checkout";
-import { MAX_SERVICIOS_JORNADA } from "../lib/alertas-flota";
+import { CONTINUA_DIURNA_MAX_MIN, CONTINUA_NOCTURNA_MAX_MIN, DESCANSO_MIN } from "../lib/alertas-flota";
 import { limaAUtcMs } from "../lib/alertas-horario";
 
 let fallos = 0;
@@ -69,7 +69,7 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
   const LO_DISPARA_OTRO = ["confirmacion_pasajero", "llegada_pasajero"];
   const UMBRAL_DEF: Record<string, number> = {
     no_inicio: 10, debio_iniciar: 1, llamada_inicio: 3, riesgo_retraso: 8, retraso_en_ruta: 10, sin_rastreo_previo: 30,
-    gps_silencio: 8, recordar_checkout: 60, doc_vence: 15, jornada: 13, servicio_abandonado: 30,
+    gps_silencio: 8, recordar_checkout: 60, doc_vence: 15, jornada: 10 /* horas de CONDUCCIÓN, RENAT art. 30.2 (antes 13 h de amplitud) */, servicio_abandonado: 30,
   };
 
   const malos: string[] = [];
@@ -123,7 +123,9 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
   const S = { umbral: 97, min: 83, hora: "23:41", persist: 71, cadencia: 59 };
   const ctxS: CtxTarjeta = { contactos: () => 2, persistenciaPuntoMin: S.persist, cadenciaCheckoutMin: S.cadencia };
   // Constantes del CÓDIGO que un texto sí puede decir (no son de la fila).
-  const PERMITIDAS = new Set([VENTANA_DEBIO_MIN, REINTENTO_MIN, ESCALAR_TRAS_RECORDATORIOS, MAX_SERVICIOS_JORNADA,
+  // Los topes de la jornada de conducción son de la NORMA (RENAT art. 30), no de la fila.
+  const PERMITIDAS = new Set([VENTANA_DEBIO_MIN, REINTENTO_MIN, ESCALAR_TRAS_RECORDATORIOS,
+    CONTINUA_DIURNA_MAX_MIN / 60, CONTINUA_NOCTURNA_MAX_MIN / 60, DESCANSO_MIN / 60,
     2 /* la tecla «marca 2» de la llamada (Opcion de lib/llamadas-central.ts) */].map(String));
   const SENTINELAS = new Set([S.umbral, S.min, S.persist, S.cadencia, S.umbral + VENTANA_DEBIO_MIN].map(String));
   const MODOS = ["anticipacion", "hora_fija", "evento", null];
@@ -312,9 +314,9 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
   chk("la nota dice los minutos de «Ya debió iniciar» y que va solo a los contactos", !!nota && /a los 4 min/.test(nota.texto) && /solo a los contactos/.test(nota.texto), nota?.texto);
 }
 
-// ── 7. Ámbar ⟺ sin_destinatarios ∨ conductor_apaga_todo; nunca en una tarjeta apagada ──
+// ── 7. Ámbar ⟺ sin_destinatarios ∨ conductor_apaga_todo ∨ umbral_sobre_norma; nunca apagada ──
 {
-  console.log("\n— Solo dos notas alarman, y nunca en una tarjeta apagada —");
+  console.log("\n— Solo tres notas alarman, y nunca en una tarjeta apagada —");
   let s = 20261013;
   const rnd = () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648; };
   const uno = <T,>(xs: T[]) => xs[Math.floor(rnd() * xs.length)];
@@ -339,7 +341,7 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
       casos++;
       const encendida = f.activoApaga ? cfg.activo : true;
       for (const x of notas) {
-        if (x.alarma !== (x.codigo === "sin_destinatarios" || x.codigo === "conductor_apaga_todo")) malos.push(`${clave}: ${x.codigo} alarma=${x.alarma}`);
+        if (x.alarma !== (x.codigo === "sin_destinatarios" || x.codigo === "conductor_apaga_todo" || x.codigo === "umbral_sobre_norma")) malos.push(`${clave}: ${x.codigo} alarma=${x.alarma}`);
         if (x.alarma && !encendida) malos.push(`${clave}: alarma en una tarjeta apagada (${x.codigo})`);
         if (!x.texto.trim()) malos.push(`${clave}: nota vacía`);
         if (x.alarma) alarmas++;
@@ -409,7 +411,8 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
   const tick = readFileSync(new URL("../app/api/alertas-flota/tick/route.ts", import.meta.url), "utf8");
   const sueltos = tick.match(/umbral\s*\?\?\s*\d/g) ?? [];
   chk("ningún `umbral ?? <número>` en el tick", sueltos.length === 0, sueltos.join(","));
-  chk("la jornada usa MAX_SERVICIOS_JORNADA (sin un 4 escrito)", /maxServicios:\s*MAX_SERVICIOS_JORNADA/.test(tick) && !/maxServicios:\s*\d/.test(tick));
+  // La jornada ya no cuenta servicios: se juzga en horas de conducción (prueba-jornada-conduccion.mts).
+  chk("la jornada ya no se decide por número de servicios", !/maxServicios/.test(tick) && /acumuladaMaxH/.test(tick));
   const usados = new Set([...tick.matchAll(/UMBRAL_DEFECTO\.(\w+)/g)].map((m) => m[1]));
   const tickLee = Object.keys(UMBRAL_DEFECTO).filter((k) => !["debio_iniciar", "llamada_inicio"].includes(k));
   chk("cada umbral del tick sale de UMBRAL_DEFECTO (los de 1 min salen de sus módulos)",

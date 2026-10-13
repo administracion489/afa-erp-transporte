@@ -1088,10 +1088,23 @@ export default function FichaServicio({
                     titulo="Posible solape de conductor"
                     detalle="El conductor aparece en otro servicio a la misma hora." />
                 )}
+                {/* La jornada se juzga en HORAS AL VOLANTE (lib/alertas-flota.ts, RENAT art. 30),
+                    no en «primera salida → último fin»: el descanso del horario partido no cuenta.
+                    El texto y el desglose los redacta el motor, el mismo del aviso por WhatsApp. */}
                 {s?.jornada_extensa && (
                   <Hallazgo tono="ambar" icono={<I.Clock size={14} color="#b45309" />}
-                    titulo="Jornada extensa del conductor"
-                    detalle="Demasiadas horas entre la primera salida y el último fin del día, o demasiados servicios. Riesgo de fatiga." />
+                    titulo="Conductor sobre el tope de conducción"
+                    detalle={
+                      <div>
+                        <p>{s.jornada?.motivo ?? "Pasa los topes de conducción del día."}</p>
+                        {Array.isArray(s.jornada?.detalle) && s.jornada.detalle.length > 0 && (
+                          <ul className="mt-1 space-y-0.5">
+                            {(s.jornada.detalle as string[]).map((d, i) => <li key={i}>· {d}</li>)}
+                          </ul>
+                        )}
+                        <p className="mt-1 italic">Es un piso: cuenta el itinerario de cada servicio, no los traslados en vacío.</p>
+                      </div>
+                    } />
                 )}
 
                 {/* Datos que no se pudieron leer. Decirlo es obligatorio: un cero que no es

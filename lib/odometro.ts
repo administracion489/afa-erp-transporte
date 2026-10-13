@@ -66,9 +66,11 @@ function horaLimaDeTs(ts: number): string | null {
 /**
  * Margen por debajo del cual un desfase de reloj es indistinguible de la latencia normal
  * (subida de la foto, cola de reintentos, redondeos). Corregir dentro de este margen sería
- * ruido; por encima, el reloj del dispositivo está realmente mal puesto.
+ * ruido; por encima, el reloj del dispositivo está realmente mal puesto. Lo HEREDA
+ * `MARGEN_RELOJ_FUTURO_MS` de lib/monitoreo-estado.ts (scripts/prueba-monitoreo-estado.mts coteja
+ * los dos): si se cambia uno, se cambia el otro.
  */
-const TOLERANCIA_RELOJ_MS = 5 * 60_000;
+export const TOLERANCIA_RELOJ_MS = 5 * 60_000;
 
 /**
  * Cuánto puede adelantarse la hora de una lectura con hora-tope para que su kilometraje encaje.
