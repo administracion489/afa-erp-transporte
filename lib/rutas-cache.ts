@@ -21,16 +21,15 @@ const supabaseAdmin =
     ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
     : null;
 
-/**
- * Firma geográfica de una ruta: las coordenadas en orden, redondeadas a 5 decimales (~1 m).
- * Las coordenadas salen de la tabla `paradas` y son estables, así que dos peticiones de la
- * misma ruta producen exactamente la misma clave.
- */
-export function firmaRuta(paradas: { lat: number; lng: number }[]): string {
-  return paradas.map((p) => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`).join("|");
-}
+// La firma se mudó a lib/ruta-firma.ts (pura) para que el navegador pueda usarla sin
+// arrastrar este cliente de base; se re-exporta para no cambiar a ningún importador.
+export { firmaRuta } from "./ruta-firma";
 
-export async function leerRutaCache(clave: string): Promise<any | null> {
+/**
+ * `ttlMs` permite a un llamador pedir una vigencia MÁS CORTA que la del almacén (una duración
+ * con tráfico previsto envejece antes que una geometría). Por defecto, la de siempre.
+ */
+export async function leerRutaCache(clave: string, ttlMs: number = TTL_MS): Promise<any | null> {
   if (!supabaseAdmin) return null;
   try {
     const { data, error } = await supabaseAdmin
@@ -40,7 +39,7 @@ export async function leerRutaCache(clave: string): Promise<any | null> {
       .maybeSingle();
 
     if (error || !data) return null;
-    if (Date.now() - new Date(data.creado_at).getTime() > TTL_MS) return null;
+    if (Date.now() - new Date(data.creado_at).getTime() > ttlMs) return null;
 
     return data.payload;
   } catch {

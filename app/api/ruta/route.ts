@@ -20,6 +20,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { guardarGasto, limitarGasto } from "@/lib/api-guard";
 import { firmaRuta, leerRutaCache, guardarRutaCache } from "@/lib/rutas-cache";
+import { claveGoogleDirections, consultarDirections, esErrorDirections } from "@/lib/google-directions";
 
 // Decodificar polilínea de Google
 function decodePoly(encoded: string): [number, number][] {
@@ -55,7 +56,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Se necesitan al menos 2 paradas con coordenadas" }, { status: 400 });
     }
 
-    const key = process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+    const key = claveGoogleDirections();
     if (!key) {
       return NextResponse.json({ error: "GOOGLE_MAPS_API_KEY no configurada en .env.local" }, { status: 500 });
     }
@@ -100,61 +101,30 @@ export async function POST(req: NextRequest) {
     if (excedido) return excedido;
 
     const tarea = (async () => {
-      const params = new URLSearchParams({
+      const params: Record<string, string> = {
         origin:       `${paradas[0].lat},${paradas[0].lng}`,
         destination:  `${paradas[paradas.length - 1].lat},${paradas[paradas.length - 1].lng}`,
-        key,
         mode:         "driving",
         alternatives: "false",
         language:     "es",
         region:       "pe",
-      });
+      };
       // Estos dos parámetros son los que suben el SKU a Advanced. Solo se mandan si de verdad
       // se quiere el ETA con tráfico en vivo.
       if (conTrafico) {
-        params.set("departure_time", "now");
-        params.set("traffic_model", "best_guess");
+        params.departure_time = "now";
+        params.traffic_model = "best_guess";
       }
       const waypoints = paradas.length > 2
         ? paradas.slice(1, -1).map(p => `${p.lat},${p.lng}`).join("|")
         : "";
-      if (waypoints) params.set("waypoints", waypoints);
-
-      const url = `https://maps.googleapis.com/maps/api/directions/json?${params}`;
+      if (waypoints) params.waypoints = waypoints;
 
       console.log(`[api/ruta] Llamando a Google Directions (${conTrafico ? "Advanced/tráfico" : "Essentials"})...`);
 
-      const res = await fetch(url, { cache: "no-store" });
-
-      if (!res.ok) {
-        console.error("[api/ruta] HTTP error:", res.status, res.statusText);
-        throw { estado: 502, cuerpo: { error: `Google HTTP ${res.status}: ${res.statusText}` } };
-      }
-
-      const data = await res.json();
-      console.log("[api/ruta] Google status:", data.status);
-
-      if (data.status !== "OK") {
-        const msg = data.error_message || data.status;
-        console.error("[api/ruta] Google error:", msg);
-
-        // Mensajes amigables para errores comunes
-        const mensajes: Record<string, string> = {
-          REQUEST_DENIED:    "Directions API no habilitada en Google Cloud Console — actívala en APIs & Services",
-          OVER_DAILY_LIMIT:  "Límite diario excedido — verificar facturación en Google Cloud",
-          OVER_QUERY_LIMIT:  "Demasiadas consultas — esperar un momento",
-          ZERO_RESULTS:      "No se encontró ruta entre las paradas — verificar coordenadas",
-          NOT_FOUND:         "Una o más paradas no son accesibles por carretera",
-          INVALID_REQUEST:   "Solicitud inválida — verificar coordenadas de paradas",
-        };
-
-        throw { estado: 422, cuerpo: { error: mensajes[data.status] || msg, google_status: data.status } };
-      }
-
-      // Verificar que hay rutas
-      if (!data.routes || data.routes.length === 0) {
-        throw { estado: 422, cuerpo: { error: "Google no devolvió rutas — verificar coordenadas" } };
-      }
+      // El fetch, el status de Google y sus mensajes viven en lib/google-directions.ts
+      // (compartido con /api/cotizaciones/horas-paraderos). Lanza { estado, cuerpo }.
+      const data = await consultarDirections(params, { key: key!, etiqueta: "api/ruta" });
 
       const route = data.routes[0];
 
@@ -195,6 +165,10 @@ export async function POST(req: NextRequest) {
           ? Math.round(leg.duration_in_traffic.value / 60)
           : Math.round((leg.duration?.value || 0) / 60),
         duracion_texto:       leg.duration_in_traffic?.text || leg.duration?.text || "—",
+        // En SEGUNDOS, sin redondear: el cálculo de horas de paraderos encadena tramos y
+        // redondear cada uno a minutos acumulaba el error en el último paradero.
+        duracion_s:           leg.duration?.value || 0,
+        duracion_trafico_s:   leg.duration_in_traffic?.value ?? (leg.duration?.value || 0),
       }));
 
       const totalMin = tramos.reduce((s: number, t: any) => s + t.duracion_trafico_min, 0);
@@ -228,7 +202,7 @@ export async function POST(req: NextRequest) {
 
   } catch (e: any) {
     // Errores de Google ya traducidos arriba (llevan estado/cuerpo propios).
-    if (e && typeof e === "object" && "estado" in e && "cuerpo" in e) {
+    if (esErrorDirections(e)) {
       return NextResponse.json(e.cuerpo, { status: e.estado });
     }
     console.error("[api/ruta] Exception:", e?.message, e?.stack);
