@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { guardarGasto, limitarGasto } from "@/lib/api-guard";
 import { leerRutaCache, guardarRutaCache } from "@/lib/rutas-cache";
+import { clavePuente } from "@/lib/ruta-firma";
 
 function decodePoly(encoded: string): [number, number][] {
   const coords: [number, number][] = [];
@@ -43,7 +44,9 @@ export async function POST(req: NextRequest) {
     }
 
     // Mismo hueco de GPS = mismas coordenadas = misma clave, entre sesiones y entre usuarios.
-    const clave = `puente:${aLat.toFixed(5)},${aLng.toFixed(5)}>${bLat.toFixed(5)},${bLng.toFixed(5)}`;
+    // La clave la deriva lib/ruta-firma.ts: «Ver recorrido» lee estos puentes de `rutas_cache` sin
+    // pagarlos, con la MISMA función (una sola clave para quien escribe y quien lee).
+    const clave = clavePuente(aLat, aLng, bLat, bLng);
     const cacheado = await leerRutaCache(clave);
     if (cacheado) return NextResponse.json(cacheado);
 

@@ -546,6 +546,8 @@ const dentro = (ts: number | null, v: Ventana): boolean =>
 // ══════════════════════════════════════════════════════════════════════════════════════
 
 type ParadaNorm = ParadaTiempos & { ordenN: number; completada: boolean; llegadaTs: number | null };
+/** Una parada de la reserva tal como la usa el motor: ordenada, `completada` y su llegada CREÍBLE. */
+export type ParadaHecho = ParadaNorm;
 
 function normalizarParadas(paradas: ParadaTiempos[] | null | undefined, v: Ventana): ParadaNorm[] {
   return (paradas || [])
@@ -645,23 +647,26 @@ const SIN_TIEMPOS = (nivel: NivelSalida, motivo: string): TiemposServicio => ({
 });
 
 /**
- * Deriva el horario real del servicio a partir de la evidencia que dejó el conductor.
- * Puro y determinista: mismas entradas, misma salida. No toca la base ni decide qué se guarda.
+ * LOS HECHOS DE LAS PARADAS de una reserva, como los lee `derivarTiempos` (de donde se extrajeron
+ * sin cambiar nada): las paradas ordenadas por `orden` (y `id`), cada una con `completada` (la marcó
+ * el conductor) y `llegadaTs`, su `hora_llegada` SOLO si cae dentro de la ventana de sanidad del día
+ * del servicio (fuera de ella queda completada sin hora: un hueco honesto, nunca una hora falsa); y
+ * `abordajesTs`, las horas de abordaje que valen como HORA: dentro de la ventana Y de una parada de
+ * ESTA reserva (`embarcar_qr` mueve pasajeros entre buses: una fila arrastrada de otro servicio
+ * metería la hora de otro viaje). `abordajesEvidencia` cuenta todos los abordajes con hora —también
+ * los de parada sin verificar o fuera de la ventana—: prueban que hubo servicio, no a qué hora.
+ *
+ * La ventana la fijan `reserva.fecha_servicio` y `ahoraMs` (si no es finito, el reloj). `hoy` se
+ * acepta porque es parte de la misma entrada que `derivarTiempos` (puede pasársele la misma), pero
+ * no cambia nada de esto. Pura.
  */
-export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
+export function hechosDeParadas(
+  e: Pick<EntradaTiempos, "reserva" | "paradas" | "abordajes" | "ahoraMs" | "hoy">,
+): { paradas: ParadaHecho[]; abordajesTs: number[]; abordajesEvidencia: number } {
   const r = e.reserva || {};
-  const estado: EstadoReserva = normalizaEstado(r.estado);
   const ahoraMs = Number.isFinite(e.ahoraMs) ? e.ahoraMs : Date.now();
-  const hoy = e.hoy || fechaLima(ahoraMs);
-  const gracia = Number.isFinite(Number(e.graciaMin))
-    ? Number(e.graciaMin)
-    : GRACIA_NO_INICIO_MIN;   // = `no_inicio` de alerta_config (10 min)
-  const brechaFines = Number.isFinite(Number(e.brechaFinesMin)) ? Number(e.brechaFinesMin) : BRECHA_FINES_MIN;
-
   const v = ventanaDelDia(r.fecha_servicio, ahoraMs);
   const paradas = normalizarParadas(e.paradas, v);
-  const gps = normalizarGps(e.gps, v);
-  const servicioMin = hhmmMin(r.hora_servicio);
 
   // Los abordajes se aceptan como HORA solo si pertenecen a una parada de ESTA reserva.
   // `embarcar_qr` mueve pasajeros entre paradas y entre buses (app/api/conductor/route.ts:638-665):
@@ -681,7 +686,7 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
     .filter((a): a is { paradaId: number | null; ts: number } => dentro(a.ts, v));
 
   // Abordajes que ocurrieron pero cuya hora NO es creíble (fuera de la ventana de sanidad).
-  // Cuentan como prueba de que hubo servicio, no como hora. Ver el bloque de GPS más abajo.
+  // Cuentan como prueba de que hubo servicio, no como hora. Ver el bloque de GPS de derivarTiempos.
   const abordajesFuera = (e.abordajes || [])
     .filter((a) => !!a && tsIso(a.hora_abordaje) !== null).length - abordajesConHora.length;
 
@@ -695,6 +700,34 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
   // "no arrancó" (rojo) — exactamente el falso positivo que este módulo existe para eliminar.
   // Y por el mismo motivo se suman los de hora increíble: la ventana juzga la HORA, no el hecho.
   const abordajesEvidencia = abordajesConHora.length + abordajesFuera;
+
+  return { paradas, abordajesTs, abordajesEvidencia };
+}
+
+/**
+ * Deriva el horario real del servicio a partir de la evidencia que dejó el conductor.
+ * Puro y determinista: mismas entradas, misma salida. No toca la base ni decide qué se guarda.
+ */
+export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
+  const r = e.reserva || {};
+  const estado: EstadoReserva = normalizaEstado(r.estado);
+  const ahoraMs = Number.isFinite(e.ahoraMs) ? e.ahoraMs : Date.now();
+  const hoy = e.hoy || fechaLima(ahoraMs);
+  const gracia = Number.isFinite(Number(e.graciaMin))
+    ? Number(e.graciaMin)
+    : GRACIA_NO_INICIO_MIN;   // = `no_inicio` de alerta_config (10 min)
+  const brechaFines = Number.isFinite(Number(e.brechaFinesMin)) ? Number(e.brechaFinesMin) : BRECHA_FINES_MIN;
+
+  const v = ventanaDelDia(r.fecha_servicio, ahoraMs);
+  // Paradas normalizadas y abordajes que valen como HORA: extraídos a `hechosDeParadas` (abajo)
+  // para que «Ver recorrido» lea los mismos hechos con la misma ventana de sanidad. Se le pasa el
+  // `ahoraMs` YA resuelto: si lo resolviera ella con su propio Date.now(), la ventana podía
+  // diferir en milisegundos de la de este motor.
+  const { paradas, abordajesTs, abordajesEvidencia } = hechosDeParadas({
+    reserva: r, paradas: e.paradas, abordajes: e.abordajes, ahoraMs, hoy,
+  });
+  const gps = normalizarGps(e.gps, v);
+  const servicioMin = hhmmMin(r.hora_servicio);
 
   const salioTs = (e.eventos || [])
     .filter((x) => x && x.evento === "salio")

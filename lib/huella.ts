@@ -4,6 +4,10 @@
 // cliente (app/cliente/page.tsx). Antes estaba duplicada y se desincronizaba: el modal se
 // arreglaba y "En vivo" quedaba con la huella cruda en zigzag. Mantener AQUÍ.
 
+// «Coordenada utilizable» tiene UNA definición en el ERP (null, vacía, no numérica, fuera de
+// rango o (0,0) exacto = sin dato). Es pura y sin dependencias: importarla no arrastra nada.
+import { coordValida } from "./cotizacion-ruta-coords";
+
 export type MatchPt = { lat: number; lng: number; acc: number };
 // `rumbo` (0-360) = dirección REAL que reporta el equipo (columna ubicaciones_gps.rumbo). Solo
 // llega con chip satelital/Doppler; con GPS de red viene 0 y se DERIVA por bearing al mostrarla.
@@ -620,6 +624,46 @@ export function resumenDeFilas(filas: any[]): ResumenViaje | null {
   return resumenViaje(limpia, crudos);
 }
 
+/**
+ * Techo de imprecisión con el que una fila de `ubicaciones_gps` entra a la huella. Es el que
+ * aplica `/api/cliente/gps` antes de devolverla (y el de la escritura del conductor, que acepta
+ * fixes hasta 1500 m a propósito: tablets/FUSED por red sin chip, y DELEGA la limpieza a quien
+ * lee). Por encima es basura de torre celular. Una sola definición para el modal y el recorrido.
+ */
+export const PRECISION_MAX_HUELLA_M = 1500;
+
+/**
+ * La CANALIZACIÓN de la huella del modal GPS (components/seguimiento/ModalGps.tsx), extraída para
+ * que «Ver recorrido» dibuje exactamente lo mismo: filas → `filasAPuntos` → `anclarImprecisos` →
+ * `limpiarHuella` → `conVelocidadColor`. Devuelve las TRES etapas porque cada una tiene su
+ * consumidor y no son intercambiables:
+ *   • `brutos`: lo que siembra el motor direccional (lib/avance-paradas.ts). Ni anclado ni limpio:
+ *     el anclaje mueve puntos ya consumidos y la limpieza destruye la cadencia de sus rachas.
+ *   • `crudos`: anclados, con TODOS sus ts — telemetría, resumen y la evidencia de los puentes.
+ *   • `limpio`: lo que se DIBUJA y de donde salen los huecos a puentear.
+ *
+ * Antes de convertir aplica dos filtros de FILA:
+ *   1. `PRECISION_MAX_HUELLA_M`, el mismo de `/api/cliente/gps` (sobre sus filas ya filtradas no
+ *      cambia nada; sobre filas leídas por otro camino, las deja iguales a las del modal).
+ *   2. DIVERGENCIA DECLARADA: una fila sin coordenadas utilizables (`coordValida`: lat/lng nulos,
+ *      vacíos, no numéricos, fuera de rango o (0,0) exacto) —o una fila nula— NO entra. El modal
+ *      la convertía en el punto (0,0) por `Number(null) === 0`, a miles de km de todo, y ese punto
+ *      partía la huella y fabricaba un hueco imposible. `filasAPuntos` NO se toca: la usan
+ *      `resumenDeFilas` y lib/km-servicio.ts, que importa la app del conductor.
+ * Con filas que pasan los dos filtros, el resultado es byte a byte el del modal
+ * (scripts/prueba-recorrido.mts, sección 6).
+ */
+export function huellaDeFilas(filas: any[] | null | undefined): { brutos: HuellaPt[]; crudos: HuellaPt[]; limpio: HuellaPt[] } {
+  const utiles = (filas || []).filter((f: any) =>
+    f != null
+    && (f.precision_m == null || f.precision_m <= PRECISION_MAX_HUELLA_M)
+    && coordValida(f.lat, f.lng));
+  const brutos = filasAPuntos(utiles);
+  const crudos = anclarImprecisos(brutos);
+  const limpio = conVelocidadColor(limpiarHuella(crudos));
+  return { brutos, crudos, limpio };
+}
+
 // ── PUENTE AZUL DE HUECOS (Idea 1) ──────────────────────────────────────────
 // Cuando la huella se CORTA por falta de GPS (túnel / zona muerta), en vez de dejar el hueco o —lo
 // PROHIBIDO— dibujar una recta que cruza casas, se rellena con el camino de CARRETERA real entre el
@@ -802,6 +846,119 @@ export function puentePorRuta(
   const out: [number, number][] = [];
   for (const c of seg) { const l = out[out.length - 1]; if (!l || l[0] !== c[0] || l[1] !== c[1]) out.push(c); }
   return out.length >= 2 ? out : null;
+}
+
+// ── LOS PUENTES DEL MODAL, EXTRAÍDOS ─────────────────────────────────────────
+// El bucle de puentes vivía dentro de components/seguimiento/ModalGps.tsx (y una tercera copia en
+// app/cliente/page.tsx, que no se migró). Se extrae en piezas para que «Ver recorrido» rellene los
+// huecos EXACTAMENTE igual que el modal sin pagar una sola llamada: la fase 1 (ruta planificada) no
+// toca la red, y la conversión de la respuesta de /api/ruta-puente sirve igual para la respuesta en
+// vivo que para la misma respuesta leída de `rutas_cache`. scripts/prueba-recorrido.mts (sección 7)
+// compara cada pieza contra el bloque original del modal copiado literal.
+
+/** Tope de huecos que se intentan puentear por ciclo (el resto queda como hueco honesto). */
+export const MAX_PUENTES = 30;
+
+/** Un tramo estimado ya validado contra la evidencia GPS, listo para dibujarse. `coords` en [lng, lat]. */
+export type PuenteEstimado = { coords: [number, number][]; km: number; min: number };
+
+/**
+ * Evidencia GPS real de un HUECO de señal (`origen: "hueco"`): los fixes crudos cuyo ts cae
+ * estrictamente entre las dos anclas de la huella limpia. Vacío = túnel real (validarPuente
+ * acepta sin el candado 3). La rama de una corrida CRUDA (vértices del Map Matching) se queda en
+ * el modal: depende de la geometría ajustada, que el recorrido no tiene.
+ */
+export function fixesDelHueco(
+  limpio: readonly HuellaPt[], crudos: readonly HuellaPt[], c: { iA: number; iB: number },
+): { lat: number; lng: number }[] {
+  const tA = limpio[c.iA]?.ts ?? 0, tB = limpio[c.iB]?.ts ?? 0;
+  if (!(tB > tA)) return [];
+  return crudos.filter((x) => x.ts > tA && x.ts < tB).map((x) => ({ lat: x.lat, lng: x.lng }));
+}
+
+/**
+ * FASE 1 de los puentes (síncrona, sin red): cada candidato se rellena SIGUIENDO LA RUTA PREVISTA
+ * (`puentePorRuta`) si esa geometría es coherente con la evidencia (`validarPuente`). `slots` va
+ * alineado por índice con `cands` (null = no se resolvió aquí) y `porGoogle` lista, en orden, los
+ * índices que el modal pide en la fase 2 a /api/ruta-puente. `fixes[ci]` es la evidencia del
+ * candidato `ci`. `ruta` es la polilínea de la ruta prevista en [lng, lat]; sin ruta, todos van a
+ * `porGoogle`.
+ */
+export function puentesPorRutaPrevista(
+  cands: readonly PuenteHueco[],
+  fixes: { lat: number; lng: number }[][],
+  ruta: [number, number][] | null | undefined,
+): { slots: (PuenteEstimado | null)[]; porGoogle: number[] } {
+  const slots: (PuenteEstimado | null)[] = new Array(cands.length).fill(null);
+  const porGoogle: number[] = [];
+  const geo = ruta || [];
+  for (let ci = 0; ci < cands.length; ci++) {
+    const c = cands[ci];
+    const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
+    const porRuta = puentePorRuta(A, B, geo);
+    if (porRuta && porRuta.length >= 2 && validarPuente(porRuta, A, B, fixes[ci], c.dt, c.dRecta)) {
+      let mts = 0;
+      for (let k = 1; k < porRuta.length; k++) mts += distM(porRuta[k - 1][1], porRuta[k - 1][0], porRuta[k][1], porRuta[k][0]);
+      slots[ci] = { coords: porRuta, km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) };
+    } else porGoogle.push(ci);
+  }
+  return { slots, porGoogle };
+}
+
+/** Status de /api/ruta-puente que significan «no hay camino» GEOMÉTRICO (permanente). */
+export const STATUS_PUENTE_SIN_CAMINO = ["ZERO_RESULTS", "NOT_FOUND", "SIN_GEOMETRIA"] as const;
+
+/**
+ * Lo que el modal guarda en su caché por hueco a partir de una respuesta de /api/ruta-puente (o de
+ * esa MISMA respuesta leída de `rutas_cache`, que solo guarda las `status: "OK"`). `transitorio`
+ * reemplaza al `expira` del modal para que esto no lea el reloj: un `ocultar` por un status que no
+ * es «sin camino» (HTTP 429/5xx, cuota, error) es transitorio y el modal le pone vencimiento
+ * (`expira = ahora + 60 s`); uno «sin camino» es permanente. El extremo crudo A/B se empalma solo
+ * si está pegado a la vía (≤ CONECTOR_MAX_M, el mismo 25 m del modal). `coords` en [lng, lat].
+ */
+export function puenteDeDirections(
+  j: any,
+  c: Pick<PuenteHueco, "aLat" | "aLng" | "bLat" | "bLng" | "dt" | "dRecta">,
+): { nivel: NivelPuente; coords: [number, number][]; km: number; dt: number; transitorio: boolean } {
+  if (j?.ocultar || j?.status !== "OK") {
+    return {
+      nivel: "ocultar", coords: [], km: 0, dt: c.dt,
+      transitorio: !(STATUS_PUENTE_SIN_CAMINO as readonly string[]).includes(j?.status),
+    };
+  }
+  const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
+  const gc: [number, number][] = (j.coords || []) as [number, number][];
+  const headOk = gc.length > 0 && distM(c.aLat, c.aLng, gc[0][1], gc[0][0]) <= CONECTOR_MAX_M;
+  const tailOk = gc.length > 0 && distM(c.bLat, c.bLng, gc[gc.length - 1][1], gc[gc.length - 1][0]) <= CONECTOR_MAX_M;
+  const coords: [number, number][] = nivel === "puente"
+    ? [...(headOk ? [[c.aLng, c.aLat] as [number, number]] : []), ...gc, ...(tailOk ? [[c.bLng, c.bLat] as [number, number]] : [])]
+    : [];
+  return { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt, transitorio: false };
+}
+
+/**
+ * La FASE 2 al dibujar: un puente de Google (la entrada de caché de `puenteDeDirections`) se
+ * dibuja SOLO si no es `ocultar`, tiene geometría y es coherente con la evidencia GPS. Si no, null.
+ */
+export function puenteEstimadoDeDirections(
+  r: { nivel: string; coords: [number, number][]; km: number } | null | undefined,
+  c: Pick<PuenteHueco, "aLat" | "aLng" | "bLat" | "bLng" | "dt" | "dRecta">,
+  fixes: { lat: number; lng: number }[],
+): PuenteEstimado | null {
+  const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
+  if (r && r.nivel !== "ocultar" && r.coords.length >= 2 && validarPuente(r.coords, A, B, fixes, c.dt, c.dRecta)) {
+    return { coords: r.coords, km: Math.round(r.km * 10) / 10, min: Math.round(c.dt / 60) };
+  }
+  return null;
+}
+
+/** El Feature GeoJSON con que el modal dibuja un tramo estimado (las dos fases lo arman igual). */
+export function featureDePuente(p: PuenteEstimado) {
+  return {
+    type: "Feature" as const,
+    geometry: { type: "LineString" as const, coordinates: p.coords },
+    properties: { nivel: "puente" as const, km: p.km, min: p.min },
+  };
 }
 
 // ── ÍCONO DEL BUS PEGADO A LA VÍA ────────────────────────────────────────────
@@ -1242,6 +1399,59 @@ export function colorearMatched(
 // pintaba el zigzag de red entero —192 cuerdas >60 m en la #962— cruzando manzanas. Ahora esa cuerda
 // no se dibuja; el estimado por ruta (verde petróleo) la cubre al terminar el Map Matching. Sin `acc`
 // (llamadores legacy) se conserva TODO (comportamiento idéntico al anterior).
+/**
+ * Un segmento de la huella cruda: sus dos extremos YA SUAVIZADOS (conservan el resto de sus
+ * propiedades, ts incluido si lo traían), la velocidad media con que se colorea y `tramo`, el
+ * índice del tramo contiguo al que pertenece — dos segmentos con distinto `tramo` están separados
+ * por un corte (salto > maxSegM o `cortaEntre`). Un tramo de un solo punto no da segmentos, así
+ * que los índices pueden saltar.
+ */
+export type SegmentoHuella<T> = { a: T; b: T; velocidad: number; tramo: number };
+
+/**
+ * Los SEGMENTOS de la huella cruda, sobre los que se construye `huellaCrudaFeatures` (que ahora es
+ * solo su versión GeoJSON, con salida idéntica a la de antes). Parte el trazo en tramos contiguos,
+ * suaviza cada tramo por distancia y emite un segmento por par. `cortaEntre(a, b)` es un corte
+ * EXTRA opcional (p. ej. un tramo «sin señal» de la cobertura de rastreo): se evalúa en la MISMA
+ * etapa que el corte por distancia, sobre los puntos CRUDOS consecutivos y ANTES de suavizar, así
+ * que el suavizado tampoco promedia a través de él. Sin `cortaEntre`, byte a byte lo de siempre.
+ */
+export function segmentosHuella<T extends { lat: number; lng: number; velocidad: number; acc?: number }>(
+  huellaPts: T[],
+  maxSegM = MAX_SEG_M,
+  omitirCrudoLargo = true,
+  cortaEntre?: (a: T, b: T) => boolean,
+): SegmentoHuella<T>[] {
+  const tramos: T[][] = [];
+  let cur: T[] = [];
+  for (let i = 0; i < huellaPts.length; i++) {
+    if (i > 0 && (
+      distM(huellaPts[i - 1].lat, huellaPts[i - 1].lng, huellaPts[i].lat, huellaPts[i].lng) > maxSegM
+      || (cortaEntre != null && cortaEntre(huellaPts[i - 1], huellaPts[i]))
+    )) {
+      if (cur.length) tramos.push(cur);
+      cur = [];
+    }
+    cur.push(huellaPts[i]);
+  }
+  if (cur.length) tramos.push(cur);
+
+  const segs: SegmentoHuella<T>[] = [];
+  for (let k = 0; k < tramos.length; k++) {
+    const pts = suavizarPorDistancia(tramos[k]);   // aplana jitter lento DENTRO del tramo (no cruza huecos)
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const d = distM(a.lat, a.lng, b.lat, b.lng);
+      // Cuerda cruda larga (extremo de red, cruza casas): se OMITE (antes gris "aprox"). Extremo sin
+      // acc (legacy) NO se omite → idéntico al comportamiento previo. La cubre el estimado por ruta.
+      // (La estela provisional pasa omitirCrudoLargo=false para dibujarla igual y no dejar el mapa vacío.)
+      if (omitirCrudoLargo && (esAccCruda(a.acc) || esAccCruda(b.acc)) && d > MAX_SEG_CRUDO_M) continue;
+      segs.push({ a, b, velocidad: ((a.velocidad ?? 0) + (b.velocidad ?? 0)) / 2, tramo: k });
+    }
+  }
+  return segs;
+}
+
 export function huellaCrudaFeatures(
   huellaPts: { lat: number; lng: number; velocidad: number; acc?: number }[],
   maxSegM = MAX_SEG_M,
@@ -1251,35 +1461,46 @@ export function huellaCrudaFeatures(
   // pega el trazo a la vía, en vez de dejar el mapa en blanco 1-2 min en terceros con GPS de red.
   omitirCrudoLargo = true,
 ): any[] {
-  const tramos: typeof huellaPts[] = [];
-  let cur: typeof huellaPts = [];
-  for (let i = 0; i < huellaPts.length; i++) {
-    if (i > 0 && distM(huellaPts[i - 1].lat, huellaPts[i - 1].lng, huellaPts[i].lat, huellaPts[i].lng) > maxSegM) {
-      if (cur.length) tramos.push(cur);
-      cur = [];
-    }
-    cur.push(huellaPts[i]);
-  }
-  if (cur.length) tramos.push(cur);
+  return segmentosHuella(huellaPts, maxSegM, omitirCrudoLargo).map((s) => ({
+    type: "Feature",
+    properties: { velocidad: s.velocidad },
+    geometry: { type: "LineString", coordinates: [[s.a.lng, s.a.lat], [s.b.lng, s.b.lat]] },
+  }));
+}
 
-  const feats: any[] = [];
-  for (const tramo of tramos) {
-    const pts = suavizarPorDistancia(tramo);   // aplana jitter lento DENTRO del tramo (no cruza huecos)
-    for (let i = 0; i < pts.length - 1; i++) {
-      const a = pts[i], b = pts[i + 1];
-      const d = distM(a.lat, a.lng, b.lat, b.lng);
-      // Cuerda cruda larga (extremo de red, cruza casas): se OMITE (antes gris "aprox"). Extremo sin
-      // acc (legacy) NO se omite → idéntico al comportamiento previo. La cubre el estimado por ruta.
-      // (La estela provisional pasa omitirCrudoLargo=false para dibujarla igual y no dejar el mapa vacío.)
-      if (omitirCrudoLargo && (esAccCruda(a.acc) || esAccCruda(b.acc)) && d > MAX_SEG_CRUDO_M) continue;
-      feats.push({
-        type: "Feature",
-        properties: { velocidad: ((a.velocidad ?? 0) + (b.velocidad ?? 0)) / 2 },
-        geometry: { type: "LineString", coordinates: [[a.lng, a.lat], [b.lng, b.lat]] },
-      });
-    }
-  }
-  return feats;
+// ── LA RAMPA DE VELOCIDAD Y EL RUMBO (presentación compartida) ─────────────────────────
+// La huella se colorea por velocidad con la MISMA rampa en la línea, en los puntitos de
+// telemetría y en la leyenda (Parado · Lento · Moderado · Rápido). Vivía como literal en cuatro
+// sitios (dos en el modal, dos en el portal del cliente); una pantalla nueva que la copiara a mano
+// pintaría «Lento» de otro color. `desdeKmh` son los cortes de la interpolación lineal de Mapbox y
+// `color` el de la línea; `claseLeyenda` es la del recuadro de la leyenda del modal (Tailwind, un
+// tono más claro que la línea: así está hoy y no se cambió).
+export const RAMPA_VELOCIDAD = [
+  { desdeKmh: 0, color: "#dc2626", etiqueta: "Parado", claseLeyenda: "bg-red-500" },
+  { desdeKmh: 15, color: "#f59e0b", etiqueta: "Lento", claseLeyenda: "bg-amber-400" },
+  { desdeKmh: 35, color: "#eab308", etiqueta: "Moderado", claseLeyenda: "bg-yellow-300" },
+  { desdeKmh: 55, color: "#16a34a", etiqueta: "Rápido", claseLeyenda: "bg-green-500" },
+] as const;
+
+/** Las cuatro etiquetas de la leyenda, en orden. */
+export const ETIQUETAS_VELOCIDAD = RAMPA_VELOCIDAD.map((r) => r.etiqueta);
+
+/** Color de los tramos ESTIMADOS (ruta prevista / Google): el verde petróleo de la leyenda. */
+export const COLOR_TRAMO_ESTIMADO = "#0f766e";
+
+/**
+ * La expresión Mapbox que colorea por velocidad: `["interpolate", ["linear"], ["get", prop], 0,
+ * "#dc2626", 15, …]`. Es la misma que el modal usa en `line-color` (dentro de su `case` del
+ * estimado) y en `circle-color`.
+ */
+export function expresionColorVelocidad(prop = "velocidad"): any[] {
+  return ["interpolate", ["linear"], ["get", prop], ...RAMPA_VELOCIDAD.flatMap((r) => [r.desdeKmh, r.color])];
+}
+
+/** Rumbo en grados → punto cardinal (popup de los puntitos de telemetría). */
+export function rumboCardinal(deg: number) {
+  const dirs = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
+  return dirs[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
 }
 
 // Cola VIVA: extiende el trazo AJUSTADO hasta el vehículo. El Map Matching se recalcula con
