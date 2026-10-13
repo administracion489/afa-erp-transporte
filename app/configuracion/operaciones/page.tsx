@@ -7,8 +7,9 @@ import { MARGEN_URGENTE_MIN, describirHorario, hhmmAMinutos, ventanaCubreMadruga
 // La MISMA tabla que usa el tick para decidir qué modo aplica a qué aviso: el motor importa
 // de ahí sus dos predicados. Sin eso, el guard que existe para que la pantalla no mienta
 // tendría su propia copia y sería el primero en quedarse atrás.
-import { cotejarModoTiempo, leeElModo, type ModoTiempo } from "@/lib/alertas-modo-tiempo";
+import { cotejarModoTiempo, leeElDirectorio, leeElModo, type ModoTiempo } from "@/lib/alertas-modo-tiempo";
 import PruebaAvisos from "./PruebaAvisos";
+import { TEXTO_ESTADO, plantillasQueUsa, revisarPlantillas } from "@/lib/plantillas-usadas";
 // La llamada de la central propia: su tarjeta no tiene canales de mensaje, tiene una central.
 import { CLAVE_LLAMADA, estadoCentral } from "@/lib/llamadas-central";
 // Las plantillas que las alertas usan y que hay que crear en Meta: el texto y sus variables en el
@@ -344,12 +345,14 @@ export default function ConfigOperacionesPage() {
   const claveBusqueda = (s: string | null | undefined) =>
     String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
   const qTipo = claveBusqueda(buscarTipo).trim();
+  // ¿La tarjeta le escribe de verdad al directorio? La columna (si dice false) y la tabla del motor.
+  const usaDirectorio = (c: AlertaCfg) => c.usa_directorio !== false && leeElDirectorio(c.clave) !== false;
   const tiposVisibles = [...cfgs]
     .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"))
     .filter((c) => !qTipo || claveBusqueda([
       c.nombre, c.descripcion, c.clave, c.plantilla,
       // La del directorio solo cuenta si de verdad le escribe a alguien (la misma condición del chip).
-      c.usa_directorio !== false && c.destinatarios.length > 0 ? (c.plantilla_directorio || "coordinador_alerta") : "",
+      usaDirectorio(c) && c.destinatarios.length > 0 ? (c.plantilla_directorio || "coordinador_alerta") : "",
     ].join(" ")).includes(qTipo));
 
   if (cargando) return <div className="p-8 text-sm text-gray-400">Cargando…</div>;
@@ -448,7 +451,7 @@ export default function ConfigOperacionesPage() {
                       📄 {c.plantilla}
                     </span>
                   )}
-                  {c.usa_directorio !== false && c.destinatarios.length > 0 && (
+                  {usaDirectorio(c) && c.destinatarios.length > 0 && (
                     <span className="font-mono text-[10px] text-purple-700 bg-purple-50 rounded px-1.5 py-0.5" title="Plantilla de lo que reciben los contactos del directorio">
                       👥 {c.plantilla_directorio || "coordinador_alerta"}
                     </span>
@@ -648,7 +651,7 @@ export default function ConfigOperacionesPage() {
                 bloque. Ofrecer ahí los contactos es prometer envíos que no ocurren — se
                 marcaron a mano una vez y nadie recibió nada. Mismo criterio que
                 `tiempo_editable` con el selector "Cuándo". */}
-            {dests.length > 0 && c.usa_directorio && (
+            {dests.length > 0 && usaDirectorio(c) && (
               <div className="mt-3">
                 <label className={label}>
                   {c.clave === CLAVE_LLAMADA ? "Si el conductor marca 2 («hablar con el coordinador»), avisar a:" : "También avisar a (directorio):"}
@@ -684,7 +687,42 @@ export default function ConfigOperacionesPage() {
             className="text-sm font-semibold text-white bg-[#0b315f] px-4 py-2 rounded-lg disabled:opacity-50">
             {cargandoTpl ? "Consultando Meta…" : "Cargar plantillas desde Meta"}
           </button>
-        ) : plantillas.length === 0 ? (
+        ) : (
+          <>
+          {/* ¿Están en Meta todas las plantillas que el ERP manda? Una tarjeta «Activo» con su plantilla
+              ausente no manda nada (#132001), y un aviso que sale una vez al mes no se prueba solo. */}
+          {(() => {
+            const revision = revisarPlantillas(plantillasQueUsa(cfgs.map((c) => ({
+              clave: c.clave, nombre: c.nombre, activo: c.activo, plantilla: c.plantilla,
+              plantilla_directorio: c.plantilla_directorio, destinatarios: c.destinatarios,
+              escribeAlDirectorio: usaDirectorio(c),
+            }))), plantillas);
+            const faltan = revision.filter((r) => r.estado !== "aprobada" && r.activa).length;
+            const color = { aprobada: "bg-green-50 text-green-700", en_revision: "bg-amber-50 text-amber-700",
+              rechazada: "bg-red-50 text-red-700", no_existe: "bg-red-50 text-red-700" } as const;
+            return (
+              <div className={`rounded-xl border p-3 mb-4 ${faltan ? "border-amber-200 bg-amber-50/40" : "border-green-200 bg-green-50/40"}`}>
+                <p className="text-xs font-bold text-gray-700 mb-1">
+                  {faltan
+                    ? `⚠ ${faltan} plantilla(s) que el ERP usa no están aprobadas en Meta: esos avisos no salen.`
+                    : "✓ Todas las plantillas que usan los avisos encendidos están aprobadas en Meta."}
+                </p>
+                <p className="text-[11px] text-gray-500 mb-2">
+                  Se crean abajo, en «Crear plantilla nueva» (con el mismo nombre). Las de tarjetas apagadas salen en gris.
+                </p>
+                <div className="space-y-1">
+                  {revision.map((r) => (
+                    <div key={r.nombre} className={`flex flex-wrap items-baseline gap-2 text-[11px] ${r.activa ? "" : "opacity-50"}`}>
+                      <span className="font-mono font-bold text-[#0b315f]">{r.nombre}</span>
+                      <span className={`px-1.5 py-0.5 rounded ${color[r.estado]}`}>{TEXTO_ESTADO[r.estado]}</span>
+                      <span className="text-gray-500">{r.usos.join(" · ")}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+          {plantillas.length === 0 ? (
           <div className="text-xs text-gray-400">No hay plantillas en la cuenta de avisos todavía.</div>
         ) : (
           <div className="space-y-4">
@@ -709,6 +747,8 @@ export default function ConfigOperacionesPage() {
               </div>
             ))}
           </div>
+        )}
+          </>
         )}
       </div>
 

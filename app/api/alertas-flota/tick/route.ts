@@ -29,7 +29,7 @@ import {
 } from "@/lib/alertas-modo-tiempo";
 import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
-import { noInicioRepiteDebio, textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
+import { detalleAlertaPrevia, listaEnUnaLinea, noInicioRepiteDebio, textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
 import { resumenAvisosDeReserva } from "@/lib/escalera-inicio-datos";
 
 export const maxDuration = 60;
@@ -495,7 +495,11 @@ async function handler(req: NextRequest) {
     {
       const cfg = activa("llamar_conductor");
       if (cfg) {
-        let n = 0;
+        // AGRUPADO POR TICK (13-10-2026): antes salía un WhatsApp cobrado POR SERVICIO —con 40
+        // servicios en la mañana, 40 mensajes al coordinador—. Ahora los que entran juntos a la
+        // ventana van en UN mensaje por coordinador (`coordinador_alerta`). Con uno solo, el
+        // mensaje personal de siempre (`coordinador_llamar_conductor`).
+        const tocan: { id: number; linea: string; nombreCond: string; ruta: string; hora: string }[] = [];
         for (const r of todas) {
           if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
           if (!["programada", "confirmada"].includes(r.estado)) continue;
@@ -504,9 +508,25 @@ async function handler(req: NextRequest) {
           const nombreCond = nombreCorto(condMap.get(r.conductor_id)?.nombre);
           const hora = horaCorta(r.hora_servicio);
           const ruta = rutaDe(r);
-          const rd = await aDirectorioPersonalizado(cfg, [nombreCond, ruta, hora]);
+          tocan.push({ id: r.id, nombreCond, ruta, hora, linea: `${hora} ${nombreCond} (${ruta})` });
+        }
+        let n = 0;
+        if (tocan.length === 1) {
+          const t = tocan[0];
+          const rd = await aDirectorioPersonalizado(cfg, [t.nombreCond, t.ruta, t.hora]);
           if (rd.enviados > 0) n++;
-          else if (rd.fallos > 0) await liberarEnvio("llamar_conductor", r.id); // transitorio → reintentar
+          else if (rd.fallos > 0) await liberarEnvio("llamar_conductor", t.id); // transitorio → reintentar
+        } else if (tocan.length > 1) {
+          tocan.sort((a, b) => a.hora.localeCompare(b.hora));
+          const detalle = listaEnUnaLinea(tocan.map((t) => t.linea), 600);
+          let enviados = 0, fallos = 0;
+          for (const d of directorioDe(cfg, destinatarios)) {
+            const rr = await enviarAvisoWhatsApp(d.telefono, "coordinador_alerta",
+              ["Llamar a conductores", `${tocan.length} conductores`, "Servicios de la próxima hora", detalle]);
+            if (rr.ok) enviados++; else fallos++;
+          }
+          if (enviados > 0) n = tocan.length;
+          else if (fallos > 0) for (const t of tocan) await liberarEnvio("llamar_conductor", t.id);
         }
         res.llamar_conductor = n;
       }
@@ -526,18 +546,25 @@ async function handler(req: NextRequest) {
       if (cfg) {
         let n = 0;
         for (const r of todas) {
-          if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
-          if (!["programada", "confirmada"].includes(r.estado)) continue; // sin GPS ni salida confirmada
+          // Propios siempre; TERCERIZADOS si la tarjeta tiene «Incluir tercerizados» (13-10-2026:
+          // antes solo propios, mientras «No inició a tiempo» sí los incluía).
+          const ref = condDe(r);
+          if (!ref) continue;
+          if (ref.tabla === "conductores_tercero" && cfg.notifica_conductor_tercero !== true) continue;
+          if (!["programada", "confirmada"].includes(r.estado)) continue; // aún no pulsa INICIAR RECORRIDO
           if (!enViaRecordatorio(cfg, r, hoy, manana, ahora, force)) continue;
           if (!(await reclamarEnvio("alerta_no_inicio_previa", r.id))) continue;
-          const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
+          const nombre = nombreCorto(datosCond(ref)?.nombre);
           const hora = horaCorta(r.hora_servicio);
           const ruta = rutaDe(r);
+          const ini = hhmmAMin(r.hora_servicio);
+          const faltan = ini == null ? Number(cfg.min_anticipacion ?? 25)
+            : (r.fecha_servicio === hoy ? ini : ini + 1440) - ahora;
           // Lo que ya se le mandó y si le llegó: con «ningún WhatsApp le llegó» el coordinador
           // sabe que el teléfono no tiene datos y que lo que sirve es llamarlo.
           const evidencia = (await resumenAvisosDeReserva(r.id, ahoraMs)).texto;
           const rd = await aDirectorio(cfg, ["Falta iniciar recorrido", nombre, `${ruta} ${hora}`,
-            `Faltan ~25 min y el conductor aún no confirma salida (sin GPS) en la app.${evidencia ? ` ${evidencia}` : ""}`]);
+            detalleAlertaPrevia(faltan, evidencia)]);
           if (rd.enviados > 0) n++;
           else if (rd.fallos > 0) await liberarEnvio("alerta_no_inicio_previa", r.id); // transitorio → reintentar
         }
@@ -575,9 +602,9 @@ async function handler(req: NextRequest) {
       const cfg = activa("no_inicio");
       if (cfg) {
         const gracia = cfg.umbral ?? 10;
-        // Con «No inició» en el mismo minuto (o antes) que «Ya debió iniciar», al conductor le
-        // llegaría el MISMO texto dos veces: se le calla a él; el coordinador sigue avisado.
-        const repiteDebio = noInicioRepiteDebio(cfg, activa("debio_iniciar"));
+        // Si «Ya debió iniciar» ya le escribió a este conductor el MISMO texto, el +10 va solo
+        // al coordinador (noInicioRepiteDebio, por conductor: propio o tercerizado).
+        const cfgDebio = activa("debio_iniciar");
         let n = 0;
         for (const r of todas) {
           if (r.fecha_servicio !== hoy) continue;
@@ -596,7 +623,7 @@ async function handler(req: NextRequest) {
           const ref = condDe(r);
           const nombre = ref ? nombreCorto(datosCond(ref)?.nombre) : "Conductor";
           let exitos = 0, fallos = 0;
-          if (cfg.notifica_conductor && ref && !repiteDebio) {
+          if (cfg.notifica_conductor && ref && !noInicioRepiteDebio(cfgDebio, ref.tabla === "conductores_tercero")) {
             const rc = await aConductor(cfg, ref, [nombre, hora, ruta, telConting], {
               reservaId: r.id,
               push: textoPushInicio("no_inicio", { hora, origen: r.origen || ruta }),

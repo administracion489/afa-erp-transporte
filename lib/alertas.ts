@@ -206,7 +206,8 @@ export async function cargarConfigAlerta(clave: string): Promise<AlertaConfig | 
 /**
  * Teléfono de CONTINGENCIA que se muestra en los mensajes al conductor ("si tienes un
  * problema, llama al Coordinador: …"). Sale del directorio (es_contingencia=true) para
- * poder cambiarlo desde el ERP sin re-aprobar plantillas en Meta. Fallback: número fijo.
+ * poder cambiarlo desde el ERP sin re-aprobar plantillas en Meta. Respaldo: el teléfono del
+ * perfil de la empresa y, sin él, «la central de operaciones» (nunca un número escrito aquí).
  */
 export async function telefonoContingencia(): Promise<string> {
   try {
@@ -220,7 +221,15 @@ export async function telefonoContingencia(): Promise<string> {
     const t = (data?.telefono || "").trim();
     if (t) return t.startsWith("+") ? t : (t.replace(/\D/g, "").length === 9 ? `+51 ${t}` : t);
   } catch { /* tabla/columna aún sin migrar → fallback */ }
-  return "+51 912 569 005";
+  // Sin contacto de contingencia: el teléfono del perfil de la empresa. Antes caía a un número de
+  // AFA escrito aquí — este ERP se vende, y en otra instalación ese número sería de otra empresa.
+  try {
+    const { data } = await admin.from("empresa_perfil").select("telefono").eq("id", 1).maybeSingle();
+    const t = String((data as { telefono?: string | null } | null)?.telefono ?? "").trim();
+    if (t) return t.startsWith("+") ? t : (t.replace(/\D/g, "").length === 9 ? `+51 ${t}` : t);
+  } catch { /* sin perfil → frase genérica */ }
+  // Un parámetro de plantilla no puede ir vacío: se nombra a quién llamar sin inventar un número.
+  return "la central de operaciones";
 }
 
 // ─── DEDUPE INSERT-ONCE (alerta_enviada) ───────────────────────────────────────

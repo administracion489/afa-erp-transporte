@@ -89,11 +89,11 @@ const CFG = { activo: true, modo_tiempo: "evento", umbral: 3 };
   chk("saluda por el primer nombre", t.mensaje.startsWith("Hola Sergio. "), t.mensaje);
   chk("dice quién llama, la hora en palabras y el punto", t.mensaje.includes("Te llama la central de AFA Transportes")
     && t.mensaje.includes("de las seis y treinta de la mañana") && t.mensaje.includes("desde Puente Santa Anita"), t.mensaje);
-  chk("y UNA orden: pulsa INICIAR", /Abre el app del conductor y pulsa INICIAR\.$/.test(t.mensaje), t.mensaje);
+  chk("y UNA orden: check-in e INICIAR RECORRIDO", /Abre el app del conductor, haz tu check in y pulsa INICIAR RECORRIDO\.$/.test(t.mensaje), t.mensaje);
   chk("el menú de teclas va aparte", /marca uno/.test(t.menu) && /marca dos/.test(t.menu) && !t.mensaje.includes("marca"));
   const sinNada = textoLlamada({});
   chk("sin empresa: «la central de operaciones», sin hora ni punto inventados",
-    sinNada.mensaje === "Hola. Te llama la central de operaciones. Tu servicio ya debió iniciar. Abre el app del conductor y pulsa INICIAR.", sinNada.mensaje);
+    sinNada.mensaje === "Hola. Te llama la central de operaciones. Tu servicio ya debió iniciar. Abre el app del conductor, haz tu check in y pulsa INICIAR RECORRIDO.", sinNada.mensaje);
   chk("sin espacios dobles", !/ {2,}/.test(t.mensaje) && !/ {2,}/.test(sinNada.mensaje));
 
   // REVISIÓN DE SEGURIDAD: el nombre y el origen los teclea cualquiera en el ERP y la llamada los
