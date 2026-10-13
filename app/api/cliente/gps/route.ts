@@ -13,7 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { paginarFilas } from "@/lib/huella";
+import { paginarFilas, PRECISION_MAX_HUELLA_M } from "@/lib/huella";
 import { verificarTokenPortal, reservaEsDelCliente, filtrarVehiculosDelCliente } from "@/lib/portal-auth";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { sembrarAvance, leerAvance, type ParadaAvance, type FixAvance } from "@/lib/avance-paradas";
@@ -223,7 +223,7 @@ export async function POST(req: NextRequest) {
       // vacía o con huecos → rectas, justo en equipos posicionados por red. La imprecisión
       // ya la absorben limpiarHuella + los radii de Map Matching (acc·1.5), así que basta
       // descartar solo la basura de torre celular (el MISMO techo que la escritura).
-      const filasOk = base.filter((p: any) => p.precision_m == null || p.precision_m <= 1500);
+      const filasOk = base.filter((p: any) => p.precision_m == null || p.precision_m <= PRECISION_MAX_HUELLA_M);
       // `servicio` viaja con la huella para que el modal aplique la MISMA cota al fix EN VIVO
       // (que no pasa por aquí: llega por el modo individual) y no vuelva a envenenar el motor
       // por la puerta de atrás. `desdeTs` nunca recorta evidencia dura: si hay puntos atados a

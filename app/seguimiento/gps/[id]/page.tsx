@@ -9,6 +9,12 @@
 // Maps JavaScript y una consulta de Directions con tráfico. Ahora no se le consulta nada a Google: la
 // traza y los episodios salen de /api/seguimiento/recorrido (lib/flota/recorrido.ts), con el mismo
 // motor que la columna «Excesos» de /uso-flota.
+//
+// La segunda corrección (reportada por el dueño): el mapa pintaba la traza de un solo azul y los
+// huecos como rectas grises que cruzaban manzanas. Ahora dibuja lo mismo que el modal GPS de
+// /seguimiento —la huella por velocidad, los tramos estimados sobre la ruta prevista ya guardada y
+// los datos por punto— y el «sin señal» es EXACTAMENTE el de la celda RASTREO, marcado solo en sus
+// dos extremos. El bloque RASTREO pinta el veredicto de la torre con su chip, su banda y su frase.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
@@ -19,8 +25,10 @@ import { etiquetaEstado, normalizaEstado } from "@/lib/estados";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { leerUmbral, UMBRALES_ACEPTADOS, UMBRAL_DEFECTO_KMH } from "@/lib/flota/excesos";
 import { episodioEnfocado, leerInicio, urlRecorrido } from "@/lib/flota/recorrido-url";
-import type { RecorridoServicio, EpisodioMapa } from "@/lib/flota/recorrido";
-import MapaRecorrido, { horaLima, COLOR_TRAZA, COLOR_EXCESO, COLOR_DESCARTADO, COLOR_HUECO } from "@/components/seguimiento/MapaRecorrido";
+import type { RecorridoServicio, EpisodioMapa, TramoSinSenal, CodigoRutaPrevista } from "@/lib/flota/recorrido";
+import { bandaCobertura, type CodigoRastreo } from "@/lib/gps-cobertura";
+import MapaRecorrido, { horaLima, duracionTramo, movimientoTramo, COLOR_EXCESO, COLOR_SIN_SENAL, type FocoSinSenal } from "@/components/seguimiento/MapaRecorrido";
+import { TIPO_TRAMO } from "@/components/seguimiento/ModalDiagnosticoRastreo";
 
 // ── TIPOS ──────────────────────────────────────────────────────────────────────
 
@@ -47,6 +55,22 @@ type DatosServicio = {
 
 type EstadoRecorrido = { cargando: boolean; error: string | null; data: RecorridoServicio | null };
 
+// Las bandas medidas del veredicto: con ellas se pinta además el rótulo de la banda, como en el
+// diagnóstico del rastreo (ModalDiagnosticoRastreo). La celda de la torre no lo lleva por espacio.
+const CODIGOS_BANDA: CodigoRastreo[] = ["completo", "aceptable", "con_cortes", "incompleto"];
+// Códigos sin %: la torre los pinta en gris, sin chip.
+const SIN_CHIP: CodigoRastreo[] = ["no_aplica", "recien_iniciado", "sin_medir"];
+
+/** La línea del estado de la ruta prevista: por CÓDIGO, nunca olfateando el detalle. */
+function textoRutaPrevista(codigo: CodigoRutaPrevista, detalle: string): string {
+  if (codigo === "guardada") return "Tramos estimados sobre la ruta prevista guardada.";
+  if (codigo === "no_guardada") return "La ruta prevista no está guardada: ábrela una vez en el modal GPS para guardarla.";
+  return detalle;
+}
+
+const metrosTxt = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`);
+const plural = (n: number, uno: string, varios: string) => `${n.toLocaleString("es-PE")} ${n === 1 ? uno : varios}`;
+
 // Etiqueta canónica única (lib/estados).
 function fmtEstado(e: string) {
   return etiquetaEstado(normalizaEstado(e));
@@ -71,6 +95,7 @@ export default function GpsServicioPage() {
   const [inicioPedido,   setInicioPedido]   = useState<number | null>(null);
   const [enfocado,       setEnfocado]       = useState<number | null>(null);
   const [verDescartados, setVerDescartados] = useState(false);
+  const [focoSinSenal,   setFocoSinSenal]   = useState<FocoSinSenal | null>(null);
   const [rec,            setRec]            = useState<EstadoRecorrido>({ cargando: true, error: null, data: null });
   const pedido = useRef(0);
 
@@ -177,6 +202,7 @@ export default function GpsServicioPage() {
   // Cambiar el umbral cambia los episodios: el foco viejo ya no apunta a nada.
   const cambiarUmbral = (u: number) => {
     setEnfocado(null);
+    setFocoSinSenal(null);
     setUmbral(u);
     window.history.replaceState(null, "", urlRecorrido(reservaId, { umbral: u }));
   };
@@ -212,6 +238,21 @@ export default function GpsServicioPage() {
   const r           = rec.data;
   const cuentan     = eps.filter((e) => e.cuenta);
   const descartados = eps.filter((e) => !e.cuenta);
+  const sinSenal: TramoSinSenal[] = r?.sinSenal ?? [];
+  const vered       = r?.rastreo ?? null;
+  const epsDecimados = r?.episodiosCoordsDecimadas === true;
+  const puntosVistos = r?.puntos?.length ?? 0;
+  const notasDibujo: string[] = [];
+  if (r) {
+    if (r.medidoDecimado) notasDibujo.push("huella simplificada para dibujarla");
+    if (r.medidoOmitidos > 0) notasDibujo.push(`${plural(r.medidoOmitidos, "tramo medido corto", "tramos medidos cortos")} sin dibujar`);
+    if (r.estimadosDecimados) notasDibujo.push("tramos estimados simplificados");
+    if (r.estimadosOmitidos > 0) notasDibujo.push(`${plural(r.estimadosOmitidos, "tramo estimado corto", "tramos estimados cortos")} sin dibujar`);
+    // Los tramos «sin señal» omitidos se dicen junto a su lista (r.sinSenalTotal > sinSenal.length).
+    if (r.puntosTotal > puntosVistos) notasDibujo.push(`datos por punto: se muestran ${puntosVistos.toLocaleString("es-PE")} de ${r.puntosTotal.toLocaleString("es-PE")}`);
+    if (epsDecimados) notasDibujo.push("posiciones de los excesos muestreadas para dibujarlas");
+    if ((r.episodiosDescartadosOmitidos ?? 0) > 0) notasDibujo.push(`${plural(r.episodiosDescartadosOmitidos, "exceso descartado no se lista", "excesos descartados no se listan")}`);
+  }
 
   return (
     <div className="h-screen flex flex-col bg-[#0b1a2e] overflow-hidden">
@@ -258,24 +299,20 @@ export default function GpsServicioPage() {
             recorrido={r}
             paradas={paradasMapa}
             enfocado={enfocado}
+            focoSinSenal={focoSinSenal}
             mostrarDescartados={verDescartados}
             onElegir={setEnfocado}
           />
 
-          {/* Leyenda */}
-          <div className="absolute top-3 left-3 bg-white/95 rounded-xl shadow px-3 py-2 text-[11px] text-gray-700 space-y-1">
-            <p className="flex items-center gap-2"><span className="inline-block w-5 h-1 rounded" style={{ background: COLOR_TRAZA }} /> Recorrido GPS</p>
-            <p className="flex items-center gap-2"><span className="inline-block w-5 h-1.5 rounded" style={{ background: COLOR_EXCESO }} /> Exceso de velocidad</p>
-            <p className="flex items-center gap-2"><span className="inline-block w-5 border-t-2 border-dashed" style={{ borderColor: COLOR_HUECO }} /> Sin señal</p>
-            {verDescartados && <p className="flex items-center gap-2"><span className="inline-block w-5 border-t-2 border-dashed" style={{ borderColor: COLOR_DESCARTADO }} /> Descartado</p>}
-          </div>
-
           {rec.cargando && (
             <div className="absolute top-3 right-14 bg-white/95 rounded-xl shadow px-3 py-2 text-xs text-gray-600">Leyendo el recorrido…</div>
           )}
-          {!rec.cargando && r && r.tramos.length === 0 && r.excesos.codigo !== "no_aplica" && (
-            <div className="absolute inset-x-0 top-16 mx-auto w-fit bg-white/95 rounded-xl shadow px-4 py-2 text-xs text-gray-700">
-              No llegaron posiciones GPS con coordenadas para este servicio.
+          {!rec.cargando && r && r.posiciones === 0 && r.excesos.codigo !== "no_aplica" && (
+            <div className="absolute inset-x-4 bottom-4 md:bottom-auto md:top-16 mx-auto w-fit max-w-md bg-white/95 rounded-xl shadow px-4 py-2 text-xs text-gray-700">
+              {/* Sin medir: la traza no se pudo leer, y eso NO es «no llegaron posiciones». */}
+              {r.rastreo?.codigo === "sin_medir"
+                ? (r.rastreo.detalle || "No se pudo leer el GPS de este servicio: no se afirma que no haya posiciones.")
+                : "No llegaron posiciones GPS con coordenadas para este servicio."}
             </div>
           )}
 
@@ -360,6 +397,12 @@ export default function GpsServicioPage() {
                             {Math.round(ep.durS)} s · pico {Math.round(ep.velMaxSensor)} km/h
                             {ep.velGeom != null ? ` · posiciones ${Math.round(ep.velGeom)} km/h` : ""}
                           </p>
+                          {/* Dónde ocurrió: informativo, no descuenta nada (el exceso cuenta igual). */}
+                          {ep.contexto?.texto && (
+                            <p className="mt-1 inline-block rounded-md bg-blue-950/60 px-1.5 py-0.5 text-[10px] font-bold text-blue-200" title={ep.contexto.motivo}>
+                              {ep.contexto.texto}
+                            </p>
+                          )}
                         </button>
                       </li>
                     ))}
@@ -379,6 +422,7 @@ export default function GpsServicioPage() {
                     {descartados.map((ep: EpisodioMapa) => (
                       <li key={ep.inicioTs} className="text-[11px] text-amber-200/90" title={ep.detalle}>
                         {horaLima(ep.inicioTs)} · pico {Math.round(ep.velMaxSensor)} km/h · {ep.detalle}
+                        {ep.contexto?.texto && <span className="text-blue-300" title={ep.contexto.motivo}> · {ep.contexto.texto}</span>}
                       </li>
                     ))}
                   </ul>
@@ -396,17 +440,93 @@ export default function GpsServicioPage() {
             {r && r.posiciones > 0 && r.primeraTs != null && r.ultimaTs != null && (
               <p className="text-blue-500 text-[10px] mt-3">
                 {r.posiciones.toLocaleString("es-PE")} posiciones GPS · {horaLima(r.primeraTs)} → {horaLima(r.ultimaTs)}
-                {r.huecos.length + r.huecosOmitidos ? ` · ${r.huecos.length + r.huecosOmitidos} tramo${r.huecos.length + r.huecosOmitidos === 1 ? "" : "s"} sin señal` : ""}
               </p>
             )}
-            {r && (r.decimada || r.tramosOmitidos > 0 || r.huecosOmitidos > 0) && (
+          </div>
+
+          {/* Rastreo GPS: el MISMO veredicto de la celda RASTREO de /seguimiento (chip, banda y frase
+              del motor) y sus tramos «sin señal», que en el mapa se marcan solo en sus extremos. */}
+          <div className="bg-[#1a2f4a] rounded-2xl p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-2">Rastreo GPS</p>
+            {rec.cargando && !r && <p className="text-blue-300 text-xs">Midiendo…</p>}
+            {!rec.cargando && !r && !rec.error && <p className="text-blue-300 text-xs">—</p>}
+            {vered && (
+              <>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {!SIN_CHIP.includes(vered.codigo) ? (
+                    <span className={`inline-block text-sm font-black px-2 py-0.5 rounded-lg whitespace-nowrap ${vered.problema === "urgente" ? "animate-pulse" : ""}`}
+                      style={{ color: vered.color, background: vered.bg }}>{vered.celda}</span>
+                  ) : (
+                    <span className="text-sm font-black text-gray-300">{vered.celda || "—"}</span>
+                  )}
+                  {CODIGOS_BANDA.includes(vered.codigo) && vered.pct != null && (
+                    <span className="text-xs font-bold text-blue-100">{bandaCobertura(vered.pct).label}</span>
+                  )}
+                </div>
+                {vered.detalle && <p className="text-blue-200 text-[11px] leading-snug mt-1.5 break-words">{vered.detalle}</p>}
+              </>
+            )}
+
+            {r && (
+              <div className="mt-3 space-y-1 text-[11px] text-blue-200">
+                <p>
+                  <span className="text-blue-400">Sin señal: </span>
+                  {r.sinSenalTotal == null
+                    ? (vered?.codigo === "no_aplica" ? "no se mide (el servicio no corrió)" : "no se pudo medir")
+                    : r.sinSenalTotal === 0 ? "ningún tramo" : plural(r.sinSenalTotal, "tramo", "tramos")}
+                </p>
+                {r.cortesEnMovimiento != null && (
+                  <p>
+                    <span className="text-blue-400">Cortes en movimiento: </span>{r.cortesEnMovimiento.toLocaleString("es-PE")}
+                    {r.kmACiegas != null && r.cortesEnMovimiento > 0 ? ` · ${r.kmACiegas.toLocaleString("es-PE", { maximumFractionDigits: 1 })} km sin señal` : ""}
+                  </p>
+                )}
+                {r.rutaPrevista && (
+                  <p className="text-blue-300" title={r.rutaPrevista.detalle}>
+                    <span className="text-blue-400">Ruta prevista: </span>{textoRutaPrevista(r.rutaPrevista.codigo, r.rutaPrevista.detalle)}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {sinSenal.length > 0 && (
+              <ul className="mt-3 space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                {sinSenal.map((t, i) => {
+                  const ubicable = t.desde != null || t.hasta != null;
+                  const avance = t.avanceM != null ? `avanzó ${metrosTxt(t.avanceM)} · ` : "";
+                  return (
+                    <li key={`${t.desdeTs}-${i}`}>
+                      <button type="button" disabled={!ubicable}
+                        onClick={() => setFocoSinSenal((f) => ({ i, n: (f?.n ?? 0) + 1 }))}
+                        className={`w-full text-left rounded-xl px-3 py-2 transition-colors ${ubicable ? "bg-[#0b315f] hover:bg-[#13427a]" : "bg-[#0b315f]/60 cursor-not-allowed"} ${focoSinSenal?.i === i ? "ring-1 ring-slate-300" : ""}`}>
+                        <p className="text-white text-xs font-black">
+                          <span className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle" style={{ background: COLOR_SIN_SENAL }} />
+                          {TIPO_TRAMO[t.tipo] ?? t.tipo} · {horaLima(t.desdeTs)}–{horaLima(t.hastaTs)} · {duracionTramo(t.durS)}
+                        </p>
+                        <p className="text-blue-200 text-[11px]">
+                          {avance}{movimientoTramo(t)}{t.estimado ? " · cubierto por un tramo estimado" : ""}
+                        </p>
+                        {!ubicable && <p className="text-blue-400 text-[10px]">Sin posición en sus bordes: no se puede ubicar en el mapa.</p>}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {r && r.sinSenalTotal != null && r.sinSenalTotal > sinSenal.length && (
               <p className="text-blue-500 text-[10px] mt-1">
-                Traza simplificada para dibujarla
-                {r.tramosOmitidos > 0 ? ` · ${r.tramosOmitidos} tramo${r.tramosOmitidos === 1 ? "" : "s"} corto${r.tramosOmitidos === 1 ? "" : "s"} sin dibujar` : ""}
-                {r.huecosOmitidos > 0 ? ` · ${r.huecosOmitidos} hueco${r.huecosOmitidos === 1 ? "" : "s"} corto${r.huecosOmitidos === 1 ? "" : "s"} sin dibujar` : ""}
-                . Los excesos se miden con todas las posiciones.
+                Se listan y se marcan {sinSenal.length.toLocaleString("es-PE")} de {r.sinSenalTotal.toLocaleString("es-PE")} (los más largos); el total es el de la celda.
               </p>
             )}
+
+            {notasDibujo.length > 0 && (
+              <p className="text-blue-500 text-[10px] mt-3">
+                Para dibujarlo: {notasDibujo.join(" · ")}. Los excesos y el rastreo se miden con todas las posiciones.
+              </p>
+            )}
+            <p className="text-blue-500 text-[10px] mt-2">
+              El trazo une las posiciones GPS; no se ajusta a la vía con un servicio de pago.
+            </p>
           </div>
 
           {/* Conductor */}
