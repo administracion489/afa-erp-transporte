@@ -96,7 +96,7 @@ export default function SelectorCliente({ clientes, valor, onElegir, uso, recien
   const cerrar = () => { setAbierto(false); setTexto(""); setActivo(-1); };
   const abrir = () => { if (abierto) return; setAbierto(true); setTexto(""); setActivo(-1); };
   const elegir = (o: Opcion | undefined) => {
-    if (!o) return;
+    if (!o || cargando) return; // lo que se ve es «Cargando…»: no se elige lo que no se ve
     if (o.tipo === "crear") onCrear?.(o.texto);
     else onElegir(o.c);
     cerrar();
@@ -120,14 +120,14 @@ export default function SelectorCliente({ clientes, valor, onElegir, uso, recien
   const mostrado = abierto ? texto
     : elegido ? rotuloCliente(elegido)
     : valor ? (cargando ? "Cargando…" : `Cliente #${valor}`) : "";
-  const idActivo = abierto && activo >= 0 ? `${idBase}-op-${activo}` : undefined;
+  const idActivo = abierto && !cargando && activo >= 0 ? `${idBase}-op-${activo}` : undefined;
   const anuncio = !abierto ? "" : cargando ? "Cargando clientes" : `${nClientes} resultado${nClientes === 1 ? "" : "s"}`;
 
   return (
     <div className="relative w-full">
       <span aria-hidden className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">🔍</span>
       <input
-        role="combobox" aria-expanded={abierto} aria-controls={listId} aria-autocomplete="list"
+        role="combobox" aria-label="Buscar cliente" aria-expanded={abierto} aria-controls={listId} aria-autocomplete="list"
         aria-activedescendant={idActivo} inputMode="search" autoComplete="off" spellCheck={false}
         className={`w-full border border-gray-200 rounded-xl pl-9 ${elegido && !abierto ? "pr-24" : "pr-3"} py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all ${!abierto && !elegido && valor ? "text-gray-400" : ""}`}
         placeholder={abierto && elegido ? rotuloCliente(elegido) : (placeholder ?? "Buscar por nombre, RUC, DNI, teléfono…")}

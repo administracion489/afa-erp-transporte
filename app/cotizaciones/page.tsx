@@ -909,9 +909,20 @@ function LocationInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputC
 }
 
 const DRAFT_KEY="afa_cot_borrador_v1";
+// La cartera ENTERA, por páginas con orden total: PostgREST corta en 1000 filas y el buscador no
+// puede decir «no hay» de un cliente que quedó en la página 2. null = no se pudo leer (no es «vacía»).
+async function leerClientes():Promise<Cliente[]|null>{
+  const out:Cliente[]=[];
+  for(let d=0;d<50000;d+=1000){const{data,error}=await supabase.from("clientes").select("*").order("nombre").order("id").range(d,d+999);if(error)return null;out.push(...(data||[]));if(!data||data.length<1000)break;}
+  return out;
+}
+type ContactoCl={nombre:string|null;apellido:string|null;cargo:string|null;telefono:string|null;email:string|null;principal:boolean|null};
 
 export default function CotizacionesPage(){
   const [clientes,setClientes]=useState<Cliente[]>([]);const [cotizas,setCotizas]=useState<Cotizacion[]>([]);const [tarifas,setTarifas]=useState<Tarifa[]>([]);const [flota,setFlota]=useState<VehiculoFlota[]>([]);const [flotaTercero,setFlotaTercero]=useState<VehiculoTerceroFlota[]>([]);const [paramsDB,setParamsDB]=useState<ParamCosto[]>([]);const [preciosDB,setPreciosDB]=useState<Record<string,number>>({});
+  const [cargandoClientes,setCargandoClientes]=useState(true);const [errorClientes,setErrorClientes]=useState(false);const [contactosDe,setContactosDe]=useState<{id:string;lista:ContactoCl[]}>({id:"",lista:[]});
+  // «+ Crear» abre /clientes en otra pestaña: solo si ESTA pantalla lo pidió se autoselecciona el creado.
+  const esperaClienteRef=useRef(false);
   const [loading,setLoading]=useState(false);const [guardando,setGuardando]=useState(false);const [mostrarForm,setMostrarForm]=useState(false);const [editandoId,setEditandoId]=useState<number|null>(null);const [busqueda,setBusqueda]=useState("");const [filtroEst,setFiltroEst]=useState("todos");const [filtroModo,setFiltroModo]=useState("todos");
   const [draftRecuperado,setDraftRecuperado]=useState(false);
   const [cfgDefault,setCfgDefault]=useState<CotPlantillaConfig|null>(null);
@@ -1031,8 +1042,8 @@ export default function CotizacionesPage(){
 
   const cargar=async()=>{
     setLoading(true);
-    const[clR,cotR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([supabase.from("clientes").select("*").order("nombre").limit(1000),supabase.from("cotizaciones").select("*").order("id",{ascending:false}),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),supabase.from("cotizacion_plantillas").select("*").eq("id","corporativo").maybeSingle()]);
-    setClientes(clR.data||[]);setCotizas(cotR.data||[]);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
+    const[clR,cotR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([leerClientes(),supabase.from("cotizaciones").select("*").order("id",{ascending:false}),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),supabase.from("cotizacion_plantillas").select("*").eq("id","corporativo").maybeSingle()]);
+    if(clR){setClientes(clR);setErrorClientes(false);}else setErrorClientes(true);setCargandoClientes(false);setCotizas(cotR.data||[]);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
     const pr:Record<string,number>={};(cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});setPreciosDB(pr);
     const emps:any[]=empR.data||[];
     setFlotaTercero((vtR.data||[]).map((v:any)=>({...v,empresa_nombre:emps.find((e:any)=>e.id===v.empresa_id)?.razon_social||"Empresa tercerizada"})));
@@ -1046,6 +1057,42 @@ export default function CotizacionesPage(){
     setLoading(false);
   };
   useEffect(()=>{cargar();},[]);
+  // Elegir cliente = lo que hacía el onChange del <select>: guarda el id como texto y propone el IGV por tipo.
+  const aplicarCliente=(cl:ClienteBuscable|null)=>setForm(p=>({...p,cliente_id:cl?String(cl.id):"",incluye_igv:cl?.tipo==="b2b"?true:false}));
+  // Solo los del cliente que está puesto ahora: los de un cliente anterior no se enseñan ni un instante.
+  const contactosCl=contactosDe.id===form.cliente_id?contactosDe.lista:[];
+  const usoCl=useMemo(()=>usoPorCliente(cotizas),[cotizas]);
+  const recientesCl=useMemo(()=>recientesDe(cotizas,8),[cotizas]);
+  const abrirAltaCliente=(texto:string)=>{
+    const t=texto.trim();const dig=t.replace(/\s+/g,"");
+    const qs=/^\d{8}(\d{3})?$/.test(dig)?`&doc=${encodeURIComponent(dig)}`:t?`&nombre=${encodeURIComponent(t)}`:"";
+    esperaClienteRef.current=true;window.open(`/clientes?nuevo=1${qs}`,"_blank","noopener");
+  };
+  // Alta en la otra pestaña → recargar la lista; seleccionar solo si esta pantalla lo pidió y el id llegó.
+  // Volver a la pestaña también recarga (sin autoseleccionar): pudo editarse o crearse sin el canal.
+  useEffect(()=>{
+    let vivo=true;
+    const recargar=async()=>{const l=await leerClientes();if(vivo&&l)setClientes(l);return vivo?l:null;};
+    let canal:BroadcastChannel|null=null;
+    try{if(typeof BroadcastChannel!=="undefined"){canal=new BroadcastChannel("afa-clientes");canal.onmessage=async(ev)=>{
+      const m=ev.data;if(!m||m.tipo!=="creado"||typeof m.id!=="number"||!Number.isFinite(m.id))return;
+      const l=await recargar();if(!l||!esperaClienteRef.current)return;
+      const cl=l.find(c=>c.id===m.id);if(!cl)return;
+      esperaClienteRef.current=false;aplicarCliente(cl);
+    };}}catch{/* sin canal, basta con volver a la pestaña */}
+    const alVolver=()=>{if(document.visibilityState==="visible")recargar();};
+    document.addEventListener("visibilitychange",alVolver);
+    return()=>{vivo=false;document.removeEventListener("visibilitychange",alVolver);try{canal?.close();}catch{}};
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+  // Contactos del cliente elegido, como atajo para «Atención». Best-effort: si falla, no se muestra nada.
+  useEffect(()=>{
+    const clave=form.cliente_id,id=Number(clave);if(!clave||!Number.isFinite(id))return;
+    let vigente=true;
+    supabase.from("contactos").select("nombre,apellido,cargo,telefono,email,principal").eq("cliente_id",id).order("principal",{ascending:false}).order("nombre")
+      .then(({data,error}:{data:ContactoCl[]|null;error:unknown})=>{if(vigente&&!error)setContactosDe({id:clave,lista:(data||[]).filter(c=>String(c.nombre??"").trim())});},()=>{});
+    return()=>{vigente=false;};
+  },[form.cliente_id]);
 
   // Restaurar borrador al montar
   useEffect(()=>{
@@ -1149,7 +1196,7 @@ export default function CotizacionesPage(){
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.equipamiento||"full_equipo",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
@@ -1677,7 +1724,7 @@ export default function CotizacionesPage(){
   };
 
   const totC=cotizas.length;const pend=cotizas.filter(c=>c.estado==="pendiente").length;const env=cotizas.filter(c=>c.estado==="enviado").length;const apr=cotizas.filter(c=>c.estado==="aprobado").length;const tasa=totC>0?Math.round(apr/totC*100):0;const pendDesc=cotizas.filter(c=>c.descuento_solicitado&&!c.descuento_autorizado).length;
-  const nomCl=(id:number|null)=>{const c=clientes.find(cl=>cl.id===id);if(!c)return "Sin cliente";return c.tipo==="b2b"?(c.empresa||c.nombre):c.nombre;};
+  const nomCl=(id:number|null)=>{const c=clientes.find(cl=>cl.id===id);if(!c)return "Sin cliente";return rotuloCliente(c);};
   // Búsqueda permisiva (lib/busqueda-texto.ts): sin importar mayúsculas, tildes, signos
   // ni el orden de las palabras. El cliente se busca por EMPRESA, nombre y RUC — antes solo
   // por `nombre`, así que la razón social que se ve en la lista no se encontraba.
@@ -1759,7 +1806,14 @@ export default function CotizacionesPage(){
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Identificación</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <Campo label="Cliente" req><div className="flex gap-2"><select className={iCls()} value={form.cliente_id} onChange={e=>{const id=e.target.value;const cl=clientes.find(c=>c.id===Number(id));setForm(p=>({...p,cliente_id:id,incluye_igv:cl?.tipo==="b2b"?true:false}));}}><option value="">— Seleccionar ({clientes.length}) —</option>{clientes.filter(c=>c.estado!=="bloqueado").sort((a,b)=>{const nA=c=>c.tipo==="b2b"?(c.empresa||c.nombre):c.nombre;return nA(a).localeCompare(nA(b));}).map(c=>{const esB2B=c.tipo==="b2b";const label=esB2B?(c.empresa||c.nombre):c.nombre;const doc=esB2B?"":(c.dni?` · DNI ${c.dni}`:"");return<option key={c.id} value={c.id}>{label}{doc}</option>;})}</select><a href="/clientes" target="_blank" rel="noreferrer" className="flex-shrink-0 w-10 h-10 rounded-xl border-2 flex items-center justify-center font-black text-lg" style={{background:"#eef3f8",borderColor:"#0b315f33",color:"#0b315f"}}>+</a></div></Campo>
+                <Campo label="Cliente" req extra={!cargandoClientes&&!errorClientes&&<span className="ml-1.5 normal-case tracking-normal font-semibold text-gray-300">· {clientes.filter(c=>!esBloqueado(c)).length} clientes</span>}>
+                  <div className="flex gap-2"><SelectorCliente clientes={clientes} valor={form.cliente_id} onElegir={aplicarCliente} uso={usoCl} recientes={recientesCl} onCrear={abrirAltaCliente} cargando={cargandoClientes}/><button type="button" onClick={()=>abrirAltaCliente("")} title="Crear cliente (se abre en otra pestaña)" aria-label="Crear cliente" className="flex-shrink-0 w-10 h-10 rounded-xl border-2 flex items-center justify-center font-black text-lg" style={{background:"#eef3f8",borderColor:"#0b315f33",color:"#0b315f"}}>+</button></div>
+                  {(()=>{if(!form.cliente_id)return null;const cl=clientes.find(c=>c.id===Number(form.cliente_id));
+                    if(cl&&esBloqueado(cl))return<p className="text-[11px] font-semibold text-red-600 mt-1">Cliente bloqueado: no se puede guardar así</p>;
+                    if(!cl&&errorClientes)return<p className="text-[11px] font-semibold text-amber-700 mt-1">No se pudo cargar la lista de clientes: no se puede comprobar el cliente #{form.cliente_id}. Recarga la página.</p>;
+                    if(!cl&&!cargandoClientes)return<p className="text-[11px] font-semibold text-red-600 mt-1">Cliente #{form.cliente_id} no encontrado</p>;
+                    return null;})()}
+                </Campo>
                 <Campo label="N° cotización"><input className={iCls("font-mono")} placeholder="Ej: 10996" value={form.numero_cotizacion} onChange={f("numero_cotizacion")}/></Campo>
                 <Campo label="Estado"><select className={iCls()} value={form.estado} onChange={f("estado")}><option value="pendiente">Pendiente</option><option value="enviado">Enviado</option><option value="rechazado">Rechazado</option></select></Campo>
                 <Campo label="IGV" span={2}>
@@ -1773,7 +1827,9 @@ export default function CotizacionesPage(){
                     {!form.incluye_igv&&<span className="text-[10px] text-amber-700 font-semibold bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">El PDF mostrará "No incluye IGV"</span>}
                   </div>
                 </Campo>
-                <Campo label="Atención" span={2}><input className={iCls()} placeholder="Nombre del responsable" value={form.atencion} onChange={f("atencion")}/></Campo>
+                <Campo label="Atención" span={2}><input className={iCls()} placeholder="Nombre del responsable" value={form.atencion} onChange={f("atencion")}/>
+                  {contactosCl.length>0&&<div className="flex flex-wrap gap-1.5 mt-1.5">{contactosCl.map((c,i)=>{const nom=[c.nombre,c.apellido].map(x=>String(x??"").trim()).filter(Boolean).join(" ");const puesto=form.atencion.trim()===nom;return<button key={i} type="button" onClick={()=>setForm(p=>({...p,atencion:nom}))} title={[c.cargo,c.telefono,c.email].filter(Boolean).join(" · ")||undefined} className="text-[11px] rounded-lg border px-2 py-1 min-h-[32px] text-left transition-colors" style={{background:puesto?"#eef3f8":"white",borderColor:puesto?"#0b315f":"#e5e7eb",color:"#0b315f"}}>{c.principal?"★ ":""}<span className="font-semibold">{nom}</span>{c.cargo&&<span className="text-gray-400"> · {c.cargo}</span>}</button>;})}</div>}
+                </Campo>
                 <Campo label="Asunto"><input className={iCls()} placeholder="Ej: Traslado aeropuerto" value={form.asunto} onChange={f("asunto")}/></Campo>
               </div>
             </div>
