@@ -206,7 +206,7 @@ export function textoLlamada(d: { nombre?: string | null; hora?: string | null; 
   const hora = horaHablada(d.hora);
   const origen = textoParaVoz(d.origen, MAX_ORIGEN_VOZ);
   const servicio = `Tu servicio${hora ? ` de ${hora}` : ""}${origen ? `, desde ${origen},` : ""} ya debió iniciar.`;
-  const mensaje = `Hola${nombre ? ` ${nombre}` : ""}. Te llama ${quien}. ${servicio} Abre el app del conductor y pulsa INICIAR.`
+  const mensaje = `Hola${nombre ? ` ${nombre}` : ""}. Te llama ${quien}. ${servicio} Abre el app del conductor, haz tu check in y pulsa INICIAR RECORRIDO.`
     .replace(/\s+/g, " ").trim();
   return {
     mensaje: Array.from(mensaje).slice(0, MAX_MENSAJE_VOZ).join(""),

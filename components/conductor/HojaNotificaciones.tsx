@@ -37,7 +37,7 @@ export function pushPendiente(estado: EstadoPushConductor, soporte: SoportePush 
 }
 
 const EJEMPLOS = [
-  { t: "🚨 Tu servicio empieza en 5 min", s: "Toca y pulsa INICIAR" },
+  { t: "🚨 Tu servicio empieza en 5 min", s: "Toca y pulsa INICIAR RECORRIDO" },
   { t: "⛔ Ya debiste INICIAR tu servicio", s: "Si se te pasó la hora" },
   { t: "🚌 Servicio asignado o cambiado", s: "Al instante, aunque el app esté cerrada" },
 ];
@@ -98,7 +98,7 @@ export default function HojaNotificaciones({
             ? "En iPhone, toca Compartir → «Añadir a pantalla de inicio» y abre el app desde ahí para recibir los avisos."
             : bloqueado
             ? "Sin ellas no te llegan los avisos de tus servicios. Ábrelas en Ajustes del teléfono → Apps → AFA Conductores → Notificaciones, y enciéndelas."
-            : "Te avisamos antes de cada servicio para que no olvides pulsar INICIAR — aunque tengas el app cerrada, como Uber."}
+            : "Te avisamos antes de cada servicio para que no olvides pulsar INICIAR RECORRIDO — aunque tengas el app cerrada, como Uber."}
         </p>
 
         {!desactualizada && !iosInstalar && (

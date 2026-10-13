@@ -19,7 +19,7 @@
 // el SQL que falta. Mandar los apagados como si salieran haría creer que salen.
 
 import {
-  CLAVE_DEBIO_INICIAR, LARGO_EVIDENCIA_COORDINADOR, minutosIniciaAhora, minutosDebioIniciar, noInicioRepiteDebio,
+  CLAVE_DEBIO_INICIAR, LARGO_EVIDENCIA_COORDINADOR, detalleAlertaPrevia, minutosIniciaAhora, minutosDebioIniciar, noInicioRepiteDebio,
   type FilaAviso, type TextoPush,
 } from "@/lib/escalera-inicio";
 import { hhmmAMinutos, limaAUtcMs } from "@/lib/alertas-horario";
@@ -73,7 +73,7 @@ export type CodigoMuestra =
   | "sin_whatsapp"     // al conductor le sale por el app o el correo, no por WhatsApp
   | "sin_contactos"    // al coordinador: ningún contacto marcado en su tarjeta
   | "solo_si_gps"      // depende de que el GPS vea al conductor en el paradero
-  | "repite_debio"     // «No inició» al conductor en el minuto de «Ya debió iniciar»: mismo texto
+  | "repite_debio"     // «No inició» al conductor repetiría el «Ya debió iniciar»: va solo al coordinador
   | "sin_plantilla"    // la tarjeta no tiene plantilla: no hay texto que mandar
   | "sin_config";      // la fila no existe en la base (falta un SQL)
 
@@ -176,8 +176,9 @@ const PASOS: Paso[] = [
     // Tick, bloque 3c: solo conductores PROPIOS (el bloque filtra tipo_asignacion = propio).
     id: "alerta_no_inicio_previa", clave: "alerta_no_inicio_previa", para: "coordinador", titulo: "Falta iniciar recorrido",
     reloj: { tipo: "antes", defecto: 25 }, sql: SQL_OPERATIVAS,
-    parametros: (d, _cfg, ev) => ["Falta iniciar recorrido", d.nombre, `${rutaDe(d)} ${d.hora}`,
-      `Faltan ~25 min y el conductor aún no confirma salida (sin GPS) en la app.${ev ? ` ${ev}` : ""}`],
+    // Tick, bloque 3c: en la prueba «faltan» los minutos de la tarjeta (el momento en que sale).
+    parametros: (d, cfg, ev) => ["Falta iniciar recorrido", d.nombre, `${rutaDe(d)} ${d.hora}`,
+      detalleAlertaPrevia(Number(cfg.min_anticipacion ?? 25), ev)],
   },
   {
     // Cron de un minuto: [nombre, hora, origen].
@@ -228,8 +229,8 @@ const NOTA: Record<CodigoMuestra, string> = {
   no_al_conductor: "Su tarjeta no le escribe al conductor: hoy no sale.",
   sin_whatsapp: "Al conductor le sale por el app o el correo, no por WhatsApp.",
   sin_contactos: "Ningún contacto marcado en su tarjeta: hoy no le llega a nadie.",
-  solo_si_gps: "Sale solo si el GPS ve al conductor en el paradero sin haber pulsado INICIAR.",
-  repite_debio: "Está en el mismo minuto (o antes) que «Ya debió iniciar» y lleva el mismo texto: al conductor no se le manda para no repetirlo. Ponle 10 min en la tarjeta «No inició».",
+  solo_si_gps: "Sale solo si el GPS ve al conductor en el paradero sin haber pulsado INICIAR RECORRIDO.",
+  repite_debio: "Al conductor ya le llegó «Ya debió iniciar» con este mismo texto: este aviso va solo al coordinador.",
   sin_plantilla: "Su tarjeta no tiene plantilla de WhatsApp: no hay texto que mandar.",
   sin_config: "Este aviso todavía no existe en la base.",
 };
@@ -287,7 +288,7 @@ export function planDeMuestra(cfgs: CfgMuestra[] | Map<string, CfgMuestra>, d: D
     else if (canal === "whatsapp" && p.para === "conductor" && cfg.canal_conductor_whatsapp === false) codigo = "sin_whatsapp";
     else if (p.para === "coordinador" && (cfg.usa_directorio === false || !(Number(cfg.contactos) > 0))) codigo = "sin_contactos";
     else if (p.reloj.tipo === "gps") codigo = "solo_si_gps";
-    else if (p.id === "no_inicio" && noInicioRepiteDebio(cfg, cfgDe(cfgs, CLAVE_DEBIO_INICIAR))) codigo = "repite_debio";
+    else if (p.id === "no_inicio" && noInicioRepiteDebio(cfgDe(cfgs, CLAVE_DEBIO_INICIAR))) codigo = "repite_debio";
     else codigo = "sale";
     return { p, cfg, canal, cuando, minuto, plantilla, codigo };
   });
@@ -392,7 +393,7 @@ export const ESPERA_PUSH_PRUEBA_SEG = 10;
 export function textoPushPrueba(): TextoPush {
   return {
     titulo: "🚨 Prueba: tu servicio empieza en 5 min",
-    cuerpo: "Así te avisaremos antes de cada servicio. Toca aquí y pulsa INICIAR (esto es solo una prueba).",
+    cuerpo: "Así te avisaremos antes de cada servicio. Toca aquí y pulsa INICIAR RECORRIDO (esto es solo una prueba).",
     requireInteraction: true,
     ttl: 300,
   };
