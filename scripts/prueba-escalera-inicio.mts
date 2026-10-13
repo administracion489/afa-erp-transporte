@@ -14,7 +14,7 @@ import {
   reclamosSinDetalle, resumenAvisosConductor, textoPushInicio, type CfgPaso, type FilaAviso,
 } from "../lib/escalera-inicio";
 import { VIA_DE_ALERTA, leeElModo } from "../lib/alertas-modo-tiempo";
-import { detalleAlertaPrevia, listaEnUnaLinea, noInicioRepiteDebio } from "../lib/escalera-inicio";
+import { DEBIO_INICIAR_MIN_DEFECTO, detalleAlertaPrevia, listaEnUnaLinea, minutosDebioIniciar, noInicioRepiteDebio } from "../lib/escalera-inicio";
 import { estadosAOperaciones } from "../lib/entrega-whatsapp";
 import { limaAUtcMs } from "../lib/alertas-horario";
 
@@ -223,6 +223,11 @@ const SERV = { estado: "programada", fecha_servicio: HOY, hora_servicio: "06:30:
   chk("«inicia ahora» se queda en pantalla", textoPushInicio(CLAVE_INICIA_AHORA, { hora: "06:30" }).requireInteraction);
   chk("«ya debió iniciar» se queda en pantalla", textoPushInicio(CLAVE_DEBIO_INICIAR, { hora: "06:30" }).requireInteraction);
   chk("«inicia ahora» dice los minutos", /en 5 min/.test(textoPushInicio(CLAVE_INICIA_AHORA, { hora: "06:30", minutos: 5 }).titulo));
+  // «Recuerda iniciar» decía «~30» fijo aunque la tarjeta se cambiara: ahora los de la tarjeta.
+  const r45 = textoPushInicio("recuerda_iniciar", { hora: "06:30", minutos: 45 }).cuerpo;
+  chk("«recuerda iniciar» dice los minutos de su tarjeta", /en ~45 min/.test(r45) && !/~30/.test(r45), r45);
+  const rSin = textoPushInicio("recuerda_iniciar", { hora: "06:30" }).cuerpo;
+  chk("…y sin minutos (a una hora fija: sale la víspera) no promete ninguno", /pronto/.test(rSin) && !/\d+ min/.test(rSin), rSin);
 }
 
 // ── 9. Coherencia con la tabla del panel ──────────────────────────────────────
@@ -266,13 +271,25 @@ const SERV = { estado: "programada", fecha_servicio: HOY, hora_servicio: "06:30:
 // ── Revisión del 13-10-2026 ───────────────────────────────────────────────────
 {
   console.log("\n— «No inició» no le repite al conductor el «Ya debió iniciar» —");
-  const debio = { activo: true, notifica_conductor: true, notifica_conductor_tercero: false };
+  const debio = { activo: true, notifica_conductor: true, notifica_conductor_tercero: false, plantilla: "conductor_no_inicio" };
   chk("propio con «Ya debió iniciar» encendido → no se le repite", noInicioRepiteDebio(debio, false));
   chk("tercerizado sin «Incluir tercerizados» en «Ya debió iniciar» → SÍ recibe «No inició»", !noInicioRepiteDebio(debio, true));
   chk("tercerizado con la casilla → no se le repite", noInicioRepiteDebio({ ...debio, notifica_conductor_tercero: true }, true));
   chk("«Ya debió iniciar» apagado → «No inició» sale", !noInicioRepiteDebio({ ...debio, activo: false }, false));
   chk("«Ya debió iniciar» sin «Conductor» → «No inició» sale", !noInicioRepiteDebio({ ...debio, notifica_conductor: false }, false));
   chk("sin fila de «Ya debió iniciar» → «No inició» sale", !noInicioRepiteDebio(null, false));
+  // Sin plantilla, el cron de un minuto no manda «Ya debió iniciar» (`!cfg.plantilla` → continue):
+  // callar el «No inició» dejaba al conductor sin ningún aviso después de la hora.
+  chk("«Ya debió iniciar» SIN plantilla → «No inició» sale (al propio)", !noInicioRepiteDebio({ ...debio, plantilla: null }, false));
+  chk("…y al tercerizado con la casilla", !noInicioRepiteDebio({ ...debio, plantilla: "", notifica_conductor_tercero: true }, true));
+  // «Conductor» se lee como en el cron de un minuto: un valor nulo no escribe, así que no calla nada.
+  chk("«Conductor» nulo → «No inició» sale (el cron lee `!notifica_conductor`)", !noInicioRepiteDebio({ ...debio, notifica_conductor: null }, false));
+
+  console.log("\n— «Ya debió iniciar» con la columna umbral vacía —");
+  // `Number(null)` es 0: el aviso salía EN la hora mientras la tarjeta enseñaba el default.
+  chk("umbral null usa el default (1), como sin columna", minutosDebioIniciar({ activo: true, umbral: null }) === DEBIO_INICIAR_MIN_DEFECTO
+    && minutosDebioIniciar({ activo: true }) === DEBIO_INICIAR_MIN_DEFECTO);
+  chk("…y un 0 escrito se respeta (en la hora)", minutosDebioIniciar({ activo: true, umbral: 0 }) === 0);
 
   console.log("\n— Alerta previa: los minutos de verdad, sin «(sin GPS)» —");
   const t = detalleAlertaPrevia(30, "");

@@ -83,7 +83,7 @@ export default function SistemaPage() {
           clave: "Cron recordatorio",
           valor: "0 13 * * * UTC (08:00 Lima)",
           estado: "activo",
-          desc: "Vercel cron — protegido por CRON_SECRET",
+          desc: "Respaldo: solo envía si no existe la tarjeta «Recordatorio al pasajero». Con la tarjeta, la envía el motor de alertas según su configuración.",
         },
       ],
     },

@@ -15,6 +15,10 @@ import { CLAVE_LLAMADA, estadoCentral } from "@/lib/llamadas-central";
 // Las plantillas que las alertas usan y que hay que crear en Meta: el texto y sus variables en el
 // orden en que el motor las manda.
 import { SUGERIDA_COORDINADOR_ALERTA, SUGERIDA_NO_INICIO, SUGERIDA_RECUERDA_INICIAR } from "@/lib/plantillas-sugeridas";
+// QUÉ DICE Y QUÉ OFRECE CADA TARJETA, derivado de lo que el motor hace (13-10-2026): la descripción
+// sembrada por SQL y los mismos controles en los 26 tipos ya no describían el sistema — «No inició»
+// decía «el conductor…» con «Conductor» ✓ mientras el tick lo callaba. Módulo PURO.
+import { controlesDe, descripcionDe, notasHoy, type CtxTarjeta } from "@/lib/alertas-tarjeta";
 
 type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean; es_contingencia?: boolean };
 type AlertaCfg = {
@@ -51,20 +55,8 @@ const COLS_CANAL = [
 const input = "w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20";
 const label = "block text-[11px] font-semibold text-gray-500 mb-1";
 
-// Etiqueta contextual del campo "umbral" según el tipo de alerta.
-const UMBRAL_LABEL: Record<string, string> = {
-  no_inicio: "Min. de gracia tras la hora",
-  // «Ya debió iniciar»: minutos DESPUÉS de la hora del servicio (cron de 1 minuto).
-  debio_iniciar: "Min. después de la hora",
-  // La llamada de la central propia: minutos después de la hora (3 = dos después del WhatsApp).
-  llamada_inicio: "Min. después de la hora",
-  gps_silencio: "Min. sin señal",
-  doc_vence: "Días de anticipación",
-  jornada: "Horas máx. de jornada",
-  // Minutos desde que cierra su ÚLTIMO servicio del día. La repetición se configura en
-  // /auditoria-jornada («Recordar cada (min)»); el aviso al directorio sale tras 3 sin respuesta.
-  recordar_checkout: "Min. de espera tras el último servicio",
-};
+/** Un campo numérico que se puede vaciar: vacío es «sin dato» (el motor usa su número por defecto), nunca 0. */
+const numeroOVacio = (v: string): number | null => (v.trim() === "" || !Number.isFinite(Number(v)) ? null : Number(v));
 
 /** Chip on/off de un canal de envío. */
 function Canal({ on, set, children }: { on: boolean; set: (v: boolean) => void; children: React.ReactNode }) {
@@ -107,15 +99,26 @@ export default function ConfigOperacionesPage() {
   // todavía no se sabe; `null` = no hay tabla o nunca se conectó.
   const [central, setCentral] = useState<{ ultimo_latido: string | null; equipo: string | null } | null | undefined>(undefined);
   const [ahoraCentral, setAhoraCentral] = useState(0);
+  // Dos números que viven fuera de alerta_config y que la tarjeta necesita para describirse: cuándo
+  // escala «En el punto, sin iniciar» y cada cuánto se repite el recordatorio de check-out. Si no se
+  // pueden leer, la frase va sin el número (no se inventa uno).
+  const [ctxExtra, setCtxExtra] = useState<{ persistenciaPuntoMin: number | null; cadenciaCheckoutMin: number | null }>(
+    { persistenciaPuntoMin: null, cadenciaCheckoutMin: null });
 
   const showToast = (msg: string, ok = true) => { setToast({ msg, ok }); setTimeout(() => setToast(null), 3500); };
 
   const cargar = useCallback(async () => {
-    const [c, d, cen] = await Promise.all([
+    const [c, d, cen, rc, jc] = await Promise.all([
       supabase.from("alerta_config").select("*").order("clave"),
       supabase.from("alerta_destinatarios").select("*").order("id"),
       supabase.from("central_llamadas_estado").select("ultimo_latido, equipo").eq("id", 1).maybeSingle(),
+      supabase.from("retraso_config").select("persistencia_punto_min").eq("id", 1).maybeSingle(),
+      supabase.from("jornada_config").select("recordar_checkout_cada_min").eq("id", 1).maybeSingle(),
     ]);
+    setCtxExtra({
+      persistenciaPuntoMin: rc.error ? null : (rc.data?.persistencia_punto_min ?? null),
+      cadenciaCheckoutMin: jc.error ? null : (jc.data?.recordar_checkout_cada_min ?? null),
+    });
     // Error = no hay tabla (falta el SQL); sin fila = la central nunca se conectó. No son lo mismo.
     setCentral(cen.error ? null : ((cen.data ?? { ultimo_latido: null, equipo: null }) as { ultimo_latido: string | null; equipo: string | null }));
     setAhoraCentral(Date.now());
@@ -170,7 +173,8 @@ export default function ConfigOperacionesPage() {
     };
     const { error } = await supabase.from("alerta_config").update({
       activo: c.activo, modo_tiempo: c.modo_tiempo,
-      min_anticipacion: c.modo_tiempo === "anticipacion" ? (c.min_anticipacion ?? 90) : c.min_anticipacion,
+      // Sin número se guarda el que el motor usa por defecto PARA ESTE TIPO (5 en «Inicia ahora», no 90).
+      min_anticipacion: c.modo_tiempo === "anticipacion" ? (c.min_anticipacion ?? controlesDe(c).minAnticipacionDefecto ?? 90) : c.min_anticipacion,
       hora_fija: c.modo_tiempo === "hora_fija" ? (c.hora_fija ?? "08:00") : c.hora_fija,
       umbral: c.umbral, notifica_conductor: c.notifica_conductor, notifica_pasajero: c.notifica_pasajero,
       notifica_conductor_tercero: c.notifica_conductor_tercero ?? false,
@@ -347,10 +351,20 @@ export default function ConfigOperacionesPage() {
   const qTipo = claveBusqueda(buscarTipo).trim();
   // ¿La tarjeta le escribe de verdad al directorio? La columna (si dice false) y la tabla del motor.
   const usaDirectorio = (c: AlertaCfg) => c.usa_directorio !== false && leeElDirectorio(c.clave) !== false;
+  // Lo que la tarjeta necesita para describirse: TODAS las configs (no_inicio depende de «Ya debió
+  // iniciar») y los contactos que de verdad recibirían el aviso — activos, con teléfono y marcados,
+  // lo mismo que cuenta `directorioDe` en el tick.
+  const vivos = new Set(dests.filter((d) => d.activo && String(d.telefono ?? "").trim()).map((d) => d.id));
+  const cfgPorClave = new Map<string, AlertaCfg>(cfgs.map((c) => [c.clave, c]));
+  const ctxTarjeta: CtxTarjeta = {
+    contactos: (clave) => cfgPorClave.get(clave)?.destinatarios.filter((id) => vivos.has(id)).length ?? 0,
+    persistenciaPuntoMin: ctxExtra.persistenciaPuntoMin,
+    cadenciaCheckoutMin: ctxExtra.cadenciaCheckoutMin,
+  };
   const tiposVisibles = [...cfgs]
     .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"))
     .filter((c) => !qTipo || claveBusqueda([
-      c.nombre, c.descripcion, c.clave, c.plantilla,
+      c.nombre, descripcionDe(c, ctxTarjeta), c.clave, c.plantilla,
       // La del directorio solo cuenta si de verdad le escribe a alguien (la misma condición del chip).
       usaDirectorio(c) && c.destinatarios.length > 0 ? (c.plantilla_directorio || "coordinador_alerta") : "",
     ].join(" ")).includes(qTipo));
@@ -439,12 +453,28 @@ export default function ConfigOperacionesPage() {
         {tiposVisibles.length === 0 && (
           <p className="text-xs text-gray-500">Ningún tipo de mensaje coincide con «{buscarTipo}».</p>
         )}
-        {tiposVisibles.map((c) => (
+        {tiposVisibles.map((c) => {
+          // Los controles los decide el catálogo (lib/alertas-tarjeta.ts), espejo del motor: no se ofrece
+          // lo que el sistema no lee, y lo que lee y antes no se podía tocar aparece.
+          const ctl = controlesDe(c);
+          const notas = notasHoy(c.clave, cfgPorClave, ctxTarjeta);
+          const descripcion = descripcionDe(c, ctxTarjeta);
+          // ¿Hay mensaje al conductor que configurar? «fijo» le escribe aunque no haya casilla.
+          const alConductor = ctl.conductor === "fijo" || (ctl.conductor === "casilla" && c.notifica_conductor);
+          return (
           <div key={c.clave} className="bg-white border border-gray-200 rounded-2xl p-4">
             <div className="flex items-center justify-between gap-3 mb-3">
               <div>
                 <span className="font-semibold text-gray-800 text-sm">{c.nombre}</span>
-                {c.descripcion && <p className="text-[12px] text-gray-500">{c.descripcion}</p>}
+                {descripcion && <p className="text-[12px] text-gray-500">{descripcion}</p>}
+                {/* Lo que cambia HOY por esta y las demás tarjetas (p. ej. «No inició» callado por
+                    «Ya debió iniciar»). Solo el ámbar pide atención; el resto informa. */}
+                {notas.map((nt, i) => (
+                  <p key={i} className={`text-[11px] mt-0.5 ${nt.alarma ? "text-amber-800 font-semibold" : "text-gray-500 italic"}`}>
+                    {nt.alarma ? "⚠️ " : "→ "}{nt.texto}
+                  </p>
+                ))}
+                {ctl.textoActivo && <p className="text-[11px] text-gray-400 mt-0.5">{ctl.textoActivo}</p>}
                 <div className="flex flex-wrap gap-1.5 mt-1">
                   {c.plantilla && (
                     <span className="font-mono text-[10px] text-gray-500 bg-gray-100 rounded px-1.5 py-0.5" title="Plantilla de WhatsApp que usa este aviso">
@@ -458,10 +488,15 @@ export default function ConfigOperacionesPage() {
                   )}
                 </div>
               </div>
-              <label className="flex items-center gap-2 text-xs font-semibold shrink-0">
-                <input type="checkbox" checked={c.activo} onChange={(e) => setCfg(c.clave, { activo: e.target.checked })} />
-                <span className={c.activo ? "text-green-600" : "text-gray-400"}>{c.activo ? "Activo" : "Inactivo"}</span>
-              </label>
+              {ctl.activo === "lo_dispara_otro" ? (
+                // El interruptor no lo apaga: ofrecerlo sería un control que el sistema no lee.
+                <span className="text-[11px] font-semibold text-gray-500 shrink-0" title={ctl.textoActivo}>⚙ Automático</span>
+              ) : (
+                <label className="flex items-center gap-2 text-xs font-semibold shrink-0">
+                  <input type="checkbox" checked={c.activo} onChange={(e) => setCfg(c.clave, { activo: e.target.checked })} />
+                  <span className={c.activo ? "text-green-600" : "text-gray-400"}>{c.activo ? "Activo" : "Inactivo"}</span>
+                </label>
+              )}
             </div>
             {/* ¿El bloque de este aviso lee siquiera el selector "Cuándo"? Se DERIVA de la
                 tabla del motor en vez de depender de que alguien mantenga a mano la columna
@@ -484,24 +519,42 @@ export default function ConfigOperacionesPage() {
               )}
               {modoVisible && c.modo_tiempo === "anticipacion" && (
                 <div><label className={label}>Minutos antes</label>
-                  <input type="number" className={input} value={c.min_anticipacion ?? 90} onChange={(e) => setCfg(c.clave, { min_anticipacion: Number(e.target.value) })} /></div>
+                  {/* Vacío = el número que el motor usa por defecto para este tipo (el placeholder). */}
+                  <input type="number" className={input} value={c.min_anticipacion ?? ""}
+                    placeholder={ctl.minAnticipacionDefecto != null ? String(ctl.minAnticipacionDefecto) : undefined}
+                    onChange={(e) => setCfg(c.clave, { min_anticipacion: numeroOVacio(e.target.value) })} /></div>
               )}
               {modoVisible && c.modo_tiempo === "hora_fija" && (
                 <div><label className={label}>Hora (HH:MM)</label>
                   <input type="time" className={input} value={c.hora_fija ?? "08:00"} onChange={(e) => setCfg(c.clave, { hora_fija: e.target.value })} /></div>
               )}
-              {UMBRAL_LABEL[c.clave] && (
-                <div><label className={label}>{UMBRAL_LABEL[c.clave]}</label>
-                  <input type="number" className={input} value={c.umbral ?? 0} onChange={(e) => setCfg(c.clave, { umbral: Number(e.target.value) })} /></div>
+              {ctl.umbral && (
+                <div><label className={label}>{ctl.umbral.etiqueta}</label>
+                  {/* Vacío = el número que usa el motor (el placeholder), nunca un 0 que el motor no usa. */}
+                  <input type="number" className={input} value={c.umbral ?? ""} placeholder={String(ctl.umbral.defecto)}
+                    onChange={(e) => setCfg(c.clave, { umbral: numeroOVacio(e.target.value) })} /></div>
               )}
-              <div className="flex items-end gap-3 text-xs text-gray-600">
-                <label className="flex items-center gap-1"><input type="checkbox" checked={c.notifica_conductor} onChange={(e) => setCfg(c.clave, { notifica_conductor: e.target.checked })} /> Conductor</label>
-                <label className="flex items-center gap-1"><input type="checkbox" checked={c.notifica_pasajero} onChange={(e) => setCfg(c.clave, { notifica_pasajero: e.target.checked })} /> Pasajero</label>
-              </div>
-              {c.notifica_conductor && (
-                <label className="flex items-end gap-1 text-xs text-gray-600" title="Los conductores tercerizados son personal de otra empresa: este aviso solo les llega si lo activas aquí.">
+              {/* «Conductor»: casilla solo si el motor la lee; «fijo» = le escribe al propio siempre;
+                  oculto = este aviso no le escribe al conductor. «Pasajero» no lo lee ningún motor
+                  (al pasajero lo deciden sus canales, abajo) y ya no se ofrece. */}
+              {ctl.conductor !== "oculto" && (
+                <div className="flex items-end gap-3 text-xs text-gray-600">
+                  {ctl.conductor === "casilla" ? (
+                    <label className="flex items-center gap-1"><input type="checkbox" checked={c.notifica_conductor} onChange={(e) => setCfg(c.clave, { notifica_conductor: e.target.checked })} /> Conductor</label>
+                  ) : (
+                    <span className="flex items-center gap-1 text-gray-600" title="Este aviso le escribe siempre al conductor de flota propia: el motor no tiene casilla para apagarlo (se apaga con «Activo»).">
+                      👤 Al conductor · siempre
+                    </span>
+                  )}
+                </div>
+              )}
+              {ctl.tercerizados && (ctl.tercerizados.independienteDeConductor || c.notifica_conductor) && (
+                <label className="flex items-end gap-1 text-xs text-gray-600"
+                  title={ctl.tercerizados.etiqueta === "Incluir tercerizados"
+                    ? "Los conductores tercerizados son personal de otra empresa: este aviso solo les llega si lo activas aquí."
+                    : "La alerta también mira los servicios hechos con unidades tercerizadas."}>
                   <input type="checkbox" checked={c.notifica_conductor_tercero}
-                    onChange={(e) => setCfg(c.clave, { notifica_conductor_tercero: e.target.checked })} /> Incluir tercerizados
+                    onChange={(e) => setCfg(c.clave, { notifica_conductor_tercero: e.target.checked })} /> {ctl.tercerizados.etiqueta}
                 </label>
               )}
             </div>
@@ -528,12 +581,13 @@ export default function ConfigOperacionesPage() {
               );
             })()}
 
-            {/* Canales de ESTE tipo de mensaje */}
-            {(c.notifica_conductor || c.notifica_pasajero) && (
+            {/* Canales de ESTE tipo de mensaje: los del conductor si hay mensaje al conductor; los del
+                pasajero, solo los que su motor lee. */}
+            {(alConductor || ctl.canalesPasajero) && (
               <div className="mt-3 border-t border-gray-100 pt-3 space-y-2">
                 <label className={label}>¿Por dónde se envía?</label>
 
-                {c.notifica_conductor && c.clave === CLAVE_LLAMADA && (() => {
+                {alConductor && c.clave === CLAVE_LLAMADA && (() => {
                   // No es un mensaje: la hace la central propia (docs/central-llamadas.md). Lo que
                   // importa aquí es si esa central está conectada — con la tarjeta encendida y la
                   // central caída, las llamadas se quedan en cola y vencen sin salir.
@@ -566,7 +620,7 @@ export default function ConfigOperacionesPage() {
                   );
                 })()}
 
-                {c.notifica_conductor && c.clave !== CLAVE_LLAMADA && (
+                {alConductor && ctl.canalesConductor && (
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs text-gray-500 w-20 shrink-0">Conductor</span>
                     <Canal on={c.canal_conductor_whatsapp} set={(v) => setCfg(c.clave, { canal_conductor_whatsapp: v })}>💬 WhatsApp</Canal>
@@ -580,7 +634,9 @@ export default function ConfigOperacionesPage() {
                     DETECTA el cambio, y como solo mira hoy/mañana, un programa fijo
                     hecho con antelación se detecta a MEDIANOCHE — que es exactamente
                     por qué llegaban a las 00:00. Aquí se elige a qué hora sale. */}
-                {c.notifica_conductor && !faltaHorario && c.clave !== CLAVE_LLAMADA && (
+                {/* Solo el bloque de ciclo de vida (asignación, cambio, cancelación, desasignación) lee
+                    el horario: en las demás tarjetas la casilla no hacía nada. */}
+                {alConductor && ctl.horario && !faltaHorario && (
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     <span className="text-xs text-gray-500 w-20 shrink-0">Horario</span>
                     <label className="flex items-center gap-1 text-xs text-gray-600"
@@ -622,20 +678,21 @@ export default function ConfigOperacionesPage() {
                   </div>
                 )}
 
-                {c.notifica_pasajero && (
+                {ctl.canalesPasajero && (
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs text-gray-500 w-20 shrink-0">Pasajero</span>
-                    <Canal on={c.canal_pasajero_push} set={(v) => setCfg(c.clave, { canal_pasajero_push: v })}>📲 Push</Canal>
-                    <Canal on={c.canal_pasajero_email} set={(v) => setCfg(c.clave, { canal_pasajero_email: v })}>📧 Correo</Canal>
-                    {c.canal_pasajero_email && (
+                    {ctl.canalesPasajero.push && <Canal on={c.canal_pasajero_push} set={(v) => setCfg(c.clave, { canal_pasajero_push: v })}>📲 Push</Canal>}
+                    {!ctl.canalesPasajero.push && <span className="text-[11px] text-gray-500">📲 La notificación del app sale siempre ·</span>}
+                    {ctl.canalesPasajero.email && <Canal on={c.canal_pasajero_email} set={(v) => setCfg(c.clave, { canal_pasajero_email: v })}>📧 Correo</Canal>}
+                    {ctl.canalesPasajero.email && c.canal_pasajero_email && (
                       <label className="flex items-center gap-1 text-[11px] text-gray-500">
                         <input type="checkbox" checked={c.canal_pasajero_email_solo_sin_app}
                           onChange={(e) => setCfg(c.clave, { canal_pasajero_email_solo_sin_app: e.target.checked })} />
                         solo sin app
                       </label>
                     )}
-                    <Canal on={c.canal_pasajero_whatsapp} set={(v) => setCfg(c.clave, { canal_pasajero_whatsapp: v })}>💬 WhatsApp</Canal>
-                    {c.canal_pasajero_whatsapp && (
+                    {ctl.canalesPasajero.whatsapp && <Canal on={c.canal_pasajero_whatsapp} set={(v) => setCfg(c.clave, { canal_pasajero_whatsapp: v })}>💬 WhatsApp</Canal>}
+                    {ctl.canalesPasajero.whatsapp && c.canal_pasajero_whatsapp && (
                       <label className="flex items-center gap-1 text-[11px] text-gray-500">
                         <input type="checkbox" checked={c.canal_pasajero_whatsapp_solo_sin_app}
                           onChange={(e) => setCfg(c.clave, { canal_pasajero_whatsapp_solo_sin_app: e.target.checked })} />
@@ -670,7 +727,8 @@ export default function ConfigOperacionesPage() {
               <button onClick={() => guardarCfg(c)} className="text-xs font-semibold text-white bg-[#0b315f] px-4 py-2 rounded-lg hover:bg-[#0a2a52]">Guardar</button>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Editor de textos de mensajes (plantillas Meta) */}
