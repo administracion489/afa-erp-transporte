@@ -150,7 +150,8 @@ export type ContextoLecturaOdometro = {
  *
  * Se manda la CANTIDAD de dígitos y jamás el km exacto: un número exacto en el prompt es un
  * número que el modelo puede copiar cuando no logra leer la foto, y ese eco es indistinguible
- * de una lectura buena (por eso elegirOdometro trae además un guard anti-eco).
+ * de una lectura buena. Como el modelo no ve ningún km, elegirOdometro trata la coincidencia de
+ * un total rescatado con la lectura anterior como un testigo, no como un eco.
  */
 function bloqueFormaOdometro(c: ContextoLecturaOdometro): string | null {
   if (!c.digitos || c.digitos <= 0) return null;
