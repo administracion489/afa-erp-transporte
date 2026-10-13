@@ -62,6 +62,7 @@ const COLS_GPS = [
   "reserva_id", "velocidad", "vehiculo_id", "vehiculo_tercero_id", "conductor_id", "conductor_tercero_id",
 ] as const;
 const ES_OPCIONAL = new Set<string>(COLS_OPCIONALES_GPS);
+const porClave = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 // ══ EL CLIENTE Y SUS RESPUESTAS ═══════════════════════════════════════════════════════════
 
@@ -105,6 +106,24 @@ function conAbort(q: any, ms: number): any {
   return s && typeof q?.abortSignal === "function" ? q.abortSignal(s) : q;
 }
 
+// ══ LO QUE ESTA BASE NO TIENE ═════════════════════════════════════════════════════════════
+
+/** Columnas accesorias que cada cliente ya demostró no tener: las de `ubicaciones_gps` por su nombre
+ *  («fix_ts») y el estado de la flota calificado («vehiculos.estado»). Por cliente y no global: en
+ *  la ruta el cliente es uno por instancia, y la matriz usa uno distinto por caso. Si alguien corre
+ *  la migración, la instancia las vuelve a pedir cuando se recicle. */
+const faltantesPorCliente = new WeakMap<object, Set<string>>();
+function faltantesDe(admin: ClienteMonitoreo): Set<string> {
+  let s = faltantesPorCliente.get(admin);
+  if (!s) { s = new Set(); faltantesPorCliente.set(admin, s); }
+  return s;
+}
+
+/** Lo que el cálculo ya sabe que falta (para la respuesta, ordenado). */
+export function columnasFaltantesDe(admin: ClienteMonitoreo): string[] {
+  return [...faltantesDe(admin)].sort();
+}
+
 // ══ LAS UNIDADES VIGENTES ═════════════════════════════════════════════════════════════════
 
 export type TablaUnidad = "vehiculos" | "vehiculos_tercero";
@@ -117,10 +136,13 @@ export type UnidadMonitoreo = {
 
 type FilaFicha = { id: unknown; estado?: unknown };
 
-/** Lee una tabla de la flota ENTERA (paginada, orden por id). Si `estado` no existe, se suelta y
- *  todas cuentan como vigentes; cualquier otro error LANZA. */
+/** Lee una tabla de la flota ENTERA (paginada, orden por id). Si `estado` no existe, se suelta, se
+ *  anota como «tabla.estado» en lo que falta (para que la respuesta lo DIGA) y todas cuentan como
+ *  vigentes; cualquier otro error LANZA. */
 async function leerFlota(admin: ClienteMonitoreo, tabla: TablaUnidad): Promise<FilaFicha[]> {
-  let columnas = ["id", "estado"];
+  const faltan = faltantesDe(admin);
+  const sinEstado = `${tabla}.estado`;
+  let columnas = faltan.has(sinEstado) ? ["id"] : ["id", "estado"];
   for (let intento = 0; intento < 2; intento++) {
     const filas: FilaFicha[] = [];
     let fallo: ErrorLectura | null = null;
@@ -135,6 +157,7 @@ async function leerFlota(admin: ClienteMonitoreo, tabla: TablaUnidad): Promise<F
     }
     if (!fallo) return filas;
     if (columnas.includes("estado") && faltaAlguna(fallo, ["estado"])) {
+      faltan.add(sinEstado);
       columnas = ["id"];
       continue;
     }
@@ -163,7 +186,7 @@ export async function unidadesVigentes(admin: ClienteMonitoreo): Promise<UnidadM
   };
   sumar("vehiculos", propias);
   sumar("vehiculos_tercero", terceros);
-  return out.sort((a, b) => (a.clave < b.clave ? -1 : a.clave > b.clave ? 1 : 0));
+  return out.sort((a, b) => porClave(a.clave, b.clave));
 }
 
 // ══ LA ÚLTIMA POSICIÓN DE CADA UNIDAD ═════════════════════════════════════════════════════
@@ -179,6 +202,8 @@ export type OpcionesLectura = {
 };
 
 export type LecturaPosiciones = {
+  /** Las claves que se quisieron leer (las unidades recibidas, sin repetir). Contiene a las dos de abajo. */
+  unidades: string[];
   /** Solo las unidades que SÍ se leyeron: null = se leyó y no tiene posición válida en la ventana. */
   posiciones: Map<string, PosicionUnidad | null>;
   /** Las que fallaron, vencieron o no alcanzaron a lanzarse. Disjunto de `posiciones`. */
@@ -188,21 +213,6 @@ export type LecturaPosiciones = {
   /** Se agotó el presupuesto antes de leerlas todas. */
   parcial: boolean;
 };
-
-/** Columnas accesorias que cada cliente ya demostró no tener. Por cliente y no global: en la ruta el
- *  cliente es uno por instancia, y la matriz usa uno distinto por caso. Si alguien corre la
- *  migración, la instancia las vuelve a pedir cuando se recicle. */
-const faltantesPorCliente = new WeakMap<object, Set<ColOpcionalGps>>();
-function faltantesDe(admin: ClienteMonitoreo): Set<ColOpcionalGps> {
-  let s = faltantesPorCliente.get(admin);
-  if (!s) { s = new Set(); faltantesPorCliente.set(admin, s); }
-  return s;
-}
-
-/** Lo que el cálculo ya sabe que falta (para la respuesta). */
-export function columnasFaltantesDe(admin: ClienteMonitoreo): string[] {
-  return [...faltantesDe(admin)].sort();
-}
 
 type ResultadoUnidad =
   | { ok: true; posicion: PosicionUnidad | null }
@@ -232,7 +242,7 @@ export async function leerUltimasPosiciones(
     // Una vuelta por cada columna que se pueda soltar, más la buena: nunca un bucle sin fin.
     for (let intento = 0; intento <= COLS_OPCIONALES_GPS.length; intento++) {
       if (intento > 0 && !quedaPresupuesto()) return { ok: false, motivo: "presupuesto" };
-      const columnas = COLS_GPS.filter((c) => !ES_OPCIONAL.has(c) || !faltan.has(c as ColOpcionalGps));
+      const columnas = COLS_GPS.filter((c) => !ES_OPCIONAL.has(c) || !faltan.has(c));
       let q = admin.from("ubicaciones_gps").select(columnas.join(", "))
         .eq(u.tabla === "vehiculos" ? "vehiculo_id" : "vehiculo_tercero_id", u.id);
       if (u.tabla === "vehiculos") q = q.is("vehiculo_tercero_id", null);
@@ -286,6 +296,7 @@ export async function leerUltimasPosiciones(
     parcial = true;
   }
   return {
+    unidades: [...new Set(unidades.map((u) => u.clave))].sort(),
     posiciones,
     sinLeer: [...sinLeer].sort(),
     columnasFaltantes: columnasFaltantesDe(admin),
@@ -346,22 +357,35 @@ export function proyectarPosicion(p: PosicionUnidad): PosicionUnidad {
   };
 }
 
-/** Arma la respuesta con EXACTAMENTE las claves de `RespuestaFlotaMonitoreo`. */
+/**
+ * Arma la respuesta con EXACTAMENTE las claves de `RespuestaFlotaMonitoreo`, y con sus invariantes
+ * puestas por construcción (el lector ya las cumple; esto impide que un error futuro las rompa en
+ * silencio): `posiciones[].unidad` y `sin_leer` son disjuntas —si una unidad estuviera en las dos,
+ * gana `sin_leer`: lo que se declaró sin leer no se dibuja— y las dos están dentro de `unidades`.
+ */
 export function armarRespuestaFlota(e: {
   ahoraMs: number; noInicio: UmbralNoInicio; lectura: LecturaPosiciones;
 }): RespuestaFlotaMonitoreo {
-  const posiciones = [...e.lectura.posiciones.values()]
-    .filter((p): p is PosicionUnidad => p != null)
-    .map(proyectarPosicion)
-    .sort((a, b) => (a.unidad < b.unidad ? -1 : a.unidad > b.unidad ? 1 : 0));
+  const sinLeer = [...new Set(e.lectura.sinLeer)].sort(porClave);
+  const fallidas = new Set(sinLeer);
+  const vistas = new Set<string>();
+  const posiciones: PosicionUnidad[] = [];
+  for (const p of e.lectura.posiciones.values()) {
+    if (p == null || fallidas.has(p.unidad) || vistas.has(p.unidad)) continue;
+    vistas.add(p.unidad);
+    posiciones.push(proyectarPosicion(p));
+  }
+  posiciones.sort((a, b) => porClave(a.unidad, b.unidad));
+  const unidades = [...new Set([...(e.lectura.unidades ?? []), ...vistas, ...sinLeer])].sort(porClave);
   return {
     generado_en: new Date(e.ahoraMs).toISOString(),
     hoy: fechaLima(e.ahoraMs),
     ventana_dias: DIAS_ULTIMA_POSICION,
     no_inicio_min: e.noInicio.min,
     fuente_no_inicio: e.noInicio.fuente,
+    unidades,
     posiciones,
-    sin_leer: [...e.lectura.sinLeer].sort(),
+    sin_leer: sinLeer,
     parcial: e.lectura.parcial === true,
     columnas_faltantes: [...e.lectura.columnasFaltantes].sort(),
   };

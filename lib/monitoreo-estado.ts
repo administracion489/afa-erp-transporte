@@ -40,6 +40,9 @@
 // PRECISION_MAX_M (o no declara precisión), la POSICIÓN sale del último fix preciso anterior DEL
 // MISMO SERVICIO y el estado y la hora, del cierre (`aproximada`). Del mismo servicio, y no de
 // cualquiera: el fix preciso anterior puede ser de antes de salir, a kilómetros.
+// UNA PRECISIÓN ≤ 0 ES «DESCONOCIDA», igual que null: la app del conductor TERCERIZADO escribe
+// `precision_m = 0` cuando no la conoce (y en el cierre, siempre). Leído como «0 m», ese cierre se
+// dibujaba como exacto. Ningún GPS da una precisión de 0 m.
 //
 // ── EL VEREDICTO, DE LA EVIDENCIA AL JUICIO (gana el primero que se cumple) ────────────────
 //   1 sos              alerta SOS pendiente de un servicio de la unidad            atender
@@ -172,7 +175,7 @@ const normEstado = (x: unknown): string | null => {
   return s || null;
 };
 
-/** ¿El punto es un fix preciso? Una precisión desconocida NO es precisa. */
+/** ¿El punto es un fix preciso? Una precisión desconocida (null, ≤ 0 o no numérica) NO es precisa. */
 const preciso = (p: PuntoMonitoreo): boolean => p.precisionM != null && p.precisionM <= PRECISION_MAX_M;
 const esCierre = (estado: string | null): boolean => estado === "finalizado";
 
@@ -209,7 +212,8 @@ function leerFila(f: FilaGpsMonitoreo, ahoraMs: number): Leida | null {
   const puntoTs = Math.min(creado ?? recibido ?? Infinity, recibido ?? Infinity, ahoraMs);
   const enlaceTs = Math.min(Math.max(creado ?? -Infinity, recibido ?? -Infinity), ahoraMs);
   const prec = numero(f.precision_m);
-  const precisionM = prec != null && prec >= 0 ? prec : null;
+  // ≤ 0 = desconocida (la app del tercerizado escribe 0 cuando no la sabe): mismo trato que null.
+  const precisionM = prec != null && prec > 0 ? prec : null;
   const vel = numero(f.velocidad);
   const velocidadKmh = vel != null && vel >= 0 ? vel : null;
   const estado = normEstado(f.estado);
@@ -511,10 +515,18 @@ export type RespuestaFlotaMonitoreo = {
   ventana_dias: number;
   no_inicio_min: number;
   fuente_no_inicio: "config" | "defecto";
+  /** Las unidades que el servidor consideró VIGENTES y quiso leer («p:ID» / «t:ID»). Contiene a
+   *  `posiciones[].unidad` y a `sin_leer`, que son disjuntas; una de aquí que no está en ninguna de
+   *  las dos se LEYÓ y no tiene posición válida en la ventana. Una unidad que la pantalla conoce y
+   *  no está aquí NO se leyó (alta reciente, caché): no es «sin posición». */
+  unidades: string[];
   posiciones: PosicionUnidad[];
   /** Unidades cuya lectura falló: `no_se_pudo_leer`, NUNCA «sin posición». */
   sin_leer: string[];
   /** Se agotó el presupuesto de tiempo antes de leerlas todas. */
   parcial: boolean;
+  /** Columnas de migraciones accesorias que esta base no tiene: las de `ubicaciones_gps` por su
+   *  nombre («fix_ts») y el `estado` de la flota calificado («vehiculos.estado»: sin ella, todas
+   *  esas unidades cuentan como vigentes). */
   columnas_faltantes: string[];
 };
