@@ -442,10 +442,48 @@ export default function ClientesPage() {
 
   const limpiarCliente = () => limpiarClienteRef.current();
 
-  const abrirNuevo = () => {
-    setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(true); setErrors({});
+  // `precarga` existe para el deep-link de abajo. abrirNuevo NO la recibe porque es
+  // un onClick: el evento del clic llegaría como precarga y se esparciría en el form.
+  const abrirNuevoCon = (precarga: Partial<typeof FORM_VACIO>) => {
+    setForm({ ...FORM_VACIO, ...precarga }); setEditandoId(null); setMostrarForm(true); setErrors({});
     setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   };
+  const abrirNuevo = () => abrirNuevoCon({});
+
+  /* Deep-link desde el buscador de clientes de /cotizaciones:
+     /clientes?nuevo=1&nombre=<texto> o /clientes?nuevo=1&doc=<8 u 11 dígitos>.
+     Se lee de window.location (cliente) para no requerir <Suspense> de useSearchParams,
+     igual que el ?buscar= de Cotizaciones. Solo se precarga lo que se tecleó allá:
+     - 11 dígitos → RUC y B2B; 8 dígitos → DNI y B2C. Otro largo no es un documento y
+       no se pone en ningún campo (el formulario lo marcaría como error sin que nadie
+       lo escribiera aquí).
+     - El texto va a la RAZÓN SOCIAL en B2B —es lo que la lista muestra como nombre del
+       cliente— y NO al «Nombre de contacto», que es una persona que nadie ha dicho
+       todavía. En B2C es el nombre completo.
+     Los parámetros se borran de la URL al consumirlos: recargar no reabre el formulario. */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get("nuevo") !== "1") return;
+    // eslint-disable-next-line no-control-regex
+    const limpio = (v: string | null) => (v ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+    const doc    = limpio(sp.get("doc")).replace(/\D/g, "");
+    const nombre = limpio(sp.get("nombre"));
+    const precarga: Partial<typeof FORM_VACIO> =
+      doc.length === 11 ? { tipo: "b2b", ruc: doc } :
+      doc.length === 8  ? { tipo: "b2c", dni: doc } : {};
+    if (nombre) {
+      if ((precarga.tipo ?? FORM_VACIO.tipo) === "b2b") precarga.empresa = nombre;
+      else precarga.nombre = nombre;
+    }
+    abrirNuevoCon(precarga);
+    try {
+      sp.delete("nuevo"); sp.delete("nombre"); sp.delete("doc");
+      const qs = sp.toString();
+      window.history.replaceState(window.history.state, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
+    } catch { /* sin history no pasa nada: solo se reabriría al recargar */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const editarCliente = (c: Cliente) => {
     const adminContacts = (c.contactos || []).filter(x => x.tipo === "administrativo");
@@ -617,6 +655,16 @@ export default function ClientesPage() {
       }
       if (error) { toast(error.message, "error"); setGuardando(false); return; }
       clienteId = data!.id;
+      // El buscador de /cotizaciones (abierto en otra pestaña) escucha este canal para
+      // recargar su lista y seleccionar al cliente recién creado. Best-effort: sin
+      // BroadcastChannel el cliente se creó igual y allá basta con recargar.
+      try {
+        if (typeof BroadcastChannel !== "undefined") {
+          const canal = new BroadcastChannel("afa-clientes");
+          canal.postMessage({ tipo: "creado", id: Number(clienteId) });
+          canal.close();
+        }
+      } catch { /* el aviso entre pestañas es un extra */ }
     }
 
     if (avisoReporte) {
