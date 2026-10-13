@@ -14,6 +14,12 @@ import {
   cargarLineas, guardarLinea, borrarLinea, tarifaDeTaller, cargarPersonalTaller, retirarDelLibro, type LineaGuardada,
 } from "@/lib/mantenimiento/ot-factura";
 import { planAlSalirDeCierre } from "@/lib/mantenimiento/proximo-servicio";
+import { fechaLima } from "@/lib/alertas-horario";
+
+// Hoy en LIMA. `toISOString()` es UTC: desde las 19:00 ya es mañana, y una fila del libro fechada
+// mañana no ancla «Próximos» (CWZ-371, OT #7). Función y no constante: el formulario vacío se
+// arma al abrirlo, no al cargar el módulo.
+const hoyLima = () => fechaLima(Date.now());
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -218,7 +224,7 @@ export default function OrdenesTab() {
   const [perfil, setPerfil] = useState<PerfilEmpresa | null>(null);
 
   // Form OT
-  const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", km_cierre: "", fecha_apertura: new Date().toISOString().split("T")[0], fecha_programada: "", mecanico: "", taller_proveedor_id: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
+  const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", km_cierre: "", fecha_apertura: hoyLima(), fecha_programada: "", mecanico: "", taller_proveedor_id: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
   const [formOT, setFormOT] = useState(FORM_OT_VACIO);
 
   // Form Plantilla
@@ -452,7 +458,7 @@ export default function OrdenesTab() {
     if (!km || km <= 0) { alert("Ingresa el kilometraje real de cierre"); return; }
     setGuardando(true);
     const { ot } = cerrarOT;
-    const hoy = new Date().toISOString().split("T")[0];
+    const hoy = hoyLima();
 
     const { error } = await supabase.from("ordenes_trabajo")
       .update({ estado: "cerrada", fecha_cierre: hoy, km_cierre: km }).eq("id", ot.id);
@@ -1159,7 +1165,7 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                       </button>
                       {nombreTaller(ot, talleres) && <span className="text-xs text-gray-400">🏢 {nombreTaller(ot, talleres)}</span>}
                       {ot.fecha_programada && (() => {
-                        const vencido = (ot.estado === "abierta" || ot.estado === "en_proceso") && new Date(ot.fecha_programada + "T00:00:00") < new Date(new Date().toISOString().split("T")[0] + "T00:00:00");
+                        const vencido = (ot.estado === "abierta" || ot.estado === "en_proceso") && new Date(ot.fecha_programada + "T00:00:00") < new Date(hoyLima() + "T00:00:00");
                         return (
                           <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: vencido ? "#fee2e2" : "#f0fdf4", color: vencido ? "#991b1b" : "#166534" }}>
                             📅 Programado: {fmtFecha(ot.fecha_programada)}
@@ -1586,7 +1592,7 @@ function ModalFacturaTaller({ ot, talleres, placa, total, linea, items, onCerrar
     razon_social: tallerDir?.nombre || ot.taller || "",
     tipo_comprobante: "factura",
     serie: "", numero: "",
-    fecha_emision: ot.fecha_cierre || new Date().toISOString().split("T")[0],
+    fecha_emision: ot.fecha_cierre || hoyLima(),
     total: "", igv: "",
   });
   const [archivo, setArchivo] = useState<File | null>(null);
