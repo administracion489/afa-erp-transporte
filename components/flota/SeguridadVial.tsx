@@ -29,6 +29,7 @@ import {
   type RespuestaExcesos,
 } from "@/lib/flota/excesos";
 import { ETIQUETA_RECORRIDO, ETIQUETA_RUTA, SIN_NOMBRE_RUTA, SIN_RECORRIDO } from "@/lib/ruta-identidad";
+import { urlRecorrido } from "@/lib/flota/recorrido-url";
 import {
   ETIQUETA_FLOTA, MAX_DIAS_RANGO, esTercero, fechaCorta, horaLima, leerParametros, minimoDesde, opcionesUmbral, problemaDeRango,
   vistaPorFlota, type FiltroFlota,
@@ -360,6 +361,7 @@ function Cuerpo({ search }: { search: string }) {
             episodios={vista.episodios}
             dir={dir}
             resaltar={reserva}
+            umbral={umbral}
             vacio={vista.resumen.totales.excesos == null
               ? TEXTO_SIN_TOTAL[vista.resumen.totales.motivoSinTotal ?? "sin_juzgables"]
               : `Ningún exceso que cuente con ${umbral} km/h en el rango.`}
@@ -371,6 +373,7 @@ function Cuerpo({ search }: { search: string }) {
               episodios={vista.resumen.fueraDeServicio}
               dir={dir}
               resaltar={null}
+              umbral={umbral}
               vacio="Ningún exceso fuera de servicio en el rango."
             />
           )}
@@ -529,7 +532,7 @@ function BannerServicio({ reserva, unida, midiendo, umbral, dir, sinMedida }: {
     <section id="servicio-del-enlace" className="rounded-2xl border-2 border-[#0b315f] bg-blue-50 px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-bold text-[#0b315f]">Servicio #{reserva}</p>
-        <a href={`/seguimiento/gps/${reserva}`} target="_blank" rel="noopener noreferrer"
+        <a href={urlRecorrido(reserva, { umbral })} target="_blank" rel="noopener noreferrer"
           className="rounded-lg border border-blue-200 bg-white px-2.5 py-1.5 text-xs font-bold text-[#0b315f] hover:bg-blue-100">
           Ver recorrido ↗
         </a>
