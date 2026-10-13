@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
       auto_ok: veredicto.autoOk,
       motivo_seleccion: veredicto.motivo,
       // La pantalla enruta por CÓDIGO, no olfateando el texto del motivo: "sobra un dígito"
-      // tiene un arreglo distinto de "puede ser un eco" o de "la IA entregó el parcial".
+      // tiene un arreglo distinto de "la IA entregó el parcial".
       codigo_seleccion: veredicto.codigo,
       corregido: veredicto.origen === "corregido",
       // El número lo DEDUJO el ERP (no lo transcribió el modelo): se pre-llena para que la

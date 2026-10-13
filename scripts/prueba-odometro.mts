@@ -108,9 +108,26 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
     v.km === 174159 && v.origen === "corregido" && v.codigo === "parcial", `km=${v.km} codigo=${v.codigo}`);
 }
 {
-  // Anti-eco: un candidato que CLAVA el vigente huele a número copiado, no leído.
-  const v = leer({ kmIA: 1803, tripIA: 174001, kmVigente: 174000 });
-  chk("el eco del km vigente no se registra como lectura", v.codigo === "eco" && v.km === 1803);
+  // EL ANTIGUO «ANTI-ECO», RETIRADO (BUI-272, 12/10/2026): check-out de la app a las 17:05 con
+  // 181,135 y foto al grupo a las 17:06 con la unidad detenida. La IA cruzó parcial y total
+  // (kilometraje 3,555 · trip 181,135); el rescate dio 181,135 y el guard, por clavar la lectura
+  // anterior, registró el PARCIAL → «Retrocede 177,580 km». Al prompt no va ningún km: la
+  // coincidencia es un testigo, no un eco.
+  const v = elegirOdometro({
+    kmIA: 3555, tripIA: 181135, textoLeido: null, kmVigente: 181135, kmDiaMax: 1500,
+    horasDesdeUltima: 0.02, hayHistorial: true, vecinas: { anterior: 181135, posterior: null },
+  });
+  chk("BUI-272 · unidad detenida: se registra el total, no el parcial",
+    v.km === 181135 && v.codigo === "parcial" && v.autoOk && v.testigo === "anterior", `km=${v.km} codigo=${v.codigo} testigo=${v.testigo}`);
+  chk("…y el motivo dice con qué lectura coincide", /coincide con la lectura anterior 181,135/.test(v.motivo ?? ""), v.motivo ?? "");
+  const e = evaluarLectura({ kmVigente: 181135, kmNuevo: v.km!, kmDiaMax: 1500, horasDesdeUltima: 0.02 });
+  chk("…y quien escribe la acepta", e.estado === "aceptada", `${e.estado} ${e.motivo}`);
+  // Sin vecinas: lo mismo contra el vigente (la foto de ahora, en pantalla).
+  const w = leer({ kmIA: 1803, tripIA: 174001, kmVigente: 174000 });
+  chk("total a 1 km del vigente: se rescata con testigo", w.km === 174001 && w.codigo === "parcial" && w.testigo === "vigente", `km=${w.km} codigo=${w.codigo}`);
+  // Sin coincidencia no hay testigo: el rescate de siempre, sin cambios.
+  const x = leer({ kmIA: 1803, tripIA: 174159, kmVigente: 174000 });
+  chk("rescate sin coincidencia: sin testigo", x.km === 174159 && x.testigo === undefined);
 }
 
 // ── 4. LA CONSISTENCIA QUE ESTABA ROTA: quien lee y quien escribe dicen lo mismo ──

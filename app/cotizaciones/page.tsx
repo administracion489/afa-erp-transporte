@@ -8,6 +8,10 @@ import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
 import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from "@/lib/coordenadas";
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
+import SelectorCliente from "@/components/SelectorCliente";
+import SelectorVehiculo from "@/components/SelectorVehiculo";
+import { usoPorVehiculo, recientesVehiculos } from "@/lib/vehiculos-buscador";
+import { rotuloCliente, usoPorCliente, recientesDe, esBloqueado, type ClienteBuscable } from "@/lib/clientes-buscador";
 
 /**
  * Quién EMITE la cotización, resuelto por el escalón único del ERP.
@@ -28,6 +32,14 @@ import {
 } from "@/lib/costos/nivel-servicio";
 import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
 import { planDePropagacion, MOTIVO_NO_PROPAGA, type MotivoNoPropaga } from "@/lib/paradas-materializar";
+import dynamic from "next/dynamic";
+import { estadoMarca, firmaParaderos, indiceDeInsercion, type HoraCalc, type FilaPlan } from "@/lib/paradas-horario";
+import { useRutaParaderos, coordsOk } from "@/components/cotizaciones/useRutaParaderos";
+import BarraHorasParaderos, { etiquetaDiaCorta, type ContextoHoras } from "@/components/cotizaciones/BarraHorasParaderos";
+import { coordValida, resolverRestauracion, rutaCoordsParaGuardar, rotuloFuente, type PuntoRuta, type Extremo } from "@/lib/cotizacion-ruta-coords";
+import { faltaColumna } from "@/lib/columna-faltante";
+// El mapa arrastra el CSS de Mapbox y su motor se baja al abrirlo (lib/mapbox-carga.ts).
+const MapaParaderos = dynamic(() => import("@/components/cotizaciones/MapaParaderos"), { ssr: false });
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -40,11 +52,13 @@ type ModoServ="eventual"|"fijo";
 // Vive dentro de items_json (jsonb), así que no necesitó migración.
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;pax_contratado?:number|null;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
-type Cliente={id:number;nombre:string;empresa?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;};
+type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;ciudad?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;};
 type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;cuentas_bancarias?:{banco:string;cuenta:string;cci:string}[]|null;};
 type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
-type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;};
+// `hora_calc` = la marca que deja «⏱ Calcular horas» (lib/paradas-horario.ts): con qué se calculó
+// la hora y para qué paraderos. Viaja en paradas_json (jsonb), sin migración.
+type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;hora_calc?:HoraCalc;};
 type Tarifa={id:number;origen:string;destino:string;tipo_vehiculo:string;equipamiento:string;tipo_servicio:string;modo:string;precio:number;moneda:string;confidencial:boolean;incluye_guia:boolean;incluye_peajes:boolean;incluye_alimentacion:boolean;notas:string|null;};
 type VehiculoFlota={id:number;placa:string;categoria:string|null;marca:string|null;modelo:string|null;anio:number|null;capacidad_pasajeros:number|null;equipamiento:string|null;foto_externa_url:string|null;foto_interna_url:string|null;descripcion_unidad:string|null;tipo_vehiculo_costeo:string|null;};
 type VehiculoTerceroFlota={id:number;empresa_id:number;placa:string;categoria:string|null;marca:string|null;modelo:string|null;capacidad:number|null;estado:string;empresa_nombre?:string;foto_externa_url:string|null;foto_interna_url:string|null;descripcion_unidad:string|null;tipo_vehiculo_costeo:string|null;};
@@ -68,8 +82,8 @@ function extraerNombreApellido(nombre:string):string{const p=nombre.toUpperCase(
 const enHorario=()=>{const l=new Date(new Date().toLocaleString("en-US",{timeZone:"America/Lima"}));return l.getDay()>=1&&l.getDay()<=5&&l.getHours()>=8&&l.getHours()<18;};
 const GRUPO_COLOR:{[k:string]:{color:string;bg:string}}={Ligeros:{color:"#6366f1",bg:"#eef2ff"},Vans:{color:"#0891b2",bg:"#ecfeff"},Buses:{color:"#0b315f",bg:"#eef3f8"},Otros:{color:"#6b7280",bg:"#f3f4f6"}};
 
-function Campo({label,span,req,hint,children}:{label:string;span?:number;req?:boolean;hint?:string;children:React.ReactNode}){
-  return(<div className={span===2?"md:col-span-2":span===3?"md:col-span-3":""}><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{label}{req&&<span className="text-red-400 ml-0.5">*</span>}</label>{children}{hint&&<p className="text-[10px] text-gray-400 mt-0.5">{hint}</p>}</div>);
+function Campo({label,span,req,hint,extra,children}:{label:string;span?:number;req?:boolean;hint?:string;extra?:React.ReactNode;children:React.ReactNode}){
+  return(<div className={span===2?"md:col-span-2":span===3?"md:col-span-3":""}><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{label}{req&&<span className="text-red-400 ml-0.5">*</span>}{extra}</label>{children}{hint&&<p className="text-[10px] text-gray-400 mt-0.5">{hint}</p>}</div>);
 }
 
 function calcCostoVeh(p:ParamCosto,pr:Record<string,number>,km:number,dias:number,peajes:number,pernocte:number,viaticos:number){
@@ -264,7 +278,8 @@ function ModalPlantilla({cot,plantillaActual,onElegir,onGenerar,onCancelar}:{cot
 }
 
 // ── CardParada: FUERA de ParadasBuilder para evitar pérdida de foco al escribir ──
-function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, onDragStart, onDragOver, onDrop, onDragEnd, isDragging, isOver }: {
+// `marca` = estadoMarca(p, firma) de lib/paradas-horario.ts: la pantalla solo la rotula.
+function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, onDragStart, onDragOver, onDrop, onDragEnd, isDragging, isOver, marca, aviso, renombre, onVolverNombre, onReintentarDireccion }: {
   p: ParadaTP; lbl: string; col: string;
   onUpd: (id: string, k: keyof ParadaTP, v: string) => void;
   onSel: (id: string, r: PlaceResultCot) => void;
@@ -277,8 +292,15 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
   onDragEnd?: () => void;
   isDragging?: boolean;
   isOver?: boolean;
+  marca?: "manual" | "vigente" | "desactualizada";
+  aviso?: string;
+  /** Se arrastró en el mapa: su dirección se busca sola (ver AvisoRenombreMapa). */
+  renombre?: RenombreMapa;
+  onVolverNombre?: () => void;
+  onReintentarDireccion?: () => void;
 }) {
   const inp = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f] bg-white";
+  const hc = p.hora_calc;
   return (
     <div
       className="bg-white rounded-2xl border-2 overflow-hidden transition-all"
@@ -299,7 +321,7 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
         {onDel && <button type="button" onClick={onDel} className="text-white/60 hover:text-white font-bold text-xs leading-none px-1">✕</button>}
       </div>
       <div className="p-4 grid gap-3" style={{ gridTemplateColumns: "1fr 120px" }}>
-        <div>
+        <div className="min-w-0">
           <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lugar</label>
           {mapsLoaded ? (
             <LocationInputCot placeholder={p.tipo==="intermedia"?"Buscar parada…":"Nombre del punto"} value={p.nombre} mapsLoaded={mapsLoaded}
@@ -313,32 +335,123 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
               📍 <a href={urlMapsPunto(p.lat, p.lng)} target="_blank" rel="noreferrer" className="hover:text-blue-500 hover:underline">{fmtCoord(p.lat, p.lng)}</a>
             </p>
           )}
+          {onVolverNombre && onReintentarDireccion && (
+            <AvisoRenombreMapa estado={renombre} onVolver={onVolverNombre} onReintentar={onReintentarDireccion} />
+          )}
         </div>
         <div>
           <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label>
           <input type="time" className={inp} value={p.hora} onChange={e => onUpd(p.id, "hora", e.target.value)} />
+          {hc && marca === "vigente" && (
+            <span className="inline-block mt-1 text-[9px] font-bold rounded-full px-1.5 py-0.5 bg-sky-50 text-sky-800 border border-sky-200"
+              title={hc.modo === "trafico" ? `Calculada con el tráfico previsto del ${etiquetaDiaCorta(hc.fecha_ref)} (Google, best_guess) y ${hc.espera_min} min de embarque por paradero.` : `Calculada con la ruta sin tráfico y ${hc.espera_min} min de embarque por paradero.`}>
+              {hc.modo === "trafico" ? `🚦 previsto ${etiquetaDiaCorta(hc.fecha_ref)}` : "≈ sin tráfico"}{hc.dia === 1 ? " (+1)" : ""}
+            </span>
+          )}
+          {hc && marca === "desactualizada" && (
+            <span className="inline-block mt-1 text-[9px] font-bold rounded-full px-1.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-300"
+              title="La hora se calculó con otros paraderos. «Calcular horas» respeta las horas escritas: usa «Recalcular todas» para rehacerla.">
+              ⚠ desactualizada (moviste un paradero){hc.dia === 1 ? " (+1)" : ""}
+            </span>
+          )}
         </div>
+        {aviso && <p className="col-span-2 text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">⚠ {aviso}</p>}
       </div>
     </div>
   );
 }
 
-function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, origenNombre, destinoNombre, origenLat, origenLng, destinoLat, destinoLng, horaIda, horaRetorno }: {
+/** Inicio, intermedios en su orden, destino: el orden del recorrido (y de la ruta y las horas). */
+function ordenarParadas(ps: ParadaTP[]): ParadaTP[] {
+  const ini = ps.find(p => p.tipo === "inicio");
+  const fin = ps.find(p => p.tipo === "destino");
+  return [...(ini ? [ini] : []), ...ps.filter(p => p.tipo === "intermedia"), ...(fin ? [fin] : [])];
+}
+
+/**
+ * La dirección de un punto (Google, por el servidor). Una sola consulta por punto: arrastrar el
+ * paradero 1 renombra a la vez el paradero y el «Punto de origen», y los dos piden lo mismo.
+ * Un fallo no se recuerda (el reintento vuelve a consultar).
+ */
+const direccionesPedidas = new Map<string, Promise<string | null>>();
+function direccionDePunto(lat: number, lng: number): Promise<string | null> {
+  const clave = `${lat.toFixed(6)},${lng.toFixed(6)}`;
+  const ya = direccionesPedidas.get(clave);
+  if (ya) return ya;
+  const p = (async () => {
+    const r = await fetch("/api/geocodificar-inverso", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lng }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+    return typeof d?.direccion === "string" && d.direccion.trim() ? d.direccion.trim() : null;
+  })();
+  direccionesPedidas.set(clave, p);
+  p.catch(() => direccionesPedidas.delete(clave));
+  return p;
+}
+
+/** Lo que pasó con el nombre de un punto arrastrado en el mapa. */
+type RenombreMapa = { cargando?: boolean; error?: string; anterior?: string; puesto?: string };
+
+/**
+ * Debajo del nombre de un punto arrastrado: buscando, el error con su reintento, o la dirección
+ * nueva con la vuelta al nombre de antes (un «Punta Hermosa» escrito a mano no se pierde por
+ * mover el marcador unos metros).
+ */
+function AvisoRenombreMapa({ estado, onVolver, onReintentar }: { estado?: RenombreMapa; onVolver: () => void; onReintentar: () => void }) {
+  if (!estado) return null;
+  if (estado.cargando) return <p className="mt-1 text-[10px] text-gray-400">⏳ Buscando la dirección del punto que moviste…</p>;
+  if (estado.error) return (
+    <div className="mt-1 flex flex-wrap items-center gap-2">
+      <span className="text-[10px] text-red-600">⚠ {estado.error}</span>
+      <button type="button" onClick={onReintentar} className="text-[10px] font-bold text-[#0b315f] border border-[#0b315f]/30 rounded-lg px-2 py-0.5 hover:bg-blue-50">↻ Reintentar</button>
+    </div>
+  );
+  if (estado.puesto && estado.anterior?.trim()) return (
+    <div className="mt-1 flex flex-wrap items-center gap-2">
+      <span className="text-[10px] text-sky-700">📍 Dirección tomada del mapa.</span>
+      <button type="button" onClick={onVolver} className="text-[10px] font-bold text-[#0b315f] hover:underline">↩ Volver a «{estado.anterior}»</button>
+    </div>
+  );
+  return null;
+}
+
+function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, origenNombre, destinoNombre, origenLat, origenLng, destinoLat, destinoLng, horaIda, horaRetorno, contexto, onMoverExtremo }: {
   paradas: ParadaTP[]; onChange: (p: ParadaTP[]) => void; tipo?: string;
   mapsLoaded?: boolean; origenNombre?: string; destinoNombre?: string;
   origenLat?: string; origenLng?: string; destinoLat?: string; destinoLng?: string;
   horaIda?: string; horaRetorno?: string;
+  /** Para «⏱ Calcular horas»: modo y fecha del servicio, sentido y salidas. */
+  contexto?: ContextoHoras;
+  /** El paradero 1 o el último se arrastró en el mapa (solo la ida: los ata al origen/destino del formulario). */
+  onMoverExtremo?: (tipo: "inicio" | "destino", lat: number, lng: number) => void;
 }) {
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [overIdx, setOverIdx] = useState<number | null>(null);
   const droppedRef = useRef(false);
 
+  // ── Ruta, mapa y horas ──────────────────────────────────────────────────────
+  const ord = useMemo(() => ordenarParadas(paradas), [paradas]);
+  const ruta = useRutaParaderos(ord);
+  const firmaActual = firmaParaderos(ord);
+  const [verMapa, setVerMapa] = useState(true);
+  const [avisos, setAvisos] = useState<{ firma: string; porId: Record<string, string> }>({ firma: "", porId: {} });
+  const [renombres, setRenombres] = useState<Record<string, RenombreMapa>>({});
+  // Lo que se lee DESPUÉS de un await (geocodificar, insertar): la lista de ahora, no la del clic.
+  const vivo = useRef({ paradas, onChange });
+  useEffect(() => { vivo.current = { paradas, onChange }; }, [paradas, onChange]);
+
   const nId = () => Math.random().toString(36).slice(2, 8);
-  const upd = (id: string, k: keyof ParadaTP, v: string) =>
+  const olvidarRenombre = (id: string) => setRenombres(prev => { if (!prev[id]) return prev; const n = { ...prev }; delete n[id]; return n; });
+  const upd = (id: string, k: keyof ParadaTP, v: string) => {
     onChange(paradas.map(p => p.id === id ? { ...p, [k]: v } : p));
+    // Quien escribe el nombre decide: la vuelta al anterior ya no aplica.
+    if (k === "nombre") olvidarRenombre(id);
+  };
   // Actualización atómica de nombre+lat+lng para evitar stale closure con 3 setState seguidos
-  const sel = (id: string, r: PlaceResultCot) =>
+  const sel = (id: string, r: PlaceResultCot) => {
     onChange(paradas.map(p => p.id === id ? { ...p, nombre: r.address, lat: String(r.lat), lng: String(r.lng) } : p));
+    olvidarRenombre(id);
+  };
   const inicio = paradas.find(p => p.tipo === "inicio");
   const fin    = paradas.find(p => p.tipo === "destino");
   const meds   = paradas.filter(p => p.tipo === "intermedia");
@@ -348,6 +461,86 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
     const a = [...paradas]; a.splice(idx < 0 ? a.length : idx, 0, n); onChange(a);
   };
   const esTP = tipo === "transporte_personal" || tipo === "fijo_multiparada";
+
+  /**
+   * Al soltar un marcador: nuevas coordenadas y, sola, la dirección de Google como nombre.
+   * Se aplica solo si al volver el paradero sigue en ESE punto y nadie le cambió el nombre
+   * mientras tanto; el nombre de antes queda a un clic («↩ Volver a…»).
+   */
+  const buscarDireccion = async (id: string, lat: string, lng: string, nombreAlSoltar: string) => {
+    setRenombres(prev => ({ ...prev, [id]: { ...prev[id], cargando: true, error: undefined } }));
+    const sigueIgual = () => {
+      const x = vivo.current.paradas.find(q => q.id === id);
+      return !!x && x.lat === lat && x.lng === lng && x.nombre === nombreAlSoltar;
+    };
+    try {
+      const dir = await direccionDePunto(Number(lat), Number(lng));
+      if (!sigueIgual()) {
+        // Lo movieron otra vez: esa búsqueda manda. Si solo le escribieron el nombre, se calla.
+        const x = vivo.current.paradas.find(q => q.id === id);
+        if (x && x.lat === lat && x.lng === lng) olvidarRenombre(id);
+        return;
+      }
+      if (!dir) { setRenombres(prev => ({ ...prev, [id]: { ...prev[id], cargando: false, error: "Google no devolvió una dirección para ese punto: el nombre quedó como estaba." } })); return; }
+      if (dir !== nombreAlSoltar) vivo.current.onChange(vivo.current.paradas.map(x => x.id === id ? { ...x, nombre: dir } : x));
+      // El «anterior» es el último nombre que NO puso el mapa: arrastrar dos veces no lo pierde.
+      setRenombres(prev => ({ ...prev, [id]: { anterior: prev[id]?.puesto === nombreAlSoltar ? prev[id]?.anterior : nombreAlSoltar, puesto: dir } }));
+    } catch (e) {
+      if (!sigueIgual()) { const x = vivo.current.paradas.find(q => q.id === id); if (x && x.lat === lat && x.lng === lng) olvidarRenombre(id); return; }
+      setRenombres(prev => ({ ...prev, [id]: { ...prev[id], cargando: false, error: `No se pudo buscar la dirección (${e instanceof Error ? e.message : "sin respuesta"}): el nombre quedó como estaba.` } }));
+    }
+  };
+  const moverEnMapa = (id: string, lat: number, lng: number) => {
+    const la = Number(lat.toFixed(6)), ln = Number(lng.toFixed(6));
+    const actual = vivo.current.paradas;
+    const p = actual.find(x => x.id === id);
+    if (!p) return;
+    vivo.current.onChange(actual.map(x => x.id === id ? { ...x, lat: String(la), lng: String(ln) } : x));
+    if (onMoverExtremo && (p.tipo === "inicio" || p.tipo === "destino")) onMoverExtremo(p.tipo, la, ln);
+    buscarDireccion(id, String(la), String(ln), p.nombre);
+  };
+  const reintentarDireccion = (id: string) => {
+    const p = vivo.current.paradas.find(x => x.id === id);
+    if (p && coordsOk(p)) buscarDireccion(id, p.lat, p.lng, p.nombre);
+  };
+  const volverNombre = (id: string) => {
+    const ant = renombres[id]?.anterior;
+    if (ant === undefined) return;
+    vivo.current.onChange(vivo.current.paradas.map(x => x.id === id ? { ...x, nombre: ant } : x));
+    olvidarRenombre(id);
+  };
+  /** «＋ Paradero aquí»: dónde va lo decide indiceDeInsercion sobre la ruta; el nombre se propone UNA vez. */
+  const insertarEnMapa = (punto: [number, number]) => {
+    const lista = ordenarParadas(vivo.current.paradas);
+    const conC = lista.filter(coordsOk);
+    if (conC.length < 2) return;
+    const poli = ruta.vigente && ruta.ruta ? ruta.ruta.poli : [];
+    const k = indiceDeInsercion(poli, conC.map(p => ({ lat: Number(p.lat), lng: Number(p.lng) })), punto);
+    const antesDe = conC[k];
+    const idx = antesDe ? lista.indexOf(antesDe) : lista.length - 1;
+    const nuevo: ParadaTP = { id: nId(), tipo: "intermedia", nombre: "", direccion: "", lat: String(Number(punto[1].toFixed(6))), lng: String(Number(punto[0].toFixed(6))), hora: "" };
+    const a = [...lista]; a.splice(Math.max(1, idx), 0, nuevo);
+    vivo.current.onChange(a);
+    direccionDePunto(Number(nuevo.lat), Number(nuevo.lng)).then(dir => {
+      if (!dir) return;
+      const ahora = vivo.current.paradas;
+      // Solo si nadie le escribió un nombre mientras tanto.
+      if (ahora.some(x => x.id === nuevo.id && !x.nombre.trim())) vivo.current.onChange(ahora.map(x => x.id === nuevo.id ? { ...x, nombre: dir } : x));
+    }).catch(() => { /* el paradero queda con coordenadas y sin nombre: el campo vacío lo pide */ });
+  };
+  const aplicarHoras = (filas: FilaPlan[], firma: string, porId: Record<string, string>) => {
+    const porFila = new Map(filas.map(f => [f.id, f]));
+    const actual = vivo.current.paradas;
+    vivo.current.onChange(actual.map(p => {
+      const f = porFila.get(p.id);
+      return f && f.hora_calc ? { ...p, hora: f.hora, hora_calc: f.hora_calc } : p;
+    }));
+    setAvisos({ firma, porId });
+  };
+  const ponerSalida = (h: string) => {
+    const actual = vivo.current.paradas;
+    vivo.current.onChange(actual.map(p => p.tipo === "inicio" ? { ...p, hora: h } : p));
+  };
 
   const handleDrop = (toIdx: number) => {
     droppedRef.current = true;
@@ -380,9 +573,37 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
     </div>
   );
 
+  const puntosMapa = ord.filter(coordsOk).map(p => ({ id: p.id, nombre: p.nombre, lat: Number(p.lat), lng: Number(p.lng), numero: ord.indexOf(p) + 1, tipo: p.tipo }));
+  const extra = (p: ParadaTP) => ({
+    marca: estadoMarca(p, firmaActual),
+    aviso: avisos.firma === firmaActual ? avisos.porId[p.id] : undefined,
+    renombre: renombres[p.id],
+    onVolverNombre: () => volverNombre(p.id),
+    onReintentarDireccion: () => reintentarDireccion(p.id),
+  });
+
   return (
     <div className="space-y-3">
-      {inicio && <CardParada p={inicio} lbl={esTP ? "🟢 Paradero 1" : "🟢 Inicio"} col="#16a34a" onUpd={upd} onSel={sel} mapsLoaded={mapsLoaded} />}
+      {puntosMapa.length >= 2 && (
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-black text-gray-600">🗺 Mapa de la ruta</span>
+            {verMapa && <span className="text-[10px] text-gray-400">Arrastra un número para mover ese paradero · clic en la línea para agregar uno</span>}
+            {ruta.cargando && <span className="text-[10px] text-gray-400">· trazando la ruta…</span>}
+            <button type="button" onClick={() => setVerMapa(v => !v)} className="ml-auto text-[10px] font-bold text-[#0b315f] hover:underline">{verMapa ? "Ocultar mapa" : "Ver mapa"}</button>
+          </div>
+          {ruta.error && <p className="text-[10px] text-red-600">⚠ No se pudo trazar la ruta: {ruta.error}</p>}
+          {!ruta.completo && <p className="text-[10px] text-gray-500">El mapa y la ruta solo incluyen los paraderos con coordenadas ({puntosMapa.length} de {ord.length}).</p>}
+          {verMapa && (
+            <MapaParaderos puntos={puntosMapa} poli={ruta.ruta?.poli ?? null} onMover={moverEnMapa} onInsertar={insertarEnMapa}
+              colorRuta={contexto?.sentido === "retorno" ? "#5b21b6" : "#0b315f"} />
+          )}
+        </div>
+      )}
+      {contexto && ord.length >= 2 && (
+        <BarraHorasParaderos paradas={ord} contexto={contexto} ruta={ruta} onAplicar={aplicarHoras} onPonerSalida={ponerSalida} />
+      )}
+      {inicio && <CardParada p={inicio} lbl={esTP ? "🟢 Paradero 1" : "🟢 Inicio"} col="#16a34a" onUpd={upd} onSel={sel} mapsLoaded={mapsLoaded} {...extra(inicio)} />}
       {meds.map((p, i) => (
         <CardParada
           key={p.id}
@@ -400,12 +621,13 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
           onDragEnd={handleDragEnd}
           isDragging={dragIdx === i}
           isOver={overIdx === i && dragIdx !== null && dragIdx !== i}
+          {...extra(p)}
         />
       ))}
       <button type="button" onClick={addMed} className="w-full py-2.5 rounded-xl border-2 border-dashed font-bold text-sm hover:bg-blue-50 transition-colors" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
         + {esTP ? "Paradero intermedio" : "Parada intermedia"}
       </button>
-      {fin && <CardParada p={fin} lbl={esTP ? "🔴 Último Paradero" : "🔴 Destino"} col="#dc2626" onUpd={upd} onSel={sel} mapsLoaded={mapsLoaded} />}
+      {fin && <CardParada p={fin} lbl={esTP ? "🔴 Último Paradero" : "🔴 Destino"} col="#dc2626" onUpd={upd} onSel={sel} mapsLoaded={mapsLoaded} {...extra(fin)} />}
     </div>
   );
 }
@@ -738,6 +960,28 @@ type PlaceResultCot={address:string;lat:number;lng:number;placeId:string;};
 // coordenada redondeada (~1 m) y devolverían el km del otro.
 const cacheTramosCot=new Map<string,number>();
 const clavePuntoCot=(p:{placeId?:string;lat:number;lng:number})=>p.placeId||`${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
+// Un extremo de tramo: un lugar elegido de la lista (o por coordenadas), o el TEXTO de una
+// dirección que nadie eligió de la lista — Google también lo acepta y lo geocodifica él.
+type PuntoKmCot={placeId:string;lat:number;lng:number}|{texto:string};
+const claveKmCot=(p:PuntoKmCot)=>"texto" in p?`t:${p.texto.trim().toLowerCase()}`:clavePuntoCot(p);
+const refKmCot=(p:PuntoKmCot)=>"texto" in p?p.texto:p.placeId?{placeId:p.placeId}:{location:{lat:p.lat,lng:p.lng}};
+/** Km por carretera de un tramo (redondeado), con caché. `null` = Google no pudo calcularlo. */
+function kmTramoCot(a:PuntoKmCot,b:PuntoKmCot):Promise<number|null>{
+  const clave=`${claveKmCot(a)}>${claveKmCot(b)}`;
+  const hit=cacheTramosCot.get(clave);
+  // `undefined` = el par no está en caché; un 0 cacheado sí es un km real.
+  if(hit!==undefined)return Promise.resolve(hit);
+  return new Promise(resolve=>{
+    try{
+      const g=(window as any).google.maps;
+      new g.DistanceMatrixService().getDistanceMatrix({origins:[refKmCot(a)],destinations:[refKmCot(b)],travelMode:g.TravelMode.DRIVING,unitSystem:g.UnitSystem.METRIC},(resp:any)=>{
+        const el=resp?.rows?.[0]?.elements?.[0];
+        if(el?.status==="OK"){const km=Math.round(el.distance.value/1000);cacheTramosCot.set(clave,km);resolve(km);}
+        else resolve(null);
+      });
+    }catch{resolve(null);}
+  });
+}
 
 function useGoogleMapsCot(){
   const[loaded,setLoaded]=useState(false);
@@ -790,6 +1034,64 @@ function PlacesInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputCls
       <input ref={inputRef} type="text" value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} className={cls+" bg-white"}/>
       {value&&<button type="button" onClick={()=>{onChange("");onSelect({address:"",lat:0,lng:0,placeId:""});}} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500 font-bold text-xs">✕</button>}
       {!mapsLoaded&&<div className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>}
+    </div>
+  );
+}
+
+/**
+ * Las coordenadas de un punto de la «Ruta del servicio», con de dónde salieron. Antes no se
+ * enseñaban nunca: no había forma de saber si un punto tenía coordenadas (y sin ellas no hay km
+ * ni mapa) o solo un texto. La frase de la fuente la compone el módulo puro, no esta pantalla.
+ */
+function CoordsDePunto({place,texto,buscando,fallo,vacioDice}:{place:PuntoRuta|null;texto:string;buscando:boolean;fallo:boolean;vacioDice?:string}){
+  if(place&&coordValida(place.lat,place.lng)){
+    const r=rotuloFuente(place.fuente);
+    return(
+      <p className={`text-[10px] leading-tight ${r.aproximada?"text-amber-600":"text-gray-500"}`}>
+        📍 <span className="font-mono">{place.lat.toFixed(6)}, {place.lng.toFixed(6)}</span>{r.texto&&<> · {r.texto}</>}
+        {" · "}<a href={`https://www.google.com/maps/search/?api=1&query=${place.lat},${place.lng}`} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">Ver en Maps</a>
+      </p>
+    );
+  }
+  if(buscando)return <p className="text-[10px] text-gray-400">⏳ Buscando las coordenadas de este texto…</p>;
+  if(!texto.trim())return vacioDice?<p className="text-[10px] text-gray-400">{vacioDice}</p>:null;
+  return <p className="text-[10px] text-amber-600 leading-tight">⚠ Sin coordenadas{fallo?" (Google no encontró este texto)":""}: elige el punto de la lista o usa «Usar coordenadas». Sin ellas no se calcula el km.</p>;
+}
+
+/**
+ * El mapa de la ruta ORIGEN → DESTINO (→ RETORNO) cuando no hay paraderos que lo dibujen. Usa la
+ * misma consulta de ruta y el mismo mapa que los paraderos: arrastrar un punto lo corrige (y su
+ * texto pasa a ser la dirección de Google, igual que en los paraderos), y no ofrece insertar — aquí no hay lista.
+ * Sin punto de retorno, la vuelta se dibuja al origen: es lo que mide el km.
+ */
+function MapaRutaServicio({origen,destino,retorno,vuelve,nombres,onMover}:{
+  origen:PuntoRuta;destino:PuntoRuta;retorno:PuntoRuta|null;vuelve:boolean;
+  nombres:{origen:string;destino:string;retorno:string};
+  onMover:(e:Extremo,lat:number,lng:number)=>void;
+}){
+  const conRetorno=vuelve&&!!retorno&&coordValida(retorno.lat,retorno.lng);
+  const fin=vuelve?(conRetorno?retorno!:origen):null;
+  const finLat=fin?.lat??null,finLng=fin?.lng??null;
+  const ptsRuta=useMemo(()=>{
+    const l=[{id:"origen",nombre:nombres.origen||"Origen",lat:String(origen.lat),lng:String(origen.lng)},{id:"destino",nombre:nombres.destino||"Destino",lat:String(destino.lat),lng:String(destino.lng)}];
+    if(finLat!==null&&finLng!==null)l.push({id:conRetorno?"retorno":"vuelta",nombre:conRetorno?(nombres.retorno||"Retorno"):(nombres.origen||"Origen"),lat:String(finLat),lng:String(finLng)});
+    return l;
+  },[origen.lat,origen.lng,destino.lat,destino.lng,finLat,finLng,conRetorno,nombres.origen,nombres.destino,nombres.retorno]);
+  const ruta=useRutaParaderos(ptsRuta);
+  const puntos=[
+    {id:"origen",nombre:nombres.origen,lat:origen.lat,lng:origen.lng,numero:1,tipo:"inicio" as const},
+    {id:"destino",nombre:nombres.destino,lat:destino.lat,lng:destino.lng,numero:2,tipo:(conRetorno?"intermedia":"destino") as "intermedia"|"destino"},
+    ...(conRetorno?[{id:"retorno",nombre:nombres.retorno,lat:retorno!.lat,lng:retorno!.lng,numero:3,tipo:"destino" as const}]:[]),
+  ];
+  return(
+    <div className="md:col-span-3 space-y-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">🗺 Ruta en el mapa</p>
+        {ruta.cargando&&<span className="text-[10px] text-gray-400">trazando…</span>}
+        {ruta.error&&<span className="text-[10px] text-red-500">⚠ {ruta.error}</span>}
+      </div>
+      <p className="text-[10px] text-gray-400">1 origen · 2 destino{conRetorno?" · 3 retorno":vuelve?" · la vuelta llega al origen":""}. Arrastra un punto para corregirlo: su dirección se actualiza sola (puedes volver al texto de antes) y el km se vuelve a medir.</p>
+      <MapaParaderos puntos={puntos} poli={ruta.ruta?.poli??null} onMover={(id,lat,lng)=>onMover(id as Extremo,lat,lng)}/>
     </div>
   );
 }
@@ -885,9 +1187,20 @@ function LocationInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputC
 }
 
 const DRAFT_KEY="afa_cot_borrador_v1";
+// La cartera ENTERA, por páginas con orden total: PostgREST corta en 1000 filas y el buscador no
+// puede decir «no hay» de un cliente que quedó en la página 2. null = no se pudo leer (no es «vacía»).
+async function leerClientes():Promise<Cliente[]|null>{
+  const out:Cliente[]=[];
+  for(let d=0;d<50000;d+=1000){const{data,error}=await supabase.from("clientes").select("*").order("nombre").order("id").range(d,d+999);if(error)return null;out.push(...(data||[]));if(!data||data.length<1000)break;}
+  return out;
+}
+type ContactoCl={nombre:string|null;apellido:string|null;cargo:string|null;telefono:string|null;email:string|null;principal:boolean|null};
 
 export default function CotizacionesPage(){
   const [clientes,setClientes]=useState<Cliente[]>([]);const [cotizas,setCotizas]=useState<Cotizacion[]>([]);const [tarifas,setTarifas]=useState<Tarifa[]>([]);const [flota,setFlota]=useState<VehiculoFlota[]>([]);const [flotaTercero,setFlotaTercero]=useState<VehiculoTerceroFlota[]>([]);const [paramsDB,setParamsDB]=useState<ParamCosto[]>([]);const [preciosDB,setPreciosDB]=useState<Record<string,number>>({});
+  const [cargandoClientes,setCargandoClientes]=useState(true);const [errorClientes,setErrorClientes]=useState(false);const [contactosDe,setContactosDe]=useState<{id:string;lista:ContactoCl[]}>({id:"",lista:[]});
+  // «+ Crear» abre /clientes en otra pestaña: solo si ESTA pantalla lo pidió se autoselecciona el creado.
+  const esperaClienteRef=useRef(false);
   const [loading,setLoading]=useState(false);const [guardando,setGuardando]=useState(false);const [mostrarForm,setMostrarForm]=useState(false);const [editandoId,setEditandoId]=useState<number|null>(null);const [busqueda,setBusqueda]=useState("");const [filtroEst,setFiltroEst]=useState("todos");const [filtroModo,setFiltroModo]=useState("todos");
   const [draftRecuperado,setDraftRecuperado]=useState(false);
   const [cfgDefault,setCfgDefault]=useState<CotPlantillaConfig|null>(null);
@@ -911,47 +1224,158 @@ export default function CotizacionesPage(){
   // Se lee de window.location (cliente) para no requerir <Suspense> de useSearchParams.
   useEffect(()=>{if(typeof window==="undefined")return;const b=new URLSearchParams(window.location.search).get("buscar");if(b)setBusqueda(b);},[]);
   const mapsLoaded=useGoogleMapsCot();
-  const [origenPlace,setOrigenPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
-  const [destinoPlace,setDestinoPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
+  const [origenPlace,setOrigenPlace]=useState<PuntoRuta|null>(null);
+  const [destinoPlace,setDestinoPlace]=useState<PuntoRuta|null>(null);
+  /**
+   * EL KM GUARDADO NO SE PISA AL REABRIR (lib/cotizacion-ruta-coords.ts). Restaurar los puntos es
+   * cambiarlos, y sin este freno abrir una cotización reescribiría su km —que pudo corregirse a
+   * mano— con el de unas coordenadas que a veces son aproximadas. Congelado = no se mide mientras el
+   * servicio vuelva igual y el retorno tenga el mismo texto; tocar un punto lo descongela.
+   */
+  const [kmCongelado,setKmCongelado]=useState<{vuelve:boolean;ret:string}|null>(null);
+  /** Puntos que al reabrir no tenían coordenadas guardadas: se buscan por el texto (aproximadas). */
+  const [porGeocodificar,setPorGeocodificar]=useState<Extremo[]>([]);
+  const [geoFallo,setGeoFallo]=useState<Extremo[]>([]);
   // `null` = todavía no hay km calculado por Maps (0 sí es un valor válido: tramos < 500 m).
   const [kmBase,setKmBase]=useState<number|null>(null);
+  /**
+   * EL KM DEL SERVICIO ES IDA + RETORNO, Y EL RETORNO SE MIDE, NO SE SUPONE.
+   *
+   * Antes solo «Ida y Retorno» y «Transporte personal» duplicaban el tramo de ida; los demás
+   * tipos con retorno (con paraderos, retén, full day, multi-día…) costeaban SOLO la ida aunque
+   * el formulario pidiera el punto de retorno, y ese punto no se consultaba nunca. Ahora todo
+   * servicio que no es «Solo ida» suma el tramo destino → punto de retorno (el origen si está
+   * vacío). `null` = sin calcular o Google no pudo: entonces se estima igual a la ida y se dice.
+   */
+  const [kmRet,setKmRet]=useState<number|null>(null);
+  const [retornoPlace,setRetornoPlace]=useState<PuntoRuta|null>(null);
   const [calculandoKm,setCalculandoKm]=useState(false);
   const [errorKm,setErrorKm]=useState("");
+  const [avisoRet,setAvisoRet]=useState("");
+  const vuelve=!["solo_ida","fijo_solo_ida"].includes(form.tipo_servicio);
+  // El texto tecleado solo cuenta mientras no se eligió un lugar de la lista.
+  const textoRet=retornoPlace?"":form.punto_retorno.trim();
   useEffect(()=>{
     // `cancelado` evita que la respuesta de un destino ya cambiado pise el km
     // del destino actual (quedaría un kilometraje equivocado en la cotización).
     let cancelado=false;
-    const limpiar=()=>{cancelado=true;};
     // Sin ruta completa no hay consulta en vuelo: se libera el bloqueo de guardado.
-    if(!mapsLoaded||!origenPlace||!destinoPlace){setCalculandoKm(false);return limpiar;}
-    // Si ya conocemos este par no se vuelve a pedir a Google.
-    const clave=`${clavePuntoCot(origenPlace)}>${clavePuntoCot(destinoPlace)}`;
-    const hit=cacheTramosCot.get(clave);
-    // `undefined` = el par no está en caché; un 0 cacheado sí es un km real y debe escribirse.
-    if(hit!==undefined){setErrorKm("");setCalculandoKm(false);setKmBase(hit);return limpiar;}
-    const svc=new (window as any).google.maps.DistanceMatrixService();
-    const orig=origenPlace.placeId?{placeId:origenPlace.placeId}:{location:{lat:origenPlace.lat,lng:origenPlace.lng}};
-    const dest=destinoPlace.placeId?{placeId:destinoPlace.placeId}:{location:{lat:destinoPlace.lat,lng:destinoPlace.lng}};
+    if(!mapsLoaded||!origenPlace||!destinoPlace){setCalculandoKm(false);return;}
+    if(kmCongelado&&kmCongelado.vuelve===vuelve&&kmCongelado.ret===form.punto_retorno.trim()){setCalculandoKm(false);return;}
+    const finRet:PuntoKmCot|null=!vuelve?null:retornoPlace??(textoRet?{texto:textoRet}:origenPlace);
     setErrorKm("");setCalculandoKm(true);
-    svc.getDistanceMatrix({origins:[orig],destinations:[dest],travelMode:(window as any).google.maps.TravelMode.DRIVING,unitSystem:(window as any).google.maps.UnitSystem.METRIC},(resp:any)=>{
-      const el=resp?.rows?.[0]?.elements?.[0];
-      if(el?.status==="OK"){
-        const km=Math.round(el.distance.value/1000);cacheTramosCot.set(clave,km);
-        if(!cancelado){setKmBase(km);setErrorKm("");setCalculandoKm(false);}
-      }else{
+    // Con el retorno escrito a mano se espera a que se deje de teclear: una consulta por tecla
+    // es una llamada pagada a Google por letra.
+    const espera=setTimeout(async()=>{
+      const [ida,ret]=await Promise.all([kmTramoCot(origenPlace,destinoPlace),finRet?kmTramoCot(destinoPlace,finRet):Promise.resolve(null)]);
+      if(cancelado)return;
+      if(ida===null){
         // Sin respuesta útil (OVER_QUERY_LIMIT, REQUEST_DENIED, red caída, ZERO_RESULTS o
         // NOT_FOUND de campamentos y destinos rurales). Se borra el km para no conservar
         // el del destino anterior y se avisa para que se ingrese a mano.
-        if(!cancelado){setKmBase(null);setForm(p=>({...p,km:""}));setErrorKm("⚠️ Google Maps no pudo calcular el kilometraje de esta ruta. Ingrésalo a mano.");setCalculandoKm(false);}
+        setKmBase(null);setKmRet(null);setAvisoRet("");setForm(p=>({...p,km:""}));setErrorKm("⚠️ Google Maps no pudo calcular el kilometraje de esta ruta. Ingrésalo a mano.");setCalculandoKm(false);return;
       }
-    });
-    return limpiar;
-  },[mapsLoaded,origenPlace?.placeId,origenPlace?.lat,origenPlace?.lng,destinoPlace?.placeId,destinoPlace?.lat,destinoPlace?.lng]);
+      setKmRet(ret);setKmBase(ida);
+      setAvisoRet(finRet&&ret===null?"⚠️ Google Maps no pudo calcular el tramo de retorno: se estimó igual a la ida. Revisa el punto de retorno o corrige el km a mano.":"");
+      setCalculandoKm(false);
+    },finRet&&"texto" in finRet?700:0);
+    return()=>{cancelado=true;clearTimeout(espera);};
+  },[mapsLoaded,origenPlace?.placeId,origenPlace?.lat,origenPlace?.lng,destinoPlace?.placeId,destinoPlace?.lat,destinoPlace?.lng,retornoPlace?.placeId,retornoPlace?.lat,retornoPlace?.lng,textoRet,vuelve,kmCongelado,form.punto_retorno]);
   useEffect(()=>{
     if(kmBase===null)return;
-    const mult=(form.tipo_servicio==="ida_retorno"||form.tipo_servicio==="transporte_personal")?2:1;
-    setForm(p=>({...p,km:String(kmBase*mult)}));
-  },[kmBase,form.tipo_servicio]);
+    setForm(p=>({...p,km:String(vuelve?kmBase+(kmRet??kmBase):kmBase)}));
+  },[kmBase,kmRet,vuelve]);
+
+  /** Al reabrir (cotización o borrador): las coordenadas por la cascada de lib/cotizacion-ruta-coords.ts. */
+  const restaurarRuta=(c:{origen:string|null;destino:string|null;punto_retorno:string|null;tipo_servicio:string|null;km?:number|string|null;ruta_coords_json?:unknown;paradas_json?:ParadaTP[]|null})=>{
+    const vuelveC=!["solo_ida","fijo_solo_ida"].includes(c.tipo_servicio||"solo_ida");
+    const r=resolverRestauracion(c,vuelveC);
+    setOrigenPlace(r.origen);setDestinoPlace(r.destino);setRetornoPlace(r.retorno);
+    setPorGeocodificar(r.porGeocodificar);setGeoFallo([]);setRenombreRuta({});
+    setKmCongelado(Number(c.km)>0?{vuelve:vuelveC,ret:String(c.punto_retorno||"").trim()}:null);
+  };
+  // Lo que el operador tiene escrito AHORA: una búsqueda por texto que vuelve tarde no pisa un
+  // punto que ya cambió.
+  const textosRuta=useRef({origen:"",destino:"",retorno:""});
+  useEffect(()=>{textosRuta.current={origen:form.origen,destino:form.destino,retorno:form.punto_retorno};},[form.origen,form.destino,form.punto_retorno]);
+  useEffect(()=>{
+    // Una cotización vieja (sin coordenadas guardadas ni paraderos) solo tiene el texto: se busca
+    // en Google y se marca APROXIMADA. Una consulta por punto, solo al reabrir.
+    if(!mapsLoaded||porGeocodificar.length===0)return;
+    type Geo={geocode:(r:{address:string;region:string;language:string})=>Promise<{results?:{geometry?:{location?:{lat:()=>number;lng:()=>number}}}[]}>};
+    const G=(window as unknown as {google?:{maps?:{Geocoder?:new()=>Geo}}}).google?.maps?.Geocoder;
+    if(!G)return;
+    let vivo=true;
+    const pedidos={...textosRuta.current};
+    const geocoder=new G();
+    (async()=>{
+      const fallos:Extremo[]=[];
+      for(const e of porGeocodificar){
+        const texto=pedidos[e].trim();
+        if(!texto)continue;
+        try{
+          const resp=await geocoder.geocode({address:texto,region:"PE",language:"es"});
+          const loc=resp?.results?.[0]?.geometry?.location;
+          if(!vivo)return;
+          if(!loc){fallos.push(e);continue;}
+          if(textosRuta.current[e]!==pedidos[e])continue;
+          const pt:PuntoRuta={placeId:"",lat:loc.lat(),lng:loc.lng(),fuente:"texto"};
+          const poner=(prev:PuntoRuta|null)=>prev??pt;
+          if(e==="origen")setOrigenPlace(poner);else if(e==="destino")setDestinoPlace(poner);else setRetornoPlace(poner);
+        }catch{fallos.push(e);}
+      }
+      if(vivo){setPorGeocodificar([]);setGeoFallo(fallos);}
+    })();
+    return()=>{vivo=false;};
+  },[mapsLoaded,porGeocodificar]);
+  /**
+   * Arrastrar un punto de la ruta (en su mapa, o el paradero 1 / último de la ida): mandan las
+   * coordenadas nuevas y el texto del punto pasa a ser la dirección de Google, sola. Se aplica solo
+   * si al volver el punto sigue ahí y nadie tocó el texto; el texto de antes queda a un clic.
+   */
+  const [renombreRuta,setRenombreRuta]=useState<Partial<Record<Extremo,RenombreMapa>>>({});
+  const placesRuta=useRef<Record<Extremo,PuntoRuta|null>>({origen:null,destino:null,retorno:null});
+  useEffect(()=>{placesRuta.current={origen:origenPlace,destino:destinoPlace,retorno:retornoPlace};},[origenPlace,destinoPlace,retornoPlace]);
+  const campoDe=(e:Extremo)=>e==="retorno"?"punto_retorno" as const:e;
+  const olvidarRenombreRuta=(e:Extremo)=>setRenombreRuta(prev=>{if(!prev[e])return prev;const n={...prev};delete n[e];return n;});
+  const buscarNombreRuta=async(e:Extremo,lat:number,lng:number,textoAlSoltar:string)=>{
+    setRenombreRuta(prev=>({...prev,[e]:{...prev[e],cargando:true,error:undefined}}));
+    const mismoPunto=()=>{const q=placesRuta.current[e];return!!q&&q.lat===lat&&q.lng===lng;};
+    const sigueIgual=()=>mismoPunto()&&textosRuta.current[e]===textoAlSoltar;
+    try{
+      const dir=await direccionDePunto(lat,lng);
+      if(!sigueIgual()){if(mismoPunto())olvidarRenombreRuta(e);return;}
+      if(!dir){setRenombreRuta(prev=>({...prev,[e]:{...prev[e],cargando:false,error:"Google no devolvió una dirección para ese punto: el texto quedó como estaba."}}));return;}
+      if(dir!==textoAlSoltar){
+        const campo=campoDe(e);
+        // Se escribe el texto sin pasar por el onChange del campo, que soltaría las coordenadas.
+        textosRuta.current={...textosRuta.current,[e]:dir};
+        setForm(p=>({...p,[campo]:dir}));
+      }
+      setRenombreRuta(prev=>({...prev,[e]:{anterior:prev[e]?.puesto===textoAlSoltar?prev[e]?.anterior:textoAlSoltar,puesto:dir}}));
+    }catch(err){
+      if(!sigueIgual()){if(mismoPunto())olvidarRenombreRuta(e);return;}
+      const msg=err instanceof Error?err.message:"sin respuesta";
+      setRenombreRuta(prev=>({...prev,[e]:{...prev[e],cargando:false,error:`No se pudo buscar la dirección (${msg}): el texto quedó como estaba.`}}));
+    }
+  };
+  const moverPuntoRuta=(e:Extremo,lat:number,lng:number)=>{
+    const pt:PuntoRuta={placeId:"",lat,lng,fuente:"mapa"};
+    setKmCongelado(null);
+    placesRuta.current={...placesRuta.current,[e]:pt};
+    if(e==="origen")setOrigenPlace(pt);else if(e==="destino")setDestinoPlace(pt);else setRetornoPlace(pt);
+    buscarNombreRuta(e,lat,lng,textosRuta.current[e]);
+  };
+  const reintentarNombreRuta=(e:Extremo)=>{const q=placesRuta.current[e];if(q&&coordValida(q.lat,q.lng))buscarNombreRuta(e,q.lat,q.lng,textosRuta.current[e]);};
+  const volverNombreRuta=(e:Extremo)=>{
+    const ant=renombreRuta[e]?.anterior;
+    if(ant===undefined)return;
+    const campo=campoDe(e);
+    textosRuta.current={...textosRuta.current,[e]:ant};
+    setForm(p=>({...p,[campo]:ant}));
+    olvidarRenombreRuta(e);
+  };
+  const [faltaMigracionCoords,setFaltaMigracionCoords]=useState(false);
 
   const f=(k:keyof typeof FORM0)=>(e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>)=>setForm(p=>({...p,[k]:e.target.value}));
   useEffect(()=>{
@@ -998,8 +1422,8 @@ export default function CotizacionesPage(){
 
   const cargar=async()=>{
     setLoading(true);
-    const[clR,cotR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([supabase.from("clientes").select("*").order("nombre").limit(1000),supabase.from("cotizaciones").select("*").order("id",{ascending:false}),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),supabase.from("cotizacion_plantillas").select("*").eq("id","corporativo").maybeSingle()]);
-    setClientes(clR.data||[]);setCotizas(cotR.data||[]);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
+    const[clR,cotR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([leerClientes(),supabase.from("cotizaciones").select("*").order("id",{ascending:false}),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),supabase.from("cotizacion_plantillas").select("*").eq("id","corporativo").maybeSingle()]);
+    if(clR){setClientes(clR);setErrorClientes(false);}else setErrorClientes(true);setCargandoClientes(false);setCotizas(cotR.data||[]);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
     const pr:Record<string,number>={};(cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});setPreciosDB(pr);
     const emps:any[]=empR.data||[];
     setFlotaTercero((vtR.data||[]).map((v:any)=>({...v,empresa_nombre:emps.find((e:any)=>e.id===v.empresa_id)?.razon_social||"Empresa tercerizada"})));
@@ -1013,6 +1437,47 @@ export default function CotizacionesPage(){
     setLoading(false);
   };
   useEffect(()=>{cargar();},[]);
+  // Elegir cliente = lo que hacía el onChange del <select>: guarda el id como texto y propone el IGV por tipo.
+  const aplicarCliente=(cl:ClienteBuscable|null)=>setForm(p=>({...p,cliente_id:cl?String(cl.id):"",incluye_igv:cl?.tipo==="b2b"?true:false}));
+  // Solo los del cliente que está puesto ahora: los de un cliente anterior no se enseñan ni un instante.
+  const contactosCl=contactosDe.id===form.cliente_id?contactosDe.lista:[];
+  const usoCl=useMemo(()=>usoPorCliente(cotizas),[cotizas]);
+  const recientesCl=useMemo(()=>recientesDe(cotizas,8),[cotizas]);
+  // Buscadores de unidad: uso y recientes derivados de las cotizaciones (no se guarda nada).
+  const usoVehP=useMemo(()=>usoPorVehiculo(cotizas,"vehiculo_flota_id"),[cotizas]);
+  const recVehP=useMemo(()=>recientesVehiculos(cotizas,"vehiculo_flota_id",8),[cotizas]);
+  const usoVehT=useMemo(()=>usoPorVehiculo(cotizas,"vehiculo_tercero_id"),[cotizas]);
+  const recVehT=useMemo(()=>recientesVehiculos(cotizas,"vehiculo_tercero_id",8),[cotizas]);
+  const abrirAltaCliente=(texto:string)=>{
+    const t=texto.trim();const dig=t.replace(/\s+/g,"");
+    const qs=/^\d{8}(\d{3})?$/.test(dig)?`&doc=${encodeURIComponent(dig)}`:t?`&nombre=${encodeURIComponent(t)}`:"";
+    esperaClienteRef.current=true;window.open(`/clientes?nuevo=1${qs}`,"_blank","noopener");
+  };
+  // Alta en la otra pestaña → recargar la lista; seleccionar solo si esta pantalla lo pidió y el id llegó.
+  // Volver a la pestaña también recarga (sin autoseleccionar): pudo editarse o crearse sin el canal.
+  useEffect(()=>{
+    let vivo=true;
+    const recargar=async()=>{const l=await leerClientes();if(vivo&&l)setClientes(l);return vivo?l:null;};
+    let canal:BroadcastChannel|null=null;
+    try{if(typeof BroadcastChannel!=="undefined"){canal=new BroadcastChannel("afa-clientes");canal.onmessage=async(ev)=>{
+      const m=ev.data;if(!m||m.tipo!=="creado"||typeof m.id!=="number"||!Number.isFinite(m.id))return;
+      const l=await recargar();if(!l||!esperaClienteRef.current)return;
+      const cl=l.find(c=>c.id===m.id);if(!cl)return;
+      esperaClienteRef.current=false;aplicarCliente(cl);
+    };}}catch{/* sin canal, basta con volver a la pestaña */}
+    const alVolver=()=>{if(document.visibilityState==="visible")recargar();};
+    document.addEventListener("visibilitychange",alVolver);
+    return()=>{vivo=false;document.removeEventListener("visibilitychange",alVolver);try{canal?.close();}catch{}};
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+  // Contactos del cliente elegido, como atajo para «Atención». Best-effort: si falla, no se muestra nada.
+  useEffect(()=>{
+    const clave=form.cliente_id,id=Number(clave);if(!clave||!Number.isFinite(id))return;
+    let vigente=true;
+    supabase.from("contactos").select("nombre,apellido,cargo,telefono,email,principal").eq("cliente_id",id).order("principal",{ascending:false}).order("nombre")
+      .then(({data,error}:{data:ContactoCl[]|null;error:unknown})=>{if(vigente&&!error)setContactosDe({id:clave,lista:(data||[]).filter(c=>String(c.nombre??"").trim())});},()=>{});
+    return()=>{vigente=false;};
+  },[form.cliente_id]);
 
   // Restaurar borrador al montar
   useEffect(()=>{
@@ -1025,6 +1490,7 @@ export default function CotizacionesPage(){
       if(d.consid)setConsid(d.consid);
       if(d.paradas?.length)setParadas(d.paradas);
       if(d.paradasRetorno?.length)setParadasRetorno(d.paradasRetorno);
+      restaurarRuta({...d.form,ruta_coords_json:d.rutaCoords,paradas_json:d.paradas});
       if(d.fechasMultidia?.length)setFechasMultidia(d.fechasMultidia);
       if(d.editandoId)setEditandoId(d.editandoId);
       if(d.diasCond)setDiasCond(d.diasCond);
@@ -1039,8 +1505,9 @@ export default function CotizacionesPage(){
   useEffect(()=>{
     if(!mostrarForm)return;
     if(!form.origen&&!form.destino&&!form.cliente_id&&!editandoId)return;
-    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,savedAt:new Date().toISOString()}));}catch{}
-  },[form,items,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF]);
+    const rutaCoords=rutaCoordsParaGuardar(origenPlace,destinoPlace,retornoPlace,{origen:form.origen,destino:form.destino,retorno:form.punto_retorno},vuelve);
+    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,rutaCoords,savedAt:new Date().toISOString()}));}catch{}
+  },[form,items,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF,origenPlace,destinoPlace,retornoPlace,vuelve]);
 
   // Auto-construir descripción del primer ítem cuando cambia modo/tipo/equipamiento
   useEffect(()=>{
@@ -1116,7 +1583,7 @@ export default function CotizacionesPage(){
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setKmBase(null);setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.equipamiento||"full_equipo",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
@@ -1199,7 +1666,24 @@ export default function CotizacionesPage(){
       precio_sugerido:costoCalc?(esFijo?costoCalc.diaEstIGV:costoCalc.totalEst20):null,
       modo_precio:tarifaEnc?"tarifario":"cotizador",incluye_igv:form.incluye_igv,
       itinerario_texto:form.itinerario_texto.trim()||null,
+      ruta_coords_json:rutaCoordsParaGuardar(origenPlace,destinoPlace,retornoPlace,{origen:form.origen,destino:form.destino,retorno:form.punto_retorno},!esSoloIda),
     } as any;
+  };
+
+  /**
+   * Guarda la cotización. `ruta_coords_json` es de una migración accesoria
+   * (supabase/cotizaciones-02-ruta-coords.sql): sin ella se guarda igual y la pantalla lo DICE —
+   * las coordenadas no se perderían en silencio.
+   */
+  const escribirCotizacion=async(payload:Record<string,unknown>)=>{
+    const ir=(p:Record<string,unknown>)=>editandoId?supabase.from("cotizaciones").update(p).eq("id",editandoId):supabase.from("cotizaciones").insert(p);
+    let r=await ir(payload);
+    if(r.error&&faltaColumna(r.error,"ruta_coords_json")){
+      const resto={...payload};delete resto.ruta_coords_json;
+      r=await ir(resto);
+      if(!r.error)setFaltaMigracionCoords(true);
+    }
+    return r;
   };
 
   const guardarBorrador=async()=>{
@@ -1208,7 +1692,7 @@ export default function CotizacionesPage(){
     setGuardando(true);
     let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
     const payload={...buildPayload("borrador"),creado_por:nombreCreador||null};
-    const{error}=editandoId?await supabase.from("cotizaciones").update(payload).eq("id",editandoId):await supabase.from("cotizaciones").insert(payload);
+    const{error}=await escribirCotizacion(payload);
     if(error){alert(error.message);setGuardando(false);return;}
     limpiar();cargar();setGuardando(false);
   };
@@ -1226,7 +1710,7 @@ export default function CotizacionesPage(){
     let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
     const esFijo=form.modo_servicio==="fijo";
     const payload={...buildPayload(form.estado==="borrador"?"pendiente":undefined),creado_por:nombreCreador||null};
-    const{error}=editandoId?await supabase.from("cotizaciones").update(payload).eq("id",editandoId):await supabase.from("cotizaciones").insert(payload);
+    const{error}=await escribirCotizacion(payload);
     if(error){alert(error.message);setGuardando(false);return;}
     // Capturar antes de limpiar() para la propagación
     const cotIdGuardado=editandoId;
@@ -1464,7 +1948,9 @@ export default function CotizacionesPage(){
   };
   const duplicarCotizacion=async(c:Cotizacion)=>{
     const payload:any={cliente_id:c.cliente_id,origen:c.origen,destino:c.destino,km:c.km,precio_cliente:c.precio_cliente,costo_estimado:c.costo_estimado,margen_estimado:c.margen_estimado,estado:"pendiente",numero_cotizacion:null,atencion:c.atencion,asunto:c.asunto?`COPIA — ${c.asunto}`:null,punto_retorno:c.punto_retorno,fecha_servicio:c.fecha_servicio,fecha_retorno:c.fecha_retorno,hora_ida:c.hora_ida,hora_retorno:c.hora_retorno,descuento_pct:c.descuento_pct||0,items_json:c.items_json,tipo_vehiculo:c.tipo_vehiculo,tipo_servicio:c.tipo_servicio,equipamiento:c.equipamiento,vehiculo_flota_id:c.vehiculo_flota_id,vehiculo_tercero_id:c.vehiculo_tercero_id,consideraciones_json:c.consideraciones_json,paradas_json:c.paradas_json,paradas_retorno_json:c.paradas_retorno_json,modo_servicio:c.modo_servicio,dias_servicio:c.dias_servicio||1,horas_servicio:c.horas_servicio||8,pernocte_costo:c.pernocte_costo,precio_dia:c.precio_dia,precio_mes_estimado:c.precio_mes_estimado,precio_tarifario:c.precio_tarifario,precio_cotizador:c.precio_cotizador,precio_sugerido:c.precio_sugerido,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto,fechas_multidia_json:c.fechas_multidia_json,plantilla_pdf:c.plantilla_pdf||"corporativo"};
-    const{error}=await supabase.from("cotizaciones").insert(payload);
+    if(c.ruta_coords_json)payload.ruta_coords_json=c.ruta_coords_json;
+    let{error}=await supabase.from("cotizaciones").insert(payload);
+    if(error&&faltaColumna(error,"ruta_coords_json")){delete payload.ruta_coords_json;({error}=await supabase.from("cotizaciones").insert(payload));}
     if(error){alert(error.message);return;}
     alert(`✅ Cotización #${c.numero_cotizacion||c.id} duplicada correctamente`);
     cargar();
@@ -1503,7 +1989,7 @@ export default function CotizacionesPage(){
     }
     cargar();
   };
-  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setKmBase(null);setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+  const editarCot=(c:Cotizacion)=>{restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
     const cl=clientes.find(c=>c.id===cot.cliente_id);
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
@@ -1644,15 +2130,21 @@ export default function CotizacionesPage(){
   };
 
   const totC=cotizas.length;const pend=cotizas.filter(c=>c.estado==="pendiente").length;const env=cotizas.filter(c=>c.estado==="enviado").length;const apr=cotizas.filter(c=>c.estado==="aprobado").length;const tasa=totC>0?Math.round(apr/totC*100):0;const pendDesc=cotizas.filter(c=>c.descuento_solicitado&&!c.descuento_autorizado).length;
-  const nomCl=(id:number|null)=>{const c=clientes.find(cl=>cl.id===id);if(!c)return "Sin cliente";return c.tipo==="b2b"?(c.empresa||c.nombre):c.nombre;};
+  const nomCl=(id:number|null)=>{const c=clientes.find(cl=>cl.id===id);if(!c)return "Sin cliente";return rotuloCliente(c);};
   // Búsqueda permisiva (lib/busqueda-texto.ts): sin importar mayúsculas, tildes, signos
   // ni el orden de las palabras. El cliente se busca por EMPRESA, nombre y RUC — antes solo
   // por `nombre`, así que la razón social que se ve en la lista no se encontraba.
   const terminosCot=terminosBusqueda(busqueda);
   const filtradas=cotizas.filter(c=>{const ncl=clientes.find(cl=>cl.id===c.cliente_id);const txt=[ncl?.empresa,ncl?.nombre,ncl?.ruc,c.origen,c.destino,c.asunto,c.atencion,c.numero_cotizacion,String(c.id).padStart(5,"0")].filter(Boolean).join(" ");return coincideBusqueda(txt,terminosCot)&&(filtroEst==="todos"||c.estado===filtroEst)&&(filtroModo==="todos"||c.modo_servicio===filtroModo||(filtroModo==="eventual"&&!c.modo_servicio));});
-  const kmNum=Number(form.km)||0;const vehFloraSel=flota.find(v=>v.id===Number(form.vehiculo_flota_id));const vehTerceroSel=flotaTercero.find(v=>v.id===Number(form.vehiculo_tercero_id));const servsList=form.modo_servicio==="eventual"?SERVS_EVENTUAL:SERVS_FIJO;const esFijoForm=form.modo_servicio==="fijo";
+  const kmNum=Number(form.km)||0;const vehFloraSel=flota.find(v=>v.id===Number(form.vehiculo_flota_id));const vehTerceroSel=flotaTercero.find(v=>v.id===Number(form.vehiculo_tercero_id));const tarifaNombreSel=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo;const servsList=form.modo_servicio==="eventual"?SERVS_EVENTUAL:SERVS_FIJO;const esFijoForm=form.modo_servicio==="fijo";
   const esSoloIda=["solo_ida","fijo_solo_ida"].includes(form.tipo_servicio);
   const requiereParadas=["ida_retorno_paradas","fijo_multiparada"].includes(form.tipo_servicio);
+  /** El recorrido de vuelta se define en los fijos con hora de retorno y en todo eventual que vuelve
+   *  (el multi-día lleva su cronograma). Antes solo existía en los fijos. */
+  const retornoConRecorrido=!esSoloIda&&form.tipo_servicio!=="multi_dia"&&(form.modo_servicio!=="fijo"||!!form.hora_retorno);
+  /** Dónde termina la vuelta: el punto de retorno si se escribió (con sus coordenadas solo si se eligió),
+   *  si no, el origen — la misma regla que mide el km. */
+  const finRetorno=form.punto_retorno.trim()?{nombre:form.punto_retorno.trim(),place:retornoPlace&&coordValida(retornoPlace.lat,retornoPlace.lng)?retornoPlace:null}:{nombre:form.origen,place:origenPlace&&coordValida(origenPlace.lat,origenPlace.lng)?origenPlace:null};
   const esTurismo=["full_day","multi_dia"].includes(form.tipo_servicio);
 
   return(
@@ -1726,7 +2218,14 @@ export default function CotizacionesPage(){
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Identificación</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <Campo label="Cliente" req><div className="flex gap-2"><select className={iCls()} value={form.cliente_id} onChange={e=>{const id=e.target.value;const cl=clientes.find(c=>c.id===Number(id));setForm(p=>({...p,cliente_id:id,incluye_igv:cl?.tipo==="b2b"?true:false}));}}><option value="">— Seleccionar ({clientes.length}) —</option>{clientes.filter(c=>c.estado!=="bloqueado").sort((a,b)=>{const nA=c=>c.tipo==="b2b"?(c.empresa||c.nombre):c.nombre;return nA(a).localeCompare(nA(b));}).map(c=>{const esB2B=c.tipo==="b2b";const label=esB2B?(c.empresa||c.nombre):c.nombre;const doc=esB2B?"":(c.dni?` · DNI ${c.dni}`:"");return<option key={c.id} value={c.id}>{label}{doc}</option>;})}</select><a href="/clientes" target="_blank" rel="noreferrer" className="flex-shrink-0 w-10 h-10 rounded-xl border-2 flex items-center justify-center font-black text-lg" style={{background:"#eef3f8",borderColor:"#0b315f33",color:"#0b315f"}}>+</a></div></Campo>
+                <Campo label="Cliente" req extra={!cargandoClientes&&!errorClientes&&<span className="ml-1.5 normal-case tracking-normal font-semibold text-gray-300">· {clientes.filter(c=>!esBloqueado(c)).length} clientes</span>}>
+                  <div className="flex gap-2"><SelectorCliente clientes={clientes} valor={form.cliente_id} onElegir={aplicarCliente} uso={usoCl} recientes={recientesCl} onCrear={abrirAltaCliente} cargando={cargandoClientes}/><button type="button" onClick={()=>abrirAltaCliente("")} title="Crear cliente (se abre en otra pestaña)" aria-label="Crear cliente" className="flex-shrink-0 w-10 h-10 rounded-xl border-2 flex items-center justify-center font-black text-lg" style={{background:"#eef3f8",borderColor:"#0b315f33",color:"#0b315f"}}>+</button></div>
+                  {(()=>{if(!form.cliente_id)return null;const cl=clientes.find(c=>c.id===Number(form.cliente_id));
+                    if(cl&&esBloqueado(cl))return<p className="text-[11px] font-semibold text-red-600 mt-1">Cliente bloqueado: no se puede guardar así</p>;
+                    if(!cl&&errorClientes)return<p className="text-[11px] font-semibold text-amber-700 mt-1">No se pudo cargar la lista de clientes: no se puede comprobar el cliente #{form.cliente_id}. Recarga la página.</p>;
+                    if(!cl&&!cargandoClientes)return<p className="text-[11px] font-semibold text-red-600 mt-1">Cliente #{form.cliente_id} no encontrado</p>;
+                    return null;})()}
+                </Campo>
                 <Campo label="N° cotización"><input className={iCls("font-mono")} placeholder="Ej: 10996" value={form.numero_cotizacion} onChange={f("numero_cotizacion")}/></Campo>
                 <Campo label="Estado"><select className={iCls()} value={form.estado} onChange={f("estado")}><option value="pendiente">Pendiente</option><option value="enviado">Enviado</option><option value="rechazado">Rechazado</option></select></Campo>
                 <Campo label="IGV" span={2}>
@@ -1740,7 +2239,9 @@ export default function CotizacionesPage(){
                     {!form.incluye_igv&&<span className="text-[10px] text-amber-700 font-semibold bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">El PDF mostrará "No incluye IGV"</span>}
                   </div>
                 </Campo>
-                <Campo label="Atención" span={2}><input className={iCls()} placeholder="Nombre del responsable" value={form.atencion} onChange={f("atencion")}/></Campo>
+                <Campo label="Atención" span={2}><input className={iCls()} placeholder="Nombre del responsable" value={form.atencion} onChange={f("atencion")}/>
+                  {contactosCl.length>0&&<div className="flex flex-wrap gap-1.5 mt-1.5">{contactosCl.map((c,i)=>{const nom=[c.nombre,c.apellido].map(x=>String(x??"").trim()).filter(Boolean).join(" ");const puesto=form.atencion.trim()===nom;return<button key={i} type="button" onClick={()=>setForm(p=>({...p,atencion:nom}))} title={[c.cargo,c.telefono,c.email].filter(Boolean).join(" · ")||undefined} className="text-[11px] rounded-lg border px-2 py-1 min-h-[32px] text-left transition-colors" style={{background:puesto?"#eef3f8":"white",borderColor:puesto?"#0b315f":"#e5e7eb",color:"#0b315f"}}>{c.principal?"★ ":""}<span className="font-semibold">{nom}</span>{c.cargo&&<span className="text-gray-400"> · {c.cargo}</span>}</button>;})}</div>}
+                </Campo>
                 <Campo label="Asunto"><input className={iCls()} placeholder="Ej: Traslado aeropuerto" value={form.asunto} onChange={f("asunto")}/></Campo>
               </div>
             </div>
@@ -1833,16 +2334,10 @@ export default function CotizacionesPage(){
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Unidad de flota <span className="normal-case font-normal text-blue-500">→ fotos en PDF</span></p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Campo label={`Vehículo propio (${flota.length})`}>
-                  <select className={iCls()} value={form.vehiculo_flota_id} onChange={e=>selVeh(e.target.value)}>
-                    <option value="">Sin vehículo propio</option>
-                    {flota.map(v=><option key={v.id} value={v.id}>{v.placa} — {v.categoria} {v.marca} {v.modelo} {v.capacidad_pasajeros?`(${v.capacidad_pasajeros}p)`:""}{v.foto_externa_url?" · 📸":""}</option>)}
-                  </select>
+                  <SelectorVehiculo tipo="propio" vehiculos={flota} valor={form.vehiculo_flota_id} onElegir={selVeh} uso={usoVehP} recientes={recVehP} tarifaTipo={form.tipo_vehiculo} tarifaNombre={tarifaNombreSel} cargando={loading}/>
                 </Campo>
-                <Campo label={`Vehículo tercerizado (${flotaTercero.length})`}>
-                  <select className={iCls()} value={form.vehiculo_tercero_id} onChange={e=>selVehTercero(e.target.value)}>
-                    <option value="">Sin vehículo tercerizado</option>
-                    {flotaTercero.map(v=><option key={v.id} value={v.id}>{v.placa} — {v.empresa_nombre||"Tercero"} · {v.categoria||""} {v.marca||""}{v.capacidad?` (${v.capacidad}p)`:""}</option>)}
-                  </select>
+                <Campo label={`Vehículo tercerizado (${flotaTercero.length} activos)`}>
+                  <SelectorVehiculo tipo="tercero" vehiculos={flotaTercero} valor={form.vehiculo_tercero_id} onElegir={selVehTercero} uso={usoVehT} recientes={recVehT} tarifaTipo={form.tipo_vehiculo} tarifaNombre={tarifaNombreSel} cargando={loading}/>
                 </Campo>
                 {vehFloraSel&&<div className="rounded-xl border-2 p-3" style={{background:"#eef3f8",borderColor:"#0b315f33"}}><p className="text-[10px] font-bold uppercase text-[#0b315f] mb-1">🚌 {vehFloraSel.placa}</p><p className="text-xs text-gray-500">{vehFloraSel.marca} {vehFloraSel.modelo}</p><div className="flex gap-2 text-[10px] mt-1">{vehFloraSel.foto_externa_url&&<span className="text-green-600 font-bold">📸 Exterior ✓</span>}{vehFloraSel.foto_interna_url&&<span className="text-green-600 font-bold">📸 Interior ✓</span>}</div></div>}
                 {vehTerceroSel&&<div className="rounded-xl border-2 p-3" style={{background:"#fef9c3",borderColor:"#ca8a0433"}}><p className="text-[10px] font-bold uppercase text-amber-700 mb-1">🤝 {vehTerceroSel.placa} · Tercero</p><p className="text-xs text-gray-500">{vehTerceroSel.empresa_nombre}</p><p className="text-[10px] text-gray-400 mt-0.5">{vehTerceroSel.categoria} {vehTerceroSel.marca}{vehTerceroSel.capacidad?` · ${vehTerceroSel.capacidad} pax`:""}</p></div>}
@@ -1857,18 +2352,24 @@ export default function CotizacionesPage(){
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <Campo label="Punto de origen" req>
                   <LocationInputCot placeholder="Av. República de Panamá 3623" value={form.origen} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,origen:v,km:""}));setOrigenPlace(null);setKmBase(null);setErrorKm("");}}
-                    onSelect={p=>{setOrigenPlace(p.placeId?{placeId:p.placeId,lat:p.lat,lng:p.lng}:{placeId:"",lat:p.lat,lng:p.lng});if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,origen:v,km:""}));setOrigenPlace(null);olvidarRenombreRuta("origen");setKmCongelado(null);setKmBase(null);setErrorKm("");}}
+                    onSelect={p=>{setKmCongelado(null);olvidarRenombreRuta("origen");setOrigenPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
+                  <CoordsDePunto place={origenPlace} texto={form.origen} buscando={porGeocodificar.includes("origen")} fallo={geoFallo.includes("origen")}/>
+                  <AvisoRenombreMapa estado={renombreRuta.origen} onVolver={()=>volverNombreRuta("origen")} onReintentar={()=>reintentarNombreRuta("origen")}/>
                 </Campo>
                 <Campo label="Punto de destino" req>
                   <LocationInputCot placeholder="Planta Cajamarquilla" value={form.destino} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,destino:v,km:""}));setDestinoPlace(null);setKmBase(null);setErrorKm("");}}
-                    onSelect={p=>{setDestinoPlace(p.placeId?{placeId:p.placeId,lat:p.lat,lng:p.lng}:{placeId:"",lat:p.lat,lng:p.lng});if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,destino:v,km:""}));setDestinoPlace(null);olvidarRenombreRuta("destino");setKmCongelado(null);setKmBase(null);setErrorKm("");}}
+                    onSelect={p=>{setKmCongelado(null);olvidarRenombreRuta("destino");setDestinoPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
+                  <CoordsDePunto place={destinoPlace} texto={form.destino} buscando={porGeocodificar.includes("destino")} fallo={geoFallo.includes("destino")}/>
+                  <AvisoRenombreMapa estado={renombreRuta.destino} onVolver={()=>volverNombreRuta("destino")} onReintentar={()=>reintentarNombreRuta("destino")}/>
                 </Campo>
                 {!esSoloIda&&<Campo label="Punto de retorno">
                   <LocationInputCot placeholder="Igual al origen" value={form.punto_retorno} mapsLoaded={mapsLoaded}
-                    onChange={v=>setForm(p=>({...p,punto_retorno:v}))}
-                    onSelect={p=>{setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
+                    onChange={v=>{setForm(p=>({...p,punto_retorno:v}));setRetornoPlace(null);olvidarRenombreRuta("retorno");setKmCongelado(null);}}
+                    onSelect={p=>{setKmCongelado(null);olvidarRenombreRuta("retorno");setRetornoPlace(coordValida(p.lat,p.lng)?{placeId:p.placeId||"",lat:p.lat,lng:p.lng,fuente:p.placeId?"lista":"coordenadas"}:null);if(p.address)setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
+                  <CoordsDePunto place={retornoPlace} texto={form.punto_retorno} buscando={porGeocodificar.includes("retorno")} fallo={geoFallo.includes("retorno")} vacioDice="Vacío: la vuelta llega al punto de origen."/>
+                  <AvisoRenombreMapa estado={renombreRuta.retorno} onVolver={()=>volverNombreRuta("retorno")} onReintentar={()=>reintentarNombreRuta("retorno")}/>
                 </Campo>}
                 <Campo label={form.tipo_servicio==="multi_dia"?"Fecha inicio (Día 1)":"Fecha de servicio"}><input type="date" className={iCls()} value={form.fecha_servicio} onChange={f("fecha_servicio")}/></Campo>
                 {["ida_retorno","ida_retorno_paradas","multi_dia"].includes(form.tipo_servicio)&&(
@@ -1940,13 +2441,18 @@ export default function CotizacionesPage(){
                     </div>
                   </div>
                 </div>}
+                {origenPlace&&destinoPlace&&coordValida(origenPlace.lat,origenPlace.lng)&&coordValida(destinoPlace.lat,destinoPlace.lng)&&paradas.filter(coordsOk).length<2&&(
+                  <MapaRutaServicio origen={origenPlace} destino={destinoPlace} retorno={retornoPlace} vuelve={vuelve}
+                    nombres={{origen:form.origen,destino:form.destino,retorno:form.punto_retorno}} onMover={moverPuntoRuta}/>
+                )}
+                {faltaMigracionCoords&&<p className="md:col-span-3 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">⚠ La cotización se guardó, pero SIN las coordenadas de la ruta: falta correr <span className="font-mono">supabase/cotizaciones-02-ruta-coords.sql</span>. Al reabrirla se buscarán de nuevo por el texto.</p>}
               </div>
             </div>
 
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Parámetros de costing</p>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <Campo label={esFijoForm?"Km diarios":"Km del servicio"} req hint={calculandoKm?"⏳ Calculando con Google Maps...":errorKm||(kmBase!==null?"📍 Calculado con Google Maps":undefined)}><input type="number" min={0} className={iCls("font-mono"+(errorKm?" border-red-300 bg-red-50":calculandoKm?" border-amber-300 bg-amber-50":kmBase!==null?" border-green-300 bg-green-50":""))} placeholder="0" value={form.km} onChange={e=>{setForm(p=>({...p,km:e.target.value}));setKmBase(null);setErrorKm("");}}/></Campo>
+                <Campo label={esFijoForm?"Km diarios":"Km del servicio"} req hint={calculandoKm?"⏳ Calculando con Google Maps...":errorKm||avisoRet||(kmBase!==null?(vuelve?`📍 Google Maps: ida ${kmBase} km + retorno ${kmRet??kmBase} km${kmRet===null?" (estimado igual a la ida)":""}`:"📍 Calculado con Google Maps"):undefined)}><input type="number" min={0} className={iCls("font-mono"+(errorKm?" border-red-300 bg-red-50":avisoRet?" border-amber-300 bg-amber-50":calculandoKm?" border-amber-300 bg-amber-50":kmBase!==null?" border-green-300 bg-green-50":""))} placeholder="0" value={form.km} onChange={e=>{setForm(p=>({...p,km:e.target.value}));setKmBase(null);setErrorKm("");}}/></Campo>
                 <Campo label="Días de conductor"><div className="flex items-center gap-1"><button onClick={()=>setDiasCond(Math.max(1,diasCond-1))} className="w-9 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">-</button><span className="flex-1 text-center font-black text-[#0b315f]">{diasCond}</span><button onClick={()=>setDiasCond(Math.min(30,diasCond+1))} className="w-9 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">+</button></div></Campo>
                 <Campo label="Peajes S/"><input type="number" min={0} className={iCls()} placeholder="0" value={peajesF||""} onChange={e=>setPeajesF(Number(e.target.value))}/></Campo>
                 <Campo label="Costo interno S/"><input type="number" min={0} className={iCls()} placeholder="0" value={form.costo_estimado} onChange={f("costo_estimado")}/></Campo>
@@ -2034,28 +2540,36 @@ export default function CotizacionesPage(){
                 origenLat={origenPlace?.lat?String(origenPlace.lat):""} origenLng={origenPlace?.lng?String(origenPlace.lng):""}
                 destinoLat={destinoPlace?.lat?String(destinoPlace.lat):""} destinoLng={destinoPlace?.lng?String(destinoPlace.lng):""}
                 horaIda={form.hora_ida} horaRetorno={form.hora_retorno}
+                contexto={{modoServicio:form.modo_servicio,fechaServicio:form.fecha_servicio||null,sentido:"ida",horaSalidaForm:form.hora_ida}}
+                // El paradero 1 y el último están atados al origen/destino del formulario (el efecto
+                // de sincronización les copia sus coordenadas): arrastrarlos mueve ESE punto, o el
+                // efecto los devolvería a su sitio. placeId vacío: mandan las coordenadas.
+                onMoverExtremo={(t,lat,lng)=>moverPuntoRuta(t==="inicio"?"origen":"destino",lat,lng)}
               />
             </div>
 
-            {/* Paradas de retorno — solo para servicios fijos con retorno */}
-            {esFijoForm&&!esSoloIda&&form.hora_retorno&&(
+            {/* Recorrido del RETORNO — fijos con hora de retorno y eventuales que vuelven (no multi-día, que
+                tiene su cronograma). Nunca se deduce de la ida: termina en el punto de retorno, o en el origen. */}
+            {retornoConRecorrido&&(
               <div className="rounded-2xl border-2 p-4" style={{borderColor:paradasRetorno.length<2?"#c4b5fd":"#a5b4fc",background:paradasRetorno.length<2?"#f5f3ff":"#eef2ff"}}>
                 <div className="flex items-center gap-2 border-b pb-1 mb-3" style={{borderColor:paradasRetorno.length<2?"#c4b5fd":"#a5b4fc"}}>
-                  <p className="text-[10px] font-bold uppercase tracking-widest" style={{color:"#5b21b6"}}>↩ Paraderos del RETORNO</p>
+                  <p className="text-[10px] font-bold uppercase tracking-widest" style={{color:"#5b21b6"}}>{esFijoForm?"↩ Paraderos del RETORNO":"↩ Puntos del recorrido del RETORNO"}</p>
                   {paradasRetorno.length<2
                     ?<span className="text-[9px] font-black px-2 py-0.5 rounded-full" style={{background:"#ddd6fe",color:"#5b21b6"}}>Opcional · {paradasRetorno.length} puntos</span>
                     :<span className="text-[9px] font-black px-2 py-0.5 rounded-full" style={{background:"#a5b4fc",color:"#1e1b4b"}}>✓ {paradasRetorno.length} puntos</span>
                   }
-                  <span className="text-[9px] text-gray-400 ml-auto">Salida: {form.hora_retorno}</span>
+                  {form.hora_retorno&&<span className="text-[9px] text-gray-400 ml-auto">Salida: {form.hora_retorno}</span>}
                 </div>
                 <p className="text-[10px] text-gray-500 mb-3">Define los puntos del trayecto de regreso. Las paradas pueden diferir de la IDA (calzadas, dirección de vía, lat/lng distintas).</p>
                 <ParadasBuilder
                   paradas={paradasRetorno} onChange={setParadasRetorno} tipo={form.tipo_servicio}
                   mapsLoaded={mapsLoaded}
-                  origenNombre={form.destino} destinoNombre={form.origen}
+                  origenNombre={form.destino} destinoNombre={finRetorno.nombre}
                   origenLat={destinoPlace?.lat?String(destinoPlace.lat):""} origenLng={destinoPlace?.lng?String(destinoPlace.lng):""}
-                  destinoLat={origenPlace?.lat?String(origenPlace.lat):""} destinoLng={origenPlace?.lng?String(origenPlace.lng):""}
+                  destinoLat={finRetorno.place?String(finRetorno.place.lat):""} destinoLng={finRetorno.place?String(finRetorno.place.lng):""}
                   horaIda={form.hora_retorno} horaRetorno=""
+                  // Sin onMoverExtremo: los extremos del retorno no están atados al formulario.
+                  contexto={{modoServicio:form.modo_servicio,fechaServicio:(esFijoForm?form.fecha_servicio:(form.fecha_retorno||form.fecha_servicio))||null,sentido:"retorno",horaSalidaIda:paradas.find(p=>p.tipo==="inicio")?.hora||form.hora_ida||null,horaSalidaForm:form.hora_retorno}}
                 />
               </div>
             )}

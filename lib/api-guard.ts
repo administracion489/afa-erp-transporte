@@ -75,6 +75,16 @@ export function limitarTasa(clave: string, limite: number, ventanaMs: number): b
 }
 
 /**
+ * Segundos que faltan para que la cubeta de `clave` se reinicie (0 si no hay cubeta viva).
+ * Para decirle al usuario CUÁNDO puede volver a intentarlo en vez de un «más tarde».
+ */
+export function segundosParaReintentar(clave: string): number {
+  const cubeta = cubetas.get(clave);
+  if (!cubeta) return 0;
+  return Math.max(0, Math.ceil((cubeta.reinicioEn - Date.now()) / 1000));
+}
+
+/**
  * Chequeo BARATO, sin estado: se aplica a toda petición, incluidas las que se van a servir
  * desde caché. Devuelve una respuesta de error o `null` si puede seguir.
  *
