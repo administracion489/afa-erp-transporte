@@ -2041,6 +2041,12 @@ export default function CotizacionesPage(){
   const kmNum=Number(form.km)||0;const vehFloraSel=flota.find(v=>v.id===Number(form.vehiculo_flota_id));const vehTerceroSel=flotaTercero.find(v=>v.id===Number(form.vehiculo_tercero_id));const tarifaNombreSel=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo;const servsList=form.modo_servicio==="eventual"?SERVS_EVENTUAL:SERVS_FIJO;const esFijoForm=form.modo_servicio==="fijo";
   const esSoloIda=["solo_ida","fijo_solo_ida"].includes(form.tipo_servicio);
   const requiereParadas=["ida_retorno_paradas","fijo_multiparada"].includes(form.tipo_servicio);
+  /** El recorrido de vuelta se define en los fijos con hora de retorno y en todo eventual que vuelve
+   *  (el multi-día lleva su cronograma). Antes solo existía en los fijos. */
+  const retornoConRecorrido=!esSoloIda&&form.tipo_servicio!=="multi_dia"&&(form.modo_servicio!=="fijo"||!!form.hora_retorno);
+  /** Dónde termina la vuelta: el punto de retorno si se escribió (con sus coordenadas solo si se eligió),
+   *  si no, el origen — la misma regla que mide el km. */
+  const finRetorno=form.punto_retorno.trim()?{nombre:form.punto_retorno.trim(),place:retornoPlace&&coordValida(retornoPlace.lat,retornoPlace.lng)?retornoPlace:null}:{nombre:form.origen,place:origenPlace&&coordValida(origenPlace.lat,origenPlace.lng)?origenPlace:null};
   const esTurismo=["full_day","multi_dia"].includes(form.tipo_servicio);
 
   return(
@@ -2441,27 +2447,28 @@ export default function CotizacionesPage(){
               />
             </div>
 
-            {/* Paradas de retorno — solo para servicios fijos con retorno */}
-            {esFijoForm&&!esSoloIda&&form.hora_retorno&&(
+            {/* Recorrido del RETORNO — fijos con hora de retorno y eventuales que vuelven (no multi-día, que
+                tiene su cronograma). Nunca se deduce de la ida: termina en el punto de retorno, o en el origen. */}
+            {retornoConRecorrido&&(
               <div className="rounded-2xl border-2 p-4" style={{borderColor:paradasRetorno.length<2?"#c4b5fd":"#a5b4fc",background:paradasRetorno.length<2?"#f5f3ff":"#eef2ff"}}>
                 <div className="flex items-center gap-2 border-b pb-1 mb-3" style={{borderColor:paradasRetorno.length<2?"#c4b5fd":"#a5b4fc"}}>
-                  <p className="text-[10px] font-bold uppercase tracking-widest" style={{color:"#5b21b6"}}>↩ Paraderos del RETORNO</p>
+                  <p className="text-[10px] font-bold uppercase tracking-widest" style={{color:"#5b21b6"}}>{esFijoForm?"↩ Paraderos del RETORNO":"↩ Puntos del recorrido del RETORNO"}</p>
                   {paradasRetorno.length<2
                     ?<span className="text-[9px] font-black px-2 py-0.5 rounded-full" style={{background:"#ddd6fe",color:"#5b21b6"}}>Opcional · {paradasRetorno.length} puntos</span>
                     :<span className="text-[9px] font-black px-2 py-0.5 rounded-full" style={{background:"#a5b4fc",color:"#1e1b4b"}}>✓ {paradasRetorno.length} puntos</span>
                   }
-                  <span className="text-[9px] text-gray-400 ml-auto">Salida: {form.hora_retorno}</span>
+                  {form.hora_retorno&&<span className="text-[9px] text-gray-400 ml-auto">Salida: {form.hora_retorno}</span>}
                 </div>
                 <p className="text-[10px] text-gray-500 mb-3">Define los puntos del trayecto de regreso. Las paradas pueden diferir de la IDA (calzadas, dirección de vía, lat/lng distintas).</p>
                 <ParadasBuilder
                   paradas={paradasRetorno} onChange={setParadasRetorno} tipo={form.tipo_servicio}
                   mapsLoaded={mapsLoaded}
-                  origenNombre={form.destino} destinoNombre={form.origen}
+                  origenNombre={form.destino} destinoNombre={finRetorno.nombre}
                   origenLat={destinoPlace?.lat?String(destinoPlace.lat):""} origenLng={destinoPlace?.lng?String(destinoPlace.lng):""}
-                  destinoLat={origenPlace?.lat?String(origenPlace.lat):""} destinoLng={origenPlace?.lng?String(origenPlace.lng):""}
+                  destinoLat={finRetorno.place?String(finRetorno.place.lat):""} destinoLng={finRetorno.place?String(finRetorno.place.lng):""}
                   horaIda={form.hora_retorno} horaRetorno=""
                   // Sin onMoverExtremo: los extremos del retorno no están atados al formulario.
-                  contexto={{modoServicio:form.modo_servicio,fechaServicio:form.fecha_servicio||null,sentido:"retorno",horaSalidaIda:paradas.find(p=>p.tipo==="inicio")?.hora||form.hora_ida||null,horaSalidaForm:form.hora_retorno}}
+                  contexto={{modoServicio:form.modo_servicio,fechaServicio:(esFijoForm?form.fecha_servicio:(form.fecha_retorno||form.fecha_servicio))||null,sentido:"retorno",horaSalidaIda:paradas.find(p=>p.tipo==="inicio")?.hora||form.hora_ida||null,horaSalidaForm:form.hora_retorno}}
                 />
               </div>
             )}
