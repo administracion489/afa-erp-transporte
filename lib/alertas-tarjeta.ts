@@ -422,7 +422,7 @@ export const TARJETAS: Record<string, FichaTarjeta> = {
   },
   // Bloque 7: flota propia de hoy, solo contactos.
   solape: aContactos(
-    (c) => `A los contactos marcados, ${cuandoBarrido(c)}: conductores de flota propia con servicios de hoy que se cruzan en horario.`,
+    (c) => `A los contactos marcados, ${cuandoBarrido(c)}: conductores de flota propia con dos servicios de hoy que se pisan, o sin tiempo para trasladarse de uno al siguiente. Mide cada servicio de su primer a su último paradero; el que no tiene itinerario sale «sin confirmar» en la torre y no se avisa.`,
     { tercerizados: "solo_propios", usa: ["hora_fija"] },
   ),
   // Bloque 7 + lib/alertas-flota.ts (evaluarJornada): horas al VOLANTE, no la amplitud del día.
