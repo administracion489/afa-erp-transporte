@@ -6,7 +6,7 @@
 // Reusa el patrón de lib/crm-ia.ts (SDK Anthropic, ANTHROPIC_API_KEY del entorno).
 
 import Anthropic from "@anthropic-ai/sdk";
-import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro, reglaTamborDecimal } from "@/lib/odometro-prompt";
+import { PATRON_DIGITO_REPETIDO, NUMERO_SOLO_DE_LA_FOTO, sinCifrasCopiables, fraseFormaOdometro, reglaTamborDecimal, fraseTamborDeLaUnidad } from "@/lib/odometro-prompt";
 
 // Cliente perezoso. Si ANTHROPIC_API_KEY no está configurada, NO debe reventar al
 // cargar el módulo: eso haría que el route devuelva un 500 SIN JSON (antes del
@@ -135,6 +135,11 @@ export type ContextoLecturaOdometro = {
   digitos?: number | null;   // cuántos dígitos tiene su odómetro (nunca el km exacto: sería copiable)
   /** El km está cerca de la cifra siguiente (`formaOdometro`): la frase admite un dígito más. */
   puedeSubir?: boolean;
+  /**
+   * El tablero de ESTA unidad tiene tambor de décimas: lo dijo una persona al corregir una lectura
+   * (lib/odometro-decimas.ts). `digitos` debe salir entonces de `kmEnEscala`, no del vigente crudo.
+   */
+  tamborDecimas?: boolean;
 };
 
 /**
@@ -177,6 +182,7 @@ export function promptOdometro(ctx?: string | null | ContextoLecturaOdometro): s
   const bloques: string[] = [PROMPT_ODO];
   const forma = bloqueFormaOdometro(c);
   if (forma) bloques.push(forma);
+  if (c.tamborDecimas) bloques.push(`${c.placa ? `${c.placa} · ` : ""}${fraseTamborDeLaUnidad('"texto_leido"')}.`);
   if (c.guia?.trim()) {
     bloques.push(
       // La guía la teclea una persona: un kilometraje escrito ahí viaja con sus cifras tapadas.
