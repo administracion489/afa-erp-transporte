@@ -33,6 +33,7 @@ export default function MapaParaderos({ puntos, poli, onMover, onInsertar, color
   const mapRef = useRef<MapboxMap | null>(null);
   const marcadores = useRef<MapboxMarker[]>([]);
   const popupRef = useRef<MapboxPopup | null>(null);
+  const observador = useRef<ResizeObserver | null>(null);
   const [listo, setListo] = useState(false);
   const [error, setError] = useState("");
   const token = tokenMapbox();
@@ -88,9 +89,18 @@ export default function MapaParaderos({ puntos, poli, onMover, onInsertar, color
         if (st === 401 || st === 403) setError("Mapbox rechazó el token (NEXT_PUBLIC_MAPBOX_TOKEN). Revisa la variable en Vercel.");
       });
       mapRef.current = m;
+      // Si el recuadro cambia de tamaño después de crear el mapa (se mostró tras estar oculto, se
+      // abrió el formulario más ancho), Mapbox no se entera solo y deja el lienzo viejo: en blanco.
+      if (typeof ResizeObserver !== "undefined" && contRef.current) {
+        const ro = new ResizeObserver(() => { mapRef.current?.resize(); });
+        ro.observe(contRef.current);
+        observador.current = ro;
+      }
     }).catch(() => { if (!cancelado) setError("No se pudo cargar el motor del mapa (revisa la conexión y vuelve a abrirlo)."); });
     return () => {
       cancelado = true;
+      observador.current?.disconnect();
+      observador.current = null;
       marcadores.current.forEach(mk => mk.remove());
       marcadores.current = [];
       popupRef.current?.remove();
@@ -159,7 +169,10 @@ export default function MapaParaderos({ puntos, poli, onMover, onInsertar, color
   }
   return (
     <div className="relative w-full rounded-xl overflow-hidden border border-gray-200" style={{ height: ALTO_PX }}>
-      <div ref={contRef} className="absolute inset-0" />
+      {/* Ancho y alto EXPLÍCITOS, no `absolute inset-0`: Mapbox le pone `.mapboxgl-map { position: relative }`
+          al contenedor, eso pisa al `absolute` y el mapa quedaba con 0 px de alto — un recuadro en blanco
+          con el botón «Encuadrar» encima. Es como lo montan /cliente, /monitoreo y /despachador. */}
+      <div ref={contRef} style={{ width: "100%", height: "100%" }} />
       {!listo && !error && <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-400 bg-gray-50">Cargando mapa…</div>}
       {error && <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-500 bg-gray-50 px-4 text-center">{error}</div>}
       {listo && (
