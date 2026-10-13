@@ -31,6 +31,12 @@
 //      una consulta fallida no puede convertir todo el libro en huérfano.
 //   4. LO QUE TODAVÍA NO PASÓ NO ANCLA. Una fila con fecha posterior a hoy es un servicio
 //      programado, no hecho: como «último servicio» corre el calendario por un trabajo futuro.
+//   5. …SALVO QUE SU OT ESTÉ CERRADA. Cerrar la orden ES la prueba de que el servicio se hizo, y
+//      pesa más que la fecha. El caso (CWZ-371, OT #7, 12/10/2026): el cierre fechaba la fila con
+//      la fecha UTC (`toISOString`), que desde las 19:00 de Lima ya es MAÑANA; la regla 4 la leía
+//      como programada y «Próximos» seguía en «Vencido» con la OT cerrada, el km y la factura
+//      puestos. El cierre ya escribe la fecha de Lima; esta regla cubre las filas que quedaron
+//      escritas así y cualquier otro desfase de reloj.
 
 import { otEnDescripcion } from "./costo-ot";
 
@@ -83,15 +89,17 @@ export function porQueNoAncla(m: FilaLibro, opts: OpcionesAncla = {}): MotivoNoA
   if (String(m.tipo ?? "preventivo").toLowerCase() !== "preventivo") return "no_preventivo";
   const est = String(m.estado ?? "").toLowerCase();
   if (est === "cancelado" || est === "cancelada" || est === "anulado" || est === "anulada") return "cancelado";
-  if (opts.hoy && m.fecha && String(m.fecha).slice(0, 10) > opts.hoy) return "futuro";
+  let otCerrada = false;
   if (opts.estadoOT) {
     const ot = otDeFila(m.descripcion);
     if (ot != null) {
       const e = opts.estadoOT.get(ot);
       if (e == null) return "ot_eliminada";
       if (String(e).toLowerCase() !== "cerrada") return "ot_no_cerrada";
+      otCerrada = true;
     }
   }
+  if (!otCerrada && opts.hoy && m.fecha && String(m.fecha).slice(0, 10) > opts.hoy) return "futuro";
   return null;
 }
 

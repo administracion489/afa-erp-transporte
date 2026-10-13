@@ -51,7 +51,7 @@ const TIPO_CFG: Record<TipoMant, { label: string; bg: string; color: string; ico
 };
 
 const FORM_VACIO = {
-  vehiculo_id: "", fecha: new Date().toISOString().split("T")[0],
+  vehiculo_id: "", fecha: hoyLimaISO(),
   tipo: "preventivo" as TipoMant, kilometraje: "", descripcion: "",
   proveedor: "", costo: "", estado: "pendiente" as EstadoMant,
   proximo_km: "", proxima_fecha: "", observaciones: "",
