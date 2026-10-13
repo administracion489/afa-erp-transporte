@@ -291,7 +291,7 @@ export default function MonitoreoPage() {
     m.on("load", () => { setMapaBaseFallo(false); listo(); });
     const respaldo = setTimeout(listo, 2500);
     m.on("error", (e: { error?: { status?: number; message?: string } }) => {
-      console.error("[monitoreo] mapa:", e?.error?.message ?? e);
+      console.warn("[monitoreo] mapa:", e?.error?.message ?? e);
       if (!m.isStyleLoaded()) setMapaBaseFallo(true);
     });
     // Placas de los grises solo de cerca.
@@ -340,7 +340,7 @@ export default function MonitoreoPage() {
       try {
         res = await fetch("/api/monitoreo/flota", { headers, cache: "no-store" });
       } catch {
-        setErrorPos({ tipo: "red", texto: "Sin conexión con el servidor" });
+        setErrorPos({ tipo: "red", texto: "sin conexión con el servidor" });
         setEstadoPos((e) => (e === "cargando" ? "fallo" : e));
         return;
       }
@@ -352,7 +352,7 @@ export default function MonitoreoPage() {
         return;
       }
       if (!res.ok) {
-        setErrorPos({ tipo: "servidor", texto: `El servidor no pudo leer las posiciones (error ${res.status})` });
+        setErrorPos({ tipo: "servidor", texto: `el servidor no pudo leer las posiciones (error ${res.status})` });
         setEstadoPos((e) => (e === "cargando" ? "fallo" : e));
         return;
       }
@@ -678,6 +678,16 @@ export default function MonitoreoPage() {
       el.style.zIndex = z;
       const pop = new mapboxgl.Popup({ offset: 56, closeButton: true, maxWidth: "min(85vw, 280px)", focusAfterOpen: false });
       pop.on("open", () => {
+        // Una ficha a la vez: con dos abiertas no se sabe de qué unidad habla cada una.
+        for (const [k, r] of marcadores.current) if (k !== clave && r.m.getPopup()?.isOpen()) r.m.getPopup()?.remove();
+        // El marcador se ancla por su borde inferior y su alto cambia (gris, placa oculta de lejos):
+        // la ficha se separa lo que mide el marcador de verdad, arriba o abajo.
+        const alto = el.offsetHeight || 56, medio = Math.round(el.offsetWidth / 2) || 20;
+        pop.setOffset({
+          top: [0, 4], "top-left": [0, 4], "top-right": [0, 4],
+          bottom: [0, -alto - 2], "bottom-left": [0, -alto - 2], "bottom-right": [0, -alto - 2],
+          left: [medio, -alto / 2], right: [-medio, -alto / 2], center: [0, 0],
+        });
         const h = contenidoPopup.current.get(clave)?.() ?? "";
         htmlPopupAbierto.current.set(clave, h);
         pop.setHTML(h);
@@ -698,6 +708,26 @@ export default function MonitoreoPage() {
       const h = popup();
       if (htmlPopupAbierto.current.get(clave) !== h) { htmlPopupAbierto.current.set(clave, h); pop.setHTML(h); }
     }
+  }, []);
+
+  /** Lleva el mapa a un marcador y abre su ficha AL LLEGAR, con el marcador en la parte baja: así
+   *  la ficha cabe entera encima. Abierta antes de moverse, en celular caía debajo del marcador y el
+   *  botón de llamar quedaba fuera de la pantalla. */
+  const centrarYAbrir = useCallback((clave: string) => {
+    const m = mapa.current;
+    const reg = marcadores.current.get(clave);
+    if (!m || !reg) return;
+    let abierta = false;
+    const abrir = () => {
+      if (abierta) return;
+      abierta = true;
+      const r = marcadores.current.get(clave);
+      if (r && !r.m.getPopup()?.isOpen()) r.m.togglePopup();
+    };
+    const alto = m.getContainer().clientHeight;
+    m.flyTo({ center: reg.m.getLngLat(), zoom: Math.max(m.getZoom(), 15), duration: 900, offset: [0, Math.round(alto * 0.25)] });
+    m.once("moveend", abrir);
+    setTimeout(abrir, 1300);
   }, []);
 
   useEffect(() => {
@@ -774,14 +804,9 @@ export default function MonitoreoPage() {
     const pendiente = abrirPendiente.current;
     if (pendiente) {
       abrirPendiente.current = null;
-      const reg = marcadores.current.get(pendiente);
-      if (reg) {
-        for (const [k, r] of marcadores.current) if (k !== pendiente && r.m.getPopup()?.isOpen()) r.m.getPopup()?.remove();
-        m.flyTo({ center: reg.m.getLngLat(), zoom: Math.max(m.getZoom(), 15), duration: 900 });
-        if (!reg.m.getPopup()?.isOpen()) reg.m.togglePopup();
-      }
+      centrarYAbrir(pendiente);
     }
-  }, [mapListo, enMapa, personasEnMapa, sosPendientes, seleccion, ahora, asegurarMarcador, conductorDe, placaDeUnidad, servicios]);
+  }, [mapListo, enMapa, personasEnMapa, sosPendientes, seleccion, ahora, asegurarMarcador, centrarYAbrir, conductorDe, placaDeUnidad, servicios]);
 
   // Primera vez que hay posiciones: encuadrar la flota (sin ninguna, se queda en Lima).
   useEffect(() => {
@@ -804,13 +829,9 @@ export default function MonitoreoPage() {
     setVistaMovil("mapa");
   };
   const verAlertaEnMapa = (a: AlertaSOS) => {
-    const reg = marcadores.current.get("s:" + a.id);
-    const m = mapa.current;
-    if (!reg || !m) return;
     setVistaMovil("mapa");
     setPanelSOS(false);
-    m.flyTo({ center: reg.m.getLngLat(), zoom: Math.max(m.getZoom(), 15), duration: 900 });
-    if (!reg.m.getPopup()?.isOpen()) reg.m.togglePopup();
+    centrarYAbrir("s:" + a.id);
   };
   // Con el panel abierto en escritorio, una selección hecha en el MAPA lleva la lista a su tarjeta.
   useEffect(() => {
@@ -831,9 +852,9 @@ export default function MonitoreoPage() {
   const avisosLectura: string[] = [];
   if (estadoPos === "listo" && noLeidas > 0) {
     avisosLectura.push(
-      `${noLeidas} unidad${noLeidas === 1 ? "" : "es"} no se ${noLeidas === 1 ? "pudo" : "pudieron"} leer en la última actualización` +
+      `${noLeidas} unidad${noLeidas === 1 ? "" : "es"} no se ${noLeidas === 1 ? "pudo" : "pudieron"} leer` +
       (meta.parcial ? " (se acabó el tiempo de lectura)" : "") +
-      ": figura" + (noLeidas === 1 ? "" : "n") + " como «No se pudo leer» y se reintenta en el próximo minuto.");
+      ": figura" + (noLeidas === 1 ? "" : "n") + " como «No se pudo leer» y se reintenta en 1 min.");
   } else if (estadoPos === "listo" && meta.parcial) {
     avisosLectura.push("La lectura de posiciones quedó a medias (se acabó el tiempo). Se reintenta en el próximo minuto.");
   }
@@ -860,7 +881,7 @@ export default function MonitoreoPage() {
     <div className="h-full flex flex-col overflow-hidden bg-[#0f172a]">
 
       {/* ── CABECERA ─────────────────────────────────────────────────────── */}
-      <header className="shrink-0 flex items-center justify-between gap-2 px-3 md:px-4 py-2 md:py-3 border-b bg-[#0b315f] border-[#1e3a5f]">
+      <header className="shrink-0 flex items-center justify-between gap-2 px-3 md:px-4 py-1.5 md:py-3 border-b bg-[#0b315f] border-[#1e3a5f]">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="hidden sm:flex w-9 h-9 rounded-xl items-center justify-center shrink-0 bg-[#0c2647]">
             <IconCrosshair size={20} color="#7dd3fc" />
@@ -898,7 +919,7 @@ export default function MonitoreoPage() {
 
       {/* ── CELULAR: Mapa | Lista y chips (en escritorio los chips van en el panel) ── */}
       <div className="md:hidden shrink-0 bg-[#0f172a] border-b border-slate-800">
-        <div className="px-3 pt-2">
+        <div className="px-3 pt-1.5">
           {segmentado(vistaMovil, [["mapa", "Mapa"], ["lista", `Lista (${lista.length})`]] as const, setVistaMovil, "Ver mapa o lista")}
         </div>
         <ChipsEstado resumen={resumen} filtro={filtroClase} onFiltro={setFiltroClase} variante="fila" />
@@ -912,7 +933,7 @@ export default function MonitoreoPage() {
           )}
           {errorPos && (errorPos.tipo === "red" || errorPos.tipo === "servidor") && (
             <p className="text-amber-300 font-semibold">
-              ⚠ No se pudo actualizar ({errorPos.texto.toLowerCase()})
+              ⚠ No se pudo actualizar: {errorPos.texto}
               {ultimaOk ? ` · mostrando datos de ${rotuloEdad(ultimaOk, ahora)}` : " · todavía no hay posiciones para mostrar"}. Se reintenta cada minuto.
             </p>
           )}
@@ -924,14 +945,16 @@ export default function MonitoreoPage() {
       {/* ── CUERPO: panel + mapa ─────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 relative md:flex">
 
-        {/* PANEL: en escritorio, columna fija con scroll propio; en celular, capa SOBRE el mapa
-            (el mapa nunca se oculta con display:none: Mapbox se iniciaría en 0×0). */}
+        {/* PANEL: en escritorio, columna fija (los filtros quietos y la lista con scroll propio); en
+            celular, capa SOBRE el mapa que scrollea entera, filtros incluidos, para que la lista no
+            quede en una franja de tres tarjetas. El mapa nunca se oculta con display:none: Mapbox se
+            iniciaría en 0×0. */}
         <section
           aria-label="Unidades de la flota"
           className={(vistaMovil === "lista" ? "flex" : "hidden") +
-            " md:flex flex-col absolute inset-0 z-20 md:static md:z-auto md:w-80 md:shrink-0 md:border-r border-slate-800 bg-[#0f172a]"}
+            " md:flex flex-col absolute inset-0 z-20 overflow-y-auto overscroll-contain md:overflow-hidden md:static md:z-auto md:w-80 md:shrink-0 md:border-r border-slate-800 bg-[#0f172a]"}
         >
-          <div className="hidden md:block px-3 pt-3 pb-2 border-b border-slate-800">
+          <div className="hidden md:block shrink-0 px-3 pt-3 pb-2 border-b border-slate-800">
             <ChipsEstado resumen={resumen} filtro={filtroClase} onFiltro={setFiltroClase} variante="panel" />
           </div>
 
@@ -968,7 +991,7 @@ export default function MonitoreoPage() {
             </button>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto px-2 pt-2 pb-28 md:pb-2">
+          <div data-lista-unidades className="px-2 pt-2 pb-28 md:pb-2 md:flex-1 md:min-h-0 md:overflow-y-auto">
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 px-2 py-1">
               {catalogos
                 ? `${lista.length} unidad${lista.length === 1 ? "" : "es"}` + (resumen ? ` · ${lista.filter((u) => u.veredicto?.dibujar).length} con posición` : " · comprobando posiciones…")

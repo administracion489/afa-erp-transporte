@@ -22,10 +22,10 @@ export default function ChipsEstado({ resumen, filtro, onFiltro, variante }: Pro
       role="group"
       aria-label="Filtrar por estado"
       className={variante === "fila"
-        ? "flex gap-2 overflow-x-auto px-3 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        : "flex flex-wrap gap-1.5"}
+        ? "flex gap-2 overflow-x-auto px-3 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        : "grid grid-cols-6 gap-1.5"}
     >
-      {CLASES_MONITOREO.map((c) => {
+      {CLASES_MONITOREO.map((c, i) => {
         const n = resumen ? resumen[c] : null;
         const activo = filtro === c;
         const color = COLOR_CLASE[c];
@@ -39,7 +39,10 @@ export default function ChipsEstado({ resumen, filtro, onFiltro, variante }: Pro
             aria-pressed={activo}
             onClick={() => onFiltro(activo ? null : c)}
             title={activo ? "Quitar el filtro" : `Ver solo: ${ETIQUETA_CLASE[c]}`}
-            className={(variante === "fila" ? "min-h-11 px-3.5 shrink-0" : "min-h-9 px-2.5") +
+            className={(variante === "fila"
+              ? "min-h-11 px-3.5 shrink-0"
+              // Panel: tres arriba (lo que se mira primero) y dos abajo, siempre en la misma rejilla.
+              : (i < 3 ? "col-span-2" : "col-span-3") + " min-h-9 px-1.5 justify-center min-w-0") +
               " inline-flex items-center gap-1.5 rounded-xl border text-xs font-bold transition-colors whitespace-nowrap"}
             style={{
               background: activo ? color + "33" : vivo ? color + "14" : "#1e293b",

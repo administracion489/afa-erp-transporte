@@ -65,7 +65,9 @@ export function svgVehiculo(cat: string | null | undefined, size = 30, fill = "#
 // Mapbox deja en z-index 2 y auto— se suben por encima con CSS. El contenedor del mapa va con
 // `isolation: isolate`: nada de esto se sale del mapa ni tapa los paneles de la pantalla.
 export const Z_SELECCIONADO = 50_000_000;
-export const Z_ALERTA_SOS = 48_000_000;
+/** La alerta SOS va DEBAJO de las unidades a atender (su placa es lo que hay que leer) y encima
+ *  del resto: la unidad con SOS ya pulsa en rojo; el ⚠ marca dónde estaba al pedir ayuda. */
+export const Z_ALERTA_SOS = 39_000_000;
 
 /** CSS de marcadores y popups, una sola vez por documento. */
 export function inyectarEstilosMonitoreo(): void {
@@ -95,10 +97,10 @@ export function inyectarEstilosMonitoreo(): void {
     .afa-pop .t{font-weight:900;font-size:15px;color:#0b315f;margin:0 26px 2px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
     .afa-pop .s{font-size:11.5px;color:#64748b;margin-bottom:6px}
     .afa-pop .prov{display:inline-block;font-size:10.5px;font-weight:800;color:#92400e;background:#fef3c7;border-radius:6px;padding:1px 6px;margin-bottom:6px}
-    .afa-pop .k{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#94a3b8;margin-top:6px}
-    .afa-pop .v{font-size:12.5px;color:#1e293b}
+    .afa-pop .f{font-size:12px;color:#1e293b;margin-top:4px;line-height:1.35}
+    .afa-pop .f b{color:#64748b;font-weight:700}
     .afa-pop .e{font-size:12.5px;font-weight:900}
-    .afa-pop .d{font-size:12px;color:#334155;margin-top:1px}
+    .afa-pop .d{font-size:12px;color:#334155;margin:1px 0 6px;line-height:1.35}
     .afa-pop .tel{display:block;margin-top:10px;min-height:44px;line-height:44px;background:#0b315f;color:#fff;text-align:center;border-radius:10px;font-size:13px;font-weight:800;text-decoration:none;padding:0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   `;
   document.head.appendChild(st);
@@ -161,9 +163,9 @@ export function htmlPopupUnidad(d: DatosPopupUnidad): string {
     (d.tercero ? `<div class="prov">Proveedor: ${esc(d.proveedor || "Tercerizado")}</div>` : "") +
     `<div class="e" style="color:${colorEtiqueta}">${esc(d.etiqueta)}</div>` +
     `<div class="d">${esc(d.detalle)}</div>` +
-    (d.ultimaPosicion ? `<div class="k">Última posición</div><div class="v">${esc(d.ultimaPosicion)}</div>` : "") +
-    (d.velocidadKmh != null ? `<div class="k">Velocidad</div><div class="v">${Math.round(d.velocidadKmh)} km/h</div>` : "") +
-    `<div class="k">Conductor</div><div class="v">${esc(d.conductor || "Sin dato en su última posición")}</div>` +
+    (d.ultimaPosicion ? `<div class="f"><b>Última posición:</b> ${esc(d.ultimaPosicion)}</div>` : "") +
+    (d.velocidadKmh != null ? `<div class="f"><b>Velocidad:</b> ${Math.round(d.velocidadKmh)} km/h</div>` : "") +
+    `<div class="f"><b>Conductor:</b> ${esc(d.conductor || "sin dato en su última posición")}</div>` +
     (tel ? `<a class="tel" href="${esc(tel)}">Llamar · ${esc(d.telefono)}</a>` : "") +
     `</div>`
   );
@@ -186,7 +188,7 @@ export function htmlPopupPersona(d: { nombre: string; estado: string; color: str
     `<div class="t" style="font-family:inherit">${esc(d.nombre)}</div>` +
     `<div class="s">Conductor conectado sin unidad asignada</div>` +
     `<div class="e" style="color:${d.color === "#64748b" ? "#475569" : d.color}">${esc(d.estado)}</div>` +
-    `<div class="k">Última posición</div><div class="v">${esc(d.ultimaPosicion)}</div>` +
+    `<div class="f"><b>Última posición:</b> ${esc(d.ultimaPosicion)}</div>` +
     (tel ? `<a class="tel" href="${esc(tel)}">Llamar · ${esc(d.telefono)}</a>` : "") +
     `</div>`
   );
@@ -199,10 +201,10 @@ export function htmlPopupSos(d: { motivo: string | null; reservaId: number | nul
     `<div class="afa-pop">` +
     `<div class="t" style="color:#dc2626;font-family:inherit">⚠ Alerta SOS</div>` +
     `<div class="s">Posición al momento de la alerta</div>` +
-    `<div class="k">Motivo</div><div class="v">${esc(d.motivo || "Sin motivo escrito")}</div>` +
-    (d.placa ? `<div class="k">Unidad</div><div class="v">${esc(d.placa)}</div>` : "") +
-    (d.reservaId != null ? `<div class="k">Servicio</div><div class="v">Reserva #${esc(d.reservaId)}</div>` : "") +
-    `<div class="k">Hora</div><div class="v">${esc(d.hora)}</div>` +
+    `<div class="f"><b>Motivo:</b> ${esc(d.motivo || "sin motivo escrito")}</div>` +
+    (d.placa ? `<div class="f"><b>Unidad:</b> ${esc(d.placa)}</div>` : "") +
+    (d.reservaId != null ? `<div class="f"><b>Servicio:</b> reserva #${esc(d.reservaId)}</div>` : "") +
+    `<div class="f"><b>Hora:</b> ${esc(d.hora)}</div>` +
     `</div>`
   );
 }

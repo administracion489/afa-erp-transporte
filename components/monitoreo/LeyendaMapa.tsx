@@ -24,7 +24,8 @@ export default function LeyendaMapa({ abierta, onAbierta }: Props) {
   const clasePanel = abierta == null ? "hidden md:block" : abierta ? "block" : "hidden";
   const claseBoton = abierta == null ? "md:hidden" : abierta ? "hidden" : "";
   return (
-    <div className="absolute bottom-9 left-2 md:left-3 z-10 max-w-[calc(100%-1rem)]">
+    // Abierta en celular, sube por encima de los botones flotantes de ELIA y de la ayuda.
+    <div className={"absolute bottom-9 left-2 md:left-3 z-10 max-w-[calc(100%-1rem)]" + (abierta ? " max-md:bottom-24" : "")}>
       <button
         type="button"
         onClick={() => onAbierta(true)}
