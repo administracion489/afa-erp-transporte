@@ -16,7 +16,7 @@
 //      corolario (el barrido sí produce válidos y rechazos).
 import {
   emparejarParaderos, juzgarTrazo, elegirRecorrido, payloadDeRecorrido, simplificar, mismosParaderos,
-  debeReconstruir, payloadServible, RADIO_PARADERO_M, MAX_SALTO_M, MAX_VERTICES, DIAS_RENOVAR, HORAS_REINTENTO,
+  debeReconstruir, payloadServible, RADIO_PARADERO_M, MAX_SALTO_M, MAX_CUERDA_M, VERSION_RUTA_PROPIA, MAX_VERTICES, DIAS_RENOVAR, HORAS_REINTENTO,
   type Candidato, type Punto, type CodigoTrazo,
 } from "../lib/ruta-propia";
 import { distM, type HuellaPt } from "../lib/huella";
@@ -152,7 +152,8 @@ function traza(n: number, opts: { acc?: number; lateral?: (i: number) => number;
   chk("6c a 500 m no son los mismos", !mismosParaderos(paraderos, paraderos.map((p) => ({ lat: p.lat + 0.0045, lng: p.lng }))));
   const ahora = Date.parse("2026-10-14T12:00:00Z");
   const hace = (h: number) => new Date(ahora - h * 3_600_000).toISOString();
-  const pay = { coordenadas: [[0, 0], [1, 1]], tramos: [] } as never;
+  const pay = { coordenadas: [[0, 0], [1, 1]], tramos: [], version: VERSION_RUTA_PROPIA } as never;
+  const vieja = { coordenadas: [[0, 0], [1, 1]], tramos: [] } as never;   // versión 1: cuerdas de hasta 300 m
   chk("6d sin fila: se arma", debeReconstruir(null, ahora));
   chk("6e con ruta reciente: no", !debeReconstruir({ payload: pay, revisada_en: hace(24 * 5) }, ahora));
   chk("6f con ruta de más de 30 días: se renueva", debeReconstruir({ payload: pay, revisada_en: hace(24 * DIAS_RENOVAR) }, ahora));
@@ -161,7 +162,25 @@ function traza(n: number, opts: { acc?: number; lateral?: (i: number) => number;
   chk("6i revisada_en ilegible: se arma", debeReconstruir({ payload: pay, revisada_en: "x" }, ahora));
   chk("6j payloadServible exige coordenadas", payloadServible({ payload: pay, revisada_en: null }) != null
     && payloadServible({ payload: null, revisada_en: null }) == null
-    && payloadServible({ payload: { coordenadas: [[0, 0]], tramos: [] } as never, revisada_en: null }) == null);
+    && payloadServible({ payload: { coordenadas: [[0, 0]], tramos: [], version: VERSION_RUTA_PROPIA } as never, revisada_en: null }) == null);
+  chk("6k una ruta de la versión 1 no se sirve", payloadServible({ payload: vieja, revisada_en: hace(1) }) == null);
+  chk("6l una ruta de la versión 1 se rearma aunque sea reciente", debeReconstruir({ payload: vieja, revisada_en: hace(1) }, ahora));
+}
+
+// ── 6b. #1309/#1608: la línea propia no puede cortar manzanas ─────────────────
+{
+  // Posiciones cada ~100 m (2 pasos): con posiciones espaciadas cada esquina sale en diagonal.
+  const espaciada = traza(85).filter((_, i) => i % 2 === 0);
+  const r = juzgarTrazo(espaciada, paraderos);
+  chk("6m posiciones cada ~100 m: «espaciado», no se arma", r.codigo === "espaciado" && (r as { saltoM?: number }).saltoM! > MAX_CUERDA_M && (r as { saltoM?: number }).saltoM! <= MAX_SALTO_M);
+  chk("6n MAX_CUERDA_M es el corte de la huella (MAX_SEG_CRUDO_M, 60 m)", MAX_CUERDA_M === 60);
+  const ok = elegirRecorrido([{ reservaId: 9, fecha: "2026-10-01", puntos: traza(85) }], paraderos);
+  if (ok.ok) {
+    const p = payloadDeRecorrido(ok, ["A", "B", "C"]);
+    chk("6o el payload nuevo lleva la versión y se sirve", p.version === VERSION_RUTA_PROPIA && payloadServible({ payload: p, revisada_en: null }) != null);
+  } else chk("6o hay elección con posiciones cada 50 m", false);
+  const e = elegirRecorrido([{ reservaId: 1, fecha: "2026-10-01", puntos: espaciada }, { reservaId: 2, fecha: "2026-10-02", puntos: traza(85) }], paraderos);
+  chk("6p entre una espaciada y una densa, gana la densa", e.ok && e.reservaId === 2 && e.descartes.espaciado === 1);
 }
 
 // ── 7. Barrido ────────────────────────────────────────────────────────────────

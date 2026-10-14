@@ -222,7 +222,8 @@ export async function armarRutaPropia(clave: string, reservaId: number, ahoraMs 
         : Object.entries(e.descartes).map(([c, n]) => `${n} × ${MOTIVO_TRAZO[c as CodigoTrazo]}`).join(" · ");
       // Si ya había una ruta buena, se CONSERVA (solo se anota que se revisó): una vía que no se
       // pudo volver a medir no deja de existir. Si no había, se anota el intento fallido.
-      const fila = actual?.payload
+      // Una de reglas viejas (payloadServible la rechaza) no se conserva: se anota el intento.
+      const fila = payloadServible(actual)
         ? { clave, revisada_en: ahoraIso }
         : { clave, cliente_id: rsv.cliente_id, payload: null, motivo, candidatos: e.juzgados, revisada_en: ahoraIso };
       const { error } = await db.from("rutas_propias").upsert(fila, { onConflict: "clave,cliente_id" });
