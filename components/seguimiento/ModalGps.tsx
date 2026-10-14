@@ -688,16 +688,20 @@ export default function ModalGps({
         const caeAj: CaeTraza = calculoAjRef.current
           ? MOTIVO_CALCULO[calculoAjRef.current.codigo].cae
           : aj ? MOTIVO_LECTURA[aj.estado].cae : "en_vivo_como_antes";
-        const usaGuardada = caeAj !== "en_vivo_como_antes" && !!trazaGuardRef.current;
+        // Solo se usa la guardada si existe y el estado dice que es la que se dibuja. En CUALQUIER otro
+        // caso (falta, calculándose, presupuesto, error, token rechazado…) se ajusta en el navegador,
+        // como antes del guardado: dibujar la huella cruda «provisional» cruzaba manzanas (#1608).
+        const usaGuardada = caeAj === "guardada" && !!trazaGuardRef.current;
         let colaClean: number;
         let crudoRanges: Array<[number, number]>;
-        if (caeAj === "en_vivo_como_antes") {
-        const matched = await ajustador.ajustar(limpio, token, () => cancel);
-        if (matched && !cancel) { setMatchedCoords(matched); matchedRef.current = matched; const ec = ajustador.leerEsCrudo(); esCrudoRef.current = ec; setEsCrudoArr(ec); }
-        if (!cancel) setColaSnapped(ajustador.leerColaSnapped());   // ¿pegó la punta viva? (si no, colaViva sigue la ruta)
-        colaClean = ajustador.leerColaClean();                      // último vértice de VÍA limpia (frontera de colaViva)
-        crudoRanges = ajustador.leerCrudoRanges();
-        } else if (usaGuardada) {
+        if (!usaGuardada) {
+          claveAsignadaRef.current = null;   // si después llega la guardada, se asigna
+          const matched = await ajustador.ajustar(limpio, token, () => cancel);
+          if (matched && !cancel) { setMatchedCoords(matched); matchedRef.current = matched; const ec = ajustador.leerEsCrudo(); esCrudoRef.current = ec; setEsCrudoArr(ec); }
+          if (!cancel) setColaSnapped(ajustador.leerColaSnapped());   // ¿pegó la punta viva? (si no, colaViva sigue la ruta)
+          colaClean = ajustador.leerColaClean();                      // último vértice de VÍA limpia (frontera de colaViva)
+          crudoRanges = ajustador.leerCrudoRanges();
+        } else {
           // Traza guardada: NO se llama a Map Matching. Solo se reasigna si cambió su clave.
           const g = trazaGuardRef.current!;
           if (!cancel && claveAsignadaRef.current !== g.clave) {
@@ -707,13 +711,6 @@ export default function ModalGps({
             setColaSnapped(g.dec.colaSnapped);
           }
           colaClean = g.dec.colaClean; crudoRanges = g.dec.crudoRanges;
-        } else {
-          // Sin ajuste (o calculándose sin traza previa): la huella cruda provisional.
-          if (!cancel && claveAsignadaRef.current !== "__crudo__") {
-            claveAsignadaRef.current = "__crudo__";
-            setMatchedCoords(null); matchedRef.current = null; esCrudoRef.current = []; setEsCrudoArr([]); setColaSnapped(true);
-          }
-          colaClean = -1; crudoRanges = [];
         }
 
         // TRAMO ESTIMADO por RUTA. Dos fuentes: (1) HUECOS de señal (calcularPuentes) y (2) CORRIDAS

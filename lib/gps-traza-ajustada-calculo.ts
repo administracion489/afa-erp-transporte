@@ -18,6 +18,11 @@
 //     la ventana queda en crudo: esa geometría degradada NO se puede guardar para siempre. Un 429 que se
 //     reintentó y luego contestó 200 NO cuenta (la geometría salió de la respuesta buena). Otro 4xx es
 //     definitivo (la consulta no tiene arreglo reintentándola) y no cuenta.
+//   • `rechazos`: consultas cuyo ÚLTIMO intento Mapbox RECHAZÓ por la credencial (401/403: token inválido,
+//     revocado o con restricción por URL —un token público restringido a transportesafa.com no sirve desde
+//     el servidor, que no manda Referer—). Con el token rechazado TODAS las ventanas caen al crudo
+//     suavizado: líneas que cruzan manzanas y «tramos estimados» con el GPS al 100 %. Esa traza NO se
+//     guarda ni se dibuja: el modal vuelve a ajustar en el navegador, como antes (caso #1608).
 //   • `abortado`: al llegar al tope de llamadas (o al plazo `hastaMs`, `porTiempo`) se deja de llamar (la siguiente petición lanza, que
 //     `mapMatchTrail` lee como `null`) y el ajustador se cancela. Una traza a medias no se guarda.
 
@@ -30,6 +35,8 @@ export type AjusteServicio = {
   colaSnapped: boolean;
   llamadas: number;
   transitorios: number;
+  /** Consultas cuyo último intento fue 401/403 (Mapbox rechazó MAPBOX_TOKEN_SERVIDOR). */
+  rechazos: number;
   abortado: boolean;
   /** Abortó por el PLAZO (no por el tope de llamadas): la función del servidor no alcanzaba. */
   porTiempo: boolean;
@@ -50,6 +57,9 @@ export function fetchMapboxServidor(plazoMs: number = PLAZO_CONSULTA_MS): FetchM
 /** ¿Es un fallo pasajero? 429 (cuota por ráfaga) o 5xx. */
 export const esStatusTransitorio = (status: number) => status === 429 || status >= 500;
 
+/** ¿Mapbox rechazó la CREDENCIAL? 401 (token inválido o revocado) o 403 (sin permiso / restricción por URL). */
+export const esStatusRechazo = (status: number) => status === 401 || status === 403;
+
 export async function ajustarServicioCompleto(
   limpio: MatchPt[],
   token: string,
@@ -68,6 +78,7 @@ export async function ajustarServicioCompleto(
   // Último resultado por consulta (la URL ES la consulta: mismos puntos, mismos radios). Un reintento
   // ante 429 repite la URL y pisa el resultado anterior.
   const ultimo = new Map<string, boolean>();   // url → ¿el último intento fue transitorio?
+  const rechazo = new Map<string, boolean>();  // url → ¿el último intento fue un rechazo de la credencial?
   const contada: FetchMapbox = async (url) => {
     if (!abortado && opts?.hastaMs != null && reloj() >= opts.hastaMs) { abortado = true; porTiempo = true; }
     if (abortado || llamadas >= tope) {
@@ -78,9 +89,11 @@ export async function ajustarServicioCompleto(
     try {
       const res = await f(url);
       ultimo.set(url, esStatusTransitorio(res.status));
+      rechazo.set(url, esStatusRechazo(res.status));
       return res;
     } catch (e) {
       ultimo.set(url, true);   // error de red: pasajero
+      rechazo.set(url, false);
       throw e;
     }
   };
@@ -97,5 +110,7 @@ export async function ajustarServicioCompleto(
   }
   let transitorios = 0;
   for (const t of ultimo.values()) if (t) transitorios++;
-  return { coords, esCrudo, colaSnapped, llamadas, transitorios, abortado, porTiempo };
+  let rechazos = 0;
+  for (const t of rechazo.values()) if (t) rechazos++;
+  return { coords, esCrudo, colaSnapped, llamadas, transitorios, rechazos, abortado, porTiempo };
 }
