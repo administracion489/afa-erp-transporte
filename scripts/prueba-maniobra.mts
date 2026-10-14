@@ -240,6 +240,25 @@ const fix = (m: number, s: number, acc = 5) => ({ lat: LAT + m * M_LAT, lng: LNG
   const fuera = await H.mapMatchTrail(pts, "tok", resp(tpDe(paresB, (i) => P(i * 16, 30)), [{ confidence: 0.9, geometry: { coordinates: geoB } }]));
   chk("6m location que no está en la geometría: el fragmento entero, como antes", alEste(fuera, 40) === 4);
 
+  // Un fix de RED anclado conserva su hora y se dibuja en la cuerda de sus confiables (anclarImprecisos),
+  // a veces junto al anterior. Datos reales de #17498 en la Panamericana a 89 km/h: 17:21:08 (±1.5),
+  // 17:21:12 (±77, anclado 16 m después del anterior) y 17:21:14 (±1.5, 145 m después). Medido contra
+  // la hora del de red, el bus «recorría» 129 m en 2 s y la carretera salía como estimado.
+  const ruta = [
+    { ...fix(-99, -4, 1.5), velocidad: 89 }, { ...fix(0, 0, 1.5), velocidad: 89 },
+    { ...fix(16, 4, 77), velocidad: 0 }, { ...fix(145, 6, 1.5), velocidad: 89 }, { ...fix(243, 10, 1.5), velocidad: 89 },
+  ];
+  const snapR = (i: number) => P((ruta[i].lat - LAT) / M_LAT, 1);
+  const geoR = ruta.map((_, i) => snapR(i));
+  const rr = await H.mapMatchTrail(ruta, "tok", resp(tpDe([0, 0, 0, 0, 0], snapR), [{ confidence: 0.9, geometry: { coordinates: geoR } }]));
+  chk("6r un fix de red anclado no parte la carretera: se dibuja entera y medida",
+    !!rr && rr.coords.length === 5 && rr.esCrudo.every((x) => !x), JSON.stringify(rr?.esCrudo));
+  chk("6s …la pieza es la geometría entera", (() => { const p = H.piezasDeFragmento(geoR, ruta, tpDe([0, 0, 0, 0, 0], snapR), 0); return p.length === 1 && "via" in p[0] && p[0].via === geoR; })());
+  // Pero un lazo imposible cuyo extremo es ese fix de red se sigue viendo, medido entre los precisos.
+  const geoRL = [snapR(0), snapR(1), snapR(2), P(40, 400), P(145, 400), snapR(3), snapR(4)];
+  const rrl = await H.mapMatchTrail(ruta, "tok", resp(tpDe([0, 0, 0, 0, 0], snapR), [{ confidence: 0.9, geometry: { coordinates: geoRL } }]));
+  chk("6t …y un lazo de 900 m junto a él sigue sin dibujarse", alEste(rrl, 400) === 0, `${alEste(rrl, 400)} vértices del lazo`);
+
   // Barrido: fragmentos con y sin rodeos, nulls al azar, precisiones mezcladas.
   let semilla = 7;
   const rnd = () => ((semilla = (semilla * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);

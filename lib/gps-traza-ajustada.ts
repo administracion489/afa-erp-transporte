@@ -44,7 +44,9 @@ import { rangosDeCrudo } from "./huella";
 // 6 (14-10-2026, #17498): un fragmento confiable cuya vía no pasa por los fixes precisos sin pareja del
 // tramo, o que entre dos puntos pegados mete un recorrido imposible para un bus, se parte y ese tramo
 // lleva los fixes reales (piezasDeFragmento, lib/huella.ts). Otra salida → se recalculan.
-export const VERSION_AJUSTE = 6;
+// 7 (14-10-2026, #17498/#29420): el recorrido imposible se mide solo entre puntos pegados PRECISOS; un
+// fix de red anclado (su hora no es la de su posición) partía la Panamericana en un tramo estimado.
+export const VERSION_AJUSTE = 7;
 /** Días hacia atrás en que el servidor CALCULA (= DIAS_RASTREO de lib/gps-cobertura-datos.ts, que la
  *  matriz coteja; aquí como literal porque este módulo no puede importar un lector de servidor). */
 export const DIAS_CALCULO = 90;
