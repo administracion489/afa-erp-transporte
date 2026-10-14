@@ -17,8 +17,10 @@
 //   (lib/rutas-cache.ts). Antes, dos personas viendo el mismo servicio pagaban dos veces la
 //   misma línea; ahora la segunda no llega a Google.
 
-import { NextRequest, NextResponse } from "next/server";
-import { guardarGasto, limitarGasto } from "@/lib/api-guard";
+import { NextRequest, NextResponse, after } from "next/server";
+import { guardarGasto, limitarGasto, limitarTasa, ipDe } from "@/lib/api-guard";
+import { debeReconstruir, payloadServible } from "@/lib/ruta-propia";
+import { rutaPropiaParaReserva, armarRutaPropia, puedeIntentar } from "@/lib/ruta-propia-datos";
 import { firmaRuta, leerRutaCache, guardarRutaCache } from "@/lib/rutas-cache";
 import { claveGoogleDirections, consultarDirections, esErrorDirections } from "@/lib/google-directions";
 
@@ -42,6 +44,9 @@ function decodePoly(encoded: string): [number, number][] {
 // N visores abriendo el mismo servicio en el mismo segundo generaban N llamadas iguales.
 const enVuelo = new Map<string, Promise<any>>();
 
+// Armar la ruta propia corre en `after()` y lee el GPS de hasta 6 servicios: se le da margen.
+export const maxDuration = 60;
+
 export async function POST(req: NextRequest) {
   try {
     const bloqueo = guardarGasto(req, { etiqueta: "ruta" });
@@ -63,7 +68,8 @@ export async function POST(req: NextRequest) {
 
     // Convertir a número por si vienen como string (Supabase numeric → string en JSON)
     const paradas = paradasRaw.map((p: any) => ({
-      nombre: p.nombre || "Parada",
+      // Tope de largo: el nombre viaja a los tramos que se guardan en `rutas_cache`.
+      nombre: String(p.nombre || "Parada").slice(0, 120),
       lat:    typeof p.lat === "string" ? parseFloat(p.lat) : Number(p.lat),
       lng:    typeof p.lng === "string" ? parseFloat(p.lng) : Number(p.lng),
     }));
@@ -76,12 +82,42 @@ export async function POST(req: NextRequest) {
 
     const firma = firmaRuta(paradas);
 
+    // RUTA PROPIA (solo el modal GPS la pide, con `propia` + `reservaId`): la línea armada con el
+    // GPS real de un servicio anterior con los mismos paraderos (lib/ruta-propia.ts). Orden:
+    //   1. la de Google guardada y VIGENTE (≤ 30 días) — manda mientras exista;
+    //   2. la propia — desde el día 31, cuando Google ya no se puede guardar más;
+    //   3. Google con el SKU barato (y se guarda 30 días), como siempre.
+    // Armarla o renovarla corre DESPUÉS de responder (`after`), y también mientras la de Google
+    // sigue vigente: así el día 31 ya está lista. Los demás llamadores no mandan `propia` y no
+    // cambian en nada (p. ej. /api/cotizaciones/horas-paraderos).
+    const reservaId = Number(body?.reservaId);
+    const conPropia = !conTrafico && body?.propia === true && Number.isFinite(reservaId) && reservaId > 0;
+
     // Solo la ruta sin tráfico es cacheable: su respuesta no depende de la hora.
     if (!conTrafico) {
-      const cacheado = await leerRutaCache(firma);
+      // La propia es la del CLIENTE de `reservaId` (rutaPropiaParaReserva): dos clientes con los
+      // mismos paraderos no se ven el recorrido. Un fallo de lectura no tumba nada: sigue Google.
+      const [cacheado, filaPropia] = await Promise.all([
+        leerRutaCache(firma),
+        conPropia ? rutaPropiaParaReserva(firma, reservaId).catch(() => null) : Promise.resolve(null),
+      ]);
+      // Armar: los paraderos y nombres los lee el servidor de la reserva (nunca del cuerpo) y su
+      // firma tiene que ser esta. Frenos antes de gastar cupo: uno en curso o reciente no cuenta;
+      // después, 5 por minuto por IP y 30 por minuto por instancia (operativos, no medidos).
+      if (conPropia && debeReconstruir(filaPropia, Date.now()) && puedeIntentar(firma, reservaId)
+          && limitarTasa(`ruta-propia:${ipDe(req)}`, 5, 60_000) && limitarTasa("ruta-propia:armar", 30, 60_000)) {
+        after(() => armarRutaPropia(firma, reservaId)
+          .then((r) => console.log("[api/ruta] ruta propia:", r.codigo))
+          .catch((e) => console.error("[api/ruta] ruta propia falló:", e instanceof Error ? e.message : e)));
+      }
       if (cacheado) {
         console.log("[api/ruta] cache HIT —", cacheado.coordenadas?.length, "puntos (0 llamadas a Google)");
-        return NextResponse.json(cacheado);
+        return NextResponse.json(conPropia ? { ...cacheado, fuente: "google" } : cacheado);
+      }
+      const propia = payloadServible(filaPropia);
+      if (propia) {
+        console.log("[api/ruta] ruta PROPIA —", propia.coordenadas.length, "puntos (0 llamadas a Google)");
+        return NextResponse.json(propia);
       }
     }
 
