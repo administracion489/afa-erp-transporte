@@ -140,8 +140,6 @@ export default function ModalGps({
   // ambas sería mentir: el badge diría "✓ Ruta libre" aunque la avenida esté trabada. Solo el botón
   // «Calcular tráfico en tiempo real» lo pone en true, y solo entonces el badge/etiqueta hablan de tráfico.
   const [rutaConTrafico,    setRutaConTrafico]    = useState(false);
-  // La ruta de Google no estaba guardada y no se consultó (carga "cache"): sin línea planificada.
-  const [rutaSinCache,      setRutaSinCache]      = useState(false);
   const rutaRef = useRef<RutaData | null>(null);   // espejo de `ruta` para leerla en el loop del puente
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
   const [errorRuta,         setErrorRuta]         = useState<string | null>(null);
@@ -183,7 +181,7 @@ export default function ModalGps({
   const geocacheRef = useRef<Map<string, string>>(new Map());                        // caché reverse-geocode por coord redondeada
   const popupTelemRef = useRef<any>(null);                                           // popup activo de un puntito
   const stopMarkersRef = useRef<any[]>([]);
-  const encuadreParadasRef = useRef(false);   // el mapa ya se encuadró por los paraderos (sin ruta)
+  const encuadreParadasRef = useRef(false);   // el mapa ya se encuadró por los paraderos (ruta no cargada)
   // ETA dinámica: posición actual del vehículo → próxima parada (Google Directions)
   const [etaMin, setEtaMin] = useState<number | null>(null);
   const [etaKm,  setEtaKm]  = useState<number | null>(null);
@@ -294,16 +292,16 @@ export default function ModalGps({
   // geometría buena y la rápida apagaba el spinner con la cara todavía en vuelo.
   const epocaRutaRef = useRef(0);
 
-  // MODO de la carga (decisión del dueño, 13-10-2026: «me está generando mucho dinero de la API
-  // de Google y muchas veces no lo usan»):
-  //   "cache"   — la que hace el modal AL ABRIR. Solo lee la ruta ya guardada en `rutas_cache`
-  //               (0 llamadas a Google); si no está, no se paga nada y el panel ofrece el botón.
-  //   "google"  — botón «Consultar ruta en Google Maps»: el SKU barato, sin tráfico, que el
-  //               servidor guarda 30 días (la próxima apertura de cualquier usuario es gratis).
+  // MODO de la carga:
+  //   "plan"    — la que hace el modal AL ABRIR: la ruta planificada SIN tráfico. Primero mira
+  //               `rutas_cache` (gratis); solo si no está la pide a Google con el SKU barato y el
+  //               servidor la guarda para todos. Dibuja la línea azul y alimenta los tramos
+  //               estimados de la huella: sin ella el mapa se veía peor (decisión del dueño, 14-10-2026).
   //   "trafico" — botón «Calcular tráfico en tiempo real»: el SKU caro, a propósito y una vez.
-  // Los tiempos que el panel enseña por defecto NO salen de aquí: son el promedio real de los
-  // últimos 30 días (lib/tramos-historicos.ts).
-  const cargarRuta = useCallback(async (modo: "cache" | "google" | "trafico" = "cache") => {
+  // Los MINUTOS que el panel enseña por defecto NO salen de aquí: son el promedio real de los
+  // últimos 30 días (lib/tramos-historicos.ts). Lo que gastaba de verdad era el ETA con tráfico
+  // cada 3 min, y ese ya no corre solo.
+  const cargarRuta = useCallback(async (modo: "plan" | "trafico" = "plan") => {
     const conTrafico = modo === "trafico";
     const epoca   = ++epocaRutaRef.current;
     const vigente = () => epocaRutaRef.current === epoca;
@@ -366,7 +364,6 @@ export default function ModalGps({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...(conTrafico ? { conTrafico: true } : {}),
-          ...(modo === "cache" ? { soloCache: true } : {}),
           // `paradaParaApiRuta` (lib/ruta-firma.ts): si este cuerpo se armara de otra forma, la clave
           // con que /api/ruta guarda la ruta y la que usa «Ver recorrido» para leerla no coincidirían.
           paradas: paradasConCoords.map(p => paradaParaApiRuta(p)),
@@ -390,17 +387,6 @@ export default function ModalGps({
         return;
       }
 
-      // La ruta no está guardada y nadie pidió consultarla: no se dibuja la línea de Google, pero
-      // los paraderos SÍ (marcadores, avance, tiempos históricos). El panel ofrece el botón.
-      if (data?.sin_cache === true) {
-        if (!vigente()) return;
-        setRuta(null);
-        setRutaConTrafico(false);
-        setRutaSinCache(true);
-        setParadasResueltas(paradasConCoords);
-        return;
-      }
-
       if (!data.coordenadas || !Array.isArray(data.coordenadas) || data.coordenadas.length === 0) {
         fallo("Google no devolvió coordenadas de ruta");
         return;
@@ -415,7 +401,6 @@ export default function ModalGps({
 
       setRuta(data as RutaData);
       setRutaConTrafico(conTrafico);   // marca de origen: sin esto el badge de tráfico sería adivinanza
-      setRutaSinCache(false);
       setParadasResueltas(paradasConCoords);
     } catch (e: any) {
       console.error("[ModalGps] Error fetch:", e);
@@ -444,14 +429,14 @@ export default function ModalGps({
     [paradasJson]
   );
 
-  useEffect(() => { cargarRuta("cache"); }, [firmaParadas, firmaParadasJson, origen, destino]); // eslint-disable-line
+  useEffect(() => { cargarRuta("plan"); }, [firmaParadas, firmaParadasJson, origen, destino]); // eslint-disable-line
   useEffect(() => { rutaRef.current = ruta; }, [ruta]);   // el loop del puente lee rutaRef.current
 
   // ── Dibujar ruta en Mapbox ────────────────────────────────────────────────
 
   useEffect(() => {
     if (!mapListo || !mapInst.current) return;
-    // Sin ruta (no estaba guardada): se retira la de unos paraderos anteriores, si la hubo.
+    // Sin ruta: se retira la de unos paraderos anteriores, si la hubo.
     if (!ruta || !ruta.coordenadas || ruta.coordenadas.length === 0) {
       try {
         const map = mapInst.current;
@@ -657,11 +642,7 @@ export default function ModalGps({
         //    (`porGoogle`, en orden). `puentesPorRutaPrevista` (lib/huella.ts) es ese bucle, sin red.
         const fase1 = puentesPorRutaPrevista(cands, fixesCand, rutaRef.current?.coordenadas);
         const slots: any[] = fase1.slots.map((p) => (p ? featureDePuente(p) : null));
-        // Sin la ruta planificada cargada (no estaba guardada y nadie la consultó) los huecos NO se
-        // mandan a Google: sería pagar por la puerta de atrás lo que el panel acaba de convertir en
-        // un botón. Quedan como hueco honesto hasta que alguien consulte la ruta. Con la ruta
-        // guardada —el caso de un contrato que se repite— todo sigue exactamente como antes.
-        const porGoogle: number[] = rutaRef.current?.coordenadas?.length ? fase1.porGoogle : [];
+        const porGoogle: number[] = fase1.porGoogle;
         // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco), con tope de
         //    concurrencia. Un `key` repetido dentro del mismo lote comparte UNA sola llamada.
         const enVuelo = new Map<string, Promise<void>>();
@@ -1205,7 +1186,7 @@ export default function ModalGps({
 
       stopMarkersRef.current.push(marker);
     });
-    // Sin la ruta de Google (no estaba guardada) nadie encuadra el mapa: lo hace la lista de
+    // Si la ruta de Google no se pudo cargar nadie encuadra el mapa: lo hace la lista de
     // paraderos, una sola vez. Con ruta, el efecto que la dibuja ya encuadra.
     if (!rutaRef.current && !encuadreParadasRef.current && total >= 2) {
       try {
@@ -2204,15 +2185,8 @@ export default function ModalGps({
                     );
                   })}
                 </div>
-                {/* Google se paga SOLO aquí, y porque lo pidió una persona. La ruta sin tráfico se
-                    guarda 30 días para todos; el tráfico no se guarda (cambia con la hora). */}
-                {rutaSinCache && !ruta && (
-                  <button onClick={() => cargarRuta("google")} disabled={cargandoRuta}
-                    className="w-full mt-3 py-1.5 rounded-lg text-[10px] font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors disabled:opacity-50"
-                    title="Dibuja la ruta planificada y los km de cada tramo. Se guarda 30 días: la próxima vez no se vuelve a pagar.">
-                    {cargandoRuta ? "Consultando..." : "🗺️ Consultar ruta en Google Maps"}
-                  </button>
-                )}
+                {/* El tráfico se paga SOLO aquí, y porque lo pidió una persona: no se guarda (cambia
+                    con la hora). La ruta sin tráfico la carga el modal al abrir, desde la caché. */}
                 <button onClick={pedirTrafico} disabled={cargandoEta || cargandoRuta || finalizado}
                   className="w-full mt-2 py-1.5 rounded-lg text-[10px] font-bold text-[#0b315f] bg-blue-50 hover:bg-blue-100 transition-colors disabled:opacity-50"
                   title={finalizado ? "El servicio ya finalizó: el tráfico de ahora no describe este viaje." : "Consulta a Google el tráfico de este momento (consulta pagada). No se actualiza solo."}>
