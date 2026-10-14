@@ -2,16 +2,18 @@
 -- Las posiciones GPS del INICIO de un servicio y sus paraderos, en un solo texto, para revisar
 -- su huella fuera del ERP (con la misma tubería del modal GPS: scripts que leen este texto).
 --
--- Uso: cambia el número de reserva en la línea marcada con ←, pega TODO en el SQL Editor y pulsa
--- Run. Sale UNA fila con UNA celda: ábrela, copia el texto entero y pégalo en el chat.
--- Trae hasta 900 posiciones (≈ 45 min con un fix cada 3 s), en el orden en que se tomaron.
+-- Uso: cambia el número de reserva y, si hace falta, la hora en las líneas marcadas con ←, pega
+-- TODO en el SQL Editor y pulsa Run. Sale UNA fila con UNA celda: ábrela, copia el texto entero y
+-- pégalo en el chat. Trae hasta 900 posiciones (≈ 45 min con un fix cada 3 s) desde esa hora.
 with params as (
-  select 1459::bigint as reserva            -- ← la reserva a revisar
+  select 1459::bigint as reserva,           -- ← la reserva a revisar
+         null::time  as desde               -- ← hora de Lima desde la que traer ('17:05'), o null
 ),
 gps as (
   select to_jsonb(u) as j, u.created_at, u.id
-  from public.ubicaciones_gps u
-  where u.reserva_id = (select reserva from params)
+  from public.ubicaciones_gps u, params p
+  where u.reserva_id = p.reserva
+    and (p.desde is null or (u.created_at at time zone 'America/Lima')::time >= p.desde)
   order by u.created_at, u.id
   limit 900
 ),

@@ -1406,6 +1406,95 @@ export function radioDeBusqueda(acc: number | undefined): number {
   return Math.min(50, Math.max(RADIO_MIN_MATCH_M, Math.ceil((acc || 25) * 1.5)));
 }
 
+// ── LA VÍA PEGADA TIENE QUE PASAR POR DONDE IBA EL BUS (#17498, 14-10-2026) ───────────────────
+// Un fragmento CONFIABLE (conf ≥ 0.4) se dibujaba entero, sin preguntar si su geometría pasaba por
+// los fixes que dice cubrir. En un intercambio (la Panamericana Sur con la Antigua y sus ramales),
+// Map Matching puede tomar el ramal equivocado: entre dos puntos pegados enruta por la vía paralela
+// y deja SIN pareja los fixes del medio —los de ±2 m, que estaban en el ramal correcto—, y esos se
+// omitían como «redundantes de tidy». La huella medida corría así por donde no hubo ningún punto.
+// Cada tramo del fragmento entre dos puntos pegados consecutivos (un leg) se juzga con dos pruebas:
+//   1. FIEL A LOS FIXES: un fix PRECISO sin pareja de ese tramo no puede quedar más lejos de la
+//      geometría que su propio radio de búsqueda (y nunca menos de TOL_VIA_M): si la vía dibujada
+//      estuviera ahí, Mapbox habría tenido un candidato sobre ella.
+//   2. FÍSICAMENTE POSIBLE: el largo del tramo no puede pasar de lo que un bus recorre en ese tiempo
+//      (VMAX_BUS_KMH) más lo que cada extremo se movió al pegarse y MARGEN_TRAMO_FISICO_M. Un rodeo
+//      por los ramales de 1 km entre dos fixes separados 15 s no es un recorrido, es un error.
+// Un tramo que falla se reemplaza por los FIXES REALES del medio (la regla de un fragmento dudoso):
+// lo que quede crudo se rellena por la vía y, si no se puede, se dibuja. Solo se juzga con la
+// `location` de cada punto pegado (es un vértice de la geometría): sin ella, el fragmento se dibuja
+// como siempre. Un fix de RED sin pareja no prueba nada y no se juzga.
+// MARGEN_TRAMO_FISICO_M NO está medido: es holgura contra el redondeo de los vértices.
+export const MARGEN_TRAMO_FISICO_M = 50;
+
+type PiezaFragmento = { via: [number, number][] } | { fix: number };
+
+/** El vértice de `g`, desde `desde`, que es la `location` del punto pegado (−1 si no está). */
+function verticeDeLocation(g: readonly [number, number][], loc: unknown, desde: number): number {
+  if (!Array.isArray(loc) || loc.length < 2 || !Number.isFinite(loc[0]) || !Number.isFinite(loc[1])) return -1;
+  for (let j = desde; j < g.length; j++) if (distM(g[j][1], g[j][0], loc[1] as number, loc[0] as number) <= 1) return j;
+  return -1;
+}
+
+/** Largo (m) de g[a..b]. */
+function largoTramo(g: readonly [number, number][], a: number, b: number): number {
+  let m = 0;
+  for (let j = a + 1; j <= b; j++) m += distM(g[j - 1][1], g[j - 1][0], g[j][1], g[j][0]);
+  return m;
+}
+
+/**
+ * Parte la geometría del fragmento `mi` donde no pasa por donde iba el bus. Sin nada que objetar
+ * devuelve UNA pieza con la geometría entera (el mismo arreglo): byte a byte lo de siempre.
+ */
+export function piezasDeFragmento(
+  g: [number, number][], sample: readonly MatchPt[],
+  tp: readonly ({ matchings_index?: number | null; location?: unknown } | null | undefined)[], mi: number,
+): PiezaFragmento[] {
+  const entera: PiezaFragmento[] = [{ via: g }];
+  const ks: number[] = [];
+  for (let k = 0; k < sample.length; k++) if (tp[k]?.matchings_index === mi) ks.push(k);
+  if (ks.length < 2 || g.length < 2) return entera;
+  const pos: number[] = [];
+  for (const k of ks) {
+    const j = verticeDeLocation(g, tp[k]?.location, pos.length ? pos[pos.length - 1] : 0);
+    if (j < 0) return entera;   // sin location (o no es un vértice): no se puede juzgar
+    pos.push(j);
+  }
+  const malo: boolean[] = [];
+  for (let w = 0; w + 1 < ks.length; w++) {
+    const a = ks[w], b = ks[w + 1], tramo = g.slice(pos[w], pos[w + 1] + 1);
+    let falla = false;
+    for (let k = a + 1; k < b && !falla; k++) {
+      const acc = sample[k].acc;
+      if (tp[k] != null || !(acc > 0 && acc <= ACC_CONFIABLE_M)) continue;
+      const d = tramo.length >= 2 ? distAPolilinea(sample[k].lat, sample[k].lng, tramo) : distM(sample[k].lat, sample[k].lng, tramo[0][1], tramo[0][0]);
+      if (d > Math.max(TOL_VIA_M, radioDeBusqueda(acc))) falla = true;
+    }
+    const ta = sample[a].ts, tb = sample[b].ts;
+    if (!falla && typeof ta === "number" && typeof tb === "number" && ta > 0 && tb > ta) {
+      const pegA = distM(sample[a].lat, sample[a].lng, g[pos[w]][1], g[pos[w]][0]);
+      const pegB = distM(sample[b].lat, sample[b].lng, g[pos[w + 1]][1], g[pos[w + 1]][0]);
+      const tope = (VMAX_BUS_KMH / 3.6) * ((tb - ta) / 1000) + pegA + pegB + MARGEN_TRAMO_FISICO_M;
+      if (largoTramo(g, pos[w], pos[w + 1]) > tope) falla = true;
+    }
+    malo.push(falla);
+  }
+  if (!malo.some(Boolean)) return entera;
+  const out: PiezaFragmento[] = [];
+  let desde = 0;   // primer vértice de g aún sin emitir
+  for (let w = 0; w < malo.length; w++) {
+    if (!malo[w]) continue;
+    out.push({ via: g.slice(desde, pos[w] + 1) });
+    let z = w;
+    while (z + 1 < malo.length && malo[z + 1]) z++;   // tramos malos seguidos: un solo hueco
+    for (let k = ks[w] + 1; k < ks[z + 1]; k++) out.push({ fix: k });
+    desde = pos[z + 1];
+    w = z;
+  }
+  out.push({ via: g.slice(desde) });
+  return out;
+}
+
 export async function mapMatchTrail(
   pts: MatchPt[],
   token: string,
@@ -1479,6 +1568,35 @@ export async function mapMatchTrail(
     const miAntes: Array<number | null> = [], miDespues: Array<number | null> = new Array(sample.length).fill(null);
     for (let k = 0, ult: number | null = null; k < sample.length; k++) { miAntes.push(ult); const x = miDe(k); if (x != null) ult = x; }
     for (let k = sample.length - 1, sig: number | null = null; k >= 0; k--) { miDespues[k] = sig; const x = miDe(k); if (x != null) sig = x; }
+    const emitirVia = (g: [number, number][]) => {
+      if (!g.length) return;
+      // Junta con lo previo: solo la mido si el lado previo era crudo (road↔crudo).
+      if (lastPt && lastCrude) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], g[0][1], g[0][0]));
+      // Junta vía↔vía entre DOS fragmentos (o dos piezas de uno partido): una recta de más de
+      // MAX_SEG_CRUDO_M no sigue la calle → sus dos extremos se marcan crudos, así la rellena la ruta
+      // (o se dibuja si no hay).
+      const juntaRecta = previoEsVia && previoPt != null
+        && distM(previoPt[1], previoPt[0], g[0][1], g[0][0]) > MAX_SEG_CRUDO_M;
+      if (juntaRecta) esCrudo[esCrudo.length - 1] = true;
+      via.push(...g);
+      for (let j = 0; j < g.length; j++) esCrudo.push(juntaRecta && j === 0);   // geometría de vía Mapbox
+      lastPt = g[g.length - 1];
+      previoPt = lastPt;
+      previoEsVia = true;
+      lastCrude = false;
+    };
+    const emitirFixReal = (k: number) => {
+      const p: [number, number] = [sample[k].lng, sample[k].lat];   // el fix REAL del bus
+      if (lastPt) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], p[1], p[0]));
+      via.push(p);
+      // crudo de RED → rutear; crudo de CHIP (≤20m) → medido, salvo recta larga en marcha (arriba)
+      esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(sample, k));
+      crudos++;
+      lastPt = p;
+      previoPt = p;
+      previoEsVia = false;
+      lastCrude = true;
+    };
     for (let k = 0; k < sample.length; k++) {
       const t: any = tp[k];
       const mi: number | null = t && t.matchings_index != null ? t.matchings_index : null;
@@ -1487,33 +1605,13 @@ export async function mapMatchTrail(
         if (!emitidos.has(mi)) {
           emitidos.add(mi);
           const g = (m[mi]?.geometry?.coordinates as [number, number][]) || [];
-          if (g.length) {
-            // Junta con lo previo: solo la mido si el lado previo era crudo (road↔crudo).
-            if (lastPt && lastCrude) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], g[0][1], g[0][0]));
-            // Junta vía↔vía entre DOS fragmentos: una recta de más de MAX_SEG_CRUDO_M no sigue la
-            // calle → sus dos extremos se marcan crudos, así la rellena la ruta (o se dibuja si no hay).
-            const juntaRecta = previoEsVia && previoPt != null
-              && distM(previoPt[1], previoPt[0], g[0][1], g[0][0]) > MAX_SEG_CRUDO_M;
-            if (juntaRecta) esCrudo[esCrudo.length - 1] = true;
-            via.push(...g);
-            for (let j = 0; j < g.length; j++) esCrudo.push(juntaRecta && j === 0);   // geometría de vía Mapbox
-            lastPt = g[g.length - 1];
-            previoPt = lastPt;
-            previoEsVia = true;
-            lastCrude = false;
+          // Partido donde no pasa por donde iba el bus (#17498); entero en el caso normal.
+          for (const pieza of piezasDeFragmento(g, sample, tp, mi)) {
+            if ("via" in pieza) emitirVia(pieza.via); else emitirFixReal(pieza.fix);
           }
         }
       } else if (mi != null) {
-        const p: [number, number] = [sample[k].lng, sample[k].lat];   // fragmento dudoso → el fix REAL del bus
-        if (lastPt) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], p[1], p[0]));
-        via.push(p);
-        // crudo de RED → rutear; crudo de CHIP (≤20m) → medido, salvo recta larga en marcha (arriba)
-        esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(sample, k));
-        crudos++;
-        lastPt = p;
-        previoPt = p;
-        previoEsVia = false;
-        lastCrude = true;
+        emitirFixReal(k);   // fragmento dudoso → el fix REAL del bus
       } else if (!(miAntes[k] != null && miAntes[k] === miDespues[k])) {
         // Sin pareja y en la FRONTERA (o antes del primer fragmento / después del último): el fix REAL.
         const p: [number, number] = [sample[k].lng, sample[k].lat];
