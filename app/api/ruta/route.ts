@@ -83,10 +83,6 @@ export async function POST(req: NextRequest) {
         console.log("[api/ruta] cache HIT —", cacheado.coordenadas?.length, "puntos (0 llamadas a Google)");
         return NextResponse.json(cacheado);
       }
-      // `soloCache`: el modal GPS dibuja la ruta al abrir SOLO si ya está guardada. Si no, no se
-      // paga nada y se ofrece el botón «Consultar ruta en Google Maps» (decisión del dueño,
-      // 13-10-2026: la mayoría de las veces nadie mira ese panel).
-      if (body?.soloCache === true) return NextResponse.json({ sin_cache: true });
     }
 
     // Clave de dedupe: la firma + si pide tráfico. Los nombres de parada no entran porque no
