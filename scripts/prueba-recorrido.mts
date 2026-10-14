@@ -1062,8 +1062,10 @@ seccion("8 · la clave de la ruta prevista (paradasParaFirma ↔ /api/ruta) y le
   chk("/api/ruta sigue leyendo las coordenadas y firmando como la copia literal",
     srcRuta.includes('lat:    typeof p.lat === "string" ? parseFloat(p.lat) : Number(p.lat),')
     && srcRuta.includes('lng:    typeof p.lng === "string" ? parseFloat(p.lng) : Number(p.lng),')
-    && srcRuta.includes("const firma = firmaRuta(paradas);") && srcRuta.includes("await leerRutaCache(firma)")
-    && srcRuta.includes("await guardarRutaCache(firma, payload)"));
+    && srcRuta.includes("const firma = firmaRuta(paradas);") && srcRuta.includes("leerRutaCache(firma)")
+    && srcRuta.includes("await guardarRutaCache(firma, payload)")
+    // La ruta propia (rutas_propias) se lee y se arma con la MISMA firma.
+    && srcRuta.includes("rutaPropiaParaReserva(firma,") && srcRuta.includes("armarRutaPropia(firma,"));
 
   // ── leerRutasCache: un cliente falso que registra cada consulta ──
   function clienteFalso(filas: any[], error: any = null) {
