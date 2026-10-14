@@ -25,6 +25,8 @@ import { fmtCoord } from "@/lib/coordenadas";
 import { useAvanceParadas } from "@/lib/useAvanceParadas";
 import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
 import { cabecerasErp } from "@/lib/fetch-erp";
+// Nombres de paradero, placa y conductor son texto libre: en un popup de Mapbox (setHTML) se escapan.
+import { escHtml } from "@/lib/html-escape";
 import type { VeredictoRastreo } from "@/lib/gps-cobertura";
 import { juzgarDetencion, medirQuietud, rotuloDetencion, type FilaQuietud } from "@/lib/gps-detencion";
 import { minutosRestantes, DIAS_HISTORIAL, type TiemposHistoricos } from "@/lib/tramos-historicos";
@@ -1188,10 +1190,10 @@ export default function ModalGps({
           <div style="font-family:system-ui;padding:6px 2px;min-width:160px">
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
               <div style="width:22px;height:22px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:white;font-size:10px;font-weight:900;flex-shrink:0">${num}</div>
-              <p style="font-weight:900;margin:0;color:#0b315f;font-size:13px;line-height:1.2">${p.nombre}</p>
+              <p style="font-weight:900;margin:0;color:#0b315f;font-size:13px;line-height:1.2">${escHtml(p.nombre)}</p>
             </div>
             <p style="margin:2px 0 0;color:${bg};font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">${tag}</p>
-            ${p.hora_estimada ? `<p style="margin:4px 0 0;color:#64748b;font-size:11px">⏰ ${p.hora_estimada.slice(0, 5)}</p>` : ""}
+            ${p.hora_estimada ? `<p style="margin:4px 0 0;color:#64748b;font-size:11px">⏰ ${escHtml(p.hora_estimada.slice(0, 5))}</p>` : ""}
             ${completada ? `<p style="margin:4px 0 0;color:#16a34a;font-weight:700;font-size:11px">✓ Completada (marcada por el conductor)</p>` : ""}
             ${inferida ? `<p style="margin:4px 0 0;color:#d97706;font-weight:700;font-size:11px">↷ ${porGpsM ? "Pasada — detectado por GPS, sin marcar" : "Sin marcar — el vehículo ya está más adelante"}</p>` : ""}
           </div>`);
@@ -1329,8 +1331,8 @@ export default function ModalGps({
   // (el popup se arma una vez; sin re-sync se quedaba con la velocidad inicial = 0).
   const popupHTML = (vel: number) =>
     `<div style="font-family:system-ui;padding:4px">
-      <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${vehiculoPlaca}</p>
-      <p style="margin:4px 0 0;color:#475569;font-size:12px">${conductorNombre}</p>
+      <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${escHtml(vehiculoPlaca)}</p>
+      <p style="margin:4px 0 0;color:#475569;font-size:12px">${escHtml(conductorNombre)}</p>
       <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${vel} km/h</p>
     </div>`;
 

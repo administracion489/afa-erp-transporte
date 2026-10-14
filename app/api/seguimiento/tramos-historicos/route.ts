@@ -9,11 +9,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
+import { limitarTasa, segundosParaReintentar } from "@/lib/api-guard";
 import { verificarTokenPortal, reservaEsDelCliente } from "@/lib/portal-auth";
 import { tiemposPorTramo, type PuntoRuta } from "@/lib/tramos-historicos";
 import { serviciosHistoricos } from "@/lib/tramos-historicos-datos";
 
 const MAX_PUNTOS = 60;
+const LIMITE_POR_MINUTO = 20;   // operativo, no medido
 
 const adminClient = () =>
   createClient(
@@ -35,14 +37,24 @@ export async function POST(req: NextRequest) {
   const db = adminClient();
 
   let clienteId: number | null = null;
+  let quien: string;
   if (req.headers.get("authorization")) {
     const auth = await verificarUsuarioApi(req, "seguimiento");
     if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+    quien = `u:${auth.userId}`;
   } else {
     const sesion = verificarTokenPortal(body?.token);
     if (!sesion) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
     if (!(await reservaEsDelCliente(db, reservaId, sesion.cid))) return NextResponse.json({ error: "No autorizado" }, { status: 403 });
     clienteId = sesion.cid;
+    quien = `c:${sesion.cid}`;
+  }
+  // El modal pide esto una vez por apertura (y al cambiar los paraderos): 20 por minuto sobra, y
+  // frena un bucle que ocuparía la instancia con el cálculo (auditoría de seguridad, 13-10-2026).
+  const claveTasa = `tramos-historicos:${quien}`;
+  if (!limitarTasa(claveTasa, LIMITE_POR_MINUTO, 60_000)) {
+    const seg = segundosParaReintentar(claveTasa);
+    return NextResponse.json({ error: `Demasiadas consultas: reintenta en ${seg} s` }, { status: 429, headers: { "Retry-After": String(seg) } });
   }
 
   const puntos: PuntoRuta[] = puntosRaw.map((p) => ({
