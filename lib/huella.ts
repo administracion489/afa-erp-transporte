@@ -1418,7 +1418,8 @@ export function radioDeBusqueda(acc: number | undefined): number {
 //      estuviera ahí, Mapbox habría tenido un candidato sobre ella.
 //   2. FÍSICAMENTE POSIBLE: el largo del tramo no puede pasar de lo que un bus recorre en ese tiempo
 //      (VMAX_BUS_KMH) más lo que cada extremo se movió al pegarse y MARGEN_TRAMO_FISICO_M. Un rodeo
-//      por los ramales de 1 km entre dos fixes separados 15 s no es un recorrido, es un error.
+//      por los ramales de 1 km entre dos fixes separados 15 s no es un recorrido, es un error. Se
+//      mide entre puntos pegados PRECISOS (la hora de un fix de red anclado no es la de su posición).
 // Un tramo que falla se reemplaza por los FIXES REALES del medio (la regla de un fragmento dudoso):
 // lo que quede crudo se rellena por la vía y, si no se puede, se dibuja. Solo se juzga con la
 // `location` de cada punto pegado (es un vértice de la geometría): sin ella, el fragmento se dibuja
@@ -1460,24 +1461,36 @@ export function piezasDeFragmento(
     if (j < 0) return entera;   // sin location (o no es un vértice): no se puede juzgar
     pos.push(j);
   }
-  const malo: boolean[] = [];
+  const malo: boolean[] = new Array(ks.length - 1).fill(false);
   for (let w = 0; w + 1 < ks.length; w++) {
     const a = ks[w], b = ks[w + 1], tramo = g.slice(pos[w], pos[w + 1] + 1);
-    let falla = false;
-    for (let k = a + 1; k < b && !falla; k++) {
+    for (let k = a + 1; k < b && !malo[w]; k++) {
       const acc = sample[k].acc;
       if (tp[k] != null || !(acc > 0 && acc <= ACC_CONFIABLE_M)) continue;
       const d = tramo.length >= 2 ? distAPolilinea(sample[k].lat, sample[k].lng, tramo) : distM(sample[k].lat, sample[k].lng, tramo[0][1], tramo[0][0]);
-      if (d > Math.max(TOL_VIA_M, radioDeBusqueda(acc))) falla = true;
+      if (d > Math.max(TOL_VIA_M, radioDeBusqueda(acc))) malo[w] = true;
     }
-    const ta = sample[a].ts, tb = sample[b].ts;
-    if (!falla && typeof ta === "number" && typeof tb === "number" && ta > 0 && tb > ta) {
-      const pegA = distM(sample[a].lat, sample[a].lng, g[pos[w]][1], g[pos[w]][0]);
-      const pegB = distM(sample[b].lat, sample[b].lng, g[pos[w + 1]][1], g[pos[w + 1]][0]);
-      const tope = (VMAX_BUS_KMH / 3.6) * ((tb - ta) / 1000) + pegA + pegB + MARGEN_TRAMO_FISICO_M;
-      if (largoTramo(g, pos[w], pos[w + 1]) > tope) falla = true;
+  }
+  // La prueba 2 se mide entre puntos pegados cuya posición es la del fix (los que anclarImprecisos
+  // no movió: acc conocida ≤ ACC_CONFIABLE_M). Un fix de red anclado conserva su hora pero se dibuja
+  // en la cuerda de sus confiables, a veces junto al anterior: medido contra él, un bus a 89 km/h
+  // «recorría» 132 m en 2 s y la Panamericana salía como estimado. El de red queda dentro del tramo.
+  const genuino = (k: number) => {
+    const acc = sample[k].acc, ts = sample[k].ts;
+    return Number.isFinite(acc) && acc <= ACC_CONFIABLE_M && typeof ts === "number" && ts > 0;
+  };
+  for (let i = -1, w = 0; w < ks.length; w++) {
+    if (!genuino(ks[w])) continue;
+    if (i >= 0) {
+      const a = ks[i], b = ks[w], ta = sample[a].ts as number, tb = sample[b].ts as number;
+      if (tb > ta) {
+        const pegA = distM(sample[a].lat, sample[a].lng, g[pos[i]][1], g[pos[i]][0]);
+        const pegB = distM(sample[b].lat, sample[b].lng, g[pos[w]][1], g[pos[w]][0]);
+        const tope = (VMAX_BUS_KMH / 3.6) * ((tb - ta) / 1000) + pegA + pegB + MARGEN_TRAMO_FISICO_M;
+        if (largoTramo(g, pos[i], pos[w]) > tope) for (let x = i; x < w; x++) malo[x] = true;
+      }
     }
-    malo.push(falla);
+    i = w;
   }
   if (!malo.some(Boolean)) return entera;
   const out: PiezaFragmento[] = [];
