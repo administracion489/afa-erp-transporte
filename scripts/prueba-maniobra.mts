@@ -43,9 +43,22 @@ const fix = (m: number, s: number, acc = 5) => ({ lat: LAT + m * M_LAT, lng: LNG
   chk("2a no pegó: cae al crudo suavizado", !r.snapped && coords.length === pts.length);
   chk("2b la maniobra de la cochera queda medida", r.esCrudo[0] === false && r.esCrudo[1] === false);
   chk("2c las rectas en marcha quedan crudas", r.esCrudo.slice(2).every(Boolean));
-  chk("2d ninguna recta de más de 60 m se dibuja como medida", lineas.every((f) => largo(f) <= H.MAX_SEG_CRUDO_M + 0.5), lineas.map((f) => Math.round(largo(f))).join(","));
+  // #1609: si el tramo en marcha NO se pudo rellenar por la vía, se dibuja como medido (una recta
+  // es mejor que un hueco que nadie rellena). Solo se oculta cuando su estimado sí se dibuja.
+  const sinPuente = H.colorearMatched(coords, pts as any, [], r.esCrudo) as any[];
+  chk("2d sin tramo estimado, la recta en marcha se dibuja (no queda un hueco)", sinPuente.length === coords.length - 1, `${sinPuente.length}/${coords.length - 1}`);
+  const conPuente = H.colorearMatched(coords, pts as any, [[2, coords.length - 1]], r.esCrudo) as any[];
+  chk("2d' con su tramo estimado dibujado, la recta no sale (no pasa por los techos)", conPuente.every((f) => largo(f) <= H.MAX_SEG_CRUDO_M + 0.5));
+  void lineas;
   const puentes = H.puentesCrudos(coords, H.rangosDeCrudo(r.esCrudo, coords.length).crudoRanges.concat([]));
   chk("2e y el tramo en marcha se ofrece para rellenar por la vía (o queda como punta viva)", r.esCrudo.slice(2).every(Boolean) && puentes.every((p) => p.origen === "crudo"));
+  // Un fix de RED largo sigue sin dibujarse aunque no haya estimado (la regla de siempre).
+  const redLejos = [fix(0, 0, 40), fix(150, 15, 40)];
+  const rRed = await H.matchVentana(redLejos, "tok", sinMatch);
+  chk("2h fix de red a más de 60 m: sigue oculto sin estimado", (H.colorearMatched(rRed.coords, redLejos as any, [], rRed.esCrudo) as any[]).length === 0);
+  // Sin precisión en la huella (llamador viejo): se oculta, como antes.
+  const sinAcc = pts.map(({ acc, ...p }) => p);
+  chk("2i huella sin precisión: la recta cruda se oculta como antes", (H.colorearMatched(coords, sinAcc as any, [], r.esCrudo) as any[]).length < coords.length - 1);
   // Con posiciones densas (cada 40 m a 48 km/h) nada cambia: el chip sigue la calle.
   const densa = Array.from({ length: 12 }, (_, i) => fix(i * 40, i * 3));
   const rd = await H.matchVentana(densa, "tok", sinMatch);
@@ -54,6 +67,20 @@ const fix = (m: number, s: number, acc = 5) => ({ lat: LAT + m * M_LAT, lng: LNG
   const red = Array.from({ length: 6 }, (_, i) => fix(i * 30, i * 60, 40));
   const rr = await H.matchVentana(red, "tok", sinMatch);
   chk("2g fix de red: crudo por la precisión, como antes", rr.esCrudo.every(Boolean));
+}
+
+// ── 3. Más tramos que el tope: la ruta prevista (gratis) los rellena TODOS (#1609) ──
+{
+  // Ruta recta al norte de 8 km; 40 corridas crudas de 150 m a lo largo de ella.
+  const ruta: [number, number][] = Array.from({ length: 81 }, (_, i) => [LNG, LAT + i * 100 * M_LAT]);
+  const cands = Array.from({ length: 40 }, (_, k) => {
+    const a = k * 200, b = a + 150;
+    return { aLat: LAT + a * M_LAT, aLng: LNG, bLat: LAT + b * M_LAT, bLng: LNG, dt: 0, dRecta: 150, iA: k * 3, iB: k * 3 + 2, origen: "crudo" as const };
+  });
+  const fixes = cands.map((c) => [{ lat: (c.aLat + c.bLat) / 2, lng: LNG }]);
+  const f1 = H.puentesPorRutaPrevista(cands, fixes, ruta);
+  chk("3a con 40 tramos (más que MAX_PUENTES) la ruta prevista rellena los 40", f1.slots.every(Boolean) && cands.length > H.MAX_PUENTES, `${f1.slots.filter(Boolean).length}/40`);
+  chk("3b el tope queda solo para Google", f1.porGoogle.length === 0);
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) FALLARON` : "\nTodo OK");
