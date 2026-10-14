@@ -133,7 +133,7 @@ const DUR_MIN_PLAN = 5;
 const FIN_ANTES_DEL_INICIO_MIN = 180;
 
 // Techo de duración. 26 h y no 12: hay tours full day de hasta 24 h — mismo techo que
-// app/api/cliente/gps/route.ts:60 (DURACION_MAX_MS) y lib/servicio-tiempos.ts:308.
+// lib/gps-huella-servicio.ts (DURACION_MAX_MS) y lib/servicio-tiempos.ts:308.
 const DURACION_MAX_MIN = 26 * 60;
 
 // Por debajo de esto NO se cree la hora de fin y se vuelve al bloque estimado. `hora_real_fin`

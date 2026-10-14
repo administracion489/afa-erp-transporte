@@ -102,7 +102,7 @@
 // la duración sale 0 y nadie se entera. Aquí se compone la hora CON `fecha_servicio` en Lima y,
 // si el fin cae antes del inicio, se asume cruce de medianoche (+1 día) SOLO si el resultado
 // cabe en 26 h — el mismo techo que ya usa la ventana de la huella
-// (app/api/cliente/gps/route.ts:56-58: "26 h y no 12: hay tours full day de hasta 24 h").
+// (lib/gps-huella-servicio.ts, DURACION_MAX_MS: "26 h y no 12: hay tours full day de hasta 24 h").
 //
 // ── EL INSTANTE GUARDADO GANA A LA HORA RECOMPUESTA ───────────────────────────────────
 // supabase/servicio-horas-reales.sql agrega a `reservas` cuatro columnas que arreglan el dato
@@ -328,14 +328,14 @@ export type EntradaTiempos = {
 // CONSTANTES
 // ══════════════════════════════════════════════════════════════════════════════════════
 
-/** Perú es UTC-5 sin horario de verano. Misma convención que app/api/cliente/gps/route.ts:63. */
+/** Perú es UTC-5 sin horario de verano. Misma convención que `limaMs` de lib/gps-huella-servicio.ts. */
 const LIMA_OFFSET_MS = -5 * 3_600_000;
 
 const MIN_MS = 60_000;
 const DIA_MS = 86_400_000;
 
 // Techo de duración. 26 h y no 12: hay tours full day de hasta 24 h — verbatim de
-// app/api/cliente/gps/route.ts:56-58 (DURACION_MAX_MS). NO es solo para promover el día al cruzar
+// lib/gps-huella-servicio.ts (DURACION_MAX_MS). NO es solo para promover el día al cruzar
 // la medianoche: también INVALIDA (defecto :521-525 — se midieron duraciones de 54 h publicadas
 // como dato bueno porque el techo nunca se aplicaba al resultado).
 const DURACION_MAX_MS = 26 * 3_600_000;
@@ -462,7 +462,7 @@ function esEstadoCrudoNoIniciado(e: string | null | undefined): boolean {
 // HELPERS DE TIEMPO — Lima siempre, el reloj del equipo nunca
 // ══════════════════════════════════════════════════════════════════════════════════════
 
-/** "HH:MM[:SS]" del día `fecha` en hora de Lima → epoch ms. Igual que app/api/cliente/gps:60-65. */
+/** "HH:MM[:SS]" del día `fecha` en hora de Lima → epoch ms. Igual que `limaMs` de lib/gps-huella-servicio.ts. */
 export function limaMs(fecha: string | null | undefined, hora: string | null | undefined): number | null {
   if (!fecha) return null;
   const h = hora ? String(hora).slice(0, 8).padEnd(8, ":00").slice(0, 8) : "00:00:00";

@@ -49,7 +49,7 @@ const admin = createClient(
 
 const DIA_MS = 86_400_000;
 // Techo de duración. 26 h y no 12: hay tours full day de hasta 24 h — mismo techo que
-// app/api/cliente/gps/route.ts:60 y lib/servicio-tiempos.ts:308.
+// lib/gps-huella-servicio.ts (DURACION_MAX_MS) y lib/servicio-tiempos.ts:308.
 const DURACION_MAX_MS = 26 * 3_600_000;
 
 type ResultadoEnvio = "enviado" | "sin_canal" | "fallo";
