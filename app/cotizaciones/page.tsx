@@ -1676,7 +1676,13 @@ export default function CotizacionesPage(){
    * las coordenadas no se perderían en silencio.
    */
   const escribirCotizacion=async(payload:Record<string,unknown>)=>{
-    const ir=(p:Record<string,unknown>)=>editandoId?supabase.from("cotizaciones").update(p).eq("id",editandoId):supabase.from("cotizaciones").insert(p);
+    // SEGURIDAD (comisiones-05): vendedor_id es INMUTABLE una vez puesto. El motor atribuye
+    // TODA comisión por él, así que editar una cotización NO lo reescribe — reatribuiría la
+    // comisión al editor. Solo viaja en la creación (INSERT); se suelta en el UPDATE.
+    const ir=(p:Record<string,unknown>)=>{
+      if(editandoId){const{vendedor_id:_omitido,...sinVendedor}=p;return supabase.from("cotizaciones").update(sinVendedor).eq("id",editandoId);}
+      return supabase.from("cotizaciones").insert(p);
+    };
     // Columnas accesorias: si falta la migración se suelta SOLO la que el error nombra y se reintenta.
     // ruta_coords_json → cotizaciones-02-ruta-coords.sql · vendedor_id → comisiones-02-captador-y-vendedor.sql.
     const intento={...payload};

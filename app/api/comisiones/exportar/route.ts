@@ -30,7 +30,10 @@ export function esRemunerativo(tipo: string): boolean {
 
 /** Un campo CSV, entrecomillado y escapado (coma, comillas, saltos). */
 function csv(v: unknown): string {
-  const s = v == null ? "" : String(v);
+  let s = v == null ? "" : String(v);
+  // Neutraliza inyección de fórmulas CSV: un valor que empieza por = + - @ lo ejecutaría
+  // Excel/Sheets al abrir el archivo. Se antepone ' (preventivo, estándar OWASP).
+  if (/^[=+\-@]/.test(s)) s = "'" + s;
   return `"${s.replace(/"/g, '""')}"`;
 }
 

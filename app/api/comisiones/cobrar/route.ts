@@ -37,6 +37,21 @@ const ETIQUETA: Record<TipoPrueba, string> = {
   factura_xml: "la factura en XML",
 };
 
+// Allowlist de tipo por prueba. Se acepta por MIME O por extensión (la extensión cubre
+// el XML, cuyo MIME el navegador manda vacío o inconsistente, y un PDF/imagen que llega
+// sin MIME). Cualquier otra cosa se rechaza con 400 nombrando lo permitido.
+const PERMITIDO: Record<TipoPrueba, { mimes: RegExp; exts: string[]; que: string }> = {
+  deposito:    { mimes: /^(image\/(jpe?g|png|webp)|application\/pdf)$/i, exts: ["jpg", "jpeg", "png", "webp", "pdf"], que: "una imagen (JPG, PNG o WEBP) o un PDF" },
+  factura_pdf: { mimes: /^application\/pdf$/i,                           exts: ["pdf"],                             que: "un PDF" },
+  factura_xml: { mimes: /^(text|application)\/xml$/i,                    exts: ["xml"],                             que: "un XML" },
+};
+
+/** ¿El archivo subido es de un tipo permitido para esa prueba? (MIME o extensión). */
+function tipoPermitido(t: TipoPrueba, f: File): boolean {
+  const ext = (f.name.split(".").pop() || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return PERMITIDO[t].mimes.test(f.type) || PERMITIDO[t].exts.includes(ext);
+}
+
 /** La extensión de un archivo subido, acotada y sin puntos ajenos. */
 function extensionDe(nombre: string, tipo: string): string {
   const porNombre = (nombre.split(".").pop() || "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5);
@@ -73,6 +88,9 @@ export async function POST(req: NextRequest) {
       }
       if (f.size > MAX_BYTES) {
         return NextResponse.json({ error: `${ETIQUETA[t]} pesa demasiado (máx. 15 MB).` }, { status: 400 });
+      }
+      if (!tipoPermitido(t, f)) {
+        return NextResponse.json({ error: `${ETIQUETA[t]} tiene un formato no permitido. Debe ser ${PERMITIDO[t].que}.` }, { status: 400 });
       }
       archivos[t] = f;
     }
