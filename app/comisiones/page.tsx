@@ -31,6 +31,22 @@ import { usePermiso } from "@/lib/usePermiso";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { supabase } from "@/lib/supabase";
 import { hoyLima } from "@/lib/alertas";
+import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
+
+// La prueba de cobro llega como RUTA cruda del bucket privado `documentos`. <ImgPrivada>/
+// <EnlacePrivado> solo reconocen el enlace público completo (lib/storage-privado.ts), así que
+// se compone con getPublicUrl —que arma exactamente esa forma— y el componente lo firma.
+function urlPruebaPrivada(ruta: string): string {
+  if (/^https?:\/\//i.test(ruta)) return ruta;
+  return supabase.storage.from("documentos").getPublicUrl(ruta).data.publicUrl;
+}
+
+const esImagenPrueba = (tipo: string) => tipo === "deposito";
+const NOMBRE_PRUEBA: Record<string, string> = {
+  deposito: "Depósito",
+  factura_pdf: "Factura PDF",
+  factura_xml: "Factura XML",
+};
 
 // ── Tipos del contrato de /api/comisiones/lineas ──────────────────────────────
 
@@ -818,6 +834,21 @@ function VistaAdministrador({ esAdmin }: { esAdmin: boolean }) {
 
 // ── Fondo administrativo y corroboración ──────────────────────────────────────
 
+type Marca = {
+  id: number;
+  reserva_id: number | null;
+  personal_administrativo_id: number | null;
+  personal_administrativo_nombre: string | null;
+  marcado_por: string | null;
+  marcado_por_nombre: string | null;
+  marcado_en: string | null;
+  corroborado_por: string | null;
+  corroborado_por_nombre: string | null;
+  corroborado_en: string | null;
+  periodo_id: number | null;
+  nota: string | null;
+};
+
 function SeccionFondo({
   esAdmin,
   anioMes,
@@ -833,22 +864,41 @@ function SeccionFondo({
   onCambio: () => void;
   setAccion: (s: string) => void;
 }) {
-  const [idMarca, setIdMarca] = useState("");
+  const [marcas, setMarcas] = useState<Marca[]>([]);
+  const [cargandoMarcas, setCargandoMarcas] = useState(false);
+  const [sel, setSel] = useState<Set<number>>(new Set());
   const [trabajando, setTrabajando] = useState(false);
-  const pendiente = lineasFondo.some((l) => l.traza_json?.codigo === "fondo_pendiente_corroboracion");
+  const [sinMigracionMarcas, setSinMigracionMarcas] = useState(false);
 
-  async function corroborar(quitar = false) {
-    const id = Number(idMarca.trim());
-    if (!Number.isFinite(id) || id <= 0) { setAccion("Indica el id de la marca de operación a corroborar."); return; }
+  const cargarMarcas = useCallback(async () => {
+    setCargandoMarcas(true);
+    const r = await pedirErp(`/api/comisiones/marcas?anioMes=${anioMes}`);
+    setCargandoMarcas(false);
+    if (r.sinMigracion) { setSinMigracionMarcas(true); setMarcas([]); return; }
+    setSinMigracionMarcas(false);
+    if (!r.ok) { setMarcas([]); return; }
+    setMarcas((r.data?.marcas as Marca[]) ?? []);
+    setSel(new Set());
+  }, [anioMes]);
+
+  useEffect(() => { cargarMarcas(); }, [cargarMarcas]);
+
+  const toggle = (id: number) =>
+    setSel((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+
+  async function corroborar(corroborar: boolean) {
+    const ids = [...sel];
+    if (!ids.length) { setAccion("Marca al menos una fila."); return; }
     setTrabajando(true);
-    const r = await pedirErp("/api/comisiones/corroborar", {
-      method: "POST",
-      body: { id, anioMes, corroborar: !quitar },
-    });
+    const r = await pedirErp("/api/comisiones/corroborar", { method: "POST", body: { ids, anioMes, corroborar } });
     setTrabajando(false);
     if (!r.ok) { setAccion("Error al corroborar: " + (r.error ?? "")); return; }
-    setAccion(quitar ? `Corroboración retirada (${r.data?.actualizadas ?? 0}).` : `Marca corroborada (${r.data?.actualizadas ?? 0}).`);
-    setIdMarca("");
+    setAccion(
+      corroborar
+        ? `${r.data?.actualizadas ?? 0} marca(s) corroborada(s). Recalcula para repartir el fondo.`
+        : `Corroboración retirada de ${r.data?.actualizadas ?? 0} marca(s).`,
+    );
+    await cargarMarcas();
     onCambio();
   }
 
@@ -869,56 +919,196 @@ function SeccionFondo({
         </div>
       )}
 
-      {pendiente && esAdmin && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 space-y-2">
-          <p className="font-semibold">El fondo está calculado pero no hay operadores corroborados.</p>
-          <p>
-            El reparto se hace entre los administrativos que <b>tú corrobores</b> sobre las marcas que dejaron los vendedores
-            (botón «Acreditar operador»). El id de cada marca lo devuelve esa acción; corrobórala aquí:
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              value={idMarca}
-              onChange={(e) => setIdMarca(e.target.value)}
-              placeholder="id de la marca"
-              inputMode="numeric"
-              className="border border-amber-300 rounded px-2 py-1 text-sm w-40"
-            />
-            <button onClick={() => corroborar(false)} disabled={trabajando} className="rounded bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 disabled:opacity-50">
-              Corroborar marca
-            </button>
-            <button onClick={() => corroborar(true)} disabled={trabajando} className="rounded border border-amber-300 text-sm px-3 py-1.5 disabled:opacity-50">
-              Retirar
-            </button>
-          </div>
-          <p className="text-[11px] text-amber-700">
-            Pendiente de backend: aún no hay una ruta que LISTE las marcas de operación por corroborar; mientras llega, se
-            corrobora por id. (Solicitado: <code>GET /api/comisiones/marcas?anioMes=</code>.)
-          </p>
+      {/* Marcas de operación: solo lo corroborado entra al reparto del fondo. */}
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-bold text-gray-800">Marcas de operación del mes</h3>
+          <button onClick={cargarMarcas} disabled={cargandoMarcas} className="text-xs text-gray-500 hover:text-gray-800 disabled:opacity-50">↻ Actualizar</button>
         </div>
-      )}
+        <p className="text-xs text-gray-500">
+          Un vendedor marca quién lo ayudó, pero eso no paga nada por sí solo: <b>solo lo que corrobores aquí entra al reparto del fondo</b>.
+        </p>
+
+        {sinMigracionMarcas ? (
+          <p className="text-xs text-amber-700">Falta correr <code>supabase/comisiones-03-clasificaciones-y-pruebas.sql</code> para ver las marcas.</p>
+        ) : cargandoMarcas ? (
+          <p className="text-xs text-gray-500">Buscando…</p>
+        ) : marcas.length === 0 ? (
+          <p className="text-xs text-gray-500">No hay marcas de operación este mes. Se crean con «Acreditar operador».</p>
+        ) : (
+          <>
+            <div className="space-y-1.5">
+              {marcas.map((m) => {
+                const corroborada = m.corroborado_en != null;
+                return (
+                  <label key={m.id} className="flex items-start gap-2 text-sm bg-white border border-gray-200 rounded px-2 py-1.5 cursor-pointer">
+                    {esAdmin && (
+                      <input type="checkbox" checked={sel.has(m.id)} onChange={() => toggle(m.id)} className="mt-0.5" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-gray-800">{m.personal_administrativo_nombre || `Administrativo #${m.personal_administrativo_id}`}</span>
+                        {m.reserva_id != null && <span className="text-xs text-gray-500">Reserva #{m.reserva_id}</span>}
+                        {corroborada ? <Chip tono="verde">corroborada</Chip> : <Chip tono="ambar">sin corroborar</Chip>}
+                      </div>
+                      <p className="text-[11px] text-gray-500">
+                        Marcó: {m.marcado_por_nombre || "—"}{m.marcado_en ? ` · ${new Date(m.marcado_en).toLocaleDateString("es-PE")}` : ""}
+                        {corroborada && m.corroborado_por_nombre ? ` · Corroboró: ${m.corroborado_por_nombre}` : ""}
+                      </p>
+                      {m.nota && <p className="text-[11px] text-gray-400 italic">{m.nota}</p>}
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            {esAdmin && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="text-xs text-gray-500">{sel.size} seleccionada(s)</span>
+                <button onClick={() => corroborar(true)} disabled={trabajando || sel.size === 0} className="rounded bg-amber-600 text-white text-xs font-semibold px-3 py-1.5 disabled:opacity-50">
+                  Corroborar seleccionadas
+                </button>
+                <button onClick={() => corroborar(false)} disabled={trabajando || sel.size === 0} className="rounded border border-gray-300 text-xs px-3 py-1.5 disabled:opacity-50">
+                  Retirar corroboración
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </section>
   );
 }
 
 // ── Lista firmada de clientes existentes ──────────────────────────────────────
 
+type FilaExistente = {
+  id: number;
+  cliente_id: number | null;
+  ruc: string | null;
+  nombre: string | null;
+  cargada_por: string | null;
+  cargada_en: string | null;
+};
+
+/** Parsea el texto pegado: una línea por cliente. Se detecta un RUC de 11 dígitos en
+ *  cualquier parte; el resto de la línea es el nombre. Solo RUC, solo nombre o ambos. */
+function parsearListaPegada(texto: string): { ruc?: string; nombre?: string }[] {
+  const salida: { ruc?: string; nombre?: string }[] = [];
+  for (const linea of texto.split(/\r?\n/)) {
+    const l = linea.trim();
+    if (!l) continue;
+    const mRuc = l.match(/\b(\d{11})\b/);
+    const ruc = mRuc ? mRuc[1] : undefined;
+    const nombre = l.replace(/\b\d{11}\b/, "").replace(/[\s,;|\t]+/g, " ").trim() || undefined;
+    if (ruc || nombre) salida.push({ ...(ruc ? { ruc } : {}), ...(nombre ? { nombre } : {}) });
+  }
+  return salida;
+}
+
+const PAGINA_LISTA = 100;
+
 function ListaFirmada() {
+  const [filas, setFilas] = useState<FilaExistente[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [cargando, setCargando] = useState(false);
+  const [sinMigracion, setSinMigracion] = useState(false);
+  const [texto, setTexto] = useState("");
+  const [guardando, setGuardando] = useState(false);
+  const [resumen, setResumen] = useState<string | null>(null);
+
+  const cargar = useCallback(async () => {
+    setCargando(true);
+    const r = await pedirErp(`/api/comisiones/lista-existentes?limit=${PAGINA_LISTA}&offset=${offset}`);
+    setCargando(false);
+    if (r.sinMigracion) { setSinMigracion(true); setFilas([]); setTotal(null); return; }
+    setSinMigracion(false);
+    if (!r.ok) { setFilas([]); return; }
+    setFilas((r.data?.clientes as FilaExistente[]) ?? []);
+    setTotal(typeof r.data?.total === "number" ? r.data.total : null);
+  }, [offset]);
+
+  useEffect(() => { cargar(); }, [cargar]);
+
+  const preview = useMemo(() => parsearListaPegada(texto), [texto]);
+
+  async function guardar() {
+    if (!preview.length) { setResumen("No se reconoció ningún cliente en el texto."); return; }
+    setGuardando(true);
+    setResumen(null);
+    const r = await pedirErp("/api/comisiones/lista-existentes", { method: "POST", body: { clientes: preview } });
+    setGuardando(false);
+    if (r.sinMigracion) { setResumen(r.error); return; }
+    if (!r.ok) { setResumen("Error: " + (r.error ?? "")); return; }
+    setResumen(`Cargadas: ${r.data?.insertadas ?? 0} nuevas · ${r.data?.duplicadas ?? 0} ya estaban · ${r.data?.invalidas ?? 0} sin dato válido.`);
+    setTexto("");
+    setOffset(0);
+    await cargar();
+  }
+
   return (
-    <section className="rounded-xl border border-gray-200 bg-white p-4 space-y-2">
+    <section className="rounded-xl border border-gray-200 bg-white p-4 space-y-3">
       <h2 className="text-lg font-bold text-gray-900">Lista firmada de clientes existentes</h2>
       <p className="text-sm text-gray-600">
-        Es la lista de clientes que ya existían al arrancar el módulo: un cliente en esta lista <b>no cuenta como nuevo</b> y
-        no da bono de arranque. La define la base (<code>comisiones_lista_clientes_existentes</code>).
+        Clientes que ya existían al arrancar el módulo: uno en esta lista <b>no cuenta como nuevo</b> y no da bono de arranque.
       </p>
-      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-        <p className="font-semibold">Carga pendiente de backend.</p>
-        <p>
-          Todavía no hay una ruta <code>/api/comisiones/*</code> para subir o pegar esta lista desde la pantalla, y este
-          módulo no lee Supabase directo. Mientras llega esa ruta, la lista se carga por migración/base.
-          (Solicitado: <code>POST /api/comisiones/lista-existentes</code> con los RUC/cliente_id firmados.)
-        </p>
-      </div>
+
+      {sinMigracion ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          Falta correr <code>supabase/comisiones-02-captador-y-vendedor.sql</code> para gestionar esta lista.
+        </div>
+      ) : (
+        <>
+          {/* Cargar / pegar */}
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+            <p className="text-sm font-semibold text-gray-800">Agregar clientes a la lista</p>
+            <p className="text-xs text-gray-500">Pega un cliente por línea: su RUC (11 dígitos), su nombre, o ambos. Ej: <code>20123456789 GLOBAL BUS PERU</code></p>
+            <textarea
+              value={texto}
+              onChange={(e) => setTexto(e.target.value)}
+              rows={4}
+              placeholder={"20123456789 GLOBAL BUS PERU S.A.C.\n20555666777\nTRANSPORTES DEL SUR"}
+              className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm font-mono"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-gray-500">{preview.length} cliente(s) reconocido(s)</span>
+              <button onClick={guardar} disabled={guardando || preview.length === 0} className="rounded-lg bg-gray-900 text-white text-sm font-semibold px-3 py-1.5 disabled:opacity-50">
+                {guardando ? "Guardando…" : "Agregar a la lista"}
+              </button>
+            </div>
+            {resumen && <p className="text-xs text-blue-800">{resumen}</p>}
+          </div>
+
+          {/* Lista cargada */}
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-gray-800">
+              Ya en la lista {total != null && <span className="text-gray-400 font-normal">({total})</span>}
+            </h3>
+            <button onClick={cargar} disabled={cargando} className="text-xs text-gray-500 hover:text-gray-800 disabled:opacity-50">↻ Actualizar</button>
+          </div>
+          {cargando ? (
+            <p className="text-xs text-gray-500">Buscando…</p>
+          ) : filas.length === 0 ? (
+            <p className="text-xs text-gray-500">La lista está vacía.</p>
+          ) : (
+            <div className="space-y-1">
+              {filas.map((f) => (
+                <div key={f.id} className="flex flex-wrap items-center justify-between gap-2 text-sm border-b border-gray-100 pb-1">
+                  <span className="text-gray-800">{f.nombre || (f.cliente_id != null ? `Cliente #${f.cliente_id}` : "—")}</span>
+                  <span className="text-xs text-gray-400 font-mono">{f.ruc || ""}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {total != null && total > PAGINA_LISTA && (
+            <div className="flex items-center gap-2 text-sm">
+              <button onClick={() => setOffset((o) => Math.max(0, o - PAGINA_LISTA))} disabled={offset === 0 || cargando} className="rounded border border-gray-300 px-2 py-1 disabled:opacity-40">← Anterior</button>
+              <span className="text-xs text-gray-500">{offset + 1}–{Math.min(offset + PAGINA_LISTA, total)} de {total}</span>
+              <button onClick={() => setOffset((o) => o + PAGINA_LISTA)} disabled={offset + PAGINA_LISTA >= total || cargando} className="rounded border border-gray-300 px-2 py-1 disabled:opacity-40">Siguiente →</button>
+            </div>
+          )}
+        </>
+      )}
     </section>
   );
 }
@@ -1059,7 +1249,7 @@ function ModalOpero({ onClose, onHecho, setAccion }: { onClose: () => void; onHe
     const r = await pedirErp("/api/comisiones/opero", { method: "POST", body: { reservaId: rid, personalAdministrativoId: pid, nota } });
     setEnviando(false);
     if (!r.ok) { setErr(r.error ?? "No se pudo acreditar."); return; }
-    setAccion(`Operador acreditado (marca #${r.data?.id ?? "?"}). Corrobórala en la sección de Fondo con ese id.`);
+    setAccion(`Operador acreditado (marca #${r.data?.id ?? "?"}). Corrobórala en «Marcas de operación» de la sección Fondo.`);
     onHecho();
     onClose();
   }
@@ -1090,6 +1280,66 @@ function ModalOpero({ onClose, onHecho, setAccion }: { onClose: () => void; onHe
         </div>
       </div>
     </ModalBase>
+  );
+}
+
+// ── Pruebas de cobro ya subidas (bucket privado) ──────────────────────────────
+
+type PruebaCobro = { id: number; tipo_prueba: string; archivo_url: string; registrado_en: string | null };
+
+function PruebasCobro({ reservaId }: { reservaId: number }) {
+  const [pruebas, setPruebas] = useState<PruebaCobro[]>([]);
+  const [estado, setEstado] = useState<"idle" | "cargando" | "sin" | "hay" | "error" | "sin_migracion">("idle");
+
+  useEffect(() => {
+    if (!Number.isFinite(reservaId) || reservaId <= 0) { setPruebas([]); setEstado("idle"); return; }
+    let vivo = true;
+    setEstado("cargando");
+    (async () => {
+      const r = await pedirErp(`/api/comisiones/pruebas?reservaId=${reservaId}`);
+      if (!vivo) return;
+      if (r.sinMigracion) { setEstado("sin_migracion"); setPruebas([]); return; }
+      if (!r.ok) { setEstado("error"); setPruebas([]); return; }
+      const ps = (r.data?.pruebas ?? []) as PruebaCobro[];
+      setPruebas(ps);
+      setEstado(ps.length ? "hay" : "sin");
+    })();
+    return () => { vivo = false; };
+  }, [reservaId]);
+
+  if (estado === "idle") return null;
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 p-2.5">
+      <p className="text-xs font-semibold text-gray-700 mb-1">Pruebas ya subidas de esta reserva</p>
+      {estado === "cargando" && <p className="text-xs text-gray-500">Buscando…</p>}
+      {estado === "error" && <p className="text-xs text-red-700">No se pudieron leer las pruebas.</p>}
+      {estado === "sin_migracion" && <p className="text-xs text-amber-700">Falta correr comisiones-03 para ver las pruebas.</p>}
+      {estado === "sin" && <p className="text-xs text-gray-500">Esta reserva aún no tiene pruebas. Al subir las tres se marcará cobrada.</p>}
+      {estado === "hay" && (
+        <div className="flex flex-wrap gap-2">
+          {pruebas.map((p) => {
+            const url = urlPruebaPrivada(p.archivo_url);
+            return (
+              <div key={p.id} className="border border-gray-200 rounded bg-white p-1.5 text-center">
+                {esImagenPrueba(p.tipo_prueba) ? (
+                  <EnlacePrivado href={url} target="_blank" rel="noopener noreferrer">
+                    <ImgPrivada src={url} alt={NOMBRE_PRUEBA[p.tipo_prueba] ?? p.tipo_prueba} style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 4 }} />
+                  </EnlacePrivado>
+                ) : (
+                  <EnlacePrivado href={url} target="_blank" rel="noopener noreferrer" className="text-blue-700 underline text-xs block py-5 px-2">
+                    Abrir
+                  </EnlacePrivado>
+                )}
+                <p className="text-[10px] text-gray-500 mt-1">{NOMBRE_PRUEBA[p.tipo_prueba] ?? p.tipo_prueba}</p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {estado === "hay" && (
+        <p className="text-[11px] text-amber-700 mt-1">Volver a subir las tres reemplaza estas pruebas (es idempotente).</p>
+      )}
+    </div>
   );
 }
 
@@ -1146,6 +1396,7 @@ function ModalCobrar({ onClose, onHecho, setAccion }: { onClose: () => void; onH
         {campoArchivo("Foto del depósito", deposito, setDeposito, "image/*,application/pdf")}
         {campoArchivo("Factura en PDF", facturaPdf, setFacturaPdf, "application/pdf")}
         {campoArchivo("Factura en XML", facturaXml, setFacturaXml, ".xml,text/xml,application/xml")}
+        {Number.isFinite(rid) && rid > 0 && <PruebasCobro reservaId={rid} />}
         {!listo && <p className="text-xs text-amber-700">Falta {faltan.join(", ")} para habilitar el botón.</p>}
         {err && <p className="text-sm text-red-700">{err}</p>}
         <div className="flex justify-end gap-2">
