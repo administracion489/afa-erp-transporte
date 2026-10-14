@@ -14,6 +14,12 @@
 //   2. SIN HUECOS: ningún salto entre dos posiciones consecutivas de más de MAX_SALTO_M (el mismo
 //      MAX_SEG_M con que la huella decide que hay un hueco). Una recta de 2 km cruzando manzanas
 //      no es una calle — lo que la huella del modal tiene prohibido dibujar.
+//   2b. SIN CUERDAS LARGAS: ninguna recta entre dos posiciones seguidas de más de MAX_CUERDA_M
+//      (= MAX_SEG_CRUDO_M de lib/huella.ts, «por encima la cuerda cruza techos/manzanas en
+//      diagonal»). La línea propia es GPS CRUDO, no ajustado a la vía: con posiciones cada 150-300 m
+//      cada esquina se dibujaba en diagonal sobre las casas, y como esa línea también GUÍA el tramo
+//      estimado del modal, el estimado cruzaba casas igual. Si no hay un servicio con posiciones
+//      densas, no hay ruta propia y manda Google, como antes.
 //   3. PRECISO: la precisión mediana del tramo ≤ ACC_CONFIABLE_M (el corte satélite/torre de la
 //      huella). Una traza por red celular dibuja la ruta a 100 m de la vía.
 //   4. ENTRE LOS VÁLIDOS, EL MÁS CORTO. Un desvío (un grifo, un desvío por obra, una vuelta
@@ -27,12 +33,16 @@
 // los de lib/huella.ts — heredados, no elegidos. MIN_PUNTOS, TOLERANCIA_DP_M y MAX_VERTICES son
 // operativos y NO están medidos.
 
-import { distM, MAX_SEG_M, ACC_CONFIABLE_M, type HuellaPt } from "./huella";
+import { distM, MAX_SEG_M, MAX_SEG_CRUDO_M, ACC_CONFIABLE_M, type HuellaPt } from "./huella";
 import { RADIO_MATCH_M } from "./tramos-historicos";
 
 export const RADIO_PARADERO_M = RADIO_MATCH_M;
 export const MAX_SALTO_M = MAX_SEG_M;
 export const ACC_MEDIANA_MAX_M = ACC_CONFIABLE_M;
+export const MAX_CUERDA_M = MAX_SEG_CRUDO_M;
+/** Versión de las reglas con que se armó el payload. Las de la 1 (con cuerdas de hasta 300 m) no se
+ *  sirven y se vuelven a armar. */
+export const VERSION_RUTA_PROPIA = 2;
 export const MIN_PUNTOS = 10;
 export const TOLERANCIA_DP_M = 4;
 export const MAX_VERTICES = 3000;
@@ -52,6 +62,7 @@ export type CodigoTrazo =
   | "pocos_puntos"        // la traza no tiene con qué dibujar
   | "no_pasa_paradero"    // no pasó (en orden) por alguno de los paraderos
   | "con_huecos"          // un salto > MAX_SALTO_M dentro del recorrido
+  | "espaciado"           // una recta > MAX_CUERDA_M (cortaría manzanas)
   | "impreciso";          // precisión mediana peor que ACC_MEDIANA_MAX_M
 
 export const MOTIVO_TRAZO: Record<CodigoTrazo, string> = {
@@ -59,6 +70,7 @@ export const MOTIVO_TRAZO: Record<CodigoTrazo, string> = {
   pocos_puntos:     "El servicio casi no tiene posiciones GPS",
   no_pasa_paradero: "El recorrido no pasó por todos los paraderos en orden",
   con_huecos:       "El recorrido tiene cortes de GPS (saltos sin posición)",
+  espaciado:        "Las posiciones llegan demasiado espaciadas (más de 60 m entre dos seguidas): la línea cortaría manzanas",
   impreciso:        "El GPS de ese servicio era impreciso (por red, sin satélite)",
 };
 
@@ -122,6 +134,7 @@ export function juzgarTrazo(puntos: HuellaPt[], paraderos: Punto[]): ResultadoTr
   for (let i = 1; i < tramo.length; i++) {
     const d = distM(tramo[i - 1].lat, tramo[i - 1].lng, tramo[i].lat, tramo[i].lng);
     if (d > MAX_SALTO_M) return { codigo: "con_huecos", saltoM: Math.round(d) };
+    if (d > MAX_CUERDA_M) return { codigo: "espaciado", saltoM: Math.round(d) };
     largo += d;
   }
   const acc = mediana(tramo.map((p) => p.acc));
@@ -200,6 +213,8 @@ export type PayloadRutaPropia = {
   total_min: number;
   advertencia: null;
   fuente: "propia";
+  /** VERSION_RUTA_PROPIA con que se armó (ausente = 1). */
+  version?: number;
   /** Fecha del servicio del que salió. El id de esa reserva NO viaja (se guarda aparte, en la fila). */
   fuente_fecha: string | null;
 };
@@ -244,6 +259,7 @@ export function payloadDeRecorrido(e: Extract<Eleccion, { ok: true }>, nombres: 
     total_min: tramos.reduce((s, t) => s + t.duracion_min, 0),
     advertencia: null,
     fuente: "propia",
+    version: VERSION_RUTA_PROPIA,
     fuente_fecha: e.fecha,
   };
 }
@@ -259,6 +275,8 @@ export type FilaRutaPropia = { payload: PayloadRutaPropia | null; revisada_en: s
 /** ¿Hay que (re)armar la ruta propia de esta clave? */
 export function debeReconstruir(fila: FilaRutaPropia | null, ahoraMs: number): boolean {
   if (!fila) return true;
+  // Un payload armado con reglas viejas no se sirve: se rearma sin esperar a la renovación.
+  if (fila.payload && fila.payload.version !== VERSION_RUTA_PROPIA) return true;
   const rev = fila.revisada_en ? Date.parse(fila.revisada_en) : NaN;
   if (!Number.isFinite(rev)) return true;
   const plazo = fila.payload ? DIAS_RENOVAR * 86_400_000 : HORAS_REINTENTO * 3_600_000;
@@ -269,5 +287,6 @@ export function debeReconstruir(fila: FilaRutaPropia | null, ahoraMs: number): b
 export function payloadServible(fila: FilaRutaPropia | null): PayloadRutaPropia | null {
   const p = fila?.payload;
   if (!p || !Array.isArray(p.coordenadas) || p.coordenadas.length < 2 || !Array.isArray(p.tramos)) return null;
+  if (p.version !== VERSION_RUTA_PROPIA) return null;   // reglas viejas: cuerdas de hasta 300 m
   return p;
 }
