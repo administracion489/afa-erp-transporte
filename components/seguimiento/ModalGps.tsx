@@ -26,6 +26,10 @@ import { useAvanceParadas } from "@/lib/useAvanceParadas";
 import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import type { VeredictoRastreo } from "@/lib/gps-cobertura";
+import {
+  MOTIVO_LECTURA, MOTIVO_CALCULO, decodificarTraza, textoEstadoTraza,
+  type TrazaDecodificada, type RespuestaAjustada, type CodigoCalculo, type CaeTraza, type TonoTraza,
+} from "@/lib/gps-traza-ajustada";
 import { juzgarDetencion, medirQuietud, rotuloDetencion, type FilaQuietud } from "@/lib/gps-detencion";
 
 declare global { interface Window { mapboxgl: any; } }
@@ -176,6 +180,17 @@ export default function ModalGps({
   // contra Google) o quedaban "ocultar" para siempre (rango sin puente de por vida del modal).
   // Los "ocultar" GEOMÉTRICOS (ZERO_RESULTS / rodeo absurdo) sí son permanentes: el mapa no cambia.
   const puentesCacheRef = useRef<Map<string, { nivel: string; coords: [number, number][]; km: number; dt: number; expira?: number }>>(new Map());
+  // TRAZA AJUSTADA GUARDADA (lib/gps-traza-ajustada.ts): solo para servicios FINALIZADOS. Viven en
+  // refs por apertura: la traza decodificada con su clave (`calculadoEn`), lo último que dijo la
+  // lectura de /api/cliente/gps, el resultado del cálculo (UN POST por apertura) y la clave que ya
+  // se asignó al estado (para no redibujar cada 15 s).
+  const trazaGuardRef   = useRef<{ clave: string; dec: TrazaDecodificada } | null>(null);
+  const lecturaAjRef    = useRef<RespuestaAjustada | null>(null);
+  const calculoAjRef    = useRef<{ codigo: CodigoCalculo; detalle?: string | null; calculadoEn?: string | null } | null>(null);
+  const calculoPedidoRef = useRef(false);
+  const claveAsignadaRef = useRef<string | null>(null);
+  const reintentarAjRef = useRef<() => void>(() => {});
+  const [estadoTraza, setEstadoTraza] = useState<{ rid: unknown; texto: string; tono: TonoTraza; cae: CaeTraza } | null>(null);
   const cargandoHuellaRef = useRef(false); // evita ciclos solapados de cargar() (30 fetch lentos > intervalo de 15 s)
   const [mostrarPuntos,     setMostrarPuntos]     = useState(true);                  // toggle de la leyenda
   const [mostrarEstimados,  setMostrarEstimados]  = useState(true);                  // toggle: ocultar/mostrar los tramos estimados (verde petróleo)
@@ -463,6 +478,62 @@ export default function ModalGps({
     let cancel = false;
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
     const ajustador = crearAjustadorHuella(); // estado de ventanas/congelado por apertura del modal
+    trazaGuardRef.current = null; lecturaAjRef.current = null; calculoAjRef.current = null;
+    calculoPedidoRef.current = false; claveAsignadaRef.current = null;
+    const publicarChip = () => {
+      if (!lecturaAjRef.current && !calculoAjRef.current) return;
+      const t = textoEstadoTraza({ lectura: lecturaAjRef.current, calculo: calculoAjRef.current });
+      if (!cancel) setEstadoTraza(prev => (prev && prev.rid === reservaId && prev.texto === t.texto && prev.tono === t.tono && prev.cae === t.cae) ? prev : { rid: reservaId, ...t });
+    };
+    const guardarTraza = (traza: unknown, clave: string) => {
+      const dec = decodificarTraza(traza);
+      if (dec) trazaGuardRef.current = { clave, dec };
+      return !!dec;
+    };
+    // UN cálculo por apertura (calculoPedidoRef). 202 = otra apertura lo calcula → reintenta cada
+    // 5 s hasta 6 veces; 503 → respeta Retry-After. Al terminar vuelve a correr `cargar`.
+    const pedirCalculo = async () => {
+      if (calculoPedidoRef.current) return;
+      calculoPedidoRef.current = true;
+      for (let intento = 0; intento <= 6 && !cancel; intento++) {
+        let espera = 5000;
+        try {
+          const cred = await credencialesGps();
+          const res = await fetch("/api/seguimiento/traza-ajustada", {
+            method: "POST", headers: cred.headers,
+            body: JSON.stringify({ reservaId, token: cred.token }),
+          });
+          const j = await res.json().catch(() => null);
+          if (cancel) return;
+          if (res.status === 200 && j?.codigo && MOTIVO_CALCULO[j.codigo as CodigoCalculo]) {
+            calculoAjRef.current = { codigo: j.codigo, detalle: j.detalle ?? null, calculadoEn: j.calculadoEn ?? null };
+            if (MOTIVO_CALCULO[j.codigo as CodigoCalculo].cae === "guardada" && j.traza) {
+              if (!guardarTraza(j.traza, j.calculadoEn || `calculo-${Date.now()}`)) calculoAjRef.current = { codigo: "error", detalle: null };
+            }
+            publicarChip(); cargar(); return;
+          }
+          if (res.status === 202) { calculoAjRef.current = { codigo: "en_curso", detalle: j?.detalle ?? null }; publicarChip(); }
+          else if (res.status === 503) {
+            const ra = Number(res.headers.get("Retry-After"));
+            espera = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 5000;
+          } else {
+            const falta = res.status === 401 || res.status === 403
+              ? (modoCliente ? "tu sesión del portal no permite ver este servicio" : "te falta el permiso del módulo Seguimiento")
+              : (j?.error || j?.detalle || null);
+            calculoAjRef.current = { codigo: "error", detalle: falta }; publicarChip(); cargar(); return;
+          }
+        } catch { /* red: reintenta */ }
+        if (intento < 6) await new Promise(r => setTimeout(r, espera));
+      }
+      if (!cancel) {
+        if (!calculoAjRef.current || calculoAjRef.current.codigo === "en_curso") calculoAjRef.current = { codigo: calculoAjRef.current ? "en_curso" : "error", detalle: null };
+        publicarChip(); cargar();
+      }
+    };
+    reintentarAjRef.current = () => {
+      calculoPedidoRef.current = false; calculoAjRef.current = null; claveAsignadaRef.current = null;
+      cargar();
+    };
     const cargar = async () => {
       if (cargandoHuellaRef.current) return;   // ciclo anterior aún en vuelo (p. ej. 30 puentes lentos) → saltar este tick
       cargandoHuellaRef.current = true;
@@ -471,9 +542,18 @@ export default function ModalGps({
         const res = await fetch("/api/cliente/gps", {
           method: "POST",
           headers: cred.headers,
-          body: JSON.stringify({ huella: true, reservaId, vehiculoId, vehiculoTerceroId, token: cred.token }),
+          body: JSON.stringify({ huella: true, reservaId, vehiculoId, vehiculoTerceroId, token: cred.token,
+            ...(trazaGuardRef.current && !trazaGuardRef.current.clave.startsWith("calculo-") ? { ajustadaConocida: trazaGuardRef.current.clave } : {}) }),
         });
         const json = await res.json();
+        // `ajustada` solo llega con la reserva FINALIZADA. Sin ella: el ajustador en vivo de siempre.
+        const aj: RespuestaAjustada | null = json?.ajustada && MOTIVO_LECTURA[json.ajustada.estado as keyof typeof MOTIVO_LECTURA] ? json.ajustada : null;
+        if (!cancel && aj) {
+          lecturaAjRef.current = aj;
+          if (aj.traza && !aj.sinCambios && aj.calculadoEn && trazaGuardRef.current?.clave !== aj.calculadoEn) guardarTraza(aj.traza, aj.calculadoEn);
+          publicarChip();
+          if ((aj.estado === "falta" || (aj.estado === "desactualizada" && aj.puedeCalcular)) && !calculoPedidoRef.current) void pedirCalculo();
+        }
         const arr = Array.isArray(json?.huella) ? json.huella : [];
         // ANTES del early-return: el caso "servicio no iniciado" devuelve huella VACÍA a
         // propósito, y es justo cuando el modal más necesita saber por qué está vacía.
@@ -580,10 +660,37 @@ export default function ModalGps({
         // "Rastreo % medido" cuente los tramos ruteados como ESTIMADO, no como medido.
 
         // Map Matching por ventanas (lib/huella.ts): throttle 60 s + congelado interno.
+        // Qué se dibuja: el cálculo manda sobre la lectura; sin ninguno (en curso) → en vivo, como antes.
+        const caeAj: CaeTraza = calculoAjRef.current
+          ? MOTIVO_CALCULO[calculoAjRef.current.codigo].cae
+          : aj ? MOTIVO_LECTURA[aj.estado].cae : "en_vivo_como_antes";
+        const usaGuardada = caeAj !== "en_vivo_como_antes" && !!trazaGuardRef.current;
+        let colaClean: number;
+        let crudoRanges: Array<[number, number]>;
+        if (caeAj === "en_vivo_como_antes") {
         const matched = await ajustador.ajustar(limpio, token, () => cancel);
         if (matched && !cancel) { setMatchedCoords(matched); matchedRef.current = matched; const ec = ajustador.leerEsCrudo(); esCrudoRef.current = ec; setEsCrudoArr(ec); }
         if (!cancel) setColaSnapped(ajustador.leerColaSnapped());   // ¿pegó la punta viva? (si no, colaViva sigue la ruta)
-        const colaClean = ajustador.leerColaClean();                // último vértice de VÍA limpia (frontera de colaViva)
+        colaClean = ajustador.leerColaClean();                      // último vértice de VÍA limpia (frontera de colaViva)
+        crudoRanges = ajustador.leerCrudoRanges();
+        } else if (usaGuardada) {
+          // Traza guardada: NO se llama a Map Matching. Solo se reasigna si cambió su clave.
+          const g = trazaGuardRef.current!;
+          if (!cancel && claveAsignadaRef.current !== g.clave) {
+            claveAsignadaRef.current = g.clave;
+            setMatchedCoords(g.dec.coords); matchedRef.current = g.dec.coords;
+            esCrudoRef.current = g.dec.esCrudo; setEsCrudoArr(g.dec.esCrudo);
+            setColaSnapped(g.dec.colaSnapped);
+          }
+          colaClean = g.dec.colaClean; crudoRanges = g.dec.crudoRanges;
+        } else {
+          // Sin ajuste (o calculándose sin traza previa): la huella cruda provisional.
+          if (!cancel && claveAsignadaRef.current !== "__crudo__") {
+            claveAsignadaRef.current = "__crudo__";
+            setMatchedCoords(null); matchedRef.current = null; esCrudoRef.current = []; setEsCrudoArr([]); setColaSnapped(true);
+          }
+          colaClean = -1; crudoRanges = [];
+        }
 
         // TRAMO ESTIMADO por RUTA. Dos fuentes: (1) HUECOS de señal (calcularPuentes) y (2) CORRIDAS
         // CRUDAS CONGELADAS (ventanas que Map Matching no pudo pegar = el zigzag/"rectas que cruzan
@@ -591,7 +698,6 @@ export default function ModalGps({
         // la vía prevista, sin cruzar el río, sin llamar a Google); si el bus se desvió (o no hay ruta),
         // FALLBACK al camino fresco de Directions. Overlay: no toca la huella medida. Las corridas crudas
         // que SÍ se rutean se añaden a `suprimir` para que colorearMatched no las dibuje también (crudas).
-        const crudoRanges = ajustador.leerCrudoRanges();
         const cruditos = puentesCrudos(matchedRef.current || [], crudoRanges);
         // Corridas crudas PRIMERO: si los candidatos superan MAX_PUENTES, que lo que quede sin
         // rutear sean huecos de señal (quedan como hueco honesto), no rangos crudos (que sin
@@ -716,7 +822,9 @@ export default function ModalGps({
     // red de un bus quieto no re-consulta en cada fix. Error (null) → NO se cachea (se reintenta
     // al vencer el throttle); [] genuino → SÍ se cachea (ahí no hay vía vehicular, es la verdad).
     // Con chip preciso jamás se llama: el fix ya está sobre la vía.
-    if (!r.snapped && esAccCruda(accFix) && !tilequeryPendRef.current && Date.now() - tilequeryLastMsRef.current >= 15000) {
+    // Servicio finalizado: el bus ya no se mueve y la traza es la guardada → sin Tilequery.
+    const finalizado = servicioGps?.estado === "finalizada" || ubic.estado === "finalizado";
+    if (!finalizado && !r.snapped && esAccCruda(accFix) && !tilequeryPendRef.current && Date.now() - tilequeryLastMsRef.current >= 15000) {
       if (!cerca || distM(cerca.lat, cerca.lng, ubic.lat, ubic.lng) > 80) {
         tilequeryPendRef.current = true;
         tilequeryLastMsRef.current = Date.now();
@@ -1773,6 +1881,14 @@ export default function ModalGps({
             {!errorMapa && huella.length > 1 && (
               <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-sm rounded-xl shadow-lg px-3 py-2">
                 <p className="text-[8px] font-bold text-gray-400 uppercase mb-1">Huella GPS · Velocidad</p>
+                {estadoTraza && estadoTraza.rid === reservaId && (
+                  <div className={`mb-1 max-w-[220px] rounded-md px-1.5 py-0.5 text-[9px] font-semibold leading-tight ${estadoTraza.tono === "ambar" ? "bg-amber-50 text-amber-800 border border-amber-200" : "bg-gray-100 text-gray-600"}`}>
+                    {estadoTraza.texto}
+                    {estadoTraza.cae === "sin_ajuste" && (
+                      <button onClick={() => reintentarAjRef.current()} className="ml-1 underline font-bold">Reintentar</button>
+                    )}
+                  </div>
+                )}
                 <div className="flex items-center gap-2 text-[9px] font-bold text-gray-600">
                   {/* La rampa de velocidad (lib/huella.ts): la misma de la línea y los puntitos. */}
                   {RAMPA_VELOCIDAD.map((r) => (
