@@ -58,7 +58,7 @@
 // `fechaServicio` y la aritmética es de CALENDARIO (ambas fechas ancladas al mediodía de
 // Lima, UTC-5), nunca contra el reloj del equipo: una laptop en otra zona horaria movía
 // un vencimiento un día entero, que es exactamente la diferencia entre "vence hoy" y
-// "vencido". Misma disciplina que app/api/cliente/gps/route.ts:59-64 (`limaMs`).
+// "vencido". Misma disciplina que lib/gps-huella-servicio.ts (`limaMs`, antes en app/api/cliente/gps).
 //
 // ══════════════════════════════════════════════════════════════════════════════
 // DECISIONES DEL DUEÑO (2026-08-20), respetadas al pie de la letra:
@@ -513,7 +513,7 @@ export function tiposObligatorios(tercerizada: boolean, ambito?: "unidad" | "per
  * Instante de una fecha "YYYY-MM-DD" al MEDIODÍA de Lima (UTC-5, sin DST). El mediodía y
  * no la medianoche a propósito: deja 12 h de colchón a cada lado, así ningún desfase de
  * parsing puede correr una fecha al día vecino — que es la diferencia entre "vence hoy"
- * (vigente) y "vencido". Ancla equivalente a `limaMs()` en app/api/cliente/gps/route.ts:60-64.
+ * (vigente) y "vencido". Ancla equivalente a `limaMs()` en lib/gps-huella-servicio.ts.
  */
 function mediodiaLimaMs(fecha: string | null | undefined): number | null {
   if (!fecha) return null;

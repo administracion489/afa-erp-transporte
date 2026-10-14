@@ -402,7 +402,8 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "• **Inmóvil** — llegaron posiciones, pero todas en el mismo punto mientras el recorrido avanzaba: el teléfono no iba en el bus.\n\n" +
           "El aviso separa dos cosas que se atienden distinto: **En ruta sin señal ahora** (más de 5 minutos sin posición con el servicio en curso: llama al conductor, casi siempre es la app cerrada o el teléfono bloqueado) y **Rastreo incompleto**, que ya quedó en el registro del viaje. El titular cuenta **unidades**, no servicios: una unidad con el teléfono mal configurado falla en todos sus viajes y es un solo problema. Cada contador filtra la lista.\n\n" +
           "**Haz clic sobre el porcentaje** (o sobre una fila del aviso) y se abre el **diagnóstico** de ese servicio: por qué se cortó cada tramo y cómo estaba configurado el teléfono del conductor. Está explicado en la pregunta siguiente.\n\n" +
-          "Es el mismo cálculo de **Salud del GPS**, donde ves el historial por conductor para saber a quién hay que configurarle el teléfono.",
+          "Es el mismo cálculo de **Salud del GPS**, donde ves el historial por conductor para saber a quién hay que configurarle el teléfono.\n\n" +
+          "En el mapa del detalle GPS, **un servicio terminado se ajusta a la vía una sola vez y ese recorrido se guarda para siempre**: las siguientes aperturas lo dibujan sin volver a calcularlo. Si después llegan posiciones tardías, se recalcula **como mucho dos veces**. Un servicio **en curso** se sigue ajustando en vivo, como siempre. Junto a la leyenda de la huella verás un aviso que dice cuál de los dos casos es.",
       },
       {
         pregunta: "¿Qué me dice el clic sobre el porcentaje de Rastreo?",

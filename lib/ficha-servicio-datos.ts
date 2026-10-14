@@ -33,7 +33,7 @@
 // 2) EL GPS DEL SERVICIO DE AL LADO.  Filtrar por vehículo SIN acotar la ventana metía la huella
 //    del servicio ANTERIOR del mismo bus (531 puntos sembrando el avance de un servicio que aún
 //    no arrancaba — commit 4e2cdf7). La ventana canónica ya existe y NO se reinventa aquí: se
-//    copia de app/api/cliente/gps/route.ts:53-58 y :129-140 (MARGEN_PREVIO_MS 45 min,
+//    copia de lib/gps-huella-servicio.ts (antes en app/api/cliente/gps) (MARGEN_PREVIO_MS 45 min,
 //    DURACION_MAX_MS 26 h, HUECO_VIAJE_MS 30 min, y el corte por tramos `tramoDelServicio`).
 //    Orden de preferencia: puntos atados a `reserva_id` (evidencia dura) → por vehículo DENTRO
 //    de la ventana → nada.
@@ -230,7 +230,7 @@ export type OpcionesFicha = {
 // CONSTANTES
 // ══════════════════════════════════════════════════════════════════════════════════════
 
-// ── Ventana del servicio. VERBATIM de app/api/cliente/gps/route.ts:53-58. Si allá cambian,
+// ── Ventana del servicio. VERBATIM de lib/gps-huella-servicio.ts (antes en app/api/cliente/gps). Si allá cambian,
 //    aquí también: son el mismo hecho ("¿qué puntos son de ESTE viaje?") contado dos veces.
 /** cuánto ANTES de la hora pactada cuenta el GPS (traslado cochera → primer paradero) */
 const MARGEN_PREVIO_MS = 45 * 60 * 1000;
@@ -372,7 +372,7 @@ const msDe = (g: any): number => {
 
 /**
  * Corte por tramos contiguos y elección del tramo DEL SERVICIO. Copia fiel de
- * app/api/cliente/gps/route.ts:80-92: un hueco > `gapMs` significa que la app dejó de transmitir,
+ * lib/gps-huella-servicio.ts (`tramoDelServicio`): un hueco > `gapMs` significa que la app dejó de transmitir,
  * o sea otro viaje. Se elige el primer tramo que seguía vivo a la hora programada (`refTs`);
  * "quedarse con el último" solo acierta cuando el servicio consultado es el de ahora mismo, y al
  * abrir uno de ayer devolvía el viaje de hoy.

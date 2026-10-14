@@ -675,9 +675,14 @@ seccion("6 · la huella del modal: huellaDeFilas, segmentosHuella y la rampa de 
     `viejo ${cerosViejo} · nuevo ${basuraNueva} · divergen ${divergen}`);
   chk("una fila nula no rompe nada y no cuenta", JSON.stringify(H.huellaDeFilas([null, ...tramo(T0, 30, 40), null] as any)) === JSON.stringify(H.huellaDeFilas(tramo(T0, 30, 40))));
   chk("sin filas: las tres etapas vacías", JSON.stringify(H.huellaDeFilas(null)) === JSON.stringify({ brutos: [], crudos: [], limpio: [] }));
+  // El filtro de la huella de /api/cliente/gps se mudó (sin cambiarlo) a lib/gps-huella-servicio.ts
+  // (filasDelServicio), que la ruta usa por huellaDelServicio — scripts/prueba-traza-ajustada.mts §6.
   const srcGps = leer("app/api/cliente/gps/route.ts");
-  chk("PRECISION_MAX_HUELLA_M = 1500 y /api/cliente/gps lo usa (sin el literal)",
-    H.PRECISION_MAX_HUELLA_M === 1500 && srcGps.includes("p.precision_m <= PRECISION_MAX_HUELLA_M") && !/precision_m\s*<=\s*1500/.test(srcGps));
+  const srcHuellaServicio = leer("lib/gps-huella-servicio.ts");
+  chk("PRECISION_MAX_HUELLA_M = 1500 y /api/cliente/gps lo usa (sin el literal), vía lib/gps-huella-servicio.ts",
+    H.PRECISION_MAX_HUELLA_M === 1500 && srcHuellaServicio.includes("p.precision_m <= PRECISION_MAX_HUELLA_M")
+    && !/precision_m\s*<=\s*1500/.test(srcHuellaServicio) && !/precision_m\s*<=\s*1500/.test(srcGps)
+    && srcGps.includes("huellaDelServicio("));
   chk(`huellaCrudaFeatures y segmentosHuella = la versión anterior (${seg} combinaciones)`, segIg === seg, `${seg - segIg}`);
   chk(`cortaEntre = partir la huella ahí y aplicar la anterior a cada pedazo (${conCorte})`, corteIg === conCorte, `${conCorte - corteIg}`);
   chk("ningún segmento cruza un corte y `tramo` no retrocede", cruzan === 0 && tramoMal === 0, `${cruzan} · ${tramoMal}`);
