@@ -563,12 +563,19 @@ type ModoFake = {
   p429?: number; p429Siempre?: number; p500?: number; pRed?: number; p422?: number;
   pSinTp?: number; pVacio?: number; confBaja?: number; tidyNull?: number; maxFrag?: number;
 };
-type Fake = { fetch: (url: string) => Promise<Response>; urls: string[]; status: Array<number | "red"> };
+type Fake = { fetch: (url: string) => Promise<Response>; urls: string[]; crudas: string[]; status: Array<number | "red"> };
+// El radio de búsqueda cambió a propósito (#1609, `radioDeBusqueda`): el Mapbox falso contesta según la
+// URL SIN `radiuses`, así el original y el nuevo reciben la MISMA respuesta y se comparan sus salidas.
+// Los radios se comprueban aparte (§0d), contra `radioDeBusqueda`.
+const sinRadios = (u: string) => u.replace(/&radiuses=[^&]*/, "");
 function crearFake(modo: ModoFake): Fake {
   const intentos = new Map<string, number>();
   const urls: string[] = [];
+  const crudas: string[] = [];
   const status: Array<number | "red"> = [];
-  const fetchFalso = async (url: string): Promise<Response> => {
+  const fetchFalso = async (urlCruda: string): Promise<Response> => {
+    crudas.push(urlCruda);
+    const url = sinRadios(urlCruda);
     urls.push(url);
     const k = (intentos.get(url) ?? 0) + 1;
     intentos.set(url, k);
@@ -606,7 +613,7 @@ function crearFake(modo: ModoFake): Fake {
     if (r("sintp") < (modo.pSinTp ?? 0)) return resp(200, { code: "Ok", matchings });
     return resp(200, { code: "Ok", matchings, tracepoints });
   };
-  return { fetch: fetchFalso, urls, status };
+  return { fetch: fetchFalso, urls, crudas, status };
 }
 const MODOS: Record<string, ModoFake> = {
   limpio: {},
@@ -674,27 +681,62 @@ const fetchQueRevienta = (async () => { throw new Error("el fetch global NO deb�
 type SalidaAjuste = { r: any; esCrudo: boolean[]; crudoRanges: Array<[number, number]>; colaClean: number; colaSnapped: boolean };
 const leerAj = (aj: any, r: any): SalidaAjuste => ({ r, esCrudo: aj.leerEsCrudo(), crudoRanges: aj.leerCrudoRanges(), colaClean: aj.leerColaClean(), colaSnapped: aj.leerColaSnapped() });
 
-// LA DIVERGENCIA DECLARADA (14-10-2026, caso #1298): un fix de chip que Map Matching no pegó y que es
-// extremo de una recta larga EN MARCHA pasa a `esCrudo` (H.fixEnRectaEnMarcha). Todo lo demás —las
-// coordenadas, `snapped`, `crudeFrac`, las llamadas— sale idéntico; `esCrudo` solo puede GANAR
-// verdaderos (nunca perderlos), y los rangos se derivan de ese `esCrudo` por rangosDeCrudo.
-let crudosNuevos = 0;
-const esSuperset = (o: boolean[] | undefined, n: boolean[] | undefined): boolean => {
+// LAS DIVERGENCIAS DECLARADAS. Todo lo demás —`snapped`, `crudeFrac`, `maxCrudoChordM`, `confidence`,
+// las llamadas (sin contar el radio)— sale idéntico; lo que cambia, y solo así:
+//  (a) 14-10-2026, #1298: un fix de chip que Map Matching no pegó y que es extremo de una recta larga EN
+//      MARCHA pasa a `esCrudo` (H.fixEnRectaEnMarcha).
+//  (b) 14-10-2026, #1609: la junta recta (> MAX_SEG_CRUDO_M) entre dos fragmentos o dos ventanas pasa a
+//      `esCrudo` en sus dos extremos. (a) y (b): `esCrudo` solo GANA verdaderos.
+//  (c) #1609: un fix sin pareja en la FRONTERA entre fragmentos se emite (antes se perdía): el vértice
+//      nuevo es un fix REAL de la huella; las coordenadas de antes siguen ahí, en el mismo orden.
+//  (d) #1609: en el crudo suavizado, un fix preciso EN MARCHA no se aleja de su posición más que su
+//      error: el vértice se mueve, pero queda a ≤ 40 m (R del suavizado) del de antes.
+let crudosNuevos = 0, sinParejaNuevos = 0, acotados = 0;
+const FIJOS = new Set<string>();   // todos los fixes reales del corpus
+for (const c of CORPUS) for (const p of limpioDe(c.filas)) FIJOS.add(`${p.lng},${p.lat}`);
+const clave = (c: [number, number]) => `${c[0]},${c[1]}`;
+/** Empareja las coords viejas con las nuevas: devuelve, por cada vieja, su índice en las nuevas (o null). */
+function alinear(o: [number, number][], n: [number, number][], contar = false): number[] | null {
+  const idx: number[] = [];
+  let j = 0;
+  for (let i = 0; i < o.length; i++) {
+    while (j < n.length) {
+      if (n[j][0] === o[i][0] && n[j][1] === o[i][1]) break;
+      if (FIJOS.has(clave(n[j])) && !FIJOS.has(clave(o[i]))) { if (contar) sinParejaNuevos++; j++; continue; }   // (c)
+      if (FIJOS.has(clave(n[j])) && j + 1 < n.length && n[j + 1][0] === o[i][0] && n[j + 1][1] === o[i][1]) { if (contar) sinParejaNuevos++; j++; continue; }
+      if (H.distM(n[j][1], n[j][0], o[i][1], o[i][0]) <= 40) { if (contar) acotados++; break; }   // (d)
+      if (FIJOS.has(clave(n[j]))) { if (contar) sinParejaNuevos++; j++; continue; }
+      return null;
+    }
+    if (j >= n.length) return null;
+    idx.push(j++);
+  }
+  while (j < n.length) { if (!FIJOS.has(clave(n[j]))) return null; if (contar) sinParejaNuevos++; j++; }
+  return idx;
+}
+const esSuperset = (o: boolean[] | undefined, n: boolean[] | undefined, idx?: number[] | null): boolean => {
   if (!o || !n) return o === n;
-  if (o.length !== n.length) return false;
-  for (let i = 0; i < o.length; i++) { if (o[i] && !n[i]) return false; if (n[i] && !o[i]) crudosNuevos++; }
+  if (!idx) { if (o.length !== n.length) return false; idx = o.map((_, i) => i); }
+  for (let i = 0; i < o.length; i++) { const v = n[idx[i]]; if (o[i] && !v) return false; if (v && !o[i]) crudosNuevos++; }
   return true;
 };
-const sinCrudo = (x: any) => (x && typeof x === "object" ? { ...x, esCrudo: undefined } : x);
-const salidaDeclarada = (o: SalidaAjuste, n: SalidaAjuste): boolean => {
-  if (JSON.stringify(o.r) !== JSON.stringify(n.r) || o.colaSnapped !== n.colaSnapped) return false;
-  if (!esSuperset(o.esCrudo, n.esCrudo)) return false;
-  if (n.r == null) return true;
+const salidaDeclarada = (o: SalidaAjuste, n: SalidaAjuste, contar = false): boolean => {
+  if (o.colaSnapped !== n.colaSnapped || (o.r == null) !== (n.r == null)) return false;
+  // Ciclo sin nada nuevo: el ajustador repite el estado del ciclo anterior (ya comparado ahí).
+  if (o.r == null) return JSON.stringify(o.esCrudo) === JSON.stringify(n.esCrudo) || n.esCrudo.length >= o.esCrudo.length;
+  const idx = alinear(o.r, n.r, contar);
+  if (!idx || !esSuperset(o.esCrudo, n.esCrudo, idx)) return false;
   const esp = H.rangosDeCrudo(n.esCrudo, Math.min(n.r.length, n.esCrudo.length));
   return JSON.stringify(esp.crudoRanges) === JSON.stringify(n.crudoRanges) && esp.colaClean === n.colaClean;
 };
-const matchDeclarado = (o: any, n: any): boolean =>
-  JSON.stringify(sinCrudo(o)) === JSON.stringify(sinCrudo(n)) && esSuperset(o?.esCrudo, n?.esCrudo);
+const sinGeo = (x: any) => (x && typeof x === "object" ? { ...x, esCrudo: undefined, coords: undefined } : x);
+const matchDeclarado = (o: any, n: any, contar = false): boolean => {
+  if ((o == null) !== (n == null)) return false;
+  if (o == null) return true;
+  if (JSON.stringify(sinGeo(o)) !== JSON.stringify(sinGeo(n))) return false;
+  const idx = alinear(o.coords, n.coords, contar);
+  return !!idx && esSuperset(o.esCrudo, n.esCrudo, idx);
+};
 
 // ══ 0 · la red inyectable ═════════════════════════════════════════════════════════════════
 seccion("0 · mapMatchTrail / matchVentana / crearAjustadorHuella con fetch inyectado = los originales (salvo la divergencia declarada)");
@@ -717,7 +759,7 @@ sinEsperas();
       (globalThis as any).fetch = fetchQueRevienta;
       const ajI = H.crearAjustadorHuella({ fetch: f3.fetch });
       const sI = leerAj(ajI, await ajI.ajustar(limpio, "tok"));
-      chk(`${c.nombre} · ${modo}: defecto = original (${limpio.length} pts, ${f1.urls.length} llamadas)`, salidaDeclarada(sO, sD) && JSON.stringify(f1.urls) === JSON.stringify(f2.urls));
+      chk(`${c.nombre} · ${modo}: defecto = original (${limpio.length} pts, ${f1.urls.length} llamadas)`, salidaDeclarada(sO, sD, true) && JSON.stringify(f1.urls) === JSON.stringify(f2.urls));
       chk(`${c.nombre} · ${modo}: inyectado = defecto`, JSON.stringify(sD) === JSON.stringify(sI) && JSON.stringify(f1.urls) === JSON.stringify(f3.urls));
       if (modo !== "limpio") chk(`${c.nombre} · ${modo}: el escenario no es trivial (${f1.urls.length} llamadas, ${sO.esCrudo.filter(Boolean).length} vértices crudos)`,
         c.nombre.startsWith("servicio corto") ? f1.urls.length >= 1 : f1.urls.length >= 2);
@@ -781,11 +823,25 @@ sinEsperas();
     (globalThis as any).fetch = fetchQueRevienta;
     const cI = JSON.stringify([await H.mapMatchTrail(ventana, "tok", fI.fetch), await H.matchVentana(ventana, "tok", fI.fetch)]);
     total++;
-    if (matchDeclarado(a[0], b[0]) && matchDeclarado(a[1], b[1]) && JSON.stringify(b) === cI
+    if (matchDeclarado(a[0], b[0], true) && matchDeclarado(a[1], b[1], true) && JSON.stringify(b) === cI
         && JSON.stringify(fO.urls) === JSON.stringify(fD.urls) && JSON.stringify(fO.urls) === JSON.stringify(fI.urls)) iguales++;
   }
   chk(`mapMatchTrail + matchVentana: ${iguales}/${total} ventanas idénticas salvo la divergencia declarada (defecto e inyectado)`, iguales === total);
-  chk(`corolario: la divergencia se ejercita (${crudosNuevos} vértices de chip en recta larga en marcha pasaron a crudo)`, crudosNuevos > 0);
+  // (d) —el suavizado acotado— casi no se ejercita aquí (en recta los vecinos se compensan): lo fija
+  // scripts/prueba-maniobra.mts §5, con una esquina.
+  chk(`corolario: la divergencia se ejercita (${crudosNuevos} vértices pasaron a crudo, ${sinParejaNuevos} fixes sin pareja emitidos, ${acotados} vértices acotados a su error)`,
+    crudosNuevos > 0 && sinParejaNuevos > 0);
+  // (d) los radios que viajan a Mapbox son los de `radioDeBusqueda`: piso de 15 m, el resto igual.
+  {
+    const f = crearFake(MODOS.limpio);
+    const v = limpioDe(CORPUS[4].filas).slice(0, 60);
+    await H.mapMatchTrail(v, "tok", f.fetch);
+    const radios = (f.crudas[0] ?? "").match(/radiuses=([^&]*)/)?.[1]?.split(";").map(Number) ?? [];
+    const sample = H.prepararPuntos(v);
+    chk(`los radios son los de radioDeBusqueda (piso ${H.RADIO_MIN_MATCH_M} m) — ${radios.slice(0, 6).join(",")}…`,
+      radios.length === sample.length && sample.every((p, i) => radios[i] === H.radioDeBusqueda(p.acc))
+      && sample.every((p, i) => radios[i] === Math.max(Math.min(50, Math.max(5, Math.ceil((p.acc || 25) * 1.5))), H.RADIO_MIN_MATCH_M)));
+  }
   (globalThis as any).fetch = fetchReal;
   chk("sin token, el ajustador no llama (inyectado o no)", await (async () => {
     const f = crearFake({});

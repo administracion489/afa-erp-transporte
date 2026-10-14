@@ -113,5 +113,75 @@ const fix = (m: number, s: number, acc = 5) => ({ lat: LAT + m * M_LAT, lng: LNG
   chk("4h punta de red: sigue por la ruta (estimado)", fRed.length === 1 && fRed[0].properties?.estimado === 1);
 }
 
+// ── 5. El fix preciso en la calle es por donde pasa la huella (#1609) ────────────
+{
+  const M_LNG = 1 / (111_320 * Math.cos(LAT * Math.PI / 180));
+  // El suavizado de antes, copiado literal: la referencia de lo que NO debe cambiar.
+  const suavViejo = <T extends { lat: number; lng: number }>(pts: T[], R = 40, K = 8): T[] => pts.map((p, i) => {
+    let sLat = 0, sLng = 0, n = 0;
+    const lo = Math.max(0, i - K), hi = Math.min(pts.length - 1, i + K);
+    for (let j = lo; j <= hi; j++) if (H.distM(pts[j].lat, pts[j].lng, p.lat, p.lng) <= R) { sLat += pts[j].lat; sLng += pts[j].lng; n++; }
+    return n ? { ...p, lat: sLat / n, lng: sLng / n } : p;
+  });
+  // Giro en L a 32 km/h (≈9 m/s), un fix cada 2 s: 60 m al norte y luego al este. El fix de la esquina.
+  const esquina = [0, 18, 36, 54].map((n, i) => ({ lat: LAT + n * M_LAT, lng: LNG, acc: 2, ts: T0 + i * 2000, velocidad: 32 }))
+    .concat([0, 18, 36, 54].map((e, i) => ({ lat: LAT + 60 * M_LAT, lng: LNG + e * M_LNG, acc: 2, ts: T0 + (4 + i) * 2000, velocidad: 32 })));
+  const k = 4;   // el de la esquina
+  const viejo = suavViejo(esquina)[k], nuevo = H.suavizarPorDistancia(esquina)[k];
+  const dViejo = H.distM(esquina[k].lat, esquina[k].lng, viejo.lat, viejo.lng);
+  const dNuevo = H.distM(esquina[k].lat, esquina[k].lng, nuevo.lat, nuevo.lng);
+  chk("5a esquina: antes el fix de ±2 m quedaba DENTRO de la manzana", dViejo > 8, `${dViejo.toFixed(1)} m`);
+  chk("5b ahora no sale de su error (máx 3 m)", dNuevo <= 3.01, `${dNuevo.toFixed(2)} m`);
+  const sinAcc = esquina.map(({ acc, ...p }) => p);
+  chk("5c sin precisión: byte a byte el suavizado de antes", JSON.stringify(H.suavizarPorDistancia(sinAcc)) === JSON.stringify(suavViejo(sinAcc)));
+  const sinHora = esquina.map(({ ts, ...p }) => p);
+  chk("5d sin hora: byte a byte el de antes", JSON.stringify(H.suavizarPorDistancia(sinHora)) === JSON.stringify(suavViejo(sinHora)));
+  const redEsq = esquina.map((p) => ({ ...p, acc: 40 }));
+  chk("5e fix de red: byte a byte el de antes (su zigzag sí se aplana)", JSON.stringify(H.suavizarPorDistancia(redEsq)) === JSON.stringify(suavViejo(redEsq)));
+  const lenta = esquina.map((p, i) => ({ ...p, ts: T0 + i * 60_000 }));   // la misma geometría en una cochera
+  chk("5f maniobra lenta: byte a byte el de antes", JSON.stringify(H.suavizarPorDistancia(lenta)) === JSON.stringify(suavViejo(lenta)));
+
+  // El radio de búsqueda: un chip de ±2 m busca vía a 15 m (antes 5), los de red no cambian.
+  chk("5g radio de un fix de ±2 m: 15 m", H.radioDeBusqueda(2) === 15 && H.RADIO_MIN_MATCH_M === 15);
+  chk("5h radio de red: igual que antes (acc·1.5, techo 50)", H.radioDeBusqueda(30) === 45 && H.radioDeBusqueda(100) === 50 && H.radioDeBusqueda(undefined) === 38);
+
+  // Mapbox parte el trazo en dos fragmentos y deja SIN pareja el fix de la frontera (el preciso).
+  const pts = Array.from({ length: 9 }, (_, i) => fix(i * 18, i * 2, 2));
+  const geo = (desde: number, hasta: number, corr = 0) => Array.from({ length: hasta - desde + 1 }, (_, j) => [LNG + corr * M_LNG, LAT + (desde + j) * 18 * M_LAT] as [number, number]);
+  const resp = (tp: any[], matchings: any[]) => async (url: string) => {
+    (resp as any).ultima = url;
+    return new Response(JSON.stringify({ code: "Ok", matchings, tracepoints: tp }), { status: 200 });
+  };
+  const tp = [0, 0, 0, null, 1, 1, null, 1, 1].map((m) => (m == null ? null : { matchings_index: m }));
+  const mm = [{ confidence: 0.9, geometry: { coordinates: geo(0, 2, 1) } }, { confidence: 0.9, geometry: { coordinates: geo(4, 8, 1) } }];   // la vía, a 1 m de los fixes
+  const r = await H.mapMatchTrail(pts, "tok", resp(tp, mm));
+  const hay = (p: { lat: number; lng: number }) => !!r?.coords.some(([x, y]) => x === p.lng && y === p.lat);
+  chk("5i el fix sin pareja de la FRONTERA entra a la huella (la línea pasa por él)", !!r && hay(pts[3]));
+  chk("5j el sin pareja DENTRO de un fragmento no (tidy lo quitó por redundante)", !!r && !hay(pts[6]));
+  chk("5k las métricas de suciedad no cambian por él (crudeFrac 0)", !!r && r.crudeFrac === 0 && r.confidence === 7 / 9);
+  const urlRadios = String((resp as any).ultima).match(/radiuses=([^&]*)/)?.[1] ?? "";
+  chk("5l a Mapbox viaja el radio de 15 m", urlRadios.split(";").every((x) => x === "15"), urlRadios);
+
+  // Dos fragmentos SIN nada entre medio y 90 m de junta recta: sus extremos pasan a crudo.
+  const tp2 = [0, 0, 0, 0, 1, 1, 1, 1, 1].map((m) => ({ matchings_index: m }));
+  const mm2 = [{ confidence: 0.9, geometry: { coordinates: geo(0, 3) } }, { confidence: 0.9, geometry: { coordinates: geo(4, 8, 85) } }];
+  const r2 = await H.mapMatchTrail(pts, "tok", resp(tp2, mm2));
+  chk("5m junta recta de más de 60 m entre fragmentos: sus dos extremos crudos", !!r2 && r2.esCrudo[3] === true && r2.esCrudo[4] === true && r2.esCrudo.filter(Boolean).length === 2);
+  const tp3 = tp2, mm3 = [{ confidence: 0.9, geometry: { coordinates: geo(0, 3) } }, { confidence: 0.9, geometry: { coordinates: geo(4, 8) } }];
+  const r3 = await H.mapMatchTrail(pts, "tok", resp(tp3, mm3));
+  chk("5n junta corta (18 m) entre fragmentos: nada cambia", !!r3 && r3.esCrudo.every((x) => !x));
+  const cands = H.puentesCrudos(r2!.coords, H.rangosDeCrudo(r2!.esCrudo, r2!.coords.length).crudoRanges);
+  chk("5o y esa junta se ofrece para rellenar por la vía", cands.length === 1 && cands[0].origen === "crudo");
+
+  // La junta entre dos ventanas del ajustador.
+  const c: [number, number][] = [[LNG, LAT], [LNG, LAT + 30 * M_LAT], [LNG, LAT + 400 * M_LAT], [LNG, LAT + 430 * M_LAT]];
+  const es = [false, false, false, false];
+  H.marcarJuntasRectas(c, es, [2, 2]);
+  chk("5p junta de 370 m entre ventanas (antes un hueco que nadie rellenaba): extremos crudos", es.join() === "false,true,true,false");
+  const es2 = [false, false, false, false];
+  H.marcarJuntasRectas([[LNG, LAT], [LNG, LAT + 30 * M_LAT], [LNG, LAT + 40 * M_LAT], [LNG, LAT + 70 * M_LAT]], es2, [2, 2]);
+  chk("5q junta corta entre ventanas: nada cambia", es2.every((x) => !x));
+}
+
 console.log(fallos ? `\n${fallos} prueba(s) FALLARON` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);
