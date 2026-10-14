@@ -25,18 +25,18 @@ import { fmtCoord } from "@/lib/coordenadas";
 import { useAvanceParadas } from "@/lib/useAvanceParadas";
 import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
 import { cabecerasErp } from "@/lib/fetch-erp";
+// Nombres de paradero, placa y conductor son texto libre: en un popup de Mapbox (setHTML) se escapan.
+import { escHtml } from "@/lib/html-escape";
 import type { VeredictoRastreo } from "@/lib/gps-cobertura";
 import { juzgarDetencion, medirQuietud, rotuloDetencion, type FilaQuietud } from "@/lib/gps-detencion";
+import { minutosRestantes, DIAS_HISTORIAL, type TiemposHistoricos } from "@/lib/tramos-historicos";
 
 declare global { interface Window { mapboxgl: any; } }
 
-// Cada refresco del ETA es una llamada a Google CON tráfico (SKU caro, no cacheable):
-// 3 min es suficiente para un bus urbano y baja el gasto ~3× frente al minuto.
-const MS_REFRESCO_ETA = 180_000;
-// Piso entre dos pedidos de ETA (mismo criterio que app/pasajero/page.tsx): volver a la pestaña
-// del modal justo antes de un tick del intervalo pagaba dos llamadas del SKU con tráfico con
-// segundos de diferencia, y cada alt-tab se saltaba el refresco de 3 min por completo.
-const MS_MIN_ENTRE_ETA = 30_000;
+// El ETA con tráfico ya NO se refresca solo (era una llamada al SKU caro de Google cada 3 min con
+// el modal abierto): se pide con un botón y vale este tiempo. Pasado, la hora calculada deja de
+// pintarse y vuelve la estimación por el promedio real — no medido, se declara.
+const VIGENCIA_ETA_TRAFICO_MS = 15 * 60_000;
 
 type UbicGps = {
   lat: number; lng: number; velocidad: number; rumbo: number;
@@ -84,8 +84,7 @@ type Props = {
 // ── Helpers de formato (mismos que la página de seguimiento) ─────────────────
 // Recibe el INSTANTE de llegada ABSOLUTO (ms epoch) ya congelado al recibir el ETA, no los
 // minutos: si lo recalculara con Date.now() + min en cada render, la hora pintada avanzaría con
-// cada poll de GPS y saltaría hacia atrás al refrescar el ETA — con MS_REFRESCO_ETA de 3 min la
-// deriva se nota. Mismo criterio que app/pasajero y app/seguimiento/[token].
+// cada poll de GPS y saltaría hacia atrás entre dos cálculos. Mismo criterio que app/pasajero y app/seguimiento/[token].
 const fmtHoraLlegada = (ts: number) => {
   const d = new Date(ts);
   return d.toLocaleTimeString("es-PE", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/Lima" });
@@ -139,8 +138,10 @@ export default function ModalGps({
   // ¿La `ruta` que se está mostrando se pidió CON tráfico? La carga automática va SIN tráfico (SKU
   // barato y cacheado) y ahí Google devuelve duracion_trafico_min = duracion_min, así que comparar
   // ambas sería mentir: el badge diría "✓ Ruta libre" aunque la avenida esté trabada. Solo el botón
-  // «Recalcular con tráfico actual» lo pone en true, y solo entonces el badge/etiqueta hablan de tráfico.
+  // «Calcular tráfico en tiempo real» lo pone en true, y solo entonces el badge/etiqueta hablan de tráfico.
   const [rutaConTrafico,    setRutaConTrafico]    = useState(false);
+  // La ruta de Google no estaba guardada y no se consultó (carga "cache"): sin línea planificada.
+  const [rutaSinCache,      setRutaSinCache]      = useState(false);
   const rutaRef = useRef<RutaData | null>(null);   // espejo de `ruta` para leerla en el loop del puente
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
   const [errorRuta,         setErrorRuta]         = useState<string | null>(null);
@@ -182,6 +183,7 @@ export default function ModalGps({
   const geocacheRef = useRef<Map<string, string>>(new Map());                        // caché reverse-geocode por coord redondeada
   const popupTelemRef = useRef<any>(null);                                           // popup activo de un puntito
   const stopMarkersRef = useRef<any[]>([]);
+  const encuadreParadasRef = useRef(false);   // el mapa ya se encuadró por los paraderos (sin ruta)
   // ETA dinámica: posición actual del vehículo → próxima parada (Google Directions)
   const [etaMin, setEtaMin] = useState<number | null>(null);
   const [etaKm,  setEtaKm]  = useState<number | null>(null);
@@ -192,7 +194,8 @@ export default function ModalGps({
   const [etaDe, setEtaDe] = useState<number | null>(null);
   // Google devolvió dos veces seguidas un rodeo absurdo hacia el objetivo: se dejó de preguntar.
   // Hay que DECIRLO — si no, el panel se queda en "Calculando tiempo estimado…" para siempre.
-  const [etaSinRuta, setEtaSinRuta] = useState(false);
+  // Se guarda PARA QUÉ parada se concluyó: con un objetivo nuevo deja de valer solo (derivado).
+  const [etaSinRutaDe, setEtaSinRutaDe] = useState<number | null>(null);
   const ultimoEtaRef = useRef(0);   // ms del último pedido de ETA a Google (piso anti doble cobro)
   const etaRechazosRef = useRef(0); // respuestas de Google descartadas por rodeo absurdo (ver calcular)
   const ultimoDestinoEtaRef = useRef<number | null>(null); // índice de parada del último ETA pedido
@@ -291,9 +294,17 @@ export default function ModalGps({
   // geometría buena y la rápida apagaba el spinner con la cara todavía en vuelo.
   const epocaRutaRef = useRef(0);
 
-  // `conTrafico` = lo pidió una PERSONA con el botón «Recalcular con tráfico actual». La carga
-  // automática del modal siempre entra con false (barata y cacheada en el servidor).
-  const cargarRuta = useCallback(async (conTrafico = false) => {
+  // MODO de la carga (decisión del dueño, 13-10-2026: «me está generando mucho dinero de la API
+  // de Google y muchas veces no lo usan»):
+  //   "cache"   — la que hace el modal AL ABRIR. Solo lee la ruta ya guardada en `rutas_cache`
+  //               (0 llamadas a Google); si no está, no se paga nada y el panel ofrece el botón.
+  //   "google"  — botón «Consultar ruta en Google Maps»: el SKU barato, sin tráfico, que el
+  //               servidor guarda 30 días (la próxima apertura de cualquier usuario es gratis).
+  //   "trafico" — botón «Calcular tráfico en tiempo real»: el SKU caro, a propósito y una vez.
+  // Los tiempos que el panel enseña por defecto NO salen de aquí: son el promedio real de los
+  // últimos 30 días (lib/tramos-historicos.ts).
+  const cargarRuta = useCallback(async (modo: "cache" | "google" | "trafico" = "cache") => {
+    const conTrafico = modo === "trafico";
     const epoca   = ++epocaRutaRef.current;
     const vigente = () => epocaRutaRef.current === epoca;
     const fallo   = (msg: string) => { if (vigente()) setErrorRuta(msg); };
@@ -355,6 +366,7 @@ export default function ModalGps({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...(conTrafico ? { conTrafico: true } : {}),
+          ...(modo === "cache" ? { soloCache: true } : {}),
           // `paradaParaApiRuta` (lib/ruta-firma.ts): si este cuerpo se armara de otra forma, la clave
           // con que /api/ruta guarda la ruta y la que usa «Ver recorrido» para leerla no coincidirían.
           paradas: paradasConCoords.map(p => paradaParaApiRuta(p)),
@@ -378,6 +390,17 @@ export default function ModalGps({
         return;
       }
 
+      // La ruta no está guardada y nadie pidió consultarla: no se dibuja la línea de Google, pero
+      // los paraderos SÍ (marcadores, avance, tiempos históricos). El panel ofrece el botón.
+      if (data?.sin_cache === true) {
+        if (!vigente()) return;
+        setRuta(null);
+        setRutaConTrafico(false);
+        setRutaSinCache(true);
+        setParadasResueltas(paradasConCoords);
+        return;
+      }
+
       if (!data.coordenadas || !Array.isArray(data.coordenadas) || data.coordenadas.length === 0) {
         fallo("Google no devolvió coordenadas de ruta");
         return;
@@ -392,6 +415,7 @@ export default function ModalGps({
 
       setRuta(data as RutaData);
       setRutaConTrafico(conTrafico);   // marca de origen: sin esto el badge de tráfico sería adivinanza
+      setRutaSinCache(false);
       setParadasResueltas(paradasConCoords);
     } catch (e: any) {
       console.error("[ModalGps] Error fetch:", e);
@@ -420,14 +444,22 @@ export default function ModalGps({
     [paradasJson]
   );
 
-  useEffect(() => { cargarRuta(); }, [firmaParadas, firmaParadasJson, origen, destino]); // eslint-disable-line
+  useEffect(() => { cargarRuta("cache"); }, [firmaParadas, firmaParadasJson, origen, destino]); // eslint-disable-line
   useEffect(() => { rutaRef.current = ruta; }, [ruta]);   // el loop del puente lee rutaRef.current
 
   // ── Dibujar ruta en Mapbox ────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!ruta || !mapListo || !mapInst.current) return;
-    if (!ruta.coordenadas || ruta.coordenadas.length === 0) return;
+    if (!mapListo || !mapInst.current) return;
+    // Sin ruta (no estaba guardada): se retira la de unos paraderos anteriores, si la hubo.
+    if (!ruta || !ruta.coordenadas || ruta.coordenadas.length === 0) {
+      try {
+        const map = mapInst.current;
+        ["ruta-sombra", "ruta-line"].forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
+        if (map.getSource("ruta-google")) map.removeSource("ruta-google");
+      } catch { /* mapa a medio desmontar */ }
+      return;
+    }
     const map = mapInst.current;
 
     try {
@@ -625,7 +657,11 @@ export default function ModalGps({
         //    (`porGoogle`, en orden). `puentesPorRutaPrevista` (lib/huella.ts) es ese bucle, sin red.
         const fase1 = puentesPorRutaPrevista(cands, fixesCand, rutaRef.current?.coordenadas);
         const slots: any[] = fase1.slots.map((p) => (p ? featureDePuente(p) : null));
-        const porGoogle: number[] = fase1.porGoogle;
+        // Sin la ruta planificada cargada (no estaba guardada y nadie la consultó) los huecos NO se
+        // mandan a Google: sería pagar por la puerta de atrás lo que el panel acaba de convertir en
+        // un botón. Quedan como hueco honesto hasta que alguien consulte la ruta. Con la ruta
+        // guardada —el caso de un contrato que se repite— todo sigue exactamente como antes.
+        const porGoogle: number[] = rutaRef.current?.coordenadas?.length ? fase1.porGoogle : [];
         // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco), con tope de
         //    concurrencia. Un `key` repetido dentro del mismo lote comparte UNA sola llamada.
         const enVuelo = new Map<string, Promise<void>>();
@@ -1154,10 +1190,10 @@ export default function ModalGps({
           <div style="font-family:system-ui;padding:6px 2px;min-width:160px">
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
               <div style="width:22px;height:22px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:white;font-size:10px;font-weight:900;flex-shrink:0">${num}</div>
-              <p style="font-weight:900;margin:0;color:#0b315f;font-size:13px;line-height:1.2">${p.nombre}</p>
+              <p style="font-weight:900;margin:0;color:#0b315f;font-size:13px;line-height:1.2">${escHtml(p.nombre)}</p>
             </div>
             <p style="margin:2px 0 0;color:${bg};font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">${tag}</p>
-            ${p.hora_estimada ? `<p style="margin:4px 0 0;color:#64748b;font-size:11px">⏰ ${p.hora_estimada.slice(0, 5)}</p>` : ""}
+            ${p.hora_estimada ? `<p style="margin:4px 0 0;color:#64748b;font-size:11px">⏰ ${escHtml(p.hora_estimada.slice(0, 5))}</p>` : ""}
             ${completada ? `<p style="margin:4px 0 0;color:#16a34a;font-weight:700;font-size:11px">✓ Completada (marcada por el conductor)</p>` : ""}
             ${inferida ? `<p style="margin:4px 0 0;color:#d97706;font-weight:700;font-size:11px">↷ ${porGpsM ? "Pasada — detectado por GPS, sin marcar" : "Sin marcar — el vehículo ya está más adelante"}</p>` : ""}
           </div>`);
@@ -1169,6 +1205,16 @@ export default function ModalGps({
 
       stopMarkersRef.current.push(marker);
     });
+    // Sin la ruta de Google (no estaba guardada) nadie encuadra el mapa: lo hace la lista de
+    // paraderos, una sola vez. Con ruta, el efecto que la dibuja ya encuadra.
+    if (!rutaRef.current && !encuadreParadasRef.current && total >= 2) {
+      try {
+        const b = new window.mapboxgl.LngLatBounds();
+        paradasResueltas.forEach(p => b.extend([Number(p.lng), Number(p.lat)]));
+        mapInst.current.fitBounds(b, { padding: { top: 60, bottom: 60, left: 60, right: 280 }, maxZoom: 15 });
+        encuadreParadasRef.current = true;
+      } catch { /* bounds inválidos: se queda la vista actual */ }
+    }
   // firmaMotivos (primitiva) y no `avance.motivo`: el array es nuevo en cada render y
   // recrearía los 30 marcadores de Mapbox varias veces por segundo.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1285,8 +1331,8 @@ export default function ModalGps({
   // (el popup se arma una vez; sin re-sync se quedaba con la velocidad inicial = 0).
   const popupHTML = (vel: number) =>
     `<div style="font-family:system-ui;padding:4px">
-      <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${vehiculoPlaca}</p>
-      <p style="margin:4px 0 0;color:#475569;font-size:12px">${conductorNombre}</p>
+      <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${escHtml(vehiculoPlaca)}</p>
+      <p style="margin:4px 0 0;color:#475569;font-size:12px">${escHtml(conductorNombre)}</p>
       <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${vel} km/h</p>
     </div>`;
 
@@ -1456,14 +1502,11 @@ export default function ModalGps({
   const alarmaSinSenal = sinSenal && !finalizado;
   // Solo tiene sentido comparar si la ruta se pidió CON tráfico: sin él, /api/ruta rellena
   // duracion_trafico_min con duracion_min y la resta da 0 SIEMPRE (no "no hay tráfico", sino
-  // "no se preguntó"). Ver el botón «Recalcular con tráfico actual» del panel derecho.
+  // "no se preguntó"). Ver el botón «Calcular tráfico en tiempo real» del panel derecho.
   const hayTrafico    = rutaConTrafico && (ruta?.tramos?.some(t => t.duracion_trafico_min > t.duracion_min + 2) ?? false);
 
-  // Espejos por REF de lo que el efecto de ETA necesita leer SIN tenerlo como dependencia.
-  // `seAleja` alterna varias veces por servicio (retornos de avenida); como dependencia
-  // desmontaría el setInterval de MS_REFRESCO_ETA en cada flip y el refresco de 3 min nunca
-  // llegaría a dispararse: el ETA pasaría a gobernarlo la llamada de montaje de cada remonte,
-  // acotada solo por el piso de 30 s — hasta 6× el gasto de la línea base.
+  // Espejos por REF de lo que el cálculo de ETA con tráfico necesita leer: así el callback del
+  // botón es estable y siempre lee el estado del último commit.
   const seAlejaRef  = useRef(false);
   const sinSenalRef = useRef(false);
   const snapPosRef  = useRef<{ lat: number; lng: number } | null>(null);
@@ -1475,7 +1518,7 @@ export default function ModalGps({
     return { idx: proximaIdx, lat: p.lat, lng: p.lng, nombre: paradasDisplay[proximaIdx]?.nombre || "Parada" };
   }, [proximaIdx, paradasAvance, paradasDisplay]);
   // Sincronización tras el commit (no durante el render): los espejos solo se leen dentro de
-  // callbacks asíncronos y del intervalo, así que basta con que estén al día en cada commit.
+  // callbacks asíncronos, así que basta con que estén al día en cada commit.
   useEffect(() => {
     seAlejaRef.current  = seAleja;
     sinSenalRef.current = sinSenal;
@@ -1483,109 +1526,83 @@ export default function ModalGps({
     objetivoEtaRef.current = objetivoEta;
   });
 
-  // ── ETA dinámica: posición actual del vehículo → próxima parada ────────────
-  // Igual que /seguimiento: Google Directions vía /api/ruta. Recalcula cada MS_REFRESCO_ETA
-  // (y al cambiar de parada o al llegar la primera señal), no en cada poll GPS.
-  // Firma primitiva de paradasResueltas: es un array NUEVO cada vez que corre cargarRuta, y como
-  // dependencia re-disparaba el ETA (llamada cara CON tráfico) sin que cambiara ninguna coord.
+  // ── ETA CON TRÁFICO bus → próxima parada: SOLO A PEDIDO ─────────────────────
+  // Antes se pedía a Google CON tráfico (SKU Advanced, sin caché) al abrir el modal y cada 3 min
+  // mientras siguiera abierto, lo mirara alguien o no. Reportado por el dueño (13-10-2026) como el
+  // gasto que más pesaba en la factura de Google. Ahora el panel estima GRATIS con el promedio
+  // real de los últimos 30 días (`etaHistorica`, abajo) y Google solo se paga cuando una persona
+  // pulsa «Calcular tráfico en tiempo real»: UNA llamada por clic.
+  const [cargandoEta,    setCargandoEta]    = useState(false);
+  const [etaCalculadaTs, setEtaCalculadaTs] = useState<number | null>(null);
+  const [avisoEta,       setAvisoEta]       = useState<string | null>(null);
+  const etaSinRuta = etaSinRutaDe != null && etaSinRutaDe === proximaIdx;
+  // Reloj de la pantalla para lo que caduca o se proyecta desde «ahora» (la vigencia del ETA con
+  // tráfico, la hora aproximada de llegada). Un tick de 15 s basta y mantiene puro el render.
+  const [ahora, setAhora] = useState(() => Date.now());
   useEffect(() => {
-    let cancel = false;
-    const limpiar = () => { if (!cancel) { setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null); } };
-    // `forzar` = solo el primer cálculo y el AVANCE de parada. El intervalo y el "volver a ser
-    // visible" respetan el piso de MS_MIN_ENTRE_ETA: sin él, cada alt-tab con el modal abierto
-    // era una llamada facturable CON tráfico que se saltaba entero el MS_REFRESCO_ETA.
-    const calcular = async (forzar = false) => {
-      // El guard vive AQUÍ y no solo en los invocadores: la llamada inicial se disparaba aunque
-      // la pestaña estuviera oculta al montar el modal.
-      if (document.hidden) return;
-      const u = ubicRef.current;
-      const obj = objetivoEtaRef.current;
-      // Nada que estimar: ruta terminada, sin objetivo con coords, o sin GPS.
-      if (!obj || !u) { limpiar(); return; }
-      // El bus SE ALEJA de la parada objetivo: pedir la ruta hacia ella devuelve una vuelta en U
-      // y pintarla es exactamente el bug ("llega a las X" con el bus yéndose). No se llama a
-      // Google — se ahorra el SKU caro y se deja de mentir. Mismo criterio en /pasajero.
-      if (seAlejaRef.current) { limpiar(); return; }
-      // Servicio terminado o sin señal: un modal olvidado abierto compraba una llamada Directions
-      // con tráfico cada 3 minutos indefinidamente, para pintar una hora sin sentido.
-      if (u.estado === "finalizado" || sinSenalRef.current) { limpiar(); return; }
-      // Dos rechazos seguidos por rodeo absurdo = la condición es persistente (bus fuera de ruta,
-      // parada mal geocodificada). Dejar de pagar hasta que el objetivo cambie.
-      if (etaRechazosRef.current >= 2 && ultimoDestinoEtaRef.current === obj.idx) return;
-      if (!forzar && Date.now() - ultimoEtaRef.current < MS_MIN_ENTRE_ETA) return;
-      // ORIGEN pegado a la vía, no el fix crudo: con GPS de red el punto cae en la calzada
-      // contraria o fuera de vía y Google rodea la manzana para salir — una vuelta en U que
-      // inyecta el propio punto de partida. Su geometría se descarta aquí abajo (solo se usan
-      // total_min/total_km), así que ese error hoy es invisible en el mapa pero sí falsea la hora.
-      const origen = snapPosRef.current ?? { lat: Number(u.lat), lng: Number(u.lng) };
-      const dRectaM = distM(origen.lat, origen.lng, obj.lat, obj.lng);
-      ultimoEtaRef.current = Date.now();
-      ultimoDestinoEtaRef.current = obj.idx;
-      try {
-        const res = await fetch("/api/ruta", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          // Único punto del modal donde el tráfico SÍ importa (bus → próxima parada): va con
-          // conTrafico para que Google use departure_time=now. No se cachea, por eso el refresco
-          // es lento (MS_REFRESCO_ETA) y se pausa con la pestaña oculta.
-          body: JSON.stringify({ conTrafico: true, paradas: [
-            { lat: origen.lat, lng: origen.lng, nombre: "Vehículo" },
-            { lat: obj.lat, lng: obj.lng, nombre: obj.nombre },
-          ] }),
-        });
-        const data = await res.json();
-        if (!cancel && res.ok && data) {
-          const min = typeof data.total_min === "number" ? data.total_min : null;
-          const km  = typeof data.total_km  === "number" ? data.total_km  : null;
-          // PRUEBA DE CORDURA sobre lo que Google acaba de devolver. Un rodeo de más de 3× la
-          // distancia en línea recta (+2 km de holgura para tramos cortos, donde cualquier
-          // manzana multiplica la razón) es una vuelta en U, no un trayecto: significa que el
-          // destino quedó detrás del bus. Conservar el ETA anterior en vez de pintar una hora
-          // absurda; el motor direccional debería estar a punto de avanzar el objetivo.
-          if (km != null && km * 1000 > dRectaM * 3 + 2000) {
-            etaRechazosRef.current++;
-            // Al segundo rechazo se deja de pedir (arriba), así que la hora que quedara pintada
-            // se congelaría sin que nada la contradiga: a los 30 min seguiría diciendo "llega a
-            // las 3:42" de una hora ya pasada. Se apaga y el panel explica por qué.
-            if (etaRechazosRef.current >= 2 && !cancel) {
-              setEtaDe(null); setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null);
-              setEtaSinRuta(true);
-            }
-            return;
-          }
-          if (!cancel) setEtaSinRuta(false);
-          etaRechazosRef.current = 0;
-          setEtaDe(obj.idx);   // la estimación queda atada a la parada para la que se pidió
-          setEtaMin(min);
-          setEtaKm(km);
-          // Se congela el INSTANTE de llegada: la hora pintada no debe moverse entre refrescos
-          // (ver fmtHoraLlegada).
-          setEtaLlegadaTs(min != null ? Date.now() + Math.round(min) * 60_000 : null);
-        }
-      } catch { /* conservar ETA previa */ }
-    };
-    // Saltarse el piso de 30 s solo cuando el objetivo AVANZA (o en el primer cálculo). Si
-    // retrocede —el bus volvió al retorno a recoger, única regresión posible del piso— se
-    // recalcula respetando el piso: un retroceso no debe poder comprar llamadas en ráfaga.
-    const prevIdx = ultimoDestinoEtaRef.current;
+    const iv = setInterval(() => setAhora(Date.now()), 15_000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Devuelve null si pidió la estimación, o el MOTIVO por el que no se pidió (se enseña al lado
+  // del botón: un clic que no hace nada sin decir por qué se lee como un botón roto).
+  const calcularEtaTrafico = useCallback(async (): Promise<string | null> => {
+    const u = ubicRef.current;
+    const obj = objetivoEtaRef.current;
+    if (!obj) return "No hay próxima parada con coordenadas.";
+    if (!u) return "Sin posición GPS del vehículo.";
+    // El bus SE ALEJA de la parada objetivo: pedir la ruta hacia ella devuelve una vuelta en U
+    // y pintarla es exactamente el bug ("llega a las X" con el bus yéndose). Mismo criterio en /pasajero.
+    if (seAlejaRef.current) return "El vehículo se aleja de la parada: no se estima la llegada.";
     // Objetivo nuevo ⇒ los rechazos eran de la parada anterior: se empieza de cero, si no una
     // parada "sin ruta directa" dejaría muda a la siguiente.
-    if (prevIdx !== proximaIdx) { etaRechazosRef.current = 0; setEtaSinRuta(false); }
-    calcular(prevIdx == null || (proximaIdx != null && proximaIdx > prevIdx));
-    // Pausa con la pestaña oculta (mismo patrón que app/pasajero/page.tsx): el timer no gasta
-    // llamadas de Google en segundo plano y al volver a ser visible recalcula una vez, siempre
-    // que hayan pasado al menos MS_MIN_ENTRE_ETA desde el último pedido.
-    const iv = setInterval(() => { calcular(); }, MS_REFRESCO_ETA);
-    const alVolverVisible = () => { calcular(); };
-    document.addEventListener("visibilitychange", alVolverVisible);
-    return () => {
-      cancel = true;
-      clearInterval(iv);
-      document.removeEventListener("visibilitychange", alVolverVisible);
-    };
-  // `seAleja` NO va aquí a propósito (ver seAlejaRef): como dependencia haría starvation del
-  // intervalo de 3 min. Su efecto inmediato en pantalla lo cubre el efecto de abajo.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proximaIdx, !!ubic, firmaAvance]);
+    if (ultimoDestinoEtaRef.current !== obj.idx) etaRechazosRef.current = 0;
+    if (u.estado === "finalizado") return "El servicio ya finalizó.";
+    if (sinSenalRef.current) return "Sin señal GPS: no se puede estimar desde la posición actual.";
+    // Dos rechazos seguidos por rodeo absurdo = la condición es persistente (bus fuera de ruta,
+    // parada mal geocodificada). No se vuelve a pagar hasta que el objetivo cambie.
+    if (etaRechazosRef.current >= 2 && ultimoDestinoEtaRef.current === obj.idx) return "Sin ruta directa: el destino quedó detrás del vehículo.";
+    // ORIGEN pegado a la vía, no el fix crudo: con GPS de red el punto cae en la calzada
+    // contraria y Google rodea la manzana para salir, lo que falsea la hora.
+    const origen = snapPosRef.current ?? { lat: Number(u.lat), lng: Number(u.lng) };
+    const dRectaM = distM(origen.lat, origen.lng, obj.lat, obj.lng);
+    ultimoEtaRef.current = Date.now();
+    ultimoDestinoEtaRef.current = obj.idx;
+    try {
+      const res = await fetch("/api/ruta", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conTrafico: true, paradas: [
+          { lat: origen.lat, lng: origen.lng, nombre: "Vehículo" },
+          { lat: obj.lat, lng: obj.lng, nombre: obj.nombre },
+        ] }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data) return data?.error || `Google no respondió (${res.status}).`;
+      const min = typeof data.total_min === "number" ? data.total_min : null;
+      const km  = typeof data.total_km  === "number" ? data.total_km  : null;
+      // PRUEBA DE CORDURA: un rodeo de más de 3× la línea recta (+2 km de holgura) es una vuelta
+      // en U, no un trayecto: el destino quedó detrás del bus.
+      if (km != null && km * 1000 > dRectaM * 3 + 2000) {
+        etaRechazosRef.current++;
+        if (etaRechazosRef.current >= 2) {
+          setEtaDe(null); setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null);
+          setEtaSinRutaDe(obj.idx);
+        }
+        return "Google devolvió un rodeo (el destino parece quedar detrás del vehículo).";
+      }
+      setEtaSinRutaDe(null);
+      etaRechazosRef.current = 0;
+      setEtaDe(obj.idx);   // la estimación queda atada a la parada para la que se pidió
+      setEtaMin(min);
+      setEtaKm(km);
+      // Se congela el INSTANTE de llegada (ver fmtHoraLlegada).
+      setEtaLlegadaTs(min != null ? Date.now() + Math.round(min) * 60_000 : null);
+      setEtaCalculadaTs(Date.now());
+      return null;
+    } catch (e) {
+      return "No se pudo consultar a Google: " + (e instanceof Error ? e.message : "error de red");
+    }
+  }, []);
 
   // VIGENCIA DE LA ESTIMACIÓN — derivada, no borrada por un efecto. Un efecto que limpiara el
   // estado dejaría un render intermedio pintando todavía la hora vieja; derivarlo la apaga en el
@@ -1593,39 +1610,148 @@ export default function ModalGps({
   //   • es de OTRA parada (el objetivo avanzó) — nunca se hereda una hora entre destinos;
   //   • el bus se aleja — calcularla exige una ruta de regreso que el bus no va a hacer;
   //   • no hay señal GPS — no se puede afirmar nada del presente.
-  const etaVigente = etaDe != null && etaDe === proximaIdx && !seAleja && !sinSenal;
+  //   • pasó VIGENCIA_ETA_TRAFICO_MS desde que se pidió — ya no se refresca sola.
+  const etaVigente = etaDe != null && etaDe === proximaIdx && !seAleja && !sinSenal
+    && etaCalculadaTs != null && ahora - etaCalculadaTs <= VIGENCIA_ETA_TRAFICO_MS;
   const etaMinVis  = etaVigente ? etaMin : null;
   const etaKmVis   = etaVigente ? etaKm : null;
   const etaLlegVis = etaVigente ? etaLlegadaTs : null;
 
-  // Hora de llegada por TRAMO del panel "Ruta · Google Maps" — antes solo mostraba el minutaje
-  // entre paraderos y el operador tenía que sumarlos a mano contra el reloj para saber a qué hora
-  // pasaría el bus por cada uno. Ancla en `etaLlegVis` (la hora YA calculada por GPS+tráfico real
-  // para la PRÓXIMA parada) cuando está vigente — ahí SÍ es la llegada, no se le suma nada más.
-  // Sin ETA real vigente (servicio no iniciado, sin GPS, o el cálculo todavía no resuelve) se ancla
-  // en "ahora": ese instante es el INICIO del tramo activo, no su llegada, así que también hay que
-  // sumarle su propia duración — de lo contrario el tramo activo se pintaba con la hora de "ahora"
-  // mismo (p. ej. "llega 11:27 p.m." siendo ya las 11:28), contradiciendo su propio badge de "7 min".
-  // De ahí en adelante se encadena sumando la duración de cada tramo siguiente. Los tramos YA
-  // RECORRIDOS (antes de la próxima parada) no llevan hora: pintarla inventaría una llegada para un
-  // tramo que ya pasó.
+  // ── TIEMPOS REALES POR TRAMO (últimos 30 días, sin Google) ─────────────────
+  // lib/tramos-historicos.ts: la mediana de llegada-a-llegada que marcaron los conductores en los
+  // servicios finalizados con esos mismos paraderos. Es lo que el panel enseña POR DEFECTO.
+  const firmaPuntosHist = useMemo(
+    () => JSON.stringify(paradasResueltas.map(p => [p.lat, p.lng, p.hora_estimada])),
+    [paradasResueltas]
+  );
+  // La respuesta lleva la FIRMA de la lista con que se pidió: mientras no coincida con la actual
+  // está «cargando» (derivado, sin un setState que lo marque).
+  const [histResp, setHistResp] = useState<{ firma: string; datos: TiemposHistoricos | null; error?: string } | null>(null);
+  const histVigente = histResp?.firma === firmaPuntosHist ? histResp : null;
+  const historico = {
+    estado: histVigente == null ? "cargando" as const : histVigente.datos ? "ok" as const : "error" as const,
+    datos: histVigente?.datos ?? null,
+    error: histVigente?.error,
+  };
+  useEffect(() => {
+    if (paradasResueltas.length < 2) return;
+    let cancel = false;
+    const firma = firmaPuntosHist;
+    (async () => {
+      try {
+        const cred = await credencialesGps();
+        const res = await fetch("/api/seguimiento/tramos-historicos", {
+          method: "POST", headers: cred.headers,
+          body: JSON.stringify({
+            reservaId, token: cred.token,
+            puntos: paradasResueltas.map(p => ({ lat: p.lat, lng: p.lng, hora: p.hora_estimada })),
+          }),
+        });
+        const j = await res.json().catch(() => null);
+        if (cancel) return;
+        if (!res.ok || !j?.ok) setHistResp({ firma, datos: null, error: j?.error || `Error ${res.status}` });
+        else setHistResp({ firma, datos: j as TiemposHistoricos });
+      } catch {
+        if (!cancel) setHistResp({ firma, datos: null, error: "No se pudo leer el historial" });
+      }
+    })();
+    return () => { cancel = true; };
+  }, [firmaPuntosHist, reservaId]); // eslint-disable-line
+
+  // Una fila por tramo de `paradasResueltas` (la MISMA lista que se le mandó al historial y a
+  // Google, en el mismo orden): así cada fuente se empareja por índice sin adivinar por nombre.
+  // Si una respuesta quedó de una lista anterior (largo distinto), no se usa.
+  const tramosPanel = useMemo(() => {
+    const n = paradasResueltas.length;
+    if (n < 2) return [];
+    const g = ruta?.tramos?.length === n - 1 ? ruta.tramos : null;
+    const hd = histVigente?.datos;
+    const h = hd?.tramos?.length === n - 1 ? hd.tramos : null;
+    return Array.from({ length: n - 1 }, (_, i) => {
+      const a = paradasResueltas[i], b = paradasResueltas[i + 1];
+      const rectaM = a.lat != null && a.lng != null && b.lat != null && b.lng != null
+        ? distM(Number(a.lat), Number(a.lng), Number(b.lat), Number(b.lng)) : null;
+      return { desde: a.nombre, hasta: b.nombre, hist: h?.[i] ?? null, google: g?.[i] ?? null, rectaM };
+    });
+  }, [paradasResueltas, ruta, histVigente]);
+  // Duración con la que se encadenan las horas: lo pedido con tráfico manda (una persona lo
+  // pidió); si no, el promedio real; si no hay historial, la de Google sin tráfico (si la ruta
+  // estaba guardada); si tampoco, no hay número y la cadena se corta ahí.
+  const minDeTramo = (f: (typeof tramosPanel)[number]): number | null =>
+    rutaConTrafico && f.google ? f.google.duracion_trafico_min : f.hist?.minutos ?? f.google?.duracion_min ?? null;
+
+  // Índice de la próxima parada en `paradasResueltas` (puede no ser 1:1 con paradasDisplay).
+  const kProxima = useMemo(() => {
+    if (!proximaParada) return -1;
+    const norm = (s: string) => (s || "").trim().toLowerCase();
+    const k = paradasResueltas.findIndex(p => p.id === proximaParada.id);
+    return k >= 0 ? k : paradasResueltas.findIndex(p => norm(p.nombre) === norm(proximaParada.nombre));
+  }, [proximaParada, paradasResueltas]);
+
+  // ETA GRATIS a la próxima parada: la parte del tramo (en línea recta) que le queda al bus, por
+  // la duración típica del tramo. Solo con el bus en marcha hacia ella; antes del origen no hay
+  // tramo del que tomar la duración.
+  const enMarchaHacia = !!ubic && !esperandoInicio && !finalizado && !sinSenal && !seAleja && !detenidaEnObjetivo;
+  const etaHist = useMemo(() => {
+    if (!enMarchaHacia || kProxima < 1) return null;
+    const f = tramosPanel[kProxima - 1];
+    if (!f) return null;
+    const base = f.hist?.minutos ?? f.google?.duracion_min ?? null;
+    const min = minutosRestantes(base, distObjetivoM, f.hist?.rectaM ?? f.rectaM);
+    if (min == null) return null;
+    return { min, fuente: f.hist?.minutos != null ? "historial" as const : "google" as const };
+  }, [enMarchaHacia, kProxima, tramosPanel, distObjetivoM]);
+
+  // Hora de llegada por TRAMO. Ancla, en este orden: la llegada CON tráfico que alguien pidió
+  // (ahí SÍ es la llegada a la próxima, no se le suma nada); la estimación gratis por el promedio
+  // real; y si no, "ahora" (o la salida programada, si todavía no sale) como INICIO del tramo
+  // activo, al que se le suma su duración. De ahí se encadena tramo a tramo. Los tramos YA
+  // RECORRIDOS no llevan hora (inventaría una llegada que ya pasó), y la cadena se corta en el
+  // primer tramo sin duración conocida: sumar un hueco daría horas falsas para todo lo que sigue.
   const horasLlegadaTramos = useMemo(() => {
-    if (!ruta?.tramos?.length || !proximaParada) return [];
-    const idxAncla = ruta.tramos.findIndex(t => t.hasta === proximaParada.nombre);
-    if (idxAncla < 0) return []; // nombre no calza entre paradas y tramos (parada sin geocodificar, etc.)
-    const anclaEsLlegadaReal = etaVigente && etaLlegVis != null;
-    // Sin ETA real, el ancla es "ahora" salvo que el servicio NO haya salido: encadenar desde
-    // ahora un servicio de las 21:00 abierto a las 19:51 pintaba "llega 8:19 p.m." en paraderos
-    // por los que el bus todavía no había pasado. Con la salida programada por delante, ese
-    // instante —y no el reloj— es el inicio del primer tramo.
-    let acum = anclaEsLlegadaReal ? etaLlegVis : Math.max(Date.now(), anclaMinimaTs);
-    return ruta.tramos.map((t, i) => {
-      if (i < idxAncla) return null;
-      if (i === idxAncla && anclaEsLlegadaReal) return acum; // ya es la llegada — no sumar de nuevo
-      acum += t.duracion_trafico_min * 60_000;
+    if (!tramosPanel.length || kProxima < 0) return [];
+    const idxAncla = kProxima - 1;   // tramo que termina en la próxima; -1 si la próxima es el origen
+    // Yendo al origen con el servicio ya iniciado no se sabe cuándo llega al origen: sin horas.
+    if (idxAncla < 0 && !esperandoInicio) return [];
+    const llegadaAncla = idxAncla >= 0
+      ? (etaLlegVis ?? (etaHist ? ahora + etaHist.min * 60_000 : null))
+      : null;
+    let acum: number | null = llegadaAncla ?? Math.max(ahora, anclaMinimaTs);
+    return tramosPanel.map((f, i) => {
+      if (i < idxAncla || acum == null) return null;
+      if (i === idxAncla && llegadaAncla != null) return acum;   // ya es la llegada
+      const m = minDeTramo(f);
+      if (m == null) { acum = null; return null; }
+      acum += m * 60_000;
       return acum;
     });
-  }, [ruta, proximaParada, etaVigente, etaLlegVis, anclaMinimaTs]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tramosPanel, kProxima, etaLlegVis, etaHist, anclaMinimaTs, esperandoInicio, rutaConTrafico, ahora]);
+
+  // Total de la ruta para el header y el panel, con su fuente dicha.
+  const totalPanel: { min: number; fuente: "trafico" | "historial" | "parcial" | "google" } | null =
+    rutaConTrafico && ruta ? { min: ruta.total_min, fuente: "trafico" }
+    : historico.datos?.completo && historico.datos.totalMin != null ? { min: Math.round(historico.datos.totalMin), fuente: "historial" }
+    : ruta ? { min: ruta.total_min, fuente: "google" }
+    : historico.datos?.totalMin != null ? { min: Math.round(historico.datos.totalMin), fuente: "parcial" }
+    : null;
+
+  // Botón «Calcular tráfico en tiempo real»: la ruta entera con tráfico y, con el bus en ruta, la
+  // llegada a la próxima parada desde su posición. Dos llamadas al SKU caro, por un clic.
+  const pedirTrafico = async () => {
+    setAvisoEta(null);
+    setCargandoEta(true);
+    try {
+      const enRuta = !!ubicRef.current && ubicRef.current.estado !== "finalizado" && !esperandoInicio;
+      const [, motivo] = await Promise.all([
+        cargarRuta("trafico"),
+        enRuta ? calcularEtaTrafico() : Promise.resolve(null),
+      ]);
+      if (motivo) setAvisoEta(motivo);
+    } finally {
+      setCargandoEta(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 md:p-4" style={{ background: "rgba(15,23,42,0.65)" }}>
@@ -1699,14 +1825,14 @@ export default function ModalGps({
                     ↷ {avance.pisoGps - avance.pisoConductor} parada(s) pasada(s) sin marcar
                   </span>
                 )}
-                {ruta && (
-                  // Sin recálculo con tráfico no se puede afirmar "ruta libre" (nunca se preguntó):
-                  // se muestra el tiempo planificado, en neutro. El veredicto de tráfico (naranja/verde)
-                  // aparece sólo tras pulsar «Recalcular con tráfico actual».
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${!rutaConTrafico ? "bg-white/15 text-blue-100" : hayTrafico ? "bg-orange-500 text-white" : "bg-green-600 text-white"}`}>
-                    {!rutaConTrafico
-                      ? `🕒 Ruta · ${ruta.total_min} min`
-                      : hayTrafico ? `⚠ Tráfico · ${ruta.total_min} min` : `✓ Ruta libre · ${ruta.total_min} min`}
+                {totalPanel && totalPanel.fuente !== "parcial" && (
+                  // Sin cálculo con tráfico no se puede afirmar "ruta libre" (nunca se preguntó):
+                  // se muestra el promedio real (o el de Google sin tráfico), en neutro. El veredicto
+                  // de tráfico (naranja/verde) aparece sólo tras pulsar «Calcular tráfico en tiempo real».
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${totalPanel.fuente !== "trafico" ? "bg-white/15 text-blue-100" : hayTrafico ? "bg-orange-500 text-white" : "bg-green-600 text-white"}`}>
+                    {totalPanel.fuente === "historial" ? `🕒 Promedio real · ${totalPanel.min} min`
+                      : totalPanel.fuente === "google" ? `🕒 Ruta · ${totalPanel.min} min`
+                      : hayTrafico ? `⚠ Tráfico · ${totalPanel.min} min` : `✓ Ruta libre · ${totalPanel.min} min`}
                   </span>
                 )}
                 {cargandoRuta && <span className="text-[10px] text-blue-300">Calculando ruta...</span>}
@@ -1893,16 +2019,38 @@ export default function ModalGps({
                         </div>
                       )}
                     </>
+                  ) : etaHist != null ? (
+                    // Estimación GRATIS por el promedio real del tramo: se dice que es aproximada y de
+                    // dónde sale. La de Google con tráfico se pide con el botón de abajo.
+                    <>
+                      <div className="flex-1">
+                        <p className="text-[10px] uppercase opacity-70">Llega aprox. a las</p>
+                        <p className="text-xl font-bold leading-tight">{fmtHoraLlegada(ahora + etaHist.min * 60_000)}</p>
+                        <p className="text-[11px] opacity-60 mt-0.5">en ~{fmtTiempo(etaHist.min)} · {etaHist.fuente === "historial" ? `promedio real ${DIAS_HISTORIAL} días` : "Google sin tráfico"}</p>
+                      </div>
+                      {distObjetivoM != null && (
+                        <div className="text-right">
+                          <p className="text-[10px] uppercase opacity-70">En recta</p>
+                          <p className="text-base font-bold">{fmtDistancia(distObjetivoM)}</p>
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <p className="text-sm opacity-80">
                       {esperandoInicio ? `El servicio aún no inicia${horaSalidaTxt ? ` — sale ${horaSalidaTxt}` : ""}`
                         : finalizado ? "Servicio finalizado"
                         : sinSenal ? "Sin señal GPS — no se puede estimar"
                         : etaSinRuta ? "Sin ruta directa: el destino quedó detrás del vehículo"
-                        : "Calculando tiempo estimado…"}
+                        : historico.estado === "cargando" ? "Buscando el promedio real del tramo…"
+                        : `Sin promedio de este tramo${distObjetivoM != null ? ` · a ${fmtDistancia(distObjetivoM)} en recta` : ""}`}
                     </p>
                   )}
                 </div>
+                {etaMinVis != null && etaCalculadaTs != null && (
+                  <p className="text-[10px] opacity-70 mt-2 pt-2 border-t border-white/20">
+                    🚦 Con tráfico de Google · calculado a las {fmtHoraTs(etaCalculadaTs)}
+                  </p>
+                )}
                 {/* De dónde sale que ésta es la próxima: una inferencia NUNCA se presenta como
                     si el conductor la hubiera confirmado. */}
                 {proximaIdx != null && proximaIdx > 0 && avance.pisoGps > avance.pisoConductor && (
@@ -1986,59 +2134,91 @@ export default function ModalGps({
               <p className="text-[9px] text-gray-400 mt-1">GPS real del conductor</p>
             </div>
 
-            {ruta && (
+            {tramosPanel.length > 0 && (
               <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
-                <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-2">Ruta · Google Maps</p>
+                <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-0.5">Tiempos entre paraderos</p>
+                {/* De dónde salen los minutos, dicho siempre: el promedio real (gratis) por defecto, el
+                    tráfico de Google solo si alguien lo pidió. */}
+                <p className="text-[9px] text-gray-400 mb-2 leading-snug">
+                  {rutaConTrafico
+                    ? "Con tráfico actual de Google (consultado a pedido)."
+                    : `Promedio real de los servicios de los últimos ${DIAS_HISTORIAL} días (llegada a llegada marcada por el conductor).`}
+                </p>
                 <div className="grid grid-cols-2 gap-2 mb-3">
                   <div className="bg-gray-50 rounded-lg px-2 py-1.5 text-center">
-                    <p className="text-[#0b315f] font-black text-lg leading-none">{ruta.total_km}</p>
-                    <p className="text-gray-400 text-[9px] font-bold">km totales</p>
+                    <p className="text-[#0b315f] font-black text-lg leading-none">{ruta ? ruta.total_km : tramosPanel.length}</p>
+                    <p className="text-gray-400 text-[9px] font-bold">{ruta ? "km totales" : "tramos"}</p>
                   </div>
-                  {/* La etiqueta dice «c/tráfico» SÓLO si de verdad se pidió con tráfico; si no, el
-                      número es la duración planificada de Google y así se nombra. */}
-                  <div className={`rounded-lg px-2 py-1.5 text-center ${!rutaConTrafico ? "bg-gray-50" : hayTrafico ? "bg-orange-50" : "bg-green-50"}`}>
-                    <p className={`font-black text-lg leading-none ${!rutaConTrafico ? "text-[#0b315f]" : hayTrafico ? "text-orange-600" : "text-green-600"}`}>{ruta.total_min}</p>
-                    <p className={`text-[9px] font-bold ${!rutaConTrafico ? "text-gray-400" : hayTrafico ? "text-orange-400" : "text-green-400"}`}>{rutaConTrafico ? "min c/tráfico" : "min estimados"}</p>
+                  <div className={`rounded-lg px-2 py-1.5 text-center ${totalPanel?.fuente !== "trafico" ? "bg-gray-50" : hayTrafico ? "bg-orange-50" : "bg-green-50"}`}
+                    title={totalPanel?.fuente === "parcial" ? `Solo ${historico.datos?.conNumero} de ${tramosPanel.length} tramos tienen promedio` : undefined}>
+                    <p className={`font-black text-lg leading-none ${totalPanel?.fuente !== "trafico" ? "text-[#0b315f]" : hayTrafico ? "text-orange-600" : "text-green-600"}`}>
+                      {totalPanel ? `${totalPanel.fuente === "parcial" ? "≥" : ""}${totalPanel.min}` : "—"}
+                    </p>
+                    <p className={`text-[9px] font-bold ${totalPanel?.fuente !== "trafico" ? "text-gray-400" : hayTrafico ? "text-orange-400" : "text-green-400"}`}>
+                      {totalPanel?.fuente === "trafico" ? "min c/tráfico"
+                        : totalPanel?.fuente === "historial" ? "min promedio real"
+                        : totalPanel?.fuente === "parcial" ? "min (parcial)"
+                        : totalPanel?.fuente === "google" ? "min Google s/tráfico"
+                        : historico.estado === "cargando" ? "midiendo…" : "sin promedio"}
+                    </p>
                   </div>
                 </div>
-                {ruta.advertencia && (
+                {rutaConTrafico && ruta?.advertencia && (
                   <div className="bg-orange-50 border border-orange-200 rounded-lg px-2 py-1.5 mb-2">
                     <p className="text-orange-600 text-[10px] font-bold">{ruta.advertencia}</p>
                   </div>
                 )}
-                {ruta.tramos && ruta.tramos.length > 0 && (
-                  <div className="space-y-2">
-                    {ruta.tramos.map((t, i) => {
-                      // Mismo criterio que `hayTrafico`: sin recálculo con tráfico la resta es 0 por
-                      // construcción, así que el tramo no se pinta de naranja por una comparación vacía.
-                      const conTrafico = rutaConTrafico && t.duracion_trafico_min > t.duracion_min + 2;
-                      const horaLlegada = horasLlegadaTramos[i] ?? null;
-                      return (
-                        <div key={i} className="border-t pt-2 first:border-t-0 first:pt-0">
-                          <div className="flex justify-between items-start gap-1 mb-0.5">
-                            <p className="text-[10px] text-gray-600 font-medium leading-tight flex-1 truncate">{t.desde} → {t.hasta}</p>
-                            <div className="flex flex-col items-end flex-shrink-0 ml-1">
-                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${conTrafico ? "bg-orange-100 text-orange-600" : "bg-green-100 text-green-600"}`}>
-                                {t.duracion_texto}
-                              </span>
-                              {horaLlegada != null && (
-                                <span className="text-[9px] text-gray-400 font-bold mt-0.5">llega {fmtHoraLlegada(horaLlegada)}</span>
-                              )}
-                            </div>
-                          </div>
-                          <p className="text-[9px] text-gray-400">{t.distancia_km} km</p>
-                        </div>
-                      );
-                    })}
-                  </div>
+                {historico.estado === "error" && (
+                  <p className="text-[9px] text-amber-600 font-bold mb-2">⚠ {historico.error}</p>
                 )}
-                {/* Único punto del modal donde el operador paga el SKU caro a propósito: pide el
-                    tráfico del momento, una vez, porque lo decidió una persona. La carga automática
-                    de la ruta sigue yendo sin tráfico (barata y cacheada). */}
-                <button onClick={() => cargarRuta(true)} disabled={cargandoRuta}
-                  className="w-full mt-3 py-1.5 rounded-lg text-[10px] font-bold text-[#0b315f] bg-blue-50 hover:bg-blue-100 transition-colors disabled:opacity-50">
-                  {cargandoRuta ? "Actualizando..." : "🔄 Recalcular con tráfico actual"}
+                <div className="space-y-2">
+                  {tramosPanel.map((f, i) => {
+                    // Mismo criterio que `hayTrafico`: sin cálculo con tráfico la resta es 0 por
+                    // construcción, así que el tramo no se pinta de naranja por una comparación vacía.
+                    const conTrafico = rutaConTrafico && !!f.google && f.google.duracion_trafico_min > f.google.duracion_min + 2;
+                    const horaLlegada = horasLlegadaTramos[i] ?? null;
+                    const min = minDeTramo(f);
+                    const fuente = rutaConTrafico && f.google ? "trafico" : f.hist?.minutos != null ? "historial" : f.google ? "google" : null;
+                    const title = fuente === "trafico" ? `Google con tráfico actual${f.hist?.minutos != null ? ` · promedio real ${fmtTiempo(f.hist.minutos)}` : ""}`
+                      : fuente === "google" ? `Sin promedio real (${f.hist?.detalle ?? "midiendo"}) · se muestra Google sin tráfico`
+                      : f.hist?.detalle ?? (historico.estado === "cargando" ? "Midiendo el promedio real…" : "Sin dato");
+                    return (
+                      <div key={i} className="border-t pt-2 first:border-t-0 first:pt-0">
+                        <div className="flex justify-between items-start gap-1 mb-0.5">
+                          <p className="text-[10px] text-gray-600 font-medium leading-tight flex-1 truncate" title={`${f.desde} → ${f.hasta}`}>{f.desde} → {f.hasta}</p>
+                          <div className="flex flex-col items-end flex-shrink-0 ml-1">
+                            <span title={title}
+                              className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${min == null ? "bg-gray-100 text-gray-400" : fuente === "trafico" ? (conTrafico ? "bg-orange-100 text-orange-600" : "bg-green-100 text-green-600") : fuente === "historial" ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"}`}>
+                              {min == null ? (historico.estado === "cargando" ? "…" : "sin dato") : `${fuente === "google" ? "~" : ""}${fmtTiempo(min)}`}
+                            </span>
+                            {horaLlegada != null && (
+                              <span className="text-[9px] text-gray-400 font-bold mt-0.5">llega {fmtHoraLlegada(horaLlegada)}</span>
+                            )}
+                          </div>
+                        </div>
+                        <p className="text-[9px] text-gray-400">
+                          {f.google ? `${f.google.distancia_km} km` : f.rectaM != null ? `${fmtDistancia(f.rectaM)} en recta` : ""}
+                          {fuente === "historial" && f.hist ? ` · ${f.hist.muestras} serv.${f.hist.codigo === "todo_el_dia" ? " (todo el día)" : ""}` : ""}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Google se paga SOLO aquí, y porque lo pidió una persona. La ruta sin tráfico se
+                    guarda 30 días para todos; el tráfico no se guarda (cambia con la hora). */}
+                {rutaSinCache && !ruta && (
+                  <button onClick={() => cargarRuta("google")} disabled={cargandoRuta}
+                    className="w-full mt-3 py-1.5 rounded-lg text-[10px] font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors disabled:opacity-50"
+                    title="Dibuja la ruta planificada y los km de cada tramo. Se guarda 30 días: la próxima vez no se vuelve a pagar.">
+                    {cargandoRuta ? "Consultando..." : "🗺️ Consultar ruta en Google Maps"}
+                  </button>
+                )}
+                <button onClick={pedirTrafico} disabled={cargandoEta || cargandoRuta || finalizado}
+                  className="w-full mt-2 py-1.5 rounded-lg text-[10px] font-bold text-[#0b315f] bg-blue-50 hover:bg-blue-100 transition-colors disabled:opacity-50"
+                  title={finalizado ? "El servicio ya finalizó: el tráfico de ahora no describe este viaje." : "Consulta a Google el tráfico de este momento (consulta pagada). No se actualiza solo."}>
+                  {cargandoEta ? "Calculando..." : "🚦 Calcular tráfico en tiempo real"}
                 </button>
+                {avisoEta && <p className="text-[9px] text-amber-600 font-bold mt-1.5 leading-snug">{avisoEta}</p>}
               </div>
             )}
 
