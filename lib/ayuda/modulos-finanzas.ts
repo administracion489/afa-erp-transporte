@@ -1301,4 +1301,77 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       { etiqueta: "Tercerizadas · los proveedores y sus unidades", href: "/tercerizadas" },
     ],
   },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // COMISIONES
+  // ══════════════════════════════════════════════════════════════════════════
+  {
+    clave: "comisiones",
+    rutas: ["/comisiones"],
+    titulo: "Comisiones · lo que gana el ejecutivo de ventas",
+    resumen:
+      "Es donde se calcula, mes a mes, lo que se le paga al ejecutivo de ventas por el negocio que trae: la comisión sobre la utilidad, el bono de arranque de un contrato fijo nuevo, el bono de atención y el fondo de los administrativos que operan los servicios. Hay dos vistas: el vendedor ve solo lo suyo (solo lectura) y la administración calcula, clasifica, corrobora, cierra el mes y exporta la planilla.",
+    paraQueSirve: [
+      "Que el vendedor vea con claridad cuánto le toca y por qué, con el cálculo de cada línea a la vista.",
+      "Calcular el preliminar del mes y recalcularlo cuando cambia algo (un cobro, una clasificación, una corroboración).",
+      "Clasificar reclamos y cancelaciones (lo único que puede romper el bono de atención) sin decidir sobre un servicio propio.",
+      "Corroborar quién operó cada servicio para repartir el fondo administrativo.",
+      "Marcar un servicio como cobrado con sus tres pruebas (depósito, factura PDF y XML) y cerrar el mes dejándolo inmutable.",
+    ],
+    conceptos: [
+      "comision_vendedor",
+      "utilidad_antes_impuestos",
+      "captador",
+      "ventana_cliente_nuevo",
+      "bono_arranque",
+      "bono_atencion",
+      "fondo_administrativo",
+    ],
+    faqs: [
+      {
+        pregunta: "¿Por qué una comisión aparece en ámbar como “retenida · falta costear”?",
+        respuesta:
+          "Porque la comisión se calcula sobre la **utilidad**, y ese servicio todavía **no tiene presupuesto**, así que la utilidad no es confiable.\n\nNo es que no te toque: es que falta un dato para calcularla bien. En cuanto se costee el servicio, la línea pasa a pagable con su monto. Por eso se muestra en ámbar con su motivo, en vez de esconderla: lo retenido se ve, no desaparece.",
+      },
+      {
+        pregunta: "El bono de atención me salió completo, pero dice que 5 indicadores están “por defecto”. ¿Qué significa?",
+        respuesta:
+          "Que de los **7 indicadores**, hoy solo **dos** se miden con datos reales: cero quejas (reclamos) y sin cancelaciones evitables. Los otros cinco (rapidez, seguimiento, registros, precios, documentación) **se dan por cumplidos por defecto** porque el ERP todavía no tiene de dónde sacar esos eventos.\n\nLa pantalla lo dice en ámbar a propósito: **no se pinta como medido lo que no se midió**. El día que se registren esos eventos, esos indicadores se empezarán a evaluar de verdad sin cambiar nada más.",
+      },
+      {
+        pregunta: "¿Cuándo se me paga la comisión: cuando vendo o cuando el cliente paga?",
+        respuesta:
+          "Cuando el cliente **paga** (el servicio está **cobrado**). Vender no basta.\n\nPor eso, para que una comisión se reconozca, la administración marca el servicio como cobrado subiendo las **tres pruebas**: la foto del depósito, la factura en PDF y la factura en XML. Sin las tres, no se marca cobrado.",
+      },
+      {
+        pregunta: "Soy administrador y no veo la lista de marcas del fondo para corroborar. ¿Por qué?",
+        respuesta:
+          "El fondo se reparte entre los operadores que **tú corroboras** sobre las marcas que dejan los vendedores (con «Acreditar operador»). Hoy la pantalla corrobora **por id** de marca —el id lo devuelve la acción de acreditar—, mientras el backend no expone una ruta que **liste** las marcas pendientes.\n\nEs una limitación conocida del contrato de la API, no un error: en cuanto exista esa ruta, la lista aparece sin tocar nada más.",
+      },
+      {
+        pregunta: "Cerré el mes por error. ¿Lo puedo reabrir?",
+        respuesta:
+          "No desde la pantalla. **Cerrar un periodo lo vuelve inmutable**: las líneas se confirman y el mes ya no se recalcula. Por eso el botón pide confirmación nombrando que queda inmutable.\n\nEso es a propósito: lo cerrado es lo que se pagó. Si de verdad hay que corregir un mes cerrado, lo tiene que destrabar quien administra la base, no la pantalla.",
+      },
+    ],
+    comoHacer: [
+      {
+        titulo: "Cerrar el mes de comisiones",
+        pasos: [
+          "Elige el mes y pulsa «Calcular / recalcular» para dejar el preliminar al día.",
+          "Revisa lo retenido (ámbar) y, si falta costear algún servicio, costéalo antes de cerrar.",
+          "Clasifica los reclamos y cancelaciones del mes que correspondan.",
+          "Corrobora las marcas del fondo para repartirlo.",
+          "Marca como cobrado lo que haya que reconocer, con sus tres pruebas.",
+          "Pulsa «Cerrar el mes» y confirma. Luego exporta la planilla (CSV).",
+        ],
+        advertencia: "Cerrar vuelve el mes INMUTABLE. Hazlo solo cuando ya no falte nada por costear, clasificar ni corroborar.",
+      },
+    ],
+    relacionadas: [
+      { etiqueta: "Clientes · captador y ventana del cliente", href: "/clientes" },
+      { etiqueta: "Cotizador · donde se registra el vendedor", href: "/cotizador" },
+      { etiqueta: "Liquidaciones · el cobro al cliente", href: "/liquidaciones" },
+    ],
+  },
 ];

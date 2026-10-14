@@ -50,6 +50,7 @@ const MODULOS = [
   "caja-chica",
   "facturacion",
   "gastos",
+  "comisiones",
   "contabilidad",
   "documentos",
   "vencimientos",

@@ -888,4 +888,90 @@ export const GLOSARIO: Record<string, Concepto> = {
       "Los factores son de la EPA de Estados Unidos (combustión en vehículos, **solo CO₂**): diésel 10.21 kg por galón, gasolina 8.78, GLP 5.68 y GNV 1.92 kg por m³. El diésel B5 y el gasohol se calculan como si fueran 100 % fósiles, así que salen un poco altos; la urea y el biodiésel no se cuentan. Es un dato de gestión interna: no está pensado como certificado para un cliente, y por ahora no se publica en su portal.",
     verTambien: ["presupuesto_servicio"],
   },
+
+  // ── Comisiones del ejecutivo de ventas ───────────────────────────────────────
+
+  comision_vendedor: {
+    clave: "comision_vendedor",
+    termino: "Comisión del vendedor",
+    definicion:
+      "Es lo que se le paga al ejecutivo de ventas por el negocio que trae, **calculado sobre la UTILIDAD** del servicio (no sobre lo que se vendió). Toda la política existe para premiar al que trae un **cliente nuevo**: un cliente ya establecido no comisiona.\nSe reconoce cuando el servicio está **cobrado**, no cuando se vende.",
+    ejemplo:
+      "Un servicio eventual de un cliente nuevo deja S/ 125 de utilidad. Si es de los primeros del mes, comisiona al 20 %: S/ 25 para el vendedor.",
+    ojo:
+      "La comisión es sobre la utilidad, así que si el servicio **no tiene presupuesto** la utilidad no es confiable y la comisión se **retiene** (aparece en ámbar como “falta costear”) hasta que se costee. No es que no te toque: es que falta un dato para calcularla bien.",
+    verTambien: ["utilidad_antes_impuestos", "captador", "bono_arranque", "bono_atencion", "ventana_cliente_nuevo", "fondo_administrativo"],
+  },
+
+  utilidad_antes_impuestos: {
+    clave: "utilidad_antes_impuestos",
+    termino: "Utilidad antes de impuestos",
+    definicion:
+      "Es lo que queda de un servicio después de restarle sus costos reales (combustible, peajes, conductor, desgaste, tercerizado…) pero **antes** de pagar el impuesto a la renta. Es la base sobre la que se calcula la comisión.\nEl motor de comisiones la **recibe ya calculada** por el costeo; no la vuelve a deducir.",
+    ejemplo:
+      "Un servicio de S/ 365 con IGV son S/ 309.32 de ingreso. Si costó S/ 198.40, la utilidad antes de impuestos es S/ 110.92. La comisión sale de ese número.",
+    ojo:
+      "No la confundas con la caja: una cosa es que el servicio deje utilidad y otra que el cliente ya haya pagado. La comisión se calcula sobre la utilidad, pero solo se paga cuando el servicio está **cobrado**.",
+    verTambien: ["utilidad_servicio", "comision_vendedor", "presupuesto_servicio"],
+  },
+
+  captador: {
+    clave: "captador",
+    termino: "Captador del cliente",
+    definicion:
+      "Es el vendedor que **trajo** al cliente. Se fija con la **primera cotización** del cliente y ya no se mueve: es quien recibe la comisión de arranque y a quien se le atribuye la ventana de “cliente nuevo”.",
+    ejemplo:
+      "Si Rosa hizo la primera cotización de GLOBAL BUS, Rosa queda como captadora de ese cliente, y las comisiones de cliente nuevo de ese cliente son suyas durante la ventana.",
+    ojo:
+      "No se teclea a mano en la ficha del cliente: lo fija el backend con la 1ª cotización. En la ficha del cliente se ve de solo lectura. Los clientes que ya existían al arrancar el módulo **no tienen captador** (están en la lista firmada de clientes existentes) y no dan comisión de arranque.",
+    verTambien: ["comision_vendedor", "ventana_cliente_nuevo", "bono_arranque"],
+  },
+
+  ventana_cliente_nuevo: {
+    clave: "ventana_cliente_nuevo",
+    termino: "Ventana de 12 meses (cliente nuevo)",
+    definicion:
+      "Un cliente nuevo comisiona solo durante un tiempo: **12 meses** desde su **primer servicio cobrado**. Pasado ese plazo, el cliente deja de ser “nuevo” y sus servicios ya no comisionan.\nHay dos medidas distintas, las dos por **fecha de servicio**: la de ENTRADA (¿es nuevo? → no tuvo servicio en los 12 meses antes de la cotización) y la de SALIDA (¿sigue comisionando? → no pasaron 12 meses desde el primer servicio cobrado).",
+    ejemplo:
+      "Primer servicio cobrado de un cliente nuevo: 15/03/2026. Comisiona hasta el 15/03/2027. Un servicio del 20/03/2027 ya sale “fuera de la ventana”.",
+    ojo:
+      "El plazo (12 meses) es un parámetro con vigencia: si cambia, los cálculos viejos no se mueven. Y las dos ventanas se miden por fecha de **servicio**, no de cobro: lo que mide la antigüedad de la relación es cuándo se prestó el servicio, no cuándo pagó.",
+    verTambien: ["captador", "comision_vendedor"],
+  },
+
+  bono_arranque: {
+    clave: "bono_arranque",
+    termino: "Bono de arranque",
+    definicion:
+      "Es un premio extra por conseguir un **contrato fijo nuevo**: **30 % de la utilidad del primer mes** del contrato, pagado en dos mitades (una al cobrar el mes 1 y otra al cobrar el mes 3).",
+    ejemplo:
+      "Un contrato fijo nuevo cuyo primer mes deja S/ 1,000 de utilidad genera un bono de arranque de S/ 300, en dos partes de S/ 150.",
+    ojo:
+      "Si el contrato se **cancela antes del mes 3**, la segunda mitad **no se paga** (sale como “bono de arranque cancelado”). Y cada mitad solo se paga cuando ese mes está cobrado: antes aparece como “pendiente de cobro”.",
+    verTambien: ["comision_vendedor", "captador"],
+  },
+
+  bono_atencion: {
+    clave: "bono_atencion",
+    termino: "Bono de atención",
+    definicion:
+      "Es un bono de hasta **S/ 150** por hacer bien el trabajo, repartido en **7 indicadores** todo-o-nada (cada uno suma su valor si se cumplió). Se da por cumplido salvo que algo lo rompa: el beneficio de la duda es a favor del vendedor.",
+    ejemplo:
+      "Los 7 indicadores suman S/ 150. Si un mes se rompe “cero quejas” (S/ 20) por un reclamo grave atribuible, el bono de ese mes baja a S/ 130.",
+    ojo:
+      "Hoy solo **dos** indicadores se miden con datos reales (cero quejas / reclamos y sin cancelaciones evitables); los otros cinco (rapidez, seguimiento, registros, precios, documentación) salen **cumplidos por defecto** porque aún no hay fuente de datos. La pantalla lo dice en ámbar por indicador: no se pinta como medido lo que no se midió. Un reclamo solo rompe el bono si es **grave, fundado y atribuible al vendedor** a la vez; una cancelación, solo si es **evitable y con constancia escrita**. Un reclamo sin clasificar NO rompe nada.",
+    verTambien: ["comision_vendedor"],
+  },
+
+  fondo_administrativo: {
+    clave: "fondo_administrativo",
+    termino: "Fondo administrativo",
+    definicion:
+      "Es un pago **de la empresa** (no sale de la comisión del vendedor) para los administrativos que **operan** los servicios: **S/ 4 por cada eventual nuevo cobrado del mes**, repartido en partes iguales entre los operadores que el administrador **corrobora**.",
+    ejemplo:
+      "Un mes con 10 eventuales nuevos cobrados junta S/ 40 de fondo. Si el admin corrobora a 2 operadores, cada uno recibe S/ 20.",
+    ojo:
+      "El vendedor **marca** quién lo ayudó, pero eso no paga nada por sí solo: solo entra al reparto lo que el **administrador corrobora** a fin de mes. Si no hay nadie corroborado, el fondo queda “pendiente de corroboración” y no se reparte (ni se inventa un destinatario). Un eventual retenido **sí** cuenta para el fondo: el fondo es un importe plano por evento, no un porcentaje de la utilidad.",
+    verTambien: ["comision_vendedor"],
+  },
 };

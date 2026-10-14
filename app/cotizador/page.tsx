@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { faltaColumna } from "@/lib/columna-faltante";
 import { calcularCostoUnidad, escenariosPrecio, aplicarPisoHora, recorridoSugerido, RECORRIDO_CARRETERA, type ParametrosUnidad, type Recorrido } from "@/lib/costeo-propio";
 import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
 import {
@@ -981,7 +982,9 @@ export default function CotizadorPage(){
   async function enviar(){
     if(!resultado||!veh)return;
     setEnviando(true);setErrorEnv("");
-    const{error}=await supabase.from("cotizaciones").insert({
+    const{data:{session:sesEnv}}=await supabase.auth.getSession();
+    const payloadCot:Record<string,unknown>={
+      vendedor_id:sesEnv?.user?.id??null,
       origen:metaRuta.origen||null,destino:metaRuta.destino||null,
       km:kmRuta,tipo:modo==="fijo"?"transporte_personal":"eventual",
       estado:"pendiente",modo_servicio:modo,tipo_servicio:tipoServ,
@@ -1004,7 +1007,10 @@ export default function CotizadorPage(){
         viaticosTotal>0?`Viáticos: ${fmt(viaticosTotal)}`:null,
         `Modo: ${modo.toUpperCase()} · ${tipoServ}`,
       ].filter(Boolean).join(" | "),
-    });
+    };
+    // vendedor_id es de una migración accesoria (comisiones-02): si no está, se guarda igual.
+    let{error}=await supabase.from("cotizaciones").insert(payloadCot);
+    if(error&&faltaColumna(error,"vendedor_id")){delete payloadCot.vendedor_id;({error}=await supabase.from("cotizaciones").insert(payloadCot));}
     setEnviando(false);
     if(error){setErrorEnv(error.message);return;}
     setEnviado(true);setTimeout(()=>router.push("/cotizaciones"),1800);

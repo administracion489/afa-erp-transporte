@@ -1677,11 +1677,17 @@ export default function CotizacionesPage(){
    */
   const escribirCotizacion=async(payload:Record<string,unknown>)=>{
     const ir=(p:Record<string,unknown>)=>editandoId?supabase.from("cotizaciones").update(p).eq("id",editandoId):supabase.from("cotizaciones").insert(p);
-    let r=await ir(payload);
-    if(r.error&&faltaColumna(r.error,"ruta_coords_json")){
-      const resto={...payload};delete resto.ruta_coords_json;
-      r=await ir(resto);
-      if(!r.error)setFaltaMigracionCoords(true);
+    // Columnas accesorias: si falta la migración se suelta SOLO la que el error nombra y se reintenta.
+    // ruta_coords_json → cotizaciones-02-ruta-coords.sql · vendedor_id → comisiones-02-captador-y-vendedor.sql.
+    const intento={...payload};
+    let r=await ir(intento);
+    let guard=0;
+    while(r.error&&guard++<2){
+      const col=(["ruta_coords_json","vendedor_id"] as const).find(c=>c in intento&&faltaColumna(r.error,c));
+      if(!col)break;
+      delete intento[col];
+      if(col==="ruta_coords_json")setFaltaMigracionCoords(true);
+      r=await ir(intento);
     }
     return r;
   };
@@ -1691,7 +1697,8 @@ export default function CotizacionesPage(){
     if(!form.cliente_id&&!form.origen.trim()&&!form.destino.trim()){alert("⚠️ Ingresa al menos el cliente o la ruta para guardar el borrador");return;}
     setGuardando(true);
     let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
-    const payload={...buildPayload("borrador"),creado_por:nombreCreador||null};
+    const{data:{session:sesCot}}=await supabase.auth.getSession();
+    const payload={...buildPayload("borrador"),creado_por:nombreCreador||null,vendedor_id:sesCot?.user?.id??null};
     const{error}=await escribirCotizacion(payload);
     if(error){alert(error.message);setGuardando(false);return;}
     limpiar();cargar();setGuardando(false);
@@ -1709,7 +1716,8 @@ export default function CotizacionesPage(){
     setGuardando(true);
     let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
     const esFijo=form.modo_servicio==="fijo";
-    const payload={...buildPayload(form.estado==="borrador"?"pendiente":undefined),creado_por:nombreCreador||null};
+    const{data:{session:sesCot}}=await supabase.auth.getSession();
+    const payload={...buildPayload(form.estado==="borrador"?"pendiente":undefined),creado_por:nombreCreador||null,vendedor_id:sesCot?.user?.id??null};
     const{error}=await escribirCotizacion(payload);
     if(error){alert(error.message);setGuardando(false);return;}
     // Capturar antes de limpiar() para la propagación
@@ -1949,8 +1957,12 @@ export default function CotizacionesPage(){
   const duplicarCotizacion=async(c:Cotizacion)=>{
     const payload:any={cliente_id:c.cliente_id,origen:c.origen,destino:c.destino,km:c.km,precio_cliente:c.precio_cliente,costo_estimado:c.costo_estimado,margen_estimado:c.margen_estimado,estado:"pendiente",numero_cotizacion:null,atencion:c.atencion,asunto:c.asunto?`COPIA — ${c.asunto}`:null,punto_retorno:c.punto_retorno,fecha_servicio:c.fecha_servicio,fecha_retorno:c.fecha_retorno,hora_ida:c.hora_ida,hora_retorno:c.hora_retorno,descuento_pct:c.descuento_pct||0,items_json:c.items_json,tipo_vehiculo:c.tipo_vehiculo,tipo_servicio:c.tipo_servicio,equipamiento:c.equipamiento,vehiculo_flota_id:c.vehiculo_flota_id,vehiculo_tercero_id:c.vehiculo_tercero_id,consideraciones_json:c.consideraciones_json,paradas_json:c.paradas_json,paradas_retorno_json:c.paradas_retorno_json,modo_servicio:c.modo_servicio,dias_servicio:c.dias_servicio||1,horas_servicio:c.horas_servicio||8,pernocte_costo:c.pernocte_costo,precio_dia:c.precio_dia,precio_mes_estimado:c.precio_mes_estimado,precio_tarifario:c.precio_tarifario,precio_cotizador:c.precio_cotizador,precio_sugerido:c.precio_sugerido,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto,fechas_multidia_json:c.fechas_multidia_json,plantilla_pdf:c.plantilla_pdf||"corporativo"};
     if(c.ruta_coords_json)payload.ruta_coords_json=c.ruta_coords_json;
+    // Quien duplica es el vendedor de la copia (comisiones-02). Si falta la columna, se guarda igual.
+    const{data:{session:sesDup}}=await supabase.auth.getSession();
+    payload.vendedor_id=sesDup?.user?.id??null;
     let{error}=await supabase.from("cotizaciones").insert(payload);
     if(error&&faltaColumna(error,"ruta_coords_json")){delete payload.ruta_coords_json;({error}=await supabase.from("cotizaciones").insert(payload));}
+    if(error&&faltaColumna(error,"vendedor_id")){delete payload.vendedor_id;({error}=await supabase.from("cotizaciones").insert(payload));}
     if(error){alert(error.message);return;}
     alert(`✅ Cotización #${c.numero_cotizacion||c.id} duplicada correctamente`);
     cargar();

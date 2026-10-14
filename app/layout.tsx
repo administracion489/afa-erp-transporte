@@ -370,6 +370,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/caja-chica",    label: "Caja Chica",    sub: "Entregas y rendiciones", icon: Ic.DollarSign,  modulo: "caja-chica"  },
       { href: "/facturacion",   label: "Facturación",   sub: "SUNAT / comprobantes",  icon: Ic.Receipt,      modulo: "facturacion" },
       { href: "/gastos",        label: "Gastos",        sub: "Egresos",               icon: Ic.TrendingDown, modulo: "gastos"      },
+      { href: "/comisiones",    label: "Comisiones",    sub: "Ejecutivo de ventas",   icon: Ic.DollarSign,   modulo: "comisiones"  },
     ],
   },
   {

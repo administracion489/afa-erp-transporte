@@ -405,6 +405,18 @@ export default function ClientesPage() {
   };
   useEffect(() => { cargarClientes(); }, []);
 
+  // Captador del cliente (comisiones-02): el nombre se resuelve desde usuarios. Si la
+  // migración no corrió, la columna no viene en el select("*") y el bloque no se pinta.
+  const [captadores, setCaptadores] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const ids = [...new Set(clientes.map(c => (c as any).captador_usuario_id).filter(Boolean) as string[])];
+    if (!ids.length) { setCaptadores({}); return; }
+    (async () => {
+      const { data } = await supabase.from("usuarios").select("id,nombre").in("id", ids);
+      setCaptadores(Object.fromEntries((data || []).map((u: any) => [String(u.id), u.nombre || String(u.id)])));
+    })();
+  }, [clientes]);
+
   /* Form helpers */
   const f = (key: string) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
@@ -2369,6 +2381,28 @@ export default function ClientesPage() {
                                     {c.notas && <span style={{ fontStyle: "italic", color: "#94a3b8" }}>"{c.notas}"</span>}
                                   </div>
                                 </div>
+
+                                {/* Captador y comisión (comisiones-02). Solo lectura: lo fija el
+                                    backend con la 1ª cotización del cliente; aquí no se edita. */}
+                                {(c as any).captador_usuario_id && (
+                                  <div>
+                                    <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#b45309", marginBottom: 10 }}>
+                                      Captador (comisión)
+                                    </p>
+                                    <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "#475569" }}>
+                                      <span style={{ fontWeight: 600, color: "#0f172a" }}>
+                                        🧑‍💼 {captadores[String((c as any).captador_usuario_id)] || "Vendedor asignado"}
+                                      </span>
+                                      {(c as any).captador_fijado_en && (
+                                        <span style={{ color: "#94a3b8", fontSize: 11 }}>Fijado: {fmtDate((c as any).captador_fijado_en)}</span>
+                                      )}
+                                      <span style={{ color: "#94a3b8", fontSize: 11 }}>
+                                        La ventana de comisión (meses que le quedan) se ve en{" "}
+                                        <a href="/comisiones" style={{ color: "#1262bd", fontWeight: 600 }}>Comisiones</a>.
+                                      </span>
+                                    </div>
+                                  </div>
+                                )}
 
                                 {/* Contactos administrativos */}
                                 {adminCount > 0 && (
