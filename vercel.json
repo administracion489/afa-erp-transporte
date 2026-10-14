@@ -64,6 +64,10 @@
     {
       "path": "/api/paradas/materializar",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/comisiones/preliminar",
+      "schedule": "0 2 * * *"
     }
   ]
 }
