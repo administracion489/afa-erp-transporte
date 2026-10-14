@@ -8,7 +8,7 @@
 // rango o (0,0) exacto = sin dato). Es pura y sin dependencias: importarla no arrastra nada.
 import { coordValida } from "./cotizacion-ruta-coords";
 
-export type MatchPt = { lat: number; lng: number; acc: number };
+export type MatchPt = { lat: number; lng: number; acc: number; ts?: number };
 // `rumbo` (0-360) = dirección REAL que reporta el equipo (columna ubicaciones_gps.rumbo). Solo
 // llega con chip satelital/Doppler; con GPS de red viene 0 y se DERIVA por bearing al mostrarla.
 // Opcional: la máquina de limpiarHuella crea puntos sin rumbo (lo recupera puntosTelemetria del crudo).
@@ -1187,6 +1187,39 @@ const fetchGlobal: FetchMapbox = (url) => fetch(url);
 // `confidence` devuelta = FRACCIÓN de puntos cubiertos por fragmentos confiables (0..1); el gate
 // de matchVentana (≥0.4 = al menos 40% pegado) decide si vale frente al crudo suavizado.
 // El radio de búsqueda por punto se deriva de la precisión GPS (acc·1.5, acotado 5–50 m).
+// ── MANIOBRA vs. RECTA EN MARCHA (caso #1298, 14-10-2026) ─────────────────────────────────
+// Un fix de CHIP (acc ≤ 20 m) que Map Matching no pegó a la vía se dibujaba siempre como medido
+// («protege el oro»). Eso está bien con posiciones densas, que siguen la calle solas, y en la
+// MANIOBRA: un bus casi detenido puede estar de verdad dentro de una cochera o un patio, encima de
+// lo que el mapa pinta como casa. Pero EN MARCHA, una recta larga entre dos fixes precisos corta la
+// esquina por encima de las manzanas. Regla (la del dueño): una cuerda de más de MAX_SEG_CRUDO_M
+// recorrida a más de VEL_MANIOBRA_KMH no es una maniobra → sus dos extremos se marcan `esCrudo`, así
+// la recta no se dibuja como medida (colorearMatched la omite) y el tramo se rellena por la vía
+// (puentesCrudos). Lenta o corta → se queda como medida, aunque caiga sobre una casa.
+// La velocidad es GEOMÉTRICA (distancia ÷ tiempo entre los dos fixes): la del equipo puede ser
+// fantasma (FUSED). Sin hora fiable no se juzga: comportamiento de siempre.
+// VEL_MANIOBRA_KMH NO está medido: es el de la regla del dueño («más de 10 km/h»).
+export const VEL_MANIOBRA_KMH = 10;
+
+/** ¿La cuerda pts[i]→pts[j] es una recta larga recorrida en marcha? */
+function cuerdaEnMarcha(a: MatchPt, b: MatchPt): boolean {
+  const ta = a.ts, tb = b.ts;
+  if (!(typeof ta === "number" && typeof tb === "number" && ta > 0 && tb > ta)) return false;
+  const d = distM(a.lat, a.lng, b.lat, b.lng);
+  if (d <= MAX_SEG_CRUDO_M) return false;
+  return d / ((tb - ta) / 1000) * 3.6 > VEL_MANIOBRA_KMH;
+}
+
+/**
+ * ¿El fix `k` es extremo de una recta larga EN MARCHA con su vecino anterior o siguiente? Solo se
+ * pregunta por fixes que NO son geometría de vía de Mapbox (fragmentos dudosos, ventana sin pegar).
+ */
+export function fixEnRectaEnMarcha(pts: readonly MatchPt[], k: number): boolean {
+  const p = pts[k];
+  if (!p) return false;
+  return (k > 0 && cuerdaEnMarcha(pts[k - 1], p)) || (k + 1 < pts.length && cuerdaEnMarcha(p, pts[k + 1]));
+}
+
 export async function mapMatchTrail(
   pts: MatchPt[],
   token: string,
@@ -1266,7 +1299,8 @@ export async function mapMatchTrail(
         const p: [number, number] = [sample[k].lng, sample[k].lat];   // fragmento dudoso → el fix REAL del bus
         if (lastPt) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], p[1], p[0]));
         via.push(p);
-        esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M);   // crudo de RED → rutear; crudo de CHIP (≤20m) → medido
+        // crudo de RED → rutear; crudo de CHIP (≤20m) → medido, salvo recta larga en marcha (arriba)
+        esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(sample, k));
         crudos++;
         lastPt = p;
         lastCrude = true;
@@ -1291,7 +1325,8 @@ export async function matchVentana(ventana: MatchPt[], token: string, f: FetchMa
   const suav = suavizarPorDistancia(ventana);   // fallback: crudo suavizado por distancia (no pegó a vía)
   const coords = suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [];
   // Por vértice: crudo de RED (acc>20) se ruteará; un fallback de CHIP (acc≤20) queda medido → protege el oro.
-  return { coords, snapped: false, crudeFrac: 1, maxCrudoChordM: 0, esCrudo: coords.map((_, i) => (suav[i]?.acc || 25) > ACC_CONFIABLE_M) };
+  // y una recta larga EN MARCHA tampoco (fixEnRectaEnMarcha): cruzaría las manzanas.
+  return { coords, snapped: false, crudeFrac: 1, maxCrudoChordM: 0, esCrudo: coords.map((_, i) => (suav[i]?.acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(suav, i)) };
 }
 
 // Tramo máximo que se DIBUJA entre dos vértices consecutivos. Más largo que esto = teleport
