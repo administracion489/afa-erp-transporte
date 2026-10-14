@@ -32,7 +32,10 @@ import { rangosDeCrudo } from "./huella";
 // 2 (14-10-2026): las trazas de la versión 1 se calcularon sin mirar si Mapbox rechazaba el token del
 // servidor, y con el token rechazado quedaron guardadas en crudo (caso #1608). Subir la versión las
 // invalida todas (`decodificarTraza` rechaza otra versión): se vuelven a calcular al abrirlas.
-export const VERSION_AJUSTE = 2;
+// 3 (14-10-2026): una recta larga EN MARCHA entre fixes de chip que Map Matching no pegó pasa a ser
+// `esCrudo` (fixEnRectaEnMarcha, lib/huella.ts): la salida del ajustador cambió y las guardadas antes
+// se recalculan.
+export const VERSION_AJUSTE = 3;
 /** Días hacia atrás en que el servidor CALCULA (= DIAS_RASTREO de lib/gps-cobertura-datos.ts, que la
  *  matriz coteja; aquí como literal porque este módulo no puede importar un lector de servidor). */
 export const DIAS_CALCULO = 90;

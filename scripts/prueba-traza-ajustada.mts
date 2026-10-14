@@ -674,8 +674,30 @@ const fetchQueRevienta = (async () => { throw new Error("el fetch global NO deb�
 type SalidaAjuste = { r: any; esCrudo: boolean[]; crudoRanges: Array<[number, number]>; colaClean: number; colaSnapped: boolean };
 const leerAj = (aj: any, r: any): SalidaAjuste => ({ r, esCrudo: aj.leerEsCrudo(), crudoRanges: aj.leerCrudoRanges(), colaClean: aj.leerColaClean(), colaSnapped: aj.leerColaSnapped() });
 
+// LA DIVERGENCIA DECLARADA (14-10-2026, caso #1298): un fix de chip que Map Matching no pegó y que es
+// extremo de una recta larga EN MARCHA pasa a `esCrudo` (H.fixEnRectaEnMarcha). Todo lo demás —las
+// coordenadas, `snapped`, `crudeFrac`, las llamadas— sale idéntico; `esCrudo` solo puede GANAR
+// verdaderos (nunca perderlos), y los rangos se derivan de ese `esCrudo` por rangosDeCrudo.
+let crudosNuevos = 0;
+const esSuperset = (o: boolean[] | undefined, n: boolean[] | undefined): boolean => {
+  if (!o || !n) return o === n;
+  if (o.length !== n.length) return false;
+  for (let i = 0; i < o.length; i++) { if (o[i] && !n[i]) return false; if (n[i] && !o[i]) crudosNuevos++; }
+  return true;
+};
+const sinCrudo = (x: any) => (x && typeof x === "object" ? { ...x, esCrudo: undefined } : x);
+const salidaDeclarada = (o: SalidaAjuste, n: SalidaAjuste): boolean => {
+  if (JSON.stringify(o.r) !== JSON.stringify(n.r) || o.colaSnapped !== n.colaSnapped) return false;
+  if (!esSuperset(o.esCrudo, n.esCrudo)) return false;
+  if (n.r == null) return true;
+  const esp = H.rangosDeCrudo(n.esCrudo, Math.min(n.r.length, n.esCrudo.length));
+  return JSON.stringify(esp.crudoRanges) === JSON.stringify(n.crudoRanges) && esp.colaClean === n.colaClean;
+};
+const matchDeclarado = (o: any, n: any): boolean =>
+  JSON.stringify(sinCrudo(o)) === JSON.stringify(sinCrudo(n)) && esSuperset(o?.esCrudo, n?.esCrudo);
+
 // ══ 0 · la red inyectable ═════════════════════════════════════════════════════════════════
-seccion("0 · mapMatchTrail / matchVentana / crearAjustadorHuella con fetch inyectado = los originales");
+seccion("0 · mapMatchTrail / matchVentana / crearAjustadorHuella con fetch inyectado = los originales (salvo la divergencia declarada)");
 type CorridaMemoria = { caso: string; modo: string; limpio: any[]; salida: SalidaAjuste };
 const MEMORIA: CorridaMemoria[] = [];
 sinEsperas();
@@ -695,9 +717,8 @@ sinEsperas();
       (globalThis as any).fetch = fetchQueRevienta;
       const ajI = H.crearAjustadorHuella({ fetch: f3.fetch });
       const sI = leerAj(ajI, await ajI.ajustar(limpio, "tok"));
-      const jO = JSON.stringify(sO), jD = JSON.stringify(sD), jI = JSON.stringify(sI);
-      chk(`${c.nombre} · ${modo}: defecto = original (${limpio.length} pts, ${f1.urls.length} llamadas)`, jO === jD && JSON.stringify(f1.urls) === JSON.stringify(f2.urls));
-      chk(`${c.nombre} · ${modo}: inyectado = original`, jO === jI && JSON.stringify(f1.urls) === JSON.stringify(f3.urls));
+      chk(`${c.nombre} · ${modo}: defecto = original (${limpio.length} pts, ${f1.urls.length} llamadas)`, salidaDeclarada(sO, sD) && JSON.stringify(f1.urls) === JSON.stringify(f2.urls));
+      chk(`${c.nombre} · ${modo}: inyectado = defecto`, JSON.stringify(sD) === JSON.stringify(sI) && JSON.stringify(f1.urls) === JSON.stringify(f3.urls));
       if (modo !== "limpio") chk(`${c.nombre} · ${modo}: el escenario no es trivial (${f1.urls.length} llamadas, ${sO.esCrudo.filter(Boolean).length} vértices crudos)`,
         c.nombre.startsWith("servicio corto") ? f1.urls.length >= 1 : f1.urls.length >= 2);
       MEMORIA.push({ caso: c.nombre, modo, limpio, salida: sI });
@@ -739,7 +760,7 @@ sinEsperas();
       const pI = await corrida(() => H.crearAjustadorHuella({ fetch: fI.fetch }), fI, false);
       const nulos = pO.filter((p) => p.startsWith('{"r":null')).length;
       chk(`incremental ${c.nombre} · ${modo}: ${pO.length} ciclos idénticos (defecto e inyectado), ${fO.urls.length} llamadas, ${nulos} ciclos sin nada nuevo`,
-        JSON.stringify(pO) === JSON.stringify(pD) && JSON.stringify(pO) === JSON.stringify(pI)
+        pO.length === pD.length && pO.every((x, i) => salidaDeclarada(JSON.parse(x), JSON.parse(pD[i]))) && JSON.stringify(pD) === JSON.stringify(pI)
         && JSON.stringify(fO.urls) === JSON.stringify(fD.urls) && JSON.stringify(fO.urls) === JSON.stringify(fI.urls));
     }
   }
@@ -754,15 +775,17 @@ sinEsperas();
     const modo = Object.values(MODOS)[k % 3];
     const fO = crearFake(modo), fD = crearFake(modo), fI = crearFake(modo);
     (globalThis as any).fetch = fO.fetch;
-    const a = JSON.stringify([await mapMatchTrailOrig(ventana, "tok"), await matchVentanaOrig(ventana, "tok")]);
+    const a = [await mapMatchTrailOrig(ventana, "tok"), await matchVentanaOrig(ventana, "tok")];
     (globalThis as any).fetch = fD.fetch;
-    const b = JSON.stringify([await H.mapMatchTrail(ventana, "tok"), await H.matchVentana(ventana, "tok")]);
+    const b = [await H.mapMatchTrail(ventana, "tok"), await H.matchVentana(ventana, "tok")];
     (globalThis as any).fetch = fetchQueRevienta;
     const cI = JSON.stringify([await H.mapMatchTrail(ventana, "tok", fI.fetch), await H.matchVentana(ventana, "tok", fI.fetch)]);
     total++;
-    if (a === b && a === cI && JSON.stringify(fO.urls) === JSON.stringify(fD.urls) && JSON.stringify(fO.urls) === JSON.stringify(fI.urls)) iguales++;
+    if (matchDeclarado(a[0], b[0]) && matchDeclarado(a[1], b[1]) && JSON.stringify(b) === cI
+        && JSON.stringify(fO.urls) === JSON.stringify(fD.urls) && JSON.stringify(fO.urls) === JSON.stringify(fI.urls)) iguales++;
   }
-  chk(`mapMatchTrail + matchVentana: ${iguales}/${total} ventanas idénticas (defecto e inyectado)`, iguales === total);
+  chk(`mapMatchTrail + matchVentana: ${iguales}/${total} ventanas idénticas salvo la divergencia declarada (defecto e inyectado)`, iguales === total);
+  chk(`corolario: la divergencia se ejercita (${crudosNuevos} vértices de chip en recta larga en marcha pasaron a crudo)`, crudosNuevos > 0);
   (globalThis as any).fetch = fetchReal;
   chk("sin token, el ajustador no llama (inyectado o no)", await (async () => {
     const f = crearFake({});
