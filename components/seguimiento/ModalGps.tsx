@@ -33,6 +33,7 @@ import {
   type TrazaDecodificada, type RespuestaAjustada, type CodigoCalculo, type CaeTraza, type TonoTraza,
 } from "@/lib/gps-traza-ajustada";
 import { juzgarDetencion, medirQuietud, rotuloDetencion, type FilaQuietud } from "@/lib/gps-detencion";
+import { filaEnVivoDelServicio, tMs } from "@/lib/gps-huella-servicio";
 import { minutosRestantes, DIAS_HISTORIAL, type TiemposHistoricos } from "@/lib/tramos-historicos";
 
 declare global { interface Window { mapboxgl: any; } }
@@ -47,6 +48,7 @@ type UbicGps = {
   precision_m: number; estado: string;
   created_at: string | null; timestamp: string | null;
   fix_ts?: string | null; // hora del último fix real (detección robusta de "congelado")
+  reserva_id?: number | null; vehiculo_id?: number | null; vehiculo_tercero_id?: number | null;
 };
 
 type Parada = {
@@ -168,6 +170,11 @@ export default function ModalGps({
   // Filtro del fix EN VIVO (una instancia por apertura del modal): rechaza el glitch de red
   // aislado que "avanza y retrocede" — ver crearFiltroFixVivo en lib/huella.ts.
   const filtroVivoRef = useRef(crearFiltroFixVivo());
+  // ¿Qué fila del tiempo real es del servicio? (filaEnVivoDelServicio, lib/gps-huella-servicio.ts):
+  // si ya se mostró una fila de ESTA reserva, o el servicio está cerrado, una fila de la unidad sin
+  // reserva —o de otra— es el bus haciendo otra cosa y no mueve el ícono (reserva #1459).
+  const vioFilaDelServicioRef = useRef(false);
+  const servicioCerradoRef = useRef(false);
   const viasCercaRef = useRef<{ lat: number; lng: number; puntos: { lat: number; lng: number }[] } | null>(null);
   const tilequeryPendRef = useRef(false);
   const tilequeryLastMsRef = useRef(0);           // throttle TEMPORAL (≥15 s): el jitter de red >80 m de un bus quieto no debe re-consultar en cada fix
@@ -581,7 +588,10 @@ export default function ModalGps({
         const arr = Array.isArray(json?.huella) ? json.huella : [];
         // ANTES del early-return: el caso "servicio no iniciado" devuelve huella VACÍA a
         // propósito, y es justo cuando el modal más necesita saber por qué está vacía.
-        if (!cancel && json?.servicio) setServicioGps(json.servicio);
+        if (!cancel && json?.servicio) {
+          setServicioGps(json.servicio);
+          if (json.servicio.estado === "finalizada" || json.servicio.estado === "cancelada") servicioCerradoRef.current = true;
+        }
         if (cancel || arr.length === 0) return;
 
         // GPS CONGELADO vs. BUS PARADO — dos métodos, el ROBUSTO primero.
@@ -1370,10 +1380,14 @@ export default function ModalGps({
         // corrige solo en el siguiente fix) ANTES de mover el ícono. Autocontenido ante ts no
         // fiable (NaN) — no hace falta validarlo aquí.
         const tsFix = fechaRef ? new Date(fechaRef).getTime() : NaN;
-        if (!mismoFix && filtroVivoRef.current(d.lat, d.lng, tsFix)) {
+        if (!mismoFix && filtroVivoRef.current(d.lat, d.lng, tsFix, d.precision_m)) {
           ubicRef.current = d;
           setUbic(d);
         }
+        // La consulta devuelve la última fila de la reserva (o, sin ninguna, la de la unidad): lo
+        // que ella diga del servicio vale aunque el filtro no haya movido el ícono.
+        if (reservaId != null && Number(d.reserva_id) === Number(reservaId)) vioFilaDelServicioRef.current = true;
+        if (d.estado === "finalizado" && reservaId != null && Number(d.reserva_id) === Number(reservaId)) servicioCerradoRef.current = true;
       } else if (!ubicRef.current) {
         // Sin datos y sin nada previo (ni realtime): recién ahí marcamos sin señal.
         setSinSenal(true);
@@ -1399,15 +1413,22 @@ export default function ModalGps({
         // Solo aceptar puntos del vehículo correcto. Cada condición exige id NO nulo:
         // así un servicio tercerizado (vehiculoId null) ya no engancha la señal de OTRO
         // bus que también tenga vehiculo_id null.
-        const match =
-          (vehiculoTerceroId != null && d.vehiculo_tercero_id === vehiculoTerceroId) ||
-          (vehiculoId != null && d.vehiculo_id === vehiculoId) ||
-          (vehiculoTerceroId == null && vehiculoId == null && reservaId != null && d.reserva_id === reservaId);
-        if (!match) return;
+        // Y solo las del SERVICIO: tras «Finalizar» la unidad sigue transmitiendo (otro servicio o
+        // conectada sin servicio) y antes cada una movía el ícono y la cabecera a «GPS en vivo»
+        // (reserva #1459). La regla es la misma que aplica la consulta del servidor.
+        const ultimo = ubicRef.current;
+        const veredicto = filaEnVivoDelServicio(d, {
+          reservaId: reservaId ?? null, vehiculoId: vehiculoId ?? null, vehiculoTerceroId: vehiculoTerceroId ?? null,
+          vioFilaDelServicio: vioFilaDelServicioRef.current,
+          servicioCerrado: servicioCerradoRef.current,
+          ultimoTs: ultimo ? tMs(ultimo) || null : null,
+        });
+        if (!veredicto.acepta) return;
         const nueva: UbicGps = {
           lat: d.lat, lng: d.lng, velocidad: d.velocidad, rumbo: d.rumbo,
           precision_m: d.precision_m, estado: d.estado,
           created_at: d.created_at ?? null, timestamp: d.timestamp ?? null,
+          reserva_id: d.reserva_id ?? null, vehiculo_id: d.vehiculo_id ?? null, vehiculo_tercero_id: d.vehiculo_tercero_id ?? null,
         };
         // Frescura aparte de si la posición se acepta abajo (misma razón que el poll): llegó
         // un INSERT real, así que la señal está viva.
@@ -1415,9 +1436,13 @@ export default function ModalGps({
         setUltimaActualiz(new Date());
         const fechaRef = nueva.created_at || nueva.timestamp;
         const tsFix = fechaRef ? new Date(fechaRef).getTime() : NaN;
+        if (veredicto.motivo === "del_servicio") {
+          vioFilaDelServicioRef.current = true;
+          if (nueva.estado === "finalizado") servicioCerradoRef.current = true;
+        }
         // Mismo filtro que el poll: un glitch aislado (realtime lo empuja de inmediato, sin
         // esperar los 10s del poll) no debe mover el ícono. Autocontenido ante ts no fiable.
-        if (filtroVivoRef.current(nueva.lat, nueva.lng, tsFix)) {
+        if (filtroVivoRef.current(nueva.lat, nueva.lng, tsFix, nueva.precision_m)) {
           ubicRef.current = nueva;
           setUbic(nueva);
         }
@@ -1592,7 +1617,9 @@ export default function ModalGps({
   // punto esté congelado → mostraba "hace 3s" con el bus parado hace 1 min. Ahora coincide
   // con sinSenal (>60s) y con el color del pulso (edad del punto).
   const fechaPunto    = ubic ? (ubic.created_at || ubic.timestamp) : null;
-  const segsDesdeUlt  = fechaPunto ? Math.floor((Date.now() - new Date(fechaPunto).getTime()) / 1000) : null;
+  // Nunca negativo: la hora la pone el TELÉFONO y su reloj puede ir unos segundos adelantado
+  // («hace -3s», reserva #1459).
+  const segsDesdeUlt  = fechaPunto ? Math.max(0, Math.floor((Date.now() - new Date(fechaPunto).getTime()) / 1000)) : null;
   // El conductor CERRÓ el servicio: el último punto de este servicio es el que la app fuerza al
   // pulsar «Finalizar», y desde ahí deja de transmitir POR DISEÑO. «Sin señal GPS» en rojo sobre
   // eso acusaba a un equipo sano (reserva #29811, cerrada 07:39 con el GPS vivo todo el viaje):

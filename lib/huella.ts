@@ -12,7 +12,10 @@ export type MatchPt = { lat: number; lng: number; acc: number; ts?: number };
 // `rumbo` (0-360) = dirección REAL que reporta el equipo (columna ubicaciones_gps.rumbo). Solo
 // llega con chip satelital/Doppler; con GPS de red viene 0 y se DERIVA por bearing al mostrarla.
 // Opcional: la máquina de limpiarHuella crea puntos sin rumbo (lo recupera puntosTelemetria del crudo).
-export type HuellaPt = { lat: number; lng: number; velocidad: number; acc: number; ts: number; rumbo?: number };
+// `parada`: el vértice es el CENTROIDE de una detención (limpiarHuella), no un fix. Su posición es el
+// promedio de minutos de muestras y su ts el de la última agrupada, así que una velocidad derivada
+// desde él no mide nada: conVelocidadColor lo deja en 0 (Parado) y no lo usa de vecino.
+export type HuellaPt = { lat: number; lng: number; velocidad: number; acc: number; ts: number; rumbo?: number; parada?: boolean };
 
 // Un puntito de telemetría REAL sobre la huella (Idea 2). `velReal`/`rumboReal` = el dato vino del
 // equipo (Doppler); si false, se derivó (velocidad por desplazamiento / rumbo por bearing) → la UI
@@ -175,11 +178,24 @@ function proyectarEnSegmento(lat: number, lng: number, A: { lat: number; lng: nu
 // Ancla solo la POSICIÓN; deja acc/velocidad/rumbo/ts intactos (la precisión sigue honesta en el
 // popup). NO agrega/quita puntos (out = pts.slice, solo muta lat/lng) → índices y congelado por
 // índice de crearAjustadorHuella intactos. Estabilidad: un punto con SUS DOS anclas ya fijas es
-// determinista entre re-fetch; los de la COLA sin ancla-posterior aún se dejan intactos y pueden
-// re-anclar (asentarse) cuando llega un confiable después — mutación tardía normal de la cola viva.
+// determinista entre re-fetch; los de la COLA sin ancla-posterior re-anclan (se asientan) cuando
+// llega un confiable después — mutación tardía normal de la cola viva.
+//
+// LA COLA (reserva #1459, 14-10-2026): mientras el bus esperaba en la cochera, el teléfono mandaba
+// cada ~10 s un fix de RED (±200 m) clavado en el mismo sitio, a 214 m del bus, intercalado con fixes
+// de chip (±3 m). En medio de la traza el ancla lo resolvía; en la PUNTA no había ancla posterior, y
+// cada vez que el último fix recibido era el de red el trazo en vivo dibujaba una línea de 214 m hasta
+// él. Ahora un fix impreciso de la cola (sin confiable después) que cae DENTRO de su propia
+// imprecisión alrededor del ÚLTIMO confiable, y a ≤ VIGENCIA_ANCLA_COLA_MS de él, se dibuja en la
+// posición de ese confiable: no aporta nada que el confiable no diga ya. Cuando llega el confiable
+// siguiente, el punto pasa a la regla de siempre (proyección sobre la cuerda), así que la traza
+// TERMINADA es la misma. Más allá de la vigencia (el chip se perdió de verdad) se deja intacto.
+export const VIGENCIA_ANCLA_COLA_MS = 15_000; // NO medido: ~4 fixes a la cadencia de la app en marcha
+/** Radio dentro del cual un fix impreciso es «el mismo lugar» que su ancla confiable. */
+export const radioAncla = (acc: number) => Math.max(70, 1.5 * acc);
 export function anclarImprecisos(pts: HuellaPt[], umbral = ACC_CONFIABLE_M, maxGapM = 200): HuellaPt[] {
   const n = pts.length;
-  if (n < 3) return pts;
+  if (n < 2) return pts;
   const relB = new Array<number>(n).fill(-1), relA = new Array<number>(n).fill(-1);
   let last = -1;
   for (let i = 0; i < n; i++) { relB[i] = last; if (pts[i].acc <= umbral) last = i; }
@@ -189,10 +205,18 @@ export function anclarImprecisos(pts: HuellaPt[], umbral = ACC_CONFIABLE_M, maxG
   for (let i = 0; i < n; i++) {
     if (pts[i].acc <= umbral) continue;                                          // confiable → intacto
     const jb = relB[i], ja = relA[i];
-    if (jb < 0 || ja < 0) continue;                                              // extremo sin ancla de un lado
+    if (jb >= 0 && ja < 0) {                                                     // COLA: solo hay ancla antes
+      const dt = pts[i].ts - pts[jb].ts;
+      if (dt > 0 && dt <= VIGENCIA_ANCLA_COLA_MS
+        && distM(pts[jb].lat, pts[jb].lng, pts[i].lat, pts[i].lng) <= radioAncla(pts[i].acc)) {
+        out[i] = { ...pts[i], lat: pts[jb].lat, lng: pts[jb].lng };            // dentro de su error → el confiable
+      }
+      continue;
+    }
+    if (jb < 0 || ja < 0) continue;                                              // cabeza sin ancla previa
     if (distM(pts[jb].lat, pts[jb].lng, pts[ja].lat, pts[ja].lng) > maxGapM) continue; // corredor largo → no anclar
     const q = proyectarEnSegmento(pts[i].lat, pts[i].lng, pts[jb], pts[ja]);
-    if (q.dist > Math.max(70, 1.5 * pts[i].acc)) continue;                       // lejos de la cuerda vs su precisión = desvío/curva real → dejar
+    if (q.dist > radioAncla(pts[i].acc)) continue;                               // lejos de la cuerda vs su precisión = desvío/curva real → dejar
     out[i] = { ...pts[i], lat: q.lat, lng: q.lng };                             // ruido lateral → anclar al corredor confiable
   }
   return out;
@@ -311,23 +335,51 @@ export function gateVelocidad(pts: HuellaPt[], vmaxKmh = VMAX_BUS_KMH, reanclaN 
 // filtro ciego un par de fixes más (NaN nunca es "mayor que" nada). Autocontenido: los
 // llamadores no necesitan validar `ts` antes de invocar esta función.
 // Uso: una instancia POR VEHÍCULO/servicio (crea un filtro nuevo por reserva, no global).
+//
+// CON LA PRECISIÓN (`acc`, opcional: sin ella, byte a byte lo de antes). Reserva #1459 (14-10-2026):
+// en la cochera llegaba cada ~10 s un fix de RED (±200 m) clavado en el MISMO punto, a 214 m del bus,
+// entre fixes de chip (±3 m). 214 m en 7 s son 110 km/h —«plausibles»—, así que el filtro lo aceptaba;
+// desde ahí los fixes de chip (214 m en 3 s) eran «imposibles» y los fantasmas siguientes (0 m) sí
+// plausibles: el ícono quedó ESTACIONADO en el fantasma, junto al paradero 1, seis minutos. Dos reglas,
+// las dos solo con `acc`:
+//   1. Un fix IMPRECISO que cae dentro de su propia incertidumbre (radioAncla) alrededor del último
+//      fix PRECISO aceptado, a ≤ VIGENCIA_ANCLA_COLA_MS de él, no aporta nada que ese no diga: no
+//      mueve el ícono y no toca el estado. (Es la misma regla que ancla la cola de la huella.)
+//   2. Un fix PRECISO cuyo salto desde un último IMPRECISO lo explica el error de ese último
+//      (radioAncla(acc del último) + lo que el bus puede recorrer) se acepta: el que estaba mal era
+//      el anterior. Nunca se afloja para un candidato impreciso: el glitch de #24742 (±300 m, 300 m
+//      en 3 s) sigue fuera.
 export function crearFiltroFixVivo(vmaxKmh = VMAX_BUS_KMH, reanclaN = 2) {
-  type Pt = { lat: number; lng: number; ts: number };
+  type Pt = { lat: number; lng: number; ts: number; acc?: number };
   let ultimo: Pt | null = null;
+  let ultimoPreciso: Pt | null = null;
   let pendientes: Pt[] = [];
   const vmax = vmaxKmh / 3.6;
   const plausible = (a: Pt, b: Pt) => distM(a.lat, a.lng, b.lat, b.lng) / Math.max(1, (b.ts - a.ts) / 1000) <= vmax;
-  return (lat: number, lng: number, ts: number): boolean => {
+  const preciso = (p: Pt) => p.acc != null && p.acc <= ACC_CONFIABLE_M;
+  const aceptar = (p: Pt) => { ultimo = p; pendientes = []; if (preciso(p)) ultimoPreciso = p; return true; };
+  return (lat: number, lng: number, ts: number, acc?: number | null): boolean => {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
     if (!Number.isFinite(ts)) return true;                          // sin ts fiable → aceptar, no tocar el estado
-    const cand: Pt = { lat, lng, ts };
-    if (!ultimo || !(ts > ultimo.ts)) { ultimo = cand; pendientes = []; return true; }
+    const conAcc = typeof acc === "number" && Number.isFinite(acc) && acc > 0;
+    const cand: Pt = conAcc ? { lat, lng, ts, acc: acc as number } : { lat, lng, ts };
+    if (conAcc && !preciso(cand) && ultimoPreciso && ts > ultimoPreciso.ts
+      && ts - ultimoPreciso.ts <= VIGENCIA_ANCLA_COLA_MS
+      && distM(ultimoPreciso.lat, ultimoPreciso.lng, lat, lng) <= radioAncla(cand.acc as number)) {
+      return false;                                                 // regla 1: impreciso dentro de su error → no aporta
+    }
+    if (!ultimo || !(ts > ultimo.ts)) return aceptar(cand);
     const ultimoPendiente = pendientes[pendientes.length - 1];
     if (ultimoPendiente && ultimoPendiente.ts === ts) return false;  // misma fila ya vista → no cuenta de nuevo
-    if (plausible(ultimo, cand)) { ultimo = cand; pendientes = []; return true; }
+    if (plausible(ultimo, cand)) return aceptar(cand);
+    if (conAcc && preciso(cand) && ultimo.acc != null && !preciso(ultimo)
+      && distM(ultimo.lat, ultimo.lng, lat, lng)
+        <= radioAncla(ultimo.acc) + vmax * Math.max(1, (ts - ultimo.ts) / 1000)) {
+      return aceptar(cand);                                         // regla 2: el impreciso era el anterior
+    }
     if (ultimoPendiente && !plausible(ultimoPendiente, cand)) pendientes = [];  // rompe la cadena → reinicia con este candidato
     pendientes.push(cand);
-    if (pendientes.length >= reanclaN) { ultimo = cand; pendientes = []; return true; }  // N pendientes COHERENTES → relocalización real
+    if (pendientes.length >= reanclaN) return aceptar(cand);       // N pendientes COHERENTES → relocalización real
     return false;                                                   // glitch aislado → descartar, conservar la posición previa
   };
 }
@@ -433,9 +485,9 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   const base = quitarExcursiones(quitarPicosV(basePre));
 
   const out: HuellaPt[] = [];
-  const emitir = (lat: number, lng: number, velocidad: number, acc: number, ts: number) => {
+  const emitir = (lat: number, lng: number, velocidad: number, acc: number, ts: number, parada = false) => {
     const last = out[out.length - 1];
-    if (!last || distM(last.lat, last.lng, lat, lng) >= 8) out.push({ lat, lng, velocidad, acc, ts });
+    if (!last || distM(last.lat, last.lng, lat, lng) >= 8) out.push(parada ? { lat, lng, velocidad, acc, ts, parada: true } : { lat, lng, velocidad, acc, ts });
   };
   type Cl = { sumLat: number; sumLng: number; n: number; acc: number; ts: number };
   const nuevoCl = (p: HuellaPt): Cl => ({ sumLat: p.lat, sumLng: p.lng, n: 1, acc: p.acc, ts: p.ts });
@@ -456,7 +508,7 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
       } else {
         pend.push(p);
         if (pend.length >= ESCAPE_N) {                        // salida confirmada
-          emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts);       // el lugar de la parada
+          emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts, true); // el lugar de la parada
           for (const q of pend) emitir(q.lat, q.lng, q.velocidad, q.acc, q.ts);
           modo = "move"; cl = null; pend = []; dwell = 0;
         }
@@ -472,7 +524,7 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
       }
     }
   }
-  if (modo === "stop" && cl) emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts); // cola: parada final
+  if (modo === "stop" && cl) emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts, true); // cola: parada final
 
   // FALLBACK: si el filtro colapsó todo a ≤1 punto pero había suficientes datos, el cluster
   // era demasiado grande para la velocidad del bus (GPS pobre + ciudad lenta). Devolver la
@@ -492,17 +544,25 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
 // de tiempo (~±6 s, robusta al jitter; punto-a-punto daría velocidades fantasma), mismo criterio
 // que velocidadPorVentana del recuadro en vivo. Si el equipo SÍ da Doppler, se respeta. Requiere
 // `ts`; sin él (0/no creciente) no toca nada. Solo cambia el COLOR, no la geometría.
+//
+// EL CENTROIDE DE UNA PARADA (`parada`, de limpiarHuella) NO SE DERIVA NI SIRVE DE VECINO (reserva
+// #1459): su posición es el promedio de seis minutos de espera en la cochera y su ts el del último fix
+// agrupado —uno que ya arrancaba—, así que «52 m en 3 s» hasta el primer fix en marcha lo pintaba a
+// 62 km/h, verde «Rápido», justo donde el bus salía a 7 km/h. Se queda en 0 y la ventana de sus
+// vecinos se corta en él.
 export function conVelocidadColor(pts: HuellaPt[], ventanaMs = 6000, maxKmh = 130): HuellaPt[] {
   const tsFiable = pts.length >= 2 && pts[pts.length - 1].ts > pts[0].ts;
   return pts.map((p, i) => {
+    if (p.parada) return p;                                    // centroide de parada → Parado
     if (p.velocidad > 0 && p.velocidad <= maxKmh) return p;   // Doppler fiable (flota propia) → respetar
     if (!tsFiable) return p;
     // Incluir SIEMPRE los vecinos inmediatos (i-1, i+1) y extender hasta ventanaMs. Sin esto, si la
     // cadencia es espaciada (el throttle cree "parado" porque el equipo da velocidad 0), los vecinos
     // quedan a >ventanaMs → la ventana colapsaba a 1 punto (dt=0) → no derivaba → seguía rojo.
-    let a = Math.max(0, i - 1), b = Math.min(pts.length - 1, i + 1);
-    while (a > 0 && p.ts - pts[a - 1].ts < ventanaMs) a--;
-    while (b < pts.length - 1 && pts[b + 1].ts - p.ts < ventanaMs) b++;
+    let a = i > 0 && !pts[i - 1].parada ? i - 1 : i;
+    let b = i < pts.length - 1 && !pts[i + 1].parada ? i + 1 : i;
+    while (a > 0 && !pts[a - 1].parada && p.ts - pts[a - 1].ts < ventanaMs) a--;
+    while (b < pts.length - 1 && !pts[b + 1].parada && pts[b + 1].ts - p.ts < ventanaMs) b++;
     const dt = (pts[b].ts - pts[a].ts) / 1000;
     if (dt <= 0) return p;
     const kmh = (distM(pts[a].lat, pts[a].lng, pts[b].lat, pts[b].lng) / dt) * 3.6;

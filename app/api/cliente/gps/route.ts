@@ -285,7 +285,15 @@ export async function POST(req: NextRequest) {
         .eq("reserva_id", reservaId).order("created_at", { ascending: false }).limit(1).maybeSingle();
       ubic = data;
     }
-    if (!ubic && (vehiculoTerceroId != null || vehiculoId != null)) {
+    // Un servicio CERRADO sin filas propias no cae a la unidad: lo que la unidad haga después
+    // (otro servicio, conectada sin servicio) no es la posición de este (reserva #1459). La misma
+    // regla aplica el tiempo real del modal (filaEnVivoDelServicio, lib/gps-huella-servicio.ts).
+    let servicioCerrado = false;
+    if (!ubic && reservaId != null) {
+      const { data: rsv } = await supabase.from("reservas").select("estado").eq("id", reservaId).maybeSingle();
+      servicioCerrado = rsv?.estado === "finalizada" || rsv?.estado === "cancelada";
+    }
+    if (!ubic && !servicioCerrado && (vehiculoTerceroId != null || vehiculoId != null)) {
       // Fallback por vehículo: solo puntos "en_ruta" para que el cliente no vea
       // al conductor en modo conectado-libre (antes/después de su servicio).
       // Cota temporal: finalizar un servicio NO cierra las filas "en_ruta" del viaje

@@ -38,7 +38,10 @@ import { rangosDeCrudo } from "./huella";
 // 4 (14-10-2026, #1609): radio de búsqueda con piso de 15 m, los fixes sin pareja de la frontera entre
 // fragmentos se emiten (antes se perdían), las juntas rectas entre fragmentos/ventanas pasan a crudo y
 // un fix preciso en marcha no se suaviza fuera de su error. Otra salida → se recalculan.
-export const VERSION_AJUSTE = 4;
+// 5 (14-10-2026, #1459): un fix impreciso de la cola (sin confiable después) dentro de su error y a
+// ≤ 15 s del último confiable se ancla a él (anclarImprecisos): cambia la entrada del ajustador en las
+// trazas que terminan en un fix de red → se recalculan.
+export const VERSION_AJUSTE = 5;
 /** Días hacia atrás en que el servidor CALCULA (= DIAS_RASTREO de lib/gps-cobertura-datos.ts, que la
  *  matriz coteja; aquí como literal porque este módulo no puede importar un lector de servidor). */
 export const DIAS_CALCULO = 90;
