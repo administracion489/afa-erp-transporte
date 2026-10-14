@@ -16,6 +16,7 @@ import { createClient } from "@supabase/supabase-js";
 import { paginarFilas } from "@/lib/huella";
 import { tMs } from "@/lib/gps-huella-servicio";
 import { huellaDelServicio } from "@/lib/gps-huella-servicio-datos";
+import { ajustadaParaRespuesta } from "@/lib/gps-traza-ajustada-datos";
 import { verificarTokenPortal, reservaEsDelCliente, filtrarVehiculosDelCliente } from "@/lib/portal-auth";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { sembrarAvance, leerAvance, type ParadaAvance, type FixAvance } from "@/lib/avance-paradas";
@@ -114,13 +115,23 @@ export async function POST(req: NextRequest) {
     // lib/gps-huella-servicio-datos.ts, EXTRAÍDOS de aquí sin cambiarlos: la traza ajustada a la vía
     // que se guarda para siempre se firma y se calcula sobre ESTAS mismas filas. Respuesta byte a
     // byte la de antes (scripts/prueba-traza-ajustada.mts §6).
+    //
+    // `ajustada` (lib/gps-traza-ajustada-datos.ts): SOLO con la reserva `finalizada` se agrega el estado
+    // de la traza ajustada a la vía que se guarda para siempre —la traza misma cuando está guardada—,
+    // firmada sobre ESTAS `filasOk`. Best-effort: nunca rompe la huella. Si el modal manda
+    // `ajustadaConocida` (el `calculadoEn` de la que ya tiene) y coincide, no se reenvía el jsonb.
+    // Sin reserva finalizada, la respuesta es byte a byte la de antes.
     if (body.huella) {
-      const { filasOk, servicio } = await huellaDelServicio(supabase, {
+      const { filasOk, servicio, reserva, completa } = await huellaDelServicio(supabase, {
         reservaId: body.reservaId ?? null,
         vehiculoId: body.vehiculoId ?? null,
         vehiculoTerceroId: body.vehiculoTerceroId ?? null,
       });
-      return NextResponse.json({ huella: filasOk.map(norm), servicio });
+      if (reserva?.estado !== "finalizada") return NextResponse.json({ huella: filasOk.map(norm), servicio });
+      const ajustada = await ajustadaParaRespuesta({
+        reservaId: Number(body.reservaId), reserva, filasOk, completa, ahoraMs: Date.now(), conocida: body.ajustadaConocida,
+      });
+      return NextResponse.json({ huella: filasOk.map(norm), servicio, ajustada });
     }
 
     // ── Modo avance: por qué paradas pasó el bus, según el GPS ────────────────

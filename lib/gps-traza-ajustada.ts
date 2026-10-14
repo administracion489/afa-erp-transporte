@@ -30,6 +30,19 @@ import { rangosDeCrudo } from "./huella";
 
 // ── Versión y topes (declarados, NO medidos) ──────────────────────────────────────────────
 export const VERSION_AJUSTE = 1;
+/** Días hacia atrás en que el servidor CALCULA (= DIAS_RASTREO de lib/gps-cobertura-datos.ts, que la
+ *  matriz coteja; aquí como literal porque este módulo no puede importar un lector de servidor). */
+export const DIAS_CALCULO = 90;
+
+/** ¿La fecha del servicio (YYYY-MM-DD, Lima) está dentro de los últimos `dias` días? Aritmética sobre la
+ *  cadena ISO, con «hoy» en Lima (UTC-5). Sin fecha válida: no. */
+export function fechaDentroDeVentana(fecha: string | null | undefined, ahoraMs: number, dias: number = DIAS_CALCULO): boolean {
+  if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return false;
+  const hoy = new Date(ahoraMs - 5 * 3600 * 1000).toISOString().slice(0, 10);
+  const limite = new Date(Date.parse(`${hoy}T12:00:00Z`) - dias * 86_400_000).toISOString().slice(0, 10);
+  return fecha >= limite && fecha <= hoy;
+}
+
 /** Peso máximo del jsonb guardado (la migración lo vuelve a exigir con un CHECK). */
 export const MAX_BYTES_TRAZA = 900_000;
 /** Vértices máximos de una traza guardada. */
@@ -196,6 +209,12 @@ export type RespuestaAjustada = {
   calculadoEn?: string;
   nFilasGuardadas?: number;
   nFilasAhora?: number;
+  /**
+   * true: el cliente ya tiene ESTA traza (mandó su `calculadoEn` y coincide con la fila), así que no
+   * se reenvía (`traza` ausente aunque el estado sea guardada/desactualizada). El modal conserva la
+   * que ya dibujó. Ahorra reenviar hasta 900 KB en cada sondeo de 15 s.
+   */
+  sinCambios?: boolean;
   detalle: string;
 };
 
@@ -223,7 +242,8 @@ export type GuardadaLeida = {
   nFilas: number;
   recalculos: number;
   calculadoEn: string;
-  traza: unknown;
+  /** La traza guardada; puede omitirse cuando `clienteLaTiene` (no hace falta leerla). */
+  traza?: unknown;
 };
 
 export type CtxLectura = CtxPrevio & {
@@ -236,6 +256,11 @@ export type CtxLectura = CtxPrevio & {
   /** ¿Hay token de Mapbox de servidor? */
   tokenServidor: boolean;
   ahoraMs: number;
+  /**
+   * El cliente ya tiene la traza de esta misma fila (su `calculadoEn` coincide y la versión es la de
+   * hoy): ya la decodificó una vez, así que no se vuelve a leer ni a reenviar. Lo decide el lector.
+   */
+  clienteLaTiene?: boolean;
 };
 
 /** Texto, qué dibuja y tono, declarado pegado a cada estado de la lectura. */
@@ -280,7 +305,7 @@ export function decidirLectura(ctx: CtxLectura): RespuestaAjustada {
   const g = ctx.guardada;
   if (g === "error") return respuesta("no_se_pudo_leer");
 
-  const dec = g ? decodificarTraza(g.traza) : null;
+  const dec = g ? (ctx.clienteLaTiene && g.version === VERSION_AJUSTE ? true : decodificarTraza(g.traza)) : null;
   if (!g || !dec) {
     // No hay traza (o la guardada no se puede leer: otra versión, o corrupta → se recalcula).
     const corrupta = !!g && !dec;
@@ -293,7 +318,11 @@ export function decidirLectura(ctx: CtxLectura): RespuestaAjustada {
     });
   }
 
-  const base = { traza: g.traza as TrazaGuardada, calculadoEn: g.calculadoEn, nFilasGuardadas: g.nFilas, nFilasAhora: ctx.nFilasAhora };
+  const yaLaTiene = !!ctx.clienteLaTiene && g.version === VERSION_AJUSTE;
+  const base = {
+    ...(yaLaTiene ? { sinCambios: true } : { traza: g.traza as TrazaGuardada }),
+    calculadoEn: g.calculadoEn, nFilasGuardadas: g.nFilas, nFilasAhora: ctx.nFilasAhora,
+  };
   if (g.version === VERSION_AJUSTE && g.firma === ctx.firmaAhora) return respuesta("guardada", base);
 
   const calc = Date.parse(g.calculadoEn);

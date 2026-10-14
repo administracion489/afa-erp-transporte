@@ -24,7 +24,13 @@
 //   4. el ciclo escritura → lectura con una base y un Mapbox falsos: lo calculado sobre
 //      `huellaDelServicio` y releído por el camino de /api/cliente/gps sale `guardada`; y
 //      `ajustarServicioCompleto` cuenta llamadas y transitorios y aborta en el tope.
-//      [La parte con los lectores REALES de T3 (lib/gps-traza-ajustada-datos.ts) queda PENDIENTE.]
+//  4b. lib/gps-traza-ajustada-datos.ts con una base y un Mapbox falsos: el ciclo calcularYGuardar →
+//      ajustadaParaRespuesta («guardada»; con `conocida`, sinCambios sin reenviar el jsonb), ya_guardada
+//      sin consultas, desactualizada → espera de 30 min → recálculo → tope, candado (en_curso y el
+//      muerto de > 5 min), presupuesto por hora y por mes, transitorios que no se guardan, el candado
+//      soltado aunque el guardado lance, guardar=false sin tocar la tabla, sin migración, sin token,
+//      no finalizada / fuera de ventana / inexistente, el tercero por la unidad de la reserva, el token
+//      del servidor sin caer al público, y el cron (apagado, por_corrida, recientes, anotados, borrado).
 //   5. barrido de `decidirLectura` y `resultadoDelCalculo`: nunca `guardada` con firma distinta;
 //      `no_se_pudo_leer` nunca puede calcular; `apagada` nunca lee ni trae traza; transitorio o
 //      abortado nunca se guarda. Corolario: el barrido SÍ produce `guardada` y `calculada`.
@@ -1123,12 +1129,251 @@ sinEsperas();
   const ajR = await TC.ajustarServicioCompleto(limpio, "tok", async (u) => { await fR.fetch(u); throw new TypeError("sin red"); });
   chk("sin red en absoluto: todas las consultas son transitorias y no se guarda", ajR.transitorios === new Set(fR.urls).size && !TA.resultadoDelCalculo(ajR).guardar);
 
-  // La parte con los lectores REALES de T3.
-  if (fs.existsSync(path.join(process.cwd(), "lib/gps-traza-ajustada-datos.ts"))) {
-    pendiente("lib/gps-traza-ajustada-datos.ts existe: falta conectar aquí firmaDeFilas / ajustadaParaRespuesta / calcularYGuardar con dobles");
-  } else {
-    pendiente("el ciclo con firmaDeFilas, ajustadaParaRespuesta y calcularYGuardar (lib/gps-traza-ajustada-datos.ts, T3)");
-  }
+}
+conEsperas();
+
+// ── Una base FALSA más completa, para los lectores y escritores reales de T3 ──────────────
+// Soporta select/eq/gte/lte/lt/is/in/order/limit/range/maybeSingle/single e insert/update/upsert/delete
+// (thenable, como el cliente de Supabase). Una tabla ausente contesta el error de PostgREST (PGRST205);
+// el índice único parcial del candado (un intento ABIERTO por reserva) contesta 23505.
+type DbT = Record<string, Fila[]>;
+function crearBaseT3(db: DbT, opts: { lanzarUpsert?: boolean } = {}) {
+  const accesos: string[] = [];
+  let seq = 1000;
+  const from = (tabla: string) => {
+    let op: "select" | "insert" | "update" | "upsert" | "delete" = "select";
+    let cols: string[] | null = null, carga: any = null, conSelect = false, uno: "single" | "maybe" | null = null;
+    const filtros: Array<(r: Fila) => boolean> = [];
+    const ordenes: Array<[string, boolean]> = [];
+    let lim: number | null = null, rango: [number, number] | null = null;
+    const faltante = () => ({ data: null, error: { code: "PGRST205", message: `Could not find the table 'public.${tabla}' in the schema cache` } });
+    const ejecutar = (): any => {
+      accesos.push(`${tabla}.${op}${cols ? `(${cols.join(",")})` : ""}`);
+      if (!(tabla in db)) return faltante();
+      const t = db[tabla];
+      const pasa = (r: Fila) => filtros.every((f) => f(r));
+      const proy = (r: Fila) => (cols ? Object.fromEntries(cols.map((k) => [k, r[k] ?? null])) : { ...r });
+      if (op === "select") {
+        let fs_ = t.filter(pasa);
+        if (ordenes.length) fs_ = [...fs_].sort((x, y) => { for (const [k, asc] of ordenes) { if (x[k] < y[k]) return asc ? -1 : 1; if (x[k] > y[k]) return asc ? 1 : -1; } return 0; });
+        if (rango) fs_ = fs_.slice(rango[0], rango[1] + 1);
+        if (lim != null) fs_ = fs_.slice(0, lim);
+        const data = fs_.map(proy);
+        if (uno) return { data: data[0] ?? null, error: null };
+        return { data, error: null };
+      }
+      if (op === "insert") {
+        const filas = (Array.isArray(carga) ? carga : [carga]).map((r: any) => ({ id: seq++, terminado_en: null, ...r }));
+        if (tabla === "gps_traza_ajuste_intentos") {
+          for (const f of filas) if (f.terminado_en == null && t.some((x) => x.reserva_id === f.reserva_id && x.terminado_en == null)) {
+            return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint \"uq_gps_traza_intento_abierto\"" } };
+          }
+        }
+        t.push(...filas);
+        const data = conSelect ? filas.map(proy) : null;
+        return { data: uno && data ? data[0] : data, error: null };
+      }
+      if (op === "update") { for (const r of t.filter(pasa)) Object.assign(r, carga); return { data: null, error: null }; }
+      if (op === "upsert") {
+        if (opts.lanzarUpsert) throw new Error("la base se cayó a mitad del upsert");
+        const i = t.findIndex((r) => r.reserva_id === carga.reserva_id);
+        if (i >= 0) t[i] = { ...carga }; else t.push({ ...carga });
+        return { data: null, error: null };
+      }
+      if (op === "delete") { const quedan = t.filter((r) => !pasa(r)); db[tabla] = quedan; return { data: null, error: null }; }
+    };
+    const b: any = {
+      select(c?: string) { if (op === "select") cols = c ? c.split(",").map((x) => x.trim()) : null; else conSelect = true, cols = c ? c.split(",").map((x) => x.trim()) : null; return b; },
+      insert(r: any) { op = "insert"; carga = r; return b; },
+      update(r: any) { op = "update"; carga = r; return b; },
+      upsert(r: any) { op = "upsert"; carga = r; return b; },
+      delete() { op = "delete"; return b; },
+      eq(k: string, v: any) { filtros.push((r) => r[k] === v); return b; },
+      gte(k: string, v: any) { filtros.push((r) => r[k] >= v); return b; },
+      lte(k: string, v: any) { filtros.push((r) => r[k] <= v); return b; },
+      lt(k: string, v: any) { filtros.push((r) => r[k] < v); return b; },
+      is(k: string, v: any) { filtros.push((r) => (r[k] ?? null) === v); return b; },
+      in(k: string, vs: any[]) { filtros.push((r) => vs.includes(r[k])); return b; },
+      order(k: string, o?: { ascending?: boolean }) { ordenes.push([k, o?.ascending !== false]); return b; },
+      limit(n: number) { lim = n; return b; },
+      range(a: number, z: number) { rango = [a, z]; return Promise.resolve().then(ejecutar); },
+      maybeSingle() { uno = "maybe"; return Promise.resolve().then(ejecutar); },
+      single() { uno = "single"; return Promise.resolve().then(ejecutar); },
+      then(ok: any, ko: any) { return Promise.resolve().then(ejecutar).then(ok, ko); },
+    };
+    return b;
+  };
+  return { from, accesos, db };
+}
+
+// ══ 4b · los lectores y escritores REALES de T3, con dobles ════════════════════════════════
+seccion("4b · lib/gps-traza-ajustada-datos.ts con una base y un Mapbox falsos");
+sinEsperas();
+{
+  const TD = await import("../lib/gps-traza-ajustada-datos");
+  const AH0 = T_BASE + 6 * 3600_000;   // 2026-10-09 12:00 Lima
+  const gps501 = viaje({ n: 700, acc: accMixto, paradas: 0.01, reservaId: 501, v: 9, t0: T_BASE - 10 * 60_000 });
+  const cfg = (o: Fila = {}) => [{ id: 1, guardar: true, borrar_guardadas: false, presupuesto_hora: 2000, presupuesto_mes: 50000, precalcular_dias: 0, por_corrida: 20, ...o }];
+  const R5 = (id: number, o: Fila = {}) => ({ id, fecha_servicio: "2026-10-09", hora_servicio: "06:00:00", estado: "finalizada", vehiculo_id: 9, vehiculo_tercero_id: null, cliente_id: 1, ...o });
+  const nuevaDb = (o: Partial<DbT> = {}): DbT => ({
+    reservas: [R5(501)], ubicaciones_gps: gps501.map((f) => ({ ...f })),
+    gps_traza_config: cfg(), gps_traza_ajustada: [], gps_traza_ajuste_intentos: [], ...o,
+  });
+  const entorno = (db: DbT, o: { fetch?: Fake; token?: string | null; lanzarUpsert?: boolean } = {}) => {
+    const base = crearBaseT3(db, { lanzarUpsert: o.lanzarUpsert });
+    const fk = o.fetch ?? crearFake(MODOS.ruidoso);
+    let reloj = AH0;
+    const deps = { admin: base, fetch: fk.fetch, token: o.token === undefined ? "tok" : o.token, ahora: () => reloj };
+    return { base, fk, deps, avanzar: (ms: number) => { reloj += ms; }, ahora: () => reloj };
+  };
+  // la lectura por el camino de /api/cliente/gps
+  const leer = async (e: ReturnType<typeof entorno>, id = 501, conocida?: string) => {
+    const h = await HSD.huellaDelServicio(e.base, { reservaId: id, vehiculoId: 9, vehiculoTerceroId: null }, e.ahora());
+    return TD.ajustadaParaRespuesta({ reservaId: id, reserva: h.reserva, filasOk: h.filasOk, completa: h.completa, ahoraMs: e.ahora(), conocida }, e.deps);
+  };
+
+  chk("firmaDeFilas = sha256(`${VERSION_AJUSTE}\\n${canonEntradaAjuste}`) (la de §3/§4)", TD.firmaDeFilas(gps501) === firmaDe(gps501));
+
+  // El ciclo completo.
+  const e1 = entorno(nuevaDb());
+  const l0 = await leer(e1);
+  chk("antes de calcular: «falta» y puede calcular", l0.estado === "falta" && l0.puedeCalcular && !l0.traza);
+  const c1 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e1.deps);
+  const fila = e1.base.db.gps_traza_ajustada[0];
+  const intento = e1.base.db.gps_traza_ajuste_intentos[0];
+  chk(`calcularYGuardar: «calculada», una fila guardada y la traza devuelta (${c1.llamadas} llamadas)`,
+    c1.codigo === "calculada" && !!c1.traza && e1.base.db.gps_traza_ajustada.length === 1 && fila.version === TA.VERSION_AJUSTE && JSON.stringify(fila.traza) === JSON.stringify(c1.traza));
+  chk("la fila: firma de las filas, n_filas, vertices, bytes, llamadas, recalculos 0, origen, ultimo_ts",
+    fila.firma === c1.firma && fila.n_filas > 0 && fila.vertices === c1.traza!.n && fila.bytes === JSON.stringify(c1.traza).length
+    && fila.llamadas === e1.fk.urls.length && fila.recalculos === 0 && fila.origen === "apertura"
+    && fila.ultimo_ts === new Date(Math.max(...gps501.map((g) => Date.parse(g.created_at)))).toISOString());
+  chk("el candado quedó SOLTADO: terminado_en, llamadas reales y resultado", intento.terminado_en != null && intento.llamadas === e1.fk.urls.length && intento.resultado === "calculada" && intento.sujeto === "u:1");
+  const l1 = await leer(e1);
+  chk("releída por el camino de /api/cliente/gps: «guardada», con la MISMA traza", l1.estado === "guardada" && JSON.stringify(l1.traza) === JSON.stringify(c1.traza) && !l1.puedeCalcular);
+  e1.base.accesos.length = 0;
+  const l1b = await leer(e1, 501, c1.calculadoEn);
+  chk("con `conocida` = su calculadoEn: «guardada», sinCambios, SIN traza y sin leer el jsonb",
+    l1b.estado === "guardada" && l1b.sinCambios === true && !l1b.traza
+    && e1.base.accesos.filter((a) => a.startsWith("gps_traza_ajustada.select")).every((a) => !a.includes("traza)") && !a.includes(",traza")));
+  const l1c = await leer(e1, 501, "2020-01-01T00:00:00.000Z");
+  chk("con un `conocida` viejo: la traza viaja entera", l1c.estado === "guardada" && !!l1c.traza && !l1c.sinCambios);
+  const llamadasAntes = e1.fk.urls.length;
+  const c2 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e1.deps);
+  chk("calcular otra vez: «ya_guardada», sin consultas a Mapbox ni intentos nuevos", c2.codigo === "ya_guardada" && !!c2.traza && e1.fk.urls.length === llamadasAntes && e1.base.db.gps_traza_ajuste_intentos.length === 1);
+
+  // Posición tardía: desactualizada → espera → recálculo → tope.
+  e1.base.db.ubicaciones_gps.push({ ...gps501[400], id: 888_888, created_at: new Date(Date.parse(gps501[400].created_at) + 900).toISOString() });
+  const l2 = await leer(e1);
+  chk("con una posición tardía: «desactualizada» con la guardada y aún sin recálculo", l2.estado === "desactualizada" && !!l2.traza && !l2.puedeCalcular);
+  const c3 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e1.deps);
+  chk("calcular antes de 30 min: «ya_guardada» con la guardada y su motivo, sin consultas", c3.codigo === "ya_guardada" && !!c3.traza && /30 min/.test(c3.detalle) && e1.fk.urls.length === llamadasAntes);
+  e1.avanzar(31 * 60_000);
+  const c4 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e1.deps);
+  chk("pasados 30 min: «calculada» otra vez, recalculos 1", c4.codigo === "calculada" && e1.base.db.gps_traza_ajustada[0].recalculos === 1);
+  chk("y releída vuelve a ser «guardada»", (await leer(e1)).estado === "guardada");
+  e1.base.db.gps_traza_ajustada[0].recalculos = TA.MAX_RECALCULOS;
+  e1.base.db.ubicaciones_gps.push({ ...gps501[500], id: 888_889, created_at: new Date(Date.parse(gps501[500].created_at) + 900).toISOString() });
+  e1.avanzar(31 * 60_000);
+  const n0 = e1.fk.urls.length;
+  const c5 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e1.deps);
+  chk(`con ${TA.MAX_RECALCULOS} recálculos: «ya_guardada» con la guardada, sin consultas`, c5.codigo === "ya_guardada" && !!c5.traza && e1.fk.urls.length === n0);
+
+  // Candado.
+  const db6 = nuevaDb();
+  const e6 = entorno(db6);
+  db6.gps_traza_ajuste_intentos.push({ id: 1, reserva_id: 501, origen: "apertura", sujeto: "u:2", empezado_en: new Date(AH0 - 60_000).toISOString(), terminado_en: null, llamadas: 8, resultado: null });
+  const c6 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e6.deps);
+  chk("con otro cálculo abierto (1 min): «en_curso», sin consultas", c6.codigo === "en_curso" && e6.fk.urls.length === 0);
+  db6.gps_traza_ajuste_intentos[0].empezado_en = new Date(AH0 - 6 * 60_000).toISOString();
+  const c7 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e6.deps);
+  chk("con uno abierto de más de 5 min: se da por muerto y se calcula", c7.codigo === "calculada" && db6.gps_traza_ajuste_intentos[0].resultado === "muerto" && db6.gps_traza_ajuste_intentos[0].terminado_en != null);
+
+  // Presupuesto.
+  const e8 = entorno(nuevaDb({ gps_traza_config: cfg({ presupuesto_hora: 3 }) }));
+  const c8 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e8.deps);
+  chk("presupuesto de la hora agotado: «presupuesto_agotado», sin consultas ni intento", c8.codigo === "presupuesto_agotado" && e8.fk.urls.length === 0 && e8.base.db.gps_traza_ajuste_intentos.length === 0 && /presupuesto_hora/.test(c8.detalle));
+  const db9 = nuevaDb({ gps_traza_config: cfg({ presupuesto_mes: 100 }) });
+  db9.gps_traza_ajuste_intentos.push({ id: 1, reserva_id: 7, origen: "apertura", empezado_en: new Date(AH0 - 3 * 86_400_000).toISOString(), terminado_en: new Date(AH0 - 3 * 86_400_000).toISOString(), llamadas: 95 });
+  const e9 = entorno(db9);
+  const c9 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e9.deps);
+  chk("presupuesto del mes (lo gastado este mes en Lima cuenta): «presupuesto_agotado»", c9.codigo === "presupuesto_agotado" && /presupuesto_mes/.test(c9.detalle));
+  chk("inicioMesLima: el 1 a las 00:00 de Lima", TD.inicioMesLima(Date.UTC(2026, 9, 1, 4, 59)) === "2026-09-01T05:00:00.000Z" && TD.inicioMesLima(Date.UTC(2026, 9, 1, 5, 0)) === "2026-10-01T05:00:00.000Z");
+
+  // Transitorios, upsert que revienta.
+  const e10 = entorno(nuevaDb(), { fetch: crearFake(MODOS.fallos) });
+  const c10 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e10.deps);
+  chk("con fallos pasajeros de Mapbox: «calculada_sin_guardar», devuelve la traza, NO guarda, y suelta el candado",
+    c10.codigo === "calculada_sin_guardar" && !!c10.traza && e10.base.db.gps_traza_ajustada.length === 0
+    && e10.base.db.gps_traza_ajuste_intentos[0].terminado_en != null && e10.base.db.gps_traza_ajuste_intentos[0].resultado === "calculada_sin_guardar");
+  const e11 = entorno(nuevaDb(), { lanzarUpsert: true });
+  const c11 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e11.deps);
+  chk("si el guardado LANZA: «error» y el candado igual se suelta (terminado_en escrito)", c11.codigo === "error" && e11.base.db.gps_traza_ajuste_intentos[0].terminado_en != null && e11.base.db.gps_traza_ajuste_intentos[0].resultado === "error");
+
+  // Interruptores y prerrequisitos.
+  const e12 = entorno(nuevaDb({ gps_traza_config: cfg({ guardar: false }), gps_traza_ajustada: [{ reserva_id: 501, version: 1, firma: "x", n_filas: 1, traza: c1.traza, recalculos: 0, calculado_en: new Date(AH0).toISOString() }] }));
+  const l12 = await leer(e12);
+  const c12 = await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e12.deps);
+  chk("guardar = false: lectura «apagada» y cálculo «apagada», sin tocar gps_traza_ajustada ni Mapbox",
+    l12.estado === "apagada" && !l12.traza && c12.codigo === "apagada" && e12.fk.urls.length === 0 && !e12.base.accesos.some((a) => a.startsWith("gps_traza_ajustada")));
+  const dbSin = nuevaDb(); delete (dbSin as any).gps_traza_config; delete (dbSin as any).gps_traza_ajustada; delete (dbSin as any).gps_traza_ajuste_intentos;
+  const e13 = entorno(dbSin);
+  chk("sin la migración: lectura y cálculo «sin_migracion»", (await leer(e13)).estado === "sin_migracion" && (await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e13.deps)).codigo === "sin_migracion" && e13.fk.urls.length === 0);
+  const dbSinTabla = nuevaDb(); delete (dbSinTabla as any).gps_traza_ajustada;
+  chk("con la config pero sin la tabla de trazas: «sin_migracion», no «no_se_pudo_leer»", (await leer(entorno(dbSinTabla))).estado === "sin_migracion");
+  const e14 = entorno(nuevaDb(), { token: null });
+  chk("sin token: lectura «sin_token» (como hoy: ajusta el navegador) y cálculo «sin_token»", (await leer(e14)).estado === "sin_token" && (await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e14.deps)).codigo === "sin_token");
+  const e15 = entorno(nuevaDb({ reservas: [R5(501, { estado: "en_curso" }), R5(502, { fecha_servicio: "2026-06-01" })] }));
+  chk("no finalizada: «no_finalizada»; más vieja que la ventana: «fuera_de_ventana»; inexistente: reservaNoExiste",
+    (await TD.calcularYGuardar(501, { origen: "apertura", sujeto: "u:1" }, e15.deps)).codigo === "no_finalizada"
+    && (await TD.calcularYGuardar(502, { origen: "apertura", sujeto: "u:1" }, e15.deps)).codigo === "fuera_de_ventana"
+    && (await TD.calcularYGuardar(99, { origen: "apertura", sujeto: "u:1" }, e15.deps)).reservaNoExiste === true && e15.fk.urls.length === 0);
+  const lNo = await TD.ajustadaParaRespuesta({ reservaId: 501, reserva: { estado: "en_curso", fecha_servicio: "2026-10-09", hora_servicio: null, vehiculo_id: 9, vehiculo_tercero_id: null }, filasOk: gps501, completa: true, ahoraMs: AH0 }, e15.deps);
+  chk("la lectura de un servicio no finalizado: «no_aplica», sin leer nada", lNo.estado === "no_aplica" && !e15.base.accesos.some((a) => a.startsWith("gps_traza_ajustada")));
+  const lErr = await TD.ajustadaParaRespuesta({ reservaId: 501, reserva: R5(501) as any, filasOk: gps501, completa: true, ahoraMs: AH0 }, { ...e1.deps, admin: { from: () => { throw new Error("se cayó"); } } });
+  chk("la lectura es best-effort: si todo revienta, «no_se_pudo_leer» y nunca lanza", lErr.estado === "no_se_pudo_leer" && !lErr.puedeCalcular);
+
+  // Tercero: los vehículos salen de la RESERVA (la huella por ventana), no de quien llama.
+  const gpsT = viaje({ n: 400, acc: accRed, vt: 7, t0: T_BASE - 10 * 60_000 });
+  const e16 = entorno(nuevaDb({ reservas: [R5(601, { vehiculo_id: null, vehiculo_tercero_id: 7 })], ubicaciones_gps: gpsT }));
+  const c16 = await TD.calcularYGuardar(601, { origen: "apertura", sujeto: "u:1" }, e16.deps);
+  const hT = await HSD.huellaDelServicio(e16.base, { reservaId: 601, vehiculoId: null, vehiculoTerceroId: 7 }, e16.ahora());
+  chk("tercero: se calcula con la unidad de la reserva y la firma es la de la huella por ventana", c16.codigo === "calculada" && c16.firma === TD.firmaDeFilas(hT.filasOk) && hT.servicio.via === "vehiculo");
+
+  // El token del servidor.
+  const envAntes = { s: process.env.MAPBOX_TOKEN_SERVIDOR, p: process.env.NEXT_PUBLIC_MAPBOX_TOKEN };
+  delete process.env.MAPBOX_TOKEN_SERVIDOR; process.env.NEXT_PUBLIC_MAPBOX_TOKEN = "pk.publico";
+  const sinVar = TD.tokenMapboxServidor();
+  process.env.MAPBOX_TOKEN_SERVIDOR = '  "sk.servidor"\n';
+  const conVar = TD.tokenMapboxServidor();
+  if (envAntes.s === undefined) delete process.env.MAPBOX_TOKEN_SERVIDOR; else process.env.MAPBOX_TOKEN_SERVIDOR = envAntes.s;
+  if (envAntes.p === undefined) delete process.env.NEXT_PUBLIC_MAPBOX_TOKEN; else process.env.NEXT_PUBLIC_MAPBOX_TOKEN = envAntes.p;
+  chk("tokenMapboxServidor: sin la variable es null (NO cae a NEXT_PUBLIC_MAPBOX_TOKEN) y limpia comillas y espacios", sinVar === null && conVar === "sk.servidor");
+
+  // El cron.
+  const eT0 = entorno(nuevaDb());
+  chk("tick con precalcular_dias = 0: «apagado», sin consultas", (await TD.tickTrazaAjustada(eT0.deps)).estado === "apagado" && eT0.fk.urls.length === 0);
+  const dbT = nuevaDb({
+    gps_traza_config: cfg({ precalcular_dias: 5, por_corrida: 2 }),
+    reservas: [R5(501, { fecha_servicio: "2026-10-07" }), R5(502, { fecha_servicio: "2026-10-06" }), R5(503, { fecha_servicio: "2026-10-09" }), R5(504, { fecha_servicio: "2026-10-05" }), R5(505, { fecha_servicio: "2026-10-01" })],
+    ubicaciones_gps: [
+      ...viaje({ n: 300, acc: accChip, reservaId: 501, t0: AH0 - 2 * 86_400_000 }),
+      ...viaje({ n: 50, acc: accChip, reservaId: 503, t0: AH0 - 20 * 60_000 }),    // última posición hace < 60 min
+      ...viaje({ n: 300, acc: accChip, reservaId: 504, t0: AH0 - 4 * 86_400_000 }),
+    ],
+  });
+  const eT = entorno(dbT, { fetch: crearFake(MODOS.limpio) });
+  const t1 = await TD.tickTrazaAjustada(eT.deps) as any;
+  const guardadasT = dbT.gps_traza_ajustada.map((f) => f.reserva_id).sort();
+  chk(`tick: respeta por_corrida (2), salta la de posiciones recientes y la de fuera de los 5 días (${JSON.stringify(t1.saltadas_por_codigo)})`,
+    t1.estado === "ok" && t1.candidatas === 4 && t1.calculadas === 1 && JSON.stringify(guardadasT) === "[501]" && t1.saltadas_por_codigo.reciente === 1 && t1.saltadas_por_codigo.sin_filas === 1);
+  chk("lo que el cron intentó sin gastar se anota cerrado (origen cron, 0 llamadas)", dbT.gps_traza_ajuste_intentos.some((f) => f.reserva_id === 502 && f.origen === "cron" && f.llamadas === 0 && f.terminado_en != null && f.resultado === "sin_filas"));
+  const t2 = await TD.tickTrazaAjustada(eT.deps) as any;
+  chk("la corrida siguiente no repite lo ya intentado ni lo guardado: calcula la que faltaba", t2.estado === "ok" && t2.calculadas === 1 && JSON.stringify(dbT.gps_traza_ajustada.map((f) => f.reserva_id).sort()) === "[501,504]" && typeof t2.gasto_mes === "number" && t2.gasto_mes > 0);
+  dbT.gps_traza_config[0].borrar_guardadas = true;
+  const t3 = await TD.tickTrazaAjustada(eT.deps) as any;
+  chk("borrar_guardadas: borra todas las guardadas y termina", t3.estado === "borrando" && t3.borradas === 2 && !t3.quedan && dbT.gps_traza_ajustada.length === 0);
+  const eTs = entorno(nuevaDb({ gps_traza_config: cfg({ precalcular_dias: 3 }) }), { token: null });
+  chk("tick sin token: «sin_token»", (await TD.tickTrazaAjustada(eTs.deps)).estado === "sin_token");
 }
 conEsperas();
 
@@ -1157,31 +1402,38 @@ seccion("5 · decidirLectura y resultadoDelCalculo: invariantes por barrido");
   for (const edad of [0, 29 * 60_000, 31 * 60_000, NaN])
   for (const dentro of [true, false])
   for (const token of [true, false])
-  for (const nF of [0, 1, 2, 100]) {
+  for (const nF of [0, 1, 2, 100])
+  for (const clienteLaTiene of [false, true]) {
     combinaciones++;
     const g = gFab(rec, edad);
-    const ctx: any = { finalizada, config, lecturaCompleta, guardada: g, firmaAhora: "F", nFilasAhora: nF, dentroDeVentana: dentro, tokenServidor: token, ahoraMs: AH };
+    // con clienteLaTiene, el lector NO lee el jsonb: la fila llega sin traza
+    const gL = clienteLaTiene && g && typeof g === "object" ? { ...g, traza: undefined } : g;
+    const ctx: any = { finalizada, config, lecturaCompleta, guardada: gL, firmaAhora: "F", nFilasAhora: nF, dentroDeVentana: dentro, tokenServidor: token, ahoraMs: AH, clienteLaTiene };
     const r = TA.decidirLectura(ctx);
     const previo = TA.previoALectura(ctx);
     vistos.add(`${r.estado}${r.puedeCalcular ? "+calc" : ""}`);
+    if (r.sinCambios) vistos.add(`${r.estado}+sinCambios`);
     const tag = `${gNombre}/${JSON.stringify(config)}/fin=${finalizada}/comp=${lecturaCompleta}/rec=${rec}/edad=${edad}/dentro=${dentro}/tok=${token}/n=${nF}`;
-    if (r.estado === "guardada" && !(g && typeof g === "object" && g.firma === "F" && g.version === TA.VERSION_AJUSTE && TA.decodificarTraza(g.traza))) falla(`guardada sin firma/versión/traza buenas: ${tag}`);
+    if (r.estado === "guardada" && !(g && typeof g === "object" && g.firma === "F" && g.version === TA.VERSION_AJUSTE && (clienteLaTiene || TA.decodificarTraza(g.traza)))) falla(`guardada sin firma/versión/traza buenas: ${tag}`);
     if (r.estado === "no_se_pudo_leer" && (r.puedeCalcular || r.traza)) falla(`no_se_pudo_leer con cálculo o traza: ${tag}`);
     if (r.estado === "apagada" && (r.traza || r.puedeCalcular || previo == null)) falla(`apagada lee o trae traza: ${tag}`);
     if (config.estado === "ok" && !config.guardar && finalizada && r.estado !== "apagada") falla(`guardar=false y no apagada: ${tag}`);
     if (!finalizada && r.estado !== "no_aplica") falla(`no finalizada y no no_aplica: ${tag}`);
     if (previo && JSON.stringify(previo) !== JSON.stringify(r)) falla(`previoALectura ≠ decidirLectura: ${tag}`);
-    if (previo && JSON.stringify(TA.decidirLectura({ ...ctx, guardada: "error" })) !== JSON.stringify(r)) falla(`con previo, la guardada influye: ${tag}`);
+    if (previo && JSON.stringify(TA.decidirLectura({ ...ctx, guardada: "error", clienteLaTiene: false })) !== JSON.stringify(r)) falla(`con previo, la guardada influye: ${tag}`);
     if (r.puedeCalcular && !(["falta", "desactualizada"].includes(r.estado) && dentro && token && nF >= 2)) falla(`puedeCalcular sin sus condiciones: ${tag}`);
     if (r.estado === "desactualizada" && r.puedeCalcular && !(rec < TA.MAX_RECALCULOS && Number.isFinite(edad) && edad >= TA.ESPERA_RECALCULO_MS)) falla(`recalcula sin tope o espera: ${tag}`);
-    if (!!r.traza !== ["guardada", "desactualizada"].includes(r.estado)) falla(`traza ⇔ guardada|desactualizada: ${tag}`);
+    if ((!!r.traza || r.sinCambios === true) !== ["guardada", "desactualizada"].includes(r.estado)) falla(`(traza o sinCambios) ⇔ guardada|desactualizada: ${tag}`);
+    if (r.sinCambios && (r.traza || !clienteLaTiene)) falla(`sinCambios con traza o sin que el cliente la tenga: ${tag}`);
+    if (r.estado === "guardada" && !clienteLaTiene && !r.traza) falla(`guardada sin traza y el cliente no la tiene: ${tag}`);
+    if (clienteLaTiene && r.estado === "guardada" && r.traza) falla(`reenvía una traza que el cliente ya tiene: ${tag}`);
     if (!r.detalle || !TA.MOTIVO_LECTURA[r.estado]) falla(`sin detalle o sin motivo declarado: ${tag}`);
     if (!lecturaCompleta && finalizada && config.estado === "ok" && config.guardar && r.estado !== "no_se_pudo_leer") falla(`lectura incompleta no es no_se_pudo_leer: ${tag}`);
     const tx = TA.textoEstadoTraza({ lectura: r });
     if (!tx.texto || tx.cae !== TA.MOTIVO_LECTURA[r.estado].cae) falla(`texto del chip: ${tag}`);
   }
   chk(`decidirLectura: ${combinaciones} combinaciones sin violar ninguna invariante`, malas === 0, `${malas} malas`);
-  for (const e of ["guardada", "desactualizada", "desactualizada+calc", "falta+calc", "no_aplica", "apagada", "sin_migracion", "sin_token", "fuera_de_ventana", "no_se_pudo_leer"]) {
+  for (const e of ["guardada", "guardada+sinCambios", "desactualizada+sinCambios", "desactualizada", "desactualizada+calc", "falta+calc", "no_aplica", "apagada", "sin_migracion", "sin_token", "fuera_de_ventana", "no_se_pudo_leer"]) {
     chk(`corolario: el barrido produce «${e}»`, vistos.has(e));
   }
   chk("un servicio fuera de la ventana con su traza guardada la sigue sirviendo (es «para siempre»)",
@@ -1314,7 +1566,8 @@ seccion("6 · huellaDelServicio (+ lib/gps-huella-servicio.ts) = el bloque origi
   const ruta = fs.readFileSync(path.join(process.cwd(), "app/api/cliente/gps/route.ts"), "utf8");
   chk("app/api/cliente/gps/route.ts usa huellaDelServicio y ya no define limaMs/tramoDelServicio/las constantes",
     ruta.includes("huellaDelServicio(") && !/function limaMs|function tramoDelServicio|const HUECO_VIAJE_MS|const MARGEN_PREVIO_MS|const DURACION_MAX_MS/.test(ruta)
-    && /return NextResponse\.json\(\{ huella: filasOk\.map\(norm\), servicio \}\)/.test(ruta));
+    && ruta.includes('if (reserva?.estado !== "finalizada") return NextResponse.json({ huella: filasOk.map(norm), servicio });')
+    && ruta.includes("return NextResponse.json({ huella: filasOk.map(norm), servicio, ajustada });"));
 }
 
 // ══ 7 · sin red ══════════════════════════════════════════════════════════════════════════
@@ -1324,21 +1577,41 @@ seccion("7 · los módulos de lectura y la ruta no llaman a Mapbox ni hacen fetc
     .filter((l) => !/^\s*\/\//.test(l)).map((l) => l.replace(/\s\/\/.*$/, "")).join("\n");
   const PROHIBIDO = /matching\/v5|tilequery|mapMatchTrail|matchVentana|crearAjustadorHuella|fetch\(/i;
   const leerF = (f: string) => sinComentarios(fs.readFileSync(path.join(process.cwd(), f), "utf8"));
-  for (const f of ["lib/gps-traza-ajustada.ts", "app/api/cliente/gps/route.ts", "lib/gps-huella-servicio.ts", "lib/gps-huella-servicio-datos.ts"]) {
+  for (const f of ["lib/gps-traza-ajustada.ts", "app/api/cliente/gps/route.ts", "lib/gps-huella-servicio.ts", "lib/gps-huella-servicio-datos.ts",
+    "lib/gps-traza-ajustada-datos.ts", "app/api/seguimiento/traza-ajustada/route.ts", "app/api/gps/traza-ajustada/tick/route.ts"]) {
     const m = leerF(f).match(PROHIBIDO);
     chk(`${f}: sin Map Matching, Tilequery ni fetch(`, !m, m?.[0]);
   }
-  if (fs.existsSync(path.join(process.cwd(), "lib/gps-traza-ajustada-datos.ts"))) {
-    const m = leerF("lib/gps-traza-ajustada-datos.ts").match(PROHIBIDO);
-    chk("lib/gps-traza-ajustada-datos.ts: sin Map Matching, Tilequery ni fetch(", !m, m?.[0]);
-  } else pendiente("lib/gps-traza-ajustada-datos.ts (T3): sin Map Matching, Tilequery ni fetch(");
   chk("el detector no es ciego: encuentra el ajustador en lib/gps-traza-ajustada-calculo.ts y las llamadas en lib/huella.ts",
     PROHIBIDO.test(leerF("lib/gps-traza-ajustada-calculo.ts")) && PROHIBIDO.test(leerF("lib/huella.ts")));
   for (const f of ["lib/gps-traza-ajustada.ts", "lib/gps-huella-servicio.ts", "lib/gps-traza-ajustada-calculo.ts"]) {
     const src = leerF(f);
     chk(`${f}: PURO (no importa Supabase, ni next, ni lee process.env)`, !/@supabase|from "next|process\.env/.test(src));
   }
-  chk("lib/gps-traza-ajustada-calculo.ts recibe el fetch: nunca usa el global", !/[^.\w]fetch\(/.test(leerF("lib/gps-traza-ajustada-calculo.ts").replace(/f\(url\)/g, "")));
+  {
+    const calc = leerF("lib/gps-traza-ajustada-calculo.ts");
+    const usos = calc.match(/[^.\w]fetch\(/g) ?? [];
+    const enServidor = /export function fetchMapboxServidor[\s\S]*?return \(url\) => fetch\(url, \{ signal: AbortSignal\.timeout\(plazoMs\) \}\);/.test(calc);
+    chk("lib/gps-traza-ajustada-calculo.ts: el fetch global solo dentro de fetchMapboxServidor (con plazo); el ajuste usa el inyectado", usos.length === 1 && enServidor);
+  }
+  chk("el lector pasa al ajuste el fetch inyectado o fetchMapboxServidor()", /d\?\.fetch \?\? fetchMapboxServidor\(\)/.test(leerF("lib/gps-traza-ajustada-datos.ts")));
+  {
+    const cob = await import("../lib/gps-cobertura-datos");
+    chk("DIAS_CALCULO del módulo puro = DIAS_RASTREO del lector", TA.DIAS_CALCULO === cob.DIAS_RASTREO);
+  }
+  {
+    const rTraza = fs.readFileSync(path.join(process.cwd(), "app/api/seguimiento/traza-ajustada/route.ts"), "utf8");
+    chk("la ruta de cálculo: módulos seguimiento/monitoreo/vehiculos o token del portal con su reserva; vehículos de la reserva (el cuerpo solo trae el id)",
+      /verificarUsuarioApiAlguno\(req, MODULOS\)/.test(rTraza) && /\["seguimiento", "monitoreo", "vehiculos"\]/.test(rTraza)
+      && /reservaEsDelCliente\(/.test(rTraza) && !/body\??\.vehiculo/.test(rTraza) && /maxDuration = 60/.test(rTraza) && /crearTurno\(2, 6\)/.test(rTraza));
+    const rTick = fs.readFileSync(path.join(process.cwd(), "app/api/gps/traza-ajustada/tick/route.ts"), "utf8");
+    const vercel = JSON.parse(fs.readFileSync(path.join(process.cwd(), "vercel.json"), "utf8"));
+    chk("el cron falla cerrado (esCronAutorizado) y está en vercel.json a las «15 * * * *»",
+      /if \(!esCronAutorizado\(req\)\)/.test(rTick) && vercel.crons.some((c: any) => c.path === "/api/gps/traza-ajustada/tick" && c.schedule === "15 * * * *"));
+    const todo = ["lib/gps-traza-ajustada-datos.ts", "app/api/seguimiento/traza-ajustada/route.ts", "app/api/gps/traza-ajustada/tick/route.ts", "app/api/cliente/gps/route.ts"]
+      .map((f) => fs.readFileSync(path.join(process.cwd(), f), "utf8")).join("\n");
+    chk("ni el token ni una URL de Mapbox van a un log ni a una respuesta", !/console\.\w+\([^)]*(token|url)\b/i.test(todo) && !/NEXT_PUBLIC_MAPBOX_TOKEN/.test(leerF("lib/gps-traza-ajustada-datos.ts")));
+  }
 }
 
 seccion("fin");

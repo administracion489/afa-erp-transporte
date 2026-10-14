@@ -134,6 +134,7 @@ export default function SistemaPage() {
     { nombre: "NEXT_PUBLIC_SUPABASE_ANON_KEY", uso: "Clave anónima Supabase", requerida: true },
     { nombre: "SUPABASE_SERVICE_ROLE_KEY", uso: "Clave admin (server-side)", requerida: true },
     { nombre: "NEXT_PUBLIC_MAPBOX_TOKEN", uso: "Renderizado de mapas", requerida: true },
+    { nombre: "MAPBOX_TOKEN_SERVIDOR", uso: "Ajuste a la vía de servicios finalizados, solo servidor (token sin restricción por URL; nunca NEXT_PUBLIC_)", requerida: false },
     { nombre: "GOOGLE_MAPS_API_KEY", uso: "Proxy de rutas Google Directions", requerida: true },
     { nombre: "RESEND_API_KEY", uso: "Envío de emails", requerida: false },
     { nombre: "RESEND_FROM", uso: "Dirección remitente emails", requerida: false },
