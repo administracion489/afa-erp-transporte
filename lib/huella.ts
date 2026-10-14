@@ -952,6 +952,94 @@ export function puenteEstimadoDeDirections(
   return null;
 }
 
+// ── SI EL GPS VA POR LA PISTA, ES HUELLA MEDIDA, NO ESTIMADA (#1309, 14-10-2026) ───────────────
+// La regla de la recta en marcha (fixEnRectaEnMarcha) marca crudo todo fix de chip con una cuerda
+// de más de 60 m en marcha, y su tramo se rellena por la vía. En una avenida RECTA (la
+// Panamericana) esa recta ES la vía: el estimado se dibujaba encima de puntos GPS que estaban en
+// la pista. Ahora un tramo crudo se queda como MEDIDO cuando (1) todos sus vértices son fixes
+// PRECISOS (el fix de la huella más cercano tiene precisión conocida ≤ ACC_CONFIABLE_M) y (2) la
+// línea de esos fixes y el tramo estimado van juntas: ningún punto de una se aleja más de
+// TOL_VIA_M de la otra (distancia de Hausdorff). Si la recta corta una esquina sobre las casas,
+// se aleja de la vía más que eso y sigue el estimado. TOL_VIA_M hereda ACC_CONFIABLE_M (20 m,
+// no medido aparte): a esa distancia de la vía, un fix preciso ya no cabe en la pista.
+export const TOL_VIA_M = 20;
+
+/** Distancia (m) de un punto a una polilínea [lng, lat]. */
+function distAPolilinea(lat: number, lng: number, linea: readonly [number, number][]): number {
+  if (linea.length === 1) return distM(lat, lng, linea[0][1], linea[0][0]);
+  let best = Infinity;
+  for (let i = 0; i < linea.length - 1; i++) {
+    const q = proyectarEnSegmento(lat, lng, { lat: linea[i][1], lng: linea[i][0] }, { lat: linea[i + 1][1], lng: linea[i + 1][0] });
+    if (q.dist < best) best = q.dist;
+  }
+  return best;
+}
+
+/** Puntos de una polilínea cada ~`paso` m (incluye los vértices), para medir la separación. */
+function muestrear(linea: readonly [number, number][], paso = 10): [number, number][] {
+  const out: [number, number][] = [];
+  for (let i = 0; i < linea.length; i++) {
+    out.push(linea[i]);
+    if (i + 1 >= linea.length) break;
+    const [aLng, aLat] = linea[i], [bLng, bLat] = linea[i + 1];
+    const n = Math.floor(distM(aLat, aLng, bLat, bLng) / paso);
+    for (let k = 1; k < n; k++) out.push([aLng + (bLng - aLng) * k / n, aLat + (bLat - aLat) * k / n]);
+  }
+  return out;
+}
+
+/** Hausdorff (m) entre dos polilíneas [lng, lat]: lo más que se aleja una de la otra. */
+export function separacionEntreLineas(a: readonly [number, number][], b: readonly [number, number][]): number {
+  if (a.length === 0 || b.length === 0) return Infinity;
+  let max = 0;
+  for (const [lng, lat] of muestrear(a)) max = Math.max(max, distAPolilinea(lat, lng, b));
+  for (const [lng, lat] of muestrear(b)) max = Math.max(max, distAPolilinea(lat, lng, a));
+  return max;
+}
+
+/**
+ * ¿El tramo crudo `crudo` (los vértices del ajuste, [lng, lat], anclas incluidas) ya va por la vía
+ * que dibuja el estimado `via`? true → se dibuja como MEDIDO y el estimado no. Pide precisión
+ * CONOCIDA y buena en cada vértice: un fix de red o una huella sin `acc` nunca se queda medido.
+ * `indicesDeVia` = los vértices que son geometría de vía ya pegada (las anclas): no se juzga su
+ * precisión, porque no son un fix.
+ */
+export function crudoSigueLaVia(
+  crudo: readonly [number, number][],
+  via: readonly [number, number][],
+  huella: readonly { lat: number; lng: number; acc?: number }[],
+  indicesDeVia: ReadonlySet<number> = new Set(),
+): boolean {
+  if (crudo.length < 2 || via.length < 2 || huella.length === 0) return false;
+  for (let k = 0; k < crudo.length; k++) {
+    if (indicesDeVia.has(k)) continue;
+    const [lng, lat] = crudo[k];
+    let bd = Infinity, acc: number | undefined;
+    for (const h of huella) {
+      const d = (h.lng - lng) ** 2 + (h.lat - lat) ** 2;
+      if (d < bd) { bd = d; acc = h.acc; }
+    }
+    if (acc == null || esAccCruda(acc)) return false;
+  }
+  return separacionEntreLineas(crudo, via) <= TOL_VIA_M;
+}
+
+/**
+ * Para el ensamblado del modal y del portal: ¿este candidato es una corrida cruda que ya va por
+ * la vía de su estimado? Entonces NO se dibuja el estimado ni se suprime el crudo: lo dibuja
+ * `colorearMatched` como huella medida. Las anclas (iA, iB) son vía pegada, no fixes.
+ */
+export function corridaCrudaEnLaVia(
+  c: Pick<PuenteHueco, "origen" | "iA" | "iB">,
+  via: readonly [number, number][] | null | undefined,
+  matched: readonly [number, number][],
+  huella: readonly { lat: number; lng: number; acc?: number }[],
+): boolean {
+  if (c.origen !== "crudo" || !via || c.iB >= matched.length) return false;
+  const tramo = matched.slice(c.iA, c.iB + 1) as [number, number][];
+  return crudoSigueLaVia(tramo, via, huella, new Set([0, tramo.length - 1]));
+}
+
 /** El Feature GeoJSON con que el modal dibuja un tramo estimado (las dos fases lo arman igual). */
 export function featureDePuente(p: PuenteEstimado) {
   return {
@@ -1606,7 +1694,11 @@ export function colaViva(
   // camino fuera de la vía (puentePorRuta devuelve null con desvío >70 m).
   if (degradado && ruta && ruta.length >= 2 && live && Number.isFinite(live.lat) && Number.isFinite(live.lng)) {
     const bridge = puentePorRuta({ lat: endLat, lng: endLng }, { lat: live.lat, lng: live.lng }, ruta);
-    if (bridge && bridge.length >= 2) {
+    // Salvo que la punta YA vaya por esa vía con fixes precisos (#1309): entonces es huella medida.
+    const precisa = pts.length >= 2 && pts.slice(1).every((p) => p.acc != null && !esAccCruda(p.acc));
+    const enLaVia = precisa && bridge && bridge.length >= 2
+      && separacionEntreLineas(pts.map((p) => [p.lng, p.lat] as [number, number]), bridge) <= TOL_VIA_M;
+    if (bridge && bridge.length >= 2 && !enLaVia) {
       return [{ type: "Feature", properties: { estimado: 1 }, geometry: { type: "LineString", coordinates: bridge } }];
     }
   }
