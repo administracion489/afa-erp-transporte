@@ -1402,19 +1402,32 @@ export function puentearHuecos(pts: HuellaPt[], maxSegM = MAX_SEG_M, vmaxKmh = 1
 // red de seguridad del "nunca cruzar techos" cuando la supresión/puentes fallan (puente con rodeo
 // absurdo, corrida corta sin rutear, tope de puentes, estado desfasado): antes esas cuerdas de
 // 61-300 m se pintaban como recorrido medido (#962).
+// UN TRAMO ESTIMADO QUE NO LLEGA NO DEJA UN HUECO (#1609, 14-10-2026). La cuerda de un fix
+// PRECISO que solo es crudo por ir en marcha (fixEnRectaEnMarcha) se omite si su tramo se
+// rellenó por la vía (`suprimir`). Si no se pudo rellenar (sin ruta, Google sin camino, tope),
+// se dibuja como medida, como antes de esa regla: una recta es mejor que un hueco que nadie
+// rellena. Solo se omite la cuerda con un extremo IMPRECISO (de red) o cuya precisión no se
+// sabe (huella sin `acc`, comportamiento de siempre).
 export function colorearMatched(
   coords: [number, number][],
-  huella: { lat: number; lng: number; velocidad: number }[],
+  huella: { lat: number; lng: number; velocidad: number; acc?: number }[],
   suprimir?: Array<[number, number]>,   // rangos de índice [s,e] a NO dibujar (crudo que se rellena por ruta estimada)
-  esCrudo?: boolean[],                  // por vértice: true = fix crudo de red (no geometría de vía)
+  esCrudo?: boolean[],                  // por vértice: true = fix crudo (de red, o recta en marcha)
 ): any[] {
-  const velCercana = (lng: number, lat: number): number => {
-    let best = 0, bd = Infinity;
+  const cercano = (lng: number, lat: number) => {
+    let best: { velocidad: number; acc?: number } | null = null, bd = Infinity;
     for (const h of huella) {
       const d = (h.lng - lng) ** 2 + (h.lat - lat) ** 2;
-      if (d < bd) { bd = d; best = h.velocidad ?? 0; }
+      if (d < bd) { bd = d; best = h; }
     }
     return best;
+  };
+  const velCercana = (lng: number, lat: number): number => cercano(lng, lat)?.velocidad ?? 0;
+  // ¿El vértice crudo es un fix de red (o de precisión desconocida)? Esos nunca se dibujan largos.
+  const crudoImpreciso = (j: number): boolean => {
+    if (!esCrudo?.[j]) return false;
+    const acc = cercano(coords[j][0], coords[j][1])?.acc;
+    return acc == null || esAccCruda(acc);
   };
   const supr = (j: number) => !!suprimir && suprimir.some(([s, e]) => j >= s && j <= e);
   const feats: any[] = [];
@@ -1427,7 +1440,7 @@ export function colorearMatched(
     // (cruzaría casas) ni gris punteada — se OMITE. La vía de ese tramo la cubre el estimado por ruta
     // (verde petróleo). El usuario pidió eliminar el gris "aprox" (jul-2026); en régimen las corridas
     // crudas ya se rutean y esto es la red de seguridad (corrida sin rutear / tope de puentes / 1er render).
-    if (!!esCrudo && (esCrudo[i] || esCrudo[i + 1]) && d > MAX_SEG_CRUDO_M) continue;
+    if (d > MAX_SEG_CRUDO_M && (crudoImpreciso(i) || crudoImpreciso(i + 1))) continue;
     feats.push({
       type: "Feature",
       properties: { velocidad: velCercana(aLng, aLat) },

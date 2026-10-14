@@ -725,7 +725,10 @@ export default function ModalGps({
         // puente dependen del corte/aprox para no dibujarse como zigzag medido).
         const candidatos = [...cruditos, ...calcularPuentes(limpio)];
         const suprimir: Array<[number, number]> = [];
-        if (candidatos.length > MAX_PUENTES) console.warn(`[ModalGps] ${candidatos.length} huecos, puenteando los primeros ${MAX_PUENTES}`);
+        // El tope MAX_PUENTES limita SOLO las consultas a Google (fase 2): seguir la ruta prevista
+        // (fase 1) no paga nada y se aplica a TODOS. Antes el tope cortaba la lista entera, así que
+        // en un viaje con muchas corridas crudas los ÚLTIMOS tramos quedaban sin rellenar (#1609).
+        const estimadosPagados = (n: number) => { if (n > MAX_PUENTES) console.warn(`[ModalGps] ${n} tramos por Google, consultando los primeros ${MAX_PUENTES}`); };
         const cache = puentesCacheRef.current;
         const feats: any[] = [];
         // Fixes GPS REALES que caen en el intervalo de un candidato (la evidencia para validarPuente):
@@ -745,14 +748,15 @@ export default function ModalGps({
         // secuenciales (~0.3-1 s c/u con caché fría) y el estimado tardaba medio minuto en
         // aparecer. Cada resultado cae en su SLOT por índice → mismo orden de features y misma
         // geometría que el camino secuencial; la caché y sus reglas de vencimiento no cambian.
-        const cands = candidatos.slice(0, MAX_PUENTES);
+        const cands = candidatos;
         const fixesCand: { lat: number; lng: number }[][] = cands.map(fixesDelTramo);   // evidencia real por candidato
         // 1) Seguir la ruta planificada — SOLO si es coherente con la evidencia GPS (no un lazo del itinerario
         //    por donde el bus no pasó). Si falla la validación NO se descarta → cae al fallback de Google
         //    (`porGoogle`, en orden). `puentesPorRutaPrevista` (lib/huella.ts) es ese bucle, sin red.
         const fase1 = puentesPorRutaPrevista(cands, fixesCand, rutaRef.current?.coordenadas);
         const slots: any[] = fase1.slots.map((p) => (p ? featureDePuente(p) : null));
-        const porGoogle: number[] = fase1.porGoogle;
+        estimadosPagados(fase1.porGoogle.length);
+        const porGoogle: number[] = fase1.porGoogle.slice(0, MAX_PUENTES);
         // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco), con tope de
         //    concurrencia. Un `key` repetido dentro del mismo lote comparte UNA sola llamada.
         const enVuelo = new Map<string, Promise<void>>();

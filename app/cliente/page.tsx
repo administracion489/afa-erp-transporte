@@ -1754,7 +1754,7 @@ export default function ClientePortal() {
       const candidatos = [...cruditos, ...calcularPuentes(limpio)];
       const suprimir: Array<[number, number]> = [];
       const MAX_PUENTES = 30;
-      if (candidatos.length > MAX_PUENTES) console.warn(`[cliente] ${candidatos.length} huecos, puenteando ${MAX_PUENTES}`);
+      // El tope limita SOLO las consultas a Google; seguir la ruta prevista no paga y va para todos (#1609).
       const rutaPlan = rutasEnVivoRef.current[rid] || [];
       const cache = puentesCacheCliRef.current;
       const feats: any[] = [];
@@ -1772,7 +1772,7 @@ export default function ClientePortal() {
       // Puentes en DOS FASES (mismo fix que ModalGps, ago-2026 "la huella tarda"): FASE 1 síncrona
       // por la ruta planificada; FASE 2 con los fetch de Google EN PARALELO acotado (6). Slots por
       // índice → mismo orden de features y misma geometría que el camino secuencial.
-      const cands = candidatos.slice(0, MAX_PUENTES);
+      const cands = candidatos;
       const slots: any[] = new Array(cands.length).fill(null);
       const fixesCand: { lat: number; lng: number }[][] = cands.map(fixesDelTramo);   // evidencia real por candidato
       const porGoogle: number[] = [];
@@ -1791,7 +1791,8 @@ export default function ClientePortal() {
       // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco), con tope de
       //    concurrencia. Un `key` repetido dentro del mismo lote comparte UNA sola llamada.
       const enVuelo = new Map<string, Promise<void>>();
-      await enParalelo(porGoogle, 6, async (ci) => {
+      if (porGoogle.length > MAX_PUENTES) console.warn(`[cliente] ${porGoogle.length} tramos por Google, consultando ${MAX_PUENTES}`);
+      await enParalelo(porGoogle.slice(0, MAX_PUENTES), 6, async (ci) => {
         if (cancel) return;
         const c = cands[ci];
         const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
