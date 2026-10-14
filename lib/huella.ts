@@ -1157,6 +1157,19 @@ export function prepararPuntos(pts: MatchPt[]): MatchPt[] {
   return out;
 }
 
+// ── LA RED SE PUEDE INYECTAR (lib/gps-traza-ajustada-calculo.ts) ─────────────────────────
+// El servidor ajusta un servicio finalizado UNA vez y lo guarda: para eso necesita CONTAR las
+// llamadas a Mapbox y saber si alguna fue un fallo pasajero (429/5xx/red), porque un `null` de
+// `mapMatchTrail` no distingue «no pegó» de «Mapbox no contestó» y una traza degradada por un
+// hipo no se puede guardar para siempre. Por eso `mapMatchTrail`, `matchVentana`,
+// `congelarPrefijoLimpio` y `crearAjustadorHuella` reciben el `fetch` como parámetro OPCIONAL.
+// COMPATIBLE HACIA ATRÁS: el defecto resuelve el `fetch` GLOBAL en el momento de la llamada —lo
+// mismo que hacía el código escrito con `fetch(url)`—, sin un `await` de más. Este archivo llega a
+// la app del conductor (lib/km-servicio.ts): con los defectos, byte a byte lo de antes
+// (scripts/prueba-traza-ajustada.mts §0, contra los originales copiados literal).
+export type FetchMapbox = (url: string) => Promise<Response>;
+const fetchGlobal: FetchMapbox = (url) => fetch(url);
+
 // Ajusta la huella GPS a la red vial usando Mapbox Map Matching API — HÍBRIDO POR FRAGMENTO.
 //
 // Mapbox parte el trace en varias `matchings` cuando duda, y era común que m[0] fuera un stub
@@ -1176,7 +1189,8 @@ export function prepararPuntos(pts: MatchPt[]): MatchPt[] {
 // El radio de búsqueda por punto se deriva de la precisión GPS (acc·1.5, acotado 5–50 m).
 export async function mapMatchTrail(
   pts: MatchPt[],
-  token: string
+  token: string,
+  f: FetchMapbox = fetchGlobal,
 ): Promise<{ coords: [number, number][]; confidence: number; crudeFrac: number; maxCrudoChordM: number; esCrudo: boolean[] } | null> {
   const sample = prepararPuntos(pts);
   if (sample.length < 2) return null;
@@ -1193,7 +1207,7 @@ export async function mapMatchTrail(
     // geometría degradada permanente (review ago-2026).
     let res: Response | null = null;
     for (let intento = 0; intento < 3; intento++) {
-      res = await fetch(url);
+      res = await f(url);
       if (res.status !== 429) break;
       await new Promise((r) => setTimeout(r, 1200 * (intento + 1)));
     }
@@ -1271,8 +1285,8 @@ export async function mapMatchTrail(
 // `snapped` = si logró pegar a la vía (confianza ≥ 0.4) o cayó al crudo → el ajustador lo usa para
 // NO revertir a zigzag un tramo ya pegado (stickiness: con GPS de red la confianza baila y sin esto
 // la cola parpadea entre pegada y cruda cada ciclo).
-export async function matchVentana(ventana: MatchPt[], token: string): Promise<{ coords: [number, number][]; snapped: boolean; crudeFrac: number; maxCrudoChordM: number; esCrudo: boolean[] }> {
-  const r = await mapMatchTrail(ventana, token);
+export async function matchVentana(ventana: MatchPt[], token: string, f: FetchMapbox = fetchGlobal): Promise<{ coords: [number, number][]; snapped: boolean; crudeFrac: number; maxCrudoChordM: number; esCrudo: boolean[] }> {
+  const r = await mapMatchTrail(ventana, token, f);
   if (r && r.confidence >= 0.4 && r.coords.length >= 2) return { coords: r.coords, snapped: true, crudeFrac: r.crudeFrac, maxCrudoChordM: r.maxCrudoChordM, esCrudo: r.esCrudo };
   const suav = suavizarPorDistancia(ventana);   // fallback: crudo suavizado por distancia (no pegó a vía)
   const coords = suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [];
@@ -1591,14 +1605,14 @@ export function velocidadPorVentana(
 // solo cuando una ventana sale cruda (GPS bueno nunca entra aquí). Piso 40: un prefijo más corto no vale
 // la fragmentación (la corrupción de <40 puntos es menor y rara). Exige crudeFrac≤0.1 (limpio de verdad).
 async function congelarPrefijoLimpio(
-  ventana: MatchPt[], token: string, cancelado?: () => boolean,
+  ventana: MatchPt[], token: string, cancelado?: () => boolean, f: FetchMapbox = fetchGlobal,
 ): Promise<{ len: number; coords: [number, number][]; esCrudo: boolean[] } | null> {
   const MIN = 40;
   let lo = MIN, hi = ventana.length - 2, bestLen = 0, bestCoords: [number, number][] | null = null, bestEsCrudo: boolean[] | null = null;
   while (lo <= hi) {
     if (cancelado?.()) break;
     const mid = (lo + hi) >> 1;
-    const r = await matchVentana(ventana.slice(0, mid), token);
+    const r = await matchVentana(ventana.slice(0, mid), token, f);
     if (r.snapped && r.crudeFrac <= 0.1) { bestLen = mid; bestCoords = r.coords; bestEsCrudo = r.esCrudo; lo = mid + 1; }
     else hi = mid - 1;
   }
@@ -1613,7 +1627,8 @@ async function congelarPrefijoLimpio(
 //   Uso: crear UN ajustador por traza (modal: por apertura; "En vivo": por servicio
 //   seleccionado). Llamar `ajustar(limpio, token, cancelado?)` cada ciclo; devuelve las
 //   coords unidas, o null si no hay nada nuevo (conservar la geometría previa).
-export function crearAjustadorHuella() {
+export function crearAjustadorHuella(opts?: { fetch?: FetchMapbox }) {
+  const f: FetchMapbox = opts?.fetch ?? fetchGlobal;   // red inyectable (ver FetchMapbox); sin opts, el fetch global
   // La API topa en MAX coords/llamada. Cada ventana se arma con MAX puntos COMO MÁXIMO
   // (solape INCLUIDO) para que prepararPuntos NUNCA la diezme. Antes la ventana medía
   // WIN+SOLAPE = 101 > 100 → prepararPuntos tomaba 1 de cada 2 → media densidad → Map
@@ -1702,7 +1717,7 @@ export function crearAjustadorHuella() {
         while (lote.length < loteMax && limpio.length - H >= NUEVOS + 2) {
           const ini = Math.max(0, H - SOLAPE);
           const ventana = limpio.slice(ini, ini + MAX);   // ≤ MAX SIEMPRE → no se diezma
-          lote.push({ ini: H, ventana, res: matchVentana(ventana, token) });
+          lote.push({ ini: H, ventana, res: matchVentana(ventana, token, f) });
           H += NUEVOS;
         }
         for (const w of lote) {
@@ -1723,7 +1738,7 @@ export function crearAjustadorHuella() {
             // esos 60 buenos = "edita 20 puntos antes"). En vez de hornear crudo sobre lo bueno, se congela
             // SOLO el PREFIJO LIMPIO más largo (INMUTABLE); el resto degradado queda para el siguiente ciclo
             // (lo cubre puentesCrudos por la ruta). Así lo ya dibujado NO se re-edita.
-            const pref = await congelarPrefijoLimpio(w.ventana, token, cancelado);
+            const pref = await congelarPrefijoLimpio(w.ventana, token, cancelado, f);
             if (cancelado?.()) return null;
             if (pref) {
               congeladas.push(pref.coords);
@@ -1745,7 +1760,7 @@ export function crearAjustadorHuella() {
 
       const colaVentana = limpio.slice(Math.max(0, congeladoHasta - SOLAPE));
       if (colaVentana.length >= 2) {
-        const rc = await matchVentana(colaVentana, token);
+        const rc = await matchVentana(colaVentana, token, f);
         if (cancelado?.()) return null;
         ultimaColaSnapped = rc.snapped;   // señal para colaViva: si NO pegó, la punta viva sigue la ruta prevista
         // STICKINESS POR CONTENIDO-CRUDO: no revertir a rectas/crudo un tramo que ya se pegó a la vía.
@@ -1771,27 +1786,11 @@ export function crearAjustadorHuella() {
       const esCrudoTodo = [...congeladasEsCrudo, lastColaEsCrudo].flat();   // alineado 1:1 con `todo`
       ultimoEsCrudo = esCrudoTodo;   // para colorearMatched: marcar `aprox` las cuerdas crudas largas que escapen a la supresión
 
-      // Rangos de crudo POR VÉRTICE (esto SÍ incluye las ventanas MIXTAS: snapped=true con fixes crudos
-      // de RED intercalados — el bug #875 de rectas naranjas sobre casas). Corridas contiguas de
-      // esCrudoTodo=true sobre `todo`, fusionando las separadas por ≤1 vértice limpio (evita confeti).
-      // Se EXCLUYE la corrida que toca el ÚLTIMO índice (punta viva → la cubre colaViva, no parpadea).
-      const rangos: Array<[number, number]> = [];
-      const n = Math.min(todo.length, esCrudoTodo.length);
-      let idx = 0;
-      while (idx < n) {
-        if (esCrudoTodo[idx]) {
-          let j = idx;
-          while (j + 1 < n && (esCrudoTodo[j + 1] || (j + 2 < n && esCrudoTodo[j + 2]))) j++;   // fusiona ≤1 limpio
-          rangos.push([idx, j]);
-          idx = j + 1;
-        } else idx++;
-      }
-      ultimoCrudoRanges = rangos.filter(([, e]) => e < n - 1);   // fuera la corrida de la punta viva (colaViva la cubre)
-
-      // Frontera de la cola VIVA = último vértice de VÍA limpia. colaViva ancla ahí y el consumidor
-      // NO dibuja el crudo de la punta como medido (lo rellena por la ruta). GPS bueno → n-1 → sin cambios.
-      ultimoColaClean = n - 1;
-      for (let k = n - 1; k >= 0; k--) { if (!esCrudoTodo[k]) { ultimoColaClean = k; break; } }
+      // Rangos de crudo y frontera de la cola viva: `rangosDeCrudo` (abajo), extraída de aquí para que
+      // la traza GUARDADA (lib/gps-traza-ajustada.ts) los derive por el MISMO camino que el ajustador.
+      const { crudoRanges, colaClean } = rangosDeCrudo(esCrudoTodo, Math.min(todo.length, esCrudoTodo.length));
+      ultimoCrudoRanges = crudoRanges;
+      ultimoColaClean = colaClean;
 
       return todo.length >= 2 ? todo : null;
     },
@@ -1804,4 +1803,33 @@ export function crearAjustadorHuella() {
     // Último índice de VÍA limpia en las coords devueltas (frontera de colaViva; corta el crudo de la punta).
     leerColaClean: () => ultimoColaClean,
   };
+}
+
+/**
+ * Rangos [ini,fin] de crudo POR VÉRTICE y frontera de la cola viva, sobre los primeros `n` vértices
+ * de `esCrudoTodo` (EXTRAÍDA de `crearAjustadorHuella`, que la llama con `n = min(coords, esCrudo)`;
+ * la traza guardada la llama al decodificar — así lo guardado y lo de memoria se leen igual).
+ *   • crudoRanges: corridas contiguas de `true` (esto SÍ incluye las ventanas MIXTAS: snapped=true con
+ *     fixes crudos de RED intercalados — el bug #875 de rectas naranjas sobre casas), fusionando las
+ *     separadas por ≤1 vértice limpio (evita confeti). Se EXCLUYE la corrida que toca el ÚLTIMO índice
+ *     (punta viva → la cubre colaViva, no parpadea).
+ *   • colaClean: último vértice de VÍA limpia. colaViva ancla ahí y el consumidor NO dibuja el crudo de
+ *     la punta como medido (lo rellena por la ruta). GPS bueno → n-1 → sin cambios. Sin vértices, -1.
+ * Byte a byte el bloque original (scripts/prueba-traza-ajustada.mts §1).
+ */
+export function rangosDeCrudo(esCrudoTodo: boolean[], n: number): { crudoRanges: Array<[number, number]>; colaClean: number } {
+  const rangos: Array<[number, number]> = [];
+  let idx = 0;
+  while (idx < n) {
+    if (esCrudoTodo[idx]) {
+      let j = idx;
+      while (j + 1 < n && (esCrudoTodo[j + 1] || (j + 2 < n && esCrudoTodo[j + 2]))) j++;   // fusiona ≤1 limpio
+      rangos.push([idx, j]);
+      idx = j + 1;
+    } else idx++;
+  }
+  const crudoRanges = rangos.filter(([, e]) => e < n - 1);   // fuera la corrida de la punta viva (colaViva la cubre)
+  let colaClean = n - 1;
+  for (let k = n - 1; k >= 0; k--) { if (!esCrudoTodo[k]) { colaClean = k; break; } }
+  return { crudoRanges, colaClean };
 }
