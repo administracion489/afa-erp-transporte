@@ -61,6 +61,24 @@ export function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[],
 // (el GPS pobre la da en 0). A diferencia de la media móvil por índices (suavizarHuella ±N), que
 // aplana poco el zigzag lento y SÍ recorta las curvas rápidas. Verificado sobre datos reales
 // (#944/#942): desviación perpendicular en tramos lentos ~2.8-10.9 m → ~0.8 m; en rápidos sin cambio.
+// ── UN FIX PRECISO EN MARCHA NO SE MUEVE MÁS QUE SU ERROR (caso #1609, 14-10-2026) ──────────
+// En una esquina, un fix de chip (±2 m, sobre la pista) se promediaba con sus vecinos de ambos
+// lados del giro y quedaba 10-15 m DENTRO de la manzana: la línea cortaba la esquina sobre las casas
+// sin pasar por el punto que el mapa enseña en la calle. El suavizado existe para el zigzag del bus
+// LENTO o parado; en marcha, un fix preciso ya está donde dice. Por eso, si el punto trae precisión
+// conocida ≤ ACC_CONFIABLE_M y hora, y va EN MARCHA (velocidad geométrica a sus vecinos >
+// VEL_MANIOBRA_KMH), el suavizado no lo saca de su círculo de error: max(acc, PISO_ERROR_FIX_M).
+// Sin acc o sin hora (llamadores viejos), byte a byte lo de siempre. PISO_ERROR_FIX_M no está medido.
+const PISO_ERROR_FIX_M = 3;
+function enMarchaEn<T extends { lat: number; lng: number }>(pts: T[], i: number): boolean {
+  const kmh = (a: any, b: any) => {
+    const ta = a?.ts, tb = b?.ts;
+    if (!(typeof ta === "number" && typeof tb === "number" && ta > 0 && tb > ta)) return -1;
+    return distM(a.lat, a.lng, b.lat, b.lng) / ((tb - ta) / 1000) * 3.6;
+  };
+  return Math.max(i > 0 ? kmh(pts[i - 1], pts[i]) : -1, i + 1 < pts.length ? kmh(pts[i], pts[i + 1]) : -1) > VEL_MANIOBRA_KMH;
+}
+
 export function suavizarPorDistancia<T extends { lat: number; lng: number }>(pts: T[], R = 40, K = 8): T[] {
   return pts.map((p, i) => {
     let sLat = 0, sLng = 0, n = 0;
@@ -68,7 +86,14 @@ export function suavizarPorDistancia<T extends { lat: number; lng: number }>(pts
     for (let j = lo; j <= hi; j++) {
       if (distM(pts[j].lat, pts[j].lng, p.lat, p.lng) <= R) { sLat += pts[j].lat; sLng += pts[j].lng; n++; }
     }
-    return n ? { ...p, lat: sLat / n, lng: sLng / n } : p;
+    if (!n) return p;
+    let lat = sLat / n, lng = sLng / n;
+    const acc = (p as any).acc;
+    if (typeof acc === "number" && acc > 0 && acc <= ACC_CONFIABLE_M && enMarchaEn(pts, i)) {
+      const tope = Math.max(acc, PISO_ERROR_FIX_M), d = distM(p.lat, p.lng, lat, lng);
+      if (d > tope) { const f = tope / d; lat = p.lat + (lat - p.lat) * f; lng = p.lng + (lng - p.lng) * f; }
+    }
+    return { ...p, lat, lng };
   });
 }
 
@@ -1308,6 +1333,19 @@ export function fixEnRectaEnMarcha(pts: readonly MatchPt[], k: number): boolean 
   return (k > 0 && cuerdaEnMarcha(pts[k - 1], p)) || (k + 1 < pts.length && cuerdaEnMarcha(p, pts[k + 1]));
 }
 
+// ── EL RADIO DE BÚSQUEDA DE UN FIX PRECISO NO PUEDE SER MÁS ANGOSTO QUE LA PISTA (#1609) ────
+// Era acc·1.5 con piso de 5 m: un chip de ±2 m buscaba vía a 5 m. Pero la vía de OpenStreetMap es
+// una LÍNEA (el eje de la calzada) y el bus va por su carril, a 5-15 m de ese eje en una avenida de
+// tres carriles por sentido. Fuera del radio Mapbox no encuentra candidato, deja el tracepoint en
+// null y parte el trazo: el fix más preciso del viaje desaparecía de la huella, que unía en recta
+// los fragmentos de antes y de después por encima de las casas (o dejaba un hueco si la recta
+// pasaba de MAX_SEG_M). Piso RADIO_MIN_MATCH_M (15 m, NO medido: el ancho de media avenida); el
+// techo de 50 m y el factor para los fixes de red no cambian.
+export const RADIO_MIN_MATCH_M = 15;
+export function radioDeBusqueda(acc: number | undefined): number {
+  return Math.min(50, Math.max(RADIO_MIN_MATCH_M, Math.ceil((acc || 25) * 1.5)));
+}
+
 export async function mapMatchTrail(
   pts: MatchPt[],
   token: string,
@@ -1316,7 +1354,7 @@ export async function mapMatchTrail(
   const sample = prepararPuntos(pts);
   if (sample.length < 2) return null;
   const coords = sample.map(p => `${p.lng},${p.lat}`).join(";");
-  const radii  = sample.map(p => String(Math.min(50, Math.max(5, Math.ceil((p.acc || 25) * 1.5))))).join(";");
+  const radii  = sample.map(p => String(radioDeBusqueda(p.acc))).join(";");
   try {
     const url =
       `https://api.mapbox.com/matching/v5/mapbox/driving/${coords}` +
@@ -1363,9 +1401,24 @@ export async function mapMatchTrail(
     //    la "recta que cruza techos" medida directamente. Las cuerdas road→road interiores de un
     //    fragmento NO cuentan (son cortas y siguen la vía).
     let crudos = 0;
-    let lastPt: [number, number] | null = null;   // última coord emitida
+    let lastPt: [number, number] | null = null;   // última coord emitida (sin contar los fixes sin emparejar, ver abajo)
     let lastCrude = false;                         // ¿la última coord emitida fue un fix crudo?
     let maxCC = 0;
+    // ── LOS FIXES QUE MAPBOX NO EMPAREJÓ, EN LA FRONTERA ENTRE FRAGMENTOS (#1609) ────────────
+    // Un tracepoint null se omitía siempre («tidy lo descartó»). Dentro de un fragmento es correcto
+    // (tidy quita redundantes y la geometría ya pasa por ahí), pero en la FRONTERA entre dos
+    // fragmentos es un fix que no se pudo emparejar —típico: el más preciso, fuera del radio de
+    // búsqueda— y omitirlo dejaba una recta entre los fragmentos (o un hueco, si pasaba de MAX_SEG_M).
+    // Ahí se emite el FIX REAL, con la misma regla que un fragmento dudoso. Las métricas de suciedad
+    // (crudeFrac, maxCrudoChordM) se cuentan como antes, sin ellos: deciden la stickiness del
+    // ajustador y no deben moverla.
+    let sinPareja = 0;
+    let previoPt: [number, number] | null = null;   // última coord emitida, incluidos los sin pareja
+    let previoEsVia = false;                          // ¿esa última coord era geometría de vía?
+    const miDe = (k: number): number | null => { const t: any = tp[k]; return t && t.matchings_index != null ? t.matchings_index : null; };
+    const miAntes: Array<number | null> = [], miDespues: Array<number | null> = new Array(sample.length).fill(null);
+    for (let k = 0, ult: number | null = null; k < sample.length; k++) { miAntes.push(ult); const x = miDe(k); if (x != null) ult = x; }
+    for (let k = sample.length - 1, sig: number | null = null; k >= 0; k--) { miDespues[k] = sig; const x = miDe(k); if (x != null) sig = x; }
     for (let k = 0; k < sample.length; k++) {
       const t: any = tp[k];
       const mi: number | null = t && t.matchings_index != null ? t.matchings_index : null;
@@ -1377,9 +1430,16 @@ export async function mapMatchTrail(
           if (g.length) {
             // Junta con lo previo: solo la mido si el lado previo era crudo (road↔crudo).
             if (lastPt && lastCrude) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], g[0][1], g[0][0]));
+            // Junta vía↔vía entre DOS fragmentos: una recta de más de MAX_SEG_CRUDO_M no sigue la
+            // calle → sus dos extremos se marcan crudos, así la rellena la ruta (o se dibuja si no hay).
+            const juntaRecta = previoEsVia && previoPt != null
+              && distM(previoPt[1], previoPt[0], g[0][1], g[0][0]) > MAX_SEG_CRUDO_M;
+            if (juntaRecta) esCrudo[esCrudo.length - 1] = true;
             via.push(...g);
-            for (let j = 0; j < g.length; j++) esCrudo.push(false);   // geometría de vía Mapbox
+            for (let j = 0; j < g.length; j++) esCrudo.push(juntaRecta && j === 0);   // geometría de vía Mapbox
             lastPt = g[g.length - 1];
+            previoPt = lastPt;
+            previoEsVia = true;
             lastCrude = false;
           }
         }
@@ -1391,13 +1451,24 @@ export async function mapMatchTrail(
         esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(sample, k));
         crudos++;
         lastPt = p;
+        previoPt = p;
+        previoEsVia = false;
         lastCrude = true;
+      } else if (!(miAntes[k] != null && miAntes[k] === miDespues[k])) {
+        // Sin pareja y en la FRONTERA (o antes del primer fragmento / después del último): el fix REAL.
+        const p: [number, number] = [sample[k].lng, sample[k].lat];
+        via.push(p);
+        esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(sample, k));
+        sinPareja++;
+        previoPt = p;
+        previoEsVia = false;
       }
-      // mi == null: tidy lo descartó como outlier/redundante → omitir (rechazo de outliers gratis)
+      // mi == null DENTRO de un fragmento: tidy lo descartó como redundante → omitir
     }
     const confidence = cubiertos / sample.length;
-    const crudeFrac = via.length ? crudos / via.length : 1;
-    return via.length >= 2 ? { coords: via, confidence, crudeFrac, maxCrudoChordM: maxCC, esCrudo } : null;
+    const nComoAntes = via.length - sinPareja;   // las métricas de suciedad, sin los fixes sin pareja
+    const crudeFrac = nComoAntes ? crudos / nComoAntes : 1;
+    return nComoAntes >= 2 && via.length >= 2 ? { coords: via, confidence, crudeFrac, maxCrudoChordM: maxCC, esCrudo } : null;
   } catch { return null; }
 }
 
@@ -1924,6 +1995,7 @@ export function crearAjustadorHuella(opts?: { fetch?: FetchMapbox }) {
 
       const todo = [...congeladas, lastCola].flat() as [number, number][];
       const esCrudoTodo = [...congeladasEsCrudo, lastColaEsCrudo].flat();   // alineado 1:1 con `todo`
+      marcarJuntasRectas(todo, esCrudoTodo, [...congeladas, lastCola].map((c) => c.length));
       ultimoEsCrudo = esCrudoTodo;   // para colorearMatched: marcar `aprox` las cuerdas crudas largas que escapen a la supresión
 
       // Rangos de crudo y frontera de la cola viva: `rangosDeCrudo` (abajo), extraída de aquí para que
@@ -1943,6 +2015,24 @@ export function crearAjustadorHuella(opts?: { fetch?: FetchMapbox }) {
     // Último índice de VÍA limpia en las coords devueltas (frontera de colaViva; corta el crudo de la punta).
     leerColaClean: () => ultimoColaClean,
   };
+}
+
+/**
+ * La junta entre dos ventanas del ajustador (último vértice de una, primero de la siguiente) que
+ * mide más de MAX_SEG_CRUDO_M no sigue la calle: es una recta entre dos geometrías. Se marcan sus
+ * dos extremos crudos para que la rellene la ruta (y, si no se puede, se dibuja: colorearMatched),
+ * en vez de cruzar las casas o —pasados MAX_SEG_M— quedar como un hueco que nadie rellena (#1609).
+ * Solo GANA verdaderos. `largos` = vértices de cada parte, en orden.
+ */
+export function marcarJuntasRectas(coords: [number, number][], esCrudo: boolean[], largos: number[]): void {
+  let off = 0;
+  for (let p = 0; p < largos.length; p++) {
+    const s = off;
+    off += largos[p];
+    if (p === 0 || largos[p] === 0 || s === 0 || s >= coords.length || s >= esCrudo.length) continue;
+    const a = coords[s - 1], b = coords[s];
+    if (distM(a[1], a[0], b[1], b[0]) > MAX_SEG_CRUDO_M) { esCrudo[s - 1] = true; esCrudo[s] = true; }
+  }
 }
 
 /**

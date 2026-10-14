@@ -35,7 +35,10 @@ import { rangosDeCrudo } from "./huella";
 // 3 (14-10-2026): una recta larga EN MARCHA entre fixes de chip que Map Matching no pegó pasa a ser
 // `esCrudo` (fixEnRectaEnMarcha, lib/huella.ts): la salida del ajustador cambió y las guardadas antes
 // se recalculan.
-export const VERSION_AJUSTE = 3;
+// 4 (14-10-2026, #1609): radio de búsqueda con piso de 15 m, los fixes sin pareja de la frontera entre
+// fragmentos se emiten (antes se perdían), las juntas rectas entre fragmentos/ventanas pasan a crudo y
+// un fix preciso en marcha no se suaviza fuera de su error. Otra salida → se recalculan.
+export const VERSION_AJUSTE = 4;
 /** Días hacia atrás en que el servidor CALCULA (= DIAS_RASTREO de lib/gps-cobertura-datos.ts, que la
  *  matriz coteja; aquí como literal porque este módulo no puede importar un lector de servidor). */
 export const DIAS_CALCULO = 90;
