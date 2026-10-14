@@ -1016,7 +1016,7 @@ export default function ClientePortal() {
         if (!filtrosVivoRef.current[k]) filtrosVivoRef.current[k] = crearFiltroFixVivo();
         // Glitch de red aislado (salto imposible que el propio track corrige solo) → conservar
         // la posición previa de ESTE bus en vez de mover el marcador a la posición falsa.
-        if (filtrosVivoRef.current[k](Number(g.lat), Number(g.lng), tMs(g))) merged[k] = g;
+        if (filtrosVivoRef.current[k](Number(g.lat), Number(g.lng), tMs(g), g.precision_m == null ? null : Number(g.precision_m))) merged[k] = g;
       });
       const ahora = Date.now();
       return Object.values(merged).filter((g: any) => ahora - tMs(g) <= MAX_EDAD_MS);

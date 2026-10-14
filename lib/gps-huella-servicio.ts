@@ -179,3 +179,54 @@ export function servicioDeHuella(
     via: viaVehiculo ? "vehiculo" : filasOk.length ? "reserva" : "ninguna",
   };
 }
+
+// ── EL FIX EN VIVO DEL MODAL: ¿esta fila es del servicio que se está mirando? ─────────────────────
+//
+// El modal GPS recibe la posición por DOS caminos: la consulta cada 10 s (`/api/cliente/gps`, modo
+// individual: la última fila de la reserva y, solo si la reserva no tiene ninguna, la última «en_ruta»
+// de la unidad) y el tiempo real de `ubicaciones_gps`. El tiempo real aceptaba CUALQUIER fila de la
+// unidad. Reserva #1459 (14-10-2026): el conductor pulsó «Finalizar» a las 16:46 y su teléfono siguió
+// mandando posiciones de la CWQ400 —de otro servicio o conectado sin servicio—; cada una movía el ícono
+// a donde estaba el bus AHORA y la cabecera pasaba a «GPS en vivo», y a los 10 s la consulta devolvía
+// el último punto del servicio y volvía a «Servicio finalizado». El operador y el cliente veían el bus
+// saltar entre dos sitios. Ahora el tiempo real contesta la MISMA pregunta que la consulta:
+//   1. la fila de ESTA reserva es del servicio (salvo que sea más vieja que la que ya se muestra:
+//      la cola offline del teléfono no puede hacer retroceder el ícono);
+//   2. la de OTRA reserva no lo es nunca;
+//   3. sin reserva en la fila, solo vale lo que valdría el respaldo de la consulta: la unidad del
+//      servicio, en estado «en_ruta», mientras la reserva no tenga ninguna fila propia y no esté
+//      cerrada. En cuanto llegó una fila del servicio —o el servicio terminó— una fila sin reserva es
+//      la unidad haciendo otra cosa.
+// Sin reserva (llamador sin servicio), la regla de antes: la unidad.
+export type MotivoFilaVivo =
+  | "del_servicio" | "por_unidad"                                            // se acepta
+  | "anterior" | "otro_servicio" | "otra_unidad" | "servicio_cerrado"        // no se acepta
+  | "fuera_del_servicio" | "sin_servicio";
+export type ContextoFilaVivo = {
+  reservaId: number | null;
+  vehiculoId: number | null;
+  vehiculoTerceroId: number | null;
+  /** ¿Ya se mostró alguna fila de ESTA reserva? */
+  vioFilaDelServicio: boolean;
+  /** La reserva está finalizada/cancelada o su último punto es el de «Finalizar». */
+  servicioCerrado: boolean;
+  /** ts de la posición que se muestra (null = ninguna). */
+  ultimoTs: number | null;
+};
+const idNum = (x: any): number | null => (x == null || x === "" ? null : Number.isFinite(Number(x)) ? Number(x) : null);
+export function filaEnVivoDelServicio(fila: any, ctx: ContextoFilaVivo): { acepta: boolean; motivo: MotivoFilaVivo } {
+  const no = (motivo: MotivoFilaVivo) => ({ acepta: false, motivo });
+  const ts = tMs(fila);
+  const rid = idNum(fila?.reserva_id), vid = idNum(fila?.vehiculo_id), vtid = idNum(fila?.vehiculo_tercero_id);
+  const reserva = idNum(ctx.reservaId), veh = idNum(ctx.vehiculoId), vehT = idNum(ctx.vehiculoTerceroId);
+  const masVieja = ctx.ultimoTs != null && ts > 0 && ts < ctx.ultimoTs;
+  if (reserva != null && rid === reserva) return masVieja ? no("anterior") : { acepta: true, motivo: "del_servicio" };
+  if (reserva != null && rid != null) return no("otro_servicio");
+  const deLaUnidad = (vehT != null && vtid === vehT) || (vehT == null && veh != null && vid === veh);
+  if (!deLaUnidad) return no("otra_unidad");
+  if (reserva == null) return masVieja ? no("anterior") : { acepta: true, motivo: "por_unidad" };
+  if (ctx.servicioCerrado) return no("servicio_cerrado");
+  if (ctx.vioFilaDelServicio) return no("fuera_del_servicio");
+  if (fila?.estado !== "en_ruta") return no("sin_servicio");
+  return masVieja ? no("anterior") : { acepta: true, motivo: "por_unidad" };
+}
