@@ -3,7 +3,8 @@
 //     estadística por servicio de /uso-flota (`medirServicio` con `conHuella`, lib/gps-cobertura-datos.ts):
 //     de ahí salen, de la misma lectura, la huella, los excesos y la medición de cobertura («sin señal»);
 //   · la ruta prevista y los puentes que el modal GPS ya pagó y guardó en `rutas_cache`, en UNA sola
-//     consulta (`leerRutasCache`, que LANZA si falla: un fallo nunca se lee como «no hay nada»);
+//     consulta (`leerRutasCache`, que LANZA si falla: un fallo nunca se lee como «no hay nada»), y la
+//     RUTA PROPIA del cliente (`rutas_propias`, el recorrido GPS real), que queda desde el día 31;
 //   · las horas de abordaje de los paraderos de la reserva (`pasajeros_parada`), solo las columnas que
 //     hacen falta para la hora: con ellas se etiqueta cada exceso («antes del paradero 1 · sin pasajeros»).
 //
@@ -18,6 +19,7 @@ import {
 } from "../gps-cobertura-datos";
 import { leerReservaDiag, type FilaReservaDiag } from "../gps-diagnostico-datos";
 import { leerRutasCache } from "../rutas-cache";
+import { leerRutasPropias } from "../ruta-propia-datos";
 import { vehiculoDeReserva } from "./servicio-estadistica";
 import {
   recorridoDeServicio, clavesRutaPrevista, clavesPuentes, resolverRutaPrevista, hechosDelServicio,
@@ -58,6 +60,8 @@ export type LectoresRecorrido = {
   traza?: LectorTraza;
   /** una sola lectura de rutas_cache con todas las claves; LANZA si falla */
   rutasCache?: (claves: string[]) => Promise<Map<string, any>>;
+  /** las rutas propias (GPS real) de esas claves para el cliente; LANZA si falla */
+  rutasPropias?: (claves: string[], clienteId: number | null) => Promise<Map<string, any>>;
   /** LANZA si falla */
   abordajes?: (paradaIds: number[]) => Promise<AbordajeTiempos[]>;
   /** ¿la torre dejó esta reserva fuera de su techo diario (MAX_RESERVAS)? best-effort: false si falla */
@@ -78,6 +82,7 @@ export async function armarRecorrido(
   const leerTraza = lectores.traza ?? trazaDe;
   const leerCache = lectores.rutasCache ?? ((claves: string[]) => leerRutasCache(claves));
   const leerAbordajes = lectores.abordajes ?? abordajesDe;
+  const leerPropias = lectores.rutasPropias ?? ((claves: string[], cid: number | null) => leerRutasPropias(claves, cid));
   const techo = lectores.fueraDelTecho ?? fueraDelTecho;
 
   // Un servicio cancelado no se mide (la torre ni lo consulta): no hay recorrido que dibujar.
@@ -102,7 +107,11 @@ export async function armarRecorrido(
   const clavesP = aplica && crudas ? clavesPuentes(crudas) : [];
   const todasClaves = [...claves.variantes.map((v) => v.firma), ...clavesP];
 
-  const [mapa, abordajes] = await Promise.all([
+  // La ruta PROPIA (GPS real, `rutas_propias`) de esas mismas claves, la del cliente del servicio: la
+  // que queda cuando la de Google guardada vence (día 31). Mismo orden que el modal GPS.
+  const firmasRuta = claves.variantes.map((v) => v.firma);
+  const clienteId = r.cliente_id != null && Number.isFinite(Number(r.cliente_id)) ? Number(r.cliente_id) : null;
+  const [mapa, abordajes, propias] = await Promise.all([
     todasClaves.length
       ? leerCache(todasClaves).catch((e: unknown) => {
         console.error("[recorrido] rutas_cache", e instanceof Error ? e.message : String(e));
@@ -115,9 +124,15 @@ export async function armarRecorrido(
         return null;
       })
       : Promise.resolve(null),
+    firmasRuta.length
+      ? leerPropias(firmasRuta, clienteId).catch((e: unknown) => {
+        console.error("[recorrido] rutas_propias", e instanceof Error ? e.message : String(e));
+        return null;
+      })
+      : Promise.resolve(new Map<string, any>()),
   ]);
 
-  const { estado, ruta } = resolverRutaPrevista(claves, mapa);
+  const { estado, ruta } = resolverRutaPrevista(claves, mapa, propias);
   let estadoRuta: EstadoRutaPrevista = estado;
   // La ruta se resuelve sin consulta (sin paraderos o sin coordenadas) pero los puentes sí se pidieron
   // y la consulta falló: se dice, para no dar a entender que no hay tramos estimados guardados.

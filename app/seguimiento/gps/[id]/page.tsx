@@ -62,8 +62,13 @@ const CODIGOS_BANDA: CodigoRastreo[] = ["completo", "aceptable", "con_cortes", "
 const SIN_CHIP: CodigoRastreo[] = ["no_aplica", "recien_iniciado", "sin_medir"];
 
 /** La línea del estado de la ruta prevista: por CÓDIGO, nunca olfateando el detalle. */
-function textoRutaPrevista(codigo: CodigoRutaPrevista, detalle: string): string {
-  if (codigo === "guardada") return "Tramos estimados sobre la ruta prevista guardada.";
+function textoRutaPrevista(codigo: CodigoRutaPrevista, detalle: string, fuente?: "google" | "propia"): string {
+  if (codigo === "guardada") {
+    // La ruta propia (recorrido GPS real de un servicio anterior) se nombra: es la que queda desde el día 31.
+    return fuente === "propia"
+      ? "Tramos estimados sobre el recorrido GPS real de un servicio anterior con estos paraderos."
+      : "Tramos estimados sobre la ruta prevista guardada.";
+  }
   if (codigo === "no_guardada") return "La ruta prevista no está guardada: ábrela una vez en el modal GPS para guardarla.";
   return detalle;
 }
@@ -483,7 +488,7 @@ export default function GpsServicioPage() {
                 )}
                 {r.rutaPrevista && (
                   <p className="text-blue-300" title={r.rutaPrevista.detalle}>
-                    <span className="text-blue-400">Ruta prevista: </span>{textoRutaPrevista(r.rutaPrevista.codigo, r.rutaPrevista.detalle)}
+                    <span className="text-blue-400">Ruta prevista: </span>{textoRutaPrevista(r.rutaPrevista.codigo, r.rutaPrevista.detalle, r.rutaPrevista.fuente)}
                   </p>
                 )}
               </div>
