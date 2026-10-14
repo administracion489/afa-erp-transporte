@@ -1888,6 +1888,41 @@ seccion("13 · una traza con un punto rápido cada 11 s ya no fabrica miles de d
     /const MAX_BYTES_CACHE = 1_000_000;/.test(srcRuta) && srcRuta.includes("if (JSON.stringify(payload).length > MAX_BYTES_CACHE) return;"));
 }
 
+seccion("14 · la RUTA PROPIA (GPS real, rutas_propias): después de la de Google vigente, y del cliente del servicio");
+{
+  const pA = { id: 1, orden: 1, nombre: "A", lat: -12.10, lng: -77.03, estado: "completada", hora_estimada: null };
+  const pB = { id: 2, orden: 2, nombre: "B", lat: -12.12, lng: -77.03, estado: "completada", hora_estimada: null };
+  const claves = R.clavesRutaPrevista([pA, pB], null, { origen: "A", destino: "B" });
+  const f = claves.variantes[0].firma;
+  const google = new Map<string, any>([[f, { coordenadas: [[-77.03, -12.10], [-77.03, -12.11], [-77.03, -12.12]] }]]);
+  const propia = new Map<string, any>([[f, { coordenadas: [[-77.03, -12.10], [-77.031, -12.12]], fuente: "propia", fuente_fecha: "2026-09-05" }]]);
+  const vacio = new Map<string, any>();
+  const g = R.resolverRutaPrevista(claves, google, propia);
+  chk("la de Google vigente manda sobre la propia", g.estado.codigo === "guardada" && g.estado.fuente === "google" && g.ruta?.length === 3);
+  const p = R.resolverRutaPrevista(claves, vacio, propia);
+  chk("sin la de Google (día 31) queda la propia, y lo dice con su fecha", p.estado.codigo === "guardada" && p.estado.fuente === "propia" && p.ruta?.length === 2 && /GPS real/.test(p.estado.detalle) && /05\/09\/2026/.test(p.estado.detalle));
+  chk("con la consulta de Google caída, la propia sirve igual", R.resolverRutaPrevista(claves, null, propia).ruta?.length === 2);
+  chk("sin propia consultada: el texto de siempre", R.resolverRutaPrevista(claves, vacio).estado.detalle === R.resolverRutaPrevista(claves, vacio, undefined).estado.detalle
+    && !/GPS real/.test(R.resolverRutaPrevista(claves, vacio).estado.detalle));
+  chk("sin ninguna: no_guardada nombra las dos", R.resolverRutaPrevista(claves, vacio, vacio).estado.codigo === "no_guardada" && /GPS real/.test(R.resolverRutaPrevista(claves, vacio, vacio).estado.detalle));
+  chk("propia caída y sin Google: no se afirma que no exista", R.resolverRutaPrevista(claves, vacio, null).estado.codigo === "no_se_pudo_leer");
+  chk("una propia sin coordenadas utilizables no cuenta", R.resolverRutaPrevista(claves, vacio, new Map([[f, { coordenadas: [[0, 0]] }]])).estado.codigo === "no_guardada");
+
+  // armarRecorrido le pide la propia con las MISMAS firmas que a rutas_cache y con el cliente del servicio.
+  let pedidas: string[] = [], cliente: number | null = -1, pedidasCache: string[] = [];
+  const r = { id: 88, estado: "finalizada", fecha_servicio: "2026-10-09", cliente_id: 41, origen: "A", destino: "B", paradas_json: null };
+  const rec = await RD.armarRecorrido(r, [pA, pB], { hoy: "2026-10-14", ahoraMs: Date.parse("2026-10-14T12:00:00Z"), umbral: 90 }, {
+    traza: async () => ({ pts: [], crudas: [], cierreTs: null }) as any,
+    rutasCache: async (cl) => { pedidasCache = cl; return new Map(); },
+    rutasPropias: async (cl, cid) => { pedidas = cl; cliente = cid; return propia; },
+    abordajes: async () => [],
+    fueraDelTecho: async () => false,
+  });
+  chk("armarRecorrido pide la propia con las firmas de la ruta y el cliente del servicio",
+    cliente === 41 && pedidas.length === 1 && pedidas[0] === f && pedidasCache.includes(f), JSON.stringify({ cliente, pedidas }));
+  chk("y la dibuja como ruta prevista", rec.rutaPrevista.codigo === "guardada" && rec.rutaPrevista.fuente === "propia", rec.rutaPrevista.detalle);
+}
+
 if (process.env.DETALLE) console.log(`   (${ok + fallas - okSeccion} comprobaciones en la sección anterior)`);
 console.log(`\n${fallas ? "❌" : "✅"} prueba-recorrido: ${ok} ok, ${fallas} fallas`);
 if (fallas) process.exit(1);

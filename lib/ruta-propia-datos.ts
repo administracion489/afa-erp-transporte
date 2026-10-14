@@ -16,7 +16,7 @@ import { firmaRuta } from "./ruta-firma";
 import { tablaFaltante } from "./columna-faltante";
 import {
   DIAS_CANDIDATOS, MAX_CANDIDATOS, MOTIVO_TRAZO, mismosParaderos, elegirRecorrido, payloadDeRecorrido,
-  debeReconstruir, type Candidato, type CodigoTrazo, type FilaRutaPropia, type Punto,
+  debeReconstruir, payloadServible, type Candidato, type CodigoTrazo, type FilaRutaPropia, type Punto, type PayloadRutaPropia,
 } from "./ruta-propia";
 
 const PAG = 1000;
@@ -65,6 +65,30 @@ async function leerFila(clave: string, clienteId: number, db: SupabaseClient): P
     throw new Error(error.message || "no se pudo leer rutas_propias");
   }
   return (data as FilaRutaPropia | null) ?? null;
+}
+
+/**
+ * Las rutas propias de varias claves de UN cliente, en una consulta (para «Ver recorrido»,
+ * lib/flota/recorrido-datos.ts). Solo las servibles. Sin la tabla, un mapa vacío. LANZA ante otro
+ * error: quien llama lo declara «no se pudo leer», nunca «no hay».
+ */
+export async function leerRutasPropias(claves: readonly string[], clienteId: number | null, db: SupabaseClient = admin()): Promise<Map<string, PayloadRutaPropia>> {
+  const out = new Map<string, PayloadRutaPropia>();
+  const unicas = [...new Set(claves.filter((c) => typeof c === "string" && c.length > 0))];
+  if (clienteId == null || !unicas.length) return out;
+  for (let i = 0; i < unicas.length; i += 50) {
+    const { data, error } = await db.from("rutas_propias").select("clave, payload, revisada_en")
+      .eq("cliente_id", clienteId).in("clave", unicas.slice(i, i + 50));
+    if (error) {
+      if (sinTabla(error)) return out;
+      throw new Error(error.message || "no se pudo leer rutas_propias");
+    }
+    for (const f of (data || []) as (FilaRutaPropia & { clave: string })[]) {
+      const p = payloadServible(f);
+      if (p) out.set(f.clave, p);
+    }
+  }
+  return out;
 }
 
 async function clienteDe(reservaId: number, db: SupabaseClient): Promise<number | null> {
