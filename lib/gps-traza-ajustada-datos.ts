@@ -382,6 +382,7 @@ export async function calcularYGuardar(
     });
     llamadas = ajuste.llamadas;
     const r = resultadoDelCalculo(ajuste);
+    if (r.codigo === "token_rechazado") console.error(`[gps-traza-ajustada] Mapbox rechazó la credencial del servidor en ${ajuste.rechazos} consultas (401/403: inválida o con restricción por dominio)`);
     if (r.codigo === "excede_servicio" && ajuste.porTiempo) {
       salida = res("excede_servicio", { llamadas, detalle: "el servicio es demasiado largo para ajustarlo en el tiempo de una consulta; no se guardó" });
     } else if (!r.guardar || !r.traza) {

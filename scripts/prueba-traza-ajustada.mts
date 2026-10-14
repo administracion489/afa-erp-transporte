@@ -964,7 +964,8 @@ const EPS_COORD = 0.5e-6 + 1e-12;
   const t = bueno.ok ? bueno.traza : (null as any);
   chk("decodificar rechaza: otra versión, n que no casa, RLE que no suma, RLE negativo, polyline cortada, basura",
     TA.decodificarTraza(t) != null
-    && TA.decodificarTraza({ ...t, v: 2 }) === null
+    && TA.decodificarTraza({ ...t, v: TA.VERSION_AJUSTE + 1 }) === null
+    && TA.decodificarTraza({ ...t, v: 1 }) === null   // las de la versión 1 (guardadas con el token rechazado, #1608) se recalculan
     && TA.decodificarTraza({ ...t, n: 3 }) === null
     && TA.decodificarTraza({ ...t, c: [1] }) === null
     && TA.decodificarTraza({ ...t, c: [3, -1] }) === null
@@ -1128,6 +1129,16 @@ sinEsperas();
   const fR = crearFake({});
   const ajR = await TC.ajustarServicioCompleto(limpio, "tok", async (u) => { await fR.fetch(u); throw new TypeError("sin red"); });
   chk("sin red en absoluto: todas las consultas son transitorias y no se guarda", ajR.transitorios === new Set(fR.urls).size && !TA.resultadoDelCalculo(ajR).guardar);
+  // #1608: token del servidor rechazado (403 = restricción por URL; 401 = inválido) → cada ventana cae
+  // al crudo suavizado. Antes eso NO contaba como fallo y se guardaba para siempre.
+  for (const st of [401, 403]) {
+    const urls: string[] = [];
+    const ajX = await TC.ajustarServicioCompleto(limpio, "tok", async (u) => { urls.push(u); return new Response(JSON.stringify({ message: "Forbidden" }), { status: st }); });
+    const rX = TA.resultadoDelCalculo(ajX);
+    chk(`token rechazado (${st}): ${ajX.rechazos} consultas rechazadas, 0 transitorias → «token_rechazado», no se guarda ni se dibuja`,
+      ajX.rechazos === new Set(urls).size && ajX.rechazos > 0 && ajX.transitorios === 0 && rX.codigo === "token_rechazado" && !rX.guardar && !rX.traza);
+  }
+  chk("con el token bueno no hay rechazos", aj.rechazos === 0 && ajF.rechazos === 0);
 
 }
 conEsperas();
@@ -1458,13 +1469,22 @@ seccion("5 · decidirLectura y resultadoDelCalculo: invariantes por barrido");
   }
   chk(`resultadoDelCalculo: ${cComb} combinaciones; con transitorios o abortado nunca se guarda`, cMalas === 0);
   chk("corolario: el barrido produce «calculada» (se guarda) y «calculada_sin_guardar»", cVistos.has("calculada") && cVistos.has("calculada_sin_guardar") && cVistos.has("excede_servicio") && cVistos.has("sin_filas") && cVistos.has("error"));
-  const codigos: string[] = ["calculada", "calculada_sin_guardar", "ya_guardada", "en_curso", "presupuesto_agotado", "limite_usuario", "excede_servicio", "no_finalizada", "sin_filas", "apagada", "sin_migracion", "sin_token", "fuera_de_ventana", "error"];
-  chk("MOTIVO_CALCULO declara los 14 códigos, cada uno con texto, qué dibuja y tono", codigos.length === Object.keys(TA.MOTIVO_CALCULO).length
+  // #1608: con el token del servidor rechazado (401/403) TODAS las ventanas caían al crudo y la traza se
+  // guardaba igual. Ahora no se guarda, no se devuelve para dibujar, y el modal ajusta en el navegador.
+  const rechazo = TA.resultadoDelCalculo({ coords: coordsOk, esCrudo: coordsOk.map(() => true), colaSnapped: false, transitorios: 0, abortado: false, rechazos: 12 });
+  chk("#1608: token rechazado → «token_rechazado», sin guardar ni traza, y el modal ajusta en vivo",
+    rechazo.codigo === "token_rechazado" && !rechazo.guardar && !rechazo.traza && TA.MOTIVO_CALCULO.token_rechazado.cae === "en_vivo_como_antes");
+  chk("sin `rechazos` (llamadores viejos) el resultado no cambia",
+    TA.resultadoDelCalculo({ coords: coordsOk, esCrudo: coordsOk.map(() => false), colaSnapped: true, transitorios: 0, abortado: false }).codigo === "calculada");
+  chk("ninguna salida «guardada» del cálculo trae fallos: calculada_sin_guardar ya no se dibuja (ajusta en el navegador)",
+    TA.MOTIVO_CALCULO.calculada_sin_guardar.cae === "sin_ajuste");
+  const codigos: string[] = ["calculada", "calculada_sin_guardar", "ya_guardada", "en_curso", "presupuesto_agotado", "limite_usuario", "excede_servicio", "no_finalizada", "sin_filas", "apagada", "sin_migracion", "sin_token", "token_rechazado", "fuera_de_ventana", "error"];
+  chk("MOTIVO_CALCULO declara los 15 códigos, cada uno con texto, qué dibuja y tono", codigos.length === Object.keys(TA.MOTIVO_CALCULO).length
     && codigos.every((c) => { const m = (TA.MOTIVO_CALCULO as any)[c]; return m && m.texto && ["guardada", "sin_ajuste", "en_vivo_como_antes"].includes(m.cae) && ["gris", "ambar"].includes(m.tono); }));
-  chk("las frases del chip: «Ajustado ahora y guardado», «Ajuste guardado · calculado el …» (hora de Lima), «Sin ajuste: …», «Ajustando en vivo (no se guarda): …»",
+  chk("las frases del chip: «Ajustado ahora y guardado», «Ajuste guardado · calculado el …» (hora de Lima), «Ajustando en el navegador (sin guardar): …», «Ajustando en vivo (no se guarda): …»",
     TA.textoEstadoTraza({ calculo: { codigo: "calculada" } }).texto === "Ajustado ahora y guardado"
     && TA.textoEstadoTraza({ lectura: { estado: "guardada", puedeCalcular: false, detalle: "x", calculadoEn: "2026-10-14T15:07:00Z" } }).texto === "Ajuste guardado · calculado el 14/10/2026 10:07"
-    && TA.textoEstadoTraza({ calculo: { codigo: "presupuesto_agotado" } }).texto.startsWith("Sin ajuste: ")
+    && TA.textoEstadoTraza({ calculo: { codigo: "presupuesto_agotado" } }).texto.startsWith("Ajustando en el navegador (sin guardar): ")
     && TA.textoEstadoTraza({ calculo: { codigo: "sin_token" } }).texto.startsWith("Ajustando en vivo (no se guarda): ")
     && codigos.every((c) => TA.textoEstadoTraza({ calculo: { codigo: c as any } }).texto.length > 5));
 }

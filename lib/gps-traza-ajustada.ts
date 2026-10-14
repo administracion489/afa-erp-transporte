@@ -29,7 +29,10 @@ import { rangosDeCrudo } from "./huella";
 /* eslint-disable @typescript-eslint/no-explicit-any -- filas crudas de PostgREST */
 
 // ── Versión y topes (declarados, NO medidos) ──────────────────────────────────────────────
-export const VERSION_AJUSTE = 1;
+// 2 (14-10-2026): las trazas de la versión 1 se calcularon sin mirar si Mapbox rechazaba el token del
+// servidor, y con el token rechazado quedaron guardadas en crudo (caso #1608). Subir la versión las
+// invalida todas (`decodificarTraza` rechaza otra versión): se vuelven a calcular al abrirlas.
+export const VERSION_AJUSTE = 2;
 /** Días hacia atrás en que el servidor CALCULA (= DIAS_RASTREO de lib/gps-cobertura-datos.ts, que la
  *  matriz coteja; aquí como literal porque este módulo no puede importar un lector de servidor). */
 export const DIAS_CALCULO = 90;
@@ -218,7 +221,14 @@ export type RespuestaAjustada = {
   detalle: string;
 };
 
-/** Qué DIBUJA el modal en cada caso (la pantalla enruta por esto, no por el texto). */
+/**
+ * Qué DIBUJA el modal en cada caso (la pantalla enruta por esto, no por el texto).
+ *   guardada            → la traza del servidor, sin llamar a Map Matching.
+ *   sin_ajuste          → no hay traza guardada utilizable (falta, se está calculando, presupuesto,
+ *                         error…): el modal ajusta EN EL NAVEGADOR como siempre y ofrece «Reintentar».
+ *                         Antes dibujaba la huella CRUDA, que cruza manzanas (#1608): nunca más.
+ *   en_vivo_como_antes  → el guardado no aplica; el modal ajusta en el navegador.
+ */
 export type CaeTraza = "guardada" | "sin_ajuste" | "en_vivo_como_antes";
 export type TonoTraza = "gris" | "ambar";
 
@@ -343,7 +353,7 @@ export function decidirLectura(ctx: CtxLectura): RespuestaAjustada {
 export type CodigoCalculo =
   | "calculada" | "calculada_sin_guardar" | "ya_guardada" | "en_curso" | "presupuesto_agotado"
   | "limite_usuario" | "excede_servicio" | "no_finalizada" | "sin_filas" | "apagada"
-  | "sin_migracion" | "sin_token" | "fuera_de_ventana" | "error";
+  | "sin_migracion" | "sin_token" | "token_rechazado" | "fuera_de_ventana" | "error";
 
 /**
  * Texto, qué dibuja el modal (`cae`) y tono, declarados PEGADOS a cada código. `cae: "guardada"`
@@ -351,7 +361,9 @@ export type CodigoCalculo =
  */
 export const MOTIVO_CALCULO: Record<CodigoCalculo, { texto: string; cae: CaeTraza; tono: TonoTraza }> = {
   calculada:             { texto: "ajustado ahora y guardado", cae: "guardada", tono: "gris" },
-  calculada_sin_guardar: { texto: "Mapbox no contestó a todas las consultas (o la traza no se pudo guardar); se vuelve a intentar al abrirlo otra vez", cae: "guardada", tono: "ambar" },
+  // Con consultas sin contestar, la traza del servidor tiene ventanas en crudo: no se dibuja esa, se
+  // ajusta en el navegador (que reintenta) y se vuelve a pedir al servidor en la próxima apertura.
+  calculada_sin_guardar: { texto: "Mapbox no contestó a todas las consultas (o la traza no se pudo guardar); se vuelve a intentar al abrirlo otra vez", cae: "sin_ajuste", tono: "ambar" },
   ya_guardada:           { texto: "otra apertura ya lo había ajustado y guardado", cae: "guardada", tono: "gris" },
   en_curso:              { texto: "otra apertura lo está ajustando en este momento", cae: "sin_ajuste", tono: "gris" },
   presupuesto_agotado:   { texto: "se agotó el presupuesto de consultas a Mapbox de esta hora o de este mes (gps_traza_config)", cae: "sin_ajuste", tono: "ambar" },
@@ -362,12 +374,15 @@ export const MOTIVO_CALCULO: Record<CodigoCalculo, { texto: string; cae: CaeTraz
   apagada:               { texto: "el guardado del ajuste está apagado (gps_traza_config.guardar)", cae: "en_vivo_como_antes", tono: "gris" },
   sin_migracion:         { texto: "falta correr supabase/gps-traza-ajustada-01.sql", cae: "en_vivo_como_antes", tono: "ambar" },
   sin_token:             { texto: "falta MAPBOX_TOKEN_SERVIDOR en el servidor", cae: "en_vivo_como_antes", tono: "ambar" },
+  token_rechazado:       { texto: "Mapbox rechazó MAPBOX_TOKEN_SERVIDOR (token inválido o con restricción por URL: el del servidor no puede tenerla); se ajusta en el navegador y no se guarda", cae: "en_vivo_como_antes", tono: "ambar" },
   fuera_de_ventana:      { texto: "el servicio es más antiguo que la ventana en que se calcula", cae: "en_vivo_como_antes", tono: "gris" },
   error:                 { texto: "no se pudo ajustar este servicio; vuelve a intentarlo", cae: "sin_ajuste", tono: "ambar" },
 };
 
 /**
  * De la salida del ajuste (lib/gps-traza-ajustada-calculo.ts) a la decisión de GUARDAR, en orden:
+ *   Mapbox rechazó el token (401/403) → `token_rechazado`, sin traza (caso #1608: guardaba el crudo
+ *     para siempre y el modal dibujaba líneas sobre casas con «tramos estimados» y el GPS al 100 %);
  *   abortado (pasó el tope de consultas) → `excede_servicio`, sin traza: una traza a medias es peor
  *     que ninguna;
  *   menos de 2 vértices → `sin_filas`;
@@ -381,7 +396,12 @@ export const MOTIVO_CALCULO: Record<CodigoCalculo, { texto: string; cae: CaeTraz
  */
 export function resultadoDelCalculo(a: {
   coords: [number, number][]; esCrudo: boolean[]; colaSnapped: boolean; transitorios: number; abortado: boolean;
+  /** Consultas que Mapbox rechazó por la credencial (401/403). Ausente = 0 (llamadores viejos). */
+  rechazos?: number;
 }): { codigo: CodigoCalculo; guardar: boolean; traza?: TrazaGuardada; bytes?: number } {
+  // PRIMERO: con el token rechazado ninguna ventana pegó y la «traza» es el crudo suavizado. No se
+  // guarda NI se devuelve para dibujar (cruzaría manzanas): el modal ajusta en el navegador.
+  if ((a.rechazos ?? 0) > 0) return { codigo: "token_rechazado", guardar: false };
   if (a.abortado) return { codigo: "excede_servicio", guardar: false };
   if (!Array.isArray(a.coords) || a.coords.length < 2) return { codigo: "sin_filas", guardar: false };
   const c = codificarTraza({ coords: a.coords, esCrudo: a.esCrudo, colaSnapped: a.colaSnapped });
@@ -417,8 +437,8 @@ export function textoEstadoTraza(x: {
       const f = fechaHoraLima(x.calculo.calculadoEn);
       return { texto: f ? `Ajuste guardado · calculado el ${f}` : "Ajuste guardado", tono: m.tono, cae: m.cae };
     }
-    if (x.calculo.codigo === "calculada_sin_guardar") return { texto: `Ajustado ahora, sin guardar: ${det}`, tono: m.tono, cae: m.cae };
-    return { texto: m.cae === "sin_ajuste" ? `Sin ajuste: ${det}` : `Ajustando en vivo (no se guarda): ${det}`, tono: m.tono, cae: m.cae };
+    if (x.calculo.codigo === "calculada_sin_guardar") return { texto: `Ajustando en el navegador (sin guardar): ${det}`, tono: m.tono, cae: m.cae };
+    return { texto: m.cae === "sin_ajuste" ? `Ajustando en el navegador (sin guardar): ${det}` : `Ajustando en vivo (no se guarda): ${det}`, tono: m.tono, cae: m.cae };
   }
   const l = x.lectura;
   if (!l) return { texto: "Ajustando en vivo (no se guarda)", tono: "gris", cae: "en_vivo_como_antes" };
@@ -431,6 +451,6 @@ export function textoEstadoTraza(x: {
     const cola = l.puedeCalcular ? " · recalculando" : "";
     return { texto: `Ajuste guardado${f ? ` del ${f}` : ""} · ${que}${cola}`, tono: m.tono, cae: m.cae };
   }
-  if (l.estado === "falta") return { texto: l.puedeCalcular ? "Ajustando a la vía (se guarda)…" : `Sin ajuste: ${l.detalle}`, tono: m.tono, cae: m.cae };
-  return { texto: m.cae === "sin_ajuste" ? `Sin ajuste: ${l.detalle}` : `Ajustando en vivo (no se guarda): ${l.detalle}`, tono: m.tono, cae: m.cae };
+  if (l.estado === "falta") return { texto: l.puedeCalcular ? "Ajustando a la vía (se guarda)…" : `Ajustando en el navegador (sin guardar): ${l.detalle}`, tono: m.tono, cae: m.cae };
+  return { texto: m.cae === "sin_ajuste" ? `Ajustando en el navegador (sin guardar): ${l.detalle}` : `Ajustando en vivo (no se guarda): ${l.detalle}`, tono: m.tono, cae: m.cae };
 }
