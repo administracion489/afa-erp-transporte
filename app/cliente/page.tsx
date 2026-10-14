@@ -8,7 +8,7 @@ import "mapbox-gl/dist/mapbox-gl.css";   // el CSS sí es estático (no arrastra
 import { cargarMapbox as cargarMapboxCompartido, type MapboxAPI } from "@/lib/mapbox-carga";
 import { animarMarcador, animarMarcadorPorCamino, tweenEnVuelo } from "@/lib/anim-marker";
 import {
-  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
+  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos, corridaCrudaEnLaVia,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM,
   pegarIconoAVia, caminoEntreSnaps, enParalelo, crearFiltroFixVivo,
@@ -1841,6 +1841,8 @@ export default function ClientePortal() {
       // Ensamblado EN ORDEN de candidatos (idéntico al secuencial): features + supresión del crudo ruteado.
       for (let ci = 0; ci < cands.length; ci++) {
         if (!slots[ci]) continue;
+        // Los fixes de la corrida ya van por la vía del estimado → huella MEDIDA, no estimada (#1309).
+        if (corridaCrudaEnLaVia(cands[ci], slots[ci].geometry?.coordinates, matchedEnVivoRefMap.current[rid] || [], limpio)) continue;
         feats.push(slots[ci]);
         if (cands[ci].origen === "crudo") suprimir.push([cands[ci].iA + 1, cands[ci].iB - 1]);
       }

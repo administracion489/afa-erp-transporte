@@ -16,7 +16,7 @@ import {
   // recorrido» (components/seguimiento/MapaRecorrido.tsx) dibuja con las MISMAS piezas, y
   // scripts/prueba-recorrido.mts (secciones 6 y 7) las compara contra el bloque original.
   huellaDeFilas, MAX_PUENTES, fixesDelHueco, puentesPorRutaPrevista,
-  puenteDeDirections, puenteEstimadoDeDirections, featureDePuente,
+  puenteDeDirections, puenteEstimadoDeDirections, featureDePuente, corridaCrudaEnLaVia,
   RAMPA_VELOCIDAD, COLOR_TRAMO_ESTIMADO, expresionColorVelocidad, rumboCardinal,
 } from "@/lib/huella";
 import { listaParadasDeRuta, paradaParaApiRuta } from "@/lib/ruta-firma";
@@ -803,6 +803,9 @@ export default function ModalGps({
         // Ensamblado EN ORDEN de candidatos (idéntico al secuencial): features + supresión del crudo ruteado.
         for (let ci = 0; ci < cands.length; ci++) {
           if (!slots[ci]) continue;
+          // Si los fixes de la corrida ya van por la vía del estimado, es huella MEDIDA (#1309):
+          // ni estimado ni supresión — colorearMatched la dibuja con su velocidad.
+          if (corridaCrudaEnLaVia(cands[ci], slots[ci].geometry?.coordinates, matchedRef.current || [], limpio)) continue;
           feats.push(slots[ci]);
           if (cands[ci].origen === "crudo") suprimir.push([cands[ci].iA + 1, cands[ci].iB - 1]);
         }

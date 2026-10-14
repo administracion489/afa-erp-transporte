@@ -83,5 +83,35 @@ const fix = (m: number, s: number, acc = 5) => ({ lat: LAT + m * M_LAT, lng: LNG
   chk("3b el tope queda solo para Google", f1.porGoogle.length === 0);
 }
 
+// ── 4. GPS en la pista = huella medida, no estimada (#1309) ──────────────────
+{
+  const M_LNG = 1 / (111_320 * Math.cos(LAT * Math.PI / 180));
+  const P = (n: number, e = 0): [number, number] => [LNG + e * M_LNG, LAT + n * M_LAT];   // n m al norte, e m al este
+  const huella = (pts: [number, number][], acc: number | undefined) => pts.map(([lng, lat]) => ({ lat, lng, velocidad: 40, ...(acc == null ? {} : { acc }) }));
+  // Avenida recta al norte: los fixes van en la vía (con 4 m de ruido lateral).
+  const via: [number, number][] = [P(0), P(600)];
+  const recta: [number, number][] = [P(0), P(150, 4), P(300, -3), P(450, 2), P(600)];
+  const c = { origen: "crudo" as const, iA: 0, iB: 4 };
+  chk("4a avenida recta con fixes precisos: se queda MEDIDA", H.corridaCrudaEnLaVia(c, via, recta, huella(recta, 5)));
+  chk("4b los mismos fixes de red: sigue el estimado", !H.corridaCrudaEnLaVia(c, via, recta, huella(recta, 40)));
+  chk("4c huella sin precisión: sigue el estimado", !H.corridaCrudaEnLaVia(c, via, recta, huella(recta, undefined)));
+  // La vía dobla en L (300 m al norte y 300 al este) y el fix del medio corta la esquina en diagonal.
+  const viaL: [number, number][] = [P(0), P(300), P(300, 300)];
+  const esquina: [number, number][] = [P(0), P(150, 150), P(300, 300)];
+  chk("4d recta que corta la esquina sobre las casas: sigue el estimado", !H.corridaCrudaEnLaVia({ origen: "crudo", iA: 0, iB: 2 }, viaL, esquina, huella(esquina, 5)));
+  chk("4e un hueco de señal nunca se juzga así", !H.corridaCrudaEnLaVia({ origen: "hueco" as any, iA: 0, iB: 4 }, via, recta, huella(recta, 5)));
+  chk("4f separación: líneas iguales 0 m, paralelas a 30 m ≈ 30", H.separacionEntreLineas(via, via) < 0.5 && Math.abs(H.separacionEntreLineas(via, [P(0, 30), P(600, 30)]) - 30) < 1);
+  // La punta (colaViva degradada): fixes precisos sobre la ruta → medida, no estimado.
+  const matched: [number, number][] = [P(0), P(100)];
+  const cola = [100, 250, 400, 550].map((n, i) => ({ lat: LAT + n * M_LAT, lng: LNG + (i % 2 ? 3 : -3) * M_LNG, velocidad: 40, acc: 5 }));
+  const live = { lat: LAT + 600 * M_LAT, lng: LNG, velocidad: 40, acc: 5 };
+  const rutaN: [number, number][] = [P(0), P(800)];
+  const fCola = H.colaViva(matched, cola, live, rutaN, true);
+  chk("4g punta precisa sobre la ruta: huella medida, sin estimado", fCola.length > 0 && fCola.every((f: any) => !f.properties?.estimado));
+  const colaRed = cola.map((p) => ({ ...p, acc: 40 }));
+  const fRed = H.colaViva(matched, colaRed, { ...live, acc: 40 }, rutaN, true);
+  chk("4h punta de red: sigue por la ruta (estimado)", fRed.length === 1 && fRed[0].properties?.estimado === 1);
+}
+
 console.log(fallos ? `\n${fallos} prueba(s) FALLARON` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);
