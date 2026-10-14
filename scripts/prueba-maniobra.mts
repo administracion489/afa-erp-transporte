@@ -183,5 +183,123 @@ const fix = (m: number, s: number, acc = 5) => ({ lat: LAT + m * M_LAT, lng: LNG
   chk("5q junta corta entre ventanas: nada cambia", es2.every((x) => !x));
 }
 
+// ── 6. La vía pegada pasa por donde iba el bus (#17498) ────────────────────────
+// Un fragmento CONFIABLE se dibujaba entero. En un intercambio, Map Matching enrutó entre dos puntos
+// pegados por la vía PARALELA y dejó sin pareja los fixes de ±2 m del ramal correcto: la huella medida
+// corría por donde no hubo ningún punto.
+{
+  const M_LNG = 1 / (111_320 * Math.cos(LAT * Math.PI / 180));
+  const P = (n: number, e = 0): [number, number] => [LNG + e * M_LNG, LAT + n * M_LAT];   // n m al norte, e m al este
+  type Salida = Awaited<ReturnType<typeof H.mapMatchTrail>>;
+  const resp = (tp: unknown[], matchings: unknown[]) => async () => new Response(JSON.stringify({ code: "Ok", matchings, tracepoints: tp }), { status: 200 });
+  const tpDe = (pares: (number | null)[], loc: (i: number) => [number, number] | undefined) =>
+    pares.map((m, i) => (m == null ? null : { matchings_index: m, location: loc(i) }));
+  const esta = (r: Salida, p: { lat: number; lng: number }) => !!r?.coords.some(([x, y]) => x === p.lng && y === p.lat);
+  const alEste = (r: Salida, e: number) => r?.coords.filter(([x]) => Math.abs((x - LNG) / M_LNG - e) < 1).length ?? -1;
+  // 9 fixes de ±2 m cada 3 s, 16 m al norte cada uno (19 km/h): el bus va por la vía A (e = 0).
+  const pts = Array.from({ length: 9 }, (_, i) => ({ ...fix(i * 16, i * 3, 2), velocidad: 19 }));
+  const snap = (i: number) => P(i * 16, 1);   // la vía A, a 1 m del fix
+
+  // Mapbox pega 0-2 y 6-8 a la vía A, deja sin pareja 3-5 y entre 2 y 6 enruta por la paralela B (40 m al este).
+  const geoB = [snap(0), snap(1), snap(2), P(40, 40), P(56, 40), P(72, 40), P(88, 40), snap(6), snap(7), snap(8)];
+  const paresB = [0, 0, 0, null, null, null, 0, 0, 0];
+  const r = await H.mapMatchTrail(pts, "tok", resp(tpDe(paresB, snap), [{ confidence: 0.9, geometry: { coordinates: geoB } }]));
+  chk("6a la paralela por donde no hubo ningún punto ya no se dibuja", alEste(r, 40) === 0, `${alEste(r, 40)} vértices en B`);
+  chk("6b los tres fixes de ±2 m del ramal entran a la huella", [3, 4, 5].every((i) => esta(r, pts[i])));
+  chk("6c y se dibujan medidos (16 m en 3 s: siguen la calle)", !!r && r.esCrudo.every((x) => !x));
+  chk("6d el resto del fragmento sigue pegado a la vía", !!r && [0, 1, 2, 6, 7, 8].every((i) => r.coords.some(([x, y]) => x === snap(i)[0] && y === snap(i)[1])));
+  const viejo = await H.mapMatchTrail(pts, "tok", resp(tpDe(paresB, () => undefined), [{ confidence: 0.9, geometry: { coordinates: geoB } }]));
+  chk("6e REGRESIÓN: sin la prueba (sin location) se dibujaba la paralela", alEste(viejo, 40) === 4 && ![3, 4, 5].some((i) => esta(viejo, pts[i])));
+  const piezas = H.piezasDeFragmento(geoB, pts, tpDe(paresB, snap), 0);
+  chk("6f el fragmento se parte en vía · fixes · vía", piezas.map((p) => ("via" in p ? "v" : "f")).join("") === "vfffv");
+
+  // Rodeo por los ramales: entre 4 y 5 (3 s) Mapbox mete ~850 m de lazo, todos los puntos con pareja.
+  const geoL = [snap(0), snap(1), snap(2), snap(3), snap(4), P(64, 200), P(300, 200), P(300, 1), snap(5), snap(6), snap(7), snap(8)];
+  const todos = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const rl = await H.mapMatchTrail(pts, "tok", resp(tpDe(todos, snap), [{ confidence: 0.9, geometry: { coordinates: geoL } }]));
+  chk("6g un lazo de 850 m en 3 s (imposible para un bus) no se dibuja", alEste(rl, 200) === 0, `${alEste(rl, 200)} vértices del lazo`);
+  chk("6h y la junta 4→5 (16 m) se dibuja medida", !!rl && rl.esCrudo.every((x) => !x) && rl.coords.length === 9);
+  // El mismo lazo con 60 s entre 4 y 5 sí cabe (36 m/s × 60 s): no es imposible, no se toca.
+  const lento = pts.map((p, i) => (i >= 5 ? { ...p, ts: p.ts + 57_000 } : p));
+  const rlL = await H.mapMatchTrail(lento, "tok", resp(tpDe(todos, snap), [{ confidence: 0.9, geometry: { coordinates: geoL } }]));
+  chk("6i el mismo lazo en 60 s es posible: se dibuja como siempre", alEste(rlL, 200) === 2);
+
+  // Lo que está bien no cambia: una curva legítima a 5 m de los fixes sin pareja.
+  const geoC = [snap(0), snap(1), snap(2), P(48, 5), P(64, 5), P(80, 5), snap(6), snap(7), snap(8)];
+  const conLoc = await H.mapMatchTrail(pts, "tok", resp(tpDe(paresB, snap), [{ confidence: 0.9, geometry: { coordinates: geoC } }]));
+  const sinLoc = await H.mapMatchTrail(pts, "tok", resp(tpDe(paresB, () => undefined), [{ confidence: 0.9, geometry: { coordinates: geoC } }]));
+  chk("6j la vía a 5 m de los fixes sin pareja: byte a byte lo de antes", JSON.stringify(conLoc) === JSON.stringify(sinLoc));
+  chk("6k …y la pieza es la geometría entera (el mismo arreglo)", (() => { const p = H.piezasDeFragmento(geoC, pts, tpDe(paresB, snap), 0); return p.length === 1 && "via" in p[0] && p[0].via === geoC; })());
+  // Un fix de RED (o sin precisión) sin pareja no prueba nada: la paralela se dibuja como antes.
+  for (const acc of [40, 0]) {
+    const red = pts.map((p, i) => (i >= 3 && i <= 5 ? { ...p, acc } : p));
+    const rr = await H.mapMatchTrail(red, "tok", resp(tpDe(paresB, snap), [{ confidence: 0.9, geometry: { coordinates: geoB } }]));
+    chk(`6l fix sin pareja de ±${acc} m: no se juzga`, alEste(rr, 40) === 4);
+  }
+  // Una location que no es un vértice de la geometría: no se puede juzgar, el fragmento entero.
+  const fuera = await H.mapMatchTrail(pts, "tok", resp(tpDe(paresB, (i) => P(i * 16, 30)), [{ confidence: 0.9, geometry: { coordinates: geoB } }]));
+  chk("6m location que no está en la geometría: el fragmento entero, como antes", alEste(fuera, 40) === 4);
+
+  // Barrido: fragmentos con y sin rodeos, nulls al azar, precisiones mezcladas.
+  let semilla = 7;
+  const rnd = () => ((semilla = (semilla * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const radio = (acc: number) => Math.max(H.TOL_VIA_M, H.radioDeBusqueda(acc));
+  let casos = 0, violaciones = 0, violacionesAntes = 0, cambiosSinRodeo = 0, guardias = 0;
+  for (let c = 0; c < 600; c++) {
+    const n = 8 + Math.floor(rnd() * 12), paso = 8 + rnd() * 50, dt = 2 + rnd() * 12;
+    const accs = [2, 5, 12, 20, 40, 0];
+    const fx = Array.from({ length: n }, (_, i) => ({ lat: LAT + i * paso * M_LAT, lng: LNG, acc: accs[Math.floor(rnd() * accs.length)], ts: T0 + i * dt * 1000 }));
+    const corte = rnd() < 0.4 ? 2 + Math.floor(rnd() * (n - 4)) : n;   // 1 o 2 fragmentos contiguos
+    const fragDe: number[] = fx.map((_, i) => (i < corte ? 0 : 1));
+    const pares = fx.map((_, i) => { const ini = i === 0 || i === corte, fin = i === n - 1 || i === corte - 1; return !ini && !fin && rnd() < 0.3 ? null : fragDe[i]; });
+    const off = fx.map(() => rnd() * 8);
+    const loc = (i: number) => P(i * paso, off[i]);
+    let conRodeo = false;
+    const matchings = [0, 1].filter((f) => fragDe.includes(f)).map((f) => {
+      const g: [number, number][] = [];
+      let prev = -1;
+      for (let i = 0; i < n; i++) {
+        if (fragDe[i] !== f || pares[i] == null) continue;
+        if (prev >= 0) {
+          const r0 = rnd();
+          if (r0 < 0.15) { conRodeo = true; for (let j = prev + 1; j < i; j++) g.push(P(j * paso, 30 + rnd() * 60)); if (i === prev + 1) g.push(P((prev + 0.5) * paso, 60)); }
+          else if (r0 < 0.25) { conRodeo = true; g.push(P(prev * paso, 400), P(i * paso + 300, 400), P(i * paso + 300, 0)); }
+          else for (let j = prev + 1; j < i; j++) g.push(P(j * paso, rnd() * 8));
+        }
+        g.push(loc(i));
+        prev = i;
+      }
+      return { confidence: 0.9, geometry: { coordinates: g } };
+    });
+    const tp = tpDe(pares, loc);
+    const out = await H.mapMatchTrail(fx, "tok", resp(tp, matchings));
+    const antes = await H.mapMatchTrail(fx, "tok", resp(tpDe(pares, () => undefined), matchings));
+    if (!out) continue;
+    casos++;
+    const igual = JSON.stringify(out) === JSON.stringify(antes);
+    if (!igual) guardias++;
+    if (!igual && !conRodeo) cambiosSinRodeo++;
+    // Invariante: todo fix PRECISO dentro del tramo de un fragmento queda a su tolerancia de la huella.
+    const dist = (p: { lat: number; lng: number }, lin: [number, number][] = out.coords) => {
+      let b = Infinity;
+      for (let j = 0; j + 1 < lin.length; j++) {
+        const ax = (lin[j][0] - p.lng) / M_LNG, ay = (lin[j][1] - p.lat) / M_LAT, bx = (lin[j + 1][0] - p.lng) / M_LNG, by = (lin[j + 1][1] - p.lat) / M_LAT;
+        const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy, t = l2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / l2)) : 0;
+        b = Math.min(b, Math.hypot(ax + t * dx, ay + t * dy));
+      }
+      return b;
+    };
+    for (let i = 0; i < n; i++) {
+      if (!(fx[i].acc > 0 && fx[i].acc <= 20)) continue;
+      if (dist(fx[i]) > radio(fx[i].acc) + 0.5) violaciones++;
+      if (antes && dist(fx[i], antes.coords) > radio(fx[i].acc) + 0.5) violacionesAntes++;
+    }
+  }
+  chk("6n barrido: todo fix preciso queda a su tolerancia de la huella", violaciones === 0, `${violaciones} en ${casos} casos`);
+  chk("6o barrido: sin rodeo inyectado, byte a byte lo de antes", cambiosSinRodeo === 0, `${cambiosSinRodeo}`);
+  chk("6p corolario: la prueba sí actúa", guardias > 50, `${guardias} de ${casos}`);
+  chk("6q …y sin ella el barrido sí encuentra fixes precisos lejos de la huella", violacionesAntes > 50, `${violacionesAntes}`);
+}
+
 console.log(fallos ? `\n${fallos} prueba(s) FALLARON` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

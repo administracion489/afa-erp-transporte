@@ -41,7 +41,10 @@ import { rangosDeCrudo } from "./huella";
 // 5 (14-10-2026, #1459): un fix impreciso de la cola (sin confiable después) dentro de su error y a
 // ≤ 15 s del último confiable se ancla a él (anclarImprecisos): cambia la entrada del ajustador en las
 // trazas que terminan en un fix de red → se recalculan.
-export const VERSION_AJUSTE = 5;
+// 6 (14-10-2026, #17498): un fragmento confiable cuya vía no pasa por los fixes precisos sin pareja del
+// tramo, o que entre dos puntos pegados mete un recorrido imposible para un bus, se parte y ese tramo
+// lleva los fixes reales (piezasDeFragmento, lib/huella.ts). Otra salida → se recalculan.
+export const VERSION_AJUSTE = 6;
 /** Días hacia atrás en que el servidor CALCULA (= DIAS_RASTREO de lib/gps-cobertura-datos.ts, que la
  *  matriz coteja; aquí como literal porque este módulo no puede importar un lector de servidor). */
 export const DIAS_CALCULO = 90;
