@@ -59,6 +59,9 @@ type RutaData = {
   coordenadas: [number, number][];
   tramos: Tramo[];
   total_km: number; total_min: number; advertencia: string | null;
+  /** "propia" = armada con el GPS real de un servicio anterior (lib/ruta-propia.ts); si no, Google. */
+  fuente?: "google" | "propia";
+  fuente_fecha?: string | null;
 };
 
 type Props = {
@@ -363,7 +366,11 @@ export default function ModalGps({
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...(conTrafico ? { conTrafico: true } : {}),
+          // Sin tráfico se acepta la RUTA PROPIA (GPS real de un servicio anterior con los mismos
+          // paraderos): el servidor la sirve cuando la de Google guardada ya venció (día 31) y,
+          // mientras tanto, la va armando para ese día. `reservaId` es con lo que verifica que los
+          // paraderos de esta petición sean los de este servicio.
+          ...(conTrafico ? { conTrafico: true } : { propia: true, reservaId }),
           // `paradaParaApiRuta` (lib/ruta-firma.ts): si este cuerpo se armara de otra forma, la clave
           // con que /api/ruta guarda la ruta y la que usa «Ver recorrido» para leerla no coincidirían.
           paradas: paradasConCoords.map(p => paradaParaApiRuta(p)),
@@ -410,7 +417,7 @@ export default function ModalGps({
       // el botón mientras la del botón con tráfico seguía en vuelo.
       if (vigente()) setCargandoRuta(false);
     }
-  }, [paradas, paradasJson, origen, destino, geocodificarParadas]); // eslint-disable-line
+  }, [paradas, paradasJson, origen, destino, geocodificarParadas, reservaId]); // eslint-disable-line
 
   // FIRMAS primitivas de los props. El padre reconstruye `paradas`/`paradasJson` con un .map()
   // inline, así que su identidad cambia en CADA render y el efecto de abajo recalculaba la ruta
@@ -1709,6 +1716,12 @@ export default function ModalGps({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tramosPanel, kProxima, etaLlegVis, etaHist, anclaMinimaTs, esperandoInicio, rutaConTrafico, ahora]);
 
+  // De dónde salen la línea y los minutos «sin tráfico» de la ruta cargada: Google, o el GPS real
+  // de un servicio anterior (la ruta propia que el servidor sirve desde el día 31).
+  const rutaPropia = !rutaConTrafico && ruta?.fuente === "propia";
+  const fechaPropia = ruta?.fuente_fecha ? `${ruta.fuente_fecha.slice(8, 10)}/${ruta.fuente_fecha.slice(5, 7)}` : null;
+  const rotuloSinTrafico = rutaPropia ? `GPS real del ${fechaPropia ?? "servicio anterior"}` : "Google sin tráfico";
+
   // Total de la ruta para el header y el panel, con su fuente dicha.
   const totalPanel: { min: number; fuente: "trafico" | "historial" | "parcial" | "google" } | null =
     rutaConTrafico && ruta ? { min: ruta.total_min, fuente: "trafico" }
@@ -2007,7 +2020,7 @@ export default function ModalGps({
                       <div className="flex-1">
                         <p className="text-[10px] uppercase opacity-70">Llega aprox. a las</p>
                         <p className="text-xl font-bold leading-tight">{fmtHoraLlegada(ahora + etaHist.min * 60_000)}</p>
-                        <p className="text-[11px] opacity-60 mt-0.5">en ~{fmtTiempo(etaHist.min)} · {etaHist.fuente === "historial" ? `promedio real ${DIAS_HISTORIAL} días` : "Google sin tráfico"}</p>
+                        <p className="text-[11px] opacity-60 mt-0.5">en ~{fmtTiempo(etaHist.min)} · {etaHist.fuente === "historial" ? `promedio real ${DIAS_HISTORIAL} días` : rotuloSinTrafico}</p>
                       </div>
                       {distObjetivoM != null && (
                         <div className="text-right">
@@ -2125,6 +2138,14 @@ export default function ModalGps({
                     ? "Con tráfico actual de Google (consultado a pedido)."
                     : `Promedio real de los servicios de los últimos ${DIAS_HISTORIAL} días (llegada a llegada marcada por el conductor).`}
                 </p>
+                {ruta && !rutaConTrafico && (
+                  <p className="text-[9px] text-gray-400 -mt-1 mb-2 leading-snug"
+                    title={rutaPropia ? "Línea armada con el recorrido GPS real de un servicio anterior con estos mismos paraderos: es un dato propio, se guarda para siempre y no se le paga a Google." : "Línea de Google Maps guardada (Google solo permite guardarla 30 días; después se usa el recorrido GPS real, si lo hay)."}>
+                    {rutaPropia
+                      ? `🛰️ Línea de la ruta: recorrido GPS real del ${fechaPropia ?? "servicio anterior"} · sin costo`
+                      : "🗺️ Línea de la ruta: Google Maps (guardada 30 días)"}
+                  </p>
+                )}
                 <div className="grid grid-cols-2 gap-2 mb-3">
                   <div className="bg-gray-50 rounded-lg px-2 py-1.5 text-center">
                     <p className="text-[#0b315f] font-black text-lg leading-none">{ruta ? ruta.total_km : tramosPanel.length}</p>
@@ -2139,7 +2160,7 @@ export default function ModalGps({
                       {totalPanel?.fuente === "trafico" ? "min c/tráfico"
                         : totalPanel?.fuente === "historial" ? "min promedio real"
                         : totalPanel?.fuente === "parcial" ? "min (parcial)"
-                        : totalPanel?.fuente === "google" ? "min Google s/tráfico"
+                        : totalPanel?.fuente === "google" ? (rutaPropia ? "min GPS real" : "min Google s/tráfico")
                         : historico.estado === "cargando" ? "midiendo…" : "sin promedio"}
                     </p>
                   </div>
@@ -2161,7 +2182,7 @@ export default function ModalGps({
                     const min = minDeTramo(f);
                     const fuente = rutaConTrafico && f.google ? "trafico" : f.hist?.minutos != null ? "historial" : f.google ? "google" : null;
                     const title = fuente === "trafico" ? `Google con tráfico actual${f.hist?.minutos != null ? ` · promedio real ${fmtTiempo(f.hist.minutos)}` : ""}`
-                      : fuente === "google" ? `Sin promedio real (${f.hist?.detalle ?? "midiendo"}) · se muestra Google sin tráfico`
+                      : fuente === "google" ? `Sin promedio real (${f.hist?.detalle ?? "midiendo"}) · se muestra ${rotuloSinTrafico}`
                       : f.hist?.detalle ?? (historico.estado === "cargando" ? "Midiendo el promedio real…" : "Sin dato");
                     return (
                       <div key={i} className="border-t pt-2 first:border-t-0 first:pt-0">
