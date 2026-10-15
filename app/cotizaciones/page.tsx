@@ -1,7 +1,12 @@
 "use client";
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import { supabase } from "@/lib/supabase";
-import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
+import { terminosBusqueda } from "@/lib/busqueda-texto";
+import {
+  PERIODOS, ETIQUETA_PERIODO, ETIQUETA_EJE, PERIODO_DEFECTO, EJE_DEFECTO, hoyLimaISO, rangoDePeriodo,
+  textoBuscable, filtrarLista, kpisDe, type Periodo, type EjeFecha, type CotLista, type RangoPeriodo,
+} from "@/lib/cotizaciones-filtros";
+import { leerListaPeriodo, leerHistorialSelector, leerCotizacion, type FilaHistorialSelector } from "@/lib/cotizaciones-datos";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
@@ -54,6 +59,12 @@ type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;ciudad?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
 type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;};
+/**
+ * Una fila de la LISTA liviana (COLS_LISTA de lib/cotizaciones-filtros.ts): solo escalares, sin
+ * items_json, paraderos ni consideraciones. Todo lo que edita, duplica, imprime o convierte pide
+ * antes el DETALLE (`leerCotizacion`) — con la fila liviana, guardar borraría ítems y paraderos.
+ */
+type CotFila=Omit<CotLista,"estado"|"modo_servicio">&{estado:EstadoCot;modo_servicio:ModoServ|null};
 type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;cuentas_bancarias?:{banco:string;cuenta:string;cci:string}[]|null;};
 type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
 // `hora_calc` = la marca que deja «⏱ Calcular horas» (lib/paradas-horario.ts): con qué se calculó
@@ -73,6 +84,11 @@ const descripcionTerceroParaCliente=(t:{placa:string;categoria:string|null;marca
 };
 
 const IGV=0.18,OVERHEAD=0.10,RESERVA=0.05;
+/** Filas que se pintan de golpe en la lista (y cuántas más trae «Mostrar más»). */
+const PASO_LISTA=50;
+const CLAVE_FILTROS_COT="afa_cot_filtros_v1";
+const ESTADOS_FILTRO=["todos","borrador","pendiente","enviado","aprobado","rechazado"];
+const MODOS_FILTRO=["todos","eventual","fijo"];
 const DEFAULT_CONSID:ConsidCot={incluye:["Traslado de origen a destino","Conductor profesional certificado","Combustible durante todo el recorrido","GPS en tiempo real","Seguro de viaje SOAT vigente"],no_incluye:["Alimentación y bebidas","Guía turístico","Entradas a atractivos turísticos"],generales:["Precios según fechas y horarios coordinados.","Tolerancia máxima de espera: 30 minutos.","No se permite consumo de alcohol ni tabaco a bordo.","Cambios en ruta u horario pueden generar costos adicionales.","Servicio eventual: adelanto del 50% para confirmar.","Recomendamos reservar con 7 días de anticipación mínimo."]};
 const SERVS_EVENTUAL=[{id:"solo_ida",label:"➡️ Solo Ida",cat:"Traslados"},{id:"ida_retorno",label:"⇄ Ida y Retorno",cat:"Traslados"},{id:"ida_retorno_paradas",label:"📍 Con Paradas",cat:"Disposición"},{id:"full_day",label:"⭐ Full Day",cat:"Turismo"},{id:"multi_dia",label:"🏕️ Multi-día",cat:"Turismo"}];
 const SERVS_FIJO=[{id:"fijo_solo_ida",label:"→ Solo Ida",cat:"Ruta Simple"},{id:"transporte_personal",label:"⇄ Ida y Retorno",cat:"Ruta Simple"},{id:"fijo_multiparada",label:"📍 Con Paraderos",cat:"Ruta Logística"},{id:"fijo_reten",label:"🏭 Retén / Planta",cat:"Retén"}];
@@ -181,7 +197,7 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
   );
 }
 
-function PanelDecision({c,onAct}:{c:Cotizacion;onAct:()=>void}){
+function PanelDecision({c,onAct}:{c:CotFila;onAct:()=>void}){
   const [guardando,setGuardando]=useState(false);const [descPct,setDescPct]=useState(c.descuento_pct_solicitado?.toString()||"");
   const enOf=enHorario();if(!c.precio_cotizador&&!c.precio_tarifario)return null;
   const esFijo=c.modo_servicio==="fijo";const tarifIGV=c.precio_tarifario?c.precio_tarifario*1.18:null;const precSug=Math.max(c.precio_cotizador||0,tarifIGV||0)||Number(c.precio_cliente);const precDesc=c.descuento_pct_solicitado?precSug*(1-c.descuento_pct_solicitado/100):null;const fuente=c.precio_cotizador&&tarifIGV?(c.precio_cotizador>=tarifIGV?"Cotizador":"Tarifario"):c.precio_cotizador?"Cotizador":"Tarifario";
@@ -195,7 +211,7 @@ function PanelDecision({c,onAct}:{c:Cotizacion;onAct:()=>void}){
 
 const MEDIOS_ENVIO=[{id:"WhatsApp",icon:"💬"},{id:"Correo electrónico",icon:"✉️"},{id:"Otros medios",icon:"📋"}];
 
-function ModalEliminar({cot,onConfirmar,onCancelar}:{cot:Cotizacion;onConfirmar:(pass:string)=>Promise<string|null>;onCancelar:()=>void}){
+function ModalEliminar({cot,onConfirmar,onCancelar}:{cot:CotFila;onConfirmar:(pass:string)=>Promise<string|null>;onCancelar:()=>void}){
   const[pass,setPass]=useState("");const[err,setErr]=useState("");const[cargando,setCargando]=useState(false);
   const intentar=async()=>{if(!pass){setErr("Ingresa tu contraseña");return;}setCargando(true);setErr("");const r=await onConfirmar(pass);setCargando(false);if(r)setErr(r);};
   return(<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"><div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm"><div className="text-center mb-5"><div className="text-4xl mb-2">🗑️</div><h3 className="text-lg font-black text-gray-800">Eliminar cotización</h3><p className="text-sm text-gray-500 mt-1 font-mono font-bold">#{cot.numero_cotizacion||String(cot.id).padStart(5,"0")}</p><p className="text-xs text-red-600 font-bold mt-2">Esta acción no se puede deshacer</p></div><div className="mb-4"><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Contraseña de administrador</label><input type="password" value={pass} onChange={e=>{setPass(e.target.value);setErr("");}} onKeyDown={e=>e.key==="Enter"&&intentar()} className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500 transition-all" placeholder="••••••••" autoFocus/>{err&&<p className="text-xs text-red-600 mt-1.5 font-medium">⚠️ {err}</p>}</div><div className="flex gap-2"><button onClick={onCancelar} className="flex-1 py-2.5 rounded-xl text-sm font-bold border hover:bg-gray-50 text-gray-700">Cancelar</button><button onClick={intentar} disabled={cargando} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50" style={{background:"#dc2626"}}>{cargando?"Verificando...":"🗑️ Eliminar"}</button></div></div></div>);
@@ -235,7 +251,7 @@ function ModalEnvio({onConfirmar,onCancelar}:{onConfirmar:(medio:string)=>void;o
   );
 }
 
-function ModalAprobacion({cot,onConfirmar,onCancelar}:{cot:Cotizacion;onConfirmar:(tipo:string,numero:string)=>void;onCancelar:()=>void}){
+function ModalAprobacion({cot,onConfirmar,onCancelar}:{cot:CotFila;onConfirmar:(tipo:string,numero:string)=>void;onCancelar:()=>void}){
   const [tipo,setTipo]=useState("Operación bancaria");const [num,setNum]=useState("");const [err,setErr]=useState("");
   return(<div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{background:"rgba(0,0,0,0.5)"}}><div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4"><h3 className="text-base font-bold">✅ Aprobar cotización #{cot.numero_cotizacion||cot.id}</h3><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">Tipo de documento *</label><select className={iCls()} value={tipo} onChange={e=>setTipo(e.target.value)}>{TIPOS_APROBACION.map(t=><option key={t}>{t}</option>)}</select></div><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">N° referencia *</label><input className={iCls("font-mono")} placeholder="Número o código" value={num} onChange={e=>{setNum(e.target.value);setErr("");}} autoFocus/>{err&&<p className="text-xs text-red-600 mt-1">⚠ {err}</p>}</div><div className="flex gap-3"><button onClick={()=>num.trim()?onConfirmar(tipo,num.trim()):setErr("Obligatorio")} className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-green-700">✅ Confirmar</button><button onClick={onCancelar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600">Cancelar</button></div></div></div>);
 }
@@ -1206,19 +1222,38 @@ async function leerClientes():Promise<Cliente[]|null>{
 type ContactoCl={nombre:string|null;apellido:string|null;cargo:string|null;telefono:string|null;email:string|null;principal:boolean|null};
 
 export default function CotizacionesPage(){
-  const [clientes,setClientes]=useState<Cliente[]>([]);const [cotizas,setCotizas]=useState<Cotizacion[]>([]);const [tarifas,setTarifas]=useState<Tarifa[]>([]);const [flota,setFlota]=useState<VehiculoFlota[]>([]);const [flotaTercero,setFlotaTercero]=useState<VehiculoTerceroFlota[]>([]);const [paramsDB,setParamsDB]=useState<ParamCosto[]>([]);const [preciosDB,setPreciosDB]=useState<Record<string,number>>({});
+  const [clientes,setClientes]=useState<Cliente[]>([]);const [cotizas,setCotizas]=useState<CotFila[]>([]);const [tarifas,setTarifas]=useState<Tarifa[]>([]);const [flota,setFlota]=useState<VehiculoFlota[]>([]);const [flotaTercero,setFlotaTercero]=useState<VehiculoTerceroFlota[]>([]);const [paramsDB,setParamsDB]=useState<ParamCosto[]>([]);const [preciosDB,setPreciosDB]=useState<Record<string,number>>({});
   const [cargandoClientes,setCargandoClientes]=useState(true);const [errorClientes,setErrorClientes]=useState(false);const [contactosDe,setContactosDe]=useState<{id:string;lista:ContactoCl[]}>({id:"",lista:[]});
   // «+ Crear» abre /clientes en otra pestaña: solo si ESTA pantalla lo pidió se autoselecciona el creado.
   const esperaClienteRef=useRef(false);
   const [loading,setLoading]=useState(false);const [guardando,setGuardando]=useState(false);const [mostrarForm,setMostrarForm]=useState(false);const [editandoId,setEditandoId]=useState<number|null>(null);const [busqueda,setBusqueda]=useState("");const [filtroEst,setFiltroEst]=useState("todos");const [filtroModo,setFiltroModo]=useState("todos");
   const [draftRecuperado,setDraftRecuperado]=useState(false);
+  // ── Lista liviana por PERIODO (lib/cotizaciones-filtros.ts + lib/cotizaciones-datos.ts) ──
+  // `busqueda` es lo que se teclea; `busquedaDeb` lo que filtra (200 ms después).
+  const [busquedaDeb,setBusquedaDeb]=useState("");
+  const [periodo,setPeriodo]=useState<Periodo>(PERIODO_DEFECTO);const [eje,setEje]=useState<EjeFecha>(EJE_DEFECTO);
+  const [rangoManual,setRangoManual]=useState<{desde:string;hasta:string}>({desde:"",hasta:""});
+  // Los filtros guardados se leen en un efecto (sessionStorage no existe al pre-renderizar):
+  // hasta entonces no se consulta, para no pedir dos veces la lista.
+  const [filtrosListos,setFiltrosListos]=useState(false);
+  // `listaDe` = la clave (eje + periodo) cuyas filas están en `cotizas`. Si no es la vigente,
+  // lo que hay en memoria es de OTRO periodo y no se enseña: se dice «Cargando…».
+  const [listaDe,setListaDe]=useState<string|null>(null);
+  const [cargandoLista,setCargandoLista]=useState(false);
+  const [errorLista,setErrorLista]=useState<{clave:string;motivo:string}|null>(null);
+  const [sinColumnasLista,setSinColumnasLista]=useState<string[]>([]);
+  const [historialSel,setHistorialSel]=useState<FilaHistorialSelector[]>([]);
+  const [paginado,setPaginado]=useState<{clave:string;n:number}>({clave:"",n:PASO_LISTA});
+  const [detalleCargando,setDetalleCargando]=useState<{id:number;accion:string}|null>(null);
+  const reqListaRef=useRef(0);
+  const cacheDetalle=useRef(new Map<number,Cotizacion>());
   const [cfgDefault,setCfgDefault]=useState<CotPlantillaConfig|null>(null);
-  const [form,setForm]=useState(FORM0);const [items,setItems]=useState<ItemCot[]>([{...ITEM_VACIO}]);const [modalAprob,setModalAprob]=useState<Cotizacion|null>(null);const [guardarTar,setGuardarTar]=useState(true);const [paradas,setParadas]=useState<ParadaTP[]>([]);const [paradasRetorno,setParadasRetorno]=useState<ParadaTP[]>([]);const [consid,setConsid]=useState<ConsidCot>(DEFAULT_CONSID);const [panelId,setPanelId]=useState<number|null>(null);
+  const [form,setForm]=useState(FORM0);const [items,setItems]=useState<ItemCot[]>([{...ITEM_VACIO}]);const [modalAprob,setModalAprob]=useState<CotFila|null>(null);const [guardarTar,setGuardarTar]=useState(true);const [paradas,setParadas]=useState<ParadaTP[]>([]);const [paradasRetorno,setParadasRetorno]=useState<ParadaTP[]>([]);const [consid,setConsid]=useState<ConsidCot>(DEFAULT_CONSID);const [panelId,setPanelId]=useState<number|null>(null);
   const [diasCond,setDiasCond]=useState(1);const [peajesF,setPeajesF]=useState(0);const [pernocteF,setPernocteF]=useState(0);const [viaticosF,setViaticosF]=useState(0);const [reprNombre,setReprNombre]=useState("");
   const [modalPlantilla,setModalPlantilla]=useState<Cotizacion|null>(null);const [plantillaElegida,setPlantillaElegida]=useState("corporativo");
-  const [modalEnvio,setModalEnvio]=useState<Cotizacion|null>(null);
+  const [modalEnvio,setModalEnvio]=useState<CotFila|null>(null);
   const [rolUsuario,setRolUsuario]=useState<string>("operador");
-  const [modalEliminar,setModalEliminar]=useState<Cotizacion|null>(null);
+  const [modalEliminar,setModalEliminar]=useState<CotFila|null>(null);
   const [fichaCargando,setFichaCargando]=useState<number|null>(null);
   const [modalPropagar,setModalPropagar]=useState<{cotId:number;reservas:{id:number;direccion_servicio:string|null}[];paradasIda:ParadaTP[];paradasRet:ParadaTP[]}|null>(null);
   const [propagando,setPropagando]=useState(false);
@@ -1231,7 +1266,29 @@ export default function CotizacionesPage(){
   useEffect(()=>{supabase.from("reservas").select("id",{count:"exact",head:true}).eq("origen_despacho",true).is("cotizacion_id",null).then((res: any)=>setPendDespacho((res.count as number)||0));},[]);
   // Deep-link desde Programación: /cotizaciones?buscar=<N°> siembra el buscador.
   // Se lee de window.location (cliente) para no requerir <Suspense> de useSearchParams.
-  useEffect(()=>{if(typeof window==="undefined")return;const b=new URLSearchParams(window.location.search).get("buscar");if(b)setBusqueda(b);},[]);
+  // Un N° que llega por enlace puede ser de hace meses: se busca en TODAS las fechas.
+  useEffect(()=>{
+    if(typeof window==="undefined")return;
+    try{
+      const raw=sessionStorage.getItem(CLAVE_FILTROS_COT);
+      if(raw){
+        const f=JSON.parse(raw)||{};
+        if((PERIODOS as readonly string[]).includes(f.periodo))setPeriodo(f.periodo);
+        if(f.eje==="emision"||f.eje==="servicio")setEje(f.eje);
+        setRangoManual({desde:typeof f.desde==="string"?f.desde:"",hasta:typeof f.hasta==="string"?f.hasta:""});
+        if(ESTADOS_FILTRO.includes(f.estado))setFiltroEst(f.estado);
+        if(MODOS_FILTRO.includes(f.modo))setFiltroModo(f.modo);
+      }
+    }catch{/* sin sessionStorage: los filtros por defecto */}
+    const b=new URLSearchParams(window.location.search).get("buscar");
+    if(b){setBusqueda(b);setBusquedaDeb(b);setPeriodo("todo");}
+    setFiltrosListos(true);
+  },[]);
+  useEffect(()=>{
+    if(!filtrosListos)return;
+    try{sessionStorage.setItem(CLAVE_FILTROS_COT,JSON.stringify({periodo,eje,desde:rangoManual.desde,hasta:rangoManual.hasta,estado:filtroEst,modo:filtroModo}));}catch{/* best-effort */}
+  },[filtrosListos,periodo,eje,rangoManual,filtroEst,filtroModo]);
+  useEffect(()=>{const t=setTimeout(()=>setBusquedaDeb(busqueda),200);return()=>clearTimeout(t);},[busqueda]);
   const mapsLoaded=useGoogleMapsCot();
   const [origenPlace,setOrigenPlace]=useState<PuntoRuta|null>(null);
   const [destinoPlace,setDestinoPlace]=useState<PuntoRuta|null>(null);
@@ -1429,10 +1486,41 @@ export default function CotizacionesPage(){
     });
   },[]);
 
-  const cargar=async()=>{
+  // Periodo vigente de la lista. Se guarda en un ref para que un `cargar()` llamado desde una
+  // clausura vieja (un modal abierto antes de cambiar el filtro) relea el periodo de AHORA.
+  const hoyLista=hoyLimaISO();
+  const rangoLista=useMemo(()=>rangoDePeriodo(periodo,hoyLista,rangoManual),[periodo,hoyLista,rangoManual]);
+  const claveLista=`${eje}|${rangoLista.codigo}|${rangoLista.desde??""}|${rangoLista.hastaExcl??""}`;
+  const paramsListaRef=useRef<{eje:EjeFecha;r:RangoPeriodo;clave:string}>({eje,r:rangoLista,clave:claveLista});
+  useEffect(()=>{paramsListaRef.current={eje,r:rangoLista,clave:claveLista};},[eje,rangoLista,claveLista]);
+  /** Solo la lista: es lo único que cambia con el periodo, el eje o el rango. */
+  const cargarLista=async()=>{
+    const id=++reqListaRef.current;
+    cacheDetalle.current.clear();
+    const{eje:ej,r,clave}=paramsListaRef.current;
+    // Un rango sin sus dos fechas, o al revés, no se consulta: la pantalla dice por qué.
+    if(r.codigo!=="ok"){setCargandoLista(false);return;}
+    setCargandoLista(true);
+    try{
+      const{filas,sinColumnas}=await leerListaPeriodo(supabase,ej,r);
+      if(id!==reqListaRef.current)return; // llegó tarde: ya se pidió otro periodo
+      setCotizas(filas as CotFila[]);setSinColumnasLista(sinColumnas);setListaDe(clave);setErrorLista(null);
+    }catch(e){
+      if(id!==reqListaRef.current)return;
+      setErrorLista({clave,motivo:(e as {message?:string})?.message||String(e)});
+    }finally{
+      if(id===reqListaRef.current)setCargandoLista(false);
+    }
+  };
+  useEffect(()=>{if(filtrosListos)cargarLista();},[filtrosListos,claveLista]);
+  /** Todo lo demás (clientes, tarifas, flota, parámetros, plantilla) y el historial de los selectores. */
+  const cargarResto=async()=>{
     setLoading(true);
-    const[clR,cotR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([leerClientes(),supabase.from("cotizaciones").select("*").order("id",{ascending:false}),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),supabase.from("cotizacion_plantillas").select("*").eq("id","corporativo").maybeSingle()]);
-    if(clR){setClientes(clR);setErrorClientes(false);}else setErrorClientes(true);setCargandoClientes(false);setCotizas(cotR.data||[]);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
+    // «Recientes» y «Más cotizados» de los selectores: un año, aparte del periodo de la lista.
+    // Best-effort: sin él los selectores solo pierden sus sugerencias.
+    leerHistorialSelector(supabase,hoyLimaISO()).then(setHistorialSel).catch(()=>{});
+    const[clR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([leerClientes(),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),supabase.from("cotizacion_plantillas").select("*").eq("id","corporativo").maybeSingle()]);
+    if(clR){setClientes(clR);setErrorClientes(false);}else setErrorClientes(true);setCargandoClientes(false);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
     const pr:Record<string,number>={};(cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});setPreciosDB(pr);
     const emps:any[]=empR.data||[];
     setFlotaTercero((vtR.data||[]).map((v:any)=>({...v,empresa_nombre:emps.find((e:any)=>e.id===v.empresa_id)?.razon_social||"Empresa tercerizada"})));
@@ -1445,18 +1533,53 @@ export default function CotizacionesPage(){
     }));
     setLoading(false);
   };
-  useEffect(()=>{cargar();},[]);
+  /** Refresca TODO (tras guardar, cambiar estado, duplicar…). */
+  const cargar=async()=>{await Promise.all([cargarResto(),cargarLista()]);};
+  useEffect(()=>{cargarResto();},[]);
   // Elegir cliente = lo que hacía el onChange del <select>: guarda el id como texto y propone el IGV por tipo.
   const aplicarCliente=(cl:ClienteBuscable|null)=>setForm(p=>({...p,cliente_id:cl?String(cl.id):"",incluye_igv:cl?.tipo==="b2b"?true:false}));
   // Solo los del cliente que está puesto ahora: los de un cliente anterior no se enseñan ni un instante.
   const contactosCl=contactosDe.id===form.cliente_id?contactosDe.lista:[];
-  const usoCl=useMemo(()=>usoPorCliente(cotizas),[cotizas]);
-  const recientesCl=useMemo(()=>recientesDe(cotizas,8),[cotizas]);
+  const usoCl=useMemo(()=>usoPorCliente(historialSel),[historialSel]);
+  const recientesCl=useMemo(()=>recientesDe(historialSel,8),[historialSel]);
   // Buscadores de unidad: uso y recientes derivados de las cotizaciones (no se guarda nada).
-  const usoVehP=useMemo(()=>usoPorVehiculo(cotizas,"vehiculo_flota_id"),[cotizas]);
-  const recVehP=useMemo(()=>recientesVehiculos(cotizas,"vehiculo_flota_id",8),[cotizas]);
-  const usoVehT=useMemo(()=>usoPorVehiculo(cotizas,"vehiculo_tercero_id"),[cotizas]);
-  const recVehT=useMemo(()=>recientesVehiculos(cotizas,"vehiculo_tercero_id",8),[cotizas]);
+  const usoVehP=useMemo(()=>usoPorVehiculo(historialSel,"vehiculo_flota_id"),[historialSel]);
+  const recVehP=useMemo(()=>recientesVehiculos(historialSel,"vehiculo_flota_id",8),[historialSel]);
+  const usoVehT=useMemo(()=>usoPorVehiculo(historialSel,"vehiculo_tercero_id"),[historialSel]);
+  const recVehT=useMemo(()=>recientesVehiculos(historialSel,"vehiculo_tercero_id",8),[historialSel]);
+  // ── Búsqueda y filtros en memoria, con el MISMO motor (lib/cotizaciones-filtros.ts) ──
+  const mapaClientes=useMemo(()=>new Map(clientes.map(c=>[c.id,c])),[clientes]);
+  const textos=useMemo(()=>new Map(cotizas.map(c=>[c.id,textoBuscable(c,mapaClientes.get(c.cliente_id??-1))])),[cotizas,mapaClientes]);
+  const terminosCot=useMemo(()=>terminosBusqueda(busquedaDeb),[busquedaDeb]);
+  const filtradas=useMemo(()=>filtrarLista(cotizas,textos,{terminos:terminosCot,estado:filtroEst,modo:filtroModo}),[cotizas,textos,terminosCot,filtroEst,filtroModo]);
+  // KPIs: el periodo filtrado solo por modo (ni por estado ni por búsqueda: si no, «Pendientes» con el filtro «Aprobadas» daría 0).
+  const kpis=useMemo(()=>kpisDe(filtrarLista(cotizas,textos,{terminos:[],estado:"todos",modo:filtroModo})),[cotizas,textos,filtroModo]);
+  // Cuántas filas se pintan: vuelve a PASO_LISTA al cambiar cualquier filtro o la búsqueda.
+  const clavePaginado=`${claveLista}|${busquedaDeb}|${filtroEst}|${filtroModo}`;
+  const nVisibles=paginado.clave===clavePaginado?paginado.n:PASO_LISTA;
+  const mostrarMas=()=>setPaginado({clave:clavePaginado,n:nVisibles+PASO_LISTA});
+  /**
+   * Pide la cotización COMPLETA antes de una acción que la necesita (editar, duplicar, PDF, ficha,
+   * convertir). Si no se puede leer, NO se abre nada con campos vacíos: guardar ese formulario
+   * borraría ítems y paraderos.
+   */
+  const conDetalle=async(c:CotFila,accion:string,hacer:(d:Cotizacion)=>unknown)=>{
+    if(detalleCargando)return;
+    let d=cacheDetalle.current.get(c.id);
+    if(!d){
+      setDetalleCargando({id:c.id,accion});
+      try{
+        const leida=await leerCotizacion<Cotizacion>(supabase,c.id);
+        if(!leida){alert(`La cotización #${c.numero_cotizacion||String(c.id).padStart(5,"0")} ya no existe (pudo eliminarse). Se recarga la lista.`);cargarLista();return;}
+        d=leida;cacheDetalle.current.set(c.id,d);
+      }catch(e){
+        alert(`No se pudo abrir la cotización #${c.numero_cotizacion||String(c.id).padStart(5,"0")}: ${(e as {message?:string})?.message||String(e)}\nNo se abrió nada para no trabajar con datos incompletos. Inténtalo de nuevo.`);
+        return;
+      }finally{setDetalleCargando(null);}
+    }
+    await hacer(d);
+  };
+  const cargandoEsta=(id:number,accion:string)=>detalleCargando?.id===id&&detalleCargando.accion===accion;
   const abrirAltaCliente=(texto:string)=>{
     const t=texto.trim();const dig=t.replace(/\s+/g,"");
     const qs=/^\d{8}(\d{3})?$/.test(dig)?`&doc=${encodeURIComponent(dig)}`:t?`&nombre=${encodeURIComponent(t)}`:"";
@@ -1788,7 +1911,7 @@ export default function CotizacionesPage(){
     }
   };
 
-  const cambiarEstado=async(cot:Cotizacion,nEst:EstadoCot)=>{
+  const cambiarEstado=async(cot:CotFila,nEst:EstadoCot)=>{
     if(nEst===cot.estado)return;
     if(!TRANSICIONES[cot.estado].includes(nEst)){
       const sig=TRANSICIONES[cot.estado];
@@ -2004,7 +2127,7 @@ export default function CotizacionesPage(){
   };
   const editarCot=(c:Cotizacion)=>{restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
-    const cl=clientes.find(c=>c.id===cot.cliente_id);
+    const cl=cot.cliente_id!=null?mapaClientes.get(cot.cliente_id):undefined;
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
     // Recopilar todos los vehículos únicos: nivel cotización + por ítem
     const vehsMap=new Map<number,VehiculoFlota>();
@@ -2022,6 +2145,8 @@ export default function CotizacionesPage(){
     const considFinal=editandoId===cot.id?consid:(cot.consideraciones_json||consid);
     generarPDF(cot,cl,its,vehiculos,nombreFinal,considFinal,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
   };
+
+  const abrirModalPlantilla=(d:Cotizacion)=>{setModalPlantilla(d);setPlantillaElegida(d.plantilla_pdf||"corporativo");};
 
   // Un vehículo de tercero visto como uno de flota, para los documentos. El texto de
   // respaldo importa: sin él, buildVehsHtml inventa la descripción genérica de la flota
@@ -2093,7 +2218,7 @@ export default function CotizacionesPage(){
           }else{
             // Solo se cachea el cálculo completo: guardar un sentido caído lo congelaría.
             await supabase.from("cotizaciones").update({ficha_ruta_json:metrica}).eq("id",cot.id);
-            setCotizas(prev=>prev.map(c=>c.id===cot.id?{...c,ficha_ruta_json:metrica}:c));
+            cacheDetalle.current.delete(cot.id); // el detalle en memoria ya no es el de la base
           }
         }
       }
@@ -2115,7 +2240,7 @@ export default function CotizacionesPage(){
       const{data:empData}=await supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle();
 
       const emp=empData as EmpresaPerfilPDF|null;
-      const cl=clientes.find(c=>c.id===cot.cliente_id);
+      const cl=cot.cliente_id!=null?mapaClientes.get(cot.cliente_id):undefined;
       const nomCl=cl?.tipo==="b2b"?(cl.empresa||cl.nombre):cl?.nombre||"—";
       const vehs=vehiculosDeCot(cot);
       const servLabel=[...SERVS_EVENTUAL,...SERVS_FIJO].find(s=>s.id===cot.tipo_servicio)?.label.replace(/^\S+\s/,"")||"Servicio de transporte";
@@ -2146,13 +2271,16 @@ export default function CotizacionesPage(){
     }
   };
 
-  const totC=cotizas.length;const pend=cotizas.filter(c=>c.estado==="pendiente").length;const env=cotizas.filter(c=>c.estado==="enviado").length;const apr=cotizas.filter(c=>c.estado==="aprobado").length;const tasa=totC>0?Math.round(apr/totC*100):0;const pendDesc=cotizas.filter(c=>c.descuento_solicitado&&!c.descuento_autorizado).length;
-  const nomCl=(id:number|null)=>{const c=clientes.find(cl=>cl.id===id);if(!c)return "Sin cliente";return rotuloCliente(c);};
-  // Búsqueda permisiva (lib/busqueda-texto.ts): sin importar mayúsculas, tildes, signos
-  // ni el orden de las palabras. El cliente se busca por EMPRESA, nombre y RUC — antes solo
-  // por `nombre`, así que la razón social que se ve en la lista no se encontraba.
-  const terminosCot=terminosBusqueda(busqueda);
-  const filtradas=cotizas.filter(c=>{const ncl=clientes.find(cl=>cl.id===c.cliente_id);const txt=[ncl?.empresa,ncl?.nombre,ncl?.ruc,c.origen,c.destino,c.asunto,c.atencion,c.numero_cotizacion,String(c.id).padStart(5,"0")].filter(Boolean).join(" ");return coincideBusqueda(txt,terminosCot)&&(filtroEst==="todos"||c.estado===filtroEst)&&(filtroModo==="todos"||c.modo_servicio===filtroModo||(filtroModo==="eventual"&&!c.modo_servicio));});
+  const totC=cotizas.length;const pendDesc=kpis.descPend;
+  const listaVigente=listaDe===claveLista;
+  const errorVigente=errorLista&&errorLista.clave===claveLista?errorLista.motivo:null;
+  const fmtISO=(f:string)=>f.split("-").reverse().join("/");
+  const rotuloPeriodo=periodo==="rango"&&rangoLista.codigo==="ok"?`Del ${fmtISO(rangoManual.desde)} al ${fmtISO(rangoManual.hasta)}`:periodo==="todo"?"Todas las fechas":ETIQUETA_PERIODO[periodo];
+  const motivoRango=rangoLista.codigo==="rango_incompleto"?"Elige las dos fechas del rango (desde y hasta) para ver las cotizaciones.":rangoLista.codigo==="rango_invertido"?"La fecha «desde» es posterior a «hasta»: corrige el rango.":null;
+  const visibles=filtradas.slice(0,nVisibles);
+  const hayFiltros=periodo!==PERIODO_DEFECTO||eje!==EJE_DEFECTO||filtroEst!=="todos"||filtroModo!=="todos"||!!busqueda.trim()||!!rangoManual.desde||!!rangoManual.hasta;
+  const limpiarFiltros=()=>{setPeriodo(PERIODO_DEFECTO);setEje(EJE_DEFECTO);setRangoManual({desde:"",hasta:""});setFiltroEst("todos");setFiltroModo("todos");setBusqueda("");setBusquedaDeb("");};
+  const nomCl=(id:number|null)=>{const c=id!=null?mapaClientes.get(id):undefined;if(!c)return "Sin cliente";return rotuloCliente(c);};
   const kmNum=Number(form.km)||0;const vehFloraSel=flota.find(v=>v.id===Number(form.vehiculo_flota_id));const vehTerceroSel=flotaTercero.find(v=>v.id===Number(form.vehiculo_tercero_id));const tarifaNombreSel=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo;const servsList=form.modo_servicio==="eventual"?SERVS_EVENTUAL:SERVS_FIJO;const esFijoForm=form.modo_servicio==="fijo";
   const esSoloIda=["solo_ida","fijo_solo_ida"].includes(form.tipo_servicio);
   const requiereParadas=["ida_retorno_paradas","fijo_multiparada"].includes(form.tipo_servicio);
@@ -2200,15 +2328,18 @@ export default function CotizacionesPage(){
       )}
       <main className="p-3 md:p-6 space-y-4 md:space-y-5 max-w-7xl mx-auto">
         <div className="flex items-start justify-between flex-wrap gap-3">
-          <div><h1 className="text-xl md:text-3xl font-bold text-gray-900">Cotizaciones</h1><p className="text-sm text-gray-400 mt-1">EVENTUAL · FIJO · {paramsDB.length} vehículos desde Supabase{pendDesc>0&&<span className="ml-2 text-orange-600 font-bold bg-orange-50 px-2 py-0.5 rounded-full text-xs">🙋 {pendDesc} descuento{pendDesc>1?"s":""} pendiente{pendDesc>1?"s":""}</span>}{pendDespacho>0&&<span className="ml-2 text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-full text-xs border border-purple-200">⚡ {pendDespacho} sin cotizar (Despachador)</span>}</p></div>
+          <div><h1 className="text-xl md:text-3xl font-bold text-gray-900">Cotizaciones</h1><p className="text-sm text-gray-400 mt-1">EVENTUAL · FIJO · {paramsDB.length} vehículos desde Supabase{listaVigente&&pendDesc>0&&<span className="ml-2 text-orange-600 font-bold bg-orange-50 px-2 py-0.5 rounded-full text-xs">🙋 {pendDesc} descuento{pendDesc>1?"s":""} pendiente{pendDesc>1?"s":""}</span>}{pendDespacho>0&&<span className="ml-2 text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-full text-xs border border-purple-200">⚡ {pendDespacho} sin cotizar (Despachador)</span>}</p></div>
           <div className="flex gap-2 flex-wrap"><a href="/cotizador" className="px-4 py-2.5 rounded-xl font-bold text-sm border text-[#0b315f] border-[#0b315f] hover:bg-[#eef3f8]">🔧 Cotizador</a><button onClick={()=>{mostrarForm?limpiar():setMostrarForm(true);}} className="px-5 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90" style={{background:mostrarForm?"#6b7280":"#0b315f"}}>{mostrarForm?"✕ Cancelar":"+ Nueva cotización"}</button></div>
         </div>
 
+        <div className="space-y-1.5">
+        <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400">{rotuloPeriodo} · por {eje==="emision"?"emisión":"fecha del servicio"}{filtroModo!=="todos"&&<span> · solo {filtroModo==="fijo"?"fijos":"eventuales"}</span>}</p>
         <section className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
-          {[{label:"Total",val:totC,color:"#0b315f",bg:"#eef3f8"},{label:"Eventuales",val:cotizas.filter(c=>!c.modo_servicio||c.modo_servicio==="eventual").length,color:"#0b315f",bg:"#eef3f8"},{label:"Fijos",val:cotizas.filter(c=>c.modo_servicio==="fijo").length,color:"#166534",bg:"#dcfce7"},{label:"Pendientes",val:pend,color:"#854d0e",bg:"#fef9c3"},{label:"Enviadas",val:env,color:"#0369a1",bg:"#e0f2fe"},{label:"Aprobadas",val:apr,color:"#166534",bg:"#dcfce7"},{label:"Tasa",val:`${tasa}%`,color:"#1d4ed8",bg:"#dbeafe"},{label:"Dscto. pend.",val:pendDesc,color:"#d97706",bg:"#fef3c7"}].map(k=>(
-            <div key={k.label} className="rounded-xl p-3 border" style={{background:k.bg,borderColor:k.color+"22"}}><p className="text-[10px] font-bold uppercase tracking-wide" style={{color:k.color+"99"}}>{k.label}</p><p className="text-xl font-black mt-0.5" style={{color:k.color}}>{k.val}</p></div>
+          {[{label:"Total",val:kpis.total,color:"#0b315f",bg:"#eef3f8"},{label:"Eventuales",val:kpis.eventuales,color:"#0b315f",bg:"#eef3f8"},{label:"Fijos",val:kpis.fijos,color:"#166534",bg:"#dcfce7"},{label:"Pendientes",val:kpis.pendientes,color:"#854d0e",bg:"#fef9c3"},{label:"Enviadas",val:kpis.enviadas,color:"#0369a1",bg:"#e0f2fe"},{label:"Aprobadas",val:kpis.aprobadas,color:"#166534",bg:"#dcfce7"},{label:"Tasa",val:`${kpis.tasa}%`,color:"#1d4ed8",bg:"#dbeafe"},{label:"Dscto. pend.",val:kpis.descPend,color:"#d97706",bg:"#fef3c7"}].map(k=>(
+            <div key={k.label} className="rounded-xl p-3 border" style={{background:k.bg,borderColor:k.color+"22"}}><p className="text-[10px] font-bold uppercase tracking-wide" style={{color:k.color+"99"}}>{k.label}</p><p className="text-xl font-black mt-0.5" style={{color:k.color}}>{listaVigente?k.val:motivoRango?"—":"…"}</p></div>
           ))}
         </section>
+        </div>
 
         {mostrarForm&&(
           <section className="bg-white rounded-2xl border shadow-sm p-4 md:p-6 space-y-5">
@@ -2605,26 +2736,45 @@ export default function CotizacionesPage(){
           </section>
         )}
 
-        <section className="space-y-2 md:space-y-0 md:flex md:flex-row md:gap-3">
-          <div className="flex gap-2 flex-1">
-            <div className="relative flex-1"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span><input className="w-full border rounded-xl pl-9 pr-4 py-2.5 text-sm focus:outline-none" placeholder="Buscar cliente, ruta o N°..." value={busqueda} onChange={e=>setBusqueda(e.target.value)}/></div>
-            <div className="flex items-center px-3 py-2 bg-gray-50 border rounded-xl text-xs text-gray-400 whitespace-nowrap">{filtradas.length}</div>
+        <section className="space-y-2 min-w-0">
+          <div className="flex gap-2">
+            <div className="relative flex-1 min-w-0"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span><input className="w-full border rounded-xl pl-9 pr-9 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f]" placeholder="Buscar cliente, RUC, ruta, asunto o N°…" value={busqueda} onChange={e=>setBusqueda(e.target.value)}/>{busqueda&&<button onClick={()=>{setBusqueda("");setBusquedaDeb("");}} className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700 text-sm" title="Limpiar búsqueda" aria-label="Limpiar búsqueda">✕</button>}</div>
+            <div className="flex items-center px-3 py-2 bg-gray-50 border rounded-xl text-xs text-gray-500 whitespace-nowrap">{listaVigente?<span><b className="text-gray-700">{filtradas.length}</b> de {totC}</span>:cargandoLista?"Cargando…":"—"}</div>
           </div>
-          <div className="grid grid-cols-2 md:flex gap-2">
+          {busquedaDeb.trim()&&periodo!=="todo"&&<p className="text-[11px] text-gray-500 px-1">Buscando solo en <b>{rotuloPeriodo.toLowerCase()}</b> · <button onClick={()=>setPeriodo("todo")} className="font-bold text-[#0b315f] underline hover:no-underline">Buscar en todas las fechas</button></p>}
+          <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1">
+            {PERIODOS.map(p=>(
+              <button key={p} onClick={()=>setPeriodo(p)} className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-bold border whitespace-nowrap transition-colors ${periodo===p?"text-white border-[#0b315f]":"bg-white text-gray-600 border-gray-200 hover:border-[#0b315f] hover:text-[#0b315f]"}`} style={periodo===p?{background:"#0b315f"}:undefined}>{ETIQUETA_PERIODO[p]}</button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {periodo==="rango"&&(
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <label className="text-[11px] font-bold text-gray-400 uppercase">Desde</label><input type="date" className="border rounded-xl px-2.5 py-2 text-sm" value={rangoManual.desde} onChange={e=>setRangoManual(r=>({...r,desde:e.target.value}))}/>
+                <label className="text-[11px] font-bold text-gray-400 uppercase">Hasta</label><input type="date" className="border rounded-xl px-2.5 py-2 text-sm" value={rangoManual.hasta} onChange={e=>setRangoManual(r=>({...r,hasta:e.target.value}))}/>
+              </div>
+            )}
+            <select className="border rounded-xl px-3 py-2.5 text-sm" value={eje} onChange={e=>setEje(e.target.value as EjeFecha)} title="Con qué fecha se mide el periodo">{(["emision","servicio"] as EjeFecha[]).map(x=><option key={x} value={x}>{ETIQUETA_EJE[x]}</option>)}</select>
             <select className="border rounded-xl px-3 py-2.5 text-sm" value={filtroModo} onChange={e=>setFiltroModo(e.target.value)}><option value="todos">Eventual + Fijo</option><option value="eventual">Solo Eventual</option><option value="fijo">Solo Fijo</option></select>
             <select className="border rounded-xl px-3 py-2.5 text-sm" value={filtroEst} onChange={e=>setFiltroEst(e.target.value)}><option value="todos">Todos estados</option><option value="borrador">Borradores</option><option value="pendiente">Pendientes</option><option value="enviado">Enviadas</option><option value="aprobado">Aprobadas</option><option value="rechazado">Rechazadas</option></select>
+            {hayFiltros&&<button onClick={limpiarFiltros} className="px-3 py-2.5 rounded-xl text-xs font-bold border text-gray-600 hover:bg-gray-50">Limpiar filtros</button>}
           </div>
+          {eje==="servicio"&&<p className="text-[11px] text-gray-400 px-1">Las cotizaciones sin fecha de servicio no aparecen con este eje.</p>}
+          {motivoRango&&<p className="text-xs font-bold rounded-xl px-3 py-2 border" style={{background:"#fffbeb",borderColor:"#fcd34d",color:"#92400e"}}>⚠ {motivoRango}</p>}
+          {errorVigente&&<div className="text-xs font-bold rounded-xl px-3 py-2 border flex items-center gap-2 flex-wrap" style={{background:"#fef2f2",borderColor:"#fca5a5",color:"#991b1b"}}><span>No se pudieron leer las cotizaciones: {errorVigente}</span><span>·</span><button onClick={()=>cargarLista()} disabled={cargandoLista} className="underline hover:no-underline disabled:opacity-50">{cargandoLista?"Reintentando…":"Reintentar"}</button></div>}
         </section>
 
         <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
 
           {/* ── Vista cards (móvil/tablet) ── */}
           <div className="md:hidden divide-y divide-gray-100">
-            {loading
+            {motivoRango||(errorVigente&&!listaVigente)
+              ? <div className="p-8 text-center text-xs text-gray-400">{motivoRango?"Sin consultar: el rango no está completo.":"No se muestran cotizaciones porque la lectura falló (ver arriba)."}</div>
+              : !listaVigente
               ? <div className="p-10 text-center text-gray-400"><div className="flex items-center justify-center gap-2"><div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>Cargando...</div></div>
               : filtradas.length===0
-                ? <div className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">📄</p><p>No hay cotizaciones</p></div>
-                : filtradas.map(c=>{
+                ? <div className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">📄</p><p>{totC===0?`No hay cotizaciones en ${rotuloPeriodo.toLowerCase()}`:"Ninguna cotización coincide con la búsqueda o los filtros"}</p></div>
+                : visibles.map(c=>{
                     const esBorrador=c.estado==="borrador";const est=ESTADO_CFG[c.estado]||ESTADO_CFG.pendiente;const margen=Number(c.margen_estimado||0);const esFijo=c.modo_servicio==="fijo";const tieneDsc=c.descuento_solicitado&&!c.descuento_autorizado;const tieneDec=!!(c.precio_cotizador||c.precio_tarifario);
                     return(
                       <div key={c.id} className={`p-4 space-y-2.5 ${esBorrador?"opacity-70":""} ${tieneDsc?"bg-orange-50":""}`}>
@@ -2651,11 +2801,11 @@ export default function CotizacionesPage(){
                           <span className="text-xs text-gray-400">{fmtF(c.fecha_servicio)}</span>
                         </div>
                         <div className="flex gap-2">
-                          <button onClick={()=>editarCot(c)} className="flex-1 py-2 rounded-xl text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️ Editar</button>
-                          <button onClick={()=>duplicarCotizacion(c)} className="py-2 px-3 rounded-xl text-xs font-bold border hover:bg-purple-50" style={{color:"#7c3aed",borderColor:"#ddd6fe"}} title="Duplicar cotización">📋</button>
-                          <button onClick={()=>{setModalPlantilla(c);setPlantillaElegida(c.plantilla_pdf||"corporativo");}} className="flex-1 py-2 rounded-xl text-xs font-bold border" style={{background:"#eef3f8",color:"#0b315f"}}>📄 PDF</button>
-                          <button onClick={()=>abrirFicha(c)} disabled={fichaCargando!==null} className="flex-1 py-2 rounded-xl text-xs font-bold border disabled:opacity-40" style={{background:"#f5f3ff",color:"#6d28d9",borderColor:"#ddd6fe"}} title="Ficha Técnica de Ruta — puntos de entrada y retorno, sin precios">{fichaCargando===c.id?"⏳ Ficha…":"🗺️ Ficha"}</button>
-                          <button onClick={()=>convertirAReserva(c)} disabled={c.estado!=="aprobado"} className="flex-1 py-2 rounded-xl text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>→ Res.</button>
+                          <button onClick={()=>conDetalle(c,"editar",editarCot)} disabled={!!detalleCargando} className="flex-1 py-2 rounded-xl text-xs font-bold border hover:bg-gray-50 text-gray-700 disabled:opacity-50">{cargandoEsta(c.id,"editar")?"…":"✏️ Editar"}</button>
+                          <button onClick={()=>conDetalle(c,"duplicar",duplicarCotizacion)} disabled={!!detalleCargando} className="py-2 px-3 rounded-xl text-xs font-bold border hover:bg-purple-50 disabled:opacity-50" style={{color:"#7c3aed",borderColor:"#ddd6fe"}} title="Duplicar cotización">{cargandoEsta(c.id,"duplicar")?"…":"📋"}</button>
+                          <button onClick={()=>conDetalle(c,"pdf",abrirModalPlantilla)} disabled={!!detalleCargando} className="flex-1 py-2 rounded-xl text-xs font-bold border disabled:opacity-50" style={{background:"#eef3f8",color:"#0b315f"}}>{cargandoEsta(c.id,"pdf")?"…":"📄 PDF"}</button>
+                          <button onClick={()=>conDetalle(c,"ficha",abrirFicha)} disabled={fichaCargando!==null||!!detalleCargando} className="flex-1 py-2 rounded-xl text-xs font-bold border disabled:opacity-40" style={{background:"#f5f3ff",color:"#6d28d9",borderColor:"#ddd6fe"}} title="Ficha Técnica de Ruta — puntos de entrada y retorno, sin precios">{fichaCargando===c.id||cargandoEsta(c.id,"ficha")?"⏳ Ficha…":"🗺️ Ficha"}</button>
+                          <button onClick={()=>conDetalle(c,"reserva",convertirAReserva)} disabled={c.estado!=="aprobado"||!!detalleCargando} className="flex-1 py-2 rounded-xl text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>{cargandoEsta(c.id,"reserva")?"…":"→ Res."}</button>
                           {rolUsuario==="admin"&&<button onClick={()=>setModalEliminar(c)} className="py-2 px-3 rounded-xl text-xs font-bold border hover:bg-red-50" style={{color:"#dc2626",borderColor:"#fca5a5"}} title="Eliminar cotización">🗑️</button>}
                         </div>
                         {tieneDec&&<button onClick={()=>setPanelId(panelId===c.id?null:c.id)} className={`text-[10px] font-black px-2 py-1 rounded-full ${tieneDsc?"bg-orange-100 text-orange-700":"bg-[#eef3f8] text-[#0b315f]"}`}>{tieneDsc?"🙋 Descuento pendiente":"💡 Ver precios"}</button>}
@@ -2671,7 +2821,7 @@ export default function CotizacionesPage(){
             <table className="w-full text-sm">
               <thead><tr style={{background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>{["N°","Cliente","Ruta","Vehículo","Servicio","Fecha","Precio","Margen","Estado","Acciones"].map(h=><th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>)}</tr></thead>
               <tbody>
-                {loading?<tr><td colSpan={10} className="p-10 text-center text-gray-400"><div className="flex items-center justify-center gap-2"><div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>Cargando...</div></td></tr>:filtradas.length===0?<tr><td colSpan={10} className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">📄</p><p>No hay cotizaciones</p></td></tr>:filtradas.map(c=>{
+                {motivoRango||(errorVigente&&!listaVigente)?<tr><td colSpan={10} className="p-8 text-center text-xs text-gray-400">{motivoRango?"Sin consultar: el rango no está completo.":"No se muestran cotizaciones porque la lectura falló (ver arriba)."}</td></tr>:!listaVigente?<tr><td colSpan={10} className="p-10 text-center text-gray-400"><div className="flex items-center justify-center gap-2"><div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>Cargando...</div></td></tr>:filtradas.length===0?<tr><td colSpan={10}><div className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">📄</p><p>{totC===0?`No hay cotizaciones en ${rotuloPeriodo.toLowerCase()}`:"Ninguna cotización coincide con la búsqueda o los filtros"}</p></div></td></tr>:visibles.map(c=>{
                   const esBorrador=c.estado==="borrador";const est=ESTADO_CFG[c.estado]||ESTADO_CFG.pendiente;const margen=Number(c.margen_estimado||0);const vehParam=paramsDB.find(p=>p.tipo_vehiculo===c.tipo_vehiculo);const vehF=flota.find(v=>v.id===c.vehiculo_flota_id);const vehT=flotaTercero.find(v=>v.id===c.vehiculo_tercero_id);
                   const tieneDec=!!(c.precio_cotizador||c.precio_tarifario);const tieneDsc=c.descuento_solicitado&&!c.descuento_autorizado;const esFijo=c.modo_servicio==="fijo";const servLabel=[...SERVS_EVENTUAL,...SERVS_FIJO].find(s=>s.id===c.tipo_servicio)?.label||c.tipo_servicio||"";
                   return(<React.Fragment key={c.id}>
@@ -2680,7 +2830,7 @@ export default function CotizacionesPage(){
                       <td className="p-3 max-w-[120px]"><div className="font-bold text-gray-800 truncate">{nomCl(c.cliente_id)}</div>{c.atencion&&<div className="text-xs text-gray-400 truncate">{c.atencion}</div>}</td>
                       <td className="p-3 max-w-[150px]"><div className="truncate text-gray-700 text-xs">{c.origen}→{c.destino}</div>{c.asunto&&<div className="text-[10px] text-gray-400 truncate">{c.asunto}</div>}</td>
                       <td className="p-3">{vehF?<p className="font-mono font-black text-xs text-[#0b315f]">{vehF.placa}</p>:vehT?<div><p className="font-mono font-black text-xs text-amber-700">{vehT.placa}</p><p className="text-[9px] text-amber-600">🤝 {vehT.empresa_nombre}</p></div>:vehParam?<div className="text-xs text-gray-500">{vehParam.icono||"🚌"} {vehParam.nombre}</div>:<span className="text-gray-300 text-xs">—</span>}</td>
-                      <td className="p-3"><span className="text-[10px] font-bold text-gray-600">{servLabel}</span>{c.paradas_json&&c.paradas_json.length>0&&<span className="text-[10px] text-[#be185d] font-bold block">🚏 {c.paradas_json.length} paradas</span>}</td>
+                      <td className="p-3"><span className="text-[10px] font-bold text-gray-600">{servLabel}</span>{(c.paradas_n??0)>0&&<span className="text-[10px] text-[#be185d] font-bold block">🚏 {c.paradas_n} paradas</span>}</td>
                       <td className="p-3 text-xs text-gray-500">{fmtF(c.fecha_servicio)}{c.hora_ida&&<div className="text-gray-400">{c.hora_ida}</div>}</td>
                       <td className="p-3 font-bold text-gray-800">{fmtS(Number(c.precio_cliente||0))}{esFijo&&<p className="text-[10px] text-gray-400 font-normal">/día</p>}{esFijo&&c.precio_mes_estimado&&<p className="text-[10px] text-green-600 font-bold">~{fmtS(c.precio_mes_estimado)}/mes</p>}</td>
                       <td className="p-3 font-bold" style={{color:margen>=0?"#166534":"#991b1b"}}>{fmtS(margen)}</td>
@@ -2694,7 +2844,7 @@ export default function CotizacionesPage(){
                         </select>
                         {c.estado==="enviado"&&c.medio_envio&&<p className="text-[9px] text-gray-400 mt-0.5 font-medium">{c.medio_envio==="WhatsApp"?"💬":c.medio_envio.startsWith("Correo")?"✉️":"📋"} {c.medio_envio}</p>}
                       </td>
-                      <td className="p-3"><div className="flex gap-1 flex-wrap"><button onClick={()=>editarCot(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️</button><button onClick={()=>duplicarCotizacion(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-purple-50" style={{color:"#7c3aed",borderColor:"#ddd6fe"}} title="Duplicar cotización">📋</button><button onClick={()=>{setModalPlantilla(c);setPlantillaElegida(c.plantilla_pdf||"corporativo");}} className="px-2 py-1.5 rounded-lg text-xs font-bold border" style={{background:"#eef3f8",color:"#0b315f"}}>📄 PDF</button><button onClick={()=>abrirFicha(c)} disabled={fichaCargando!==null} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-40" style={{background:"#f5f3ff",color:"#6d28d9",borderColor:"#ddd6fe"}} title="Ficha Técnica de Ruta — puntos de entrada y retorno, sin precios">{fichaCargando===c.id?"⏳":"🗺️ Ficha"}</button><button onClick={()=>convertirAReserva(c)} disabled={c.estado!=="aprobado"} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>→Res</button>{rolUsuario==="admin"&&<button onClick={()=>setModalEliminar(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-red-50" style={{color:"#dc2626",borderColor:"#fca5a5"}} title="Eliminar cotización">🗑️</button>}</div></td>
+                      <td className="p-3"><div className="flex gap-1 flex-wrap"><button onClick={()=>conDetalle(c,"editar",editarCot)} disabled={!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700 disabled:opacity-50" title="Editar">{cargandoEsta(c.id,"editar")?"…":"✏️"}</button><button onClick={()=>conDetalle(c,"duplicar",duplicarCotizacion)} disabled={!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-purple-50 disabled:opacity-50" style={{color:"#7c3aed",borderColor:"#ddd6fe"}} title="Duplicar cotización">{cargandoEsta(c.id,"duplicar")?"…":"📋"}</button><button onClick={()=>conDetalle(c,"pdf",abrirModalPlantilla)} disabled={!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-50" style={{background:"#eef3f8",color:"#0b315f"}}>{cargandoEsta(c.id,"pdf")?"…":"📄 PDF"}</button><button onClick={()=>conDetalle(c,"ficha",abrirFicha)} disabled={fichaCargando!==null||!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-40" style={{background:"#f5f3ff",color:"#6d28d9",borderColor:"#ddd6fe"}} title="Ficha Técnica de Ruta — puntos de entrada y retorno, sin precios">{fichaCargando===c.id||cargandoEsta(c.id,"ficha")?"⏳":"🗺️ Ficha"}</button><button onClick={()=>conDetalle(c,"reserva",convertirAReserva)} disabled={c.estado!=="aprobado"||!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>{cargandoEsta(c.id,"reserva")?"…":"→Res"}</button>{rolUsuario==="admin"&&<button onClick={()=>setModalEliminar(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-red-50" style={{color:"#dc2626",borderColor:"#fca5a5"}} title="Eliminar cotización">🗑️</button>}</div></td>
                     </tr>
                     {panelId===c.id&&<tr><td colSpan={10} className="px-4 pb-3 pt-0"><PanelDecision c={c} onAct={cargar}/></td></tr>}
                   </React.Fragment>);
@@ -2702,7 +2852,9 @@ export default function CotizacionesPage(){
               </tbody>
             </table>
           </div>
-          <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between flex-wrap gap-1"><span>{filtradas.length} de {totC} cotizaciones · {paramsDB.length} vehículos</span><span className="hidden sm:inline">AFA ERP · Comercial</span></div>
+          {listaVigente&&filtradas.length>nVisibles&&<div className="px-4 py-3 border-t text-center"><button onClick={mostrarMas} className="px-4 py-2 rounded-xl text-xs font-bold border text-[#0b315f] border-[#0b315f]/30 hover:bg-[#eef3f8]">Mostrar {Math.min(PASO_LISTA,filtradas.length-nVisibles)} más (quedan {filtradas.length-nVisibles})</button></div>}
+          {listaVigente&&sinColumnasLista.includes("paradas_n")&&<div className="px-4 py-2 border-t text-[11px] font-bold" style={{background:"#fffbeb",color:"#92400e"}}>⚠ Falta correr supabase/cotizaciones-03-indices-lista.sql: la lista no muestra cuántos paraderos tiene cada cotización y va más lenta con «Todo».</div>}
+          <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between flex-wrap gap-1"><span>{listaVigente?<>{Math.min(nVisibles,filtradas.length)<filtradas.length?`Mostrando ${Math.min(nVisibles,filtradas.length)} · `:""}{filtradas.length} de {totC} en {rotuloPeriodo.toLowerCase()}{cargandoLista&&" · actualizando…"}</>:cargandoLista?"Cargando…":"—"}</span><span className="hidden sm:inline">AFA ERP · Comercial</span></div>
         </section>
       </main>
     </>
