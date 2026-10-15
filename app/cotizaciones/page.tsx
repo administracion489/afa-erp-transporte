@@ -43,6 +43,10 @@ import { useRutaParaderos, coordsOk } from "@/components/cotizaciones/useRutaPar
 import BarraHorasParaderos, { etiquetaDiaCorta, type ContextoHoras } from "@/components/cotizaciones/BarraHorasParaderos";
 import { coordValida, resolverRestauracion, rutaCoordsParaGuardar, rotuloFuente, type PuntoRuta, type Extremo } from "@/lib/cotizacion-ruta-coords";
 import { faltaColumna } from "@/lib/columna-faltante";
+import ModalDespachoSinCotizar from "@/components/cotizaciones/ModalDespachoSinCotizar";
+import { leerDespachosSinCotizar, vincularCotizacion } from "@/lib/despacho-sin-cotizar-datos";
+import { pendientesDeCotizar, prellenadoCotizacion, type ReservaDespacho } from "@/lib/despacho-sin-cotizar";
+import { hoyLima } from "@/lib/alertas";
 // El mapa arrastra el CSS de Mapbox y su motor se baja al abrirlo (lib/mapbox-carga.ts).
 const MapaParaderos = dynamic(() => import("@/components/cotizaciones/MapaParaderos"), { ssr: false });
 
@@ -1258,12 +1262,27 @@ export default function CotizacionesPage(){
   const [modalPropagar,setModalPropagar]=useState<{cotId:number;reservas:{id:number;direccion_servicio:string|null}[];paradasIda:ParadaTP[];paradasRet:ParadaTP[]}|null>(null);
   const [propagando,setPropagando]=useState(false);
   const [vehExpandido,setVehExpandido]=useState(false);
-  const [pendDespacho,setPendDespacho]=useState(0);
+  const [pendDespacho,setPendDespacho]=useState<number|null>(null);const [errDespacho,setErrDespacho]=useState<string|null>(null);const [modalDespacho,setModalDespacho]=useState(false);const despachoOrigenRef=useRef<ReservaDespacho|null>(null);const [despachoOrigen,setDespachoOrigen]=useState<ReservaDespacho|null>(null);
   const [fechasMultidia,setFechasMultidia]=useState<FechaMultidia[]>([]);
   const skipFechasRef=useRef(false);
   const skipDescRef=useRef(false);
   const skipParadasRef=useRef(false);
-  useEffect(()=>{supabase.from("reservas").select("id",{count:"exact",head:true}).eq("origen_despacho",true).is("cotizacion_id",null).then((res: any)=>setPendDespacho((res.count as number)||0));},[]);
+  // Mismo predicado para el chip y la lista del modal (pendientesDeCotizar). Si la lectura falla
+  // el chip dice «?» con el error: nunca un 0 falso.
+  const contarDespacho=async()=>{try{const{filas}=await leerDespachosSinCotizar(supabase);setPendDespacho(pendientesDeCotizar(filas).length);setErrDespacho(null);}catch(e:any){setPendDespacho(null);setErrDespacho(e?.message??String(e));}};
+  useEffect(()=>{contarDespacho();if(typeof window!=="undefined"&&new URLSearchParams(window.location.search).get("regularizar")==="1")setModalDespacho(true);// eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+  const fijarDespachoOrigen=(r:ReservaDespacho|null)=>{despachoOrigenRef.current=r;setDespachoOrigen(r);};
+  const cotizarDespacho=(r:ReservaDespacho)=>{
+    const p=prellenadoCotizacion(r,hoyLima());
+    const cl=p.cliente_id!=null?clientes.find(c=>c.id===p.cliente_id):null;
+    setModalDespacho(false);limpiar();
+    skipDescRef.current=true;
+    setForm({...FORM0,cliente_id:p.cliente_id!=null?String(p.cliente_id):"",incluye_igv:cl?(cl as any).tipo==="b2b":FORM0.incluye_igv,origen:p.origen,destino:p.destino,fecha_servicio:p.fecha_servicio,hora_ida:p.hora_ida,modo_servicio:p.modo_servicio,tipo_servicio:p.tipo_servicio,asunto:p.asunto});
+    setItems(p.items.map(it=>({...ITEM_VACIO,descripcion:it.descripcion,cantidad:it.cantidad,precio_unit:it.precio_unit??0})));
+    fijarDespachoOrigen(r);setMostrarForm(true);
+    setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);
+  };
   // Deep-link desde Programación: /cotizaciones?buscar=<N°> siembra el buscador.
   // Se lee de window.location (cliente) para no requerir <Suspense> de useSearchParams.
   // Un N° que llega por enlace puede ser de hace meses: se busca en TODAS las fechas.
@@ -1719,7 +1738,7 @@ export default function CotizacionesPage(){
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.tipo_vehiculo_costeo?equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo)):(v.equipamiento||"full_equipo"),tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo,...(v.tipo_vehiculo_costeo?{equipamiento:equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo))}:{})}));};
@@ -1812,7 +1831,7 @@ export default function CotizacionesPage(){
    * las coordenadas no se perderían en silencio.
    */
   const escribirCotizacion=async(payload:Record<string,unknown>)=>{
-    const ir=(p:Record<string,unknown>)=>editandoId?supabase.from("cotizaciones").update(p).eq("id",editandoId):supabase.from("cotizaciones").insert(p);
+    const ir=(p:Record<string,unknown>):Promise<any>=>editandoId?(supabase.from("cotizaciones").update(p).eq("id",editandoId) as any):(supabase.from("cotizaciones").insert(p).select("id").single() as any);
     let r=await ir(payload);
     if(r.error&&faltaColumna(r.error,"ruta_coords_json")){
       const resto={...payload};delete resto.ruta_coords_json;
@@ -1846,8 +1865,16 @@ export default function CotizacionesPage(){
     let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
     const esFijo=form.modo_servicio==="fijo";
     const payload={...buildPayload(form.estado==="borrador"?"pendiente":undefined),creado_por:nombreCreador||null};
-    const{error}=await escribirCotizacion(payload);
+    const{error,data:insertado}=await escribirCotizacion(payload);
     if(error){alert(error.message);setGuardando(false);return;}
+    // Servicio del Despachador que se estaba cotizando: queda vinculado a la cotización nueva.
+    const origenDesp=despachoOrigenRef.current;
+    if(origenDesp&&!editandoId){
+      const nuevoId=Number(insertado?.id);
+      const v=Number.isFinite(nuevoId)&&nuevoId>0?await vincularCotizacion(supabase,origenDesp.id,nuevoId):{ok:false,error:"no se obtuvo el id de la cotización nueva"};
+      if(!v.ok)alert(`La cotización se guardó, pero NO se pudo vincular al servicio del Despachador #${origenDesp.codigo||origenDesp.id}: ${v.error}. Vincúlalo desde «⚡ sin cotizar».`);
+      fijarDespachoOrigen(null);contarDespacho();
+    }
     // Capturar antes de limpiar() para la propagación
     const cotIdGuardado=editandoId;
     const paradasGuardadas=[...paradas];
@@ -2295,6 +2322,7 @@ export default function CotizacionesPage(){
   return(
     <>
       {modalEnvio&&<ModalEnvio onConfirmar={confirmarEnvio} onCancelar={()=>setModalEnvio(null)}/>}
+      {modalDespacho&&<ModalDespachoSinCotizar nombreCliente={(id)=>{const cl=id!=null?clientes.find(c=>c.id===id):null;return cl?rotuloCliente(cl as any):(id!=null?`Cliente #${id}`:"Sin cliente");}} onCerrar={()=>setModalDespacho(false)} onCambio={contarDespacho} onCotizar={cotizarDespacho}/>}
       {modalAprob&&<ModalAprobacion cot={modalAprob} onConfirmar={confirmarAprob} onCancelar={()=>setModalAprob(null)}/>}
       {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={setPlantillaElegida} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida)} onCancelar={()=>setModalPlantilla(null)}/>}
       {modalEliminar&&<ModalEliminar cot={modalEliminar} onConfirmar={eliminarCotizacion} onCancelar={()=>setModalEliminar(null)}/>}
@@ -2328,7 +2356,7 @@ export default function CotizacionesPage(){
       )}
       <main className="p-3 md:p-6 space-y-4 md:space-y-5 max-w-7xl mx-auto">
         <div className="flex items-start justify-between flex-wrap gap-3">
-          <div><h1 className="text-xl md:text-3xl font-bold text-gray-900">Cotizaciones</h1><p className="text-sm text-gray-400 mt-1">EVENTUAL · FIJO · {paramsDB.length} vehículos desde Supabase{listaVigente&&pendDesc>0&&<span className="ml-2 text-orange-600 font-bold bg-orange-50 px-2 py-0.5 rounded-full text-xs">🙋 {pendDesc} descuento{pendDesc>1?"s":""} pendiente{pendDesc>1?"s":""}</span>}{pendDespacho>0&&<span className="ml-2 text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-full text-xs border border-purple-200">⚡ {pendDespacho} sin cotizar (Despachador)</span>}</p></div>
+          <div><h1 className="text-xl md:text-3xl font-bold text-gray-900">Cotizaciones</h1><p className="text-sm text-gray-400 mt-1">EVENTUAL · FIJO · {paramsDB.length} vehículos desde Supabase{listaVigente&&pendDesc>0&&<span className="ml-2 text-orange-600 font-bold bg-orange-50 px-2 py-0.5 rounded-full text-xs">🙋 {pendDesc} descuento{pendDesc>1?"s":""} pendiente{pendDesc>1?"s":""}</span>}{(errDespacho||(pendDespacho??0)>0)&&<button type="button" onClick={()=>setModalDespacho(true)} title={errDespacho?`No se pudo contar: ${errDespacho}`:"Regularizar los servicios del Despachador sin cotización"} className="ml-2 text-purple-700 font-bold bg-purple-50 hover:bg-purple-100 px-2 py-0.5 rounded-full text-xs border border-purple-200">⚡ {errDespacho?"?":pendDespacho} sin cotizar (Despachador)</button>}</p></div>
           <div className="flex gap-2 flex-wrap"><a href="/cotizador" className="px-4 py-2.5 rounded-xl font-bold text-sm border text-[#0b315f] border-[#0b315f] hover:bg-[#eef3f8]">🔧 Cotizador</a><button onClick={()=>{mostrarForm?limpiar():setMostrarForm(true);}} className="px-5 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90" style={{background:mostrarForm?"#6b7280":"#0b315f"}}>{mostrarForm?"✕ Cancelar":"+ Nueva cotización"}</button></div>
         </div>
 
@@ -2343,6 +2371,7 @@ export default function CotizacionesPage(){
 
         {mostrarForm&&(
           <section className="bg-white rounded-2xl border shadow-sm p-4 md:p-6 space-y-5">
+            {despachoOrigen&&(<div className="rounded-xl border border-purple-200 bg-purple-50 px-4 py-2.5 flex items-center justify-between gap-3"><span className="text-xs font-bold text-purple-800">⚡ Cotizando el servicio del Despachador #{despachoOrigen.codigo||despachoOrigen.id} del {String(despachoOrigen.fecha_servicio||"").split("-").reverse().slice(0,2).join("/")||"—"} — al guardar quedará vinculado</span><button onClick={()=>fijarDespachoOrigen(null)} className="text-xs font-bold text-purple-500 hover:text-purple-800 underline flex-shrink-0">Quitar el vínculo</button></div>)}
             {draftRecuperado&&(<div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><span>📋</span><span className="text-xs font-bold text-blue-700">Borrador recuperado — continúa donde lo dejaste</span></div><button onClick={limpiar} className="text-xs font-bold text-blue-400 hover:text-blue-700 underline flex-shrink-0">Descartar</button></div>)}
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-lg" style={{background:form.estado==="borrador"?"#6b7280":"#0b315f"}}>{editandoId?"✏️":"📄"}</div>

@@ -767,6 +767,11 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
     conceptos: ["igv", "margen", "margen_real", "costo_directo", "amortizacion", "factura"],
     faqs: [
       {
+        pregunta: "¿Qué es \"sin cotizar (Despachador)\" y cómo lo regularizo?",
+        respuesta:
+          "Son servicios creados desde el **Despachador** que no tienen una cotización detrás y siguen pendientes (no cancelados ni marcados como que no la requieren). El chip morado de la cabecera los cuenta y **al pulsarlo** abre la lista, con fecha, cliente, RUTA y ORIGEN → DESTINO, aunque sean de días anteriores.\n\nCada uno tiene cuatro salidas:\n\n1. **Crear cotización**: abre el formulario prellenado (cliente, ruta, fecha, hora y el importe sin IGV). Al guardarla, el servicio queda **vinculado** a ella.\n2. **Vincular a cotización existente**: solo a una cotización **eventual del mismo cliente**.\n3. **Cancelar en Programación**: si no se ejecutó. Se cancela allá, porque Programación te pregunta qué hacer con el importe (S/ 0.00 o falso flete).\n4. **No requiere cotización**: con su motivo escrito (cortesía, servicio interno). Se puede deshacer.\n\nSi el chip dice **?**, no se pudo contar: pasa el mouse para ver el error.",
+      },
+      {
         pregunta: "¿Cómo se llega al precio? Veo tres números distintos.",
         respuesta:
           "Son tres formas de responder la misma pregunta, y el ERP te las enseña juntas para que elijas con criterio:\n\n• **🔧 Cotizador** — el precio calculado desde tus costos reales para esa ruta y esa unidad. Es el que sabe si vas a perder plata.\n• **📋 Tarifario** — el precio oficial que ya tienes fijado para esa ruta. Es el que mantiene la coherencia: que el mismo cliente no reciba dos precios distintos según quién conteste.\n• **⭐ Sugerido** — el **mayor** de los dos anteriores. El ERP no te propone nunca el más barato.\n\nCada uno tiene su botón **Usar**, y abajo queda registrado con qué criterio se fijó el precio (“Modo: cotizador / tarifario / manual”). Ese registro es lo que después te deja explicar por qué un servicio se vendió a S/ 960 y otro parecido a S/ 1,120.",

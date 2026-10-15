@@ -1897,6 +1897,22 @@ export default function ReservasPage() {
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
 
+  // Deep-link /programacion?editar=<id> (lo usa «Regularizar» de /cotizaciones): abre el
+  // formulario de ESE servicio aunque el filtro de fechas lo deje fuera. Se lee de
+  // window.location para no requerir <Suspense> de useSearchParams.
+  const editarDeUrlRef = useRef(false);
+  useEffect(() => {
+    if (editarDeUrlRef.current || typeof window === "undefined") return;
+    editarDeUrlRef.current = true;
+    const id = Number(new URLSearchParams(window.location.search).get("editar"));
+    if (!Number.isInteger(id) || id <= 0) return;
+    supabase.from("reservas").select("*").eq("id", id).maybeSingle().then(({ data, error }: any) => {
+      if (error || !data) { alert(`No se pudo abrir el servicio #${id}${error ? `: ${error.message}` : ""}.`); return; }
+      editarReserva(data as Reserva);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Autocompletado del costo ──────────────────────────────────────────────
   // Es lo ÚNICO del Pacto que le AHORRA trabajo al operador, y por eso es lo que hace
   // que la regla se cumpla: hoy ese número vive en la cabeza de una persona y se teclea
