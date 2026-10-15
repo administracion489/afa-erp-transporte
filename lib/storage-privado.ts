@@ -24,7 +24,7 @@
 // objeto, no un enlace público. Igual que los demás, nunca lleva getPublicUrl — las fotos de
 // marcación traen rostro y ubicación, y los documentos de ausencia son descansos médicos y
 // licencias. Quien lo pinta firma la ruta con createSignedUrl (bucket "rrhh", path guardado).
-export const BUCKETS_PRIVADOS = ["documentos", "pasajeros-fotos", "radar-media", "rrhh"] as const;
+export const BUCKETS_PRIVADOS = ["documentos", "pasajeros-fotos", "radar-media", "rrhh", "crm-media"] as const;
 export type BucketPrivado = (typeof BUCKETS_PRIVADOS)[number];
 export type ObjetoPrivado = { bucket: BucketPrivado; ruta: string };
 
