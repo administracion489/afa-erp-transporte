@@ -181,8 +181,13 @@ export type FilaSeguro = {
   deAfa: boolean;
   /** solo pólizas: cuántos asegurados vigentes cubre */
   cubiertos?: number;
-  /** solo pólizas: a quién cubre hoy (para el cumplimiento) */
+  /** solo pólizas: a quién cubre hoy (para el cumplimiento). Las inclusiones SOLICITADAS no. */
   cubre?: ClaveAsegurado[];
+  /** todos los tipos que cubre la fila (una póliza SCTR Salud + Pensión + Vida Ley es UNA fila);
+   *  en documentos y fichas es `[tipo]`. `tipo` sigue siendo el principal. */
+  tipos: TipoSeguro[];
+  /** solo pólizas: inclusiones pedidas al bróker y aún sin confirmar (0 en el resto) */
+  solicitados: number;
 };
 
 export const EDITAR_EN: Record<FuenteSeguro, string> = {
@@ -235,9 +240,34 @@ function rotuloDe(dir: Directorio, k: ClaveAsegurado): string {
   return m?.get(k.id) ?? `${k.clase.replace("_", " ")} #${k.id}`;
 }
 
-function armar(base: Omit<FilaSeguro, "clave" | "etiqueta" | "dias" | "estado">, hoy: string): FilaSeguro {
+function armar(
+  base: Omit<FilaSeguro, "clave" | "etiqueta" | "dias" | "estado" | "tipos" | "solicitados"> & { tipos?: TipoSeguro[]; solicitados?: number },
+  hoy: string,
+): FilaSeguro {
   const { dias, estado } = estadoDe(base.vencimiento, hoy);
-  return { ...base, clave: `${base.fuente}:${base.origenId}:${base.tipo}`, etiqueta: etiquetaTipoSeguro(base.tipo), dias, estado };
+  const tipos = base.tipos && base.tipos.length ? base.tipos : [base.tipo];
+  return {
+    ...base, tipos, solicitados: base.solicitados ?? 0,
+    clave: `${base.fuente}:${base.origenId}:${base.tipo}`,
+    etiqueta: tipos.length > 1 ? etiquetaDeTipos(tipos) : etiquetaTipoSeguro(base.tipo), dias, estado,
+  };
+}
+
+/** Rótulo de una póliza de varios tipos: «SCTR Salud + Pensión + Vida Ley» (orden fijo de
+ *  TIPOS_PERSONA; los dos SCTR se escriben juntos para no repetir «SCTR»). */
+export function etiquetaDeTipos(tipos: TipoSeguro[]): string {
+  const orden = ["sctr_salud", "sctr_pension", "vida_ley"];
+  const ts = [...new Set(tipos)].sort((a, b) => {
+    const ia = orden.indexOf(a), ib = orden.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  const partes: string[] = [];
+  if (ts.includes("sctr_salud") && ts.includes("sctr_pension")) partes.push("SCTR Salud + Pensión");
+  for (const t of ts) {
+    if ((t === "sctr_salud" || t === "sctr_pension") && partes[0] === "SCTR Salud + Pensión") continue;
+    partes.push(etiquetaTipoSeguro(t));
+  }
+  return partes.join(" + ");
 }
 
 // ── Documentos de vehículo propio ───────────────────────────────────────────
@@ -299,16 +329,47 @@ export type PolizaRow = {
   /** accesoria (seguros-01): póliza individual de una unidad de tercero */
   vehiculo_tercero_id?: number | null;
   alcance?: "individual" | "colectiva" | null;
+  /** accesoria (seguros-04a): los tipos de PERSONA que cubre (⊆ sctr_salud, sctr_pension,
+   *  vida_ley, e incluye `tipo`). null/vacío = solo `tipo`, lo de siempre. */
+  coberturas?: string[] | null;
   fecha_inicio?: string | null; fecha_vencimiento?: string | null;
   prima_total?: number | null; cuota_mensual?: number | null; archivo_url?: string | null;
 };
 
+export type EstadoCobertura = "solicitada" | "incluida" | "excluida";
+
 export type CoberturaRow = {
+  id?: number;
   seguro_id: number;
   conductor_id?: number | null; personal_administrativo_id?: number | null;
   vehiculo_id?: number | null; vehiculo_tercero_id?: number | null;
   desde?: string | null; hasta?: string | null;
+  /** accesorias (seguros-04a). estado null = incluida (lo de siempre). Una 'solicitada' es una
+   *  inclusión pedida al bróker que la aseguradora aún no confirmó: NO cubre. */
+  estado?: EstadoCobertura | string | null;
+  solicitada_en?: string | null;
+  constancia_url?: string | null;
+  nota?: string | null;
 };
+
+/** Tipos que cubre una póliza: `coberturas` si trae alguno, si no `[tipo]` (sin tipo, ninguno).
+ *  Texto CRUDO, como la vista: `tipo = any(coberturas)`. */
+export function tiposDePoliza(p: Pick<PolizaRow, "tipo" | "coberturas">): string[] {
+  const cs = Array.isArray(p.coberturas) ? p.coberturas.map((c) => String(c ?? "").trim()).filter(Boolean) : [];
+  if (cs.length) return [...new Set(cs)];
+  return p.tipo ? [String(p.tipo)] : [];
+}
+
+/** null (o un valor que el CHECK no admite) = incluida: el comportamiento de antes de seguros-04a. */
+export function estadoCobertura(c: Pick<CoberturaRow, "estado">): EstadoCobertura {
+  const e = String(c.estado ?? "").trim().toLowerCase();
+  return e === "solicitada" ? "solicitada" : e === "excluida" ? "excluida" : "incluida";
+}
+
+/** Desde cuándo cubre: coalesce(cobertura.desde, póliza.fecha_inicio). null = no se sabe (cubre). */
+export function inicioEfectivo(c: Pick<CoberturaRow, "desde">, p: Pick<PolizaRow, "fecha_inicio"> | null | undefined): string | null {
+  return fecha(c.desde) ?? fecha(p?.fecha_inicio);
+}
 
 export function claveDeCobertura(c: CoberturaRow): ClaveAsegurado | null {
   if (c.conductor_id != null) return { clase: "conductor", id: Number(c.conductor_id) };
@@ -340,6 +401,7 @@ export function cubiertosDePoliza(p: PolizaRow, coberturas: CoberturaRow[], hoy?
   }
   const out: ClaveAsegurado[] = [];
   for (const c of suyas) {
+    if (estadoCobertura(c) === "solicitada") continue; // pedida, no confirmada: no cubre
     if (!coberturaVigente(c, hoy)) continue;
     const k = claveDeCobertura(c);
     if (k && !out.some((o) => mismaClave(o, k))) out.push(k);
@@ -347,9 +409,17 @@ export function cubiertosDePoliza(p: PolizaRow, coberturas: CoberturaRow[], hoy?
   return out;
 }
 
+/** Inclusiones pedidas al bróker y aún sin confirmar de una póliza. */
+export function solicitadosDePoliza(p: PolizaRow, coberturas: CoberturaRow[]): number {
+  return (coberturas || []).filter((c) => Number(c.seguro_id) === Number(p.id) && estadoCobertura(c) === "solicitada").length;
+}
+
+/** UNA fila por póliza, aunque cubra varios tipos (la prima se cuenta una vez). */
 export function filasDePolizas(polizas: PolizaRow[], coberturas: CoberturaRow[], dir: Directorio, hoy: string): FilaSeguro[] {
   return (polizas || []).map((p) => {
     const tipo = tipoSeguroDe(p.tipo) ?? "otro";
+    const extra = tiposDePoliza(p).map((t) => tipoSeguroDe(t)).filter((t): t is string => !!t);
+    const tipos = [tipo, ...extra.filter((t) => t !== tipo)];
     const cubre = cubiertosDePoliza(p, coberturas, hoy);
     const asegurado: Asegurado = cubre.length === 1
       ? { ...cubre[0], rotulo: rotuloDe(dir, cubre[0]) }
@@ -362,6 +432,7 @@ export function filasDePolizas(polizas: PolizaRow[], coberturas: CoberturaRow[],
       inicio: fecha(p.fecha_inicio), vencimiento: fecha(p.fecha_vencimiento),
       prima: num(p.prima_total), cuota: num(p.cuota_mensual), archivo: txt(p.archivo_url),
       editarEn: EDITAR_EN.poliza, deAfa: true, cubiertos: cubre.length, cubre,
+      tipos, solicitados: solicitadosDePoliza(p, coberturas),
     }, hoy);
   });
 }
