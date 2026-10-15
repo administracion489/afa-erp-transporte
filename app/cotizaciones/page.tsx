@@ -62,6 +62,15 @@ type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;dire
 type Tarifa={id:number;origen:string;destino:string;tipo_vehiculo:string;equipamiento:string;tipo_servicio:string;modo:string;precio:number;moneda:string;confidencial:boolean;incluye_guia:boolean;incluye_peajes:boolean;incluye_alimentacion:boolean;notas:string|null;};
 type VehiculoFlota={id:number;placa:string;categoria:string|null;marca:string|null;modelo:string|null;anio:number|null;capacidad_pasajeros:number|null;equipamiento:string|null;foto_externa_url:string|null;foto_interna_url:string|null;descripcion_unidad:string|null;tipo_vehiculo_costeo:string|null;};
 type VehiculoTerceroFlota={id:number;empresa_id:number;placa:string;categoria:string|null;marca:string|null;modelo:string|null;capacidad:number|null;estado:string;empresa_nombre?:string;foto_externa_url:string|null;foto_interna_url:string|null;descripcion_unidad:string|null;tipo_vehiculo_costeo:string|null;};
+// Descripción de una unidad tercerizada para un documento que lee el CLIENTE: nunca nombra
+// al proveedor (ver terceroAFlota). Se compara sin tildes ni mayúsculas ni signos.
+const normEmp=(x:string)=>x.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toUpperCase().replace(/[^A-Z0-9]+/g," ").trim();
+const descripcionTerceroParaCliente=(t:{placa:string;categoria:string|null;marca:string|null;capacidad:number|null;descripcion_unidad:string|null;empresa_nombre?:string}):string=>{
+  const propia=(t.descripcion_unidad||"").trim();
+  const emp=normEmp(t.empresa_nombre||"");
+  if(propia&&!(emp&&normEmp(propia).includes(emp)))return propia;
+  return `${t.placa} ${t.categoria||""} ${t.marca||""} ${t.capacidad?`(${t.capacidad} pax)`:""}`.replace(/\s+/g," ").trim();
+};
 
 const IGV=0.18,OVERHEAD=0.10,RESERVA=0.05;
 const DEFAULT_CONSID:ConsidCot={incluye:["Traslado de origen a destino","Conductor profesional certificado","Combustible durante todo el recorrido","GPS en tiempo real","Seguro de viaje SOAT vigente"],no_incluye:["Alimentación y bebidas","Guía turístico","Entradas a atractivos turísticos"],generales:["Precios según fechas y horarios coordinados.","Tolerancia máxima de espera: 30 minutos.","No se permite consumo de alcohol ni tabaco a bordo.","Cambios en ruta u horario pueden generar costos adicionales.","Servicio eventual: adelanto del 50% para confirmar.","Recomendamos reservar con 7 días de anticipación mínimo."]};
@@ -2013,11 +2022,15 @@ export default function CotizacionesPage(){
   // Un vehículo de tercero visto como uno de flota, para los documentos. El texto de
   // respaldo importa: sin él, buildVehsHtml inventa la descripción genérica de la flota
   // propia ("con A/C, audio, asientos reclinables") para una unidad que no conocemos.
+  // REGLA DURA: estos documentos (cotización, Ficha Técnica de Ruta) van al CLIENTE, y el
+  // cliente NUNCA debe saber que la unidad es tercerizada. Ni el nombre de la empresa
+  // proveedora ni la palabra "tercero" salen al papel; la unidad se identifica por su placa.
+  // Una descripción escrita a mano que nombre a la empresa se descarta por lo mismo.
   const terceroAFlota=(t:VehiculoTerceroFlota):VehiculoFlota=>({
     id:t.id,placa:t.placa,categoria:t.categoria,marca:t.marca,modelo:t.modelo,anio:null,
     capacidad_pasajeros:t.capacidad,equipamiento:null,
     foto_externa_url:t.foto_externa_url,foto_interna_url:t.foto_interna_url,
-    descripcion_unidad:t.descripcion_unidad||`${t.empresa_nombre||"Tercero"} — ${t.placa} ${t.categoria||""} ${t.marca||""} ${t.capacidad?`(${t.capacidad} pax)`:""}`.replace(/\s+/g," ").trim(),
+    descripcion_unidad:descripcionTerceroParaCliente(t),
     tipo_vehiculo_costeo:t.tipo_vehiculo_costeo,
   });
 
