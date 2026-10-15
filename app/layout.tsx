@@ -4,6 +4,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from "react";
 import { Manrope, JetBrains_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabase";
+import { cabecerasErp } from "@/lib/fetch-erp";
+import { ImgPrivada } from "@/components/ArchivoPrivado";
 import EliaPanel from "./_components/elia";
 import AyudaModulo from "./_components/AyudaModulo";
 import NotificadorMensajesPasajeros from "@/components/NotificadorMensajesPasajeros";
@@ -287,7 +289,10 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
     grupo: "Principal",
     items: [
       { href: "/dashboard", label: "Dashboard", sub: "Panel principal", icon: Ic.Dashboard, modulo: "dashboard" },
-      { href: "/mi-perfil", label: "Mi Perfil", sub: "Ficha · asistencia · vacaciones", icon: Ic.UserCheck, modulo: "mi-perfil" },
+      // "Mi Perfil" (/mi-perfil) YA NO vive aquí: se abre desde el bloque de usuario del pie del
+      // menú (ver MenuUsuario). Al salir de `menuGrupos` deja de estar en `menu`, así que el gate
+      // del RootLayout lo trata aparte (ver la rama `pathname === "/mi-perfil"`), igual que
+      // /seguimiento/gps/. La guarda fina de la pantalla la hace usePermiso("mi-perfil").
     ],
   },
   {
@@ -623,6 +628,172 @@ function GrupoMenu({
   );
 }
 
+// ─── Bloque de usuario (pie del menú) = acceso a Mi Perfil ───────────────────
+// Es un BOTÓN (no un div) que abre un popover con "Mi Perfil" y "Cerrar sesión".
+// Funciona colapsado (solo el avatar) y expandido (avatar + nombre + correo + rol),
+// y en celular (el aside completo se despliega y este bloque queda abajo). El popover
+// se cierra al navegar, al hacer clic fuera o con Escape; accesible por teclado.
+function MenuUsuario({
+  nombre,
+  email,
+  rol,
+  foto,
+  collapsed,
+  onCerrarSesion,
+}: {
+  nombre: string;
+  email: string;
+  rol: string;
+  foto: string | null;
+  collapsed: boolean;
+  onCerrarSesion: () => void;
+}) {
+  const pathname = usePathname();
+  const [abierto, setAbierto] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const enPerfil = pathname === "/mi-perfil";
+
+  // Se cierra al cambiar de ruta. Se hace comparando en el render (no en un efecto, que
+  // dispararía set-state-in-effect), igual que el reinicio del menú móvil del RootLayout.
+  const [rutaVista, setRutaVista] = useState(pathname);
+  if (rutaVista !== pathname) {
+    setRutaVista(pathname);
+    if (abierto) setAbierto(false);
+  }
+
+  // Se cierra al hacer clic fuera o con Escape.
+  useEffect(() => {
+    if (!abierto) return;
+    const fuera = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setAbierto(false);
+    };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setAbierto(false); };
+    document.addEventListener("mousedown", fuera);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", fuera);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [abierto]);
+
+  const inicial = (nombre || "U").charAt(0).toUpperCase();
+  const rolLabel = rol === "admin" ? "Admin" : "Operador";
+
+  const avatar = (clase: string) => (
+    <div className={`
+      ${clase} rounded-full overflow-hidden flex-shrink-0 shadow
+      bg-gradient-to-br from-[#2f8ee9] to-[#0b315f]
+      text-white flex items-center justify-center font-black
+    `}>
+      {foto
+        ? <ImgPrivada src={foto} alt="" className="w-full h-full object-cover" />
+        : inicial}
+    </div>
+  );
+
+  const popover = (
+    <div
+      role="menu"
+      aria-label="Menú de usuario"
+      className={`
+        absolute bottom-full mb-2 z-50 p-1
+        ${collapsed ? "left-0 w-52" : "left-0 right-0"}
+        rounded-xl border border-white/10 bg-[#0b2545] shadow-2xl shadow-black/50
+      `}
+    >
+      {/* En colapsado el trigger no dice quién es; el popover sí. */}
+      {collapsed && (
+        <div className="px-2.5 py-2 mb-1 border-b border-white/5">
+          <p className="text-[12px] font-bold text-white/90 truncate">{nombre}</p>
+          <p className="text-[10px] text-white/35 truncate">{email}</p>
+          <span className="inline-block mt-1 text-[8px] font-black uppercase tracking-wider text-amber-400/90 bg-amber-400/10 px-1.5 py-0.5 rounded">
+            {rolLabel}
+          </span>
+        </div>
+      )}
+      <Link
+        href="/mi-perfil"
+        role="menuitem"
+        onClick={() => setAbierto(false)}
+        className={`
+          flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[12px] font-semibold transition-colors
+          outline-none focus-visible:bg-white/10
+          ${enPerfil ? "bg-white/10 text-white" : "text-white/75 hover:bg-white/10 hover:text-white"}
+        `}
+      >
+        <Ic.UserCheck size={14} strokeWidth={2} />
+        Mi Perfil
+      </Link>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => { setAbierto(false); onCerrarSesion(); }}
+        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[12px] font-semibold text-red-300 hover:bg-red-600/25 hover:text-red-200 transition-colors outline-none focus-visible:bg-red-600/25"
+      >
+        <Ic.LogOut size={14} strokeWidth={2} />
+        Cerrar sesión
+      </button>
+    </div>
+  );
+
+  // ── Colapsado: solo el avatar ──
+  if (collapsed) {
+    return (
+      <div ref={ref} className="relative flex justify-center">
+        {abierto && popover}
+        <button
+          type="button"
+          onClick={() => setAbierto((v) => !v)}
+          aria-haspopup="menu"
+          aria-expanded={abierto}
+          title={`${nombre} · ${rolLabel}`}
+          className={`
+            w-9 h-9 rounded-full transition-all
+            outline-none focus-visible:ring-2 focus-visible:ring-[#2f8ee9]
+            ${abierto ? "ring-2 ring-[#2f8ee9]" : "hover:brightness-110"}
+          `}
+        >
+          {avatar("w-9 h-9 text-sm")}
+        </button>
+      </div>
+    );
+  }
+
+  // ── Expandido: avatar + nombre + correo + rol + chevron ──
+  return (
+    <div ref={ref} className="relative">
+      {abierto && popover}
+      <button
+        type="button"
+        onClick={() => setAbierto((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={abierto}
+        className={`
+          w-full flex items-center gap-2.5 p-1.5 rounded-xl text-left transition-colors
+          outline-none focus-visible:ring-2 focus-visible:ring-[#2f8ee9]
+          ${abierto ? "bg-white/10" : "hover:bg-white/8"}
+        `}
+      >
+        {avatar("w-9 h-9 text-sm")}
+        <div className="min-w-0 flex-1">
+          <p className="font-bold text-[12px] text-white/90 leading-tight truncate">{nombre}</p>
+          <p className="text-[10px] text-white/35 truncate">{email}</p>
+        </div>
+        <span className="flex items-center gap-1 flex-shrink-0">
+          <span className="text-[8px] font-black uppercase tracking-wider text-amber-400/90 bg-amber-400/10 px-1.5 py-0.5 rounded">
+            {rolLabel}
+          </span>
+          <Ic.ChevronRight
+            size={13}
+            strokeWidth={2.5}
+            className={`text-white/35 transition-transform duration-200 ${abierto ? "rotate-90" : "-rotate-90"}`}
+          />
+        </span>
+      </button>
+    </div>
+  );
+}
+
 // ─── Layout principal ───────────────────────────────────────────────────────
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -653,6 +824,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [permisos, setPermisos]           = useState<string[]>([]);
   const [cargando, setCargando]           = useState(true);
   const [collapsed, setCollapsed]         = useState(false);
+  const [fotoPerfil, setFotoPerfil]       = useState<string | null>(null);
+  const fotoPedidaRef                     = useRef(false);
 
   // En celular el menú no usa `collapsed` (que es el de escritorio, y ahí todo sigue
   // igual): va colapsado salvo que la persona lo abra a mano, y CADA navegación lo vuelve
@@ -736,8 +909,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         .eq("usuario_id", session.user.id)
         .eq("permitido", true);
 
+      const esAdmin = perfil.rol === "admin";
       let listaPermisos = permisosData?.map((p: any) => p.modulo) || [];
-      if (perfil.rol === "admin") {
+      if (esAdmin) {
         listaPermisos = [...new Set(menu.map((item) => item.modulo))];
       }
       setPermisos(listaPermisos);
@@ -750,8 +924,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       const rutaActual = menu.find(
         (item) => pathname === item.href || pathname.startsWith(`${item.href}/`)
       );
+      // /mi-perfil salió de `menuGrupos`, así que `rutaActual` no lo encuentra. Se gobierna
+      // explícitamente con el mismo permiso que usePermiso("mi-perfil") exige en la pantalla:
+      // admin pasa siempre, y el resto solo con el módulo "mi-perfil" (que todo usuario tiene
+      // sembrado). Sin esta rama caería en `!rutaActual` → pasaría sin mirar el permiso.
       const permitida = pathname.startsWith("/seguimiento/gps/")
         ? MODULOS_RECORRIDO.some((m) => listaPermisos.includes(m))
+        : pathname === "/mi-perfil"
+        ? esAdmin || listaPermisos.includes("mi-perfil")
         : !rutaActual || listaPermisos.includes(rutaActual.modulo);
       if (!permitida) {
         router.replace("/dashboard");
@@ -761,6 +941,25 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     }
     cargarSesionPermisos();
   }, [pathname, esLogin, esPublica, router]);
+
+  // Foto del perfil para el avatar del bloque de usuario (si existe). Se pide UNA vez por
+  // montaje del layout, no en cada navegación: `/api/rrhh/perfil` es un endpoint que ya existe
+  // (lo usa /mi-perfil) y devuelve el enlace firmado del rostro; si falta la migración o no hay
+  // foto, se queda en null y el avatar usa la inicial. Best-effort: un fallo no rompe nada.
+  useEffect(() => {
+    if (esLogin || esPublica || cargando || fotoPedidaRef.current) return;
+    fotoPedidaRef.current = true;
+    let vivo = true;
+    (async () => {
+      try {
+        const res = await fetch("/api/rrhh/perfil", { headers: await cabecerasErp() });
+        const d = await res.json().catch(() => null);
+        const url = d?.perfil?.foto_url_firmada;
+        if (vivo && typeof url === "string" && url) setFotoPerfil(url);
+      } catch { /* la inicial del avatar sirve igual */ }
+    })();
+    return () => { vivo = false; };
+  }, [esLogin, esPublica, cargando]);
 
   async function cerrarSesion() {
     try { await supabase.auth.signOut(); }
@@ -881,46 +1080,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 />
               </div>
 
+              {/* Bloque de usuario = puerta a Mi Perfil. Al pulsarlo abre un menú con
+                  "Mi Perfil" y "Cerrar sesión" (ver MenuUsuario). Antes era un avatar inerte
+                  con un botón de salir suelto. */}
               <div className={`
                 border-t border-white/8 bg-black/15 transition-all duration-300
-                ${menuColapsado ? "p-2" : "p-3"}
+                ${menuColapsado ? "p-2" : "p-2.5"}
               `}>
-                {menuColapsado ? (
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#2f8ee9] to-[#0b315f] text-white flex items-center justify-center font-black text-sm shadow">
-                      {nombreUsuario.charAt(0).toUpperCase()}
-                    </div>
-                    <button
-                      onClick={cerrarSesion}
-                      title="Cerrar sesión"
-                      className="w-8 h-8 flex items-center justify-center rounded-lg bg-red-600/15 hover:bg-red-600/35 transition-colors"
-                    >
-                      <Ic.LogOut size={13} strokeWidth={2} className="text-red-400" />
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    <div className="flex items-center gap-2.5 mb-2.5">
-                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#2f8ee9] to-[#0b315f] text-white flex items-center justify-center font-black text-sm shadow flex-shrink-0">
-                        {nombreUsuario.charAt(0).toUpperCase()}
-                      </div>
-                      <div className="min-w-0">
-                        <p className="font-bold text-[12px] text-white/90 leading-tight truncate">{nombreUsuario}</p>
-                        <p className="text-[9px] text-white/30 truncate">{emailUsuario}</p>
-                        <span className="inline-block text-[9px] font-black text-amber-400/90 uppercase tracking-wider bg-amber-400/10 px-1.5 py-0.5 rounded mt-0.5">
-                          {rolUsuario === "admin" ? "Admin" : "Operador"}
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={cerrarSesion}
-                      className="w-full flex items-center justify-center gap-1.5 bg-red-600/12 hover:bg-red-600/28 border border-red-500/15 text-red-400 hover:text-red-300 text-[11px] font-bold py-1.5 rounded-lg transition-all"
-                    >
-                      <Ic.LogOut size={12} strokeWidth={2} />
-                      Cerrar sesión
-                    </button>
-                  </>
-                )}
+                <MenuUsuario
+                  nombre={nombreUsuario}
+                  email={emailUsuario}
+                  rol={rolUsuario}
+                  foto={fotoPerfil}
+                  collapsed={menuColapsado}
+                  onCerrarSesion={cerrarSesion}
+                />
               </div>
             </aside>
 

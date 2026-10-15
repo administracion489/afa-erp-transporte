@@ -113,12 +113,18 @@ function MiPerfil() {
     if (res.ok) await cargar();
   }
 
+  const TABS = [
+    ["perfil", "Mi perfil", <IconUser key="i" />],
+    ["marcar", "Marcar asistencia", <IconCamera key="i" />],
+    ["asistencias", "Mis asistencias", <IconClock key="i" />],
+  ] as const;
+
   return (
-    <main className="p-6 space-y-5 max-w-4xl mx-auto">
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900">Mi Perfil</h1>
+    <main className="mx-auto max-w-5xl space-y-5">
+      <header>
+        <h1 className="text-2xl sm:text-3xl font-black text-gray-900 tracking-tight">Mi Perfil</h1>
         <p className="text-gray-400 text-sm mt-1">Tu ficha, tus consentimientos, tu asistencia y tus vacaciones</p>
-      </div>
+      </header>
 
       {data?.sin_migracion && (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
@@ -127,25 +133,39 @@ function MiPerfil() {
         </div>
       )}
 
-      {/* Pestañas */}
-      <div className="flex gap-1 border-b border-gray-200">
-        {([["perfil", "Mi perfil"], ["marcar", "Marcar asistencia"], ["asistencias", "Mis asistencias"]] as const).map(([k, l]) => (
+      {/* Pestañas — control segmentado (se ve bien en celular: ocupan el ancho) */}
+      <div className="flex gap-1 rounded-xl bg-gray-100 p-1">
+        {TABS.map(([k, l, icon]) => (
           <button
             key={k}
             onClick={() => setTab(k)}
-            className={`px-4 py-2 text-sm font-bold rounded-t-lg ${tab === k ? "text-indigo-700 border-b-2 border-indigo-600" : "text-gray-500 hover:text-gray-700"}`}
+            aria-pressed={tab === k}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-4 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all ${
+              tab === k
+                ? "bg-white text-indigo-700 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
           >
-            {l}
+            {icon}
+            <span className="truncate">{l}</span>
           </button>
         ))}
       </div>
 
       {cargando ? (
-        <p className="text-sm text-gray-500">Cargando tu información…</p>
+        <div className="rounded-2xl border border-gray-200 bg-white p-8 text-center text-sm text-gray-500">
+          <span className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-gray-200 border-t-indigo-500 align-middle mr-2" />
+          Cargando tu información…
+        </div>
       ) : tab === "perfil" ? (
         <SeccionPerfil data={data} correo={correo} onGuardado={cargar} />
       ) : tab === "marcar" ? (
-        <MarcarAsistencia biometrico={biometrico} onPedirConsentimiento={otorgarBiometrico} onMarcada={() => { /* refresca al entrar a Mis asistencias */ }} />
+        <div className="rounded-2xl border border-gray-200 bg-white p-5">
+          <SeccionTitulo>Marcar asistencia</SeccionTitulo>
+          <div className="mt-4">
+            <MarcarAsistencia biometrico={biometrico} onPedirConsentimiento={otorgarBiometrico} onMarcada={() => { /* refresca al entrar a Mis asistencias */ }} />
+          </div>
+        </div>
       ) : (
         <MisAsistencias />
       )}
@@ -214,38 +234,58 @@ function SeccionPerfil({ data, correo, onGuardado }: { data: PerfilResp | null; 
 
   const ficha = data?.ficha;
   const sal = data?.saldo_vacaciones;
+  const nombre = data?.usuario?.nombre ?? "—";
+  const inicial = (nombre || "—").trim().charAt(0).toUpperCase() || "—";
+  const clase = ficha?.clase === "conductor" ? "Conductor" : ficha?.clase === "administrativo" ? "Personal administrativo" : "Usuario del ERP";
 
   return (
     <div className="space-y-5">
-      {/* Cabecera: foto + nombre + ficha */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 flex flex-wrap items-center gap-4">
-        <div className="w-24 h-24 rounded-full overflow-hidden bg-gray-100 border flex items-center justify-center shrink-0">
-          {fotoDataUrl
-            // eslint-disable-next-line @next/next/no-img-element
-            ? <img src={fotoDataUrl} alt="" className="w-full h-full object-cover" />
-            : p?.foto_url_firmada
-            ? <ImgPrivada src={p.foto_url_firmada} alt="" className="w-full h-full object-cover" />
-            : <span className="text-3xl text-gray-300">👤</span>}
+      {/* ── Cabecera de perfil ── */}
+      <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden shadow-sm">
+        <div className="h-20 bg-gradient-to-r from-[#0b315f] via-[#1c4a86] to-[#2a5298]" />
+        <div className="px-5 pb-5 -mt-11 flex flex-col sm:flex-row sm:items-end gap-4">
+          {/* Avatar grande con botón de cambiar foto superpuesto */}
+          <div className="relative shrink-0">
+            <div className="w-24 h-24 rounded-2xl overflow-hidden bg-gray-100 ring-4 ring-white shadow-lg flex items-center justify-center">
+              {fotoDataUrl
+                // eslint-disable-next-line @next/next/no-img-element
+                ? <img src={fotoDataUrl} alt="" className="w-full h-full object-cover" />
+                : p?.foto_url_firmada
+                ? <ImgPrivada src={p.foto_url_firmada} alt="" className="w-full h-full object-cover" />
+                : <span className="w-full h-full bg-gradient-to-br from-[#2f8ee9] to-[#0b315f] text-white flex items-center justify-center text-4xl font-black">{inicial}</span>}
+            </div>
+            <label
+              title="Cambiar foto"
+              className="absolute -bottom-1 -right-1 w-8 h-8 rounded-full bg-white border border-gray-200 shadow flex items-center justify-center text-gray-600 hover:text-indigo-600 hover:border-indigo-200 cursor-pointer transition-colors"
+            >
+              <IconCamera />
+              <input type="file" accept="image/*" className="hidden" onChange={elegirFoto} />
+            </label>
+          </div>
+
+          <div className="flex-1 min-w-0 sm:pb-1">
+            <p className="text-xl font-black text-gray-900 truncate">{nombre}</p>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
+              <span className="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-bold text-indigo-700">{clase}</span>
+              {ficha?.datos?.cargo && <span className="text-xs text-gray-500">{ficha.datos.cargo}</span>}
+              {ficha?.datos?.departamento && <span className="text-xs text-gray-400">· {ficha.datos.departamento}</span>}
+            </div>
+            <p className="text-xs text-gray-400 mt-1.5 truncate">{correo ?? "—"}</p>
+          </div>
+
+          {ficha?.fecha_ingreso && (
+            <div className="sm:text-right sm:pb-1">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Ingreso</p>
+              <p className="text-sm font-semibold text-gray-700">{ficha.fecha_ingreso}</p>
+            </div>
+          )}
         </div>
-        <div className="flex-1 min-w-[180px]">
-          <p className="text-xl font-black text-gray-900">{data?.usuario?.nombre ?? "—"}</p>
-          <p className="text-xs text-gray-500">
-            {ficha?.clase === "conductor" ? "Conductor" : ficha?.clase === "administrativo" ? "Personal administrativo" : "Usuario del ERP"}
-            {ficha?.datos?.cargo ? ` · ${ficha.datos.cargo}` : ""}
-            {ficha?.datos?.departamento ? ` · ${ficha.datos.departamento}` : ""}
-          </p>
-          {ficha?.fecha_ingreso && <p className="text-[11px] text-gray-400 mt-0.5">Ingreso: {ficha.fecha_ingreso}</p>}
-        </div>
-        <label className="px-3 py-2 rounded-lg border text-xs font-bold text-gray-600 hover:bg-gray-50 cursor-pointer">
-          Cambiar foto
-          <input type="file" accept="image/*" className="hidden" onChange={elegirFoto} />
-        </label>
       </div>
 
-      {/* Datos editables */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3">
-        <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">Mis datos</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      {/* ── Datos personales (editables) ── */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4">
+        <SeccionTitulo>Datos personales</SeccionTitulo>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-3">
           <Campo label="Fecha de nacimiento" tipo="date" valor={form.fecha_nacimiento} onChange={(v) => setForm((f) => ({ ...f, fecha_nacimiento: v }))} />
           <Campo label="Teléfono personal" valor={form.telefono_personal} onChange={(v) => setForm((f) => ({ ...f, telefono_personal: v }))} />
           <Campo label="Dirección" valor={form.direccion} onChange={(v) => setForm((f) => ({ ...f, direccion: v }))} span2 />
@@ -257,30 +297,30 @@ function SeccionPerfil({ data, correo, onGuardado }: { data: PerfilResp | null; 
           <CampoGris label="Correo (no editable)" valor={correo ?? "—"} />
           <CampoGris label="Sueldo (no editable)" valor="Lo gestiona Recursos Humanos" />
         </div>
-        <div className="flex items-center gap-3 pt-1">
-          <button onClick={guardar} disabled={guardando} className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-bold hover:opacity-90 disabled:opacity-50">
+        <div className="flex flex-wrap items-center gap-3 pt-4 border-t border-gray-100">
+          <button onClick={guardar} disabled={guardando} className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-bold hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-sm">
             {guardando ? "Guardando…" : "Guardar cambios"}
           </button>
           {msg && <span className="text-xs text-gray-500">{msg}</span>}
         </div>
       </div>
 
-      {/* Vacaciones */}
+      {/* ── Vacaciones ── */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5">
-        <p className="text-[11px] font-black uppercase tracking-widest text-gray-400 mb-2">Saldo de vacaciones</p>
+        <SeccionTitulo>Saldo de vacaciones</SeccionTitulo>
         {sal && sal.saldo ? (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
             <Kpi label="Años completos" valor={String(sal.saldo.anios_completos)} />
             <Kpi label="Días ganados" valor={String(sal.saldo.dias_ganados)} />
             <Kpi label="Días gozados" valor={String(sal.saldo.dias_gozados)} />
             <Kpi label="Saldo" valor={String(sal.saldo.saldo)} resalta={sal.saldo.saldo < 0 ? "deuda" : "ok"} />
           </div>
         ) : (
-          <p className="text-xs text-gray-500">{(sal as { motivo?: string } | null)?.motivo ?? "No se pudo calcular el saldo de vacaciones."}</p>
+          <p className="text-xs text-gray-500 mt-3">{(sal as { motivo?: string } | null)?.motivo ?? "No se pudo calcular el saldo de vacaciones."}</p>
         )}
       </div>
 
-      {/* Consentimientos */}
+      {/* ── Consentimientos ── */}
       <Consentimientos data={data} onCambio={onGuardado} />
     </div>
   );
@@ -304,16 +344,22 @@ function Consentimientos({ data, onCambio }: { data: PerfilResp | null; onCambio
     const c = cons?.[tipo];
     const otorgado = !!c?.otorgado;
     return (
-      <div className="flex items-start justify-between gap-3 py-3">
+      <div className="flex items-start justify-between gap-3 py-4 first:pt-0 last:pb-0">
         <div className="min-w-0">
-          <p className="text-sm font-bold text-gray-800">{titulo}</p>
-          <p className="text-[11px] text-gray-500 leading-relaxed">{texto}</p>
-          {otorgado && c?.en && <p className="text-[11px] text-emerald-600 mt-0.5">Otorgado el {new Date(c.en).toLocaleDateString("es-PE")}</p>}
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-sm font-bold text-gray-800">{titulo}</p>
+            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${otorgado ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${otorgado ? "bg-emerald-500" : "bg-gray-400"}`} />
+              {otorgado ? "Otorgado" : "Pendiente"}
+            </span>
+          </div>
+          <p className="text-[11px] text-gray-500 leading-relaxed mt-1">{texto}</p>
+          {otorgado && c?.en && <p className="text-[11px] text-emerald-600 mt-1">Otorgado el {new Date(c.en).toLocaleDateString("es-PE")}</p>}
         </div>
         <button
           onClick={() => cambiar(tipo, !otorgado)}
           disabled={trabajando === tipo}
-          className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold ${otorgado ? "border text-red-600 hover:bg-red-50" : "bg-indigo-600 text-white hover:opacity-90"} disabled:opacity-50`}
+          className={`shrink-0 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-colors disabled:opacity-50 ${otorgado ? "border border-gray-200 text-red-600 hover:bg-red-50 hover:border-red-200" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}
         >
           {trabajando === tipo ? "…" : otorgado ? "Revocar" : "Otorgar"}
         </button>
@@ -322,12 +368,14 @@ function Consentimientos({ data, onCambio }: { data: PerfilResp | null; onCambio
   };
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-5 divide-y divide-gray-100">
-      <p className="text-[11px] font-black uppercase tracking-widest text-gray-400 pb-1">Consentimientos (Ley N.º 29733)</p>
-      {fila("biometrico", "Foto del rostro al marcar asistencia",
-        "Autorizo que al marcar se detecte un rostro y se guarde mi foto (dato sensible) como evidencia para que RRHH verifique la marca. Sin reconocimiento facial automático. Revocable.")}
-      {fila("monitoreo", "Registro de ubicación y asistencia en jornada",
-        "Autorizo el registro de mi ubicación y asistencia durante mi jornada con fines laborales. Revocable.")}
+    <div className="rounded-2xl border border-gray-200 bg-white p-5">
+      <SeccionTitulo hint="Ley N.º 29733">Consentimientos</SeccionTitulo>
+      <div className="divide-y divide-gray-100 mt-3">
+        {fila("biometrico", "Foto del rostro al marcar asistencia",
+          "Autorizo que al marcar se detecte un rostro y se guarde mi foto (dato sensible) como evidencia para que RRHH verifique la marca. Sin reconocimiento facial automático. Revocable.")}
+        {fila("monitoreo", "Registro de ubicación y asistencia en jornada",
+          "Autorizo el registro de mi ubicación y asistencia durante mi jornada con fines laborales. Revocable.")}
+      </div>
     </div>
   );
 }
@@ -362,27 +410,29 @@ function MisAsistencias() {
 
   return (
     <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
-      <p className="text-[11px] font-black uppercase tracking-widest text-gray-400 px-4 pt-4">Últimos 10 días</p>
+      <div className="px-5 pt-5 pb-1">
+        <SeccionTitulo hint="Últimos 10 días">Mis asistencias</SeccionTitulo>
+      </div>
       {jornadas.length === 0 ? (
-        <p className="text-sm text-gray-500 p-4">No tienes marcas registradas en los últimos 10 días.</p>
+        <p className="text-sm text-gray-500 px-5 pb-5 pt-2">No tienes marcas registradas en los últimos 10 días.</p>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto mt-2">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-[11px] uppercase tracking-wide text-gray-400 border-b">
-                <th className="text-left px-4 py-2">Día</th>
-                <th className="text-right px-4 py-2">Horas</th>
-                <th className="text-right px-4 py-2">Tardanza</th>
-                <th className="text-left px-4 py-2">Estado</th>
+              <tr className="text-[11px] uppercase tracking-wide text-gray-400 border-y border-gray-100 bg-gray-50/50">
+                <th className="text-left px-5 py-2.5 font-bold">Día</th>
+                <th className="text-right px-5 py-2.5 font-bold">Horas</th>
+                <th className="text-right px-5 py-2.5 font-bold">Tardanza</th>
+                <th className="text-left px-5 py-2.5 font-bold">Estado</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
               {jornadas.map((j) => (
-                <tr key={j.fecha}>
-                  <td className="px-4 py-2 font-mono text-xs">{j.fecha}</td>
-                  <td className="px-4 py-2 text-right font-semibold">{j.estado === "completa" ? `${j.horas_trabajadas} h` : "—"}</td>
-                  <td className="px-4 py-2 text-right">{j.tardanza_min > 0 ? <span className="text-amber-700 font-semibold">{j.tardanza_min} min</span> : <span className="text-gray-300">0</span>}</td>
-                  <td className="px-4 py-2"><EstadoJornada estado={j.estado} /></td>
+                <tr key={j.fecha} className="hover:bg-gray-50/50 transition-colors">
+                  <td className="px-5 py-2.5 font-mono text-xs text-gray-700">{j.fecha}</td>
+                  <td className="px-5 py-2.5 text-right font-semibold text-gray-800">{j.estado === "completa" ? `${j.horas_trabajadas} h` : "—"}</td>
+                  <td className="px-5 py-2.5 text-right">{j.tardanza_min > 0 ? <span className="text-amber-700 font-semibold">{j.tardanza_min} min</span> : <span className="text-gray-300">0</span>}</td>
+                  <td className="px-5 py-2.5"><EstadoJornada estado={j.estado} /></td>
                 </tr>
               ))}
             </tbody>
@@ -405,11 +455,20 @@ function EstadoJornada({ estado }: { estado: string }) {
 }
 
 // ── átomos ──────────────────────────────────────────────────────────────────────────────
+function SeccionTitulo({ children, hint }: { children: React.ReactNode; hint?: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2">
+      <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">{children}</p>
+      {hint && <span className="text-[10px] font-semibold text-gray-300 uppercase tracking-wide">{hint}</span>}
+    </div>
+  );
+}
+
 function Campo({ label, valor, onChange, tipo = "text", span2 }: { label: string; valor: string; onChange: (v: string) => void; tipo?: string; span2?: boolean }) {
   return (
     <div className={span2 ? "md:col-span-2" : ""}>
       <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{label}</label>
-      <input type={tipo} value={valor} onChange={(e) => onChange(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
+      <input type={tipo} value={valor} onChange={(e) => onChange(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:border-indigo-300 transition-shadow" />
     </div>
   );
 }
@@ -418,17 +477,41 @@ function CampoGris({ label, valor }: { label: string; valor: string }) {
   return (
     <div>
       <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{label}</label>
-      <div className="w-full rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-sm text-gray-400">{valor}</div>
+      <div className="w-full rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-sm text-gray-400 truncate" title={valor}>{valor}</div>
     </div>
   );
 }
 
 function Kpi({ label, valor, resalta }: { label: string; valor: string; resalta?: "ok" | "deuda" }) {
   const c = resalta === "deuda" ? "text-red-600" : resalta === "ok" ? "text-emerald-600" : "text-gray-900";
+  const borde = resalta === "deuda" ? "border-red-100 bg-red-50/40" : resalta === "ok" ? "border-emerald-100 bg-emerald-50/40" : "border-gray-100 bg-gray-50";
   return (
-    <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+    <div className={`rounded-xl border p-3 ${borde}`}>
       <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">{label}</p>
-      <p className={`text-2xl font-black ${c}`}>{valor}</p>
+      <p className={`text-2xl font-black mt-0.5 ${c}`}>{valor}</p>
     </div>
+  );
+}
+
+// ── Iconos inline (sin dependencias; tono heredado por currentColor) ─────────────────────
+function IconUser() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
+    </svg>
+  );
+}
+function IconCamera() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" />
+    </svg>
+  );
+}
+function IconClock() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+    </svg>
   );
 }
