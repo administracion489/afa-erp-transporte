@@ -32,8 +32,11 @@ t(prellenadoCotizacion({ id: 4, ruta_nombre: "RUTA A", origen: "x", destino: "y"
 t(prellenadoCotizacion({ id: 4 }, "").tipo_servicio === "solo_ida", "solo ida");
 
 // puedeVincular
-const r: ReservaDespacho = { id: 1, cliente_id: 5, cotizacion_id: null };
+const r: ReservaDespacho = { id: 1, cliente_id: 5, cotizacion_id: null, origen_despacho: true, estado: "finalizada" };
 t(puedeVincular(r, { id: 1, cliente_id: 5, modo_servicio: "eventual", estado: "aprobada" }).ok, "vincula");
+t(!puedeVincular({ ...r, origen_despacho: false }, { id: 1, cliente_id: 5 }).ok, "no despacho no vincula");
+t(!puedeVincular({ ...r, estado: "cancelada" }, { id: 1, cliente_id: 5 }).ok, "cancelado no vincula");
+t(!puedeVincular(r, { id: 1, cliente_id: 5, estado: "rechazado" }).ok, "cotizacion rechazado (valor real) no vincula");
 t(!puedeVincular(r, { id: 1, cliente_id: 6 }).ok, "cliente distinto");
 t(!puedeVincular(r, { id: 1, cliente_id: 5, modo_servicio: "fijo" }).ok, "fijo");
 t(!puedeVincular(r, { id: 1, cliente_id: 5, estado: "rechazada" }).ok, "rechazada");

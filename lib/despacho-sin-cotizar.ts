@@ -112,12 +112,14 @@ export function puedeVincular(
   reserva: ReservaDespacho,
   cot: CotizacionVinculable,
 ): { ok: boolean; motivo: string | null } {
+  if (reserva.origen_despacho !== true) return { ok: false, motivo: "El servicio no salió del Despachador." };
+  if (String(reserva.estado ?? "").toLowerCase() === "cancelada") return { ok: false, motivo: "El servicio está cancelado: no necesita cotización." };
   if (reserva.cotizacion_id != null) return { ok: false, motivo: "El servicio ya está vinculado a una cotización." };
   if (reserva.cliente_id == null || cot.cliente_id == null || reserva.cliente_id !== cot.cliente_id)
     return { ok: false, motivo: "La cotización es de otro cliente (o le falta el cliente)." };
   if (cot.modo_servicio === "fijo")
     return { ok: false, motivo: "Es un contrato fijo: sus servicios se generan desde Programación, no se vinculan a mano." };
-  if (String(cot.estado ?? "").toLowerCase() === "rechazada")
+  if (["rechazado", "rechazada"].includes(String(cot.estado ?? "").toLowerCase()))
     return { ok: false, motivo: "La cotización está rechazada." };
   return { ok: true, motivo: null };
 }

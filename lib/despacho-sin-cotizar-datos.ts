@@ -58,8 +58,11 @@ export async function vincularCotizacion(sb: any, reservaId: number, cotId: numb
 }
 
 async function escribirAccesorias(sb: any, reservaId: number, patch: Record<string, any>) {
-  const { error } = await sb.from("reservas").update(patch).eq("id", reservaId);
-  if (!error) return { ok: true, error: null, sinMigracion: false };
+  // Solo servicios del Despachador sin cotización; y un update que no tocó ninguna fila no es "guardado".
+  const { data, error } = await sb.from("reservas").update(patch).eq("id", reservaId)
+    .eq("origen_despacho", true).is("cotizacion_id", null).select("id");
+  if (!error && Array.isArray(data) && data.length > 0) return { ok: true, error: null, sinMigracion: false };
+  if (!error) return { ok: false, error: `El servicio #${reservaId} ya no existe, ya tiene cotización o no salió del Despachador.`, sinMigracion: false };
   if (faltaAlguna(error, ACCESORIAS))
     return { ok: false, error: `Falta correr ${SQL_MIGRACION} para poder marcar servicios que no requieren cotización.`, sinMigracion: true };
   return { ok: false, error: `No se pudo guardar en el servicio #${reservaId}: ${error.message ?? error}`, sinMigracion: false };
