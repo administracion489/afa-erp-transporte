@@ -41,6 +41,7 @@ import {
 } from "@/lib/gps-equipo";
 import { tablaFaltante } from "@/lib/columna-faltante";
 import { vencimientoFichaOPoliza } from "@/lib/seguros";
+import { fechaLima } from "@/lib/documentos-estado";
 import { leerPolizasPersonas } from "@/lib/seguros-datos";
 
 const admin = createClient(
@@ -599,7 +600,8 @@ export async function POST(req: NextRequest) {
         if (tabla === "conductores") {
           const seg = await leerPolizasPersonas(admin, { conductorId: Number(c.id) });
           sctrSaludVenc = vencimientoFichaOPoliza({ clase: "conductor", id: Number(c.id) }, "sctr_salud_venc",
-            sctrSaludVenc, seg?.polizas ?? null, seg?.coberturas ?? null).vencimiento;
+            sctrSaludVenc, seg?.polizas ?? null, seg?.coberturas ?? null, fechaLima()).vencimiento;
+          // Inclusión pendiente → null: el app no puede enseñar un SCTR que aún no cubre.
         }
         // El token es la credencial de sesión: las acciones sensibles derivan de él
         // la identidad, en vez de confiar en el `cid` que mande el cliente.

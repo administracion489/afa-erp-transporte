@@ -12,9 +12,13 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { EnlacePrivado } from "@/components/ArchivoPrivado";
 import {
-  TIPOS_SEGURO, SCTR_SIN_PRECISAR, CODIGOS_FALTANTE, FUENTES_SEGURO, kpisSeguros, estadoDe,
-  type FilaSeguro, type FuenteSeguro, type Faltante, type ClaveAsegurado,
+  TIPOS_SEGURO, SCTR_SIN_PRECISAR, CODIGOS_FALTANTE, FUENTES_SEGURO, TIPOS_PERSONA, kpisSeguros, estadoDe,
+  tiposDePoliza, estadoCobertura, inicioEfectivo, etiquetaDeTipos,
+  type FilaSeguro, type FuenteSeguro, type Faltante, type ClaveAsegurado, type TipoPersona,
+  type CoberturaRow, type PolizaRow,
 } from "@/lib/seguros";
+import { listaInclusion, type PersonaInclusion } from "@/lib/seguros-inclusion";
+import { usePuedeVer } from "@/lib/usePuedeVer";
 import { cargarSeguros, type ResultadoSeguros } from "@/lib/seguros-datos";
 import { columnaFaltante, tablaFaltante } from "@/lib/columna-faltante";
 import { diasEntreFechas } from "@/lib/documentos-estado";
@@ -52,8 +56,23 @@ const ASEGURADORAS = [
 const TIPOS_DE_DOCUMENTO = ["soat", "cat"];
 const TIPOS_VEHICULARES = ["soat", "cat", "todo_riesgo", "responsabilidad_civil"];
 
-/** Columnas de `seguros` que trae una migración accesoria (seguros-01): se sueltan si el error las nombra. */
-const COLS_ACCESORIAS = ["vehiculo_tercero_id", "alcance"] as const;
+/** Columnas de `seguros` que trae una migración accesoria (seguros-01 / -04a): se sueltan si el error las nombra. */
+const COLS_ACCESORIAS = ["vehiculo_tercero_id", "alcance", "coberturas"] as const;
+const SQL_04A = "supabase/seguros-04a-coberturas-e-inclusion.sql";
+
+/** Los tres tipos de persona que una sola póliza puede cubrir a la vez (orden canónico). */
+const ETQ_PERSONA: Record<TipoPersona, string> = { sctr_salud: "SCTR Salud", sctr_pension: "SCTR Pensión", vida_ley: "Vida Ley" };
+const esTipoPersona = (t: string): t is TipoPersona => (TIPOS_PERSONA as string[]).includes(t);
+const canonico = (ts: TipoPersona[]) => TIPOS_PERSONA.filter((t) => ts.includes(t));
+
+/** Lo que se lee de cada fila de `seguro_cobertura` de la póliza abierta. */
+type CobFila = {
+  id: number | null; desde: string | null; hasta: string | null;
+  estado: string | null; solicitada_en: string | null; constancia_url: string | null; nota: string | null;
+};
+const COLS_COB_04A = ["estado", "solicitada_en", "constancia_url", "nota"];
+/** Módulos que dejan ver la remuneración en la lista para el bróker (constante: usePuedeVer la usa como clave). */
+const MODULOS_SUELDO = ["conductores", "personal-administrativo"] as const;
 
 type ClaseCubierto = "conductor" | "personal" | "vehiculo" | "vehiculo_tercero";
 const COLUMNA_COBERTURA: Record<ClaseCubierto, string> = {
@@ -70,6 +89,9 @@ const GRUPOS_CUBIERTOS: { clase: ClaseCubierto; titulo: string; icon: string }[]
 ];
 type Candidato = { clave: string; clase: ClaseCubierto; id: number; rotulo: string; activo: boolean };
 const claveCub = (clase: string, id: unknown) => `${clase}:${Number(id)}`;
+const claveDeFila = (c: Pick<CoberturaRow, "conductor_id" | "personal_administrativo_id" | "vehiculo_id" | "vehiculo_tercero_id">): string | null =>
+  c.conductor_id != null ? claveCub("conductor", c.conductor_id) : c.personal_administrativo_id != null ? claveCub("personal", c.personal_administrativo_id)
+  : c.vehiculo_id != null ? claveCub("vehiculo", c.vehiculo_id) : c.vehiculo_tercero_id != null ? claveCub("vehiculo_tercero", c.vehiculo_tercero_id) : null;
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -115,12 +137,54 @@ async function leerTodo(tabla: string, cols: string): Promise<{ filas: FilaLeida
   }
 }
 
+function fmtDM(f: string | null | undefined) {
+  const s = String(f ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "—";
+  return `${s.slice(8, 10)}/${s.slice(5, 7)}`;
+}
+
+/** Baja = 'excluida' o (sin la columna estado) un `hasta` ya pasado. */
+const esBaja = (c: Pick<CobFila, "estado" | "hasta">, hoy: string) =>
+  estadoCobertura(c) === "excluida" || (!!c.hasta && !!hoy && c.hasta < hoy);
+
+/** El chip de un asegurado dentro de su póliza: Incluido · Solicitada hace N días · Por iniciar DD/MM · Baja DD/MM. */
+function chipCobertura(c: CobFila, poliza: Pick<PolizaRow, "fecha_inicio"> | null, hoy: string): { texto: string; bg: string; color: string } {
+  if (esBaja(c, hoy)) return { texto: `Baja ${fmtDM(c.hasta)}`, bg: "#f3f4f6", color: "#4b5563" };
+  if (estadoCobertura(c) === "solicitada") {
+    const n = c.solicitada_en && hoy ? diasEntreFechas(c.solicitada_en, hoy) : null;
+    return { texto: n === null ? "Solicitada" : n === 0 ? "Solicitada hoy" : `Solicitada hace ${n} día${n === 1 ? "" : "s"}`, bg: "#fef3c7", color: "#92400e" };
+  }
+  const ini = inicioEfectivo(c, poliza);
+  if (ini && hoy && ini > hoy) return { texto: `Por iniciar ${fmtDM(ini)}`, bg: "#fef3c7", color: "#92400e" };
+  return { texto: c.desde ? `Incluido desde ${fmtDM(c.desde)}` : "Incluido", bg: "#dcfce7", color: "#166534" };
+}
+
 const FORM_VACIO = {
   tipo: "sctr_salud", aseguradora: "", numero_poliza: "", titular: "",
   vehiculo_id: "", proveedor_id: "", fecha_inicio: "",
   fecha_vencimiento: "", prima_total: "", cuota_mensual: "",
   archivo_url: "", observaciones: "",
 };
+
+/** El resultado de «Copiar lista para el bróker»: qué se copió y a quién le falta un dato. */
+function PanelCopia({ copia, onCerrar }: {
+  copia: { titulo: string; filas: number; faltan: string[]; tsv: string; copiado: boolean; error?: string } | null;
+  onCerrar: () => void;
+}) {
+  if (!copia) return null;
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-[11px] space-y-1 ${copia.error || copia.faltan.length ? "border-amber-200 bg-amber-50 text-amber-900" : "border-green-200 bg-green-50 text-green-900"}`}>
+      {copia.error ? <p>⚠️ {copia.error}</p> : (
+        <>
+          <p><b>{copia.copiado ? "✓ Copiada" : "No se pudo copiar al portapapeles: selecciónala abajo y cópiala"}</b> — {copia.filas} persona(s) · {copia.titulo}. Pégala en el correo o en Excel.</p>
+          {copia.faltan.length > 0 && <p>⚠️ Sin estos datos la aseguradora devuelve la inclusión: {copia.faltan.join(" · ")}. Complétalos en su ficha antes de enviarla.</p>}
+          {!copia.copiado && <textarea readOnly className="w-full h-24 font-mono text-[10px] border rounded p-1" value={copia.tsv} onFocus={(e) => e.currentTarget.select()} />}
+        </>
+      )}
+      <button type="button" onClick={onCerrar} className="underline font-bold">Cerrar</button>
+    </div>
+  );
+}
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
@@ -145,8 +209,21 @@ export default function SegurosPage() {
   const [form, setForm] = useState(FORM_VACIO);
   const [archivoUrlOriginal, setArchivoUrlOriginal] = useState("");
   const [archivoNuevo, setArchivoNuevo] = useState<File | null>(null);
-  // Asegurados de la póliza en edición: clave → id de la fila de seguro_cobertura (null = de la póliza vieja).
-  const [cubOriginal, setCubOriginal] = useState<Map<string, number | null>>(new Map());
+  // Asegurados de la póliza en edición: clave → su fila de seguro_cobertura (id null = de la póliza vieja).
+  const [cubOriginal, setCubOriginal] = useState<Map<string, CobFila>>(new Map());
+  /** Tipos de persona que cubre la póliza (SCTR Salud · SCTR Pensión · Vida Ley), orden canónico. */
+  const [coberturasSel, setCoberturasSel] = useState<TipoPersona[]>(["sctr_salud"]);
+  /** «Ya figuran en la constancia»: los marcados nacen incluidos. Marcado al crear, no al agregar a una existente. */
+  const [yaFiguran, setYaFiguran] = useState(true);
+  /** Acción en curso sobre un asegurado (marcar incluido / dar de baja), con su fecha y constancia. */
+  const [accionCob, setAccionCob] = useState<{ clave: string; tipo: "incluir" | "baja"; fecha: string; archivo: File | null } | null>(null);
+  const [aplicando, setAplicando] = useState(false);
+  const [conSueldo, setConSueldo] = useState(false);
+  const [copia, setCopia] = useState<{ titulo: string; filas: number; faltan: string[]; tsv: string; copiado: boolean; error?: string } | null>(null);
+  /** Sin la columna estado de seguro_cobertura (seguros-04a) en la póliza abierta. */
+  const [sinEstadoCob, setSinEstadoCob] = useState(false);
+  const puedeVer = usePuedeVer(MODULOS_SUELDO);
+  const puedeVerSueldo = !!puedeVer && (puedeVer["conductores"] || puedeVer["personal-administrativo"]);
   const [cubSel, setCubSel] = useState<Set<string>>(new Set());
   const [busCub, setBusCub] = useState<Record<ClaseCubierto, string>>({ conductor: "", personal: "", vehiculo: "", vehiculo_tercero: "" });
   const [vehiculoIdOriginal, setVehiculoIdOriginal] = useState<number | null>(null);
@@ -191,6 +268,11 @@ export default function SegurosPage() {
   const rotuloCub = useMemo(() => new Map(candidatos.map((c) => [c.clave, c.rotulo])), [candidatos]);
 
   const selectorDisponible = !cobSinTabla && !cobNoLeida && res?.coberturas !== "error";
+  /** Se puede registrar una inclusión SOLICITADA solo con la columna `estado` (seguros-04a): sin ella
+   *  una fila nueva queda null = incluida = cubierto, que es justo lo que no se puede afirmar. */
+  const puedeSolicitar = !!res?.inclusiones && !sinEstadoCob;
+  const esPersonaForm = esTipoPersona(form.tipo);
+  const multiples = !!res?.coberturasMultiples;
 
   // ── CRUD de pólizas ───────────────────────────────────────────────────────
 
@@ -198,10 +280,48 @@ export default function SegurosPage() {
     setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false);
     setArchivoNuevo(null); setArchivoUrlOriginal("");
     setCubOriginal(new Map()); setCubSel(new Set()); setVehiculoIdOriginal(null); setCobNoLeida(null);
+    setCoberturasSel(["sctr_salud"]); setYaFiguran(true); setAccionCob(null); setCopia(null); setSinEstadoCob(false);
     setBusCub({ conductor: "", personal: "", vehiculo: "", vehiculo_tercero: "" });
   };
 
   const nuevo = () => { limpiar(); setMostrarForm(true); setAvisoGuardado([]); };
+
+  /** Lee los asegurados de la póliza abierta. Suelta SOLO las columnas de seguros-04a que el error
+   *  nombre; cualquier otro error oculta el selector (guardar a ciegas podría duplicar o perder filas). */
+  const recargarCoberturas = async (id: number, s?: { vehiculo_id?: unknown; vehiculo_tercero_id?: unknown }) => {
+    let cols = ["id", "conductor_id", "personal_administrativo_id", "vehiculo_id", "vehiculo_tercero_id", "desde", "hasta", ...COLS_COB_04A];
+    let sinEstado = false;
+    for (let intento = 0; intento <= COLS_COB_04A.length; intento++) {
+      const cob = await supabase.from("seguro_cobertura").select(cols.join(",")).eq("seguro_id", id).order("id", { ascending: true });
+      if (cob.error) {
+        const col = columnaFaltante(cob.error);
+        if (col && COLS_COB_04A.includes(col) && cols.includes(col)) { cols = cols.filter((c) => c !== col); if (col === "estado") sinEstado = true; continue; }
+        if (tablaFaltante(cob.error, "seguro_cobertura")) setCobSinTabla(true);
+        else setCobNoLeida(cob.error.message);
+        return;
+      }
+      const orig = new Map<string, CobFila>();
+      for (const r of (cob.data ?? []) as unknown as Record<string, unknown>[]) {
+        const clase: ClaseCubierto | null = r.conductor_id != null ? "conductor" : r.personal_administrativo_id != null ? "personal"
+          : r.vehiculo_id != null ? "vehiculo" : r.vehiculo_tercero_id != null ? "vehiculo_tercero" : null;
+        if (!clase) continue;
+        orig.set(claveCub(clase, r[COLUMNA_COBERTURA[clase]]), {
+          id: Number(r.id), desde: (r.desde as string) ?? null, hasta: (r.hasta as string) ?? null,
+          estado: (r.estado as string) ?? null, solicitada_en: (r.solicitada_en as string) ?? null,
+          constancia_url: (r.constancia_url as string) ?? null, nota: (r.nota as string) ?? null,
+        });
+      }
+      // Póliza vieja sin filas de cobertura: su vehículo es el asegurado.
+      const vacia: CobFila = { id: null, desde: null, hasta: null, estado: null, solicitada_en: null, constancia_url: null, nota: null };
+      if (orig.size === 0 && s?.vehiculo_id != null) orig.set(claveCub("vehiculo", s.vehiculo_id), vacia);
+      if (orig.size === 0 && s?.vehiculo_tercero_id != null) orig.set(claveCub("vehiculo_tercero", s.vehiculo_tercero_id), vacia);
+      setSinEstadoCob(sinEstado);
+      setCobNoLeida(null);
+      setCubOriginal(orig);
+      setCubSel(new Set());
+      return;
+    }
+  };
 
   const editar = async (id: number) => {
     limpiar();
@@ -225,28 +345,12 @@ export default function SegurosPage() {
     });
     setArchivoUrlOriginal(s.archivo_url || "");
     setVehiculoIdOriginal(s.vehiculo_id != null ? Number(s.vehiculo_id) : null);
+    const tipos = tiposDePoliza(s as PolizaRow).filter(esTipoPersona);
+    setCoberturasSel(tipos.length ? canonico(tipos) : esTipoPersona(String(s.tipo)) ? [s.tipo as TipoPersona] : ["sctr_salud"]);
+    // A una póliza que ya existe, lo que se agrega es una inclusión que hay que PEDIR (si se puede).
+    setYaFiguran(!res?.inclusiones);
 
-    // Asegurados actuales.
-    const orig = new Map<string, number | null>();
-    const cob = await supabase.from("seguro_cobertura")
-      .select("id,conductor_id,personal_administrativo_id,vehiculo_id,vehiculo_tercero_id").eq("seguro_id", id);
-    if (cob.error) {
-      // Sin poder leerlos no se ofrece el selector: guardar con la lista vacía los BORRARÍA.
-      if (tablaFaltante(cob.error, "seguro_cobertura")) setCobSinTabla(true);
-      else setCobNoLeida(cob.error.message);
-    } else {
-      for (const r of cob.data ?? []) {
-        const clase: ClaseCubierto | null = r.conductor_id != null ? "conductor" : r.personal_administrativo_id != null ? "personal"
-          : r.vehiculo_id != null ? "vehiculo" : r.vehiculo_tercero_id != null ? "vehiculo_tercero" : null;
-        if (!clase) continue;
-        orig.set(claveCub(clase, r[COLUMNA_COBERTURA[clase]]), Number(r.id));
-      }
-      // Póliza vieja sin filas de cobertura: su vehículo es el asegurado.
-      if (orig.size === 0 && s.vehiculo_id != null) orig.set(claveCub("vehiculo", s.vehiculo_id), null);
-      if (orig.size === 0 && s.vehiculo_tercero_id != null) orig.set(claveCub("vehiculo_tercero", s.vehiculo_tercero_id), null);
-    }
-    setCubOriginal(orig);
-    setCubSel(new Set(orig.keys()));
+    await recargarCoberturas(id, s);
     setEditandoId(id); setMostrarForm(true); setCargandoPoliza(false);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
@@ -257,6 +361,162 @@ export default function SegurosPage() {
     : !form.aseguradora ? "Falta elegir la aseguradora."
     : !form.fecha_vencimiento ? "Falta la fecha de vencimiento."
     : null;
+
+  /**
+   * Agrega a la póliza lo marcado en el selector (y migra el vehículo de una póliza vieja).
+   * Nace 'incluida' si «Ya figuran en la constancia» está marcado; si no, 'solicitada' con
+   * solicitada_en = hoy (Lima). NUNCA se guarda a alguien como solicitado soltando la columna
+   * estado: sin seguros-04a no se ofrece y aquí se fuerza incluida solo si así lo pidió la pantalla.
+   * Un dado de baja que se vuelve a marcar se REINCLUYE en su misma fila (índice único), con rastro en nota.
+   */
+  const agregarAsegurados = async (seguroId: number, alCrear: boolean): Promise<{ ok: boolean; avisos: string[]; n: number }> => {
+    const avisos: string[] = [];
+    const incluidos = yaFiguran || !puedeSolicitar;
+    if (!incluidos && !puedeSolicitar) return { ok: false, avisos: [`No se registró ninguna inclusión: falta ${SQL_04A}.`], n: 0 };
+    const legado = [...cubOriginal.entries()].filter(([, f]) => f.id == null).map(([k]) => k);
+    const nuevas = [...cubSel].filter((k) => !cubOriginal.has(k));
+    const reincluir = [...cubSel].filter((k) => { const f = cubOriginal.get(k); return !!f && f.id != null && esBaja(f, hoy); });
+    const estadoNuevo = (incl: boolean): Record<string, unknown> => !res?.inclusiones || sinEstadoCob ? {}
+      : incl ? { estado: "incluida", solicitada_en: null } : { estado: "solicitada", solicitada_en: hoy };
+    let ok = true;
+    const filas = [
+      ...legado.map((k) => ({ k, incl: true })),
+      ...nuevas.map((k) => ({ k, incl: incluidos })),
+    ].map(({ k, incl }) => {
+      const [clase, id] = k.split(":") as [ClaseCubierto, string];
+      return { seguro_id: seguroId, [COLUMNA_COBERTURA[clase]]: Number(id), ...estadoNuevo(incl) };
+    });
+    if (filas.length) {
+      const ins = await supabase.from("seguro_cobertura").insert(filas);
+      if (ins.error) {
+        ok = false;
+        avisos.push(tablaFaltante(ins.error, "seguro_cobertura")
+          ? "La póliza se guardó, pero sus asegurados no: falta la tabla seguro_cobertura (corre supabase/seguros-02-cobertura.sql en Supabase → SQL Editor)."
+          : `No se pudieron agregar ${filas.length} asegurado(s): ${ins.error.message}. Nadie quedó agregado; vuelve a intentarlo.`);
+        if (tablaFaltante(ins.error, "seguro_cobertura")) setCobSinTabla(true);
+      }
+    }
+    for (const k of reincluir) {
+      const f = cubOriginal.get(k)!;
+      const rastro = `Reincluido el ${fmtFecha(hoy)} (baja anterior hasta ${fmtFecha(f.hasta)}).`;
+      const patch: Record<string, unknown> = { hasta: null, desde: null, ...estadoNuevo(incluidos) };
+      if (res?.inclusiones && !sinEstadoCob) patch.nota = f.nota ? `${f.nota} · ${rastro}` : rastro;
+      const u = await supabase.from("seguro_cobertura").update(patch).eq("id", f.id);
+      if (u.error) { ok = false; avisos.push(`No se pudo reincluir a ${rotuloCub.get(k) ?? k}: ${u.error.message}`); }
+    }
+    const n = nuevas.length + reincluir.length;
+    if (ok && n > 0 && !incluidos) avisos.push(`${n} inclusión(es) registradas como SOLICITADAS el ${fmtFecha(hoy)}: no quedan cubiertos hasta que marques «Incluido» con la fecha de la constancia.`);
+    if (ok && n > 0 && !puedeSolicitar && !alCrear) avisos.push(`${n} asegurado(s) se agregaron como INCLUIDOS: sin ${SQL_04A} no se puede registrar una inclusión pendiente.`);
+    return { ok, avisos, n };
+  };
+
+  /** Agregar ahora (sin tocar el resto de la póliza): en una póliza existente. */
+  const agregarAhora = async () => {
+    if (!editandoId || cubSel.size === 0) return;
+    const nombres = [...cubSel].map((k) => rotuloCub.get(k) ?? k);
+    const incl = yaFiguran || !puedeSolicitar;
+    if (!confirm(`${incl ? "Agregar como INCLUIDOS" : "Registrar como inclusión SOLICITADA hoy"} a ${nombres.length} asegurado(s) de la póliza ${form.numero_poliza ? `N° ${form.numero_poliza}` : `#${editandoId}`}:\n\n${nombres.slice(0, 20).join("\n")}${nombres.length > 20 ? `\n… y ${nombres.length - 20} más` : ""}${incl ? "" : "\n\nNo quedan cubiertos hasta marcarlos incluidos."}`)) return;
+    setAplicando(true);
+    const r = await agregarAsegurados(editandoId, false);
+    setAvisoGuardado(r.avisos);
+    await recargarCoberturas(editandoId);
+    void cargarDatos();
+    setAplicando(false);
+  };
+
+  /** Marcar incluido (fecha efectiva obligatoria + constancia opcional) o dar de baja (fecha de baja). */
+  const aplicarAccion = async () => {
+    if (!accionCob || !editandoId) return;
+    const f = cubOriginal.get(accionCob.clave);
+    if (!f || f.id == null) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(accionCob.fecha)) { alert(accionCob.tipo === "incluir" ? "Falta la fecha desde la que cubre (la de la constancia)." : "Falta la fecha de baja."); return; }
+    const quien = rotuloCub.get(accionCob.clave) ?? accionCob.clave;
+    setAplicando(true);
+    let subidas: Awaited<ReturnType<typeof subirEvidencias>>["subidas"] = [];
+    const patch: Record<string, unknown> = {};
+    if (accionCob.tipo === "incluir") {
+      patch.estado = "incluida"; patch.desde = accionCob.fecha; patch.solicitada_en = f.solicitada_en;
+      if (accionCob.archivo) {
+        const up = await subirEvidencias(supabase as unknown as StorageCliente, [{ archivo: accionCob.archivo, clase: "constancia" }], "seguros");
+        if (up.fallidas.length) {
+          if (!confirm(preguntaSinRespaldo(up.fallidas, "la inclusión"))) { setAplicando(false); return; }
+        } else { subidas = up.subidas; patch.constancia_url = up.subidas[0]?.url ?? null; }
+      }
+    } else {
+      patch.hasta = accionCob.fecha;
+      if (res?.inclusiones && !sinEstadoCob) patch.estado = "excluida";
+    }
+    const u = await supabase.from("seguro_cobertura").update(patch).eq("id", f.id);
+    if (u.error) {
+      await retirarSubidas(supabase as unknown as StorageCliente, subidas);
+      alert(`No se guardó (${quien}): ${u.error.message}`);
+      setAplicando(false);
+      return;
+    }
+    setAvisoGuardado([accionCob.tipo === "incluir"
+      ? `${quien}: incluido desde el ${fmtFecha(accionCob.fecha)}${accionCob.fecha > hoy ? " (todavía no está cubierto: empieza ese día)" : ""}.`
+      : `${quien}: dado de baja el ${fmtFecha(accionCob.fecha)}.`]);
+    setAccionCob(null);
+    await recargarCoberturas(editandoId);
+    void cargarDatos();
+    setAplicando(false);
+  };
+
+  /** Quitar: SOLO una inclusión solicitada por error (no deja rastro de cobertura que borrar). */
+  const quitarSolicitada = async (clave: string) => {
+    const f = cubOriginal.get(clave);
+    if (!editandoId || !f || f.id == null || estadoCobertura(f) !== "solicitada") return;
+    const quien = rotuloCub.get(clave) ?? clave;
+    if (!confirm(`¿Quitar la inclusión SOLICITADA de ${quien}${f.solicitada_en ? ` (pedida el ${fmtFecha(f.solicitada_en)})` : ""}?\n\nÚsalo solo si se pidió por error: si el bróker ya la tramitó, márcalo incluido.`)) return;
+    setAplicando(true);
+    const d = await supabase.from("seguro_cobertura").delete().eq("id", f.id);
+    if (d.error) alert(`No se quitó: ${d.error.message}`);
+    await recargarCoberturas(editandoId);
+    void cargarDatos();
+    setAplicando(false);
+  };
+
+  /**
+   * Copia al portapapeles la lista para el bróker (lib/seguros-inclusion.ts): de las personas
+   * `claves`. Lee DNI, nacimiento, cargo e ingreso de su ficha; la remuneración solo si se pidió y
+   * quien copia ve Conductores o Personal. Nombra a quién le falta DNI o fecha de nacimiento.
+   */
+  const copiarLista = async (seguroId: number, claves: string[]) => {
+    const personas = claves.filter((k) => k.startsWith("conductor:") || k.startsWith("personal:"));
+    if (!personas.length) { setCopia({ titulo: "", filas: 0, faltan: [], tsv: "", copiado: false, error: "No hay personas en la lista (los vehículos no van a la lista del bróker)." }); return; }
+    const leer = async (tabla: string, base: string[], opc: string[], ids: number[]) => {
+      let cols = [...base, ...opc];
+      for (let intento = 0; intento <= opc.length; intento++) {
+        const { data, error } = await supabase.from(tabla).select(cols.join(",")).in("id", ids);
+        if (!error) return (data ?? []) as unknown as Record<string, unknown>[];
+        const col = columnaFaltante(error);
+        if (col && opc.includes(col) && cols.includes(col)) { cols = cols.filter((c) => c !== col); continue; }
+        throw new Error(error.message);
+      }
+      return [];
+    };
+    // Cada sueldo solo con el módulo de SU ficha: Conductores no da acceso al del personal.
+    const sueldoCond = conSueldo && !!puedeVer?.["conductores"];
+    const sueldoPers = conSueldo && !!puedeVer?.["personal-administrativo"];
+    const idsDe = (pre: string) => personas.filter((k) => k.startsWith(pre)).map((k) => Number(k.split(":")[1]));
+    try {
+      const [c, p] = await Promise.all([
+        idsDe("conductor:").length ? leer("conductores", ["id", "nombre"], ["dni", "fecha_nacimiento", "fecha_ingreso", ...(sueldoCond ? ["sueldo_basico"] : [])], idsDe("conductor:")) : Promise.resolve([]),
+        idsDe("personal:").length ? leer("personal_administrativo", ["id", "nombre"], ["dni", "fecha_nacimiento", "cargo", "fecha_ingreso", ...(sueldoPers ? ["sueldo_basico"] : [])], idsDe("personal:")) : Promise.resolve([]),
+      ]);
+      const lista: PersonaInclusion[] = [
+        ...c.map((r) => ({ clase: "conductor" as const, id: Number(r.id), nombre: (r.nombre as string) ?? null, dni: (r.dni as string) ?? null, fecha_nacimiento: (r.fecha_nacimiento as string) ?? null, fecha_ingreso: (r.fecha_ingreso as string) ?? null, sueldo_basico: (r.sueldo_basico as number) ?? null })),
+        ...p.map((r) => ({ clase: "personal" as const, id: Number(r.id), nombre: (r.nombre as string) ?? null, dni: (r.dni as string) ?? null, fecha_nacimiento: (r.fecha_nacimiento as string) ?? null, cargo: (r.cargo as string) ?? null, fecha_ingreso: (r.fecha_ingreso as string) ?? null, sueldo_basico: (r.sueldo_basico as number) ?? null })),
+      ];
+      const pol = (res?.polizas ?? []).find((x) => Number(x.id) === seguroId) ?? null;
+      const l = listaInclusion(lista, pol, { conSueldo: sueldoCond || sueldoPers });
+      let copiado = false;
+      try { await navigator.clipboard.writeText(l.tsv); copiado = true; } catch { copiado = false; }
+      setCopia({ titulo: l.titulo, filas: l.filas, tsv: l.tsv, copiado, faltan: l.faltan.map((x) => `${x.nombre}: falta ${x.campos.join(" y ")}`) });
+    } catch (e: unknown) {
+      setCopia({ titulo: "", filas: 0, faltan: [], tsv: "", copiado: false, error: `No se pudo leer las fichas: ${e instanceof Error ? e.message : "error"}` });
+    }
+  };
 
   const guardar = async () => {
     if (bloqueoGuardar) return;
@@ -278,8 +538,12 @@ export default function SegurosPage() {
 
     // 2. La póliza. Las columnas accesorias se sueltan SOLO si el error las nombra.
     const venc = form.fecha_vencimiento;
+    // Póliza de persona: `tipo` = la primera cobertura marcada (orden canónico) y `coberturas` = todas
+    // (solo con seguros-04a, y solo si son varias: null = «solo cubre `tipo`», lo de siempre).
+    const tiposPersona = esPersonaForm ? canonico(coberturasSel.length ? coberturasSel : [form.tipo as TipoPersona]) : [];
+    const tipoGuardar = esPersonaForm ? (multiples ? tiposPersona[0] : form.tipo) : form.tipo;
     const payload: Record<string, unknown> = {
-      tipo:              form.tipo,
+      tipo:              tipoGuardar,
       aseguradora:       form.aseguradora.trim(),
       numero_poliza:     form.numero_poliza.trim() || null,
       titular:           form.titular.trim()       || null,
@@ -294,6 +558,7 @@ export default function SegurosPage() {
       observaciones:     form.observaciones.trim() || null,
       alcance:           "colectiva",
     };
+    if (esPersonaForm && multiples) payload.coberturas = tiposPersona.length > 1 ? tiposPersona : null;
     // La columna prima/cuota es NOT NULL default 0 en algunas bases: vacío no se convierte en 0
     // aquí; si la base lo exige, se avisa abajo.
     let seguroId: number | null = editandoId;
@@ -308,7 +573,9 @@ export default function SegurosPage() {
       const acc = COLS_ACCESORIAS.find((c) => c === col);
       if (acc && acc in payload) {
         delete payload[acc];
-        avisos.push(`La columna «${acc}» de seguros no existe todavía: se guardó sin ella (corre supabase/seguros-01-base.sql en Supabase → SQL Editor).`);
+        avisos.push(acc === "coberturas"
+          ? `La columna «coberturas» de seguros no existe todavía: la póliza se guardó cubriendo SOLO ${ETQ_PERSONA[tipoGuardar as TipoPersona] ?? tipoGuardar} (corre ${SQL_04A} en Supabase → SQL Editor).`
+          : `La columna «${acc}» de seguros no existe todavía: se guardó sin ella (corre supabase/seguros-01-base.sql en Supabase → SQL Editor).`);
         continue;
       }
       break;
@@ -323,32 +590,13 @@ export default function SegurosPage() {
       return;
     }
 
-    // 3. Asegurados: borrar e insertar SOLO las diferencias, comprobando cada error.
+    // 3. Asegurados: solo se AGREGA (o se reincluye) desde aquí; quitar y dar de baja son acciones
+    //    de cada fila. Cada escritura comprueba su error.
     if (selectorDisponible) {
-      const quitar = [...cubOriginal.entries()].filter(([k]) => !cubSel.has(k));
-      const idsQuitar = quitar.map(([, id]) => id).filter((x): x is number => x != null);
-      const agregar = [...cubSel].filter((k) => !cubOriginal.has(k) || cubOriginal.get(k) == null);
-      let cobOk = true;
-      if (idsQuitar.length) {
-        const d = await supabase.from("seguro_cobertura").delete().in("id", idsQuitar);
-        if (d.error) { cobOk = false; avisos.push(`No se pudieron quitar ${idsQuitar.length} asegurado(s): ${d.error.message}`); }
-      }
-      if (agregar.length) {
-        const filas = agregar.map((k) => {
-          const [clase, id] = k.split(":") as [ClaseCubierto, string];
-          return { seguro_id: seguroId, [COLUMNA_COBERTURA[clase]]: Number(id) };
-        });
-        const ins = await supabase.from("seguro_cobertura").insert(filas);
-        if (ins.error) {
-          cobOk = false;
-          avisos.push(tablaFaltante(ins.error, "seguro_cobertura")
-            ? "La póliza se guardó, pero sus asegurados no: falta la tabla seguro_cobertura (corre supabase/seguros-02-cobertura.sql en Supabase → SQL Editor)."
-            : `La póliza se guardó, pero no se pudieron agregar ${agregar.length} asegurado(s): ${ins.error.message}`);
-          if (tablaFaltante(ins.error, "seguro_cobertura")) setCobSinTabla(true);
-        }
-      }
+      const r = await agregarAsegurados(seguroId, !editandoId);
+      avisos.push(...r.avisos);
       // La póliza vieja que usaba vehiculo_id: sus asegurados viven ahora en seguro_cobertura.
-      if (cobOk && vehiculoIdOriginal != null) {
+      if (r.ok && vehiculoIdOriginal != null) {
         const u = await supabase.from("seguros").update({ vehiculo_id: null }).eq("id", seguroId);
         if (u.error) avisos.push(`No se pudo retirar el vehículo antiguo de la póliza: ${u.error.message}`);
       }
@@ -397,9 +645,21 @@ export default function SegurosPage() {
 
   const faltantes: Faltante[] = res?.faltantes ?? [];
   const alarmas = faltantes.filter((f) => f.alarma);
-  const faltVisibles = verTodosFalt ? faltantes : faltantes.slice(0, 12);
+  /** Las inclusiones en trámite se agrupan por póliza (con los días esperando); el resto, en la lista. */
+  const esInclusion = (f: Faltante) => f.codigo === "inclusion_solicitada" || f.codigo === "inclusion_por_iniciar";
+  const otrosFalt = faltantes.filter((f) => !esInclusion(f));
+  const inclusionesPorPoliza = (() => {
+    const m = new Map<number, Faltante[]>();
+    for (const f of faltantes) if (esInclusion(f) && f.seguroId != null) m.set(f.seguroId, [...(m.get(f.seguroId) ?? []), f]);
+    return [...m.entries()].map(([sid, fs]) => ({ sid, fs, pol: (res?.polizas ?? []).find((p) => Number(p.id) === sid) ?? null }));
+  })();
+  const faltVisibles = verTodosFalt ? otrosFalt : otrosFalt.slice(0, 12);
 
-  const nCubiertos = (clase: ClaseCubierto) => [...cubSel].filter((c) => c.startsWith(clase + ":")).length;
+  /** Ya está en la póliza y no de baja: no se vuelve a marcar (se gestiona en su fila). */
+  const enPoliza = (clave: string) => { const f = cubOriginal.get(clave); return !!f && !esBaja(f, hoy); };
+  const nVigentes = [...cubOriginal.keys()].filter(enPoliza).length;
+  const nCubiertos = (clase: ClaseCubierto) =>
+    [...cubOriginal.keys()].filter((c) => c.startsWith(clase + ":") && enPoliza(c)).length + [...cubSel].filter((c) => c.startsWith(clase + ":")).length;
   const candidatosDe = (clase: ClaseCubierto) => {
     const q = sinTildes(busCub[clase].trim());
     return candidatos.filter((c) => c.clase === clase && (!q || sinTildes(c.rotulo).includes(q)))
@@ -408,7 +668,7 @@ export default function SegurosPage() {
   const alternar = (clave: string) => setCubSel((s) => { const n = new Set(s); if (n.has(clave)) n.delete(clave); else n.add(clave); return n; });
   const marcarTodos = (clase: ClaseCubierto, marcar: boolean) => setCubSel((s) => {
     const n = new Set(s);
-    for (const c of candidatosDe(clase)) { if (marcar) n.add(c.clave); else n.delete(c.clave); }
+    for (const c of candidatosDe(clase)) { if (enPoliza(c.clave)) continue; if (marcar) n.add(c.clave); else n.delete(c.clave); }
     return n;
   });
 
@@ -477,6 +737,35 @@ export default function SegurosPage() {
               ⚠️ No se juzgó (una fuente no se pudo leer o falta su migración): {res.sinJuzgar.join(" · ")}. Que no salga aquí no significa que esté cubierto.
             </p>
           )}
+          {inclusionesPorPoliza.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-bold text-amber-900">📨 Inclusiones en trámite — no están cubiertos todavía</p>
+              {inclusionesPorPoliza.map(({ sid, fs, pol }) => (
+                <div key={sid} className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <p className="font-bold">
+                      {pol ? etiquetaDeTipos(tiposDePoliza(pol)) : "Póliza"} · {pol?.numero_poliza ? `N° ${pol.numero_poliza}` : `#${sid}`}{pol?.aseguradora ? ` · ${pol.aseguradora}` : ""}
+                      <span className="font-normal"> — {fs.length} persona(s)</span>
+                    </p>
+                    <button onClick={() => editar(sid)} className="px-2.5 py-1 rounded-lg border border-amber-300 bg-white font-bold hover:bg-amber-100">Gestionar →</button>
+                  </div>
+                  <ul className="mt-1 space-y-0.5">
+                    {fs.map((f, i) => {
+                      const n = f.codigo === "inclusion_solicitada" && f.fechaInclusion && hoy ? diasEntreFechas(f.fechaInclusion, hoy) : null;
+                      return (
+                        <li key={`${f.asegurado.clase}:${f.asegurado.id}:${i}`}>
+                          <b>{f.asegurado.rotulo}</b> · {etiquetaDeTipos(f.tipos ?? [f.tipo])} ·{" "}
+                          {f.codigo === "inclusion_solicitada"
+                            ? (f.fechaInclusion ? `solicitada el ${fmtDM(f.fechaInclusion)} · ${n} día${n === 1 ? "" : "s"} esperando` : "solicitada (sin fecha)")
+                            : `incluido desde el ${fmtDM(f.fechaInclusion)}: no asignarlo antes`}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="space-y-1.5">
             {faltVisibles.map((f, i) => {
               const cfg = CODIGOS_FALTANTE[f.codigo];
@@ -501,9 +790,9 @@ export default function SegurosPage() {
               );
             })}
           </div>
-          {faltantes.length > 12 && (
+          {otrosFalt.length > 12 && (
             <button onClick={() => setVerTodosFalt((v) => !v)} className="text-xs font-bold text-[#0b315f] underline">
-              {verTodosFalt ? "Ver menos" : `Ver los ${faltantes.length}`}
+              {verTodosFalt ? "Ver menos" : `Ver los ${otrosFalt.length}`}
             </button>
           )}
         </section>
@@ -599,7 +888,10 @@ export default function SegurosPage() {
                   {Object.entries(TIPOS_SEGURO).filter(([, v]) => v.categoria === cat).map(([kk, v]) => {
                     const activo = form.tipo === kk;
                     return (
-                      <button key={kk} type="button" onClick={() => setForm((p) => ({ ...p, tipo: kk }))}
+                      <button key={kk} type="button" onClick={() => {
+                        setForm((p) => ({ ...p, tipo: kk }));
+                        if (esTipoPersona(kk) && !coberturasSel.includes(kk)) setCoberturasSel(multiples ? canonico([...coberturasSel, kk]) : [kk]);
+                      }}
                         className="flex flex-col items-center gap-1 px-2 py-2.5 rounded-xl border-2 transition-all text-center min-h-[44px]"
                         style={{ background: activo ? v.bg : "white", borderColor: activo ? v.color : "#e5e7eb", color: activo ? v.color : "#9ca3af" }}>
                         <span className="text-lg">{v.icon}</span>
@@ -610,6 +902,40 @@ export default function SegurosPage() {
                 </div>
               </div>
             ))}
+            {esPersonaForm && (
+              <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 mt-1 space-y-2">
+                <p className="text-[11px] font-bold text-gray-700">Esta póliza cubre:</p>
+                <div className="flex flex-wrap gap-3">
+                  {TIPOS_PERSONA.map((t) => {
+                    const marcado = coberturasSel.includes(t);
+                    const bloqueado = !multiples && t !== form.tipo;
+                    return (
+                      <label key={t} className={`flex items-center gap-2 text-xs min-h-[32px] ${bloqueado ? "text-gray-300" : "text-gray-800 cursor-pointer"}`}>
+                        <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" disabled={bloqueado}
+                          checked={multiples ? marcado : t === form.tipo}
+                          onChange={() => {
+                            if (!multiples) return;
+                            const sig = marcado ? coberturasSel.filter((x) => x !== t) : canonico([...coberturasSel, t]);
+                            if (sig.length === 0) return; // al menos una
+                            setCoberturasSel(sig);
+                            setForm((p) => ({ ...p, tipo: sig[0] }));
+                          }} />
+                        {ETQ_PERSONA[t]}
+                      </label>
+                    );
+                  })}
+                </div>
+                {multiples ? (
+                  <p className="text-[10px] text-gray-500">
+                    Se guarda como una sola póliza «{etiquetaDeTipos(canonico(coberturasSel))}»: una fila en la tabla, la prima se cuenta una vez, y cada asegurado queda cubierto en los {coberturasSel.length} tipos.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                    ⚠️ Esta base solo admite UN tipo por póliza: falta la columna «coberturas». Corre <b>{SQL_04A}</b> en Supabase → SQL Editor para registrar SCTR Salud + Pensión + Vida Ley en una sola póliza. Mientras tanto, una póliza por tipo.
+                  </p>
+                )}
+              </div>
+            )}
             {esDocumentoVehicular && (
               <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
                 ⚠️ El <b>{tipoCfg.label}</b> es de cada placa y se registra en sus documentos, con su fecha y su archivo:
@@ -681,11 +1007,11 @@ export default function SegurosPage() {
           {/* Asegurados */}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">
-              Asegurados de la póliza {selectorDisponible && <span className="text-[#0b315f]">· {cubSel.size} marcado(s)</span>}
+              Asegurados de la póliza {selectorDisponible && <span className="text-[#0b315f]">· {nVigentes} en la póliza{cubSel.size > 0 ? ` · ${cubSel.size} por agregar` : ""}</span>}
             </p>
             {cobNoLeida || res?.coberturas === "error" ? (
               <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800">
-                No se pudieron leer los asegurados{cobNoLeida ? `: ${cobNoLeida}` : ""}. El selector se oculta para no borrarlos por error al guardar; recarga para reintentar.
+                No se pudieron leer los asegurados{cobNoLeida ? `: ${cobNoLeida}` : ""}. El selector se oculta para no duplicarlos ni perderlos al guardar; recarga para reintentar.
               </div>
             ) : !selectorDisponible ? (
               <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
@@ -693,33 +1019,170 @@ export default function SegurosPage() {
                 Mientras tanto la póliza se guarda sin asegurados y las personas siguen leyéndose de su ficha.
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {GRUPOS_CUBIERTOS.map((g) => {
-                  const lista = candidatosDe(g.clase);
-                  const todosMarcados = lista.length > 0 && lista.every((c) => cubSel.has(c.clave));
-                  return (
-                    <div key={g.clase} className="border rounded-xl p-3">
-                      <div className="flex items-center justify-between gap-2 mb-2">
-                        <p className="text-xs font-bold text-gray-700">{g.icon} {g.titulo} <span className="text-gray-400">· {nCubiertos(g.clase)}</span></p>
-                        <button type="button" disabled={lista.length === 0} onClick={() => marcarTodos(g.clase, !todosMarcados)}
-                          className="text-[11px] font-bold text-[#0b315f] underline disabled:opacity-40">
-                          {todosMarcados ? "Desmarcar" : "Marcar"} {busCub[g.clase] ? "los filtrados" : "todos"}
-                        </button>
-                      </div>
-                      <input className={inputCls("py-1.5 mb-2")} placeholder="Buscar…" value={busCub[g.clase]}
-                        onChange={(e) => setBusCub((b) => ({ ...b, [g.clase]: e.target.value }))} />
-                      <div className="max-h-44 overflow-y-auto space-y-0.5">
-                        {lista.length === 0 && <p className="text-[11px] text-gray-400 px-1">{candidatos.length === 0 ? "Comprobando…" : "Nadie coincide."}</p>}
-                        {lista.map((c) => (
-                          <label key={c.clave} className="flex items-center gap-2 px-1 py-1 rounded hover:bg-gray-50 cursor-pointer text-xs">
-                            <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" checked={cubSel.has(c.clave)} onChange={() => alternar(c.clave)} />
-                            <span className={c.activo ? "text-gray-800" : "text-gray-400"}>{c.rotulo}{!c.activo && " (inactivo)"}</span>
-                          </label>
-                        ))}
-                      </div>
+              <div className="space-y-3">
+                {/* Los que ya están en la póliza, con su estado y sus acciones */}
+                {editandoId && cubOriginal.size > 0 && (
+                  <div className="border rounded-xl p-3 space-y-1.5">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <p className="text-xs font-bold text-gray-700">En la póliza ({cubOriginal.size})</p>
+                      {(() => {
+                        const solicitados = [...cubOriginal.entries()].filter(([, f]) => estadoCobertura(f) === "solicitada").map(([k]) => k);
+                        const marcadosPersona = [...cubSel].filter((k) => k.startsWith("conductor:") || k.startsWith("personal:"));
+                        const objetivo = marcadosPersona.length ? marcadosPersona : solicitados;
+                        return (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {puedeVerSueldo && (
+                              <label className="flex items-center gap-1.5 text-[11px] text-gray-600">
+                                <input type="checkbox" className="w-3.5 h-3.5 accent-[#0b315f]" checked={conSueldo} onChange={(e) => setConSueldo(e.target.checked)} /> incluir remuneración
+                              </label>
+                            )}
+                            <button type="button" disabled={objetivo.length === 0} onClick={() => copiarLista(editandoId, objetivo)}
+                              className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg border bg-white hover:bg-gray-50 disabled:opacity-40">
+                              📋 Copiar lista para el bróker ({objetivo.length})
+                            </button>
+                            {objetivo.length === 0 && <span className="text-[10px] text-gray-400">Sin inclusiones solicitadas ni personas marcadas abajo.</span>}
+                            {objetivo.length > 0 && <span className="text-[10px] text-gray-400">{marcadosPersona.length ? "de los marcados abajo" : "de las inclusiones solicitadas"}</span>}
+                          </div>
+                        );
+                      })()}
                     </div>
-                  );
-                })}
+                    <PanelCopia copia={copia} onCerrar={() => setCopia(null)} />
+                    <div className="max-h-72 overflow-y-auto divide-y">
+                      {[...cubOriginal.entries()]
+                        .sort(([ka, a], [kb, b]) => Number(estadoCobertura(b) === "solicitada") - Number(estadoCobertura(a) === "solicitada")
+                          || Number(esBaja(a, hoy)) - Number(esBaja(b, hoy)) || (rotuloCub.get(ka) ?? ka).localeCompare(rotuloCub.get(kb) ?? kb))
+                        .map(([k, f]) => {
+                          const chip = chipCobertura(f, { fecha_inicio: form.fecha_inicio || null }, hoy);
+                          const sol = estadoCobertura(f) === "solicitada";
+                          const baja = esBaja(f, hoy);
+                          const abierta = accionCob?.clave === k;
+                          return (
+                            <div key={k} className="py-1.5 text-xs">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="text-gray-800 font-semibold truncate">{rotuloCub.get(k) ?? k}</span>
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded" style={{ background: chip.bg, color: chip.color }}>{chip.texto}</span>
+                                  {f.constancia_url && <EnlacePrivado href={f.constancia_url} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold text-blue-600 underline">📄 constancia</EnlacePrivado>}
+                                  {f.id == null && <span className="text-[10px] text-gray-400">(de la póliza antigua: se pasa a la lista al guardar)</span>}
+                                </div>
+                                {f.id != null && (
+                                  <div className="flex items-center gap-1.5">
+                                    {puedeSolicitar && !baja && (sol || (chip.texto.startsWith("Por iniciar"))) && (
+                                      <button type="button" disabled={aplicando} onClick={() => setAccionCob({ clave: k, tipo: "incluir", fecha: f.desde ?? "", archivo: null })}
+                                        className="px-2 py-1 rounded-lg border border-green-200 text-green-800 font-bold hover:bg-green-50">✓ Marcar incluido</button>
+                                    )}
+                                    {!baja && !sol && (
+                                      <button type="button" disabled={aplicando} onClick={() => setAccionCob({ clave: k, tipo: "baja", fecha: hoy, archivo: null })}
+                                        className="px-2 py-1 rounded-lg border text-gray-700 font-bold hover:bg-gray-50">Dar de baja</button>
+                                    )}
+                                    {sol && (
+                                      <button type="button" disabled={aplicando} onClick={() => quitarSolicitada(k)}
+                                        className="px-2 py-1 rounded-lg border border-red-100 text-red-600 font-bold hover:bg-red-50">Quitar</button>
+                                    )}
+                                    {baja && <span className="text-[10px] text-gray-400">márcalo abajo para reincluirlo</span>}
+                                  </div>
+                                )}
+                              </div>
+                              {f.nota && <p className="text-[10px] text-gray-400 mt-0.5">{f.nota}</p>}
+                              {abierta && accionCob && (
+                                <div className="mt-1.5 rounded-lg border bg-gray-50 px-3 py-2 flex items-end gap-3 flex-wrap">
+                                  <div>
+                                    <label className="block text-[10px] font-bold uppercase text-gray-500 mb-0.5">
+                                      {accionCob.tipo === "incluir" ? "Cubre desde * (la fecha de la constancia)" : "Fecha de baja *"}
+                                    </label>
+                                    <input type="date" className={inputCls("py-1.5")} value={accionCob.fecha}
+                                      onChange={(e) => setAccionCob((a) => a && ({ ...a, fecha: e.target.value }))} />
+                                  </div>
+                                  {accionCob.tipo === "incluir" && (
+                                    <div>
+                                      <label className="block text-[10px] font-bold uppercase text-gray-500 mb-0.5">Constancia (opcional)</label>
+                                      <input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" className="text-[11px]"
+                                        onChange={(e) => {
+                                          const a = e.target.files?.[0] ?? null;
+                                          if (a) { const r = revisarArchivo(a); if (!r.ok) { alert(`No se puede adjuntar «${a.name}»: ${r.motivo}`); e.target.value = ""; return; } }
+                                          setAccionCob((x) => x && ({ ...x, archivo: a }));
+                                        }} />
+                                    </div>
+                                  )}
+                                  <button type="button" disabled={aplicando || !accionCob.fecha} onClick={aplicarAccion}
+                                    className="px-3 py-1.5 rounded-lg text-white font-bold disabled:opacity-50" style={{ background: "#0b315f" }}>
+                                    {aplicando ? "Guardando…" : accionCob.tipo === "incluir" ? "Guardar inclusión" : "Guardar baja"}
+                                  </button>
+                                  <button type="button" onClick={() => setAccionCob(null)} className="px-3 py-1.5 rounded-lg border font-bold text-gray-600">Cancelar</button>
+                                  {!accionCob.fecha && <p className="w-full text-[10px] text-gray-500">Falta la fecha: {accionCob.tipo === "incluir" ? "desde cuándo cubre según la constancia del bróker." : "desde cuándo deja de estar cubierto."}</p>}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Interruptor: cómo nacen los que se agregan */}
+                <div className={`rounded-xl border px-3 py-2 text-xs ${yaFiguran || !puedeSolicitar ? "border-gray-200 bg-white" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+                  <label className="flex items-center gap-2 font-bold cursor-pointer">
+                    <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" checked={yaFiguran || !puedeSolicitar} disabled={!puedeSolicitar}
+                      onChange={(e) => setYaFiguran(e.target.checked)} />
+                    Ya figuran en la constancia de la póliza
+                  </label>
+                  <p className="mt-1 text-[11px]">
+                    {yaFiguran || !puedeSolicitar
+                      ? "Los que marques abajo entran como INCLUIDOS: cubiertos desde el inicio de la póliza."
+                      : `Los que marques abajo entran como inclusión SOLICITADA el ${fmtFecha(hoy)}: NO quedan cubiertos hasta que marques «Incluido» con la fecha de la constancia del bróker.`}
+                  </p>
+                  {!puedeSolicitar && (
+                    <p className="mt-1 text-[11px] text-amber-900">
+                      ⚠️ No se puede registrar una inclusión pendiente: falta la columna «estado» de seguro_cobertura. Corre <b>{SQL_04A}</b> en Supabase → SQL Editor. Mientras tanto todo lo que agregues queda como incluido (cubierto).
+                    </p>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {GRUPOS_CUBIERTOS.map((g) => {
+                    const lista = candidatosDe(g.clase);
+                    const marcables = lista.filter((c) => !enPoliza(c.clave));
+                    const todosMarcados = marcables.length > 0 && marcables.every((c) => cubSel.has(c.clave));
+                    return (
+                      <div key={g.clase} className="border rounded-xl p-3">
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <p className="text-xs font-bold text-gray-700">{g.icon} {g.titulo} <span className="text-gray-400">· {nCubiertos(g.clase)}</span></p>
+                          <button type="button" disabled={marcables.length === 0} onClick={() => marcarTodos(g.clase, !todosMarcados)}
+                            className="text-[11px] font-bold text-[#0b315f] underline disabled:opacity-40">
+                            {todosMarcados ? "Desmarcar" : "Marcar"} {busCub[g.clase] ? "los filtrados" : "todos"}
+                          </button>
+                        </div>
+                        <input className={inputCls("py-1.5 mb-2")} placeholder="Buscar…" value={busCub[g.clase]}
+                          onChange={(e) => setBusCub((b) => ({ ...b, [g.clase]: e.target.value }))} />
+                        <div className="max-h-44 overflow-y-auto space-y-0.5">
+                          {lista.length === 0 && <p className="text-[11px] text-gray-400 px-1">{candidatos.length === 0 ? "Comprobando…" : "Nadie coincide."}</p>}
+                          {lista.map((c) => {
+                            const ya = cubOriginal.get(c.clave);
+                            const fija = enPoliza(c.clave);
+                            const chip = ya ? chipCobertura(ya, { fecha_inicio: form.fecha_inicio || null }, hoy) : null;
+                            return (
+                              <label key={c.clave} className={`flex items-center gap-2 px-1 py-1 rounded text-xs ${fija ? "" : "hover:bg-gray-50 cursor-pointer"}`}>
+                                <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" disabled={fija}
+                                  checked={fija || cubSel.has(c.clave)} onChange={() => alternar(c.clave)} />
+                                <span className={c.activo ? "text-gray-800" : "text-gray-400"}>{c.rotulo}{!c.activo && " (inactivo)"}</span>
+                                {chip && <span className="text-[9px] font-bold px-1 rounded" style={{ background: chip.bg, color: chip.color }}>{chip.texto}{!fija ? " · reincluir" : ""}</span>}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {editandoId && cubSel.size > 0 && (
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <button type="button" disabled={aplicando} onClick={agregarAhora}
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-white disabled:opacity-50" style={{ background: yaFiguran || !puedeSolicitar ? "#0b315f" : "#b45309" }}>
+                      {aplicando ? "Guardando…" : yaFiguran || !puedeSolicitar ? `Agregar ${cubSel.size} como incluidos` : `Solicitar inclusión de ${cubSel.size}`}
+                    </button>
+                    <span className="text-[11px] text-gray-500">También se aplica al pulsar «Actualizar póliza».</span>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -856,6 +1319,7 @@ export default function SegurosPage() {
                       </td>
                       <td className="p-3 text-xs font-bold text-gray-800">
                         {s.asegurado.rotulo}
+                        {s.solicitados > 0 && <div className="text-[9px] font-bold text-amber-800">{s.solicitados} inclusión(es) solicitada(s)</div>}
                         {!s.deAfa && <div className="text-[9px] font-bold uppercase text-amber-700">tercerizada</div>}
                       </td>
                       <td className="p-3">
@@ -920,10 +1384,45 @@ export default function SegurosPage() {
                             </div>
                             <div className="space-y-1.5">
                               <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Cubre a</p>
-                              {s.fuente === "poliza" ? (
-                                cubre.length === 0 ? <p className="text-gray-400">{res?.coberturas === "sin_tabla" ? "Sin asegurados: falta supabase/seguros-02-cobertura.sql." : "Ningún asegurado vigente registrado."}</p>
-                                  : <p className="text-gray-700">{cubre.slice(0, 30).map((c) => rotuloCub.get(claveCub(c.clase, c.id)) ?? `${c.clase} #${c.id}`).join(" · ")}{cubre.length > 30 ? ` · y ${cubre.length - 30} más` : ""}</p>
-                              ) : <p className="text-gray-700">{s.asegurado.rotulo}</p>}
+                              {s.fuente === "poliza" ? (() => {
+                                const pol = (res?.polizas ?? []).find((x) => Number(x.id) === s.origenId) ?? null;
+                                const suyas = (res?.asegurados ?? []).filter((c) => Number(c.seguro_id) === s.origenId);
+                                if (suyas.length === 0) {
+                                  return cubre.length === 0
+                                    ? <p className="text-gray-400">{res?.coberturas === "sin_tabla" ? "Sin asegurados: falta supabase/seguros-02-cobertura.sql." : "Ningún asegurado registrado."}</p>
+                                    : <p className="text-gray-700">{cubre.map((c) => rotuloCub.get(claveCub(c.clase, c.id)) ?? `${c.clase} #${c.id}`).join(" · ")}</p>;
+                                }
+                                const filasCob = suyas.map((c) => ({ c, k: claveDeFila(c) })).filter((x): x is { c: CoberturaRow; k: string } => !!x.k);
+                                const solicitados = filasCob.filter((x) => estadoCobertura(x.c) === "solicitada").map((x) => x.k);
+                                return (
+                                  <div className="space-y-1">
+                                    <div className="max-h-48 overflow-y-auto space-y-0.5">
+                                      {filasCob.map(({ c, k }) => {
+                                        const chip = chipCobertura({ id: c.id ?? null, desde: c.desde ?? null, hasta: c.hasta ?? null, estado: (c.estado as string) ?? null, solicitada_en: c.solicitada_en ?? null, constancia_url: c.constancia_url ?? null, nota: c.nota ?? null }, pol, hoy);
+                                        return (
+                                          <div key={k} className="flex items-center gap-1.5">
+                                            <span className="text-gray-700">{rotuloCub.get(k) ?? k}</span>
+                                            <span className="text-[9px] font-bold px-1 rounded" style={{ background: chip.bg, color: chip.color }}>{chip.texto}</span>
+                                            {c.constancia_url && <EnlacePrivado href={c.constancia_url} target="_blank" rel="noopener noreferrer" className="text-[9px] text-blue-600 underline">constancia</EnlacePrivado>}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                    <div className="flex items-center gap-2 flex-wrap pt-1">
+                                      <button onClick={() => editar(s.origenId)} className="text-[11px] font-bold px-2 py-1 rounded-lg border bg-white hover:bg-gray-50">Gestionar asegurados</button>
+                                      <button disabled={solicitados.length === 0} onClick={() => copiarLista(s.origenId, solicitados)}
+                                        className="text-[11px] font-bold px-2 py-1 rounded-lg border bg-white hover:bg-gray-50 disabled:opacity-40">📋 Copiar lista para el bróker ({solicitados.length})</button>
+                                      {puedeVerSueldo && (
+                                        <label className="flex items-center gap-1 text-[10px] text-gray-600">
+                                          <input type="checkbox" className="w-3.5 h-3.5 accent-[#0b315f]" checked={conSueldo} onChange={(e) => setConSueldo(e.target.checked)} /> con remuneración
+                                        </label>
+                                      )}
+                                    </div>
+                                    {solicitados.length === 0 && <p className="text-[10px] text-gray-400">No hay inclusiones solicitadas en esta póliza.</p>}
+                                    {!mostrarForm && <PanelCopia copia={copia} onCerrar={() => setCopia(null)} />}
+                                  </div>
+                                );
+                              })() : <p className="text-gray-700">{s.asegurado.rotulo}</p>}
                             </div>
                             <div className="space-y-1.5">
                               <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Detalle</p>

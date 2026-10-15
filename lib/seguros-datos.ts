@@ -27,6 +27,15 @@ export type ResultadoSeguros = {
   fuentes: Record<FuenteSeguro, EstadoFuente>;
   /** `seguro_cobertura` aparte de `seguros`: sin seguros-02 las pólizas se ven, sin asegurados */
   coberturas: EstadoFuente;
+  /** seguros-04a corrida en `seguro_cobertura` (columna `estado`): solo entonces se puede
+   *  registrar una inclusión SOLICITADA. Sin ella la UI no ofrece «Solicitar inclusión». */
+  inclusiones: boolean;
+  /** seguros-04a corrida en `seguros` (columna `coberturas`): una póliza puede cubrir varios tipos */
+  coberturasMultiples: boolean;
+  /** las filas crudas, para quien necesita la regla por persona (estadoSctrEn, la ficha) */
+  polizas: PolizaRow[];
+  asegurados: CoberturaRow[];
+  personas: PersonaFicha[];
   faltantes: Faltante[];
   /** qué parte del cumplimiento NO se juzgó y por qué (vacío = se juzgó todo) */
   sinJuzgar: string[];
@@ -67,39 +76,62 @@ async function leerTabla<T>(
   return { filas: [], estado: "error", soltadas, error: "no se pudo leer" };
 }
 
+/** Columnas de migraciones accesorias → el SQL que las crea (para nombrarlo en el aviso). */
+const SQL_DE_COLUMNA: Record<string, string> = {
+  vehiculo_tercero_id: "supabase/seguros-01-base.sql",
+  alcance: "supabase/seguros-01-base.sql",
+  coberturas: "supabase/seguros-04a-coberturas-e-inclusion.sql",
+  estado: "supabase/seguros-04a-coberturas-e-inclusion.sql",
+  solicitada_en: "supabase/seguros-04a-coberturas-e-inclusion.sql",
+  constancia_url: "supabase/seguros-04a-coberturas-e-inclusion.sql",
+  nota: "supabase/seguros-04a-coberturas-e-inclusion.sql",
+};
+const COLS_04A_COB = ["estado", "solicitada_en", "constancia_url", "nota"];
+
 /**
- * Pólizas de PERSONA (SCTR Salud/Pensión, Vida Ley) y sus coberturas, para quien solo necesita
- * `vencimientoFichaOPoliza` (el tick y el login del conductor, con el cliente service-role).
- * BEST-EFFORT: si falta alguna de las dos tablas o falla cualquier lectura devuelve null, y
+ * Pólizas y coberturas de PERSONA, para quien solo necesita `vencimientoFichaOPoliza` (el tick y
+ * el login del conductor, con el cliente service-role). Se leen TODAS las pólizas (con
+ * `coberturas` una de tipo vida_ley puede cubrir SCTR, así que filtrar por `tipo` perdería
+ * coberturas). Si falta una columna de seguros-04a se suelta SOLO la que el error nombra y se
+ * relee (sin ella: comportamiento de antes); queda en `soltadas`.
+ * BEST-EFFORT: si falta alguna de las dos tablas o falla cualquier otra lectura devuelve null, y
  * quien llama se queda con la ficha — exactamente lo de antes. Nunca media lista: una cobertura
  * perdida haría caer a una persona de la póliza a la ficha sin que nadie lo note.
  * `conductorId` acota las coberturas a un conductor (el login).
  */
 export async function leerPolizasPersonas(
   db: any, opts: { conductorId?: number } = {},
-): Promise<{ polizas: PolizaRow[]; coberturas: CoberturaRow[] } | null> {
+): Promise<{ polizas: PolizaRow[]; coberturas: CoberturaRow[]; soltadas: string[] } | null> {
   try {
-    const pag = async (armar: () => any): Promise<any[] | null> => {
-      const todas: any[] = [];
-      for (let desde = 0; ; desde += PAG) {
-        const { data, error } = await armar().order("id", { ascending: true }).range(desde, desde + PAG - 1);
-        if (error) return null;
-        todas.push(...(data ?? []));
-        if (!data || data.length < PAG) return todas;
+    const soltadas: string[] = [];
+    const pag = async (tabla: string, columnas: string[], opcionales: string[], filtro: (q: any) => any): Promise<any[] | null> => {
+      let cols = [...columnas];
+      for (let intento = 0; intento <= opcionales.length; intento++) {
+        const todas: any[] = [];
+        let fallo: any = null;
+        for (let desde = 0; ; desde += PAG) {
+          const { data, error } = await filtro(db.from(tabla).select(cols.join(","))).order("id", { ascending: true }).range(desde, desde + PAG - 1);
+          if (error) { fallo = error; break; }
+          todas.push(...(data ?? []));
+          if (!data || data.length < PAG) break;
+        }
+        if (!fallo) return todas;
+        const col = columnaFaltante(fallo);
+        if (col && opcionales.includes(col) && cols.includes(col)) { cols = cols.filter((c) => c !== col); soltadas.push(`${tabla}.${col}`); continue; }
+        return null;
       }
+      return null;
     };
-    const TIPOS = ["sctr_salud", "sctr_pension", "vida_ley"];
     const [pol, cob] = await Promise.all([
-      pag(() => db.from("seguros").select("id,tipo,fecha_vencimiento").in("tipo", TIPOS)),
-      pag(() => {
-        let q = db.from("seguro_cobertura").select("id,seguro_id,conductor_id,personal_administrativo_id,desde,hasta");
-        q = opts.conductorId != null ? q.eq("conductor_id", opts.conductorId)
-          : q.or("conductor_id.not.is.null,personal_administrativo_id.not.is.null");
-        return q;
-      }),
+      pag("seguros", ["id", "tipo", "fecha_inicio", "fecha_vencimiento", "coberturas"], ["coberturas"], (q) => q),
+      pag("seguro_cobertura",
+        ["id", "seguro_id", "conductor_id", "personal_administrativo_id", "desde", "hasta", "estado", "solicitada_en"],
+        ["estado", "solicitada_en"],
+        (q) => opts.conductorId != null ? q.eq("conductor_id", opts.conductorId)
+          : q.or("conductor_id.not.is.null,personal_administrativo_id.not.is.null")),
     ]);
     if (!pol || !cob) return null;
-    return { polizas: pol as PolizaRow[], coberturas: cob as CoberturaRow[] };
+    return { polizas: pol as PolizaRow[], coberturas: cob as CoberturaRow[], soltadas };
   } catch {
     return null;
   }
@@ -122,16 +154,21 @@ export async function cargarSeguros(dbInyectado?: any, hoy: string = fechaLima()
     leerTabla<any>(db, "conductores", COLS_PERSONA, ["sctr_salud_venc", "sctr_pension_venc", "vida_ley", "vida_ley_venc"]),
     leerTabla<any>(db, "personal_administrativo", COLS_PERSONA, ["sctr_salud_venc", "sctr_pension_venc", "vida_ley", "vida_ley_venc"]),
     leerTabla<PolizaRow>(db, "seguros",
-      ["id", "tipo", "aseguradora", "numero_poliza", "titular", "vehiculo_id", "fecha_inicio", "fecha_vencimiento", "prima_total", "cuota_mensual", "archivo_url", "vehiculo_tercero_id", "alcance"],
-      ["vehiculo_tercero_id", "alcance"]),
-    leerTabla<CoberturaRow>(db, "seguro_cobertura", ["id", "seguro_id", "conductor_id", "personal_administrativo_id", "vehiculo_id", "vehiculo_tercero_id", "desde", "hasta"]),
+      ["id", "tipo", "aseguradora", "numero_poliza", "titular", "vehiculo_id", "fecha_inicio", "fecha_vencimiento", "prima_total", "cuota_mensual", "archivo_url", "vehiculo_tercero_id", "alcance", "coberturas"],
+      ["vehiculo_tercero_id", "alcance", "coberturas"]),
+    leerTabla<CoberturaRow>(db, "seguro_cobertura",
+      ["id", "seguro_id", "conductor_id", "personal_administrativo_id", "vehiculo_id", "vehiculo_tercero_id", "desde", "hasta", ...COLS_04A_COB],
+      COLS_04A_COB),
   ]);
 
   const errores: string[] = [];
   const nota = (l: Lectura<any>, quien: string, sql?: string) => {
     if (l.estado === "error") errores.push(`No se pudo leer ${quien}: ${l.error}. Esa parte de la pantalla no se muestra; recarga para reintentar.`);
     if (l.estado === "sin_tabla") errores.push(`Falta ${quien}${sql ? ` (corre ${sql} en Supabase → SQL Editor)` : ""}.`);
-    if (l.soltadas.length) errores.push(`En ${quien} faltan las columnas ${l.soltadas.join(", ")}${sql ? ` (${sql})` : ""}; se leyó sin ellas.`);
+    if (l.soltadas.length) {
+      const sqls = [...new Set(l.soltadas.map((c) => SQL_DE_COLUMNA[c] ?? sql).filter(Boolean))];
+      errores.push(`En ${quien} faltan las columnas ${l.soltadas.join(", ")}${sqls.length ? ` (corre ${sqls.join(" y ")} en Supabase → SQL Editor)` : ""}; se leyó sin ellas.`);
+    }
   };
   nota(veh, "la flota propia (vehiculos)"); nota(vt, "la flota tercerizada (vehiculos_tercero)");
   nota(emp, "las empresas tercerizadas"); nota(dv, "los documentos de vehículos"); nota(dt, "los documentos de terceros");
@@ -190,5 +227,11 @@ export async function cargarSeguros(dbInyectado?: any, hoy: string = fechaLima()
 
   const faltantes = coberturaFaltante(flotaPropia, flotaTercero, personasJuzgables, filas, hoy, { polizas, coberturas });
 
-  return { filas, fuentes, coberturas: cob.estado, faltantes, sinJuzgar, errores, hoy };
+  const inclusiones = cob.estado === "ok" && !cob.soltadas.includes("estado");
+  const coberturasMultiples = pol.estado === "ok" && !pol.soltadas.includes("coberturas");
+  return {
+    filas, fuentes, coberturas: cob.estado, inclusiones, coberturasMultiples,
+    polizas, asegurados: coberturas, personas,
+    faltantes, sinJuzgar, errores, hoy,
+  };
 }

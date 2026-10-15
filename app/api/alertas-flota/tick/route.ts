@@ -31,6 +31,7 @@ import {
 import { detectarSolapesJornada, itinerarioDe, type ReservaFlota } from "@/lib/alertas-flota";
 import { UMBRAL_DEFECTO } from "@/lib/alertas-tarjeta";
 import { vencimientoFichaOPoliza } from "@/lib/seguros";
+import { fechaLima } from "@/lib/documentos-estado";
 import { leerPolizasPersonas } from "@/lib/seguros-datos";
 import { CLAVE_ESPERA_ABANDONADO, paramsAvisoAbandonados, planDePendientes, type ServicioCerrado } from "@/lib/servicio-abandonado";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
@@ -1019,7 +1020,9 @@ async function handler(req: NextRequest) {
           if (c.estado === "de_baja" || !cfg.plantilla) continue;
           for (const [campo, etiqueta] of DOCS) {
             const f = vencimientoFichaOPoliza({ clase: "conductor", id: Number(c.id) }, campo, c[campo],
-              segPersona?.polizas ?? null, segPersona?.coberturas ?? null).vencimiento;
+              segPersona?.polizas ?? null, segPersona?.coberturas ?? null, fechaLima()).vencimiento;
+            // null también para una inclusión PENDIENTE (pedida o por iniciar): no hay póliza que
+            // venza ni la ficha la tapa → no se avisa «por vencer» de algo que aún no cubre.
             if (!f || f < hoy || f > limiteISO) continue; // vigente, ya vencido, o fuera de ventana
             if (!(await reclamarEnvio("doc_vence", `${c.id}:${campo}`))) continue;
             // Sin reservaId: este aviso no cuelga de ninguna reserva → no se loguea
