@@ -10,6 +10,8 @@ import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/doc
 import { seriesRendimiento, juzgarTramo, normalizarCantidad } from "@/lib/rendimiento";
 import { familiaCombustible, configCombustible, capacidadTanqueDe } from "@/lib/combustible-tipos";
 import { utilizacionParaElia } from "@/lib/flota/uso-flota";
+import { cargarSeguros } from "@/lib/seguros-datos";
+import { TIPOS_SEGURO, SCTR_SIN_PRECISAR, kpisSeguros } from "@/lib/seguros";
 import { entradaUsoParaElia } from "@/lib/flota/uso-flota-datos";
 import type {
   BloqueUI,
@@ -2367,45 +2369,47 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
 
       // ────────────────────────────────────────────────────────────────────
       case "consultar_seguros": {
-        const { data } = await sb
-          .from("seguros")
-          .select("id, tipo, aseguradora, numero_poliza, vehiculo_id, proveedor_id, fecha_vencimiento, prima_total, cuota_mensual, estado")
-          .limit(200);
-        const seguros = (data as any[]) ?? [];
-        if (seguros.length === 0) return { paraModelo: JSON.stringify({ encontrados: 0, nota: "No hay pólizas registradas." }) };
+        // La MISMA vista derivada de /seguros (lib/seguros-datos.ts): documentos de vehículo y de
+        // terceros, fichas de conductores/personal y pólizas colectivas. Leer solo la tabla
+        // `seguros` decía «no hay pólizas» con toda la flota asegurada por sus documentos.
+        const r = await cargarSeguros(sb, fechaLima());
+        // Se lee con service-role: las fichas de personas solo se enseñan a quien puede verlas
+        // (el módulo seguros o el de esa ficha). Vehículos/Reportes no dan acceso a personal.
+        const verPersonal = tienePermiso(ctx, ["seguros", "personal-administrativo"]);
+        const verConductores = tienePermiso(ctx, ["seguros", "conductores"]);
+        const claseVisible = (c: string) =>
+          (c !== "personal" || verPersonal) && (c !== "conductor" || verConductores);
+        const filas = r.filas.filter(
+          (f) => claseVisible(f.asegurado.clase) && (f.fuente !== "ficha_personal" || verPersonal) && (f.fuente !== "ficha_conductor" || verConductores),
+        );
+        const verMontos = tienePermiso(ctx, ["seguros"]) || puedeVerPrecios(ctx);
+        if (filas.length === 0 && r.errores.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, nota: "No hay seguros registrados en ninguna fuente (documentos de vehículos, de terceros, fichas ni pólizas)." }) };
 
-        const ETIQUETA_TIPO: Record<string, string> = {
-          soat: "SOAT",
-          cat: "CAT",
-          sctr_salud: "SCTR Salud",
-          sctr_pension: "SCTR Pensión",
-          vida_ley: "Vida Ley",
-          todo_riesgo: "Todo Riesgo",
-          responsabilidad_civil: "Resp. Civil",
-          seguro_carga: "Seg. Carga",
-          patrimonio: "Patrimonio",
-          otro: "Otro",
-        };
-        const OBLIGATORIOS = new Set(["soat", "cat", "sctr_salud", "sctr_pension", "vida_ley"]);
-        const vehiculos = await mapaNombres(sb, "vehiculos", seguros.map((s) => s.vehiculo_id), "id, placa");
-
-        const detalle = seguros.map((s) => {
-          const dias = diasPara(s.fecha_vencimiento);
-          return {
-            tipo: ETIQUETA_TIPO[s.tipo] || s.tipo,
-            obligatorio: OBLIGATORIOS.has(s.tipo),
-            aseguradora: s.aseguradora,
-            poliza: s.numero_poliza,
-            placa: s.vehiculo_id ? vehiculos[s.vehiculo_id]?.placa : null,
-            vence: s.fecha_vencimiento,
-            dias_para_vencer: dias,
-            situacion: dias === null ? "sin_fecha" : dias < 0 ? "vencido" : dias <= 30 ? "por_vencer" : "vigente",
-            cuota_mensual: s.cuota_mensual,
-          };
-        });
+        const esObl = (t: string) => t === SCTR_SIN_PRECISAR || TIPOS_SEGURO[t]?.categoria === "obligatorio";
+        const detalle = filas.map((f) => ({
+          tipo: f.etiqueta,
+          obligatorio: esObl(f.tipo),
+          asegurado: f.asegurado.rotulo,
+          aseguradora: f.aseguradora,
+          poliza: f.numero,
+          origen: f.fuente,
+          vence: f.vencimiento,
+          dias_para_vencer: f.dias,
+          situacion: f.estado,
+          cuota_mensual: verMontos ? f.cuota : null,
+          de_afa: f.deAfa,
+          se_corrige_en: f.editarEn,
+          // pólizas: inclusiones pedidas al bróker sin confirmar (esas personas NO están cubiertas)
+          ...(f.fuente === "poliza" ? { inclusiones_sin_confirmar: f.solicitados } : {}),
+        }));
         const vencidos = detalle.filter((d) => d.situacion === "vencido");
         const porVencer = detalle.filter((d) => d.situacion === "por_vencer");
-        const cuotaTotal = seguros.reduce((s, x) => s + Number(x.cuota_mensual || 0), 0);
+        const k = kpisSeguros(filas);
+        const faltantes = r.faltantes.filter((f) => f.alarma && claseVisible(f.asegurado.clase));
+        // Una inclusión PENDIENTE (pedida al bróker o confirmada con inicio futuro) NO es una póliza
+        // vigente ni la tapa la ficha: esa persona no está cubierta hasta la fecha que se dice.
+        const pendientes = faltantes.filter((f) => f.codigo === "inclusion_solicitada" || f.codigo === "inclusion_por_iniciar");
         const visibles = input.solo_alertas ? [...vencidos, ...porVencer] : detalle;
 
         return {
@@ -2413,18 +2417,30 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             encontrados: detalle.length,
             vencidos: vencidos.length,
             por_vencer_30d: porVencer.length,
-            cuota_mensual_total: cuotaTotal,
+            cuota_mensual_total_afa: verMontos ? k.cuotaTotal : null,
             detalle: visibles.slice(0, 15),
-            nota: "SOAT/CAT, SCTR y Vida Ley son obligatorios por ley: un vencido es riesgo legal inmediato.",
+            sin_cobertura: faltantes.slice(0, 15).map((f) => ({ asegurado: f.asegurado.rotulo, problema: f.texto, se_corrige_en: f.arreglo })),
+            sin_cobertura_total: faltantes.length,
+            inclusiones_pendientes: pendientes.slice(0, 15).map((f) => ({
+              asegurado: f.asegurado.rotulo,
+              estado: f.codigo === "inclusion_solicitada" ? "solicitada_al_broker_sin_confirmar" : "confirmada_aun_no_empieza",
+              fecha: f.fechaInclusion ?? null,
+              cubre: f.texto,
+            })),
+            // Una fuente que no se pudo leer NO es «sin seguro»: decirlo así.
+            fuentes_con_error: r.errores,
+            no_juzgado: r.sinJuzgar,
+            nota: "SOAT/CAT, SCTR y Vida Ley son obligatorios por ley: un vencido es riesgo legal inmediato. Una inclusión pendiente (solicitada al bróker o con inicio futuro) NO es cobertura: esa persona no está asegurada todavía y no debe asignarse antes de la fecha de inicio. Si hay fuentes_con_error, dilo: lo que no se leyó no se puede afirmar como cubierto ni como faltante.",
           }),
           ui: [
             {
               tipo: "kpis",
               items: [
-                { label: "Pólizas", valor: String(detalle.length), intent: "info" },
-                { label: "Vencidas", valor: String(vencidos.length), intent: vencidos.length ? "danger" : "ok" },
+                { label: "Seguros", valor: String(detalle.length), intent: "info" },
+                { label: "Vencidos", valor: String(vencidos.length), intent: vencidos.length ? "danger" : "ok" },
                 { label: "Por vencer (30d)", valor: String(porVencer.length), intent: porVencer.length ? "warn" : "ok" },
-                { label: "Cuota mensual", valor: fmtCorto(cuotaTotal), intent: "info" },
+                { label: "Sin cobertura", valor: String(faltantes.length), intent: faltantes.length ? "danger" : "ok" },
+                { label: "Cuota mensual", valor: verMontos ? fmtCorto(k.cuotaTotal) : "—", intent: "info" },
               ],
             },
             ...(vencidos.length + porVencer.length > 0
@@ -2432,7 +2448,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
                   {
                     tipo: "conductores",
                     items: [...vencidos, ...porVencer].slice(0, 6).map((d) => ({
-                      nombre: `${d.tipo}${d.placa ? ` · ${d.placa}` : ""}`,
+                      nombre: `${d.tipo} · ${d.asegurado}`,
                       estado: d.aseguradora,
                       telefono: null,
                       alertas: [

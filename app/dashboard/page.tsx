@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
+import { cargarSeguros, type ResultadoSeguros } from "@/lib/seguros-datos";
+import { TIPOS_SEGURO, SCTR_SIN_PRECISAR, CODIGOS_FALTANTE } from "@/lib/seguros";
 
 // ─── TOKENS ──────────────────────────────────────────────────────────────────
 const C = {
@@ -21,7 +23,6 @@ const C = {
 type Reserva       = { id:number; origen:string; destino:string; fecha_servicio:string|null; hora_servicio:string|null; tipo:string; estado:string; precio_cliente:number; costo_proveedor:number; margen:number; cliente_id:number|null; vehiculo_id:number|null; conductor_id:number|null; tipo_asignacion?:string|null; empresa_tercerizada_id?:number|null; };
 type Vehiculo      = { id:number; placa:string; categoria:string|null; estado:string|null; estado_operativo:string|null; kilometraje_actual:number|null; proximo_mantenimiento_km:number|null; };
 type Conductor     = { id:number; nombre:string; estado:string|null; vencimiento_licencia:string|null; };
-type Seguro        = { id:number; tipo:string; fecha_vencimiento:string|null; aseguradora:string|null; vehiculo_id:number|null; };
 type Mantenimiento = { id:number; costo:number; tipo:string|null; proxima_fecha:string|null; estado:string|null; vehiculo_id:number|null; };
 type Combustible   = { id:number; total:number; fecha:string|null; vehiculo_id:number|null; };
 type DocVehiculo   = { id:number; vehiculo_id:number; tipo:string; fecha_vencimiento:string|null; };
@@ -511,7 +512,11 @@ export default function DashboardPage() {
   const [reservas,      setReservas]      = useState<Reserva[]>([]);
   const [vehiculos,     setVehiculos]     = useState<Vehiculo[]>([]);
   const [conductores,   setConductores]   = useState<Conductor[]>([]);
-  const [seguros,       setSeguros]       = useState<Seguro[]>([]);
+  // /seguros es una vista DERIVADA (documentos de vehículo y de terceros, fichas, pólizas): el
+  // tablero lee lo mismo con el mismo motor, o diría «sin pólizas» con la flota asegurada.
+  // null = cargando; `fallo` = la carga entera no corrió (se dice, no se vuelve 0).
+  const [seguros,       setSeguros]       = useState<ResultadoSeguros | null>(null);
+  const [segFallo,      setSegFallo]      = useState<string | null>(null);
   const [mantenimiento, setMantenimiento] = useState<Mantenimiento[]>([]);
   const [combustible,   setCombustible]   = useState<Combustible[]>([]);
   const [docsVehiculo,  setDocsVehiculo]  = useState<DocVehiculo[]>([]);
@@ -526,6 +531,11 @@ export default function DashboardPage() {
   const [modulo,        setModulo]        = useState<"erp"|"apps">("erp");
 
   useEffect(() => {
+    // Aparte del Promise.all: una fuente de seguros que falla no puede dejar el tablero en blanco.
+    cargarSeguros(supabase)
+      .then((r) => { setSeguros(r); setSegFallo(null); })
+      .catch((e) => setSegFallo(String(e?.message ?? e)));
+
     (async () => {
       try {
         setLoading(true);
@@ -535,11 +545,10 @@ export default function DashboardPage() {
           return r;
         };
         const hoy = new Date().toISOString().split("T")[0];
-        const [rRes,vRes,cRes,sRes,mRes,cbRes,dvRes,nRes,etRes,dtRes,fRes,gRes,shRes,sosRes,vtRes,ctRes] = await Promise.all([
+        const [rRes,vRes,cRes,mRes,cbRes,dvRes,nRes,etRes,dtRes,fRes,gRes,shRes,sosRes,vtRes,ctRes] = await Promise.all([
           safe(supabase.from("reservas").select("id,origen,destino,fecha_servicio,hora_servicio,tipo,estado,precio_cliente,costo_proveedor,margen,cliente_id,vehiculo_id,conductor_id,tipo_asignacion,empresa_tercerizada_id").order("id", { ascending: false })),
           safe(supabase.from("vehiculos").select("id,placa,categoria,estado,estado_operativo,kilometraje_actual,proximo_mantenimiento_km")),
           safe(supabase.from("conductores").select("id,nombre,estado,vencimiento_licencia")),
-          safe(supabase.from("seguros").select("id,tipo,fecha_vencimiento,aseguradora,vehiculo_id")),
           safe(supabase.from("mantenimiento").select("id,costo,tipo,proxima_fecha,estado,vehiculo_id")),
           safe(supabase.from("combustible").select("id,total,fecha,vehiculo_id")),
           safe(supabase.from("documentos_vehiculo").select("id,vehiculo_id,tipo,fecha_vencimiento")),
@@ -556,7 +565,6 @@ export default function DashboardPage() {
         setReservas(rRes.data      || []);
         setVehiculos(vRes.data     || []);
         setConductores(cRes.data   || []);
-        setSeguros(sRes.data       || []);
         setMantenimiento(mRes.data || []);
         setCombustible(cbRes.data  || []);
         setDocsVehiculo(dvRes.data || []);
@@ -648,9 +656,15 @@ export default function DashboardPage() {
   const cpkNeuArr   = neuActivos.filter(n=>n.costo_compra&&n.km_actual&&n.km_instalacion).map(n => { const km=Number(n.km_actual)-Number(n.km_instalacion); return km>0?Number(n.costo_compra)/km:null; }).filter(Boolean) as number[];
   const cpkNeuProm  = cpkNeuArr.length > 0 ? cpkNeuArr.reduce((a,b)=>a+b)/cpkNeuArr.length : null;
 
-  const segVenc     = seguros.filter(s => estadoFecha(s.fecha_vencimiento) === "vencido").length;
-  const segPorVenc  = seguros.filter(s => estadoFecha(s.fecha_vencimiento) === "por_vencer").length;
-  const segOblVenc  = seguros.filter(s => ["soat","cat","sctr_salud","sctr_pension","vida_ley"].includes(s.tipo) && estadoFecha(s.fecha_vencimiento) === "vencido").length;
+  const segFilas    = seguros?.filas ?? [];
+  const esOblSeg    = (t: string) => t === SCTR_SIN_PRECISAR || TIPOS_SEGURO[t]?.categoria === "obligatorio";
+  const segPorVenc  = segFilas.filter(f => f.estado === "por_vencer").length;
+  const segOblVenc  = segFilas.filter(f => esOblSeg(f.tipo) && f.estado === "vencido").length;
+  // Sin cobertura (no «vencida»: eso ya lo cuenta segOblVenc): unidad sin SOAT, persona sin SCTR…
+  const segSinCob   = (seguros?.faltantes ?? []).filter(f => CODIGOS_FALTANTE[f.codigo].alarma &&
+    !["soat_vencido", "sctr_vencido", "vida_ley_vencida"].includes(f.codigo)).length;
+  // Lo que no se pudo leer o juzgar se NOMBRA: un «Al día» sobre una fuente caída es falso.
+  const segIncompleto = !!segFallo || (seguros ? (seguros.errores.length > 0 || seguros.sinJuzgar.length > 0) : false);
 
   const mantPend    = mantenimiento.filter(m => m.estado === "pendiente").length;
   const mantProx    = mantenimiento.filter(m => { const d=diasPara(m.proxima_fecha); return d!==null&&d>=0&&d<=15; }).length;
@@ -663,7 +677,9 @@ export default function DashboardPage() {
   const alertas: Alerta[] = [];
   if (sosActivos>0)          alertas.push({ tipo:"critico",  texto:`${sosActivos} ALERTA(S) SOS activa(s) sin atender`,                     href:"/monitoreo",               orden:0 });
   if (docsOblVenc>0)         alertas.push({ tipo:"critico",  texto:`${docsOblVenc} doc. obligatorio vencido (SOAT, CITV, SUTRAN)`,           href:"/documentos-vehiculares",  orden:1 });
-  if (segOblVenc>0)          alertas.push({ tipo:"critico",  texto:`${segOblVenc} seguro obligatorio vencido (SCTR, Vida Ley)`,              href:"/seguros",                 orden:2 });
+  if (segOblVenc>0)          alertas.push({ tipo:"critico",  texto:`${segOblVenc} seguro obligatorio vencido (SOAT, SCTR, Vida Ley)`,        href:"/seguros",                 orden:2 });
+  if (segSinCob>0)           alertas.push({ tipo:"critico",  texto:`${segSinCob} sin cobertura obligatoria (SOAT, SCTR o Vida Ley)`,        href:"/seguros",                 orden:2 });
+  if (segIncompleto)         alertas.push({ tipo:"atencion", texto:segFallo ? `No se pudieron leer los seguros: ${segFallo}` : `Seguros: parte de las fuentes no se pudo leer (${seguros?.sinJuzgar.join("; ") || seguros?.errores[0]})`, href:"/seguros", orden:12 });
   if (empConRiesgo>0)        alertas.push({ tipo:"critico",  texto:`${empConRiesgo} empresa tercerizada con documentos vencidos`,            href:"/tercerizadas",            orden:3 });
   if (licVenc>0)             alertas.push({ tipo:"critico",  texto:`${licVenc} conductor(es) con licencia vencida`,                         href:"/conductores",             orden:4 });
   if (neuCrit>0)             alertas.push({ tipo:"critico",  texto:`${neuCrit} neumático(s) al 90%+ de vida útil`,                          href:"/neumaticos",              orden:5 });
@@ -705,7 +721,7 @@ export default function DashboardPage() {
   // ── Estado áreas ─────────────────────────────────────────────────────────────
   const areaIntentDoc  = docsOblVenc>0 ? "danger" : docsPorVenc>0 ? "warn" : "ok" as "danger"|"warn"|"ok"|"neutral";
   const areaIntentNeu  = neuCrit>0 ? "danger" : neuPorVenc>0 ? "warn" : "ok" as "danger"|"warn"|"ok"|"neutral";
-  const areaIntentSeg  = segOblVenc>0 ? "danger" : segPorVenc>0 ? "warn" : "ok" as "danger"|"warn"|"ok"|"neutral";
+  const areaIntentSeg  = (segOblVenc>0 || segSinCob>0) ? "danger" : (segPorVenc>0 || segIncompleto) ? "warn" : !seguros ? "neutral" : "ok" as "danger"|"warn"|"ok"|"neutral";
   const areaIntentMant = mantPend>0 ? "warn" : "ok" as "danger"|"warn"|"ok"|"neutral";
 
   const estadoBadge: Record<string, { bg: string; c: string; dot: string }> = {
@@ -888,8 +904,8 @@ export default function DashboardPage() {
           value={fmtSoles(gastoCombustible)}
           sub="Gasto acumulado" intent="neutral" onClick={() => router.push("/combustible")}/>
         <AreaTile icon={I.Shield} label="Seguros"
-          value={segOblVenc > 0 ? `${segOblVenc} venc.` : "Al día"}
-          sub={segPorVenc > 0 ? `${segPorVenc} por vencer` : "Pólizas vigentes"} intent={areaIntentSeg} onClick={() => router.push("/seguros")}/>
+          value={segFallo ? "Sin datos" : !seguros ? "…" : segOblVenc > 0 ? `${segOblVenc} venc.` : segSinCob > 0 ? `${segSinCob} sin cob.` : segIncompleto ? "Incompleto" : "Al día"}
+          sub={segFallo ? "No se pudo leer" : !seguros ? "Cargando…" : segPorVenc > 0 ? `${segPorVenc} por vencer` : segIncompleto ? "Fuentes sin leer" : `${segFilas.length} registro(s), al día`} intent={areaIntentSeg} onClick={() => router.push("/seguros")}/>
         <AreaTile icon={I.Hand} label="Tercerizadas"
           value={`${empresasTer.length} emp.`}
           sub={empConRiesgo > 0 ? `${empConRiesgo} en riesgo` : "Flota externa activa"}

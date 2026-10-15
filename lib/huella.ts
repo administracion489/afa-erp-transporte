@@ -8,11 +8,14 @@
 // rango o (0,0) exacto = sin dato). Es pura y sin dependencias: importarla no arrastra nada.
 import { coordValida } from "./cotizacion-ruta-coords";
 
-export type MatchPt = { lat: number; lng: number; acc: number };
+export type MatchPt = { lat: number; lng: number; acc: number; ts?: number };
 // `rumbo` (0-360) = dirección REAL que reporta el equipo (columna ubicaciones_gps.rumbo). Solo
 // llega con chip satelital/Doppler; con GPS de red viene 0 y se DERIVA por bearing al mostrarla.
 // Opcional: la máquina de limpiarHuella crea puntos sin rumbo (lo recupera puntosTelemetria del crudo).
-export type HuellaPt = { lat: number; lng: number; velocidad: number; acc: number; ts: number; rumbo?: number };
+// `parada`: el vértice es el CENTROIDE de una detención (limpiarHuella), no un fix. Su posición es el
+// promedio de minutos de muestras y su ts el de la última agrupada, así que una velocidad derivada
+// desde él no mide nada: conVelocidadColor lo deja en 0 (Parado) y no lo usa de vecino.
+export type HuellaPt = { lat: number; lng: number; velocidad: number; acc: number; ts: number; rumbo?: number; parada?: boolean };
 
 // Un puntito de telemetría REAL sobre la huella (Idea 2). `velReal`/`rumboReal` = el dato vino del
 // equipo (Doppler); si false, se derivó (velocidad por desplazamiento / rumbo por bearing) → la UI
@@ -61,6 +64,24 @@ export function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[],
 // (el GPS pobre la da en 0). A diferencia de la media móvil por índices (suavizarHuella ±N), que
 // aplana poco el zigzag lento y SÍ recorta las curvas rápidas. Verificado sobre datos reales
 // (#944/#942): desviación perpendicular en tramos lentos ~2.8-10.9 m → ~0.8 m; en rápidos sin cambio.
+// ── UN FIX PRECISO EN MARCHA NO SE MUEVE MÁS QUE SU ERROR (caso #1609, 14-10-2026) ──────────
+// En una esquina, un fix de chip (±2 m, sobre la pista) se promediaba con sus vecinos de ambos
+// lados del giro y quedaba 10-15 m DENTRO de la manzana: la línea cortaba la esquina sobre las casas
+// sin pasar por el punto que el mapa enseña en la calle. El suavizado existe para el zigzag del bus
+// LENTO o parado; en marcha, un fix preciso ya está donde dice. Por eso, si el punto trae precisión
+// conocida ≤ ACC_CONFIABLE_M y hora, y va EN MARCHA (velocidad geométrica a sus vecinos >
+// VEL_MANIOBRA_KMH), el suavizado no lo saca de su círculo de error: max(acc, PISO_ERROR_FIX_M).
+// Sin acc o sin hora (llamadores viejos), byte a byte lo de siempre. PISO_ERROR_FIX_M no está medido.
+const PISO_ERROR_FIX_M = 3;
+function enMarchaEn<T extends { lat: number; lng: number }>(pts: T[], i: number): boolean {
+  const kmh = (a: any, b: any) => {
+    const ta = a?.ts, tb = b?.ts;
+    if (!(typeof ta === "number" && typeof tb === "number" && ta > 0 && tb > ta)) return -1;
+    return distM(a.lat, a.lng, b.lat, b.lng) / ((tb - ta) / 1000) * 3.6;
+  };
+  return Math.max(i > 0 ? kmh(pts[i - 1], pts[i]) : -1, i + 1 < pts.length ? kmh(pts[i], pts[i + 1]) : -1) > VEL_MANIOBRA_KMH;
+}
+
 export function suavizarPorDistancia<T extends { lat: number; lng: number }>(pts: T[], R = 40, K = 8): T[] {
   return pts.map((p, i) => {
     let sLat = 0, sLng = 0, n = 0;
@@ -68,7 +89,14 @@ export function suavizarPorDistancia<T extends { lat: number; lng: number }>(pts
     for (let j = lo; j <= hi; j++) {
       if (distM(pts[j].lat, pts[j].lng, p.lat, p.lng) <= R) { sLat += pts[j].lat; sLng += pts[j].lng; n++; }
     }
-    return n ? { ...p, lat: sLat / n, lng: sLng / n } : p;
+    if (!n) return p;
+    let lat = sLat / n, lng = sLng / n;
+    const acc = (p as any).acc;
+    if (typeof acc === "number" && acc > 0 && acc <= ACC_CONFIABLE_M && enMarchaEn(pts, i)) {
+      const tope = Math.max(acc, PISO_ERROR_FIX_M), d = distM(p.lat, p.lng, lat, lng);
+      if (d > tope) { const f = tope / d; lat = p.lat + (lat - p.lat) * f; lng = p.lng + (lng - p.lng) * f; }
+    }
+    return { ...p, lat, lng };
   });
 }
 
@@ -150,11 +178,24 @@ function proyectarEnSegmento(lat: number, lng: number, A: { lat: number; lng: nu
 // Ancla solo la POSICIÓN; deja acc/velocidad/rumbo/ts intactos (la precisión sigue honesta en el
 // popup). NO agrega/quita puntos (out = pts.slice, solo muta lat/lng) → índices y congelado por
 // índice de crearAjustadorHuella intactos. Estabilidad: un punto con SUS DOS anclas ya fijas es
-// determinista entre re-fetch; los de la COLA sin ancla-posterior aún se dejan intactos y pueden
-// re-anclar (asentarse) cuando llega un confiable después — mutación tardía normal de la cola viva.
+// determinista entre re-fetch; los de la COLA sin ancla-posterior re-anclan (se asientan) cuando
+// llega un confiable después — mutación tardía normal de la cola viva.
+//
+// LA COLA (reserva #1459, 14-10-2026): mientras el bus esperaba en la cochera, el teléfono mandaba
+// cada ~10 s un fix de RED (±200 m) clavado en el mismo sitio, a 214 m del bus, intercalado con fixes
+// de chip (±3 m). En medio de la traza el ancla lo resolvía; en la PUNTA no había ancla posterior, y
+// cada vez que el último fix recibido era el de red el trazo en vivo dibujaba una línea de 214 m hasta
+// él. Ahora un fix impreciso de la cola (sin confiable después) que cae DENTRO de su propia
+// imprecisión alrededor del ÚLTIMO confiable, y a ≤ VIGENCIA_ANCLA_COLA_MS de él, se dibuja en la
+// posición de ese confiable: no aporta nada que el confiable no diga ya. Cuando llega el confiable
+// siguiente, el punto pasa a la regla de siempre (proyección sobre la cuerda), así que la traza
+// TERMINADA es la misma. Más allá de la vigencia (el chip se perdió de verdad) se deja intacto.
+export const VIGENCIA_ANCLA_COLA_MS = 15_000; // NO medido: ~4 fixes a la cadencia de la app en marcha
+/** Radio dentro del cual un fix impreciso es «el mismo lugar» que su ancla confiable. */
+export const radioAncla = (acc: number) => Math.max(70, 1.5 * acc);
 export function anclarImprecisos(pts: HuellaPt[], umbral = ACC_CONFIABLE_M, maxGapM = 200): HuellaPt[] {
   const n = pts.length;
-  if (n < 3) return pts;
+  if (n < 2) return pts;
   const relB = new Array<number>(n).fill(-1), relA = new Array<number>(n).fill(-1);
   let last = -1;
   for (let i = 0; i < n; i++) { relB[i] = last; if (pts[i].acc <= umbral) last = i; }
@@ -164,10 +205,18 @@ export function anclarImprecisos(pts: HuellaPt[], umbral = ACC_CONFIABLE_M, maxG
   for (let i = 0; i < n; i++) {
     if (pts[i].acc <= umbral) continue;                                          // confiable → intacto
     const jb = relB[i], ja = relA[i];
-    if (jb < 0 || ja < 0) continue;                                              // extremo sin ancla de un lado
+    if (jb >= 0 && ja < 0) {                                                     // COLA: solo hay ancla antes
+      const dt = pts[i].ts - pts[jb].ts;
+      if (dt > 0 && dt <= VIGENCIA_ANCLA_COLA_MS
+        && distM(pts[jb].lat, pts[jb].lng, pts[i].lat, pts[i].lng) <= radioAncla(pts[i].acc)) {
+        out[i] = { ...pts[i], lat: pts[jb].lat, lng: pts[jb].lng };            // dentro de su error → el confiable
+      }
+      continue;
+    }
+    if (jb < 0 || ja < 0) continue;                                              // cabeza sin ancla previa
     if (distM(pts[jb].lat, pts[jb].lng, pts[ja].lat, pts[ja].lng) > maxGapM) continue; // corredor largo → no anclar
     const q = proyectarEnSegmento(pts[i].lat, pts[i].lng, pts[jb], pts[ja]);
-    if (q.dist > Math.max(70, 1.5 * pts[i].acc)) continue;                       // lejos de la cuerda vs su precisión = desvío/curva real → dejar
+    if (q.dist > radioAncla(pts[i].acc)) continue;                               // lejos de la cuerda vs su precisión = desvío/curva real → dejar
     out[i] = { ...pts[i], lat: q.lat, lng: q.lng };                             // ruido lateral → anclar al corredor confiable
   }
   return out;
@@ -286,23 +335,51 @@ export function gateVelocidad(pts: HuellaPt[], vmaxKmh = VMAX_BUS_KMH, reanclaN 
 // filtro ciego un par de fixes más (NaN nunca es "mayor que" nada). Autocontenido: los
 // llamadores no necesitan validar `ts` antes de invocar esta función.
 // Uso: una instancia POR VEHÍCULO/servicio (crea un filtro nuevo por reserva, no global).
+//
+// CON LA PRECISIÓN (`acc`, opcional: sin ella, byte a byte lo de antes). Reserva #1459 (14-10-2026):
+// en la cochera llegaba cada ~10 s un fix de RED (±200 m) clavado en el MISMO punto, a 214 m del bus,
+// entre fixes de chip (±3 m). 214 m en 7 s son 110 km/h —«plausibles»—, así que el filtro lo aceptaba;
+// desde ahí los fixes de chip (214 m en 3 s) eran «imposibles» y los fantasmas siguientes (0 m) sí
+// plausibles: el ícono quedó ESTACIONADO en el fantasma, junto al paradero 1, seis minutos. Dos reglas,
+// las dos solo con `acc`:
+//   1. Un fix IMPRECISO que cae dentro de su propia incertidumbre (radioAncla) alrededor del último
+//      fix PRECISO aceptado, a ≤ VIGENCIA_ANCLA_COLA_MS de él, no aporta nada que ese no diga: no
+//      mueve el ícono y no toca el estado. (Es la misma regla que ancla la cola de la huella.)
+//   2. Un fix PRECISO cuyo salto desde un último IMPRECISO lo explica el error de ese último
+//      (radioAncla(acc del último) + lo que el bus puede recorrer) se acepta: el que estaba mal era
+//      el anterior. Nunca se afloja para un candidato impreciso: el glitch de #24742 (±300 m, 300 m
+//      en 3 s) sigue fuera.
 export function crearFiltroFixVivo(vmaxKmh = VMAX_BUS_KMH, reanclaN = 2) {
-  type Pt = { lat: number; lng: number; ts: number };
+  type Pt = { lat: number; lng: number; ts: number; acc?: number };
   let ultimo: Pt | null = null;
+  let ultimoPreciso: Pt | null = null;
   let pendientes: Pt[] = [];
   const vmax = vmaxKmh / 3.6;
   const plausible = (a: Pt, b: Pt) => distM(a.lat, a.lng, b.lat, b.lng) / Math.max(1, (b.ts - a.ts) / 1000) <= vmax;
-  return (lat: number, lng: number, ts: number): boolean => {
+  const preciso = (p: Pt) => p.acc != null && p.acc <= ACC_CONFIABLE_M;
+  const aceptar = (p: Pt) => { ultimo = p; pendientes = []; if (preciso(p)) ultimoPreciso = p; return true; };
+  return (lat: number, lng: number, ts: number, acc?: number | null): boolean => {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
     if (!Number.isFinite(ts)) return true;                          // sin ts fiable → aceptar, no tocar el estado
-    const cand: Pt = { lat, lng, ts };
-    if (!ultimo || !(ts > ultimo.ts)) { ultimo = cand; pendientes = []; return true; }
+    const conAcc = typeof acc === "number" && Number.isFinite(acc) && acc > 0;
+    const cand: Pt = conAcc ? { lat, lng, ts, acc: acc as number } : { lat, lng, ts };
+    if (conAcc && !preciso(cand) && ultimoPreciso && ts > ultimoPreciso.ts
+      && ts - ultimoPreciso.ts <= VIGENCIA_ANCLA_COLA_MS
+      && distM(ultimoPreciso.lat, ultimoPreciso.lng, lat, lng) <= radioAncla(cand.acc as number)) {
+      return false;                                                 // regla 1: impreciso dentro de su error → no aporta
+    }
+    if (!ultimo || !(ts > ultimo.ts)) return aceptar(cand);
     const ultimoPendiente = pendientes[pendientes.length - 1];
     if (ultimoPendiente && ultimoPendiente.ts === ts) return false;  // misma fila ya vista → no cuenta de nuevo
-    if (plausible(ultimo, cand)) { ultimo = cand; pendientes = []; return true; }
+    if (plausible(ultimo, cand)) return aceptar(cand);
+    if (conAcc && preciso(cand) && ultimo.acc != null && !preciso(ultimo)
+      && distM(ultimo.lat, ultimo.lng, lat, lng)
+        <= radioAncla(ultimo.acc) + vmax * Math.max(1, (ts - ultimo.ts) / 1000)) {
+      return aceptar(cand);                                         // regla 2: el impreciso era el anterior
+    }
     if (ultimoPendiente && !plausible(ultimoPendiente, cand)) pendientes = [];  // rompe la cadena → reinicia con este candidato
     pendientes.push(cand);
-    if (pendientes.length >= reanclaN) { ultimo = cand; pendientes = []; return true; }  // N pendientes COHERENTES → relocalización real
+    if (pendientes.length >= reanclaN) return aceptar(cand);       // N pendientes COHERENTES → relocalización real
     return false;                                                   // glitch aislado → descartar, conservar la posición previa
   };
 }
@@ -408,9 +485,9 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   const base = quitarExcursiones(quitarPicosV(basePre));
 
   const out: HuellaPt[] = [];
-  const emitir = (lat: number, lng: number, velocidad: number, acc: number, ts: number) => {
+  const emitir = (lat: number, lng: number, velocidad: number, acc: number, ts: number, parada = false) => {
     const last = out[out.length - 1];
-    if (!last || distM(last.lat, last.lng, lat, lng) >= 8) out.push({ lat, lng, velocidad, acc, ts });
+    if (!last || distM(last.lat, last.lng, lat, lng) >= 8) out.push(parada ? { lat, lng, velocidad, acc, ts, parada: true } : { lat, lng, velocidad, acc, ts });
   };
   type Cl = { sumLat: number; sumLng: number; n: number; acc: number; ts: number };
   const nuevoCl = (p: HuellaPt): Cl => ({ sumLat: p.lat, sumLng: p.lng, n: 1, acc: p.acc, ts: p.ts });
@@ -431,7 +508,7 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
       } else {
         pend.push(p);
         if (pend.length >= ESCAPE_N) {                        // salida confirmada
-          emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts);       // el lugar de la parada
+          emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts, true); // el lugar de la parada
           for (const q of pend) emitir(q.lat, q.lng, q.velocidad, q.acc, q.ts);
           modo = "move"; cl = null; pend = []; dwell = 0;
         }
@@ -447,7 +524,7 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
       }
     }
   }
-  if (modo === "stop" && cl) emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts); // cola: parada final
+  if (modo === "stop" && cl) emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts, true); // cola: parada final
 
   // FALLBACK: si el filtro colapsó todo a ≤1 punto pero había suficientes datos, el cluster
   // era demasiado grande para la velocidad del bus (GPS pobre + ciudad lenta). Devolver la
@@ -467,17 +544,25 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
 // de tiempo (~±6 s, robusta al jitter; punto-a-punto daría velocidades fantasma), mismo criterio
 // que velocidadPorVentana del recuadro en vivo. Si el equipo SÍ da Doppler, se respeta. Requiere
 // `ts`; sin él (0/no creciente) no toca nada. Solo cambia el COLOR, no la geometría.
+//
+// EL CENTROIDE DE UNA PARADA (`parada`, de limpiarHuella) NO SE DERIVA NI SIRVE DE VECINO (reserva
+// #1459): su posición es el promedio de seis minutos de espera en la cochera y su ts el del último fix
+// agrupado —uno que ya arrancaba—, así que «52 m en 3 s» hasta el primer fix en marcha lo pintaba a
+// 62 km/h, verde «Rápido», justo donde el bus salía a 7 km/h. Se queda en 0 y la ventana de sus
+// vecinos se corta en él.
 export function conVelocidadColor(pts: HuellaPt[], ventanaMs = 6000, maxKmh = 130): HuellaPt[] {
   const tsFiable = pts.length >= 2 && pts[pts.length - 1].ts > pts[0].ts;
   return pts.map((p, i) => {
+    if (p.parada) return p;                                    // centroide de parada → Parado
     if (p.velocidad > 0 && p.velocidad <= maxKmh) return p;   // Doppler fiable (flota propia) → respetar
     if (!tsFiable) return p;
     // Incluir SIEMPRE los vecinos inmediatos (i-1, i+1) y extender hasta ventanaMs. Sin esto, si la
     // cadencia es espaciada (el throttle cree "parado" porque el equipo da velocidad 0), los vecinos
     // quedan a >ventanaMs → la ventana colapsaba a 1 punto (dt=0) → no derivaba → seguía rojo.
-    let a = Math.max(0, i - 1), b = Math.min(pts.length - 1, i + 1);
-    while (a > 0 && p.ts - pts[a - 1].ts < ventanaMs) a--;
-    while (b < pts.length - 1 && pts[b + 1].ts - p.ts < ventanaMs) b++;
+    let a = i > 0 && !pts[i - 1].parada ? i - 1 : i;
+    let b = i < pts.length - 1 && !pts[i + 1].parada ? i + 1 : i;
+    while (a > 0 && !pts[a - 1].parada && p.ts - pts[a - 1].ts < ventanaMs) a--;
+    while (b < pts.length - 1 && !pts[b + 1].parada && pts[b + 1].ts - p.ts < ventanaMs) b++;
     const dt = (pts[b].ts - pts[a].ts) / 1000;
     if (dt <= 0) return p;
     const kmh = (distM(pts[a].lat, pts[a].lng, pts[b].lat, pts[b].lng) / dt) * 3.6;
@@ -952,6 +1037,94 @@ export function puenteEstimadoDeDirections(
   return null;
 }
 
+// ── SI EL GPS VA POR LA PISTA, ES HUELLA MEDIDA, NO ESTIMADA (#1309, 14-10-2026) ───────────────
+// La regla de la recta en marcha (fixEnRectaEnMarcha) marca crudo todo fix de chip con una cuerda
+// de más de 60 m en marcha, y su tramo se rellena por la vía. En una avenida RECTA (la
+// Panamericana) esa recta ES la vía: el estimado se dibujaba encima de puntos GPS que estaban en
+// la pista. Ahora un tramo crudo se queda como MEDIDO cuando (1) todos sus vértices son fixes
+// PRECISOS (el fix de la huella más cercano tiene precisión conocida ≤ ACC_CONFIABLE_M) y (2) la
+// línea de esos fixes y el tramo estimado van juntas: ningún punto de una se aleja más de
+// TOL_VIA_M de la otra (distancia de Hausdorff). Si la recta corta una esquina sobre las casas,
+// se aleja de la vía más que eso y sigue el estimado. TOL_VIA_M hereda ACC_CONFIABLE_M (20 m,
+// no medido aparte): a esa distancia de la vía, un fix preciso ya no cabe en la pista.
+export const TOL_VIA_M = 20;
+
+/** Distancia (m) de un punto a una polilínea [lng, lat]. */
+function distAPolilinea(lat: number, lng: number, linea: readonly [number, number][]): number {
+  if (linea.length === 1) return distM(lat, lng, linea[0][1], linea[0][0]);
+  let best = Infinity;
+  for (let i = 0; i < linea.length - 1; i++) {
+    const q = proyectarEnSegmento(lat, lng, { lat: linea[i][1], lng: linea[i][0] }, { lat: linea[i + 1][1], lng: linea[i + 1][0] });
+    if (q.dist < best) best = q.dist;
+  }
+  return best;
+}
+
+/** Puntos de una polilínea cada ~`paso` m (incluye los vértices), para medir la separación. */
+function muestrear(linea: readonly [number, number][], paso = 10): [number, number][] {
+  const out: [number, number][] = [];
+  for (let i = 0; i < linea.length; i++) {
+    out.push(linea[i]);
+    if (i + 1 >= linea.length) break;
+    const [aLng, aLat] = linea[i], [bLng, bLat] = linea[i + 1];
+    const n = Math.floor(distM(aLat, aLng, bLat, bLng) / paso);
+    for (let k = 1; k < n; k++) out.push([aLng + (bLng - aLng) * k / n, aLat + (bLat - aLat) * k / n]);
+  }
+  return out;
+}
+
+/** Hausdorff (m) entre dos polilíneas [lng, lat]: lo más que se aleja una de la otra. */
+export function separacionEntreLineas(a: readonly [number, number][], b: readonly [number, number][]): number {
+  if (a.length === 0 || b.length === 0) return Infinity;
+  let max = 0;
+  for (const [lng, lat] of muestrear(a)) max = Math.max(max, distAPolilinea(lat, lng, b));
+  for (const [lng, lat] of muestrear(b)) max = Math.max(max, distAPolilinea(lat, lng, a));
+  return max;
+}
+
+/**
+ * ¿El tramo crudo `crudo` (los vértices del ajuste, [lng, lat], anclas incluidas) ya va por la vía
+ * que dibuja el estimado `via`? true → se dibuja como MEDIDO y el estimado no. Pide precisión
+ * CONOCIDA y buena en cada vértice: un fix de red o una huella sin `acc` nunca se queda medido.
+ * `indicesDeVia` = los vértices que son geometría de vía ya pegada (las anclas): no se juzga su
+ * precisión, porque no son un fix.
+ */
+export function crudoSigueLaVia(
+  crudo: readonly [number, number][],
+  via: readonly [number, number][],
+  huella: readonly { lat: number; lng: number; acc?: number }[],
+  indicesDeVia: ReadonlySet<number> = new Set(),
+): boolean {
+  if (crudo.length < 2 || via.length < 2 || huella.length === 0) return false;
+  for (let k = 0; k < crudo.length; k++) {
+    if (indicesDeVia.has(k)) continue;
+    const [lng, lat] = crudo[k];
+    let bd = Infinity, acc: number | undefined;
+    for (const h of huella) {
+      const d = (h.lng - lng) ** 2 + (h.lat - lat) ** 2;
+      if (d < bd) { bd = d; acc = h.acc; }
+    }
+    if (acc == null || esAccCruda(acc)) return false;
+  }
+  return separacionEntreLineas(crudo, via) <= TOL_VIA_M;
+}
+
+/**
+ * Para el ensamblado del modal y del portal: ¿este candidato es una corrida cruda que ya va por
+ * la vía de su estimado? Entonces NO se dibuja el estimado ni se suprime el crudo: lo dibuja
+ * `colorearMatched` como huella medida. Las anclas (iA, iB) son vía pegada, no fixes.
+ */
+export function corridaCrudaEnLaVia(
+  c: Pick<PuenteHueco, "origen" | "iA" | "iB">,
+  via: readonly [number, number][] | null | undefined,
+  matched: readonly [number, number][],
+  huella: readonly { lat: number; lng: number; acc?: number }[],
+): boolean {
+  if (c.origen !== "crudo" || !via || c.iB >= matched.length) return false;
+  const tramo = matched.slice(c.iA, c.iB + 1) as [number, number][];
+  return crudoSigueLaVia(tramo, via, huella, new Set([0, tramo.length - 1]));
+}
+
 /** El Feature GeoJSON con que el modal dibuja un tramo estimado (las dos fases lo arman igual). */
 export function featureDePuente(p: PuenteEstimado) {
   return {
@@ -1157,6 +1330,19 @@ export function prepararPuntos(pts: MatchPt[]): MatchPt[] {
   return out;
 }
 
+// ── LA RED SE PUEDE INYECTAR (lib/gps-traza-ajustada-calculo.ts) ─────────────────────────
+// El servidor ajusta un servicio finalizado UNA vez y lo guarda: para eso necesita CONTAR las
+// llamadas a Mapbox y saber si alguna fue un fallo pasajero (429/5xx/red), porque un `null` de
+// `mapMatchTrail` no distingue «no pegó» de «Mapbox no contestó» y una traza degradada por un
+// hipo no se puede guardar para siempre. Por eso `mapMatchTrail`, `matchVentana`,
+// `congelarPrefijoLimpio` y `crearAjustadorHuella` reciben el `fetch` como parámetro OPCIONAL.
+// COMPATIBLE HACIA ATRÁS: el defecto resuelve el `fetch` GLOBAL en el momento de la llamada —lo
+// mismo que hacía el código escrito con `fetch(url)`—, sin un `await` de más. Este archivo llega a
+// la app del conductor (lib/km-servicio.ts): con los defectos, byte a byte lo de antes
+// (scripts/prueba-traza-ajustada.mts §0, contra los originales copiados literal).
+export type FetchMapbox = (url: string) => Promise<Response>;
+const fetchGlobal: FetchMapbox = (url) => fetch(url);
+
 // Ajusta la huella GPS a la red vial usando Mapbox Map Matching API — HÍBRIDO POR FRAGMENTO.
 //
 // Mapbox parte el trace en varias `matchings` cuando duda, y era común que m[0] fuera un stub
@@ -1174,14 +1360,163 @@ export function prepararPuntos(pts: MatchPt[]): MatchPt[] {
 // `confidence` devuelta = FRACCIÓN de puntos cubiertos por fragmentos confiables (0..1); el gate
 // de matchVentana (≥0.4 = al menos 40% pegado) decide si vale frente al crudo suavizado.
 // El radio de búsqueda por punto se deriva de la precisión GPS (acc·1.5, acotado 5–50 m).
+// ── MANIOBRA vs. RECTA EN MARCHA (caso #1298, 14-10-2026) ─────────────────────────────────
+// Un fix de CHIP (acc ≤ 20 m) que Map Matching no pegó a la vía se dibujaba siempre como medido
+// («protege el oro»). Eso está bien con posiciones densas, que siguen la calle solas, y en la
+// MANIOBRA: un bus casi detenido puede estar de verdad dentro de una cochera o un patio, encima de
+// lo que el mapa pinta como casa. Pero EN MARCHA, una recta larga entre dos fixes precisos corta la
+// esquina por encima de las manzanas. Regla (la del dueño): una cuerda de más de MAX_SEG_CRUDO_M
+// recorrida a más de VEL_MANIOBRA_KMH no es una maniobra → sus dos extremos se marcan `esCrudo`, así
+// la recta no se dibuja como medida (colorearMatched la omite) y el tramo se rellena por la vía
+// (puentesCrudos). Lenta o corta → se queda como medida, aunque caiga sobre una casa.
+// La velocidad es GEOMÉTRICA (distancia ÷ tiempo entre los dos fixes): la del equipo puede ser
+// fantasma (FUSED). Sin hora fiable no se juzga: comportamiento de siempre.
+// VEL_MANIOBRA_KMH NO está medido: es el de la regla del dueño («más de 10 km/h»).
+export const VEL_MANIOBRA_KMH = 10;
+
+/** ¿La cuerda pts[i]→pts[j] es una recta larga recorrida en marcha? */
+function cuerdaEnMarcha(a: MatchPt, b: MatchPt): boolean {
+  const ta = a.ts, tb = b.ts;
+  if (!(typeof ta === "number" && typeof tb === "number" && ta > 0 && tb > ta)) return false;
+  const d = distM(a.lat, a.lng, b.lat, b.lng);
+  if (d <= MAX_SEG_CRUDO_M) return false;
+  return d / ((tb - ta) / 1000) * 3.6 > VEL_MANIOBRA_KMH;
+}
+
+/**
+ * ¿El fix `k` es extremo de una recta larga EN MARCHA con su vecino anterior o siguiente? Solo se
+ * pregunta por fixes que NO son geometría de vía de Mapbox (fragmentos dudosos, ventana sin pegar).
+ */
+export function fixEnRectaEnMarcha(pts: readonly MatchPt[], k: number): boolean {
+  const p = pts[k];
+  if (!p) return false;
+  return (k > 0 && cuerdaEnMarcha(pts[k - 1], p)) || (k + 1 < pts.length && cuerdaEnMarcha(p, pts[k + 1]));
+}
+
+// ── EL RADIO DE BÚSQUEDA DE UN FIX PRECISO NO PUEDE SER MÁS ANGOSTO QUE LA PISTA (#1609) ────
+// Era acc·1.5 con piso de 5 m: un chip de ±2 m buscaba vía a 5 m. Pero la vía de OpenStreetMap es
+// una LÍNEA (el eje de la calzada) y el bus va por su carril, a 5-15 m de ese eje en una avenida de
+// tres carriles por sentido. Fuera del radio Mapbox no encuentra candidato, deja el tracepoint en
+// null y parte el trazo: el fix más preciso del viaje desaparecía de la huella, que unía en recta
+// los fragmentos de antes y de después por encima de las casas (o dejaba un hueco si la recta
+// pasaba de MAX_SEG_M). Piso RADIO_MIN_MATCH_M (15 m, NO medido: el ancho de media avenida); el
+// techo de 50 m y el factor para los fixes de red no cambian.
+export const RADIO_MIN_MATCH_M = 15;
+export function radioDeBusqueda(acc: number | undefined): number {
+  return Math.min(50, Math.max(RADIO_MIN_MATCH_M, Math.ceil((acc || 25) * 1.5)));
+}
+
+// ── LA VÍA PEGADA TIENE QUE PASAR POR DONDE IBA EL BUS (#17498, 14-10-2026) ───────────────────
+// Un fragmento CONFIABLE (conf ≥ 0.4) se dibujaba entero, sin preguntar si su geometría pasaba por
+// los fixes que dice cubrir. En un intercambio (la Panamericana Sur con la Antigua y sus ramales),
+// Map Matching puede tomar el ramal equivocado: entre dos puntos pegados enruta por la vía paralela
+// y deja SIN pareja los fixes del medio —los de ±2 m, que estaban en el ramal correcto—, y esos se
+// omitían como «redundantes de tidy». La huella medida corría así por donde no hubo ningún punto.
+// Cada tramo del fragmento entre dos puntos pegados consecutivos (un leg) se juzga con dos pruebas:
+//   1. FIEL A LOS FIXES: un fix PRECISO sin pareja de ese tramo no puede quedar más lejos de la
+//      geometría que su propio radio de búsqueda (y nunca menos de TOL_VIA_M): si la vía dibujada
+//      estuviera ahí, Mapbox habría tenido un candidato sobre ella.
+//   2. FÍSICAMENTE POSIBLE: el largo del tramo no puede pasar de lo que un bus recorre en ese tiempo
+//      (VMAX_BUS_KMH) más lo que cada extremo se movió al pegarse y MARGEN_TRAMO_FISICO_M. Un rodeo
+//      por los ramales de 1 km entre dos fixes separados 15 s no es un recorrido, es un error. Se
+//      mide entre puntos pegados PRECISOS (la hora de un fix de red anclado no es la de su posición).
+// Un tramo que falla se reemplaza por los FIXES REALES del medio (la regla de un fragmento dudoso):
+// lo que quede crudo se rellena por la vía y, si no se puede, se dibuja. Solo se juzga con la
+// `location` de cada punto pegado (es un vértice de la geometría): sin ella, el fragmento se dibuja
+// como siempre. Un fix de RED sin pareja no prueba nada y no se juzga.
+// MARGEN_TRAMO_FISICO_M NO está medido: es holgura contra el redondeo de los vértices.
+export const MARGEN_TRAMO_FISICO_M = 50;
+
+type PiezaFragmento = { via: [number, number][] } | { fix: number };
+
+/** El vértice de `g`, desde `desde`, que es la `location` del punto pegado (−1 si no está). */
+function verticeDeLocation(g: readonly [number, number][], loc: unknown, desde: number): number {
+  if (!Array.isArray(loc) || loc.length < 2 || !Number.isFinite(loc[0]) || !Number.isFinite(loc[1])) return -1;
+  for (let j = desde; j < g.length; j++) if (distM(g[j][1], g[j][0], loc[1] as number, loc[0] as number) <= 1) return j;
+  return -1;
+}
+
+/** Largo (m) de g[a..b]. */
+function largoTramo(g: readonly [number, number][], a: number, b: number): number {
+  let m = 0;
+  for (let j = a + 1; j <= b; j++) m += distM(g[j - 1][1], g[j - 1][0], g[j][1], g[j][0]);
+  return m;
+}
+
+/**
+ * Parte la geometría del fragmento `mi` donde no pasa por donde iba el bus. Sin nada que objetar
+ * devuelve UNA pieza con la geometría entera (el mismo arreglo): byte a byte lo de siempre.
+ */
+export function piezasDeFragmento(
+  g: [number, number][], sample: readonly MatchPt[],
+  tp: readonly ({ matchings_index?: number | null; location?: unknown } | null | undefined)[], mi: number,
+): PiezaFragmento[] {
+  const entera: PiezaFragmento[] = [{ via: g }];
+  const ks: number[] = [];
+  for (let k = 0; k < sample.length; k++) if (tp[k]?.matchings_index === mi) ks.push(k);
+  if (ks.length < 2 || g.length < 2) return entera;
+  const pos: number[] = [];
+  for (const k of ks) {
+    const j = verticeDeLocation(g, tp[k]?.location, pos.length ? pos[pos.length - 1] : 0);
+    if (j < 0) return entera;   // sin location (o no es un vértice): no se puede juzgar
+    pos.push(j);
+  }
+  const malo: boolean[] = new Array(ks.length - 1).fill(false);
+  for (let w = 0; w + 1 < ks.length; w++) {
+    const a = ks[w], b = ks[w + 1], tramo = g.slice(pos[w], pos[w + 1] + 1);
+    for (let k = a + 1; k < b && !malo[w]; k++) {
+      const acc = sample[k].acc;
+      if (tp[k] != null || !(acc > 0 && acc <= ACC_CONFIABLE_M)) continue;
+      const d = tramo.length >= 2 ? distAPolilinea(sample[k].lat, sample[k].lng, tramo) : distM(sample[k].lat, sample[k].lng, tramo[0][1], tramo[0][0]);
+      if (d > Math.max(TOL_VIA_M, radioDeBusqueda(acc))) malo[w] = true;
+    }
+  }
+  // La prueba 2 se mide entre puntos pegados cuya posición es la del fix (los que anclarImprecisos
+  // no movió: acc conocida ≤ ACC_CONFIABLE_M). Un fix de red anclado conserva su hora pero se dibuja
+  // en la cuerda de sus confiables, a veces junto al anterior: medido contra él, un bus a 89 km/h
+  // «recorría» 132 m en 2 s y la Panamericana salía como estimado. El de red queda dentro del tramo.
+  const genuino = (k: number) => {
+    const acc = sample[k].acc, ts = sample[k].ts;
+    return Number.isFinite(acc) && acc <= ACC_CONFIABLE_M && typeof ts === "number" && ts > 0;
+  };
+  for (let i = -1, w = 0; w < ks.length; w++) {
+    if (!genuino(ks[w])) continue;
+    if (i >= 0) {
+      const a = ks[i], b = ks[w], ta = sample[a].ts as number, tb = sample[b].ts as number;
+      if (tb > ta) {
+        const pegA = distM(sample[a].lat, sample[a].lng, g[pos[i]][1], g[pos[i]][0]);
+        const pegB = distM(sample[b].lat, sample[b].lng, g[pos[w]][1], g[pos[w]][0]);
+        const tope = (VMAX_BUS_KMH / 3.6) * ((tb - ta) / 1000) + pegA + pegB + MARGEN_TRAMO_FISICO_M;
+        if (largoTramo(g, pos[i], pos[w]) > tope) for (let x = i; x < w; x++) malo[x] = true;
+      }
+    }
+    i = w;
+  }
+  if (!malo.some(Boolean)) return entera;
+  const out: PiezaFragmento[] = [];
+  let desde = 0;   // primer vértice de g aún sin emitir
+  for (let w = 0; w < malo.length; w++) {
+    if (!malo[w]) continue;
+    out.push({ via: g.slice(desde, pos[w] + 1) });
+    let z = w;
+    while (z + 1 < malo.length && malo[z + 1]) z++;   // tramos malos seguidos: un solo hueco
+    for (let k = ks[w] + 1; k < ks[z + 1]; k++) out.push({ fix: k });
+    desde = pos[z + 1];
+    w = z;
+  }
+  out.push({ via: g.slice(desde) });
+  return out;
+}
+
 export async function mapMatchTrail(
   pts: MatchPt[],
-  token: string
+  token: string,
+  f: FetchMapbox = fetchGlobal,
 ): Promise<{ coords: [number, number][]; confidence: number; crudeFrac: number; maxCrudoChordM: number; esCrudo: boolean[] } | null> {
   const sample = prepararPuntos(pts);
   if (sample.length < 2) return null;
   const coords = sample.map(p => `${p.lng},${p.lat}`).join(";");
-  const radii  = sample.map(p => String(Math.min(50, Math.max(5, Math.ceil((p.acc || 25) * 1.5))))).join(";");
+  const radii  = sample.map(p => String(radioDeBusqueda(p.acc))).join(";");
   try {
     const url =
       `https://api.mapbox.com/matching/v5/mapbox/driving/${coords}` +
@@ -1193,7 +1528,7 @@ export async function mapMatchTrail(
     // geometría degradada permanente (review ago-2026).
     let res: Response | null = null;
     for (let intento = 0; intento < 3; intento++) {
-      res = await fetch(url);
+      res = await f(url);
       if (res.status !== 429) break;
       await new Promise((r) => setTimeout(r, 1200 * (intento + 1)));
     }
@@ -1228,9 +1563,53 @@ export async function mapMatchTrail(
     //    la "recta que cruza techos" medida directamente. Las cuerdas road→road interiores de un
     //    fragmento NO cuentan (son cortas y siguen la vía).
     let crudos = 0;
-    let lastPt: [number, number] | null = null;   // última coord emitida
+    let lastPt: [number, number] | null = null;   // última coord emitida (sin contar los fixes sin emparejar, ver abajo)
     let lastCrude = false;                         // ¿la última coord emitida fue un fix crudo?
     let maxCC = 0;
+    // ── LOS FIXES QUE MAPBOX NO EMPAREJÓ, EN LA FRONTERA ENTRE FRAGMENTOS (#1609) ────────────
+    // Un tracepoint null se omitía siempre («tidy lo descartó»). Dentro de un fragmento es correcto
+    // (tidy quita redundantes y la geometría ya pasa por ahí), pero en la FRONTERA entre dos
+    // fragmentos es un fix que no se pudo emparejar —típico: el más preciso, fuera del radio de
+    // búsqueda— y omitirlo dejaba una recta entre los fragmentos (o un hueco, si pasaba de MAX_SEG_M).
+    // Ahí se emite el FIX REAL, con la misma regla que un fragmento dudoso. Las métricas de suciedad
+    // (crudeFrac, maxCrudoChordM) se cuentan como antes, sin ellos: deciden la stickiness del
+    // ajustador y no deben moverla.
+    let sinPareja = 0;
+    let previoPt: [number, number] | null = null;   // última coord emitida, incluidos los sin pareja
+    let previoEsVia = false;                          // ¿esa última coord era geometría de vía?
+    const miDe = (k: number): number | null => { const t: any = tp[k]; return t && t.matchings_index != null ? t.matchings_index : null; };
+    const miAntes: Array<number | null> = [], miDespues: Array<number | null> = new Array(sample.length).fill(null);
+    for (let k = 0, ult: number | null = null; k < sample.length; k++) { miAntes.push(ult); const x = miDe(k); if (x != null) ult = x; }
+    for (let k = sample.length - 1, sig: number | null = null; k >= 0; k--) { miDespues[k] = sig; const x = miDe(k); if (x != null) sig = x; }
+    const emitirVia = (g: [number, number][]) => {
+      if (!g.length) return;
+      // Junta con lo previo: solo la mido si el lado previo era crudo (road↔crudo).
+      if (lastPt && lastCrude) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], g[0][1], g[0][0]));
+      // Junta vía↔vía entre DOS fragmentos (o dos piezas de uno partido): una recta de más de
+      // MAX_SEG_CRUDO_M no sigue la calle → sus dos extremos se marcan crudos, así la rellena la ruta
+      // (o se dibuja si no hay).
+      const juntaRecta = previoEsVia && previoPt != null
+        && distM(previoPt[1], previoPt[0], g[0][1], g[0][0]) > MAX_SEG_CRUDO_M;
+      if (juntaRecta) esCrudo[esCrudo.length - 1] = true;
+      via.push(...g);
+      for (let j = 0; j < g.length; j++) esCrudo.push(juntaRecta && j === 0);   // geometría de vía Mapbox
+      lastPt = g[g.length - 1];
+      previoPt = lastPt;
+      previoEsVia = true;
+      lastCrude = false;
+    };
+    const emitirFixReal = (k: number) => {
+      const p: [number, number] = [sample[k].lng, sample[k].lat];   // el fix REAL del bus
+      if (lastPt) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], p[1], p[0]));
+      via.push(p);
+      // crudo de RED → rutear; crudo de CHIP (≤20m) → medido, salvo recta larga en marcha (arriba)
+      esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(sample, k));
+      crudos++;
+      lastPt = p;
+      previoPt = p;
+      previoEsVia = false;
+      lastCrude = true;
+    };
     for (let k = 0; k < sample.length; k++) {
       const t: any = tp[k];
       const mi: number | null = t && t.matchings_index != null ? t.matchings_index : null;
@@ -1239,29 +1618,28 @@ export async function mapMatchTrail(
         if (!emitidos.has(mi)) {
           emitidos.add(mi);
           const g = (m[mi]?.geometry?.coordinates as [number, number][]) || [];
-          if (g.length) {
-            // Junta con lo previo: solo la mido si el lado previo era crudo (road↔crudo).
-            if (lastPt && lastCrude) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], g[0][1], g[0][0]));
-            via.push(...g);
-            for (let j = 0; j < g.length; j++) esCrudo.push(false);   // geometría de vía Mapbox
-            lastPt = g[g.length - 1];
-            lastCrude = false;
+          // Partido donde no pasa por donde iba el bus (#17498); entero en el caso normal.
+          for (const pieza of piezasDeFragmento(g, sample, tp, mi)) {
+            if ("via" in pieza) emitirVia(pieza.via); else emitirFixReal(pieza.fix);
           }
         }
       } else if (mi != null) {
-        const p: [number, number] = [sample[k].lng, sample[k].lat];   // fragmento dudoso → el fix REAL del bus
-        if (lastPt) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], p[1], p[0]));
+        emitirFixReal(k);   // fragmento dudoso → el fix REAL del bus
+      } else if (!(miAntes[k] != null && miAntes[k] === miDespues[k])) {
+        // Sin pareja y en la FRONTERA (o antes del primer fragmento / después del último): el fix REAL.
+        const p: [number, number] = [sample[k].lng, sample[k].lat];
         via.push(p);
-        esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M);   // crudo de RED → rutear; crudo de CHIP (≤20m) → medido
-        crudos++;
-        lastPt = p;
-        lastCrude = true;
+        esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(sample, k));
+        sinPareja++;
+        previoPt = p;
+        previoEsVia = false;
       }
-      // mi == null: tidy lo descartó como outlier/redundante → omitir (rechazo de outliers gratis)
+      // mi == null DENTRO de un fragmento: tidy lo descartó como redundante → omitir
     }
     const confidence = cubiertos / sample.length;
-    const crudeFrac = via.length ? crudos / via.length : 1;
-    return via.length >= 2 ? { coords: via, confidence, crudeFrac, maxCrudoChordM: maxCC, esCrudo } : null;
+    const nComoAntes = via.length - sinPareja;   // las métricas de suciedad, sin los fixes sin pareja
+    const crudeFrac = nComoAntes ? crudos / nComoAntes : 1;
+    return nComoAntes >= 2 && via.length >= 2 ? { coords: via, confidence, crudeFrac, maxCrudoChordM: maxCC, esCrudo } : null;
   } catch { return null; }
 }
 
@@ -1271,13 +1649,14 @@ export async function mapMatchTrail(
 // `snapped` = si logró pegar a la vía (confianza ≥ 0.4) o cayó al crudo → el ajustador lo usa para
 // NO revertir a zigzag un tramo ya pegado (stickiness: con GPS de red la confianza baila y sin esto
 // la cola parpadea entre pegada y cruda cada ciclo).
-export async function matchVentana(ventana: MatchPt[], token: string): Promise<{ coords: [number, number][]; snapped: boolean; crudeFrac: number; maxCrudoChordM: number; esCrudo: boolean[] }> {
-  const r = await mapMatchTrail(ventana, token);
+export async function matchVentana(ventana: MatchPt[], token: string, f: FetchMapbox = fetchGlobal): Promise<{ coords: [number, number][]; snapped: boolean; crudeFrac: number; maxCrudoChordM: number; esCrudo: boolean[] }> {
+  const r = await mapMatchTrail(ventana, token, f);
   if (r && r.confidence >= 0.4 && r.coords.length >= 2) return { coords: r.coords, snapped: true, crudeFrac: r.crudeFrac, maxCrudoChordM: r.maxCrudoChordM, esCrudo: r.esCrudo };
   const suav = suavizarPorDistancia(ventana);   // fallback: crudo suavizado por distancia (no pegó a vía)
   const coords = suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [];
   // Por vértice: crudo de RED (acc>20) se ruteará; un fallback de CHIP (acc≤20) queda medido → protege el oro.
-  return { coords, snapped: false, crudeFrac: 1, maxCrudoChordM: 0, esCrudo: coords.map((_, i) => (suav[i]?.acc || 25) > ACC_CONFIABLE_M) };
+  // y una recta larga EN MARCHA tampoco (fixEnRectaEnMarcha): cruzaría las manzanas.
+  return { coords, snapped: false, crudeFrac: 1, maxCrudoChordM: 0, esCrudo: coords.map((_, i) => (suav[i]?.acc || 25) > ACC_CONFIABLE_M || fixEnRectaEnMarcha(suav, i)) };
 }
 
 // Tramo máximo que se DIBUJA entre dos vértices consecutivos. Más largo que esto = teleport
@@ -1353,19 +1732,32 @@ export function puentearHuecos(pts: HuellaPt[], maxSegM = MAX_SEG_M, vmaxKmh = 1
 // red de seguridad del "nunca cruzar techos" cuando la supresión/puentes fallan (puente con rodeo
 // absurdo, corrida corta sin rutear, tope de puentes, estado desfasado): antes esas cuerdas de
 // 61-300 m se pintaban como recorrido medido (#962).
+// UN TRAMO ESTIMADO QUE NO LLEGA NO DEJA UN HUECO (#1609, 14-10-2026). La cuerda de un fix
+// PRECISO que solo es crudo por ir en marcha (fixEnRectaEnMarcha) se omite si su tramo se
+// rellenó por la vía (`suprimir`). Si no se pudo rellenar (sin ruta, Google sin camino, tope),
+// se dibuja como medida, como antes de esa regla: una recta es mejor que un hueco que nadie
+// rellena. Solo se omite la cuerda con un extremo IMPRECISO (de red) o cuya precisión no se
+// sabe (huella sin `acc`, comportamiento de siempre).
 export function colorearMatched(
   coords: [number, number][],
-  huella: { lat: number; lng: number; velocidad: number }[],
+  huella: { lat: number; lng: number; velocidad: number; acc?: number }[],
   suprimir?: Array<[number, number]>,   // rangos de índice [s,e] a NO dibujar (crudo que se rellena por ruta estimada)
-  esCrudo?: boolean[],                  // por vértice: true = fix crudo de red (no geometría de vía)
+  esCrudo?: boolean[],                  // por vértice: true = fix crudo (de red, o recta en marcha)
 ): any[] {
-  const velCercana = (lng: number, lat: number): number => {
-    let best = 0, bd = Infinity;
+  const cercano = (lng: number, lat: number) => {
+    let best: { velocidad: number; acc?: number } | null = null, bd = Infinity;
     for (const h of huella) {
       const d = (h.lng - lng) ** 2 + (h.lat - lat) ** 2;
-      if (d < bd) { bd = d; best = h.velocidad ?? 0; }
+      if (d < bd) { bd = d; best = h; }
     }
     return best;
+  };
+  const velCercana = (lng: number, lat: number): number => cercano(lng, lat)?.velocidad ?? 0;
+  // ¿El vértice crudo es un fix de red (o de precisión desconocida)? Esos nunca se dibujan largos.
+  const crudoImpreciso = (j: number): boolean => {
+    if (!esCrudo?.[j]) return false;
+    const acc = cercano(coords[j][0], coords[j][1])?.acc;
+    return acc == null || esAccCruda(acc);
   };
   const supr = (j: number) => !!suprimir && suprimir.some(([s, e]) => j >= s && j <= e);
   const feats: any[] = [];
@@ -1378,7 +1770,7 @@ export function colorearMatched(
     // (cruzaría casas) ni gris punteada — se OMITE. La vía de ese tramo la cubre el estimado por ruta
     // (verde petróleo). El usuario pidió eliminar el gris "aprox" (jul-2026); en régimen las corridas
     // crudas ya se rutean y esto es la red de seguridad (corrida sin rutear / tope de puentes / 1er render).
-    if (!!esCrudo && (esCrudo[i] || esCrudo[i + 1]) && d > MAX_SEG_CRUDO_M) continue;
+    if (d > MAX_SEG_CRUDO_M && (crudoImpreciso(i) || crudoImpreciso(i + 1))) continue;
     feats.push({
       type: "Feature",
       properties: { velocidad: velCercana(aLng, aLat) },
@@ -1544,7 +1936,11 @@ export function colaViva(
   // camino fuera de la vía (puentePorRuta devuelve null con desvío >70 m).
   if (degradado && ruta && ruta.length >= 2 && live && Number.isFinite(live.lat) && Number.isFinite(live.lng)) {
     const bridge = puentePorRuta({ lat: endLat, lng: endLng }, { lat: live.lat, lng: live.lng }, ruta);
-    if (bridge && bridge.length >= 2) {
+    // Salvo que la punta YA vaya por esa vía con fixes precisos (#1309): entonces es huella medida.
+    const precisa = pts.length >= 2 && pts.slice(1).every((p) => p.acc != null && !esAccCruda(p.acc));
+    const enLaVia = precisa && bridge && bridge.length >= 2
+      && separacionEntreLineas(pts.map((p) => [p.lng, p.lat] as [number, number]), bridge) <= TOL_VIA_M;
+    if (bridge && bridge.length >= 2 && !enLaVia) {
       return [{ type: "Feature", properties: { estimado: 1 }, geometry: { type: "LineString", coordinates: bridge } }];
     }
   }
@@ -1591,14 +1987,14 @@ export function velocidadPorVentana(
 // solo cuando una ventana sale cruda (GPS bueno nunca entra aquí). Piso 40: un prefijo más corto no vale
 // la fragmentación (la corrupción de <40 puntos es menor y rara). Exige crudeFrac≤0.1 (limpio de verdad).
 async function congelarPrefijoLimpio(
-  ventana: MatchPt[], token: string, cancelado?: () => boolean,
+  ventana: MatchPt[], token: string, cancelado?: () => boolean, f: FetchMapbox = fetchGlobal,
 ): Promise<{ len: number; coords: [number, number][]; esCrudo: boolean[] } | null> {
   const MIN = 40;
   let lo = MIN, hi = ventana.length - 2, bestLen = 0, bestCoords: [number, number][] | null = null, bestEsCrudo: boolean[] | null = null;
   while (lo <= hi) {
     if (cancelado?.()) break;
     const mid = (lo + hi) >> 1;
-    const r = await matchVentana(ventana.slice(0, mid), token);
+    const r = await matchVentana(ventana.slice(0, mid), token, f);
     if (r.snapped && r.crudeFrac <= 0.1) { bestLen = mid; bestCoords = r.coords; bestEsCrudo = r.esCrudo; lo = mid + 1; }
     else hi = mid - 1;
   }
@@ -1613,7 +2009,8 @@ async function congelarPrefijoLimpio(
 //   Uso: crear UN ajustador por traza (modal: por apertura; "En vivo": por servicio
 //   seleccionado). Llamar `ajustar(limpio, token, cancelado?)` cada ciclo; devuelve las
 //   coords unidas, o null si no hay nada nuevo (conservar la geometría previa).
-export function crearAjustadorHuella() {
+export function crearAjustadorHuella(opts?: { fetch?: FetchMapbox }) {
+  const f: FetchMapbox = opts?.fetch ?? fetchGlobal;   // red inyectable (ver FetchMapbox); sin opts, el fetch global
   // La API topa en MAX coords/llamada. Cada ventana se arma con MAX puntos COMO MÁXIMO
   // (solape INCLUIDO) para que prepararPuntos NUNCA la diezme. Antes la ventana medía
   // WIN+SOLAPE = 101 > 100 → prepararPuntos tomaba 1 de cada 2 → media densidad → Map
@@ -1702,7 +2099,7 @@ export function crearAjustadorHuella() {
         while (lote.length < loteMax && limpio.length - H >= NUEVOS + 2) {
           const ini = Math.max(0, H - SOLAPE);
           const ventana = limpio.slice(ini, ini + MAX);   // ≤ MAX SIEMPRE → no se diezma
-          lote.push({ ini: H, ventana, res: matchVentana(ventana, token) });
+          lote.push({ ini: H, ventana, res: matchVentana(ventana, token, f) });
           H += NUEVOS;
         }
         for (const w of lote) {
@@ -1723,7 +2120,7 @@ export function crearAjustadorHuella() {
             // esos 60 buenos = "edita 20 puntos antes"). En vez de hornear crudo sobre lo bueno, se congela
             // SOLO el PREFIJO LIMPIO más largo (INMUTABLE); el resto degradado queda para el siguiente ciclo
             // (lo cubre puentesCrudos por la ruta). Así lo ya dibujado NO se re-edita.
-            const pref = await congelarPrefijoLimpio(w.ventana, token, cancelado);
+            const pref = await congelarPrefijoLimpio(w.ventana, token, cancelado, f);
             if (cancelado?.()) return null;
             if (pref) {
               congeladas.push(pref.coords);
@@ -1745,7 +2142,7 @@ export function crearAjustadorHuella() {
 
       const colaVentana = limpio.slice(Math.max(0, congeladoHasta - SOLAPE));
       if (colaVentana.length >= 2) {
-        const rc = await matchVentana(colaVentana, token);
+        const rc = await matchVentana(colaVentana, token, f);
         if (cancelado?.()) return null;
         ultimaColaSnapped = rc.snapped;   // señal para colaViva: si NO pegó, la punta viva sigue la ruta prevista
         // STICKINESS POR CONTENIDO-CRUDO: no revertir a rectas/crudo un tramo que ya se pegó a la vía.
@@ -1769,29 +2166,14 @@ export function crearAjustadorHuella() {
 
       const todo = [...congeladas, lastCola].flat() as [number, number][];
       const esCrudoTodo = [...congeladasEsCrudo, lastColaEsCrudo].flat();   // alineado 1:1 con `todo`
+      marcarJuntasRectas(todo, esCrudoTodo, [...congeladas, lastCola].map((c) => c.length));
       ultimoEsCrudo = esCrudoTodo;   // para colorearMatched: marcar `aprox` las cuerdas crudas largas que escapen a la supresión
 
-      // Rangos de crudo POR VÉRTICE (esto SÍ incluye las ventanas MIXTAS: snapped=true con fixes crudos
-      // de RED intercalados — el bug #875 de rectas naranjas sobre casas). Corridas contiguas de
-      // esCrudoTodo=true sobre `todo`, fusionando las separadas por ≤1 vértice limpio (evita confeti).
-      // Se EXCLUYE la corrida que toca el ÚLTIMO índice (punta viva → la cubre colaViva, no parpadea).
-      const rangos: Array<[number, number]> = [];
-      const n = Math.min(todo.length, esCrudoTodo.length);
-      let idx = 0;
-      while (idx < n) {
-        if (esCrudoTodo[idx]) {
-          let j = idx;
-          while (j + 1 < n && (esCrudoTodo[j + 1] || (j + 2 < n && esCrudoTodo[j + 2]))) j++;   // fusiona ≤1 limpio
-          rangos.push([idx, j]);
-          idx = j + 1;
-        } else idx++;
-      }
-      ultimoCrudoRanges = rangos.filter(([, e]) => e < n - 1);   // fuera la corrida de la punta viva (colaViva la cubre)
-
-      // Frontera de la cola VIVA = último vértice de VÍA limpia. colaViva ancla ahí y el consumidor
-      // NO dibuja el crudo de la punta como medido (lo rellena por la ruta). GPS bueno → n-1 → sin cambios.
-      ultimoColaClean = n - 1;
-      for (let k = n - 1; k >= 0; k--) { if (!esCrudoTodo[k]) { ultimoColaClean = k; break; } }
+      // Rangos de crudo y frontera de la cola viva: `rangosDeCrudo` (abajo), extraída de aquí para que
+      // la traza GUARDADA (lib/gps-traza-ajustada.ts) los derive por el MISMO camino que el ajustador.
+      const { crudoRanges, colaClean } = rangosDeCrudo(esCrudoTodo, Math.min(todo.length, esCrudoTodo.length));
+      ultimoCrudoRanges = crudoRanges;
+      ultimoColaClean = colaClean;
 
       return todo.length >= 2 ? todo : null;
     },
@@ -1804,4 +2186,51 @@ export function crearAjustadorHuella() {
     // Último índice de VÍA limpia en las coords devueltas (frontera de colaViva; corta el crudo de la punta).
     leerColaClean: () => ultimoColaClean,
   };
+}
+
+/**
+ * La junta entre dos ventanas del ajustador (último vértice de una, primero de la siguiente) que
+ * mide más de MAX_SEG_CRUDO_M no sigue la calle: es una recta entre dos geometrías. Se marcan sus
+ * dos extremos crudos para que la rellene la ruta (y, si no se puede, se dibuja: colorearMatched),
+ * en vez de cruzar las casas o —pasados MAX_SEG_M— quedar como un hueco que nadie rellena (#1609).
+ * Solo GANA verdaderos. `largos` = vértices de cada parte, en orden.
+ */
+export function marcarJuntasRectas(coords: [number, number][], esCrudo: boolean[], largos: number[]): void {
+  let off = 0;
+  for (let p = 0; p < largos.length; p++) {
+    const s = off;
+    off += largos[p];
+    if (p === 0 || largos[p] === 0 || s === 0 || s >= coords.length || s >= esCrudo.length) continue;
+    const a = coords[s - 1], b = coords[s];
+    if (distM(a[1], a[0], b[1], b[0]) > MAX_SEG_CRUDO_M) { esCrudo[s - 1] = true; esCrudo[s] = true; }
+  }
+}
+
+/**
+ * Rangos [ini,fin] de crudo POR VÉRTICE y frontera de la cola viva, sobre los primeros `n` vértices
+ * de `esCrudoTodo` (EXTRAÍDA de `crearAjustadorHuella`, que la llama con `n = min(coords, esCrudo)`;
+ * la traza guardada la llama al decodificar — así lo guardado y lo de memoria se leen igual).
+ *   • crudoRanges: corridas contiguas de `true` (esto SÍ incluye las ventanas MIXTAS: snapped=true con
+ *     fixes crudos de RED intercalados — el bug #875 de rectas naranjas sobre casas), fusionando las
+ *     separadas por ≤1 vértice limpio (evita confeti). Se EXCLUYE la corrida que toca el ÚLTIMO índice
+ *     (punta viva → la cubre colaViva, no parpadea).
+ *   • colaClean: último vértice de VÍA limpia. colaViva ancla ahí y el consumidor NO dibuja el crudo de
+ *     la punta como medido (lo rellena por la ruta). GPS bueno → n-1 → sin cambios. Sin vértices, -1.
+ * Byte a byte el bloque original (scripts/prueba-traza-ajustada.mts §1).
+ */
+export function rangosDeCrudo(esCrudoTodo: boolean[], n: number): { crudoRanges: Array<[number, number]>; colaClean: number } {
+  const rangos: Array<[number, number]> = [];
+  let idx = 0;
+  while (idx < n) {
+    if (esCrudoTodo[idx]) {
+      let j = idx;
+      while (j + 1 < n && (esCrudoTodo[j + 1] || (j + 2 < n && esCrudoTodo[j + 2]))) j++;   // fusiona ≤1 limpio
+      rangos.push([idx, j]);
+      idx = j + 1;
+    } else idx++;
+  }
+  const crudoRanges = rangos.filter(([, e]) => e < n - 1);   // fuera la corrida de la punta viva (colaViva la cubre)
+  let colaClean = n - 1;
+  for (let k = n - 1; k >= 0; k--) { if (!esCrudoTodo[k]) { colaClean = k; break; } }
+  return { crudoRanges, colaClean };
 }

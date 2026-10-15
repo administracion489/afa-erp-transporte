@@ -8,7 +8,7 @@ import "mapbox-gl/dist/mapbox-gl.css";   // el CSS sí es estático (no arrastra
 import { cargarMapbox as cargarMapboxCompartido, type MapboxAPI } from "@/lib/mapbox-carga";
 import { animarMarcador, animarMarcadorPorCamino, tweenEnVuelo } from "@/lib/anim-marker";
 import {
-  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
+  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos, corridaCrudaEnLaVia,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM,
   pegarIconoAVia, caminoEntreSnaps, enParalelo, crearFiltroFixVivo,
@@ -1016,7 +1016,7 @@ export default function ClientePortal() {
         if (!filtrosVivoRef.current[k]) filtrosVivoRef.current[k] = crearFiltroFixVivo();
         // Glitch de red aislado (salto imposible que el propio track corrige solo) → conservar
         // la posición previa de ESTE bus en vez de mover el marcador a la posición falsa.
-        if (filtrosVivoRef.current[k](Number(g.lat), Number(g.lng), tMs(g))) merged[k] = g;
+        if (filtrosVivoRef.current[k](Number(g.lat), Number(g.lng), tMs(g), g.precision_m == null ? null : Number(g.precision_m))) merged[k] = g;
       });
       const ahora = Date.now();
       return Object.values(merged).filter((g: any) => ahora - tMs(g) <= MAX_EDAD_MS);
@@ -1754,7 +1754,7 @@ export default function ClientePortal() {
       const candidatos = [...cruditos, ...calcularPuentes(limpio)];
       const suprimir: Array<[number, number]> = [];
       const MAX_PUENTES = 30;
-      if (candidatos.length > MAX_PUENTES) console.warn(`[cliente] ${candidatos.length} huecos, puenteando ${MAX_PUENTES}`);
+      // El tope limita SOLO las consultas a Google; seguir la ruta prevista no paga y va para todos (#1609).
       const rutaPlan = rutasEnVivoRef.current[rid] || [];
       const cache = puentesCacheCliRef.current;
       const feats: any[] = [];
@@ -1772,7 +1772,7 @@ export default function ClientePortal() {
       // Puentes en DOS FASES (mismo fix que ModalGps, ago-2026 "la huella tarda"): FASE 1 síncrona
       // por la ruta planificada; FASE 2 con los fetch de Google EN PARALELO acotado (6). Slots por
       // índice → mismo orden de features y misma geometría que el camino secuencial.
-      const cands = candidatos.slice(0, MAX_PUENTES);
+      const cands = candidatos;
       const slots: any[] = new Array(cands.length).fill(null);
       const fixesCand: { lat: number; lng: number }[][] = cands.map(fixesDelTramo);   // evidencia real por candidato
       const porGoogle: number[] = [];
@@ -1791,7 +1791,8 @@ export default function ClientePortal() {
       // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco), con tope de
       //    concurrencia. Un `key` repetido dentro del mismo lote comparte UNA sola llamada.
       const enVuelo = new Map<string, Promise<void>>();
-      await enParalelo(porGoogle, 6, async (ci) => {
+      if (porGoogle.length > MAX_PUENTES) console.warn(`[cliente] ${porGoogle.length} tramos por Google, consultando ${MAX_PUENTES}`);
+      await enParalelo(porGoogle.slice(0, MAX_PUENTES), 6, async (ci) => {
         if (cancel) return;
         const c = cands[ci];
         const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
@@ -1840,6 +1841,8 @@ export default function ClientePortal() {
       // Ensamblado EN ORDEN de candidatos (idéntico al secuencial): features + supresión del crudo ruteado.
       for (let ci = 0; ci < cands.length; ci++) {
         if (!slots[ci]) continue;
+        // Los fixes de la corrida ya van por la vía del estimado → huella MEDIDA, no estimada (#1309).
+        if (corridaCrudaEnLaVia(cands[ci], slots[ci].geometry?.coordinates, matchedEnVivoRefMap.current[rid] || [], limpio)) continue;
         feats.push(slots[ci]);
         if (cands[ci].origen === "crudo") suprimir.push([cands[ci].iA + 1, cands[ci].iB - 1]);
       }

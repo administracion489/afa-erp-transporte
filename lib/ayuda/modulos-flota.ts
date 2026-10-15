@@ -508,32 +508,52 @@ export const MODULOS_FLOTA: AyudaModulo[] = [
   {
     clave: "seguros",
     rutas: ["/seguros"],
-    titulo: "Seguros · pólizas de la flota y de la gente",
+    titulo: "Seguros · todo lo asegurado, venga de donde venga",
     resumen:
-      "Un solo lugar para todas las pólizas: las de los vehículos (SOAT, CAT, Todo Riesgo, Responsabilidad Civil) y las de los trabajadores (SCTR Salud, SCTR Pensión, Vida Ley). Te dice qué vence, cuándo, y cuánto te cuesta al año y al mes.",
+      "Junta en una sola tabla todos los seguros que el ERP ya conoce: el SOAT y demás documentos de cada placa, lo de las unidades tercerizadas, el SCTR y Vida Ley de la ficha de cada persona, y las pólizas colectivas que registras aquí. Cada fila dice de dónde sale y se corrige donde vive. Arriba, la **Cobertura faltante** nombra a quién le falta un seguro obligatorio.",
     paraQueSirve: [
-      "No perder de vista un vencimiento que deja una unidad o un trabajador sin cobertura.",
-      "Saber cuánto te cuesta el bloque de seguros: prima anual total y cuota mensual total.",
-      "Separar lo obligatorio de lo complementario, para saber qué es riesgo legal y qué es decisión comercial.",
+      "Ver de un vistazo qué unidad no tiene SOAT/CAT vigente y qué trabajador no tiene SCTR Salud, SCTR Pensión o Vida Ley.",
+      "No perder de vista un vencimiento: la franja de 60 días dice qué toca renovar.",
+      "Registrar las pólizas COLECTIVAS (SCTR, Vida Ley, Responsabilidad Civil o Todo Riesgo de flota) y marcar a quién cubre cada una.",
+      "Saber cuánto te cuestan las pólizas de AFA: prima anual y cuota mensual (las de terceros no suman).",
       "Tener a mano el número de póliza, la aseguradora y el PDF cuando hay un siniestro.",
-      "Ver en la franja de 60 días qué toca renovar antes de que te agarre encima.",
     ],
     conceptos: ["vencimiento", "devengado", "periodo_contable", "cuentas_por_pagar"],
     faqs: [
       {
+        pregunta: "¿De dónde sale cada fila y dónde la corrijo?",
+        respuesta:
+          "Cada fila lleva un chip con su **fuente**, y se corrige en esa pantalla, no aquí:\n\n• **Documentos vehiculares** — el SOAT, CAT, Todo Riesgo o Resp. Civil cargado en los documentos de una placa propia. Se edita en los documentos de esa unidad.\n• **Tercerizadas** — lo mismo para las unidades y empresas tercerizadas (incluido su SCTR y Vida Ley). Se edita en Tercerizadas.\n• **Ficha del conductor** / **Ficha del personal** — las fechas de SCTR Salud, SCTR Pensión y Vida Ley escritas en la ficha de la persona. Se editan en Conductores o en Personal administrativo.\n• **Póliza** — una póliza colectiva registrada aquí. Es la única que se edita y se elimina desde esta pantalla.\n\nPor eso las filas que no son póliza traen un botón **Editar en …** en vez de lápiz: cada dato tiene un solo lugar donde se escribe, y así nunca hay dos fechas distintas para el mismo papel.",
+      },
+      {
+        pregunta: "¿Qué es una póliza colectiva y cómo marco a quién cubre?",
+        respuesta:
+          "Es una póliza que cubre a varios a la vez: el SCTR de toda la planilla, la Vida Ley, o una Responsabilidad Civil de flota. Con **+ Nueva póliza colectiva** registras sus datos y, abajo, marcas a sus **asegurados**: conductores, personal, vehículos propios y de terceros, con buscador y **Marcar todos**. El PDF de la póliza se sube ahí mismo y queda guardado de forma privada.\n\nCuando una persona está en una póliza de SCTR o Vida Ley, **manda la póliza**: en su ficha ese campo queda en solo lectura y dice **Cubierto por la póliza N° …** con su vencimiento. Si no está en ninguna, vale la fecha de su ficha, como siempre.\n\nEl **SOAT y el CAT no se registran aquí**: son de cada placa y van en sus documentos, porque de esa fecha depende que la unidad quede apta para circular. Si eliges SOAT o CAT, la pantalla te manda a Documentos vehiculares.\n\nSi la pantalla dice que falta **supabase/seguros-02-cobertura.sql**, todavía no se puede marcar a quién cubre una póliza: alguien tiene que correr ese SQL en Supabase.",
+      },
+      {
+        pregunta: "Mi póliza cubre SCTR Salud, SCTR Pensión y Vida Ley a la vez. ¿La registro tres veces?",
+        respuesta:
+          "No. Registra **una sola póliza** y marca los tipos que cubre: sale en una fila (por ejemplo **SCTR Salud + Pensión + Vida Ley**), su prima se cuenta **una vez** y cada persona que marques queda cubierta en los tres. Es obligatoria si cualquiera de sus tipos lo es.\n\nSi la pantalla dice que falta **supabase/seguros-04a-coberturas-e-inclusion.sql**, todavía solo se puede elegir un tipo por póliza: alguien tiene que correr ese SQL en Supabase.",
+      },
+      {
+        pregunta: "Entró un trabajador nuevo. ¿Cuándo queda cubierto por el SCTR?",
+        respuesta:
+          "**Recién cuando la aseguradora confirma la inclusión**, no cuando lo pides. El camino es:\n\n1. Lo agregas a la póliza como **inclusión solicitada**, con la fecha en que se la pediste al bróker. El ERP arma la lista que pide el bróker (nombre, DNI, fecha de nacimiento, cargo, fecha de ingreso y, si lo pide, el sueldo) para pegarla en el correo o en Excel, y te avisa a quién le falta el DNI o la fecha de nacimiento: sin esos dos la aseguradora la devuelve.\n2. Mientras esté **solicitada**, esa persona **no está cubierta**: la Cobertura faltante dice «Inclusión al … solicitada al bróker el DD/MM (N días), sin activar», y su ficha **no la tapa** aunque tenga una fecha escrita.\n3. Cuando llega la constancia, la marcas **incluida** con la fecha desde la que cubre. Si esa fecha es futura, dice «incluido desde el DD/MM: no lo asignes antes».\n\nUna baja se marca **excluida** con su fecha de fin: desde ese día deja de estar cubierto.",
+      },
+      {
+        pregunta: "¿Qué dice la Cobertura faltante y por qué a veces no la juzga?",
+        respuesta:
+          "Revisa la flota y las personas **activas**:\n\n• Cada unidad (propia o tercerizada) tiene que tener **SOAT o CAT vigente**. Una unidad sin ningún documento sale **Sin SOAT/CAT**, nunca en verde.\n• Cada conductor y cada persona del personal tiene que tener **SCTR Salud**, **SCTR Pensión** y **Vida Ley** (por una póliza o por su ficha).\n• Cada empresa tercerizada con unidades activas, sus SCTR y Vida Ley.\n\nUna persona con una **inclusión pedida y sin confirmar** (o confirmada pero que aún no empieza) sale como tal, también en rojo: todavía no está cubierta.\n\nCada aviso dice **dónde se corrige** y trae el enlace. En rojo lo vencido o lo que no existe; en ámbar lo que falta completar; en gris **Registrado dos veces** (la ficha y una póliza dicen fechas distintas: vale la póliza y conviene vaciar la ficha).\n\nUn **SCTR** registrado sin decir si es Salud o Pensión no cuenta para ninguno de los dos: corrige su tipo donde se registró.\n\nSi una fuente no se pudo leer, esa parte **no se juzga** y la pantalla lo dice; los números muestran **?**, nunca un cero, porque no saber no es lo mismo que no tener.",
+      },
+      {
         pregunta: "¿Cuáles son obligatorios y qué pasa de verdad si se me vence uno?",
         respuesta:
-          "El ERP los marca con 🔴 **Obligatorios**. Son de dos familias distintas:\n\n**Del vehículo**\n• **SOAT** — sin él la unidad no puede circular: multa, retención de la unidad y, si hay accidente, los daños a terceros los pagas tú.\n• **CAT** — la alternativa al SOAT en algunas provincias.\n\n**De las personas** (estos los fiscaliza SUNAFIL, no la policía de tránsito)\n• **SCTR Salud** y **SCTR Pensión** — obligatorios porque el transporte es actividad de riesgo. Si un trabajador se accidenta sin SCTR vigente, la atención y la indemnización las asume la empresa, más la multa.\n• **Vida Ley (D.L. 688)** — el seguro de vida que la empresa contrata para su trabajador. En **Personal administrativo** el ERP te lanza el aviso cuando alguien llega a los 4 años de antigüedad, que es el hito clásico que se pasa por alto. En **Conductores** ese aviso automático no existe: ahí tienes la casilla Vida Ley con su fecha de vencimiento, y la fecha sí entra al semáforo, pero el recordatorio de los 4 años lo tienes que llevar tú.\n\nLos complementarios (🔵 Todo Riesgo, Responsabilidad Civil, seguro de carga, patrimonio) no son exigencia legal, pero **sí suelen ser exigencia del cliente corporativo en la licitación**: una minera o una empresa grande te va a pedir póliza de responsabilidad civil con un monto mínimo antes de firmar.\n\n**Los montos de multa y las coberturas exactas dependen de la norma vigente y de tu póliza. Confírmalos con tu corredor de seguros y con tu asesor laboral** — el ERP te avisa de la fecha, no interpreta el contrato.",
+          "El ERP los marca con 🔴 **Obligatorios**. Son de dos familias distintas:\n\n**Del vehículo**\n• **SOAT** — sin él la unidad no puede circular: multa, retención de la unidad y, si hay accidente, los daños a terceros los pagas tú.\n• **CAT** — la alternativa al SOAT en algunas provincias.\n\n**De las personas** (estos los fiscaliza SUNAFIL, no la policía de tránsito)\n• **SCTR Salud** y **SCTR Pensión** — obligatorios porque el transporte es actividad de riesgo. Si un trabajador se accidenta sin SCTR vigente, la atención y la indemnización las asume la empresa, más la multa.\n• **Vida Ley (D.L. 688)** — el seguro de vida que la empresa contrata para su trabajador.\n\nLos complementarios (🔵 Todo Riesgo, Responsabilidad Civil, seguro de carga, patrimonio) no son exigencia legal, pero **sí suelen ser exigencia del cliente corporativo en la licitación**.\n\n**Los montos de multa y las coberturas exactas dependen de la norma vigente y de tu póliza. Confírmalos con tu corredor de seguros y con tu asesor laboral** — el ERP te avisa de la fecha, no interpreta el contrato.",
       },
       {
         pregunta: "¿Pongo Prima total o Cuota mensual? ¿Qué diferencia hay?",
         respuesta:
-          "• **Prima total** es lo que cuesta la póliza por todo el período, normalmente un año. Es el precio del contrato.\n• **Cuota mensual** es lo que le pagas a la aseguradora cada mes si la financiaste en cuotas.\n\nPuedes llenar las dos. Los KPIs de arriba las suman por separado: **Prima anual** te dice cuánto pesa el bloque de seguros en el año, y **Cuota mensual** cuánto sale de caja este mes.\n\nUna cosa que conviene tener en la cabeza: si pagaste S/ 12,000 de golpe en enero por una póliza anual, contablemente ese gasto **no es todo de enero** — le corresponde S/ 1,000 a cada mes del año. Eso es lo que se llama devengar. Cargarlo entero a enero hace que enero se vea pésimo y los once meses siguientes se vean mejores de lo que son.\n\n**Cómo se registra ese reparto en tus libros lo define tu contador.** Esta pantalla lleva el control de la póliza; el asiento contable es otra cosa.",
-      },
-      {
-        pregunta: "El SOAT ya lo cargué en Documentos Vehiculares. ¿Lo cargo otra vez aquí?",
-        respuesta:
-          "Sí, y no es duplicar: son dos preguntas distintas sobre el mismo papel.\n\n• En **Documentos Vehiculares** el SOAT es un **requisito para circular**. Lo que importa ahí es la fecha: si vence, la unidad pasa a “No apto” y no debería salir.\n\n• Aquí el SOAT es una **póliza con un costo y una aseguradora**. Lo que importa es cuánto te cuesta, con quién está contratada, con qué broker y cuánto suma al total de primas del año.\n\nSi solo te interesa el control operativo, con Documentos Vehiculares te basta. Si quieres saber cuánto gasta AFA en seguros al año y negociar la renovación con números, cárgalo también aquí. Lo que **no** debes hacer es llevar dos fechas de vencimiento distintas para el mismo papel: cuando renueves, actualiza las dos.",
+          "• **Prima total** es lo que cuesta la póliza por todo el período, normalmente un año.\n• **Cuota mensual** es lo que le pagas a la aseguradora cada mes si la financiaste en cuotas.\n\nPuedes llenar las dos. Los KPIs suman solo lo que paga AFA: las primas de las unidades tercerizadas cuentan para el cumplimiento, pero no son gasto tuyo.\n\nSi pagaste S/ 12,000 de golpe en enero por una póliza anual, contablemente ese gasto **no es todo de enero**: le corresponde una parte a cada mes del año (devengar). **Cómo se registra ese reparto en tus libros lo define tu contador.**",
       },
     ],
     relacionadas: [

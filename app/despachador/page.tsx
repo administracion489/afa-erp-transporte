@@ -7,6 +7,9 @@ import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
+import { hoyLima } from "@/lib/alertas";
+import { pendientesDeCotizar } from "@/lib/despacho-sin-cotizar";
+import { leerDespachosSinCotizar } from "@/lib/despacho-sin-cotizar-datos";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
@@ -191,6 +194,14 @@ const FORM0 = {
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function DespachadorPage() {
+  // Servicios del despachador de días anteriores sin cotizar (mismo predicado que /cotizaciones).
+  const [pendAnteriores, setPendAnteriores] = useState<number | null>(null);
+  useEffect(() => {
+    const hoy = hoyLima();
+    leerDespachosSinCotizar(supabase)
+      .then(({ filas }) => setPendAnteriores(pendientesDeCotizar(filas).filter((r) => String(r.fecha_servicio ?? "") < hoy).length))
+      .catch(() => setPendAnteriores(null));
+  }, []);
   const mapsLoaded = useGoogleMaps();
 
   // ── Data ───────────────────────────────────────────────────────────────────
@@ -499,6 +510,11 @@ export default function DespachadorPage() {
           <p className="text-sm text-gray-400 mt-0.5">
             Genera servicios urgentes · pasan directo a Programación con alerta en Cotizaciones y Facturación
           </p>
+          {(pendAnteriores ?? 0) > 0 && (
+            <a href="/cotizaciones?regularizar=1" className="inline-block mt-1 text-xs font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded-full px-2 py-0.5 hover:bg-purple-100">
+              {pendAnteriores} servicio{pendAnteriores === 1 ? "" : "s"} del despachador de días anteriores sin cotizar · Regularizar
+            </a>
+          )}
         </div>
 
         {/* KPIs */}

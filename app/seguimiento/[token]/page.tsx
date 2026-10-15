@@ -162,7 +162,7 @@ export default function SeguimientoPage() {
         if (data.ultimaUbicacion) {
           // Siembra el filtro con el primer fix (siempre se acepta) para que las comparaciones
           // de velocidad del realtime/poll de abajo tengan una referencia desde el inicio.
-          filtroVivoRef.current(data.ultimaUbicacion.lat, data.ultimaUbicacion.lng, new Date(data.ultimaUbicacion.created_at).getTime());
+          filtroVivoRef.current(data.ultimaUbicacion.lat, data.ultimaUbicacion.lng, new Date(data.ultimaUbicacion.created_at).getTime(), data.ultimaUbicacion.precision_m);
           ubicacionRef.current = data.ultimaUbicacion;
           setUbicacion(data.ultimaUbicacion);
           setUltimaActualizacion(new Date(data.ultimaUbicacion.created_at));
@@ -424,7 +424,7 @@ export default function SeguimientoPage() {
           const nueva = data.ultimaUbicacion as UbicacionGPS;
           if (!ubicacionRef.current || ubicacionRef.current.created_at !== nueva.created_at) {
             const tsFix = nueva.created_at ? new Date(nueva.created_at).getTime() : NaN;
-            if (!Number.isFinite(tsFix) || filtroVivoRef.current(nueva.lat, nueva.lng, tsFix)) {
+            if (!Number.isFinite(tsFix) || filtroVivoRef.current(nueva.lat, nueva.lng, tsFix, nueva.precision_m)) {
               ubicacionRef.current = nueva;
               setUbicacion(nueva);
             }

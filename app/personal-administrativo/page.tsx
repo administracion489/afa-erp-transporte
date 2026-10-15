@@ -1,7 +1,11 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { vencimientoPersona, type PolizaRow, type CoberturaRow, type TipoPersona } from "@/lib/seguros";
+import { leerPolizasPersonas } from "@/lib/seguros-datos";
+import { fechaLima } from "@/lib/documentos-estado";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -167,6 +171,87 @@ const DEPTO_COLORES: Record<string, { color: string; bg: string }> = {
   "Logística / Flota":   { color: "#854d0e", bg: "#fef9c3" },
 };
 
+// ─── PÓLIZAS COLECTIVAS (seguros-02 / seguros-04a) ────────────────────────────
+// Si la persona está en una póliza de ese tipo, manda la PÓLIZA (misma cascada que /seguros y que
+// v_seguro_persona: `vencimientoPersona`, con el «hoy» de Lima). Una inclusión SOLICITADA o que
+// todavía no empieza ('pendiente') tampoco deja editar la ficha: no está cubierto y la ficha no lo
+// tapa. Lectura best-effort con el MISMO lector del tick y del login (`leerPolizasPersonas`): sin
+// las tablas, o si falla, la ficha se edita como siempre y no se dice nada.
+
+type CoberturaPoliza = {
+  numero: string; vence: string | null; seguroId: number;
+  /** inclusión en trámite: 'solicitada' (fecha = solicitud) o 'por_iniciar' (fecha = inicio) */
+  pendiente?: { estado: "solicitada" | "por_iniciar"; fecha: string | null };
+};
+
+function usePolizasPersona(clase: "conductor" | "personal") {
+  const [datos, setDatos] = useState<{ polizas: PolizaRow[]; coberturas: CoberturaRow[]; numeros: Map<number, string> }>(
+    { polizas: [], coberturas: [], numeros: new Map() });
+  const hoy = fechaLima();
+  useEffect(() => {
+    let vivo = true;
+    (async () => {
+      try {
+        const r = await leerPolizasPersonas(supabase);
+        if (!r) return;
+        // El número de póliza solo se usa para el rótulo: si no se lee, se enseña «#id».
+        const numeros = new Map<number, string>();
+        const n = await supabase.from("seguros").select("id,numero_poliza").order("id", { ascending: true }).limit(1000);
+        for (const p of (n.error ? [] : n.data ?? []) as { id: number; numero_poliza: string | null }[]) {
+          if (p.numero_poliza) numeros.set(Number(p.id), String(p.numero_poliza));
+        }
+        if (vivo) setDatos({ polizas: r.polizas, coberturas: r.coberturas, numeros });
+      } catch { /* sin pólizas: la ficha manda, como siempre */ }
+    })();
+    return () => { vivo = false; };
+  }, [clase]);
+  return (id: number | null, tipo: TipoPersona): CoberturaPoliza | null => {
+    if (id == null) return null;
+    const v = vencimientoPersona({ clase, id, nombre: "", activo: true }, datos.polizas, datos.coberturas, tipo, hoy);
+    const rot = (sid: number) => datos.numeros.has(sid) ? `N° ${datos.numeros.get(sid)}` : `#${sid}`;
+    if (v.fuente === "pendiente" && v.inclusion) {
+      const sid = v.inclusion.seguroId;
+      return { numero: rot(sid), vence: null, seguroId: sid, pendiente: { estado: v.inclusion.estado, fecha: v.inclusion.fecha } };
+    }
+    if (v.fuente !== "poliza" || v.seguroId == null) return null;
+    return { numero: rot(v.seguroId), vence: v.vencimiento, seguroId: v.seguroId };
+  };
+}
+
+function fmtVence(f: string | null) {
+  const s = String(f ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "sin fecha";
+  const [a, m, d] = s.split("-");
+  return `${d}/${m}/${a}`;
+}
+function fmtDiaMes(f: string | null) {
+  const s = String(f ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "—";
+  const [, m, d] = s.split("-");
+  return `${d}/${m}`;
+}
+
+/** El campo de la ficha cuando lo cubre una póliza (o hay una inclusión en trámite): solo
+ *  lectura, con su porqué y dónde se edita. */
+function CubiertoPorPoliza({ c }: { c: CoberturaPoliza }) {
+  if (c.pendiente) {
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        {c.pendiente.estado === "solicitada"
+          ? <>Inclusión solicitada en la póliza {c.numero}{c.pendiente.fecha ? ` el ${fmtDiaMes(c.pendiente.fecha)}` : ""}: su ficha no cuenta hasta activarla. No está cubierto todavía.</>
+          : <>Incluido en la póliza {c.numero} desde el {fmtDiaMes(c.pendiente.fecha)}: su ficha no cuenta. Antes de esa fecha no está cubierto.</>}{" "}
+        <Link href="/seguros" className="font-bold underline">Se gestiona en Seguros →</Link>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+      Cubierto por la póliza {c.numero} (vence {fmtVence(c.vence)}).{" "}
+      <Link href="/seguros" className="font-bold underline">Se edita en Seguros →</Link>
+    </div>
+  );
+}
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function PersonalAdministrativoPage() {
@@ -181,6 +266,10 @@ export default function PersonalAdministrativoPage() {
   const [filtroDepto, setFiltroDepto] = useState("todos");
   const [filtroAlerta,setFiltroAlerta]= useState("todos");
   const [form, setForm] = useState(FORM_VACIO);
+  const polizaDe = usePolizasPersona("personal");
+  const cubSalud = polizaDe(editandoId, "sctr_salud");
+  const cubPension = polizaDe(editandoId, "sctr_pension");
+  const cubVidaLey = polizaDe(editandoId, "vida_ley");
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -510,7 +599,7 @@ export default function PersonalAdministrativoPage() {
             {/* Alerta vida ley */}
             {form.fecha_ingreso && (() => {
               const años = Math.floor((Date.now() - new Date(form.fecha_ingreso + "T00:00:00").getTime()) / (365.25 * 86400000));
-              if (años >= 4 && !form.vida_ley) return (
+              if (años >= 4 && !form.vida_ley && !cubVidaLey) return (
                 <div className="mt-3 rounded-xl px-4 py-2.5 text-xs text-amber-800 border border-amber-200" style={{ background: "#fef9c3" }}>
                   ⚠️ <b>Seguro Vida Ley obligatorio</b> — este trabajador tiene {años} años de antigüedad. El D.L. 688 obliga el seguro desde 4 años. Actívalo abajo.
                 </div>
@@ -547,11 +636,13 @@ export default function PersonalAdministrativoPage() {
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Seguridad y Salud en el Trabajo — SST / SUNAFIL</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Campo label="🏥 SCTR Salud — vencimiento">
-                <input type="date" className={inputCls(estadoFecha(form.sctr_salud_venc) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.sctr_salud_venc} onChange={f("sctr_salud_venc")} />
+                {cubSalud ? <CubiertoPorPoliza c={cubSalud} /> :
+                <input type="date" className={inputCls(estadoFecha(form.sctr_salud_venc) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.sctr_salud_venc} onChange={f("sctr_salud_venc")} />}
                 <p className="text-[10px] text-gray-400 mt-0.5">Obligatorio planilla · renovar anualmente</p>
               </Campo>
               <Campo label="💼 SCTR Pensión — vencimiento">
-                <input type="date" className={inputCls(estadoFecha(form.sctr_pension_venc) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.sctr_pension_venc} onChange={f("sctr_pension_venc")} />
+                {cubPension ? <CubiertoPorPoliza c={cubPension} /> :
+                <input type="date" className={inputCls(estadoFecha(form.sctr_pension_venc) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.sctr_pension_venc} onChange={f("sctr_pension_venc")} />}
                 <p className="text-[10px] text-gray-400 mt-0.5">Complementa SCTR Salud</p>
               </Campo>
               <Campo label="🩺 Examen médico ocup. — vencimiento">
@@ -563,6 +654,10 @@ export default function PersonalAdministrativoPage() {
                 <p className="text-[10px] text-gray-400 mt-0.5">Penales · policiales · judiciales · 3 meses</p>
               </Campo>
               <div className="flex flex-col gap-2">
+                {cubVidaLey ? (<>
+                  <p className="text-sm font-bold text-gray-700 mt-5">💛 Seguro Vida Ley (D.L. 688)</p>
+                  <CubiertoPorPoliza c={cubVidaLey} />
+                </>) : (<>
                 <label className="flex items-center gap-2 cursor-pointer mt-5">
                   <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" checked={form.vida_ley} onChange={f("vida_ley")} />
                   <span className="text-sm font-bold text-gray-700">💛 Seguro Vida Ley (D.L. 688)</span>
@@ -570,6 +665,7 @@ export default function PersonalAdministrativoPage() {
                 {form.vida_ley && (
                   <input type="date" className={inputCls()} placeholder="Vencimiento póliza" value={form.vida_ley_venc} onChange={f("vida_ley_venc")} />
                 )}
+                </>)}
                 <p className="text-[10px] text-gray-400">Obligatorio desde 4 años de antigüedad</p>
               </div>
             </div>

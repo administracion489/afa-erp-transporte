@@ -26,7 +26,7 @@ const cubetas = new Map<string, Cubeta>();
 const LIMPIEZA_CADA_MS = 5 * 60_000;
 let ultimaLimpieza = 0;
 
-function ipDe(req: NextRequest): string {
+export function ipDe(req: NextRequest): string {
   // Vercel y la mayoría de proxies ponen la IP real del cliente al inicio de x-forwarded-for.
   const fwd = req.headers.get("x-forwarded-for");
   if (fwd) return fwd.split(",")[0].trim();

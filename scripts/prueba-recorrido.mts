@@ -675,9 +675,14 @@ seccion("6 · la huella del modal: huellaDeFilas, segmentosHuella y la rampa de 
     `viejo ${cerosViejo} · nuevo ${basuraNueva} · divergen ${divergen}`);
   chk("una fila nula no rompe nada y no cuenta", JSON.stringify(H.huellaDeFilas([null, ...tramo(T0, 30, 40), null] as any)) === JSON.stringify(H.huellaDeFilas(tramo(T0, 30, 40))));
   chk("sin filas: las tres etapas vacías", JSON.stringify(H.huellaDeFilas(null)) === JSON.stringify({ brutos: [], crudos: [], limpio: [] }));
+  // El filtro de la huella de /api/cliente/gps se mudó (sin cambiarlo) a lib/gps-huella-servicio.ts
+  // (filasDelServicio), que la ruta usa por huellaDelServicio — scripts/prueba-traza-ajustada.mts §6.
   const srcGps = leer("app/api/cliente/gps/route.ts");
-  chk("PRECISION_MAX_HUELLA_M = 1500 y /api/cliente/gps lo usa (sin el literal)",
-    H.PRECISION_MAX_HUELLA_M === 1500 && srcGps.includes("p.precision_m <= PRECISION_MAX_HUELLA_M") && !/precision_m\s*<=\s*1500/.test(srcGps));
+  const srcHuellaServicio = leer("lib/gps-huella-servicio.ts");
+  chk("PRECISION_MAX_HUELLA_M = 1500 y /api/cliente/gps lo usa (sin el literal), vía lib/gps-huella-servicio.ts",
+    H.PRECISION_MAX_HUELLA_M === 1500 && srcHuellaServicio.includes("p.precision_m <= PRECISION_MAX_HUELLA_M")
+    && !/precision_m\s*<=\s*1500/.test(srcHuellaServicio) && !/precision_m\s*<=\s*1500/.test(srcGps)
+    && srcGps.includes("huellaDelServicio("));
   chk(`huellaCrudaFeatures y segmentosHuella = la versión anterior (${seg} combinaciones)`, segIg === seg, `${seg - segIg}`);
   chk(`cortaEntre = partir la huella ahí y aplicar la anterior a cada pedazo (${conCorte})`, corteIg === conCorte, `${conCorte - corteIg}`);
   chk("ningún segmento cruza un corte y `tramo` no retrocede", cruzan === 0 && tramoMal === 0, `${cruzan} · ${tramoMal}`);
@@ -1057,8 +1062,10 @@ seccion("8 · la clave de la ruta prevista (paradasParaFirma ↔ /api/ruta) y le
   chk("/api/ruta sigue leyendo las coordenadas y firmando como la copia literal",
     srcRuta.includes('lat:    typeof p.lat === "string" ? parseFloat(p.lat) : Number(p.lat),')
     && srcRuta.includes('lng:    typeof p.lng === "string" ? parseFloat(p.lng) : Number(p.lng),')
-    && srcRuta.includes("const firma = firmaRuta(paradas);") && srcRuta.includes("await leerRutaCache(firma)")
-    && srcRuta.includes("await guardarRutaCache(firma, payload)"));
+    && srcRuta.includes("const firma = firmaRuta(paradas);") && srcRuta.includes("leerRutaCache(firma)")
+    && srcRuta.includes("await guardarRutaCache(firma, payload)")
+    // La ruta propia (rutas_propias) se lee y se arma con la MISMA firma.
+    && srcRuta.includes("rutaPropiaParaReserva(firma,") && srcRuta.includes("armarRutaPropia(firma,"));
 
   // ── leerRutasCache: un cliente falso que registra cada consulta ──
   function clienteFalso(filas: any[], error: any = null) {
@@ -1884,6 +1891,41 @@ seccion("13 · una traza con un punto rápido cada 11 s ya no fabrica miles de d
   const srcRuta = fs.readFileSync(path.join(process.cwd(), "app/api/seguimiento/recorrido/route.ts"), "utf8");
   chk("la ruta no cachea un recorrido de más de 1 MB (y lo sirve igual)",
     /const MAX_BYTES_CACHE = 1_000_000;/.test(srcRuta) && srcRuta.includes("if (JSON.stringify(payload).length > MAX_BYTES_CACHE) return;"));
+}
+
+seccion("14 · la RUTA PROPIA (GPS real, rutas_propias): después de la de Google vigente, y del cliente del servicio");
+{
+  const pA = { id: 1, orden: 1, nombre: "A", lat: -12.10, lng: -77.03, estado: "completada", hora_estimada: null };
+  const pB = { id: 2, orden: 2, nombre: "B", lat: -12.12, lng: -77.03, estado: "completada", hora_estimada: null };
+  const claves = R.clavesRutaPrevista([pA, pB], null, { origen: "A", destino: "B" });
+  const f = claves.variantes[0].firma;
+  const google = new Map<string, any>([[f, { coordenadas: [[-77.03, -12.10], [-77.03, -12.11], [-77.03, -12.12]] }]]);
+  const propia = new Map<string, any>([[f, { coordenadas: [[-77.03, -12.10], [-77.031, -12.12]], fuente: "propia", fuente_fecha: "2026-09-05" }]]);
+  const vacio = new Map<string, any>();
+  const g = R.resolverRutaPrevista(claves, google, propia);
+  chk("la de Google vigente manda sobre la propia", g.estado.codigo === "guardada" && g.estado.fuente === "google" && g.ruta?.length === 3);
+  const p = R.resolverRutaPrevista(claves, vacio, propia);
+  chk("sin la de Google (día 31) queda la propia, y lo dice con su fecha", p.estado.codigo === "guardada" && p.estado.fuente === "propia" && p.ruta?.length === 2 && /GPS real/.test(p.estado.detalle) && /05\/09\/2026/.test(p.estado.detalle));
+  chk("con la consulta de Google caída, la propia sirve igual", R.resolverRutaPrevista(claves, null, propia).ruta?.length === 2);
+  chk("sin propia consultada: el texto de siempre", R.resolverRutaPrevista(claves, vacio).estado.detalle === R.resolverRutaPrevista(claves, vacio, undefined).estado.detalle
+    && !/GPS real/.test(R.resolverRutaPrevista(claves, vacio).estado.detalle));
+  chk("sin ninguna: no_guardada nombra las dos", R.resolverRutaPrevista(claves, vacio, vacio).estado.codigo === "no_guardada" && /GPS real/.test(R.resolverRutaPrevista(claves, vacio, vacio).estado.detalle));
+  chk("propia caída y sin Google: no se afirma que no exista", R.resolverRutaPrevista(claves, vacio, null).estado.codigo === "no_se_pudo_leer");
+  chk("una propia sin coordenadas utilizables no cuenta", R.resolverRutaPrevista(claves, vacio, new Map([[f, { coordenadas: [[0, 0]] }]])).estado.codigo === "no_guardada");
+
+  // armarRecorrido le pide la propia con las MISMAS firmas que a rutas_cache y con el cliente del servicio.
+  let pedidas: string[] = [], cliente: number | null = -1, pedidasCache: string[] = [];
+  const r = { id: 88, estado: "finalizada", fecha_servicio: "2026-10-09", cliente_id: 41, origen: "A", destino: "B", paradas_json: null };
+  const rec = await RD.armarRecorrido(r, [pA, pB], { hoy: "2026-10-14", ahoraMs: Date.parse("2026-10-14T12:00:00Z"), umbral: 90 }, {
+    traza: async () => ({ pts: [], crudas: [], cierreTs: null }) as any,
+    rutasCache: async (cl) => { pedidasCache = cl; return new Map(); },
+    rutasPropias: async (cl, cid) => { pedidas = cl; cliente = cid; return propia; },
+    abordajes: async () => [],
+    fueraDelTecho: async () => false,
+  });
+  chk("armarRecorrido pide la propia con las firmas de la ruta y el cliente del servicio",
+    cliente === 41 && pedidas.length === 1 && pedidas[0] === f && pedidasCache.includes(f), JSON.stringify({ cliente, pedidas }));
+  chk("y la dibuja como ruta prevista", rec.rutaPrevista.codigo === "guardada" && rec.rutaPrevista.fuente === "propia", rec.rutaPrevista.detalle);
 }
 
 if (process.env.DETALLE) console.log(`   (${ok + fallas - okSeccion} comprobaciones en la sección anterior)`);

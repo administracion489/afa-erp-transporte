@@ -402,7 +402,8 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "• **Inmóvil** — llegaron posiciones, pero todas en el mismo punto mientras el recorrido avanzaba: el teléfono no iba en el bus.\n\n" +
           "El aviso separa dos cosas que se atienden distinto: **En ruta sin señal ahora** (más de 5 minutos sin posición con el servicio en curso: llama al conductor, casi siempre es la app cerrada o el teléfono bloqueado) y **Rastreo incompleto**, que ya quedó en el registro del viaje. El titular cuenta **unidades**, no servicios: una unidad con el teléfono mal configurado falla en todos sus viajes y es un solo problema. Cada contador filtra la lista.\n\n" +
           "**Haz clic sobre el porcentaje** (o sobre una fila del aviso) y se abre el **diagnóstico** de ese servicio: por qué se cortó cada tramo y cómo estaba configurado el teléfono del conductor. Está explicado en la pregunta siguiente.\n\n" +
-          "Es el mismo cálculo de **Salud del GPS**, donde ves el historial por conductor para saber a quién hay que configurarle el teléfono.",
+          "Es el mismo cálculo de **Salud del GPS**, donde ves el historial por conductor para saber a quién hay que configurarle el teléfono.\n\n" +
+          "En el mapa del detalle GPS, **un servicio terminado se ajusta a la vía una sola vez y ese recorrido se guarda para siempre**: las siguientes aperturas lo dibujan sin volver a calcularlo. Si después llegan posiciones tardías, se recalcula **como mucho dos veces**. Un servicio **en curso** se sigue ajustando en vivo, como siempre. Junto a la leyenda de la huella verás un aviso que dice cuál de los dos casos es.",
       },
       {
         pregunta: "¿Qué me dice el clic sobre el porcentaje de Rastreo?",
@@ -766,6 +767,11 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
     conceptos: ["igv", "margen", "margen_real", "costo_directo", "amortizacion", "factura"],
     faqs: [
       {
+        pregunta: "¿Qué es \"sin cotizar (Despachador)\" y cómo lo regularizo?",
+        respuesta:
+          "Son servicios creados desde el **Despachador** que no tienen una cotización detrás y siguen pendientes (no cancelados ni marcados como que no la requieren). El chip morado de la cabecera los cuenta y **al pulsarlo** abre la lista, con fecha, cliente, RUTA y ORIGEN → DESTINO, aunque sean de días anteriores.\n\nCada uno tiene cuatro salidas:\n\n1. **Crear cotización**: abre el formulario prellenado (cliente, ruta, fecha, hora y el importe sin IGV). Al guardarla, el servicio queda **vinculado** a ella.\n2. **Vincular a cotización existente**: solo a una cotización **eventual del mismo cliente**.\n3. **Cancelar en Programación**: si no se ejecutó. Se cancela allá, porque Programación te pregunta qué hacer con el importe (S/ 0.00 o falso flete).\n4. **No requiere cotización**: con su motivo escrito (cortesía, servicio interno). Se puede deshacer.\n\nSi el chip dice **?**, no se pudo contar: pasa el mouse para ver el error.",
+      },
+      {
         pregunta: "¿Cómo se llega al precio? Veo tres números distintos.",
         respuesta:
           "Son tres formas de responder la misma pregunta, y el ERP te las enseña juntas para que elijas con criterio:\n\n• **🔧 Cotizador** — el precio calculado desde tus costos reales para esa ruta y esa unidad. Es el que sabe si vas a perder plata.\n• **📋 Tarifario** — el precio oficial que ya tienes fijado para esa ruta. Es el que mantiene la coherencia: que el mismo cliente no reciba dos precios distintos según quién conteste.\n• **⭐ Sugerido** — el **mayor** de los dos anteriores. El ERP no te propone nunca el más barato.\n\nCada uno tiene su botón **Usar**, y abajo queda registrado con qué criterio se fijó el precio (“Modo: cotizador / tarifario / manual”). Ese registro es lo que después te deja explicar por qué un servicio se vendió a S/ 960 y otro parecido a S/ 1,120.",
@@ -789,6 +795,11 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
         pregunta: "¿Por qué a un cliente le sale con IGV y a otro no?",
         respuesta:
           "Porque el ERP lo decide según el tipo de cliente: a una **empresa (B2B)** le propone la cotización **con IGV** y a una **persona (B2C)** sin él. Puedes cambiarlo con el interruptor del formulario; si lo apagas, el PDF sale con la leyenda “No incluye IGV”.\n\nEs una decisión comercial de presentación, no un cambio tributario: el IGV se cobra igual cuando se emite la factura. Lo único que cambia es si el número grande que ve el cliente ya lo incluye o hay que sumárselo aparte.\n\nOjo con esto al comparar precios: el **Tarifario guarda los precios SIN IGV**, y las pantallas se lo suman al mostrarlos. Un precio de tarifario de S/ 949.15 se te muestra como S/ 1,120.\n\nY en el **Cotizador**, el número grande de los tres cuadros es el **sin IGV**; el con IGV va debajo en pequeño. Es a propósito: el IGV **no es tuyo** —lo cobras y se lo entregas a SUNAT—, así que lo que se negocia, lo que sostiene tu margen y lo que hay que comparar contra la competencia es el valor del servicio. Con el número bruto arriba, ese 18 % se lee como parte de tu precio y cada comparación te sale 18 % desviada. Los dos siguen a la vista: el de arriba para decidir, el de abajo para la factura.\n\nLa excepción es el bloque azul **“→ Enviar a Cotizaciones”**: ahí los importes van **con IGV y así lo dicen sus etiquetas**, porque ese es el número que se guarda en la cotización. Si ese bloque mostrara el sin IGV, lo que ves y lo que se guarda serían distintos.",
+      },
+      {
+        pregunta: "La lista no me muestra una cotización vieja. ¿Dónde está?",
+        respuesta:
+          "La lista abre con los **Últimos 90 días** para cargar rápido: no trae de golpe años de cotizaciones. Arriba de la lista están los periodos: **Hoy**, **Últimos 7 días**, **Últimos 30 días**, **Este mes**, **Mes anterior**, **Últimos 90 días**, **Este año**, **Rango de fechas** (eliges desde y hasta) y **Todo**.\n\nAl lado eliges con qué fecha se mide: **Fecha de emisión** (cuándo se creó la cotización) o **Fecha del servicio** (cuándo sale el bus). Con fecha del servicio, las cotizaciones que no tienen esa fecha escrita no aparecen.\n\nEl buscador busca **dentro del periodo elegido**: si no encuentras algo, pulsa **Buscar en todas las fechas** debajo del buscador. Busca por cliente, RUC, ruta, asunto o N°, sin importar tildes ni el orden de las palabras.\n\nLa lista pinta 50 filas; con más, pulsa **Mostrar 50 más** al final. Los indicadores de arriba (Total, Pendientes, Tasa…) cuentan el periodo elegido, y el periodo y los filtros se recuerdan mientras la pestaña siga abierta. **Limpiar filtros** vuelve a los 90 días.",
       },
       {
         pregunta: "¿Cómo encuentro al cliente en el formulario? Son cientos.",

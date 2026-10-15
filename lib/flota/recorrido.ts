@@ -130,7 +130,11 @@ export type PuntoDato = { c: Coord; ts: number; vel: number; velReal: boolean; r
  *  `sin_paraderos` · `paraderos_sin_coordenadas` · `no_se_pudo_leer` (la consulta falló: nunca se
  *  lee como «no guardada»). */
 export type CodigoRutaPrevista = "guardada" | "no_guardada" | "mismo_punto" | "sin_paraderos" | "paraderos_sin_coordenadas" | "no_se_pudo_leer";
-export type EstadoRutaPrevista = { codigo: CodigoRutaPrevista; detalle: string };
+export type EstadoRutaPrevista = {
+  codigo: CodigoRutaPrevista; detalle: string;
+  /** Con `guardada`: de dónde salió la línea — la de Google (`rutas_cache`, 30 días) o la propia (GPS real). */
+  fuente?: "google" | "propia";
+};
 
 /** Dónde ocurrió un exceso respecto del servicio. Informativo: no cambia el conteo. */
 export type CodigoContexto = "antes_paradero_1" | "en_servicio_con_pasajeros" | "en_servicio" | "despues_ultimo_paradero" | "sin_dato";
@@ -488,7 +492,15 @@ function coordenadasDe(payload: any): [number, number][] | null {
  * FASE 1 de los puentes. Los motivos que no dependen de la consulta (sin paraderos, sin coordenadas)
  * se dicen aunque la consulta haya fallado.
  */
-export function resolverRutaPrevista(claves: ClavesRuta, mapa: ReadonlyMap<string, any> | null): { estado: EstadoRutaPrevista; ruta: [number, number][] | null } {
+export function resolverRutaPrevista(
+  claves: ClavesRuta,
+  mapa: ReadonlyMap<string, any> | null,
+  /** La RUTA PROPIA (lib/ruta-propia.ts, tabla `rutas_propias`) de esas mismas claves, del cliente del
+   *  servicio: el recorrido GPS real de un servicio anterior. Va DESPUÉS de la de Google vigente (el
+   *  mismo orden del modal GPS) y es la que queda desde el día 31. `undefined` = no se consultó (el
+   *  comportamiento de siempre); `null` = la consulta falló. */
+  propias?: ReadonlyMap<string, any> | null,
+): { estado: EstadoRutaPrevista; ruta: [number, number][] | null } {
   const ninguna = (estado: EstadoRutaPrevista) => ({ estado, ruta: null });
   if (!claves.variantes.length) {
     if (claves.sinRuta === "sin_paradas") {
@@ -502,7 +514,29 @@ export function resolverRutaPrevista(claves: ClavesRuta, mapa: ReadonlyMap<strin
       detalle: `Menos de dos paraderos tienen coordenadas${claves.sinCoordenadas ? ` (${claves.sinCoordenadas} sin ubicar)` : ""}: no hay ruta prevista guardada que leer. Se completan en Programación.`,
     });
   }
+  // La propia, buscada aparte: sirve también si la consulta de Google falló.
+  const deLaPropia = (): { estado: EstadoRutaPrevista; ruta: [number, number][] } | null => {
+    if (!propias) return null;
+    for (const v of claves.variantes) {
+      const p = propias.get(v.firma);
+      const ruta = p ? coordenadasDe(p) : null;
+      if (!ruta) continue;
+      const f = typeof p?.fuente_fecha === "string" && /^\d{4}-\d{2}-\d{2}/.test(p.fuente_fecha)
+        ? ` del ${p.fuente_fecha.slice(8, 10)}/${p.fuente_fecha.slice(5, 7)}/${p.fuente_fecha.slice(0, 4)}` : "";
+      return {
+        estado: {
+          codigo: "guardada",
+          fuente: "propia",
+          detalle: `Ruta prevista armada con el recorrido GPS real de un servicio anterior${f} con los mismos paraderos (${ruta.length} puntos; dato propio, sin costo).`,
+        },
+        ruta,
+      };
+    }
+    return null;
+  };
   if (!mapa) {
+    const propia = deLaPropia();
+    if (propia) return propia;
     return ninguna({ codigo: "no_se_pudo_leer", detalle: "No se pudo leer la ruta prevista guardada (ni los tramos estimados): no se afirma que no exista. Vuelve a intentarlo en unos minutos." });
   }
   for (const v of claves.variantes) {
@@ -512,11 +546,14 @@ export function resolverRutaPrevista(claves: ClavesRuta, mapa: ReadonlyMap<strin
     return {
       estado: {
         codigo: "guardada",
+        fuente: "google",
         detalle: `Ruta prevista guardada por el modal GPS (${ruta.length} puntos)${v.conParadasJson ? ", con las coordenadas de la cotización" : ""}${v.sinCoordenadas ? `; ${v.sinCoordenadas} paradero(s) sin coordenadas quedaron fuera` : ""}.`,
       },
       ruta,
     };
   }
+  const propia = deLaPropia();
+  if (propia) return propia;
   const minFaltan = Math.min(...claves.variantes.map((v) => v.sinCoordenadas));
   if (minFaltan > 0) {
     return ninguna({
@@ -524,9 +561,14 @@ export function resolverRutaPrevista(claves: ClavesRuta, mapa: ReadonlyMap<strin
       detalle: `${minFaltan} paradero(s) sin coordenadas: el modal GPS los ubica con Google al abrirse y la ruta que guardó no se puede encontrar sin repetir esa consulta. Se completan en Programación.`,
     });
   }
+  if (propias === null) {
+    return ninguna({ codigo: "no_se_pudo_leer", detalle: "No hay ruta de Google guardada vigente y no se pudo leer la ruta propia (recorrido GPS real): no se afirma que no exista. Vuelve a intentarlo en unos minutos." });
+  }
   return ninguna({
     codigo: "no_guardada",
-    detalle: "No hay ruta prevista guardada: nadie abrió el modal GPS de este servicio en los últimos 30 días. Sin ella, los huecos sin señal solo se marcan en sus dos extremos.",
+    detalle: propias === undefined
+      ? "No hay ruta prevista guardada: nadie abrió el modal GPS de este servicio en los últimos 30 días. Sin ella, los huecos sin señal solo se marcan en sus dos extremos."
+      : "No hay ruta prevista guardada: ni la de Google (nadie abrió el modal GPS de este servicio en los últimos 30 días) ni un recorrido GPS real armado con estos paraderos. Sin ella, los huecos sin señal solo se marcan en sus dos extremos.",
   });
 }
 

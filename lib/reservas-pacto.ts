@@ -359,6 +359,14 @@ const COLUMNAS_OPCIONALES: Record<string, { sql: string; que: string }> = {
   ruta_etiqueta: { sql: "supabase/liquidaciones-04-etiquetas-item.sql", que: "la etiqueta de RUTA del ítem" },
   turno:         { sql: "supabase/liquidaciones-04-etiquetas-item.sql", que: "el TURNO del ítem" },
   movil:         { sql: "supabase/liquidaciones-04-etiquetas-item.sql", que: "el MÓVIL del ítem" },
+  cotizacion_no_requerida_motivo: {
+    sql: "supabase/reservas-07-despacho-sin-cotizar.sql",
+    que: "la marca de «no requiere cotización» y su motivo (el servicio seguirá contando como sin cotizar)",
+  },
+  cotizacion_no_requerida_en: {
+    sql: "supabase/reservas-07-despacho-sin-cotizar.sql",
+    que: "la fecha de la marca de «no requiere cotización»",
+  },
 };
 
 /**
