@@ -40,6 +40,8 @@ import {
   MAX_ESCRITURAS_CONDUCTOR_MIN,
 } from "@/lib/gps-equipo";
 import { tablaFaltante } from "@/lib/columna-faltante";
+import { vencimientoFichaOPoliza } from "@/lib/seguros";
+import { leerPolizasPersonas } from "@/lib/seguros-datos";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -590,6 +592,15 @@ export async function POST(req: NextRequest) {
         if (!pinBd || pinBd !== pinT) continue;
         if (!c.activo_app) return NextResponse.json({ ok: false, error: "Acceso no activado. Llama a central." });
         limpiarIntentos(dniT);
+        // SCTR Salud: si una póliza lo cubre, manda la póliza (lib/seguros.ts). Best-effort y
+        // solo conductores propios (los de tercero no tienen esa columna): sin las tablas o con
+        // la lectura fallida, la ficha, como antes.
+        let sctrSaludVenc: string | null = (c as any).sctr_salud_venc ?? null;
+        if (tabla === "conductores") {
+          const seg = await leerPolizasPersonas(admin, { conductorId: Number(c.id) });
+          sctrSaludVenc = vencimientoFichaOPoliza({ clase: "conductor", id: Number(c.id) }, "sctr_salud_venc",
+            sctrSaludVenc, seg?.polizas ?? null, seg?.coberturas ?? null).vencimiento;
+        }
         // El token es la credencial de sesión: las acciones sensibles derivan de él
         // la identidad, en vez de confiar en el `cid` que mande el cliente.
         // NUNCA se devuelve pin_acceso.
@@ -602,7 +613,7 @@ export async function POST(req: NextRequest) {
             licencia: c.licencia ?? null,
             vencimiento_licencia: c.vencimiento_licencia ?? null,
             categoria_licencia: c.categoria_licencia ?? null,
-            sctr_salud_venc: (c as any).sctr_salud_venc ?? null,
+            sctr_salud_venc: sctrSaludVenc,
             examen_medico_venc: (c as any).examen_medico_venc ?? null,
           },
         });

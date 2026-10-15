@@ -30,6 +30,8 @@ import {
 } from "@/lib/alertas-modo-tiempo";
 import { detectarSolapesJornada, itinerarioDe, type ReservaFlota } from "@/lib/alertas-flota";
 import { UMBRAL_DEFECTO } from "@/lib/alertas-tarjeta";
+import { vencimientoFichaOPoliza } from "@/lib/seguros";
+import { leerPolizasPersonas } from "@/lib/seguros-datos";
 import { CLAVE_ESPERA_ABANDONADO, paramsAvisoAbandonados, planDePendientes, type ServicioCerrado } from "@/lib/servicio-abandonado";
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
 import { detalleAlertaPrevia, listaEnUnaLinea, noInicioRepiteDebio, textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
@@ -1004,13 +1006,20 @@ async function handler(req: NextRequest) {
         ];
         let n = 0;
         const cnlDoc = canalesConductor(cfg);
+        // SCTR / Vida Ley: si el conductor está en una póliza de ese tipo, manda la PÓLIZA
+        // (lib/seguros.ts, la regla de /seguros y de v_seguro_persona). Best-effort: sin las
+        // tablas o con una lectura fallida, null → la ficha, exactamente como antes. La clave
+        // de envío NO cambia (`${c.id}:${campo}`): cambiarla reenviaría WhatsApp ya pagados.
+        const segPersona = await leerPolizasPersonas(admin);
+        if (!segPersona) res.doc_vence_sin_polizas = 1;
         for (const c of (conds ?? []) as any[]) {
           // OJO: NO se descarta por falta de teléfono. Antes se filtraba aquí y un
           // conductor sin WhatsApp no recibía nada aunque tuviera correo — ahora decide
           // el fan-out, que sabe qué canales están habilitados y con qué datos cuenta.
           if (c.estado === "de_baja" || !cfg.plantilla) continue;
           for (const [campo, etiqueta] of DOCS) {
-            const f = c[campo];
+            const f = vencimientoFichaOPoliza({ clase: "conductor", id: Number(c.id) }, campo, c[campo],
+              segPersona?.polizas ?? null, segPersona?.coberturas ?? null).vencimiento;
             if (!f || f < hoy || f > limiteISO) continue; // vigente, ya vencido, o fuera de ventana
             if (!(await reclamarEnvio("doc_vence", `${c.id}:${campo}`))) continue;
             // Sin reservaId: este aviso no cuelga de ninguna reserva → no se loguea

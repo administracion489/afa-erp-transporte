@@ -8,6 +8,7 @@ import AvisoFichaCombustible from "@/components/flota/AvisoFichaCombustible";
 import { NIVEL_CFG } from "@/lib/costos/nivel-servicio";
 import { EnlacePrivado } from "@/components/ArchivoPrivado";
 import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
+import { guardarDocumentoVehiculo } from "@/lib/documentos-vehiculo-datos";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -440,9 +441,7 @@ export default function VehiculosPage() {
       entidad_emisora: formD.entidad_emisora.trim() || cfg.entidad || null,
       archivo_url: formD.archivo_url.trim() || null, observaciones: formD.observaciones.trim() || null,
     };
-    const { error } = editandoDocId
-      ? await supabase.from("documentos_vehiculo").update(payload).eq("id", editandoDocId)
-      : await supabase.from("documentos_vehiculo").insert(payload);
+    const { error } = await guardarDocumentoVehiculo(supabase, { ...payload, id: editandoDocId });
     if (error) { alert(error.message); setGuardando(false); return; }
     setFormD(FORM_D); setEditandoDocId(null); setMostrarFormD(false);
     cargarTodo(); setGuardando(false);
