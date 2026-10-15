@@ -28,6 +28,7 @@ const MODULOS = [
   "redes",
   "despachador",
   "programacion",
+  "programacion-montos", // no es una pantalla: muestra Ventas/Costos/Margen en /programacion
   "seguimiento",
   "monitoreo",
   "pasajeros",

@@ -50,6 +50,10 @@ import { semillaDeServicio, filasDeSemilla, estadoRetorno, avisoRetorno } from "
 import { estadoSctrEn, vencimientoPersona, type PersonaFicha, type PolizaRow, type CoberturaRow } from "@/lib/seguros";
 import { leerPolizasPersonas } from "@/lib/seguros-datos";
 import { columnaFaltante as columnaFaltanteDe } from "@/lib/columna-faltante";
+import { usePuedeVer } from "@/lib/usePuedeVer";
+
+// Ventas/Costos/Margen del periodo: solo el admin y quien tenga este permiso en /usuarios.
+const MODULOS_MONTOS = ["programacion-montos"] as const;
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
 function useGoogleMapsLoaded() {
@@ -553,6 +557,8 @@ async function geocodificar(direccion: string, paradaId = 0): Promise<{ lat: num
 
 export default function ReservasPage() {
   const router = useRouter();
+  // null mientras consulta: no se pintan los montos hasta saber que puede verlos.
+  const verMontos = usePuedeVer(MODULOS_MONTOS)?.["programacion-montos"] === true;
   const [clientes,     setClientes]     = useState<Cliente[]>([]);
   const [vehiculos,    setVehiculos]    = useState<Vehiculo[]>([]);
   const [conductores,  setConductores]  = useState<Conductor[]>([]);
@@ -5086,8 +5092,8 @@ export default function ReservasPage() {
         ))}
       </section>
 
-      {/* KPIs financieros */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {/* KPIs financieros — solo admin o permiso «programacion-montos» */}
+      {verMontos && <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div className="md:col-span-3 -mb-1 text-[11px] font-bold text-gray-400">
           Periodo: {resumenFin?.desde ? fmtFecha(resumenFin.desde) : "inicio"} – {resumenFin?.hasta ? fmtFecha(resumenFin.hasta) : "hoy"}
           {!(filtroDesde || filtroHasta || verTodo) && " (mes en curso)"}
@@ -5104,7 +5110,7 @@ export default function ReservasPage() {
             <p className="text-2xl font-black mt-0.5" style={{ color: k.color }}>{k.valor}</p>
           </div>
         ))}
-      </section>
+      </section>}
 
       {/* CIERRE ADMINISTRATIVO (Dimensión B) — familia violeta + contorno, distinto a propósito del ciclo operativo */}
       <section className="rounded-2xl border px-5 py-4" style={{ borderColor: "#ddd6fe", background: "#faf5ff" }}>
