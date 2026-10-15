@@ -2400,11 +2400,16 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           cuota_mensual: verMontos ? f.cuota : null,
           de_afa: f.deAfa,
           se_corrige_en: f.editarEn,
+          // pólizas: inclusiones pedidas al bróker sin confirmar (esas personas NO están cubiertas)
+          ...(f.fuente === "poliza" ? { inclusiones_sin_confirmar: f.solicitados } : {}),
         }));
         const vencidos = detalle.filter((d) => d.situacion === "vencido");
         const porVencer = detalle.filter((d) => d.situacion === "por_vencer");
         const k = kpisSeguros(filas);
         const faltantes = r.faltantes.filter((f) => f.alarma && claseVisible(f.asegurado.clase));
+        // Una inclusión PENDIENTE (pedida al bróker o confirmada con inicio futuro) NO es una póliza
+        // vigente ni la tapa la ficha: esa persona no está cubierta hasta la fecha que se dice.
+        const pendientes = faltantes.filter((f) => f.codigo === "inclusion_solicitada" || f.codigo === "inclusion_por_iniciar");
         const visibles = input.solo_alertas ? [...vencidos, ...porVencer] : detalle;
 
         return {
@@ -2416,10 +2421,16 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             detalle: visibles.slice(0, 15),
             sin_cobertura: faltantes.slice(0, 15).map((f) => ({ asegurado: f.asegurado.rotulo, problema: f.texto, se_corrige_en: f.arreglo })),
             sin_cobertura_total: faltantes.length,
+            inclusiones_pendientes: pendientes.slice(0, 15).map((f) => ({
+              asegurado: f.asegurado.rotulo,
+              estado: f.codigo === "inclusion_solicitada" ? "solicitada_al_broker_sin_confirmar" : "confirmada_aun_no_empieza",
+              fecha: f.fechaInclusion ?? null,
+              cubre: f.texto,
+            })),
             // Una fuente que no se pudo leer NO es «sin seguro»: decirlo así.
             fuentes_con_error: r.errores,
             no_juzgado: r.sinJuzgar,
-            nota: "SOAT/CAT, SCTR y Vida Ley son obligatorios por ley: un vencido es riesgo legal inmediato. Si hay fuentes_con_error, dilo: lo que no se leyó no se puede afirmar como cubierto ni como faltante.",
+            nota: "SOAT/CAT, SCTR y Vida Ley son obligatorios por ley: un vencido es riesgo legal inmediato. Una inclusión pendiente (solicitada al bróker o con inicio futuro) NO es cobertura: esa persona no está asegurada todavía y no debe asignarse antes de la fecha de inicio. Si hay fuentes_con_error, dilo: lo que no se leyó no se puede afirmar como cubierto ni como faltante.",
           }),
           ui: [
             {

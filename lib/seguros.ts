@@ -461,33 +461,78 @@ export function fechaDeFicha(p: PersonaFicha, tipo: TipoPersona): string | null 
   return p.vida_ley === true ? fecha(p.vida_ley_venc) : null;
 }
 
-export type VencimientoPersona = { vencimiento: string | null; fuente: "poliza" | "ficha" | null; seguroId?: number };
+export type InclusionPendiente = {
+  /** 'solicitada': pedida al bróker, sin confirmar · 'por_iniciar': confirmada, empieza después */
+  estado: "solicitada" | "por_iniciar";
+  /** solicitada → solicitada_en · por_iniciar → inicio efectivo */
+  fecha: string | null;
+  seguroId: number;
+};
+
+export type VencimientoPersona = {
+  vencimiento: string | null;
+  /** 'pendiente' = hay una inclusión en trámite: NO está cubierto y la ficha NO manda */
+  fuente: "poliza" | "ficha" | "pendiente" | null;
+  seguroId?: number;
+  inclusion?: InclusionPendiente;
+};
 
 /**
- * EQUIVALENTE EXACTO de la vista `v_seguro_persona` (supabase/seguros-03-vista-persona.sql); la
- * matriz lo fija. Si la persona está en alguna cobertura de una póliza con `seguros.tipo` ===
- * tipo, manda la PÓLIZA: el fin más lejano de coalesce(cobertura.hasta, seguros.fecha_vencimiento),
- * desempate por id de póliza mayor. Una baja (hasta en el pasado) da una fecha vencida y NO cae a
- * la ficha. No mira `desde`. Si no está en ninguna, la FICHA; si no, null — nunca se inventa.
+ * EQUIVALENTE EXACTO de la vista `v_seguro_persona` (supabase/seguros-04b-vista-persona.sql; antes seguros-03); la matriz lo
+ * fija con un oráculo literal. Por persona × tipo, gana el primer paso:
+ *  1) CUBRE por póliza: coberturas no 'solicitada' de pólizas cuyo `tiposDePoliza` incluye el
+ *     tipo, con inicio efectivo (coalesce(desde, fecha_inicio)) null o ≤ hoy y fin
+ *     (coalesce(hasta, fecha_vencimiento)) ≥ hoy → el fin más lejano (empate: id de póliza mayor).
+ *  2) PENDIENTE: una INCLUIDA con inicio > hoy ('por_iniciar', gana: ya está confirmada; la de
+ *     inicio más cercano; una 'excluida' con inicio futuro no cuenta en ningún paso) o una 'solicitada' ('solicitada', la de solicitud más antigua; sin fecha al
+ *     final). Desempate: id de póliza mayor. vencimiento null y la FICHA NO MANDA.
+ *  3) Póliza vencida o de baja (no solicitada, inicio ≤ hoy o null): el fin más lejano aunque pasado
+ *     — la verdad, no se cae a la ficha.
+ *  4) FICHA (Vida Ley solo con la casilla marcada). 5) null — nunca se inventa una fecha.
+ * Una cobertura sin ningún fin (ni hasta ni fecha_vencimiento) no cuenta en 1 ni en 3, como antes.
+ * Sin estados, sin `coberturas` y sin inicios futuros: byte a byte la regla de seguros-03.
  */
 export function vencimientoPersona(
-  persona: PersonaFicha, polizas: PolizaRow[], coberturas: CoberturaRow[], tipo: TipoPersona,
+  persona: PersonaFicha, polizas: PolizaRow[], coberturas: CoberturaRow[], tipo: TipoPersona, hoy: string,
 ): VencimientoPersona {
   const porId = new Map<number, PolizaRow>();
   for (const p of polizas || []) porId.set(Number(p.id), p);
-  let fin: string | null = null, sid = -Infinity;
+  let act: { fin: string; sid: number } | null = null;
+  let ven: { fin: string; sid: number } | null = null;
+  let ini: { f: string; sid: number } | null = null;
+  let sol: { f: string | null; sid: number } | null = null;
+  const mejorFin = (a: { fin: string; sid: number } | null, fin: string, sid: number) =>
+    a === null || fin > a.fin || (fin === a.fin && sid > a.sid) ? { fin, sid } : a;
   for (const c of coberturas || []) {
     const p = porId.get(Number(c.seguro_id));
-    if (!p || p.tipo !== tipo) continue;
+    if (!p || !tiposDePoliza(p).includes(tipo)) continue;
     const suya = persona.clase === "conductor"
       ? c.conductor_id != null && Number(c.conductor_id) === persona.id
       : c.personal_administrativo_id != null && Number(c.personal_administrativo_id) === persona.id;
     if (!suya) continue;
-    const v = fecha(c.hasta) ?? fecha(p.fecha_vencimiento);
-    if (!v) continue;
-    if (fin === null || v > fin || (v === fin && Number(p.id) > sid)) { fin = v; sid = Number(p.id); }
+    const sid = Number(p.id);
+    if (estadoCobertura(c) === "solicitada") {
+      const f = fecha(c.solicitada_en);
+      // la más antigua primero; sin fecha al final; empate id mayor
+      if (sol === null || (f !== null && (sol.f === null || f < sol.f)) || (f === sol.f && sid > sol.sid)) sol = { f, sid };
+      continue;
+    }
+    const i0 = inicioEfectivo(c, p);
+    if (i0 !== null && i0 > hoy) {
+      // solo una INCLUIDA con inicio futuro está por iniciar; una excluida que aún no empezó no
+      // cuenta para nada (la vista: `est = 'incluida' and ini > hoy`)
+      if (estadoCobertura(c) === "incluida" && (ini === null || i0 < ini.f || (i0 === ini.f && sid > ini.sid))) ini = { f: i0, sid };
+      continue;
+    }
+    const fin = fecha(c.hasta) ?? fecha(p.fecha_vencimiento);
+    if (!fin) continue;
+    if (fin >= hoy) act = mejorFin(act, fin, sid);
+    else ven = mejorFin(ven, fin, sid);
   }
-  if (fin !== null) return { vencimiento: fin, fuente: "poliza", seguroId: sid };
+  if (act) return { vencimiento: act.fin, fuente: "poliza", seguroId: act.sid };
+  if (ini) return { vencimiento: null, fuente: "pendiente", inclusion: { estado: "por_iniciar", fecha: ini.f, seguroId: ini.sid } };
+  if (sol) return { vencimiento: null, fuente: "pendiente", inclusion: { estado: "solicitada", fecha: sol.f, seguroId: sol.sid } };
+  if (ven) return { vencimiento: ven.fin, fuente: "poliza", seguroId: ven.sid };
   const f = fechaDeFicha(persona, tipo);
   return f ? { vencimiento: f, fuente: "ficha" } : { vencimiento: null, fuente: null };
 }
@@ -502,13 +547,14 @@ export const TIPO_DE_COLUMNA_FICHA: Record<string, TipoPersona> = {
 
 /**
  * Vencimiento que usan el tick (bloque 6, `doc_vence`) y el login del app del conductor: la
- * PÓLIZA gana si la persona está en una cobertura de ese tipo (la misma regla de
- * `vencimientoPersona`); si no, el valor CRUDO de la ficha, tal cual lo usaban hasta hoy.
+ * regla de `vencimientoPersona` (póliza → pendiente → póliza vencida); si no, el valor CRUDO de la
+ * ficha, tal cual lo usaban hasta hoy.
  *  · `polizas`/`coberturas` en null = no se pudieron leer (o falta la migración): byte a byte el
  *    comportamiento anterior, la ficha.
+ *  · PENDIENTE (inclusión solicitada o por iniciar) → vencimiento null y fuente 'pendiente': no
+ *    está cubierto, y la ficha NO lo tapa. El tick salta un null (no hay «por vencer» que avisar).
  *  · La rama de ficha NO aplica la casilla `vida_ley` de `fechaDeFicha`: esos dos caminos nunca
- *    la miraron, y cambiarlo aquí dejaría de avisar un Vida Ley que hoy se avisa. Solo la póliza
- *    puede mover la fecha.
+ *    la miraron, y cambiarlo aquí dejaría de avisar un Vida Ley que hoy se avisa.
  *  · Una baja de la póliza (hasta pasado) da su fecha vencida y NO cae a la ficha — la verdad.
  */
 export function vencimientoFichaOPoliza(
@@ -517,12 +563,14 @@ export function vencimientoFichaOPoliza(
   valorFicha: string | null | undefined,
   polizas: PolizaRow[] | null,
   coberturas: CoberturaRow[] | null,
-): { vencimiento: string | null; fuente: "poliza" | "ficha"; seguroId?: number } {
+  hoy: string,
+): { vencimiento: string | null; fuente: "poliza" | "ficha" | "pendiente"; seguroId?: number; inclusion?: InclusionPendiente } {
   const tipo = TIPO_DE_COLUMNA_FICHA[columna];
   const crudo = valorFicha ?? null;
   if (!tipo || !polizas || !coberturas) return { vencimiento: crudo, fuente: "ficha" };
-  const v = vencimientoPersona({ clase: persona.clase, id: persona.id, nombre: "", activo: true }, polizas, coberturas, tipo);
+  const v = vencimientoPersona({ clase: persona.clase, id: persona.id, nombre: "", activo: true }, polizas, coberturas, tipo, hoy);
   if (v.fuente === "poliza") return { vencimiento: v.vencimiento, fuente: "poliza", seguroId: v.seguroId };
+  if (v.fuente === "pendiente") return { vencimiento: null, fuente: "pendiente", inclusion: v.inclusion };
   return { vencimiento: crudo, fuente: "ficha" };
 }
 
@@ -534,8 +582,8 @@ export function filasDeFichas(
   const out: FilaSeguro[] = [];
   for (const p of personas || []) {
     for (const tipo of TIPOS_PERSONA) {
-      const v = vencimientoPersona(p, polizas, coberturas, tipo);
-      if (v.fuente !== "ficha") continue;
+      const v = vencimientoPersona(p, polizas, coberturas, tipo, hoy);
+      if (v.fuente !== "ficha") continue; // póliza o inclusión pendiente: la ficha no sale
       const fuente: FuenteSeguro = p.clase === "conductor" ? "ficha_conductor" : "ficha_personal";
       out.push(armar({
         fuente, origenId: p.id, tipo,
@@ -566,8 +614,11 @@ export function kpisSeguros(filas: FilaSeguro[]): KpisSeguros {
     else if (f.estado === "por_vencer") k.porVencer++;
     else if (f.estado === "vencido") k.vencidos++;
     else k.sinFecha++;
-    const cat = f.tipo === SCTR_SIN_PRECISAR ? "obligatorio" : (TIPOS_SEGURO[f.tipo]?.categoria ?? "complementario");
-    if (cat === "obligatorio") k.obligatorios++; else k.complementarios++;
+    // Una póliza de varios tipos es UNA fila (su prima se cuenta una vez) y es obligatoria si
+    // cualquiera de sus tipos lo es.
+    const tipos = f.tipos && f.tipos.length ? f.tipos : [f.tipo];
+    const obligatoria = tipos.some((t) => t === SCTR_SIN_PRECISAR || TIPOS_SEGURO[t]?.categoria === "obligatorio");
+    if (obligatoria) k.obligatorios++; else k.complementarios++;
     if (f.deAfa) { k.primaTotal += f.prima ?? 0; k.cuotaTotal += f.cuota ?? 0; }
   }
   k.primaTotal = Math.round(k.primaTotal * 100) / 100;
@@ -581,6 +632,7 @@ export type CodigoFaltante =
   | "sin_soat" | "soat_vencido" | "soat_sin_fecha"
   | "sctr_salud_faltante" | "sctr_pension_faltante" | "sctr_vencido"
   | "vida_ley_faltante" | "vida_ley_vencida"
+  | "inclusion_solicitada" | "inclusion_por_iniciar"
   | "doble_registro";
 
 /** `alarma` declarada PEGADA al código: solo doble_registro no alarma (es un dato redundante,
@@ -594,6 +646,8 @@ export const CODIGOS_FALTANTE: Record<CodigoFaltante, { titulo: string; alarma: 
   sctr_vencido:          { titulo: "SCTR vencido",              alarma: true },
   vida_ley_faltante:     { titulo: "Sin Vida Ley",              alarma: true },
   vida_ley_vencida:      { titulo: "Vida Ley vencida",          alarma: true },
+  inclusion_solicitada:  { titulo: "Inclusión pedida, sin activar", alarma: true },
+  inclusion_por_iniciar: { titulo: "Inclusión aún no empieza",  alarma: true },
   doble_registro:        { titulo: "Registrado dos veces",      alarma: false },
 };
 
@@ -606,6 +660,11 @@ export type Faltante = {
   /** dónde se corrige */
   arreglo: string;
   vencimiento?: string | null;
+  /** inclusiones: todos los tipos de esa póliza en trámite para esa persona, y la póliza */
+  tipos?: TipoSeguro[];
+  seguroId?: number;
+  /** inclusiones: fecha de solicitud (solicitada) o de inicio (por_iniciar) */
+  fechaInclusion?: string | null;
 };
 
 export type UnidadFlota = { id: number; placa: string; estado?: string | null; empresa_id?: number | null; empresa?: string | null };
@@ -620,6 +679,10 @@ const fmt = (f: string | null | undefined) => {
   const s = fecha(f); if (!s) return "—";
   const [a, m, d] = s.split("-"); return `${d}/${m}/${a}`;
 };
+const fmtDM = (f: string | null | undefined) => {
+  const s = fecha(f); if (!s) return "—";
+  const [, m, d] = s.split("-"); return `${d}/${m}`;
+};
 
 function falta(codigo: CodigoFaltante, asegurado: Asegurado, tipo: TipoSeguro, texto: string, arreglo: string, vencimiento?: string | null): Faltante {
   return { codigo, alarma: CODIGOS_FALTANTE[codigo].alarma, asegurado, tipo, texto, arreglo, vencimiento };
@@ -627,7 +690,7 @@ function falta(codigo: CodigoFaltante, asegurado: Asegurado, tipo: TipoSeguro, t
 
 /** Filas que cubren a un asegurado (directas o por póliza). */
 function filasDe(filas: FilaSeguro[], k: ClaveAsegurado, tipos: TipoSeguro[]): FilaSeguro[] {
-  return filas.filter((f) => tipos.includes(f.tipo) && (
+  return filas.filter((f) => (f.tipos && f.tipos.length ? f.tipos : [f.tipo]).some((t) => tipos.includes(t)) && (
     mismaClave(k, f.asegurado) || (f.cubre ?? []).some((c) => mismaClave(c, k))));
 }
 
@@ -694,12 +757,26 @@ export function coberturaFaltante(
   }
 
   // Personas.
+  const porIdPol = new Map<number, PolizaRow>();
+  for (const pz of opts.polizas ?? []) porIdPol.set(Number(pz.id), pz);
   for (const p of personas || []) {
     if (!p.activo) continue;
     const a: Asegurado = { clase: p.clase, id: p.id, rotulo: p.nombre };
     const fichaEn = p.clase === "conductor" ? EDITAR_EN.ficha_conductor : EDITAR_EN.ficha_personal;
+    // Inclusiones en trámite: una por persona × póliza × código, con todos sus tipos.
+    const inclusiones = new Map<string, Faltante>();
     for (const t of TIPOS_PERSONA) {
-      const v = vencimientoPersona(p, opts.polizas ?? [], opts.coberturas ?? [], t);
+      const v = vencimientoPersona(p, opts.polizas ?? [], opts.coberturas ?? [], t, hoy);
+      if (v.fuente === "pendiente" && v.inclusion) {
+        const inc = v.inclusion;
+        const codigo: CodigoFaltante = inc.estado === "solicitada" ? "inclusion_solicitada" : "inclusion_por_iniciar";
+        const clave = `${inc.seguroId}:${codigo}`;
+        const ya = inclusiones.get(clave);
+        if (ya) { ya.tipos!.push(t); continue; }
+        inclusiones.set(clave, { ...falta(codigo, a, t, "", `${EDITAR_EN.poliza} → póliza #${inc.seguroId}`),
+          tipos: [t], seguroId: inc.seguroId, fechaInclusion: inc.fecha });
+        continue;
+      }
       const arreglo = v.fuente === "poliza" ? `${EDITAR_EN.poliza} → póliza #${v.seguroId}` : `${fichaEn} → ficha de ${p.nombre}`;
       if (v.fuente === null) {
         const sinFechaVL = t === "vida_ley" && p.vida_ley === true ? " (Vida Ley marcada pero sin fecha de vencimiento)" : "";
@@ -713,6 +790,43 @@ export function coberturaFaltante(
         if (f) out.push(falta("doble_registro", a, t, `${p.nombre}: la ficha dice ${ETQ[t]} hasta ${fmt(f)} y la póliza #${v.seguroId} hasta ${fmt(v.vencimiento)}; vale la póliza.`, `${fichaEn} → ficha de ${p.nombre} (vacía la fecha)`));
       }
     }
+    for (const f of inclusiones.values()) {
+      const pol = porIdPol.get(Number(f.seguroId));
+      const que = `${etiquetaDeTipos(f.tipos!)}${pol?.numero_poliza ? ` (póliza ${pol.numero_poliza})` : ` (póliza #${f.seguroId})`}`;
+      if (f.codigo === "inclusion_solicitada") {
+        const n = f.fechaInclusion ? diasEntreFechas(f.fechaInclusion, hoy) : null;
+        f.texto = f.fechaInclusion
+          ? `${p.nombre}: inclusión al ${que} solicitada al bróker el ${fmtDM(f.fechaInclusion)} (${n} día${n === 1 ? "" : "s"}), sin activar. No está cubierto.`
+          : `${p.nombre}: inclusión al ${que} solicitada al bróker, sin activar. No está cubierto.`;
+      } else {
+        f.texto = `${p.nombre}: incluido en el ${que} desde el ${fmtDM(f.fechaInclusion)}: no lo asignes antes.`;
+      }
+      out.push(f);
+    }
   }
   return out;
+}
+
+// ─── SCTR PARA ASIGNAR UN SERVICIO ──────────────────────────────────────────
+
+export type EstadoSctr = "activo" | "pendiente_inclusion" | "por_iniciar" | "vencido" | "sin_sctr";
+
+/** Del peor al mejor: el SCTR exige salud Y pensión, así que manda el peor de los dos. */
+const PEOR_SCTR: EstadoSctr[] = ["sin_sctr", "vencido", "pendiente_inclusion", "por_iniciar", "activo"];
+
+/**
+ * ¿La persona tiene SCTR en esa FECHA (la del servicio)? Misma regla de `vencimientoPersona`
+ * evaluada con `fecha` como «hoy», para salud y pensión, y gana el peor. Para Programación.
+ *  · póliza o ficha con vencimiento ≥ fecha → activo; < fecha → vencido; sin dato → sin_sctr.
+ *  · inclusión solicitada → pendiente_inclusion; confirmada que empieza después → por_iniciar.
+ */
+export function estadoSctrEn(persona: PersonaFicha, polizas: PolizaRow[], coberturas: CoberturaRow[], fechaServicio: string): EstadoSctr {
+  const uno = (t: TipoPersona): EstadoSctr => {
+    const v = vencimientoPersona(persona, polizas, coberturas, t, fechaServicio);
+    if (v.fuente === "pendiente") return v.inclusion?.estado === "por_iniciar" ? "por_iniciar" : "pendiente_inclusion";
+    if (!v.vencimiento) return "sin_sctr";
+    return v.vencimiento >= fechaServicio ? "activo" : "vencido";
+  };
+  const a = uno("sctr_salud"), b = uno("sctr_pension");
+  return PEOR_SCTR.indexOf(a) <= PEOR_SCTR.indexOf(b) ? a : b;
 }
