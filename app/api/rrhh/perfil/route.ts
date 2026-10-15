@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { escribirDegradando } from "@/lib/rrhh/db";
-import { adminRrhh, subirArrhh, firmarRutaRrhh } from "@/lib/rrhh/server";
+import { adminRrhh, subirArrhh, firmarRutaRrhh, AdjuntoInvalido } from "@/lib/rrhh/server";
 import {
   fichaDeUsuario, saldoDeUsuario, estadoConsentimientos,
 } from "@/lib/rrhh/perfil-datos";
@@ -106,12 +106,14 @@ async function editar(req: NextRequest) {
       if (campo in body) fila[campo] = body[campo] === "" ? null : body[campo];
     }
 
-    // Foto de perfil: la sube el SERVIDOR al bucket privado; se guarda la ruta.
+    // Foto de perfil: la sube el SERVIDOR al bucket privado, re-encodeada sin EXIF/GPS. Un archivo
+    // inválido → 400; un fallo de Storage → se guarda el resto del perfil sin la foto.
     let fotoOmitida = false;
     if (body.foto) {
       try {
-        fila.foto_url = await subirArrhh(sb, `perfil/${usuarioId}/${crypto.randomUUID()}.jpg`, body.foto);
-      } catch {
+        fila.foto_url = await subirArrhh(sb, `perfil/${usuarioId}/${crypto.randomUUID()}`, body.foto, "foto");
+      } catch (e) {
+        if (e instanceof AdjuntoInvalido) return NextResponse.json({ ok: false, error: e.message }, { status: 400 });
         fotoOmitida = true;
       }
     }

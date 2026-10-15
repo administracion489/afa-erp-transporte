@@ -242,9 +242,11 @@ export default function MarcarAsistencia({
         <div className="rounded-xl border-2 border-indigo-200 bg-indigo-50 p-4 space-y-2">
           <p className="text-xs font-black uppercase tracking-widest text-indigo-800">🔒 Antes de marcar: consentimiento biométrico</p>
           <p className="text-xs text-indigo-900 leading-relaxed">
-            Marcar por reconocimiento facial trata tu <b>imagen del rostro</b>, que la Ley N.º 29733 de Protección de Datos Personales
-            considera un <b>dato sensible</b>. La foto se usa solo para verificar tu identidad al fichar, se guarda cifrada y de acceso
-            restringido, y <b>puedes revocar</b> este permiso cuando quieras desde tu perfil.
+            Al marcar, la cámara <b>detecta tu rostro</b> y guarda una foto como evidencia — una <b>imagen del rostro</b>, que la Ley
+            N.º 29733 de Protección de Datos Personales considera un <b>dato sensible</b>. La cámara solo confirma que hay un rostro:
+            <b> no hace reconocimiento facial automático</b>. La foto queda como respaldo para que Recursos Humanos verifique la marca
+            (y para disuadir que alguien fiche por otro), se guarda cifrada y de acceso restringido, y <b>puedes revocar</b> este permiso
+            cuando quieras desde tu perfil.
           </p>
           <div className="flex flex-wrap gap-2 pt-1">
             <button onClick={onPedirConsentimiento} className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:opacity-90">

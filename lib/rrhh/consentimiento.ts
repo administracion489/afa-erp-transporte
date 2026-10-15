@@ -29,8 +29,10 @@ export const VERSION_CONSENTIMIENTO: Record<TipoConsentimiento, string> = {
 /** Resumen informativo (la pantalla muestra el texto completo). */
 export const RESUMEN_CONSENTIMIENTO: Record<TipoConsentimiento, string> = {
   biometrico:
-    "Autorizo el tratamiento de mi imagen facial para verificar mi identidad al marcar asistencia. " +
-    "La foto se guarda cifrada y de acceso restringido. Puedo revocar este consentimiento cuando quiera.",
+    "Autorizo que, al marcar asistencia, la cámara detecte un rostro y se guarde mi foto como " +
+    "evidencia, para que Recursos Humanos verifique la marca. No se hace reconocimiento facial " +
+    "automático. La foto se guarda cifrada y de acceso restringido. Puedo revocar este " +
+    "consentimiento cuando quiera.",
   monitoreo:
     "Autorizo el registro de mi ubicación y asistencia durante mi jornada con fines laborales. " +
     "Puedo revocar este consentimiento cuando quiera.",

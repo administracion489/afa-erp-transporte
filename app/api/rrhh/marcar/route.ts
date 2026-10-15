@@ -16,7 +16,7 @@ import { calcularJornada } from "@/lib/rrhh/jornada";
 import { cargarConfigRrhh, marcasDeHoy, hoyLimaFecha } from "@/lib/rrhh/marcacion-datos";
 import { consentimientoVigente } from "@/lib/rrhh/consentimiento";
 import { escribirDegradando } from "@/lib/rrhh/db";
-import { adminRrhh, subirArrhh } from "@/lib/rrhh/server";
+import { adminRrhh, subirArrhh, AdjuntoInvalido } from "@/lib/rrhh/server";
 import { tablaFaltante } from "@/lib/columna-faltante";
 
 export const maxDuration = 60;
@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
         ok: false,
         requiere_consentimiento: "biometrico",
         metodo_alterno: "pin",
-        error: "Para marcar con reconocimiento facial primero debes dar tu consentimiento biométrico en tu perfil. Mientras tanto, puedes marcar con PIN pidiéndoselo a Recursos Humanos.",
+        error: "Para marcar con la cámara (se guarda tu foto como evidencia) primero debes dar tu consentimiento biométrico en tu perfil. Mientras tanto, puedes marcar con PIN pidiéndoselo a Recursos Humanos.",
       }, { status: 403 });
     }
 
@@ -85,13 +85,15 @@ export async function POST(req: NextRequest) {
       }, { status: 403 });
     }
 
-    // 5) Foto al bucket privado. Si falla, se registra SIN foto (nunca se pierde la marca).
+    // 5) Foto al bucket privado (re-encodeada sin EXIF/GPS). Un archivo inválido → 400; un fallo
+    //    de Storage → se registra SIN foto (nunca se pierde la marca).
     let fotoPath: string | null = null;
     let fotoOmitida = false;
     if (body.foto) {
       try {
-        fotoPath = await subirArrhh(sb, `marcas/${usuarioId}/${hoy}/${tipo}-${crypto.randomUUID()}.jpg`, body.foto);
-      } catch {
+        fotoPath = await subirArrhh(sb, `marcas/${usuarioId}/${hoy}/${tipo}-${crypto.randomUUID()}`, body.foto, "foto");
+      } catch (e) {
+        if (e instanceof AdjuntoInvalido) return NextResponse.json({ ok: false, error: e.message }, { status: 400 });
         fotoOmitida = true;
       }
     } else {

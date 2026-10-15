@@ -23,6 +23,37 @@ import type { ConfigRrhh } from "@/lib/rrhh/tipos";
 
 const SQL = "supabase/rrhh-01-perfil-asistencia.sql";
 
+/** Re-encodea una imagen de archivo por <canvas> a JPEG, descartando EXIF/GPS, y reduciéndola a
+ *  como mucho 1024 px en el lado mayor (un rostro de perfil no necesita más). Rechaza si no es una
+ *  imagen que el navegador sepa decodificar; el llamador cae entonces al archivo crudo. */
+function reencodearFotoCanvas(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith("image/")) { reject(new Error("no es imagen")); return; }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const MAX = 1024;
+        const escala = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight) || 1);
+        const w = Math.max(1, Math.round(img.naturalWidth * escala));
+        const h = Math.max(1, Math.round(img.naturalHeight * escala));
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { reject(new Error("sin canvas")); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      } catch (e) {
+        reject(e as Error);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("no se pudo decodificar")); };
+    img.src = url;
+  });
+}
+
 type PerfilResp = {
   ok: boolean;
   sin_migracion?: string;
@@ -148,9 +179,14 @@ function SeccionPerfil({ data, correo, onGuardado }: { data: PerfilResp | null; 
     });
   }, [p]);
 
-  function elegirFoto(e: React.ChangeEvent<HTMLInputElement>) {
+  async function elegirFoto(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Defensa en profundidad: re-encodeamos la foto por <canvas> antes de mandarla, igual que la
+    // marcación facial. Eso descarta EXIF/GPS en el cliente (la foto de un celular trae ubicación).
+    // El servidor la vuelve a re-encodear sin metadatos, así que si el canvas falla no pasa nada.
+    const url = await reencodearFotoCanvas(file).catch(() => null);
+    if (url) { setFotoDataUrl(url); return; }
     const r = new FileReader();
     r.onload = () => setFotoDataUrl(typeof r.result === "string" ? r.result : null);
     r.readAsDataURL(file);
@@ -288,8 +324,8 @@ function Consentimientos({ data, onCambio }: { data: PerfilResp | null; onCambio
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-5 divide-y divide-gray-100">
       <p className="text-[11px] font-black uppercase tracking-widest text-gray-400 pb-1">Consentimientos (Ley N.º 29733)</p>
-      {fila("biometrico", "Reconocimiento facial para marcar asistencia",
-        "Autorizo tratar mi imagen del rostro (dato sensible) solo para verificar mi identidad al fichar. Revocable.")}
+      {fila("biometrico", "Foto del rostro al marcar asistencia",
+        "Autorizo que al marcar se detecte un rostro y se guarde mi foto (dato sensible) como evidencia para que RRHH verifique la marca. Sin reconocimiento facial automático. Revocable.")}
       {fila("monitoreo", "Registro de ubicación y asistencia en jornada",
         "Autorizo el registro de mi ubicación y asistencia durante mi jornada con fines laborales. Revocable.")}
     </div>

@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { escribirDegradando } from "@/lib/rrhh/db";
-import { adminRrhh, subirArrhh, leerAdjunto, extDeMedia } from "@/lib/rrhh/server";
+import { adminRrhh, subirArrhh, AdjuntoInvalido } from "@/lib/rrhh/server";
 import { tablaFaltante } from "@/lib/columna-faltante";
 
 export const maxDuration = 60;
@@ -49,15 +49,15 @@ async function solicitar(req: NextRequest, body: Record<string, unknown>) {
     const sb = adminRrhh();
 
     // Documento de respaldo opcional (descanso médico, licencia) → bucket privado, guarda ruta.
+    // Solo PDF o imagen (re-encodeada sin EXIF/GPS); un tipo/tamaño inválido → 400; un fallo de
+    // Storage → la solicitud se registra sin el documento.
     let documentoPath: string | null = null;
     let documentoOmitido = false;
     if (body.documento) {
-      const adj = leerAdjunto(body.documento);
       try {
-        documentoPath = await subirArrhh(
-          sb, `ausencias/${usuarioId}/${crypto.randomUUID()}.${extDeMedia(adj?.mediaType ?? "")}`, body.documento,
-        );
-      } catch {
+        documentoPath = await subirArrhh(sb, `ausencias/${usuarioId}/${crypto.randomUUID()}`, body.documento, "documento");
+      } catch (e) {
+        if (e instanceof AdjuntoInvalido) return NextResponse.json({ ok: false, error: e.message }, { status: 400 });
         documentoOmitido = true;
       }
     }
@@ -104,15 +104,29 @@ async function resolver(req: NextRequest, body: Record<string, unknown>, accion:
     }
     if (!existe) return NextResponse.json({ ok: false, error: "Ausencia no encontrada." }, { status: 404 });
 
+    // Una ausencia solo se resuelve UNA vez: ya aprobada/rechazada no se vuelve a tocar. Se avisa
+    // antes (mensaje claro) y el UPDATE filtra por estado='solicitada' para cerrar la carrera
+    // entre dos aprobadores que la leyeron a la vez.
+    if (existe.estado !== "solicitada") {
+      return NextResponse.json(
+        { ok: false, estado: existe.estado, error: `Esta ausencia ya está ${existe.estado}; no se puede volver a resolver.` },
+        { status: 409 },
+      );
+    }
+
     const patch: Record<string, unknown> = {
       estado: accion === "aprobar" ? "aprobada" : "rechazada",
       aprobado_por: auth.userId, // la firma RRHH es la del token
       aprobado_en: new Date().toISOString(),
     };
     const upd = await escribirDegradando("rrhh_ausencia", patch, (f) =>
-      sb.from("rrhh_ausencia").update(f).eq("id", id).select("*"));
+      sb.from("rrhh_ausencia").update(f).eq("id", id).eq("estado", "solicitada").select("*"));
     if (upd.sinMigracion) return NextResponse.json({ ok: false, sin_migracion: SQL }, { status: 422 });
     if (!upd.ok) return NextResponse.json({ ok: false, error: upd.error?.message ?? "No se pudo actualizar." }, { status: 500 });
+    // El filtro de estado no casó ninguna fila: otra persona la resolvió entre la lectura y el UPDATE.
+    if (!upd.data) {
+      return NextResponse.json({ ok: false, error: "Esta ausencia acaba de ser resuelta por otra persona." }, { status: 409 });
+    }
 
     return NextResponse.json({ ok: true, ausencia: upd.data });
   } catch (e: any) {
