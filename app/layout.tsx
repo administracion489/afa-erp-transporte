@@ -445,14 +445,14 @@ const MENU_RESTO_MIN_PX = 4;
 function LogoAFA({ collapsed }: { collapsed: boolean }) {
   if (collapsed) {
     return (
-      <div className="w-10 h-10 mx-auto rounded-xl overflow-hidden bg-[#2a5298] flex items-center justify-center shadow-lg">
-        <img src="/logoafa.png" alt="AFA" className="w-9 h-9 object-contain" />
+      <div className="w-10 h-10 mx-auto flex items-center justify-center">
+        <img src="/logoafa-blanco-icono.png" alt="AFA" className="w-10 object-contain drop-shadow-[0_2px_6px_rgba(47,142,233,0.45)]" />
       </div>
     );
   }
   return (
-    <div className="w-full bg-[#2a5298] rounded-xl px-3 py-2 shadow-lg flex items-center justify-center">
-      <img src="/logoafa.png" alt="AFA Transportes" className="w-full max-h-14 object-contain" />
+    <div className="w-full px-2 py-1 flex items-center justify-center">
+      <img src="/logoafa-blanco.png" alt="AFA Transportes" className="w-full max-h-16 object-contain drop-shadow-[0_2px_8px_rgba(47,142,233,0.45)]" />
     </div>
   );
 }
@@ -504,14 +504,14 @@ function GrupoMenu({
                 group relative flex items-center justify-center w-10 h-10 mx-auto mb-0.5 rounded-xl transition-all duration-150
                 ${activo
                   ? "bg-gradient-to-br from-[#2f8ee9] to-[#1262bd] shadow-md shadow-blue-900/40"
-                  : "hover:bg-white/10"
+                  : "hover:bg-white/12"
                 }
               `}
             >
               <Icon
                 size={17}
                 strokeWidth={activo ? 2.5 : 1.8}
-                className={activo ? "text-white" : "text-white/50 group-hover:text-white transition-colors"}
+                className={activo ? "text-white" : "text-white/85 group-hover:text-white transition-colors"}
               />
               {badge > 0 && (
                 <span
@@ -550,13 +550,13 @@ function GrupoMenu({
           onClick={() => setAbierto((v) => !v)}
           className="w-full flex items-center justify-between px-3 py-1.5 text-left group"
         >
-          <span className="text-[9px] font-black uppercase tracking-[0.15em] text-white/30 group-hover:text-white/50 transition-colors">
+          <span className="text-[10px] font-extrabold uppercase tracking-[0.16em] text-sky-300/80 group-hover:text-sky-200 transition-colors">
             {grupo}
           </span>
           <Ic.ChevronRight
             size={10}
             strokeWidth={2.5}
-            className={`text-white/25 transition-transform duration-200 ${abierto ? "rotate-90" : ""}`}
+            className={`text-sky-300/70 transition-transform duration-200 ${abierto ? "rotate-90" : ""}`}
           />
         </button>
       )}
@@ -575,18 +575,18 @@ function GrupoMenu({
                   group flex items-center gap-2.5 px-2.5 py-2 rounded-xl transition-all duration-150
                   ${activo
                     ? "bg-gradient-to-r from-[#2f8ee9] to-[#1262bd] shadow-md shadow-blue-900/30"
-                    : "hover:bg-white/8"
+                    : "hover:bg-white/10 hover:translate-x-0.5"
                   }
                 `}
               >
                 <div className={`
                   relative w-7 h-7 flex items-center justify-center rounded-lg flex-shrink-0 transition-all
-                  ${activo ? "bg-white/15" : "bg-white/5 group-hover:bg-white/10"}
+                  ${activo ? "bg-white/20" : "bg-white/10 ring-1 ring-white/10 group-hover:bg-[#2f8ee9]/30 group-hover:ring-[#2f8ee9]/40"}
                 `}>
                   <Icon
-                    size={14}
-                    strokeWidth={activo ? 2.5 : 1.8}
-                    className={activo ? "text-white" : "text-white/50 group-hover:text-white/90"}
+                    size={15}
+                    strokeWidth={activo ? 2.5 : 2}
+                    className={activo ? "text-white" : "text-white/90 group-hover:text-white"}
                   />
                   {badge > 0 && (
                     <span
@@ -599,11 +599,11 @@ function GrupoMenu({
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className={`text-[12px] font-semibold leading-tight truncate transition-colors
-                    ${activo ? "text-white" : "text-white/70 group-hover:text-white"}`}>
+                    ${activo ? "text-white" : "text-white/95 group-hover:text-white"}`}>
                     {item.label}
                   </p>
                   <p className={`text-[10px] truncate transition-colors
-                    ${activo ? "text-blue-100/60" : "text-white/25"}`}>
+                    ${activo ? "text-blue-50/85" : "text-slate-300/70 group-hover:text-slate-200"}`}>
                     {item.sub}
                   </p>
                 </div>
@@ -622,7 +622,7 @@ function GrupoMenu({
       )}
 
       {grupo !== "Principal" && (
-        <div className="mt-1.5 border-t border-white/5" />
+        <div className="mt-1.5 border-t border-white/10" />
       )}
     </div>
   );
@@ -705,7 +705,7 @@ function MenuUsuario({
       {collapsed && (
         <div className="px-2.5 py-2 mb-1 border-b border-white/5">
           <p className="text-[12px] font-bold text-white/90 truncate">{nombre}</p>
-          <p className="text-[10px] text-white/35 truncate">{email}</p>
+          <p className="text-[10px] text-slate-300/75 truncate">{email}</p>
           <span className="inline-block mt-1 text-[8px] font-black uppercase tracking-wider text-amber-400/90 bg-amber-400/10 px-1.5 py-0.5 rounded">
             {rolLabel}
           </span>
@@ -776,8 +776,8 @@ function MenuUsuario({
       >
         {avatar("w-9 h-9 text-sm")}
         <div className="min-w-0 flex-1">
-          <p className="font-bold text-[12px] text-white/90 leading-tight truncate">{nombre}</p>
-          <p className="text-[10px] text-white/35 truncate">{email}</p>
+          <p className="font-bold text-[12px] text-white leading-tight truncate">{nombre}</p>
+          <p className="text-[10px] text-slate-300/75 truncate">{email}</p>
         </div>
         <span className="flex items-center gap-1 flex-shrink-0">
           <span className="text-[8px] font-black uppercase tracking-wider text-amber-400/90 bg-amber-400/10 px-1.5 py-0.5 rounded">
@@ -786,7 +786,7 @@ function MenuUsuario({
           <Ic.ChevronRight
             size={13}
             strokeWidth={2.5}
-            className={`text-white/35 transition-transform duration-200 ${abierto ? "rotate-90" : "-rotate-90"}`}
+            className={`text-white/60 transition-transform duration-200 ${abierto ? "rotate-90" : "-rotate-90"}`}
           />
         </span>
       </button>
@@ -1035,11 +1035,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
               {!menuColapsado && (
                 <div className="px-3 py-2 border-b border-white/5">
-                  <div className="flex items-center gap-2 bg-white/5 rounded-lg px-2.5 py-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
+                  <div className="flex items-center gap-2 bg-white/[0.07] ring-1 ring-white/10 rounded-lg px-2.5 py-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0 shadow-[0_0_6px_rgba(52,211,153,0.9)]" />
                     <div>
-                      <p className="text-white/75 text-[11px] font-semibold leading-none">Sistema de Gestión</p>
-                      <p className="text-white/30 text-[9px] uppercase tracking-widest mt-0.5">ERP Transporte</p>
+                      <p className="text-white text-[11px] font-semibold leading-none">Sistema de Gestión</p>
+                      <p className="text-sky-300 text-[9px] font-bold uppercase tracking-widest mt-0.5">ERP / TMS</p>
                     </div>
                   </div>
                 </div>
