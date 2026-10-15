@@ -6,7 +6,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { bloqueParaIA } from "@/lib/crm-media";
 import { createClient } from "@supabase/supabase-js";
-import { enviarWhatsApp, enviarMessenger, enviarInstagram } from "@/lib/crm-meta";
+import { enviarWhatsApp, enviarMessenger, enviarInstagram, marcarLeidoYEscribiendo } from "@/lib/crm-meta";
 import { enviarEmail } from "@/lib/crm-gmail";
 import { textoLegible } from "@/lib/crm-gmail-reglas";
 import { phonePara } from "@/lib/whatsapp-numeros";
@@ -519,6 +519,18 @@ export type ResultadoIA = {
 // Solo contesta la corrida del ÚLTIMO mensaje: las de los anteriores ven que llegó uno
 // más nuevo y se retiran, así sale UNA respuesta que une todo lo recibido.
 const SILENCIO_MS = 12_000;
+// Un mensaje que ya parece completo (una pregunta, o un texto largo con los datos, o un
+// documento) espera poco; uno corto o suelto («Hola», «una consulta», una foto sola) espera
+// los 12 s porque casi siempre viene algo más. Es una regla aproximada, no una certeza.
+const SILENCIO_COMPLETO_MS = 4_000;
+export function silencioPara(m: { tipo?: string | null; contenido?: string | null } | null): number {
+  if (!m) return SILENCIO_MS;
+  const t = (m.contenido ?? "").trim();
+  if (m.tipo === "document") return SILENCIO_COMPLETO_MS;
+  if (m.tipo && m.tipo !== "texto" && m.tipo !== "text") return SILENCIO_MS;
+  if (/\?\s*$/.test(t) || t.length >= 60) return SILENCIO_COMPLETO_MS;
+  return SILENCIO_MS;
+}
 const ESPERA_MAX_MS = 45_000;
 const MAX_ARCHIVOS_IA = 4;
 const CANDADO_MS = 90_000;
@@ -603,21 +615,30 @@ async function responderConIAInterno(
     // Ráfaga: tres mensajes seguidos son tres webhooks y antes eran tres respuestas.
     const ultimoEntrante = async () => {
       const { data } = await sb
-        .from("crm_mensajes").select("id, created_at").eq("conversacion_id", convId)
+        .from("crm_mensajes").select("id, created_at, tipo, contenido, meta_message_id").eq("conversacion_id", convId)
         .eq("direccion", "entrante").order("created_at", { ascending: false }).limit(1).maybeSingle();
-      return data as { id: string; created_at: string } | null;
+      return data as { id: string; created_at: string; tipo: string | null; contenido: string | null; meta_message_id: string | null } | null;
     };
     const propio = await ultimoEntrante();
+    // «escribiendo…» y ✓✓ azules mientras se espera, solo si la IA va a contestar sola
+    // (en modo copiloto contesta una persona y el indicador sería una promesa falsa).
+    const autonomosIni: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
+    const mostrarEscribiendo =
+      conv.canal === "whatsapp" && autonomosIni.includes("whatsapp") && dentroHorario(agente) && !!propio?.meta_message_id;
+    if (mostrarEscribiendo) await marcarLeidoYEscribiendo(propio!.meta_message_id!, (conv as any).phone_number_id);
+    const silencio = silencioPara(propio);
     const tope = Date.now() + ESPERA_MAX_MS;
     for (;;) {
       const ult = await ultimoEntrante();
       if (ult && propio && ult.id !== propio.id)
         return { ok: true, accion: "omitido", motivo: "Llegó otro mensaje del cliente: responde la corrida de ese." };
-      const quieto = ult ? Date.now() - new Date(ult.created_at).getTime() : SILENCIO_MS;
-      if (quieto >= SILENCIO_MS || Date.now() >= tope) break;
-      await new Promise((r) => setTimeout(r, Math.min(SILENCIO_MS - quieto + 200, tope - Date.now())));
+      const quieto = ult ? Date.now() - new Date(ult.created_at).getTime() : silencio;
+      if (quieto >= silencio || Date.now() >= tope) break;
+      await new Promise((r) => setTimeout(r, Math.min(silencio - quieto + 200, tope - Date.now())));
     }
     ultimoVisto = propio?.id ?? null;
+    // El indicador dura ~25 s: se renueva justo antes de redactar.
+    if (mostrarEscribiendo) await marcarLeidoYEscribiendo(propio!.meta_message_id!, (conv as any).phone_number_id);
     // Candado por hilo. Si otra corrida lo tiene (la de un mensaje anterior que ya estaba
     // redactando), se espera a que lo suelte: esa corrida verá que llegó este mensaje y se
     // retirará sin enviar, y entonces contesta esta con todo junto.

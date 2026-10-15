@@ -206,3 +206,25 @@ export async function marcarLeidoWA(messageId: string): Promise<void> {
     body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: messageId }),
   });
 }
+
+/** Marca el mensaje del cliente como leído (✓✓ azules) y le muestra «escribiendo…»
+ *  de nuestro lado. Meta lo apaga solo a los ~25 s o al llegar nuestra respuesta.
+ *  Best-effort: si falla no pasa nada. */
+export async function marcarLeidoYEscribiendo(messageId: string, phoneId?: string | null): Promise<void> {
+  const phone = phoneId ?? process.env.META_PHONE_NUMBER_ID;
+  if (!phone || !messageId) return;
+  try {
+    await fetch(`${GRAPH}/${phone}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phone)}` },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: messageId,
+        typing_indicator: { type: "text" },
+      }),
+    });
+  } catch {
+    /* sin «escribiendo…» la respuesta sale igual */
+  }
+}
