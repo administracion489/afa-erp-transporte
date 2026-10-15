@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { EnlacePrivado } from "@/components/ArchivoPrivado";
+import { TIPOS_SEGURO } from "@/lib/seguros";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -27,76 +28,7 @@ type Vehiculo  = { id: number; placa: string; categoria?: string; };
 type Proveedor = { id: number; nombre: string; };
 
 // ─── CONFIGURACIÓN DE TIPOS DE SEGURO ────────────────────────────────────────
-
-type TipoSeguroConfig = {
-  label: string; icon: string; color: string; bg: string;
-  categoria: "obligatorio" | "complementario";
-  descripcion: string; renovacion: string; // anual, mensual, etc.
-  entidadLabel: string; // "vehículo", "empresa", "trabajador"
-};
-
-const TIPOS_SEGURO: Record<string, TipoSeguroConfig> = {
-  soat: {
-    label: "SOAT", icon: "🚗", color: "#dc2626", bg: "#fee2e2",
-    categoria: "obligatorio",
-    descripcion: "Seguro Obligatorio de Accidentes de Tránsito — por vehículo",
-    renovacion: "Anual", entidadLabel: "vehículo",
-  },
-  cat: {
-    label: "CAT", icon: "📜", color: "#b45309", bg: "#fef3c7",
-    categoria: "obligatorio",
-    descripcion: "Certificado Accidentes de Tránsito (alternativa SOAT provincias)",
-    renovacion: "Anual", entidadLabel: "vehículo",
-  },
-  todo_riesgo: {
-    label: "Todo Riesgo", icon: "🛡️", color: "#1d4ed8", bg: "#dbeafe",
-    categoria: "complementario",
-    descripcion: "Cobertura total: robo, choque, incendio, daños a terceros",
-    renovacion: "Anual", entidadLabel: "vehículo",
-  },
-  responsabilidad_civil: {
-    label: "Resp. Civil", icon: "⚖️", color: "#7c3aed", bg: "#ede9fe",
-    categoria: "complementario",
-    descripcion: "Responsabilidad civil frente a terceros — por vehículo o flota",
-    renovacion: "Anual", entidadLabel: "vehículo/empresa",
-  },
-  sctr_salud: {
-    label: "SCTR Salud", icon: "🏥", color: "#0f766e", bg: "#f0fdfa",
-    categoria: "obligatorio",
-    descripcion: "Seguro Complementario Trabajo de Riesgo — Salud (Rimac, Pacífico, La Positiva)",
-    renovacion: "Anual", entidadLabel: "empresa",
-  },
-  sctr_pension: {
-    label: "SCTR Pensión", icon: "💼", color: "#166534", bg: "#dcfce7",
-    categoria: "obligatorio",
-    descripcion: "Seguro Complementario Trabajo de Riesgo — Pensiones (ONP o AFP)",
-    renovacion: "Anual", entidadLabel: "empresa",
-  },
-  vida_ley: {
-    label: "Vida Ley", icon: "❤️", color: "#9d174d", bg: "#fdf2f8",
-    categoria: "obligatorio",
-    descripcion: "Vida Ley D.L. 688 — obligatorio para trabajadores desde el 1er día",
-    renovacion: "Anual", entidadLabel: "empresa",
-  },
-  seguro_carga: {
-    label: "Seg. Carga", icon: "📦", color: "#92400e", bg: "#fff7ed",
-    categoria: "complementario",
-    descripcion: "Seguro de transporte terrestre de carga y mercancías",
-    renovacion: "Por servicio/anual", entidadLabel: "empresa",
-  },
-  patrimonio: {
-    label: "Patrimonio", icon: "🏢", color: "#4b5563", bg: "#f3f4f6",
-    categoria: "complementario",
-    descripcion: "Seguro de bienes muebles, inmuebles, equipos e instalaciones",
-    renovacion: "Anual", entidadLabel: "empresa",
-  },
-  otro: {
-    label: "Otro", icon: "📋", color: "#6b7280", bg: "#f9fafb",
-    categoria: "complementario",
-    descripcion: "Otro tipo de seguro",
-    renovacion: "Variable", entidadLabel: "—",
-  },
-};
+// El catálogo vive en lib/seguros.ts (lo comparten la vista derivada y esta pantalla).
 
 // ─── ASEGURADORAS PERÚ ────────────────────────────────────────────────────────
 
