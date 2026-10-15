@@ -1,3 +1,4 @@
+import { guardarMediaWhatsApp } from "@/lib/crm-media";
 // lib/crm-coexistencia.ts — SOLO SERVIDOR.
 //
 // Los tres webhooks que Meta manda SOLO cuando un número está en coexistencia
@@ -113,7 +114,9 @@ export async function procesarEchos(sb: SB, value: any): Promise<number> {
     });
     if (!conv) continue;
 
-    const { tipo, contenido, mediaUrl } = contenidoDeMensaje(eco);
+    const { tipo, contenido, mediaUrl: urlDirecta } = contenidoDeMensaje(eco);
+    // Lo que se manda desde el celular (fotos, stickers) también se ve en el CRM.
+    const mediaUrl = urlDirecta ?? (await guardarMediaWhatsApp(sb as any, eco, phoneNumberId))?.url ?? null;
     const cuando = isoDeTimestamp(eco?.timestamp);
 
     // created_at explícito: el Inbox ordena el hilo por esa columna, así que un

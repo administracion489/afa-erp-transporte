@@ -4,6 +4,7 @@
 // SOLO servidor: usa ANTHROPIC_API_KEY + service-role de Supabase.
 // ============================================================
 import Anthropic from "@anthropic-ai/sdk";
+import { bloqueParaIA } from "@/lib/crm-media";
 import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsApp, enviarMessenger, enviarInstagram } from "@/lib/crm-meta";
 import { enviarEmail } from "@/lib/crm-gmail";
@@ -403,6 +404,10 @@ function construirSystem(agente: any, contacto: any, conv: any): string {
     "- No reveles que eres una IA salvo que te lo pregunten directamente; preséntate como el asistente de AFA.",
     "- No compartas costos internos, márgenes ni datos de otros clientes.",
     "- Devuelve solo el texto del mensaje al cliente, sin prefijos como 'Asistente:'.",
+    "- Si el cliente envía FOTOS o DOCUMENTOS, LÉELOS: extrae fechas, horarios, número de pasajeros, origen, destino y lo que pida. Nunca digas que no puedes verlos. Resume lo que entendiste y pregunta solo lo que falte.",
+    "- No repitas una pregunta que ya hiciste con otras palabras. Si el cliente no la contestó, espera; no insistas en el mismo mensaje ni en el siguiente.",
+    "- Un sticker o una reacción no es una pregunta: no contestes solo por eso.",
+    "- Formato WhatsApp: negrita con *un* asterisco (nunca **dos**). Mensajes cortos, un solo mensaje por turno.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -411,22 +416,47 @@ function construirSystem(agente: any, contacto: any, conv: any): string {
 // ── Historial de la conversación → mensajes para Claude ──────────────────────
 
 async function cargarHistorial(sb: SB, convId: string): Promise<Anthropic.MessageParam[]> {
+  // Los 40 MÁS RECIENTES: antes se pedían los 40 más antiguos (orden ascendente + limit),
+  // así que en un hilo largo la IA contestaba sin ver lo último que escribió el cliente.
   const { data } = await sb
     .from("crm_mensajes")
-    .select("direccion, contenido, tipo, created_at")
+    .select("direccion, contenido, tipo, media_url, created_at")
     .eq("conversacion_id", convId)
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false })
     .limit(40);
-  const msgs = (data ?? []).slice(-20);
+  const msgs = (data ?? []).reverse().slice(-20);
+  // Las fotos y PDF que mandó el cliente van como IMAGEN/DOCUMENTO para que la IA los LEA
+  // (antes recibía «[image]» y contestaba «no puedo verlas»). Solo los últimos, por costo.
+  const conArchivo = msgs
+    .map((m: any, i: number) => ({ m, i }))
+    .filter(({ m }) => m.direccion === "entrante" && m.media_url && ["image", "document", "imagen"].includes(m.tipo))
+    .slice(-MAX_ARCHIVOS_IA);
+  const bloques = new Map<number, any>();
+  for (const { m, i } of conArchivo) {
+    const b = await bloqueParaIA(sb as any, m.media_url);
+    if (b) bloques.set(i, b);
+  }
   const out: Anthropic.MessageParam[] = [];
-  for (const m of msgs) {
+  msgs.forEach((m: any, i: number) => {
     const role = m.direccion === "entrante" ? "user" : "assistant";
+    if (m.tipo === "reaction") {
+      if (role === "user") out.push({ role, content: `[El cliente reaccionó con ${m.contenido ?? "un emoji"}]` });
+      return;
+    }
     // Un correo importado como HTML (antes de que la lectura lo pasara a texto) se lee como
     // texto: si no, el agente se gasta los tokens leyendo CSS.
-    const texto = textoLegible(m.contenido)?.trim() || (m.tipo && m.tipo !== "texto" ? `[${m.tipo}]` : "");
-    if (!texto) continue;
-    out.push({ role, content: texto });
-  }
+    const crudo = textoLegible(m.contenido)?.trim() ?? "";
+    const texto = /^\[[a-z_]+\]$/i.test(crudo) ? "" : crudo;
+    const archivo = bloques.get(i);
+    if (archivo) {
+      const etiqueta = archivo.type === "image" ? "[El cliente envió esta imagen]" : "[El cliente envió este documento]";
+      out.push({ role: "user", content: [archivo, { type: "text", text: texto ? `${etiqueta} ${texto}` : etiqueta }] as any });
+      return;
+    }
+    const final = texto || (m.tipo && m.tipo !== "texto" ? `[${m.tipo === "sticker" ? "sticker" : m.tipo}]` : "");
+    if (!final) return;
+    out.push({ role, content: final });
+  });
   // La conversación debe empezar con un mensaje del usuario
   while (out.length && out[0].role !== "user") out.shift();
   // …y TERMINAR con uno: si el último es nuestro, la API lo toma como «prefill» y
@@ -484,6 +514,7 @@ export type ResultadoIA = {
  * @param opts.forzarBorrador  pedido manual desde el inbox: siempre deja borrador
  */
 const ESPERA_RAFAGA_MS = 6000;
+const MAX_ARCHIVOS_IA = 4;
 const CANDADO_MS = 90_000;
 
 export async function responderConIA(
@@ -506,6 +537,7 @@ async function responderConIAInterno(
   opts: { forzarBorrador?: boolean },
   candado: { tomado: boolean }
 ): Promise<ResultadoIA> {
+  const inicioRespuesta = new Date().toISOString();
   if (!process.env.ANTHROPIC_API_KEY)
     return { ok: false, accion: "omitido", error: "Falta ANTHROPIC_API_KEY en el entorno." };
 
@@ -576,11 +608,13 @@ async function responderConIAInterno(
       return { ok: true, accion: "omitido", motivo: "Otra respuesta de la IA ya está en curso." };
     candado.tomado = !errLock;
     const { data: ult } = await sb
-      .from("crm_mensajes").select("direccion").eq("conversacion_id", convId)
+      .from("crm_mensajes").select("direccion, tipo").eq("conversacion_id", convId)
       .order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (ult?.direccion === "saliente") {
       return { ok: true, accion: "omitido", motivo: "El último mensaje ya es nuestro." };
     }
+    if (ult?.tipo === "sticker" || ult?.tipo === "reaction")
+      return { ok: true, accion: "omitido", motivo: "Un sticker o reacción no se contesta." };
   }
 
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
@@ -636,6 +670,14 @@ async function responderConIAInterno(
     !opts.forzarBorrador && !ctx.escalado.v && autonomos.includes(conv.canal) && dentroHorario(agente);
 
   if (puedeAuto) {
+    // Justo antes de enviar: si mientras pensaba contestó una persona (desde el celular o el
+    // CRM), u otra corrida de la IA, o se pausó la IA, no se manda: serían dos respuestas.
+    const { data: ahora } = await sb.from("crm_conversaciones").select("ia_pausada").eq("id", convId).maybeSingle();
+    const { count: nuevos } = await sb
+      .from("crm_mensajes").select("id", { count: "exact", head: true })
+      .eq("conversacion_id", convId).eq("direccion", "saliente").gte("created_at", inicioRespuesta);
+    if (ahora?.ia_pausada || (nuevos ?? 0) > 0)
+      return { ok: true, accion: "omitido", motivo: "Ya respondió otra persona o la IA se pausó mientras se redactaba." };
     if (agente.delay_segundos > 0)
       await new Promise((r) => setTimeout(r, Math.min(agente.delay_segundos, 30) * 1000));
     const err = await enviarPorCanal(sb, conv, contacto, textoFinal);

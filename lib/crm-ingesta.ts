@@ -152,6 +152,8 @@ export function contenidoDeMensaje(msg: any): { tipo: string; contenido: string;
     msg?.text?.body ??
     msg?.[tipo]?.caption ??
     msg?.caption ??
+    msg?.document?.filename ??
+    (tipo === "reaction" ? msg?.reaction?.emoji || "👍" : null) ??
     msg?.button?.text ??
     msg?.interactive?.list_reply?.title ??
     msg?.interactive?.button_reply?.title ??

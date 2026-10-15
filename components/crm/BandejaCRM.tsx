@@ -6,6 +6,7 @@ import {
 } from "@/lib/crm-telefono";
 import { avisosAutomaticosDeTelefono, etiquetaAviso, type AvisoAutomatico } from "@/lib/crm-avisos-automaticos";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import MensajeContenido, { esBurbujaSinFondo } from "@/components/crm/MensajeContenido";
 import { haceCuanto, textoLegible } from "@/lib/crm-gmail-reglas";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -130,6 +131,24 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [convs, setConvs] = useState<Conversacion[]>([]);
   const [selected, setSelected] = useState<Conversacion | null>(null);
   const [mensajes, setMensajes] = useState<Mensaje[]>([]);
+  // Media firmada por mensaje (bucket privado crm-media): undefined = cargando, null = no disponible.
+  const [mediaUrls, setMediaUrls] = useState<Record<string, string | null>>({});
+  const pedidosMedia = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const faltan = mensajes.filter((m) => m.media_url && !pedidosMedia.current.has(m.id)).map((m) => m.id);
+    if (!faltan.length) return;
+    faltan.forEach((id) => pedidosMedia.current.add(id));
+    (async () => {
+      try {
+        const r = await fetch("/api/crm/media", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ mensaje_ids: faltan }) });
+        const d = await r.json();
+        const urls: Record<string, string | null> = d?.urls ?? {};
+        setMediaUrls((p) => ({ ...p, ...Object.fromEntries(faltan.map((id) => [id, urls[id] ?? null])) }));
+      } catch {
+        faltan.forEach((id) => pedidosMedia.current.delete(id));
+      }
+    })();
+  }, [mensajes]);
   const [reply, setReply] = useState("");
   const [canalFiltro, setCanalFiltro] = useState<Canal>("todos");
   const [numeroFiltro, setNumeroFiltro] = useState<string>("todos");
@@ -987,17 +1006,20 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                   <div className={`flex ${esMio ? "justify-end" : "justify-start"}`}>
                     <div
                       className={`max-w-sm px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed
-                        ${esMio
+                        ${esBurbujaSinFondo(m.tipo)
+                          ? (esMio ? "text-gray-500" : "text-gray-800")
+                          : esMio
                           ? "bg-[#0b315f] text-white rounded-br-sm"
                           : "bg-white border border-gray-100 text-gray-800 rounded-bl-sm shadow-sm"
                         }`}
                     >
-                      {m.media_url && (
-                        <img src={m.media_url} alt="media" className="rounded-lg mb-1.5 max-w-full" />
-                      )}
-                      {/* `overflow-wrap:anywhere`: un enlace de 200 caracteres sin espacios se salía de
-                          la burbuja y le ponía al chat entero una barra de desplazamiento horizontal. */}
-                      <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{m.contenido}</p>
+                      <MensajeContenido
+                        tipo={m.tipo}
+                        contenido={m.contenido}
+                        tieneMedia={!!m.media_url}
+                        url={m.media_url ? mediaUrls[m.id] : null}
+                        esMio={esMio}
+                      />
                       <div className={`text-[10px] mt-1 text-right ${esMio ? "text-white/60" : "text-gray-400"}`}>
                         {m.generado_por_ia && <span className="mr-1" title="Generado por IA">✨</span>}
                         {fmtFechaMsg(m.created_at)}

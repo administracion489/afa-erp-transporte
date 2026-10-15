@@ -3,6 +3,7 @@ import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createHmac, timingSafeEqual } from "crypto";
 import { responderConIA } from "@/lib/crm-ia";
+import { guardarMediaWhatsApp } from "@/lib/crm-media";
 import { esNumeroDeAvisos } from "@/lib/whatsapp-numeros";
 import { procesarEchos, procesarHistorial, procesarContactos } from "@/lib/crm-coexistencia";
 import { resolverContacto, resolverConversacion } from "@/lib/crm-ingesta";
@@ -108,19 +109,25 @@ export async function POST(req: NextRequest) {
         }
 
         for (const msg of val.messages ?? []) {
+          const media = await guardarMediaWhatsApp(db(), msg, phoneId);
           const convId = await processarMensaje({
             canal: "whatsapp",
             senderId: msg.from,
             senderName: val.contacts?.[0]?.profile?.name ?? msg.from,
             idField: "wa_id",
-            contenido: msg.text?.body ?? msg.caption ?? `[${msg.type}]`,
+            contenido:
+              msg.text?.body ?? msg[msg.type]?.caption ?? msg.document?.filename ??
+              (msg.type === "reaction" ? msg.reaction?.emoji || "👍" : null) ??
+              msg.button?.text ?? msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ??
+              `[${msg.type}]`,
             tipo: msg.type === "text" ? "texto" : msg.type,
-            mediaUrl: msg.image?.url ?? msg.audio?.url ?? msg.video?.url ?? msg.document?.url ?? null,
+            mediaUrl: media?.url ?? msg.image?.url ?? msg.audio?.url ?? msg.video?.url ?? msg.document?.url ?? null,
             metaMessageId: msg.id,
             phoneNumberId: phoneId ?? null,
             displayPhoneNumber: val.metadata?.display_phone_number ?? null,
           });
-          if (convId && !esAvisos) conversacionesNuevas.add(convId);
+          // Una reacción (😂 a un mensaje) no es una pregunta: la IA no contesta por ella.
+          if (convId && !esAvisos && msg.type !== "reaction") conversacionesNuevas.add(convId);
         }
       }
     }
