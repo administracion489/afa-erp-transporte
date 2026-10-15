@@ -495,19 +495,21 @@ export default function SegurosPage() {
       }
       return [];
     };
-    const sueldo = conSueldo && puedeVerSueldo;
+    // Cada sueldo solo con el módulo de SU ficha: Conductores no da acceso al del personal.
+    const sueldoCond = conSueldo && !!puedeVer?.["conductores"];
+    const sueldoPers = conSueldo && !!puedeVer?.["personal-administrativo"];
     const idsDe = (pre: string) => personas.filter((k) => k.startsWith(pre)).map((k) => Number(k.split(":")[1]));
     try {
       const [c, p] = await Promise.all([
-        idsDe("conductor:").length ? leer("conductores", ["id", "nombre"], ["dni", "fecha_nacimiento", "fecha_ingreso", ...(sueldo ? ["sueldo_basico"] : [])], idsDe("conductor:")) : Promise.resolve([]),
-        idsDe("personal:").length ? leer("personal_administrativo", ["id", "nombre"], ["dni", "fecha_nacimiento", "cargo", "fecha_ingreso", ...(sueldo ? ["sueldo_basico"] : [])], idsDe("personal:")) : Promise.resolve([]),
+        idsDe("conductor:").length ? leer("conductores", ["id", "nombre"], ["dni", "fecha_nacimiento", "fecha_ingreso", ...(sueldoCond ? ["sueldo_basico"] : [])], idsDe("conductor:")) : Promise.resolve([]),
+        idsDe("personal:").length ? leer("personal_administrativo", ["id", "nombre"], ["dni", "fecha_nacimiento", "cargo", "fecha_ingreso", ...(sueldoPers ? ["sueldo_basico"] : [])], idsDe("personal:")) : Promise.resolve([]),
       ]);
       const lista: PersonaInclusion[] = [
         ...c.map((r) => ({ clase: "conductor" as const, id: Number(r.id), nombre: (r.nombre as string) ?? null, dni: (r.dni as string) ?? null, fecha_nacimiento: (r.fecha_nacimiento as string) ?? null, fecha_ingreso: (r.fecha_ingreso as string) ?? null, sueldo_basico: (r.sueldo_basico as number) ?? null })),
         ...p.map((r) => ({ clase: "personal" as const, id: Number(r.id), nombre: (r.nombre as string) ?? null, dni: (r.dni as string) ?? null, fecha_nacimiento: (r.fecha_nacimiento as string) ?? null, cargo: (r.cargo as string) ?? null, fecha_ingreso: (r.fecha_ingreso as string) ?? null, sueldo_basico: (r.sueldo_basico as number) ?? null })),
       ];
       const pol = (res?.polizas ?? []).find((x) => Number(x.id) === seguroId) ?? null;
-      const l = listaInclusion(lista, pol, { conSueldo: sueldo });
+      const l = listaInclusion(lista, pol, { conSueldo: sueldoCond || sueldoPers });
       let copiado = false;
       try { await navigator.clipboard.writeText(l.tsv); copiado = true; } catch { copiado = false; }
       setCopia({ titulo: l.titulo, filas: l.filas, tsv: l.tsv, copiado, faltan: l.faltan.map((x) => `${x.nombre}: falta ${x.campos.join(" y ")}`) });
