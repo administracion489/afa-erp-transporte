@@ -182,7 +182,7 @@ function usePolizasPersona(clase: "conductor" | "personal") {
     let vivo = true;
     const col = clase === "conductor" ? "conductor_id" : "personal_administrativo_id";
     const leer = async (tabla: string, cols: string, filtro?: string) => {
-      const out: any[] = [];
+      const out: Record<string, unknown>[] = [];
       for (let desde = 0; ; desde += 1000) {
         let q = supabase.from(tabla).select(cols).order("id", { ascending: true }).range(desde, desde + 999);
         if (filtro) q = q.not(filtro, "is", null);
@@ -198,7 +198,7 @@ function usePolizasPersona(clase: "conductor" | "personal") {
           leer("seguros", "id,tipo,numero_poliza,fecha_vencimiento"),
           leer("seguro_cobertura", `id,seguro_id,${col},hasta`, col),
         ]);
-        if (vivo && p && c) setDatos({ polizas: p, coberturas: c });
+        if (vivo && p && c) setDatos({ polizas: p as unknown as PolizaRow[], coberturas: c as unknown as CoberturaRow[] });
       } catch { /* sin pólizas: la ficha manda, como siempre */ }
     })();
     return () => { vivo = false; };

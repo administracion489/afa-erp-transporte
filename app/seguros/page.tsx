@@ -69,7 +69,7 @@ const GRUPOS_CUBIERTOS: { clase: ClaseCubierto; titulo: string; icon: string }[]
   { clase: "vehiculo_tercero", titulo: "Vehículos de terceros", icon: "🚐" },
 ];
 type Candidato = { clave: string; clase: ClaseCubierto; id: number; rotulo: string; activo: boolean };
-const claveCub = (clase: string, id: number | string) => `${clase}:${Number(id)}`;
+const claveCub = (clase: string, id: unknown) => `${clase}:${Number(id)}`;
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -104,8 +104,9 @@ const esTercerizada = (f: FilaSeguro) =>
   f.asegurado.clase === "vehiculo_tercero" || f.asegurado.clase === "empresa_tercero" ||
   (f.cubre ?? []).some((c) => c.clase === "vehiculo_tercero");
 
-async function leerTodo(tabla: string, cols: string): Promise<{ filas: any[]; error: any }> {
-  const out: any[] = [];
+type FilaLeida = Record<string, unknown>;
+async function leerTodo(tabla: string, cols: string): Promise<{ filas: FilaLeida[]; error: { message?: string } | null }> {
+  const out: FilaLeida[] = [];
   for (let desde = 0; ; desde += 1000) {
     const { data, error } = await supabase.from(tabla).select(cols).order("id", { ascending: true }).range(desde, desde + 999);
     if (error) return { filas: [], error };
@@ -185,7 +186,7 @@ export default function SegurosPage() {
     setLoading(false);
   };
 
-  useEffect(() => { cargarDatos(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { cargarDatos(); }, []);
 
   const rotuloCub = useMemo(() => new Map(candidatos.map((c) => [c.clave, c.rotulo])), [candidatos]);
 
@@ -296,13 +297,13 @@ export default function SegurosPage() {
     // La columna prima/cuota es NOT NULL default 0 en algunas bases: vacío no se convierte en 0
     // aquí; si la base lo exige, se avisa abajo.
     let seguroId: number | null = editandoId;
-    let error: any = null;
+    let error: { message?: string; code?: string } | null = null;
     for (let intento = 0; intento <= COLS_ACCESORIAS.length; intento++) {
       const r = editandoId
         ? await supabase.from("seguros").update(payload).eq("id", editandoId)
         : await supabase.from("seguros").insert(payload).select("id").single();
       error = r.error;
-      if (!error) { if (!editandoId) seguroId = Number((r as any).data?.id); break; }
+      if (!error) { if (!editandoId) seguroId = Number((r as { data?: { id?: unknown } }).data?.id); break; }
       const col = columnaFaltante(error);
       const acc = COLS_ACCESORIAS.find((c) => c === col);
       if (acc && acc in payload) {
@@ -767,13 +768,13 @@ export default function SegurosPage() {
           <input className="w-full border rounded-xl pl-9 pr-4 py-2.5 text-sm focus:outline-none"
             placeholder="Buscar por asegurado, placa, aseguradora, póliza…" value={busqueda} onChange={(e) => setBusqueda(e.target.value)} />
         </div>
-        <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroFuente} onChange={(e) => setFiltroFuente(e.target.value as any)}>
+        <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroFuente} onChange={(e) => setFiltroFuente(e.target.value as "todos" | FuenteSeguro)}>
           <option value="todos">Todas las fuentes</option>
           {FUENTES_SEGURO.map((f) => (
             <option key={f} value={f}>{FUENTE_LABEL[f].label}{res?.fuentes[f] === "error" ? " (no se pudo leer)" : res?.fuentes[f] === "sin_tabla" ? " (falta migración)" : ""}</option>
           ))}
         </select>
-        <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroFlota} onChange={(e) => setFiltroFlota(e.target.value as any)}>
+        <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroFlota} onChange={(e) => setFiltroFlota(e.target.value as "todas" | "propia" | "tercerizada")}>
           <option value="todas">Propia y tercerizada</option>
           <option value="propia">Flota propia / AFA</option>
           <option value="tercerizada">Flota tercerizada</option>
