@@ -1,4 +1,5 @@
 "use client";
+import ContactosSinIA from "@/components/crm/ContactosSinIA";
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
@@ -565,6 +566,7 @@ export default function AgenteIAPage() {
           </div>
         </div>
       </div>
+      <ContactosSinIA />
     </div>
   );
 }

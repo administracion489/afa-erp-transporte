@@ -429,6 +429,9 @@ async function cargarHistorial(sb: SB, convId: string): Promise<Anthropic.Messag
   }
   // La conversación debe empezar con un mensaje del usuario
   while (out.length && out[0].role !== "user") out.shift();
+  // …y TERMINAR con uno: si el último es nuestro, la API lo toma como «prefill» y
+  // los modelos nuevos lo rechazan con un 400 (lo que salía en rojo al pedir borrador).
+  while (out.length && out[out.length - 1].role !== "user") out.pop();
   return out;
 }
 
@@ -480,9 +483,28 @@ export type ResultadoIA = {
  * @param convId  conversación a atender
  * @param opts.forzarBorrador  pedido manual desde el inbox: siempre deja borrador
  */
+const ESPERA_RAFAGA_MS = 6000;
+const CANDADO_MS = 90_000;
+
 export async function responderConIA(
   convId: string,
   opts: { forzarBorrador?: boolean } = {}
+): Promise<ResultadoIA> {
+  const candado = { tomado: false };
+  try {
+    return await responderConIAInterno(convId, opts, candado);
+  } finally {
+    // Solo suelta el candado quien lo ganó: soltarlo desde una llamada perdedora
+    // abriría la puerta a la respuesta duplicada.
+    if (candado.tomado)
+      await db().from("crm_conversaciones").update({ ia_respondiendo_at: null }).eq("id", convId);
+  }
+}
+
+async function responderConIAInterno(
+  convId: string,
+  opts: { forzarBorrador?: boolean },
+  candado: { tomado: boolean }
 ): Promise<ResultadoIA> {
   if (!process.env.ANTHROPIC_API_KEY)
     return { ok: false, accion: "omitido", error: "Falta ANTHROPIC_API_KEY en el entorno." };
@@ -506,6 +528,8 @@ export async function responderConIA(
 
   if (!opts.forzarBorrador) {
     if (conv.ia_pausada) return { ok: true, accion: "omitido", motivo: "IA pausada en este hilo." };
+    if (contacto?.ia_desactivada === true)
+      return { ok: true, accion: "omitido", motivo: "IA desactivada para este contacto (proveedor / conductor)." };
     // El agente solo atiende números de ATENCIÓN AL CLIENTE. Un número marcado solo para
     // avisos automáticos (usa_avisos y no usa_crm) nunca responde con IA.
     if (conv.canal === "whatsapp" && (conv as any).phone_number_id) {
@@ -533,6 +557,29 @@ export async function responderConIA(
         await sb.from("crm_conversaciones").update({ ia_pausada: true, estado: "en_progreso" }).eq("id", convId);
         return { ok: true, accion: "escalado", motivo: "Límite de turnos automáticos alcanzado." };
       }
+    }
+  }
+
+  if (!opts.forzarBorrador) {
+    // Ráfaga: tres fotos seguidas son tres webhooks y antes eran tres respuestas iguales.
+    // Se espera a que termine la ráfaga, se toma un candado por hilo y solo responde
+    // quien lo gana; si el último mensaje ya es nuestro, el hilo ya está contestado.
+    await new Promise((r) => setTimeout(r, ESPERA_RAFAGA_MS));
+    const limite = new Date(Date.now() - CANDADO_MS).toISOString();
+    const { data: gano, error: errLock } = await sb
+      .from("crm_conversaciones")
+      .update({ ia_respondiendo_at: new Date().toISOString() })
+      .eq("id", convId)
+      .or(`ia_respondiendo_at.is.null,ia_respondiendo_at.lt.${limite}`)
+      .select("id");
+    if (!errLock && (!gano || gano.length === 0))
+      return { ok: true, accion: "omitido", motivo: "Otra respuesta de la IA ya está en curso." };
+    candado.tomado = !errLock;
+    const { data: ult } = await sb
+      .from("crm_mensajes").select("direccion").eq("conversacion_id", convId)
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (ult?.direccion === "saliente") {
+      return { ok: true, accion: "omitido", motivo: "El último mensaje ya es nuestro." };
     }
   }
 
