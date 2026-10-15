@@ -18,6 +18,7 @@ import {
 import { cargarSeguros, leerPolizasPersonas } from "../lib/seguros-datos";
 import { diasEntreFechas } from "../lib/documentos-estado";
 import { listaInclusion, limpiarCampo } from "../lib/seguros-inclusion";
+import { opcionesAseguradora, aseguradoraConocida, claveAseguradora, limpiarNombreAseguradora } from "../lib/seguros-aseguradoras";
 
 let ok = 0, fallos = 0;
 const check = (c: unknown, m: string) => { if (c) ok++; else { fallos++; console.log("  ✗", m); } };
@@ -429,6 +430,25 @@ sec("13. Lector: suelta SOLO la columna nombrada (seguros-04a) y lo dice");
   check(!!lp && lp.soltadas.length === 2 && lp.polizas.length === 1, "leerPolizasPersonas: suelta las de 04a y lee todas las pólizas (no solo .in tipo)");
   const lpOtro = await leerPolizasPersonas(dbSinCols({ seguros: [{ id: 1, tipo: "x" }], seguro_cobertura: [] }, { seguro_cobertura: ["desde"] }));
   check(lpOtro === null, "una columna que no es accesoria → null (ficha)");
+}
+
+{
+  console.log("\n· Aseguradoras: la lista se amplía sin tocar código");
+  const ops = opcionesAseguradora(
+    [{ id: 7, nombre: "SANITAS PERÚ S.A. EPS", tipo: "seguros" }, { id: 8, nombre: "Taller X", tipo: "taller" }, { id: 9, nombre: "Seguros SURA", tipo: "seguros" }],
+    ["Rimac Seguros", "RÍMAC", "Crecer Seguros", "Otra", null, "  "],
+  );
+  const nombres = ops.map((o) => o.nombre);
+  check(nombres.filter((n) => claveAseguradora(n) === "sanitas").length === 1, "Sanitas aparece una sola vez (proveedor y base son la misma)");
+  check(ops.find((o) => claveAseguradora(o.nombre) === "sanitas")?.origen === "proveedor", "y gana el nombre del proveedor");
+  check(!nombres.includes("Taller X"), "un proveedor que no es de seguros no entra");
+  check(nombres.some((n) => /SURA/.test(n)) && nombres.includes("Crecer Seguros"), "entran proveedores de seguros y las ya usadas");
+  check(nombres.filter((n) => claveAseguradora(n) === "rimac").length === 1, "«RÍMAC» y «Rimac Seguros» son una");
+  check(!nombres.some((n) => /^otra$/i.test(n)), "«Otra» nunca es una aseguradora");
+  check(aseguradoraConocida("sanitas", ops)?.nombre === "SANITAS PERÚ S.A. EPS", "escribir «sanitas» reconoce la existente");
+  check(aseguradoraConocida("Qualitas", ops) === null, "una nueva no se confunde");
+  check(limpiarNombreAseguradora("  Sanitas   Perú ") === "Sanitas Perú" && limpiarNombreAseguradora("otra") === null, "limpieza del nombre");
+  check(claveAseguradora("Seguros") !== "" , "«Seguros» solo no queda con clave vacía");
 }
 
 console.log(`\n${fallos === 0 ? "✓" : "✗"} ${ok} ok · ${fallos} fallos`);

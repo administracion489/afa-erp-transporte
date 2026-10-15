@@ -17,6 +17,7 @@ import {
   type FilaSeguro, type FuenteSeguro, type Faltante, type ClaveAsegurado, type TipoPersona,
   type CoberturaRow, type PolizaRow,
 } from "@/lib/seguros";
+import { opcionesAseguradora, aseguradoraConocida, limpiarNombreAseguradora, OTRA_ASEGURADORA } from "@/lib/seguros-aseguradoras";
 import { listaInclusion, type PersonaInclusion } from "@/lib/seguros-inclusion";
 import { usePuedeVer } from "@/lib/usePuedeVer";
 import { cargarSeguros, type ResultadoSeguros } from "@/lib/seguros-datos";
@@ -45,12 +46,6 @@ const PANTALLA: Record<string, string> = {
 };
 const pantallaDe = (ruta: string) => PANTALLA[ruta] ?? ruta;
 
-const ASEGURADORAS = [
-  "Rimac Seguros", "Pacífico Seguros", "La Positiva Seguros",
-  "Mapfre Perú", "Interseguro", "Protecta Security",
-  "Chubb Perú", "Zurich Seguros", "BNP Paribas Cardif",
-  "AFOCAT (regional)", "Otra",
-];
 
 /** Lo que va al SOAT/CAT de cada placa: no es una póliza colectiva. */
 const TIPOS_DE_DOCUMENTO = ["soat", "cat"];
@@ -192,7 +187,10 @@ export default function SegurosPage() {
   const [res,        setRes]        = useState<ResultadoSeguros | null>(null);
   const [errorCarga, setErrorCarga] = useState<string | null>(null);
   const [candidatos, setCandidatos] = useState<Candidato[]>([]);
-  const [proveedores,setProveedores]= useState<{ id: number; nombre: string }[]>([]);
+  const [proveedores,setProveedores]= useState<{ id: number; nombre: string; tipo?: string | null }[]>([]);
+  /** «Otra»: la aseguradora se escribe a mano (y se puede guardar en Proveedores). */
+  const [aseguradoraLibre, setAseguradoraLibre] = useState(false);
+  const [guardarComoProveedor, setGuardarComoProveedor] = useState(true);
   const [loading,    setLoading]    = useState(true);
   const [guardando,  setGuardando]  = useState(false);
   const [editandoId, setEditandoId] = useState<number | null>(null);
@@ -251,7 +249,7 @@ export default function SegurosPage() {
       leerTodo("personal_administrativo", "id,nombre,estado"),
       leerTodo("vehiculos", "id,placa,estado"),
       leerTodo("vehiculos_tercero", "id,placa,estado"),
-      supabase.from("proveedores").select("id,nombre").order("nombre"),
+      supabase.from("proveedores").select("id,nombre,tipo").order("nombre"),
     ]);
     setCandidatos([
       ...c.filas.map((x) => ({ clave: claveCub("conductor", x.id), clase: "conductor" as const, id: Number(x.id), rotulo: String(x.nombre ?? `#${x.id}`), activo: activoDe(x.estado) })),
@@ -273,11 +271,18 @@ export default function SegurosPage() {
   const puedeSolicitar = !!res?.inclusiones && !sinEstadoCob;
   const esPersonaForm = esTipoPersona(form.tipo);
   const multiples = !!res?.coberturasMultiples;
+  /** Lista de aseguradoras: proveedores «Seguros / broker» ∪ las ya usadas ∪ las de fábrica. */
+  const opcionesAseg = useMemo(
+    () => opcionesAseguradora(proveedores, (res?.filas ?? []).map((f) => f.aseguradora)),
+    [proveedores, res],
+  );
+  const asegEscrita = limpiarNombreAseguradora(form.aseguradora);
+  const asegYaConocida = asegEscrita ? aseguradoraConocida(asegEscrita, opcionesAseg) : null;
 
   // ── CRUD de pólizas ───────────────────────────────────────────────────────
 
   const limpiar = () => {
-    setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false);
+    setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); setAseguradoraLibre(false); setGuardarComoProveedor(true);
     setArchivoNuevo(null); setArchivoUrlOriginal("");
     setCubOriginal(new Map()); setCubSel(new Set()); setVehiculoIdOriginal(null); setCobNoLeida(null);
     setCoberturasSel(["sctr_salud"]); setYaFiguran(true); setAccionCob(null); setCopia(null); setSinEstadoCob(false);
@@ -358,7 +363,7 @@ export default function SegurosPage() {
   const esDocumentoVehicular = TIPOS_DE_DOCUMENTO.includes(form.tipo);
   const bloqueoGuardar: string | null =
     !editandoId && esDocumentoVehicular ? "El SOAT/CAT es de cada placa: se registra en Documentos vehiculares, no como póliza colectiva."
-    : !form.aseguradora ? "Falta elegir la aseguradora."
+    : !asegEscrita ? (aseguradoraLibre ? "Escribe el nombre de la aseguradora." : "Falta elegir la aseguradora.")
     : !form.fecha_vencimiento ? "Falta la fecha de vencimiento."
     : null;
 
@@ -536,6 +541,16 @@ export default function SegurosPage() {
       }
     }
 
+    // 1b. Aseguradora: si es la misma que una conocida escrita de otra forma, se guarda con ese nombre
+    //     (así no se parte en dos). Una nueva se da de alta en Proveedores si se pidió — best-effort.
+    const aseguradoraGuardar = asegYaConocida?.nombre ?? asegEscrita ?? "";
+    if (aseguradoraLibre && !asegYaConocida && guardarComoProveedor && asegEscrita) {
+      const { data: provNuevo, error: errProv } = await supabase.from("proveedores")
+        .insert({ nombre: asegEscrita, tipo: "seguros", estado: "activo" }).select("id,nombre,tipo").single();
+      if (errProv) avisos.push(`La aseguradora «${asegEscrita}» se guardó en la póliza, pero no en Proveedores: ${errProv.message}`);
+      else if (provNuevo) setProveedores((ps) => [...ps, provNuevo].sort((a, b) => String(a.nombre).localeCompare(String(b.nombre), "es")));
+    }
+
     // 2. La póliza. Las columnas accesorias se sueltan SOLO si el error las nombra.
     const venc = form.fecha_vencimiento;
     // Póliza de persona: `tipo` = la primera cobertura marcada (orden canónico) y `coberturas` = todas
@@ -544,7 +559,7 @@ export default function SegurosPage() {
     const tipoGuardar = esPersonaForm ? (multiples ? tiposPersona[0] : form.tipo) : form.tipo;
     const payload: Record<string, unknown> = {
       tipo:              tipoGuardar,
-      aseguradora:       form.aseguradora.trim(),
+      aseguradora:       aseguradoraGuardar,
       numero_poliza:     form.numero_poliza.trim() || null,
       titular:           form.titular.trim()       || null,
       vehiculo_id:       selectorDisponible ? (editandoId ? vehiculoIdOriginal : null) : (form.vehiculo_id ? Number(form.vehiculo_id) : null),
@@ -950,11 +965,37 @@ export default function SegurosPage() {
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Datos de la póliza</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Campo label="Aseguradora *">
-                <select className={inputCls()} value={form.aseguradora} onChange={(e) => setForm((p) => ({ ...p, aseguradora: e.target.value }))}>
-                  <option value="">Seleccionar aseguradora</option>
-                  {ASEGURADORAS.map((a) => <option key={a} value={a}>{a}</option>)}
-                  {form.aseguradora && !ASEGURADORAS.includes(form.aseguradora) && <option value={form.aseguradora}>{form.aseguradora}</option>}
-                </select>
+                {!aseguradoraLibre ? (
+                  <select className={inputCls()} value={form.aseguradora}
+                    onChange={(e) => {
+                      if (e.target.value === OTRA_ASEGURADORA) { setAseguradoraLibre(true); setForm((p) => ({ ...p, aseguradora: "" })); return; }
+                      setForm((p) => ({ ...p, aseguradora: e.target.value }));
+                    }}>
+                    <option value="">Seleccionar aseguradora</option>
+                    {opcionesAseg.map((a) => (
+                      <option key={a.nombre} value={a.nombre}>{a.nombre}{a.origen === "proveedor" ? " · en Proveedores" : ""}</option>
+                    ))}
+                    {form.aseguradora && !opcionesAseg.some((a) => a.nombre === form.aseguradora) && <option value={form.aseguradora}>{form.aseguradora}</option>}
+                    <option value={OTRA_ASEGURADORA}>✍ Otra (escribir el nombre)…</option>
+                  </select>
+                ) : (
+                  <div className="space-y-1.5">
+                    <input autoFocus className={inputCls()} placeholder="Ej: Sanitas Perú" value={form.aseguradora}
+                      onChange={(e) => setForm((p) => ({ ...p, aseguradora: e.target.value }))} />
+                    {asegYaConocida ? (
+                      <p className="text-[11px] text-blue-700">Ya está en la lista como «{asegYaConocida.nombre}»: se guardará con ese nombre.</p>
+                    ) : asegEscrita ? (
+                      <label className="flex items-center gap-1.5 text-[11px] text-gray-600">
+                        <input type="checkbox" checked={guardarComoProveedor} onChange={(e) => setGuardarComoProveedor(e.target.checked)} />
+                        Guardarla también en Proveedores (Seguros / broker) para elegirla la próxima vez
+                      </label>
+                    ) : null}
+                    <button type="button" className="text-[11px] font-semibold text-gray-500 underline"
+                      onClick={() => { setAseguradoraLibre(false); setForm((p) => ({ ...p, aseguradora: "" })); }}>
+                      ← Elegir de la lista
+                    </button>
+                  </div>
+                )}
               </Campo>
               <Campo label="Número de póliza">
                 <input className={inputCls("font-mono")} placeholder="Ej: POL-2024-001234" value={form.numero_poliza} onChange={(e) => setForm((p) => ({ ...p, numero_poliza: e.target.value }))} />
@@ -973,7 +1014,14 @@ export default function SegurosPage() {
               <Campo label="Broker / Proveedor">
                 <select className={inputCls()} value={form.proveedor_id} onChange={(e) => setForm((p) => ({ ...p, proveedor_id: e.target.value }))}>
                   <option value="">Sin broker</option>
-                  {proveedores.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                  {proveedores.filter((p) => p.tipo === "seguros").length > 0 && (
+                    <optgroup label="Seguros / broker">
+                      {proveedores.filter((p) => p.tipo === "seguros").map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                    </optgroup>
+                  )}
+                  <optgroup label="Otros proveedores">
+                    {proveedores.filter((p) => p.tipo !== "seguros" && p.tipo !== "transporte").map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                  </optgroup>
                 </select>
               </Campo>
             </div>
