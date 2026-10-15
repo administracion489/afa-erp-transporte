@@ -1369,6 +1369,14 @@ La pantalla dejaba editar los **quince** campos de dinero de cada tipo y **ningu
   - **El historial de los selectores va aparte** (`leerHistorialSelector`, 365 días): «Recientes» y «Más cotizados» no dependen del periodo que se mira en la lista.
   - Migración accesoria `supabase/cotizaciones-03-indices-lista.sql` (**no la corre el deploy**; hora valle): índices por emisión y por servicio y la columna generada `paradas_n`. Sin ella la lista funciona, no pinta el chip «🚏 N paradas» (lo dice en ámbar) y va más lenta con «Todo».
 
+### Servicios del Despachador sin cotizar · se REGULARIZAN, no solo se cuentan
+
+`lib/despacho-sin-cotizar.ts` (motor PURO) + `lib/despacho-sin-cotizar-datos.ts` + el chip «⚡ N sin cotizar (Despachador)» de `/cotizaciones` (ahora un botón) + `components/cotizaciones/ModalDespachoSinCotizar.tsx` + el aviso de `/despachador`. Matriz: `npx tsx scripts/prueba-despacho-sin-cotizar.mts`. Migración accesoria: `supabase/reservas-07-despacho-sin-cotizar.sql` (**no la corre el deploy**; sin ella todo funciona menos «No requiere cotización», y la pantalla lo dice en ámbar).
+
+- **UN SOLO PREDICADO** (`pendientesDeCotizar`, de `motivoDespacho`): el chip, la lista del modal y el aviso de `/despachador` cuentan con él. Antes el chip contaba también los cancelados y no abría nada (`/despachador` solo lista hoy). Si la lectura falla el chip dice **«?»** con el error en el `title`: nunca un 0 falso.
+- **CUATRO SALIDAS**: **Crear cotización** (formulario prellenado con `prellenadoCotizacion`; al guardar se vincula con `vincularCotizacion`, y si falla se dice); **Vincular** a una existente, solo **eventual y del mismo cliente** (`puedeVincular`); **Cancelar en Programación** (`/programacion?editar=<id>`): el modal NO cambia el estado, porque el importe de una cancelación lo decide `planDeCancelacion`; y **No requiere cotización** con motivo (≥ 5 caracteres), deshacible.
+- `/despachador` avisa de los pendientes de días anteriores y enlaza a `/cotizaciones?regularizar=1`, que abre el modal.
+
 ### Costeo de la unidad propia (`lib/costeo-propio.ts`)
 
 La fórmula del costo de mover un bus propio —combustible por km/galón con urea, neumáticos por vida útil, mantenimiento en S/km, depreciación, fijos anuales prorrateados, conductor por día, peajes, otros, más reserva 5 % y overhead 10 %— vivía **dentro** de `app/cotizador/page.tsx`, así que no la podía usar nadie más. Está extraída, y `calcular()` en el cotizador es ahora un adaptador que arma el `Resultado` con la forma que esa pantalla espera.
