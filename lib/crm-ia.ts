@@ -506,6 +506,17 @@ export async function responderConIA(
 
   if (!opts.forzarBorrador) {
     if (conv.ia_pausada) return { ok: true, accion: "omitido", motivo: "IA pausada en este hilo." };
+    // El agente solo atiende números de ATENCIÓN AL CLIENTE. Un número marcado solo para
+    // avisos automáticos (usa_avisos y no usa_crm) nunca responde con IA.
+    if (conv.canal === "whatsapp" && (conv as any).phone_number_id) {
+      const { data: num } = await sb
+        .from("whatsapp_numeros")
+        .select("usa_crm, usa_avisos")
+        .eq("phone_number_id", (conv as any).phone_number_id)
+        .maybeSingle();
+      if (num && num.usa_crm === false)
+        return { ok: true, accion: "omitido", motivo: "Número de avisos: el agente IA no atiende aquí." };
+    }
     if (conv.estado === "resuelta" || conv.estado === "spam")
       return { ok: true, accion: "omitido", motivo: `Conversación ${conv.estado}.` };
     const canales: string[] = Array.isArray(agente.canales) ? agente.canales : [];

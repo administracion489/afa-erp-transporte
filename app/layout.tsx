@@ -309,6 +309,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
     grupo: "CRM",
     items: [
       { href: "/crm",          label: "Inbox CRM",  sub: "Conversaciones",      icon: Ic.MessageSquare, modulo: "crm" },
+      { href: "/crm/notificaciones", label: "Inbox Notificaciones", sub: "Respuestas a avisos automáticos", icon: Ic.Bell, modulo: "crm" },
       { href: "/crm/pipeline", label: "Pipeline",   sub: "Embudo de ventas",    icon: Ic.TrendingUp,    modulo: "crm" },
       { href: "/crm/agente",   label: "Agente IA",  sub: "Asistente con Claude", icon: Ic.Bot,          modulo: "crm" },
       { href: "/crm/campanas", label: "Campañas",   sub: "Envíos masivos WhatsApp/Email", icon: Ic.Bell, modulo: "crm" },
