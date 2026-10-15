@@ -2140,7 +2140,7 @@ export default function CotizacionesPage(){
     let nombreFinal=(cot as any).creado_por||"";
     if(!nombreFinal){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreFinal=extraerNombreApellido(uRow.nombre);}}catch(e){}}
     const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
-    if(plantilla!=="corporativo")await supabase.from("cotizaciones").update({plantilla_pdf:plantilla}).eq("id",cot.id);
+    if(plantilla!=="corporativo"){await supabase.from("cotizaciones").update({plantilla_pdf:plantilla}).eq("id",cot.id);cacheDetalle.current.delete(cot.id);}
     setModalPlantilla(null);
     const considFinal=editandoId===cot.id?consid:(cot.consideraciones_json||consid);
     generarPDF(cot,cl,its,vehiculos,nombreFinal,considFinal,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
@@ -2759,7 +2759,7 @@ export default function CotizacionesPage(){
             <select className="border rounded-xl px-3 py-2.5 text-sm" value={filtroEst} onChange={e=>setFiltroEst(e.target.value)}><option value="todos">Todos estados</option><option value="borrador">Borradores</option><option value="pendiente">Pendientes</option><option value="enviado">Enviadas</option><option value="aprobado">Aprobadas</option><option value="rechazado">Rechazadas</option></select>
             {hayFiltros&&<button onClick={limpiarFiltros} className="px-3 py-2.5 rounded-xl text-xs font-bold border text-gray-600 hover:bg-gray-50">Limpiar filtros</button>}
           </div>
-          {eje==="servicio"&&<p className="text-[11px] text-gray-400 px-1">Las cotizaciones sin fecha de servicio no aparecen con este eje.</p>}
+          {eje==="servicio"&&periodo!=="todo"&&<p className="text-[11px] text-gray-400 px-1">Las cotizaciones sin fecha de servicio no aparecen con este eje.</p>}
           {motivoRango&&<p className="text-xs font-bold rounded-xl px-3 py-2 border" style={{background:"#fffbeb",borderColor:"#fcd34d",color:"#92400e"}}>⚠ {motivoRango}</p>}
           {errorVigente&&<div className="text-xs font-bold rounded-xl px-3 py-2 border flex items-center gap-2 flex-wrap" style={{background:"#fef2f2",borderColor:"#fca5a5",color:"#991b1b"}}><span>No se pudieron leer las cotizaciones: {errorVigente}</span><span>·</span><button onClick={()=>cargarLista()} disabled={cargandoLista} className="underline hover:no-underline disabled:opacity-50">{cargandoLista?"Reintentando…":"Reintentar"}</button></div>}
         </section>

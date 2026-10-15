@@ -51,7 +51,10 @@ export async function leerListaPeriodo(
         if (lim.lt) q = q.lt(lim.columna, lim.lt);
         return q.order("id", { ascending: false });
       });
-      return { filas, sinColumnas: sin };
+      // Paginar por offset puede repetir una fila si alguien crea una cotización entre dos páginas.
+      const vistos = new Set<number>();
+      const unicas = filas.filter((f) => (vistos.has(f.id) ? false : (vistos.add(f.id), true)));
+      return { filas: unicas, sinColumnas: sin };
     } catch (e) {
       const col = columnaFaltante(e as { code?: string; message?: string });
       const opcional = col ? COLS_OPCIONALES_LISTA.find((c) => c === col && !sin.includes(c)) : undefined;

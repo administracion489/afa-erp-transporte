@@ -83,7 +83,7 @@ export function rangoDePeriodo(p: Periodo, hoy: string, rango?: { desde?: string
     case "rango": {
       const d = (rango?.desde ?? "").trim();
       const h = (rango?.hasta ?? "").trim();
-      if (!RE_ISO.test(d) || !RE_ISO.test(h)) return { desde: null, hastaExcl: null, codigo: "rango_incompleto" };
+      if (!RE_ISO.test(d) || !RE_ISO.test(h) || sumarDias(d, 0) !== d || sumarDias(h, 0) !== h) return { desde: null, hastaExcl: null, codigo: "rango_incompleto" };
       if (d > h) return { desde: null, hastaExcl: null, codigo: "rango_invertido" };
       return { desde: d, hastaExcl: sumarDias(h, 1), codigo: "ok" };
     }
