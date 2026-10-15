@@ -11,9 +11,10 @@ import {
   TIPOS_SEGURO, tipoSeguroDe, SCTR_SIN_PRECISAR, estadoDe, DIAS_POR_VENCER, FUENTES_SEGURO,
   filasDeDocumentosVehiculo, filasDeDocumentosTercero, filasDeFichas, filasDePolizas,
   vencimientoPersona, coberturaFaltante, kpisSeguros, CODIGOS_FALTANTE,
+  vencimientoFichaOPoliza, TIPO_DE_COLUMNA_FICHA,
   type PersonaFicha, type PolizaRow, type CoberturaRow, type FilaSeguro, type TipoPersona,
 } from "../lib/seguros";
-import { cargarSeguros } from "../lib/seguros-datos";
+import { cargarSeguros, leerPolizasPersonas } from "../lib/seguros-datos";
 import { diasEntreFechas } from "../lib/documentos-estado";
 
 let ok = 0, fallos = 0;
@@ -166,6 +167,7 @@ function dbFalsa(tablas: Record<string, any[] | { error: any }>) {
   return {
     from(t: string) {
       const q: any = { cols: "", select(c: string) { q.cols = c; return q; }, order() { return q; },
+        in() { return q; }, eq() { return q; }, or() { return q; },
         async range(a: number, b: number) {
           const d = tablas[t];
           if (!d) return { data: null, error: { code: "PGRST205", message: `Could not find the table 'public.${t}' in the schema cache` } };
@@ -184,6 +186,72 @@ check(r1.sinJuzgar.length > 0 && r1.errores.some((e) => /documentos de vehículo
 check(r1.fuentes.poliza === "sin_tabla", "sin seguro_cobertura → sin_tabla");
 const r2 = await cargarSeguros(dbFalsa({ ...base, documentos_vehiculo: [], documentos_tercero: [] }), HOY);
 check(r2.faltantes.some((f) => f.codigo === "sin_soat"), "con todo leído, unidad sin docs → sin_soat");
+
+sec("10. Tick doc_vence / login del conductor: póliza gana, ficha de respaldo, clave intacta");
+{
+  const POL: PolizaRow[] = [{ id: 7, tipo: "sctr_salud", fecha_vencimiento: "2026-10-30" }, { id: 8, tipo: "vida_ley", fecha_vencimiento: "2027-05-01" }];
+  const COB: CoberturaRow[] = [{ seguro_id: 7, conductor_id: 1 }, { seguro_id: 8, conductor_id: 2, hasta: "2026-10-20" }];
+  const yo = (id: number) => ({ clase: "conductor" as const, id });
+  // sin pólizas leídas → el valor CRUDO de la ficha, tal cual
+  check(vencimientoFichaOPoliza(yo(1), "sctr_salud_venc", "2026-10-20", null, null).vencimiento === "2026-10-20", "sin tablas: ficha cruda");
+  check(vencimientoFichaOPoliza(yo(1), "sctr_salud_venc", "2026-10-20", null, COB).fuente === "ficha", "una de las dos en null: ficha");
+  check(vencimientoFichaOPoliza(yo(1), "sctr_salud_venc", "2026-10-20", POL, COB).vencimiento === "2026-10-30", "póliza gana");
+  check(vencimientoFichaOPoliza(yo(3), "sctr_salud_venc", "2026-10-20", POL, COB).vencimiento === "2026-10-20", "no cubierto: ficha");
+  check(vencimientoFichaOPoliza(yo(2), "vida_ley_venc", "2027-01-01", POL, COB).vencimiento === "2026-10-20", "baja (hasta) gana, no cae a ficha");
+  check(vencimientoFichaOPoliza(yo(1), "vencimiento_licencia", "2026-11-01", POL, COB).vencimiento === "2026-11-01", "licencia no es seguro: ficha siempre");
+  // la casilla vida_ley no se aplica en este camino (comportamiento de siempre del tick)
+  check(vencimientoFichaOPoliza(yo(5), "vida_ley_venc", "2026-10-25", POL, COB).vencimiento === "2026-10-25", "vida ley de ficha sin mirar la casilla");
+  check(Object.keys(TIPO_DE_COLUMNA_FICHA).length === 3, "solo tres columnas son seguros");
+
+  // Copia del bucle del bloque 6: qué claves reclama y con qué fecha.
+  const DOCS = ["vencimiento_licencia", "sctr_salud_venc", "sctr_pension_venc", "vida_ley_venc"];
+  const tick = (conds: any[], pol: PolizaRow[] | null, cob: CoberturaRow[] | null, hoy: string, limite: string) => {
+    const out: { clave: string; f: string }[] = [];
+    for (const c of conds) for (const campo of DOCS) {
+      const f = vencimientoFichaOPoliza({ clase: "conductor", id: c.id }, campo, c[campo], pol, cob).vencimiento;
+      if (!f || f < hoy || f > limite) continue;
+      out.push({ clave: `${c.id}:${campo}`, f });
+    }
+    return out;
+  };
+  const tickViejo = (conds: any[], hoy: string, limite: string) => {
+    const out: { clave: string; f: string }[] = [];
+    for (const c of conds) for (const campo of DOCS) {
+      const f = c[campo];
+      if (!f || f < hoy || f > limite) continue;
+      out.push({ clave: `${c.id}:${campo}`, f });
+    }
+    return out;
+  };
+  const FECHAS = [null, "2026-10-10", "2026-10-15", "2026-10-30", "2026-12-31"];
+  let iguales = 0, combos = 0, conPoliza = 0, clavesBien = true;
+  for (const a of FECHAS) for (const b of FECHAS) for (const v of FECHAS) for (const pv of FECHAS) {
+    const conds = [{ id: 1, vencimiento_licencia: a, sctr_salud_venc: b, sctr_pension_venc: a, vida_ley_venc: v }, { id: 3, sctr_salud_venc: b }];
+    const pol: PolizaRow[] = [{ id: 7, tipo: "sctr_salud", fecha_vencimiento: pv }];
+    const cob: CoberturaRow[] = [{ seguro_id: 7, conductor_id: 1 }];
+    combos++;
+    const viejo = JSON.stringify(tickViejo(conds, HOY, "2026-11-14"));
+    if (JSON.stringify(tick(conds, null, null, HOY, "2026-11-14")) === viejo) iguales++;
+    const nuevo = tick(conds, pol, cob, HOY, "2026-11-14");
+    // toda clave sigue con la forma de siempre y pertenece al universo viejo de claves
+    for (const x of nuevo) if (!/^\d+:[a-z_]+$/.test(x.clave) || !DOCS.includes(x.clave.split(":")[1])) clavesBien = false;
+    if (nuevo.some((x) => x.clave === "1:sctr_salud_venc" && x.f === pv)) conPoliza++;
+    // el conductor 3 (sin póliza) sale idéntico
+    const solo3 = (l: any[]) => JSON.stringify(l.filter((x) => x.clave.startsWith("3:")));
+    if (solo3(nuevo) !== solo3(JSON.parse(viejo))) clavesBien = false;
+  }
+  check(iguales === combos, `sin pólizas el tick es byte a byte el de antes (${iguales}/${combos})`);
+  check(clavesBien, "las claves de envío no cambian de forma ni de universo; el no cubierto, idéntico");
+  check(conPoliza > 0, "corolario: con póliza en ventana sí avisa con la fecha de la póliza");
+
+  // Lector best-effort
+  const sinTabla = await leerPolizasPersonas(dbFalsa({ seguros: [] }));
+  check(sinTabla === null, "falta seguro_cobertura → null (ficha)");
+  const conError = await leerPolizasPersonas(dbFalsa({ seguros: { error: { code: "500", message: "x" } }, seguro_cobertura: [] }));
+  check(conError === null, "lectura fallida → null, no media lista");
+  const bien = await leerPolizasPersonas(dbFalsa({ seguros: POL, seguro_cobertura: COB }));
+  check(!!bien && bien.polizas.length === 2 && bien.coberturas.length === 2, "lee las dos");
+}
 
 console.log(`\n${fallos === 0 ? "✓" : "✗"} ${ok} ok · ${fallos} fallos`);
 process.exit(fallos ? 1 : 0);

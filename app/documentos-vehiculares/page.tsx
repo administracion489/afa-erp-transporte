@@ -6,6 +6,7 @@ import dayGridPlugin from "@fullcalendar/daygrid";
 import { supabase } from "@/lib/supabase";
 import { docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
 import { EnlacePrivado } from "@/components/ArchivoPrivado";
+import { guardarDocumentoVehiculo } from "@/lib/documentos-vehiculo-datos";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -204,9 +205,7 @@ export default function DocumentosVehiculosPage() {
       archivo_url:       form.archivo_url.trim()       || null,
       observaciones:     form.observaciones.trim()     || null,
     };
-    const { error } = editandoId
-      ? await supabase.from("documentos_vehiculo").update(payload).eq("id", editandoId)
-      : await supabase.from("documentos_vehiculo").insert(payload);
+    const { error } = await guardarDocumentoVehiculo(supabase, { ...payload, id: editandoId });
     if (error) { alert(error.message); setGuardando(false); return; }
     limpiar(); cargarDatos(); setGuardando(false);
   };

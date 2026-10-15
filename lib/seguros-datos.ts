@@ -67,6 +67,44 @@ async function leerTabla<T>(
   return { filas: [], estado: "error", soltadas, error: "no se pudo leer" };
 }
 
+/**
+ * Pólizas de PERSONA (SCTR Salud/Pensión, Vida Ley) y sus coberturas, para quien solo necesita
+ * `vencimientoFichaOPoliza` (el tick y el login del conductor, con el cliente service-role).
+ * BEST-EFFORT: si falta alguna de las dos tablas o falla cualquier lectura devuelve null, y
+ * quien llama se queda con la ficha — exactamente lo de antes. Nunca media lista: una cobertura
+ * perdida haría caer a una persona de la póliza a la ficha sin que nadie lo note.
+ * `conductorId` acota las coberturas a un conductor (el login).
+ */
+export async function leerPolizasPersonas(
+  db: any, opts: { conductorId?: number } = {},
+): Promise<{ polizas: PolizaRow[]; coberturas: CoberturaRow[] } | null> {
+  try {
+    const pag = async (armar: () => any): Promise<any[] | null> => {
+      const todas: any[] = [];
+      for (let desde = 0; ; desde += PAG) {
+        const { data, error } = await armar().order("id", { ascending: true }).range(desde, desde + PAG - 1);
+        if (error) return null;
+        todas.push(...(data ?? []));
+        if (!data || data.length < PAG) return todas;
+      }
+    };
+    const TIPOS = ["sctr_salud", "sctr_pension", "vida_ley"];
+    const [pol, cob] = await Promise.all([
+      pag(() => db.from("seguros").select("id,tipo,fecha_vencimiento").in("tipo", TIPOS)),
+      pag(() => {
+        let q = db.from("seguro_cobertura").select("id,seguro_id,conductor_id,personal_administrativo_id,desde,hasta");
+        q = opts.conductorId != null ? q.eq("conductor_id", opts.conductorId)
+          : q.or("conductor_id.not.is.null,personal_administrativo_id.not.is.null");
+        return q;
+      }),
+    ]);
+    if (!pol || !cob) return null;
+    return { polizas: pol as PolizaRow[], coberturas: cob as CoberturaRow[] };
+  } catch {
+    return null;
+  }
+}
+
 const peor = (...e: EstadoFuente[]): EstadoFuente => e.includes("error") ? "error" : e.includes("sin_tabla") ? "sin_tabla" : "ok";
 
 /** `db` por defecto: el cliente de navegador (lib/supabase.ts), importado al llamar para que la

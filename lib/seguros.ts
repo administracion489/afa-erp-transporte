@@ -421,6 +421,40 @@ export function vencimientoPersona(
   return f ? { vencimiento: f, fuente: "ficha" } : { vencimiento: null, fuente: null };
 }
 
+/** Columna de la ficha del conductor → tipo de seguro de persona. Lo que no está aquí (licencia,
+ *  examen médico…) no es un seguro y su fecha sale siempre de la ficha. */
+export const TIPO_DE_COLUMNA_FICHA: Record<string, TipoPersona> = {
+  sctr_salud_venc: "sctr_salud",
+  sctr_pension_venc: "sctr_pension",
+  vida_ley_venc: "vida_ley",
+};
+
+/**
+ * Vencimiento que usan el tick (bloque 6, `doc_vence`) y el login del app del conductor: la
+ * PÓLIZA gana si la persona está en una cobertura de ese tipo (la misma regla de
+ * `vencimientoPersona`); si no, el valor CRUDO de la ficha, tal cual lo usaban hasta hoy.
+ *  · `polizas`/`coberturas` en null = no se pudieron leer (o falta la migración): byte a byte el
+ *    comportamiento anterior, la ficha.
+ *  · La rama de ficha NO aplica la casilla `vida_ley` de `fechaDeFicha`: esos dos caminos nunca
+ *    la miraron, y cambiarlo aquí dejaría de avisar un Vida Ley que hoy se avisa. Solo la póliza
+ *    puede mover la fecha.
+ *  · Una baja de la póliza (hasta pasado) da su fecha vencida y NO cae a la ficha — la verdad.
+ */
+export function vencimientoFichaOPoliza(
+  persona: { clase: "conductor" | "personal"; id: number },
+  columna: string,
+  valorFicha: string | null | undefined,
+  polizas: PolizaRow[] | null,
+  coberturas: CoberturaRow[] | null,
+): { vencimiento: string | null; fuente: "poliza" | "ficha"; seguroId?: number } {
+  const tipo = TIPO_DE_COLUMNA_FICHA[columna];
+  const crudo = valorFicha ?? null;
+  if (!tipo || !polizas || !coberturas) return { vencimiento: crudo, fuente: "ficha" };
+  const v = vencimientoPersona({ clase: persona.clase, id: persona.id, nombre: "", activo: true }, polizas, coberturas, tipo);
+  if (v.fuente === "poliza") return { vencimiento: v.vencimiento, fuente: "poliza", seguroId: v.seguroId };
+  return { vencimiento: crudo, fuente: "ficha" };
+}
+
 /** Una fila por persona y tipo con dato EN SU FICHA, salvo que una póliza la cubra (entonces
  *  la cubre la fila de la póliza y no se duplica). */
 export function filasDeFichas(
