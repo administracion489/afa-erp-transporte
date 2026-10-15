@@ -522,7 +522,8 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const toggleIaPausada = async () => {
     if (!selected) return;
     const nuevo = !selected.ia_pausada;
-    await supabase.from("crm_conversaciones").update({ ia_pausada: nuevo }).eq("id", selected.id);
+    const { error } = await supabase.from("crm_conversaciones").update({ ia_pausada: nuevo }).eq("id", selected.id);
+    if (error) { showToast(`No se pudo cambiar la IA: ${error.message}`, false); return; }
     setSelected({ ...selected, ia_pausada: nuevo });
     showToast(nuevo ? "IA pausada en este chat" : "IA reactivada en este chat");
   };
