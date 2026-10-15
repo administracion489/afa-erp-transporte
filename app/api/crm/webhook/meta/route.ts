@@ -16,7 +16,7 @@ const db = () =>
   });
 
 // El agente IA (after) puede tardar varios segundos con herramientas; damos margen.
-export const maxDuration = 60;
+export const maxDuration = 180;
 
 // GET — verificación del webhook por Meta
 export async function GET(req: NextRequest) {
@@ -200,13 +200,14 @@ export async function POST(req: NextRequest) {
 
       // responderConIA decide solo si está activo, el canal aplica, el hilo no
       // está pausado, etc.
-      for (const id of conversacionesNuevas) {
-        try {
-          await responderConIA(id);
-        } catch {
-          /* el motor ya maneja sus errores; no romper el resto */
-        }
-      }
+      // En paralelo: cada hilo espera a que su cliente termine de escribir (hasta ~45 s).
+      await Promise.all(
+        [...conversacionesNuevas].map((id) =>
+          responderConIA(id).catch(() => {
+            /* el motor ya maneja sus errores; no romper el resto */
+          }),
+        ),
+      );
     });
   }
 
