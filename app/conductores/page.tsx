@@ -4,6 +4,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { vencimientoPersona, type PolizaRow, type CoberturaRow, type TipoPersona } from "@/lib/seguros";
+import { leerPolizasPersonas } from "@/lib/seguros-datos";
+import { fechaLima } from "@/lib/documentos-estado";
 import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
@@ -171,46 +173,50 @@ function BadgeDoc({ fecha, diasAlerta = 30, label }: { fecha: string | null; dia
   );
 }
 
-// ─── PÓLIZAS COLECTIVAS (seguros-02) ──────────────────────────────────────────
+// ─── PÓLIZAS COLECTIVAS (seguros-02 / seguros-04a) ────────────────────────────
 // Si la persona está en una póliza de ese tipo, manda la PÓLIZA (misma cascada que /seguros y que
-// v_seguro_persona: `vencimientoPersona`). Lectura best-effort: sin las tablas, o si falla, la
-// ficha se edita como siempre y no se dice nada.
+// v_seguro_persona: `vencimientoPersona`, con el «hoy» de Lima). Una inclusión SOLICITADA o que
+// todavía no empieza ('pendiente') tampoco deja editar la ficha: no está cubierto y la ficha no lo
+// tapa. Lectura best-effort con el MISMO lector del tick y del login (`leerPolizasPersonas`): sin
+// las tablas, o si falla, la ficha se edita como siempre y no se dice nada.
 
-type CoberturaPoliza = { numero: string; vence: string | null; seguroId: number };
+type CoberturaPoliza = {
+  numero: string; vence: string | null; seguroId: number;
+  /** inclusión en trámite: 'solicitada' (fecha = solicitud) o 'por_iniciar' (fecha = inicio) */
+  pendiente?: { estado: "solicitada" | "por_iniciar"; fecha: string | null };
+};
 
 function usePolizasPersona(clase: "conductor" | "personal") {
-  const [datos, setDatos] = useState<{ polizas: PolizaRow[]; coberturas: CoberturaRow[] }>({ polizas: [], coberturas: [] });
+  const [datos, setDatos] = useState<{ polizas: PolizaRow[]; coberturas: CoberturaRow[]; numeros: Map<number, string> }>(
+    { polizas: [], coberturas: [], numeros: new Map() });
+  const hoy = fechaLima();
   useEffect(() => {
     let vivo = true;
-    const col = clase === "conductor" ? "conductor_id" : "personal_administrativo_id";
-    const leer = async (tabla: string, cols: string, filtro?: string) => {
-      const out: Record<string, unknown>[] = [];
-      for (let desde = 0; ; desde += 1000) {
-        let q = supabase.from(tabla).select(cols).order("id", { ascending: true }).range(desde, desde + 999);
-        if (filtro) q = q.not(filtro, "is", null);
-        const { data, error } = await q;
-        if (error) return null;
-        out.push(...(data ?? []));
-        if (!data || data.length < 1000) return out;
-      }
-    };
     (async () => {
       try {
-        const [p, c] = await Promise.all([
-          leer("seguros", "id,tipo,numero_poliza,fecha_vencimiento"),
-          leer("seguro_cobertura", `id,seguro_id,${col},hasta`, col),
-        ]);
-        if (vivo && p && c) setDatos({ polizas: p as unknown as PolizaRow[], coberturas: c as unknown as CoberturaRow[] });
+        const r = await leerPolizasPersonas(supabase);
+        if (!r) return;
+        // El número de póliza solo se usa para el rótulo: si no se lee, se enseña «#id».
+        const numeros = new Map<number, string>();
+        const n = await supabase.from("seguros").select("id,numero_poliza").order("id", { ascending: true }).limit(1000);
+        for (const p of (n.error ? [] : n.data ?? []) as { id: number; numero_poliza: string | null }[]) {
+          if (p.numero_poliza) numeros.set(Number(p.id), String(p.numero_poliza));
+        }
+        if (vivo) setDatos({ polizas: r.polizas, coberturas: r.coberturas, numeros });
       } catch { /* sin pólizas: la ficha manda, como siempre */ }
     })();
     return () => { vivo = false; };
   }, [clase]);
   return (id: number | null, tipo: TipoPersona): CoberturaPoliza | null => {
     if (id == null) return null;
-    const v = vencimientoPersona({ clase, id, nombre: "", activo: true }, datos.polizas, datos.coberturas, tipo);
+    const v = vencimientoPersona({ clase, id, nombre: "", activo: true }, datos.polizas, datos.coberturas, tipo, hoy);
+    const rot = (sid: number) => datos.numeros.has(sid) ? `N° ${datos.numeros.get(sid)}` : `#${sid}`;
+    if (v.fuente === "pendiente" && v.inclusion) {
+      const sid = v.inclusion.seguroId;
+      return { numero: rot(sid), vence: null, seguroId: sid, pendiente: { estado: v.inclusion.estado, fecha: v.inclusion.fecha } };
+    }
     if (v.fuente !== "poliza" || v.seguroId == null) return null;
-    const pol = datos.polizas.find((p) => Number(p.id) === v.seguroId);
-    return { numero: pol?.numero_poliza ? `N° ${pol.numero_poliza}` : `#${v.seguroId}`, vence: v.vencimiento, seguroId: v.seguroId };
+    return { numero: rot(v.seguroId), vence: v.vencimiento, seguroId: v.seguroId };
   };
 }
 
@@ -220,9 +226,26 @@ function fmtVence(f: string | null) {
   const [a, m, d] = s.split("-");
   return `${d}/${m}/${a}`;
 }
+function fmtDiaMes(f: string | null) {
+  const s = String(f ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "—";
+  const [, m, d] = s.split("-");
+  return `${d}/${m}`;
+}
 
-/** El campo de la ficha cuando lo cubre una póliza: solo lectura, con su porqué y dónde se edita. */
+/** El campo de la ficha cuando lo cubre una póliza (o hay una inclusión en trámite): solo
+ *  lectura, con su porqué y dónde se edita. */
 function CubiertoPorPoliza({ c }: { c: CoberturaPoliza }) {
+  if (c.pendiente) {
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        {c.pendiente.estado === "solicitada"
+          ? <>Inclusión solicitada en la póliza {c.numero}{c.pendiente.fecha ? ` el ${fmtDiaMes(c.pendiente.fecha)}` : ""}: su ficha no cuenta hasta activarla. No está cubierto todavía.</>
+          : <>Incluido en la póliza {c.numero} desde el {fmtDiaMes(c.pendiente.fecha)}: su ficha no cuenta. Antes de esa fecha no está cubierto.</>}{" "}
+        <Link href="/seguros" className="font-bold underline">Se gestiona en Seguros →</Link>
+      </div>
+    );
+  }
   return (
     <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
       Cubierto por la póliza {c.numero} (vence {fmtVence(c.vence)}).{" "}

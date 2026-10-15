@@ -47,6 +47,9 @@ import { cabecerasErp } from "@/lib/fetch-erp";
 import { paginarFilas } from "@/lib/huella";
 import { avisosAutoseleccion, unirContexto, cotizacionesAJuzgar, textoAvisoAutoseleccion, vigenteParaAutoseleccion, COLS_AUTOSELECCION, type FilaAutoseleccion } from "@/lib/reservas-autoseleccion-aviso";
 import { semillaDeServicio, filasDeSemilla, estadoRetorno, avisoRetorno } from "@/lib/paradas-materializar";
+import { estadoSctrEn, vencimientoPersona, type PersonaFicha, type PolizaRow, type CoberturaRow } from "@/lib/seguros";
+import { leerPolizasPersonas } from "@/lib/seguros-datos";
+import { columnaFaltante as columnaFaltanteDe } from "@/lib/columna-faltante";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
 function useGoogleMapsLoaded() {
@@ -553,6 +556,9 @@ export default function ReservasPage() {
   const [clientes,     setClientes]     = useState<Cliente[]>([]);
   const [vehiculos,    setVehiculos]    = useState<Vehiculo[]>([]);
   const [conductores,  setConductores]  = useState<Conductor[]>([]);
+  /** SCTR de los conductores propios (pólizas + fichas): best-effort, se lee DESPUÉS de pintar y
+   *  nunca bloquea ni retrasa nada. null = todavía no / no se pudo leer → no se pinta ningún chip. */
+  const [sctrDatos, setSctrDatos] = useState<{ polizas: PolizaRow[]; coberturas: CoberturaRow[]; fichas: Map<number, PersonaFicha> } | null>(null);
   const [empresasTer,  setEmpresasTer]  = useState<EmpresaTercerizada[]>([]);
   const [vehTercero,   setVehTercero]   = useState<VehiculoTercero[]>([]);
   /** Aviso de las migraciones del Pacto pendientes. No bloquea: informa. */
@@ -1813,6 +1819,58 @@ export default function ReservasPage() {
 
   const vehiculosAptos         = vehiculos.filter(v => v.estado === "disponible" && (v.estado_operativo === "apto" || !v.estado_operativo));
   const conductoresDisponibles = conductores.filter(c => c.estado !== "no_disponible" && (!c.vencimiento_licencia || new Date(c.vencimiento_licencia) >= new Date()));
+
+  // SCTR del conductor PROPIO contra la fecha del servicio (estadoSctrEn, la misma regla de /seguros).
+  useEffect(() => {
+    let vivo = true;
+    const t = setTimeout(async () => {
+      try {
+        const pol = await leerPolizasPersonas(supabase);
+        let cols = ["id", "nombre", "estado", "sctr_salud_venc", "sctr_pension_venc"];
+        let filas: Record<string, unknown>[] | null = null;
+        for (let intento = 0; intento < 3 && filas === null; intento++) {
+          const out: Record<string, unknown>[] = [];
+          let fallo: unknown = null;
+          for (let desde = 0; ; desde += 1000) {
+            const { data, error } = await supabase.from("conductores").select(cols.join(",")).order("id", { ascending: true }).range(desde, desde + 999);
+            if (error) { fallo = error; break; }
+            out.push(...(data ?? []));
+            if (!data || data.length < 1000) break;
+          }
+          if (!fallo) { filas = out; break; }
+          const col = columnaFaltanteDe(fallo);
+          if (col && (col === "sctr_salud_venc" || col === "sctr_pension_venc") && cols.includes(col)) { cols = cols.filter((c) => c !== col); continue; }
+          return; // otra falla: sin chips
+        }
+        if (!vivo || !filas) return;
+        const fichas = new Map<number, PersonaFicha>();
+        for (const r of filas) fichas.set(Number(r.id), {
+          clase: "conductor", id: Number(r.id), nombre: String(r.nombre ?? ""), activo: true,
+          sctr_salud_venc: (r.sctr_salud_venc as string | null) ?? null, sctr_pension_venc: (r.sctr_pension_venc as string | null) ?? null,
+        });
+        setSctrDatos({ polizas: pol?.polizas ?? [], coberturas: pol?.coberturas ?? [], fichas });
+      } catch { /* best-effort: sin chips */ }
+    }, 0);
+    return () => { vivo = false; clearTimeout(t); };
+  }, []);
+  const sctrDe = (conductorId: string | number | null | undefined, fechaServicio: string | null | undefined):
+    { texto: string; tono: "ambar" | "gris"; detalle: string } | null => {
+    if (!sctrDatos || conductorId === "" || conductorId == null) return null;
+    const ficha = sctrDatos.fichas.get(Number(conductorId));
+    if (!ficha) return null;
+    const fecha = fechaServicio && /^\d{4}-\d{2}-\d{2}$/.test(fechaServicio) ? fechaServicio : fechaLima();
+    const e = estadoSctrEn(ficha, sctrDatos.polizas, sctrDatos.coberturas, fecha);
+    const dm = (f: string | null | undefined) => (f ? `${f.slice(8, 10)}/${f.slice(5, 7)}` : "—");
+    if (e === "activo") return null;
+    if (e === "sin_sctr") return { texto: "sin SCTR", tono: "gris", detalle: `Sin SCTR registrado para el ${dm(fecha)} (ni póliza ni fecha en su ficha). Se registra en Seguros o en su ficha.` };
+    if (e === "vencido") return { texto: "SCTR VENCIDO", tono: "ambar", detalle: `Su SCTR no cubre el ${dm(fecha)}: está vencido. Renuévalo en Seguros o en su ficha.` };
+    if (e === "pendiente_inclusion") return { texto: "SCTR PENDIENTE", tono: "ambar", detalle: `Su inclusión al SCTR está solicitada al bróker y sin activar: el ${dm(fecha)} no está cubierto.` };
+    const inicios = (["sctr_salud", "sctr_pension"] as const)
+      .map((t) => vencimientoPersona(ficha, sctrDatos.polizas, sctrDatos.coberturas, t, fecha).inclusion)
+      .filter((x) => x?.estado === "por_iniciar").map((x) => x!.fecha ?? "").filter(Boolean).sort();
+    const desde = inicios[inicios.length - 1] ?? null;
+    return { texto: `SCTR DESDE ${dm(desde)}`, tono: "ambar", detalle: `Su SCTR empieza el ${dm(desde)}: el ${dm(fecha)} todavía no está cubierto.` };
+  };
   // Solo alerta visual — NO saca al vehículo de `vehiculosAptos` ni impide asignarlo:
   // el mantenimiento se puede coordinar en un horario fuera del servicio.
   const tieneOtPendiente = (id: number | string | null) => id != null && otPendientePorVeh.has(Number(id));
@@ -5372,10 +5430,23 @@ export default function ReservasPage() {
                 <Campo label={"Conductor (" + conductoresDisponibles.length + " disponibles) *"}>
                   <select className={inputCls()} value={form.conductor_id} onChange={f("conductor_id")}>
                     <option value="">Seleccionar conductor</option>
-                    {conductoresDisponibles.map(c => (
-                      <option key={c.id} value={c.id}>{c.nombre}{c.licencia ? " · " + c.licencia : ""}</option>
-                    ))}
+                    {conductoresDisponibles.map(c => {
+                      const sc = sctrDe(c.id, form.fecha_servicio);
+                      return (
+                        <option key={c.id} value={c.id}>{c.nombre}{c.licencia ? " · " + c.licencia : ""}{sc ? (sc.tono === "ambar" ? " · ⚠ " : " · ") + sc.texto : ""}</option>
+                      );
+                    })}
                   </select>
+                  {(() => {
+                    const sc = sctrDe(form.conductor_id, form.fecha_servicio);
+                    if (!sc) return null;
+                    return (
+                      <p className={"mt-1.5 text-[11px] " + (sc.tono === "ambar" ? "text-amber-800" : "text-gray-400")} title={sc.detalle}>
+                        <span className={"inline-block font-bold px-1.5 py-0.5 rounded mr-1 " + (sc.tono === "ambar" ? "bg-amber-100 text-amber-900 border border-amber-200" : "bg-gray-100 text-gray-500")}>{sc.texto}</span>
+                        {sc.detalle}
+                      </p>
+                    );
+                  })()}
                 </Campo>
                 <Campo label="Observaciones">
                   <input className={inputCls()} placeholder="Notas del servicio..." value={form.observaciones} onChange={f("observaciones")} />
