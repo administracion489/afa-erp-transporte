@@ -513,7 +513,13 @@ export type ResultadoIA = {
  * @param convId  conversación a atender
  * @param opts.forzarBorrador  pedido manual desde el inbox: siempre deja borrador
  */
-const ESPERA_RAFAGA_MS = 6000;
+// El cliente suele escribir en varios mensajes seguidos («Hola» · «quiero cotizar» · foto).
+// La IA espera a que deje de escribir: responde cuando pasan SILENCIO_MS sin mensajes
+// nuevos, con un tope de ESPERA_MAX_MS para no dejarlo esperando si escribe sin parar.
+// Solo contesta la corrida del ÚLTIMO mensaje: las de los anteriores ven que llegó uno
+// más nuevo y se retiran, así sale UNA respuesta que une todo lo recibido.
+const SILENCIO_MS = 12_000;
+const ESPERA_MAX_MS = 45_000;
 const MAX_ARCHIVOS_IA = 4;
 const CANDADO_MS = 90_000;
 
@@ -538,6 +544,7 @@ async function responderConIAInterno(
   candado: { tomado: boolean }
 ): Promise<ResultadoIA> {
   const inicioRespuesta = new Date().toISOString();
+  let ultimoVisto: string | null = null;
   if (!process.env.ANTHROPIC_API_KEY)
     return { ok: false, accion: "omitido", error: "Falta ANTHROPIC_API_KEY en el entorno." };
 
@@ -593,17 +600,44 @@ async function responderConIAInterno(
   }
 
   if (!opts.forzarBorrador) {
-    // Ráfaga: tres fotos seguidas son tres webhooks y antes eran tres respuestas iguales.
-    // Se espera a que termine la ráfaga, se toma un candado por hilo y solo responde
-    // quien lo gana; si el último mensaje ya es nuestro, el hilo ya está contestado.
-    await new Promise((r) => setTimeout(r, ESPERA_RAFAGA_MS));
-    const limite = new Date(Date.now() - CANDADO_MS).toISOString();
-    const { data: gano, error: errLock } = await sb
-      .from("crm_conversaciones")
-      .update({ ia_respondiendo_at: new Date().toISOString() })
-      .eq("id", convId)
-      .or(`ia_respondiendo_at.is.null,ia_respondiendo_at.lt.${limite}`)
-      .select("id");
+    // Ráfaga: tres mensajes seguidos son tres webhooks y antes eran tres respuestas.
+    const ultimoEntrante = async () => {
+      const { data } = await sb
+        .from("crm_mensajes").select("id, created_at").eq("conversacion_id", convId)
+        .eq("direccion", "entrante").order("created_at", { ascending: false }).limit(1).maybeSingle();
+      return data as { id: string; created_at: string } | null;
+    };
+    const propio = await ultimoEntrante();
+    const tope = Date.now() + ESPERA_MAX_MS;
+    for (;;) {
+      const ult = await ultimoEntrante();
+      if (ult && propio && ult.id !== propio.id)
+        return { ok: true, accion: "omitido", motivo: "Llegó otro mensaje del cliente: responde la corrida de ese." };
+      const quieto = ult ? Date.now() - new Date(ult.created_at).getTime() : SILENCIO_MS;
+      if (quieto >= SILENCIO_MS || Date.now() >= tope) break;
+      await new Promise((r) => setTimeout(r, Math.min(SILENCIO_MS - quieto + 200, tope - Date.now())));
+    }
+    ultimoVisto = propio?.id ?? null;
+    // Candado por hilo. Si otra corrida lo tiene (la de un mensaje anterior que ya estaba
+    // redactando), se espera a que lo suelte: esa corrida verá que llegó este mensaje y se
+    // retirará sin enviar, y entonces contesta esta con todo junto.
+    let gano: any[] | null = null;
+    let errLock: any = null;
+    for (let intento = 0; intento < 6; intento++) {
+      const limite = new Date(Date.now() - CANDADO_MS).toISOString();
+      const r = await sb
+        .from("crm_conversaciones")
+        .update({ ia_respondiendo_at: new Date().toISOString() })
+        .eq("id", convId)
+        .or(`ia_respondiendo_at.is.null,ia_respondiendo_at.lt.${limite}`)
+        .select("id");
+      gano = r.data; errLock = r.error;
+      if (errLock || (gano && gano.length > 0)) break;
+      await new Promise((res) => setTimeout(res, 8000));
+      const ult = await ultimoEntrante();
+      if (ult && propio && ult.id !== propio.id)
+        return { ok: true, accion: "omitido", motivo: "Llegó otro mensaje del cliente: responde la corrida de ese." };
+    }
     if (!errLock && (!gano || gano.length === 0))
       return { ok: true, accion: "omitido", motivo: "Otra respuesta de la IA ya está en curso." };
     candado.tomado = !errLock;
@@ -676,6 +710,13 @@ async function responderConIAInterno(
     const { count: nuevos } = await sb
       .from("crm_mensajes").select("id", { count: "exact", head: true })
       .eq("conversacion_id", convId).eq("direccion", "saliente").gte("created_at", inicioRespuesta);
+    // …y si el cliente escribió otra cosa mientras se redactaba, responde la corrida de ese
+    // mensaje con todo junto (esta respuesta ya quedó vieja).
+    const { data: ultEnt } = await sb
+      .from("crm_mensajes").select("id").eq("conversacion_id", convId).eq("direccion", "entrante")
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (ultimoVisto && ultEnt && ultEnt.id !== ultimoVisto)
+      return { ok: true, accion: "omitido", motivo: "El cliente siguió escribiendo; responde la corrida de su último mensaje." };
     if (ahora?.ia_pausada || (nuevos ?? 0) > 0)
       return { ok: true, accion: "omitido", motivo: "Ya respondió otra persona o la IA se pausó mientras se redactaba." };
     if (agente.delay_segundos > 0)
