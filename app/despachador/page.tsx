@@ -7,7 +7,7 @@ import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
-import { hoyLima } from "@/lib/alertas";
+import { hoyLimaISO as hoyLima } from "@/lib/cotizaciones-filtros"; // lib/alertas crea el cliente service-role al cargarse: no se importa desde el navegador
 import { pendientesDeCotizar } from "@/lib/despacho-sin-cotizar";
 import { leerDespachosSinCotizar } from "@/lib/despacho-sin-cotizar-datos";
 

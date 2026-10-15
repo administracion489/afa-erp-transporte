@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePermiso } from "@/lib/usePermiso";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { supabase } from "@/lib/supabase";
-import { hoyLima } from "@/lib/alertas";
+import { hoyLimaISO as hoyLima } from "@/lib/cotizaciones-filtros"; // lib/alertas crea el cliente service-role al cargarse: no se importa desde el navegador
 import { ImgPrivada, EnlacePrivado } from "@/components/ArchivoPrivado";
 
 // La prueba de cobro llega como RUTA cruda del bucket privado `documentos`. <ImgPrivada>/

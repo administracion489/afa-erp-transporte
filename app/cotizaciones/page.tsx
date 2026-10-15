@@ -46,7 +46,8 @@ import { faltaColumna } from "@/lib/columna-faltante";
 import ModalDespachoSinCotizar from "@/components/cotizaciones/ModalDespachoSinCotizar";
 import { leerDespachosSinCotizar, vincularCotizacion } from "@/lib/despacho-sin-cotizar-datos";
 import { pendientesDeCotizar, prellenadoCotizacion, type ReservaDespacho } from "@/lib/despacho-sin-cotizar";
-import { hoyLima } from "@/lib/alertas";
+// hoyLima de lib/alertas NO: ese módulo crea el cliente service-role al cargarse y rompe la página en el navegador.
+import { hoyLimaISO as hoyLima } from "@/lib/cotizaciones-filtros";
 // El mapa arrastra el CSS de Mapbox y su motor se baja al abrirlo (lib/mapbox-carga.ts).
 const MapaParaderos = dynamic(() => import("@/components/cotizaciones/MapaParaderos"), { ssr: false });
 
