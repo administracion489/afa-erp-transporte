@@ -287,6 +287,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
     grupo: "Principal",
     items: [
       { href: "/dashboard", label: "Dashboard", sub: "Panel principal", icon: Ic.Dashboard, modulo: "dashboard" },
+      { href: "/mi-perfil", label: "Mi Perfil", sub: "Ficha · asistencia · vacaciones", icon: Ic.UserCheck, modulo: "mi-perfil" },
     ],
   },
   {
@@ -348,6 +349,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
   {
     grupo: "RRHH",
     items: [
+      { href: "/rrhh",                    label: "Control de Personal", sub: "Asistencia · ausencias", icon: Ic.Users,    modulo: "rrhh" },
       { href: "/conductores",             label: "Conductores",    sub: "Choferes",        icon: Ic.UserCheck, modulo: "conductores"            },
       { href: "/personal-administrativo", label: "Personal Adm.", sub: "Equipo interno",  icon: Ic.Briefcase, modulo: "personal-administrativo" },
     ],

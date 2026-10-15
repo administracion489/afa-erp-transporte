@@ -11,6 +11,7 @@ import { GLOSARIO } from "@/lib/ayuda/glosario";
 import { MODULOS_FINANZAS } from "@/lib/ayuda/modulos-finanzas";
 import { MODULOS_OPERACIONES } from "@/lib/ayuda/modulos-operaciones";
 import { MODULOS_FLOTA } from "@/lib/ayuda/modulos-flota";
+import { MODULOS_RRHH } from "@/lib/ayuda/modulos-rrhh";
 
 export type { AyudaModulo, Concepto, Faq, ComoHacer } from "@/lib/ayuda/tipos";
 export { GLOSARIO } from "@/lib/ayuda/glosario";
@@ -19,6 +20,7 @@ export const MODULOS_AYUDA: AyudaModulo[] = [
   ...MODULOS_FINANZAS,
   ...MODULOS_OPERACIONES,
   ...MODULOS_FLOTA,
+  ...MODULOS_RRHH,
 ];
 
 /**

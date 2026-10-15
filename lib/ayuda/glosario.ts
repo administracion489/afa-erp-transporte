@@ -974,4 +974,54 @@ export const GLOSARIO: Record<string, Concepto> = {
       "El vendedor **marca** quién lo ayudó, pero eso no paga nada por sí solo: solo entra al reparto lo que el **administrador corrobora** a fin de mes. Si no hay nadie corroborado, el fondo queda “pendiente de corroboración” y no se reparte (ni se inventa un destinatario). Un eventual retenido **sí** cuenta para el fondo: el fondo es un importe plano por evento, no un porcentaje de la utilidad.",
     verTambien: ["comision_vendedor"],
   },
+
+  // ── RRHH · asistencia y vacaciones ────────────────────────────────────────────
+
+  marcacion: {
+    clave: "marcacion",
+    termino: "Marcación (fichaje)",
+    definicion:
+      "Es el registro de cada hito del día laboral: **entrada**, **salida a almuerzo**, **regreso de almuerzo** y **salida**, en ese orden.\nEl empleado la hace desde su perfil con la cámara (reconocimiento facial), y de ahí sale cuántas horas trabajó y si llegó tarde.",
+    ejemplo:
+      "Marcas entrada 07:58, salida a almuerzo 13:02, regreso 13:58 y salida 18:05: el sistema calcula 9.1 horas trabajadas descontando 56 minutos de almuerzo.",
+    ojo:
+      "El orden es obligatorio: nunca se puede marcar “salida” antes de “entrada”, y una vez marcada la salida el día queda cerrado. Si un empleado no pudo usar la cámara (no dio su consentimiento, no tiene cámara), **Recursos Humanos lo marca por PIN** desde su pantalla — esa marca no es facial y no exige consentimiento biométrico. La foto del rostro es un **dato biométrico**: solo se pide con el consentimiento de la Ley N.º 29733, y es revocable.",
+    verTambien: ["geocerca", "jornada"],
+  },
+
+  geocerca: {
+    clave: "geocerca",
+    termino: "Geocerca",
+    definicion:
+      "Es un círculo alrededor de la sede (un punto y un radio en metros). Sirve para saber si una marcación se hizo **en el trabajo** o desde fuera.\nAl marcar, el celular manda su ubicación y el servidor mide la distancia a la sede.",
+    ejemplo:
+      "Con la sede en un radio de 150 m, una marca a 40 m cuenta como “dentro”; una a 600 m, como “fuera”, y queda registrada así.",
+    ojo:
+      "La geocerca puede estar en dos modos: **solo avisa** (registra la marca aunque estés lejos, anotando la distancia) o **bloquea** (no deja marcar fuera del radio). Nace en modo “solo avisa” y sin coordenadas: hasta que RRHH no declara dónde está la sede, no bloquea a nadie. “No sé dónde estás” **no es** “estás lejos”: si el celular no da ubicación, no se afirma que estuvo fuera.",
+    verTambien: ["marcacion"],
+  },
+
+  jornada: {
+    clave: "jornada",
+    termino: "Jornada",
+    definicion:
+      "Son las horas efectivas de un día de trabajo: **(salida − entrada) − almuerzo**.\nSale de las marcaciones del día y nunca es negativa. Si el día no cerró (falta la salida), queda “en curso” y en 0 horas, sin inventar una hora de salida.",
+    ejemplo:
+      "Entrada 08:10 y salida 18:00 con una hora de almuerzo son 8.83 horas. Como la referencia es 08:00 con 10 min de tolerancia, hay 0 minutos de tardanza.",
+    ojo:
+      "Si no se marcó el **par completo** de almuerzo (salida y regreso), se descuenta el almuerzo por defecto configurado y se marca como “estimado” (con un asterisco). La tardanza se mide contra la hora de entrada de referencia más la tolerancia; la salida temprana, contra la hora de salida. El cruce de medianoche (un turno nocturno) se resuelve solo, porque cada marca lleva su fecha y hora completas.",
+    verTambien: ["marcacion", "geocerca"],
+  },
+
+  vacaciones: {
+    clave: "vacaciones",
+    termino: "Vacaciones",
+    definicion:
+      "Son los días de descanso pagado que se ganan por antigüedad: por cada **año completo** de servicio se ganan los días que fije el régimen laboral de la empresa.\nEl **saldo** es lo ganado menos lo ya gozado (ausencias de tipo “vacaciones” aprobadas).",
+    ejemplo:
+      "Con un régimen de 30 días al año y 3 años completos de servicio son 90 días ganados. Si ya gozó 68, el saldo es 22.",
+    ojo:
+      "El saldo **puede salir negativo** y eso no es un error: son vacaciones adelantadas, una deuda real que se muestra tal cual. Los días los gana el **aniversario** de ingreso: antes del primer año cumplido, el saldo ganado es 0. Si no se conoce la fecha de ingreso del empleado en su ficha, no se muestra un 0 (que se leería como “sin derecho”): se dice que falta el dato.",
+    verTambien: ["jornada"],
+  },
 };

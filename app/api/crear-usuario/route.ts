@@ -41,6 +41,8 @@ const MODULOS = [
   "seguros",
   "conductores",
   "personal-administrativo",
+  "rrhh",
+  "mi-perfil",
   "proveedores",
   "ordenes-compra",
   "pactos",
@@ -143,7 +145,7 @@ export async function POST(request: Request) {
       permitido:
         rol === "admin"
           ? true
-          : ["dashboard", "reservas", "cotizaciones", "clientes"].includes(modulo),
+          : ["dashboard", "reservas", "cotizaciones", "clientes", "mi-perfil"].includes(modulo),
     }));
 
     const { error: permisosError } = await supabaseAdmin
