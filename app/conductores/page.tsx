@@ -1,7 +1,9 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { vencimientoPersona, type PolizaRow, type CoberturaRow, type TipoPersona } from "@/lib/seguros";
 import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
@@ -169,6 +171,66 @@ function BadgeDoc({ fecha, diasAlerta = 30, label }: { fecha: string | null; dia
   );
 }
 
+// ─── PÓLIZAS COLECTIVAS (seguros-02) ──────────────────────────────────────────
+// Si la persona está en una póliza de ese tipo, manda la PÓLIZA (misma cascada que /seguros y que
+// v_seguro_persona: `vencimientoPersona`). Lectura best-effort: sin las tablas, o si falla, la
+// ficha se edita como siempre y no se dice nada.
+
+type CoberturaPoliza = { numero: string; vence: string | null; seguroId: number };
+
+function usePolizasPersona(clase: "conductor" | "personal") {
+  const [datos, setDatos] = useState<{ polizas: PolizaRow[]; coberturas: CoberturaRow[] }>({ polizas: [], coberturas: [] });
+  useEffect(() => {
+    let vivo = true;
+    const col = clase === "conductor" ? "conductor_id" : "personal_administrativo_id";
+    const leer = async (tabla: string, cols: string, filtro?: string) => {
+      const out: any[] = [];
+      for (let desde = 0; ; desde += 1000) {
+        let q = supabase.from(tabla).select(cols).order("id", { ascending: true }).range(desde, desde + 999);
+        if (filtro) q = q.not(filtro, "is", null);
+        const { data, error } = await q;
+        if (error) return null;
+        out.push(...(data ?? []));
+        if (!data || data.length < 1000) return out;
+      }
+    };
+    (async () => {
+      try {
+        const [p, c] = await Promise.all([
+          leer("seguros", "id,tipo,numero_poliza,fecha_vencimiento"),
+          leer("seguro_cobertura", `id,seguro_id,${col},hasta`, col),
+        ]);
+        if (vivo && p && c) setDatos({ polizas: p, coberturas: c });
+      } catch { /* sin pólizas: la ficha manda, como siempre */ }
+    })();
+    return () => { vivo = false; };
+  }, [clase]);
+  return (id: number | null, tipo: TipoPersona): CoberturaPoliza | null => {
+    if (id == null) return null;
+    const v = vencimientoPersona({ clase, id, nombre: "", activo: true }, datos.polizas, datos.coberturas, tipo);
+    if (v.fuente !== "poliza" || v.seguroId == null) return null;
+    const pol = datos.polizas.find((p) => Number(p.id) === v.seguroId);
+    return { numero: pol?.numero_poliza ? `N° ${pol.numero_poliza}` : `#${v.seguroId}`, vence: v.vencimiento, seguroId: v.seguroId };
+  };
+}
+
+function fmtVence(f: string | null) {
+  const s = String(f ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "sin fecha";
+  const [a, m, d] = s.split("-");
+  return `${d}/${m}/${a}`;
+}
+
+/** El campo de la ficha cuando lo cubre una póliza: solo lectura, con su porqué y dónde se edita. */
+function CubiertoPorPoliza({ c }: { c: CoberturaPoliza }) {
+  return (
+    <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+      Cubierto por la póliza {c.numero} (vence {fmtVence(c.vence)}).{" "}
+      <Link href="/seguros" className="font-bold underline">Se edita en Seguros →</Link>
+    </div>
+  );
+}
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function ConductoresPage() {
@@ -183,6 +245,10 @@ export default function ConductoresPage() {
   const [filtroEst,   setFiltroEst]   = useState("todos");
   const [filtroAlerta,setFiltroAlerta]= useState("todos");
   const [form, setForm] = useState(FORM_VACIO);
+  const polizaDe = usePolizasPersona("conductor");
+  const cubSalud = polizaDe(editandoId, "sctr_salud");
+  const cubPension = polizaDe(editandoId, "sctr_pension");
+  const cubVidaLey = polizaDe(editandoId, "vida_ley");
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -500,10 +566,12 @@ export default function ConductoresPage() {
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Documentos SUNAFIL / Seguridad y Salud</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Campo label="🏥 SCTR Salud — vencimiento">
-                <input type="date" className={inputCls(estadoFecha(form.sctr_salud_venc, 30) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.sctr_salud_venc} onChange={f("sctr_salud_venc")} />
+                {cubSalud ? <CubiertoPorPoliza c={cubSalud} /> :
+                <input type="date" className={inputCls(estadoFecha(form.sctr_salud_venc, 30) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.sctr_salud_venc} onChange={f("sctr_salud_venc")} />}
               </Campo>
               <Campo label="💼 SCTR Pensión — vencimiento">
-                <input type="date" className={inputCls(estadoFecha(form.sctr_pension_venc, 30) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.sctr_pension_venc} onChange={f("sctr_pension_venc")} />
+                {cubPension ? <CubiertoPorPoliza c={cubPension} /> :
+                <input type="date" className={inputCls(estadoFecha(form.sctr_pension_venc, 30) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.sctr_pension_venc} onChange={f("sctr_pension_venc")} />}
               </Campo>
               <Campo label="🩺 Examen médico ocup. — vencimiento">
                 <input type="date" className={inputCls(estadoFecha(form.examen_medico_venc, 30) === "vencido" ? "border-red-400 bg-red-50" : "")} value={form.examen_medico_venc} onChange={f("examen_medico_venc")} />
@@ -517,11 +585,16 @@ export default function ConductoresPage() {
                 <p className="text-[10px] text-gray-400 mt-0.5">Penales + policiales + judiciales</p>
               </Campo>
               <div>
+                {cubVidaLey ? (<>
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-2">💛 Seguro Vida Ley</p>
+                  <CubiertoPorPoliza c={cubVidaLey} />
+                </>) : (<>
                 <label className="flex items-center gap-2 cursor-pointer mb-2">
                   <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" checked={form.vida_ley} onChange={f("vida_ley")} />
                   <span className="text-[11px] font-bold uppercase tracking-wide text-gray-400">💛 Seguro Vida Ley</span>
                 </label>
                 {form.vida_ley && <input type="date" className={inputCls()} placeholder="Vencimiento póliza" value={form.vida_ley_venc} onChange={f("vida_ley_venc")} />}
+                </>)}
                 <p className="text-[10px] text-gray-400 mt-0.5">Obligatorio desde 4 años de antigüedad (D.L. 688)</p>
               </div>
             </div>
