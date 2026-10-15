@@ -2373,7 +2373,16 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
         // terceros, fichas de conductores/personal y pólizas colectivas. Leer solo la tabla
         // `seguros` decía «no hay pólizas» con toda la flota asegurada por sus documentos.
         const r = await cargarSeguros(sb, fechaLima());
-        const filas = r.filas;
+        // Se lee con service-role: las fichas de personas solo se enseñan a quien puede verlas
+        // (el módulo seguros o el de esa ficha). Vehículos/Reportes no dan acceso a personal.
+        const verPersonal = tienePermiso(ctx, ["seguros", "personal-administrativo"]);
+        const verConductores = tienePermiso(ctx, ["seguros", "conductores"]);
+        const claseVisible = (c: string) =>
+          (c !== "personal" || verPersonal) && (c !== "conductor" || verConductores);
+        const filas = r.filas.filter(
+          (f) => claseVisible(f.asegurado.clase) && (f.fuente !== "ficha_personal" || verPersonal) && (f.fuente !== "ficha_conductor" || verConductores),
+        );
+        const verMontos = tienePermiso(ctx, ["seguros"]) || puedeVerPrecios(ctx);
         if (filas.length === 0 && r.errores.length === 0)
           return { paraModelo: JSON.stringify({ encontrados: 0, nota: "No hay seguros registrados en ninguna fuente (documentos de vehículos, de terceros, fichas ni pólizas)." }) };
 
@@ -2388,14 +2397,14 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           vence: f.vencimiento,
           dias_para_vencer: f.dias,
           situacion: f.estado,
-          cuota_mensual: f.cuota,
+          cuota_mensual: verMontos ? f.cuota : null,
           de_afa: f.deAfa,
           se_corrige_en: f.editarEn,
         }));
         const vencidos = detalle.filter((d) => d.situacion === "vencido");
         const porVencer = detalle.filter((d) => d.situacion === "por_vencer");
         const k = kpisSeguros(filas);
-        const faltantes = r.faltantes.filter((f) => f.alarma);
+        const faltantes = r.faltantes.filter((f) => f.alarma && claseVisible(f.asegurado.clase));
         const visibles = input.solo_alertas ? [...vencidos, ...porVencer] : detalle;
 
         return {
@@ -2403,7 +2412,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             encontrados: detalle.length,
             vencidos: vencidos.length,
             por_vencer_30d: porVencer.length,
-            cuota_mensual_total_afa: k.cuotaTotal,
+            cuota_mensual_total_afa: verMontos ? k.cuotaTotal : null,
             detalle: visibles.slice(0, 15),
             sin_cobertura: faltantes.slice(0, 15).map((f) => ({ asegurado: f.asegurado.rotulo, problema: f.texto, se_corrige_en: f.arreglo })),
             sin_cobertura_total: faltantes.length,
@@ -2420,7 +2429,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
                 { label: "Vencidos", valor: String(vencidos.length), intent: vencidos.length ? "danger" : "ok" },
                 { label: "Por vencer (30d)", valor: String(porVencer.length), intent: porVencer.length ? "warn" : "ok" },
                 { label: "Sin cobertura", valor: String(faltantes.length), intent: faltantes.length ? "danger" : "ok" },
-                { label: "Cuota mensual", valor: fmtCorto(k.cuotaTotal), intent: "info" },
+                { label: "Cuota mensual", valor: verMontos ? fmtCorto(k.cuotaTotal) : "—", intent: "info" },
               ],
             },
             ...(vencidos.length + porVencer.length > 0

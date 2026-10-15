@@ -1644,6 +1644,19 @@ La nota imprimía `040002019 UGL 10.527x 24.720` / `MAX-D DIESEL B5 S50 UV 260.2
 - **La pantalla importa el MISMO motor que el cron** y juzga el borrador que se está editando, no la fila guardada — igual que `avisosDe` en `/programacion`. Una pantalla con su propia lógica de «esto saldrá» es el bug del semáforo de puntualidad.
 - **Sin la migración corrida, `/redes` lo DICE en ámbar nombrando el SQL** en vez de aparentar una pantalla vacía. Módulo nuevo del menú: **`redes`** — recuerda que son **TRES** listas (`menuGrupos`, `MODULOS` de crear-usuario, y `GRUPOS_MODULOS` + `nombresModulo` de `/usuarios`), más su ficha de ayuda.
 
+### Seguros · /seguros DERIVA de donde ya vive cada póliza; no se copia nada
+
+`lib/seguros.ts` (motor PURO) + `lib/seguros-datos.ts` (`cargarSeguros`, el que lee; también `leerPolizasPersonas`) + `lib/documentos-vehiculo-datos.ts` + `app/seguros/page.tsx`. Matriz: `npx tsx scripts/prueba-seguros.mts`. Migraciones: `supabase/seguros-01-base.sql`, `seguros-02-cobertura.sql`, `seguros-03-vista-persona.sql` (**no las corre el deploy**; antes, `diagnostico-seguros.sql`, solo lee).
+
+**El caso**: /seguros salía en cero con el SOAT y el SCTR ya registrados, porque solo leía la tabla `seguros`, que nadie más escribía. El dueño pidió «enlazar» las pantallas para que un cambio en una mueva la otra: se resolvió con UNA fila autoritativa por seguro, sin sincronización.
+
+- **Cada seguro vive donde está su asegurado**: SOAT/CAT/Todo Riesgo/RC de UNA placa propia en `documentos_vehiculo`; los de terceros y el SCTR/Vida Ley de la empresa tercerizada en `documentos_tercero`; las pólizas que cubren a VARIOS (SCTR salud, SCTR pensión, Vida Ley, RC de flota…) en `seguros` (`alcance='colectiva'`) + `seguro_cobertura` (N:M, un sujeto por fila). /seguros las junta (`FilaSeguro.fuente`) y una fila que no es póliza se edita en SU pantalla («Editar en …»): un solo camino de escritura. SOAT/CAT no se dan de alta en `seguros`.
+- **Persona: la póliza manda sobre la ficha** (`vencimientoPersona` ≡ `v_seguro_persona`, cruzadas en la matriz): fin más lejano de `coalesce(cobertura.hasta, seguros.fecha_vencimiento)`; una baja vencida no vuelve a la ficha. Sin póliza, `conductores`/`personal_administrativo.sctr_*_venc`/`vida_ley_venc` son el respaldo, y en la ficha cubierta esos campos pasan a solo lectura. El tick `doc_vence` y el login del conductor usan la misma regla (`vencimientoFichaOPoliza`) **con la misma clave de envío** (`${id}:${campo}`): sin pólizas, byte a byte lo de antes. Ellos NO miran la casilla `vida_ley` (nunca la miraron); /seguros sí.
+- **«SCTR» a secas es `sctr_sin_precisar`**: se ve y no cumple ni salud ni pensión.
+- **Cobertura faltante** (`coberturaFaltante`, códigos con `alarma` declarada): unidad activa sin SOAT nunca sale verde; `doble_registro` es gris. Una fuente que no se pudo leer es «?» y `sinJuzgar`, nunca un 0. Las primas de terceros no suman a los KPIs de AFA.
+- **Sin backfill**: aseguradora y número de una póliza SCTR no existen en ninguna ficha; los escribe una persona.
+- ELIA (`consultar_seguros`, service-role) solo enseña personas a quien tiene `seguros` o el módulo de esa ficha, y montos con `seguros` o `puedeVerPrecios`.
+
 ### Seguridad · la anon key NO es un secreto
 
 `supabase/seguridad-00-diagnostico.sql` (solo lee) + `supabase/seguridad-01-rls.sql` (**no la corre el deploy**). Nació de la alerta del Security Advisor de Supabase del 27-09-2026 (`rls_disabled_in_public`, `sensitive_columns_exposed`).

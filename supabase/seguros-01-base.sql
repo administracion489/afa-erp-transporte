@@ -79,6 +79,8 @@ drop policy if exists seguros_authenticated on public.seguros;
 create policy seguros_authenticated on public.seguros
   for all to authenticated using (true) with check (true);
 revoke all on public.seguros from anon;
+do $$ declare q text := pg_get_serial_sequence('public.seguros','id');
+begin if q is not null then execute format('revoke all on sequence %s from anon', q); end if; end $$;
 
 -- Verificación (debe salir alcance y vehiculo_tercero_id, y rls = true):
 -- select column_name from information_schema.columns
