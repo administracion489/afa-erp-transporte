@@ -7,6 +7,7 @@ import {
 import { avisosAutomaticosDeTelefono, etiquetaAviso, type AvisoAutomatico } from "@/lib/crm-avisos-automaticos";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import MensajeContenido, { esBurbujaSinFondo } from "@/components/crm/MensajeContenido";
+import { useRespuestasRapidas, SugerenciasRapidas, ModalRespuestasRapidas, aplicarVariables } from "@/components/crm/RespuestasRapidas";
 import { haceCuanto, textoLegible } from "@/lib/crm-gmail-reglas";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -131,6 +132,8 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [convs, setConvs] = useState<Conversacion[]>([]);
   const [selected, setSelected] = useState<Conversacion | null>(null);
   const [mensajes, setMensajes] = useState<Mensaje[]>([]);
+  const rapidas = useRespuestasRapidas();
+  const [modalRapidas, setModalRapidas] = useState(false);
   // Media firmada por mensaje (bucket privado crm-media): undefined = cargando, null = no disponible.
   const [mediaUrls, setMediaUrls] = useState<Record<string, string | null>>({});
   const pedidosMedia = useRef<Set<string>>(new Set());
@@ -275,12 +278,16 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       (data ?? []).map(async (c: any) => {
         const { data: ult } = await supabase
           .from("crm_mensajes")
-          .select("contenido")
+          .select("contenido, direccion, created_at")
           .eq("conversacion_id", c.id)
           .order("created_at", { ascending: false })
           .limit(1)
           .maybeSingle();
-        return { ...c, _ultimo_texto: textoLegible(ult?.contenido) ?? undefined };
+        return {
+          ...c,
+          _ultimo_texto: textoLegible(ult?.contenido) ?? undefined,
+          _espera_desde: ult?.direccion === "entrante" ? ult.created_at : undefined,
+        };
       })
     );
     setConvs(enriched as Conversacion[]);
@@ -645,7 +652,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       )}
 
       {/* ── Panel izquierdo — lista de conversaciones ── */}
-      <div className="w-80 flex-shrink-0 bg-white border-r border-gray-100 flex flex-col">
+      <div className="w-[30%] min-w-[320px] max-w-[460px] flex-shrink-0 bg-white border-r border-gray-100 flex flex-col">
 
         {/* Header */}
         <div className="p-4 border-b border-gray-100">
@@ -835,6 +842,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: cfg.bg, color: cfg.color }}>
                           {cfg.icon} {cfg.label}
                         </span>
+                        <ChipEspera desde={(c as any)._espera_desde} />
                         {c.no_leidos > 0 && (
                           <span className="bg-[#0b315f] text-white text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
                             {c.no_leidos > 9 ? "9+" : c.no_leidos}
@@ -959,12 +967,14 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             </div>
           </div>
 
+          {selected.canal === "whatsapp" && <VentanaWhatsApp mensajes={mensajes} />}
+
           {/* Mensajes — con los avisos automáticos intercalados en su momento exacto.
               Esos avisos salen FUERA del CRM (lib/notificaciones.ts nunca escribe en
               crm_mensajes), así que sin intercalarlos un "Muchas gracias" suelto no dice
               nada; debajo del aviso que lo precede se explica solo. No se guarda el texto
               que se envió, sólo el qué/cuándo — nunca se finge citarlo. */}
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-2">
+          <div className="flex-1 overflow-y-auto px-[6%] py-4 space-y-1.5" style={{ background: "#efeae2" }}>
             {mensajes.length === 0 && avisos.length === 0 && (
               <div className="text-center text-gray-400 text-sm py-12">Sin mensajes aún</div>
             )}
@@ -1005,12 +1015,12 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                   {separador}
                   <div className={`flex ${esMio ? "justify-end" : "justify-start"}`}>
                     <div
-                      className={`max-w-sm px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed
+                      className={`max-w-[65%] px-3 py-2 rounded-lg text-[14.5px] leading-snug
                         ${esBurbujaSinFondo(m.tipo)
                           ? (esMio ? "text-gray-500" : "text-gray-800")
                           : esMio
-                          ? "bg-[#0b315f] text-white rounded-br-sm"
-                          : "bg-white border border-gray-100 text-gray-800 rounded-bl-sm shadow-sm"
+                          ? "bg-[#d9fdd3] text-gray-900 rounded-tr-none shadow-sm"
+                          : "bg-white text-gray-900 rounded-tl-none shadow-sm"
                         }`}
                     >
                       <MensajeContenido
@@ -1018,10 +1028,14 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                         contenido={m.contenido}
                         tieneMedia={!!m.media_url}
                         url={m.media_url ? mediaUrls[m.id] : null}
-                        esMio={esMio}
+                        esMio={false}
                       />
-                      <div className={`text-[10px] mt-1 text-right ${esMio ? "text-white/60" : "text-gray-400"}`}>
-                        {m.generado_por_ia && <span className="mr-1" title="Generado por IA">✨</span>}
+                      <div className="text-[10px] mt-1 text-right text-gray-500">
+                        {esMio && (
+                          <span className="mr-1.5">
+                            {m.generado_por_ia ? "✨ IA" : (m as any).origen === "app_movil" ? "📱 Celular" : (m as any).origen === "historial" ? "Historial" : "💻 CRM"}
+                          </span>
+                        )}
                         {fmtFechaMsg(m.created_at)}
                         {m.error && <span className="ml-1 text-red-300">⚠ {m.error}</span>}
                       </div>
@@ -1104,13 +1118,32 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                 </button>
               </div>
             ) : (
+              <>
+              <SugerenciasRapidas
+                reply={reply}
+                lista={rapidas.lista}
+                onElegir={(r) => { setReply(aplicarVariables(r.texto, selected.crm_contactos?.nombre)); replyRef.current?.focus(); }}
+              />
               <div className="flex gap-3 items-end">
+                <button
+                  onClick={() => setModalRapidas(true)}
+                  title="Respuestas rápidas (escribe / en el mensaje)"
+                  className="border border-gray-200 text-gray-500 px-2.5 py-2 rounded-xl text-sm hover:bg-gray-50"
+                >
+                  ⚡
+                </button>
                 <textarea
                   ref={replyRef}
                   value={reply}
                   onChange={(e) => setReply(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); enviar(); }
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      // «/atajo» exacto + Enter = pega la respuesta rápida en vez de enviar «/atajo».
+                      const r = reply.startsWith("/") ? rapidas.lista.find((x) => `/${x.atajo}` === reply.trim().toLowerCase()) : null;
+                      if (r) { setReply(aplicarVariables(r.texto, selected.crm_contactos?.nombre)); return; }
+                      enviar();
+                    }
                   }}
                   placeholder={`Responder por ${CANAL_CFG[selected.canal]?.label ?? selected.canal}…`}
                   rows={2}
@@ -1136,6 +1169,10 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                   </button>
                 </div>
               </div>
+              </>
+            )}
+            {modalRapidas && (
+              <ModalRespuestasRapidas lista={rapidas.lista} falta={rapidas.falta} onClose={() => setModalRapidas(false)} onCambio={rapidas.recargar} />
             )}
             <div className="text-xs text-gray-400 mt-1.5 text-right">
               Enter para enviar · Shift+Enter para nueva línea
@@ -1670,6 +1707,57 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
           Cerrar
         </button>
       </div>
+    </div>
+  );
+}
+
+
+// ── Lo que tienen los inbox de WhatsApp profesionales (Respond.io, Chatwoot, Wati) ──
+
+/** Cuánto lleva el cliente esperando respuesta: el último mensaje del hilo es suyo.
+ *  Ámbar desde 15 min, rojo desde 1 h. Se refresca solo cada minuto. */
+function ChipEspera({ desde }: { desde?: string }) {
+  const [, tic] = useState(0);
+  useEffect(() => { const t = setInterval(() => tic((n) => n + 1), 60_000); return () => clearInterval(t); }, []);
+  if (!desde) return null;
+  const min = Math.floor((Date.now() - new Date(desde).getTime()) / 60000);
+  if (min < 15 || min > 7 * 24 * 60) return null;
+  const txt = min < 60 ? `${min} min` : min < 1440 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`;
+  return (
+    <span
+      title="El cliente espera respuesta desde hace este tiempo"
+      className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${min >= 60 ? "bg-red-50 text-red-600" : "bg-amber-50 text-amber-700"}`}
+    >
+      ⏱ {txt}
+    </span>
+  );
+}
+
+/** Regla de Meta: se puede escribir texto libre solo dentro de las 24 h desde el último
+ *  mensaje del cliente. Pasado eso, solo plantillas aprobadas (Campañas). */
+function VentanaWhatsApp({ mensajes }: { mensajes: { direccion: string; created_at: string }[] }) {
+  const [, tic] = useState(0);
+  useEffect(() => { const t = setInterval(() => tic((n) => n + 1), 60_000); return () => clearInterval(t); }, []);
+  const ult = [...mensajes].reverse().find((m) => m.direccion === "entrante");
+  if (!ult) return null;
+  const restanMin = Math.floor((new Date(ult.created_at).getTime() + 24 * 3600_000 - Date.now()) / 60000);
+  if (restanMin > 0 && restanMin > 120) {
+    return (
+      <div className="px-5 py-1 text-[11px] text-gray-500 bg-white border-b border-gray-100">
+        🟢 Ventana de WhatsApp abierta · quedan {Math.floor(restanMin / 60)} h para responder con texto libre
+      </div>
+    );
+  }
+  if (restanMin > 0) {
+    return (
+      <div className="px-5 py-1 text-[11px] text-amber-800 bg-amber-50 border-b border-amber-100">
+        ⏳ La ventana de 24 h se cierra en {restanMin} min: después solo se podrá escribir con una plantilla aprobada.
+      </div>
+    );
+  }
+  return (
+    <div className="px-5 py-1.5 text-[11px] text-red-700 bg-red-50 border-b border-red-100">
+      🔒 Pasaron más de 24 h desde el último mensaje del cliente: WhatsApp no deja enviar texto libre. Usa una plantilla aprobada (Campañas) o espera a que el cliente escriba.
     </div>
   );
 }
