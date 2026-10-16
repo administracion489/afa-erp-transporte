@@ -1,3 +1,4 @@
+import { transcribirMensaje } from "@/lib/crm-audio";
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -67,6 +68,7 @@ export async function POST(req: NextRequest) {
   try { body = JSON.parse(crudo); } catch { return NextResponse.json({ ok: true }); }
 
   const { object, entry = [] } = body;
+  const audiosPorTranscribir: { metaId: string; url: string }[] = []; // notas de voz → texto antes de la IA
   const conversacionesNuevas = new Set<string>(); // hilos con mensaje entrante → atender con IA
   // Webhooks de coexistencia apartados para procesarlos después de responder 200.
   const coexistencia: { campo: string; value: any }[] = [];
@@ -131,6 +133,8 @@ export async function POST(req: NextRequest) {
             phoneNumberId: phoneId ?? null,
             displayPhoneNumber: val.metadata?.display_phone_number ?? null,
           });
+          if (convId && media?.url && (msg.type === "audio" || msg.type === "voice"))
+            audiosPorTranscribir.push({ metaId: msg.id, url: media.url });
           // Una reacción (😂 a un mensaje) no es una pregunta: la IA no contesta por ella.
           if (convId && !esAvisos && msg.type !== "reaction") conversacionesNuevas.add(convId);
         }
@@ -180,7 +184,7 @@ export async function POST(req: NextRequest) {
   // decisión tiene que estar tomada antes de que el agente se plantee responder,
   // o el cliente recibe dos respuestas al mismo mensaje. Con dos after() por
   // separado el orden no está garantizado.
-  if (coexistencia.length > 0 || conversacionesNuevas.size > 0 || estadosEntrega.length > 0) {
+  if (coexistencia.length > 0 || conversacionesNuevas.size > 0 || estadosEntrega.length > 0 || audiosPorTranscribir.length > 0) {
     after(async () => {
       const sb = db();
       if (estadosEntrega.length > 0) {
@@ -201,6 +205,12 @@ export async function POST(req: NextRequest) {
           // Un chunk malformado no debe impedir el siguiente ni el resto del webhook.
           console.error(`[webhook] ${campo}:`, err);
         }
+      }
+
+      // Notas de voz → texto ANTES de la IA: así «escucha» el audio y el equipo lo lee.
+      for (const a of audiosPorTranscribir) {
+        try { await transcribirMensaje(sb, { meta_message_id: a.metaId }, a.url); }
+        catch (err) { console.error("[webhook] transcripción:", err); }
       }
 
       // responderConIA decide solo si está activo, el canal aplica, el hilo no

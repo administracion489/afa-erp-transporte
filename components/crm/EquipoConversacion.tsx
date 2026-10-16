@@ -8,6 +8,8 @@ export const ETIQUETAS: { clave: string; color: string; bg: string }[] = [
   { clave: "Reserva", color: "#047857", bg: "#d1fae5" },
   { clave: "Reclamo", color: "#b91c1c", bg: "#fee2e2" },
   { clave: "Urgente", color: "#c2410c", bg: "#ffedd5" },
+  // La pone la IA al derivar un chat (lib/crm-ia.ts, ETIQUETA_EJECUTIVO): mismo texto.
+  { clave: "Para ejecutivo", color: "#a16207", bg: "#fef9c3" },
   { clave: "Colegio", color: "#7e22ce", bg: "#f3e8ff" },
   { clave: "Turismo", color: "#0e7490", bg: "#cffafe" },
   { clave: "Personal", color: "#4d7c0f", bg: "#ecfccb" },

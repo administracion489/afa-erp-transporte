@@ -38,30 +38,44 @@ export async function transcribirAudio(mediaUrl: string, mime: string | null): P
       return null;
     }
 
-    // 2) Enviar a la API de transcripciones (multipart/form-data con fetch nativo)
+    return await transcribirBytes(bytes, mime);
+  } catch (e: any) {
+    console.warn("[radar/transcripcion] Error transcribiendo:", e?.message ?? e);
+    return null;
+  }
+}
+
+/** Transcribe bytes de audio con whisper-1 (español). La usan el Radar y el CRM.
+ *  null sin OPENAI_API_KEY o si falla; nunca lanza. */
+export async function transcribirBytes(bytes: ArrayBuffer | Uint8Array, mime: string | null): Promise<string | null> {
+  if (!process.env.OPENAI_API_KEY) return null;
+  try {
     const tipo = mime || "audio/ogg";
     const form = new FormData();
-    form.append("file", new Blob([bytes], { type: tipo }), `nota-de-voz.${extensionDe(mime)}`);
+    form.append("file", new Blob([bytes as BlobPart], { type: tipo }), `nota-de-voz.${extensionDe(mime)}`);
     form.append("model", "whisper-1");
     form.append("language", "es");
-
-    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-      body: form,
-    });
-
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 45_000);
+    let resp: Response;
+    try {
+      resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: form,
+        signal: ctrl.signal,
+      });
+    } finally { clearTimeout(t); }
     if (!resp.ok) {
       const detalle = await resp.text().catch(() => "");
-      console.warn("[radar/transcripcion] Whisper respondió", resp.status, detalle.slice(0, 300));
+      console.warn("[transcripcion] Whisper respondió", resp.status, detalle.slice(0, 300));
       return null;
     }
-
     const json: any = await resp.json();
     const texto = String(json?.text ?? "").trim();
     return texto || null;
   } catch (e: any) {
-    console.warn("[radar/transcripcion] Error transcribiendo:", e?.message ?? e);
+    console.warn("[transcripcion] Error transcribiendo:", e?.message ?? e);
     return null;
   }
 }
