@@ -25,6 +25,7 @@ type Agente = {
   max_turnos_auto: number;
   pausa_humano_horas?: number | null;
   escalar_si: string;
+  mensaje_derivacion?: string | null;
   firma: string;
 };
 
@@ -101,6 +102,8 @@ export default function AgenteIAPage() {
       error
         ? /pausa_humano_horas/.test(error.message)
           ? "Falta correr supabase/crm-ia-pausa-humano.sql en Supabase"
+          : /mensaje_derivacion/.test(error.message)
+          ? "Falta correr supabase/crm-ia-mensaje-derivacion.sql en Supabase"
           : `Error al guardar: ${error.message}`
         : "Configuración guardada",
       !error,
@@ -498,6 +501,20 @@ export default function AgenteIAPage() {
                   placeholder="reclamo, queja, hablar con una persona, factura, gerente"
                 />
                 <p className="text-[11px] text-gray-400 mt-1">Frases separadas por coma.</p>
+              </div>
+
+              <div>
+                <label className={label}>Mensaje al derivar a un ejecutivo</label>
+                <textarea
+                  rows={3}
+                  className={input}
+                  value={agente.mensaje_derivacion ?? ""}
+                  onChange={(e) => set("mensaje_derivacion", e.target.value)}
+                  placeholder="Gracias, {nombre}. Ya registré tu solicitud y un ejecutivo de nuestro equipo la está revisando para enviarte la información por este mismo chat a la brevedad. 🙌"
+                />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Lo usa la IA cuando no encuentra lo que piden en el sistema, no puede escuchar un audio o el tema es para una persona. Nunca dirá «no encontré sus servicios». {"{nombre}"} = primer nombre del cliente. Vacío = este texto de ejemplo. El chat queda con la etiqueta «Para ejecutivo» y una nota interna con lo que pidió.
+                </p>
               </div>
 
               <div>

@@ -67,6 +67,17 @@ export default function MensajeContenido({
     return <span className="text-xs italic opacity-70">{etiqueta[tipo] ?? contenido} (no se recibió el archivo)</span>;
   }
 
+  // Nota de voz transcrita (lib/crm-audio.ts guarda «🎤 texto»): se lee bajo el reproductor.
+  if ((tipo === "audio" || tipo === "voice") && texto.startsWith("🎤 "))
+    return (
+      <>
+        {media && <div className="mb-1.5">{media}</div>}
+        <p className="text-[13px] italic opacity-80 whitespace-pre-wrap [overflow-wrap:anywhere]">
+          <span className="not-italic text-[11px] font-semibold opacity-70">🎤 Transcripción: </span>
+          {texto.slice(3)}
+        </p>
+      </>
+    );
   const mostrarTexto = texto && !(tipo === "document" && tieneMedia);
   return (
     <>
