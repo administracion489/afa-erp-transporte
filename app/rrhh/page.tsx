@@ -35,7 +35,7 @@ export default function RrhhPage() {
 }
 
 function Rrhh() {
-  const [tab, setTab] = useState<"asistencia" | "ausencias" | "manual" | "vincular">("asistencia");
+  const [tab, setTab] = useState<"asistencia" | "ausencias" | "manual" | "vincular" | "fichaje">("asistencia");
   const [nombres, setNombres] = useState<Record<string, string>>({});
   const [cfg, setCfg] = useState<ConfigRrhh | null>(null);
   const [sinMigracion, setSinMigracion] = useState(false);
@@ -67,7 +67,7 @@ function Rrhh() {
       )}
 
       <div className="flex gap-1 border-b border-gray-200 flex-wrap">
-        {([["asistencia", "Asistencia del día"], ["ausencias", "Ausencias"], ["manual", "Marca manual"], ["vincular", "Vincular conductor"]] as const).map(([k, l]) => (
+        {([["asistencia", "Asistencia del día"], ["ausencias", "Ausencias"], ["manual", "Marca manual"], ["vincular", "Vincular conductor"], ["fichaje", "¿Quién ficha?"]] as const).map(([k, l]) => (
           <button key={k} onClick={() => setTab(k)} className={`px-4 py-2 text-sm font-bold rounded-t-lg ${tab === k ? "text-indigo-700 border-b-2 border-indigo-600" : "text-gray-500 hover:text-gray-700"}`}>
             {l}
           </button>
@@ -80,8 +80,10 @@ function Rrhh() {
         <Ausencias nombres={nombres} onSinMigracion={() => setSinMigracion(true)} />
       ) : tab === "manual" ? (
         <MarcaManual nombres={nombres} />
-      ) : (
+      ) : tab === "vincular" ? (
         <Vincular nombres={nombres} />
+      ) : (
+        <QuienFicha nombres={nombres} onSinMigracion={() => setSinMigracion(true)} />
       )}
     </main>
   );
@@ -338,6 +340,127 @@ function Vincular({ nombres }: { nombres: Record<string, string> }) {
         <button onClick={vincular} disabled={enviando} className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-bold hover:opacity-90 disabled:opacity-50">{enviando ? "Vinculando…" : "Vincular"}</button>
         {msg && <span className={`text-xs ${msg.ok ? "text-emerald-600" : "text-red-600"}`}>{msg.t}</span>}
       </div>
+    </div>
+  );
+}
+
+// ── ¿QUIÉN FICHA? — RRHH enciende/apaga, por empleado, la marcación con cámara ────────────
+function QuienFicha({ nombres, onSinMigracion }: { nombres: Record<string, string>; onSinMigracion: () => void }) {
+  const usuarios = useMemo(() => Object.entries(nombres).sort((a, b) => a[1].localeCompare(b[1], "es")), [nombres]);
+  const [marca, setMarca] = useState<Record<string, boolean>>({});
+  const [estado, setEstado] = useState<"cargando" | "ok" | "sin_migracion" | "error">("cargando");
+  const [guardando, setGuardando] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
+
+  // El estado actual de `marca_asistencia` se LEE directo con la sesión del ERP: la RLS de
+  // empleado_perfil (rrhh-01) deja ver TODO a quien tiene el permiso `rrhh` (fn_es_rrhh), el
+  // mismo que gatea esta pantalla. El endpoint configurar-empleado es SOLO para ESCRIBIR.
+  const cargar = useCallback(async () => {
+    setEstado("cargando"); setMsg(null);
+    const { data, error } = await supabase.from("empleado_perfil").select("usuario_id, marca_asistencia");
+    if (error) {
+      if (tablaFaltante(error, "empleado_perfil")) { onSinMigracion(); setEstado("sin_migracion"); return; }
+      setEstado("error"); return;
+    }
+    const m: Record<string, boolean> = {};
+    for (const r of (data ?? []) as { usuario_id: string; marca_asistencia?: boolean }[]) m[r.usuario_id] = !!r.marca_asistencia;
+    setMarca(m);
+    setEstado("ok");
+  }, [onSinMigracion]);
+
+  useEffect(() => { void cargar(); }, [cargar]);
+
+  // Pesimista a propósito: el interruptor solo refleja lo que el servidor CONFIRMÓ. Un fallo de red,
+  // un error o un `sin_migracion` NO mueven `marca[id]`, así que nunca se ve un estado que no se guardó.
+  async function alternar(id: string, nuevo: boolean) {
+    setGuardando(id); setMsg(null);
+    try {
+      const res = await fetch("/api/rrhh/configurar-empleado", {
+        method: "POST",
+        headers: await cabecerasErp(),
+        body: JSON.stringify({ usuario_id: id, marca_asistencia: nuevo }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (d?.sin_migracion) { onSinMigracion(); setEstado("sin_migracion"); return; }
+      if (!res.ok || !d?.ok) { setMsg({ ok: false, t: d?.error ?? "No se pudo guardar." }); return; }
+      // marca_asistencia es de rrhh-01; si el servidor la SOLTÓ, no se persistió → no muevas el switch.
+      if (((d.columnas_omitidas ?? []) as string[]).includes("marca_asistencia")) {
+        setMsg({ ok: false, t: `No se guardó: falta correr ${SQL}.` }); return;
+      }
+      const aplicado = (d.aplicado ?? {}) as { marca_asistencia?: unknown };
+      const guardado = typeof aplicado.marca_asistencia === "boolean" ? aplicado.marca_asistencia : nuevo;
+      setMarca((m) => ({ ...m, [id]: guardado }));
+      setMsg({ ok: true, t: `${nombres[id] ?? "El empleado"}: ${guardado ? "ahora ficha con cámara." : "ya no ficha con cámara."}` });
+    } catch {
+      setMsg({ ok: false, t: "No se guardó (fallo de red): el interruptor no cambió. Vuelve a intentar." });
+    } finally {
+      setGuardando(null);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-xl border border-indigo-100 bg-indigo-50/50 px-4 py-3 text-xs text-indigo-900/80 space-y-1">
+        <p>Quien está <b>encendido</b> marca su asistencia <b>con cámara</b> al entrar; al encenderlo, la próxima vez que marque se registra su <b>rostro de referencia</b>.</p>
+        <p className="text-indigo-900/60">Los conductores derivan su asistencia de los servicios del día: no hace falta encenderlos aquí.</p>
+      </div>
+
+      {msg && <div className={`rounded-lg border px-3 py-2 text-xs ${msg.ok ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-red-200 bg-red-50 text-red-700"}`}>{msg.t}</div>}
+
+      {estado === "cargando" ? (
+        <p className="text-sm text-gray-500">Cargando la configuración de fichaje…</p>
+      ) : estado === "sin_migracion" ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+          El módulo de personal aún no está activo: falta correr <code className="font-mono">{SQL}</code> en Supabase.
+        </div>
+      ) : estado === "error" ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700 flex items-center gap-3">
+          <span>No se pudo leer la configuración de fichaje.</span>
+          <button onClick={() => void cargar()} className="px-3 py-1 rounded-lg border border-red-300 text-red-700 font-bold hover:bg-red-100">Reintentar</button>
+        </div>
+      ) : usuarios.length === 0 ? (
+        <p className="text-sm text-gray-500">No hay usuarios del ERP para configurar.</p>
+      ) : (
+        <div className="rounded-2xl border border-gray-200 bg-white overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-[11px] uppercase tracking-wide text-gray-400 border-b">
+                <th className="text-left px-4 py-2">Empleado</th>
+                <th className="text-right px-4 py-2">¿Ficha con cámara?</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {usuarios.map(([id, n]) => {
+                const on = !!marca[id];
+                const ocupado = guardando === id;
+                return (
+                  <tr key={id}>
+                    <td className="px-4 py-2 font-semibold text-gray-800">{n}</td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center justify-end gap-2">
+                        <span className={`text-xs ${ocupado ? "text-gray-400" : on ? "text-indigo-700 font-semibold" : "text-gray-400"}`}>
+                          {ocupado ? "Guardando…" : on ? "Ficha" : "No ficha"}
+                        </span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={on}
+                          aria-label={`${n}: ${on ? "ficha" : "no ficha"} con cámara`}
+                          disabled={ocupado}
+                          onClick={() => void alternar(id, !on)}
+                          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-indigo-600" : "bg-gray-300"}`}
+                        >
+                          <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-[22px]" : "translate-x-0.5"}`} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

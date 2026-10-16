@@ -19,6 +19,7 @@ import MarcarAsistencia from "@/components/rrhh/MarcarAsistencia";
 import { cargarConfigRrhh } from "@/lib/rrhh/marcacion-datos";
 import { jornadasDelRango, type JornadaDeDia } from "@/lib/rrhh/jornada-datos";
 import { fechaLima } from "@/lib/alertas-horario";
+import { RESUMEN_CONSENTIMIENTO, type TipoConsentimiento } from "@/lib/rrhh/consentimiento";
 import type { ConfigRrhh } from "@/lib/rrhh/tipos";
 
 const SQL = "supabase/rrhh-01-perfil-asistencia.sql";
@@ -72,7 +73,7 @@ type PerfilResp = {
   saldo_vacaciones:
     | { saldo: { anios_completos: number; dias_ganados: number; dias_gozados: number; saldo: number }; fecha_ingreso?: string }
     | { saldo: null; motivo: string };
-  consentimientos: Record<"biometrico" | "monitoreo", { otorgado: boolean; en: string | null; version: string | null; vigente_version: string }>;
+  consentimientos: Record<TipoConsentimiento, { otorgado: boolean; en: string | null; version: string | null; vigente_version: string }>;
 };
 
 export default function MiPerfilPage() {
@@ -84,7 +85,15 @@ export default function MiPerfilPage() {
 }
 
 function MiPerfil() {
-  const [tab, setTab] = useState<"perfil" | "marcar" | "asistencias">("perfil");
+  // Pestaña inicial desde ?tab= (el layout redirige a /mi-perfil?tab=marcar tras el login de un
+  // fichador). Se lee en el inicializador de useState, no en un efecto: evita un setState de montaje
+  // (y el Suspense que useSearchParams exige en esta versión de Next). MiPerfil solo monta en el
+  // cliente —usePermiso devuelve `validando` durante el SSR—, así que `window` siempre existe aquí.
+  const [tab, setTab] = useState<"perfil" | "marcar" | "asistencias">(() => {
+    if (typeof window === "undefined") return "perfil";
+    const t = new URLSearchParams(window.location.search).get("tab");
+    return t === "marcar" || t === "asistencias" ? t : "perfil";
+  });
   const [data, setData] = useState<PerfilResp | null>(null);
   const [cargando, setCargando] = useState(true);
   const [correo, setCorreo] = useState<string | null>(null);
@@ -105,10 +114,13 @@ function MiPerfil() {
   useEffect(() => { void cargar(); }, [cargar]);
 
   const biometrico = data?.consentimientos?.biometrico?.otorgado ?? false;
+  const facial = data?.consentimientos?.facial?.otorgado ?? false;
 
-  async function otorgarBiometrico() {
+  // Otorga UN consentimiento (biométrico o facial) por su tipo y recarga. El endpoint es genérico:
+  // POST { [tipo]: true } otorga; { [tipo]: false } revoca (lo usa el panel de Consentimientos).
+  async function otorgar(tipo: "biometrico" | "facial") {
     const res = await fetch("/api/rrhh/consentimiento", {
-      method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ biometrico: true }),
+      method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ [tipo]: true }),
     });
     if (res.ok) await cargar();
   }
@@ -163,7 +175,7 @@ function MiPerfil() {
         <div className="rounded-2xl border border-gray-200 bg-white p-5">
           <SeccionTitulo>Marcar asistencia</SeccionTitulo>
           <div className="mt-4">
-            <MarcarAsistencia biometrico={biometrico} onPedirConsentimiento={otorgarBiometrico} onMarcada={() => { /* refresca al entrar a Mis asistencias */ }} />
+            <MarcarAsistencia biometrico={biometrico} facial={facial} onPedirConsentimiento={(tipo) => otorgar(tipo)} onMarcada={() => { /* refresca al entrar a Mis asistencias */ }} />
           </div>
         </div>
       ) : (
@@ -330,7 +342,7 @@ function Consentimientos({ data, onCambio }: { data: PerfilResp | null; onCambio
   const [trabajando, setTrabajando] = useState<string | null>(null);
   const cons = data?.consentimientos;
 
-  async function cambiar(tipo: "biometrico" | "monitoreo", otorgar: boolean) {
+  async function cambiar(tipo: TipoConsentimiento, otorgar: boolean) {
     setTrabajando(tipo);
     try {
       const res = await fetch("/api/rrhh/consentimiento", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ [tipo]: otorgar }) });
@@ -340,7 +352,7 @@ function Consentimientos({ data, onCambio }: { data: PerfilResp | null; onCambio
     }
   }
 
-  const fila = (tipo: "biometrico" | "monitoreo", titulo: string, texto: string) => {
+  const fila = (tipo: TipoConsentimiento, titulo: string, texto: string) => {
     const c = cons?.[tipo];
     const otorgado = !!c?.otorgado;
     return (
@@ -373,6 +385,7 @@ function Consentimientos({ data, onCambio }: { data: PerfilResp | null; onCambio
       <div className="divide-y divide-gray-100 mt-3">
         {fila("biometrico", "Foto del rostro al marcar asistencia",
           "Autorizo que al marcar se detecte un rostro y se guarde mi foto (dato sensible) como evidencia para que RRHH verifique la marca. Sin reconocimiento facial automático. Revocable.")}
+        {fila("facial", "Verificación facial al marcar asistencia", RESUMEN_CONSENTIMIENTO.facial)}
         {fila("monitoreo", "Registro de ubicación y asistencia en jornada",
           "Autorizo el registro de mi ubicación y asistencia durante mi jornada con fines laborales. Revocable.")}
       </div>

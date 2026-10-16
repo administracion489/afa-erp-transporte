@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Re
 import { Manrope, JetBrains_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { EVENTO_ENTRADA_MARCADA } from "@/lib/rrhh/fichador";
 import { ImgPrivada } from "@/components/ArchivoPrivado";
 import EliaPanel from "./_components/elia";
 import AyudaModulo from "./_components/AyudaModulo";
@@ -828,6 +829,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [fotoPerfil, setFotoPerfil]       = useState<string | null>(null);
   const fotoPedidaRef                     = useRef(false);
 
+  // Fichaje: un usuario que DEBE marcar asistencia y aún no marcó su ENTRADA de hoy aterriza
+  // directo en la pantalla de marcar. Se resuelve UNA sola vez por montaje del layout
+  // (`fichajeResueltoRef`, mismo patrón que `fotoPedidaRef`), NUNCA en cada navegación: un
+  // re-redirect por navegación sería un lock duro del ERP entero y encerraría a un fichador cuya
+  // cámara/consentimiento/rostro fallara. FAIL-OPEN: ante cualquier fallo, NO pendiente, NO bloquea.
+  const [fichajePendiente, setFichajePendiente] = useState(false);
+  const fichajeResueltoRef                      = useRef(false);
+
   // En celular el menú no usa `collapsed` (que es el de escritorio, y ahí todo sigue
   // igual): va colapsado salvo que la persona lo abra a mano, y CADA navegación lo vuelve
   // a colapsar (también volver a una ruta donde ya se había abierto). El reinicio se hace
@@ -938,6 +947,41 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         router.replace("/dashboard");
         return;
       }
+
+      // ── Fichaje: ¿este usuario debe marcar y aún no marcó su ENTRADA de hoy? ───────────────
+      // REDIRECT DE PRIMERA CARGA, no un lock: se resuelve UNA sola vez por montaje
+      // (`fichajeResueltoRef`), así que la navegación posterior NO vuelve a redirigir. Si la
+      // persona navega a otro lado sin marcar, se lo permitimos (fail-open: el gate del ERP no
+      // puede atrapar a nadie). `GET /api/rrhh/estado-fichaje` ya es fail-open; aquí reforzamos:
+      // todo en try/catch, y solo es "pendiente" cuando `es_fichador === true` Y
+      // `marco_entrada_hoy === false`. Cualquier otra cosa (error, red caída, campos que no sean
+      // exactamente esos) → NO pendiente, y el ERP se usa con normalidad. Un fallo de este
+      // endpoint JAMÁS debe impedir trabajar. Para quien no ficha (es_fichador:false) nada cambia.
+      if (!fichajeResueltoRef.current) {
+        fichajeResueltoRef.current = true;
+        // Timeout de cliente: el fichaje NUNCA puede retener el primer render del ERP. Un endpoint
+        // LENTO (no caído) es tan dañino como uno caído en este camino crítico, así que a los 4 s se
+        // aborta y se trata como fail-open (no pendiente). Así el login no espera a RRHH jamás.
+        const ac = new AbortController();
+        const t = setTimeout(() => ac.abort(), 4000);
+        try {
+          const res = await fetch("/api/rrhh/estado-fichaje", { headers: await cabecerasErp(), signal: ac.signal });
+          const d = await res.json().catch(() => null);
+          const pend = d?.es_fichador === true && d?.marco_entrada_hoy === false;
+          setFichajePendiente(pend);
+          if (pend && pathname !== "/mi-perfil") {
+            // Aterriza en marcar. La navegación re-ejecuta el efecto, pero `fichajeResueltoRef`
+            // ya está en true: no vuelve a redirigir, y el `setCargando(false)` corre ahí.
+            router.replace("/mi-perfil?tab=marcar");
+            return;
+          }
+        } catch {
+          /* FAIL-OPEN: un fallo, un timeout (abort 4 s) o red caída no vuelve "pendiente" a nadie ni bloquea el ERP */
+        } finally {
+          clearTimeout(t);
+        }
+      }
+
       setCargando(false);
     }
     cargarSesionPermisos();
@@ -961,6 +1005,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     })();
     return () => { vivo = false; };
   }, [esLogin, esPublica, cargando]);
+
+  // Al marcar ENTRADA, la pantalla de fichaje dispara este evento `window` (el mismo que
+  // desbloquea el gate de la cámara, lib/rrhh/fichador.ts): desmarca el pendiente sin recargar,
+  // así el recordatorio desaparece en cuanto la persona ficha. Se registra una vez por montaje.
+  useEffect(() => {
+    const alMarcarEntrada = () => setFichajePendiente(false);
+    window.addEventListener(EVENTO_ENTRADA_MARCADA, alMarcarEntrada);
+    return () => window.removeEventListener(EVENTO_ENTRADA_MARCADA, alMarcarEntrada);
+  }, []);
 
   async function cerrarSesion() {
     try { await supabase.auth.signOut(); }
@@ -1124,6 +1177,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             {/* Aviso global de mensajes de pasajeros — toast/sonido/notificación, en cualquier página */}
             {permisos.includes("seguimiento") && (
               <NotificadorMensajesPasajeros noLeidos={mensajesNoLeidos} ultimo={ultimoMensaje} />
+            )}
+
+            {/* Recordatorio de fichaje. El gate NO atrapa a nadie (fail-open): si un fichador
+                navegó sin marcar su ENTRADA, se lo recordamos sin bloquear. Es un overlay APARTE
+                del gate (como AyudaModulo): no toca auth, permisos ni navegación, y al marcar
+                desaparece por el evento EVENTO_ENTRADA_MARCADA. Bottom-center para no chocar con
+                el menú (izquierda) ni con ELIA/Ayuda (abajo a la derecha); z-30 queda bajo los
+                modales (z-40+), así que un modal lo tapa. */}
+            {fichajePendiente && pathname !== "/mi-perfil" && (
+              <Link
+                href="/mi-perfil?tab=marcar"
+                className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 rounded-xl bg-amber-500 px-3.5 py-2.5 text-[12px] font-bold text-white shadow-xl shadow-amber-900/30 hover:bg-amber-600 transition-colors"
+              >
+                <Ic.UserCheck size={15} strokeWidth={2.4} />
+                Marca tu entrada de hoy
+              </Link>
             )}
           </div>
         )}

@@ -1,10 +1,16 @@
 // ──────────────────────────────────────────────────────────────────────────────
-// lib/rrhh/consentimiento.ts — el consentimiento biométrico y de monitoreo, declarado.
+// lib/rrhh/consentimiento.ts — los consentimientos biométrico, de monitoreo y facial, declarados.
 //
 // La marcación FACIAL procesa un dato biométrico (el rostro): en Perú la Ley 29733 de
 // Protección de Datos Personales exige consentimiento PREVIO, LIBRE, INFORMADO y REVOCABLE
 // para tratar datos sensibles. Por eso /api/rrhh/marcar lo exige vigente, y sin él ofrece un
 // método alterno (PIN con RRHH) en vez de bloquear a la persona.
+//
+// DOS CONSENTIMIENTOS DISTINTOS SOBRE EL ROSTRO, Y NO SE PUEDEN FUNDIR. El `biometrico` autoriza
+// guardar una FOTO como evidencia y PROMETE que no se hace reconocimiento facial automático. El
+// `facial` autoriza algo que ese texto niega: calcular una PLANTILLA facial (un vector numérico)
+// para VERIFICAR la identidad 1:1 al marcar. Reutilizar `biometrico` para eso contradiría el
+// consentimiento ya otorgado, así que la verificación facial lleva su propio tipo, texto y versión.
 //
 // La VERSIÓN es un identificador del texto vigente: se guarda en `consentimiento_*_version`
 // para poder probar QUÉ aceptó la persona y cuándo. Si el texto legal cambia, se sube la
@@ -12,18 +18,19 @@
 // hecho histórico. El texto lo muestra la pantalla; aquí vive el identificador y el resumen.
 // ──────────────────────────────────────────────────────────────────────────────
 
-export type TipoConsentimiento = "biometrico" | "monitoreo";
+export type TipoConsentimiento = "biometrico" | "monitoreo" | "facial";
 
-export const TIPOS_CONSENTIMIENTO: readonly TipoConsentimiento[] = ["biometrico", "monitoreo"] as const;
+export const TIPOS_CONSENTIMIENTO: readonly TipoConsentimiento[] = ["biometrico", "monitoreo", "facial"] as const;
 
 export function esTipoConsentimiento(t: unknown): t is TipoConsentimiento {
-  return t === "biometrico" || t === "monitoreo";
+  return t === "biometrico" || t === "monitoreo" || t === "facial";
 }
 
 /** Versión vigente del texto de cada consentimiento. Subirla = nuevo texto; no se reescribe. */
 export const VERSION_CONSENTIMIENTO: Record<TipoConsentimiento, string> = {
   biometrico: "2026-10-biometrico-v1",
   monitoreo: "2026-10-monitoreo-v1",
+  facial: "2026-10-facial-v1",
 };
 
 /** Resumen informativo (la pantalla muestra el texto completo). */
@@ -36,6 +43,13 @@ export const RESUMEN_CONSENTIMIENTO: Record<TipoConsentimiento, string> = {
   monitoreo:
     "Autorizo el registro de mi ubicación y asistencia durante mi jornada con fines laborales. " +
     "Puedo revocar este consentimiento cuando quiera.",
+  facial:
+    "Autorizo que, al marcar asistencia, se calcule una PLANTILLA FACIAL (una HUELLA FACIAL: un " +
+    "vector numérico derivado de mi rostro) y se guarde CIFRADA, para usarla SOLO para VERIFICAR " +
+    "MI IDENTIDAD al registrar mi asistencia (confirmar que soy yo quien marca). La plantilla " +
+    "facial es un dato biométrico sensible (Ley N.º 29733). Verifica identidad, no es una prueba " +
+    "de vida: no detecta si el rostro es de una persona presente o una foto. Puedo revocar este " +
+    "consentimiento cuando quiera.",
 };
 
 /** Las columnas de `empleado_perfil` que guardan cada consentimiento. */

@@ -96,6 +96,25 @@ export async function autorizacionesDeUsuario(
   return listarAutorizaciones(sb, { usuarioId });
 }
 
+/**
+ * LECTOR para el gate del fichador (lib/rrhh/fichador.ts): las autorizaciones de campo de UN
+ * usuario con la forma EXACTA que `ventanaCampoVigente` (lib/rrhh/campo.ts) consume para decidir
+ * si hay una ventana vigente AHORA — ese veredicto es el `campo_vigente` que `debeFichar` pide.
+ *
+ * REUSA `autorizacionesDeUsuario` en vez de re-leer `rrhh_autorizacion_campo`: una segunda
+ * consulta a la misma tabla es cómo dos lectores terminan leyendo distinto. `FilaAutorizacionCampo`
+ * es un superconjunto de `AutorizacionCampo`, así que el arreglo pasa tal cual al motor. Se
+ * propaga `sinMigracion` para que el LLAMADOR —no este lector ni el motor— decida cómo degradar:
+ * sin la tabla no hay autorización de campo que valga, pero esa es una decisión del gate.
+ */
+export async function autorizacionesCampoDe(
+  sb: SB,
+  usuarioId: string,
+): Promise<{ autorizaciones: AutorizacionCampo[]; sinMigracion: boolean }> {
+  const { autorizaciones, sinMigracion } = await autorizacionesDeUsuario(sb, usuarioId);
+  return { autorizaciones, sinMigracion };
+}
+
 /** Una autorización por id (para el guard de aprobar/rechazar: existe + estado). */
 export async function autorizacionPorId(
   sb: SB,
