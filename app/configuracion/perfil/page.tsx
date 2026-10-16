@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/lib/supabase";
-import { empresaConDefectos, type CuentaBancaria } from "@/lib/empresa-perfil";
+import { empresaConDefectos, monedaDeCuenta, type CuentaBancaria } from "@/lib/empresa-perfil";
 
 type EmpresaPerfil = {
   id: number;
@@ -485,7 +485,12 @@ export default function PerfilEmpresaPage() {
         slogan: perfil.slogan || null,
         autorizacion_mtc: perfil.autorizacion_mtc || null,
         // Se manda SIEMPRE, incluso vacío: borrar la última cuenta tiene que poder borrarla.
-        cuentas_bancarias: (perfil.cuentas_bancarias || []).filter(c => (c.banco || "").trim()),
+        // La moneda solo se escribe si se declaró: una cuenta «sin declarar» conserva su forma de siempre.
+        cuentas_bancarias: (perfil.cuentas_bancarias || []).filter(c => (c.banco || "").trim()).map(c => {
+          const base: CuentaBancaria = { banco: c.banco, cuenta: c.cuenta, cci: c.cci };
+          const m = monedaDeCuenta(c.moneda);
+          return m ? { ...base, moneda: m } : base;
+        }),
         color_primario: perfil.color_primario || "#0b315f",
         regimen_tributario: perfil.regimen_tributario || "General",
         moneda: perfil.moneda || "PEN",
@@ -777,13 +782,27 @@ export default function PerfilEmpresaPage() {
               Se imprimen en la cotización, bajo «Nuestras cuentas bancarias». <b>Sin cuentas, ese
               bloque no se imprime</b> — nunca sale un ejemplo, que sería plata mandada a donde no es.
             </p>
+            <p style={{ fontSize: 12, color: "#6b7280", marginTop: -8, marginBottom: 16, lineHeight: 1.5 }}>
+              <b>Moneda</b>: una cotización en soles imprime las cuentas en soles y las «sin declarar»;
+              una en dólares, las de dólares y las «sin declarar». Una cuenta declarada en la otra moneda
+              nunca se imprime. Si una cuenta es solo de soles o solo de dólares, decláralo.
+            </p>
 
             {(perfil.cuentas_bancarias || []).map((c, i) => (
-              <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 8, marginBottom: 10, alignItems: "end" }}>
+              <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 150px 1fr 1fr auto", gap: 8, marginBottom: 10, alignItems: "end" }}>
                 <div>
-                  <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", display: "block", marginBottom: 4 }}>Banco y moneda</label>
+                  <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", display: "block", marginBottom: 4 }}>Banco</label>
                   <input style={inputStyle} placeholder="BCP — Soles" value={c.banco || ""}
                     onChange={e => setCuenta(i, { banco: e.target.value })} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", display: "block", marginBottom: 4 }}>Moneda</label>
+                  <select style={inputStyle} value={monedaDeCuenta(c.moneda) ?? ""}
+                    onChange={e => setCuenta(i, { moneda: e.target.value === "PEN" || e.target.value === "USD" ? e.target.value : null })}>
+                    <option value="">Sin declarar (sale en las dos)</option>
+                    <option value="PEN">Soles (S/)</option>
+                    <option value="USD">Dólares (US$)</option>
+                  </select>
                 </div>
                 <div>
                   <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", display: "block", marginBottom: 4 }}>N° de cuenta</label>

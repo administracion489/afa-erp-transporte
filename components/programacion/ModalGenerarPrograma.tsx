@@ -10,6 +10,8 @@ import { AUTOSELECCION_AL_NACER, herenciaAutoseleccion, camposDeHerencia, avisoH
 import { leerAnterioresDelContrato } from "@/lib/reservas-autoseleccion-datos";
 import { tieneParaderosDeRetorno, AVISO_GENERADOR_SIN_RETORNO } from "@/lib/paradas-materializar";
 import { sentidoDeReserva } from "@/lib/liquidacion-agrupacion";
+import { faltaAlguna } from "@/lib/columna-faltante";
+import { normalizarMoneda, revisarTipoCambio } from "@/lib/cotizacion-moneda";
 
 type ItemCot = {
   descripcion: string;
@@ -44,7 +46,28 @@ type CotizacionFija = {
   hora_retorno: string | null;
   paradas_retorno_json: any[] | null;
   items_json: ItemCot[] | null;
+  // De cotizaciones-04-moneda-idioma.sql (ausentes sin la migración). Solo INFORMAN: los importes
+  // de la cotización están siempre en soles y es lo que se escribe en las reservas.
+  moneda?: string | null;
+  tipo_cambio?: number | null;
 };
+
+const COLS_COT_FIJA = "id, cliente_id, asunto, tipo_servicio, precio_dia, precio_cliente, paradas_json, hora_ida, hora_retorno, paradas_retorno_json, items_json";
+const COLS_COT_MONEDA = ["moneda", "tipo_cambio"] as const;
+
+/** Las cotizaciones fijas, soltando SOLO la columna de moneda que el error nombra. */
+async function leerCotizacionesFijas(): Promise<{ data: CotizacionFija[] | null }> {
+  let opcionales: ("moneda" | "tipo_cambio")[] = [...COLS_COT_MONEDA];
+  for (let i = 0; i <= COLS_COT_MONEDA.length; i++) {
+    const cols = [COLS_COT_FIJA, ...opcionales].join(", ");
+    const r = await supabase.from("cotizaciones").select(cols).eq("modo_servicio", "fijo").order("id", { ascending: false });
+    if (!r.error) return { data: (r.data || []) as CotizacionFija[] };
+    const falta = faltaAlguna(r.error, opcionales);
+    if (!falta) return { data: null };
+    opcionales = opcionales.filter(c => c !== falta);
+  }
+  return { data: null };
+}
 
 type VehiculoTercero = {
   id: number;
@@ -270,11 +293,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
 
   useEffect(() => {
     Promise.all([
-      supabase
-        .from("cotizaciones")
-        .select("id, cliente_id, asunto, tipo_servicio, precio_dia, precio_cliente, paradas_json, hora_ida, hora_retorno, paradas_retorno_json, items_json")
-        .eq("modo_servicio", "fijo")
-        .order("id", { ascending: false }),
+      leerCotizacionesFijas(),
       supabase.from("vehiculos_tercero").select("id, empresa_id, placa, categoria"),
       supabase.from("empresas_tercerizadas").select("id, razon_social"),
     ]).then(([cotRes, vehRes, empRes]) => {
@@ -882,6 +901,17 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
                       : <span className="font-semibold" style={{ color: "#92400e" }}>sin paraderos de retorno en la cotización</span>}
                   </p>
                 )}
+
+                {/* Moneda pactada: solo informa. La cotización guarda soles y eso se escribe. */}
+                {normalizarMoneda(cot.moneda) === "USD" && (() => {
+                  const tc = revisarTipoCambio(cot.tipo_cambio).tc;
+                  return (
+                    <p className="rounded-lg px-2 py-1" style={{ background: "#dbeafe", color: "#1e3a8a" }}>
+                      💱 La tarifa se pactó en US$; se escriben soles{tc != null ? ` al TC ${tc}` : ""} (el equivalente que guarda la cotización). Los precios de abajo están en S/.
+                      {tc == null && " La cotización no tiene un tipo de cambio válido guardado."}
+                    </p>
+                  );
+                })()}
 
                 {/* Lista de slots/vehículos (solo en el programa fijo: el adicional elige uno) */}
                 {!esAdicional && esMultiVehiculo && (
