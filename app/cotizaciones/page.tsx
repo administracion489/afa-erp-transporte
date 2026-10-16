@@ -222,7 +222,7 @@ function ModalEliminar({cot,onConfirmar,onCancelar}:{cot:CotFila;onConfirmar:(pa
   return(<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"><div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm"><div className="text-center mb-5"><div className="text-4xl mb-2">🗑️</div><h3 className="text-lg font-black text-gray-800">Eliminar cotización</h3><p className="text-sm text-gray-500 mt-1 font-mono font-bold">#{cot.numero_cotizacion||String(cot.id).padStart(5,"0")}</p><p className="text-xs text-red-600 font-bold mt-2">Esta acción no se puede deshacer</p></div><div className="mb-4"><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Contraseña de administrador</label><input type="password" value={pass} onChange={e=>{setPass(e.target.value);setErr("");}} onKeyDown={e=>e.key==="Enter"&&intentar()} className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500 transition-all" placeholder="••••••••" autoFocus/>{err&&<p className="text-xs text-red-600 mt-1.5 font-medium">⚠️ {err}</p>}</div><div className="flex gap-2"><button onClick={onCancelar} className="flex-1 py-2.5 rounded-xl text-sm font-bold border hover:bg-gray-50 text-gray-700">Cancelar</button><button onClick={intentar} disabled={cargando} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50" style={{background:"#dc2626"}}>{cargando?"Verificando...":"🗑️ Eliminar"}</button></div></div></div>);
 }
 
-function ModalEnvio({onConfirmar,onCancelar}:{onConfirmar:(medio:string)=>void;onCancelar:()=>void}){
+function ModalEnvio({onConfirmar,onCancelar,ocupado=false}:{onConfirmar:(medio:string)=>void;onCancelar:()=>void;ocupado?:boolean}){
   const[medio,setMedio]=useState("");const[detalle,setDetalle]=useState("");const[err,setErr]=useState("");
   const confirmar=()=>{
     if(!medio){setErr("Selecciona un medio de envío");return;}
@@ -248,18 +248,21 @@ function ModalEnvio({onConfirmar,onCancelar}:{onConfirmar:(medio:string)=>void;o
         )}
         {err&&<p className="text-xs text-red-600 font-bold">⚠ {err}</p>}
         <div className="flex gap-3">
-          <button onClick={confirmar} className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white" style={{background:"#0b315f"}}>✅ Confirmar envío</button>
-          <button onClick={onCancelar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={confirmar} disabled={ocupado} className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60" style={{background:"#0b315f"}}>{ocupado?"⏳ Guardando…":"✅ Confirmar envío"}</button>
+          <button onClick={onCancelar} disabled={ocupado} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50 disabled:opacity-50">Cancelar</button>
         </div>
       </div>
     </div>
   );
 }
 
-function ModalAprobacion({cot,onConfirmar,onCancelar}:{cot:CotFila;onConfirmar:(tipo:string,numero:string)=>void;onCancelar:()=>void}){
+function ModalAprobacion({cot,onConfirmar,onCancelar,ocupado=false}:{cot:CotFila;onConfirmar:(tipo:string,numero:string)=>void;onCancelar:()=>void;ocupado?:boolean}){
   const [tipo,setTipo]=useState("Operación bancaria");const [num,setNum]=useState("");const [err,setErr]=useState("");
-  return(<div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{background:"rgba(0,0,0,0.5)"}}><div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4"><h3 className="text-base font-bold">✅ Aprobar cotización #{cot.numero_cotizacion||cot.id}</h3><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">Tipo de documento *</label><select className={iCls()} value={tipo} onChange={e=>setTipo(e.target.value)}>{TIPOS_APROBACION.map(t=><option key={t}>{t}</option>)}</select></div><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">N° referencia *</label><input className={iCls("font-mono")} placeholder="Número o código" value={num} onChange={e=>{setNum(e.target.value);setErr("");}} autoFocus/>{err&&<p className="text-xs text-red-600 mt-1">⚠ {err}</p>}</div><div className="flex gap-3"><button onClick={()=>num.trim()?onConfirmar(tipo,num.trim()):setErr("Obligatorio")} className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-green-700">✅ Confirmar</button><button onClick={onCancelar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600">Cancelar</button></div></div></div>);
+  return(<div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{background:"rgba(0,0,0,0.5)"}}><div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4"><h3 className="text-base font-bold">✅ Aprobar cotización #{cot.numero_cotizacion||cot.id}</h3><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">Tipo de documento *</label><select className={iCls()} value={tipo} onChange={e=>setTipo(e.target.value)}>{TIPOS_APROBACION.map(t=><option key={t}>{t}</option>)}</select></div><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">N° referencia *</label><input className={iCls("font-mono")} placeholder="Número o código" value={num} onChange={e=>{setNum(e.target.value);setErr("");}} autoFocus/>{err&&<p className="text-xs text-red-600 mt-1">⚠ {err}</p>}</div><div className="flex gap-3"><button onClick={()=>num.trim()?onConfirmar(tipo,num.trim()):setErr("Obligatorio")} disabled={ocupado} className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-green-700 disabled:opacity-60">{ocupado?"⏳ Guardando…":"✅ Confirmar"}</button><button onClick={onCancelar} disabled={ocupado} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 disabled:opacity-50">Cancelar</button></div></div></div>);
 }
+
+/** Acciones de la fila que ESCRIBEN en la base: su bandera dura hasta que terminan (ver conDetalle). */
+const ACCIONES_QUE_ESCRIBEN=new Set(["duplicar","reserva"]);
 
 const PLANTILLAS_INFO=[
   {id:"corporativo",   icon:"🏢",nombre:"Clásico Corporativo",desc:"Formal y sobria",badge:"PRINCIPAL",color:"#0b315f",bg:"#eef3f8"},
@@ -1250,6 +1253,13 @@ export default function CotizacionesPage(){
   const [historialSel,setHistorialSel]=useState<FilaHistorialSelector[]>([]);
   const [paginado,setPaginado]=useState<{clave:string;n:number}>({clave:"",n:PASO_LISTA});
   const [detalleCargando,setDetalleCargando]=useState<{id:number;accion:string}|null>(null);
+  // Frena el segundo clic aunque React todavía no haya pintado los botones deshabilitados.
+  const accionEnCursoRef=useRef(false);
+  // Cambiar el estado / marcar enviada / aprobar: una escritura a la vez (id de la cotización).
+  const [estadoEnCurso,setEstadoEnCurso]=useState<number|null>(null);const estadoEnCursoRef=useRef(false);
+  // Las condiciones que `limpiar()` puso en un formulario nuevo. Mientras `consid` sea ESE objeto,
+  // nadie las tocó y la plantilla puede reemplazarlas (ver cargarResto).
+  const considSinTocarRef=useRef<ConsidCot>(DEFAULT_CONSID);
   const reqListaRef=useRef(0);
   const cacheDetalle=useRef(new Map<number,Cotizacion>());
   const [cfgDefault,setCfgDefault]=useState<CotPlantillaConfig|null>(null);
@@ -1543,7 +1553,7 @@ export default function CotizacionesPage(){
     });
   },[]);
 
-  // Periodo vigente de la lista. Se guarda en un ref para que un `cargar()` llamado desde una
+  // Periodo vigente de la lista. Se guarda en un ref para que un `cargarLista()` llamado desde una
   // clausura vieja (un modal abierto antes de cambiar el filtro) relea el periodo de AHORA.
   const hoyLista=hoyLimaISO();
   const rangoLista=useMemo(()=>rangoDePeriodo(periodo,hoyLista,rangoManual),[periodo,hoyLista,rangoManual]);
@@ -1582,17 +1592,31 @@ export default function CotizacionesPage(){
     const emps:any[]=empR.data||[];
     setFlotaTercero((vtR.data||[]).map((v:any)=>({...v,empresa_nombre:emps.find((e:any)=>e.id===v.empresa_id)?.razon_social||"Empresa tercerizada"})));
     const cfg=plR.data as CotPlantillaConfig|null;setCfgDefault(cfg);
-    // Actualizar consid con valores de DB si no hay borrador activo y el formulario no está abierto
-    setConsid(p=>({
+    // Las condiciones de la plantilla solo reemplazan a las de fábrica SIN TOCAR: las de un
+    // formulario nuevo que nadie editó todavía. Las de una cotización abierta para editar, las de
+    // un borrador recuperado o las que el operador ya escribió no se pisan. Antes se pisaban
+    // siempre, y una recarga que terminaba después de abrir otra cotización le cambiaba sus
+    // condiciones por las de la plantilla.
+    setConsid(p=>p!==considSinTocarRef.current?p:{
       incluye:cfg?.condiciones_incluye?.length?cfg.condiciones_incluye:p.incluye,
       no_incluye:cfg?.condiciones_no_incluye?.length?cfg.condiciones_no_incluye:p.no_incluye,
       generales:cfg?.condiciones_generales?.length?cfg.condiciones_generales:p.generales,
-    }));
+    });
     setLoading(false);
   };
-  /** Refresca TODO (tras guardar, cambiar estado, duplicar…). */
-  const cargar=async()=>{await Promise.all([cargarResto(),cargarLista()]);};
   useEffect(()=>{cargarResto();},[]);
+  /**
+   * Tras guardar, duplicar, convertir, eliminar o cambiar el estado: solo lo que esas acciones
+   * cambian. La lista; el historial de los selectores («Recientes»), y el tarifario, que guardar y
+   * aprobar escriben. Clientes, flota, parámetros y plantilla no cambian por ellas y se leen al
+   * montar: releerlos dejaba los selectores de unidad en «cargando».
+   */
+  const refrescar=async()=>{
+    leerHistorialSelector(supabase,hoyLimaISO()).then(setHistorialSel).catch(()=>{});
+    supabase.from("tarifario").select("*").eq("activo",true)
+      .then(({data,error}:{data:Tarifa[]|null;error:unknown})=>{if(!error&&data)setTarifas(data);},()=>{});
+    await cargarLista();
+  };
   // Elegir cliente = lo que hacía el onChange del <select>: guarda el id como texto y propone el IGV por tipo.
   const aplicarCliente=(cl:ClienteBuscable|null)=>setForm(p=>({...p,cliente_id:cl?String(cl.id):"",incluye_igv:cl?.tipo==="b2b"?true:false}));
   // Solo los del cliente que está puesto ahora: los de un cliente anterior no se enseñan ni un instante.
@@ -1619,22 +1643,36 @@ export default function CotizacionesPage(){
    * Pide la cotización COMPLETA antes de una acción que la necesita (editar, duplicar, PDF, ficha,
    * convertir). Si no se puede leer, NO se abre nada con campos vacíos: guardar ese formulario
    * borraría ítems y paraderos.
+   *
+   * Duplicar y convertir ESCRIBEN: su bandera dura hasta que la acción termina, no solo la lectura.
+   * Antes se soltaba al leer, así que con la red lenta quedaban sin bloqueo y un segundo clic
+   * insertaba otra copia u otras reservas. Editar, PDF y ficha solo abren algo: la bandera se
+   * suelta al tener el detalle, como siempre (la ficha lleva la suya, y una consulta lenta a Google
+   * no tiene por qué bloquear el resto de la lista).
    */
   const conDetalle=async(c:CotFila,accion:string,hacer:(d:Cotizacion)=>unknown)=>{
-    if(detalleCargando)return;
+    if(accionEnCursoRef.current)return;
+    accionEnCursoRef.current=true;setDetalleCargando({id:c.id,accion});
+    const soltar=()=>{accionEnCursoRef.current=false;setDetalleCargando(null);};
+    const n=c.numero_cotizacion||String(c.id).padStart(5,"0");
     let d=cacheDetalle.current.get(c.id);
     if(!d){
-      setDetalleCargando({id:c.id,accion});
       try{
         const leida=await leerCotizacion<Cotizacion>(supabase,c.id);
-        if(!leida){alert(`La cotización #${c.numero_cotizacion||String(c.id).padStart(5,"0")} ya no existe (pudo eliminarse). Se recarga la lista.`);cargarLista();return;}
+        if(!leida){soltar();alert(`La cotización #${n} ya no existe (pudo eliminarse). Se recarga la lista.`);cargarLista();return;}
         d=leida;cacheDetalle.current.set(c.id,d);
       }catch(e){
-        alert(`No se pudo abrir la cotización #${c.numero_cotizacion||String(c.id).padStart(5,"0")}: ${(e as {message?:string})?.message||String(e)}\nNo se abrió nada para no trabajar con datos incompletos. Inténtalo de nuevo.`);
+        soltar();
+        alert(`No se pudo abrir la cotización #${n}: ${(e as {message?:string})?.message||String(e)}\nNo se abrió nada para no trabajar con datos incompletos. Inténtalo de nuevo.`);
         return;
-      }finally{setDetalleCargando(null);}
+      }
     }
-    await hacer(d);
+    const escribe=ACCIONES_QUE_ESCRIBEN.has(accion);
+    if(!escribe)soltar();
+    try{await hacer(d);}
+    catch(e){
+      alert(`⚠️ No se pudo terminar la acción sobre la cotización #${n}: ${(e as {message?:string})?.message||String(e)}. Revisa la lista${accion==="reserva"?" y Programación":""} antes de volver a intentarlo: pudo quedar a medias.`);
+    }finally{if(escribe)soltar();}
   };
   const cargandoEsta=(id:number,accion:string)=>detalleCargando?.id===id&&detalleCargando.accion===accion;
   const abrirAltaCliente=(texto:string)=>{
@@ -1778,7 +1816,7 @@ export default function CotizacionesPage(){
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);const considBase:ConsidCot={incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales};considSinTocarRef.current=considBase;setConsid(considBase);setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.tipo_vehiculo_costeo?equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo)):(v.equipamiento||"full_equipo"),tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo,...(v.tipo_vehiculo_costeo?{equipamiento:equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo))}:{})}));};
@@ -1926,7 +1964,7 @@ export default function CotizacionesPage(){
       const payload={...buildPayload("borrador"),creado_por:op.nombre||null,vendedor_id:op.id};
       const{error}=await escribirCotizacion(payload);
       if(error){alert(error.message);return;}
-      limpiar();cargar();
+      limpiar();refrescar();
     }catch(e){avisarFalloGuardado(e);}
     finally{setGuardando(false);}
   };
@@ -2033,7 +2071,7 @@ export default function CotizacionesPage(){
         if(eUpd)clientesSinResinc+=lote.length;else clientesResinc+=lote.length;
       }
     }
-    limpiar();cargar();setGuardando(false);
+    limpiar();refrescar();setGuardando(false);
     if(clientesResinc>0)alert(`✅ Cliente actualizado en ${clientesResinc} servicio${clientesResinc!==1?"s":""} de Programación vinculado${clientesResinc!==1?"s":""} a esta cotización.`);
     if(falloLecturaServ)alert(`⚠️ La cotización se guardó, pero no se pudieron revisar sus servicios de Programación (${falloLecturaServ}): ni se corrigió el cliente ni se ofrece propagar las paradas. Ábrela y guárdala de nuevo para reintentarlo.`);
     if(clientesSinResinc>0)alert(`⚠️ La cotización se guardó, pero ${clientesSinResinc} servicio${clientesSinResinc!==1?"s":""} de Programación siguen con el cliente anterior (no se pudieron actualizar). Ábrela y guárdala de nuevo para reintentarlo.`);
@@ -2053,18 +2091,64 @@ export default function CotizacionesPage(){
     }
     if(nEst==="aprobado"){setModalAprob(cot);return;}
     if(nEst==="enviado"){setModalEnvio(cot);return;}
-    await supabase.from("cotizaciones").update({estado:nEst}).eq("id",cot.id);cargar();
+    await conBloqueoEstado(cot.id,async()=>{
+      const e=await actualizarCot(cot.id,{estado:nEst});
+      if(e){alert(`No se pudo pasar la cotización #${cot.numero_cotizacion||String(cot.id).padStart(5,"0")} a «${ESTADO_CFG[nEst].label}»: ${e}`);return;}
+      refrescar();
+    });
+  };
+  /**
+   * Escribe en la cotización y devuelve el motivo si NO quedó escrita: con error, o sin ninguna fila
+   * (eliminada, o sin permiso: la base no da error en ese caso). Antes no se miraba nada y una
+   * escritura fallida dejaba creer que el estado cambió.
+   */
+  const actualizarCot=async(id:number,patch:Record<string,unknown>):Promise<string|null>=>{
+    const{data,error}=await supabase.from("cotizaciones").update(patch).eq("id",id).select("id");
+    if(error)return error.message;
+    if(!data?.length)return "no se encontró la cotización (pudo eliminarse, o no tienes permiso para cambiarla)";
+    return null;
+  };
+  /** Cambiar el estado, marcar enviada o aprobar: una escritura a la vez, y el botón bloqueado hasta que termine. */
+  const conBloqueoEstado=async(id:number,hacer:()=>Promise<void>)=>{
+    if(estadoEnCursoRef.current)return;
+    estadoEnCursoRef.current=true;setEstadoEnCurso(id);
+    try{await hacer();}
+    catch(e){alert(`⚠️ No se pudo terminar de cambiar el estado: ${(e as {message?:string})?.message||String(e)}. Revisa la lista antes de volver a intentarlo.`);}
+    finally{estadoEnCursoRef.current=false;setEstadoEnCurso(null);}
   };
   const confirmarEnvio=async(medio:string)=>{
-    if(!modalEnvio)return;
-    await supabase.from("cotizaciones").update({estado:"enviado",medio_envio:medio}).eq("id",modalEnvio.id);
-    setModalEnvio(null);cargar();
+    const cot=modalEnvio;if(!cot)return;
+    await conBloqueoEstado(cot.id,async()=>{
+      const e=await actualizarCot(cot.id,{estado:"enviado",medio_envio:medio});
+      // Con error el modal sigue abierto: el medio elegido no se pierde y se puede reintentar.
+      if(e){alert(`No se pudo marcar como enviada la cotización #${cot.numero_cotizacion||String(cot.id).padStart(5,"0")}: ${e}`);return;}
+      setModalEnvio(null);refrescar();
+    });
   };
-  const confirmarAprob=async(tipo:string,numero:string)=>{if(!modalAprob)return;const{error:cotErr}=await supabase.from("cotizaciones").update({estado:"aprobado",tipo_aprobacion:tipo,numero_aprobacion:numero}).eq("id",modalAprob.id);if(cotErr){alert("Error al aprobar: "+cotErr.message);return;}if(modalAprob.tipo_vehiculo&&modalAprob.tipo_servicio&&modalAprob.equipamiento){const esFijo=modalAprob.modo_servicio==="fijo";const{error:tarErr}=await supabase.from("tarifario").upsert({origen:modalAprob.origen.toUpperCase(),destino:modalAprob.destino.toUpperCase(),tipo_vehiculo:modalAprob.tipo_vehiculo,equipamiento:modalAprob.equipamiento,tipo_servicio:modalAprob.tipo_servicio,modo:modalAprob.modo_servicio||"eventual",precio:esFijo?(Number(modalAprob.precio_dia||0)/1.18):Math.round(Number(modalAprob.precio_cliente)/1.18*100)/100,moneda:"PEN",confidencial:false,incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Aprobada #${modalAprob.numero_cotizacion||modalAprob.id}`,activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});if(tarErr)alert("Error al guardar en tarifario: "+tarErr.message);}setModalAprob(null);cargar();};
+  const confirmarAprob=async(tipo:string,numero:string)=>{
+    const cot=modalAprob;if(!cot)return;
+    await conBloqueoEstado(cot.id,async()=>{
+      const e=await actualizarCot(cot.id,{estado:"aprobado",tipo_aprobacion:tipo,numero_aprobacion:numero});
+      if(e){alert("Error al aprobar: "+e);return;}
+      if(cot.tipo_vehiculo&&cot.tipo_servicio&&cot.equipamiento){const esFijo=cot.modo_servicio==="fijo";const{error:tarErr}=await supabase.from("tarifario").upsert({origen:cot.origen.toUpperCase(),destino:cot.destino.toUpperCase(),tipo_vehiculo:cot.tipo_vehiculo,equipamiento:cot.equipamiento,tipo_servicio:cot.tipo_servicio,modo:cot.modo_servicio||"eventual",precio:esFijo?(Number(cot.precio_dia||0)/1.18):Math.round(Number(cot.precio_cliente)/1.18*100)/100,moneda:"PEN",confidencial:false,incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Aprobada #${cot.numero_cotizacion||cot.id}`,activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});if(tarErr)alert("Error al guardar en tarifario: "+tarErr.message);}
+      setModalAprob(null);refrescar();
+    });
+  };
+  /**
+   * La bandera se suelta pase lo que pase: mientras propaga el modal no se puede cerrar, así que una
+   * excepción a mitad lo dejaría colgado y sin salida.
+   */
   const confirmarPropagar=async()=>{
     if(!modalPropagar||propagando)return;
     setPropagando(true);
-    const{reservas,paradasIda,paradasRet}=modalPropagar;
+    try{await propagarParaderos(modalPropagar);}
+    catch(e){
+      setModalPropagar(null);
+      alert(`⚠ La propagación se interrumpió: ${(e as {message?:string})?.message||String(e)}.\nAlgunos servicios pudieron quedar actualizados: revisa Programación antes de volver a intentarlo.`);
+    }finally{setPropagando(false);}
+  };
+  const propagarParaderos=async(mp:NonNullable<typeof modalPropagar>)=>{
+    const{reservas,paradasIda,paradasRet}=mp;
     const todosIds=reservas.map(r=>r.id);
     const BATCH=100;
 
@@ -2213,7 +2297,7 @@ export default function CotizacionesPage(){
     if(authErr)return "Contraseña incorrecta";
     const{error}=await supabase.from("cotizaciones").delete().eq("id",modalEliminar.id);
     if(error)return "Error al eliminar: "+error.message;
-    setModalEliminar(null);cargar();return null;
+    setModalEliminar(null);refrescar();return null;
   };
   const duplicarCotizacion=async(c:Cotizacion)=>{
     const payload:any={cliente_id:c.cliente_id,origen:c.origen,destino:c.destino,km:c.km,precio_cliente:c.precio_cliente,costo_estimado:c.costo_estimado,margen_estimado:c.margen_estimado,estado:"pendiente",numero_cotizacion:null,atencion:c.atencion,asunto:c.asunto?`COPIA — ${c.asunto}`:null,punto_retorno:c.punto_retorno,fecha_servicio:c.fecha_servicio,fecha_retorno:c.fecha_retorno,hora_ida:c.hora_ida,hora_retorno:c.hora_retorno,descuento_pct:c.descuento_pct||0,items_json:c.items_json,tipo_vehiculo:c.tipo_vehiculo,tipo_servicio:c.tipo_servicio,equipamiento:c.equipamiento,vehiculo_flota_id:c.vehiculo_flota_id,vehiculo_tercero_id:c.vehiculo_tercero_id,consideraciones_json:c.consideraciones_json,paradas_json:c.paradas_json,paradas_retorno_json:c.paradas_retorno_json,modo_servicio:c.modo_servicio,dias_servicio:c.dias_servicio||1,horas_servicio:c.horas_servicio||8,pernocte_costo:c.pernocte_costo,precio_dia:c.precio_dia,precio_mes_estimado:c.precio_mes_estimado,precio_tarifario:c.precio_tarifario,precio_cotizador:c.precio_cotizador,precio_sugerido:c.precio_sugerido,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto,fechas_multidia_json:c.fechas_multidia_json,plantilla_pdf:c.plantilla_pdf||"corporativo"};
@@ -2226,43 +2310,52 @@ export default function CotizacionesPage(){
     if(error&&faltaColumna(error,"vendedor_id")){delete payload.vendedor_id;({error}=await supabase.from("cotizaciones").insert(payload));}
     if(error){alert(error.message);return;}
     alert(`✅ Cotización #${c.numero_cotizacion||c.id} duplicada correctamente`);
-    cargar();
+    refrescar();
   };
   const convertirAReserva=async(cot:Cotizacion)=>{
     if(cot.estado!=="aprobado"){alert("Solo cotizaciones aprobadas");return;}
-    const{data:existe}=await supabase.from("reservas").select("id").eq("cotizacion_id",cot.id).maybeSingle();
-    if(existe){alert("Ya fue convertida en reserva");return;}
+    // `limit(1)` y no `maybeSingle()`: con más de una reserva ya creada (una por vehículo),
+    // `maybeSingle` da error, `existe` queda en null y se volvían a crear todas. Y una lectura que
+    // falla no es «todavía no tiene reservas».
+    const{data:existentes,error:eExiste}=await supabase.from("reservas").select("id").eq("cotizacion_id",cot.id).limit(1);
+    if(eExiste){alert(`No se pudo comprobar si la cotización ya tiene reservas, así que no se creó ninguna: ${eExiste.message}`);return;}
+    if(existentes?.length){alert("Ya fue convertida en reserva");return;}
     const ps=cot.paradas_json||[];const pI=ps.find(p=>p.tipo==="inicio");
     const its=cot.items_json||[];
     const vehKey=(it:ItemCot)=>it.vehiculo_flota_id?`f_${it.vehiculo_flota_id}`:it.vehiculo_tercero_id?`t_${it.vehiculo_tercero_id}`:"sin";
     const grupos=its.reduce((m,it)=>{const k=vehKey(it);if(!m[k])m[k]=[];m[k].push(it);return m;},{} as Record<string,ItemCot[]>);
     const keys=Object.keys(grupos);
     const useMulti=keys.length>1||(keys.length===1&&keys[0]!=="sin"&&(keys[0].startsWith("f_")||keys[0].startsWith("t_")));
-    const basePayload={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:cot.destino,fecha_servicio:cot.fecha_servicio||new Date().toISOString().split("T")[0],hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null,costo_proveedor:0,ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:cot.paradas_json,hora:pI?.hora||cot.hora_ida,sentido:"ida"})||null};
-    const insertParadas=async(reservaId:number)=>{if(ps.length<1)return;await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:reservaId,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));};
+    const basePayload={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:cot.destino,fecha_servicio:cot.fecha_servicio||hoyLima(),hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null,costo_proveedor:0,ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:cot.paradas_json,hora:pI?.hora||cot.hora_ida,sentido:"ida"})||null};
+    const insertParadas=async(reservaId:number):Promise<string|null>=>{if(ps.length<1)return null;const{error}=await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:reservaId,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));return error?error.message:null;};
+    const avisoParadas=(e:string|null)=>e?`\n⚠️ Pero sus ${ps.length} paradas no se pudieron crear (${e}): agrégalas desde Programación.`:"";
     if(!useMulti){
       // Nace con «Permitir autoselección» (lib/reservas-autoseleccion.ts).
       const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:cot.precio_cliente,vehiculo_id:cot.vehiculo_flota_id||null,vehiculo_tercero_id:cot.vehiculo_tercero_id||null});
       if(error){alert(error.message);return;}
-      if(r)await insertParadas(r.id);
-      alert(`✅ Reserva creada${ps.length>0?` con ${ps.length} paradas`:""}`);
+      const eParadas=r?await insertParadas(r.id):null;
+      alert(`✅ Reserva creada${ps.length>0&&!eParadas?` con ${ps.length} paradas`:""}${avisoParadas(eParadas)}`);
     } else {
-      let count=0;
+      let count=0;let eParadas:string|null=null;
       for(const k of keys){
         const gItems=grupos[k];
         const{total:gTotal}=calcItems(gItems,cot.incluye_igv!==false);
         const vehFlotaId=k.startsWith("f_")?Number(k.slice(2)):(k==="sin"?cot.vehiculo_flota_id||null:null);
         const vehTercId=k.startsWith("t_")?Number(k.slice(2)):(k==="sin"?cot.vehiculo_tercero_id||null:null);
         const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:gTotal,vehiculo_id:vehFlotaId,vehiculo_tercero_id:vehTercId});
-        if(error){alert(error.message);return;}
-        if(r&&count===0)await insertParadas(r.id);
+        if(error){
+          // Las ya creadas se quedan, y «→ Res.» ya no vuelve a convertir esta cotización: se dice cuántas faltan.
+          alert(count>0?`⚠️ Se crearon ${count} de ${keys.length} reservas y la siguiente falló: ${error.message}\nLas que faltan créalas desde Programación (esta cotización ya figura como convertida).${avisoParadas(eParadas)}`:error.message);
+          refrescar();return;
+        }
+        if(r&&count===0)eParadas=await insertParadas(r.id);
         count++;
       }
-      alert(`✅ ${count} reserva${count>1?"s creadas (una por vehículo)":"creada"}`);
+      alert(`✅ ${count} reserva${count>1?"s creadas (una por vehículo)":"creada"}${avisoParadas(eParadas)}`);
     }
-    cargar();
+    refrescar();
   };
-  const editarCot=(c:Cotizacion)=>{restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+  const editarCot=(c:Cotizacion)=>{restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||{...DEFAULT_CONSID});/* una copia: las de una cotización abierta no son «sin tocar» y la plantilla no las pisa */setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
     const cl=cot.cliente_id!=null?mapaClientes.get(cot.cliente_id):undefined;
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
@@ -2431,9 +2524,9 @@ export default function CotizacionesPage(){
 
   return(
     <>
-      {modalEnvio&&<ModalEnvio onConfirmar={confirmarEnvio} onCancelar={()=>setModalEnvio(null)}/>}
+      {modalEnvio&&<ModalEnvio onConfirmar={confirmarEnvio} onCancelar={()=>setModalEnvio(null)} ocupado={estadoEnCurso!==null}/>}
       {modalDespacho&&<ModalDespachoSinCotizar nombreCliente={(id)=>{const cl=id!=null?clientes.find(c=>c.id===id):null;return cl?rotuloCliente(cl as any):(id!=null?`Cliente #${id}`:"Sin cliente");}} onCerrar={()=>setModalDespacho(false)} onCambio={contarDespacho} onCotizar={cotizarDespacho}/>}
-      {modalAprob&&<ModalAprobacion cot={modalAprob} onConfirmar={confirmarAprob} onCancelar={()=>setModalAprob(null)}/>}
+      {modalAprob&&<ModalAprobacion cot={modalAprob} onConfirmar={confirmarAprob} onCancelar={()=>setModalAprob(null)} ocupado={estadoEnCurso!==null}/>}
       {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={setPlantillaElegida} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida)} onCancelar={()=>setModalPlantilla(null)}/>}
       {modalEliminar&&<ModalEliminar cot={modalEliminar} onConfirmar={eliminarCotizacion} onCancelar={()=>setModalEliminar(null)}/>}
       {modalPropagar&&(
@@ -2458,7 +2551,7 @@ export default function CotizacionesPage(){
               <p>• La <strong>hora de salida</strong> de cada servicio se ajusta a la del primer paradero de su tramo.</p>
             </div>
             <div className="flex gap-2 pt-1">
-              <button onClick={()=>setModalPropagar(null)} className="flex-1 py-2.5 px-4 rounded-xl border border-gray-200 text-sm font-semibold text-gray-600 hover:bg-gray-50">Solo esta cotización</button>
+              <button onClick={()=>setModalPropagar(null)} disabled={propagando} title={propagando?"Espera a que termine la propagación":undefined} className="flex-1 py-2.5 px-4 rounded-xl border border-gray-200 text-sm font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">Solo esta cotización</button>
               <button onClick={confirmarPropagar} disabled={propagando} className="flex-1 py-2.5 px-4 rounded-xl text-sm font-bold text-white disabled:opacity-60" style={{background:"#0b315f"}}>{propagando?"Actualizando...":"Propagar a futuros ("+modalPropagar.reservas.length+")"}</button>
             </div>
           </div>
@@ -2923,7 +3016,7 @@ export default function CotizacionesPage(){
                             <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${esFijo?"bg-green-100 text-green-700":"bg-blue-100 text-blue-700"}`}>{esFijo?"📅 FIJO":"📋 EVEN."}</span>
                             {tieneDsc&&<span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 animate-pulse">🙋 Dscto.</span>}
                           </div>
-                          <select value={c.estado} onChange={e=>cambiarEstado(c,e.target.value as EstadoCot)} className="text-[10px] font-bold px-2 py-1 rounded-lg border-0 cursor-pointer flex-shrink-0" style={{background:est.bg,color:est.color}}>
+                          <select value={c.estado} onChange={e=>cambiarEstado(c,e.target.value as EstadoCot)} disabled={estadoEnCurso!==null} title={estadoEnCurso===c.id?"Guardando el estado…":undefined} className="text-[10px] font-bold px-2 py-1 rounded-lg border-0 cursor-pointer flex-shrink-0 disabled:opacity-50 disabled:cursor-wait" style={{background:est.bg,color:est.color}}>
                             {(["borrador","pendiente","enviado","aprobado","rechazado"] as EstadoCot[]).map(s=>(
                               <option key={s} value={s} disabled={s!==c.estado&&!TRANSICIONES[c.estado].includes(s)}>{s===c.estado?"✓ ":TRANSICIONES[c.estado].includes(s)?"→ ":"✕ "}{ESTADO_CFG[s].label}</option>
                             ))}
@@ -2948,7 +3041,7 @@ export default function CotizacionesPage(){
                           {rolUsuario==="admin"&&<button onClick={()=>setModalEliminar(c)} className="py-2 px-3 rounded-xl text-xs font-bold border hover:bg-red-50" style={{color:"#dc2626",borderColor:"#fca5a5"}} title="Eliminar cotización">🗑️</button>}
                         </div>
                         {tieneDec&&<button onClick={()=>setPanelId(panelId===c.id?null:c.id)} className={`text-[10px] font-black px-2 py-1 rounded-full ${tieneDsc?"bg-orange-100 text-orange-700":"bg-[#eef3f8] text-[#0b315f]"}`}>{tieneDsc?"🙋 Descuento pendiente":"💡 Ver precios"}</button>}
-                        {panelId===c.id&&<PanelDecision c={c} onAct={cargar}/>}
+                        {panelId===c.id&&<PanelDecision c={c} onAct={refrescar}/>}
                       </div>
                     );
                   })
@@ -2974,7 +3067,7 @@ export default function CotizacionesPage(){
                       <td className="p-3 font-bold text-gray-800">{fmtS(Number(c.precio_cliente||0))}{esFijo&&<p className="text-[10px] text-gray-400 font-normal">/día</p>}{esFijo&&c.precio_mes_estimado&&<p className="text-[10px] text-green-600 font-bold">~{fmtS(c.precio_mes_estimado)}/mes</p>}</td>
                       <td className="p-3 font-bold" style={{color:margen>=0?"#166534":"#991b1b"}}>{fmtS(margen)}</td>
                       <td className="p-3" onClick={e=>e.stopPropagation()}>
-                        <select value={c.estado} onChange={e=>cambiarEstado(c,e.target.value as EstadoCot)} className="text-xs font-bold px-2 py-1 rounded-lg border-0 cursor-pointer" style={{background:est.bg,color:est.color}}>
+                        <select value={c.estado} onChange={e=>cambiarEstado(c,e.target.value as EstadoCot)} disabled={estadoEnCurso!==null} title={estadoEnCurso===c.id?"Guardando el estado…":undefined} className="text-xs font-bold px-2 py-1 rounded-lg border-0 cursor-pointer disabled:opacity-50 disabled:cursor-wait" style={{background:est.bg,color:est.color}}>
                           {(["borrador","pendiente","enviado","aprobado","rechazado"] as EstadoCot[]).map(s=>(
                             <option key={s} value={s} disabled={s!==c.estado&&!TRANSICIONES[c.estado].includes(s)}>
                               {s===c.estado?"✓ ":TRANSICIONES[c.estado].includes(s)?"→ ":"✕ "}{ESTADO_CFG[s].label}
@@ -2985,7 +3078,7 @@ export default function CotizacionesPage(){
                       </td>
                       <td className="p-3"><div className="flex gap-1 flex-wrap"><button onClick={()=>conDetalle(c,"editar",editarCot)} disabled={!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700 disabled:opacity-50" title="Editar">{cargandoEsta(c.id,"editar")?"…":"✏️"}</button><button onClick={()=>conDetalle(c,"duplicar",duplicarCotizacion)} disabled={!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-purple-50 disabled:opacity-50" style={{color:"#7c3aed",borderColor:"#ddd6fe"}} title="Duplicar cotización">{cargandoEsta(c.id,"duplicar")?"…":"📋"}</button><button onClick={()=>conDetalle(c,"pdf",abrirModalPlantilla)} disabled={!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-50" style={{background:"#eef3f8",color:"#0b315f"}}>{cargandoEsta(c.id,"pdf")?"…":"📄 PDF"}</button><button onClick={()=>conDetalle(c,"ficha",abrirFicha)} disabled={fichaCargando!==null||!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-40" style={{background:"#f5f3ff",color:"#6d28d9",borderColor:"#ddd6fe"}} title="Ficha Técnica de Ruta — puntos de entrada y retorno, sin precios">{fichaCargando===c.id||cargandoEsta(c.id,"ficha")?"⏳":"🗺️ Ficha"}</button><button onClick={()=>conDetalle(c,"reserva",convertirAReserva)} disabled={c.estado!=="aprobado"||!!detalleCargando} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>{cargandoEsta(c.id,"reserva")?"…":"→Res"}</button>{rolUsuario==="admin"&&<button onClick={()=>setModalEliminar(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-red-50" style={{color:"#dc2626",borderColor:"#fca5a5"}} title="Eliminar cotización">🗑️</button>}</div></td>
                     </tr>
-                    {panelId===c.id&&<tr><td colSpan={10} className="px-4 pb-3 pt-0"><PanelDecision c={c} onAct={cargar}/></td></tr>}
+                    {panelId===c.id&&<tr><td colSpan={10} className="px-4 pb-3 pt-0"><PanelDecision c={c} onAct={refrescar}/></td></tr>}
                   </React.Fragment>);
                 })}
               </tbody>
