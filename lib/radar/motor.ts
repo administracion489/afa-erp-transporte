@@ -38,6 +38,8 @@ import { miembrosDelMismoRemitente, pareceCombustible, remitenteUtilizable } fro
 import { CONFIG_DEFECTO, normalizarConfigRadar, dentroDeHorario } from "./config";
 import { LISTA_CATEGORIAS, type CategoriaRadar, type RadarConfig, type ResumenProcesamiento } from "./tipos";
 import { firmarUrl, firmarUrls } from "@/lib/storage-firmado";
+import { aceptarLecturaGirada, girosPara, notaReintentoGirado, rotuloCopia, voucherSinLeer } from "@/lib/radar/voucher-girado";
+import { copiasGiradas } from "@/lib/radar/imagenes-giradas";
 
 // ── Cliente admin (patrón de la casa) ────────────────────────────────────────
 
@@ -665,6 +667,42 @@ async function procesarMensaje(
     confianza = normalizarConfianza(json?.confianza);
     resumenIa = String(json?.resumen ?? "").slice(0, 300) || "Sin resumen";
     datos = json?.datos ?? {};
+
+    // UNA NOTA DE LADO NO ES ILEGIBLE (lib/radar/voucher-girado.ts). Si vio el papel y no sacó la
+    // cantidad o el importe, se pregunta UNA vez más con copias giradas de las fotos. Best-effort: si
+    // algo falla, o la segunda lectura no trae lo que faltaba, queda la primera, como antes.
+    if (categoria === "combustible" && voucherSinLeer(datos)) {
+      try {
+        const imagenes = miembrosConMedia.filter((m) => m.tipo === "imagen");
+        const giros = girosPara(imagenes.length);
+        const copias = giros.length
+          ? await copiasGiradas(imagenes.map((m) => urlDe(m.media_url)), giros)
+          : null;
+        if (copias && copias.length) {
+          const numeroFoto = (idxImagen: number) => miembrosConMedia.indexOf(imagenes[idxImagen]) + 1;
+          const bloquesCopias = copias.flatMap((c) => [
+            { type: "text", text: rotuloCopia(numeroFoto(c.indice), c.giro) },
+            { type: "image", source: { type: "base64", media_type: c.mime, data: c.base64 } },
+          ]);
+          const r2 = await llamarIA(modeloExtraccion, [
+            ...bloquesMedia,
+            ...bloquesCopias,
+            { type: "text", text: prompt + notaReintentoGirado(bloquesMedia.length) },
+          ]);
+          sumar(modeloExtraccion, r2);
+          const json2 = extraerJSON(r2.texto);
+          const cat2 = normalizarCategoria(json2?.categoria);
+          if (aceptarLecturaGirada(cat2, json2?.datos).usar) {
+            categoria = cat2;
+            confianza = normalizarConfianza(json2?.confianza);
+            resumenIa = String(json2?.resumen ?? "").slice(0, 300) || resumenIa;
+            datos = { ...json2.datos, lectura_girada: true };
+          }
+        }
+      } catch (e: any) {
+        console.warn("[radar/motor] reintento con copias giradas falló:", String(e?.message ?? e).slice(0, 200));
+      }
+    }
   } else {
     // Texto: triage barato primero (con el texto combinado del cluster, si lo hay)
     const textoParaClasificar = textoClusterCombinado || texto;
