@@ -130,6 +130,8 @@ async function numerosDeAvisos(): Promise<string[] | null> {
     .map((n: any) => String(n.display_phone_number));
 }
 
+const PAGINA_CHAT = 200;
+
 export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [avisosNums, setAvisosNums] = useState<string[] | null>(null);
   useEffect(() => { numerosDeAvisos().then((n) => setAvisosNums(n ?? [])); }, []);
@@ -349,17 +351,33 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
   // ── Cargar mensajes de conversación ───────────────────────────────────
 
-  const cargarMensajes = useCallback(async (convId: string) => {
+  // Los ÚLTIMOS N, no los primeros: sin límite PostgREST corta en 1000 filas, y un chat con
+  // el historial importado (coexistencia, hasta 6 meses) enseñaba los 1000 más VIEJOS — la
+  // lista decía «Recién me acaba de enviar…» y el chat se quedaba semanas atrás.
+  const limiteRef = useRef(PAGINA_CHAT);
+  const [hayAnteriores, setHayAnteriores] = useState(false);
+  const leerUltimos = useCallback(async (convId: string) => {
+    const lim = limiteRef.current;
     const { data } = await supabase
       .from("crm_mensajes")
       .select("*")
       .eq("conversacion_id", convId)
-      .order("created_at", { ascending: true });
-    setMensajes(((data ?? []) as Mensaje[]).map(legible));
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(lim);
+    if (!data) return null;
+    return { filas: (data as Mensaje[]).slice().reverse(), hayMas: data.length >= lim };
+  }, []);
+
+  const cargarMensajes = useCallback(async (convId: string, opts: { mantenerScroll?: boolean } = {}) => {
+    const r = await leerUltimos(convId);
+    setMensajes((r?.filas ?? []).map(legible));
+    setHayAnteriores(!!r?.hayMas);
+    if (opts.mantenerScroll) return;
     const { data: ns } = await supabase.from("crm_notas").select("id, texto, autor_nombre, created_at").eq("conversacion_id", convId).order("created_at");
     setNotas((ns ?? []) as any[]);
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
-  }, []);
+  }, [leerUltimos]);
 
   const cargarAcciones = useCallback(async (convId: string) => {
     const { data } = await supabase
@@ -391,6 +409,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
   useEffect(() => {
     if (selected) {
+      limiteRef.current = PAGINA_CHAT;
       cargarMensajes(selected.id);
       cargarAcciones(selected.id);
     } else {
@@ -438,10 +457,10 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       cargarConvsRef.current();
       const sel = selectedRef.current;
       if (!sel) return;
-      const { data } = await supabase
-        .from("crm_mensajes").select("*").eq("conversacion_id", sel.id)
-        .order("created_at", { ascending: true });
+      const r = await leerUltimos(sel.id);
+      const data = r?.filas;
       if (!data || selectedRef.current?.id !== sel.id) return;
+      setHayAnteriores(!!r?.hayMas);
       setMensajes((prev) => {
         if (prev.length === data.length && prev[prev.length - 1]?.id === data[data.length - 1]?.id) return prev;
         setTimeout(() => marcarLeido(sel.id), 0);
@@ -647,11 +666,16 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
     | { kind: "aviso"; at: string; aviso: AvisoAutomatico }
     | { kind: "nota"; at: string; nota: { id: string; texto: string; autor_nombre: string | null; created_at: string } };
 
+  // Con mensajes anteriores sin cargar, los avisos y notas de antes del primero cargado
+  // se esconden también: si no, quedarían arriba como si no hubiera nada entre medio.
+  const desdeChat = hayAnteriores && mensajes[0] ? new Date(mensajes[0].created_at).getTime() : -Infinity;
   const timeline: ItemTimeline[] = [
     ...mensajes.map((m): ItemTimeline => ({ kind: "mensaje", at: m.created_at, mensaje: m })),
     ...avisos.map((a): ItemTimeline => ({ kind: "aviso", at: a.created_at, aviso: a })),
     ...notas.map((n): ItemTimeline => ({ kind: "nota", at: n.created_at, nota: n })),
-  ].sort((x, y) => new Date(x.at).getTime() - new Date(y.at).getTime());
+  ]
+    .filter((x) => x.kind === "mensaje" || new Date(x.at).getTime() >= desdeChat)
+    .sort((x, y) => new Date(x.at).getTime() - new Date(y.at).getTime());
 
   // ── Filtros ────────────────────────────────────────────────────────────
 
@@ -1049,6 +1073,16 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
               nada; debajo del aviso que lo precede se explica solo. No se guarda el texto
               que se envió, sólo el qué/cuándo — nunca se finge citarlo. */}
           <div className="flex-1 overflow-y-auto px-[6%] py-4 space-y-1.5" style={{ background: "#efeae2" }}>
+            {hayAnteriores && selected && (
+              <div className="flex justify-center pb-2">
+                <button
+                  onClick={() => { limiteRef.current += PAGINA_CHAT; cargarMensajes(selected.id, { mantenerScroll: true }); }}
+                  className="text-xs bg-white/90 shadow-sm rounded-full px-3 py-1 text-[#0b315f] hover:bg-white"
+                >
+                  ↑ Cargar mensajes anteriores
+                </button>
+              </div>
+            )}
             {mensajes.length === 0 && avisos.length === 0 && (
               <div className="text-center text-gray-400 text-sm py-12">Sin mensajes aún</div>
             )}
