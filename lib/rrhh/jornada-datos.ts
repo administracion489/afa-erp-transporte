@@ -16,6 +16,7 @@
 
 import { fechaLima, limaAUtcMs } from "@/lib/alertas-horario";
 import { tablaFaltante } from "@/lib/columna-faltante";
+import { cfgsEfectivasDe } from "./horario-datos";
 import { calcularJornada } from "./jornada";
 import type { ConfigRrhh, Marca, ResultadoJornada } from "./tipos";
 
@@ -61,11 +62,29 @@ export async function marcasPorRango(
 
 export type JornadaDeDia = ResultadoJornada & { usuario_id: string; fecha: string };
 
-/** Agrupa las marcas del rango por (usuario, día de Lima) y calcula la jornada de cada uno. */
+/**
+ * Horario POR EMPLEADO, OPCIONAL. Sin este parámetro, cada jornada se juzga con el `cfg`
+ * global —byte a byte el comportamiento anterior—. Dos formas de activarlo:
+ *   · `cfgPorUsuario`: un Map<usuario_id, ConfigRrhh> ya resuelto (p. ej. con `cfgsEfectivasDe`).
+ *     Un usuario presente en el Map usa SU cfg; uno ausente cae al global.
+ *   · `porEmpleado: true` (y sin `cfgPorUsuario`): el lector resuelve los overrides él mismo,
+ *     leyendo `empleado_perfil` con `cfgsEfectivasDe` para los usuarios del rango. Sin la
+ *     migración rrhh-04, esa resolución cae al global para todos (misma salida que hoy).
+ * El Map pre-resuelto GANA sobre `porEmpleado`: si lo pasan, no se vuelve a leer la base.
+ */
+export type OpcionesHorarioJornada = {
+  cfgPorUsuario?: Map<string, ConfigRrhh> | null;
+  porEmpleado?: boolean;
+};
+
+/** Agrupa las marcas del rango por (usuario, día de Lima) y calcula la jornada de cada uno.
+ *  Con `horario`, cada empleado se juzga con SU horario efectivo (ver `OpcionesHorarioJornada`);
+ *  sin él, todos contra el `cfg` global, exactamente como antes. */
 export async function jornadasDelRango(
   sb: SB,
   opts: { usuarioId?: string | null; desde: string; hasta: string },
   cfg: ConfigRrhh,
+  horario?: OpcionesHorarioJornada,
 ): Promise<{ jornadas: JornadaDeDia[]; sinMigracion: boolean }> {
   const { marcas, sinMigracion } = await marcasPorRango(sb, opts);
   if (sinMigracion) return { jornadas: [], sinMigracion: true };
@@ -81,9 +100,19 @@ export async function jornadasDelRango(
     porClave.set(clave, g);
   }
 
+  // El cfg POR USUARIO. Sin `horario` → null → cada jornada usa `cfg` (global): byte a byte lo
+  // de antes. El Map pre-resuelto manda; si no vino y piden `porEmpleado`, se lee la base para
+  // los usuarios que de verdad aparecen en el rango (no para toda la empresa).
+  let cfgPorUsuario = horario?.cfgPorUsuario ?? null;
+  if (!cfgPorUsuario && horario?.porEmpleado) {
+    const usuarios = [...new Set([...porClave.values()].map((g) => g.usuario_id))];
+    cfgPorUsuario = await cfgsEfectivasDe(sb, usuarios, cfg);
+  }
+
   const jornadas: JornadaDeDia[] = [];
   for (const g of porClave.values()) {
-    jornadas.push({ usuario_id: g.usuario_id, fecha: g.fecha, ...calcularJornada(g.marcas, cfg) });
+    const cfgEf = cfgPorUsuario?.get(g.usuario_id) ?? cfg;
+    jornadas.push({ usuario_id: g.usuario_id, fecha: g.fecha, ...calcularJornada(g.marcas, cfgEf) });
   }
   jornadas.sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : a.usuario_id < b.usuario_id ? -1 : 1));
   return { jornadas, sinMigracion: false };
