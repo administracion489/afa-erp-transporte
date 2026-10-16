@@ -38,6 +38,9 @@ export async function resolverContacto(
   sb: SB,
   opts: { campo: CampoId; valor: string; nombre?: string | null; canal: string; telefono?: string | null },
 ): Promise<{ id: string } | null> {
+  // Sin id no se busca ni se crea: `.eq(campo, undefined)` no encuentra nada y cada
+  // mensaje terminaba en un contacto nuevo sin número.
+  if (!opts.valor || !String(opts.valor).trim()) return null;
   const buscar = async () =>
     (await sb.from("crm_contactos").select("id, nombre, telefono").eq(opts.campo, opts.valor).maybeSingle()).data;
 
@@ -80,6 +83,47 @@ export async function resolverContacto(
     return null;
   }
   return data as { id: string };
+}
+
+/**
+ * Quién escribe por WhatsApp. Desde 2026 un cliente puede usar un «usuario» de WhatsApp y
+ * ocultar su número: entonces el webhook no trae `from` con el teléfono sino un id por
+ * empresa (BSUID, p. ej. «PE.1349…»), en `from`, `from_user_id` o `contacts[].user_id`.
+ * Antes se leía solo `msg.from`: sin él, cada mensaje creaba un contacto nuevo SIN número
+ * (el «Charle Herrera» ×3, con «Canal sin datos para enviar»).
+ * Devuelve el id con el que se identifica al contacto (`wa_id`) y el teléfono si se conoce.
+ */
+export function identidadWhatsApp(msg: any, contactos?: any[]): { id: string | null; telefono: string | null } {
+  const c0 = Array.isArray(contactos) ? contactos.find((c) => c?.wa_id === msg?.from || c?.user_id === msg?.from) ?? contactos[0] : null;
+  const esTelefono = (v: unknown) => typeof v === "string" && /^\+?\d{8,15}$/.test(v.trim());
+  const telefono = esTelefono(msg?.from) ? soloDigitos(msg.from) : esTelefono(c0?.wa_id) ? soloDigitos(c0.wa_id) : null;
+  const bsuid =
+    [msg?.from_user_id, c0?.user_id, msg?.from].find((v) => typeof v === "string" && v.trim() && !esTelefono(v)) ?? null;
+  return { id: telefono ?? (bsuid ? String(bsuid).trim() : null), telefono };
+}
+
+/**
+ * Contacto de WhatsApp. Con id (teléfono o BSUID) es el de siempre. Sin ningún id —no
+ * debería pasar, pero pasó— se agrupa por el nombre del perfil entre los contactos que
+ * tampoco tienen id, en vez de crear uno nuevo con cada mensaje.
+ */
+export async function resolverContactoWhatsApp(
+  sb: SB,
+  opts: { id: string | null; telefono: string | null; nombre?: string | null },
+): Promise<{ id: string } | null> {
+  if (opts.id) {
+    return resolverContacto(sb, { campo: "wa_id", valor: opts.id, nombre: opts.nombre, canal: "whatsapp", telefono: opts.telefono });
+  }
+  const nombre = (opts.nombre ?? "").trim();
+  if (!nombre) return null;
+  const { data } = await sb
+    .from("crm_contactos").select("id").eq("nombre", nombre).is("wa_id", null).eq("canal_origen", "whatsapp")
+    .order("created_at", { ascending: true }).limit(1).maybeSingle();
+  if (data) return { id: data.id };
+  const { data: nuevo, error } = await sb
+    .from("crm_contactos").insert({ nombre, canal_origen: "whatsapp" }).select("id").single();
+  if (error) { console.error("[crm-ingesta] contacto sin id:", error.message); return null; }
+  return nuevo as { id: string };
 }
 
 export type Conversacion = { id: string; no_leidos: number | null; ultimo_mensaje_at: string | null };
