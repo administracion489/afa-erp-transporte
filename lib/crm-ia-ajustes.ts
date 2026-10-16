@@ -43,6 +43,11 @@ export type AjustesIA = {
   lugares_conocidos: string;
   /** Cuántos mensajes recientes relee en cada respuesta. */
   mensajes_historial: number;
+  /** Mientras se arma un pedido, cada respuesta termina con el resumen de lo que ya dio el
+   *  cliente y pide SOLO lo que falta. */
+  resumen_pedido: boolean;
+  /** Los datos que forman el pedido (lo que va en el resumen). */
+  campos_pedido: string;
   /** Reglas extra del negocio, una por línea. */
   reglas_extra: string;
 };
@@ -70,6 +75,9 @@ export const AJUSTES_DEFECTO: AjustesIA = {
   recordar_datos: true,
   lugares_conocidos: "el aeropuerto, los terminales terrestres, las estaciones, las plazas y los centros comerciales conocidos",
   mensajes_historial: 40,
+  resumen_pedido: true,
+  campos_pedido:
+    "ruta (origen → destino, con la dirección de recojo), fecha y hora, número de pasajeros, equipaje, tipo de servicio (solo ida, ida y vuelta, por horas), nombre y empresa",
   reglas_extra: "",
 };
 
@@ -116,6 +124,8 @@ export function normalizarAjustes(raw: unknown): AjustesIA {
     recordar_datos: bool(r.recordar_datos, d.recordar_datos),
     lugares_conocidos: texto(r.lugares_conocidos, d.lugares_conocidos, 400, true),
     mensajes_historial: entero(r.mensajes_historial, d.mensajes_historial, 10, 60),
+    resumen_pedido: bool(r.resumen_pedido, d.resumen_pedido),
+    campos_pedido: texto(r.campos_pedido, d.campos_pedido, 600),
     reglas_extra: texto(r.reglas_extra, d.reglas_extra, 4000, true),
   };
 }

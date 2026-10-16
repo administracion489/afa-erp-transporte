@@ -25,5 +25,7 @@ ok(normalizarAjustes({ mensajes_historial: 500 }).mensajes_historial === 60, "hi
 ok(normalizarAjustes({ mensajes_historial: 1 }).mensajes_historial === 10, "historial mínimo 10");
 ok(normalizarAjustes({ lugares_conocidos: "" }).lugares_conocidos === "", "lugares vacíos = ninguno");
 ok(normalizarAjustes({}).recordar_datos === true, "recordar datos nace encendido");
+ok(normalizarAjustes({}).resumen_pedido === true, "resumen del pedido nace encendido");
+ok(normalizarAjustes({ campos_pedido: "  " }).campos_pedido === AJUSTES_DEFECTO.campos_pedido, "campos vacíos → defecto");
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

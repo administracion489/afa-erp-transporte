@@ -116,6 +116,20 @@ export default function AjustesComportamiento({
       </Fila>
 
       <Fila
+        titulo="🧾 Resumen del pedido al final de cada respuesta"
+        detalle="Mientras el cliente pide un servicio, cada respuesta termina con los datos que ya dio y SOLO los que faltan. Si ya está todo, lo confirma. También al derivar a un ejecutivo."
+        on={a.resumen_pedido} onClick={() => set("resumen_pedido", !a.resumen_pedido)}
+      >
+        <div>
+          <label className={label}>Datos que forman el pedido</label>
+          <textarea rows={2} className={input} value={a.campos_pedido} onChange={(e) => set("campos_pedido", e.target.value)} />
+        </div>
+        <div className="rounded-lg bg-[#d9fdd3] px-3 py-2 text-[12px] text-gray-800 whitespace-pre-line">
+          {"Ejemplo:\n📋 Resumen de su solicitud\n• Ruta: Surco → Aeropuerto\n• Fecha y hora: martes 20/10, 5:00 a. m.\n• Pasajeros: 18, con maletas de 23 kg\n• Servicio: solo ida\n• Nombre: Paola Huarachi\nSolo me falta: la dirección exacta de recojo en Surco."}
+        </div>
+      </Fila>
+
+      <Fila
         titulo="🙅 Nunca decir «no encontré sus servicios»"
         detalle="Si el sistema no encuentra lo que piden, no asusta al cliente: pide datos y deriva el chat a un ejecutivo con el mensaje de derivación."
         on={a.no_decir_no_encontre} onClick={() => set("no_decir_no_encontre", !a.no_decir_no_encontre)}
