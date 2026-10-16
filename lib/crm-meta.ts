@@ -50,8 +50,11 @@ export async function enviarWhatsApp(to: string, texto: string, phoneId?: string
   // Se añadió el 2026-07-08 13:28 (d8e5d65) y 54 min después (82d8a99) el Inbox se
   // desvió a la plantilla hello_world, la única ruta que lo esquivaba: de ahí venía que
   // los clientes recibieran "Hello World". Quitar esto es lo que arregla la causa.
+  // Un cliente con «usuario» de WhatsApp y número oculto se identifica por su BSUID
+  // («PE.1349…»): va tal cual, sin quitarle las letras.
+  const esBsuid = /[A-Za-z]/.test(to);
   const d = to.replace(/\D/g, "");
-  const limpioTo = d.length === 9 ? "51" + d : d;
+  const limpioTo = esBsuid ? to.trim() : d.length === 9 ? "51" + d : d;
 
   const res = await fetch(`${GRAPH}/${phone}/messages`, {
     method: "POST",

@@ -94,7 +94,8 @@ export async function procesarEchos(sb: SB, value: any): Promise<number> {
 
   let guardados = 0;
   for (const eco of echos) {
-    const cliente = soloDigitos(eco?.to);
+    // Con «usuario» de WhatsApp el destinatario puede ser un BSUID («PE.1349…»), no un número.
+    const cliente = /[A-Za-z]/.test(String(eco?.to ?? "")) ? String(eco.to).trim() : soloDigitos(eco?.to);
     const idMensaje = eco?.id ? String(eco.id) : null;
     if (!cliente || !idMensaje) continue;
 
@@ -102,7 +103,7 @@ export async function procesarEchos(sb: SB, value: any): Promise<number> {
       campo: "wa_id",
       valor: cliente,
       canal: "whatsapp",
-      telefono: cliente,
+      telefono: /[A-Za-z]/.test(cliente) ? null : cliente,
     });
     if (!contacto) continue;
 

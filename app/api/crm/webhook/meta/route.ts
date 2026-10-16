@@ -6,7 +6,7 @@ import { responderConIA } from "@/lib/crm-ia";
 import { guardarMediaWhatsApp } from "@/lib/crm-media";
 import { esNumeroDeAvisos } from "@/lib/whatsapp-numeros";
 import { procesarEchos, procesarHistorial, procesarContactos } from "@/lib/crm-coexistencia";
-import { resolverContacto, resolverConversacion } from "@/lib/crm-ingesta";
+import { resolverContacto, resolverContactoWhatsApp, resolverConversacion, identidadWhatsApp } from "@/lib/crm-ingesta";
 import { faltaColumna } from "@/lib/columna-faltante";
 import { registrarEstadosEntrega, type EstadoMeta } from "@/lib/entrega-whatsapp";
 
@@ -110,10 +110,15 @@ export async function POST(req: NextRequest) {
 
         for (const msg of val.messages ?? []) {
           const media = await guardarMediaWhatsApp(db(), msg, phoneId);
+          const quien = identidadWhatsApp(msg, val.contacts);
+          const perfil = (Array.isArray(val.contacts)
+            ? val.contacts.find((c: any) => c?.wa_id === msg.from || c?.user_id === msg.from) ?? val.contacts[0]
+            : null)?.profile?.name;
           const convId = await processarMensaje({
             canal: "whatsapp",
-            senderId: msg.from,
-            senderName: val.contacts?.[0]?.profile?.name ?? msg.from,
+            senderId: quien.id ?? "",
+            telefonoWa: quien.telefono,
+            senderName: perfil ?? quien.telefono ?? quien.id ?? "",
             idField: "wa_id",
             contenido:
               msg.text?.body ?? msg[msg.type]?.caption ?? msg.document?.filename ??
@@ -223,6 +228,8 @@ type MsgInput = {
   tipo: string;
   mediaUrl: string | null;
   metaMessageId: string;
+  // Sólo WhatsApp: el teléfono del cliente, si lo mostró (con «usuario» de WhatsApp puede no venir).
+  telefonoWa?: string | null;
   // Sólo WhatsApp: número de la empresa por el que entró (CRM vs AVISOS).
   phoneNumberId?: string | null;
   displayPhoneNumber?: string | null;
@@ -243,13 +250,16 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
   // senderId ES el número en E.164 sin "+") vive dentro de resolverContacto, así
   // que también la reciben los echos y el historial de la coexistencia — no solo
   // los mensajes entrantes como cuando el bloque estaba aquí suelto.
-  const contacto = await resolverContacto(supabase, {
-    campo: m.idField,
-    valor: m.senderId,
-    nombre: m.senderName || null,
-    canal: m.canal,
-    telefono: m.canal === "whatsapp" ? m.senderId : null,
-  });
+  const contacto =
+    m.canal === "whatsapp"
+      ? await resolverContactoWhatsApp(supabase, { id: m.senderId || null, telefono: m.telefonoWa ?? null, nombre: m.senderName || null })
+      : await resolverContacto(supabase, {
+          campo: m.idField,
+          valor: m.senderId,
+          nombre: m.senderName || null,
+          canal: m.canal,
+          telefono: null,
+        });
   if (!contacto) return null;
 
   // Consentimiento WhatsApp: quien escribe por WhatsApp queda opt-in automático
