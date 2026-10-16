@@ -119,7 +119,7 @@ export function buildVehsHtml(vehiculos: VehiculoPDF[], cp: string, opts?: { img
     // un rótulo en el anexo distinto del nivel con el que se le vendió el servicio.
     const tipoEquip = en ? (nivelDeEquipamiento(veh.equipamiento) === "full_equipo" ? "FULL EQUIPMENT" : "STANDARD") : etiquetaNivel(veh.equipamiento);
     const lbl = vehiculos.length > 1
-      ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc((veh.categoria || (en ? "UNIT" : "UNIDAD")).toUpperCase())} ${tipoEquip}${veh.capacidad_pasajeros ? (en ? " FOR " + veh.capacidad_pasajeros + " PASSENGERS" : " DE " + veh.capacidad_pasajeros + " PASAJEROS") : ""}</p>`
+      ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc((veh.categoria || (en ? "UNIT" : "UNIDAD")).toUpperCase())} ${tipoEquip}${veh.capacidad_pasajeros ? (en ? " FOR " + esc(veh.capacidad_pasajeros) + " PASSENGERS" : " DE " + esc(veh.capacidad_pasajeros) + " PASAJEROS") : ""}</p>`
       : "";
     return `${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${esc(desc)}</p>${fotos}`;
   }).join("");

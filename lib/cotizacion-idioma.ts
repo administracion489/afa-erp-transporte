@@ -293,6 +293,7 @@ export function fmtFechaDoc(valor: string | Date, idioma: Idioma, estilo: Estilo
  */
 export function fmtImporte(n: number, m: Moneda, idioma: Idioma = "es"): string {
   const loc = LOCALE[normalizarIdioma(idioma)];
+  n = Number(n);
   if (normalizarMoneda(m) === "PEN") return `S/ ${n.toLocaleString(loc, { minimumFractionDigits: 2 })}`;
   return `US$ ${n.toLocaleString(loc, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }

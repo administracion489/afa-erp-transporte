@@ -159,7 +159,7 @@ export function buildCronogramaMultidiaPDF(cot: CotizacionPdf, cp: string, idiom
     const destinoNombre = esc(d.destino_nombre || "—");
     const rutaLabel = hasDestino ? `<span style="color:#374151;">${origenNombre}</span><span style="color:${cp};font-weight:900;"> → </span><span style="font-weight:700;">${destinoNombre}</span>` : "";
     return `<tr style="border-bottom:1px solid #f3f4f6;">
-      <td style="text-align:center;font-weight:900;font-size:11px;color:${cp};padding:5px 8px;white-space:nowrap;">${T("cron_dia_mayus", { n: d.dia })}</td>
+      <td style="text-align:center;font-weight:900;font-size:11px;color:${cp};padding:5px 8px;white-space:nowrap;">${T("cron_dia_mayus", { n: esc(d.dia) })}</td>
       <td style="padding:5px 8px;font-size:10px;font-weight:600;">${fechaFmt}</td>
       ${hasDestino ? `<td style="padding:5px 8px;font-size:10px;">${rutaLabel}</td>` : ""}
       <td style="text-align:center;padding:5px 8px;font-size:10px;">⏰ ${esc(d.hora_ida || "—")}</td>
@@ -464,7 +464,17 @@ function textosDePlantilla(cfg: PlantillaPdfCfg | null | undefined): string[] {
  * El HTML del PDF de la cotización y lo que la pantalla tiene que AVISAR antes de enviarlo.
  * `html: null` solo con el aviso `sin_tc` (dólares sin un tipo de cambio válido).
  */
+// Los campos numéricos de items_json vienen de un jsonb que acepta texto: un string que no es
+// número se imprimiría crudo en el HTML (y el PDF se escribe en el origen del ERP). Un número
+// sigue tal cual (la salida no cambia); null/undefined también; lo demás pasa a 0.
+function numPdf(v: unknown): unknown {
+  if (v === null || v === undefined || typeof v === "number") return v;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export function htmlCotizacion(e: EntradaPdfCot): ResultadoPdf {
+  e = { ...e, items: e.items.map(it => ({ ...it, dias: numPdf(it.dias), cantidad: numPdf(it.cantidad), precio_unit: numPdf(it.precio_unit), descuento_pct: numPdf(it.descuento_pct) }) as typeof it) };
   const avisos: AvisoPdf[] = [];
   const cot = e.cot;
   const idioma = normalizarIdioma(e.idioma ?? cot.idioma_pdf);

@@ -499,5 +499,20 @@ console.log("5. Cuentas por moneda");
   ok(cuentasParaMoneda([{ banco: "A", cuenta: "1", cci: "", moneda: "EUR" as any }], "USD").length === 1, "moneda desconocida = sin declarar");
 }
 
+// Seguridad: los campos numéricos vienen de un jsonb que acepta texto; nunca se imprimen crudos.
+{
+  const P = "<img src=x onerror=alert(1)>";
+  for (const plantilla of ["corporativo", "moderno_fotos", "turistico", "ejecutivo"]) {
+    const r = N.htmlCotizacion({
+      cot: { id: 1, numero_cotizacion: "N", origen: "a", destino: "b", km: 1, created_at: "2026-01-01",
+        fechas_multidia_json: [{ dia: P, fecha: "2026-01-01", hora_ida: "1", destino_nombre: "" }] } as any,
+      items: [{ descripcion: "d", dias: P, cantidad: P, precio_unit: P, descuento_pct: P } as any],
+      vehiculos: [{ capacidad_pasajeros: P, categoria: "x" } as any, { capacidad_pasajeros: P } as any],
+      plantilla,
+    } as any);
+    ok(!(r.html ?? "").includes("<img src=x"), `${plantilla}: texto en campos numéricos no entra crudo al HTML`);
+  }
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);
