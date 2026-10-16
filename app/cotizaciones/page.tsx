@@ -1505,8 +1505,31 @@ export default function CotizacionesPage(){
         }
       }catch(e){/* best-effort: sin nombre, el PDF omite la línea */}
     };
-    const{data:{subscription}}=supabase.auth.onAuthStateChange(async(_event,session)=>{await cargarNombre(session);});
-    supabase.auth.getSession().then(({data:{session}})=>{cargarNombre(session);});
+    /**
+     * EL CALLBACK DE SESIÓN NO ESPERA NADA DE SUPABASE, y es la diferencia entre guardar y colgarse.
+     *
+     * supabase-js avisa SIGNED_IN cada vez que la pestaña vuelve a estar visible y TOKEN_REFRESHED
+     * cada hora, y lo hace CON SU CANDADO DE SESIÓN TOMADO, esperando a que el callback termine.
+     * El callback era `async` y hacía `await supabase.from("usuarios")…`: esa consulta pide la
+     * sesión, la sesión espera al candado y el candado espera al callback. Desde ese momento TODA
+     * consulta de la pestaña quedaba en cola para siempre — «⏳ Guardando…» sin fin y solo F5 lo
+     * arreglaba. Pasaba con casi todos los usuarios, porque los creados desde /usuarios no traen
+     * `full_name` en `user_metadata` y cargarNombre siempre caía a la consulta.
+     *
+     * Por eso: callback síncrono, el trabajo se DIFIERE con setTimeout (lo que pide la propia
+     * librería) y solo cuando cambia el usuario — volver a la pestaña o renovar el token es la
+     * misma persona con el mismo nombre.
+     */
+    let usuarioVisto:string|null|undefined;
+    const alCambiarSesion=(session:any)=>{
+      const id:string|null=session?.user?.id??null;
+      if(id===usuarioVisto)return;
+      usuarioVisto=id;
+      // Otra persona en la misma pestaña: su cotización no sale con el nombre de la anterior.
+      setTimeout(()=>{setReprNombre("");void cargarNombre(session);},0);
+    };
+    const{data:{subscription}}=supabase.auth.onAuthStateChange((_event:string,session:any)=>{alCambiarSesion(session);});
+    supabase.auth.getSession().then(({data:{session}}:any)=>{alCambiarSesion(session);});
     return()=>subscription.unsubscribe();
   },[]);
   useEffect(()=>{
