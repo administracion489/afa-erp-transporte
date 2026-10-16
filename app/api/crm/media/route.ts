@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { objetoPrivadoDe } from "@/lib/storage-privado";
-import { rescatarUrlMeta } from "@/lib/crm-media";
+import { rescatarUrlMeta, esUrlMediaMeta } from "@/lib/crm-media";
 
 export const maxDuration = 60;
 
@@ -48,7 +48,8 @@ export async function POST(req: NextRequest) {
     if (!ident) { urls[m.id] = null; continue; }
     const obj = objetoPrivadoDe(ident);
     if (obj) { aFirmar.push({ id: m.id, bucket: obj.bucket, ruta: obj.ruta }); continue; }
-    if (/fbsbx\.com|facebook\.com|whatsapp\.net/.test(ident)) { aRescatar.push(m); continue; }
+    // Solo un enlace de Meta (host exacto, ver esUrlMediaMeta) se intenta con el token.
+    if (esUrlMediaMeta(ident)) { aRescatar.push(m); continue; }
     urls[m.id] = ident; // enlace público de otro origen: se usa tal cual
   }
 
@@ -66,7 +67,7 @@ export async function POST(req: NextRequest) {
       const nuevo = await rescatarUrlMeta(sb, m.media_url, phone, m.id);
       if (!nuevo) {
         // Ya no está en Meta (sus enlaces caducan): no disponible.
-        urls[m.id] = /fbsbx\.com|whatsapp\.net/.test(m.media_url) ? null : m.media_url;
+        urls[m.id] = null;
         continue;
       }
       await sb.from("crm_mensajes").update({ media_url: nuevo }).eq("id", m.id);

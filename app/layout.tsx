@@ -947,14 +947,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     async function cargarSesionPermisos() {
       if (esLogin || esPublica) { setCargando(false); return; }
 
+      // Se decide ANTES de esperar nada: si con lo ya validado la ruta no corresponde, se tapa la
+      // pantalla de inmediato (una pantalla sin su módulo no llega a pintarse mientras tanto).
+      const previo = validadoRef.current;
+      const okConPrevio = !!previo && rutaPermitida(previo.permisos, previo.esAdmin);
+      if (!okConPrevio) setCargando(true);
+
       const { data } = await supabase.auth.getSession();
       const session = data.session;
-      if (!session) { validadoRef.current = null; router.replace("/login"); return; }
+      // Recarga completa (no navegación interna): así nada del usuario anterior —foto, fichaje,
+      // permisos— sobrevive al montaje cuando entra otra persona en la misma pestaña.
+      if (!session) { validadoRef.current = null; window.location.href = "/login"; return; }
       setEmailUsuario(session.user.email || "");
 
       // Camino rápido: este usuario ya se validó en este montaje y la ruta le corresponde.
-      const previo = validadoRef.current;
-      const rapido = !!previo && previo.userId === session.user.id && rutaPermitida(previo.permisos, previo.esAdmin);
+      const rapido = okConPrevio && previo!.userId === session.user.id;
       if (rapido) setCargando(false);
       else setCargando(true);
 
@@ -965,11 +972,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       ]);
       const perfil = perfilRes.data;
 
-      // Un fallo de RED con una validación previa no saca a nadie: se sigue con lo validado y
-      // la próxima navegación vuelve a intentar.
-      if ((perfilRes.error || permisosRes.error) && rapido) return;
+      // Desactivado: se expulsa en cuanto se SABE, aunque la otra consulta haya fallado.
+      // Un fallo de RED con una validación previa no saca a nadie (se sigue con lo validado y la
+      // próxima navegación vuelve a intentar), pero solo cuando el estado no se conoce.
+      const desactivado = !!perfil && perfil.activo === false;
+      if (!desactivado && perfilRes.error && rapido) return;
 
-      if (!perfil || perfil.activo === false) {
+      if (!perfil || desactivado) {
         validadoRef.current = null;
         await supabase.auth.signOut();
         window.location.href = "/login";
@@ -978,6 +987,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
       setNombreUsuario(perfil.nombre || "Usuario");
       setRolUsuario(perfil.rol || "operador");
+      if (permisosRes.error && rapido) return;
 
       const esAdmin = perfil.rol === "admin";
       let listaPermisos = permisosRes.data?.map((p: any) => p.modulo) || [];
