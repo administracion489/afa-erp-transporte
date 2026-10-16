@@ -204,6 +204,7 @@ export function contenidoDeMensaje(msg: any): { tipo: string; contenido: string;
     msg?.button?.text ??
     msg?.interactive?.list_reply?.title ??
     msg?.interactive?.button_reply?.title ??
+    textoContactoOUbicacion(msg) ??
     null;
 
   return {
@@ -213,4 +214,26 @@ export function contenidoDeMensaje(msg: any): { tipo: string; contenido: string;
     // no por URL. Solo se guarda si Meta manda una directamente.
     mediaUrl: msg?.[tipo]?.url ?? msg?.image?.url ?? msg?.document?.url ?? null,
   };
+}
+
+/** Contacto compartido (tarjeta de WhatsApp) o ubicación → texto legible. Antes quedaba como
+ *  «[contacts]» / «[location]»: el equipo no veía el número y la IA tampoco. */
+export function textoContactoOUbicacion(msg: any): string | null {
+  const tipo = String(msg?.type ?? "");
+  if (tipo === "contacts" && Array.isArray(msg?.contacts)) {
+    const lineas = msg.contacts.slice(0, 10).map((c: any) => {
+      const nombre = c?.name?.formatted_name || [c?.name?.first_name, c?.name?.last_name].filter(Boolean).join(" ") || "Sin nombre";
+      const tels = (Array.isArray(c?.phones) ? c.phones : []).map((p: any) => p?.phone || p?.wa_id).filter(Boolean);
+      const org = c?.org?.company ? ` (${c.org.company})` : "";
+      return `👤 ${nombre}${org}${tels.length ? `: ${tels.join(" / ")}` : ""}`;
+    });
+    return lineas.length ? `Contacto compartido:\n${lineas.join("\n")}` : null;
+  }
+  if (tipo === "location" && msg?.location) {
+    const l = msg.location;
+    const partes = [l.name, l.address].filter(Boolean).join(" · ");
+    const mapa = l.latitude != null && l.longitude != null ? `https://maps.google.com/?q=${l.latitude},${l.longitude}` : "";
+    return `📍 Ubicación${partes ? `: ${partes}` : ""}${mapa ? `\n${mapa}` : ""}`;
+  }
+  return null;
 }
