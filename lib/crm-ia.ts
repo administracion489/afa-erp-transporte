@@ -64,10 +64,28 @@ const NOTA_SIN_RESULTADOS =
 const MENSAJE_DERIVACION_DEFECTO =
   "Gracias, {nombre}. Ya registré tu solicitud y un ejecutivo de nuestro equipo la está revisando para enviarte la información por este mismo chat a la brevedad. 🙌";
 
+function primerNombre(contacto: any): string {
+  const nombre = String(contacto?.nombre ?? "").trim().split(/\s+/)[0] ?? "";
+  return nombre && !/^\+?\d/.test(nombre) ? nombre.charAt(0).toUpperCase() + nombre.slice(1).toLowerCase() : "";
+}
+
+/** Hora de Lima (UTC-5, sin horario de verano) y el saludo que le toca. */
+function ahoraLima(): { fecha: string; hora: string; saludo: string; inicioDiaUtc: string } {
+  const lima = new Date(Date.now() - 5 * 3600_000);
+  const iso = lima.toISOString();
+  const h = lima.getUTCHours();
+  const saludo = h < 12 ? "Buenos días" : h < 19 ? "Buenas tardes" : "Buenas noches";
+  return {
+    fecha: iso.slice(0, 10),
+    hora: iso.slice(11, 16),
+    saludo,
+    inicioDiaUtc: new Date(`${iso.slice(0, 10)}T05:00:00.000Z`).toISOString(),
+  };
+}
+
 function mensajeDerivacion(agente: any, contacto: any): string {
   const plantilla = String(agente?.mensaje_derivacion ?? "").trim() || MENSAJE_DERIVACION_DEFECTO;
-  const nombre = String(contacto?.nombre ?? "").trim().split(/\s+/)[0] ?? "";
-  const n = nombre && !/^\+?\d/.test(nombre) ? nombre.charAt(0).toUpperCase() + nombre.slice(1).toLowerCase() : "";
+  const n = primerNombre(contacto);
   return plantilla.replace(/\{nombre\}/g, n).replace(/,\s*([.!?])/g, "$1").replace(/\s+,/g, ",");
 }
 
@@ -413,7 +431,9 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
 
 // ── System prompt construido desde la config del agente ──────────────────────
 
-function construirSystem(agente: any, contacto: any, conv: any): string {
+function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false): string {
+  const ahora = ahoraLima();
+  const nombre = primerNombre(contacto);
   const goals: { titulo: string; instrucciones: string }[] = Array.isArray(agente.goals) ? agente.goals : [];
   const goalsTxt = goals.length
     ? goals.map((g, i) => `${i + 1}. ${g.titulo}: ${g.instrucciones}`).join("\n")
@@ -429,6 +449,12 @@ function construirSystem(agente: any, contacto: any, conv: any): string {
     goalsTxt,
     "",
     agente.conocimiento ? `## Base de conocimiento\n${agente.conocimiento}\n` : "",
+    "## Fecha y hora",
+    `Hoy es ${ahora.fecha} y son las ${ahora.hora} en Lima. «Mañana» = el día siguiente a esa fecha.`,
+    "",
+    primeroDelDia
+      ? `## SALUDO OBLIGATORIO\nEs tu PRIMER mensaje del día con este cliente: tu respuesta DEBE empezar con «${ahora.saludo}${nombre ? `, ${nombre}` : ""}», seguido de una presentación breve si corresponde, y recién después responder o preguntar. No omitas el saludo aunque el cliente no salude ni aunque necesites pedirle datos.\n`
+      : "## Saludo\nYa conversaste hoy con este cliente: NO vuelvas a saludar ni a presentarte; responde directo.\n",
     "## Canal y contacto",
     `Estás respondiendo por ${conv.canal}. Cliente: ${contacto.nombre ?? "desconocido"}${contacto.empresa ? ` (${contacto.empresa})` : ""}${contacto.telefono ? `, tel ${contacto.telefono}` : ""}.`,
     "",
@@ -754,7 +780,12 @@ async function responderConIAInterno(
   }
 
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
-  const system = construirSystem(agente, contacto, conv);
+  // ¿Ya le escribimos hoy (hora de Lima) en este hilo? Si no, el saludo es obligatorio.
+  const { count: salientesHoy } = await sb
+    .from("crm_mensajes").select("id", { count: "exact", head: true })
+    .eq("conversacion_id", convId).eq("direccion", "saliente")
+    .gte("created_at", ahoraLima().inicioDiaUtc);
+  const system = construirSystem(agente, contacto, conv, (salientesHoy ?? 0) === 0);
   const messages = await cargarHistorial(sb, convId);
   if (messages.length === 0) return { ok: true, accion: "omitido", motivo: "Sin mensajes del cliente." };
 
@@ -851,11 +882,12 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
   const agente = agentes?.[0];
   if (!agente) return { ok: false, herramientas: [], error: "No hay agente configurado." };
 
-  const contacto = { id: "test", nombre: "Cliente de prueba", empresa: null, telefono: null, wa_id: null, email: null };
+  const contacto = { id: "test", nombre: null, empresa: null, telefono: null, wa_id: null, email: null };
   const conv = { id: "test", canal: "whatsapp", estado: "abierta", pipeline_id: null };
   const ctx: Ctx = { sb, contacto, conv, agente, escalado: { v: false } };
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
-  const system = construirSystem(agente, contacto, conv);
+  // En la prueba, «primer mensaje del día» = el agente todavía no contestó en este chat de prueba.
+  const system = construirSystem(agente, contacto, conv, !historial.some((m) => m.role === "assistant"));
   const messages: Anthropic.MessageParam[] = [...historial, { role: "user", content: mensaje }];
   const usadas: string[] = [];
 
