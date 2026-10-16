@@ -6,7 +6,13 @@ import {
   PERIODOS, ETIQUETA_PERIODO, ETIQUETA_EJE, PERIODO_DEFECTO, EJE_DEFECTO, hoyLimaISO, rangoDePeriodo,
   textoBuscable, filtrarLista, kpisDe, type Periodo, type EjeFecha, type CotLista, type RangoPeriodo,
 } from "@/lib/cotizaciones-filtros";
-import { leerListaPeriodo, leerHistorialSelector, leerCotizacion, type FilaHistorialSelector } from "@/lib/cotizaciones-datos";
+import { leerListaPeriodo, leerHistorialSelector, leerCotizacion, leerTipoCambioSugerido, type FilaHistorialSelector } from "@/lib/cotizaciones-datos";
+import {
+  normalizarMoneda, simboloMoneda, revisarTipoCambio, aMonedaCot, aPENdesdeCot, itemsEnMoneda, itemsAPEN,
+  totalesEnMoneda, planCambioMoneda, type Moneda, type SugerenciaTc,
+} from "@/lib/cotizacion-moneda";
+import { normalizarIdioma, DEFAULT_CONSID_ES, descripcionServicio, type Idioma } from "@/lib/cotizacion-idioma";
+import { htmlCotizacion, type AvisoPdf, type ResultadoPdf } from "@/lib/cotizacion-pdf";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
@@ -63,7 +69,7 @@ type ModoServ="eventual"|"fijo";
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;pax_contratado?:number|null;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;ciudad?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;moneda?:string|null;tipo_cambio?:number|string|null;idioma_pdf?:string|null;};
 /**
  * Una fila de la LISTA liviana (COLS_LISTA de lib/cotizaciones-filtros.ts): solo escalares, sin
  * items_json, paraderos ni consideraciones. Todo lo que edita, duplica, imprime o convierte pide
@@ -94,18 +100,34 @@ const PASO_LISTA=50;
 const CLAVE_FILTROS_COT="afa_cot_filtros_v1";
 const ESTADOS_FILTRO=["todos","borrador","pendiente","enviado","aprobado","rechazado"];
 const MODOS_FILTRO=["todos","eventual","fijo"];
-const DEFAULT_CONSID:ConsidCot={incluye:["Traslado de origen a destino","Conductor profesional certificado","Combustible durante todo el recorrido","GPS en tiempo real","Seguro de viaje SOAT vigente"],no_incluye:["Alimentación y bebidas","Guía turístico","Entradas a atractivos turísticos"],generales:["Precios según fechas y horarios coordinados.","Tolerancia máxima de espera: 30 minutos.","No se permite consumo de alcohol ni tabaco a bordo.","Cambios en ruta u horario pueden generar costos adicionales.","Servicio eventual: adelanto del 50% para confirmar.","Recomendamos reservar con 7 días de anticipación mínimo."]};
+// Las consideraciones de fábrica viven en lib/cotizacion-idioma.ts (con su versión en inglés).
+const DEFAULT_CONSID:ConsidCot=DEFAULT_CONSID_ES;
+/**
+ * La migración de moneda e idioma (cotizaciones-04). Sin ella las tres columnas no existen: se
+ * guarda en soles y en español, y el selector de dólares se apaga nombrando este archivo.
+ */
+const SQL_MONEDA="supabase/cotizaciones-04-moneda-idioma.sql";
+const COLS_MONEDA=["moneda","tipo_cambio","idioma_pdf"] as const;
+const ETQ_FUENTE_TC:Record<SugerenciaTc["fuente"],string>={tabla_tipo_cambio:"tabla de tipo de cambio",ultima_cotizacion_usd:"última cotización en dólares",sin_fuente:"sin fuente"};
 const SERVS_EVENTUAL=[{id:"solo_ida",label:"➡️ Solo Ida",cat:"Traslados"},{id:"ida_retorno",label:"⇄ Ida y Retorno",cat:"Traslados"},{id:"ida_retorno_paradas",label:"📍 Con Paradas",cat:"Disposición"},{id:"full_day",label:"⭐ Full Day",cat:"Turismo"},{id:"multi_dia",label:"🏕️ Multi-día",cat:"Turismo"}];
 const SERVS_FIJO=[{id:"fijo_solo_ida",label:"→ Solo Ida",cat:"Ruta Simple"},{id:"transporte_personal",label:"⇄ Ida y Retorno",cat:"Ruta Simple"},{id:"fijo_multiparada",label:"📍 Con Paraderos",cat:"Ruta Logística"},{id:"fijo_reten",label:"🏭 Retén / Planta",cat:"Retén"}];
 const ESTADO_CFG:Record<EstadoCot,{label:string;bg:string;color:string}>={borrador:{label:"Borrador",bg:"#f3f4f6",color:"#6b7280"},pendiente:{label:"Pendiente",bg:"#fef9c3",color:"#854d0e"},enviado:{label:"Enviado",bg:"#e0f2fe",color:"#0369a1"},aprobado:{label:"Aprobado",bg:"#dcfce7",color:"#166534"},rechazado:{label:"Rechazado",bg:"#fee2e2",color:"#991b1b"}};
 const TRANSICIONES:Record<EstadoCot,EstadoCot[]>={borrador:["pendiente"],pendiente:["enviado"],enviado:["aprobado","rechazado"],aprobado:[],rechazado:["pendiente"]};
 const TIPOS_APROBACION=["Operación bancaria","Orden de compra","Orden de servicio","Correo de confirmación","Contrato firmado"];
 const ITEM_VACIO:ItemCot={descripcion:"",dias:1,cantidad:1,precio_unit:0,descuento_pct:0,pax_contratado:null};
-const FORM0={cliente_id:"",origen:"",destino:"",km:"",costo_estimado:"",estado:"pendiente" as EstadoCot,numero_cotizacion:"",atencion:"",asunto:"",punto_retorno:"",fecha_servicio:"",fecha_retorno:"",hora_ida:"",hora_retorno:"",descuento_pct:"0",tipo_vehiculo:"",equipamiento:"full_equipo",vehiculo_flota_id:"",vehiculo_tercero_id:"",modo_servicio:"eventual" as ModoServ,tipo_servicio:"solo_ida",dias_servicio:"1",horas_servicio:"8",pernocte_costo:"0",precio_dia:"",incluye_igv:true,itinerario_texto:""};
+const FORM0={cliente_id:"",origen:"",destino:"",km:"",costo_estimado:"",estado:"pendiente" as EstadoCot,numero_cotizacion:"",atencion:"",asunto:"",punto_retorno:"",fecha_servicio:"",fecha_retorno:"",hora_ida:"",hora_retorno:"",descuento_pct:"0",tipo_vehiculo:"",equipamiento:"full_equipo",vehiculo_flota_id:"",vehiculo_tercero_id:"",modo_servicio:"eventual" as ModoServ,tipo_servicio:"solo_ida",dias_servicio:"1",horas_servicio:"8",pernocte_costo:"0",precio_dia:"",incluye_igv:true,itinerario_texto:"",moneda:"PEN" as Moneda,tipo_cambio:"",idioma_pdf:"es" as Idioma};
 
 const fmtS=(n:number)=>`S/ ${n.toLocaleString("es-PE",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const fmtF=(f:string|null)=>f?new Date(f+"T00:00:00").toLocaleDateString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric"}):"—";
-const calcItems=(items:ItemCot[],conIGV=true)=>{const s=items.reduce((t,it)=>t+it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100),0);return{subtotal:s,igv:conIGV?s*0.18:0,total:conIGV?s*1.18:s};};
+/** Un importe ya expresado en `m` (S/ o US$). */
+const fmtM=(n:number,m:Moneda)=>m==="USD"?`US$ ${n.toLocaleString("es-PE",{minimumFractionDigits:2,maximumFractionDigits:2})}`:fmtS(n);
+/**
+ * Un importe GUARDADO en soles, enseñado en la moneda de la cotización. Sin un tipo de cambio
+ * válido se enseña en soles (nunca soles rotulados como dólares).
+ */
+const fmtCot=(pen:number,m:Moneda,tc:unknown)=>{const v=aMonedaCot(pen,m,tc);return v==null?fmtS(pen):fmtM(v,m);};
+/** El `title` de un importe en dólares: lo que vale en soles y a qué tipo de cambio. */
+const tituloSoles=(pen:number,m:Moneda,tc:unknown)=>m==="USD"?`${fmtS(pen)} al tipo de cambio ${revisarTipoCambio(tc).tc??"—"} (se guarda en soles)`:undefined;
 const norm=(s:string)=>s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
 const iCls=(e="")=>`w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all ${e}`;
 function extraerNombreApellido(nombre:string):string{const p=nombre.toUpperCase().trim().split(/\s+/).filter(Boolean);if(p.length===0)return nombre.toUpperCase();if(p.length<=2)return p.join(" ");if(p.length===3)return p[0]+" "+p[1];return p[0]+" "+p[2];}
@@ -128,7 +150,11 @@ function calcCostoVeh(p:ParamCosto,pr:Record<string,number>,km:number,dias:numbe
   return{baseCosto:base,totalMin15:fF(0.15),totalEst20:fF(0.20),totalAlto25:fF(0.25),sinIGV15:pF(0.15),sinIGV20:pF(0.20),sinIGV25:pF(0.25),precioPax20:fF(0.20)/(p.capacidad||1),precioPax20Sin:pF(0.20)/(p.capacidad||1),diaEstIGV:fF(0.20),diaMinIGV:fF(0.15),mesEstIGV:fF(0.20)*26};
 }
 
-function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peajes,pernocte,viaticos,modoServ,tarifas,paramsDB,preciosDB,onAplicar}:{origen:string;destino:string;tipoVehId:string;tipoServ:string;equip:string;km:number;dias:number;peajes:number;pernocte:number;viaticos:number;modoServ:ModoServ;tarifas:Tarifa[];paramsDB:ParamCosto[];preciosDB:Record<string,number>;onAplicar:(sinIGV:number,fuente:string,costo?:number)=>void;}){
+function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peajes,pernocte,viaticos,modoServ,tarifas,paramsDB,preciosDB,onAplicar,moneda="PEN",tc=null}:{origen:string;destino:string;tipoVehId:string;tipoServ:string;equip:string;km:number;dias:number;peajes:number;pernocte:number;viaticos:number;modoServ:ModoServ;tarifas:Tarifa[];paramsDB:ParamCosto[];preciosDB:Record<string,number>;onAplicar:(sinIGV:number,fuente:string,costo?:number)=>void;moneda?:Moneda;tc?:unknown;}){
+  // Todo se calcula en SOLES (como se guarda); en una cotización en dólares se ENSEÑA en US$ al
+  // tipo de cambio de la cotización, con los soles en el title. `onAplicar` recibe siempre soles.
+  const usd=moneda==="USD"&&revisarTipoCambio(tc).codigo==="ok";
+  const M=(pen:number)=>usd?fmtCot(pen,"USD",tc):fmtS(pen);
   const veh=paramsDB.find(p=>p.tipo_vehiculo===tipoVehId);
   const costo=useMemo(()=>veh?calcCostoVeh(veh,preciosDB,km>0?km:1,dias,peajes,pernocte,viaticos):null,[veh,preciosDB,km,dias,peajes,pernocte,viaticos]);
   const tarifaExacta=useMemo(()=>tarifas.find(t=>norm(t.origen)===norm(origen)&&norm(t.destino)===norm(destino)&&t.tipo_vehiculo===tipoVehId&&t.equipamiento===equip&&t.tipo_servicio===tipoServ&&(t.modo||"eventual")===modoServ),[tarifas,origen,destino,tipoVehId,equip,tipoServ,modoServ]);
@@ -150,7 +176,7 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="px-2 py-0.5 rounded-lg text-[9px] font-black bg-white/10 text-white/60 uppercase tracking-wider">Precios sin IGV</span>
+          <span className="px-2 py-0.5 rounded-lg text-[9px] font-black bg-white/10 text-white/60 uppercase tracking-wider">Precios sin IGV{usd?" · en US$":""}</span>
           <div className={`px-3 py-1 rounded-xl text-[11px] font-bold ${enOf?"bg-green-500/20 text-green-300":"bg-amber-500/20 text-amber-300"}`}>{enOf?"🟢 Horario oficina":"🟡 Fuera horario"}</div>
         </div>
       </div>
@@ -160,8 +186,8 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
           <div className="rounded-xl bg-red-500/10 border border-red-400/20 p-3">
             <p className="text-[9px] font-black text-red-300 uppercase mb-1">⛔ Mínimo 15%</p>
             {km>0&&costo?(<>
-              <p className="font-black text-lg text-white font-mono">{fmtS(dispMin)}</p>
-              <p className="text-[9px] text-red-300/60 mb-1">+IGV → {fmtS(dispMin*1.18)}</p>
+              <p className="font-black text-lg text-white font-mono">{M(dispMin)}</p>
+              <p className="text-[9px] text-red-300/60 mb-1">+IGV → {M(dispMin*1.18)}</p>
               <button onClick={()=>onAplicar(dispMin,"cotizador_min",costo.baseCosto)} className="w-full py-1 rounded-lg text-[10px] font-black text-white bg-red-500/30 hover:bg-red-500/50">Usar mínimo</button>
             </>):<p className="text-white/25 text-xs mt-1">Ingresa km</p>}
           </div>
@@ -170,8 +196,8 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
             <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-blue-500 text-white text-[8px] font-black px-2 py-0.5 rounded-full whitespace-nowrap">RECOMENDADO</div>
             <p className="text-[9px] font-black text-blue-300 uppercase mb-1">🔧 Estándar 20%</p>
             {km>0&&costo?(<>
-              <p className="font-black text-lg text-white font-mono">{fmtS(dispEst)}</p>
-              <p className="text-[9px] text-blue-300/70">{esFijo?`~${fmtS(dispEst*26)}/mes`:`${fmtS(costo.precioPax20Sin)}/pax`}</p>
+              <p className="font-black text-lg text-white font-mono">{M(dispEst)}</p>
+              <p className="text-[9px] text-blue-300/70">{esFijo?`~${M(dispEst*26)}/mes`:`${M(costo.precioPax20Sin)}/pax`}</p>
               <button onClick={()=>onAplicar(dispEst,"cotizador",costo.baseCosto)} className="mt-2 w-full py-1 rounded-lg text-[10px] font-black text-white bg-blue-500 hover:bg-blue-400">✓ Usar estándar</button>
             </>):<p className="text-white/25 text-xs mt-1">Ingresa km</p>}
           </div>
@@ -179,8 +205,8 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
           <div className={`rounded-xl p-3 border ${tarifaExacta?"bg-green-500/15 border-green-400/40":"bg-white/8 border-white/15"}`}>
             {tarifaExacta?(<>
               <p className="text-[9px] font-black text-green-300 uppercase mb-1">📋 Tarifario</p>
-              <p className="font-black text-lg text-white font-mono">{fmtS(dispTarif)}</p>
-              <p className="text-[9px] text-green-300/60 mb-1">+IGV → {fmtS(dispTarif*1.18)}</p>
+              <p className="font-black text-lg text-white font-mono">{M(dispTarif)}</p>
+              <p className="text-[9px] text-green-300/60 mb-1">+IGV → {M(dispTarif*1.18)}</p>
               <button onClick={()=>onAplicar(dispTarif,"tarifario")} className="w-full py-1 rounded-lg text-[10px] font-black text-white bg-green-600 hover:bg-green-500">✓ Usar tarifario</button>
             </>):(<>
               <p className="text-[9px] font-black text-white/40 uppercase mb-1">📋 Tarifario</p>
@@ -192,8 +218,8 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
         {dispSug>0&&(<div className="rounded-xl bg-white/10 border border-white/20 px-4 py-3 flex items-center justify-between gap-3">
           <div>
             <p className="text-white/50 text-[10px] font-bold uppercase">⭐ Precio sugerido <span className="text-white/30 normal-case font-normal">(sin IGV)</span></p>
-            <p className="text-white font-black text-xl font-mono">{fmtS(dispSug)}</p>
-            <p className="text-white/40 text-[10px]">Con IGV → {fmtS(dispSug*1.18)}{esFijo&&costo?`  ·  ~${fmtS(dispSug*26)}/mes s/IGV`:""}</p>
+            <p className="text-white font-black text-xl font-mono" title={tituloSoles(dispSug,moneda,tc)}>{M(dispSug)}</p>{usd&&<p className="text-white/40 text-[10px] font-mono">= {fmtS(dispSug)} sin IGV (se guarda en soles)</p>}
+            <p className="text-white/40 text-[10px]">Con IGV → {M(dispSug*1.18)}{esFijo&&costo?`  ·  ~${M(dispSug*26)}/mes s/IGV`:""}</p>
           </div>
           <button onClick={()=>onAplicar(dispSug,"sugerido",costo?.baseCosto)} className="px-4 py-2.5 rounded-xl font-black text-sm bg-white text-[#0b315f] hover:bg-gray-100 flex-shrink-0">→ Aplicar</button>
         </div>)}
@@ -204,6 +230,9 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
 
 function PanelDecision({c,onAct}:{c:CotFila;onAct:()=>void}){
   const [guardando,setGuardando]=useState(false);const [descPct,setDescPct]=useState(c.descuento_pct_solicitado?.toString()||"");
+  // Los importes de la fila son SOLES (y así se escriben); en una cotización en dólares se ENSEÑAN
+  // en US$ al tipo de cambio congelado en ella.
+  const mon=normalizarMoneda(c.moneda);const fmtC=(pen:number)=>fmtCot(pen,mon,c.tipo_cambio);
   const enOf=enHorario();if(!c.precio_cotizador&&!c.precio_tarifario)return null;
   const esFijo=c.modo_servicio==="fijo";const tarifIGV=c.precio_tarifario?c.precio_tarifario*1.18:null;const precSug=Math.max(c.precio_cotizador||0,tarifIGV||0)||Number(c.precio_cliente);const precDesc=c.descuento_pct_solicitado?precSug*(1-c.descuento_pct_solicitado/100):null;const fuente=c.precio_cotizador&&tarifIGV?(c.precio_cotizador>=tarifIGV?"Cotizador":"Tarifario"):c.precio_cotizador?"Cotizador":"Tarifario";
   async function getCosto(){const{data}=await supabase.from("cotizaciones").select("costo_estimado").eq("id",c.id).single();return Number(data?.costo_estimado||0);}
@@ -211,7 +240,7 @@ function PanelDecision({c,onAct}:{c:CotFila;onAct:()=>void}){
   async function solDesc(){const pct=parseFloat(descPct);if(!pct||pct<=0||pct>=100)return;setGuardando(true);await supabase.from("cotizaciones").update({descuento_solicitado:true,descuento_pct_solicitado:pct,descuento_autorizado:false,hora_solicitud_descuento:new Date().toISOString()}).eq("id",c.id);setGuardando(false);onAct();}
   async function autDesc(){if(!precDesc)return;setGuardando(true);const costo=await getCosto();await supabase.from("cotizaciones").update({precio_cliente:precDesc,margen_estimado:precDesc-costo,descuento_autorizado:true,modo_precio:"descuento_autorizado"}).eq("id",c.id);setGuardando(false);onAct();}
   async function rechDesc(){setGuardando(true);await supabase.from("cotizaciones").update({descuento_autorizado:false,descuento_solicitado:false}).eq("id",c.id);setGuardando(false);onAct();}
-  return(<div className="mt-2 rounded-xl border overflow-hidden" style={{borderColor:"#0b315f22"}}><div className="px-3 py-2 flex items-center gap-2 flex-wrap" style={{background:"#eef3f8"}}><span className="text-[11px] font-black text-[#0b315f]">💡 Precios{esFijo?" · FIJO":""}</span>{c.precio_cotizador&&<span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded-full">🔧 {fmtS(c.precio_cotizador)}{esFijo?"/día":""}</span>}{tarifIGV&&<span className="text-[10px] bg-green-100 text-green-700 font-bold px-1.5 py-0.5 rounded-full">📋 {fmtS(tarifIGV)}{esFijo?"/día":""}</span>}<span className="text-[10px] bg-[#0b315f] text-white font-bold px-1.5 py-0.5 rounded-full">⭐ {fmtS(precSug)} ({fuente})</span>{c.descuento_solicitado&&!c.descuento_autorizado&&<span className="text-[10px] bg-orange-100 text-orange-700 font-bold px-1.5 py-0.5 rounded-full animate-pulse">🙋 {c.descuento_pct_solicitado}% pendiente</span>}{esFijo&&c.precio_mes_estimado&&<span className="text-[10px] bg-green-50 text-green-700 font-bold px-1.5 py-0.5 rounded-full">📅 ~{fmtS(c.precio_mes_estimado)}/mes</span>}</div><div className="p-3 bg-white space-y-3">{!enOf&&<div className="rounded-xl px-3 py-2 border border-amber-200 bg-amber-50 text-xs text-amber-800 font-semibold">⏰ Fuera de horario L-V 8-18h — precio máximo sugerido automáticamente</div>}{c.descuento_solicitado&&!c.descuento_autorizado&&(<div className="rounded-xl border-2 border-orange-300 bg-orange-50 p-3"><p className="font-black text-orange-800 text-sm mb-2">🙋 Descuento {c.descuento_pct_solicitado}% → {precDesc?fmtS(precDesc):"—"}</p>{enOf?<div className="flex gap-2"><button onClick={autDesc} disabled={guardando} className="flex-1 py-1.5 rounded-xl font-black text-xs text-white bg-green-600 disabled:opacity-50">✅ Autorizar</button><button onClick={rechDesc} disabled={guardando} className="px-3 py-1.5 rounded-xl font-bold text-xs border border-red-200 text-red-600 disabled:opacity-50">✕</button></div>:<p className="text-orange-600 text-xs font-bold text-center bg-orange-100 rounded-lg py-1.5">⏰ Se responderá en horario de oficina</p>}</div>)}<div className="grid grid-cols-1 sm:grid-cols-3 gap-2">{[{label:"🔧 Cotizador",val:c.precio_cotizador,color:"blue",modo:"cotizador"},{label:"📋 Tarifario",val:tarifIGV,color:"green",modo:"tarifario"},{label:"⭐ Sugerido",val:precSug,color:"navy",modo:"sugerido"}].map(item=>(<div key={item.label} className={`rounded-xl border-2 p-2.5 ${item.color==="blue"?"border-blue-200 bg-blue-50":item.color==="green"?"border-green-200 bg-green-50":"border-[#0b315f] bg-[#eef3f8]"}`}><p className={`text-[9px] font-bold uppercase mb-1 ${item.color==="blue"?"text-blue-600":item.color==="green"?"text-green-600":"text-[#0b315f]"}`}>{item.label}</p><p className={`font-black text-sm font-mono ${item.color==="blue"?"text-blue-700":item.color==="green"?"text-green-700":"text-[#0b315f]"}`}>{item.val?fmtS(item.val):"—"}</p>{esFijo&&item.val&&<p className="text-[9px] text-gray-400">~{fmtS(item.val*26)}/mes</p>}{item.val&&enOf&&<button onClick={()=>aplicar(item.val!,item.modo)} disabled={guardando||Math.abs(Number(c.precio_cliente)-item.val)<0.01} className={`mt-1.5 w-full py-1 rounded-lg text-[10px] font-black text-white disabled:opacity-40 ${item.color==="blue"?"bg-blue-600":item.color==="green"?"bg-green-600":"bg-[#0b315f]"}`}>{Math.abs(Number(c.precio_cliente)-item.val)<0.01?"✓":"Usar"}</button>}</div>))}</div><div className="flex items-center justify-between bg-gray-50 rounded-xl px-3 py-2"><div><p className="text-[10px] text-gray-400 font-bold uppercase">Precio actual</p><p className="font-black text-sm text-gray-800">{fmtS(Number(c.precio_cliente))}{esFijo&&<span className="text-[10px] text-gray-400 font-normal ml-1">/día</span>}</p></div><p className="text-[10px] text-gray-400">Modo: <b>{c.modo_precio||"manual"}</b></p></div>{!c.descuento_solicitado&&!c.descuento_autorizado&&(<div className="border border-dashed border-gray-200 rounded-xl p-2.5"><p className="text-[9px] font-bold text-gray-400 uppercase mb-1.5">🙋 Registrar descuento</p><div className="flex gap-2"><input type="number" min={1} max={50} placeholder="%" value={descPct} onChange={e=>setDescPct(e.target.value)} className="flex-1 border border-gray-200 rounded-xl px-2.5 py-1.5 text-sm outline-none focus:border-[#0b315f]"/><button onClick={solDesc} disabled={guardando||!descPct} className="px-3 py-1.5 rounded-xl font-bold text-xs text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40">Registrar</button></div></div>)}</div></div>);
+  return(<div className="mt-2 rounded-xl border overflow-hidden" style={{borderColor:"#0b315f22"}}><div className="px-3 py-2 flex items-center gap-2 flex-wrap" style={{background:"#eef3f8"}}><span className="text-[11px] font-black text-[#0b315f]">💡 Precios{esFijo?" · FIJO":""}</span>{mon==="USD"&&<span className="text-[10px] bg-sky-50 text-sky-800 border border-sky-200 font-bold px-1.5 py-0.5 rounded-full" title="Los importes se guardan en soles; aquí se enseñan en dólares al tipo de cambio de la cotización.">US$ al TC {revisarTipoCambio(c.tipo_cambio).tc??"—"} · se guarda en soles</span>}{c.precio_cotizador&&<span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded-full">🔧 {fmtC(c.precio_cotizador)}{esFijo?"/día":""}</span>}{tarifIGV&&<span className="text-[10px] bg-green-100 text-green-700 font-bold px-1.5 py-0.5 rounded-full">📋 {fmtC(tarifIGV)}{esFijo?"/día":""}</span>}<span className="text-[10px] bg-[#0b315f] text-white font-bold px-1.5 py-0.5 rounded-full">⭐ {fmtC(precSug)} ({fuente})</span>{c.descuento_solicitado&&!c.descuento_autorizado&&<span className="text-[10px] bg-orange-100 text-orange-700 font-bold px-1.5 py-0.5 rounded-full animate-pulse">🙋 {c.descuento_pct_solicitado}% pendiente</span>}{esFijo&&c.precio_mes_estimado&&<span className="text-[10px] bg-green-50 text-green-700 font-bold px-1.5 py-0.5 rounded-full">📅 ~{fmtC(c.precio_mes_estimado)}/mes</span>}</div><div className="p-3 bg-white space-y-3">{!enOf&&<div className="rounded-xl px-3 py-2 border border-amber-200 bg-amber-50 text-xs text-amber-800 font-semibold">⏰ Fuera de horario L-V 8-18h — precio máximo sugerido automáticamente</div>}{c.descuento_solicitado&&!c.descuento_autorizado&&(<div className="rounded-xl border-2 border-orange-300 bg-orange-50 p-3"><p className="font-black text-orange-800 text-sm mb-2">🙋 Descuento {c.descuento_pct_solicitado}% → {precDesc?fmtC(precDesc):"—"}</p>{enOf?<div className="flex gap-2"><button onClick={autDesc} disabled={guardando} className="flex-1 py-1.5 rounded-xl font-black text-xs text-white bg-green-600 disabled:opacity-50">✅ Autorizar</button><button onClick={rechDesc} disabled={guardando} className="px-3 py-1.5 rounded-xl font-bold text-xs border border-red-200 text-red-600 disabled:opacity-50">✕</button></div>:<p className="text-orange-600 text-xs font-bold text-center bg-orange-100 rounded-lg py-1.5">⏰ Se responderá en horario de oficina</p>}</div>)}<div className="grid grid-cols-1 sm:grid-cols-3 gap-2">{[{label:"🔧 Cotizador",val:c.precio_cotizador,color:"blue",modo:"cotizador"},{label:"📋 Tarifario",val:tarifIGV,color:"green",modo:"tarifario"},{label:"⭐ Sugerido",val:precSug,color:"navy",modo:"sugerido"}].map(item=>(<div key={item.label} className={`rounded-xl border-2 p-2.5 ${item.color==="blue"?"border-blue-200 bg-blue-50":item.color==="green"?"border-green-200 bg-green-50":"border-[#0b315f] bg-[#eef3f8]"}`}><p className={`text-[9px] font-bold uppercase mb-1 ${item.color==="blue"?"text-blue-600":item.color==="green"?"text-green-600":"text-[#0b315f]"}`}>{item.label}</p><p className={`font-black text-sm font-mono ${item.color==="blue"?"text-blue-700":item.color==="green"?"text-green-700":"text-[#0b315f]"}`}>{item.val?fmtC(item.val):"—"}</p>{esFijo&&item.val&&<p className="text-[9px] text-gray-400">~{fmtC(item.val*26)}/mes</p>}{item.val&&enOf&&<button onClick={()=>aplicar(item.val!,item.modo)} disabled={guardando||Math.abs(Number(c.precio_cliente)-item.val)<0.01} className={`mt-1.5 w-full py-1 rounded-lg text-[10px] font-black text-white disabled:opacity-40 ${item.color==="blue"?"bg-blue-600":item.color==="green"?"bg-green-600":"bg-[#0b315f]"}`}>{Math.abs(Number(c.precio_cliente)-item.val)<0.01?"✓":"Usar"}</button>}</div>))}</div><div className="flex items-center justify-between bg-gray-50 rounded-xl px-3 py-2"><div><p className="text-[10px] text-gray-400 font-bold uppercase">Precio actual</p><p className="font-black text-sm text-gray-800">{fmtC(Number(c.precio_cliente))}{esFijo&&<span className="text-[10px] text-gray-400 font-normal ml-1">/día</span>}</p></div><p className="text-[10px] text-gray-400">Modo: <b>{c.modo_precio||"manual"}</b></p></div>{!c.descuento_solicitado&&!c.descuento_autorizado&&(<div className="border border-dashed border-gray-200 rounded-xl p-2.5"><p className="text-[9px] font-bold text-gray-400 uppercase mb-1.5">🙋 Registrar descuento</p><div className="flex gap-2"><input type="number" min={1} max={50} placeholder="%" value={descPct} onChange={e=>setDescPct(e.target.value)} className="flex-1 border border-gray-200 rounded-xl px-2.5 py-1.5 text-sm outline-none focus:border-[#0b315f]"/><button onClick={solDesc} disabled={guardando||!descPct} className="px-3 py-1.5 rounded-xl font-bold text-xs text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40">Registrar</button></div></div>)}</div></div>);
 }
 
 const MEDIOS_ENVIO=[{id:"WhatsApp",icon:"💬"},{id:"Correo electrónico",icon:"✉️"},{id:"Otros medios",icon:"📋"}];
@@ -271,7 +300,14 @@ const PLANTILLAS_INFO=[
   {id:"ejecutivo",     icon:"⭐",nombre:"Ejecutivo Premium",  desc:"VIP · ES + EN",   badge:null,       color:"#1a1a1a",bg:"#fafafa"},
 ];
 
-function ModalPlantilla({cot,plantillaActual,onElegir,onGenerar,onCancelar}:{cot:Cotizacion;plantillaActual:string;onElegir:(id:string)=>void;onGenerar:()=>void;onCancelar:()=>void;}){
+/**
+ * `avisos` = lo que `htmlCotizacion` (lib/cotizacion-pdf.ts) dice de ESTA combinación de
+ * plantilla, idioma y moneda; null mientras se comprueba (no se afirma «sin avisos» buscando).
+ * Solo un aviso que `bloquea` (dólares sin tipo de cambio) apaga el botón, y lo dice debajo.
+ */
+function ModalPlantilla({cot,plantillaActual,onElegir,idioma,onIdioma,avisos,errorAvisos,generando=false,onGenerar,onCancelar}:{cot:Cotizacion;plantillaActual:string;onElegir:(id:string)=>void;idioma:Idioma;onIdioma:(i:Idioma)=>void;avisos:AvisoPdf[]|null;errorAvisos?:string;generando?:boolean;onGenerar:()=>void;onCancelar:()=>void;}){
+  const bloqueo=avisos?.find(a=>a.bloquea)||null;
+  const mon=normalizarMoneda(cot.moneda);
   return(
     <div style={{position:"fixed",inset:0,zIndex:60,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",background:"rgba(0,0,0,0.55)"}}>
       <div style={{background:"white",borderRadius:24,boxShadow:"0 24px 60px rgba(0,0,0,0.2)",width:"100%",maxWidth:520,padding:28}}>
@@ -297,9 +333,23 @@ function ModalPlantilla({cot,plantillaActual,onElegir,onGenerar,onCancelar}:{cot
             );
           })}
         </div>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,flexWrap:"wrap"}}>
+          <span style={{fontSize:11,fontWeight:800,color:"#64748b",textTransform:"uppercase"}}>Idioma del PDF</span>
+          {(["es","en"] as Idioma[]).map(i=>(
+            <button key={i} onClick={()=>onIdioma(i)} style={{padding:"6px 12px",borderRadius:10,border:`2px solid ${idioma===i?"#0b315f":"#e2e8f0"}`,background:idioma===i?"#eef3f8":"white",color:idioma===i?"#0b315f":"#64748b",fontWeight:800,fontSize:12,cursor:"pointer"}}>{i==="es"?"🇵🇪 Español":"🇺🇸 English"}</button>
+          ))}
+          <span style={{fontSize:11,color:"#94a3b8"}}>Moneda: <b>{mon==="USD"?`US$ (TC ${revisarTipoCambio(cot.tipo_cambio).tc??"—"})`:"S/"}</b></span>
+        </div>
+        {avisos===null&&!errorAvisos&&<p style={{fontSize:11,color:"#94a3b8",margin:"0 0 12px"}}>Comprobando la plantilla, las cuentas bancarias y el idioma…</p>}
+        {errorAvisos&&<p style={{fontSize:11,color:"#92400e",background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:10,padding:"6px 10px",margin:"0 0 12px"}}>⚠ No se pudo comprobar la plantilla: {errorAvisos}</p>}
+        {avisos&&avisos.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+          {avisos.map(a=>(
+            <p key={a.codigo} style={{fontSize:11,margin:0,borderRadius:10,padding:"6px 10px",...(a.bloquea?{color:"#991b1b",background:"#fef2f2",border:"1px solid #fca5a5"}:{color:"#92400e",background:"#fffbeb",border:"1px solid #fcd34d"})}}>{a.bloquea?"⛔":"⚠"} {a.detalle}</p>
+          ))}
+        </div>}
         <div style={{display:"flex",gap:10}}>
-          <button onClick={onGenerar} style={{flex:1,padding:"12px",borderRadius:14,border:"none",background:"#0b315f",color:"white",fontWeight:900,fontSize:14,cursor:"pointer"}}>
-            📄 Generar PDF
+          <button onClick={onGenerar} disabled={!!bloqueo||generando} style={{flex:1,padding:"12px",borderRadius:14,border:"none",background:"#0b315f",color:"white",fontWeight:900,fontSize:14,cursor:bloqueo||generando?"not-allowed":"pointer",opacity:bloqueo||generando?0.5:1}}>
+            {generando?"⏳ Generando…":"📄 Generar PDF"}
           </button>
           <button onClick={onCancelar} style={{padding:"12px 20px",borderRadius:14,border:"1px solid #e2e8f0",background:"white",color:"#64748b",fontWeight:700,fontSize:14,cursor:"pointer"}}>
             Cancelar
@@ -665,314 +715,6 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, orig
   );
 }
 
-// ── Helpers para Anexo de Itinerario ──
-function formatItinerarioHtml(texto:string,cp:string,acento:string):string{
-  return texto.split('\n').map(l=>{
-    if(!l.trim())return'<div style="height:5px;"></div>';
-    if(/^d[iíI][aA]\s*\d+/i.test(l.trim()))
-      return`<div style="margin:16px 0 8px;padding:8px 14px;background:${cp}18;border-left:4px solid ${cp};border-radius:0 8px 8px 0;font-size:13px;font-weight:900;color:${cp};">${l}</div>`;
-    const m=l.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.*)/);
-    if(m)return`<div style="display:flex;gap:12px;padding:5px 0;border-bottom:1px solid #f3f4f6;"><span style="font-size:10px;font-weight:900;color:${acento};min-width:42px;flex-shrink:0;padding-top:1px;">${m[1]}</span><span style="font-size:11px;">${m[2]}</span></div>`;
-    return`<p style="margin:4px 0;font-size:11px;">${l}</p>`;
-  }).join('');
-}
-function buildAnexoHtml(cot:Cotizacion,nomCl:string,nCot:string,cp:string,acento:string):string{
-  const texto=(cot.itinerario_texto||'').trim();if(!texto)return'';
-  const itHtml=formatItinerarioHtml(texto,cp,acento);
-  const fechaStr=cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():'';
-  return`<div style="page-break-before:always;padding:82px 40px 20px;">
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid ${cp};padding-bottom:12px;margin-bottom:24px;">
-      <div>
-        <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1.5px;margin:0 0 4px;">ANEXO 1</p>
-        <h2 style="font-size:20px;font-weight:900;color:${cp};margin:0;">PROGRAMA DETALLADO</h2>
-      </div>
-      <div style="text-align:right;">
-        <p style="font-size:10px;color:#6b7280;margin:0 0 2px;">N° ${nCot}</p>
-        <p style="font-size:12px;font-weight:800;color:${cp};margin:0;">${nomCl}</p>
-        ${fechaStr?`<p style="font-size:10px;color:#6b7280;margin:2px 0 0;">${fechaStr}</p>`:''}
-      </div>
-    </div>
-    <div>${itHtml}</div>
-  </div>`;
-}
-
-function buildCronogramaMultidiaPDF(cot:Cotizacion,cp:string):string{
-  const dias=cot.fechas_multidia_json;if(!dias?.length)return'';
-  const hasDestino=dias.some(d=>d.destino_nombre?.trim());
-  const rows=dias.map((d,i)=>{
-    const esUltimo=i===dias.length-1;
-    const fechaFmt=d.fecha?new Date(d.fecha+"T00:00:00").toLocaleDateString("es-PE",{weekday:"short",day:"numeric",month:"short",year:"numeric"}).toUpperCase():"—";
-    const horaFin=(d as any).hora_fin??(d as any).hora_retorno??"";
-    const tipoNoche=(d as any).tipo_noche??(horaFin?"":"pernocte");
-    let finLabel="";
-    if(esUltimo){finLabel=horaFin?`<b>⏰ ${horaFin}</b> <span style="color:#166534;font-size:9px;">✅ Retorno final</span>`:`<span style="color:#6b7280;font-size:9px;font-style:italic;">Por confirmar</span>`;}
-    else if(tipoNoche==="cochera"){finLabel=horaFin?`<b>⏰ ${horaFin}</b> <span style="color:#1d4ed8;font-size:9px;">🏠 Retorno cochera</span>`:`<span style="color:#1d4ed8;font-size:9px;">🏠 Retorno cochera</span>`;}
-    else{finLabel=horaFin?`<b>⏰ ${horaFin}</b> <span style="color:#b45309;font-size:9px;">🏨 Pernocte</span>`:`<span style="color:#b45309;font-size:9px;font-style:italic;">🏨 Pernocte</span>`;}
-    const origenNombre=i===0?cot.origen:(dias[i-1].destino_nombre||"—");
-    const destinoNombre=d.destino_nombre||"—";
-    const rutaLabel=hasDestino?`<span style="color:#374151;">${origenNombre}</span><span style="color:${cp};font-weight:900;"> → </span><span style="font-weight:700;">${destinoNombre}</span>`:"";
-    return`<tr style="border-bottom:1px solid #f3f4f6;">
-      <td style="text-align:center;font-weight:900;font-size:11px;color:${cp};padding:5px 8px;white-space:nowrap;">DÍA ${d.dia}</td>
-      <td style="padding:5px 8px;font-size:10px;font-weight:600;">${fechaFmt}</td>
-      ${hasDestino?`<td style="padding:5px 8px;font-size:10px;">${rutaLabel}</td>`:""}
-      <td style="text-align:center;padding:5px 8px;font-size:10px;">⏰ ${d.hora_ida||"—"}</td>
-      <td style="padding:5px 8px;font-size:10px;">${finLabel}</td>
-    </tr>`;
-  }).join("");
-  const colRuta=hasDestino?`<th style="padding:4px 8px;text-align:left;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">Ruta del día</th>`:"";
-  return`<div style="margin:12px 0 16px;background:#fafafa;border:1px solid ${cp}22;border-radius:10px;overflow:hidden;">
-    <div style="background:${cp}12;padding:8px 14px;border-bottom:1px solid ${cp}22;">
-      <p style="font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.8px;margin:0;">📅 Cronograma del servicio — ${dias.length} días</p>
-    </div>
-    <table style="width:100%;border-collapse:collapse;">
-      <thead><tr style="background:${cp}08;">
-        <th style="padding:4px 8px;text-align:center;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">Día</th>
-        <th style="padding:4px 8px;text-align:left;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">Fecha</th>
-        ${colRuta}
-        <th style="padding:4px 8px;text-align:center;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">H. Salida</th>
-        <th style="padding:4px 8px;text-align:left;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">Fin del día</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  </div>`;
-}
-
-
-function generarPDFModerno(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculos:VehiculoFlota[],repr:string,consid:ConsidCot,cfg:CotPlantillaConfig|null,empresa:EmpresaPerfilPDF|null){
-  const conIGV=cot.incluye_igv!==false;
-  const{subtotal,igv,total}=calcItems(items,conIGV);
-  const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
-  const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
-  const cp=cfg?.color_primario||"#1a1a2e"; const cs=cfg?.color_secundario||"#2f8ee9";
-  const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
-  const empNombre=EMP(empresa).nombre;
-  const empRuc=EMP(empresa).ruc; const empTel=EMP(empresa).telefono; const empEmail=EMP(empresa).email;
-  const empWeb=EMP(empresa).web;
-  const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;">${i+1}. ${it.descripcion}</td><td style="padding:10px 12px;text-align:center;border-bottom:1px solid #f0f0f0;">${it.dias}d × ${it.cantidad}</td><td style="padding:10px 12px;text-align:right;border-bottom:1px solid #f0f0f0;font-weight:700;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}).join("");
-  const inc=(cfg?.condiciones_incluye||consid.incluye).map(i=>`<li style="margin:4px 0;font-size:10px;color:#333;">${i}</li>`).join("");
-  const noInc=(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li style="margin:4px 0;font-size:10px;color:#333;">${i}</li>`).join("");
-  const win=window.open("","_blank");if(!win)return;
-  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title>
-  <style>${sharedCSS()}</style>
-  </head><body>
-  ${buildHeaderPDFHtml(logoUrl,cp,cfg?.titulo_documento||"PROPUESTA DE SERVICIO",`N° ${nCot} · ${new Date().toLocaleDateString("es-PE")} · Válida 30 días`)}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
-      <div style="background:#f8fafc;border-radius:12px;padding:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 8px;letter-spacing:.8px;">Cliente</p>
-        <p style="font-weight:800;font-size:14px;margin:0;">${nomCl}</p><p style="color:#64748b;font-size:10px;margin:3px 0 0;">${cliente?.ruc?"RUC: "+cliente.ruc:cliente?.dni?"DNI: "+cliente.dni:""}${cot.atencion?" · "+cot.atencion:""}</p></div>
-      <div style="background:#f8fafc;border-radius:12px;padding:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 8px;letter-spacing:.8px;">Servicio</p>
-        <p style="font-weight:800;font-size:14px;margin:0;">${cot.origen} → ${cot.destino}</p><p style="color:#64748b;font-size:10px;margin:3px 0 0;">${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"Fecha a coordinar"}${cot.hora_ida?" · "+cot.hora_ida:""}</p></div>
-    </div>
-    ${buildCronogramaMultidiaPDF(cot,cp)}
-    ${vehiculos.length?`<div style="background:#f8fafc;border-radius:12px;padding:16px;margin-bottom:20px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 12px;letter-spacing:.8px;">Descripción de la unidad${vehiculos.length>1?" · "+vehiculos.length+" vehículos":""}</p>${buildVehsHtml(vehiculos,cp)}</div>`:""}
-    <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
-      <thead><tr style="background:${cp};"><th style="padding:10px 12px;text-align:left;color:white;font-size:10px;font-weight:700;border-radius:8px 0 0 0;">Descripción</th><th style="padding:10px 12px;text-align:center;color:white;font-size:10px;font-weight:700;">Cant.</th><th style="padding:10px 12px;text-align:right;color:white;font-size:10px;font-weight:700;border-radius:0 8px 0 0;">Total</th></tr></thead>
-      <tbody>${filasItems}</tbody>
-    </table>
-    <div style="display:flex;justify-content:flex-end;margin-bottom:24px;">
-      <div style="background:#f8fafc;border-radius:12px;padding:16px;min-width:220px;">
-        ${conIGV?`<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px;"><span style="color:#64748b;">Subtotal (sin IGV)</span><span style="font-weight:700;">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div><div style="display:flex;justify-content:space-between;margin-bottom:10px;font-size:11px;"><span style="color:#64748b;">IGV 18%</span><span style="font-weight:700;">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>`:""}
-        <div style="display:flex;justify-content:space-between;border-top:2px solid ${cp};padding-top:10px;"><span style="font-weight:900;font-size:14px;color:${cp};">TOTAL</span><span style="font-weight:900;font-size:14px;color:${cp};">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
-        ${!conIGV?`<p style="font-size:10px;color:#6b7280;margin:6px 0 0;text-align:right;">No incluye IGV</p>`:""}
-      </div>
-    </div>
-    ${items.length>=3||vehiculos.length>=3?`<div style="page-break-before:always;height:70px;margin:0;"></div>`:""}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;">
-      <div><p style="font-weight:900;font-size:10px;color:#166534;text-transform:uppercase;margin:0 0 8px;">✅ Incluye</p><ul style="margin:0;padding-left:16px;">${inc}</ul></div>
-      <div><p style="font-weight:900;font-size:10px;color:#991b1b;text-transform:uppercase;margin:0 0 8px;">❌ No incluye</p><ul style="margin:0;padding-left:16px;">${noInc}</ul></div>
-    </div>
-    ${cfg?.mensaje_cierre?`<p style="text-align:center;color:#64748b;font-style:italic;font-size:11px;margin-bottom:24px;">${cfg.mensaje_cierre}</p>`:""}
-  ${buildAnexoHtml(cot,nomCl,nCot,cp,cs)}
-  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,empWeb)}
-  <script>window.onload=()=>window.print();</script></body></html>`);
-  win.document.close();
-}
-
-function generarPDFTuristico(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculos:VehiculoFlota[],repr:string,consid:ConsidCot,cfg:CotPlantillaConfig|null,empresa:EmpresaPerfilPDF|null){
-  const conIGV=cot.incluye_igv!==false;
-  const{subtotal,igv,total}=calcItems(items,conIGV);
-  const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
-  const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
-  const cp=cfg?.color_primario||"#b45309"; const cs=cfg?.color_secundario||"#d97706";
-  const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
-  const empNombre=EMP(empresa).nombre; const empTel=EMP(empresa).telefono; const empEmail=EMP(empresa).email;
-  const filasItems=items.map((it)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:8px 12px;border-bottom:1px solid #fde68a;">${it.descripcion}<br/><span style="font-size:9px;color:#92400e;">${it.dias} día(s) × ${it.cantidad} unidad(es)</span></td><td style="padding:8px 12px;text-align:right;border-bottom:1px solid #fde68a;font-weight:800;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}).join("");
-  const paradas=cot.paradas_json||[];const paradasHtml=paradas.length>0?`<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px;margin-bottom:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 10px;">🗺️ Itinerario de paradas</p>${paradas.map((p,i)=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;"><div style="width:24px;height:24px;border-radius:50%;background:${cp};color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;flex-shrink:0;">${i+1}</div><div><p style="font-weight:700;font-size:11px;margin:0;">${p.nombre||p.tipo}</p>${p.hora?`<p style="font-size:10px;color:#92400e;margin:1px 0 0;">🕐 ${p.hora}</p>`:""}</div></div>`).join("")}</div>`:""  ;
-  const win=window.open("","_blank");if(!win)return;
-  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización Turística N° ${nCot}</title>
-  <style>${sharedCSS()}</style>
-  </head><body>
-  ${buildHeaderPDFHtml(logoUrl,cp,cfg?.titulo_documento||"COTIZACIÓN TURÍSTICA",`N° ${nCot} · Válida 30 días`)}
-    <div style="background:#fff7ed;border-left:4px solid ${cp};border-radius:0 10px 10px 0;padding:14px 18px;margin-bottom:18px;">
-      <p style="font-weight:900;color:${cp};font-size:13px;margin:0 0 4px;">📍 ${cot.origen} → ${cot.destino}</p>
-      <p style="color:#92400e;font-size:11px;margin:0;">${cot.hora_ida?"Salida: "+cot.hora_ida:""}${cot.km?" · "+cot.km+" km":""}</p>
-    </div>
-    ${buildCronogramaMultidiaPDF(cot,cp)}
-    ${vehiculos.length?`<div style="margin-bottom:16px;">${buildVehsHtml(vehiculos,cp,{imgH:"180px",radius:"10px",gap:"10px"})}</div>`:""}
-    ${paradasHtml}
-    <table style="width:100%;border-collapse:collapse;margin-bottom:18px;">
-      <thead><tr style="background:${cp};"><th style="padding:9px 12px;text-align:left;color:white;font-size:10px;font-weight:700;">Descripción del servicio</th><th style="padding:9px 12px;text-align:right;color:white;font-size:10px;font-weight:700;">Importe</th></tr></thead>
-      <tbody style="background:#fffbeb;">${filasItems}</tbody>
-    </table>
-    <div style="display:flex;justify-content:flex-end;margin-bottom:20px;">
-      <div style="background:#fff7ed;border:2px solid ${cs};border-radius:12px;padding:14px 20px;min-width:200px;">
-        ${conIGV?`<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px;"><span style="color:#92400e;">Subtotal</span><span style="font-weight:700;">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div><div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:10px;"><span style="color:#92400e;">IGV 18%</span><span style="font-weight:700;">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>`:""}
-        <div style="display:flex;justify-content:space-between;border-top:2px solid ${cp};padding-top:8px;"><span style="font-weight:900;font-size:15px;color:${cp};">TOTAL</span><span style="font-weight:900;font-size:15px;color:${cp};">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
-        ${!conIGV?`<p style="font-size:10px;color:#92400e;margin:6px 0 0;text-align:right;">No incluye IGV</p>`:""}
-      </div>
-    </div>
-    ${items.length>=3||vehiculos.length>=3?`<div style="page-break-before:always;height:70px;margin:0;"></div>`:""}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px;">
-      <div style="background:#f0fdf4;border-radius:10px;padding:12px;"><p style="font-weight:900;font-size:10px;color:#166534;margin:0 0 6px;">✅ INCLUYE</p>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<p style="font-size:10px;color:#166534;margin:2px 0;">• ${i}</p>`).join("")}</div>
-      <div style="background:#fff5f5;border-radius:10px;padding:12px;"><p style="font-weight:900;font-size:10px;color:#991b1b;margin:0 0 6px;">❌ NO INCLUYE</p>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<p style="font-size:10px;color:#991b1b;margin:2px 0;">• ${i}</p>`).join("")}</div>
-    </div>
-    ${cfg?.mensaje_cierre?`<p style="text-align:center;color:${cp};font-weight:700;font-size:12px;margin:16px 0;padding:12px;background:#fff7ed;border-radius:10px;">${cfg.mensaje_cierre}</p>`:""}
-  ${buildAnexoHtml(cot,nomCl,nCot,cp,cs)}
-  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,EMP(empresa).web)}
-  <script>window.onload=()=>window.print();</script></body></html>`);
-  win.document.close();
-}
-
-function generarPDFEjecutivo(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculos:VehiculoFlota[],repr:string,consid:ConsidCot,cfg:CotPlantillaConfig|null,empresa:EmpresaPerfilPDF|null){
-  const conIGV=cot.incluye_igv!==false;
-  const{subtotal,igv,total}=calcItems(items,conIGV);
-  const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
-  const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
-  const cp=cfg?.color_primario||"#1a1a1a"; const acento=cfg?.color_acento||"#C8A24B";
-  const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
-  const empNombre=EMP(empresa).nombre; const empRuc=EMP(empresa).ruc; const empTel=EMP(empresa).telefono; const empEmail=EMP(empresa).email;
-  const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;font-size:10.5px;">${it.descripcion}</td><td style="padding:10px 14px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:10px;color:#6b7280;">${it.dias}d × ${it.cantidad}</td><td style="padding:10px 14px;text-align:right;border-bottom:1px solid #f0f0f0;font-weight:800;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td><td style="padding:10px 14px;text-align:center;border-bottom:1px solid #f0f0f0;color:#6b7280;font-style:italic;font-size:9.5px;">USD ${(tf/3.7).toFixed(2)}</td></tr>`;}).join("");
-  const win=window.open("","_blank");if(!win)return;
-  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Service Quotation N° ${nCot}</title>
-  <style>${sharedCSS()}</style>
-  </head><body>
-  ${buildHeaderPDFHtml(logoUrl,cp,cfg?.titulo_documento||"SERVICE QUOTATION / COTIZACIÓN",`N° ${nCot} · ${new Date().toLocaleDateString("es-PE")} · Valid 30 days`)}
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
-    <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;">
-      <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">CLIENT / CLIENTE</p>
-      <p style="font-weight:800;font-size:14px;margin:0;">${nomCl}</p>
-      ${cliente?.ruc?`<p style="color:#6b7280;font-size:10px;margin:3px 0 0;">RUC: ${cliente.ruc}</p>`:""}
-      ${cot.atencion?`<p style="color:#6b7280;font-size:10px;margin:2px 0 0;">Attn: ${cot.atencion}</p>`:""}
-    </div>
-    <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;">
-      <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">${empNombre}</p>
-      <p style="color:#6b7280;font-size:10px;margin:2px 0;">RUC: ${empRuc}</p>
-      <p style="color:#6b7280;font-size:10px;margin:2px 0;">Repr: ${repr}</p>
-      <p style="color:#6b7280;font-size:10px;margin:2px 0;">📞 ${empTel} · ✉️ ${empEmail}</p>
-    </div>
-  </div>
-  <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:20px;">
-    <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">SERVICE DETAILS / DETALLE DEL SERVICIO</p>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
-      <div><p style="font-size:9px;color:#6b7280;margin:0;">Origin / Origen</p><p style="font-weight:700;font-size:11px;margin:2px 0 0;">${cot.origen}</p></div>
-      <div><p style="font-size:9px;color:#6b7280;margin:0;">Destination / Destino</p><p style="font-weight:700;font-size:11px;margin:2px 0 0;">${cot.destino}</p></div>
-      <div><p style="font-size:9px;color:#6b7280;margin:0;">Date / Fecha</p><p style="font-weight:700;font-size:11px;margin:2px 0 0;">${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric"}):"—"}</p></div>
-    </div>
-  </div>
-  ${buildCronogramaMultidiaPDF(cot,cp)}
-  ${vehiculos.length?`<div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:20px;"><p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">UNIT / UNIDAD${vehiculos.length>1?" · "+vehiculos.length+" vehículos":""}</p>${buildVehsHtml(vehiculos,cp,{imgH:"190px",radius:"8px"})}</div>`:""}
-  <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
-    <thead><tr style="border-bottom:2px solid ${acento};"><th style="padding:9px 14px;text-align:left;font-size:9px;font-weight:900;text-transform:uppercase;color:${cp};letter-spacing:.5px;">Description</th><th style="padding:9px 14px;text-align:center;font-size:9px;font-weight:900;text-transform:uppercase;color:${cp};letter-spacing:.5px;">Qty</th><th style="padding:9px 14px;text-align:right;font-size:9px;font-weight:900;text-transform:uppercase;color:${cp};letter-spacing:.5px;">Amount PEN</th><th style="padding:9px 14px;text-align:right;font-size:9px;font-weight:900;text-transform:uppercase;color:#9ca3af;letter-spacing:.5px;">USD ~</th></tr></thead>
-    <tbody>${filasItems}</tbody>
-  </table>
-  <div style="display:flex;justify-content:flex-end;margin-bottom:24px;">
-    <div style="min-width:240px;">
-      ${conIGV?`<div style="display:flex;justify-content:space-between;padding:6px 0;font-size:11px;"><span style="color:#6b7280;">Subtotal (excl. tax)</span><span style="font-weight:700;">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div><div style="display:flex;justify-content:space-between;padding:6px 0;font-size:11px;"><span style="color:#6b7280;">IGV/Tax 18%</span><span style="font-weight:700;">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>`:""}
-      <div style="display:flex;justify-content:space-between;padding:10px 0;border-top:2px solid ${acento};margin-top:4px;"><span style="font-weight:900;font-size:15px;">TOTAL</span><span style="font-weight:900;font-size:15px;color:${cp};">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
-      ${!conIGV?`<p style="font-size:10px;color:#6b7280;margin:4px 0 0;text-align:right;">No incluye IGV</p>`:""}
-    </div>
-  </div>
-  ${items.length>=3||vehiculos.length>=3?`<div style="page-break-before:always;height:70px;margin:0;"></div>`:""}
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px;">
-    <div><p style="font-size:9px;font-weight:900;color:#166534;text-transform:uppercase;letter-spacing:.5px;margin:0 0 6px;">Includes / Incluye</p>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<p style="font-size:10px;color:#166534;margin:3px 0;">✓ ${i}</p>`).join("")}</div>
-    <div><p style="font-size:9px;font-weight:900;color:#991b1b;text-transform:uppercase;letter-spacing:.5px;margin:0 0 6px;">Not included / No incluye</p>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<p style="font-size:10px;color:#991b1b;margin:3px 0;">✗ ${i}</p>`).join("")}</div>
-  </div>
-  ${cfg?.mensaje_cierre?`<p style="text-align:center;color:#6b7280;font-style:italic;font-size:11px;margin-bottom:20px;border-top:1px solid #e5e7eb;padding-top:14px;">${cfg.mensaje_cierre}</p>`:""}
-  ${buildAnexoHtml(cot,nomCl,nCot,cp,acento)}
-  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,EMP(empresa).web)}
-  <script>window.onload=()=>window.print();</script></body></html>`);
-  win.document.close();
-}
-
-// v2: muestra FECHA IDA + FECHA RETORNO separados cuando fecha_retorno está cargado
-/**
- * EL BLOQUE DE CUENTAS BANCARIAS DEL PDF, ARMADO DESDE LA CONFIGURACIÓN.
- *
- * Estaba ESCRITO A MANO en el HTML con las cuentas reales de una empresa concreta — número de
- * cuenta y CCI, en BCP soles y dólares. Es el peor de todos los literales que tenía este
- * archivo: los demás imprimían un nombre equivocado; este manda el dinero al destinatario
- * equivocado. Un comprador cotiza, su cliente lee «nuestras cuentas bancarias» y transfiere…
- * a la cuenta de otro.
- *
- * Y los campos YA EXISTÍAN: `cot_plantilla_config` tiene `banco_1..3_{nombre,cuenta,cci}` y
- * `mostrar_cuentas_bancarias`, con su formulario en /cotizaciones/plantillas — que además ya
- * decía «ve a Configuración para editar las cuentas bancarias». La pantalla prometía algo que
- * el PDF no cumplía.
- *
- * SIN CUENTAS CONFIGURADAS NO SE IMPRIME EL BLOQUE. Ni un encabezado vacío ni un ejemplo: un
- * «Nuestras cuentas bancarias» sin nada debajo se lee como un documento a medio hacer, y
- * cualquier número de relleno es plata mandada a donde no es.
- */
-function buildCuentasHtml(cfg: CotPlantillaConfig | null, empresa?: EmpresaPerfilPDF | null): string {
-  if (cfg && cfg.mostrar_cuentas_bancarias === false) return "";
-
-  // `usar_bancos_propios` significa que ESTA plantilla cobra en cuentas distintas de las de la
-  // empresa. Apagado —el caso normal— manda la ficha de la empresa, que es donde vive la cuenta
-  // a la que te pagan: con tres plantillas, el mismo número en tres sitios es tres sitios que
-  // corregir el día que cambies de banco.
-  if (!cfg?.usar_bancos_propios) {
-    const deEmpresa = EMP(empresa).cuentas;
-    if (deEmpresa.length) return pintarCuentas(deEmpresa);
-    // Sin cuentas en la empresa se mira igual la plantilla: una base a la que le falte
-    // `empresa-02` no puede perder el bloque que ya venía imprimiendo.
-  }
-
-  const cuentas = [1, 2, 3]
-    .map(n => ({
-      banco:  String((cfg as any)?.[`banco_${n}_nombre`] ?? "").trim(),
-      cuenta: String((cfg as any)?.[`banco_${n}_cuenta`] ?? "").trim(),
-      cci:    String((cfg as any)?.[`banco_${n}_cci`]    ?? "").trim(),
-    }))
-    // Basta con el nombre del banco y un número: una fila con solo el rótulo no dice dónde pagar.
-    .filter(c => c.banco && (c.cuenta || c.cci));
-  return pintarCuentas(cuentas);
-}
-
-function pintarCuentas(cuentas: { banco: string; cuenta: string; cci: string }[]): string {
-  if (!cuentas.length) return "";
-  return `<div class="cuentas"><h3>Nuestras cuentas bancarias</h3><div class="cuentas-grid">${
-    cuentas.map(c => `<div class="cuenta-box"><div class="banco">${c.banco}</div>${
-      c.cuenta ? `<p>Cta: ${c.cuenta}</p>` : ""}${c.cci ? `<p>CCI: ${c.cci}</p>` : ""}</div>`).join("")
-  }</div></div>`;
-}
-
-function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculos:VehiculoFlota[],repr="",consid:ConsidCot=DEFAULT_CONSID,plantilla="corporativo",cfg:CotPlantillaConfig|null=null,empresa:EmpresaPerfilPDF|null=null){
-  if(plantilla==="moderno_fotos"){generarPDFModerno(cot,cliente,items,vehiculos,repr,consid,cfg,empresa);return;}
-  if(plantilla==="turistico"){generarPDFTuristico(cot,cliente,items,vehiculos,repr,consid,cfg,empresa);return;}
-  if(plantilla==="ejecutivo"){generarPDFEjecutivo(cot,cliente,items,vehiculos,repr,consid,cfg,empresa);return;}
-  // ── plantilla corporativo (original intacta, solo empresa_perfil si existe) ──
-  const empNombre=EMP(empresa).nombre; const empRuc=EMP(empresa).ruc; const empEmail=EMP(empresa).email; const empTel=EMP(empresa).telefono; const empDir=EMP(empresa).direccion;
-  const conIGV=cot.incluye_igv!==false;
-  // Un servicio de solo ida no tiene punto ni hora de retorno: imprimirlos (y caer
-  // al origen cuando punto_retorno está vacío) le promete al cliente un tramo que
-  // no se cotizó. Sin tipo_servicio (cotizaciones antiguas) se conserva lo de antes.
-  const soloIda=["solo_ida","fijo_solo_ida"].includes(cot.tipo_servicio||"");
-  const{subtotal,igv,total}=calcItems(items,conIGV);const desc=items.reduce((s,it)=>s+it.dias*it.cantidad*it.precio_unit*(it.descuento_pct/100),0);
-  const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
-  const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");const anio=new Date().getFullYear();
-  const fechaDoc=cot.created_at?new Date(cot.created_at).toLocaleDateString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric"}):new Date().toLocaleDateString("es-PE");
-  const vehsSec=buildVehsHtml(vehiculos,"#0b315f",{imgH:"180px",radius:"8px",contain:true});
-  const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="text-align:center;padding:6px;border:1px solid #ccc;">${i+1}</td><td style="padding:6px;border:1px solid #ccc;">${it.descripcion}</td><td style="text-align:center;padding:6px;border:1px solid #ccc;">${it.dias}</td><td style="text-align:center;padding:6px;border:1px solid #ccc;">${it.cantidad}</td><td style="text-align:right;padding:6px;border:1px solid #ccc;">S/ ${it.precio_unit.toLocaleString("es-PE",{minimumFractionDigits:2})}</td><td style="text-align:center;padding:6px;border:1px solid #ccc;">${it.descuento_pct>0?it.descuento_pct+"%":""}</td><td style="text-align:right;padding:6px;border:1px solid #ccc;font-weight:bold;">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}).join("");
-  // El precio del PDF es el ya definido en los items: la nota de "Servicio Fijo"
-  // con precio/día y mes estimado es cálculo interno y no debe verse en el documento.
-  const notaFijo="";
-  const css=sharedCSS(`.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}.box{border:1px solid #ccc;border-radius:4px;padding:8px 10px}.box-title{font-weight:900;font-size:10px;color:#0b315f;text-transform:uppercase;border-bottom:1px solid #e5e7eb;padding-bottom:4px;margin-bottom:6px}.box-row{margin:3px 0;font-size:10.5px}table{width:100%;border-collapse:collapse;margin:10px 0;font-size:10.5px}thead{background:#0b315f;color:white}thead th{padding:6px;text-align:center;font-weight:700;font-size:10px;border:1px solid #0b315f}tbody tr:nth-child(even){background:#f8fafc}.totales td{padding:4px 10px}.totales .label{text-align:right;color:#555;font-weight:600}.totales .valor{text-align:right;font-weight:700}.totales .total-neto{font-size:13px;font-weight:900;color:#0b315f}.totales .sep{border-top:2px solid #0b315f}.cuentas{margin-top:12px;border-top:2px solid #0b315f;padding-top:10px}.cuentas h3{font-size:11px;font-weight:900;color:#0b315f;margin:0 0 6px}.cuentas-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.cuenta-box{border:1px solid #ddd;border-radius:4px;padding:6px 8px}.cuenta-box .banco{font-weight:900;font-size:10px;color:#0b315f;margin-bottom:3px}.cuenta-box p{margin:1px 0;font-size:9.5px}.anexo h3{font-size:10.5px;font-weight:900;margin:8px 0 4px;text-transform:uppercase}.anexo li{font-size:10.5px;color:#333;line-height:1.6}`);
-  const totalesCorpHtml=(()=>{let h="<table class=\"totales\">";if(conIGV){h+=`<tr><td class="label">SUBTOTAL</td><td class="valor">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;if(desc>0)h+=`<tr><td class="label">DESCUENTO</td><td class="valor" style="color:#dc2626;">- S/ ${desc.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;h+=`<tr><td class="label">IGV (18%)</td><td class="valor">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}h+=`<tr class="sep"><td class="label total-neto">TOTAL NETO</td><td class="valor total-neto">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;if(!conIGV)h+="<tr><td colspan=\"2\" style=\"text-align:right;font-size:9px;color:#6b7280;padding:2px 10px 0;\">No incluye IGV</td></tr>";h+="</table>";return h;})();
-  const saltoIncl=items.length>=3||vehiculos.length>=3?'<div style="page-break-before:always;height:70px;margin:0;"></div>':"";
-  const win=window.open("","_blank");if(!win)return;
-  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title><style>${css}</style></head><body>${buildHeaderPDFHtml(empresa?.logo_url||LOGO_DEFAULT,"#0b315f",`COTIZACIÓN N° ${nCot} - ${anio}`,`Fecha: ${fechaDoc} · Válida 30 días`)}<div class="grid2"><div class="box"><div class="box-title">Datos del cliente</div><div class="box-row"><b>CLIENTE:</b> ${nomCl}</div><div class="box-row"><b>${cliente?.ruc?"RUC":"DNI"}:</b> ${cliente?.ruc||cliente?.dni||"—"}</div><div class="box-row"><b>DIRECCIÓN:</b> ${cliente?.direccion||"—"}</div><div class="box-row"><b>CELULAR:</b> ${cliente?.telefono||"—"}</div><div class="box-row"><b>ATENCIÓN:</b> ${cot.atencion||cliente?.operativo_nombre||"—"}</div></div><div class="box"><div class="box-title">${empNombre}</div><div class="box-row"><b>RUC:</b> ${empRuc}</div>${repr?`<div class="box-row"><b>REPRESENTANTE:</b> ${repr}</div>`:""}<div class="box-row"><b>EMAIL:</b> ${empEmail}</div><div class="box-row"><b>TELF:</b> ${empTel}</div></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Detalle del servicio</div><div style="display:grid;grid-template-columns:${soloIda?"1fr 1fr":"1fr 1fr 1fr"};gap:6px;"><div class="box-row"><b>ORIGEN:</b> ${cot.origen||"—"}</div><div class="box-row"><b>DESTINO:</b> ${cot.destino||"—"}</div>${soloIda?"":`<div class="box-row"><b>RETORNO:</b> ${cot.punto_retorno||cot.origen||"—"}</div>`}</div>${cot.asunto?`<div class="box-row" style="margin-top:4px;"><b>ASUNTO:</b> ${cot.asunto}</div>`:""}${cot.fecha_retorno?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA IDA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORA IDA:</b> <b>${cot.hora_ida||"_____"}</b></div><div class="box-row"><b>FECHA RETORNO:</b> ${new Date(cot.fecha_retorno+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase()}</div><div class="box-row"><b>HORA RETORNO:</b> <b>${cot.hora_retorno||"_____"}</b></div></div>`:`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORARIO:</b> Salida: <b>${cot.hora_ida||"_____"}</b>${soloIda?"":` | Retorno: <b>${cot.hora_retorno||"_____"}</b>`}</div></div>`}${notaFijo}</div>${buildCronogramaMultidiaPDF(cot,"#0b315f")}<table><thead><tr><th style="width:40px;">ITEM</th><th style="text-align:left;">DESCRIPCIÓN</th><th style="width:45px;">DÍAS</th><th style="width:55px;">CANT.</th><th style="width:110px;">P. UNIT S/ sin IGV</th><th style="width:55px;">% DSCTO.</th><th style="width:110px;">TOTAL S/</th></tr></thead><tbody>${filasItems}<tr><td colspan="7" style="border:1px solid #ccc;padding:0;vertical-align:top;">${totalesCorpHtml}</td></tr></tbody></table>${buildCuentasHtml(cfg,empresa)}${buildAnexoHtml(cot,nomCl,nCot,"#0b315f","#1d4ed8")}<div class="page-break"></div><h2 style="font-size:14px;font-weight:900;color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:6px;margin-bottom:16px;padding-top:82px;">Descripción de la unidad y condiciones</h2>${vehiculos.length?`<div class="box" style="margin-bottom:10px;"><div class="box-title">Características de la unidad${vehiculos.length>1?" · "+vehiculos.length+" vehículos":""}</div><div class="box-row">${vehsSec}</div></div>`:""}`+saltoIncl+`<div class="anexo"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;"><div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">✅ Servicio incluye</h3><ul>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div><div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">❌ No incluye</h3><ul>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div></div><h3 style="color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:3px;">📋 Consideraciones generales</h3><ul>${(cfg?.condiciones_generales||consid.generales).map(i=>`<li>${i}</li>`).join("")}</ul></div>${buildFooterPDFHtml("#0b315f",empDir,empTel,empEmail,EMP(empresa).web)}<script>window.onload=()=>window.print();</script></body></html>`);
-  win.document.close();
-}
-
 // Ficha Técnica de Ruta: el documento se arma en lib/ficha-ruta-html.ts (así se puede
 // generar y revisar sin navegador). Aquí solo se abre la ventana y se imprime.
 function generarFichaRuta(datos:FichaRutaDatos){
@@ -1278,6 +1020,23 @@ export default function CotizacionesPage(){
   const skipFechasRef=useRef(false);
   const skipDescRef=useRef(false);
   const skipParadasRef=useRef(false);
+  // ── MONEDA DE LA COTIZACIÓN (lib/cotizacion-moneda.ts) ──────────────────────────────────
+  // Lo que se GUARDA siempre está en soles. Lo que se TECLEA (ítems y precio/día) está en la
+  // moneda en que hoy se enseña el formulario: `monedaItems`. Solo pasa a US$ cuando hay un tipo
+  // de cambio válido — sin él los importes siguen en soles y lo dicen, nunca soles rotulados US$.
+  const [monedaItems,setMonedaItems]=useState<Moneda>("PEN");
+  const ultimoTcRef=useRef<number|null>(null);
+  // Al pasar a dólares se recuerdan los soles exactos: volver a soles sin haber tocado nada los
+  // devuelve tal cual (la ida y vuelta por 2 decimales no los mueve ni un céntimo).
+  const baseSolesRef=useRef<{tc:number;usd:string;items:ItemCot[];precioDia:string}|null>(null);
+  const [sugTc,setSugTc]=useState<SugerenciaTc|null>(null);
+  // Sin la migración (cotizaciones-04) no se puede cotizar en dólares: lo dice la lista (columna
+  // soltada) o el guardado (la base rechazó la columna).
+  const [faltaMonedaGuardado,setFaltaMonedaGuardado]=useState(false);
+  // ── PDF: idioma elegido en el modal y los avisos de htmlCotizacion para esa combinación ──
+  const [idiomaPdfModal,setIdiomaPdfModal]=useState<Idioma>("es");
+  const [avisosPdf,setAvisosPdf]=useState<AvisoPdf[]|null>(null);const [errorAvisosPdf,setErrorAvisosPdf]=useState("");
+  const [generandoPdf,setGenerandoPdf]=useState(false);
   // Mismo predicado para el chip y la lista del modal (pendientesDeCotizar). Si la lectura falla
   // el chip dice «?» con el error: nunca un 0 falso.
   const contarDespacho=async()=>{try{const{filas}=await leerDespachosSinCotizar(supabase);setPendDespacho(pendientesDeCotizar(filas).length);setErrDespacho(null);}catch(e:any){setPendDespacho(null);setErrDespacho(e?.message??String(e));}};
@@ -1716,6 +1475,8 @@ export default function CotizacionesPage(){
       // sobre uno ausente reventaba el guardado — y el borrador sobrevive a F5.
       setForm({...FORM0,...d.form});
       if(d.items?.length)setItems(d.items);
+      // Los ítems del borrador están en la moneda en que se teclearon (`monedaItems`), con su TC.
+      if(d.monedaItems==="USD"&&typeof d.tcItems==="number"){setMonedaItems("USD");ultimoTcRef.current=d.tcItems;}
       if(d.consid)setConsid(d.consid);
       if(d.paradas?.length)setParadas(d.paradas);
       if(d.paradasRetorno?.length)setParadasRetorno(d.paradasRetorno);
@@ -1735,21 +1496,18 @@ export default function CotizacionesPage(){
     if(!mostrarForm)return;
     if(!form.origen&&!form.destino&&!form.cliente_id&&!editandoId)return;
     const rutaCoords=rutaCoordsParaGuardar(origenPlace,destinoPlace,retornoPlace,{origen:form.origen,destino:form.destino,retorno:form.punto_retorno},vuelve);
-    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,rutaCoords,savedAt:new Date().toISOString()}));}catch{}
-  },[form,items,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF,origenPlace,destinoPlace,retornoPlace,vuelve]);
+    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,monedaItems,tcItems:monedaItems==="USD"?ultimoTcRef.current:null,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,rutaCoords,savedAt:new Date().toISOString()}));}catch{}
+  },[form,items,monedaItems,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF,origenPlace,destinoPlace,retornoPlace,vuelve]);
 
   // Auto-construir descripción del primer ítem cuando cambia modo/tipo/equipamiento
   useEffect(()=>{
     if(!mostrarForm)return;
     if(skipDescRef.current){skipDescRef.current=false;return;}
-    const servLbl=form.modo_servicio==="fijo"?"SERVICIO DE TRANSPORTE DE PERSONAL":"SERVICIO DE TRANSPORTE TURÍSTICO";
+    // Compuesta por lib/cotizacion-idioma.ts en el idioma del PDF. El nivel lo declara la FICHA
+    // (sufijo _ESTANDAR), no `form.equipamiento`: elegir una placa copia el equipamiento de la PLACA
+    // y puede contradecir a la ficha. Y si el nombre de la ficha ya lo dice, no se repite.
     const tipoNom=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||"";
-    // El nivel lo declara la FICHA (sufijo _ESTANDAR), no `form.equipamiento`: elegir una placa
-    // copia el equipamiento de la PLACA y puede contradecir a la ficha — salía «Estándar (>10 años)
-    // FULL EQUIPO». Y si el nombre de la ficha ya lo dice, no se repite.
-    const equipLbl=etiquetaNivel(equipamientoDeNivel(nivelDeFicha(form.tipo_vehiculo)));
-    const yaLoDice=/full\s*equipo|est[aá]ndar/i.test(tipoNom);
-    const autoDesc=tipoNom?`${servLbl} - ${tipoNom}${equipLbl&&!yaLoDice?" "+equipLbl:""}`:servLbl;
+    const autoDesc=descripcionServicio({modo_servicio:form.modo_servicio,tipo_vehiculo:form.tipo_vehiculo,tipoNombre:tipoNom},form.idioma_pdf);
     setItems(prev=>{const n=[...prev];if(n[0])n[0]={...n[0],descripcion:autoDesc};return n;});
   },[form.modo_servicio,form.tipo_vehiculo,form.equipamiento,mostrarForm]);
 
@@ -1815,12 +1573,80 @@ export default function CotizacionesPage(){
   },[form.vehiculo_flota_id,flota,nivel]);
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
-  const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);const considBase:ConsidCot={incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales};considSinTocarRef.current=considBase;setConsid(considBase);setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const faltaColMoneda=sinColumnasLista.includes("moneda")||faltaMonedaGuardado;
+  const revTc=revisarTipoCambio(form.tipo_cambio);
+  /** El tipo de cambio con que se expresan hoy los importes del formulario (null = soles). */
+  const tcItems=monedaItems==="USD"?(revTc.tc??ultimoTcRef.current):null;
+  /** Los ítems del formulario EN SOLES (lo que se guarda): 4 decimales desde los dólares tecleados. */
+  const itemsPENForm=useMemo(()=>monedaItems==="USD"?(itemsAPEN(items,"USD",tcItems)??items):items,[items,monedaItems,tcItems]);
+  /** Precio/día del formulario en soles (con IGV), o null si está vacío. */
+  const precioDiaPENForm=(()=>{const n=Number(form.precio_dia);if(!form.precio_dia||!Number.isFinite(n)||n<=0)return null;return monedaItems==="USD"?aPENdesdeCot(n,"USD",tcItems):n;})();
+  // Totales en SOLES (lo que se guarda en precio_cliente) y en la moneda que se enseña.
+  const totPEN=totalesEnMoneda(itemsPENForm,"PEN",null,form.incluye_igv)!;
+  const totPant=(monedaItems==="USD"?totalesEnMoneda(itemsPENForm,"USD",tcItems,form.incluye_igv):null)??totPEN;
+  const{subtotal}=totPEN;const{igv,total}=totPant;const subtotalPant=totPant.subtotal;
+  const simbItems=simboloMoneda(monedaItems);
+
+  /** Lleva ítems y precio/día a la moneda pedida, si se puede (ver `monedaItems`). */
+  const reexpresar=(m:Moneda,tcStr:string)=>{
+    const r=revisarTipoCambio(tcStr);
+    if(r.codigo==="ok")ultimoTcRef.current=r.tc;
+    if(m==="USD"&&monedaItems==="PEN"&&r.tc!=null){
+      const tc=r.tc;
+      const usd=itemsEnMoneda(items,"USD",tc)??items;
+      const pd=form.precio_dia&&Number(form.precio_dia)>0?String(aMonedaCot(Number(form.precio_dia),"USD",tc)):form.precio_dia;
+      baseSolesRef.current={tc,usd:JSON.stringify({usd,pd}),items,precioDia:form.precio_dia};
+      setItems(usd);setForm(p=>({...p,precio_dia:pd}));setMonedaItems("USD");
+    }else if(m==="PEN"&&monedaItems==="USD"){
+      const tc=r.tc??ultimoTcRef.current;
+      const base=baseSolesRef.current;
+      if(base&&base.tc===tc&&base.usd===JSON.stringify({usd:items,pd:form.precio_dia})){
+        setItems(base.items);setForm(p=>({...p,precio_dia:base.precioDia}));
+      }else if(tc!=null){
+        setItems(itemsAPEN(items,"USD",tc)??items);
+        const pd=form.precio_dia&&Number(form.precio_dia)>0?String(aPENdesdeCot(Number(form.precio_dia),"USD",tc)):form.precio_dia;
+        setForm(p=>({...p,precio_dia:pd}));
+      }
+      baseSolesRef.current=null;setMonedaItems("PEN");
+    }
+  };
+  /** Cambiar la moneda NO reinterpreta números: los soles se conservan (planCambioMoneda). */
+  const cambiarMoneda=(m:Moneda)=>{
+    if(m===form.moneda)return;
+    if(m==="USD"&&faltaColMoneda)return;
+    setForm(p=>({...p,moneda:m}));
+    reexpresar(m,form.tipo_cambio);
+  };
+  /** Con dólares ya en pantalla, cambiar el TC conserva los dólares tecleados y recalcula los soles. */
+  const cambiarTipoCambio=(v:string)=>{
+    setForm(p=>({...p,tipo_cambio:v}));
+    reexpresar(form.moneda,v);
+  };
+  /** Una cotización en dólares sin un tipo de cambio válido no se guarda (lo que le falta, dicho). */
+  const bloqueoMoneda=form.moneda!=="USD"?"":faltaColMoneda?`No se puede guardar en dólares: falta correr ${SQL_MONEDA}. Pásala a soles para guardarla.`:revTc.codigo!=="ok"?revTc.detalle:monedaItems!=="USD"?"Los importes todavía están en soles: escribe el tipo de cambio para pasarlos a dólares.":"";
+  const detalleMoneda=planCambioMoneda({moneda:monedaItems,tipoCambio:form.tipo_cambio,itemsPEN:[]},form.moneda).detalle;
+  // La sugerencia del tipo de cambio se pide al pasar a dólares (best-effort, nunca lanza).
+  useEffect(()=>{
+    if(form.moneda!=="USD"||sugTc)return;
+    let vigente=true;
+    leerTipoCambioSugerido(supabase,hoyLima()).then(r=>{if(vigente)setSugTc(r);});
+    return()=>{vigente=false;};
+  },[form.moneda,sugTc]);
+  /** Al cambiar de idioma, la descripción automática se recompone (solo si sigue siendo la del sistema). */
+  const cambiarIdiomaPdf=(i:Idioma)=>{
+    if(i===form.idioma_pdf)return;
+    const ctx={modo_servicio:form.modo_servicio,tipo_vehiculo:form.tipo_vehiculo,tipoNombre:paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||""};
+    const antes=descripcionServicio(ctx,form.idioma_pdf);
+    setItems(prev=>prev.map((it,ix)=>ix===0&&it.descripcion===antes?{...it,descripcion:descripcionServicio(ctx,i)}:it));
+    setForm(p=>({...p,idioma_pdf:i}));
+  };
+  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);setMonedaItems("PEN");baseSolesRef.current=null;const considBase:ConsidCot={incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales};considSinTocarRef.current=considBase;setConsid(considBase);setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.tipo_vehiculo_costeo?equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo)):(v.equipamiento||"full_equipo"),tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo,...(v.tipo_vehiculo_costeo?{equipamiento:equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo))}:{})}));};
-  const aplicarPrecio=(sinIGV:number,fuente:string,costoBase?:number)=>{const esFijo=form.modo_servicio==="fijo";const conIGV=sinIGV*(1+IGV);setItems(prev=>{const n=[...prev];n[0]={...n[0],precio_unit:Math.round(sinIGV*100)/100};return n;});if(costoBase)setForm(p=>({...p,costo_estimado:String(Math.round(costoBase*100)/100)}));if(esFijo)setForm(p=>({...p,precio_dia:String(Math.round(conIGV*100)/100)}));};
+  // `sinIGV` llega en SOLES (el calculador y el tarifario son soles); se escribe en la moneda en que
+  // se teclean hoy los ítems. El costo interno sigue en soles.
+  const aplicarPrecio=(sinIGV:number,fuente:string,costoBase?:number)=>{const esFijo=form.modo_servicio==="fijo";const conIGV=sinIGV*(1+IGV);const enPant=(pen:number)=>monedaItems==="USD"?(aMonedaCot(pen,"USD",tcItems)??Math.round(pen*100)/100):Math.round(pen*100)/100;setItems(prev=>{const n=[...prev];n[0]={...n[0],precio_unit:enPant(sinIGV)};return n;});if(costoBase)setForm(p=>({...p,costo_estimado:String(Math.round(costoBase*100)/100)}));if(esFijo)setForm(p=>({...p,precio_dia:String(enPant(conIGV))}));};
   const buscarTarifa=()=>tarifas.find(t=>norm(t.origen)===norm(form.origen)&&norm(t.destino)===norm(form.destino)&&t.tipo_vehiculo===form.tipo_vehiculo&&t.equipamiento===form.equipamiento&&t.tipo_servicio===form.tipo_servicio&&(t.modo||"eventual")===form.modo_servicio)||null;
 
   const agregarItemItinerario=()=>{setItems(prev=>[...prev,{descripcion:"Itinerario del recorrido:\n- Punto de partida: \n- Parada 1: \n- Parada 2: \n- Destino final: ",dias:1,cantidad:1,precio_unit:0,descuento_pct:0}]);};
@@ -1872,9 +1698,12 @@ export default function CotizacionesPage(){
     const tarifaEnc=buscarTarifa();const kmNum2=Number(form.km)||0;const esFijo=form.modo_servicio==="fijo";
     const vehParam=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo);
     const costoCalc=vehParam?calcCostoVeh(vehParam,preciosDB,kmNum2>0?kmNum2:1,diasCond,peajesF,pernocteF,viaticosF):null;
-    const precioDiaNum=esFijo?Number(form.precio_dia)||costoCalc?.diaEstIGV:null;
+    // Todo lo que se escribe va EN SOLES: los ítems y el precio/día tecleados en US$ se llevan a
+    // soles con 4 decimales al tipo de cambio de la cotización (lib/cotizacion-moneda.ts).
+    const precioDiaNum=esFijo?precioDiaPENForm||costoCalc?.diaEstIGV:null;
     const precioMesNum=esFijo&&precioDiaNum?precioDiaNum*26:null;
-    const{total:tot}=calcItems(items,form.incluye_igv);
+    const tot=totPEN.total;
+    const monGuardar:Moneda=monedaItems==="USD"&&form.moneda==="USD"?"USD":"PEN";
     return{
       cliente_id:form.cliente_id?Number(form.cliente_id):null,origen:form.origen.trim(),destino:form.destino.trim(),km:kmNum2,
       precio_cliente:esFijo?(precioDiaNum||tot):tot,costo_estimado:Number(form.costo_estimado||0),
@@ -1886,7 +1715,7 @@ export default function CotizacionesPage(){
       hora_ida:(form.tipo_servicio==="multi_dia"&&fechasMultidia.length>0?fechasMultidia[0].hora_ida:form.hora_ida)||null,
       hora_retorno:(form.tipo_servicio==="multi_dia"&&fechasMultidia.length>0?fechasMultidia[fechasMultidia.length-1].hora_fin:form.hora_retorno)||null,
       fechas_multidia_json:form.tipo_servicio==="multi_dia"&&fechasMultidia.length>0?fechasMultidia:null,
-      descuento_pct:Number(form.descuento_pct||0),items_json:items,tipo_vehiculo:form.tipo_vehiculo||null,
+      descuento_pct:Number(form.descuento_pct||0),items_json:itemsPENForm,tipo_vehiculo:form.tipo_vehiculo||null,
       tipo_servicio:form.tipo_servicio||null,equipamiento:form.equipamiento||null,
       vehiculo_flota_id:form.vehiculo_flota_id?Number(form.vehiculo_flota_id):null,
       vehiculo_tercero_id:form.vehiculo_tercero_id?Number(form.vehiculo_tercero_id):null,
@@ -1899,6 +1728,7 @@ export default function CotizacionesPage(){
       precio_sugerido:costoCalc?(esFijo?costoCalc.diaEstIGV:costoCalc.totalEst20):null,
       modo_precio:tarifaEnc?"tarifario":"cotizador",incluye_igv:form.incluye_igv,
       itinerario_texto:form.itinerario_texto.trim()||null,
+      moneda:monGuardar,tipo_cambio:monGuardar==="USD"?revTc.tc:null,idioma_pdf:form.idioma_pdf,
       ruta_coords_json:rutaCoordsParaGuardar(origenPlace,destinoPlace,retornoPlace,{origen:form.origen,destino:form.destino,retorno:form.punto_retorno},!esSoloIda),
     } as any;
   };
@@ -1922,10 +1752,16 @@ export default function CotizacionesPage(){
     const intento={...payload};
     let r=await ir(intento);
     let guard=0;
-    while(r.error&&guard++<2){
-      const col=(["ruta_coords_json","vendedor_id"] as const).find(c=>c in intento&&faltaColumna(r.error,c));
+    // moneda/tipo_cambio/idioma_pdf → cotizaciones-04-moneda-idioma.sql: sin ella se guarda en soles
+    // y en español. Una cotización en DÓLARES no se guarda así: se dice y se devuelve el error.
+    while(r.error&&guard++<5){
+      const col=(["ruta_coords_json","vendedor_id",...COLS_MONEDA] as const).find(c=>c in intento&&faltaColumna(r.error,c));
       if(!col)break;
-      delete intento[col];
+      if((COLS_MONEDA as readonly string[]).includes(col)){
+        setFaltaMonedaGuardado(true);
+        if(intento.moneda==="USD")return{error:{message:`No se guardó: la cotización está en dólares y la base todavía no tiene la columna «${col}». Hay que correr ${SQL_MONEDA}; mientras tanto se puede cotizar en soles.`}} as any;
+        for(const c of COLS_MONEDA)delete intento[c];
+      }else delete intento[col];
       if(col==="ruta_coords_json")setFaltaMigracionCoords(true);
       r=await ir(intento);
     }
@@ -1958,6 +1794,7 @@ export default function CotizacionesPage(){
   const guardarBorrador=async()=>{
     if(calculandoKm){alert("⏳ Se está calculando el kilometraje de la ruta. Espera un segundo antes de guardar.");return;}
     if(!form.cliente_id&&!form.origen.trim()&&!form.destino.trim()){alert("⚠️ Ingresa al menos el cliente o la ruta para guardar el borrador");return;}
+    if(bloqueoMoneda){alert(`⚠️ ${bloqueoMoneda}`);return;}
     setGuardando(true);
     try{
       const op=await operadorActual();
@@ -1978,6 +1815,7 @@ export default function CotizacionesPage(){
     if(requiereParadas&&paradas.length<2){alert("⚠️ El servicio 'Con Paradas' requiere al menos 2 puntos del recorrido en la sección de paradas");return;}
     const cl=clientes.find(c=>c.id===Number(form.cliente_id));if(cl?.estado==="bloqueado"){alert("Cliente bloqueado.");return;}
     if(items.some(it=>!it.descripcion.trim())){alert("Todos los items necesitan descripción");return;}
+    if(bloqueoMoneda){alert(`⚠️ ${bloqueoMoneda}`);return;}
     setGuardando(true);
     try{
     const op=await operadorActual();
@@ -1999,7 +1837,8 @@ export default function CotizacionesPage(){
     const paradasRetornoGuardadas=[...paradasRetorno];
     const tarifaEnc=buscarTarifa();const vehParam=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo);
     const costoCalc=vehParam?calcCostoVeh(vehParam,preciosDB,kmNum>0?kmNum:1,diasCond,peajesF,pernocteF,viaticosF):null;
-    const precioDiaNum=esFijo?Number(form.precio_dia)||costoCalc?.diaEstIGV:null;
+    const precioDiaNum=esFijo?precioDiaPENForm||costoCalc?.diaEstIGV:null;
+    // El tarifario guarda SOLES (sin IGV), también desde una cotización en dólares.
     if(guardarTar&&form.tipo_vehiculo&&form.tipo_servicio&&form.equipamiento&&subtotal>0){const{error:tarErr}=await supabase.from("tarifario").upsert({origen:form.origen.trim().toUpperCase(),destino:form.destino.trim().toUpperCase(),tipo_vehiculo:form.tipo_vehiculo,equipamiento:form.equipamiento,tipo_servicio:form.tipo_servicio,modo:form.modo_servicio,precio:esFijo?(precioDiaNum||subtotal)/1.18:subtotal,moneda:"PEN",confidencial:["full_day","multi_dia"].includes(form.tipo_servicio),incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Cotización ${form.numero_cotizacion||""}`.trim(),activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});if(tarErr)alert("Error al guardar en tarifario: "+tarErr.message);}
     // Detectar servicios futuros no ejecutados para ofrecer propagación de las direcciones.
     //
@@ -2302,14 +2141,27 @@ export default function CotizacionesPage(){
   const duplicarCotizacion=async(c:Cotizacion)=>{
     const payload:any={cliente_id:c.cliente_id,origen:c.origen,destino:c.destino,km:c.km,precio_cliente:c.precio_cliente,costo_estimado:c.costo_estimado,margen_estimado:c.margen_estimado,estado:"pendiente",numero_cotizacion:null,atencion:c.atencion,asunto:c.asunto?`COPIA — ${c.asunto}`:null,punto_retorno:c.punto_retorno,fecha_servicio:c.fecha_servicio,fecha_retorno:c.fecha_retorno,hora_ida:c.hora_ida,hora_retorno:c.hora_retorno,descuento_pct:c.descuento_pct||0,items_json:c.items_json,tipo_vehiculo:c.tipo_vehiculo,tipo_servicio:c.tipo_servicio,equipamiento:c.equipamiento,vehiculo_flota_id:c.vehiculo_flota_id,vehiculo_tercero_id:c.vehiculo_tercero_id,consideraciones_json:c.consideraciones_json,paradas_json:c.paradas_json,paradas_retorno_json:c.paradas_retorno_json,modo_servicio:c.modo_servicio,dias_servicio:c.dias_servicio||1,horas_servicio:c.horas_servicio||8,pernocte_costo:c.pernocte_costo,precio_dia:c.precio_dia,precio_mes_estimado:c.precio_mes_estimado,precio_tarifario:c.precio_tarifario,precio_cotizador:c.precio_cotizador,precio_sugerido:c.precio_sugerido,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto,fechas_multidia_json:c.fechas_multidia_json,plantilla_pdf:c.plantilla_pdf||"corporativo"};
     if(c.ruta_coords_json)payload.ruta_coords_json=c.ruta_coords_json;
+    // La moneda, el tipo de cambio congelado y el idioma del PDF viajan con la copia (cotizaciones-04).
+    if(c.moneda!=null)payload.moneda=normalizarMoneda(c.moneda);
+    if(c.tipo_cambio!=null)payload.tipo_cambio=c.tipo_cambio;
+    if(c.idioma_pdf!=null)payload.idioma_pdf=normalizarIdioma(c.idioma_pdf);
     // Quien duplica es el vendedor de la copia (comisiones-02). Si falta la columna, se guarda igual.
     const{data:{session:sesDup}}=await supabase.auth.getSession();
     payload.vendedor_id=sesDup?.user?.id??null;
     let{error}=await supabase.from("cotizaciones").insert(payload);
     if(error&&faltaColumna(error,"ruta_coords_json")){delete payload.ruta_coords_json;({error}=await supabase.from("cotizaciones").insert(payload));}
     if(error&&faltaColumna(error,"vendedor_id")){delete payload.vendedor_id;({error}=await supabase.from("cotizaciones").insert(payload));}
+    let avisoCopia="";
+    for(let g=0;g<3&&error;g++){
+      const col=faltaAlguna(error,COLS_MONEDA);if(!col||!(col in payload))break;
+      const eraUsd=payload.moneda==="USD";
+      for(const k of COLS_MONEDA)delete payload[k];
+      setFaltaMonedaGuardado(true);
+      if(eraUsd)avisoCopia=`\n⚠️ La original está en dólares, pero la base no tiene la columna «${col}» (${SQL_MONEDA}): la copia quedó en SOLES y en español, con los mismos importes en soles.`;
+      ({error}=await supabase.from("cotizaciones").insert(payload));
+    }
     if(error){alert(error.message);return;}
-    alert(`✅ Cotización #${c.numero_cotizacion||c.id} duplicada correctamente`);
+    alert(`✅ Cotización #${c.numero_cotizacion||c.id} duplicada correctamente${avisoCopia}`);
     refrescar();
   };
   const convertirAReserva=async(cot:Cotizacion)=>{
@@ -2329,17 +2181,22 @@ export default function CotizacionesPage(){
     const basePayload={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:cot.destino,fecha_servicio:cot.fecha_servicio||hoyLima(),hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null,costo_proveedor:0,ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:cot.paradas_json,hora:pI?.hora||cot.hora_ida,sentido:"ida"})||null};
     const insertParadas=async(reservaId:number):Promise<string|null>=>{if(ps.length<1)return null;const{error}=await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:reservaId,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));return error?error.message:null;};
     const avisoParadas=(e:string|null)=>e?`\n⚠️ Pero sus ${ps.length} paradas no se pudieron crear (${e}): agrégalas desde Programación.`:"";
+    // La reserva lleva el precio EN SOLES (la fila autoritativa). En una cotización en dólares se
+    // dice a qué tipo de cambio: la reserva y la liquidación ya no hablan de dólares.
+    const monCot=normalizarMoneda(cot.moneda);
+    if(monCot==="USD"&&!confirm(`La cotización #${cot.numero_cotizacion||cot.id} está en dólares (${fmtCot(Number(cot.precio_cliente||0),"USD",cot.tipo_cambio)}).\nLa reserva se crea con el precio EN SOLES: ${fmtS(Number(cot.precio_cliente||0))} al tipo de cambio de la cotización (S/ ${revisarTipoCambio(cot.tipo_cambio).tc??"—"} por US$).\n¿Crear la reserva?`))return;
+    const notaTc=monCot==="USD"?`\nℹ️ La cotización está en dólares: la reserva queda con el precio EN SOLES al tipo de cambio de la cotización (S/ ${revisarTipoCambio(cot.tipo_cambio).tc??"—"} por US$).`:"";
     if(!useMulti){
       // Nace con «Permitir autoselección» (lib/reservas-autoseleccion.ts).
       const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:cot.precio_cliente,vehiculo_id:cot.vehiculo_flota_id||null,vehiculo_tercero_id:cot.vehiculo_tercero_id||null});
       if(error){alert(error.message);return;}
       const eParadas=r?await insertParadas(r.id):null;
-      alert(`✅ Reserva creada${ps.length>0&&!eParadas?` con ${ps.length} paradas`:""}${avisoParadas(eParadas)}`);
+      alert(`✅ Reserva creada${ps.length>0&&!eParadas?` con ${ps.length} paradas`:""}${avisoParadas(eParadas)}${notaTc}`);
     } else {
       let count=0;let eParadas:string|null=null;
       for(const k of keys){
         const gItems=grupos[k];
-        const{total:gTotal}=calcItems(gItems,cot.incluye_igv!==false);
+        const gTotal=totalesEnMoneda(gItems,"PEN",null,cot.incluye_igv!==false)!.total;
         const vehFlotaId=k.startsWith("f_")?Number(k.slice(2)):(k==="sin"?cot.vehiculo_flota_id||null:null);
         const vehTercId=k.startsWith("t_")?Number(k.slice(2)):(k==="sin"?cot.vehiculo_tercero_id||null:null);
         const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:gTotal,vehiculo_id:vehFlotaId,vehiculo_tercero_id:vehTercId});
@@ -2351,12 +2208,25 @@ export default function CotizacionesPage(){
         if(r&&count===0)eParadas=await insertParadas(r.id);
         count++;
       }
-      alert(`✅ ${count} reserva${count>1?"s creadas (una por vehículo)":"creada"}${avisoParadas(eParadas)}`);
+      alert(`✅ ${count} reserva${count>1?"s creadas (una por vehículo)":"creada"}${avisoParadas(eParadas)}${notaTc}`);
     }
     refrescar();
   };
-  const editarCot=(c:Cotizacion)=>{restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||{...DEFAULT_CONSID});/* una copia: las de una cotización abierta no son «sin tocar» y la plantilla no las pisa */setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
-  const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
+  const editarCot=(c:Cotizacion)=>{
+    // Se teclea en la moneda de la cotización: con dólares y un TC válido, ítems y precio/día se
+    // enseñan en US$ (lo guardado sigue en soles). Sin TC válido, en soles.
+    const mon=normalizarMoneda(c.moneda);const rtc=revisarTipoCambio(c.tipo_cambio);
+    const enUsd=mon==="USD"&&rtc.tc!=null;
+    if(enUsd)ultimoTcRef.current=rtc.tc;
+    setMonedaItems(enUsd?"USD":"PEN");baseSolesRef.current=null;
+    const itemsBase:ItemCot[]=c.items_json?.length?c.items_json:[{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(Number(c.precio_cliente||0)/1.18*100)/100,descuento_pct:0}];
+    const pdTxt=c.precio_dia?String(enUsd?aMonedaCot(Number(c.precio_dia),"USD",rtc.tc):c.precio_dia):"";
+    restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:pdTxt,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||"",moneda:mon,tipo_cambio:c.tipo_cambio!=null?String(c.tipo_cambio):"",idioma_pdf:normalizarIdioma(c.idioma_pdf)});setItems(enUsd?(itemsEnMoneda(itemsBase,"USD",rtc.tc)??itemsBase):itemsBase);setConsid(c.consideraciones_json||{...DEFAULT_CONSID});/* una copia: las de una cotización abierta no son «sin tocar» y la plantilla no las pisa */setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+  /**
+   * Arma el PDF con lib/cotizacion-pdf.ts (`htmlCotizacion`): devuelve el HTML y lo que hay que
+   * AVISAR antes de enviarlo. `html: null` solo con dólares sin tipo de cambio válido.
+   */
+  const prepararPDF=async(cot:Cotizacion,plantilla:string,idioma:Idioma):Promise<ResultadoPdf&{plantilla:string}>=>{
     const cl=cot.cliente_id!=null?mapaClientes.get(cot.cliente_id):undefined;
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
     // Recopilar todos los vehículos únicos: nivel cotización + por ítem
@@ -2370,13 +2240,51 @@ export default function CotizacionesPage(){
     let nombreFinal=(cot as any).creado_por||"";
     if(!nombreFinal){try{nombreFinal=(await operadorActual()).nombre;}catch(e){}}
     const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
-    if(plantilla!=="corporativo"){await supabase.from("cotizaciones").update({plantilla_pdf:plantilla}).eq("id",cot.id);cacheDetalle.current.delete(cot.id);}
-    setModalPlantilla(null);
     const considFinal=editandoId===cot.id?consid:(cot.consideraciones_json||consid);
-    generarPDF(cot,cl,its,vehiculos,nombreFinal,considFinal,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
+    const r=htmlCotizacion({
+      cot,cliente:cl,items:its,vehiculos,repr:nombreFinal,consid:considFinal,plantilla,
+      cfg:cfgData as CotPlantillaConfig|null,empresa:empData as EmpresaPerfilPDF|null,
+      idioma,tipoVehiculoNombre:paramsDB.find(p=>p.tipo_vehiculo===cot.tipo_vehiculo)?.nombre??null,
+    });
+    return{...r,plantilla};
   };
+  const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida,idioma:Idioma=idiomaPdfModal)=>{
+    if(generandoPdf)return;
+    setGenerandoPdf(true);
+    try{
+      const r=await prepararPDF(cot,plantilla,idioma);
+      setAvisosPdf(r.avisos);
+      // Sin HTML no se abre ventana: el modal sigue abierto con el motivo (dólares sin tipo de cambio).
+      if(!r.html){alert(r.avisos.map(a=>a.detalle).join("\n")||"No se pudo generar el PDF.");return;}
+      const win=window.open("","_blank");
+      if(!win){alert("El navegador bloqueó la ventana emergente. Permite las ventanas emergentes para este sitio y vuelve a intentarlo.");return;}
+      win.document.write(r.html);win.document.close();
+      // La plantilla y el idioma elegidos quedan en la cotización (best-effort: idioma_pdf es de cotizaciones-04).
+      const cambios:Record<string,string>={};
+      if(plantilla!=="corporativo")cambios.plantilla_pdf=plantilla;
+      if(idioma!==normalizarIdioma(cot.idioma_pdf))cambios.idioma_pdf=idioma;
+      if(Object.keys(cambios).length){
+        let{error}=await supabase.from("cotizaciones").update(cambios).eq("id",cot.id);
+        if(error&&faltaColumna(error,"idioma_pdf")&&cambios.idioma_pdf){delete cambios.idioma_pdf;setFaltaMonedaGuardado(true);if(Object.keys(cambios).length)({error}=await supabase.from("cotizaciones").update(cambios).eq("id",cot.id));}
+        cacheDetalle.current.delete(cot.id);
+      }
+      setModalPlantilla(null);
+    }catch(e){alert(`No se pudo generar el PDF: ${(e as {message?:string})?.message||String(e)}`);}
+    finally{setGenerandoPdf(false);}
+  };
+  // Los avisos del modal se calculan para la plantilla y el idioma elegidos, ANTES de generar.
+  useEffect(()=>{
+    if(!modalPlantilla)return;
+    let vigente=true;
+    setAvisosPdf(null);setErrorAvisosPdf("");
+    prepararPDF(modalPlantilla,plantillaElegida,idiomaPdfModal)
+      .then(r=>{if(vigente)setAvisosPdf(r.avisos);})
+      .catch(e=>{if(vigente)setErrorAvisosPdf((e as {message?:string})?.message||String(e));});
+    return()=>{vigente=false;};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[modalPlantilla,plantillaElegida,idiomaPdfModal]);
 
-  const abrirModalPlantilla=(d:Cotizacion)=>{setModalPlantilla(d);setPlantillaElegida(d.plantilla_pdf||"corporativo");};
+  const abrirModalPlantilla=(d:Cotizacion)=>{setModalPlantilla(d);setPlantillaElegida(d.plantilla_pdf||"corporativo");setIdiomaPdfModal(normalizarIdioma(d.idioma_pdf));setAvisosPdf(null);setErrorAvisosPdf("");};
 
   // Un vehículo de tercero visto como uno de flota, para los documentos. El texto de
   // respaldo importa: sin él, buildVehsHtml inventa la descripción genérica de la flota
@@ -2527,7 +2435,7 @@ export default function CotizacionesPage(){
       {modalEnvio&&<ModalEnvio onConfirmar={confirmarEnvio} onCancelar={()=>setModalEnvio(null)} ocupado={estadoEnCurso!==null}/>}
       {modalDespacho&&<ModalDespachoSinCotizar nombreCliente={(id)=>{const cl=id!=null?clientes.find(c=>c.id===id):null;return cl?rotuloCliente(cl as any):(id!=null?`Cliente #${id}`:"Sin cliente");}} onCerrar={()=>setModalDespacho(false)} onCambio={contarDespacho} onCotizar={cotizarDespacho}/>}
       {modalAprob&&<ModalAprobacion cot={modalAprob} onConfirmar={confirmarAprob} onCancelar={()=>setModalAprob(null)} ocupado={estadoEnCurso!==null}/>}
-      {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={setPlantillaElegida} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida)} onCancelar={()=>setModalPlantilla(null)}/>}
+      {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={setPlantillaElegida} idioma={idiomaPdfModal} onIdioma={setIdiomaPdfModal} avisos={avisosPdf} errorAvisos={errorAvisosPdf} generando={generandoPdf} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida,idiomaPdfModal)} onCancelar={()=>setModalPlantilla(null)}/>}
       {modalEliminar&&<ModalEliminar cot={modalEliminar} onConfirmar={eliminarCotizacion} onCancelar={()=>setModalEliminar(null)}/>}
       {modalPropagar&&(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
@@ -2618,6 +2526,32 @@ export default function CotizacionesPage(){
                     </button>
                     {!form.incluye_igv&&<span className="text-[10px] text-amber-700 font-semibold bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">El PDF mostrará "No incluye IGV"</span>}
                   </div>
+                </Campo>
+                <Campo label="Idioma del PDF">
+                  <select className={iCls()} value={form.idioma_pdf} onChange={e=>cambiarIdiomaPdf(normalizarIdioma(e.target.value))}>
+                    <option value="es">🇵🇪 Español</option><option value="en" disabled={faltaColMoneda&&form.idioma_pdf!=="en"}>🇺🇸 English</option>
+                  </select>
+                  {faltaColMoneda&&<p className="text-[10px] text-amber-700 mt-0.5">Sin {SQL_MONEDA} el idioma no se guarda (se elige al generar el PDF).</p>}
+                </Campo>
+                <Campo label="Moneda" span={2}>
+                  <div className="flex items-center gap-3 pt-1 flex-wrap">
+                    {(["PEN","USD"] as Moneda[]).map(m=>{const sel=form.moneda===m;const off=m==="USD"&&faltaColMoneda&&!sel;return(
+                      <button key={m} type="button" disabled={off} onClick={()=>cambiarMoneda(m)} title={off?`Falta correr ${SQL_MONEDA}`:undefined} className="flex items-center gap-2 px-4 py-2 rounded-xl border-2 text-xs font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed" style={{background:sel?"#eef3f8":"white",borderColor:sel?"#0b315f":"#e5e7eb",color:sel?"#0b315f":"#9ca3af"}}>
+                        {m==="PEN"?"S/ Soles":"US$ Dólares"}
+                      </button>);})}
+                    {form.moneda==="USD"&&<div className="flex items-center gap-2">
+                      <label className="text-[10px] font-bold uppercase text-gray-400 whitespace-nowrap">Tipo de cambio (S/ por US$)</label>
+                      <input inputMode="decimal" className={iCls("font-mono w-28")} placeholder="0.0000" value={form.tipo_cambio} onChange={e=>cambiarTipoCambio(e.target.value)}/>
+                    </div>}
+                  </div>
+                  {faltaColMoneda&&form.moneda!=="USD"&&<p className="text-[10px] text-amber-700 font-semibold mt-1">Dólares no disponible: falta correr {SQL_MONEDA}. Mientras tanto se cotiza en soles.</p>}
+                  {form.moneda==="USD"&&<div className="mt-1 space-y-0.5">
+                    {/* La sugerencia se ENSEÑA con su fuente; el número lo escribe una persona (sin «usar este»). */}
+                    <p className="text-[10px] text-gray-500">{sugTc==null?"Buscando un tipo de cambio de referencia…":sugTc.tc!=null?<>Referencia: <b className="font-mono">{sugTc.tc}</b> · {ETQ_FUENTE_TC[sugTc.fuente]} — {sugTc.detalle}</>:sugTc.detalle}</p>
+                    {revTc.codigo!=="ok"?<p className="text-[10px] font-semibold text-red-600">{revTc.detalle} No se puede guardar hasta escribirlo.</p>
+                      :<p className="text-[10px] text-gray-500">Los importes se teclean en dólares y se guardan en SOLES a este tipo de cambio (queda congelado en la cotización).</p>}
+                    {detalleMoneda&&monedaItems!=="USD"&&<p className="text-[10px] text-amber-700 font-semibold">{detalleMoneda}</p>}
+                  </div>}
                 </Campo>
                 <Campo label="Atención" span={2}><input className={iCls()} placeholder="Nombre del responsable" value={form.atencion} onChange={f("atencion")}/>
                   {contactosCl.length>0&&<div className="flex flex-wrap gap-1.5 mt-1.5">{contactosCl.map((c,i)=>{const nom=[c.nombre,c.apellido].map(x=>String(x??"").trim()).filter(Boolean).join(" ");const puesto=form.atencion.trim()===nom;return<button key={i} type="button" onClick={()=>setForm(p=>({...p,atencion:nom}))} title={[c.cargo,c.telefono,c.email].filter(Boolean).join(" · ")||undefined} className="text-[11px] rounded-lg border px-2 py-1 min-h-[32px] text-left transition-colors" style={{background:puesto?"#eef3f8":"white",borderColor:puesto?"#0b315f":"#e5e7eb",color:"#0b315f"}}>{c.principal?"★ ":""}<span className="font-semibold">{nom}</span>{c.cargo&&<span className="text-gray-400"> · {c.cargo}</span>}</button>;})}</div>}
@@ -2838,10 +2772,10 @@ export default function CotizacionesPage(){
                 <Campo label="Costo interno S/"><input type="number" min={0} className={iCls()} placeholder="0" value={form.costo_estimado} onChange={f("costo_estimado")}/></Campo>
               </div>
               {!esFijoForm&&form.tipo_servicio==="multi_dia"&&<div className="mt-3 rounded-xl bg-purple-50 border border-purple-200 p-4 grid grid-cols-2 gap-4"><p className="col-span-2 text-[10px] font-black text-purple-700 uppercase">🏕️ Costos multi-día</p><Campo label="Pernocte bus S/"><input type="number" min={0} className={iCls()} value={pernocteF||""} onChange={e=>setPernocteF(Number(e.target.value))}/></Campo><Campo label="Viáticos chofer S/"><input type="number" min={0} className={iCls()} value={viaticosF||""} onChange={e=>setViaticosF(Number(e.target.value))}/></Campo></div>}
-              {esFijoForm&&<div className="mt-3 rounded-xl bg-green-50 border border-green-200 p-4 grid grid-cols-2 gap-4 items-end"><Campo label="Precio/día confirmado S/ (con IGV)"><input type="number" min={0} className={iCls("font-mono font-bold")} placeholder="0.00" value={form.precio_dia} onChange={f("precio_dia")}/></Campo>{form.precio_dia&&Number(form.precio_dia)>0&&<div className="rounded-xl bg-green-100 border border-green-300 px-4 py-3"><p className="text-[10px] font-bold text-green-700 uppercase">Estimado mensual (×26)</p><p className="font-black text-xl text-green-700">{fmtS(Number(form.precio_dia)*26)}</p></div>}</div>}
+              {esFijoForm&&<div className="mt-3 rounded-xl bg-green-50 border border-green-200 p-4 grid grid-cols-2 gap-4 items-end"><Campo label={`Precio/día confirmado ${simbItems} (con IGV)`}><input type="number" min={0} className={iCls("font-mono font-bold")} placeholder="0.00" value={form.precio_dia} onChange={f("precio_dia")}/>{monedaItems==="USD"&&precioDiaPENForm!=null&&<p className="text-[10px] text-gray-500 mt-0.5">Se guarda en soles: {fmtS(precioDiaPENForm)}</p>}</Campo>{form.precio_dia&&Number(form.precio_dia)>0&&<div className="rounded-xl bg-green-100 border border-green-300 px-4 py-3"><p className="text-[10px] font-bold text-green-700 uppercase">Estimado mensual (×26)</p><p className="font-black text-xl text-green-700">{fmtM(Number(form.precio_dia)*26,monedaItems)}</p></div>}</div>}
             </div>
 
-            {form.tipo_vehiculo&&<SugerenciaEnVivo origen={form.origen} destino={form.destino} tipoVehId={form.tipo_vehiculo} tipoServ={form.tipo_servicio} equip={form.equipamiento} km={kmNum} dias={diasCond} peajes={peajesF} pernocte={pernocteF} viaticos={viaticosF} modoServ={form.modo_servicio} tarifas={tarifas} paramsDB={paramsDB} preciosDB={preciosDB} onAplicar={aplicarPrecio}/>}
+            {form.tipo_vehiculo&&<SugerenciaEnVivo origen={form.origen} destino={form.destino} tipoVehId={form.tipo_vehiculo} tipoServ={form.tipo_servicio} equip={form.equipamiento} km={kmNum} dias={diasCond} peajes={peajesF} pernocte={pernocteF} viaticos={viaticosF} modoServ={form.modo_servicio} tarifas={tarifas} paramsDB={paramsDB} preciosDB={preciosDB} onAplicar={aplicarPrecio} moneda={monedaItems} tc={tcItems}/>}
 
             <div>
               <div className="flex items-center justify-between border-b pb-1 mb-3"><p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Items</p><button onClick={addItem} className="text-xs font-bold text-[#0b315f] hover:underline">+ Agregar</button></div>
@@ -2867,26 +2801,27 @@ export default function CotizacionesPage(){
                 <div className="col-span-2 text-[9px] font-bold uppercase tracking-wide text-gray-400 text-center">Días</div>
                 <div className="col-span-2 text-[9px] font-bold uppercase tracking-wide text-gray-400 text-center">Cant.</div>
                 <div className="col-span-2 text-[9px] font-bold uppercase tracking-wide text-gray-400 text-center">Pax</div>
-                <div className="col-span-2 text-[9px] font-bold uppercase tracking-wide text-gray-400 text-right">P. Unit.</div>
+                <div className="col-span-2 text-[9px] font-bold uppercase tracking-wide text-gray-400 text-right">P. Unit. {simbItems}</div>
                 <div className="col-span-1 text-[9px] font-bold uppercase tracking-wide text-gray-400 text-center">Dto.%</div>
                 <div className="col-span-2 text-[9px] font-bold uppercase tracking-wide text-gray-400 text-right">Total</div>
                 <div className="col-span-1"/>
               </div>
               <div className="space-y-2">
-                {items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return(<div key={i} className="grid grid-cols-12 gap-2 items-start bg-gray-50 rounded-xl p-2"><div className="col-span-12"><label className="block text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-0.5">Descripción</label><textarea rows={2} className={iCls("resize-y min-h-[60px] leading-snug")} placeholder="Descripción del servicio" value={it.descripcion} onChange={e=>{updItem(i,"descripcion",e.target.value);e.target.style.height="auto";e.target.style.height=e.target.scrollHeight+"px";}} style={{overflow:"hidden"}}/></div><div className="col-span-3 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Días</label><input type="number" min="1" className={iCls("text-center")} value={it.dias} onChange={e=>updItem(i,"dias",e.target.value)}/></div><div className="col-span-3 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Cant.</label><input type="number" min="1" className={iCls("text-center")} value={it.cantidad} onChange={e=>updItem(i,"cantidad",e.target.value)}/></div><div className="col-span-3 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Pax</label><input type="number" min="1" className={iCls("text-center")} placeholder="pax" title="Asientos CONTRATADOS para este ítem. Es lo que imprime la liquidación — no la capacidad del bus que se asigne el día del servicio." value={it.pax_contratado||""} onChange={e=>updItem(i,"pax_contratado",e.target.value)}/></div><div className="col-span-6 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">P. Unit.</label><input type="number" min="0" className={iCls("text-right")} placeholder="0.00" value={it.precio_unit||""} onChange={e=>updItem(i,"precio_unit",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Dto.%</label><input type="number" min="0" max="100" className={iCls("text-center")} placeholder="0" value={it.descuento_pct||""} onChange={e=>updItem(i,"descuento_pct",e.target.value)}/></div><div className="col-span-9 md:col-span-2 text-right font-bold text-sm text-gray-800 pr-2 flex md:block items-center justify-end gap-1"><span className="md:hidden text-[9px] font-normal text-gray-400">Total:</span>{fmtS(tf)}</div><div className="col-span-3 md:col-span-1 flex justify-end">{items.length>1&&<button onClick={()=>delItem(i)} className="w-7 h-7 rounded-lg text-red-400 hover:bg-red-50 font-bold text-sm">✕</button>}</div>{(flota.length>0||flotaTercero.length>0)&&<div className="col-span-12 mt-1"><select className="w-full border border-gray-100 rounded-lg px-2 py-1.5 text-xs text-gray-500 bg-white focus:outline-none focus:border-[#0b315f]" value={it.vehiculo_flota_id?`f_${it.vehiculo_flota_id}`:it.vehiculo_tercero_id?`t_${it.vehiculo_tercero_id}`:""} onChange={e=>{const val=e.target.value;setItems(prev=>prev.map((x,xi)=>xi!==i?x:val.startsWith("f_")?{...x,vehiculo_flota_id:Number(val.slice(2)),vehiculo_tercero_id:null}:val.startsWith("t_")?{...x,vehiculo_flota_id:null,vehiculo_tercero_id:Number(val.slice(2))}:{...x,vehiculo_flota_id:null,vehiculo_tercero_id:null}));}}><option value="">🚌 Asignar vehículo a este ítem (opcional)</option>{flota.length>0&&<optgroup label="Flota propia">{flota.map(v=><option key={v.id} value={`f_${v.id}`}>{v.placa}{v.categoria?` · ${v.categoria}`:""}{v.marca?` ${v.marca}`:""}{v.capacidad_pasajeros?` (${v.capacidad_pasajeros}p)`:""}</option>)}</optgroup>}{flotaTercero.length>0&&<optgroup label="Tercerizado">{flotaTercero.map(v=><option key={v.id} value={`t_${v.id}`}>{v.placa}{v.categoria?` · ${v.categoria}`:""}{v.empresa_nombre?` — ${v.empresa_nombre}`:""}</option>)}</optgroup>}</select></div>}</div>);})}
+                {items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return(<div key={i} className="grid grid-cols-12 gap-2 items-start bg-gray-50 rounded-xl p-2"><div className="col-span-12"><label className="block text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-0.5">Descripción</label><textarea rows={2} className={iCls("resize-y min-h-[60px] leading-snug")} placeholder="Descripción del servicio" value={it.descripcion} onChange={e=>{updItem(i,"descripcion",e.target.value);e.target.style.height="auto";e.target.style.height=e.target.scrollHeight+"px";}} style={{overflow:"hidden"}}/></div><div className="col-span-3 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Días</label><input type="number" min="1" className={iCls("text-center")} value={it.dias} onChange={e=>updItem(i,"dias",e.target.value)}/></div><div className="col-span-3 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Cant.</label><input type="number" min="1" className={iCls("text-center")} value={it.cantidad} onChange={e=>updItem(i,"cantidad",e.target.value)}/></div><div className="col-span-3 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Pax</label><input type="number" min="1" className={iCls("text-center")} placeholder="pax" title="Asientos CONTRATADOS para este ítem. Es lo que imprime la liquidación — no la capacidad del bus que se asigne el día del servicio." value={it.pax_contratado||""} onChange={e=>updItem(i,"pax_contratado",e.target.value)}/></div><div className="col-span-6 md:col-span-2"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">P. Unit.</label><input type="number" min="0" className={iCls("text-right")} placeholder="0.00" value={it.precio_unit||""} onChange={e=>updItem(i,"precio_unit",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><label className="block md:hidden text-[9px] font-bold text-gray-400 mb-0.5">Dto.%</label><input type="number" min="0" max="100" className={iCls("text-center")} placeholder="0" value={it.descuento_pct||""} onChange={e=>updItem(i,"descuento_pct",e.target.value)}/></div><div className="col-span-9 md:col-span-2 text-right font-bold text-sm text-gray-800 pr-2 flex md:block items-center justify-end gap-1"><span className="md:hidden text-[9px] font-normal text-gray-400">Total:</span>{fmtM(totPant.lineas[i]??tf,monedaItems)}</div><div className="col-span-3 md:col-span-1 flex justify-end">{items.length>1&&<button onClick={()=>delItem(i)} className="w-7 h-7 rounded-lg text-red-400 hover:bg-red-50 font-bold text-sm">✕</button>}</div>{(flota.length>0||flotaTercero.length>0)&&<div className="col-span-12 mt-1"><select className="w-full border border-gray-100 rounded-lg px-2 py-1.5 text-xs text-gray-500 bg-white focus:outline-none focus:border-[#0b315f]" value={it.vehiculo_flota_id?`f_${it.vehiculo_flota_id}`:it.vehiculo_tercero_id?`t_${it.vehiculo_tercero_id}`:""} onChange={e=>{const val=e.target.value;setItems(prev=>prev.map((x,xi)=>xi!==i?x:val.startsWith("f_")?{...x,vehiculo_flota_id:Number(val.slice(2)),vehiculo_tercero_id:null}:val.startsWith("t_")?{...x,vehiculo_flota_id:null,vehiculo_tercero_id:Number(val.slice(2))}:{...x,vehiculo_flota_id:null,vehiculo_tercero_id:null}));}}><option value="">🚌 Asignar vehículo a este ítem (opcional)</option>{flota.length>0&&<optgroup label="Flota propia">{flota.map(v=><option key={v.id} value={`f_${v.id}`}>{v.placa}{v.categoria?` · ${v.categoria}`:""}{v.marca?` ${v.marca}`:""}{v.capacidad_pasajeros?` (${v.capacidad_pasajeros}p)`:""}</option>)}</optgroup>}{flotaTercero.length>0&&<optgroup label="Tercerizado">{flotaTercero.map(v=><option key={v.id} value={`t_${v.id}`}>{v.placa}{v.categoria?` · ${v.categoria}`:""}{v.empresa_nombre?` — ${v.empresa_nombre}`:""}</option>)}</optgroup>}</select></div>}</div>);})}
               </div>
               <div className="flex justify-end mt-4">
                 <div className="w-full md:w-72 space-y-1.5 bg-gray-50 rounded-xl p-4">
                   {form.incluye_igv&&<>
-                    <div className="flex justify-between text-sm"><span className="text-gray-500">Subtotal (sin IGV)</span><span className="font-bold">{fmtS(subtotal)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-gray-500">IGV 18%</span><span className="font-bold">{fmtS(igv)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-gray-500">Subtotal (sin IGV)</span><span className="font-bold">{fmtM(subtotalPant,monedaItems)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-gray-500">IGV 18%</span><span className="font-bold">{fmtM(igv,monedaItems)}</span></div>
                   </>}
                   <div className="flex justify-between text-base border-t pt-2" style={{borderColor:"#0b315f"}}>
                     <span className="font-black">{esFijoForm?"Total/día":"Total"}</span>
-                    <span className="font-black" style={{color:"#0b315f"}}>{fmtS(total)}</span>
+                    <span className="font-black" style={{color:"#0b315f"}}>{fmtM(total,monedaItems)}</span>
                   </div>
+                  {monedaItems==="USD"&&<p className="text-[10px] text-gray-500 text-right" title="Lo que se guarda: los importes de la cotización siempre están en soles.">Se guarda en soles: {fmtS(totPEN.total)} (TC {tcItems})</p>}
                   {!form.incluye_igv&&<p className="text-[10px] text-amber-700 font-semibold text-right">No incluye IGV</p>}
-                  {esFijoForm&&<div className="flex justify-between text-sm"><span className="text-gray-400">Mes est. (×26)</span><span className="font-black text-green-600">{fmtS(total*26)}</span></div>}
+                  {esFijoForm&&<div className="flex justify-between text-sm"><span className="text-gray-400">Mes est. (×26)</span><span className="font-black text-green-600">{fmtM(total*26,monedaItems)}</span></div>}
                 </div>
               </div>
             </div>
@@ -2954,8 +2889,9 @@ export default function CotizacionesPage(){
               </div>
             )}
 
-            {form.tipo_vehiculo&&form.tipo_servicio&&form.origen&&form.destino&&<div className="rounded-xl border px-4 py-3 flex items-start gap-3" style={{background:"#f0fdf4",borderColor:"#86efac"}}><input type="checkbox" id="chk_tar" checked={guardarTar} onChange={e=>setGuardarTar(e.target.checked)} className="w-4 h-4 mt-0.5 accent-green-600 flex-shrink-0"/><label htmlFor="chk_tar" className="cursor-pointer text-xs text-green-800"><b>Guardar en Tarifario</b> — {form.origen}→{form.destino} · {paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo} · {form.modo_servicio.toUpperCase()}</label></div>}
+            {form.tipo_vehiculo&&form.tipo_servicio&&form.origen&&form.destino&&<div className="rounded-xl border px-4 py-3 flex items-start gap-3" style={{background:"#f0fdf4",borderColor:"#86efac"}}><input type="checkbox" id="chk_tar" checked={guardarTar} onChange={e=>setGuardarTar(e.target.checked)} className="w-4 h-4 mt-0.5 accent-green-600 flex-shrink-0"/><label htmlFor="chk_tar" className="cursor-pointer text-xs text-green-800"><b>Guardar en Tarifario</b> — {form.origen}→{form.destino} · {paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo} · {form.modo_servicio.toUpperCase()}{form.moneda==="USD"&&<span className="block text-green-700/80 mt-0.5">El tarifario guarda SOLES sin IGV: se registra el equivalente al tipo de cambio de la cotización, no los dólares.</span>}</label></div>}
 
+            {bloqueoMoneda&&<p className="text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">⛔ No se puede guardar todavía: {bloqueoMoneda}</p>}
             <div className="flex gap-3 flex-wrap items-center pt-2 border-t">
               <button onClick={guardarCotizacion} disabled={guardando||calculandoKm} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 flex items-center gap-2" style={{background:"#0b315f"}}>
                 {guardando?"⏳ Guardando...":calculandoKm?"⏳ Calculando km...":editandoId&&form.estado!=="borrador"?"✅ Actualizar cotización":"✅ Guardar cotización"}
@@ -3026,9 +2962,9 @@ export default function CotizacionesPage(){
                         <div className="text-xs text-gray-500 truncate">{c.origen} → {c.destino}{c.asunto&&<span className="text-gray-400"> · {c.asunto}</span>}</div>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <span className="font-black text-gray-800">{fmtS(Number(c.precio_cliente||0))}</span>
+                            <span className="font-black text-gray-800" title={tituloSoles(Number(c.precio_cliente||0),normalizarMoneda(c.moneda),c.tipo_cambio)}>{fmtCot(Number(c.precio_cliente||0),normalizarMoneda(c.moneda),c.tipo_cambio)}</span>
                             {esFijo&&<span className="text-[10px] text-gray-400">/día</span>}
-                            <span className="text-xs font-bold" style={{color:margen>=0?"#166534":"#991b1b"}}>{fmtS(margen)}</span>
+                            <span className="text-xs font-bold" title="Margen estimado, en soles" style={{color:margen>=0?"#166534":"#991b1b"}}>{fmtS(margen)}</span>
                           </div>
                           <span className="text-xs text-gray-400">{fmtF(c.fecha_servicio)}</span>
                         </div>
@@ -3051,7 +2987,7 @@ export default function CotizacionesPage(){
           {/* ── Vista tabla (desktop) ── */}
           <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr style={{background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>{["N°","Cliente","Ruta","Vehículo","Servicio","Fecha","Precio","Margen","Estado","Acciones"].map(h=><th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>)}</tr></thead>
+              <thead><tr style={{background:"#f8fafc",borderBottom:"1px solid #e2e8f0"}}>{["N°","Cliente","Ruta","Vehículo","Servicio","Fecha","Precio","Margen S/","Estado","Acciones"].map(h=><th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>)}</tr></thead>
               <tbody>
                 {motivoRango||(errorVigente&&!listaVigente)?<tr><td colSpan={10} className="p-8 text-center text-xs text-gray-400">{motivoRango?"Sin consultar: el rango no está completo.":"No se muestran cotizaciones porque la lectura falló (ver arriba)."}</td></tr>:!listaVigente?<tr><td colSpan={10} className="p-10 text-center text-gray-400"><div className="flex items-center justify-center gap-2"><div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>Cargando...</div></td></tr>:filtradas.length===0?<tr><td colSpan={10}><div className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">📄</p><p>{totC===0?`No hay cotizaciones en ${rotuloPeriodo.toLowerCase()}`:"Ninguna cotización coincide con la búsqueda o los filtros"}</p></div></td></tr>:visibles.map(c=>{
                   const esBorrador=c.estado==="borrador";const est=ESTADO_CFG[c.estado]||ESTADO_CFG.pendiente;const margen=Number(c.margen_estimado||0);const vehParam=paramsDB.find(p=>p.tipo_vehiculo===c.tipo_vehiculo);const vehF=flota.find(v=>v.id===c.vehiculo_flota_id);const vehT=flotaTercero.find(v=>v.id===c.vehiculo_tercero_id);
@@ -3064,8 +3000,8 @@ export default function CotizacionesPage(){
                       <td className="p-3">{vehF?<p className="font-mono font-black text-xs text-[#0b315f]">{vehF.placa}</p>:vehT?<div><p className="font-mono font-black text-xs text-amber-700">{vehT.placa}</p><p className="text-[9px] text-amber-600">🤝 {vehT.empresa_nombre}</p></div>:vehParam?<div className="text-xs text-gray-500">{vehParam.icono||"🚌"} {vehParam.nombre}</div>:<span className="text-gray-300 text-xs">—</span>}</td>
                       <td className="p-3"><span className="text-[10px] font-bold text-gray-600">{servLabel}</span>{(c.paradas_n??0)>0&&<span className="text-[10px] text-[#be185d] font-bold block">🚏 {c.paradas_n} paradas</span>}</td>
                       <td className="p-3 text-xs text-gray-500">{fmtF(c.fecha_servicio)}{c.hora_ida&&<div className="text-gray-400">{c.hora_ida}</div>}</td>
-                      <td className="p-3 font-bold text-gray-800">{fmtS(Number(c.precio_cliente||0))}{esFijo&&<p className="text-[10px] text-gray-400 font-normal">/día</p>}{esFijo&&c.precio_mes_estimado&&<p className="text-[10px] text-green-600 font-bold">~{fmtS(c.precio_mes_estimado)}/mes</p>}</td>
-                      <td className="p-3 font-bold" style={{color:margen>=0?"#166534":"#991b1b"}}>{fmtS(margen)}</td>
+                      <td className="p-3 font-bold text-gray-800" title={tituloSoles(Number(c.precio_cliente||0),normalizarMoneda(c.moneda),c.tipo_cambio)}>{fmtCot(Number(c.precio_cliente||0),normalizarMoneda(c.moneda),c.tipo_cambio)}{esFijo&&<p className="text-[10px] text-gray-400 font-normal">/día</p>}{esFijo&&c.precio_mes_estimado&&<p className="text-[10px] text-green-600 font-bold">~{fmtCot(c.precio_mes_estimado,normalizarMoneda(c.moneda),c.tipo_cambio)}/mes</p>}</td>
+                      <td className="p-3 font-bold" title="Margen estimado, en soles" style={{color:margen>=0?"#166534":"#991b1b"}}>{fmtS(margen)}</td>
                       <td className="p-3" onClick={e=>e.stopPropagation()}>
                         <select value={c.estado} onChange={e=>cambiarEstado(c,e.target.value as EstadoCot)} disabled={estadoEnCurso!==null} title={estadoEnCurso===c.id?"Guardando el estado…":undefined} className="text-xs font-bold px-2 py-1 rounded-lg border-0 cursor-pointer disabled:opacity-50 disabled:cursor-wait" style={{background:est.bg,color:est.color}}>
                           {(["borrador","pendiente","enviado","aprobado","rechazado"] as EstadoCot[]).map(s=>(

@@ -115,7 +115,9 @@ export function limitesConsulta(eje: EjeFecha, r: Pick<RangoPeriodo, "desde" | "
  * modales que reciben una fila leen. Fuera a propósito: los jsonb (items_json, paradas_json,
  * paradas_retorno_json, consideraciones_json, fechas_multidia_json, ficha_ruta_json,
  * ruta_coords_json) e itinerario_texto — se piden con el detalle (`leerCotizacion`).
- * `paradas_n` es de una migración accesoria: el lector la suelta si el error la nombra.
+ * `paradas_n`, `moneda`, `tipo_cambio` e `idioma_pdf` son de migraciones accesorias
+ * (cotizaciones-03 y cotizaciones-04): el lector suelta la que el error nombra. `idioma_pdf`
+ * viaja en la lista porque el modal del PDF la propone sin pedir el detalle.
  */
 export const COLS_LISTA = [
   "id", "cliente_id", "origen", "destino", "km", "precio_cliente", "costo_estimado", "margen_estimado",
@@ -129,13 +131,13 @@ export const COLS_LISTA = [
   "precio_sugerido", "modo_precio", "medio_envio", "plantilla_pdf", "enviado_automatico", "incluye_igv",
   "descuento_solicitado", "descuento_pct_solicitado", "descuento_autorizado", "hora_solicitud_descuento",
   "numero_aprobacion", "tipo_aprobacion",
-  "paradas_n",
+  "paradas_n", "moneda", "tipo_cambio", "idioma_pdf",
 ] as const;
 
 export type ColLista = (typeof COLS_LISTA)[number];
 
 /** Columna de migración accesoria: si el error la nombra, se suelta y se reintenta. */
-export const COLS_OPCIONALES_LISTA: readonly ColLista[] = ["paradas_n"];
+export const COLS_OPCIONALES_LISTA: readonly ColLista[] = ["paradas_n", "moneda", "tipo_cambio", "idioma_pdf"];
 
 /** El string del `select`, sin las columnas indicadas. */
 export function colsSelect(sin: readonly string[] = []): string {
@@ -160,6 +162,10 @@ export type CotLista = {
   hora_solicitud_descuento: string | null; numero_aprobacion: string | null; tipo_aprobacion: string | null;
   /** Nº de paraderos de ida (columna accesoria). null/ausente = no se sabe. */
   paradas_n?: number | null;
+  /** De cotizaciones-04 (accesorias). Ausentes = PEN, sin TC, español. Los importes siguen en soles. */
+  moneda?: string | null;
+  tipo_cambio?: number | string | null;
+  idioma_pdf?: string | null;
 };
 
 type FilaBuscable = Pick<CotLista, "id" | "origen" | "destino" | "asunto" | "atencion" | "numero_cotizacion">;
