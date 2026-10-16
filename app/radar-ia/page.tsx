@@ -174,7 +174,7 @@ const ANOMALIA_LABEL: Record<string, string> = {
   tipo_corregido_por_producto:  "Tipo corregido por el producto",
   tipo_no_coincide_con_producto: "Tipo ≠ producto del voucher",
   // ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts)
-  carga_parcial_probable: "Carga parcial (aguja)",
+  carga_parcial_probable: "Carga parcial (indicador del tablero)",
   tipo_no_coincide_con_precio:  "Tipo ≠ precio pagado",
   // La fecha del voucher contra la del mensaje (lib/radar/fecha-voucher.ts)
   fecha_corregida:        "Fecha corregida",

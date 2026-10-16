@@ -219,6 +219,8 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
   "vio_surtidor": boolean,              // ¿viste una foto del surtidor?
   "vio_tablero": boolean,               // ¿viste una foto del tablero/odómetro?
   "nivel_tanque": "lleno"|"parcial"|"no_visible",  // el INDICADOR DE NIVEL del tablero DESPUÉS de cargar. "no_visible" si no se ve o no hay foto de tablero: no lo deduzcas de la cantidad
+  "indicador_nivel": "aguja"|"barras"|"porcentaje"|"autonomia"|"otro"|null,  // CÓMO muestra ESTE tablero el nivel de combustible. null si no lo identificaste
+  "evidencia_nivel": string|null,       // lo que viste para decidirlo: «ícono de surtidor, 8 de 8 barras», «aguja en F». null si no lo identificaste
   "fuentes": {                          // de qué foto salió cada campo (para poder cruzar y auditar)
     "galones": "surtidor"|"nota"|"tablero"|"texto"|"calculado"|null,
     "monto_total": "surtidor"|"nota"|"texto"|"calculado"|null,
@@ -291,7 +293,7 @@ Ahí la CANTIDAD es el C.CCC, el PRECIO por galón el PP.PPP y el IMPORTE el TTT
 const GUIA_COMBUSTIBLE_MEDIA = `REGLAS ESPECIALES SI EL CONTENIDO ES DE COMBUSTIBLE (recarga de una unidad de AFA):
 Un reporte de recarga suele venir como VARIAS fotos con ROLES distintos; combina los datos de TODAS, no de una sola:
 - TABLERO / ODÓMETRO: lee el kilometraje TOTAL. El "Trip"/viaje es PARCIAL (va en "trip_km", NO en "kilometraje"). Cifras como "16.3 L/100km" o "km/gal" son la TASA DE CONSUMO del viaje (va en "consumo_l_100km"): NUNCA la pongas en galones/litros/monto.
-- NIVEL DE COMBUSTIBLE (aguja del tablero, a veces antes y después): solo evidencia visual; no aporta números duros.
+- NIVEL DE COMBUSTIBLE (el indicador del tablero —aguja, barras o porcentaje según el modelo—, a veces antes y después): solo evidencia visual; no aporta números duros.
 - SURTIDOR del grifo (pantalla digital de 7 segmentos): galones/litros despachados, soles y a veces el precio. Transcríbelo dígito a dígito; cuida las confusiones 8↔0↔6↔9 y la posición del punto decimal (C.CCC gal ≠ CCCC).
 - NOTA DE DESPACHO / voucher (papel impreso por el grifo): grifo, dirección, RUC, razón social, N° de comprobante (serie-correlativo), placa, kilometraje, galones, precio, total, fecha y hora.
 - UNA NOTA DE LADO O DE CABEZA NO ES ILEGIBLE: el papel se fotografía seguido girado 90° (el texto corre de abajo hacia arriba) o al revés. Antes de dar un número por no leído, gira la foto mentalmente y lee la nota con el texto derecho. "No se pudo leer" es solo para un papel borroso, cortado o tapado, nunca para uno girado.
@@ -338,11 +340,14 @@ EL GNV SE DESPACHA EN METROS CÚBICOS (m³). Pon ese número TAL CUAL en "galone
 Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
 Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.
 
-EL INDICADOR DE NIVEL DEL TABLERO ("nivel_tanque"):
-En la misma foto del tablero donde está el odómetro sale la aguja (o las barras) del combustible, y esa foto se toma DESPUÉS de cargar. Dice algo que ningún otro dato del voucher dice: si el tanque quedó a tope. Reglas:
-- "lleno" SOLO si la aguja está en el tope (F / la última barra encendida / prácticamente en el máximo).
-- "parcial" SOLO si se ve con claridad que NO llegó al tope. La política de la empresa es cargar completo, así que esto es la excepción y hay que verla, no suponerla.
-- "no_visible" en todo lo demás: sin foto de tablero, aguja tapada por el reflejo, foto recortada, o duda. **Nunca lo deduzcas de la cantidad despachada ni del importe** — el ERP ya mira esos dos por su cuenta y tu trabajo aquí es SOLO reportar lo que se ve en la aguja.
+EL INDICADOR DE NIVEL DEL TABLERO ("nivel_tanque", "indicador_nivel", "evidencia_nivel"):
+En la misma foto del tablero donde está el odómetro sale el nivel de combustible, y esa foto se toma DESPUÉS de cargar. Dice algo que ningún otro dato del voucher dice: si el tanque quedó a tope.
+CADA MODELO LO MUESTRA DISTINTO: una AGUJA con E/F (o 0 · ½ · 1), una columna o franja de BARRAS/segmentos, un PORCENTAJE digital, o solo la AUTONOMÍA en km. Primero ENCUÉNTRALO, y solo cuenta el que tiene el ícono del surtidor ⛽ o las letras E/F a su lado. En un tablero digital hay otros relojes con la misma forma que NO son el combustible: el TACÓMETRO (marcas 0-1-2-3… o «×1000 r/min»), la TEMPERATURA (C/H o un termómetro), el velocímetro, la barra ECO, el consumo (L/100km, km/L) y el nivel de AdBlue/urea. Si no ves con claridad cuál es el del combustible, no lo elijas por la forma: "no_visible".
+Reglas:
+- "indicador_nivel": qué tipo de indicador de combustible encontraste. "evidencia_nivel": en pocas palabras qué viste («ícono de surtidor, 8 de 8 barras», «aguja con E/F en F», «combustible 100 %»).
+- "lleno" SOLO si ese indicador está en el tope (F / la última barra encendida / 100 % / prácticamente en el máximo).
+- "parcial" SOLO si IDENTIFICASTE el indicador del combustible (ícono ⛽ o E/F) y se ve con claridad que NO llegó al tope. La política de la empresa es cargar completo, así que esto es la excepción y hay que verla, no suponerla. La autonomía en km sola NO dice si el tanque está lleno (depende del consumo): con solo eso, "no_visible".
+- "no_visible" en todo lo demás: sin foto de tablero, indicador tapado por el reflejo, foto recortada, no sabes cuál es el del combustible, o duda. **Nunca lo deduzcas de la cantidad despachada ni del importe** — el ERP ya mira esos dos por su cuenta y tu trabajo aquí es SOLO reportar lo que se ve en el indicador.
 
 UN ÁLBUM PUEDE TRAER DOS DESPACHOS, NO SOLO DOS FOTOS:
 Antes de combinar nada, cuenta cuántas NOTAS DE DESPACHO distintas hay. Un conductor que cierra turno fotografía los vouchers del DÍA y los manda juntos, así que la ráfaga puede ser una recarga contada en varias fotos… o dos recargas completas. Los discriminantes, en este orden: **nº de comprobante distinto**, **placa distinta**, **importe o fecha/hora distintos**. Cualquiera de los tres y son DOS despachos.
