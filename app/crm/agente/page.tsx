@@ -1,5 +1,7 @@
 "use client";
 import ContactosSinIA from "@/components/crm/ContactosSinIA";
+import AjustesComportamiento from "@/components/crm/AjustesComportamiento";
+import { normalizarAjustes } from "@/lib/crm-ia-ajustes";
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
@@ -26,6 +28,7 @@ type Agente = {
   pausa_humano_horas?: number | null;
   escalar_si: string;
   mensaje_derivacion?: string | null;
+  comportamiento?: unknown;
   firma: string;
 };
 
@@ -64,6 +67,17 @@ export default function AgenteIAPage() {
   const [probando, setProbando] = useState(false);
   const chatEndRef = React.useRef<HTMLDivElement>(null);
 
+  // Lo que solo sabe el servidor: ¿hay clave de transcripción? y el prompt real.
+  const [estadoIA, setEstadoIA] = useState<{ transcripcion: boolean | null; instrucciones: string | null }>({ transcripcion: null, instrucciones: null });
+  const cargarEstadoIA = React.useCallback(async () => {
+    try {
+      const r = await fetch("/api/crm/ia/estado", { headers: await cabecerasErp() });
+      const j = await r.json();
+      if (j?.ok) setEstadoIA({ transcripcion: !!j.transcripcion, instrucciones: j.instrucciones ?? null });
+    } catch { /* se queda en «no se sabe» */ }
+  }, []);
+  useEffect(() => { cargarEstadoIA(); }, [cargarEstadoIA]);
+
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
     setTimeout(() => setToast(null), 3500);
@@ -92,7 +106,10 @@ export default function AgenteIAPage() {
   const guardar = async () => {
     if (!agente) return;
     setGuardando(true);
-    const { id, ...patch } = agente;
+    const { id, ...resto } = agente;
+    // Se guarda acotado con la misma regla que usa el motor.
+    const patch: any = { ...resto };
+    if (resto.comportamiento !== undefined) patch.comportamiento = normalizarAjustes(resto.comportamiento);
     const { error } = await supabase
       .from("crm_agentes_ia")
       .update({ ...patch, updated_at: new Date().toISOString() })
@@ -102,12 +119,16 @@ export default function AgenteIAPage() {
       error
         ? /pausa_humano_horas/.test(error.message)
           ? "Falta correr supabase/crm-ia-pausa-humano.sql en Supabase"
-          : /mensaje_derivacion/.test(error.message)
-          ? "Falta correr supabase/crm-ia-mensaje-derivacion.sql en Supabase"
+          : /mensaje_derivacion|comportamiento/.test(error.message)
+          ? "Falta correr supabase/crm-ia-comportamiento.sql en Supabase"
           : `Error al guardar: ${error.message}`
         : "Configuración guardada",
       !error,
     );
+    if (!error) {
+      if (patch.comportamiento) set("comportamiento", patch.comportamiento);
+      cargarEstadoIA();
+    }
   };
 
   const toggleActivo = async () => {
@@ -513,9 +534,16 @@ export default function AgenteIAPage() {
                   placeholder="Gracias, {nombre}. Ya registré tu solicitud y un ejecutivo de nuestro equipo la está revisando para enviarte la información por este mismo chat a la brevedad. 🙌"
                 />
                 <p className="text-[11px] text-gray-400 mt-1">
-                  Lo usa la IA cuando no encuentra lo que piden en el sistema, no puede escuchar un audio o el tema es para una persona. Nunca dirá «no encontré sus servicios». {"{nombre}"} = primer nombre del cliente. Vacío = este texto de ejemplo. El chat queda con la etiqueta «Para ejecutivo» y una nota interna con lo que pidió.
+                  Lo usa la IA cuando no encuentra lo que piden en el sistema, no puede escuchar un audio o el tema es para una persona. {"{nombre}"} = primer nombre del cliente. Vacío = este texto de ejemplo. La etiqueta y la nota interna se configuran abajo, en «Al derivar a un ejecutivo».
                 </p>
               </div>
+
+              <AjustesComportamiento
+                valor={agente.comportamiento}
+                onChange={(v) => set("comportamiento", v)}
+                transcripcionLista={estadoIA.transcripcion}
+                instrucciones={estadoIA.instrucciones}
+              />
 
               <div>
                 <label className={label}>Firma (se añade al final del mensaje)</label>
