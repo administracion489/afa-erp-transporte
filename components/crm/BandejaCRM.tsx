@@ -7,6 +7,8 @@ import {
 import { avisosAutomaticosDeTelefono, etiquetaAviso, type AvisoAutomatico } from "@/lib/crm-avisos-automaticos";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import MensajeContenido, { esBurbujaSinFondo } from "@/components/crm/MensajeContenido";
+import EquipoConversacion, { ChipEtiqueta, ETIQUETAS, useYo, useUsuarios } from "@/components/crm/EquipoConversacion";
+import PanelCliente from "@/components/crm/PanelCliente";
 import { useRespuestasRapidas, SugerenciasRapidas, ModalRespuestasRapidas, aplicarVariables } from "@/components/crm/RespuestasRapidas";
 import { haceCuanto, textoLegible } from "@/lib/crm-gmail-reglas";
 
@@ -23,6 +25,7 @@ type Contacto = {
 type Conversacion = {
   id: string; canal: Canal; estado: Estado; asunto?: string;
   ultimo_mensaje_at?: string; no_leidos: number; pipeline_id?: string;
+  asignado_a?: string | null; etiquetas?: string[] | null;
   contacto_id: string; crm_contactos: Contacto; created_at?: string;
   ia_pausada?: boolean; borrador_ia?: string | null; borrador_ia_at?: string | null;
   _ultimo_texto?: string;
@@ -133,6 +136,13 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [selected, setSelected] = useState<Conversacion | null>(null);
   const [mensajes, setMensajes] = useState<Mensaje[]>([]);
   const rapidas = useRespuestasRapidas();
+  const yo = useYo();
+  const usuariosEquipo = useUsuarios();
+  const [vista, setVista] = useState<"todas" | "mias" | "sin">("todas");
+  const [filtroEtq, setFiltroEtq] = useState("");
+  const [panelCliente, setPanelCliente] = useState(false);
+  const [notas, setNotas] = useState<{ id: string; texto: string; autor_nombre: string | null; created_at: string }[]>([]);
+  const [modoNota, setModoNota] = useState(false);
   const [modalRapidas, setModalRapidas] = useState(false);
   // Media firmada por mensaje (bucket privado crm-media): undefined = cargando, null = no disponible.
   const [mediaUrls, setMediaUrls] = useState<Record<string, string | null>>({});
@@ -347,6 +357,8 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       .eq("conversacion_id", convId)
       .order("created_at", { ascending: true });
     setMensajes(((data ?? []) as Mensaje[]).map(legible));
+    const { data: ns } = await supabase.from("crm_notas").select("id, texto, autor_nombre, created_at").eq("conversacion_id", convId).order("created_at");
+    setNotas((ns ?? []) as any[]);
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
   }, []);
 
@@ -487,6 +499,20 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
     const texto = base.trim();
     if (override === undefined) setReply("");
 
+    // Nota interna: queda en el hilo para el equipo y NO se envía al cliente.
+    if (modoNota && override === undefined) {
+      const { data: u } = await supabase.auth.getUser();
+      const autor = usuariosEquipo.find((x) => x.id === u.user?.id)?.nombre ?? u.user?.email ?? null;
+      const { data: n, error } = await supabase
+        .from("crm_notas")
+        .insert({ conversacion_id: selected.id, texto, autor_id: u.user?.id ?? null, autor_nombre: autor })
+        .select("id, texto, autor_nombre, created_at").single();
+      setEnviando(false);
+      if (error) { showToast(/crm_notas/.test(error.message) ? "Falta correr supabase/crm-inbox-equipo.sql" : error.message, false); setReply(texto); return; }
+      setNotas((p) => [...p, n as any]);
+      return;
+    }
+
     // La ruta exige sesión: envía texto libre a clientes reales.
     const { data: s } = await supabase.auth.getSession();
     const res = await fetch("/api/crm/mensajes/enviar", {
@@ -504,6 +530,11 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
     else {
       // Al enviar (manual o aprobando un borrador), el borrador IA queda obsoleto
       if (selected.borrador_ia) await limpiarBorrador(selected.id);
+      // Quien responde un chat sin dueño se queda con él (como Chatwoot / Respond.io).
+      if (!selected.asignado_a && yo) {
+        const { error: eA } = await supabase.from("crm_conversaciones").update({ asignado_a: yo }).eq("id", selected.id);
+        if (!eA) setSelected((p) => (p && p.id === selected.id ? { ...p, asignado_a: yo } : p));
+      }
       cargarMensajes(selected.id);
       cargarConvs();
     }
@@ -614,16 +645,21 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
   type ItemTimeline =
     | { kind: "mensaje"; at: string; mensaje: Mensaje }
-    | { kind: "aviso"; at: string; aviso: AvisoAutomatico };
+    | { kind: "aviso"; at: string; aviso: AvisoAutomatico }
+    | { kind: "nota"; at: string; nota: { id: string; texto: string; autor_nombre: string | null; created_at: string } };
 
   const timeline: ItemTimeline[] = [
     ...mensajes.map((m): ItemTimeline => ({ kind: "mensaje", at: m.created_at, mensaje: m })),
     ...avisos.map((a): ItemTimeline => ({ kind: "aviso", at: a.created_at, aviso: a })),
+    ...notas.map((n): ItemTimeline => ({ kind: "nota", at: n.created_at, nota: n })),
   ].sort((x, y) => new Date(x.at).getTime() - new Date(y.at).getTime());
 
   // ── Filtros ────────────────────────────────────────────────────────────
 
   const convsFiltradas = convs.filter((c) => {
+    if (vista === "mias" && c.asignado_a !== yo) return false;
+    if (vista === "sin" && c.asignado_a) return false;
+    if (filtroEtq && !(c.etiquetas ?? []).includes(filtroEtq)) return false;
     if (!busqueda) return true;
     const q = busqueda.toLowerCase();
     return (
@@ -792,6 +828,21 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             </button>
           ))}
         </div>
+        <div className="px-3 py-1.5 flex gap-1.5 items-center border-b border-gray-100">
+          {(["todas", "mias", "sin"] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setVista(v)}
+              className={`text-xs px-2.5 py-1 rounded-full ${vista === v ? "bg-[#0b315f] text-white" : "text-gray-500 hover:bg-gray-100"}`}
+            >
+              {v === "todas" ? "Todas" : v === "mias" ? "Mías" : `Sin asignar (${convs.filter((c) => !c.asignado_a).length})`}
+            </button>
+          ))}
+          <select value={filtroEtq} onChange={(e) => setFiltroEtq(e.target.value)} className="ml-auto text-xs border border-gray-200 rounded-lg px-1.5 py-1 bg-white">
+            <option value="">🏷 Todas</option>
+            {[...new Set([...ETIQUETAS.map((x) => x.clave), ...convs.flatMap((c) => c.etiquetas ?? [])])].map((e) => <option key={e} value={e}>{e}</option>)}
+          </select>
+        </div>
 
         {/* Lista */}
         <div className="flex-1 overflow-y-auto">
@@ -843,6 +894,12 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                           {cfg.icon} {cfg.label}
                         </span>
                         <ChipEspera desde={(c as any)._espera_desde} />
+                        {(c.etiquetas ?? []).slice(0, 2).map((e) => <ChipEtiqueta key={e} e={e} />)}
+                        {c.asignado_a && (
+                          <span className="text-[10px] text-gray-400" title="Asignado a">
+                            👤 {c.asignado_a === yo ? "yo" : usuariosEquipo.find((u) => u.id === c.asignado_a)?.nombre?.split(" ")[0] ?? ""}
+                          </span>
+                        )}
                         {c.no_leidos > 0 && (
                           <span className="bg-[#0b315f] text-white text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
                             {c.no_leidos > 9 ? "9+" : c.no_leidos}
@@ -958,6 +1015,12 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                 {selected.ia_pausada ? "🤖 IA pausada" : "🤖 IA activa"}
               </button>
 
+              <button
+                onClick={() => setPanelCliente((v) => !v)}
+                className={`text-xs px-3 py-1.5 rounded-lg font-semibold ${panelCliente ? "bg-[#0b315f] text-white" : "bg-gray-100 text-gray-700"}`}
+              >
+                👤 Cliente
+              </button>
               <a
                 href="/crm/pipeline"
                 className="text-xs bg-[#0b315f]/10 text-[#0b315f] font-semibold px-3 py-1.5 rounded-lg hover:bg-[#0b315f]/20 transition-colors"
@@ -967,6 +1030,16 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             </div>
           </div>
 
+          <div className="bg-white border-b border-gray-100 px-5 py-1.5">
+            <EquipoConversacion
+              conv={selected}
+              aviso={(m, ok = true) => showToast(m, ok)}
+              onCambio={(patch) => {
+                setSelected((p) => (p ? { ...p, ...patch } : p));
+                setConvs((prev) => prev.map((c) => (c.id === selected.id ? { ...c, ...patch } : c)));
+              }}
+            />
+          </div>
           {selected.canal === "whatsapp" && <VentanaWhatsApp mensajes={mensajes} />}
 
           {/* Mensajes — con los avisos automáticos intercalados en su momento exacto.
@@ -988,6 +1061,20 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                 </div>
               );
 
+              if (item.kind === "nota") {
+                const n = item.nota;
+                return (
+                  <React.Fragment key={`n-${n.id}`}>
+                    {separador}
+                    <div className="flex justify-center">
+                      <div className="max-w-[70%] bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2 text-[13px] text-yellow-900" title="Nota interna: el cliente no la ve">
+                        <div className="text-[10px] font-semibold text-yellow-700 mb-0.5">🔒 Nota interna · {n.autor_nombre ?? "equipo"} · {fmtFechaMsg(n.created_at)}</div>
+                        <div className="whitespace-pre-wrap">{n.texto}</div>
+                      </div>
+                    </div>
+                  </React.Fragment>
+                );
+              }
               if (item.kind === "aviso") {
                 const a = item.aviso;
                 return (
@@ -1126,6 +1213,13 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
               />
               <div className="flex gap-3 items-end">
                 <button
+                  onClick={() => setModoNota((v) => !v)}
+                  title="Nota interna: la ve el equipo, el cliente no"
+                  className={`px-2.5 py-2 rounded-xl text-sm border ${modoNota ? "bg-yellow-100 border-yellow-300 text-yellow-800" : "border-gray-200 text-gray-500 hover:bg-gray-50"}`}
+                >
+                  🔒
+                </button>
+                <button
                   onClick={() => setModalRapidas(true)}
                   title="Respuestas rápidas (escribe / en el mensaje)"
                   className="border border-gray-200 text-gray-500 px-2.5 py-2 rounded-xl text-sm hover:bg-gray-50"
@@ -1145,9 +1239,9 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                       enviar();
                     }
                   }}
-                  placeholder={`Responder por ${CANAL_CFG[selected.canal]?.label ?? selected.canal}…`}
+                  placeholder={modoNota ? "Nota interna para el equipo (el cliente no la ve)…" : `Responder por ${CANAL_CFG[selected.canal]?.label ?? selected.canal}…`}
                   rows={2}
-                  className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+                  className={`flex-1 border rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 ${modoNota ? "bg-yellow-50 border-yellow-300" : "border-gray-200"}`}
                 />
                 <div className="flex flex-col gap-1.5">
                   <button
@@ -1195,6 +1289,10 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             ))}
           </div>
         </div>
+      )}
+
+      {selected && panelCliente && selected.crm_contactos && (
+        <PanelCliente contacto={selected.crm_contactos as any} onClose={() => setPanelCliente(false)} />
       )}
 
       {/* ── Modal nuevo contacto ── */}

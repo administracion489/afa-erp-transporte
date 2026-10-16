@@ -1273,6 +1273,17 @@ export default function CotizacionesPage(){
   const contarDespacho=async()=>{try{const{filas}=await leerDespachosSinCotizar(supabase);setPendDespacho(pendientesDeCotizar(filas).length);setErrDespacho(null);}catch(e:any){setPendDespacho(null);setErrDespacho(e?.message??String(e));}};
   useEffect(()=>{contarDespacho();if(typeof window!=="undefined"&&new URLSearchParams(window.location.search).get("regularizar")==="1")setModalDespacho(true);// eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
+  // Deep-link desde el CRM: /cotizaciones?nuevo=1&cliente=<id>&asunto=<texto> abre el
+  // formulario nuevo con el cliente ya elegido.
+  useEffect(()=>{
+    if(typeof window==="undefined")return;
+    const q=new URLSearchParams(window.location.search);
+    if(q.get("nuevo")!=="1")return;
+    limpiar();
+    setForm({...FORM0,cliente_id:q.get("cliente")??"",asunto:q.get("asunto")??FORM0.asunto});
+    setMostrarForm(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
   const fijarDespachoOrigen=(r:ReservaDespacho|null)=>{despachoOrigenRef.current=r;setDespachoOrigen(r);};
   const cotizarDespacho=(r:ReservaDespacho)=>{
     const p=prellenadoCotizacion(r,hoyLima());
