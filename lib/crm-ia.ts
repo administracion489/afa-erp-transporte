@@ -473,8 +473,10 @@ async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string): 
   let error: string | null = null;
   try {
     // Por el mismo número que usó el cliente (ver app/api/crm/mensajes/enviar).
-    if (conv.canal === "whatsapp" && contacto?.wa_id)
-      metaId = await enviarWhatsApp(contacto.wa_id, texto, conv.phone_number_id ?? (await phonePara("crm")));
+    // Sin wa_id (contacto creado a mano, o por el historial) se usa su teléfono.
+    const waDestino = contacto?.wa_id || (contacto?.telefono ? String(contacto.telefono).replace(/\D/g, "") : "");
+    if (conv.canal === "whatsapp" && waDestino)
+      metaId = await enviarWhatsApp(waDestino, texto, conv.phone_number_id ?? (await phonePara("crm")));
     else if (conv.canal === "messenger" && contacto?.fb_psid) metaId = await enviarMessenger(contacto.fb_psid, texto);
     else if (conv.canal === "instagram" && contacto?.ig_id) metaId = await enviarInstagram(contacto.ig_id, texto);
     else if (conv.canal === "gmail" && contacto?.gmail_email) {
@@ -581,6 +583,25 @@ async function responderConIAInterno(
     if (conv.ia_pausada) return { ok: true, accion: "omitido", motivo: "IA pausada en este hilo." };
     if (contacto?.ia_desactivada === true)
       return { ok: true, accion: "omitido", motivo: "IA desactivada para este contacto (proveedor / conductor)." };
+    // Sin modo autónomo para este canal (o fuera de horario) la IA solo redacta cuando el
+    // operador lo PIDE con el botón ✨ IA: antes armaba un borrador con cada mensaje y
+    // gastaba IA en sugerencias que nadie había pedido.
+    const autonomosPre: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
+    if (!autonomosPre.includes(conv.canal) || !dentroHorario(agente))
+      return { ok: true, accion: "omitido", motivo: "Modo copiloto: la sugerencia se pide con el botón ✨ IA." };
+    // Si una persona del equipo respondió hace poco (desde el CRM o el celular), la IA se
+    // aparta unas horas: el cliente ya está atendido por un humano.
+    const horasPausa = Number.isFinite(Number(agente.pausa_humano_horas)) ? Number(agente.pausa_humano_horas) : 12;
+    if (horasPausa > 0) {
+      const desde = new Date(Date.now() - horasPausa * 3600_000).toISOString();
+      const { count: humanos } = await sb
+        .from("crm_mensajes").select("id", { count: "exact", head: true })
+        .eq("conversacion_id", convId).eq("direccion", "saliente")
+        .or("generado_por_ia.is.null,generado_por_ia.eq.false")
+        .gte("created_at", desde);
+      if ((humanos ?? 0) > 0)
+        return { ok: true, accion: "omitido", motivo: `Una persona respondió en las últimas ${horasPausa} h: la IA no interviene.` };
+    }
     // El agente solo atiende números de ATENCIÓN AL CLIENTE. Un número marcado solo para
     // avisos automáticos (usa_avisos y no usa_crm) nunca responde con IA.
     if (conv.canal === "whatsapp" && (conv as any).phone_number_id) {

@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
     // entró, para contestar por el mismo y no desde otro (ver más abajo).
     const { data: conv } = await supabase
       .from("crm_conversaciones")
-      .select("id, canal, gmail_thread_id, asunto, contacto_id, phone_number_id, crm_contactos(wa_id, fb_psid, ig_id, gmail_email)")
+      .select("id, canal, gmail_thread_id, asunto, contacto_id, phone_number_id, crm_contactos(wa_id, telefono, fb_psid, ig_id, gmail_email)")
       .eq("id", conversacion_id)
       .single();
 
@@ -42,13 +42,15 @@ export async function POST(req: NextRequest) {
     let errorMsg: string | null = null;
 
     try {
-      if (conv.canal === "whatsapp" && contacto?.wa_id) {
+      // Sin wa_id (contacto creado a mano) se usa su teléfono.
+      const waDestino = contacto?.wa_id || (contacto?.telefono ? String(contacto.telefono).replace(/\D/g, "") : "");
+      if (conv.canal === "whatsapp" && waDestino) {
         // Se responde POR EL MISMO NÚMERO por el que escribió el cliente. Sin esto cae
         // al número por defecto, así que quien escribía a Avisos recibía la respuesta
         // desde Ventas. Las conversaciones anteriores a ago-2026 no tienen
         // phone_number_id guardado: para ésas se usa el número del CRM.
         const phoneId = (conv as any).phone_number_id ?? (await phonePara("crm"));
-        metaId = await enviarWhatsApp(contacto.wa_id, texto, phoneId);
+        metaId = await enviarWhatsApp(waDestino, texto, phoneId);
       } else if (conv.canal === "messenger" && contacto?.fb_psid) {
         metaId = await enviarMessenger(contacto.fb_psid, texto);
       } else if (conv.canal === "instagram" && contacto?.ig_id) {

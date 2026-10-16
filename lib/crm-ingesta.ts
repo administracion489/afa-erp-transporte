@@ -123,6 +123,9 @@ export async function resolverConversacion(
     .single();
 
   if (error) {
+    // Dos mensajes a la vez: el otro webhook ya la creó (índice único uq_crm_conv_abierta).
+    const otra = await buscar();
+    if (otra) return otra as Conversacion;
     console.error("[crm-ingesta] no se pudo crear la conversación:", error.message);
     return null;
   }

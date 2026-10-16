@@ -23,6 +23,7 @@ type Agente = {
   hora_fin: string;
   delay_segundos: number;
   max_turnos_auto: number;
+  pausa_humano_horas?: number | null;
   escalar_si: string;
   firma: string;
 };
@@ -96,7 +97,14 @@ export default function AgenteIAPage() {
       .update({ ...patch, updated_at: new Date().toISOString() })
       .eq("id", id);
     setGuardando(false);
-    showToast(error ? "Error al guardar" : "Configuración guardada", !error);
+    showToast(
+      error
+        ? /pausa_humano_horas/.test(error.message)
+          ? "Falta correr supabase/crm-ia-pausa-humano.sql en Supabase"
+          : `Error al guardar: ${error.message}`
+        : "Configuración guardada",
+      !error,
+    );
   };
 
   const toggleActivo = async () => {
@@ -466,6 +474,18 @@ export default function AgenteIAPage() {
                     onChange={(e) => set("max_turnos_auto", Number(e.target.value))}
                   />
                   <p className="text-[11px] text-gray-400 mt-1">Tras N respuestas IA, escala a humano (0 = sin límite).</p>
+                </div>
+                <div>
+                  <label className={label}>Pausa tras respuesta humana (horas)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={168}
+                    className={input}
+                    value={agente.pausa_humano_horas ?? 12}
+                    onChange={(e) => set("pausa_humano_horas", Number(e.target.value))}
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">Si alguien del equipo respondió (CRM o celular), la IA no contesta en ese chat durante estas horas (0 = no pausar).</p>
                 </div>
               </div>
 
