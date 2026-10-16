@@ -45,6 +45,7 @@ import { faltaAlguna } from "@/lib/columna-faltante";
 import { resolverGrifo, grifoPorRuc, type CatalogoGrifos } from "@/lib/combustible/grifo-canonico";
 import { catalogoGrifosMemo } from "@/lib/combustible/grifo-canonico-datos";
 import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
+import { DETALLE_LECTURA_GIRADA } from "./voucher-girado";
 import {
   resolverIdentidadGrifo,
   normalizarDiscrepancias,
@@ -1491,6 +1492,13 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       detalle: "Hay una foto de la nota/surtidor pero no se pudo leer la cantidad o el importe — revisar la foto del voucher",
       bloquea: true,
     });
+  }
+
+  // La nota venía girada y la leyó el reintento con copias derechas (lib/radar/voucher-girado.ts).
+  // No bloquea —es una lectura del papel, y el cuadre de arriba la juzgó igual que a cualquier otra—,
+  // pero se dice: el revisor tiene que saber que la primera mirada no la pudo leer.
+  if (d.lectura_girada === true) {
+    anomalias.push({ codigo: "observacion_lectura", detalle: DETALLE_LECTURA_GIRADA, bloquea: false });
   }
 
   // ── ¿QUEDÓ LLENO EL TANQUE? (lib/radar/tanque-lleno.ts) ───────────────────

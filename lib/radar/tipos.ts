@@ -411,6 +411,8 @@ export type ExtraccionCombustible = {
       )[]
     | null;
   notas_extraccion?: string | null;    // dudas de 7 segmentos, fotos ilegibles, etc.
+  /** La nota se leyó en el reintento con copias GIRADAS (lib/radar/voucher-girado.ts). Lo pone el ERP, no la IA. */
+  lectura_girada?: boolean;
   /**
    * Los dígitos de la cantidad TAL CUAL están impresos ("8.799x"), sin interpretar. Espejo de
    * `texto_leido` en ExtraccionOdometro y por el mismo motivo: transcribir obliga a mirar las
