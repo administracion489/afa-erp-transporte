@@ -1,0 +1,25 @@
+// npx tsx scripts/prueba-crm-ia-ajustes.mts
+import { normalizarAjustes, AJUSTES_DEFECTO, saludoParaHora, presentacion } from "../lib/crm-ia-ajustes";
+let fallos = 0;
+const ok = (c: boolean, m: string) => { if (!c) { fallos++; console.log("✗", m); } else console.log("✓", m); };
+ok(JSON.stringify(normalizarAjustes(null)) === JSON.stringify(AJUSTES_DEFECTO), "null → defectos");
+ok(JSON.stringify(normalizarAjustes("x")) === JSON.stringify(AJUSTES_DEFECTO), "basura → defectos");
+ok(JSON.stringify(normalizarAjustes([1])) === JSON.stringify(AJUSTES_DEFECTO), "array → defectos");
+const a = normalizarAjustes({ hora_tarde: 15, hora_noche: 10, silencio_seg: 2, silencio_completo_seg: 8, espera_max_seg: 3, intentos_pedir_datos: 9, etiqueta_derivacion: "  ", saludo_manana: "" });
+ok(a.hora_noche > a.hora_tarde, "noche siempre después de tarde");
+ok(a.silencio_seg >= a.silencio_completo_seg, "silencio ≥ silencio completo");
+ok(a.espera_max_seg >= a.silencio_seg, "espera máx ≥ silencio");
+ok(a.intentos_pedir_datos === 3, "intentos acotados");
+ok(a.etiqueta_derivacion === "", "etiqueta vacía = ninguna");
+ok(a.saludo_manana === "Buenos días", "saludo vacío → defecto");
+ok(JSON.stringify(normalizarAjustes(a)) === JSON.stringify(a), "idempotente");
+ok(normalizarAjustes({ saludo_activo: "no" }).saludo_activo === true, "bool no booleano → defecto");
+ok(normalizarAjustes({ hora_tarde: "13" }).hora_tarde === 13, "número en texto se lee");
+const d = AJUSTES_DEFECTO;
+ok(saludoParaHora(d, 0) === "Buenos días" && saludoParaHora(d, 11) === "Buenos días", "mañana");
+ok(saludoParaHora(d, 12) === "Buenas tardes" && saludoParaHora(d, 18) === "Buenas tardes", "tarde");
+ok(saludoParaHora(d, 19) === "Buenas noches" && saludoParaHora(d, 23) === "Buenas noches", "noche");
+ok(presentacion(d, "ACME") === "el asistente de ACME", "presentación con empresa");
+ok(!presentacion(d, "").includes("{empresa}"), "sin empresa no queda la llave");
+console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
+process.exit(fallos ? 1 : 0);

@@ -1,3 +1,4 @@
+import { normalizarAjustes } from "@/lib/crm-ia-ajustes";
 import { transcribirMensaje } from "@/lib/crm-audio";
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
@@ -208,7 +209,12 @@ export async function POST(req: NextRequest) {
       }
 
       // Notas de voz → texto ANTES de la IA: así «escucha» el audio y el equipo lo lee.
-      for (const a of audiosPorTranscribir) {
+      let transcribir = true;
+      if (audiosPorTranscribir.length) {
+        const { data: ag } = await sb.from("crm_agentes_ia").select("*").order("created_at").limit(1);
+        transcribir = normalizarAjustes(ag?.[0]?.comportamiento).transcribir_audios;
+      }
+      for (const a of transcribir ? audiosPorTranscribir : []) {
         try { await transcribirMensaje(sb, { meta_message_id: a.metaId }, a.url); }
         catch (err) { console.error("[webhook] transcripción:", err); }
       }

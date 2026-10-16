@@ -5,6 +5,7 @@
 // ============================================================
 import Anthropic from "@anthropic-ai/sdk";
 import { bloqueParaIA } from "@/lib/crm-media";
+import { normalizarAjustes, saludoParaHora, presentacion, type AjustesIA } from "@/lib/crm-ia-ajustes";
 import { esAudio, esTranscripcion, transcribirMensaje, PREFIJO_TRANSCRIPCION } from "@/lib/crm-audio";
 import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsApp, enviarMessenger, enviarInstagram, marcarLeidoYEscribiendo } from "@/lib/crm-meta";
@@ -54,12 +55,33 @@ const MODELOS_VALIDOS = new Set(["claude-opus-4-8", "claude-sonnet-4-6", "claude
 // Lo que el sistema NO encuentra no se le dice al cliente como «no encontré sus servicios»:
 // asusta (parece que no existe su reserva) cuando casi siempre es que su número no está
 // vinculado a la ficha del cliente. Se deriva a una persona, que sí sabe buscarlo.
-const ETIQUETA_EJECUTIVO = "Para ejecutivo";
+// Las reglas y textos se editan en /crm/agente → Ajustes (lib/crm-ia-ajustes.ts).
+const ajustesDe = (agente: any): AjustesIA => normalizarAjustes(agente?.comportamiento);
 
-const NOTA_SIN_RESULTADOS =
-  "Sin resultados en el sistema (suele ser que este número no está vinculado a la ficha del cliente, no que el servicio no exista). " +
-  "NO le digas al cliente que no encontraste nada ni que no hay registros. Si aún no le pediste la fecha o el número de servicio, pídeselo UNA vez; " +
-  "si ya lo pediste o no lo sabe, llama a escalar_a_humano (motivo + pedido) y responde con el mensaje de derivación.";
+const vecesTxt = (n: number) => (n === 1 ? "UNA vez" : `hasta ${n} veces`);
+
+function notaSinResultados(aj: AjustesIA): string {
+  if (!aj.no_decir_no_encontre)
+    return "Sin resultados en el sistema (puede que el número no esté vinculado a la ficha del cliente). Pide la fecha o el número de servicio.";
+  const pedir = aj.intentos_pedir_datos > 0
+    ? `Si aún no le pediste la fecha o el número de servicio, pídeselo (${vecesTxt(aj.intentos_pedir_datos)} como máximo en el chat); si ya lo pediste o no lo sabe, `
+    : "No le pidas más datos: ";
+  return "Sin resultados en el sistema (suele ser que este número no está vinculado a la ficha del cliente, no que el servicio no exista). " +
+    `NO le digas al cliente que no encontraste nada ni que no hay registros. ${pedir}llama a escalar_a_humano (motivo + pedido) y responde con el mensaje de derivación.`;
+}
+
+/** Nombre de la empresa (perfil), para presentarse. Best-effort, memoizado 5 min. */
+let empresaCache: { v: string; t: number } | null = null;
+async function nombreEmpresa(sb: SB): Promise<string> {
+  if (empresaCache && Date.now() - empresaCache.t < 300_000) return empresaCache.v;
+  let v = "";
+  try {
+    const { data } = await sb.from("empresa_perfil").select("nombre, razon_social").eq("id", 1).maybeSingle();
+    v = String((data as any)?.nombre || (data as any)?.razon_social || "").trim();
+  } catch { /* sin perfil: «la empresa» */ }
+  empresaCache = { v, t: Date.now() };
+  return v;
+}
 
 const MENSAJE_DERIVACION_DEFECTO =
   "Gracias, {nombre}. Ya registré tu solicitud y un ejecutivo de nuestro equipo la está revisando para enviarte la información por este mismo chat a la brevedad. 🙌";
@@ -70,11 +92,10 @@ function primerNombre(contacto: any): string {
 }
 
 /** Hora de Lima (UTC-5, sin horario de verano) y el saludo que le toca. */
-function ahoraLima(): { fecha: string; hora: string; saludo: string; inicioDiaUtc: string } {
+function ahoraLima(aj?: AjustesIA): { fecha: string; hora: string; saludo: string; inicioDiaUtc: string } {
   const lima = new Date(Date.now() - 5 * 3600_000);
   const iso = lima.toISOString();
-  const h = lima.getUTCHours();
-  const saludo = h < 12 ? "Buenos días" : h < 19 ? "Buenas tardes" : "Buenas noches";
+  const saludo = saludoParaHora(aj ?? normalizarAjustes(null), lima.getUTCHours());
   return {
     fecha: iso.slice(0, 10),
     hora: iso.slice(11, 16),
@@ -110,7 +131,7 @@ const TOOLS = [
   {
     name: "cotizacion_estimada",
     description:
-      "Devuelve un rango de precio REFERENCIAL basado en el histórico real de cotizaciones y servicios de AFA para una ruta. Úsala cuando tengas al menos origen y destino. Siempre aclara al cliente que es un estimado y que el equipo confirma el precio final. Precios en PEN, sin IGV.",
+      "Devuelve un rango de precio REFERENCIAL basado en el histórico real de cotizaciones y servicios de la empresa para una ruta. Úsala cuando tengas al menos origen y destino. Siempre aclara al cliente que es un estimado y que el equipo confirma el precio final. Precios en PEN, sin IGV.",
     input_schema: {
       type: "object",
       properties: {
@@ -124,7 +145,7 @@ const TOOLS = [
   {
     name: "consultar_flota",
     description:
-      "Lista los tipos de vehículo y capacidades disponibles (flota propia y de terceros). Úsala para responder si AFA tiene un bus de X asientos o qué unidades maneja.",
+      "Lista los tipos de vehículo y capacidades disponibles (flota propia y de terceros). Úsala para responder si la empresa tiene un bus de X asientos o qué unidades maneja.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -246,7 +267,7 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
         } else {
           const ids = await clientesDelContacto(sb, contacto);
           if (ids.length === 0)
-            return JSON.stringify({ encontrados: 0, nota: NOTA_SIN_RESULTADOS });
+            return JSON.stringify({ encontrados: 0, nota: notaSinResultados(ajustesDe(ctx.agente)) });
           q = q.in("cliente_id", ids);
         }
         if (input.fecha) q = q.eq("fecha_servicio", input.fecha);
@@ -266,7 +287,7 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
           const { data: c } = await sb.from("conductores").select("id, nombre, telefono").in("id", conIds);
           for (const x of c ?? []) choferes[x.id] = x.nombre;
         }
-        if (rows.length === 0) return JSON.stringify({ encontrados: 0, nota: NOTA_SIN_RESULTADOS });
+        if (rows.length === 0) return JSON.stringify({ encontrados: 0, nota: notaSinResultados(ajustesDe(ctx.agente)) });
         return JSON.stringify({
           encontrados: rows.length,
           servicios: rows.map((r) => ({
@@ -407,12 +428,15 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
         ctx.escalado.v = true;
         // Para que el ejecutivo sepa QUÉ enviar sin releer el chat: etiqueta + nota interna.
         // Best-effort: sin crm-inbox-equipo.sql corrido no hay etiquetas ni notas.
+        const aj = ajustesDe(ctx.agente);
         try {
-          const { data: e } = await sb.from("crm_conversaciones").select("etiquetas").eq("id", conv.id).maybeSingle();
-          const etq: string[] = Array.isArray((e as any)?.etiquetas) ? (e as any).etiquetas : [];
-          if (!etq.includes(ETIQUETA_EJECUTIVO))
-            await sb.from("crm_conversaciones").update({ etiquetas: [...etq, ETIQUETA_EJECUTIVO] }).eq("id", conv.id);
-          await sb.from("crm_notas").insert({
+          if (aj.etiqueta_derivacion) {
+            const { data: e } = await sb.from("crm_conversaciones").select("etiquetas").eq("id", conv.id).maybeSingle();
+            const etq: string[] = Array.isArray((e as any)?.etiquetas) ? (e as any).etiquetas : [];
+            if (!etq.includes(aj.etiqueta_derivacion))
+              await sb.from("crm_conversaciones").update({ etiquetas: [...etq, aj.etiqueta_derivacion] }).eq("id", conv.id);
+          }
+          if (aj.nota_interna_derivacion) await sb.from("crm_notas").insert({
             conversacion_id: conv.id,
             texto: `🤖 La IA derivó este chat.\nMotivo: ${String(input?.motivo ?? "—").slice(0, 300)}\nPedido del cliente: ${String(input?.pedido ?? "—").slice(0, 500)}`,
             autor_nombre: "Asistente IA",
@@ -431,8 +455,10 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
 
 // ── System prompt construido desde la config del agente ──────────────────────
 
-function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false): string {
-  const ahora = ahoraLima();
+function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false, empresa = ""): string {
+  const aj = ajustesDe(agente);
+  const ahora = ahoraLima(aj);
+  const emp = empresa || "la empresa";
   const nombre = primerNombre(contacto);
   const goals: { titulo: string; instrucciones: string }[] = Array.isArray(agente.goals) ? agente.goals : [];
   const goalsTxt = goals.length
@@ -440,10 +466,10 @@ function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = 
     : "Atender al cliente con cordialidad y resolver su consulta.";
 
   return [
-    agente.persona || "Eres el asistente comercial de AFA Transportes.",
+    agente.persona || `Eres el asistente comercial de ${emp}.`,
     "",
     "## Sobre la empresa",
-    agente.empresa_contexto || "AFA Transportes — operador de transporte en Perú.",
+    agente.empresa_contexto || `${emp} — empresa de transporte.`,
     "",
     "## Tus objetivos (goals)",
     goalsTxt,
@@ -452,7 +478,7 @@ function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = 
     "## Fecha y hora",
     `Hoy es ${ahora.fecha} y son las ${ahora.hora} en Lima. «Mañana» = el día siguiente a esa fecha.`,
     "",
-    primeroDelDia
+    !aj.saludo_activo ? "" : primeroDelDia
       ? `## SALUDO OBLIGATORIO\nEs tu PRIMER mensaje del día con este cliente: tu respuesta DEBE empezar con «${ahora.saludo}${nombre ? `, ${nombre}` : ""}», seguido de una presentación breve si corresponde, y recién después responder o preguntar. No omitas el saludo aunque el cliente no salude ni aunque necesites pedirle datos.\n`
       : "## Saludo\nYa conversaste hoy con este cliente: NO vuelvas a saludar ni a presentarte; responde directo.\n",
     "## Canal y contacto",
@@ -465,16 +491,25 @@ function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = 
     "- NUNCA confirmes que ya cotizaste/reservaste/agendaste algo. Para eso usa proponer_cotizacion / proponer_reserva (un humano aprueba) y dile al cliente que el equipo confirmará.",
     "- Cuando obtengas datos del cliente (nombre, empresa, correo, ruta, pasajeros), guárdalos con actualizar_contacto / registrar_lead.",
     agente.escalar_si ? `- Escala a un humano (escalar_a_humano) si el mensaje menciona: ${agente.escalar_si}.` : "",
-    "- Si no encuentras en el sistema lo que el cliente pide (servicios, choferes, placas, horarios, documentos), NUNCA digas «no encontré», «no hay registros», «no existe» ni «no tengo información»: eso asusta al cliente. Pide la fecha o el número de servicio UNA sola vez; si ya lo pediste, no lo sabe o igual no aparece, llama a escalar_a_humano (con motivo y pedido) y responde con el mensaje de derivación.",
-    "- Las notas de voz llegan transcritas como «[Nota de voz del cliente, transcrita]»: respóndelas como cualquier mensaje. Nunca digas que no puedes escuchar audios. Si llega «[…nota de voz que no se pudo transcribir]», llama a escalar_a_humano y responde con el mensaje de derivación (un ejecutivo escuchará el audio).",
+    aj.no_decir_no_encontre
+      ? `- Si no encuentras en el sistema lo que el cliente pide (servicios, choferes, placas, horarios, documentos), NUNCA digas «no encontré», «no hay registros», «no existe» ni «no tengo información»: eso asusta al cliente. ${aj.intentos_pedir_datos > 0 ? `Pide la fecha o el número de servicio ${vecesTxt(aj.intentos_pedir_datos)} como máximo; si ya lo pediste, no lo sabe o igual no aparece, ` : "No pidas más datos: "}llama a escalar_a_humano (con motivo y pedido) y responde con el mensaje de derivación.`
+      : "",
+    aj.transcribir_audios
+      ? "- Las notas de voz llegan transcritas como «[Nota de voz del cliente, transcrita]»: respóndelas como cualquier mensaje. Nunca digas que no puedes escuchar audios. Si llega «[…nota de voz que no se pudo transcribir]», llama a escalar_a_humano y responde con el mensaje de derivación (un ejecutivo escuchará el audio)."
+      : "- Si el cliente manda una nota de voz, no digas que no puedes escucharla: llama a escalar_a_humano y responde con el mensaje de derivación (un ejecutivo escuchará el audio).",
     `- Mensaje de derivación (adáptalo mínimamente, sin quitar la idea de que un ejecutivo revisará y enviará la información por este chat): «${mensajeDerivacion(agente, contacto)}»`,
-    "- No reveles que eres una IA salvo que te lo pregunten directamente; preséntate como el asistente de AFA.",
+    aj.ocultar_ia
+      ? `- No reveles que eres una IA salvo que te lo pregunten directamente; preséntate como ${presentacion(aj, emp)}.`
+      : `- Preséntate como ${presentacion(aj, emp)}.`,
     "- No compartas costos internos, márgenes ni datos de otros clientes.",
     "- Devuelve solo el texto del mensaje al cliente, sin prefijos como 'Asistente:'.",
-    "- Si el cliente envía FOTOS o DOCUMENTOS, LÉELOS: extrae fechas, horarios, número de pasajeros, origen, destino y lo que pida. Nunca digas que no puedes verlos. Resume lo que entendiste y pregunta solo lo que falte.",
+    !aj.leer_archivos ? "- Si el cliente envía fotos o documentos, dile que un ejecutivo los revisará (no los ves)." : "- Si el cliente envía FOTOS o DOCUMENTOS, LÉELOS: extrae fechas, horarios, número de pasajeros, origen, destino y lo que pida. Nunca digas que no puedes verlos. Resume lo que entendiste y pregunta solo lo que falte.",
     "- No repitas una pregunta que ya hiciste con otras palabras. Si el cliente no la contestó, espera; no insistas en el mismo mensaje ni en el siguiente.",
     "- Un sticker o una reacción no es una pregunta: no contestes solo por eso.",
     "- Formato WhatsApp: negrita con *un* asterisco (nunca **dos**). Mensajes cortos, un solo mensaje por turno.",
+    aj.reglas_extra
+      ? `\n## Reglas del negocio\n${aj.reglas_extra.split(/\n+/).map((l) => l.trim()).filter(Boolean).map((l) => (l.startsWith("-") ? l : `- ${l}`)).join("\n")}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -482,7 +517,7 @@ function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = 
 
 // ── Historial de la conversación → mensajes para Claude ──────────────────────
 
-async function cargarHistorial(sb: SB, convId: string): Promise<Anthropic.MessageParam[]> {
+async function cargarHistorial(sb: SB, convId: string, aj: AjustesIA = normalizarAjustes(null)): Promise<Anthropic.MessageParam[]> {
   // Los 40 MÁS RECIENTES: antes se pedían los 40 más antiguos (orden ascendente + limit),
   // así que en un hilo largo la IA contestaba sin ver lo último que escribió el cliente.
   const { data } = await sb
@@ -494,19 +529,19 @@ async function cargarHistorial(sb: SB, convId: string): Promise<Anthropic.Messag
   const msgs = (data ?? []).reverse().slice(-20);
   // Notas de voz que el webhook no alcanzó a transcribir (o anteriores a esta función):
   // se transcriben ahora y quedan guardadas. Solo las últimas, por costo.
-  const audiosPend = msgs
+  const audiosPend = !aj.transcribir_audios ? [] : msgs
     .filter((m: any) => m.direccion === "entrante" && esAudio(m.tipo) && m.media_url && !esTranscripcion(m.contenido))
-    .slice(-MAX_AUDIOS_IA);
+    .slice(-aj.max_audios);
   for (const m of audiosPend as any[]) {
     const nuevo = await transcribirMensaje(sb as any, { id: m.id }, m.media_url, m.contenido);
     if (nuevo) m.contenido = nuevo;
   }
   // Las fotos y PDF que mandó el cliente van como IMAGEN/DOCUMENTO para que la IA los LEA
   // (antes recibía «[image]» y contestaba «no puedo verlas»). Solo los últimos, por costo.
-  const conArchivo = msgs
+  const conArchivo = !aj.leer_archivos ? [] : msgs
     .map((m: any, i: number) => ({ m, i }))
     .filter(({ m }) => m.direccion === "entrante" && m.media_url && ["image", "document", "imagen"].includes(m.tipo))
-    .slice(-MAX_ARCHIVOS_IA);
+    .slice(-aj.max_archivos);
   const bloques = new Map<number, any>();
   for (const { m, i } of conArchivo) {
     const b = await bloqueParaIA(sb as any, m.media_url);
@@ -610,17 +645,19 @@ const SILENCIO_MS = 12_000;
 // documento) espera poco; uno corto o suelto («Hola», «una consulta», una foto sola) espera
 // los 12 s porque casi siempre viene algo más. Es una regla aproximada, no una certeza.
 const SILENCIO_COMPLETO_MS = 4_000;
-export function silencioPara(m: { tipo?: string | null; contenido?: string | null } | null): number {
-  if (!m) return SILENCIO_MS;
+export function silencioPara(
+  m: { tipo?: string | null; contenido?: string | null } | null,
+  aj?: AjustesIA,
+): number {
+  const largo = aj ? aj.silencio_seg * 1000 : SILENCIO_MS;
+  const corto = aj ? aj.silencio_completo_seg * 1000 : SILENCIO_COMPLETO_MS;
+  if (!m) return largo;
   const t = (m.contenido ?? "").trim();
-  if (m.tipo === "document") return SILENCIO_COMPLETO_MS;
-  if (m.tipo && m.tipo !== "texto" && m.tipo !== "text") return SILENCIO_MS;
-  if (/\?\s*$/.test(t) || t.length >= 60) return SILENCIO_COMPLETO_MS;
-  return SILENCIO_MS;
+  if (m.tipo === "document") return corto;
+  if (m.tipo && m.tipo !== "texto" && m.tipo !== "text") return largo;
+  if (/\?\s*$/.test(t) || t.length >= 60) return corto;
+  return largo;
 }
-const ESPERA_MAX_MS = 45_000;
-const MAX_ARCHIVOS_IA = 4;
-const MAX_AUDIOS_IA = 3;
 const CANDADO_MS = 90_000;
 
 export async function responderConIA(
@@ -733,8 +770,9 @@ async function responderConIAInterno(
     const mostrarEscribiendo =
       conv.canal === "whatsapp" && autonomosIni.includes("whatsapp") && dentroHorario(agente) && !!propio?.meta_message_id;
     if (mostrarEscribiendo) await marcarLeidoYEscribiendo(propio!.meta_message_id!, (conv as any).phone_number_id);
-    const silencio = silencioPara(propio);
-    const tope = Date.now() + ESPERA_MAX_MS;
+    const ajEspera = ajustesDe(agente);
+    const silencio = silencioPara(propio, ajEspera);
+    const tope = Date.now() + ajEspera.espera_max_seg * 1000;
     for (;;) {
       const ult = await ultimoEntrante();
       if (ult && propio && ult.id !== propio.id)
@@ -785,8 +823,8 @@ async function responderConIAInterno(
     .from("crm_mensajes").select("id", { count: "exact", head: true })
     .eq("conversacion_id", convId).eq("direccion", "saliente")
     .gte("created_at", ahoraLima().inicioDiaUtc);
-  const system = construirSystem(agente, contacto, conv, (salientesHoy ?? 0) === 0);
-  const messages = await cargarHistorial(sb, convId);
+  const system = construirSystem(agente, contacto, conv, (salientesHoy ?? 0) === 0, await nombreEmpresa(sb));
+  const messages = await cargarHistorial(sb, convId, ajustesDe(agente));
   if (messages.length === 0) return { ok: true, accion: "omitido", motivo: "Sin mensajes del cliente." };
 
   const ctx: Ctx = { sb, contacto, conv, agente, escalado: { v: false } };
@@ -887,7 +925,7 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
   const ctx: Ctx = { sb, contacto, conv, agente, escalado: { v: false } };
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
   // En la prueba, «primer mensaje del día» = el agente todavía no contestó en este chat de prueba.
-  const system = construirSystem(agente, contacto, conv, !historial.some((m) => m.role === "assistant"));
+  const system = construirSystem(agente, contacto, conv, !historial.some((m) => m.role === "assistant"), await nombreEmpresa(sb));
   const messages: Anthropic.MessageParam[] = [...historial, { role: "user", content: mensaje }];
   const usadas: string[] = [];
 
@@ -921,4 +959,15 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
   } catch (e: any) {
     return { ok: false, herramientas: usadas, error: e?.message ?? "Error llamando a Claude." };
   }
+}
+
+/** Las instrucciones exactas que recibe la IA con la configuración guardada (para mostrarlas
+ *  en /crm/agente). Cliente de ejemplo, primer mensaje del día. */
+export async function vistaPreviaInstrucciones(): Promise<string | null> {
+  const sb = db();
+  const { data } = await sb.from("crm_agentes_ia").select("*").order("created_at").limit(1);
+  const agente = data?.[0];
+  if (!agente) return null;
+  const contacto = { id: "ejemplo", nombre: "María Pérez", empresa: null, telefono: null };
+  return construirSystem(agente, contacto, { id: "ejemplo", canal: "whatsapp" }, true, await nombreEmpresa(sb));
 }
