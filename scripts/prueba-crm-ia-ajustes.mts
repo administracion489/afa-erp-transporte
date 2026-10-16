@@ -21,5 +21,9 @@ ok(saludoParaHora(d, 12) === "Buenas tardes" && saludoParaHora(d, 18) === "Buena
 ok(saludoParaHora(d, 19) === "Buenas noches" && saludoParaHora(d, 23) === "Buenas noches", "noche");
 ok(presentacion(d, "ACME") === "el asistente de ACME", "presentación con empresa");
 ok(!presentacion(d, "").includes("{empresa}"), "sin empresa no queda la llave");
+ok(normalizarAjustes({ mensajes_historial: 500 }).mensajes_historial === 60, "historial acotado a 60");
+ok(normalizarAjustes({ mensajes_historial: 1 }).mensajes_historial === 10, "historial mínimo 10");
+ok(normalizarAjustes({ lugares_conocidos: "" }).lugares_conocidos === "", "lugares vacíos = ninguno");
+ok(normalizarAjustes({}).recordar_datos === true, "recordar datos nace encendido");
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

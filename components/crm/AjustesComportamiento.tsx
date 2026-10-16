@@ -98,6 +98,24 @@ export default function AjustesComportamiento({
       </div>
 
       <Fila
+        titulo="📋 No volver a pedir lo que el cliente ya dio"
+        detalle="Antes de responder relee la conversación y arma la ficha del pedido (origen, destino, fecha, hora, pasajeros, equipaje, ida/vuelta, nombre). Si falta algo, lo pide todo junto y una sola vez; con los datos completos, los confirma y avanza con la cotización."
+        on={a.recordar_datos} onClick={() => set("recordar_datos", !a.recordar_datos)}
+      >
+        <div>
+          <label className={label}>Lugares que no necesitan dirección exacta</label>
+          <input className={input} value={a.lugares_conocidos} onChange={(e) => set("lugares_conocidos", e.target.value)}
+            placeholder="el aeropuerto, los terminales terrestres…" />
+          <p className={ayuda}>Para que no pida «la calle o avenida» del aeropuerto. Vacío = ninguno.</p>
+        </div>
+        <div className="w-48">
+          <label className={label}>Mensajes que relee</label>
+          <Num v={a.mensajes_historial} min={10} max={60} on={(x) => set("mensajes_historial", x)} />
+          <p className={ayuda}>Más mensajes = más contexto (y más costo).</p>
+        </div>
+      </Fila>
+
+      <Fila
         titulo="🙅 Nunca decir «no encontré sus servicios»"
         detalle="Si el sistema no encuentra lo que piden, no asusta al cliente: pide datos y deriva el chat a un ejecutivo con el mensaje de derivación."
         on={a.no_decir_no_encontre} onClick={() => set("no_decir_no_encontre", !a.no_decir_no_encontre)}

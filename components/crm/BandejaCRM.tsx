@@ -29,6 +29,8 @@ type Conversacion = {
   asignado_a?: string | null; etiquetas?: string[] | null;
   contacto_id: string; crm_contactos: Contacto; created_at?: string;
   ia_pausada?: boolean; borrador_ia?: string | null; borrador_ia_at?: string | null;
+  // Por qué respondió (o no) la IA la última vez (lib/crm-ia.ts → registrarDecision).
+  ia_ultima_decision?: { accion: string; ok?: boolean; motivo?: string | null; a_pedido?: boolean; at: string } | null;
   _ultimo_texto?: string;
   // Número de la empresa por el que entró (los 2 números del WABA caen en este
   // mismo Inbox). NULL en conversaciones anteriores a ago-2026.
@@ -624,7 +626,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
         // Refrescar el hilo abierto (borrador IA, pausa, estado) sin perder el contacto embebido
         setSelected((prev) =>
           prev && prev.id === upd.id
-            ? { ...prev, ia_pausada: upd.ia_pausada, borrador_ia: upd.borrador_ia, borrador_ia_at: upd.borrador_ia_at, estado: upd.estado }
+            ? { ...prev, ia_pausada: upd.ia_pausada, borrador_ia: upd.borrador_ia, borrador_ia_at: upd.borrador_ia_at, estado: upd.estado, ia_ultima_decision: upd.ia_ultima_decision }
             : prev
         );
         pedirConvs();
@@ -1196,6 +1198,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
           {selected.canal === "whatsapp" && (
             <VentanaWhatsApp mensajes={mensajes} numero={selected.display_phone_number ? formatearNumero(selected.display_phone_number) : null} />
           )}
+          <PorQueNoRespondioIA decision={selected.ia_ultima_decision} mensajes={mensajes} />
 
           {/* Mensajes — con los avisos automáticos intercalados en su momento exacto.
               Esos avisos salen FUERA del CRM (lib/notificaciones.ts nunca escribe en
@@ -2031,6 +2034,28 @@ function VentanaWhatsApp({ mensajes, numero }: { mensajes: { direccion: string; 
   return (
     <div className="px-5 py-1.5 text-[11px] text-red-700 bg-red-50 border-b border-red-100">
       🔒 Pasaron más de 24 h desde el último mensaje del cliente: desde el CRM WhatsApp ya no deja enviar texto libre ni archivos. <b>Puedes escribirle desde el celular (app WhatsApp Business{numero ? ` del ${numero}` : ""})</b>, que no tiene esa regla, o usar una plantilla aprobada (Campañas).
+    </div>
+  );
+}
+
+// Si el último mensaje es del cliente y la IA no lo contestó, se dice POR QUÉ (pausada, una persona
+// respondió hace poco, modo copiloto, error de Claude…). Sin esto, una IA callada no se distingue
+// de una IA rota. Solo cuando la decisión es posterior a ese mensaje (es sobre él).
+function PorQueNoRespondioIA({ decision, mensajes }: {
+  decision?: Conversacion["ia_ultima_decision"];
+  mensajes: { direccion: string; created_at: string }[];
+}) {
+  const ultimo = mensajes[mensajes.length - 1];
+  if (!decision || !ultimo || ultimo.direccion !== "entrante") return null;
+  if (decision.a_pedido || (decision.accion !== "omitido" && decision.accion !== "borrador")) return null;
+  if (new Date(decision.at).getTime() < new Date(ultimo.created_at).getTime()) return null;
+  const error = decision.ok === false;
+  const texto = decision.accion === "borrador" && !decision.motivo
+    ? "dejó una sugerencia en vez de enviarla"
+    : decision.motivo ?? "sin motivo registrado";
+  return (
+    <div className={`px-4 py-1.5 text-[11px] border-b ${error ? "bg-red-50 text-red-700 border-red-100" : "bg-gray-50 text-gray-600 border-gray-100"}`}>
+      ✨ La IA no respondió el último mensaje: {texto}
     </div>
   );
 }
