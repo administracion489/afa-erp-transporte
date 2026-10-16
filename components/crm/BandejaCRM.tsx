@@ -255,53 +255,74 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
   // ── Cargar conversaciones ──────────────────────────────────────────────
 
+  // Cada carga es UNA petición: el último mensaje de cada hilo viene embebido (PostgREST lo
+  // resuelve con un LATERAL ... LIMIT 1). Antes eran 1 + 80 peticiones, repetidas en cada
+  // mensaje que entraba (realtime) y cada 8 s: con el CRM abierto, la base y la conexión del
+  // equipo se saturaban y el ERP entero se ponía lento.
+  const pedidoConvsId = useRef(0);
   const cargarConvs = useCallback(async () => {
     if (avisosNums === null) return;
-    let q = supabase
-      .from("crm_conversaciones")
-      .select("*, crm_contactos(id,nombre,empresa,telefono,email,canal_origen,wa_id,fb_psid,ig_id,gmail_email)")
-      .order("ultimo_mensaje_at", { ascending: false, nullsFirst: false });
-
-    // «Todas» = todo menos spam (ninguna pestaña enseñó nunca el spam).
-    if (estadoFiltro === "todas") q = q.in("estado", ["abierta", "en_progreso", "resuelta"]);
-    else q = q.eq("estado", estadoFiltro);
-
-    if (canalFiltro !== "todos") q = q.eq("canal", canalFiltro);
-
+    const pid = ++pedidoConvsId.current;
+    const COLS = "*, crm_contactos(id,nombre,empresa,telefono,email,canal_origen,wa_id,fb_psid,ig_id,gmail_email)";
+    const armar = (conUltimo: boolean) => {
+      let q = supabase
+        .from("crm_conversaciones")
+        .select(conUltimo ? `${COLS}, crm_mensajes(contenido,direccion,created_at)` : COLS)
+        .order("ultimo_mensaje_at", { ascending: false, nullsFirst: false });
+      if (conUltimo)
+        q = q.order("created_at", { ascending: false, referencedTable: "crm_mensajes" }).limit(1, { referencedTable: "crm_mensajes" });
+      return q;
+    };
     // Sólo aplica a WhatsApp: los demás canales no tienen número de la empresa, así que
     // filtrar por él los dejaría a todos fuera con el selector ya oculto — una lista
     // vacía sin motivo visible.
     const filtraNumero = numeroFiltro !== "todos" && (canalFiltro === "todos" || canalFiltro === "whatsapp");
-    if (filtraNumero) q = q.eq("display_phone_number", numeroFiltro);
     // Separación de bandejas: el número de avisos no se mezcla con atención al cliente.
     const lista = avisosNums.map((n) => `"${n}"`).join(",");
-    if (bandeja === "avisos") {
-      if (avisosNums.length === 0) { setConvs([]); setCargando(false); return; }
-      q = q.in("display_phone_number", avisosNums);
-    } else if (avisosNums.length > 0) {
-      q = q.or(`display_phone_number.is.null,display_phone_number.not.in.(${lista})`);
+    if (bandeja === "avisos" && avisosNums.length === 0) { setConvs([]); setCargando(false); return; }
+
+    type Ult = { contenido: string | null; direccion: string; created_at: string } | null;
+    type Fila = { id: string; crm_mensajes?: Ult[] } & Record<string, unknown>;
+    const filtros = (b: ReturnType<typeof armar>) => {
+      // «Todas» = todo menos spam (ninguna pestaña enseñó nunca el spam).
+      if (estadoFiltro === "todas") b = b.in("estado", ["abierta", "en_progreso", "resuelta"]);
+      else b = b.eq("estado", estadoFiltro);
+      if (canalFiltro !== "todos") b = b.eq("canal", canalFiltro);
+      if (filtraNumero) b = b.eq("display_phone_number", numeroFiltro);
+      if (bandeja === "avisos") b = b.in("display_phone_number", avisosNums);
+      else if (avisosNums.length > 0) b = b.or(`display_phone_number.is.null,display_phone_number.not.in.(${lista})`);
+      return b.limit(80);
+    };
+    const primera = await filtros(armar(true));
+    let data: Fila[] | null = primera.data;
+    let ultimos: Map<string, Ult> | null = null;
+    if (primera.error) {
+      // Respaldo si la base no resuelve el embebido: la lista y, aparte, el último mensaje
+      // de cada hilo con pocas peticiones a la vez (nunca 80 juntas).
+      ({ data } = await filtros(armar(false)));
+      ultimos = new Map();
+      const filas = data ?? [];
+      for (let i = 0; i < filas.length; i += 6) {
+        await Promise.all(filas.slice(i, i + 6).map(async (c) => {
+          const { data: ult } = await supabase
+            .from("crm_mensajes").select("contenido, direccion, created_at")
+            .eq("conversacion_id", c.id).order("created_at", { ascending: false }).limit(1).maybeSingle();
+          ultimos!.set(c.id, (ult as Ult) ?? null);
+        }));
+      }
     }
-
-    const { data } = await q.limit(80);
-
-    // Para cada conv, obtener el último mensaje
-    const enriched = await Promise.all(
-      (data ?? []).map(async (c: any) => {
-        const { data: ult } = await supabase
-          .from("crm_mensajes")
-          .select("contenido, direccion, created_at")
-          .eq("conversacion_id", c.id)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        return {
-          ...c,
-          _ultimo_texto: textoLegible(ult?.contenido) ?? undefined,
-          _espera_desde: ult?.direccion === "entrante" ? ult.created_at : undefined,
-        };
-      })
-    );
-    setConvs(enriched as Conversacion[]);
+    // Una respuesta vieja (de antes de cambiar un filtro) no pisa la nueva.
+    if (pid !== pedidoConvsId.current) return;
+    const enriched = (data ?? []).map((c) => {
+      const { crm_mensajes: emb, ...resto } = c;
+      const ult = ultimos ? ultimos.get(c.id) : Array.isArray(emb) ? emb[0] : null;
+      return {
+        ...resto,
+        _ultimo_texto: textoLegible(ult?.contenido) ?? undefined,
+        _espera_desde: ult?.direccion === "entrante" ? ult.created_at : undefined,
+      };
+    });
+    setConvs(enriched as unknown as Conversacion[]);
     setCargando(false);
   }, [canalFiltro, estadoFiltro, numeroFiltro, avisosNums, bandeja]);
 
@@ -436,7 +457,9 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const avisosCargadosDe = useRef<string | null>(null);
   useEffect(() => {
     if (!selected) { avisosCargadosDe.current = null; setAvisos([]); return; }
-    const clave = `${selected.id}:${mensajes.length}`;
+    // Por hilo y primer mensaje cargado, y como mucho cada 5 min: la consulta busca el teléfono
+    // con un comodín al inicio (recorre la tabla de avisos), así que no puede ir con cada mensaje.
+    const clave = `${selected.id}:${mensajes[0]?.created_at ?? ""}:${Math.floor(Date.now() / 300_000)}`;
     if (avisosCargadosDe.current === clave) return;
     avisosCargadosDe.current = clave;
     cargarAvisosAutomaticos(selected, mensajes);
@@ -448,32 +471,62 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   selectedRef.current = selected;
   const cargarConvsRef = useRef(cargarConvs);
   cargarConvsRef.current = cargarConvs;
+  const mensajesRef = useRef<Mensaje[]>([]);
+  useEffect(() => { mensajesRef.current = mensajes; }, [mensajes]);
+
+  // Recarga de la lista PEDIDA por un evento (realtime o el sondeo): se juntan las ráfagas
+  // —un mensaje entrante son un INSERT y un UPDATE, y el historial de coexistencia trae cientos
+  // seguidos— en UNA carga, y nunca corren dos a la vez.
+  const convsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const convsEnCurso = useRef(false);
+  const convsOtraVez = useRef(false);
+  const pedirConvs = useCallback(() => {
+    if (convsTimer.current) return;
+    convsTimer.current = setTimeout(async () => {
+      convsTimer.current = null;
+      if (convsEnCurso.current) { convsOtraVez.current = true; return; }
+      convsEnCurso.current = true;
+      try { await cargarConvsRef.current(); }
+      finally {
+        convsEnCurso.current = false;
+        if (convsOtraVez.current) { convsOtraVez.current = false; pedirConvs(); }
+      }
+    }, 800);
+  }, []);
+  useEffect(() => () => { if (convsTimer.current) clearTimeout(convsTimer.current); }, []);
 
   // Respaldo del realtime: si la tabla no está en la publicación o el socket se cae,
   // la pantalla igual se pone al día sola (cada 8 s con la pestaña visible, y al volver a ella).
   useEffect(() => {
+    // Es un RESPALDO (lo inmediato lo trae el realtime): cada 30 s, y del hilo abierto solo
+    // lo NUEVO desde el último mensaje cargado, no los 200 de nuevo.
     const tick = async () => {
       if (document.visibilityState !== "visible") return;
-      cargarConvsRef.current();
+      pedirConvs();
       const sel = selectedRef.current;
       if (!sel) return;
-      const r = await leerUltimos(sel.id);
-      const data = r?.filas;
+      const ultimo = mensajesRef.current[mensajesRef.current.length - 1];
+      if (!ultimo || ultimo.conversacion_id !== sel.id) return;
+      const { data } = await supabase
+        .from("crm_mensajes").select("*").eq("conversacion_id", sel.id)
+        .gte("created_at", ultimo.created_at)
+        .order("created_at", { ascending: true }).limit(PAGINA_CHAT);
       if (!data || selectedRef.current?.id !== sel.id) return;
-      setHayAnteriores(!!r?.hayMas);
       setMensajes((prev) => {
-        if (prev.length === data.length && prev[prev.length - 1]?.id === data[data.length - 1]?.id) return prev;
+        const vistos = new Set(prev.map((m) => m.id));
+        const nuevos = (data as Mensaje[]).filter((m) => !vistos.has(m.id)).map(legible);
+        if (!nuevos.length) return prev;
         setTimeout(() => marcarLeido(sel.id), 0);
         setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
-        return (data as Mensaje[]).map(legible);
+        return [...prev, ...nuevos];
       });
     };
-    const id = setInterval(tick, 8000);
+    const id = setInterval(tick, 30_000);
     const alVolver = () => { if (document.visibilityState === "visible") tick(); };
     document.addEventListener("visibilitychange", alVolver);
     window.addEventListener("focus", alVolver);
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", alVolver); window.removeEventListener("focus", alVolver); };
-  }, [marcarLeido]);
+  }, [marcarLeido, pedirConvs]);
 
   useEffect(() => {
     const ch = supabase
@@ -487,7 +540,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
           // Con el hilo abierto, lo que llega ya se está leyendo.
           if (nuevo.direccion === "entrante") marcarLeido(sel.id);
         }
-        cargarConvsRef.current();
+        pedirConvs();
       })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "crm_conversaciones" }, (payload: any) => {
         const upd = payload.new as Conversacion;
@@ -497,7 +550,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             ? { ...prev, ia_pausada: upd.ia_pausada, borrador_ia: upd.borrador_ia, borrador_ia_at: upd.borrador_ia_at, estado: upd.estado }
             : prev
         );
-        cargarConvsRef.current();
+        pedirConvs();
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "crm_acciones_ia" }, (payload: any) => {
         const row = (payload.new ?? payload.old) as AccionIA;
@@ -506,7 +559,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [cargarAcciones, marcarLeido]);
+  }, [cargarAcciones, marcarLeido, pedirConvs]);
 
   // ── Enviar mensaje ─────────────────────────────────────────────────────
 
