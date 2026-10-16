@@ -17,6 +17,10 @@ const LIMITE: Record<string, number> = { image: 5, video: 16, audio: 16, documen
 const tipoDe = (mime: string) =>
   /^image\/(jpeg|png)$/.test(mime) ? "image" : /^video\/(mp4|3gpp)$/.test(mime) ? "video" : /^audio\//.test(mime) ? "audio" : "document";
 const limpiarNombre = (n: string) => n.replace(/[^\w.\-() áéíóúñÁÉÍÓÚÑ]/g, "_").slice(0, 120) || "archivo";
+// La ruta en Storage solo admite ASCII: «COTIZACIÓN N° 00691.pdf» daba «Invalid key». El nombre
+// con tildes se conserva para el chat y para WhatsApp; solo la RUTA va sin acentos ni símbolos.
+const claveStorage = (n: string) =>
+  n.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9._-]+/g, "_").replace(/_+/g, "_").slice(0, 100) || "archivo";
 
 // Enviar un archivo (cotización en PDF, Word, foto…) al cliente por WhatsApp, en dos pasos:
 //   1) { accion: "subir", conversacion_id, nombre, mime, tamano } → URL firmada de SUBIDA:
@@ -47,7 +51,7 @@ export async function POST(req: NextRequest) {
     if (mb > LIMITE[tipo])
       return NextResponse.json({ ok: false, error: `WhatsApp acepta hasta ${LIMITE[tipo]} MB para este tipo de archivo (este pesa ${mb.toFixed(1)} MB).` }, { status: 400 });
     await asegurarBucket(sb);
-    const ruta = `enviados/${new Date().toISOString().slice(0, 7)}/${crypto.randomUUID()}-${nombre}`;
+    const ruta = `enviados/${new Date().toISOString().slice(0, 7)}/${crypto.randomUUID()}-${claveStorage(nombre)}`;
     const { data, error } = await sb.storage.from(BUCKET_CRM_MEDIA).createSignedUploadUrl(ruta);
     if (error || !data) return NextResponse.json({ ok: false, error: error?.message ?? "No se pudo preparar la subida" }, { status: 500 });
     return NextResponse.json({ ok: true, ruta, token: data.token, bucket: BUCKET_CRM_MEDIA });
