@@ -23,7 +23,7 @@ const EXT: Record<string, string> = {
 };
 
 let bucketListo = false;
-async function asegurarBucket(sb: SupabaseClient) {
+export async function asegurarBucket(sb: SupabaseClient) {
   if (bucketListo) return;
   const { error } = await sb.storage.createBucket(BUCKET_CRM_MEDIA, { public: false });
   if (error && !/exist/i.test(error.message)) console.error("[crm-media] bucket:", error.message);
