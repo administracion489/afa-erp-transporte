@@ -455,7 +455,7 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
 
 // ── System prompt construido desde la config del agente ──────────────────────
 
-function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false, empresa = ""): string {
+export function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false, empresa = ""): string {
   const aj = ajustesDe(agente);
   const ahora = ahoraLima(aj);
   const emp = empresa || "la empresa";
@@ -464,40 +464,32 @@ function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = 
   const goalsTxt = goals.length
     ? goals.map((g, i) => `${i + 1}. ${g.titulo}: ${g.instrucciones}`).join("\n")
     : "Atender al cliente con cordialidad y resolver su consulta.";
+  const reglasNegocio = aj.reglas_extra
+    ? aj.reglas_extra.split(/\n+/).map((l) => l.trim()).filter(Boolean).map((l) => (l.startsWith("-") ? l : `- ${l}`)).join("\n")
+    : "";
 
+  // ORDEN: primero lo general (fecha, saludo, reglas del sistema) y AL FINAL lo que escribió la
+  // empresa (objetivos, base de conocimiento, reglas del negocio), con su prioridad dicha. Antes
+  // los objetivos iban arriba y las reglas generales después, y una regla general («mensajes
+  // cortos», «no repitas una pregunta») le ganaba a una del dueño («al final, resume los datos y
+  // pide solo lo que falta»).
   return [
     agente.persona || `Eres el asistente comercial de ${emp}.`,
     "",
     "## Sobre la empresa",
     agente.empresa_contexto || `${emp} — empresa de transporte.`,
     "",
-    "## Tus objetivos (goals)",
-    goalsTxt,
-    "",
-    agente.conocimiento ? `## Base de conocimiento\n${agente.conocimiento}\n` : "",
     "## Fecha y hora",
     `Hoy es ${ahora.fecha} y son las ${ahora.hora} en Lima. «Mañana» = el día siguiente a esa fecha.`,
     "",
     !aj.saludo_activo ? "" : primeroDelDia
       ? `## SALUDO OBLIGATORIO\nEs tu PRIMER mensaje del día con este cliente: tu respuesta DEBE empezar con «${ahora.saludo}${nombre ? `, ${nombre}` : ""}», seguido de una presentación breve si corresponde, y recién después responder o preguntar. No omitas el saludo aunque el cliente no salude ni aunque necesites pedirle datos.\n`
-      : "## Saludo\nYa conversaste hoy con este cliente: NO vuelvas a saludar ni a presentarte; responde directo.\n",
-    aj.recordar_datos
-      ? [
-          "## Lo que el cliente YA dijo (no se vuelve a pedir)",
-          "- Antes de responder, relee TODA la conversación —también lo que el cliente le contestó a una persona del equipo— y arma la ficha del pedido: origen y dirección de recojo, destino, fecha, hora, número de pasajeros, equipaje, solo ida o ida y vuelta, nombre y empresa.",
-          "- NUNCA vuelvas a pedir un dato que ya está en la conversación, aunque lo haya dado en otro orden, en un solo bloque o repartido en varios mensajes.",
-          "- Si el cliente repite su pedido o pregunta «¿me pueden dar la cotización?», es que espera una respuesta: no le pidas lo que ya dio; avanza con lo que tienes.",
-          aj.lugares_conocidos ? `- No necesitan dirección exacta: ${aj.lugares_conocidos}.` : "",
-          "- Si falta algo indispensable, pide TODO lo que falte en un solo mensaje, una sola vez. No condiciones la atención a que te dé su nombre: si falta, pídelo en el mismo mensaje en que avanzas.",
-          "- Con los datos del servicio completos, confírmalos en una lista corta (origen → destino, fecha y hora, pasajeros, equipaje, ida/vuelta) y avanza: precio referencial con cotizacion_estimada y proponer_cotizacion para que el equipo lo confirme.",
-          "",
-        ].filter(Boolean).join("\n")
-      : "",
+      : "## Saludo\nYa conversaste hoy con este cliente: NO vuelvas a saludar ni a presentarte.\n",
     "## Canal y contacto",
     `Estás respondiendo por ${conv.canal}. Cliente: ${contacto.nombre ?? "desconocido"}${contacto.empresa ? ` (${contacto.empresa})` : ""}${contacto.telefono ? `, tel ${contacto.telefono}` : ""}.`,
     "",
-    "## Reglas",
-    "- Responde SIEMPRE en el idioma del cliente (por defecto español peruano). Mensajes breves, claros y útiles, estilo WhatsApp.",
+    "## Reglas generales",
+    "- Responde SIEMPRE en el idioma del cliente (por defecto español peruano). Mensajes claros y útiles, estilo WhatsApp, sin relleno (el resumen del pedido no cuenta como relleno).",
     "- Usa las herramientas para consultar datos reales antes de afirmar precios, horarios o estados. No inventes información.",
     "- Para precios: usa cotizacion_estimada y deja claro que es REFERENCIAL; el equipo confirma el precio final.",
     "- NUNCA confirmes que ya cotizaste/reservaste/agendaste algo. Para eso usa proponer_cotizacion / proponer_reserva (un humano aprueba) y dile al cliente que el equipo confirmará.",
@@ -515,13 +507,47 @@ function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = 
       : `- Preséntate como ${presentacion(aj, emp)}.`,
     "- No compartas costos internos, márgenes ni datos de otros clientes.",
     "- Devuelve solo el texto del mensaje al cliente, sin prefijos como 'Asistente:'.",
-    !aj.leer_archivos ? "- Si el cliente envía fotos o documentos, dile que un ejecutivo los revisará (no los ves)." : "- Si el cliente envía FOTOS o DOCUMENTOS, LÉELOS: extrae fechas, horarios, número de pasajeros, origen, destino y lo que pida. Nunca digas que no puedes verlos. Resume lo que entendiste y pregunta solo lo que falte.",
-    "- No repitas una pregunta que ya hiciste con otras palabras. Si el cliente no la contestó, espera; no insistas en el mismo mensaje ni en el siguiente.",
+    !aj.leer_archivos ? "- Si el cliente envía fotos o documentos, dile que un ejecutivo los revisará (no los ves)." : "- Si el cliente envía FOTOS o DOCUMENTOS, LÉELOS: extrae fechas, horarios, número de pasajeros, origen, destino y lo que pida. Nunca digas que no puedes verlos.",
+    aj.resumen_pedido
+      ? "- No insistas con una pregunta suelta que ya hiciste. Lo que falte va en el «Solo me falta» del resumen del pedido, que SÍ va en cada respuesta mientras el pedido no esté completo."
+      : "- No repitas una pregunta que ya hiciste con otras palabras. Si el cliente no la contestó, espera; no insistas en el mismo mensaje ni en el siguiente.",
     "- Un sticker o una reacción no es una pregunta: no contestes solo por eso.",
-    "- Formato WhatsApp: negrita con *un* asterisco (nunca **dos**). Mensajes cortos, un solo mensaje por turno.",
-    aj.reglas_extra
-      ? `\n## Reglas del negocio\n${aj.reglas_extra.split(/\n+/).map((l) => l.trim()).filter(Boolean).map((l) => (l.startsWith("-") ? l : `- ${l}`)).join("\n")}`
+    "- Formato WhatsApp: negrita con *un* asterisco (nunca **dos**). Un solo mensaje por turno.",
+    "",
+    aj.recordar_datos
+      ? [
+          "## Lo que el cliente YA dijo (no se vuelve a pedir)",
+          "- Antes de responder, relee TODA la conversación —también lo que el cliente le contestó a una persona del equipo— y arma la ficha del pedido.",
+          "- NUNCA vuelvas a pedir un dato que ya está en la conversación, aunque lo haya dado en otro orden, en un solo bloque o repartido en varios mensajes.",
+          "- Si el cliente repite su pedido o pregunta «¿me pueden dar la cotización?», es que espera una respuesta: no le pidas lo que ya dio; avanza con lo que tienes.",
+          aj.lugares_conocidos ? `- No necesitan dirección exacta: ${aj.lugares_conocidos}.` : "",
+          "- Si falta algo indispensable, pide TODO lo que falte en un solo mensaje. No condiciones la atención a que te dé su nombre: si falta, pídelo en el mismo mensaje en que avanzas.",
+          "- Con los datos del servicio completos, avanza: precio referencial con cotizacion_estimada y proponer_cotizacion para que el equipo lo confirme.",
+          "",
+        ].filter(Boolean).join("\n")
       : "",
+    aj.resumen_pedido
+      ? [
+          "## Resumen del pedido (al final de tu respuesta)",
+          `- Mientras el cliente esté pidiendo un servicio (cotización o reserva), TERMINA cada respuesta con el resumen de lo que ya dio y pide SOLO lo que falta. Datos del pedido: ${aj.campos_pedido}.`,
+          "- Formato:",
+          "📋 *Resumen de su solicitud*",
+          "• <dato>: <lo que dio el cliente>",
+          "• …",
+          "*Solo me falta:* <los datos que faltan, juntos en una línea>",
+          "- Si ya está todo, cambia la última línea por «Con esto ya tengo todo lo necesario».",
+          "- Nunca pongas en el resumen un dato que el cliente no dio: lo que no dio va en «Solo me falta».",
+          "- También al derivar a un ejecutivo. No lo pongas en respuestas que no son de un pedido (consultas sobre un servicio en curso, saludos, agradecimientos).",
+          "",
+        ].join("\n")
+      : "",
+    "## Tus objetivos (goals)",
+    goalsTxt,
+    "",
+    agente.conocimiento ? `## Base de conocimiento\n${agente.conocimiento}\n` : "",
+    reglasNegocio ? `## Reglas del negocio\n${reglasNegocio}\n` : "",
+    "## Prioridad",
+    "Tus objetivos, la base de conocimiento y las reglas del negocio los escribió la empresa: si chocan con una regla general de arriba, MANDAN ELLOS. Lo único que no se negocia: no inventar datos, no dar por confirmada una cotización o reserva que aprueba una persona, y no compartir costos internos ni datos de otros clientes.",
   ]
     .filter(Boolean)
     .join("\n");
