@@ -1520,16 +1520,17 @@ export default function CotizacionesPage(){
      * librería) y solo cuando cambia el usuario — volver a la pestaña o renovar el token es la
      * misma persona con el mismo nombre.
      */
+    type SesionVista={user?:{id?:string}|null}|null;
     let usuarioVisto:string|null|undefined;
-    const alCambiarSesion=(session:any)=>{
+    const alCambiarSesion=(session:SesionVista)=>{
       const id:string|null=session?.user?.id??null;
       if(id===usuarioVisto)return;
       usuarioVisto=id;
       // Otra persona en la misma pestaña: su cotización no sale con el nombre de la anterior.
       setTimeout(()=>{setReprNombre("");void cargarNombre(session);},0);
     };
-    const{data:{subscription}}=supabase.auth.onAuthStateChange((_event:string,session:any)=>{alCambiarSesion(session);});
-    supabase.auth.getSession().then(({data:{session}}:any)=>{alCambiarSesion(session);});
+    const{data:{subscription}}=supabase.auth.onAuthStateChange((_event:string,session:SesionVista)=>{alCambiarSesion(session);});
+    supabase.auth.getSession().then(({data:{session}}:{data:{session:SesionVista}})=>{alCambiarSesion(session);});
     return()=>subscription.unsubscribe();
   },[]);
   useEffect(()=>{
@@ -1671,7 +1672,9 @@ export default function CotizacionesPage(){
       const raw=localStorage.getItem(DRAFT_KEY);if(!raw)return;
       const d=JSON.parse(raw);if(!d?.form)return;
       skipDescRef.current=true;skipParadasRef.current=true;
-      setForm(d.form);
+      // Sobre FORM0: un borrador de una versión anterior no trae los campos nuevos, y un `.trim()`
+      // sobre uno ausente reventaba el guardado — y el borrador sobrevive a F5.
+      setForm({...FORM0,...d.form});
       if(d.items?.length)setItems(d.items);
       if(d.consid)setConsid(d.consid);
       if(d.paradas?.length)setParadas(d.paradas);
@@ -1889,16 +1892,41 @@ export default function CotizacionesPage(){
     return r;
   };
 
+  /**
+   * Quién guarda: el nombre (para «REPRESENTANTE») y el id (para `vendedor_id`). Sale de
+   * `getSession`, que lee la sesión del almacén LOCAL; antes cada guardado sin nombre resuelto
+   * pedía `getUser()`, que es un viaje al servidor de Auth con el candado de sesión tomado.
+   */
+  const operadorActual=async():Promise<{nombre:string;id:string|null}>=>{
+    const{data:{session}}=await supabase.auth.getSession();
+    const u=session?.user;
+    let nombre=reprNombre||"";
+    if(!nombre&&u){
+      try{
+        type FilaNombre={data:{nombre?:string|null}|null};
+        const{data:porId}:FilaNombre=await supabase.from("usuarios").select("nombre").eq("id",u.id).maybeSingle();
+        let n=String(porId?.nombre??"").trim();
+        if(!n&&u.email){const{data:porCorreo}:FilaNombre=await supabase.from("usuarios").select("nombre").eq("email",u.email).maybeSingle();n=String(porCorreo?.nombre??"").trim();}
+        if(n)nombre=extraerNombreApellido(n);
+      }catch(e){/* best-effort: sin nombre, el PDF omite la línea */}
+    }
+    return{nombre,id:u?.id??null};
+  };
+  /** Lo que salga mal a mitad de un guardado se DICE, y el botón vuelve a quedar usable (finally). */
+  const avisarFalloGuardado=(e:unknown)=>alert(`⚠️ No se pudo terminar de guardar: ${(e as {message?:string})?.message||String(e)}. Revisa la lista antes de volver a intentarlo: la cotización pudo quedar guardada.`);
+
   const guardarBorrador=async()=>{
     if(calculandoKm){alert("⏳ Se está calculando el kilometraje de la ruta. Espera un segundo antes de guardar.");return;}
     if(!form.cliente_id&&!form.origen.trim()&&!form.destino.trim()){alert("⚠️ Ingresa al menos el cliente o la ruta para guardar el borrador");return;}
     setGuardando(true);
-    let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
-    const{data:{session:sesCot}}=await supabase.auth.getSession();
-    const payload={...buildPayload("borrador"),creado_por:nombreCreador||null,vendedor_id:sesCot?.user?.id??null};
-    const{error}=await escribirCotizacion(payload);
-    if(error){alert(error.message);setGuardando(false);return;}
-    limpiar();cargar();setGuardando(false);
+    try{
+      const op=await operadorActual();
+      const payload={...buildPayload("borrador"),creado_por:op.nombre||null,vendedor_id:op.id};
+      const{error}=await escribirCotizacion(payload);
+      if(error){alert(error.message);return;}
+      limpiar();cargar();
+    }catch(e){avisarFalloGuardado(e);}
+    finally{setGuardando(false);}
   };
 
   const guardarCotizacion=async()=>{
@@ -1911,12 +1939,12 @@ export default function CotizacionesPage(){
     const cl=clientes.find(c=>c.id===Number(form.cliente_id));if(cl?.estado==="bloqueado"){alert("Cliente bloqueado.");return;}
     if(items.some(it=>!it.descripcion.trim())){alert("Todos los items necesitan descripción");return;}
     setGuardando(true);
-    let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
+    try{
+    const op=await operadorActual();
     const esFijo=form.modo_servicio==="fijo";
-    const{data:{session:sesCot}}=await supabase.auth.getSession();
-    const payload={...buildPayload(form.estado==="borrador"?"pendiente":undefined),creado_por:nombreCreador||null,vendedor_id:sesCot?.user?.id??null};
+    const payload={...buildPayload(form.estado==="borrador"?"pendiente":undefined),creado_por:op.nombre||null,vendedor_id:op.id};
     const{error,data:insertado}=await escribirCotizacion(payload);
-    if(error){alert(error.message);setGuardando(false);return;}
+    if(error){alert(error.message);return;}
     // Servicio del Despachador que se estaba cotizando: queda vinculado a la cotización nueva.
     const origenDesp=despachoOrigenRef.current;
     if(origenDesp&&!editandoId){
@@ -1952,18 +1980,25 @@ export default function CotizacionesPage(){
     //     los servicios sin estado escrito, que son servicios VIVOS y los que más falta hace
     //     tocar, quedaban fuera. El filtro se hace en JS, donde "no es ninguno de estos tres"
     //     significa lo que uno espera que signifique.
-    let reservasParaPropagar:{id:number;direccion_servicio:string|null}[]=[];
-    if(cotIdGuardado&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
-      const todayPeru=new Date(Date.now()-5*60*60*1000).toISOString().split("T")[0];
-      const afect:{id:number;direccion_servicio:string|null;estado:string|null}[]=[];
+    //
+    // Los servicios del contrato se leen UNA sola vez y de ahí salen las dos listas (propagar las
+    // paradas y re-sincronizar el cliente). Antes eran dos lecturas paginadas de las MISMAS filas,
+    // una detrás de la otra, con el botón en «Guardando…»: en un contrato fijo largo, segundos de más.
+    const todayPeru=hoyLimaISO();
+    const servCot:{id:number;direccion_servicio:string|null;estado:string|null;estado_admin:string|null;cliente_id:number|null;fecha_servicio:string|null}[]=[];
+    if(cotIdGuardado){
       for(let d=0;d<40000;d+=1000){
-        const{data,error:eLee}=await supabase.from("reservas").select("id,direccion_servicio,estado").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).order("id").range(d,d+999);
+        const{data,error:eLee}=await supabase.from("reservas").select("id,direccion_servicio,estado,estado_admin,cliente_id,fecha_servicio").eq("cotizacion_id",cotIdGuardado).order("id").range(d,d+999);
         if(eLee)break;
-        afect.push(...(data||[]));
+        servCot.push(...(data||[]));
         if(!data||data.length<1000)break;
       }
-      reservasParaPropagar=afect
-        .filter(r=>!["en_curso","finalizada","cancelada"].includes(r.estado||""))
+    }
+    let reservasParaPropagar:{id:number;direccion_servicio:string|null}[]=[];
+    if(cotIdGuardado&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
+      // Mismo corte que el `.gte("fecha_servicio", hoy)` de antes: sin fecha no es un servicio futuro.
+      reservasParaPropagar=servCot
+        .filter(r=>(r.fecha_servicio??"")>=todayPeru&&!["en_curso","finalizada","cancelada"].includes(r.estado||""))
         .map(r=>({id:r.id,direccion_servicio:r.direccion_servicio}));
     }
     // ── Sincronizar el CLIENTE a los servicios ya generados desde esta cotización ──────────
@@ -1972,20 +2007,25 @@ export default function CotizacionesPage(){
     // Programación seguiría mostrando el cliente viejo (bug reportado con la cotización #00238).
     // Se corrigen los servicios vinculados MENOS cancelados y ya facturados/cobrados (cambiarles
     // el cliente rompería la traza con el comprobante SUNAT ya emitido).
-    let clientesResinc=0;
+    let clientesResinc=0,clientesSinResinc=0;
     if(cotIdGuardado){
       const nuevoCliente=payload.cliente_id;
-      const vinc:{id:number;cliente_id:number|null;estado:string|null;estado_admin:string|null}[]=[];
-      for(let d=0;d<40000;d+=1000){const{data,error:eLee}=await supabase.from("reservas").select("id,cliente_id,estado,estado_admin").eq("cotizacion_id",cotIdGuardado).order("id").range(d,d+999);if(eLee)break;vinc.push(...(data||[]));if(!data||data.length<1000)break;}
-      const idsResinc=vinc.filter(r=>r.cliente_id!==nuevoCliente&&r.estado!=="cancelada"&&!["facturada","cobrada"].includes(r.estado_admin||"")).map(r=>r.id);
-      for(let i=0;i<idsResinc.length;i+=100)await supabase.from("reservas").update({cliente_id:nuevoCliente}).in("id",idsResinc.slice(i,i+100));
-      clientesResinc=idsResinc.length;
+      const idsResinc=servCot.filter(r=>r.cliente_id!==nuevoCliente&&r.estado!=="cancelada"&&!["facturada","cobrada"].includes(r.estado_admin||"")).map(r=>r.id);
+      // Se cuenta lo que de verdad se escribió: el aviso decía «actualizado en N» aunque un lote fallara.
+      for(let i=0;i<idsResinc.length;i+=100){
+        const lote=idsResinc.slice(i,i+100);
+        const{error:eUpd}=await supabase.from("reservas").update({cliente_id:nuevoCliente}).in("id",lote);
+        if(eUpd)clientesSinResinc+=lote.length;else clientesResinc+=lote.length;
+      }
     }
     limpiar();cargar();setGuardando(false);
     if(clientesResinc>0)alert(`✅ Cliente actualizado en ${clientesResinc} servicio${clientesResinc!==1?"s":""} de Programación vinculado${clientesResinc!==1?"s":""} a esta cotización.`);
+    if(clientesSinResinc>0)alert(`⚠️ La cotización se guardó, pero ${clientesSinResinc} servicio${clientesSinResinc!==1?"s":""} de Programación siguen con el cliente anterior (no se pudieron actualizar). Ábrela y guárdala de nuevo para reintentarlo.`);
     if(reservasParaPropagar.length>0){
       setModalPropagar({cotId:cotIdGuardado!,reservas:reservasParaPropagar,paradasIda:paradasGuardadas,paradasRet:paradasRetornoGuardadas});
     }
+    }catch(e){avisarFalloGuardado(e);}
+    finally{setGuardando(false);}
   };
 
   const cambiarEstado=async(cot:CotFila,nEst:EstadoCot)=>{
@@ -2219,7 +2259,7 @@ export default function CotizacionesPage(){
     its.forEach(it=>{addF(it.vehiculo_flota_id);addT(it.vehiculo_tercero_id);});
     const vehiculos=[...vehsMap.values()];
     let nombreFinal=(cot as any).creado_por||"";
-    if(!nombreFinal){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreFinal=extraerNombreApellido(uRow.nombre);}}catch(e){}}
+    if(!nombreFinal){try{nombreFinal=(await operadorActual()).nombre;}catch(e){}}
     const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
     if(plantilla!=="corporativo"){await supabase.from("cotizaciones").update({plantilla_pdf:plantilla}).eq("id",cot.id);cacheDetalle.current.delete(cot.id);}
     setModalPlantilla(null);
