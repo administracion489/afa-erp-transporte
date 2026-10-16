@@ -2,7 +2,7 @@
 // Estaban dentro de app/cotizaciones/page.tsx; viven aquí para que cualquier documento
 // nuevo herede el mismo membrete sin copiarlo, y para poder generarlo fuera del navegador.
 
-import { etiquetaNivel } from "./costos/nivel-servicio";
+import { etiquetaNivel, nivelDeEquipamiento } from "./costos/nivel-servicio";
 
 export const LOGO_DEFAULT = "/logoafacotizacion-removebg-preview.png";
 
@@ -60,9 +60,9 @@ export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, 
  * `wrap` sigue puesto: con un domicilio largo el membrete pasa a dos líneas y cada una se
  * centra por su cuenta.
  */
-export function buildFooterPDFHtml(cp: string, empDir: string, empTel: string, empEmail: string, empWeb: string): string {
+export function buildFooterPDFHtml(cp: string, empDir: string, empTel: string, empEmail: string, empWeb: string, idioma: "es" | "en" = "es"): string {
   const partes = [
-    { icono: "&#8962;", texto: empDir ? `Dir.: ${empDir}` : "" },
+    { icono: "&#8962;", texto: empDir ? `${idioma === "en" ? "Address" : "Dir."}: ${empDir}` : "" },
     { icono: "&#9990;", texto: empTel },
     { icono: "&#9993;", texto: empEmail },
     { icono: "&#9741;", texto: empWeb },
@@ -93,14 +93,21 @@ export type VehiculoPDF = {
 };
 
 /** Bloque de unidad con foto exterior/interior y descripción — el mismo en cotización y ficha. */
-export function buildVehsHtml(vehiculos: VehiculoPDF[], cp: string, opts?: { imgH?: string; radius?: string; gap?: string; contain?: boolean }): string {
+export function buildVehsHtml(vehiculos: VehiculoPDF[], cp: string, opts?: { imgH?: string; radius?: string; gap?: string; contain?: boolean; idioma?: "es" | "en" }): string {
   if (!vehiculos.length) return "";
+  const en = opts?.idioma === "en";
   const imgH = opts?.imgH || "200px"; const radius = opts?.radius || "12px"; const gap = opts?.gap || "12px"; const contain = opts?.contain || false;
   return vehiculos.map((veh, idx) => {
     const esFull = (veh.equipamiento || "full_equipo") === "full_equipo";
-    const desc = veh.descripcion_unidad || (esFull
-      ? `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`
-      : `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, estándar, bodega y GPS.`);
+    // La descripción ESCRITA de la unidad se imprime tal cual en los dos idiomas; solo la que
+    // compone el sistema se traduce.
+    const desc = veh.descripcion_unidad || (en
+      ? (esFull
+        ? `Bus with capacity for ${veh.capacidad_pasajeros || "—"} passengers, with A/C, audio system, reclining seats, luggage hold and GPS.`
+        : `Bus with capacity for ${veh.capacidad_pasajeros || "—"} passengers, standard, luggage hold and GPS.`)
+      : (esFull
+        ? `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`
+        : `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, estándar, bodega y GPS.`));
     const mkImg = (url: string) => contain
       ? `<div style="background:#f3f4f6;border-radius:${radius};border:1px solid #e5e7eb;height:${imgH};display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="${esc(driveImg(url))}" style="max-width:100%;max-height:${imgH};object-fit:contain;"/></div>`
       : `<div style="border-radius:${radius};overflow:hidden;height:${imgH};"><img src="${esc(driveImg(url))}" style="width:100%;height:100%;object-fit:cover;"/></div>`;
@@ -110,9 +117,9 @@ export function buildVehsHtml(vehiculos: VehiculoPDF[], cp: string, opts?: { img
     const sep = idx > 0 ? `<div style="height:1px;background:#e5e7eb;margin:10px 0 12px;"></div>` : "";
     // El MISMO rótulo que la pantalla y que la descripción del ítem: el cliente no puede leer
     // un rótulo en el anexo distinto del nivel con el que se le vendió el servicio.
-    const tipoEquip = etiquetaNivel(veh.equipamiento);
+    const tipoEquip = en ? (nivelDeEquipamiento(veh.equipamiento) === "full_equipo" ? "FULL EQUIPMENT" : "STANDARD") : etiquetaNivel(veh.equipamiento);
     const lbl = vehiculos.length > 1
-      ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc((veh.categoria || "UNIDAD").toUpperCase())} ${tipoEquip}${veh.capacidad_pasajeros ? " DE " + veh.capacidad_pasajeros + " PASAJEROS" : ""}</p>`
+      ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc((veh.categoria || (en ? "UNIT" : "UNIDAD")).toUpperCase())} ${tipoEquip}${veh.capacidad_pasajeros ? (en ? " FOR " + esc(veh.capacidad_pasajeros) + " PASSENGERS" : " DE " + esc(veh.capacidad_pasajeros) + " PASAJEROS") : ""}</p>`
       : "";
     return `${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${esc(desc)}</p>${fotos}`;
   }).join("");

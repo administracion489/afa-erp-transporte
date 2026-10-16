@@ -2,6 +2,8 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { faltaAlguna } from "@/lib/columna-faltante";
+import { aMonedaCot, normalizarMoneda, revisarTipoCambio } from "@/lib/cotizacion-moneda";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -35,7 +37,27 @@ type Cliente = {
 type Cotizacion = {
   id: number; numero_cotizacion: string | null; origen: string; destino: string;
   precio_cliente: number; cliente_id: number | null; items_json: ItemFactura[] | null;
+  // De cotizaciones-04-moneda-idioma.sql: ausentes sin la migración (= soles, lo de siempre).
+  // Los importes de la cotización están SIEMPRE en soles; la moneda es solo cómo se pactó.
+  moneda?: string | null; tipo_cambio?: number | null;
 };
+
+const COLS_COT = "id,numero_cotizacion,origen,destino,precio_cliente,cliente_id,items_json";
+const COLS_COT_MONEDA = ["moneda", "tipo_cambio"] as const;
+
+/** Lee las cotizaciones aprobadas soltando SOLO la columna de moneda que el error nombra. */
+async function leerCotizacionesAprobadas(): Promise<{ data: Cotizacion[]; error: string | null }> {
+  let opcionales: string[] = [...COLS_COT_MONEDA];
+  for (let i = 0; i <= COLS_COT_MONEDA.length; i++) {
+    const cols = [COLS_COT, ...opcionales].join(",");
+    const r = await supabase.from("cotizaciones").select(cols).eq("estado", "aprobado").order("id", { ascending: false });
+    if (!r.error) return { data: (r.data || []) as Cotizacion[], error: null };
+    const falta = faltaAlguna(r.error, opcionales as unknown as readonly ("moneda" | "tipo_cambio")[]);
+    if (!falta) return { data: [], error: r.error.message || "No se pudieron leer las cotizaciones aprobadas." };
+    opcionales = opcionales.filter(c => c !== falta);
+  }
+  return { data: [], error: "No se pudieron leer las cotizaciones aprobadas." };
+}
 
 type Reserva = {
   id: number; origen: string; destino: string;
@@ -140,6 +162,9 @@ export default function FacturacionPage() {
   const [form, setForm]               = useState(FORM_VACIO);
   const [items, setItems]             = useState<ItemFactura[]>([{ ...ITEM_VACIO }]);
   const [pendDespacho, setPendDespacho] = useState(0);
+  // Qué se propuso al elegir la cotización (moneda, TC) — informativo, todo queda editable.
+  const [avisoCot, setAvisoCot] = useState<{ tono: "info" | "ambar"; texto: string } | null>(null);
+  const [errorCot, setErrorCot] = useState<string | null>(null);
   useEffect(() => {
     // Reservas de Despachador sin factura asociada
     supabase.from("reservas").select("id", { count: "exact", head: true })
@@ -166,12 +191,13 @@ export default function FacturacionPage() {
     const [fRes, clRes, cotRes, rRes] = await Promise.all([
       supabase.from("facturas").select("*").order("id", { ascending: false }),
       supabase.from("clientes").select("id,nombre,empresa,tipo,ruc,dni,email,telefono,direccion").order("nombre"),
-      supabase.from("cotizaciones").select("id,numero_cotizacion,origen,destino,precio_cliente,cliente_id,items_json").eq("estado", "aprobado").order("id", { ascending: false }),
+      leerCotizacionesAprobadas(),
       supabase.from("reservas").select("id,origen,destino,precio_cliente,cliente_id,fecha_servicio").order("id", { ascending: false }).limit(100),
     ]);
     setFacturas(fRes.data   || []);
     setClientes(clRes.data  || []);
-    setCotizaciones(cotRes.data || []);
+    setCotizaciones(cotRes.data);
+    setErrorCot(cotRes.error);
     setReservas(rRes.data   || []);
     setLoading(false);
   };
@@ -192,21 +218,36 @@ export default function FacturacionPage() {
 
   const aplicarCotizacion = (cotId: string) => {
     const cot = cotizaciones.find(c => c.id === Number(cotId));
-    if (!cot) return;
+    if (!cot) { setAvisoCot(null); return; }
+    // Los importes de la cotización están en SOLES. Si se pactó en dólares, se PROPONE facturar en
+    // US$ con el tipo de cambio congelado en ella; con un TC inválido no se convierte nada (imprimir
+    // soles rotulados como dólares es el error caro) y se propone en soles diciéndolo.
+    const monedaCot = normalizarMoneda(cot.moneda);
+    const tc = monedaCot === "USD" ? revisarTipoCambio(cot.tipo_cambio).tc : null;
+    const enUsd = monedaCot === "USD" && tc != null;
+    const conv = (pen: number) => (enUsd ? (aMonedaCot(pen, "USD", tc) ?? pen) : pen);
     setForm(p => ({
       ...p, cotizacion_id: cotId,
       cliente_id: String(cot.cliente_id || ""),
+      moneda: enUsd ? "USD" : "PEN",
+      tipo_cambio: enUsd ? String(tc) : p.tipo_cambio,
     }));
-    if (cot.items_json && cot.items_json.length > 0) {
-      setItems(cot.items_json.map(it => ({
-        descripcion: (it as any).descripcion || "",
-        cantidad: (it as any).cantidad || 1,
-        precio_unit: (it as any).precio_unit || 0,
-        total: ((it as any).cantidad || 1) * ((it as any).precio_unit || 0),
-      })));
+    if (enUsd) {
+      setAvisoCot({ tono: "info", texto: `Esta cotización se pactó en US$ al tipo de cambio S/ ${tc} por US$. Se propone facturar en dólares con los ítems convertidos desde los soles guardados (US$ = S/ ÷ ${tc}). Revisa el tipo de cambio del día de emisión: puedes cambiar la moneda o el TC.` });
+    } else if (monedaCot === "USD") {
+      setAvisoCot({ tono: "ambar", texto: "Esta cotización se pactó en US$ pero no tiene un tipo de cambio válido guardado: los ítems se proponen en soles. Si facturas en dólares, convierte los precios a mano." });
     } else {
-      const precioSinIgv = Number(cot.precio_cliente) / 1.18;
-      setItems([{ descripcion: `Servicio de transporte — ${cot.origen} → ${cot.destino}`, cantidad: 1, precio_unit: Math.round(precioSinIgv * 100) / 100, total: Math.round(precioSinIgv * 100) / 100 }]);
+      setAvisoCot(null);
+    }
+    if (cot.items_json && cot.items_json.length > 0) {
+      setItems(cot.items_json.map(it => {
+        const cantidad = (it as any).cantidad || 1;
+        const precio_unit = conv(Number((it as any).precio_unit || 0));
+        return { descripcion: (it as any).descripcion || "", cantidad, precio_unit, total: cantidad * precio_unit };
+      }));
+    } else {
+      const precioSinIgv = conv(Math.round(Number(cot.precio_cliente) / 1.18 * 100) / 100);
+      setItems([{ descripcion: `Servicio de transporte — ${cot.origen} → ${cot.destino}`, cantidad: 1, precio_unit: precioSinIgv, total: precioSinIgv }]);
     }
   };
 
@@ -229,7 +270,7 @@ export default function FacturacionPage() {
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  const limpiar = () => { setForm(FORM_VACIO); setItems([{ ...ITEM_VACIO }]); setEditandoId(null); setMostrarForm(false); };
+  const limpiar = () => { setAvisoCot(null); setForm(FORM_VACIO); setItems([{ ...ITEM_VACIO }]); setEditandoId(null); setMostrarForm(false); };
 
   const guardar = async () => {
     if (!form.cliente_id) { alert("Selecciona un cliente"); return; }
@@ -487,10 +528,11 @@ export default function FacturacionPage() {
                   <option value="">Sin cotización</option>
                   {cotizaciones.map(c => (
                     <option key={c.id} value={c.id}>
-                      #{c.numero_cotizacion || c.id} · {c.origen} → {c.destino}
+                      #{c.numero_cotizacion || c.id} · {c.origen} → {c.destino}{normalizarMoneda(c.moneda) === "USD" ? " · US$" : ""}
                     </option>
                   ))}
                 </select>
+                {errorCot && <p className="text-[10px] text-red-600 mt-0.5">No se pudieron leer las cotizaciones aprobadas: {errorCot}</p>}
               </Campo>
               <Campo label="Reserva (opcional)">
                 <select className={inputCls()} value={form.reserva_id}
@@ -526,6 +568,12 @@ export default function FacturacionPage() {
                   </div>
                 );
               })()}
+
+              {avisoCot && form.cotizacion_id && (
+                <div className={`md:col-span-3 rounded-xl px-4 py-2 text-xs border ${avisoCot.tono === "ambar" ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-blue-50 border-blue-200 text-blue-800"}`}>
+                  {avisoCot.texto}
+                </div>
+              )}
             </div>
           </div>
 

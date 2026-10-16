@@ -10,6 +10,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { columnaFaltante } from "@/lib/columna-faltante";
+import { sugerirTipoCambio, type SugerenciaTc } from "@/lib/cotizacion-moneda";
 import {
   colsSelect, limitesConsulta, sumarDias, COLS_OPCIONALES_LISTA,
   type CotLista, type EjeFecha, type RangoPeriodo,
@@ -85,4 +86,28 @@ export async function leerCotizacion<T = Record<string, unknown>>(sb: Sb, id: nu
   const { data, error } = await sb.from("cotizaciones").select("*").eq("id", id).maybeSingle();
   if (error) throw error;
   return (data as T) ?? null;
+}
+
+/**
+ * El tipo de cambio que se PROPONE al cotizar en dólares (la regla en lib/cotizacion-moneda.ts).
+ * BEST-EFFORT: si la tabla `tipo_cambio` o la columna `cotizaciones.tipo_cambio` no existen, o la
+ * consulta falla, esa fuente se salta. Nunca lanza: una sugerencia que no se pudo leer es un campo
+ * vacío que la persona llena, no una pantalla rota.
+ */
+export async function leerTipoCambioSugerido(sb: Sb, hoy: string): Promise<SugerenciaTc> {
+  let filaTabla: { venta: unknown; fecha?: string | null } | null = null;
+  let ultimaCotUsd: { tipo_cambio: unknown; numero_cotizacion?: string | null; created_at?: string | null } | null = null;
+  try {
+    const { data, error } = await sb.from("tipo_cambio").select("fecha,venta")
+      .eq("moneda", "USD").lte("fecha", hoy).order("fecha", { ascending: false }).limit(1).maybeSingle();
+    if (!error && data) filaTabla = data;
+  } catch { /* fuente opcional */ }
+  if (!filaTabla || sugerirTipoCambio({ filaTabla }).fuente !== "tabla_tipo_cambio") {
+    try {
+      const { data, error } = await sb.from("cotizaciones").select("tipo_cambio,numero_cotizacion,created_at")
+        .eq("moneda", "USD").not("tipo_cambio", "is", null).order("id", { ascending: false }).limit(1).maybeSingle();
+      if (!error && data) ultimaCotUsd = data;
+    } catch { /* sin la migración no hay columna: se salta */ }
+  }
+  return sugerirTipoCambio({ filaTabla, ultimaCotUsd });
 }
