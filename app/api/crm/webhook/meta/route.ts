@@ -1,3 +1,4 @@
+import { textoContactoOUbicacion } from "@/lib/crm-ingesta";
 import { normalizarAjustes } from "@/lib/crm-ia-ajustes";
 import { transcribirMensaje } from "@/lib/crm-audio";
 import { NextRequest, NextResponse } from "next/server";
@@ -127,6 +128,7 @@ export async function POST(req: NextRequest) {
               msg.text?.body ?? msg[msg.type]?.caption ?? msg.document?.filename ??
               (msg.type === "reaction" ? msg.reaction?.emoji || "👍" : null) ??
               msg.button?.text ?? msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ??
+              textoContactoOUbicacion(msg) ??
               `[${msg.type}]`,
             tipo: msg.type === "text" ? "texto" : msg.type,
             mediaUrl: media?.url ?? msg.image?.url ?? msg.audio?.url ?? msg.video?.url ?? msg.document?.url ?? null,
