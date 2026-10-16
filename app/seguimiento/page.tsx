@@ -772,13 +772,14 @@ export default function SeguimientoPage() {
       .then(({ data }) => { if (data) setEmpresaPerfil(data as EmpresaPerfil); });
   }, []);
 
-  const cargar = useCallback(async () => {
-    setLoading(true);
-    // `reservas` va sin paginar a propósito: está acotada a UNA fecha (≈20 servicios/día medidos
-    // sobre 30 días) y su `.order("hora_servicio")` no es único, así que paginarla sería menos
-    // seguro, no más. Todo lo demás sí pagina: ver el comentario de `enLotesPaginado`.
-    const [rRes,clRes,vRes,cRes,etRes,vtRes,dtRes,ctRes] = await Promise.all([
-      supabase.from("reservas").select("*").eq("fecha_servicio",fechaFiltro).in("estado",["programada","confirmada","en_curso","finalizada","cancelada"]).order("hora_servicio",{ascending:true}),
+  // ── Catálogos (clientes, flota, conductores, tercerizadas, documentos) ────────────
+  // No dependen del día ni cambian con un paradero marcado: se bajan UNA vez, se refrescan cada
+  // 5 min, y antes si un servicio del día apunta a un id que el catálogo todavía no tiene (una
+  // unidad o un conductor dado de alta hoy). Antes se bajaban ENTEROS con cada evento en vivo.
+  const catalogosAt = useRef(0);
+  const idsCatalogo = useRef<{ cl: Set<number>; v: Set<number>; c: Set<number>; et: Set<number>; vt: Set<number>; ct: Set<number> } | null>(null);
+  const cargarCatalogos = useCallback(async () => {
+    const [clRes,vRes,cRes,etRes,vtRes,dtRes,ctRes] = await Promise.all([
       tablaPaginada("clientes","id,nombre,empresa"),
       tablaPaginada("vehiculos","id,placa,capacidad_pasajeros"),
       tablaPaginada("conductores","id,nombre,telefono"),
@@ -789,44 +790,88 @@ export default function SeguimientoPage() {
       tablaPaginada("documentos_tercero","id,empresa_id,tipo,fecha_vencimiento"),
       tablaPaginada("conductores_tercero","id,nombre,telefono"),
     ]);
-    const reservasData = (rRes.data as Reserva[])||[];
-    setReservas(reservasData); setClientes(clRes as Cliente[]);
+    setClientes(clRes as Cliente[]);
     setVehiculos(vRes as Vehiculo[]); setConductores(cRes as Conductor[]);
     setEmpresas(etRes as EmpTer[]); setVehsTer(vtRes as VehTer[]);
     setDocsTer(dtRes as DocTer[]); setCondsTer(ctRes as CondTer[]);
+    const ids = (xs: { id: number }[]) => new Set(xs.map((x) => x.id));
+    idsCatalogo.current = { cl: ids(clRes), v: ids(vRes), c: ids(cRes), et: ids(etRes), vt: ids(vtRes), ct: ids(ctRes) };
+    catalogosAt.current = Date.now();
+  }, []);
 
+  // La última carga manda: si llega otro evento (o se cambia de día) mientras una carga está en
+  // vuelo, esa se descarta al volver y solo pinta la más nueva.
+  const pedidoCarga = useRef(0);
+  const fechaCargada = useRef<string | null>(null);
+  const cargar = useCallback(async () => {
+    const pid = ++pedidoCarga.current;
+    // El «Cargando servicios…» tapa el tablero solo al entrar o al cambiar de día. Una recarga
+    // por un evento en vivo (un paradero marcado, un servicio iniciado) actualiza por detrás.
+    if (fechaCargada.current !== fechaFiltro) setLoading(true);
+    const catalogosViejos = !idsCatalogo.current || Date.now() - catalogosAt.current > 5 * 60_000;
+    // `reservas` va sin paginar a propósito: está acotada a UNA fecha (≈20 servicios/día medidos
+    // sobre 30 días) y su `.order("hora_servicio")` no es único, así que paginarla sería menos
+    // seguro, no más. Todo lo demás sí pagina: ver el comentario de `enLotesPaginado`.
+    const [rRes] = await Promise.all([
+      supabase.from("reservas").select("*").eq("fecha_servicio",fechaFiltro).in("estado",["programada","confirmada","en_curso","finalizada","cancelada"]).order("hora_servicio",{ascending:true}),
+      catalogosViejos ? cargarCatalogos() : Promise.resolve(),
+    ]);
+    if (pid !== pedidoCarga.current) return;
+    const reservasData = (rRes.data as Reserva[])||[];
+
+    type FilaPP = {parada_id:number; pasajero_id:number; estado?:string|null; estado_abordaje?:string|null; hora_abordaje?:string|null};
+    let parData: Parada[] = [], pp: FilaPP[] = [];
+    let pax: {id:number; reserva_id:number}[] = [], gastos: {reserva_id:number; monto:number}[] = [];
     const reservaIds = reservasData.map(r => r.id);
     if (reservaIds.length > 0) {
       // Orden ESTABLE con `id` de desempate: `orden` se repite entre reservas y dos páginas
       // podrían solaparse o saltarse filas. Dentro de cada reserva el orden sigue siendo `orden`,
       // que es de lo que dependen `paradas[0]` (origen), la última (destino) y derivarTiempos.
-      const parData = await enLotesPaginado("paradas","*","reserva_id",reservaIds,["reserva_id","orden","id"]);
-      setParadas(parData as Parada[]);
-      const paradaIds = parData.map((p:any)=>p.id);
+      parData = await enLotesPaginado("paradas","*","reserva_id",reservaIds,["reserva_id","orden","id"]);
+      const paradaIds = parData.map((p)=>p.id);
       // Abordaje real (estado + estado_abordaje), roster ad-hoc y gastos: todo en lote (sin N+1 por tarjeta).
-      const [pp, pax, gastos] = await Promise.all([
+      [pp, pax, gastos] = await Promise.all([
         // `hora_abordaje` la pone el SERVIDOR al escanear el QR (app/api/conductor/route.ts).
         // Es la 2ª fuente de la hora real de salida cuando el conductor no marcó el paradero.
         enLotesPaginado("pasajeros_parada","parada_id,pasajero_id,estado,estado_abordaje,hora_abordaje","parada_id",paradaIds,["parada_id","pasajero_id"]),
         enLotesPaginado("pasajeros","id,reserva_id","reserva_id",reservaIds,["reserva_id","id"]),
         enLotesPaginado("gastos","reserva_id,monto","reserva_id",reservaIds,["reserva_id","id"]),
       ]);
-      setPasajPar(pp); setPaxAdhoc(pax); setGastosRows(gastos);
-    } else { setParadas([]); setPasajPar([]); setPaxAdhoc([]); setGastosRows([]); }
+    }
 
     // Documentos de la FLOTA PROPIA: antes se traía la tabla entera en cada refresco (sin filtro
     // ni paginación). Solo se consultan por `r.vehiculo_id`, así que basta con los vehículos que
     // salen hoy: menos datos, y lo que llega llega completo.
+    let docVehData: DocVeh[] = [];
     try {
       const vehIds = Array.from(new Set(reservasData.map(r => r.vehiculo_id).filter((x): x is number => x != null)));
-      const docVehData = vehIds.length
+      docVehData = vehIds.length
         ? await enLotesPaginado("documentos_vehiculo","id,vehiculo_id,tipo,fecha_vencimiento","vehiculo_id",vehIds,["vehiculo_id","id"])
         : [];
-      setDocsVeh(docVehData as DocVeh[]);
-    } catch { setDocsVeh([]); }
+    } catch { docVehData = []; }
 
+    if (pid !== pedidoCarga.current) return;
+    // Todo junto: el tablero nunca pinta los servicios nuevos con los paraderos del refresco anterior.
+    setReservas(reservasData);
+    setParadas(parData);
+    setPasajPar(pp); setPaxAdhoc(pax); setGastosRows(gastos);
+    setDocsVeh(docVehData);
+    fechaCargada.current = fechaFiltro;
     setLoading(false);
-  }, [fechaFiltro]);
+
+    // ¿Algún servicio apunta a algo que el catálogo aún no tiene? Se refresca ya.
+    const cat = idsCatalogo.current;
+    const falta = (id: number | null | undefined, set: Set<number> | undefined) => id != null && !!set && !set.has(id);
+    const num = (v: unknown) => (typeof v === "number" ? v : null);
+    if (cat && reservasData.some((res) => {
+      const r = res as unknown as Record<string, unknown>;
+      return falta(num(r.cliente_id), cat.cl) || falta(num(r.vehiculo_id), cat.v) || falta(num(r.conductor_id), cat.c) ||
+        falta(num(r.empresa_tercerizada_id), cat.et) || falta(num(r.vehiculo_tercero_id), cat.vt) || falta(num(r.conductor_tercero_id), cat.ct);
+    })) {
+      catalogosAt.current = 0;
+      void cargarCatalogos();
+    }
+  }, [fechaFiltro, cargarCatalogos]);
 
   useEffect(()=>{ cargar(); },[cargar]);
 

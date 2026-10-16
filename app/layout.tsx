@@ -7,8 +7,11 @@ import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { EVENTO_ENTRADA_MARCADA } from "@/lib/rrhh/fichador";
 import { ImgPrivada } from "@/components/ArchivoPrivado";
-import EliaPanel from "./_components/elia";
-import AyudaModulo from "./_components/AyudaModulo";
+import dynamic from "next/dynamic";
+// ELIA y la Ayuda (con el texto de las 54 fichas, ~600 KB de fuente) se descargan DESPUÉS de
+// pintar la pantalla: antes viajaban dentro del JavaScript que toda página espera para arrancar.
+const EliaPanel = dynamic(() => import("./_components/elia"), { ssr: false });
+const AyudaModulo = dynamic(() => import("./_components/AyudaModulo"), { ssr: false });
 import NotificadorMensajesPasajeros from "@/components/NotificadorMensajesPasajeros";
 import { useMensajesNoLeidosPasajero } from "@/lib/useMensajesNoLeidos";
 import "./globals.css";
@@ -887,45 +890,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     useMensajesNoLeidosPasajero(!esLogin && !esPublica && !cargando && permisos.includes("seguimiento"));
   const badgesMenu = { "/seguimiento": mensajesNoLeidos };
 
+  // Sesión + perfil + permisos ya validados EN ESTE MONTAJE. Con ellos, navegar entre pantallas
+  // no vuelve a tapar todo con «Validando permisos…»: se decide al instante con lo validado y se
+  // revalida por detrás (si el usuario se desactivó o perdió el módulo, igual se le saca). Antes
+  // CADA clic del menú desmontaba la pantalla entera y esperaba dos consultas antes de pintar.
+  const validadoRef = useRef<{ userId: string; permisos: string[]; esAdmin: boolean } | null>(null);
+
   useEffect(() => {
-    async function cargarSesionPermisos() {
-      if (esLogin || esPublica) { setCargando(false); return; }
-      setCargando(true);
-
-      const { data } = await supabase.auth.getSession();
-      const session = data.session;
-      if (!session) { router.replace("/login"); return; }
-
-      setEmailUsuario(session.user.email || "");
-
-      const { data: perfil } = await supabase
-        .from("usuarios")
-        .select("nombre, rol, activo")
-        .eq("id", session.user.id)
-        .maybeSingle();
-
-      if (!perfil || perfil.activo === false) {
-        await supabase.auth.signOut();
-        window.location.href = "/login";
-        return;
-      }
-
-      setNombreUsuario(perfil.nombre || "Usuario");
-      setRolUsuario(perfil.rol || "operador");
-
-      const { data: permisosData } = await supabase
-        .from("permisos_usuario")
-        .select("modulo")
-        .eq("usuario_id", session.user.id)
-        .eq("permitido", true);
-
-      const esAdmin = perfil.rol === "admin";
-      let listaPermisos = permisosData?.map((p: any) => p.modulo) || [];
-      if (esAdmin) {
-        listaPermisos = [...new Set(menu.map((item) => item.modulo))];
-      }
-      setPermisos(listaPermisos);
-
+    let vigente = true;
+    // ¿Puede ver la ruta actual con esta lista de módulos?
+    const rutaPermitida = (listaPermisos: string[], esAdmin: boolean) => {
       // «Ver recorrido» (/seguimiento/gps/[id]) lo abren tres pantallas: Seguimiento, Seguridad vial
       // (monitoreo) y Uso de flota (vehiculos). Su API (/api/seguimiento/recorrido) acepta cualquiera
       // de los tres, y la pantalla tiene que aceptar los mismos: si no, quien llega desde Seguridad vial
@@ -938,53 +912,108 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       // explícitamente con el mismo permiso que usePermiso("mi-perfil") exige en la pantalla:
       // admin pasa siempre, y el resto solo con el módulo "mi-perfil" (que todo usuario tiene
       // sembrado). Sin esta rama caería en `!rutaActual` → pasaría sin mirar el permiso.
-      const permitida = pathname.startsWith("/seguimiento/gps/")
+      return pathname.startsWith("/seguimiento/gps/")
         ? MODULOS_RECORRIDO.some((m) => listaPermisos.includes(m))
         : pathname === "/mi-perfil"
         ? esAdmin || listaPermisos.includes("mi-perfil")
         : !rutaActual || listaPermisos.includes(rutaActual.modulo);
-      if (!permitida) {
+    };
+
+    // ── Fichaje: ¿este usuario debe marcar y aún no marcó su ENTRADA de hoy? ───────────────
+    // Se resuelve UNA sola vez por montaje y ya NO retiene el primer render: antes el ERP entero
+    // esperaba esta consulta (hasta 4 s) antes de pintar cualquier pantalla. Ahora la pantalla se
+    // pinta y, si resulta pendiente y la persona sigue en la página donde entró, se la lleva a
+    // marcar. FAIL-OPEN como antes: un fallo, un timeout o la red caída no vuelven "pendiente"
+    // a nadie; solo es pendiente con `es_fichador === true` Y `marco_entrada_hoy === false`.
+    const revisarFichaje = async (rutaAlEntrar: string) => {
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 8000);
+      try {
+        const res = await fetch("/api/rrhh/estado-fichaje", { headers: await cabecerasErp(), signal: ac.signal });
+        const d = await res.json().catch(() => null);
+        const pend = d?.es_fichador === true && d?.marco_entrada_hoy === false;
+        setFichajePendiente(pend);
+        // Solo si no se movió de donde entró: no se le arranca de una pantalla que ya eligió.
+        if (pend && rutaAlEntrar !== "/mi-perfil" && window.location.pathname === rutaAlEntrar) {
+          router.replace("/mi-perfil?tab=marcar");
+        }
+      } catch {
+        /* FAIL-OPEN */
+      } finally {
+        clearTimeout(t);
+      }
+    };
+
+    async function cargarSesionPermisos() {
+      if (esLogin || esPublica) { setCargando(false); return; }
+
+      // Se decide ANTES de esperar nada: si con lo ya validado la ruta no corresponde, se tapa la
+      // pantalla de inmediato (una pantalla sin su módulo no llega a pintarse mientras tanto).
+      const previo = validadoRef.current;
+      const okConPrevio = !!previo && rutaPermitida(previo.permisos, previo.esAdmin);
+      if (!okConPrevio) setCargando(true);
+
+      const { data } = await supabase.auth.getSession();
+      const session = data.session;
+      // Recarga completa (no navegación interna): así nada del usuario anterior —foto, fichaje,
+      // permisos— sobrevive al montaje cuando entra otra persona en la misma pestaña.
+      if (!session) { validadoRef.current = null; window.location.href = "/login"; return; }
+      setEmailUsuario(session.user.email || "");
+
+      // Camino rápido: este usuario ya se validó en este montaje y la ruta le corresponde.
+      const rapido = okConPrevio && previo!.userId === session.user.id;
+      if (rapido) setCargando(false);
+      else setCargando(true);
+
+      // Perfil y permisos EN PARALELO (antes, uno detrás del otro).
+      const [perfilRes, permisosRes] = await Promise.all([
+        supabase.from("usuarios").select("nombre, rol, activo").eq("id", session.user.id).maybeSingle(),
+        supabase.from("permisos_usuario").select("modulo").eq("usuario_id", session.user.id).eq("permitido", true),
+      ]);
+      const perfil = perfilRes.data;
+
+      // Desactivado: se expulsa en cuanto se SABE, aunque la otra consulta haya fallado.
+      // Un fallo de RED con una validación previa no saca a nadie (se sigue con lo validado y la
+      // próxima navegación vuelve a intentar), pero solo cuando el estado no se conoce.
+      const desactivado = !!perfil && perfil.activo === false;
+      if (!desactivado && perfilRes.error && rapido) return;
+
+      if (!perfil || desactivado) {
+        validadoRef.current = null;
+        await supabase.auth.signOut();
+        window.location.href = "/login";
+        return;
+      }
+
+      setNombreUsuario(perfil.nombre || "Usuario");
+      setRolUsuario(perfil.rol || "operador");
+      if (permisosRes.error && rapido) return;
+
+      const esAdmin = perfil.rol === "admin";
+      let listaPermisos = permisosRes.data?.map((p: any) => p.modulo) || [];
+      if (esAdmin) {
+        listaPermisos = [...new Set(menu.map((item) => item.modulo))];
+      }
+      // Misma lista → mismo arreglo: re-validar al navegar no re-pinta el menú entero.
+      setPermisos((prev) => (prev.join("|") === listaPermisos.join("|") ? prev : listaPermisos));
+      validadoRef.current = { userId: session.user.id, permisos: listaPermisos, esAdmin };
+
+      // Ya se navegó a otra ruta: decide la corrida de esa.
+      if (!vigente) return;
+      if (!rutaPermitida(listaPermisos, esAdmin)) {
         router.replace("/dashboard");
         return;
       }
 
-      // ── Fichaje: ¿este usuario debe marcar y aún no marcó su ENTRADA de hoy? ───────────────
-      // REDIRECT DE PRIMERA CARGA, no un lock: se resuelve UNA sola vez por montaje
-      // (`fichajeResueltoRef`), así que la navegación posterior NO vuelve a redirigir. Si la
-      // persona navega a otro lado sin marcar, se lo permitimos (fail-open: el gate del ERP no
-      // puede atrapar a nadie). `GET /api/rrhh/estado-fichaje` ya es fail-open; aquí reforzamos:
-      // todo en try/catch, y solo es "pendiente" cuando `es_fichador === true` Y
-      // `marco_entrada_hoy === false`. Cualquier otra cosa (error, red caída, campos que no sean
-      // exactamente esos) → NO pendiente, y el ERP se usa con normalidad. Un fallo de este
-      // endpoint JAMÁS debe impedir trabajar. Para quien no ficha (es_fichador:false) nada cambia.
       if (!fichajeResueltoRef.current) {
         fichajeResueltoRef.current = true;
-        // Timeout de cliente: el fichaje NUNCA puede retener el primer render del ERP. Un endpoint
-        // LENTO (no caído) es tan dañino como uno caído en este camino crítico, así que a los 4 s se
-        // aborta y se trata como fail-open (no pendiente). Así el login no espera a RRHH jamás.
-        const ac = new AbortController();
-        const t = setTimeout(() => ac.abort(), 4000);
-        try {
-          const res = await fetch("/api/rrhh/estado-fichaje", { headers: await cabecerasErp(), signal: ac.signal });
-          const d = await res.json().catch(() => null);
-          const pend = d?.es_fichador === true && d?.marco_entrada_hoy === false;
-          setFichajePendiente(pend);
-          if (pend && pathname !== "/mi-perfil") {
-            // Aterriza en marcar. La navegación re-ejecuta el efecto, pero `fichajeResueltoRef`
-            // ya está en true: no vuelve a redirigir, y el `setCargando(false)` corre ahí.
-            router.replace("/mi-perfil?tab=marcar");
-            return;
-          }
-        } catch {
-          /* FAIL-OPEN: un fallo, un timeout (abort 4 s) o red caída no vuelve "pendiente" a nadie ni bloquea el ERP */
-        } finally {
-          clearTimeout(t);
-        }
+        void revisarFichaje(pathname);
       }
 
       setCargando(false);
     }
     cargarSesionPermisos();
+    return () => { vigente = false; };
   }, [pathname, esLogin, esPublica, router]);
 
   // Foto del perfil para el avatar del bloque de usuario (si existe). Se pide UNA vez por

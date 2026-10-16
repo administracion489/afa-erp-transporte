@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   telefonoLegible, telefonoDeContacto, nombreEsElNumero, coincideBusquedaTelefono,
@@ -137,34 +137,71 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   useEffect(() => { numerosDeAvisos().then((n) => setAvisosNums(n ?? [])); }, []);
   const [convs, setConvs] = useState<Conversacion[]>([]);
   const [selected, setSelected] = useState<Conversacion | null>(null);
-  const [mensajes, setMensajes] = useState<Mensaje[]>([]);
+  const [mensajesTodos, setMensajes] = useState<Mensaje[]>([]);
+  // Lo que se PINTA son solo los mensajes del hilo abierto, nunca los de otro: al cambiar de
+  // chat, los del anterior se quedaban en pantalla bajo el nombre del nuevo hasta que llegaba
+  // la respuesta (y una respuesta tardía podía pisar al otro chat: «chats cruzados»).
+  const mensajes = useMemo(
+    () => mensajesTodos.filter((m) => m.conversacion_id === selected?.id),
+    [mensajesTodos, selected?.id],
+  );
   const rapidas = useRespuestasRapidas();
   const yo = useYo();
   const usuariosEquipo = useUsuarios();
   const [vista, setVista] = useState<"todas" | "mias" | "sin">("todas");
   const [filtroEtq, setFiltroEtq] = useState("");
   const [panelCliente, setPanelCliente] = useState(false);
-  const [notas, setNotas] = useState<{ id: string; texto: string; autor_nombre: string | null; created_at: string }[]>([]);
+  const [notasTodas, setNotas] = useState<{ id: string; conversacion_id: string; texto: string; autor_nombre: string | null; created_at: string }[]>([]);
+  const notas = useMemo(() => notasTodas.filter((n) => n.conversacion_id === selected?.id), [notasTodas, selected?.id]);
   const [modoNota, setModoNota] = useState(false);
   const [modalRapidas, setModalRapidas] = useState(false);
   // Media firmada por mensaje (bucket privado crm-media): undefined = cargando, null = no disponible.
   const [mediaUrls, setMediaUrls] = useState<Record<string, string | null>>({});
   const pedidosMedia = useRef<Set<string>>(new Set());
+  const intentosMedia = useRef<Map<string, number>>(new Map());
+  const [reintentoMedia, setReintentoMedia] = useState(0);
   useEffect(() => {
-    const faltan = mensajes.filter((m) => m.media_url && !pedidosMedia.current.has(m.id)).map((m) => m.id);
+    // Los MÁS NUEVOS primero (son los que se ven abajo) y en lotes chicos: antes iba el chat
+    // entero en una sola petición, y un archivo viejo de Meta que tardaba dejaba TODOS en
+    // «Cargando archivo…».
+    const faltan = mensajes
+      .filter((m) => m.media_url && !pedidosMedia.current.has(m.id))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map((m) => m.id);
     if (!faltan.length) return;
     faltan.forEach((id) => pedidosMedia.current.add(id));
     (async () => {
-      try {
-        const r = await fetch("/api/crm/media", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ mensaje_ids: faltan }) });
-        const d = await r.json();
-        const urls: Record<string, string | null> = d?.urls ?? {};
-        setMediaUrls((p) => ({ ...p, ...Object.fromEntries(faltan.map((id) => [id, urls[id] ?? null])) }));
-      } catch {
-        faltan.forEach((id) => pedidosMedia.current.delete(id));
+      for (let i = 0; i < faltan.length; i += 30) {
+        const lote = faltan.slice(i, i + 30);
+        let urls: Record<string, string | null> = {};
+        let pendientes: string[] = [];
+        try {
+          const r = await fetch("/api/crm/media", { method: "POST", headers: await cabecerasErp(), body: JSON.stringify({ mensaje_ids: lote }) });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d?.error ?? String(r.status));
+          urls = d?.urls ?? {};
+          pendientes = Array.isArray(d?.pendientes) ? d.pendientes.map(String) : [];
+        } catch {
+          pendientes = lote;
+        }
+        const resueltos = lote.filter((id) => !pendientes.includes(id));
+        // Lo que no alcanzó se reintenta solo (hasta 3 veces); después se dice «no disponible».
+        const agotados: string[] = [];
+        for (const id of pendientes) {
+          const n = (intentosMedia.current.get(id) ?? 0) + 1;
+          intentosMedia.current.set(id, n);
+          if (n >= 3) agotados.push(id);
+          else pedidosMedia.current.delete(id);
+        }
+        setMediaUrls((p) => ({
+          ...p,
+          ...Object.fromEntries(resueltos.map((id) => [id, urls[id] ?? null])),
+          ...Object.fromEntries(agotados.map((id) => [id, null])),
+        }));
+        if (pendientes.length > agotados.length) setTimeout(() => setReintentoMedia((x) => x + 1), 4000);
       }
     })();
-  }, [mensajes]);
+  }, [mensajes, reintentoMedia]);
   const [reply, setReply] = useState("");
   const [canalFiltro, setCanalFiltro] = useState<Canal>("todos");
   const [numeroFiltro, setNumeroFiltro] = useState<string>("todos");
@@ -188,7 +225,12 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [copiado, setCopiado] = useState(false);
   const [gmailAviso, setGmailAviso] = useState<{ ok: boolean; texto: string } | null>(null);
   const [acciones, setAcciones] = useState<AccionIA[]>([]);
-  const [avisos, setAvisos] = useState<AvisoAutomatico[]>([]);
+  // Los avisos van atados a SU hilo: los de otro chat no se pintan ni un instante.
+  const [avisosHilo, setAvisosHilo] = useState<{ conv: string; lista: AvisoAutomatico[] } | null>(null);
+  const avisos = useMemo(
+    () => (avisosHilo && avisosHilo.conv === selected?.id ? avisosHilo.lista : []),
+    [avisosHilo, selected?.id],
+  );
   const [pidiendoIA, setPidiendoIA] = useState(false);
   const [nuevoContactoModal, setNuevoContactoModal] = useState(false);
   const [nuevoForm, setNuevoForm] = useState({ nombre: "", empresa: "", telefono: "", email: "", canal: "whatsapp", notas: "" });
@@ -255,53 +297,74 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
   // ── Cargar conversaciones ──────────────────────────────────────────────
 
+  // Cada carga es UNA petición: el último mensaje de cada hilo viene embebido (PostgREST lo
+  // resuelve con un LATERAL ... LIMIT 1). Antes eran 1 + 80 peticiones, repetidas en cada
+  // mensaje que entraba (realtime) y cada 8 s: con el CRM abierto, la base y la conexión del
+  // equipo se saturaban y el ERP entero se ponía lento.
+  const pedidoConvsId = useRef(0);
   const cargarConvs = useCallback(async () => {
     if (avisosNums === null) return;
-    let q = supabase
-      .from("crm_conversaciones")
-      .select("*, crm_contactos(id,nombre,empresa,telefono,email,canal_origen,wa_id,fb_psid,ig_id,gmail_email)")
-      .order("ultimo_mensaje_at", { ascending: false, nullsFirst: false });
-
-    // «Todas» = todo menos spam (ninguna pestaña enseñó nunca el spam).
-    if (estadoFiltro === "todas") q = q.in("estado", ["abierta", "en_progreso", "resuelta"]);
-    else q = q.eq("estado", estadoFiltro);
-
-    if (canalFiltro !== "todos") q = q.eq("canal", canalFiltro);
-
+    const pid = ++pedidoConvsId.current;
+    const COLS = "*, crm_contactos(id,nombre,empresa,telefono,email,canal_origen,wa_id,fb_psid,ig_id,gmail_email)";
+    const armar = (conUltimo: boolean) => {
+      let q = supabase
+        .from("crm_conversaciones")
+        .select(conUltimo ? `${COLS}, crm_mensajes(contenido,direccion,created_at)` : COLS)
+        .order("ultimo_mensaje_at", { ascending: false, nullsFirst: false });
+      if (conUltimo)
+        q = q.order("created_at", { ascending: false, referencedTable: "crm_mensajes" }).limit(1, { referencedTable: "crm_mensajes" });
+      return q;
+    };
     // Sólo aplica a WhatsApp: los demás canales no tienen número de la empresa, así que
     // filtrar por él los dejaría a todos fuera con el selector ya oculto — una lista
     // vacía sin motivo visible.
     const filtraNumero = numeroFiltro !== "todos" && (canalFiltro === "todos" || canalFiltro === "whatsapp");
-    if (filtraNumero) q = q.eq("display_phone_number", numeroFiltro);
     // Separación de bandejas: el número de avisos no se mezcla con atención al cliente.
     const lista = avisosNums.map((n) => `"${n}"`).join(",");
-    if (bandeja === "avisos") {
-      if (avisosNums.length === 0) { setConvs([]); setCargando(false); return; }
-      q = q.in("display_phone_number", avisosNums);
-    } else if (avisosNums.length > 0) {
-      q = q.or(`display_phone_number.is.null,display_phone_number.not.in.(${lista})`);
+    if (bandeja === "avisos" && avisosNums.length === 0) { setConvs([]); setCargando(false); return; }
+
+    type Ult = { contenido: string | null; direccion: string; created_at: string } | null;
+    type Fila = { id: string; crm_mensajes?: Ult[] } & Record<string, unknown>;
+    const filtros = (b: ReturnType<typeof armar>) => {
+      // «Todas» = todo menos spam (ninguna pestaña enseñó nunca el spam).
+      if (estadoFiltro === "todas") b = b.in("estado", ["abierta", "en_progreso", "resuelta"]);
+      else b = b.eq("estado", estadoFiltro);
+      if (canalFiltro !== "todos") b = b.eq("canal", canalFiltro);
+      if (filtraNumero) b = b.eq("display_phone_number", numeroFiltro);
+      if (bandeja === "avisos") b = b.in("display_phone_number", avisosNums);
+      else if (avisosNums.length > 0) b = b.or(`display_phone_number.is.null,display_phone_number.not.in.(${lista})`);
+      return b.limit(80);
+    };
+    const primera = await filtros(armar(true));
+    let data: Fila[] | null = primera.data;
+    let ultimos: Map<string, Ult> | null = null;
+    if (primera.error) {
+      // Respaldo si la base no resuelve el embebido: la lista y, aparte, el último mensaje
+      // de cada hilo con pocas peticiones a la vez (nunca 80 juntas).
+      ({ data } = await filtros(armar(false)));
+      ultimos = new Map();
+      const filas = data ?? [];
+      for (let i = 0; i < filas.length; i += 6) {
+        await Promise.all(filas.slice(i, i + 6).map(async (c) => {
+          const { data: ult } = await supabase
+            .from("crm_mensajes").select("contenido, direccion, created_at")
+            .eq("conversacion_id", c.id).order("created_at", { ascending: false }).limit(1).maybeSingle();
+          ultimos!.set(c.id, (ult as Ult) ?? null);
+        }));
+      }
     }
-
-    const { data } = await q.limit(80);
-
-    // Para cada conv, obtener el último mensaje
-    const enriched = await Promise.all(
-      (data ?? []).map(async (c: any) => {
-        const { data: ult } = await supabase
-          .from("crm_mensajes")
-          .select("contenido, direccion, created_at")
-          .eq("conversacion_id", c.id)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        return {
-          ...c,
-          _ultimo_texto: textoLegible(ult?.contenido) ?? undefined,
-          _espera_desde: ult?.direccion === "entrante" ? ult.created_at : undefined,
-        };
-      })
-    );
-    setConvs(enriched as Conversacion[]);
+    // Una respuesta vieja (de antes de cambiar un filtro) no pisa la nueva.
+    if (pid !== pedidoConvsId.current) return;
+    const enriched = (data ?? []).map((c) => {
+      const { crm_mensajes: emb, ...resto } = c;
+      const ult = ultimos ? ultimos.get(c.id) : Array.isArray(emb) ? emb[0] : null;
+      return {
+        ...resto,
+        _ultimo_texto: textoLegible(ult?.contenido) ?? undefined,
+        _espera_desde: ult?.direccion === "entrante" ? ult.created_at : undefined,
+      };
+    });
+    setConvs(enriched as unknown as Conversacion[]);
     setCargando(false);
   }, [canalFiltro, estadoFiltro, numeroFiltro, avisosNums, bandeja]);
 
@@ -369,15 +432,47 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
     return { filas: (data as Mensaje[]).slice().reverse(), hayMas: data.length >= lim };
   }, []);
 
+  // Chats abiertos hace poco: volver a uno lo pinta AL INSTANTE desde aquí mientras se
+  // actualiza por detrás. `chatListo` dice de qué hilo es lo que hay en pantalla.
+  const cacheChats = useRef<Map<string, { mensajes: Mensaje[]; notas: typeof notasTodas; hayMas: boolean }>>(new Map());
+  const [chatListo, setChatListo] = useState<string | null>(null);
+  const pedidoChat = useRef(0);
   const cargarMensajes = useCallback(async (convId: string, opts: { mantenerScroll?: boolean } = {}) => {
-    const r = await leerUltimos(convId);
-    setMensajes((r?.filas ?? []).map(legible));
-    setHayAnteriores(!!r?.hayMas);
-    if (opts.mantenerScroll) return;
-    const { data: ns } = await supabase.from("crm_notas").select("id, texto, autor_nombre, created_at").eq("conversacion_id", convId).order("created_at");
-    setNotas((ns ?? []) as any[]);
-    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    const pid = ++pedidoChat.current;
+    if (!opts.mantenerScroll) {
+      const c = cacheChats.current.get(convId);
+      if (c) {
+        setMensajes(c.mensajes); setNotas(c.notas); setHayAnteriores(c.hayMas); setChatListo(convId);
+        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "auto" }), 30);
+      }
+    }
+    // Mensajes y notas a la vez (antes, uno detrás del otro).
+    const [r, ns] = await Promise.all([
+      leerUltimos(convId),
+      opts.mantenerScroll
+        ? Promise.resolve(null)
+        : supabase.from("crm_notas").select("id, conversacion_id, texto, autor_nombre, created_at").eq("conversacion_id", convId).order("created_at"),
+    ]);
+    // Si mientras tanto se abrió otro chat (o se pidió otra carga), esta respuesta ya no manda.
+    if (pid !== pedidoChat.current) return;
+    if (r) {
+      setMensajes(r.filas.map(legible));
+      setHayAnteriores(r.hayMas);
+    }
+    if (ns) setNotas(((ns as { data: unknown[] | null }).data ?? []) as typeof notasTodas);
+    setChatListo(convId);
+    if (!opts.mantenerScroll) setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "auto" }), 50);
   }, [leerUltimos]);
+
+  // Lo que se ve del hilo abierto queda en la caché (los 15 más recientes).
+  useEffect(() => {
+    if (!selected || chatListo !== selected.id) return;
+    const c = cacheChats.current;
+    c.delete(selected.id);
+    c.set(selected.id, { mensajes, notas, hayMas: hayAnteriores });
+    while (c.size > 15) c.delete(c.keys().next().value as string);
+  }, [selected, chatListo, mensajes, notas, hayAnteriores]);
+  const cargandoChat = !!selected && chatListo !== selected.id;
 
   const cargarAcciones = useCallback(async (convId: string) => {
     const { data } = await supabase
@@ -399,12 +494,13 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   // es para alcanzar el aviso que provocó ese primer mensaje.
   const cargarAvisosAutomaticos = useCallback(async (conv: Conversacion, msgs: Mensaje[]) => {
     const tel = telefonoDeContacto(conv.crm_contactos);
-    if (conv.canal !== "whatsapp" || !tel) { setAvisos([]); return; }
+    if (conv.canal !== "whatsapp" || !tel) { setAvisosHilo({ conv: conv.id, lista: [] }); return; }
     const primero = msgs[0]?.created_at ?? conv.created_at;
     const desde = primero
       ? new Date(new Date(primero).getTime() - 24 * 60 * 60 * 1000).toISOString()
       : null;
-    setAvisos(await avisosAutomaticosDeTelefono(supabase, tel, desde));
+    const lista = await avisosAutomaticosDeTelefono(supabase, tel, desde);
+    setAvisosHilo({ conv: conv.id, lista });
   }, []);
 
   useEffect(() => {
@@ -435,12 +531,16 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   // notificaciones_enviadas en cada patch de realtime que reasigna `selected`.
   const avisosCargadosDe = useRef<string | null>(null);
   useEffect(() => {
-    if (!selected) { avisosCargadosDe.current = null; setAvisos([]); return; }
-    const clave = `${selected.id}:${mensajes.length}`;
+    if (!selected) { avisosCargadosDe.current = null; return; }
+    // Se espera a tener los mensajes del hilo (el primero fija la ventana): así es UNA consulta.
+    if (cargandoChat) return;
+    // Por hilo y primer mensaje cargado, y como mucho cada 5 min: la consulta busca el teléfono
+    // con un comodín al inicio (recorre la tabla de avisos), así que no puede ir con cada mensaje.
+    const clave = `${selected.id}:${mensajes[0]?.created_at ?? ""}:${Math.floor(Date.now() / 300_000)}`;
     if (avisosCargadosDe.current === clave) return;
     avisosCargadosDe.current = clave;
     cargarAvisosAutomaticos(selected, mensajes);
-  }, [selected, mensajes, cargarAvisosAutomaticos]);
+  }, [selected, mensajes, cargandoChat, cargarAvisosAutomaticos]);
 
   // ── Realtime ───────────────────────────────────────────────────────────
 
@@ -448,32 +548,62 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   selectedRef.current = selected;
   const cargarConvsRef = useRef(cargarConvs);
   cargarConvsRef.current = cargarConvs;
+  const mensajesRef = useRef<Mensaje[]>([]);
+  useEffect(() => { mensajesRef.current = mensajes; }, [mensajes]);
+
+  // Recarga de la lista PEDIDA por un evento (realtime o el sondeo): se juntan las ráfagas
+  // —un mensaje entrante son un INSERT y un UPDATE, y el historial de coexistencia trae cientos
+  // seguidos— en UNA carga, y nunca corren dos a la vez.
+  const convsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const convsEnCurso = useRef(false);
+  const convsOtraVez = useRef(false);
+  const pedirConvs = useCallback(() => {
+    if (convsTimer.current) return;
+    convsTimer.current = setTimeout(async () => {
+      convsTimer.current = null;
+      if (convsEnCurso.current) { convsOtraVez.current = true; return; }
+      convsEnCurso.current = true;
+      try { await cargarConvsRef.current(); }
+      finally {
+        convsEnCurso.current = false;
+        if (convsOtraVez.current) { convsOtraVez.current = false; pedirConvs(); }
+      }
+    }, 800);
+  }, []);
+  useEffect(() => () => { if (convsTimer.current) clearTimeout(convsTimer.current); }, []);
 
   // Respaldo del realtime: si la tabla no está en la publicación o el socket se cae,
   // la pantalla igual se pone al día sola (cada 8 s con la pestaña visible, y al volver a ella).
   useEffect(() => {
+    // Es un RESPALDO (lo inmediato lo trae el realtime): cada 30 s, y del hilo abierto solo
+    // lo NUEVO desde el último mensaje cargado, no los 200 de nuevo.
     const tick = async () => {
       if (document.visibilityState !== "visible") return;
-      cargarConvsRef.current();
+      pedirConvs();
       const sel = selectedRef.current;
       if (!sel) return;
-      const r = await leerUltimos(sel.id);
-      const data = r?.filas;
+      const ultimo = mensajesRef.current[mensajesRef.current.length - 1];
+      if (!ultimo || ultimo.conversacion_id !== sel.id) return;
+      const { data } = await supabase
+        .from("crm_mensajes").select("*").eq("conversacion_id", sel.id)
+        .gte("created_at", ultimo.created_at)
+        .order("created_at", { ascending: true }).limit(PAGINA_CHAT);
       if (!data || selectedRef.current?.id !== sel.id) return;
-      setHayAnteriores(!!r?.hayMas);
       setMensajes((prev) => {
-        if (prev.length === data.length && prev[prev.length - 1]?.id === data[data.length - 1]?.id) return prev;
+        const vistos = new Set(prev.map((m) => m.id));
+        const nuevos = (data as Mensaje[]).filter((m) => !vistos.has(m.id)).map(legible);
+        if (!nuevos.length) return prev;
         setTimeout(() => marcarLeido(sel.id), 0);
         setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
-        return (data as Mensaje[]).map(legible);
+        return [...prev, ...nuevos];
       });
     };
-    const id = setInterval(tick, 8000);
+    const id = setInterval(tick, 30_000);
     const alVolver = () => { if (document.visibilityState === "visible") tick(); };
     document.addEventListener("visibilitychange", alVolver);
     window.addEventListener("focus", alVolver);
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", alVolver); window.removeEventListener("focus", alVolver); };
-  }, [marcarLeido]);
+  }, [marcarLeido, pedirConvs]);
 
   useEffect(() => {
     const ch = supabase
@@ -487,7 +617,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
           // Con el hilo abierto, lo que llega ya se está leyendo.
           if (nuevo.direccion === "entrante") marcarLeido(sel.id);
         }
-        cargarConvsRef.current();
+        pedirConvs();
       })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "crm_conversaciones" }, (payload: any) => {
         const upd = payload.new as Conversacion;
@@ -497,7 +627,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             ? { ...prev, ia_pausada: upd.ia_pausada, borrador_ia: upd.borrador_ia, borrador_ia_at: upd.borrador_ia_at, estado: upd.estado }
             : prev
         );
-        cargarConvsRef.current();
+        pedirConvs();
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "crm_acciones_ia" }, (payload: any) => {
         const row = (payload.new ?? payload.old) as AccionIA;
@@ -506,7 +636,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [cargarAcciones, marcarLeido]);
+  }, [cargarAcciones, marcarLeido, pedirConvs]);
 
   // ── Enviar mensaje ─────────────────────────────────────────────────────
 
@@ -524,7 +654,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       const { data: n, error } = await supabase
         .from("crm_notas")
         .insert({ conversacion_id: selected.id, texto, autor_id: u.user?.id ?? null, autor_nombre: autor })
-        .select("id, texto, autor_nombre, created_at").single();
+        .select("id, conversacion_id, texto, autor_nombre, created_at").single();
       setEnviando(false);
       if (error) { showToast(/crm_notas/.test(error.message) ? "Falta correr supabase/crm-inbox-equipo.sql" : error.message, false); setReply(texto); return; }
       setNotas((p) => [...p, n as any]);
@@ -668,7 +798,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
   // Con mensajes anteriores sin cargar, los avisos y notas de antes del primero cargado
   // se esconden también: si no, quedarían arriba como si no hubiera nada entre medio.
-  const desdeChat = hayAnteriores && mensajes[0] ? new Date(mensajes[0].created_at).getTime() : -Infinity;
+  const desdeChat = hayAnteriores && !cargandoChat && mensajes[0] ? new Date(mensajes[0].created_at).getTime() : -Infinity;
   const timeline: ItemTimeline[] = [
     ...mensajes.map((m): ItemTimeline => ({ kind: "mensaje", at: m.created_at, mensaje: m })),
     ...avisos.map((a): ItemTimeline => ({ kind: "aviso", at: a.created_at, aviso: a })),
@@ -1073,7 +1203,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
               nada; debajo del aviso que lo precede se explica solo. No se guarda el texto
               que se envió, sólo el qué/cuándo — nunca se finge citarlo. */}
           <div className="flex-1 overflow-y-auto px-[6%] py-4 space-y-1.5" style={{ background: "#efeae2" }}>
-            {hayAnteriores && selected && (
+            {hayAnteriores && !cargandoChat && selected && (
               <div className="flex justify-center pb-2">
                 <button
                   onClick={() => { limiteRef.current += PAGINA_CHAT; cargarMensajes(selected.id, { mantenerScroll: true }); }}
@@ -1083,7 +1213,10 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                 </button>
               </div>
             )}
-            {mensajes.length === 0 && avisos.length === 0 && (
+            {cargandoChat && mensajes.length === 0 && (
+              <div className="text-center text-gray-400 text-sm py-12">Cargando conversación…</div>
+            )}
+            {!cargandoChat && mensajes.length === 0 && avisos.length === 0 && (
               <div className="text-center text-gray-400 text-sm py-12">Sin mensajes aún</div>
             )}
             {timeline.map((item, i) => {

@@ -22,6 +22,38 @@ const EXT: Record<string, string> = {
   "video/mp4": "mp4", "video/3gpp": "3gp", "application/pdf": "pdf",
 };
 
+// A qué hosts se les puede mandar el token de WhatsApp: SOLO a Meta, por host EXACTO o subdominio.
+// Antes se decidía con un regex sin anclar («contiene fbsbx.com»), así que una media_url como
+// «https://otro-sitio.tld/?fbsbx.com» recibía el token de los números oficiales.
+const HOSTS_MEDIA_META = ["fbsbx.com", "whatsapp.net"];
+const HOSTS_CDN_META = ["fbcdn.net", "fbsbx.com", "whatsapp.net"];
+function hostDe(url: string | null | undefined, dominios: string[]): boolean {
+  if (!url) return false;
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol !== "https:" || u.username || u.password) return false;
+  if (u.port && u.port !== "443") return false;
+  const h = u.hostname.toLowerCase();
+  return dominios.some((d) => h === d || h.endsWith(`.${d}`));
+}
+/** ¿Es un enlace de media de Meta (el único sitio al que va el token)? */
+export const esUrlMediaMeta = (url: string | null | undefined) => hostDe(url, HOSTS_MEDIA_META);
+
+/** Baja un archivo de Meta con el token. La redirección (si la hay) se sigue UNA vez, SIN el
+ *  token y solo hacia Meta: el token no sale nunca hacia otro host. */
+async function bajarDeMeta(url: string, token: string, ms: number): Promise<Response | null> {
+  if (!esUrlMediaMeta(url)) return null;
+  let res = await conTope(url, { headers: { Authorization: `Bearer ${token}` }, redirect: "manual" }, ms);
+  if (res.status >= 300 && res.status < 400) {
+    const loc = res.headers.get("location");
+    let destino: string | null = null;
+    try { destino = loc ? new URL(loc, url).toString() : null; } catch { destino = null; }
+    if (!destino || !hostDe(destino, HOSTS_CDN_META)) return null;
+    res = await conTope(destino, { redirect: "error" }, ms);
+  }
+  return res.ok ? res : null;
+}
+
 let bucketListo = false;
 export async function asegurarBucket(sb: SupabaseClient) {
   if (bucketListo) return;
@@ -57,8 +89,8 @@ export async function guardarMediaWhatsApp(
     const meta: any = await info.json();
     if (!meta?.url || (meta.file_size && meta.file_size > MAX_BYTES)) return null;
 
-    const bin = await conTope(meta.url, { headers: auth }, 30000);
-    if (!bin.ok) { console.error("[crm-media] descarga", bin.status); return null; }
+    const bin = await bajarDeMeta(String(meta.url), token, 30000);
+    if (!bin) { console.error("[crm-media] descarga: no se pudo bajar de Meta"); return null; }
     const buf = Buffer.from(await bin.arrayBuffer());
     if (buf.length > MAX_BYTES) return null;
     const mime = String(meta.mime_type ?? msg?.[tipo]?.mime_type ?? "application/octet-stream").split(";")[0].trim();
@@ -102,11 +134,11 @@ export async function rescatarUrlMeta(
   clave: string,
 ): Promise<string | null> {
   try {
-    if (!/fbsbx\.com|facebook\.com|whatsapp\.net/.test(url)) return null;
+    if (!esUrlMediaMeta(url)) return null;
     const token = (await tokenParaNumero(phoneNumberId ?? undefined)) ?? process.env.META_WA_TOKEN;
     if (!token) return null;
-    const res = await conTope(url, { headers: { Authorization: `Bearer ${token}` } }, 30000);
-    if (!res.ok) return null;
+    const res = await bajarDeMeta(url, token, 30000);
+    if (!res) return null;
     const mime = (res.headers.get("content-type") ?? "application/octet-stream").split(";")[0].trim();
     if (/text\/html|json/.test(mime)) return null;
     const buf = Buffer.from(await res.arrayBuffer());
