@@ -42,7 +42,7 @@ import { estadoMarca, firmaParaderos, indiceDeInsercion, type HoraCalc, type Fil
 import { useRutaParaderos, coordsOk } from "@/components/cotizaciones/useRutaParaderos";
 import BarraHorasParaderos, { etiquetaDiaCorta, type ContextoHoras } from "@/components/cotizaciones/BarraHorasParaderos";
 import { coordValida, resolverRestauracion, rutaCoordsParaGuardar, rotuloFuente, type PuntoRuta, type Extremo } from "@/lib/cotizacion-ruta-coords";
-import { faltaColumna } from "@/lib/columna-faltante";
+import { faltaColumna, faltaAlguna } from "@/lib/columna-faltante";
 import ModalDespachoSinCotizar from "@/components/cotizaciones/ModalDespachoSinCotizar";
 import { leerDespachosSinCotizar, vincularCotizacion } from "@/lib/despacho-sin-cotizar-datos";
 import { pendientesDeCotizar, prellenadoCotizacion, type ReservaDespacho } from "@/lib/despacho-sin-cotizar";
@@ -1489,19 +1489,22 @@ export default function CotizacionesPage(){
      * consultaban al guardar. Si no hay ninguno, el campo se queda VACÍO y el PDF omite la
      * línea: un documento sin representante es mejor que uno a nombre de otra persona.
      */
+    let usuarioVisto:string|null|undefined;
     const cargarNombre=async(session:any)=>{
       if(!session?.user)return;
+      // Una respuesta que llega después de cambiar de usuario no pisa el nombre del vigente.
+      const poner=(n:string)=>{if(usuarioVisto===session.user.id)setReprNombre(extraerNombreApellido(n));};
       const m=session.user.user_metadata;
       const fullName=(m?.full_name||m?.name||"").trim();
-      if(fullName){setReprNombre(extraerNombreApellido(fullName));return;}
+      if(fullName){poner(fullName);return;}
       try{
         const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("id",session.user.id).maybeSingle();
         const n=String((uRow as any)?.nombre??"").trim();
-        if(n){setReprNombre(extraerNombreApellido(n));return;}
+        if(n){poner(n);return;}
         if(session.user.email){
           const{data:porCorreo}=await supabase.from("usuarios").select("nombre").eq("email",session.user.email).maybeSingle();
           const n2=String((porCorreo as any)?.nombre??"").trim();
-          if(n2)setReprNombre(extraerNombreApellido(n2));
+          if(n2)poner(n2);
         }
       }catch(e){/* best-effort: sin nombre, el PDF omite la línea */}
     };
@@ -1521,7 +1524,6 @@ export default function CotizacionesPage(){
      * misma persona con el mismo nombre.
      */
     type SesionVista={user?:{id?:string}|null}|null;
-    let usuarioVisto:string|null|undefined;
     const alCambiarSesion=(session:SesionVista)=>{
       const id:string|null=session?.user?.id??null;
       if(id===usuarioVisto)return;
@@ -1984,18 +1986,31 @@ export default function CotizacionesPage(){
     // Los servicios del contrato se leen UNA sola vez y de ahí salen las dos listas (propagar las
     // paradas y re-sincronizar el cliente). Antes eran dos lecturas paginadas de las MISMAS filas,
     // una detrás de la otra, con el botón en «Guardando…»: en un contrato fijo largo, segundos de más.
+    //
+    // Las dos columnas accesorias se sueltan SOLO si el error las nombra, y cada una apaga solo su
+    // uso (como cuando eran dos lecturas): sin `direccion_servicio` no se propaga, sin
+    // `estado_admin` no se re-sincroniza el cliente. Una lectura que falla por otra causa SE DICE:
+    // antes se cortaba en silencio y el guardado parecía completo.
     const todayPeru=hoyLimaISO();
     const servCot:{id:number;direccion_servicio:string|null;estado:string|null;estado_admin:string|null;cliente_id:number|null;fecha_servicio:string|null}[]=[];
+    const OPCIONALES_SERV=["direccion_servicio","estado_admin"] as const;
+    const sinColServ:string[]=[];
+    let falloLecturaServ="";
     if(cotIdGuardado){
       for(let d=0;d<40000;d+=1000){
-        const{data,error:eLee}=await supabase.from("reservas").select("id,direccion_servicio,estado,estado_admin,cliente_id,fecha_servicio").eq("cotizacion_id",cotIdGuardado).order("id").range(d,d+999);
-        if(eLee)break;
+        const cols=["id","estado","cliente_id","fecha_servicio",...OPCIONALES_SERV.filter(c=>!sinColServ.includes(c))].join(",");
+        const{data,error:eLee}=await supabase.from("reservas").select(cols).eq("cotizacion_id",cotIdGuardado).order("id").range(d,d+999);
+        if(eLee){
+          const col=faltaAlguna(eLee,OPCIONALES_SERV.filter(c=>!sinColServ.includes(c)));
+          if(col){sinColServ.push(col);servCot.length=0;d=-1000;continue;}
+          falloLecturaServ=eLee.message||String(eLee);servCot.length=0;break;
+        }
         servCot.push(...(data||[]));
         if(!data||data.length<1000)break;
       }
     }
     let reservasParaPropagar:{id:number;direccion_servicio:string|null}[]=[];
-    if(cotIdGuardado&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
+    if(cotIdGuardado&&!sinColServ.includes("direccion_servicio")&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
       // Mismo corte que el `.gte("fecha_servicio", hoy)` de antes: sin fecha no es un servicio futuro.
       reservasParaPropagar=servCot
         .filter(r=>(r.fecha_servicio??"")>=todayPeru&&!["en_curso","finalizada","cancelada"].includes(r.estado||""))
@@ -2008,7 +2023,7 @@ export default function CotizacionesPage(){
     // Se corrigen los servicios vinculados MENOS cancelados y ya facturados/cobrados (cambiarles
     // el cliente rompería la traza con el comprobante SUNAT ya emitido).
     let clientesResinc=0,clientesSinResinc=0;
-    if(cotIdGuardado){
+    if(cotIdGuardado&&!sinColServ.includes("estado_admin")){
       const nuevoCliente=payload.cliente_id;
       const idsResinc=servCot.filter(r=>r.cliente_id!==nuevoCliente&&r.estado!=="cancelada"&&!["facturada","cobrada"].includes(r.estado_admin||"")).map(r=>r.id);
       // Se cuenta lo que de verdad se escribió: el aviso decía «actualizado en N» aunque un lote fallara.
@@ -2020,6 +2035,7 @@ export default function CotizacionesPage(){
     }
     limpiar();cargar();setGuardando(false);
     if(clientesResinc>0)alert(`✅ Cliente actualizado en ${clientesResinc} servicio${clientesResinc!==1?"s":""} de Programación vinculado${clientesResinc!==1?"s":""} a esta cotización.`);
+    if(falloLecturaServ)alert(`⚠️ La cotización se guardó, pero no se pudieron revisar sus servicios de Programación (${falloLecturaServ}): ni se corrigió el cliente ni se ofrece propagar las paradas. Ábrela y guárdala de nuevo para reintentarlo.`);
     if(clientesSinResinc>0)alert(`⚠️ La cotización se guardó, pero ${clientesSinResinc} servicio${clientesSinResinc!==1?"s":""} de Programación siguen con el cliente anterior (no se pudieron actualizar). Ábrela y guárdala de nuevo para reintentarlo.`);
     if(reservasParaPropagar.length>0){
       setModalPropagar({cotId:cotIdGuardado!,reservas:reservasParaPropagar,paradasIda:paradasGuardadas,paradasRet:paradasRetornoGuardadas});
