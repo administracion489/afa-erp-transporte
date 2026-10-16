@@ -49,8 +49,26 @@ export type PerfilEmpresa = {
   cuentas_bancarias?: CuentaBancaria[] | null;
 };
 
-/** Una cuenta de cobro. `cuenta` y `cci` son texto: llevan guiones y ceros a la izquierda. */
-export type CuentaBancaria = { banco: string; cuenta: string; cci: string };
+/**
+ * Una cuenta de cobro. `cuenta` y `cci` son texto: llevan guiones y ceros a la izquierda.
+ *
+ * `moneda` vive en el mismo jsonb (sin migración) y es TRI-ESTADO: "PEN", "USD" o sin declarar.
+ * Un PDF en dólares imprime las de dólares y las sin declarar, y NUNCA una declarada en soles:
+ * mandar a un cliente a transferir dólares a una cuenta en soles es plata que el banco convierte
+ * a su tipo de cambio o rechaza. Sin declarar se imprime en las dos — es lo que ya pasaba.
+ */
+export type CuentaBancaria = { banco: string; cuenta: string; cci: string; moneda?: "PEN" | "USD" | null };
+
+/** La moneda declarada de una cuenta, o null si no la declara (o declara algo que no se conoce). */
+export function monedaDeCuenta(v: unknown): "PEN" | "USD" | null {
+  const m = String(v ?? "").trim().toUpperCase();
+  return m === "PEN" || m === "USD" ? m : null;
+}
+
+/** Las cuentas que sirven para cobrar en esa moneda: las declaradas en ella y las sin declarar. */
+export function cuentasParaMoneda(cuentas: CuentaBancaria[], m: "PEN" | "USD"): CuentaBancaria[] {
+  return cuentas.filter(c => { const d = monedaDeCuenta(c.moneda); return d === null || d === m; });
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SON DOS IMÁGENES Y EL ERP NO PUEDE DEDUCIR UNA DE LA OTRA
@@ -106,11 +124,16 @@ export function logoDeFondo(
 export function cuentasUtiles(v: unknown): CuentaBancaria[] {
   if (!Array.isArray(v)) return [];
   return v
-    .map(c => ({
-      banco:  String((c as any)?.banco  ?? "").trim(),
-      cuenta: String((c as any)?.cuenta ?? "").trim(),
-      cci:    String((c as any)?.cci    ?? "").trim(),
-    }))
+    .map(c => {
+      const base: CuentaBancaria = {
+        banco:  String((c as any)?.banco  ?? "").trim(),
+        cuenta: String((c as any)?.cuenta ?? "").trim(),
+        cci:    String((c as any)?.cci    ?? "").trim(),
+      };
+      // La clave solo aparece si se declaró: una cuenta sin moneda conserva su forma de siempre.
+      const m = monedaDeCuenta((c as any)?.moneda);
+      return m ? { ...base, moneda: m } : base;
+    })
     .filter(c => c.banco && (c.cuenta || c.cci));
 }
 
