@@ -137,22 +137,24 @@ export async function enviarWhatsAppPlantilla(
 
 export async function enviarWhatsAppMedia(
   to: string,
-  tipo: "image" | "document" | "audio",
+  tipo: "image" | "document" | "audio" | "video",
   url: string,
-  caption?: string
+  caption?: string,
+  opts: { phoneId?: string | null; filename?: string } = {},
 ): Promise<string | null> {
-  const phoneId = process.env.META_PHONE_NUMBER_ID;
+  const phoneId = opts.phoneId ?? process.env.META_PHONE_NUMBER_ID;
   if (!phoneId) throw new Error("META_PHONE_NUMBER_ID no configurado");
+  // Igual que enviarWhatsApp: 9 dígitos → +51; un BSUID («PE.…») va tal cual.
+  const d = to.replace(/\D/g, "");
+  const destino = /[A-Za-z]/.test(to) ? to.trim() : d.length === 9 ? "51" + d : d;
+  const cuerpo: Record<string, unknown> = { link: url };
+  if (caption && tipo !== "audio") cuerpo.caption = caption;
+  if (tipo === "document" && opts.filename) cuerpo.filename = opts.filename;
 
   const res = await fetch(`${GRAPH}/${phoneId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phoneId)}` },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: tipo,
-      [tipo]: { link: url, ...(caption ? { caption } : {}) },
-    }),
+    body: JSON.stringify({ messaging_product: "whatsapp", to: destino, type: tipo, [tipo]: cuerpo }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message ?? "Error WhatsApp media");

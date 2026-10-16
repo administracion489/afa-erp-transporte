@@ -9,6 +9,7 @@ import { cabecerasErp } from "@/lib/fetch-erp";
 import MensajeContenido, { esBurbujaSinFondo } from "@/components/crm/MensajeContenido";
 import EquipoConversacion, { ChipEtiqueta, ETIQUETAS, useYo, useUsuarios } from "@/components/crm/EquipoConversacion";
 import PanelCliente from "@/components/crm/PanelCliente";
+import AdjuntarArchivo from "@/components/crm/AdjuntarArchivo";
 import { useRespuestasRapidas, SugerenciasRapidas, ModalRespuestasRapidas, aplicarVariables } from "@/components/crm/RespuestasRapidas";
 import { haceCuanto, textoLegible } from "@/lib/crm-gmail-reglas";
 
@@ -1040,7 +1041,9 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
               }}
             />
           </div>
-          {selected.canal === "whatsapp" && <VentanaWhatsApp mensajes={mensajes} />}
+          {selected.canal === "whatsapp" && (
+            <VentanaWhatsApp mensajes={mensajes} numero={selected.display_phone_number ? formatearNumero(selected.display_phone_number) : null} />
+          )}
 
           {/* Mensajes — con los avisos automáticos intercalados en su momento exacto.
               Esos avisos salen FUERA del CRM (lib/notificaciones.ts nunca escribe en
@@ -1212,6 +1215,13 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                 onElegir={(r) => { setReply(aplicarVariables(r.texto, selected.crm_contactos?.nombre)); replyRef.current?.focus(); }}
               />
               <div className="flex gap-3 items-end">
+                <AdjuntarArchivo
+                  conversacionId={selected.id}
+                  habilitado={selected.canal === "whatsapp"}
+                  motivo="Por ahora los archivos solo se envían por WhatsApp."
+                  aviso={(m, ok = true) => showToast(m, ok)}
+                  onEnviado={() => { cargarMensajes(selected.id); cargarConvs(); }}
+                />
                 <button
                   onClick={() => setModoNota((v) => !v)}
                   title="Nota interna: la ve el equipo, el cliente no"
@@ -1833,7 +1843,7 @@ function ChipEspera({ desde }: { desde?: string }) {
 
 /** Regla de Meta: se puede escribir texto libre solo dentro de las 24 h desde el último
  *  mensaje del cliente. Pasado eso, solo plantillas aprobadas (Campañas). */
-function VentanaWhatsApp({ mensajes }: { mensajes: { direccion: string; created_at: string }[] }) {
+function VentanaWhatsApp({ mensajes, numero }: { mensajes: { direccion: string; created_at: string }[]; numero?: string | null }) {
   const [, tic] = useState(0);
   useEffect(() => { const t = setInterval(() => tic((n) => n + 1), 60_000); return () => clearInterval(t); }, []);
   const ult = [...mensajes].reverse().find((m) => m.direccion === "entrante");
@@ -1849,13 +1859,13 @@ function VentanaWhatsApp({ mensajes }: { mensajes: { direccion: string; created_
   if (restanMin > 0) {
     return (
       <div className="px-5 py-1 text-[11px] text-amber-800 bg-amber-50 border-b border-amber-100">
-        ⏳ La ventana de 24 h se cierra en {restanMin} min: después solo se podrá escribir con una plantilla aprobada.
+        ⏳ La ventana de 24 h se cierra en {restanMin} min: después, desde el CRM solo con plantilla aprobada; desde el celular sí podrás escribirle normal.
       </div>
     );
   }
   return (
     <div className="px-5 py-1.5 text-[11px] text-red-700 bg-red-50 border-b border-red-100">
-      🔒 Pasaron más de 24 h desde el último mensaje del cliente: WhatsApp no deja enviar texto libre. Usa una plantilla aprobada (Campañas) o espera a que el cliente escriba.
+      🔒 Pasaron más de 24 h desde el último mensaje del cliente: desde el CRM WhatsApp ya no deja enviar texto libre ni archivos. <b>Puedes escribirle desde el celular (app WhatsApp Business{numero ? ` del ${numero}` : ""})</b>, que no tiene esa regla, o usar una plantilla aprobada (Campañas).
     </div>
   );
 }
