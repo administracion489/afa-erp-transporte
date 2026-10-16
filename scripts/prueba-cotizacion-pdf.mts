@@ -1,3 +1,4 @@
+// @ts-nocheck — lleva copiados literal los generadores viejos de page.tsx (sin sus tipos): la comparación byte a byte es lo que se prueba, no los tipos.
 // Matriz de lib/cotizacion-pdf.ts — npx tsx scripts/prueba-cotizacion-pdf.mts
 //
 // Las cuatro plantillas en ESPAÑOL y SOLES tienen que salir byte a byte iguales a los generadores
