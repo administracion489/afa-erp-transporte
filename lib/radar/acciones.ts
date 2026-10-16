@@ -34,7 +34,7 @@ import {
   tipoDeEtiquetaPrecio, precioReferencialDe, revisarPrecioUnitario, unidadDeCarga,
 } from "@/lib/combustible-tipos";
 import { resolverTipoCombustible, revisarTipoContraPrecio } from "./tipo-voucher";
-import { serieRendimiento, juzgarTramo, TECHO_FAMILIA, type CargaRendimiento } from "@/lib/rendimiento";
+import { serieRendimiento, juzgarTramo, TECHO_FAMILIA, normalizarCantidad, type CargaRendimiento } from "@/lib/rendimiento";
 import {
   leerAlbumRecargas, buscarDuplicado, buscarCargaRegistrada, patronComprobante,
   type RecargaAlbum, type DespachoGuardado, type CargaRegistrada,
@@ -46,6 +46,7 @@ import { resolverGrifo, grifoPorRuc, type CatalogoGrifos } from "@/lib/combustib
 import { catalogoGrifosMemo } from "@/lib/combustible/grifo-canonico-datos";
 import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
 import { DETALLE_LECTURA_GIRADA } from "./voucher-girado";
+import { juzgarNivelTanque } from "./tanque-lleno";
 import {
   resolverIdentidadGrifo,
   normalizarDiscrepancias,
@@ -1513,15 +1514,29 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   // grifo sin stock— la carga va a revisión en vez de auto-registrarse midiendo mal ese tramo.
   // Un `false` puesto por una máquina deja de anclar en silencio, y un tramo que deja de medirse
   // no se nota en ninguna pantalla: por eso lo confirma una persona.
-  const nivelTanque = d.nivel_tanque ?? null;
+  //
+  // Y el «parcial» de la IA se juzga antes de creerlo (lib/radar/tanque-lleno.ts → juzgarNivelTanque):
+  // cada modelo muestra el nivel distinto y en un tablero digital hay relojes con la misma forma
+  // (tacómetro, temperatura, ECO). Sin decir qué indicador leyó y qué vio, o con una cantidad que
+  // llena casi el tanque entero, el «parcial» se descarta y la carga sigue como «no visible».
+  const unidadTanque = veh ?? terc ?? null;
+  const juicioNivel = juzgarNivelTanque({
+    nivel: d.nivel_tanque,
+    indicador: d.indicador_nivel,
+    evidencia: d.evidencia_nivel,
+    cantidad: normalizarCantidad(cantidad, esLitros ? "litros" : null, familiaCombustible(tipoComb)),
+    capacidad: unidadTanque ? capacidadTanqueDe(unidadTanque as any, tipoComb) : null,
+  });
+  const nivelTanque = juicioNivel.nivel;
   if (nivelTanque === "parcial") {
     anomalias.push({
       codigo: "carga_parcial_probable",
       detalle:
-        "La aguja del tablero NO marca el tanque lleno después de cargar. Si fue una carga parcial " +
-        "hay que decirlo: el rendimiento se mide de tanque lleno a tanque lleno, y una parcial sin " +
-        "declarar lo infla igual que una carga que nadie registró. Confírmalo con la foto y marca " +
-        "la casilla «tanque lleno» como corresponda.",
+        `El indicador de combustible del tablero NO marca el tanque lleno después de cargar (la IA vio: ` +
+        `${juicioNivel.evidencia}). Compruébalo en la foto — no lo confundas con el tacómetro, la ` +
+        "temperatura o la barra ECO—. Si fue una carga parcial hay que decirlo: el rendimiento se mide " +
+        "de tanque lleno a tanque lleno, y una parcial sin declarar lo infla igual que una carga que " +
+        "nadie registró. Marca la casilla «tanque lleno» como corresponda.",
       bloquea: true,
     });
   }

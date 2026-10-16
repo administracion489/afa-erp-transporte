@@ -88,6 +88,74 @@ export function importeEsRedondo(monto: number | null | undefined): boolean {
  */
 export const FRACCION_TANQUE_LLENO = 0.85;
 
+// ── ¿LE CREEMOS AL «PARCIAL» DE LA IA? ──────────────────────────────────────
+//
+// EL CASO (CNQ-396, 14/10/2026): tablero DIGITAL de una van, con el tanque lleno, y la IA devolvió
+// `nivel_tanque: "parcial"`. La carga quedó «Carga parcial (aguja)» y bloqueada. El prompt hablaba
+// de «la aguja» y cada modelo pinta el nivel distinto —aguja con E/F, barras, una franja, un
+// porcentaje, o solo la autonomía en km—, y en un tablero digital hay otros relojes con la misma
+// forma: el tacómetro (0-1-2… ×1000 rpm), la temperatura (C/H), la barra ECO, el consumo L/100km.
+// La IA leyó uno de ésos como si fuera el tanque.
+//
+// Un «parcial» es la única lectura del tanque que CAMBIA algo (manda la carga a revisión y propone
+// desmarcar la casilla), así que se le exige evidencia; un «lleno» o un «no_visible» se dejan como
+// están porque los dos anclan igual que la política.
+
+/** Cómo muestra el tablero el nivel de combustible. Lo declara la IA junto a la lectura. */
+export type IndicadorNivel = "aguja" | "barras" | "porcentaje" | "autonomia" | "otro";
+
+const INDICADORES: readonly IndicadorNivel[] = ["aguja", "barras", "porcentaje", "autonomia", "otro"];
+
+export function normalizarIndicador(v: unknown): IndicadorNivel | null {
+  const s = String(v ?? "").trim().toLowerCase();
+  return (INDICADORES as readonly string[]).includes(s) ? (s as IndicadorNivel) : null;
+}
+
+export type JuicioNivel = {
+  /** El nivel con el que sigue el ERP. Un «parcial» descartado pasa a "no_visible". */
+  nivel: "lleno" | "parcial" | "no_visible" | null;
+  /** Por qué se descartó un «parcial». `null` si no se descartó nada. */
+  descartado: "sin_indicador" | "sin_evidencia" | "solo_autonomia" | "cantidad_llena" | null;
+  indicador: IndicadorNivel | null;
+  evidencia: string | null;
+};
+
+/**
+ * Decide si el «parcial» de la IA vale. Cuatro descartes, de la evidencia al juicio:
+ *   · sin_indicador: no dijo QUÉ indicador del tablero leyó (o dijo «otro»): no se sabe si era el
+ *     del combustible.
+ *   · sin_evidencia: no describió lo que vio (ícono del surtidor, E/F, cuántas barras).
+ *   · solo_autonomia: la autonomía en km depende del consumo reciente, no del tanque: no prueba
+ *     que el tanque no se llenó.
+ *   · cantidad_llena: se despachó ≥ 85 % del tanque de la unidad, o sea se llenó casi entero.
+ */
+export function juzgarNivelTanque(args: {
+  nivel?: unknown;
+  indicador?: unknown;
+  evidencia?: unknown;
+  /** Cantidad despachada y capacidad del tanque, en la MISMA unidad. 0/null = no se sabe. */
+  cantidad?: number | null;
+  capacidad?: number | null;
+}): JuicioNivel {
+  const crudo = String(args.nivel ?? "").trim().toLowerCase();
+  const nivel = crudo === "lleno" || crudo === "parcial" || crudo === "no_visible" ? crudo : null;
+  const indicador = normalizarIndicador(args.indicador);
+  const ev = String(args.evidencia ?? "").trim();
+  const evidencia = ev.length >= 8 ? ev.slice(0, 240) : null;
+  const base = { indicador, evidencia };
+  if (nivel !== "parcial") return { nivel, descartado: null, ...base };
+  const descartar = (d: NonNullable<JuicioNivel["descartado"]>): JuicioNivel => ({ nivel: "no_visible", descartado: d, ...base });
+  if (!indicador || indicador === "otro") return descartar("sin_indicador");
+  if (indicador === "autonomia") return descartar("solo_autonomia");
+  if (!evidencia) return descartar("sin_evidencia");
+  const q = Number(args.cantidad);
+  const cap = Number(args.capacidad);
+  if (Number.isFinite(q) && Number.isFinite(cap) && cap > 0 && q >= cap * FRACCION_TANQUE_LLENO) {
+    return descartar("cantidad_llena");
+  }
+  return { nivel: "parcial", descartado: null, ...base };
+}
+
 export function proponerTanqueLleno(args: {
   /** Fila de `vehiculos`/`vehiculos_tercero` para resolver la capacidad. Puede faltar. */
   vehiculo?: { categoria?: string | null; capacidad_tanque?: Record<string, number> | null } | string | null;
@@ -111,8 +179,9 @@ export function proponerTanqueLleno(args: {
       codigo: "aguja",
       apunta: porDefecto,
       detalle: porDefecto
-        ? "En la foto del tablero la aguja marca el tanque LLENO."
-        : "En la foto del tablero la aguja NO marca lleno: la carga habría sido parcial.",
+        ? "En la foto del tablero el indicador de combustible marca el tanque LLENO."
+        : "En la foto del tablero el indicador de combustible NO marca lleno: la carga habría sido parcial. " +
+          "Compruébalo en la foto: cada modelo lo muestra distinto (aguja, barras, porcentaje) y no hay que confundirlo con el tacómetro, la temperatura o la barra ECO.",
     });
   }
 

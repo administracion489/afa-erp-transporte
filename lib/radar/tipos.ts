@@ -232,7 +232,7 @@ export type AnomaliaCombustible = {
     | "tipo_no_coincide_con_producto"// el papel la contradice pero nombra varios productos: no se adivina
     | "tipo_no_coincide_con_precio"  // se pagó el precio de otro combustible (solo avisa: no reescribe el tipo)
     // ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts):
-    | "carga_parcial_probable"       // la aguja del tablero NO marca lleno: ese tramo no se mide igual
+    | "carga_parcial_probable"       // el indicador de combustible del tablero NO marca lleno: ese tramo no se mide igual
     // La fecha del voucher contra la del mensaje (lib/radar/fecha-voucher.ts):
     | "fecha_corregida"              // fuera de rango y UNA sola variante (año, día↔mes) la explica: se propone
     | "fecha_fuera_de_rango"         // posterior al mensaje o demasiado vieja, y no se puede adivinar cuál era
@@ -355,6 +355,10 @@ export type ExtraccionCombustible = {
   vio_tablero?: boolean | null;        // se vio una foto del tablero/odómetro
   /** El indicador de nivel del tablero DESPUÉS de cargar. Propone `combustible.tanque_lleno`. */
   nivel_tanque?: "lleno" | "parcial" | "no_visible" | null;
+  /** Cómo muestra ese tablero el nivel (lo declara la IA). Ver lib/radar/tanque-lleno.ts. */
+  indicador_nivel?: "aguja" | "barras" | "porcentaje" | "autonomia" | "otro" | null;
+  /** Lo que la IA vio para decidirlo. Un «parcial» sin esto no se cree. */
+  evidencia_nivel?: string | null;
   fuentes?: Record<string, string | null> | null;          // de qué foto salió cada campo clave (galones→surtidor, etc.)
   confianza_campos?: Record<string, number | null> | null; // 0..1 por campo clave
   /**
