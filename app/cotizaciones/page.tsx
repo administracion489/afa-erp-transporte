@@ -17,7 +17,7 @@ import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
 import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from "@/lib/coordenadas";
-import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
+import { LOGO_DEFAULT } from "@/lib/pdf-chrome";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
 import SelectorCliente from "@/components/SelectorCliente";
 import SelectorVehiculo from "@/components/SelectorVehiculo";
@@ -39,7 +39,7 @@ const EMP = empresaConDefectos;
 import { componentesCostoKm } from "@/lib/costos/costo-km-parametro";
 import {
   NIVELES, NIVEL_CFG, nivelDeEquipamiento, equipamientoDeNivel, nivelDeFicha, fichasDelNivel,
-  planDeNivel, cotejarUnidadConNivel, etiquetaNivel, type NivelServicio,
+  planDeNivel, cotejarUnidadConNivel, type NivelServicio,
 } from "@/lib/costos/nivel-servicio";
 import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
 import { planDePropagacion, MOTIVO_NO_PROPAGA, type MotivoNoPropaga } from "@/lib/paradas-materializar";
@@ -1025,7 +1025,7 @@ export default function CotizacionesPage(){
   // moneda en que hoy se enseña el formulario: `monedaItems`. Solo pasa a US$ cuando hay un tipo
   // de cambio válido — sin él los importes siguen en soles y lo dicen, nunca soles rotulados US$.
   const [monedaItems,setMonedaItems]=useState<Moneda>("PEN");
-  const ultimoTcRef=useRef<number|null>(null);
+  const [ultimoTc,setUltimoTc]=useState<number|null>(null);
   // Al pasar a dólares se recuerdan los soles exactos: volver a soles sin haber tocado nada los
   // devuelve tal cual (la ida y vuelta por 2 decimales no los mueve ni un céntimo).
   const baseSolesRef=useRef<{tc:number;usd:string;items:ItemCot[];precioDia:string}|null>(null);
@@ -1476,7 +1476,7 @@ export default function CotizacionesPage(){
       setForm({...FORM0,...d.form});
       if(d.items?.length)setItems(d.items);
       // Los ítems del borrador están en la moneda en que se teclearon (`monedaItems`), con su TC.
-      if(d.monedaItems==="USD"&&typeof d.tcItems==="number"){setMonedaItems("USD");ultimoTcRef.current=d.tcItems;}
+      if(d.monedaItems==="USD"&&typeof d.tcItems==="number"){setMonedaItems("USD");setUltimoTc(d.tcItems);}
       if(d.consid)setConsid(d.consid);
       if(d.paradas?.length)setParadas(d.paradas);
       if(d.paradasRetorno?.length)setParadasRetorno(d.paradasRetorno);
@@ -1496,8 +1496,8 @@ export default function CotizacionesPage(){
     if(!mostrarForm)return;
     if(!form.origen&&!form.destino&&!form.cliente_id&&!editandoId)return;
     const rutaCoords=rutaCoordsParaGuardar(origenPlace,destinoPlace,retornoPlace,{origen:form.origen,destino:form.destino,retorno:form.punto_retorno},vuelve);
-    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,monedaItems,tcItems:monedaItems==="USD"?ultimoTcRef.current:null,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,rutaCoords,savedAt:new Date().toISOString()}));}catch{}
-  },[form,items,monedaItems,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF,origenPlace,destinoPlace,retornoPlace,vuelve]);
+    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,monedaItems,tcItems:monedaItems==="USD"?ultimoTc:null,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,rutaCoords,savedAt:new Date().toISOString()}));}catch{}
+  },[form,items,monedaItems,ultimoTc,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF,origenPlace,destinoPlace,retornoPlace,vuelve]);
 
   // Auto-construir descripción del primer ítem cuando cambia modo/tipo/equipamiento
   useEffect(()=>{
@@ -1576,7 +1576,7 @@ export default function CotizacionesPage(){
   const faltaColMoneda=sinColumnasLista.includes("moneda")||faltaMonedaGuardado;
   const revTc=revisarTipoCambio(form.tipo_cambio);
   /** El tipo de cambio con que se expresan hoy los importes del formulario (null = soles). */
-  const tcItems=monedaItems==="USD"?(revTc.tc??ultimoTcRef.current):null;
+  const tcItems=monedaItems==="USD"?(revTc.tc??ultimoTc):null;
   /** Los ítems del formulario EN SOLES (lo que se guarda): 4 decimales desde los dólares tecleados. */
   const itemsPENForm=useMemo(()=>monedaItems==="USD"?(itemsAPEN(items,"USD",tcItems)??items):items,[items,monedaItems,tcItems]);
   /** Precio/día del formulario en soles (con IGV), o null si está vacío. */
@@ -1590,7 +1590,7 @@ export default function CotizacionesPage(){
   /** Lleva ítems y precio/día a la moneda pedida, si se puede (ver `monedaItems`). */
   const reexpresar=(m:Moneda,tcStr:string)=>{
     const r=revisarTipoCambio(tcStr);
-    if(r.codigo==="ok")ultimoTcRef.current=r.tc;
+    if(r.codigo==="ok")setUltimoTc(r.tc);
     if(m==="USD"&&monedaItems==="PEN"&&r.tc!=null){
       const tc=r.tc;
       const usd=itemsEnMoneda(items,"USD",tc)??items;
@@ -1598,7 +1598,7 @@ export default function CotizacionesPage(){
       baseSolesRef.current={tc,usd:JSON.stringify({usd,pd}),items,precioDia:form.precio_dia};
       setItems(usd);setForm(p=>({...p,precio_dia:pd}));setMonedaItems("USD");
     }else if(m==="PEN"&&monedaItems==="USD"){
-      const tc=r.tc??ultimoTcRef.current;
+      const tc=r.tc??ultimoTc;
       const base=baseSolesRef.current;
       if(base&&base.tc===tc&&base.usd===JSON.stringify({usd:items,pd:form.precio_dia})){
         setItems(base.items);setForm(p=>({...p,precio_dia:base.precioDia}));
@@ -2217,7 +2217,7 @@ export default function CotizacionesPage(){
     // enseñan en US$ (lo guardado sigue en soles). Sin TC válido, en soles.
     const mon=normalizarMoneda(c.moneda);const rtc=revisarTipoCambio(c.tipo_cambio);
     const enUsd=mon==="USD"&&rtc.tc!=null;
-    if(enUsd)ultimoTcRef.current=rtc.tc;
+    if(enUsd)setUltimoTc(rtc.tc);
     setMonedaItems(enUsd?"USD":"PEN");baseSolesRef.current=null;
     const itemsBase:ItemCot[]=c.items_json?.length?c.items_json:[{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(Number(c.precio_cliente||0)/1.18*100)/100,descuento_pct:0}];
     const pdTxt=c.precio_dia?String(enUsd?aMonedaCot(Number(c.precio_dia),"USD",rtc.tc):c.precio_dia):"";
@@ -2272,18 +2272,6 @@ export default function CotizacionesPage(){
     }catch(e){alert(`No se pudo generar el PDF: ${(e as {message?:string})?.message||String(e)}`);}
     finally{setGenerandoPdf(false);}
   };
-  // Los avisos del modal se calculan para la plantilla y el idioma elegidos, ANTES de generar.
-  useEffect(()=>{
-    if(!modalPlantilla)return;
-    let vigente=true;
-    setAvisosPdf(null);setErrorAvisosPdf("");
-    prepararPDF(modalPlantilla,plantillaElegida,idiomaPdfModal)
-      .then(r=>{if(vigente)setAvisosPdf(r.avisos);})
-      .catch(e=>{if(vigente)setErrorAvisosPdf((e as {message?:string})?.message||String(e));});
-    return()=>{vigente=false;};
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[modalPlantilla,plantillaElegida,idiomaPdfModal]);
-
   const abrirModalPlantilla=(d:Cotizacion)=>{setModalPlantilla(d);setPlantillaElegida(d.plantilla_pdf||"corporativo");setIdiomaPdfModal(normalizarIdioma(d.idioma_pdf));setAvisosPdf(null);setErrorAvisosPdf("");};
 
   // Un vehículo de tercero visto como uno de flota, para los documentos. El texto de
@@ -2300,6 +2288,17 @@ export default function CotizacionesPage(){
     descripcion_unidad:descripcionTerceroParaCliente(t),
     tipo_vehiculo_costeo:t.tipo_vehiculo_costeo,
   });
+
+  // Los avisos del modal se calculan para la plantilla y el idioma elegidos, ANTES de generar.
+  useEffect(()=>{
+    if(!modalPlantilla)return;
+    let vigente=true;
+    prepararPDF(modalPlantilla,plantillaElegida,idiomaPdfModal)
+      .then(r=>{if(vigente)setAvisosPdf(r.avisos);})
+      .catch(e=>{if(vigente)setErrorAvisosPdf((e as {message?:string})?.message||String(e));});
+    return()=>{vigente=false;};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[modalPlantilla,plantillaElegida,idiomaPdfModal]);
 
   // Vehículos asignados a la cotización (mismo criterio que el PDF: nivel cotización + por ítem).
   const vehiculosDeCot=(cot:Cotizacion):VehiculoFlota[]=>{
@@ -2435,7 +2434,7 @@ export default function CotizacionesPage(){
       {modalEnvio&&<ModalEnvio onConfirmar={confirmarEnvio} onCancelar={()=>setModalEnvio(null)} ocupado={estadoEnCurso!==null}/>}
       {modalDespacho&&<ModalDespachoSinCotizar nombreCliente={(id)=>{const cl=id!=null?clientes.find(c=>c.id===id):null;return cl?rotuloCliente(cl as any):(id!=null?`Cliente #${id}`:"Sin cliente");}} onCerrar={()=>setModalDespacho(false)} onCambio={contarDespacho} onCotizar={cotizarDespacho}/>}
       {modalAprob&&<ModalAprobacion cot={modalAprob} onConfirmar={confirmarAprob} onCancelar={()=>setModalAprob(null)} ocupado={estadoEnCurso!==null}/>}
-      {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={setPlantillaElegida} idioma={idiomaPdfModal} onIdioma={setIdiomaPdfModal} avisos={avisosPdf} errorAvisos={errorAvisosPdf} generando={generandoPdf} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida,idiomaPdfModal)} onCancelar={()=>setModalPlantilla(null)}/>}
+      {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={id=>{setPlantillaElegida(id);setAvisosPdf(null);setErrorAvisosPdf("");}} idioma={idiomaPdfModal} onIdioma={i=>{setIdiomaPdfModal(i);setAvisosPdf(null);setErrorAvisosPdf("");}} avisos={avisosPdf} errorAvisos={errorAvisosPdf} generando={generandoPdf} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida,idiomaPdfModal)} onCancelar={()=>setModalPlantilla(null)}/>}
       {modalEliminar&&<ModalEliminar cot={modalEliminar} onConfirmar={eliminarCotizacion} onCancelar={()=>setModalEliminar(null)}/>}
       {modalPropagar&&(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
