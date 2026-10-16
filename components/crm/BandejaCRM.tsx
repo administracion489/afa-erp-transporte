@@ -168,7 +168,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [numeroFiltro, setNumeroFiltro] = useState<string>("todos");
   const [numeros, setNumeros] = useState<string[]>([]);
   const [conectarWaModal, setConectarWaModal] = useState(false);
-  const [estadoFiltro, setEstadoFiltro] = useState<"abierta" | "en_progreso" | "resuelta">("abierta");
+  const [estadoFiltro, setEstadoFiltro] = useState<"todas" | "abierta" | "en_progreso" | "resuelta">("todas");
   const [busqueda, setBusqueda] = useState("");
   const [enviando, setEnviando] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -260,11 +260,9 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       .select("*, crm_contactos(id,nombre,empresa,telefono,email,canal_origen,wa_id,fb_psid,ig_id,gmail_email)")
       .order("ultimo_mensaje_at", { ascending: false, nullsFirst: false });
 
-    if (estadoFiltro !== "resuelta") {
-      q = q.in("estado", estadoFiltro === "abierta" ? ["abierta"] : ["en_progreso"]);
-    } else {
-      q = q.eq("estado", "resuelta");
-    }
+    // «Todas» = todo menos spam (ninguna pestaña enseñó nunca el spam).
+    if (estadoFiltro === "todas") q = q.in("estado", ["abierta", "en_progreso", "resuelta"]);
+    else q = q.eq("estado", estadoFiltro);
 
     if (canalFiltro !== "todos") q = q.eq("canal", canalFiltro);
 
@@ -816,7 +814,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
         {/* Filtros estado */}
         <div className="px-3 py-2 flex gap-1.5 border-b border-gray-100">
-          {(["abierta", "en_progreso", "resuelta"] as const).map((e) => (
+          {(["todas", "abierta", "en_progreso", "resuelta"] as const).map((e) => (
             <button
               key={e}
               onClick={() => setEstadoFiltro(e)}
@@ -825,7 +823,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                   ? "bg-[#0b315f]/10 text-[#0b315f] font-semibold"
                   : "text-gray-500 hover:text-gray-700"}`}
             >
-              {e === "abierta" ? "Abiertas" : e === "en_progreso" ? "En progreso" : "Resueltas"}
+              {e === "todas" ? "Todas" : e === "abierta" ? "Abiertas" : e === "en_progreso" ? "En progreso" : "Resueltas"}
             </button>
           ))}
         </div>
