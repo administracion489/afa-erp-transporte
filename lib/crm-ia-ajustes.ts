@@ -37,6 +37,12 @@ export type AjustesIA = {
   silencio_seg: number;
   silencio_completo_seg: number;
   espera_max_seg: number;
+  /** Releer la conversación y no volver a pedir lo que el cliente ya dio. */
+  recordar_datos: boolean;
+  /** Lugares que no necesitan dirección exacta (el aeropuerto, terminales…). */
+  lugares_conocidos: string;
+  /** Cuántos mensajes recientes relee en cada respuesta. */
+  mensajes_historial: number;
   /** Reglas extra del negocio, una por línea. */
   reglas_extra: string;
 };
@@ -61,6 +67,9 @@ export const AJUSTES_DEFECTO: AjustesIA = {
   silencio_seg: 12,
   silencio_completo_seg: 4,
   espera_max_seg: 45,
+  recordar_datos: true,
+  lugares_conocidos: "el aeropuerto, los terminales terrestres, las estaciones, las plazas y los centros comerciales conocidos",
+  mensajes_historial: 40,
   reglas_extra: "",
 };
 
@@ -104,6 +113,9 @@ export function normalizarAjustes(raw: unknown): AjustesIA {
     silencio_seg,
     silencio_completo_seg,
     espera_max_seg: Math.max(silencio_seg, entero(r.espera_max_seg, d.espera_max_seg, 5, 120)),
+    recordar_datos: bool(r.recordar_datos, d.recordar_datos),
+    lugares_conocidos: texto(r.lugares_conocidos, d.lugares_conocidos, 400, true),
+    mensajes_historial: entero(r.mensajes_historial, d.mensajes_historial, 10, 60),
     reglas_extra: texto(r.reglas_extra, d.reglas_extra, 4000, true),
   };
 }

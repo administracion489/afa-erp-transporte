@@ -221,7 +221,7 @@ const TOOLS = [
   {
     name: "escalar_a_humano",
     description:
-      "Pasa la conversación a un ejecutivo y pausa tu intervención. Úsala si el cliente lo pide, está molesto, hay un reclamo, contrato/licitación, si no encuentras en el sistema lo que pide (servicios, choferes, placas, documentos), si no puedes escuchar una nota de voz, o algo fuera de tu alcance. Tras llamarla responde con el mensaje de derivación: un ejecutivo revisará y le enviará la información por este chat.",
+      "Pasa la conversación a un ejecutivo y pausa tu intervención. Úsala si el cliente lo pide, está molesto, hay un reclamo, contrato/licitación, si no encuentras en el sistema lo que pide (servicios, choferes, placas, documentos), si no puedes escuchar una nota de voz, o algo fuera de tu alcance. Una solicitud de COTIZACIÓN no es motivo para derivar: para eso están cotizacion_estimada y proponer_cotizacion. Tras llamarla responde con el mensaje de derivación: un ejecutivo revisará y le enviará la información por este chat.",
     input_schema: {
       type: "object",
       properties: {
@@ -481,6 +481,18 @@ function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = 
     !aj.saludo_activo ? "" : primeroDelDia
       ? `## SALUDO OBLIGATORIO\nEs tu PRIMER mensaje del día con este cliente: tu respuesta DEBE empezar con «${ahora.saludo}${nombre ? `, ${nombre}` : ""}», seguido de una presentación breve si corresponde, y recién después responder o preguntar. No omitas el saludo aunque el cliente no salude ni aunque necesites pedirle datos.\n`
       : "## Saludo\nYa conversaste hoy con este cliente: NO vuelvas a saludar ni a presentarte; responde directo.\n",
+    aj.recordar_datos
+      ? [
+          "## Lo que el cliente YA dijo (no se vuelve a pedir)",
+          "- Antes de responder, relee TODA la conversación —también lo que el cliente le contestó a una persona del equipo— y arma la ficha del pedido: origen y dirección de recojo, destino, fecha, hora, número de pasajeros, equipaje, solo ida o ida y vuelta, nombre y empresa.",
+          "- NUNCA vuelvas a pedir un dato que ya está en la conversación, aunque lo haya dado en otro orden, en un solo bloque o repartido en varios mensajes.",
+          "- Si el cliente repite su pedido o pregunta «¿me pueden dar la cotización?», es que espera una respuesta: no le pidas lo que ya dio; avanza con lo que tienes.",
+          aj.lugares_conocidos ? `- No necesitan dirección exacta: ${aj.lugares_conocidos}.` : "",
+          "- Si falta algo indispensable, pide TODO lo que falte en un solo mensaje, una sola vez. No condiciones la atención a que te dé su nombre: si falta, pídelo en el mismo mensaje en que avanzas.",
+          "- Con los datos del servicio completos, confírmalos en una lista corta (origen → destino, fecha y hora, pasajeros, equipaje, ida/vuelta) y avanza: precio referencial con cotizacion_estimada y proponer_cotizacion para que el equipo lo confirme.",
+          "",
+        ].filter(Boolean).join("\n")
+      : "",
     "## Canal y contacto",
     `Estás respondiendo por ${conv.canal}. Cliente: ${contacto.nombre ?? "desconocido"}${contacto.empresa ? ` (${contacto.empresa})` : ""}${contacto.telefono ? `, tel ${contacto.telefono}` : ""}.`,
     "",
@@ -520,13 +532,15 @@ function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = 
 async function cargarHistorial(sb: SB, convId: string, aj: AjustesIA = normalizarAjustes(null)): Promise<Anthropic.MessageParam[]> {
   // Los 40 MÁS RECIENTES: antes se pedían los 40 más antiguos (orden ascendente + limit),
   // así que en un hilo largo la IA contestaba sin ver lo último que escribió el cliente.
+  // Cuántos relee lo dice Ajustes (40 por defecto): con 20, en un chat donde el cliente repitió
+  // su pedido varias veces, los datos del principio quedaban fuera y la IA los volvía a pedir.
   const { data } = await sb
     .from("crm_mensajes")
     .select("id, direccion, contenido, tipo, media_url, created_at")
     .eq("conversacion_id", convId)
     .order("created_at", { ascending: false })
-    .limit(40);
-  const msgs = (data ?? []).reverse().slice(-20);
+    .limit(aj.mensajes_historial);
+  const msgs = (data ?? []).reverse();
   // Notas de voz que el webhook no alcanzó a transcribir (o anteriores a esta función):
   // se transcriben ahora y quedan guardadas. Solo las últimas, por costo.
   const audiosPend = !aj.transcribir_audios ? [] : msgs
@@ -665,14 +679,50 @@ export async function responderConIA(
   opts: { forzarBorrador?: boolean } = {}
 ): Promise<ResultadoIA> {
   const candado = { tomado: false };
+  let resultado: ResultadoIA | null = null;
   try {
-    return await responderConIAInterno(convId, opts, candado);
+    resultado = await responderConIAInterno(convId, opts, candado);
+    return resultado;
+  } catch (e: any) {
+    resultado = { ok: false, accion: "omitido", error: e?.message ?? "Error inesperado de la IA." };
+    throw e;
   } finally {
     // Solo suelta el candado quien lo ganó: soltarlo desde una llamada perdedora
     // abriría la puerta a la respuesta duplicada.
     if (candado.tomado)
       await db().from("crm_conversaciones").update({ ia_respondiendo_at: null }).eq("id", convId);
+    if (resultado) await registrarDecision(convId, resultado, !!opts.forzarBorrador);
   }
+}
+
+// Por qué la IA respondió o no, guardado en la conversación: antes, si no contestaba, no quedaba
+// rastro en ningún sitio (el webhook descarta el resultado) y no había forma de saber si estaba
+// pausada, si una persona había respondido o si Claude devolvió un error.
+// Las corridas que se retiran porque otra se encarga (ráfaga, candado) no se anotan: pisarían la
+// decisión de la que sí respondió.
+const MOTIVOS_DE_RELEVO = [
+  "Llegó otro mensaje del cliente",
+  "Otra respuesta de la IA ya está en curso",
+  "El cliente siguió escribiendo",
+];
+async function registrarDecision(convId: string, r: ResultadoIA, aPedido: boolean) {
+  const motivo = r.error ?? r.motivo ?? null;
+  if (r.accion === "omitido" && motivo && MOTIVOS_DE_RELEVO.some((m) => motivo.startsWith(m))) return;
+  console.log(`[crm-ia] ${convId} ${r.accion}${motivo ? ` · ${motivo}` : ""}`);
+  try {
+    await db()
+      .from("crm_conversaciones")
+      .update({
+        ia_ultima_decision: {
+          accion: r.accion,
+          ok: r.ok,
+          motivo: motivo ? String(motivo).slice(0, 300) : null,
+          a_pedido: aPedido,
+          at: new Date().toISOString(),
+        },
+      })
+      .eq("id", convId);
+  } catch { /* sin la columna (crm-ia-decision.sql) no se anota: la IA funciona igual */ }
 }
 
 async function responderConIAInterno(
