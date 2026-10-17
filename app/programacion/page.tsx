@@ -625,6 +625,10 @@ export default function ReservasPage() {
   const [expandidoId,  setExpandidoId]  = useState<number | null>(null);
   const [mostrarForm,  setMostrarForm]  = useState(false);
   const [busqueda,     setBusqueda]     = useState("");
+  // Búsqueda en TODO el historial, hecha por la base (fn_programacion_buscar): trae solo las
+  // coincidencias en vez de cargar el historial entero. `q` es la búsqueda a la que responde.
+  const [historial,    setHistorial]    = useState<{ q: string; estado: "buscando" | "ok" | "error"; n: number; tope: boolean; motivo?: string } | null>(null);
+  const extrasHistorialRef = useRef<Reserva[]>([]);
   const [filtroEstado, setFiltroEstado] = useState("todos");
   const [filtroTipo,   setFiltroTipo]   = useState("todos");
   const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
@@ -1681,6 +1685,12 @@ export default function ReservasPage() {
   // Ventas/costos/margen del rango de `rangoFinanciero()`, excluyendo canceladas.
   const cargarResumenFinanciero = async () => {
     const { desde, hasta } = rangoFinanciero();
+    // La base suma (rendimiento-02-programacion-resumen.sql). Sin la función, el camino de siempre.
+    const rpc = await supabase.rpc("fn_programacion_finanzas", { p_desde: desde, p_hasta: hasta });
+    if (!rpc.error && rpc.data) {
+      setResumenFin({ ventas: Number(rpc.data.ventas || 0), costos: Number(rpc.data.costos || 0), margen: Number(rpc.data.margen || 0), desde, hasta });
+      return;
+    }
     const filas = await fetchReservasCols("precio_cliente,costo_proveedor,margen", (q: any) => {
       let qq = q.neq("estado", "cancelada");
       if (desde) qq = qq.gte("fecha_servicio", desde);
@@ -1736,9 +1746,27 @@ export default function ReservasPage() {
   // ventana visible. Proyección ultraligera (sin paradas_json) sobre toda la tabla + el
   // conteo de sobrecupo por count server-side.
   const cargarResumen = async () => {
-    const filas = await fetchReservasCols(COLS_RESUMEN, (q: any) => q);
     const hoyP = fechaLima();
     const e7   = fechaLima(7);
+    const sobrecupoP = supabase.from("reservas_ocupacion")
+      .select("reserva_id", { count: "exact", head: true }).eq("sobrecupo", true);
+    // Los totales los suma la BASE en una consulta (rendimiento-02-programacion-resumen.sql).
+    // Antes se bajaban TODAS las reservas (~14 consultas de 1000 filas en paralelo) en cada
+    // apertura y tras cada cambio de estado: fue la consulta más cara del proyecto y llenaba
+    // las conexiones de la API (caída del 16-10-2026). Sin la función, el camino de siempre.
+    const rpc = await supabase.rpc("fn_programacion_resumen", { p_hoy: hoyP, p_hasta7: e7 });
+    if (!rpc.error && rpc.data) {
+      const d = rpc.data;
+      const { count } = await sobrecupoP;
+      setResumen({
+        total: Number(d.total || 0), porEstado: d.por_estado || {}, porAdmin: d.por_admin || {},
+        hoy: Number(d.hoy || 0), prox7d: Number(d.prox7d || 0), sincronizadas: Number(d.sincronizadas || 0),
+        ventas: Number(d.ventas || 0), costos: Number(d.costos || 0), margen: Number(d.margen || 0),
+        sobrecupo: count || 0,
+      });
+      return;
+    }
+    const filas = await fetchReservasCols(COLS_RESUMEN, (q: any) => q);
     const porEstado: Record<string, number> = {};
     const porAdmin:  Record<string, number> = {};
     let ventas = 0, costos = 0, margen = 0, hoy = 0, prox7d = 0, sincronizadas = 0;
@@ -1752,8 +1780,7 @@ export default function ReservasPage() {
       if (r.fecha_servicio && r.fecha_servicio >= hoyP && r.fecha_servicio <= e7 && r.estado !== "cancelada" && r.estado !== "finalizada") prox7d++;
       if (r.sincronizado_app) sincronizadas++;
     }
-    const { count } = await supabase.from("reservas_ocupacion")
-      .select("reserva_id", { count: "exact", head: true }).eq("sobrecupo", true);
+    const { count } = await sobrecupoP;
     setResumen({ total: filas.length, porEstado, porAdmin, hoy, prox7d, sincronizadas, ventas, costos, margen, sobrecupo: count || 0 });
   };
 
@@ -1761,12 +1788,15 @@ export default function ReservasPage() {
   const cargarLista = async () => {
     setLoading(true);
     const { desde, hasta } = rangoVentana();
-    const filas = await fetchReservasCols(COLS_LISTA, (q: any) => {
+    const ventana = await fetchReservasCols(COLS_LISTA, (q: any) => {
       let qq = q;
       if (desde) qq = qq.gte("fecha_servicio", desde);
       if (hasta) qq = qq.lte("fecha_servicio", hasta);
       return qq;
     });
+    // Lo encontrado en el historial sigue en la lista al recargar (p.ej. tras guardar uno).
+    const enVentana = new Set(ventana.map((r: any) => r.id));
+    const filas = [...ventana, ...extrasHistorialRef.current.filter(r => !enVentana.has(r.id))];
     setReservas(filas);
     setLimiteVista(100);
     await cargarNumerosCotizacion(filas);
@@ -1776,6 +1806,46 @@ export default function ReservasPage() {
     // Después de pintar: el contrato es un dato de contraste, no puede retrasar la lista.
     cargarPaxContratado(filas);
     cargarVecinosAutoseleccion(filas);
+  };
+
+  // «Buscar en todo el historial»: la BASE busca con la misma regla que la pantalla y
+  // devuelve hasta 300 coincidencias (las más recientes); se agregan a la lista. Antes este
+  // botón cargaba el historial ENTERO (miles de filas) solo para filtrar en el navegador.
+  const buscarEnHistorial = async () => {
+    const q = busqueda.trim();
+    const terminos = terminosBusqueda(q);
+    if (!terminos.length) return;
+    setHistorial({ q, estado: "buscando", n: 0, tope: false });
+    const TOPE = 300;
+    const { data: ids, error } = await supabase.rpc("fn_programacion_buscar", { p_terminos: terminos, p_limite: TOPE });
+    if (error) {
+      const sinFuncion = /fn_programacion_buscar|PGRST202|42883/i.test(`${error.code} ${error.message}`);
+      setHistorial({ q, estado: "error", n: 0, tope: false, motivo: sinFuncion
+        ? "falta correr supabase/rendimiento-02-programacion-resumen.sql. Mientras tanto usa «Ver todo»."
+        : error.message });
+      return;
+    }
+    const lista: number[] = (ids || []).map((x: any) => Number(typeof x === "object" ? Object.values(x)[0] : x)).filter((n: number) => Number.isFinite(n));
+    const yaEstan = new Set(reservas.map(r => r.id));
+    const faltan = lista.filter(id => !yaEstan.has(id));
+    const nuevas: Reserva[] = [];
+    for (let i = 0; i < faltan.length; i += 100) {
+      const lote = faltan.slice(i, i + 100);
+      nuevas.push(...await fetchReservasCols(COLS_LISTA, (qq: any) => qq.in("id", lote)));
+    }
+    if (faltan.length && !nuevas.length) {
+      setHistorial({ q, estado: "error", n: 0, tope: false, motivo: "no se pudieron leer los servicios encontrados. Inténtalo de nuevo." });
+      return;
+    }
+    const porId = new Map(extrasHistorialRef.current.map(r => [r.id, r]));
+    nuevas.forEach(r => porId.set(r.id, r));
+    extrasHistorialRef.current = [...porId.values()];
+    const unidas = [...reservas, ...nuevas];
+    setReservas(unidas);
+    setHistorial({ q, estado: "ok", n: lista.length, tope: lista.length >= TOPE });
+    await cargarNumerosCotizacion(unidas);
+    await cargarOcupaciones(unidas.map(r => r.id));
+    cargarRutas(unidas.map(r => r.id));
   };
 
   // Refresco tras una mutación (guardar, eliminar, aplicar masivo…): lista + totales.
@@ -5843,9 +5913,45 @@ export default function ReservasPage() {
       <section className="space-y-3">
         {/* Fila 1: búsqueda, estado, tipo, servicio */}
         <div className="flex flex-col md:flex-row gap-3 flex-wrap">
-          <div className="relative flex-1 min-w-[180px]">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
-            <input className="w-full border rounded-xl pl-9 pr-4 py-2.5 text-sm focus:outline-none" placeholder="Buscar por cliente, ruta o ID..." value={busqueda} onChange={e => setBusqueda(e.target.value)} />
+          <div className="flex-1 min-w-[220px]">
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
+              <input
+                className="w-full border rounded-xl pl-9 pr-9 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f]"
+                placeholder="Buscar por código (OS-…), cliente, ruta, origen o N° de cotización"
+                value={busqueda}
+                onChange={e => setBusqueda(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && busqueda.trim() && !verTodo) buscarEnHistorial(); if (e.key === "Escape") setBusqueda(""); }}
+                title="Sin importar mayúsculas, tildes ni el orden de las palabras. Enter: buscar también en todo el historial."
+              />
+              {busqueda && (
+                <button type="button" onClick={() => setBusqueda("")} aria-label="Borrar búsqueda"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full text-gray-400 hover:text-gray-700 hover:bg-gray-100 text-sm">✕</button>
+              )}
+            </div>
+            {busqueda.trim() && (
+              <div className="mt-1.5 flex items-center gap-2 flex-wrap text-[11px] text-gray-500">
+                <span>
+                  <b className="text-gray-700">{filtradas.length}</b> coincidencia{filtradas.length !== 1 ? "s" : ""}{" "}
+                  {verTodo ? "en todo el historial" : "en las fechas cargadas"}
+                </span>
+                {!verTodo && (historial?.q !== busqueda.trim() ? (
+                  <button type="button" onClick={buscarEnHistorial}
+                    className="px-2 py-0.5 rounded-lg border border-[#0b315f]/30 text-[#0b315f] font-bold hover:bg-[#eef3f8]">
+                    🕘 Buscar también en todo el historial
+                  </button>
+                ) : historial.estado === "buscando" ? (
+                  <span className="text-[#0b315f] font-bold">⏳ Buscando en el historial…</span>
+                ) : historial.estado === "ok" ? (
+                  <span className="text-green-700 font-bold">
+                    ✓ Historial revisado: {historial.n === 0 ? "no hay más servicios con esa búsqueda" : `${historial.n} servicio${historial.n !== 1 ? "s" : ""} en total`}
+                    {historial.tope && " (se muestran los 300 más recientes: afina la búsqueda)"}
+                  </span>
+                ) : (
+                  <span className="text-amber-700 font-bold">⚠ No se pudo buscar en el historial: {historial.motivo}</span>
+                ))}
+              </div>
+            )}
           </div>
           <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)}>
             <option value="todos">Todos los estados</option>
@@ -6437,12 +6543,13 @@ export default function ReservasPage() {
                   {/* La lista solo trae una ventana de fechas: una búsqueda sin resultados
                       ahí NO significa que el cliente no tenga servicios. Se dice y se
                       ofrece la salida, en vez de dejar que se lea como "no existe". */}
-                  {busqueda.trim() && !verTodo && (
+                  {busqueda.trim() && !verTodo && !(historial?.q === busqueda.trim() && historial.estado === "ok") && (
                     <div className="mt-3 text-[13px] text-gray-500">
                       <p>La búsqueda solo mira los servicios cargados en la ventana de fechas actual.</p>
                       <button
                         className="mt-2 px-3 py-1.5 rounded-lg border border-amber-400 bg-amber-50 text-amber-800 font-medium hover:bg-amber-100"
-                        onClick={() => setVerTodo(true)}
+                        onClick={buscarEnHistorial}
+                        disabled={historial?.q === busqueda.trim() && historial.estado === "buscando"}
                       >
                         🕘 Buscar «{busqueda.trim()}» en todo el historial
                       </button>
