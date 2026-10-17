@@ -38,6 +38,7 @@ import ModalCostear from "@/components/programacion/ModalCostear";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
 import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
 import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
+import TableroProgramacion, { type TableroDatos, type MarcaTablero } from "@/components/programacion/TableroProgramacion";
 import {
   textoDeTramo, validarEtiquetas, etiquetasDeTramo, patchEtiquetas, rotuloEtiquetas, mismasEtiquetas, etiquetasDelDia, claveRutaTurno,
   type TextoEtiquetas, type TramoConEtiquetas,
@@ -451,6 +452,13 @@ function fechaLima(offsetDias = 0): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
+// Hora de Lima (HH:MM:SS) para el «atrasado» del tablero.
+function horaLimaHms(): string {
+  return new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(11, 19);
+}
+
+// Lo que devuelve fn_programacion_tablero: ver components/programacion/TableroProgramacion.tsx.
+type Tablero = TableroDatos;
 function fmtFecha(f: string | null) {
   if (!f) return "-";
   return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
@@ -629,6 +637,13 @@ export default function ReservasPage() {
   // coincidencias en vez de cargar el historial entero. `q` es la búsqueda a la que responde.
   const [historial,    setHistorial]    = useState<{ q: string; estado: "buscando" | "ok" | "error"; n: number; tope: boolean; motivo?: string } | null>(null);
   const extrasHistorialRef = useRef<Reserva[]>([]);
+  // Tablero (rendimiento-03a/03b): HOY · operación del PERIODO · su dinero · su cierre. Cada
+  // número lo cuenta la base con la misma marca que abre la lista al pulsarlo.
+  const [tablero,      setTablero]      = useState<Tablero | null>(null);
+  const [tableroFalta, setTableroFalta] = useState(false);
+  const tableroSeq = useRef(0);
+  // Marca del tablero pulsada: la lista se reduce a sus ids (que la base devuelve).
+  const [filtroMarca,  setFiltroMarca]  = useState<{ clave: MarcaTablero; label: string; ids: Set<number>; estado: "cargando" | "ok" | "error"; motivo?: string } | null>(null);
   const [filtroEstado, setFiltroEstado] = useState("todos");
   const [filtroTipo,   setFiltroTipo]   = useState("todos");
   const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
@@ -1684,6 +1699,7 @@ export default function ReservasPage() {
 
   // Ventas/costos/margen del rango de `rangoFinanciero()`, excluyendo canceladas.
   const cargarResumenFinanciero = async () => {
+    cargarTablero();
     const { desde, hasta } = rangoFinanciero();
     // La base suma (rendimiento-02-programacion-resumen.sql). Sin la función, el camino de siempre.
     const rpc = await supabase.rpc("fn_programacion_finanzas", { p_desde: desde, p_hasta: hasta });
@@ -1704,6 +1720,64 @@ export default function ReservasPage() {
       margen += Number(r.margen || 0);
     }
     setResumenFin({ ventas, costos, margen, desde, hasta });
+  };
+
+  // El tablero: mismo periodo que el dinero (`rangoFinanciero`), «hoy» y la hora de Lima.
+  // Sin la función (rendimiento-03a/03b sin correr) la pantalla cae a las tarjetas de antes.
+  const cargarTablero = async () => {
+    const seq = ++tableroSeq.current;
+    const { desde, hasta } = rangoFinanciero();
+    const { data, error } = await supabase.rpc("fn_programacion_tablero", {
+      p_desde: desde, p_hasta: hasta, p_hoy: fechaLima(), p_ahora: horaLimaHms(),
+    });
+    if (seq !== tableroSeq.current) return; // llegó una respuesta más nueva
+    if (error || !data) { setTablero(null); setTableroFalta(true); return; }
+    setTableroFalta(false);
+    setTablero({ ...(data as Omit<Tablero, "desde" | "hasta">), desde, hasta });
+  };
+
+  // Trae a la lista los servicios de esos ids que todavía no están (quedan como «extras»,
+  // igual que lo encontrado en el historial). false si había que traer y no llegó nada.
+  const traerALaLista = async (ids: number[]): Promise<boolean> => {
+    const yaEstan = new Set(reservas.map(r => r.id));
+    const faltan = ids.filter(id => !yaEstan.has(id));
+    const nuevas: Reserva[] = [];
+    for (let i = 0; i < faltan.length; i += 100) {
+      const lote = faltan.slice(i, i + 100);
+      nuevas.push(...await fetchReservasCols(COLS_LISTA, (qq: any) => qq.in("id", lote)));
+    }
+    if (faltan.length && !nuevas.length) return false;
+    if (!nuevas.length) return true;
+    const porId = new Map(extrasHistorialRef.current.map(r => [r.id, r]));
+    nuevas.forEach(r => porId.set(r.id, r));
+    extrasHistorialRef.current = [...porId.values()];
+    const unidas = [...reservas, ...nuevas];
+    setReservas(unidas);
+    await cargarNumerosCotizacion(unidas);
+    await cargarOcupaciones(unidas.map(r => r.id));
+    cargarRutas(unidas.map(r => r.id));
+    return true;
+  };
+
+  // Pulsar un número del tablero: la base devuelve los ids de ESA marca (la misma definición
+  // con la que contó) y la lista se reduce a ellos. Pulsar el mismo otra vez lo quita.
+  const aplicarMarca = async (clave: MarcaTablero, label: string) => {
+    if (filtroMarca?.clave === clave) { setFiltroMarca(null); return; }
+    setFiltroEstado("todos");
+    setFiltroPorAsignar(false);
+    setFiltroMarca({ clave, label, ids: new Set(), estado: "cargando" });
+    const { desde, hasta } = rangoFinanciero();
+    const { data, error } = await supabase.rpc("fn_programacion_tablero_ids", {
+      p_marca: clave, p_desde: desde, p_hasta: hasta, p_hoy: fechaLima(), p_ahora: horaLimaHms(),
+    });
+    if (error) { setFiltroMarca({ clave, label, ids: new Set(), estado: "error", motivo: error.message }); return; }
+    const ids: number[] = ((data || []) as unknown[])
+      .map(x => Number(x !== null && typeof x === "object" ? Object.values(x)[0] : x))
+      .filter(n => Number.isFinite(n));
+    const ok = await traerALaLista(ids);
+    setFiltroMarca(ok
+      ? { clave, label, ids: new Set(ids), estado: "ok" }
+      : { clave, label, ids: new Set(), estado: "error", motivo: "no se pudieron leer esos servicios. Inténtalo de nuevo." });
   };
 
   // Catálogos (clientes, vehículos, conductores, terceros): no cambian al operar reservas,
@@ -1746,6 +1820,7 @@ export default function ReservasPage() {
   // ventana visible. Proyección ultraligera (sin paradas_json) sobre toda la tabla + el
   // conteo de sobrecupo por count server-side.
   const cargarResumen = async () => {
+    cargarTablero();
     const hoyP = fechaLima();
     const e7   = fechaLima(7);
     const sobrecupoP = supabase.from("reservas_ocupacion")
@@ -1826,26 +1901,11 @@ export default function ReservasPage() {
       return;
     }
     const lista: number[] = (ids || []).map((x: any) => Number(typeof x === "object" ? Object.values(x)[0] : x)).filter((n: number) => Number.isFinite(n));
-    const yaEstan = new Set(reservas.map(r => r.id));
-    const faltan = lista.filter(id => !yaEstan.has(id));
-    const nuevas: Reserva[] = [];
-    for (let i = 0; i < faltan.length; i += 100) {
-      const lote = faltan.slice(i, i + 100);
-      nuevas.push(...await fetchReservasCols(COLS_LISTA, (qq: any) => qq.in("id", lote)));
-    }
-    if (faltan.length && !nuevas.length) {
+    if (!await traerALaLista(lista)) {
       setHistorial({ q, estado: "error", n: 0, tope: false, motivo: "no se pudieron leer los servicios encontrados. Inténtalo de nuevo." });
       return;
     }
-    const porId = new Map(extrasHistorialRef.current.map(r => [r.id, r]));
-    nuevas.forEach(r => porId.set(r.id, r));
-    extrasHistorialRef.current = [...porId.values()];
-    const unidas = [...reservas, ...nuevas];
-    setReservas(unidas);
     setHistorial({ q, estado: "ok", n: lista.length, tope: lista.length >= TOPE });
-    await cargarNumerosCotizacion(unidas);
-    await cargarOcupaciones(unidas.map(r => r.id));
-    cargarRutas(unidas.map(r => r.id));
   };
 
   // Refresco tras una mutación (guardar, eliminar, aplicar masivo…): lista + totales.
@@ -1857,7 +1917,8 @@ export default function ReservasPage() {
   // Recarga la lista y los KPIs financieros cuando cambia la ventana (rango de fechas o "Ver
   // todo"). Debounce corto para no disparar dos veces al elegir Desde y Hasta seguidos.
   useEffect(() => {
-    const t = setTimeout(() => { cargarLista(); cargarResumenFinanciero(); }, 300);
+    // La marca pulsada se suelta: sus ids eran del periodo anterior.
+    const t = setTimeout(() => { setFiltroMarca(null); cargarLista(); cargarResumenFinanciero(); }, 300);
     return () => clearTimeout(t);
   }, [filtroDesde, filtroHasta, verTodo]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1885,7 +1946,12 @@ export default function ReservasPage() {
 
   // Al cambiar cualquier filtro de cliente (búsqueda, estado, tipo…) se vuelve a mostrar
   // desde las primeras 100 filas, para que "Cargar más" no arrastre el conteo anterior.
-  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, filtroPorAsignar, filtroEtiqueta]);
+  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, filtroPorAsignar, filtroEtiqueta, filtroMarca]);
+  // «Atrasados» y «en curso» cambian con el reloj: el tablero se refresca solo cada 2 min.
+  useEffect(() => {
+    const t = setInterval(() => { if (document.visibilityState === "visible") cargarTablero(); }, 120_000);
+    return () => clearInterval(t);
+  }, [filtroDesde, filtroHasta, verTodo]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nombreCliente    = (id: number | null) => { const c = clientes.find(c => c.id === id); return c ? (c.empresa || c.nombre) : "Sin cliente"; };
   const nombreVehiculo   = (id: number | null) => vehiculos.find(v => v.id === id)?.placa || "-";
@@ -3563,14 +3629,19 @@ export default function ReservasPage() {
         || (filtroOrigen === "adicional" ? esAdicional(r) : !esAdicional(r));
       const passEtiqueta    = !filtroEtiqueta || claveFiltroEtiqueta(r) === filtroEtiqueta;
       const passPorAsignar  = !filtroPorAsignar || (r.estado === "pendiente" && !r.vehiculo_id && !r.empresa_tercerizada_id);
+      // Una marca del tablero manda sobre las fechas: «hoy», «por asignar» o «sin cerrar de
+      // antes» caen fuera del Desde/Hasta a propósito, y los ids ya son los de la base.
+      if (filtroMarca && !filtroMarca.ids.has(r.id)) return false;
+      const passFechas = !!filtroMarca || (
+        (!filtroDesde || (!!r.fecha_servicio && r.fecha_servicio >= filtroDesde)) &&
+        (!filtroHasta || (!!r.fecha_servicio && r.fecha_servicio <= filtroHasta)));
       return coincideBusqueda(txt, terminos) &&
         passOrigen &&
         (filtroEstado === "todos" || r.estado === filtroEstado) &&
         (filtroTipo === "todos" || r.tipo === filtroTipo) &&
         passServicio &&
         passSentido &&
-        (!filtroDesde || (r.fecha_servicio && r.fecha_servicio >= filtroDesde)) &&
-        (!filtroHasta || (r.fecha_servicio && r.fecha_servicio <= filtroHasta)) &&
+        passFechas &&
         passPorAsignar &&
         passEtiqueta;
     });
@@ -3596,7 +3667,7 @@ export default function ReservasPage() {
       }
       return aFut ? -1 : 1;
     });
-  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy, filtroEtiqueta]);
+  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy, filtroEtiqueta, filtroMarca]);
 
   // Agrupación de servicios fijos por contrato (cotizacion_id)
   const gruposContratos = useMemo(() => {
@@ -5133,7 +5204,7 @@ export default function ReservasPage() {
                   <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold" style={{ background: cfg.bg, color: cfg.color }}>
                     <div className="w-2 h-2 rounded-full" style={{ background: cfg.dot }} />
                     {cfg.label}
-                    {count > 0 && <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-black text-white" style={{ background: cfg.dot }}>{count}</span>}
+                    {!tablero && count > 0 && <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-black text-white" style={{ background: cfg.dot }}>{count}</span>}
                   </div>
                   <p className="text-[9px] text-gray-400 mt-1 text-center max-w-[80px]">{desc}</p>
                 </div>
@@ -5144,6 +5215,18 @@ export default function ReservasPage() {
         </div>
       </div>
 
+      {/* TABLERO: hoy · operación · dinero · cierre del periodo (rendimiento-03a/03b). Sin la
+          función, las tarjetas de antes. */}
+      {tablero ? (
+        <TableroProgramacion t={tablero} hoy={hoy} verMontos={verMontos} verTodo={verTodo}
+          periodoPorDefecto={!(filtroDesde || filtroHasta || verTodo)}
+          marcaActiva={filtroMarca?.clave ?? null} onMarca={aplicarMarca} />
+      ) : (<>
+      {tableroFalta && (
+        <div className="rounded-xl px-4 py-2 text-xs bg-amber-50 border border-amber-200 text-amber-800">
+          El tablero por periodo necesita correr <b>supabase/rendimiento-03a-programacion-marcas.sql</b> y <b>rendimiento-03b-programacion-tablero.sql</b>. Mientras tanto se ven los totales de siempre.
+        </div>
+      )}
       {/* KPIs */}
       <section className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
         {[
@@ -5205,6 +5288,8 @@ export default function ReservasPage() {
           })}
         </div>
       </section>
+
+      </>)}
 
       {/* FORMULARIO PROGRAMACION */}
       {mostrarForm && editandoId && (
@@ -5911,6 +5996,17 @@ export default function ReservasPage() {
 
       {/* FILTROS */}
       <section className="space-y-3">
+        {filtroMarca && (
+          <div className="flex items-center gap-2 flex-wrap rounded-xl px-3 py-2 text-xs border"
+            style={{ background: filtroMarca.estado === "error" ? "#fffbeb" : "#eef3f8", borderColor: filtroMarca.estado === "error" ? "#fcd34d" : "#0b315f33" }}>
+            <span className="font-bold text-[#0b315f]">Mostrando: {filtroMarca.label}</span>
+            {filtroMarca.estado === "cargando" && <span className="text-gray-500">⏳ buscando…</span>}
+            {filtroMarca.estado === "ok" && <span className="text-gray-600">{filtroMarca.ids.size} servicio(s) · {filtradas.length} con los demás filtros</span>}
+            {filtroMarca.estado === "error" && <span className="text-amber-800">⚠ No se pudo filtrar: {filtroMarca.motivo}</span>}
+            <button type="button" onClick={() => setFiltroMarca(null)}
+              className="ml-auto px-2 py-0.5 rounded-lg border bg-white text-gray-600 font-bold hover:bg-gray-50">✕ Quitar filtro</button>
+          </div>
+        )}
         {/* Fila 1: búsqueda, estado, tipo, servicio */}
         <div className="flex flex-col md:flex-row gap-3 flex-wrap">
           <div className="flex-1 min-w-[220px]">
