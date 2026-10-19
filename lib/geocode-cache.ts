@@ -23,9 +23,17 @@ const supabaseAdmin =
 /** `direccion` = formatted_address de Google; puede faltar en entradas cacheadas antiguas. */
 export type Coordenadas = { lat: number; lng: number; direccion?: string | null };
 
-/** Misma dirección escrita con otro espaciado o mayúsculas = misma entrada de caché. */
+/**
+ * Misma dirección escrita con otro espaciado o mayúsculas = misma entrada de caché.
+ *
+ * Las claves de la geocodificación INVERSA («inv:») y las de traslados («zon:», «zoninv:»,
+ * lib/traslados/ubicar.ts) viven en la misma tabla. Una «dirección» que empiece igual —se puede
+ * mandar sin sesión a /api/geocodificar— escribiría en el espacio de otro y dejaría memorizado un
+ * «no encontrado» falso durante 30 días: se le antepone «txt:». Solo cambia la clave de esas rarezas.
+ */
 function normalizar(consulta: string): string {
-  return consulta.trim().toLowerCase().replace(/\s+/g, " ");
+  const k = consulta.trim().toLowerCase().replace(/\s+/g, " ");
+  return /^(inv|zon|zoninv|txt):/.test(k) ? `txt:${k}` : k;
 }
 
 // `texto` guarda la dirección resuelta por Google: el formatted_address en la geocodificación
