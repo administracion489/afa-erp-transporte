@@ -2,11 +2,12 @@
 // lib/traslados/api.ts — El contrato de POST /api/traslados/simular, compartido por la pantalla
 // (/tarifario → Zonas y traslados → Simulador) y el servidor. Motor PURO.
 //
-// La misma entrada la usará la herramienta del agente IA del CRM: el simulador no es una
-// imitación del cotizador automático, ES el cotizador automático sin enviar nada.
+// La misma entrada la usa la herramienta `cotizar_traslado` del agente IA del CRM: el simulador
+// no es una imitación del cotizador automático, ES el cotizador automático sin enviar nada.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { SENALES, type PuntoUbicado, type ResultadoTraslado, type SenalComplejidad, type Sentido } from "./motor";
+import type { CodigoRevision } from "./envio-ia";
 
 /** Un punto: el texto que escribió el cliente, o coordenadas (un pin del mapa o de WhatsApp). */
 export type LugarEntrada = string | { lat: number; lng: number; texto?: string };
@@ -32,8 +33,16 @@ export type CodigoUbicar = "ok" | "no_encontrado" | "sin_clave" | "error" | "vac
 
 export type LugarUbicado = { codigo: CodigoUbicar; detalle: string; punto: PuntoUbicado | null };
 
+/**
+ * Qué haría la IA del CRM con esta cotización: enviarla sola o dejarla para revisar, con sus
+ * motivos (lib/traslados/envio-ia.ts → `planEnvio`). En el simulador se supone WhatsApp con el
+ * número escrito, el agente en modo autónomo y el PDF armado; el perfil y las zonas son los reales.
+ * Solo viene con un resultado cotizable.
+ */
+export type EnvioSimulado = { decision: "automatico" | "revision"; motivos: CodigoRevision[] };
+
 export type RespuestaSimulador =
-  | { ok: true; resultado: ResultadoTraslado; lugares: { origen: LugarUbicado; destino: LugarUbicado } }
+  | { ok: true; resultado: ResultadoTraslado; lugares: { origen: LugarUbicado; destino: LugarUbicado }; envio?: EnvioSimulado }
   | { ok: false; codigo: "sin_migracion" | "entrada_invalida" | "error"; detalle: string };
 
 const MAX_TEXTO = 300;

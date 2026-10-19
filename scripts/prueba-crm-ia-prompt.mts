@@ -1,7 +1,7 @@
 // ANTHROPIC_API_KEY=x npx tsx scripts/prueba-crm-ia-prompt.mts
 // Las instrucciones de la IA: lo de la empresa va AL FINAL y con prioridad dicha; el resumen del
 // pedido aparece solo si está encendido, y entonces la regla general no prohíbe el «Solo me falta».
-import { construirSystem } from "../lib/crm-ia";
+import { construirSystem, BLOQUE_TRASLADOS } from "../lib/crm-ia";
 let fallos = 0;
 const ok = (c: boolean, m: string) => { if (!c) { fallos++; console.log("✗", m); } else console.log("✓", m); };
 const agente = {
@@ -25,5 +25,20 @@ ok(!p.includes("Mensajes cortos"), "ya no dice «Mensajes cortos» (chocaba con 
 const sin = construirSystem({ ...agente, comportamiento: { resumen_pedido: false } }, contacto, conv, false, "AFA");
 ok(!sin.includes("## Resumen del pedido") && sin.includes("No repitas una pregunta que ya hiciste"), "apagado: sin resumen y vuelve la regla de no repetir");
 ok(!sin.includes("SALUDO OBLIGATORIO") && sin.includes("NO vuelvas a saludar"), "segundo mensaje del día: no saluda");
+// Traslados (lib/traslados/envio-ia.ts): el bloque va ANTES de los objetivos de la empresa, solo
+// cuando se ofrece `cotizar_traslado`; sin él, las instrucciones son las de siempre, byte a byte.
+const conT = construirSystem(agente, contacto, conv, true, "AFA Transportes", { traslados: true });
+const sinT = construirSystem(agente, contacto, conv, true, "AFA Transportes", { traslados: false });
+const p2 = construirSystem(agente, contacto, conv, true, "AFA Transportes");
+const t = (x: string) => conT.indexOf(x);
+ok(sinT === p2 && !sinT.includes("## Traslados simples"), "sin traslados: idéntico a no pasar la opción, sin el bloque");
+ok(t("## Traslados simples") > t("## Reglas generales") && t("## Traslados simples") < t("## Tus objetivos"), "con traslados: el bloque va antes de «## Tus objetivos»");
+ok(conT.replace(BLOQUE_TRASLADOS + "\n", "") === sinT, "el bloque es lo ÚNICO que cambia");
+ok(conT.trimEnd().endsWith("datos de otros clientes."), "con traslados sigue cerrando en «datos de otros clientes.»");
+ok(/cotizar_traslado/.test(BLOQUE_TRASLADOS) && /NUNCA calcules ni inventes un precio/.test(BLOQUE_TRASLADOS), "usa la herramienta y nunca inventa precios");
+ok(/en un solo mensaje/.test(BLOQUE_TRASLADOS) && /mensaje de derivación/.test(BLOQUE_TRASLADOS), "pregunta todo junto; deriva con el mensaje de derivación");
+ok(/NO menciones ningún importe/.test(BLOQUE_TRASLADOS) && /EXACTAMENTE como vienen/.test(BLOQUE_TRASLADOS), "en revisión sin importes; en automático tal cual");
+ok(/proponer_reserva/.test(BLOQUE_TRASLADOS) && /disponibilidad/.test(BLOQUE_TRASLADOS), "nunca confirma disponibilidad ni reserva; si acepta, proponer_reserva");
+ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NUNCA confirmes que ya cotizaste"), "aclara que no contradice «NUNCA confirmes…», que sigue");
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

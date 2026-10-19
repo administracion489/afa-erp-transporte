@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
-import { enviarWhatsAppMedia } from "@/lib/crm-meta";
+import { enviarWhatsAppMedia, explicarErrorEnvioWhatsApp } from "@/lib/crm-meta";
 import { phonePara } from "@/lib/whatsapp-numeros";
 import { BUCKET_CRM_MEDIA, asegurarBucket } from "@/lib/crm-media";
 
@@ -73,10 +73,7 @@ export async function POST(req: NextRequest) {
       const phoneId = (conv as any).phone_number_id ?? (await phonePara("crm"));
       metaId = await enviarWhatsAppMedia(destino, tipo as any, firmada.signedUrl, caption || undefined, { phoneId, filename: nombre });
     } catch (e: any) {
-      const bruto = String(e?.message ?? e);
-      error = /131047|re-engagement|24 hours/i.test(bruto)
-        ? "Pasaron más de 24 h desde el último mensaje del cliente: desde el CRM ya no se puede enviar. Envíalo desde el celular (WhatsApp Business) o con una plantilla."
-        : bruto;
+      error = explicarErrorEnvioWhatsApp(String(e?.message ?? e));
     }
 
     const media_url = sb.storage.from(BUCKET_CRM_MEDIA).getPublicUrl(ruta).data.publicUrl;

@@ -349,9 +349,13 @@ const LINEA_EJECUTIVO = LINEA_DISPONIBILIDAD;
  * El mensaje que manda el CÓDIGO cuando el del modelo menciona un importe que no es de la
  * cotización (o en revisión). En revisión no lleva ningún importe.
  */
-export function mensajeCotizacionCodigo(x: { nombre: string; numero: string; decision: DecisionEnvio; total?: string; validez?: string }): string {
+export function mensajeCotizacionCodigo(x: { nombre: string; numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean }): string {
   const nombre = String(x.nombre ?? "").trim().split(/\s+/)[0] ?? "";
   const hola = nombre ? `Hola ${nombre},` : "Hola,";
+  if (x.yaEnviada) {
+    const total = x.total ? ` El total es ${x.total} (IGV incluido)${x.validez ? `, válida hasta el ${x.validez}` : ""}.` : "";
+    return `${hola} la cotización N° ${x.numero} de tu traslado ya te la envié por este chat.${total} ${LINEA_EJECUTIVO}`;
+  }
   if (x.decision === "automatico") {
     const total = x.total ? ` El total es ${x.total} (IGV incluido)` : "";
     const validez = x.validez ? `${total ? "," : " La cotización es"} válida hasta el ${x.validez}` : "";
@@ -413,6 +417,37 @@ export function respuestaParaModelo(x: {
     }
   }
   return JSON.stringify(out);
+}
+
+/** Respuesta al modelo cuando el pedido lo atiende un ejecutivo por algo que no decidió el motor (un tope, un fallo). */
+export function respuestaDerivar(): string {
+  return JSON.stringify({ accion: "derivar", codigo: "requiere_ejecutivo", instruccion: "Este pedido lo atiende un ejecutivo. Responde con el mensaje de derivación y no menciones precios." });
+}
+
+/** Respuesta al modelo cuando hay que volver a preguntar algo que el validador no aceptó. */
+export function respuestaPreguntar(faltan: string[]): string {
+  const f = faltan.map((x) => String(x).slice(0, 200));
+  return JSON.stringify({
+    accion: "preguntar", codigo: "falta_dato", faltan: f,
+    instruccion: `Pregúntale al cliente, en un solo mensaje: ${f.join("; ")}. Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos.`,
+  });
+}
+
+/** Respuesta al modelo de una cotización que quedó en revisión y cuyo resultado no se pudo reconstruir: sin importes. */
+export function respuestaEnRevision(numero: string): string {
+  return JSON.stringify({
+    accion: "cotizar", codigo: "cotizado", cotizacion: { numero, envio: "revision" },
+    instruccion: `La cotización N° ${numero} quedó registrada y la revisa un ejecutivo, que se la enviará por este chat. NO menciones precios ni importes.`,
+  });
+}
+
+/** Respuesta al modelo cuando la MISMA cotización ya se le envió al cliente: puede repetir su total, nada más. */
+export function respuestaYaEnviada(numero: string, cifras: { total: string; validez: string | null } | null): string {
+  return JSON.stringify({
+    accion: "cotizar", codigo: "cotizado",
+    cotizacion: { numero, envio: "ya_enviada", ...(cifras ? { total: cifras.total, incluye_igv: true, validez: cifras.validez } : {}) },
+    instruccion: `La cotización N° ${numero} de este mismo pedido ya se le envió por este chat: no la vuelvas a cotizar. Recuérdasela${cifras ? " con el total y la validez EXACTAMENTE como vienen aquí" : " sin mencionar importes"} y pregúntale si desea reservar o si tiene alguna duda.`,
+  });
 }
 
 // ── 9. Topes ─────────────────────────────────────────────────────────────────
@@ -551,6 +586,15 @@ export function itemsMonto(v: unknown): { dias: number; cantidad: number; precio
 }
 
 /**
+ * La acción se puede reclamar para enviar: está `pendiente`, o en `enviando` con el plazo vencido
+ * (el envío anterior murió) o sin plazo escrito (para que no quede atascada).
+ */
+export function accionReclamable(accion: { estado?: string | null; resuelta_at?: string | null }, ahoraMs: number): boolean {
+  if (accion.estado === "pendiente") return true;
+  return accion.estado === "enviando" && (!accion.resuelta_at || !(Date.parse(accion.resuelta_at) > ahoraMs));
+}
+
+/**
  * ¿Se puede ENVIAR (desde la tarjeta o en automático) la cotización de esta acción? Exige que la
  * acción sea una cotización de traslado y siga pendiente (o en `enviando` con el plazo VENCIDO:
  * el envío anterior murió; `resuelta_at` guarda ese plazo mientras se envía, y sin plazo escrito
@@ -566,8 +610,7 @@ export function planAccionTraslado(
 ): { codigo: PlanAccion; detalle: string } {
   if (!accion || accion.tipo !== "cotizacion_traslado")
     return { codigo: "cotizacion_no_existe", detalle: "La acción no es una cotización de traslado." };
-  const vencida = accion.estado === "enviando" && (!accion.resuelta_at || !(Date.parse(accion.resuelta_at) > ahoraMs));
-  if (accion.estado !== "pendiente" && !vencida) {
+  if (!accionReclamable(accion, ahoraMs)) {
     return {
       codigo: "no_pendiente",
       detalle: accion.estado === "enviando" ? "Se está enviando en este momento: espera unos minutos." : `La cotización ya fue ${accion.estado ?? "resuelta"}.`,

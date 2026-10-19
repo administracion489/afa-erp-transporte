@@ -22,8 +22,8 @@
 
 import type { EntradaSimulador, LugarEntrada } from "./api";
 import type { ConfigTraslados } from "./datos";
-import type { ResultadoTraslado, Zona } from "./motor";
-import { aPENdesdeCot, normalizarMoneda, totalesEnMoneda, type Moneda } from "../cotizacion-moneda";
+import { importesTraslado, tarifaDelPar, type CategoriaTraslado, type ResultadoTraslado, type TarifaTraslado, type UbicacionZona, type Zona } from "./motor";
+import { aPENdesdeCot, normalizarMoneda, revisarTipoCambio, totalesEnMoneda, type Moneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { numeroCotizacion } from "../cotizacion-pdf";
 import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
@@ -244,6 +244,69 @@ export function cuadraConMotor(fila: Pick<FilaCotizacionLeida, "items_json" | "i
   if (!cerca(t.subtotal, p.subtotal) || !cerca(t.igv, p.igv) || !cerca(t.total, p.total)) return false;
   const pen = totalesEnMoneda(items, "PEN", null, true)!;
   return cerca(Number(fila.precio_cliente), r2(pen.total));
+}
+
+/**
+ * El resultado del motor RECONSTRUIDO desde una cotización ya guardada, sin volver a geocodificar:
+ * las zonas salen de los ids de `traslado_json`, el precio de la tarifa VIGENTE de ese par y el
+ * IGV de hoy. Sirve para volver a decidir el envío de una cotización pendiente (el cliente repite
+ * el pedido) y para que `cuadraConMotor` compare la fila contra el tarifario de hoy: si alguien
+ * cambió el precio, la zona se apagó o la fila se editó, no cuadra y la cotización no sale sola.
+ * null si falta cualquier pieza (una zona o categoría borrada o apagada, sin tarifa, USD sin TC).
+ */
+export function resultadoDeFila(
+  fila: Pick<FilaCotizacionLeida, "moneda" | "tipo_cambio" | "traslado_json">,
+  cat: { zonas: readonly Zona[]; categorias: readonly CategoriaTraslado[]; tarifas: readonly TarifaTraslado[] },
+  igvPct: number,
+): ResultadoTraslado | null {
+  const tj = fila.traslado_json;
+  if (!tj?.zona_origen || !tj.zona_destino || !tj.categoria?.clave) return null;
+  const viva = <T extends { activo?: boolean | null }>(x: T | undefined) => (x && x.activo !== false ? x : undefined);
+  const za = viva(cat.zonas.find((z) => z.id === Number(tj.zona_origen!.id)));
+  const zb = viva(cat.zonas.find((z) => z.id === Number(tj.zona_destino!.id)));
+  const categoria = viva(cat.categorias.find((c) => c.clave === tj.categoria!.clave));
+  if (!za || !zb || !categoria) return null;
+  const moneda = normalizarMoneda(fila.moneda);
+  const t = tarifaDelPar(za, zb, categoria.clave, moneda, cat.tarifas, cat.zonas);
+  if (!t) return null;
+  const tc = moneda === "USD" ? revisarTipoCambio(fila.tipo_cambio).tc : null;
+  if (moneda === "USD" && tc == null) return null;
+  const tramos = Number(tj.tramos) === 2 ? 2 : 1;
+  const precioTramo = Number(t.tarifa.precio_tramo);
+  const imp = importesTraslado(precioTramo, tramos, igvPct);
+  const ubic = (z: Zona): UbicacionZona => ({ codigo: z.tipo === "punto" ? "punto" : "distrito", zona: z, distrito: null, distancia_m: null, detalle: "" });
+  return {
+    codigo: "cotizable", accion: "cotizar", motivo: "", faltan: [], explicacion: [],
+    origen: ubic(za), destino: ubic(zb),
+    vehiculo: { codigo: "ok", categoria, alternativas: [], asientos: 0, detalle: "" },
+    moneda,
+    precio: {
+      moneda, precio_tramo: precioTramo, tramos, subtotal: imp.subtotal, igv_pct: igvPct, igv: imp.igv, total: imp.total,
+      subtotal_pen: aPENdesdeCot(imp.subtotal, moneda, tc) as number, total_pen: aPENdesdeCot(imp.total, moneda, tc) as number,
+      tipo_cambio: tc, tipo_cambio_fecha: tj.tc_fecha ?? null, nivel: t.nivel,
+    },
+    validez_hasta: tj.validez_hasta ?? null,
+  };
+}
+
+/**
+ * Las cifras que imprime el PDF de una fila (precio por tramo, subtotal, IGV y total, en la moneda
+ * del cliente) y el total y la validez ya escritos. Son las únicas que el agente puede repetir
+ * cuando la cotización ya se envió. null si los importes no se pueden imprimir.
+ */
+export function cifrasDeFila(fila: Pick<FilaCotizacionLeida, "items_json" | "moneda" | "tipo_cambio" | "incluye_igv" | "traslado_json">): { figuras: number[]; total: string; validez: string | null } | null {
+  const items = Array.isArray(fila.items_json) ? (fila.items_json as ItemTraslado[]) : [];
+  if (!items.length) return null;
+  const moneda = normalizarMoneda(fila.moneda);
+  const t = totalesEnMoneda(items.map((it) => ({
+    dias: Number(it.dias ?? 1), cantidad: Number(it.cantidad), precio_unit: Number(it.precio_unit), descuento_pct: Number(it.descuento_pct ?? 0),
+  })), moneda, fila.tipo_cambio, fila.incluye_igv !== false);
+  if (!t || !Number.isFinite(t.total)) return null;
+  return {
+    figuras: [...t.unitarios, ...t.lineas, t.subtotal, t.igv, t.total].map((n) => r2(n)),
+    total: fmtImporte(t.total, moneda, "es"),
+    validez: fecha(fila.traslado_json?.validez_hasta ?? null, "corta"),
+  };
 }
 
 // ── 3. El contenido del PDF ──────────────────────────────────────────────────

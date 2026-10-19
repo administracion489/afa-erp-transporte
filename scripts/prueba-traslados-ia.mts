@@ -22,6 +22,9 @@ import { empresaConDefectos } from "../lib/empresa-perfil";
 import { numeroCotizacion } from "../lib/cotizacion-pdf";
 import { LOGO_DEFAULT } from "../lib/pdf-chrome";
 import { PDFDocument, StandardFonts } from "pdf-lib";
+import { cotizarTrasladoIA, CLAVE_CONSULTA_IA, type CtxCotizarIA } from "../lib/traslados/cotizar-ia-datos";
+import { enviarCotizacionTraslado, type DepsEnvio } from "../lib/traslados/enviar-cotizacion-datos";
+import type { CatalogoTraslados } from "../lib/traslados/datos";
 
 let fallos = 0, oks = 0;
 const ok = (c: boolean, m: string) => { if (c) oks++; else { fallos++; if (fallos <= 60) console.log("  FALLA " + m); } };
@@ -346,6 +349,17 @@ seccion("9. La fila reproduce al motor (cuadraConMotor)");
   const tjTxt = JSON.stringify(fila.traslado_json);
   ok(!/precio|total|subtotal|igv|importe/i.test(tjTxt) && !tjTxt.includes(String(r.precio!.precio_tramo * 2)), "traslado_json no lleva importes");
   ok(fila.traslado_json.pax === 10 && fila.traslado_json.maletas === 10 && fila.traslado_json.categoria.clave === "SPRINTER_20" && fila.traslado_json.tramos === 2 && fila.traslado_json.tc_fecha === HOY, "traslado_json con los hechos");
+  // resultadoDeFila: el resultado reconstruido de una fila guardada (para volver a decidir el envío sin Google).
+  const leidaUsd = { ...fila, id: 1 };
+  const rr = C.resultadoDeFila(leidaUsd, { zonas, categorias, tarifas }, 18);
+  ok(!!rr && C.cuadraConMotor(leidaUsd, rr) && rr.precio!.total === r.precio!.total && rr.origen?.zona?.id === r.origen?.zona?.id, "resultadoDeFila reproduce al motor y cuadra");
+  const tarifasCaras = tarifas.map((t) => ({ ...t, precio_tramo: t.precio_tramo + 1 }));
+  ok(!C.cuadraConMotor(leidaUsd, C.resultadoDeFila(leidaUsd, { zonas, categorias, tarifas: tarifasCaras }, 18)!), "si la tarifa cambió, la fila guardada ya no cuadra");
+  ok(C.resultadoDeFila(leidaUsd, { zonas: zonas.map((x) => x.id === AER.id ? { ...x, activo: false } : x), categorias, tarifas }, 18) === null, "con la zona apagada no se reconstruye");
+  ok(C.resultadoDeFila({ ...leidaUsd, tipo_cambio: null }, { zonas, categorias, tarifas }, 18) === null, "en dólares sin TC no se reconstruye");
+  ok(C.resultadoDeFila({ ...leidaUsd, traslado_json: null }, { zonas, categorias, tarifas }, 18) === null, "sin traslado_json no se reconstruye");
+  const cif = C.cifrasDeFila(leidaUsd)!;
+  ok(cif.total === `US$ ${r.precio!.total.toFixed(2)}` && cif.figuras.includes(r.precio!.total) && cif.validez === "25/10/2026", `cifrasDeFila: ${cif.total} · ${cif.validez}`);
   const enSoles = C.filaCotizacionTraslado(M.evaluarTraslado(pedido(), ctx), entradaDe(pedido()), { convId: "c", clienteId: null, atencion: null, config, firma: "f", hoy: HOY });
   ok(enSoles.tipo_cambio === null && enSoles.consideraciones_json.generales.length === 3 && enSoles.tipo_servicio === "solo_ida" && enSoles.fecha_retorno === null, "en soles sin TC ni la consideración de dólares; solo ida sin retorno");
 }
@@ -659,6 +673,313 @@ seccion("16. supabase/traslados-05-cotizacion-ia.sql");
     ok(!/default\s+true/i.test(sinComentarios), "ningún interruptor nace encendido");
   }
 }
+
+// ── 17. De punta a punta, con una base falsa ─────────────────────────────────
+// cotizarTrasladoIA y enviarCotizacionTraslado sobre una base en memoria que imita a PostgREST (los
+// filtros que usan, el conteo, los errores de columna que faltan y el índice único del freno), sin
+// Google ni Meta: el motor se llama con las semillas de los SQL y el envío de WhatsApp se graba.
+seccion("17. De punta a punta: cotizar, reclamar, enviar, reintentar");
+type FilaF = Record<string, any>;
+class SbFalso {
+  tablas: Record<string, FilaF[]> = {};
+  faltan: Record<string, string[]> = {};
+  fallas: { tabla: string; op: string; mensaje: string }[] = [];
+  archivos = new Map<string, Uint8Array>();
+  firmaFalla = false;
+  n = 0;
+  constructor(public reloj: () => number) {}
+  t(nombre: string) { return (this.tablas[nombre] ??= []); }
+  from(tabla: string) { return new ConsultaF(this, tabla); }
+  storage = {
+    createBucket: async () => ({ error: null }),
+    from: (bucket: string) => ({
+      upload: async (ruta: string, b: Uint8Array) => { this.archivos.set(`${bucket}/${ruta}`, b); return { error: null }; },
+      createSignedUrl: async (ruta: string) => this.firmaFalla || !this.archivos.has(`${bucket}/${ruta}`)
+        ? { data: null, error: { message: "no se pudo firmar" } }
+        : { data: { signedUrl: `https://sb.test/storage/v1/object/sign/${bucket}/${ruta}?token=x` }, error: null },
+      getPublicUrl: (ruta: string) => ({ data: { publicUrl: `https://sb.test/storage/v1/object/public/${bucket}/${ruta}` } }),
+    }),
+  };
+}
+class ConsultaF implements PromiseLike<any> {
+  op: "select" | "insert" | "update" = "select";
+  cols = "*"; head = false; contar = false; ret = false;
+  filtros: ((f: FilaF) => boolean)[] = [];
+  orden: { c: string; asc: boolean } | null = null;
+  desde = 0; hasta = Infinity; uno: "single" | "maybe" | null = null; payload: any = null;
+  constructor(private sb: SbFalso, private tabla: string) {}
+  select(cols = "*", o?: { count?: string; head?: boolean }) {
+    if (this.op === "select") { this.cols = cols; this.contar = !!o?.count; this.head = !!o?.head; } else this.ret = true;
+    return this;
+  }
+  insert(v: any) { this.op = "insert"; this.payload = v; return this; }
+  update(v: any) { this.op = "update"; this.payload = v; return this; }
+  eq(c: string, v: any) { this.filtros.push((f) => v != null && f[c] != null && String(f[c]) === String(v)); return this; }
+  gte(c: string, v: any) { this.filtros.push((f) => f[c] != null && f[c] >= v); return this; }
+  lt(c: string, v: any) { this.filtros.push((f) => f[c] != null && f[c] < v); return this; }
+  like(c: string, pat: string) { const re = new RegExp(`^${pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*")}$`); this.filtros.push((f) => re.test(String(f[c] ?? ""))); return this; }
+  in(c: string, vs: any[]) { this.filtros.push((f) => vs.map(String).includes(String(f[c]))); return this; }
+  is(c: string, v: null) { this.filtros.push((f) => (v === null ? f[c] == null : f[c] === v)); return this; }
+  not(c: string, op: string, v: null) { if (op === "is" && v === null) this.filtros.push((f) => f[c] != null); return this; }
+  order(c: string, o?: { ascending?: boolean }) { this.orden = { c, asc: o?.ascending !== false }; return this; }
+  range(a: number, b: number) { this.desde = a; this.hasta = b; return this; }
+  limit(n: number) { this.hasta = this.desde + n - 1; return this; }
+  single() { this.uno = "single"; return this; }
+  maybeSingle() { this.uno = "maybe"; return this; }
+  then<A, B>(ok?: ((v: any) => A | PromiseLike<A>) | null, mal?: ((e: any) => B | PromiseLike<B>) | null): PromiseLike<A | B> {
+    return Promise.resolve().then(() => this.ejecutar()).then(ok, mal);
+  }
+  private ejecutar(): any {
+    const sb = this.sb, tabla = this.tabla, filas = sb.t(tabla);
+    const falla = sb.fallas.find((x) => x.tabla === tabla && x.op === this.op);
+    if (falla) return { data: null, count: null, error: { message: falla.mensaje } };
+    const faltan = sb.faltan[tabla] ?? [];
+    const colsPedidas = this.cols.replace(/\w+\([^)]*\)/g, "").split(",").map((x) => x.trim()).filter((x) => x && x !== "*");
+    const malCol = this.op === "select" ? colsPedidas.find((c) => faltan.includes(c)) : Object.keys(this.payload ?? {}).find((c) => faltan.includes(c));
+    if (malCol) return this.op === "select"
+      ? { data: null, error: { code: "42703", message: `column ${tabla}.${malCol} does not exist` } }
+      : { data: null, error: { code: "PGRST204", message: `Could not find the '${malCol}' column of '${tabla}' in the schema cache` } };
+    const ahora = new Date(sb.reloj()).toISOString();
+    if (this.op === "insert") {
+      const fila: FilaF = { ...this.payload };
+      fila.id ??= tabla === "cotizaciones" ? 100 + ++sb.n : `00000000-0000-4000-8000-${String(++sb.n).padStart(12, "0")}`;
+      if (tabla === "crm_acciones_ia") fila.creada_at ??= ahora; else fila.created_at ??= ahora;
+      if (tabla === "alerta_enviada" && filas.some((x) => x.clave === fila.clave && x.ref === fila.ref && x.fecha === fila.fecha))
+        return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } };
+      filas.push(fila);
+      return this.resultado([fila]);
+    }
+    let sel = filas.filter((f) => this.filtros.every((p) => p(f)));
+    if (this.op === "update") {
+      for (const f of sel) Object.assign(f, this.payload);
+      return this.ret ? this.resultado(sel) : { data: null, error: null };
+    }
+    if (this.orden) { const { c, asc } = this.orden; sel = [...sel].sort((a, b) => (a[c] < b[c] ? -1 : a[c] > b[c] ? 1 : 0) * (asc ? 1 : -1)); }
+    if (this.contar && this.head) return { data: null, count: sel.length, error: null };
+    sel = sel.slice(this.desde, this.hasta === Infinity ? undefined : this.hasta + 1);
+    return this.resultado(sel);
+  }
+  private resultado(sel: FilaF[]): any {
+    const emb = this.cols.match(/(\w+)\(([^)]*)\)/);
+    const conEmb = sel.map((f) => {
+      const o = { ...f };
+      if (emb && emb[1] === "crm_contactos") o.crm_contactos = this.sb.t("crm_contactos").find((x) => x.id === f.contacto_id) ?? null;
+      return o;
+    });
+    if (this.uno === "single") return conEmb.length === 1 ? { data: conEmb[0], error: null } : { data: null, error: { message: "JSON object requested, multiple (or no) rows returned" } };
+    if (this.uno === "maybe") return { data: conEmb[0] ?? null, error: null };
+    return { data: conEmb, error: null };
+  }
+}
+
+const RELOJ = Date.parse("2026-10-19T15:00:00Z");
+const reloj = RELOJ;
+const nuevaBase = () => {
+  const sb = new SbFalso(() => reloj);
+  sb.tablas.traslados_config = [{ id: 1, validez_dias: 30, espera_gratis_min: 30, consideraciones: config.consideraciones, consideraciones_usd: config.consideraciones_usd, ia_cotiza: true, envio_automatico: true }];
+  sb.tablas.zonas_traslado = zonas.map((x) => ({ ...x }));
+  sb.tablas.traslado_categorias = categorias.map((x) => ({ ...x }));
+  sb.tablas.tarifas_traslado = tarifas.map((x, i) => ({ ...x, id: i + 1 }));
+  sb.tablas.config_tributaria = [{ id: 1, igv_pct: 18 }];
+  sb.tablas.empresa_perfil = [{ id: 1, nombre: "Transportes Ñandú", razon_social: "Transportes Ñandú S.A.C.", ruc: "20123456789", telefono: "+51 999 888 777", web: "www.ejemplo.pe", logo_url: null, color_primario: "#0b5394" }];
+  sb.tablas.clientes = [{ id: 7, telefono: "966 707 225" }, { id: 8, telefono: "+51 955 000 111" }];
+  sb.tablas.crm_contactos = [
+    { id: "ct-1", nombre: "Ana Pérez", wa_id: "51966707225", telefono: "999111222", cliente_id: null },
+    { id: "ct-2", nombre: "Luis", wa_id: "51955000111", telefono: null, cliente_id: null },
+    { id: "ct-3", nombre: "Sin wa", wa_id: null, telefono: "988777666", cliente_id: null },
+  ];
+  sb.tablas.crm_conversaciones = [
+    { id: "cv-1", canal: "whatsapp", phone_number_id: "PH-CRM", contacto_id: "ct-1" },
+    { id: "cv-2", canal: "whatsapp", phone_number_id: null, contacto_id: "ct-2" },
+    { id: "cv-3", canal: "whatsapp", phone_number_id: null, contacto_id: "ct-3" },
+  ];
+  sb.tablas.crm_mensajes = [
+    { id: "m1", conversacion_id: "cv-1", direccion: "entrante", contenido: "Hola, necesito un traslado del aeropuerto a mi hotel en Miraflores", created_at: "2026-10-19T14:50:00Z" },
+    { id: "m2", conversacion_id: "cv-2", direccion: "entrante", contenido: "precio de traslado al aeropuerto", created_at: "2026-10-19T14:50:00Z" },
+  ];
+  return sb;
+};
+const PUNTO_DE: Record<string, M.PuntoUbicado> = {
+  "aeropuerto jorge chavez": AEROP, "hotel belmond miraflores": MIRA, "san isidro": SI, "barranco": BARR,
+};
+const simularFalso = (consultas: { n: number }) => async (_sb: unknown, e: EntradaSimulador, hoy: string) => {
+  consultas.n++;
+  const punto = (l: EntradaSimulador["origen"]) => PUNTO_DE[M.claveNombre(typeof l === "string" ? l : l.texto ?? "")] ?? pt([], { texto: String(l) });
+  const cat: CatalogoTraslados = { zonas, categorias, tarifas, config: { ...config, ia_cotiza: true, envio_automatico: true }, sinMigracionIA: false };
+  const resultado = M.evaluarTraslado({
+    origen: punto(e.origen), destino: punto(e.destino), fecha_servicio: e.fecha_servicio, hora_servicio: e.hora_servicio, sentido: e.sentido,
+    fecha_retorno: e.fecha_retorno, hora_retorno: e.hora_retorno, pax: e.pax, maletas: e.maletas, telefono: e.telefono,
+    paradas_intermedias: e.paradas_intermedias, fechas_adicionales: e.fechas_adicionales, vehiculos_pedidos: e.vehiculos_pedidos, senales: e.senales,
+  }, { zonas, categorias, tarifas, tipoCambio: { fecha: hoy, venta: 3.431 }, hoy, igvPct: 18, validezDias: 30 });
+  return { respuesta: { ok: true as const, resultado, lugares: {} as any }, catalogo: cat, igvPct: 18 };
+};
+type Envio = { to: string; tipo: string; url: string; caption?: string; opts: any };
+const envios: Envio[] = [];
+let metaFalla: string | null = null;
+const depsEnvio: DepsEnvio = {
+  enviarMedia: (async (to: string, tipo: any, url: string, caption?: string, opts?: any) => {
+    if (metaFalla) throw new Error(metaFalla);
+    envios.push({ to, tipo, url, caption, opts }); return `wamid.${envios.length}`;
+  }) as any,
+  phonePara: async () => "PH-DEFECTO", asegurarBucket: async () => {}, bajarLogo: async () => null, ahoraMs: () => reloj,
+  uuid: () => `123e4567-e89b-42d3-a456-${String(envios.length + Math.floor(Math.random() * 1e6)).padStart(12, "0")}`,
+};
+const pedidoIA = { origen_texto: "Aeropuerto Jorge Chávez", destino_texto: "Hotel Belmond Miraflores", fecha_servicio: "2026-10-25", hora_servicio: "06:30", sentido: "ida", pax: 2, maletas: 1, telefono: "+13055551234" };
+const ctxDe = (sb: SbFalso, convId: string, contactoId: string, modoAuto = true, canal = "whatsapp"): CtxCotizarIA => {
+  const ct = sb.t("crm_contactos").find((x) => x.id === contactoId)!;
+  return { sb, conv: { id: convId, canal }, contacto: ct, remitente: { canal, waId: ct.wa_id }, modoAuto, consultasTurno: { n: 0 } };
+};
+{
+  const sb = nuevaBase();
+  const consultasMotor = { n: 0 };
+  const deps = { simular: simularFalso(consultasMotor) as any, bajarLogo: async () => null, ahoraMs: () => reloj, azar: () => String(Math.random()).slice(2, 8) };
+
+  // A) Automático: aeropuerto → Miraflores, peruano, todo encendido.
+  const ctxA = ctxDe(sb, "cv-1", "ct-1");
+  const a = await cotizarTrasladoIA(ctxA, pedidoIA, deps);
+  ok(a.accion === "cotizar" && a.cotizacion?.decision === "automatico" && !!a.envioPendiente, `A: cotiza y sale solo (${a.cotizacion?.decision} ${JSON.stringify(a.derivar ?? "")})`);
+  ok(!!a.envioPendiente && Buffer.from(a.envioPendiente.bytes.slice(0, 5)).toString("latin1") === "%PDF-", "A: el PDF está armado");
+  const cot = sb.t("cotizaciones")[0];
+  ok(sb.t("cotizaciones").length === 1 && cot.crm_conversacion_id === "cv-1" && cot.traslado_json?.firma && cot.moneda === "PEN" && cot.precio_cliente === 118, `A: una cotización en soles, de la conversación (${cot?.precio_cliente})`);
+  ok(cot.cliente_id === 7, `A: el cliente sale del wa_id, no del teléfono del contacto (${cot.cliente_id})`);
+  const acc = sb.t("crm_acciones_ia")[0];
+  ok(sb.t("crm_acciones_ia").length === 1 && acc.tipo === "cotizacion_traslado" && acc.estado === "pendiente" && acc.resultado_id === cot.id && acc.payload.decision === "automatico", "A: la acción nace pendiente, apunta a la cotización");
+  ok(!/S\/|US\$|\d+\.\d\d/.test(acc.resumen), `A: el resumen de la tarjeta no lleva importes (${acc.resumen})`);
+  ok(sb.t("alerta_enviada").length === 1 && sb.t("alerta_enviada")[0].clave === CLAVE_CONSULTA_IA && sb.t("alerta_enviada")[0].ref.startsWith("conv:cv-1:"), "A: la consulta queda contada");
+  ok(ctxA.consultasTurno.n === 1 && consultasMotor.n === 1, "A: una consulta en el turno");
+  const jA = JSON.parse(a.respuestaModelo);
+  ok(jA.cotizacion?.envio === "automatico" && jA.cotizacion?.total === "S/ 118.00", `A: el modelo recibe el total (${a.respuestaModelo.slice(0, 120)})`);
+  ok(a.cotizacion!.figuras.includes(118), "A: el total es una cifra permitida");
+
+  // B) El envío: al wa_id del hilo, con URL firmada, por el número del hilo.
+  const b = await enviarCotizacionTraslado(sb as any, { accionId: acc.id, por: "automatico", bytes: a.envioPendiente!.bytes, nombre: a.envioPendiente!.nombre, caption: a.envioPendiente!.caption }, depsEnvio);
+  ok(b.ok && b.codigo === "ok" && b.metaId === "wamid.1", `B: enviada (${b.codigo} ${b.detalle})`);
+  ok(envios.length === 1 && envios[0].to === "51966707225" && envios[0].tipo === "document" && envios[0].opts.phoneId === "PH-CRM", `B: al wa_id ${envios[0]?.to}, nunca al teléfono del contacto, por el número del hilo`);
+  ok(envios[0].url.includes("/object/sign/crm-media/cotizaciones-ia/2026-10/"), `B: URL firmada del bucket privado (${envios[0].url})`);
+  ok(envios[0].opts.filename === a.envioPendiente!.nombre && /^[\x20-\x7e]+$/.test(envios[0].opts.filename), "B: el archivo con nombre ASCII");
+  const msg = sb.t("crm_mensajes").find((x) => x.tipo === "document")!;
+  ok(!!msg && msg.generado_por_ia === true && msg.meta_message_id === "wamid.1" && msg.error == null && msg.media_url.includes("/object/public/crm-media/"), "B: el mensaje queda en el hilo, como de la IA");
+  ok(cot.estado === "enviado" && cot.medio_envio === "WhatsApp", "B: la cotización pasa a «enviado» por WhatsApp");
+  ok(acc.estado === "aprobada" && acc.payload.envio?.por === "automatico" && acc.payload.envio?.meta_message_id === "wamid.1" && acc.resuelta_por == null, "B: la acción aprobada con quién envió");
+
+  // C) No se envía dos veces.
+  const c = await enviarCotizacionTraslado(sb as any, { accionId: acc.id, por: "ejecutivo", usuarioId: "u-1" }, depsEnvio);
+  ok(!c.ok && c.codigo === "no_pendiente" && envios.length === 1, `C: la segunda vez no sale (${c.codigo})`);
+
+  // D) El mismo pedido otra vez, ya enviado: «ya te la envié», sin otra cotización ni otra consulta.
+  const ctxD = ctxDe(sb, "cv-1", "ct-1");
+  const d = await cotizarTrasladoIA(ctxD, { ...pedidoIA, origen_texto: "AEROPUERTO JORGE CHAVEZ" }, deps);
+  ok(d.cotizacion?.yaEnviada === true && sb.t("cotizaciones").length === 1 && sb.t("alerta_enviada").length === 1 && consultasMotor.n === 1, "D: el mismo pedido ya enviado no se vuelve a cotizar ni consulta Google");
+  ok(JSON.parse(d.respuestaModelo).cotizacion?.envio === "ya_enviada" && !d.envioPendiente, "D: el modelo sabe que ya se envió");
+
+  // E) Revisión: el agente en copiloto. Sin importes para el modelo, nota interna, la IA no se pausa.
+  const ctxE = ctxDe(sb, "cv-2", "ct-2", false);
+  const e = await cotizarTrasladoIA(ctxE, { ...pedidoIA, destino_texto: "San Isidro" }, deps);
+  ok(e.cotizacion?.decision === "revision" && !e.envioPendiente && !e.derivar, `E: en revisión (${JSON.stringify(sb.t("crm_acciones_ia").at(-1)?.payload?.motivos)})`);
+  ok(!textoContradicePrecioJSON(e.respuestaModelo), "E: el modelo no recibe ningún importe");
+  ok(sb.t("crm_notas").some((n) => n.conversacion_id === "cv-2" && /modo autónomo/.test(n.texto)), "E: nota interna con el motivo y su arreglo");
+  const accE = sb.t("crm_acciones_ia").find((x) => x.conversacion_id === "cv-2")!;
+  ok(sb.t("cotizaciones").find((x) => x.id === accE.resultado_id)?.cliente_id === 8, "E: cliente por los 9 dígitos del wa_id");
+
+  // F) El mismo pedido, ahora en modo autónomo: se REUSA la cotización y se vuelve a decidir.
+  const nCot = sb.t("cotizaciones").length, nCons = consultasMotor.n;
+  const f = await cotizarTrasladoIA(ctxDe(sb, "cv-2", "ct-2", true), { ...pedidoIA, destino_texto: "san isidro" }, deps);
+  ok(f.cotizacion?.decision === "automatico" && !!f.envioPendiente && f.cotizacion.cotizacionId === accE.resultado_id, `F: reusa la cotización y ahora sale sola (${f.cotizacion?.decision})`);
+  ok(sb.t("cotizaciones").length === nCot && consultasMotor.n === nCons && sb.t("crm_acciones_ia").filter((x) => x.conversacion_id === "cv-2").length === 1, "F: sin otra cotización, sin otra consulta, sin otra acción");
+
+  // G) Meta rechaza: la acción vuelve a pendiente con su error y una nota; el reintento sale.
+  metaFalla = "(#131047) Re-engagement message";
+  const g1 = await enviarCotizacionTraslado(sb as any, { accionId: accE.id, por: "automatico", bytes: f.envioPendiente!.bytes, nombre: f.envioPendiente!.nombre, caption: f.envioPendiente!.caption }, depsEnvio);
+  ok(!g1.ok && g1.codigo === "envio_fallido" && /24 h/.test(g1.detalle), `G: el fallo se explica (${g1.detalle})`);
+  ok(accE.estado === "pendiente" && accE.resuelta_at == null && /24 h/.test(accE.payload.ultimo_error?.detalle ?? ""), "G: la acción vuelve a pendiente con el error escrito");
+  ok(sb.t("crm_notas").some((n) => n.conversacion_id === "cv-2" && /No se pudo enviar/.test(n.texto)), "G: y una nota interna");
+  metaFalla = null;
+  const g2 = await enviarCotizacionTraslado(sb as any, { accionId: accE.id, por: "ejecutivo", usuarioId: "u-9" }, depsEnvio);
+  ok(g2.ok && accE.estado === "aprobada" && accE.resuelta_por === "u-9" && accE.payload.envio.por === "ejecutivo", `G: el ejecutivo la reenvía (arma el PDF de la fila) (${g2.codigo} ${g2.detalle})`);
+  ok(envios.at(-1)!.to === "51955000111", "G: al wa_id de esa conversación");
+  ok(sb.t("crm_mensajes").filter((x) => x.conversacion_id === "cv-2" && x.tipo === "document").at(-1)?.generado_por_ia === false, "G: el del ejecutivo cuenta como humano (aparta a la IA)");
+
+  // H) Dos envíos a la vez: solo uno gana.
+  sb.tablas.crm_contactos.push({ id: "ct-4", nombre: "Rosa", wa_id: "51911222333", telefono: null, cliente_id: null });
+  sb.tablas.crm_conversaciones.push({ id: "cv-4", canal: "whatsapp", phone_number_id: null, contacto_id: "ct-4" });
+  const h = await cotizarTrasladoIA(ctxDe(sb, "cv-4", "ct-4"), { ...pedidoIA, destino_texto: "Barranco" }, deps);
+  const accH = sb.t("crm_acciones_ia").find((x) => x.conversacion_id === "cv-4")!;
+  const antes = envios.length;
+  const [h1, h2] = await Promise.all([
+    enviarCotizacionTraslado(sb as any, { accionId: accH.id, por: "automatico", bytes: h.envioPendiente!.bytes, nombre: "x.pdf", caption: "c" }, depsEnvio),
+    enviarCotizacionTraslado(sb as any, { accionId: accH.id, por: "ejecutivo", usuarioId: "u-1" }, depsEnvio),
+  ]);
+  ok([h1, h2].filter((x) => x.ok).length === 1 && envios.length === antes + 1, `H: dos envíos simultáneos → uno solo (${h1.codigo} / ${h2.codigo})`);
+
+  // I) Un envío que murió (enviando con el plazo vencido) se puede reintentar; uno en curso, no.
+  sb.tablas.crm_contactos.push({ id: "ct-5", nombre: "Juan", wa_id: "51922333444", telefono: null, cliente_id: null });
+  sb.tablas.crm_conversaciones.push({ id: "cv-5", canal: "whatsapp", phone_number_id: null, contacto_id: "ct-5" });
+  const i0 = await cotizarTrasladoIA(ctxDe(sb, "cv-5", "ct-5"), pedidoIA, deps);
+  const accI = sb.t("crm_acciones_ia").find((x) => x.conversacion_id === "cv-5")!;
+  accI.estado = "enviando"; accI.resuelta_at = new Date(reloj + 60_000).toISOString();
+  ok((await enviarCotizacionTraslado(sb as any, { accionId: accI.id, por: "ejecutivo", usuarioId: "u" }, depsEnvio)).codigo === "no_pendiente", "I: enviando dentro del plazo → no se toca");
+  accI.resuelta_at = new Date(reloj - 1).toISOString();
+  const i1 = await enviarCotizacionTraslado(sb as any, { accionId: accI.id, por: "automatico", bytes: i0.envioPendiente!.bytes, nombre: "x.pdf", caption: "c" }, depsEnvio);
+  ok(i1.ok, `I: con el plazo vencido, se reintenta (${i1.codigo})`);
+
+  // J) Sin enlace firmado no se envía; sin wa_id tampoco; las dos vuelven a pendiente.
+  sb.tablas.crm_contactos.push({ id: "ct-6", nombre: "Eva", wa_id: "51933444555", telefono: null, cliente_id: null });
+  sb.tablas.crm_conversaciones.push({ id: "cv-6", canal: "whatsapp", phone_number_id: null, contacto_id: "ct-6" });
+  await cotizarTrasladoIA(ctxDe(sb, "cv-6", "ct-6"), pedidoIA, deps);
+  const accJ = sb.t("crm_acciones_ia").find((x) => x.conversacion_id === "cv-6")!;
+  sb.firmaFalla = true;
+  const nEnv = envios.length;
+  const j1 = await enviarCotizacionTraslado(sb as any, { accionId: accJ.id, por: "ejecutivo", usuarioId: "u" }, depsEnvio);
+  ok(!j1.ok && j1.codigo === "sin_url" && envios.length === nEnv && accJ.estado === "pendiente", `J: sin URL firmada no se envía (${j1.codigo})`);
+  sb.firmaFalla = false;
+  sb.t("crm_contactos").find((x) => x.id === "ct-6")!.wa_id = null;
+  const j2 = await enviarCotizacionTraslado(sb as any, { accionId: accJ.id, por: "ejecutivo", usuarioId: "u" }, depsEnvio);
+  ok(!j2.ok && j2.codigo === "sin_remitente" && envios.length === nEnv && accJ.estado === "pendiente", `J: sin wa_id no se envía (aunque el contacto tenga teléfono) (${j2.codigo})`);
+
+  // K) Rechazada → la ve un ejecutivo (se deriva), sin otra cotización.
+  accJ.estado = "rechazada";
+  const k = await cotizarTrasladoIA({ ...ctxDe(sb, "cv-6", "ct-6"), remitente: { canal: "whatsapp", waId: "51933444555" } }, pedidoIA, deps);
+  ok(k.accion === "derivar" && /rechazó/.test(k.derivar?.motivo ?? ""), "K: un pedido igual a uno rechazado se deriva");
+
+  // L) Topes: con 10 consultas hoy en la conversación, se deriva SIN gastar Google; un conteo ilegible también.
+  sb.tablas.crm_contactos.push({ id: "ct-7", nombre: "Leo", wa_id: "51944555666", telefono: null, cliente_id: null });
+  sb.tablas.crm_conversaciones.push({ id: "cv-7", canal: "whatsapp", phone_number_id: null, contacto_id: "ct-7" });
+  for (let x = 0; x < E.TOPES.MAX_CONSULTAS_CONV_DIA; x++) sb.t("alerta_enviada").push({ clave: CLAVE_CONSULTA_IA, ref: `conv:cv-7:${x}`, fecha: "2026-10-19" });
+  const nMotor = consultasMotor.n;
+  const l1 = await cotizarTrasladoIA(ctxDe(sb, "cv-7", "ct-7"), pedidoIA, deps);
+  ok(l1.accion === "derivar" && consultasMotor.n === nMotor, `L: tope de la conversación → deriva sin consultar (${l1.derivar?.motivo})`);
+  sb.fallas.push({ tabla: "alerta_enviada", op: "select", mensaje: "timeout" });
+  const l2 = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), { ...pedidoIA, pax: 3 }, deps);
+  ok(l2.accion === "derivar" && consultasMotor.n === nMotor, "L: un conteo que no se pudo leer bloquea");
+  sb.fallas.pop();
+  const ctxL = ctxDe(sb, "cv-1", "ct-1"); ctxL.consultasTurno.n = E.TOPES.MAX_CONSULTAS_POR_TURNO;
+  ok((await cotizarTrasladoIA(ctxL, { ...pedidoIA, pax: 3 }, deps)).accion === "derivar" && consultasMotor.n === nMotor, "L: tope por turno");
+
+  // M) Sin la columna creada_at (no debería pasar: es la real) se cuenta con created_at.
+  const sbM = nuevaBase();
+  sbM.faltan.crm_acciones_ia = ["creada_at"];
+  const m = await cotizarTrasladoIA(ctxDe(sbM, "cv-1", "ct-1"), pedidoIA, { ...deps, simular: simularFalso({ n: 0 }) as any });
+  ok(m.accion === "cotizar", `M: sin creada_at se lee con created_at (${m.accion} ${m.derivar?.motivo ?? ""})`);
+
+  // N) Sin las columnas de traslados-05 en cotizaciones: no se cotiza (y se dice cuál falta).
+  const sbN = nuevaBase();
+  sbN.faltan.cotizaciones = ["crm_conversacion_id", "traslado_json"];
+  const nn = await cotizarTrasladoIA(ctxDe(sbN, "cv-1", "ct-1"), pedidoIA, { ...deps, simular: simularFalso({ n: 0 }) as any });
+  ok(nn.accion === "derivar" && sbN.t("cotizaciones").length === 0, `N: sin traslados-05 no se cotiza (${nn.derivar?.motivo})`);
+  const sbN2 = nuevaBase();
+  sbN2.tablas.traslados_config[0].ia_cotiza = false;
+  ok((await cotizarTrasladoIA(ctxDe(sbN2, "cv-1", "ct-1"), pedidoIA, deps)).accion === "derivar", "N: con el interruptor apagado no se cotiza");
+
+  // O) Un pedido incompleto pregunta, sin crear nada.
+  const sbO = nuevaBase();
+  const o = await cotizarTrasladoIA(ctxDe(sbO, "cv-1", "ct-1"), { ...pedidoIA, maletas: undefined }, { ...deps, simular: simularFalso({ n: 0 }) as any });
+  ok(o.accion === "preguntar" && (o.faltan ?? []).some((x) => /maletas/.test(x)) && sbO.t("cotizaciones").length === 0 && sbO.t("crm_acciones_ia").length === 0, "O: pregunta lo que falta sin crear nada");
+
+  // P) La moneda es la del wa_id aunque el modelo diga un teléfono extranjero (ya probado arriba con
+  //    +1 305…: la cotización A salió en soles).
+  ok(cot.moneda === "PEN" && cot.tipo_cambio == null, "P: el teléfono que escribe el modelo no cambia la moneda");
+}
+function textoContradicePrecioJSON(j: string): boolean { return E.textoContradicePrecio(j, []) || /"total"/.test(j); }
 
 console.log(`\n${oks} ok · ${fallos} fallos`);
 for (const p of pendientes) console.log(`  ${p}`);

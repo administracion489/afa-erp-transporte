@@ -2,6 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
+import { enviarCotizacionTraslado, type CodigoEnvio } from "@/lib/traslados/enviar-cotizacion-datos";
+import { accionReclamable } from "@/lib/traslados/envio-ia";
+
+// Enviar la cotización de traslado arma el PDF, lo sube y lo manda por WhatsApp: más que los 10 s
+// por defecto en un mal día de Meta o de Storage.
+export const maxDuration = 60;
+
+/** El estado HTTP de cada código del envío de una cotización de traslado. */
+const STATUS_ENVIO: Record<CodigoEnvio, number> = {
+  ok: 200, no_pendiente: 409, reclamo_perdido: 409, cotizacion_no_existe: 404,
+  cotizacion_ajena: 422, canal_no_whatsapp: 422, sin_remitente: 422, sin_precio: 422,
+  error_lectura: 500, pdf_no_generado: 502, sin_url: 502, envio_fallido: 502,
+};
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -47,6 +60,31 @@ export async function POST(req: NextRequest) {
       .eq("id", accion_id)
       .single();
     if (!accion) return NextResponse.json({ ok: false, error: "Acción no encontrada" }, { status: 404 });
+
+    // Cotización de traslado de la IA: «aprobar» es ENVIARLA al cliente (el PDF se arma de la fila,
+    // así que sale con lo que se haya corregido en /cotizaciones); «rechazar» no toca la cotización.
+    if (accion.tipo === "cotizacion_traslado") {
+      if (decision === "rechazar") {
+        if (!accionReclamable(accion, Date.now()))
+          return NextResponse.json({ ok: false, estado: accion.estado, error: `La acción ya está ${accion.estado}.` }, { status: 409 });
+        let q = sb.from("crm_acciones_ia")
+          .update({ estado: "rechazada", resuelta_at: new Date().toISOString(), resuelta_por: usuario_id })
+          .eq("id", accion_id).eq("estado", accion.estado);
+        if (accion.estado === "enviando") q = accion.resuelta_at ? q.eq("resuelta_at", accion.resuelta_at) : q.is("resuelta_at", null);
+        const { data: upd, error } = await q.select("id");
+        if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+        if (!upd?.length) return NextResponse.json({ ok: false, error: "Otro usuario la está enviando o ya la resolvió." }, { status: 409 });
+        return NextResponse.json({ ok: true, estado: "rechazada" });
+      }
+      const r = await enviarCotizacionTraslado(sb, { accionId: accion_id, por: "ejecutivo", usuarioId: usuario_id });
+      const estado = r.ok ? "aprobada"
+        : r.codigo === "no_pendiente" || r.codigo === "reclamo_perdido" || r.codigo === "cotizacion_no_existe" ? accion.estado : "pendiente";
+      return NextResponse.json(
+        { ok: r.ok, estado, codigo: r.codigo, detalle: r.detalle, ...(r.ok ? {} : { error: r.detalle }) },
+        { status: STATUS_ENVIO[r.codigo] ?? 500 },
+      );
+    }
+
     if (accion.estado !== "pendiente")
       return NextResponse.json({ ok: false, error: `La acción ya fue ${accion.estado}` }, { status: 409 });
 
