@@ -72,6 +72,10 @@
     {
       "path": "/api/comisiones/preliminar",
       "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/tipo-cambio/sunat",
+      "schedule": "20 14 * * *"
     }
   ]
 }

@@ -882,6 +882,7 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       "Ver de un golpe qué rutas todavía no tienen precio fijado.",
       "Separar el precio por evento (eventual) del precio por día (contratos fijos).",
       "Cargar o exportar el tarifario completo en CSV.",
+      "Fijar los precios de traslados por zona (aeropuerto ↔ distritos) que el agente IA del CRM cotiza solo, y probarlos en el simulador.",
     ],
     conceptos: ["igv", "margen"],
     faqs: [
@@ -904,6 +905,16 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
         pregunta: "¿Qué diferencia hay entre el modo EVENTUAL y el FIJO?",
         respuesta:
           "Es lo que significa el número de la celda:\n\n• **EVENTUAL** — precio **total del evento**. Un traslado al aeropuerto: S/ 960 y se acabó.\n• **FIJO** — precio **por día** de un contrato de transporte de personal. Ese mismo número, multiplicado por **26 días**, es lo que le facturarás al mes (el ERP te lo muestra a un costado).\n\nSon dos tarifas distintas para la misma ruta y no se comparan entre sí. Un cliente fijo paga menos por día porque te da volumen y previsibilidad; un eventual paga más porque es una sola vez.\n\nDentro de cada modo puedes además separar por **nivel de servicio**: ⭐ Full Equipo o 📦 Estándar.",
+      },
+      {
+        pregunta: "¿Qué es la vista «Zonas y traslados»?",
+        respuesta:
+          "Es el tarifario de los **traslados simples** (un punto de recojo y un destino, solo ida o ida y retorno) organizado **por zonas** en vez de por dirección. Es la lista de precios que va a usar el agente IA del CRM para cotizar solo.\n\n• **Zonas**: los 50 distritos de Lima y Callao agrupados por sector, más **puntos** como el aeropuerto (una geocerca: dentro de su radio manda sobre el distrito). Los distritos grandes —SJL, Ancón, Ventanilla, Lurín, Lurigancho— se parten en **subzonas** marcando su centro en el mapa: una dirección cae en la subzona más cercana, o en la que nombre su barrio.\n• **Precios**: por **par de zonas** (aeropuerto ↔ Miraflores vale igual en los dos sentidos), por vehículo y en dos monedas: **soles** para números peruanos (+51) y **dólares** (precio turista) para el resto. Son **netos por tramo, sin IGV**; ida y retorno son dos tramos. Una subzona sin precio propio usa el de su distrito.\n• **Vehículos**: se elige el **más chico donde caben**. Sin bodega, cada maleta de 23 kg ocupa un asiento (10 pasajeros con maletas → Sprinter 20); el minibús lleva hasta 15 maletas en su maletera y el bus 45 en sus bodegas.\n• **Simulador**: escribe un pedido y ves exactamente qué haría la IA: cotizarlo, preguntarle algo al cliente, o pasarlo a un ejecutivo, con el porqué.",
+      },
+      {
+        pregunta: "¿Por qué el simulador dice «pasa a un ejecutivo» en una dirección que sí conozco?",
+        respuesta:
+          "Porque **ante la duda el ERP no adivina**: un pedido derivado le cuesta un minuto al ejecutivo; una cotización con el precio de otra zona se descubre cuando el cliente ya la aceptó. Las causas más comunes:\n\n• **Google solo dijo «Lima»**. Lo hace también con direcciones de San Isidro o Lince, así que no se toma como Cercado.\n• **El distrito no se reconoció**: el simulador te muestra el nombre que dio Google; agrégalo como **alias** del distrito en Zonas.\n• **No hay precio** para ese par de zonas y ese vehículo. El ERP **no ofrece un vehículo más grande** solo porque ese sí tiene precio: sería cobrarle al cliente una unidad que no necesita.\n• **No es simple**: paradas intermedias, varias fechas, TDR o licitación, evento, que el vehículo espere, o un pedido de descuento.\n• **Es en dólares y no hay tipo de cambio** de SUNAT de los últimos 7 días (los importes se guardan en soles). Se actualiza solo cada mañana; también hay un botón en Ajustes.\n\nOjo con un caso que el ERP evita a propósito: **«San Juan de Miraflores» contiene la palabra «Miraflores»** y es otro distrito, a 15 km. Por eso las zonas se comparan por el nombre completo, nunca por «contiene».",
       },
     ],
     relacionadas: [
