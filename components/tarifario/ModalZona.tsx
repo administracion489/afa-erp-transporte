@@ -6,11 +6,19 @@
 // La forma de cada tipo la exige la base (CHECK `zonas_traslado_forma`): una subzona sin centro o
 // un punto sin radio no se pueden guardar, y el botón lo dice fijo debajo en vez de dejar que la
 // base devuelva un error en inglés.
+//
+// «📄 Envío automático de la cotización» (traslados-05): marcarla hace que la IA del CRM envíe el
+// PDF SIN revisión cuando el recojo o el destino cae en la zona. Por eso marcarla pide un confirm()
+// que nombra la zona y sus subzonas, y una subzona dice si ya lo HEREDA de su distrito (la herencia
+// la decide `zonaConEnvio`, la misma función del agente).
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { leerEntero, motivoAliasInvalido, nombreRepetido, SECTORES, type TarifaFila, type ZonaFila } from "./traslados-pantalla";
-import { COLS_ZONA, filasEscritas, LIMITES, motivoCeroFilas, normalizarZona } from "./traslados-datos";
+import {
+  envioDeZona, leerEntero, mensajeEnvioZona, motivoAliasInvalido, nombreRepetido, SECTORES, SQL_COTIZACION_IA,
+  type TarifaFila, type ZonaFila,
+} from "./traslados-pantalla";
+import { filasEscritas, LIMITES, motivoCeroFilas, normalizarZona } from "./traslados-datos";
 import { AZUL, EditorAlias, iCls, Modal, type Decir } from "./traslados-comun";
 import { LugarInput, LUGAR_VACIO, ubicarParaMapa, type LugarValor } from "./google-lugar";
 import MapaZona, { type Vuelo } from "./MapaZona";
@@ -63,7 +71,7 @@ export async function borrarZona(z: ZonaFila, zonas: readonly ZonaFila[], tarifa
   return true;
 }
 
-export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada, onCerrar, decir }: {
+export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada, onCerrar, decir, colsZona, sinMigracionIA, envioMaestro }: {
   modo: ModoModalZona;
   zonas: readonly ZonaFila[];
   tarifas: readonly TarifaFila[];
@@ -71,6 +79,11 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
   onBorrada: (id: number) => void;
   onCerrar: () => void;
   decir: Decir;
+  /** Las columnas que se piden de vuelta (sin `envio_automatico` si falta traslados-05). */
+  colsZona: string;
+  sinMigracionIA: boolean;
+  /** El maestro de Ajustes: solo para decir en la confirmación si la marca vale ya o después. */
+  envioMaestro: boolean;
 }) {
   const editando = modo.tipo === "editar" ? modo.zona : null;
   const tipo: TipoZona = editando ? editando.tipo : (modo.tipo === "nuevo" ? modo.zonaTipo : "distrito");
@@ -85,6 +98,7 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
   const [sectorOtro, setSectorOtro] = useState(() => ((SECTORES as readonly string[]).includes(sectorInicial) ? "" : sectorInicial));
   const [alias, setAlias] = useState<string[]>(() => [...(editando?.alias ?? [])]);
   const [notas, setNotas] = useState(() => editando?.notas ?? "");
+  const [envio, setEnvio] = useState(() => editando?.envio_automatico === true);
   const [centro, setCentro] = useState<{ lat: number; lng: number } | null>(() =>
     editando && editando.lat != null && editando.lng != null ? { lat: Number(editando.lat), lng: Number(editando.lng) } : null);
   const [radio, setRadio] = useState(() => (editando?.radio_m != null ? String(editando.radio_m) : tipo === "punto" ? "1000" : ""));
@@ -130,8 +144,23 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
               : sectorSel === OTRO_SECTOR && !sectorOtro.trim() ? "Escribe el nombre del sector, o elige uno de la lista."
                 : null;
 
+  // ¿La subzona ya sale sola por su distrito? Se juzga SIN su propia marca (si la tiene, la casilla
+  // ya lo dice) y fuera de la lista, para que `zonaConEnvio` no lea la marca guardada.
+  const heredaDe = useMemo(() => {
+    if (tipo !== "subzona" || !padre) return null;
+    const sinMarca: ZonaFila = {
+      id: editando?.id ?? -1, nombre: editando?.nombre ?? "", tipo, padre_id: padre.id, alias: [],
+      activo: editando?.activo !== false, orden: 0, envio_automatico: false,
+    };
+    const e = envioDeZona(sinMarca, zonas.filter((x) => x.id !== sinMarca.id));
+    return e.codigo === "hereda" ? e.distrito : null;
+  }, [tipo, padre, editando, zonas]);
+
   const guardar = async () => {
     if (motivo || guardando) return;
+    // Marcarla (no tenerla ya) manda PDFs sin revisión: se confirma nombrando la zona.
+    if (!sinMigracionIA && envio && editando?.envio_automatico !== true
+      && !window.confirm(mensajeEnvioZona({ id: editando?.id ?? null, nombre: nombreLimpio, tipo }, zonas, envioMaestro))) return;
     setGuardando(true);
     setError(null);
     const sector = tipo === "subzona" ? (padre?.sector ?? null) : (sectorSel === OTRO_SECTOR ? sectorOtro.trim() : sectorSel) || null;
@@ -144,14 +173,16 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
       lng: conMapa ? centro!.lng : null,
       radio_m: tipo === "punto" && lecturaRadio.tipo === "ok" ? lecturaRadio.valor : null,
     };
+    // Sin traslados-05 la columna no existe: mandarla haría fallar todo el guardado.
+    if (!sinMigracionIA) payload.envio_automatico = envio;
     let res;
     if (editando) {
-      res = await supabase.from("zonas_traslado").update(payload).eq("id", editando.id).select(COLS_ZONA);
+      res = await supabase.from("zonas_traslado").update(payload).eq("id", editando.id).select(colsZona);
     } else {
       const mismoTipo = zonas.filter((z) => z.tipo === tipo);
       const orden = tipo === "subzona" ? Number(padre?.orden) || 0 : Math.max(0, ...mismoTipo.map((z) => Number(z.orden) || 0)) + 1;
       res = await supabase.from("zonas_traslado").insert({ ...payload, tipo, padre_id: tipo === "subzona" ? padre?.id ?? null : null, orden, activo: true })
-        .select(COLS_ZONA);
+        .select(colsZona);
     }
     setGuardando(false);
     if (res.error?.code === "23505") {
@@ -256,6 +287,26 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
           </p>
         </div>
       )}
+
+      <div className={`rounded-xl border px-3 py-3 space-y-1 ${envio && !sinMigracionIA ? "border-green-300 bg-green-50/60" : "border-gray-200"}`}>
+        <label className={`flex items-start gap-3 min-h-[44px] ${sinMigracionIA ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}>
+          <input type="checkbox" className="w-5 h-5 mt-0.5 accent-[#0b315f] flex-shrink-0" checked={envio && !sinMigracionIA} disabled={sinMigracionIA || guardando}
+            onChange={(e) => setEnvio(e.target.checked)} />
+          <span>
+            <span className="block text-sm font-bold text-gray-800">📄 Envío automático de la cotización</span>
+            <span className="block text-[11px] text-gray-500 mt-0.5">
+              Si el recojo o el destino de un traslado cae en esta zona{tipo === "distrito" ? " (o en una de sus subzonas)" : ""}, la IA del CRM le envía el PDF al cliente por WhatsApp SIN revisión de un ejecutivo. Basta con que una de las dos puntas esté marcada; si ninguna lo está, la cotización queda en el inbox para que un ejecutivo la revise y la envíe.
+              {!envioMaestro && !sinMigracionIA && " Hoy el envío automático está apagado en Ajustes: la marca vale cuando se encienda."}
+            </span>
+          </span>
+        </label>
+        {heredaDe && !envio && !sinMigracionIA && (
+          <p className="text-[11px] text-green-800 pl-8">Aunque no la marques, esta subzona ya sale sola: lo hereda de <b>{heredaDe}</b>.</p>
+        )}
+        {sinMigracionIA && (
+          <p className="text-[11px] text-amber-800 pl-8">Para usarla falta correr <span className="font-mono">{SQL_COTIZACION_IA}</span> en Supabase → SQL Editor.</p>
+        )}
+      </div>
 
       <label className="block">
         <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Notas</span>

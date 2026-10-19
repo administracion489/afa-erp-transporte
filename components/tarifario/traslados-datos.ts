@@ -17,16 +17,35 @@ export type ConfigFila = {
   espera_gratis_min: number;
   consideraciones: string[];
   consideraciones_usd: string[];
+  /** traslados-05: la IA del CRM cotiza traslados. Sin la migración, false. */
+  ia_cotiza: boolean;
+  /** traslados-05: maestro del envío SIN revisión. Sin la migración, false. */
+  envio_automatico: boolean;
 };
 
-export const CONFIG_VACIA: ConfigFila = { validez_dias: 30, espera_gratis_min: 30, consideraciones: [], consideraciones_usd: [] };
+export const CONFIG_VACIA: ConfigFila = {
+  validez_dias: 30, espera_gratis_min: 30, consideraciones: [], consideraciones_usd: [], ia_cotiza: false, envio_automatico: false,
+};
 
+/**
+ * `sinMigracionIA`: falta alguna columna de traslados-05 (los tres interruptores). La pantalla
+ * funciona igual, lee los tres como apagados y lo dice nombrando el SQL. `colsZona` son las
+ * columnas que se pueden pedir de vuelta tras escribir una zona: con la columna ausente, pedirla
+ * haría fallar la escritura entera.
+ */
 export type CargaTraslados =
-  | { tipo: "ok"; zonas: ZonaFila[]; categorias: CategoriaFila[]; tarifas: TarifaFila[]; config: ConfigFila; configExiste: boolean }
+  | {
+    tipo: "ok"; zonas: ZonaFila[]; categorias: CategoriaFila[]; tarifas: TarifaFila[]; config: ConfigFila; configExiste: boolean;
+    sinMigracionIA: boolean; colsZona: string; colsConfig: string;
+  }
   | { tipo: "sin_tablas"; tabla: string }
   | { tipo: "error"; detalle: string };
 
 export const COLS_ZONA = "id, nombre, tipo, padre_id, sector, alias, lat, lng, radio_m, orden, activo, notas";
+/** Con la columna de traslados-05. */
+export const COLS_ZONA_IA = `${COLS_ZONA}, envio_automatico`;
+export const COLS_CONFIG = "id, validez_dias, espera_gratis_min, consideraciones, consideraciones_usd";
+export const COLS_CONFIG_IA = `${COLS_CONFIG}, ia_cotiza, envio_automatico`;
 export const COLS_TARIFA = "id, zona_a_id, zona_b_id, categoria, moneda, precio_tramo, activo, notas";
 export const COLS_CATEGORIA = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo, orden, activo";
 const PAG = 1000;
@@ -60,6 +79,8 @@ export function normalizarZona(z: Record<string, unknown>): ZonaFila {
     orden: num(z.orden) ?? 0,
     activo: z.activo !== false,
     notas: z.notas == null ? null : String(z.notas),
+    // Solo `true` cuenta: sin la migración la columna no viene y eso es «no».
+    envio_automatico: z.envio_automatico === true,
   };
 }
 
@@ -96,17 +117,38 @@ export function normalizarConfig(c: Record<string, unknown> | null | undefined):
     espera_gratis_min: c.espera_gratis_min == null ? CONFIG_VACIA.espera_gratis_min : Number(c.espera_gratis_min),
     consideraciones: lista(c.consideraciones),
     consideraciones_usd: lista(c.consideraciones_usd),
+    ia_cotiza: c.ia_cotiza === true,
+    envio_automatico: c.envio_automatico === true,
   };
+}
+
+/** Lee con las columnas de traslados-05 y, si el error NOMBRA una de ellas, vuelve a leer sin ellas. */
+async function conRespaldo<T extends { error: ErrorSupabase }>(
+  conIA: () => PromiseLike<T>, sinIA: () => PromiseLike<T>, columnas: readonly string[],
+): Promise<{ r: T; falta: boolean }> {
+  const r = await conIA();
+  if (r.error && faltaAlguna(r.error, columnas)) return { r: await sinIA(), falta: true };
+  return { r, falta: false };
+}
+
+async function leerConfig(cols: string): Promise<{ data: Record<string, unknown> | null; error: ErrorSupabase }> {
+  const { data, error } = await supabase.from("traslados_config").select(cols).eq("id", 1).maybeSingle();
+  return { data: (data as Record<string, unknown> | null) ?? null, error };
 }
 
 export async function cargarTraslados(): Promise<CargaTraslados> {
   try {
-    const [z, c, t, cfg] = await Promise.all([
-      todas<Record<string, unknown>>("zonas_traslado", COLS_ZONA, "id"),
+    const [zr, c, t, cfgr] = await Promise.all([
+      conRespaldo(
+        () => todas<Record<string, unknown>>("zonas_traslado", COLS_ZONA_IA, "id"),
+        () => todas<Record<string, unknown>>("zonas_traslado", COLS_ZONA, "id"),
+        ["envio_automatico"]),
       todas<Record<string, unknown>>("traslado_categorias", COLS_CATEGORIA, "clave"),
       todas<Record<string, unknown>>("tarifas_traslado", COLS_TARIFA, "id"),
-      supabase.from("traslados_config").select("id, validez_dias, espera_gratis_min, consideraciones, consideraciones_usd").eq("id", 1).maybeSingle(),
+      conRespaldo(() => leerConfig(COLS_CONFIG_IA), () => leerConfig(COLS_CONFIG), ["ia_cotiza", "envio_automatico"]),
     ]);
+    const z = zr.r;
+    const cfg = cfgr.r;
     const errores: [string, ErrorSupabase][] = [
       ["zonas_traslado", z.error], ["traslado_categorias", c.error], ["tarifas_traslado", t.error], ["traslados_config", cfg.error],
     ];
@@ -120,8 +162,11 @@ export async function cargarTraslados(): Promise<CargaTraslados> {
       zonas: (z.filas ?? []).map(normalizarZona),
       categorias: (c.filas ?? []).map(normalizarCategoria),
       tarifas: (t.filas ?? []).map(normalizarTarifa),
-      config: normalizarConfig(cfg.data as Record<string, unknown> | null),
+      config: normalizarConfig(cfg.data),
       configExiste: !!cfg.data,
+      sinMigracionIA: zr.falta || cfgr.falta,
+      colsZona: zr.falta ? COLS_ZONA : COLS_ZONA_IA,
+      colsConfig: cfgr.falta ? COLS_CONFIG : COLS_CONFIG_IA,
     };
   } catch (e) {
     return { tipo: "error", detalle: `No se pudo leer el catálogo de traslados: ${(e as Error)?.message ?? "sin conexión"}` };

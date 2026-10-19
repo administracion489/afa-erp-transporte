@@ -5,6 +5,7 @@
 // enseña en gris como heredado. Lo heredado se cruza contra `tarifaDelPar` del motor: si la
 // pantalla dijera «usa el de SJL» donde el cotizador no encuentra precio, esta matriz falla.
 import * as M from "../lib/traslados/motor";
+import * as E from "../lib/traslados/envio-ia";
 import * as P from "../components/tarifario/traslados-pantalla";
 
 let fallos = 0, oks = 0;
@@ -151,6 +152,63 @@ seccion("6. Minutos de espera contra el texto");
 ok(P.minutosQueNoCoinciden(["Incluye 30 minutos de espera gratis."], 30).length === 0, "coinciden");
 ok(P.minutosQueNoCoinciden(["Incluye 30 minutos de espera gratis."], 45).join() === "30", "no coinciden: se avisa");
 ok(P.minutosQueNoCoinciden(["Precios por tramo."], 45).length === 0, "sin minutos en el texto, nada que avisar");
+
+// ── 7. Envío automático por zona (fase 2) ─────────────────────────────────────
+// La pantalla NO tiene su propia regla de herencia: `envioDeZona` dice «sale sola» exactamente
+// cuando `zonaConEnvio` (la del agente) dice que sí. Si la pantalla dijera «hereda de SJL» donde el
+// agente deja la cotización en revisión, esta sección falla.
+seccion("7. Envío automático: la pantalla dice lo mismo que el agente");
+{
+  const conMarca = (zs: P.ZonaFila[], ids: number[]) => zs.map((x) => ({ ...x, envio_automatico: ids.includes(x.id) }));
+  let barridoEnvio = 0;
+  const ids = ZONAS.map((x) => x.id);
+  // Todas las combinaciones de marca sobre AER, SJL, CG y HUA, con SJL y CG activos o no.
+  const sujetos = [AER.id, SJL.id, CG.id, HUA.id];
+  for (let mascara = 0; mascara < 1 << sujetos.length; mascara++) {
+    for (const sjlActivo of [true, false]) for (const cgActivo of [true, false]) {
+      const marcadas = sujetos.filter((_, i) => mascara & (1 << i));
+      const zs = conMarca(ZONAS, marcadas).map((x) =>
+        x.id === SJL.id ? { ...x, activo: sjlActivo } : x.id === CG.id ? { ...x, activo: cgActivo } : x);
+      for (const zona of zs) {
+        barridoEnvio++;
+        const e = P.envioDeZona(zona, zs);
+        const motor = E.zonaConEnvio(zona, zs);
+        ok((e.codigo === "propio" || e.codigo === "hereda") === motor, `envioDeZona = zonaConEnvio (${zona.nombre}, marcadas ${marcadas.join(",") || "ninguna"})`);
+        if (e.codigo === "hereda") ok(zona.tipo === "subzona" && zona.envio_automatico !== true && e.distrito === SJL.nombre, "solo hereda una subzona sin marca propia, de su distrito");
+        if (e.codigo === "sin_efecto") ok(zona.envio_automatico === true && zona.activo === false, "«sin efecto» = marcada pero inactiva");
+      }
+      const propias = P.zonasConEnvioPropio(zs).map((x) => x.id);
+      ok(propias.every((id) => marcadas.includes(id)), "Ajustes solo nombra zonas que tienen la marca");
+      ok(P.subzonasQueHeredan(zs).every((x) => !propias.includes(x.id)), "heredar y tener la marca son disjuntos");
+    }
+  }
+  ok(ids.length > 0, "catálogo");
+  console.log(`  barrido: ${barridoEnvio} zonas`);
+
+  // Sin la migración la columna no viene: nada sale solo y nada se pinta.
+  ok(ZONAS.every((x) => P.envioDeZona(x, ZONAS).codigo === "no"), "sin la columna, ninguna zona envía");
+  // Una subzona hereda de su distrito ACTIVO; con el distrito inactivo, no.
+  const conSjl = conMarca(ZONAS, [SJL.id]);
+  ok(P.envioDeZona(CG, conSjl).codigo === "hereda", "Canto Grande hereda de SJL");
+  ok(P.envioDeZona(CG, conSjl.map((x) => (x.id === SJL.id ? { ...x, activo: false } : x))).codigo === "no", "con SJL inactivo, no hereda");
+  ok(P.subzonasQueHeredan(conSjl).map((x) => x.id).sort().join() === [CG.id, ZA.id].sort().join(), "las dos subzonas de SJL heredan");
+
+  seccion("8. Las confirmaciones nombran lo que va a pasar");
+  const m1 = P.mensajeEncenderEnvio({ zonas: ["Aeropuerto Jorge Chávez"], iaCotiza: true });
+  ok(m1.includes("Aeropuerto Jorge Chávez") && /SIN que un ejecutivo/.test(m1), "encender el envío nombra la zona y dice «sin revisión»");
+  ok(!/apagada/.test(m1), "con la IA encendida no avisa de la IA apagada");
+  ok(/Ninguna zona/.test(P.mensajeEncenderEnvio({ zonas: [], iaCotiza: true })), "sin zonas marcadas lo dice");
+  ok(/apagada/.test(P.mensajeEncenderEnvio({ zonas: ["X"], iaCotiza: false })), "con la IA apagada avisa que no sale nada");
+  ok(P.mensajeEncenderEnvio({ zonas: ["A", "B", "C"], iaCotiza: true }).includes("A, B y C"), "lista con «y»");
+  ok(/sin revisión|SIN revisión/i.test(P.mensajeEncenderIA({ envioMaestro: true, zonas: ["Aeropuerto Jorge Chávez"] }))
+    && P.mensajeEncenderIA({ envioMaestro: true, zonas: ["Aeropuerto Jorge Chávez"] }).includes("Aeropuerto Jorge Chávez"), "encender la IA con envío nombra la zona que sale sola");
+  ok(/inbox/.test(P.mensajeEncenderIA({ envioMaestro: false, zonas: ["Aeropuerto Jorge Chávez"] })), "encender la IA sin envío: todo al inbox");
+  const mz = P.mensajeEnvioZona({ id: SJL.id, nombre: SJL.nombre, tipo: "distrito" }, ZONAS, false);
+  ok(mz.includes("2 subzonas") && mz.includes(SJL.nombre) && /apagado en Ajustes/.test(mz), "marcar un distrito nombra sus subzonas y el maestro apagado");
+  ok(!/subzona/.test(P.mensajeEnvioZona({ id: AER.id, nombre: AER.nombre, tipo: "punto" }, ZONAS, true)), "un punto no habla de subzonas");
+  ok(/aplica desde que guardes/.test(P.mensajeEnvioZona({ id: null, nombre: "Nuevo", tipo: "distrito" }, ZONAS, true)), "con el maestro encendido, vale ya");
+  ok(P.SQL_TRASLADOS.some((x) => x.archivo === P.SQL_COTIZACION_IA), "la lista de SQL incluye traslados-05");
+}
 
 console.log(`\n${oks} ok · ${fallos} fallos`);
 if (fallos) process.exit(1);

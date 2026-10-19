@@ -6,13 +6,26 @@
 // POST /api/tipo-cambio/sunat, que lo trae, lo controla y lo guarda. Aquí solo se lee, y se juzga
 // con `tcParaCotizar` del motor — el mismo juicio que hace el cotizador: si aquí sale ámbar, las
 // cotizaciones en dólares están pasando a un ejecutivo.
+//
+// «🤖 Cotización automática por WhatsApp» (fase 2): los dos interruptores de traslados-05 se
+// guardan AL INSTANTE (no con «Guardar ajustes»), y lo que la IA hace de verdad con ellos lo dice
+// `estadoCotizadorIA` (lib/traslados/envio-ia.ts) leyendo además la fila del agente del CRM: un
+// interruptor encendido con el agente en copiloto o sin WhatsApp no cotiza ni envía nada, y la
+// pantalla no puede dar a entender lo contrario.
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { fechaLima } from "@/lib/alertas-horario";
+import { tablaQueFalta } from "@/lib/columna-faltante";
 import { TC_MAX_DIAS, tcParaCotizar } from "@/lib/traslados/motor";
-import { fmtFecha, leerEntero, minutosQueNoCoinciden } from "./traslados-pantalla";
+import { estadoCotizadorIA } from "@/lib/traslados/envio-ia";
+import { LINEA_DISPONIBILIDAD } from "@/lib/traslados/cotizacion-traslado";
+import {
+  fmtFecha, leerEntero, mensajeEncenderEnvio, mensajeEncenderIA, minutosQueNoCoinciden, SQL_COTIZACION_IA,
+  subzonasQueHeredan, zonasConEnvioPropio, type ZonaFila,
+} from "./traslados-pantalla";
 import { filasEscritas, leerUltimoTc, LIMITES, normalizarConfig, type ConfigFila, type LecturaTc } from "./traslados-datos";
 import { AZUL, iCls, type Decir } from "./traslados-comun";
 
@@ -58,11 +71,16 @@ function ListaTextos({ items, onCambiar, placeholder, etiqueta }: {
   );
 }
 
-export default function AjustesTraslado({ config, configExiste, onConfig, decir }: {
+export default function AjustesTraslado({ config, configExiste, onConfig, decir, zonas, sinMigracionIA, colsConfig, onIrAZonas }: {
   config: ConfigFila;
   configExiste: boolean;
   onConfig: (c: ConfigFila) => void;
   decir: Decir;
+  zonas: readonly ZonaFila[];
+  sinMigracionIA: boolean;
+  /** Las columnas que se piden de vuelta al guardar (sin las de traslados-05 si falta la migración). */
+  colsConfig: string;
+  onIrAZonas: () => void;
 }) {
   const [validez, setValidez] = useState(String(config.validez_dias));
   const [espera, setEspera] = useState(String(config.espera_gratis_min));
@@ -94,7 +112,7 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir 
     const fila = { id: 1, validez_dias: lVal.valor, espera_gratis_min: lEsp.valor, consideraciones: limpias(cons), consideraciones_usd: limpias(consUsd) };
     // Con RLS, el lado «update» de un upsert sin permiso no da error: vuelve sin filas.
     const r = filasEscritas<Record<string, unknown>>(
-      await supabase.from("traslados_config").upsert(fila, { onConflict: "id" }).select("id, validez_dias, espera_gratis_min, consideraciones, consideraciones_usd"),
+      await supabase.from("traslados_config").upsert(fila, { onConflict: "id" }).select(colsConfig),
       "No se guardaron los ajustes");
     setGuardando(false);
     if (!r.ok) { setError(r.detalle); return; }
@@ -105,49 +123,217 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir 
   };
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[1fr_22rem] gap-4 items-start">
-      <section className="bg-white border rounded-2xl p-4 space-y-4">
-        {!configExiste && (
-          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">La fila de ajustes no existe todavía: se usan los valores por defecto (30 días, 30 minutos, sin consideraciones). Al guardar se crea.</p>
-        )}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <label className="block">
-            <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Validez de la cotización (días)</span>
-            <input className={iCls("font-mono")} inputMode="numeric" value={validez} onChange={(e) => setValidez(e.target.value)} />
-            <span className="block text-[10px] text-gray-400 mt-0.5">Vale esos días o hasta la fecha del servicio, lo que llegue primero ({LIMITES.validez_dias[0]}–{LIMITES.validez_dias[1]}).</span>
-          </label>
-          <label className="block">
-            <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Espera gratis (minutos)</span>
-            <input className={iCls("font-mono")} inputMode="numeric" value={espera} onChange={(e) => setEspera(e.target.value)} />
-            <span className="block text-[10px] text-gray-400 mt-0.5">Minutos de espera incluidos en el traslado ({LIMITES.espera_gratis_min[0]}–{LIMITES.espera_gratis_min[1]}).</span>
-          </label>
-        </div>
-        {minutosDistintos.length > 0 && (
-          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
-            Las consideraciones hablan de {minutosDistintos.map((m) => `${m} min`).join(", ")} y la espera gratis dice {espera} min: la cotización diría dos cosas distintas. Corrige el texto o el número.
-          </p>
-        )}
-        <div>
-          <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones (van en toda cotización de traslado)</p>
-          <ListaTextos items={cons} onCambiar={setCons} etiqueta="Consideración" placeholder="Ej: Sujeto a disponibilidad: un ejecutivo confirma la reserva." />
-        </div>
-        <div>
-          <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones solo para dólares (se agregan cuando se cotiza en US$)</p>
-          <ListaTextos items={consUsd} onCambiar={setConsUsd} etiqueta="Consideración en dólares" placeholder="Ej: El IGV se exonera solo con TAM y pasaporte." />
-        </div>
-        {error && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{error}</p>}
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={guardar} disabled={!!motivo || guardando}
-            className="px-5 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-50 min-h-[44px]" style={{ background: AZUL }}>
-            {guardando ? "Guardando…" : "Guardar ajustes"}
-          </button>
-          {sucio && <button type="button" onClick={descartar} disabled={guardando} className="px-4 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50 min-h-[44px]">Descartar cambios</button>}
-          {motivo && <span className="text-[11px] text-gray-500">{motivo}</span>}
-        </div>
-      </section>
+    <div className="space-y-4">
+      <CotizacionIA config={config} onConfig={onConfig} decir={decir} zonas={zonas}
+        sinMigracionIA={sinMigracionIA} colsConfig={colsConfig} onIrAZonas={onIrAZonas} />
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_22rem] gap-4 items-start">
+        <section className="bg-white border rounded-2xl p-4 space-y-4">
+          {!configExiste && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">La fila de ajustes no existe todavía: se usan los valores por defecto (30 días, 30 minutos, sin consideraciones). Al guardar se crea.</p>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="block">
+              <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Validez de la cotización (días)</span>
+              <input className={iCls("font-mono")} inputMode="numeric" value={validez} onChange={(e) => setValidez(e.target.value)} />
+              <span className="block text-[10px] text-gray-400 mt-0.5">Vale esos días o hasta la fecha del servicio, lo que llegue primero ({LIMITES.validez_dias[0]}–{LIMITES.validez_dias[1]}).</span>
+            </label>
+            <label className="block">
+              <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Espera gratis (minutos)</span>
+              <input className={iCls("font-mono")} inputMode="numeric" value={espera} onChange={(e) => setEspera(e.target.value)} />
+              <span className="block text-[10px] text-gray-400 mt-0.5">Minutos de espera incluidos en el traslado ({LIMITES.espera_gratis_min[0]}–{LIMITES.espera_gratis_min[1]}).</span>
+            </label>
+          </div>
+          {minutosDistintos.length > 0 && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+              Las consideraciones hablan de {minutosDistintos.map((m) => `${m} min`).join(", ")} y la espera gratis dice {espera} min: la cotización diría dos cosas distintas. Corrige el texto o el número.
+            </p>
+          )}
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones (van en toda cotización de traslado)</p>
+            <ListaTextos items={cons} onCambiar={setCons} etiqueta="Consideración" placeholder="Ej: Sujeto a disponibilidad: un ejecutivo confirma la reserva." />
+          </div>
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones solo para dólares (se agregan cuando se cotiza en US$)</p>
+            <ListaTextos items={consUsd} onCambiar={setConsUsd} etiqueta="Consideración en dólares" placeholder="Ej: El IGV se exonera solo con TAM y pasaporte." />
+          </div>
+          {error && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{error}</p>}
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={guardar} disabled={!!motivo || guardando}
+              className="px-5 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-50 min-h-[44px]" style={{ background: AZUL }}>
+              {guardando ? "Guardando…" : "Guardar ajustes"}
+            </button>
+            {sucio && <button type="button" onClick={descartar} disabled={guardando} className="px-4 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50 min-h-[44px]">Descartar cambios</button>}
+            {motivo && <span className="text-[11px] text-gray-500">{motivo}</span>}
+          </div>
+        </section>
 
-      <TipoCambioSunat decir={decir} />
+        <TipoCambioSunat decir={decir} />
+      </div>
     </div>
+  );
+}
+
+// ── 🤖 Cotización automática por WhatsApp ────────────────────────────────────
+
+type AgenteIA = { activo: boolean; canales: string[]; canales_autonomos: string[]; horario_activo: boolean; hora_inicio?: string; hora_fin?: string };
+
+type LecturaAgente =
+  | { tipo: "ok"; agente: AgenteIA | null }
+  | { tipo: "error"; detalle: string };
+
+const textos = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+const hhmm = (v: unknown): string | undefined => (typeof v === "string" && /^\d{2}:\d{2}/.test(v) ? v.slice(0, 5) : undefined);
+
+/**
+ * La MISMA fila que lee el agente en el servidor (lib/crm-ia.ts: la primera por `created_at`).
+ * Sin la tabla no hay agente; un fallo de lectura NO se lee como «agente apagado».
+ */
+async function leerAgente(): Promise<LecturaAgente> {
+  try {
+    const { data, error } = await supabase.from("crm_agentes_ia").select("*").order("created_at").limit(1);
+    if (error) return tablaQueFalta(error) != null ? { tipo: "ok", agente: null } : { tipo: "error", detalle: error.message };
+    const a = ((data ?? []) as Record<string, unknown>[])[0];
+    if (!a) return { tipo: "ok", agente: null };
+    return {
+      tipo: "ok",
+      agente: {
+        activo: a.activo === true, canales: textos(a.canales), canales_autonomos: textos(a.canales_autonomos),
+        horario_activo: a.horario_activo === true, hora_inicio: hhmm(a.hora_inicio), hora_fin: hhmm(a.hora_fin),
+      },
+    };
+  } catch (e) {
+    return { tipo: "error", detalle: (e as Error)?.message ?? "sin conexión" };
+  }
+}
+
+function Casilla({ marcada, ocupada, bloqueada, onCambiar, titulo, detalle }: {
+  marcada: boolean; ocupada: boolean; bloqueada: boolean; onCambiar: (v: boolean) => void; titulo: string; detalle: string;
+}) {
+  return (
+    <label className={`flex items-start gap-3 rounded-xl border px-3 py-3 min-h-[44px] ${bloqueada ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:bg-gray-50"} ${marcada ? "border-[#0b315f]/40 bg-[#eef3f8]/50" : "border-gray-200"}`}>
+      <input type="checkbox" className="w-5 h-5 mt-0.5 accent-[#0b315f] flex-shrink-0" checked={marcada} disabled={bloqueada || ocupada}
+        onChange={(e) => onCambiar(e.target.checked)} />
+      <span className="min-w-0">
+        <span className="block text-sm font-bold text-gray-800">{titulo}{ocupada ? " · guardando…" : ""}</span>
+        <span className="block text-[11px] text-gray-500 mt-0.5">{detalle}</span>
+      </span>
+    </label>
+  );
+}
+
+function CotizacionIA({ config, onConfig, decir, zonas, sinMigracionIA, colsConfig, onIrAZonas }: {
+  config: ConfigFila;
+  onConfig: (c: ConfigFila) => void;
+  decir: Decir;
+  zonas: readonly ZonaFila[];
+  sinMigracionIA: boolean;
+  colsConfig: string;
+  onIrAZonas: () => void;
+}) {
+  const [lectura, setLectura] = useState<LecturaAgente | null>(null);
+  const [n, setN] = useState(0);
+  const [guardando, setGuardando] = useState<"ia_cotiza" | "envio_automatico" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let vivo = true;
+    void leerAgente().then((r) => { if (vivo) setLectura(r); });
+    return () => { vivo = false; };
+  }, [n]);
+
+  const conEnvio = zonasConEnvioPropio(zonas);
+  const nombres = conEnvio.map((z) => z.nombre);
+  const heredan = subzonasQueHeredan(zonas);
+  // Sin la migración `estadoCotizadorIA` contesta antes de mirar al agente; con ella, solo se
+  // juzga cuando el agente se pudo leer (un fallo de lectura no es «el agente está apagado»).
+  const estado = sinMigracionIA || lectura?.tipo === "ok"
+    ? estadoCotizadorIA({
+      iaCotiza: config.ia_cotiza, envioMaestro: config.envio_automatico, zonasConEnvio: nombres,
+      agente: lectura?.tipo === "ok" ? lectura.agente : null, sinMigracion: sinMigracionIA,
+    })
+    : null;
+
+  const cambiar = async (campo: "ia_cotiza" | "envio_automatico", v: boolean) => {
+    if (guardando || sinMigracionIA) return;
+    if (v) {
+      const msg = campo === "ia_cotiza"
+        ? mensajeEncenderIA({ envioMaestro: config.envio_automatico, zonas: nombres })
+        : mensajeEncenderEnvio({ zonas: nombres, iaCotiza: config.ia_cotiza });
+      if (!window.confirm(msg)) return;
+    }
+    setGuardando(campo);
+    setError(null);
+    // Solo la columna que cambió: el upsert actualiza las columnas que lleva y no toca las demás
+    // (ni lo que esté escrito sin guardar en el formulario de abajo). Con RLS, sin permiso vuelve sin filas.
+    const que = campo === "ia_cotiza" ? "No se guardó «La IA cotiza traslados»" : "No se guardó el envío automático";
+    const r = filasEscritas<Record<string, unknown>>(
+      await supabase.from("traslados_config").upsert({ id: 1, [campo]: v }, { onConflict: "id" }).select(colsConfig), que);
+    setGuardando(null);
+    if (!r.ok) { setError(r.detalle); return; }
+    onConfig(normalizarConfig(r.filas[0]));
+    decir(campo === "ia_cotiza"
+      ? (v ? "La IA del CRM ya puede cotizar traslados." : "La IA del CRM dejó de cotizar traslados.")
+      : (v ? "Envío automático encendido en las zonas marcadas." : "Envío automático apagado: todo queda en revisión."));
+  };
+
+  const ambar = !!estado?.ambar;
+  return (
+    <section className={`border rounded-2xl p-4 space-y-3 ${ambar ? "bg-amber-50 border-amber-200" : "bg-white"}`}>
+      <div className="flex flex-wrap items-start gap-2">
+        <h3 className="text-sm font-bold text-gray-700 flex-1">🤖 Cotización automática por WhatsApp</h3>
+        <Link href="/crm/agente" className="text-[11px] font-bold text-[#0b315f] underline">Agente IA del CRM →</Link>
+      </div>
+      <p className="text-xs text-gray-500">
+        La IA del CRM cotiza por WhatsApp solo los <b>traslados simples</b> (un recojo y un destino, solo ida o ida y retorno) con los precios de este tarifario, y deja la cotización en /cotizaciones. Lo demás —TDR, licitaciones, eventos, varios servicios, descuentos— lo pasa a un ejecutivo. {LINEA_DISPONIBILIDAD}
+      </p>
+
+      {sinMigracionIA && (
+        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          Falta correr <span className="font-mono">{SQL_COTIZACION_IA}</span> en Supabase → SQL Editor (antes, <span className="font-mono">supabase/traslados-04-tipo-cambio-solo-servidor.sql</span>). Hasta entonces la IA del CRM no cotiza traslados y estas casillas no se pueden guardar.
+        </p>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+        <Casilla marcada={config.ia_cotiza} ocupada={guardando === "ia_cotiza"} bloqueada={sinMigracionIA || (!!guardando && guardando !== "ia_cotiza")}
+          onCambiar={(v) => void cambiar("ia_cotiza", v)} titulo="La IA cotiza traslados"
+          detalle="Apagada, la IA ni siquiera tiene la herramienta: los pedidos de traslado los atiende un ejecutivo." />
+        <Casilla marcada={config.envio_automatico} ocupada={guardando === "envio_automatico"} bloqueada={sinMigracionIA || (!!guardando && guardando !== "envio_automatico")}
+          onCambiar={(v) => void cambiar("envio_automatico", v)} titulo="Enviar sola la cotización en las zonas marcadas"
+          detalle="Encendida, el PDF sale solo al cliente cuando el recojo o el destino está en una zona marcada. Apagada, cada cotización queda en el inbox del CRM y la envía un ejecutivo con un clic." />
+      </div>
+
+      <div className="text-xs text-gray-600 space-y-1">
+        <p className="font-bold text-gray-500 uppercase tracking-wide text-[11px]">Zonas con envío automático</p>
+        {conEnvio.length === 0 ? (
+          <p className="text-gray-500">Ninguna zona marcada{sinMigracionIA ? " (sin la migración no se pueden marcar)" : ""}: todo lo que cotice la IA queda en revisión.</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {conEnvio.map((z) => (
+              <span key={z.id} className="px-2 py-1 rounded-lg bg-green-50 border border-green-200 text-green-800 text-[11px] font-bold">📄 {z.nombre}</span>
+            ))}
+          </div>
+        )}
+        {heredan.length > 0 && (
+          <p className="text-[11px] text-gray-500">También {heredan.length} subzona{heredan.length === 1 ? "" : "s"} que lo hereda{heredan.length === 1 ? "" : "n"} de su distrito: {heredan.map((z) => z.nombre).join(", ")}.</p>
+        )}
+        <button type="button" onClick={onIrAZonas} className="text-[11px] font-bold text-[#0b315f] underline">Marcar o desmarcar zonas en la pestaña Zonas →</button>
+      </div>
+
+      <div className={`rounded-xl border px-3 py-2 text-xs space-y-1 ${ambar ? "border-amber-300 text-amber-900 bg-white/60" : "border-gray-200 text-gray-700 bg-gray-50"}`}>
+        <p className="text-[11px] font-bold uppercase tracking-wide opacity-70">Lo que hace hoy</p>
+        {estado ? (
+          estado.lineas.map((l, i) => <p key={i} className={ambar && i === 0 ? "font-bold" : ""}>{l}</p>)
+        ) : lectura?.tipo === "error" ? (
+          <p className="text-red-700">No se pudo leer la configuración del agente IA del CRM ({lectura.detalle}): no se puede decir si hoy cotiza.{" "}
+            <button type="button" onClick={() => { setLectura(null); setN((x) => x + 1); }} className="underline font-bold">Reintentar</button>
+          </p>
+        ) : (
+          <p className="text-gray-400">Comprobando el agente IA del CRM…</p>
+        )}
+      </div>
+
+      {error && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{error}</p>}
+    </section>
   );
 }
 

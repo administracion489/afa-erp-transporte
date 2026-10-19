@@ -573,7 +573,7 @@ export default function TarifarioPage() {
       <main className="p-4 sm:p-6 space-y-5 max-w-[1500px] mx-auto">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Tarifario</h1>
-          <p className="text-sm text-gray-400 mt-1">Zonas y precios de traslado · los que usará la IA del CRM para cotizar sola (todavía no cotiza: se activa en la fase siguiente)</p>
+          <p className="text-sm text-gray-400 mt-1">Zonas y precios de traslado · los que usa la IA del CRM para cotizar traslados simples por WhatsApp (se enciende en Ajustes)</p>
         </div>
         {interruptor}
         <ZonasTraslados />

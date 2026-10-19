@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
 import {
-  telefonoLegible, telefonoDeContacto, nombreEsElNumero, coincideBusquedaTelefono,
+  telefonoLegible, telefonoDeContacto, nombreEsElNumero, coincideBusquedaTelefono, formatearTelefono,
 } from "@/lib/crm-telefono";
 import { avisosAutomaticosDeTelefono, etiquetaAviso, type AvisoAutomatico } from "@/lib/crm-avisos-automaticos";
 import { cabecerasErp } from "@/lib/fetch-erp";
@@ -12,6 +12,10 @@ import PanelCliente from "@/components/crm/PanelCliente";
 import AdjuntarArchivo from "@/components/crm/AdjuntarArchivo";
 import { useRespuestasRapidas, SugerenciasRapidas, ModalRespuestasRapidas, aplicarVariables } from "@/components/crm/RespuestasRapidas";
 import { haceCuanto, textoLegible } from "@/lib/crm-gmail-reglas";
+import { accionReclamable, MOTIVO_REVISION, PLAZO_ENVIO_MS } from "@/lib/traslados/envio-ia";
+import { LINEA_DISPONIBILIDAD } from "@/lib/traslados/cotizacion-traslado";
+import { usePuedeVer } from "@/lib/usePuedeVer";
+import { abrirPdf } from "@/components/tarifario/abrir-pdf";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -70,10 +74,34 @@ type Mensaje = {
 // tecla del cuadro de respuesta, y un boletín son decenas de KB de HTML.
 const legible = (m: Mensaje): Mensaje => ({ ...m, contenido: textoLegible(m.contenido) ?? undefined });
 
+// La fecha de la fila es `creada_at` (crm-agente-ia.sql); `created_at` NO existe en esa tabla. Se
+// conserva opcional por si una instalación la tuviera, y se ordena con la que venga.
 type AccionIA = {
-  id: string; conversacion_id: string; tipo: "cotizacion" | "reserva";
-  resumen?: string; payload: any; estado: string; created_at?: string;
+  id: string; conversacion_id: string; tipo: "cotizacion" | "reserva" | "cotizacion_traslado";
+  resumen?: string; payload: any; estado: string; creada_at?: string; created_at?: string;
+  resuelta_at?: string | null; resultado_id?: number | null;
 };
+
+/** Lo que el agente guarda en `payload` de una `cotizacion_traslado` (lib/traslados/cotizar-ia-datos.ts). */
+type PayloadTraslado = {
+  cotizacion_id?: number; numero?: string; decision?: "automatico" | "revision";
+  motivos?: string[]; ultimo_error?: string | null;
+};
+
+const fechaAccion = (a: AccionIA) => a.creada_at ?? a.created_at ?? "";
+
+function payloadTraslado(a: AccionIA): PayloadTraslado {
+  const p = (a.payload && typeof a.payload === "object" ? a.payload : {}) as Record<string, unknown>;
+  return {
+    numero: typeof p.numero === "string" && p.numero.trim() ? p.numero.trim() : undefined,
+    decision: p.decision === "automatico" || p.decision === "revision" ? p.decision : undefined,
+    motivos: Array.isArray(p.motivos) ? p.motivos.filter((x): x is string => typeof x === "string") : [],
+    ultimo_error: typeof p.ultimo_error === "string" && p.ultimo_error.trim() ? p.ultimo_error : null,
+  };
+}
+
+/** Para pintar el enlace «Abrir en Cotizaciones» solo a quien puede abrir esa pantalla. */
+const MODULOS_TRASLADO = ["cotizaciones"] as const;
 
 // ── Canal config ──────────────────────────────────────────────────────────
 
@@ -227,6 +255,14 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [copiado, setCopiado] = useState(false);
   const [gmailAviso, setGmailAviso] = useState<{ ok: boolean; texto: string } | null>(null);
   const [acciones, setAcciones] = useState<AccionIA[]>([]);
+  // Un fallo al leer las propuestas se DICE: antes la consulta fallaba entera (pedía ordenar por una
+  // columna que no existe) y el inbox no enseñaba ninguna, sin que nada lo avisara.
+  const [errorAcciones, setErrorAcciones] = useState<string | null>(null);
+  const accionesPedidas = useRef<string | null>(null);
+  // La cotización de traslado: qué se está haciendo con cuál, y el último resultado (fijo en su tarjeta).
+  const [trasladoOcupado, setTrasladoOcupado] = useState<{ id: string; que: "pdf" | "enviar" | "rechazar" } | null>(null);
+  const [trasladoMsg, setTrasladoMsg] = useState<Record<string, string>>({});
+  const puedeVer = usePuedeVer(MODULOS_TRASLADO);
   // Los avisos van atados a SU hilo: los de otro chat no se pintan ni un instante.
   const [avisosHilo, setAvisosHilo] = useState<{ conv: string; lista: AvisoAutomatico[] } | null>(null);
   const avisos = useMemo(
@@ -476,14 +512,22 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   }, [selected, chatListo, mensajes, notas, hayAnteriores]);
   const cargandoChat = !!selected && chatListo !== selected.id;
 
+  // Las pendientes y las que se están enviando (`enviando`: el envío del PDF reclamó la acción).
+  // SIN `.order` en la consulta: la columna de fecha es `creada_at` y el `.order("created_at")` de
+  // antes hacía fallar la lectura entera, así que ninguna propuesta de la IA llegaba a verse. Se
+  // ordena en memoria, la más nueva primero.
   const cargarAcciones = useCallback(async (convId: string) => {
-    const { data } = await supabase
+    accionesPedidas.current = convId;
+    const { data, error } = await supabase
       .from("crm_acciones_ia")
       .select("*")
       .eq("conversacion_id", convId)
-      .eq("estado", "pendiente")
-      .order("created_at", { ascending: false });
-    setAcciones((data ?? []) as AccionIA[]);
+      .in("estado", ["pendiente", "enviando"]);
+    // Si mientras tanto se abrió otro hilo, esta respuesta ya no es la suya.
+    if (accionesPedidas.current !== convId) return;
+    if (error) { setErrorAcciones(error.message); setAcciones([]); return; }
+    setErrorAcciones(null);
+    setAcciones(((data ?? []) as AccionIA[]).slice().sort((a, b) => fechaAccion(b).localeCompare(fechaAccion(a))));
   }, []);
 
   // Los avisos automáticos (fuera del CRM) que recibió este número, para intercalarlos
@@ -511,7 +555,9 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       cargarMensajes(selected.id);
       cargarAcciones(selected.id);
     } else {
+      accionesPedidas.current = null;
       setAcciones([]);
+      setErrorAcciones(null);
     }
     // Solo al cambiar de HILO: `selected` se reasigna en cada patch de realtime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -748,6 +794,84 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
     } else {
       showToast(data.error ?? "Error al procesar la propuesta", false);
     }
+  };
+
+  // ── Cotización de traslado de la IA ────────────────────────────────────
+  // «Ver PDF» lo arma el servidor desde la cotización (no se guarda); «Enviar al cliente» lo vuelve a
+  // armar desde la fila (si se editó en /cotizaciones, sale editada) y lo manda por WhatsApp a quien
+  // escribió en ESTA conversación. Las dos piden la acción por su id: el servidor comprueba que la
+  // cotización sea de esta conversación (planAccionTraslado), no se confía en lo que pinta la tarjeta.
+
+  const verPdfTraslado = async (a: AccionIA) => {
+    if (trasladoOcupado) return;
+    setTrasladoOcupado({ id: a.id, que: "pdf" });
+    setTrasladoMsg((m) => ({ ...m, [a.id]: "" }));
+    const r = await abrirPdf(
+      async () => fetch(`/api/crm/ia/cotizacion-traslado?accion_id=${encodeURIComponent(a.id)}`, { headers: await cabecerasErp() }),
+      "el permiso del módulo CRM para ver el PDF");
+    setTrasladoOcupado(null);
+    if (!r.ok) setTrasladoMsg((m) => ({ ...m, [a.id]: r.detalle }));
+  };
+
+  const enviarTraslado = async (a: AccionIA) => {
+    if (trasladoOcupado || !selected || a.conversacion_id !== selected.id) return;
+    const p = payloadTraslado(a);
+    const cot = p.numero ? `N° ${p.numero}` : "de traslado";
+    const tel = formatearTelefono(selected.crm_contactos?.wa_id) || "(sin número)";
+    const nombre = !nombreEsElNumero(selected.crm_contactos) && selected.crm_contactos?.nombre?.trim();
+    const ok = window.confirm(
+      `¿Enviar la cotización ${cot} al WhatsApp ${tel}${nombre ? ` (${nombre})` : ""}?\n\n`
+      + "Sale el PDF armado con la cotización tal como está ahora en /cotizaciones: si la editaste, sale editada.\n\n"
+      + "Se envía como respuesta del equipo: la IA deja de contestar en este chat por unas horas.");
+    if (!ok) return;
+    setTrasladoOcupado({ id: a.id, que: "enviar" });
+    setTrasladoMsg((m) => ({ ...m, [a.id]: "" }));
+    let error: string | null = null;
+    try {
+      const res = await fetch("/api/crm/ia/accion", {
+        method: "POST",
+        headers: await cabecerasErp({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ accion_id: a.id, decision: "aprobar" }),
+      });
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; detalle?: string; error?: string } | null;
+      if (res.status === 401) error = "Tu sesión venció o no se pudo verificar: vuelve a ingresar.";
+      else if (res.status === 403) error = "Te falta el permiso del módulo CRM para enviar la cotización (lo da un administrador en Usuarios).";
+      else if (d?.ok) showToast(d.detalle || `Cotización ${cot} enviada a ${tel}.`);
+      else error = d?.error || d?.detalle || `El servidor respondió ${res.status} sin enviar la cotización.`;
+    } catch (e) {
+      error = `No se pudo llamar al servidor: ${(e as Error)?.message ?? "sin conexión"}. Revisa si salió antes de reintentar.`;
+    }
+    setTrasladoOcupado(null);
+    if (error) setTrasladoMsg((m) => ({ ...m, [a.id]: error }));
+    // Solo si se sigue en ese hilo: recargar otro pisaría las propuestas del que está abierto.
+    if (selectedRef.current?.id === a.conversacion_id) cargarAcciones(a.conversacion_id);
+  };
+
+  const rechazarTraslado = async (a: AccionIA) => {
+    if (trasladoOcupado) return;
+    const p = payloadTraslado(a);
+    if (!window.confirm(`¿Rechazar la cotización ${p.numero ? `N° ${p.numero}` : "de traslado"}?\n\nNo se le envía nada al cliente y la propuesta sale de esta bandeja.`)) return;
+    setTrasladoOcupado({ id: a.id, que: "rechazar" });
+    setTrasladoMsg((m) => ({ ...m, [a.id]: "" }));
+    let error: string | null = null;
+    try {
+      const res = await fetch("/api/crm/ia/accion", {
+        method: "POST",
+        headers: await cabecerasErp({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ accion_id: a.id, decision: "rechazar" }),
+      });
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (res.status === 401) error = "Tu sesión venció o no se pudo verificar: vuelve a ingresar.";
+      else if (res.status === 403) error = "Te falta el permiso del módulo CRM (lo da un administrador en Usuarios).";
+      else if (d?.ok) showToast("Cotización rechazada: no se le envió nada al cliente.");
+      else error = d?.error || `El servidor respondió ${res.status} sin rechazarla.`;
+    } catch (e) {
+      error = `No se pudo llamar al servidor: ${(e as Error)?.message ?? "sin conexión"}.`;
+    }
+    setTrasladoOcupado(null);
+    if (error) setTrasladoMsg((m) => ({ ...m, [a.id]: error }));
+    // Solo si se sigue en ese hilo: recargar otro pisaría las propuestas del que está abierto.
+    if (selectedRef.current?.id === a.conversacion_id) cargarAcciones(a.conversacion_id);
   };
 
   // ── Cambiar estado ─────────────────────────────────────────────────────
@@ -1306,13 +1430,25 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
           </div>
 
           {/* ── Propuestas de la IA pendientes de confirmación ── */}
-          {acciones.length > 0 && (
-            <div className="bg-amber-50 border-t border-amber-100 px-5 py-3 space-y-2">
-              {acciones.map((a) => (
+          {errorAcciones && (
+            <div className="bg-red-50 border-t border-red-100 px-5 py-2 text-xs text-red-700">
+              No se pudieron leer las propuestas de la IA de esta conversación: {errorAcciones}{" "}
+              <button onClick={() => cargarAcciones(selected.id)} className="underline font-semibold">Reintentar</button>
+            </div>
+          )}
+          {/* Solo las de ESTE hilo: una tarjeta de otra conversación con «Enviar al cliente» mandaría el PDF a otra persona. */}
+          {acciones.some((a) => a.conversacion_id === selected.id) && (
+            <div className="bg-amber-50 border-t border-amber-100 px-5 py-3 space-y-2 max-h-[45vh] overflow-y-auto">
+              {acciones.filter((a) => a.conversacion_id === selected.id).map((a) => a.tipo === "cotizacion_traslado" ? (
+                <TarjetaTraslado key={a.id} a={a} canal={selected.canal} waId={selected.crm_contactos?.wa_id ?? null}
+                  ocupado={trasladoOcupado?.id === a.id ? trasladoOcupado.que : trasladoOcupado ? "otra" : null}
+                  mensaje={trasladoMsg[a.id] || null} puedeCotizaciones={puedeVer ? puedeVer.cotizaciones : null}
+                  onVerPdf={() => void verPdfTraslado(a)} onEnviar={() => void enviarTraslado(a)} onRechazar={() => void rechazarTraslado(a)} />
+              ) : (
                 <div key={a.id} className="bg-white border border-amber-200 rounded-xl p-3 flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">
-                      ✨ Propuesta de {a.tipo === "cotizacion" ? "cotización" : "reserva"} (IA)
+                      ✨ Propuesta de {a.tipo === "cotizacion" ? "cotización" : a.tipo === "reserva" ? "reserva" : String(a.tipo)} (IA)
                     </div>
                     <div className="text-sm text-gray-700 truncate">{a.resumen}</div>
                   </div>
@@ -2056,6 +2192,100 @@ function PorQueNoRespondioIA({ decision, mensajes }: {
   return (
     <div className={`px-4 py-1.5 text-[11px] border-b ${error ? "bg-red-50 text-red-700 border-red-100" : "bg-gray-50 text-gray-600 border-gray-100"}`}>
       ✨ La IA no respondió el último mensaje: {texto}
+    </div>
+  );
+}
+
+/**
+ * La tarjeta de una cotización de traslado que la IA dejó para revisar (o que debía salir sola y no
+ * salió). Todo lo que viene de la base se pinta como TEXTO. Los motivos se leen de MOTIVO_REVISION
+ * (lib/traslados/envio-ia.ts), el mismo catálogo con que el agente los decidió.
+ */
+function TarjetaTraslado({ a, canal, waId, ocupado, mensaje, puedeCotizaciones, onVerPdf, onEnviar, onRechazar }: {
+  a: AccionIA;
+  canal: Canal;
+  waId: string | null;
+  /** Qué se está haciendo con ESTA tarjeta, u «otra» si se está trabajando con otra. */
+  ocupado: "pdf" | "enviar" | "rechazar" | "otra" | null;
+  mensaje: string | null;
+  /** null mientras se consulta el permiso. */
+  puedeCotizaciones: boolean | null;
+  onVerPdf: () => void;
+  onEnviar: () => void;
+  onRechazar: () => void;
+}) {
+  const p = payloadTraslado(a);
+  // ¿Se puede enviar AHORA? Lo dice el motor (`accionReclamable`, la misma regla del servidor): una
+  // en «enviando» con su plazo vigente no se toca (otro envío está en curso); con el plazo vencido,
+  // el envío murió y se puede reintentar. El reloj avanza solo mientras se está enviando, para que
+  // el botón vuelva sin recargar. La cotización y la conversación las vuelve a juzgar el servidor.
+  const [ahora, setAhora] = useState(() => Date.now());
+  useEffect(() => {
+    if (a.estado !== "enviando") return;
+    const t = setInterval(() => setAhora(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [a.estado]);
+  const enCurso = !accionReclamable({ estado: a.estado, resuelta_at: a.resuelta_at ?? null }, ahora);
+  const sinWhatsApp = canal !== "whatsapp"
+    ? "Esta conversación no es de WhatsApp: el PDF se envía solo por WhatsApp."
+    : !String(waId ?? "").replace(/\D/g, "") ? "La conversación no tiene el número de WhatsApp del cliente: no se puede enviar el PDF." : null;
+  const motivoNoEnviar = enCurso
+    ? (a.estado === "enviando"
+      ? `Se está enviando en este momento. Si en ${Math.round(PLAZO_ENVIO_MS / 60_000)} minutos no termina, se podrá reintentar.`
+      : `La cotización ya fue ${a.estado}.`)
+    : sinWhatsApp;
+  const algoEnCurso = ocupado != null;
+  const motivos = p.motivos ?? [];
+
+  return (
+    <div className="bg-white border border-amber-200 rounded-xl p-3 space-y-2">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">🚐 Cotización de traslado para revisar</div>
+        {p.numero && <div className="text-[11px] font-mono font-bold text-gray-600">N° {p.numero}</div>}
+        {enCurso && <div className="text-[11px] font-semibold text-sky-700">⏳ enviándose…</div>}
+      </div>
+      {a.resumen && <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">{a.resumen}</p>}
+      {p.decision === "automatico" ? (
+        <p className="text-xs text-amber-800">Debía enviarse sola, pero no salió: revísala y envíala.</p>
+      ) : motivos.length > 0 ? (
+        <div className="text-xs text-gray-600">
+          <p className="font-semibold text-gray-500">Quedó en revisión porque:</p>
+          <ul className="list-disc pl-4 space-y-0.5">
+            {motivos.map((c) => (
+              <li key={c}>{Object.prototype.hasOwnProperty.call(MOTIVO_REVISION, c) ? MOTIVO_REVISION[c as keyof typeof MOTIVO_REVISION].texto : c}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {p.ultimo_error && (
+        <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-2 py-1.5 break-words">Último intento de envío: {p.ultimo_error}</p>
+      )}
+      <p className="text-[10px] text-gray-400">{LINEA_DISPONIBILIDAD}</p>
+      <div className="flex flex-wrap gap-1.5">
+        <button onClick={onVerPdf} disabled={algoEnCurso}
+          className="text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50 min-h-[36px]">
+          {ocupado === "pdf" ? "Armando el PDF…" : "📄 Ver PDF"}
+        </button>
+        {p.numero && puedeCotizaciones !== false && (
+          <a href={`/cotizaciones?buscar=${encodeURIComponent(p.numero)}`} target="_blank" rel="noopener noreferrer"
+            className="text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 min-h-[36px] inline-flex items-center">
+            Abrir en Cotizaciones ↗
+          </a>
+        )}
+        <button onClick={onRechazar} disabled={algoEnCurso || enCurso}
+          className="text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-50 min-h-[36px]">
+          {ocupado === "rechazar" ? "Rechazando…" : "Rechazar"}
+        </button>
+        <button onClick={onEnviar} disabled={algoEnCurso || !!motivoNoEnviar}
+          className="text-xs px-2.5 py-1.5 rounded-lg bg-[#0b315f] text-white font-semibold hover:bg-[#1262bd] disabled:opacity-50 min-h-[36px]">
+          {ocupado === "enviar" ? "Enviando…" : "Enviar al cliente"}
+        </button>
+      </div>
+      {motivoNoEnviar && <p className="text-[11px] text-gray-500">No se puede enviar ahora: {motivoNoEnviar}</p>}
+      {p.numero && puedeCotizaciones === false && (
+        <p className="text-[11px] text-gray-400">Para abrirla en Cotizaciones hace falta el módulo Cotizaciones.</p>
+      )}
+      {mensaje && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-2 py-1.5 break-words">{mensaje}</p>}
     </div>
   );
 }
