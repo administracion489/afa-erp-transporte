@@ -106,6 +106,15 @@ export type AvisoPdf = { codigo: CodigoAvisoPdf; detalle: string; /** `sin_tc` i
 
 export type ResultadoPdf = { html: string | null; avisos: AvisoPdf[] };
 
+/**
+ * El número que se IMPRIME: el escrito a mano en `numero_cotizacion` o, si no hay, el id con ceros
+ * a la izquierda. No hay correlativo propio: el buscador de /cotizaciones encuentra los dos.
+ * Lo usan este PDF y el de traslados cotizados por la IA (lib/traslados/cotizacion-traslado.ts).
+ */
+export function numeroCotizacion(c: { id: number; numero_cotizacion?: string | null }): string {
+  return c.numero_cotizacion || String(c.id).padStart(5, "0");
+}
+
 // ── Helpers de anexo e itinerario ──────────────────────────────────────────────
 
 const ES_DIA = /^d[iíI][aA]\s*\d+/i;
@@ -531,7 +540,7 @@ export function htmlCotizacion(e: EntradaPdfCot): ResultadoPdf {
     tot, conIGV, descs,
     consid,
     nomCl: cliente?.tipo === "b2b" ? (cliente.empresa || cliente.nombre) : cliente?.nombre || "—",
-    nCot: cot.numero_cotizacion || String(cot.id).padStart(5, "0"),
+    nCot: numeroCotizacion(cot),
     ahora: e.ahora ?? new Date(),
     // En inglés los textos libres de la plantilla no se imprimen: el título sale del diccionario.
     titulo: porDefecto => esc(idioma === "es" ? (cfg?.titulo_documento || porDefecto) : porDefecto),
