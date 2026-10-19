@@ -385,7 +385,12 @@ export function sumarDias(iso: string, n: number): string {
 const diasEntre = (desde: string, hasta: string) =>
   Math.round((Date.parse(`${hasta}T00:00:00Z`) - Date.parse(`${desde}T00:00:00Z`)) / 86400000);
 
-const esFecha = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
+/** Una fecha que EXISTE (el ida y vuelta descarta «2026-02-30», que V8 acepta como 2 de marzo). */
+const esFecha = (s: unknown): s is string => {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+};
 
 export type CodigoTcTraslado = "ok" | "sin_tc" | "tc_viejo" | "tc_invalido";
 
@@ -542,7 +547,7 @@ export function evaluarTraslado(pedido: PedidoTraslado, ctx: ContextoTraslado): 
   if (paradas > 0) complejas.push(`Tiene ${paradas} parada${paradas === 1 ? "" : "s"} intermedia${paradas === 1 ? "" : "s"}`);
   if (fechasExtra > 0) complejas.push("Pide el servicio en varias fechas");
   if (vehiculos > 1) complejas.push(`Pide ${vehiculos} vehículos`);
-  for (const s of new Set(pedido.senales ?? [])) if (SENALES[s]) complejas.push(SENALES[s]);
+  for (const s of new Set(pedido.senales ?? [])) if (Object.prototype.hasOwnProperty.call(SENALES, s)) complejas.push(SENALES[s]);
   if (complejas.length) {
     exp.push(...complejas.map((c) => `No es un traslado simple: ${c.toLowerCase()}.`));
     return base("complejo", complejas.join(" · "));

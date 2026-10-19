@@ -38,6 +38,24 @@ export type RespuestaSimulador =
 
 const MAX_TEXTO = 300;
 
+/** Una fecha YYYY-MM-DD que EXISTE: «2026-02-30» pasa la expresión regular y V8 la acepta como 2 de marzo. */
+export function fechaReal(v: unknown): v is string {
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
+function coordenada(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") { const n = Number(v); return Number.isFinite(n) ? n : null; }
+  return null;
+}
+
+/** La caja de Perú (no medida, con margen): fuera de ella no se puede cotizar y no se gasta Google. */
+export function dentroDePeru(lat: number, lng: number): boolean {
+  return lat >= -18.5 && lat <= 0 && lng >= -81.5 && lng <= -68.5;
+}
+
 /** Valida y limpia la entrada. Devuelve el motivo si no sirve. Las ausencias no son error: el motor las pregunta. */
 export function validarEntrada(x: unknown): { ok: true; entrada: EntradaSimulador } | { ok: false; detalle: string } {
   if (!x || typeof x !== "object") return { ok: false, detalle: "Falta el pedido." };
@@ -46,8 +64,11 @@ export function validarEntrada(x: unknown): { ok: true; entrada: EntradaSimulado
     if (typeof v === "string") return v.trim().slice(0, MAX_TEXTO);
     if (v && typeof v === "object") {
       const p = v as Record<string, unknown>;
-      const lat = Number(p.lat), lng = Number(p.lng);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return { error: `Coordenadas inválidas en ${nombre}.` };
+      // `Number(null)`, `Number("")` y `Number([])` valen 0: un punto sin coordenadas sería el (0, 0),
+      // en medio del Atlántico, y costaría una geocodificación inversa. Se exige un número de verdad.
+      const lat = coordenada(p.lat), lng = coordenada(p.lng);
+      if (lat == null || lng == null) return { error: `Coordenadas inválidas en ${nombre}.` };
+      if (!dentroDePeru(lat, lng)) return { error: `Las coordenadas de ${nombre} están fuera de Perú.` };
       return { lat, lng, texto: typeof p.texto === "string" ? p.texto.slice(0, MAX_TEXTO) : undefined };
     }
     return "";
@@ -56,8 +77,8 @@ export function validarEntrada(x: unknown): { ok: true; entrada: EntradaSimulado
   const destino = lugar(o.destino, "el destino");
   if (typeof origen === "object" && "error" in origen) return { ok: false, detalle: origen.error };
   if (typeof destino === "object" && "error" in destino) return { ok: false, detalle: destino.error };
-  const fecha = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
-  const hora = (v: unknown) => (typeof v === "string" && /^\d{2}:\d{2}/.test(v) ? v.slice(0, 5) : null);
+  const fecha = (v: unknown) => (fechaReal(v) ? v : null);
+  const hora = (v: unknown) => (typeof v === "string" && /^([01]\d|2[0-3]):[0-5]\d/.test(v) ? v.slice(0, 5) : null);
   const num = (v: unknown, max: number) => {
     if (v == null || v === "") return null;
     const n = Math.round(Number(v));
@@ -65,7 +86,8 @@ export function validarEntrada(x: unknown): { ok: true; entrada: EntradaSimulado
   };
   const sentido = o.sentido === "ida" || o.sentido === "ida_retorno" ? o.sentido : null;
   const senales = Array.isArray(o.senales)
-    ? [...new Set(o.senales.filter((s): s is SenalComplejidad => typeof s === "string" && s in SENALES))]
+    // Propiedad PROPIA y no `in`: «constructor» o «__proto__» están «in» cualquier objeto.
+    ? [...new Set(o.senales.filter((s): s is SenalComplejidad => typeof s === "string" && Object.prototype.hasOwnProperty.call(SENALES, s)))]
     : [];
   return {
     ok: true,

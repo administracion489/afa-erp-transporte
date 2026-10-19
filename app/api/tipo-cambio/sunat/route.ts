@@ -8,7 +8,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { esCronAutorizado, verificarUsuarioApiAlguno } from "@/lib/api-auth";
 import { limitarTasa } from "@/lib/api-guard";
-import { obtenerTipoCambioSunat } from "@/lib/tipo-cambio-sunat";
+import { obtenerTipoCambioSunat, revisarParaGuardar } from "@/lib/tipo-cambio-sunat";
+import { fechaLima } from "@/lib/alertas-horario";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,14 @@ async function actualizar() {
   const sb = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
+  const hoy = fechaLima(Date.now());
+  const { data: ultimo } = await sb.from("tipo_cambio").select("venta")
+    .eq("moneda", "USD").lte("fecha", hoy).order("fecha", { ascending: false }).limit(1).maybeSingle();
+  const rev = revisarParaGuardar(r.tc, hoy, ultimo ? { venta: Number(ultimo.venta) } : null);
+  if (!rev.ok) {
+    console.error("[tipo-cambio/sunat] no se guarda:", rev.detalle);
+    return NextResponse.json({ ok: false, detalle: rev.detalle }, { status: 502 });
+  }
   const { error } = await sb.from("tipo_cambio").upsert(
     { fecha: r.tc.fecha, moneda: "USD", compra: r.tc.compra, venta: r.tc.venta, fuente: r.tc.fuente },
     { onConflict: "fecha,moneda" },

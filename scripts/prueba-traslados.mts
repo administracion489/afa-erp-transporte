@@ -292,6 +292,20 @@ seccion("6. geocodigo y validarEntrada");
   ok(!validarEntrada({ origen: { lat: 200, lng: 0 } }).ok, "coordenadas imposibles se rechazan");
   ok(validarEntrada({}).ok, "un pedido vacío es válido: el motor pregunta lo que falta");
   ok(!validarEntrada(null).ok, "sin cuerpo no hay pedido");
+  // Lo que encontró la auditoría de seguridad:
+  const proto = validarEntrada({ senales: ["constructor", "toString", "__proto__", "tdr"] });
+  ok(proto.ok && proto.entrada.senales?.join() === "tdr", "«constructor» y «__proto__» no son señales");
+  ok(M.evaluarTraslado({ origen: null, destino: null, fecha_servicio: null, sentido: null, pax: null, maletas: null, telefono: null, senales: ["constructor" as M.SenalComplejidad] }, { zonas, categorias, tarifas, tipoCambio: null, hoy: "2026-10-19", igvPct: 18, validezDias: 30 }).codigo === "falta_dato", "el motor tampoco revienta con «constructor»");
+  ok(!validarEntrada({ origen: { lat: null, lng: null } }).ok, "lat/lng null no es el (0, 0)");
+  ok(!validarEntrada({ origen: { lat: "", lng: "" } }).ok, "lat/lng vacíos no son el (0, 0)");
+  ok(!validarEntrada({ origen: { lat: 0, lng: 0 } }).ok, "el (0, 0) está fuera de Perú");
+  ok(!validarEntrada({ origen: { lat: 40.7, lng: -74 } }).ok, "Nueva York está fuera de Perú");
+  ok(validarEntrada({ origen: { lat: "-12.03", lng: "-77.11" } }).ok, "coordenadas en texto numérico valen");
+  const imposible = validarEntrada({ fecha_servicio: "2026-02-30", hora_servicio: "99:99", fecha_retorno: "2026-11-31" });
+  ok(imposible.ok && imposible.entrada.fecha_servicio === null && imposible.entrada.hora_servicio === null && imposible.entrada.fecha_retorno === null, "fechas y horas que no existen se descartan");
+  const ctxF = { zonas, categorias, tarifas, tipoCambio: null, hoy: "2026-10-19", igvPct: 18, validezDias: 30 };
+  ok(M.evaluarTraslado({ origen: pt(["Miraflores"]), destino: pt(["Barranco"]), fecha_servicio: "2026-11-31", sentido: "ida", pax: 2, maletas: 0, telefono: "+51966707225" }, ctxF).codigo === "falta_dato", "el motor no acepta el 31 de noviembre");
+  ok(M.validezHasta("2026-10-31", null, 30) === "2026-11-30", "la validez siempre es una fecha que existe");
 }
 
 console.log(`\n${oks} ok · ${fallos} fallos`);

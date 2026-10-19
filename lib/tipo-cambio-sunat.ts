@@ -40,6 +40,31 @@ export function parsearJsonApisNet(j: unknown): Omit<TipoCambioDia, "fuente"> | 
   return { fecha, compra, venta };
 }
 
+/** Más de una semana: no es el tipo de cambio de hoy (mismo tope que la cotización de traslados). */
+export const TC_MAX_DIAS_GUARDAR = 7;
+/**
+ * Salto máximo, respecto del último guardado, que se acepta del RESPALDO (apis.net.pe). NO MEDIDO:
+ * el sol rara vez se mueve 3 % en un día. La fuente principal (SUNAT) no se frena: es la oficial.
+ * Un salto mayor del respaldo no se guarda y lo revisa una persona.
+ */
+export const SALTO_MAX_RESPALDO = 0.03;
+
+/** ¿Se puede guardar este tipo de cambio? Fecha ni futura ni vieja, y el respaldo sin saltos. */
+export function revisarParaGuardar(
+  tc: TipoCambioDia, hoy: string, ultimo: { venta: number } | null,
+): { ok: true } | { ok: false; detalle: string } {
+  if (tc.fecha > hoy) return { ok: false, detalle: `La fecha ${tc.fecha} es posterior a hoy (${hoy}).` };
+  const dias = Math.round((Date.parse(`${hoy}T00:00:00Z`) - Date.parse(`${tc.fecha}T00:00:00Z`)) / 86400000);
+  if (dias > TC_MAX_DIAS_GUARDAR) return { ok: false, detalle: `El tipo de cambio es del ${tc.fecha}: tiene ${dias} días.` };
+  if (tc.fuente !== "SUNAT" && ultimo && ultimo.venta > 0) {
+    const salto = Math.abs(tc.venta - ultimo.venta) / ultimo.venta;
+    if (salto > SALTO_MAX_RESPALDO) {
+      return { ok: false, detalle: `${tc.fuente} da ${tc.venta}, un ${(salto * 100).toFixed(1)} % distinto del último guardado (${ultimo.venta}): no se guarda sin revisarlo.` };
+    }
+  }
+  return { ok: true };
+}
+
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
 export async function obtenerTipoCambioSunat(): Promise<{ ok: true; tc: TipoCambioDia } | { ok: false; detalle: string }> {
