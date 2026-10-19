@@ -207,7 +207,11 @@ export async function enviarCotizacionTraslado(
   const soltar = async (codigo: CodigoEnvio, detalle: string): Promise<ResultadoEnvio> => {
     try {
       await sb.from("crm_acciones_ia")
-        .update({ estado: "pendiente", resuelta_at: null, payload: { ...payload, ultimo_error: { at: new Date(ahora).toISOString(), por: x.por, codigo, detalle: detalle.slice(0, 500) } } })
+        // `ultimo_error` es TEXTO: es lo que pinta la tarjeta del inbox. Cuándo, quién y el código van aparte.
+        .update({
+          estado: "pendiente", resuelta_at: null,
+          payload: { ...payload, ultimo_error: detalle.slice(0, 500), ultimo_error_codigo: codigo, ultimo_error_at: new Date(ahora).toISOString(), ultimo_error_por: x.por },
+        })
         .eq("id", acc.id).eq("estado", "enviando").eq("resuelta_at", plazo);
     } catch { /* si ni esto se puede escribir, el plazo vence solo y se puede reintentar */ }
     try {
@@ -309,7 +313,7 @@ export async function enviarCotizacionTraslado(
   await sb.from("crm_acciones_ia")
     .update({
       estado: "aprobada", resuelta_at: at, resuelta_por: x.por === "ejecutivo" ? x.usuarioId ?? null : null,
-      payload: { ...payload, envio: { por: x.por, at, meta_message_id: metaId } },
+      payload: { ...payload, ultimo_error: null, envio: { por: x.por, at, meta_message_id: metaId } },
     })
     .eq("id", acc.id).eq("estado", "enviando");
   return { ok: true, codigo: "ok", detalle: "", metaId };

@@ -891,7 +891,7 @@ const ctxDe = (sb: SbFalso, convId: string, contactoId: string, modoAuto = true,
   metaFalla = "(#131047) Re-engagement message";
   const g1 = await enviarCotizacionTraslado(sb as any, { accionId: accE.id, por: "automatico", bytes: f.envioPendiente!.bytes, nombre: f.envioPendiente!.nombre, caption: f.envioPendiente!.caption }, depsEnvio);
   ok(!g1.ok && g1.codigo === "envio_fallido" && /24 h/.test(g1.detalle), `G: el fallo se explica (${g1.detalle})`);
-  ok(accE.estado === "pendiente" && accE.resuelta_at == null && /24 h/.test(accE.payload.ultimo_error?.detalle ?? ""), "G: la acción vuelve a pendiente con el error escrito");
+  ok(accE.estado === "pendiente" && accE.resuelta_at == null && typeof accE.payload.ultimo_error === "string" && /24 h/.test(accE.payload.ultimo_error) && accE.payload.ultimo_error_codigo === "envio_fallido", "G: la acción vuelve a pendiente con el error escrito");
   ok(sb.t("crm_notas").some((n) => n.conversacion_id === "cv-2" && /No se pudo enviar/.test(n.texto)), "G: y una nota interna");
   metaFalla = null;
   const g2 = await enviarCotizacionTraslado(sb as any, { accionId: accE.id, por: "ejecutivo", usuarioId: "u-9" }, depsEnvio);
