@@ -13,7 +13,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { enviarCredencialEmailPasajero } from "@/lib/pasajero-email";
 import { enviarAvisoWhatsApp } from "@/lib/notificaciones";
-import { esFaltaDePlantilla } from "@/lib/plantilla-idioma";
 
 const supaAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -23,20 +22,22 @@ const supaAdmin = createClient(
 
 export const PLANTILLA_INVITACION = "invitacion_app_pasajero";
 
-// La versión con imagen y emojis (pedida el 18-10-2026: la de solo texto se veía «fea»). Se crea a
-// mano en WhatsApp Manager, categoría UTILIDAD, con un HEADER de tipo IMAGEN y las MISMAS dos
-// variables; el texto sugerido está en lib/plantillas-sugeridas.ts (SUGERIDA_INVITACION_PASAJERO).
+// La IMAGEN (pedida el 18-10-2026: solo texto se veía «fea») va en un HEADER que se le agrega a
+// la MISMA plantilla editándola en WhatsApp Manager: ya está aprobada como UTILIDAD, que es lo que
+// importa. Una plantilla de Marketing (`invitacion_pasajero_imagen`, ya no se usa) Meta no la
+// entrega a quien nunca le escribió al número de avisos: la acepta y la descarta minutos después
+// (18-10-2026: no llegó hasta que la pasajera escribió «hola»), y un pasajero nuevo no escribe primero.
 //
-// TIENE QUE SER UTILIDAD: la primera (`invitacion_pasajero_imagen`) quedó aprobada como Marketing,
-// y Meta no entrega una plantilla de Marketing a quien nunca le escribió al número de avisos — lo
-// acepta en el envío y la descarta minutos después (18-10-2026: no llegó hasta que la pasajera
-// escribió «hola»). Un pasajero nuevo nunca escribe primero, así que esa ya no se usa.
-//
-// Mientras Meta no tenga esta APROBADA, el envío contesta #132001 (no se cobra) y se cae a
-// PLANTILLA_INVITACION (texto): subir este cambio no deja de mandar invitaciones.
-export const PLANTILLA_INVITACION_IMAGEN = "invitacion_pasajero_registro";
+// Mientras la edición no esté aprobada, la plantilla NO tiene header y Meta rechaza el envío que
+// trae imagen (#132000 / #132012, no se cobra): se reintenta sin imagen. Así el código sirve antes y
+// después de la edición, y si un día se le quita la imagen tampoco deja de invitar.
 const APP_URL = (process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com").replace(/\/$/, "");
 export const IMAGEN_INVITACION = `${APP_URL}/whatsapp-invitacion-pasajero.jpg`;
+
+/** Meta rechaza el envío porque los parámetros (aquí, la imagen) no calzan con la plantilla. */
+export function esHeaderQueNoCalza(error: unknown): boolean {
+  return typeof error === "string" && /#?13201[2-5]\b|#?132000\b/.test(error);
+}
 
 function nombreCorto(nombre: string): string {
   return nombre.trim().split(/\s+/).slice(0, 2).join(" ");
@@ -81,10 +82,8 @@ export async function enviarInvitacionesPasajeros(
       if (!p.telefono) { res.whatsappOmitidos++; }
       else {
         const params = [nombreCorto(p.nombre), p.empresa || empresaAfa];
-        let r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION_IMAGEN, params, { tipo: "image", link: IMAGEN_INVITACION });
-        // Respaldo de texto si la de imagen no existe o no está aprobada (#132001, no se cobra), o si
-        // Meta la rechaza en el envío por el tope de mensajes de Marketing (#131049).
-        if (!r.ok && (esFaltaDePlantilla(r.error) || /#?131049\b/.test(r.error ?? "")))
+        let r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params, { tipo: "image", link: IMAGEN_INVITACION });
+        if (!r.ok && esHeaderQueNoCalza(r.error))
           r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params);
         if (r.ok) res.whatsappEnviados++; else res.whatsappErrores++;
       }

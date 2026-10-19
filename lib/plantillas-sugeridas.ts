@@ -62,7 +62,7 @@ export const SUGERIDA_COORDINADOR_ALERTA: PlantillaSugerida = {
  * por enlace (lib/pasajero-invitacion.ts). Sin contraseñas: el PIN va por correo.
  */
 export const SUGERIDA_INVITACION_PASAJERO: PlantillaSugerida = {
-  name: "invitacion_pasajero_registro",
+  name: "invitacion_app_pasajero",
   category: "UTILITY",
   body: "Hola {{1}}, tu registro en el servicio de transporte de personal de *{{2}}* ya está activo ✅\n\nIngresa a la app *AFA Pasajero* para ver tu ruta, tu paradero, tu horario y tu QR de abordaje 📲\n\n📧 Tus datos de acceso te llegan por correo.",
   ejemplos: ["María López", "Compañía Hard Discount S.A.C."],
