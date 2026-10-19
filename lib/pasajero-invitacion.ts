@@ -13,6 +13,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { enviarCredencialEmailPasajero } from "@/lib/pasajero-email";
 import { enviarAvisoWhatsApp } from "@/lib/notificaciones";
+import { esFaltaDePlantilla } from "@/lib/plantilla-idioma";
 
 const supaAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -21,6 +22,15 @@ const supaAdmin = createClient(
 );
 
 export const PLANTILLA_INVITACION = "invitacion_app_pasajero";
+
+// La versión con imagen y emojis (pedida el 18-10-2026: la de solo texto se veía «fea»). Se crea a
+// mano en WhatsApp Manager con un HEADER de tipo IMAGEN y las MISMAS dos variables; el texto
+// sugerido está en lib/plantillas-sugeridas.ts (SUGERIDA_INVITACION_PASAJERO). Mientras Meta no la
+// tenga APROBADA, el envío contesta #132001 (no se cobra) y se cae a PLANTILLA_INVITACION: subir
+// este cambio no deja de mandar invitaciones.
+export const PLANTILLA_INVITACION_IMAGEN = "invitacion_pasajero_imagen";
+const APP_URL = (process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com").replace(/\/$/, "");
+export const IMAGEN_INVITACION = `${APP_URL}/whatsapp-invitacion-pasajero.jpg`;
 
 function nombreCorto(nombre: string): string {
   return nombre.trim().split(/\s+/).slice(0, 2).join(" ");
@@ -64,7 +74,9 @@ export async function enviarInvitacionesPasajeros(
     if (canales.whatsapp) {
       if (!p.telefono) { res.whatsappOmitidos++; }
       else {
-        const r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, [nombreCorto(p.nombre), p.empresa || empresaAfa]);
+        const params = [nombreCorto(p.nombre), p.empresa || empresaAfa];
+        let r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION_IMAGEN, params, { tipo: "image", link: IMAGEN_INVITACION });
+        if (!r.ok && esFaltaDePlantilla(r.error)) r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params);
         if (r.ok) res.whatsappEnviados++; else res.whatsappErrores++;
       }
     }

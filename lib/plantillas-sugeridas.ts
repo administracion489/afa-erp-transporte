@@ -55,6 +55,21 @@ export const SUGERIDA_COORDINADOR_ALERTA: PlantillaSugerida = {
   botonUrl: "",
 };
 
+/**
+ * Invitación al pasajero CON IMAGEN. {{1}} nombre · {{2}} empresa del pasajero (o la de AFA).
+ * NO se crea con «Prellenar»: lleva un HEADER de tipo IMAGEN, que se sube a mano en WhatsApp Manager
+ * (de ejemplo, public/whatsapp-invitacion-pasajero.jpg). Al enviar, el código manda esa misma imagen
+ * por enlace (lib/pasajero-invitacion.ts). Sin contraseñas: el PIN va por correo.
+ */
+export const SUGERIDA_INVITACION_PASAJERO: PlantillaSugerida = {
+  name: "invitacion_pasajero_imagen",
+  category: "UTILITY",
+  body: "¡Hola {{1}}! 👋 Bienvenido al transporte de *{{2}}* 🚌✨\n\n📲 Descarga la app *AFA Pasajero* y ten todo en tu celular:\n\n📍 Tu bus en el mapa, en tiempo real\n🚏 Tu paradero y tu horario\n🎫 Tu QR para abordar\n🔔 Avisos cuando el bus está por llegar\n\n📧 En breve te llegan por correo tus datos de acceso.\n\n¡Buen viaje! 🙌",
+  ejemplos: ["María López", "Compañía Hard Discount S.A.C."],
+  botonTexto: "Descargar app Android",
+  botonUrl: "https://play.google.com/store/apps/details?id=com.transportesafa.pasajero",
+};
+
 export const SUGERIDAS_ESCALERA: PlantillaSugerida[] = [
   SUGERIDA_RECUERDA_INICIAR, SUGERIDA_NO_INICIO, SUGERIDA_COORDINADOR_ALERTA,
 ];

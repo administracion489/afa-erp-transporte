@@ -236,10 +236,11 @@ async function plantillaAvisos(
   parametros: string[],
   phone: string,
   botones?: { index: number; texto: string }[],
+  header?: { tipo: "image"; link: string },
 ): Promise<string | null> {
   return enviarConIdiomaCorrecto({
     plantilla,
-    enviar: (idioma) => enviarWhatsAppPlantilla(to, plantilla, idioma, parametros, phone, botones),
+    enviar: (idioma) => enviarWhatsAppPlantilla(to, plantilla, idioma, parametros, phone, botones, header),
     consultar: () => idiomasEnMetaAvisos(plantilla),
     memo: memoIdiomaAvisos,
     ahoraMs: Date.now(),
@@ -255,12 +256,14 @@ export async function enviarAvisoWhatsApp(
   telefonoRaw: string,
   plantilla: string,
   parametros: string[],
+  // Imagen de encabezado: solo para plantillas creadas en Meta con HEADER de tipo imagen.
+  header?: { tipo: "image"; link: string },
 ): Promise<{ ok: boolean; error?: string }> {
   const phone = await phoneAvisos();
   if (!phone) return { ok: false, error: "META_PHONE_NUMBER_ID_AVISOS no configurado" };
   if (!telefonoRaw?.trim()) return { ok: false, error: "sin teléfono" };
   try {
-    await plantillaAvisos(normalizarTelefono(telefonoRaw), plantilla, parametros, phone);
+    await plantillaAvisos(normalizarTelefono(telefonoRaw), plantilla, parametros, phone, undefined, header);
     return { ok: true };
   } catch (e: any) {
     return { ok: false, error: e.message };
