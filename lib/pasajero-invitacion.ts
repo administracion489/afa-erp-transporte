@@ -76,7 +76,11 @@ export async function enviarInvitacionesPasajeros(
       else {
         const params = [nombreCorto(p.nombre), p.empresa || empresaAfa];
         let r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION_IMAGEN, params, { tipo: "image", link: IMAGEN_INVITACION });
-        if (!r.ok && esFaltaDePlantilla(r.error)) r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params);
+        // Respaldo de texto si la de imagen no existe/no está aprobada (#132001) o si Meta no la
+        // entregó por el tope de mensajes de Marketing a esa persona (#131049): quedó aprobada como
+        // Marketing, y un envío rechazado no se cobra.
+        if (!r.ok && (esFaltaDePlantilla(r.error) || /#?131049\b/.test(r.error ?? "")))
+          r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params);
         if (r.ok) res.whatsappEnviados++; else res.whatsappErrores++;
       }
     }
