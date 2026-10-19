@@ -99,12 +99,12 @@ export default function SimuladorTraslado({ onIrA }: { onIrA: (tab: "zonas") => 
   const lPax = leerEntero(f.pax, 0, 500);
   const lMal = leerEntero(f.maletas, 0, 1000);
   const lPar = leerEntero(f.paradas, 0, 50);
-  const motivo = !f.origen.texto.trim() && f.origen.lat == null ? "Escribe el punto de recojo."
-    : !f.destino.texto.trim() && f.destino.lat == null ? "Escribe el destino."
-      : lPax.tipo === "error" ? `Pasajeros: ${lPax.detalle}`
-        : lMal.tipo === "error" ? `Maletas: ${lMal.detalle}`
-          : lPar.tipo === "error" ? `Paradas intermedias: ${lPar.detalle}`
-            : null;
+  // Solo bloquea lo que no se puede ENVIAR (un número mal escrito). Lo que falta (recojo, destino,
+  // fecha, pasajeros, maletas) se deja vacío a propósito: el motor contesta qué preguntaría la IA.
+  const motivo = lPax.tipo === "error" ? `Pasajeros: ${lPax.detalle}`
+    : lMal.tipo === "error" ? `Maletas: ${lMal.detalle}`
+      : lPar.tipo === "error" ? `Paradas intermedias: ${lPar.detalle}`
+        : null;
 
   const simular = async () => {
     if (motivo || estado.tipo === "simulando") return;
@@ -145,7 +145,7 @@ export default function SimuladorTraslado({ onIrA }: { onIrA: (tab: "zonas") => 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
       <section className="bg-white border rounded-2xl p-4 space-y-3">
-        <p className="text-xs text-gray-500">Es el mismo cotizador que usará la IA del CRM, sin enviar nada: lo que sale aquí es lo que la IA le contestaría al cliente.</p>
+        <p className="text-xs text-gray-500">Es el mismo cotizador que usará la IA del CRM, sin enviar nada: lo que sale aquí es lo que la IA le contestará al cliente cuando se active (todavía no cotiza sola).</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Origen (recojo)</span>

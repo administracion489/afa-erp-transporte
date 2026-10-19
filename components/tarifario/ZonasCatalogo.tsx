@@ -13,7 +13,7 @@ import {
   coincideZona, compararSectores, mapaZonas, motivoAliasInvalido, ordenarZonas, sectorDe,
   type TarifaFila, type ZonaFila,
 } from "./traslados-pantalla";
-import { COLS_ZONA, normalizarZona, textoError } from "./traslados-datos";
+import { COLS_ZONA, filasEscritas, motivoCeroFilas, normalizarZona } from "./traslados-datos";
 import { AZUL, EditorAlias, iCls, InterruptorActivo, type Decir } from "./traslados-comun";
 import ModalZona, { AYUDA_ALIAS, borrarZona, REGLA_SUBZONA, type ModoModalZona } from "./ModalZona";
 
@@ -62,10 +62,11 @@ export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, d
 
   const actualizar = async (z: ZonaFila, cambios: Partial<ZonaFila>, que: string): Promise<boolean> => {
     setOcupada(z.id);
-    const { data, error } = await supabase.from("zonas_traslado").update(cambios).eq("id", z.id).select(COLS_ZONA).single();
+    const r = filasEscritas<Record<string, unknown>>(await supabase.from("zonas_traslado").update(cambios).eq("id", z.id).select(COLS_ZONA), que);
     setOcupada(null);
-    if (error) { decir(textoError(error, que), "error"); return false; }
-    onZona(normalizarZona(data as Record<string, unknown>));
+    // Sin permiso (o con error) el estado no se toca: la pantalla sigue enseñando lo que dice la base.
+    if (!r.ok) { decir(r.cero ? await motivoCeroFilas("zonas_traslado", "id", z.id, que) : r.detalle, "error"); return false; }
+    onZona(normalizarZona(r.filas[0]));
     return true;
   };
 

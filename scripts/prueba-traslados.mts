@@ -46,7 +46,7 @@ const precios = [...sql03.slice(sql03.indexOf("p(categoria, pen, usd)")).matchAl
 ok(precios.length === 7, "7 precios leídos");
 const z = (n: string) => zonas.find((x) => x.nombre === n)!;
 const AER = z("Aeropuerto Jorge Chávez");
-let tarifas: M.TarifaTraslado[] = [];
+const tarifas: M.TarifaTraslado[] = [];
 for (const d of ["Miraflores", "San Isidro", "Barranco"]) {
   for (const p of precios) for (const moneda of ["PEN", "USD"] as const) {
     const [a, b] = M.parOrdenado(AER.id, z(d).id);

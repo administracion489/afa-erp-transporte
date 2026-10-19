@@ -16,7 +16,7 @@ import {
   bloquesDePrecios, claveCelda, fmtMoneda, fmtNum, leerPrecio, mapaZonas, MONEDAS, otraPunta, SIMBOLO,
   tarifasPorZona, type CategoriaFila, type FilaPrecio, type Heredada, type TarifaFila, type ZonaFila,
 } from "./traslados-pantalla";
-import { COLS_TARIFA, normalizarTarifa, textoError } from "./traslados-datos";
+import { COLS_TARIFA, filasEscritas, normalizarTarifa, SIN_PERMISO_TARIFAS, tarifasQueSiguen } from "./traslados-datos";
 import { AZUL, BuscadorZona, Modal, SelectorZonasMultiple, iCls, type Decir } from "./traslados-comun";
 
 const ENCABEZADO = "Precio NETO por tramo, sin IGV. Ida y retorno = 2 tramos. Soles para números peruanos (+51), dólares para el resto.";
@@ -52,7 +52,6 @@ function CeldaInput({ moneda, base, inactiva, heredada, onGuardar, onError, etiq
     const r = leerPrecio(texto);
     if (r.tipo === "error") { onError(`${etiqueta}: ${r.detalle}`); setTexto(inicial); return; }
     const nuevo = r.tipo === "vacio" ? null : r.valor;
-    if (nuevo === base && !(inactiva && nuevo != null && texto.trim() !== inicial)) { setTexto(inicial); return; }
     if (nuevo === base) { setTexto(inicial); return; }
     setGuardando(true);
     const ok = await onGuardar(nuevo);
@@ -112,6 +111,24 @@ export default function PreciosTraslado({ zonas, categorias, tarifas, onTarifas,
   const propias = origen ? tarifas.filter((t) => otraPunta(t, origen.id) != null).length : 0;
   const destinosConPrecio = origen ? new Set(tarifas.map((t) => otraPunta(t, origen.id)).filter((x) => x != null)).size : 0;
 
+  /**
+   * Borra tarifas por id y lo comprueba: con RLS, un DELETE sin permiso borra cero filas sin dar
+   * error. Lo que la base ya no tiene (borrado por otra persona) también se quita de la pantalla.
+   * Devuelve true solo si al terminar no queda ninguna de esas filas.
+   */
+  const borrarTarifas = async (ids: number[], que: string): Promise<boolean> => {
+    const r = filasEscritas<{ id: number }>(await supabase.from("tarifas_traslado").delete().in("id", ids).select("id"), que, ids.length);
+    if (!r.ok && !r.cero) { decir(r.detalle, "error"); return false; }
+    const borradas = r.ok ? r.filas.map((x) => Number(x.id)) : [];
+    if (r.ok && r.faltan === 0) { onTarifasBorradas(borradas); return true; }
+    const siguen = await tarifasQueSiguen(ids);
+    if (siguen == null) { onTarifasBorradas(borradas); decir(`${que}: no se pudo comprobar si se borraron. Pulsa «↻ Recargar».`, "error"); return false; }
+    onTarifasBorradas(ids.filter((id) => !siguen.has(id)));
+    if (siguen.size === 0) return true;
+    decir(`${que}: ${siguen.size} de ${ids.length} no se borraron porque ${SIN_PERMISO_TARIFAS}.`, "error");
+    return false;
+  };
+
   /** Escribe (o borra, con null) el precio de UNA celda para una o varias zonas destino. */
   const guardarPrecio = async (destinos: ZonaFila[], cat: string, moneda: Moneda, valor: number | null): Promise<boolean> => {
     if (!origen) return false;
@@ -120,17 +137,18 @@ export default function PreciosTraslado({ zonas, categorias, tarifas, onTarifas,
     if (valor == null) {
       const ids = tarifas.filter((t) => t.categoria === cat && t.moneda === moneda && pares.some(([a, b]) => t.zona_a_id === a && t.zona_b_id === b)).map((t) => t.id);
       if (ids.length === 0) return true;
-      const { error } = await supabase.from("tarifas_traslado").delete().in("id", ids);
-      if (error) { decir(textoError(error, `No se pudo quitar el precio ${nombreCat} ${SIMBOLO[moneda]}`), "error"); return false; }
-      onTarifasBorradas(ids);
+      // Con RLS, un DELETE sin permiso no da error: borra cero filas. Se piden de vuelta las borradas.
+      const r = await borrarTarifas(ids, `No se pudo quitar el precio ${nombreCat} ${SIMBOLO[moneda]}`);
+      if (!r) return false;
       decir(`Precio ${nombreCat} ${SIMBOLO[moneda]} quitado${ids.length > 1 ? ` en ${ids.length} zonas` : ""}.`);
       return true;
     }
     const filas = pares.map(([a, b]) => ({ zona_a_id: a, zona_b_id: b, categoria: cat, moneda, precio_tramo: valor, activo: true }));
-    const { data, error } = await supabase.from("tarifas_traslado")
-      .upsert(filas, { onConflict: "zona_a_id,zona_b_id,categoria,moneda" }).select(COLS_TARIFA);
-    if (error) { decir(textoError(error, `No se pudo guardar ${nombreCat} ${SIMBOLO[moneda]}`), "error"); return false; }
-    onTarifas(((data ?? []) as Record<string, unknown>[]).map(normalizarTarifa));
+    const r = filasEscritas<Record<string, unknown>>(await supabase.from("tarifas_traslado")
+      .upsert(filas, { onConflict: "zona_a_id,zona_b_id,categoria,moneda" }).select(COLS_TARIFA), `No se pudo guardar ${nombreCat} ${SIMBOLO[moneda]}`, filas.length);
+    if (!r.ok) { decir(r.detalle, "error"); return false; }
+    onTarifas(r.filas.map(normalizarTarifa));
+    if (r.faltan > 0) { decir(`Solo se guardaron ${r.filas.length} de ${filas.length} precios ${nombreCat} ${SIMBOLO[moneda]}.`, "error"); return false; }
     decir(`${nombreCat}: ${fmtMoneda(valor, moneda)} por tramo${filas.length > 1 ? ` en ${filas.length} zonas` : ""}.`);
     return true;
   };
@@ -143,9 +161,7 @@ export default function PreciosTraslado({ zonas, categorias, tarifas, onTarifas,
     const algunaSub = origen.tipo === "subzona" || filasP.some((f) => f.zona.tipo === "subzona");
     const despues = algunaSub ? "Sin precio propio, ese recorrido usará el precio de su distrito (si lo tiene)." : "Sin precio, el cotizador ya no cotiza ese recorrido solo: el pedido pasa a un ejecutivo.";
     if (!window.confirm(`¿Borrar los ${ids.length} precio${ids.length === 1 ? "" : "s"} de ${origen.nombre} ↔ ${nombres}?\n\n${despues}`)) return;
-    const { error } = await supabase.from("tarifas_traslado").delete().in("id", ids);
-    if (error) { decir(textoError(error, "No se pudieron borrar los precios"), "error"); return; }
-    onTarifasBorradas(ids);
+    if (!(await borrarTarifas(ids, "No se pudieron borrar los precios"))) return;
     decir(`${ids.length} precio${ids.length === 1 ? "" : "s"} borrado${ids.length === 1 ? "" : "s"}.`);
   };
 
@@ -386,11 +402,12 @@ function ModalAgregarDestinos({ origen, zonas, cats, tarifas, onGuardadas, onCer
       const [a, b] = parOrdenado(origen.id, z.id);
       return llenos.map((x) => ({ zona_a_id: a, zona_b_id: b, categoria: x.c.clave, moneda: x.m, precio_tramo: x.r.valor, activo: true }));
     });
-    const { data, error: e } = await supabase.from("tarifas_traslado")
-      .upsert(filas, { onConflict: "zona_a_id,zona_b_id,categoria,moneda" }).select(COLS_TARIFA);
+    const r = filasEscritas<Record<string, unknown>>(await supabase.from("tarifas_traslado")
+      .upsert(filas, { onConflict: "zona_a_id,zona_b_id,categoria,moneda" }).select(COLS_TARIFA), "No se guardaron los precios", filas.length);
     setGuardando(false);
-    if (e) { setError(textoError(e, "No se guardaron los precios (no se escribió ninguno)")); return; }
-    onGuardadas(((data ?? []) as Record<string, unknown>[]).map(normalizarTarifa));
+    if (!r.ok) { setError(r.detalle); return; }
+    onGuardadas(r.filas.map(normalizarTarifa));
+    if (r.faltan > 0) { setError(`Solo se guardaron ${r.filas.length} de ${filas.length} precios: revisa la tabla y vuelve a intentarlo con los que faltan.`); return; }
     decir(`${filas.length} precio${filas.length === 1 ? "" : "s"} guardado${filas.length === 1 ? "" : "s"} en ${destinos.length} destino${destinos.length === 1 ? "" : "s"}.`);
     onCerrar();
   };

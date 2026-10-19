@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { NIVEL_CFG, nivelDeEquipamiento } from "@/lib/costos/nivel-servicio";
+import ZonasTraslados from "@/components/tarifario/ZonasTraslados";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -523,10 +524,66 @@ function FormTarifa({
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PÁGINA PRINCIPAL
+// PÁGINA PRINCIPAL · dos vistas: «Tarifas por ruta» (la de siempre) y «Zonas y traslados»
 // ══════════════════════════════════════════════════════════════════════════════
 
+type VistaTarifario = "ruta" | "zonas";
+
+/** La vista pedida en la URL (`?vista=zonas`). Esta página solo se pinta en el navegador: el layout espera la sesión. */
+function vistaInicial(): VistaTarifario {
+  if (typeof window === "undefined") return "ruta";
+  try { return new URLSearchParams(window.location.search).get("vista") === "zonas" ? "zonas" : "ruta"; }
+  catch { return "ruta"; }
+}
+
+const VISTAS: { id: VistaTarifario; label: string; sub: string }[] = [
+  { id: "ruta",  label: "📋 Tarifas por ruta",    sub: "Precios oficiales por ruta y vehículo" },
+  { id: "zonas", label: "🗺 Zonas y traslados",   sub: "Precios por zona · para la cotización automática del CRM" },
+];
+
+function InterruptorVista({ vista, onCambiar }: { vista: VistaTarifario; onCambiar: (v: VistaTarifario) => void }) {
+  return (
+    <div className="grid grid-cols-2 gap-2 bg-white border rounded-2xl p-1.5 shadow-sm" role="tablist" aria-label="Vista del tarifario">
+      {VISTAS.map(v => (
+        <button key={v.id} type="button" role="tab" aria-selected={vista === v.id} onClick={() => onCambiar(v.id)}
+          className="flex flex-col items-center justify-center rounded-xl px-2 py-2.5 min-h-[44px] transition-all"
+          style={{ background: vista === v.id ? "#0b315f" : "white", color: vista === v.id ? "white" : "#0b315f" }}>
+          <span className="font-black text-sm text-center">{v.label}</span>
+          <span className="text-[10px] opacity-75 text-center hidden sm:block">{v.sub}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function TarifarioPage() {
+  const [vista, setVista] = useState<VistaTarifario>(vistaInicial);
+  const cambiarVista = (v: VistaTarifario) => {
+    setVista(v);
+    try {
+      const u = new URL(window.location.href);
+      if (v === "zonas") u.searchParams.set("vista", "zonas");
+      else { u.searchParams.delete("vista"); u.searchParams.delete("tab"); }
+      window.history.replaceState(window.history.state, "", `${u.pathname}${u.search}${u.hash}`);
+    } catch { /* la URL es una comodidad */ }
+  };
+  const interruptor = <InterruptorVista vista={vista} onCambiar={cambiarVista} />;
+  if (vista === "zonas") {
+    return (
+      <main className="p-4 sm:p-6 space-y-5 max-w-[1500px] mx-auto">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Tarifario</h1>
+          <p className="text-sm text-gray-400 mt-1">Zonas y precios de traslado · los que usará la IA del CRM para cotizar sola (todavía no cotiza: se activa en la fase siguiente)</p>
+        </div>
+        {interruptor}
+        <ZonasTraslados />
+      </main>
+    );
+  }
+  return <TarifasPorRuta interruptor={interruptor} />;
+}
+
+function TarifasPorRuta({ interruptor }: { interruptor: React.ReactNode }) {
   const mapsLoaded = useGoogleMapsTar();
   const [tarifas,     setTarifas]     = useState<Tarifa[]>([]);
   const [cotRefs,     setCotRefs]     = useState<CotRef[]>([]);
@@ -761,6 +818,8 @@ export default function TarifarioPage() {
           </button>
         </div>
       </div>
+
+      {interruptor}
 
       {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

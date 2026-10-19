@@ -178,16 +178,66 @@ export async function leerFichasCosteo(): Promise<{ tipo: "ok"; fichas: FichaCos
   };
 }
 
-// ── Errores de escritura, en castellano ──────────────────────────────────────
+// ── Escrituras: con RLS, «sin permiso» puede ser un error O cero filas ───────────────────
+
+/** Escribir en las cuatro tablas exige el módulo «tarifas» (o admin). Leer, no. */
+export const SIN_PERMISO_TARIFAS = "hace falta el permiso del módulo Tarifas (lo da un administrador en Usuarios)";
+
+/** Los límites que exigen los CHECK de traslados-01-tablas.sql: el formulario los valida antes de guardar. */
+export const LIMITES = {
+  radio_m: [1, 10000],
+  capacidad: [1, 100],
+  maletas_bodega: [0, 200],
+  validez_dias: [1, 365],
+  espera_gratis_min: [0, 600],
+} as const;
 
 /** El error de una escritura dicho para quien lo lee, con lo que hay que hacer cuando se sabe. */
 export function textoError(e: ErrorSupabase, que: string): string {
   const code = String(e?.code ?? "");
   const msg = String(e?.message ?? "");
+  if (code === "42501" || /row-level security|permission denied/i.test(msg)) return `${que}: no se guardó porque ${SIN_PERMISO_TARIFAS}.`;
   if (code === "23505") return `${que}: ya existe (los nombres y las claves no se repiten).`;
-  if (code === "23514") return `${que}: falta un dato obligatorio (centro en el mapa, radio o distrito) o un valor no es válido.`;
+  if (code === "23514") return `${que}: un dato está fuera de rango o falta (centro en el mapa, radio de 1 a 10 000 m, asientos de 1 a 100, bodega de 0 a 200…).`;
   if (code === "23503") return `${que}: hace referencia a algo que ya no existe (recarga la pantalla).`;
-  if (code === "42501" || /row-level security|permission denied/i.test(msg)) return `${que}: la base no permitió escribir. ¿Venció tu sesión? Vuelve a ingresar.`;
   if (/failed to fetch|network/i.test(msg)) return `${que}: sin conexión con la base. Revisa tu internet y vuelve a intentarlo.`;
   return `${que}: ${msg || "error desconocido"}`;
+}
+
+/**
+ * Lo que devolvió una escritura hecha CON `.select()`. Con RLS, un UPDATE, DELETE o el lado
+ * «update» de un upsert sin permiso NO da error: afecta cero filas. Por eso toda escritura de esta
+ * pantalla pide las filas de vuelta, y menos filas de las esperadas se dicen, nunca se dan por
+ * guardadas.
+ */
+export function filasEscritas<T>(
+  res: { data: T[] | T | null; error: ErrorSupabase },
+  que: string,
+  esperadas = 1,
+): { ok: true; filas: T[]; faltan: number } | { ok: false; detalle: string; cero: boolean } {
+  if (res.error) return { ok: false, detalle: textoError(res.error, que), cero: false };
+  const filas = res.data == null ? [] : Array.isArray(res.data) ? res.data : [res.data];
+  if (filas.length === 0) return { ok: false, detalle: `${que}: no se guardó porque ${SIN_PERMISO_TARIFAS}.`, cero: true };
+  return { ok: true, filas, faltan: Math.max(0, esperadas - filas.length) };
+}
+
+/**
+ * Cero filas tiene DOS causas: falta el permiso, o la fila ya no existe (otra persona la borró).
+ * Leer está abierto a todo el ERP, así que se comprueba cuál fue en vez de acusar al permiso.
+ */
+export async function motivoCeroFilas(tabla: string, col: string, valor: string | number, que: string): Promise<string> {
+  try {
+    const { data, error } = await supabase.from(tabla).select(col).eq(col, valor).limit(1);
+    if (!error && (data ?? []).length === 0) return `${que}: ya no existe en la base (alguien la borró). Pulsa «↻ Recargar».`;
+  } catch { /* si no se puede comprobar, queda el motivo del permiso */ }
+  return `${que}: no se guardó porque ${SIN_PERMISO_TARIFAS}.`;
+}
+
+/** De unos ids de tarifas, los que todavía existen (null si no se pudo comprobar). */
+export async function tarifasQueSiguen(ids: number[]): Promise<Set<number> | null> {
+  try {
+    const { data, error } = await supabase.from("tarifas_traslado").select("id").in("id", ids);
+    if (error) return null;
+    return new Set(((data ?? []) as { id: unknown }[]).map((x) => Number(x.id)));
+  } catch { return null; }
 }

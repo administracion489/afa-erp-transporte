@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { elegirVehiculo } from "@/lib/traslados/motor";
 import { leerEntero, normalizarClaveCategoria, type CategoriaFila } from "./traslados-pantalla";
-import { COLS_CATEGORIA, leerFichasCosteo, normalizarCategoria, textoError, type FichaCosteo } from "./traslados-datos";
+import { COLS_CATEGORIA, filasEscritas, leerFichasCosteo, LIMITES, motivoCeroFilas, normalizarCategoria, type FichaCosteo } from "./traslados-datos";
 import { AZUL, iCls, InterruptorActivo, type Decir } from "./traslados-comun";
 
 const REGLA = "Se elige el vehículo más chico donde caben. Sin bodega, cada maleta de 23 kg ocupa un asiento (10 pax con maletas = 20 asientos → Sprinter 20). Con bodega, las maletas van primero ahí y solo las que sobran ocupan asiento.";
@@ -77,10 +77,11 @@ export default function VehiculosTraslado({ categorias, onCategoria, decir }: {
 
   const actualizar = async (c: CategoriaFila, cambios: Partial<CategoriaFila>, que: string): Promise<boolean> => {
     setOcupada(c.clave);
-    const { data, error } = await supabase.from("traslado_categorias").update(cambios).eq("clave", c.clave).select(COLS_CATEGORIA).single();
+    // Con RLS, un UPDATE sin permiso no da error: vuelve sin filas, y `filasEscritas` lo dice.
+    const r = filasEscritas<Record<string, unknown>>(await supabase.from("traslado_categorias").update(cambios).eq("clave", c.clave).select(COLS_CATEGORIA), que);
     setOcupada(null);
-    if (error) { decir(textoError(error, que), "error"); return false; }
-    onCategoria(normalizarCategoria(data as Record<string, unknown>));
+    if (!r.ok) { decir(r.cero ? await motivoCeroFilas("traslado_categorias", "clave", c.clave, que) : r.detalle, "error"); return false; }
+    onCategoria(normalizarCategoria(r.filas[0]));
     return true;
   };
 
@@ -165,11 +166,11 @@ export default function VehiculosTraslado({ categorias, onCategoria, decir }: {
                         onGuardar={(v) => actualizar(c, { nombre: String(v) }, `No se pudo cambiar el nombre de ${c.clave}`)} />
                     </td>
                     <td className="p-2 w-24">
-                      <Campo key={`c-${c.capacidad}`} valor={c.capacidad} tipo="entero" min={1} max={200} etiqueta={`Asientos de ${c.clave}`} ocupado={ocupado}
+                      <Campo key={`c-${c.capacidad}`} valor={c.capacidad} tipo="entero" min={LIMITES.capacidad[0]} max={LIMITES.capacidad[1]} etiqueta={`Asientos de ${c.clave}`} ocupado={ocupado}
                         onGuardar={(v) => actualizar(c, { capacidad: Number(v) }, `No se pudo cambiar la capacidad de ${c.clave}`)} />
                     </td>
                     <td className="p-2 w-28">
-                      <Campo key={`b-${c.maletas_bodega}`} valor={c.maletas_bodega} tipo="entero" min={0} max={500} etiqueta={`Maletas en bodega de ${c.clave}`} ocupado={ocupado}
+                      <Campo key={`b-${c.maletas_bodega}`} valor={c.maletas_bodega} tipo="entero" min={LIMITES.maletas_bodega[0]} max={LIMITES.maletas_bodega[1]} etiqueta={`Maletas en bodega de ${c.clave}`} ocupado={ocupado}
                         onGuardar={(v) => actualizar(c, { maletas_bodega: Number(v) }, `No se pudo cambiar la bodega de ${c.clave}`)} />
                     </td>
                     <td className="p-2 min-w-[14rem]">
@@ -219,12 +220,12 @@ function AltaCategoria({ categorias, fichas, onCreada, decir }: {
   const [error, setError] = useState<string | null>(null);
 
   const k = normalizarClaveCategoria(clave);
-  const lCap = leerEntero(cap, 1, 200);
-  const lBod = leerEntero(bodega, 0, 500);
+  const lCap = leerEntero(cap, LIMITES.capacidad[0], LIMITES.capacidad[1]);
+  const lBod = leerEntero(bodega, LIMITES.maletas_bodega[0], LIMITES.maletas_bodega[1]);
   const motivo = !k ? "Falta la clave (MAYÚSCULAS, sin espacios; p. ej. VAN_12)."
     : categorias.some((c) => c.clave === k) ? `Ya existe la clave ${k}.`
       : !nombre.trim() ? "Falta el nombre."
-        : lCap.tipo !== "ok" ? "Faltan los asientos (un entero entre 1 y 200)."
+        : lCap.tipo !== "ok" ? `Faltan los asientos (un entero entre ${LIMITES.capacidad[0]} y ${LIMITES.capacidad[1]}).`
           : lBod.tipo === "error" ? `Maletas en bodega: ${lBod.detalle}`
             : null;
 
@@ -233,13 +234,15 @@ function AltaCategoria({ categorias, fichas, onCreada, decir }: {
     setGuardando(true);
     setError(null);
     const orden = Math.max(0, ...categorias.map((c) => Number(c.orden) || 0)) + 10;
-    const { data, error: e } = await supabase.from("traslado_categorias").insert({
+    const res = await supabase.from("traslado_categorias").insert({
       clave: k, nombre: nombre.trim(), capacidad: lCap.valor, maletas_bodega: lBod.tipo === "ok" ? lBod.valor : 0,
       tipo_vehiculo: ficha || null, orden, activo: true,
-    }).select(COLS_CATEGORIA).single();
+    }).select(COLS_CATEGORIA);
     setGuardando(false);
-    if (e) { setError(e.code === "23505" ? `Ya existe la clave ${k}.` : textoError(e, "No se pudo crear el vehículo")); return; }
-    onCreada(normalizarCategoria(data as Record<string, unknown>));
+    if (res.error?.code === "23505") { setError(`Ya existe la clave ${k}.`); return; }
+    const r = filasEscritas<Record<string, unknown>>(res, "No se pudo crear el vehículo");
+    if (!r.ok) { setError(r.detalle); return; }
+    onCreada(normalizarCategoria(r.filas[0]));
     decir(`Vehículo ${k} creado.`);
     setClave(""); setNombre(""); setCap(""); setBodega("0"); setFicha("");
   };

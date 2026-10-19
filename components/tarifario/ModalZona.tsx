@@ -10,7 +10,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { leerEntero, motivoAliasInvalido, nombreRepetido, SECTORES, type TarifaFila, type ZonaFila } from "./traslados-pantalla";
-import { COLS_ZONA, normalizarZona, textoError } from "./traslados-datos";
+import { COLS_ZONA, filasEscritas, LIMITES, motivoCeroFilas, normalizarZona } from "./traslados-datos";
 import { AZUL, EditorAlias, iCls, Modal, type Decir } from "./traslados-comun";
 import { LugarInput, LUGAR_VACIO, ubicarParaMapa, type LugarValor } from "./google-lugar";
 import MapaZona, { type Vuelo } from "./MapaZona";
@@ -49,8 +49,16 @@ export function mensajeBorrado(z: ZonaFila, zonas: readonly ZonaFila[], tarifas:
 /** Borra la zona (con confirmación que nombra lo que se va). Devuelve true si se borró. */
 export async function borrarZona(z: ZonaFila, zonas: readonly ZonaFila[], tarifas: readonly TarifaFila[], decir: Decir): Promise<boolean> {
   if (!window.confirm(mensajeBorrado(z, zonas, tarifas))) return false;
-  const { error } = await supabase.from("zonas_traslado").delete().eq("id", z.id);
-  if (error) { decir(textoError(error, `No se pudo borrar «${z.nombre}»`), "error"); return false; }
+  // Con RLS, un DELETE sin permiso no da error: borra cero filas. Se pide la fila de vuelta.
+  const que = `No se pudo borrar «${z.nombre}»`;
+  const r = filasEscritas(await supabase.from("zonas_traslado").delete().eq("id", z.id).select("id"), que);
+  if (!r.ok) {
+    const motivo = r.cero ? await motivoCeroFilas("zonas_traslado", "id", z.id, que) : r.detalle;
+    // Ya no existía: el borrado está hecho, solo hay que reflejarlo.
+    if (r.cero && /ya no existe/.test(motivo)) { decir(`«${z.nombre}» ya estaba borrada.`, "info"); return true; }
+    decir(motivo, "error");
+    return false;
+  }
   decir(`«${z.nombre}» borrada.`);
   return true;
 }
@@ -107,7 +115,8 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
   }, []);
 
   const borrador = { id: editando?.id ?? null, tipo, padre_id: padre?.id ?? null, nombre };
-  const lecturaRadio = leerEntero(radio, 50, 50000);
+  const lecturaRadio = leerEntero(radio, LIMITES.radio_m[0], LIMITES.radio_m[1]);
+  const centroValido = !!centro && Math.abs(centro.lat) <= 90 && Math.abs(centro.lng) <= 180;
   const nombreLimpio = nombre.trim();
   const repetida = nombreRepetido(nombreLimpio, zonas, editando?.id);
   const prefijo = tipo === "subzona" && padre ? `${padre.nombre} ·` : null;
@@ -116,7 +125,8 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
       : prefijo && nombreLimpio === prefijo ? "Completa el nombre de la subzona después de «·»."
         : repetida ? `Ya existe una zona llamada «${repetida.nombre}»: los nombres no se repiten.`
           : conMapa && !centro ? "Falta marcar el centro en el mapa (haz clic donde queda)."
-            : tipo === "punto" && lecturaRadio.tipo !== "ok" ? "El radio va en metros: un número entero entre 50 y 50 000."
+          : conMapa && !centroValido ? "El centro está fuera de rango: vuelve a marcarlo en el mapa."
+            : tipo === "punto" && lecturaRadio.tipo !== "ok" ? `El radio va en metros: un número entero entre ${LIMITES.radio_m[0]} y ${LIMITES.radio_m[1].toLocaleString("es-PE")}.`
               : sectorSel === OTRO_SECTOR && !sectorOtro.trim() ? "Escribe el nombre del sector, o elige uno de la lista."
                 : null;
 
@@ -136,22 +146,23 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
     };
     let res;
     if (editando) {
-      res = await supabase.from("zonas_traslado").update(payload).eq("id", editando.id).select(COLS_ZONA).single();
+      res = await supabase.from("zonas_traslado").update(payload).eq("id", editando.id).select(COLS_ZONA);
     } else {
       const mismoTipo = zonas.filter((z) => z.tipo === tipo);
       const orden = tipo === "subzona" ? Number(padre?.orden) || 0 : Math.max(0, ...mismoTipo.map((z) => Number(z.orden) || 0)) + 1;
       res = await supabase.from("zonas_traslado").insert({ ...payload, tipo, padre_id: tipo === "subzona" ? padre?.id ?? null : null, orden, activo: true })
-        .select(COLS_ZONA).single();
+        .select(COLS_ZONA);
     }
     setGuardando(false);
-    if (res.error) {
-      const t = res.error.code === "23505"
-        ? `Ya existe una zona llamada «${nombreLimpio}» (los nombres no se repiten aunque cambien las mayúsculas).`
-        : textoError(res.error, editando ? "No se pudo guardar la zona" : "No se pudo crear la zona");
-      setError(t);
+    if (res.error?.code === "23505") {
+      setError(`Ya existe una zona llamada «${nombreLimpio}» (los nombres no se repiten aunque cambien las mayúsculas).`);
       return;
     }
-    onGuardada(normalizarZona(res.data as Record<string, unknown>));
+    // Un UPDATE sin permiso no da error con RLS: vuelve sin filas. `filasEscritas` lo dice.
+    const que = editando ? "No se pudo guardar la zona" : "No se pudo crear la zona";
+    const r = filasEscritas<Record<string, unknown>>(res, que);
+    if (!r.ok) { setError(r.cero && editando ? await motivoCeroFilas("zonas_traslado", "id", editando.id, que) : r.detalle); return; }
+    onGuardada(normalizarZona(r.filas[0]));
     decir(editando ? `«${nombreLimpio}» guardada.` : `«${nombreLimpio}» creada.`);
     onCerrar();
   };
@@ -201,7 +212,7 @@ export default function ModalZona({ modo, zonas, tarifas, onGuardada, onBorrada,
         )}
         {tipo === "punto" && (
           <label className="block">
-            <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Radio (metros) *</span>
+            <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Radio (metros, de 1 a 10 000) *</span>
             <input className={iCls("font-mono")} inputMode="numeric" value={radio} onChange={(e) => setRadio(e.target.value)} placeholder="1000" />
           </label>
         )}
