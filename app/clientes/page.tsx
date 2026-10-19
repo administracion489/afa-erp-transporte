@@ -963,6 +963,7 @@ export default function ClientesPage() {
   const [formPax,          setFormPax]          = useState({ nombre: "", dni: "", telefono: "", empresa: "", email: "", pin_acceso: "", edad: "" });
   const [savingPax,        setSavingPax]        = useState(false);
   const [enviandoCreds,    setEnviandoCreds]    = useState<Set<number>>(new Set());
+  const [enviandoWa,       setEnviandoWa]       = useState<Set<number>>(new Set());
   const nominaInputRef = useRef<HTMLInputElement>(null);
   const { canalEmail, setCanalEmail, canalWhatsapp, setCanalWhatsapp } = useCanalesInvitacion();
 
@@ -1174,6 +1175,30 @@ export default function ClientesPage() {
       toast(msg, enviados > 0 ? "ok" : "info");
     } finally {
       setEnviandoCreds(new Set());
+    }
+  };
+
+  /** WhatsApp de invitación a pedido del operador (cabecera de la nómina o por fila).
+   *  Usa la MISMA puerta que la invitación automática al dar de alta: plantilla aprobada de
+   *  Meta, que por diseño NO lleva el PIN (lib/pasajero-invitacion.ts). */
+  const enviarWhatsapp = async (ids: number[]) => {
+    setEnviandoWa(new Set(ids));
+    try {
+      const res = await fetch("/api/pasajeros/invitacion", {
+        method: "POST", headers: await cabecerasErp(),
+        body: JSON.stringify({ pasajeroIds: ids, canales: { email: false, whatsapp: true } }),
+      });
+      const json = await res.json();
+      if (!res.ok) { toast(json.error || "Error al enviar", "error"); return; }
+      const { whatsappEnviados = 0, whatsappOmitidos = 0, whatsappErrores = 0 } = json;
+      const msg = `💬 ${whatsappEnviados} WhatsApp enviado(s)`
+        + (whatsappOmitidos ? ` · ${whatsappOmitidos} sin teléfono` : "")
+        + (whatsappErrores ? ` · ${whatsappErrores} error(es): revisa que la plantilla «invitacion_app_pasajero» esté aprobada en Meta` : "");
+      toast(msg, whatsappEnviados > 0 ? "ok" : whatsappErrores ? "error" : "info");
+    } catch {
+      toast("No se pudo enviar el WhatsApp (sin conexión)", "error");
+    } finally {
+      setEnviandoWa(new Set());
     }
   };
 
@@ -2497,6 +2522,7 @@ export default function ClientesPage() {
                               {(() => {
                                 const nomina = nominaMap[expandidoId!] || [];
                                 const conEmail = nomina.filter(p => p.email);
+                                const conTelefono = nomina.filter(p => p.telefono);
                                 return (
                                   <div style={{ borderTop: "1px solid #e2e8f0", marginTop: 16, paddingTop: 16 }}>
                                     {/* Header row */}
@@ -2514,6 +2540,17 @@ export default function ClientesPage() {
                                         <button onClick={e => { e.stopPropagation(); enviarCredenciales(nomina.map(p => p.id)); }} disabled={enviandoCreds.size > 0}
                                           style={{ padding: "4px 12px", borderRadius: 7, border: "none", background: enviandoCreds.size > 0 ? "#94a3b8" : "#16a34a", color: "white", fontSize: 10, fontWeight: 700, cursor: enviandoCreds.size > 0 ? "not-allowed" : "pointer" }}>
                                           {enviandoCreds.size > 0 ? "Enviando..." : `✉ Enviar credenciales (${conEmail.length})`}
+                                        </button>
+                                      )}
+                                      {conTelefono.length > 0 && (
+                                        <button onClick={e => {
+                                          e.stopPropagation();
+                                          if (!confirm(`Se enviará el WhatsApp de invitación a ${conTelefono.length} pasajero(s) con teléfono${nomina.length > conTelefono.length ? ` (${nomina.length - conTelefono.length} sin teléfono quedan fuera)` : ""}.\n\nEs la plantilla aprobada de Meta: invita a instalar la app y NO incluye el PIN (ese va por correo). Cada mensaje se cobra.\n\n¿Enviar?`)) return;
+                                          enviarWhatsapp(conTelefono.map(p => p.id));
+                                        }} disabled={enviandoWa.size > 0}
+                                          title="Invitación por WhatsApp a instalar la app (no incluye el PIN)"
+                                          style={{ padding: "4px 12px", borderRadius: 7, border: "none", background: enviandoWa.size > 0 ? "#94a3b8" : "#25d366", color: "white", fontSize: 10, fontWeight: 700, cursor: enviandoWa.size > 0 ? "not-allowed" : "pointer" }}>
+                                          {enviandoWa.size > 0 ? "Enviando..." : `💬 Enviar por WhatsApp (${conTelefono.length})`}
                                         </button>
                                       )}
                                       <button onClick={e => { e.stopPropagation(); descargarPlantilla(); }}
@@ -2563,6 +2600,9 @@ export default function ClientesPage() {
                                             <button onClick={e => { e.stopPropagation(); enviarCredenciales([p.id]); }} disabled={!p.email || enviandoCreds.has(p.id)}
                                               title={p.email ? "Enviar credenciales" : "Agrega un email primero"}
                                               style={{ padding: "3px 8px", borderRadius: 6, border: "1px solid #e5e7eb", background: "white", fontSize: 10, fontWeight: 600, cursor: p.email ? "pointer" : "not-allowed", color: p.email ? "#0b315f" : "#cbd5e1", flexShrink: 0, opacity: p.email ? 1 : 0.5 }}>✉</button>
+                                            <button onClick={e => { e.stopPropagation(); enviarWhatsapp([p.id]); }} disabled={!p.telefono || enviandoWa.has(p.id)}
+                                              title={p.telefono ? "Enviar invitación por WhatsApp (no incluye el PIN)" : "Agrega un teléfono primero"}
+                                              style={{ padding: "3px 8px", borderRadius: 6, border: "1px solid #e5e7eb", background: "white", fontSize: 10, fontWeight: 600, cursor: p.telefono ? "pointer" : "not-allowed", color: p.telefono ? "#16a34a" : "#cbd5e1", flexShrink: 0, opacity: p.telefono ? 1 : 0.5 }}>💬</button>
                                           </div>
                                         ))}
                                       </div>
