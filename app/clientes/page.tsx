@@ -12,6 +12,7 @@ import {
   type Frecuencia, type Ventana,
 } from "@/lib/ocupacion/cadencia";
 import { cabecerasErp } from "@/lib/fetch-erp";
+import { PERIODOS_ALTA, rangoDePeriodo, filtrarPorAlta, fechaLimaDeTs, type PeriodoAlta } from "@/lib/nomina-envio";
 import { faltaAlguna } from "@/lib/columna-faltante";
 
 /* ══════════════════════════════════════════════
@@ -33,6 +34,7 @@ type PasajeroCliente = {
   email: string | null;
   pin_acceso: string | null;
   edad: number | null;
+  created_at?: string | null;
 };
 
 type Contacto = {
@@ -964,6 +966,8 @@ export default function ClientesPage() {
   const [savingPax,        setSavingPax]        = useState(false);
   const [enviandoCreds,    setEnviandoCreds]    = useState<Set<number>>(new Set());
   const [enviandoWa,       setEnviandoWa]       = useState<Set<number>>(new Set());
+  // Envío masivo acotado por fecha de alta (lib/nomina-envio.ts): no escribirle a toda la nómina.
+  const [envioMasivo, setEnvioMasivo] = useState<null | { canal: "whatsapp" | "email"; periodo: PeriodoAlta; desde: string; hasta: string }>(null);
   const nominaInputRef = useRef<HTMLInputElement>(null);
   const { canalEmail, setCanalEmail, canalWhatsapp, setCanalWhatsapp } = useCanalesInvitacion();
 
@@ -1014,7 +1018,7 @@ export default function ClientesPage() {
     setLoadingNomina(true);
     const { data } = await supabase
       .from("pasajeros")
-      .select("id, nombre, dni, telefono, empresa, email, pin_acceso, edad")
+      .select("id, nombre, dni, telefono, empresa, email, pin_acceso, edad, created_at")
       .eq("cliente_id", clienteId)
       .is("reserva_id", null)
       .order("nombre");
@@ -2537,17 +2541,13 @@ export default function ClientesPage() {
                                         </button>
                                       )}
                                       {conEmail.length > 0 && (
-                                        <button onClick={e => { e.stopPropagation(); enviarCredenciales(nomina.map(p => p.id)); }} disabled={enviandoCreds.size > 0}
+                                        <button onClick={e => { e.stopPropagation(); setEnvioMasivo({ canal: "email", periodo: "7d", desde: "", hasta: "" }); }} disabled={enviandoCreds.size > 0}
                                           style={{ padding: "4px 12px", borderRadius: 7, border: "none", background: enviandoCreds.size > 0 ? "#94a3b8" : "#16a34a", color: "white", fontSize: 10, fontWeight: 700, cursor: enviandoCreds.size > 0 ? "not-allowed" : "pointer" }}>
                                           {enviandoCreds.size > 0 ? "Enviando..." : `✉ Enviar credenciales (${conEmail.length})`}
                                         </button>
                                       )}
                                       {conTelefono.length > 0 && (
-                                        <button onClick={e => {
-                                          e.stopPropagation();
-                                          if (!confirm(`Se enviará el WhatsApp de invitación a ${conTelefono.length} pasajero(s) con teléfono${nomina.length > conTelefono.length ? ` (${nomina.length - conTelefono.length} sin teléfono quedan fuera)` : ""}.\n\nEs la plantilla aprobada de Meta: invita a instalar la app y NO incluye el PIN (ese va por correo). Cada mensaje se cobra.\n\n¿Enviar?`)) return;
-                                          enviarWhatsapp(conTelefono.map(p => p.id));
-                                        }} disabled={enviandoWa.size > 0}
+                                        <button onClick={e => { e.stopPropagation(); setEnvioMasivo({ canal: "whatsapp", periodo: "7d", desde: "", hasta: "" }); }} disabled={enviandoWa.size > 0}
                                           title="Invitación por WhatsApp a instalar la app (no incluye el PIN)"
                                           style={{ padding: "4px 12px", borderRadius: 7, border: "none", background: enviandoWa.size > 0 ? "#94a3b8" : "#25d366", color: "white", fontSize: 10, fontWeight: 700, cursor: enviandoWa.size > 0 ? "not-allowed" : "pointer" }}>
                                           {enviandoWa.size > 0 ? "Enviando..." : `💬 Enviar por WhatsApp (${conTelefono.length})`}
@@ -2568,6 +2568,87 @@ export default function ClientesPage() {
                                       <input ref={nominaInputRef} type="file" accept=".xls,.xlsx,.csv" style={{ display: "none" }}
                                         onChange={e => { e.stopPropagation(); const file = e.target.files?.[0]; if (file && expandidoId) handleNominaArchivo(file, expandidoId); e.target.value = ""; }} />
                                     </div>
+                                    {envioMasivo && (() => {
+                                      const hoy = fechaLimaDeTs(Date.now())!;
+                                      const esWa = envioMasivo.canal === "whatsapp";
+                                      const conCanal = nomina.filter(p => esWa ? p.telefono : p.email);
+                                      const rango = rangoDePeriodo(envioMasivo.periodo, hoy, envioMasivo.desde, envioMasivo.hasta);
+                                      const invalido = "invalido" in rango ? rango.invalido : null;
+                                      const elegidos = invalido ? [] : filtrarPorAlta(conCanal, rango as { desde: string | null; hasta: string | null });
+                                      const sinCanalPeriodo = invalido ? 0 : filtrarPorAlta(nomina, rango as { desde: string | null; hasta: string | null }).length - elegidos.length;
+                                      const enviar = () => {
+                                        if (!elegidos.length) return;
+                                        const ids = elegidos.map(p => p.id);
+                                        setEnvioMasivo(null);
+                                        if (esWa) enviarWhatsapp(ids); else enviarCredenciales(ids);
+                                      };
+                                      const set = (c: Partial<NonNullable<typeof envioMasivo>>) => setEnvioMasivo({ ...envioMasivo, ...c });
+                                      return (
+                                        <div onClick={e => { e.stopPropagation(); setEnvioMasivo(null); }}
+                                          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+                                          <div onClick={e => e.stopPropagation()} style={{ background: "white", borderRadius: 14, padding: 20, width: "100%", maxWidth: 460, maxHeight: "85vh", overflowY: "auto", boxShadow: "0 20px 50px rgba(0,0,0,.25)" }}>
+                                            <p style={{ fontSize: 15, fontWeight: 800, color: "#0f172a", margin: "0 0 4px" }}>
+                                              {esWa ? "💬 Enviar invitación por WhatsApp" : "✉ Enviar credenciales por correo"}
+                                            </p>
+                                            <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 14px" }}>
+                                              Elige a quiénes, según la fecha en que se dieron de alta en la nómina.
+                                              {esWa && " Cada WhatsApp se cobra; no incluye el PIN (ese va por correo)."}
+                                            </p>
+                                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                                              {PERIODOS_ALTA.map(op => (
+                                                <button key={op.id} onClick={() => set({ periodo: op.id })}
+                                                  style={{ padding: "6px 12px", borderRadius: 999, fontSize: 11, fontWeight: 700, cursor: "pointer",
+                                                    border: envioMasivo.periodo === op.id ? "1px solid #0b315f" : "1px solid #e2e8f0",
+                                                    background: envioMasivo.periodo === op.id ? "#0b315f" : "white", color: envioMasivo.periodo === op.id ? "white" : "#374151" }}>
+                                                  {op.etiqueta}
+                                                </button>
+                                              ))}
+                                            </div>
+                                            {envioMasivo.periodo === "rango" && (
+                                              <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center", fontSize: 11, color: "#374151" }}>
+                                                Desde <input type="date" value={envioMasivo.desde} max={hoy} onChange={e => set({ desde: e.target.value })} style={{ padding: "5px 8px", border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 12 }} />
+                                                hasta <input type="date" value={envioMasivo.hasta} max={hoy} onChange={e => set({ hasta: e.target.value })} style={{ padding: "5px 8px", border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 12 }} />
+                                              </div>
+                                            )}
+                                            {invalido ? (
+                                              <p style={{ fontSize: 12, color: "#b45309", background: "#fffbeb", padding: "8px 10px", borderRadius: 8, margin: "0 0 12px" }}>{invalido}</p>
+                                            ) : (
+                                              <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 10, marginBottom: 12 }}>
+                                                <p style={{ fontSize: 12, fontWeight: 700, color: "#0f172a", margin: 0 }}>
+                                                  {elegidos.length} pasajero(s) recibirán el {esWa ? "WhatsApp" : "correo"}
+                                                </p>
+                                                {sinCanalPeriodo > 0 && (
+                                                  <p style={{ fontSize: 11, color: "#b45309", margin: "4px 0 0" }}>
+                                                    {sinCanalPeriodo} del periodo quedan fuera por no tener {esWa ? "teléfono" : "email"}.
+                                                  </p>
+                                                )}
+                                                {elegidos.length > 0 && (
+                                                  <div style={{ marginTop: 8, maxHeight: 160, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+                                                    {elegidos.map(p => (
+                                                      <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, color: "#374151" }}>
+                                                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.nombre}</span>
+                                                        <span style={{ color: "#94a3b8", flexShrink: 0 }}>{p.created_at ? `alta ${(fechaLimaDeTs(p.created_at) || "").split("-").reverse().join("/")}` : "sin fecha"}</span>
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                )}
+                                              </div>
+                                            )}
+                                            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                                              <button onClick={() => setEnvioMasivo(null)}
+                                                style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #e2e8f0", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#374151" }}>
+                                                Cancelar
+                                              </button>
+                                              <button onClick={enviar} disabled={!elegidos.length}
+                                                style={{ padding: "8px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700, color: "white",
+                                                  background: !elegidos.length ? "#94a3b8" : esWa ? "#25d366" : "#16a34a", cursor: elegidos.length ? "pointer" : "not-allowed" }}>
+                                                {esWa ? "💬" : "✉"} Enviar a {elegidos.length}
+                                              </button>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
                                     <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 10 }} onClick={e => e.stopPropagation()}>
                                       <span style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600 }}>Al crear pasajero, enviar invitación automática por:</span>
                                       <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, color: "#374151", cursor: "pointer" }}>
