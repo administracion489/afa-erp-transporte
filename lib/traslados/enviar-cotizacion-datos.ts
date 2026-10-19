@@ -11,6 +11,10 @@
 //    envío que muere a mitad se puede reintentar pasado ese plazo.
 //  · SOLO AL `wa_id` DE LA CONVERSACIÓN. Nunca a `contacto.telefono`, que el modelo puede escribir
 //    con `actualizar_contacto`.
+//  · QUIEN LLAMA DICE DE QUÉ CONVERSACIÓN Y DE QUÉ COTIZACIÓN ES (`esperado`): la IA pasa las de su
+//    turno y la tarjeta del inbox la conversación que tiene abierta. Si la acción es de otra, no se
+//    reclama ni se toca (`cotizacion_ajena`): un id de acción equivocado no puede mandar el PDF de
+//    otro cliente.
 //  · LA URL QUE SE LE PASA A META ES FIRMADA, y si no se puede firmar NO se envía: `firmarUrl`
 //    devuelve la original cuando falla, y en un bucket privado esa no se puede descargar.
 //  · SI FALLA, LA ACCIÓN VUELVE A `pendiente` con el error escrito y una nota interna: el
@@ -71,15 +75,35 @@ export function tipoImagen(b: Uint8Array): "png" | "jpg" | null {
 
 export type LogoPdf = { bytes: Uint8Array; tipo: "png" | "jpg" };
 
+/** Dónde puede estar el logo: el almacenamiento PÚBLICO del propio proyecto de Supabase. */
+export const RUTA_LOGO_PERMITIDA = "/storage/v1/object/public/";
+
 /**
- * El logo del perfil, best-effort: solo https, sin redirecciones, 4 s y 2 MB como mucho. Si no es
- * PNG ni JPG se convierte con sharp. Cualquier fallo devuelve null y el PDF sale sin logo (nunca
- * con el de otra empresa).
+ * El host del proyecto de Supabase (de `NEXT_PUBLIC_SUPABASE_URL`), o null si no está o no es
+ * https. Sin él no se baja ningún logo.
  */
-export async function bajarLogo(url: string | null | undefined, f: typeof fetch = fetch): Promise<LogoPdf | null> {
+export function hostSupabase(base: string | null | undefined = process.env.NEXT_PUBLIC_SUPABASE_URL): string | null {
+  try {
+    const u = new URL(String(base ?? ""));
+    return u.protocol === "https:" ? u.host : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * El logo del perfil, best-effort: SOLO del almacenamiento público del propio Supabase (el bucket
+ * donde lo sube /configuracion/perfil), https, sin redirecciones, 4 s y 2 MB como mucho, y solo
+ * PNG o JPG por sus bytes (no se convierte nada: otro formato es otro decodificador expuesto a lo
+ * que alguien pegó en el campo del logo). Cualquier fallo devuelve null y el PDF sale sin logo
+ * (nunca con el de otra empresa).
+ */
+export async function bajarLogo(url: string | null | undefined, f: typeof fetch = fetch, base?: string | null): Promise<LogoPdf | null> {
   let u: URL;
   try { u = new URL(String(url ?? "")); } catch { return null; }
   if (u.protocol !== "https:" || u.username || u.password) return null;
+  const host = hostSupabase(base === undefined ? process.env.NEXT_PUBLIC_SUPABASE_URL : base);
+  if (!host || u.host !== host || !u.pathname.startsWith(RUTA_LOGO_PERMITIDA) || u.pathname.includes("..")) return null;
   const ctrl = new AbortController();
   const reloj = setTimeout(() => ctrl.abort(), LOGO_TIMEOUT_MS);
   try {
@@ -101,11 +125,7 @@ export async function bajarLogo(url: string | null | undefined, f: typeof fetch 
     let o = 0;
     for (const p of partes) { bytes.set(p, o); o += p.byteLength; }
     const tipo = tipoImagen(bytes);
-    if (tipo) return { bytes, tipo };
-    const sharp = (await import("sharp")).default;
-    const png = await sharp(Buffer.from(bytes), { limitInputPixels: 25_000_000 })
-      .resize({ width: 800, height: 320, fit: "inside", withoutEnlargement: true }).png().toBuffer();
-    return { bytes: new Uint8Array(png), tipo: "png" };
+    return tipo ? { bytes, tipo } : null;
   } catch {
     return null;
   } finally {
@@ -173,9 +193,36 @@ type AccionFila = {
 
 const COLS_ACCION = "id, tipo, estado, conversacion_id, contacto_id, resuelta_at, resultado_id, payload";
 
+/**
+ * Por qué la acción NO es la que espera quien llama, o null si lo es (o si no espera nada). Una
+ * conversación o cotización esperada que llega vacía o rara cuenta como «no coincide»: quien la
+ * pasa es porque quiere comprobarla.
+ */
+export function accionAjena(
+  acc: { conversacion_id?: string | null; resultado_id?: number | null; payload?: Record<string, unknown> | null },
+  esperado: { conversacionId?: string; cotizacionId?: number } | null | undefined,
+): string | null {
+  if (!esperado) return null;
+  if (esperado.conversacionId !== undefined) {
+    const e = typeof esperado.conversacionId === "string" ? esperado.conversacionId.trim() : "";
+    if (!e || !acc.conversacion_id || acc.conversacion_id !== e) return "La acción no es de esta conversación.";
+  }
+  if (esperado.cotizacionId !== undefined) {
+    const e = Number(esperado.cotizacionId);
+    const p = acc.payload && typeof acc.payload === "object" ? (acc.payload as { cotizacion_id?: unknown }).cotizacion_id : undefined;
+    const propia = Number(acc.resultado_id ?? p);
+    if (!Number.isInteger(e) || e <= 0 || !Number.isFinite(propia) || propia !== e) return "La acción no es de esta cotización.";
+  }
+  return null;
+}
+
 export async function enviarCotizacionTraslado(
   sb: Sb,
-  x: { accionId: string; por: "automatico" | "ejecutivo"; usuarioId?: string | null; bytes?: Uint8Array | null; nombre?: string; caption?: string },
+  x: {
+    accionId: string; por: "automatico" | "ejecutivo"; usuarioId?: string | null; bytes?: Uint8Array | null; nombre?: string; caption?: string;
+    /** De qué conversación y cotización TIENE que ser la acción. Si no coincide, no se reclama ni se envía. */
+    esperado?: { conversacionId?: string; cotizacionId?: number };
+  },
   deps: DepsEnvio = {},
 ): Promise<ResultadoEnvio> {
   const ahora = deps.ahoraMs?.() ?? Date.now();
@@ -185,6 +232,9 @@ export async function enviarCotizacionTraslado(
   if (eAcc) return { ok: false, codigo: "error_lectura", detalle: `No se pudo leer la acción: ${eAcc.message}` };
   const acc = accData as AccionFila | null;
   if (!acc || acc.tipo !== "cotizacion_traslado") return { ok: false, codigo: "cotizacion_no_existe", detalle: "La acción no es una cotización de traslado." };
+  // Antes de reclamar nada: la acción tiene que ser de la conversación y la cotización que dice quien llama.
+  const ajena = accionAjena(acc, x.esperado);
+  if (ajena) return { ok: false, codigo: "cotizacion_ajena", detalle: ajena };
   if (!accionReclamable(acc, ahora)) {
     return {
       ok: false, codigo: "no_pendiente",

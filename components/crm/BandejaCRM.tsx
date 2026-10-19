@@ -831,7 +831,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       const res = await fetch("/api/crm/ia/accion", {
         method: "POST",
         headers: await cabecerasErp({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ accion_id: a.id, decision: "aprobar" }),
+        body: JSON.stringify({ accion_id: a.id, decision: "aprobar", conversacion_id: a.conversacion_id }),
       });
       const d = (await res.json().catch(() => null)) as { ok?: boolean; detalle?: string; error?: string } | null;
       if (res.status === 401) error = "Tu sesión venció o no se pudo verificar: vuelve a ingresar.";
@@ -858,7 +858,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
       const res = await fetch("/api/crm/ia/accion", {
         method: "POST",
         headers: await cabecerasErp({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ accion_id: a.id, decision: "rechazar" }),
+        body: JSON.stringify({ accion_id: a.id, decision: "rechazar", conversacion_id: a.conversacion_id }),
       });
       const d = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
       if (res.status === 401) error = "Tu sesión venció o no se pudo verificar: vuelve a ingresar.";

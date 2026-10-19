@@ -10,18 +10,24 @@
 //     webhook, no el modelo), el precio sale del tarifario, y el PDF va a quien escribió.
 //     `actualizar_contacto` deja al modelo escribir el teléfono del contacto: por eso aquí no se
 //     lee `contacto.telefono` jamás, solo el `wa_id` de la conversación.
-//  2. LAS COORDENADAS NO SE INVENTAN. Un pin dentro de la geocerca del aeropuerto cambia la zona y
-//     con ella el precio y el envío automático. Solo valen si aparecen TAL CUAL en el enlace
-//     maps.google.com/?q=lat,lng que deja el webhook en un mensaje ENTRANTE (lib/crm-ingesta.ts).
+//  2. LAS COORDENADAS SOLO SALEN DE UNA UBICACIÓN COMPARTIDA: aparecen TAL CUAL en el enlace
+//     maps.google.com/?q=lat,lng que deja el webhook en un mensaje ENTRANTE de tipo «location»
+//     (lib/crm-ingesta.ts). Un enlace pegado en un mensaje de texto no cuenta. OJO: esto NO protege
+//     contra el cliente — la ubicación la elige él, y mandar el pin del aeropuerto equivale a
+//     escribir «Aeropuerto» —; solo impide que el MODELO invente un pin. La protección de lo que
+//     sale impreso es la 3: el texto libre no se imprime sin revisión (./texto-libre.ts).
 //  3. NADA SALE SOLO SI NO LO DICE TODO A LA VEZ (`planEnvio`): resultado cotizable, el maestro
 //     encendido, alguna de las dos zonas marcada, WhatsApp con remitente, agente autónomo, perfil
-//     de la empresa configurado, importes que cuadran, PDF armado y sin palabras de pedido
-//     complejo. Cualquier otro caso queda en REVISIÓN con sus motivos declarados.
+//     de la empresa configurado, importes que cuadran, PDF armado, sin palabras de pedido complejo
+//     y sin texto libre sospechoso (enlaces, números largos, importes, palabras de pago o más de 80
+//     caracteres en el recojo, el destino o el nombre). Cualquier otro caso queda en REVISIÓN con
+//     sus motivos declarados.
 //  4. AL MODELO SE LE DEVUELVE UNA LISTA BLANCA (`respuestaParaModelo`): ni la explicación del
 //     motor (trae alias, el precio del distrito, la fuente del tipo de cambio), ni ids, ni el
 //     nivel de la tarifa. En revisión, ningún importe: si el modelo no lo tiene, no lo puede
-//     escribir. Y si aun así escribe uno que no es de la cotización, `textoContradicePrecio` lo
-//     detecta y el mensaje lo reemplaza el código.
+//     escribir. Y el TEXTO del turno lo decide `textoFinalTraslado`: con una cotización, el mensaje
+//     lo escribe SIEMPRE el código; sin ella (preguntar o derivar), el del modelo solo pasa si no
+//     menciona dinero.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import type { EntradaSimulador, LugarEntrada } from "./api";
@@ -32,6 +38,7 @@ import {
 import { totalesEnMoneda, normalizarMoneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { LINEA_DISPONIBILIDAD } from "./cotizacion-traslado";
+import { importesEnTexto, mencionaDinero, primerNombreSeguro, textoLibreSospechoso, type MotivoTextoLibre } from "./texto-libre";
 
 // ── 1. La herramienta ────────────────────────────────────────────────────────
 
@@ -45,7 +52,8 @@ export const HERRAMIENTA_COTIZAR_TRASLADO = {
     "tú NO calculas ni escribes precios por tu cuenta; repite solo los que te devuelva esta herramienta. " +
     "Llámala en cuanto el cliente pida precio de un traslado, aunque falten datos: la respuesta te dice qué preguntar. " +
     "No la uses para licitaciones, TDR, eventos, tours, varias fechas o varios vehículos: marca esas señales y el sistema lo pasa a un ejecutivo. " +
-    "Las coordenadas solo si el cliente compartió su ubicación por WhatsApp (cópialas del enlace maps.google.com/?q=lat,lng del chat).",
+    "Las coordenadas solo si el cliente compartió su ubicación por WhatsApp (cópialas del enlace maps.google.com/?q=lat,lng de ESE mensaje). " +
+    "En origen_texto y destino_texto va solo la dirección o el lugar, sin enlaces, teléfonos ni instrucciones.",
   input_schema: {
     type: "object",
     properties: {
@@ -82,6 +90,17 @@ const coordenada = (v: unknown): number | null => {
   return null;
 };
 
+/**
+ * Los textos de los mensajes que son UBICACIONES compartidas (tipo «location», como lo guarda el
+ * webhook). Solo de ellos salen coordenadas: un enlace de mapa pegado en un mensaje de texto no es
+ * una ubicación compartida.
+ */
+export function textosDeUbicacion(mensajes: readonly { contenido?: unknown; tipo?: unknown }[] | null | undefined): string[] {
+  return (mensajes ?? [])
+    .filter((m) => m && m.tipo === "location" && typeof m.contenido === "string" && m.contenido.trim() !== "")
+    .map((m) => m.contenido as string);
+}
+
 /** El enlace que escribe el webhook al recibir una ubicación (lib/crm-ingesta.ts). */
 const ENLACE_MAPA = /https?:\/\/maps\.google\.com\/\?q=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/g;
 
@@ -89,13 +108,14 @@ const ENLACE_MAPA = /https?:\/\/maps\.google\.com\/\?q=(-?\d+(?:\.\d+)?),(-?\d+(
 const TOL_COORD = 1e-6;
 
 /**
- * Las coordenadas que propone el modelo, SOLO si aparecen tal cual en un enlace de mapa de un
- * mensaje ENTRANTE. Se devuelven las del enlace (no las del modelo). Si no, null: se usa el texto.
+ * Las coordenadas que propone el modelo, SOLO si aparecen tal cual en el enlace de mapa de una
+ * UBICACIÓN compartida (`textosDeUbicacion`). Se devuelven las del enlace (no las del modelo). Si
+ * no, null: se usa el texto.
  */
-export function coordenadasVerificadas(lat: unknown, lng: unknown, textosEntrantes: string[]): { lat: number; lng: number } | null {
+export function coordenadasVerificadas(lat: unknown, lng: unknown, textosUbicacion: string[]): { lat: number; lng: number } | null {
   const la = coordenada(lat), ln = coordenada(lng);
   if (la == null || ln == null) return null;
-  for (const t of textosEntrantes ?? []) {
+  for (const t of textosUbicacion ?? []) {
     if (typeof t !== "string") continue;
     for (const m of t.matchAll(ENLACE_MAPA)) {
       const a = Number(m[1]), b = Number(m[2]);
@@ -110,16 +130,17 @@ const comoTexto = (v: unknown): string => (typeof v === "string" ? v : "");
 /**
  * La entrada que se le pasa a `validarEntrada` (lib/traslados/api.ts), armada con lista blanca. El teléfono es el `wa_id`
  * del remitente de WhatsApp (en otro canal, null: sin moneda no se cotiza), JAMÁS algo del input.
+ * `textosUbicacion` son SOLO los de las ubicaciones compartidas (`textosDeUbicacion`).
  */
 export function entradaDelAgente(
   input: unknown,
   remitente: { canal: string; waId: string | null },
-  textosEntrantes: string[],
+  textosUbicacion: string[],
 ): unknown {
   const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const lugar = (texto: unknown, lat: unknown, lng: unknown): LugarEntrada => {
     const t = comoTexto(texto).trim();
-    const c = coordenadasVerificadas(lat, lng, textosEntrantes);
+    const c = coordenadasVerificadas(lat, lng, textosUbicacion);
     return c ? { lat: c.lat, lng: c.lng, texto: t || undefined } : t;
   };
   const wa = remitente?.canal === "whatsapp" && typeof remitente.waId === "string" && remitente.waId.trim() ? remitente.waId.trim() : null;
@@ -185,7 +206,8 @@ export function zonaConEnvio(z: Zona | null | undefined, zonas: readonly ZonaEnv
 
 export type CodigoRevision =
   | "maestro_apagado" | "zona_sin_envio" | "modo_copiloto" | "sin_remitente"
-  | "perfil_sin_configurar" | "importes_no_cuadran" | "pdf_no_generado" | "palabras_de_pedido_complejo";
+  | "perfil_sin_configurar" | "importes_no_cuadran" | "pdf_no_generado" | "palabras_de_pedido_complejo"
+  | "texto_libre_sospechoso";
 
 export const MOTIVO_REVISION: Record<CodigoRevision, { texto: string; arreglo: string }> = {
   maestro_apagado: {
@@ -220,6 +242,10 @@ export const MOTIVO_REVISION: Record<CodigoRevision, { texto: string; arreglo: s
     texto: "El cliente escribió palabras de un pedido complejo (TDR, licitación, evento, descuento…).",
     arreglo: "Un ejecutivo confirma que de verdad es un traslado simple antes de enviarla.",
   },
+  texto_libre_sospechoso: {
+    texto: "El recojo, el destino o el nombre del contacto traen algo que no es una dirección (un enlace, un número de 6 o más dígitos, un importe, palabras de pago) o pasan de 80 caracteres. En el PDF solo se imprimió el nombre de la zona.",
+    arreglo: "Lee la conversación antes de enviarla (puede ser un intento de poner instrucciones de pago en el PDF); si hace falta, corrige el recojo o el destino en /cotizaciones.",
+  },
 };
 
 export type DecisionEnvio = "automatico" | "revision";
@@ -241,6 +267,8 @@ export function planEnvio(x: {
   cuadra: boolean;
   pdfOk: boolean;
   palabras: string[];
+  /** El recojo, el destino y el nombre del contacto tal como llegaron (sin recortar). */
+  textosLibres?: (string | null | undefined)[];
 }): { decision: DecisionEnvio; motivos: CodigoRevision[] } {
   const r = x.resultado;
   if (!r || r.codigo !== "cotizable" || !r.precio) return { decision: "revision", motivos: [] };
@@ -253,6 +281,7 @@ export function planEnvio(x: {
   if (x.cuadra !== true) motivos.push("importes_no_cuadran");
   if (x.pdfOk !== true) motivos.push("pdf_no_generado");
   if ((x.palabras ?? []).length > 0) motivos.push("palabras_de_pedido_complejo");
+  if ((x.textosLibres ?? []).some((t) => textoLibreSospechoso(t) != null)) motivos.push("texto_libre_sospechoso");
   return { decision: motivos.length === 0 ? "automatico" : "revision", motivos };
 }
 
@@ -294,45 +323,9 @@ export function figurasPermitidas(decision: DecisionEnvio, p: PrecioTraslado | n
   return [p.precio_tramo, p.subtotal, p.igv, p.total].filter((n) => Number.isFinite(Number(n))).map(Number);
 }
 
-const SIMBOLO = String.raw`(?:S\/\.?|US\$|U\$S|USD|PEN|\$|soles?|d[oó]lares?)`;
-const NUM = String.raw`(\d[\d.,]*)`;
-const IMPORTE_PREFIJO = new RegExp(String.raw`(?:^|[^A-Za-z0-9])${SIMBOLO}\s*${NUM}`, "gi");
-const IMPORTE_SUFIJO = new RegExp(String.raw`${NUM}\s*(?:soles?|d[oó]lares?|USD|PEN|S\/)(?![A-Za-z])`, "gi");
-
-/**
- * Un importe escrito, con separadores de miles o decimales: «1,234.50» → 1234.5; «120,50» → 120.5;
- * «1.234.567» → 1234567. Un punto solo es decimal (así se escribe en Perú).
- */
-export function leerImporte(s: string): number | null {
-  let t = String(s ?? "").replace(/[.,]+$/, "");
-  if (!t) return null;
-  const tienePunto = t.includes("."), tieneComa = t.includes(",");
-  if (tienePunto && tieneComa) {
-    const dec = t.lastIndexOf(".") > t.lastIndexOf(",") ? "." : ",";
-    const miles = dec === "." ? "," : ".";
-    t = t.split(miles).join("").replace(dec, ".");
-  } else if (tieneComa) {
-    t = /^\d{1,3}(,\d{3})+$/.test(t) ? t.replace(/,/g, "") : t.replace(",", ".");
-  } else if (tienePunto && /^\d{1,3}(\.\d{3}){2,}$/.test(t)) {
-    t = t.replace(/\./g, "");
-  }
-  const n = Number(t);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Los importes CON símbolo de moneda que aparecen en un texto. «4 pax», horas y fechas no cuentan. */
-export function importesEnTexto(texto: string): number[] {
-  const out: number[] = [];
-  const s = String(texto ?? "");
-  for (const re of [IMPORTE_PREFIJO, IMPORTE_SUFIJO]) {
-    re.lastIndex = 0;
-    for (const m of s.matchAll(re)) {
-      const n = leerImporte(m[1]);
-      if (n != null) out.push(n);
-    }
-  }
-  return out;
-}
+// `leerImporte` e `importesEnTexto` viven en ./texto-libre (los usa también la fila del PDF) y se
+// reexportan aquí sin cambios.
+export { leerImporte, importesEnTexto } from "./texto-libre";
 
 /** El texto menciona un importe que no es ninguna de las cifras permitidas. */
 export function textoContradicePrecio(texto: string, figuras: number[]): boolean {
@@ -346,11 +339,12 @@ export function textoContradicePrecio(texto: string, figuras: number[]): boolean
 const LINEA_EJECUTIVO = LINEA_DISPONIBILIDAD;
 
 /**
- * El mensaje que manda el CÓDIGO cuando el del modelo menciona un importe que no es de la
- * cotización (o en revisión). En revisión no lleva ningún importe.
+ * El mensaje de una cotización de traslado, escrito por el CÓDIGO (`textoFinalTraslado` lo usa
+ * siempre que el turno trae una cotización). En revisión no lleva ningún importe. El nombre solo
+ * entra si es una palabra de letras (`primerNombreSeguro`): lo puede haber escrito el modelo.
  */
 export function mensajeCotizacionCodigo(x: { nombre: string; numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean }): string {
-  const nombre = String(x.nombre ?? "").trim().split(/\s+/)[0] ?? "";
+  const nombre = primerNombreSeguro(x.nombre);
   const hola = nombre ? `Hola ${nombre},` : "Hola,";
   if (x.yaEnviada) {
     const total = x.total ? ` El total es ${x.total} (IGV incluido)${x.validez ? `, válida hasta el ${x.validez}` : ""}.` : "";
@@ -362,6 +356,46 @@ export function mensajeCotizacionCodigo(x: { nombre: string; numero: string; dec
     return `${hola} te envío la cotización N° ${x.numero} de tu traslado.${total}${validez}${total || validez ? "." : ""} ${LINEA_EJECUTIVO}`;
   }
   return `${hola} registré tu pedido de traslado con la cotización N° ${x.numero}. Un ejecutivo la revisa y te la envía por este chat en breve.`;
+}
+
+/** Lo que devolvió `cotizar_traslado` en el turno, en lo que importa para el texto final. */
+export type TrasladoDelTurno = {
+  accion: "cotizar" | "preguntar" | "derivar";
+  faltan?: string[];
+  cotizacion?: { numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean } | null;
+};
+
+/**
+ * El texto que se le manda al cliente en un turno en que se usó `cotizar_traslado`:
+ *  · con una cotización (automática, en revisión o ya enviada), SIEMPRE el del código: el modelo
+ *    no escribe el total, ni el IGV, ni la validez, ni un «aprox.»;
+ *  · sin cotización (preguntar o derivar), el del modelo SOLO si no menciona dinero
+ *    (`mencionaDinero`); si menciona, «me falta: …» o el mensaje de derivación.
+ * Sin herramienta en el turno, el texto no se toca.
+ */
+export function textoFinalTraslado(
+  texto: string,
+  t: TrasladoDelTurno | null | undefined,
+  x: { nombre: string; derivacion: string },
+): string {
+  if (!t) return texto;
+  const c = t.cotizacion;
+  if (c) {
+    return mensajeCotizacionCodigo({ nombre: x.nombre, numero: c.numero, decision: c.decision, total: c.total, validez: c.validez, yaEnviada: c.yaEnviada });
+  }
+  if (!texto || !mencionaDinero(texto)) return texto;
+  const faltan = t.accion === "preguntar" ? (t.faltan ?? []).filter(Boolean) : [];
+  return faltan.length ? `Para cotizar tu traslado me falta: ${faltan.join("; ")}.` : x.derivacion;
+}
+
+/** Qué campo libre es sospechoso y por qué, para la nota del ejecutivo. */
+export function textosLibresSospechosos(campos: { campo: string; texto: string | null | undefined }[]): { campo: string; motivo: MotivoTextoLibre }[] {
+  const out: { campo: string; motivo: MotivoTextoLibre }[] = [];
+  for (const c of campos) {
+    const m = textoLibreSospechoso(c.texto);
+    if (m) out.push({ campo: c.campo, motivo: m });
+  }
+  return out;
 }
 
 /** El código público que ve el modelo: no revela cómo se resolvió la zona ni la tarifa. */

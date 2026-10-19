@@ -15,6 +15,7 @@ import { inflateSync } from "node:zlib";
 import * as M from "../lib/traslados/motor";
 import * as E from "../lib/traslados/envio-ia";
 import * as C from "../lib/traslados/cotizacion-traslado";
+import * as T from "../lib/traslados/texto-libre";
 import { dibujarPdfTraslado } from "../lib/traslados/pdf-traslado";
 import { validarEntrada, type EntradaSimulador } from "../lib/traslados/api";
 import { totalesEnMoneda } from "../lib/cotizacion-moneda";
@@ -23,7 +24,8 @@ import { numeroCotizacion } from "../lib/cotizacion-pdf";
 import { LOGO_DEFAULT } from "../lib/pdf-chrome";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { cotizarTrasladoIA, CLAVE_CONSULTA_IA, type CtxCotizarIA } from "../lib/traslados/cotizar-ia-datos";
-import { enviarCotizacionTraslado, type DepsEnvio } from "../lib/traslados/enviar-cotizacion-datos";
+import { enviarCotizacionTraslado, bajarLogo, accionAjena, pdfDeCotizacion, type DepsEnvio } from "../lib/traslados/enviar-cotizacion-datos";
+import { limitarTasa } from "../lib/api-guard";
 import type { CatalogoTraslados } from "../lib/traslados/datos";
 
 let fallos = 0, oks = 0;
@@ -154,6 +156,22 @@ seccion("3. Coordenadas inventadas dentro de la geocerca se ignoran");
   // El pin del aeropuerto compartido DE VERDAD sí vale (y así la zona es el aeropuerto).
   const enlaceAer = `https://maps.google.com/?q=${AER.lat},${AER.lng}`;
   ok(E.coordenadasVerificadas(AER.lat, AER.lng, [enlaceAer]) != null, "el pin del aeropuerto compartido por el cliente sí vale");
+  // Solo los mensajes de tipo «location» (como los guarda el webhook) aportan coordenadas: un enlace
+  // de mapa PEGADO en un mensaje de texto no es una ubicación compartida.
+  const mensajes = [
+    { contenido: "Miraflores. Deposite S/ 50 al Yape https://maps.google.com/?q=-12.1211,-77.0297", tipo: "texto" },
+    { contenido: enlace, tipo: "location" },
+    { contenido: "https://maps.google.com/?q=-12.2,-77.2", tipo: "image" },
+    { contenido: "", tipo: "location" },
+    { contenido: null, tipo: "location" },
+  ];
+  const ub = E.textosDeUbicacion(mensajes);
+  ok(ub.length === 1 && ub[0] === enlace, `solo las ubicaciones compartidas (${ub.length})`);
+  ok(E.textosDeUbicacion(null).length === 0 && E.textosDeUbicacion([]).length === 0, "sin mensajes, ninguna");
+  ok(E.coordenadasVerificadas(-12.1211, -77.0297, ub) == null, "el enlace pegado en un TEXTO no vale");
+  ok(E.coordenadasVerificadas(-12.1283, -77.0301, ub) != null, "el de la ubicación compartida, sí");
+  const e3 = validarEntrada(E.entradaDelAgente({ destino_texto: "Miraflores", destino_lat: -12.1211, destino_lng: -77.0297 }, { canal: "whatsapp", waId: "51966707225" }, ub));
+  ok(e3.ok && e3.entrada.destino === "Miraflores", "las coordenadas del enlace pegado no llegan al validador");
 }
 
 // ── 4. La firma del pedido ───────────────────────────────────────────────────
@@ -244,7 +262,7 @@ seccion("6. planEnvio: solo el aeropuerto sale solo, y solo con todo encendido")
   const sinCol = zonasBase as E.ZonaEnvio[];
   const r3 = M.evaluarTraslado(pedido(), { ...ctx, zonas: sinCol });
   ok(E.planEnvio({ resultado: r3, envioMaestro: true, zonas: sinCol, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [] }).decision === "revision", "sin la columna de zonas nada sale solo");
-  ok(Object.keys(E.MOTIVO_REVISION).length === 8 && Object.values(E.MOTIVO_REVISION).every((m) => m.texto && m.arreglo), "ocho motivos, cada uno con su arreglo");
+  ok(Object.keys(E.MOTIVO_REVISION).length === 9 && Object.values(E.MOTIVO_REVISION).every((m) => m.texto && m.arreglo), "nueve motivos, cada uno con su arreglo");
 }
 
 // ── 7. Sin precio nunca se envía ─────────────────────────────────────────────
@@ -341,7 +359,7 @@ seccion("9. La fila reproduce al motor (cuadraConMotor)");
   const fila = C.filaCotizacionTraslado(r, e, { convId: "conv-1", clienteId: 7, atencion: "  Ana Pérez ", config, firma: E.firmaPedido(e), hoy: HOY });
   ok(Object.keys(fila).every((k) => COLUMNAS.has(k)), `toda columna existe: ${Object.keys(fila).filter((k) => !COLUMNAS.has(k)).join(", ") || "ok"}`);
   ok(fila.estado === "pendiente" && fila.modo_servicio === "eventual" && fila.tipo_servicio === "ida_retorno" && fila.equipamiento === null && fila.incluye_igv === true, "estado, modo, tipo de servicio, equipamiento null e IGV incluido");
-  ok(fila.origen === "Aeropuerto Jorge Chávez" && fila.destino === "Hotel Belmond, Miraflores", "el aeropuerto con el nombre de su zona; el hotel con lo que dijo el cliente");
+  ok(fila.origen === "Aeropuerto Jorge Chávez" && fila.destino === "Miraflores (Hotel Belmond, Miraflores)", `el aeropuerto con el nombre de su zona; el hotel con su ZONA y lo que dijo el cliente como referencia (${fila.destino})`);
   ok(fila.moneda === "USD" && fila.tipo_cambio === 3.431 && fila.idioma_pdf === "es" && fila.tipo_vehiculo === "SPRINTER_20", "moneda, TC, idioma y ficha de costeo");
   ok(fila.hora_retorno === "18:00" && fila.fecha_retorno === "2026-10-28" && fila.hora_ida === "06:30", "fechas y horas con los nombres de columna reales");
   ok(fila.consideraciones_json.generales.length === 4 && fila.consideraciones_json.incluye.length === 0, "consideraciones: las generales + la de dólares");
@@ -467,10 +485,14 @@ await (async () => {
 
 const pHostil = pedido({ pax: 10, maletas: 10, sentido: "ida_retorno", fecha_retorno: "2026-10-28", hora_retorno: "18:00" });
 const rHostil = M.evaluarTraslado(pHostil, ctx);
-const eHostil = { ...entradaDe(pHostil), destino: "Hotel 😀 <script>alert('x')</script> → Miraflores ↔ ✈️ " + "Ñ".repeat(400) };
+const destinoHostil = "Hotel 😀 <script>alert('x')</script> → Miraflores ↔ ✈️ " + "Ñ".repeat(400);
+const eHostil = { ...entradaDe(pHostil), destino: destinoHostil };
 const filaH = C.filaCotizacionTraslado(rHostil, eHostil, { convId: "c", clienteId: null, atencion: "Peña 👍 <b>", config, firma: "f", hoy: HOY });
+ok(filaH.destino === "Miraflores" && filaH.atencion === "Peña 👍 <b>", `lo hostil y largo del cliente no se imprime: queda la zona (${filaH.destino.slice(0, 40)})`);
+// Para probar el DIBUJO con contenido hostil se pone a mano en la fila (como si lo escribiera un
+// ejecutivo en /cotizaciones): el PDF se deriva de la fila.
 const leidaH: C.FilaCotizacionLeida = {
-  ...filaH, id: 123, created_at: "2026-10-20T03:00:00Z",
+  ...filaH, destino: destinoHostil, id: 123, created_at: "2026-10-20T03:00:00Z",
   items_json: [{ ...filaH.items_json[0], descripcion: "x".repeat(5000) + " 🚐" }],
   consideraciones_json: { generales: [...filaH.consideraciones_json.generales, ...Array.from({ length: 90 }, (_, i) => `Consideración ${i + 1}\tcon\nsaltos 😀 y señal ñ`)], incluye: [], no_incluye: [] },
 };
@@ -802,9 +824,21 @@ const nuevaBase = () => {
 const PUNTO_DE: Record<string, M.PuntoUbicado> = {
   "aeropuerto jorge chavez": AEROP, "hotel belmond miraflores": MIRA, "san isidro": SI, "barranco": BARR,
 };
+// La última entrada que llegó al motor (para comprobar si las coordenadas pasaron o no).
+const entradasMotor: EntradaSimulador[] = [];
 const simularFalso = (consultas: { n: number }) => async (_sb: unknown, e: EntradaSimulador, hoy: string) => {
   consultas.n++;
-  const punto = (l: EntradaSimulador["origen"]) => PUNTO_DE[M.claveNombre(typeof l === "string" ? l : l.texto ?? "")] ?? pt([], { texto: String(l) });
+  entradasMotor.push(e);
+  // Como Google: un pin junto al aeropuerto cae en su geocerca; cualquier otro pin, o un texto que
+  // empieza por «Miraflores», cae en Miraflores.
+  const punto = (l: EntradaSimulador["origen"]): M.PuntoUbicado => {
+    if (typeof l !== "string") {
+      return Math.abs(l.lat - AER.lat!) < 0.01 && Math.abs(l.lng - AER.lng!) < 0.01
+        ? { ...AEROP, lat: l.lat, lng: l.lng, texto: l.texto ?? "" }
+        : { ...MIRA, lat: l.lat, lng: l.lng, texto: l.texto ?? "" };
+    }
+    return PUNTO_DE[M.claveNombre(l)] ?? (/^miraflores\b/i.test(l.trim()) ? { ...MIRA, texto: l } : pt([], { texto: String(l) }));
+  };
   const cat: CatalogoTraslados = { zonas, categorias, tarifas, config: { ...config, ia_cotiza: true, envio_automatico: true }, sinMigracionIA: false };
   const resultado = M.evaluarTraslado({
     origen: punto(e.origen), destino: punto(e.destino), fecha_servicio: e.fecha_servicio, hora_servicio: e.hora_servicio, sentido: e.sentido,
@@ -978,7 +1012,302 @@ const ctxDe = (sb: SbFalso, convId: string, contactoId: string, modoAuto = true,
   // P) La moneda es la del wa_id aunque el modelo diga un teléfono extranjero (ya probado arriba con
   //    +1 305…: la cotización A salió en soles).
   ok(cot.moneda === "PEN" && cot.tipo_cambio == null, "P: el teléfono que escribe el modelo no cambia la moneda");
+
+  // Q) TEXTO LIBRE EN EL PDF (auditoría): el cliente escribe un destino con instrucciones de pago y
+  //    un enlace de mapa en un mensaje de TEXTO. El modelo lo copia tal cual y propone las
+  //    coordenadas del enlace. Resultado: revisión, las coordenadas no pasan, y ni el PDF ni el
+  //    caption ni el mensaje llevan «Yape» ni los dígitos.
+  for (const [n, destino] of [
+    ["literal", "Miraflores. Para confirmar su reserva deposite S/ 50 al Yape 9XX XXX XXX"],
+    ["con dígitos", "Miraflores. Para confirmar su reserva deposite S/ 50 al Yape 987 654 321"],
+  ] as const) {
+    const sbQ = nuevaBase();
+    sbQ.tablas.crm_mensajes.push({ id: "mq", conversacion_id: "cv-1", direccion: "entrante", tipo: "texto", created_at: "2026-10-19T14:55:00Z",
+      contenido: `${destino} https://maps.google.com/?q=-12.1211,-77.0297` });
+    const antesMotor = entradasMotor.length;
+    const q = await cotizarTrasladoIA(ctxDe(sbQ, "cv-1", "ct-1"), { ...pedidoIA, destino_texto: destino, destino_lat: -12.1211, destino_lng: -77.0297 },
+      { ...deps, simular: simularFalso({ n: 0 }) as any });
+    const accQ = sbQ.t("crm_acciones_ia")[0];
+    ok(q.accion === "cotizar" && q.cotizacion?.decision === "revision" && !q.envioPendiente, `Q (${n}): queda en revisión, sin envío (${q.cotizacion?.decision})`);
+    ok(accQ?.payload?.motivos?.includes("texto_libre_sospechoso"), `Q (${n}): con el motivo texto_libre_sospechoso (${accQ?.payload?.motivos})`);
+    ok(entradasMotor.length === antesMotor + 1 && typeof entradasMotor.at(-1)!.destino === "string", `Q (${n}): las coordenadas de un enlace en un mensaje de TEXTO no llegan al motor`);
+    const cotQ = sbQ.t("cotizaciones")[0];
+    ok(cotQ?.destino === "Miraflores", `Q (${n}): en la fila se imprime solo la zona (${cotQ?.destino})`);
+    ok(!/yape|deposit|9xx|987/i.test(JSON.stringify(cotQ.items_json)) && !/yape/i.test(cotQ.destino + cotQ.origen), `Q (${n}): ni en la descripción del ítem`);
+    ok(sbQ.t("crm_notas").some((x) => /Destino: menciona dinero/.test(x.texto)), `Q (${n}): la nota del ejecutivo dice qué campo y por qué`);
+    const pdfQ = await pdfDeCotizacion(sbQ as any, cotQ.id, { bajarLogo: async () => null });
+    const txtQ = textoDelPdf(pdfQ.bytes);
+    ok(!/yape/i.test(txtQ) && !/9XX|987|654 321/.test(txtQ) && !/deposit/i.test(txtQ), `Q (${n}): el PDF no lleva «Yape» ni los dígitos`);
+    ok(!/yape/i.test(pdfQ.caption) && !/\d{3}\s?\d{3}/.test(pdfQ.caption.replace(/N° \d+/, "")), `Q (${n}): el caption tampoco (${pdfQ.caption})`);
+    // El mensaje del turno lo escribe el código: el del modelo repetía la instrucción de pago.
+    const final = E.textoFinalTraslado(`Listo, ${destino}`, q, { nombre: "Ana Pérez", derivacion: "Un ejecutivo te escribe." });
+    ok(!/yape|deposit|\b50\b|9XX|987/i.test(final) && final.includes(q.cotizacion!.numero), `Q (${n}): el mensaje al cliente no repite nada (${final})`);
+    // El ejecutivo la aprueba: sale el PDF de la fila, sin el texto del cliente.
+    const nE = envios.length;
+    const qe = await enviarCotizacionTraslado(sbQ as any, { accionId: accQ.id, por: "ejecutivo", usuarioId: "u-1", esperado: { conversacionId: "cv-1" } }, depsEnvio);
+    ok(qe.ok && envios.length === nE + 1 && !/yape/i.test(envios.at(-1)!.caption ?? ""), `Q (${n}): aprobada, sale sin el texto del cliente (${qe.codigo})`);
+  }
+
+  // Q2) El nombre del contacto con instrucciones de pago: revisión, «Atención» no se imprime y el
+  //     saludo no lo usa.
+  {
+    const sbQ = nuevaBase();
+    sbQ.t("crm_contactos").find((x) => x.id === "ct-1")!.nombre = "Pague al Yape 987654321";
+    const q = await cotizarTrasladoIA(ctxDe(sbQ, "cv-1", "ct-1"), pedidoIA, { ...deps, simular: simularFalso({ n: 0 }) as any });
+    const cotQ = sbQ.t("cotizaciones")[0];
+    ok(q.cotizacion?.decision === "revision" && sbQ.t("crm_acciones_ia")[0].payload.motivos.join() === "texto_libre_sospechoso", `Q2: revisión solo por el nombre (${sbQ.t("crm_acciones_ia")[0]?.payload?.motivos})`);
+    ok(cotQ.atencion === null, "Q2: «Atención» no se imprime");
+    const txtQ = textoDelPdf((await pdfDeCotizacion(sbQ as any, cotQ.id, { bajarLogo: async () => null })).bytes);
+    ok(!/yape|987654321/i.test(txtQ), "Q2: el PDF no lo lleva");
+    ok(E.textoFinalTraslado("x", q, { nombre: "Pague al Yape 987654321", derivacion: "d" }).startsWith("Hola,"), "Q2: el saludo no lo usa");
+  }
+
+  // R) La acción tiene que ser de la conversación y la cotización que dice quien envía.
+  {
+    const sbR = nuevaBase();
+    const r0 = await cotizarTrasladoIA(ctxDe(sbR, "cv-1", "ct-1"), pedidoIA, { ...deps, simular: simularFalso({ n: 0 }) as any });
+    const accR = sbR.t("crm_acciones_ia")[0];
+    const antes = JSON.stringify(accR), nE = envios.length, nNotas = sbR.t("crm_notas").length;
+    const r1 = await enviarCotizacionTraslado(sbR as any, { accionId: accR.id, por: "ejecutivo", usuarioId: "u", esperado: { conversacionId: "cv-2" } }, depsEnvio);
+    ok(!r1.ok && r1.codigo === "cotizacion_ajena" && /conversación/.test(r1.detalle), `R: de otra conversación → ${r1.codigo}`);
+    ok(JSON.stringify(accR) === antes && envios.length === nE && sbR.t("crm_notas").length === nNotas, "R: ni se reclama, ni se envía, ni se escribe nada");
+    const r2 = await enviarCotizacionTraslado(sbR as any, { accionId: accR.id, por: "automatico", bytes: r0.envioPendiente!.bytes, nombre: "x.pdf", caption: "c", esperado: { conversacionId: "cv-1", cotizacionId: accR.resultado_id + 1 } }, depsEnvio);
+    ok(!r2.ok && r2.codigo === "cotizacion_ajena" && JSON.stringify(accR) === antes, `R: de otra cotización → ${r2.codigo}`);
+    const r3 = await enviarCotizacionTraslado(sbR as any, { accionId: accR.id, por: "automatico", bytes: r0.envioPendiente!.bytes, nombre: "x.pdf", caption: "c", esperado: { conversacionId: "cv-1", cotizacionId: r0.envioPendiente!.cotizacionId } }, depsEnvio);
+    ok(r3.ok && accR.estado === "aprobada", `R: con la conversación y la cotización correctas, sale (${r3.codigo})`);
+  }
+
+  // S) Una ubicación COMPARTIDA (tipo «location») sí aporta coordenadas, y elegir el pin del
+  //    aeropuerto es lo mismo que escribir «Aeropuerto»: la protección no son las coordenadas.
+  {
+    const sbS = nuevaBase();
+    sbS.tablas.crm_mensajes.push({ id: "ms", conversacion_id: "cv-1", direccion: "entrante", tipo: "location", created_at: "2026-10-19T14:56:00Z",
+      contenido: `📍 Ubicación\nhttps://maps.google.com/?q=${AER.lat},${AER.lng}` });
+    const antesMotor = entradasMotor.length;
+    const s1 = await cotizarTrasladoIA(ctxDe(sbS, "cv-1", "ct-1"), { ...pedidoIA, origen_texto: "Mi ubicación", origen_lat: AER.lat, origen_lng: AER.lng },
+      { ...deps, simular: simularFalso({ n: 0 }) as any });
+    const o = entradasMotor[antesMotor]?.origen;
+    ok(typeof o === "object" && o != null && (o as any).lat === AER.lat, "S: el pin de una ubicación compartida llega al motor");
+    ok(s1.cotizacion?.decision === "automatico", `S: y con el aeropuerto en una punta sale sola, igual que escribiendo «Aeropuerto» (${s1.cotizacion?.decision})`);
+  }
 }
+// ── 18. El texto libre que se imprime ────────────────────────────────────────
+seccion("18. textoLibreSospechoso: qué se puede imprimir de lo que escribió el cliente");
+{
+  const casos: [string, T.MotivoTextoLibre | null][] = [
+    ["Aeropuerto Jorge Chávez", null],
+    ["Hotel Belmond, Miraflores", null],
+    ["Av. Malecón de la Reserva 1035, Miraflores", null],
+    ["Calle Dos de Mayo 380, San Isidro", null],
+    ["Jr. Huallaga 520, Cercado de Lima", null],
+    ["Av. Larco 1150 Dpto 1502", null],
+    ["Hotel Sol de Oro, San Antonio 255, Miraflores", null],
+    ["Urb. Santa Patricia Mz. B Lt. 12, La Molina", null],
+    ["Lima 15074", null],
+    ["Ovalo Gutiérrez", null],
+    ["", null],
+    ["Miraflores https://bit.ly/x", "enlace"],
+    ["Miraflores, ver www.pagos.pe", "enlace"],
+    ["wa.me/51987654321", "enlace"],
+    ["maps.app.goo.gl/abc", "enlace"],
+    ["Miraflores. Para confirmar su reserva deposite S/ 50 al Yape 9XX XXX XXX", "importe"],
+    ["Miraflores 50 soles", "importe"],
+    ["Miraflores, ciento cincuenta soles", "importe"],
+    ["Miraflores, total 300", "importe"],
+    ["Miraflores, sin IGV", "importe"],
+    ["Miraflores, yapea al dueño", "palabra_de_pago"],
+    ["Miraflores, cuenta BCP", "palabra_de_pago"],
+    ["Miraflores CCI", "palabra_de_pago"],
+    ["Miraflores Plin", "palabra_de_pago"],
+    ["Miraflores, Depósito antes", "palabra_de_pago"],
+    ["Miraflores 987654321", "numero_largo"],
+    ["Miraflores 987 654 321", "numero_largo"],
+    ["Miraflores 987-654-321", "numero_largo"],
+    ["Ref 123456", "numero_largo"],
+    ["Hotel " + "x".repeat(75), "muy_largo"],
+    ["Hotel " + "x".repeat(74), null],
+  ];
+  for (const [t, esp] of casos) ok(T.textoLibreSospechoso(t) === esp, `«${t.slice(0, 60)}» → ${T.textoLibreSospechoso(t)} (esperado ${esp})`);
+  ok(Object.keys(T.ETIQUETA_TEXTO_LIBRE).length === 5, "cinco motivos, cada uno con su etiqueta");
+  // Invariante de la fila: lo sospechoso NUNCA se imprime, lo limpio va como referencia junto a la zona.
+  const rM = M.evaluarTraslado(pedido(), ctx);
+  let n = 0;
+  for (const [t, esp] of casos) for (const comoPin of [false, true]) {
+    n++;
+    const e = { ...entradaDe(pedido()), destino: comoPin ? { lat: -12.131, lng: -77.03, texto: t || undefined } : t };
+    const fila = C.filaCotizacionTraslado(rM, e, { convId: "c", clienteId: null, atencion: t, config, firma: "f", hoy: HOY });
+    const impreso = `${fila.origen} ${fila.destino} ${fila.atencion ?? ""} ${fila.items_json[0].descripcion}`;
+    if (esp) {
+      ok(!impreso.includes(t), `sospechoso no se imprime: «${t.slice(0, 40)}»`);
+      ok(fila.destino === (comoPin ? "Miraflores (ubicación compartida)" : "Miraflores") && fila.atencion === null, `queda la zona (${fila.destino})`);
+    } else if (t) {
+      ok(fila.destino === `Miraflores (${t})` && fila.atencion === t.slice(0, 60).trim(), `limpio: zona + referencia (${fila.destino})`);
+    }
+    ok(Array.from(fila.destino).length <= 80 + "Miraflores ()".length, "la referencia impresa no pasa de 80 caracteres");
+  }
+  console.log(`  barrido: ${n} filas`);
+  ok(C.filaCotizacionTraslado(rM, { ...entradaDe(pedido()), destino: "  MIRAFLORES " }, { convId: "c", clienteId: null, atencion: null, config, firma: "f", hoy: HOY }).destino === "Miraflores", "si lo del cliente es el nombre de la zona, no se repite");
+  ok(T.atencionImprimible("Ana  María\nPérez") === "Ana María Pérez", "atención en una línea");
+  ok(T.atencionImprimible("A".repeat(70)) === "A".repeat(60) && T.atencionImprimible("A".repeat(81)) === null, "atención: hasta 60; más de 80 es sospechoso");
+  ok(T.primerNombreSeguro("Ana Pérez") === "Ana" && T.primerNombreSeguro("José-Luis Q") === "José-Luis" && T.primerNombreSeguro("+51 999") === ""
+    && T.primerNombreSeguro("Yape 987") === "" && T.primerNombreSeguro("https://x") === "" && T.primerNombreSeguro("Ana123") === "" && T.primerNombreSeguro(null) === "", "primerNombreSeguro");
+  // planEnvio: con un texto libre sospechoso no sale sola; sin textos, igual que antes.
+  const base = { resultado: rM, envioMaestro: true, zonas, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [] as string[] };
+  ok(E.planEnvio(base).decision === "automatico" && E.planEnvio({ ...base, textosLibres: [] }).decision === "automatico", "sin textos sospechosos sale sola");
+  for (const [t, esp] of casos) {
+    const p = E.planEnvio({ ...base, textosLibres: ["Aeropuerto Jorge Chávez", t, "Ana"] });
+    ok((p.decision === "revision") === (esp != null) && (esp == null || p.motivos.join() === "texto_libre_sospechoso"), `planEnvio con «${t.slice(0, 30)}» → ${p.decision}`);
+  }
+  ok(E.planEnvio({ ...base, textosLibres: [null, undefined, "Ana", "Pague al Yape 987654321"] }).motivos.join() === "texto_libre_sospechoso", "también el nombre del contacto");
+}
+
+// ── 19. El texto del turno: con cotización lo escribe el código; sin ella, sin dinero ──
+seccion("19. textoFinalTraslado: el modelo no escribe importes");
+{
+  // La cotización de la prueba: tramo 120, subtotal 240, IGV 43.20, total 283.20 (en soles).
+  const FRASES_DINERO = [
+    "El total sería 150 (IGV incluido)",
+    "Total: 150.00 nuevos soles",
+    "Son 150$ con IGV",
+    "ciento cincuenta soles",
+    "Te aplico 50 % de descuento",
+    "€ 150",
+    "US$283.20",
+    "283.20 dólares",
+    "El total es S/ 43.20",
+    "serán aprox 300",
+    "Te sale gratis el retorno",
+    "Son S/. 283.20 más IGV",
+    "costaría unos 240",
+    "Cuesta 120 por tramo",
+    "Hola Ana, ¡listo! El precio es de S/ 300 para 2 pasajeros.",
+  ];
+  const LIMPIAS = [
+    "¡Hola! Para cotizar tu traslado me falta saber la hora de recojo y cuántas maletas de 23 kg llevan.",
+    "¿Serían 4 pasajeros? ¿A qué hora aterriza tu vuelo, 10:30?",
+    "El recojo sería el 2026-10-25 a las 05:30, ¿correcto?",
+    "Perfecto, son 3 maletas grandes y 2 pasajeros.",
+    "¿Sería para 4 personas? ¿Llevan maletas?",
+    "Un ejecutivo revisará tu pedido y te escribirá por este chat.",
+    "¿Tu vuelo es el LA2045 del 25 de octubre?",
+    "¿El recojo sería en el terminal nacional o internacional?",
+  ];
+  for (const f of FRASES_DINERO) ok(T.mencionaDinero(f), `menciona dinero: «${f}»`);
+  for (const f of LIMPIAS) ok(!T.mencionaDinero(f), `no menciona dinero: «${f}»`);
+  const derivacion = "Hola Ana, un ejecutivo revisará tu pedido y te enviará la información por este chat.";
+  ok(!T.mencionaDinero(derivacion), "el mensaje de derivación no menciona dinero");
+  const cotAuto = { numero: "00123", decision: "automatico" as const, total: "S/ 283.20", validez: "18/11/2026" };
+  const modos: [string, E.TrasladoDelTurno][] = [
+    ["auto", { accion: "cotizar", cotizacion: cotAuto }],
+    ["revisión", { accion: "cotizar", cotizacion: { numero: "00124", decision: "revision" } }],
+    ["ya enviada", { accion: "cotizar", cotizacion: { ...cotAuto, yaEnviada: true } }],
+    ["preguntar", { accion: "preguntar", faltan: ["la cantidad de maletas de 23 kg", "la hora de recojo"] }],
+    ["derivar", { accion: "derivar" }],
+  ];
+  let n = 0;
+  for (const [modo, t] of modos) for (const f of [...FRASES_DINERO, ...LIMPIAS, ""]) {
+    n++;
+    const final = E.textoFinalTraslado(f, t, { nombre: "Ana Pérez", derivacion });
+    if (t.cotizacion) {
+      ok(final === E.mensajeCotizacionCodigo({ nombre: "Ana Pérez", ...t.cotizacion }), `${modo}: con cotización, SIEMPRE el texto del código («${f.slice(0, 30)}»)`);
+      const permitidas = t.cotizacion.total ? [283.2] : [];
+      ok(T.importesEnTexto(final).every((x) => permitidas.some((p) => Math.abs(p - x) < 0.005)), `${modo}: solo el total de la cotización (${final})`);
+      ok(!/\b150\b|\b300\b|43\.20|€|US\$|d[oó]lares|gratis|descuento|aprox|%/.test(final), `${modo}: nada de la frase del modelo`);
+    } else if (f && T.mencionaDinero(f)) {
+      ok(!T.mencionaDinero(final) && final !== f, `${modo}: el texto con dinero se reemplaza («${f.slice(0, 30)}» → «${final.slice(0, 50)}»)`);
+      ok(modo === "preguntar" ? final === "Para cotizar tu traslado me falta: la cantidad de maletas de 23 kg; la hora de recojo." : final === derivacion, `${modo}: por «me falta» o la derivación`);
+    } else {
+      ok(final === f, `${modo}: el texto limpio del modelo pasa intacto («${f.slice(0, 30)}»)`);
+    }
+  }
+  console.log(`  barrido: ${n} textos`);
+  ok(E.textoFinalTraslado("Cuesta S/ 999", null, { nombre: "Ana", derivacion }) === "Cuesta S/ 999", "sin la herramienta en el turno, el texto no se toca");
+  ok(E.textoFinalTraslado("Cuesta S/ 999", { accion: "preguntar", faltan: [] }, { nombre: "Ana", derivacion }) === derivacion, "preguntar sin lista de faltantes: derivación");
+  // La cifra de una cotización EN DÓLARES no se cuela en una cotización en soles.
+  const enSoles = E.textoFinalTraslado("Son US$283.20", { accion: "cotizar", cotizacion: cotAuto }, { nombre: "", derivacion });
+  ok(!enSoles.includes("US$") && enSoles.includes("S/ 283.20") && enSoles.startsWith("Hola,"), `en soles, el total en soles (${enSoles})`);
+}
+
+// ── 20. El logo del PDF ──────────────────────────────────────────────────────
+seccion("20. bajarLogo: solo del almacenamiento público del propio Supabase, solo PNG o JPG");
+{
+  const BASE = "https://abcd1234.supabase.co";
+  const PUB = `${BASE}/storage/v1/object/public/empresa/logo.png`;
+  const PNG = new Uint8Array(logoPng);
+  const JPG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+  const SVG = new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>`);
+  const WEBP = new TextEncoder().encode("RIFF\0\0\0\0WEBPVP8 ");
+  let llamadas = 0;
+  const cuerpo = (b: Uint8Array): BodyInit => new Blob([new Uint8Array(b)]);
+  const fetchCon = (b: Uint8Array, extra: ResponseInit = {}) => (async (_u: any, _o?: any) => { llamadas++; return new Response(cuerpo(b), { status: 200, ...extra }); }) as typeof fetch;
+  const casos: [string, string, typeof fetch, string | null, "png" | "jpg" | null, boolean][] = [
+    ["PNG del bucket público", PUB, fetchCon(PNG), BASE, "png", true],
+    ["JPG del bucket público", PUB.replace(".png", ".jpg"), fetchCon(JPG), BASE, "jpg", true],
+    ["SVG", PUB.replace(".png", ".svg"), fetchCon(SVG), BASE, null, true],
+    ["WebP", PUB.replace(".png", ".webp"), fetchCon(WEBP), BASE, null, true],
+    ["host ajeno", "https://evil.test/storage/v1/object/public/empresa/logo.png", fetchCon(PNG), BASE, null, false],
+    ["otro proyecto de Supabase", "https://otro.supabase.co/storage/v1/object/public/empresa/logo.png", fetchCon(PNG), BASE, null, false],
+    ["ruta que no es el almacenamiento público", `${BASE}/rest/v1/empresa_perfil`, fetchCon(PNG), BASE, null, false],
+    ["bucket firmado (privado)", `${BASE}/storage/v1/object/sign/documentos/x.png?token=y`, fetchCon(PNG), BASE, null, false],
+    ["salto de ruta", `${BASE}/storage/v1/object/public/../../rest/v1/x`, fetchCon(PNG), BASE, null, false],
+    ["http", PUB.replace("https:", "http:"), fetchCon(PNG), BASE, null, false],
+    ["con usuario", PUB.replace("https://", "https://u:p@"), fetchCon(PNG), BASE, null, false],
+    ["sin NEXT_PUBLIC_SUPABASE_URL", PUB, fetchCon(PNG), null, null, false],
+    ["base http", PUB, fetchCon(PNG), "http://abcd1234.supabase.co", null, false],
+    ["no es URL", "logo.png", fetchCon(PNG), BASE, null, false],
+    ["respuesta 404", PUB, (async () => { llamadas++; return new Response(cuerpo(PNG), { status: 404 }); }) as typeof fetch, BASE, null, true],
+    ["más de 2 MB", PUB, fetchCon(new Uint8Array(2 * 1024 * 1024 + 10).fill(0x89)), BASE, null, true],
+    ["fetch que lanza", PUB, (async () => { llamadas++; throw new Error("x"); }) as typeof fetch, BASE, null, true],
+  ];
+  for (const [n, url, f, base, tipo, llama] of casos) {
+    const antes = llamadas;
+    const r = await bajarLogo(url, f, base);
+    ok((r?.tipo ?? null) === tipo, `${n} → ${r?.tipo ?? null}`);
+    ok((llamadas > antes) === llama, `${n}: ${llama ? "sí" : "no"} se pide`);
+  }
+  const src = readFileSync("lib/traslados/enviar-cotizacion-datos.ts", "utf8").replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  ok(!/sharp/.test(src), "sin conversión con sharp");
+}
+
+// ── 21. Quién puede enviar, el freno de la prueba y el número de destino ──────
+seccion("21. accionAjena, la ruta de la tarjeta, /api/crm/ia/probar y el destino fijo");
+{
+  const acc = { conversacion_id: "cv-1", resultado_id: 12, payload: { cotizacion_id: 12 } };
+  ok(accionAjena(acc, undefined) === null && accionAjena(acc, {}) === null, "sin esperado no se comprueba nada");
+  ok(accionAjena(acc, { conversacionId: "cv-1", cotizacionId: 12 }) === null, "la suya pasa");
+  ok(/conversación/.test(accionAjena(acc, { conversacionId: "cv-2" }) ?? ""), "otra conversación no");
+  ok(accionAjena(acc, { conversacionId: "" }) != null && accionAjena(acc, { conversacionId: "  " }) != null, "una conversación esperada vacía no pasa");
+  ok(accionAjena({ ...acc, conversacion_id: null }, { conversacionId: "cv-1" }) != null, "una acción sin conversación no pasa");
+  ok(/cotización/.test(accionAjena(acc, { cotizacionId: 13 }) ?? "") && accionAjena(acc, { cotizacionId: NaN }) != null && accionAjena(acc, { cotizacionId: 0 }) != null, "otra cotización no");
+  ok(accionAjena({ conversacion_id: "cv-1", resultado_id: null, payload: { cotizacion_id: 12 } }, { cotizacionId: 12 }) === null, "la cotización también del payload");
+  // La ruta de la tarjeta: exige la conversación y la compara.
+  const quitarComentarios = (x: string) => x.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const ruta = quitarComentarios(readFileSync("app/api/crm/ia/accion/route.ts", "utf8"));
+  ok(/conversacion_id\s*}\s*=\s*await req\.json\(\)/.test(ruta), "la ruta lee conversacion_id del cuerpo");
+  ok(/accion\.conversacion_id !== convEsperada[\s\S]{0,200}status: 409/.test(ruta), "si no coincide → 409");
+  const rama = ruta.slice(ruta.indexOf('accion.tipo === "cotizacion_traslado"'));
+  ok(/if \(!convEsperada\)[\s\S]{0,200}status: 400/.test(rama.slice(0, 400)) && rama.indexOf("!convEsperada") < rama.indexOf('decision === "rechazar"'), "en traslados la exige ANTES de rechazar o enviar");
+  ok(/esperado: \{ conversacionId: convEsperada \}/.test(rama), "y la pasa al envío");
+  const bandeja = readFileSync("components/crm/BandejaCRM.tsx", "utf8");
+  ok((bandeja.match(/decision: "(?:aprobar|rechazar)", conversacion_id: a\.conversacion_id/g) ?? []).length === 2, "la tarjeta del inbox manda la conversación al aprobar y al rechazar");
+  // /api/crm/ia/probar: mismo origen y 10 por usuario y minuto.
+  const probar = quitarComentarios(readFileSync("app/api/crm/ia/probar/route.ts", "utf8"));
+  ok(/guardarGasto\(req/.test(probar) && probar.indexOf("guardarGasto(req") < probar.indexOf("verificarUsuarioApi("), "probar: mismo origen, antes que nada");
+  ok(/limitarTasa\(clave, PRUEBAS_POR_MINUTO, 60_000\)/.test(probar) && /`crm-probar:\$\{auth\.userId\}`/.test(probar) && /PRUEBAS_POR_MINUTO = 10/.test(probar), "probar: 10 por usuario y minuto");
+  ok(probar.indexOf("limitarTasa(") < probar.indexOf("probarAgente("), "probar: el freno va antes de gastar");
+  const claveT = `crm-probar:prueba-${Math.random()}`;
+  const pasan = Array.from({ length: 11 }, () => limitarTasa(claveT, 10, 60_000));
+  ok(pasan.slice(0, 10).every(Boolean) && pasan[10] === false, "limitarTasa: diez pasan, la undécima no");
+  // El envío automático dice de qué conversación y cotización es; el texto va al número copiado ANTES del bucle.
+  const ia = quitarComentarios(readFileSync("lib/crm-ia.ts", "utf8"));
+  ok(/esperado: \{ conversacionId: String\(conv\.id\), cotizacionId: pdf\.cotizacionId \}/.test(ia), "crm-ia: el PDF automático exige su conversación y su cotización");
+  const cuerpo = ia.slice(ia.indexOf("async function responderConIAInterno"));
+  const iSnap = cuerpo.indexOf("const waDestinoInicial = waDestinoDe(contacto)"), iBucle = cuerpo.indexOf("for (let iter = 0");
+  ok(iSnap > 0 && iSnap < iBucle, "crm-ia: el número de destino se copia antes del bucle del agente");
+  ok(/enviarPorCanal\(sb, conv, contacto, textoFinal, waDestinoInicial\)/.test(cuerpo), "crm-ia: y se responde a ese número");
+  ok(/textoSinImportesAjenos\(textoFinal, ctx\.cotizacionTraslado, agente, contactoInicial\)/.test(cuerpo), "crm-ia: el saludo usa el nombre de antes del bucle");
+}
+
 function textoContradicePrecioJSON(j: string): boolean { return E.textoContradicePrecio(j, []) || /"total"/.test(j); }
 
 console.log(`\n${oks} ok · ${fallos} fallos`);

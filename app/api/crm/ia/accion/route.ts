@@ -49,9 +49,11 @@ export async function POST(req: NextRequest) {
     if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
     const usuario_id = auth.userId;
 
-    const { accion_id, decision } = await req.json();
+    const { accion_id, decision, conversacion_id } = await req.json();
     if (!accion_id || !["aprobar", "rechazar"].includes(decision))
       return NextResponse.json({ ok: false, error: "Datos inválidos" }, { status: 400 });
+    // La conversación que tiene abierta quien pulsa: si viene, la acción tiene que ser de ella.
+    const convEsperada = typeof conversacion_id === "string" ? conversacion_id.trim() : "";
 
     const sb = db();
     const { data: accion } = await sb
@@ -60,10 +62,15 @@ export async function POST(req: NextRequest) {
       .eq("id", accion_id)
       .single();
     if (!accion) return NextResponse.json({ ok: false, error: "Acción no encontrada" }, { status: 404 });
+    if (convEsperada && accion.conversacion_id !== convEsperada)
+      return NextResponse.json({ ok: false, error: "La acción no es de esta conversación: recarga la bandeja." }, { status: 409 });
 
     // Cotización de traslado de la IA: «aprobar» es ENVIARLA al cliente (el PDF se arma de la fila,
     // así que sale con lo que se haya corregido en /cotizaciones); «rechazar» no toca la cotización.
     if (accion.tipo === "cotizacion_traslado") {
+      // Enviar un PDF a un cliente exige saber de qué conversación es: sin ella no se hace nada.
+      if (!convEsperada)
+        return NextResponse.json({ ok: false, error: "Falta la conversación de la cotización (conversacion_id): recarga la bandeja." }, { status: 400 });
       if (decision === "rechazar") {
         if (!accionReclamable(accion, Date.now()))
           return NextResponse.json({ ok: false, estado: accion.estado, error: `La acción ya está ${accion.estado}.` }, { status: 409 });
@@ -76,7 +83,9 @@ export async function POST(req: NextRequest) {
         if (!upd?.length) return NextResponse.json({ ok: false, error: "Otro usuario la está enviando o ya la resolvió." }, { status: 409 });
         return NextResponse.json({ ok: true, estado: "rechazada" });
       }
-      const r = await enviarCotizacionTraslado(sb, { accionId: accion_id, por: "ejecutivo", usuarioId: usuario_id });
+      const r = await enviarCotizacionTraslado(sb, {
+        accionId: accion_id, por: "ejecutivo", usuarioId: usuario_id, esperado: { conversacionId: convEsperada },
+      });
       const estado = r.ok ? "aprobada"
         : r.codigo === "no_pendiente" || r.codigo === "reclamo_perdido" || r.codigo === "cotizacion_no_existe" ? accion.estado : "pendiente";
       return NextResponse.json(

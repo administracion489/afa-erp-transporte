@@ -18,16 +18,22 @@
 //
 // NINGÚN DATO DE LA EMPRESA ESTÁ ESCRITO AQUÍ: nombre, RUC y logo salen del perfil
 // (`empresaConDefectos`). Sin logo en el perfil, el PDF va sin logo; nunca el del bundle.
+//
+// LO QUE ESCRIBIÓ EL CLIENTE NO SE IMPRIME TAL CUAL: el recojo y el destino van con el nombre de su
+// ZONA y, como mucho, una referencia corta entre paréntesis; «Atención» hasta 60 caracteres. Lo
+// sospechoso (./texto-libre.ts) no se imprime. El texto crudo queda en `traslado_json` para el
+// ejecutivo, que no sale en el PDF.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import type { EntradaSimulador, LugarEntrada } from "./api";
 import type { ConfigTraslados } from "./datos";
-import { importesTraslado, tarifaDelPar, type CategoriaTraslado, type ResultadoTraslado, type TarifaTraslado, type UbicacionZona, type Zona } from "./motor";
+import { claveNombre, importesTraslado, tarifaDelPar, type CategoriaTraslado, type ResultadoTraslado, type TarifaTraslado, type UbicacionZona, type Zona } from "./motor";
 import { aPENdesdeCot, normalizarMoneda, revisarTipoCambio, totalesEnMoneda, type Moneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { numeroCotizacion } from "../cotizacion-pdf";
 import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { fechaLima } from "../alertas-horario";
+import { atencionImprimible, referenciaImprimible } from "./texto-libre";
 
 const r2 = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 100) / 100;
 const MAX_LUGAR = 300;
@@ -124,12 +130,19 @@ export type FilaCotizacionLeida = {
 const textoLugar = (l: LugarEntrada): string =>
   typeof l === "string" ? l.trim() : String(l.texto ?? "").trim();
 
-/** El nombre que se imprime: el de la zona si es un PUNTO (el aeropuerto), si no lo que dijo el cliente. */
-function nombreLugar(l: LugarEntrada, z: Zona | null | undefined): string {
-  if (z?.tipo === "punto") return z.nombre.slice(0, MAX_LUGAR);
-  const t = textoLugar(l);
-  if (t) return t.slice(0, MAX_LUGAR);
-  return z ? `${z.nombre} (ubicación compartida)`.slice(0, MAX_LUGAR) : "Ubicación compartida";
+/**
+ * Lo que se IMPRIME del recojo o del destino. Un PUNTO (el aeropuerto) va con el nombre de su
+ * zona y nada más. Cualquier otra zona va con SU nombre (lo que se cotizó) y, como mucho, una
+ * referencia corta de lo que dijo el cliente entre paréntesis: «Miraflores (Hotel Belmond)». Si
+ * lo del cliente es sospechoso (un enlace, un teléfono, un importe, palabras de pago, más de 80
+ * caracteres), no se imprime: queda solo la zona y la cotización va a revisión (planEnvio).
+ */
+function nombreLugar(l: LugarEntrada, z: Zona): string {
+  if (z.tipo === "punto") return z.nombre.slice(0, MAX_LUGAR);
+  const ref = referenciaImprimible(textoLugar(l));
+  if (ref) return claveNombre(ref) === claveNombre(z.nombre) ? z.nombre.slice(0, MAX_LUGAR) : `${z.nombre} (${ref})`.slice(0, MAX_LUGAR);
+  if (typeof l !== "string") return `${z.nombre} (ubicación compartida)`.slice(0, MAX_LUGAR);
+  return z.nombre.slice(0, MAX_LUGAR);
 }
 
 const recortar = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
@@ -187,7 +200,8 @@ export function filaCotizacionTraslado(
     idioma_pdf: "es",
     consideraciones_json: { incluye: [], no_incluye: [], generales },
     asunto: "Traslado cotizado por la IA (WhatsApp)",
-    atencion: x.atencion ? String(x.atencion).trim().slice(0, 200) || null : null,
+    // Hasta 60 caracteres y nunca algo sospechoso (lo juzga también planEnvio).
+    atencion: atencionImprimible(x.atencion),
     numero_cotizacion: null,
     crm_conversacion_id: x.convId,
     traslado_json: {

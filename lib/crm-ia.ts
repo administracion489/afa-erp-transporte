@@ -13,8 +13,8 @@ import { enviarEmail } from "@/lib/crm-gmail";
 import { textoLegible } from "@/lib/crm-gmail-reglas";
 import { phonePara } from "@/lib/whatsapp-numeros";
 import {
-  HERRAMIENTA_COTIZAR_TRASLADO, entradaDelAgente, mensajeCotizacionCodigo, planEnvio, respuestaDerivar,
-  respuestaParaModelo, senalesEnTexto, textoContradicePrecio,
+  HERRAMIENTA_COTIZAR_TRASLADO, entradaDelAgente, planEnvio, respuestaDerivar,
+  respuestaParaModelo, senalesEnTexto, textoFinalTraslado,
 } from "@/lib/traslados/envio-ia";
 import { cuadraConMotor, filaCotizacionTraslado } from "@/lib/traslados/cotizacion-traslado";
 import { cotizarTrasladoIA, type ResultadoCotizarIA } from "@/lib/traslados/cotizar-ia-datos";
@@ -693,14 +693,25 @@ async function cargarHistorial(sb: SB, convId: string, aj: AjustesIA = normaliza
 
 // ── Envío por canal (modo autónomo) ──────────────────────────────────────────
 
-async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string): Promise<string | null> {
+/** El número de WhatsApp al que se responde: el wa_id del hilo o, sin él, el teléfono del contacto. */
+function waDestinoDe(contacto: { wa_id?: unknown; telefono?: unknown } | null | undefined): string {
+  if (contacto?.wa_id) return String(contacto.wa_id);
+  return contacto?.telefono ? String(contacto.telefono).replace(/\D/g, "") : "";
+}
+
+/**
+ * `waDestino`, si se pasa, es el número copiado ANTES del bucle del agente: `actualizar_contacto`
+ * deja al modelo reescribir `contacto.telefono` en este mismo turno, y sin wa_id la respuesta iría
+ * al número que escribió el modelo.
+ */
+async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string, waDestinoFijo?: string): Promise<string | null> {
   let metaId: string | null = null;
   let gmailMsgId: string | null = null;
   let error: string | null = null;
   try {
     // Por el mismo número que usó el cliente (ver app/api/crm/mensajes/enviar).
     // Sin wa_id (contacto creado a mano, o por el historial) se usa su teléfono.
-    const waDestino = contacto?.wa_id || (contacto?.telefono ? String(contacto.telefono).replace(/\D/g, "") : "");
+    const waDestino = waDestinoFijo !== undefined ? waDestinoFijo : waDestinoDe(contacto);
     if (conv.canal === "whatsapp" && waDestino)
       metaId = await enviarWhatsApp(waDestino, texto, conv.phone_number_id ?? (await phonePara("crm")));
     else if (conv.canal === "messenger" && contacto?.fb_psid) metaId = await enviarMessenger(contacto.fb_psid, texto);
@@ -727,22 +738,12 @@ async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string): 
 }
 
 /**
- * Si en este turno se usó `cotizar_traslado` y el texto del modelo menciona un importe que no es
- * una de las cifras permitidas (en revisión, ninguna), el mensaje lo arma el código. Sin cotización
- * de traslado en el turno, el texto no se toca.
+ * Si en este turno se usó `cotizar_traslado`: con una cotización, el mensaje lo escribe SIEMPRE el
+ * código (el modelo no pone el total, el IGV ni la validez); sin ella, el del modelo solo pasa si
+ * no menciona dinero (`textoFinalTraslado`). Sin la herramienta en el turno, el texto no se toca.
  */
 export function textoSinImportesAjenos(texto: string, ct: ResultadoCotizarIA | null | undefined, agente: any, contacto: any): string {
-  if (!ct || !texto) return texto;
-  const c = ct.cotizacion;
-  if (!textoContradicePrecio(texto, c?.figuras ?? [])) return texto;
-  if (c) {
-    return mensajeCotizacionCodigo({
-      nombre: primerNombre(contacto), numero: c.numero, decision: c.decision, total: c.total, validez: c.validez, yaEnviada: c.yaEnviada,
-    });
-  }
-  if (ct.accion === "derivar") return mensajeDerivacion(agente, contacto);
-  const faltan = ct.faltan ?? [];
-  return faltan.length ? `Para cotizar tu traslado me falta: ${faltan.join("; ")}.` : mensajeDerivacion(agente, contacto);
+  return textoFinalTraslado(texto, ct ?? null, { nombre: primerNombre(contacto), derivacion: mensajeDerivacion(agente, contacto) });
 }
 
 // ── Entrada principal ────────────────────────────────────────────────────────
@@ -993,6 +994,10 @@ async function responderConIAInterno(
     !opts.forzarBorrador && autonomos.includes(conv.canal) && dentroHorario(agente);
   // El remitente se copia AHORA: el modelo puede reescribir datos del contacto con sus herramientas.
   const remitente = { canal: String(conv.canal ?? ""), waId: contacto?.wa_id ? String(contacto.wa_id) : null };
+  // También el número al que se responde y el nombre del saludo: `actualizar_contacto` puede
+  // cambiar `contacto.telefono` y `contacto.nombre` en este mismo turno.
+  const waDestinoInicial = waDestinoDe(contacto);
+  const contactoInicial = { ...contacto };
   // `cotizar_traslado` solo en WhatsApp, con el interruptor encendido y las migraciones corridas.
   const traslados = conv.canal === "whatsapp" && (await leerConfigIA(sb)).iaCotiza;
 
@@ -1046,7 +1051,7 @@ async function responderConIAInterno(
 
   // El modelo no pone números: si su texto trae un importe que no es de la cotización de traslado
   // de este turno (en revisión, ninguno), el mensaje lo escribe el código.
-  textoFinal = textoSinImportesAjenos(textoFinal, ctx.cotizacionTraslado, agente, contacto);
+  textoFinal = textoSinImportesAjenos(textoFinal, ctx.cotizacionTraslado, agente, contactoInicial);
 
   if (agente.firma) textoFinal = `${textoFinal}\n${agente.firma}`;
 
@@ -1072,7 +1077,7 @@ async function responderConIAInterno(
       return { ok: true, accion: "omitido", motivo: "Ya respondió otra persona o la IA se pausó mientras se redactaba." };
     if (agente.delay_segundos > 0)
       await new Promise((r) => setTimeout(r, Math.min(agente.delay_segundos, 30) * 1000));
-    const err = await enviarPorCanal(sb, conv, contacto, textoFinal);
+    const err = await enviarPorCanal(sb, conv, contacto, textoFinal, waDestinoInicial);
     if (err) {
       // Si falla el envío, al menos deja el borrador
       await sb.from("crm_conversaciones").update({ borrador_ia: textoFinal, borrador_ia_at: new Date().toISOString() }).eq("id", convId);
@@ -1085,6 +1090,7 @@ async function responderConIAInterno(
       try {
         const env = await enviarCotizacionTraslado(sb, {
           accionId: pdf.accionId, por: "automatico", bytes: pdf.bytes, nombre: pdf.nombre, caption: pdf.caption,
+          esperado: { conversacionId: String(conv.id), cotizacionId: pdf.cotizacionId },
         });
         if (!env.ok) console.warn(`[crm-ia] ${convId} cotización de traslado no enviada: ${env.codigo} · ${env.detalle}`);
       } catch (e: any) {
@@ -1176,7 +1182,8 @@ export async function vistaPreviaInstrucciones(): Promise<string | null> {
  */
 async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: string[], empresa: string): Promise<string> {
   try {
-    const v = validarEntrada(entradaDelAgente(input, { canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS }, textos));
+    // En la prueba no hay ubicaciones compartidas: las coordenadas que proponga el modelo no valen.
+    const v = validarEntrada(entradaDelAgente(input, { canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS }, []));
     if (!v.ok) return respuestaDerivar();
     const hoy = fechaLima(Date.now());
     const sim = await simularTrasladoConCatalogo(sb, v.entrada, hoy);
@@ -1189,6 +1196,7 @@ async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: 
       resultado: r, envioMaestro: sim.catalogo.config.envio_automatico === true, zonas: sim.catalogo.zonas,
       canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS, modoAuto: autonomos.includes("whatsapp") && dentroHorario(agente),
       perfilConfigurado: !!empresa, cuadra: cuadraConMotor(fila, r), pdfOk: true, palabras: senalesEnTexto(textos),
+      textosLibres: [input?.origen_texto, input?.destino_texto],
     });
     return respuestaParaModelo({ resultado: r, cotizacion: { numero: "PRUEBA", decision: plan.decision } });
   } catch {

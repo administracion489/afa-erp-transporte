@@ -9,7 +9,7 @@
 // EL ORDEN, Y POR QUÉ:
 //  1. La configuración (`leerConfigIA`): si se apagó entre el ofrecimiento y la llamada, se deriva.
 //  2. La entrada con LISTA BLANCA (`entradaDelAgente`): la moneda sale del wa_id del remitente y las
-//     coordenadas solo de un enlace de mapa de un mensaje entrante.
+//     coordenadas solo del enlace de una UBICACIÓN compartida (mensaje entrante de tipo «location»).
 //  3. La IDEMPOTENCIA, antes de gastar Google: el mismo pedido (misma `firmaPedido`) en la misma
 //     conversación en las últimas 2 h no crea otra cotización. Pendiente → se reusa y se vuelve a
 //     decidir el envío (el caso típico: el envío anterior se canceló porque el cliente siguió
@@ -18,8 +18,10 @@
 //     Un conteo que no se pudo leer bloquea: se deriva.
 //  5. El motor (`simularTrasladoConCatalogo`, el mismo del simulador de /tarifario).
 //  6. La cotización (`cotizaciones` es la fila autoritativa), el PDF, el cuadre contra el motor y
-//     `planEnvio`; después la acción de la bandeja (`crm_acciones_ia`, tipo `cotizacion_traslado`,
-//     siempre `pendiente`) y, si queda en revisión, una nota interna con los motivos.
+//     `planEnvio` (que también juzga el recojo, el destino y el nombre como TEXTO LIBRE: con algo
+//     sospechoso no sale sola); después la acción de la bandeja (`crm_acciones_ia`, tipo
+//     `cotizacion_traslado`, siempre `pendiente`) y, si queda en revisión, una nota interna con los
+//     motivos.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { faltaAlguna, faltaColumna } from "../columna-faltante";
@@ -36,8 +38,10 @@ import {
 import {
   MOTIVO_REVISION, TOPES, decidirTope, entradaDelAgente, figurasPermitidas, firmaPedido, planEnvio,
   respuestaDerivar, respuestaEnRevision, respuestaParaModelo, respuestaYaEnviada, senalesEnTexto,
+  textosDeUbicacion, textosLibresSospechosos,
   type CodigoRevision, type DecisionEnvio,
 } from "./envio-ia";
+import { ETIQUETA_TEXTO_LIBRE } from "./texto-libre";
 import { armarPdfDeFila, leerCotizacionTraslado, leerPerfilPdf, type LogoPdf, type PerfilPdf } from "./enviar-cotizacion-datos";
 import { simularTrasladoConCatalogo } from "./servicio";
 import type { ResultadoTraslado } from "./motor";
@@ -58,8 +62,11 @@ export type CtxCotizarIA = {
   modoAuto: boolean;
   /** Consultas al motor hechas en ESTE turno (se cuentan en memoria). */
   consultasTurno: { n: number };
-  /** Los textos de los mensajes ENTRANTES; si faltan, se leen. */
-  textosEntrantes?: string[];
+  /**
+   * Los mensajes ENTRANTES (contenido y tipo); si faltan, se leen. De todos salen las palabras de
+   * pedido complejo; las coordenadas, SOLO de los de tipo «location».
+   */
+  entrantes?: { contenido: string | null; tipo: string | null }[];
 };
 
 export type CotizacionIA = {
@@ -116,12 +123,14 @@ export async function clienteIdDeRemitente(sb: Sb, contacto: CtxCotizarIA["conta
   return ids.size === 1 ? [...ids][0] : null;
 }
 
-/** Los textos entrantes de la conversación (más recientes primero). null si no se pudieron leer. */
-async function textosEntrantesDe(sb: Sb, convId: string): Promise<string[] | null> {
-  const { data, error } = await sb.from("crm_mensajes").select("contenido").eq("conversacion_id", convId).eq("direccion", "entrante")
+type Entrante = { contenido: string | null; tipo: string | null };
+
+/** Los mensajes entrantes de la conversación (más recientes primero), con su tipo. null si no se pudieron leer. */
+async function entrantesDe(sb: Sb, convId: string): Promise<Entrante[] | null> {
+  const { data, error } = await sb.from("crm_mensajes").select("contenido, tipo").eq("conversacion_id", convId).eq("direccion", "entrante")
     .order("created_at", { ascending: false }).limit(60);
   if (error) return null;
-  return ((data ?? []) as { contenido: string | null }[]).map((m) => String(m.contenido ?? "")).filter(Boolean);
+  return ((data ?? []) as Entrante[]).filter((m) => m && String(m.contenido ?? "").trim() !== "");
 }
 
 const textoLugar = (l: LugarEntrada) => (typeof l === "string" ? l : l.texto || `${l.lat.toFixed(5)}, ${l.lng.toFixed(5)}`);
@@ -221,18 +230,20 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   const cfg = await leerConfigIA(sb);
   if (!cfg.iaCotiza) return deriva("La cotización automática de traslados no está disponible", "Cotizar un traslado", cfg.detalle ?? "");
 
-  // 2) La entrada, con lista blanca.
-  const textos = ctx.textosEntrantes ?? (await textosEntrantesDe(sb, ctx.conv.id));
-  const v = validarEntrada(entradaDelAgente(input, ctx.remitente, textos ?? []));
+  // 2) La entrada, con lista blanca. Coordenadas solo de las ubicaciones compartidas.
+  const entrantes = ctx.entrantes ?? (await entrantesDe(sb, ctx.conv.id));
+  const textos = entrantes ? entrantes.map((m) => String(m.contenido ?? "")) : null;
+  const v = validarEntrada(entradaDelAgente(input, ctx.remitente, textosDeUbicacion(entrantes)));
   if (!v.ok) return deriva(`Pedido de traslado que no se pudo leer: ${v.detalle}`, "Cotizar un traslado");
   const e = v.entrada;
   const pedido = pedidoEnUnaLinea(e);
   const firma = firmaPedido(e);
+  const libres = camposLibres(e, ctx.contacto?.nombre ?? null);
 
   // 3) ¿Ya se cotizó este mismo pedido?
   const previa = await accionPrevia(sb, ctx.conv.id, firma, ahora);
   if (!previa.ok) return deriva("No se pudo comprobar si este pedido ya se cotizó", pedido, previa.detalle);
-  if (previa.accion) return reusar(ctx, deps, previa.accion, { pedido, firma, textos, ahora, hoy });
+  if (previa.accion) return reusar(ctx, deps, previa.accion, { pedido, firma, textos, libres, ahora, hoy });
 
   // 4) Topes, antes de gastar Google.
   const conteos = await contarTopes(sb, ctx.conv.id, hoy);
@@ -263,13 +274,21 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   const ins = await insertarCotizacion(sb, fila);
   if (!ins.ok) return deriva(ins.motivo, pedido, ins.detalle);
   const leida: FilaCotizacionLeida = { ...fila, id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at };
-  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, pedido, nota: r.explicacion.join("\n") });
+  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n") });
+}
+
+type CampoLibre = { campo: string; texto: string | null };
+
+/** Lo que escribió el cliente (o el modelo) y podría imprimirse: el recojo, el destino y el nombre. */
+function camposLibres(e: EntradaSimulador, nombre: string | null): CampoLibre[] {
+  const t = (l: LugarEntrada) => (typeof l === "string" ? l : l.texto ?? null);
+  return [{ campo: "Recojo", texto: t(e.origen) }, { campo: "Destino", texto: t(e.destino) }, { campo: "Nombre del contacto", texto: nombre }];
 }
 
 /** El mismo pedido otra vez: se reusa la cotización (y se vuelve a decidir el envío), se recuerda la enviada, o se deriva. */
 async function reusar(
   ctx: CtxCotizarIA, deps: DepsCotizar, acc: AccionFila,
-  x: { pedido: string; firma: string; textos: string[] | null; ahora: number; hoy: string },
+  x: { pedido: string; firma: string; textos: string[] | null; libres: CampoLibre[]; ahora: number; hoy: string },
 ): Promise<ResultadoCotizarIA> {
   const { sb } = ctx;
   if (acc.estado === "rechazada") return deriva("Un ejecutivo rechazó hace poco una cotización de este mismo pedido", x.pedido);
@@ -299,7 +318,7 @@ async function reusar(
   }
   const igv = await leerIgvPct(sb);
   const r = resultadoDeFila(leida, catalogo, igv);
-  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo, firma: x.firma, textos: x.textos, pedido: x.pedido, nota: "", existente: acc });
+  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo, firma: x.firma, textos: x.textos, libres: x.libres, pedido: x.pedido, nota: "", existente: acc });
 }
 
 /** PDF, cuadre, decisión de envío, acción de la bandeja y nota interna. Compartido por la cotización nueva y la reusada. */
@@ -307,7 +326,7 @@ async function decidirYRegistrar(
   ctx: CtxCotizarIA, deps: DepsCotizar,
   x: {
     leida: FilaCotizacionLeida; resultado: ResultadoTraslado | null; catalogo: Pick<CatalogoTraslados, "config" | "zonas">;
-    firma: string; textos: string[] | null; pedido: string; nota: string; existente?: AccionFila;
+    firma: string; textos: string[] | null; libres: CampoLibre[]; pedido: string; nota: string; existente?: AccionFila;
   },
 ): Promise<ResultadoCotizarIA> {
   const { sb } = ctx;
@@ -332,7 +351,7 @@ async function decidirYRegistrar(
       resultado: x.resultado, envioMaestro: x.catalogo.config.envio_automatico === true, zonas: x.catalogo.zonas,
       canal: ctx.remitente.canal, waId: ctx.remitente.waId, modoAuto: ctx.modoAuto,
       perfilConfigurado: !!perfil && !empresa.sinConfigurar, cuadra: cuadraConMotor(x.leida, x.resultado),
-      pdfOk: !!pdf, palabras,
+      pdfOk: !!pdf, palabras, textosLibres: x.libres.map((c) => c.texto),
     });
     decision = plan.decision;
     motivos = plan.motivos;
@@ -371,6 +390,7 @@ async function decidirYRegistrar(
       const lineas = [
         `🤖 La IA cotizó un traslado y lo dejó para que lo revises: cotización N° ${numero}.`,
         ...motivos.map((m) => `• ${MOTIVO_REVISION[m].texto} ${MOTIVO_REVISION[m].arreglo}`),
+        ...textosLibresSospechosos(x.libres).map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
         errorPdf ? `• PDF: ${errorPdf.slice(0, 300)}` : "",
         `Pedido: ${x.pedido}`,
         x.nota ? `Cómo se cotizó:\n${x.nota.slice(0, 1500)}` : "",
