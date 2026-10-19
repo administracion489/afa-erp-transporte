@@ -39,6 +39,8 @@ ok(/cotizar_traslado/.test(BLOQUE_TRASLADOS) && /NUNCA calcules ni inventes un p
 ok(/en un solo mensaje/.test(BLOQUE_TRASLADOS) && /mensaje de derivación/.test(BLOQUE_TRASLADOS), "pregunta todo junto; deriva con el mensaje de derivación");
 ok(/NO menciones ningún importe/.test(BLOQUE_TRASLADOS) && /EXACTAMENTE como vienen/.test(BLOQUE_TRASLADOS), "en revisión sin importes; en automático tal cual");
 ok(/proponer_reserva/.test(BLOQUE_TRASLADOS) && /disponibilidad/.test(BLOQUE_TRASLADOS), "nunca confirma disponibilidad ni reserva; si acepta, proponer_reserva");
+ok(/cliente_pide_dolares/.test(BLOQUE_TRASLADOS) && /EXPRESAMENTE/.test(BLOQUE_TRASLADOS), "si el cliente pide dólares, marca cliente_pide_dolares");
+ok(!/No cambies el precio ni la moneda/.test(BLOQUE_TRASLADOS) && /No cambies el precio/.test(BLOQUE_TRASLADOS), "la moneda pedida en dólares ya no se deriva; el precio sigue sin cambiarse");
 ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NUNCA confirmes que ya cotizaste"), "aclara que no contradice «NUNCA confirmes…», que sigue");
 // El texto del turno con traslados (auditoría): con cotización lo escribe el código; sin ella, el
 // del modelo solo pasa si no habla de dinero. textoSinImportesAjenos delega en textoFinalTraslado.

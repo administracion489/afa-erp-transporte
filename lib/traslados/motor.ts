@@ -345,15 +345,16 @@ export function elegirVehiculo(
   };
 }
 
-// ── 4. La moneda: la decide el número de WhatsApp ────────────────────────────
+// ── 4. La moneda: la decide el número de WhatsApp, salvo que el cliente pida dólares ──
 
-export type CodigoMoneda = "peru" | "extranjero" | "sin_telefono";
+export type CodigoMoneda = "peru" | "extranjero" | "sin_telefono" | "pide_dolares";
 
 /**
  * Número peruano (+51, o un celular de 9 dígitos sin prefijo) → soles; cualquier otro país →
  * dólares (la lista de precio turista). Un BSUID de WhatsApp («PE.…») lleva el país delante.
- * Las dos listas NO son una conversión entre sí, así que la moneda no se cambia a pedido: un
- * pedido de la otra moneda lo ve un ejecutivo.
+ * Las dos listas NO son una conversión entre sí. La única excepción es `monedaDelPedido`: el
+ * cliente que pide dólares recibe la lista en dólares; cualquier otro cambio de moneda lo ve un
+ * ejecutivo.
  */
 export function monedaPorTelefono(tel: string | null | undefined): { moneda: Moneda | null; codigo: CodigoMoneda; detalle: string } {
   const s = String(tel ?? "").trim();
@@ -369,6 +370,34 @@ export function monedaPorTelefono(tel: string | null | undefined): { moneda: Mon
   if (d.length === 9 && d.startsWith("9")) return { moneda: "PEN", codigo: "peru", detalle: "Celular peruano: precios en soles." };
   if (d.length >= 8 && !d.startsWith("51")) return { moneda: "USD", codigo: "extranjero", detalle: `Número extranjero (+${d.slice(0, 3)}…): precios en dólares.` };
   return { moneda: null, codigo: "sin_telefono", detalle: "Sin un número de WhatsApp válido no se sabe en qué moneda cotizar." };
+}
+
+/**
+ * La moneda de la cotización. Manda el número (`monedaPorTelefono`), con UNA excepción, pedida por
+ * el dueño (19-10-2026): si el cliente pidió la cotización EN DÓLARES, se cotiza con la lista en
+ * dólares aunque escriba desde un número peruano (o sin número). Es la lista que alguien tecleó, no
+ * una conversión de la de soles: este módulo no inventa precios.
+ *
+ * Solo hacia los dólares, y es deliberado: pedir SOLES desde un número extranjero sigue yendo a un
+ * ejecutivo (señal `otra_moneda`). La lista en soles suele quedar por debajo de la de dólares al
+ * tipo de cambio del día, así que ofrecerla a pedido es cobrar de menos, el error que no vuelve.
+ *
+ * `pideDolares` no es lo que dijo el modelo: lo pone `entradaDelAgente` solo cuando el modelo lo
+ * marca Y los mensajes del propio cliente nombran los dólares (dos confirmaciones). Sin él, el
+ * resultado es byte a byte el de `monedaPorTelefono`.
+ */
+export function monedaDelPedido(
+  tel: string | null | undefined,
+  pideDolares: boolean | null | undefined,
+): { moneda: Moneda | null; codigo: CodigoMoneda; detalle: string } {
+  const porNumero = monedaPorTelefono(tel);
+  if (pideDolares !== true || porNumero.moneda === "USD") return porNumero;
+  return {
+    moneda: "USD", codigo: "pide_dolares",
+    detalle: porNumero.moneda === "PEN"
+      ? "El cliente pidió la cotización en dólares: se cotiza con la lista en dólares aunque escribe desde un número peruano."
+      : "El cliente pidió la cotización en dólares: se cotiza con la lista en dólares.",
+  };
 }
 
 // ── 5. Tipo de cambio, fechas e importes ─────────────────────────────────────
@@ -436,7 +465,7 @@ export const SENALES: Record<SenalComplejidad, string> = {
   guia_o_tour: "Pide guía, city tour o full day",
   descuento: "Pide descuento o negocia el precio",
   contrato: "Es un contrato o un servicio recurrente",
-  otra_moneda: "Pide cotizar en otra moneda",
+  otra_moneda: "Pide una moneda que no se ofrece (euros, o soles desde un número extranjero)",
   otro: "Tiene condiciones que debe analizar un ejecutivo",
 };
 
@@ -452,6 +481,8 @@ export type PedidoTraslado = {
   /** Maletas de 23 kg. null = el cliente no lo dijo (hay que preguntar); 0 = no llevan. */
   maletas: number | null;
   telefono: string | null;
+  /** El cliente pidió la cotización en dólares (verificado en sus mensajes): ver `monedaDelPedido`. */
+  pide_dolares?: boolean | null;
   paradas_intermedias?: number | null;
   fechas_adicionales?: number | null;
   vehiculos_pedidos?: number | null;
@@ -574,8 +605,8 @@ export function evaluarTraslado(pedido: PedidoTraslado, ctx: ContextoTraslado): 
     return base("fecha_pasada", "La fecha del retorno es anterior a la de la ida.", { faltan: ["la fecha del retorno"] });
   }
 
-  // 4) Moneda, por el número.
-  const mon = monedaPorTelefono(pedido.telefono);
+  // 4) Moneda: por el número, salvo que el cliente haya pedido dólares.
+  const mon = monedaDelPedido(pedido.telefono, pedido.pide_dolares);
   exp.push(mon.detalle);
   if (!mon.moneda) return base("sin_moneda", mon.detalle);
   const moneda = mon.moneda;

@@ -23,6 +23,12 @@ export type EntradaSimulador = {
   pax: number | null;
   maletas: number | null;
   telefono: string | null;
+  /**
+   * El cliente pidió la cotización en dólares: se cotiza con la lista en dólares aunque el número
+   * sea peruano (`monedaDelPedido`). En el agente IA solo llega `true` si sus propios mensajes
+   * nombran los dólares (`entradaDelAgente`). Ausente = la moneda la decide el número.
+   */
+  pide_dolares?: boolean;
   paradas_intermedias?: number | null;
   fechas_adicionales?: number | null;
   vehiculos_pedidos?: number | null;
@@ -106,6 +112,9 @@ export function validarEntrada(x: unknown): { ok: true; entrada: EntradaSimulado
       sentido, fecha_retorno: fecha(o.fecha_retorno), hora_retorno: hora(o.hora_retorno),
       pax: num(o.pax, 500), maletas: num(o.maletas, 1000),
       telefono: typeof o.telefono === "string" ? o.telefono.trim().slice(0, 40) : null,
+      // Solo un `true` de verdad (no «true» en texto ni 1), y la clave solo cuando lo es: sin
+      // pedido de dólares, la entrada es la de siempre.
+      ...(o.pide_dolares === true ? { pide_dolares: true } : {}),
       paradas_intermedias: num(o.paradas_intermedias, 50), fechas_adicionales: num(o.fechas_adicionales, 365),
       vehiculos_pedidos: num(o.vehiculos_pedidos, 50), senales,
     },

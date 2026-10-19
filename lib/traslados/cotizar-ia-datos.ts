@@ -8,8 +8,9 @@
 //
 // EL ORDEN, Y POR QUÉ:
 //  1. La configuración (`leerConfigIA`): si se apagó entre el ofrecimiento y la llamada, se deriva.
-//  2. La entrada con LISTA BLANCA (`entradaDelAgente`): la moneda sale del wa_id del remitente y las
-//     coordenadas solo del enlace de una UBICACIÓN compartida (mensaje entrante de tipo «location»).
+//  2. La entrada con LISTA BLANCA (`entradaDelAgente`): la moneda sale del wa_id del remitente (o
+//     dólares, si el modelo lo marca Y el cliente los nombró en sus mensajes) y las coordenadas solo
+//     del enlace de una UBICACIÓN compartida (mensaje entrante de tipo «location»).
 //  3. La IDEMPOTENCIA, antes de gastar Google: el mismo pedido (misma `firmaPedido`) en la misma
 //     conversación en las últimas 2 h no crea otra cotización. Pendiente → se reusa y se vuelve a
 //     decidir el envío (el caso típico: el envío anterior se canceló porque el cliente siguió
@@ -142,6 +143,7 @@ export function pedidoEnUnaLinea(e: EntradaSimulador): string {
     `Traslado ${textoLugar(e.origen) || "?"} → ${textoLugar(e.destino) || "?"}`,
     `${e.fecha_servicio ?? "sin fecha"}${e.hora_servicio ? ` ${e.hora_servicio}` : ""}`,
     sentido, `${e.pax ?? "?"} pax`, `${e.maletas ?? "?"} maletas de 23 kg`,
+    ...(e.pide_dolares ? ["pide la cotización en dólares"] : []),
   ].join(" · ").slice(0, 500);
 }
 
@@ -233,7 +235,7 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   // 2) La entrada, con lista blanca. Coordenadas solo de las ubicaciones compartidas.
   const entrantes = ctx.entrantes ?? (await entrantesDe(sb, ctx.conv.id));
   const textos = entrantes ? entrantes.map((m) => String(m.contenido ?? "")) : null;
-  const v = validarEntrada(entradaDelAgente(input, ctx.remitente, textosDeUbicacion(entrantes)));
+  const v = validarEntrada(entradaDelAgente(input, ctx.remitente, textosDeUbicacion(entrantes), textos ?? []));
   if (!v.ok) return deriva(`Pedido de traslado que no se pudo leer: ${v.detalle}`, "Cotizar un traslado");
   const e = v.entrada;
   const pedido = pedidoEnUnaLinea(e);
