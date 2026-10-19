@@ -31,6 +31,9 @@ export const PLANTILLA_INVITACION = "invitacion_app_pasajero";
 // Mientras la edición no esté aprobada, la plantilla NO tiene header y Meta rechaza el envío que
 // trae imagen (#132000 / #132012, no se cobra): se reintenta sin imagen. Así el código sirve antes y
 // después de la edición, y si un día se le quita la imagen tampoco deja de invitar.
+// La plantilla se editó SIN imagen (decisión del dueño, 18-10-2026), así que se manda sin header.
+// Si un día se le agrega la imagen en WhatsApp Manager, poner esto en true.
+export const INVITACION_CON_IMAGEN = false;
 const APP_URL = (process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com").replace(/\/$/, "");
 export const IMAGEN_INVITACION = `${APP_URL}/whatsapp-invitacion-pasajero.jpg`;
 
@@ -82,8 +85,10 @@ export async function enviarInvitacionesPasajeros(
       if (!p.telefono) { res.whatsappOmitidos++; }
       else {
         const params = [nombreCorto(p.nombre), p.empresa || empresaAfa];
-        let r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params, { tipo: "image", link: IMAGEN_INVITACION });
-        if (!r.ok && esHeaderQueNoCalza(r.error))
+        let r = INVITACION_CON_IMAGEN
+          ? await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params, { tipo: "image", link: IMAGEN_INVITACION })
+          : await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params);
+        if (INVITACION_CON_IMAGEN && !r.ok && esHeaderQueNoCalza(r.error))
           r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params);
         if (r.ok) res.whatsappEnviados++; else res.whatsappErrores++;
       }
