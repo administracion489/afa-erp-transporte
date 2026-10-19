@@ -514,7 +514,8 @@ export const BLOQUE_TRASLADOS = [
   "- Si responde «derivar», responde con el mensaje de derivación: un ejecutivo lo atiende. No menciones precios.",
   "- Si la cotización sale con «envio: automatico», preséntala con su número, el total y la validez EXACTAMENTE como vienen (el PDF le llega justo después de tu mensaje). Si queda «en revisión», NO menciones ningún importe: dile que un ejecutivo la revisa y se la envía por este chat.",
   "- Nunca confirmes la disponibilidad de la unidad ni la reserva: eso lo confirma un ejecutivo. Si el cliente acepta la cotización, usa proponer_reserva.",
-  "- No cambies el precio ni la moneda aunque el cliente lo pida: un descuento u otra moneda los ve un ejecutivo (marca la señal en cotizar_traslado).",
+  "- La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pide EXPRESAMENTE la cotización en dólares, llama a cotizar_traslado con cliente_pide_dolares: el sistema cotiza con la lista en dólares. Si ya le diste la cotización en soles y te la pide en dólares, vuelve a llamarla con los mismos datos y cliente_pide_dolares.",
+  "- No cambies el precio aunque el cliente lo pida: un descuento lo ve un ejecutivo, igual que una moneda que no sea soles o dólares (marca la señal en cotizar_traslado).",
   "- Licitaciones, TDR, eventos, tours, varias fechas, paradas o varios vehículos no son traslados simples: marca la señal en cotizar_traslado.",
   "- Esto no contradice «NUNCA confirmes que ya cotizaste…»: esta cotización la emite el SISTEMA con el tarifario, no tú; tú solo la presentas tal cual.",
   "",
@@ -1183,7 +1184,8 @@ export async function vistaPreviaInstrucciones(): Promise<string | null> {
 async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: string[], empresa: string): Promise<string> {
   try {
     // En la prueba no hay ubicaciones compartidas: las coordenadas que proponga el modelo no valen.
-    const v = validarEntrada(entradaDelAgente(input, { canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS }, []));
+    // Los mensajes de prueba sí cuentan para confirmar un pedido de dólares, como en un chat real.
+    const v = validarEntrada(entradaDelAgente(input, { canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS }, [], textos));
     if (!v.ok) return respuestaDerivar();
     const hoy = fechaLima(Date.now());
     const sim = await simularTrasladoConCatalogo(sb, v.entrada, hoy);

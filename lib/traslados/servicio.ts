@@ -57,7 +57,7 @@ export async function simularTrasladoConCatalogo(
     destino: puntoParaMotor(destino, textoDe(entrada.destino)),
     fecha_servicio: entrada.fecha_servicio, hora_servicio: entrada.hora_servicio,
     sentido: entrada.sentido, fecha_retorno: entrada.fecha_retorno, hora_retorno: entrada.hora_retorno,
-    pax: entrada.pax, maletas: entrada.maletas, telefono: entrada.telefono,
+    pax: entrada.pax, maletas: entrada.maletas, telefono: entrada.telefono, pide_dolares: entrada.pide_dolares === true,
     paradas_intermedias: entrada.paradas_intermedias, fechas_adicionales: entrada.fechas_adicionales,
     vehiculos_pedidos: entrada.vehiculos_pedidos, senales: entrada.senales,
   }, {

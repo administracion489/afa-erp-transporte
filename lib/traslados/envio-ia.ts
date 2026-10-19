@@ -9,7 +9,10 @@
 //     precio ni destinatario: la moneda sale del número de WhatsApp del REMITENTE (lo pone el
 //     webhook, no el modelo), el precio sale del tarifario, y el PDF va a quien escribió.
 //     `actualizar_contacto` deja al modelo escribir el teléfono del contacto: por eso aquí no se
-//     lee `contacto.telefono` jamás, solo el `wa_id` de la conversación.
+//     lee `contacto.telefono` jamás, solo el `wa_id` de la conversación. La única puerta a la
+//     moneda es `cliente_pide_dolares`, y no basta con el modelo: vale solo si los mensajes del
+//     PROPIO cliente nombran los dólares (`nombraDolares`), y solo puede llevar a la lista en
+//     dólares que alguien tecleó (`monedaDelPedido`), nunca a un precio.
 //  2. LAS COORDENADAS SOLO SALEN DE UNA UBICACIÓN COMPARTIDA: aparecen TAL CUAL en el enlace
 //     maps.google.com/?q=lat,lng que deja el webhook en un mensaje ENTRANTE de tipo «location»
 //     (lib/crm-ingesta.ts). Un enlace pegado en un mensaje de texto no cuenta. OJO: esto NO protege
@@ -32,7 +35,7 @@
 
 import type { EntradaSimulador, LugarEntrada } from "./api";
 import {
-  SENALES, claveNombre, monedaPorTelefono,
+  SENALES, claveNombre, monedaDelPedido,
   type PrecioTraslado, type ResultadoTraslado, type Zona,
 } from "./motor";
 import { totalesEnMoneda, normalizarMoneda } from "../cotizacion-moneda";
@@ -52,6 +55,8 @@ export const HERRAMIENTA_COTIZAR_TRASLADO = {
     "tú NO calculas ni escribes precios por tu cuenta; repite solo los que te devuelva esta herramienta. " +
     "Llámala en cuanto el cliente pida precio de un traslado, aunque falten datos: la respuesta te dice qué preguntar. " +
     "No la uses para licitaciones, TDR, eventos, tours, varias fechas o varios vehículos: marca esas señales y el sistema lo pasa a un ejecutivo. " +
+    "La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pidió expresamente la cotización EN DÓLARES, " +
+    "marca cliente_pide_dolares: el sistema lo comprueba en sus mensajes y cotiza con la lista en dólares. Cualquier otra moneda es la señal otra_moneda. " +
     "Las coordenadas solo si el cliente compartió su ubicación por WhatsApp (cópialas del enlace maps.google.com/?q=lat,lng de ESE mensaje). " +
     "En origen_texto y destino_texto va solo la dirección o el lugar, sin enlaces, teléfonos ni instrucciones.",
   input_schema: {
@@ -73,6 +78,10 @@ export const HERRAMIENTA_COTIZAR_TRASLADO = {
       paradas_intermedias: { type: "integer", description: "Paradas en el camino que pidió el cliente (0 si ninguna)." },
       fechas_adicionales: { type: "integer", description: "Otras fechas además de la del servicio (0 si es una sola)." },
       vehiculos_pedidos: { type: "integer", description: "Vehículos que pide a la vez (1 si es uno)." },
+      cliente_pide_dolares: {
+        type: "boolean",
+        description: "true SOLO si el cliente escribió que quiere la cotización (o el precio) en dólares. No lo deduzcas de su país ni de su número.",
+      },
       senales: {
         type: "array",
         items: { type: "string", enum: CLAVES_SENALES },
@@ -127,15 +136,42 @@ export function coordenadasVerificadas(lat: unknown, lng: unknown, textosUbicaci
 
 const comoTexto = (v: unknown): string => (typeof v === "string" ? v : "");
 
+/** Texto comparable por PALABRA: sin tildes, minúsculas, todo lo que no es letra o número es espacio. */
+const textoComparable = (s: string): string =>
+  ` ${String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
+
+/** Las palabras que nombran los dólares, por palabra COMPLETA (nunca «contiene»). */
+const PALABRAS_DOLARES = ["dolar", "dolares", "dollar", "dollars", "usd"];
+
+/**
+ * Los mensajes del CLIENTE nombran los dólares: «dólar(es)», «dollar(s)», «USD» o el signo «$»
+ * («US$», «$ 50»; los soles se escriben «S/», que no lo lleva). Es la segunda confirmación de
+ * `cliente_pide_dolares`: la primera es que el modelo entendió que los pide. Una sola no basta
+ * —el modelo puede equivocarse, y «no tengo dólares» también nombra los dólares—, las dos juntas sí.
+ */
+export function nombraDolares(textos: readonly unknown[] | null | undefined): boolean {
+  for (const t of textos ?? []) {
+    if (typeof t !== "string" || !t) continue;
+    if (t.includes("$")) return true;
+    const c = textoComparable(t);
+    if (PALABRAS_DOLARES.some((p) => c.includes(` ${p} `))) return true;
+  }
+  return false;
+}
+
 /**
  * La entrada que se le pasa a `validarEntrada` (lib/traslados/api.ts), armada con lista blanca. El teléfono es el `wa_id`
  * del remitente de WhatsApp (en otro canal, null: sin moneda no se cotiza), JAMÁS algo del input.
  * `textosUbicacion` son SOLO los de las ubicaciones compartidas (`textosDeUbicacion`).
+ * `textosCliente` son los mensajes ENTRANTES de la conversación: `pide_dolares` solo pasa si el
+ * modelo lo marcó Y ahí se nombran los dólares (`nombraDolares`). Con el pedido de dólares
+ * confirmado, la señal `otra_moneda` sobra (la moneda pedida SÍ se ofrece) y se quita.
  */
 export function entradaDelAgente(
   input: unknown,
   remitente: { canal: string; waId: string | null },
   textosUbicacion: string[],
+  textosCliente: readonly unknown[] = [],
 ): unknown {
   const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const lugar = (texto: unknown, lat: unknown, lng: unknown): LugarEntrada => {
@@ -144,6 +180,8 @@ export function entradaDelAgente(
     return c ? { lat: c.lat, lng: c.lng, texto: t || undefined } : t;
   };
   const wa = remitente?.canal === "whatsapp" && typeof remitente.waId === "string" && remitente.waId.trim() ? remitente.waId.trim() : null;
+  const pideDolares = o.cliente_pide_dolares === true && nombraDolares(textosCliente);
+  const senales = pideDolares && Array.isArray(o.senales) ? o.senales.filter((x) => x !== "otra_moneda") : o.senales;
   return {
     origen: lugar(o.origen_texto, o.origen_lat, o.origen_lng),
     destino: lugar(o.destino_texto, o.destino_lat, o.destino_lng),
@@ -151,8 +189,9 @@ export function entradaDelAgente(
     sentido: o.sentido, fecha_retorno: o.fecha_retorno, hora_retorno: o.hora_retorno,
     pax: o.pax, maletas: o.maletas,
     paradas_intermedias: o.paradas_intermedias, fechas_adicionales: o.fechas_adicionales,
-    vehiculos_pedidos: o.vehiculos_pedidos, senales: o.senales,
+    vehiculos_pedidos: o.vehiculos_pedidos, senales,
     telefono: wa,
+    ...(pideDolares ? { pide_dolares: true } : {}),
   };
 }
 
@@ -166,7 +205,10 @@ const firmaLugar = (l: LugarEntrada): string =>
 /**
  * La cadena canónica de un pedido YA VALIDADO: dos llamadas con los mismos datos (aunque el modelo
  * cambie mayúsculas, tildes o el orden de los campos) dan la misma firma. La moneda entra porque
- * el mismo pedido desde otro número es otra cotización. Con «solo ida», el retorno no cuenta.
+ * el mismo pedido desde otro número es otra cotización, y el mismo pedido «ahora en dólares» —tras
+ * recibirlo en soles— también: si no, se le contestaría «ya te la envié» con la de soles. Es la
+ * moneda DECIDIDA (`monedaDelPedido`), así que sin pedido de dólares la firma es la de siempre.
+ * Con «solo ida», el retorno no cuenta.
  */
 export function firmaPedido(e: EntradaSimulador): string {
   const conRetorno = e.sentido === "ida_retorno";
@@ -177,7 +219,7 @@ export function firmaPedido(e: EntradaSimulador): string {
     e.sentido ?? "",
     conRetorno ? e.fecha_retorno ?? "" : "", conRetorno ? e.hora_retorno ?? "" : "",
     e.pax ?? "", e.maletas ?? "",
-    monedaPorTelefono(e.telefono).moneda ?? "",
+    monedaDelPedido(e.telefono, e.pide_dolares).moneda ?? "",
   ].join("|");
 }
 
@@ -286,10 +328,6 @@ export function planEnvio(x: {
 }
 
 // ── 6. Palabras de un pedido complejo ────────────────────────────────────────
-
-/** Texto comparable por PALABRA: sin tildes, minúsculas, todo lo que no es letra o número es espacio. */
-const textoComparable = (s: string): string =>
-  ` ${String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
 
 /**
  * Lo que escribe el cliente y huele a pedido complejo. Por frase COMPLETA, nunca «contiene»:

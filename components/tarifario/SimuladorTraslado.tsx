@@ -53,13 +53,14 @@ type Form = {
   pax: string;
   maletas: string;
   telefono: string;
+  pideDolares: boolean;
   paradas: string;
   senales: SenalComplejidad[];
 };
 
 const formVacio = (): Form => ({
   origen: LUGAR_VACIO, destino: LUGAR_VACIO, fecha: manana(), sentido: "ida", fechaRetorno: "",
-  pax: "", maletas: "", telefono: "", paradas: "", senales: [],
+  pax: "", maletas: "", telefono: "", pideDolares: false, paradas: "", senales: [],
 });
 
 type RespuestaOk = Extract<RespuestaSimulador, { ok: true }>;
@@ -141,6 +142,7 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
       pax: lPax.tipo === "ok" ? lPax.valor : null,
       maletas: lMal.tipo === "ok" ? lMal.valor : null,
       telefono: f.telefono.trim() || null,
+      ...(f.pideDolares ? { pide_dolares: true } : {}),
       paradas_intermedias: lPar.tipo === "ok" ? lPar.valor : null,
       senales: f.senales,
     };
@@ -222,6 +224,11 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
               <button type="button" onClick={() => poner("telefono", TEL_PERUANO)} className="px-3 py-2 rounded-xl text-xs font-bold border text-gray-600 hover:bg-gray-50 min-h-[44px]">Como peruano</button>
             </div>
             <span className="block text-[10px] text-gray-400 mt-0.5">El número decide la moneda: +51 → soles; otro país → dólares (precio turista). Vacío = no se sabe la moneda (pasa a un ejecutivo).</span>
+            <label className="flex items-center gap-2 text-xs text-gray-700 min-h-[36px] cursor-pointer mt-1">
+              <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" checked={f.pideDolares} onChange={(e) => poner("pideDolares", e.target.checked)} />
+              El cliente pidió la cotización en dólares
+            </label>
+            <span className="block text-[10px] text-gray-400">Con la casilla, se cotiza con la lista en dólares aunque el número sea peruano. En el chat, la IA solo lo aplica si el cliente escribió «dólares», «USD» o «$».</span>
           </div>
           <label className="block">
             <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Paradas intermedias</span>

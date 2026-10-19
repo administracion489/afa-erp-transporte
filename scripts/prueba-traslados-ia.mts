@@ -105,7 +105,12 @@ seccion("1. La herramienta no tiene teléfono, moneda, precio ni destinatario");
   const h = E.HERRAMIENTA_COTIZAR_TRASLADO;
   const props = Object.keys((h.input_schema as { properties: Record<string, unknown> }).properties);
   ok(h.name === "cotizar_traslado", "se llama cotizar_traslado");
-  ok(!props.some((p) => /tel|phone|moneda|currency|precio|price|importe|total|destinatario|wa_id|numero/i.test(p)), `sin campos de dinero ni destinatario (${props.join(", ")})`);
+  // La ÚNICA puerta a la moneda es `cliente_pide_dolares`: un booleano (no puede nombrar una
+  // moneda ni un precio) que además se verifica contra los mensajes del cliente (sección 2b).
+  const DECLARADAS = ["cliente_pide_dolares"];
+  ok(!props.filter((p) => !DECLARADAS.includes(p)).some((p) => /tel|phone|moneda|currency|precio|price|importe|total|destinatario|wa_id|numero|dolar|usd|pen\b|soles/i.test(p)), `sin campos de dinero ni destinatario (${props.join(", ")})`);
+  ok((h.input_schema as any).properties.cliente_pide_dolares?.type === "boolean", "cliente_pide_dolares es un booleano: solo puede pedir la lista en dólares");
+  ok(/dólares/i.test(h.description) && /comprueba/i.test(h.description), "la descripción dice que el pedido de dólares se comprueba");
   const enumSen = ((h.input_schema as any).properties.senales.items.enum as string[]);
   ok(JSON.stringify(enumSen) === JSON.stringify(Object.keys(M.SENALES)), "el enum de señales es EXACTAMENTE el del motor");
   ok(/precio/i.test(h.description) && /sistema/i.test(h.description), "la descripción dice que el precio lo pone el sistema");
@@ -134,6 +139,80 @@ seccion("2. El teléfono del modelo nunca decide la moneda");
   const r = M.evaluarTraslado({ ...pedido(), telefono: (validarEntrada(E.entradaDelAgente({ telefono: "+13055551234" }, { canal: "whatsapp", waId: "51966707225" }, [])) as any).entrada.telefono }, ctx);
   ok(r.precio?.moneda === "PEN", "un peruano que el modelo «pasa» a extranjero sigue en soles");
   ok(E.entradaDelAgente(null, { canal: "whatsapp", waId: "51966707225" }, []) != null, "un input nulo no revienta");
+}
+
+// ── 2b. Dólares a pedido: el modelo Y los mensajes del cliente ────────────────
+seccion("2b. El cliente que pide dólares los recibe; el modelo solo nunca cambia la moneda");
+{
+  // nombraDolares: por palabra completa, o el signo «$».
+  const si = ["¿Cuánto sería en dólares?", "precio en USD por favor", "US$?", "me lo das en $", "DOLARES AMERICANOS", "dollars please", "en dolar", "$50 está bien?"];
+  const no = ["en soles", "S/ 100", "", "dolarizado", "usda", "dolare", "el aeropuerto queda lejos"];
+  for (const t of si) ok(E.nombraDolares([t]), `«${t}» nombra los dólares`);
+  for (const t of no) ok(!E.nombraDolares([t]), `«${t}» no nombra los dólares`);
+  ok(!E.nombraDolares(null) && !E.nombraDolares([]) && !E.nombraDolares([null, 5, {}] as unknown[]), "sin textos (o sin texto de verdad), no");
+  ok(E.nombraDolares(["hola", null, "y en dólares?"] as unknown[]), "basta con uno de los mensajes");
+
+  // monedaDelPedido: sin pedido de dólares es EXACTAMENTE monedaPorTelefono.
+  const tels = [null, "", "+51966707225", "966707225", "13055551234", "PE.x", "US.y", "123", "  +51 966 707 225 "];
+  for (const t of tels) for (const pd of [undefined, null, false]) {
+    ok(JSON.stringify(M.monedaDelPedido(t, pd)) === JSON.stringify(M.monedaPorTelefono(t)), `sin pedido de dólares = por el número (${t}, ${pd})`);
+  }
+  for (const t of tels) {
+    const r = M.monedaDelPedido(t, true);
+    ok(r.moneda === "USD", `con pedido de dólares, dólares (${t})`);
+    if (M.monedaPorTelefono(t).moneda === "USD") ok(JSON.stringify(r) === JSON.stringify(M.monedaPorTelefono(t)), `un extranjero que pide dólares: lo de siempre (${t})`);
+    else ok(r.codigo === "pide_dolares" && /pidió la cotización en dólares/.test(r.detalle), `un peruano (o sin número) que pide dólares: pide_dolares (${t})`);
+  }
+
+  // El barrido: canal × wa_id × lo que marca el modelo × lo que escribió el cliente × señales.
+  let n = 0;
+  const marcas: unknown[] = [undefined, true, false, "true", 1, null];
+  const textosCli: string[][] = [[], ["¿me lo cotizas en dólares?"], ["en soles por favor"], ["US$ 50?"], ["Hola", "precio"]];
+  const senalesM: unknown[] = [undefined, ["otra_moneda"], ["otra_moneda", "tdr"], ["tdr"]];
+  for (const canal of ["whatsapp", "instagram"]) for (const wa of ["51966707225", "13055551234", null]) for (const marca of marcas) for (const tc of textosCli) for (const sen of senalesM) {
+    n++;
+    const input = { origen_texto: "Aeropuerto", destino_texto: "Miraflores", pax: 2, maletas: 0, sentido: "ida", fecha_servicio: "2026-10-25", cliente_pide_dolares: marca, senales: sen, moneda: "USD" };
+    const v = validarEntrada(E.entradaDelAgente(input, { canal, waId: wa }, [], tc));
+    ok(v.ok, "validable");
+    if (!v.ok) continue;
+    const confirmado = marca === true && E.nombraDolares(tc);
+    ok((v.entrada.pide_dolares === true) === confirmado, `pide_dolares solo con las DOS confirmaciones (modelo ${String(marca)}, cliente ${JSON.stringify(tc)})`);
+    ok(confirmado || !("pide_dolares" in v.entrada), "sin confirmación, la clave ni aparece");
+    const mon = M.monedaDelPedido(v.entrada.telefono, v.entrada.pide_dolares).moneda;
+    // LA INVARIANTE: lo que diga el modelo, por sí solo, nunca cambia la moneda.
+    if (!confirmado) ok(mon === M.monedaPorTelefono(v.entrada.telefono).moneda, `el modelo solo no cambia la moneda (${canal}, ${wa}, ${String(marca)}, ${JSON.stringify(tc)})`);
+    else ok(mon === "USD", "con las dos confirmaciones, dólares");
+    const sv = v.entrada.senales ?? [];
+    const pedidas = Array.isArray(sen) ? (sen as string[]) : [];
+    if (confirmado) ok(!sv.includes("otra_moneda") && pedidas.filter((x) => x !== "otra_moneda").every((x) => sv.includes(x as M.SenalComplejidad)), "con dólares confirmados, otra_moneda sobra y el resto de señales sigue");
+    else ok(pedidas.every((x) => sv.includes(x as M.SenalComplejidad)), "sin confirmación, las señales pasan tal cual (otra_moneda deriva)");
+  }
+  console.log(`  barrido: ${n} combinaciones`);
+
+  // El motor: un peruano que pide dólares recibe la LISTA en dólares (no una conversión de la de soles).
+  const usdAuto = precios.find((p) => p.categoria === "AUTO")!.usd;
+  const r = M.evaluarTraslado(pedido({ telefono: "+51966707225", pide_dolares: true }), ctx);
+  ok(r.codigo === "cotizable" && r.precio?.moneda === "USD" && r.precio.precio_tramo === usdAuto, `peruano que pide dólares → lista en dólares (${r.precio?.moneda} ${r.precio?.precio_tramo})`);
+  ok(r.precio?.tipo_cambio === 3.431 && Math.abs((r.precio?.subtotal_pen ?? 0) - usdAuto * 3.431) < 0.01, "se guarda en soles al TC SUNAT");
+  ok(r.explicacion.some((x) => /pidió la cotización en dólares/.test(x)), "la explicación lo dice (la lee el ejecutivo)");
+  const rx = M.evaluarTraslado(pedido({ telefono: "+13055551234", pide_dolares: true }), ctx);
+  const rx0 = M.evaluarTraslado(pedido({ telefono: "+13055551234" }), ctx);
+  ok(JSON.stringify(rx) === JSON.stringify(rx0), "un extranjero que pide dólares: el mismo resultado de siempre");
+  ok(M.evaluarTraslado(pedido({ pide_dolares: true }), { ...ctx, tipoCambio: null }).codigo === "sin_tipo_cambio", "sin tipo de cambio SUNAT, se deriva");
+  ok(M.evaluarTraslado(pedido({ telefono: null, pide_dolares: true }), ctx).precio?.moneda === "USD", "sin número pero pidiendo dólares: dólares (el envío lo decide planEnvio)");
+  ok(M.evaluarTraslado(pedido({ pide_dolares: true, senales: ["otra_moneda"] }), ctx).codigo === "complejo", "el motor no quita señales: eso lo hace entradaDelAgente");
+  for (const p of [pedido(), pedido({ telefono: "13055551234" }), pedido({ telefono: null }), pedido({ destino: SI, sentido: "ida_retorno", fecha_retorno: "2026-10-27" })]) {
+    ok(JSON.stringify(M.evaluarTraslado(p, ctx)) === JSON.stringify(M.evaluarTraslado({ ...p, pide_dolares: false }, ctx)), "pide_dolares en false = el comportamiento de siempre");
+  }
+  // Y sale sola si es el aeropuerto: la moneda pedida no es motivo de revisión.
+  const pe = E.planEnvio({ resultado: r, envioMaestro: true, zonas, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [] });
+  ok(pe.decision === "automatico", `aeropuerto en dólares a pedido: sale sola (${pe.motivos.join(",")})`);
+
+  // validarEntrada: solo un `true` de verdad.
+  for (const [x, esp] of [[true, true], ["true", false], [1, false], [false, false], [undefined, false], [null, false]] as [unknown, boolean][]) {
+    const v = validarEntrada({ origen: "a", destino: "b", pide_dolares: x });
+    ok(v.ok && (v.entrada.pide_dolares === true) === esp && (esp || !("pide_dolares" in v.entrada)), `validarEntrada pide_dolares=${JSON.stringify(x)} → ${esp}`);
+  }
 }
 
 // ── 3. Coordenadas: solo las del enlace de un mensaje entrante ───────────────
@@ -192,6 +271,11 @@ seccion("4. firmaPedido");
   const conPin = base({ origen: { lat: -12.12831234, lng: -77.03011111, texto: "x" } });
   ok(E.firmaPedido(conPin) === E.firmaPedido(base({ origen: { lat: -12.128312, lng: -77.030111, texto: "y" } })), "un pin se compara a 5 decimales");
   ok(E.firmaPedido(base({ sentido: "ida_retorno", fecha_retorno: "2026-10-30" })) !== E.firmaPedido(base({ sentido: "ida_retorno", fecha_retorno: "2026-10-31" })), "con ida y retorno, la fecha del retorno sí cuenta");
+  // El mismo pedido «ahora en dólares» es OTRA cotización (si no, se le diría «ya te la envié» con la de soles).
+  ok(E.firmaPedido(base({ pide_dolares: true })) !== f, "un peruano que pide dólares cambia la firma");
+  ok(E.firmaPedido(base({ pide_dolares: true })) === E.firmaPedido(base({ telefono: "13055551234" })), "y es la del mismo pedido en dólares");
+  ok(E.firmaPedido(base({ pide_dolares: false })) === f, "sin pedido de dólares, la firma de siempre");
+  ok(E.firmaPedido(base({ telefono: "13055551234", pide_dolares: true })) === E.firmaPedido(base({ telefono: "13055551234" })), "un extranjero que pide dólares: la misma firma");
 }
 
 // ── 5. zonaConEnvio ──────────────────────────────────────────────────────────
@@ -842,7 +926,7 @@ const simularFalso = (consultas: { n: number }) => async (_sb: unknown, e: Entra
   const cat: CatalogoTraslados = { zonas, categorias, tarifas, config: { ...config, ia_cotiza: true, envio_automatico: true }, sinMigracionIA: false };
   const resultado = M.evaluarTraslado({
     origen: punto(e.origen), destino: punto(e.destino), fecha_servicio: e.fecha_servicio, hora_servicio: e.hora_servicio, sentido: e.sentido,
-    fecha_retorno: e.fecha_retorno, hora_retorno: e.hora_retorno, pax: e.pax, maletas: e.maletas, telefono: e.telefono,
+    fecha_retorno: e.fecha_retorno, hora_retorno: e.hora_retorno, pax: e.pax, maletas: e.maletas, telefono: e.telefono, pide_dolares: e.pide_dolares,
     paradas_intermedias: e.paradas_intermedias, fechas_adicionales: e.fechas_adicionales, vehiculos_pedidos: e.vehiculos_pedidos, senales: e.senales,
   }, { zonas, categorias, tarifas, tipoCambio: { fecha: hoy, venta: 3.431 }, hoy, igvPct: 18, validezDias: 30 });
   return { respuesta: { ok: true as const, resultado, lugares: {} as any }, catalogo: cat, igvPct: 18 };
@@ -1012,6 +1096,25 @@ const ctxDe = (sb: SbFalso, convId: string, contactoId: string, modoAuto = true,
   // P) La moneda es la del wa_id aunque el modelo diga un teléfono extranjero (ya probado arriba con
   //    +1 305…: la cotización A salió en soles).
   ok(cot.moneda === "PEN" && cot.tipo_cambio == null, "P: el teléfono que escribe el modelo no cambia la moneda");
+
+  // P2) DÓLARES A PEDIDO: el modelo lo marca pero el cliente nunca escribió «dólares» → soles; el
+  //     cliente lo escribe → otra cotización (otra firma), en dólares con el TC, y sale sola.
+  {
+    const sbP = nuevaBase();
+    const pIA = { ...pedidoIA, cliente_pide_dolares: true, senales: ["otra_moneda"] };
+    const p1 = await cotizarTrasladoIA(ctxDe(sbP, "cv-1", "ct-1"), { ...pIA, senales: [] }, { ...deps, simular: simularFalso({ n: 0 }) as any });
+    const c1 = sbP.t("cotizaciones")[0];
+    ok(p1.accion === "cotizar" && c1?.moneda === "PEN" && c1?.tipo_cambio == null, `P2: el modelo solo no cambia la moneda (${c1?.moneda})`);
+    sbP.tablas.crm_mensajes.push({ id: "m9", conversacion_id: "cv-1", direccion: "entrante", contenido: "¿Me la puedes pasar en dólares?", created_at: "2026-10-19T14:58:00Z" });
+    const p2 = await cotizarTrasladoIA(ctxDe(sbP, "cv-1", "ct-1"), pIA, { ...deps, simular: simularFalso({ n: 0 }) as any });
+    const c2 = sbP.t("cotizaciones")[1];
+    ok(p2.accion === "cotizar" && sbP.t("cotizaciones").length === 2 && c2?.moneda === "USD" && c2?.tipo_cambio === 3.431, `P2: con «dólares» escrito, otra cotización en dólares (${p2.accion} ${c2?.moneda} ${JSON.stringify(p2.derivar ?? "")})`);
+    ok(p2.cotizacion?.decision === "automatico" && /^US\$/.test(p2.cotizacion?.total ?? ""), `P2: aeropuerto en dólares sale sola, con el total en US$ (${p2.cotizacion?.total})`);
+    ok(c2?.traslado_json?.firma !== c1?.traslado_json?.firma, "P2: firmas distintas: no se responde «ya te la envié» con la de soles");
+    ok((c2?.consideraciones_json?.generales ?? []).some((x: string) => config.consideraciones_usd.includes(x)), "P2: el PDF en dólares lleva las consideraciones de dólares");
+    const p3 = await cotizarTrasladoIA(ctxDe(sbP, "cv-1", "ct-1"), pIA, { ...deps, simular: simularFalso({ n: 0 }) as any });
+    ok(p3.accion === "cotizar" && sbP.t("cotizaciones").length === 2, "P2: el mismo pedido en dólares otra vez se reusa (idempotente)");
+  }
 
   // Q) TEXTO LIBRE EN EL PDF (auditoría): el cliente escribe un destino con instrucciones de pago y
   //    un enlace de mapa en un mensaje de TEXTO. El modelo lo copia tal cual y propone las
