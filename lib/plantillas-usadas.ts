@@ -14,7 +14,8 @@ export const PLANTILLAS_FIJAS: { nombre: string; uso: string }[] = [
   { nombre: "bus_llego_paradero", uso: "«El bus llegó» al pasajero" },
   { nombre: "recordatorio_conductor_completo", uso: "Recordatorio al conductor con ida y retorno en un solo mensaje" },
   { nombre: "conductor_asignacion_multiple", uso: "Varias asignaciones al conductor en un solo mensaje" },
-  { nombre: "invitacion_app_pasajero", uso: "Invitación al pasajero a instalar la app" },
+  { nombre: "invitacion_pasajero_imagen", uso: "Invitación al pasajero a instalar la app (con imagen; si falta, sale la de texto)" },
+  { nombre: "invitacion_app_pasajero", uso: "Invitación al pasajero a instalar la app (respaldo de texto)" },
   { nombre: "documentos_proveedor_vencer", uso: "Documentos por vencer al proveedor tercerizado" },
   { nombre: "liquidacion_conformidad", uso: "Liquidación enviada al cliente para su conformidad" },
 ];
