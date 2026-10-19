@@ -3,6 +3,10 @@
 // con sus alias (chips que se guardan al instante), su interruptor y sus subzonas debajo; y los
 // puntos (geocercas). Las altas y la edición completa van en ModalZona.
 //
+// El chip «📄 Envío automático» dice si la IA del CRM envía SOLA la cotización de esa zona: lo
+// decide `envioDeZona` → `zonaConEnvio` (lib/traslados/envio-ia.ts), la misma regla del agente, así
+// que una subzona sin marca propia sale «hereda de …» cuando su distrito la tiene.
+//
 // QUÉ ZONA LE TOCA A UNA DIRECCIÓN LO DECIDE EL MOTOR (lib/traslados/motor.ts → zonaDePunto). Aquí
 // solo se editan los datos que el motor lee: el nombre y los alias de cada distrito, el centro y
 // los barrios de cada subzona, el centro y el radio de cada punto.
@@ -10,21 +14,27 @@
 import { useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
-  coincideZona, compararSectores, mapaZonas, motivoAliasInvalido, ordenarZonas, sectorDe,
+  coincideZona, compararSectores, envioDeZona, mapaZonas, motivoAliasInvalido, ordenarZonas, sectorDe, SQL_COTIZACION_IA,
   type TarifaFila, type ZonaFila,
 } from "./traslados-pantalla";
-import { COLS_ZONA, filasEscritas, motivoCeroFilas, normalizarZona } from "./traslados-datos";
+import { filasEscritas, motivoCeroFilas, normalizarZona } from "./traslados-datos";
 import { AZUL, EditorAlias, iCls, InterruptorActivo, type Decir } from "./traslados-comun";
 import ModalZona, { AYUDA_ALIAS, borrarZona, REGLA_SUBZONA, type ModoModalZona } from "./ModalZona";
 
 const ICONO = { distrito: "🏙", subzona: "↳", punto: "📍" } as const;
 
-export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, decir }: {
+export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, decir, colsZona, sinMigracionIA, envioMaestro, onIrAjustes }: {
   zonas: ZonaFila[];
   tarifas: TarifaFila[];
   onZona: (z: ZonaFila) => void;
   onZonaBorrada: (id: number) => void;
   decir: Decir;
+  /** Las columnas que se piden de vuelta (sin `envio_automatico` si falta traslados-05). */
+  colsZona: string;
+  sinMigracionIA: boolean;
+  /** El maestro de Ajustes: con él apagado la marca de una zona no envía nada todavía. */
+  envioMaestro: boolean;
+  onIrAjustes: () => void;
 }) {
   const [q, setQ] = useState("");
   const [modal, setModal] = useState<ModoModalZona | null>(null);
@@ -62,7 +72,7 @@ export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, d
 
   const actualizar = async (z: ZonaFila, cambios: Partial<ZonaFila>, que: string): Promise<boolean> => {
     setOcupada(z.id);
-    const r = filasEscritas<Record<string, unknown>>(await supabase.from("zonas_traslado").update(cambios).eq("id", z.id).select(COLS_ZONA), que);
+    const r = filasEscritas<Record<string, unknown>>(await supabase.from("zonas_traslado").update(cambios).eq("id", z.id).select(colsZona), que);
     setOcupada(null);
     // Sin permiso (o con error) el estado no se toca: la pantalla sigue enseñando lo que dice la base.
     if (!r.ok) { decir(r.cero ? await motivoCeroFilas("zonas_traslado", "id", z.id, que) : r.detalle, "error"); return false; }
@@ -80,6 +90,30 @@ export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, d
   const nDistritos = zonas.filter((z) => z.tipo === "distrito").length;
   const nSub = zonas.filter((z) => z.tipo === "subzona").length;
   const nPuntos = zonas.filter((z) => z.tipo === "punto").length;
+  const nEnvio = zonas.filter((z) => envioDeZona(z, zonas).codigo === "propio").length;
+
+  /** El chip del envío automático, o nada. Verde si sale sola; gris si el maestro está apagado o la zona inactiva. */
+  const chipEnvio = (z: ZonaFila) => {
+    const e = envioDeZona(z, zonas);
+    if (e.codigo === "no") return null;
+    if (e.codigo === "sin_efecto") {
+      return (
+        <span className="inline-block mt-1 px-1.5 py-0.5 rounded-md border border-gray-200 bg-gray-50 text-[10px] font-bold text-gray-400"
+          title="Tiene marcado el envío automático, pero la zona está inactiva: el cotizador no la reconoce.">📄 envío automático · zona inactiva</span>
+      );
+    }
+    const apagado = envioMaestro ? "" : " Hoy el envío automático está apagado en Ajustes: por ahora todo queda en revisión.";
+    const texto = e.codigo === "hereda" ? `📄 envío automático · hereda de ${e.distrito}` : "📄 envío automático";
+    const titulo = e.codigo === "hereda"
+      ? `Sale sola porque su distrito (${e.distrito}) tiene marcado el envío automático.${apagado}`
+      : `La IA del CRM envía sola la cotización cuando el recojo o el destino está aquí.${apagado}`;
+    return (
+      <span title={titulo}
+        className={`inline-block mt-1 px-1.5 py-0.5 rounded-md border text-[10px] font-bold ${envioMaestro ? "border-green-200 bg-green-50 text-green-800" : "border-gray-200 bg-gray-50 text-gray-500"}`}>
+        {texto}{envioMaestro ? "" : " (apagado en Ajustes)"}
+      </span>
+    );
+  };
 
   const tarjeta = (z: ZonaFila, subzonas: ZonaFila[]) => {
     const n = preciosDe.get(z.id) ?? 0;
@@ -98,6 +132,7 @@ export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, d
               {" · "}{n} precio{n === 1 ? "" : "s"}
               {inactiva && " · el cotizador no la reconoce: esos pedidos pasan a un ejecutivo"}
             </p>
+            {chipEnvio(z)}
           </div>
           <div className="flex items-center gap-1.5 flex-wrap">
             <InterruptorActivo activo={!inactiva} ocupado={ocupada === z.id}
@@ -136,6 +171,7 @@ export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, d
               Centro <span className="font-mono">{Number(s.lat).toFixed(4)}, {Number(s.lng).toFixed(4)}</span>
               {" · "}{n === 0 ? "sin precio propio: usa el de su distrito" : `${n} precio${n === 1 ? "" : "s"} propio${n === 1 ? "" : "s"}`}
             </p>
+            {chipEnvio(s)}
           </div>
           <div className="flex items-center gap-1.5 flex-wrap">
             <InterruptorActivo activo={!inactiva} ocupado={ocupada === s.id}
@@ -159,12 +195,15 @@ export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, d
     <div className="space-y-4">
       <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-900 space-y-1">
         <p><b>Cómo se elige la zona de una dirección:</b> primero los <b>puntos</b> (geocercas como el aeropuerto: dentro del radio mandan); si no, el <b>distrito</b> que da Google, comparado completo con el nombre y los alias de cada distrito; y si el distrito tiene subzonas, la subzona. {REGLA_SUBZONA}</p>
+        <p><b>📄 Envío automático de la cotización:</b> en las zonas marcadas (✎ Editar → la casilla) la IA del CRM le envía sola el PDF al cliente cuando el recojo o el destino cae ahí; una subzona hereda la marca de su distrito. Las demás cotizaciones quedan en el inbox del CRM para que un ejecutivo las revise y las envíe. {sinMigracionIA
+          ? <>Para usarlo falta correr <span className="font-mono">{SQL_COTIZACION_IA}</span>.</>
+          : <>El interruptor general está en <button type="button" onClick={onIrAjustes} className="underline font-bold">Ajustes</button>{envioMaestro ? " (encendido)." : " (hoy apagado: todo queda en revisión)."}</>}</p>
         <p><b>Distritos que conviene partir en subzonas</b> porque el precio cambia dentro del mismo distrito: San Juan de Lurigancho, Ancón, Ventanilla, Lurín y Lurigancho (Chosica). Usa «＋ Subzona» en el distrito y marca el centro de cada parte en el mapa. Una subzona sin precio propio usa el de su distrito.</p>
       </div>
 
       <div className="flex flex-wrap gap-2 items-center">
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="🔍 Buscar distrito, subzona o alias…" className={iCls("flex-1 min-w-[12rem] max-w-md")} />
-        <span className="text-[11px] text-gray-400">{nDistritos} distritos · {nSub} subzonas · {nPuntos} puntos</span>
+        <span className="text-[11px] text-gray-400">{nDistritos} distritos · {nSub} subzonas · {nPuntos} puntos{sinMigracionIA ? "" : ` · ${nEnvio} con envío automático`}</span>
         <div className="flex gap-2 ml-auto">
           <button type="button" onClick={() => setModal({ tipo: "nuevo", zonaTipo: "distrito" })}
             className="px-4 py-2.5 rounded-xl font-bold text-sm border text-gray-700 hover:bg-gray-50 min-h-[44px]">＋ Distrito</button>
@@ -201,7 +240,8 @@ export default function ZonasCatalogo({ zonas, tarifas, onZona, onZonaBorrada, d
 
       {modal && (
         <ModalZona modo={modal} zonas={zonas} tarifas={tarifas} decir={decir}
-          onGuardada={onZona} onBorrada={onZonaBorrada} onCerrar={() => setModal(null)} />
+          onGuardada={onZona} onBorrada={onZonaBorrada} onCerrar={() => setModal(null)}
+          colsZona={colsZona} sinMigracionIA={sinMigracionIA} envioMaestro={envioMaestro} />
       )}
     </div>
   );

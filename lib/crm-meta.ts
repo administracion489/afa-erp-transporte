@@ -161,6 +161,18 @@ export async function enviarWhatsAppMedia(
   return data.messages?.[0]?.id ?? null;
 }
 
+/**
+ * El error de un envío de WhatsApp, dicho para el operador. Meta rechaza con 131047 lo que se
+ * manda fuera de la ventana de 24 h desde el último mensaje del cliente: eso no se arregla
+ * reintentando, sino desde el celular o con una plantilla. El resto se deja tal cual.
+ * Lo usan el adjunto del inbox y el envío de la cotización de traslado.
+ */
+export function explicarErrorEnvioWhatsApp(bruto: string): string {
+  return /131047|re-engagement|24 hours/i.test(bruto)
+    ? "Pasaron más de 24 h desde el último mensaje del cliente: desde el CRM ya no se puede enviar. Envíalo desde el celular (WhatsApp Business) o con una plantilla."
+    : bruto;
+}
+
 // ── Messenger ─────────────────────────────────────────────────────────────
 
 export async function enviarMessenger(psid: string, texto: string): Promise<string | null> {

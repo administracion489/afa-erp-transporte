@@ -4,16 +4,22 @@
 // lo que decidiría: cotizar solo, preguntarle al cliente o pasarlo a un ejecutivo.
 //
 // LA PANTALLA NO DECIDE NADA: zona, vehículo, precio, IGV y validez salen del servidor (el mismo
-// motor que usará la IA). Aquí solo se arma el pedido y se enseña la respuesta con su porqué.
+// motor que usa la IA). Aquí solo se arma el pedido y se enseña la respuesta con su porqué.
+//
+// Fase 2: la respuesta trae además `envio` —si ese pedido, llegado por WhatsApp, saldría SOLO o
+// quedaría en REVISIÓN según la configuración de hoy— con los motivos declarados del motor
+// (`MOTIVO_REVISION`), y «Ver PDF de ejemplo» pide el mismo PDF (número «EJEMPLO», no guarda nada).
 
 import { useState } from "react";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { fechaLima } from "@/lib/alertas-horario";
 import { SENALES, sumarDias, type AccionTraslado, type CodigoZona, type SenalComplejidad, type UbicacionZona } from "@/lib/traslados/motor";
-import type { EntradaSimulador, LugarEntrada, LugarUbicado, RespuestaSimulador } from "@/lib/traslados/api";
+import type { EntradaSimulador, EnvioSimulado, LugarEntrada, LugarUbicado, RespuestaSimulador } from "@/lib/traslados/api";
+import { MOTIVO_REVISION, type CodigoRevision } from "@/lib/traslados/envio-ia";
 import { fmtFecha, fmtMoneda, leerEntero } from "./traslados-pantalla";
 import { AZUL, iCls } from "./traslados-comun";
 import { LugarInput, LUGAR_VACIO, type LugarValor } from "./google-lugar";
+import { abrirPdf } from "./abrir-pdf";
 
 const INSIGNIA: Record<AccionTraslado, { texto: string; clase: string }> = {
   cotizar: { texto: "✅ Se cotiza sola", clase: "bg-green-50 border-green-300 text-green-800" },
@@ -56,10 +62,22 @@ const formVacio = (): Form => ({
   pax: "", maletas: "", telefono: "", paradas: "", senales: [],
 });
 
+type RespuestaOk = Extract<RespuestaSimulador, { ok: true }>;
+
+/** El `envio` de la respuesta, solo si tiene la forma del contrato; códigos desconocidos se descartan. */
+function envioDe(r: RespuestaOk): EnvioSimulado | null {
+  const e = r.envio as { decision?: unknown; motivos?: unknown } | null | undefined;
+  if (!e || (e.decision !== "automatico" && e.decision !== "revision")) return null;
+  const motivos = Array.isArray(e.motivos)
+    ? e.motivos.filter((c): c is CodigoRevision => typeof c === "string" && Object.prototype.hasOwnProperty.call(MOTIVO_REVISION, c))
+    : [];
+  return { decision: e.decision, motivos };
+}
+
 type Estado =
   | { tipo: "nada" }
   | { tipo: "simulando" }
-  | { tipo: "ok"; r: Extract<RespuestaSimulador, { ok: true }> }
+  | { tipo: "ok"; r: RespuestaOk; entrada: EntradaSimulador }
   | { tipo: "error"; detalle: string; ambar?: boolean };
 
 const lugarParaApi = (v: LugarValor): LugarEntrada =>
@@ -91,7 +109,12 @@ function Ubicacion({ titulo, zona, lugar, onIrAZonas }: { titulo: string; zona: 
   );
 }
 
-export default function SimuladorTraslado({ onIrA }: { onIrA: (tab: "zonas") => void }) {
+export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
+  onIrA: (tab: "zonas" | "ajustes") => void;
+  /** Lo que dice Ajustes hoy: el simulador cotiza igual, pero la pantalla no puede dar a entender que la IA ya lo hace. */
+  iaCotiza: boolean;
+  sinMigracionIA: boolean;
+}) {
   const [f, setF] = useState<Form>(formVacio);
   const [estado, setEstado] = useState<Estado>({ tipo: "nada" });
   const poner = <K extends keyof Form>(k: K, v: Form[K]) => setF((x) => ({ ...x, [k]: v }));
@@ -133,7 +156,7 @@ export default function SimuladorTraslado({ onIrA }: { onIrA: (tab: "zonas") => 
       if (res.status === 404) { setEstado({ tipo: "error", detalle: "El simulador todavía no está desplegado en el servidor (/api/traslados/simular)." }); return; }
       if (!d || !("ok" in d)) { setEstado({ tipo: "error", detalle: `El servidor respondió ${res.status} sin un resultado legible.` }); return; }
       if (!d.ok) { setEstado({ tipo: "error", detalle: d.detalle, ambar: d.codigo === "sin_migracion" }); return; }
-      setEstado({ tipo: "ok", r: d });
+      setEstado({ tipo: "ok", r: d, entrada });
     } catch (e) {
       setEstado({ tipo: "error", detalle: `No se pudo llamar al simulador: ${(e as Error)?.message ?? "sin conexión"}.` });
     }
@@ -145,7 +168,13 @@ export default function SimuladorTraslado({ onIrA }: { onIrA: (tab: "zonas") => 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
       <section className="bg-white border rounded-2xl p-4 space-y-3">
-        <p className="text-xs text-gray-500">Es el mismo cotizador que usará la IA del CRM, sin enviar nada: lo que sale aquí es lo que la IA le contestará al cliente cuando se active (todavía no cotiza sola).</p>
+        <p className="text-xs text-gray-500">Es el mismo cotizador que usa la IA del CRM por WhatsApp, sin enviar nada: lo que sale aquí es lo que la IA le contestaría al cliente y, si se cotiza, si el PDF saldría solo o quedaría para que lo revise un ejecutivo. Para que la IA cotice de verdad tienen que estar encendidos los interruptores de Ajustes.</p>
+        {(sinMigracionIA || !iaCotiza) && (
+          <p className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+            Hoy la IA del CRM <b>no cotiza traslados</b> ({sinMigracionIA ? "falta correr supabase/traslados-05-cotizacion-ia.sql" : "está apagado en Ajustes"}): esto es lo que haría al encenderla.{" "}
+            <button type="button" onClick={() => onIrA("ajustes")} className="underline font-bold">Ir a Ajustes</button>
+          </p>
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Origen (recojo)</span>
@@ -229,16 +258,28 @@ export default function SimuladorTraslado({ onIrA }: { onIrA: (tab: "zonas") => 
         {estado.tipo === "error" && (
           <p className={`rounded-2xl border p-4 text-sm ${estado.ambar ? "bg-amber-50 border-amber-200 text-amber-900" : "bg-red-50 border-red-200 text-red-800"}`}>{estado.detalle}</p>
         )}
-        {estado.tipo === "ok" && <Resultado r={estado.r} onIrAZonas={() => onIrA("zonas")} />}
+        {estado.tipo === "ok" && <Resultado r={estado.r} entrada={estado.entrada} onIrAZonas={() => onIrA("zonas")} onIrAjustes={() => onIrA("ajustes")} />}
       </section>
     </div>
   );
 }
 
-function Resultado({ r: { resultado: r, lugares }, onIrAZonas }: { r: Extract<RespuestaSimulador, { ok: true }>; onIrAZonas: () => void }) {
+function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: RespuestaOk; entrada: EntradaSimulador; onIrAZonas: () => void; onIrAjustes: () => void }) {
+  const { resultado: r, lugares } = resp;
   const ins = INSIGNIA[r.accion];
   const p = r.precio;
   const veh = r.vehiculo;
+  const envio = r.accion === "cotizar" ? envioDe(resp) : null;
+  const [pdf, setPdf] = useState<{ abriendo: boolean; error: string | null }>({ abriendo: false, error: null });
+
+  const verPdf = async () => {
+    if (pdf.abriendo) return;
+    setPdf({ abriendo: true, error: null });
+    const res = await abrirPdf(async () => fetch("/api/traslados/simular?pdf=1", {
+      method: "POST", headers: await cabecerasErp({ "Content-Type": "application/json" }), body: JSON.stringify(entrada),
+    }), "el permiso del módulo «Tarifas» para ver el PDF de ejemplo");
+    setPdf({ abriendo: false, error: res.ok ? null : res.detalle });
+  };
   return (
     <div className="bg-white border rounded-2xl p-4 space-y-4">
       <div className={`rounded-xl border-2 px-4 py-3 ${ins.clase}`}>
@@ -272,6 +313,38 @@ function Resultado({ r: { resultado: r, lugares }, onIrAZonas }: { r: Extract<Re
         </div>
       )}
       {r.validez_hasta && <p className="text-xs text-gray-600">Válida hasta el <b>{fmtFecha(r.validez_hasta)}</b>.</p>}
+
+      {envio && (envio.decision === "automatico" ? (
+        <div className="rounded-xl border border-green-300 bg-green-50 px-3 py-2 text-green-900">
+          <p className="text-sm font-bold">📤 Se ENVIARÍA sola</p>
+          <p className="text-xs mt-0.5">Si este pedido llegara por WhatsApp, la IA le enviaría el PDF al cliente sin que un ejecutivo lo revise. Supone el agente IA en modo autónomo para WhatsApp: lo que hace hoy de verdad lo dice Ajustes.</p>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sky-900">
+          <p className="text-sm font-bold">👀 Pasaría a REVISIÓN{envio.motivos.length > 0 ? " porque…" : ""}</p>
+          {envio.motivos.length > 0 && (
+            <ul className="list-disc pl-5 mt-1 space-y-1 text-xs">
+              {envio.motivos.map((c) => (
+                <li key={c}>{MOTIVO_REVISION[c].texto} <span className="text-[11px] text-sky-700">{MOTIVO_REVISION[c].arreglo}</span></li>
+              ))}
+            </ul>
+          )}
+          <p className="text-xs mt-1">La cotización quedaría en el inbox del CRM («🚐 Cotización de traslado para revisar») y la enviaría un ejecutivo con un clic.{" "}
+            <button type="button" onClick={onIrAjustes} className="underline font-bold">Ver Ajustes</button>
+          </p>
+        </div>
+      ))}
+
+      {r.accion === "cotizar" && (
+        <div className="space-y-1">
+          <button type="button" onClick={() => void verPdf()} disabled={pdf.abriendo}
+            className="px-4 py-2.5 rounded-xl font-bold text-sm border border-[#0b315f] text-[#0b315f] hover:bg-[#eef3f8] disabled:opacity-50 min-h-[44px]">
+            {pdf.abriendo ? "Armando el PDF…" : "📄 Ver PDF de ejemplo"}
+          </button>
+          <p className="text-[10px] text-gray-400">Es el PDF que recibiría el cliente, con el número «EJEMPLO». No se guarda ni se envía nada.</p>
+          {pdf.error && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{pdf.error}</p>}
+        </div>
+      )}
 
       {r.explicacion.length > 0 && (
         <div>

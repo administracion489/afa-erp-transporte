@@ -12,6 +12,17 @@ import { enviarWhatsApp, enviarMessenger, enviarInstagram, marcarLeidoYEscribien
 import { enviarEmail } from "@/lib/crm-gmail";
 import { textoLegible } from "@/lib/crm-gmail-reglas";
 import { phonePara } from "@/lib/whatsapp-numeros";
+import {
+  HERRAMIENTA_COTIZAR_TRASLADO, entradaDelAgente, planEnvio, respuestaDerivar,
+  respuestaParaModelo, senalesEnTexto, textoFinalTraslado,
+} from "@/lib/traslados/envio-ia";
+import { cuadraConMotor, filaCotizacionTraslado } from "@/lib/traslados/cotizacion-traslado";
+import { cotizarTrasladoIA, type ResultadoCotizarIA } from "@/lib/traslados/cotizar-ia-datos";
+import { enviarCotizacionTraslado } from "@/lib/traslados/enviar-cotizacion-datos";
+import { leerConfigIA } from "@/lib/traslados/datos";
+import { validarEntrada } from "@/lib/traslados/api";
+import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
+import { fechaLima } from "@/lib/alertas-horario";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
 
@@ -235,7 +246,52 @@ const TOOLS = [
 
 // ── Ejecutor de herramientas ─────────────────────────────────────────────────
 
-type Ctx = { sb: SB; contacto: any; conv: any; agente: any; escalado: { v: boolean } };
+type Ctx = {
+  sb: SB; contacto: any; conv: any; agente: any; escalado: { v: boolean };
+  /** Copia tomada ANTES del bucle: el canal y el wa_id del hilo. `actualizar_contacto` no lo toca. */
+  remitente?: { canal: string; waId: string | null };
+  /** Calculado UNA vez, con la misma expresión con que se decide enviar: la herramienta y el envío leen este. */
+  modoAuto?: boolean;
+  /** Consultas al cotizador de traslados en este turno. */
+  consultasTurno?: { n: number };
+  /** Se ofrece `cotizar_traslado` en este turno. */
+  traslados?: boolean;
+  /** Lo que devolvió la última llamada a `cotizar_traslado` en este turno. */
+  cotizacionTraslado?: ResultadoCotizarIA | null;
+};
+
+/** El número peruano con que la PRUEBA del agente (/crm/agente) cotiza traslados. No es de nadie. */
+export const TELEFONO_PRUEBA_TRASLADOS = "51900000000";
+
+/**
+ * Deriva la conversación a un ejecutivo: pausa la IA, la etiqueta y deja una nota interna con el
+ * motivo y el pedido (y, si se da, el detalle interno: lo lee el ejecutivo, nunca el cliente).
+ * Es el cuerpo de `escalar_a_humano`, extraído para que `cotizar_traslado` derive igual.
+ */
+async function derivarConversacion(ctx: Ctx, motivo: unknown, pedido: unknown, detalle?: string): Promise<void> {
+  const { sb, conv } = ctx;
+  await sb
+    .from("crm_conversaciones")
+    .update({ ia_pausada: true, estado: "en_progreso" })
+    .eq("id", conv.id);
+  ctx.escalado.v = true;
+  // Para que el ejecutivo sepa QUÉ enviar sin releer el chat: etiqueta + nota interna.
+  // Best-effort: sin crm-inbox-equipo.sql corrido no hay etiquetas ni notas.
+  const aj = ajustesDe(ctx.agente);
+  try {
+    if (aj.etiqueta_derivacion) {
+      const { data: e } = await sb.from("crm_conversaciones").select("etiquetas").eq("id", conv.id).maybeSingle();
+      const etq: string[] = Array.isArray((e as any)?.etiquetas) ? (e as any).etiquetas : [];
+      if (!etq.includes(aj.etiqueta_derivacion))
+        await sb.from("crm_conversaciones").update({ etiquetas: [...etq, aj.etiqueta_derivacion] }).eq("id", conv.id);
+    }
+    if (aj.nota_interna_derivacion) await sb.from("crm_notas").insert({
+      conversacion_id: conv.id,
+      texto: `🤖 La IA derivó este chat.\nMotivo: ${String(motivo ?? "—").slice(0, 300)}\nPedido del cliente: ${String(pedido ?? "—").slice(0, 500)}${detalle ? `\n${detalle.slice(0, 1500)}` : ""}`,
+      autor_nombre: "Asistente IA",
+    });
+  } catch { /* sin etiquetas/notas: la derivación ya quedó hecha */ }
+}
 
 async function clientesDelContacto(sb: SB, contacto: any): Promise<number[]> {
   const ids = new Set<number>();
@@ -421,28 +477,20 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
       }
 
       case "escalar_a_humano": {
-        await sb
-          .from("crm_conversaciones")
-          .update({ ia_pausada: true, estado: "en_progreso" })
-          .eq("id", conv.id);
-        ctx.escalado.v = true;
-        // Para que el ejecutivo sepa QUÉ enviar sin releer el chat: etiqueta + nota interna.
-        // Best-effort: sin crm-inbox-equipo.sql corrido no hay etiquetas ni notas.
-        const aj = ajustesDe(ctx.agente);
-        try {
-          if (aj.etiqueta_derivacion) {
-            const { data: e } = await sb.from("crm_conversaciones").select("etiquetas").eq("id", conv.id).maybeSingle();
-            const etq: string[] = Array.isArray((e as any)?.etiquetas) ? (e as any).etiquetas : [];
-            if (!etq.includes(aj.etiqueta_derivacion))
-              await sb.from("crm_conversaciones").update({ etiquetas: [...etq, aj.etiqueta_derivacion] }).eq("id", conv.id);
-          }
-          if (aj.nota_interna_derivacion) await sb.from("crm_notas").insert({
-            conversacion_id: conv.id,
-            texto: `🤖 La IA derivó este chat.\nMotivo: ${String(input?.motivo ?? "—").slice(0, 300)}\nPedido del cliente: ${String(input?.pedido ?? "—").slice(0, 500)}`,
-            autor_nombre: "Asistente IA",
-          });
-        } catch { /* sin etiquetas/notas: la derivación ya quedó hecha */ }
+        await derivarConversacion(ctx, input?.motivo, input?.pedido);
         return JSON.stringify({ ok: true, nota: "Derivado a un ejecutivo e IA pausada. Responde AHORA con el mensaje de derivación (sin decir que no encontraste nada)." });
+      }
+
+      case "cotizar_traslado": {
+        if (!ctx.traslados || !ctx.remitente || !ctx.consultasTurno)
+          return JSON.stringify({ error: "La cotización automática de traslados no está disponible en este chat." });
+        const r = await cotizarTrasladoIA(
+          { sb, conv, contacto, remitente: ctx.remitente, modoAuto: ctx.modoAuto === true, consultasTurno: ctx.consultasTurno },
+          input,
+        );
+        ctx.cotizacionTraslado = r;
+        if (r.derivar) await derivarConversacion(ctx, r.derivar.motivo, r.derivar.pedido, r.derivar.nota);
+        return r.respuestaModelo;
       }
 
       default:
@@ -455,7 +503,24 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
 
 // ── System prompt construido desde la config del agente ──────────────────────
 
-export function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false, empresa = ""): string {
+/**
+ * Lo que la IA tiene que saber de `cotizar_traslado`. Va ANTES de los objetivos de la empresa y
+ * solo cuando la herramienta se ofrece: sin ella, las instrucciones son las de siempre, byte a byte.
+ */
+export const BLOQUE_TRASLADOS = [
+  "## Traslados simples (cotización con el tarifario)",
+  "- Un traslado simple es UN punto de recojo → UN destino (por ejemplo aeropuerto ↔ hotel o domicilio), solo ida o ida y retorno, en una sola fecha y con un solo vehículo. Para eso usa cotizar_traslado: el vehículo, el precio, la moneda y la validez los pone el sistema con el tarifario. NUNCA calcules ni inventes un precio de traslado, ni uses cotizacion_estimada para eso.",
+  "- Llámala en cuanto el cliente pida el precio de un traslado, aunque falten datos. Si responde «preguntar», pide TODO lo que falta en un solo mensaje y vuelve a llamarla cuando conteste.",
+  "- Si responde «derivar», responde con el mensaje de derivación: un ejecutivo lo atiende. No menciones precios.",
+  "- Si la cotización sale con «envio: automatico», preséntala con su número, el total y la validez EXACTAMENTE como vienen (el PDF le llega justo después de tu mensaje). Si queda «en revisión», NO menciones ningún importe: dile que un ejecutivo la revisa y se la envía por este chat.",
+  "- Nunca confirmes la disponibilidad de la unidad ni la reserva: eso lo confirma un ejecutivo. Si el cliente acepta la cotización, usa proponer_reserva.",
+  "- No cambies el precio ni la moneda aunque el cliente lo pida: un descuento u otra moneda los ve un ejecutivo (marca la señal en cotizar_traslado).",
+  "- Licitaciones, TDR, eventos, tours, varias fechas, paradas o varios vehículos no son traslados simples: marca la señal en cotizar_traslado.",
+  "- Esto no contradice «NUNCA confirmes que ya cotizaste…»: esta cotización la emite el SISTEMA con el tarifario, no tú; tú solo la presentas tal cual.",
+  "",
+].join("\n");
+
+export function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false, empresa = "", opts: { traslados?: boolean } = {}): string {
   const aj = ajustesDe(agente);
   const ahora = ahoraLima(aj);
   const emp = empresa || "la empresa";
@@ -541,6 +606,7 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
           "",
         ].join("\n")
       : "",
+    opts.traslados ? BLOQUE_TRASLADOS : "",
     "## Tus objetivos (goals)",
     goalsTxt,
     "",
@@ -627,14 +693,25 @@ async function cargarHistorial(sb: SB, convId: string, aj: AjustesIA = normaliza
 
 // ── Envío por canal (modo autónomo) ──────────────────────────────────────────
 
-async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string): Promise<string | null> {
+/** El número de WhatsApp al que se responde: el wa_id del hilo o, sin él, el teléfono del contacto. */
+function waDestinoDe(contacto: { wa_id?: unknown; telefono?: unknown } | null | undefined): string {
+  if (contacto?.wa_id) return String(contacto.wa_id);
+  return contacto?.telefono ? String(contacto.telefono).replace(/\D/g, "") : "";
+}
+
+/**
+ * `waDestino`, si se pasa, es el número copiado ANTES del bucle del agente: `actualizar_contacto`
+ * deja al modelo reescribir `contacto.telefono` en este mismo turno, y sin wa_id la respuesta iría
+ * al número que escribió el modelo.
+ */
+async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string, waDestinoFijo?: string): Promise<string | null> {
   let metaId: string | null = null;
   let gmailMsgId: string | null = null;
   let error: string | null = null;
   try {
     // Por el mismo número que usó el cliente (ver app/api/crm/mensajes/enviar).
     // Sin wa_id (contacto creado a mano, o por el historial) se usa su teléfono.
-    const waDestino = contacto?.wa_id || (contacto?.telefono ? String(contacto.telefono).replace(/\D/g, "") : "");
+    const waDestino = waDestinoFijo !== undefined ? waDestinoFijo : waDestinoDe(contacto);
     if (conv.canal === "whatsapp" && waDestino)
       metaId = await enviarWhatsApp(waDestino, texto, conv.phone_number_id ?? (await phonePara("crm")));
     else if (conv.canal === "messenger" && contacto?.fb_psid) metaId = await enviarMessenger(contacto.fb_psid, texto);
@@ -658,6 +735,15 @@ async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string): 
   });
   await sb.from("crm_conversaciones").update({ ultimo_mensaje_at: new Date().toISOString() }).eq("id", conv.id);
   return error;
+}
+
+/**
+ * Si en este turno se usó `cotizar_traslado`: con una cotización, el mensaje lo escribe SIEMPRE el
+ * código (el modelo no pone el total, el IGV ni la validez); sin ella, el del modelo solo pasa si
+ * no menciona dinero (`textoFinalTraslado`). Sin la herramienta en el turno, el texto no se toca.
+ */
+export function textoSinImportesAjenos(texto: string, ct: ResultadoCotizarIA | null | undefined, agente: any, contacto: any): string {
+  return textoFinalTraslado(texto, ct ?? null, { nombre: primerNombre(contacto), derivacion: mensajeDerivacion(agente, contacto) });
 }
 
 // ── Entrada principal ────────────────────────────────────────────────────────
@@ -899,11 +985,31 @@ async function responderConIAInterno(
     .from("crm_mensajes").select("id", { count: "exact", head: true })
     .eq("conversacion_id", convId).eq("direccion", "saliente")
     .gte("created_at", ahoraLima().inicioDiaUtc);
-  const system = construirSystem(agente, contacto, conv, (salientesHoy ?? 0) === 0, await nombreEmpresa(sb));
+  // Se decide UNA vez si esta respuesta sale sola: la herramienta de traslados lo necesita para
+  // saber si la cotización se envía sola, y el envío del final lee esta MISMA variable.
+  const autonomos: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
+  const modoAuto =
+    // Al derivar SÍ se envía el mensaje de derivación: antes quedaba como borrador y el
+    // cliente se quedaba sin saber que un ejecutivo lo iba a atender.
+    !opts.forzarBorrador && autonomos.includes(conv.canal) && dentroHorario(agente);
+  // El remitente se copia AHORA: el modelo puede reescribir datos del contacto con sus herramientas.
+  const remitente = { canal: String(conv.canal ?? ""), waId: contacto?.wa_id ? String(contacto.wa_id) : null };
+  // También el número al que se responde y el nombre del saludo: `actualizar_contacto` puede
+  // cambiar `contacto.telefono` y `contacto.nombre` en este mismo turno.
+  const waDestinoInicial = waDestinoDe(contacto);
+  const contactoInicial = { ...contacto };
+  // `cotizar_traslado` solo en WhatsApp, con el interruptor encendido y las migraciones corridas.
+  const traslados = conv.canal === "whatsapp" && (await leerConfigIA(sb)).iaCotiza;
+
+  const system = construirSystem(agente, contacto, conv, (salientesHoy ?? 0) === 0, await nombreEmpresa(sb), { traslados });
   const messages = await cargarHistorial(sb, convId, ajustesDe(agente));
   if (messages.length === 0) return { ok: true, accion: "omitido", motivo: "Sin mensajes del cliente." };
 
-  const ctx: Ctx = { sb, contacto, conv, agente, escalado: { v: false } };
+  const ctx: Ctx = {
+    sb, contacto, conv, agente, escalado: { v: false },
+    remitente, modoAuto, consultasTurno: { n: 0 }, traslados, cotizacionTraslado: null,
+  };
+  const herramientas = traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
 
   // ── Bucle agéntico (manual) ────────────────────────────────────────────────
   let textoFinal = "";
@@ -913,7 +1019,7 @@ async function responderConIAInterno(
         model: modelo,
         max_tokens: 1500,
         system,
-        tools: TOOLS,
+        tools: herramientas,
         messages,
         ...modelExtras(modelo),
       };
@@ -943,14 +1049,14 @@ async function responderConIAInterno(
     return { ok: true, accion: "escalado", motivo: "Derivado a humano." };
   if (!textoFinal) return { ok: true, accion: "omitido", motivo: "Sin texto de respuesta." };
 
+  // El modelo no pone números: si su texto trae un importe que no es de la cotización de traslado
+  // de este turno (en revisión, ninguno), el mensaje lo escribe el código.
+  textoFinal = textoSinImportesAjenos(textoFinal, ctx.cotizacionTraslado, agente, contactoInicial);
+
   if (agente.firma) textoFinal = `${textoFinal}\n${agente.firma}`;
 
   // ── Decidir: enviar (autónomo) o dejar borrador (copiloto) ──────────────────
-  const autonomos: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
-  const puedeAuto =
-    // Al derivar SÍ se envía el mensaje de derivación: antes quedaba como borrador y el
-    // cliente se quedaba sin saber que un ejecutivo lo iba a atender.
-    !opts.forzarBorrador && autonomos.includes(conv.canal) && dentroHorario(agente);
+  const puedeAuto = modoAuto;
 
   if (puedeAuto) {
     // Justo antes de enviar: si mientras pensaba contestó una persona (desde el celular o el
@@ -971,11 +1077,25 @@ async function responderConIAInterno(
       return { ok: true, accion: "omitido", motivo: "Ya respondió otra persona o la IA se pausó mientras se redactaba." };
     if (agente.delay_segundos > 0)
       await new Promise((r) => setTimeout(r, Math.min(agente.delay_segundos, 30) * 1000));
-    const err = await enviarPorCanal(sb, conv, contacto, textoFinal);
+    const err = await enviarPorCanal(sb, conv, contacto, textoFinal, waDestinoInicial);
     if (err) {
       // Si falla el envío, al menos deja el borrador
       await sb.from("crm_conversaciones").update({ borrador_ia: textoFinal, borrador_ia_at: new Date().toISOString() }).eq("id", convId);
       return { ok: false, accion: "borrador", texto: textoFinal, error: err };
+    }
+    // El PDF de la cotización de traslado sale DESPUÉS del texto, y solo si el texto salió. Si
+    // falla, la acción vuelve a «pendiente» con su error y la envía un ejecutivo desde la bandeja.
+    const pdf = ctx.cotizacionTraslado?.envioPendiente;
+    if (pdf) {
+      try {
+        const env = await enviarCotizacionTraslado(sb, {
+          accionId: pdf.accionId, por: "automatico", bytes: pdf.bytes, nombre: pdf.nombre, caption: pdf.caption,
+          esperado: { conversacionId: String(conv.id), cotizacionId: pdf.cotizacionId },
+        });
+        if (!env.ok) console.warn(`[crm-ia] ${convId} cotización de traslado no enviada: ${env.codigo} · ${env.detalle}`);
+      } catch (e: any) {
+        console.error(`[crm-ia] ${convId} cotización de traslado:`, e?.message ?? e);
+      }
     }
     return { ok: true, accion: ctx.escalado.v ? "escalado" : "enviado", texto: textoFinal };
   }
@@ -1000,15 +1120,19 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
   const conv = { id: "test", canal: "whatsapp", estado: "abierta", pipeline_id: null };
   const ctx: Ctx = { sb, contacto, conv, agente, escalado: { v: false } };
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
+  const empresa = await nombreEmpresa(sb);
+  const traslados = (await leerConfigIA(sb)).iaCotiza;
   // En la prueba, «primer mensaje del día» = el agente todavía no contestó en este chat de prueba.
-  const system = construirSystem(agente, contacto, conv, !historial.some((m) => m.role === "assistant"), await nombreEmpresa(sb));
+  const system = construirSystem(agente, contacto, conv, !historial.some((m) => m.role === "assistant"), empresa, { traslados });
   const messages: Anthropic.MessageParam[] = [...historial, { role: "user", content: mensaje }];
   const usadas: string[] = [];
+  const textosCliente = messages.filter((m) => m.role === "user" && typeof m.content === "string").map((m) => m.content as string);
+  const herramientas = traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
 
   try {
     let textoFinal = "";
     for (let iter = 0; iter < 6; iter++) {
-      const req: any = { model: modelo, max_tokens: 1500, system, tools: TOOLS, messages, ...modelExtras(modelo) };
+      const req: any = { model: modelo, max_tokens: 1500, system, tools: herramientas, messages, ...modelExtras(modelo) };
       const resp: any = await anthropic.messages.create(req);
       const toolUses = (resp.content ?? []).filter((b: any) => b.type === "tool_use");
       const textos = (resp.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text);
@@ -1026,6 +1150,8 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
             ? JSON.stringify({ ok: true, nota: "(simulado en prueba)" })
             : tu.name === "actualizar_contacto" || tu.name === "registrar_lead"
             ? JSON.stringify({ ok: true, nota: "(simulado en prueba)" })
+            : tu.name === "cotizar_traslado"
+            ? await cotizarTrasladoDePrueba(sb, agente, tu.input, textosCliente, empresa)
             : await ejecutarTool(tu.name, tu.input, ctx);
         results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
       }
@@ -1045,5 +1171,35 @@ export async function vistaPreviaInstrucciones(): Promise<string | null> {
   const agente = data?.[0];
   if (!agente) return null;
   const contacto = { id: "ejemplo", nombre: "María Pérez", empresa: null, telefono: null };
-  return construirSystem(agente, contacto, { id: "ejemplo", canal: "whatsapp" }, true, await nombreEmpresa(sb));
+  const traslados = (await leerConfigIA(sb)).iaCotiza;
+  return construirSystem(agente, contacto, { id: "ejemplo", canal: "whatsapp" }, true, await nombreEmpresa(sb), { traslados });
+}
+
+/**
+ * `cotizar_traslado` en la PRUEBA del agente: cotiza con el motor de verdad (el mismo del
+ * simulador) como si escribiera un número peruano de prueba, y dice qué haría con el envío. No
+ * crea cotización, acción ni nota, y no envía nada.
+ */
+async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: string[], empresa: string): Promise<string> {
+  try {
+    // En la prueba no hay ubicaciones compartidas: las coordenadas que proponga el modelo no valen.
+    const v = validarEntrada(entradaDelAgente(input, { canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS }, []));
+    if (!v.ok) return respuestaDerivar();
+    const hoy = fechaLima(Date.now());
+    const sim = await simularTrasladoConCatalogo(sb, v.entrada, hoy);
+    if (!sim.respuesta.ok || !sim.catalogo) return respuestaDerivar();
+    const r = sim.respuesta.resultado;
+    if (r.codigo !== "cotizable") return respuestaParaModelo({ resultado: r });
+    const fila = filaCotizacionTraslado(r, v.entrada, { convId: "prueba", clienteId: null, atencion: null, config: sim.catalogo.config, firma: "prueba", hoy });
+    const autonomos: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
+    const plan = planEnvio({
+      resultado: r, envioMaestro: sim.catalogo.config.envio_automatico === true, zonas: sim.catalogo.zonas,
+      canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS, modoAuto: autonomos.includes("whatsapp") && dentroHorario(agente),
+      perfilConfigurado: !!empresa, cuadra: cuadraConMotor(fila, r), pdfOk: true, palabras: senalesEnTexto(textos),
+      textosLibres: [input?.origen_texto, input?.destino_texto],
+    });
+    return respuestaParaModelo({ resultado: r, cotizacion: { numero: "PRUEBA", decision: plan.decision } });
+  } catch {
+    return respuestaDerivar();
+  }
 }

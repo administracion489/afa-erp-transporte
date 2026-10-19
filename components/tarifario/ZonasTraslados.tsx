@@ -6,7 +6,7 @@
 // (`?vista=zonas&tab=…`) para poder enlazarla; nada de datos en localStorage. Cada pestaña se
 // monta la primera vez que se abre y se queda montada (volver a ella no pierde lo que se escribió).
 //
-// Sin la migración (supabase/traslados-01…03) la vista lo dice en ámbar nombrando los SQL y no
+// Sin la migración (supabase/traslados-01…05) la vista lo dice en ámbar nombrando los SQL y no
 // enseña nada más: una pantalla vacía se leería como «no hay precios».
 
 import { useCallback, useEffect, useState } from "react";
@@ -105,7 +105,7 @@ export default function ZonasTraslados() {
         <ol className="list-decimal pl-5 space-y-1">
           {SQL_TRASLADOS.map((s) => <li key={s.archivo}><span className="font-mono">{s.archivo}</span> — {s.que}.</li>)}
         </ol>
-        <p className="text-xs">Mientras tanto, el cotizador automático no cotiza traslados: todo pedido pasa a un ejecutivo.</p>
+        <p className="text-xs">Mientras tanto, la IA del CRM no cotiza traslados: todo pedido pasa a un ejecutivo.</p>
         <button type="button" onClick={recargar} className="px-4 py-2 rounded-xl text-xs font-bold border border-amber-400 hover:bg-amber-100 min-h-[40px]">↻ Volver a comprobar</button>
       </div>
     );
@@ -121,6 +121,9 @@ export default function ZonasTraslados() {
 
   const d = carga;
   const oculto = (t: TabTraslados) => (tab === t ? "" : "hidden");
+  // Ajustes se vuelve a montar SOLO cuando cambia lo que edita su formulario: los interruptores de
+  // la IA se guardan al instante y no pueden borrar lo que alguien dejó escrito sin guardar.
+  const claveAjustes = JSON.stringify([d.config.validez_dias, d.config.espera_gratis_min, d.config.consideraciones, d.config.consideraciones_usd]);
   return (
     <div className="space-y-4">
       <div className="flex gap-1 overflow-x-auto border-b -mx-1 px-1" role="tablist">
@@ -142,7 +145,8 @@ export default function ZonasTraslados() {
       )}
       {montadas.has("zonas") && (
         <div className={oculto("zonas")}>
-          <ZonasCatalogo zonas={d.zonas} tarifas={d.tarifas} decir={decir} onZona={onZona} onZonaBorrada={onZonaBorrada} />
+          <ZonasCatalogo zonas={d.zonas} tarifas={d.tarifas} decir={decir} onZona={onZona} onZonaBorrada={onZonaBorrada}
+            colsZona={d.colsZona} sinMigracionIA={d.sinMigracionIA} envioMaestro={d.config.envio_automatico} onIrAjustes={() => irA("ajustes")} />
         </div>
       )}
       {montadas.has("vehiculos") && (
@@ -152,12 +156,13 @@ export default function ZonasTraslados() {
       )}
       {montadas.has("simulador") && (
         <div className={oculto("simulador")}>
-          <SimuladorTraslado onIrA={irA} />
+          <SimuladorTraslado onIrA={irA} iaCotiza={d.config.ia_cotiza} sinMigracionIA={d.sinMigracionIA} />
         </div>
       )}
       {montadas.has("ajustes") && (
         <div className={oculto("ajustes")}>
-          <AjustesTraslado key={JSON.stringify(d.config)} config={d.config} configExiste={d.configExiste} onConfig={onConfig} decir={decir} />
+          <AjustesTraslado key={claveAjustes} config={d.config} configExiste={d.configExiste} onConfig={onConfig} decir={decir}
+            zonas={d.zonas} sinMigracionIA={d.sinMigracionIA} colsConfig={d.colsConfig} onIrAZonas={() => irA("zonas")} />
         </div>
       )}
 

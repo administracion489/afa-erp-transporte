@@ -14,8 +14,10 @@ import {
   claveNombre, esGenerico, nombresDeZona, ordenarCategorias, tarifaDelPar,
   type CategoriaTraslado, type Moneda, type TarifaTraslado, type Zona,
 } from "@/lib/traslados/motor";
+import { zonaConEnvio } from "@/lib/traslados/envio-ia";
 
-export type ZonaFila = Zona & { notas?: string | null };
+/** `envio_automatico` es de traslados-05: sin esa migración llega `undefined`, que es «no». */
+export type ZonaFila = Zona & { notas?: string | null; envio_automatico?: boolean | null };
 export type TarifaFila = TarifaTraslado & { id: number; notas?: string | null };
 export type CategoriaFila = CategoriaTraslado;
 
@@ -27,11 +29,16 @@ export const SECTORES = ["Lima Norte", "Lima Centro", "Lima Moderna", "Lima Este
 export const SECTOR_OTROS = "Otros";
 export const SECCION_PUNTOS = "📍 Puntos (geocercas)";
 
-/** Los tres SQL de la migración, en el orden en que se corren. */
+/** La migración que agrega los interruptores de la IA del CRM (fase 2). */
+export const SQL_COTIZACION_IA = "supabase/traslados-05-cotizacion-ia.sql";
+
+/** Los SQL de la migración, en el orden en que se corren (traslados-05 exige traslados-04). */
 export const SQL_TRASLADOS: readonly { archivo: string; que: string }[] = [
   { archivo: "supabase/traslados-01-tablas.sql", que: "las tablas de zonas, vehículos, precios y ajustes" },
   { archivo: "supabase/traslados-02-zonas-lima.sql", que: "los 50 distritos de Lima y Callao y el aeropuerto" },
   { archivo: "supabase/traslados-03-precios-afa.sql", que: "SOLO para AFA: sus vehículos, precios y consideraciones" },
+  { archivo: "supabase/traslados-04-tipo-cambio-solo-servidor.sql", que: "que el tipo de cambio y el IGV los escriba solo el servidor (o Tesorería)" },
+  { archivo: SQL_COTIZACION_IA, que: "los interruptores de la IA del CRM (cotizar y enviar sola); su último bloque es SOLO para AFA y enciende el envío automático del aeropuerto" },
 ];
 
 // ── Sectores y orden ─────────────────────────────────────────────────────────
@@ -369,4 +376,80 @@ export function normalizarClaveCategoria(s: string): string {
     .replace(/\s+/g, "_")
     .replace(/[^A-Z0-9_]/g, "")
     .slice(0, 30);
+}
+
+// ── Envío automático de la cotización (fase 2) ───────────────────────────────
+// QUÉ ZONA TIENE ENVÍO LO DECIDE `zonaConEnvio` (lib/traslados/envio-ia.ts), la MISMA función con
+// que el agente decide si el PDF sale solo: una subzona hereda de su distrito activo. Aquí solo se
+// traduce a lo que se pinta y a las frases de las confirmaciones.
+
+export type EnvioZona =
+  | { codigo: "propio" }                     // marcada y activa: sale sola
+  | { codigo: "hereda"; distrito: string }   // subzona sin marca propia: hereda de su distrito
+  | { codigo: "sin_efecto" }                 // marcada pero inactiva: el cotizador no la reconoce
+  | { codigo: "no" };
+
+export function envioDeZona(z: ZonaFila, zonas: readonly ZonaFila[]): EnvioZona {
+  const efectivo = zonaConEnvio(z, zonas);
+  const propio = z.envio_automatico === true;
+  if (efectivo && propio) return { codigo: "propio" };
+  if (efectivo) return { codigo: "hereda", distrito: zonas.find((x) => x.id === z.padre_id)?.nombre ?? "su distrito" };
+  if (propio) return { codigo: "sin_efecto" };
+  return { codigo: "no" };
+}
+
+/** Las zonas que tienen marcada la casilla y la aplican (las que se nombran en Ajustes). */
+export function zonasConEnvioPropio(zonas: readonly ZonaFila[]): ZonaFila[] {
+  return ordenarZonas(zonas.filter((z) => envioDeZona(z, zonas).codigo === "propio"));
+}
+
+/** Las subzonas que salen solas sin tener la casilla, porque su distrito la tiene. */
+export function subzonasQueHeredan(zonas: readonly ZonaFila[]): ZonaFila[] {
+  return zonas.filter((z) => envioDeZona(z, zonas).codigo === "hereda");
+}
+
+const listaY = (xs: readonly string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} y ${xs[xs.length - 1]}`);
+
+/** El confirm() de encender el MAESTRO del envío automático: dice qué zonas salen sin revisión. */
+export function mensajeEncenderEnvio(x: { zonas: readonly string[]; iaCotiza: boolean }): string {
+  const partes = ["¿Encender el envío automático de cotizaciones de traslado?"];
+  if (x.zonas.length === 0) {
+    partes.push("Ninguna zona tiene marcado «📄 Envío automático de la cotización»: hasta que marques una en la pestaña Zonas, todo seguirá quedando en revisión.");
+  } else {
+    partes.push(`Las cotizaciones de traslado cuyo recojo o destino sea ${listaY(x.zonas)} saldrán al cliente por WhatsApp SIN que un ejecutivo las revise: el PDF con el precio del tarifario, armado y enviado por el sistema.`);
+    partes.push("Las demás seguirán quedando en el inbox del CRM para que un ejecutivo las revise y las envíe.");
+  }
+  if (!x.iaCotiza) partes.push("Ojo: la casilla «La IA cotiza traslados» está apagada, así que por ahora no sale nada.");
+  return partes.join("\n\n");
+}
+
+/** El confirm() de encender «La IA cotiza traslados». */
+export function mensajeEncenderIA(x: { envioMaestro: boolean; zonas: readonly string[] }): string {
+  const partes = [
+    "¿Encender la cotización de traslados por la IA del CRM?",
+    "La IA cotizará por WhatsApp los traslados simples (un recojo y un destino, solo ida o ida y retorno) con el precio de este tarifario y creará la cotización en /cotizaciones. Lo complejo (TDR, licitaciones, eventos, varios servicios, descuentos) lo pasa a un ejecutivo, y la disponibilidad y la reserva las confirma siempre un ejecutivo.",
+  ];
+  if (x.envioMaestro && x.zonas.length > 0) {
+    partes.push(`Con el envío automático encendido, las de ${listaY(x.zonas)} le llegan al cliente SIN revisión; las demás quedan en el inbox para que un ejecutivo las envíe.`);
+  } else {
+    partes.push("El envío automático está apagado (o sin zonas marcadas): cada cotización queda en el inbox del CRM para que un ejecutivo la revise y la envíe.");
+  }
+  return partes.join("\n\n");
+}
+
+/**
+ * El confirm() de marcar el envío automático en UNA zona: nombra la zona, las subzonas que lo
+ * heredan si es un distrito, y si el maestro de Ajustes lo deja salir hoy o no.
+ */
+export function mensajeEnvioZona(z: { id: number | null; nombre: string; tipo: Zona["tipo"] }, zonas: readonly ZonaFila[], envioMaestro: boolean): string {
+  const hijas = z.tipo === "distrito" && z.id != null ? zonas.filter((s) => s.tipo === "subzona" && s.padre_id === z.id && s.activo !== false) : [];
+  const donde = hijas.length > 0 ? `«${z.nombre}» (y sus ${hijas.length} subzona${hijas.length === 1 ? "" : "s"}, que lo heredan)` : `«${z.nombre}»`;
+  const partes = [
+    `¿Marcar el envío automático en ${donde}?`,
+    `Las cotizaciones de traslado cuyo recojo o destino esté en ${donde} saldrán al cliente por WhatsApp SIN que un ejecutivo las revise.`,
+  ];
+  partes.push(envioMaestro
+    ? "El envío automático está encendido en Ajustes: aplica desde que guardes."
+    : "Hoy el envío automático está apagado en Ajustes: la marca queda guardada y empieza a valer cuando se encienda.");
+  return partes.join("\n\n");
 }
