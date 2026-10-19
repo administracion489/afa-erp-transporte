@@ -24,11 +24,17 @@ const supaAdmin = createClient(
 export const PLANTILLA_INVITACION = "invitacion_app_pasajero";
 
 // La versión con imagen y emojis (pedida el 18-10-2026: la de solo texto se veía «fea»). Se crea a
-// mano en WhatsApp Manager con un HEADER de tipo IMAGEN y las MISMAS dos variables; el texto
-// sugerido está en lib/plantillas-sugeridas.ts (SUGERIDA_INVITACION_PASAJERO). Mientras Meta no la
-// tenga APROBADA, el envío contesta #132001 (no se cobra) y se cae a PLANTILLA_INVITACION: subir
-// este cambio no deja de mandar invitaciones.
-export const PLANTILLA_INVITACION_IMAGEN = "invitacion_pasajero_imagen";
+// mano en WhatsApp Manager, categoría UTILIDAD, con un HEADER de tipo IMAGEN y las MISMAS dos
+// variables; el texto sugerido está en lib/plantillas-sugeridas.ts (SUGERIDA_INVITACION_PASAJERO).
+//
+// TIENE QUE SER UTILIDAD: la primera (`invitacion_pasajero_imagen`) quedó aprobada como Marketing,
+// y Meta no entrega una plantilla de Marketing a quien nunca le escribió al número de avisos — lo
+// acepta en el envío y la descarta minutos después (18-10-2026: no llegó hasta que la pasajera
+// escribió «hola»). Un pasajero nuevo nunca escribe primero, así que esa ya no se usa.
+//
+// Mientras Meta no tenga esta APROBADA, el envío contesta #132001 (no se cobra) y se cae a
+// PLANTILLA_INVITACION (texto): subir este cambio no deja de mandar invitaciones.
+export const PLANTILLA_INVITACION_IMAGEN = "invitacion_pasajero_registro";
 const APP_URL = (process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com").replace(/\/$/, "");
 export const IMAGEN_INVITACION = `${APP_URL}/whatsapp-invitacion-pasajero.jpg`;
 
@@ -76,9 +82,8 @@ export async function enviarInvitacionesPasajeros(
       else {
         const params = [nombreCorto(p.nombre), p.empresa || empresaAfa];
         let r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION_IMAGEN, params, { tipo: "image", link: IMAGEN_INVITACION });
-        // Respaldo de texto si la de imagen no existe/no está aprobada (#132001) o si Meta no la
-        // entregó por el tope de mensajes de Marketing a esa persona (#131049): quedó aprobada como
-        // Marketing, y un envío rechazado no se cobra.
+        // Respaldo de texto si la de imagen no existe o no está aprobada (#132001, no se cobra), o si
+        // Meta la rechaza en el envío por el tope de mensajes de Marketing (#131049).
         if (!r.ok && (esFaltaDePlantilla(r.error) || /#?131049\b/.test(r.error ?? "")))
           r = await enviarAvisoWhatsApp(p.telefono, PLANTILLA_INVITACION, params);
         if (r.ok) res.whatsappEnviados++; else res.whatsappErrores++;
