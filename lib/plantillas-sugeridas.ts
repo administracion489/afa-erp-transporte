@@ -64,7 +64,7 @@ export const SUGERIDA_COORDINADOR_ALERTA: PlantillaSugerida = {
 export const SUGERIDA_INVITACION_PASAJERO: PlantillaSugerida = {
   name: "invitacion_pasajero_imagen",
   category: "UTILITY",
-  body: "¡Hola {{1}}! 👋 Bienvenido al transporte de *{{2}}* 🚌✨\n\n📲 Descarga la app *AFA Pasajero* y ten todo en tu celular:\n\n📍 Tu bus en el mapa, en tiempo real\n🚏 Tu paradero y tu horario\n🎫 Tu QR para abordar\n🔔 Avisos cuando el bus está por llegar\n\n📧 En breve te llegan por correo tus datos de acceso.\n\n¡Buen viaje! 🙌",
+  body: "¡Hola {{1}}! 👋 Ya eres parte del transporte de *{{2}}* 🚌\n\n📲 Con la app *AFA Pasajero*:\n📍 Ves tu bus en vivo\n🔔 Te avisa cuando llega\n🎫 Abordas con tu QR\n\n📧 Tus datos de acceso llegan por correo. ¡Buen viaje! 🙌",
   ejemplos: ["María López", "Compañía Hard Discount S.A.C."],
   botonTexto: "Descargar app Android",
   botonUrl: "https://play.google.com/store/apps/details?id=com.transportesafa.pasajero",
