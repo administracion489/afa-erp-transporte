@@ -123,6 +123,17 @@ function ahoraLima(aj?: AjustesIA): { fecha: string; hora: string; saludo: strin
 /** Un momento de Lima: fecha ISO y "HH:MM". */
 export type MomentoLima = { fecha: string; hora: string };
 
+/** Lo que leen de `crm_agentes_ia` el prompt y los textos del código (el resto de la fila, tal cual). */
+export type AgenteIAConfig = {
+  comportamiento?: unknown;
+  nombre?: string | null;
+  escalar_si?: string | null;
+  pausa_humano_horas?: unknown;
+  mensaje_derivacion?: string | null;
+  idioma?: string | null;
+  [columna: string]: unknown;
+};
+
 /**
  * El mensaje de derivación con el nombre del cliente puesto. Lo escribe el CÓDIGO (lo cita el prompt
  * y lo usa `textoFinalTraslado`), así que habla con el trato del agente:
@@ -134,7 +145,7 @@ export type MomentoLima = { fecha: string; hora: string };
  *    a un texto que escribió una persona).
  * `ahora` (Lima) es para probarlo; sin él, el momento actual.
  */
-export function mensajeDerivacion(agente: any, contacto: any, ahora?: MomentoLima): string {
+export function mensajeDerivacion(agente: AgenteIAConfig | null | undefined, contacto: { nombre?: string | null } | null | undefined, ahora?: MomentoLima): string {
   const aj = ajustesDe(agente);
   const m = ahora ?? ahoraLima(aj);
   const fuera = fraseFueraDeAtencion(atencionDe(aj), m.fecha, m.hora, aj.tratamiento);
@@ -151,12 +162,12 @@ export function mensajeDerivacion(agente: any, contacto: any, ahora?: MomentoLim
 
 /** Horas que la IA se aparta cuando contesta una persona del equipo. La MISMA lectura con que el
  *  motor decide (responderConIAInterno) y con que el prompt lo dice: 12 si no hay un número. */
-export function horasPausaHumano(agente: any): number {
-  return Number.isFinite(Number(agente?.pausa_humano_horas)) ? Number(agente.pausa_humano_horas) : 12;
+export function horasPausaHumano(agente: AgenteIAConfig | null | undefined): number {
+  return Number.isFinite(Number(agente?.pausa_humano_horas)) ? Number(agente?.pausa_humano_horas) : 12;
 }
 
 /** El idioma por defecto de las respuestas (`crm_agentes_ia.idioma`). */
-function idiomaPorDefecto(agente: any): string {
+function idiomaPorDefecto(agente: AgenteIAConfig | null | undefined): string {
   return agente?.idioma === "en" ? "inglés" : "español peruano";
 }
 
@@ -586,7 +597,7 @@ export const BLOQUE_TRASLADOS = bloqueTraslados("todo_junto");
  * y ahí sigue mandando lo que escribió la empresa. El trato, el modo de preguntar y cuándo se deriva
  * van siempre. `ahora` (Lima) es para probarlo; sin él, el momento actual.
  */
-export function bloqueAjustes(agente: any, empresa = "", ahora?: MomentoLima): string {
+export function bloqueAjustes(agente: AgenteIAConfig | null | undefined, empresa = "", ahora?: MomentoLima): string {
   const aj = ajustesDe(agente);
   const m = ahora ?? ahoraLima(aj);
   const emp = empresa || "la empresa";
