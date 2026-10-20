@@ -7,7 +7,9 @@
 // monta la primera vez que se abre y se queda montada (volver a ella no pierde lo que se escribió).
 //
 // Sin la migración (supabase/traslados-01…05) la vista lo dice en ámbar nombrando los SQL y no
-// enseña nada más: una pantalla vacía se leería como «no hay precios».
+// enseña nada más: una pantalla vacía se leería como «no hay precios». Sin traslados-07 (fotos y
+// descripción de cada vehículo, listas Incluye / No incluye) todo funciona como antes y las
+// pestañas Vehículos y Ajustes lo dicen en ámbar.
 
 import { useCallback, useEffect, useState } from "react";
 import { SQL_TRASLADOS, type CategoriaFila, type TarifaFila, type ZonaFila } from "./traslados-pantalla";
@@ -123,7 +125,7 @@ export default function ZonasTraslados() {
   const oculto = (t: TabTraslados) => (tab === t ? "" : "hidden");
   // Ajustes se vuelve a montar SOLO cuando cambia lo que edita su formulario: los interruptores de
   // la IA se guardan al instante y no pueden borrar lo que alguien dejó escrito sin guardar.
-  const claveAjustes = JSON.stringify([d.config.validez_dias, d.config.espera_gratis_min, d.config.consideraciones, d.config.consideraciones_usd]);
+  const claveAjustes = JSON.stringify([d.config.validez_dias, d.config.espera_gratis_min, d.config.consideraciones, d.config.consideraciones_usd, d.config.incluye, d.config.no_incluye]);
   return (
     <div className="space-y-4">
       <div className="flex gap-1 overflow-x-auto border-b -mx-1 px-1" role="tablist">
@@ -151,7 +153,8 @@ export default function ZonasTraslados() {
       )}
       {montadas.has("vehiculos") && (
         <div className={oculto("vehiculos")}>
-          <VehiculosTraslado categorias={d.categorias} onCategoria={onCategoria} decir={decir} />
+          <VehiculosTraslado categorias={d.categorias} onCategoria={onCategoria} decir={decir}
+            colsCategoria={d.colsCategoria} sinMigracionFotos={d.sinMigracionFotos} />
         </div>
       )}
       {montadas.has("simulador") && (
@@ -162,7 +165,7 @@ export default function ZonasTraslados() {
       {montadas.has("ajustes") && (
         <div className={oculto("ajustes")}>
           <AjustesTraslado key={claveAjustes} config={d.config} configExiste={d.configExiste} onConfig={onConfig} decir={decir}
-            zonas={d.zonas} sinMigracionIA={d.sinMigracionIA} colsConfig={d.colsConfig} onIrAZonas={() => irA("zonas")} />
+            zonas={d.zonas} sinMigracionIA={d.sinMigracionIA} sinMigracionListas={d.sinMigracionListas} colsConfig={d.colsConfig} onIrAZonas={() => irA("zonas")} />
         </div>
       )}
 

@@ -5,13 +5,17 @@
 // QUÉ VEHÍCULO SALE NO SE DECIDE AQUÍ: el calculador llama a `elegirVehiculo` del motor (sin
 // precios), la misma función que usa el cotizador automático. La CLAVE de una categoría no se
 // edita: los precios la referencian.
+//
+// Debajo de la tabla, «📷 Fotos y descripción para la cotización» (FotosCategorias.tsx): lo que el
+// cliente ve de cada vehículo en el PDF de la cotización de traslado (traslados-07).
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { elegirVehiculo } from "@/lib/traslados/motor";
 import { leerEntero, normalizarClaveCategoria, type CategoriaFila } from "./traslados-pantalla";
-import { COLS_CATEGORIA, filasEscritas, leerFichasCosteo, LIMITES, motivoCeroFilas, normalizarCategoria, type FichaCosteo } from "./traslados-datos";
+import { filasEscritas, leerFichasCosteo, LIMITES, motivoCeroFilas, normalizarCategoria, type FichaCosteo } from "./traslados-datos";
 import { AZUL, iCls, InterruptorActivo, type Decir } from "./traslados-comun";
+import FotosCategorias from "./FotosCategorias";
 
 const REGLA = "Se elige el vehículo más chico donde caben. Sin bodega, cada maleta de 23 kg ocupa un asiento (10 pax con maletas = 20 asientos → Sprinter 20). Con bodega, las maletas van primero ahí y solo las que sobran ocupan asiento.";
 
@@ -56,10 +60,14 @@ function Campo({ valor, onGuardar, tipo = "texto", min = 0, max = 100000, ancho 
   );
 }
 
-export default function VehiculosTraslado({ categorias, onCategoria, decir }: {
+export default function VehiculosTraslado({ categorias, onCategoria, decir, colsCategoria, sinMigracionFotos }: {
   categorias: CategoriaFila[];
   onCategoria: (c: CategoriaFila) => void;
   decir: Decir;
+  /** Las columnas que se piden de vuelta al escribir (sin las de traslados-07 si falta la migración). */
+  colsCategoria: string;
+  /** Faltan las columnas de traslados-07: sin fotos ni descripción, y se dice en ámbar. */
+  sinMigracionFotos: boolean;
 }) {
   const [fichas, setFichas] = useState<EstadoFichas>({ tipo: "cargando" });
   const [ocupada, setOcupada] = useState<string | null>(null);
@@ -78,7 +86,7 @@ export default function VehiculosTraslado({ categorias, onCategoria, decir }: {
   const actualizar = async (c: CategoriaFila, cambios: Partial<CategoriaFila>, que: string): Promise<boolean> => {
     setOcupada(c.clave);
     // Con RLS, un UPDATE sin permiso no da error: vuelve sin filas, y `filasEscritas` lo dice.
-    const r = filasEscritas<Record<string, unknown>>(await supabase.from("traslado_categorias").update(cambios).eq("clave", c.clave).select(COLS_CATEGORIA), que);
+    const r = filasEscritas<Record<string, unknown>>(await supabase.from("traslado_categorias").update(cambios).eq("clave", c.clave).select(colsCategoria), que);
     setOcupada(null);
     if (!r.ok) { decir(r.cero ? await motivoCeroFilas("traslado_categorias", "clave", c.clave, que) : r.detalle, "error"); return false; }
     onCategoria(normalizarCategoria(r.filas[0]));
@@ -199,17 +207,20 @@ export default function VehiculosTraslado({ categorias, onCategoria, decir }: {
             </tbody>
           </table>
         </div>
-        <AltaCategoria categorias={categorias} fichas={fichas} onCreada={onCategoria} decir={decir} />
+        <AltaCategoria categorias={categorias} fichas={fichas} onCreada={onCategoria} decir={decir} colsCategoria={colsCategoria} />
       </section>
+
+      <FotosCategorias categorias={lista} colsCategoria={colsCategoria} sinMigracion={sinMigracionFotos} onCategoria={onCategoria} decir={decir} />
     </div>
   );
 }
 
-function AltaCategoria({ categorias, fichas, onCreada, decir }: {
+function AltaCategoria({ categorias, fichas, onCreada, decir, colsCategoria }: {
   categorias: CategoriaFila[];
   fichas: EstadoFichas;
   onCreada: (c: CategoriaFila) => void;
   decir: Decir;
+  colsCategoria: string;
 }) {
   const [clave, setClave] = useState("");
   const [nombre, setNombre] = useState("");
@@ -237,7 +248,7 @@ function AltaCategoria({ categorias, fichas, onCreada, decir }: {
     const res = await supabase.from("traslado_categorias").insert({
       clave: k, nombre: nombre.trim(), capacidad: lCap.valor, maletas_bodega: lBod.tipo === "ok" ? lBod.valor : 0,
       tipo_vehiculo: ficha || null, orden, activo: true,
-    }).select(COLS_CATEGORIA);
+    }).select(colsCategoria);
     setGuardando(false);
     if (res.error?.code === "23505") { setError(`Ya existe la clave ${k}.`); return; }
     const r = filasEscritas<Record<string, unknown>>(res, "No se pudo crear el vehículo");

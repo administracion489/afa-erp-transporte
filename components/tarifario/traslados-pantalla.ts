@@ -15,11 +15,23 @@ import {
   type CategoriaTraslado, type Moneda, type TarifaTraslado, type Zona,
 } from "@/lib/traslados/motor";
 import { zonaConEnvio } from "@/lib/traslados/envio-ia";
+import { BUCKETS_PRIVADOS } from "@/lib/storage-privado";
 
 /** `envio_automatico` es de traslados-05: sin esa migración llega `undefined`, que es «no». */
 export type ZonaFila = Zona & { notas?: string | null; envio_automatico?: boolean | null };
 export type TarifaFila = TarifaTraslado & { id: number; notas?: string | null };
-export type CategoriaFila = CategoriaTraslado;
+/**
+ * Las tres últimas son de traslados-07 (lo que el PDF de la IA enseña de la categoría): sin esa
+ * migración llegan `null` y la pantalla lo dice nombrando el SQL. El motor no las lee.
+ */
+export type CategoriaFila = CategoriaTraslado & {
+  foto_externa_url?: string | null;
+  foto_interna_url?: string | null;
+  descripcion_cliente?: string | null;
+};
+
+/** La migración que agrega las fotos y la descripción de la categoría, y las listas Incluye / No incluye. */
+export const SQL_FOTOS_CATEGORIA = "supabase/traslados-07-fotos-categoria.sql";
 
 export const MONEDAS: readonly Moneda[] = ["PEN", "USD"];
 export const SIMBOLO: Record<Moneda, string> = { PEN: "S/", USD: "US$" };
@@ -39,6 +51,7 @@ export const SQL_TRASLADOS: readonly { archivo: string; que: string }[] = [
   { archivo: "supabase/traslados-03-precios-afa.sql", que: "SOLO para AFA: sus vehículos, precios y consideraciones" },
   { archivo: "supabase/traslados-04-tipo-cambio-solo-servidor.sql", que: "que el tipo de cambio y el IGV los escriba solo el servidor (o Tesorería)" },
   { archivo: SQL_COTIZACION_IA, que: "los interruptores de la IA del CRM (cotizar y enviar sola); su último bloque es SOLO para AFA y enciende el envío automático del aeropuerto" },
+  { archivo: SQL_FOTOS_CATEGORIA, que: "las fotos y la descripción de cada vehículo para el PDF de la cotización, y las listas Incluye / No incluye" },
 ];
 
 // ── Sectores y orden ─────────────────────────────────────────────────────────
@@ -452,4 +465,129 @@ export function mensajeEnvioZona(z: { id: number | null; nombre: string; tipo: Z
     ? "El envío automático está encendido en Ajustes: aplica desde que guardes."
     : "Hoy el envío automático está apagado en Ajustes: la marca queda guardada y empieza a valer cuando se encienda.");
   return partes.join("\n\n");
+}
+
+// ── Fotos y descripción de la categoría (traslados-07) ───────────────────────
+// Las fotos y la descripción que el cliente ve en el PDF de la cotización de traslado. Qué foto es
+// un JPEG aceptable lo dice `revisarJpeg` (lib/traslados/fotos-categoria.ts, el mismo control del
+// servidor); qué descripción se imprime lo dice `descripcionCategoria` (cotizacion-traslado.ts).
+// Aquí solo: qué no se puede leer en el navegador, de dónde viene una foto de la flota, cómo se
+// guarda el texto y cómo se dice cada respuesta de la subida.
+
+const MARCAS_HEIF = new Set(["heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1", "msf1"]);
+
+/**
+ * ¿Es una foto HEIC/HEIF (la del iPhone)? El navegador no la convierte a JPEG, así que se rechaza
+ * ANTES de intentarlo, diciendo por qué. Por el tipo, la extensión o la firma (`ftyp` + marca);
+ * un AVIF (misma familia, otra marca) sí lo leen los navegadores y no cuenta.
+ */
+export function esHeic(tipo: string | null | undefined, nombre: string | null | undefined, cabecera?: Uint8Array | null): boolean {
+  if (/^image\/hei[cf](-sequence)?$/i.test(String(tipo ?? "").trim())) return true;
+  if (/\.(heic|heif)$/i.test(String(nombre ?? "").trim())) return true;
+  const b = cabecera ?? null;
+  if (!b || b.length < 12) return false;
+  const txt = (i: number, n: number) => String.fromCharCode(...Array.from(b.subarray(i, i + n)));
+  return txt(4, 4) === "ftyp" && MARCAS_HEIF.has(txt(8, 4).toLowerCase());
+}
+
+export const MOTIVO_HEIC = "Es una foto HEIC (la del iPhone) y el navegador no la puede convertir. Elígela desde la galería como JPG o PNG (en el iPhone: Ajustes → Cámara → Formatos → «Más compatible»), o sube una captura de pantalla de la foto.";
+
+/** Caracteres como los cuenta la base (`char_length`): un emoji es uno, no dos. */
+export const largoTexto = (t: string): number => Array.from(t).length;
+
+/**
+ * La descripción para el cliente tal como se GUARDA: espacios y saltos colapsados (el PDF la
+ * imprime como un solo párrafo) y sin bordes. Vacía = null: el PDF usa la frase por defecto.
+ */
+export function descripcionParaGuardar(texto: string | null | undefined): string | null {
+  const t = String(texto ?? "").replace(/\s+/g, " ").trim();
+  return t ? t : null;
+}
+
+/** De dónde viene una foto de la ficha de una unidad, para saber si se puede copiar a la categoría. */
+export type OrigenFoto =
+  /** El almacenamiento PÚBLICO del propio Supabase: se baja, se achica y se sube como foto nueva. */
+  | { tipo: "copiable"; url: string }
+  /** Google Drive: no se puede copiar desde el navegador; se descarga y se sube a mano. */
+  | { tipo: "drive"; url: string; miniatura: string | null }
+  /** Un bucket privado del proyecto, otro proyecto u otro sitio: tampoco se copia. */
+  | { tipo: "otro"; url: string };
+
+const RUTA_PUBLICA_STORAGE = "/storage/v1/object/public/";
+
+/** El origen de una URL de foto de la flota (`vehiculos` / `vehiculos_tercero`), o null si no hay. */
+export function origenFoto(url: string | null | undefined, supabaseUrl: string | null | undefined): OrigenFoto | null {
+  const crudo = String(url ?? "").trim();
+  if (!crudo) return null;
+  let u: URL;
+  try { u = new URL(crudo); } catch { return { tipo: "otro", url: crudo }; }
+  if (/(^|\.)drive\.google\.com$|(^|\.)docs\.google\.com$/i.test(u.hostname)) {
+    const m = crudo.match(/\/d\/([a-zA-Z0-9_-]{20,})/) || crudo.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
+    return { tipo: "drive", url: crudo, miniatura: m ? `https://drive.google.com/thumbnail?id=${m[1]}&sz=w400` : null };
+  }
+  let base: URL | null = null;
+  try { base = supabaseUrl ? new URL(supabaseUrl) : null; } catch { base = null; }
+  const propio = !!base && u.protocol === "https:" && u.host === base.host && !u.username && !u.password;
+  if (propio && u.pathname.startsWith(RUTA_PUBLICA_STORAGE) && !u.pathname.includes("..")) {
+    let bucket = "";
+    try { bucket = decodeURIComponent(u.pathname.slice(RUTA_PUBLICA_STORAGE.length).split("/")[0] ?? ""); } catch { bucket = ""; }
+    if (bucket && !(BUCKETS_PRIVADOS as readonly string[]).includes(bucket)) return { tipo: "copiable", url: crudo };
+  }
+  return { tipo: "otro", url: crudo };
+}
+
+/** Una unidad de la flota con sus fotos, como sugerencia para la categoría. */
+export type UnidadFotos = {
+  id: number;
+  flota: "propia" | "tercerizada";
+  placa: string;
+  estado: string | null;
+  tipo_vehiculo_costeo: string | null;
+  foto_externa_url: string | null;
+  foto_interna_url: string | null;
+};
+
+/**
+ * Las unidades que se SUGIEREN para la categoría: las vigentes (estado distinto de «inactivo»)
+ * cuya ficha de costeo es la de la categoría y que tienen al menos una foto. Las propias primero,
+ * después por placa. Nunca se elige ninguna sola: la foto de un tercero puede mostrar su logo.
+ */
+export function sugerenciasFlota(unidades: readonly UnidadFotos[], tipoVehiculo: string | null | undefined): UnidadFotos[] {
+  const tipo = String(tipoVehiculo ?? "").trim();
+  if (!tipo) return [];
+  return unidades
+    .filter((u) => String(u.tipo_vehiculo_costeo ?? "").trim() === tipo)
+    .filter((u) => String(u.estado ?? "").trim().toLowerCase() !== "inactivo")
+    .filter((u) => String(u.foto_externa_url ?? "").trim() || String(u.foto_interna_url ?? "").trim())
+    .slice()
+    .sort((a, b) => (a.flota === b.flota ? 0 : a.flota === "propia" ? -1 : 1) || a.placa.localeCompare(b.placa));
+}
+
+/** Lo que responde /api/traslados/categorias/foto. */
+export type RespuestaFoto = { ok?: boolean; codigo?: string; detalle?: string; url?: string | null } | null;
+
+/**
+ * El mensaje de una respuesta de la subida (o del quitar) de una foto, enrutado por CÓDIGO.
+ * `sinMigracion`: falta traslados-07 (la pantalla pasa a decirlo en ámbar).
+ */
+export function mensajeRespuestaFoto(status: number, d: RespuestaFoto, accion: "subir" | "quitar" = "subir"): { codigo: string; detalle: string; sinMigracion: boolean } {
+  const codigo = String(d?.codigo ?? (status === 401 ? "sin_sesion" : status === 404 && !d ? "sin_despliegue" : "error"));
+  const de = (detalle: string, sinMigracion = false) => ({ codigo, detalle, sinMigracion });
+  const que = accion === "subir" ? "No se guardó la foto" : "No se quitó la foto";
+  if (codigo === "sin_migracion") {
+    return de(/traslados-0/.test(d?.detalle ?? "") ? `${que}: ${d?.detalle}` : `${que}: falta correr ${SQL_FOTOS_CATEGORIA} en Supabase (SQL Editor → pegar entero → Run).`, true);
+  }
+  if (status === 401) return de(`${que}: tu sesión venció o no se pudo verificar. Vuelve a ingresar.`);
+  if (status === 403) {
+    return de(codigo === "origen"
+      ? `${que}: el servidor rechazó la llamada (origen no permitido). Abre el ERP desde su dirección oficial.`
+      : `${que}: te falta el permiso del módulo Tarifas (lo da un administrador en Usuarios).`);
+  }
+  if (codigo === "sin_despliegue") return de(`${que}: la subida de fotos todavía no está desplegada en el servidor (/api/traslados/categorias/foto).`);
+  if (codigo === "sin_categoria") return de(`${que}: esta categoría ya no existe en la base (alguien la borró). Pulsa «↻ Recargar».`);
+  if (codigo === "cambio_concurrente") return de(`${que}: otra persona cambió esta foto mientras tanto. Pulsa «↻ Recargar» y vuelve a intentarlo.`);
+  if (codigo === "tope") return de(`${que}: ${d?.detalle || "demasiadas fotos seguidas; espera un minuto."}`);
+  if (status === 413 || status === 422) return de(`${que}: ${d?.detalle || "la foto no es un JPEG que el PDF pueda usar."}`);
+  if (status >= 500) return de(`${que}: ${d?.detalle || "el servidor no respondió bien. Vuelve a intentarlo en un momento."}`);
+  return de(`${que}: ${d?.detalle || `el servidor respondió ${status}.`}`);
 }

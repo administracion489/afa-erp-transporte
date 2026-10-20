@@ -210,5 +210,73 @@ seccion("7. Envío automático: la pantalla dice lo mismo que el agente");
   ok(P.SQL_TRASLADOS.some((x) => x.archivo === P.SQL_COTIZACION_IA), "la lista de SQL incluye traslados-05");
 }
 
+// ── 9. Fotos y descripción de la categoría (traslados-07) ─────────────────────
+seccion("9. Fotos de la categoría: qué se lee, qué se copia y cómo se dice");
+{
+  const bytes = (...xs: (number | string)[]) => new Uint8Array(xs.flatMap((x) => (typeof x === "string" ? [...x].map((ch) => ch.charCodeAt(0)) : [x])));
+  const ftyp = (marca: string) => bytes(0, 0, 0, 24, "ftyp", marca, 0, 0, 0, 0);
+  ok(P.esHeic("image/heic", "foto.jpg") && P.esHeic("image/heif", null) && P.esHeic("IMAGE/HEIC-SEQUENCE", null), "HEIC por el tipo");
+  ok(P.esHeic("", "IMG_0001.HEIC") && P.esHeic(null, "x.heif"), "HEIC por la extensión");
+  ok(P.esHeic("", "foto", ftyp("heic")) && P.esHeic("", "foto", ftyp("mif1")), "HEIC por la firma (sin tipo ni extensión)");
+  ok(!P.esHeic("", "foto", ftyp("avif")), "un AVIF sí lo lee el navegador: no es HEIC");
+  ok(!P.esHeic("image/jpeg", "foto.jpg", bytes(0xff, 0xd8, 0xff, 0xe0, 0, 16, "JFIF", 0, 1, 1)), "un JPEG no es HEIC");
+  ok(/JPG o PNG/.test(P.MOTIVO_HEIC) && /captura/.test(P.MOTIVO_HEIC), "el motivo dice qué subir en su lugar");
+
+  ok(P.descripcionParaGuardar("  Minivan\n con   bodega  ") === "Minivan con bodega", "la descripción se guarda en un párrafo, sin bordes");
+  ok(P.descripcionParaGuardar("   \n ") === null && P.descripcionParaGuardar(null) === null, "vacía = null (el PDF usa la frase por defecto)");
+  ok(P.largoTexto("🚐 Van") === 5 && P.largoTexto("ñandú") === 5, "los caracteres se cuentan como la base (un emoji es uno)");
+
+  const SB = "https://abc.supabase.co";
+  const pub = (bucket: string, ruta = "propios/ABC123/ext.jpg") => `${SB}/storage/v1/object/public/${bucket}/${ruta}`;
+  ok(P.origenFoto(pub("vehiculos-fotos"), SB)?.tipo === "copiable", "una foto pública del propio Supabase se puede copiar");
+  for (const b of ["documentos", "pasajeros-fotos", "radar-media", "crm-media"]) ok(P.origenFoto(pub(b), SB)?.tipo === "otro", `un bucket privado (${b}) no se copia`);
+  ok(P.origenFoto(pub("vehiculos-fotos").replace("abc.", "otro."), SB)?.tipo === "otro", "otro proyecto de Supabase no se copia");
+  ok(P.origenFoto(pub("vehiculos-fotos").replace("https:", "http:"), SB)?.tipo === "otro", "http no se copia");
+  ok(P.origenFoto(pub("vehiculos-fotos").replace("https://", "https://yo:clave@"), SB)?.tipo === "otro", "con usuario en la URL no se copia");
+  ok(P.origenFoto(`${SB}/storage/v1/object/sign/vehiculos-fotos/x.jpg?token=1`, SB)?.tipo === "otro", "una URL firmada no se copia");
+  ok(P.origenFoto(pub("vehiculos-fotos"), null)?.tipo === "otro", "sin la URL del proyecto, nada se da por propio");
+  const dr = P.origenFoto("https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWx/view?usp=sharing", SB);
+  ok(dr?.tipo === "drive" && dr.miniatura === "https://drive.google.com/thumbnail?id=1AbCdEfGhIjKlMnOpQrStUvWx&sz=w400", "Drive: se reconoce y se arma la miniatura");
+  ok(P.origenFoto("https://drive.google.com/drive/folders/x", SB)?.tipo === "drive" && (P.origenFoto("https://drive.google.com/drive/folders/x", SB) as { miniatura: string | null }).miniatura === null, "Drive sin id: sin miniatura");
+  ok(P.origenFoto("", SB) === null && P.origenFoto(null, SB) === null && P.origenFoto("   ", SB) === null, "sin foto = null");
+  ok(P.origenFoto("no es una url", SB)?.tipo === "otro" && P.origenFoto("https://ejemplo.com/bus.jpg", SB)?.tipo === "otro", "texto suelto u otro sitio: no se copia");
+
+  const u = (id: number, flota: P.UnidadFotos["flota"], placa: string, tipo: string | null, estado: string | null, ext: string | null, int: string | null = null): P.UnidadFotos =>
+    ({ id, flota, placa, tipo_vehiculo_costeo: tipo, estado, foto_externa_url: ext, foto_interna_url: int });
+  const flota = [
+    u(1, "tercerizada", "AAA-111", "SPRINTER_17", "disponible", "x"),
+    u(2, "propia", "ZZZ-999", "SPRINTER_17", null, null, "y"),
+    u(3, "propia", "BBB-222", "SPRINTER_17", "Inactivo", "x"),
+    u(4, "propia", "CCC-333", "SPRINTER_17", "disponible", null, null),
+    u(5, "propia", "DDD-444", "BUS_50", "disponible", "x"),
+    u(6, "propia", "EEE-555", " SPRINTER_17 ", "ocupado", "x"),
+  ];
+  const sug = P.sugerenciasFlota(flota, "SPRINTER_17");
+  ok(sug.map((x) => x.id).join() === "6,2,1", "solo la misma ficha, vigentes y con alguna foto; propias primero y por placa");
+  ok(P.sugerenciasFlota(flota, null).length === 0 && P.sugerenciasFlota(flota, "  ").length === 0, "sin ficha de costeo no se sugiere nada");
+
+  const m = (status: number, d: P.RespuestaFoto, accion?: "subir" | "quitar") => P.mensajeRespuestaFoto(status, d, accion);
+  const sm = m(409, { codigo: "sin_migracion", detalle: "Falta correr supabase/traslados-07-fotos-categoria.sql en Supabase." });
+  ok(sm.sinMigracion && sm.detalle.includes("traslados-07"), "sin migración: se marca y nombra el SQL");
+  ok(m(409, { codigo: "sin_migracion" }).detalle.includes(P.SQL_FOTOS_CATEGORIA), "sin migración y sin detalle: nombra el SQL igual");
+  ok(/sesión/.test(m(401, null).detalle) && !m(401, null).sinMigracion, "401: la sesión");
+  ok(/origen/.test(m(403, { codigo: "origen" }).detalle) && /Tarifas/.test(m(403, { codigo: "sin_permiso", detalle: "x" }).detalle), "403: origen o el permiso que falta");
+  ok(/desplegada/.test(m(404, null).detalle) && /Recargar/.test(m(404, { codigo: "sin_categoria" }).detalle), "404: sin despliegue o categoría borrada");
+  ok(/Recargar/.test(m(409, { codigo: "cambio_concurrente" }).detalle), "409: otro la cambió");
+  ok(m(429, { codigo: "tope", detalle: "Demasiadas fotos seguidas: espera 12 s." }).detalle.includes("12 s"), "429: dice cuánto esperar");
+  ok(m(422, { codigo: "canales", detalle: "Es un JPEG en CMYK (de imprenta): conviértelo a RGB." }).detalle.includes("CMYK"), "422: el motivo de revisarJpeg");
+  ok(m(413, { codigo: "muy_pesado", detalle: "La foto pesa 900 KB" }).detalle.includes("900 KB"), "413: el peso");
+  ok(/servidor/.test(m(502, null).detalle) && m(500, { detalle: "No se pudo guardar." }).detalle.includes("No se pudo guardar."), "5xx: dicho en castellano");
+  ok(/^No se quitó/.test(m(500, null, "quitar").detalle) && /^No se guardó/.test(m(500, null).detalle), "dice qué acción falló");
+
+  const fs = await import("node:fs");
+  ok(fs.existsSync(P.SQL_FOTOS_CATEGORIA), "el SQL que nombra la pantalla existe");
+  ok(P.SQL_TRASLADOS.some((x) => x.archivo === P.SQL_FOTOS_CATEGORIA), "la lista de SQL incluye traslados-07");
+  // El aviso «sin_foto» del PDF nombra el bloque de la pantalla con su título real.
+  const pantalla = fs.readFileSync("components/tarifario/FotosCategorias.tsx", "utf8");
+  const avisos = fs.readFileSync("lib/traslados/enviar-cotizacion-datos.ts", "utf8");
+  ok(pantalla.includes("Fotos y descripción para la cotización") && avisos.includes("«Fotos y descripción para la cotización»"), "el aviso sin_foto nombra el bloque como se llama en la pantalla");
+}
+
 console.log(`\n${oks} ok · ${fallos} fallos`);
 if (fallos) process.exit(1);

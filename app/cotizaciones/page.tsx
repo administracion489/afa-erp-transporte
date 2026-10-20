@@ -50,6 +50,8 @@ import BarraHorasParaderos, { etiquetaDiaCorta, type ContextoHoras } from "@/com
 import { coordValida, resolverRestauracion, rutaCoordsParaGuardar, rotuloFuente, type PuntoRuta, type Extremo } from "@/lib/cotizacion-ruta-coords";
 import { faltaColumna, faltaAlguna } from "@/lib/columna-faltante";
 import ModalDespachoSinCotizar from "@/components/cotizaciones/ModalDespachoSinCotizar";
+import { AVISO_TRASLADO_EN_CASTELLANO, clienteErpDe, entradaTrasladoPagina, esTrasladoIA } from "@/components/cotizaciones/pdf-traslado";
+import type { FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
 import { leerDespachosSinCotizar, vincularCotizacion } from "@/lib/despacho-sin-cotizar-datos";
 import { pendientesDeCotizar, prellenadoCotizacion, type ReservaDespacho } from "@/lib/despacho-sin-cotizar";
 // hoyLima de lib/alertas NO: ese módulo crea el cliente service-role al cargarse y rompe la página en el navegador.
@@ -69,7 +71,7 @@ type ModoServ="eventual"|"fijo";
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;pax_contratado?:number|null;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;ciudad?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;moneda?:string|null;tipo_cambio?:number|string|null;idioma_pdf?:string|null;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;moneda?:string|null;tipo_cambio?:number|string|null;idioma_pdf?:string|null;traslado_json?:unknown;crm_conversacion_id?:string|null;};
 /**
  * Una fila de la LISTA liviana (COLS_LISTA de lib/cotizaciones-filtros.ts): solo escalares, sin
  * items_json, paraderos ni consideraciones. Todo lo que edita, duplica, imprime o convierte pide
@@ -2225,8 +2227,11 @@ export default function CotizacionesPage(){
   /**
    * Arma el PDF con lib/cotizacion-pdf.ts (`htmlCotizacion`): devuelve el HTML y lo que hay que
    * AVISAR antes de enviarlo. `html: null` solo con dólares sin tipo de cambio válido.
+   * Un TRASLADO de la IA del CRM (`traslado_json`) con la plantilla corporativa imprime LO MISMO que
+   * el PDF que se manda por WhatsApp (components/cotizaciones/pdf-traslado.ts), siempre en castellano
+   * (`idioma` dice en qué idioma salió de verdad). Las demás cotizaciones, como siempre.
    */
-  const prepararPDF=async(cot:Cotizacion,plantilla:string,idioma:Idioma):Promise<ResultadoPdf&{plantilla:string}>=>{
+  const prepararPDF=async(cot:Cotizacion,plantilla:string,idioma:Idioma):Promise<ResultadoPdf&{plantilla:string;idioma?:Idioma}>=>{
     const cl=cot.cliente_id!=null?mapaClientes.get(cot.cliente_id):undefined;
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
     // Recopilar todos los vehículos únicos: nivel cotización + por ítem
@@ -2240,6 +2245,14 @@ export default function CotizacionesPage(){
     let nombreFinal=(cot as any).creado_por||"";
     if(!nombreFinal){try{nombreFinal=(await operadorActual()).nombre;}catch(e){}}
     const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
+    if(plantilla==="corporativo"&&esTrasladoIA(cot)){
+      const e=await entradaTrasladoPagina(cot as unknown as FilaCotizacionLeida,{empresa:empData as EmpresaPerfilPDF|null,plantilla:cfgData as CotPlantillaConfig|null,cliente:clienteErpDe(cl)}).catch(()=>null);
+      if(e){
+        const rt=htmlCotizacion(e);
+        const avisos=idioma==="es"?rt.avisos:[...rt.avisos,{codigo:"textos_escritos_tal_cual" as const,bloquea:false,detalle:AVISO_TRASLADO_EN_CASTELLANO}];
+        return{...rt,avisos,plantilla,idioma:"es"};
+      }
+    }
     const considFinal=editandoId===cot.id?consid:(cot.consideraciones_json||consid);
     const r=htmlCotizacion({
       cot,cliente:cl,items:its,vehiculos,repr:nombreFinal,consid:considFinal,plantilla,
@@ -2262,7 +2275,8 @@ export default function CotizacionesPage(){
       // La plantilla y el idioma elegidos quedan en la cotización (best-effort: idioma_pdf es de cotizaciones-04).
       const cambios:Record<string,string>={};
       if(plantilla!=="corporativo")cambios.plantilla_pdf=plantilla;
-      if(idioma!==normalizarIdioma(cot.idioma_pdf))cambios.idioma_pdf=idioma;
+      const idiomaImpreso=r.idioma??idioma;
+      if(idiomaImpreso!==normalizarIdioma(cot.idioma_pdf))cambios.idioma_pdf=idiomaImpreso;
       if(Object.keys(cambios).length){
         let{error}=await supabase.from("cotizaciones").update(cambios).eq("id",cot.id);
         if(error&&faltaColumna(error,"idioma_pdf")&&cambios.idioma_pdf){delete cambios.idioma_pdf;setFaltaMonedaGuardado(true);if(Object.keys(cambios).length)({error}=await supabase.from("cotizaciones").update(cambios).eq("id",cot.id));}

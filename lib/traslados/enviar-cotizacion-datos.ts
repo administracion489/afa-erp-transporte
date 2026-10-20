@@ -198,6 +198,8 @@ export const COLS_CATEGORIA_PDF = "clave, nombre, capacidad, maletas_bodega, tip
 export const COLS_CATEGORIA_FOTOS = ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] as const;
 /** El SQL que agrega las fotos (lo nombran los avisos y el endpoint de subida). */
 export const SQL_FOTOS = "supabase/traslados-07-fotos-categoria.sql";
+/** Dónde se ponen las fotos y la descripción de la categoría (components/tarifario/FotosCategorias.tsx). */
+export const DONDE_FOTOS = "/tarifario → Zonas y traslados → Vehículos → «Fotos y descripción para la cotización» (debajo de la tabla de vehículos)";
 
 export type CodigoAvisoTraslado = "sin_foto" | "foto_no_descargada" | "sin_cuenta_en_moneda" | "sin_migracion_fotos";
 /** Lo que el PDF no pudo poner y conviene decir. NINGUNO bloquea el envío. */
@@ -262,8 +264,8 @@ export type PdfArmado = { bytes: Uint8Array; nombre: string; caption: string; em
 /** El texto de un aviso, con dónde se arregla. */
 function aviso(codigo: CodigoAvisoTraslado, extra = ""): AvisoPdfTraslado {
   const detalle: Record<CodigoAvisoTraslado, string> = {
-    sin_foto: "La categoría del vehículo no tiene fotos: el PDF sale solo con su descripción. Se suben en /tarifario → Zonas y traslados → Vehículos.",
-    foto_no_descargada: "Una foto de la categoría no se pudo bajar (o no es del almacenamiento de fotos de traslados): el PDF sale sin ella. Vuelve a subirla en /tarifario → Zonas y traslados → Vehículos.",
+    sin_foto: `La categoría del vehículo no tiene fotos: el PDF sale solo con su descripción. Se suben en ${DONDE_FOTOS}.`,
+    foto_no_descargada: `Una foto de la categoría no se pudo bajar (o no es del almacenamiento de fotos de traslados): el PDF sale sin ella. Vuelve a subirla en ${DONDE_FOTOS}.`,
     sin_cuenta_en_moneda: "El PDF sale sin el bloque de cuentas bancarias.",
     sin_migracion_fotos: `Falta correr ${SQL_FOTOS}: el PDF sale sin las fotos ni la descripción de la categoría.`,
   };

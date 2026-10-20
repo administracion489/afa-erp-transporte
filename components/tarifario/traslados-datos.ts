@@ -10,7 +10,7 @@
 import { supabase } from "@/lib/supabase";
 import { tablaQueFalta, faltaAlguna, type ErrorSupabase } from "@/lib/columna-faltante";
 import type { Moneda } from "@/lib/traslados/motor";
-import type { CategoriaFila, TarifaFila, ZonaFila } from "./traslados-pantalla";
+import type { CategoriaFila, TarifaFila, UnidadFotos, ZonaFila } from "./traslados-pantalla";
 
 export type ConfigFila = {
   validez_dias: number;
@@ -21,22 +21,31 @@ export type ConfigFila = {
   ia_cotiza: boolean;
   /** traslados-05: maestro del envío SIN revisión. Sin la migración, false. */
   envio_automatico: boolean;
+  /** traslados-07: lo que INCLUYE un traslado (la cotización lo copia). Sin la migración, vacía. */
+  incluye: string[];
+  /** traslados-07: lo que NO incluye. Sin la migración, vacía. */
+  no_incluye: string[];
 };
 
 export const CONFIG_VACIA: ConfigFila = {
   validez_dias: 30, espera_gratis_min: 30, consideraciones: [], consideraciones_usd: [], ia_cotiza: false, envio_automatico: false,
+  incluye: [], no_incluye: [],
 };
 
 /**
  * `sinMigracionIA`: falta alguna columna de traslados-05 (los tres interruptores). La pantalla
  * funciona igual, lee los tres como apagados y lo dice nombrando el SQL. `colsZona` son las
  * columnas que se pueden pedir de vuelta tras escribir una zona: con la columna ausente, pedirla
- * haría fallar la escritura entera.
+ * haría fallar la escritura entera. Lo mismo `colsCategoria` y `colsConfig`.
+ * `sinMigracionFotos` / `sinMigracionListas`: faltan columnas de traslados-07 (las fotos y la
+ * descripción de la categoría; las listas Incluye / No incluye). Sin ellas la pantalla sigue como
+ * antes y lo dice en ámbar.
  */
 export type CargaTraslados =
   | {
     tipo: "ok"; zonas: ZonaFila[]; categorias: CategoriaFila[]; tarifas: TarifaFila[]; config: ConfigFila; configExiste: boolean;
     sinMigracionIA: boolean; colsZona: string; colsConfig: string;
+    sinMigracionFotos: boolean; sinMigracionListas: boolean; colsCategoria: string;
   }
   | { tipo: "sin_tablas"; tabla: string }
   | { tipo: "error"; detalle: string };
@@ -48,6 +57,11 @@ export const COLS_CONFIG = "id, validez_dias, espera_gratis_min, consideraciones
 export const COLS_CONFIG_IA = `${COLS_CONFIG}, ia_cotiza, envio_automatico`;
 export const COLS_TARIFA = "id, zona_a_id, zona_b_id, categoria, moneda, precio_tramo, activo, notas";
 export const COLS_CATEGORIA = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo, orden, activo";
+/** Las de traslados-07 en la categoría: se piden y, si el error nombra una, se suelta SOLO esa. */
+export const COLS_CATEGORIA_FOTOS = ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] as const;
+/** Las columnas accesorias de `traslados_config`: las de traslados-05 y las de traslados-07. */
+const COLS_CONFIG_IA_LISTA = ["ia_cotiza", "envio_automatico"] as const;
+const COLS_CONFIG_LISTAS = ["incluye", "no_incluye"] as const;
 const PAG = 1000;
 
 type Lectura<T> = { filas: T[]; error: null } | { filas: null; error: ErrorSupabase };
@@ -97,6 +111,8 @@ export function normalizarTarifa(t: Record<string, unknown>): TarifaFila {
   };
 }
 
+const textoONull = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
+
 export function normalizarCategoria(c: Record<string, unknown>): CategoriaFila {
   return {
     clave: String(c.clave ?? ""),
@@ -106,6 +122,10 @@ export function normalizarCategoria(c: Record<string, unknown>): CategoriaFila {
     tipo_vehiculo: c.tipo_vehiculo == null ? null : String(c.tipo_vehiculo),
     orden: num(c.orden) ?? 0,
     activo: c.activo !== false,
+    // traslados-07: sin la migración no vienen (y se leen como «sin foto», que la pantalla dice en ámbar).
+    foto_externa_url: textoONull(c.foto_externa_url),
+    foto_interna_url: textoONull(c.foto_interna_url),
+    descripcion_cliente: textoONull(c.descripcion_cliente),
   };
 }
 
@@ -119,6 +139,8 @@ export function normalizarConfig(c: Record<string, unknown> | null | undefined):
     consideraciones_usd: lista(c.consideraciones_usd),
     ia_cotiza: c.ia_cotiza === true,
     envio_automatico: c.envio_automatico === true,
+    incluye: lista(c.incluye),
+    no_incluye: lista(c.no_incluye),
   };
 }
 
@@ -131,6 +153,26 @@ async function conRespaldo<T extends { error: ErrorSupabase }>(
   return { r, falta: false };
 }
 
+/**
+ * Una lectura con columnas ACCESORIAS: si el error NOMBRA una de ellas, se repite sin ESA (solo la
+ * que el error nombra) y se apunta en `faltan`. Cualquier otro error se devuelve tal cual. `cols`
+ * son las columnas que sí existen (las que se pueden pedir de vuelta tras escribir).
+ */
+async function conAccesorias<T extends { error: ErrorSupabase }>(
+  leer: (cols: string) => PromiseLike<T>, base: string, accesorias: readonly string[],
+): Promise<{ r: T; faltan: string[]; cols: string }> {
+  let quedan = [...accesorias];
+  const faltan: string[] = [];
+  for (;;) {
+    const cols = quedan.length ? `${base}, ${quedan.join(", ")}` : base;
+    const r = await leer(cols);
+    const col = r.error ? faltaAlguna(r.error, quedan) : null;
+    if (!col) return { r, faltan, cols };
+    faltan.push(col);
+    quedan = quedan.filter((c) => c !== col);
+  }
+}
+
 async function leerConfig(cols: string): Promise<{ data: Record<string, unknown> | null; error: ErrorSupabase }> {
   const { data, error } = await supabase.from("traslados_config").select(cols).eq("id", 1).maybeSingle();
   return { data: (data as Record<string, unknown> | null) ?? null, error };
@@ -138,16 +180,17 @@ async function leerConfig(cols: string): Promise<{ data: Record<string, unknown>
 
 export async function cargarTraslados(): Promise<CargaTraslados> {
   try {
-    const [zr, c, t, cfgr] = await Promise.all([
+    const [zr, cr, t, cfgr] = await Promise.all([
       conRespaldo(
         () => todas<Record<string, unknown>>("zonas_traslado", COLS_ZONA_IA, "id"),
         () => todas<Record<string, unknown>>("zonas_traslado", COLS_ZONA, "id"),
         ["envio_automatico"]),
-      todas<Record<string, unknown>>("traslado_categorias", COLS_CATEGORIA, "clave"),
+      conAccesorias((cols) => todas<Record<string, unknown>>("traslado_categorias", cols, "clave"), COLS_CATEGORIA, COLS_CATEGORIA_FOTOS),
       todas<Record<string, unknown>>("tarifas_traslado", COLS_TARIFA, "id"),
-      conRespaldo(() => leerConfig(COLS_CONFIG_IA), () => leerConfig(COLS_CONFIG), ["ia_cotiza", "envio_automatico"]),
+      conAccesorias((cols) => leerConfig(cols), COLS_CONFIG, [...COLS_CONFIG_IA_LISTA, ...COLS_CONFIG_LISTAS]),
     ]);
     const z = zr.r;
+    const c = cr.r;
     const cfg = cfgr.r;
     const errores: [string, ErrorSupabase][] = [
       ["zonas_traslado", z.error], ["traslado_categorias", c.error], ["tarifas_traslado", t.error], ["traslados_config", cfg.error],
@@ -164,9 +207,12 @@ export async function cargarTraslados(): Promise<CargaTraslados> {
       tarifas: (t.filas ?? []).map(normalizarTarifa),
       config: normalizarConfig(cfg.data),
       configExiste: !!cfg.data,
-      sinMigracionIA: zr.falta || cfgr.falta,
+      sinMigracionIA: zr.falta || cfgr.faltan.some((x) => (COLS_CONFIG_IA_LISTA as readonly string[]).includes(x)),
       colsZona: zr.falta ? COLS_ZONA : COLS_ZONA_IA,
-      colsConfig: cfgr.falta ? COLS_CONFIG : COLS_CONFIG_IA,
+      colsConfig: cfgr.cols,
+      sinMigracionFotos: cr.faltan.length > 0,
+      sinMigracionListas: cfgr.faltan.some((x) => (COLS_CONFIG_LISTAS as readonly string[]).includes(x)),
+      colsCategoria: cr.cols,
     };
   } catch (e) {
     return { tipo: "error", detalle: `No se pudo leer el catálogo de traslados: ${(e as Error)?.message ?? "sin conexión"}` };
@@ -205,6 +251,40 @@ export async function leerUltimoTc(hoy: string): Promise<LecturaTc> {
     };
   }
   return { tipo: "error", detalle: "No se pudo leer el tipo de cambio." };
+}
+
+// ── Fotos de la flota (sugerencias para la categoría) ────────────────────────
+
+export type FlotaFotos = { tipo: "ok"; unidades: UnidadFotos[] } | { tipo: "error"; detalle: string };
+
+/**
+ * Las unidades de UNA flota con sus fotos y su ficha de costeo. Sin la columna `estado` se leen
+ * todas (no se puede decir cuál está inactiva); sin `tipo_vehiculo_costeo`, ninguna se puede
+ * sugerir y se dice. Un fallo de lectura NUNCA se lee como «no hay unidades».
+ */
+async function fotosDe(tabla: "vehiculos" | "vehiculos_tercero", flota: UnidadFotos["flota"]): Promise<FlotaFotos> {
+  try {
+    const r = await conAccesorias((cols) => todas<Record<string, unknown>>(tabla, cols, "id"), "id, placa, foto_externa_url, foto_interna_url", ["estado", "tipo_vehiculo_costeo"]);
+    if (r.r.error) return { tipo: "error", detalle: r.r.error.message ?? "error desconocido" };
+    if (r.faltan.includes("tipo_vehiculo_costeo")) return { tipo: "error", detalle: `la tabla ${tabla} no tiene la columna tipo_vehiculo_costeo` };
+    const txt = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+    return {
+      tipo: "ok",
+      unidades: (r.r.filas ?? []).map((u) => ({
+        id: Number(u.id), flota, placa: String(u.placa ?? "").trim() || `#${u.id}`,
+        estado: txt(u.estado), tipo_vehiculo_costeo: txt(u.tipo_vehiculo_costeo),
+        foto_externa_url: txt(u.foto_externa_url), foto_interna_url: txt(u.foto_interna_url),
+      })),
+    };
+  } catch (e) {
+    return { tipo: "error", detalle: (e as Error)?.message ?? "sin conexión" };
+  }
+}
+
+/** Las dos flotas (propia y tercerizada), cada una con su propio resultado. */
+export async function leerFotosFlota(): Promise<{ propias: FlotaFotos; terceros: FlotaFotos }> {
+  const [propias, terceros] = await Promise.all([fotosDe("vehiculos", "propia"), fotosDe("vehiculos_tercero", "tercerizada")]);
+  return { propias, terceros };
 }
 
 // ── Fichas de costeo (para el selector de Vehículos) ─────────────────────────
