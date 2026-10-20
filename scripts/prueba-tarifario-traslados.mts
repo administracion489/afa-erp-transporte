@@ -278,5 +278,158 @@ seccion("9. Fotos de la categoría: qué se lee, qué se copia y cómo se dice")
   ok(pantalla.includes("Fotos y descripción para la cotización") && avisos.includes("«Fotos y descripción para la cotización»"), "el aviso sin_foto nombra el bloque como se llama en la pantalla");
 }
 
+// ── 10. Las condiciones del PDF del traslado (cotizaciones-05) ────────────────
+// Con reglas, Ajustes ENSEÑA (solo lectura) lo que la IA copia a la fila en cada segmento. Lo que se
+// pinta sale de `condicionesTrasladoIA`, y aquí se cruza contra `filaCotizacionTraslado` —la fila
+// que arma la IA— con la plantilla que elige `plantillaParaUso`: si la pantalla enseñara otras
+// listas, otra plantilla u otra fuente que la IA, esta sección falla.
+seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de verdad");
+{
+  const C = await import("../lib/traslados/cotizacion-traslado");
+  const PL = await import("../lib/cotizacion-plantillas");
+  type Pl = import("../lib/cotizacion-plantillas").PlantillaFila;
+  type Rg = import("../lib/cotizacion-plantillas").ReglaPlantilla;
+  const HOY = "2026-10-20";
+  // Oráculo escrito aparte (no `sirveParaIA`): activa, diseño corporativo y no en inglés.
+  const sirve = (p: Pl): boolean => p.activa !== false && (p.diseno ?? "corporativo") === "corporativo" && p.idioma !== "en";
+
+  // Un traslado cotizable de verdad (el motor), en soles y en dólares: aeropuerto → Miraflores.
+  const tarifasT = [t(AER.id, MIR.id, "AUTO", "PEN", 100), t(AER.id, MIR.id, "AUTO", "USD", 35)];
+  const ctxT: M.ContextoTraslado = { zonas: ZONAS, categorias: CATS, tarifas: tarifasT, tipoCambio: { fecha: HOY, venta: 3.4 }, hoy: HOY, igvPct: 18, validezDias: 30 };
+  const pedidoT = (tel: string): M.PedidoTraslado => ({
+    origen: { texto: "Aeropuerto Jorge Chávez", lat: -12.03, lng: -77.11, localidades: ["Callao"], barrios: [] },
+    destino: { texto: "Miraflores", lat: -12.12, lng: -77.03, localidades: ["Miraflores"], barrios: [] },
+    fecha_servicio: "2026-10-25", sentido: "ida", pax: 2, maletas: 0, telefono: tel,
+  });
+  const entradaT = (tel: string) => ({ origen: "Aeropuerto Jorge Chávez", destino: "Miraflores", fecha_servicio: "2026-10-25", hora_servicio: null, sentido: "ida" as const, fecha_retorno: null, hora_retorno: null, pax: 2, maletas: 0, telefono: tel });
+  const TEL = { PEN: "+51966707225", USD: "+13055551234" };
+  const rPen = M.evaluarTraslado(pedidoT(TEL.PEN), ctxT);
+  const rUsd = M.evaluarTraslado(pedidoT(TEL.USD), ctxT);
+  ok(rPen.codigo === "cotizable" && rPen.precio?.moneda === "PEN", `el traslado en soles es cotizable (${rPen.codigo}: ${rPen.motivo})`);
+  ok(rUsd.codigo === "cotizable" && rUsd.precio?.moneda === "USD", `el traslado en dólares es cotizable (${rUsd.codigo}: ${rUsd.motivo})`);
+  ok(PL.segmentoDeCliente({ moneda: "USD", tipoCliente: "b2b" }) === "extranjero" && PL.segmentoDeCliente({ moneda: "PEN", tipoCliente: "b2b" }) === "empresa",
+    "en el traslado, «extranjero» es siempre en dólares y los otros dos en soles (lo que supone la pantalla)");
+
+  const pl = (id: string, extra: Partial<Pl> = {}): Pl => ({ id, nombre: id.toUpperCase(), activa: true, es_principal: false, diseno: "corporativo", idioma: "es", orden: 1, ...extra });
+  const CORP = pl("corporativo", { nombre: "Corporativo", es_principal: true, condiciones_generales: ["General de la corporativa", "  "], condiciones_incluye: ["Incluye de la corporativa"], condiciones_no_incluye: null });
+  const TIA = pl("traslados_ia", { nombre: "Traslados (IA)", orden: 2, condiciones_generales: ["Precios por tramo.", "Incluye 30 minutos de espera gratis.", ""], condiciones_incluye: ["  Conductor profesional "], condiciones_no_incluye: [] });
+  const TUSD = pl("traslados_ia_usd", { nombre: "Traslados (IA) · dólares", orden: 3, condiciones_generales: ["Incluye 30 minutos de espera gratis.", "IGV exonerado con TAM y pasaporte."], condiciones_incluye: null, condiciones_no_incluye: ["Parqueo del aeropuerto"] });
+  const MOD = pl("moderno_fotos", { diseno: "moderno_fotos", condiciones_generales: ["No la dibuja la IA"] });
+  const ING = pl("en_ingles", { idioma: "en", condiciones_generales: ["In English"] });
+  const OFF = pl("apagada", { activa: false, condiciones_generales: ["Desactivada"] });
+  const r3 = (e: string, p: string, x: string): Rg[] => [
+    { servicio: "traslado_ia", segmento: "empresa", plantilla_id: e },
+    { servicio: "traslado_ia", segmento: "particular", plantilla_id: p },
+    { servicio: "traslado_ia", segmento: "extranjero", plantilla_id: x },
+  ];
+  const JUEGOS: { nombre: string; pls: Pl[]; reglas: Rg[] }[] = [
+    { nombre: "el traspaso", pls: [CORP, TIA, TUSD, MOD, ING, OFF], reglas: r3("traslados_ia", "traslados_ia", "traslados_ia_usd") },
+    { nombre: "celdas vacías", pls: [CORP, TIA, TUSD], reglas: [] },
+    { nombre: "reglas rotas", pls: [CORP, TIA, MOD, ING, OFF], reglas: r3("moderno_fotos", "apagada", "no_existe") },
+    { nombre: "inglés", pls: [CORP, ING], reglas: r3("en_ingles", "en_ingles", "en_ingles") },
+    { nombre: "sin principal", pls: [{ ...CORP, es_principal: false }, TIA], reglas: r3("traslados_ia", "moderno_fotos", "apagada") },
+    { nombre: "principal que la IA no dibuja", pls: [{ ...MOD, es_principal: true }, CORP, OFF], reglas: r3("apagada", "apagada", "corporativo") },
+    { nombre: "nada", pls: [], reglas: [] },
+    { nombre: "otras reglas que no son de la IA", pls: [CORP, TIA], reglas: [{ servicio: "eventual", segmento: "empresa", plantilla_id: "traslados_ia" }] },
+  ];
+  const CONFIGS: P.ConfigCondiciones[] = [
+    { consideraciones: ["Precios por tramo. No incluyen IGV.", "Incluye 15 minutos de espera."], consideraciones_usd: ["Pago al tipo de cambio del día", "  "], incluye: ["Ajustes incluye"], no_incluye: ["Ajustes no incluye"] },
+    { consideraciones: [], consideraciones_usd: [] },
+    { consideraciones: ["  Solo esta  ", ""], consideraciones_usd: [], incluye: null, no_incluye: [] },
+  ];
+  const codigosVistos = new Set<string>();
+  let nCond = 0;
+  for (const j of JUEGOS) for (const cfg of CONFIGS) {
+    const grupos = P.condicionesTrasladoIA(j.pls, j.reglas, cfg);
+    const segsEnGrupos = grupos.flatMap((g) => g.segmentos.map((x) => x.segmento));
+    ok(segsEnGrupos.length === 3 && PL.SEGMENTOS.every((sg) => segsEnGrupos.filter((x) => x === sg).length === 1), `${j.nombre}: cada segmento sale en un solo grupo`);
+    ok(new Set(grupos.map((g) => g.clave)).size === grupos.length, `${j.nombre}: un grupo por fuente`);
+    for (const segmento of PL.SEGMENTOS) {
+      nCond++;
+      const g = grupos.find((x) => x.segmentos.some((y) => y.segmento === segmento))!;
+      const su = g.segmentos.find((y) => y.segmento === segmento)!;
+      const uso = PL.plantillaParaUso({ servicio: "traslado_ia", segmento }, j.pls, j.reglas);
+      codigosVistos.add(uso.codigo);
+      const usd = segmento === "extranjero";
+      const fila = C.filaCotizacionTraslado(usd ? rUsd : rPen, entradaT(usd ? TEL.USD : TEL.PEN), {
+        convId: "c", clienteId: null, atencion: null, config: { validez_dias: 30, espera_gratis_min: 30, ...cfg } as unknown as import("../lib/traslados/datos").ConfigTraslados, firma: "f", hoy: HOY, plantilla: uso.plantilla,
+      });
+      const cj = fila.consideraciones_json;
+      ok(JSON.stringify([g.generales.items, g.incluye.items, g.no_incluye.items]) === JSON.stringify([cj.generales, cj.incluye, cj.no_incluye]),
+        `${j.nombre} · ${segmento}: las listas que enseña Ajustes = las que copia la IA (${JSON.stringify(g.generales.items)} vs ${JSON.stringify(cj.generales)})`);
+      ok((g.fuente.tipo === "plantilla") === (uso.plantilla != null), `${j.nombre} · ${segmento}: de una plantilla ⟺ la IA usa una plantilla`);
+      if (g.fuente.tipo === "plantilla") ok(g.fuente.plantilla.id === uso.plantilla?.id && fila.plantilla_pdf === uso.plantilla?.id, `${j.nombre} · ${segmento}: la misma plantilla que la IA`);
+      else ok(g.fuente.usd === usd && !("plantilla_pdf" in fila), `${j.nombre} · ${segmento}: sin plantilla, las de Ajustes (con las de dólares solo en extranjero)`);
+      ok(su.codigo === uso.codigo && su.detalle === uso.detalle && su.ambar === ["regla_inactiva", "regla_no_sirve_ia", "sin_plantilla", "sin_reglas"].includes(uso.codigo), `${j.nombre} · ${segmento}: el código y el ámbar del motor`);
+      ok(su.porque.length > 0 && !su.porque.startsWith("Traslado de la IA"), `${j.nombre} · ${segmento}: el porqué sin el nombre de la celda delante`);
+      if (g.fuente.tipo === "plantilla") {
+        const p = g.fuente.plantilla;
+        ok(g.generales.propia === Array.isArray(p.condiciones_generales) && g.incluye.propia === Array.isArray(p.condiciones_incluye) && g.no_incluye.propia === Array.isArray(p.condiciones_no_incluye), `${j.nombre} · ${segmento}: «sin lista propia» ⟺ NULL en la plantilla`);
+        ok(sirve(p), `${j.nombre} · ${segmento}: nunca enseña una plantilla que la IA no dibuja`);
+      }
+      // La pantalla del simulador: con la respuesta que arma la ruta para esta misma resolución.
+      const resp = {
+        plantilla: uso.plantilla ? { id: uso.plantilla.id, nombre: uso.plantilla.nombre || uso.plantilla.id, segmento, codigo: uso.codigo } : null,
+        condiciones: { fuente: uso.plantilla ? "plantilla" : "ajustes", segmento, codigo: uso.codigo, detalle: uso.detalle },
+      };
+      const cs = P.condicionesDelSimulador(resp);
+      ok(cs != null && cs.texto.startsWith("Condiciones del PDF:"), `${j.nombre} · ${segmento}: el simulador lo dice`);
+      if (cs) {
+        ok(uso.plantilla ? cs.texto.includes(`«${uso.plantilla.nombre}»`) && !/Ajustes/.test(cs.texto) : /Ajustes/.test(cs.texto), `${j.nombre} · ${segmento}: el simulador nombra la misma fuente`);
+        ok(cs.ambar === su.ambar, `${j.nombre} · ${segmento}: el simulador pinta ámbar lo mismo que Ajustes`);
+        ok(cs.enlace != null, `${j.nombre} · ${segmento}: siempre dice dónde se arregla`);
+      }
+    }
+  }
+  console.log(`  barrido: ${nCond} segmentos · códigos vistos: ${[...codigosVistos].sort().join(", ")}`);
+  ok(["regla", "principal", "regla_inactiva", "regla_no_sirve_ia", "sin_plantilla"].every((c) => codigosVistos.has(c)), "el barrido pasa por los cinco códigos que hay con reglas");
+
+  // El traspaso: empresa y particular comparten «Traslados (IA)»; extranjero, la de dólares.
+  const gT = P.condicionesTrasladoIA(JUEGOS[0].pls, JUEGOS[0].reglas, CONFIGS[0]);
+  ok(gT.length === 2 && gT[0].segmentos.map((x) => x.segmento).join() === "empresa,particular" && P.segmentosTexto(gT[0]) === "empresa y particular", "el traspaso: empresa y particular juntos, extranjero aparte");
+  ok(gT[1].incluye.propia === false && gT[1].incluye.items.length === 0, "lista NULL de la plantilla: «sin lista propia», nunca la de Ajustes");
+  ok(!gT.some((g) => g.generales.items.some((x) => x.includes("15 minutos"))), "con plantillas, las consideraciones de Ajustes no se enseñan");
+  // Sin una plantilla que la IA pueda usar: las de Ajustes, y en dólares con las de dólares.
+  const gN = P.condicionesTrasladoIA([], [], CONFIGS[0]);
+  ok(gN.length === 2 && gN.every((g) => g.fuente.tipo === "ajustes" && g.segmentos.every((x) => x.codigo === "sin_plantilla" && x.ambar)), "sin plantillas: las de Ajustes, en ámbar");
+  ok(gN[1].generales.items.join("|") === "Precios por tramo. No incluyen IGV.|Incluye 15 minutos de espera.|Pago al tipo de cambio del día", "extranjero sin plantilla: generales + las de dólares, limpias");
+
+  // La espera gratis se coteja con lo que el PDF imprime, y se nombra la plantilla.
+  ok(P.esperaQueNoCoincideIA(gT, 30).length === 0, "con 30 min en las plantillas y 30 de espera: nada");
+  const e45 = P.esperaQueNoCoincideIA(gT, 45);
+  ok(e45.length === 2 && e45[0].texto.includes("«Traslados (IA)»") && e45[0].texto.includes("empresa y particular") && e45[0].texto.includes("30 min") && e45[0].texto.includes("45 min"), "con 45 de espera: nombra la plantilla, sus segmentos y los dos números");
+  ok(e45[1].texto.includes("«Traslados (IA) · dólares»") && e45.every((d) => d.grupo.fuente.tipo === "plantilla"), "y la de dólares aparte");
+  ok(P.esperaQueNoCoincideIA(gT, 15).length === 2, "los «15 minutos» de Ajustes no cuentan: no los imprime ningún PDF");
+  const eN = P.esperaQueNoCoincideIA(gN, 30);
+  ok(eN.length === 2 && eN.every((d) => d.minutos.join() === "15" && /Ajustes/.test(d.texto) && /Asigna una plantilla/.test(d.texto)), "sin plantilla: las de Ajustes, y dice cómo arreglarlo");
+
+  // El enlace al editor solo lleva un id de forma válida (va en la URL).
+  ok(P.enlaceEditarPlantilla("traslados_ia") === "/cotizaciones/plantillas?editar=traslados_ia", "enlace a editar esa plantilla");
+  ok(P.enlaceEditarPlantilla("../x?y=1") === "/cotizaciones/plantillas" && P.enlaceEditarPlantilla(null) === "/cotizaciones/plantillas" && P.enlaceEditarPlantilla("AB") === "/cotizaciones/plantillas", "un id de otra forma no va en la URL");
+
+  // El simulador: la frase pedida, los códigos sin plantilla, y una respuesta de antes no dice nada.
+  const csR = P.condicionesDelSimulador({ plantilla: { id: "traslados_ia", nombre: "Traslados (IA)", segmento: "particular", codigo: "regla" }, condiciones: { fuente: "plantilla", segmento: "particular", codigo: "regla", detalle: "x" } });
+  ok(csR?.texto === "Condiciones del PDF: plantilla «Traslados (IA)» (traslado de la IA · particular)" && csR.detalle === null && !csR.ambar, "por la regla: la frase pedida, sin más");
+  ok(csR?.enlace?.tipo === "plantilla" && (csR.enlace as { href: string }).href === "/cotizaciones/plantillas?editar=traslados_ia", "con el enlace a editar esa plantilla");
+  ok(!!csR?.nota && /particular/.test(csR.nota) && /empresa/.test(csR.nota), "en soles avisa que el simulador no prueba la celda «empresa»");
+  ok(P.condicionesDelSimulador({ plantilla: { id: "traslados_ia_usd", nombre: "D", segmento: "extranjero", codigo: "regla" } })?.nota === null, "en dólares no hay nada que avisar");
+  const csS = P.condicionesDelSimulador({ plantilla: null, condiciones: { fuente: "ajustes", segmento: "particular", codigo: "sin_reglas", detalle: "x" } });
+  ok(!!csS && csS.texto.includes("las de Ajustes") && csS.texto.includes(PL.SQL_PLANTILLAS_USO) && csS.ambar && csS.enlace?.tipo === "ajustes", "sin reglas: las de Ajustes, nombrando el SQL");
+  const csP = P.condicionesDelSimulador({ plantilla: null, condiciones: { fuente: "ajustes", segmento: "extranjero", codigo: "sin_plantilla", detalle: "No hay una plantilla principal activa." } });
+  ok(!!csP && /hay reglas, pero ninguna plantilla que la IA pueda dibujar/.test(csP.texto) && csP.ambar && csP.enlace?.tipo === "plantillas" && csP.detalle!.includes("No hay una plantilla principal activa."), "sin plantilla: lo dice y manda a Plantillas PDF");
+  for (const vieja of [null, undefined, {}, { envio: { decision: "automatico", motivos: [] } }, { plantilla: null }, { plantilla: { id: 5, segmento: "otro", codigo: "regla" } }, { condiciones: { codigo: "inventado" } }]) {
+    ok(P.condicionesDelSimulador(vieja as Parameters<typeof P.condicionesDelSimulador>[0]) === null, `una respuesta sin esos campos (o deformes) no dice nada: ${JSON.stringify(vieja)}`);
+  }
+  const largo = P.condicionesDelSimulador({ plantilla: { id: "x_larga", nombre: "N".repeat(500), segmento: "empresa", codigo: "regla" } });
+  ok(!!largo && Array.from(largo.texto).length < 200, "un nombre desmesurado se recorta");
+
+  // Ajustes no escribe las cuatro listas cuando las lee una plantilla.
+  const fsA = await import("node:fs");
+  const src = fsA.readFileSync("components/tarifario/AjustesTraslado.tsx", "utf8");
+  ok(/if \(conListas\) \{\s*fila\.consideraciones = limpias\(cons\);\s*fila\.consideraciones_usd = limpias\(consUsd\);/.test(src) && !/consideraciones: limpias\(cons\)/.test(src),
+    "«Guardar ajustes» solo escribe las cuatro listas mientras son las que la IA copia");
+  ok(/const listasEditables = plantillas != null && grupos == null;/.test(src), "editables solo sin reglas o con la lectura fallida (y no mientras se comprueba)");
+}
+
 console.log(`\n${oks} ok · ${fallos} fallos`);
 if (fallos) process.exit(1);

@@ -1,7 +1,9 @@
 // ──────────────────────────────────────────────────────────────────────────────
 // components/tarifario/traslados-pantalla.ts — Lo que la pantalla «Zonas y traslados» decide por
 // su cuenta, en PURO (sin base ni React): el orden por sector, cómo se lee un precio tecleado, qué
-// alias se rechazan y cómo se arman las filas de la tabla de precios.
+// alias se rechazan y cómo se arman las filas de la tabla de precios. Y, desde cotizaciones-05, qué
+// condiciones del PDF del traslado enseñan Ajustes y el Simulador (`condicionesTrasladoIA`,
+// `condicionesDelSimulador`): la plantilla la elige `plantillaParaUso`, no esta pantalla.
 //
 // QUÉ ZONA, QUÉ VEHÍCULO Y QUÉ PRECIO NO SE DECIDEN AQUÍ: los decide lib/traslados/motor.ts, y esta
 // pantalla lo importa. En particular, el precio «heredado» de una subzona que se enseña en gris
@@ -16,6 +18,10 @@ import {
 } from "@/lib/traslados/motor";
 import { zonaConEnvio } from "@/lib/traslados/envio-ia";
 import { BUCKETS_PRIVADOS } from "@/lib/storage-privado";
+import {
+  considSnapshot, esIdPlantillaValido, etiquetaCelda, plantillaParaUso, SEGMENTOS, SQL_PLANTILLAS_USO,
+  type CodigoUso, type PlantillaFila, type ReglaPlantilla, type Segmento,
+} from "@/lib/cotizacion-plantillas";
 
 /** `envio_automatico` es de traslados-05: sin esa migración llega `undefined`, que es «no». */
 export type ZonaFila = Zona & { notas?: string | null; envio_automatico?: boolean | null };
@@ -465,6 +471,198 @@ export function mensajeEnvioZona(z: { id: number | null; nombre: string; tipo: Z
     ? "El envío automático está encendido en Ajustes: aplica desde que guardes."
     : "Hoy el envío automático está apagado en Ajustes: la marca queda guardada y empieza a valer cuando se encienda.");
   return partes.join("\n\n");
+}
+
+// ── Las condiciones del PDF del traslado de la IA (cotizaciones-05) ──────────
+// Desde supabase/cotizaciones-05 las condiciones del PDF del traslado salen de la plantilla de la
+// regla «Traslado de la IA × segmento» (lib/traslados/plantilla-traslado-datos.ts), no de Ajustes.
+// QUÉ PLANTILLA usa cada segmento lo decide `plantillaParaUso` (el MISMO motor que usa la IA), y QUÉ
+// LISTAS se copian a la fila es lo que hace `filaCotizacionTraslado`: la matriz cruza
+// `condicionesTrasladoIA` contra esa fila, segmento por segmento. Si Ajustes enseñara otras listas
+// que las que la IA copia, la pantalla estaría describiendo un PDF que no existe.
+
+/** Lo que `traslados_config` aporta a las condiciones (las cuatro listas de antes de cotizaciones-05). */
+export type ConfigCondiciones = {
+  consideraciones: readonly string[];
+  consideraciones_usd: readonly string[];
+  incluye?: readonly string[] | null;
+  no_incluye?: readonly string[] | null;
+};
+
+/** Una lista del PDF tal como la copia la IA. `propia: false` = la plantilla no la tiene (NULL): el PDF sale sin ella. */
+export type ListaCondicion = { items: string[]; propia: boolean };
+
+/**
+ * Cómo resolvió `plantillaParaUso` un segmento. `detalle` es su frase entera; `porque`, la misma sin
+ * el nombre de la celda delante (la pantalla ya lo pone). `ambar`: contradice lo configurado (o no
+ * hay una plantilla que la IA pueda usar).
+ */
+export type UsoSegmentoIA = { segmento: Segmento; codigo: CodigoUso; detalle: string; porque: string; ambar: boolean };
+
+/**
+ * Los segmentos que comparten la MISMA fuente de condiciones (empresa y particular suelen llevar la
+ * misma plantilla): se enseñan una vez. `fuente.tipo === "ajustes"`: no hay una plantilla que la IA
+ * pueda usar en esos segmentos y la IA copia las de `traslados_config` (en dólares, con las de dólares).
+ */
+export type GrupoCondicionesIA = {
+  clave: string;
+  fuente: { tipo: "plantilla"; plantilla: PlantillaFila } | { tipo: "ajustes"; usd: boolean };
+  segmentos: UsoSegmentoIA[];
+  generales: ListaCondicion;
+  incluye: ListaCondicion;
+  no_incluye: ListaCondicion;
+};
+
+/** Los códigos de `plantillaParaUso` que pintan ámbar: la configuración dice una cosa y la IA hace otra (o falta el SQL). */
+const USO_AMBAR: readonly CodigoUso[] = ["regla_inactiva", "regla_no_sirve_ia", "sin_plantilla", "sin_reglas"];
+export const usoEsAmbar = (c: CodigoUso): boolean => USO_AMBAR.includes(c);
+
+/** La misma limpieza que `filaCotizacionTraslado`: sin espacios de los bordes y sin líneas vacías. */
+const limpiaLista = (l: readonly unknown[] | null | undefined): string[] =>
+  (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
+
+/**
+ * Qué condiciones copia la IA a la fila en cada segmento, CON reglas (cotizaciones-05 corrida). En
+ * el traslado el segmento `extranjero` es SIEMPRE en dólares y los otros dos en soles
+ * (`segmentoDeCliente`: la moneda manda), así que el respaldo de Ajustes de `extranjero` lleva las
+ * líneas de dólares. Sin reglas (`reglas === null`) no se llama: Ajustes edita sus listas como antes.
+ */
+export function condicionesTrasladoIA(
+  plantillas: readonly PlantillaFila[],
+  reglas: readonly ReglaPlantilla[],
+  config: ConfigCondiciones,
+): GrupoCondicionesIA[] {
+  const grupos: GrupoCondicionesIA[] = [];
+  for (const segmento of SEGMENTOS) {
+    const u = plantillaParaUso({ servicio: "traslado_ia", segmento }, plantillas, reglas);
+    const prefijo = `${etiquetaCelda({ servicio: "traslado_ia", segmento })}: `;
+    const porque = u.codigo === "regla" ? "por la regla." : u.detalle.startsWith(prefijo) ? u.detalle.slice(prefijo.length) : u.detalle;
+    const uso: UsoSegmentoIA = { segmento, codigo: u.codigo, detalle: u.detalle, porque, ambar: usoEsAmbar(u.codigo) };
+    const usd = segmento === "extranjero";
+    const clave = u.plantilla ? `plantilla:${u.plantilla.id}` : `ajustes:${usd ? "usd" : "pen"}`;
+    const ya = grupos.find((g) => g.clave === clave);
+    if (ya) { ya.segmentos.push(uso); continue; }
+    if (u.plantilla) {
+      const p = u.plantilla;
+      // Respaldo VACÍO, como la IA: una lista NULL de la plantilla nunca trae las de Ajustes.
+      const s = considSnapshot(p, { incluye: [], no_incluye: [], generales: [] });
+      grupos.push({
+        clave, fuente: { tipo: "plantilla", plantilla: p }, segmentos: [uso],
+        generales: { items: limpiaLista(s.generales), propia: Array.isArray(p.condiciones_generales) },
+        incluye: { items: limpiaLista(s.incluye), propia: Array.isArray(p.condiciones_incluye) },
+        no_incluye: { items: limpiaLista(s.no_incluye), propia: Array.isArray(p.condiciones_no_incluye) },
+      });
+    } else {
+      grupos.push({
+        clave, fuente: { tipo: "ajustes", usd }, segmentos: [uso],
+        generales: { items: limpiaLista([...(config.consideraciones ?? []), ...(usd ? config.consideraciones_usd ?? [] : [])]), propia: true },
+        incluye: { items: limpiaLista(config.incluye), propia: true },
+        no_incluye: { items: limpiaLista(config.no_incluye), propia: true },
+      });
+    }
+  }
+  return grupos;
+}
+
+/** «empresa y particular»: los segmentos de un grupo, en minúsculas. */
+export function segmentosTexto(g: Pick<GrupoCondicionesIA, "segmentos">): string {
+  return listaY(g.segmentos.map((s) => etiquetaCelda({ servicio: "traslado_ia", segmento: s.segmento }).split(" · ")[1] ?? s.segmento));
+}
+
+/** El enlace al editor de esa plantilla (`?editar=` solo con un id de forma válida: va en la URL). */
+export function enlaceEditarPlantilla(id: string | null | undefined): string {
+  return id && esIdPlantillaValido(id) ? `/cotizaciones/plantillas?editar=${encodeURIComponent(id)}` : "/cotizaciones/plantillas";
+}
+
+/** Un grupo cuyas consideraciones hablan de otros minutos que la espera gratis de Ajustes. */
+export type EsperaDistinta = { grupo: GrupoCondicionesIA; minutos: number[]; texto: string };
+
+/**
+ * `minutosQueNoCoinciden` contra las consideraciones generales que la IA copia de VERDAD (las de la
+ * plantilla de cada segmento, o las de Ajustes donde no hay plantilla), con la frase que nombra cuál
+ * corregir. Con reglas, las listas de Ajustes ya no se imprimen (salvo donde no hay plantilla):
+ * compararlas avisaría de un texto que ningún PDF dice, y callaría el que sí.
+ */
+export function esperaQueNoCoincideIA(grupos: readonly GrupoCondicionesIA[], esperaMin: number): EsperaDistinta[] {
+  const out: EsperaDistinta[] = [];
+  for (const g of grupos) {
+    const minutos = minutosQueNoCoinciden(g.generales.items, esperaMin);
+    if (minutos.length === 0) continue;
+    const habla = minutos.map((m) => `${m} min`).join(", ");
+    const segs = segmentosTexto(g);
+    const texto = g.fuente.tipo === "plantilla"
+      ? `La plantilla «${g.fuente.plantilla.nombre || g.fuente.plantilla.id}» (traslado de la IA · ${segs}) habla de ${habla} y la espera gratis dice ${esperaMin} min: el PDF del traslado diría dos cosas distintas. Corrige sus consideraciones en Plantillas PDF, o el número.`
+      : `Las consideraciones de Ajustes, que la IA usa en ${segs} porque no hay una plantilla que pueda usar, hablan de ${habla} y la espera gratis dice ${esperaMin} min. Asigna una plantilla al traslado de la IA en Plantillas PDF, o corrige el número.`;
+    out.push({ grupo: g, minutos, texto });
+  }
+  return out;
+}
+
+/**
+ * Lo que el simulador dice de las condiciones del PDF, desde `respuesta.plantilla` y
+ * `respuesta.condiciones` (lib/traslados/api.ts). Valida la forma (viene de la red). Una respuesta
+ * que no trae ninguno de los dos (un servidor de antes) → null: no se dice nada, porque callar es
+ * mejor que afirmar una fuente que no se sabe. `enlace`: dónde se arregla.
+ */
+export type CondicionesSimuladasPantalla = {
+  texto: string;
+  detalle: string | null;
+  nota: string | null;
+  ambar: boolean;
+  enlace: { tipo: "plantilla"; href: string } | { tipo: "plantillas"; href: string } | { tipo: "ajustes" } | null;
+};
+
+const CODIGOS_USO: readonly CodigoUso[] = ["regla", "principal", "regla_inactiva", "regla_no_sirve_ia", "sin_reglas", "sin_plantilla"];
+const esCodigoUso = (x: unknown): x is CodigoUso => typeof x === "string" && (CODIGOS_USO as readonly string[]).includes(x);
+const esSegmento = (x: unknown): x is Segmento => typeof x === "string" && (SEGMENTOS as readonly string[]).includes(x);
+const textoCorto = (x: unknown, max: number): string | null =>
+  (typeof x === "string" && x.trim() ? Array.from(x.trim()).slice(0, max).join("") : null);
+
+export function condicionesDelSimulador(r: { plantilla?: unknown; condiciones?: unknown } | null | undefined): CondicionesSimuladasPantalla | null {
+  if (!r) return null;
+  const p = r.plantilla as { id?: unknown; nombre?: unknown; segmento?: unknown; codigo?: unknown } | null | undefined;
+  const c = r.condiciones as { fuente?: unknown; segmento?: unknown; codigo?: unknown; detalle?: unknown } | null | undefined;
+  const cond = c && typeof c === "object" && esCodigoUso(c.codigo)
+    ? { fuente: c.fuente === "plantilla" ? ("plantilla" as const) : ("ajustes" as const), segmento: esSegmento(c.segmento) ? c.segmento : null, codigo: c.codigo, detalle: textoCorto(c.detalle, 400) }
+    : null;
+  const celda = (s: Segmento) => { const t = etiquetaCelda({ servicio: "traslado_ia", segmento: s }); return t.charAt(0).toLowerCase() + t.slice(1); };
+  // Sin cliente del ERP el segmento sale de la moneda: en soles es «particular» (un cliente empresa
+  // usaría la celda «empresa», que el simulador no puede probar).
+  const notaDe = (s: Segmento | null) => (s === "particular"
+    ? "El simulador no tiene un cliente del ERP: en soles el segmento es «particular». Un cliente empresa (B2B) ya verificado usaría la regla «Traslado de la IA · empresa»."
+    : null);
+
+  if (p && typeof p === "object" && typeof p.id === "string" && p.id.trim() && esSegmento(p.segmento) && esCodigoUso(p.codigo)) {
+    const nombre = textoCorto(p.nombre, 120) ?? p.id;
+    return {
+      texto: `Condiciones del PDF: plantilla «${nombre}» (${celda(p.segmento)})`,
+      // Por la regla no hace falta decir más; si no, la frase del motor dice por qué esa.
+      detalle: p.codigo === "regla" ? null : cond?.detalle ?? null,
+      nota: notaDe(p.segmento),
+      ambar: usoEsAmbar(p.codigo),
+      enlace: { tipo: "plantilla", href: enlaceEditarPlantilla(p.id) },
+    };
+  }
+  if (!cond) return null;
+  if (cond.fuente === "plantilla") {
+    // La respuesta dice que hay plantilla pero no cuál (no debería pasar): se dice lo que se sabe.
+    return { texto: "Condiciones del PDF: las de una plantilla PDF", detalle: cond.detalle, nota: notaDe(cond.segmento), ambar: usoEsAmbar(cond.codigo), enlace: { tipo: "plantillas", href: "/cotizaciones/plantillas" } };
+  }
+  if (cond.codigo === "sin_reglas") {
+    return {
+      texto: `Condiciones del PDF: las de Ajustes de traslados (falta el SQL ${SQL_PLANTILLAS_USO})`,
+      detalle: "Al correrlo, las condiciones del traslado pasan a las plantillas «Traslados (IA)» y se editan en Plantillas PDF.",
+      nota: null, ambar: true, enlace: { tipo: "ajustes" },
+    };
+  }
+  if (cond.codigo === "sin_plantilla") {
+    return {
+      texto: "Condiciones del PDF: las de Ajustes de traslados — hay reglas, pero ninguna plantilla que la IA pueda dibujar",
+      detalle: `${cond.detalle ? `${cond.detalle} ` : ""}La IA solo dibuja una plantilla activa, de diseño Corporativo y en castellano: asígnale una en Plantillas PDF.`,
+      nota: notaDe(cond.segmento), ambar: true, enlace: { tipo: "plantillas", href: "/cotizaciones/plantillas" },
+    };
+  }
+  return { texto: "Condiciones del PDF: las de Ajustes de traslados", detalle: cond.detalle, nota: notaDe(cond.segmento), ambar: usoEsAmbar(cond.codigo), enlace: { tipo: "ajustes" } };
 }
 
 // ── Fotos y descripción de la categoría (traslados-07) ───────────────────────

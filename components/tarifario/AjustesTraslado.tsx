@@ -1,11 +1,23 @@
 "use client";
 // components/tarifario/AjustesTraslado.tsx — Pestaña «Ajustes»: la fila única `traslados_config`
-// (validez, espera gratis, consideraciones en soles y en dólares, y las listas Incluye / No incluye
-// de traslados-07) y el tipo de cambio de SUNAT.
+// (validez, espera gratis y, mientras no se corra supabase/cotizaciones-05, las cuatro listas de
+// condiciones del PDF) y el tipo de cambio de SUNAT.
 //
-// LAS LISTAS INCLUYE / NO INCLUYE las copia cada cotización de traslado AL CREARSE (como las
-// consideraciones): cambiarlas aquí no reescribe lo que ya se le envió a un cliente. Una lista
-// vacía no se imprime en el PDF. Sin traslados-07 no existen: se dice en ámbar y no se ofrecen.
+// LAS CONDICIONES DEL PDF DEL TRASLADO TIENEN UNA SOLA FUENTE (cotizaciones-05): la plantilla PDF
+// que la regla «Traslado de la IA × segmento» asigna a cada tipo de cliente, que se edita en
+// /cotizaciones/plantillas. CON las reglas, las cuatro listas de Ajustes (consideraciones, las de
+// dólares, Incluye, No incluye) se ENSEÑAN en solo lectura por segmento —qué plantilla usa la IA y
+// sus tres listas, con el enlace a editarla— y «Guardar ajustes» ya NO escribe esas cuatro
+// columnas: una lista editable que guarda en una columna que nadie lee es peor que no ofrecerla. Qué
+// plantilla y qué listas lo deciden `plantillaParaUso` y la misma copia que hace
+// `filaCotizacionTraslado` (`condicionesTrasladoIA`, cruzada en la matriz). SIN las reglas (falta el
+// SQL) o con la lectura fallida, las listas se editan aquí como antes y una línea lo dice: el SQL que
+// falta, o el error (nunca se pintan unas listas vacías por una lectura que falló). Mientras se
+// comprueba, no se ofrecen ni se guardan.
+//
+// Las listas que la IA copia, las copia cada cotización AL CREARSE: cambiarlas no reescribe lo que
+// ya se le envió a un cliente. Una lista vacía no se imprime en el PDF. Sin traslados-07 las de
+// Incluye / No incluye de Ajustes no existen: se dice en ámbar y no se ofrecen.
 //
 // EL TIPO DE CAMBIO NO SE ESCRIBE DESDE EL NAVEGADOR: «Actualizar ahora» llama a
 // POST /api/tipo-cambio/sunat, que lo trae, lo controla y lo guarda. Aquí solo se lee, y se juzga
@@ -27,9 +39,12 @@ import { tablaQueFalta } from "@/lib/columna-faltante";
 import { TC_MAX_DIAS, tcParaCotizar } from "@/lib/traslados/motor";
 import { estadoCotizadorIA } from "@/lib/traslados/envio-ia";
 import { LINEA_DISPONIBILIDAD } from "@/lib/traslados/cotizacion-traslado";
+import { leerPlantillasYReglas, type LecturaPlantillas } from "@/lib/cotizacion-plantillas-datos";
+import { ETIQUETA_SEGMENTO, SQL_PLANTILLAS_USO } from "@/lib/cotizacion-plantillas";
 import {
+  condicionesTrasladoIA, enlaceEditarPlantilla, esperaQueNoCoincideIA,
   fmtFecha, leerEntero, mensajeEncenderEnvio, mensajeEncenderIA, minutosQueNoCoinciden, SQL_COTIZACION_IA, SQL_FOTOS_CATEGORIA,
-  subzonasQueHeredan, zonasConEnvioPropio, type ZonaFila,
+  subzonasQueHeredan, zonasConEnvioPropio, type GrupoCondicionesIA, type ListaCondicion, type ZonaFila,
 } from "./traslados-pantalla";
 import { filasEscritas, leerUltimoTc, LIMITES, normalizarConfig, type ConfigFila, type LecturaTc } from "./traslados-datos";
 import { AZUL, iCls, type Decir } from "./traslados-comun";
@@ -97,19 +112,41 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
   const [noIncl, setNoIncl] = useState<string[]>(config.no_incluye);
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // De dónde salen las condiciones del PDF (cotizaciones-05). null = comprobando.
+  const [plantillas, setPlantillas] = useState<LecturaPlantillas | null>(null);
+  const [nPl, setNPl] = useState(0);
+
+  useEffect(() => {
+    let vivo = true;
+    void leerPlantillasYReglas(supabase)
+      .catch((e: unknown): LecturaPlantillas => ({ ok: false, plantillas: [], reglas: null, sinDiseno: false, error: `No se pudieron leer las plantillas del PDF: ${(e as Error)?.message ?? "sin conexión"}` }))
+      .then((r) => { if (vivo) setPlantillas(r); });
+    return () => { vivo = false; };
+  }, [nPl]);
+  const releerPlantillas = () => { setPlantillas(null); setNPl((x) => x + 1); };
+
+  // CON reglas: las condiciones son las de las plantillas (solo lectura). SIN reglas o con la lectura
+  // fallida: las de Ajustes, editables como antes. Mientras se comprueba, ni se ofrecen ni se guardan.
+  const grupos: GrupoCondicionesIA[] | null = plantillas && plantillas.ok && plantillas.reglas
+    ? condicionesTrasladoIA(plantillas.plantillas, plantillas.reglas, config)
+    : null;
+  const listasEditables = plantillas != null && grupos == null;
 
   const lVal = leerEntero(validez, LIMITES.validez_dias[0], LIMITES.validez_dias[1]);
   const lEsp = leerEntero(espera, LIMITES.espera_gratis_min[0], LIMITES.espera_gratis_min[1]);
   const limpias = (l: string[]) => l.map((x) => x.trim()).filter(Boolean);
   const sucio = validez !== String(config.validez_dias) || espera !== String(config.espera_gratis_min)
-    || JSON.stringify(limpias(cons)) !== JSON.stringify(config.consideraciones)
-    || JSON.stringify(limpias(consUsd)) !== JSON.stringify(config.consideraciones_usd)
-    || (!sinMigracionListas && (JSON.stringify(limpias(incl)) !== JSON.stringify(config.incluye)
-      || JSON.stringify(limpias(noIncl)) !== JSON.stringify(config.no_incluye)));
+    || (listasEditables && (JSON.stringify(limpias(cons)) !== JSON.stringify(config.consideraciones)
+      || JSON.stringify(limpias(consUsd)) !== JSON.stringify(config.consideraciones_usd)
+      || (!sinMigracionListas && (JSON.stringify(limpias(incl)) !== JSON.stringify(config.incluye)
+        || JSON.stringify(limpias(noIncl)) !== JSON.stringify(config.no_incluye)))));
   const motivo = lVal.tipo !== "ok" ? `Validez: un número entero de días entre ${LIMITES.validez_dias[0]} y ${LIMITES.validez_dias[1]}.`
     : lEsp.tipo !== "ok" ? `Espera gratis: un número entero de minutos entre ${LIMITES.espera_gratis_min[0]} y ${LIMITES.espera_gratis_min[1]}.`
       : !sucio ? "No hay cambios." : null;
-  const minutosDistintos = lEsp.tipo === "ok" ? minutosQueNoCoinciden([...cons, ...consUsd], lEsp.valor) : [];
+  // La espera gratis se coteja con las consideraciones que el PDF imprime DE VERDAD: con reglas, las
+  // de la plantilla de cada segmento (y se nombra cuál corregir); sin ellas, las de aquí.
+  const minutosDistintos = lEsp.tipo === "ok" && listasEditables ? minutosQueNoCoinciden([...cons, ...consUsd], lEsp.valor) : [];
+  const esperaDistinta = lEsp.tipo === "ok" && grupos ? esperaQueNoCoincideIA(grupos, lEsp.valor) : [];
 
   const descartar = () => {
     setValidez(String(config.validez_dias)); setEspera(String(config.espera_gratis_min));
@@ -121,9 +158,16 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
     if (motivo || guardando || lVal.tipo !== "ok" || lEsp.tipo !== "ok") return;
     setGuardando(true);
     setError(null);
-    const fila: Record<string, unknown> = { id: 1, validez_dias: lVal.valor, espera_gratis_min: lEsp.valor, consideraciones: limpias(cons), consideraciones_usd: limpias(consUsd) };
-    // Sin traslados-07 las listas no existen: mandarlas haría fallar el guardado entero.
-    if (!sinMigracionListas) { fila.incluye = limpias(incl); fila.no_incluye = limpias(noIncl); }
+    const fila: Record<string, unknown> = { id: 1, validez_dias: lVal.valor, espera_gratis_min: lEsp.valor };
+    // Las cuatro listas solo mientras son las que la IA copia (sin cotizaciones-05, o sin poder
+    // comprobarlo). Con reglas, nadie las lee: escribirlas sería guardar un texto que no sale en ningún PDF.
+    const conListas = listasEditables;
+    if (conListas) {
+      fila.consideraciones = limpias(cons);
+      fila.consideraciones_usd = limpias(consUsd);
+      // Sin traslados-07 las de Incluye / No incluye no existen: mandarlas haría fallar el guardado entero.
+      if (!sinMigracionListas) { fila.incluye = limpias(incl); fila.no_incluye = limpias(noIncl); }
+    }
     // Con RLS, el lado «update» de un upsert sin permiso no da error: vuelve sin filas.
     const r = filasEscritas<Record<string, unknown>>(
       await supabase.from("traslados_config").upsert(fila, { onConflict: "id" }).select(colsConfig),
@@ -132,8 +176,10 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
     if (!r.ok) { setError(r.detalle); return; }
     const c = normalizarConfig(r.filas[0]);
     onConfig(c);
-    setCons(c.consideraciones); setConsUsd(c.consideraciones_usd);
-    if (!sinMigracionListas) { setIncl(c.incluye); setNoIncl(c.no_incluye); }
+    if (conListas) {
+      setCons(c.consideraciones); setConsUsd(c.consideraciones_usd);
+      if (!sinMigracionListas) { setIncl(c.incluye); setNoIncl(c.no_incluye); }
+    }
     decir("Ajustes guardados.");
   };
 
@@ -144,7 +190,7 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_22rem] gap-4 items-start">
         <section className="bg-white border rounded-2xl p-4 space-y-4">
           {!configExiste && (
-            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">La fila de ajustes no existe todavía: se usan los valores por defecto (30 días, 30 minutos, sin consideraciones). Al guardar se crea.</p>
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">La fila de ajustes no existe todavía: se usan los valores por defecto (30 días, 30 minutos{listasEditables ? ", sin consideraciones" : ""}). Al guardar se crea.</p>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block">
@@ -163,30 +209,56 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
               Las consideraciones hablan de {minutosDistintos.map((m) => `${m} min`).join(", ")} y la espera gratis dice {espera} min: la cotización diría dos cosas distintas. Corrige el texto o el número.
             </p>
           )}
-          <div>
-            <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones (van en toda cotización de traslado)</p>
-            <ListaTextos items={cons} onCambiar={setCons} etiqueta="Consideración" placeholder="Ej: Sujeto a disponibilidad: un ejecutivo confirma la reserva." />
-          </div>
-          <div>
-            <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones solo para dólares (se agregan cuando se cotiza en US$)</p>
-            <ListaTextos items={consUsd} onCambiar={setConsUsd} etiqueta="Consideración en dólares" placeholder="Ej: El IGV se exonera solo con TAM y pasaporte." />
-          </div>
-          {sinMigracionListas ? (
-            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
-              Las listas <b>Incluye</b> y <b>No incluye</b> del PDF todavía no existen: falta correr <span className="font-mono">{SQL_FOTOS_CATEGORIA}</span> en Supabase → SQL Editor (pegar entero → Run). Hasta entonces la cotización de traslado sale sin esas dos listas.
+          {esperaDistinta.map((d) => (
+            <p key={d.grupo.clave} className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+              {d.texto}{" "}
+              <Link href={d.grupo.fuente.tipo === "plantilla" ? enlaceEditarPlantilla(d.grupo.fuente.plantilla.id) : "/cotizaciones/plantillas"} className="font-bold underline break-words">
+                {d.grupo.fuente.tipo === "plantilla" ? `Editar «${d.grupo.fuente.plantilla.nombre || d.grupo.fuente.plantilla.id}» →` : "Ir a Plantillas PDF →"}
+              </Link>
             </p>
+          ))}
+          {plantillas == null ? (
+            <p className="text-xs text-gray-400">Comprobando de dónde salen las condiciones del PDF del traslado (Ajustes o una plantilla PDF)…</p>
+          ) : grupos ? (
+            <CondicionesDePlantillas grupos={grupos} onReleer={releerPlantillas} />
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <>
+              {plantillas.ok ? (
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                  Falta correr <span className="font-mono">{SQL_PLANTILLAS_USO}</span> en Supabase → SQL Editor (pegar entero → Run). Hasta entonces las condiciones del PDF del traslado se editan aquí y son las que la IA copia. Al correrlo, pasan a las plantillas «Traslados (IA)» de <Link href="/cotizaciones/plantillas" className="font-bold underline">Plantillas PDF</Link>, se editan allí y aquí solo se enseñan.
+                </p>
+              ) : (
+                <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                  No se pudo comprobar si el traslado de la IA usa una plantilla PDF ({plantillas.error}). Mientras tanto aquí se editan las listas de Ajustes, que la IA solo usa si falta <span className="font-mono">{SQL_PLANTILLAS_USO}</span> o si ninguna plantilla le sirve.{" "}
+                  <button type="button" onClick={releerPlantillas} className="font-bold underline">Reintentar</button>
+                </p>
+              )}
               <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Incluye (va en el PDF de cada traslado)</p>
-                <ListaTextos items={incl} onCambiar={setIncl} etiqueta="Incluye" placeholder="Ej: Conductor y unidad con SOAT vigente." />
+                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones (van en toda cotización de traslado)</p>
+                <ListaTextos items={cons} onCambiar={setCons} etiqueta="Consideración" placeholder="Ej: Sujeto a disponibilidad: un ejecutivo confirma la reserva." />
               </div>
               <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">No incluye (va en el PDF de cada traslado)</p>
-                <ListaTextos items={noIncl} onCambiar={setNoIncl} etiqueta="No incluye" placeholder="Ej: Estacionamiento por retraso del vuelo." />
+                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones solo para dólares (se agregan cuando se cotiza en US$)</p>
+                <ListaTextos items={consUsd} onCambiar={setConsUsd} etiqueta="Consideración en dólares" placeholder="Ej: El IGV se exonera solo con TAM y pasaporte." />
               </div>
-              <p className="lg:col-span-2 text-[10px] text-gray-400">Cada cotización copia estas listas al crearse: cambiarlas aquí no cambia las que ya se enviaron. Una lista vacía no se imprime.</p>
-            </div>
+              {sinMigracionListas ? (
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                  Las listas <b>Incluye</b> y <b>No incluye</b> del PDF todavía no existen: falta correr <span className="font-mono">{SQL_FOTOS_CATEGORIA}</span> en Supabase → SQL Editor (pegar entero → Run). Hasta entonces la cotización de traslado sale sin esas dos listas.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Incluye (va en el PDF de cada traslado)</p>
+                    <ListaTextos items={incl} onCambiar={setIncl} etiqueta="Incluye" placeholder="Ej: Conductor y unidad con SOAT vigente." />
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">No incluye (va en el PDF de cada traslado)</p>
+                    <ListaTextos items={noIncl} onCambiar={setNoIncl} etiqueta="No incluye" placeholder="Ej: Estacionamiento por retraso del vuelo." />
+                  </div>
+                  <p className="lg:col-span-2 text-[10px] text-gray-400">Cada cotización copia estas listas al crearse: cambiarlas aquí no cambia las que ya se enviaron. Una lista vacía no se imprime.</p>
+                </div>
+              )}
+            </>
           )}
           {error && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{error}</p>}
           <div className="flex flex-wrap items-center gap-2">
@@ -201,6 +273,77 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
 
         <TipoCambioSunat decir={decir} />
       </div>
+    </div>
+  );
+}
+
+// ── Las condiciones del PDF, de las plantillas (cotizaciones-05) ─────────────
+
+function ListaSoloLectura({ titulo, lista, plantilla }: { titulo: string; lista: ListaCondicion; plantilla: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{titulo}</p>
+      {!lista.propia ? (
+        <p className="text-[11px] text-gray-500 italic">La plantilla no tiene esta lista propia: el PDF del traslado sale sin ella.</p>
+      ) : lista.items.length === 0 ? (
+        <p className="text-[11px] text-gray-500 italic">Vacía{plantilla ? " en la plantilla" : ""}: el PDF no la imprime.</p>
+      ) : (
+        <ol className="list-decimal pl-5 space-y-0.5 text-xs text-gray-700 break-words">{lista.items.map((t, i) => <li key={i}>{t}</li>)}</ol>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Las condiciones que la IA copia a cada traslado, por segmento, en SOLO LECTURA: se editan en la
+ * plantilla (Plantillas PDF). Lo que se pinta sale de `condicionesTrasladoIA`, que la matriz cruza
+ * con la fila que arma la IA.
+ */
+function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoCondicionesIA[]; onReleer: () => void }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-start gap-2">
+        <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 flex-1">Condiciones del PDF del traslado</p>
+        <button type="button" onClick={onReleer} className="text-[11px] font-bold text-gray-500 hover:text-gray-700 underline min-h-[32px]">↻ Volver a leer las plantillas</button>
+      </div>
+      <p className="text-xs text-gray-500">
+        Las consideraciones, <b>Incluye</b> y <b>No incluye</b> del PDF del traslado salen de la plantilla PDF que la regla «Traslado de la IA» asigna a cada tipo de cliente, y se editan en <Link href="/cotizaciones/plantillas" className="font-bold text-[#0b315f] underline">Plantillas PDF</Link>. Aquí solo se enseñan: es lo que la IA copia a cada cotización nueva (las ya creadas no cambian). En dólares el tipo de cliente es siempre «Extranjero».
+      </p>
+      {grupos.map((g) => {
+        const ambar = g.segmentos.some((s) => s.ambar);
+        const esPlantilla = g.fuente.tipo === "plantilla";
+        return (
+          <div key={g.clave} className={`border rounded-xl p-3 space-y-2 ${ambar ? "border-amber-300 bg-amber-50" : "border-gray-200"}`}>
+            <div className="flex flex-wrap items-start gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-bold text-gray-800">{g.segmentos.map((s) => ETIQUETA_SEGMENTO[s.segmento]).join(" · ")}</p>
+                <p className="text-xs text-gray-600 break-words">
+                  {g.fuente.tipo === "plantilla"
+                    ? <>Plantilla <b>«{g.fuente.plantilla.nombre || g.fuente.plantilla.id}»</b></>
+                    : <>Las listas de Ajustes de traslados{g.fuente.usd ? " (con las de dólares)" : ""}, que ya no se editan aquí</>}
+                </p>
+              </div>
+              {g.fuente.tipo === "plantilla" ? (
+                <Link href={enlaceEditarPlantilla(g.fuente.plantilla.id)} className="text-[11px] font-bold text-[#0b315f] underline whitespace-nowrap min-h-[32px] inline-flex items-center">Editar en Plantillas PDF →</Link>
+              ) : (
+                <Link href="/cotizaciones/plantillas" className="text-[11px] font-bold text-amber-900 underline whitespace-nowrap min-h-[32px] inline-flex items-center">Asignar una plantilla →</Link>
+              )}
+            </div>
+            <div className="space-y-0.5">
+              {g.segmentos.map((s) => (
+                <p key={s.segmento} className={`text-[11px] ${s.ambar ? "text-amber-900" : "text-gray-500"}`}>
+                  <b>{ETIQUETA_SEGMENTO[s.segmento]}:</b> {s.porque}
+                </p>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 pt-1">
+              <ListaSoloLectura titulo="Consideraciones" lista={g.generales} plantilla={esPlantilla} />
+              <ListaSoloLectura titulo="Incluye" lista={g.incluye} plantilla={esPlantilla} />
+              <ListaSoloLectura titulo="No incluye" lista={g.no_incluye} plantilla={esPlantilla} />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
