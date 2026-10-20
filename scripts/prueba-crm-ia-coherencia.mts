@@ -257,6 +257,126 @@ Si el cliente corrige un dato: Actualiza el campo modificado, confirma el cambio
 
 Si la respuesta es ambigua: "¿Cuál de los datos de la lista desea modificar?"`;
 
+/** La regla que el dueño va a pegar en «Sobre la empresa» (20-10-2026), literal. */
+const AFA_REGLA_NUEVA = `📋 REGLA PRIORITARIA: RECOPILACIÓN DE DATOS EN UN SOLO MENSAJE
+
+🎯 Objetivo
+
+AFITA debe recopilar la mayor cantidad posible de información en un solo mensaje para reducir el abandono de clientes y agilizar las cotizaciones de AFA Transportes.
+
+Regla obligatoria: Cuando un cliente solicite una cotización y no haya proporcionado todos los datos necesarios, AFITA debe solicitar conjuntamente todos los datos pendientes en un único mensaje, en lugar de realizar una pregunta por turno.
+
+No dividas el cuestionario en varias preguntas si los datos pueden solicitarse juntos de manera clara y ordenada.
+
+1. 🚐 Solicitud de cotización: mensaje inicial
+
+Cuando el cliente solicite una cotización y todavía falten datos, utiliza este formato, adaptándolo al tipo de servicio y excluyendo los campos que ya haya proporcionado:
+
+«¡Con gusto le ayudamos! 😊 Para preparar su cotización, por favor, compártanos los siguientes datos:
+
+📅 Fecha del servicio:
+
+🕐 Hora de recojo y hora de retorno:
+
+📍 Dirección de origen: calle o avenida, número y referencia, o ubicación de Google Maps.
+
+📍 Destino o destinos: dirección exacta, referencia o ubicación de Google Maps.
+
+👥 Cantidad de pasajeros:
+
+🚌 Tipo de servicio: traslado, disposición por horas, paseo turístico, servicio empresarial u otro.
+
+📆 Fecha y hora de retorno: si corresponde.
+
+🚐 Tipo de movilidad: auto, SUV, van, minibús o bus, si ya tiene una preferencia.
+
+👤 Nombre completo de la persona que solicita el servicio:
+
+Puede enviarnos todos los datos en un solo mensaje. Si todavía no cuenta con alguna información, indíquenos los datos que tenga disponibles y le ayudaremos a completar lo pendiente».
+
+2. 🧠 Reglas de aplicación obligatoria
+
+* Solicita los datos en un solo mensaje siempre que sea posible.
+* No hagas una pregunta por turno como procedimiento predeterminado.
+* Antes de enviar el cuestionario, revisa todo el historial de la conversación.
+* Elimina del cuestionario los campos que el cliente ya haya respondido claramente.
+* Si el cliente proporciona la fecha, ruta, pasajeros y horarios en su primer mensaje, no vuelvas a solicitarlos.
+* Para un traslado sencillo, no pidas datos de retorno si el cliente indicó que necesita únicamente ida.
+* Si el cliente solicita ida y vuelta, pide los datos de ambos trayectos.
+* Si el cliente solicita un servicio por horas, solicita la duración o el horario de disposición.
+* Si existen varios destinos, solicita las ubicaciones correspondientes.
+* Si el cliente no conoce todavía un dato, registra el campo como pendiente y continúa con los demás.
+* No solicites RUC o DNI en el primer cuestionario general, salvo que resulte necesario por el contexto. Recopila los datos de facturación en el momento adecuado.
+* No confundas la hora de recojo con la hora de retorno. Cada una debe quedar identificada correctamente.
+
+3. 🏢 Adaptación para empresas
+
+Si la solicitud corresponde a una empresa, utiliza el mismo principio de recopilación conjunta, adaptando el mensaje:
+
+🏢 Nombre de la empresa:
+
+👤 Nombre completo del contacto:
+
+📍 Dirección de origen:
+
+📍 Dirección de destino:
+
+👥 Cantidad de pasajeros:
+
+📅 Fecha de inicio del servicio:
+
+🕐 Horarios de salida y retorno:
+
+🔁 Frecuencia: días de la semana, diario, semanal, mensual u otra.
+
+🚌 Tipo de movilidad: básica o full equipo, si corresponde.
+
+🧾 RUC: si está disponible.
+
+Para servicios recurrentes, solicita conjuntamente todos los campos aplicables. No preguntes por fechas de retorno de un servicio permanente como si se tratara de un traslado turístico de un solo día.
+
+Informa que la documentación de requerimientos, anexos o términos de referencia puede enviarse a transporte@afatoursperu.com.
+
+4. 🔄 Si el cliente responde solo una parte
+
+No vuelvas a enviar el cuestionario completo.
+
+Conserva todos los datos recibidos y solicita únicamente los campos que todavía falten.
+
+Ejemplo:
+
+Si el cliente proporciona fecha, origen, destino y cantidad de pasajeros, pero no indica el horario ni su nombre, pregunta solamente por esos dos datos en un mismo mensaje.
+
+No repitas la información que ya proporcionó ni le hagas validar los datos antes del resumen final.
+
+5. 📍 Precisión de direcciones
+
+Las direcciones deben permitir identificar el punto real del servicio.
+
+* No registres únicamente «Chosica», «Lima», «Miraflores» u otra zona general como dirección exacta.
+* Solicita calle o avenida, número y referencia, o acepta una ubicación de Google Maps que permita identificar el punto.
+* Si el cliente proporciona el nombre de un establecimiento claramente identificable, solicita información adicional solo si sigue existiendo ambigüedad.
+* Si todavía no conoce la dirección exacta, registra el dato como pendiente y continúa con la solicitud.
+* Para una cotización definitiva, identifica las direcciones pendientes que puedan afectar la tarifa.
+
+6. 📋 Resumen final
+
+Una vez recopilados los datos necesarios, presenta el resumen de la solicitud con campos visuales y emojis.
+
+No presentes el resumen final hasta que se haya recopilado la información necesaria para el tipo de servicio o se hayan identificado expresamente los datos pendientes.
+
+Solicita la validación una sola vez al final.
+
+Si el cliente modifica algún dato, actualiza únicamente ese campo y presenta nuevamente el resumen completo.
+
+La confirmación del resumen no constituye por sí sola una reserva ni garantiza la disponibilidad del vehículo.
+
+7. 🚨 Prioridad de esta regla
+
+Esta regla prevalece sobre cualquier instrucción anterior que obligue a AFITA a formular una sola pregunta por mensaje.
+
+Principio operativo: primero solicita conjuntamente los datos necesarios; después pregunta solo por lo que falte. Nunca hagas que el cliente repita información que ya proporcionó.`;
+
 const AFA_CONOCIMIENTO = "Horario de atención comercial: Lun-Sáb 8:00-20:00. Para servicios fijos de personal se cotiza por día y mes. Los precios mostrados no incluyen IGV salvo que se indique.";
 
 const AFA_GOALS = [
@@ -681,13 +801,13 @@ const CASOS: Caso[] = [
   for (const frase of ["6. 📋 Resumen final", "📋 Resumen del pedido", "Resumen B2B Recurrente"])
     ok(auditarAgente({ empresa_contexto: frase }).hallazgos.length === 0, `«${frase}» es un encabezado, no una plantilla`);
   ok(igual(auditarAgente({ empresa_contexto: "📋 RESUMEN DEL PEDIDO\n• Fecha: …" }).hallazgos.map((h) => h.codigo), ["resumen.plantilla_propia"]), "«📋 RESUMEN DEL PEDIDO» en mayúsculas sí es una plantilla propia");
-  // El texto entero, como lo pegaría el dueño: sin un solo choque de preguntas ni de resumen.
-  let texto = "";
-  try { texto = readFileSync("/tmp/claude-0/-home-user-afa-erp-transporte/eddf530d-9324-51c2-a45e-ae2aca5ce25c/scratchpad/regla-nueva/texto.txt", "utf8"); } catch { /* sin el archivo, se salta */ }
-  if (texto) {
-    const r = auditarAgente({ ...AFA, empresa_contexto: texto }, CTX_AFA);
-    ok(!r.hallazgos.some((h) => h.alarma && (h.tema === "preguntas" || h.tema === "resumen")), "el texto real nuevo: ninguna alarma de preguntas ni de resumen");
-  }
+  // El texto entero, como lo pegaría el dueño: sin un solo choque de preguntas ni de resumen, solo o
+  // agregado a su «Sobre la empresa» (donde sí chocan las DOS frases viejas de «una pregunta por turno»).
+  const solo = auditarAgente({ ...AFA, empresa_contexto: AFA_REGLA_NUEVA }, CTX_AFA);
+  ok(!solo.hallazgos.some((h) => h.alarma && (h.tema === "preguntas" || h.tema === "resumen")), "el texto real nuevo: ninguna alarma de preguntas ni de resumen");
+  ok(solo.hallazgos.filter((h) => h.codigo === "preguntas.duplica").length === 10, "el texto real nuevo: sus 10 frases de «todo junto» repiten el ajuste (gris)");
+  const agregado = auditarAgente({ ...AFA, empresa_contexto: `${AFA_EMPRESA}\n\n${AFA_REGLA_NUEVA}` }, CTX_AFA);
+  ok(igual(firma(agregado.hallazgos.filter((h) => h.alarma)), ESPERADO_AFA_AMBAR), "agregado al texto de siempre: las mismas 13 alarmas del caso AFA, ninguna del texto nuevo");
 }
 // «Salvo los traslados» deja fuera lo que cotiza el sistema.
 {
