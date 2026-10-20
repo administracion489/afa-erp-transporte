@@ -40,7 +40,7 @@ import type { VehiculoPDF } from "../pdf-chrome";
 import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { fechaLima } from "../alertas-horario";
 import { atencionImprimible, referenciaImprimible } from "./texto-libre";
-import { urlFotoPermitida } from "./fotos-categoria";
+import { urlFotoPermitida, type LadoFoto } from "./fotos-categoria";
 import { mismoTelefonoE164 } from "../crm-telefono";
 
 const r2 = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 100) / 100;
@@ -398,22 +398,23 @@ export function descripcionCategoria(cat: Pick<CategoriaPdf, "nombre" | "capacid
 
 /**
  * La unidad del PDF desde la categoría. Con `supabaseUrl`, una foto que no sea del bucket
- * `traslados-fotos` del propio proyecto se descarta (no se imprime ni se intenta bajar).
+ * `traslados-fotos` del propio proyecto, con el nombre exacto que le pone la subida y de ESTA
+ * categoría y ESTE lado (`urlFotoPermitida`), se descarta: no se imprime ni se intenta bajar.
  */
 export function vehiculoDeCategoria(cat: CategoriaPdf | null | undefined, opts: { supabaseUrl?: string | null } = {}): VehiculoPDF | null {
   if (!cat) return null;
-  const foto = (u: string | null | undefined) => {
+  const foto = (u: string | null | undefined, lado: LadoFoto) => {
     const x = v(u);
     if (!x) return null;
-    return opts.supabaseUrl !== undefined && !urlFotoPermitida(x, opts.supabaseUrl) ? null : x;
+    return opts.supabaseUrl !== undefined && !urlFotoPermitida(x, opts.supabaseUrl, { clave: v(cat.clave), lado }) ? null : x;
   };
   const n = Math.trunc(Number(cat.capacidad));
   return {
     categoria: v(cat.nombre) || null,
     capacidad_pasajeros: Number.isFinite(n) && n > 0 ? n : null,
     equipamiento: null,
-    foto_externa_url: foto(cat.foto_externa_url),
-    foto_interna_url: foto(cat.foto_interna_url),
+    foto_externa_url: foto(cat.foto_externa_url, "externa"),
+    foto_interna_url: foto(cat.foto_interna_url, "interna"),
     descripcion_unidad: descripcionCategoria(cat),
   };
 }

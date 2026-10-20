@@ -11,8 +11,10 @@
 //
 // NADA SE DECODIFICA AQUÍ: la foto se juzga por sus bytes (firma JPEG, marcador SOF con las
 // dimensiones, final FF D9) con `revisarJpeg` (lib/traslados/fotos-categoria.ts), el mismo control
-// que aplica el servidor antes de meterla en el PDF. Cada foto se guarda con NOMBRE NUEVO (uuid):
-// nunca sobrescribe; la anterior se borra solo si es de este bucket y solo si el cambio entró.
+// que aplica el servidor antes de meterla en el PDF, y se guarda SIN METADATOS (`limpiarJpeg`: fuera
+// EXIF con el GPS, XMP, miniaturas y comentarios; la imagen no se recomprime). Cada foto se guarda
+// con NOMBRE NUEVO (uuid): nunca sobrescribe; la anterior se borra solo si su URL tiene la forma
+// exacta de `rutaFoto` de ESTA categoría y ESTE lado, y solo si el cambio entró.
 // El cambio es CONDICIONAL (exige la foto que se leyó): si otra persona la cambió entretanto, se
 // borra lo subido y se pide repetir, en vez de dejar un archivo huérfano o pisar el cambio ajeno.
 //
@@ -25,7 +27,7 @@ import { limitarTasa, mismoOrigen, segundosParaReintentar } from "@/lib/api-guar
 import { columnaFaltante, tablaQueFalta } from "@/lib/columna-faltante";
 import { normalizarClaveCategoria } from "@/components/tarifario/traslados-pantalla";
 import {
-  BUCKET_FOTOS_TRASLADO, COLUMNA_FOTO, FOTO_MAX_BYTES, LADOS_FOTO, claveValida, revisarJpeg, rutaDeUrlFoto, rutaFoto,
+  BUCKET_FOTOS_TRASLADO, COLUMNA_FOTO, FOTO_MAX_BYTES, LADOS_FOTO, claveValida, limpiarJpeg, revisarJpeg, rutaDeUrlFoto, rutaFoto,
   type LadoFoto,
 } from "@/lib/traslados/fotos-categoria";
 
@@ -71,9 +73,13 @@ async function cambiarFoto(sb: ReturnType<typeof db>, clave: string, lado: LadoF
   return q.select("clave");
 }
 
-/** Borra un objeto del bucket solo si la URL es de ESTE bucket del propio proyecto. Best-effort. */
-async function borrarObjeto(sb: ReturnType<typeof db>, url: string | null) {
-  const ruta = rutaDeUrlFoto(url, process.env.NEXT_PUBLIC_SUPABASE_URL);
+/**
+ * Borra un objeto del bucket solo si la URL es de ESTE bucket del propio proyecto, con la forma
+ * exacta de `rutaFoto` y de ESTA categoría y ESTE lado: la columna se puede escribir por PostgREST
+ * (módulo Tarifas), y sin esto «Quitar» en una categoría borraría la foto de otra. Best-effort.
+ */
+async function borrarObjeto(sb: ReturnType<typeof db>, url: string | null, esperado: { clave: string; lado: LadoFoto }) {
+  const ruta = rutaDeUrlFoto(url, process.env.NEXT_PUBLIC_SUPABASE_URL, esperado);
   if (!ruta) return;
   try { await sb.storage.from(BUCKET_FOTOS_TRASLADO).remove([ruta]); } catch { /* queda huérfano: no afecta a ningún PDF */ }
 }
@@ -122,21 +128,26 @@ export async function POST(req: NextRequest) {
   const bytes = new Uint8Array(await archivo.arrayBuffer());
   const rev = revisarJpeg(bytes);
   if (!rev.ok) return responder(422, rev.codigo, rev.detalle);
+  // Sin metadatos (EXIF con el GPS, XMP, miniaturas): la foto la recibe un cliente por WhatsApp.
+  const limpia = limpiarJpeg(bytes);
+  if (!limpia.ok) return responder(422, limpia.codigo, limpia.detalle);
+  const rev2 = revisarJpeg(limpia.bytes);
+  if (!rev2.ok) return responder(422, rev2.codigo, rev2.detalle);
 
   const sb = db();
   const previa = await fotoActual(sb, clave, lado);
   if (!previa.ok) return previa.res;
 
   const ruta = rutaFoto(clave, lado, crypto.randomUUID());
-  const up = await sb.storage.from(BUCKET_FOTOS_TRASLADO).upload(ruta, bytes, { contentType: "image/jpeg", upsert: false, cacheControl: "31536000" });
+  const up = await sb.storage.from(BUCKET_FOTOS_TRASLADO).upload(ruta, limpia.bytes, { contentType: "image/jpeg", upsert: false, cacheControl: "31536000" });
   if (up.error) {
     if (/bucket not found/i.test(up.error.message ?? "")) return sinMigracion();
     console.error("[traslados/categorias/foto] subida", up.error.message);
     return responder(502, "error", "No se pudo guardar la foto en el almacenamiento. Vuelve a intentarlo en un momento.");
   }
   const url = sb.storage.from(BUCKET_FOTOS_TRASLADO).getPublicUrl(ruta).data.publicUrl;
-  if (!rutaDeUrlFoto(url, process.env.NEXT_PUBLIC_SUPABASE_URL)) {
-    await borrarObjeto(sb, url);
+  if (!rutaDeUrlFoto(url, process.env.NEXT_PUBLIC_SUPABASE_URL, { clave, lado })) {
+    try { await sb.storage.from(BUCKET_FOTOS_TRASLADO).remove([ruta]); } catch { /* best-effort */ }
     return responder(500, "error", "La dirección pública de la foto no es la esperada: revisa NEXT_PUBLIC_SUPABASE_URL en Vercel.");
   }
 
@@ -151,8 +162,8 @@ export async function POST(req: NextRequest) {
     }
     return responder(409, "cambio_concurrente", "Otra persona cambió esta foto mientras subías la tuya: recarga la pantalla y vuelve a intentarlo.");
   }
-  if (previa.anterior && previa.anterior !== url) await borrarObjeto(sb, previa.anterior);
-  return responder(200, "ok", "", { clave, lado, url, ancho: rev.ancho, alto: rev.alto });
+  if (previa.anterior && previa.anterior !== url) await borrarObjeto(sb, previa.anterior, { clave, lado });
+  return responder(200, "ok", "", { clave, lado, url, ancho: rev2.ancho, alto: rev2.alto, metadatos_quitados: limpia.quitados });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -173,6 +184,6 @@ export async function DELETE(req: NextRequest) {
     return responder(500, "error", "No se pudo quitar la foto de la categoría. Vuelve a intentarlo.");
   }
   if (!cambio.data?.length) return responder(409, "cambio_concurrente", "Otra persona cambió esta foto: recarga la pantalla y vuelve a intentarlo.");
-  await borrarObjeto(sb, previa.anterior);
+  await borrarObjeto(sb, previa.anterior, { clave, lado });
   return responder(200, "ok", "", { clave, lado, url: null });
 }

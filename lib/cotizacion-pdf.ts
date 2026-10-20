@@ -116,7 +116,8 @@ export type EntradaPdfCot = {
   omitirListasVacias?: boolean;
 };
 
-export type CodigoAvisoPdf = "sin_tc" | "sin_cuenta_en_moneda" | "plantilla_en_espanol" | "textos_escritos_tal_cual";
+/** `cliente_no_verificado` solo lo agrega /cotizaciones al PDF de un traslado de la IA (components/cotizaciones/pdf-traslado.ts). */
+export type CodigoAvisoPdf = "sin_tc" | "sin_cuenta_en_moneda" | "plantilla_en_espanol" | "textos_escritos_tal_cual" | "cliente_no_verificado";
 
 export type AvisoPdf = { codigo: CodigoAvisoPdf; detalle: string; /** `sin_tc` impide el PDF. */ bloquea: boolean };
 

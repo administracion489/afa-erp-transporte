@@ -19,7 +19,7 @@
 //  5. Con todos los topes llenos, el PDF pesa menos de 3.5 MB.
 // Con MUESTRA_DIR=<carpeta> escribe el PDF y el HTML de muestra (aeropuerto → Miraflores, ida y retorno).
 import { readFileSync, writeFileSync } from "node:fs";
-import { inflateSync } from "node:zlib";
+import { crc32, deflateSync, inflateSync } from "node:zlib";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import * as M from "../lib/traslados/motor";
 import * as C from "../lib/traslados/cotizacion-traslado";
@@ -30,8 +30,10 @@ import { docCorporativo, usaValidezHasta, COLOR_CORPORATIVO, cuentasCorporativo 
 import { dibujarPdfCorporativo, type TrazaPdf } from "../lib/pdf-corporativo";
 import { aWinAnsi } from "../lib/pdf-winansi";
 import { esc } from "../lib/pdf-chrome";
-import { armarPdfDeFila, bajarImagenPublica, bajarLogo, bajarFoto } from "../lib/traslados/enviar-cotizacion-datos";
+import { armarPdfDeFila, bajarImagenPublica, bajarLogo, bajarFoto, inflarConTope, logoPermitido, LOGO_MAX_BYTES } from "../lib/traslados/enviar-cotizacion-datos";
 import { empresaConDefectos } from "../lib/empresa-perfil";
+import { mismoTelefonoE164, telefonosE164 } from "../lib/crm-telefono";
+import { clienteIdDeRemitente } from "../lib/traslados/cotizar-ia-datos";
 
 let fallos = 0, oks = 0;
 const ok = (c: boolean, m: string) => { if (c) oks++; else { fallos++; if (fallos <= 80) console.log("  FALLA " + m); } };
@@ -98,8 +100,14 @@ const jpeg = async (w: number, h: number, color: string, o: { progressive?: bool
 const FOTO_EXT = await jpeg(1280, 853, "#4a7bb7");
 const FOTO_INT = await jpeg(960, 1280, "#8a6a4a");
 const BASE = "https://abcd1234.supabase.co";
-const URL_EXT = `${BASE}/storage/v1/object/public/traslados-fotos/categorias/SUV/externa-123e4567-e89b-12d3-a456-426614174000.jpg`;
-const URL_INT = `${BASE}/storage/v1/object/public/traslados-fotos/categorias/SUV/interna-123e4567-e89b-12d3-a456-426614174001.jpg`;
+/** La URL pública de la foto de una categoría, con la forma exacta que le pone la subida (`rutaFoto`). */
+const urlFoto = (clave: string, lado: F.LadoFoto) =>
+  `${BASE}/storage/v1/object/public/traslados-fotos/${F.rutaFoto(clave, lado, lado === "externa" ? "123e4567-e89b-12d3-a456-426614174000" : "123e4567-e89b-12d3-a456-426614174001")}`;
+const URL_EXT = urlFoto("SUV", "externa");
+const URL_INT = urlFoto("SUV", "interna");
+/** Las fotos de prueba por su URL (cualquier categoría): la exterior y la interior. */
+const fotosDe = (cat: { foto_externa_url?: string | null; foto_interna_url?: string | null } | null | undefined): Record<string, Uint8Array> =>
+  cat?.foto_externa_url ? { [cat.foto_externa_url]: FOTO_EXT, [cat.foto_interna_url!]: FOTO_INT } : {};
 const perfil = {
   nombre: "Transportes Ñandú", razon_social: "Transportes Ñandú S.A.C.", ruc: "20123456789", telefono: "+51 999 888 777",
   web: "www.ejemplo.pe", email: "ventas@ejemplo.pe", direccion: "Av. Peñaloza 123, Lima", logo_url: `${BASE}/storage/v1/object/public/empresa/logo.png`,
@@ -107,7 +115,7 @@ const perfil = {
 };
 const catDe = (clave: string, conFotos: boolean): C.CategoriaPdf => {
   const c = categorias.find((x) => x.clave === clave)!;
-  return { ...c, foto_externa_url: conFotos ? URL_EXT : null, foto_interna_url: conFotos ? URL_INT : null, descripcion_cliente: null };
+  return { ...c, foto_externa_url: conFotos ? urlFoto(clave, "externa") : null, foto_interna_url: conFotos ? urlFoto(clave, "interna") : null, descripcion_cliente: null };
 };
 /** La categoría que la propia fila cotizó (la que el envío lee de `traslado_categorias`). */
 const catDeFila = (f: C.FilaCotizacionLeida, conFotos: boolean) => catDe(f.traslado_json!.categoria!.clave, conFotos);
@@ -153,17 +161,17 @@ const primeraDiferencia = (a: string[], b: string[]) => {
   return i === a.length && i === b.length ? null : `en ${i}: html «${a.slice(Math.max(0, i - 4), i + 4).join(" ")}» · pdf «${b.slice(Math.max(0, i - 4), i + 4).join(" ")}»`;
 };
 
-type Caso = { n: string; fila: C.FilaCotizacionLeida; cliente?: C.ClienteErp | null; categoria?: C.CategoriaPdf | null; logo: boolean; ejemplo?: boolean; plantilla?: any; perfil?: any };
+type Caso = { n: string; fila: C.FilaCotizacionLeida; cliente?: C.ClienteErp | null; contactoClienteId?: number | null; categoria?: C.CategoriaPdf | null; logo: boolean; ejemplo?: boolean; plantilla?: any; perfil?: any };
 
 async function compararCaso(c: Caso) {
   const ent = C.entradaCorporativaTraslado(c.fila, {
-    empresa: c.perfil ?? perfil, cliente: c.cliente ?? null, celular: "51966707225", plantilla: c.plantilla ?? null,
+    empresa: c.perfil ?? perfil, cliente: c.cliente ?? null, contactoClienteId: c.contactoClienteId ?? null, celular: "51966707225", plantilla: c.plantilla ?? null,
     categoria: c.categoria ?? null, ejemplo: c.ejemplo, supabaseUrl: BASE, ahoraMs: Date.parse("2026-10-19T15:00:00Z"),
   });
   const html = htmlCotizacion(ent).html!;
   const doc = docCorporativo(ent);
   const traza: TrazaPdf[] = [];
-  const fotos: Record<string, Uint8Array> = c.categoria?.foto_externa_url ? { [URL_EXT]: FOTO_EXT, [URL_INT]: FOTO_INT } : {};
+  const fotos = fotosDe(c.categoria);
   const bytes = await dibujarPdfCorporativo(doc, { logo: c.logo ? { bytes: LOGO_PNG, tipo: "png" } : null, fotos }, { traza, marcaAgua: c.ejemplo ? "EJEMPLO · SIN VALIDEZ" : null });
   const z = zonasHtml(html);
   const cuerpoPdf = fichas(traza.filter((x) => x.zona === "cuerpo").map((x) => x.texto).join(" "));
@@ -219,7 +227,7 @@ const USD = filaDe(pedido({ telefono: "+13055551234", sentido: "ida_retorno", fe
 const CLIENTE_ERP: C.ClienteErp = { nombre: "Contacto", empresa: "Minera Sur SAC", tipo: "b2b", ruc: "20111222333", direccion: "Av. Arequipa 123", telefono: "999 111 222", operativo_nombre: "Ana" };
 const casos: Caso[] = [
   { n: "ida · PEN · sin cliente · con fotos · con logo", fila: IDA, categoria: catDeFila(IDA, true), logo: true },
-  { n: "ida y retorno · PEN · con cliente del ERP · sin fotos", fila: IDA_RET, cliente: CLIENTE_ERP, categoria: catDeFila(IDA_RET, false), logo: true },
+  { n: "ida y retorno · PEN · con cliente del ERP · sin fotos", fila: { ...IDA_RET, cliente_id: 7 }, cliente: CLIENTE_ERP, contactoClienteId: 7, categoria: catDeFila(IDA_RET, false), logo: true },
   { n: "ida y retorno · USD · con fotos · sin logo", fila: USD, categoria: catDeFila(USD, true), logo: false },
   { n: "EJEMPLO del simulador", fila: IDA_RET, categoria: catDeFila(IDA_RET, true), logo: true, ejemplo: true },
   { n: "plantilla con condiciones propias", fila: IDA, categoria: catDeFila(IDA, false), logo: true, plantilla: PLANTILLA_CON_CONDICIONES },
@@ -266,6 +274,10 @@ seccion("3. vehiculoDeCategoria · cfgSoloCuentas · entradaCorporativaTraslado"
   ok(v.foto_externa_url === URL_EXT && v.foto_interna_url === URL_INT && v.equipamiento === null, "fotos del bucket propio pasan");
   const v2 = C.vehiculoDeCategoria({ ...catDe("SUV", true), foto_externa_url: "https://evil.test/storage/v1/object/public/traslados-fotos/x.jpg" }, { supabaseUrl: BASE })!;
   ok(v2.foto_externa_url === null && v2.foto_interna_url === URL_INT, "una foto de otro host se descarta");
+  const v3 = C.vehiculoDeCategoria({ ...catDe("SUV", true), foto_externa_url: urlFoto("VAN_12", "externa") }, { supabaseUrl: BASE })!;
+  ok(v3.foto_externa_url === null && v3.foto_interna_url === URL_INT, "la foto de OTRA categoría se descarta");
+  const v4 = C.vehiculoDeCategoria({ ...catDe("SUV", true), foto_externa_url: URL_INT, foto_interna_url: URL_EXT }, { supabaseUrl: BASE })!;
+  ok(v4.foto_externa_url === null && v4.foto_interna_url === null, "una foto puesta en el lado contrario se descarta");
   ok(C.vehiculoDeCategoria(null) === null, "sin categoría, sin unidad");
   const cfg = C.cfgSoloCuentas({ ...PLANTILLA_CON_CONDICIONES, banco_1_nombre: "IBK", banco_1_cuenta: "9", color_primario: "#123456" } as any)!;
   ok(JSON.stringify(Object.keys(cfg).sort()) === JSON.stringify(["banco_1_cuenta", "banco_1_nombre", "mostrar_cuentas_bancarias", "usar_bancos_propios"]), `cfgSoloCuentas deja solo las cuentas (${Object.keys(cfg).join(", ")})`);
@@ -340,31 +352,61 @@ seccion("4. revisarJpeg (barrido) · revisarPng");
 }
 
 // ── 5. URLs, rutas y descargas ────────────────────────────────────────────────
-seccion("5. urlFotoPermitida · rutaFoto · bajarImagenPublica");
+seccion("5. urlFotoPermitida (forma exacta de rutaFoto) · rutaFoto · bajarImagenPublica");
 {
-  const BUENA = `${BASE}/storage/v1/object/public/traslados-fotos/categorias/SUV/externa-x.jpg`;
+  const UUID = "123e4567-e89b-12d3-a456-426614174000";
+  const BUENA = urlFoto("SUV", "externa");
+  const PUB = `${BASE}/storage/v1/object/public/traslados-fotos/`;
   const casos: [string, unknown, string | null | undefined, boolean][] = [
     ["la del bucket", BUENA, BASE, true],
+    ["la interior", urlFoto("VAN_12", "interna"), BASE, true],
     ["otro host", BUENA.replace("abcd1234", "otro"), BASE, false],
     ["host parecido", BUENA.replace("abcd1234.supabase.co", "abcd1234.supabase.co.evil.test"), BASE, false],
+    ["host en mayúsculas", BUENA.replace("abcd1234.supabase.co", "ABCD1234.supabase.co"), BASE, false],
+    ["puerto explícito", BUENA.replace("supabase.co/", "supabase.co:443/"), BASE, false],
     ["otro bucket", BUENA.replace("traslados-fotos", "vehiculos-fotos"), BASE, false],
     ["bucket con prefijo", BUENA.replace("traslados-fotos/", "traslados-fotos-x/"), BASE, false],
-    ["salto ..", `${BASE}/storage/v1/object/public/traslados-fotos/../vehiculos-fotos/x.jpg`, BASE, false],
-    ["salto codificado", `${BASE}/storage/v1/object/public/traslados-fotos/%2e%2e/x.jpg`, BASE, false],
-    ["barra codificada", `${BASE}/storage/v1/object/public/traslados-fotos/a%2fb.jpg`, BASE, false],
-    ["barra invertida", `${BASE}/storage/v1/object/public/traslados-fotos/a\\b.jpg`, BASE, false],
+    ["salto ..", `${PUB}../vehiculos-fotos/x.jpg`, BASE, false],
+    ["salto dentro de la ruta", `${PUB}categorias/SUV/../VAN/externa-${UUID}.jpg`, BASE, false],
+    ["salto codificado", `${PUB}%2e%2e/x.jpg`, BASE, false],
+    ["barra codificada", `${PUB}categorias%2fSUV/externa-${UUID}.jpg`, BASE, false],
+    ["barra invertida", `${PUB}categorias\\SUV/externa-${UUID}.jpg`, BASE, false],
     ["http", BUENA.replace("https:", "http:"), BASE, false],
     ["usuario en la URL", BUENA.replace("https://", "https://u:p@"), BASE, false],
     ["con consulta", `${BUENA}?x=1`, BASE, false], ["con fragmento", `${BUENA}#x`, BASE, false],
-    ["firmada (privada)", `${BASE}/storage/v1/object/sign/traslados-fotos/x.jpg?token=y`, BASE, false],
-    ["ruta vacía", `${BASE}/storage/v1/object/public/traslados-fotos/`, BASE, false],
-    ["no es URL", "categorias/SUV/x.jpg", BASE, false], ["null", null, BASE, false],
+    ["firmada (privada)", `${BASE}/storage/v1/object/sign/traslados-fotos/categorias/SUV/externa-${UUID}.jpg?token=y`, BASE, false],
+    ["ruta vacía", PUB, BASE, false],
+    ["sin carpeta categorias", `${PUB}SUV/externa-${UUID}.jpg`, BASE, false],
+    ["clave en minúsculas", `${PUB}categorias/suv/externa-${UUID}.jpg`, BASE, false],
+    ["clave de 31", `${PUB}categorias/${"A".repeat(31)}/externa-${UUID}.jpg`, BASE, false],
+    ["otro lado", `${PUB}categorias/SUV/techo-${UUID}.jpg`, BASE, false],
+    ["uuid en mayúsculas", `${PUB}categorias/SUV/externa-${UUID.toUpperCase()}.jpg`, BASE, false],
+    ["sin uuid", `${PUB}categorias/SUV/externa-x.jpg`, BASE, false],
+    ["uuid corto", `${PUB}categorias/SUV/externa-${UUID.slice(0, -1)}.jpg`, BASE, false],
+    [".JPG", BUENA.replace(".jpg", ".JPG"), BASE, false],
+    [".jpeg", BUENA.replace(".jpg", ".jpeg"), BASE, false],
+    ["con sufijo", `${BUENA}.png`, BASE, false],
+    ["subcarpeta extra", `${PUB}categorias/SUV/x/externa-${UUID}.jpg`, BASE, false],
+    ["con espacios alrededor", `  ${BUENA}  `, BASE, true],
+    ["no es URL", F.rutaFoto("SUV", "externa", UUID), BASE, false], ["null", null, BASE, false],
     ["sin NEXT_PUBLIC_SUPABASE_URL", BUENA, null, false], ["base http", BUENA, BASE.replace("https:", "http:"), false],
   ];
-  for (const [n, u, b, esp] of casos) ok(F.urlFotoPermitida(u, b) === esp, `urlFotoPermitida ${n} → ${!esp}`);
-  ok(F.rutaDeUrlFoto(BUENA, BASE) === "categorias/SUV/externa-x.jpg", "rutaDeUrlFoto da la ruta dentro del bucket");
-  const UUID = "123e4567-e89b-12d3-a456-426614174000";
-  ok(F.rutaFoto("SUV", "externa", UUID) === `categorias/SUV/externa-${UUID}.jpg`, "rutaFoto");
+  for (const [n, u, b, esp] of casos) ok(F.urlFotoPermitida(u, b) === esp, `urlFotoPermitida ${n} → ${esp}`);
+  ok(F.rutaDeUrlFoto(BUENA, BASE) === `categorias/SUV/externa-${UUID}.jpg`, "rutaDeUrlFoto da la ruta dentro del bucket");
+  // Con la categoría y el lado esperados (el borrado del endpoint y el PDF los pasan).
+  ok(F.rutaDeUrlFoto(BUENA, BASE, { clave: "SUV", lado: "externa" }) != null, "la de su categoría y su lado pasa");
+  ok(F.rutaDeUrlFoto(BUENA, BASE, { clave: "VAN_12", lado: "externa" }) === null, "la de OTRA categoría no pasa (no se borra al quitar la de esta)");
+  ok(F.rutaDeUrlFoto(BUENA, BASE, { clave: "SUV", lado: "interna" }) === null, "la del otro lado no pasa");
+  ok(F.rutaDeUrlFoto(BUENA, BASE, { clave: "SU", lado: "externa" }) === null && F.rutaDeUrlFoto(urlFoto("SUV_2", "externa"), BASE, { clave: "SUV", lado: "externa" }) === null, "ni una clave que es prefijo de otra");
+  // Ciclo: lo que produce rutaFoto (con cualquier clave válida y un uuid de crypto) es lo que acepta la URL, y nada más.
+  for (let i = 0; i < 300; i++) {
+    const clave = ["A", "SUV", "VAN_12", "MINIBUS_30", "X".repeat(30), `C${i}`][i % 6];
+    const lado = F.LADOS_FOTO[i % 2];
+    const ruta = F.rutaFoto(clave, lado, crypto.randomUUID().toUpperCase());
+    ok(F.RE_RUTA_FOTO.test(ruta) && F.rutaDeUrlFoto(`${PUB}${ruta}`, BASE, { clave, lado }) === ruta, `ciclo rutaFoto → URL → ruta (${ruta})`);
+  }
+  // La regla que se le pasa al CHECK de traslados-07 (texto exacto, con la clave y el lado de la columna).
+  ok(F.RE_RUTA_FOTO.source === String.raw`^categorias\/([A-Z0-9_]{1,30})\/(externa|interna)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jpg$`, "RE_RUTA_FOTO es la acordada con el CHECK de la migración");
   for (const [k, l, u] of [["suv", "externa", UUID], ["SUV/../X", "externa", UUID], ["SUV", "techo", UUID], ["SUV", "interna", "../x"], ["", "interna", UUID]] as [string, any, string][]) {
     let lanza = false; try { F.rutaFoto(k, l, u); } catch { lanza = true; }
     ok(lanza, `rutaFoto rechaza ${k}/${l}/${u}`);
@@ -375,17 +417,23 @@ seccion("5. urlFotoPermitida · rutaFoto · bajarImagenPublica");
   const PNG = new Uint8Array(await sharp({ create: { width: 30, height: 30, channels: 3, background: "#fff" } }).png().toBuffer());
   const bomba = new Uint8Array(PNG); new DataView(bomba.buffer).setUint32(16, 50000); new DataView(bomba.buffer).setUint32(20, 50000);
   const GRANDE = await jpeg(2000, 100, "#abcdef");
+  const LOGO = `${BASE}/storage/v1/object/public/empresa/logo.png`;
   const dl: [string, () => Promise<unknown>, boolean, boolean][] = [
     ["foto JPEG del bucket", () => bajarFoto(BUENA, fetchCon(FOTO_EXT), BASE), true, true],
     ["foto PNG (solo JPEG)", () => bajarFoto(BUENA, fetchCon(PNG), BASE), false, true],
     ["foto de 2000 px", () => bajarFoto(BUENA, fetchCon(GRANDE), BASE), false, true],
     ["foto de más de 600 KB", () => bajarFoto(BUENA, fetchCon(new Uint8Array(F.FOTO_MAX_BYTES + 10).fill(0xff)), BASE), false, true],
     ["foto de otro bucket (no se pide)", () => bajarFoto(BUENA.replace("traslados-fotos", "vehiculos-fotos"), fetchCon(FOTO_EXT), BASE), false, false],
-    ["foto con .. (no se pide)", () => bajarFoto(`${BASE}/storage/v1/object/public/traslados-fotos/../x.jpg`, fetchCon(FOTO_EXT), BASE), false, false],
-    ["logo PNG", () => bajarLogo(`${BASE}/storage/v1/object/public/empresa/logo.png`, fetchCon(LOGO_PNG), BASE), true, true],
-    ["logo bomba PNG", () => bajarLogo(`${BASE}/storage/v1/object/public/empresa/logo.png`, fetchCon(bomba), BASE), false, true],
+    ["foto con .. (no se pide)", () => bajarFoto(`${PUB}../x.jpg`, fetchCon(FOTO_EXT), BASE), false, false],
+    ["foto sin la forma de rutaFoto (no se pide)", () => bajarFoto(`${PUB}categorias/SUV/externa-x.jpg`, fetchCon(FOTO_EXT), BASE), false, false],
+    ["logo PNG", () => bajarLogo(LOGO, fetchCon(LOGO_PNG), BASE), true, true],
+    ["logo PNG con ?t= (como lo guarda /configuracion/perfil)", () => bajarLogo(`${LOGO}?t=1760000000000`, fetchCon(LOGO_PNG), BASE), true, true],
+    ["logo bomba PNG (IHDR enorme)", () => bajarLogo(LOGO, fetchCon(bomba), BASE), false, true],
     ["logo JPEG", () => bajarLogo(`${BASE}/storage/v1/object/public/empresa/logo.jpg`, fetchCon(FOTO_EXT), BASE), true, true],
     ["logo de otro host (no se pide)", () => bajarLogo("https://evil.test/storage/v1/object/public/empresa/logo.png", fetchCon(LOGO_PNG), BASE), false, false],
+    ["logo de otro bucket del proyecto (no se pide)", () => bajarLogo(`${BASE}/storage/v1/object/public/vehiculos-fotos/logo.png`, fetchCon(LOGO_PNG), BASE), false, false],
+    ["logo del bucket de fotos de traslado (no se pide)", () => bajarLogo(BUENA, fetchCon(FOTO_EXT), BASE), false, false],
+    ["logo de más de 512 KB", () => bajarLogo(LOGO, fetchCon(new Uint8Array(LOGO_MAX_BYTES + 10).fill(0x89)), BASE), false, true],
   ];
   for (const [n, f, esp, pide] of dl) {
     const antes = llamadas;
@@ -393,10 +441,104 @@ seccion("5. urlFotoPermitida · rutaFoto · bajarImagenPublica");
     ok(!!r === esp, `${n} → ${r ? "sí" : "no"}`);
     ok((llamadas > antes) === pide, `${n}: ${pide ? "sí" : "no"} se pide`);
   }
+  ok(LOGO_MAX_BYTES === 512 * 1024, "el logo pesa como mucho 512 KB");
+  ok(logoPermitido(LOGO, BASE) && !logoPermitido(`${BASE}/storage/v1/object/public/empresa/`, BASE) && !logoPermitido(`${LOGO}#x`, BASE) && !logoPermitido(`${BASE}/storage/v1/object/public/empresa/../x.png`, BASE), "logoPermitido: solo un archivo del bucket empresa");
   // Sin redirecciones: la descarga se pide con redirect "error".
   let opciones: RequestInit | undefined;
   await bajarImagenPublica(BUENA, "foto", (async (_u: any, o?: RequestInit) => { opciones = o; return new Response(new Blob([new Uint8Array(FOTO_EXT)])); }) as typeof fetch, BASE);
   ok(opciones?.redirect === "error" && !!opciones?.signal, "sin redirecciones y con plazo");
+}
+
+// ── 5b. El PNG del logo: todos los chunks, sin animación, IDAT con tope ─────
+seccion("5b. revisarPng: APNG, IDAT inflado, entrelazado, IHDR enorme (la auditoría)");
+{
+  const chunk = (tipo: string, datos: Uint8Array) => {
+    const b = Buffer.alloc(12 + datos.length);
+    b.writeUInt32BE(datos.length, 0); b.write(tipo, 4, "ascii"); Buffer.from(datos).copy(b, 8);
+    b.writeUInt32BE(crc32(b.subarray(4, 8 + datos.length)) >>> 0, 8 + datos.length);
+    return b;
+  };
+  const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = (w: number, h: number, prof = 8, color = 6, entre = 0) => {
+    const d = Buffer.alloc(13); d.writeUInt32BE(w, 0); d.writeUInt32BE(h, 4); d[8] = prof; d[9] = color; d[12] = entre; return chunk("IHDR", d);
+  };
+  const png = (...partes: Buffer[]) => new Uint8Array(Buffer.concat([SIG, ...partes, chunk("IEND", Buffer.alloc(0))]));
+  const OPC = { maxBytes: LOGO_MAX_BYTES, maxLado: 4000, maxPixeles: 4_000_000, inflar: inflarConTope };
+  const crudo10 = deflateSync(Buffer.alloc((10 * 4 + 1) * 10));
+
+  // (1) La de la auditoría: APNG de pocos bytes con un fotograma de 6000 × 6000 (16000 × 16000 en su prueba).
+  for (const N of [6000, 16000]) {
+    const actl = Buffer.alloc(8); actl.writeUInt32BE(1, 0);
+    const fctl = Buffer.alloc(26); fctl.writeUInt32BE(1, 0); fctl.writeUInt32BE(N, 4); fctl.writeUInt32BE(N, 8);
+    const fdat = Buffer.concat([Buffer.from([0, 0, 0, 2]), deflateSync(Buffer.alloc(1000))]);
+    const apng = png(ihdr(10, 10), chunk("acTL", actl), chunk("IDAT", crudo10), chunk("fcTL", fctl), chunk("fdAT", fdat));
+    const t0 = Date.now();
+    const r = F.revisarPng(apng, OPC);
+    ok(!r.ok && r.codigo === "animado" && Date.now() - t0 < 200, `APNG ${N} × ${N} en ${apng.length} B → rechazado sin decodificar (${r.ok ? "ok" : r.codigo})`);
+    ok(!F.revisarPng(apng).ok, `APNG ${N}: también sin inflar (puro)`);
+  }
+  // Un solo fcTL o fdAT sin acTL también es animación.
+  ok(F.revisarPng(png(ihdr(10, 10), chunk("IDAT", crudo10), chunk("fdAT", Buffer.alloc(8)))).codigo === "animado" as any, "un fdAT suelto → animado");
+
+  // (2) La de la auditoría: IDAT que se infla a cientos de MB (100 × 100 RGBA ≈ 40 KB declarados).
+  const t1 = Date.now();
+  const idat400 = deflateSync(Buffer.alloc(400 * 1024 * 1024), { level: 9 });
+  const bomba400 = png(ihdr(100, 100), chunk("IDAT", idat400));
+  const r400 = F.revisarPng(bomba400, OPC);
+  ok(!r400.ok && r400.codigo === "idat_desproporcionado", `IDAT de ${Math.round(idat400.length / 1024)} KB que infla 400 MB → idat_desproporcionado (${r400.ok ? "ok" : r400.codigo})`);
+  ok(!F.revisarPng(bomba400).ok, "también sin inflar (puro): el IDAT no cabe en lo que la imagen declara");
+  // (3) Una bomba que SÍ cabe en el tope de tamaño del IDAT: 1000 × 1000 RGBA (4 MB declarados) con 300 MB dentro.
+  const idat300 = deflateSync(Buffer.alloc(300 * 1024 * 1024), { level: 9 });
+  const bomba300 = png(ihdr(1000, 1000), chunk("IDAT", idat300));
+  ok(bomba300.length <= LOGO_MAX_BYTES && idat300.length <= F.idatMaximo(F.bytesCrudosPng(1000, 1000, 6, 8, false)), `la bomba de 300 MB pesa ${Math.round(bomba300.length / 1024)} KB: cabe en los topes de bytes`);
+  const t2 = Date.now();
+  const r300 = F.revisarPng(bomba300, OPC);
+  const ms300 = Date.now() - t2;
+  ok(!r300.ok && r300.codigo === "idat_invalido" && ms300 < 1500, `con inflar (servidor) → idat_invalido en ${ms300} ms (${r300.ok ? "ok" : r300.codigo})`);
+  ok(F.revisarPng(bomba300, { maxBytes: LOGO_MAX_BYTES }).ok, "sin inflar no se puede ver (por eso el servidor la infla con tope)");
+  ok(Date.now() - t1 < 20_000, "las bombas se juzgan en segundos, no en minutos");
+  // Menos datos de los declarados también se rechaza (pdf-lib la pintaría a medias).
+  ok(F.revisarPng(png(ihdr(10, 10), chunk("IDAT", deflateSync(Buffer.alloc(100)))), OPC).codigo === "idat_invalido" as any, "IDAT corto → idat_invalido");
+  ok(F.revisarPng(png(ihdr(10, 10), chunk("IDAT", Buffer.from([1, 2, 3, 4, 5]))), OPC).codigo === "idat_invalido" as any, "IDAT que no es zlib → idat_invalido");
+
+  // (4) IHDR enorme y formatos imposibles.
+  ok(F.revisarPng(png(ihdr(50000, 50000), chunk("IDAT", crudo10)), OPC).codigo === "muy_grande" as any, "IHDR 50000 × 50000 → muy_grande");
+  ok(F.revisarPng(png(ihdr(4000, 1001), chunk("IDAT", crudo10)), OPC).codigo === "muy_grande" as any, "más de 4 Mpx → muy_grande");
+  ok(F.revisarPng(png(ihdr(0, 10), chunk("IDAT", crudo10)), OPC).codigo === "sin_dimensiones" as any, "ancho 0 → sin_dimensiones");
+  ok(F.revisarPng(png(ihdr(10, 10, 16, 3), chunk("IDAT", crudo10)), OPC).codigo === "formato" as any, "paleta de 16 bits → formato");
+  ok(F.revisarPng(png(ihdr(10, 10, 8, 6, 2), chunk("IDAT", crudo10)), OPC).codigo === "formato" as any, "entrelazado desconocido → formato");
+  ok(F.revisarPng(png(ihdr(10, 10, 8, 3), chunk("IDAT", deflateSync(Buffer.alloc(110)))), OPC).codigo === "estructura" as any, "paleta sin PLTE → estructura");
+  // (5) Estructura: largo de bloque mayor que el archivo (UPNG haría un bucle de 4 mil millones), sin IEND, IDAT partidos.
+  const malLargo = Buffer.from(png(ihdr(10, 10), chunk("IDAT", crudo10)));
+  malLargo.writeUInt32BE(0xfffffff0, 8 + 25);
+  ok(F.revisarPng(new Uint8Array(malLargo), OPC).codigo === "truncado" as any, "un bloque que dice medir 4 GB → truncado");
+  ok(F.revisarPng(new Uint8Array(Buffer.concat([SIG, ihdr(10, 10), chunk("IDAT", crudo10)])), OPC).codigo === "truncado" as any, "sin IEND → truncado");
+  ok(F.revisarPng(png(ihdr(10, 10), chunk("IDAT", crudo10.subarray(0, 10)), chunk("tEXt", Buffer.from("a\0b")), chunk("IDAT", crudo10.subarray(10))), OPC).codigo === "estructura" as any, "IDAT partidos por otro bloque → estructura");
+  ok(F.revisarPng(png(ihdr(10, 10), chunk("IDAT", crudo10.subarray(0, 10)), chunk("IDAT", crudo10.subarray(10))), OPC).ok, "IDAT seguidos en dos bloques → ok");
+  ok(F.revisarPng(png(ihdr(10, 10)), OPC).codigo === "sin_datos" as any, "sin IDAT → sin_datos");
+  ok(F.revisarPng(new Uint8Array(Buffer.concat([SIG, chunk("tEXt", Buffer.from("a\0b")), ihdr(10, 10), chunk("IDAT", crudo10), chunk("IEND", Buffer.alloc(0))])), OPC).codigo === "estructura" as any, "IHDR que no va primero → estructura");
+  ok(F.revisarPng(new Uint8Array(LOGO_MAX_BYTES + 1).fill(0x89), OPC).codigo === "muy_pesado" as any, "más de 512 KB → muy_pesado");
+
+  // (6) Los PNG de verdad pasan, y pdf-lib los incrusta: el logo del repo, entrelazado, paleta, gris, 16 bits.
+  const reales: [string, Uint8Array][] = [
+    ["logo del repo", LOGO_PNG],
+    ["entrelazado (Adam7)", new Uint8Array(await sharp({ create: { width: 97, height: 53, channels: 4, background: { r: 10, g: 200, b: 30, alpha: 0.5 } } }).png({ progressive: true }).toBuffer())],
+    ["paleta", new Uint8Array(await sharp({ create: { width: 64, height: 40, channels: 3, background: "#123456" } }).png({ palette: true }).toBuffer())],
+    ["paleta entrelazada", new Uint8Array(await sharp({ create: { width: 33, height: 17, channels: 3, background: "#654321" } }).png({ palette: true, progressive: true }).toBuffer())],
+    ["gris", new Uint8Array(await sharp({ create: { width: 50, height: 9, channels: 3, background: "#777" } }).grayscale().png().toBuffer())],
+    ["16 bits", new Uint8Array(await sharp({ create: { width: 20, height: 20, channels: 3, background: "#abcdef" } }).toColourspace("rgb16").png().toBuffer())],
+    ["1 × 1", new Uint8Array(await sharp({ create: { width: 1, height: 1, channels: 4, background: "#fff" } }).png().toBuffer())],
+  ];
+  for (const [n, b] of reales) {
+    const r = F.revisarPng(b, OPC);
+    let incrusta = false;
+    try { const d = await PDFDocument.create(); const im = await d.embedPng(b); incrusta = r.ok && im.width === r.ancho && im.height === r.alto; } catch { incrusta = false; }
+    ok(r.ok && incrusta, `${n}: pasa y pdf-lib lo incrusta con esas medidas (${r.ok ? `${r.ancho}×${r.alto}${r.entrelazado ? " entrelazado" : ""}` : r.codigo})`);
+  }
+  // El tamaño inflado de Adam7 es el que da zlib de verdad.
+  const ent = reales[1][1];
+  const rEnt = F.revisarPng(ent, OPC);
+  ok(rEnt.ok && rEnt.entrelazado, "el entrelazado se reconoce y se mide con sus siete pasadas");
 }
 
 // ── 6. armarPdfDeFila de punta a punta, con una base falsa ───────────────────
@@ -424,44 +566,166 @@ seccion("6. armarPdfDeFila: los avisos que no bloquean");
       return q;
     },
   });
-  const tablas = (cat: Record<string, any> | null, cuentas = perfil.cuentas_bancarias) => ({
+  const tablas = (cat: Record<string, any> | null, cuentas = perfil.cuentas_bancarias): Record<string, any[]> => ({
     empresa_perfil: [{ id: 1, ...perfil, cuentas_bancarias: cuentas }],
     traslado_categorias: cat ? [cat] : [],
     crm_conversaciones: [{ id: "conv-1", contacto_id: "ct-1" }],
-    crm_contactos: [{ id: "ct-1", wa_id: "51966707225" }],
+    crm_contactos: [{ id: "ct-1", wa_id: "51966707225", cliente_id: 7 }],
     clientes: [{ id: 7, ...CLIENTE_ERP }],
     cotizacion_plantillas: [{ id: "corporativo", ...PLANTILLA_CON_CONDICIONES }],
   });
   const prev = process.env.NEXT_PUBLIC_SUPABASE_URL;
   process.env.NEXT_PUBLIC_SUPABASE_URL = BASE;
-  const fotosOk = async (u: string) => (u === URL_EXT ? FOTO_EXT : u === URL_INT ? FOTO_INT : null);
+  const fotosOk = async (u: string) => (!F.urlFotoPermitida(u, BASE) ? null : /\/externa-/.test(u) ? FOTO_EXT : FOTO_INT);
   const sinLogo = async () => null;
+  const conLogo = async () => ({ bytes: LOGO_PNG, tipo: "png" as const });
   const codigos = (a: { avisos: { codigo: string }[] }) => a.avisos.map((x) => x.codigo).sort().join(",");
   const SUV = categorias.find((c) => c.clave === IDA.traslado_json!.categoria!.clave)!;
-  const conFotos = { ...SUV, foto_externa_url: URL_EXT, foto_interna_url: URL_INT, descripcion_cliente: null };
-  const r1 = await armarPdfDeFila(base(tablas(conFotos)) as any, { ...IDA, cliente_id: 7 }, { bajarLogo: sinLogo, bajarFoto: fotosOk });
+  const conFotos = { ...SUV, foto_externa_url: urlFoto(SUV.clave, "externa"), foto_interna_url: urlFoto(SUV.clave, "interna"), descripcion_cliente: null };
+  const r1 = await armarPdfDeFila(base(tablas(conFotos)) as any, { ...IDA, cliente_id: 7 }, { bajarLogo: conLogo, bajarFoto: fotosOk });
   ok(codigos(r1) === "", `todo bien: sin avisos (${codigos(r1)})`);
   const txt1 = textosDelPdf(r1.bytes).join(" ");
   ok(txt1.includes("Minera Sur SAC") && txt1.includes("999 111 222") && !/PLANTILLA/.test(txt1), "imprime el cliente del ERP, y nada de la plantilla salvo sus cuentas");
   ok(r1.nombre === "Cotizacion-01234.pdf" && r1.caption.includes("01234"), `nombre y caption (${r1.nombre})`);
-  const r2 = await armarPdfDeFila(base(tablas({ ...SUV, foto_externa_url: null, foto_interna_url: null, descripcion_cliente: null })) as any, IDA, { bajarLogo: sinLogo, bajarFoto: fotosOk });
+  const r2 = await armarPdfDeFila(base(tablas({ ...SUV, foto_externa_url: null, foto_interna_url: null, descripcion_cliente: null })) as any, IDA, { bajarLogo: conLogo, bajarFoto: fotosOk });
   ok(codigos(r2) === "sin_foto", `sin fotos: sin_foto (${codigos(r2)})`);
   ok(textosDelPdf(r2.bytes).join(" ").includes("+51 966 707 225"), "sin cliente: el CELULAR es el wa_id de la conversación");
-  const r3 = await armarPdfDeFila(base(tablas(conFotos)) as any, IDA, { bajarLogo: sinLogo, bajarFoto: async () => null });
+  const r3 = await armarPdfDeFila(base(tablas(conFotos)) as any, IDA, { bajarLogo: conLogo, bajarFoto: async () => null });
   ok(codigos(r3) === "foto_no_descargada", `la foto no se bajó: foto_no_descargada (${codigos(r3)})`);
-  const r4 = await armarPdfDeFila(base(tablas({ ...SUV }), { traslado_categorias: ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] }) as any, IDA, { bajarLogo: sinLogo, bajarFoto: fotosOk });
+  const r4 = await armarPdfDeFila(base(tablas({ ...SUV }), { traslado_categorias: ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] }) as any, IDA, { bajarLogo: conLogo, bajarFoto: fotosOk });
   ok(codigos(r4) === "sin_migracion_fotos" && r4.bytes.length > 1000, `sin traslados-07: sin_migracion_fotos y el PDF sale igual (${codigos(r4)})`);
   const usdFila = { ...USD };
-  const r5 = await armarPdfDeFila(base(tablas(conFotos, [perfil.cuentas_bancarias[0]])) as any, usdFila, { bajarLogo: sinLogo, bajarFoto: fotosOk });
+  const r5 = await armarPdfDeFila(base(tablas(conFotos, [perfil.cuentas_bancarias[0]])) as any, usdFila, { bajarLogo: conLogo, bajarFoto: fotosOk });
   ok(codigos(r5) === "sin_cuenta_en_moneda", `USD con solo cuentas en soles: sin_cuenta_en_moneda (${codigos(r5)})`);
-  const r6 = await armarPdfDeFila(base(tablas({ ...conFotos, foto_externa_url: "https://evil.test/x.jpg" })) as any, IDA, { bajarLogo: sinLogo, bajarFoto: fotosOk });
+  const r6 = await armarPdfDeFila(base(tablas({ ...conFotos, foto_externa_url: "https://evil.test/x.jpg" })) as any, IDA, { bajarLogo: conLogo, bajarFoto: fotosOk });
   ok(codigos(r6) === "foto_no_descargada", `una foto de otro sitio no se baja: foto_no_descargada (${codigos(r6)})`);
-  const r7 = await armarPdfDeFila(base(tablas(conFotos)) as any, IDA, { bajarLogo: sinLogo, bajarFoto: fotosOk, ejemplo: true });
+  const r7 = await armarPdfDeFila(base(tablas(conFotos)) as any, IDA, { bajarLogo: conLogo, bajarFoto: fotosOk, ejemplo: true });
   ok(r7.nombre === "Cotizacion-EJEMPLO.pdf" && textosDelPdf(r7.bytes).includes("EJEMPLO · SIN VALIDEZ"), "el ejemplo lleva la marca de agua");
+  // El logo: si el perfil tiene uno y no se pudo usar, se avisa (y el PDF lleva el nombre de la empresa).
+  const r8 = await armarPdfDeFila(base(tablas(conFotos)) as any, IDA, { bajarLogo: sinLogo, bajarFoto: fotosOk });
+  ok(codigos(r8) === "logo_no_usado" && textosDelPdf(r8.bytes).includes("Transportes Ñandú"), `logo que no se pudo usar: logo_no_usado y el nombre en la tarjeta (${codigos(r8)})`);
+  const tOtro = tablas(conFotos); tOtro.empresa_perfil[0].logo_url = `${BASE}/storage/v1/object/public/vehiculos-fotos/logo.png`;
+  const r9 = await armarPdfDeFila(base(tOtro) as any, IDA, { bajarFoto: fotosOk });
+  ok(codigos(r9) === "logo_no_usado" && r9.avisos[0].detalle.includes("no está en el almacenamiento del perfil"), `logo de otro bucket: no se pide y se dice por qué (${r9.avisos.map((a) => a.detalle).join(" | ")})`);
+  // El cliente del ERP: vinculado al contacto → se imprime; sin vínculo y con otro número → atención y celular.
+  const tSinVinculo = tablas(conFotos); tSinVinculo.crm_contactos[0].cliente_id = null;
+  const r10 = await armarPdfDeFila(base(tSinVinculo) as any, { ...IDA, cliente_id: 7 }, { bajarLogo: conLogo, bajarFoto: fotosOk });
+  const txt10 = textosDelPdf(r10.bytes).join(" ");
+  ok(codigos(r10) === "cliente_no_verificado" && !txt10.includes("Minera Sur SAC") && !txt10.includes("20111222333") && txt10.includes("Ana Pérez Núñez") && txt10.includes("+51 966 707 225"), `cliente sin vincular y con otro número: atención y celular, sin RUC ni razón social (${codigos(r10)})`);
+  const tMismoNumero = tablas(conFotos); tMismoNumero.crm_contactos[0].cliente_id = null; tMismoNumero.clientes[0].telefono = "966 707 225";
+  const r11 = await armarPdfDeFila(base(tMismoNumero) as any, { ...IDA, cliente_id: 7 }, { bajarLogo: conLogo, bajarFoto: fotosOk });
+  ok(codigos(r11) === "" && textosDelPdf(r11.bytes).join(" ").includes("Minera Sur SAC"), `cliente sin vincular pero con el MISMO número completo: se imprime (${codigos(r11)})`);
+  const tExtranjero = tablas(conFotos); tExtranjero.crm_contactos[0] = { id: "ct-1", wa_id: "447987654321", cliente_id: null }; tExtranjero.clientes[0].telefono = "987654321";
+  const r12 = await armarPdfDeFila(base(tExtranjero) as any, { ...IDA, cliente_id: 7 }, { bajarLogo: conLogo, bajarFoto: fotosOk });
+  ok(codigos(r12) === "cliente_no_verificado" && !textosDelPdf(r12.bytes).join(" ").includes("Minera Sur SAC"), `+44 7987654321 frente al cliente 987654321: no se imprime (${codigos(r12)})`);
+  const r13 = await armarPdfDeFila(base(tSinVinculo) as any, { ...IDA, cliente_id: 7 }, { bajarLogo: conLogo, bajarFoto: fotosOk, celular: "51966707225", contactoClienteId: 7 });
+  ok(codigos(r13) === "" && textosDelPdf(r13.bytes).join(" ").includes("Minera Sur SAC"), "el vínculo que pasa quien llama (la IA, con su contacto) cuenta");
   let lanzaSinPerfil = false;
   try { await armarPdfDeFila({ from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: { message: "caída" } }) }) }) }) } as any, IDA, { bajarLogo: sinLogo }); } catch { lanzaSinPerfil = true; }
   ok(lanzaSinPerfil, "sin poder leer el perfil no hay PDF (lanza)");
   process.env.NEXT_PUBLIC_SUPABASE_URL = prev;
+}
+
+// ── 6b. El cliente del ERP: número COMPLETO, nunca los últimos 9 dígitos ─────
+seccion("6b. Cliente del ERP: telefonosE164 · clienteParaPdf · clienteIdDeRemitente");
+{
+  const casosTel: [string | null, string[]][] = [
+    ["51987654321", ["51987654321"]], ["987654321", ["51987654321"]], ["+51 987 654 321", ["51987654321"]],
+    ["0051987654321", ["51987654321"]], ["+44 7987654321", ["447987654321"]], ["447987654321", ["447987654321"]],
+    ["(01) 456-7890", ["5114567890"]], ["044 123456", ["5144123456"]], ["4567890", []], ["123456789", []],
+    ["987654321 / 912345678", ["51987654321", "51912345678"]], ["987654321 y 912345678", ["51987654321", "51912345678"]],
+    ["+1 (305) 555-1234", ["13055551234"]], ["", []], [null, []], ["abc", []], ["9876543210000000", []],
+  ];
+  for (const [t, esp] of casosTel) ok(JSON.stringify(telefonosE164(t)) === JSON.stringify(esp), `telefonosE164(${JSON.stringify(t)}) = ${JSON.stringify(telefonosE164(t))}`);
+  ok(!mismoTelefonoE164("+44 7987654321", "987654321"), "+44 7987654321 NO es el cliente 987654321 (terminan igual)");
+  ok(mismoTelefonoE164("51987654321", "987654321"), "51987654321 sí es el cliente 987654321");
+  ok(!mismoTelefonoE164("51987654321", "4567890") && !mismoTelefonoE164("", "") && !mismoTelefonoE164(null, "987654321"), "sin número completo no empareja");
+  // Barrido: con un wa_id de otro país, ningún número local de 9 dígitos empareja; con +51, solo el suyo.
+  for (let i = 0; i < 400; i++) {
+    const local = `9${String(10_000_000 + i * 21_911).padStart(8, "0")}`;
+    for (const pais of ["44", "1", "34", "57", "591", "52"]) ok(!mismoTelefonoE164(`${pais}${local}`, local), `+${pais} ${local} no es el ${local}`);
+    ok(mismoTelefonoE164(`51${local}`, local) && !mismoTelefonoE164(`51${local}`, `9${local.slice(1, -1)}${(Number(local.at(-1)) + 1) % 10}`), `51${local} es el ${local} y no otro`);
+  }
+  const CL: C.ClienteErp = { empresa: "Minera Sur SAC", ruc: "20111222333", telefono: "987654321" };
+  const vin = (id: unknown, ref: { contactoClienteId?: number | null; waId?: string | null }, cl: C.ClienteErp | null = CL) => C.clienteParaPdf(id, cl, ref).vinculo;
+  ok(vin(7, { contactoClienteId: 7, waId: "447987654321" }) === "contacto", "vinculado por una persona: se imprime aunque el número no sea el suyo");
+  ok(vin(7, { contactoClienteId: 8, waId: "51987654321" }) === "telefono", "mismo número completo: se imprime");
+  ok(vin(7, { contactoClienteId: null, waId: "447987654321" }) === "no_verificado", "+44 7987654321 con el cliente 987654321: no se imprime");
+  ok(vin(7, { contactoClienteId: 8, waId: "51912345678" }) === "no_verificado", "vinculado a OTRO cliente y otro número: no se imprime");
+  ok(vin(null, { contactoClienteId: 7, waId: "51987654321" }) === "sin_cliente" && vin(7, {}, null) === "sin_cliente", "sin cliente_id o sin ficha: sin_cliente");
+  ok(vin("7", { contactoClienteId: 7 as any }) === "contacto" && vin(7, { contactoClienteId: "" as any, waId: null }) === "no_verificado", "el id como texto cuenta; vacío no");
+  // La entrada del PDF aplica la regla por sí misma (la pantalla y el servidor no pueden saltársela).
+  const e1 = C.entradaCorporativaTraslado({ ...IDA, cliente_id: 7 }, { empresa: perfil, cliente: CL, celular: "447987654321" });
+  ok(e1.cliente!.empresa === undefined && e1.cliente!.ruc === undefined && e1.cliente!.nombre === "Ana Pérez Núñez" && e1.cliente!.telefono === "+447987654321", "entradaCorporativaTraslado: sin verificar → atención y celular");
+  const e2 = C.entradaCorporativaTraslado({ ...IDA, cliente_id: 7 }, { empresa: perfil, cliente: CL, celular: "51987654321" });
+  ok(e2.cliente!.empresa === "Minera Sur SAC" && e2.cliente!.ruc === "20111222333", "entradaCorporativaTraslado: mismo número → sus datos");
+  const e3 = C.entradaCorporativaTraslado({ ...IDA, cliente_id: 7 }, { empresa: perfil, cliente: CL, celular: "447987654321", contactoClienteId: 7 });
+  ok(e3.cliente!.empresa === "Minera Sur SAC", "entradaCorporativaTraslado: vinculado al contacto → sus datos");
+  // clienteIdDeRemitente: el cliente que la IA le pone a la cotización.
+  const sbClientes = (filas: { id: number; telefono: string | null }[], error = false) => ({
+    from: () => {
+      const q: any = { select: () => q, not: () => q, order: () => q, range: (a: number, b: number) => Promise.resolve(error ? { data: null, error: { message: "caída" } } : { data: filas.slice(a, b + 1), error: null }) };
+      return q;
+    },
+  });
+  const cl = (filas: { id: number; telefono: string | null }[], wa: string | null, contacto: any = null, error = false) => clienteIdDeRemitente(sbClientes(filas, error) as any, contacto, wa);
+  ok(await cl([{ id: 1, telefono: "987654321" }], "447987654321") === null, "IA: +44 7987654321 no se queda con el cliente 987654321");
+  ok(await cl([{ id: 1, telefono: "987654321" }], "51987654321") === 1, "IA: 51987654321 → el cliente 987654321");
+  ok(await cl([{ id: 1, telefono: "+51 987 654 321" }, { id: 2, telefono: "987654321" }], "51987654321") === null, "IA: dos clientes con el mismo número → ninguno (ambiguo)");
+  ok(await cl([{ id: 1, telefono: "+44 7987654321" }, { id: 2, telefono: "987654321" }], "447987654321") === 1, "IA: el extranjero empareja con su número completo");
+  ok(await cl([{ id: 1, telefono: "912345678 / 987654321" }], "51987654321") === 1, "IA: una ficha con dos números empareja con cualquiera");
+  ok(await cl([{ id: 1, telefono: "987654321" }], "51987654321", { cliente_id: 9 }) === 9, "IA: el vinculado al contacto manda");
+  ok(await cl([{ id: 1, telefono: "987654321" }], "51987654321", null, true) === null, "IA: si no se pueden leer los clientes, ninguno");
+  ok(await cl([{ id: 1, telefono: "987654321" }], "PE.abc") === null && await cl([{ id: 1, telefono: "987654321" }], null) === null, "IA: sin wa_id numérico, ninguno");
+  const muchos = Array.from({ length: 2500 }, (_, i) => ({ id: i + 1, telefono: i === 2300 ? "987654321" : `9${String(10_000_000 + i).padStart(8, "0")}` }));
+  ok(await cl(muchos, "51987654321") === 2301, "IA: pagina más allá de 1000 filas");
+  // La pantalla de /cotizaciones arma la entrada con el vínculo del contacto (la misma regla).
+  const pant = readFileSync("components/cotizaciones/pdf-traslado.ts", "utf8");
+  ok(/crm_contactos\(wa_id, cliente_id\)/.test(pant) && /contactoClienteId: conv\.contactoClienteId/.test(pant), "la pantalla pasa el cliente vinculado del contacto a entradaCorporativaTraslado");
+  ok(!/tel9\(/.test(readFileSync("lib/traslados/cotizar-ia-datos.ts", "utf8")), "cotizar-ia-datos ya no compara los últimos 9 dígitos");
+}
+
+// ── 5c. limpiarJpeg: sin EXIF ni comentarios, la imagen intacta ──────────────
+seccion("5c. limpiarJpeg: quita APPn (salvo JFIF y Adobe) y COM");
+{
+  const seg = (marcador: number, datos: Uint8Array | string) => {
+    const d = typeof datos === "string" ? Buffer.from(datos, "latin1") : Buffer.from(datos);
+    const b = Buffer.alloc(4 + d.length); b[0] = 0xff; b[1] = marcador; b.writeUInt16BE(d.length + 2, 2); d.copy(b, 4); return b;
+  };
+  const base = Buffer.from(FOTO_EXT);
+  // Se le meten APP0 JFIF, una miniatura JFXX, EXIF (con «GPS»), XMP, ICC, un COM y un APP14 Adobe.
+  const JFIF = seg(0xe0, "JFIF\0\x01\x01\0\0\x01\0\x01\0\0"), ADOBE = seg(0xee, "Adobe\0\x64\0\0\0\0\x01");
+  const conMeta = Buffer.concat([base.subarray(0, 2), JFIF, seg(0xe0, "JFXX\0\x10miniatura"), seg(0xe1, "Exif\0\0GPS-12.0464,-77.0428"), seg(0xe1, "http://ns.adobe.com/xap/1.0/\0<x:xmpmeta/>"), seg(0xe2, "ICC_PROFILE\0xx"), seg(0xfe, "Tomada por Juan"), ADOBE, base.subarray(2)]);
+  const r = F.limpiarJpeg(new Uint8Array(conMeta));
+  ok(r.ok && r.quitados === 5, `quita la miniatura, EXIF, XMP, ICC y el comentario (${r.ok ? r.quitados : r.codigo})`);
+  if (r.ok) {
+    const txt = Buffer.from(r.bytes).toString("latin1");
+    ok(!txt.includes("GPS") && !txt.includes("xmpmeta") && !txt.includes("ICC_PROFILE") && !txt.includes("Juan") && !txt.includes("miniatura"), "no queda nada de los metadatos");
+    ok(txt.includes("JFIF") && txt.includes("Adobe"), "conserva APP0 JFIF y APP14 Adobe");
+    ok(Buffer.from(r.bytes).equals(Buffer.concat([base.subarray(0, 2), JFIF, ADOBE, base.subarray(2)])), "el resto es byte a byte el original (la imagen no se recomprime)");
+    const rv = F.revisarJpeg(r.bytes);
+    ok(rv.ok && rv.ancho === 1280 && rv.alto === 853, "sigue siendo un JPEG válido con sus medidas");
+    const d = await PDFDocument.create();
+    const im = await d.embedJpg(r.bytes);
+    ok(im.width === 1280 && im.height === 853, "pdf-lib lo incrusta");
+  }
+  const sinMeta = F.limpiarJpeg(new Uint8Array(base));
+  ok(sinMeta.ok && sinMeta.quitados === 0 && Buffer.from(sinMeta.bytes).equals(base), "un JPEG sin metadatos queda idéntico");
+  // Con relleno FF FF entre segmentos (válido en JPEG) también sale, sin el relleno.
+  const conRelleno = Buffer.concat([base.subarray(0, 2), Buffer.from([0xff, 0xff]), seg(0xfe, "x"), base.subarray(2)]);
+  const rr = F.limpiarJpeg(new Uint8Array(conRelleno));
+  ok(rr.ok && rr.quitados === 1 && Buffer.from(rr.bytes).equals(base), "el relleno y el comentario se van");
+  // Estructuras que no se aceptan.
+  ok(!F.limpiarJpeg(new Uint8Array(Buffer.concat([base.subarray(0, 2), Buffer.from([0x00, 0x11]), base.subarray(2)]))).ok, "basura entre segmentos → rechazo");
+  ok(!F.limpiarJpeg(new Uint8Array(Buffer.concat([base.subarray(0, 2), seg(0xe1, "Exif")].map((x) => x)).subarray(0, 8))).ok, "cortado antes de los datos → rechazo");
+  ok(!F.limpiarJpeg(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0])).ok, "no es JPEG → rechazo");
+  // El progresivo también.
+  const prog = await jpeg(320, 200, "#336699", { progressive: true });
+  const rp = F.limpiarJpeg(new Uint8Array(Buffer.concat([Buffer.from(prog).subarray(0, 2), seg(0xe1, "Exif\0\0GPS"), Buffer.from(prog).subarray(2)])));
+  ok(rp.ok && rp.quitados === 1 && Buffer.from(rp.bytes).equals(Buffer.from(prog)) && F.revisarJpeg(rp.bytes).ok, "progresivo: igual");
+  const ruta = readFileSync("app/api/traslados/categorias/foto/route.ts", "utf8");
+  ok(/limpiarJpeg\(bytes\)/.test(ruta) && /upload\(ruta, limpia\.bytes/.test(ruta), "el endpoint sube la foto ya limpia");
+  ok(/borrarObjeto\(sb, previa\.anterior, \{ clave, lado \}\)/.test(ruta) && !/borrarObjeto\(sb, [^,]+\)/.test(ruta), "el endpoint solo borra la foto de ESA categoría y ESE lado");
 }
 
 // ── 7. El peso con todos los topes llenos ────────────────────────────────────
@@ -481,7 +745,8 @@ seccion("7. Con todos los topes llenos, el PDF pesa menos de 3.5 MB");
     consideraciones_json: { generales: Array.from({ length: 40 }, (_, i) => `Consideración ${i + 1} `.padEnd(200, "y")), incluye: Array.from({ length: 20 }, (_, i) => `Incluye ${i}`), no_incluye: Array.from({ length: 20 }, (_, i) => `No incluye ${i}`) },
   };
   const ent = C.entradaCorporativaTraslado(fila, { empresa: { ...perfil, cuentas_bancarias: Array.from({ length: 6 }, (_, i) => ({ banco: `Banco ${i}`, cuenta: "1".repeat(20), cci: "2".repeat(20) })) }, celular: "51966707225", categoria: { ...catDeFila(fila, true), descripcion_cliente: "d".repeat(300) }, supabaseUrl: BASE });
-  const bytes = await dibujarPdfCorporativo(docCorporativo(ent), { logo: { bytes: logo, tipo: "png" }, fotos: { [URL_EXT]: foto, [URL_INT]: foto } });
+  const cat7 = catDeFila(fila, true);
+  const bytes = await dibujarPdfCorporativo(docCorporativo(ent), { logo: { bytes: logo, tipo: "png" }, fotos: { [cat7.foto_externa_url!]: foto, [cat7.foto_interna_url!]: foto } });
   ok(bytes.length < 3.5 * 1024 * 1024, `pesa ${(bytes.length / 1024 / 1024).toFixed(2)} MB (< 3.5)`);
   const pags = (await PDFDocument.load(bytes)).getPageCount();
   ok(pags >= 3, `el contenido largo parte las hojas (${pags})`);
@@ -509,7 +774,8 @@ if (process.env.MUESTRA_DIR) {
   const dir = process.env.MUESTRA_DIR;
   const fotoExt = new Uint8Array(readFileSync(`${dir}/foto-ext.jpg`)), fotoInt = new Uint8Array(readFileSync(`${dir}/foto-int.jpg`));
   const ent = C.entradaCorporativaTraslado(IDA_RET, { empresa: perfil, celular: "51966707225", categoria: catDeFila(IDA_RET, true), supabaseUrl: BASE, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
-  writeFileSync(`${dir}/muestra-traslado.pdf`, await dibujarPdfCorporativo(docCorporativo(ent), { logo: { bytes: LOGO_PNG, tipo: "png" }, fotos: { [URL_EXT]: fotoExt, [URL_INT]: fotoInt } }));
+  const catM = catDeFila(IDA_RET, true);
+  writeFileSync(`${dir}/muestra-traslado.pdf`, await dibujarPdfCorporativo(docCorporativo(ent), { logo: { bytes: LOGO_PNG, tipo: "png" }, fotos: { [catM.foto_externa_url!]: fotoExt, [catM.foto_interna_url!]: fotoInt } }));
   const local = { ...ent, empresa: { ...ent.empresa, logo_url: `file://${process.cwd()}/public/logoafacotizacion-removebg-preview.png` }, vehiculos: ent.vehiculos.map((v) => ({ ...v, foto_externa_url: `file://${dir}/foto-ext.jpg`, foto_interna_url: `file://${dir}/foto-int.jpg` })) };
   writeFileSync(`${dir}/muestra-traslado.html`, htmlCotizacion(local as any).html!.replace("<script>window.onload=()=>window.print();</script>", ""));
   console.log(`  muestra: ${dir}/muestra-traslado.pdf y .html`);

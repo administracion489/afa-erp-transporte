@@ -50,7 +50,7 @@ import BarraHorasParaderos, { etiquetaDiaCorta, type ContextoHoras } from "@/com
 import { coordValida, resolverRestauracion, rutaCoordsParaGuardar, rotuloFuente, type PuntoRuta, type Extremo } from "@/lib/cotizacion-ruta-coords";
 import { faltaColumna, faltaAlguna } from "@/lib/columna-faltante";
 import ModalDespachoSinCotizar from "@/components/cotizaciones/ModalDespachoSinCotizar";
-import { AVISO_TRASLADO_EN_CASTELLANO, clienteErpDe, entradaTrasladoPagina, esTrasladoIA } from "@/components/cotizaciones/pdf-traslado";
+import { AVISO_CLIENTE_NO_VERIFICADO, AVISO_TRASLADO_EN_CASTELLANO, clienteErpDe, entradaTrasladoPagina, esTrasladoIA } from "@/components/cotizaciones/pdf-traslado";
 import type { FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
 import { leerDespachosSinCotizar, vincularCotizacion } from "@/lib/despacho-sin-cotizar-datos";
 import { pendientesDeCotizar, prellenadoCotizacion, type ReservaDespacho } from "@/lib/despacho-sin-cotizar";
@@ -2248,8 +2248,9 @@ export default function CotizacionesPage(){
     if(plantilla==="corporativo"&&esTrasladoIA(cot)){
       const e=await entradaTrasladoPagina(cot as unknown as FilaCotizacionLeida,{empresa:empData as EmpresaPerfilPDF|null,plantilla:cfgData as CotPlantillaConfig|null,cliente:clienteErpDe(cl)}).catch(()=>null);
       if(e){
-        const rt=htmlCotizacion(e);
-        const avisos=idioma==="es"?rt.avisos:[...rt.avisos,{codigo:"textos_escritos_tal_cual" as const,bloquea:false,detalle:AVISO_TRASLADO_EN_CASTELLANO}];
+        const{clienteNoVerificado,...entrada}=e;
+        const rt=htmlCotizacion(entrada);
+        const avisos=[...rt.avisos,...(idioma==="es"?[]:[{codigo:"textos_escritos_tal_cual" as const,bloquea:false,detalle:AVISO_TRASLADO_EN_CASTELLANO}]),...(clienteNoVerificado?[{codigo:"cliente_no_verificado" as const,bloquea:false,detalle:AVISO_CLIENTE_NO_VERIFICADO}]:[])];
         return{...rt,avisos,plantilla,idioma:"es"};
       }
     }

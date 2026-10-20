@@ -3,8 +3,9 @@
 // imprime LO MISMO que el PDF que se manda por WhatsApp, porque arma su entrada con la MISMA
 // función que el servidor (`entradaCorporativaTraslado`, lib/traslados/cotizacion-traslado.ts) y con
 // los mismos datos que lee lib/traslados/enviar-cotizacion-datos.ts: la fila, el cliente del ERP
-// vinculado, el wa_id de la conversación, las cuentas de la plantilla `corporativo` y la categoría
-// del vehículo (con sus fotos y su descripción de traslados-07).
+// (que solo se imprime si está vinculado al contacto o su número completo es el wa_id), el wa_id y
+// el cliente vinculado del contacto de la conversación, las cuentas de la plantilla `corporativo` y
+// la categoría del vehículo (con sus fotos y su descripción de traslados-07).
 //
 // Sin esto, la página pintaba el traslado con la plantilla genérica: sus seis condiciones generales
 // pisaban las del traslado (los 30 min de espera, el TAM), el subtítulo decía «Válida 30 días» aunque
@@ -16,7 +17,7 @@
 
 import { supabase } from "@/lib/supabase";
 import { faltaAlguna } from "@/lib/columna-faltante";
-import { entradaCorporativaTraslado, type CategoriaPdf, type ClienteErp, type FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
+import { clienteParaPdf, entradaCorporativaTraslado, type CategoriaPdf, type ClienteErp, type FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
 import type { EntradaPdfCot, PlantillaPdfCfg } from "@/lib/cotizacion-pdf";
 import type { PerfilEmpresa } from "@/lib/empresa-perfil";
 import { COLS_CATEGORIA_FOTOS } from "@/components/tarifario/traslados-datos";
@@ -25,6 +26,14 @@ import { COLS_CATEGORIA_FOTOS } from "@/components/tarifario/traslados-datos";
 const COLS_CATEGORIA_PDF = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo";
 
 /** El aviso del modal cuando se pidió el PDF en inglés: el del traslado solo existe en castellano. */
+/**
+ * El aviso del modal cuando la cotización tiene un cliente del ERP que el PDF NO imprime: no está
+ * vinculado al contacto de la conversación ni su número completo es el WhatsApp. Es la misma regla
+ * del envío por WhatsApp (`clienteParaPdf`), así que callarlo haría creer que se imprimió.
+ */
+export const AVISO_CLIENTE_NO_VERIFICADO =
+  "El cliente elegido en esta cotización no se imprime: no está vinculado al contacto de WhatsApp que la pidió ni su teléfono es ese número. El PDF sale con el nombre de quien escribió y su celular, igual que el que se envía por WhatsApp. Para imprimirlo, vincula el cliente al contacto en el CRM.";
+
 export const AVISO_TRASLADO_EN_CASTELLANO =
   "Esta cotización de traslado la armó la IA del CRM: su PDF se imprime en castellano, igual que el que se envía por WhatsApp (la descripción del vehículo y la línea de disponibilidad no tienen versión en inglés).";
 
@@ -67,16 +76,22 @@ async function leerCategoria(clave: unknown): Promise<CategoriaPdf | null> {
   }
 }
 
-/** El wa_id de la conversación que pidió la cotización (el CELULAR que imprime el PDF sin cliente del ERP). */
-async function leerCelular(conversacionId: unknown): Promise<string | null> {
-  if (typeof conversacionId !== "string" || !conversacionId) return null;
+/**
+ * El wa_id de la conversación que pidió la cotización (el CELULAR que imprime el PDF) y el cliente
+ * del ERP vinculado a su contacto: los datos del cliente solo se imprimen si está vinculado o si su
+ * número COMPLETO es el wa_id (`clienteParaPdf`, la misma regla que el servidor).
+ */
+async function leerConversacion(conversacionId: unknown): Promise<{ celular: string | null; contactoClienteId: number | null }> {
+  const nada = { celular: null, contactoClienteId: null };
+  if (typeof conversacionId !== "string" || !conversacionId) return nada;
   try {
-    const { data, error } = await supabase.from("crm_conversaciones").select("id, crm_contactos(wa_id)").eq("id", conversacionId).maybeSingle();
-    if (error || !data) return null;
-    const c = Array.isArray(data.crm_contactos) ? data.crm_contactos[0] : data.crm_contactos;
-    return typeof c?.wa_id === "string" ? c.wa_id : null;
+    const { data, error } = await supabase.from("crm_conversaciones").select("id, crm_contactos(wa_id, cliente_id)").eq("id", conversacionId).maybeSingle();
+    if (error || !data) return nada;
+    const c = (Array.isArray(data.crm_contactos) ? data.crm_contactos[0] : data.crm_contactos) as { wa_id?: unknown; cliente_id?: unknown } | null;
+    const vinc = Number(c?.cliente_id);
+    return { celular: typeof c?.wa_id === "string" ? c.wa_id : null, contactoClienteId: Number.isInteger(vinc) && vinc > 0 ? vinc : null };
   } catch {
-    return null;
+    return nada;
   }
 }
 
@@ -87,14 +102,17 @@ async function leerCelular(conversacionId: unknown): Promise<string | null> {
 export async function entradaTrasladoPagina(
   cot: FilaCotizacionLeida,
   x: { empresa: PerfilEmpresa | null; plantilla: PlantillaPdfCfg | null; cliente: ClienteErp | null },
-): Promise<EntradaPdfCot | null> {
+): Promise<(EntradaPdfCot & { clienteNoVerificado: boolean }) | null> {
   if (!esTrasladoIA(cot)) return null;
-  const [categoria, celular] = await Promise.all([leerCategoria(cot.traslado_json?.categoria?.clave), leerCelular(cot.crm_conversacion_id)]);
+  const [categoria, conv] = await Promise.all([leerCategoria(cot.traslado_json?.categoria?.clave), leerConversacion(cot.crm_conversacion_id)]);
   try {
-    return entradaCorporativaTraslado(cot, {
-      empresa: x.empresa, cliente: x.cliente, celular, plantilla: x.plantilla, categoria,
+    const entrada = entradaCorporativaTraslado(cot, {
+      empresa: x.empresa, cliente: x.cliente, celular: conv.celular, contactoClienteId: conv.contactoClienteId,
+      plantilla: x.plantilla, categoria,
       supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL ?? null,
     });
+    const { vinculo } = clienteParaPdf(cot.cliente_id, x.cliente, { contactoClienteId: conv.contactoClienteId, waId: conv.celular });
+    return { ...entrada, clienteNoVerificado: vinculo === "no_verificado" };
   } catch {
     return null;
   }

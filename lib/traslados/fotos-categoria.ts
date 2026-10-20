@@ -119,6 +119,55 @@ export function revisarJpeg(bytes: Uint8Array | null | undefined, opts: { maxByt
   return mal("sin_dimensiones", "El JPEG no declara sus dimensiones.");
 }
 
+export type LimpiezaJpeg =
+  | { ok: true; bytes: Uint8Array; quitados: number; bytesQuitados: number }
+  | { ok: false; codigo: "estructura" | "truncado"; detalle: string };
+
+/**
+ * El JPEG sin sus metadatos: quita los segmentos APP1…APP15 (EXIF con el GPS de quien tomó la foto,
+ * XMP, ICC, miniaturas) y los comentarios (COM), salvo APP0 «JFIF» y APP14 «Adobe», que describen
+ * cómo leer la imagen. Recorre los segmentos hasta el comienzo de los datos (SOS) —el mismo
+ * recorrido de `revisarJpeg`— y copia el resto tal cual: la imagen no se decodifica ni se recomprime.
+ * La pantalla ya sube un JPEG del canvas (sin EXIF); esto cubre un POST directo al endpoint.
+ */
+export function limpiarJpeg(b: Uint8Array): LimpiezaJpeg {
+  const mal = (codigo: "estructura" | "truncado", detalle: string): LimpiezaJpeg => ({ ok: false, codigo, detalle });
+  if (!(b.length > 4 && b[0] === 0xff && b[1] === 0xd8)) return mal("estructura", "No es un JPEG.");
+  const partes: Uint8Array[] = [b.subarray(0, 2)];
+  let quitados = 0;
+  let pos = 2;
+  const empieza = (ini: number, txt: string) => [...txt].every((c, i) => b[ini + i] === c.charCodeAt(0));
+  while (pos < b.length) {
+    if (b[pos] !== 0xff) return mal("estructura", "La estructura del JPEG no es la esperada: vuelve a exportarla.");
+    let m = pos + 1;
+    while (m < b.length && b[m] === 0xff) m++; // bytes de relleno: se descartan
+    if (m >= b.length) return mal("truncado", "La foto está cortada: vuelve a exportarla.");
+    const marcador = b[m];
+    if (marcador === 0xda) {
+      partes.push(b.subarray(m - 1));
+      const out = new Uint8Array(partes.reduce((n, p) => n + p.length, 0));
+      let o = 0;
+      for (const p of partes) { out.set(p, o); o += p.length; }
+      return { ok: true, bytes: out, quitados, bytesQuitados: b.length - out.length };
+    }
+    if (marcador === 0xd8 || marcador === 0xd9 || marcador === 0x01 || marcador === 0x00 || (marcador >= 0xd0 && marcador <= 0xd7)) {
+      return mal("estructura", "La estructura del JPEG no es la esperada: vuelve a exportarla.");
+    }
+    if (m + 3 > b.length) return mal("truncado", "La foto está cortada: vuelve a exportarla.");
+    const largo = (b[m + 1] << 8) | b[m + 2];
+    const fin = m + 1 + largo;
+    if (largo < 2 || fin > b.length) return mal("truncado", "La foto está cortada: vuelve a exportarla.");
+    const app = marcador >= 0xe0 && marcador <= 0xef;
+    const conservar = !(app || marcador === 0xfe)
+      || (marcador === 0xe0 && empieza(m + 3, "JFIF\0"))
+      || (marcador === 0xee && empieza(m + 3, "Adobe"));
+    if (conservar) partes.push(b.subarray(m - 1, fin));
+    else quitados++;
+    pos = fin;
+  }
+  return mal("estructura", "El JPEG no trae los datos de la imagen.");
+}
+
 // ── El PNG del logo ──────────────────────────────────────────────────────────
 //
 // pdf-lib (UPNG) DESCOMPRIME el PNG entero para incrustarlo, y no pone ningún tope: el IHDR no
@@ -287,27 +336,38 @@ export function hostDe(base: string | null | undefined): string | null {
 }
 
 /**
- * La ruta dentro del bucket `traslados-fotos` de una URL pública DEL PROPIO PROYECTO, o null si la URL
- * no es eso: otro host, otro bucket, http, usuario o contraseña en la URL, `..`, barras invertidas,
- * una consulta o un fragmento, o una ruta vacía.
+ * La forma EXACTA de la ruta de una foto (la que produce `rutaFoto`): categoría, lado, uuid en
+ * minúsculas y `.jpg`. La comparte la migración traslados-07 (CHECK de las columnas), escrita como
+ * `^https://[^/]+/storage/v1/object/public/traslados-fotos/categorias/<clave>/<lado>-<uuid>\.jpg$`
+ * con la clave y el lado de la propia columna.
  */
-export function rutaDeUrlFoto(url: unknown, supabaseUrl: string | null | undefined): string | null {
+export const RE_RUTA_FOTO = /^categorias\/([A-Z0-9_]{1,30})\/(externa|interna)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jpg$/;
+
+/**
+ * La ruta dentro del bucket `traslados-fotos` de una URL pública DEL PROPIO PROYECTO, o null si la URL
+ * no es EXACTAMENTE `https://<host del proyecto>/storage/v1/object/public/traslados-fotos/` + una ruta
+ * con la forma de `rutaFoto` (`RE_RUTA_FOTO`): otro host, otro bucket, http, usuario, puerto o
+ * mayúsculas que la normalización cambiaría, codificaciones `%xx`, consulta, fragmento, `..`, o una
+ * ruta con otra forma. Con `esperado`, además, la ruta tiene que ser de ESA categoría y ESE lado:
+ * la columna se puede escribir por PostgREST con el módulo Tarifas, y sin esto «Quitar» o
+ * «Reemplazar» en una categoría borraría la foto de OTRA.
+ */
+export function rutaDeUrlFoto(url: unknown, supabaseUrl: string | null | undefined, esperado?: { clave: string; lado: LadoFoto }): string | null {
   const host = hostDe(supabaseUrl);
-  if (!host || typeof url !== "string" || !url.trim()) return null;
+  if (!host || typeof url !== "string") return null;
   const crudo = url.trim();
-  if (crudo.includes("\\") || /%2e%2e|%2f|%5c/i.test(crudo)) return null;
-  let u: URL;
-  try { u = new URL(crudo); } catch { return null; }
-  if (u.protocol !== "https:" || u.username || u.password || u.host !== host || u.search || u.hash) return null;
-  if (!u.pathname.startsWith(RUTA_PUBLICA_FOTOS)) return null;
-  let ruta: string;
-  try { ruta = decodeURIComponent(u.pathname.slice(RUTA_PUBLICA_FOTOS.length)); } catch { return null; }
-  if (!ruta || ruta.split("/").some((p) => p === "" || p === "." || p === "..")) return null;
-  if (crudo.includes("/../") || crudo.includes("/./")) return null;
+  const prefijo = `https://${host}${RUTA_PUBLICA_FOTOS}`;
+  if (!crudo.startsWith(prefijo)) return null;
+  const ruta = crudo.slice(prefijo.length);
+  const m = RE_RUTA_FOTO.exec(ruta);
+  if (!m) return null;
+  // La URL tiene que ser ya su forma normalizada (nada que el parser reescriba por el camino).
+  try { if (new URL(crudo).href !== crudo) return null; } catch { return null; }
+  if (esperado && (m[1] !== esperado.clave || m[2] !== esperado.lado)) return null;
   return ruta;
 }
 
-/** ¿Es la URL pública de una foto del bucket `traslados-fotos` del propio proyecto? */
-export function urlFotoPermitida(url: unknown, supabaseUrl: string | null | undefined): boolean {
-  return rutaDeUrlFoto(url, supabaseUrl) != null;
+/** ¿Es la URL pública de una foto del bucket `traslados-fotos` del propio proyecto (de esa categoría y lado, si se dicen)? */
+export function urlFotoPermitida(url: unknown, supabaseUrl: string | null | undefined, esperado?: { clave: string; lado: LadoFoto }): boolean {
+  return rutaDeUrlFoto(url, supabaseUrl, esperado) != null;
 }
