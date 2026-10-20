@@ -662,6 +662,8 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
   const emp = empresa || "la empresa";
   const nombre = primerNombre(contacto);
   const una = aj.preguntas === "una_por_mensaje";
+  // «Datos del pedido» escritos con emojis (📅 Fecha, 👥 Pasajeros…): el resumen los usa en vez de «•».
+  const conEmoji = /\p{Extended_Pictographic}/u.test(aj.campos_pedido);
   const goals: { titulo: string; instrucciones: string }[] = Array.isArray(agente.goals) ? agente.goals : [];
   const goalsTxt = goals.length
     ? goals.map((g, i) => `${i + 1}. ${g.titulo}: ${g.instrucciones}`).join("\n")
@@ -742,6 +744,7 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
           tituloResumen(aj),
           "• <dato>: <lo que dio el cliente>",
           "• …",
+          ...(conEmoji ? ["(Si un dato de «Datos del pedido» lleva su emoji, pon ese emoji en su renglón en lugar de «•».)"] : []),
           `y termina con «${cierreResumen(aj, nombre)}».`,
           "- Si después el cliente corrige un dato, vuelve a mostrar el resumen completo actualizado.",
           "- Nunca pongas en el resumen un dato que el cliente no dio.",
@@ -756,6 +759,7 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
           tituloResumen(aj),
           "• <dato>: <lo que dio el cliente>",
           "• …",
+          ...(conEmoji ? ["(Si un dato de «Datos del pedido» lleva su emoji, pon ese emoji en su renglón en lugar de «•».)"] : []),
           una ? "*Lo siguiente que necesito:* <UN dato: el siguiente que falta>" : "*Solo me falta:* <los datos que faltan, juntos en una línea>",
           `- Si ya está todo, cambia la última línea por «${cierreResumen(aj, nombre)}».`,
           una

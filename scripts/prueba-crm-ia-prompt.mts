@@ -287,5 +287,14 @@ ok(trasladosDeConfig(null) === null, "traslados: sin configuración → null");
   console.log(`  barrido: ${n} combinaciones`);
   ok(n === 48, "corolario: el barrido recorrió las 48 combinaciones");
 }
+// «Datos del pedido» con emojis: el resumen usa esos emojis en lugar de «•» (pedido del dueño, 20-10-2026).
+{
+  const base = construirSystem({ ...agente, comportamiento: { reglas_extra: "x" } }, contacto, conv, true, "AFA Transportes");
+  const conE = construirSystem({ ...agente, comportamiento: { reglas_extra: "x", campos_pedido: "📅 fecha del servicio, 🕐 hora de recojo, 👥 pasajeros" } }, contacto, conv, true, "AFA Transportes");
+  ok(!base.includes("pon ese emoji en su renglón"), "sin emojis en los datos del pedido, el formato es el de siempre");
+  ok(conE.includes("pon ese emoji en su renglón") && conE.includes("📅 fecha del servicio"), "con emojis en los datos del pedido, el resumen los usa");
+  const cadaE = construirSystem({ ...agente, comportamiento: { reglas_extra: "x", resumen_cuando: "cada_respuesta", campos_pedido: "📅 fecha" } }, contacto, conv, true, "AFA Transportes");
+  ok(cadaE.includes("pon ese emoji en su renglón"), "también con el resumen en cada respuesta");
+}
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);
