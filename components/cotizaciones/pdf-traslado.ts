@@ -4,8 +4,11 @@
 // función que el servidor (`entradaCorporativaTraslado`, lib/traslados/cotizacion-traslado.ts) y con
 // los mismos datos que lee lib/traslados/enviar-cotizacion-datos.ts: la fila, el cliente del ERP
 // (que solo se imprime si está vinculado al contacto o su número completo es el wa_id), el wa_id y
-// el cliente vinculado del contacto de la conversación, las cuentas de la plantilla `corporativo` y
-// la categoría del vehículo (con sus fotos y su descripción de traslados-07).
+// el cliente vinculado del contacto de la conversación, las CUENTAS de la plantilla de la cotización
+// (`plantilla_pdf`; si no existe o no dibuja el diseño corporativo, `corporativo`, igual que el
+// servidor) y la categoría del vehículo (con sus fotos y su descripción de traslados-07). Las
+// CONDICIONES salen siempre de la fila: desde supabase/cotizaciones-05 la IA las copia ahí, en
+// versión 2, desde la plantilla de su regla; en las de antes, de Ajustes de traslados.
 //
 // Sin esto, la página pintaba el traslado con la plantilla genérica: sus seis condiciones generales
 // pisaban las del traslado (los 30 min de espera, el TAM), el subtítulo decía «Válida 30 días» aunque
@@ -96,7 +99,9 @@ async function leerConversacion(conversacionId: unknown): Promise<{ celular: str
 
 /**
  * La entrada del PDF corporativo de un traslado de la IA, o null si no lo es o no se pudo armar.
- * `plantilla` es la fila `corporativo` de `cotizacion_plantillas` (solo se usan sus cuentas).
+ * `plantilla` es la plantilla con la que se imprime (la de `plantilla_pdf` de la cotización, de
+ * diseño corporativo; o `corporativo`): solo se usan sus CUENTAS (`cfgSoloCuentas`), las condiciones
+ * salen de la fila.
  */
 export async function entradaTrasladoPagina(
   cot: FilaCotizacionLeida,

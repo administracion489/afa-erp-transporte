@@ -33,6 +33,7 @@ import { fechaLima } from "../alertas-horario";
 import { telefonosE164 } from "../crm-telefono";
 import { validarEntrada, type EntradaSimulador, type LugarEntrada } from "./api";
 import { cargarCatalogo, leerConfigIA, leerIgvPct, SinMigracionTraslados, type CatalogoTraslados } from "./datos";
+import { plantillaParaTraslado } from "./plantilla-traslado-datos";
 import {
   cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, resultadoDeFila,
   type FilaCotizacion, type FilaCotizacionLeida,
@@ -187,18 +188,22 @@ async function contarTopes(sb: Sb, convId: string, hoy: string): Promise<Conteos
   return { consultasConv: n(a), consultasDia: n(b), cotizacionesConv: n(c), cotizacionesDia: n(d) };
 }
 
-type Insercion = { ok: true; id: number; numero: string | null; created_at: string | null } | { ok: false; motivo: string; detalle: string };
+type Insercion = { ok: true; id: number; numero: string | null; created_at: string | null; sueltas: string[] } | { ok: false; motivo: string; detalle: string };
 
 /**
  * Inserta la cotización. Solo reintenta si el error NOMBRA una columna accesoria (un INSERT que no
  * entró por eso no dejó nada escrito); ante cualquier otro error no se reintenta (duplicaría).
+ * `sueltas`: las columnas que no se guardaron (la fila leída de vuelta no las tiene).
+ * `plantilla_pdf` es accesoria: sin ella, las condiciones ya van copiadas en la fila y el PDF toma
+ * las cuentas de `corporativo`, como antes.
  */
 async function insertarCotizacion(sb: Sb, fila: FilaCotizacion): Promise<Insercion> {
   const f: Record<string, unknown> = { ...fila };
-  for (let i = 0; i < 4; i++) {
+  const sueltas: string[] = [];
+  for (let i = 0; i < 5; i++) {
     const { data, error } = await sb.from("cotizaciones").insert(f).select("id, numero_cotizacion, created_at").single();
-    if (!error && data) return { ok: true, id: Number(data.id), numero: data.numero_cotizacion ?? null, created_at: data.created_at ?? null };
-    const col = faltaAlguna(error, ["crm_conversacion_id", "traslado_json", "moneda", "tipo_cambio", "idioma_pdf"] as const);
+    if (!error && data) return { ok: true, id: Number(data.id), numero: data.numero_cotizacion ?? null, created_at: data.created_at ?? null, sueltas };
+    const col = faltaAlguna(error, ["crm_conversacion_id", "traslado_json", "moneda", "tipo_cambio", "idioma_pdf", "plantilla_pdf"] as const);
     if (!col) return { ok: false, motivo: "No se pudo guardar la cotización del traslado", detalle: String(error?.message ?? "sin respuesta") };
     if (col === "crm_conversacion_id" || col === "traslado_json") {
       return { ok: false, motivo: "Falta correr supabase/traslados-05-cotizacion-ia.sql", detalle: `La columna cotizaciones.${col} no existe.` };
@@ -207,6 +212,7 @@ async function insertarCotizacion(sb: Sb, fila: FilaCotizacion): Promise<Inserci
       return { ok: false, motivo: "Falta correr supabase/cotizaciones-04-moneda-idioma.sql", detalle: "Una cotización en dólares no se guarda sin su moneda y su tipo de cambio." };
     }
     delete f[col];
+    sueltas.push(col);
   }
   return { ok: false, motivo: "No se pudo guardar la cotización del traslado", detalle: "Demasiados reintentos." };
 }
@@ -271,15 +277,22 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
     return { ...deriva(r.motivo, pedido, r.explicacion.join("\n")), respuestaModelo: respuestaParaModelo({ resultado: r }) };
   }
 
-  // 6) La cotización.
+  // 6) La cotización. Sus condiciones salen de la plantilla PDF de la regla «Traslado de la IA ×
+  //    segmento» (el segmento: la moneda que decidió el motor y el tipo del cliente YA verificado);
+  //    sin la migración, o sin una plantilla que la IA pueda dibujar, de `traslados_config` como
+  //    siempre. Una lectura que falla no es «sin plantilla»: se deriva.
   const clienteId = await clienteIdDeRemitente(sb, ctx.contacto, ctx.remitente.waId);
+  const pt = await plantillaParaTraslado(sb, { moneda: r.precio!.moneda, clienteId });
+  if (!pt.ok) return deriva("No se pudieron leer las condiciones del PDF (plantilla)", pedido, pt.detalle);
   const fila = filaCotizacionTraslado(r, e, {
     convId: ctx.conv.id, clienteId, atencion: ctx.contacto?.nombre ?? null, config: sim.catalogo.config, firma, hoy,
-    ahora: new Date(ahora).toISOString(),
+    ahora: new Date(ahora).toISOString(), plantilla: pt.plantilla,
   });
   const ins = await insertarCotizacion(sb, fila);
   if (!ins.ok) return deriva(ins.motivo, pedido, ins.detalle);
-  const leida: FilaCotizacionLeida = { ...fila, id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at };
+  const guardada: Record<string, unknown> = { ...fila };
+  for (const c of ins.sueltas) delete guardada[c];
+  const leida: FilaCotizacionLeida = { ...(guardada as FilaCotizacion), id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at };
   return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n") });
 }
 

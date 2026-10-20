@@ -22,11 +22,14 @@
 //  · EL PDF SE DERIVA DE LA FILA CADA VEZ: si un ejecutivo la corrigió en /cotizaciones, sale
 //    corregida. La copia enviada queda en `crm-media` como constancia, referenciada por el mensaje.
 //
-// EL PDF ES LA PLANTILLA CORPORATIVA de /cotizaciones (lib/cotizacion-corporativo.ts +
+// EL PDF ES EL DISEÑO CORPORATIVO de /cotizaciones (lib/cotizacion-corporativo.ts +
 // lib/pdf-corporativo.ts). Para armarlo se leen el perfil (con sus cuentas), el cliente del ERP
-// vinculado, el wa_id de la conversación, la plantilla `corporativo` (solo sus cuentas) y la
-// categoría con sus fotos (traslados-07). Cada columna de una migración accesoria se SUELTA solo si
-// el error la nombra (lib/columna-faltante.ts): sin traslados-07 el PDF sale sin fotos y lo avisa.
+// vinculado, el wa_id de la conversación, la plantilla de la cotización (`plantilla_pdf`, solo sus
+// CUENTAS: las condiciones ya están copiadas en la fila; si no existe, no se puede leer o no dibuja
+// el diseño corporativo, `corporativo` como antes) y la categoría con sus fotos (traslados-07).
+// Cada columna de una migración accesoria se SUELTA solo si el error la nombra
+// (lib/columna-faltante.ts): sin traslados-07 el PDF sale sin fotos y lo avisa; sin `plantilla_pdf`,
+// las cuentas son las de `corporativo`.
 // Las imágenes se bajan con LISTA BLANCA (el logo, solo del bucket `empresa` del propio Supabase,
 // donde lo sube /configuracion/perfil; las fotos, solo del bucket `traslados-fotos`), sin
 // redirecciones, 4 s y con tope de bytes. Un PNG se recorre ENTERO antes de dárselo a pdf-lib: sin
@@ -43,6 +46,7 @@ import { faltaAlguna } from "../columna-faltante";
 import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { docCorporativo, numeroCotizacion } from "../cotizacion-corporativo";
 import type { PlantillaPdfCfg } from "../cotizacion-pdf";
+import { disenoDe } from "../cotizacion-plantillas";
 import { dibujarPdfCorporativo, type ImagenPdf } from "../pdf-corporativo";
 import { fechaLima } from "../alertas-horario";
 import {
@@ -60,6 +64,11 @@ export const COLS_COTIZACION_TRASLADO =
   "id, cliente_id, numero_cotizacion, created_at, estado, origen, destino, fecha_servicio, hora_ida, fecha_retorno, hora_retorno, " +
   "tipo_servicio, tipo_vehiculo, items_json, incluye_igv, precio_cliente, moneda, tipo_cambio, atencion, consideraciones_json, " +
   "crm_conversacion_id, traslado_json";
+/** Accesorias: si el error nombra una, se suelta SOLO esa (sin `plantilla_pdf`, las cuentas son las de `corporativo`). */
+export const COLS_COTIZACION_TRASLADO_ACCESORIAS = ["plantilla_pdf"] as const;
+
+/** La plantilla cuyas CUENTAS imprime el PDF cuando la cotización no dice otra (o la suya no sirve). */
+export const PLANTILLA_CUENTAS_DEFECTO = "corporativo";
 
 /** Lo que vale el enlace firmado que descarga Meta (s). Meta lo baja al momento; una hora sobra. */
 const TTL_URL_META = 3600;
@@ -284,11 +293,21 @@ export async function leerDatosPdf(
       };
     } catch { return dado; }
   };
+  // La plantilla de la cotización (solo se usan sus CUENTAS: las condiciones van en la fila). Si no
+  // existe, no se puede leer o no dibuja el diseño corporativo, la `corporativo` de siempre.
   const plantilla = async (): Promise<PlantillaPdfCfg | null> => {
-    try {
-      const { data, error } = await sb.from("cotizacion_plantillas").select("*").eq("id", "corporativo").maybeSingle();
-      return error ? null : ((data ?? null) as PlantillaPdfCfg | null);
-    } catch { return null; }
+    const leer = async (id: string): Promise<(PlantillaPdfCfg & { id?: string; diseno?: string | null }) | null> => {
+      try {
+        const { data, error } = await sb.from("cotizacion_plantillas").select("*").eq("id", id).maybeSingle();
+        return error ? null : ((data ?? null) as (PlantillaPdfCfg & { id?: string; diseno?: string | null }) | null);
+      } catch { return null; }
+    };
+    const id = typeof fila.plantilla_pdf === "string" ? fila.plantilla_pdf.trim() : "";
+    if (id && id !== PLANTILLA_CUENTAS_DEFECTO) {
+      const p = await leer(id);
+      if (p && disenoDe({ id: typeof p.id === "string" ? p.id : id, diseno: p.diseno }) === "corporativo") return p;
+    }
+    return leer(PLANTILLA_CUENTAS_DEFECTO);
   };
   const categoria = async (): Promise<{ cat: CategoriaPdf | null; faltan: string[] }> => {
     const clave = fila.traslado_json?.categoria?.clave;
@@ -370,12 +389,18 @@ export async function armarPdfDeFila(
   return { bytes, nombre: nombreArchivoPdf(numeroCotizacion(entrada.cot)), caption: captionDocumento(fila, empresa), empresa, avisos };
 }
 
-/** La fila de la cotización, o null si no existe. LANZA si no se puede leer. */
+/**
+ * La fila de la cotización, o null si no existe. LANZA si no se puede leer. `plantilla_pdf` es
+ * accesoria: si el error la nombra, se lee sin ella (el PDF toma las cuentas de `corporativo`).
+ */
 export async function leerCotizacionTraslado(sb: Sb, id: number): Promise<FilaCotizacionLeida | null> {
   if (!Number.isInteger(id) || id <= 0) return null;
-  const { data, error } = await sb.from("cotizaciones").select(COLS_COTIZACION_TRASLADO).eq("id", id).maybeSingle();
+  const r = await conAccesorias((cols) => sb.from("cotizaciones").select(cols).eq("id", id).maybeSingle(), COLS_COTIZACION_TRASLADO, COLS_COTIZACION_TRASLADO_ACCESORIAS);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const error = r.error as any;
   if (error) throw new Error(`No se pudo leer la cotización ${id}: ${error.message}`);
-  return (data ?? null) as FilaCotizacionLeida | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return ((r as any).data ?? null) as FilaCotizacionLeida | null;
 }
 
 /** El PDF de una cotización guardada, leído de su fila. LANZA si no existe o no se puede imprimir. */

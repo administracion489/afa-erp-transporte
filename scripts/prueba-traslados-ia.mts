@@ -1424,6 +1424,267 @@ seccion("21. accionAjena, la ruta de la tarjeta, /api/crm/ia/probar y el destino
 
 function textoContradicePrecioJSON(j: string): boolean { return E.textoContradicePrecio(j, []) || /"total"/.test(j); }
 
+// ── 22. Las condiciones del traslado salen de la PLANTILLA de su regla (cotizaciones-05) ──────
+// Desde supabase/cotizaciones-05-plantillas-uso.sql las condiciones del PDF del traslado son las de
+// la plantilla de la regla «Traslado de la IA × segmento» (la migración TRASPASA las de
+// traslados_config a «Traslados (IA)» y, con líneas de dólares, a «Traslados (IA) · dólares»). Lo que
+// se fija aquí: (a) la emulación del traspaso es la del SQL; (b) la ruta con plantilla, alimentada
+// con lo que haría el traspaso, da EXACTAMENTE las listas de la ruta antigua, en soles y en dólares;
+// (c) sin la migración (PGRST205) la fila es byte a byte la de antes; (d) una lectura fallida deriva;
+// (e) el tipo de cliente solo se lee del cliente verificado y solo si decide algo.
+seccion("22. Las condiciones del traslado salen de la plantilla de su regla; sin la migración, de Ajustes");
+{
+  const P = await import("../lib/cotizacion-plantillas");
+  const { plantillaParaTraslado } = await import("../lib/traslados/plantilla-traslado-datos");
+  type Plantilla = import("../lib/cotizacion-plantillas").PlantillaFila;
+  type Regla = import("../lib/cotizacion-plantillas").ReglaPlantilla;
+
+  // (a) El traspaso que se emula es el del SQL (si cambia uno, esta sección tiene que cambiar).
+  const sql05 = readFileSync("supabase/cotizaciones-05-plantillas-uso.sql", "utf8").replace(/\s+/g, " ");
+  ok(sql05.includes("g := coalesce(cfg->'consideraciones', '[]'); gu := coalesce(cfg->'consideraciones_usd', '[]');"), "SQL: generales = consideraciones; dólares = consideraciones_usd (ausentes → vacías)");
+  ok(sql05.includes("'condiciones_incluye', coalesce(cfg->'incluye', '[]'), 'condiciones_no_incluye', coalesce(cfg->'no_incluye', '[]')"), "SQL: incluye y no incluye, los de Ajustes (ausentes → vacíos)");
+  ok(sql05.includes("'es_principal', false, 'activa', true, 'diseno', 'corporativo', 'idioma', 'es'"), "SQL: la copia es corporativa, en castellano, activa y no principal (sirve para la IA)");
+  ok(sql05.includes("jsonb_build_object('id', 'traslados_ia', 'nombre', 'Traslados (IA)', 'orden', o + 1, 'condiciones_generales', g)"), "SQL: «Traslados (IA)» con las generales");
+  ok(sql05.includes("if jsonb_array_length(gu) > 0 then execute sql using src || jsonb_build_object('id', 'traslados_ia_usd', 'nombre', 'Traslados (IA) · dólares', 'orden', o + 2, 'condiciones_generales', g || gu); end if;"), "SQL: la de dólares solo con líneas de dólares, con las generales + las de dólares");
+  ok(sql05.includes("('traslado_ia', 'empresa', 'traslados_ia'), ('traslado_ia', 'particular', 'traslados_ia'), ('traslado_ia', 'extranjero', case when jsonb_array_length(gu) > 0 then 'traslados_ia_usd' else 'traslados_ia' end)"), "SQL: las tres reglas de la IA");
+  ok(P.ID_PLANTILLA_TRASLADOS === "traslados_ia" && P.ID_PLANTILLA_TRASLADOS_USD === "traslados_ia_usd", "los ids del SQL son los del motor");
+
+  type CfgT = { consideraciones?: unknown[] | null; consideraciones_usd?: unknown[] | null; incluye?: unknown[] | null; no_incluye?: unknown[] | null };
+  const CORP: Plantilla = {
+    id: "corporativo", nombre: "Corporativo", es_principal: true, activa: true, diseno: "corporativo", idioma: "es", orden: 1,
+    condiciones_generales: ["GENERAL DE LA CORPORATIVA"], condiciones_incluye: ["INCLUYE DE LA CORPORATIVA"], condiciones_no_incluye: ["NO INCLUYE DE LA CORPORATIVA"],
+    mostrar_cuentas_bancarias: true, usar_bancos_propios: true, banco_1_nombre: "BCP", banco_1_cuenta: "191-1234567-0-12", banco_1_cci: "002-191-001234567012-55",
+  };
+  /** Lo que hace el bloque 3 de cotizaciones-05 (comprobado arriba contra el SQL). */
+  const traspaso = (cfg: CfgT, corp: Plantilla = CORP): { plantillas: Plantilla[]; reglas: Regla[] } => {
+    const g = (cfg.consideraciones ?? []) as string[], gu = (cfg.consideraciones_usd ?? []) as string[];
+    const src: Plantilla = { ...corp, es_principal: false, activa: true, diseno: "corporativo", idioma: "es", condiciones_incluye: (cfg.incluye ?? []) as string[], condiciones_no_incluye: (cfg.no_incluye ?? []) as string[] };
+    const plantillas: Plantilla[] = [corp, { ...src, id: "traslados_ia", nombre: "Traslados (IA)", orden: 2, condiciones_generales: g }];
+    if (gu.length > 0) plantillas.push({ ...src, id: "traslados_ia_usd", nombre: "Traslados (IA) · dólares", orden: 3, condiciones_generales: [...g, ...gu] });
+    const reglas: Regla[] = [
+      { servicio: "traslado_ia", segmento: "empresa", plantilla_id: "traslados_ia" },
+      { servicio: "traslado_ia", segmento: "particular", plantilla_id: "traslados_ia" },
+      { servicio: "traslado_ia", segmento: "extranjero", plantilla_id: gu.length > 0 ? "traslados_ia_usd" : "traslados_ia" },
+    ];
+    return { plantillas, reglas };
+  };
+  // La regla de ANTES, copiada literal de filaCotizacionTraslado (sin plantilla debe seguir dando esto).
+  const consideracionesViejas = (c: CfgT, usd: boolean) => {
+    const limpia = (l: readonly unknown[] | null | undefined) => (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
+    const generales = limpia([...((c.consideraciones as unknown[]) ?? []), ...(usd ? (c.consideraciones_usd as unknown[]) ?? [] : [])]);
+    const incluye = limpia(c.incluye as unknown[]);
+    const noIncluye = limpia(c.no_incluye as unknown[]);
+    return { incluye, no_incluye: noIncluye, generales };
+  };
+
+  // (b) Barrido: Ajustes × pedido × tipo de cliente. Con la plantilla del traspaso, las mismas listas.
+  const GENERALES = [config.consideraciones, [], ["  Línea con espacios  ", "", "   ", "Otra línea"], null];
+  const USD_LINEAS = [config.consideraciones_usd, [], ["   "], ["Pago al tipo de cambio del día", ""], null];
+  const INCLUYE = [undefined, [], ["Conductor profesional", "  "], null];
+  const NO_INCLUYE = [undefined, [], ["Parqueo del aeropuerto"]];
+  const PEDIDOS = [
+    pedido(), pedido({ sentido: "ida_retorno", fecha_retorno: "2026-10-28", hora_retorno: "18:00" }),
+    pedido({ telefono: "+13055551234", sentido: "ida_retorno", fecha_retorno: "2026-10-28", hora_retorno: "18:00" }),
+    pedido({ pide_dolares: true }),
+  ];
+  let n = 0;
+  for (const gen of GENERALES) for (const gu of USD_LINEAS) for (const inc of INCLUYE) for (const noi of NO_INCLUYE) for (const p of PEDIDOS) for (const tipo of ["b2b", "b2c", null]) {
+    n++;
+    const cfg: CfgT = { consideraciones: gen, consideraciones_usd: gu, ...(inc !== undefined ? { incluye: inc } : {}), ...(noi !== undefined ? { no_incluye: noi } : {}) };
+    const configT = { validez_dias: 30, espera_gratis_min: 30, ...cfg } as any;
+    const r = M.evaluarTraslado(p, ctx);
+    if (r.codigo !== "cotizable") { ok(false, `pedido no cotizable: ${r.codigo}`); continue; }
+    const usd = r.precio!.moneda === "USD";
+    const t = traspaso(cfg);
+    const segmento = P.segmentoDeCliente({ moneda: r.precio!.moneda, tipoCliente: tipo });
+    const uso = P.plantillaParaUso({ servicio: "traslado_ia", segmento }, t.plantillas, t.reglas);
+    const esperada = usd && (gu ?? []).length > 0 ? "traslados_ia_usd" : "traslados_ia";
+    ok(uso.codigo === "regla" && uso.plantilla?.id === esperada, `la regla del traspaso elige ${esperada} (${uso.codigo} ${uso.plantilla?.id})`);
+    const base = { convId: "c", clienteId: null, atencion: "Ana", config: configT, firma: "f", hoy: HOY, ahora: "2026-10-19T15:00:00.000Z" };
+    const vieja = C.filaCotizacionTraslado(r, entradaDe(p), base);
+    const nueva = C.filaCotizacionTraslado(r, entradaDe(p), { ...base, plantilla: uso.plantilla });
+    const cv = vieja.consideraciones_json, cn = nueva.consideraciones_json;
+    const listas = (c: typeof cv) => JSON.stringify([c.incluye, c.no_incluye, c.generales]);
+    ok(listas(cn) === listas(cv), `mismas listas por las dos rutas (${p.telefono} ${p.sentido} ${tipo}): ${listas(cn)} vs ${listas(cv)}`);
+    ok(JSON.stringify(cv) === JSON.stringify(consideracionesViejas(cfg, usd)), "sin plantilla: las consideraciones del algoritmo viejo, byte a byte");
+    ok(cn.version === 2 && cn.plantilla === esperada && nueva.plantilla_pdf === esperada, "con plantilla: versión 2, de qué plantilla y plantilla_pdf");
+    ok(!("plantilla_pdf" in vieja) && JSON.stringify(Object.keys(cv)) === JSON.stringify(["incluye", "no_incluye", "generales"]), "sin plantilla: ni plantilla_pdf ni version");
+    const { consideraciones_json: _a, plantilla_pdf: _b, ...restoN } = nueva;
+    const { consideraciones_json: _c, ...restoV } = vieja;
+    ok(JSON.stringify(restoN) === JSON.stringify(restoV), "el resto de la fila no cambia");
+    // La entrada del PDF (lo que se imprime) es la misma.
+    const ent = (f: typeof vieja) => C.entradaCorporativaTraslado({ ...f, id: 7, created_at: "2026-10-19T15:00:00Z" }, { empresa: perfilPrueba, celular: "51966707225", plantilla: CORP, ahoraMs: reloj });
+    ok(JSON.stringify(ent(nueva).consid) === JSON.stringify(ent(vieja).consid) && JSON.stringify(ent(nueva).cfg) === JSON.stringify(ent(vieja).cfg), "la entrada del PDF imprime las mismas condiciones y cuentas");
+  }
+  console.log(`  barrido: ${n} combinaciones`);
+  // Sin plantilla (null o ausente) es la misma fila.
+  {
+    const r = M.evaluarTraslado(pedido({ telefono: "+13055551234" }), ctx);
+    const base = { convId: "c", clienteId: null, atencion: null, config, firma: "f", hoy: HOY, ahora: "2026-10-19T15:00:00.000Z" };
+    const a = JSON.stringify(C.filaCotizacionTraslado(r, entradaDe(pedido({ telefono: "+13055551234" })), base));
+    ok(a === JSON.stringify(C.filaCotizacionTraslado(r, entradaDe(pedido({ telefono: "+13055551234" })), { ...base, plantilla: null })), "plantilla null = sin plantilla");
+    // Una lista NULL en la plantilla no trae las de Ajustes: es vacía (las condiciones son las de la plantilla).
+    const sinListas: Plantilla = { ...CORP, id: "x_sin_listas", condiciones_generales: null, condiciones_incluye: null, condiciones_no_incluye: null };
+    const f = C.filaCotizacionTraslado(r, entradaDe(pedido({ telefono: "+13055551234" })), { ...base, plantilla: sinListas });
+    ok(f.consideraciones_json.generales.length === 0 && f.consideraciones_json.incluye.length === 0 && f.plantilla_pdf === "x_sin_listas", "plantilla sin condiciones propias: listas vacías, nunca las de Ajustes");
+    ok(Object.keys(f).every((k) => k !== "undefined"), "sin claves raras");
+  }
+
+  // (c)(d)(e) plantillaParaTraslado sobre una base falsa: tablas que faltan (PGRST205) y lecturas que fallan.
+  class SbConTablas extends SbFalso {
+    sinTabla = new Set<string>();
+    lecturas: string[] = [];
+    from(tabla: string): any {
+      this.lecturas.push(tabla);
+      if (this.sinTabla.has(tabla)) {
+        const r = { data: null, count: null, error: { code: "PGRST205", message: `Could not find the table 'public.${tabla}' in the schema cache` } };
+        const q: any = new Proxy({}, { get: (_t, k) => (k === "then" ? (a: any, b: any) => Promise.resolve(r).then(a, b) : () => q) });
+        return q;
+      }
+      return super.from(tabla);
+    }
+  }
+  const baseCon = (x: { plantillas?: Plantilla[] | null; reglas?: Regla[] | null } = {}) => {
+    const sb = new SbConTablas(() => reloj);
+    Object.assign(sb.tablas, nuevaBase().tablas);
+    if (x.plantillas === null) sb.sinTabla.add("cotizacion_plantillas"); else sb.tablas.cotizacion_plantillas = (x.plantillas ?? []).map((p) => ({ ...p }));
+    if (x.reglas === null) sb.sinTabla.add("cotizacion_plantilla_reglas"); else sb.tablas.cotizacion_plantilla_reglas = (x.reglas ?? []).map((p) => ({ ...p }));
+    return sb;
+  };
+  const T = traspaso(config);
+  const EMPRESA: Plantilla = { ...T.plantillas[1], id: "traslados_empresa", nombre: "Traslados empresas", orden: 4, condiciones_generales: ["CONDICIÓN PARA EMPRESAS"] };
+  const conEmpresa = () => ({ plantillas: [...T.plantillas, EMPRESA], reglas: T.reglas.map((r) => (r.segmento === "empresa" ? { ...r, plantilla_id: "traslados_empresa" } : r)) });
+  const cuantasClientes = (sb: SbConTablas) => sb.lecturas.filter((t) => t === "clientes").length;
+  {
+    const sb = baseCon({ plantillas: [CORP], reglas: null });
+    const r = await plantillaParaTraslado(sb, { moneda: "PEN", clienteId: 7 });
+    ok(r.ok && r.plantilla === null && r.codigo === "sin_reglas" && cuantasClientes(sb) === 0, `sin la tabla de reglas: null (Ajustes) y sin leer al cliente (${JSON.stringify(r)})`);
+    const sb2 = baseCon({ plantillas: null, reglas: null });
+    const r2 = await plantillaParaTraslado(sb2, { moneda: "USD", clienteId: null });
+    ok(r2.ok && r2.plantilla === null && r2.ok && r2.segmento === "extranjero", "sin la tabla de plantillas: null (Ajustes)");
+    const sb3 = baseCon(T); sb3.fallas.push({ tabla: "cotizacion_plantilla_reglas", op: "select", mensaje: "timeout" });
+    const r3 = await plantillaParaTraslado(sb3, { moneda: "PEN", clienteId: null });
+    ok(!r3.ok && /reglas/.test(r3.detalle) && /timeout/.test(r3.detalle), `reglas que no se pudieron leer: ok:false con el motivo (${!r3.ok ? r3.detalle : ""})`);
+    const sb4 = baseCon(T); sb4.fallas.push({ tabla: "cotizacion_plantillas", op: "select", mensaje: "sin conexión" });
+    const r4 = await plantillaParaTraslado(sb4, { moneda: "PEN", clienteId: null });
+    ok(!r4.ok && /sin conexión/.test(r4.detalle), "plantillas que no se pudieron leer: ok:false");
+    const sb5 = baseCon(T);
+    const r5 = await plantillaParaTraslado(sb5, { moneda: "PEN", clienteId: null });
+    ok(r5.ok && r5.plantilla?.id === "traslados_ia" && r5.segmento === "particular" && r5.codigo === "regla" && cuantasClientes(sb5) === 0, "sin cliente: particular, sin leer clientes");
+    const sb6 = baseCon(T); sb6.fallas.push({ tabla: "clientes", op: "select", mensaje: "caída" });
+    const r6 = await plantillaParaTraslado(sb6, { moneda: "USD", clienteId: 7 });
+    ok(r6.ok && r6.plantilla?.id === "traslados_ia_usd" && r6.segmento === "extranjero" && cuantasClientes(sb6) === 0, "en dólares el cliente no decide: no se lee (aunque la lectura fallara)");
+    const sb7 = baseCon(conEmpresa()); sb7.t("clientes").find((c) => c.id === 7)!.tipo = "b2b";
+    const r7 = await plantillaParaTraslado(sb7, { moneda: "PEN", clienteId: 7 });
+    ok(r7.ok && r7.plantilla?.id === "traslados_empresa" && r7.segmento === "empresa", `cliente b2b: la de empresas (${r7.ok ? r7.plantilla?.id : r7.detalle})`);
+    const sb8 = baseCon(conEmpresa()); sb8.t("clientes").find((c) => c.id === 7)!.tipo = "b2c";
+    const r8 = await plantillaParaTraslado(sb8, { moneda: "PEN", clienteId: 7 });
+    ok(r8.ok && r8.plantilla?.id === "traslados_ia" && r8.segmento === "particular", "cliente b2c: particular");
+    const r9 = await plantillaParaTraslado(baseCon(conEmpresa()), { moneda: "PEN", clienteId: 999 });
+    ok(r9.ok && r9.segmento === "particular", "un cliente que no existe: particular");
+    const sb10 = baseCon(conEmpresa()); sb10.fallas.push({ tabla: "clientes", op: "select", mensaje: "caída" });
+    const r10 = await plantillaParaTraslado(sb10, { moneda: "PEN", clienteId: 7 });
+    ok(!r10.ok && /tipo del cliente/.test(r10.detalle), "el tipo del cliente no se pudo leer y decide: ok:false (no se adivina el segmento)");
+    // Una celda que apunta a una plantilla que la IA no dibuja, o desactivada: la principal (si sirve).
+    const enIngles = { plantillas: [...T.plantillas.map((p) => (p.id === "traslados_ia" ? { ...p, idioma: "en" } : p))], reglas: T.reglas };
+    const r11 = await plantillaParaTraslado(baseCon(enIngles), { moneda: "PEN", clienteId: null });
+    ok(r11.ok && r11.codigo === "regla_no_sirve_ia" && r11.plantilla?.id === "corporativo", "regla con una plantilla en inglés: la principal corporativa");
+    const otroDiseno = { plantillas: [{ ...CORP, diseno: "moderno_fotos" }, ...T.plantillas.slice(1).map((p) => (p.id === "traslados_ia" ? { ...p, activa: false } : p))], reglas: T.reglas };
+    const r12 = await plantillaParaTraslado(baseCon(otroDiseno), { moneda: "PEN", clienteId: null });
+    ok(r12.ok && r12.plantilla === null && r12.codigo === "sin_plantilla", "regla desactivada y principal de otro diseño: null (Ajustes)");
+    // plantillaParaTraslado no recibe texto libre: sus únicas entradas son la moneda y el id del cliente.
+    const fuente = readFileSync("lib/traslados/plantilla-traslado-datos.ts", "utf8").replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    ok(/plantillaParaTraslado\(sb: Sb, x: \{ moneda: unknown; clienteId: number \| null \}\)/.test(fuente) && !/req\b|cuerpo|input|json\(\)/.test(fuente), "plantillaParaTraslado solo recibe la moneda y el id del cliente (nunca el cuerpo de una petición)");
+  }
+
+  // De punta a punta: la cotización de la IA con y sin la migración.
+  const depsP = { simular: simularFalso({ n: 0 }) as any, bajarLogo: async () => null, ahoraMs: () => reloj, azar: () => String(Math.random()).slice(2, 8) };
+  const listasDe = (f: any) => JSON.stringify([f.consideraciones_json.incluye, f.consideraciones_json.no_incluye, f.consideraciones_json.generales]);
+  const corrida = async (sb: SbFalso, input: any = pedidoIA) => {
+    const res = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), input, depsP);
+    // `fila` es la última cotización guardada (en una derivación no hay: se comprueba con el conteo).
+    return { res, fila: sb.t("cotizaciones").at(-1) as any, pdf: res.envioPendiente ? textoDelPdf(res.envioPendiente.bytes) : null };
+  };
+  {
+    const vieja = await corrida(baseCon({ plantillas: [CORP], reglas: null }));       // sin la migración (PGRST205)
+    const plana = await corrida(nuevaBase());                                           // la base de la sección 17
+    const nueva = await corrida(baseCon(T));                                            // con la migración y el traspaso
+    ok(vieja.res.cotizacion?.decision === "automatico" && nueva.res.cotizacion?.decision === "automatico", `las dos salen solas (${vieja.res.cotizacion?.decision} / ${nueva.res.cotizacion?.decision} ${JSON.stringify(nueva.res.derivar ?? "")})`);
+    ok(!("plantilla_pdf" in vieja.fila) && vieja.fila.consideraciones_json.version === undefined, "sin la migración: ni plantilla_pdf ni versión en la fila");
+    ok(JSON.stringify(vieja.fila) === JSON.stringify(plana.fila), "sin la migración la fila es la misma que sin plantillas en la base");
+    ok(JSON.stringify(vieja.fila.consideraciones_json) === JSON.stringify(consideracionesViejas(config, false)), "sin la migración: las consideraciones del algoritmo viejo");
+    ok(nueva.fila.plantilla_pdf === "traslados_ia" && nueva.fila.consideraciones_json.version === 2 && nueva.fila.consideraciones_json.plantilla === "traslados_ia", "con la migración: plantilla_pdf y versión 2");
+    ok(listasDe(nueva.fila) === listasDe(vieja.fila), `las mismas listas por las dos rutas (${listasDe(nueva.fila)})`);
+    ok(!!nueva.pdf && nueva.pdf === vieja.pdf, "el texto del PDF enviado es idéntico por las dos rutas");
+    ok(!/CORPORATIVA/.test(nueva.pdf ?? ""), "y no trae ninguna condición de la corporativa");
+  }
+  {
+    // En dólares: la de dólares, con la línea de dólares; la misma lista que la ruta antigua.
+    const conDolares = (sb: SbFalso) => { sb.tablas.crm_mensajes.push({ id: "m9", conversacion_id: "cv-1", direccion: "entrante", contenido: "¿Me la puedes pasar en dólares?", created_at: "2026-10-19T14:58:00Z" }); return sb; };
+    const pUsd = { ...pedidoIA, cliente_pide_dolares: true };
+    const vieja = await corrida(conDolares(baseCon({ plantillas: [CORP], reglas: null })), pUsd);
+    const nueva = await corrida(conDolares(baseCon(T)), pUsd);
+    ok(vieja.fila?.moneda === "USD" && nueva.fila?.moneda === "USD", "las dos en dólares");
+    ok(nueva.fila.plantilla_pdf === "traslados_ia_usd" && listasDe(nueva.fila) === listasDe(vieja.fila), `dólares: la plantilla de dólares y las mismas listas (${listasDe(nueva.fila)})`);
+    ok(nueva.fila.consideraciones_json.generales.some((x: string) => config.consideraciones_usd.includes(x)), "con la línea de dólares");
+    ok(!!nueva.pdf && nueva.pdf === vieja.pdf, "dólares: el texto del PDF es idéntico");
+  }
+  {
+    // El cliente verificado (vinculado al contacto) de tipo empresa: la plantilla de su regla.
+    const sb = baseCon(conEmpresa());
+    sb.t("clientes").find((c) => c.id === 7)!.tipo = "b2b";
+    const e = await corrida(sb);
+    ok(e.fila?.plantilla_pdf === "traslados_empresa" && e.fila.consideraciones_json.generales.join() === "CONDICIÓN PARA EMPRESAS", `empresa: las condiciones de su plantilla (${e.fila?.plantilla_pdf})`);
+    ok((e.pdf ?? "").includes("CONDICIÓN PARA EMPRESAS"), "y el PDF las imprime");
+    // Un cliente que NO está verificado (otro número, sin vínculo) no cuenta: particular.
+    const sbN = baseCon(conEmpresa());
+    sbN.t("clientes").find((c) => c.id === 7)!.tipo = "b2b";
+    sbN.t("clientes").find((c) => c.id === 7)!.telefono = "999 000 111";
+    const e2 = await corrida(sbN);
+    ok(e2.fila?.cliente_id == null && e2.fila?.plantilla_pdf === "traslados_ia", `sin cliente verificado, particular (${e2.fila?.cliente_id} ${e2.fila?.plantilla_pdf})`);
+  }
+  {
+    // Lectura fallida: se deriva al ejecutivo con su motivo, sin crear nada.
+    const sb = baseCon(T); sb.fallas.push({ tabla: "cotizacion_plantilla_reglas", op: "select", mensaje: "timeout" });
+    const d = await corrida(sb);
+    ok(d.res.accion === "derivar" && d.res.derivar?.motivo === "No se pudieron leer las condiciones del PDF (plantilla)" && /timeout/.test(d.res.derivar?.nota ?? "") && sb.t("cotizaciones").length === 0 && sb.t("crm_acciones_ia").length === 0, `reglas ilegibles → deriva sin crear nada (${d.res.derivar?.motivo})`);
+    const sbC = baseCon(conEmpresa()); sbC.t("crm_contactos").find((x) => x.id === "ct-1")!.cliente_id = 7; sbC.fallas.push({ tabla: "clientes", op: "select", mensaje: "caída" });
+    const dc = await corrida(sbC);
+    ok(dc.res.accion === "derivar" && /tipo del cliente/.test(dc.res.derivar?.nota ?? "") && sbC.t("cotizaciones").length === 0, "el tipo del cliente ilegible (y decide) → deriva");
+  }
+  {
+    // Sin la columna plantilla_pdf (no debería pasar: es de producción) se guarda sin ella; el PDF
+    // y su relectura toman las cuentas de `corporativo`.
+    const sb = baseCon(T); sb.faltan.cotizaciones = ["plantilla_pdf"];
+    const s = await corrida(sb);
+    ok(s.res.accion === "cotizar" && !("plantilla_pdf" in s.fila) && s.fila.consideraciones_json.version === 2, `sin la columna: se guarda sin ella, las condiciones fijadas (${s.res.accion})`);
+    const pdf = await pdfDeCotizacion(sb as any, s.fila.id, { bajarLogo: async () => null });
+    ok(textoDelPdf(pdf.bytes) === s.pdf, "la relectura (sin la columna) imprime lo mismo que se armó al crearla");
+  }
+  {
+    // Las CUENTAS son las de la plantilla de la cotización (plantilla_pdf), también al reenviar.
+    const sb = baseCon({ ...T, plantillas: T.plantillas.map((p) => (p.id === "traslados_ia" ? { ...p, banco_1_nombre: "BANCO DE LA PLANTILLA IA" } : p)) });
+    const c = await corrida(sb);
+    ok((c.pdf ?? "").includes("BANCO DE LA PLANTILLA IA") && !(c.pdf ?? "").includes("BCP"), "el PDF lleva las cuentas de la plantilla de la regla");
+    const pdf = await pdfDeCotizacion(sb as any, c.fila.id, { bajarLogo: async () => null });
+    ok(textoDelPdf(pdf.bytes).includes("BANCO DE LA PLANTILLA IA"), "y la relectura también (plantilla_pdf)");
+    // Si después esa plantilla pasa a otro diseño, el PDF vuelve a las cuentas de `corporativo`.
+    sb.t("cotizacion_plantillas").find((p) => p.id === "traslados_ia")!.diseno = "ejecutivo";
+    const pdf2 = await pdfDeCotizacion(sb as any, c.fila.id, { bajarLogo: async () => null });
+    ok(textoDelPdf(pdf2.bytes).includes("BCP") && !textoDelPdf(pdf2.bytes).includes("BANCO DE LA PLANTILLA IA"), "una plantilla que ya no es corporativa: las cuentas de corporativo");
+  }
+  {
+    // El simulador usa la misma plantilla, sin cliente y sin tomar nada del cuerpo.
+    const q = (x: string) => x.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const ruta = q(readFileSync("app/api/traslados/simular/route.ts", "utf8"));
+    ok(/plantillaParaTraslado\(sb, \{ moneda: r\.precio!\.moneda, clienteId: null \}\)/.test(ruta), "simulador: la plantilla con la moneda del motor y sin cliente");
+    ok(/if \(!pt\.ok\)[\s\S]{0,200}status: 500/.test(ruta) && ruta.indexOf("plantillaParaTraslado(") < ruta.indexOf("filaCotizacionTraslado("), "simulador: lectura fallida → 500 con su motivo, antes de armar la fila");
+    ok(/plantilla: pt\.plantilla/.test(ruta) && /\.\.\.respuesta, envio, plantilla, condiciones/.test(ruta), "simulador: la fila con la plantilla, y la respuesta dice cuál");
+    const ia = q(readFileSync("lib/traslados/cotizar-ia-datos.ts", "utf8"));
+    ok(/plantillaParaTraslado\(sb, \{ moneda: r\.precio!\.moneda, clienteId \}\)/.test(ia) && ia.indexOf("clienteIdDeRemitente(sb, ctx.contacto") < ia.indexOf("plantillaParaTraslado("), "IA: el tipo de cliente sale del cliente ya verificado (clienteIdDeRemitente)");
+  }
+}
+
 console.log(`\n${oks} ok · ${fallos} fallos`);
 for (const p of pendientes) console.log(`  ${p}`);
 if (fallos) process.exit(1);

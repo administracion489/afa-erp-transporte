@@ -8,6 +8,7 @@
 
 import { SENALES, type PuntoUbicado, type ResultadoTraslado, type SenalComplejidad, type Sentido } from "./motor";
 import type { CodigoRevision } from "./envio-ia";
+import type { CodigoUso, Segmento } from "../cotizacion-plantillas";
 
 /** Un punto: el texto que escribió el cliente, o coordenadas (un pin del mapa o de WhatsApp). */
 export type LugarEntrada = string | { lat: number; lng: number; texto?: string };
@@ -47,8 +48,22 @@ export type LugarUbicado = { codigo: CodigoUbicar; detalle: string; punto: Punto
  */
 export type EnvioSimulado = { decision: "automatico" | "revision"; motivos: CodigoRevision[] };
 
+/**
+ * De dónde saca la IA las condiciones del PDF de esta cotización (lib/traslados/plantilla-traslado-datos.ts):
+ * `plantilla` es la plantilla PDF de la regla «Traslado de la IA × segmento» (en el simulador el
+ * segmento sale solo de la moneda: no hay cliente del ERP), o null si usa las de Ajustes de traslados.
+ * `condiciones` lo dice SIEMPRE, con el código y la frase de `plantillaParaUso`: con `plantilla`
+ * null, «falta el SQL» (`sin_reglas`) y «no hay una plantilla que la IA pueda usar» (`sin_plantilla`)
+ * se arreglan en sitios distintos. Solo vienen con un resultado cotizable.
+ */
+export type PlantillaSimulada = { id: string; nombre: string; segmento: Segmento; codigo: CodigoUso };
+export type CondicionesSimuladas = { fuente: "plantilla" | "ajustes"; segmento: Segmento; codigo: CodigoUso; detalle: string };
+
 export type RespuestaSimulador =
-  | { ok: true; resultado: ResultadoTraslado; lugares: { origen: LugarUbicado; destino: LugarUbicado }; envio?: EnvioSimulado }
+  | {
+    ok: true; resultado: ResultadoTraslado; lugares: { origen: LugarUbicado; destino: LugarUbicado }; envio?: EnvioSimulado;
+    plantilla?: PlantillaSimulada | null; condiciones?: CondicionesSimuladas;
+  }
   | { ok: false; codigo: "sin_migracion" | "entrada_invalida" | "error"; detalle: string };
 
 const MAX_TEXTO = 300;
