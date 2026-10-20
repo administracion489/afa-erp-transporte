@@ -130,7 +130,9 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
   ok(mensajeDerivacion({ mensaje_derivacion: conLlave, comportamiento: atencion }, ct, SAB_18) === "Gracias Paola, ya registré su solicitud. Nuestro horario de atención es de lunes a sábado, de 09:00 a 17:00; un ejecutivo le responderá el lunes desde las 09:00. 🙌", "con {atencion}, fuera: ahí entra la frase");
   ok(mensajeDerivacion({ mensaje_derivacion: conLlave, comportamiento: atencion }, ct, LUN_10) === "Gracias Paola, ya registré su solicitud. 🙌", "con {atencion}, dentro: la llave se va limpia");
   ok(mensajeDerivacion({ mensaje_derivacion: "Hola {nombre}. {atencion}", comportamiento: atencion }, ct, LUN_10) === "Hola Paola.", "con {atencion} al final y dentro: sin espacio colgando");
-  ok(mensajeDerivacion({ mensaje_derivacion: "Hola {nombre}." }, { nombre: "$&x" }, SAB_18) === "Hola $&x.", "un nombre con «$&» no se reinterpreta");
+  // ADAPTADA (auditoría 20-10): el nombre pasa por primerNombreSeguro, así que «$&x» ni se
+  // reinterpreta ni se repite (no es un nombre).
+  ok(mensajeDerivacion({ mensaje_derivacion: "Hola {nombre}." }, { nombre: "$&x" }, SAB_18) === "Hola.", "un nombre con «$&» no se reinterpreta ni se repite");
 }
 
 // ── bloqueTraslados: con «todo junto», BYTE A BYTE el bloque de antes ─────────────────────────────
@@ -295,6 +297,12 @@ ok(trasladosDeConfig(null) === null, "traslados: sin configuración → null");
   ok(conE.includes("pon ese emoji en su renglón") && conE.includes("📅 fecha del servicio"), "con emojis en los datos del pedido, el resumen los usa");
   const cadaE = construirSystem({ ...agente, comportamiento: { reglas_extra: "x", resumen_cuando: "cada_respuesta", campos_pedido: "📅 fecha" } }, contacto, conv, true, "AFA Transportes");
   ok(cadaE.includes("pon ese emoji en su renglón"), "también con el resumen en cada respuesta");
+}
+// Auditoría 20-10: el nombre del perfil de WhatsApp lo elige el cliente; en la derivación pasa por primerNombreSeguro.
+{
+  const d = mensajeDerivacion({}, { nombre: "S/150" });
+  ok(!/S\/150|150/.test(d) && d.length > 0, "derivación: un nombre «S/150» no se repite");
+  ok(mensajeDerivacion({}, { nombre: "paola huarachi" }).includes("Paola"), "derivación: un nombre normal sigue saliendo");
 }
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

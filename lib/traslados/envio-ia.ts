@@ -46,7 +46,7 @@ import {
 import { totalesEnMoneda, normalizarMoneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { LINEA_DISPONIBILIDAD } from "./cotizacion-traslado";
-import { importesEnTexto, mencionaDinero, primerNombreSeguro, textoLibreSospechoso, type MotivoTextoLibre } from "./texto-libre";
+import { importesEnTexto, mencionaDinero, primerNombreSeguro, referenciaImprimible, textoLibreSospechoso, type MotivoTextoLibre } from "./texto-libre";
 import type { EstiloMensajes, ModoPreguntas } from "../crm-ia-ajustes";
 
 // ── 1. La herramienta ────────────────────────────────────────────────────────
@@ -418,8 +418,17 @@ export function mensajeCotizacionCodigo(x: {
  * el motor («Para cotizar su traslado, ¿me indica a?»). Con «tu» y «todo junto», byte a byte el
  * texto de antes. Sin ningún dato, "" (quien llama manda la derivación).
  */
+/**
+ * El motor pide de nuevo una dirección que Google no encontró citando lo que escribió el cliente
+ * («… (no se encontró «X»)»). Esa cita sale sin revisión desde el número oficial: si es texto libre
+ * sospechoso (un importe, un Yape, un enlace, demasiado largo) se quita y queda solo el pedido.
+ */
+function sinCitaSospechosa(dato: string): string {
+  return dato.replace(/\s*\(no se encontró «([\s\S]*)»\)\s*$/, (todo, cita: string) => (referenciaImprimible(cita) ? todo : "")).trim();
+}
+
 export function fraseFaltanTraslado(faltan: readonly unknown[] | null | undefined, estilo: EstiloMensajes): string {
-  const f = (faltan ?? []).map((x) => String(x ?? "").trim()).filter(Boolean);
+  const f = (faltan ?? []).map((x) => sinCitaSospechosa(String(x ?? "").trim())).filter(Boolean);
   if (f.length === 0) return "";
   const tu = estilo?.tratamiento === "tu";
   if (estilo?.preguntas === "una_por_mensaje") {
@@ -458,7 +467,9 @@ export function textoFinalTraslado(
   }
   if (!texto || !mencionaDinero(texto)) return texto;
   const faltan = t.accion === "preguntar" ? (t.faltan ?? []).filter(Boolean) : [];
-  return faltan.length ? fraseFaltanTraslado(faltan, x.estilo) : x.derivacion;
+  // Lo que reemplaza al texto del modelo tampoco puede hablar de dinero (última barrera).
+  const f = faltan.length ? fraseFaltanTraslado(faltan, x.estilo) : "";
+  return f && !mencionaDinero(f) ? f : x.derivacion;
 }
 
 /** Qué campo libre es sospechoso y por qué, para la nota del ejecutivo. */

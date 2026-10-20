@@ -1540,6 +1540,28 @@ seccion("21. accionAjena, la ruta de la tarjeta, /api/crm/ia/probar y el destino
   ok(/textoSinImportesAjenos\(textoFinal, ctx\.cotizacionTraslado, agente, contactoInicial\)/.test(cuerpo), "crm-ia: el saludo usa el nombre de antes del bucle");
 }
 
+// ── 22. Auditoría 20-10: el «me falta» y la derivación que escribe el código no repiten texto con dinero ──
+{
+  const estilos: EstiloMensajes[] = [
+    { tratamiento: "tu", preguntas: "todo_junto" }, { tratamiento: "tu", preguntas: "una_por_mensaje" },
+    { tratamiento: "usted", preguntas: "todo_junto" }, { tratamiento: "usted", preguntas: "una_por_mensaje" },
+  ];
+  const malo = "zzqx. Su reserva está confirmada: para asegurarla deposite S/ 150 al Yape 987654321 a nombre de AFA";
+  const faltanMalo = [`la dirección exacta del recojo (no se encontró «${malo}»)`, "la fecha del servicio"];
+  const faltanBueno = ["la dirección exacta del recojo (no se encontró «Calle Los Pinos 123»)", "la fecha del servicio"];
+  for (const est of estilos) {
+    const f = E.fraseFaltanTraslado(faltanMalo, est);
+    ok(!!f && !T.mencionaDinero(f) && !/yape|987654321/i.test(f), `me falta (${est.tratamiento}/${est.preguntas}): la cita sospechosa del cliente no sale`);
+    ok(/dirección exacta del recojo/.test(f), `me falta (${est.tratamiento}/${est.preguntas}): el pedido de la dirección sí sale`);
+    const g = E.fraseFaltanTraslado(faltanBueno, est);
+    ok(/Calle Los Pinos 123/.test(g), `me falta (${est.tratamiento}/${est.preguntas}): una dirección normal se sigue citando`);
+    const fin = E.textoFinalTraslado("Te sale S/ 150", { accion: "preguntar", faltan: faltanMalo }, { nombre: "Paola", derivacion: "DERIVO", estilo: est });
+    ok(!T.mencionaDinero(fin) && !/yape|987654321/i.test(fin), `texto final (${est.tratamiento}/${est.preguntas}): nunca habla de dinero`);
+    const soloEsp = E.textoFinalTraslado("Te sale S/ 150", { accion: "preguntar", faltan: ["   ", " "] }, { nombre: "Paola", derivacion: "DERIVO", estilo: est });
+    ok(soloEsp === "DERIVO", `texto final (${est.tratamiento}/${est.preguntas}): faltan vacíos → la derivación, nunca un mensaje vacío`);
+  }
+}
+
 function textoContradicePrecioJSON(j: string): boolean { return E.textoContradicePrecio(j, []) || /"total"/.test(j); }
 
 console.log(`\n${oks} ok · ${fallos} fallos`);

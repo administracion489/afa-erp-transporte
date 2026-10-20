@@ -30,6 +30,7 @@ import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
 import { fechaLima } from "@/lib/alertas-horario";
 import { faltaColumna } from "@/lib/columna-faltante";
 import { inicioVentanaHumano, inicioConteoTurnos } from "@/lib/crm-ia-reactivacion";
+import { primerNombreSeguro } from "@/lib/traslados/texto-libre";
 import { CONTESTA, MOTIVO_ULTIMO, juzgarUltimo, leerMarca, marcaVigente, ordenarRafaga, type MarcaRespuesta } from "@/lib/crm-ia-rafaga";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
@@ -156,8 +157,10 @@ export function mensajeDerivacion(agente: AgenteIAConfig | null | undefined, con
     // iguales, y dentro del horario la llave se va sin dejar espacios colgando.
     plantilla = propia.replace(/\{atencion\}/g, () => fuera).replace(/[ \t]{2,}/g, " ").replace(/[ \t]+$/gm, "").trim();
   }
-  const n = primerNombre(contacto);
-  return plantilla.replace(/\{nombre\}/g, () => n).replace(/,\s*([.!?])/g, "$1").replace(/\s+,/g, ",");
+  // El nombre lo elige el cliente en su perfil de WhatsApp y este mensaje lo escribe el código:
+  // pasa por el mismo filtro que el mensaje de la cotización (un «S/150» no se repite).
+  const n = primerNombreSeguro(primerNombre(contacto));
+  return plantilla.replace(/\{nombre\}/g, () => n).replace(/,\s*([.!?])/g, "$1").replace(/\s+,/g, ",").replace(/[ \t]+([.!?])/g, "$1");
 }
 
 /** Horas que la IA se aparta cuando contesta una persona del equipo. La MISMA lectura con que el
