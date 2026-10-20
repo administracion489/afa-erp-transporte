@@ -19,9 +19,10 @@ import {
 import { zonaConEnvio } from "@/lib/traslados/envio-ia";
 import { BUCKETS_PRIVADOS } from "@/lib/storage-privado";
 import {
-  considSnapshot, esIdPlantillaValido, etiquetaCelda, plantillaParaUso, SEGMENTOS, SQL_PLANTILLAS_USO,
+  esIdPlantillaValido, etiquetaCelda, plantillaParaUso, SEGMENTOS, SQL_PLANTILLAS_USO,
   type CodigoUso, type PlantillaFila, type ReglaPlantilla, type Segmento,
 } from "@/lib/cotizacion-plantillas";
+import { considDeTraslado } from "@/lib/traslados/cotizacion-traslado";
 
 /** `envio_automatico` es de traslados-05: sin esa migración llega `undefined`, que es «no». */
 export type ZonaFila = Zona & { notas?: string | null; envio_automatico?: boolean | null };
@@ -477,9 +478,13 @@ export function mensajeEnvioZona(z: { id: number | null; nombre: string; tipo: Z
 // Desde supabase/cotizaciones-05 las condiciones del PDF del traslado salen de la plantilla de la
 // regla «Traslado de la IA × segmento» (lib/traslados/plantilla-traslado-datos.ts), no de Ajustes.
 // QUÉ PLANTILLA usa cada segmento lo decide `plantillaParaUso` (el MISMO motor que usa la IA), y QUÉ
-// LISTAS se copian a la fila es lo que hace `filaCotizacionTraslado`: la matriz cruza
-// `condicionesTrasladoIA` contra esa fila, segmento por segmento. Si Ajustes enseñara otras listas
-// que las que la IA copia, la pantalla estaría describiendo un PDF que no existe.
+// LISTAS se copian a la fila lo decide `considDeTraslado` (lib/traslados/cotizacion-traslado.ts), la
+// MISMA función que usa `filaCotizacionTraslado`: la pantalla no tiene su propia copia. La matriz
+// cruza además `condicionesTrasladoIA` contra esa fila, segmento por segmento.
+//
+// MIENTRAS ALGÚN SEGMENTO CAIGA A LAS LISTAS DE AJUSTES (sin una plantilla que la IA pueda usar),
+// esas listas se siguen EDITANDO en Ajustes: las lee la IA (`listasDeAjustesEnUso`). Solo las que no
+// lee nadie dejan de ofrecerse y de guardarse.
 
 /** Lo que `traslados_config` aporta a las condiciones (las cuatro listas de antes de cotizaciones-05). */
 export type ConfigCondiciones = {
@@ -517,10 +522,6 @@ export type GrupoCondicionesIA = {
 const USO_AMBAR: readonly CodigoUso[] = ["regla_inactiva", "regla_no_sirve_ia", "sin_plantilla", "sin_reglas"];
 export const usoEsAmbar = (c: CodigoUso): boolean => USO_AMBAR.includes(c);
 
-/** La misma limpieza que `filaCotizacionTraslado`: sin espacios de los bordes y sin líneas vacías. */
-const limpiaLista = (l: readonly unknown[] | null | undefined): string[] =>
-  (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
-
 /**
  * Qué condiciones copia la IA a la fila en cada segmento, CON reglas (cotizaciones-05 corrida). En
  * el traslado el segmento `extranjero` es SIEMPRE en dólares y los otros dos en soles
@@ -542,31 +543,22 @@ export function condicionesTrasladoIA(
     const clave = u.plantilla ? `plantilla:${u.plantilla.id}` : `ajustes:${usd ? "usd" : "pen"}`;
     const ya = grupos.find((g) => g.clave === clave);
     if (ya) { ya.segmentos.push(uso); continue; }
-    if (u.plantilla) {
-      const p = u.plantilla;
-      // Respaldo VACÍO, como la IA: una lista NULL de la plantilla nunca trae las de Ajustes.
-      const s = considSnapshot(p, { incluye: [], no_incluye: [], generales: [] });
-      grupos.push({
-        clave, fuente: { tipo: "plantilla", plantilla: p }, segmentos: [uso],
-        generales: { items: limpiaLista(s.generales), propia: Array.isArray(p.condiciones_generales) },
-        incluye: { items: limpiaLista(s.incluye), propia: Array.isArray(p.condiciones_incluye) },
-        no_incluye: { items: limpiaLista(s.no_incluye), propia: Array.isArray(p.condiciones_no_incluye) },
-      });
-    } else {
-      grupos.push({
-        clave, fuente: { tipo: "ajustes", usd }, segmentos: [uso],
-        generales: { items: limpiaLista([...(config.consideraciones ?? []), ...(usd ? config.consideraciones_usd ?? [] : [])]), propia: true },
-        incluye: { items: limpiaLista(config.incluye), propia: true },
-        no_incluye: { items: limpiaLista(config.no_incluye), propia: true },
-      });
-    }
+    // Lo que la IA copia a la fila: la MISMA función que usa `filaCotizacionTraslado`.
+    const c = considDeTraslado(u.plantilla, config, usd ? "USD" : "PEN");
+    const p = u.plantilla;
+    grupos.push({
+      clave, fuente: p ? { tipo: "plantilla", plantilla: p } : { tipo: "ajustes", usd }, segmentos: [uso],
+      generales: { items: c.generales, propia: p ? Array.isArray(p.condiciones_generales) : true },
+      incluye: { items: c.incluye, propia: p ? Array.isArray(p.condiciones_incluye) : true },
+      no_incluye: { items: c.no_incluye, propia: p ? Array.isArray(p.condiciones_no_incluye) : true },
+    });
   }
   return grupos;
 }
 
 /** «empresa y particular»: los segmentos de un grupo, en minúsculas. */
 export function segmentosTexto(g: Pick<GrupoCondicionesIA, "segmentos">): string {
-  return listaY(g.segmentos.map((s) => etiquetaCelda({ servicio: "traslado_ia", segmento: s.segmento }).split(" · ")[1] ?? s.segmento));
+  return listaY(g.segmentos.map((s) => nombreSegmento(s.segmento)));
 }
 
 /** El enlace al editor de esa plantilla (`?editar=` solo con un id de forma válida: va en la URL). */
@@ -574,26 +566,76 @@ export function enlaceEditarPlantilla(id: string | null | undefined): string {
   return id && esIdPlantillaValido(id) ? `/cotizaciones/plantillas?editar=${encodeURIComponent(id)}` : "/cotizaciones/plantillas";
 }
 
-/** Un grupo cuyas consideraciones hablan de otros minutos que la espera gratis de Ajustes. */
-export type EsperaDistinta = { grupo: GrupoCondicionesIA; minutos: number[]; texto: string };
+/**
+ * QUÉ LISTAS DE AJUSTES LEE HOY LA IA, y por tanto se ofrecen y se guardan. `grupos === null` (sin
+ * reglas: falta el SQL, o no se pudo comprobar) → las cuatro, en todos los segmentos (`segmentos:
+ * null`). Con reglas, solo las de los segmentos que caen a Ajustes (sin una plantilla que la IA pueda
+ * usar): consideraciones, Incluye y No incluye si cae alguno; las de dólares solo si cae
+ * `extranjero` (el único que se cotiza en dólares). Si no cae ninguno, ninguna: nadie las lee.
+ */
+export type UsoListasAjustes = { enUso: boolean; usd: boolean; segmentos: Segmento[] | null };
+
+export function listasDeAjustesEnUso(grupos: readonly GrupoCondicionesIA[] | null): UsoListasAjustes {
+  if (!grupos) return { enUso: true, usd: true, segmentos: null };
+  const segmentos = grupos.filter((g) => g.fuente.tipo === "ajustes").flatMap((g) => g.segmentos.map((x) => x.segmento));
+  return { enUso: segmentos.length > 0, usd: segmentos.includes("extranjero"), segmentos };
+}
+
+const nombreSegmento = (s: Segmento): string => etiquetaCelda({ servicio: "traslado_ia", segmento: s }).split(" · ")[1] ?? s;
+
+/**
+ * La línea ámbar sobre las listas editables cuando hay reglas y algún segmento cae a Ajustes: qué
+ * segmentos las usan, que lo demás usa su plantilla y, si las de dólares no las lee nadie, por qué no
+ * se ofrecen. Sin reglas (`segmentos: null`) o sin segmentos que caigan, null (lo dice otra línea).
+ */
+export function avisoListasAjustes(u: UsoListasAjustes): string | null {
+  if (!u.segmentos || u.segmentos.length === 0) return null;
+  const todos = u.segmentos.length === SEGMENTOS.length;
+  const partes = [
+    `La IA usa estas listas en ${listaY(u.segmentos.map(nombreSegmento))} porque ahí no hay una plantilla que pueda usar (ver arriba): lo que cambies aquí va en el PDF de ${u.segmentos.length === 1 ? "ese tipo de cliente" : "esos tipos de cliente"}.`,
+  ];
+  if (!todos) partes.push("Los demás usan su plantilla.");
+  if (!u.usd) partes.push("Las líneas solo para dólares no se ofrecen: el tipo de cliente Extranjero usa su plantilla.");
+  partes.push("Para que salgan de una plantilla, asígnala en Plantillas PDF.");
+  return partes.join(" ");
+}
+
+/**
+ * Una fuente cuyas consideraciones hablan de otros minutos que la espera gratis: una plantilla
+ * (`plantilla`), o las listas de Ajustes (`plantilla: null`, todos los segmentos que caen a ellas
+ * juntos: son el mismo texto, y avisarlo dos veces sería ruido).
+ */
+export type EsperaDistinta = { clave: string; plantilla: PlantillaFila | null; segmentos: Segmento[]; minutos: number[]; texto: string };
 
 /**
  * `minutosQueNoCoinciden` contra las consideraciones generales que la IA copia de VERDAD (las de la
  * plantilla de cada segmento, o las de Ajustes donde no hay plantilla), con la frase que nombra cuál
- * corregir. Con reglas, las listas de Ajustes ya no se imprimen (salvo donde no hay plantilla):
- * compararlas avisaría de un texto que ningún PDF dice, y callaría el que sí.
+ * corregir. Con reglas, las listas de Ajustes solo se imprimen donde no hay plantilla: compararlas
+ * en todos los casos avisaría de un texto que ningún PDF dice, y callaría el que sí.
  */
 export function esperaQueNoCoincideIA(grupos: readonly GrupoCondicionesIA[], esperaMin: number): EsperaDistinta[] {
   const out: EsperaDistinta[] = [];
+  const habla = (m: number[]) => m.map((x) => `${x} min`).join(", ");
   for (const g of grupos) {
+    if (g.fuente.tipo !== "plantilla") continue;
     const minutos = minutosQueNoCoinciden(g.generales.items, esperaMin);
     if (minutos.length === 0) continue;
-    const habla = minutos.map((m) => `${m} min`).join(", ");
-    const segs = segmentosTexto(g);
-    const texto = g.fuente.tipo === "plantilla"
-      ? `La plantilla «${g.fuente.plantilla.nombre || g.fuente.plantilla.id}» (traslado de la IA · ${segs}) habla de ${habla} y la espera gratis dice ${esperaMin} min: el PDF del traslado diría dos cosas distintas. Corrige sus consideraciones en Plantillas PDF, o el número.`
-      : `Las consideraciones de Ajustes, que la IA usa en ${segs} porque no hay una plantilla que pueda usar, hablan de ${habla} y la espera gratis dice ${esperaMin} min. Asigna una plantilla al traslado de la IA en Plantillas PDF, o corrige el número.`;
-    out.push({ grupo: g, minutos, texto });
+    const p = g.fuente.plantilla;
+    out.push({
+      clave: g.clave, plantilla: p, segmentos: g.segmentos.map((x) => x.segmento), minutos,
+      texto: `La plantilla «${p.nombre || p.id}» (traslado de la IA · ${segmentosTexto(g)}) habla de ${habla(minutos)} y la espera gratis dice ${esperaMin} min: el PDF del traslado diría dos cosas distintas. Corrige sus consideraciones en Plantillas PDF, o el número.`,
+    });
+  }
+  const deAjustes = grupos.filter((g) => g.fuente.tipo === "ajustes");
+  if (deAjustes.length > 0) {
+    const minutos = minutosQueNoCoinciden(deAjustes.flatMap((g) => g.generales.items), esperaMin);
+    if (minutos.length > 0) {
+      const segmentos = deAjustes.flatMap((g) => g.segmentos.map((x) => x.segmento));
+      out.push({
+        clave: "ajustes", plantilla: null, segmentos, minutos,
+        texto: `Las consideraciones de aquí abajo, que la IA usa en ${listaY(segmentos.map(nombreSegmento))}, hablan de ${habla(minutos)} y la espera gratis dice ${esperaMin} min: el PDF del traslado diría dos cosas distintas. Corrige el texto o el número.`,
+      });
+    }
   }
   return out;
 }

@@ -14,6 +14,9 @@
 //     perfil de la empresa) pasa por `esc`: el documento se abre con document.write en el origen
 //     del ERP, y un nombre con markup no puede entrar crudo. Sin < > & " ' no cambia nada.
 //  3. El itinerario reconoce también `Day N` como encabezado de día (para el anexo en inglés).
+//  4. Un color de la plantilla solo entra al CSS si es `#RRGGBB` (`colorCss`); si no, el del diseño.
+//     `esc` no basta dentro de un `style`: «red;background:url(…)» no lleva < > & " ' y cambiaba el
+//     documento. Con colores válidos (los que guarda el editor) no cambia nada.
 //
 // MONEDA: los ítems llegan SIEMPRE en soles (la fila autoritativa). En USD se convierten aquí con
 // el tipo de cambio congelado de la cotización (`totalesEnMoneda`), se imprime una sola vez
@@ -42,6 +45,20 @@ import {
 export { numeroCotizacion };
 
 const EMP = empresaConDefectos;
+
+/** Un color `#RRGGBB` (lo único que el editor de plantillas guarda como color). */
+export function colorValido(x: unknown): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(String(x ?? "").trim());
+}
+
+/**
+ * El color de la plantilla que se interpola en el CSS del documento: el escrito si es `#RRGGBB`; si
+ * no (vacío, otro formato o texto con más CSS dentro), el del diseño. Ver la divergencia 4.
+ */
+export function colorCss(x: unknown, defecto: string): string {
+  const t = String(x ?? "").trim();
+  return colorValido(t) ? t : defecto;
+}
 
 export type FechaMultidiaPdf = {
   dia: number; fecha: string; hora_ida: string; destino_nombre: string;
@@ -287,7 +304,7 @@ function htmlModerno(c: Ctx): string {
   const { cliente, vehiculos, cfg, empresa } = e;
   const { subtotal, igv, total } = tot;
   const nomCl = esc(c.nomCl), nCot = esc(c.nCot);
-  const cp = esc(cfg?.color_primario || "#1a1a2e"); const cs = esc(cfg?.color_secundario || "#2f8ee9");
+  const cp = colorCss(cfg?.color_primario, "#1a1a2e"); const cs = colorCss(cfg?.color_secundario, "#2f8ee9");
   const logoUrl = esc(empresa?.logo_url || LOGO_DEFAULT);
   const empTel = esc(EMP(empresa).telefono); const empEmail = esc(EMP(empresa).email);
   const empWeb = esc(EMP(empresa).web);
@@ -336,7 +353,7 @@ function htmlTuristico(c: Ctx): string {
   const { vehiculos, cfg, empresa } = e;
   const { subtotal, igv, total } = tot;
   const nCot = esc(c.nCot);
-  const cp = esc(cfg?.color_primario || "#b45309"); const cs = esc(cfg?.color_secundario || "#d97706");
+  const cp = colorCss(cfg?.color_primario, "#b45309"); const cs = colorCss(cfg?.color_secundario, "#d97706");
   const logoUrl = esc(empresa?.logo_url || LOGO_DEFAULT);
   const empTel = esc(EMP(empresa).telefono); const empEmail = esc(EMP(empresa).email);
   const filasItems = e.items.map((it, i) => { const tf = tot.lineas[i]; return `<tr><td style="padding:8px 12px;border-bottom:1px solid #fde68a;">${esc(c.descs[i])}<br/><span style="font-size:9px;color:#92400e;">${T("tur_dias_unid", { d: it.dias, c: it.cantidad })}</span></td><td style="padding:8px 12px;text-align:right;border-bottom:1px solid #fde68a;font-weight:800;color:${cp};">${money(tf)}</td></tr>`; }).join("");
@@ -381,7 +398,7 @@ function htmlEjecutivo(c: Ctx): string {
   const { cliente, vehiculos, cfg, empresa } = e;
   const { subtotal, igv, total } = tot;
   const nomCl = esc(c.nomCl), nCot = esc(c.nCot);
-  const cp = esc(cfg?.color_primario || "#1a1a1a"); const acento = esc(cfg?.color_acento || "#C8A24B");
+  const cp = colorCss(cfg?.color_primario, "#1a1a1a"); const acento = colorCss(cfg?.color_acento, "#C8A24B");
   const logoUrl = esc(empresa?.logo_url || LOGO_DEFAULT);
   const empNombre = esc(EMP(empresa).nombre); const empRuc = esc(EMP(empresa).ruc); const empTel = esc(EMP(empresa).telefono); const empEmail = esc(EMP(empresa).email);
   const repr = esc(e.repr ?? "");

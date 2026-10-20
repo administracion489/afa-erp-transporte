@@ -7,8 +7,11 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { faltaAlguna, type ErrorSupabase } from "@/lib/columna-faltante";
-import type { Diseno } from "@/lib/cotizacion-plantillas";
-import { ETIQUETA_TEXTO_LIBRE, textoLibreSospechoso, type MotivoTextoLibre } from "@/lib/traslados/texto-libre";
+import { plantillaPorId, type Diseno, type PlantillaFila, type Segmento } from "@/lib/cotizacion-plantillas";
+import { cuentaEnUnaLinea, cuentasFrenteACorporativo } from "@/lib/traslados/cotizacion-traslado";
+import type { PerfilEmpresa } from "@/lib/empresa-perfil";
+import { ETIQUETA_TEXTO_LIBRE, MOTIVOS_CONDICION_REVISION, motivosLineaIA } from "@/lib/traslados/texto-libre";
+import { colorValido } from "@/lib/cotizacion-pdf";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = any;
@@ -98,9 +101,8 @@ export function textoOpcional(x: unknown): string | null {
   return t ? t : null;
 }
 
-export function colorValido(x: unknown): boolean {
-  return /^#[0-9a-fA-F]{6}$/.test(String(x ?? "").trim());
-}
+/** Un color `#RRGGBB` (vive en lib/cotizacion-pdf.ts: el PDF tampoco interpola otra cosa en su CSS). */
+export { colorValido };
 
 /**
  * Los colores, títulos y cierres de fábrica de cada diseño, para «Restaurar». Sin nombres de
@@ -115,29 +117,69 @@ export const DE_FABRICA: Partial<Record<Diseno, Record<string, string>>> = {
 
 // ── Lo que la IA manda SIN revisión ──────────────────────────────────────────
 
-/**
- * Por qué una línea de condiciones de una plantilla que usa la IA merece mirarse: un enlace, un
- * número de 6+ dígitos (un teléfono o una cuenta) o palabras de pago (Yape, Plin, depósito,
- * transferencia, cuenta, CCI…). Usa el MISMO detector que el texto libre del cliente
- * (lib/traslados/texto-libre.ts); como ese devuelve solo el primer motivo y en su orden el importe
- * va antes, cada motivo se pregunta por separado. El importe y el largo NO cuentan aquí: una
- * condición dice «IGV (18 %)» o «adelanto del 50 %» con toda normalidad, y un aviso que sale
- * siempre se vuelve paisaje.
- */
-export function motivosLineaIA(linea: string): MotivoTextoLibre[] {
-  const t = String(linea ?? "");
-  if (!t.trim()) return [];
-  const out: MotivoTextoLibre[] = [];
-  if (textoLibreSospechoso(t) === "enlace") out.push("enlace");
-  if (t.split(/[^\p{L}\p{N}]+/u).some(w => w && textoLibreSospechoso(w) === "palabra_de_pago")) out.push("palabra_de_pago");
-  // Fechas y horas no son un teléfono ni una cuenta («válido hasta el 31/12/2026»): se quitan antes.
-  const sinFechas = t.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ");
-  if (textoLibreSospechoso(sinFechas.replace(/[^\d\s.\-]/g, " ")) === "numero_largo") out.push("numero_largo");
-  return out;
-}
+/** Movida a lib/traslados/texto-libre.ts (el servidor la usa de respaldo); se re-exporta para la pantalla. */
+export { motivosLineaIA };
 
-export function avisoLineaIA(linea: string): string | null {
+/**
+ * El aviso de una línea de condiciones de una plantilla que la IA usa (`enUso`) o puede usar (sirve
+ * para traslados). Dice lo que de verdad pasa: con un enlace o un número de 6+ dígitos, el servidor
+ * deja la cotización para revisión (`condicionesSospechosas`); con palabras de pago, sale igual sin
+ * revisión, y por eso se pide revisar que no pida pagos.
+ */
+export function avisoLineaIA(linea: string, opts: { enUso?: boolean } = {}): string | null {
   const m = motivosLineaIA(linea);
   if (!m.length) return null;
-  return `Esta línea ${m.map(x => ETIQUETA_TEXTO_LIBRE[x]).join(" y ")}. La manda la IA sin revisión: revisa que no pida pagos.`;
+  const enUso = opts.enUso !== false;
+  const que = `Esta línea ${m.map(x => ETIQUETA_TEXTO_LIBRE[x]).join(" y ")}.`;
+  if (m.some(x => MOTIVOS_CONDICION_REVISION.includes(x))) {
+    return enUso
+      ? `${que} Con ella, la IA no envía sola sus cotizaciones de traslado: quedan para que las revise un ejecutivo.`
+      : `${que} Si asignas esta plantilla a traslados, la IA no enviará sola sus cotizaciones: quedarán para que las revise un ejecutivo.`;
+  }
+  return enUso
+    ? `${que} La manda la IA sin revisión: revisa que no pida pagos.`
+    : `${que} Si la asignas a traslados, esta línea la manda la IA sin revisión: revisa que no pida pagos.`;
+}
+
+/**
+ * Lo que el `confirm()` de una celda «Traslado de la IA» dice de la plantilla que RESULTA (también al
+ * vaciar la celda, que pasa a la principal): las cuentas que imprimirá el PDF en la moneda del
+ * segmento —con la MISMA cuenta que el servidor (`cuentasFrenteACorporativo`), y si no son las de
+ * `corporativo` la IA dejará cada cotización para revisión— y las líneas de sus condiciones que
+ * merecen mirarse (`motivosLineaIA`). `perfil` undefined = no se pudo leer (no se afirman cuentas).
+ * `resultante` null = la IA usa las condiciones de Ajustes y las cuentas de `corporativo`.
+ */
+export function lineasConfirmTraslado(x: {
+  resultante: PlantillaFila | null;
+  plantillas: readonly PlantillaFila[];
+  perfil: PerfilEmpresa | null | undefined;
+  segmento: Segmento;
+}): string[] {
+  const out: string[] = [];
+  const moneda = x.segmento === "extranjero" ? "USD" : "PEN";
+  const corp = plantillaPorId(x.plantillas, "corporativo");
+  const pl = x.resultante ?? corp;
+  if (x.perfil === undefined) {
+    out.push("No se pudo leer el perfil de la empresa: no se puede decir qué cuentas bancarias imprimirá el PDF.");
+  } else {
+    const f = cuentasFrenteACorporativo({
+      plantilla: pl,
+      referencia: !x.resultante || x.resultante.id === "corporativo" ? { estado: "misma" } : { estado: "leida", cfg: corp },
+      empresa: x.perfil, moneda,
+    });
+    out.push(`Cuentas bancarias que imprimirá el PDF (${moneda === "USD" ? "dólares" : "soles"}): ${f.plantilla.length ? f.plantilla.map(cuentaEnUnaLinea).join("; ") : "ninguna"}.`);
+    if (f.codigo === "distintas") out.push("⚠ No son las de la plantilla «corporativo»: la IA dejará cada cotización de traslado para que la revise un ejecutivo antes de enviarla.");
+  }
+  if (x.resultante) {
+    const lineas = [x.resultante.condiciones_incluye, x.resultante.condiciones_no_incluye, x.resultante.condiciones_generales]
+      .flatMap(l => (Array.isArray(l) ? l : [])).map(s => String(s ?? "").trim()).filter(Boolean);
+    for (const l of lineas) {
+      const m = motivosLineaIA(l);
+      if (!m.length) continue;
+      const revisa = m.some(y => MOTIVOS_CONDICION_REVISION.includes(y));
+      const corta = Array.from(l).length > 120 ? `${Array.from(l).slice(0, 119).join("")}…` : l;
+      out.push(`⚠ «${corta}» ${m.map(y => ETIQUETA_TEXTO_LIBRE[y]).join(" y ")}${revisa ? ": con ella, la IA deja sus cotizaciones para revisión." : ": la IA la manda sin revisión, revisa que no pida pagos."}`);
+    }
+  }
+  return out;
 }

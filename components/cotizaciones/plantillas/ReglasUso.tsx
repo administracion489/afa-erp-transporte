@@ -14,14 +14,17 @@ import {
   plantillaPorId, plantillaPrincipal, sirveParaIA,
   type PlantillaFila, type ReglaPlantilla, type Segmento, type ServicioPlantilla,
 } from "@/lib/cotizacion-plantillas";
-import { SIN_PERMISO_COTIZACIONES, filasDeVuelta } from "./pantalla";
+import type { PerfilEmpresa } from "@/lib/empresa-perfil";
+import { SIN_PERMISO_COTIZACIONES, filasDeVuelta, lineasConfirmTraslado } from "./pantalla";
 
 const clave = (s: ServicioPlantilla, g: Segmento) => `${s}|${g}`;
 const nombre = (p: PlantillaFila) => `«${p.nombre || p.id}»`;
 
-export function ReglasUso({ plantillas, reglas, onCambio, aviso }: {
+export function ReglasUso({ plantillas, reglas, onCambio, aviso, perfil }: {
   plantillas: PlantillaFila[];
   reglas: ReglaPlantilla[];
+  /** El perfil de la empresa (sus cuentas); undefined mientras carga o si no se pudo leer. */
+  perfil?: PerfilEmpresa | null;
   /** Vuelve a leer plantillas y reglas. */
   onCambio: () => Promise<void>;
   aviso: (msg: string, ok?: boolean) => void;
@@ -40,7 +43,9 @@ export function ReglasUso({ plantillas, reglas, onCambio, aviso }: {
       const otras = reglas.filter(r => !(r.servicio === servicio && r.segmento === segmento));
       const sim = plantillaParaUso({ servicio, segmento }, plantillas, nuevo ? [...otras, { servicio, segmento, plantilla_id: nuevo }] : otras);
       const destino = sim.plantilla ? `las condiciones y las cuentas de la plantilla ${nombre(sim.plantilla)}` : "las condiciones de /tarifario → Ajustes de traslados (no queda una plantilla que la IA pueda usar)";
-      if (!window.confirm(`Los traslados que cotiza la IA para clientes «${ETIQUETA_SEGMENTO[segmento]}» salen por WhatsApp SIN revisión.\n\nDesde ahora llevarán ${destino}.\n\n¿Cambiar la regla ${celdaTxt}?`)) return;
+      // Y lo que de verdad va a salir: las cuentas que imprimirá el PDF y las líneas que conviene mirar.
+      const detalle = lineasConfirmTraslado({ resultante: sim.plantilla, plantillas, perfil, segmento });
+      if (!window.confirm(`Los traslados que cotiza la IA para clientes «${ETIQUETA_SEGMENTO[segmento]}» salen por WhatsApp SIN revisión.\n\nDesde ahora llevarán ${destino}.${detalle.length ? `\n\n• ${detalle.join("\n• ")}` : ""}\n\n¿Cambiar la regla ${celdaTxt}?`)) return;
     }
     setGuardando(k);
     setErrores(e => { const n = { ...e }; delete n[k]; return n; });

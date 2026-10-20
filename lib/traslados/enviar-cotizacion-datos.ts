@@ -25,8 +25,11 @@
 // EL PDF ES EL DISEÑO CORPORATIVO de /cotizaciones (lib/cotizacion-corporativo.ts +
 // lib/pdf-corporativo.ts). Para armarlo se leen el perfil (con sus cuentas), el cliente del ERP
 // vinculado, el wa_id de la conversación, la plantilla de la cotización (`plantilla_pdf`, solo sus
-// CUENTAS: las condiciones ya están copiadas en la fila; si no existe, no se puede leer o no dibuja
-// el diseño corporativo, `corporativo` como antes) y la categoría con sus fotos (traslados-07).
+// CUENTAS: las condiciones ya están copiadas en la fila; si no existe, no se puede leer, está
+// DESACTIVADA o no dibuja el diseño corporativo, `corporativo` como antes) y la categoría con sus
+// fotos (traslados-07). Si las cuentas de esa plantilla no son las que imprimiría `corporativo`, el
+// PDF lo avisa (`cuentas_distintas_de_corporativo`) y la IA no lo envía sola; tampoco con unas
+// condiciones que no caben en el PDF (`condiciones_demasiadas`).
 // Cada columna de una migración accesoria se SUELTA solo si el error la nombra
 // (lib/columna-faltante.ts): sin traslados-07 el PDF sale sin fotos y lo avisa; sin `plantilla_pdf`,
 // las cuentas son las de `corporativo`.
@@ -35,7 +38,10 @@
 // redirecciones, 4 s y con tope de bytes. Un PNG se recorre ENTERO antes de dárselo a pdf-lib: sin
 // animación (APNG), y su IDAT se infla AQUÍ con tope de salida — la «bomba» PNG. Los datos del
 // cliente del ERP solo se imprimen si `clienteParaPdf` los verifica. Lo que falta (foto, logo,
-// cuenta en la moneda, cliente sin verificar) se AVISA y no bloquea: `planEnvio` no cambia.
+// cuenta en la moneda, cliente sin verificar) se AVISA y no bloquea: `planEnvio` no cambia. Las
+// cuentas distintas de `corporativo` y las condiciones desmesuradas también son AVISOS del PDF (el
+// PDF sale igual), pero la IA las lee para dejar la cotización en revisión
+// (`revisionPorCondiciones`, lib/traslados/envio-ia.ts).
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { BUCKET_CRM_MEDIA, asegurarBucket as asegurarBucketCrm } from "../crm-media";
@@ -43,15 +49,15 @@ import { enviarWhatsAppMedia, explicarErrorEnvioWhatsApp } from "../crm-meta";
 import { phonePara as phoneParaUso } from "../whatsapp-numeros";
 import { inflateSync } from "node:zlib";
 import { faltaAlguna } from "../columna-faltante";
-import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
+import { empresaConDefectos, type CuentaBancaria, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { docCorporativo, numeroCotizacion } from "../cotizacion-corporativo";
 import type { PlantillaPdfCfg } from "../cotizacion-pdf";
-import { disenoDe } from "../cotizacion-plantillas";
+import { disenoDe, esActiva, excesoCondiciones, MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES } from "../cotizacion-plantillas";
 import { dibujarPdfCorporativo, type ImagenPdf } from "../pdf-corporativo";
 import { fechaLima } from "../alertas-horario";
 import {
-  captionDocumento, clienteParaPdf, entradaCorporativaTraslado, nombreArchivoPdf, rutaPdf,
-  type CategoriaPdf, type ClienteErp, type FilaCotizacionLeida,
+  captionDocumento, clienteParaPdf, cuentaEnUnaLinea, cuentasFrenteACorporativo, entradaCorporativaTraslado, nombreArchivoPdf, rutaPdf,
+  type CategoriaPdf, type ClienteErp, type FilaCotizacionLeida, type ReferenciaCuentas,
 } from "./cotizacion-traslado";
 import { FOTO_MAX_BYTES, hostDe, revisarJpeg, revisarPng, urlFotoPermitida } from "./fotos-categoria";
 import { accionReclamable, planAccionTraslado, plazoEnvio, type PlanAccion } from "./envio-ia";
@@ -243,8 +249,13 @@ export const SQL_FOTOS = "supabase/traslados-07-fotos-categoria.sql";
 export const DONDE_FOTOS = "/tarifario → Zonas y traslados → Vehículos → «Fotos y descripción para la cotización» (debajo de la tabla de vehículos)";
 
 export type CodigoAvisoTraslado =
-  | "sin_foto" | "foto_no_descargada" | "sin_cuenta_en_moneda" | "sin_migracion_fotos" | "logo_no_usado" | "cliente_no_verificado";
-/** Lo que el PDF no pudo poner y conviene decir. NINGUNO bloquea el envío. */
+  | "sin_foto" | "foto_no_descargada" | "sin_cuenta_en_moneda" | "sin_migracion_fotos" | "logo_no_usado" | "cliente_no_verificado"
+  | "cuentas_distintas_de_corporativo" | "condiciones_demasiadas";
+/**
+ * Lo que el PDF no pudo poner y conviene decir. NINGUNO impide armar el PDF ni enviarlo desde la
+ * tarjeta del CRM; `cuentas_distintas_de_corporativo` y `condiciones_demasiadas` impiden que la IA
+ * lo envíe SOLA (`revisionPorCondiciones`, lib/traslados/envio-ia.ts).
+ */
 export type AvisoPdfTraslado = { codigo: CodigoAvisoTraslado; detalle: string };
 
 export type DatosPdf = {
@@ -254,10 +265,40 @@ export type DatosPdf = {
   /** El `cliente_id` del contacto del CRM (vinculado por una persona); null si no hay o no se pudo leer. */
   contactoClienteId: number | null;
   plantilla: PlantillaPdfCfg | null;
+  /** La plantilla `corporativo` contra cuyas cuentas se comparan las de `plantilla`. */
+  referenciaCuentas: ReferenciaCuentas;
   categoria: CategoriaPdf | null;
   /** Faltan columnas de traslados-07 en `traslado_categorias`. */
   sinMigracionFotos: boolean;
 };
+
+/**
+ * La plantilla cuyas CUENTAS imprime el PDF de un traslado (las condiciones van en la fila) y contra
+ * qué se comparan. Es la de `plantilla_pdf` si existe, se pudo leer, está ACTIVA y dibuja el diseño
+ * corporativo; si no, `corporativo`, como si no existiera (y entonces no hay nada que comparar). Con
+ * otra plantilla se lee además `corporativo`: si no se puede, la comparación queda `ilegible`.
+ * Ninguna lectura lanza: una plantilla ilegible es `corporativo`, y una `corporativo` ilegible, null.
+ */
+export async function plantillaYReferenciaCuentas(sb: Sb, plantillaPdf: unknown): Promise<{ usada: PlantillaPdfCfg | null; referencia: ReferenciaCuentas }> {
+  type FilaPl = PlantillaPdfCfg & { id?: string; diseno?: string | null; activa?: boolean | null };
+  const leer = async (id: string): Promise<{ ok: true; fila: FilaPl | null } | { ok: false; detalle: string }> => {
+    try {
+      const { data, error } = await sb.from("cotizacion_plantillas").select("*").eq("id", id).maybeSingle();
+      return error ? { ok: false, detalle: String(error.message ?? "error") } : { ok: true, fila: (data ?? null) as FilaPl | null };
+    } catch (e) { return { ok: false, detalle: String((e as Error)?.message ?? e) }; }
+  };
+  const misma: ReferenciaCuentas = { estado: "misma" };
+  const id = typeof plantillaPdf === "string" ? plantillaPdf.trim() : "";
+  if (id && id !== PLANTILLA_CUENTAS_DEFECTO) {
+    const [p, corp] = await Promise.all([leer(id), leer(PLANTILLA_CUENTAS_DEFECTO)]);
+    if (p.ok && p.fila && esActiva(p.fila) && disenoDe({ id: typeof p.fila.id === "string" ? p.fila.id : id, diseno: p.fila.diseno }) === "corporativo") {
+      return { usada: p.fila, referencia: corp.ok ? { estado: "leida", cfg: corp.fila } : { estado: "ilegible", detalle: corp.detalle } };
+    }
+    return { usada: corp.ok ? corp.fila : null, referencia: misma };
+  }
+  const corp = await leer(PLANTILLA_CUENTAS_DEFECTO);
+  return { usada: corp.ok ? corp.fila : null, referencia: misma };
+}
 
 /**
  * Lo que necesita el PDF además de la fila. El perfil LANZA si no se puede leer (sin él no hay
@@ -293,22 +334,6 @@ export async function leerDatosPdf(
       };
     } catch { return dado; }
   };
-  // La plantilla de la cotización (solo se usan sus CUENTAS: las condiciones van en la fila). Si no
-  // existe, no se puede leer o no dibuja el diseño corporativo, la `corporativo` de siempre.
-  const plantilla = async (): Promise<PlantillaPdfCfg | null> => {
-    const leer = async (id: string): Promise<(PlantillaPdfCfg & { id?: string; diseno?: string | null }) | null> => {
-      try {
-        const { data, error } = await sb.from("cotizacion_plantillas").select("*").eq("id", id).maybeSingle();
-        return error ? null : ((data ?? null) as (PlantillaPdfCfg & { id?: string; diseno?: string | null }) | null);
-      } catch { return null; }
-    };
-    const id = typeof fila.plantilla_pdf === "string" ? fila.plantilla_pdf.trim() : "";
-    if (id && id !== PLANTILLA_CUENTAS_DEFECTO) {
-      const p = await leer(id);
-      if (p && disenoDe({ id: typeof p.id === "string" ? p.id : id, diseno: p.diseno }) === "corporativo") return p;
-    }
-    return leer(PLANTILLA_CUENTAS_DEFECTO);
-  };
   const categoria = async (): Promise<{ cat: CategoriaPdf | null; faltan: string[] }> => {
     const clave = fila.traslado_json?.categoria?.clave;
     if (!clave) return { cat: null, faltan: [] };
@@ -317,10 +342,10 @@ export async function leerDatosPdf(
       return { cat: r.error ? null : (((r as { data?: unknown }).data ?? null) as CategoriaPdf | null), faltan: r.faltan };
     } catch { return { cat: null, faltan: [] }; }
   };
-  const [cl, conv, pl, ca] = await Promise.all([cliente(), conversacion(), plantilla(), categoria()]);
+  const [cl, conv, pl, ca] = await Promise.all([cliente(), conversacion(), plantillaYReferenciaCuentas(sb, fila.plantilla_pdf), categoria()]);
   return {
     perfil: pp.perfil, cliente: cl, celular: conv.celular, contactoClienteId: conv.contactoClienteId,
-    plantilla: pl, categoria: ca.cat, sinMigracionFotos: ca.faltan.length > 0,
+    plantilla: pl.usada, referenciaCuentas: pl.referencia, categoria: ca.cat, sinMigracionFotos: ca.faltan.length > 0,
   };
 }
 
@@ -335,8 +360,42 @@ function aviso(codigo: CodigoAvisoTraslado, extra = ""): AvisoPdfTraslado {
     sin_migracion_fotos: `Falta correr ${SQL_FOTOS}: el PDF sale sin las fotos ni la descripción de la categoría.`,
     logo_no_usado: `El logo del perfil no se pudo usar: el PDF sale con el nombre de la empresa en su lugar. Súbelo en ${DONDE_LOGO} (PNG o JPG, sin animación, hasta ${Math.floor(LOGO_MAX_BYTES / 1024)} KB).`,
     cliente_no_verificado: "El cliente del ERP de la cotización no está vinculado a este contacto del CRM y su teléfono no es el número de WhatsApp: el PDF sale con la atención y el celular, sin sus datos. Si es el mismo cliente, vincúlalo en el panel del cliente del CRM.",
+    cuentas_distintas_de_corporativo: `Las cuentas bancarias de la plantilla de esta cotización no son las de la plantilla «${PLANTILLA_CUENTAS_DEFECTO}»: la IA no la envía sola. Revisa las cuentas antes de enviarla (se corrigen en /cotizaciones/plantillas).`,
+    condiciones_demasiadas: `Las condiciones de esta cotización pasan de ${MAX_LINEAS_CONDICIONES} líneas en una lista o tienen una línea de más de ${MAX_CARACTERES_CONDICION} caracteres: el PDF podría no mostrarlas enteras y la IA no la envía sola. Acórtalas en la cotización (/cotizaciones) o en su plantilla (/cotizaciones/plantillas).`,
   };
   return { codigo, detalle: extra ? `${detalle[codigo]} ${extra}`.trim() : detalle[codigo] };
+}
+
+/**
+ * Los avisos del PDF de un traslado que la IA lee para NO enviarlo sola (`revisionPorCondiciones`,
+ * lib/traslados/envio-ia.ts): las cuentas de su plantilla distintas de las de `corporativo` (o sin
+ * poder comprobarlo) y unas condiciones que no caben (`excesoCondiciones`). PURO; los usan el PDF
+ * (`armarPdfDeFila`) y el simulador de /tarifario, que así dice lo mismo que hará la IA.
+ */
+export function avisosDeRevision(
+  fila: Pick<FilaCotizacionLeida, "moneda" | "consideraciones_json">,
+  x: { plantilla: PlantillaPdfCfg | null; referencia: ReferenciaCuentas; perfil: PerfilEmpresa | null },
+): AvisoPdfTraslado[] {
+  const avisos: AvisoPdfTraslado[] = [];
+  // Las cuentas de la plantilla frente a las de `corporativo` (con la moneda de la fila, como el PDF).
+  const frente = cuentasFrenteACorporativo({ plantilla: x.plantilla, referencia: x.referencia, empresa: x.perfil, moneda: fila.moneda });
+  const listaCuentas = (cs: CuentaBancaria[] | null) => (cs && cs.length ? cs.map(cuentaEnUnaLinea).join("; ") : "ninguna");
+  if (frente.codigo === "distintas") {
+    avisos.push(aviso("cuentas_distintas_de_corporativo", `Imprime: ${listaCuentas(frente.plantilla)}. «${PLANTILLA_CUENTAS_DEFECTO}» imprimiría: ${listaCuentas(frente.corporativo)}.`));
+  } else if (frente.codigo === "sin_comprobar") {
+    // No se pudo comprobar: el mismo código (la IA tampoco la envía sola), con la frase de lo que pasó.
+    const det = x.referencia.estado === "ilegible" ? x.referencia.detalle : "";
+    avisos.push({
+      codigo: "cuentas_distintas_de_corporativo",
+      detalle: `No se pudo leer la plantilla «${PLANTILLA_CUENTAS_DEFECTO}» para comprobar que las cuentas bancarias de la plantilla de esta cotización sean las mismas${det ? ` (${det.slice(0, 200)})` : ""}: la IA no la envía sola. Imprime: ${listaCuentas(frente.plantilla)}.`,
+    });
+  }
+  const exceso = excesoCondiciones(fila.consideraciones_json);
+  if (exceso.length) {
+    const nombreLista = { incluye: "Incluye", no_incluye: "No incluye", generales: "Consideraciones generales" } as const;
+    avisos.push(aviso("condiciones_demasiadas", exceso.map((e) => `«${nombreLista[e.lista]}»: ${e.motivo === "demasiadas_lineas" ? `${e.n} líneas` : `una línea de ${e.n} caracteres`}`).join("; ") + "."));
+  }
+  return avisos;
 }
 
 /**
@@ -369,6 +428,7 @@ export async function armarPdfDeFila(
   }
   for (const a of doc.avisos) if (a.codigo === "sin_cuenta_en_moneda") avisos.push(aviso("sin_cuenta_en_moneda", a.detalle));
   if (datos.sinMigracionFotos) avisos.push(aviso("sin_migracion_fotos"));
+  avisos.push(...avisosDeRevision(fila, { plantilla: datos.plantilla, referencia: datos.referenciaCuentas, perfil: datos.perfil }));
 
   const logoUrl = String(doc.logoUrl ?? "").trim() || null;
   const fotosPedidas = [datos.categoria?.foto_externa_url, datos.categoria?.foto_interna_url].map((u) => String(u ?? "").trim()).filter(Boolean);

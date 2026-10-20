@@ -539,5 +539,26 @@ console.log("6. Versión 2: las condiciones FIJADAS en la fila ganan en español
   ok(h0.includes(">Agua<") && !h0.includes("Conductor de la fila"), "sin versión: la regla de siempre (gana la plantilla)");
 }
 
+console.log("7. Colores de la plantilla: solo #RRGGBB entra al CSS (divergencia 4)");
+{
+  // Un color que no es #RRGGBB no se interpola: el documento es el MISMO que con el color por defecto
+  // del diseño (sin color en la plantilla). `esc` no bastaba dentro de un style: «red;background:url(…)»
+  // no lleva < > & " ' y entraba crudo.
+  const malos = ["red;background:url(https://x.test/a.png)", "#12345", "#1234567", "rgb(1,2,3)", "#12345g", "  ", "javascript:alert(1)", "#123456;color:red"];
+  const sinColor = { titulo_documento: "MI TÍTULO", mensaje_cierre: "Cierre" };
+  for (const p of ["moderno_fotos", "turistico", "ejecutivo"] as const) {
+    const ref = N.htmlCotizacion({ cot: COTS(1)[0], cliente: CLIENTES[2], items: ITEMS[0], vehiculos: [veh(1)], consid: DEFAULT_CONSID, plantilla: p, cfg: sinColor }).html!;
+    let iguales = 0;
+    for (const m of malos) {
+      const h = N.htmlCotizacion({ cot: COTS(1)[0], cliente: CLIENTES[2], items: ITEMS[0], vehiculos: [veh(1)], consid: DEFAULT_CONSID, plantilla: p, cfg: { ...sinColor, color_primario: m, color_secundario: m, color_acento: m } }).html!;
+      if (h === ref && !h.includes("x.test/a.png") && !h.includes("javascript:")) iguales++;
+    }
+    ok(iguales === malos.length, `${p}: ${iguales}/${malos.length} colores inválidos → el documento con el color por defecto`);
+    const bueno = N.htmlCotizacion({ cot: COTS(1)[0], cliente: CLIENTES[2], items: ITEMS[0], vehiculos: [], consid: DEFAULT_CONSID, plantilla: p, cfg: { ...sinColor, color_primario: " #ABCDEF " } }).html!;
+    ok(bueno.includes("#ABCDEF") && !bueno.includes(" #ABCDEF "), `${p}: un color válido con espacios entra recortado`);
+  }
+  ok(N.colorValido("#a1B2c3") && !N.colorValido("#a1b2c") && !N.colorValido(null) && N.colorCss("x", "#000000") === "#000000" && N.colorCss("#FFFFFF", "#000000") === "#FFFFFF", "colorValido / colorCss");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

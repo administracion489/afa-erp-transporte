@@ -6,7 +6,8 @@
 //
 // Con un resultado cotizable, la respuesta trae además `envio`: qué haría la IA con esa
 // cotización (enviarla sola o dejarla para revisar, con sus motivos), suponiendo WhatsApp con el
-// número escrito, el agente en modo autónomo y el PDF armado; el perfil y las zonas son los reales.
+// número escrito, el agente en modo autónomo y el PDF armado; el perfil, las zonas, las cuentas de
+// la plantilla (frente a las de `corporativo`) y las condiciones son los reales.
 // Con `?pdf=1` (el mismo cuerpo) devuelve el PDF de EJEMPLO de esa cotización (número EJEMPLO y
 // marca de agua), con el formato corporativo de /cotizaciones y la foto de la categoría; la cabecera
 // `X-Avisos-Pdf` lista los códigos de lo que no pudo poner. No escribe nada en ningún caso.
@@ -27,8 +28,8 @@ import { guardarGasto, limitarTasa, segundosParaReintentar } from "@/lib/api-gua
 import { validarEntrada, type CondicionesSimuladas, type EnvioSimulado, type PlantillaSimulada } from "@/lib/traslados/api";
 import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
 import { cuadraConMotor, filaCotizacionTraslado, type FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
-import { planEnvio } from "@/lib/traslados/envio-ia";
-import { armarPdfDeFila, leerPerfilPdf, type PerfilPdf } from "@/lib/traslados/enviar-cotizacion-datos";
+import { planEnvio, revisionPorCondiciones } from "@/lib/traslados/envio-ia";
+import { armarPdfDeFila, avisosDeRevision, leerPerfilPdf, plantillaYReferenciaCuentas, type PerfilPdf } from "@/lib/traslados/enviar-cotizacion-datos";
 import { plantillaParaTraslado } from "@/lib/traslados/plantilla-traslado-datos";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
 import { fechaLima } from "@/lib/alertas-horario";
@@ -111,7 +112,17 @@ export async function POST(req: NextRequest) {
       perfilConfigurado: !!perfil && !empresaConDefectos(perfil.perfil).sinConfigurar,
       cuadra: cuadraConMotor(fila, r), pdfOk: true, palabras: [],
     });
-    const envio: EnvioSimulado = { decision: plan.decision, motivos: plan.motivos };
+    // Y lo que la IA lee del PDF de su fila (lib/traslados/cotizar-ia-datos.ts → revisionPorCondiciones):
+    // las cuentas de la plantilla frente a las de `corporativo` y las condiciones (que no quepan, o con
+    // un enlace o un número de 6+ dígitos). Sin esto el simulador diría «sale sola» de una cotización
+    // que la IA dejaría para revisión.
+    const pc = await plantillaYReferenciaCuentas(sb, fila.plantilla_pdf);
+    const porPdf = revisionPorCondiciones({
+      avisosPdf: avisosDeRevision(fila, { plantilla: pc.usada, referencia: pc.referencia, perfil: perfil?.perfil ?? null }),
+      consideraciones: fila.consideraciones_json,
+    });
+    const motivos = [...plan.motivos, ...porPdf.motivos.filter((m) => !plan.motivos.includes(m))];
+    const envio: EnvioSimulado = { decision: motivos.length === 0 ? "automatico" : "revision", motivos };
     const plantilla: PlantillaSimulada | null = pt.plantilla
       ? { id: pt.plantilla.id, nombre: pt.plantilla.nombre || pt.plantilla.id, segmento: pt.segmento, codigo: pt.codigo }
       : null;

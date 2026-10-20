@@ -38,11 +38,11 @@ import type { ConfigTraslados } from "./datos";
 import { claveNombre, importesTraslado, tarifaDelPar, type CategoriaTraslado, type ResultadoTraslado, type TarifaTraslado, type UbicacionZona, type Zona } from "./motor";
 import { aPENdesdeCot, normalizarMoneda, revisarTipoCambio, totalesEnMoneda, type Moneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
-import { numeroCotizacion } from "../cotizacion-corporativo";
+import { cuentasCorporativo, numeroCotizacion } from "../cotizacion-corporativo";
 import type { ClientePdf, EntradaPdfCot, PlantillaPdfCfg } from "../cotizacion-pdf";
 import { considSnapshot, type PlantillaFila } from "../cotizacion-plantillas";
 import type { VehiculoPDF } from "../pdf-chrome";
-import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
+import { empresaConDefectos, type CuentaBancaria, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { fechaLima } from "../alertas-horario";
 import { atencionImprimible, referenciaImprimible } from "./texto-libre";
 import { urlFotoPermitida, type LadoFoto } from "./fotos-categoria";
@@ -87,6 +87,40 @@ export type TrasladoJson = {
  * (`considSnapshot`): el PDF imprime la fila. Sin ellas, como siempre (de `traslados_config`).
  */
 export type ConsideracionesJson = { incluye: string[]; no_incluye: string[]; generales: string[]; version?: number; plantilla?: string | null };
+
+/** Las cuatro listas de `traslados_config` que pueden ir a las condiciones (de antes de cotizaciones-05). */
+export type ListasConfigTraslado = {
+  consideraciones?: readonly unknown[] | null;
+  consideraciones_usd?: readonly unknown[] | null;
+  incluye?: readonly unknown[] | null;
+  no_incluye?: readonly unknown[] | null;
+};
+
+/**
+ * LAS CONDICIONES QUE UNA COTIZACIÓN DE TRASLADO COPIA A SU FILA. Una sola definición: la usan
+ * `filaCotizacionTraslado` (lo que se guarda y se imprime) y Ajustes de traslados
+ * (components/tarifario/traslados-pantalla.ts, lo que se enseña), así que la pantalla no puede
+ * describir otras listas que las que copia la IA.
+ *  · Con `plantilla` (la de `plantillaParaTraslado`, cotizaciones-05): las de la plantilla
+ *    (`considSnapshot` con respaldo VACÍO: una lista NULL de la plantilla es una lista vacía, nunca
+ *    las de Ajustes), en versión 2 y con su id. La de dólares ya trae sus líneas de dólares (la
+ *    migración las traspasó como consideraciones + consideraciones_usd): no se suman aquí.
+ *  · Sin plantilla: las de `traslados_config`, con las de dólares solo si se cotiza en dólares.
+ * En los dos casos, limpias: sin espacios de los bordes ni líneas vacías.
+ */
+export function considDeTraslado(plantilla: PlantillaFila | null | undefined, config: ListasConfigTraslado, moneda: Moneda): ConsideracionesJson {
+  const limpia = (l: readonly unknown[] | null | undefined) => (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
+  if (plantilla) {
+    const s = considSnapshot(plantilla, { incluye: [], no_incluye: [], generales: [] });
+    return { incluye: limpia(s.incluye), no_incluye: limpia(s.no_incluye), generales: limpia(s.generales), version: s.version, plantilla: s.plantilla };
+  }
+  const usd = moneda === "USD";
+  const generales = limpia([...(config.consideraciones ?? []), ...(usd ? config.consideraciones_usd ?? [] : [])]);
+  // traslados-07: sin la migración llegan ausentes y las listas quedan vacías (no se imprimen).
+  const incluye = limpia(config.incluye);
+  const noIncluye = limpia(config.no_incluye);
+  return { incluye, no_incluye: noIncluye, generales };
+}
 
 /** Lo que se INSERTA en `cotizaciones`. Nombres de columna verificados contra producción (19-10-2026). */
 export type FilaCotizacion = {
@@ -202,20 +236,7 @@ export function filaCotizacionTraslado(
   );
   const items: ItemTraslado[] = [{ descripcion, dias: 1, cantidad: p.tramos, precio_unit: precioUnitPen, descuento_pct: 0, pax_contratado: null }];
   const totPen = totalesEnMoneda(items, "PEN", null, true)!;
-  const limpia = (l: readonly unknown[] | null | undefined) => (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
-  let consideraciones: ConsideracionesJson;
-  if (x.plantilla) {
-    // La plantilla de la regla (cotizaciones-05). La de dólares ya trae sus líneas de dólares
-    // (la migración las traspasó como consideraciones + consideraciones_usd): no se suman aquí.
-    const s = considSnapshot(x.plantilla, { incluye: [], no_incluye: [], generales: [] });
-    consideraciones = { incluye: limpia(s.incluye), no_incluye: limpia(s.no_incluye), generales: limpia(s.generales), version: s.version, plantilla: s.plantilla };
-  } else {
-    const generales = limpia([...(x.config.consideraciones ?? []), ...(usd ? x.config.consideraciones_usd ?? [] : [])]);
-    // traslados-07: sin la migración llegan ausentes y las listas quedan vacías (no se imprimen).
-    const incluye = limpia(x.config.incluye);
-    const noIncluye = limpia(x.config.no_incluye);
-    consideraciones = { incluye, no_incluye: noIncluye, generales };
-  }
+  const consideraciones = considDeTraslado(x.plantilla ?? null, x.config, p.moneda);
   const pax = Number(e.pax) || 0;
   const maletas = Number(e.maletas) || 0;
   return {
@@ -465,6 +486,64 @@ export function cfgSoloCuentas(cfg: PlantillaPdfCfg | null | undefined): Plantil
     if (cfg[clave] != null) out[clave] = cfg[clave];
   }
   return out;
+}
+
+// ── Las cuentas de la plantilla frente a las de `corporativo` ─────────────────
+// Las CUENTAS del PDF de la IA salen de la plantilla de la cotización (`plantilla_pdf`), y esa
+// plantilla la edita quien tiene el módulo Cotizaciones. Antes de cotizaciones-05 salían siempre de
+// `corporativo`. Un número de cuenta cambiado en la plantilla de traslados saldría por WhatsApp sin
+// que nadie lo viera, con el nombre y el RUC de la empresa: si las cuentas que imprime la plantilla
+// no son las que imprimiría `corporativo`, el PDF lo AVISA (`cuentas_distintas_de_corporativo`) y
+// la IA lo deja para revisión (`cuentas_distintas`, lib/traslados/envio-ia.ts).
+
+/** Contra qué se comparan las cuentas de la plantilla del PDF. */
+export type ReferenciaCuentas =
+  /** El PDF ya imprime las de `corporativo` (o su respaldo): no hay nada que comparar. */
+  | { estado: "misma" }
+  /** La fila `corporativo` (null: no existe, y entonces las del perfil, como sin plantilla). */
+  | { estado: "leida"; cfg: PlantillaPdfCfg | null }
+  /** La fila `corporativo` no se pudo leer: no se puede comprobar. */
+  | { estado: "ilegible"; detalle: string };
+
+export type CodigoCuentasFrente = "misma_plantilla" | "iguales" | "distintas" | "sin_comprobar";
+
+export type CuentasFrente = {
+  codigo: CodigoCuentasFrente;
+  /** Las que imprime el PDF (las de la plantilla, en la moneda de la cotización). */
+  plantilla: CuentaBancaria[];
+  /** Las que imprimiría `corporativo`; null si no se pudo leer o es la misma plantilla. */
+  corporativo: CuentaBancaria[] | null;
+};
+
+/** Una cuenta en una línea: «BCP 191-111 CCI 002-191 (PEN)». */
+export function cuentaEnUnaLinea(c: CuentaBancaria): string {
+  return [c.banco, c.cuenta, c.cci ? `CCI ${c.cci}` : "", c.moneda ? `(${c.moneda})` : ""].map(v).filter(Boolean).join(" ");
+}
+
+/** La identidad de una cuenta para comparar: sin espacios de más, sin distinguir mayúsculas. */
+const claveCuenta = (c: CuentaBancaria) => [c.banco, c.cuenta, c.cci, c.moneda ?? ""].map((x) => v(x).replace(/\s+/g, " ").toUpperCase()).join("|");
+
+/** El mismo conjunto de cuentas (el orden no cuenta). */
+export function mismasCuentas(a: readonly CuentaBancaria[], b: readonly CuentaBancaria[]): boolean {
+  const ka = a.map(claveCuenta).sort(), kb = b.map(claveCuenta).sort();
+  return ka.length === kb.length && ka.every((x, i) => x === kb[i]);
+}
+
+/**
+ * Las cuentas que imprime el PDF de un traslado con su plantilla (`cfgSoloCuentas` +
+ * `cuentasCorporativo`, lo mismo que dibuja el PDF) frente a las que imprimiría con `corporativo`.
+ * `sin_comprobar` cuando `corporativo` no se pudo leer: no se puede decir que sean las mismas.
+ */
+export function cuentasFrenteACorporativo(x: {
+  plantilla: PlantillaPdfCfg | null; referencia: ReferenciaCuentas; empresa: PerfilEmpresa | null; moneda: unknown;
+}): CuentasFrente {
+  const moneda = normalizarMoneda(x.moneda);
+  const de = (cfg: PlantillaPdfCfg | null) => cuentasCorporativo(cfgSoloCuentas(cfg), x.empresa, moneda).cuentas;
+  const plantilla = de(x.plantilla);
+  if (x.referencia.estado === "misma") return { codigo: "misma_plantilla", plantilla, corporativo: null };
+  if (x.referencia.estado === "ilegible") return { codigo: "sin_comprobar", plantilla, corporativo: null };
+  const corporativo = de(x.referencia.cfg);
+  return { codigo: mismasCuentas(plantilla, corporativo) ? "iguales" : "distintas", plantilla, corporativo };
 }
 
 /** El cliente del ERP como lo lee el PDF (`clientes`). */

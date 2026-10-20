@@ -2393,7 +2393,9 @@ export default function CotizacionesPage(){
     const diseno=disenoDe(fila??{id:plantilla});
     const elegida={id:plantilla,nombre:fila?.nombre||plantilla};
     if(diseno==="corporativo"&&esTrasladoIA(cot)){
-      const e=await entradaTrasladoPagina(cot as unknown as FilaCotizacionLeida,{empresa:empData as EmpresaPerfilPDF|null,plantilla:fila,cliente:clienteErpDe(cl)}).catch(()=>null);
+      // Como el servidor (plantillaYReferenciaCuentas): una plantilla DESACTIVADA no presta sus cuentas: las de `corporativo`.
+      const plCuentas=fila&&!esActiva(fila)?plantillaPorId(plantillas,"corporativo"):fila;
+      const e=await entradaTrasladoPagina(cot as unknown as FilaCotizacionLeida,{empresa:empData as EmpresaPerfilPDF|null,plantilla:plCuentas,cliente:clienteErpDe(cl)}).catch(()=>null);
       if(e){
         const{clienteNoVerificado,...entrada}=e;
         const rt=htmlCotizacion(entrada);

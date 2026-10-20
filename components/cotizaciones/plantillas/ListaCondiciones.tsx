@@ -2,6 +2,10 @@
 // components/cotizaciones/plantillas/ListaCondiciones.tsx — Una lista editable de condiciones
 // (Incluye, No incluye, Consideraciones generales) de una plantilla. Vive FUERA de la página a
 // propósito: definida dentro del render, cada tecla la volvía a montar y el campo perdía el foco.
+// Topes (lib/cotizacion-plantillas.ts): hasta MAX_LINEAS_CONDICIONES líneas y MAX_CARACTERES_CONDICION
+// caracteres por línea; una cotización de traslado que los pasa no la envía sola la IA.
+
+import { MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES } from "@/lib/cotizacion-plantillas";
 
 export function ListaCondiciones({ titulo, color, items, onChange, avisoLinea, vacia }: {
   titulo: string;
@@ -36,7 +40,7 @@ export function ListaCondiciones({ titulo, color, items, onChange, avisoLinea, v
                 <input
                   value={item}
                   onChange={e => cambiar(i, e.target.value)}
-                  maxLength={500}
+                  maxLength={MAX_CARACTERES_CONDICION}
                   aria-label={`${titulo}, línea ${i + 1}`}
                   style={{ flex: 1, minWidth: 0, border: `1px solid ${aviso ? "#f59e0b" : "#e2e8f0"}`, borderRadius: 10, padding: "8px 12px", fontSize: 12, outline: "none", background: "white" }}
                 />
@@ -45,11 +49,32 @@ export function ListaCondiciones({ titulo, color, items, onChange, avisoLinea, v
                 <button type="button" onClick={() => quitar(i)} title="Quitar esta línea" style={{ ...btn, border: "1px solid #fca5a5", background: "#fff5f5", color: "#dc2626" }}>✕</button>
               </div>
               {aviso && <p style={{ fontSize: 11, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "4px 8px", margin: "4px 0 0" }}>⚠ {aviso}</p>}
+              {Array.from(item).length > MAX_CARACTERES_CONDICION && (
+                <p style={{ fontSize: 11, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "4px 8px", margin: "4px 0 0" }}>
+                  ⚠ Esta línea pasa de {MAX_CARACTERES_CONDICION} caracteres ({Array.from(item).length}): acórtala; así, la IA no envía sola sus cotizaciones de traslado.
+                </p>
+              )}
             </div>
           );
         })}
       </div>
-      <button type="button" onClick={() => onChange([...items, ""])} style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color, background: "none", border: "none", cursor: "pointer", padding: "6px 0" }}>+ Agregar línea</button>
+      {(() => {
+        const lleno = items.length >= MAX_LINEAS_CONDICIONES;
+        const porQue = `Hasta ${MAX_LINEAS_CONDICIONES} líneas por lista: más no caben en una hoja del PDF que manda la IA.`;
+        return (
+          <>
+            <button type="button" onClick={() => { if (!lleno) onChange([...items, ""]); }} disabled={lleno} title={lleno ? porQue : undefined}
+              style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color: lleno ? "#94a3b8" : color, background: "none", border: "none", cursor: lleno ? "not-allowed" : "pointer", padding: "6px 0" }}>+ Agregar línea</button>
+            {lleno && (
+              <p style={{ fontSize: 11, color: items.length > MAX_LINEAS_CONDICIONES ? "#92400e" : "#64748b", margin: "2px 0 0" }}>
+                {items.length > MAX_LINEAS_CONDICIONES
+                  ? `⚠ Esta lista tiene ${items.length} líneas: ${porQue} Quita ${items.length - MAX_LINEAS_CONDICIONES}; con más, la IA no envía sola sus cotizaciones de traslado.`
+                  : porQue}
+              </p>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }

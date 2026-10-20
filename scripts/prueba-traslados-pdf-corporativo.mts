@@ -885,6 +885,30 @@ seccion("9. La plantilla de la cotización: el traspaso no cambia el PDF; las cu
   const t3 = await txt(null);
   ok(t3.includes("BANCO DE LA CORPORATIVA"), "sin plantilla_pdf, las de corporativo (como antes)");
   ok(!/CONDICIÓN DE PLANTILLA/.test(t1 + t2 + t3), "las condiciones de ninguna plantilla se imprimen: salen de la fila");
+
+  // Auditoría de plantillas-uso: una plantilla DESACTIVADA no presta sus cuentas, y unas cuentas
+  // distintas de las de `corporativo` (o sin poder comprobarlo) se AVISAN (la IA no la envía sola).
+  ok((await plantillaDe("traslados_ia", [], {})).id === "traslados_ia", "activa: la de la fila");
+  const inactiva = async () => { const sb = base({ ...tablas(), cotizacion_plantillas: [CORP_B, { ...IA, activa: false }] }); return D.leerDatosPdf(sb as any, { ...IDA, plantilla_pdf: "traslados_ia" as any }, conPerfil); };
+  const dIn = await inactiva();
+  ok((dIn.plantilla as any)?.id === "corporativo" && dIn.referenciaCuentas.estado === "misma", "desactivada: corporativo, como si no existiera (nada que comparar)");
+  const armar = async (pdf: unknown, t: Record<string, Tabla> = tablas(), o: { fallaId?: string } = {}) =>
+    armarPdfDeFila(base(t, o) as any, { ...IDA, plantilla_pdf: pdf as any }, { bajarLogo: async () => null, bajarFoto: async () => null, celular: "51966707225", contactoClienteId: null });
+  const cod = (a: { avisos: { codigo: string }[] }) => a.avisos.map((x) => x.codigo);
+  const aDist = await armar("traslados_ia");
+  const avDist = aDist.avisos.find((a) => a.codigo === "cuentas_distintas_de_corporativo");
+  ok(!!avDist && avDist.detalle.includes("BANCO DE LA PLANTILLA IA") && avDist.detalle.includes("BANCO DE LA CORPORATIVA"), `cuentas distintas: el aviso dice las dos (${avDist?.detalle})`);
+  ok(!cod(await armar("corporativo")).includes("cuentas_distintas_de_corporativo") && !cod(await armar(null)).includes("cuentas_distintas_de_corporativo"), "con corporativo (o sin plantilla_pdf) no hay nada que comparar");
+  ok(!cod(await armar("traslados_ia", { ...tablas(), cotizacion_plantillas: [CORP_B, { ...IA, activa: false }] })).includes("cuentas_distintas_de_corporativo"), "desactivada: sin aviso (imprime las de corporativo)");
+  ok(!cod(await armar("igual", tablas([{ ...CORP_B, id: "igual", es_principal: false }]))).includes("cuentas_distintas_de_corporativo"), "otra plantilla con las mismas cuentas: sin aviso");
+  const aIleg = await armar("traslados_ia", tablas(), { fallaId: "corporativo" });
+  const avIleg = aIleg.avisos.find((a) => a.codigo === "cuentas_distintas_de_corporativo");
+  ok(!!avIleg && /No se pudo leer la plantilla «corporativo»/.test(avIleg.detalle) && /timeout/.test(avIleg.detalle) && textosDelPdf(aIleg.bytes).join(" ").includes("BANCO DE LA PLANTILLA IA"), `corporativo ilegible: el PDF sale con la de la fila y avisa que no se pudo comprobar (${avIleg?.detalle})`);
+  // Condiciones desmesuradas: aviso del PDF (el PDF sale igual).
+  const muchas = { ...IDA, consideraciones_json: { incluye: [], no_incluye: [], generales: Array.from({ length: 31 }, (_, i) => `Línea ${i + 1}`) } };
+  const aMuchas = await armarPdfDeFila(base(tablas()) as any, muchas as any, { bajarLogo: async () => null, bajarFoto: async () => null, celular: "51966707225", contactoClienteId: null });
+  ok(cod(aMuchas).includes("condiciones_demasiadas") && aMuchas.bytes.length > 1000, `31 líneas: aviso condiciones_demasiadas y el PDF sale igual (${cod(aMuchas)})`);
+  ok(!cod(await armar(null)).includes("condiciones_demasiadas"), "con las condiciones de siempre, sin ese aviso");
   process.env.NEXT_PUBLIC_SUPABASE_URL = prev;
 
   // leerCotizacionTraslado: plantilla_pdf es accesoria.

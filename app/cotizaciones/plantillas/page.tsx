@@ -25,7 +25,7 @@ import {
   CAMPOS_PLANTILLA, ETIQUETA_CAMPO, ETIQUETA_DISENO, ETIQUETA_SEGMENTO, SEGMENTOS, SERVICIOS_PLANTILLA,
   SQL_PLANTILLAS_USO, TABLA_PLANTILLAS, considSnapshot, disenoDe, ejemploParaVistaPrevia, esActiva,
   esIdPlantillaValido, etiquetaCelda, idNuevaPlantilla, leeCampo, plantillaParaUso, plantillaPrincipal,
-  reglasQueUsan,
+  reglasQueUsan, sirveParaIA,
   type Diseno, type PlantillaFila, type ReglaPlantilla, type Segmento, type ServicioPlantilla, type UsoPlantilla,
 } from "@/lib/cotizacion-plantillas";
 import { leerPlantillasYReglas } from "@/lib/cotizacion-plantillas-datos";
@@ -238,7 +238,7 @@ export default function PlantillasPDFPage() {
       if (ia.length) {
         lineas.push(`La IA del CRM usa esta plantilla en sus traslados (clientes: ${ia.map(x => ETIQUETA_SEGMENTO[x.segmento]).join(", ")}): sus próximas cotizaciones saldrán por WhatsApp con estas condiciones, sin revisión.`);
         const raras = LISTAS.flatMap(l => (patch[l.k] as string[] | null) ?? []).filter(x => avisoLineaIA(x)).length;
-        if (raras) lineas.push(`${plural(raras, "línea trae", "líneas traen")} un enlace, un número largo o palabras de pago (están marcadas en ámbar): revisa que no pidan pagos.`);
+        if (raras) lineas.push(`${plural(raras, "línea trae", "líneas traen")} un enlace, un número largo o palabras de pago (están marcadas en ámbar): con un enlace o un número largo la IA deja sus cotizaciones para revisión; las palabras de pago salen sin revisión, revisa que no pidan pagos.`);
       }
       const pedir = !c || "error" in c || c.n > 0 || ia.length > 0;
       if (pedir && !window.confirm(`Cambiaste las condiciones de «${nombre}».\n\n• ${lineas.join("\n• ")}\n\n¿Guardar?`)) return;
@@ -670,7 +670,11 @@ export default function PlantillasPDFPage() {
                   const ninguna = ls.every(l => form[l.k] == null);
                   const c = conteos[base.id];
                   const respaldoNombre = principalActual && principalActual.id !== base.id ? `la plantilla principal «${principalActual.nombre}»` : "fábrica";
-                  const avisoLinea = iaBase.length > 0 ? avisoLineaIA : undefined;
+                  // El ámbar sale en toda plantilla que la IA PUEDE usar (activa, corporativa, en castellano
+                  // —con el idioma que hay en el formulario—), no solo en la que ya usa: asignarla a traslados
+                  // es un clic en la cuadrícula de reglas, y ahí ya no se ven sus líneas.
+                  const sirveIA = sirveParaIA({ ...base, idioma: form.idioma ?? base.idioma } as PlantillaFila);
+                  const avisoLinea = iaBase.length > 0 || sirveIA ? (linea: string) => avisoLineaIA(linea, { enUso: iaBase.length > 0 }) : undefined;
                   return (
                     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                       <div style={gris}>
@@ -830,7 +834,7 @@ export default function PlantillasPDFPage() {
             {reglas === null ? (
               <div style={ambar}>⚠ Las reglas no están disponibles: falta correr {SQL_PLANTILLAS_USO} en Supabase. Mientras tanto, toda cotización nueva usa la plantilla principal y la IA usa las condiciones de /tarifario → Zonas y traslados → Ajustes.</div>
             ) : (
-              <ReglasUso plantillas={plantillas} reglas={reglas} aviso={mostrarToast} onCambio={async () => { await recargar(); }} />
+              <ReglasUso plantillas={plantillas} reglas={reglas} aviso={mostrarToast} onCambio={async () => { await recargar(); }} perfil={perfil.estado === "ok" ? perfil.perfil : undefined} />
             )}
           </div>
         </>

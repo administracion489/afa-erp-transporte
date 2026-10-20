@@ -362,7 +362,7 @@ seccion("6. planEnvio: solo el aeropuerto sale solo, y solo con todo encendido")
   const sinCol = zonasBase as E.ZonaEnvio[];
   const r3 = M.evaluarTraslado(pedido(), { ...ctx, zonas: sinCol });
   ok(E.planEnvio({ resultado: r3, envioMaestro: true, zonas: sinCol, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [] }).decision === "revision", "sin la columna de zonas nada sale solo");
-  ok(Object.keys(E.MOTIVO_REVISION).length === 9 && Object.values(E.MOTIVO_REVISION).every((m) => m.texto && m.arreglo), "nueve motivos, cada uno con su arreglo");
+  ok(Object.keys(E.MOTIVO_REVISION).length === 11 && Object.values(E.MOTIVO_REVISION).every((m) => m.texto && m.arreglo), "once motivos, cada uno con su arreglo");
 }
 
 // ── 7. Sin precio nunca se envía ─────────────────────────────────────────────
@@ -1802,12 +1802,13 @@ seccion("22. Las condiciones del traslado salen de la plantilla de su regla; sin
     ok(textoDelPdf(pdf.bytes) === s.pdf, "la relectura (sin la columna) imprime lo mismo que se armó al crearla");
   }
   {
-    // Las CUENTAS son las de la plantilla de la cotización (plantilla_pdf), también al reenviar.
+    // Las CUENTAS son las de la plantilla de la cotización (plantilla_pdf), también al reenviar. Como
+    // NO son las de `corporativo`, la IA no la envía sola (sección 23): el PDF se mira por la relectura.
     const sb = baseCon({ ...T, plantillas: T.plantillas.map((p) => (p.id === "traslados_ia" ? { ...p, banco_1_nombre: "BANCO DE LA PLANTILLA IA" } : p)) });
     const c = await corrida(sb);
-    ok((c.pdf ?? "").includes("BANCO DE LA PLANTILLA IA") && !(c.pdf ?? "").includes("BCP"), "el PDF lleva las cuentas de la plantilla de la regla");
+    ok(c.res.cotizacion?.decision === "revision" && !c.res.envioPendiente, `cuentas de la plantilla distintas de corporativo: revisión (${c.res.cotizacion?.decision})`);
     const pdf = await pdfDeCotizacion(sb as any, c.fila.id, { bajarLogo: async () => null });
-    ok(textoDelPdf(pdf.bytes).includes("BANCO DE LA PLANTILLA IA"), "y la relectura también (plantilla_pdf)");
+    ok(textoDelPdf(pdf.bytes).includes("BANCO DE LA PLANTILLA IA") && !textoDelPdf(pdf.bytes).includes("BCP"), "el PDF lleva las cuentas de la plantilla de la regla (relectura por plantilla_pdf)");
     // Si después esa plantilla pasa a otro diseño, el PDF vuelve a las cuentas de `corporativo`.
     sb.t("cotizacion_plantillas").find((p) => p.id === "traslados_ia")!.diseno = "ejecutivo";
     const pdf2 = await pdfDeCotizacion(sb as any, c.fila.id, { bajarLogo: async () => null });
@@ -1822,6 +1823,165 @@ seccion("22. Las condiciones del traslado salen de la plantilla de su regla; sin
     ok(/plantilla: pt\.plantilla/.test(ruta) && /\.\.\.respuesta, envio, plantilla, condiciones/.test(ruta), "simulador: la fila con la plantilla, y la respuesta dice cuál");
     const ia = q(readFileSync("lib/traslados/cotizar-ia-datos.ts", "utf8"));
     ok(/plantillaParaTraslado\(sb, \{ moneda: r\.precio!\.moneda, clienteId \}\)/.test(ia) && ia.indexOf("clienteIdDeRemitente(sb, ctx.contacto") < ia.indexOf("plantillaParaTraslado("), "IA: el tipo de cliente sale del cliente ya verificado (clienteIdDeRemitente)");
+  }
+}
+
+// ── 23. Auditoría de seguridad de plantillas-uso: lo que la plantilla manda sin revisión ──────
+// La plantilla de traslados la edita quien tiene el módulo Cotizaciones, y su PDF sale por WhatsApp
+// sin revisión. Se fija: (a) una plantilla DESACTIVADA no presta sus cuentas (las de `corporativo`,
+// como si no existiera); (b) cuentas de la plantilla distintas de las de `corporativo` (o sin poder
+// comprobarlo) → revisión con `cuentas_distintas`; (c) una condición con un enlace o un número de 6+
+// dígitos → revisión con `texto_libre_sospechoso` y la línea citada en la nota; una palabra de pago
+// sola NO; (d) más de 30 líneas en una lista o una línea de más de 500 caracteres → revisión con
+// `condiciones_demasiadas` (y el aviso del PDF); (e) el corolario: la plantilla normal sale sola.
+seccion("23. Cuentas y condiciones de la plantilla de traslados: inactiva, distintas, sospechosas o desmesuradas");
+{
+  const P = await import("../lib/cotizacion-plantillas");
+  const D = await import("../lib/traslados/enviar-cotizacion-datos");
+  const PA = await import("../components/cotizaciones/plantillas/pantalla");
+  type Plantilla = import("../lib/cotizacion-plantillas").PlantillaFila;
+
+  // (1) Puro: qué deja la cotización para revisión mirando el PDF de su fila.
+  const rev = (consid: unknown, avisos: { codigo: string }[] = []) => E.revisionPorCondiciones({ avisosPdf: avisos, consideraciones: consid });
+  const cj = (generales: string[], extra: Record<string, unknown> = {}) => ({ incluye: [], no_incluye: [], generales, version: 2, plantilla: "traslados_ia", ...extra });
+  ok(rev(cj(config.consideraciones)).motivos.length === 0, "las condiciones sembradas de AFA no dejan nada para revisión");
+  ok(rev(cj([...config.consideraciones, ...config.consideraciones_usd])).motivos.length === 0, "tampoco las de dólares");
+  const enl = rev(cj(["Reserve en www.pagos-traslados.com"]));
+  ok(enl.motivos.join() === "texto_libre_sospechoso" && enl.lineas[0]?.linea === "Reserve en www.pagos-traslados.com" && enl.lineas[0].motivos.join() === "enlace", `una condición con un enlace → texto_libre_sospechoso, con la línea (${JSON.stringify(enl)})`);
+  ok(rev(cj(["Más información: https://x.test/pagar"])).motivos.join() === "texto_libre_sospechoso", "https:// también");
+  const num = rev({ incluye: ["Consultas al 987 654 321"], no_incluye: [], generales: [] });
+  ok(num.motivos.join() === "texto_libre_sospechoso" && num.lineas[0].lista === "incluye" && num.lineas[0].motivos.join() === "numero_largo", "6+ dígitos (con espacios) en cualquier lista → revisión");
+  ok(rev(cj(["Cuenta 191-1234567-0-12 a nombre de otra empresa"])).lineas[0]?.motivos.join() === "numero_largo", "un número de cuenta con guiones → revisión (la palabra de pago sola no cuenta, el número sí)");
+  for (const l of ["El pago del parqueo corre por cuenta del pasajero.", "Pago por Yape o Plin al confirmar.", "Depósito en cuenta del 50 % para reservar.", "Válido hasta el 31/12/2026 a las 18:00.", "No incluyen IGV (18 %).", "Hasta 30 minutos de espera."]) {
+    ok(rev(cj([l])).motivos.length === 0, `«${l}»: no deja la cotización para revisión`);
+  }
+  ok(rev(cj([]), [{ codigo: "cuentas_distintas_de_corporativo" }]).motivos.join() === "cuentas_distintas", "el aviso del PDF de cuentas distintas → cuentas_distintas");
+  ok(rev(cj([]), [{ codigo: "sin_foto" }, { codigo: "logo_no_usado" }, { codigo: "cliente_no_verificado" }]).motivos.length === 0, "los demás avisos del PDF no dejan nada para revisión");
+  const lineas = (n: number) => Array.from({ length: n }, (_, i) => `Condición número ${i + 1}`);
+  ok(rev(cj(lineas(30))).motivos.length === 0 && rev(cj(lineas(31))).motivos.join() === "condiciones_demasiadas", "30 líneas caben; 31 → condiciones_demasiadas");
+  ok(rev({ incluye: lineas(31), no_incluye: [], generales: [] }).motivos.join() === "condiciones_demasiadas", "en cualquier lista");
+  ok(rev(cj(["   ", "", ...lineas(30)])).motivos.length === 0, "las líneas vacías no cuentan (el PDF no las imprime)");
+  ok(rev(cj(["a".repeat(500)])).motivos.length === 0 && rev(cj(["a".repeat(501)])).motivos.join() === "condiciones_demasiadas", "500 caracteres caben; 501 → condiciones_demasiadas");
+  ok(rev(cj(["ñ".repeat(500)])).motivos.length === 0, "se cuentan caracteres, no bytes");
+  ok(rev(cj([]), [{ codigo: "condiciones_demasiadas" }]).motivos.join() === "condiciones_demasiadas", "también por el aviso del PDF");
+  const todo = rev(cj([...lineas(31), "www.x.com"]), [{ codigo: "cuentas_distintas_de_corporativo" }]);
+  ok(todo.motivos.join() === "cuentas_distintas,condiciones_demasiadas,texto_libre_sospechoso", `los tres a la vez, sin repetir (${todo.motivos})`);
+  ok(rev(null).motivos.length === 0 && rev({ generales: "no es lista" }).motivos.length === 0, "sin condiciones o con basura: nada");
+  {
+    // La pantalla usa la MISMA función que el servidor: movida, no copiada (la identidad del módulo
+    // cambia con el alias «@/», así que se comprueba el código y el resultado).
+    const fuentePantalla = readFileSync("components/cotizaciones/plantillas/pantalla.ts", "utf8");
+    const muestras = ["Reserve en www.x.com", "Consultas al 987 654 321", "Pago por Yape", "Válido hasta el 31/12/2026", "IGV (18 %)", "", "Cuenta 191-1234567-0-12 en el BCP"];
+    ok(!/function motivosLineaIA/.test(fuentePantalla) && /motivosLineaIA[^;]*from "@\/lib\/traslados\/texto-libre"/.test(fuentePantalla)
+      && muestras.every((l) => JSON.stringify(PA.motivosLineaIA(l)) === JSON.stringify(T.motivosLineaIA(l))),
+      "la pantalla usa la MISMA función que el servidor (movida a lib/traslados/texto-libre.ts)");
+  }
+  ok(E.MOTIVO_REVISION.cuentas_distintas.texto.length > 0 && E.MOTIVO_REVISION.condiciones_demasiadas.arreglo.includes("/cotizaciones/plantillas"), "los dos motivos nuevos con su texto y su arreglo");
+
+  // (2) Puro: las cuentas de la plantilla frente a las de `corporativo`.
+  const CORP23: Plantilla = {
+    id: "corporativo", nombre: "Corporativo", es_principal: true, activa: true, diseno: "corporativo", idioma: "es", orden: 1,
+    condiciones_generales: ["GENERAL DE LA CORPORATIVA"], condiciones_incluye: [], condiciones_no_incluye: [],
+    mostrar_cuentas_bancarias: true, usar_bancos_propios: true, banco_1_nombre: "BCP", banco_1_cuenta: "191-1234567-0-12", banco_1_cci: "002-191-001234567012-55",
+  };
+  const frente = (pl: Plantilla | null, ref: C.ReferenciaCuentas, moneda = "PEN", empresa: any = perfilPrueba) => C.cuentasFrenteACorporativo({ plantilla: pl, referencia: ref, empresa, moneda });
+  const OTRA = { ...CORP23, id: "traslados_ia", banco_1_nombre: "BANCO DE OTRO" };
+  ok(frente(CORP23, { estado: "misma" }).codigo === "misma_plantilla", "la misma plantilla: nada que comparar");
+  ok(frente({ ...CORP23, id: "traslados_ia" }, { estado: "leida", cfg: CORP23 }).codigo === "iguales", "una copia con las mismas cuentas: iguales");
+  ok(frente(OTRA, { estado: "leida", cfg: CORP23 }).codigo === "distintas", "otro banco: distintas");
+  ok(frente({ ...CORP23, banco_1_cuenta: "191-1234567-0-13" }, { estado: "leida", cfg: CORP23 }).codigo === "distintas", "un solo dígito de la cuenta: distintas");
+  ok(frente({ ...CORP23, banco_1_cuenta: "  191-1234567-0-12 " }, { estado: "leida", cfg: CORP23 }).codigo === "iguales", "espacios de más: iguales");
+  const DOS = { ...CORP23, banco_2_nombre: "BBVA", banco_2_cuenta: "011-222", banco_2_cci: "" };
+  const DOS_AL_REVES = { ...CORP23, banco_1_nombre: "BBVA", banco_1_cuenta: "011-222", banco_1_cci: "", banco_2_nombre: "BCP", banco_2_cuenta: "191-1234567-0-12", banco_2_cci: "002-191-001234567012-55" };
+  ok(frente(DOS_AL_REVES, { estado: "leida", cfg: DOS }).codigo === "iguales", "el orden de las cuentas no cuenta");
+  ok(frente({ ...CORP23, mostrar_cuentas_bancarias: false }, { estado: "leida", cfg: CORP23 }).codigo === "distintas", "ocultar las cuentas también es distinto (la frase lo dice: «ninguna»)");
+  ok(frente(OTRA, { estado: "ilegible", detalle: "timeout" }).codigo === "sin_comprobar", "corporativo ilegible: sin_comprobar");
+  ok(frente({ ...CORP23, id: "x", usar_bancos_propios: false }, { estado: "leida", cfg: null }, "PEN", { ...perfilPrueba, cuentas_bancarias: [{ banco: "BCP", cuenta: "1", cci: "" }] }).codigo === "iguales",
+    "corporativo no existe: se compara con lo que imprimiría sin plantilla (las del perfil)");
+  ok(frente(OTRA, { estado: "leida", cfg: CORP23 }).plantilla[0]?.banco === "BANCO DE OTRO" && C.cuentaEnUnaLinea({ banco: "BCP", cuenta: "191", cci: "002", moneda: "PEN" }) === "BCP 191 CCI 002 (PEN)", "las cuentas que imprime, en una línea");
+
+  // (3) De punta a punta.
+  const IA23 = (x: Partial<Plantilla> = {}): Plantilla => ({
+    ...CORP23, id: "traslados_ia", nombre: "Traslados (IA)", es_principal: false, orden: 2,
+    condiciones_generales: [...config.consideraciones], condiciones_incluye: [], condiciones_no_incluye: [], ...x,
+  });
+  const REGLAS23 = (["empresa", "particular", "extranjero"] as const).map((segmento) => ({ servicio: "traslado_ia", segmento, plantilla_id: "traslados_ia" }));
+  const base23 = (ia: Plantilla) => {
+    const sb = nuevaBase();
+    sb.tablas.cotizacion_plantillas = [{ ...CORP23 }, { ...ia }];
+    sb.tablas.cotizacion_plantilla_reglas = REGLAS23.map((r) => ({ ...r }));
+    return sb;
+  };
+  const deps23 = { simular: simularFalso({ n: 0 }) as any, bajarLogo: async () => null, ahoraMs: () => reloj, azar: () => String(Math.random()).slice(2, 8) };
+  const correr = async (sb: SbFalso) => {
+    const res = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), pedidoIA, deps23);
+    return { res, acc: sb.t("crm_acciones_ia").at(-1) as any, nota: sb.t("crm_notas").map((n) => String(n.texto)).join("\n"), fila: sb.t("cotizaciones").at(-1) as any };
+  };
+  const motivosDe = (r: Awaited<ReturnType<typeof correr>>) => (r.acc?.payload?.motivos ?? []).join();
+  {
+    const r = await correr(base23(IA23()));
+    ok(r.res.cotizacion?.decision === "automatico" && !!r.res.envioPendiente && r.fila?.plantilla_pdf === "traslados_ia", `corolario: la plantilla de traslados con las cuentas de corporativo sale sola (${r.res.cotizacion?.decision} ${motivosDe(r)})`);
+  }
+  {
+    // (b) Cuentas distintas → revisión, con las cuentas en la nota.
+    const sb = base23(IA23({ banco_1_nombre: "BANCO DE LA PLANTILLA IA", banco_1_cuenta: "555-0001" }));
+    const r = await correr(sb);
+    ok(r.res.cotizacion?.decision === "revision" && !r.res.envioPendiente && motivosDe(r) === "cuentas_distintas", `cuentas distintas → revisión con cuentas_distintas (${motivosDe(r)})`);
+    ok(r.nota.includes(E.MOTIVO_REVISION.cuentas_distintas.texto) && r.nota.includes("BANCO DE LA PLANTILLA IA 555-0001") && r.nota.includes("BCP 191-1234567-0-12"), "la nota dice el motivo y qué cuentas imprime frente a las de corporativo");
+    ok(!/BANCO DE LA PLANTILLA IA|555-0001/.test(r.res.respuestaModelo), "al modelo no le llega ninguna cuenta");
+    const pdf = await pdfDeCotizacion(sb as any, r.fila.id, { bajarLogo: async () => null });
+    ok(pdf.avisos.some((a) => a.codigo === "cuentas_distintas_de_corporativo") && textoDelPdf(pdf.bytes).includes("BANCO DE LA PLANTILLA IA"), "el PDF (Ver PDF del ejecutivo) imprime las de la plantilla y lo avisa");
+
+    // (a) La plantilla se DESACTIVA: deja de prestar sus cuentas; vuelven las de corporativo y sale sola.
+    sb.t("cotizacion_plantillas").find((p) => p.id === "traslados_ia")!.activa = false;
+    const d = await D.leerDatosPdf(sb as any, r.fila, { celular: "51966707225", contactoClienteId: null });
+    ok((d.plantilla as any)?.id === "corporativo" && d.referenciaCuentas.estado === "misma", `plantilla inactiva: las cuentas de corporativo, como si no existiera (${(d.plantilla as any)?.id} ${d.referenciaCuentas.estado})`);
+    const pdf2 = await pdfDeCotizacion(sb as any, r.fila.id, { bajarLogo: async () => null });
+    const t2 = textoDelPdf(pdf2.bytes);
+    ok(t2.includes("BCP") && !t2.includes("BANCO DE LA PLANTILLA IA") && !pdf2.avisos.some((a) => a.codigo === "cuentas_distintas_de_corporativo"), "y el PDF imprime las de corporativo, sin el aviso");
+    const r2 = await correr(sb);
+    ok(sb.t("cotizaciones").length === 1 && r2.res.cotizacion?.decision === "automatico" && !!r2.res.envioPendiente && r2.acc?.payload?.decision === "automatico", `el mismo pedido otra vez (se reusa): ahora sale sola (${r2.res.cotizacion?.decision} ${motivosDe(r2)})`);
+    ok(textoDelPdf(r2.res.envioPendiente!.bytes).includes("BCP"), "con las cuentas de corporativo");
+  }
+  {
+    // (c) Condiciones con un enlace / un número largo → revisión con la línea citada; una palabra de pago sola, no.
+    const lEnl = "Confirme su reserva en www.pagos-traslados.com";
+    const r = await correr(base23(IA23({ condiciones_generales: [...config.consideraciones, lEnl] })));
+    ok(r.res.cotizacion?.decision === "revision" && motivosDe(r) === "texto_libre_sospechoso", `condición con un enlace → revisión (${motivosDe(r)})`);
+    ok(r.nota.includes(lEnl) && r.nota.includes("Consideraciones generales") && r.nota.includes(T.ETIQUETA_TEXTO_LIBRE.enlace), "la nota cita la línea, su lista y por qué");
+    const lNum = "Consultas al 987 654 321";
+    const rn = await correr(base23(IA23({ condiciones_no_incluye: [lNum] })));
+    ok(rn.res.cotizacion?.decision === "revision" && motivosDe(rn) === "texto_libre_sospechoso" && rn.nota.includes(lNum) && rn.nota.includes("No incluye"), `condición con 6+ dígitos → revisión (${motivosDe(rn)})`);
+    const lPago = "El pago del parqueo corre por cuenta del pasajero.";
+    const rp = await correr(base23(IA23({ condiciones_generales: [...config.consideraciones, lPago] })));
+    ok(rp.res.cotizacion?.decision === "automatico" && !!rp.res.envioPendiente && textoDelPdf(rp.res.envioPendiente!.bytes).includes("parqueo corre por cuenta"), `una palabra de pago sola no la deja para revisión (${rp.res.cotizacion?.decision} ${motivosDe(rp)})`);
+  }
+  {
+    // (d) Condiciones desmesuradas → revisión y el aviso del PDF.
+    const r31 = await correr(base23(IA23({ condiciones_generales: lineas(31) })));
+    ok(r31.res.cotizacion?.decision === "revision" && motivosDe(r31) === "condiciones_demasiadas" && r31.nota.includes(E.MOTIVO_REVISION.condiciones_demasiadas.texto), `31 líneas → revisión con condiciones_demasiadas (${motivosDe(r31)})`);
+    ok(/«Consideraciones generales»: 31 líneas/.test(r31.nota), "la nota dice qué lista y cuántas líneas (aviso del PDF)");
+    const r30 = await correr(base23(IA23({ condiciones_generales: lineas(30) })));
+    ok(r30.res.cotizacion?.decision === "automatico", `30 líneas: sale sola (${motivosDe(r30)})`);
+    const rLarga = await correr(base23(IA23({ condiciones_incluye: ["x".repeat(501)] })));
+    ok(rLarga.res.cotizacion?.decision === "revision" && motivosDe(rLarga) === "condiciones_demasiadas" && /una línea de 501 caracteres/.test(rLarga.nota), `una línea de 501 caracteres → revisión (${motivosDe(rLarga)})`);
+    const rTodo = await correr(base23(IA23({ banco_1_nombre: "OTRO", condiciones_generales: [...lineas(31), "Pague en bit.ly/abc"] })));
+    ok(motivosDe(rTodo) === "cuentas_distintas,condiciones_demasiadas,texto_libre_sospechoso", `los tres motivos a la vez (${motivosDe(rTodo)})`);
+  }
+  {
+    // El simulador de /tarifario dice lo mismo que hará la IA; la pantalla de plantillas usa la misma regla.
+    const q = (x: string) => x.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const ruta = q(readFileSync("app/api/traslados/simular/route.ts", "utf8"));
+    ok(/revisionPorCondiciones\(\{[\s\S]{0,300}avisosDeRevision\(fila,/.test(ruta) && /plantillaYReferenciaCuentas\(sb, fila\.plantilla_pdf\)/.test(ruta), "simulador: las cuentas y las condiciones, con las mismas funciones que la IA");
+    const ia = q(readFileSync("lib/traslados/cotizar-ia-datos.ts", "utf8"));
+    ok(ia.indexOf("planEnvio({") < ia.indexOf("revisionPorCondiciones({") && /consideraciones: x\.leida\.consideraciones_json/.test(ia), "IA: después de planEnvio, sobre las condiciones de la FILA (las que van en el PDF)");
+    ok(PA.avisoLineaIA("Consultas al 987 654 321", { enUso: false })!.includes("Si asignas esta plantilla a traslados") && PA.avisoLineaIA("Pago por Yape.", { enUso: false })!.includes("Si la asignas a traslados, esta línea la manda la IA sin revisión"), "la pantalla avisa también en una plantilla que la IA puede usar (y dice lo que de verdad pasa)");
+    ok(PA.avisoLineaIA("Pago por Yape.")!.includes("La manda la IA sin revisión") && PA.avisoLineaIA("www.x.com")!.includes("quedan para que las revise un ejecutivo"), "en una plantilla en uso, también");
+    const conf = PA.lineasConfirmTraslado({ resultante: IA23({ banco_1_nombre: "OTRO", condiciones_generales: ["Pague en www.x.com"] }), plantillas: [CORP23], perfil: perfilPrueba as any, segmento: "particular" });
+    ok(conf.some((l) => l.includes("OTRO") && l.includes("soles")) && conf.some((l) => l.includes("No son las de la plantilla «corporativo»")) && conf.some((l) => l.includes("www.x.com")), `el confirm de la regla lista cuentas, la diferencia y las líneas (${conf.join(" | ")})`);
+    const confVacia = PA.lineasConfirmTraslado({ resultante: null, plantillas: [CORP23], perfil: perfilPrueba as any, segmento: "extranjero" });
+    ok(confVacia.some((l) => l.includes("BCP") && l.includes("dólares")) && !confVacia.some((l) => l.includes("No son")), "al vaciar la celda (sin plantilla): las cuentas de corporativo");
+    ok(PA.lineasConfirmTraslado({ resultante: null, plantillas: [CORP23], perfil: undefined, segmento: "particular" })[0].startsWith("No se pudo leer el perfil"), "sin perfil no se afirman cuentas");
   }
 }
 

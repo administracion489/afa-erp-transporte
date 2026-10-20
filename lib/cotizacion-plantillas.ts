@@ -352,6 +352,44 @@ export function avisoCondicionesDeOtraPlantilla(
   };
 }
 
+// ── Topes de las listas de condiciones ───────────────────────────────────────
+// Lo que la IA manda sin revisión lo dibuja el servidor con pdf-lib, y una lista que no cabe en una
+// hoja se pierde; una línea desmesurada se recorta. Los dos números NO están medidos: son los de la
+// pantalla (el editor no deja agregar la línea 31 ni escribir el carácter 501) y una cotización de
+// traslado que los pasa no sale sola (`condiciones_demasiadas`, lib/traslados/envio-ia.ts).
+
+/** Líneas que puede tener una lista de condiciones (Incluye, No incluye o Consideraciones generales). */
+export const MAX_LINEAS_CONDICIONES = 30;
+/** Caracteres que puede tener una línea de condiciones. */
+export const MAX_CARACTERES_CONDICION = 500;
+
+export type ListaConsid = "incluye" | "no_incluye" | "generales";
+export const LISTAS_CONSID: readonly ListaConsid[] = ["incluye", "no_incluye", "generales"];
+
+/** Las líneas de una lista como las imprime el PDF: texto, sin espacios de más, sin las vacías. */
+export function lineasDeLista(l: unknown): string[] {
+  return Array.isArray(l) ? l.map(s => String(s ?? "").trim()).filter(Boolean) : [];
+}
+
+export type ExcesoCondiciones = { lista: ListaConsid; motivo: "demasiadas_lineas" | "linea_larga"; n: number };
+
+/**
+ * Qué listas de condiciones de una cotización (`consideraciones_json`: incluye, no incluye y
+ * generales) pasan de los topes, con cuántas líneas tienen o cuántos caracteres la línea más larga.
+ * Vacío = caben. Se cuenta como imprime el PDF (sin las líneas vacías) y por caracteres completos.
+ */
+export function excesoCondiciones(c: unknown): ExcesoCondiciones[] {
+  const o = c && typeof c === "object" ? (c as Record<string, unknown>) : {};
+  const out: ExcesoCondiciones[] = [];
+  for (const lista of LISTAS_CONSID) {
+    const ls = lineasDeLista(o[lista]);
+    if (ls.length > MAX_LINEAS_CONDICIONES) out.push({ lista, motivo: "demasiadas_lineas", n: ls.length });
+    const larga = ls.reduce((m, s) => Math.max(m, Array.from(s).length), 0);
+    if (larga > MAX_CARACTERES_CONDICION) out.push({ lista, motivo: "linea_larga", n: larga });
+  }
+  return out;
+}
+
 // ── El editor honesto ────────────────────────────────────────────────────────
 
 /**

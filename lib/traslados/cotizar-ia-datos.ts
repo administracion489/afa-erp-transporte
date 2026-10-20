@@ -20,9 +20,11 @@
 //  5. El motor (`simularTrasladoConCatalogo`, el mismo del simulador de /tarifario).
 //  6. La cotización (`cotizaciones` es la fila autoritativa), el PDF, el cuadre contra el motor y
 //     `planEnvio` (que también juzga el recojo, el destino y el nombre como TEXTO LIBRE: con algo
-//     sospechoso no sale sola); después la acción de la bandeja (`crm_acciones_ia`, tipo
+//     sospechoso no sale sola) más `revisionPorCondiciones` (lo que dice el PDF de SU fila: cuentas
+//     de la plantilla distintas de `corporativo`, condiciones que no caben o con un enlace o un
+//     número de 6+ dígitos); después la acción de la bandeja (`crm_acciones_ia`, tipo
 //     `cotizacion_traslado`, siempre `pendiente`) y, si queda en revisión, una nota interna con los
-//     motivos.
+//     motivos (y la línea de condiciones que la dejó, citada).
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { faltaAlguna, faltaColumna } from "../columna-faltante";
@@ -40,7 +42,7 @@ import {
 } from "./cotizacion-traslado";
 import {
   MOTIVO_REVISION, TOPES, decidirTope, entradaDelAgente, figurasPermitidas, firmaPedido, planEnvio,
-  respuestaDerivar, respuestaEnRevision, respuestaParaModelo, respuestaYaEnviada, senalesEnTexto,
+  respuestaDerivar, respuestaEnRevision, respuestaParaModelo, respuestaYaEnviada, revisionPorCondiciones, senalesEnTexto,
   textosDeUbicacion, textosLibresSospechosos,
   type CodigoRevision, type DecisionEnvio,
 } from "./envio-ia";
@@ -305,6 +307,11 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
 
 type CampoLibre = { campo: string; texto: string | null };
 
+/** El nombre de cada lista de condiciones, como lo rotula la pantalla. */
+const NOMBRE_LISTA = { incluye: "Incluye", no_incluye: "No incluye", generales: "Consideraciones generales" } as const;
+/** Un texto en una línea y como mucho `n` caracteres (con «…»). */
+const recortar = (t: string, n: number) => { const c = Array.from(String(t ?? "").replace(/\s+/g, " ").trim()); return c.length > n ? `${c.slice(0, n - 1).join("")}…` : c.join(""); };
+
 /** Lo que escribió el cliente (o el modelo) y podría imprimirse: el recojo, el destino y el nombre. */
 function camposLibres(e: EntradaSimulador, nombre: string | null): CampoLibre[] {
   const t = (l: LugarEntrada) => (typeof l === "string" ? l : l.texto ?? null);
@@ -394,6 +401,12 @@ async function decidirYRegistrar(
     decision = "revision";
     motivos = ["importes_no_cuadran"];
   }
+  // Y lo que dice el PDF de SU fila (respaldo de lo que avisa /cotizaciones/plantillas): cuentas de
+  // la plantilla distintas de las de `corporativo`, condiciones que no caben, y condiciones con un
+  // enlace o un número de 6+ dígitos. Cualquiera la deja para revisión.
+  const porPdf = revisionPorCondiciones({ avisosPdf: pdf?.avisos ?? null, consideraciones: x.leida.consideraciones_json });
+  for (const m of porPdf.motivos) if (!motivos.includes(m)) motivos.push(m);
+  if (motivos.length > 0) decision = "revision";
 
   // La acción de la bandeja: nueva, o la misma con la decisión de ahora.
   let accionId = x.existente?.id;
@@ -425,6 +438,7 @@ async function decidirYRegistrar(
         `🤖 La IA cotizó un traslado y lo dejó para que lo revises: cotización N° ${numero}.`,
         ...motivos.map((m) => `• ${MOTIVO_REVISION[m].texto} ${MOTIVO_REVISION[m].arreglo}`),
         ...textosLibresSospechosos(x.libres).map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
+        ...porPdf.lineas.map((c) => `  – Condición del PDF («${NOMBRE_LISTA[c.lista]}»): «${recortar(c.linea, 160)}» ${c.motivos.map((m) => ETIQUETA_TEXTO_LIBRE[m]).join(" y ")}.`),
         errorPdf ? `• PDF: ${errorPdf.slice(0, 300)}` : "",
         // Lo que el PDF no pudo poner (no bloquea el envío; aquí solo se dice).
         ...(pdf?.avisos ?? []).map((a) => `• PDF: ${a.detalle}`),
