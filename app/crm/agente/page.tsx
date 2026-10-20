@@ -116,6 +116,10 @@ const label = "block text-xs font-semibold text-gray-500 mb-1.5";
 
 export default function AgenteIAPage() {
   const [agente, setAgente] = useState<Agente | null>(null);
+  /** Lo último cargado o guardado: contra esto se cuentan los choques NUEVOS al guardar. */
+  const [cargado, setCargado] = useState<Agente | null>(null);
+  /** Nombre del perfil de la empresa ({empresa} en «Cómo se presenta»); "" = sin perfil. */
+  const [empresa, setEmpresa] = useState("");
   const [cargando, setCargando] = useState(true);
   const [faltaTabla, setFaltaTabla] = useState(false);
   const [tab, setTab] = useState<Tab>("Personalidad");
@@ -129,13 +133,21 @@ export default function AgenteIAPage() {
   const [probando, setProbando] = useState(false);
   const chatEndRef = React.useRef<HTMLDivElement>(null);
 
-  // Lo que solo sabe el servidor: ¿hay clave de transcripción? y el prompt real.
-  const [estadoIA, setEstadoIA] = useState<{ transcripcion: boolean | null; instrucciones: string | null }>({ transcripcion: null, instrucciones: null });
+  // Lo que solo sabe el servidor: ¿hay clave de transcripción?, el prompt real y si la IA cotiza
+  // traslados (null = no se sabe: el auditor no afirma nada de traslados).
+  const [estadoIA, setEstadoIA] = useState<{ transcripcion: boolean | null; instrucciones: string | null; traslados: boolean | null }>({
+    transcripcion: null, instrucciones: null, traslados: null,
+  });
   const cargarEstadoIA = React.useCallback(async () => {
     try {
       const r = await fetch("/api/crm/ia/estado", { headers: await cabecerasErp() });
       const j = await r.json();
-      if (j?.ok) setEstadoIA({ transcripcion: !!j.transcripcion, instrucciones: j.instrucciones ?? null });
+      if (j?.ok)
+        setEstadoIA({
+          transcripcion: !!j.transcripcion,
+          instrucciones: j.instrucciones ?? null,
+          traslados: typeof j.traslados === "boolean" ? j.traslados : null,
+        });
     } catch { /* se queda en «no se sabe» */ }
   }, []);
   useEffect(() => { cargarEstadoIA(); }, [cargarEstadoIA]);
@@ -152,25 +164,93 @@ export default function AgenteIAPage() {
         setFaltaTabla(true);
       } else if (data && data[0]) {
         const a = data[0];
-        setAgente({
+        const leido: Agente = {
           ...a,
           goals: Array.isArray(a.goals) ? a.goals : [],
           canales: Array.isArray(a.canales) ? a.canales : [],
           canales_autonomos: Array.isArray(a.canales_autonomos) ? a.canales_autonomos : [],
-        });
+        };
+        setAgente(leido);
+        setCargado(leido);
       }
       setCargando(false);
+    })();
+    // El nombre de la empresa, como lo lee el motor (nombre o razón social). Best-effort.
+    (async () => {
+      try {
+        const { data } = await supabase.from("empresa_perfil").select("nombre, razon_social").eq("id", 1).maybeSingle();
+        const p = data as { nombre?: string | null; razon_social?: string | null } | null;
+        setEmpresa(String(p?.nombre || p?.razon_social || "").trim());
+      } catch { /* sin perfil: «la empresa» */ }
     })();
   }, []);
 
   const set = <K extends keyof Agente>(k: K, v: Agente[K]) => setAgente((a) => (a ? { ...a, [k]: v } : a));
 
+  // ── Coherencia: el auditor PURO sobre lo que se está editando (se recalcula al teclear, diferido
+  // para no frenar la escritura) y sobre lo guardado (para saber qué choques AGREGA una edición). ──
+  const ctxAuditoria = useMemo(() => ({ trasladosActivos: estadoIA.traslados, empresa }), [estadoIA.traslados, empresa]);
+  const agenteDiferido = useDeferredValue(agente);
+  const auditoria = useMemo(
+    () => (agenteDiferido ? auditarAgente(cfgAuditable(agenteDiferido), ctxAuditoria) : null),
+    [agenteDiferido, ctxAuditoria],
+  );
+  const auditoriaCargada = useMemo(
+    () => (cargado ? auditarAgente(cfgAuditable(cargado), ctxAuditoria) : null),
+    [cargado, ctxAuditoria],
+  );
+
+  // «Ver la frase» / «Ir al ajuste»: se cambia de pestaña y, ya pintada, se enfoca o se resalta.
+  type Destino = { tipo: "frase"; campo: CampoTexto; cita: string; indice?: number } | { tipo: "ajuste"; ancla: string };
+  const [irA, setIrA] = useState<Destino | null>(null);
+  useEffect(() => {
+    if (!irA) return;
+    const raf = requestAnimationFrame(() => {
+      if (irA.tipo === "frase") enfocarFrase(irA.campo, irA.cita, irA.indice);
+      else resaltarAjuste(irA.ancla);
+      setIrA(null);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [irA]);
+
+  const acciones: AccionesCoherencia = {
+    verFrase: (campo, cita, indice) => {
+      setTab(TAB_DE_CAMPO[campo]);
+      setIrA({ tipo: "frase", campo, cita, ...(indice != null ? { indice } : {}) });
+    },
+    irAjuste: (ancla) => {
+      setTab("Ajustes");
+      setIrA({ tipo: "ajuste", ancla });
+    },
+    // Solo cambia el FORMULARIO: el aviso pasa a gris en vivo y guardar sigue siendo del dueño.
+    aplicarPropuesta: (h) => {
+      const p = h.propuesta;
+      if (!p) return;
+      if (p.clave === "pausa_humano_horas") set("pausa_humano_horas", Number(p.valor));
+      else if (p.clave === "escalar_si") set("escalar_si", String(p.valor ?? ""));
+      else if (p.clave === "mensaje_derivacion") set("mensaje_derivacion", String(p.valor ?? ""));
+      else
+        setAgente((a) => {
+          if (!a) return a;
+          const c = a.comportamiento;
+          const base = { ...normalizarAjustes(c), ...(c && typeof c === "object" ? (c as object) : {}) } as AjustesIA;
+          return { ...a, comportamiento: { ...base, [p.clave]: p.valor } };
+        });
+      showToast(`«${h.ajuste?.etiqueta ?? "Ajuste"}» puesto en «${p.etiqueta}». Falta pulsar Guardar.`);
+    },
+  };
+
   const guardar = async () => {
     if (!agente) return;
+    // No se bloquea: si la edición AGREGA choques, se nombran y decide el dueño. Los que ya estaban
+    // no se vuelven a preguntar (los muestra el panel).
+    const despues = auditarAgente(cfgAuditable(agente), ctxAuditoria);
+    const nuevas = nuevasAlarmas(auditoriaCargada?.hallazgos ?? [], despues.hallazgos);
+    if (nuevas.length > 0 && !window.confirm(textoChoquesNuevos(nuevas))) return;
     setGuardando(true);
     const { id, ...resto } = agente;
     // Se guarda acotado con la misma regla que usa el motor.
-    const patch: any = { ...resto };
+    const patch: Omit<Agente, "id"> = { ...resto };
     if (resto.comportamiento !== undefined) patch.comportamiento = normalizarAjustes(resto.comportamiento);
     const { error } = await supabase
       .from("crm_agentes_ia")
@@ -184,11 +264,14 @@ export default function AgenteIAPage() {
           : /mensaje_derivacion|comportamiento/.test(error.message)
           ? "Falta correr supabase/crm-ia-comportamiento.sql en Supabase"
           : `Error al guardar: ${error.message}`
+        : despues.alarmas > 0
+        ? `Configuración guardada · ${despues.alarmas} choque${despues.alarmas === 1 ? "" : "s"} pendiente${despues.alarmas === 1 ? "" : "s"}`
         : "Configuración guardada",
       !error,
     );
     if (!error) {
       if (patch.comportamiento) set("comportamiento", patch.comportamiento);
+      setCargado({ ...agente, ...(patch.comportamiento !== undefined ? { comportamiento: patch.comportamiento } : {}) });
       cargarEstadoIA();
     }
   };
