@@ -17,6 +17,9 @@
 //     descargas con lista blanca y la bomba PNG.
 //  4. `armarPdfDeFila` de punta a punta sobre una base falsa: los avisos que no bloquean.
 //  5. Con todos los topes llenos, el PDF pesa menos de 3.5 MB.
+//  6. La plantilla de la cotización (cotizaciones-05): alimentada con lo que haría el traspaso, la
+//     ruta con plantilla imprime el MISMO texto que la de Ajustes; las cuentas salen de `plantilla_pdf`
+//     y vuelven a `corporativo` si esa no existe, no se lee o no es corporativa.
 // Con MUESTRA_DIR=<carpeta> escribe el PDF y el HTML de muestra (aeropuerto → Miraflores, ida y retorno).
 import { readFileSync, writeFileSync } from "node:fs";
 import { crc32, deflateSync, inflateSync } from "node:zlib";
@@ -767,6 +770,157 @@ ok(!/sharp/.test(readFileSync("lib/traslados/enviar-cotizacion-datos.ts", "utf8"
   ok(/upsert: false/.test(ruta) && /randomUUID\(\)/.test(ruta), "cada foto con nombre nuevo, sin sobrescribir");
   ok(/revisarJpeg\(bytes\)/.test(ruta), "la subida revisa el JPEG por sus bytes");
   ok(ruta.includes("supabase/traslados-07-fotos-categoria.sql"), "sin la migración nombra el SQL");
+}
+
+// ── 9. La plantilla de la cotización (cotizaciones-05): mismo texto por las dos rutas ─────────
+// Desde supabase/cotizaciones-05 las condiciones del traslado se COPIAN de la plantilla de su regla
+// (la migración traspasa las de Ajustes a «Traslados (IA)» y «Traslados (IA) · dólares») y el PDF
+// toma las CUENTAS de la plantilla de `plantilla_pdf`. Se fija: (1) alimentada con lo que haría el
+// traspaso, la ruta con plantilla imprime EXACTAMENTE el mismo texto (PDF y HTML) que la ruta de
+// Ajustes, en soles y en dólares; (2) `leerDatosPdf` usa la plantilla de `plantilla_pdf` y vuelve a
+// `corporativo` si no existe, no se puede leer o no dibuja el diseño corporativo; (3) la fila se lee
+// aunque falte la columna `plantilla_pdf`.
+seccion("9. La plantilla de la cotización: el traspaso no cambia el PDF; las cuentas, de plantilla_pdf");
+{
+  const D = await import("../lib/traslados/enviar-cotizacion-datos");
+  type Plantilla = import("../lib/cotizacion-plantillas").PlantillaFila;
+  const CORP: Plantilla = { id: "corporativo", nombre: "Corporativo", es_principal: true, activa: true, diseno: "corporativo", idioma: "es", orden: 1, ...PLANTILLA_CON_CONDICIONES };
+  /** Lo que hace el bloque 3 de supabase/cotizaciones-05 (comprobado contra el SQL en prueba-traslados-ia, sección 22). */
+  const traspaso = (cfg: typeof config, usd: boolean): Plantilla => {
+    const g = cfg.consideraciones ?? [], gu = cfg.consideraciones_usd ?? [];
+    return {
+      ...CORP, es_principal: false, activa: true, diseno: "corporativo", idioma: "es",
+      id: usd && gu.length ? "traslados_ia_usd" : "traslados_ia", nombre: usd && gu.length ? "Traslados (IA) · dólares" : "Traslados (IA)",
+      condiciones_incluye: cfg.incluye ?? [], condiciones_no_incluye: cfg.no_incluye ?? [], condiciones_generales: usd && gu.length ? [...g, ...gu] : g,
+    };
+  };
+  const filaPor = (p: M.PedidoTraslado, conPlantilla: boolean, cfg = config): C.FilaCotizacionLeida => {
+    const r = M.evaluarTraslado(p, ctx);
+    const f = C.filaCotizacionTraslado(r, entradaDe(p), {
+      convId: "conv-1", clienteId: null, atencion: "Ana Pérez Núñez", config: cfg, firma: "f", hoy: HOY,
+      plantilla: conPlantilla ? traspaso(cfg, r.precio!.moneda === "USD") : null,
+    });
+    return { ...f, id: 1234, numero_cotizacion: null, created_at: "2026-10-19T15:00:00Z" };
+  };
+  const pedidos: [string, M.PedidoTraslado][] = [
+    ["ida · PEN", pedido()],
+    ["ida y retorno · PEN", pedido({ sentido: "ida_retorno", fecha_retorno: "2026-10-28", hora_retorno: "18:00" })],
+    ["ida y retorno · USD", pedido({ telefono: "+13055551234", sentido: "ida_retorno", fecha_retorno: "2026-10-28", hora_retorno: "18:00" })],
+    ["ida · USD a pedido", pedido({ pide_dolares: true })],
+  ];
+  const configs: [string, typeof config][] = [
+    ["Ajustes de la semilla", config],
+    ["sin Incluye / No incluye", { ...config, incluye: [], no_incluye: [] }],
+    ["sin líneas de dólares", { ...config, consideraciones_usd: [] }],
+    ["con espacios y vacías", { ...config, consideraciones: ["  Uno  ", "", "Dos"], incluye: ["  ", "Tres"] }],
+  ];
+  for (const [nc, cfg] of configs) for (const [np, p] of pedidos) {
+    const vieja = filaPor(p, false, cfg), nueva = filaPor(p, true, cfg);
+    ok(nueva.consideraciones_json?.version === 2 && !!nueva.plantilla_pdf && vieja.plantilla_pdf === undefined, `${nc} · ${np}: la nueva en versión 2 con plantilla_pdf; la vieja sin`);
+    const cat = catDeFila(vieja, true);
+    const rv = await compararCaso({ n: `${nc} · ${np} · ruta de Ajustes`, fila: vieja, categoria: cat, logo: true, plantilla: CORP });
+    const rn = await compararCaso({ n: `${nc} · ${np} · ruta con plantilla`, fila: nueva, categoria: cat, logo: true, plantilla: traspaso(cfg, vieja.moneda === "USD") });
+    ok(JSON.stringify(textosDelPdf(rn.bytes)) === JSON.stringify(textosDelPdf(rv.bytes)), `${nc} · ${np}: el texto del PDF es idéntico por las dos rutas`);
+    ok(rn.html === rv.html, `${nc} · ${np}: y el HTML de /cotizaciones también`);
+  }
+
+  // leerDatosPdf: la plantilla de plantilla_pdf, o `corporativo`.
+  type Tabla = Record<string, any>[];
+  const base = (t: Record<string, Tabla>, x: { faltan?: Record<string, string[]>; fallaId?: string } = {}) => {
+    const lecturas: string[] = [];
+    return {
+      lecturas,
+      from(tabla: string) {
+        let cols = "*"; const filtros: [string, any][] = [];
+        const q: any = {
+          select(c: string) { cols = c; return q; },
+          eq(c: string, v: any) { filtros.push([c, v]); return q; },
+          maybeSingle() { return q; },
+          then(a: any, b: any) {
+            return Promise.resolve().then(() => {
+              if (tabla === "cotizacion_plantillas") lecturas.push(String(filtros.find(([c]) => c === "id")?.[1]));
+              if (tabla === "cotizacion_plantillas" && x.fallaId && filtros.some(([c, v]) => c === "id" && v === x.fallaId)) return { data: null, error: { message: "timeout" } };
+              const pedidas = cols.replace(/\w+\([^)]*\)/g, "").split(",").map((s) => s.trim()).filter((s) => s && s !== "*");
+              const falta = pedidas.find((c) => (x.faltan?.[tabla] ?? []).includes(c));
+              if (falta) return { data: null, error: { code: "42703", message: `column ${tabla}.${falta} does not exist` } };
+              const fila = (t[tabla] ?? []).find((f) => filtros.every(([c, v]) => String(f[c]) === String(v))) ?? null;
+              return { data: fila, error: null };
+            }).then(a, b);
+          },
+        };
+        return q;
+      },
+    };
+  };
+  const IA: Plantilla = { ...traspaso(config, false), usar_bancos_propios: true, banco_1_nombre: "BANCO DE LA PLANTILLA IA", banco_1_cuenta: "123-456", banco_1_cci: "002-123-456" };
+  const CORP_B: Plantilla = { ...CORP, usar_bancos_propios: true, banco_1_nombre: "BANCO DE LA CORPORATIVA", banco_1_cuenta: "999-888", banco_1_cci: "002-999-888" };
+  const tablas = (extra: Plantilla[] = []): Record<string, Tabla> => ({
+    empresa_perfil: [{ id: 1, ...perfil, cuentas_bancarias: [] }],
+    cotizacion_plantillas: [CORP_B, IA, ...extra],
+  });
+  const conPerfil = { perfil: { perfil: { ...perfil, cuentas_bancarias: [] } as any }, celular: "51966707225", contactoClienteId: null };
+  const plantillaDe = async (pdf: unknown, extra: Plantilla[] = [], o: { fallaId?: string } = {}) => {
+    const sb = base(tablas(extra), o);
+    const d = await D.leerDatosPdf(sb as any, { ...IDA, plantilla_pdf: pdf as any }, conPerfil);
+    return { id: (d.plantilla as any)?.id ?? null, lecturas: sb.lecturas };
+  };
+  ok((await plantillaDe("traslados_ia")).id === "traslados_ia", "plantilla_pdf corporativa: esa");
+  ok((await plantillaDe("corporativo")).id === "corporativo" && (await plantillaDe("corporativo")).lecturas.length === 1, "plantilla_pdf = corporativo: una sola lectura");
+  for (const v of [null, undefined, "", "   "]) ok((await plantillaDe(v)).id === "corporativo", `sin plantilla_pdf (${JSON.stringify(v)}): corporativo`);
+  ok((await plantillaDe("no_existe")).id === "corporativo", "una plantilla que ya no existe: corporativo");
+  ok((await plantillaDe("traslados_ia", [], { fallaId: "traslados_ia" })).id === "corporativo", "una plantilla que no se pudo leer: corporativo");
+  ok((await plantillaDe("mi_moderna", [{ ...CORP, id: "mi_moderna", diseno: "moderno_fotos" }])).id === "corporativo", "de otro diseño (columna diseno): corporativo");
+  ok((await plantillaDe("ejecutivo", [{ ...CORP, id: "ejecutivo", diseno: undefined } as any])).id === "corporativo", "sin la columna diseno, el id de un diseño que no es corporativo: corporativo");
+  ok((await plantillaDe("copia_sin_diseno", [{ ...IA, id: "copia_sin_diseno", diseno: undefined } as any])).id === "copia_sin_diseno", "sin la columna diseno, un id que no es un diseño dibuja la corporativa: esa");
+
+  // armarPdfDeFila: las cuentas de la plantilla de la fila.
+  const prev = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  process.env.NEXT_PUBLIC_SUPABASE_URL = BASE;
+  const txt = async (pdf: unknown, extra: Plantilla[] = []) =>
+    textosDelPdf((await armarPdfDeFila(base(tablas(extra)) as any, { ...IDA, plantilla_pdf: pdf as any }, { bajarLogo: async () => null, bajarFoto: async () => null, celular: "51966707225", contactoClienteId: null })).bytes).join(" ");
+  const t1 = await txt("traslados_ia");
+  ok(t1.includes("BANCO DE LA PLANTILLA IA") && !t1.includes("BANCO DE LA CORPORATIVA"), "el PDF imprime las cuentas de la plantilla de la fila");
+  const t2 = await txt("mi_moderna", [{ ...CORP, id: "mi_moderna", diseno: "moderno_fotos", banco_1_nombre: "BANCO MODERNO" }]);
+  ok(t2.includes("BANCO DE LA CORPORATIVA") && !t2.includes("BANCO MODERNO"), "con una plantilla de otro diseño, las de corporativo");
+  const t3 = await txt(null);
+  ok(t3.includes("BANCO DE LA CORPORATIVA"), "sin plantilla_pdf, las de corporativo (como antes)");
+  ok(!/CONDICIÓN DE PLANTILLA/.test(t1 + t2 + t3), "las condiciones de ninguna plantilla se imprimen: salen de la fila");
+
+  // Auditoría de plantillas-uso: una plantilla DESACTIVADA no presta sus cuentas, y unas cuentas
+  // distintas de las de `corporativo` (o sin poder comprobarlo) se AVISAN (la IA no la envía sola).
+  ok((await plantillaDe("traslados_ia", [], {})).id === "traslados_ia", "activa: la de la fila");
+  const inactiva = async () => { const sb = base({ ...tablas(), cotizacion_plantillas: [CORP_B, { ...IA, activa: false }] }); return D.leerDatosPdf(sb as any, { ...IDA, plantilla_pdf: "traslados_ia" as any }, conPerfil); };
+  const dIn = await inactiva();
+  ok((dIn.plantilla as any)?.id === "corporativo" && dIn.referenciaCuentas.estado === "misma", "desactivada: corporativo, como si no existiera (nada que comparar)");
+  const armar = async (pdf: unknown, t: Record<string, Tabla> = tablas(), o: { fallaId?: string } = {}) =>
+    armarPdfDeFila(base(t, o) as any, { ...IDA, plantilla_pdf: pdf as any }, { bajarLogo: async () => null, bajarFoto: async () => null, celular: "51966707225", contactoClienteId: null });
+  const cod = (a: { avisos: { codigo: string }[] }) => a.avisos.map((x) => x.codigo);
+  const aDist = await armar("traslados_ia");
+  const avDist = aDist.avisos.find((a) => a.codigo === "cuentas_distintas_de_corporativo");
+  ok(!!avDist && avDist.detalle.includes("BANCO DE LA PLANTILLA IA") && avDist.detalle.includes("BANCO DE LA CORPORATIVA"), `cuentas distintas: el aviso dice las dos (${avDist?.detalle})`);
+  ok(!cod(await armar("corporativo")).includes("cuentas_distintas_de_corporativo") && !cod(await armar(null)).includes("cuentas_distintas_de_corporativo"), "con corporativo (o sin plantilla_pdf) no hay nada que comparar");
+  ok(!cod(await armar("traslados_ia", { ...tablas(), cotizacion_plantillas: [CORP_B, { ...IA, activa: false }] })).includes("cuentas_distintas_de_corporativo"), "desactivada: sin aviso (imprime las de corporativo)");
+  ok(!cod(await armar("igual", tablas([{ ...CORP_B, id: "igual", es_principal: false }]))).includes("cuentas_distintas_de_corporativo"), "otra plantilla con las mismas cuentas: sin aviso");
+  const aIleg = await armar("traslados_ia", tablas(), { fallaId: "corporativo" });
+  const avIleg = aIleg.avisos.find((a) => a.codigo === "cuentas_distintas_de_corporativo");
+  ok(!!avIleg && /No se pudo leer la plantilla «corporativo»/.test(avIleg.detalle) && /timeout/.test(avIleg.detalle) && textosDelPdf(aIleg.bytes).join(" ").includes("BANCO DE LA PLANTILLA IA"), `corporativo ilegible: el PDF sale con la de la fila y avisa que no se pudo comprobar (${avIleg?.detalle})`);
+  // Condiciones desmesuradas: aviso del PDF (el PDF sale igual).
+  const muchas = { ...IDA, consideraciones_json: { incluye: [], no_incluye: [], generales: Array.from({ length: 31 }, (_, i) => `Línea ${i + 1}`) } };
+  const aMuchas = await armarPdfDeFila(base(tablas()) as any, muchas as any, { bajarLogo: async () => null, bajarFoto: async () => null, celular: "51966707225", contactoClienteId: null });
+  ok(cod(aMuchas).includes("condiciones_demasiadas") && aMuchas.bytes.length > 1000, `31 líneas: aviso condiciones_demasiadas y el PDF sale igual (${cod(aMuchas)})`);
+  ok(!cod(await armar(null)).includes("condiciones_demasiadas"), "con las condiciones de siempre, sin ese aviso");
+  process.env.NEXT_PUBLIC_SUPABASE_URL = prev;
+
+  // leerCotizacionTraslado: plantilla_pdf es accesoria.
+  const filaGuardada = { ...IDA, id: 55, plantilla_pdf: "traslados_ia" };
+  const l1 = await D.leerCotizacionTraslado(base({ cotizaciones: [filaGuardada] }) as any, 55);
+  ok(l1?.plantilla_pdf === "traslados_ia", "la fila trae plantilla_pdf");
+  const l2 = await D.leerCotizacionTraslado(base({ cotizaciones: [{ ...IDA, id: 55 }] }, { faltan: { cotizaciones: ["plantilla_pdf"] } }) as any, 55);
+  ok(!!l2 && l2.id === 55, "sin la columna plantilla_pdf, la fila se lee igual (se suelta solo esa)");
+  let lanza = false;
+  try { await D.leerCotizacionTraslado(base({ cotizaciones: [] }, { faltan: { cotizaciones: ["traslado_json"] } }) as any, 55); } catch { lanza = true; }
+  ok(lanza, "una columna que no es accesoria sigue siendo un error");
+  ok(D.COLS_COTIZACION_TRASLADO_ACCESORIAS.join() === "plantilla_pdf" && !D.COLS_COTIZACION_TRASLADO.includes("plantilla_pdf"), "plantilla_pdf va aparte, como accesoria");
 }
 
 // ── Muestra para mirar (no la exige la matriz) ───────────────────────────────

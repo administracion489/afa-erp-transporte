@@ -16,6 +16,9 @@
 //    REFERENCIA corta junto al nombre de la zona, nunca en su lugar.
 //  · `mencionaDinero` es la misma idea para el TEXTO del modelo cuando la herramienta no devolvió
 //    ninguna cotización: si habla de dinero, el mensaje lo escribe el código.
+//  · Las CONDICIONES del PDF (sección 4) las escribe una persona en la plantilla: `motivosLineaIA`
+//    las marca en ámbar en /cotizaciones/plantillas y, de respaldo en el servidor, una con un enlace o
+//    un número de 6+ dígitos deja la cotización para revisión (`condicionesSospechosas`).
 // ──────────────────────────────────────────────────────────────────────────────
 
 /** Lo más largo que se imprime de una referencia del cliente (no medido: una dirección cabe). */
@@ -180,4 +183,57 @@ export function primerNombreSeguro(nombre: string | null | undefined): string {
   if (!/^[\p{L}][\p{L}'’-]{0,29}$/u.test(p)) return "";
   if (PALABRAS_PAGO.includes(porPalabra(p).trim())) return "";
   return p;
+}
+
+// ── 4. Las condiciones que la IA imprime en el PDF ───────────────────────────
+// Las condiciones del PDF del traslado las escribe una persona en la plantilla de su regla
+// (/cotizaciones/plantillas) y la IA las manda sin revisión. Movida aquí desde
+// components/cotizaciones/plantillas/pantalla.ts (que la importa): la pantalla AVISA con ella y el
+// servidor la usa de RESPALDO (lib/traslados/cotizar-ia-datos.ts): una sola definición.
+
+/**
+ * Por qué una línea de condiciones merece mirarse: un enlace, un número de 6+ dígitos (un teléfono o
+ * una cuenta) o palabras de pago (Yape, Plin, depósito, transferencia, cuenta, CCI…). Usa el MISMO
+ * detector que el texto libre del cliente; como ese devuelve solo el primer motivo y en su orden el
+ * importe va antes, cada motivo se pregunta por separado. El importe y el largo NO cuentan aquí: una
+ * condición dice «IGV (18 %)» o «adelanto del 50 %» con toda normalidad, y un aviso que sale siempre
+ * se vuelve paisaje.
+ */
+export function motivosLineaIA(linea: string): MotivoTextoLibre[] {
+  const t = String(linea ?? "");
+  if (!t.trim()) return [];
+  const out: MotivoTextoLibre[] = [];
+  if (textoLibreSospechoso(t) === "enlace") out.push("enlace");
+  if (t.split(/[^\p{L}\p{N}]+/u).some(w => w && textoLibreSospechoso(w) === "palabra_de_pago")) out.push("palabra_de_pago");
+  // Fechas y horas no son un teléfono ni una cuenta («válido hasta el 31/12/2026»): se quitan antes.
+  const sinFechas = t.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ");
+  if (textoLibreSospechoso(sinFechas.replace(/[^\d\s.\-]/g, " ")) === "numero_largo") out.push("numero_largo");
+  return out;
+}
+
+/**
+ * Los motivos que, en una condición del PDF que manda la IA, la dejan para que la revise un
+ * ejecutivo: un enlace o un número de 6+ dígitos. Las palabras de pago NO: «el pago del parqueo
+ * corre por cuenta del pasajero» es una condición normal (la pantalla las marca en ámbar igual).
+ */
+export const MOTIVOS_CONDICION_REVISION: readonly MotivoTextoLibre[] = ["enlace", "numero_largo"];
+
+export type CondicionSospechosa = { lista: "incluye" | "no_incluye" | "generales"; linea: string; motivos: MotivoTextoLibre[] };
+
+/**
+ * Las líneas de las condiciones de una cotización (`consideraciones_json`) que la dejan para revisión
+ * (`MOTIVOS_CONDICION_REVISION`), en el orden en que se imprimen. Se miran las líneas como las
+ * imprime el PDF (sin espacios de más ni vacías).
+ */
+export function condicionesSospechosas(c: unknown): CondicionSospechosa[] {
+  const o = c && typeof c === "object" ? (c as Record<string, unknown>) : {};
+  const out: CondicionSospechosa[] = [];
+  for (const lista of ["incluye", "no_incluye", "generales"] as const) {
+    const ls = Array.isArray(o[lista]) ? (o[lista] as unknown[]).map(s => String(s ?? "").trim()).filter(Boolean) : [];
+    for (const linea of ls) {
+      const motivos = motivosLineaIA(linea).filter(m => MOTIVOS_CONDICION_REVISION.includes(m));
+      if (motivos.length) out.push({ lista, linea, motivos });
+    }
+  }
+  return out;
 }

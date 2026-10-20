@@ -4,8 +4,11 @@
 // función que el servidor (`entradaCorporativaTraslado`, lib/traslados/cotizacion-traslado.ts) y con
 // los mismos datos que lee lib/traslados/enviar-cotizacion-datos.ts: la fila, el cliente del ERP
 // (que solo se imprime si está vinculado al contacto o su número completo es el wa_id), el wa_id y
-// el cliente vinculado del contacto de la conversación, las cuentas de la plantilla `corporativo` y
-// la categoría del vehículo (con sus fotos y su descripción de traslados-07).
+// el cliente vinculado del contacto de la conversación, las CUENTAS de la plantilla de la cotización
+// (`plantilla_pdf`; si no existe o no dibuja el diseño corporativo, `corporativo`, igual que el
+// servidor) y la categoría del vehículo (con sus fotos y su descripción de traslados-07). Las
+// CONDICIONES salen siempre de la fila: desde supabase/cotizaciones-05 la IA las copia ahí, en
+// versión 2, desde la plantilla de su regla; en las de antes, de Ajustes de traslados.
 //
 // Sin esto, la página pintaba el traslado con la plantilla genérica: sus seis condiciones generales
 // pisaban las del traslado (los 30 min de espera, el TAM), el subtítulo decía «Válida 30 días» aunque
@@ -21,6 +24,7 @@ import { clienteParaPdf, entradaCorporativaTraslado, type CategoriaPdf, type Cli
 import type { EntradaPdfCot, PlantillaPdfCfg } from "@/lib/cotizacion-pdf";
 import type { PerfilEmpresa } from "@/lib/empresa-perfil";
 import { COLS_CATEGORIA_FOTOS } from "@/components/tarifario/traslados-datos";
+import { esTrasladoIA } from "@/lib/cotizacion-plantillas";
 
 /** Las columnas de la categoría que lee el PDF (las mismas que lee el servidor). */
 const COLS_CATEGORIA_PDF = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo";
@@ -37,11 +41,9 @@ export const AVISO_CLIENTE_NO_VERIFICADO =
 export const AVISO_TRASLADO_EN_CASTELLANO =
   "Esta cotización de traslado la armó la IA del CRM: su PDF se imprime en castellano, igual que el que se envía por WhatsApp (la descripción del vehículo y la línea de disponibilidad no tienen versión en inglés).";
 
-/** ¿Es un traslado cotizado por la IA? (`traslado_json` es un objeto). */
-export function esTrasladoIA(cot: { traslado_json?: unknown } | null | undefined): boolean {
-  const tj = cot?.traslado_json;
-  return !!tj && typeof tj === "object" && !Array.isArray(tj);
-}
+// ¿Es un traslado cotizado por la IA? (`traslado_json` es un objeto). La regla vive en
+// lib/cotizacion-plantillas.ts (la usa también `servicioDeCotizacion`); aquí se re-exporta.
+export { esTrasladoIA };
 
 /** El cliente de la pantalla como lo lee el PDF. */
 export function clienteErpDe(c: {
@@ -97,7 +99,9 @@ async function leerConversacion(conversacionId: unknown): Promise<{ celular: str
 
 /**
  * La entrada del PDF corporativo de un traslado de la IA, o null si no lo es o no se pudo armar.
- * `plantilla` es la fila `corporativo` de `cotizacion_plantillas` (solo se usan sus cuentas).
+ * `plantilla` es la plantilla con la que se imprime (la de `plantilla_pdf` de la cotización, de
+ * diseño corporativo; o `corporativo`): solo se usan sus CUENTAS (`cfgSoloCuentas`), las condiciones
+ * salen de la fila.
  */
 export async function entradaTrasladoPagina(
   cot: FilaCotizacionLeida,

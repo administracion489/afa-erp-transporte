@@ -6,10 +6,17 @@
 //
 // Con un resultado cotizable, la respuesta trae además `envio`: qué haría la IA con esa
 // cotización (enviarla sola o dejarla para revisar, con sus motivos), suponiendo WhatsApp con el
-// número escrito, el agente en modo autónomo y el PDF armado; el perfil y las zonas son los reales.
+// número escrito, el agente en modo autónomo y el PDF armado; el perfil, las zonas, las cuentas de
+// la plantilla (frente a las de `corporativo`) y las condiciones son los reales.
 // Con `?pdf=1` (el mismo cuerpo) devuelve el PDF de EJEMPLO de esa cotización (número EJEMPLO y
 // marca de agua), con el formato corporativo de /cotizaciones y la foto de la categoría; la cabecera
 // `X-Avisos-Pdf` lista los códigos de lo que no pudo poner. No escribe nada en ningún caso.
+//
+// Las CONDICIONES del PDF salen de la misma plantilla que usaría la IA (`plantillaParaTraslado`,
+// regla «Traslado de la IA × segmento»; aquí el segmento sale solo de la moneda, porque el
+// simulador no tiene un cliente del ERP verificado) y la respuesta dice cuál (`plantilla`,
+// `condiciones`). Del cuerpo de la petición solo se toma el pedido: la plantilla NUNCA. Una lectura
+// de las plantillas que falla es un 500 con su motivo (la IA, en ese caso, deriva).
 //
 // Solo usuarios del ERP con el módulo «tarifas» (el simulador vive en esa pantalla). Cada
 // simulación puede costar hasta 4 consultas de Geocoding (2 directas + 2 inversas) si no están
@@ -18,11 +25,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { guardarGasto, limitarTasa, segundosParaReintentar } from "@/lib/api-guard";
-import { validarEntrada, type EnvioSimulado } from "@/lib/traslados/api";
+import { validarEntrada, type CondicionesSimuladas, type EnvioSimulado, type PlantillaSimulada } from "@/lib/traslados/api";
 import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
 import { cuadraConMotor, filaCotizacionTraslado, type FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
-import { planEnvio } from "@/lib/traslados/envio-ia";
-import { armarPdfDeFila, leerPerfilPdf, type PerfilPdf } from "@/lib/traslados/enviar-cotizacion-datos";
+import { planEnvio, revisionPorCondiciones } from "@/lib/traslados/envio-ia";
+import { armarPdfDeFila, avisosDeRevision, leerPerfilPdf, plantillaYReferenciaCuentas, type PerfilPdf } from "@/lib/traslados/enviar-cotizacion-datos";
+import { plantillaParaTraslado } from "@/lib/traslados/plantilla-traslado-datos";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
 import { fechaLima } from "@/lib/alertas-horario";
 import { createClient } from "@supabase/supabase-js";
@@ -67,9 +75,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(respuesta);
     }
     const r = respuesta.resultado;
+    // La plantilla de las condiciones, la misma que usaría la IA (sin cliente: el segmento sale de la moneda).
+    const pt = await plantillaParaTraslado(sb, { moneda: r.precio!.moneda, clienteId: null });
+    if (!pt.ok) {
+      return NextResponse.json({ ok: false, codigo: "error", detalle: `No se pudieron leer las condiciones del PDF (plantilla): ${pt.detalle}` }, { status: 500 });
+    }
     // La fila que guardaría la IA, en memoria (no se inserta).
     const fila = filaCotizacionTraslado(r, v.entrada, {
-      convId: "simulador", clienteId: null, atencion: null, config: catalogo.config, firma: "simulador", hoy,
+      convId: "simulador", clienteId: null, atencion: null, config: catalogo.config, firma: "simulador", hoy, plantilla: pt.plantilla,
     });
     let perfil: PerfilPdf | null = null;
     try { perfil = await leerPerfilPdf(sb); } catch { perfil = null; }
@@ -99,8 +112,22 @@ export async function POST(req: NextRequest) {
       perfilConfigurado: !!perfil && !empresaConDefectos(perfil.perfil).sinConfigurar,
       cuadra: cuadraConMotor(fila, r), pdfOk: true, palabras: [],
     });
-    const envio: EnvioSimulado = { decision: plan.decision, motivos: plan.motivos };
-    return NextResponse.json({ ...respuesta, envio });
+    // Y lo que la IA lee del PDF de su fila (lib/traslados/cotizar-ia-datos.ts → revisionPorCondiciones):
+    // las cuentas de la plantilla frente a las de `corporativo` y las condiciones (que no quepan, o con
+    // un enlace o un número de 6+ dígitos). Sin esto el simulador diría «sale sola» de una cotización
+    // que la IA dejaría para revisión.
+    const pc = await plantillaYReferenciaCuentas(sb, fila.plantilla_pdf);
+    const porPdf = revisionPorCondiciones({
+      avisosPdf: avisosDeRevision(fila, { plantilla: pc.usada, referencia: pc.referencia, perfil: perfil?.perfil ?? null }),
+      consideraciones: fila.consideraciones_json,
+    });
+    const motivos = [...plan.motivos, ...porPdf.motivos.filter((m) => !plan.motivos.includes(m))];
+    const envio: EnvioSimulado = { decision: motivos.length === 0 ? "automatico" : "revision", motivos };
+    const plantilla: PlantillaSimulada | null = pt.plantilla
+      ? { id: pt.plantilla.id, nombre: pt.plantilla.nombre || pt.plantilla.id, segmento: pt.segmento, codigo: pt.codigo }
+      : null;
+    const condiciones: CondicionesSimuladas = { fuente: pt.plantilla ? "plantilla" : "ajustes", segmento: pt.segmento, codigo: pt.codigo, detalle: pt.detalle };
+    return NextResponse.json({ ...respuesta, envio, plantilla, condiciones });
   } catch (e) {
     console.error("[traslados/simular]", (e as Error)?.message);
     return NextResponse.json({ ok: false, codigo: "error", detalle: quierePdf ? "No se pudo armar el PDF de ejemplo." : "No se pudo simular el traslado." }, { status: 500 });

@@ -14,17 +14,27 @@
 //     perfil de la empresa) pasa por `esc`: el documento se abre con document.write en el origen
 //     del ERP, y un nombre con markup no puede entrar crudo. Sin < > & " ' no cambia nada.
 //  3. El itinerario reconoce también `Day N` como encabezado de día (para el anexo en inglés).
+//  4. Un color de la plantilla solo entra al CSS si es `#RRGGBB` (`colorCss`); si no, el del diseño.
+//     `esc` no basta dentro de un `style`: «red;background:url(…)» no lleva < > & " ' y cambiaba el
+//     documento. Con colores válidos (los que guarda el editor) no cambia nada.
 //
 // MONEDA: los ítems llegan SIEMPRE en soles (la fila autoritativa). En USD se convierten aquí con
 // el tipo de cambio congelado de la cotización (`totalesEnMoneda`), se imprime una sola vez
 // «Tipo de cambio referencial» y no se imprime ningún total en soles. Sin un TC válido NO hay PDF
 // en dólares (`html: null` + aviso `sin_tc`): imprimir soles rotulados como dólares es el error caro.
+//
+// CONSIDERACIONES: con `consid.version = 2` la fila manda (las condiciones se copiaron de la
+// plantilla al guardar, `considSnapshot` en lib/cotizacion-plantillas.ts); sin `version`, la regla
+// de siempre (`considParaPdf`, lib/cotizacion-idioma.ts). Qué campos de la plantilla lee cada uno
+// de los cuatro diseños lo declara `CAMPOS_POR_DISENO` (lib/cotizacion-plantillas.ts), y
+// scripts/prueba-cotizacion-plantillas.mts lo comprueba contra este archivo con valores centinela:
+// si un diseño empieza o deja de leer un campo, esa tabla se actualiza o la matriz falla.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, pintarPieHtml, pintarVehiculosHtml, sharedCSS, buildVehsHtml, esc, type VehiculoPDF } from "./pdf-chrome";
 import { empresaConDefectos, type PerfilEmpresa, type CuentaBancaria } from "./empresa-perfil";
 import type { Moneda, TotalesMoneda } from "./cotizacion-moneda";
-import { t, fmtFechaDoc, fmtImporte, fmtTipoCambio, type Idioma, type ClaveTexto, type ConsidCot } from "./cotizacion-idioma";
+import { t, fmtFechaDoc, fmtImporte, fmtTipoCambio, esConsidFijada, type Idioma, type ClaveTexto, type ConsidFila } from "./cotizacion-idioma";
 import {
   anexoDoc, baseCotizacionPdf, cronogramaDoc, cuentasCorporativo, cuentasDoc, docCorporativoDeBase, lineasItinerario, listaVisible, numeroCotizacion,
   type AnexoDoc, type CajaDoc, type CronogramaDoc, type CuentasDoc, type DocCorporativo, type FilaDoc, type LineaItinerario, type Segmento,
@@ -35,6 +45,20 @@ import {
 export { numeroCotizacion };
 
 const EMP = empresaConDefectos;
+
+/** Un color `#RRGGBB` (lo único que el editor de plantillas guarda como color). */
+export function colorValido(x: unknown): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(String(x ?? "").trim());
+}
+
+/**
+ * El color de la plantilla que se interpola en el CSS del documento: el escrito si es `#RRGGBB`; si
+ * no (vacío, otro formato o texto con más CSS dentro), el del diseño. Ver la divergencia 4.
+ */
+export function colorCss(x: unknown, defecto: string): string {
+  const t = String(x ?? "").trim();
+  return colorValido(t) ? t : defecto;
+}
 
 export type FechaMultidiaPdf = {
   dia: number; fecha: string; hora_ida: string; destino_nombre: string;
@@ -90,8 +114,17 @@ export type EntradaPdfCot = {
   vehiculos: VehiculoPDF[];
   /** Quién firma como representante. */
   repr?: string;
-  /** Las consideraciones de la cotización (las de la pantalla si se está editando). */
-  consid?: ConsidCot;
+  /**
+   * Las consideraciones de la cotización (las de la pantalla si se está editando). Con `version: 2`
+   * (`CONSID_VERSION`, lib/cotizacion-idioma.ts) están FIJADAS: en español se imprimen ellas y no
+   * las de la plantilla. Sin `version`, la regla de siempre.
+   */
+  consid?: ConsidFila;
+  /**
+   * El DISEÑO que dibuja el documento (`corporativo` | `moderno_fotos` | `turistico` | `ejecutivo`).
+   * Desde las plantillas con uso, el id de la plantilla ya no es su diseño: quien llama pasa
+   * `disenoDe(fila)` (lib/cotizacion-plantillas.ts). Un valor desconocido dibuja la corporativa.
+   */
   plantilla?: PlantillaPdf | string;
   cfg?: PlantillaPdfCfg | null;
   empresa?: PerfilEmpresa | null;
@@ -116,8 +149,12 @@ export type EntradaPdfCot = {
   omitirListasVacias?: boolean;
 };
 
-/** `cliente_no_verificado` solo lo agrega /cotizaciones al PDF de un traslado de la IA (components/cotizaciones/pdf-traslado.ts). */
-export type CodigoAvisoPdf = "sin_tc" | "sin_cuenta_en_moneda" | "plantilla_en_espanol" | "textos_escritos_tal_cual" | "cliente_no_verificado";
+/**
+ * `cliente_no_verificado` solo lo agrega /cotizaciones al PDF de un traslado de la IA (components/cotizaciones/pdf-traslado.ts).
+ * `condiciones_de_otra_plantilla` lo arma `avisoCondicionesDeOtraPlantilla` (lib/cotizacion-plantillas.ts):
+ * la cotización tiene sus condiciones fijadas desde una plantilla y se imprime con OTRA.
+ */
+export type CodigoAvisoPdf = "sin_tc" | "sin_cuenta_en_moneda" | "plantilla_en_espanol" | "textos_escritos_tal_cual" | "cliente_no_verificado" | "condiciones_de_otra_plantilla";
 
 export type AvisoPdf = { codigo: CodigoAvisoPdf; detalle: string; /** `sin_tc` impide el PDF. */ bloquea: boolean };
 
@@ -267,7 +304,7 @@ function htmlModerno(c: Ctx): string {
   const { cliente, vehiculos, cfg, empresa } = e;
   const { subtotal, igv, total } = tot;
   const nomCl = esc(c.nomCl), nCot = esc(c.nCot);
-  const cp = esc(cfg?.color_primario || "#1a1a2e"); const cs = esc(cfg?.color_secundario || "#2f8ee9");
+  const cp = colorCss(cfg?.color_primario, "#1a1a2e"); const cs = colorCss(cfg?.color_secundario, "#2f8ee9");
   const logoUrl = esc(empresa?.logo_url || LOGO_DEFAULT);
   const empTel = esc(EMP(empresa).telefono); const empEmail = esc(EMP(empresa).email);
   const empWeb = esc(EMP(empresa).web);
@@ -316,7 +353,7 @@ function htmlTuristico(c: Ctx): string {
   const { vehiculos, cfg, empresa } = e;
   const { subtotal, igv, total } = tot;
   const nCot = esc(c.nCot);
-  const cp = esc(cfg?.color_primario || "#b45309"); const cs = esc(cfg?.color_secundario || "#d97706");
+  const cp = colorCss(cfg?.color_primario, "#b45309"); const cs = colorCss(cfg?.color_secundario, "#d97706");
   const logoUrl = esc(empresa?.logo_url || LOGO_DEFAULT);
   const empTel = esc(EMP(empresa).telefono); const empEmail = esc(EMP(empresa).email);
   const filasItems = e.items.map((it, i) => { const tf = tot.lineas[i]; return `<tr><td style="padding:8px 12px;border-bottom:1px solid #fde68a;">${esc(c.descs[i])}<br/><span style="font-size:9px;color:#92400e;">${T("tur_dias_unid", { d: it.dias, c: it.cantidad })}</span></td><td style="padding:8px 12px;text-align:right;border-bottom:1px solid #fde68a;font-weight:800;color:${cp};">${money(tf)}</td></tr>`; }).join("");
@@ -361,7 +398,7 @@ function htmlEjecutivo(c: Ctx): string {
   const { cliente, vehiculos, cfg, empresa } = e;
   const { subtotal, igv, total } = tot;
   const nomCl = esc(c.nomCl), nCot = esc(c.nCot);
-  const cp = esc(cfg?.color_primario || "#1a1a1a"); const acento = esc(cfg?.color_acento || "#C8A24B");
+  const cp = colorCss(cfg?.color_primario, "#1a1a1a"); const acento = colorCss(cfg?.color_acento, "#C8A24B");
   const logoUrl = esc(empresa?.logo_url || LOGO_DEFAULT);
   const empNombre = esc(EMP(empresa).nombre); const empRuc = esc(EMP(empresa).ruc); const empTel = esc(EMP(empresa).telefono); const empEmail = esc(EMP(empresa).email);
   const repr = esc(e.repr ?? "");
@@ -460,13 +497,17 @@ function htmlCorporativo(d: DocCorporativo): string {
 
 // ── La entrada única ───────────────────────────────────────────────────────────
 
-/** Los textos que la PLANTILLA escribió a mano (en español) y que en inglés no se imprimen. */
-function textosDePlantilla(cfg: PlantillaPdfCfg | null | undefined): string[] {
+/**
+ * Los textos que la PLANTILLA escribió a mano (en español) y que en inglés no se imprimen. Con las
+ * consideraciones FIJADAS en la fila (versión 2) las condiciones de la plantilla no se imprimen en
+ * ningún idioma, así que nombrarlas aquí sería avisar de algo que no pasa.
+ */
+function textosDePlantilla(cfg: PlantillaPdfCfg | null | undefined, considFijada: boolean): string[] {
   if (!cfg) return [];
   const out: string[] = [];
   if (String(cfg.titulo_documento ?? "").trim()) out.push("el título del documento");
   if (String(cfg.mensaje_cierre ?? "").trim()) out.push("el mensaje de cierre");
-  if (cfg.condiciones_incluye?.length || cfg.condiciones_no_incluye?.length || cfg.condiciones_generales?.length) out.push("las condiciones de la plantilla");
+  if (!considFijada && (cfg.condiciones_incluye?.length || cfg.condiciones_no_incluye?.length || cfg.condiciones_generales?.length)) out.push("las condiciones de la plantilla");
   return out;
 }
 
@@ -485,7 +526,7 @@ export function htmlCotizacion(e: EntradaPdfCot): ResultadoPdf {
   const cfg = b.e.cfg ?? null;
 
   if (idioma === "en") {
-    const dePlantilla = textosDePlantilla(cfg);
+    const dePlantilla = textosDePlantilla(cfg, esConsidFijada(b.e.consid));
     if (dePlantilla.length) {
       avisos.push({
         codigo: "plantilla_en_espanol", bloquea: false,

@@ -46,7 +46,11 @@ import {
 import { totalesEnMoneda, normalizarMoneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { LINEA_DISPONIBILIDAD } from "./cotizacion-traslado";
-import { importesEnTexto, mencionaDinero, primerNombreSeguro, referenciaImprimible, textoLibreSospechoso, type MotivoTextoLibre } from "./texto-libre";
+import {
+  condicionesSospechosas, importesEnTexto, mencionaDinero, primerNombreSeguro, referenciaImprimible, textoLibreSospechoso,
+  type CondicionSospechosa, type MotivoTextoLibre,
+} from "./texto-libre";
+import { excesoCondiciones, MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES } from "../cotizacion-plantillas";
 import type { EstiloMensajes, ModoPreguntas } from "../crm-ia-ajustes";
 
 // ── 1. La herramienta ────────────────────────────────────────────────────────
@@ -255,7 +259,7 @@ export function zonaConEnvio(z: Zona | null | undefined, zonas: readonly ZonaEnv
 export type CodigoRevision =
   | "maestro_apagado" | "zona_sin_envio" | "modo_copiloto" | "sin_remitente"
   | "perfil_sin_configurar" | "importes_no_cuadran" | "pdf_no_generado" | "palabras_de_pedido_complejo"
-  | "texto_libre_sospechoso";
+  | "texto_libre_sospechoso" | "cuentas_distintas" | "condiciones_demasiadas";
 
 export const MOTIVO_REVISION: Record<CodigoRevision, { texto: string; arreglo: string }> = {
   maestro_apagado: {
@@ -291,10 +295,42 @@ export const MOTIVO_REVISION: Record<CodigoRevision, { texto: string; arreglo: s
     arreglo: "Un ejecutivo confirma que de verdad es un traslado simple antes de enviarla.",
   },
   texto_libre_sospechoso: {
-    texto: "El recojo, el destino o el nombre del contacto traen algo que no es una dirección (un enlace, un número de 6 o más dígitos, un importe, palabras de pago) o pasan de 80 caracteres. En el PDF solo se imprimió el nombre de la zona.",
-    arreglo: "Lee la conversación antes de enviarla (puede ser un intento de poner instrucciones de pago en el PDF); si hace falta, corrige el recojo o el destino en /cotizaciones.",
+    texto: "El recojo, el destino o el nombre del contacto traen algo que no es una dirección (un enlace, un número de 6 o más dígitos, un importe, palabras de pago) o pasan de 80 caracteres —en el PDF solo se imprimió el nombre de la zona—, o una condición del PDF trae un enlace o un número de 6 o más dígitos.",
+    arreglo: "Lee la conversación y las condiciones del PDF antes de enviarla (puede ser un intento de poner instrucciones de pago en el PDF); el recojo y el destino se corrigen en /cotizaciones, las condiciones en la cotización o en su plantilla (/cotizaciones/plantillas).",
+  },
+  cuentas_distintas: {
+    texto: "Las cuentas bancarias de la plantilla de traslados no son las de la plantilla «corporativo» (o no se pudo comprobar): revisa antes de enviar.",
+    arreglo: "Comprueba en «Ver PDF» que las cuentas sean de la empresa; si no, corrígelas en /cotizaciones/plantillas (pestaña Cuentas de la plantilla de traslados).",
+  },
+  condiciones_demasiadas: {
+    texto: `Las condiciones del PDF pasan de ${MAX_LINEAS_CONDICIONES} líneas en una lista o tienen una línea de más de ${MAX_CARACTERES_CONDICION} caracteres: el PDF podría no mostrarlas enteras.`,
+    arreglo: "Acórtalas en la cotización (/cotizaciones) o en la plantilla de traslados (/cotizaciones/plantillas) y mira el PDF antes de enviarla.",
   },
 };
+
+/** Una condición del PDF que deja la cotización para revisión (la cita la nota del ejecutivo). */
+export type CondicionCitada = CondicionSospechosa;
+
+/**
+ * Lo que, además de `planEnvio`, deja una cotización de traslado para revisión, mirando el PDF que
+ * se arma de SU fila: las cuentas de su plantilla distintas de las de `corporativo` (el aviso
+ * `cuentas_distintas_de_corporativo` del PDF → `cuentas_distintas`), condiciones que no caben
+ * (`excesoCondiciones` → `condiciones_demasiadas`) y condiciones con un enlace o un número de 6+
+ * dígitos (`condicionesSospechosas` → `texto_libre_sospechoso`; las palabras de pago solas NO).
+ * PURO: recibe los códigos de los avisos del PDF y las condiciones de la fila.
+ */
+export function revisionPorCondiciones(x: {
+  avisosPdf: readonly { codigo: string }[] | null | undefined;
+  consideraciones: unknown;
+}): { motivos: CodigoRevision[]; lineas: CondicionCitada[] } {
+  const motivos: CodigoRevision[] = [];
+  if ((x.avisosPdf ?? []).some((a) => a?.codigo === "cuentas_distintas_de_corporativo")) motivos.push("cuentas_distintas");
+  const exceso = excesoCondiciones(x.consideraciones).length > 0 || (x.avisosPdf ?? []).some((a) => a?.codigo === "condiciones_demasiadas");
+  if (exceso) motivos.push("condiciones_demasiadas");
+  const lineas = condicionesSospechosas(x.consideraciones);
+  if (lineas.length) motivos.push("texto_libre_sospechoso");
+  return { motivos, lineas };
+}
 
 export type DecisionEnvio = "automatico" | "revision";
 

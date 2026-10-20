@@ -13,6 +13,12 @@ import {
 } from "@/lib/cotizacion-moneda";
 import { normalizarIdioma, DEFAULT_CONSID_ES, descripcionServicio, type Idioma } from "@/lib/cotizacion-idioma";
 import { htmlCotizacion, type AvisoPdf, type ResultadoPdf } from "@/lib/cotizacion-pdf";
+import {
+  CONSID_VERSION, ETIQUETA_DISENO, avisoCondicionesDeOtraPlantilla, considParaFormulario, considSnapshot, disenoDe, esActiva,
+  etiquetaCelda, plantillaParaUso, plantillaPorId, plantillaPrincipal, segmentoDeCliente, servicioDeCotizacion, SQL_PLANTILLAS_USO,
+  type CodigoUso, type ConsidFila, type Diseno, type PlantillaFila, type ReglaPlantilla,
+} from "@/lib/cotizacion-plantillas";
+import { leerPlantillasYReglas } from "@/lib/cotizacion-plantillas-datos";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
@@ -71,7 +77,7 @@ type ModoServ="eventual"|"fijo";
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;pax_contratado?:number|null;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;ciudad?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;moneda?:string|null;tipo_cambio?:number|string|null;idioma_pdf?:string|null;traslado_json?:unknown;crm_conversacion_id?:string|null;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidFila|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;moneda?:string|null;tipo_cambio?:number|string|null;idioma_pdf?:string|null;traslado_json?:unknown;crm_conversacion_id?:string|null;};
 /**
  * Una fila de la LISTA liviana (COLS_LISTA de lib/cotizaciones-filtros.ts): solo escalares, sin
  * items_json, paraderos ni consideraciones. Todo lo que edita, duplica, imprime o convierte pide
@@ -79,7 +85,6 @@ type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;k
  */
 type CotFila=Omit<CotLista,"estado"|"modo_servicio">&{estado:EstadoCot;modo_servicio:ModoServ|null};
 type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;cuentas_bancarias?:{banco:string;cuenta:string;cci:string}[]|null;};
-type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
 // `hora_calc` = la marca que deja «⏱ Calcular horas» (lib/paradas-horario.ts): con qué se calculó
 // la hora y para qué paraderos. Viaja en paradas_json (jsonb), sin migración.
 type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;hora_calc?:HoraCalc;};
@@ -295,21 +300,40 @@ function ModalAprobacion({cot,onConfirmar,onCancelar,ocupado=false}:{cot:CotFila
 /** Acciones de la fila que ESCRIBEN en la base: su bandera dura hasta que terminan (ver conDetalle). */
 const ACCIONES_QUE_ESCRIBEN=new Set(["duplicar","reserva"]);
 
-const PLANTILLAS_INFO=[
-  {id:"corporativo",   icon:"🏢",nombre:"Clásico Corporativo",desc:"Formal y sobria",badge:"PRINCIPAL",color:"#0b315f",bg:"#eef3f8"},
-  {id:"moderno_fotos", icon:"📸",nombre:"Moderno con Fotos",  desc:"Impacto visual",  badge:null,       color:"#1a1a2e",bg:"#f0f4ff"},
-  {id:"turistico",     icon:"🌄",nombre:"Turístico",           desc:"Tours y full day", badge:null,       color:"#b45309",bg:"#fffbeb"},
-  {id:"ejecutivo",     icon:"⭐",nombre:"Ejecutivo Premium",  desc:"VIP · ES + EN",   badge:null,       color:"#1a1a1a",bg:"#fafafa"},
-];
+/**
+ * Cómo se pinta cada DISEÑO en las listas de plantillas (la plantilla elige su icono; si no, el del
+ * diseño). La lista de plantillas viene de la base (lib/cotizacion-plantillas-datos.ts): antes era
+ * una lista fija de cuatro en el código, y una plantilla duplicada no se podía elegir.
+ */
+const ESTILO_DISENO:Record<Diseno,{icon:string;color:string;bg:string}>={
+  corporativo:{icon:"🏢",color:"#0b315f",bg:"#eef3f8"},
+  moderno_fotos:{icon:"📸",color:"#1a1a2e",bg:"#f0f4ff"},
+  turistico:{icon:"🌄",color:"#b45309",bg:"#fffbeb"},
+  ejecutivo:{icon:"⭐",color:"#1a1a1a",bg:"#fafafa"},
+};
+/**
+ * Las plantillas que se pueden elegir: las ACTIVAS, más las de `incluir` aunque estén desactivadas
+ * (la que ya tiene la cotización: elegirla de nuevo no puede ser imposible) y, si la lista no se
+ * pudo leer, un renglón con su id — nunca una lista vacía.
+ */
+function opcionesPlantilla(plantillas:readonly PlantillaFila[],incluir:readonly (string|null|undefined)[]):PlantillaFila[]{
+  const ids=new Set(incluir.filter((x):x is string=>!!x));
+  const out=plantillas.filter(p=>esActiva(p)||ids.has(p.id));
+  for(const id of ids)if(!out.some(p=>p.id===id))out.push({id,nombre:id});
+  return out;
+}
+const rotuloOpcion=(p:PlantillaFila)=>`${p.icono||ESTILO_DISENO[disenoDe(p)].icon} ${p.nombre||p.id} · ${ETIQUETA_DISENO[disenoDe(p)]}${p.es_principal?" · principal":""}${esActiva(p)?"":" · desactivada"}`;
 
 /**
  * `avisos` = lo que `htmlCotizacion` (lib/cotizacion-pdf.ts) dice de ESTA combinación de
  * plantilla, idioma y moneda; null mientras se comprueba (no se afirma «sin avisos» buscando).
  * Solo un aviso que `bloquea` (dólares sin tipo de cambio) apaga el botón, y lo dice debajo.
  */
-function ModalPlantilla({cot,plantillaActual,onElegir,idioma,onIdioma,avisos,errorAvisos,generando=false,onGenerar,onCancelar}:{cot:Cotizacion;plantillaActual:string;onElegir:(id:string)=>void;idioma:Idioma;onIdioma:(i:Idioma)=>void;avisos:AvisoPdf[]|null;errorAvisos?:string;generando?:boolean;onGenerar:()=>void;onCancelar:()=>void;}){
+function ModalPlantilla({cot,plantillas,errorPlantillas,plantillaActual,onElegir,idioma,onIdioma,avisos,errorAvisos,generando=false,onGenerar,onCancelar}:{cot:Cotizacion;plantillas:PlantillaFila[];errorPlantillas?:string|null;plantillaActual:string;onElegir:(id:string)=>void;idioma:Idioma;onIdioma:(i:Idioma)=>void;avisos:AvisoPdf[]|null;errorAvisos?:string;generando?:boolean;onGenerar:()=>void;onCancelar:()=>void;}){
   const bloqueo=avisos?.find(a=>a.bloquea)||null;
   const mon=normalizarMoneda(cot.moneda);
+  // Las activas y la que tiene la cotización aunque esté desactivada (ver opcionesPlantilla).
+  const opciones=opcionesPlantilla(plantillas,[cot.plantilla_pdf||"corporativo",plantillaActual]);
   return(
     <div style={{position:"fixed",inset:0,zIndex:60,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",background:"rgba(0,0,0,0.55)"}}>
       <div style={{background:"white",borderRadius:24,boxShadow:"0 24px 60px rgba(0,0,0,0.2)",width:"100%",maxWidth:520,padding:28}}>
@@ -317,20 +341,24 @@ function ModalPlantilla({cot,plantillaActual,onElegir,idioma,onIdioma,avisos,err
           <div><p style={{fontWeight:900,fontSize:17,color:"#1e293b",margin:0}}>📄 Elegir plantilla PDF</p><p style={{color:"#94a3b8",fontSize:12,margin:"3px 0 0"}}>Cotización #{cot.numero_cotizacion||cot.id}</p></div>
           <button onClick={onCancelar} style={{background:"#f1f5f9",border:"none",borderRadius:10,width:32,height:32,cursor:"pointer",fontSize:16,color:"#64748b"}}>✕</button>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:20}}>
-          {PLANTILLAS_INFO.map(p=>{
+        {errorPlantillas&&<p style={{fontSize:11,color:"#92400e",background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:10,padding:"6px 10px",margin:"0 0 12px"}}>⚠ {errorPlantillas}{plantillas.length===0?" Se ofrecen solo la de esta cotización y la corporativa.":""}</p>}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:20,maxHeight:"50vh",overflowY:"auto",padding:2}}>
+          {opciones.map(p=>{
             const sel=plantillaActual===p.id;
+            const d=disenoDe(p);const est=ESTILO_DISENO[d];
+            const activa=esActiva(p);
             return(
-              <button key={p.id} onClick={()=>onElegir(p.id)} style={{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:6,padding:"14px 16px",borderRadius:16,border:`2px solid ${sel?p.color:"#e2e8f0"}`,background:sel?p.bg:"white",cursor:"pointer",textAlign:"left",transition:"all 0.15s",boxShadow:sel?"0 0 0 3px "+p.color+"22":"none"}}>
+              <button key={p.id} onClick={()=>onElegir(p.id)} title={activa?undefined:"Desactivada: no se ofrece en cotizaciones nuevas, pero esta cotización la tiene elegida."} style={{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:6,padding:"14px 16px",borderRadius:16,border:`2px solid ${sel?est.color:"#e2e8f0"}`,background:sel?est.bg:"white",cursor:"pointer",textAlign:"left",transition:"all 0.15s",boxShadow:sel?"0 0 0 3px "+est.color+"22":"none",opacity:activa?1:0.75}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,width:"100%"}}>
-                  <span style={{fontSize:22}}>{p.icon}</span>
-                  <div style={{flex:1}}>
-                    <p style={{fontWeight:900,fontSize:13,color:sel?p.color:"#1e293b",margin:0}}>{p.nombre}</p>
-                    <p style={{color:"#94a3b8",fontSize:11,margin:"1px 0 0"}}>{p.desc}</p>
+                  <span style={{fontSize:22}}>{p.icono||est.icon}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{fontWeight:900,fontSize:13,color:sel?est.color:"#1e293b",margin:0}}>{p.nombre||p.id}</p>
+                    <p style={{color:"#94a3b8",fontSize:11,margin:"1px 0 0"}}>Diseño {ETIQUETA_DISENO[d]}</p>
                   </div>
-                  {p.badge&&<span style={{fontSize:9,fontWeight:900,background:p.color,color:"white",padding:"2px 7px",borderRadius:20,flexShrink:0}}>{p.badge}</span>}
+                  {p.es_principal&&<span style={{fontSize:9,fontWeight:900,background:est.color,color:"white",padding:"2px 7px",borderRadius:20,flexShrink:0}}>PRINCIPAL</span>}
+                  {!activa&&<span style={{fontSize:9,fontWeight:900,background:"#e2e8f0",color:"#475569",padding:"2px 7px",borderRadius:20,flexShrink:0}}>DESACTIVADA</span>}
                 </div>
-                {sel&&<span style={{fontSize:10,fontWeight:800,color:p.color}}>✓ Seleccionada</span>}
+                {sel&&<span style={{fontSize:10,fontWeight:800,color:est.color}}>✓ Seleccionada</span>}
               </button>
             );
           })}
@@ -1001,14 +1029,56 @@ export default function CotizacionesPage(){
   const accionEnCursoRef=useRef(false);
   // Cambiar el estado / marcar enviada / aprobar: una escritura a la vez (id de la cotización).
   const [estadoEnCurso,setEstadoEnCurso]=useState<number|null>(null);const estadoEnCursoRef=useRef(false);
-  // Las condiciones que `limpiar()` puso en un formulario nuevo. Mientras `consid` sea ESE objeto,
-  // nadie las tocó y la plantilla puede reemplazarlas (ver cargarResto).
-  const considSinTocarRef=useRef<ConsidCot>(DEFAULT_CONSID);
   const reqListaRef=useRef(0);
   const cacheDetalle=useRef(new Map<number,Cotizacion>());
-  const [cfgDefault,setCfgDefault]=useState<CotPlantillaConfig|null>(null);
-  const [form,setForm]=useState(FORM0);const [items,setItems]=useState<ItemCot[]>([{...ITEM_VACIO}]);const [modalAprob,setModalAprob]=useState<CotFila|null>(null);const [guardarTar,setGuardarTar]=useState(true);const [paradas,setParadas]=useState<ParadaTP[]>([]);const [paradasRetorno,setParadasRetorno]=useState<ParadaTP[]>([]);const [consid,setConsid]=useState<ConsidCot>(DEFAULT_CONSID);const [panelId,setPanelId]=useState<number|null>(null);
+  // ── PLANTILLAS DEL PDF (lib/cotizacion-plantillas.ts) ──────────────────────────────────
+  // La lista y las reglas de uso (servicio × tipo de cliente). `reglasPl: null` = falta el SQL de
+  // las reglas (o no se pudo leer: `lecturaPl.error`): entonces se usa la corporativa, como antes.
+  const [plantillas,setPlantillas]=useState<PlantillaFila[]>([]);const [reglasPl,setReglasPl]=useState<ReglaPlantilla[]|null>(null);
+  const [lecturaPl,setLecturaPl]=useState<{cargada:boolean;error:string|null;sinDiseno:boolean}>({cargada:false,error:null,sinDiseno:false});
+  // La plantilla del formulario: en una cotización NUEVA la decide la regla (`usoAuto`) salvo que se
+  // elija a mano; al EDITAR es la guardada (`plantilla_pdf`, o la corporativa).
+  const [plantillaFijada,setPlantillaFijada]=useState<{id:string;origen:"manual"|"guardada"}|null>(null);
+  // Las condiciones que alguien TOCÓ (o que trae la cotización abierta). null = sin tocar: el
+  // formulario enseña las de su plantilla y cambian con ella (`considAuto`). Es lo que antes hacía
+  // `considSinTocarRef`.
+  const [considEditada,setConsidEditada]=useState<ConsidFila|null>(null);
+  // Mientras se lee la plantilla de una cotización abierta no se guarda: sus condiciones dependen de ella.
+  const [considPendiente,setConsidPendiente]=useState(false);const [avisoConsidForm,setAvisoConsidForm]=useState("");
+  const reqConsidRef=useRef(0);
+  // El idioma lo eligió una persona: una plantilla en inglés ya no lo cambia. `idiomaAplicadoRef` =
+  // la plantilla cuyo idioma ya se aplicó (para no volver a aplicarlo en cada render).
+  const idiomaTocadoRef=useRef(false);const idiomaAplicadoRef=useRef<string|null>(null);
+  const [form,setForm]=useState(FORM0);const [items,setItems]=useState<ItemCot[]>([{...ITEM_VACIO}]);const [modalAprob,setModalAprob]=useState<CotFila|null>(null);const [guardarTar,setGuardarTar]=useState(true);const [paradas,setParadas]=useState<ParadaTP[]>([]);const [paradasRetorno,setParadasRetorno]=useState<ParadaTP[]>([]);const [panelId,setPanelId]=useState<number|null>(null);
   const [diasCond,setDiasCond]=useState(1);const [peajesF,setPeajesF]=useState(0);const [pernocteF,setPernocteF]=useState(0);const [viaticosF,setViaticosF]=useState(0);const [reprNombre,setReprNombre]=useState("");
+  // ── La plantilla y las condiciones del formulario ──
+  // La regla (servicio × tipo de cliente) para una cotización NUEVA. Sin las reglas (falta el SQL) o
+  // si la lista no se pudo leer, la corporativa, como antes. Mientras se lee no se afirma nada.
+  const tipoClienteForm=clientes.find(c=>String(c.id)===form.cliente_id)?.tipo??null;
+  const usoAuto=useMemo<{id:string;codigo:CodigoUso|"cargando"|"lectura_fallida";detalle:string;celda:string}>(()=>{
+    const u={servicio:servicioDeCotizacion({modo_servicio:form.modo_servicio,tipo_servicio:form.tipo_servicio}),segmento:segmentoDeCliente({moneda:form.moneda,tipoCliente:tipoClienteForm})};
+    const celda=etiquetaCelda(u);
+    if(!lecturaPl.cargada)return{id:"corporativo",codigo:"cargando",detalle:"",celda};
+    if(lecturaPl.error)return{id:"corporativo",codigo:"lectura_fallida",detalle:lecturaPl.error,celda};
+    if(reglasPl===null){
+      const corp=plantillaPorId(plantillas,"corporativo");
+      if(corp&&esActiva(corp))return{id:"corporativo",codigo:"sin_reglas",detalle:`Falta ${SQL_PLANTILLAS_USO}: todavía no hay reglas de uso y se usa la corporativa, como antes.`,celda};
+    }
+    const r=plantillaParaUso(u,plantillas,reglasPl);
+    return{id:r.plantilla?.id??"corporativo",codigo:r.codigo,detalle:r.detalle,celda};
+  },[lecturaPl,reglasPl,plantillas,form.modo_servicio,form.tipo_servicio,form.moneda,tipoClienteForm]);
+  const plantillaForm=plantillaFijada?.id??usoAuto.id;
+  const filaForm=plantillaPorId(plantillas,plantillaForm);
+  const nombrePlantilla=(id:string|null|undefined)=>{if(!id)return null;const p=plantillaPorId(plantillas,id);return p?(p.nombre||p.id):null;};
+  /**
+   * Las condiciones que COPIA una plantilla al formulario (`considSnapshot`, versión 2): una lista
+   * que la plantilla no tiene (NULL) sale de la principal, y si tampoco, de las de fábrica.
+   */
+  const considDePlantilla=(p:PlantillaFila|null):ConsidFila=>considSnapshot(p,considSnapshot(plantillaPrincipal(plantillas),DEFAULT_CONSID));
+  const considAuto=considDePlantilla(filaForm);
+  const consid:ConsidFila=considEditada??considAuto;
+  /** Editar una condición la vuelve «tocada»: desde ahí ni la regla ni otra plantilla la pisan. */
+  const setConsid=(v:ConsidFila|((prev:ConsidFila)=>ConsidFila))=>setConsidEditada(prev=>typeof v==="function"?v(prev??considAuto):v);
   const [modalPlantilla,setModalPlantilla]=useState<Cotizacion|null>(null);const [plantillaElegida,setPlantillaElegida]=useState("corporativo");
   const [modalEnvio,setModalEnvio]=useState<CotFila|null>(null);
   const [rolUsuario,setRolUsuario]=useState<string>("operador");
@@ -1341,31 +1411,69 @@ export default function CotizacionesPage(){
     }
   };
   useEffect(()=>{if(filtrosListos)cargarLista();},[filtrosListos,claveLista]);
+  /**
+   * Las condiciones de una cotización abierta: EXACTAMENTE lo que su PDF imprime hoy
+   * (`considParaFormulario` con la plantilla con la que se imprime: `plantilla_pdf`, aunque esté
+   * desactivada, o la corporativa), así guardarla —ya en versión 2— no le cambia el PDF. Cuentan
+   * como tocadas: ni la regla ni otra plantilla las pisan. Si la plantilla no está en la lista se lee;
+   * mientras tanto no se guarda. `delBorrador`: las de un borrador de antes de este cambio, que se
+   * conservan si alguien las editó (son las que muestra el formulario). Un TRASLADO de la IA con una
+   * plantilla de diseño corporativo imprime SIEMPRE las de su fila (`cfgSoloCuentas`): ahí la
+   * plantilla no pone condiciones.
+   */
+  const fijarConsidDeCotizacion=(c:{plantilla_pdf?:string|null;consideraciones_json?:ConsidFila|null;idioma_pdf?:string|null;traslado_json?:unknown},delBorrador?:ConsidFila|null)=>{
+    const idPl=c.plantilla_pdf||"corporativo";
+    setPlantillaFijada({id:idPl,origen:"guardada"});setAvisoConsidForm("");
+    const idioma=normalizarIdioma(c.idioma_pdf);
+    const fila=c.consideraciones_json??null;
+    // El borrador de antes ponía `consideraciones_json || las de fábrica` al abrir: si sigue igual, nadie las editó.
+    const base=fila??DEFAULT_CONSID;
+    const editadasEnBorrador=!!delBorrador&&JSON.stringify([delBorrador.incluye,delBorrador.no_incluye,delBorrador.generales])!==JSON.stringify([base.incluye,base.no_incluye,base.generales]);
+    const fijar=(cfg:PlantillaFila|null)=>{
+      if(editadasEnBorrador&&delBorrador){setConsidEditada({...delBorrador,plantilla:idPl});return;}
+      const imprimeLaFila=esTrasladoIA(c)&&disenoDe(cfg??{id:idPl})==="corporativo";
+      const r:ConsidFila=imprimeLaFila&&!fila?{incluye:[],no_incluye:[],generales:[]}:considParaFormulario(imprimeLaFila?null:cfg,fila,idioma);
+      setConsidEditada({...r,plantilla:r.plantilla??idPl});
+    };
+    const req=++reqConsidRef.current;
+    const local=plantillaPorId(plantillas,idPl);
+    // Con la lista leída sin error, una plantilla que no está es una que ya no existe: imprime sin ella.
+    if(local||(lecturaPl.cargada&&!lecturaPl.error)){fijar(local);setConsidPendiente(false);return;}
+    fijar(null);setConsidPendiente(true);
+    Promise.resolve(supabase.from("cotizacion_plantillas").select("*").eq("id",idPl).maybeSingle())
+      .then(({data,error}:{data:PlantillaFila|null;error:{message?:string}|null})=>{
+        if(req!==reqConsidRef.current)return;
+        if(error)setAvisoConsidForm(`No se pudo leer la plantilla «${idPl}» (${error.message||"error"}): las condiciones que ves son las guardadas en la cotización y el PDF de hoy podría imprimir las de la plantilla. Revísalas antes de guardar.`);
+        else fijar(data);
+      },(e:unknown)=>{if(req===reqConsidRef.current)setAvisoConsidForm(`No se pudo leer la plantilla «${idPl}» (${String((e as {message?:string})?.message??e)}): las condiciones que ves son las guardadas en la cotización. Revísalas antes de guardar.`);})
+      .finally(()=>{if(req===reqConsidRef.current)setConsidPendiente(false);});
+  };
   /** Todo lo demás (clientes, tarifas, flota, parámetros, plantilla) y el historial de los selectores. */
   const cargarResto=async()=>{
     setLoading(true);
     // «Recientes» y «Más cotizados» de los selectores: un año, aparte del periodo de la lista.
     // Best-effort: sin él los selectores solo pierden sus sugerencias.
     leerHistorialSelector(supabase,hoyLimaISO()).then(setHistorialSel).catch(()=>{});
-    const[clR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([leerClientes(),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),supabase.from("cotizacion_plantillas").select("*").eq("id","corporativo").maybeSingle()]);
+    const[clR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([leerClientes(),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),leerPlantillasYReglas(supabase).catch((e:unknown)=>({ok:false as const,plantillas:[] as PlantillaFila[],reglas:null,sinDiseno:false,error:String((e as {message?:string})?.message??e)}))]);
     if(clR){setClientes(clR);setErrorClientes(false);}else setErrorClientes(true);setCargandoClientes(false);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
     const pr:Record<string,number>={};(cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});setPreciosDB(pr);
     const emps:any[]=empR.data||[];
     setFlotaTercero((vtR.data||[]).map((v:any)=>({...v,empresa_nombre:emps.find((e:any)=>e.id===v.empresa_id)?.razon_social||"Empresa tercerizada"})));
-    const cfg=plR.data as CotPlantillaConfig|null;setCfgDefault(cfg);
-    // Las condiciones de la plantilla solo reemplazan a las de fábrica SIN TOCAR: las de un
-    // formulario nuevo que nadie editó todavía. Las de una cotización abierta para editar, las de
-    // un borrador recuperado o las que el operador ya escribió no se pisan. Antes se pisaban
-    // siempre, y una recarga que terminaba después de abrir otra cotización le cambiaba sus
-    // condiciones por las de la plantilla.
-    setConsid(p=>p!==considSinTocarRef.current?p:{
-      incluye:cfg?.condiciones_incluye?.length?cfg.condiciones_incluye:p.incluye,
-      no_incluye:cfg?.condiciones_no_incluye?.length?cfg.condiciones_no_incluye:p.no_incluye,
-      generales:cfg?.condiciones_generales?.length?cfg.condiciones_generales:p.generales,
-    });
+    // Las plantillas del PDF y sus reglas. Una lectura que falla NO es una lista vacía: se dice y
+    // el formulario usa la corporativa, como antes. Las condiciones de un formulario sin tocar
+    // salen de la plantilla (`considAuto`); las tocadas o las de una cotización abierta no se pisan.
+    setPlantillas(plR.plantillas);setReglasPl(plR.ok?plR.reglas:null);setLecturaPl({cargada:true,error:plR.ok?null:plR.error,sinDiseno:plR.sinDiseno});
     setLoading(false);
   };
   useEffect(()=>{cargarResto();},[]);
+  // Volver a la pestaña relee las plantillas (pudieron editarse en Plantillas PDF). Una relectura que
+  // falla no borra lo que ya había.
+  useEffect(()=>{
+    let vivo=true;
+    const alVolver=()=>{if(document.visibilityState!=="visible")return;leerPlantillasYReglas(supabase).then(r=>{if(!vivo||!r.ok)return;setPlantillas(r.plantillas);setReglasPl(r.reglas);setLecturaPl({cargada:true,error:null,sinDiseno:r.sinDiseno});}).catch(()=>{});};
+    document.addEventListener("visibilitychange",alVolver);
+    return()=>{vivo=false;document.removeEventListener("visibilitychange",alVolver);};
+  },[]);
   /**
    * Tras guardar, duplicar, convertir, eliminar o cambiar el estado: solo lo que esas acciones
    * cambian. La lista; el historial de los selectores («Recientes»), y el tarifario, que guardar y
@@ -1479,7 +1587,21 @@ export default function CotizacionesPage(){
       if(d.items?.length)setItems(d.items);
       // Los ítems del borrador están en la moneda en que se teclearon (`monedaItems`), con su TC.
       if(d.monedaItems==="USD"&&typeof d.tcItems==="number"){setMonedaItems("USD");setUltimoTc(d.tcItems);}
-      if(d.consid)setConsid(d.consid);
+      // Plantilla y condiciones (borrador con `vPlantillas`): la elegida o guardada, y las condiciones
+      // solo si alguien las tocó (`considEditada`; null = las de la plantilla). Un borrador de ANTES
+      // trae siempre `consid`: si editaba una cotización, se vuelve a leer para cargar lo que su PDF
+      // imprime hoy (fijarConsidDeCotizacion), salvo que se hubieran editado.
+      if(d.vPlantillas){
+        if(d.plantillaFijada&&typeof d.plantillaFijada.id==="string")setPlantillaFijada(d.plantillaFijada);
+        if(d.considEditada)setConsidEditada(d.considEditada);
+        idiomaTocadoRef.current=!!d.idiomaTocado;
+      }else{
+        idiomaTocadoRef.current=d.form.idioma_pdf==="en";
+        if(d.editandoId){
+          setConsidPendiente(true);
+          leerCotizacion<Cotizacion>(supabase,d.editandoId).then(c=>{if(c)fijarConsidDeCotizacion(c,d.consid??null);else{if(d.consid)setConsidEditada(d.consid);setConsidPendiente(false);}},()=>{if(d.consid)setConsidEditada(d.consid);setAvisoConsidForm("No se pudo leer la cotización de este borrador: revisa las condiciones y la plantilla antes de guardar.");setConsidPendiente(false);});
+        }else if(d.consid)setConsidEditada(d.consid);
+      }
       if(d.paradas?.length)setParadas(d.paradas);
       if(d.paradasRetorno?.length)setParadasRetorno(d.paradasRetorno);
       restaurarRuta({...d.form,ruta_coords_json:d.rutaCoords,paradas_json:d.paradas});
@@ -1491,6 +1613,7 @@ export default function CotizacionesPage(){
       if(d.viaticosF)setViaticosF(d.viaticosF);
       setMostrarForm(true);setDraftRecuperado(true);
     }catch{}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
   // Guardar borrador mientras el formulario está abierto
@@ -1498,8 +1621,8 @@ export default function CotizacionesPage(){
     if(!mostrarForm)return;
     if(!form.origen&&!form.destino&&!form.cliente_id&&!editandoId)return;
     const rutaCoords=rutaCoordsParaGuardar(origenPlace,destinoPlace,retornoPlace,{origen:form.origen,destino:form.destino,retorno:form.punto_retorno},vuelve);
-    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,monedaItems,tcItems:monedaItems==="USD"?ultimoTc:null,consid,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,rutaCoords,savedAt:new Date().toISOString()}));}catch{}
-  },[form,items,monedaItems,ultimoTc,consid,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF,origenPlace,destinoPlace,retornoPlace,vuelve]);
+    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,monedaItems,tcItems:monedaItems==="USD"?ultimoTc:null,vPlantillas:1,considEditada,plantillaFijada,plantillaForm,idiomaTocado:idiomaTocadoRef.current,paradas,paradasRetorno,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,rutaCoords,savedAt:new Date().toISOString()}));}catch{}
+  },[form,items,monedaItems,ultimoTc,considEditada,plantillaFijada,plantillaForm,paradas,paradasRetorno,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF,origenPlace,destinoPlace,retornoPlace,vuelve]);
 
   // Auto-construir descripción del primer ítem cuando cambia modo/tipo/equipamiento
   useEffect(()=>{
@@ -1642,7 +1765,18 @@ export default function CotizacionesPage(){
     setItems(prev=>prev.map((it,ix)=>ix===0&&it.descripcion===antes?{...it,descripcion:descripcionServicio(ctx,i)}:it));
     setForm(p=>({...p,idioma_pdf:i}));
   };
-  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);setMonedaItems("PEN");baseSolesRef.current=null;const considBase:ConsidCot={incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales};considSinTocarRef.current=considBase;setConsid(considBase);setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  // Una plantilla en INGLÉS preselecciona el PDF en inglés, y al pasar a una en español vuelve el
+  // español que ella puso. Solo en una cotización nueva y mientras nadie haya elegido el idioma a mano.
+  useEffect(()=>{
+    if(editandoId!=null||idiomaTocadoRef.current||!filaForm||idiomaAplicadoRef.current===filaForm.id)return;
+    const quiere:Idioma=normalizarIdioma(filaForm.idioma)==="en"?"en":"es";
+    if(quiere==="en"&&faltaColMoneda)return; // sin cotizaciones-04 el PDF no se guarda en inglés
+    idiomaAplicadoRef.current=filaForm.id;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- sigue a la plantilla que eligió la regla (estado derivado de la base)
+    if(quiere!==form.idioma_pdf)cambiarIdiomaPdf(quiere);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[filaForm?.id,filaForm?.idioma,editandoId,faltaColMoneda]);
+  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);setMonedaItems("PEN");baseSolesRef.current=null;/* plantilla por regla y condiciones sin tocar: las de la plantilla del formulario */setPlantillaFijada(null);setConsidEditada(null);reqConsidRef.current++;setConsidPendiente(false);setAvisoConsidForm("");idiomaTocadoRef.current=false;idiomaAplicadoRef.current=null;setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.tipo_vehiculo_costeo?equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo)):(v.equipamiento||"full_equipo"),tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo,...(v.tipo_vehiculo_costeo?{equipamiento:equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo))}:{})}));};
@@ -1721,7 +1855,10 @@ export default function CotizacionesPage(){
       tipo_servicio:form.tipo_servicio||null,equipamiento:form.equipamiento||null,
       vehiculo_flota_id:form.vehiculo_flota_id?Number(form.vehiculo_flota_id):null,
       vehiculo_tercero_id:form.vehiculo_tercero_id?Number(form.vehiculo_tercero_id):null,
-      consideraciones_json:consid,paradas_json:paradas.length>0?paradas:null,paradas_retorno_json:paradasRetorno.length>0?paradasRetorno:null,modo_servicio:form.modo_servicio,
+      // Las condiciones quedan ESCRITAS en la fila (versión 2): el PDF imprime estas, las que muestra
+      // el formulario, y no las que tenga la plantilla el día que se imprima (lib/cotizacion-plantillas.ts).
+      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,version:CONSID_VERSION,plantilla:plantillaForm},plantilla_pdf:plantillaForm,
+      paradas_json:paradas.length>0?paradas:null,paradas_retorno_json:paradasRetorno.length>0?paradasRetorno:null,modo_servicio:form.modo_servicio,
       dias_servicio:Number(form.dias_servicio)||1,horas_servicio:Number(form.horas_servicio)||8,
       pernocte_costo:pernocteF||null,precio_dia:precioDiaNum,precio_mes_estimado:precioMesNum,
       precio_tarifario:tarifaEnc?tarifaEnc.precio:null,
@@ -1795,6 +1932,7 @@ export default function CotizacionesPage(){
 
   const guardarBorrador=async()=>{
     if(calculandoKm){alert("⏳ Se está calculando el kilometraje de la ruta. Espera un segundo antes de guardar.");return;}
+    if(!lecturaPl.cargada||considPendiente){alert("⏳ Se están leyendo las plantillas del PDF (de ellas salen las condiciones). Espera un segundo antes de guardar.");return;}
     if(!form.cliente_id&&!form.origen.trim()&&!form.destino.trim()){alert("⚠️ Ingresa al menos el cliente o la ruta para guardar el borrador");return;}
     if(bloqueoMoneda){alert(`⚠️ ${bloqueoMoneda}`);return;}
     setGuardando(true);
@@ -1811,6 +1949,7 @@ export default function CotizacionesPage(){
   const guardarCotizacion=async()=>{
     // Mientras Maps responde, form.km puede ser el del destino anterior: no se guarda.
     if(calculandoKm){alert("⏳ Se está calculando el kilometraje de la ruta. Espera un segundo antes de guardar.");return;}
+    if(!lecturaPl.cargada||considPendiente){alert("⏳ Se están leyendo las plantillas del PDF (de ellas salen las condiciones). Espera un segundo antes de guardar.");return;}
     if(!form.origen.trim()){alert("⚠️ Falta el Punto de origen");return;}
     if(!form.destino.trim()){alert("⚠️ Falta el Punto de destino");return;}
     if(!form.cliente_id){alert("⚠️ Falta seleccionar el cliente");return;}
@@ -2143,6 +2282,8 @@ export default function CotizacionesPage(){
   const duplicarCotizacion=async(c:Cotizacion)=>{
     const payload:any={cliente_id:c.cliente_id,origen:c.origen,destino:c.destino,km:c.km,precio_cliente:c.precio_cliente,costo_estimado:c.costo_estimado,margen_estimado:c.margen_estimado,estado:"pendiente",numero_cotizacion:null,atencion:c.atencion,asunto:c.asunto?`COPIA — ${c.asunto}`:null,punto_retorno:c.punto_retorno,fecha_servicio:c.fecha_servicio,fecha_retorno:c.fecha_retorno,hora_ida:c.hora_ida,hora_retorno:c.hora_retorno,descuento_pct:c.descuento_pct||0,items_json:c.items_json,tipo_vehiculo:c.tipo_vehiculo,tipo_servicio:c.tipo_servicio,equipamiento:c.equipamiento,vehiculo_flota_id:c.vehiculo_flota_id,vehiculo_tercero_id:c.vehiculo_tercero_id,consideraciones_json:c.consideraciones_json,paradas_json:c.paradas_json,paradas_retorno_json:c.paradas_retorno_json,modo_servicio:c.modo_servicio,dias_servicio:c.dias_servicio||1,horas_servicio:c.horas_servicio||8,pernocte_costo:c.pernocte_costo,precio_dia:c.precio_dia,precio_mes_estimado:c.precio_mes_estimado,precio_tarifario:c.precio_tarifario,precio_cotizador:c.precio_cotizador,precio_sugerido:c.precio_sugerido,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto,fechas_multidia_json:c.fechas_multidia_json,plantilla_pdf:c.plantilla_pdf||"corporativo"};
     if(c.ruta_coords_json)payload.ruta_coords_json=c.ruta_coords_json;
+    // Las condiciones y la plantilla se copian TAL CUAL (con su versión y su plantilla, o sin ellas):
+    // la copia imprime lo mismo que la original.
     // La moneda, el tipo de cambio congelado y el idioma del PDF viajan con la copia (cotizaciones-04).
     if(c.moneda!=null)payload.moneda=normalizarMoneda(c.moneda);
     if(c.tipo_cambio!=null)payload.tipo_cambio=c.tipo_cambio;
@@ -2223,13 +2364,14 @@ export default function CotizacionesPage(){
     setMonedaItems(enUsd?"USD":"PEN");baseSolesRef.current=null;
     const itemsBase:ItemCot[]=c.items_json?.length?c.items_json:[{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(Number(c.precio_cliente||0)/1.18*100)/100,descuento_pct:0}];
     const pdTxt=c.precio_dia?String(enUsd?aMonedaCot(Number(c.precio_dia),"USD",rtc.tc):c.precio_dia):"";
-    restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:pdTxt,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||"",moneda:mon,tipo_cambio:c.tipo_cambio!=null?String(c.tipo_cambio):"",idioma_pdf:normalizarIdioma(c.idioma_pdf)});setItems(enUsd?(itemsEnMoneda(itemsBase,"USD",rtc.tc)??itemsBase):itemsBase);setConsid(c.consideraciones_json||{...DEFAULT_CONSID});/* una copia: las de una cotización abierta no son «sin tocar» y la plantilla no las pisa */setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+    restaurarRuta(c);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:pdTxt,incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||"",moneda:mon,tipo_cambio:c.tipo_cambio!=null?String(c.tipo_cambio):"",idioma_pdf:normalizarIdioma(c.idioma_pdf)});setItems(enUsd?(itemsEnMoneda(itemsBase,"USD",rtc.tc)??itemsBase):itemsBase);/* lo que su PDF imprime hoy, con su plantilla: guardarla no le cambia el PDF */fijarConsidDeCotizacion(c);idiomaTocadoRef.current=true;setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   /**
    * Arma el PDF con lib/cotizacion-pdf.ts (`htmlCotizacion`): devuelve el HTML y lo que hay que
    * AVISAR antes de enviarlo. `html: null` solo con dólares sin tipo de cambio válido.
-   * Un TRASLADO de la IA del CRM (`traslado_json`) con la plantilla corporativa imprime LO MISMO que
-   * el PDF que se manda por WhatsApp (components/cotizaciones/pdf-traslado.ts), siempre en castellano
-   * (`idioma` dice en qué idioma salió de verdad). Las demás cotizaciones, como siempre.
+   * Un TRASLADO de la IA del CRM (`traslado_json`) con una plantilla de diseño corporativo imprime
+   * LO MISMO que el PDF que se manda por WhatsApp (components/cotizaciones/pdf-traslado.ts), siempre
+   * en castellano (`idioma` dice en qué idioma salió de verdad). Las demás cotizaciones, como siempre.
+   * `plantilla` es el ID de la plantilla; el diseño que dibuja es `disenoDe(fila)`.
    */
   const prepararPDF=async(cot:Cotizacion,plantilla:string,idioma:Idioma):Promise<ResultadoPdf&{plantilla:string;idioma?:Idioma}>=>{
     const cl=cot.cliente_id!=null?mapaClientes.get(cot.cliente_id):undefined;
@@ -2244,23 +2386,35 @@ export default function CotizacionesPage(){
     const vehiculos=[...vehsMap.values()];
     let nombreFinal=(cot as any).creado_por||"";
     if(!nombreFinal){try{nombreFinal=(await operadorActual()).nombre;}catch(e){}}
-    const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
-    if(plantilla==="corporativo"&&esTrasladoIA(cot)){
-      const e=await entradaTrasladoPagina(cot as unknown as FilaCotizacionLeida,{empresa:empData as EmpresaPerfilPDF|null,plantilla:cfgData as CotPlantillaConfig|null,cliente:clienteErpDe(cl)}).catch(()=>null);
+    // La fila de la plantilla se relee al imprimir (pudo editarse en Plantillas PDF); si la lectura
+    // falla, la de la lista ya cargada.
+    const[{data:empData},rPl]=await Promise.all([supabase.from("empresa_perfil").select("*").eq("id",1).maybeSingle(),Promise.resolve(supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()).catch(()=>({data:null,error:{message:"sin conexión"}}))]);
+    const fila:PlantillaFila|null=rPl.error?plantillaPorId(plantillas,plantilla):(rPl.data as PlantillaFila|null);
+    const diseno=disenoDe(fila??{id:plantilla});
+    const elegida={id:plantilla,nombre:fila?.nombre||plantilla};
+    if(diseno==="corporativo"&&esTrasladoIA(cot)){
+      // Como el servidor (plantillaYReferenciaCuentas): una plantilla DESACTIVADA no presta sus cuentas: las de `corporativo`.
+      const plCuentas=fila&&!esActiva(fila)?plantillaPorId(plantillas,"corporativo"):fila;
+      const e=await entradaTrasladoPagina(cot as unknown as FilaCotizacionLeida,{empresa:empData as EmpresaPerfilPDF|null,plantilla:plCuentas,cliente:clienteErpDe(cl)}).catch(()=>null);
       if(e){
         const{clienteNoVerificado,...entrada}=e;
         const rt=htmlCotizacion(entrada);
-        const avisos=[...rt.avisos,...(idioma==="es"?[]:[{codigo:"textos_escritos_tal_cual" as const,bloquea:false,detalle:AVISO_TRASLADO_EN_CASTELLANO}]),...(clienteNoVerificado?[{codigo:"cliente_no_verificado" as const,bloquea:false,detalle:AVISO_CLIENTE_NO_VERIFICADO}]:[])];
+        // El traslado imprime las condiciones de SU fila: si se copiaron de otra plantilla, se dice.
+        const otra=avisoCondicionesDeOtraPlantilla(cot.consideraciones_json,elegida,nombrePlantilla);
+        const avisos=[...rt.avisos,...(idioma==="es"?[]:[{codigo:"textos_escritos_tal_cual" as const,bloquea:false,detalle:AVISO_TRASLADO_EN_CASTELLANO}]),...(clienteNoVerificado?[{codigo:"cliente_no_verificado" as const,bloquea:false,detalle:AVISO_CLIENTE_NO_VERIFICADO}]:[]),...(otra?[otra]:[])];
         return{...rt,avisos,plantilla,idioma:"es"};
       }
     }
-    const considFinal=editandoId===cot.id?consid:(cot.consideraciones_json||consid);
+    // La que se está editando imprime lo que muestra el formulario, como quedará guardada (versión 2).
+    // Una sin condiciones guardadas, las de fábrica (lo mismo que carga el formulario al abrirla).
+    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,version:CONSID_VERSION,plantilla:plantillaForm}:(cot.consideraciones_json||{...DEFAULT_CONSID});
     const r=htmlCotizacion({
-      cot,cliente:cl,items:its,vehiculos,repr:nombreFinal,consid:considFinal,plantilla,
-      cfg:cfgData as CotPlantillaConfig|null,empresa:empData as EmpresaPerfilPDF|null,
+      cot,cliente:cl,items:its,vehiculos,repr:nombreFinal,consid:considFinal,plantilla:diseno,
+      cfg:fila,empresa:empData as EmpresaPerfilPDF|null,
       idioma,tipoVehiculoNombre:paramsDB.find(p=>p.tipo_vehiculo===cot.tipo_vehiculo)?.nombre??null,
     });
-    return{...r,plantilla};
+    const otra=avisoCondicionesDeOtraPlantilla(considFinal,elegida,nombrePlantilla);
+    return{...r,avisos:otra?[...r.avisos,otra]:r.avisos,plantilla};
   };
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida,idioma:Idioma=idiomaPdfModal)=>{
     if(generandoPdf)return;
@@ -2275,13 +2429,16 @@ export default function CotizacionesPage(){
       win.document.write(r.html);win.document.close();
       // La plantilla y el idioma elegidos quedan en la cotización (best-effort: idioma_pdf es de cotizaciones-04).
       const cambios:Record<string,string>={};
-      if(plantilla!=="corporativo")cambios.plantilla_pdf=plantilla;
+      // Siempre que cambie, también a la corporativa: es la que se preselecciona la próxima vez.
+      if(plantilla!==cot.plantilla_pdf)cambios.plantilla_pdf=plantilla;
       const idiomaImpreso=r.idioma??idioma;
       if(idiomaImpreso!==normalizarIdioma(cot.idioma_pdf))cambios.idioma_pdf=idiomaImpreso;
       if(Object.keys(cambios).length){
         let{error}=await supabase.from("cotizaciones").update(cambios).eq("id",cot.id);
         if(error&&faltaColumna(error,"idioma_pdf")&&cambios.idioma_pdf){delete cambios.idioma_pdf;setFaltaMonedaGuardado(true);if(Object.keys(cambios).length)({error}=await supabase.from("cotizaciones").update(cambios).eq("id",cot.id));}
         cacheDetalle.current.delete(cot.id);
+        // Si es la que está abierta en el formulario, su plantilla pasa a ser esta (si no, guardarla la devolvería a la anterior).
+        if(cambios.plantilla_pdf&&!error&&editandoId===cot.id)setPlantillaFijada({id:plantilla,origen:"manual"});
       }
       setModalPlantilla(null);
     }catch(e){alert(`No se pudo generar el PDF: ${(e as {message?:string})?.message||String(e)}`);}
@@ -2449,7 +2606,7 @@ export default function CotizacionesPage(){
       {modalEnvio&&<ModalEnvio onConfirmar={confirmarEnvio} onCancelar={()=>setModalEnvio(null)} ocupado={estadoEnCurso!==null}/>}
       {modalDespacho&&<ModalDespachoSinCotizar nombreCliente={(id)=>{const cl=id!=null?clientes.find(c=>c.id===id):null;return cl?rotuloCliente(cl as any):(id!=null?`Cliente #${id}`:"Sin cliente");}} onCerrar={()=>setModalDespacho(false)} onCambio={contarDespacho} onCotizar={cotizarDespacho}/>}
       {modalAprob&&<ModalAprobacion cot={modalAprob} onConfirmar={confirmarAprob} onCancelar={()=>setModalAprob(null)} ocupado={estadoEnCurso!==null}/>}
-      {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={id=>{setPlantillaElegida(id);setAvisosPdf(null);setErrorAvisosPdf("");}} idioma={idiomaPdfModal} onIdioma={i=>{setIdiomaPdfModal(i);setAvisosPdf(null);setErrorAvisosPdf("");}} avisos={avisosPdf} errorAvisos={errorAvisosPdf} generando={generandoPdf} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida,idiomaPdfModal)} onCancelar={()=>setModalPlantilla(null)}/>}
+      {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillas={plantillas} errorPlantillas={lecturaPl.error} plantillaActual={plantillaElegida} onElegir={id=>{setPlantillaElegida(id);setAvisosPdf(null);setErrorAvisosPdf("");}} idioma={idiomaPdfModal} onIdioma={i=>{setIdiomaPdfModal(i);setAvisosPdf(null);setErrorAvisosPdf("");}} avisos={avisosPdf} errorAvisos={errorAvisosPdf} generando={generandoPdf} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida,idiomaPdfModal)} onCancelar={()=>setModalPlantilla(null)}/>}
       {modalEliminar&&<ModalEliminar cot={modalEliminar} onConfirmar={eliminarCotizacion} onCancelar={()=>setModalEliminar(null)}/>}
       {modalPropagar&&(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
@@ -2542,7 +2699,7 @@ export default function CotizacionesPage(){
                   </div>
                 </Campo>
                 <Campo label="Idioma del PDF">
-                  <select className={iCls()} value={form.idioma_pdf} onChange={e=>cambiarIdiomaPdf(normalizarIdioma(e.target.value))}>
+                  <select className={iCls()} value={form.idioma_pdf} onChange={e=>{idiomaTocadoRef.current=true;cambiarIdiomaPdf(normalizarIdioma(e.target.value));}}>
                     <option value="es">🇵🇪 Español</option><option value="en" disabled={faltaColMoneda&&form.idioma_pdf!=="en"}>🇺🇸 English</option>
                   </select>
                   {faltaColMoneda&&<p className="text-[10px] text-amber-700 mt-0.5">Sin {SQL_MONEDA} el idioma no se guarda (se elige al generar el PDF).</p>}
@@ -2842,6 +2999,34 @@ export default function CotizacionesPage(){
 
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Consideraciones <span className="normal-case font-normal text-blue-500">→ aparecen en el PDF</span></p>
+              {(()=>{
+                // La plantilla del PDF: de ella salen las condiciones al crear la cotización (y quedan
+                // escritas en ella). En una nueva la elige la regla; aquí se puede cambiar a mano.
+                const opciones=opcionesPlantilla(plantillas,[plantillaForm]);
+                const ambar=!plantillaFijada&&(usoAuto.codigo==="regla_inactiva"||usoAuto.codigo==="regla_no_sirve_ia"||usoAuto.codigo==="sin_plantilla"||usoAuto.codigo==="sin_reglas"||usoAuto.codigo==="lectura_fallida");
+                const rotulo=plantillaFijada?.origen==="manual"?"elegida a mano":plantillaFijada?.origen==="guardada"?"la guardada en esta cotización"
+                  :({cargando:"comprobando las plantillas…",regla:`por la regla ${usoAuto.celda}`,principal:`plantilla principal (no hay regla para ${usoAuto.celda})`,
+                    regla_inactiva:"plantilla principal (la regla no se puede usar)",regla_no_sirve_ia:"plantilla principal (la regla no se puede usar)",
+                    sin_reglas:"sin reglas de uso: la de siempre",sin_plantilla:"no hay una plantilla principal activa",lectura_fallida:"no se pudieron leer las plantillas"} as Record<string,string>)[usoAuto.codigo]??"";
+                // Las condiciones en pantalla vienen de OTRA plantilla (se tocaron y la plantilla cambió): se ofrece cargarlas.
+                const otraPl=consid.plantilla!==plantillaForm&&considEditada!==null&&!considPendiente?filaForm:null;
+                return(<div className="rounded-xl border border-gray-200 bg-gray-50 p-3 mb-3 space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="text-[11px] font-bold uppercase tracking-wide text-gray-500" htmlFor="plantilla-pdf-form">Plantilla del PDF</label>
+                    <select id="plantilla-pdf-form" className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:border-[#0b315f] max-w-full" value={plantillaForm} disabled={considPendiente} onChange={e=>setPlantillaFijada({id:e.target.value,origen:"manual"})}>
+                      {opciones.map(p=><option key={p.id} value={p.id}>{rotuloOpcion(p)}</option>)}
+                    </select>
+                    <span className="text-[11px] text-gray-500">{rotulo}</span>
+                    {plantillaFijada?.origen==="manual"&&!editandoId&&<button type="button" onClick={()=>setPlantillaFijada(null)} className="text-[11px] font-bold text-[#0b315f] hover:underline">↺ Usar la de la regla</button>}
+                  </div>
+                  {considPendiente&&<p className="text-[11px] text-gray-500">Leyendo la plantilla de esta cotización…</p>}
+                  {ambar&&usoAuto.detalle&&<p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {usoAuto.detalle}</p>}
+                  {!plantillaFijada&&usoAuto.codigo==="lectura_fallida"&&<p className="text-[11px] text-amber-800">Se usa la corporativa y, si no se pudo leer, las condiciones de fábrica.</p>}
+                  {avisoConsidForm&&<p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {avisoConsidForm}</p>}
+                  {otraPl&&<p className="text-[11px] text-gray-600">Las condiciones de abajo no son las de «{otraPl.nombre||otraPl.id}» (se editaron{consid.plantilla?` o vienen de «${nombrePlantilla(consid.plantilla)||consid.plantilla}»`:""}). <button type="button" className="font-bold text-[#0b315f] hover:underline" onClick={()=>{const n=consid.incluye.length+consid.no_incluye.length+consid.generales.length;if(confirm(`Se reemplazan las ${n} condiciones de abajo por las de la plantilla «${otraPl.nombre||otraPl.id}». ¿Continuar?`))setConsidEditada(null);}}>Cargar las condiciones de «{otraPl.nombre||otraPl.id}»</button></p>}
+                  <p className="text-[10px] text-gray-400">Al guardar, las condiciones de abajo quedan escritas en la cotización y son las que imprime su PDF; cambiar después la plantilla no las cambia.</p>
+                </div>);
+              })()}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {([{key:"incluye" as const,label:"✅ Servicio incluye",color:"#166534",bg:"#f0fdf4",border:"#86efac"},{key:"no_incluye" as const,label:"❌ No incluye",color:"#991b1b",bg:"#fff5f5",border:"#fca5a5"}]).map(({key,label,color,bg,border})=>(
                   <div key={key} className="rounded-xl border-2 p-3 space-y-2" style={{background:bg,borderColor:border}}><p className="text-xs font-black" style={{color}}>{label}</p><div className="space-y-1.5">{consid[key].map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,[key]:prev[key].map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,[key]:prev[key].filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div><button onClick={()=>setConsid(prev=>({...prev,[key]:[...prev[key],""]}))  } className="text-[10px] font-bold hover:underline" style={{color}}>+ Agregar ítem</button></div>
@@ -2850,7 +3035,7 @@ export default function CotizacionesPage(){
               <div className="rounded-xl border-2 p-3 space-y-2 mt-4" style={{background:"#eef3f8",borderColor:"#93c5fd"}}>
                 <p className="text-xs font-black text-[#0b315f]">📋 Consideraciones generales</p>
                 <div className="space-y-1.5">{consid.generales.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,generales:prev.generales.map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,generales:prev.generales.filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
-                <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,generales:[...prev.generales,""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,generales:[...(cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales)]}))} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar por defecto</button></div>
+                <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,generales:[...prev.generales,""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,generales:[...considDePlantilla(filaForm).generales]}))} title={`Vuelve a las consideraciones generales de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar las de la plantilla</button></div>
               </div>
             </div>
 

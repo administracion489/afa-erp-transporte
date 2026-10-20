@@ -20,9 +20,11 @@
 //  5. El motor (`simularTrasladoConCatalogo`, el mismo del simulador de /tarifario).
 //  6. La cotización (`cotizaciones` es la fila autoritativa), el PDF, el cuadre contra el motor y
 //     `planEnvio` (que también juzga el recojo, el destino y el nombre como TEXTO LIBRE: con algo
-//     sospechoso no sale sola); después la acción de la bandeja (`crm_acciones_ia`, tipo
+//     sospechoso no sale sola) más `revisionPorCondiciones` (lo que dice el PDF de SU fila: cuentas
+//     de la plantilla distintas de `corporativo`, condiciones que no caben o con un enlace o un
+//     número de 6+ dígitos); después la acción de la bandeja (`crm_acciones_ia`, tipo
 //     `cotizacion_traslado`, siempre `pendiente`) y, si queda en revisión, una nota interna con los
-//     motivos.
+//     motivos (y la línea de condiciones que la dejó, citada).
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { faltaAlguna, faltaColumna } from "../columna-faltante";
@@ -33,13 +35,14 @@ import { fechaLima } from "../alertas-horario";
 import { telefonosE164 } from "../crm-telefono";
 import { validarEntrada, type EntradaSimulador, type LugarEntrada } from "./api";
 import { cargarCatalogo, leerConfigIA, leerIgvPct, SinMigracionTraslados, type CatalogoTraslados } from "./datos";
+import { plantillaParaTraslado } from "./plantilla-traslado-datos";
 import {
   cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, resultadoDeFila,
   type FilaCotizacion, type FilaCotizacionLeida,
 } from "./cotizacion-traslado";
 import {
   MOTIVO_REVISION, TOPES, decidirTope, entradaDelAgente, figurasPermitidas, firmaPedido, planEnvio,
-  respuestaDerivar, respuestaEnRevision, respuestaParaModelo, respuestaYaEnviada, senalesEnTexto,
+  respuestaDerivar, respuestaEnRevision, respuestaParaModelo, respuestaYaEnviada, revisionPorCondiciones, senalesEnTexto,
   textosDeUbicacion, textosLibresSospechosos,
   type CodigoRevision, type DecisionEnvio,
 } from "./envio-ia";
@@ -194,18 +197,22 @@ async function contarTopes(sb: Sb, convId: string, hoy: string): Promise<Conteos
   return { consultasConv: n(a), consultasDia: n(b), cotizacionesConv: n(c), cotizacionesDia: n(d) };
 }
 
-type Insercion = { ok: true; id: number; numero: string | null; created_at: string | null } | { ok: false; motivo: string; detalle: string };
+type Insercion = { ok: true; id: number; numero: string | null; created_at: string | null; sueltas: string[] } | { ok: false; motivo: string; detalle: string };
 
 /**
  * Inserta la cotización. Solo reintenta si el error NOMBRA una columna accesoria (un INSERT que no
  * entró por eso no dejó nada escrito); ante cualquier otro error no se reintenta (duplicaría).
+ * `sueltas`: las columnas que no se guardaron (la fila leída de vuelta no las tiene).
+ * `plantilla_pdf` es accesoria: sin ella, las condiciones ya van copiadas en la fila y el PDF toma
+ * las cuentas de `corporativo`, como antes.
  */
 async function insertarCotizacion(sb: Sb, fila: FilaCotizacion): Promise<Insercion> {
   const f: Record<string, unknown> = { ...fila };
-  for (let i = 0; i < 4; i++) {
+  const sueltas: string[] = [];
+  for (let i = 0; i < 5; i++) {
     const { data, error } = await sb.from("cotizaciones").insert(f).select("id, numero_cotizacion, created_at").single();
-    if (!error && data) return { ok: true, id: Number(data.id), numero: data.numero_cotizacion ?? null, created_at: data.created_at ?? null };
-    const col = faltaAlguna(error, ["crm_conversacion_id", "traslado_json", "moneda", "tipo_cambio", "idioma_pdf"] as const);
+    if (!error && data) return { ok: true, id: Number(data.id), numero: data.numero_cotizacion ?? null, created_at: data.created_at ?? null, sueltas };
+    const col = faltaAlguna(error, ["crm_conversacion_id", "traslado_json", "moneda", "tipo_cambio", "idioma_pdf", "plantilla_pdf"] as const);
     if (!col) return { ok: false, motivo: "No se pudo guardar la cotización del traslado", detalle: String(error?.message ?? "sin respuesta") };
     if (col === "crm_conversacion_id" || col === "traslado_json") {
       return { ok: false, motivo: "Falta correr supabase/traslados-05-cotizacion-ia.sql", detalle: `La columna cotizaciones.${col} no existe.` };
@@ -214,6 +221,7 @@ async function insertarCotizacion(sb: Sb, fila: FilaCotizacion): Promise<Inserci
       return { ok: false, motivo: "Falta correr supabase/cotizaciones-04-moneda-idioma.sql", detalle: "Una cotización en dólares no se guarda sin su moneda y su tipo de cambio." };
     }
     delete f[col];
+    sueltas.push(col);
   }
   return { ok: false, motivo: "No se pudo guardar la cotización del traslado", detalle: "Demasiados reintentos." };
 }
@@ -278,19 +286,31 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
     return { ...deriva(r.motivo, pedido, r.explicacion.join("\n")), respuestaModelo: respuestaParaModelo({ resultado: r, preguntas: ctx.preguntas }) };
   }
 
-  // 6) La cotización.
+  // 6) La cotización. Sus condiciones salen de la plantilla PDF de la regla «Traslado de la IA ×
+  //    segmento» (el segmento: la moneda que decidió el motor y el tipo del cliente YA verificado);
+  //    sin la migración, o sin una plantilla que la IA pueda dibujar, de `traslados_config` como
+  //    siempre. Una lectura que falla no es «sin plantilla»: se deriva.
   const clienteId = await clienteIdDeRemitente(sb, ctx.contacto, ctx.remitente.waId);
+  const pt = await plantillaParaTraslado(sb, { moneda: r.precio!.moneda, clienteId });
+  if (!pt.ok) return deriva("No se pudieron leer las condiciones del PDF (plantilla)", pedido, pt.detalle);
   const fila = filaCotizacionTraslado(r, e, {
     convId: ctx.conv.id, clienteId, atencion: ctx.contacto?.nombre ?? null, config: sim.catalogo.config, firma, hoy,
-    ahora: new Date(ahora).toISOString(),
+    ahora: new Date(ahora).toISOString(), plantilla: pt.plantilla,
   });
   const ins = await insertarCotizacion(sb, fila);
   if (!ins.ok) return deriva(ins.motivo, pedido, ins.detalle);
-  const leida: FilaCotizacionLeida = { ...fila, id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at };
+  const guardada: Record<string, unknown> = { ...fila };
+  for (const c of ins.sueltas) delete guardada[c];
+  const leida: FilaCotizacionLeida = { ...(guardada as FilaCotizacion), id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at };
   return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n") });
 }
 
 type CampoLibre = { campo: string; texto: string | null };
+
+/** El nombre de cada lista de condiciones, como lo rotula la pantalla. */
+const NOMBRE_LISTA = { incluye: "Incluye", no_incluye: "No incluye", generales: "Consideraciones generales" } as const;
+/** Un texto en una línea y como mucho `n` caracteres (con «…»). */
+const recortar = (t: string, n: number) => { const c = Array.from(String(t ?? "").replace(/\s+/g, " ").trim()); return c.length > n ? `${c.slice(0, n - 1).join("")}…` : c.join(""); };
 
 /** Lo que escribió el cliente (o el modelo) y podría imprimirse: el recojo, el destino y el nombre. */
 function camposLibres(e: EntradaSimulador, nombre: string | null): CampoLibre[] {
@@ -381,6 +401,12 @@ async function decidirYRegistrar(
     decision = "revision";
     motivos = ["importes_no_cuadran"];
   }
+  // Y lo que dice el PDF de SU fila (respaldo de lo que avisa /cotizaciones/plantillas): cuentas de
+  // la plantilla distintas de las de `corporativo`, condiciones que no caben, y condiciones con un
+  // enlace o un número de 6+ dígitos. Cualquiera la deja para revisión.
+  const porPdf = revisionPorCondiciones({ avisosPdf: pdf?.avisos ?? null, consideraciones: x.leida.consideraciones_json });
+  for (const m of porPdf.motivos) if (!motivos.includes(m)) motivos.push(m);
+  if (motivos.length > 0) decision = "revision";
 
   // La acción de la bandeja: nueva, o la misma con la decisión de ahora.
   let accionId = x.existente?.id;
@@ -412,6 +438,7 @@ async function decidirYRegistrar(
         `🤖 La IA cotizó un traslado y lo dejó para que lo revises: cotización N° ${numero}.`,
         ...motivos.map((m) => `• ${MOTIVO_REVISION[m].texto} ${MOTIVO_REVISION[m].arreglo}`),
         ...textosLibresSospechosos(x.libres).map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
+        ...porPdf.lineas.map((c) => `  – Condición del PDF («${NOMBRE_LISTA[c.lista]}»): «${recortar(c.linea, 160)}» ${c.motivos.map((m) => ETIQUETA_TEXTO_LIBRE[m]).join(" y ")}.`),
         errorPdf ? `• PDF: ${errorPdf.slice(0, 300)}` : "",
         // Lo que el PDF no pudo poner (no bloquea el envío; aquí solo se dice).
         ...(pdf?.avisos ?? []).map((a) => `• PDF: ${a.detalle}`),

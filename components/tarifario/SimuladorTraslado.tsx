@@ -9,14 +9,21 @@
 // Fase 2: la respuesta trae además `envio` —si ese pedido, llegado por WhatsApp, saldría SOLO o
 // quedaría en REVISIÓN según la configuración de hoy— con los motivos declarados del motor
 // (`MOTIVO_REVISION`), y «Ver PDF de ejemplo» pide el mismo PDF (número «EJEMPLO», no guarda nada).
+//
+// Desde supabase/cotizaciones-05 dice además DE DÓNDE salen las condiciones del PDF: la plantilla
+// de la regla «Traslado de la IA × segmento» (`respuesta.plantilla`) o, sin ella, las de Ajustes con
+// su porqué (`respuesta.condiciones`: falta el SQL, o ninguna plantilla que la IA pueda dibujar). La
+// frase la compone `condicionesDelSimulador` (traslados-pantalla.ts); una respuesta sin esos campos
+// (un servidor de antes) no dice nada.
 
 import { useState } from "react";
+import Link from "next/link";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { fechaLima } from "@/lib/alertas-horario";
 import { SENALES, sumarDias, type AccionTraslado, type CodigoZona, type SenalComplejidad, type UbicacionZona } from "@/lib/traslados/motor";
 import type { EntradaSimulador, EnvioSimulado, LugarEntrada, LugarUbicado, RespuestaSimulador } from "@/lib/traslados/api";
 import { MOTIVO_REVISION, type CodigoRevision } from "@/lib/traslados/envio-ia";
-import { fmtFecha, fmtMoneda, leerEntero } from "./traslados-pantalla";
+import { condicionesDelSimulador, fmtFecha, fmtMoneda, leerEntero } from "./traslados-pantalla";
 import { AZUL, iCls } from "./traslados-comun";
 import { LugarInput, LUGAR_VACIO, type LugarValor } from "./google-lugar";
 import { abrirPdf } from "./abrir-pdf";
@@ -277,6 +284,7 @@ function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: Respuesta
   const p = r.precio;
   const veh = r.vehiculo;
   const envio = r.accion === "cotizar" ? envioDe(resp) : null;
+  const condiciones = r.accion === "cotizar" ? condicionesDelSimulador(resp) : null;
   const [pdf, setPdf] = useState<{ abriendo: boolean; error: string | null }>({ abriendo: false, error: null });
 
   const verPdf = async () => {
@@ -341,6 +349,21 @@ function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: Respuesta
           </p>
         </div>
       ))}
+
+      {condiciones && (
+        <div className={`rounded-xl border px-3 py-2 text-xs space-y-0.5 ${condiciones.ambar ? "border-amber-300 bg-amber-50 text-amber-900" : "border-gray-200 bg-gray-50 text-gray-700"}`}>
+          <p className="font-bold break-words">📋 {condiciones.texto}</p>
+          {condiciones.detalle && <p className="break-words">{condiciones.detalle}</p>}
+          {condiciones.nota && <p className="text-[11px] opacity-80">{condiciones.nota}</p>}
+          {condiciones.enlace && (condiciones.enlace.tipo === "ajustes" ? (
+            <button type="button" onClick={onIrAjustes} className="underline font-bold min-h-[32px]">Ver las condiciones en Ajustes</button>
+          ) : (
+            <Link href={condiciones.enlace.href} className="underline font-bold inline-flex items-center min-h-[32px]">
+              {condiciones.enlace.tipo === "plantilla" ? "Editar la plantilla en Plantillas PDF →" : "Ir a Plantillas PDF →"}
+            </Link>
+          ))}
+        </div>
+      )}
 
       {r.accion === "cotizar" && (
         <div className="space-y-1">
