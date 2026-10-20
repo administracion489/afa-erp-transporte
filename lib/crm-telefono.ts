@@ -80,3 +80,40 @@ export function coincideBusquedaTelefono(c: ContactoConTelefono | null | undefin
   const tel = telefonoDeContacto(c);
   return !!tel && tel.includes(digitosConsulta);
 }
+
+// ── El número COMPLETO (E.164), para decir que dos teléfonos son el MISMO ─────
+//
+// `tel9` compara los últimos 9 dígitos y sirve para BUSCAR. No sirve para AFIRMAR que un remitente
+// es un cliente del ERP: +44 7987654321 y el celular peruano 987 654 321 terminan igual. Cuando de
+// esa igualdad depende mostrarle a alguien datos de otro (el PDF de un traslado con RUC, DNI y
+// dirección), se compara el número completo:
+//  · 9 dígitos que empiezan por 9 (celular peruano) → 51 + los 9;
+//  · 8 a 10 dígitos que empiezan por 0 (fijo peruano con su prefijo, «01 4567890») → 51 + el resto;
+//  · «00» delante (prefijo internacional) se quita;
+//  · 10 a 15 dígitos que no empiezan por 0 → ya traen su código de país;
+//  · lo demás (7 u 8 dígitos sueltos, un número de otro país escrito sin su código) no es un número
+//    completo: no se completa con nada y no empareja con nadie.
+// LÍMITE QUE NO SE PUEDE CERRAR DESDE AQUÍ: un número RECICLADO (el operador se lo dio a otra
+// persona) sigue siendo el mismo número; ni el ERP ni WhatsApp pueden saber que cambió de dueño.
+
+/** Los números de un campo de teléfono (puede traer varios: «987654321 / 912345678»), en E.164 sin «+». */
+export function telefonosE164(s?: string | null): string[] {
+  const out: string[] = [];
+  for (const parte of String(s ?? "").split(/[\/,;|]|\s+(?:y|o)\s+/i)) {
+    let d = parte.replace(/\D/g, "");
+    if (d.startsWith("00")) d = d.slice(2);
+    let e: string | null = null;
+    if (d.length === 9 && d.startsWith("9")) e = `51${d}`;
+    else if (d.startsWith("0") && d.length >= 8 && d.length <= 10) e = `51${d.slice(1)}`;
+    else if (!d.startsWith("0") && d.length >= 10 && d.length <= 15) e = d;
+    if (e && !out.includes(e)) out.push(e);
+  }
+  return out;
+}
+
+/** ¿Los dos campos comparten un número COMPLETO? (nunca por los últimos dígitos). */
+export function mismoTelefonoE164(a?: string | null, b?: string | null): boolean {
+  const xs = telefonosE164(a);
+  if (!xs.length) return false;
+  return telefonosE164(b).some((y) => xs.includes(y));
+}

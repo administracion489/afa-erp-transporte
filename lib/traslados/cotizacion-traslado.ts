@@ -1,22 +1,26 @@
 // ──────────────────────────────────────────────────────────────────────────────
 // lib/traslados/cotizacion-traslado.ts — El traslado que cotizó la IA, como FILA de `cotizaciones`
-// y como CONTENIDO de su PDF. Motor PURO: no lee la base ni dibuja (el dibujo es
-// lib/traslados/pdf-traslado.ts).
+// y como ENTRADA de su PDF. Motor PURO: no lee la base ni dibuja. El PDF es la plantilla
+// CORPORATIVA de /cotizaciones: qué se imprime lo decide lib/cotizacion-corporativo.ts y lo dibuja
+// en el servidor lib/pdf-corporativo.ts (antes tenía su propio layout, y no se parecía).
 //
 // LA FILA AUTORITATIVA ES `cotizaciones`, guardada como la guarda /cotizaciones:
 //  · los importes van SIEMPRE en soles (`items_json[].precio_unit` con 4 decimales si la cotización
 //    es en dólares, para que el ida y vuelta devuelva exacto el precio de lista), y
 //    `precio_cliente` es el TOTAL CON IGV (`incluye_igv` true), igual que `totPEN.total`;
 //  · `moneda` y `tipo_cambio` son presentación (cotizaciones-04);
-//  · `traslado_json` guarda solo HECHOS que no son dinero (pax, maletas, zonas, firma, validez).
+//  · `traslado_json` guarda solo HECHOS que no son dinero (pax, maletas, zonas, firma, validez);
+//  · `consideraciones_json` copia las de `traslados_config` (generales; e incluye / no incluye de
+//    traslados-07) al CREARLA: la cotización es un documento, y cambiar los ajustes después no
+//    reescribe lo que ya se le dijo a un cliente.
 //
-// EL PDF SE DERIVA DE LA FILA CADA VEZ (`contenidoPdfTraslado`): si un ejecutivo la corrige en
-// /cotizaciones, el PDF que se envía sale corregido. Los totales salen de `totalesEnMoneda`, la
+// EL PDF SE DERIVA DE LA FILA CADA VEZ (`entradaCorporativaTraslado`): si un ejecutivo la corrige
+// en /cotizaciones, el PDF que se envía sale corregido. Los totales salen de `totalesEnMoneda`, la
 // misma función de los PDF de /cotizaciones, y `cuadraConMotor` comprueba ANTES de enviar que la
 // fila reproduce los importes del tarifario (ese módulo usa un IGV de 18 % fijo y el motor el de
 // `config_tributaria`: si un día difieren, la cotización no sale sola).
 //
-// NINGÚN DATO DE LA EMPRESA ESTÁ ESCRITO AQUÍ: nombre, RUC y logo salen del perfil
+// NINGÚN DATO DE LA EMPRESA ESTÁ ESCRITO AQUÍ: nombre, RUC, cuentas y logo salen del perfil
 // (`empresaConDefectos`). Sin logo en el perfil, el PDF va sin logo; nunca el del bundle.
 //
 // LO QUE ESCRIBIÓ EL CLIENTE NO SE IMPRIME TAL CUAL: el recojo y el destino van con el nombre de su
@@ -30,10 +34,14 @@ import type { ConfigTraslados } from "./datos";
 import { claveNombre, importesTraslado, tarifaDelPar, type CategoriaTraslado, type ResultadoTraslado, type TarifaTraslado, type UbicacionZona, type Zona } from "./motor";
 import { aPENdesdeCot, normalizarMoneda, revisarTipoCambio, totalesEnMoneda, type Moneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
-import { numeroCotizacion } from "../cotizacion-pdf";
+import { numeroCotizacion } from "../cotizacion-corporativo";
+import type { ClientePdf, EntradaPdfCot, PlantillaPdfCfg } from "../cotizacion-pdf";
+import type { VehiculoPDF } from "../pdf-chrome";
 import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { fechaLima } from "../alertas-horario";
 import { atencionImprimible, referenciaImprimible } from "./texto-libre";
+import { urlFotoPermitida, type LadoFoto } from "./fotos-categoria";
+import { mismoTelefonoE164 } from "../crm-telefono";
 
 const r2 = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 100) / 100;
 const MAX_LUGAR = 300;
@@ -105,6 +113,8 @@ export type FilaCotizacion = {
 /** La fila leída de vuelta (o armada para el PDF de ejemplo del simulador, con id 0). */
 export type FilaCotizacionLeida = {
   id: number;
+  /** El cliente del ERP vinculado (el PDF imprime sus datos); null o ausente = sin cliente. */
+  cliente_id?: number | null;
   numero_cotizacion?: string | null;
   created_at?: string | null;
   estado?: string | null;
@@ -174,8 +184,11 @@ export function filaCotizacionTraslado(
   );
   const items: ItemTraslado[] = [{ descripcion, dias: 1, cantidad: p.tramos, precio_unit: precioUnitPen, descuento_pct: 0, pax_contratado: null }];
   const totPen = totalesEnMoneda(items, "PEN", null, true)!;
-  const generales = [...(x.config.consideraciones ?? []), ...(usd ? x.config.consideraciones_usd ?? [] : [])]
-    .map((s) => String(s ?? "").trim()).filter(Boolean);
+  const limpia = (l: readonly unknown[] | null | undefined) => (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
+  const generales = limpia([...(x.config.consideraciones ?? []), ...(usd ? x.config.consideraciones_usd ?? [] : [])]);
+  // traslados-07: sin la migración llegan ausentes y las listas quedan vacías (no se imprimen).
+  const incluye = limpia(x.config.incluye);
+  const noIncluye = limpia(x.config.no_incluye);
   const pax = Number(e.pax) || 0;
   const maletas = Number(e.maletas) || 0;
   return {
@@ -198,7 +211,7 @@ export function filaCotizacionTraslado(
     moneda: p.moneda,
     tipo_cambio: usd ? p.tipo_cambio : null,
     idioma_pdf: "es",
-    consideraciones_json: { incluye: [], no_incluye: [], generales },
+    consideraciones_json: { incluye, no_incluye: noIncluye, generales },
     asunto: "Traslado cotizado por la IA (WhatsApp)",
     // Hasta 60 caracteres y nunca algo sospechoso (lo juzga también planEnvio).
     atencion: atencionImprimible(x.atencion),
@@ -323,191 +336,238 @@ export function cifrasDeFila(fila: Pick<FilaCotizacionLeida, "items_json" | "mon
   };
 }
 
-// ── 3. El contenido del PDF ──────────────────────────────────────────────────
+// ── 3. La entrada del PDF corporativo ────────────────────────────────────────
+// El PDF del traslado es la plantilla CORPORATIVA de /cotizaciones (lib/cotizacion-corporativo.ts
+// decide qué se imprime; lib/pdf-corporativo.ts lo dibuja en el servidor). Aquí solo se arma su
+// entrada desde la fila, con las cuatro trampas del traslado resueltas:
+//  1. LAS CONSIDERACIONES SALEN SOLO DE LA FILA. `considParaPdf` deja ganar las condiciones de la
+//     PLANTILLA, y las seis generales de la corporativa pisarían las del traslado (los 30 min de
+//     espera, el TAM): `cfgSoloCuentas` le quita a la plantilla todo menos las cuentas.
+//  2. LA VALIDEZ SE DICE COMO ES: un traslado vence en la fecha del servicio si llega antes de los
+//     30 días, y «Válida 30 días» sería falso → `corp_sub_hasta` («Válida hasta el …»).
+//  3. EL ASUNTO NO SE IMPRIME: lleva un texto interno («Traslado cotizado por la IA (WhatsApp)»).
+//  4. LA UNIDAD SE DESCRIBE CON DATOS ESCRITOS (`vehiculoDeCategoria`): la descripción para el
+//     cliente de la categoría o «{nombre} para hasta N pasajeros · bodega para M maletas de 23 kg».
+//     Sin ella, `descripcionVehiculoPdf` inventaría «Bus con capacidad… A/C…», falso para un AUTO.
+// Sin cliente del ERP, CLIENTE es la atención (ya saneada) y CELULAR el wa_id de la conversación;
+// el REPRESENTANTE no se imprime.
 
 export const LINEA_DISPONIBILIDAD = "La disponibilidad de la unidad y la reserva del servicio las confirma un ejecutivo.";
-
-export type ContenidoPdf = {
-  /** Título del documento y del archivo. */
-  titulo: string;
-  numero: string;
-  /** Fecha de emisión (dd/mm/aaaa, Lima). */
-  fecha: string;
-  /** Color primario (#rrggbb). */
-  color: string;
-  /** Texto en diagonal y claro sobre la página (el PDF de ejemplo); null en uno real. */
-  marcaAgua: string | null;
-  empresa: { nombre: string; lineas: string[] };
-  /** El pie de cada página. */
-  pie: string;
-  atencion: string | null;
-  servicio: { etiqueta: string; valor: string }[];
-  tabla: { encabezados: [string, string, string, string]; filas: [string, string, string, string][] };
-  totales: { etiqueta: string; valor: string; fuerte?: boolean }[];
-  validez: string | null;
-  consideraciones: { titulo: string; lineas: string[] }[];
-  /** La línea fija, siempre presente. */
-  aviso: string;
-  /** El perfil de la empresa no tiene nombre: lo que se imprime como empresa es el aviso. */
-  perfilSinConfigurar: boolean;
-  /** El logo del perfil (lo descarga el servidor). null = sin logo. */
-  logoUrl: string | null;
-};
 
 /** El perfil tiene nombre propio (no se imprimiría el aviso «CONFIGURA EL PERFIL…»). */
 export function perfilConfigurado(perfil: PerfilEmpresa | null | undefined): boolean {
   return !empresaConDefectos(perfil).sinConfigurar;
 }
 
-/** Color neutro de respaldo: no es la marca de nadie. */
-export const COLOR_DEFECTO = "#1d3557";
-
-/** Un color hexadecimal #rgb o #rrggbb, o el de respaldo. */
-export function colorValido(c: unknown): string {
-  const s = String(c ?? "").trim();
-  if (/^#[0-9a-f]{6}$/i.test(s)) return s.toLowerCase();
-  if (/^#[0-9a-f]{3}$/i.test(s)) return `#${s.slice(1).split("").map((x) => x + x).join("")}`.toLowerCase();
-  return COLOR_DEFECTO;
-}
-
 const v = (x: unknown) => String(x ?? "").trim();
 const fecha = (iso: string | null | undefined, estilo: "corta" | "larga_mayus") =>
   iso && /^\d{4}-\d{2}-\d{2}$/.test(iso) ? fmtFechaDoc(iso, "es", estilo) : null;
 
+/** La categoría de `traslado_categorias` como la lee el PDF. Las tres últimas son de traslados-07. */
+export type CategoriaPdf = {
+  clave: string;
+  nombre: string;
+  capacidad: number | string | null;
+  maletas_bodega?: number | string | null;
+  tipo_vehiculo?: string | null;
+  foto_externa_url?: string | null;
+  foto_interna_url?: string | null;
+  descripcion_cliente?: string | null;
+};
+
+/** El tope de la descripción para el cliente (el mismo CHECK de traslados-07). */
+export const MAX_DESCRIPCION_CLIENTE = 300;
+
 /**
- * El contenido del PDF, DERIVADO de la fila. LANZA si los importes no se pueden imprimir (sin
- * ítems, o en dólares sin un tipo de cambio válido): imprimir soles rotulados como dólares es el
- * error caro, y el llamador lo trata como «PDF no generado».
+ * La descripción de la unidad para el cliente: la que escribió una persona en la categoría o, sin
+ * ella, una frase con DATOS ESCRITOS (asientos y bodega). Nunca «A/C» ni nada que nadie declaró.
  */
-export function contenidoPdfTraslado(
-  cot: FilaCotizacionLeida,
-  empresa: EmpresaResuelta,
-  opts?: { ejemplo?: boolean; colorPrimario?: string | null; hoy?: string },
-): ContenidoPdf {
-  const items = Array.isArray(cot.items_json) ? (cot.items_json as (ItemTraslado & { descripcion?: string })[]) : [];
-  if (items.length === 0) throw new Error("La cotización no tiene ítems: no hay nada que imprimir.");
-  const moneda = normalizarMoneda(cot.moneda);
-  const conIGV = cot.incluye_igv !== false;
-  const tot = totalesEnMoneda(items.map((it) => ({
-    dias: Number(it.dias ?? 1), cantidad: Number(it.cantidad), precio_unit: Number(it.precio_unit), descuento_pct: Number(it.descuento_pct ?? 0),
-  })), moneda, cot.tipo_cambio, conIGV);
-  if (!tot || ![tot.subtotal, tot.total].every(Number.isFinite)) {
-    throw new Error("La cotización está en dólares sin un tipo de cambio válido: no se puede imprimir.");
-  }
-  const money = (n: number) => fmtImporte(n, moneda, "es");
-  const tj = cot.traslado_json ?? null;
+export function descripcionCategoria(cat: Pick<CategoriaPdf, "nombre" | "capacidad" | "maletas_bodega" | "descripcion_cliente">): string {
+  const escrita = v(cat.descripcion_cliente).replace(/\s+/g, " ");
+  if (escrita) return Array.from(escrita).slice(0, MAX_DESCRIPCION_CLIENTE).join("");
+  const n = Math.trunc(Number(cat.capacidad));
+  const m = Math.trunc(Number(cat.maletas_bodega));
+  const pax = Number.isFinite(n) && n > 0 ? ` para hasta ${n} ${n === 1 ? "pasajero" : "pasajeros"}` : "";
+  // «Minivan H1 10 pax para hasta 10 pasajeros» dice lo mismo dos veces: si la frase va a decir
+  // los pasajeros, se le quita al nombre su «N pax» / «N-M pax» final (el de la ficha no cambia).
+  const sinPax = pax ? v(cat.nombre).replace(/\s*\b\d+(\s*-\s*\d+)?\s*pax\.?\s*$/i, "").trim() : "";
+  const nombre = sinPax || v(cat.nombre) || "Unidad";
+  const bodega = Number.isFinite(m) && m > 0 ? ` · bodega para ${m} ${m === 1 ? "maleta" : "maletas"} de 23 kg` : "";
+  return `${nombre}${pax}${bodega}`;
+}
 
-  const lineasEmpresa = [
-    empresa.razonSocial && empresa.razonSocial !== empresa.nombre ? empresa.razonSocial : "",
-    empresa.ruc ? `RUC ${empresa.ruc}` : "",
-    empresa.direccion,
-    [empresa.telefono, empresa.email].filter(Boolean).join(" · "),
-    empresa.web,
-  ].map(v).filter(Boolean);
-
-  const sentido = cot.tipo_servicio === "ida_retorno" || tj?.sentido === "ida_retorno" ? "Ida y retorno" : "Solo ida";
-  const conHora = (f: string | null, h: string | null) => {
-    const d = fecha(f, "larga_mayus");
-    if (!d) return null;
-    return h && /^\d{2}:\d{2}/.test(h) ? `${d} · ${h.slice(0, 5)} h` : d;
+/**
+ * La unidad del PDF desde la categoría. Con `supabaseUrl`, una foto que no sea del bucket
+ * `traslados-fotos` del propio proyecto, con el nombre exacto que le pone la subida y de ESTA
+ * categoría y ESTE lado (`urlFotoPermitida`), se descarta: no se imprime ni se intenta bajar.
+ */
+export function vehiculoDeCategoria(cat: CategoriaPdf | null | undefined, opts: { supabaseUrl?: string | null } = {}): VehiculoPDF | null {
+  if (!cat) return null;
+  const foto = (u: string | null | undefined, lado: LadoFoto) => {
+    const x = v(u);
+    if (!x) return null;
+    return opts.supabaseUrl !== undefined && !urlFotoPermitida(x, opts.supabaseUrl, { clave: v(cat.clave), lado }) ? null : x;
   };
-  const servicio: { etiqueta: string; valor: string }[] = [
-    { etiqueta: "Recojo", valor: v(cot.origen) || "—" },
-    { etiqueta: "Destino", valor: v(cot.destino) || "—" },
-    { etiqueta: "Servicio", valor: `Traslado · ${sentido}` },
-  ];
-  const ida = conHora(cot.fecha_servicio, cot.hora_ida);
-  if (ida) servicio.push({ etiqueta: sentido === "Ida y retorno" ? "Ida" : "Fecha", valor: ida });
-  if (sentido === "Ida y retorno") {
-    const vuelta = conHora(cot.fecha_retorno, cot.hora_retorno);
-    if (vuelta) servicio.push({ etiqueta: "Retorno", valor: vuelta });
-  }
-  const cat = tj?.categoria;
-  if (cat?.nombre) servicio.push({ etiqueta: "Vehículo", valor: `${cat.nombre}${Number(cat.capacidad) > 0 ? ` (hasta ${cat.capacidad} pasajeros)` : ""}` });
-  else if (v(cot.tipo_vehiculo)) servicio.push({ etiqueta: "Vehículo", valor: v(cot.tipo_vehiculo) });
-  if (Number(tj?.pax) > 0) servicio.push({ etiqueta: "Pasajeros", valor: String(tj!.pax) });
-  if (tj && Number.isFinite(Number(tj.maletas))) {
-    const m = Number(tj.maletas);
-    servicio.push({ etiqueta: "Maletas (23 kg)", valor: m === 0 ? "Sin maletas grandes" : String(m) });
-  }
-
-  const filas = items.map((it, i): [string, string, string, string] => {
-    const cant = Number(it.dias ?? 1) * Number(it.cantidad);
-    return [v(it.descripcion) || "Traslado", String(Number.isFinite(cant) ? cant : ""), money(tot.unitarios[i]), money(tot.lineas[i])];
-  });
-  const totales: ContenidoPdf["totales"] = [{ etiqueta: "Subtotal", valor: money(tot.subtotal) }];
-  if (conIGV) totales.push({ etiqueta: `IGV (${IGV_PDF_PCT} %)`, valor: money(tot.igv) });
-  totales.push({ etiqueta: conIGV ? "Total (IGV incluido)" : "Total", valor: money(tot.total), fuerte: true });
-
-  const cj = cot.consideraciones_json ?? {};
-  const lista = (x: unknown) => (Array.isArray(x) ? x.map(v).filter(Boolean) : []);
-  const consideraciones = [
-    { titulo: "Consideraciones", lineas: lista(cj.generales) },
-    { titulo: "Incluye", lineas: lista(cj.incluye) },
-    { titulo: "No incluye", lineas: lista(cj.no_incluye) },
-  ].filter((c) => c.lineas.length > 0);
-
-  const emision = opts?.hoy
-    ?? (cot.created_at && Number.isFinite(Date.parse(cot.created_at)) ? fechaLima(Date.parse(cot.created_at)) : fechaLima(Date.now()));
-
-  const numero = opts?.ejemplo ? "EJEMPLO" : numeroCotizacion(cot);
+  const n = Math.trunc(Number(cat.capacidad));
   return {
-    titulo: "Cotización de traslado",
-    numero,
-    fecha: fecha(emision, "corta") ?? emision,
-    color: colorValido(opts?.colorPrimario),
-    marcaAgua: opts?.ejemplo ? "EJEMPLO · SIN VALIDEZ" : null,
-    empresa: { nombre: empresa.nombre, lineas: lineasEmpresa },
-    pie: [empresa.nombre, empresa.ruc ? `RUC ${empresa.ruc}` : "", empresa.telefono, empresa.web].map(v).filter(Boolean).join(" · "),
-    atencion: v(cot.atencion) || null,
-    servicio,
-    tabla: { encabezados: ["Descripción", "Tramos", "Precio por tramo", "Importe"], filas },
-    totales,
-    validez: fecha(tj?.validez_hasta ?? null, "corta"),
-    consideraciones,
-    aviso: LINEA_DISPONIBILIDAD,
-    perfilSinConfigurar: empresa.sinConfigurar,
-    logoUrl: empresa.logo,
+    categoria: v(cat.nombre) || null,
+    capacidad_pasajeros: Number.isFinite(n) && n > 0 ? n : null,
+    equipamiento: null,
+    foto_externa_url: foto(cat.foto_externa_url, "externa"),
+    foto_interna_url: foto(cat.foto_interna_url, "interna"),
+    descripcion_unidad: descripcionCategoria(cat),
+  };
+}
+
+/**
+ * La plantilla con SOLO lo que decide las cuentas bancarias: si se imprimen, si se usan las de la
+ * plantilla y cuáles son. Sin título, cierre ni condiciones (ver la trampa 1 arriba).
+ */
+export function cfgSoloCuentas(cfg: PlantillaPdfCfg | null | undefined): PlantillaPdfCfg | null {
+  if (!cfg) return null;
+  const out: PlantillaPdfCfg = {};
+  if (cfg.mostrar_cuentas_bancarias != null) out.mostrar_cuentas_bancarias = cfg.mostrar_cuentas_bancarias;
+  if (cfg.usar_bancos_propios != null) out.usar_bancos_propios = cfg.usar_bancos_propios;
+  for (const n of [1, 2, 3] as const) for (const k of ["nombre", "cuenta", "cci"] as const) {
+    const clave = `banco_${n}_${k}` as const;
+    if (cfg[clave] != null) out[clave] = cfg[clave];
+  }
+  return out;
+}
+
+/** El cliente del ERP como lo lee el PDF (`clientes`). */
+export type ClienteErp = {
+  nombre?: string | null; empresa?: string | null; tipo?: string | null; ruc?: string | null; dni?: string | null;
+  direccion?: string | null; telefono?: string | null; operativo_nombre?: string | null;
+};
+
+/**
+ * Por qué el PDF imprime (o no) los datos del cliente del ERP:
+ *  · `contacto`: el cliente está VINCULADO al contacto del CRM (lo vinculó una persona);
+ *  · `telefono`: el número COMPLETO del cliente es el wa_id que pidió la cotización;
+ *  · `sin_cliente`: la cotización no tiene cliente del ERP;
+ *  · `no_verificado`: tiene uno y nada prueba que sea quien escribe → atención y celular.
+ */
+export type VinculoClientePdf = "contacto" | "telefono" | "sin_cliente" | "no_verificado";
+
+/**
+ * El cliente del ERP que el PDF puede imprimir. El PDF de un traslado le llega por WhatsApp a quien
+ * escribió, a veces sin que nadie lo revise, y lleva nombre, RUC, DNI, dirección y teléfono: solo se
+ * imprimen si una persona vinculó ese cliente al contacto, o si su número COMPLETO es el wa_id
+ * (`mismoTelefonoE164`; nunca los últimos 9 dígitos). Con cualquier otro origen del `cliente_id`
+ * (una coincidencia vieja por 9 dígitos, uno puesto a mano en /cotizaciones que no está vinculado
+ * al contacto) sale con la atención y el celular. La misma regla para el servidor y la pantalla.
+ * LÍMITE: un número RECICLADO no se puede detectar (es el mismo número).
+ */
+export function clienteParaPdf(
+  clienteId: unknown,
+  cliente: ClienteErp | null | undefined,
+  ref: { contactoClienteId?: number | string | null; waId?: string | null },
+): { cliente: ClienteErp | null; vinculo: VinculoClientePdf } {
+  const id = Number(clienteId);
+  if (!cliente || clienteId == null || !Number.isInteger(id) || id <= 0) return { cliente: null, vinculo: "sin_cliente" };
+  const vinculado = ref.contactoClienteId != null && String(ref.contactoClienteId).trim() !== "" && Number(ref.contactoClienteId) === id;
+  if (vinculado) return { cliente, vinculo: "contacto" };
+  if (mismoTelefonoE164(cliente.telefono, ref.waId)) return { cliente, vinculo: "telefono" };
+  return { cliente: null, vinculo: "no_verificado" };
+}
+
+/** El wa_id como teléfono legible (+51 966 707 225), o null si no es un número. */
+export function celularImprimible(waId: string | null | undefined): string | null {
+  const d = v(waId).replace(/^\+/, "");
+  if (!/^\d{8,15}$/.test(d)) return null;
+  if (d.length === 11 && d.startsWith("51")) return `+51 ${d.slice(2, 5)} ${d.slice(5, 8)} ${d.slice(8)}`;
+  return `+${d}`;
+}
+
+/**
+ * La entrada de `docCorporativo` / `htmlCotizacion` (plantilla corporativa) para un traslado,
+ * DERIVADA de su fila: si un ejecutivo la corrigió en /cotizaciones, sale corregida. La página de
+ * /cotizaciones y el WhatsApp imprimen lo mismo si las dos la arman aquí.
+ *
+ * `plantilla` es la fila `corporativo` de `cotizacion_plantillas` (solo se usan sus cuentas);
+ * `categoria`, la de `traslado_categorias` (sin ella, la de `traslado_json`, sin fotos ni bodega);
+ * `celular`, el wa_id de la conversación; `contactoClienteId`, el cliente vinculado a su contacto.
+ * El `cliente` solo se imprime si `clienteParaPdf` lo verifica. LANZA si la fila no tiene ítems.
+ */
+export function entradaCorporativaTraslado(
+  fila: FilaCotizacionLeida,
+  x: {
+    empresa: PerfilEmpresa | null;
+    cliente?: ClienteErp | null;
+    celular?: string | null;
+    /** El `cliente_id` del contacto del CRM de la conversación (vinculado por una persona). */
+    contactoClienteId?: number | string | null;
+    plantilla?: PlantillaPdfCfg | null;
+    categoria?: CategoriaPdf | null;
+    /** El PDF de ejemplo del simulador: el número dice EJEMPLO. */
+    ejemplo?: boolean;
+    /** Para filtrar las fotos que no son del bucket del propio proyecto (el servidor lo pasa). */
+    supabaseUrl?: string | null;
+    ahoraMs?: number;
+  },
+): EntradaPdfCot {
+  const items = Array.isArray(fila.items_json) ? (fila.items_json as (Partial<ItemTraslado> & { descripcion?: string })[]) : [];
+  if (items.length === 0) throw new Error("La cotización no tiene ítems: no hay nada que imprimir.");
+  const tj = fila.traslado_json ?? null;
+  const ahoraMs = x.ahoraMs ?? Date.now();
+  const emision = fila.created_at && Number.isFinite(Date.parse(fila.created_at)) ? fechaLima(Date.parse(fila.created_at)) : fechaLima(ahoraMs);
+  const atencion = atencionImprimible(fila.atencion);
+  const celular = celularImprimible(x.celular);
+  const c = clienteParaPdf(fila.cliente_id, x.cliente, { contactoClienteId: x.contactoClienteId, waId: x.celular }).cliente;
+  const cliente: ClientePdf = c
+    ? {
+      nombre: v(c.nombre) || atencion || "",
+      empresa: v(c.empresa) || undefined, tipo: v(c.tipo) || undefined,
+      ruc: v(c.ruc) || undefined, dni: v(c.dni) || undefined, direccion: v(c.direccion) || undefined,
+      telefono: v(c.telefono) || celular || undefined, operativo_nombre: v(c.operativo_nombre) || undefined,
+    }
+    : { nombre: atencion ?? "", telefono: celular ?? undefined };
+  const veh = vehiculoDeCategoria(x.categoria ?? (tj?.categoria?.nombre ? { clave: tj.categoria.clave ?? "", nombre: tj.categoria.nombre, capacidad: tj.categoria.capacidad ?? null } : null),
+    x.supabaseUrl !== undefined ? { supabaseUrl: x.supabaseUrl } : {});
+  const cj = fila.consideraciones_json ?? {};
+  const lista = (l: unknown) => (Array.isArray(l) ? l.map(v).filter(Boolean) : []);
+  return {
+    cot: {
+      id: fila.id,
+      numero_cotizacion: x.ejemplo ? "EJEMPLO" : fila.numero_cotizacion ?? null,
+      origen: v(fila.origen), destino: v(fila.destino), km: null,
+      atencion, asunto: null, punto_retorno: null,
+      fecha_servicio: fila.fecha_servicio, fecha_retorno: fila.tipo_servicio === "ida_retorno" ? fila.fecha_retorno : null,
+      hora_ida: fila.hora_ida ? fila.hora_ida.slice(0, 5) : null,
+      hora_retorno: fila.tipo_servicio === "ida_retorno" && fila.hora_retorno ? fila.hora_retorno.slice(0, 5) : null,
+      tipo_servicio: fila.tipo_servicio, incluye_igv: fila.incluye_igv,
+      itinerario_texto: null, created_at: fila.created_at ?? "",
+      paradas_json: null, fechas_multidia_json: null,
+      modo_servicio: "eventual", tipo_vehiculo: fila.tipo_vehiculo ?? null,
+      moneda: fila.moneda ?? null, tipo_cambio: fila.tipo_cambio ?? null, idioma_pdf: "es",
+    },
+    cliente,
+    items: items.map((it) => ({
+      descripcion: v(it.descripcion) || "Traslado",
+      dias: Number(it.dias ?? 1), cantidad: Number(it.cantidad), precio_unit: Number(it.precio_unit), descuento_pct: Number(it.descuento_pct ?? 0),
+    })),
+    vehiculos: veh ? [veh] : [],
+    repr: "",
+    consid: { incluye: lista(cj.incluye), no_incluye: lista(cj.no_incluye), generales: lista(cj.generales) },
+    plantilla: "corporativo",
+    cfg: cfgSoloCuentas(x.plantilla),
+    empresa: x.empresa,
+    idioma: "es",
+    // El año del título es el de Lima (mediodía del día de hoy en Lima: en el servidor, que corre
+    // en UTC, la medianoche de Lima cae el día anterior).
+    ahora: new Date(`${fechaLima(ahoraMs)}T12:00:00`),
+    fechaEmision: emision,
+    validezHasta: tj?.validez_hasta ?? null,
+    notaTotales: LINEA_DISPONIBILIDAD,
+    omitirListasVacias: true,
   };
 }
 
 // ── 4. Texto que cabe en las fuentes estándar del PDF ────────────────────────
-
-/** Lo que las fuentes estándar no tienen y tiene un equivalente legible. */
-const EQUIVALENTES: Record<string, string> = {
-  "→": "->", "←": "<-", "↔": "<->", "⇄": "<->", "⇒": "=>", "➜": "->", "➡": "->",
-  "≥": ">=", "≤": "<=", "≠": "!=", "×": "x", "−": "-", "‐": "-", "‑": "-", "‒": "-",
-  "✓": "", "✔": "", "✗": "", "✘": "",
-};
-
-/**
- * El texto con SOLO los caracteres que la fuente puede dibujar (`font.getCharacterSet()`): pdf-lib
- * LANZA con un carácter que WinAnsi no tiene (un emoji, una flecha), y ese texto lo escribe el
- * cliente. Conserva tildes, ñ, «», °, · y €; cambia flechas y signos por su equivalente; quita el
- * resto. Los saltos y tabulaciones pasan a espacio (el dibujo parte las líneas). Con `max`, corta
- * por caracteres completos y termina en «…».
- */
-export function aWinAnsi(texto: string, permitidos: ReadonlySet<number>, max?: number): string {
-  const base = String(texto ?? "").normalize("NFC").replace(/[\r\n\t\f\v\u2028\u2029]+/g, " ");
-  let out = "";
-  for (const ch of Array.from(base)) {
-    const eq = EQUIVALENTES[ch];
-    const cand = eq !== undefined ? eq : ch;
-    for (const c of Array.from(cand)) {
-      const cp = c.codePointAt(0)!;
-      if (permitidos.has(cp)) out += c;
-    }
-  }
-  out = out.replace(/ {2,}/g, " ").trim();
-  if (max != null && max > 0) {
-    const cps = Array.from(out);
-    if (cps.length > max) {
-      const elipsis = permitidos.has(0x2026) ? "…" : "...";
-      out = cps.slice(0, Math.max(0, max - Array.from(elipsis).length)).join("").trimEnd() + elipsis;
-    }
-  }
-  return out;
-}
+// `aWinAnsi` vive en lib/pdf-winansi.ts (lo usa también el PDF corporativo del servidor); se
+// re-exporta aquí porque es donde lo buscan los demás.
+export { aWinAnsi } from "../pdf-winansi";
 
 // ── 5. Archivo, ruta y texto del documento ───────────────────────────────────
 

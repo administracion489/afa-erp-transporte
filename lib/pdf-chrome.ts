@@ -61,18 +61,37 @@ export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, 
  * centra por su cuenta.
  */
 export function buildFooterPDFHtml(cp: string, empDir: string, empTel: string, empEmail: string, empWeb: string, idioma: "es" | "en" = "es"): string {
-  const partes = [
-    { icono: "&#8962;", texto: empDir ? `${idioma === "en" ? "Address" : "Dir."}: ${empDir}` : "" },
-    { icono: "&#9990;", texto: empTel },
-    { icono: "&#9993;", texto: empEmail },
-    { icono: "&#9741;", texto: empWeb },
-  ].filter(p => String(p.texto ?? "").trim());
+  return pintarPieHtml(cp, partesPie(empDir, empTel, empEmail, empWeb, idioma));
+}
 
+/** Qué dato es cada parte del pie: el HTML le pone su ícono; el PDF del servidor (WinAnsi) no lo tiene. */
+export type TipoPartePie = "direccion" | "telefono" | "email" | "web";
+export type PartePie = { tipo: TipoPartePie; texto: string };
+
+/** El ícono HTML de cada parte del pie (entidades: el documento se escribe con document.write). */
+export const ICONO_PIE_HTML: Record<TipoPartePie, string> = { direccion: "&#8962;", telefono: "&#9990;", email: "&#9993;", web: "&#9741;" };
+
+/**
+ * Las partes del pie que SÍ tienen dato, en su orden (ver la cabecera de `buildFooterPDFHtml`).
+ * El texto va tal cual llega: quien pinta HTML lo escapa (o lo recibe ya escapado).
+ */
+export function partesPie(empDir: string, empTel: string, empEmail: string, empWeb: string, idioma: "es" | "en" = "es"): PartePie[] {
+  const partes: PartePie[] = [
+    { tipo: "direccion", texto: empDir ? `${idioma === "en" ? "Address" : "Dir."}: ${empDir}` : "" },
+    { tipo: "telefono", texto: empTel },
+    { tipo: "email", texto: empEmail },
+    { tipo: "web", texto: empWeb },
+  ];
+  return partes.filter(p => String(p.texto ?? "").trim());
+}
+
+/** El pie en HTML. El texto de cada parte se imprime TAL CUAL: quien llama decide si lo escapó. */
+export function pintarPieHtml(cp: string, partes: PartePie[]): string {
   if (!partes.length) return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;"></div>`;
 
   const sep = `<span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>`;
   return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;">
-    ${partes.map(p => `<span style="color:white;font-size:8.5px;">${p.icono} ${p.texto}</span>`).join(sep)}
+    ${partes.map(p => `<span style="color:white;font-size:8.5px;">${ICONO_PIE_HTML[p.tipo]} ${p.texto}</span>`).join(sep)}
   </div>`;
 }
 
@@ -92,36 +111,75 @@ export type VehiculoPDF = {
   descripcion_unidad: string | null;
 };
 
+/**
+ * La descripción de la unidad que se imprime. La ESCRITA (`descripcion_unidad`) va tal cual en los
+ * dos idiomas; sin ella, la que compone el sistema (y esa sí se traduce). Extraída de
+ * `buildVehsHtml`, que la sigue usando: el PDF del servidor (lib/pdf-corporativo.ts) imprime la
+ * MISMA frase que el HTML.
+ */
+export function descripcionVehiculoPdf(veh: VehiculoPDF, idioma: "es" | "en" = "es"): string {
+  const en = idioma === "en";
+  const esFull = (veh.equipamiento || "full_equipo") === "full_equipo";
+  return veh.descripcion_unidad || (en
+    ? (esFull
+      ? `Bus with capacity for ${veh.capacidad_pasajeros || "—"} passengers, with A/C, audio system, reclining seats, luggage hold and GPS.`
+      : `Bus with capacity for ${veh.capacidad_pasajeros || "—"} passengers, standard, luggage hold and GPS.`)
+    : (esFull
+      ? `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`
+      : `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, estándar, bodega y GPS.`));
+}
+
+/**
+ * El rótulo de una unidad cuando el documento lleva VARIAS (con una sola no se imprime). El MISMO
+ * rótulo que la pantalla y que la descripción del ítem: el cliente no puede leer un rótulo en el
+ * anexo distinto del nivel con el que se le vendió el servicio.
+ */
+export function etiquetaVehiculoPdf(veh: VehiculoPDF, idioma: "es" | "en" = "es"): string {
+  const en = idioma === "en";
+  const tipoEquip = en ? (nivelDeEquipamiento(veh.equipamiento) === "full_equipo" ? "FULL EQUIPMENT" : "STANDARD") : etiquetaNivel(veh.equipamiento);
+  return `${(veh.categoria || (en ? "UNIT" : "UNIDAD")).toUpperCase()} ${tipoEquip}${veh.capacidad_pasajeros ? (en ? " FOR " + veh.capacidad_pasajeros + " PASSENGERS" : " DE " + veh.capacidad_pasajeros + " PASAJEROS") : ""}`;
+}
+
+/** Una unidad del documento, en texto CRUDO (sin escapar): lo pintan el HTML y el PDF del servidor. */
+export type VehiculoDoc = {
+  /** Solo con varias unidades. */
+  etiqueta: string | null;
+  descripcion: string;
+  fotoExterior: string | null;
+  fotoInterior: string | null;
+};
+
+export function vehiculosDoc(vehiculos: VehiculoPDF[], idioma: "es" | "en" = "es"): VehiculoDoc[] {
+  return vehiculos.map(veh => ({
+    etiqueta: vehiculos.length > 1 ? etiquetaVehiculoPdf(veh, idioma) : null,
+    descripcion: descripcionVehiculoPdf(veh, idioma),
+    fotoExterior: veh.foto_externa_url || null,
+    fotoInterior: veh.foto_interna_url || null,
+  }));
+}
+
 /** Bloque de unidad con foto exterior/interior y descripción — el mismo en cotización y ficha. */
 export function buildVehsHtml(vehiculos: VehiculoPDF[], cp: string, opts?: { imgH?: string; radius?: string; gap?: string; contain?: boolean; idioma?: "es" | "en" }): string {
   if (!vehiculos.length) return "";
-  const en = opts?.idioma === "en";
+  return pintarVehiculosHtml(vehiculosDoc(vehiculos, opts?.idioma === "en" ? "en" : "es"), cp, opts);
+}
+
+/** El HTML de las unidades ya resueltas (`vehiculosDoc`). Escapa todo lo que imprime. */
+export function pintarVehiculosHtml(vehs: VehiculoDoc[], cp: string, opts?: { imgH?: string; radius?: string; gap?: string; contain?: boolean }): string {
+  if (!vehs.length) return "";
   const imgH = opts?.imgH || "200px"; const radius = opts?.radius || "12px"; const gap = opts?.gap || "12px"; const contain = opts?.contain || false;
-  return vehiculos.map((veh, idx) => {
-    const esFull = (veh.equipamiento || "full_equipo") === "full_equipo";
-    // La descripción ESCRITA de la unidad se imprime tal cual en los dos idiomas; solo la que
-    // compone el sistema se traduce.
-    const desc = veh.descripcion_unidad || (en
-      ? (esFull
-        ? `Bus with capacity for ${veh.capacidad_pasajeros || "—"} passengers, with A/C, audio system, reclining seats, luggage hold and GPS.`
-        : `Bus with capacity for ${veh.capacidad_pasajeros || "—"} passengers, standard, luggage hold and GPS.`)
-      : (esFull
-        ? `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`
-        : `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, estándar, bodega y GPS.`));
+  return vehs.map((veh, idx) => {
     const mkImg = (url: string) => contain
       ? `<div style="background:#f3f4f6;border-radius:${radius};border:1px solid #e5e7eb;height:${imgH};display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="${esc(driveImg(url))}" style="max-width:100%;max-height:${imgH};object-fit:contain;"/></div>`
       : `<div style="border-radius:${radius};overflow:hidden;height:${imgH};"><img src="${esc(driveImg(url))}" style="width:100%;height:100%;object-fit:cover;"/></div>`;
-    const fotos = veh.foto_externa_url || veh.foto_interna_url
-      ? `<div style="display:grid;grid-template-columns:${veh.foto_externa_url && veh.foto_interna_url ? "1fr 1fr" : "1fr"};gap:${gap};margin:10px 0;">${veh.foto_externa_url ? mkImg(veh.foto_externa_url) : ""}${veh.foto_interna_url ? mkImg(veh.foto_interna_url) : ""}</div>`
+    const fotos = veh.fotoExterior || veh.fotoInterior
+      ? `<div style="display:grid;grid-template-columns:${veh.fotoExterior && veh.fotoInterior ? "1fr 1fr" : "1fr"};gap:${gap};margin:10px 0;">${veh.fotoExterior ? mkImg(veh.fotoExterior) : ""}${veh.fotoInterior ? mkImg(veh.fotoInterior) : ""}</div>`
       : "";
     const sep = idx > 0 ? `<div style="height:1px;background:#e5e7eb;margin:10px 0 12px;"></div>` : "";
-    // El MISMO rótulo que la pantalla y que la descripción del ítem: el cliente no puede leer
-    // un rótulo en el anexo distinto del nivel con el que se le vendió el servicio.
-    const tipoEquip = en ? (nivelDeEquipamiento(veh.equipamiento) === "full_equipo" ? "FULL EQUIPMENT" : "STANDARD") : etiquetaNivel(veh.equipamiento);
-    const lbl = vehiculos.length > 1
-      ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc((veh.categoria || (en ? "UNIT" : "UNIDAD")).toUpperCase())} ${tipoEquip}${veh.capacidad_pasajeros ? (en ? " FOR " + esc(veh.capacidad_pasajeros) + " PASSENGERS" : " DE " + esc(veh.capacidad_pasajeros) + " PASAJEROS") : ""}</p>`
+    const lbl = veh.etiqueta != null
+      ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc(veh.etiqueta)}</p>`
       : "";
-    return `${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${esc(desc)}</p>${fotos}`;
+    return `${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${esc(veh.descripcion)}</p>${fotos}`;
   }).join("");
 }
 

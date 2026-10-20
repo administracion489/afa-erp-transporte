@@ -8,7 +8,8 @@
 // cotización (enviarla sola o dejarla para revisar, con sus motivos), suponiendo WhatsApp con el
 // número escrito, el agente en modo autónomo y el PDF armado; el perfil y las zonas son los reales.
 // Con `?pdf=1` (el mismo cuerpo) devuelve el PDF de EJEMPLO de esa cotización (número EJEMPLO y
-// marca de agua). No escribe nada en ningún caso.
+// marca de agua), con el formato corporativo de /cotizaciones y la foto de la categoría; la cabecera
+// `X-Avisos-Pdf` lista los códigos de lo que no pudo poner. No escribe nada en ningún caso.
 //
 // Solo usuarios del ERP con el módulo «tarifas» (el simulador vive en esa pantalla). Cada
 // simulación puede costar hasta 4 consultas de Geocoding (2 directas + 2 inversas) si no están
@@ -76,13 +77,18 @@ export async function POST(req: NextRequest) {
     if (quierePdf) {
       const leida: FilaCotizacionLeida = { ...fila, id: 0, created_at: new Date().toISOString() };
       if (!perfil) return NextResponse.json({ ok: false, codigo: "error", detalle: "No se pudo leer el perfil de la empresa." }, { status: 500 });
-      const pdf = await armarPdfDeFila(sb, leida, { ejemplo: true, perfil });
+      // El CELULAR que se imprime es el teléfono que se escribió en el simulador (el de un cliente
+      // real sería el wa_id de su conversación).
+      const pdf = await armarPdfDeFila(sb, leida, { ejemplo: true, perfil, celular: v.entrada.telefono ?? null });
       return new Response(Buffer.from(pdf.bytes), {
         headers: {
           "Content-Type": "application/pdf",
           "X-Content-Type-Options": "nosniff",
           "Cache-Control": "no-store",
           "Content-Disposition": `inline; filename="${pdf.nombre}"`,
+          // Lo que el PDF no pudo poner (sin foto, foto que no se bajó, sin cuenta en la moneda, falta
+          // traslados-07): solo los códigos, separados por coma. La pantalla los nombra.
+          "X-Avisos-Pdf": pdf.avisos.map((a) => a.codigo).join(","),
         },
       });
     }

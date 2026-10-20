@@ -1,6 +1,11 @@
 "use client";
 // components/tarifario/AjustesTraslado.tsx — Pestaña «Ajustes»: la fila única `traslados_config`
-// (validez, espera gratis, consideraciones en soles y en dólares) y el tipo de cambio de SUNAT.
+// (validez, espera gratis, consideraciones en soles y en dólares, y las listas Incluye / No incluye
+// de traslados-07) y el tipo de cambio de SUNAT.
+//
+// LAS LISTAS INCLUYE / NO INCLUYE las copia cada cotización de traslado AL CREARSE (como las
+// consideraciones): cambiarlas aquí no reescribe lo que ya se le envió a un cliente. Una lista
+// vacía no se imprime en el PDF. Sin traslados-07 no existen: se dice en ámbar y no se ofrecen.
 //
 // EL TIPO DE CAMBIO NO SE ESCRIBE DESDE EL NAVEGADOR: «Actualizar ahora» llama a
 // POST /api/tipo-cambio/sunat, que lo trae, lo controla y lo guarda. Aquí solo se lee, y se juzga
@@ -23,7 +28,7 @@ import { TC_MAX_DIAS, tcParaCotizar } from "@/lib/traslados/motor";
 import { estadoCotizadorIA } from "@/lib/traslados/envio-ia";
 import { LINEA_DISPONIBILIDAD } from "@/lib/traslados/cotizacion-traslado";
 import {
-  fmtFecha, leerEntero, mensajeEncenderEnvio, mensajeEncenderIA, minutosQueNoCoinciden, SQL_COTIZACION_IA,
+  fmtFecha, leerEntero, mensajeEncenderEnvio, mensajeEncenderIA, minutosQueNoCoinciden, SQL_COTIZACION_IA, SQL_FOTOS_CATEGORIA,
   subzonasQueHeredan, zonasConEnvioPropio, type ZonaFila,
 } from "./traslados-pantalla";
 import { filasEscritas, leerUltimoTc, LIMITES, normalizarConfig, type ConfigFila, type LecturaTc } from "./traslados-datos";
@@ -71,13 +76,15 @@ function ListaTextos({ items, onCambiar, placeholder, etiqueta }: {
   );
 }
 
-export default function AjustesTraslado({ config, configExiste, onConfig, decir, zonas, sinMigracionIA, colsConfig, onIrAZonas }: {
+export default function AjustesTraslado({ config, configExiste, onConfig, decir, zonas, sinMigracionIA, sinMigracionListas, colsConfig, onIrAZonas }: {
   config: ConfigFila;
   configExiste: boolean;
   onConfig: (c: ConfigFila) => void;
   decir: Decir;
   zonas: readonly ZonaFila[];
   sinMigracionIA: boolean;
+  /** Faltan las columnas `incluye` / `no_incluye` (traslados-07): no se ofrecen ni se guardan. */
+  sinMigracionListas: boolean;
   /** Las columnas que se piden de vuelta al guardar (sin las de traslados-05 si falta la migración). */
   colsConfig: string;
   onIrAZonas: () => void;
@@ -86,6 +93,8 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
   const [espera, setEspera] = useState(String(config.espera_gratis_min));
   const [cons, setCons] = useState<string[]>(config.consideraciones);
   const [consUsd, setConsUsd] = useState<string[]>(config.consideraciones_usd);
+  const [incl, setIncl] = useState<string[]>(config.incluye);
+  const [noIncl, setNoIncl] = useState<string[]>(config.no_incluye);
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,7 +103,9 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
   const limpias = (l: string[]) => l.map((x) => x.trim()).filter(Boolean);
   const sucio = validez !== String(config.validez_dias) || espera !== String(config.espera_gratis_min)
     || JSON.stringify(limpias(cons)) !== JSON.stringify(config.consideraciones)
-    || JSON.stringify(limpias(consUsd)) !== JSON.stringify(config.consideraciones_usd);
+    || JSON.stringify(limpias(consUsd)) !== JSON.stringify(config.consideraciones_usd)
+    || (!sinMigracionListas && (JSON.stringify(limpias(incl)) !== JSON.stringify(config.incluye)
+      || JSON.stringify(limpias(noIncl)) !== JSON.stringify(config.no_incluye)));
   const motivo = lVal.tipo !== "ok" ? `Validez: un número entero de días entre ${LIMITES.validez_dias[0]} y ${LIMITES.validez_dias[1]}.`
     : lEsp.tipo !== "ok" ? `Espera gratis: un número entero de minutos entre ${LIMITES.espera_gratis_min[0]} y ${LIMITES.espera_gratis_min[1]}.`
       : !sucio ? "No hay cambios." : null;
@@ -102,14 +113,17 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
 
   const descartar = () => {
     setValidez(String(config.validez_dias)); setEspera(String(config.espera_gratis_min));
-    setCons(config.consideraciones); setConsUsd(config.consideraciones_usd); setError(null);
+    setCons(config.consideraciones); setConsUsd(config.consideraciones_usd);
+    setIncl(config.incluye); setNoIncl(config.no_incluye); setError(null);
   };
 
   const guardar = async () => {
     if (motivo || guardando || lVal.tipo !== "ok" || lEsp.tipo !== "ok") return;
     setGuardando(true);
     setError(null);
-    const fila = { id: 1, validez_dias: lVal.valor, espera_gratis_min: lEsp.valor, consideraciones: limpias(cons), consideraciones_usd: limpias(consUsd) };
+    const fila: Record<string, unknown> = { id: 1, validez_dias: lVal.valor, espera_gratis_min: lEsp.valor, consideraciones: limpias(cons), consideraciones_usd: limpias(consUsd) };
+    // Sin traslados-07 las listas no existen: mandarlas haría fallar el guardado entero.
+    if (!sinMigracionListas) { fila.incluye = limpias(incl); fila.no_incluye = limpias(noIncl); }
     // Con RLS, el lado «update» de un upsert sin permiso no da error: vuelve sin filas.
     const r = filasEscritas<Record<string, unknown>>(
       await supabase.from("traslados_config").upsert(fila, { onConflict: "id" }).select(colsConfig),
@@ -119,6 +133,7 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
     const c = normalizarConfig(r.filas[0]);
     onConfig(c);
     setCons(c.consideraciones); setConsUsd(c.consideraciones_usd);
+    if (!sinMigracionListas) { setIncl(c.incluye); setNoIncl(c.no_incluye); }
     decir("Ajustes guardados.");
   };
 
@@ -156,6 +171,23 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
             <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones solo para dólares (se agregan cuando se cotiza en US$)</p>
             <ListaTextos items={consUsd} onCambiar={setConsUsd} etiqueta="Consideración en dólares" placeholder="Ej: El IGV se exonera solo con TAM y pasaporte." />
           </div>
+          {sinMigracionListas ? (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+              Las listas <b>Incluye</b> y <b>No incluye</b> del PDF todavía no existen: falta correr <span className="font-mono">{SQL_FOTOS_CATEGORIA}</span> en Supabase → SQL Editor (pegar entero → Run). Hasta entonces la cotización de traslado sale sin esas dos listas.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Incluye (va en el PDF de cada traslado)</p>
+                <ListaTextos items={incl} onCambiar={setIncl} etiqueta="Incluye" placeholder="Ej: Conductor y unidad con SOAT vigente." />
+              </div>
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">No incluye (va en el PDF de cada traslado)</p>
+                <ListaTextos items={noIncl} onCambiar={setNoIncl} etiqueta="No incluye" placeholder="Ej: Estacionamiento por retraso del vuelo." />
+              </div>
+              <p className="lg:col-span-2 text-[10px] text-gray-400">Cada cotización copia estas listas al crearse: cambiarlas aquí no cambia las que ya se enviaron. Una lista vacía no se imprime.</p>
+            </div>
+          )}
           {error && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{error}</p>}
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" onClick={guardar} disabled={!!motivo || guardando}

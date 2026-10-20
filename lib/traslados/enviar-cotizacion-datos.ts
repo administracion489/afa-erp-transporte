@@ -21,19 +21,35 @@
 //    ejecutivo la ve en la tarjeta y puede reintentar. Nada se da por enviado sin `meta_message_id`.
 //  · EL PDF SE DERIVA DE LA FILA CADA VEZ: si un ejecutivo la corrigió en /cotizaciones, sale
 //    corregida. La copia enviada queda en `crm-media` como constancia, referenciada por el mensaje.
+//
+// EL PDF ES LA PLANTILLA CORPORATIVA de /cotizaciones (lib/cotizacion-corporativo.ts +
+// lib/pdf-corporativo.ts). Para armarlo se leen el perfil (con sus cuentas), el cliente del ERP
+// vinculado, el wa_id de la conversación, la plantilla `corporativo` (solo sus cuentas) y la
+// categoría con sus fotos (traslados-07). Cada columna de una migración accesoria se SUELTA solo si
+// el error la nombra (lib/columna-faltante.ts): sin traslados-07 el PDF sale sin fotos y lo avisa.
+// Las imágenes se bajan con LISTA BLANCA (el logo, solo del bucket `empresa` del propio Supabase,
+// donde lo sube /configuracion/perfil; las fotos, solo del bucket `traslados-fotos`), sin
+// redirecciones, 4 s y con tope de bytes. Un PNG se recorre ENTERO antes de dárselo a pdf-lib: sin
+// animación (APNG), y su IDAT se infla AQUÍ con tope de salida — la «bomba» PNG. Los datos del
+// cliente del ERP solo se imprimen si `clienteParaPdf` los verifica. Lo que falta (foto, logo,
+// cuenta en la moneda, cliente sin verificar) se AVISA y no bloquea: `planEnvio` no cambia.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { BUCKET_CRM_MEDIA, asegurarBucket as asegurarBucketCrm } from "../crm-media";
 import { enviarWhatsAppMedia, explicarErrorEnvioWhatsApp } from "../crm-meta";
 import { phonePara as phoneParaUso } from "../whatsapp-numeros";
-import { faltaColumna } from "../columna-faltante";
+import { inflateSync } from "node:zlib";
+import { faltaAlguna } from "../columna-faltante";
 import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
-import { numeroCotizacion } from "../cotizacion-pdf";
+import { docCorporativo, numeroCotizacion } from "../cotizacion-corporativo";
+import type { PlantillaPdfCfg } from "../cotizacion-pdf";
+import { dibujarPdfCorporativo, type ImagenPdf } from "../pdf-corporativo";
 import { fechaLima } from "../alertas-horario";
 import {
-  captionDocumento, contenidoPdfTraslado, nombreArchivoPdf, rutaPdf, type FilaCotizacionLeida,
+  captionDocumento, clienteParaPdf, entradaCorporativaTraslado, nombreArchivoPdf, rutaPdf,
+  type CategoriaPdf, type ClienteErp, type FilaCotizacionLeida,
 } from "./cotizacion-traslado";
-import { dibujarPdfTraslado } from "./pdf-traslado";
+import { FOTO_MAX_BYTES, hostDe, revisarJpeg, revisarPng, urlFotoPermitida } from "./fotos-categoria";
 import { accionReclamable, planAccionTraslado, plazoEnvio, type PlanAccion } from "./envio-ia";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -41,30 +57,60 @@ type Sb = any;
 
 /** Las columnas de la cotización que necesitan el PDF y el envío. */
 export const COLS_COTIZACION_TRASLADO =
-  "id, numero_cotizacion, created_at, estado, origen, destino, fecha_servicio, hora_ida, fecha_retorno, hora_retorno, " +
+  "id, cliente_id, numero_cotizacion, created_at, estado, origen, destino, fecha_servicio, hora_ida, fecha_retorno, hora_retorno, " +
   "tipo_servicio, tipo_vehiculo, items_json, incluye_igv, precio_cliente, moneda, tipo_cambio, atencion, consideraciones_json, " +
   "crm_conversacion_id, traslado_json";
 
 /** Lo que vale el enlace firmado que descarga Meta (s). Meta lo baja al momento; una hora sobra. */
 const TTL_URL_META = 3600;
 
-// ── 1. El perfil y el logo ───────────────────────────────────────────────────
+// ── 1. Lecturas que sueltan la columna accesoria que el error nombra ─────────
 
-export type PerfilPdf = { perfil: PerfilEmpresa | null; color: string | null };
-
-/** El perfil de la empresa con su color (que `EmpresaResuelta` no lleva). LANZA si no se puede leer. */
-export async function leerPerfilPdf(sb: Sb): Promise<PerfilPdf> {
-  const base = "nombre, razon_social, ruc, logo_url, telefono, email, direccion, web";
-  let r = await sb.from("empresa_perfil").select(`${base}, color_primario`).eq("id", 1).maybeSingle();
-  if (r.error && faltaColumna(r.error, "color_primario")) r = await sb.from("empresa_perfil").select(base).eq("id", 1).maybeSingle();
-  if (r.error) throw new Error(`No se pudo leer el perfil de la empresa: ${r.error.message}`);
-  const p = (r.data ?? null) as (PerfilEmpresa & { color_primario?: string | null }) | null;
-  return { perfil: p, color: p?.color_primario ?? null };
+/**
+ * Una consulta con columnas ACCESORIAS: si el error nombra una de ellas, se repite sin ESA (solo la
+ * que el error nombra) y se apunta en `faltan`. Cualquier otro error se devuelve tal cual.
+ */
+async function conAccesorias<R extends { error: unknown }>(
+  consulta: (cols: string) => PromiseLike<R>, base: string, accesorias: readonly string[],
+): Promise<R & { faltan: string[] }> {
+  let quedan = [...accesorias];
+  const faltan: string[] = [];
+  for (;;) {
+    const r = await consulta(quedan.length ? `${base}, ${quedan.join(", ")}` : base);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const col = r.error ? faltaAlguna(r.error as any, quedan) : null;
+    if (!col) return { ...r, faltan };
+    faltan.push(col);
+    quedan = quedan.filter((c) => c !== col);
+  }
 }
 
-/** Topes del logo (no medidos: un logo de verdad pesa decenas de KB). */
-export const LOGO_MAX_BYTES = 2 * 1024 * 1024;
-export const LOGO_TIMEOUT_MS = 4000;
+// ── 2. El perfil, el logo y las fotos ────────────────────────────────────────
+
+export type PerfilPdf = { perfil: PerfilEmpresa | null };
+
+const COLS_PERFIL = "nombre, razon_social, ruc, logo_url, telefono, email, direccion, web";
+/** `cuentas_bancarias` es de empresa-02: sin ella el PDF sale sin cuentas (y lo avisa). */
+const COLS_PERFIL_ACCESORIAS = ["cuentas_bancarias"] as const;
+
+/** El perfil de la empresa (con sus cuentas). LANZA si no se puede leer. */
+export async function leerPerfilPdf(sb: Sb): Promise<PerfilPdf> {
+  const r = await conAccesorias((cols) => sb.from("empresa_perfil").select(cols).eq("id", 1).maybeSingle(), COLS_PERFIL, COLS_PERFIL_ACCESORIAS);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const err = r.error as any;
+  if (err) throw new Error(`No se pudo leer el perfil de la empresa: ${err.message}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return { perfil: ((r as any).data ?? null) as PerfilEmpresa | null };
+}
+
+/** Topes del logo (no medidos: un logo de verdad pesa decenas de KB y mide cientos de px). */
+export const LOGO_MAX_BYTES = 512 * 1024;
+export const LOGO_MAX_LADO = 4000;
+export const LOGO_MAX_PIXELES = 4_000_000;
+/** Lo que espera cada descarga (logo o foto). */
+export const IMAGEN_TIMEOUT_MS = 4000;
+/** @deprecated nombre anterior de `IMAGEN_TIMEOUT_MS`. */
+export const LOGO_TIMEOUT_MS = IMAGEN_TIMEOUT_MS;
 
 /** PNG o JPG por su firma, no por la extensión ni por lo que diga el servidor. */
 export function tipoImagen(b: Uint8Array): "png" | "jpg" | null {
@@ -73,44 +119,73 @@ export function tipoImagen(b: Uint8Array): "png" | "jpg" | null {
   return null;
 }
 
-export type LogoPdf = { bytes: Uint8Array; tipo: "png" | "jpg" };
+export type LogoPdf = ImagenPdf;
 
-/** Dónde puede estar el logo: el almacenamiento PÚBLICO del propio proyecto de Supabase. */
+/** Dónde puede estar una imagen: el almacenamiento PÚBLICO del propio proyecto de Supabase. */
 export const RUTA_LOGO_PERMITIDA = "/storage/v1/object/public/";
+/** El bucket del logo: donde lo sube /configuracion/perfil (`supabase.storage.from("empresa")`). */
+export const BUCKET_LOGO = "empresa";
+/** Dónde se sube el logo (lo nombra el aviso). */
+export const DONDE_LOGO = "/configuracion/perfil";
 
 /**
  * El host del proyecto de Supabase (de `NEXT_PUBLIC_SUPABASE_URL`), o null si no está o no es
- * https. Sin él no se baja ningún logo.
+ * https. Sin él no se baja ninguna imagen.
  */
 export function hostSupabase(base: string | null | undefined = process.env.NEXT_PUBLIC_SUPABASE_URL): string | null {
-  try {
-    const u = new URL(String(base ?? ""));
-    return u.protocol === "https:" ? u.host : null;
-  } catch {
-    return null;
-  }
+  return hostDe(base);
 }
 
 /**
- * El logo del perfil, best-effort: SOLO del almacenamiento público del propio Supabase (el bucket
- * donde lo sube /configuracion/perfil), https, sin redirecciones, 4 s y 2 MB como mucho, y solo
- * PNG o JPG por sus bytes (no se convierte nada: otro formato es otro decodificador expuesto a lo
- * que alguien pegó en el campo del logo). Cualquier fallo devuelve null y el PDF sale sin logo
- * (nunca con el de otra empresa).
+ * ¿La URL del logo es del bucket `empresa` del propio proyecto? https, el host del proyecto, sin
+ * usuario ni `..`. La consulta se tolera: /configuracion/perfil guarda la URL con `?t=<hora>` para
+ * que el navegador no muestre el logo viejo.
  */
-export async function bajarLogo(url: string | null | undefined, f: typeof fetch = fetch, base?: string | null): Promise<LogoPdf | null> {
+export function logoPermitido(url: string | null | undefined, base: string | null | undefined = process.env.NEXT_PUBLIC_SUPABASE_URL): boolean {
   let u: URL;
-  try { u = new URL(String(url ?? "")); } catch { return null; }
+  try { u = new URL(String(url ?? "").trim()); } catch { return false; }
+  const host = hostSupabase(base);
+  if (!host || u.protocol !== "https:" || u.username || u.password || u.host !== host || u.hash) return false;
+  if (String(url).includes("..") || /%2e|%2f|%5c/i.test(u.pathname) || String(url).includes("\\")) return false;
+  return u.pathname.startsWith(`${RUTA_LOGO_PERMITIDA}${BUCKET_LOGO}/`) && u.pathname.length > `${RUTA_LOGO_PERMITIDA}${BUCKET_LOGO}/`.length;
+}
+
+/**
+ * Infla el IDAT de un PNG con TOPE de salida (`maxOutputLength`): zlib se detiene al pasarse en vez
+ * de producir cientos de MB, y LANZA. Es lo que `revisarPng` usa para comprobar que los datos son
+ * exactamente los que declara la cabecera antes de dárselos a pdf-lib.
+ */
+export function inflarConTope(idat: Uint8Array, max: number): number {
+  return inflateSync(idat, { maxOutputLength: Math.max(1, max) }).length;
+}
+
+/**
+ * Una imagen del almacenamiento PÚBLICO del propio Supabase, best-effort. LISTA BLANCA: el logo solo
+ * del bucket `empresa` (`logoPermitido`); las fotos, solo del bucket `traslados-fotos` con el nombre
+ * exacto que les pone la subida (`urlFotoPermitida`); https, sin usuario, sin `..`, sin
+ * redirecciones, 4 s, y con tope de bytes. Se comprueba por los BYTES:
+ *  · logo: PNG recorrido entero — sin animación, IDAT inflado aquí con tope (`revisarPng` +
+ *    `inflarConTope`) — o JPEG, ≤ 512 KB;
+ *  · foto: SOLO JPEG, ≤ 600 KB y ≤ 1600 px por lado (marcador SOF), que pdf-lib incrusta tal cual.
+ * Cualquier fallo devuelve null y el PDF sale sin esa imagen (nunca con la de otra empresa).
+ */
+export async function bajarImagenPublica(url: string | null | undefined, uso: "logo" | "foto", f: typeof fetch = fetch, base?: string | null): Promise<ImagenPdf | null> {
+  const b = base === undefined ? process.env.NEXT_PUBLIC_SUPABASE_URL : base;
+  let u: URL;
+  try { u = new URL(String(url ?? "").trim()); } catch { return null; }
   if (u.protocol !== "https:" || u.username || u.password) return null;
-  const host = hostSupabase(base === undefined ? process.env.NEXT_PUBLIC_SUPABASE_URL : base);
-  if (!host || u.host !== host || !u.pathname.startsWith(RUTA_LOGO_PERMITIDA) || u.pathname.includes("..")) return null;
+  const host = hostSupabase(b);
+  if (!host || u.host !== host || !u.pathname.startsWith(RUTA_LOGO_PERMITIDA) || u.pathname.includes("..") || String(url).includes("..")) return null;
+  if (uso === "foto" && !urlFotoPermitida(u.toString(), b)) return null;
+  if (uso === "logo" && !logoPermitido(u.toString(), b)) return null;
+  const max = uso === "foto" ? FOTO_MAX_BYTES : LOGO_MAX_BYTES;
   const ctrl = new AbortController();
-  const reloj = setTimeout(() => ctrl.abort(), LOGO_TIMEOUT_MS);
+  const reloj = setTimeout(() => ctrl.abort(), IMAGEN_TIMEOUT_MS);
   try {
     const res = await f(u.toString(), { signal: ctrl.signal, redirect: "error" });
     if (!res.ok || !res.body) return null;
     const largo = Number(res.headers.get("content-length"));
-    if (Number.isFinite(largo) && largo > LOGO_MAX_BYTES) return null;
+    if (Number.isFinite(largo) && largo > max) return null;
     const lector = res.body.getReader();
     const partes: Uint8Array[] = [];
     let total = 0;
@@ -118,14 +193,17 @@ export async function bajarLogo(url: string | null | undefined, f: typeof fetch 
       const { done, value } = await lector.read();
       if (done) break;
       total += value.byteLength;
-      if (total > LOGO_MAX_BYTES) { ctrl.abort(); return null; }
+      if (total > max) { ctrl.abort(); return null; }
       partes.push(value);
     }
     const bytes = new Uint8Array(total);
     let o = 0;
     for (const p of partes) { bytes.set(p, o); o += p.byteLength; }
+    if (uso === "foto") return revisarJpeg(bytes).ok ? { bytes, tipo: "jpg" } : null;
     const tipo = tipoImagen(bytes);
-    return tipo ? { bytes, tipo } : null;
+    if (tipo === "png") return revisarPng(bytes, { maxBytes: LOGO_MAX_BYTES, maxLado: LOGO_MAX_LADO, maxPixeles: LOGO_MAX_PIXELES, inflar: inflarConTope }).ok ? { bytes, tipo } : null;
+    if (tipo === "jpg") return revisarJpeg(bytes, { maxBytes: LOGO_MAX_BYTES, maxLado: LOGO_MAX_LADO }).ok ? { bytes, tipo } : null;
+    return null;
   } catch {
     return null;
   } finally {
@@ -133,26 +211,163 @@ export async function bajarLogo(url: string | null | undefined, f: typeof fetch 
   }
 }
 
-// ── 2. El PDF ────────────────────────────────────────────────────────────────
+/** El logo del perfil (ver `bajarImagenPublica`). */
+export function bajarLogo(url: string | null | undefined, f: typeof fetch = fetch, base?: string | null): Promise<LogoPdf | null> {
+  return bajarImagenPublica(url, "logo", f, base);
+}
 
-export type PdfArmado = { bytes: Uint8Array; nombre: string; caption: string; empresa: EmpresaResuelta };
+/** Una foto de la categoría (ver `bajarImagenPublica`): sus bytes JPEG, o null. */
+export async function bajarFoto(url: string | null | undefined, f: typeof fetch = fetch, base?: string | null): Promise<Uint8Array | null> {
+  return (await bajarImagenPublica(url, "foto", f, base))?.bytes ?? null;
+}
+
+// ── 3. Los datos del PDF y el PDF ────────────────────────────────────────────
+
+/** Las columnas del cliente del ERP que imprime el PDF. */
+export const COLS_CLIENTE_PDF = ["nombre", "empresa", "tipo", "ruc", "dni", "direccion", "telefono", "operativo_nombre"] as const;
+/** Las de la categoría: las de traslados-01 y, accesorias, las de traslados-07. */
+export const COLS_CATEGORIA_PDF = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo";
+export const COLS_CATEGORIA_FOTOS = ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] as const;
+/** El SQL que agrega las fotos (lo nombran los avisos y el endpoint de subida). */
+export const SQL_FOTOS = "supabase/traslados-07-fotos-categoria.sql";
+/** Dónde se ponen las fotos y la descripción de la categoría (components/tarifario/FotosCategorias.tsx). */
+export const DONDE_FOTOS = "/tarifario → Zonas y traslados → Vehículos → «Fotos y descripción para la cotización» (debajo de la tabla de vehículos)";
+
+export type CodigoAvisoTraslado =
+  | "sin_foto" | "foto_no_descargada" | "sin_cuenta_en_moneda" | "sin_migracion_fotos" | "logo_no_usado" | "cliente_no_verificado";
+/** Lo que el PDF no pudo poner y conviene decir. NINGUNO bloquea el envío. */
+export type AvisoPdfTraslado = { codigo: CodigoAvisoTraslado; detalle: string };
+
+export type DatosPdf = {
+  perfil: PerfilEmpresa | null;
+  cliente: ClienteErp | null;
+  celular: string | null;
+  /** El `cliente_id` del contacto del CRM (vinculado por una persona); null si no hay o no se pudo leer. */
+  contactoClienteId: number | null;
+  plantilla: PlantillaPdfCfg | null;
+  categoria: CategoriaPdf | null;
+  /** Faltan columnas de traslados-07 en `traslado_categorias`. */
+  sinMigracionFotos: boolean;
+};
+
+/**
+ * Lo que necesita el PDF además de la fila. El perfil LANZA si no se puede leer (sin él no hay
+ * quién emita); lo demás es best-effort: un cliente, una conversación, una plantilla o una
+ * categoría que no se pudo leer dejan el PDF con menos datos, no sin PDF.
+ */
+export async function leerDatosPdf(
+  sb: Sb, fila: FilaCotizacionLeida,
+  opts: { perfil?: PerfilPdf | null; celular?: string | null; contactoClienteId?: number | null } = {},
+): Promise<DatosPdf> {
+  const pp = opts.perfil ?? (await leerPerfilPdf(sb));
+  const cliente = async (): Promise<ClienteErp | null> => {
+    const id = Number(fila.cliente_id);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    try {
+      // Todas las columnas son accesorias aquí: se suelta la que falte y se imprime lo que haya.
+      const r = await conAccesorias((cols) => sb.from("clientes").select(cols).eq("id", id).maybeSingle(), "id", COLS_CLIENTE_PDF);
+      return r.error ? null : (((r as { data?: unknown }).data ?? null) as ClienteErp | null);
+    } catch { return null; }
+  };
+  // El wa_id y el cliente vinculado del contacto de la conversación (lo que no vino en `opts`).
+  const conversacion = async (): Promise<{ celular: string | null; contactoClienteId: number | null }> => {
+    const dado = { celular: opts.celular ?? null, contactoClienteId: opts.contactoClienteId ?? null };
+    if ((opts.celular !== undefined && opts.contactoClienteId !== undefined) || !fila.crm_conversacion_id) return dado;
+    try {
+      const { data, error } = await sb.from("crm_conversaciones").select("id, crm_contactos(wa_id, cliente_id)").eq("id", fila.crm_conversacion_id).maybeSingle();
+      if (error || !data) return dado;
+      const c = (Array.isArray(data.crm_contactos) ? data.crm_contactos[0] : data.crm_contactos) as { wa_id?: string | null; cliente_id?: number | string | null } | null;
+      const vinc = Number(c?.cliente_id);
+      return {
+        celular: opts.celular !== undefined ? opts.celular : (c?.wa_id ?? null),
+        contactoClienteId: opts.contactoClienteId !== undefined ? opts.contactoClienteId : (Number.isInteger(vinc) && vinc > 0 ? vinc : null),
+      };
+    } catch { return dado; }
+  };
+  const plantilla = async (): Promise<PlantillaPdfCfg | null> => {
+    try {
+      const { data, error } = await sb.from("cotizacion_plantillas").select("*").eq("id", "corporativo").maybeSingle();
+      return error ? null : ((data ?? null) as PlantillaPdfCfg | null);
+    } catch { return null; }
+  };
+  const categoria = async (): Promise<{ cat: CategoriaPdf | null; faltan: string[] }> => {
+    const clave = fila.traslado_json?.categoria?.clave;
+    if (!clave) return { cat: null, faltan: [] };
+    try {
+      const r = await conAccesorias((cols) => sb.from("traslado_categorias").select(cols).eq("clave", clave).maybeSingle(), COLS_CATEGORIA_PDF, COLS_CATEGORIA_FOTOS);
+      return { cat: r.error ? null : (((r as { data?: unknown }).data ?? null) as CategoriaPdf | null), faltan: r.faltan };
+    } catch { return { cat: null, faltan: [] }; }
+  };
+  const [cl, conv, pl, ca] = await Promise.all([cliente(), conversacion(), plantilla(), categoria()]);
+  return {
+    perfil: pp.perfil, cliente: cl, celular: conv.celular, contactoClienteId: conv.contactoClienteId,
+    plantilla: pl, categoria: ca.cat, sinMigracionFotos: ca.faltan.length > 0,
+  };
+}
+
+export type PdfArmado = { bytes: Uint8Array; nombre: string; caption: string; empresa: EmpresaResuelta; avisos: AvisoPdfTraslado[] };
+
+/** El texto de un aviso, con dónde se arregla. */
+function aviso(codigo: CodigoAvisoTraslado, extra = ""): AvisoPdfTraslado {
+  const detalle: Record<CodigoAvisoTraslado, string> = {
+    sin_foto: `La categoría del vehículo no tiene fotos: el PDF sale solo con su descripción. Se suben en ${DONDE_FOTOS}.`,
+    foto_no_descargada: `Una foto de la categoría no se pudo bajar (o no es del almacenamiento de fotos de traslados): el PDF sale sin ella. Vuelve a subirla en ${DONDE_FOTOS}.`,
+    sin_cuenta_en_moneda: "El PDF sale sin el bloque de cuentas bancarias.",
+    sin_migracion_fotos: `Falta correr ${SQL_FOTOS}: el PDF sale sin las fotos ni la descripción de la categoría.`,
+    logo_no_usado: `El logo del perfil no se pudo usar: el PDF sale con el nombre de la empresa en su lugar. Súbelo en ${DONDE_LOGO} (PNG o JPG, sin animación, hasta ${Math.floor(LOGO_MAX_BYTES / 1024)} KB).`,
+    cliente_no_verificado: "El cliente del ERP de la cotización no está vinculado a este contacto del CRM y su teléfono no es el número de WhatsApp: el PDF sale con la atención y el celular, sin sus datos. Si es el mismo cliente, vincúlalo en el panel del cliente del CRM.",
+  };
+  return { codigo, detalle: extra ? `${detalle[codigo]} ${extra}`.trim() : detalle[codigo] };
+}
 
 /**
  * El PDF de una fila (guardada, o armada en memoria para el ejemplo del simulador). LANZA si los
- * importes no se pueden imprimir o el perfil no se puede leer: el llamador lo trata como «PDF no
- * generado».
+ * importes no se pueden imprimir (dólares sin tipo de cambio, sin ítems) o el perfil no se puede
+ * leer: el llamador lo trata como «PDF no generado».
  */
 export async function armarPdfDeFila(
   sb: Sb,
   fila: FilaCotizacionLeida,
-  opts: { ejemplo?: boolean; perfil?: PerfilPdf | null; bajarLogo?: (url: string | null) => Promise<LogoPdf | null> } = {},
+  opts: {
+    ejemplo?: boolean; perfil?: PerfilPdf | null; celular?: string | null; contactoClienteId?: number | null;
+    bajarLogo?: (url: string | null) => Promise<LogoPdf | null>;
+    bajarFoto?: (url: string) => Promise<Uint8Array | null>;
+    ahoraMs?: number;
+  } = {},
 ): Promise<PdfArmado> {
-  const pp = opts.perfil ?? (await leerPerfilPdf(sb));
-  const empresa = empresaConDefectos(pp.perfil);
-  const logo = await (opts.bajarLogo ?? ((u: string | null) => bajarLogo(u)))(empresa.logo);
-  const contenido = contenidoPdfTraslado(fila, empresa, { ejemplo: opts.ejemplo, colorPrimario: pp.color });
-  const bytes = await dibujarPdfTraslado(contenido, logo);
-  return { bytes, nombre: nombreArchivoPdf(contenido.numero), caption: captionDocumento(fila, empresa), empresa };
+  const datos = await leerDatosPdf(sb, fila, { perfil: opts.perfil, celular: opts.celular, contactoClienteId: opts.contactoClienteId });
+  const empresa = empresaConDefectos(datos.perfil);
+  const base = process.env.NEXT_PUBLIC_SUPABASE_URL ?? null;
+  const entrada = entradaCorporativaTraslado(fila, {
+    empresa: datos.perfil, cliente: datos.cliente, celular: datos.celular, contactoClienteId: datos.contactoClienteId,
+    plantilla: datos.plantilla, categoria: datos.categoria, ejemplo: opts.ejemplo, supabaseUrl: base, ahoraMs: opts.ahoraMs,
+  });
+  const doc = docCorporativo(entrada);
+
+  const avisos: AvisoPdfTraslado[] = [];
+  if (clienteParaPdf(fila.cliente_id, datos.cliente, { contactoClienteId: datos.contactoClienteId, waId: datos.celular }).vinculo === "no_verificado") {
+    avisos.push(aviso("cliente_no_verificado"));
+  }
+  for (const a of doc.avisos) if (a.codigo === "sin_cuenta_en_moneda") avisos.push(aviso("sin_cuenta_en_moneda", a.detalle));
+  if (datos.sinMigracionFotos) avisos.push(aviso("sin_migracion_fotos"));
+
+  const logoUrl = String(doc.logoUrl ?? "").trim() || null;
+  const fotosPedidas = [datos.categoria?.foto_externa_url, datos.categoria?.foto_interna_url].map((u) => String(u ?? "").trim()).filter(Boolean);
+  const urls = (doc.pagina2.caracteristicas?.vehiculos ?? []).flatMap((v) => [v.fotoExterior, v.fotoInterior]).filter((u): u is string => !!u);
+  const bajar = opts.bajarFoto ?? ((u: string) => bajarFoto(u));
+  const [logo, ...bytesFotos] = await Promise.all([
+    (opts.bajarLogo ?? ((u: string | null) => bajarLogo(u)))(logoUrl),
+    ...urls.map((u) => bajar(u).catch(() => null)),
+  ]);
+  if (logoUrl && !logo) avisos.push(aviso("logo_no_usado", logoPermitido(logoUrl, base) ? "" : "(no está en el almacenamiento del perfil de la empresa)"));
+  const fotos: Record<string, Uint8Array> = {};
+  urls.forEach((u, i) => { const b = bytesFotos[i]; if (b?.length) fotos[u] = b; });
+  if (!datos.sinMigracionFotos && datos.categoria && !fotosPedidas.length) avisos.push(aviso("sin_foto"));
+  const faltantes = fotosPedidas.filter((u) => !fotos[u]).length;
+  if (faltantes) avisos.push(aviso("foto_no_descargada", faltantes > 1 ? `(${faltantes} fotos)` : ""));
+
+  const bytes = await dibujarPdfCorporativo(doc, { logo, fotos }, { marcaAgua: opts.ejemplo ? "EJEMPLO · SIN VALIDEZ" : null });
+  return { bytes, nombre: nombreArchivoPdf(numeroCotizacion(entrada.cot)), caption: captionDocumento(fila, empresa), empresa, avisos };
 }
 
 /** La fila de la cotización, o null si no existe. LANZA si no se puede leer. */
@@ -164,7 +379,7 @@ export async function leerCotizacionTraslado(sb: Sb, id: number): Promise<FilaCo
 }
 
 /** El PDF de una cotización guardada, leído de su fila. LANZA si no existe o no se puede imprimir. */
-export async function pdfDeCotizacion(sb: Sb, cotId: number, opts: { bajarLogo?: (url: string | null) => Promise<LogoPdf | null> } = {}): Promise<PdfArmado> {
+export async function pdfDeCotizacion(sb: Sb, cotId: number, opts: { bajarLogo?: (url: string | null) => Promise<LogoPdf | null>; bajarFoto?: (url: string) => Promise<Uint8Array | null> } = {}): Promise<PdfArmado> {
   const fila = await leerCotizacionTraslado(sb, cotId);
   if (!fila) throw new Error("La cotización ya no existe.");
   return armarPdfDeFila(sb, fila, opts);
@@ -182,6 +397,7 @@ export type DepsEnvio = {
   phonePara?: (uso: "crm") => Promise<string | undefined>;
   asegurarBucket?: (sb: Sb) => Promise<void>;
   bajarLogo?: (url: string | null) => Promise<LogoPdf | null>;
+  bajarFoto?: (url: string) => Promise<Uint8Array | null>;
   ahoraMs?: () => number;
   uuid?: () => string;
 };
@@ -302,7 +518,7 @@ export async function enviarCotizacionTraslado(
   let caption = x.caption ?? "";
   try {
     if (!bytes || !caption) {
-      const pdf = await armarPdfDeFila(sb, fila, { bajarLogo: deps.bajarLogo });
+      const pdf = await armarPdfDeFila(sb, fila, { bajarLogo: deps.bajarLogo, bajarFoto: deps.bajarFoto, celular: conv!.wa_id, ahoraMs: ahora });
       if (!bytes) { bytes = pdf.bytes; nombre = pdf.nombre; }
       if (!caption) caption = pdf.caption;
     }
