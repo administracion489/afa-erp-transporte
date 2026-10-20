@@ -241,7 +241,7 @@ const TABLA = {
   },
   "traslados.hoy": {
     alarma: true, relacion: "contradice", titulo: "Manda los pedidos para hoy a una persona, pero el cotizador de traslados también cotiza los de hoy",
-    arreglo: "Con los traslados por zona encendidos, la IA cotiza también un traslado para hoy con el tarifario y puede enviarlo sola. Si eso está bien, aclara en la frase «salvo los traslados»; si no, bórrala o apaga la cotización automática de traslados.",
+    arreglo: "Con los traslados por zona encendidos, la IA cotiza también un traslado para hoy con el tarifario y puede enviarlo sola. Si eso está bien, aclara en la frase «salvo los traslados»; si no, bórrala o apaga «La IA cotiza traslados» (Tarifario → Zonas y traslados → Ajustes).",
   },
 } as const satisfies Record<string, FilaTabla>;
 
@@ -369,6 +369,10 @@ export function partirFrases(texto: string): Frase[] {
   return out;
 }
 
+/** Lo que va antes de una cita que NO es un mensaje para el cliente: lo que dice el cliente
+ *  («si el cliente pregunta "¿tienes buses…?"») o una frase que se prohíbe («no uses frases como…»). */
+const RE_ANTES_NO_PLANTILLA = /\b(cliente|usuario|pasajero)s?\b[^.]{0,25}\b(dice|diga|dijo|pregunta|pregunte|escribe|escriba|pide|responde|contesta)\b[^.]{0,10}$|\bsi (dice|pregunta|escribe|pide)\b[^.]{0,10}$|\b(frases|palabras|expresiones|mensajes) como\b[^.]{0,10}$|\bno (uses|digas|escribas|pongas)\b[^.]{0,25}$/;
+
 /** Los mensajes citados del texto («…», “…” o "…" en una línea) de 4 palabras o más: plantillas
  *  que la IA puede copiar al cliente. */
 function segmentosCitados(texto: string): { texto: string; inicio: number }[] {
@@ -378,12 +382,12 @@ function segmentosCitados(texto: string): { texto: string; inicio: number }[] {
   while ((m = re.exec(texto))) {
     const t = m[1] ?? m[2] ?? m[3] ?? "";
     const palabras = t.split(/\s+/).filter((w) => /\p{L}/u.test(w)).length;
-    if (palabras >= 4) out.push({ texto: t, inicio: m.index + 1 });
+    const antes = normalizarTexto(texto.slice(Math.max(0, m.index - 60), m.index));
+    if (palabras >= 4 && !RE_ANTES_NO_PLANTILLA.test(antes)) out.push({ texto: t, inicio: m.index + 1 });
   }
   return out;
 }
 
-const tiene = (re: RegExp, s: string) => re.test(s);
 
 // ── Familias de expresiones (sobre el texto normalizado salvo que se diga) ───────────────────────
 
@@ -417,15 +421,17 @@ const marcaDelTrato = (t: Tratamiento) => (t === "tu" ? RE_MARCA_TU : RE_MARCA_U
 const otroTrato = (t: Tratamiento): Tratamiento => (t === "tu" ? "usted" : "tu");
 
 // Cómo se piden los datos
-const RE_UNA = /\buna (sola )?pregunta (por|a la) (vez|turno|mensaje)\b|\bun (solo )?dato (por|a la) (vez|turno|mensaje)\b|\bde (a )?uno en uno\b|\bno (agrupar|agrupes|adelantar|adelantes)\b/;
+const RE_UNA = /\buna (sola )?pregunta (por|a la) (vez|turno|mensaje)\b|\bun (solo )?dato (por|a la) (vez|turno|mensaje)\b|\bde (a )?uno en uno\b/;
+/** «No agrupar, no adelantar preguntas»: sin «pregunta» en la frase no es esto («no adelantes datos de precio»). */
+const RE_UNA_NO_AGRUPAR = /\bno (agrupar|agrupes|adelantar|adelantes)\b/;
 const RE_JUNTO = /\b(todo|todos los datos|todas las preguntas|todo lo que falt\w*)\b.{0,40}\b(junt\w*|en un (solo|unico) mensaje)\b/;
 const RE_JUNTO_NEGADO = /\bno\b (\w+ ){0,2}(pidas|preguntes|pedir|preguntar)\b.{0,10}\b(todo|todos|todas)\b.{0,40}\b(junt\w*|en un (solo|unico) mensaje)\b/;
 const RE_ANCLA_UNA = /pregunt|\bdatos?\b/;
-const RE_ANCLA_JUNTO = /pregunt|\bdatos?\b|\bpid|falt/;
+const RE_ANCLA_JUNTO = /pregunt|\bpid\w*|\bpedir\b|\bsolicit\w*/;
 
 function preguntasDeclaradas(f: Frase): ModoPreguntas | null {
   const n = f.norm;
-  const una = (RE_UNA.test(n) && RE_ANCLA_UNA.test(n)) || RE_JUNTO_NEGADO.test(n);
+  const una = (RE_UNA.test(n) && RE_ANCLA_UNA.test(n)) || (RE_UNA_NO_AGRUPAR.test(n) && /pregunt/.test(n)) || RE_JUNTO_NEGADO.test(n);
   const junto = RE_JUNTO.test(n) && RE_ANCLA_JUNTO.test(n) && !RE_JUNTO_NEGADO.test(n);
   if (una && junto) return null;
   return una ? "una_por_mensaje" : junto ? "todo_junto" : null;
@@ -451,7 +457,7 @@ const esTituloResumen = (f: Frase) =>
 const soloPalabras = (s: string) => normalizarTexto(s).replace(/[^a-z0-9]+/g, " ").trim();
 
 // Saludo
-const RE_SALUDO = /\b(saludo|bienvenida|menu (inicial|principal))\b/;
+const RE_SALUDO = /\bmenu (inicial|principal|de opciones)\b|\b(saludo|bienvenida)\b[^.]{0,60}\b(menu|opciones)\b/;
 const RE_SALUDO_ACCION = /\b(muestra|muestrale|responde|respondele|envia|enviale|usa|di|dile|saluda|ofrece|ofrecele|da|dale)\b/;
 const RE_INICIO_SALUDO = /^[^\p{L}]*(hola|buenos dias|buenas tardes|buenas noches)\b/u;
 
@@ -460,7 +466,13 @@ const RE_PRESENTACION = /(?:^|[^\p{L}])(Eres|eres|Soy|soy|Me llamo|me llamo)\s+(
 const NO_SON_NOMBRES = new Set(["el", "la", "los", "las", "un", "una", "tu", "su", "de", "del", "parte", "quien", "yo", "nuestro", "nuestra", "aqui", "muy"]);
 
 // Decir que es una IA
-const RE_REVELA = /\b(soy|eres|me presento como|presentate como|te presentas como)\b[^.]{0,60}?\b(asistente virtual|chatbot|bot|robot|inteligencia artificial|ia)\b/;
+const RE_REVELA = /\b(soy|eres|me presento como|presentate como|te presentas como)\b([^.;:!?()]{0,40}?)\b(asistente virtual|asistente de (ia|inteligencia artificial)|chatbot|bot|robot|inteligencia artificial|(una|la|un) ia)\b/;
+/** Lo que hay entre «eres» y «IA» no puede ser otra oración: «eres el asistente de ventas y usas la IA». */
+const RE_REVELA_HUECO_AJENO = /\b(y|que|para|con|usa\w*|usando|pero)\b/;
+function revelaQueEsIA(n: string): boolean {
+  const m = RE_REVELA.exec(n);
+  return !!m && !RE_REVELA_HUECO_AJENO.test(m[2]);
+}
 const RE_REVELA_NEGADO = /\b(no|nunca)\s+(soy|eres)\b[^.]{0,20}\b(bot|robot|chatbot|ia)\b/;
 const RE_PREGUNTA_SI_ES_BOT = /\beres (un |una )?(bot|robot|chatbot|ia|inteligencia artificial|humano|persona|maquina)\s*\?|\bsi (te|le) pregunta|\bsi (el cliente )?pregunta (si|que)\b/;
 const RE_OCULTA = /\b(no|nunca|jamas)\b (le )?(digas|reveles|menciones|admitas|aclares|confieses|cuentes) (que )?(eres|es|sos) (una |un )?(ia|inteligencia artificial|bot|robot|chatbot|asistente virtual|maquina)\b|\boculta que (eres|es) (una |un )?(ia|bot|robot|inteligencia artificial)\b/;
@@ -468,7 +480,7 @@ const RE_VIRTUAL_EN_AJUSTE = /\b(virtual|ia|bot|chatbot|robot|inteligencia artif
 
 // Archivos
 const RE_ANCLA_ARCHIVO = /\b(archivos?|fotos?|imagen(es)?|pdfs?|documentos?|adjuntos?|capturas?)\b/;
-const RE_NO_LEE = /\b(asesor|ejecutivo|equipo|persona)\b[^.]{0,20}\b(revis\w*|ver|vera|veran)\b|\bno (puedes|puedo|puede|podemos) (ver|abrir|leer)\b|\bhemos recibido (el|tu|su|los|sus) (archivo|documento|foto|imagen)/;
+const RE_NO_LEE = /\b(asesor\w*|ejecutivo\w*|persona|alguien del equipo|nuestro equipo|el equipo)\b[^.]{0,20}\b(revis\w*|(lo|la|los|las) (vera|veran))\b|\bno (puedes|puedo|puede|podemos) (ver|abrir|leer)\b|\bhemos recibido (el|tu|su|los|sus) (archivo|documento|foto|imagen)/;
 const RE_LEE = /\b(lee|leer|leelos|leelas|analiza|analizar|extrae)\b[^.]{0,20}\b(fotos?|archivos?|documentos?|pdfs?|imagen(es)?|adjuntos?)\b/;
 
 // Audios
@@ -491,7 +503,7 @@ const RE_PAUSA_QUE = /\b(silencio|pausa\w*)\b|\bno (respondas|intervengas|contes
 const RE_PAUSA_HORAS = /\b(\d{1,3}) ?(h|horas?)\b/;
 
 // Horario de atención
-const RE_ANCLA_HORARIO = /\batencion\b|\batendemos\b|\batiende\w*\b|\batender\b|\bfuera de horario\b|\ben horario\b|\bhorario (de )?(atencion|oficina|comercial|laboral|de trabajo)\b|\bhorarios?\b(?! (\w+ ){0,2}(salida|retorno|recojo|servicio|ruta|viaje|llegada|partida|vuelo|bus|unidad))/;
+const RE_ANCLA_HORARIO = /\batencion\b(?! inmediata)|\b(atendemos|atiende\w*|atender)\b(?! (\w+ ){0,2}(servicios?|rutas?|turnos?|viajes?|traslados?|recojos?)\b)|\bfuera de horario\b|\ben horario\b|\bhorario (de )?(atencion|oficina|comercial|laboral|de trabajo)\b|\bhorarios?\b(?! (\w+ ){0,2}(salida|retorno|recojo|servicio|ruta|viaje|llegada|partida|vuelo|bus|unidad))/;
 const RE_URL_TEL = /https?:\/\/\S+|www\.\S+|\S+@\S+|\+?\d[\d \-]{7,}\d/g;
 const RE_RANGO_HORAS = /(?<![\d:])(\d{1,2})(?::(\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?|horas?\b|hrs?\b|h\b)?\s*(?:a|-|–|—|hasta|al)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?|horas?\b|hrs?\b|h\b)?(?![\d:])/;
 const RE_RANGO_DIAS = /\b(lun|mar|mie|jue|vie|sab|dom)[a-z]*\.?\s*(?:a|-|–|al|hasta)\s*(lun|mar|mie|jue|vie|sab|dom)[a-z]*/;
@@ -550,7 +562,7 @@ const RE_SEG_NEGADO = /\b(no|nunca|ni)\b[^.]{0,20}\b(envies|mandes|hagas|aplicar
 
 // Llamar por teléfono
 const RE_LLAMADA = /\bllama(r)? al cliente\b|\bllamal[oa]s?\b|\bllamale\b|\bhaz(le)? una llamada\b|\brealiza una llamada\b|\bllamada telefonica al cliente\b/;
-const RE_LLAMADA_NEGADA = /\b(no|nunca)\b (\w+ ){0,2}llam/;
+const RE_LLAMADA_NEGADA = /\b(no|nunca)\b (\w+ ){0,2}llam|\b(conductor|chofer|ejecutivo|asesor|equipo|operador|coordinador|vendedor)\b[^.]{0,15}\bllam/;
 
 // Traslados
 const RE_PAX_MUCHOS = /\b(mas de|sobre) \d+ ?(pasajeros|personas|pax)\b|\+ ?\d+ ?(pasajeros|personas|pax)\b|\d+ ?\+ ?(pasajeros|personas|pax)\b/;
@@ -618,6 +630,12 @@ function recortarTexto(s: string, max: number): string {
   const c = Array.from(s.replace(/\s+/g, " ").trim());
   return c.length <= max ? c.join("") : `${c.slice(0, max - 1).join("").trimEnd()}…`;
 }
+
+/** Los motivos del sistema están escritos para el modelo («si no encuentras…»); aquí los lee el dueño. */
+const MOTIVOS_PARA_EL_DUENO = MOTIVOS_DERIVACION_SISTEMA
+  .replace(/\bno encuentras\b/g, "la IA no encuentra")
+  .replace(/\bno puedes\b/g, "la IA no puede")
+  .replace(/\btu alcance\b/g, "su alcance");
 
 /** Horas de pausa como las lee el motor: sin dato (la columna nace en 12) → 12. */
 function horasPausa(v: unknown): number {
@@ -739,7 +757,7 @@ export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: bo
       }
 
       // Decir que es una IA
-      const revela = RE_REVELA.test(n) && !RE_REVELA_NEGADO.test(n) && !RE_PREGUNTA_SI_ES_BOT.test(n);
+      const revela = revelaQueEsIA(n) && !RE_REVELA_NEGADO.test(n) && !RE_PREGUNTA_SI_ES_BOT.test(n);
       const oculta = RE_OCULTA.test(n);
       if (oculta) {
         if (aj.ocultar_ia) c("identidad_ia.duplica", { ajuste: AJ.identidad });
@@ -784,7 +802,7 @@ export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: bo
         else if (!exime && RE_DIRECCION_FUERTE.test(n) && aj.lugares_conocidos)
           c("direccion.contradice", {
             ajuste: AJ.direccion,
-            arreglo: `El ajuste «${TEMAS_AJUSTE.direccion.etiqueta}» dice: ${aj.lugares_conocidos}. Ahí manda el ajuste, y el cotizador de traslados cotiza por zona. Agrega a la frase «salvo ${aj.lugares_conocidos}», o bórrala; si también ahí quieres la dirección exacta, vacía el ajuste.`,
+            arreglo: `El ajuste «${TEMAS_AJUSTE.direccion.etiqueta}» dice: ${aj.lugares_conocidos}. Ahí manda el ajuste${ctx.trasladosActivos === true ? ", y el cotizador de traslados cotiza por zona" : ""}. Agrega a la frase «salvo ${aj.lugares_conocidos}», o bórrala; si también ahí quieres la dirección exacta, vacía el ajuste.`,
           });
       }
 
@@ -792,7 +810,7 @@ export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: bo
       if (RE_MOTIVO_DERIVA.test(n) && RE_ACCION_DERIVA.test(n) && !RE_PREGUNTA_SI_ES_BOT.test(n))
         c("derivacion.duplica", {
           ajuste: AJ.derivacion,
-          arreglo: `No hace falta cambiarla: el sistema ya pasa el chat a una persona ${MOTIVOS_DERIVACION_SISTEMA}${escalarSi ? `, y si el mensaje menciona: ${escalarSi}` : ""}. Al hacerlo, aparta a la IA de ese chat.`,
+          arreglo: `No hace falta cambiarla: el sistema ya pasa el chat a una persona ${MOTIVOS_PARA_EL_DUENO}${escalarSi ? `, y si el mensaje menciona: ${escalarSi}` : ""}. Al hacerlo, aparta a la IA de ese chat.`,
         });
 
       // Pausa cuando contesta una persona
@@ -958,8 +976,12 @@ export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: bo
   for (const k of ordenados) {
     const unico = k.unico ?? `${k.codigo}|${k.campo ?? ""}|${k.indice ?? ""}|${k.cita}`;
     const llave = k.unico ? `${k.codigo}|${unico}` : unico;
-    if (vistos.has(llave)) continue;
+    // La misma frase escrita dos veces en el mismo campo (dos mensajes citados idénticos) es UN
+    // hallazgo: la identidad que ve la pantalla es (código, campo, objetivo, frase).
+    const identidad = `${k.codigo}|${k.campo ?? ""}|${k.indice ?? ""}|${k.cita}|${k.otra ? `${k.otra.campo}|${k.otra.cita}` : ""}`;
+    if (vistos.has(llave) || vistos.has(identidad)) continue;
     vistos.add(llave);
+    vistos.add(identidad);
     const fila = TABLA[k.codigo];
     let arreglo = k.arreglo ?? fila.arreglo;
     if (k.codigo === "seguimiento.imposible") {
