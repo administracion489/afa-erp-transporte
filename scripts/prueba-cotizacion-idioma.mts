@@ -1,7 +1,7 @@
 // Matriz de lib/cotizacion-idioma.ts — npx tsx scripts/prueba-cotizacion-idioma.mts
 import {
   TEXTOS_PDF, t, normalizarIdioma, fmtFechaDoc, fmtImporte, considParaPdf, descripcionServicio, descripcionParaPdf,
-  DEFAULT_CONSID_ES, DEFAULT_CONSID_EN, etiquetaNivelIdioma, type ClaveTexto,
+  DEFAULT_CONSID_ES, DEFAULT_CONSID_EN, etiquetaNivelIdioma, CONSID_VERSION, esConsidFijada, type ClaveTexto,
 } from "../lib/cotizacion-idioma";
 import { htmlCotizacion } from "../lib/cotizacion-pdf";
 import { etiquetaNivel, equipamientoDeNivel, nivelDeFicha } from "../lib/costos/nivel-servicio";
@@ -120,6 +120,28 @@ console.log("5. PDF en inglés sin textos fijos en español (4 plantillas × 2 m
   // Lo escrito en español va tal cual y se avisa con su código
   const r2 = htmlCotizacion({ cot: { id: 1, numero_cotizacion: null, origen: "Lima", destino: "Ica", km: 0, atencion: null, asunto: null, punto_retorno: null, fecha_servicio: null, fecha_retorno: null, hora_ida: null, hora_retorno: null, tipo_servicio: null, incluye_igv: true, itinerario_texto: "Día 1\nSalida", created_at: "", idioma_pdf: "en" }, items: [{ descripcion: "Traslado a Ica", dias: 1, cantidad: 1, precio_unit: 100, descuento_pct: 0 }], vehiculos: [], consid: { incluye: ["Agua"], no_incluye: [], generales: [] } });
   ok(r2.html!.includes("Traslado a Ica") && r2.avisos.some(a => a.codigo === "textos_escritos_tal_cual"), "lo escrito va tal cual, con aviso textos_escritos_tal_cual");
+}
+
+console.log("6. Versión 2: en español gana la fila; en inglés no cambia nada");
+{
+  const cfgs = [null, undefined, {}, { condiciones_incluye: ["A"] }, { condiciones_incluye: [], condiciones_no_incluye: ["B"], condiciones_generales: null }];
+  const consids = [DEFAULT_CONSID_ES, { incluye: ["X"], no_incluye: [], generales: ["Y"] }];
+  for (const cfg of cfgs as any[]) for (const c of consids) {
+    const v2 = { ...c, version: CONSID_VERSION, plantilla: "corporativo" };
+    const r = considParaPdf(cfg, v2, "es");
+    ok(r.incluye === c.incluye && r.no_incluye === c.no_incluye && r.generales === c.generales && r.escritasTalCual.length === 0, `es + v2 = la fila (cfg ${JSON.stringify(cfg)})`);
+    ok(JSON.stringify(considParaPdf(cfg, v2, "en")) === JSON.stringify(considParaPdf(cfg, c, "en")), `en + v2 = sin versión (cfg ${JSON.stringify(cfg)})`);
+  }
+  ok(esConsidFijada({ version: 2 }) && !esConsidFijada({ version: "2" }) && !esConsidFijada(DEFAULT_CONSID_ES) && !esConsidFijada(null), "esConsidFijada");
+  // El PDF en inglés es el mismo con v2 o sin ella, en las cuatro plantillas.
+  const cot = { id: 1, numero_cotizacion: null, origen: "Lima", destino: "Ica", km: 0, atencion: null, asunto: null, punto_retorno: null, fecha_servicio: null, fecha_retorno: null, hora_ida: null, hora_retorno: null, tipo_servicio: null, incluye_igv: true, itinerario_texto: null, created_at: "2026-10-01T15:00:00Z", idioma_pdf: "en" };
+  const ahora = new Date("2026-10-20T15:00:00Z");
+  for (const p of ["corporativo", "moderno_fotos", "turistico", "ejecutivo"]) for (const c of consids) {
+    const cfg = { condiciones_incluye: ["De la plantilla"], titulo_documento: "T" };
+    const a = htmlCotizacion({ cot, items: [{ descripcion: "x", dias: 1, cantidad: 1, precio_unit: 1, descuento_pct: 0 }], vehiculos: [], consid: c, plantilla: p, cfg, ahora });
+    const b = htmlCotizacion({ cot, items: [{ descripcion: "x", dias: 1, cantidad: 1, precio_unit: 1, descuento_pct: 0 }], vehiculos: [], consid: { ...c, version: CONSID_VERSION }, plantilla: p, cfg, ahora });
+    ok(a.html === b.html, `${p}: en inglés, el mismo PDF con o sin v2`);
+  }
 }
 
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);

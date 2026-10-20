@@ -514,5 +514,30 @@ console.log("5. Cuentas por moneda");
   }
 }
 
+console.log("6. Versión 2: las condiciones FIJADAS en la fila ganan en español (lib/cotizacion-plantillas.ts)");
+{
+  // Con `version: 2` el documento es el MISMO que el de la regla vieja con una plantilla SIN condiciones:
+  // la fila manda, y todo lo demás de la plantilla (colores, título, cierre, cuentas) sigue igual.
+  const sinListas = (cfg: any) => (cfg ? { ...cfg, condiciones_incluye: null, condiciones_no_incluye: null, condiciones_generales: null } : cfg);
+  const filas = [DEFAULT_CONSID, { incluye: ["Conductor de la fila"], no_incluye: [], generales: ["General de la fila"] }];
+  let n = 0, iguales = 0;
+  for (let k = 0; k < 6; k++) for (const cot of COTS(k)) for (const p of PLANTILLAS) for (const cfg of CFGS) for (const fila of filas) for (const emp of EMPRESAS) {
+    n++;
+    const v2 = { ...fila, version: 2, plantilla: "corporativo" };
+    const a = N.htmlCotizacion({ cot, cliente: CLIENTES[2], items: ITEMS[k % 2], vehiculos: [], repr: "", consid: v2, plantilla: p, cfg, empresa: emp }).html;
+    const b = N.htmlCotizacion({ cot, cliente: CLIENTES[2], items: ITEMS[k % 2], vehiculos: [], repr: "", consid: fila, plantilla: p, cfg: sinListas(cfg), empresa: emp }).html;
+    if (a === b) iguales++;
+  }
+  ok(iguales === n, `v2 = regla vieja con la plantilla sin condiciones: ${iguales}/${n}`);
+  const cfg = CFGS[1];
+  for (const p of PLANTILLAS) {
+    const h = N.htmlCotizacion({ cot: COTS(1)[0], items: ITEMS[0], vehiculos: [], consid: { incluye: ["Conductor de la fila"], no_incluye: ["No de la fila"], generales: ["General de la fila"], version: 2 }, plantilla: p, cfg }).html!;
+    ok(h.includes("Conductor de la fila") && !h.includes(">Agua<"), `${p}: con v2 imprime la fila y no la lista de la plantilla`);
+  }
+  // Sin `version` (todas las cotizaciones de antes), la plantilla sigue ganando: la sección 1 lo compara byte a byte.
+  const h0 = N.htmlCotizacion({ cot: COTS(1)[0], items: ITEMS[0], vehiculos: [], consid: { incluye: ["Conductor de la fila"], no_incluye: [], generales: [] }, plantilla: "corporativo", cfg }).html!;
+  ok(h0.includes(">Agua<") && !h0.includes("Conductor de la fila"), "sin versión: la regla de siempre (gana la plantilla)");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

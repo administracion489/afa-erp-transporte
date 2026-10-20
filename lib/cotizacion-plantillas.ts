@@ -93,7 +93,7 @@ export const DESCRIPCION_SEGMENTO: Record<Segmento, string> = {
 
 /** «Turismo · particular»: el nombre de una celda de las reglas. */
 export function etiquetaCelda(u: { servicio: ServicioPlantilla; segmento: Segmento }): string {
-  return `${ETIQUETA_SERVICIO[u.servicio]} · ${ETIQUETA_SEGMENTO[u.segmento].toLowerCase()}`;
+  return `${ETIQUETA_SERVICIO[u.servicio] ?? String(u.servicio)} · ${(ETIQUETA_SEGMENTO[u.segmento] ?? String(u.segmento)).toLowerCase()}`;
 }
 
 /** El SQL que crea `diseno` y la tabla de reglas. Sin él, la pantalla lo nombra en ámbar. */
