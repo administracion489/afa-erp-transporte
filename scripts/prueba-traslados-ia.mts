@@ -2,8 +2,9 @@
 // Matriz de la IA del CRM cotizando traslados — npx tsx scripts/prueba-traslados-ia.mts
 //
 // lib/traslados/envio-ia.ts (qué acepta del modelo, qué le devuelve, si se envía sola),
-// lib/traslados/cotizacion-traslado.ts (la fila de `cotizaciones` y el contenido del PDF) y
-// lib/traslados/pdf-traslado.ts (el dibujo). Las zonas, categorías y precios se LEEN de los SQL de
+// lib/traslados/cotizacion-traslado.ts (la fila de `cotizaciones` y la entrada de su PDF) y
+// lib/pdf-corporativo.ts (el dibujo: la plantilla corporativa de /cotizaciones; su comparación con
+// el HTML está en prueba-traslados-pdf-corporativo.mts). Las zonas, categorías y precios se LEEN de los SQL de
 // semilla (supabase/traslados-02 y -03), como en prueba-traslados.mts.
 //
 // LA INVARIANTE QUE NO SE AFLOJA (pedido del dueño, 19-10-2026): por ahora solo el AEROPUERTO
@@ -16,7 +17,8 @@ import * as M from "../lib/traslados/motor";
 import * as E from "../lib/traslados/envio-ia";
 import * as C from "../lib/traslados/cotizacion-traslado";
 import * as T from "../lib/traslados/texto-libre";
-import { dibujarPdfTraslado } from "../lib/traslados/pdf-traslado";
+import { dibujarPdfCorporativo } from "../lib/pdf-corporativo";
+import { docCorporativo } from "../lib/cotizacion-corporativo";
 import { validarEntrada, type EntradaSimulador } from "../lib/traslados/api";
 import { totalesEnMoneda } from "../lib/cotizacion-moneda";
 import { empresaConDefectos } from "../lib/empresa-perfil";
@@ -580,25 +582,31 @@ const leidaH: C.FilaCotizacionLeida = {
   items_json: [{ ...filaH.items_json[0], descripcion: "x".repeat(5000) + " 🚐" }],
   consideraciones_json: { generales: [...filaH.consideraciones_json.generales, ...Array.from({ length: 90 }, (_, i) => `Consideración ${i + 1}\tcon\nsaltos 😀 y señal ñ`)], incluye: [], no_incluye: [] },
 };
-const contH = C.contenidoPdfTraslado(leidaH, empresaPrueba, { colorPrimario: "#0a7" });
-ok(contH.numero === "00123" && contH.fecha === "19/10/2026", `número con ceros y fecha de Lima (${contH.numero}, ${contH.fecha})`);
-ok(contH.color === "#00aa77", "color #rgb normalizado");
-ok(C.contenidoPdfTraslado(leidaH, empresaPrueba, { ejemplo: true }).numero === "EJEMPLO", "con «ejemplo» el número dice EJEMPLO");
-ok(contH.aviso === "La disponibilidad de la unidad y la reserva del servicio las confirma un ejecutivo.", "la línea fija");
+// El PDF es la plantilla corporativa: la entrada se arma desde la fila y `docCorporativo` decide
+// qué se imprime (lo mismo que /cotizaciones).
+const perfilPrueba = { nombre: "Transportes Ñandú", razon_social: "Transportes Ñandú S.A.C.", ruc: "20123456789", telefono: "+51 999 888 777", web: "www.ejemplo.pe", email: "ventas@ejemplo.pe", direccion: "Av. Peñaloza 123, Lima" };
+const entH = (x: Partial<Parameters<typeof C.entradaCorporativaTraslado>[1]> = {}, f: C.FilaCotizacionLeida = leidaH) =>
+  C.entradaCorporativaTraslado(f, { empresa: perfilPrueba, celular: "51966707225", ...x });
+const contH = docCorporativo(entH());
+ok(contH.titulo === "COTIZACIÓN N° 00123 - 2026" && contH.subtitulo.startsWith("Fecha: 19/10/2026"), `número con ceros y fecha de Lima (${contH.titulo} · ${contH.subtitulo})`);
+ok(contH.color === "#0b315f", "el color es el de la plantilla corporativa");
+ok(docCorporativo(entH({ ejemplo: true })).titulo.includes("N° EJEMPLO"), "con «ejemplo» el número dice EJEMPLO");
+ok(contH.notaTotales === "La disponibilidad de la unidad y la reserva del servicio las confirma un ejecutivo.", "la línea fija");
 ok(contH.logoUrl === null, "sin logo en el perfil: sin logo");
-ok(C.contenidoPdfTraslado(leidaH, empresaConDefectos({ nombre: "X", logo_url: "https://x/logo.png" })).logoUrl === "https://x/logo.png", "el logo es el del perfil");
+ok(docCorporativo(entH({ empresa: { nombre: "X", logo_url: "https://x/logo.png" } })).logoUrl === "https://x/logo.png", "el logo es el del perfil");
 ok(!JSON.stringify(contH).includes(LOGO_DEFAULT), "nunca el logo del bundle");
-const totTxt = contH.totales.map((t) => `${t.etiqueta} ${t.valor}`).join(" | ");
-ok(totTxt === `Subtotal S/ 700.00 | IGV (18 %) S/ 126.00 | Total (IGV incluido) S/ 826.00`, `totales con las funciones de /cotizaciones: ${totTxt}`);
-ok(contH.tabla.filas[0][1] === "2" && contH.tabla.filas[0][2] === "S/ 350.00", "2 tramos × S/ 350.00");
+const totTxt = [...contH.totales.filas, contH.totales.total].map((t) => `${t.rotulo} ${t.valor}`).join(" | ");
+ok(totTxt === `SUBTOTAL S/ 700.00 | IGV (18%) S/ 126.00 | TOTAL NETO S/ 826.00`, `totales con las funciones de /cotizaciones: ${totTxt}`);
+ok(contH.tabla.filas[0].cantidad === "2" && contH.tabla.filas[0].punit === "S/ 350.00", "2 tramos × S/ 350.00");
+ok(contH.detalle.asunto === null, "el asunto (texto interno) no se imprime");
 const usdR = M.evaluarTraslado(pedido({ telefono: "+13055551234" }), ctx);
 const usdF = C.filaCotizacionTraslado(usdR, entradaDe(pedido({ telefono: "+13055551234" })), { convId: "c", clienteId: null, atencion: null, config, firma: "f", hoy: HOY });
-const usdC = C.contenidoPdfTraslado({ ...usdF, id: 9 }, empresaPrueba, { hoy: HOY });
-ok(usdC.totales.at(-1)!.valor === `US$ ${usdR.precio!.total.toFixed(2)}`, `en dólares, el total del motor (${usdC.totales.at(-1)!.valor})`);
-let lanzaSinTc = false; try { C.contenidoPdfTraslado({ ...usdF, id: 9, tipo_cambio: null }, empresaPrueba); } catch { lanzaSinTc = true; }
+const usdC = docCorporativo(entH({}, { ...usdF, id: 9 }));
+ok(usdC.totales.total.valor === `US$ ${usdR.precio!.total.toFixed(2)}`, `en dólares, el total del motor (${usdC.totales.total.valor})`);
+let lanzaSinTc = false; try { docCorporativo(entH({}, { ...usdF, id: 9, tipo_cambio: null })); } catch { lanzaSinTc = true; }
 ok(lanzaSinTc, "en dólares sin tipo de cambio no hay PDF");
 ok(C.perfilConfigurado({ nombre: "X" }) && C.perfilConfigurado({ razon_social: "Y" }) && !C.perfilConfigurado(null) && !C.perfilConfigurado({ nombre: "  " }), "perfilConfigurado = el perfil tiene nombre");
-ok(C.contenidoPdfTraslado(leidaH, empresaConDefectos(null)).perfilSinConfigurar, "sin perfil, el contenido lo dice");
+ok(docCorporativo(entH({ empresa: null })).empresaNombre === empresaConDefectos(null).nombre, "sin perfil, la empresa es el aviso «configura el perfil»");
 ok(C.nombreArchivoPdf("00123") === "Cotizacion-00123.pdf" && /^[\x20-\x7e]+$/.test(C.nombreArchivoPdf("Ñ/../é 12")) && !C.nombreArchivoPdf("Ñ/../é 12").includes("/"), "nombre de archivo ASCII y sin barras");
 ok(C.rutaPdf(12, "2026-10", "123e4567-e89b-12d3-a456-426614174000") === "cotizaciones-ia/2026-10/12-123e4567-e89b-12d3-a456-426614174000.pdf", "ruta del bucket");
 for (const [id, ym, u] of [[0, "2026-10", "123e4567-e89b-12d3-a456-426614174000"], [1, "../..", "123e4567-e89b-12d3-a456-426614174000"], [1, "2026-10", "../x"]] as [number, string, string][]) {
@@ -615,27 +623,26 @@ const sharp = (await import("sharp")).default;
 const logoPng = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="300" height="110"><rect width="300" height="110" rx="14" fill="#00aa77"/><text x="150" y="70" font-size="44" font-family="Arial" font-weight="bold" fill="#fff" text-anchor="middle">LOGO</text></svg>`)).png().toBuffer();
 {
   let bytes: Uint8Array | null = null, err = "";
-  try { bytes = await dibujarPdfTraslado(contH, { bytes: new Uint8Array(logoPng), tipo: "png" }); } catch (e) { err = (e as Error).message; }
+  try { bytes = await dibujarPdfCorporativo(contH, { logo: { bytes: new Uint8Array(logoPng), tipo: "png" } }); } catch (e) { err = (e as Error).message; }
   ok(!!bytes, `el PDF hostil se dibuja sin lanzar ${err}`);
   if (bytes) {
     ok(Buffer.from(bytes.slice(0, 5)).toString("latin1") === "%PDF-", "empieza por %PDF-");
     const txt = textoDelPdf(bytes);
-    ok(txt.includes("Transportes Ñandú") && txt.includes("Peñaloza") && txt.includes("Atención:") && txt.includes("señal ñ"), "tildes y ñ se ven en el texto del PDF");
-    ok(txt.includes("COTIZACIÓN DE TRASLADO") && txt.includes("N° 00123") && txt.includes("S/ 826.00"), "título, número y total");
+    ok(txt.includes("TRANSPORTES ÑANDÚ") && txt.includes("Peñaloza") && txt.includes("ATENCIÓN:") && txt.includes("señal ñ"), "tildes y ñ se ven en el texto del PDF");
+    ok(txt.includes("COTIZACIÓN N° 00123 - 2026") && txt.includes("S/ 826.00"), "título, número y total");
     ok(txt.includes("La disponibilidad de la unidad y la reserva del servicio las confirma un ejecutivo."), "la línea fija se imprime");
-    ok(/Página 2 de \d/.test(txt), "noventa consideraciones parten la página");
     ok(!/\bAFA\b/.test(txt) && !txt.includes(LOGO_DEFAULT), "sin «AFA» ni el logo del bundle");
     ok(txt.includes("<script>"), "el <script> del cliente es texto plano (un PDF no ejecuta HTML)");
     const doc = await PDFDocument.load(bytes);
-    ok(doc.getPageCount() >= 2, `páginas: ${doc.getPageCount()}`);
+    ok(doc.getPageCount() >= 3, `noventa consideraciones parten la hoja 2 (páginas: ${doc.getPageCount()})`);
   }
   // Sin logo, con un logo corrupto y con el perfil vacío: tampoco lanza.
-  for (const [n, logo, emp] of [["sin logo", null, empresaPrueba], ["logo corrupto", { bytes: new Uint8Array([1, 2, 3]), tipo: "png" as const }, empresaPrueba], ["perfil vacío", null, empresaConDefectos(null)]] as const) {
-    let l = false; try { await dibujarPdfTraslado(C.contenidoPdfTraslado(leidaH, emp), logo); } catch { l = true; }
+  for (const [n, logo, emp] of [["sin logo", null, perfilPrueba], ["logo corrupto", { bytes: new Uint8Array([1, 2, 3]), tipo: "png" as const }, perfilPrueba], ["perfil vacío", null, null]] as const) {
+    let l = false; try { await dibujarPdfCorporativo(docCorporativo(entH({ empresa: emp })), { logo }); } catch { l = true; }
     ok(!l, `${n}: no lanza`);
   }
   // Los módulos no traen ningún dato de una empresa concreta.
-  for (const archivo of ["lib/traslados/cotizacion-traslado.ts", "lib/traslados/pdf-traslado.ts", "lib/traslados/envio-ia.ts"]) {
+  for (const archivo of ["lib/traslados/cotizacion-traslado.ts", "lib/pdf-corporativo.ts", "lib/cotizacion-corporativo.ts", "lib/traslados/envio-ia.ts", "lib/traslados/enviar-cotizacion-datos.ts"]) {
     const src = readFileSync(archivo, "utf8");
     ok(!src.includes("LOGO_DEFAULT") && !/\bAFA\b/.test(src) && !/afatours|logoafa/i.test(src), `${archivo} sin LOGO_DEFAULT ni «AFA»`);
   }
@@ -646,8 +653,8 @@ const logoPng = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"
     const rM = M.evaluarTraslado(pedido({ pax: 3, maletas: 2, sentido: "ida_retorno", fecha_retorno: "2026-10-28", hora_retorno: "18:00" }), ctx);
     const eM = { ...entradaDe(pedido({ pax: 3, maletas: 2, sentido: "ida_retorno", fecha_retorno: "2026-10-28", hora_retorno: "18:00" })), destino: "Hotel Belmond Miraflores Park, Av. Malecón de la Reserva 1035, Miraflores" };
     const fM = C.filaCotizacionTraslado(rM, eM, { convId: "c", clienteId: null, atencion: "Ana Pérez Núñez", config, firma: "f", hoy: HOY });
-    const cM = C.contenidoPdfTraslado({ ...fM, id: 1234, created_at: "2026-10-19T15:00:00Z" }, empresaPrueba, { colorPrimario: "#0b5394" });
-    writeFileSync(muestraDir, await dibujarPdfTraslado(cM, { bytes: new Uint8Array(logoPng), tipo: "png" }));
+    const cM = docCorporativo(entH({}, { ...fM, id: 1234, created_at: "2026-10-19T15:00:00Z" }));
+    writeFileSync(muestraDir, await dibujarPdfCorporativo(cM, { logo: { bytes: new Uint8Array(logoPng), tipo: "png" } }));
     console.log(`  muestra: ${muestraDir}`);
   }
 }
@@ -1332,12 +1339,15 @@ seccion("19. textoFinalTraslado: el modelo no escribe importes");
 }
 
 // ── 20. El logo del PDF ──────────────────────────────────────────────────────
-seccion("20. bajarLogo: solo del almacenamiento público del propio Supabase, solo PNG o JPG");
+seccion("20. bajarLogo: solo del almacenamiento público del propio Supabase, solo PNG o JPG (comprobados por sus bytes)");
 {
   const BASE = "https://abcd1234.supabase.co";
   const PUB = `${BASE}/storage/v1/object/public/empresa/logo.png`;
   const PNG = new Uint8Array(logoPng);
-  const JPG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+  // Un JPEG de verdad (con su SOF y su final): la cabecera sola ya no basta, porque pdf-lib lo
+  // incrusta sin decodificar y uno cortado saldría roto en el PDF.
+  const JPG = new Uint8Array(await sharp({ create: { width: 40, height: 20, channels: 3, background: "#0b315f" } }).jpeg().toBuffer());
+  const JPG_CORTADO = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]);
   const SVG = new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>`);
   const WEBP = new TextEncoder().encode("RIFF\0\0\0\0WEBPVP8 ");
   let llamadas = 0;
@@ -1346,6 +1356,7 @@ seccion("20. bajarLogo: solo del almacenamiento público del propio Supabase, so
   const casos: [string, string, typeof fetch, string | null, "png" | "jpg" | null, boolean][] = [
     ["PNG del bucket público", PUB, fetchCon(PNG), BASE, "png", true],
     ["JPG del bucket público", PUB.replace(".png", ".jpg"), fetchCon(JPG), BASE, "jpg", true],
+    ["JPG cortado (solo la cabecera)", PUB.replace(".png", ".jpg"), fetchCon(JPG_CORTADO), BASE, null, true],
     ["SVG", PUB.replace(".png", ".svg"), fetchCon(SVG), BASE, null, true],
     ["WebP", PUB.replace(".png", ".webp"), fetchCon(WEBP), BASE, null, true],
     ["host ajeno", "https://evil.test/storage/v1/object/public/empresa/logo.png", fetchCon(PNG), BASE, null, false],

@@ -48,13 +48,16 @@ export async function GET(req: NextRequest) {
     if (!["ok", "canal_no_whatsapp", "sin_remitente"].includes(plan.codigo)) {
       return error(plan.detalle, plan.codigo === "cotizacion_no_existe" ? 404 : 422);
     }
-    const pdf = await armarPdfDeFila(sb, cot!);
+    // El CELULAR que se imprime es el wa_id de esta conversación (el mismo que usará el envío).
+    const pdf = await armarPdfDeFila(sb, cot!, { celular: conv?.wa_id ?? null });
     return new Response(Buffer.from(pdf.bytes), {
       headers: {
         "Content-Type": "application/pdf",
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "no-store",
         "Content-Disposition": `inline; filename="${pdf.nombre}"`,
+        // Lo que el PDF no pudo poner (sin foto, sin cuenta en la moneda…): solo los códigos.
+        "X-Avisos-Pdf": pdf.avisos.map((a) => a.codigo).join(","),
       },
     });
   } catch (e) {

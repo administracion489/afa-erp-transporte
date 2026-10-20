@@ -112,6 +112,8 @@ export type FilaCotizacion = {
 /** La fila leída de vuelta (o armada para el PDF de ejemplo del simulador, con id 0). */
 export type FilaCotizacionLeida = {
   id: number;
+  /** El cliente del ERP vinculado (el PDF imprime sus datos); null o ausente = sin cliente. */
+  cliente_id?: number | null;
   numero_cotizacion?: string | null;
   created_at?: string | null;
   estado?: string | null;

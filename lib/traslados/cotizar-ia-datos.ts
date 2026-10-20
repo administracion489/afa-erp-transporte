@@ -43,7 +43,7 @@ import {
   type CodigoRevision, type DecisionEnvio,
 } from "./envio-ia";
 import { ETIQUETA_TEXTO_LIBRE } from "./texto-libre";
-import { armarPdfDeFila, leerCotizacionTraslado, leerPerfilPdf, type LogoPdf, type PerfilPdf } from "./enviar-cotizacion-datos";
+import { armarPdfDeFila, leerCotizacionTraslado, leerPerfilPdf, type AvisoPdfTraslado, type LogoPdf, type PerfilPdf } from "./enviar-cotizacion-datos";
 import { simularTrasladoConCatalogo } from "./servicio";
 import type { ResultadoTraslado } from "./motor";
 
@@ -98,6 +98,7 @@ export type ResultadoCotizarIA = {
 export type DepsCotizar = {
   simular?: typeof simularTrasladoConCatalogo;
   bajarLogo?: (url: string | null) => Promise<LogoPdf | null>;
+  bajarFoto?: (url: string) => Promise<Uint8Array | null>;
   ahoraMs?: () => number;
   azar?: () => string;
 };
@@ -338,10 +339,11 @@ async function decidirYRegistrar(
   let perfil: PerfilPdf | null = null;
   try { perfil = await leerPerfilPdf(sb); } catch { perfil = null; }
   const empresa = empresaConDefectos(perfil?.perfil ?? null);
-  let pdf: { bytes: Uint8Array; nombre: string; caption: string } | null = null;
+  let pdf: { bytes: Uint8Array; nombre: string; caption: string; avisos: AvisoPdfTraslado[] } | null = null;
   let errorPdf = "";
   if (perfil) {
-    try { pdf = await armarPdfDeFila(sb, x.leida, { perfil, bajarLogo: deps.bajarLogo }); }
+    // El CELULAR del PDF es el wa_id del hilo, copiado antes del bucle (nunca lo que escriba el modelo).
+    try { pdf = await armarPdfDeFila(sb, x.leida, { perfil, bajarLogo: deps.bajarLogo, bajarFoto: deps.bajarFoto, celular: ctx.remitente.waId, ahoraMs: deps.ahoraMs?.() }); }
     catch (err) { errorPdf = String((err as Error)?.message ?? err); }
   } else errorPdf = "No se pudo leer el perfil de la empresa.";
 
@@ -394,6 +396,8 @@ async function decidirYRegistrar(
         ...motivos.map((m) => `• ${MOTIVO_REVISION[m].texto} ${MOTIVO_REVISION[m].arreglo}`),
         ...textosLibresSospechosos(x.libres).map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
         errorPdf ? `• PDF: ${errorPdf.slice(0, 300)}` : "",
+        // Lo que el PDF no pudo poner (no bloquea el envío; aquí solo se dice).
+        ...(pdf?.avisos ?? []).map((a) => `• PDF: ${a.detalle}`),
         `Pedido: ${x.pedido}`,
         x.nota ? `Cómo se cotizó:\n${x.nota.slice(0, 1500)}` : "",
       ].filter(Boolean);
