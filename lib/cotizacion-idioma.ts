@@ -45,6 +45,8 @@ const ES = {
   // corporativo
   corp_titulo: "COTIZACIÓN N° {n} - {anio}",
   corp_sub: "Fecha: {fecha} · Válida 30 días",
+  /** Cuando la validez NO es de 30 días (un traslado vence en la fecha del servicio si llega antes). */
+  corp_sub_hasta: "Fecha: {fecha} · Válida hasta el {hasta}",
   corp_datos_cliente: "Datos del cliente",
   corp_cliente: "CLIENTE:",
   corp_direccion: "DIRECCIÓN:",
@@ -158,6 +160,7 @@ const EN: Record<ClaveTexto, string> = {
   rotulo_dni: "ID",
   corp_titulo: "QUOTATION No. {n} - {anio}",
   corp_sub: "Date: {fecha} · Valid for 30 days",
+  corp_sub_hasta: "Date: {fecha} · Valid until {hasta}",
   corp_datos_cliente: "Client details",
   corp_cliente: "CLIENT:",
   corp_direccion: "ADDRESS:",

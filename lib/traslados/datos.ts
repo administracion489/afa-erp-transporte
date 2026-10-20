@@ -28,10 +28,15 @@ export type ConfigTraslados = {
   ia_cotiza?: boolean;
   /** traslados-05: maestro del envío SIN revisión. Ausente = no. */
   envio_automatico?: boolean;
+  /** traslados-07: lo que INCLUYE un traslado (la cotización lo copia). Ausente = vacía (no se imprime). */
+  incluye?: string[];
+  /** traslados-07: lo que NO incluye. Ausente = vacía. */
+  no_incluye?: string[];
 };
 
 export const CONFIG_DEFECTO: ConfigTraslados = {
   validez_dias: 30, espera_gratis_min: 30, consideraciones: [], consideraciones_usd: [], ia_cotiza: false, envio_automatico: false,
+  incluye: [], no_incluye: [],
 };
 
 export type CatalogoTraslados = {
@@ -41,10 +46,14 @@ export type CatalogoTraslados = {
   config: ConfigTraslados;
   /** Faltan las columnas de traslados-05: la IA no cotiza y nada sale solo. */
   sinMigracionIA: boolean;
+  /** Faltan las listas Incluye / No incluye de traslados-07: las cotizaciones nacen sin ellas. */
+  sinMigracionListas?: boolean;
 };
 
 /** Las columnas de traslados-05 que se leen con el catálogo. */
 export const COLUMNAS_IA = ["envio_automatico", "ia_cotiza"] as const;
+/** Las columnas de traslados-07 de `traslados_config`. */
+export const COLUMNAS_LISTAS = ["incluye", "no_incluye"] as const;
 
 export const TABLAS_TRASLADOS = ["zonas_traslado", "traslado_categorias", "tarifas_traslado", "traslados_config"] as const;
 
@@ -77,15 +86,22 @@ class ErrorLectura extends Error {
 }
 
 /**
- * Como `todas`, pero con columnas ACCESORIAS: si el error nombra una de ellas, se relee sin TODAS
- * (son de la misma migración) y se avisa con `faltan: true`. Ante otro error, lanza.
+ * Como `todas`, pero con columnas ACCESORIAS: si el error nombra una de ellas, se relee sin ESA
+ * (solo la que el error nombra: hay columnas de dos migraciones, traslados-05 y -07) y se apunta en
+ * `faltan`. Ante otro error, lanza.
  */
-async function todasConAccesorias<T>(sb: Sb, tabla: string, base: string, accesorias: readonly string[], orden: string): Promise<{ filas: T[]; faltan: boolean }> {
-  try {
-    return { filas: await todas<T>(sb, tabla, `${base}, ${accesorias.join(", ")}`, orden), faltan: false };
-  } catch (e) {
-    if (e instanceof ErrorLectura && faltaAlguna(e.error, accesorias)) return { filas: await todas<T>(sb, tabla, base, orden), faltan: true };
-    throw e;
+async function todasConAccesorias<T>(sb: Sb, tabla: string, base: string, accesorias: readonly string[], orden: string): Promise<{ filas: T[]; faltan: string[] }> {
+  let quedan = [...accesorias];
+  const faltan: string[] = [];
+  for (;;) {
+    try {
+      return { filas: await todas<T>(sb, tabla, quedan.length ? `${base}, ${quedan.join(", ")}` : base, orden), faltan };
+    } catch (e) {
+      const col = e instanceof ErrorLectura ? faltaAlguna(e.error, quedan) : null;
+      if (!col) throw e;
+      faltan.push(col);
+      quedan = quedan.filter((c) => c !== col);
+    }
   }
 }
 
@@ -94,9 +110,10 @@ export async function cargarCatalogo(sb: Sb): Promise<CatalogoTraslados> {
     todasConAccesorias<ZonaEnvio>(sb, "zonas_traslado", "id, nombre, tipo, padre_id, sector, alias, lat, lng, radio_m, orden, activo", ["envio_automatico"], "id"),
     todas<CategoriaTraslado>(sb, "traslado_categorias", "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo, orden, activo", "clave"),
     todas<TarifaTraslado>(sb, "tarifas_traslado", "id, zona_a_id, zona_b_id, categoria, moneda, precio_tramo, activo", "id"),
-    todasConAccesorias<Partial<ConfigTraslados>>(sb, "traslados_config", "validez_dias, espera_gratis_min, consideraciones, consideraciones_usd", ["ia_cotiza", "envio_automatico"], "id"),
+    todasConAccesorias<Partial<ConfigTraslados>>(sb, "traslados_config", "validez_dias, espera_gratis_min, consideraciones, consideraciones_usd", [...COLUMNAS_IA, ...COLUMNAS_LISTAS], "id"),
   ]);
-  const sinMigracionIA = zonas.faltan || cfg.faltan;
+  const sinMigracionIA = zonas.faltan.length > 0 || cfg.faltan.some((c) => (COLUMNAS_IA as readonly string[]).includes(c));
+  const sinMigracionListas = cfg.faltan.some((c) => (COLUMNAS_LISTAS as readonly string[]).includes(c));
   const c = cfg.filas[0] ?? {};
   return {
     zonas: zonas.filas.map((z) => ({
@@ -112,8 +129,11 @@ export async function cargarCatalogo(sb: Sb): Promise<CatalogoTraslados> {
       consideraciones_usd: Array.isArray(c.consideraciones_usd) ? c.consideraciones_usd : [],
       ia_cotiza: !sinMigracionIA && c.ia_cotiza === true,
       envio_automatico: !sinMigracionIA && c.envio_automatico === true,
+      incluye: Array.isArray(c.incluye) ? c.incluye : [],
+      no_incluye: Array.isArray(c.no_incluye) ? c.no_incluye : [],
     },
     sinMigracionIA,
+    sinMigracionListas,
   };
 }
 
