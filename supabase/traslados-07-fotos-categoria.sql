@@ -9,16 +9,27 @@
 -- Bloqueo: las columnas no tienen default o lo tienen constante (PG11+: no reescriben la tabla). Los CHECK
 -- revalidan traslado_categorias, que son unas pocas filas.
 
--- 0) Requisitos.
-do $$ begin
+-- 0) Requisitos. Y se DETIENE (sin cambiar nada) si storage.objects tiene una política de escritura que
+--    no se acota por bucket_id: valdría para todos los buckets y abriría también traslados-fotos (ver 3).
+do $$ declare g text; begin
   if to_regclass('public.traslado_categorias') is null or to_regclass('public.traslados_config') is null then
     raise exception 'Antes de traslados-07 hay que correr: traslados-01-tablas.sql';
+  end if;
+  g := (select string_agg(policyname || ' (' || cmd || ')', ', ') from pg_policies
+         where schemaname = 'storage' and tablename = 'objects' and cmd in ('INSERT', 'UPDATE', 'DELETE', 'ALL')
+           and not (roles <@ array['service_role']::name[])
+           and coalesce(qual, '') || ' ' || coalesce(with_check, '') !~* 'bucket_id');
+  if g is not null then
+    raise exception 'storage.objects tiene políticas de escritura sin bucket_id: %. Acótalas con bucket_id = ''…'' y vuelve a correr.', g;
   end if;
 end $$;
 
 -- 1) La categoría: foto exterior, foto interior y la descripción que lee el cliente (≤ 300 caracteres).
---    La URL solo puede ser del bucket traslados-fotos (lo sube el servidor, ver 3) y por https. El CHECK no
---    sabe el host del proyecto: lo comprueba el servidor antes de descargar (urlFotoPermitida).
+--    La URL tiene la forma EXACTA que escribe el servidor (rutaFoto, lib/traslados/fotos-categoria.ts):
+--    https://<host>/storage/v1/object/public/traslados-fotos/categorias/<CLAVE>/<lado>-<uuid>.jpg, y el
+--    lado es el de su columna. Sin `..`, comillas, consulta ni usuario. El CHECK no sabe el host del
+--    proyecto: lo comprueba el servidor antes de descargar (urlFotoPermitida). La CLAVE no se ata a la de
+--    la fila a propósito: renombrar una categoría (on update cascade) no puede chocar con su foto.
 alter table public.traslado_categorias
   add column if not exists foto_externa_url    text,
   add column if not exists foto_interna_url    text,
@@ -27,12 +38,10 @@ alter table public.traslado_categorias
   drop constraint if exists traslado_categorias_foto_externa_ck,
   drop constraint if exists traslado_categorias_foto_interna_ck,
   drop constraint if exists traslado_categorias_descripcion_ck,
-  add constraint traslado_categorias_foto_externa_ck check (foto_externa_url is null
-    or (left(foto_externa_url, 8) = 'https://'
-        and strpos(foto_externa_url, '/storage/v1/object/public/traslados-fotos/') > 0)),
-  add constraint traslado_categorias_foto_interna_ck check (foto_interna_url is null
-    or (left(foto_interna_url, 8) = 'https://'
-        and strpos(foto_interna_url, '/storage/v1/object/public/traslados-fotos/') > 0)),
+  add constraint traslado_categorias_foto_externa_ck check (foto_externa_url is null or foto_externa_url ~
+    '^https://[A-Za-z0-9-]+([.][A-Za-z0-9-]+)*(:[0-9]{1,5})?/storage/v1/object/public/traslados-fotos/categorias/[A-Z0-9_]{1,30}/externa-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[.]jpg$'),
+  add constraint traslado_categorias_foto_interna_ck check (foto_interna_url is null or foto_interna_url ~
+    '^https://[A-Za-z0-9-]+([.][A-Za-z0-9-]+)*(:[0-9]{1,5})?/storage/v1/object/public/traslados-fotos/categorias/[A-Z0-9_]{1,30}/interna-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[.]jpg$'),
   add constraint traslado_categorias_descripcion_ck check (descripcion_cliente is null
     or char_length(descripcion_cliente) <= 300);
 
@@ -61,8 +70,8 @@ comment on column public.traslados_config.no_incluye is
 --    service-role (POST/DELETE /api/traslados/categorias/foto), que verifica el módulo «tarifas» y la firma
 --    del JPEG. Estas fotos las manda la IA a clientes sin revisión: no se sirven desde vehiculos-fotos, que
 --    cualquier sesión del ERP puede sobrescribir. OJO: una política GLOBAL (sin bucket_id) abriría también
---    este bucket; diagnostico-traslados-07.sql las busca. El `do update` reafirma la configuración si
---    alguien la cambió a mano.
+--    este bucket: el paso 0 se detiene si ve una, y diagnostico-traslados-07.sql las busca después. El
+--    `do update` reafirma la configuración si alguien la cambió a mano.
 insert into storage.buckets (id, name, public, allowed_mime_types, file_size_limit)
 values ('traslados-fotos', 'traslados-fotos', true, '{image/jpeg}', 614400)
 on conflict (id) do update set public = excluded.public,

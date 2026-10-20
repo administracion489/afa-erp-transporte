@@ -56,7 +56,7 @@ filas(orden, pregunta, resultado, como) as (
       on ic.table_schema = 'public' and ic.table_name = cols.t and ic.column_name = cols.c
   union all
   select 31, 'C · CHECK ' || cks.n, coalesce(pg_get_constraintdef(pc.oid), 'FALTA'),
-         'Las URL solo de /storage/v1/object/public/traslados-fotos/ por https; descripción ≤ 300.'
+         'URL con la forma de rutaFoto: https://<host>/…/traslados-fotos/categorias/<CLAVE>/<lado>-<uuid>.jpg; descripción ≤ 300.'
     from cks left join pg_constraint pc
       on pc.conname = cks.n and pc.conrelid = to_regclass('public.traslado_categorias')
   union all
