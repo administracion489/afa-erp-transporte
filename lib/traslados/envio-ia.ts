@@ -31,6 +31,11 @@
 //     escribir. Y el TEXTO del turno lo decide `textoFinalTraslado`: con una cotización, el mensaje
 //     lo escribe SIEMPRE el código; sin ella (preguntar o derivar), el del modelo solo pasa si no
 //     menciona dinero.
+//  5. LOS TEXTOS DEL CÓDIGO HABLAN COMO EL AGENTE (20-10-2026). El trato (usted / tú) y el modo de
+//     preguntar (todo junto / uno por mensaje) salen del MISMO ajuste del agente que lee el prompt
+//     (lib/crm-ia-ajustes.ts → `estiloDe`): un prompt de usted y un mensaje del código que tutea son
+//     dos voces en el chat. Por eso `estilo` es OBLIGATORIO en los textos que ve el cliente; la
+//     instrucción al modelo (`respuestaParaModelo`) lo recibe opcional y, sin él, es la de siempre.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import type { EntradaSimulador, LugarEntrada } from "./api";
@@ -41,7 +46,8 @@ import {
 import { totalesEnMoneda, normalizarMoneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { LINEA_DISPONIBILIDAD } from "./cotizacion-traslado";
-import { importesEnTexto, mencionaDinero, primerNombreSeguro, textoLibreSospechoso, type MotivoTextoLibre } from "./texto-libre";
+import { importesEnTexto, mencionaDinero, primerNombreSeguro, referenciaImprimible, textoLibreSospechoso, type MotivoTextoLibre } from "./texto-libre";
+import type { EstiloMensajes, ModoPreguntas } from "../crm-ia-ajustes";
 
 // ── 1. La herramienta ────────────────────────────────────────────────────────
 
@@ -380,20 +386,55 @@ const LINEA_EJECUTIVO = LINEA_DISPONIBILIDAD;
  * El mensaje de una cotización de traslado, escrito por el CÓDIGO (`textoFinalTraslado` lo usa
  * siempre que el turno trae una cotización). En revisión no lleva ningún importe. El nombre solo
  * entra si es una palabra de letras (`primerNombreSeguro`): lo puede haber escrito el modelo.
+ * Habla con el trato del agente (`estilo`, obligatorio): con «tu», byte a byte el texto de antes
+ * de existir el ajuste; con «usted», la misma frase en el otro trato. Sin estilo (un llamador en
+ * JS) se trata de usted, que es el defecto del ajuste. Los importes, el número y la validez no
+ * cambian con el trato.
  */
-export function mensajeCotizacionCodigo(x: { nombre: string; numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean }): string {
+export function mensajeCotizacionCodigo(x: {
+  nombre: string; numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean;
+  estilo: EstiloMensajes;
+}): string {
   const nombre = primerNombreSeguro(x.nombre);
   const hola = nombre ? `Hola ${nombre},` : "Hola,";
+  const tu = x.estilo?.tratamiento === "tu";
+  const su = tu ? "tu" : "su";
   if (x.yaEnviada) {
     const total = x.total ? ` El total es ${x.total} (IGV incluido)${x.validez ? `, válida hasta el ${x.validez}` : ""}.` : "";
-    return `${hola} la cotización N° ${x.numero} de tu traslado ya te la envié por este chat.${total} ${LINEA_EJECUTIVO}`;
+    return `${hola} la cotización N° ${x.numero} de ${su} traslado ya ${tu ? "te" : "se"} la envié por este chat.${total} ${LINEA_EJECUTIVO}`;
   }
   if (x.decision === "automatico") {
     const total = x.total ? ` El total es ${x.total} (IGV incluido)` : "";
     const validez = x.validez ? `${total ? "," : " La cotización es"} válida hasta el ${x.validez}` : "";
-    return `${hola} te envío la cotización N° ${x.numero} de tu traslado.${total}${validez}${total || validez ? "." : ""} ${LINEA_EJECUTIVO}`;
+    return `${hola} ${tu ? "te" : "le"} envío la cotización N° ${x.numero} de ${su} traslado.${total}${validez}${total || validez ? "." : ""} ${LINEA_EJECUTIVO}`;
   }
-  return `${hola} registré tu pedido de traslado con la cotización N° ${x.numero}. Un ejecutivo la revisa y te la envía por este chat en breve.`;
+  return `${hola} registré ${su} pedido de traslado con la cotización N° ${x.numero}. Un ejecutivo la revisa y ${tu ? "te" : "se"} la envía por este chat en breve.`;
+}
+
+/**
+ * «Me falta…»: lo que el CÓDIGO le pide al cliente cuando el texto del modelo no se puede mandar
+ * (menciona dinero) y la herramienta pidió datos. Con «todo junto», la lista entera («Para cotizar
+ * su traslado me falta: a; b.»); con «uno por mensaje», SOLO el primero, en el orden en que los da
+ * el motor («Para cotizar su traslado, ¿me indica a?»). Con «tu» y «todo junto», byte a byte el
+ * texto de antes. Sin ningún dato, "" (quien llama manda la derivación).
+ */
+/**
+ * El motor pide de nuevo una dirección que Google no encontró citando lo que escribió el cliente
+ * («… (no se encontró «X»)»). Esa cita sale sin revisión desde el número oficial: si es texto libre
+ * sospechoso (un importe, un Yape, un enlace, demasiado largo) se quita y queda solo el pedido.
+ */
+function sinCitaSospechosa(dato: string): string {
+  return dato.replace(/\s*\(no se encontró «([\s\S]*)»\)\s*$/, (todo, cita: string) => (referenciaImprimible(cita) ? todo : "")).trim();
+}
+
+export function fraseFaltanTraslado(faltan: readonly unknown[] | null | undefined, estilo: EstiloMensajes): string {
+  const f = (faltan ?? []).map((x) => sinCitaSospechosa(String(x ?? "").trim())).filter(Boolean);
+  if (f.length === 0) return "";
+  const tu = estilo?.tratamiento === "tu";
+  if (estilo?.preguntas === "una_por_mensaje") {
+    return tu ? `Para cotizar tu traslado, ¿me indicas ${f[0]}?` : `Para cotizar su traslado, ¿me indica ${f[0]}?`;
+  }
+  return `Para cotizar ${tu ? "tu" : "su"} traslado me falta: ${f.join("; ")}.`;
 }
 
 /** Lo que devolvió `cotizar_traslado` en el turno, en lo que importa para el texto final. */
@@ -408,22 +449,27 @@ export type TrasladoDelTurno = {
  *  · con una cotización (automática, en revisión o ya enviada), SIEMPRE el del código: el modelo
  *    no escribe el total, ni el IGV, ni la validez, ni un «aprox.»;
  *  · sin cotización (preguntar o derivar), el del modelo SOLO si no menciona dinero
- *    (`mencionaDinero`); si menciona, «me falta: …» o el mensaje de derivación.
- * Sin herramienta en el turno, el texto no se toca.
+ *    (`mencionaDinero`); si menciona, «me falta: …» (`fraseFaltanTraslado`) o el mensaje de derivación.
+ * Sin herramienta en el turno, el texto no se toca. Lo que escribe el código va con el `estilo`
+ * del agente (trato y modo de preguntar); la derivación ya llega armada con él.
  */
 export function textoFinalTraslado(
   texto: string,
   t: TrasladoDelTurno | null | undefined,
-  x: { nombre: string; derivacion: string },
+  x: { nombre: string; derivacion: string; estilo: EstiloMensajes },
 ): string {
   if (!t) return texto;
   const c = t.cotizacion;
   if (c) {
-    return mensajeCotizacionCodigo({ nombre: x.nombre, numero: c.numero, decision: c.decision, total: c.total, validez: c.validez, yaEnviada: c.yaEnviada });
+    return mensajeCotizacionCodigo({
+      nombre: x.nombre, numero: c.numero, decision: c.decision, total: c.total, validez: c.validez, yaEnviada: c.yaEnviada, estilo: x.estilo,
+    });
   }
   if (!texto || !mencionaDinero(texto)) return texto;
   const faltan = t.accion === "preguntar" ? (t.faltan ?? []).filter(Boolean) : [];
-  return faltan.length ? `Para cotizar tu traslado me falta: ${faltan.join("; ")}.` : x.derivacion;
+  // Lo que reemplaza al texto del modelo tampoco puede hablar de dinero (última barrera).
+  const f = faltan.length ? fraseFaltanTraslado(faltan, x.estilo) : "";
+  return f && !mencionaDinero(f) ? f : x.derivacion;
 }
 
 /** Qué campo libre es sospechoso y por qué, para la nota del ejecutivo. */
@@ -445,6 +491,20 @@ const codigoPublico = (r: ResultadoTraslado): CodigoPublico =>
   : r.codigo === "fecha_pasada" ? "fecha_pasada"
   : "requiere_ejecutivo";
 
+/**
+ * Qué preguntarle al cliente. Sin `preguntas` (o «todo_junto»), byte a byte la de siempre: todo en
+ * un mensaje. Con «una_por_mensaje», SOLO el primer dato que falta (el orden es el del motor) y los
+ * demás se nombran para después: el modelo sabe que existen y no los adelanta.
+ */
+function instruccionPreguntar(faltan: string[], preguntas?: ModoPreguntas): string {
+  if (preguntas === "una_por_mensaje" && faltan.length > 0) {
+    const [primero, ...resto] = faltan;
+    const despues = resto.length ? ` Lo demás que falta (${resto.join("; ")}) se lo preguntas después, de a uno.` : "";
+    return `Pregúntale al cliente SOLO por: ${primero}.${despues} Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos que ya tienes.`;
+  }
+  return `Pregúntale al cliente, en un solo mensaje: ${faltan.join("; ")}. Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos.`;
+}
+
 /** Las claves que puede llevar la respuesta al modelo. La matriz lo comprueba. */
 export const CLAVES_RESPUESTA_MODELO = ["accion", "codigo", "faltan", "vehiculo", "sentido", "tramos", "cotizacion", "instruccion"] as const;
 export const CLAVES_COTIZACION_MODELO = ["numero", "envio", "total", "incluye_igv", "validez"] as const;
@@ -457,13 +517,15 @@ export const CLAVES_COTIZACION_MODELO = ["numero", "envio", "total", "incluye_ig
 export function respuestaParaModelo(x: {
   resultado: ResultadoTraslado;
   cotizacion?: { numero: string; decision: DecisionEnvio } | null;
+  /** El modo de preguntar del agente. Sin él, la instrucción de siempre (todo junto). */
+  preguntas?: ModoPreguntas;
 }): string {
   const r = x.resultado;
   const out: Record<string, unknown> = { accion: r.accion, codigo: codigoPublico(r) };
   if (r.accion === "preguntar") {
     const faltan = (r.faltan ?? []).map((f) => String(f).slice(0, 200));
     out.faltan = faltan;
-    out.instruccion = `Pregúntale al cliente, en un solo mensaje: ${faltan.join("; ")}. Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos.`;
+    out.instruccion = instruccionPreguntar(faltan, x.preguntas);
   } else if (r.accion === "derivar") {
     out.instruccion = "Este pedido lo atiende un ejecutivo. Responde con el mensaje de derivación y no menciones precios.";
   } else {
@@ -496,12 +558,13 @@ export function respuestaDerivar(): string {
   return JSON.stringify({ accion: "derivar", codigo: "requiere_ejecutivo", instruccion: "Este pedido lo atiende un ejecutivo. Responde con el mensaje de derivación y no menciones precios." });
 }
 
-/** Respuesta al modelo cuando hay que volver a preguntar algo que el validador no aceptó. */
-export function respuestaPreguntar(faltan: string[]): string {
+/** Respuesta al modelo cuando hay que volver a preguntar algo que el validador no aceptó. Sin
+ *  `preguntas`, byte a byte la de siempre. */
+export function respuestaPreguntar(faltan: string[], preguntas?: ModoPreguntas): string {
   const f = faltan.map((x) => String(x).slice(0, 200));
   return JSON.stringify({
     accion: "preguntar", codigo: "falta_dato", faltan: f,
-    instruccion: `Pregúntale al cliente, en un solo mensaje: ${f.join("; ")}. Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos.`,
+    instruccion: instruccionPreguntar(f, preguntas),
   });
 }
 
