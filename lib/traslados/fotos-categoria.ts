@@ -119,25 +119,142 @@ export function revisarJpeg(bytes: Uint8Array | null | undefined, opts: { maxByt
   return mal("sin_dimensiones", "El JPEG no declara sus dimensiones.");
 }
 
-export type RevisionPng = { ok: true; ancho: number; alto: number } | { ok: false; detalle: string };
+// ── El PNG del logo ──────────────────────────────────────────────────────────
+//
+// pdf-lib (UPNG) DESCOMPRIME el PNG entero para incrustarlo, y no pone ningún tope: el IHDR no
+// basta. Una animación (APNG) declara en su `fcTL` las medidas de cada fotograma y UPNG reserva
+// memoria para esas, no para las de la cabecera (un PNG de 162 B con un fotograma de 16000 × 16000
+// tardó 24 s y ~1.1 GB); y el IDAT se infla entero aunque traiga mucho más de lo que la imagen ocupa.
+// Por eso `revisarPng` recorre TODOS los chunks (que cada uno quepa en el archivo, sin animación, IDAT
+// seguidos) y comprueba el tamaño del IDAT contra el que la cabecera permite; y si se le pasa
+// `inflar` (el servidor: `zlib.inflateSync` con `maxOutputLength`), lo infla con TOPE y exige
+// exactamente los bytes que la cabecera declara. Sin `inflar` no se descomprime nada (es puro y la
+// pantalla también lo puede usar), y entonces el tope es el del tamaño del IDAT.
+
+export type CodigoPng =
+  | "ok" | "vacio" | "no_es_png" | "muy_pesado" | "truncado" | "estructura" | "animado" | "formato"
+  | "sin_dimensiones" | "muy_grande" | "sin_datos" | "idat_desproporcionado" | "idat_invalido";
+
+export type RevisionPng =
+  | { ok: true; codigo: "ok"; ancho: number; alto: number; entrelazado: boolean; detalle: "" }
+  | { ok: false; codigo: Exclude<CodigoPng, "ok">; detalle: string };
+
+/** Canales por tipo de color (IHDR) y profundidades de bit válidas para cada uno (PNG 1.2, tabla 11.1). */
+const CANALES_PNG: Record<number, { canales: number; bits: readonly number[] }> = {
+  0: { canales: 1, bits: [1, 2, 4, 8, 16] },
+  2: { canales: 3, bits: [8, 16] },
+  3: { canales: 1, bits: [1, 2, 4, 8] },
+  4: { canales: 2, bits: [8, 16] },
+  6: { canales: 4, bits: [8, 16] },
+};
+/** Las siete pasadas de Adam7: (x0, y0, dx, dy). */
+const ADAM7: readonly (readonly [number, number, number, number])[] = [
+  [0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2],
+];
+/** Los chunks de una animación (APNG): UPNG los decodifica con las medidas que ellos declaran. */
+const CHUNKS_ANIMACION = new Set(["acTL", "fcTL", "fdAT"]);
 
 /**
- * Las dimensiones de un PNG leídas de su IHDR, sin decodificarlo: es lo que frena una «bomba» (un
- * PNG de pocos KB que pdf-lib descomprimiría a cientos de MB). Topes no medidos: un logo real mide
- * cientos de px por lado.
+ * Cuántos bytes ocupa la imagen YA INFLADA (con el byte de filtro de cada línea): lo que debe dar
+ * exactamente el IDAT. Con entrelazado (Adam7) es la suma de las siete subimágenes.
  */
-export function revisarPng(b: Uint8Array | null | undefined, opts: { maxLado?: number; maxPixeles?: number } = {}): RevisionPng {
+export function bytesCrudosPng(ancho: number, alto: number, tipoColor: number, profundidad: number, entrelazado: boolean): number {
+  const bitsPx = (CANALES_PNG[tipoColor]?.canales ?? 4) * profundidad;
+  const linea = (w: number) => Math.ceil((w * bitsPx) / 8) + 1;
+  if (!entrelazado) return linea(ancho) * alto;
+  let total = 0;
+  for (const [x0, y0, dx, dy] of ADAM7) {
+    const w = ancho > x0 ? Math.ceil((ancho - x0) / dx) : 0;
+    const h = alto > y0 ? Math.ceil((alto - y0) / dy) : 0;
+    if (w && h) total += linea(w) * h;
+  }
+  return total;
+}
+
+/**
+ * El mayor IDAT (comprimido) que un PNG honesto puede necesitar para `crudos` bytes: deflate sin
+ * comprimir («stored») añade 5 bytes cada 65 535 más los 6 de zlib; se deja un margen amplio para
+ * codificadores que expanden un poco los datos que no se comprimen (no medido).
+ */
+export const idatMaximo = (crudos: number) => crudos + Math.ceil(crudos / 8) + 1024;
+
+/**
+ * ¿Es un PNG que pdf-lib puede incrustar sin riesgo? Recorre todos sus chunks sin decodificar nada;
+ * con `inflar` (servidor), además infla el IDAT con tope. Topes no medidos: un logo real mide
+ * cientos de px por lado y pesa decenas de KB.
+ */
+export function revisarPng(
+  b: Uint8Array | null | undefined,
+  opts: { maxLado?: number; maxPixeles?: number; maxBytes?: number; inflar?: (zlib: Uint8Array, maxSalida: number) => number } = {},
+): RevisionPng {
   const maxLado = opts.maxLado ?? 4000;
   const maxPixeles = opts.maxPixeles ?? 4_000_000;
+  const maxBytes = opts.maxBytes ?? Infinity;
   const x = b ?? new Uint8Array(0);
-  if (x.length < 33 || formatoPorFirma(x) !== "png") return { ok: false, detalle: "No es un PNG." };
-  const tipo = String.fromCharCode(x[12], x[13], x[14], x[15]);
-  if (tipo !== "IHDR") return { ok: false, detalle: "El PNG no empieza por su cabecera (IHDR)." };
+  const mal = (codigo: Exclude<CodigoPng, "ok">, detalle: string): RevisionPng => ({ ok: false, codigo, detalle });
+  if (!x.length) return mal("vacio", "El archivo está vacío.");
+  if (x.length > maxBytes) return mal("muy_pesado", `El PNG pesa ${Math.ceil(x.length / 1024)} KB y el máximo es ${Math.floor(maxBytes / 1024)} KB.`);
+  if (formatoPorFirma(x) !== "png" || x[4] !== 0x0d || x[5] !== 0x0a || x[6] !== 0x1a || x[7] !== 0x0a) return mal("no_es_png", "No es un PNG.");
   const u32 = (i: number) => ((x[i] << 24) >>> 0) + (x[i + 1] << 16) + (x[i + 2] << 8) + x[i + 3];
-  const ancho = u32(16), alto = u32(20);
-  if (!ancho || !alto) return { ok: false, detalle: "El PNG no declara sus dimensiones." };
-  if (ancho > maxLado || alto > maxLado || ancho * alto > maxPixeles) return { ok: false, detalle: `El PNG mide ${ancho} × ${alto} px: es demasiado grande.` };
-  return { ok: true, ancho, alto };
+  const letra = (c: number) => (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
+
+  let pos = 8;
+  let ihdr: { ancho: number; alto: number; prof: number; color: number; entrelazado: boolean } | null = null;
+  let hayPlte = false, fin = false, idatCerrado = false;
+  const idats: [number, number][] = [];
+  let idatTotal = 0;
+  while (pos < x.length) {
+    if (pos + 12 > x.length) return mal("truncado", "El PNG está cortado.");
+    const largo = u32(pos);
+    if (largo > 0x7fffffff || pos + 12 + largo > x.length) return mal("truncado", "El PNG está cortado (un bloque dice medir más que el archivo).");
+    if (![4, 5, 6, 7].every((i) => letra(x[pos + i]))) return mal("estructura", "La estructura del PNG no es la esperada.");
+    const tipo = String.fromCharCode(x[pos + 4], x[pos + 5], x[pos + 6], x[pos + 7]);
+    const datos = pos + 8;
+    if (!ihdr && tipo !== "IHDR") return mal("estructura", "El PNG no empieza por su cabecera (IHDR).");
+    if (CHUNKS_ANIMACION.has(tipo)) return mal("animado", "Es un PNG animado (APNG): usa uno sin animación.");
+    if (tipo === "IHDR") {
+      if (ihdr || largo !== 13) return mal("estructura", "La cabecera del PNG no es la esperada.");
+      const prof = x[datos + 8], color = x[datos + 9], compresion = x[datos + 10], filtro = x[datos + 11], entre = x[datos + 12];
+      const ancho = u32(datos), alto = u32(datos + 4);
+      if (!ancho || !alto) return mal("sin_dimensiones", "El PNG no declara sus dimensiones.");
+      if (ancho > maxLado || alto > maxLado || ancho * alto > maxPixeles) return mal("muy_grande", `El PNG mide ${ancho} × ${alto} px: es demasiado grande.`);
+      if (!CANALES_PNG[color]?.bits.includes(prof) || compresion !== 0 || filtro !== 0 || (entre !== 0 && entre !== 1)) {
+        return mal("formato", "El PNG usa un formato que no corresponde (tipo de color, bits o compresión).");
+      }
+      ihdr = { ancho, alto, prof, color, entrelazado: entre === 1 };
+    } else if (tipo === "PLTE") {
+      if (largo === 0 || largo % 3 !== 0 || largo > 768 || idats.length) return mal("estructura", "La paleta del PNG no es la esperada.");
+      hayPlte = true;
+    } else if (tipo === "IDAT") {
+      // Los IDAT van seguidos: uno después de otro chunk que ya cerró la serie es un archivo armado a mano.
+      if (idatCerrado) return mal("estructura", "Los datos del PNG no van seguidos.");
+      idats.push([datos, largo]);
+      idatTotal += largo;
+    } else if (tipo === "IEND") {
+      if (largo !== 0) return mal("estructura", "El final del PNG no es el esperado.");
+      fin = true;
+      break;
+    }
+    if (tipo !== "IDAT" && idats.length) idatCerrado = true;
+    pos += 12 + largo;
+  }
+  if (!ihdr) return mal("estructura", "El PNG no tiene cabecera.");
+  if (!fin) return mal("truncado", "El PNG está cortado (le falta su final).");
+  if (!idats.length || !idatTotal) return mal("sin_datos", "El PNG no trae la imagen.");
+  if (ihdr.color === 3 && !hayPlte) return mal("estructura", "El PNG de paleta no trae su paleta.");
+  const crudos = bytesCrudosPng(ihdr.ancho, ihdr.alto, ihdr.color, ihdr.prof, ihdr.entrelazado);
+  if (idatTotal > idatMaximo(crudos)) {
+    return mal("idat_desproporcionado", "El PNG trae muchos más datos de los que su imagen puede ocupar.");
+  }
+  if (opts.inflar) {
+    const zlib = new Uint8Array(idatTotal);
+    let o = 0;
+    for (const [ini, n] of idats) { zlib.set(x.subarray(ini, ini + n), o); o += n; }
+    let salida: number;
+    try { salida = opts.inflar(zlib, crudos); } catch { return mal("idat_invalido", "Los datos del PNG no se pueden leer o miden más de lo que declara su cabecera."); }
+    if (salida !== crudos) return mal("idat_invalido", "Los datos del PNG no miden lo que declara su cabecera.");
+  }
+  return { ok: true, codigo: "ok", ancho: ihdr.ancho, alto: ihdr.alto, entrelazado: ihdr.entrelazado, detalle: "" };
 }
 
 const RE_CLAVE = /^[A-Z0-9_]{1,30}$/;

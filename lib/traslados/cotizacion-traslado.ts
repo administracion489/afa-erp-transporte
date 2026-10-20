@@ -41,6 +41,7 @@ import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "..
 import { fechaLima } from "../alertas-horario";
 import { atencionImprimible, referenciaImprimible } from "./texto-libre";
 import { urlFotoPermitida } from "./fotos-categoria";
+import { mismoTelefonoE164 } from "../crm-telefono";
 
 const r2 = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 100) / 100;
 const MAX_LUGAR = 300;
@@ -439,6 +440,37 @@ export type ClienteErp = {
   direccion?: string | null; telefono?: string | null; operativo_nombre?: string | null;
 };
 
+/**
+ * Por qué el PDF imprime (o no) los datos del cliente del ERP:
+ *  · `contacto`: el cliente está VINCULADO al contacto del CRM (lo vinculó una persona);
+ *  · `telefono`: el número COMPLETO del cliente es el wa_id que pidió la cotización;
+ *  · `sin_cliente`: la cotización no tiene cliente del ERP;
+ *  · `no_verificado`: tiene uno y nada prueba que sea quien escribe → atención y celular.
+ */
+export type VinculoClientePdf = "contacto" | "telefono" | "sin_cliente" | "no_verificado";
+
+/**
+ * El cliente del ERP que el PDF puede imprimir. El PDF de un traslado le llega por WhatsApp a quien
+ * escribió, a veces sin que nadie lo revise, y lleva nombre, RUC, DNI, dirección y teléfono: solo se
+ * imprimen si una persona vinculó ese cliente al contacto, o si su número COMPLETO es el wa_id
+ * (`mismoTelefonoE164`; nunca los últimos 9 dígitos). Con cualquier otro origen del `cliente_id`
+ * (una coincidencia vieja por 9 dígitos, uno puesto a mano en /cotizaciones que no está vinculado
+ * al contacto) sale con la atención y el celular. La misma regla para el servidor y la pantalla.
+ * LÍMITE: un número RECICLADO no se puede detectar (es el mismo número).
+ */
+export function clienteParaPdf(
+  clienteId: unknown,
+  cliente: ClienteErp | null | undefined,
+  ref: { contactoClienteId?: number | string | null; waId?: string | null },
+): { cliente: ClienteErp | null; vinculo: VinculoClientePdf } {
+  const id = Number(clienteId);
+  if (!cliente || clienteId == null || !Number.isInteger(id) || id <= 0) return { cliente: null, vinculo: "sin_cliente" };
+  const vinculado = ref.contactoClienteId != null && String(ref.contactoClienteId).trim() !== "" && Number(ref.contactoClienteId) === id;
+  if (vinculado) return { cliente, vinculo: "contacto" };
+  if (mismoTelefonoE164(cliente.telefono, ref.waId)) return { cliente, vinculo: "telefono" };
+  return { cliente: null, vinculo: "no_verificado" };
+}
+
 /** El wa_id como teléfono legible (+51 966 707 225), o null si no es un número. */
 export function celularImprimible(waId: string | null | undefined): string | null {
   const d = v(waId).replace(/^\+/, "");
@@ -454,7 +486,8 @@ export function celularImprimible(waId: string | null | undefined): string | nul
  *
  * `plantilla` es la fila `corporativo` de `cotizacion_plantillas` (solo se usan sus cuentas);
  * `categoria`, la de `traslado_categorias` (sin ella, la de `traslado_json`, sin fotos ni bodega);
- * `celular`, el wa_id de la conversación. LANZA si la fila no tiene ítems.
+ * `celular`, el wa_id de la conversación; `contactoClienteId`, el cliente vinculado a su contacto.
+ * El `cliente` solo se imprime si `clienteParaPdf` lo verifica. LANZA si la fila no tiene ítems.
  */
 export function entradaCorporativaTraslado(
   fila: FilaCotizacionLeida,
@@ -462,6 +495,8 @@ export function entradaCorporativaTraslado(
     empresa: PerfilEmpresa | null;
     cliente?: ClienteErp | null;
     celular?: string | null;
+    /** El `cliente_id` del contacto del CRM de la conversación (vinculado por una persona). */
+    contactoClienteId?: number | string | null;
     plantilla?: PlantillaPdfCfg | null;
     categoria?: CategoriaPdf | null;
     /** El PDF de ejemplo del simulador: el número dice EJEMPLO. */
@@ -478,7 +513,7 @@ export function entradaCorporativaTraslado(
   const emision = fila.created_at && Number.isFinite(Date.parse(fila.created_at)) ? fechaLima(Date.parse(fila.created_at)) : fechaLima(ahoraMs);
   const atencion = atencionImprimible(fila.atencion);
   const celular = celularImprimible(x.celular);
-  const c = x.cliente ?? null;
+  const c = clienteParaPdf(fila.cliente_id, x.cliente, { contactoClienteId: x.contactoClienteId, waId: x.celular }).cliente;
   const cliente: ClientePdf = c
     ? {
       nombre: v(c.nombre) || atencion || "",

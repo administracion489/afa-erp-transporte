@@ -30,6 +30,7 @@ import { empresaConDefectos } from "../empresa-perfil";
 import { numeroCotizacion } from "../cotizacion-pdf";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { fechaLima } from "../alertas-horario";
+import { telefonosE164 } from "../crm-telefono";
 import { validarEntrada, type EntradaSimulador, type LugarEntrada } from "./api";
 import { cargarCatalogo, leerConfigIA, leerIgvPct, SinMigracionTraslados, type CatalogoTraslados } from "./datos";
 import {
@@ -103,23 +104,25 @@ export type DepsCotizar = {
   azar?: () => string;
 };
 
-const tel9 = (s?: string | null) => String(s ?? "").replace(/\D/g, "").slice(-9);
-
 /**
- * El cliente del ERP de esta cotización: el que ya está vinculado al contacto, o el ÚNICO cliente
- * cuyo teléfono termina en los mismos 9 dígitos que el wa_id. Nunca por `contacto.telefono` ni por
- * el correo (los puede escribir el modelo). Ambiguo o ilegible → null (se completa en /cotizaciones).
+ * El cliente del ERP de esta cotización: el que ya está vinculado al contacto (lo vinculó una
+ * persona), o el ÚNICO cliente con el MISMO número COMPLETO que el wa_id (`mismoTelefonoE164`: los 9
+ * dígitos de un celular peruano se completan con 51; un wa_id de otro país nunca empareja con un
+ * número local). Antes comparaba los últimos 9 dígitos, y +44 7987654321 recibía sin revisión el
+ * RUC, el DNI y la dirección del cliente 987 654 321. Nunca por `contacto.telefono` ni por el correo
+ * (los puede escribir el modelo). Ambiguo o ilegible → null (se completa en /cotizaciones).
+ * LÍMITE: un número reciclado (otra persona con el número de un cliente) no se puede detectar.
  */
 export async function clienteIdDeRemitente(sb: Sb, contacto: CtxCotizarIA["contacto"], waId: string | null): Promise<number | null> {
   if (contacto?.cliente_id != null && Number.isFinite(Number(contacto.cliente_id))) return Number(contacto.cliente_id);
   if (!waId || !/^\+?\d{8,15}$/.test(waId.trim())) return null;
-  const tel = tel9(waId);
-  if (tel.length !== 9) return null;
+  const wa = telefonosE164(waId);
+  if (wa.length !== 1) return null;
   const ids = new Set<number>();
   for (let desde = 0; ; desde += 1000) {
     const { data, error } = await sb.from("clientes").select("id, telefono").not("telefono", "is", null).order("id", { ascending: true }).range(desde, desde + 999);
     if (error) return null;
-    for (const c of (data ?? []) as { id: number; telefono: string | null }[]) if (tel9(c.telefono) === tel) ids.add(Number(c.id));
+    for (const c of (data ?? []) as { id: number; telefono: string | null }[]) if (telefonosE164(c.telefono).includes(wa[0])) ids.add(Number(c.id));
     if (!data || data.length < 1000) break;
   }
   return ids.size === 1 ? [...ids][0] : null;
@@ -343,7 +346,14 @@ async function decidirYRegistrar(
   let errorPdf = "";
   if (perfil) {
     // El CELULAR del PDF es el wa_id del hilo, copiado antes del bucle (nunca lo que escriba el modelo).
-    try { pdf = await armarPdfDeFila(sb, x.leida, { perfil, bajarLogo: deps.bajarLogo, bajarFoto: deps.bajarFoto, celular: ctx.remitente.waId, ahoraMs: deps.ahoraMs?.() }); }
+    // Los datos del cliente del ERP solo se imprimen si está vinculado al contacto o su número
+    // COMPLETO es el wa_id (`clienteParaPdf`): si no, atención y celular.
+    try {
+      pdf = await armarPdfDeFila(sb, x.leida, {
+        perfil, bajarLogo: deps.bajarLogo, bajarFoto: deps.bajarFoto, celular: ctx.remitente.waId,
+        contactoClienteId: ctx.contacto?.cliente_id ?? null, ahoraMs: deps.ahoraMs?.(),
+      });
+    }
     catch (err) { errorPdf = String((err as Error)?.message ?? err); }
   } else errorPdf = "No se pudo leer el perfil de la empresa.";
 
