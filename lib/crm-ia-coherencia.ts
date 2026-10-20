@@ -874,7 +874,10 @@ export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: bo
     if (aj.resumen_pedido) {
       const enPlantilla = frases.filter(esPlantillaResumen);
       if (enPlantilla.length) {
-        const titulo = frases.find(esTituloResumen);
+        // Dentro de una plantilla declarada («Plantilla de resumen: …»), su línea con 📋 es el título
+        // aunque no vaya en mayúsculas; suelta, esa línea es solo un encabezado de sección.
+        const titulo = frases.find(esTituloResumen)
+          ?? (frases.some((x) => /plantilla de(l)? resumen/.test(x.norm)) ? frases.find((x) => x.texto.includes("📋") && RE_ANCLA_RESUMEN.test(x.norm)) : undefined);
         const f = titulo ?? enPlantilla[0];
         const igual = titulo && soloPalabras(titulo.texto) === soloPalabras(tituloResumen(aj));
         const sinTituloPropio = !titulo && aj.resumen_titulo !== "";

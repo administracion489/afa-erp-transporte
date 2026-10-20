@@ -1,8 +1,15 @@
 "use client";
 import ContactosSinIA from "@/components/crm/ContactosSinIA";
 import AjustesComportamiento from "@/components/crm/AjustesComportamiento";
-import { normalizarAjustes } from "@/lib/crm-ia-ajustes";
-import React, { useEffect, useState } from "react";
+import CoherenciaAgente, {
+  AvisoCampo, AvisosAjuste, ProveedorCoherencia, enfocarFrase, idCampo, resaltarAjuste, type AccionesCoherencia,
+} from "@/components/crm/CoherenciaAgente";
+import { normalizarAjustes, mensajeDerivacionDefecto, TEMAS_AJUSTE, type AjustesIA } from "@/lib/crm-ia-ajustes";
+import {
+  auditarAgente, nuevasAlarmas,
+  type CampoTexto, type ConfigAuditable, type Hallazgo,
+} from "@/lib/crm-ia-coherencia";
+import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
 
@@ -45,8 +52,63 @@ const MODELOS = [
   { key: "claude-haiku-4-5", label: "Claude Haiku 4.5", nota: "Más rápido y económico" },
 ];
 
-const TABS = ["Personalidad", "Goals", "Conocimiento", "Canales & Modo", "Ajustes"] as const;
+const TABS = ["Personalidad", "Objetivos", "Conocimiento", "Canales & Modo", "Ajustes"] as const;
 type Tab = (typeof TABS)[number];
+
+// ── Coherencia de la configuración (lib/crm-ia-coherencia.ts decide; aquí solo se navega) ─────────
+
+/** Dónde vive cada texto del dueño. */
+const TAB_DE_CAMPO: Record<CampoTexto, Tab> = {
+  persona: "Personalidad",
+  empresa_contexto: "Personalidad",
+  goals: "Objetivos",
+  conocimiento: "Conocimiento",
+  reglas_extra: "Ajustes",
+  mensaje_derivacion: "Ajustes",
+};
+/** Los campos de `porCampo` (el conteo de alarmas del motor) que pinta el badge de cada pestaña.
+ *  "ajustes" = los choques entre ajustes, que se arreglan en Ajustes. */
+const CAMPOS_DE_TAB: Partial<Record<Tab, string[]>> = {
+  Personalidad: ["persona", "empresa_contexto"],
+  Objetivos: ["goals"],
+  Conocimiento: ["conocimiento"],
+  Ajustes: ["reglas_extra", "mensaje_derivacion", "ajustes"],
+};
+
+/** Lo que el auditor lee del formulario (lo que se está editando, sin guardar). */
+const cfgAuditable = (a: Agente): ConfigAuditable => ({
+  persona: a.persona,
+  empresa_contexto: a.empresa_contexto,
+  conocimiento: a.conocimiento,
+  goals: a.goals,
+  mensaje_derivacion: a.mensaje_derivacion,
+  escalar_si: a.escalar_si,
+  nombre: a.nombre,
+  pausa_humano_horas: a.pausa_humano_horas,
+  comportamiento: a.comportamiento,
+});
+
+const corto = (s: string, max = 90) => {
+  const c = Array.from(s.replace(/\s+/g, " ").trim());
+  return c.length <= max ? c.join("") : `${c.slice(0, max - 1).join("").trimEnd()}…`;
+};
+
+/** El confirm() de guardar: nombra los choques NUEVOS (hasta 3) y dice quién manda. */
+function textoChoquesNuevos(nuevas: Hallazgo[]): string {
+  const n = nuevas.length;
+  const lineas = nuevas.slice(0, 3).map((h) => {
+    const manda = h.ajuste ? ` Manda: ${h.ajuste.etiqueta} = ${h.ajuste.valorLegible}.` : "";
+    return `• ${h.titulo}: «${corto(h.cita)}» (${h.etiquetaCampo}).${manda}`;
+  });
+  if (n > 3) lineas.push(`(…y ${n - 3} más)`);
+  const imposible = nuevas.some((h) => !h.ajuste);
+  return [
+    `Con estos cambios hay ${n} choque${n === 1 ? "" : "s"} nuevo${n === 1 ? "" : "s"}:`,
+    ...lineas,
+    "",
+    `La IA seguirá el ajuste${imposible ? ", y lo que el sistema no puede hacer no lo hará aunque esté escrito" : ""}. ¿Guardar igual?`,
+  ].join("\n");
+}
 
 const input =
   "w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20";

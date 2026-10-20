@@ -655,6 +655,40 @@ const CASOS: Caso[] = [
   const r = auditarAgente({ empresa_contexto: "Usa esta plantilla de resumen:\n📋 Resumen de su solicitud\n• dato: valor" });
   ok(igual(codigos(r.hallazgos), ["resumen.duplica"]), "el título del ajuste (automático) escrito en el texto → repite");
 }
+// El texto REAL que el dueño va a pegar (20-10-2026): sus negaciones y su frase de prioridad dicen
+// «todo junto», y su «6. 📋 Resumen final» es un encabezado, no una plantilla.
+{
+  const juntas = [
+    "* No hagas una pregunta por turno como procedimiento predeterminado.",
+    "Regla obligatoria: Cuando un cliente solicite una cotización y no haya proporcionado todos los datos necesarios, AFITA debe solicitar conjuntamente todos los datos pendientes en un único mensaje, en lugar de realizar una pregunta por turno.",
+    "No dividas el cuestionario en varias preguntas si los datos pueden solicitarse juntos de manera clara y ordenada.",
+    "Esta regla prevalece sobre cualquier instrucción anterior que obligue a AFITA a formular una sola pregunta por mensaje.",
+    "Nunca realices una sola pregunta por mensaje.",
+    "Pide todo junto, en vez de hacer una pregunta a la vez.",
+    "Esta regla deja sin efecto la de una pregunta por turno.",
+    "* Solicita los datos en un solo mensaje siempre que sea posible.",
+    "Para servicios recurrentes, solicita conjuntamente todos los campos aplicables.",
+  ];
+  for (const frase of juntas) {
+    const a = auditarAgente({ empresa_contexto: frase }).hallazgos.filter((h) => h.tema === "preguntas").map((h) => h.codigo);
+    const b = auditarAgente({ empresa_contexto: frase, comportamiento: { preguntas: "una_por_mensaje" } }).hallazgos.filter((h) => h.tema === "preguntas").map((h) => h.codigo);
+    ok(igual(a, ["preguntas.duplica"]) && igual(b, ["preguntas.contradice"]), `«${frase.slice(0, 60)}…» dice «todo junto» (todo junto → repite; uno por mensaje → contradice)${igual(a, ["preguntas.duplica"]) && igual(b, ["preguntas.contradice"]) ? "" : ` (dio ${a.join(",")} / ${b.join(",")})`}`);
+  }
+  // Las afirmativas siguen diciendo «uno por mensaje».
+  for (const frase of ["Haz una sola pregunta por turno.", "Un solo dato por mensaje: Realiza una sola pregunta por turno.", "No te demores: haz una pregunta por mensaje."])
+    ok(igual(auditarAgente({ empresa_contexto: frase }).hallazgos.map((h) => h.codigo), ["preguntas.contradice"]), `«${frase}» sigue diciendo «uno por mensaje»`);
+  // Encabezados de resumen, no plantillas.
+  for (const frase of ["6. 📋 Resumen final", "📋 Resumen del pedido", "Resumen B2B Recurrente"])
+    ok(auditarAgente({ empresa_contexto: frase }).hallazgos.length === 0, `«${frase}» es un encabezado, no una plantilla`);
+  ok(igual(auditarAgente({ empresa_contexto: "📋 RESUMEN DEL PEDIDO\n• Fecha: …" }).hallazgos.map((h) => h.codigo), ["resumen.plantilla_propia"]), "«📋 RESUMEN DEL PEDIDO» en mayúsculas sí es una plantilla propia");
+  // El texto entero, como lo pegaría el dueño: sin un solo choque de preguntas ni de resumen.
+  let texto = "";
+  try { texto = readFileSync("/tmp/claude-0/-home-user-afa-erp-transporte/eddf530d-9324-51c2-a45e-ae2aca5ce25c/scratchpad/regla-nueva/texto.txt", "utf8"); } catch { /* sin el archivo, se salta */ }
+  if (texto) {
+    const r = auditarAgente({ ...AFA, empresa_contexto: texto }, CTX_AFA);
+    ok(!r.hallazgos.some((h) => h.alarma && (h.tema === "preguntas" || h.tema === "resumen")), "el texto real nuevo: ninguna alarma de preguntas ni de resumen");
+  }
+}
 // «Salvo los traslados» deja fuera lo que cotiza el sistema.
 {
   const r = auditarAgente({ empresa_contexto: "Urgencias para hoy, salvo los traslados: comuníquese al 999 888 777." }, { trasladosActivos: true });
