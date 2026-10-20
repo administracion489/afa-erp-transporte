@@ -1564,7 +1564,7 @@ seccion("21. accionAjena, la ruta de la tarjeta, /api/crm/ia/probar y el destino
 
 function textoContradicePrecioJSON(j: string): boolean { return E.textoContradicePrecio(j, []) || /"total"/.test(j); }
 
-// ── 22. Las condiciones del traslado salen de la PLANTILLA de su regla (cotizaciones-05) ──────
+// ── 23. Las condiciones del traslado salen de la PLANTILLA de su regla (cotizaciones-05) ──────
 // Desde supabase/cotizaciones-05-plantillas-uso.sql las condiciones del PDF del traslado son las de
 // la plantilla de la regla «Traslado de la IA × segmento» (la migración TRASPASA las de
 // traslados_config a «Traslados (IA)» y, con líneas de dólares, a «Traslados (IA) · dólares»). Lo que
