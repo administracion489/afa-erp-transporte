@@ -23,6 +23,8 @@ import { leerConfigIA } from "@/lib/traslados/datos";
 import { validarEntrada } from "@/lib/traslados/api";
 import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
 import { fechaLima } from "@/lib/alertas-horario";
+import { faltaColumna } from "@/lib/columna-faltante";
+import { inicioVentanaHumano, inicioConteoTurnos } from "@/lib/crm-ia-reactivacion";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
 
@@ -857,12 +859,14 @@ async function responderConIAInterno(
   if (!opts.forzarBorrador && !agente.activo) return { ok: true, accion: "omitido", motivo: "Agente desactivado." };
 
   // Conversación + contacto
-  const { data: conv } = await sb
-    .from("crm_conversaciones")
-    .select("id, canal, estado, asunto, gmail_thread_id, pipeline_id, ia_pausada, contacto_id, phone_number_id, crm_contactos(*)")
-    .eq("id", convId)
-    .single();
+  // `ia_reactivada_at` es de una migración accesoria (crm-ia-reactivacion.sql): sin ella se lee sin la columna.
+  const COLS_CONV = "id, canal, estado, asunto, gmail_thread_id, pipeline_id, ia_pausada, contacto_id, phone_number_id, crm_contactos(*)";
+  let rConv: any = await sb.from("crm_conversaciones").select(`${COLS_CONV}, ia_reactivada_at`).eq("id", convId).single();
+  if (rConv.error && faltaColumna(rConv.error, "ia_reactivada_at"))
+    rConv = await sb.from("crm_conversaciones").select(COLS_CONV).eq("id", convId).single();
+  const conv = rConv.data;
   if (!conv) return { ok: false, accion: "omitido", error: "Conversación no encontrada." };
+  const reactivadaAt: string | null = (conv as any).ia_reactivada_at ?? null;
   const contacto = (conv as any).crm_contactos;
 
   if (!opts.forzarBorrador) {
@@ -878,15 +882,21 @@ async function responderConIAInterno(
     // Si una persona del equipo respondió hace poco (desde el CRM o el celular), la IA se
     // aparta unas horas: el cliente ya está atendido por un humano.
     const horasPausa = Number.isFinite(Number(agente.pausa_humano_horas)) ? Number(agente.pausa_humano_horas) : 12;
+    // Si una persona REACTIVÓ la IA en este chat, solo cuentan las respuestas humanas posteriores.
     if (horasPausa > 0) {
-      const desde = new Date(Date.now() - horasPausa * 3600_000).toISOString();
+      const desde = inicioVentanaHumano(Date.now(), horasPausa, reactivadaAt);
       const { count: humanos } = await sb
         .from("crm_mensajes").select("id", { count: "exact", head: true })
         .eq("conversacion_id", convId).eq("direccion", "saliente")
         .or("generado_por_ia.is.null,generado_por_ia.eq.false")
         .gte("created_at", desde);
       if ((humanos ?? 0) > 0)
-        return { ok: true, accion: "omitido", motivo: `Una persona respondió en las últimas ${horasPausa} h: la IA no interviene.` };
+        return {
+          ok: true, accion: "omitido",
+          motivo: reactivadaAt && desde === inicioConteoTurnos(reactivadaAt)
+            ? "Una persona respondió después de reactivar la IA: la IA no interviene."
+            : `Una persona respondió en las últimas ${horasPausa} h: la IA no interviene (pulsa «IA activa» para que vuelva a contestar).`,
+        };
     }
     // El agente solo atiende números de ATENCIÓN AL CLIENTE. Un número marcado solo para
     // avisos automáticos (usa_avisos y no usa_crm) nunca responde con IA.
@@ -905,12 +915,17 @@ async function responderConIAInterno(
     if (!canales.includes(conv.canal))
       return { ok: true, accion: "omitido", motivo: `Canal ${conv.canal} no atendido por el agente.` };
     // Límite de turnos automáticos
+    // Tras una reactivación se cuentan solo los turnos posteriores: si no, el hilo que ya llegó al
+    // límite se volvería a pausar solo en el siguiente mensaje.
     if (agente.max_turnos_auto > 0) {
-      const { count } = await sb
+      const desdeTurnos = inicioConteoTurnos(reactivadaAt);
+      let qTurnos = sb
         .from("crm_mensajes")
         .select("id", { count: "exact", head: true })
         .eq("conversacion_id", convId)
         .eq("generado_por_ia", true);
+      if (desdeTurnos) qTurnos = qTurnos.gte("created_at", desdeTurnos);
+      const { count } = await qTurnos;
       if ((count ?? 0) >= agente.max_turnos_auto) {
         await sb.from("crm_conversaciones").update({ ia_pausada: true, estado: "en_progreso" }).eq("id", convId);
         return { ok: true, accion: "escalado", motivo: "Límite de turnos automáticos alcanzado." };
