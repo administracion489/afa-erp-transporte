@@ -26,6 +26,14 @@ ok(normalizarAjustes({ mensajes_historial: 1 }).mensajes_historial === 10, "hist
 ok(normalizarAjustes({ lugares_conocidos: "" }).lugares_conocidos === "", "lugares vacíos = ninguno");
 ok(normalizarAjustes({}).recordar_datos === true, "recordar datos nace encendido");
 ok(normalizarAjustes({}).resumen_pedido === true, "resumen del pedido nace encendido");
+// El resumen va UNA vez al final (la regla del dueño, 20-10-2026). Un ajuste guardado antes de
+// existir el campo —con resumen_pedido: true— también: solo «cada_respuesta» escrito lo cambia.
+ok(normalizarAjustes({}).resumen_cuando === "al_final", "el resumen nace «solo al final»");
+ok(normalizarAjustes({ resumen_pedido: true }).resumen_cuando === "al_final", "ajuste guardado antes del campo → al final");
+ok(normalizarAjustes({ resumen_cuando: "cada_respuesta" }).resumen_cuando === "cada_respuesta", "«cada respuesta» elegido a propósito se conserva");
+for (const malo of ["", "siempre", null, 3, ["al_final"]])
+  ok(normalizarAjustes({ resumen_cuando: malo }).resumen_cuando === "al_final", `valor desconocido → al final: ${JSON.stringify(malo)}`);
+{ const c = normalizarAjustes({ resumen_cuando: "cada_respuesta" }); ok(JSON.stringify(normalizarAjustes(c)) === JSON.stringify(c), "idempotente con «cada respuesta»"); }
 ok(normalizarAjustes({ campos_pedido: "  " }).campos_pedido === AJUSTES_DEFECTO.campos_pedido, "campos vacíos → defecto");
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

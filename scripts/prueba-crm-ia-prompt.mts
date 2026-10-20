@@ -14,8 +14,20 @@ const conv = { id: "x", canal: "whatsapp" };
 const p = construirSystem(agente, contacto, conv, true, "AFA Transportes");
 const i = (t: string) => p.indexOf(t);
 ok(i("## Resumen del pedido") > 0, "resumen del pedido presente por defecto");
-ok(i("*Solo me falta:*") > 0, "formato con «Solo me falta»");
-ok(i("No insistas con una pregunta suelta") > 0 && i("No repitas una pregunta que ya hiciste") < 0, "la regla general no prohíbe el «Solo me falta»");
+// Por defecto el resumen va UNA vez, cuando ya están todos los datos (regla del dueño, 20-10-2026:
+// lo mandaba en cada respuesta y su regla decía «el resumen se hace únicamente al final»).
+ok(i("UNA vez, cuando ya tienes todos los datos") > 0, "por defecto: el resumen solo al final");
+ok(i("NO resumas, no repitas ni confirmes lo que el cliente ya dio") > 0, "mientras falten datos no resume");
+ok(i("Con esto ya tengo todo lo necesario") > 0 && i("📋 *Resumen de su solicitud*") > 0, "con todo completo, el resumen con su formato");
+ok(i("*Solo me falta:*") < 0 && i("SÍ va en cada respuesta") < 0, "por defecto ya no pide el resumen en cada respuesta");
+ok(i("No repitas una pregunta que ya hiciste") > 0, "por defecto, la regla de no repetir preguntas");
+ok(/«Sobre la empresa», tus objetivos/.test(p), "lo escrito en «Sobre la empresa» también manda sobre las reglas generales");
+const cada = construirSystem({ ...agente, comportamiento: { reglas_extra: "Nunca prometas una unidad.", resumen_cuando: "cada_respuesta" } }, contacto, conv, true, "AFA Transportes");
+const c = (x: string) => cada.indexOf(x);
+ok(c("## Resumen del pedido (al final de tu respuesta)") > 0, "«cada respuesta»: el resumen al final de cada respuesta");
+ok(c("*Solo me falta:*") > 0, "«cada respuesta»: formato con «Solo me falta»");
+ok(c("No insistas con una pregunta suelta") > 0 && c("No repitas una pregunta que ya hiciste") < 0, "«cada respuesta»: la regla general no prohíbe el «Solo me falta»");
+ok(c("UNA vez, cuando ya tienes todos los datos") < 0, "«cada respuesta»: sin el bloque de «solo al final»");
 ok(i("## Tus objetivos") > i("## Reglas generales"), "objetivos después de las reglas generales");
 ok(i("## Base de conocimiento") > i("## Tus objetivos"), "conocimiento después de objetivos");
 ok(i("## Reglas del negocio") > i("## Base de conocimiento"), "reglas del negocio después");

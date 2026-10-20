@@ -577,7 +577,7 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
     "- No compartas costos internos, márgenes ni datos de otros clientes.",
     "- Devuelve solo el texto del mensaje al cliente, sin prefijos como 'Asistente:'.",
     !aj.leer_archivos ? "- Si el cliente envía fotos o documentos, dile que un ejecutivo los revisará (no los ves)." : "- Si el cliente envía FOTOS o DOCUMENTOS, LÉELOS: extrae fechas, horarios, número de pasajeros, origen, destino y lo que pida. Nunca digas que no puedes verlos.",
-    aj.resumen_pedido
+    aj.resumen_pedido && aj.resumen_cuando === "cada_respuesta"
       ? "- No insistas con una pregunta suelta que ya hiciste. Lo que falte va en el «Solo me falta» del resumen del pedido, que SÍ va en cada respuesta mientras el pedido no esté completo."
       : "- No repitas una pregunta que ya hiciste con otras palabras. Si el cliente no la contestó, espera; no insistas en el mismo mensaje ni en el siguiente.",
     "- Un sticker o una reacción no es una pregunta: no contestes solo por eso.",
@@ -595,7 +595,22 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
           "",
         ].filter(Boolean).join("\n")
       : "",
-    aj.resumen_pedido
+    aj.resumen_pedido && aj.resumen_cuando === "al_final"
+      ? [
+          "## Resumen del pedido (UNA vez, cuando ya tienes todos los datos)",
+          `- Datos del pedido: ${aj.campos_pedido}.`,
+          "- Mientras falte alguno, NO resumas, no repitas ni confirmes lo que el cliente ya dio: pide SOLO lo que falta, todo junto en un solo mensaje.",
+          "- Cuando ya tengas todos, muestra el resumen completo con este formato:",
+          "📋 *Resumen de su solicitud*",
+          "• <dato>: <lo que dio el cliente>",
+          "• …",
+          "y termina con «Con esto ya tengo todo lo necesario».",
+          "- Si después el cliente corrige un dato, vuelve a mostrar el resumen completo actualizado.",
+          "- Nunca pongas en el resumen un dato que el cliente no dio.",
+          "- Al derivar a un ejecutivo, sí muestra el resumen de lo que ya dio (ahí termina tu parte). No lo pongas en respuestas que no son de un pedido (consultas sobre un servicio en curso, saludos, agradecimientos).",
+          "",
+        ].join("\n")
+      : aj.resumen_pedido
       ? [
           "## Resumen del pedido (al final de tu respuesta)",
           `- Mientras el cliente esté pidiendo un servicio (cotización o reserva), TERMINA cada respuesta con el resumen de lo que ya dio y pide SOLO lo que falta. Datos del pedido: ${aj.campos_pedido}.`,
@@ -617,7 +632,7 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
     agente.conocimiento ? `## Base de conocimiento\n${agente.conocimiento}\n` : "",
     reglasNegocio ? `## Reglas del negocio\n${reglasNegocio}\n` : "",
     "## Prioridad",
-    "Tus objetivos, la base de conocimiento y las reglas del negocio los escribió la empresa: si chocan con una regla general de arriba, MANDAN ELLOS. Lo único que no se negocia: no inventar datos, no dar por confirmada una cotización o reserva que aprueba una persona, y no compartir costos internos ni datos de otros clientes.",
+    "«Sobre la empresa», tus objetivos, la base de conocimiento y las reglas del negocio los escribió la empresa: si chocan con una regla general de arriba, MANDAN ELLOS. Lo único que no se negocia: no inventar datos, no dar por confirmada una cotización o reserva que aprueba una persona, y no compartir costos internos ni datos de otros clientes.",
   ]
     .filter(Boolean)
     .join("\n");

@@ -3,7 +3,7 @@
 // Los valores se normalizan con el MISMO normalizarAjustes que usa el motor: lo que se ve es
 // lo que la IA va a hacer.
 import React, { useState } from "react";
-import { normalizarAjustes, saludoParaHora, AJUSTES_DEFECTO, type AjustesIA } from "@/lib/crm-ia-ajustes";
+import { normalizarAjustes, saludoParaHora, AJUSTES_DEFECTO, RESUMEN_CUANDO, type AjustesIA, type ResumenCuando } from "@/lib/crm-ia-ajustes";
 
 const input =
   "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20";
@@ -116,16 +116,26 @@ export default function AjustesComportamiento({
       </Fila>
 
       <Fila
-        titulo="🧾 Resumen del pedido al final de cada respuesta"
-        detalle="Mientras el cliente pide un servicio, cada respuesta termina con los datos que ya dio y SOLO los que faltan. Si ya está todo, lo confirma. También al derivar a un ejecutivo."
+        titulo="🧾 Resumen del pedido"
+        detalle={n.resumen_cuando === "al_final"
+          ? "Mientras falten datos, la IA pide SOLO lo que falta, sin repetir lo que el cliente ya dio. Cuando tiene todo, muestra el resumen UNA vez. También al derivar a un ejecutivo."
+          : "Mientras el cliente pide un servicio, cada respuesta termina con los datos que ya dio y SOLO los que faltan. Si ya está todo, lo confirma. También al derivar a un ejecutivo."}
         on={a.resumen_pedido} onClick={() => set("resumen_pedido", !a.resumen_pedido)}
       >
+        <div>
+          <label className={label}>¿Cuándo lo muestra?</label>
+          <select className={input} value={n.resumen_cuando} onChange={(e) => set("resumen_cuando", e.target.value as ResumenCuando)}>
+            {RESUMEN_CUANDO.map((o) => <option key={o.valor} value={o.valor}>{o.etiqueta}</option>)}
+          </select>
+        </div>
         <div>
           <label className={label}>Datos que forman el pedido</label>
           <textarea rows={2} className={input} value={a.campos_pedido} onChange={(e) => set("campos_pedido", e.target.value)} />
         </div>
         <div className="rounded-lg bg-[#d9fdd3] px-3 py-2 text-[12px] text-gray-800 whitespace-pre-line">
-          {"Ejemplo:\n📋 Resumen de su solicitud\n• Ruta: Surco → Aeropuerto\n• Fecha y hora: martes 20/10, 5:00 a. m.\n• Pasajeros: 18, con maletas de 23 kg\n• Servicio: solo ida\n• Nombre: Paola Huarachi\nSolo me falta: la dirección exacta de recojo en Surco."}
+          {n.resumen_cuando === "al_final"
+            ? "Mientras falten datos:\n¿Me indica la fecha, la hora de recojo y cuántas maletas de 23 kg llevan?\n\nCon todo completo:\n📋 Resumen de su solicitud\n• Ruta: Surco → Aeropuerto\n• Fecha y hora: martes 20/10, 5:00 a. m.\n• Pasajeros: 18, con maletas de 23 kg\n• Servicio: solo ida\n• Nombre: Paola Huarachi\nCon esto ya tengo todo lo necesario."
+            : "Ejemplo:\n📋 Resumen de su solicitud\n• Ruta: Surco → Aeropuerto\n• Fecha y hora: martes 20/10, 5:00 a. m.\n• Pasajeros: 18, con maletas de 23 kg\n• Servicio: solo ida\n• Nombre: Paola Huarachi\nSolo me falta: la dirección exacta de recojo en Surco."}
         </div>
       </Fila>
 
