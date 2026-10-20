@@ -25,6 +25,7 @@ import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
 import { fechaLima } from "@/lib/alertas-horario";
 import { faltaColumna } from "@/lib/columna-faltante";
 import { inicioVentanaHumano, inicioConteoTurnos } from "@/lib/crm-ia-reactivacion";
+import { CONTESTA, MOTIVO_ULTIMO, juzgarUltimo, leerMarca, marcaVigente, ordenarRafaga, type MarcaRespuesta } from "@/lib/crm-ia-rafaga";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
 
@@ -624,18 +625,22 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
 
 // ── Historial de la conversación → mensajes para Claude ──────────────────────
 
-async function cargarHistorial(sb: SB, convId: string, aj: AjustesIA = normalizarAjustes(null)): Promise<Anthropic.MessageParam[]> {
+async function cargarHistorial(
+  sb: SB, convId: string, aj: AjustesIA = normalizarAjustes(null), marca: MarcaRespuesta | null = null,
+): Promise<Anthropic.MessageParam[]> {
   // Los 40 MÁS RECIENTES: antes se pedían los 40 más antiguos (orden ascendente + limit),
   // así que en un hilo largo la IA contestaba sin ver lo último que escribió el cliente.
   // Cuántos relee lo dice Ajustes (40 por defecto): con 20, en un chat donde el cliente repitió
   // su pedido varias veces, los datos del principio quedaban fuera y la IA los volvía a pedir.
   const { data } = await sb
     .from("crm_mensajes")
-    .select("id, direccion, contenido, tipo, media_url, created_at")
+    .select("id, direccion, contenido, tipo, media_url, created_at, generado_por_ia")
     .eq("conversacion_id", convId)
     .order("created_at", { ascending: false })
     .limit(aj.mensajes_historial);
-  const msgs = (data ?? []).reverse();
+  // Lo que el cliente escribió mientras la última respuesta se enviaba va DESPUÉS de ella
+  // (lib/crm-ia-rafaga.ts): esa respuesta no lo leyó.
+  const msgs = ordenarRafaga((data ?? []).reverse(), marca);
   // Notas de voz que el webhook no alcanzó a transcribir (o anteriores a esta función):
   // se transcriben ahora y quedan guardadas. Solo las últimas, por costo.
   const audiosPend = !aj.transcribir_audios ? [] : msgs
@@ -757,6 +762,8 @@ export type ResultadoIA = {
   accion: "enviado" | "borrador" | "escalado" | "omitido";
   motivo?: string;
   error?: string;
+  /** Solo si se ENVIÓ: hasta qué mensaje del cliente leyó esta respuesta (lib/crm-ia-rafaga.ts). */
+  marca?: MarcaRespuesta;
 };
 
 /**
@@ -802,11 +809,13 @@ export async function responderConIA(
     resultado = { ok: false, accion: "omitido", error: e?.message ?? "Error inesperado de la IA." };
     throw e;
   } finally {
+    // La decisión va ANTES de soltar el candado: lleva la marca de qué leyó la respuesta, y la
+    // corrida que espera el turno la lee apenas lo toma (lib/crm-ia-rafaga.ts).
+    if (resultado) await registrarDecision(convId, resultado, !!opts.forzarBorrador);
     // Solo suelta el candado quien lo ganó: soltarlo desde una llamada perdedora
     // abriría la puerta a la respuesta duplicada.
     if (candado.tomado)
       await db().from("crm_conversaciones").update({ ia_respondiendo_at: null }).eq("id", convId);
-    if (resultado) await registrarDecision(convId, resultado, !!opts.forzarBorrador);
   }
 }
 
@@ -825,6 +834,8 @@ async function registrarDecision(convId: string, r: ResultadoIA, aPedido: boolea
   if (r.accion === "omitido" && motivo && MOTIVOS_DE_RELEVO.some((m) => motivo.startsWith(m))) return;
   console.log(`[crm-ia] ${convId} ${r.accion}${motivo ? ` · ${motivo}` : ""}`);
   try {
+    // La marca de la última respuesta ENVIADA sobrevive a las decisiones que no envían.
+    const marca = r.marca ? r.marca : marcaVigente(null, (await leerDecision(convId)));
     await db()
       .from("crm_conversaciones")
       .update({
@@ -834,10 +845,21 @@ async function registrarDecision(convId: string, r: ResultadoIA, aPedido: boolea
           motivo: motivo ? String(motivo).slice(0, 300) : null,
           a_pedido: aPedido,
           at: new Date().toISOString(),
+          ...(marca ? { marca } : {}),
         },
       })
       .eq("id", convId);
   } catch { /* sin la columna (crm-ia-decision.sql) no se anota: la IA funciona igual */ }
+}
+
+/** `ia_ultima_decision` de la conversación; null si no hay, o sin la columna (crm-ia-decision.sql). */
+async function leerDecision(convId: string): Promise<unknown> {
+  try {
+    const { data, error } = await db().from("crm_conversaciones").select("ia_ultima_decision").eq("id", convId).maybeSingle();
+    return error ? null : (data as any)?.ia_ultima_decision ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function responderConIAInterno(
@@ -845,8 +867,12 @@ async function responderConIAInterno(
   opts: { forzarBorrador?: boolean },
   candado: { tomado: boolean }
 ): Promise<ResultadoIA> {
-  const inicioRespuesta = new Date().toISOString();
+  // Desde cuándo una respuesta nuestra cuenta como «otra respuesta salió mientras se redactaba»:
+  // desde que esta corrida tiene el turno. Contar desde que despertó tomaría por nueva la respuesta
+  // que se envió sin leer este mensaje, que es justo la que esta corrida viene a completar.
+  let inicioRespuesta = new Date().toISOString();
   let ultimoVisto: string | null = null;
+  let vistoAt: string | null = null;
   if (!process.env.ANTHROPIC_API_KEY)
     return { ok: false, accion: "omitido", error: "Falta ANTHROPIC_API_KEY en el entorno." };
 
@@ -960,6 +986,7 @@ async function responderConIAInterno(
       await new Promise((r) => setTimeout(r, Math.min(silencio - quieto + 200, tope - Date.now())));
     }
     ultimoVisto = propio?.id ?? null;
+    vistoAt = propio?.created_at ?? null;
     // El indicador dura ~25 s: se renueva justo antes de redactar.
     if (mostrarEscribiendo) await marcarLeidoYEscribiendo(propio!.meta_message_id!, (conv as any).phone_number_id);
     // Candado por hilo. Si otra corrida lo tiene (la de un mensaje anterior que ya estaba
@@ -986,13 +1013,18 @@ async function responderConIAInterno(
       return { ok: true, accion: "omitido", motivo: "Otra respuesta de la IA ya está en curso." };
     candado.tomado = !errLock;
     const { data: ult } = await sb
-      .from("crm_mensajes").select("direccion, tipo").eq("conversacion_id", convId)
+      .from("crm_mensajes").select("id, direccion, tipo, created_at, generado_por_ia").eq("conversacion_id", convId)
       .order("created_at", { ascending: false }).limit(1).maybeSingle();
-    if (ult?.direccion === "saliente") {
-      return { ok: true, accion: "omitido", motivo: "El último mensaje ya es nuestro." };
-    }
-    if (ult?.tipo === "sticker" || ult?.tipo === "reaction")
+    // Que el último mensaje sea nuestro no basta para callar: si es una respuesta de la IA que
+    // se escribió SIN leer este mensaje (llegó mientras se enviaba), este mensaje sigue sin
+    // contestar. Lo dice la marca que dejó esa respuesta (lib/crm-ia-rafaga.ts).
+    const juicio = juzgarUltimo(ult as any, propio, ult?.direccion === "saliente" ? leerMarca(await leerDecision(convId)) : null);
+    if (!CONTESTA[juicio])
+      return { ok: true, accion: "omitido", motivo: MOTIVO_ULTIMO[juicio as keyof typeof MOTIVO_ULTIMO] };
+    const delCliente = juicio === "no_lo_vio" ? propio : ult;
+    if (delCliente?.tipo === "sticker" || delCliente?.tipo === "reaction")
       return { ok: true, accion: "omitido", motivo: "Un sticker o reacción no se contesta." };
+    inicioRespuesta = new Date().toISOString();
   }
 
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
@@ -1018,7 +1050,7 @@ async function responderConIAInterno(
   const traslados = conv.canal === "whatsapp" && (await leerConfigIA(sb)).iaCotiza;
 
   const system = construirSystem(agente, contacto, conv, (salientesHoy ?? 0) === 0, await nombreEmpresa(sb), { traslados });
-  const messages = await cargarHistorial(sb, convId, ajustesDe(agente));
+  const messages = await cargarHistorial(sb, convId, ajustesDe(agente), leerMarca(await leerDecision(convId)));
   if (messages.length === 0) return { ok: true, accion: "omitido", motivo: "Sin mensajes del cliente." };
 
   const ctx: Ctx = {
@@ -1075,6 +1107,10 @@ async function responderConIAInterno(
   const puedeAuto = modoAuto;
 
   if (puedeAuto) {
+    // La espera va ANTES de las comprobaciones: con ella después, un mensaje que el cliente
+    // escribía durante esos segundos salía sin leer (el caso de lib/crm-ia-rafaga.ts).
+    if (agente.delay_segundos > 0)
+      await new Promise((r) => setTimeout(r, Math.min(agente.delay_segundos, 30) * 1000));
     // Justo antes de enviar: si mientras pensaba contestó una persona (desde el celular o el
     // CRM), u otra corrida de la IA, o se pausó la IA, no se manda: serían dos respuestas.
     const { data: ahora } = await sb.from("crm_conversaciones").select("ia_pausada").eq("id", convId).maybeSingle();
@@ -1091,8 +1127,6 @@ async function responderConIAInterno(
     // La pausa que puso esta misma corrida al derivar no cuenta.
     if ((ahora?.ia_pausada && !ctx.escalado.v) || (nuevos ?? 0) > 0)
       return { ok: true, accion: "omitido", motivo: "Ya respondió otra persona o la IA se pausó mientras se redactaba." };
-    if (agente.delay_segundos > 0)
-      await new Promise((r) => setTimeout(r, Math.min(agente.delay_segundos, 30) * 1000));
     const err = await enviarPorCanal(sb, conv, contacto, textoFinal, waDestinoInicial);
     if (err) {
       // Si falla el envío, al menos deja el borrador
@@ -1113,7 +1147,12 @@ async function responderConIAInterno(
         console.error(`[crm-ia] ${convId} cotización de traslado:`, e?.message ?? e);
       }
     }
-    return { ok: true, accion: ctx.escalado.v ? "escalado" : "enviado", texto: textoFinal };
+    // Hasta qué mensaje leyó esta respuesta: si el cliente escribió mientras se enviaba, la
+    // corrida de ese mensaje lo sabrá y no se callará por ver una respuesta nuestra al final.
+    const marca: MarcaRespuesta | undefined = ultimoVisto && vistoAt
+      ? { visto_id: ultimoVisto, visto_at: vistoAt, hasta: new Date().toISOString() }
+      : undefined;
+    return { ok: true, accion: ctx.escalado.v ? "escalado" : "enviado", texto: textoFinal, marca };
   }
 
   // Copiloto: guardar como borrador para que un humano lo apruebe
