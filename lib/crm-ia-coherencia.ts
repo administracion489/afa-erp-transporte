@@ -428,15 +428,23 @@ const otroTrato = (t: Tratamiento): Tratamiento => (t === "tu" ? "usted" : "tu")
 const RE_UNA = /\buna (sola )?pregunta (por|a la) (vez|turno|mensaje)\b|\bun (solo )?dato (por|a la) (vez|turno|mensaje)\b|\bde (a )?uno en uno\b/;
 /** «No agrupar, no adelantar preguntas»: sin «pregunta» en la frase no es esto («no adelantes datos de precio»). */
 const RE_UNA_NO_AGRUPAR = /\bno (agrupar|agrupes|adelantar|adelantes)\b/;
-const RE_JUNTO = /\b(todo|todos los datos|todas las preguntas|todo lo que falt\w*)\b.{0,40}\b(junt\w*|en un (solo|unico) mensaje)\b/;
+const RE_JUNTO = /\b(todo|todos los datos|todas las preguntas|todo lo que falt\w*|(los )?datos|(la )?informacion|(los )?campos)\b.{0,40}\b(junt\w*|conjuntamente|en (un|el) (solo|unico|mismo) mensaje)\b|\b(conjuntamente|en conjunto)\b.{0,40}\b(datos|campos|preguntas|informacion)\b|\bno dividas\b.{0,40}\b(cuestionario|preguntas|datos)\b/;
 const RE_JUNTO_NEGADO = /\bno\b (\w+ ){0,2}(pidas|preguntes|pedir|preguntar)\b.{0,10}\b(todo|todos|todas)\b.{0,40}\b(junt\w*|en un (solo|unico) mensaje)\b/;
 const RE_ANCLA_UNA = /pregunt|\bdatos?\b/;
-const RE_ANCLA_JUNTO = /pregunt|\bpid\w*|\bpedir\b|\bsolicit\w*/;
+const RE_ANCLA_JUNTO = /pregunt|\bpid\w*|\bpedir\b|\bsolicit\w*|\brecopil\w*|\bcuestionario\b/;
+/** Lo que, delante de «una pregunta por turno», la NIEGA o la ANULA: «No hagas una pregunta por
+ *  turno…», «…en lugar de realizar una pregunta por turno», «Esta regla prevalece sobre cualquier
+ *  instrucción que obligue a formular una sola pregunta por mensaje». Ahí el texto dice «todo junto». */
+const RE_UNA_INVERTIDA = /\b(no|nunca|jamas|evita) (\w+ ){0,3}(hagas|hacer|realices|realizar|formules|formular|pidas|pedir|uses|usar|limites|limitar|apliques|aplicar)\b|\ben (lugar|vez) de\b|\b(prevalece sobre|deja sin efecto|anula|anular|reemplaza|sustituye|no aplica)\b/;
 
 function preguntasDeclaradas(f: Frase): ModoPreguntas | null {
   const n = f.norm;
-  const una = (RE_UNA.test(n) && RE_ANCLA_UNA.test(n)) || (RE_UNA_NO_AGRUPAR.test(n) && /pregunt/.test(n)) || RE_JUNTO_NEGADO.test(n);
-  const junto = RE_JUNTO.test(n) && RE_ANCLA_JUNTO.test(n) && !RE_JUNTO_NEGADO.test(n);
+  const m = RE_UNA.exec(n);
+  // Una «una pregunta por turno» negada o anulada por lo que va delante (en la misma oración, hasta
+  // 100 caracteres atrás) dice lo contrario: todo junto.
+  const invertida = !!m && RE_UNA_INVERTIDA.test(n.slice(Math.max(0, m.index - 100), m.index));
+  const una = (!!m && !invertida && RE_ANCLA_UNA.test(n)) || (RE_UNA_NO_AGRUPAR.test(n) && /pregunt/.test(n)) || RE_JUNTO_NEGADO.test(n);
+  const junto = invertida || (RE_JUNTO.test(n) && RE_ANCLA_JUNTO.test(n) && !RE_JUNTO_NEGADO.test(n));
   if (una && junto) return null;
   return una ? "una_por_mensaje" : junto ? "todo_junto" : null;
 }
@@ -453,10 +461,16 @@ function resumenCuandoDeclarado(f: Frase): ResumenCuando | null {
   if (RE_CADA.test(n)) return RE_CADA_NEGADO.test(n) ? "al_final" : "cada_respuesta";
   return RE_AL_FINAL.test(n) ? "al_final" : null;
 }
-const esPlantillaResumen = (f: Frase) =>
-  RE_ANCLA_RESUMEN.test(f.norm) && (f.texto.includes("📋") || /plantilla de(l)? resumen/.test(f.norm) || /\bRESUMEN DE\b/.test(f.texto));
+/** Todas las letras en mayúsculas (y al menos cuatro): «📋 RESUMEN DE SOLICITUD», no «6. 📋 Resumen final». */
+const enMayusculas = (t: string) => {
+  const letras = t.match(/\p{L}/gu) ?? [];
+  return letras.length >= 4 && letras.every((l) => l === l.toUpperCase());
+};
+/** El TÍTULO de una plantilla de resumen: «RESUMEN DE…» en mayúsculas, o «📋» con la línea en
+ *  mayúsculas. Un encabezado de sección («6. 📋 Resumen final») no es una plantilla. */
 const esTituloResumen = (f: Frase) =>
-  RE_ANCLA_RESUMEN.test(f.norm) && (f.texto.includes("📋") || /\bRESUMEN DE\b/.test(f.texto));
+  RE_ANCLA_RESUMEN.test(f.norm) && (/\bRESUMEN DE\b/.test(f.texto) || (f.texto.includes("📋") && enMayusculas(f.texto)));
+const esPlantillaResumen = (f: Frase) => esTituloResumen(f) || /plantilla de(l)? resumen/.test(f.norm);
 /** Para comparar títulos: solo letras y números. */
 const soloPalabras = (s: string) => normalizarTexto(s).replace(/[^a-z0-9]+/g, " ").trim();
 
