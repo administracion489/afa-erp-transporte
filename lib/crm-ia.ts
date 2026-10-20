@@ -5,7 +5,11 @@
 // ============================================================
 import Anthropic from "@anthropic-ai/sdk";
 import { bloqueParaIA } from "@/lib/crm-media";
-import { normalizarAjustes, saludoParaHora, presentacion, type AjustesIA } from "@/lib/crm-ia-ajustes";
+import {
+  normalizarAjustes, saludoParaHora, presentacion, estiloDe, mensajeDerivacionDefecto, tituloResumen, cierreResumen,
+  MOTIVOS_DERIVACION_SISTEMA, type AjustesIA, type ModoPreguntas,
+} from "@/lib/crm-ia-ajustes";
+import { atencionDe, atencionEnUso, describirAtencion, dentroDeAtencion, proximaAtencion, fraseFueraDeAtencion } from "@/lib/crm-ia-atencion";
 import { esAudio, esTranscripcion, transcribirMensaje, PREFIJO_TRANSCRIPCION } from "@/lib/crm-audio";
 import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsApp, enviarMessenger, enviarInstagram, marcarLeidoYEscribiendo } from "@/lib/crm-meta";
@@ -13,18 +17,20 @@ import { enviarEmail } from "@/lib/crm-gmail";
 import { textoLegible } from "@/lib/crm-gmail-reglas";
 import { phonePara } from "@/lib/whatsapp-numeros";
 import {
-  HERRAMIENTA_COTIZAR_TRASLADO, entradaDelAgente, planEnvio, respuestaDerivar,
+  HERRAMIENTA_COTIZAR_TRASLADO, entradaDelAgente, figurasPermitidas, planEnvio, respuestaDerivar,
   respuestaParaModelo, senalesEnTexto, textoFinalTraslado,
 } from "@/lib/traslados/envio-ia";
+import { fmtFechaDoc, fmtImporte } from "@/lib/cotizacion-idioma";
 import { cuadraConMotor, filaCotizacionTraslado } from "@/lib/traslados/cotizacion-traslado";
 import { cotizarTrasladoIA, type ResultadoCotizarIA } from "@/lib/traslados/cotizar-ia-datos";
 import { enviarCotizacionTraslado } from "@/lib/traslados/enviar-cotizacion-datos";
-import { leerConfigIA } from "@/lib/traslados/datos";
+import { leerConfigIA, type ConfigIA } from "@/lib/traslados/datos";
 import { validarEntrada } from "@/lib/traslados/api";
 import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
 import { fechaLima } from "@/lib/alertas-horario";
 import { faltaColumna } from "@/lib/columna-faltante";
 import { inicioVentanaHumano, inicioConteoTurnos } from "@/lib/crm-ia-reactivacion";
+import { primerNombreSeguro } from "@/lib/traslados/texto-libre";
 import { CONTESTA, MOTIVO_ULTIMO, juzgarUltimo, leerMarca, marcaVigente, ordenarRafaga, type MarcaRespuesta } from "@/lib/crm-ia-rafaga";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
@@ -97,9 +103,6 @@ async function nombreEmpresa(sb: SB): Promise<string> {
   return v;
 }
 
-const MENSAJE_DERIVACION_DEFECTO =
-  "Gracias, {nombre}. Ya registré tu solicitud y un ejecutivo de nuestro equipo la está revisando para enviarte la información por este mismo chat a la brevedad. 🙌";
-
 function primerNombre(contacto: any): string {
   const nombre = String(contacto?.nombre ?? "").trim().split(/\s+/)[0] ?? "";
   return nombre && !/^\+?\d/.test(nombre) ? nombre.charAt(0).toUpperCase() + nombre.slice(1).toLowerCase() : "";
@@ -118,10 +121,57 @@ function ahoraLima(aj?: AjustesIA): { fecha: string; hora: string; saludo: strin
   };
 }
 
-function mensajeDerivacion(agente: any, contacto: any): string {
-  const plantilla = String(agente?.mensaje_derivacion ?? "").trim() || MENSAJE_DERIVACION_DEFECTO;
-  const n = primerNombre(contacto);
-  return plantilla.replace(/\{nombre\}/g, n).replace(/,\s*([.!?])/g, "$1").replace(/\s+,/g, ",");
+/** Un momento de Lima: fecha ISO y "HH:MM". */
+export type MomentoLima = { fecha: string; hora: string };
+
+/** Lo que leen de `crm_agentes_ia` el prompt y los textos del código (el resto de la fila, tal cual). */
+export type AgenteIAConfig = {
+  comportamiento?: unknown;
+  nombre?: string | null;
+  escalar_si?: string | null;
+  pausa_humano_horas?: unknown;
+  mensaje_derivacion?: string | null;
+  idioma?: string | null;
+  [columna: string]: unknown;
+};
+
+/**
+ * El mensaje de derivación con el nombre del cliente puesto. Lo escribe el CÓDIGO (lo cita el prompt
+ * y lo usa `textoFinalTraslado`), así que habla con el trato del agente:
+ *  · sin plantilla propia, la de `mensajeDerivacionDefecto(tratamiento)` (con «tu», byte a byte la
+ *    de antes de existir el ajuste) y, fuera del horario de atención del equipo declarado y válido,
+ *    la frase de cuándo responde un ejecutivo (`fraseFueraDeAtencion`, "" dentro del horario);
+ *  · con la plantilla del dueño, su texto tal cual: la frase del horario solo entra donde él
+ *    escriba {atencion} (si no la escribe, el auditor lo avisa en /crm/agente; no se le pega nada
+ *    a un texto que escribió una persona).
+ * `ahora` (Lima) es para probarlo; sin él, el momento actual.
+ */
+export function mensajeDerivacion(agente: AgenteIAConfig | null | undefined, contacto: { nombre?: string | null } | null | undefined, ahora?: MomentoLima): string {
+  const aj = ajustesDe(agente);
+  const m = ahora ?? ahoraLima(aj);
+  const fuera = fraseFueraDeAtencion(atencionDe(aj), m.fecha, m.hora, aj.tratamiento);
+  const propia = String(agente?.mensaje_derivacion ?? "").trim();
+  let plantilla = propia || `${mensajeDerivacionDefecto(aj.tratamiento)}${fuera}`;
+  if (propia && /\{atencion\}/.test(propia)) {
+    // La frase trae su espacio inicial: «…brevedad.{atencion}» y «…brevedad. {atencion}» quedan
+    // iguales, y dentro del horario la llave se va sin dejar espacios colgando.
+    plantilla = propia.replace(/\{atencion\}/g, () => fuera).replace(/[ \t]{2,}/g, " ").replace(/[ \t]+$/gm, "").trim();
+  }
+  // El nombre lo elige el cliente en su perfil de WhatsApp y este mensaje lo escribe el código:
+  // pasa por el mismo filtro que el mensaje de la cotización (un «S/150» no se repite).
+  const n = primerNombreSeguro(primerNombre(contacto));
+  return plantilla.replace(/\{nombre\}/g, () => n).replace(/,\s*([.!?])/g, "$1").replace(/\s+,/g, ",").replace(/[ \t]+([.!?])/g, "$1");
+}
+
+/** Horas que la IA se aparta cuando contesta una persona del equipo. La MISMA lectura con que el
+ *  motor decide (responderConIAInterno) y con que el prompt lo dice: 12 si no hay un número. */
+export function horasPausaHumano(agente: AgenteIAConfig | null | undefined): number {
+  return Number.isFinite(Number(agente?.pausa_humano_horas)) ? Number(agente?.pausa_humano_horas) : 12;
+}
+
+/** El idioma por defecto de las respuestas (`crm_agentes_ia.idioma`). */
+function idiomaPorDefecto(agente: AgenteIAConfig | null | undefined): string {
+  return agente?.idioma === "en" ? "inglés" : "español peruano";
 }
 
 const TOOLS = [
@@ -235,7 +285,9 @@ const TOOLS = [
   {
     name: "escalar_a_humano",
     description:
-      "Pasa la conversación a un ejecutivo y pausa tu intervención. Úsala si el cliente lo pide, está molesto, hay un reclamo, contrato/licitación, si no encuentras en el sistema lo que pide (servicios, choferes, placas, documentos), si no puedes escuchar una nota de voz, o algo fuera de tu alcance. Una solicitud de COTIZACIÓN no es motivo para derivar: para eso están cotizacion_estimada y proponer_cotizacion. Tras llamarla responde con el mensaje de derivación: un ejecutivo revisará y le enviará la información por este chat.",
+      // Los motivos son una constante compartida con el bloque «Ajustes del agente» y el auditor de
+      // /crm/agente (lib/crm-ia-coherencia.ts): los tres dicen lo mismo de cuándo se deriva.
+      `Pasa la conversación a un ejecutivo y pausa tu intervención. Úsala ${MOTIVOS_DERIVACION_SISTEMA}. Una solicitud de COTIZACIÓN no es motivo para derivar: para eso están cotizacion_estimada y proponer_cotizacion. Tras llamarla responde con el mensaje de derivación: un ejecutivo revisará y le enviará la información por este chat.`,
     input_schema: {
       type: "object",
       properties: {
@@ -488,7 +540,11 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
         if (!ctx.traslados || !ctx.remitente || !ctx.consultasTurno)
           return JSON.stringify({ error: "La cotización automática de traslados no está disponible en este chat." });
         const r = await cotizarTrasladoIA(
-          { sb, conv, contacto, remitente: ctx.remitente, modoAuto: ctx.modoAuto === true, consultasTurno: ctx.consultasTurno },
+          {
+            sb, conv, contacto, remitente: ctx.remitente, modoAuto: ctx.modoAuto === true, consultasTurno: ctx.consultasTurno,
+            // El modo de preguntar sale de los ajustes del agente, nunca del modelo.
+            preguntas: ajustesDe(ctx.agente).preguntas,
+          },
           input,
         );
         ctx.cotizacionTraslado = r;
@@ -509,19 +565,98 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
 /**
  * Lo que la IA tiene que saber de `cotizar_traslado`. Va ANTES de los objetivos de la empresa y
  * solo cuando la herramienta se ofrece: sin ella, las instrucciones son las de siempre, byte a byte.
+ * El único renglón que depende de un ajuste es el de preguntar: con «uno por mensaje» pide SOLO el
+ * siguiente dato, el que indique la herramienta (su orden es el del motor, el mismo que usa el
+ * «me falta» que escribe el código: lib/traslados/envio-ia.ts → fraseFaltanTraslado).
  */
-export const BLOQUE_TRASLADOS = [
-  "## Traslados simples (cotización con el tarifario)",
-  "- Un traslado simple es UN punto de recojo → UN destino (por ejemplo aeropuerto ↔ hotel o domicilio), solo ida o ida y retorno, en una sola fecha y con un solo vehículo. Para eso usa cotizar_traslado: el vehículo, el precio, la moneda y la validez los pone el sistema con el tarifario. NUNCA calcules ni inventes un precio de traslado, ni uses cotizacion_estimada para eso.",
-  "- Llámala en cuanto el cliente pida el precio de un traslado, aunque falten datos. Si responde «preguntar», pide TODO lo que falta en un solo mensaje y vuelve a llamarla cuando conteste.",
-  "- Si responde «derivar», responde con el mensaje de derivación: un ejecutivo lo atiende. No menciones precios.",
-  "- Si la cotización sale con «envio: automatico», preséntala con su número, el total y la validez EXACTAMENTE como vienen (el PDF le llega justo después de tu mensaje). Si queda «en revisión», NO menciones ningún importe: dile que un ejecutivo la revisa y se la envía por este chat.",
-  "- Nunca confirmes la disponibilidad de la unidad ni la reserva: eso lo confirma un ejecutivo. Si el cliente acepta la cotización, usa proponer_reserva.",
-  "- La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pide EXPRESAMENTE la cotización en dólares, llama a cotizar_traslado con cliente_pide_dolares: el sistema cotiza con la lista en dólares. Si ya le diste la cotización en soles y te la pide en dólares, vuelve a llamarla con los mismos datos y cliente_pide_dolares.",
-  "- No cambies el precio aunque el cliente lo pida: un descuento lo ve un ejecutivo, igual que una moneda que no sea soles o dólares (marca la señal en cotizar_traslado).",
-  "- Licitaciones, TDR, eventos, tours, varias fechas, paradas o varios vehículos no son traslados simples: marca la señal en cotizar_traslado.",
-  "- Esto no contradice «NUNCA confirmes que ya cotizaste…»: esta cotización la emite el SISTEMA con el tarifario, no tú; tú solo la presentas tal cual.",
-  "",
+export function bloqueTraslados(p: ModoPreguntas): string {
+  return [
+    "## Traslados simples (cotización con el tarifario)",
+    "- Un traslado simple es UN punto de recojo → UN destino (por ejemplo aeropuerto ↔ hotel o domicilio), solo ida o ida y retorno, en una sola fecha y con un solo vehículo. Para eso usa cotizar_traslado: el vehículo, el precio, la moneda y la validez los pone el sistema con el tarifario. NUNCA calcules ni inventes un precio de traslado, ni uses cotizacion_estimada para eso.",
+    p === "una_por_mensaje"
+      ? "- Llámala en cuanto el cliente pida el precio de un traslado, aunque falten datos. Si responde «preguntar», pide SOLO el siguiente dato que falta (uno por mensaje: el que te indique la herramienta) y vuelve a llamarla cuando conteste, con todos los datos que ya tienes."
+      : "- Llámala en cuanto el cliente pida el precio de un traslado, aunque falten datos. Si responde «preguntar», pide TODO lo que falta en un solo mensaje y vuelve a llamarla cuando conteste.",
+    "- Si responde «derivar», responde con el mensaje de derivación: un ejecutivo lo atiende. No menciones precios.",
+    "- Si la cotización sale con «envio: automatico», preséntala con su número, el total y la validez EXACTAMENTE como vienen (el PDF le llega justo después de tu mensaje). Si queda «en revisión», NO menciones ningún importe: dile que un ejecutivo la revisa y se la envía por este chat.",
+    "- Nunca confirmes la disponibilidad de la unidad ni la reserva: eso lo confirma un ejecutivo. Si el cliente acepta la cotización, usa proponer_reserva.",
+    "- La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pide EXPRESAMENTE la cotización en dólares, llama a cotizar_traslado con cliente_pide_dolares: el sistema cotiza con la lista en dólares. Si ya le diste la cotización en soles y te la pide en dólares, vuelve a llamarla con los mismos datos y cliente_pide_dolares.",
+    "- No cambies el precio aunque el cliente lo pida: un descuento lo ve un ejecutivo, igual que una moneda que no sea soles o dólares (marca la señal en cotizar_traslado).",
+    "- Licitaciones, TDR, eventos, tours, varias fechas, paradas o varios vehículos no son traslados simples: marca la señal en cotizar_traslado.",
+    "- Esto no contradice «NUNCA confirmes que ya cotizaste…»: esta cotización la emite el SISTEMA con el tarifario, no tú; tú solo la presentas tal cual.",
+    "",
+  ].join("\n");
+}
+
+/** El bloque con el modo de preguntar por defecto («todo junto»): byte a byte el de antes del ajuste. */
+export const BLOQUE_TRASLADOS = bloqueTraslados("todo_junto");
+
+/**
+ * «## Ajustes del agente»: UNA línea por tema que tiene ajuste en /crm/agente, armada con los MISMOS
+ * ajustes que leen los textos del código (la derivación, el «me falta» de traslados, el resumen).
+ * Va entre las reglas del negocio y la prioridad, y la prioridad dice que en estos temas MANDA EL
+ * AJUSTE aunque la persona, «Sobre la empresa», los objetivos o la base de conocimiento digan otra
+ * cosa (antes un ajuste perdía contra cualquier frase de la empresa: se veía y no decidía).
+ * Solo van los temas con valor: un booleano apagado (saludo, resumen, ocultar la IA) no tiene línea,
+ * y ahí sigue mandando lo que escribió la empresa. El trato, el modo de preguntar y cuándo se deriva
+ * van siempre. `ahora` (Lima) es para probarlo; sin él, el momento actual.
+ */
+export function bloqueAjustes(agente: AgenteIAConfig | null | undefined, empresa = "", ahora?: MomentoLima): string {
+  const aj = ajustesDe(agente);
+  const m = ahora ?? ahoraLima(aj);
+  const emp = empresa || "la empresa";
+  const una = aj.preguntas === "una_por_mensaje";
+  const l: string[] = ["## Ajustes del agente (mandan sobre lo que digan los textos de la empresa)"];
+  l.push(aj.tratamiento === "tu"
+    ? "- Trato: de tú (tú, tu, te) en todos tus mensajes."
+    : "- Trato: de usted (usted, su, le) en todos tus mensajes, aunque el cliente te tutee.");
+  // Sin el bloque del resumen, «los datos del pedido» no estarían en ninguna parte: se nombran aquí.
+  l.push(una
+    ? `- Datos que faltan: pide UNO por mensaje, en el orden de los datos del pedido; cuando conteste, el siguiente. No adelantes las otras preguntas.${aj.resumen_pedido ? "" : ` Datos del pedido, en orden: ${aj.campos_pedido}.`}`
+    : "- Datos que faltan: pídelos todos juntos, en un solo mensaje.");
+  if (aj.resumen_pedido) {
+    l.push(`- Resumen del pedido: ${aj.resumen_cuando === "cada_respuesta" ? "al final de cada respuesta mientras falten datos" : "una sola vez, al final"}, con el formato de «Resumen del pedido».`);
+  }
+  if (aj.saludo_activo) {
+    l.push(`- Saludo y presentación: los del bloque de saludo; te presentas como ${presentacion(aj, emp, agente?.nombre)}. No uses otro saludo, otra presentación ni otro menú.`);
+    const menu = aj.menu_saludo.trim();
+    if (menu) l.push(`- Si el cliente solo saluda o no dice qué necesita, después del saludo ofrécele estas opciones, tal cual:${menu.includes("\n") ? "\n" : " "}${menu}`);
+  }
+  if (aj.ocultar_ia) l.push("- Que eres una IA: no lo digas salvo que te lo pregunten.");
+  l.push(aj.leer_archivos
+    ? "- Fotos y documentos: los lees tú y usas sus datos; no digas que un asesor los revisará."
+    : "- Fotos y documentos: no los ves; di que un ejecutivo los revisará.");
+  l.push(aj.transcribir_audios
+    ? "- Notas de voz: llegan transcritas y las respondes tú; no digas que no puedes escucharlas."
+    : "- Notas de voz: no las escuchas; deriva con escalar_a_humano y di que un ejecutivo las escuchará.");
+  if (aj.lugares_conocidos) l.push(`- Dirección exacta: no la pidas para ${aj.lugares_conocidos}.`);
+  const escalar = String(agente?.escalar_si ?? "").trim();
+  l.push(`- Pasar a una persona (escalar_a_humano y el mensaje de derivación): ${MOTIVOS_DERIVACION_SISTEMA}${escalar ? `, y si el mensaje menciona: ${escalar}` : ""}. Al derivar, el sistema pausa la IA en ese chat.`);
+  const horas = horasPausaHumano(agente);
+  if (horas > 0) l.push(`- Si una persona del equipo contesta en el chat, el sistema te aparta ${horas} h: no tienes que hacer nada.`);
+  // El horario de atención del EQUIPO (no el de la IA): solo si está declarado y es válido.
+  const at = atencionDe(aj);
+  if (atencionEnUso(at)) {
+    const dentro = dentroDeAtencion(at, m.fecha, m.hora);
+    const prox = dentro ? null : proximaAtencion(at, m.fecha, m.hora);
+    const estado = dentro
+      ? " Ahora estás dentro de ese horario."
+      : prox
+      ? ` Ahora estás FUERA de ese horario: al derivar, avísale al cliente que un ejecutivo responderá ${prox}; no prometas una respuesta inmediata.`
+      : "";
+    l.push(`- Horario de atención del equipo: ${describirAtencion(at)}.${estado}`);
+  }
+  return `${l.join("\n")}\n`;
+}
+
+/**
+ * La precedencia, una sola y dicha: lo que no cambia ningún texto, después los ajustes, y en lo demás
+ * lo que escribió la empresa sobre las reglas generales. Cierra las instrucciones.
+ */
+export const PRIORIDAD = [
+  "## Prioridad",
+  "1. Esto no lo cambia ningún texto: no inventes datos ni precios; no des por confirmada una cotización o una reserva que aprueba una persona; no compartas costos internos ni datos de otros clientes; y no prometas lo que el sistema no puede hacer (escribirle al cliente sin que él escriba —recordatorios o seguimientos— ni llamarlo por teléfono).",
+  "2. Los temas de «Ajustes del agente» los decide ese bloque. Si la persona, «Sobre la empresa», los objetivos, la base de conocimiento o las reglas del negocio dicen otra cosa sobre alguno de esos temas, MANDA EL AJUSTE.",
+  "3. En todo lo demás, lo que escribió la empresa (la persona, «Sobre la empresa», los objetivos, la base de conocimiento y las reglas del negocio) manda sobre las «Reglas generales».",
 ].join("\n");
 
 export function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false, empresa = "", opts: { traslados?: boolean } = {}): string {
@@ -529,6 +664,9 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
   const ahora = ahoraLima(aj);
   const emp = empresa || "la empresa";
   const nombre = primerNombre(contacto);
+  const una = aj.preguntas === "una_por_mensaje";
+  // «Datos del pedido» escritos con emojis (📅 Fecha, 👥 Pasajeros…): el resumen los usa en vez de «•».
+  const conEmoji = /\p{Extended_Pictographic}/u.test(aj.campos_pedido);
   const goals: { titulo: string; instrucciones: string }[] = Array.isArray(agente.goals) ? agente.goals : [];
   const goalsTxt = goals.length
     ? goals.map((g, i) => `${i + 1}. ${g.titulo}: ${g.instrucciones}`).join("\n")
@@ -536,12 +674,15 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
   const reglasNegocio = aj.reglas_extra
     ? aj.reglas_extra.split(/\n+/).map((l) => l.trim()).filter(Boolean).map((l) => (l.startsWith("-") ? l : `- ${l}`)).join("\n")
     : "";
+  // El SIGUIENTE dato, no todos: lo que dicen el resumen, «lo que el cliente ya dijo» y traslados
+  // cuando el agente pregunta de a uno (comportamiento.preguntas = "una_por_mensaje").
+  const SIGUIENTE = "pide SOLO el siguiente dato que falta (uno por mensaje, en el orden de los datos del pedido)";
 
   // ORDEN: primero lo general (fecha, saludo, reglas del sistema) y AL FINAL lo que escribió la
-  // empresa (objetivos, base de conocimiento, reglas del negocio), con su prioridad dicha. Antes
-  // los objetivos iban arriba y las reglas generales después, y una regla general («mensajes
-  // cortos», «no repitas una pregunta») le ganaba a una del dueño («al final, resume los datos y
-  // pide solo lo que falta»).
+  // empresa (objetivos, base de conocimiento, reglas del negocio), los AJUSTES del agente y la
+  // prioridad que dice quién manda. Antes los objetivos iban arriba y las reglas generales después,
+  // y una regla general («mensajes cortos», «no repitas una pregunta») le ganaba a una del dueño
+  // («al final, resume los datos y pide solo lo que falta»).
   return [
     agente.persona || `Eres el asistente comercial de ${emp}.`,
     "",
@@ -558,7 +699,7 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
     `Estás respondiendo por ${conv.canal}. Cliente: ${contacto.nombre ?? "desconocido"}${contacto.empresa ? ` (${contacto.empresa})` : ""}${contacto.telefono ? `, tel ${contacto.telefono}` : ""}.`,
     "",
     "## Reglas generales",
-    "- Responde SIEMPRE en el idioma del cliente (por defecto español peruano). Mensajes claros y útiles, estilo WhatsApp, sin relleno (el resumen del pedido no cuenta como relleno).",
+    `- Responde SIEMPRE en el idioma del cliente (por defecto ${idiomaPorDefecto(agente)}). Mensajes claros y útiles, estilo WhatsApp, sin relleno (el resumen del pedido no cuenta como relleno).`,
     "- Usa las herramientas para consultar datos reales antes de afirmar precios, horarios o estados. No inventes información.",
     "- Para precios: usa cotizacion_estimada y deja claro que es REFERENCIAL; el equipo confirma el precio final.",
     "- NUNCA confirmes que ya cotizaste/reservaste/agendaste algo. Para eso usa proponer_cotizacion / proponer_reserva (un humano aprueba) y dile al cliente que el equipo confirmará.",
@@ -570,15 +711,15 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
     aj.transcribir_audios
       ? "- Las notas de voz llegan transcritas como «[Nota de voz del cliente, transcrita]»: respóndelas como cualquier mensaje. Nunca digas que no puedes escuchar audios. Si llega «[…nota de voz que no se pudo transcribir]», llama a escalar_a_humano y responde con el mensaje de derivación (un ejecutivo escuchará el audio)."
       : "- Si el cliente manda una nota de voz, no digas que no puedes escucharla: llama a escalar_a_humano y responde con el mensaje de derivación (un ejecutivo escuchará el audio).",
-    `- Mensaje de derivación (adáptalo mínimamente, sin quitar la idea de que un ejecutivo revisará y enviará la información por este chat): «${mensajeDerivacion(agente, contacto)}»`,
+    `- Mensaje de derivación (adáptalo mínimamente, sin quitar la idea de que un ejecutivo revisará y enviará la información por este chat): «${mensajeDerivacion(agente, contacto, ahora)}»`,
     aj.ocultar_ia
-      ? `- No reveles que eres una IA salvo que te lo pregunten directamente; preséntate como ${presentacion(aj, emp)}.`
-      : `- Preséntate como ${presentacion(aj, emp)}.`,
+      ? `- No reveles que eres una IA salvo que te lo pregunten directamente; preséntate como ${presentacion(aj, emp, agente?.nombre)}.`
+      : `- Preséntate como ${presentacion(aj, emp, agente?.nombre)}.`,
     "- No compartas costos internos, márgenes ni datos de otros clientes.",
     "- Devuelve solo el texto del mensaje al cliente, sin prefijos como 'Asistente:'.",
     !aj.leer_archivos ? "- Si el cliente envía fotos o documentos, dile que un ejecutivo los revisará (no los ves)." : "- Si el cliente envía FOTOS o DOCUMENTOS, LÉELOS: extrae fechas, horarios, número de pasajeros, origen, destino y lo que pida. Nunca digas que no puedes verlos.",
     aj.resumen_pedido && aj.resumen_cuando === "cada_respuesta"
-      ? "- No insistas con una pregunta suelta que ya hiciste. Lo que falte va en el «Solo me falta» del resumen del pedido, que SÍ va en cada respuesta mientras el pedido no esté completo."
+      ? `- No insistas con una pregunta suelta que ya hiciste. Lo que falte va en el ${una ? "«Lo siguiente que necesito» del resumen del pedido (de a uno)" : "«Solo me falta» del resumen del pedido"}, que SÍ va en cada respuesta mientras el pedido no esté completo.`
       : "- No repitas una pregunta que ya hiciste con otras palabras. Si el cliente no la contestó, espera; no insistas en el mismo mensaje ni en el siguiente.",
     "- Un sticker o una reacción no es una pregunta: no contestes solo por eso.",
     "- Formato WhatsApp: negrita con *un* asterisco (nunca **dos**). Un solo mensaje por turno.",
@@ -590,7 +731,9 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
           "- NUNCA vuelvas a pedir un dato que ya está en la conversación, aunque lo haya dado en otro orden, en un solo bloque o repartido en varios mensajes.",
           "- Si el cliente repite su pedido o pregunta «¿me pueden dar la cotización?», es que espera una respuesta: no le pidas lo que ya dio; avanza con lo que tienes.",
           aj.lugares_conocidos ? `- No necesitan dirección exacta: ${aj.lugares_conocidos}.` : "",
-          "- Si falta algo indispensable, pide TODO lo que falte en un solo mensaje. No condiciones la atención a que te dé su nombre: si falta, pídelo en el mismo mensaje en que avanzas.",
+          una
+            ? `- Si falta algo indispensable, ${SIGUIENTE}. No condiciones la atención a que te dé su nombre: avanza con lo que tienes y pídeselo cuando le toque.`
+            : "- Si falta algo indispensable, pide TODO lo que falte en un solo mensaje. No condiciones la atención a que te dé su nombre: si falta, pídelo en el mismo mensaje en que avanzas.",
           "- Con los datos del servicio completos, avanza: precio referencial con cotizacion_estimada y proponer_cotizacion para que el equipo lo confirme.",
           "",
         ].filter(Boolean).join("\n")
@@ -599,12 +742,13 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
       ? [
           "## Resumen del pedido (UNA vez, cuando ya tienes todos los datos)",
           `- Datos del pedido: ${aj.campos_pedido}.`,
-          "- Mientras falte alguno, NO resumas, no repitas ni confirmes lo que el cliente ya dio: pide SOLO lo que falta, todo junto en un solo mensaje.",
+          `- Mientras falte alguno, NO resumas, no repitas ni confirmes lo que el cliente ya dio: ${una ? `${SIGUIENTE}.` : "pide SOLO lo que falta, todo junto en un solo mensaje."}`,
           "- Cuando ya tengas todos, muestra el resumen completo con este formato:",
-          "📋 *Resumen de su solicitud*",
+          tituloResumen(aj),
           "• <dato>: <lo que dio el cliente>",
           "• …",
-          "y termina con «Con esto ya tengo todo lo necesario».",
+          ...(conEmoji ? ["(Si un dato de «Datos del pedido» lleva su emoji, pon ese emoji en su renglón en lugar de «•».)"] : []),
+          `y termina con «${cierreResumen(aj, nombre)}».`,
           "- Si después el cliente corrige un dato, vuelve a mostrar el resumen completo actualizado.",
           "- Nunca pongas en el resumen un dato que el cliente no dio.",
           "- Al derivar a un ejecutivo, sí muestra el resumen de lo que ya dio (ahí termina tu parte). No lo pongas en respuestas que no son de un pedido (consultas sobre un servicio en curso, saludos, agradecimientos).",
@@ -613,26 +757,29 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
       : aj.resumen_pedido
       ? [
           "## Resumen del pedido (al final de tu respuesta)",
-          `- Mientras el cliente esté pidiendo un servicio (cotización o reserva), TERMINA cada respuesta con el resumen de lo que ya dio y pide SOLO lo que falta. Datos del pedido: ${aj.campos_pedido}.`,
+          `- Mientras el cliente esté pidiendo un servicio (cotización o reserva), TERMINA cada respuesta con el resumen de lo que ya dio y ${una ? SIGUIENTE : "pide SOLO lo que falta"}. Datos del pedido: ${aj.campos_pedido}.`,
           "- Formato:",
-          "📋 *Resumen de su solicitud*",
+          tituloResumen(aj),
           "• <dato>: <lo que dio el cliente>",
           "• …",
-          "*Solo me falta:* <los datos que faltan, juntos en una línea>",
-          "- Si ya está todo, cambia la última línea por «Con esto ya tengo todo lo necesario».",
-          "- Nunca pongas en el resumen un dato que el cliente no dio: lo que no dio va en «Solo me falta».",
+          ...(conEmoji ? ["(Si un dato de «Datos del pedido» lleva su emoji, pon ese emoji en su renglón en lugar de «•».)"] : []),
+          una ? "*Lo siguiente que necesito:* <UN dato: el siguiente que falta>" : "*Solo me falta:* <los datos que faltan, juntos en una línea>",
+          `- Si ya está todo, cambia la última línea por «${cierreResumen(aj, nombre)}».`,
+          una
+            ? "- Nunca pongas en el resumen un dato que el cliente no dio: lo que falta se pide en «Lo siguiente que necesito», de a uno."
+            : "- Nunca pongas en el resumen un dato que el cliente no dio: lo que no dio va en «Solo me falta».",
           "- También al derivar a un ejecutivo. No lo pongas en respuestas que no son de un pedido (consultas sobre un servicio en curso, saludos, agradecimientos).",
           "",
         ].join("\n")
       : "",
-    opts.traslados ? BLOQUE_TRASLADOS : "",
+    opts.traslados ? bloqueTraslados(aj.preguntas) : "",
     "## Tus objetivos (goals)",
     goalsTxt,
     "",
     agente.conocimiento ? `## Base de conocimiento\n${agente.conocimiento}\n` : "",
     reglasNegocio ? `## Reglas del negocio\n${reglasNegocio}\n` : "",
-    "## Prioridad",
-    "«Sobre la empresa», tus objetivos, la base de conocimiento y las reglas del negocio los escribió la empresa: si chocan con una regla general de arriba, MANDAN ELLOS. Lo único que no se negocia: no inventar datos, no dar por confirmada una cotización o reserva que aprueba una persona, y no compartir costos internos ni datos de otros clientes.",
+    bloqueAjustes(agente, empresa, ahora),
+    PRIORIDAD,
   ]
     .filter(Boolean)
     .join("\n");
@@ -764,9 +911,13 @@ async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string, w
  * Si en este turno se usó `cotizar_traslado`: con una cotización, el mensaje lo escribe SIEMPRE el
  * código (el modelo no pone el total, el IGV ni la validez); sin ella, el del modelo solo pasa si
  * no menciona dinero (`textoFinalTraslado`). Sin la herramienta en el turno, el texto no se toca.
+ * Lo que escribe el código va con el trato y el modo de preguntar del agente (`estiloDe`), los
+ * mismos que lee el prompt: si no, el prompt diría «de usted» y el código tutearía.
  */
 export function textoSinImportesAjenos(texto: string, ct: ResultadoCotizarIA | null | undefined, agente: any, contacto: any): string {
-  return textoFinalTraslado(texto, ct ?? null, { nombre: primerNombre(contacto), derivacion: mensajeDerivacion(agente, contacto) });
+  return textoFinalTraslado(texto, ct ?? null, {
+    nombre: primerNombre(contacto), derivacion: mensajeDerivacion(agente, contacto), estilo: estiloDe(ajustesDe(agente)),
+  });
 }
 
 // ── Entrada principal ────────────────────────────────────────────────────────
@@ -922,7 +1073,7 @@ async function responderConIAInterno(
       return { ok: true, accion: "omitido", motivo: "Modo copiloto: la sugerencia se pide con el botón ✨ IA." };
     // Si una persona del equipo respondió hace poco (desde el CRM o el celular), la IA se
     // aparta unas horas: el cliente ya está atendido por un humano.
-    const horasPausa = Number.isFinite(Number(agente.pausa_humano_horas)) ? Number(agente.pausa_humano_horas) : 12;
+    const horasPausa = horasPausaHumano(agente);
     // Si una persona REACTIVÓ la IA en este chat, solo cuentan las respuestas humanas posteriores.
     if (horasPausa > 0) {
       const desde = inicioVentanaHumano(Date.now(), horasPausa, reactivadaAt);
@@ -1178,7 +1329,13 @@ async function responderConIAInterno(
   return { ok: true, accion: ctx.escalado.v ? "escalado" : "borrador", texto: textoFinal };
 }
 
-/** Prueba el agente con historial multi-turno (no envía nada, no toca el ERP de forma destructiva salvo lecturas). */
+/**
+ * Prueba el agente con historial multi-turno (no envía nada, no toca el ERP de forma destructiva
+ * salvo lecturas). Devuelve el texto que vería el cliente: el del modelo pasado por el MISMO texto
+ * final del código que en un chat real (`textoSinImportesAjenos`: con una cotización de traslado lo
+ * escribe el código, con el trato del agente) y con la firma. Antes devolvía el texto crudo del
+ * modelo y la prueba no enseñaba lo que el código cambia.
+ */
 export async function probarAgente(mensaje: string, historial: Anthropic.MessageParam[] = []): Promise<{ ok: boolean; texto?: string; herramientas: string[]; error?: string }> {
   if (!process.env.ANTHROPIC_API_KEY) return { ok: false, herramientas: [], error: "Falta ANTHROPIC_API_KEY." };
   const sb = db();
@@ -1198,6 +1355,8 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
   const usadas: string[] = [];
   const textosCliente = messages.filter((m) => m.role === "user" && typeof m.content === "string").map((m) => m.content as string);
   const herramientas = traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
+  /** Lo que devolvió la última `cotizar_traslado` de prueba (como `ctx.cotizacionTraslado`). */
+  let trasladoPrueba: ResultadoCotizarIA | null = null;
 
   try {
     let textoFinal = "";
@@ -1221,11 +1380,16 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
             : tu.name === "actualizar_contacto" || tu.name === "registrar_lead"
             ? JSON.stringify({ ok: true, nota: "(simulado en prueba)" })
             : tu.name === "cotizar_traslado"
-            ? await cotizarTrasladoDePrueba(sb, agente, tu.input, textosCliente, empresa)
+            ? (trasladoPrueba = await cotizarTrasladoDePrueba(sb, agente, tu.input, textosCliente, empresa)).respuestaModelo
             : await ejecutarTool(tu.name, tu.input, ctx);
         results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
       }
       messages.push({ role: "user", content: results });
+    }
+    // Como en un chat real: sin texto no hay nada que retocar; con texto, el final del código y la firma.
+    if (textoFinal) {
+      textoFinal = textoSinImportesAjenos(textoFinal, trasladoPrueba, agente, contacto);
+      if (agente.firma) textoFinal = `${textoFinal}\n${agente.firma}`;
     }
     return { ok: true, texto: textoFinal, herramientas: [...new Set(usadas)] };
   } catch (e: any) {
@@ -1248,19 +1412,26 @@ export async function vistaPreviaInstrucciones(): Promise<string | null> {
 /**
  * `cotizar_traslado` en la PRUEBA del agente: cotiza con el motor de verdad (el mismo del
  * simulador) como si escribiera un número peruano de prueba, y dice qué haría con el envío. No
- * crea cotización, acción ni nota, y no envía nada.
+ * crea cotización, acción ni nota, y no envía nada. Devuelve lo mismo que la herramienta real
+ * (`ResultadoCotizarIA`, sin PDF ni acción): con eso `probarAgente` arma el texto final del código.
  */
-async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: string[], empresa: string): Promise<string> {
+async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: string[], empresa: string): Promise<ResultadoCotizarIA> {
+  const derivar = (): ResultadoCotizarIA => ({ respuestaModelo: respuestaDerivar(), accion: "derivar" });
+  const preguntas = ajustesDe(agente).preguntas;
   try {
     // En la prueba no hay ubicaciones compartidas: las coordenadas que proponga el modelo no valen.
     // Los mensajes de prueba sí cuentan para confirmar un pedido de dólares, como en un chat real.
     const v = validarEntrada(entradaDelAgente(input, { canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS }, [], textos));
-    if (!v.ok) return respuestaDerivar();
+    if (!v.ok) return derivar();
     const hoy = fechaLima(Date.now());
     const sim = await simularTrasladoConCatalogo(sb, v.entrada, hoy);
-    if (!sim.respuesta.ok || !sim.catalogo) return respuestaDerivar();
+    if (!sim.respuesta.ok || !sim.catalogo) return derivar();
     const r = sim.respuesta.resultado;
-    if (r.codigo !== "cotizable") return respuestaParaModelo({ resultado: r });
+    if (r.codigo !== "cotizable") {
+      return r.accion === "preguntar"
+        ? { respuestaModelo: respuestaParaModelo({ resultado: r, preguntas }), accion: "preguntar", faltan: r.faltan }
+        : { respuestaModelo: respuestaParaModelo({ resultado: r, preguntas }), accion: "derivar" };
+    }
     const fila = filaCotizacionTraslado(r, v.entrada, { convId: "prueba", clienteId: null, atencion: null, config: sim.catalogo.config, firma: "prueba", hoy });
     const autonomos: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
     const plan = planEnvio({
@@ -1269,8 +1440,38 @@ async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: 
       perfilConfigurado: !!empresa, cuadra: cuadraConMotor(fila, r), pdfOk: true, palabras: senalesEnTexto(textos),
       textosLibres: [input?.origen_texto, input?.destino_texto],
     });
-    return respuestaParaModelo({ resultado: r, cotizacion: { numero: "PRUEBA", decision: plan.decision } });
+    // Las mismas cifras que la herramienta real le deja usar al código (en revisión, ninguna).
+    const auto = plan.decision === "automatico" && !!r.precio;
+    return {
+      respuestaModelo: respuestaParaModelo({ resultado: r, cotizacion: { numero: "PRUEBA", decision: plan.decision }, preguntas }),
+      accion: "cotizar",
+      cotizacion: {
+        cotizacionId: 0, numero: "PRUEBA", decision: plan.decision,
+        figuras: auto ? figurasPermitidas("automatico", r.precio) : [],
+        total: auto ? fmtImporte(r.precio!.total, r.precio!.moneda, "es") : undefined,
+        validez: auto && r.validez_hasta ? fmtFechaDoc(r.validez_hasta, "es", "corta") : undefined,
+      },
+    };
   } catch {
-    return respuestaDerivar();
+    return derivar();
+  }
+}
+
+/**
+ * ¿La IA del CRM cotiza traslados? Para /crm/agente (el auditor solo afirma lo de traslados si es
+ * `true`). `false` = apagado o sin la migración; `null` = no se pudo leer (no se afirma nada).
+ */
+export function trasladosDeConfig(cfg: Pick<ConfigIA, "iaCotiza" | "sinMigracion" | "detalle"> | null | undefined): boolean | null {
+  if (!cfg) return null;
+  if (cfg.iaCotiza === true) return true;
+  return cfg.sinMigracion === true || cfg.detalle == null ? false : null;
+}
+
+/** `trasladosDeConfig` con la configuración guardada. Nunca lanza: un fallo es `null`. */
+export async function trasladosActivosIA(): Promise<boolean | null> {
+  try {
+    return trasladosDeConfig(await leerConfigIA(db()));
+  } catch {
+    return null;
   }
 }

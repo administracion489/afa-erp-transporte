@@ -48,6 +48,7 @@ import { ETIQUETA_TEXTO_LIBRE } from "./texto-libre";
 import { armarPdfDeFila, leerCotizacionTraslado, leerPerfilPdf, type AvisoPdfTraslado, type LogoPdf, type PerfilPdf } from "./enviar-cotizacion-datos";
 import { simularTrasladoConCatalogo } from "./servicio";
 import type { ResultadoTraslado } from "./motor";
+import type { ModoPreguntas } from "../crm-ia-ajustes";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = any;
@@ -70,6 +71,12 @@ export type CtxCotizarIA = {
    * pedido complejo; las coordenadas, SOLO de los de tipo «location».
    */
   entrantes?: { contenido: string | null; tipo: string | null }[];
+  /**
+   * El modo de preguntar del agente (`comportamiento.preguntas`, lib/crm-ia-ajustes.ts): con
+   * «una_por_mensaje», la instrucción al modelo pide SOLO el primer dato que falta. Sin él, la de
+   * siempre (todo junto). Lo pone el agente desde sus ajustes, nunca el modelo.
+   */
+  preguntas?: ModoPreguntas;
 };
 
 export type CotizacionIA = {
@@ -272,9 +279,9 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   const sim = await (deps.simular ?? simularTrasladoConCatalogo)(sb, e, hoy);
   if (!sim.respuesta.ok) return deriva(`No se pudo cotizar el traslado: ${sim.respuesta.detalle}`, pedido);
   const r = sim.respuesta.resultado;
-  if (r.accion === "preguntar") return { respuestaModelo: respuestaParaModelo({ resultado: r }), accion: "preguntar", faltan: r.faltan };
+  if (r.accion === "preguntar") return { respuestaModelo: respuestaParaModelo({ resultado: r, preguntas: ctx.preguntas }), accion: "preguntar", faltan: r.faltan };
   if (r.accion === "derivar" || !sim.catalogo) {
-    return { ...deriva(r.motivo, pedido, r.explicacion.join("\n")), respuestaModelo: respuestaParaModelo({ resultado: r }) };
+    return { ...deriva(r.motivo, pedido, r.explicacion.join("\n")), respuestaModelo: respuestaParaModelo({ resultado: r, preguntas: ctx.preguntas }) };
   }
 
   // 6) La cotización. Sus condiciones salen de la plantilla PDF de la regla «Traslado de la IA ×
@@ -429,7 +436,7 @@ async function decidirYRegistrar(
   }
 
   const r = x.resultado;
-  const respuestaModelo = r ? respuestaParaModelo({ resultado: r, cotizacion: { numero, decision } }) : respuestaEnRevision(numero);
+  const respuestaModelo = r ? respuestaParaModelo({ resultado: r, cotizacion: { numero, decision }, preguntas: ctx.preguntas }) : respuestaEnRevision(numero);
   const cotizacion: CotizacionIA = {
     cotizacionId: x.leida.id, numero, decision, accionId,
     figuras: decision === "automatico" && r?.precio ? figurasPermitidas("automatico", r.precio) : [],

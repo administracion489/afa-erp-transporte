@@ -1,8 +1,15 @@
 "use client";
 import ContactosSinIA from "@/components/crm/ContactosSinIA";
 import AjustesComportamiento from "@/components/crm/AjustesComportamiento";
-import { normalizarAjustes } from "@/lib/crm-ia-ajustes";
-import React, { useEffect, useState } from "react";
+import CoherenciaAgente, {
+  AvisoCampo, AvisosAjuste, ProveedorCoherencia, enfocarFrase, idCampo, resaltarAjuste, type AccionesCoherencia,
+} from "@/components/crm/CoherenciaAgente";
+import { normalizarAjustes, mensajeDerivacionDefecto, TEMAS_AJUSTE, type AjustesIA } from "@/lib/crm-ia-ajustes";
+import {
+  auditarAgente, nuevasAlarmas,
+  type CampoTexto, type ConfigAuditable, type Hallazgo,
+} from "@/lib/crm-ia-coherencia";
+import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
 
@@ -45,8 +52,63 @@ const MODELOS = [
   { key: "claude-haiku-4-5", label: "Claude Haiku 4.5", nota: "Más rápido y económico" },
 ];
 
-const TABS = ["Personalidad", "Goals", "Conocimiento", "Canales & Modo", "Ajustes"] as const;
+const TABS = ["Personalidad", "Objetivos", "Conocimiento", "Canales & Modo", "Ajustes"] as const;
 type Tab = (typeof TABS)[number];
+
+// ── Coherencia de la configuración (lib/crm-ia-coherencia.ts decide; aquí solo se navega) ─────────
+
+/** Dónde vive cada texto del dueño. */
+const TAB_DE_CAMPO: Record<CampoTexto, Tab> = {
+  persona: "Personalidad",
+  empresa_contexto: "Personalidad",
+  goals: "Objetivos",
+  conocimiento: "Conocimiento",
+  reglas_extra: "Ajustes",
+  mensaje_derivacion: "Ajustes",
+};
+/** Los campos de `porCampo` (el conteo de alarmas del motor) que pinta el badge de cada pestaña.
+ *  "ajustes" = los choques entre ajustes, que se arreglan en Ajustes. */
+const CAMPOS_DE_TAB: Partial<Record<Tab, string[]>> = {
+  Personalidad: ["persona", "empresa_contexto"],
+  Objetivos: ["goals"],
+  Conocimiento: ["conocimiento"],
+  Ajustes: ["reglas_extra", "mensaje_derivacion", "ajustes"],
+};
+
+/** Lo que el auditor lee del formulario (lo que se está editando, sin guardar). */
+const cfgAuditable = (a: Agente): ConfigAuditable => ({
+  persona: a.persona,
+  empresa_contexto: a.empresa_contexto,
+  conocimiento: a.conocimiento,
+  goals: a.goals,
+  mensaje_derivacion: a.mensaje_derivacion,
+  escalar_si: a.escalar_si,
+  nombre: a.nombre,
+  pausa_humano_horas: a.pausa_humano_horas,
+  comportamiento: a.comportamiento,
+});
+
+const corto = (s: string, max = 90) => {
+  const c = Array.from(s.replace(/\s+/g, " ").trim());
+  return c.length <= max ? c.join("") : `${c.slice(0, max - 1).join("").trimEnd()}…`;
+};
+
+/** El confirm() de guardar: nombra los choques NUEVOS (hasta 3) y dice quién manda. */
+function textoChoquesNuevos(nuevas: Hallazgo[]): string {
+  const n = nuevas.length;
+  const lineas = nuevas.slice(0, 3).map((h) => {
+    const manda = h.ajuste ? ` Manda: ${h.ajuste.etiqueta} = ${h.ajuste.valorLegible}.` : "";
+    return `• ${h.titulo}: «${corto(h.cita)}» (${h.etiquetaCampo}).${manda}`;
+  });
+  if (n > 3) lineas.push(`(…y ${n - 3} más)`);
+  const imposible = nuevas.some((h) => !h.ajuste);
+  return [
+    `Con estos cambios hay ${n} choque${n === 1 ? "" : "s"} nuevo${n === 1 ? "" : "s"}:`,
+    ...lineas,
+    "",
+    `La IA seguirá el ajuste${imposible ? ", y lo que el sistema no puede hacer no lo hará aunque esté escrito" : ""}. ¿Guardar igual?`,
+  ].join("\n");
+}
 
 const input =
   "w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20";
@@ -54,6 +116,10 @@ const label = "block text-xs font-semibold text-gray-500 mb-1.5";
 
 export default function AgenteIAPage() {
   const [agente, setAgente] = useState<Agente | null>(null);
+  /** Lo último cargado o guardado: contra esto se cuentan los choques NUEVOS al guardar. */
+  const [cargado, setCargado] = useState<Agente | null>(null);
+  /** Nombre del perfil de la empresa ({empresa} en «Cómo se presenta»); "" = sin perfil. */
+  const [empresa, setEmpresa] = useState("");
   const [cargando, setCargando] = useState(true);
   const [faltaTabla, setFaltaTabla] = useState(false);
   const [tab, setTab] = useState<Tab>("Personalidad");
@@ -67,13 +133,21 @@ export default function AgenteIAPage() {
   const [probando, setProbando] = useState(false);
   const chatEndRef = React.useRef<HTMLDivElement>(null);
 
-  // Lo que solo sabe el servidor: ¿hay clave de transcripción? y el prompt real.
-  const [estadoIA, setEstadoIA] = useState<{ transcripcion: boolean | null; instrucciones: string | null }>({ transcripcion: null, instrucciones: null });
+  // Lo que solo sabe el servidor: ¿hay clave de transcripción?, el prompt real y si la IA cotiza
+  // traslados (null = no se sabe: el auditor no afirma nada de traslados).
+  const [estadoIA, setEstadoIA] = useState<{ transcripcion: boolean | null; instrucciones: string | null; traslados: boolean | null }>({
+    transcripcion: null, instrucciones: null, traslados: null,
+  });
   const cargarEstadoIA = React.useCallback(async () => {
     try {
       const r = await fetch("/api/crm/ia/estado", { headers: await cabecerasErp() });
       const j = await r.json();
-      if (j?.ok) setEstadoIA({ transcripcion: !!j.transcripcion, instrucciones: j.instrucciones ?? null });
+      if (j?.ok)
+        setEstadoIA({
+          transcripcion: !!j.transcripcion,
+          instrucciones: j.instrucciones ?? null,
+          traslados: typeof j.traslados === "boolean" ? j.traslados : null,
+        });
     } catch { /* se queda en «no se sabe» */ }
   }, []);
   useEffect(() => { cargarEstadoIA(); }, [cargarEstadoIA]);
@@ -90,25 +164,93 @@ export default function AgenteIAPage() {
         setFaltaTabla(true);
       } else if (data && data[0]) {
         const a = data[0];
-        setAgente({
+        const leido: Agente = {
           ...a,
           goals: Array.isArray(a.goals) ? a.goals : [],
           canales: Array.isArray(a.canales) ? a.canales : [],
           canales_autonomos: Array.isArray(a.canales_autonomos) ? a.canales_autonomos : [],
-        });
+        };
+        setAgente(leido);
+        setCargado(leido);
       }
       setCargando(false);
+    })();
+    // El nombre de la empresa, como lo lee el motor (nombre o razón social). Best-effort.
+    (async () => {
+      try {
+        const { data } = await supabase.from("empresa_perfil").select("nombre, razon_social").eq("id", 1).maybeSingle();
+        const p = data as { nombre?: string | null; razon_social?: string | null } | null;
+        setEmpresa(String(p?.nombre || p?.razon_social || "").trim());
+      } catch { /* sin perfil: «la empresa» */ }
     })();
   }, []);
 
   const set = <K extends keyof Agente>(k: K, v: Agente[K]) => setAgente((a) => (a ? { ...a, [k]: v } : a));
 
+  // ── Coherencia: el auditor PURO sobre lo que se está editando (se recalcula al teclear, diferido
+  // para no frenar la escritura) y sobre lo guardado (para saber qué choques AGREGA una edición). ──
+  const ctxAuditoria = useMemo(() => ({ trasladosActivos: estadoIA.traslados, empresa }), [estadoIA.traslados, empresa]);
+  const agenteDiferido = useDeferredValue(agente);
+  const auditoria = useMemo(
+    () => (agenteDiferido ? auditarAgente(cfgAuditable(agenteDiferido), ctxAuditoria) : null),
+    [agenteDiferido, ctxAuditoria],
+  );
+  const auditoriaCargada = useMemo(
+    () => (cargado ? auditarAgente(cfgAuditable(cargado), ctxAuditoria) : null),
+    [cargado, ctxAuditoria],
+  );
+
+  // «Ver la frase» / «Ir al ajuste»: se cambia de pestaña y, ya pintada, se enfoca o se resalta.
+  type Destino = { tipo: "frase"; campo: CampoTexto; cita: string; indice?: number } | { tipo: "ajuste"; ancla: string };
+  const [irA, setIrA] = useState<Destino | null>(null);
+  useEffect(() => {
+    if (!irA) return;
+    const raf = requestAnimationFrame(() => {
+      if (irA.tipo === "frase") enfocarFrase(irA.campo, irA.cita, irA.indice);
+      else resaltarAjuste(irA.ancla);
+      setIrA(null);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [irA]);
+
+  const acciones: AccionesCoherencia = {
+    verFrase: (campo, cita, indice) => {
+      setTab(TAB_DE_CAMPO[campo]);
+      setIrA({ tipo: "frase", campo, cita, ...(indice != null ? { indice } : {}) });
+    },
+    irAjuste: (ancla) => {
+      setTab("Ajustes");
+      setIrA({ tipo: "ajuste", ancla });
+    },
+    // Solo cambia el FORMULARIO: el aviso pasa a gris en vivo y guardar sigue siendo del dueño.
+    aplicarPropuesta: (h) => {
+      const p = h.propuesta;
+      if (!p) return;
+      if (p.clave === "pausa_humano_horas") set("pausa_humano_horas", Number(p.valor));
+      else if (p.clave === "escalar_si") set("escalar_si", String(p.valor ?? ""));
+      else if (p.clave === "mensaje_derivacion") set("mensaje_derivacion", String(p.valor ?? ""));
+      else
+        setAgente((a) => {
+          if (!a) return a;
+          const c = a.comportamiento;
+          const base = { ...normalizarAjustes(c), ...(c && typeof c === "object" ? (c as object) : {}) } as AjustesIA;
+          return { ...a, comportamiento: { ...base, [p.clave]: p.valor } };
+        });
+      showToast(`«${h.ajuste?.etiqueta ?? "Ajuste"}» puesto en «${p.etiqueta}». Falta pulsar Guardar.`);
+    },
+  };
+
   const guardar = async () => {
     if (!agente) return;
+    // No se bloquea: si la edición AGREGA choques, se nombran y decide el dueño. Los que ya estaban
+    // no se vuelven a preguntar (los muestra el panel).
+    const despues = auditarAgente(cfgAuditable(agente), ctxAuditoria);
+    const nuevas = nuevasAlarmas(auditoriaCargada?.hallazgos ?? [], despues.hallazgos);
+    if (nuevas.length > 0 && !window.confirm(textoChoquesNuevos(nuevas))) return;
     setGuardando(true);
     const { id, ...resto } = agente;
     // Se guarda acotado con la misma regla que usa el motor.
-    const patch: any = { ...resto };
+    const patch: Omit<Agente, "id"> = { ...resto };
     if (resto.comportamiento !== undefined) patch.comportamiento = normalizarAjustes(resto.comportamiento);
     const { error } = await supabase
       .from("crm_agentes_ia")
@@ -122,11 +264,14 @@ export default function AgenteIAPage() {
           : /mensaje_derivacion|comportamiento/.test(error.message)
           ? "Falta correr supabase/crm-ia-comportamiento.sql en Supabase"
           : `Error al guardar: ${error.message}`
+        : despues.alarmas > 0
+        ? `Configuración guardada · ${despues.alarmas} choque${despues.alarmas === 1 ? "" : "s"} pendiente${despues.alarmas === 1 ? "" : "s"}`
         : "Configuración guardada",
       !error,
     );
     if (!error) {
       if (patch.comportamiento) set("comportamiento", patch.comportamiento);
+      setCargado({ ...agente, ...(patch.comportamiento !== undefined ? { comportamiento: patch.comportamiento } : {}) });
       cargarEstadoIA();
     }
   };
@@ -161,8 +306,8 @@ export default function AgenteIAPage() {
       });
       const data = await res.json();
       setChatMsgs((prev) => [...prev, { role: "afita", texto: data.texto ?? "", herramientas: data.herramientas, error: data.error }]);
-    } catch (e: any) {
-      setChatMsgs((prev) => [...prev, { role: "afita", texto: "", error: e?.message ?? "Error de red" }]);
+    } catch (e) {
+      setChatMsgs((prev) => [...prev, { role: "afita", texto: "", error: e instanceof Error ? e.message : "Error de red" }]);
     }
     setProbando(false);
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
@@ -198,7 +343,10 @@ export default function AgenteIAPage() {
     );
   };
 
+  const trato = normalizarAjustes(agente.comportamiento).tratamiento;
+
   return (
+    <ProveedorCoherencia resultado={auditoria} acciones={acciones}>
     <div className="max-w-5xl mx-auto p-5 pb-24">
       {toast && (
         <div
@@ -255,19 +403,33 @@ export default function AgenteIAPage() {
       <div className="flex gap-4">
         {/* Columna principal */}
         <div className="flex-1 min-w-0">
+          {/* Choques de la configuración: los decide lib/crm-ia-coherencia.ts; sin hallazgos no pinta nada. */}
+          <CoherenciaAgente resultado={auditoria} />
+
           {/* Tabs */}
           <div className="flex gap-1 border-b border-gray-100 mb-5 overflow-x-auto">
-            {TABS.map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors ${
-                  tab === t ? "border-[#0b315f] text-[#0b315f]" : "border-transparent text-gray-400 hover:text-gray-600"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+            {TABS.map((t) => {
+              const choques = (CAMPOS_DE_TAB[t] ?? []).reduce((s, c) => s + (auditoria?.porCampo[c] ?? 0), 0);
+              return (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors ${
+                    tab === t ? "border-[#0b315f] text-[#0b315f]" : "border-transparent text-gray-400 hover:text-gray-600"
+                  }`}
+                >
+                  {t}
+                  {choques > 0 && (
+                    <span
+                      className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-100 text-amber-800 text-[10px] font-bold align-middle"
+                      title={`${choques} choque${choques === 1 ? "" : "s"} con los ajustes`}
+                    >
+                      {choques}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
           {/* ── Personalidad ── */}
@@ -276,26 +438,37 @@ export default function AgenteIAPage() {
               <div>
                 <label className={label}>Nombre del agente</label>
                 <input className={input} value={agente.nombre} onChange={(e) => set("nombre", e.target.value)} />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  La IA lo usa si «{TEMAS_AJUSTE.presentacion.etiqueta}» (en Ajustes) lleva {"{agente}"}.
+                </p>
               </div>
               <div>
-                <label className={label}>Personalidad y tono (rol del bot)</label>
+                <label className={label} htmlFor={idCampo("persona")}>Personalidad y tono (rol del bot)</label>
                 <textarea
+                  id={idCampo("persona")}
                   className={input}
                   rows={4}
                   value={agente.persona}
                   onChange={(e) => set("persona", e.target.value)}
                   placeholder="Eres el asistente comercial de la empresa. Hablas español peruano, cordial y profesional…"
                 />
+                <AvisoCampo campo="persona" />
               </div>
               <div>
-                <label className={label}>Contexto de la empresa</label>
+                <label className={label} htmlFor={idCampo("empresa_contexto")}>Sobre la empresa</label>
                 <textarea
+                  id={idCampo("empresa_contexto")}
                   className={input}
                   rows={3}
                   value={agente.empresa_contexto}
                   onChange={(e) => set("empresa_contexto", e.target.value)}
                   placeholder="Qué hace la empresa, qué servicios ofrece, zonas de cobertura…"
                 />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Lo que no tiene un ajuste (qué hace la empresa, servicios, precios, el tono). El trato, cómo pide los
+                  datos, el resumen, el saludo y el horario de atención se deciden en Ajustes: ahí manda el ajuste.
+                </p>
+                <AvisoCampo campo="empresa_contexto" />
               </div>
               <div className="w-40">
                 <label className={label}>Idioma principal</label>
@@ -308,7 +481,7 @@ export default function AgenteIAPage() {
           )}
 
           {/* ── Goals ── */}
-          {tab === "Goals" && (
+          {tab === "Objetivos" && (
             <div className="space-y-3">
               <p className="text-xs text-gray-400 px-1">
                 Los objetivos guían qué debe lograr el agente en cada conversación (igual que los “Goals” de Zolutium).
@@ -318,6 +491,7 @@ export default function AgenteIAPage() {
                   <div className="flex items-center gap-2">
                     <span className="text-[#0b315f] font-bold text-sm">#{i + 1}</span>
                     <input
+                      id={idCampo("goals", i + 1, "titulo")}
                       className={`${input} font-semibold`}
                       value={g.titulo}
                       placeholder="Título del objetivo"
@@ -336,6 +510,7 @@ export default function AgenteIAPage() {
                     </button>
                   </div>
                   <textarea
+                    id={idCampo("goals", i + 1, "instrucciones")}
                     className={input}
                     rows={2}
                     value={g.instrucciones}
@@ -346,6 +521,7 @@ export default function AgenteIAPage() {
                       set("goals", goals);
                     }}
                   />
+                  <AvisoCampo campo="goals" indice={i + 1} />
                 </div>
               ))}
               <button
@@ -360,16 +536,18 @@ export default function AgenteIAPage() {
           {/* ── Conocimiento ── */}
           {tab === "Conocimiento" && (
             <div className="bg-white border border-gray-100 rounded-2xl p-5">
-              <label className={label}>Base de conocimiento (FAQ, políticas, info de rutas)</label>
+              <label className={label} htmlFor={idCampo("conocimiento")}>Base de conocimiento (FAQ, políticas, info de rutas)</label>
               <textarea
+                id={idCampo("conocimiento")}
                 className={input}
                 rows={14}
                 value={agente.conocimiento}
                 onChange={(e) => set("conocimiento", e.target.value)}
                 placeholder={
-                  "Pega aquí todo lo que el agente debe saber: horarios de atención, políticas, rutas frecuentes, formas de pago, preguntas frecuentes y sus respuestas…"
+                  "Pega aquí todo lo que el agente debe saber: políticas, rutas frecuentes, formas de pago, preguntas frecuentes y sus respuestas… (el horario de atención del equipo se declara en Ajustes)"
                 }
               />
+              <AvisoCampo campo="conocimiento" />
               <p className="text-xs text-gray-400 mt-2">
                 Además de esto, el agente consulta datos reales de tu ERP (rutas, precios históricos, flota, estado de
                 servicios) mediante herramientas.
@@ -398,7 +576,7 @@ export default function AgenteIAPage() {
                   ))}
                 </div>
                 <p className="text-xs text-gray-400 mt-2">
-                  En estos canales el agente genera una respuesta (borrador por defecto).
+                  En estos canales trabaja el agente. Copiloto: la IA no escribe sola; la sugerencia se pide con ✨ IA en el inbox.
                 </p>
               </div>
 
@@ -410,8 +588,8 @@ export default function AgenteIAPage() {
                     <div>
                       <div className="font-semibold text-gray-700">Copiloto (por defecto)</div>
                       <div className="text-gray-500 text-xs">
-                        La IA redacta y deja la respuesta como <b>borrador</b> en el inbox. Tu equipo la revisa y envía
-                        con un clic.
+                        Copiloto: la IA no escribe sola; la sugerencia se pide con <b>✨ IA</b> en el inbox. Tu equipo la
+                        revisa, la edita si hace falta y la envía.
                       </div>
                     </div>
                   </div>
@@ -453,7 +631,10 @@ export default function AgenteIAPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <label className="text-sm font-semibold text-gray-700">Restringir autonomía a horario</label>
-                  <p className="text-xs text-gray-400">Fuera de horario, la IA solo deja borradores.</p>
+                  <p className="text-xs text-gray-400">
+                    Fuera de este horario la IA no contesta ni deja borrador: el chat espera a una persona, que puede pedir
+                    una sugerencia con ✨ IA. No es el horario de atención del equipo.
+                  </p>
                 </div>
                 <button
                   onClick={() => set("horario_activo", !agente.horario_activo)}
@@ -499,8 +680,8 @@ export default function AgenteIAPage() {
                   />
                   <p className="text-[11px] text-gray-400 mt-1">Tras N respuestas IA, escala a humano (0 = sin límite).</p>
                 </div>
-                <div>
-                  <label className={label}>Pausa tras respuesta humana (horas)</label>
+                <div id="ajuste-pausa-humano" className="scroll-mt-24 rounded-xl">
+                  <label className={label}>{TEMAS_AJUSTE.pausa_humano.etiqueta}</label>
                   <input
                     type="number"
                     min={0}
@@ -510,32 +691,39 @@ export default function AgenteIAPage() {
                     onChange={(e) => set("pausa_humano_horas", Number(e.target.value))}
                   />
                   <p className="text-[11px] text-gray-400 mt-1">Si alguien del equipo respondió (CRM o celular), la IA no contesta en ese chat durante estas horas (0 = no pausar).</p>
+                  <AvisosAjuste ancla={TEMAS_AJUSTE.pausa_humano.ancla} />
                 </div>
               </div>
 
-              <div>
-                <label className={label}>Escalar a humano si el mensaje menciona</label>
+              <div id="ajuste-escalar" className="scroll-mt-24 rounded-xl">
+                <label className={label}>{TEMAS_AJUSTE.derivacion.etiqueta}</label>
                 <input
                   className={input}
                   value={agente.escalar_si}
                   onChange={(e) => set("escalar_si", e.target.value)}
                   placeholder="reclamo, queja, hablar con una persona, factura, gerente"
                 />
-                <p className="text-[11px] text-gray-400 mt-1">Frases separadas por coma.</p>
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Frases separadas por coma. Además, el sistema ya pasa el chat a una persona si el cliente lo pide, está
+                  molesto o hay un reclamo, entre otros casos.
+                </p>
+                <AvisosAjuste ancla={TEMAS_AJUSTE.derivacion.ancla} />
               </div>
 
               <div>
-                <label className={label}>Mensaje al derivar a un ejecutivo</label>
+                <label className={label} htmlFor={idCampo("mensaje_derivacion")}>Mensaje al derivar a un ejecutivo</label>
                 <textarea
+                  id={idCampo("mensaje_derivacion")}
                   rows={3}
                   className={input}
                   value={agente.mensaje_derivacion ?? ""}
                   onChange={(e) => set("mensaje_derivacion", e.target.value)}
-                  placeholder="Gracias, {nombre}. Ya registré tu solicitud y un ejecutivo de nuestro equipo la está revisando para enviarte la información por este mismo chat a la brevedad. 🙌"
+                  placeholder={mensajeDerivacionDefecto(trato)}
                 />
                 <p className="text-[11px] text-gray-400 mt-1">
-                  Lo usa la IA cuando no encuentra lo que piden en el sistema, no puede escuchar un audio o el tema es para una persona. {"{nombre}"} = primer nombre del cliente. Vacío = este texto de ejemplo. La etiqueta y la nota interna se configuran abajo, en «Al derivar a un ejecutivo».
+                  Lo usa la IA cuando no encuentra lo que piden en el sistema, no puede escuchar un audio o el tema es para una persona. {"{nombre}"} = primer nombre del cliente; {"{atencion}"} = la frase del horario de atención del equipo (solo fuera de ese horario). Vacío = este texto de ejemplo, en el trato de «{TEMAS_AJUSTE.tratamiento.etiqueta}» y con el horario de atención si lo declaras. La etiqueta y la nota interna se configuran abajo, en «Al derivar a un ejecutivo».
                 </p>
+                <AvisoCampo campo="mensaje_derivacion" />
               </div>
 
               <AjustesComportamiento
@@ -543,6 +731,9 @@ export default function AgenteIAPage() {
                 onChange={(v) => set("comportamiento", v)}
                 transcripcionLista={estadoIA.transcripcion}
                 instrucciones={estadoIA.instrucciones}
+                empresa={empresa}
+                nombreAgente={agente.nombre ?? ""}
+                mensajeDerivacionPropio={agente.mensaje_derivacion ?? ""}
               />
 
               <div>
@@ -633,5 +824,6 @@ export default function AgenteIAPage() {
       </div>
       <ContactosSinIA />
     </div>
+    </ProveedorCoherencia>
   );
 }
