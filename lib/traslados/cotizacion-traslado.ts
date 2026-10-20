@@ -10,9 +10,13 @@
 //    `precio_cliente` es el TOTAL CON IGV (`incluye_igv` true), igual que `totPEN.total`;
 //  · `moneda` y `tipo_cambio` son presentación (cotizaciones-04);
 //  · `traslado_json` guarda solo HECHOS que no son dinero (pax, maletas, zonas, firma, validez);
-//  · `consideraciones_json` copia las de `traslados_config` (generales; e incluye / no incluye de
-//    traslados-07) al CREARLA: la cotización es un documento, y cambiar los ajustes después no
-//    reescribe lo que ya se le dijo a un cliente.
+//  · `consideraciones_json` COPIA las condiciones al CREARLA: la cotización es un documento, y
+//    cambiar la plantilla (o los ajustes) después no reescribe lo que ya se le dijo a un cliente.
+//    De dónde se copian: de la PLANTILLA PDF de la regla «Traslado de la IA × segmento»
+//    (lib/traslados/plantilla-traslado-datos.ts; desde supabase/cotizaciones-05), en versión 2 y con
+//    `plantilla_pdf`; sin esa plantilla (sin la migración, o sin una que la IA pueda dibujar), de
+//    `traslados_config` como siempre (generales; e incluye / no incluye de traslados-07) — y entonces
+//    la fila sale byte a byte la de antes, sin `version` ni `plantilla_pdf`.
 //
 // EL PDF SE DERIVA DE LA FILA CADA VEZ (`entradaCorporativaTraslado`): si un ejecutivo la corrige
 // en /cotizaciones, el PDF que se envía sale corregido. Los totales salen de `totalesEnMoneda`, la
@@ -36,6 +40,7 @@ import { aPENdesdeCot, normalizarMoneda, revisarTipoCambio, totalesEnMoneda, typ
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { numeroCotizacion } from "../cotizacion-corporativo";
 import type { ClientePdf, EntradaPdfCot, PlantillaPdfCfg } from "../cotizacion-pdf";
+import { considSnapshot, type PlantillaFila } from "../cotizacion-plantillas";
 import type { VehiculoPDF } from "../pdf-chrome";
 import { empresaConDefectos, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { fechaLima } from "../alertas-horario";
@@ -77,7 +82,11 @@ export type TrasladoJson = {
   generada_en: string;
 };
 
-export type ConsideracionesJson = { incluye: string[]; no_incluye: string[]; generales: string[] };
+/**
+ * Las condiciones de la fila. `version: 2` y `plantilla` solo cuando se copiaron de una plantilla
+ * (`considSnapshot`): el PDF imprime la fila. Sin ellas, como siempre (de `traslados_config`).
+ */
+export type ConsideracionesJson = { incluye: string[]; no_incluye: string[]; generales: string[]; version?: number; plantilla?: string | null };
 
 /** Lo que se INSERTA en `cotizaciones`. Nombres de columna verificados contra producción (19-10-2026). */
 export type FilaCotizacion = {
@@ -103,6 +112,8 @@ export type FilaCotizacion = {
   tipo_cambio: number | null;
   idioma_pdf: "es";
   consideraciones_json: ConsideracionesJson;
+  /** La plantilla de la que se copiaron las condiciones (y de la que el PDF toma las cuentas). Ausente sin plantilla. */
+  plantilla_pdf?: string;
   asunto: string;
   atencion: string | null;
   numero_cotizacion: null;
@@ -133,6 +144,8 @@ export type FilaCotizacionLeida = {
   tipo_cambio?: number | string | null;
   atencion?: string | null;
   consideraciones_json?: Partial<ConsideracionesJson> | null;
+  /** La plantilla PDF de la cotización (sus CUENTAS van en el PDF); null o ausente = `corporativo`. */
+  plantilla_pdf?: string | null;
   crm_conversacion_id?: string | null;
   traslado_json?: Partial<TrasladoJson> | null;
 };
@@ -160,11 +173,16 @@ const recortar = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0
 /**
  * La fila de `cotizaciones` de un traslado cotizable. LANZA si el resultado no es cotizable: el
  * llamador solo crea una cotización con precio, y una fila sin él no tiene arreglo silencioso.
+ *
+ * `plantilla` (opcional): la de `plantillaParaTraslado`. Con ella, las condiciones se copian de la
+ * plantilla (`considSnapshot` con respaldo VACÍO: una lista NULL de la plantilla es una lista vacía,
+ * nunca las de `traslados_config`), limpias igual que siempre, en versión 2, y `plantilla_pdf` es su
+ * id. Sin ella (null o ausente), byte a byte la fila de antes: las condiciones de `traslados_config`.
  */
 export function filaCotizacionTraslado(
   r: ResultadoTraslado,
   e: EntradaSimulador,
-  x: { convId: string; clienteId: number | null; atencion: string | null; config: ConfigTraslados; firma: string; hoy: string; ahora?: string },
+  x: { convId: string; clienteId: number | null; atencion: string | null; config: ConfigTraslados; firma: string; hoy: string; ahora?: string; plantilla?: PlantillaFila | null },
 ): FilaCotizacion {
   const p = r.precio;
   const cat = r.vehiculo?.categoria;
@@ -185,10 +203,19 @@ export function filaCotizacionTraslado(
   const items: ItemTraslado[] = [{ descripcion, dias: 1, cantidad: p.tramos, precio_unit: precioUnitPen, descuento_pct: 0, pax_contratado: null }];
   const totPen = totalesEnMoneda(items, "PEN", null, true)!;
   const limpia = (l: readonly unknown[] | null | undefined) => (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
-  const generales = limpia([...(x.config.consideraciones ?? []), ...(usd ? x.config.consideraciones_usd ?? [] : [])]);
-  // traslados-07: sin la migración llegan ausentes y las listas quedan vacías (no se imprimen).
-  const incluye = limpia(x.config.incluye);
-  const noIncluye = limpia(x.config.no_incluye);
+  let consideraciones: ConsideracionesJson;
+  if (x.plantilla) {
+    // La plantilla de la regla (cotizaciones-05). La de dólares ya trae sus líneas de dólares
+    // (la migración las traspasó como consideraciones + consideraciones_usd): no se suman aquí.
+    const s = considSnapshot(x.plantilla, { incluye: [], no_incluye: [], generales: [] });
+    consideraciones = { incluye: limpia(s.incluye), no_incluye: limpia(s.no_incluye), generales: limpia(s.generales), version: s.version, plantilla: s.plantilla };
+  } else {
+    const generales = limpia([...(x.config.consideraciones ?? []), ...(usd ? x.config.consideraciones_usd ?? [] : [])]);
+    // traslados-07: sin la migración llegan ausentes y las listas quedan vacías (no se imprimen).
+    const incluye = limpia(x.config.incluye);
+    const noIncluye = limpia(x.config.no_incluye);
+    consideraciones = { incluye, no_incluye: noIncluye, generales };
+  }
   const pax = Number(e.pax) || 0;
   const maletas = Number(e.maletas) || 0;
   return {
@@ -211,7 +238,8 @@ export function filaCotizacionTraslado(
     moneda: p.moneda,
     tipo_cambio: usd ? p.tipo_cambio : null,
     idioma_pdf: "es",
-    consideraciones_json: { incluye, no_incluye: noIncluye, generales },
+    consideraciones_json: consideraciones,
+    ...(x.plantilla ? { plantilla_pdf: x.plantilla.id } : {}),
     asunto: "Traslado cotizado por la IA (WhatsApp)",
     // Hasta 60 caracteres y nunca algo sospechoso (lo juzga también planEnvio).
     atencion: atencionImprimible(x.atencion),
@@ -340,9 +368,13 @@ export function cifrasDeFila(fila: Pick<FilaCotizacionLeida, "items_json" | "mon
 // El PDF del traslado es la plantilla CORPORATIVA de /cotizaciones (lib/cotizacion-corporativo.ts
 // decide qué se imprime; lib/pdf-corporativo.ts lo dibuja en el servidor). Aquí solo se arma su
 // entrada desde la fila, con las cuatro trampas del traslado resueltas:
-//  1. LAS CONSIDERACIONES SALEN SOLO DE LA FILA. `considParaPdf` deja ganar las condiciones de la
-//     PLANTILLA, y las seis generales de la corporativa pisarían las del traslado (los 30 min de
-//     espera, el TAM): `cfgSoloCuentas` le quita a la plantilla todo menos las cuentas.
+//  1. LAS CONSIDERACIONES SALEN SOLO DE LA FILA. En una fila de antes (sin `version`), `considParaPdf`
+//     deja ganar las condiciones de la PLANTILLA, y las seis generales de la corporativa pisarían las
+//     del traslado (los 30 min de espera, el TAM): `cfgSoloCuentas` le quita a la plantilla todo
+//     menos las cuentas. Desde cotizaciones-05 la fila nace en versión 2 con las condiciones de SU
+//     plantilla (`plantilla_pdf`) ya copiadas, que es lo mismo que se imprime así: `cfgSoloCuentas`
+//     sigue haciendo falta para las cotizaciones de traslado de antes, y la plantilla solo aporta sus
+//     CUENTAS.
 //  2. LA VALIDEZ SE DICE COMO ES: un traslado vence en la fecha del servicio si llega antes de los
 //     30 días, y «Válida 30 días» sería falso → `corp_sub_hasta` («Válida hasta el …»).
 //  3. EL ASUNTO NO SE IMPRIME: lleva un texto interno («Traslado cotizado por la IA (WhatsApp)»).
@@ -485,7 +517,8 @@ export function celularImprimible(waId: string | null | undefined): string | nul
  * DERIVADA de su fila: si un ejecutivo la corrigió en /cotizaciones, sale corregida. La página de
  * /cotizaciones y el WhatsApp imprimen lo mismo si las dos la arman aquí.
  *
- * `plantilla` es la fila `corporativo` de `cotizacion_plantillas` (solo se usan sus cuentas);
+ * `plantilla` es la de `plantilla_pdf` de la fila (o `corporativo`; solo se usan sus CUENTAS: las
+ * condiciones salen de la fila);
  * `categoria`, la de `traslado_categorias` (sin ella, la de `traslado_json`, sin fotos ni bodega);
  * `celular`, el wa_id de la conversación; `contactoClienteId`, el cliente vinculado a su contacto.
  * El `cliente` solo se imprime si `clienteParaPdf` lo verifica. LANZA si la fila no tiene ítems.
