@@ -556,6 +556,9 @@ const CASOS: Caso[] = [
   { codigo: "tratamiento.plantilla", cfg: { empresa_contexto: 'Saludo simple: muestra el Menú Inicial: "Hola 👋 Soy Ana, estoy aquí para brindarte atención"' } },
   { codigo: "tratamiento.plantilla", cfg: { mensaje_derivacion: "Gracias, {nombre}. Ya registré tu pedido; un ejecutivo te escribe en breve." }, campo: "mensaje_derivacion" },
   { codigo: "tratamiento.plantilla", cfg: { empresa_contexto: 'Al final di: "Un asesor se comunicará con usted a la brevedad."', comportamiento: { tratamiento: "tu" } } },
+  { codigo: "tratamiento.ajuste_en_otro_trato", cfg: { comportamiento: { menu_saludo: "Hola 👋 Soy Ana. Estoy aquí para brindarte atención y orientación según tu necesidad." } }, campo: null },
+  { codigo: "tratamiento.ajuste_en_otro_trato", cfg: { comportamiento: { resumen_titulo: "📋 *Resumen de tu pedido*" } }, campo: null },
+  { codigo: "tratamiento.ajuste_en_otro_trato", cfg: { comportamiento: { resumen_cierre: "Con esto ya tengo todo, {nombre}. Usted recibirá la cotización.", tratamiento: "tu" } }, campo: null },
   { codigo: "preguntas.duplica", cfg: { empresa_contexto: "Pide todo lo que falte junto, en un solo mensaje." } },
   { codigo: "resumen.contradice", cfg: { empresa_contexto: "Termina con el resumen al final de cada respuesta." } },
   { codigo: "resumen.sin_ajuste", cfg: { empresa_contexto: "El resumen va solo al final.", comportamiento: { resumen_pedido: false } } },
@@ -594,6 +597,37 @@ const CASOS: Caso[] = [
   // Los dos de traslados ya los cubre AFA; con trasladosActivos en false no salen (arriba).
   const faltan = (Object.keys(TABLA_HALLAZGOS) as CodigoCoherencia[]).filter((c) => !cubiertos.has(c));
   ok(faltan.length === 0, `todo código de la tabla tiene un caso que lo produce${faltan.length ? ` (faltan: ${faltan.join(", ")})` : ""}`);
+}
+// Los textos que viven en ajustes (menú, título y cierre del resumen) contra el trato.
+{
+  const aud = (comp: Record<string, unknown>) => auditarAgente({ comportamiento: comp }).hallazgos;
+  const menuTu = "Hola 👋 Soy Ana. Estoy aquí para brindarte atención y orientación según tu necesidad.";
+  const h = aud({ menu_saludo: menuTu }).find((x) => x.codigo === "tratamiento.ajuste_en_otro_trato");
+  ok(!!h && h.alarma && h.campo === null && h.cita === menuTu && h.ajuste?.clave === "menu_saludo" && h.ajuste.ancla === "ajuste-saludo",
+    "menú «…brindarte atención» con usted → ámbar, sin campo, cita = el menú, manda menu_saludo (ancla ajuste-saludo)");
+  ok(/menú del saludo está escrito de tú/.test(h?.arreglo ?? "") && /dice de usted/.test(h?.arreglo ?? ""), "el arreglo dice qué texto, en qué trato y qué dice el ajuste");
+  const t = aud({ resumen_titulo: "📋 *Resumen de tu pedido*", resumen_cierre: "Listo, te escribo en breve." }).filter((x) => x.codigo === "tratamiento.ajuste_en_otro_trato");
+  ok(igual(t.map((x) => x.ajuste?.clave).sort(), ["resumen_cierre", "resumen_titulo"]) && t.every((x) => x.ajuste?.ancla === "ajuste-resumen"), "título y cierre del resumen en tú con usted → dos avisos con ancla ajuste-resumen");
+  // Lo benigno no salta.
+  const benignos: Record<string, unknown>[] = [
+    { menu_saludo: "¿En qué le puedo ayudar?" },
+    { menu_saludo: "1️⃣ Cotizar un servicio\n2️⃣ Consultar sobre una reserva" },
+    { menu_saludo: "¿En qué te puedo ayudar? 1. Cotizar 2. Reservas", tratamiento: "tu" },
+    { resumen_titulo: "📋 *RESUMEN DE SOLICITUD*", resumen_cierre: "¿Todo está correcto, {nombre}?" },
+    { resumen_titulo: "📋 *Resumen de tu solicitud*", tratamiento: "tu" },
+    { resumen_cierre: "Con esto ya tengo todo lo necesario" },
+    { resumen_cierre: "Con esto ya tengo todo lo necesario", tratamiento: "tu" },
+  ];
+  for (const b of benignos) ok(aud(b).length === 0, `ajustes benignos → nada: ${JSON.stringify(b).slice(0, 70)}`);
+  // Solo cuando se usan: con el saludo o el resumen apagados no llegan al cliente.
+  ok(aud({ menu_saludo: menuTu, saludo_activo: false }).length === 0, "menú en tú con el saludo apagado → nada (no se usa)");
+  ok(aud({ resumen_titulo: "📋 *Resumen de tu pedido*", resumen_pedido: false }).length === 0, "título en tú con el resumen apagado → nada (no se usa)");
+  // El menú real de AFA (en tú) puesto en el ajuste con trato de usted sí salta; el recomendado (de usted), no.
+  const afaMenu = auditarAgente({ ...AFA, comportamiento: { ...RECOMENDADO, menu_saludo: "Hola 👋 Soy AFITA, asistente virtual de AFA Transportes\nEstoy aquí para brindarte atención y orientación según tu necesidad." } }, CTX_AFA);
+  ok(afaMenu.hallazgos.filter((x) => x.codigo === "tratamiento.ajuste_en_otro_trato").length === 1 && afaMenu.alarmas === rRec.alarmas + 1, "AFA: su menú real (brindarte) en el ajuste con usted → una alarma más");
+  ok(!rRec.hallazgos.some((x) => x.codigo === "tratamiento.ajuste_en_otro_trato"), "AFA recomendado (menú de usted): nada");
+  // «sin_nombre» no cambia: {agente} sin nombre sigue saliendo.
+  ok(auditarAgente({ nombre: "", comportamiento: { presentarse_como: "{agente}, de {empresa}" } }).hallazgos.some((x) => x.codigo === "presentacion.sin_nombre"), "presentacion.sin_nombre sigue igual");
 }
 // Que el cliente tutee no es el trato que se pide: «aunque te tutee, responde de usted» declara usted.
 {

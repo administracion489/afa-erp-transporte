@@ -87,6 +87,10 @@ const TABLA = {
     alarma: true, relacion: "contradice", titulo: "Pide otro trato al cliente que el del ajuste",
     arreglo: "Manda el ajuste «Cómo trata al cliente». Si lo que quieres es lo que dice tu texto, cambia el ajuste; si no, borra la frase.",
   },
+  "tratamiento.ajuste_en_otro_trato": {
+    alarma: true, relacion: "ajustes_chocan", titulo: "Un texto de los ajustes está escrito en el otro trato",
+    arreglo: "Ese texto lo copia la IA tal cual al cliente: corrígelo para que use el trato del ajuste «Cómo trata al cliente», o cambia el trato.",
+  },
   "tratamiento.plantilla": {
     alarma: true, relacion: "plantilla", titulo: "Un mensaje de ejemplo está escrito en el otro trato",
     arreglo: "Reescribe el mensaje en el trato del ajuste «Cómo trata al cliente»: si la IA lo copia, el cliente leerá los dos tratos en el mismo chat.",
@@ -958,6 +962,29 @@ export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: bo
   }
 
   // ── Choques entre ajustes ──
+  // Los textos que viven en ajustes (el menú del saludo, el título y el cierre del resumen) van al
+  // cliente tal cual: el texto ENTERO es el mensaje, no hace falta que esté entre comillas. Solo se
+  // miran cuando se usan (saludo encendido / resumen encendido): apagados no llegan a nadie.
+  {
+    const trato = aj.tratamiento === "usted" ? "de usted" : "de tú";
+    const otro = aj.tratamiento === "usted" ? "de tú" : "de usted";
+    const marca = marcaDelTrato(otroTrato(aj.tratamiento));
+    const textosAjuste: { clave: ClaveAjuste; tema: TemaAjusteConAjuste; etiqueta: string; que: string; valor: string; usado: boolean }[] = [
+      { clave: "menu_saludo", tema: "saludo", etiqueta: TEMAS_AJUSTE.saludo.etiqueta, que: "El menú del saludo", valor: aj.menu_saludo, usado: aj.saludo_activo },
+      { clave: "resumen_titulo", tema: "resumen", etiqueta: "Título del resumen", que: "El título del resumen", valor: aj.resumen_titulo, usado: aj.resumen_pedido },
+      { clave: "resumen_cierre", tema: "resumen", etiqueta: "Cierre del resumen", que: "El cierre del resumen", valor: aj.resumen_cierre, usado: aj.resumen_pedido },
+    ];
+    for (const t of textosAjuste) {
+      if (!t.usado || !t.valor.trim() || !marca.test(normalizarTexto(t.valor))) continue;
+      const cita = recortarCita(t.valor);
+      cands.push({
+        campo: null, orden: Number.MAX_SAFE_INTEGER, codigo: "tratamiento.ajuste_en_otro_trato", cita, pos: 0,
+        etiquetaCampo: `${t.etiqueta} (ajuste)`, unico: `ajuste_en_otro_trato|${t.clave}`,
+        ajuste: { clave: t.clave, etiqueta: t.etiqueta, ancla: TEMAS_AJUSTE[t.tema].ancla, valorLegible: cortoEntreComillas(t.valor, 60) },
+        arreglo: `${t.que} está escrito ${otro} y el ajuste «${TEMAS_AJUSTE.tratamiento.etiqueta}» dice ${trato}: la IA lo copia tal cual al cliente. Corrige ${t.que.toLowerCase().replace(/^el /, "el ")} en «${t.etiqueta}», o cambia el trato.`,
+      });
+    }
+  }
   if (/\{agente\}/.test(aj.presentarse_como) && !nombreAgente)
     cands.push({
       campo: null, orden: Number.MAX_SAFE_INTEGER, codigo: "presentacion.sin_nombre", cita: aj.presentarse_como, pos: 0, ajuste: AJ.presentacion,
