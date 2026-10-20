@@ -29,6 +29,20 @@ import { cotizarTrasladoIA, CLAVE_CONSULTA_IA, type CtxCotizarIA } from "../lib/
 import { enviarCotizacionTraslado, bajarLogo, accionAjena, pdfDeCotizacion, type DepsEnvio } from "../lib/traslados/enviar-cotizacion-datos";
 import { limitarTasa } from "../lib/api-guard";
 import type { CatalogoTraslados } from "../lib/traslados/datos";
+import type { EstiloMensajes } from "../lib/crm-ia-ajustes";
+
+// Los textos que arma el CÓDIGO hablan con el trato y el modo de preguntar del agente
+// (lib/crm-ia-ajustes.ts). Las aserciones literales de siempre son las de «tu» + «todo junto», que es
+// lo que el código escribía antes de existir el ajuste; los otros tres estilos se barren aparte.
+const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "todo_junto" };
+const ESTILOS: EstiloMensajes[] = [
+  TU, { tratamiento: "tu", preguntas: "una_por_mensaje" },
+  { tratamiento: "usted", preguntas: "todo_junto" }, { tratamiento: "usted", preguntas: "una_por_mensaje" },
+];
+const nombreEstilo = (e: EstiloMensajes) => `${e.tratamiento}/${e.preguntas}`;
+/** Formas de tú dirigidas al cliente (y de usted), por palabra completa. */
+const TUTEA = /(?:^|[^\p{L}])(?:tu|tus|te|ti|contigo|enviarte|indicas)(?=[^\p{L}]|$)/iu;
+const USTEDEA = /(?:^|[^\p{L}])(?:usted|ustedes|su|sus|le|enviarle|indica)(?=[^\p{L}]|$)/iu;
 
 let fallos = 0, oks = 0;
 const ok = (c: boolean, m: string) => { if (c) oks++; else { fallos++; if (fallos <= 60) console.log("  FALLA " + m); } };
@@ -396,9 +410,29 @@ seccion("8. respuestaParaModelo: lista blanca y sin dinero en revisión");
         }
         if (r.accion === "preguntar") ok(Array.isArray(o2.faltan) && o2.faltan.length > 0, "preguntar trae lo que falta");
         else ok(!("faltan" in o2), "lo que falta solo viaja cuando hay que preguntar");
+        // El modo de preguntar del agente: «todo_junto» es la instrucción de siempre, byte a byte; con
+        // «una_por_mensaje» cambia SOLO la instrucción de preguntar, y la lista blanca no se afloja.
+        ok(E.respuestaParaModelo({ resultado: r, cotizacion: cot, preguntas: "todo_junto" }) === json, "todo junto = sin el parámetro, byte a byte");
+        const j1 = E.respuestaParaModelo({ resultado: r, cotizacion: cot, preguntas: "una_por_mensaje" });
+        if (r.accion !== "preguntar") ok(j1 === json, "uno por mensaje no cambia lo que no es preguntar");
+        else {
+          const o3 = JSON.parse(j1);
+          ok(Object.keys(o3).every((k) => (E.CLAVES_RESPUESTA_MODELO as readonly string[]).includes(k)) && !prohibido.test(j1) && !E.textoContradicePrecio(j1, []), "uno por mensaje: misma lista blanca, sin importes");
+          ok(JSON.stringify(o3.faltan) === JSON.stringify(o2.faltan), "uno por mensaje: la lista de lo que falta es la misma");
+          ok(o3.instruccion.startsWith(`Pregúntale al cliente SOLO por: ${o2.faltan[0]}.`) && !/en un solo mensaje|todo junto|todos juntos/i.test(o3.instruccion), `uno por mensaje: solo el primero (${o3.instruccion})`);
+          ok(o2.faltan.slice(1).every((x: string) => o3.instruccion.includes(x)) === true && (o2.faltan.length > 1) === o3.instruccion.includes("de a uno"), "uno por mensaje: los demás se nombran para después");
+        }
       }
     }
   console.log(`  barrido: ${n} respuestas`);
+  // Literales, para que el texto no derive en silencio.
+  const rP = M.evaluarTraslado(pedido({ origen: AEROP, destino: MIRA, pax: null, maletas: null, sentido: "ida" }), ctx);
+  ok(rP.accion === "preguntar" && rP.faltan.length === 2, `caso literal con dos datos (${rP.faltan})`);
+  ok(JSON.parse(E.respuestaParaModelo({ resultado: rP })).instruccion === `Pregúntale al cliente, en un solo mensaje: ${rP.faltan.join("; ")}. Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos.`, "sin el parámetro: la instrucción de siempre");
+  ok(JSON.parse(E.respuestaParaModelo({ resultado: rP, preguntas: "una_por_mensaje" })).instruccion === `Pregúntale al cliente SOLO por: ${rP.faltan[0]}. Lo demás que falta (${rP.faltan[1]}) se lo preguntas después, de a uno. Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos que ya tienes.`, "uno por mensaje: la instrucción literal");
+  ok(E.respuestaPreguntar(["la hora de recojo"]) === JSON.stringify({ accion: "preguntar", codigo: "falta_dato", faltan: ["la hora de recojo"], instruccion: "Pregúntale al cliente, en un solo mensaje: la hora de recojo. Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos." }), "respuestaPreguntar sin el parámetro: la de siempre, byte a byte");
+  ok(E.respuestaPreguntar(["a", "b"], "todo_junto") === E.respuestaPreguntar(["a", "b"]), "respuestaPreguntar todo junto = sin el parámetro");
+  ok(JSON.parse(E.respuestaPreguntar(["la hora de recojo"], "una_por_mensaje")).instruccion === "Pregúntale al cliente SOLO por: la hora de recojo. Cuando responda, vuelve a llamar a cotizar_traslado con TODOS los datos que ya tienes.", "respuestaPreguntar uno por mensaje, con un solo dato");
 }
 
 // ── 9. Cuadre ────────────────────────────────────────────────────────────────
@@ -497,11 +531,63 @@ seccion("10. textoContradicePrecio");
   for (const [t, esp] of casos) ok(E.textoContradicePrecio(t, fig) === esp, `«${t}» → ${esp}`);
   ok(E.textoContradicePrecio("S/ 118", []), "en revisión cualquier importe contradice");
   ok(E.leerImporte("1,234.50") === 1234.5 && E.leerImporte("120,50") === 120.5 && E.leerImporte("1.234.567") === 1234567 && E.leerImporte("254.88.") === 254.88, "lectura de separadores");
-  const auto = E.mensajeCotizacionCodigo({ nombre: "Ana Pérez", numero: "00123", decision: "automatico", total: "S/ 118.00", validez: "18/11/2026" });
+  const auto = E.mensajeCotizacionCodigo({ nombre: "Ana Pérez", numero: "00123", decision: "automatico", total: "S/ 118.00", validez: "18/11/2026", estilo: TU });
   ok(auto.includes("00123") && auto.includes("S/ 118.00") && auto.includes("18/11/2026") && auto.startsWith("Hola Ana,") && !E.textoContradicePrecio(auto, [118]), `mensaje automático: ${auto}`);
   ok(/ejecutivo/.test(auto), "y dice que la disponibilidad la confirma un ejecutivo");
-  const rev = E.mensajeCotizacionCodigo({ nombre: "", numero: "00124", decision: "revision", total: "S/ 118.00" });
+  const rev = E.mensajeCotizacionCodigo({ nombre: "", numero: "00124", decision: "revision", total: "S/ 118.00", estilo: TU });
   ok(rev.includes("00124") && !E.textoContradicePrecio(rev, []) && rev.startsWith("Hola,"), `mensaje en revisión sin importes: ${rev}`);
+}
+
+// ── 10b. Los textos del código, con el trato y el modo de preguntar del agente ───
+seccion("10b. mensajeCotizacionCodigo y fraseFaltanTraslado leen el estilo del agente");
+{
+  const L = "La disponibilidad de la unidad y la reserva del servicio las confirma un ejecutivo.";
+  const base = { nombre: "Ana Pérez", numero: "00123", total: "S/ 118.00", validez: "18/11/2026" };
+  // Con «tu», byte a byte lo de antes de existir el ajuste (copiado literal de la versión anterior).
+  const LIT_TU = {
+    auto: `Hola Ana, te envío la cotización N° 00123 de tu traslado. El total es S/ 118.00 (IGV incluido), válida hasta el 18/11/2026. ${L}`,
+    ya: `Hola Ana, la cotización N° 00123 de tu traslado ya te la envié por este chat. El total es S/ 118.00 (IGV incluido), válida hasta el 18/11/2026. ${L}`,
+    rev: "Hola Ana, registré tu pedido de traslado con la cotización N° 00123. Un ejecutivo la revisa y te la envía por este chat en breve.",
+  };
+  const LIT_USTED = {
+    auto: `Hola Ana, le envío la cotización N° 00123 de su traslado. El total es S/ 118.00 (IGV incluido), válida hasta el 18/11/2026. ${L}`,
+    ya: `Hola Ana, la cotización N° 00123 de su traslado ya se la envié por este chat. El total es S/ 118.00 (IGV incluido), válida hasta el 18/11/2026. ${L}`,
+    rev: "Hola Ana, registré su pedido de traslado con la cotización N° 00123. Un ejecutivo la revisa y se la envía por este chat en breve.",
+  };
+  for (const e of ESTILOS) {
+    const lit = e.tratamiento === "tu" ? LIT_TU : LIT_USTED;
+    const auto = E.mensajeCotizacionCodigo({ ...base, decision: "automatico", estilo: e });
+    const ya = E.mensajeCotizacionCodigo({ ...base, decision: "automatico", yaEnviada: true, estilo: e });
+    const rev = E.mensajeCotizacionCodigo({ ...base, decision: "revision", estilo: e });
+    ok(auto === lit.auto && ya === lit.ya && rev === lit.rev, `${nombreEstilo(e)}: los tres mensajes literales (${auto} | ${ya} | ${rev})`);
+    // El modo de preguntar no cambia el mensaje de una cotización: no pregunta nada.
+    for (const m of [auto, ya, rev]) {
+      ok(e.tratamiento === "tu" ? !USTEDEA.test(m) : !TUTEA.test(m), `${nombreEstilo(e)}: un solo trato en «${m.slice(0, 60)}…»`);
+      ok(T.importesEnTexto(m).every((x) => Math.abs(x - 118) < 0.005), `${nombreEstilo(e)}: solo el total de la cotización`);
+    }
+  }
+  // Sin total ni validez, y sin nombre: el resto de la frase no cambia con el trato.
+  ok(E.mensajeCotizacionCodigo({ nombre: "", numero: "9", decision: "automatico", estilo: { tratamiento: "usted", preguntas: "todo_junto" } }) === `Hola, le envío la cotización N° 9 de su traslado. ${L}`, "usted sin cifras");
+  ok(E.mensajeCotizacionCodigo({ nombre: "", numero: "9", decision: "automatico", validez: "1/1/2027", estilo: TU }) === `Hola, te envío la cotización N° 9 de tu traslado. La cotización es válida hasta el 1/1/2027. ${L}`, "tú solo con validez");
+  // Un llamador en JS sin estilo: el defecto del ajuste (usted), nunca un texto roto.
+  ok((E.mensajeCotizacionCodigo as any)({ nombre: "Ana", numero: "1", decision: "revision" }).includes("registré su pedido"), "sin estilo → de usted (el defecto)");
+
+  // «Me falta»: todo junto = la lista entera; uno por mensaje = SOLO el primero, en el orden del motor.
+  const f = ["la cantidad de maletas de 23 kg", "la hora de recojo"];
+  ok(E.fraseFaltanTraslado(f, TU) === "Para cotizar tu traslado me falta: la cantidad de maletas de 23 kg; la hora de recojo.", "tú + todo junto: el texto de siempre, byte a byte");
+  ok(E.fraseFaltanTraslado(f, { tratamiento: "tu", preguntas: "una_por_mensaje" }) === "Para cotizar tu traslado, ¿me indicas la cantidad de maletas de 23 kg?", "tú + uno por mensaje");
+  ok(E.fraseFaltanTraslado(f, { tratamiento: "usted", preguntas: "todo_junto" }) === "Para cotizar su traslado me falta: la cantidad de maletas de 23 kg; la hora de recojo.", "usted + todo junto");
+  ok(E.fraseFaltanTraslado(f, { tratamiento: "usted", preguntas: "una_por_mensaje" }) === "Para cotizar su traslado, ¿me indica la cantidad de maletas de 23 kg?", "usted + uno por mensaje");
+  for (const e of ESTILOS) {
+    ok(E.fraseFaltanTraslado([], e) === "" && E.fraseFaltanTraslado(["", "  "], e) === "" && E.fraseFaltanTraslado(null, e) === "", `${nombreEstilo(e)}: sin datos que pedir, nada`);
+    const una = E.fraseFaltanTraslado(f, e);
+    if (e.preguntas === "una_por_mensaje") ok(!una.includes("la hora de recojo") && (una.match(/\?/g) ?? []).length === 1, `${nombreEstilo(e)}: una sola pregunta`);
+    else ok(f.every((x) => una.includes(x)), `${nombreEstilo(e)}: todos los datos`);
+    ok(e.tratamiento === "tu" ? !USTEDEA.test(una) : !TUTEA.test(una), `${nombreEstilo(e)}: un solo trato («${una}»)`);
+    ok(!T.mencionaDinero(una), `${nombreEstilo(e)}: no menciona dinero`);
+  }
+  // Con un solo dato, los dos modos piden lo mismo (uno solo); cambia solo la forma.
+  ok(E.fraseFaltanTraslado(["la fecha del servicio"], { tratamiento: "usted", preguntas: "una_por_mensaje" }) === "Para cotizar su traslado, ¿me indica la fecha del servicio?", "un solo dato, uno por mensaje");
 }
 
 // ── 11. Palabras de pedido complejo ──────────────────────────────────────────
@@ -1099,6 +1185,20 @@ const ctxDe = (sb: SbFalso, convId: string, contactoId: string, modoAuto = true,
   const sbO = nuevaBase();
   const o = await cotizarTrasladoIA(ctxDe(sbO, "cv-1", "ct-1"), { ...pedidoIA, maletas: undefined }, { ...deps, simular: simularFalso({ n: 0 }) as any });
   ok(o.accion === "preguntar" && (o.faltan ?? []).some((x) => /maletas/.test(x)) && sbO.t("cotizaciones").length === 0 && sbO.t("crm_acciones_ia").length === 0, "O: pregunta lo que falta sin crear nada");
+  ok(JSON.parse(o.respuestaModelo).instruccion.startsWith("Pregúntale al cliente, en un solo mensaje:"), "O: sin el modo del agente, la instrucción de siempre (todo junto)");
+  // O2) Con el agente en «uno por mensaje», la instrucción al modelo pide SOLO el primero; el resultado
+  //     (lo que lee el código para su «me falta») trae la lista entera, en el orden del motor.
+  {
+    const sbO2 = nuevaBase();
+    const o2 = await cotizarTrasladoIA({ ...ctxDe(sbO2, "cv-1", "ct-1"), preguntas: "una_por_mensaje" }, { ...pedidoIA, maletas: undefined, pax: undefined },
+      { ...deps, simular: simularFalso({ n: 0 }) as any });
+    const ins = JSON.parse(o2.respuestaModelo).instruccion as string;
+    ok(o2.accion === "preguntar" && (o2.faltan ?? []).length === 2 && ins.startsWith(`Pregúntale al cliente SOLO por: ${o2.faltan![0]}.`) && ins.includes(o2.faltan![1]) && !/en un solo mensaje/.test(ins),
+      `O2: uno por mensaje → SOLO el primero (${ins})`);
+    ok(E.textoFinalTraslado("¿El retorno te sale gratis?", o2, { nombre: "Ana", derivacion: "d", estilo: { tratamiento: "usted", preguntas: "una_por_mensaje" } }) === `Para cotizar su traslado, ¿me indica ${o2.faltan![0]}?`,
+      "O2: y el texto del código con dinero pide el mismo primero");
+    ok(sbO2.t("cotizaciones").length === 0 && sbO2.t("crm_acciones_ia").length === 0, "O2: sin crear nada");
+  }
 
   // P) La moneda es la del wa_id aunque el modelo diga un teléfono extranjero (ya probado arriba con
   //    +1 305…: la cotización A salió en soles).
@@ -1149,9 +1249,12 @@ const ctxDe = (sb: SbFalso, convId: string, contactoId: string, modoAuto = true,
     const txtQ = textoDelPdf(pdfQ.bytes);
     ok(!/yape/i.test(txtQ) && !/9XX|987|654 321/.test(txtQ) && !/deposit/i.test(txtQ), `Q (${n}): el PDF no lleva «Yape» ni los dígitos`);
     ok(!/yape/i.test(pdfQ.caption) && !/\d{3}\s?\d{3}/.test(pdfQ.caption.replace(/N° \d+/, "")), `Q (${n}): el caption tampoco (${pdfQ.caption})`);
-    // El mensaje del turno lo escribe el código: el del modelo repetía la instrucción de pago.
-    const final = E.textoFinalTraslado(`Listo, ${destino}`, q, { nombre: "Ana Pérez", derivacion: "Un ejecutivo te escribe." });
-    ok(!/yape|deposit|\b50\b|9XX|987/i.test(final) && final.includes(q.cotizacion!.numero), `Q (${n}): el mensaje al cliente no repite nada (${final})`);
+    // El mensaje del turno lo escribe el código: el del modelo repetía la instrucción de pago. Con
+    // cualquiera de los cuatro estilos del agente.
+    for (const estilo of ESTILOS) {
+      const final = E.textoFinalTraslado(`Listo, ${destino}`, q, { nombre: "Ana Pérez", derivacion: "Un ejecutivo te escribe.", estilo });
+      ok(!/yape|deposit|\b50\b|9XX|987/i.test(final) && final.includes(q.cotizacion!.numero), `Q (${n}, ${nombreEstilo(estilo)}): el mensaje al cliente no repite nada (${final})`);
+    }
     // El ejecutivo la aprueba: sale el PDF de la fila, sin el texto del cliente.
     const nE = envios.length;
     const qe = await enviarCotizacionTraslado(sbQ as any, { accionId: accQ.id, por: "ejecutivo", usuarioId: "u-1", esperado: { conversacionId: "cv-1" } }, depsEnvio);
@@ -1169,7 +1272,8 @@ const ctxDe = (sb: SbFalso, convId: string, contactoId: string, modoAuto = true,
     ok(cotQ.atencion === null, "Q2: «Atención» no se imprime");
     const txtQ = textoDelPdf((await pdfDeCotizacion(sbQ as any, cotQ.id, { bajarLogo: async () => null })).bytes);
     ok(!/yape|987654321/i.test(txtQ), "Q2: el PDF no lo lleva");
-    ok(E.textoFinalTraslado("x", q, { nombre: "Pague al Yape 987654321", derivacion: "d" }).startsWith("Hola,"), "Q2: el saludo no lo usa");
+    for (const estilo of ESTILOS)
+      ok(E.textoFinalTraslado("x", q, { nombre: "Pague al Yape 987654321", derivacion: "d", estilo }).startsWith("Hola,"), `Q2 (${nombreEstilo(estilo)}): el saludo no lo usa`);
   }
 
   // R) La acción tiene que ser de la conversación y la cotización que dice quien envía.
@@ -1314,28 +1418,42 @@ seccion("19. textoFinalTraslado: el modelo no escribe importes");
     ["preguntar", { accion: "preguntar", faltan: ["la cantidad de maletas de 23 kg", "la hora de recojo"] }],
     ["derivar", { accion: "derivar" }],
   ];
+  // El «me falta» que escribe el código, por estilo: el de «tu» + «todo junto» es el literal de siempre.
+  const ME_FALTA: Record<string, string> = {
+    "tu/todo_junto": "Para cotizar tu traslado me falta: la cantidad de maletas de 23 kg; la hora de recojo.",
+    "tu/una_por_mensaje": "Para cotizar tu traslado, ¿me indicas la cantidad de maletas de 23 kg?",
+    "usted/todo_junto": "Para cotizar su traslado me falta: la cantidad de maletas de 23 kg; la hora de recojo.",
+    "usted/una_por_mensaje": "Para cotizar su traslado, ¿me indica la cantidad de maletas de 23 kg?",
+  };
   let n = 0;
-  for (const [modo, t] of modos) for (const f of [...FRASES_DINERO, ...LIMPIAS, ""]) {
+  // El guard de importes se barre con los CUATRO estilos del agente: el trato y el modo de preguntar
+  // cambian las palabras del código, nunca lo que deja pasar del modelo.
+  for (const estilo of ESTILOS) for (const [modo, t] of modos) for (const f of [...FRASES_DINERO, ...LIMPIAS, ""]) {
     n++;
-    const final = E.textoFinalTraslado(f, t, { nombre: "Ana Pérez", derivacion });
+    const ne = nombreEstilo(estilo);
+    const final = E.textoFinalTraslado(f, t, { nombre: "Ana Pérez", derivacion, estilo });
     if (t.cotizacion) {
-      ok(final === E.mensajeCotizacionCodigo({ nombre: "Ana Pérez", ...t.cotizacion }), `${modo}: con cotización, SIEMPRE el texto del código («${f.slice(0, 30)}»)`);
+      ok(final === E.mensajeCotizacionCodigo({ nombre: "Ana Pérez", ...t.cotizacion, estilo }), `${ne} ${modo}: con cotización, SIEMPRE el texto del código («${f.slice(0, 30)}»)`);
       const permitidas = t.cotizacion.total ? [283.2] : [];
-      ok(T.importesEnTexto(final).every((x) => permitidas.some((p) => Math.abs(p - x) < 0.005)), `${modo}: solo el total de la cotización (${final})`);
-      ok(!/\b150\b|\b300\b|43\.20|€|US\$|d[oó]lares|gratis|descuento|aprox|%/.test(final), `${modo}: nada de la frase del modelo`);
+      ok(T.importesEnTexto(final).every((x) => permitidas.some((p) => Math.abs(p - x) < 0.005)), `${ne} ${modo}: solo el total de la cotización (${final})`);
+      ok(!/\b150\b|\b300\b|43\.20|€|US\$|d[oó]lares|gratis|descuento|aprox|%/.test(final), `${ne} ${modo}: nada de la frase del modelo`);
+      ok(estilo.tratamiento === "tu" ? !USTEDEA.test(final) : !TUTEA.test(final), `${ne} ${modo}: el texto del código con el trato del agente (${final})`);
     } else if (f && T.mencionaDinero(f)) {
-      ok(!T.mencionaDinero(final) && final !== f, `${modo}: el texto con dinero se reemplaza («${f.slice(0, 30)}» → «${final.slice(0, 50)}»)`);
-      ok(modo === "preguntar" ? final === "Para cotizar tu traslado me falta: la cantidad de maletas de 23 kg; la hora de recojo." : final === derivacion, `${modo}: por «me falta» o la derivación`);
+      ok(!T.mencionaDinero(final) && final !== f, `${ne} ${modo}: el texto con dinero se reemplaza («${f.slice(0, 30)}» → «${final.slice(0, 50)}»)`);
+      ok(modo === "preguntar" ? final === ME_FALTA[ne] : final === derivacion, `${ne} ${modo}: por «me falta» o la derivación (${final})`);
     } else {
-      ok(final === f, `${modo}: el texto limpio del modelo pasa intacto («${f.slice(0, 30)}»)`);
+      ok(final === f, `${ne} ${modo}: el texto limpio del modelo pasa intacto («${f.slice(0, 30)}»)`);
     }
   }
-  console.log(`  barrido: ${n} textos`);
-  ok(E.textoFinalTraslado("Cuesta S/ 999", null, { nombre: "Ana", derivacion }) === "Cuesta S/ 999", "sin la herramienta en el turno, el texto no se toca");
-  ok(E.textoFinalTraslado("Cuesta S/ 999", { accion: "preguntar", faltan: [] }, { nombre: "Ana", derivacion }) === derivacion, "preguntar sin lista de faltantes: derivación");
-  // La cifra de una cotización EN DÓLARES no se cuela en una cotización en soles.
-  const enSoles = E.textoFinalTraslado("Son US$283.20", { accion: "cotizar", cotizacion: cotAuto }, { nombre: "", derivacion });
-  ok(!enSoles.includes("US$") && enSoles.includes("S/ 283.20") && enSoles.startsWith("Hola,"), `en soles, el total en soles (${enSoles})`);
+  console.log(`  barrido: ${n} textos (4 estilos)`);
+  for (const estilo of ESTILOS) {
+    const ne = nombreEstilo(estilo);
+    ok(E.textoFinalTraslado("Cuesta S/ 999", null, { nombre: "Ana", derivacion, estilo }) === "Cuesta S/ 999", `${ne}: sin la herramienta en el turno, el texto no se toca`);
+    ok(E.textoFinalTraslado("Cuesta S/ 999", { accion: "preguntar", faltan: [] }, { nombre: "Ana", derivacion, estilo }) === derivacion, `${ne}: preguntar sin lista de faltantes: derivación`);
+    // La cifra de una cotización EN DÓLARES no se cuela en una cotización en soles.
+    const enSoles = E.textoFinalTraslado("Son US$283.20", { accion: "cotizar", cotizacion: cotAuto }, { nombre: "", derivacion, estilo });
+    ok(!enSoles.includes("US$") && enSoles.includes("S/ 283.20") && enSoles.startsWith("Hola,"), `${ne}: en soles, el total en soles (${enSoles})`);
+  }
 }
 
 // ── 20. El logo del PDF ──────────────────────────────────────────────────────
