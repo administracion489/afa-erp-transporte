@@ -306,8 +306,8 @@ export default function AgenteIAPage() {
       });
       const data = await res.json();
       setChatMsgs((prev) => [...prev, { role: "afita", texto: data.texto ?? "", herramientas: data.herramientas, error: data.error }]);
-    } catch (e: any) {
-      setChatMsgs((prev) => [...prev, { role: "afita", texto: "", error: e?.message ?? "Error de red" }]);
+    } catch (e) {
+      setChatMsgs((prev) => [...prev, { role: "afita", texto: "", error: e instanceof Error ? e.message : "Error de red" }]);
     }
     setProbando(false);
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
@@ -343,7 +343,10 @@ export default function AgenteIAPage() {
     );
   };
 
+  const trato = normalizarAjustes(agente.comportamiento).tratamiento;
+
   return (
+    <ProveedorCoherencia resultado={auditoria} acciones={acciones}>
     <div className="max-w-5xl mx-auto p-5 pb-24">
       {toast && (
         <div
@@ -400,19 +403,33 @@ export default function AgenteIAPage() {
       <div className="flex gap-4">
         {/* Columna principal */}
         <div className="flex-1 min-w-0">
+          {/* Choques de la configuración: los decide lib/crm-ia-coherencia.ts; sin hallazgos no pinta nada. */}
+          <CoherenciaAgente resultado={auditoria} />
+
           {/* Tabs */}
           <div className="flex gap-1 border-b border-gray-100 mb-5 overflow-x-auto">
-            {TABS.map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors ${
-                  tab === t ? "border-[#0b315f] text-[#0b315f]" : "border-transparent text-gray-400 hover:text-gray-600"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+            {TABS.map((t) => {
+              const choques = (CAMPOS_DE_TAB[t] ?? []).reduce((s, c) => s + (auditoria?.porCampo[c] ?? 0), 0);
+              return (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors ${
+                    tab === t ? "border-[#0b315f] text-[#0b315f]" : "border-transparent text-gray-400 hover:text-gray-600"
+                  }`}
+                >
+                  {t}
+                  {choques > 0 && (
+                    <span
+                      className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-100 text-amber-800 text-[10px] font-bold align-middle"
+                      title={`${choques} choque${choques === 1 ? "" : "s"} con los ajustes`}
+                    >
+                      {choques}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
           {/* ── Personalidad ── */}
@@ -421,26 +438,37 @@ export default function AgenteIAPage() {
               <div>
                 <label className={label}>Nombre del agente</label>
                 <input className={input} value={agente.nombre} onChange={(e) => set("nombre", e.target.value)} />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  La IA lo usa si «{TEMAS_AJUSTE.presentacion.etiqueta}» (en Ajustes) lleva {"{agente}"}.
+                </p>
               </div>
               <div>
-                <label className={label}>Personalidad y tono (rol del bot)</label>
+                <label className={label} htmlFor={idCampo("persona")}>Personalidad y tono (rol del bot)</label>
                 <textarea
+                  id={idCampo("persona")}
                   className={input}
                   rows={4}
                   value={agente.persona}
                   onChange={(e) => set("persona", e.target.value)}
                   placeholder="Eres el asistente comercial de la empresa. Hablas español peruano, cordial y profesional…"
                 />
+                <AvisoCampo campo="persona" />
               </div>
               <div>
-                <label className={label}>Contexto de la empresa</label>
+                <label className={label} htmlFor={idCampo("empresa_contexto")}>Sobre la empresa</label>
                 <textarea
+                  id={idCampo("empresa_contexto")}
                   className={input}
                   rows={3}
                   value={agente.empresa_contexto}
                   onChange={(e) => set("empresa_contexto", e.target.value)}
                   placeholder="Qué hace la empresa, qué servicios ofrece, zonas de cobertura…"
                 />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Lo que no tiene un ajuste (qué hace la empresa, servicios, precios, el tono). El trato, cómo pide los
+                  datos, el resumen, el saludo y el horario de atención se deciden en Ajustes: ahí manda el ajuste.
+                </p>
+                <AvisoCampo campo="empresa_contexto" />
               </div>
               <div className="w-40">
                 <label className={label}>Idioma principal</label>
@@ -453,7 +481,7 @@ export default function AgenteIAPage() {
           )}
 
           {/* ── Goals ── */}
-          {tab === "Goals" && (
+          {tab === "Objetivos" && (
             <div className="space-y-3">
               <p className="text-xs text-gray-400 px-1">
                 Los objetivos guían qué debe lograr el agente en cada conversación (igual que los “Goals” de Zolutium).
@@ -463,6 +491,7 @@ export default function AgenteIAPage() {
                   <div className="flex items-center gap-2">
                     <span className="text-[#0b315f] font-bold text-sm">#{i + 1}</span>
                     <input
+                      id={idCampo("goals", i + 1, "titulo")}
                       className={`${input} font-semibold`}
                       value={g.titulo}
                       placeholder="Título del objetivo"
@@ -481,6 +510,7 @@ export default function AgenteIAPage() {
                     </button>
                   </div>
                   <textarea
+                    id={idCampo("goals", i + 1, "instrucciones")}
                     className={input}
                     rows={2}
                     value={g.instrucciones}
@@ -491,6 +521,7 @@ export default function AgenteIAPage() {
                       set("goals", goals);
                     }}
                   />
+                  <AvisoCampo campo="goals" indice={i + 1} />
                 </div>
               ))}
               <button
@@ -505,16 +536,18 @@ export default function AgenteIAPage() {
           {/* ── Conocimiento ── */}
           {tab === "Conocimiento" && (
             <div className="bg-white border border-gray-100 rounded-2xl p-5">
-              <label className={label}>Base de conocimiento (FAQ, políticas, info de rutas)</label>
+              <label className={label} htmlFor={idCampo("conocimiento")}>Base de conocimiento (FAQ, políticas, info de rutas)</label>
               <textarea
+                id={idCampo("conocimiento")}
                 className={input}
                 rows={14}
                 value={agente.conocimiento}
                 onChange={(e) => set("conocimiento", e.target.value)}
                 placeholder={
-                  "Pega aquí todo lo que el agente debe saber: horarios de atención, políticas, rutas frecuentes, formas de pago, preguntas frecuentes y sus respuestas…"
+                  "Pega aquí todo lo que el agente debe saber: políticas, rutas frecuentes, formas de pago, preguntas frecuentes y sus respuestas… (el horario de atención del equipo se declara en Ajustes)"
                 }
               />
+              <AvisoCampo campo="conocimiento" />
               <p className="text-xs text-gray-400 mt-2">
                 Además de esto, el agente consulta datos reales de tu ERP (rutas, precios históricos, flota, estado de
                 servicios) mediante herramientas.
@@ -543,7 +576,7 @@ export default function AgenteIAPage() {
                   ))}
                 </div>
                 <p className="text-xs text-gray-400 mt-2">
-                  En estos canales el agente genera una respuesta (borrador por defecto).
+                  En estos canales trabaja el agente. Copiloto: la IA no escribe sola; la sugerencia se pide con ✨ IA en el inbox.
                 </p>
               </div>
 
@@ -555,8 +588,8 @@ export default function AgenteIAPage() {
                     <div>
                       <div className="font-semibold text-gray-700">Copiloto (por defecto)</div>
                       <div className="text-gray-500 text-xs">
-                        La IA redacta y deja la respuesta como <b>borrador</b> en el inbox. Tu equipo la revisa y envía
-                        con un clic.
+                        Copiloto: la IA no escribe sola; la sugerencia se pide con <b>✨ IA</b> en el inbox. Tu equipo la
+                        revisa, la edita si hace falta y la envía.
                       </div>
                     </div>
                   </div>
@@ -598,7 +631,10 @@ export default function AgenteIAPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <label className="text-sm font-semibold text-gray-700">Restringir autonomía a horario</label>
-                  <p className="text-xs text-gray-400">Fuera de horario, la IA solo deja borradores.</p>
+                  <p className="text-xs text-gray-400">
+                    Fuera de este horario la IA no contesta ni deja borrador: el chat espera a una persona, que puede pedir
+                    una sugerencia con ✨ IA. No es el horario de atención del equipo.
+                  </p>
                 </div>
                 <button
                   onClick={() => set("horario_activo", !agente.horario_activo)}
@@ -644,8 +680,8 @@ export default function AgenteIAPage() {
                   />
                   <p className="text-[11px] text-gray-400 mt-1">Tras N respuestas IA, escala a humano (0 = sin límite).</p>
                 </div>
-                <div>
-                  <label className={label}>Pausa tras respuesta humana (horas)</label>
+                <div id="ajuste-pausa-humano" className="scroll-mt-24 rounded-xl">
+                  <label className={label}>{TEMAS_AJUSTE.pausa_humano.etiqueta}</label>
                   <input
                     type="number"
                     min={0}
@@ -655,32 +691,39 @@ export default function AgenteIAPage() {
                     onChange={(e) => set("pausa_humano_horas", Number(e.target.value))}
                   />
                   <p className="text-[11px] text-gray-400 mt-1">Si alguien del equipo respondió (CRM o celular), la IA no contesta en ese chat durante estas horas (0 = no pausar).</p>
+                  <AvisosAjuste ancla={TEMAS_AJUSTE.pausa_humano.ancla} />
                 </div>
               </div>
 
-              <div>
-                <label className={label}>Escalar a humano si el mensaje menciona</label>
+              <div id="ajuste-escalar" className="scroll-mt-24 rounded-xl">
+                <label className={label}>{TEMAS_AJUSTE.derivacion.etiqueta}</label>
                 <input
                   className={input}
                   value={agente.escalar_si}
                   onChange={(e) => set("escalar_si", e.target.value)}
                   placeholder="reclamo, queja, hablar con una persona, factura, gerente"
                 />
-                <p className="text-[11px] text-gray-400 mt-1">Frases separadas por coma.</p>
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Frases separadas por coma. Además, el sistema ya pasa el chat a una persona si el cliente lo pide, está
+                  molesto o hay un reclamo, entre otros casos.
+                </p>
+                <AvisosAjuste ancla={TEMAS_AJUSTE.derivacion.ancla} />
               </div>
 
               <div>
-                <label className={label}>Mensaje al derivar a un ejecutivo</label>
+                <label className={label} htmlFor={idCampo("mensaje_derivacion")}>Mensaje al derivar a un ejecutivo</label>
                 <textarea
+                  id={idCampo("mensaje_derivacion")}
                   rows={3}
                   className={input}
                   value={agente.mensaje_derivacion ?? ""}
                   onChange={(e) => set("mensaje_derivacion", e.target.value)}
-                  placeholder="Gracias, {nombre}. Ya registré tu solicitud y un ejecutivo de nuestro equipo la está revisando para enviarte la información por este mismo chat a la brevedad. 🙌"
+                  placeholder={mensajeDerivacionDefecto(trato)}
                 />
                 <p className="text-[11px] text-gray-400 mt-1">
-                  Lo usa la IA cuando no encuentra lo que piden en el sistema, no puede escuchar un audio o el tema es para una persona. {"{nombre}"} = primer nombre del cliente. Vacío = este texto de ejemplo. La etiqueta y la nota interna se configuran abajo, en «Al derivar a un ejecutivo».
+                  Lo usa la IA cuando no encuentra lo que piden en el sistema, no puede escuchar un audio o el tema es para una persona. {"{nombre}"} = primer nombre del cliente; {"{atencion}"} = la frase del horario de atención del equipo (solo fuera de ese horario). Vacío = este texto de ejemplo, en el trato de «{TEMAS_AJUSTE.tratamiento.etiqueta}» y con el horario de atención si lo declaras. La etiqueta y la nota interna se configuran abajo, en «Al derivar a un ejecutivo».
                 </p>
+                <AvisoCampo campo="mensaje_derivacion" />
               </div>
 
               <AjustesComportamiento
@@ -688,6 +731,9 @@ export default function AgenteIAPage() {
                 onChange={(v) => set("comportamiento", v)}
                 transcripcionLista={estadoIA.transcripcion}
                 instrucciones={estadoIA.instrucciones}
+                empresa={empresa}
+                nombreAgente={agente.nombre ?? ""}
+                mensajeDerivacionPropio={agente.mensaje_derivacion ?? ""}
               />
 
               <div>
@@ -778,5 +824,6 @@ export default function AgenteIAPage() {
       </div>
       <ContactosSinIA />
     </div>
+    </ProveedorCoherencia>
   );
 }

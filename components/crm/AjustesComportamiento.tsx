@@ -204,6 +204,14 @@ export default function AjustesComportamiento({
             ? "Pide solo el siguiente dato que falta, en el orden de «Datos que forman el pedido»; cuando el cliente lo contesta, pide el siguiente."
             : "Pide todo lo que falta en un solo mensaje."}
         </p>
+        {/* Con el resumen apagado, «Datos que forman el pedido» (que vive en el resumen) igual decide el
+            orden en que se piden de a uno: el campo se ofrece aquí para que no quede escondido. */}
+        {una && !n.resumen_pedido && (
+          <div>
+            <label className={label}>Datos que forman el pedido (en este orden los pide)</label>
+            <textarea rows={2} className={input} value={a.campos_pedido} onChange={(e) => set("campos_pedido", e.target.value)} />
+          </div>
+        )}
         <AvisosAjuste ancla={TEMAS_AJUSTE.preguntas.ancla} />
       </div>
 
@@ -318,6 +326,9 @@ export default function AjustesComportamiento({
           </div>
         </div>
         <div className={ejemplo}><Wa texto={ejemploResumen} /></div>
+        {/\p{Extended_Pictographic}/u.test(n.campos_pedido) && (
+          <p className={ayuda}>Como «Datos que forman el pedido» lleva emojis, cada renglón del resumen lleva su emoji en lugar de «•».</p>
+        )}
       </Fila>
 
       <Fila

@@ -894,7 +894,7 @@ ok(rAfa.alarmas > 0 && rRec.alarmas > 0, "corolario: el caso AFA da alarmas");
 // Anclas: cada ajuste.ancla tiene que existir como `id` en la pantalla. PENDIENTE hasta que T5 ponga
 // los id en components/crm/AjustesComportamiento.tsx o app/crm/agente/page.tsx: mientras tanto
 // informa con ⏳ y no falla. La sesión principal la activa poniendo ANCLAS_OBLIGATORIAS = true.
-const ANCLAS_OBLIGATORIAS = false;
+const ANCLAS_OBLIGATORIAS = true;
 {
   const leer = (p: string) => { try { return readFileSync(new URL(`../${p}`, import.meta.url), "utf8"); } catch { return ""; } };
   const fuentes = leer("components/crm/AjustesComportamiento.tsx") + "\n" + leer("app/crm/agente/page.tsx");
