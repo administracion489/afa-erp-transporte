@@ -386,8 +386,11 @@ export function descripcionCategoria(cat: Pick<CategoriaPdf, "nombre" | "capacid
   if (escrita) return Array.from(escrita).slice(0, MAX_DESCRIPCION_CLIENTE).join("");
   const n = Math.trunc(Number(cat.capacidad));
   const m = Math.trunc(Number(cat.maletas_bodega));
-  const nombre = v(cat.nombre) || "Unidad";
   const pax = Number.isFinite(n) && n > 0 ? ` para hasta ${n} ${n === 1 ? "pasajero" : "pasajeros"}` : "";
+  // «Minivan H1 10 pax para hasta 10 pasajeros» dice lo mismo dos veces: si la frase va a decir
+  // los pasajeros, se le quita al nombre su «N pax» / «N-M pax» final (el de la ficha no cambia).
+  const sinPax = pax ? v(cat.nombre).replace(/\s*\b\d+(\s*-\s*\d+)?\s*pax\.?\s*$/i, "").trim() : "";
+  const nombre = sinPax || v(cat.nombre) || "Unidad";
   const bodega = Number.isFinite(m) && m > 0 ? ` · bodega para ${m} ${m === 1 ? "maleta" : "maletas"} de 23 kg` : "";
   return `${nombre}${pax}${bodega}`;
 }

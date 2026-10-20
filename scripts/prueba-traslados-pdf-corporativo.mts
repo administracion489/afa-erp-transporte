@@ -255,6 +255,10 @@ seccion("3. vehiculoDeCategoria · cfgSoloCuentas · entradaCorporativaTraslado"
   ok(d({}) === "Auto para hasta 3 pasajeros · bodega para 2 maletas de 23 kg", "frase por defecto");
   ok(d({ maletas_bodega: 0 }) === "Auto para hasta 3 pasajeros", "sin bodega se omite esa parte");
   ok(d({ maletas_bodega: 1, capacidad: 1 }) === "Auto para hasta 1 pasajero · bodega para 1 maleta de 23 kg", "singular");
+  ok(d({ nombre: "Minivan H1 10 pax", capacidad: 10, maletas_bodega: 0 }) === "Minivan H1 para hasta 10 pasajeros", "el «N pax» del nombre no se repite");
+  ok(d({ nombre: "Minibús 25-30 pax", capacidad: 30, maletas_bodega: 15 }) === "Minibús para hasta 30 pasajeros · bodega para 15 maletas de 23 kg", "ni el «N-M pax»");
+  ok(d({ nombre: "Bus 45-50 pax", capacidad: 0, maletas_bodega: 0 }) === "Bus 45-50 pax", "sin capacidad, el nombre queda entero");
+  ok(d({ nombre: "50 pax", capacidad: 50, maletas_bodega: 0 }) === "50 pax para hasta 50 pasajeros", "un nombre que es solo «N pax» no queda vacío");
   ok(d({ descripcion_cliente: "  Sedán   negro\ncon aire " }) === "Sedán negro con aire", "la descripción escrita manda (y se limpia)");
   ok(Array.from(d({ descripcion_cliente: "x".repeat(500) })).length === 300, "la escrita se corta en 300");
   for (const c of categorias) ok(!/A\/C|aire/i.test(C.descripcionCategoria(c)), `${c.clave}: la frase por defecto no promete A/C`);
