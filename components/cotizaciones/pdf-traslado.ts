@@ -21,6 +21,7 @@ import { clienteParaPdf, entradaCorporativaTraslado, type CategoriaPdf, type Cli
 import type { EntradaPdfCot, PlantillaPdfCfg } from "@/lib/cotizacion-pdf";
 import type { PerfilEmpresa } from "@/lib/empresa-perfil";
 import { COLS_CATEGORIA_FOTOS } from "@/components/tarifario/traslados-datos";
+import { esTrasladoIA } from "@/lib/cotizacion-plantillas";
 
 /** Las columnas de la categoría que lee el PDF (las mismas que lee el servidor). */
 const COLS_CATEGORIA_PDF = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo";
@@ -37,11 +38,9 @@ export const AVISO_CLIENTE_NO_VERIFICADO =
 export const AVISO_TRASLADO_EN_CASTELLANO =
   "Esta cotización de traslado la armó la IA del CRM: su PDF se imprime en castellano, igual que el que se envía por WhatsApp (la descripción del vehículo y la línea de disponibilidad no tienen versión en inglés).";
 
-/** ¿Es un traslado cotizado por la IA? (`traslado_json` es un objeto). */
-export function esTrasladoIA(cot: { traslado_json?: unknown } | null | undefined): boolean {
-  const tj = cot?.traslado_json;
-  return !!tj && typeof tj === "object" && !Array.isArray(tj);
-}
+// ¿Es un traslado cotizado por la IA? (`traslado_json` es un objeto). La regla vive en
+// lib/cotizacion-plantillas.ts (la usa también `servicioDeCotizacion`); aquí se re-exporta.
+export { esTrasladoIA };
 
 /** El cliente de la pantalla como lo lee el PDF. */
 export function clienteErpDe(c: {

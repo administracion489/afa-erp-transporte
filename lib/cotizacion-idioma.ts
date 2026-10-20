@@ -339,17 +339,44 @@ export type ConsidPdf = ConsidCot & {
 };
 
 /**
+ * LA VERSIÓN 2 DE `cotizaciones.consideraciones_json` (las plantillas con uso,
+ * lib/cotizacion-plantillas.ts): la fila guarda las condiciones COPIADAS de la plantilla al crear o
+ * guardar la cotización, y esas son las que se imprimen. Es la constancia de lo enviado: editar la
+ * plantilla después ya no cambia el PDF de una cotización que ya salió.
+ *
+ * Sin `version` (todo lo guardado antes) manda la regla de siempre, así que ninguna cotización
+ * existente cambia de PDF (scripts/prueba-cotizacion-pdf.mts lo compara byte a byte).
+ */
+export const CONSID_VERSION = 2;
+
+/** Las consideraciones tal como se guardan en la fila. `plantilla`: el id de la que se copiaron. */
+export type ConsidFila = ConsidCot & { version?: number; plantilla?: string | null };
+
+/** ¿La fila trae sus condiciones FIJADAS (versión 2)? Solo un `version: 2` numérico. */
+export function esConsidFijada(c: unknown): boolean {
+  return !!c && typeof c === "object" && !Array.isArray(c) && (c as { version?: unknown }).version === CONSID_VERSION;
+}
+
+/** Una lista de una fila fijada: lo que no es lista (fila dañada) se imprime vacío, nunca la plantilla. */
+const listaDeFila = (x: unknown): string[] => (Array.isArray(x) ? (x as string[]) : []);
+
+/**
  * Las consideraciones que imprime el PDF.
  *
- * ES: EXACTAMENTE la regla de siempre — `cfg?.condiciones_x || consid.x` (una lista vacía en la
- * plantilla también gana, porque `[]` es verdadero).
+ * ES, fila FIJADA (versión 2): las listas de la FILA, sin mirar la plantilla.
  *
- * EN: las de la plantilla NO se imprimen (son texto libre en español y la plantilla no tiene
- * versión inglesa); se usan las de la cotización, y la lista que es idéntica a la de fábrica se
- * cambia por su versión inglesa.
+ * ES, fila de antes: EXACTAMENTE la regla de siempre — `cfg?.condiciones_x || consid.x` (una lista
+ * vacía en la plantilla también gana, porque `[]` es verdadero).
+ *
+ * EN (fijada o no, sin cambios): las de la plantilla NO se imprimen (son texto libre en español y
+ * la plantilla no tiene versión inglesa); se usan las de la cotización, y la lista que es idéntica
+ * a la de fábrica se cambia por su versión inglesa.
  */
-export function considParaPdf(cfg: CfgConsid, consid: ConsidCot, idioma: Idioma): ConsidPdf {
+export function considParaPdf(cfg: CfgConsid, consid: ConsidCot & { version?: unknown }, idioma: Idioma): ConsidPdf {
   if (normalizarIdioma(idioma) === "es") {
+    if (esConsidFijada(consid)) {
+      return { incluye: listaDeFila(consid.incluye), no_incluye: listaDeFila(consid.no_incluye), generales: listaDeFila(consid.generales), escritasTalCual: [] };
+    }
     return {
       incluye: cfg?.condiciones_incluye || consid.incluye,
       no_incluye: cfg?.condiciones_no_incluye || consid.no_incluye,
