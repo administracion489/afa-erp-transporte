@@ -775,10 +775,34 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const toggleIaPausada = async () => {
     if (!selected) return;
     const nuevo = !selected.ia_pausada;
-    const { error } = await supabase.from("crm_conversaciones").update({ ia_pausada: nuevo }).eq("id", selected.id);
-    if (error) { showToast(`No se pudo cambiar la IA: ${error.message}`, false); return; }
-    setSelected({ ...selected, ia_pausada: nuevo });
-    showToast(nuevo ? "IA pausada en este chat" : "IA reactivada en este chat");
+    // Reactivar pasa por el servidor: anota la reactivación (la pausa de 12 h por respuesta humana
+    // deja de contar lo anterior) y, si el cliente está esperando, la IA contesta en el momento.
+    if (!nuevo) setSelected({ ...selected, ia_pausada: false });
+    if (!nuevo) showToast("Reactivando la IA…");
+    let data: any = null;
+    try {
+      const res = await fetch("/api/crm/ia/reactivar", {
+        method: "POST",
+        headers: await cabecerasErp(),
+        body: JSON.stringify({ conversacion_id: selected.id, activar: !nuevo }),
+      });
+      data = await res.json();
+    } catch (e: any) {
+      data = { ok: false, error: e?.message ?? "Sin conexión" };
+    }
+    if (!data?.ok) {
+      setSelected({ ...selected, ia_pausada: selected.ia_pausada });
+      showToast(`No se pudo cambiar la IA: ${data?.error ?? "error desconocido"}`, false);
+      return;
+    }
+    setSelected((s) => (s && s.id === selected.id ? { ...s, ia_pausada: nuevo } : s));
+    if (nuevo) { showToast("IA pausada en este chat"); return; }
+    const aviso = data.sin_migracion ? " (falta correr supabase/crm-ia-reactivacion.sql: la pausa de 12 h sigue contando)" : "";
+    const ia = data.ia;
+    if (!ia) showToast(`IA reactivada: contestará el próximo mensaje del cliente${aviso}`);
+    else if (ia.accion === "enviado") showToast(`IA reactivada y ya respondió al cliente${aviso}`);
+    else if (ia.accion === "borrador") showToast(`IA reactivada: dejó un borrador para revisar${aviso}`);
+    else showToast(`IA reactivada, pero no respondió: ${ia.error ?? ia.motivo ?? ia.accion}${aviso}`, false);
   };
 
   const resolverAccion = async (accionId: string, decision: "aprobar" | "rechazar") => {
