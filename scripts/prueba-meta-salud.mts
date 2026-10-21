@@ -18,6 +18,7 @@ import {
   type LecturaToken,
   type NumeroLeido,
   type CuentaLeida,
+  cuentaSoloParaBsp,
 } from "../lib/meta-salud";
 import { explicarErrorEnvioWhatsApp } from "../lib/crm-meta";
 
@@ -269,11 +270,24 @@ check("sin método gana sobre un token inválido y sobre otra cuenta",
 const vPago141 = veredictoSalud([LC("propio", s1, permOk, cSin)], WABA);
 check("sin método y además el 141006: un solo veredicto que nombra los dos", vPago141.codigo === "pago" && /141006/.test(vPago141.texto) && /ningún método de pago/.test(vPago141.texto), vPago141);
 
+// 3f. Lo que contestó Meta el 20-10-2026 a las 23:34, con el método de pago recién
+// agregado: la cuenta NO se deja leer a un Tech Provider. El ERP no puede saberlo y
+// tiene que decirlo, sin afirmar ni que falta ni que está.
+const cBsp = leerCuenta(400, { error: { message: "You do not have permission to perform this action. This action requires that the Business that owns this App is a Business Solution Provider for WhatsApp.", code: 10 } });
+check("cuenta solo para BSP: se reconoce", cuentaSoloParaBsp(cBsp) && cBsp.metodoPago === null, cBsp);
+check("cuenta solo para BSP: otro error no lo es", !cuentaSoloParaBsp(cErr) && !cuentaSoloParaBsp(cSin) && !cuentaSoloParaBsp(null));
+const vBsp = veredictoSalud([LC("propio", sLl, permOk, cBsp), LC("general", sLl, permOk, cBsp)], WABA);
+check("caso real 23:34: disponible, dice que el ERP no puede comprobar el pago", vBsp.codigo === "disponible" && /no puede comprobar el método de pago/.test(vBsp.texto) && /proveedor BSP/.test(vBsp.texto), vBsp);
+check("caso real 23:34: no afirma que falte ni que esté", !/ningún método de pago|no es un tema de pago/.test(vBsp.texto), vBsp);
+check("caso real 23:34: sigue mandando al soporte con el fbtrace", /fbtrace_id/.test(vBsp.texto), vBsp);
+const vBspCon = veredictoSalud([LC("propio", sLl, permOk, cBsp), LC("general", sLl, permOk, cCon)], WABA);
+check("un token lee la cuenta con método: manda esa lectura", /no es un tema de pago/.test(vBspCon.texto) && !/proveedor BSP/.test(vBspCon.texto), vBspCon);
+
 // ── 3d. Barrido ───────────────────────────────────────────────────────────────
 const saludes = [s0, s1, s2, s3, s4, sReal, sLl, null];
 const permisos = [permOk, permNo, inv, sinDatos, null];
 const numeros: (NumeroLeido | null)[] = [nOk, nFuera, nFlag, nErr, null];
-const cuentasB: (CuentaLeida | null)[] = [cSin, cCon, cErr, null];
+const cuentasB: (CuentaLeida | null)[] = [cSin, cCon, cErr, cBsp, null];
 let combinaciones = 0;
 for (const a of saludes) for (const b of saludes) for (const pa of permisos) for (const pb of permisos) for (const na of numeros) for (const ca of cuentasB) {
   combinaciones++;
@@ -281,6 +295,7 @@ for (const a of saludes) for (const b of saludes) for (const pa of permisos) for
   if (/no es un tema de pago/.test(v.texto)) check("barrido: «no es un tema de pago» solo con la cuenta leída CON método", ca?.metodoPago === true, { ca, v });
   if (ca?.metodoPago === false) check("barrido: la cuenta sin método de pago siempre es el veredicto pago", v.codigo === "pago" && /ningún método de pago/.test(v.texto), { ca, v });
   check("barrido: nunca se dice que no hay problema de pago sin la cuenta", !/ningún problema de pago/.test(v.texto), v);
+  if (/proveedor BSP/.test(v.texto)) check("barrido: «solo BSP» solo con esa respuesta de Meta y sin otra cuenta leída", cuentaSoloParaBsp(ca), { ca, v });
   const relevantes = [...(a?.bloqueos ?? []), ...(b?.bloqueos ?? [])].filter((x) => !esDeLlamadas(x));
   const leyoAvailable = a?.nivel === "AVAILABLE" || b?.nivel === "AVAILABLE";
   const limitadoPorLlamadas = [a, b].some((x) => x?.nivel === "LIMITED" && x.bloqueos.length > 0 && x.bloqueos.every(esDeLlamadas));
@@ -292,7 +307,7 @@ for (const a of saludes) for (const b of saludes) for (const pa of permisos) for
   check("barrido: con un bloqueo relevante nunca es disponible ni no_se_sabe", !relevantes.length || (v.codigo !== "disponible" && v.codigo !== "no_se_sabe"), { a, b, v });
   check("barrido: el texto nunca está vacío", v.texto.length > 10);
 }
-check("barrido: corrió", combinaciones === 32000);
+check("barrido: corrió", combinaciones === 40000);
 
 // ── 4. Lo que ve el operador ──────────────────────────────────────────────────
 const bruto = `(#131005) Access denied (también con el token general)${MARCA_META_DICE}${v1.texto}`;
