@@ -48,7 +48,10 @@ async function postWA(phoneId: string, body: unknown, mensajePorDefecto: string)
     // de una cuenta bloqueada o una deuda, y el operador no sabe dónde arreglarlo.
     if (r.porPermiso) {
       const v = await diagnosticarEnvio(phoneId, { propio, general });
-      throw new Error(`${r.mensaje}${MARCA_META_DICE}${v.texto}`);
+      // El fbtrace_id va con el código de Meta: es lo que pide su soporte si el
+      // diagnóstico no alcanza para explicar el rechazo.
+      const traza = r.fbtrace ? ` [fbtrace_id ${r.fbtrace}]` : "";
+      throw new Error(`${r.mensaje}${traza}${MARCA_META_DICE}${v.texto}`);
     }
     throw new Error(r.mensaje);
   }

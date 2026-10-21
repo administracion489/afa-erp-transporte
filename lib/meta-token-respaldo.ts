@@ -27,7 +27,7 @@
 // primero (los llamadores reconocen el error por su código: 131047, 132001…).
 
 /** El `error` de una respuesta de la Graph API. */
-export type ErrorMeta = { code?: number | string; error_subcode?: number | string; message?: string } | null | undefined;
+export type ErrorMeta = { code?: number | string; error_subcode?: number | string; message?: string; fbtrace_id?: string } | null | undefined;
 
 /**
  * Códigos de la Graph API que significan «este token no puede hacer esto»:
@@ -62,7 +62,7 @@ export type IntentoMeta = { ok: boolean; status: number; data: any };
 
 export type ResultadoEnvio =
   | { ok: true; data: any; token: string; intentos: number }
-  | { ok: false; mensaje: string; intentos: number; porPermiso: boolean };
+  | { ok: false; mensaje: string; intentos: number; porPermiso: boolean; fbtrace?: string | null };
 
 /**
  * Prueba los tokens en orden. Reintenta con el siguiente SOLO ante un error de
@@ -75,15 +75,20 @@ export async function enviarConRespaldo(
 ): Promise<ResultadoEnvio> {
   const mensajes: string[] = [];
   let intentos = 0;
+  // El fbtrace_id del último rechazo: es lo que pide el soporte de Meta para rastrear
+  // un envío concreto cuando su diagnóstico no explica el rechazo.
+  let fbtrace: string | null = null;
   for (let i = 0; i < tokens.length; i++) {
     const r = await intentar(tokens[i]);
     intentos++;
     if (r.ok) return { ok: true, data: r.data, token: tokens[i], intentos };
     const err: ErrorMeta = r.data?.error;
     mensajes.push(String(err?.message ?? mensajePorDefecto));
+    const traza = err?.fbtrace_id;
+    if (traza != null && String(traza).trim()) fbtrace = String(traza).trim().slice(0, 80);
     const porPermiso = esErrorDePermiso(r.status, err);
     if (!porPermiso || i === tokens.length - 1) {
-      return { ok: false, mensaje: unirMensajes(mensajes), intentos, porPermiso };
+      return { ok: false, mensaje: unirMensajes(mensajes), intentos, porPermiso, fbtrace };
     }
   }
   return { ok: false, mensaje: "No hay token de WhatsApp para este número: ni propio (whatsapp_tokens) ni META_WA_TOKEN en el entorno.", intentos: 0, porPermiso: false };

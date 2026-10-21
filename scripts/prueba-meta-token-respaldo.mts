@@ -125,6 +125,17 @@ const DENEGADO: IntentoMeta = { ok: false, status: 403, data: err(131005, ACCESO
   check("j. vetado y el general rechazado → se prueba el propio", r.ok && r.token === "P" && f.llamadas.join() === "G,P", { r, l: f.llamadas });
 }
 
+{
+  // El fbtrace_id del último rechazo viaja con el error: lo pide el soporte de Meta.
+  const conTraza = (t: string): IntentoMeta => ({ ok: false, status: 403, data: { error: { code: 131005, message: ACCESO_DENEGADO, fbtrace_id: t } } });
+  const f = falso({ P: conTraza("AAA"), G: conTraza("BBB") });
+  const r = await enviarConRespaldo(["P", "G"], f.intentar, "Error");
+  check("k. el fbtrace_id es el del último intento", !r.ok && r.fbtrace === "BBB", r);
+  const f2 = falso({ P: DENEGADO });
+  const r2 = await enviarConRespaldo(["P"], f2.intentar, "Error");
+  check("k. sin fbtrace_id → null", !r2.ok && r2.fbtrace === null, r2);
+}
+
 // ── 4. Barrido ────────────────────────────────────────────────────────────────
 const respuestas: IntentoMeta[] = [
   OK,
