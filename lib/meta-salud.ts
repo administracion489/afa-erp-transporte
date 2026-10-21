@@ -33,6 +33,15 @@
 // mandaba a configurar un SIP. Se conservan en la lectura guardada y no entran al
 // veredicto. El tercero era la verificación del negocio (141010), y tiene su propio
 // código porque se arregla en otro sitio y no es una deuda.
+//
+// Y LO QUE health_status NO DICE: EL MÉTODO DE PAGO. El 21-10-2026 WhatsApp
+// Manager mostraba «Falta un método de pago válido: no podrás enviar mensajes a los
+// clientes hasta que agregues un método de pago», y health_status no lo mencionaba:
+// el veredicto decía «Meta no marca ningún problema de pago», que era falso. Por eso
+// se lee además la CUENTA de WhatsApp (`GET /{waba_id}?fields=currency,
+// primary_funding_id,…`): sin `primary_funding_id` no hay método de pago y eso
+// manda sobre todo lo demás. «No es un pago» solo se afirma cuando la cuenta se leyó
+// y TIENE método de pago; si no se pudo leer, se dice dónde mirarlo.
 
 /** Separa, dentro del error de un envío, el código de Meta de su diagnóstico. */
 export const MARCA_META_DICE = " · Meta dice: ";
@@ -75,12 +84,22 @@ export type NumeroLeido = {
   error: string | null;
 };
 
+/** La cuenta de WhatsApp (WABA): moneda, método de pago y revisión. */
+export type CuentaLeida = {
+  moneda: string | null;
+  /** ¿Tiene método de pago (primary_funding_id)? null = no se pudo leer. */
+  metodoPago: boolean | null;
+  revision: string | null; // account_review_status
+  error: string | null;
+};
+
 export type LecturaToken = {
   cual: "propio" | "general";
   salud: SaludLeida | null;
   permisos: PermisoLeido | null;
-  /** Opcional: las lecturas guardadas antes de esta pieza no lo traen. */
+  /** Opcionales: las lecturas guardadas antes de estas piezas no los traen. */
   numero?: NumeroLeido | null;
+  cuenta?: CuentaLeida | null;
 };
 
 export type CodigoVeredicto =
@@ -208,6 +227,25 @@ export function leerNumero(
   };
 }
 
+/**
+ * Lee `GET /{waba_id}?fields=id,currency,primary_funding_id,account_review_status`.
+ * Graph omite los campos vacíos, así que sin `primary_funding_id` en una respuesta
+ * que sí trae la cuenta (`id`) no hay método de pago. Con error, nada se afirma.
+ */
+export function leerCuenta(status: number, data: any): CuentaLeida {
+  const error = errorDeGraph(data, status);
+  if (error || !data || typeof data !== "object" || data.id == null) {
+    return { moneda: null, metodoPago: null, revision: null, error: error ?? "Meta no devolvió la cuenta de WhatsApp." };
+  }
+  const fondo = data.primary_funding_id;
+  return {
+    moneda: txt(data.currency),
+    metodoPago: fondo != null && String(fondo).trim() !== "",
+    revision: txt(data.account_review_status),
+    error: null,
+  };
+}
+
 /** Estados del número que Meta documenta como «no puede operar». Los demás no se juzgan. */
 const ESTADOS_MALOS = new Set(["DISCONNECTED", "FLAGGED", "RESTRICTED", "BANNED", "DELETED", "RATE_LIMITED"]);
 
@@ -264,8 +302,8 @@ function frase(b: Bloqueo): string {
 const NOMBRE_TOKEN = { propio: "el acceso propio del número", general: "el acceso general de la empresa (META_WA_TOKEN)" } as const;
 
 /**
- * El veredicto, de la evidencia al juicio: (1) lo que Meta dice que bloquea el
- * número —el pago aparte, porque se arregla en otro sitio, y sin lo de las llamadas,
+ * El veredicto, de la evidencia al juicio: (0) la cuenta sin método de pago; (1) lo
+ * que Meta dice que bloquea el número —el pago aparte, porque se arregla en otro sitio, y sin lo de las llamadas,
  * que no toca los mensajes—; (2) un token caducado; (3) el permiso de mensajería que
  * falta; (4) el número fuera de la cuenta registrada; (5) el número inactivo en la
  * Cloud API; (6) la verificación del negocio; (7) Meta dice que el número puede
@@ -288,14 +326,36 @@ export function veredictoSalud(lecturas: LecturaToken[], wabaId: string | null):
   const verif = bloqueos.filter((b) => !esDePago(b) && esDeVerificacion(b));
   const resto = bloqueos.filter((b) => !esDePago(b) && !esDeVerificacion(b));
   const cuenta = wabaId ? ` ${wabaId}` : "";
-  // La pregunta que abrió este módulo fue «¿es por deuda?»: se contesta siempre que
-  // Meta haya respondido y no marque nada de pago.
-  const leyoSalud = lecturas.some((l) => l.salud && !l.salud.error);
-  const sinPago = leyoSalud ? " Meta no marca ningún problema de pago." : "";
+  // La pregunta que abrió este módulo fue «¿es por deuda?». health_status NO ve el
+  // método de pago (el 21-10-2026 faltaba y no lo decía), así que «no es un pago»
+  // solo se afirma con la cuenta leída y con método de pago. Si no se pudo leer, se
+  // dice dónde mirarlo en vez de afirmar nada.
+  const cuentas = lecturas.map((l) => l.cuenta).filter((c): c is CuentaLeida => !!c && !c.error);
+  const sinMetodo = cuentas.find((c) => c.metodoPago === false);
+  const conMetodo = cuentas.some((c) => c.metodoPago === true);
+  const sinPago = conMetodo
+    ? " La cuenta tiene método de pago: no es un tema de pago."
+    : " Revisa también WhatsApp Manager → Información general → Alertas: si dice «Falta un método de pago», esa es la causa.";
   const ademas = verif.length ? ` Además, Meta marca ${verif.map(frase).join(" · ")}.` : "";
 
+  // Si un token ve el método de pago y otro no, no se afirma que falte: un campo
+  // que un token no alcanza a ver no es un método de pago ausente.
+  if (sinMetodo && !conMetodo) {
+    const moneda = sinMetodo.moneda ? ` La cuenta factura en ${sinMetodo.moneda}.` : "";
+    const otros = [...pago, ...resto, ...verif];
+    return {
+      codigo: "pago",
+      texto:
+        `Meta no registra ningún método de pago en la cuenta de WhatsApp${cuenta}, y sin él no deja enviar mensajes desde el ERP. Se agrega en WhatsApp Manager → Información general → «Agregar método de pago».${moneda}` +
+        (otros.length ? ` Además, Meta marca ${otros.map(frase).join(" · ")}.` : ""),
+    };
+  }
   if (pago.length) {
-    return { codigo: "pago", texto: `Meta bloquea el envío por un tema de PAGO en ${pago.map(frase).join(" · ")}` };
+    const otros = [...resto, ...verif];
+    return {
+      codigo: "pago",
+      texto: `Meta bloquea el envío por un tema de PAGO en ${pago.map(frase).join(" · ")}` + (otros.length ? `. Además, Meta marca ${otros.map(frase).join(" · ")}.` : ""),
+    };
   }
   if (resto.length) {
     return { codigo: "bloqueo_meta", texto: `Meta bloquea el envío en ${[...resto, ...verif].map(frase).join(" · ")}.${sinPago}` };
@@ -347,13 +407,13 @@ export function veredictoSalud(lecturas: LecturaToken[], wabaId: string | null):
   if (lecturas.some((l) => l.salud?.nivel === "AVAILABLE")) {
     return {
       codigo: "disponible",
-      texto: `Meta dice que el número SÍ puede enviar (estado AVAILABLE, sin bloqueos ni deudas) y aun así rechaza el envío del ERP: es un permiso de la app sobre la cuenta${cuenta}, no un pago. Hay que abrir un caso en el soporte de Meta con el fbtrace_id de este error.`,
+      texto: `Meta dice que el número SÍ puede enviar (estado AVAILABLE, sin bloqueos) y aun así rechaza el envío del ERP.${sinPago} Si no es eso, hay que abrir un caso en el soporte de Meta con el fbtrace_id de este error.`,
     };
   }
   if (lecturas.some(soloLlamadas)) {
     return {
       codigo: "disponible",
-      texto: `Meta solo marca límites de las LLAMADAS de WhatsApp (que el ERP no usa), nada que impida los mensajes, y aun así rechaza el envío: no es un pago. Hay que abrir un caso en el soporte de Meta con el fbtrace_id de este error.`,
+      texto: `Meta solo marca límites de las LLAMADAS de WhatsApp (que el ERP no usa), nada que impida los mensajes, y aun así rechaza el envío.${sinPago} Si no es eso, hay que abrir un caso en el soporte de Meta con el fbtrace_id de este error.`,
     };
   }
 

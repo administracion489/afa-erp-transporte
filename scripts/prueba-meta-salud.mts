@@ -8,6 +8,7 @@ import {
   leerSalud,
   leerPermisos,
   leerNumero,
+  leerCuenta,
   problemaNumero,
   veredictoSalud,
   esDePago,
@@ -16,6 +17,7 @@ import {
   MARCA_META_DICE,
   type LecturaToken,
   type NumeroLeido,
+  type CuentaLeida,
 } from "../lib/meta-salud";
 import { explicarErrorEnvioWhatsApp } from "../lib/crm-meta";
 
@@ -130,7 +132,7 @@ check("veredicto pago: nombra la cuenta y la solución", /cuenta de WhatsApp/.te
 
 const v2 = veredictoSalud([L("propio", s2, permOk)], WABA);
 check("veredicto: la verificación del negocio tiene su código", v2.codigo === "verificacion" && /portafolio/.test(v2.texto) && /verificación de negocio/.test(v2.texto), v2);
-check("veredicto verificación: dice que no es pago y que los accesos están bien", /ningún problema de pago/.test(v2.texto) && /siguen válidos/.test(v2.texto), v2);
+check("veredicto verificación: sin la cuenta leída no afirma que no es pago, dice dónde mirarlo", !/no es un tema de pago/.test(v2.texto) && /Falta un método de pago/.test(v2.texto) && /siguen válidos/.test(v2.texto), v2);
 const v2b = veredictoSalud([L("propio", s3, permOk)], WABA);
 check("veredicto: otro bloqueo de Meta (app en desarrollo) es bloqueo_meta", v2b.codigo === "bloqueo_meta" && /development/.test(v2b.texto), v2b);
 
@@ -138,7 +140,7 @@ const v3 = veredictoSalud([L("propio", s4, permNo), L("general", s4, permNo)], W
 check("veredicto: ninguno con permiso sobre la WABA", v3.codigo === "sin_permiso" && v3.texto.includes(WABA), v3);
 
 const v4 = veredictoSalud([L("propio", s4, permNo), L("general", s0, permOk)], WABA);
-check("veredicto: uno con permiso y sano → disponible, no es pago", v4.codigo === "disponible" && /no un pago/.test(v4.texto), v4);
+check("veredicto: uno con permiso y sano → disponible, y manda a mirar las alertas", v4.codigo === "disponible" && /Alertas/.test(v4.texto) && !/no es un tema de pago/.test(v4.texto), v4);
 
 const v5 = veredictoSalud([L("propio", s4, inv), L("general", s4, inv)], WABA);
 check("veredicto: los dos tokens inválidos", v5.codigo === "token_invalido", v5);
@@ -189,7 +191,7 @@ check("real: nada es de pago", !sReal.bloqueos.some(esDePago));
 const vReal = veredictoSalud([L("propio", sReal, permOk), L("general", sReal, permOk)], WABA);
 check("real: el veredicto es la verificación", vReal.codigo === "verificacion", vReal);
 check("real: no habla de SIP ni de llamadas", !/SIP|calling|138024|138025/.test(vReal.texto), vReal);
-check("real: dice que no es pago", /ningún problema de pago/.test(vReal.texto), vReal);
+check("real: sin la cuenta leída NO afirma que no es pago (el 21-10 sí lo era)", !/no es un tema de pago|ningún problema de pago/.test(vReal.texto) && /Falta un método de pago/.test(vReal.texto), vReal);
 check("real: nombra el portafolio y el arreglo en castellano", vReal.texto.includes("287525502109554") && /Centro de seguridad/.test(vReal.texto), vReal);
 check("real: la verificación aparece una sola vez aunque la lean los dos tokens", (vReal.texto.match(/141010/g) ?? []).length === 1, vReal);
 check("real: manda al soporte de Meta con el fbtrace_id si sigue", /fbtrace_id/.test(vReal.texto), vReal);
@@ -203,7 +205,7 @@ const SOLO_LLAMADAS = {
 };
 const sLl = leerSalud(200, SOLO_LLAMADAS);
 const vLl = veredictoSalud([L("propio", sLl, permOk)], WABA);
-check("solo llamadas: disponible y lo dice", vLl.codigo === "disponible" && /LLAMADAS/.test(vLl.texto) && /no es un pago/.test(vLl.texto), vLl);
+check("solo llamadas: disponible y lo dice", vLl.codigo === "disponible" && /LLAMADAS/.test(vLl.texto) && /Alertas/.test(vLl.texto), vLl);
 
 // ── 3c. El estado del número y la cuenta a la que pertenece ──────────────────
 const PHONE = "2588335447883921";
@@ -233,26 +235,64 @@ const nFlag = leerNumero(200, { status: "RESTRICTED" }, PHONE, listaCon);
 const vFlag = veredictoSalud([LN("propio", s0, permOk, nFlag)], WABA);
 check("número restringido: numero_estado", vFlag.codigo === "numero_estado" && /RESTRICTED/.test(vFlag.texto), vFlag);
 
+
+// ── 3e. EL MÉTODO DE PAGO (21-10-2026): health_status no lo dice, la cuenta sí ──
+// WhatsApp Manager: «Falta un método de pago válido… No podrás enviar mensajes a los
+// clientes hasta que agregues un método de pago». health_status era el de arriba
+// (LIMITED por llamadas y verificación) y el veredicto decía «no hay problema de pago».
+const cSin = leerCuenta(200, { id: WABA, currency: "INR", account_review_status: "APPROVED" });
+check("cuenta: sin primary_funding_id → no hay método de pago", cSin.metodoPago === false && cSin.moneda === "INR" && cSin.error === null, cSin);
+const cCon = leerCuenta(200, { id: WABA, currency: "USD", primary_funding_id: "123456789" });
+check("cuenta: con primary_funding_id → sí hay", cCon.metodoPago === true && cCon.moneda === "USD", cCon);
+check("cuenta: primary_funding_id vacío no cuenta", leerCuenta(200, { id: WABA, primary_funding_id: "  " }).metodoPago === false);
+const cErr = leerCuenta(400, { error: { message: "(#100) Tried accessing nonexisting field (primary_funding_id)", code: 100 } });
+check("cuenta: error de Meta → nada afirmado", cErr.metodoPago === null && /100/.test(cErr.error ?? ""), cErr);
+check("cuenta: respuesta sin id → nada afirmado", leerCuenta(200, {}).metodoPago === null && leerCuenta(200, null).error !== null);
+
+const LC = (cual: "propio" | "general", salud: any, permisos: any, cuenta: CuentaLeida | null): LecturaToken => ({ cual, salud, permisos, numero: nOk, cuenta });
+const vPagoReal = veredictoSalud([LC("propio", sReal, permOk, cSin), LC("general", sReal, permOk, cSin)], WABA);
+check("pago real: el veredicto es pago", vPagoReal.codigo === "pago", vPagoReal);
+check("pago real: dice que falta el método y dónde se agrega", /ningún método de pago/.test(vPagoReal.texto) && /Agregar método de pago/.test(vPagoReal.texto) && vPagoReal.texto.includes(WABA), vPagoReal);
+check("pago real: nombra la moneda de la cuenta", /factura en INR/.test(vPagoReal.texto), vPagoReal);
+check("pago real: la verificación no se calla", /141010/.test(vPagoReal.texto) && (vPagoReal.texto.match(/141010/g) ?? []).length === 1, vPagoReal);
+check("pago real: no habla de SIP", !/SIP|138024|138025/.test(vPagoReal.texto), vPagoReal);
+const vConMetodo = veredictoSalud([LC("propio", sReal, permOk, cCon)], WABA);
+check("con método de pago: el veredicto es la verificación y dice que no es pago", vConMetodo.codigo === "verificacion" && /no es un tema de pago/.test(vConMetodo.texto), vConMetodo);
+const vDisCon = veredictoSalud([LC("propio", s0, permOk, cCon)], WABA);
+check("disponible con método: no es pago", vDisCon.codigo === "disponible" && /no es un tema de pago/.test(vDisCon.texto), vDisCon);
+const vCuentaErr = veredictoSalud([LC("propio", sReal, permOk, cErr)], WABA);
+check("cuenta ilegible: no se afirma nada del pago", vCuentaErr.codigo === "verificacion" && !/no es un tema de pago|ningún método de pago/.test(vCuentaErr.texto), vCuentaErr);
+const vDesacuerdo = veredictoSalud([LC("propio", sReal, permOk, cSin), LC("general", sReal, permOk, cCon)], WABA);
+check("un token ve el método y otro no: no se afirma que falte", vDesacuerdo.codigo === "verificacion" && /no es un tema de pago/.test(vDesacuerdo.texto), vDesacuerdo);
+check("sin método gana sobre un token inválido y sobre otra cuenta",
+  veredictoSalud([{ cual: "propio", salud: s4, permisos: inv, numero: nFuera, cuenta: cSin }], WABA).codigo === "pago");
+const vPago141 = veredictoSalud([LC("propio", s1, permOk, cSin)], WABA);
+check("sin método y además el 141006: un solo veredicto que nombra los dos", vPago141.codigo === "pago" && /141006/.test(vPago141.texto) && /ningún método de pago/.test(vPago141.texto), vPago141);
+
 // ── 3d. Barrido ───────────────────────────────────────────────────────────────
 const saludes = [s0, s1, s2, s3, s4, sReal, sLl, null];
 const permisos = [permOk, permNo, inv, sinDatos, null];
 const numeros: (NumeroLeido | null)[] = [nOk, nFuera, nFlag, nErr, null];
+const cuentasB: (CuentaLeida | null)[] = [cSin, cCon, cErr, null];
 let combinaciones = 0;
-for (const a of saludes) for (const b of saludes) for (const pa of permisos) for (const pb of permisos) for (const na of numeros) {
+for (const a of saludes) for (const b of saludes) for (const pa of permisos) for (const pb of permisos) for (const na of numeros) for (const ca of cuentasB) {
   combinaciones++;
-  const v = veredictoSalud([LN("propio", a, pa, na), LN("general", b, pb, nOk)], WABA);
+  const v = veredictoSalud([{ cual: "propio", salud: a, permisos: pa, numero: na, cuenta: ca }, LN("general", b, pb, nOk)], WABA);
+  if (/no es un tema de pago/.test(v.texto)) check("barrido: «no es un tema de pago» solo con la cuenta leída CON método", ca?.metodoPago === true, { ca, v });
+  if (ca?.metodoPago === false) check("barrido: la cuenta sin método de pago siempre es el veredicto pago", v.codigo === "pago" && /ningún método de pago/.test(v.texto), { ca, v });
+  check("barrido: nunca se dice que no hay problema de pago sin la cuenta", !/ningún problema de pago/.test(v.texto), v);
   const relevantes = [...(a?.bloqueos ?? []), ...(b?.bloqueos ?? [])].filter((x) => !esDeLlamadas(x));
   const leyoAvailable = a?.nivel === "AVAILABLE" || b?.nivel === "AVAILABLE";
   const limitadoPorLlamadas = [a, b].some((x) => x?.nivel === "LIMITED" && x.bloqueos.length > 0 && x.bloqueos.every(esDeLlamadas));
   if (v.codigo === "disponible")
     check("barrido: disponible solo con AVAILABLE o con un LIMITED de llamadas", (leyoAvailable || limitadoPorLlamadas) && relevantes.length === 0, { a, b, v });
   for (const x of relevantes)
-    if (x.codigo != null && v.codigo !== "pago") check("barrido: todo lo que Meta marca (salvo llamadas) se nombra", v.texto.includes(String(x.codigo)), { x, v });
+    if (x.codigo != null) check("barrido: todo lo que Meta marca (salvo llamadas) se nombra", v.texto.includes(String(x.codigo)), { x, v });
   check("barrido: nunca se habla de SIP en el veredicto", !/\bSIP\b|138024|138025/.test(v.texto), v);
   check("barrido: con un bloqueo relevante nunca es disponible ni no_se_sabe", !relevantes.length || (v.codigo !== "disponible" && v.codigo !== "no_se_sabe"), { a, b, v });
   check("barrido: el texto nunca está vacío", v.texto.length > 10);
 }
-check("barrido: corrió", combinaciones === 8000);
+check("barrido: corrió", combinaciones === 32000);
 
 // ── 4. Lo que ve el operador ──────────────────────────────────────────────────
 const bruto = `(#131005) Access denied (también con el token general)${MARCA_META_DICE}${v1.texto}`;
@@ -271,6 +311,7 @@ const meta = readFileSync(new URL("../lib/crm-meta.ts", import.meta.url), "utf8"
 check("crm-meta: diagnostica solo ante un rechazo por permisos", /if \(r\.porPermiso\)\s*\{[\s\S]*diagnosticarEnvio/.test(meta));
 check("crm-meta: el fbtrace_id va antes de la marca", /\$\{r\.mensaje\}\$\{traza\}\$\{MARCA_META_DICE\}/.test(meta));
 check("datos: el estado del número va en una petición aparte de health_status", /fields=health_status`/.test(datos) && /fields=status,name_status/.test(datos));
+check("datos: se lee el método de pago de la cuenta, en su propia petición", /\$\{encodeURIComponent\(wabaId\)\}\?fields=id,currency,primary_funding_id/.test(datos) && /cuenta: w \? leerCuenta/.test(datos));
 
 console.log(`\n${ok} bien · ${mal} mal`);
 if (mal) process.exit(1);
