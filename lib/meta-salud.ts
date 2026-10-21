@@ -246,6 +246,15 @@ export function leerCuenta(status: number, data: any): CuentaLeida {
   };
 }
 
+/**
+ * ¿La cuenta no se pudo leer porque Meta reserva el método de pago a los proveedores
+ * BSP? Se mira el TEXTO del error, no un campo nuevo, para que también lo reconozcan
+ * las lecturas ya guardadas en `crm_config`.
+ */
+export function cuentaSoloParaBsp(c: CuentaLeida | null | undefined): boolean {
+  return !!c?.error && /business solution provider/i.test(c.error);
+}
+
 /** Estados del número que Meta documenta como «no puede operar». Los demás no se juzgan. */
 const ESTADOS_MALOS = new Set(["DISCONNECTED", "FLAGGED", "RESTRICTED", "BANNED", "DELETED", "RATE_LIMITED"]);
 
@@ -333,9 +342,16 @@ export function veredictoSalud(lecturas: LecturaToken[], wabaId: string | null):
   const cuentas = lecturas.map((l) => l.cuenta).filter((c): c is CuentaLeida => !!c && !c.error);
   const sinMetodo = cuentas.find((c) => c.metodoPago === false);
   const conMetodo = cuentas.some((c) => c.metodoPago === true);
+  // Meta solo le deja leer el método de pago a un proveedor BSP de WhatsApp: a un
+  // Tech Provider (AFA desde ago-2026) le contesta (#10) «requires that the Business
+  // that owns this App is a Business Solution Provider». Visto el 20-10-2026 con la
+  // cuenta recién pagada: el ERP no PUEDE saberlo, y lo dice en vez de callarlo.
+  const soloBsp = !cuentas.length && lecturas.some((l) => cuentaSoloParaBsp(l.cuenta));
   const sinPago = conMetodo
     ? " La cuenta tiene método de pago: no es un tema de pago."
-    : " Revisa también WhatsApp Manager → Información general → Alertas: si dice «Falta un método de pago», esa es la causa.";
+    : soloBsp
+      ? " El ERP no puede comprobar el método de pago: Meta solo se lo muestra a un proveedor BSP de WhatsApp. Revísalo en WhatsApp Manager → Información general → Alertas: si dice «Falta un método de pago», o el método figura pendiente de verificar, esa es la causa."
+      : " Revisa también WhatsApp Manager → Información general → Alertas: si dice «Falta un método de pago», esa es la causa.";
   const ademas = verif.length ? ` Además, Meta marca ${verif.map(frase).join(" · ")}.` : "";
 
   // Si un token ve el método de pago y otro no, no se afirma que falte: un campo
