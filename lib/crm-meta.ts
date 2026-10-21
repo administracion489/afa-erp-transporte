@@ -2,27 +2,55 @@
 // Env vars: META_WA_TOKEN (WhatsApp system user token), META_PAGE_TOKEN (Messenger/Instagram page token)
 // Legacy: META_ACCESS_TOKEN se usa como fallback si los nuevos no están definidos
 
-import { tokenParaNumero } from "@/lib/meta-tokens";
+import { tokenPropio } from "@/lib/meta-tokens";
+import { enviarConRespaldo, tokensEnOrden, VETO_TOKEN_PROPIO_MS } from "@/lib/meta-token-respaldo";
 
 const GRAPH = "https://graph.facebook.com/v25.0";
 const PAGE_TOKEN = () => process.env.META_PAGE_TOKEN!;
 
 // Token de WhatsApp POR NÚMERO, no global.
 //
-// Todos los números de AFA cuelgan del mismo system user (META_WA_TOKEN) y para
-// ellos esto devuelve exactamente lo de siempre. La diferencia aparece al VENDER
-// el ERP: cada empresa que completa el Embedded Signup entrega su propio business
-// token, que queda cifrado en `whatsapp_tokens` y se usa solo para sus números.
-// Sin esto, un segundo cliente sería imposible: su WABA no está bajo el system
-// user de AFA y Meta rechazaría cada envío con un 190/200.
-async function waToken(phoneId: string): Promise<string> {
-  const token = await tokenParaNumero(phoneId);
-  if (!token) {
-    throw new Error(
-      "No hay token de WhatsApp para este número: ni propio (whatsapp_tokens) ni META_WA_TOKEN en el entorno.",
-    );
+// Todos los números de AFA cuelgan del mismo system user (META_WA_TOKEN). La
+// diferencia aparece al VENDER el ERP: cada empresa que completa el Embedded Signup
+// entrega su propio business token, que queda cifrado en `whatsapp_tokens` y se usa
+// solo para sus números. Sin esto, un segundo cliente sería imposible: su WABA no
+// está bajo el system user de AFA y Meta rechazaría cada envío con un 190/200.
+//
+// Y si Meta rechaza el token propio POR PERMISOS, se reintenta una vez con el
+// general (lib/meta-token-respaldo.ts): el 20-10-2026 el token propio del número
+// del CRM perdió el permiso de envío y el número quedó mudo, aunque el system user
+// de la empresa podía enviar por él. Un rechazo por permiso no envía ni cobra nada.
+const tokenPropioVetadoHasta = new Map<string, number>();
+
+async function postWA(phoneId: string, body: unknown, mensajePorDefecto: string): Promise<any> {
+  const propio = await tokenPropio(phoneId);
+  const general = process.env.META_WA_TOKEN;
+  const vetado = (tokenPropioVetadoHasta.get(phoneId) ?? 0) > Date.now();
+  const tokens = tokensEnOrden(propio, general, vetado);
+  const r = await enviarConRespaldo(
+    tokens,
+    async (token) => {
+      const res = await fetch(`${GRAPH}/${phoneId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    },
+    mensajePorDefecto,
+  );
+  if (!r.ok) throw new Error(r.mensaje);
+  const propioLimpio = propio?.trim();
+  if (propioLimpio && r.token !== propioLimpio) {
+    if (!vetado) {
+      console.warn(`[crm-meta] El token propio del número ${phoneId} fue rechazado por permisos; se envió con META_WA_TOKEN.`);
+    }
+    tokenPropioVetadoHasta.set(phoneId, Date.now() + VETO_TOKEN_PROPIO_MS);
+  } else if (propioLimpio) {
+    tokenPropioVetadoHasta.delete(phoneId);
   }
-  return token;
+  return r.data;
 }
 
 // Los DOS números con API oficial de Meta:
@@ -56,18 +84,11 @@ export async function enviarWhatsApp(to: string, texto: string, phoneId?: string
   const d = to.replace(/\D/g, "");
   const limpioTo = esBsuid ? to.trim() : d.length === 9 ? "51" + d : d;
 
-  const res = await fetch(`${GRAPH}/${phone}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phone)}` },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to: limpioTo,
-      type: "text",
-      text: { body: texto },
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message ?? "Error WhatsApp");
+  const data = await postWA(
+    phone,
+    { messaging_product: "whatsapp", to: limpioTo, type: "text", text: { body: texto } },
+    "Error WhatsApp",
+  );
   return data.messages?.[0]?.id ?? null;
 }
 
@@ -116,10 +137,9 @@ export async function enviarWhatsAppPlantilla(
     })),
   ];
 
-  const res = await fetch(`${GRAPH}/${phone}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phone)}` },
-    body: JSON.stringify({
+  const data = await postWA(
+    phone,
+    {
       messaging_product: "whatsapp",
       to,
       type: "template",
@@ -128,10 +148,9 @@ export async function enviarWhatsAppPlantilla(
         language: { code: idioma },
         ...(components.length ? { components } : {}),
       },
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message ?? "Error WhatsApp plantilla");
+    },
+    "Error WhatsApp plantilla",
+  );
   return data.messages?.[0]?.id ?? null;
 }
 
@@ -151,26 +170,30 @@ export async function enviarWhatsAppMedia(
   if (caption && tipo !== "audio") cuerpo.caption = caption;
   if (tipo === "document" && opts.filename) cuerpo.filename = opts.filename;
 
-  const res = await fetch(`${GRAPH}/${phoneId}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phoneId)}` },
-    body: JSON.stringify({ messaging_product: "whatsapp", to: destino, type: tipo, [tipo]: cuerpo }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message ?? "Error WhatsApp media");
+  const data = await postWA(
+    phoneId,
+    { messaging_product: "whatsapp", to: destino, type: tipo, [tipo]: cuerpo },
+    "Error WhatsApp media",
+  );
   return data.messages?.[0]?.id ?? null;
 }
 
 /**
  * El error de un envío de WhatsApp, dicho para el operador. Meta rechaza con 131047 lo que se
  * manda fuera de la ventana de 24 h desde el último mensaje del cliente: eso no se arregla
- * reintentando, sino desde el celular o con una plantilla. El resto se deja tal cual.
- * Lo usan el adjunto del inbox y el envío de la cotización de traslado.
+ * reintentando, sino desde el celular o con una plantilla. Con 131005 el ERP no tiene permiso
+ * de envío sobre el número. El resto se deja tal cual. Lo usan el texto y el adjunto del
+ * inbox, la respuesta de la IA y el envío de la cotización de traslado.
  */
 export function explicarErrorEnvioWhatsApp(bruto: string): string {
-  return /131047|re-engagement|24 hours/i.test(bruto)
-    ? "Pasaron más de 24 h desde el último mensaje del cliente: desde el CRM ya no se puede enviar. Envíalo desde el celular (WhatsApp Business) o con una plantilla."
-    : bruto;
+  if (/131047|re-engagement|24 hours/i.test(bruto))
+    return "Pasaron más de 24 h desde el último mensaje del cliente: desde el CRM ya no se puede enviar. Envíalo desde el celular (WhatsApp Business) o con una plantilla.";
+  // 131005: el token con que el ERP envía no tiene permiso de mensajería sobre el número
+  // (ya se probó el token propio y el general, ver lib/meta-token-respaldo.ts). Se
+  // conserva el texto de Meta: es lo único que dice cuál de los dos falló y por qué.
+  if (/131005|access denied/i.test(bruto))
+    return `Meta rechazó el envío por permisos: el ERP no tiene permiso para enviar por este número. Desde el celular sí se puede. Arreglo: volver a conectar el número en /crm → «Conectar WhatsApp», o revisar en Meta Business Suite que la app del ERP siga con acceso a esa cuenta de WhatsApp. (${bruto})`;
+  return bruto;
 }
 
 // ── Messenger ─────────────────────────────────────────────────────────────
@@ -217,11 +240,11 @@ export async function enviarInstagram(igScopedId: string, texto: string): Promis
 export async function marcarLeidoWA(messageId: string): Promise<void> {
   const phoneId = process.env.META_PHONE_NUMBER_ID;
   if (!phoneId) return;
-  await fetch(`${GRAPH}/${phoneId}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phoneId)}` },
-    body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: messageId }),
-  });
+  try {
+    await postWA(phoneId, { messaging_product: "whatsapp", status: "read", message_id: messageId }, "Error al marcar leído");
+  } catch {
+    /* marcar leído es best-effort */
+  }
 }
 
 /** Marca el mensaje del cliente como leído (✓✓ azules) y le muestra «escribiendo…»
@@ -231,16 +254,11 @@ export async function marcarLeidoYEscribiendo(messageId: string, phoneId?: strin
   const phone = phoneId ?? process.env.META_PHONE_NUMBER_ID;
   if (!phone || !messageId) return;
   try {
-    await fetch(`${GRAPH}/${phone}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phone)}` },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        status: "read",
-        message_id: messageId,
-        typing_indicator: { type: "text" },
-      }),
-    });
+    await postWA(
+      phone,
+      { messaging_product: "whatsapp", status: "read", message_id: messageId, typing_indicator: { type: "text" } },
+      "Error al marcar leído",
+    );
   } catch {
     /* sin «escribiendo…» la respuesta sale igual */
   }

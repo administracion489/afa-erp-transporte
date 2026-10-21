@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { enviarWhatsApp, enviarMessenger, enviarInstagram } from "@/lib/crm-meta";
+import { enviarWhatsApp, enviarMessenger, enviarInstagram, explicarErrorEnvioWhatsApp } from "@/lib/crm-meta";
 import { enviarEmail } from "@/lib/crm-gmail";
 import { phonePara } from "@/lib/whatsapp-numeros";
 import { verificarUsuarioApi } from "@/lib/api-auth";
@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
       const bruto = String(e?.message ?? e);
       errorMsg = /131047|re-engagement|24 hours/i.test(bruto)
         ? "Pasaron más de 24 h desde el último mensaje del cliente: WhatsApp ya no permite texto libre. Hay que reabrir la conversación con una plantilla aprobada (Campañas → plantillas)."
-        : bruto;
+        : explicarErrorEnvioWhatsApp(bruto);
     }
 
     // Guardar mensaje en DB siempre (incluso si falló)

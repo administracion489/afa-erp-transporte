@@ -12,7 +12,7 @@ import {
 import { atencionDe, atencionEnUso, describirAtencion, dentroDeAtencion, proximaAtencion, fraseFueraDeAtencion } from "@/lib/crm-ia-atencion";
 import { esAudio, esTranscripcion, transcribirMensaje, PREFIJO_TRANSCRIPCION } from "@/lib/crm-audio";
 import { createClient } from "@supabase/supabase-js";
-import { enviarWhatsApp, enviarMessenger, enviarInstagram, marcarLeidoYEscribiendo } from "@/lib/crm-meta";
+import { enviarWhatsApp, enviarMessenger, enviarInstagram, marcarLeidoYEscribiendo, explicarErrorEnvioWhatsApp } from "@/lib/crm-meta";
 import { enviarEmail } from "@/lib/crm-gmail";
 import { textoLegible } from "@/lib/crm-gmail-reglas";
 import { phonePara } from "@/lib/whatsapp-numeros";
@@ -891,7 +891,7 @@ async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string, w
       gmailMsgId = r.messageId;
     } else error = "Canal sin datos para enviar";
   } catch (e: any) {
-    error = e?.message ?? "Error de envío";
+    error = explicarErrorEnvioWhatsApp(String(e?.message ?? "Error de envío"));
   }
   await sb.from("crm_mensajes").insert({
     conversacion_id: conv.id,
