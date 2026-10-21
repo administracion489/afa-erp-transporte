@@ -17,7 +17,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi, verificarUsuarioApiAlguno } from "@/lib/api-auth";
 import { guardarGasto } from "@/lib/api-guard";
-import { cobradoEn, docConfirmacion, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, nombreArchivo, normalizarIdioma,
+import { cobradoEn, fechaValida, docConfirmacion, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, nombreArchivo, normalizarIdioma,
   telefonoWa, type DatosConfirmacion, type ExtrasConf } from "@/lib/confirmacion-reserva";
 import { anularAdelanto, emitirVersion, leerEntrada, leerVersion, leerVersiones, registrarAdelanto, SQL_CONFIRMACION } from "@/lib/confirmacion-reserva-datos";
 import { dibujarConfirmacion } from "@/lib/confirmacion-reserva-pdf";
@@ -40,6 +40,15 @@ function extrasDe(v: unknown): ExtrasConf {
   const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
   const s = (x: unknown, max: number) => (typeof x === "string" ? x.slice(0, max) : null);
   return { vuelo: s(o.vuelo, 40), punto_encuentro: s(o.punto_encuentro, 120), nota: s(o.nota, 300), incluir_telefono_conductor: o.incluir_telefono_conductor === true };
+}
+
+/**
+ * Los mensajes que escribe este módulo (reglas de negocio) se enseñan; un error crudo de la base
+ * no: va al log y el navegador recibe uno genérico.
+ */
+function mensajeSeguro(e: unknown): string {
+  const m = (e as Error)?.message ?? "";
+  return /^(Ese cobro|Otra persona|Falta correr)/.test(m) ? m : "No se pudo completar la operación. Vuelve a intentar en un momento.";
 }
 
 async function puedeCobrar(req: NextRequest): Promise<boolean> {
@@ -73,7 +82,8 @@ export async function GET(req: NextRequest) {
         },
       });
     } catch (e) {
-      return err(500, `No se pudo generar el PDF: ${(e as Error).message}`);
+      console.error("[reservas/confirmacion] pdf", e);
+      return err(500, "No se pudo generar el PDF. Vuelve a intentar en un momento.");
     }
   }
 
@@ -112,7 +122,8 @@ export async function GET(req: NextRequest) {
       mensajes: { es: mensajeWhatsApp("es", emp.nombre, "{codigo}"), en: mensajeWhatsApp("en", emp.nombre, "{codigo}") },
     });
   } catch (e) {
-    return err(500, (e as Error).message);
+    console.error("[reservas/confirmacion] estado", e);
+    return err(500, "No se pudo leer la reserva. Vuelve a intentar en un momento.");
   }
 }
 
@@ -138,7 +149,8 @@ export async function POST(req: NextRequest) {
       const v = await emitirVersion(sb, juicio.idDocumento, juicio.datos, { id: auth.userId, nombre: (u?.nombre as string | null) ?? null });
       return NextResponse.json({ ok: true, ...v });
     } catch (e) {
-      return err(500, (e as Error).message);
+      console.error(`[reservas/confirmacion] ${accion}`, e);
+      return err(500, mensajeSeguro(e));
     }
   }
 
@@ -165,15 +177,23 @@ export async function POST(req: NextRequest) {
       if (monto + ya > imp.total + 0.005) return err(409, `Con este cobro se pasaría del precio del servicio (${imp.moneda} ${imp.total.toFixed(2)}; ya cobrado ${ya.toFixed(2)}).`);
       const fecha = String(cuerpo.fecha ?? "").slice(0, 10);
       const hoy = fechaLima(Date.now());
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha) || Number.isNaN(Date.parse(`${fecha}T12:00:00Z`)) || fecha > hoy) return err(400, "La fecha del cobro no es válida (no puede ser futura).");
+      const haceUnAnio = fechaLima(Date.now() - 366 * 86_400_000);
+      if (fechaValida(fecha) !== fecha || fecha > hoy || fecha < haceUnAnio) return err(400, "La fecha del cobro no es válida: tiene que existir, no ser futura ni de hace más de un año.");
       const metodo = METODOS.has(String(cuerpo.metodo)) ? String(cuerpo.metodo) : null;
       const referencia = typeof cuerpo.referencia === "string" ? cuerpo.referencia.trim().slice(0, 60) || null : null;
       if (!referencia && metodo !== "efectivo") return err(400, "Escribe el número de operación del pago (o elige efectivo).");
       const { data: u } = await sb.from("usuarios").select("nombre").eq("id", auth.userId).maybeSingle();
       const r = await registrarAdelanto(sb, Math.min(...ids), entrada.tramos[0].cliente_id, { monto, moneda: imp.moneda, fecha, metodo, referencia }, String(u?.nombre ?? auth.userId));
+      // Dos registros a la vez pueden pasar los dos el tope: se relee y, si se pasó, se anula el propio.
+      const { entrada: despues } = await leerEntrada(sb, reservaId, null);
+      if (cobradoEn(despues.pagos, imp.moneda) > imp.total + 0.005) {
+        await sb.from("pagos").update({ anulado: true }).eq("id", r.id);
+        return err(409, "Otro cobro se registró a la vez y juntos superan el precio: este no se guardó. Revisa los cobros y vuelve a intentar.");
+      }
       return NextResponse.json({ ok: true, ...r });
     } catch (e) {
-      return err(500, (e as Error).message);
+      console.error(`[reservas/confirmacion] ${accion}`, e);
+      return err(500, mensajeSeguro(e));
     }
   }
 

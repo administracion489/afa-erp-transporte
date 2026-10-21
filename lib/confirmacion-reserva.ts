@@ -194,7 +194,7 @@ export function horaCorta(h: unknown): string {
   if (hh > 23 || mm > 59) return "";
   return `${String(hh).padStart(2, "0")}:${m[2]}`;
 }
-const fechaValida = (f: unknown): string => {
+export const fechaValida = (f: unknown): string => {
   const s = txt(f).slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "";
   const d = new Date(`${s}T12:00:00Z`);

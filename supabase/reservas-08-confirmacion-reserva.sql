@@ -52,6 +52,38 @@ alter table public.reserva_confirmaciones enable row level security;
 revoke all on public.reserva_confirmaciones from anon, authenticated;
 revoke all on sequence public.reserva_confirmaciones_id_seq from anon, authenticated;
 
+-- 3) EL ADELANTO DE UNA RESERVA SOLO LO ESCRIBE EL SERVIDOR. La política de `pagos` (finanzas-01)
+--    deja escribir a cualquier sesión del ERP, y ahora un cobro con reserva_id HABILITA la
+--    confirmación: desde la consola del navegador se podría «registrar» un adelanto sin Tesorería.
+--    No se cambia la política (Finanzas escribe cobros de facturas desde el navegador): se frena
+--    solo lo que toca reserva_id o anula un cobro de reserva, salvo service-role o el SQL Editor.
+--    SECURITY INVOKER a propósito: con DEFINER, current_user sería el dueño y no frenaría a nadie.
+create or replace function public.fn_pagos_reserva_solo_servidor()
+returns trigger language plpgsql security invoker set search_path = public, pg_temp as $$
+declare v_toca boolean := false;
+begin
+  if coalesce(auth.role(), '') = 'service_role' or current_user not in ('authenticated', 'anon') then
+    return case when tg_op = 'DELETE' then old else new end;
+  end if;
+  if tg_op = 'INSERT' then
+    v_toca := new.reserva_id is not null;
+  elsif tg_op = 'UPDATE' then
+    v_toca := new.reserva_id is distinct from old.reserva_id
+           or (old.reserva_id is not null and new.anulado is distinct from old.anulado);
+  else
+    v_toca := old.reserva_id is not null;
+  end if;
+  if v_toca then
+    raise exception 'El adelanto de una reserva se registra desde la Confirmación de Reserva (Finanzas / Cuentas por Pagar).'
+      using errcode = '42501';
+  end if;
+  return case when tg_op = 'DELETE' then old else new end;
+end $$;
+drop trigger if exists trg_pagos_reserva_solo_servidor on public.pagos;
+create trigger trg_pagos_reserva_solo_servidor
+  before insert or update or delete on public.pagos
+  for each row execute function public.fn_pagos_reserva_solo_servidor();
+
 -- Verificación:
 --   select column_name from information_schema.columns where table_name='pagos' and column_name='reserva_id';
 --   select count(*) from public.reserva_confirmaciones;

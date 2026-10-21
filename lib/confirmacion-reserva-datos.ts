@@ -189,6 +189,13 @@ export async function anularAdelanto(sb: Sb, pagoId: number, ids: number[]): Pro
   const { count, error: e0 } = await sb.from("pagos_aplicacion").select("id", { count: "exact", head: true }).eq("pago_id", pagoId);
   if (e0) throw new Error(`No se pudo comprobar el cobro: ${e0.message}`);
   if ((count ?? 0) > 0) throw new Error("Ese cobro ya está aplicado a un comprobante: se corrige en Finanzas.");
+  // Uno ya casado con el banco tampoco: el depósito quedaría conciliado con un cobro anulado.
+  const [m, x] = await Promise.all([
+    sb.from("movimientos_tesoreria").select("id", { count: "exact", head: true }).eq("pago_id", pagoId).eq("conciliado", true),
+    sb.from("extractos_bancarios_movimientos").select("id", { count: "exact", head: true }).eq("pago_id", pagoId).eq("estado_conciliacion", "conciliado"),
+  ]);
+  if (m.error || x.error) throw new Error(`No se pudo comprobar la conciliación del cobro: ${(m.error ?? x.error).message}`);
+  if ((m.count ?? 0) + (x.count ?? 0) > 0) throw new Error("Ese cobro ya está conciliado con el banco: se corrige en Tesorería → Conciliación.");
   const { data, error } = await sb.from("pagos").update({ anulado: true }).eq("id", pagoId).eq("sentido", "cobro")
     .in("reserva_id", ids).eq("anulado", false).select("id");
   if (error) throw new Error(`No se pudo anular el cobro: ${error.message}`);
