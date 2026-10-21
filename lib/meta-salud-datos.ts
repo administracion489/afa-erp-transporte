@@ -12,7 +12,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { appId } from "@/lib/meta-onboarding";
 import { porPhoneId, phonePara, wabaPara } from "@/lib/whatsapp-numeros";
-import { leerPermisos, leerSalud, veredictoSalud, type LecturaToken, type Veredicto } from "@/lib/meta-salud";
+import { leerNumero, leerPermisos, leerSalud, veredictoSalud, type LecturaToken, type Veredicto } from "@/lib/meta-salud";
 
 const GRAPH = "https://graph.facebook.com/v25.0";
 /** Una lectura por número cada tanto: mientras el bloqueo siga, cada envío repite el mismo veredicto. No medido. */
@@ -77,16 +77,21 @@ export async function diagnosticarEnvio(
 
     const lecturas: LecturaToken[] = await Promise.all(
       lista.map(async ({ cual, token }) => {
-        const [s, d] = await Promise.all([
+        // El estado del número va en una petición aparte: un campo que esta versión de
+        // la Graph API no acepte haría fallar también la de health_status.
+        const [s, d, n, lista] = await Promise.all([
           pedir(`${GRAPH}/${encodeURIComponent(phoneId)}?fields=health_status`, token),
           id && secreto
             ? pedir(`${GRAPH}/debug_token?input_token=${encodeURIComponent(token)}&access_token=${encodeURIComponent(`${id}|${secreto}`)}`)
             : Promise.resolve(null),
+          pedir(`${GRAPH}/${encodeURIComponent(phoneId)}?fields=status,name_status,platform_type,account_mode,quality_rating`, token),
+          wabaId ? pedir(`${GRAPH}/${encodeURIComponent(wabaId)}/phone_numbers?fields=id&limit=100`, token) : Promise.resolve(null),
         ]);
         return {
           cual,
           salud: leerSalud(s.status, s.data),
           permisos: d ? leerPermisos(d.status, d.data, wabaId) : null,
+          numero: leerNumero(n.status, n.data, phoneId, lista),
         };
       }),
     );
