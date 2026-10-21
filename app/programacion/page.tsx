@@ -6,7 +6,7 @@ import { supabase } from "@/lib/supabase";
 import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
 import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
 import { configAutoridad, etiquetaAutorizacion, type Autoridad } from "@/lib/autorizacion-transporte";
-import { Calculator, Calendar, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
+import { Calculator, Calendar, FileCheck2, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import {
   ESTADOS_RESERVA, ESTADOS_RESERVA_LISTA, ORDEN_ESTADO,
   ESTADOS_ADMIN, ESTADOS_ADMIN_LISTA, aplicaAdmin, ESTADO_ADMIN_INICIAL, etiquetaAdmin, siguienteAdmin,
@@ -35,6 +35,7 @@ import { correrParaderosDeServicios, resumirCorrida } from "@/lib/paradas-hora-d
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma, { type ModoPrograma } from "@/components/programacion/ModalGenerarPrograma";
 import ModalCostear from "@/components/programacion/ModalCostear";
+import ModalConfirmacionReserva from "@/components/programacion/ModalConfirmacionReserva";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
 import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
 import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
@@ -658,6 +659,8 @@ export default function ReservasPage() {
   // Costear un servicio de flota propia. En tercerizado no aplica: ahí el costo es
   // el importe pactado con el proveedor, que ya tiene su campo.
   const [costearId, setCostearId] = useState<number | null>(null);
+  /** La Confirmación de Reserva para el cliente (ModalConfirmacionReserva). */
+  const [confirmacionId, setConfirmacionId] = useState<number | null>(null);
   const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
   const [modalLinksId,         setModalLinksId]         = useState<number | null>(null);
   const [confirmEliminarId,    setConfirmEliminarId]    = useState<number | null>(null);
@@ -3758,6 +3761,17 @@ export default function ReservasPage() {
   return (
     <main className="p-6 space-y-5 max-w-7xl mx-auto">
 
+      {confirmacionId != null && (() => {
+        const r = reservas.find(x => x.id === confirmacionId);
+        return (
+          <ModalConfirmacionReserva
+            reservaId={confirmacionId}
+            etiqueta={r ? `${r.codigo ?? `#${r.id}`} · ${r.fecha_servicio ?? ""} ${String(r.hora_servicio ?? "").slice(0, 5)} · ${r.ruta_nombre ?? ""}` : `#${confirmacionId}`}
+            onCerrar={() => setConfirmacionId(null)}
+          />
+        );
+      })()}
+
       {costearId != null && (() => {
         const r = reservas.find(x => x.id === costearId);
         if (!r) return null;
@@ -5619,10 +5633,18 @@ export default function ReservasPage() {
                     <button
                       type="button"
                       onClick={() => setCostearId(editandoId)}
-                      className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
                       style={{ background: "#0f5257" }}
                     >
                       <Calculator size={15} /> Costear este servicio
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmacionId(editandoId)}
+                      className="ml-2 inline-flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
+                      style={{ background: "#0b315f" }}
+                    >
+                      <FileCheck2 size={15} /> Confirmación de reserva
                     </button>
                     <p className="text-[10px] text-gray-400 mt-1.5 leading-snug">
                       Combustible según el rendimiento medido de esta placa, conductor a
@@ -6532,6 +6554,7 @@ export default function ReservasPage() {
                       </div>
                       <div className="flex gap-1.5 shrink-0">
                         <button onClick={() => abrirManifiesto(r.id)} className="flex items-center gap-1 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors"><FileText size={11} /></button>
+                        <button onClick={() => setConfirmacionId(r.id)} title="Confirmación de reserva para el cliente" className="flex items-center gap-1 bg-sky-50 hover:bg-sky-100 text-sky-800 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors"><FileCheck2 size={11} /></button>
                         <button onClick={() => setModalLinksId(r.id)} className="flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors">
                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                         </button>
@@ -6915,6 +6938,9 @@ export default function ReservasPage() {
                         <div className="flex gap-1.5 flex-wrap">
                           <button onClick={() => abrirManifiesto(r.id)} className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
                             <FileText size={13} /> Manifiesto
+                          </button>
+                          <button onClick={() => setConfirmacionId(r.id)} title="Confirmación de reserva para el cliente" className="flex items-center gap-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
+                            <FileCheck2 size={13} /> Confirmación
                           </button>
                           <button onClick={() => setModalLinksId(r.id)} className="flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
