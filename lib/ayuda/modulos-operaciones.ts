@@ -85,9 +85,15 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       "Ver en qué estado está cada servicio y qué le falta para cerrarse administrativamente.",
       "Vigilar el sobrecupo: más pasajeros que asientos.",
       "Etiquetar RUTA, TURNO y MÓVIL (🏷): deciden en qué ítem de la liquidación va cada servicio.",
+      "Emitir la CONFIRMACIÓN DE RESERVA en PDF (español o inglés) para mandársela al cliente por WhatsApp.",
     ],
     conceptos: ["estado_admin", "estado_proveedor", "tercerizado", "margen", "liquidacion_cliente", "servicio_adicional"],
     faqs: [
+      {
+        pregunta: "¿Cómo le mando al cliente la Confirmación de Reserva?",
+        respuesta:
+          "Botón **Confirmación** en la fila del servicio (o **Confirmación de reserva** dentro del formulario). Se abre una ventana con el pago, lo que falta y las confirmaciones ya emitidas.\n\n**Qué la habilita:**\n• Un **adelanto registrado**. Lo registra **Tesorería o Finanzas** en esa misma ventana cuando el dinero ya está en la cuenta — una captura del cliente no basta. Si el cliente tiene condición de **crédito**, se puede emitir sin adelanto y el papel lo dice.\n• Fecha, hora, recojo, destino, cliente y el **precio de venta** registrados. El ERP no imprime un importe que nadie registró.\n\n**Qué imprime:** cliente, servicio (ida y retorno si los hay), unidad y conductor si ya están asignados — si no, dice que se enviarán después —, precio, adelanto con su fecha, saldo y moneda. El teléfono del conductor solo sale si marcas la casilla. Nunca DNI, licencia ni costos.\n\n**Versiones:** si cambias la hora, la unidad, el conductor o el precio, vuelve a pulsar **Generar**: sale la versión siguiente y dice qué cambió. La anterior queda en el historial. Volver a descargar no crea nada nuevo.\n\n**WhatsApp:** en el celular abre la hoja de compartir con el PDF adjunto; en la computadora descarga el PDF y abre WhatsApp con el mensaje y el número del cliente — adjuntas el archivo tú. El ERP no marca nada como enviado.\n\nNo reemplaza al comprobante de pago, y emitirla no cambia el estado del servicio.",
+      },
       {
         pregunta: "¿Qué es el chip azul «🏷 RUTA A · T1 · 50 PAX» y cómo lo pongo?",
         respuesta:
