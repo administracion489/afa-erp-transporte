@@ -4,6 +4,8 @@
 
 import { tokenPropio } from "@/lib/meta-tokens";
 import { enviarConRespaldo, tokensEnOrden, VETO_TOKEN_PROPIO_MS } from "@/lib/meta-token-respaldo";
+import { diagnosticarEnvio } from "@/lib/meta-salud-datos";
+import { MARCA_META_DICE } from "@/lib/meta-salud";
 
 const GRAPH = "https://graph.facebook.com/v25.0";
 const PAGE_TOKEN = () => process.env.META_PAGE_TOKEN!;
@@ -40,7 +42,16 @@ async function postWA(phoneId: string, body: unknown, mensajePorDefecto: string)
     },
     mensajePorDefecto,
   );
-  if (!r.ok) throw new Error(r.mensaje);
+  if (!r.ok) {
+    // Rechazado por permisos con TODOS los tokens: se le pregunta a Meta por qué
+    // (lib/meta-salud.ts). Sin esto «Access denied» no distingue un permiso retirado
+    // de una cuenta bloqueada o una deuda, y el operador no sabe dónde arreglarlo.
+    if (r.porPermiso) {
+      const v = await diagnosticarEnvio(phoneId, { propio, general });
+      throw new Error(`${r.mensaje}${MARCA_META_DICE}${v.texto}`);
+    }
+    throw new Error(r.mensaje);
+  }
   const propioLimpio = propio?.trim();
   if (propioLimpio && r.token !== propioLimpio) {
     if (!vetado) {
@@ -191,6 +202,10 @@ export function explicarErrorEnvioWhatsApp(bruto: string): string {
   // 131005: el token con que el ERP envía no tiene permiso de mensajería sobre el número
   // (ya se probó el token propio y el general, ver lib/meta-token-respaldo.ts). Se
   // conserva el texto de Meta: es lo único que dice cuál de los dos falló y por qué.
+  if (/131005|access denied/i.test(bruto) && bruto.includes(MARCA_META_DICE)) {
+    const [codigo, dice] = bruto.split(MARCA_META_DICE);
+    return `Meta rechazó el envío por este número. ${dice} Desde el celular sí se puede. (${codigo})`;
+  }
   if (/131005|access denied/i.test(bruto))
     return `Meta rechazó el envío por permisos: el ERP no tiene permiso para enviar por este número. Desde el celular sí se puede. Arreglo: volver a conectar el número en /crm → «Conectar WhatsApp», o revisar en Meta Business Suite que la app del ERP siga con acceso a esa cuenta de WhatsApp. (${bruto})`;
   return bruto;
