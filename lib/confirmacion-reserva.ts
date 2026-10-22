@@ -130,6 +130,8 @@ export type TramoDoc = {
   origen: string;
   destino: string;
   ruta: string | null;
+  /** Código de ESTE tramo; solo cuando hay dos o más (una ida sola no cambia su firma). */
+  codigo?: string | null;
 };
 
 export type UnidadDoc = {
@@ -371,6 +373,7 @@ export function juzgarConfirmacion(e: EntradaConfirmacion): JuicioConfirmacion {
         origen: txt(t.origen).slice(0, 160),
         destino: txt(t.destino).slice(0, 160),
         ruta: nulo(t.ruta_nombre, 80),
+        ...(vivos.length > 1 ? { codigo: nulo(t.codigo, 40) } : {}),
       })),
       vuelo: nulo(e.extras?.vuelo, 40),
       punto_encuentro: nulo(e.extras?.punto_encuentro, 120),
@@ -481,7 +484,7 @@ export const TEXTOS: Record<Idioma, Diccionario> = {
     operacion: "UNIDAD Y CONDUCTOR", unidad: "Unidad", placa: "Placa", conductor: "Conductor", tel_conductor: "Teléfono",
     pendiente_operacion: "Los datos del vehículo y del conductor le serán enviados posteriormente.",
     pendiente_unidad: "Se enviará posteriormente.",
-    economia: "INFORMACIÓN ECONÓMICA", total: "Precio total contratado", adelanto: "Adelanto recibido",
+    economia: "INFORMACIÓN ECONÓMICA", total: "Precio total contratado", total_tramos: "Precio total (ida y retorno)", adelanto: "Adelanto recibido",
     saldo: "Saldo pendiente", moneda: "Moneda", estado_pago: "Estado del pago",
     pago_pagado: "Pagado", pago_adelanto: "Adelanto recibido · saldo pendiente", pago_credito: "Según condición de crédito",
     igv_incluido: "Importes con IGV incluido.", igv_no_incluido: "Importes sin IGV.",
@@ -500,7 +503,7 @@ export const TEXTOS: Record<Idioma, Diccionario> = {
     operacion: "VEHICLE AND DRIVER", unidad: "Vehicle", placa: "Plate", conductor: "Driver", tel_conductor: "Phone",
     pendiente_operacion: "Vehicle and driver details will be sent to you later.",
     pendiente_unidad: "To be sent later.",
-    economia: "PAYMENT DETAILS", total: "Total contracted price", adelanto: "Deposit received",
+    economia: "PAYMENT DETAILS", total: "Total contracted price", total_tramos: "Total price (outbound and return)", adelanto: "Deposit received",
     saldo: "Balance due", moneda: "Currency", estado_pago: "Payment status",
     pago_pagado: "Paid in full", pago_adelanto: "Deposit received · balance due", pago_credito: "Per credit terms",
     igv_incluido: "Amounts include IGV (Peruvian VAT).", igv_no_incluido: "Amounts exclude IGV (Peruvian VAT).",
@@ -545,7 +548,7 @@ export function docConfirmacion(d: DatosConfirmacion, idioma: Idioma, meta: { ve
       ],
     },
     ...d.servicio.tramos.map((t) => ({
-      titulo: "", subtitulo: T[t.sentido],
+      titulo: "", subtitulo: t.codigo ? `${T[t.sentido]} · ${t.codigo}` : T[t.sentido],
       filas: [
         { label: T.fecha_hora, valor: `${fechaLarga(t.fecha, idioma)} · ${horaTexto(t.hora, idioma)}` },
         { label: T.origen, valor: t.origen },
@@ -568,7 +571,7 @@ export function docConfirmacion(d: DatosConfirmacion, idioma: Idioma, meta: { ve
     {
       titulo: T.economia,
       filas: [
-        { label: T.total, valor: dinero(ec.total, ec.moneda) },
+        { label: d.servicio.tramos.length > 1 ? T.total_tramos : T.total, valor: dinero(ec.total, ec.moneda) },
         ...ec.adelantos.map((p) => ({ label: `${T.adelanto}${p.fecha ? ` · ${fechaCorta(p.fecha)}` : ""}`, valor: dinero(p.monto, ec.moneda) })),
         { label: T.saldo, valor: dinero(ec.saldo, ec.moneda) },
         { label: T.moneda, valor: T[`moneda_${ec.moneda}`] },
