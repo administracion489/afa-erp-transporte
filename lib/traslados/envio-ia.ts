@@ -47,7 +47,7 @@ import { totalesEnMoneda, normalizarMoneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { LINEA_DISPONIBILIDAD } from "./cotizacion-traslado";
 import {
-  condicionesSospechosas, importesEnTexto, mencionaDinero, primerNombreSeguro, referenciaImprimible, textoLibreSospechoso,
+  condicionesSospechosas, importesEnTexto, mencionaDinero, referenciaImprimible, textoLibreSospechoso,
   type CondicionSospechosa, type MotivoTextoLibre,
 } from "./texto-libre";
 import { excesoCondiciones, MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES } from "../cotizacion-plantillas";
@@ -84,7 +84,10 @@ export const HERRAMIENTA_COTIZAR_TRASLADO = {
       fecha_retorno: { type: "string", description: "Fecha del retorno, YYYY-MM-DD (solo con ida y retorno)." },
       hora_retorno: { type: "string", description: "Hora de recojo del retorno, HH:MM (solo con ida y retorno)." },
       pax: { type: "integer", description: "Número de pasajeros." },
-      maletas: { type: "integer", description: "Maletas grandes (de 23 kg). 0 si no llevan. No lo supongas: pregúntalo." },
+      maletas: {
+        type: "integer",
+        description: "SOLO las maletas grandes de bodega (de 23 kg). Las de mano (10 kg), las mochilas y los artículos personales NO van aquí. 0 si no llevan maletas grandes. No lo supongas: si el cliente dice «con maletas» o da un número sin decir de qué tipo, pregúntale cuántas son grandes (23 kg), cuántas de mano (10 kg) y cuántos artículos personales.",
+      },
       paradas_intermedias: { type: "integer", description: "Paradas en el camino que pidió el cliente (0 si ninguna)." },
       fechas_adicionales: { type: "integer", description: "Otras fechas además de la del servicio (0 si es una sola)." },
       vehiculos_pedidos: { type: "integer", description: "Vehículos que pide a la vez (1 si es uno)." },
@@ -420,31 +423,31 @@ const LINEA_EJECUTIVO = LINEA_DISPONIBILIDAD;
 
 /**
  * El mensaje de una cotización de traslado, escrito por el CÓDIGO (`textoFinalTraslado` lo usa
- * siempre que el turno trae una cotización). En revisión no lleva ningún importe. El nombre solo
- * entra si es una palabra de letras (`primerNombreSeguro`): lo puede haber escrito el modelo.
- * Habla con el trato del agente (`estilo`, obligatorio): con «tu», byte a byte el texto de antes
- * de existir el ajuste; con «usted», la misma frase en el otro trato. Sin estilo (un llamador en
- * JS) se trata de usted, que es el defecto del ajuste. Los importes, el número y la validez no
- * cambian con el trato.
+ * siempre que el turno trae una cotización). En revisión no lleva ningún importe.
+ * NO SALUDA NI LLEVA EL NOMBRE (21-10-2026): llega en medio de la conversación, después de que la IA
+ * ya saludó y pidió los datos, y empezaba con «Hola {nombre},» tomando el nombre del perfil de
+ * WhatsApp — en la prueba del dueño salió «Hola Atencion,» (su perfil se llama «Atención al
+ * Cliente») justo después de que la IA lo había llamado «José Luis».
+ * Habla con el trato del agente (`estilo`, obligatorio): «tu» o «usted», la misma frase en los dos.
+ * Sin estilo (un llamador en JS) se trata de usted, que es el defecto del ajuste. Los importes, el
+ * número y la validez no cambian con el trato.
  */
 export function mensajeCotizacionCodigo(x: {
-  nombre: string; numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean;
+  numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean;
   estilo: EstiloMensajes;
 }): string {
-  const nombre = primerNombreSeguro(x.nombre);
-  const hola = nombre ? `Hola ${nombre},` : "Hola,";
   const tu = x.estilo?.tratamiento === "tu";
   const su = tu ? "tu" : "su";
   if (x.yaEnviada) {
     const total = x.total ? ` El total es ${x.total} (IGV incluido)${x.validez ? `, válida hasta el ${x.validez}` : ""}.` : "";
-    return `${hola} la cotización N° ${x.numero} de ${su} traslado ya ${tu ? "te" : "se"} la envié por este chat.${total} ${LINEA_EJECUTIVO}`;
+    return `La cotización N° ${x.numero} de ${su} traslado ya ${tu ? "te" : "se"} la envié por este chat.${total} ${LINEA_EJECUTIVO}`;
   }
   if (x.decision === "automatico") {
     const total = x.total ? ` El total es ${x.total} (IGV incluido)` : "";
     const validez = x.validez ? `${total ? "," : " La cotización es"} válida hasta el ${x.validez}` : "";
-    return `${hola} ${tu ? "te" : "le"} envío la cotización N° ${x.numero} de ${su} traslado.${total}${validez}${total || validez ? "." : ""} ${LINEA_EJECUTIVO}`;
+    return `${tu ? "Te" : "Le"} envío la cotización N° ${x.numero} de ${su} traslado.${total}${validez}${total || validez ? "." : ""} ${LINEA_EJECUTIVO}`;
   }
-  return `${hola} registré ${su} pedido de traslado con la cotización N° ${x.numero}. Un ejecutivo la revisa y ${tu ? "te" : "se"} la envía por este chat en breve.`;
+  return `Registré ${su} pedido de traslado con la cotización N° ${x.numero}. Un ejecutivo la revisa y ${tu ? "te" : "se"} la envía por este chat en breve.`;
 }
 
 /**
@@ -492,13 +495,13 @@ export type TrasladoDelTurno = {
 export function textoFinalTraslado(
   texto: string,
   t: TrasladoDelTurno | null | undefined,
-  x: { nombre: string; derivacion: string; estilo: EstiloMensajes },
+  x: { derivacion: string; estilo: EstiloMensajes },
 ): string {
   if (!t) return texto;
   const c = t.cotizacion;
   if (c) {
     return mensajeCotizacionCodigo({
-      nombre: x.nombre, numero: c.numero, decision: c.decision, total: c.total, validez: c.validez, yaEnviada: c.yaEnviada, estilo: x.estilo,
+      numero: c.numero, decision: c.decision, total: c.total, validez: c.validez, yaEnviada: c.yaEnviada, estilo: x.estilo,
     });
   }
   if (!texto || !mencionaDinero(texto)) return texto;

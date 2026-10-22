@@ -31,6 +31,7 @@ import { fechaLima } from "@/lib/alertas-horario";
 import { faltaColumna } from "@/lib/columna-faltante";
 import { inicioVentanaHumano, inicioConteoTurnos } from "@/lib/crm-ia-reactivacion";
 import { primerNombreSeguro } from "@/lib/traslados/texto-libre";
+import { limpiarTextoModelo, saludoDeBooleano, saludoDelTurno, textosSinContestar, type SaludoDelTurno } from "@/lib/crm-ia-mensaje";
 import { CONTESTA, MOTIVO_ULTIMO, juzgarUltimo, leerMarca, marcaVigente, ordenarRafaga, type MarcaRespuesta } from "@/lib/crm-ia-rafaga";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
@@ -576,6 +577,7 @@ export function bloqueTraslados(p: ModoPreguntas): string {
     p === "una_por_mensaje"
       ? "- Llámala en cuanto el cliente pida el precio de un traslado, aunque falten datos. Si responde «preguntar», pide SOLO el siguiente dato que falta (uno por mensaje: el que te indique la herramienta) y vuelve a llamarla cuando conteste, con todos los datos que ya tienes."
       : "- Llámala en cuanto el cliente pida el precio de un traslado, aunque falten datos. Si responde «preguntar», pide TODO lo que falta en un solo mensaje y vuelve a llamarla cuando conteste.",
+    "- Equipaje: en «maletas» van SOLO las maletas grandes de bodega (23 kg). Si el cliente dice «con maletas» o da un número sin decir de qué tipo, pregúntale cuántas son grandes (23 kg), cuántas de mano (10 kg) y cuántos artículos personales (mochila o cartera); las de mano y los artículos personales viajan con el pasajero y no van en «maletas».",
     "- Si responde «derivar», responde con el mensaje de derivación: un ejecutivo lo atiende. No menciones precios.",
     "- Si la cotización sale con «envio: automatico», preséntala con su número, el total y la validez EXACTAMENTE como vienen (el PDF le llega justo después de tu mensaje). Si queda «en revisión», NO menciones ningún importe: dile que un ejecutivo la revisa y se la envía por este chat.",
     "- Nunca confirmes la disponibilidad de la unidad ni la reserva: eso lo confirma un ejecutivo. Si el cliente acepta la cotización, usa proponer_reserva.",
@@ -587,7 +589,7 @@ export function bloqueTraslados(p: ModoPreguntas): string {
   ].join("\n");
 }
 
-/** El bloque con el modo de preguntar por defecto («todo junto»): byte a byte el de antes del ajuste. */
+/** El bloque con el modo de preguntar por defecto («todo junto»). */
 export const BLOQUE_TRASLADOS = bloqueTraslados("todo_junto");
 
 /**
@@ -659,8 +661,16 @@ export const PRIORIDAD = [
   "3. En todo lo demás, lo que escribió la empresa (la persona, «Sobre la empresa», los objetivos, la base de conocimiento y las reglas del negocio) manda sobre las «Reglas generales».",
 ].join("\n");
 
-export function construirSystem(agente: any, contacto: any, conv: any, primeroDelDia = false, empresa = "", opts: { traslados?: boolean } = {}): string {
+/**
+ * El nombre del saludo sale del perfil de WhatsApp, que el cliente escribe como quiere («Atención al
+ * Cliente», el nombre de su empresa…). Si en el chat dijo cómo se llama, ese manda.
+ */
+const NOMBRE_DEL_CHAT = " Si en este chat el cliente ya te dijo su nombre, usa ese en el saludo.";
+
+export function construirSystem(agente: any, contacto: any, conv: any, saludo: boolean | SaludoDelTurno = false, empresa = "", opts: { traslados?: boolean } = {}): string {
   const aj = ajustesDe(agente);
+  // `true`/`false` es la forma de antes («primer mensaje del día»); lib/crm-ia-mensaje.ts decide los tres casos.
+  const sal = typeof saludo === "boolean" ? saludoDeBooleano(saludo) : saludo;
   const ahora = ahoraLima(aj);
   const emp = empresa || "la empresa";
   const nombre = primerNombre(contacto);
@@ -692,8 +702,10 @@ export function construirSystem(agente: any, contacto: any, conv: any, primeroDe
     "## Fecha y hora",
     `Hoy es ${ahora.fecha} y son las ${ahora.hora} en Lima. «Mañana» = el día siguiente a esa fecha.`,
     "",
-    !aj.saludo_activo ? "" : primeroDelDia
-      ? `## SALUDO OBLIGATORIO\nEs tu PRIMER mensaje del día con este cliente: tu respuesta DEBE empezar con «${ahora.saludo}${nombre ? `, ${nombre}` : ""}», seguido de una presentación breve si corresponde, y recién después responder o preguntar. No omitas el saludo aunque el cliente no salude ni aunque necesites pedirle datos.\n`
+    !aj.saludo_activo ? "" : sal.modo === "primero"
+      ? `## SALUDO OBLIGATORIO\nEs tu PRIMER mensaje del día con este cliente: tu respuesta DEBE empezar con «${ahora.saludo}${nombre ? `, ${nombre}` : ""}», seguido de una presentación breve si corresponde, y recién después responder o preguntar. No omitas el saludo aunque el cliente no salude ni aunque necesites pedirle datos.${NOMBRE_DEL_CHAT}\n`
+      : sal.modo === "devolver"
+      ? `## SALUDO\nYa conversaron hoy, pero el cliente te acaba de saludar: tu respuesta DEBE empezar devolviéndole el saludo en pocas palabras («${ahora.saludo}${nombre ? `, ${nombre}` : ""}»)${sal.presentarse ? ", seguido de una presentación breve (todavía no te presentaste hoy en este chat)" : ""}, y recién después responder o preguntar.${sal.presentarse ? "" : " No te vuelvas a presentar."}${NOMBRE_DEL_CHAT}\n`
       : "## Saludo\nYa conversaste hoy con este cliente: NO vuelvas a saludar ni a presentarte.\n",
     "## Canal y contacto",
     `Estás respondiendo por ${conv.canal}. Cliente: ${contacto.nombre ?? "desconocido"}${contacto.empresa ? ` (${contacto.empresa})` : ""}${contacto.telefono ? `, tel ${contacto.telefono}` : ""}.`,
@@ -916,7 +928,7 @@ async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string, w
  */
 export function textoSinImportesAjenos(texto: string, ct: ResultadoCotizarIA | null | undefined, agente: any, contacto: any): string {
   return textoFinalTraslado(texto, ct ?? null, {
-    nombre: primerNombre(contacto), derivacion: mensajeDerivacion(agente, contacto), estilo: estiloDe(ajustesDe(agente)),
+    derivacion: mensajeDerivacion(agente, contacto), estilo: estiloDe(ajustesDe(agente)),
   });
 }
 
@@ -1194,11 +1206,14 @@ async function responderConIAInterno(
   }
 
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
-  // ¿Ya le escribimos hoy (hora de Lima) en este hilo? Si no, el saludo es obligatorio.
-  const { count: salientesHoy } = await sb
-    .from("crm_mensajes").select("id", { count: "exact", head: true })
-    .eq("conversacion_id", convId).eq("direccion", "saliente")
-    .gte("created_at", ahoraLima().inicioDiaUtc);
+  // ¿Ya le llegó hoy (hora de Lima) algún mensaje nuestro en este hilo? Solo cuentan los que SALIERON:
+  // un envío que Meta rechazó (`error`) no es «ya conversamos». Y cuáles fueron de la IA, para
+  // saber si todavía no se presentó hoy (lib/crm-ia-mensaje.ts → saludoDelTurno).
+  const { data: llegadosHoy } = await sb
+    .from("crm_mensajes").select("generado_por_ia")
+    .eq("conversacion_id", convId).eq("direccion", "saliente").is("error", null)
+    .gte("created_at", ahoraLima().inicioDiaUtc)
+    .limit(500);
   // Se decide UNA vez si esta respuesta sale sola: la herramienta de traslados lo necesita para
   // saber si la cotización se envía sola, y el envío del final lee esta MISMA variable.
   const autonomos: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
@@ -1215,9 +1230,14 @@ async function responderConIAInterno(
   // `cotizar_traslado` solo en WhatsApp, con el interruptor encendido y las migraciones corridas.
   const traslados = conv.canal === "whatsapp" && (await leerConfigIA(sb)).iaCotiza;
 
-  const system = construirSystem(agente, contacto, conv, (salientesHoy ?? 0) === 0, await nombreEmpresa(sb), { traslados });
   const messages = await cargarHistorial(sb, convId, ajustesDe(agente), leerMarca(await leerDecision(convId)));
   if (messages.length === 0) return { ok: true, accion: "omitido", motivo: "Sin mensajes del cliente." };
+  const saludo = saludoDelTurno({
+    alcanzadosHoy: llegadosHoy?.length ?? 0,
+    iaHoy: (llegadosHoy ?? []).filter((m: { generado_por_ia?: boolean | null }) => m.generado_por_ia === true).length,
+    textosCliente: textosSinContestar(messages),
+  });
+  const system = construirSystem(agente, contacto, conv, saludo, await nombreEmpresa(sb), { traslados });
 
   const ctx: Ctx = {
     sb, contacto, conv, agente, escalado: { v: false },
@@ -1242,7 +1262,7 @@ async function responderConIAInterno(
       // Acumular texto y detectar tool_use
       const toolUses = (resp.content ?? []).filter((b: any) => b.type === "tool_use");
       const textos = (resp.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text);
-      if (textos.length) textoFinal = textos.join("\n").trim();
+      if (textos.length) textoFinal = limpiarTextoModelo(textos.join("\n"));
 
       if (resp.stop_reason !== "tool_use" || toolUses.length === 0) break;
 
@@ -1349,8 +1369,11 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
   const empresa = await nombreEmpresa(sb);
   const traslados = (await leerConfigIA(sb)).iaCotiza;
-  // En la prueba, «primer mensaje del día» = el agente todavía no contestó en este chat de prueba.
-  const system = construirSystem(agente, contacto, conv, !historial.some((m) => m.role === "assistant"), empresa, { traslados });
+  // En la prueba, «primer mensaje del día» = el agente todavía no contestó en este chat de prueba
+  // (y todo lo de ese chat es de la IA).
+  const contestados = historial.filter((m) => m.role === "assistant").length;
+  const saludo = saludoDelTurno({ alcanzadosHoy: contestados, iaHoy: contestados, textosCliente: [mensaje] });
+  const system = construirSystem(agente, contacto, conv, saludo, empresa, { traslados });
   const messages: Anthropic.MessageParam[] = [...historial, { role: "user", content: mensaje }];
   const usadas: string[] = [];
   const textosCliente = messages.filter((m) => m.role === "user" && typeof m.content === "string").map((m) => m.content as string);
@@ -1365,7 +1388,7 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
       const resp: any = await anthropic.messages.create(req);
       const toolUses = (resp.content ?? []).filter((b: any) => b.type === "tool_use");
       const textos = (resp.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text);
-      if (textos.length) textoFinal = textos.join("\n").trim();
+      if (textos.length) textoFinal = limpiarTextoModelo(textos.join("\n"));
       if (resp.stop_reason !== "tool_use" || toolUses.length === 0) break;
       messages.push({ role: "assistant", content: resp.content });
       const results: any[] = [];
