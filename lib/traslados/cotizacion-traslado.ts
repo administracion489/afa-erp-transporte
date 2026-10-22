@@ -41,7 +41,7 @@ import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
 import { cuentasCorporativo, numeroCotizacion } from "../cotizacion-corporativo";
 import type { ClientePdf, EntradaPdfCot, PlantillaPdfCfg } from "../cotizacion-pdf";
 import { considSnapshot, type PlantillaFila } from "../cotizacion-plantillas";
-import type { VehiculoPDF } from "../pdf-chrome";
+import { MAX_DESCRIPCION_RENGLONES, MAX_RENGLONES_DESCRIPCION, type VehiculoPDF } from "../pdf-chrome";
 import { empresaConDefectos, type CuentaBancaria, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { fechaLima } from "../alertas-horario";
 import { atencionImprimible, referenciaImprimible } from "./texto-libre";
@@ -428,16 +428,34 @@ export type CategoriaPdf = {
   descripcion_cliente?: string | null;
 };
 
-/** El tope de la descripción para el cliente (el mismo CHECK de traslados-07). */
-export const MAX_DESCRIPCION_CLIENTE = 300;
+/** El tope de la descripción para el cliente (el CHECK de traslados-08; traslados-07 lo tenía en 300). */
+export const MAX_DESCRIPCION_CLIENTE = MAX_DESCRIPCION_RENGLONES;
+/** Cuántos renglones imprime el PDF (no medido: caben en la hoja 2 junto a las fotos). */
+export const MAX_RENGLONES_CLIENTE = MAX_RENGLONES_DESCRIPCION;
+
+/**
+ * La descripción escrita tal como se GUARDA y se imprime: en renglones (el dueño la escribe como
+ * lista), cada renglón sin espacios de más y sin renglones vacíos. Vacía = "".
+ */
+export function normalizarDescripcionCliente(texto: string | null | undefined): string {
+  return String(texto ?? "")
+    .split(/\r\n?|[\n\u2028\u2029\v\f]/)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
 
 /**
  * La descripción de la unidad para el cliente: la que escribió una persona en la categoría o, sin
  * ella, una frase con DATOS ESCRITOS (asientos y bodega). Nunca «A/C» ni nada que nadie declaró.
+ * La escrita conserva sus renglones (hasta `MAX_RENGLONES_CLIENTE` y `MAX_DESCRIPCION_CLIENTE`).
  */
 export function descripcionCategoria(cat: Pick<CategoriaPdf, "nombre" | "capacidad" | "maletas_bodega" | "descripcion_cliente">): string {
-  const escrita = v(cat.descripcion_cliente).replace(/\s+/g, " ");
-  if (escrita) return Array.from(escrita).slice(0, MAX_DESCRIPCION_CLIENTE).join("");
+  const escrita = normalizarDescripcionCliente(cat.descripcion_cliente);
+  if (escrita) {
+    const enRenglones = escrita.split("\n").slice(0, MAX_RENGLONES_CLIENTE).join("\n");
+    return Array.from(enRenglones).slice(0, MAX_DESCRIPCION_CLIENTE).join("").trim();
+  }
   const n = Math.trunc(Number(cat.capacidad));
   const m = Math.trunc(Number(cat.maletas_bodega));
   const pax = Number.isFinite(n) && n > 0 ? ` para hasta ${n} ${n === 1 ? "pasajero" : "pasajeros"}` : "";
@@ -469,6 +487,8 @@ export function vehiculoDeCategoria(cat: CategoriaPdf | null | undefined, opts: 
     foto_externa_url: foto(cat.foto_externa_url, "externa"),
     foto_interna_url: foto(cat.foto_interna_url, "interna"),
     descripcion_unidad: descripcionCategoria(cat),
+    // La escrita se imprime en renglones; la frase por defecto es una sola línea (da igual).
+    descripcion_renglones: true,
   };
 }
 

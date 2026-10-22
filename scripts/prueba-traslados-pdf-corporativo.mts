@@ -32,7 +32,7 @@ import { TEXTOS_PDF, t } from "../lib/cotizacion-idioma";
 import { docCorporativo, usaValidezHasta, COLOR_CORPORATIVO, cuentasCorporativo } from "../lib/cotizacion-corporativo";
 import { dibujarPdfCorporativo, type TrazaPdf } from "../lib/pdf-corporativo";
 import { aWinAnsi } from "../lib/pdf-winansi";
-import { esc } from "../lib/pdf-chrome";
+import { esc, pintarVehiculosHtml, vehiculosDoc } from "../lib/pdf-chrome";
 import { armarPdfDeFila, bajarImagenPublica, bajarLogo, bajarFoto, inflarConTope, logoPermitido, LOGO_MAX_BYTES } from "../lib/traslados/enviar-cotizacion-datos";
 import { empresaConDefectos } from "../lib/empresa-perfil";
 import { mismoTelefonoE164, telefonosE164 } from "../lib/crm-telefono";
@@ -259,6 +259,34 @@ for (const c of casos) resultados.push(await compararCaso(c));
   ok(!rv.traza.some((x) => x.texto === "SERVICIO INCLUYE" || x.texto === "NO INCLUYE"), "sin Incluye ni No incluye: ningún título vacío en el PDF");
 }
 
+// ── 2b. La descripción en renglones (el caso del 21-10-2026) ─────────────────
+seccion("2b. La descripción de la categoría se imprime en renglones, en el HTML y en el PDF");
+{
+  // La descripción real de la Minivan (483 caracteres, 6 renglones), que el tope de 300 no dejaba guardar.
+  const REAL = [
+    "- Capacidad: 10 asientos confort de amplio espacio y diseño ergonómico.",
+    "- Climatización: Sistema de aire acondicionado y calefacción integral.",
+    "- Conectividad: Radio MP3 con conexión Bluetooth y cargadores de celular para los pasajeros.",
+    "- Visibilidad: Vista panorámica con amplias ventanas laterales.",
+    "- Seguridad: Cinturones de seguridad en todos los asientos y equipamiento de emergencia (extintor, botiquín y triángulos de seguridad).",
+    "- Privacidad: Lunas tintadas con protección UV.",
+  ];
+  const texto = REAL.join("\n");
+  ok(Array.from(texto).length > 300 && Array.from(texto).length <= C.MAX_DESCRIPCION_CLIENTE, `el caso real (${Array.from(texto).length} caracteres) cabe en el tope nuevo`);
+  ok(C.descripcionCategoria({ nombre: "Minivan", capacidad: 10, maletas_bodega: 4, descripcion_cliente: texto }) === texto, "se imprime tal cual, con sus 6 renglones");
+  const cat = { ...catDeFila(IDA, true), descripcion_cliente: texto };
+  const r = await compararCaso({ n: "descripción en renglones", fila: IDA, categoria: cat, logo: true });
+  ok(r.html.includes(REAL.map(esc).join("<br/>")), "el HTML separa cada renglón con <br/>");
+  const cuerpo = r.traza.filter((x) => x.zona === "cuerpo").map((x) => x.texto);
+  for (const l of REAL) ok(cuerpo.some((x) => l.startsWith(x) && x.startsWith(l.slice(0, 12))), `el PDF empieza un renglón con «${l.slice(0, 24)}…»`);
+  ok(r.paginas === 2, `sigue en dos hojas (${r.paginas})`);
+  // Fuera de la categoría (las unidades de /vehiculos), un salto de línea sigue siendo un espacio: sin cambios.
+  const sinMarca = [{ categoria: "BUS", capacidad_pasajeros: 30, equipamiento: null, foto_externa_url: null, foto_interna_url: null, descripcion_unidad: "Bus con radio, ventanas \namplias" }];
+  const html = pintarVehiculosHtml(vehiculosDoc(sinMarca), "#000");
+  ok(html.includes("ventanas \namplias") && !html.includes("<br/>"), "una unidad de la flota con un salto suelto: el HTML de siempre");
+  ok(!("renglones" in vehiculosDoc(sinMarca)[0]), "y su ficha no lleva la marca");
+}
+
 // ── 3. La unidad, la plantilla y la entrada ───────────────────────────────────
 seccion("3. vehiculoDeCategoria · cfgSoloCuentas · entradaCorporativaTraslado");
 {
@@ -270,8 +298,14 @@ seccion("3. vehiculoDeCategoria · cfgSoloCuentas · entradaCorporativaTraslado"
   ok(d({ nombre: "Minibús 25-30 pax", capacidad: 30, maletas_bodega: 15 }) === "Minibús para hasta 30 pasajeros · bodega para 15 maletas de 23 kg", "ni el «N-M pax»");
   ok(d({ nombre: "Bus 45-50 pax", capacidad: 0, maletas_bodega: 0 }) === "Bus 45-50 pax", "sin capacidad, el nombre queda entero");
   ok(d({ nombre: "50 pax", capacidad: 50, maletas_bodega: 0 }) === "50 pax para hasta 50 pasajeros", "un nombre que es solo «N pax» no queda vacío");
-  ok(d({ descripcion_cliente: "  Sedán   negro\ncon aire " }) === "Sedán negro con aire", "la descripción escrita manda (y se limpia)");
-  ok(Array.from(d({ descripcion_cliente: "x".repeat(500) })).length === 300, "la escrita se corta en 300");
+  ok(d({ descripcion_cliente: "  Sedán   negro con aire " }) === "Sedán negro con aire", "la descripción escrita manda (y se limpia)");
+  // ADAPTADA 22-10-2026: la escrita conserva sus RENGLONES (el dueño la escribe como lista con guiones).
+  ok(d({ descripcion_cliente: "  Sedán   negro\r\n\n  con aire \n" }) === "Sedán negro\ncon aire", "en renglones: cada uno limpio, sin renglones vacíos");
+  ok(C.MAX_DESCRIPCION_CLIENTE === 1000 && C.MAX_RENGLONES_CLIENTE === 20, "topes: 1000 caracteres y 20 renglones");
+  ok(Array.from(d({ descripcion_cliente: "x".repeat(1500) })).length === 1000, "la escrita se corta en 1000");
+  ok(d({ descripcion_cliente: Array.from({ length: 30 }, (_, i) => `r${i}`).join("\n") }).split("\n").length === 20, "y en 20 renglones");
+  ok(C.normalizarDescripcionCliente(" a \u2028 b \n\n") === "a\nb" && C.normalizarDescripcionCliente(null) === "", "normalizar: separadores raros y vacía");
+  ok(C.vehiculoDeCategoria(catDe("SUV", false))!.descripcion_renglones === true, "la unidad de la categoría se imprime en renglones");
   for (const c of categorias) ok(!/A\/C|aire/i.test(C.descripcionCategoria(c)), `${c.clave}: la frase por defecto no promete A/C`);
   const v = C.vehiculoDeCategoria(catDe("SUV", true), { supabaseUrl: BASE })!;
   ok(v.foto_externa_url === URL_EXT && v.foto_interna_url === URL_INT && v.equipamiento === null, "fotos del bucket propio pasan");
@@ -747,7 +781,7 @@ seccion("7. Con todos los topes llenos, el PDF pesa menos de 3.5 MB");
     items_json: Array.from({ length: 3 }, (_, i) => ({ descripcion: `Ítem ${i + 1} `.padEnd(380, "x"), dias: 1, cantidad: 2, precio_unit: 100, descuento_pct: 0, pax_contratado: null })),
     consideraciones_json: { generales: Array.from({ length: 40 }, (_, i) => `Consideración ${i + 1} `.padEnd(200, "y")), incluye: Array.from({ length: 20 }, (_, i) => `Incluye ${i}`), no_incluye: Array.from({ length: 20 }, (_, i) => `No incluye ${i}`) },
   };
-  const ent = C.entradaCorporativaTraslado(fila, { empresa: { ...perfil, cuentas_bancarias: Array.from({ length: 6 }, (_, i) => ({ banco: `Banco ${i}`, cuenta: "1".repeat(20), cci: "2".repeat(20) })) }, celular: "51966707225", categoria: { ...catDeFila(fila, true), descripcion_cliente: "d".repeat(300) }, supabaseUrl: BASE });
+  const ent = C.entradaCorporativaTraslado(fila, { empresa: { ...perfil, cuentas_bancarias: Array.from({ length: 6 }, (_, i) => ({ banco: `Banco ${i}`, cuenta: "1".repeat(20), cci: "2".repeat(20) })) }, celular: "51966707225", categoria: { ...catDeFila(fila, true), descripcion_cliente: Array.from({ length: 20 }, (_, i) => `- Renglón ${i + 1} `.padEnd(49, "d")).join("\n") }, supabaseUrl: BASE });
   const cat7 = catDeFila(fila, true);
   const bytes = await dibujarPdfCorporativo(docCorporativo(ent), { logo: { bytes: logo, tipo: "png" }, fotos: { [cat7.foto_externa_url!]: foto, [cat7.foto_interna_url!]: foto } });
   ok(bytes.length < 3.5 * 1024 * 1024, `pesa ${(bytes.length / 1024 / 1024).toFixed(2)} MB (< 3.5)`);
