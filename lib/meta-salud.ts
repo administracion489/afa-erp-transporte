@@ -247,6 +247,17 @@ export function leerCuenta(status: number, data: any): CuentaLeida {
 }
 
 /**
+ * AGREGAR LA TARJETA NO BASTA: TIENE QUE QUEDAR COMO PREDETERMINADA. El 21-10-2026 la
+ * tarjeta ya estaba agregada a la cuenta de WhatsApp desde la víspera y Meta siguió
+ * rechazando cada envío del CRM con 131005; salió al primer intento (22:09) en cuanto
+ * el dueño la marcó como predeterminada. Es lo que Graph llama `primary_funding_id`: la
+ * cuenta cobra al método PRINCIPAL, y una tarjeta agregada sin marcar no lo es. Va en
+ * todo texto que mande a revisar el pago, porque es justo el paso que se salta.
+ */
+export const PAGO_PREDETERMINADO =
+  " Ojo: no basta con agregar la tarjeta; en Facturación y pagos → la cuenta de WhatsApp → Métodos de pago tiene que quedar marcada como PREDETERMINADA, o Meta sigue rechazando los envíos.";
+
+/**
  * ¿La cuenta no se pudo leer porque Meta reserva el método de pago a los proveedores
  * BSP? Se mira el TEXTO del error, no un campo nuevo, para que también lo reconozcan
  * las lecturas ya guardadas en `crm_config`.
@@ -350,8 +361,8 @@ export function veredictoSalud(lecturas: LecturaToken[], wabaId: string | null):
   const sinPago = conMetodo
     ? " La cuenta tiene método de pago: no es un tema de pago."
     : soloBsp
-      ? " El ERP no puede comprobar el método de pago: Meta solo se lo muestra a un proveedor BSP de WhatsApp. Revísalo en WhatsApp Manager → Información general → Alertas: si dice «Falta un método de pago», o el método figura pendiente de verificar, esa es la causa."
-      : " Revisa también WhatsApp Manager → Información general → Alertas: si dice «Falta un método de pago», esa es la causa.";
+      ? ` El ERP no puede comprobar el método de pago: Meta solo se lo muestra a un proveedor BSP de WhatsApp. Revísalo en WhatsApp Manager → Información general → Alertas: si dice «Falta un método de pago», o el método figura pendiente de verificar, esa es la causa.${PAGO_PREDETERMINADO}`
+      : ` Revisa también WhatsApp Manager → Información general → Alertas: si dice «Falta un método de pago», esa es la causa.${PAGO_PREDETERMINADO}`;
   const ademas = verif.length ? ` Además, Meta marca ${verif.map(frase).join(" · ")}.` : "";
 
   // Si un token ve el método de pago y otro no, no se afirma que falte: un campo
@@ -362,7 +373,7 @@ export function veredictoSalud(lecturas: LecturaToken[], wabaId: string | null):
     return {
       codigo: "pago",
       texto:
-        `Meta no registra ningún método de pago en la cuenta de WhatsApp${cuenta}, y sin él no deja enviar mensajes desde el ERP. Se agrega en WhatsApp Manager → Información general → «Agregar método de pago».${moneda}` +
+        `Meta no registra ningún método de pago en la cuenta de WhatsApp${cuenta}, y sin él no deja enviar mensajes desde el ERP. Se agrega en WhatsApp Manager → Información general → «Agregar método de pago».${PAGO_PREDETERMINADO}${moneda}` +
         (otros.length ? ` Además, Meta marca ${otros.map(frase).join(" · ")}.` : ""),
     };
   }
@@ -370,7 +381,10 @@ export function veredictoSalud(lecturas: LecturaToken[], wabaId: string | null):
     const otros = [...resto, ...verif];
     return {
       codigo: "pago",
-      texto: `Meta bloquea el envío por un tema de PAGO en ${pago.map(frase).join(" · ")}` + (otros.length ? `. Además, Meta marca ${otros.map(frase).join(" · ")}.` : ""),
+      texto:
+        `Meta bloquea el envío por un tema de PAGO en ${pago.map(frase).join(" · ")}.` +
+        (otros.length ? ` Además, Meta marca ${otros.map(frase).join(" · ")}.` : "") +
+        PAGO_PREDETERMINADO,
     };
   }
   if (resto.length) {

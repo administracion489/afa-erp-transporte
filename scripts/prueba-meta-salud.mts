@@ -19,6 +19,7 @@ import {
   type NumeroLeido,
   type CuentaLeida,
   cuentaSoloParaBsp,
+  PAGO_PREDETERMINADO,
 } from "../lib/meta-salud";
 import { explicarErrorEnvioWhatsApp } from "../lib/crm-meta";
 
@@ -283,6 +284,16 @@ check("caso real 23:34: sigue mandando al soporte con el fbtrace", /fbtrace_id/.
 const vBspCon = veredictoSalud([LC("propio", sLl, permOk, cBsp), LC("general", sLl, permOk, cCon)], WABA);
 check("un token lee la cuenta con método: manda esa lectura", /no es un tema de pago/.test(vBspCon.texto) && !/proveedor BSP/.test(vBspCon.texto), vBspCon);
 
+// 3g. El 21-10-2026 la tarjeta YA estaba agregada y Meta siguió rechazando hasta que
+// se marcó como PREDETERMINADA (22:09 salió el primer envío). Todo texto que manda a
+// revisar el pago lo dice; el que afirma que hay método de pago no lo repite.
+check("predeterminada: va cuando el ERP no puede ver el pago (BSP)", vBsp.texto.includes(PAGO_PREDETERMINADO), vBsp);
+check("predeterminada: va cuando la cuenta no se pudo leer", vCuentaErr.texto.includes(PAGO_PREDETERMINADO), vCuentaErr);
+check("predeterminada: va en el veredicto pago por cuenta sin método", vPagoReal.texto.includes(PAGO_PREDETERMINADO) && /PREDETERMINADA/.test(vPagoReal.texto), vPagoReal);
+check("predeterminada: NO va cuando la cuenta tiene método de pago", !vConMetodo.texto.includes(PAGO_PREDETERMINADO) && !vDisCon.texto.includes(PAGO_PREDETERMINADO));
+check("predeterminada: va en el veredicto pago de health_status", vPago141.texto.includes(PAGO_PREDETERMINADO) && v1.texto.includes(PAGO_PREDETERMINADO), v1);
+check("predeterminada: el texto sin diagnóstico también lo dice", /predeterminada/.test(explicarErrorEnvioWhatsApp("(#131005) Access denied")));
+
 // ── 3d. Barrido ───────────────────────────────────────────────────────────────
 const saludes = [s0, s1, s2, s3, s4, sReal, sLl, null];
 const permisos = [permOk, permNo, inv, sinDatos, null];
@@ -295,6 +306,8 @@ for (const a of saludes) for (const b of saludes) for (const pa of permisos) for
   if (/no es un tema de pago/.test(v.texto)) check("barrido: «no es un tema de pago» solo con la cuenta leída CON método", ca?.metodoPago === true, { ca, v });
   if (ca?.metodoPago === false) check("barrido: la cuenta sin método de pago siempre es el veredicto pago", v.codigo === "pago" && /ningún método de pago/.test(v.texto), { ca, v });
   check("barrido: nunca se dice que no hay problema de pago sin la cuenta", !/ningún problema de pago/.test(v.texto), v);
+  if (v.codigo === "pago" || (!/no es un tema de pago/.test(v.texto) && /Falta un método de pago|ningún método de pago/.test(v.texto)))
+    check("barrido: todo texto que manda a revisar el pago dice que la tarjeta quede PREDETERMINADA", v.texto.includes(PAGO_PREDETERMINADO), v);
   if (/proveedor BSP/.test(v.texto)) check("barrido: «solo BSP» solo con esa respuesta de Meta y sin otra cuenta leída", cuentaSoloParaBsp(ca), { ca, v });
   const relevantes = [...(a?.bloqueos ?? []), ...(b?.bloqueos ?? [])].filter((x) => !esDeLlamadas(x));
   const leyoAvailable = a?.nivel === "AVAILABLE" || b?.nivel === "AVAILABLE";

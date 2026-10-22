@@ -210,7 +210,7 @@ export function explicarErrorEnvioWhatsApp(bruto: string): string {
     return `Meta rechazó el envío por este número. ${dice} Desde el celular sí se puede. (${codigo})`;
   }
   if (/131005|access denied/i.test(bruto))
-    return `Meta rechazó el envío por permisos: el ERP no tiene permiso para enviar por este número. Desde el celular sí se puede. Arreglo: volver a conectar el número en /crm → «Conectar WhatsApp», o revisar en Meta Business Suite que la app del ERP siga con acceso a esa cuenta de WhatsApp. (${bruto})`;
+    return `Meta rechazó el envío por permisos: el ERP no tiene permiso para enviar por este número. Desde el celular sí se puede. Arreglo: volver a conectar el número en /crm → «Conectar WhatsApp», o revisar en Meta Business Suite que la app del ERP siga con acceso a esa cuenta de WhatsApp. Si WhatsApp Manager avisa de un método de pago, la tarjeta tiene que estar agregada Y marcada como predeterminada en esa cuenta. (${bruto})`;
   return bruto;
 }
 
