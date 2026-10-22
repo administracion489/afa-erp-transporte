@@ -7,6 +7,8 @@
 import * as M from "../lib/traslados/motor";
 import * as E from "../lib/traslados/envio-ia";
 import * as P from "../components/tarifario/traslados-pantalla";
+import * as C from "../lib/traslados/cotizacion-traslado";
+import { existsSync } from "node:fs";
 
 let fallos = 0, oks = 0;
 const ok = (c: boolean, m: string) => { if (c) oks++; else { fallos++; console.log("  FALLA " + m); } };
@@ -222,7 +224,15 @@ seccion("9. Fotos de la categoría: qué se lee, qué se copia y cómo se dice")
   ok(!P.esHeic("image/jpeg", "foto.jpg", bytes(0xff, 0xd8, 0xff, 0xe0, 0, 16, "JFIF", 0, 1, 1)), "un JPEG no es HEIC");
   ok(/JPG o PNG/.test(P.MOTIVO_HEIC) && /captura/.test(P.MOTIVO_HEIC), "el motivo dice qué subir en su lugar");
 
-  ok(P.descripcionParaGuardar("  Minivan\n con   bodega  ") === "Minivan con bodega", "la descripción se guarda en un párrafo, sin bordes");
+  // ADAPTADA 22-10-2026: la descripción se guarda en RENGLONES (cada salto de línea sale en el PDF).
+  ok(P.descripcionParaGuardar("  Minivan\n con   bodega  \n\n") === "Minivan\ncon bodega", "la descripción se guarda en renglones, sin bordes ni renglones vacíos");
+  ok(P.descripcionParaGuardar(" - A \r\n - B ") === C.descripcionCategoria({ nombre: "x", capacidad: 1, maletas_bodega: 0, descripcion_cliente: " - A \r\n - B " }), "se guarda con la MISMA limpieza con que el PDF la imprime");
+  ok(P.motivoDescripcionLarga(null) === null && P.motivoDescripcionLarga("x".repeat(1000)) === null, "hasta 1000 caracteres se guarda");
+  ok(/1001 caracteres y el máximo es 1000/.test(P.motivoDescripcionLarga("x".repeat(1001)) ?? ""), "con 1001, dice cuántos tiene");
+  ok(/21 renglones y el máximo es 20/.test(P.motivoDescripcionLarga(Array.from({ length: 21 }, () => "a").join("\n")) ?? ""), "con 21 renglones, lo dice");
+  ok(P.esTopeViejoDescripcion({ code: "23514", message: 'new row for relation "traslado_categorias" violates check constraint "traslado_categorias_descripcion_ck"' }), "reconoce el CHECK viejo de 300");
+  ok(!P.esTopeViejoDescripcion({ code: "23514", message: 'violates check constraint "traslado_categorias_foto_externa_ck"' }) && !P.esTopeViejoDescripcion(null), "otro CHECK no es el de la descripción");
+  ok(P.MOTIVO_TOPE_VIEJO.includes(P.SQL_DESCRIPCION_LARGA) && existsSync(P.SQL_DESCRIPCION_LARGA), "el aviso nombra el SQL, y el SQL existe");
   ok(P.descripcionParaGuardar("   \n ") === null && P.descripcionParaGuardar(null) === null, "vacía = null (el PDF usa la frase por defecto)");
   ok(P.largoTexto("🚐 Van") === 5 && P.largoTexto("ñandú") === 5, "los caracteres se cuentan como la base (un emoji es uno)");
 

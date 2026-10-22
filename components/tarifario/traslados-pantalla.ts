@@ -22,7 +22,7 @@ import {
   esIdPlantillaValido, etiquetaCelda, plantillaParaUso, SEGMENTOS, SQL_PLANTILLAS_USO,
   type CodigoUso, type PlantillaFila, type ReglaPlantilla, type Segmento,
 } from "@/lib/cotizacion-plantillas";
-import { considDeTraslado } from "@/lib/traslados/cotizacion-traslado";
+import { considDeTraslado, MAX_DESCRIPCION_CLIENTE, MAX_RENGLONES_CLIENTE, normalizarDescripcionCliente } from "@/lib/traslados/cotizacion-traslado";
 
 /** `envio_automatico` es de traslados-05: sin esa migración llega `undefined`, que es «no». */
 export type ZonaFila = Zona & { notas?: string | null; envio_automatico?: boolean | null };
@@ -736,13 +736,32 @@ export const MOTIVO_HEIC = "Es una foto HEIC (la del iPhone) y el navegador no l
 export const largoTexto = (t: string): number => Array.from(t).length;
 
 /**
- * La descripción para el cliente tal como se GUARDA: espacios y saltos colapsados (el PDF la
- * imprime como un solo párrafo) y sin bordes. Vacía = null: el PDF usa la frase por defecto.
+ * La descripción para el cliente tal como se GUARDA: en renglones (cada salto de línea se imprime en
+ * el PDF), cada renglón sin espacios de más y sin renglones vacíos. Vacía = null: el PDF usa la frase
+ * por defecto. La MISMA limpieza con que la imprime `descripcionCategoria`.
  */
 export function descripcionParaGuardar(texto: string | null | undefined): string | null {
-  const t = String(texto ?? "").replace(/\s+/g, " ").trim();
+  const t = normalizarDescripcionCliente(texto);
   return t ? t : null;
 }
+
+/** Por qué no se puede guardar esta descripción (ya limpia), o null si se puede. */
+export function motivoDescripcionLarga(nueva: string | null): string | null {
+  if (!nueva) return null;
+  const n = largoTexto(nueva);
+  if (n > MAX_DESCRIPCION_CLIENTE) return `Tiene ${n} caracteres y el máximo es ${MAX_DESCRIPCION_CLIENTE}.`;
+  const r = nueva.split("\n").length;
+  if (r > MAX_RENGLONES_CLIENTE) return `Tiene ${r} renglones y el máximo es ${MAX_RENGLONES_CLIENTE}.`;
+  return null;
+}
+
+/** El CHECK viejo (traslados-07, 300 caracteres) rechazó el guardado: falta correr traslados-08. */
+export const SQL_DESCRIPCION_LARGA = "supabase/traslados-08-descripcion-larga.sql";
+export function esTopeViejoDescripcion(error: { code?: string | null; message?: string | null } | null | undefined): boolean {
+  return !!error && (error.code === "23514" || /check constraint/i.test(String(error.message ?? "")))
+    && /traslado_categorias_descripcion_ck/.test(String(error.message ?? ""));
+}
+export const MOTIVO_TOPE_VIEJO = `La base todavía acepta hasta 300 caracteres. Para guardar una descripción más larga hay que correr ${SQL_DESCRIPCION_LARGA} en el SQL Editor de Supabase (pegar entero → Run).`;
 
 /** De dónde viene una foto de la ficha de una unidad, para saber si se puede copiar a la categoría. */
 export type OrigenFoto =

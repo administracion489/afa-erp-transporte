@@ -102,6 +102,12 @@ export const driveImg = (url: string) => {
   return m ? `https://drive.google.com/thumbnail?id=${m[1]}&sz=w800` : url;
 };
 
+/** Tope de una descripción en renglones: caracteres (saltos incluidos, como `char_length`) y renglones.
+ *  No medidos: caben con holgura en la hoja 2 junto a las dos fotos. El de caracteres es el CHECK de
+ *  traslados-08 sobre `traslado_categorias.descripcion_cliente`. */
+export const MAX_DESCRIPCION_RENGLONES = 1000;
+export const MAX_RENGLONES_DESCRIPCION = 20;
+
 export type VehiculoPDF = {
   categoria: string | null;
   capacidad_pasajeros: number | null;
@@ -109,6 +115,9 @@ export type VehiculoPDF = {
   foto_externa_url: string | null;
   foto_interna_url: string | null;
   descripcion_unidad: string | null;
+  /** La descripción escrita va en RENGLONES: cada salto de línea se imprime (la categoría de traslado,
+   *  que se escribe como lista). Sin la marca, como siempre: un solo párrafo. */
+  descripcion_renglones?: boolean;
 };
 
 /**
@@ -147,6 +156,8 @@ export type VehiculoDoc = {
   descripcion: string;
   fotoExterior: string | null;
   fotoInterior: string | null;
+  /** Solo si la descripción va en renglones (`VehiculoPDF.descripcion_renglones`). */
+  renglones?: true;
 };
 
 export function vehiculosDoc(vehiculos: VehiculoPDF[], idioma: "es" | "en" = "es"): VehiculoDoc[] {
@@ -155,6 +166,7 @@ export function vehiculosDoc(vehiculos: VehiculoPDF[], idioma: "es" | "en" = "es
     descripcion: descripcionVehiculoPdf(veh, idioma),
     fotoExterior: veh.foto_externa_url || null,
     fotoInterior: veh.foto_interna_url || null,
+    ...(veh.descripcion_renglones && veh.descripcion_unidad ? { renglones: true as const } : {}),
   }));
 }
 
@@ -179,7 +191,8 @@ export function pintarVehiculosHtml(vehs: VehiculoDoc[], cp: string, opts?: { im
     const lbl = veh.etiqueta != null
       ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc(veh.etiqueta)}</p>`
       : "";
-    return `${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${esc(veh.descripcion)}</p>${fotos}`;
+    const desc = veh.renglones ? veh.descripcion.split("\n").map(esc).join("<br/>") : esc(veh.descripcion);
+    return `${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${desc}</p>${fotos}`;
   }).join("");
 }
 

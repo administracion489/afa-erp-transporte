@@ -14,16 +14,17 @@
 // cliente no puede saber que la unidad es tercerizada), y la elegida se COPIA como foto nueva; las
 // de Google Drive u otro sitio no se pueden copiar desde el navegador y se dice cómo subirlas.
 //
-// LA DESCRIPCIÓN la escribe una persona (≤ 300). Vacía, el PDF dice la frase por defecto con DATOS
-// ESCRITOS (`descripcionCategoria`: asientos y bodega), que aquí se enseña tal cual saldrá.
+// LA DESCRIPCIÓN la escribe una persona, en renglones (hasta 1000 caracteres y 20 renglones; cada
+// salto de línea sale en el PDF). Vacía, el PDF dice la frase por defecto con DATOS ESCRITOS
+// (`descripcionCategoria`: asientos y bodega), que aquí se enseña tal cual saldrá.
 
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { faltaAlguna } from "@/lib/columna-faltante";
 import { COLUMNA_FOTO, type LadoFoto } from "@/lib/traslados/fotos-categoria";
-import { descripcionCategoria, MAX_DESCRIPCION_CLIENTE } from "@/lib/traslados/cotizacion-traslado";
+import { descripcionCategoria, MAX_DESCRIPCION_CLIENTE, MAX_RENGLONES_CLIENTE } from "@/lib/traslados/cotizacion-traslado";
 import {
-  descripcionParaGuardar, largoTexto, origenFoto, SQL_FOTOS_CATEGORIA, sugerenciasFlota,
+  descripcionParaGuardar, esTopeViejoDescripcion, largoTexto, MOTIVO_TOPE_VIEJO, motivoDescripcionLarga, origenFoto, SQL_FOTOS_CATEGORIA, sugerenciasFlota,
   type CategoriaFila, type UnidadFotos,
 } from "./traslados-pantalla";
 import { COLS_CATEGORIA_FOTOS, filasEscritas, leerFotosFlota, motivoCeroFilas, normalizarCategoria, type FlotaFotos } from "./traslados-datos";
@@ -360,9 +361,8 @@ function DescripcionCliente({ categoria: c, colsCategoria, onGuardada, onSinMigr
   const nueva = descripcionParaGuardar(texto);
   const n = largoTexto(nueva ?? "");
   const porDefecto = descripcionCategoria({ ...c, descripcion_cliente: null });
-  const motivo = nueva === guardada ? "No hay cambios."
-    : n > MAX_DESCRIPCION_CLIENTE ? `Tiene ${n} caracteres y el máximo es ${MAX_DESCRIPCION_CLIENTE}.`
-      : null;
+  const renglones = nueva ? nueva.split("\n").length : 0;
+  const motivo = nueva === guardada ? "No hay cambios." : motivoDescripcionLarga(nueva);
 
   const guardar = async () => {
     if (motivo || guardando) return;
@@ -372,6 +372,7 @@ function DescripcionCliente({ categoria: c, colsCategoria, onGuardada, onSinMigr
     const res = await supabase.from("traslado_categorias").update({ descripcion_cliente: nueva }).eq("clave", c.clave).select(colsCategoria);
     setGuardando(false);
     if (res.error && faltaAlguna(res.error, COLS_CATEGORIA_FOTOS)) { onSinMigracion(); return; }
+    if (esTopeViejoDescripcion(res.error)) { setError(MOTIVO_TOPE_VIEJO); return; }
     const r = filasEscritas<Record<string, unknown>>(res, que);
     if (!r.ok) { setError(r.cero ? await motivoCeroFilas("traslado_categorias", "clave", c.clave, que) : r.detalle); return; }
     onGuardada(normalizarCategoria(r.filas[0]));
@@ -382,12 +383,13 @@ function DescripcionCliente({ categoria: c, colsCategoria, onGuardada, onSinMigr
     <div className="space-y-1">
       <label className="block">
         <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Descripción para el cliente</span>
-        <textarea value={texto} rows={2} onChange={(e) => { setTexto(e.target.value); if (error) setError(null); }} disabled={guardando}
+        <textarea value={texto} rows={Math.min(14, Math.max(3, texto.split("\n").length + 1))} onChange={(e) => { setTexto(e.target.value); if (error) setError(null); }} disabled={guardando}
           placeholder={porDefecto} aria-label={`Descripción para el cliente de ${c.clave}`}
           className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f]" />
       </label>
       <div className="flex flex-wrap items-center gap-2 text-[11px]">
         <span className={n > MAX_DESCRIPCION_CLIENTE ? "text-red-700 font-bold" : "text-gray-400"}>{n}/{MAX_DESCRIPCION_CLIENTE}</span>
+        {renglones > 1 && <span className={renglones > MAX_RENGLONES_CLIENTE ? "text-red-700 font-bold" : "text-gray-400"}>· {renglones}/{MAX_RENGLONES_CLIENTE} renglones</span>}
         <button type="button" onClick={guardar} disabled={!!motivo || guardando}
           className="px-3 py-1.5 rounded-lg font-bold text-white disabled:opacity-40 min-h-[36px]" style={{ background: AZUL }}>
           {guardando ? "Guardando…" : nueva ? "Guardar descripción" : "Guardar vacía"}
@@ -397,9 +399,9 @@ function DescripcionCliente({ categoria: c, colsCategoria, onGuardada, onSinMigr
         )}
         {motivo && motivo !== "No hay cambios." && <span className="text-red-700">{motivo}</span>}
       </div>
-      <p className="text-[11px] text-gray-500">
+      <p className="text-[11px] text-gray-500 whitespace-pre-line">
         {nueva
-          ? <>En el PDF: «{descripcionCategoria({ ...c, descripcion_cliente: nueva })}»</>
+          ? <>En el PDF (cada renglón sale en su propia línea):{"\n"}{descripcionCategoria({ ...c, descripcion_cliente: nueva })}</>
           : <>Vacía, el PDF dice: «{porDefecto}»</>}
       </p>
       {error && <p className="text-[11px] text-red-700" role="alert">{error}</p>}

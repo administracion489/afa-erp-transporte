@@ -29,6 +29,7 @@ import { PDFDocument, StandardFonts, degrees, rgb, type PDFFont, type PDFImage, 
 import { aWinAnsi } from "./pdf-winansi";
 import { listaVisible, type CajaDoc, type DocCorporativo, type FilaDoc, type ListaDoc } from "./cotizacion-corporativo";
 import { NOMBRE_SIN_CONFIGURAR } from "./empresa-perfil";
+import { MAX_DESCRIPCION_RENGLONES, MAX_RENGLONES_DESCRIPCION } from "./pdf-chrome";
 
 /** Una imagen ya bajada y comprobada por su firma. */
 export type ImagenPdf = { bytes: Uint8Array; tipo: "png" | "jpg" };
@@ -582,7 +583,10 @@ export async function dibujarPdfCorporativo(d: DocCorporativo, img: ImagenesCorp
     const tit = medirTitulo(car.titulo, wi);
     const vehs = car.vehiculos.map((v, i) => {
       const etiqueta = v.etiqueta ? partir(T(v.etiqueta, 200), neg, 10, wi) : [];
-      const desc = partir(T(v.descripcion, 600), reg, 11, wi);
+      // En renglones (la categoría de traslado): cada salto de línea es un renglón, como en el HTML.
+      const desc = v.renglones
+        ? v.descripcion.split("\n").slice(0, MAX_RENGLONES_DESCRIPCION).flatMap((l) => partir(T(l, MAX_DESCRIPCION_RENGLONES), reg, 11, wi))
+        : partir(T(v.descripcion, 600), reg, 11, wi);
       const fs = [v.fotoExterior, v.fotoInterior].map((u) => (u ? fotos.get(u) ?? null : null)).filter((x): x is PDFImage => !!x);
       return { etiqueta, desc, fs };
     });
