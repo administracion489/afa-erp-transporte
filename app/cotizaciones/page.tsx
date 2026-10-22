@@ -48,6 +48,7 @@ import {
   planDeNivel, cotejarUnidadConNivel, type NivelServicio,
 } from "@/lib/costos/nivel-servicio";
 import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
+import { planRetorno } from "@/lib/cotizacion-retorno";
 import { planDePropagacion, MOTIVO_NO_PROPAGA, type MotivoNoPropaga } from "@/lib/paradas-materializar";
 import dynamic from "next/dynamic";
 import { estadoMarca, firmaParaderos, indiceDeInsercion, type HoraCalc, type FilaPlan } from "@/lib/paradas-horario";
@@ -2312,16 +2313,54 @@ export default function CotizacionesPage(){
     // `limit(1)` y no `maybeSingle()`: con más de una reserva ya creada (una por vehículo),
     // `maybeSingle` da error, `existe` queda en null y se volvían a crear todas. Y una lectura que
     // falla no es «todavía no tiene reservas».
-    const{data:existentes,error:eExiste}=await supabase.from("reservas").select("id").eq("cotizacion_id",cot.id).limit(1);
+    const{data:existentes,error:eExiste}=await supabase.from("reservas").select("id,fecha_servicio,vehiculo_id,vehiculo_tercero_id,reserva_vinculada_id,estado").eq("cotizacion_id",cot.id).limit(20);
     if(eExiste){alert(`No se pudo comprobar si la cotización ya tiene reservas, así que no se creó ninguna: ${eExiste.message}`);return;}
-    if(existentes?.length){alert("Ya fue convertida en reserva");return;}
     const ps=cot.paradas_json||[];const pI=ps.find(p=>p.tipo==="inicio");
+    const fechaIda=cot.fecha_servicio||hoyLima();
+    const planRet=planRetorno(cot,fechaIda);
+    // El retorno es su PROPIA reserva (lib/cotizacion-retorno.ts): nace en S/ 0.00 —el importe va en
+    // la ida— y enlazado a ella por los dos lados. Devuelve null si salió, o el motivo si no.
+    const crearRetorno=async(ida:{id:number;vehiculo_id:number|null;vehiculo_tercero_id:number|null}):Promise<string|null>=>{
+      if(planRet.codigo!=="ok")return null;
+      const paradasSemilla=planRet.paradas.map((p,i,a)=>({id:`ret${i}`,tipo:i===0?"inicio":i===a.length-1?"destino":"intermedia",nombre:p.nombre,direccion:p.direccion||"",lat:p.lat!=null?String(p.lat):"",lng:p.lng!=null?String(p.lng):"",hora:p.hora||""}));
+      const fila:Record<string,unknown>={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:planRet.origen,destino:planRet.destino,fecha_servicio:planRet.fecha,hora_servicio:planRet.hora,estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:paradasSemilla,costo_proveedor:0,precio_cliente:0,vehiculo_id:ida.vehiculo_id,vehiculo_tercero_id:ida.vehiculo_tercero_id,reserva_vinculada_id:ida.id,direccion_servicio:"retorno",ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:paradasSemilla,hora:planRet.hora,sentido:"retorno"})||null};
+      let ins=await insertarServicioNuevo((f)=>supabase.from("reservas").insert(f).select().single(),fila);
+      if(ins.error&&faltaColumna(ins.error,"direccion_servicio")){delete fila.direccion_servicio;ins=await insertarServicioNuevo((f)=>supabase.from("reservas").insert(f).select().single(),fila);}
+      if(ins.error||!ins.data)return ins.error?.message||"sin respuesta";
+      const retId=ins.data.id as number;
+      let up=await supabase.from("reservas").update({reserva_vinculada_id:retId,direccion_servicio:"ida"}).eq("id",ida.id);
+      if(up.error&&faltaColumna(up.error,"direccion_servicio"))up=await supabase.from("reservas").update({reserva_vinculada_id:retId}).eq("id",ida.id);
+      const{error:eP}=await supabase.from("paradas").insert(planRet.paradas.map(p=>({reserva_id:retId,orden:p.orden,nombre:p.nombre,direccion:p.direccion,lat:p.lat,lng:p.lng,hora_estimada:p.hora,estado:"pendiente"})));
+      const avisos=[up.error?`no se pudo enlazar a la ida (${up.error.message}): enlázalos desde Liquidaciones o Programación`:"",eP?`sus paradas no se crearon (${eP.message})`:""].filter(Boolean);
+      return avisos.length?`retorno creado, pero ${avisos.join(" y ")}`:null;
+    };
+    const textoRetorno=(errores:(string|null)[],n:number)=>{
+      if(planRet.codigo==="no_aplica")return"";
+      if(planRet.codigo!=="ok")return `\n⚠️ No se creó el RETORNO: ${planRet.motivo} Créalo desde Programación.`;
+      const e=errores.filter(Boolean);
+      return e.length?`\n⚠️ Retorno: ${e.join(" · ")}`:`\n↩ Y ${n>1?`${n} retornos`:"su retorno"} del ${planRet.fecha.split("-").reverse().join("/")} a las ${planRet.hora} (${planRet.origen} → ${planRet.destino}), en S/ 0.00: el importe va en la ida.`;
+    };
+    if(existentes?.length){
+      // Convertida antes de que «→ Res.» creara el retorno: se completa SOLO si ninguna ida tiene ya
+      // su hermano (por ninguno de los dos lados del enlace) y ninguna está cancelada.
+      const idas=existentes as {id:number;fecha_servicio:string;vehiculo_id:number|null;vehiculo_tercero_id:number|null;reserva_vinculada_id:number|null;estado:string}[];
+      if(planRet.codigo==="no_aplica"||idas.some(r=>r.reserva_vinculada_id!=null||r.estado==="cancelada")){alert("Ya fue convertida en reserva");return;}
+      const{data:atras,error:eAt}=await supabase.from("reservas").select("id").in("reserva_vinculada_id",idas.map(r=>r.id)).limit(1);
+      if(eAt){alert(`No se pudo comprobar si ya tiene retorno, así que no se creó nada: ${eAt.message}`);return;}
+      if(atras?.length){alert("Ya fue convertida en reserva");return;}
+      if(planRet.codigo!=="ok"){alert(`Ya fue convertida en reserva, pero le falta el RETORNO y no se puede crear: ${planRet.motivo} Créalo desde Programación.`);return;}
+      if(!confirm(`La cotización #${cot.numero_cotizacion||cot.id} ya tiene ${idas.length} reserva(s) de IDA, pero no su RETORNO.\n¿Crear ${idas.length>1?`${idas.length} retornos`:"el retorno"}: ${planRet.fecha.split("-").reverse().join("/")} ${planRet.hora} · ${planRet.origen} → ${planRet.destino}, en S/ 0.00 (el importe sigue en la ida)?`))return;
+      const errs:(string|null)[]=[];
+      for(const ida of idas)errs.push(await crearRetorno(ida));
+      alert(`✅ Retorno completado${textoRetorno(errs,idas.length)}`);
+      refrescar();return;
+    }
     const its=cot.items_json||[];
     const vehKey=(it:ItemCot)=>it.vehiculo_flota_id?`f_${it.vehiculo_flota_id}`:it.vehiculo_tercero_id?`t_${it.vehiculo_tercero_id}`:"sin";
     const grupos=its.reduce((m,it)=>{const k=vehKey(it);if(!m[k])m[k]=[];m[k].push(it);return m;},{} as Record<string,ItemCot[]>);
     const keys=Object.keys(grupos);
     const useMulti=keys.length>1||(keys.length===1&&keys[0]!=="sin"&&(keys[0].startsWith("f_")||keys[0].startsWith("t_")));
-    const basePayload={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:cot.destino,fecha_servicio:cot.fecha_servicio||hoyLima(),hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null,costo_proveedor:0,ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:cot.paradas_json,hora:pI?.hora||cot.hora_ida,sentido:"ida"})||null};
+    const basePayload={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:cot.destino,fecha_servicio:fechaIda,hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null,costo_proveedor:0,ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:cot.paradas_json,hora:pI?.hora||cot.hora_ida,sentido:"ida"})||null};
     const insertParadas=async(reservaId:number):Promise<string|null>=>{if(ps.length<1)return null;const{error}=await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:reservaId,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));return error?error.message:null;};
     const avisoParadas=(e:string|null)=>e?`\n⚠️ Pero sus ${ps.length} paradas no se pudieron crear (${e}): agrégalas desde Programación.`:"";
     // La reserva lleva el precio EN SOLES (la fila autoritativa). En una cotización en dólares se
@@ -2334,9 +2373,10 @@ export default function CotizacionesPage(){
       const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:cot.precio_cliente,vehiculo_id:cot.vehiculo_flota_id||null,vehiculo_tercero_id:cot.vehiculo_tercero_id||null});
       if(error){alert(error.message);return;}
       const eParadas=r?await insertParadas(r.id):null;
-      alert(`✅ Reserva creada${ps.length>0&&!eParadas?` con ${ps.length} paradas`:""}${avisoParadas(eParadas)}${notaTc}`);
+      const eRet=r?await crearRetorno(r):null;
+      alert(`✅ Reserva creada${ps.length>0&&!eParadas?` con ${ps.length} paradas`:""}${avisoParadas(eParadas)}${textoRetorno([eRet],1)}${notaTc}`);
     } else {
-      let count=0;let eParadas:string|null=null;
+      let count=0;let eParadas:string|null=null;const errsRet:(string|null)[]=[];
       for(const k of keys){
         const gItems=grupos[k];
         const gTotal=totalesEnMoneda(gItems,"PEN",null,cot.incluye_igv!==false)!.total;
@@ -2349,9 +2389,10 @@ export default function CotizacionesPage(){
           refrescar();return;
         }
         if(r&&count===0)eParadas=await insertParadas(r.id);
+        if(r)errsRet.push(await crearRetorno(r));
         count++;
       }
-      alert(`✅ ${count} reserva${count>1?"s creadas (una por vehículo)":"creada"}${avisoParadas(eParadas)}${notaTc}`);
+      alert(`✅ ${count} reserva${count>1?"s creadas (una por vehículo)":"creada"}${avisoParadas(eParadas)}${textoRetorno(errsRet,count)}${notaTc}`);
     }
     refrescar();
   };
