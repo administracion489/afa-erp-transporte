@@ -12,10 +12,8 @@ import {
 import { atencionDe, atencionEnUso, describirAtencion, dentroDeAtencion, proximaAtencion, fraseFueraDeAtencion } from "@/lib/crm-ia-atencion";
 import { esAudio, esTranscripcion, transcribirMensaje, PREFIJO_TRANSCRIPCION } from "@/lib/crm-audio";
 import { createClient } from "@supabase/supabase-js";
-import { enviarWhatsApp, enviarMessenger, enviarInstagram, marcarLeidoYEscribiendo, explicarErrorEnvioWhatsApp } from "@/lib/crm-meta";
-import { enviarEmail } from "@/lib/crm-gmail";
+import { marcarLeidoYEscribiendo } from "@/lib/crm-meta";
 import { textoLegible } from "@/lib/crm-gmail-reglas";
-import { phonePara } from "@/lib/whatsapp-numeros";
 import {
   HERRAMIENTA_COTIZAR_TRASLADO, entradaDelAgente, figurasPermitidas, planEnvio, respuestaDerivar,
   respuestaParaModelo, senalesEnTexto, textoFinalTraslado,
@@ -33,6 +31,13 @@ import { inicioVentanaHumano, inicioConteoTurnos } from "@/lib/crm-ia-reactivaci
 import { primerNombreSeguro } from "@/lib/traslados/texto-libre";
 import { limpiarTextoModelo, saludoDeBooleano, saludoDelTurno, textosSinContestar, type SaludoDelTurno } from "@/lib/crm-ia-mensaje";
 import { CONTESTA, MOTIVO_ULTIMO, juzgarUltimo, leerMarca, marcaVigente, ordenarRafaga, type MarcaRespuesta } from "@/lib/crm-ia-rafaga";
+import { enviarTextoCRM, waDestinoDe } from "@/lib/crm-enviar-texto";
+import {
+  HERRAMIENTAS_RESERVA, FRASE_PROPONER_RESERVA_TRASLADOS, FRASE_RESERVAR_TRASLADO, bloqueReservaTraslados, respuestaReservaParaModelo,
+  textoFinalReserva, type ResultadoReservaIA,
+} from "@/lib/traslados/reserva-ia";
+import type { ConfigReserva } from "@/lib/traslados/reserva-pago";
+import { cancelarIA, cotizacionTrasladoDelChat, politicasIA, reportarPagoIA, reservaEstadoIA, reservarTrasladoIA, type CtxReservaIA } from "@/lib/traslados/reserva-solicitud-datos";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
 
@@ -314,6 +319,12 @@ type Ctx = {
   traslados?: boolean;
   /** Lo que devolvió la última llamada a `cotizar_traslado` en este turno. */
   cotizacionTraslado?: ResultadoCotizarIA | null;
+  /**
+   * La reserva de traslados (lib/traslados/reserva-solicitud-datos.ts): se ofrece SOLO con
+   * traslados, `reserva_ia` encendida (y las migraciones corridas) y el agente autónomo. Lo que
+   * devuelve cada herramienta de reserva en el turno va a `resultados` (de ahí sale el texto final).
+   */
+  reserva?: { activa: boolean; cfg: ConfigReserva; turno: { n: number }; resultados: ResultadoReservaIA[] };
 };
 
 /** El número peruano con que la PRUEBA del agente (/crm/agente) cotiza traslados. No es de nadie. */
@@ -553,6 +564,25 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
         return r.respuestaModelo;
       }
 
+      case "reservar_traslado":
+      case "reportar_pago_traslado":
+      case "politicas_reserva":
+      case "cancelar_reserva_traslado": {
+        if (!ctx.reserva?.activa || !ctx.remitente)
+          return respuestaReservaParaModelo("derivar");
+        const cr: CtxReservaIA = {
+          sb, conv, contacto, remitente: ctx.remitente, agente: ctx.agente, modoAuto: ctx.modoAuto === true,
+          cfg: ctx.reserva.cfg, turno: ctx.reserva.turno,
+        };
+        const fn = name === "reservar_traslado" ? reservarTrasladoIA
+          : name === "reportar_pago_traslado" ? reportarPagoIA
+          : name === "politicas_reserva" ? politicasIA : cancelarIA;
+        const r = await fn(cr, input);
+        ctx.reserva.resultados.push(r);
+        if (r.derivar) await derivarConversacion(ctx, r.derivar.motivo, r.derivar.pedido, r.derivar.nota);
+        return r.respuestaModelo;
+      }
+
       default:
         return JSON.stringify({ error: `Herramienta desconocida: ${name}` });
     }
@@ -570,8 +600,8 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
  * siguiente dato, el que indique la herramienta (su orden es el del motor, el mismo que usa el
  * «me falta» que escribe el código: lib/traslados/envio-ia.ts → fraseFaltanTraslado).
  */
-export function bloqueTraslados(p: ModoPreguntas): string {
-  return [
+export function bloqueTraslados(p: ModoPreguntas, opts: { reserva?: boolean } = {}): string {
+  const bloque = [
     "## Traslados simples (cotización con el tarifario)",
     "- Un traslado simple es UN punto de recojo → UN destino (por ejemplo aeropuerto ↔ hotel o domicilio), solo ida o ida y retorno, en una sola fecha y con un solo vehículo. Para eso usa cotizar_traslado: el vehículo, el precio, la moneda y la validez los pone el sistema con el tarifario. NUNCA calcules ni inventes un precio de traslado, ni uses cotizacion_estimada para eso.",
     p === "una_por_mensaje"
@@ -587,6 +617,9 @@ export function bloqueTraslados(p: ModoPreguntas): string {
     "- Esto no contradice «NUNCA confirmes que ya cotizaste…»: esta cotización la emite el SISTEMA con el tarifario, no tú; tú solo la presentas tal cual.",
     "",
   ].join("\n");
+  // Con la reserva de traslados activa, `reservar_traslado` reemplaza a `proponer_reserva` en los
+  // traslados (lib/traslados/reserva-ia.ts). Apagada, el bloque es byte a byte el de antes.
+  return opts.reserva ? bloque.replace(FRASE_PROPONER_RESERVA_TRASLADOS, FRASE_RESERVAR_TRASLADO) : bloque;
 }
 
 /** El bloque con el modo de preguntar por defecto («todo junto»). */
@@ -667,7 +700,7 @@ export const PRIORIDAD = [
  */
 const NOMBRE_DEL_CHAT = " Si en este chat el cliente ya te dijo su nombre, usa ese en el saludo.";
 
-export function construirSystem(agente: any, contacto: any, conv: any, saludo: boolean | SaludoDelTurno = false, empresa = "", opts: { traslados?: boolean } = {}): string {
+export function construirSystem(agente: any, contacto: any, conv: any, saludo: boolean | SaludoDelTurno = false, empresa = "", opts: { traslados?: boolean; reserva?: boolean } = {}): string {
   const aj = ajustesDe(agente);
   // `true`/`false` es la forma de antes («primer mensaje del día»); lib/crm-ia-mensaje.ts decide los tres casos.
   const sal = typeof saludo === "boolean" ? saludoDeBooleano(saludo) : saludo;
@@ -784,7 +817,9 @@ export function construirSystem(agente: any, contacto: any, conv: any, saludo: b
           "",
         ].join("\n")
       : "",
-    opts.traslados ? bloqueTraslados(aj.preguntas) : "",
+    opts.traslados ? bloqueTraslados(aj.preguntas, { reserva: opts.reserva === true }) : "",
+    // «## Reserva y pago de traslados»: SOLO con traslados y la reserva activa (si no, nada: el prompt es el de antes).
+    opts.traslados && opts.reserva ? bloqueReservaTraslados() : "",
     "## Tus objetivos (goals)",
     goalsTxt,
     "",
@@ -875,48 +910,15 @@ async function cargarHistorial(
 
 // ── Envío por canal (modo autónomo) ──────────────────────────────────────────
 
-/** El número de WhatsApp al que se responde: el wa_id del hilo o, sin él, el teléfono del contacto. */
-function waDestinoDe(contacto: { wa_id?: unknown; telefono?: unknown } | null | undefined): string {
-  if (contacto?.wa_id) return String(contacto.wa_id);
-  return contacto?.telefono ? String(contacto.telefono).replace(/\D/g, "") : "";
-}
-
 /**
  * `waDestino`, si se pasa, es el número copiado ANTES del bucle del agente: `actualizar_contacto`
  * deja al modelo reescribir `contacto.telefono` en este mismo turno, y sin wa_id la respuesta iría
- * al número que escribió el modelo.
+ * al número que escribió el modelo. El envío y el registro en el hilo son los de
+ * lib/crm-enviar-texto.ts (extraídos de aquí: los usan también las acciones de la reserva).
  */
 async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string, waDestinoFijo?: string): Promise<string | null> {
-  let metaId: string | null = null;
-  let gmailMsgId: string | null = null;
-  let error: string | null = null;
-  try {
-    // Por el mismo número que usó el cliente (ver app/api/crm/mensajes/enviar).
-    // Sin wa_id (contacto creado a mano, o por el historial) se usa su teléfono.
-    const waDestino = waDestinoFijo !== undefined ? waDestinoFijo : waDestinoDe(contacto);
-    if (conv.canal === "whatsapp" && waDestino)
-      metaId = await enviarWhatsApp(waDestino, texto, conv.phone_number_id ?? (await phonePara("crm")));
-    else if (conv.canal === "messenger" && contacto?.fb_psid) metaId = await enviarMessenger(contacto.fb_psid, texto);
-    else if (conv.canal === "instagram" && contacto?.ig_id) metaId = await enviarInstagram(contacto.ig_id, texto);
-    else if (conv.canal === "gmail" && contacto?.gmail_email) {
-      const r = await enviarEmail(contacto.gmail_email, conv.asunto ?? "Re: Consulta", texto.replace(/\n/g, "<br>"), conv.gmail_thread_id ?? undefined);
-      gmailMsgId = r.messageId;
-    } else error = "Canal sin datos para enviar";
-  } catch (e: any) {
-    error = explicarErrorEnvioWhatsApp(String(e?.message ?? "Error de envío"));
-  }
-  await sb.from("crm_mensajes").insert({
-    conversacion_id: conv.id,
-    direccion: "saliente",
-    tipo: "texto",
-    contenido: texto,
-    meta_message_id: metaId,
-    gmail_message_id: gmailMsgId,
-    generado_por_ia: true,
-    error,
-  });
-  await sb.from("crm_conversaciones").update({ ultimo_mensaje_at: new Date().toISOString() }).eq("id", conv.id);
-  return error;
+  const r = await enviarTextoCRM(sb, conv, contacto, texto, { waDestino: waDestinoFijo });
+  return r.error;
 }
 
 /**
@@ -1228,7 +1230,11 @@ async function responderConIAInterno(
   const waDestinoInicial = waDestinoDe(contacto);
   const contactoInicial = { ...contacto };
   // `cotizar_traslado` solo en WhatsApp, con el interruptor encendido y las migraciones corridas.
-  const traslados = conv.canal === "whatsapp" && (await leerConfigIA(sb)).iaCotiza;
+  const cfgIA = await leerConfigIA(sb);
+  const traslados = conv.canal === "whatsapp" && cfgIA.iaCotiza;
+  // Las herramientas de RESERVA, además, solo con la reserva encendida (y sus migraciones) y el agente
+  // autónomo: hacen cosas (crean la solicitud, leen el comprobante) que una propuesta no puede deshacer.
+  const reservaActiva = traslados && cfgIA.reservaIA && modoAuto;
 
   const messages = await cargarHistorial(sb, convId, ajustesDe(agente), leerMarca(await leerDecision(convId)));
   if (messages.length === 0) return { ok: true, accion: "omitido", motivo: "Sin mensajes del cliente." };
@@ -1237,13 +1243,16 @@ async function responderConIAInterno(
     iaHoy: (llegadosHoy ?? []).filter((m: { generado_por_ia?: boolean | null }) => m.generado_por_ia === true).length,
     textosCliente: textosSinContestar(messages),
   });
-  const system = construirSystem(agente, contacto, conv, saludo, await nombreEmpresa(sb), { traslados });
+  const system = construirSystem(agente, contacto, conv, saludo, await nombreEmpresa(sb), { traslados, reserva: reservaActiva });
 
   const ctx: Ctx = {
     sb, contacto, conv, agente, escalado: { v: false },
     remitente, modoAuto, consultasTurno: { n: 0 }, traslados, cotizacionTraslado: null,
+    ...(reservaActiva ? { reserva: { activa: true, cfg: cfgIA.reserva, turno: { n: 0 }, resultados: [] } } : {}),
   };
-  const herramientas = traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
+  const herramientas = reservaActiva
+    ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO, ...HERRAMIENTAS_RESERVA]
+    : traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
 
   // ── Bucle agéntico (manual) ────────────────────────────────────────────────
   let textoFinal = "";
@@ -1279,13 +1288,26 @@ async function responderConIAInterno(
     return { ok: false, accion: "omitido", error: e?.message ?? "Error llamando a Claude." };
   }
 
+  // Con la reserva activa, el texto lo decide primero `textoFinalReserva`: los mensajes que arma el
+  // código (T1–T11), la derivación, o la guarda T10 si el modelo habló de dinero con una cotización
+  // de traslado en el chat. Si no decide (null), sigue como siempre.
+  let decidioReserva = false;
+  if (ctx.reserva) {
+    const ultimaCot = await cotizacionTrasladoDelChat(sb, convId);
+    const tf = textoFinalReserva(textoFinal, ctx.reserva.resultados, {
+      estilo: estiloDe(ajustesDe(agente)), numeroCotizacion: ultimaCot?.numero ?? null, hayCotizacionTraslado: !!ultimaCot,
+      derivacion: mensajeDerivacion(agente, contactoInicial), cotizoEnElTurno: !!ctx.cotizacionTraslado?.cotizacion,
+    });
+    if (tf != null) { textoFinal = tf; decidioReserva = true; }
+  }
+
   if (ctx.escalado.v && !textoFinal)
     return { ok: true, accion: "escalado", motivo: "Derivado a humano." };
   if (!textoFinal) return { ok: true, accion: "omitido", motivo: "Sin texto de respuesta." };
 
   // El modelo no pone números: si su texto trae un importe que no es de la cotización de traslado
   // de este turno (en revisión, ninguno), el mensaje lo escribe el código.
-  textoFinal = textoSinImportesAjenos(textoFinal, ctx.cotizacionTraslado, agente, contactoInicial);
+  if (!decidioReserva) textoFinal = textoSinImportesAjenos(textoFinal, ctx.cotizacionTraslado, agente, contactoInicial);
 
   if (agente.firma) textoFinal = `${textoFinal}\n${agente.firma}`;
 
@@ -1368,16 +1390,25 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
   const ctx: Ctx = { sb, contacto, conv, agente, escalado: { v: false } };
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
   const empresa = await nombreEmpresa(sb);
-  const traslados = (await leerConfigIA(sb)).iaCotiza;
+  const cfgIA = await leerConfigIA(sb);
+  const traslados = cfgIA.iaCotiza;
+  // La reserva se prueba como la vería el cliente con el agente autónomo en WhatsApp; SIMULADA: no
+  // crea solicitudes, no lee comprobantes, no manda correos ni mensajes.
+  const autonomosP: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
+  const reservaPrueba = traslados && cfgIA.reservaIA && autonomosP.includes("whatsapp");
   // En la prueba, «primer mensaje del día» = el agente todavía no contestó en este chat de prueba
   // (y todo lo de ese chat es de la IA).
   const contestados = historial.filter((m) => m.role === "assistant").length;
   const saludo = saludoDelTurno({ alcanzadosHoy: contestados, iaHoy: contestados, textosCliente: [mensaje] });
-  const system = construirSystem(agente, contacto, conv, saludo, empresa, { traslados });
+  const system = construirSystem(agente, contacto, conv, saludo, empresa, { traslados, reserva: reservaPrueba });
   const messages: Anthropic.MessageParam[] = [...historial, { role: "user", content: mensaje }];
   const usadas: string[] = [];
+  /** Lo que «devolvieron» las herramientas de reserva simuladas (como `ctx.reserva.resultados`). */
+  const reservaResultados: ResultadoReservaIA[] = [];
   const textosCliente = messages.filter((m) => m.role === "user" && typeof m.content === "string").map((m) => m.content as string);
-  const herramientas = traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
+  const herramientas = reservaPrueba
+    ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO, ...HERRAMIENTAS_RESERVA]
+    : traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
   /** Lo que devolvió la última `cotizar_traslado` de prueba (como `ctx.cotizacionTraslado`). */
   let trasladoPrueba: ResultadoCotizarIA | null = null;
 
@@ -1404,14 +1435,25 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
             ? JSON.stringify({ ok: true, nota: "(simulado en prueba)" })
             : tu.name === "cotizar_traslado"
             ? (trasladoPrueba = await cotizarTrasladoDePrueba(sb, agente, tu.input, textosCliente, empresa)).respuestaModelo
+            : reservaPrueba && RESERVA_DE_PRUEBA[tu.name]
+            ? (() => { const r = RESERVA_DE_PRUEBA[tu.name](); reservaResultados.push(r); return r.respuestaModelo; })()
             : await ejecutarTool(tu.name, tu.input, ctx);
         results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
       }
       messages.push({ role: "user", content: results });
     }
-    // Como en un chat real: sin texto no hay nada que retocar; con texto, el final del código y la firma.
+    // Como en un chat real: primero el texto de la reserva (si decide), después el final del código y la firma.
+    let decidioReserva = false;
+    if (reservaPrueba) {
+      const tf = textoFinalReserva(textoFinal, reservaResultados, {
+        estilo: estiloDe(ajustesDe(agente)), numeroCotizacion: trasladoPrueba?.cotizacion ? "PRUEBA" : null,
+        hayCotizacionTraslado: !!trasladoPrueba?.cotizacion, derivacion: mensajeDerivacion(agente, contacto),
+        cotizoEnElTurno: !!trasladoPrueba?.cotizacion,
+      });
+      if (tf != null) { textoFinal = tf; decidioReserva = true; }
+    }
     if (textoFinal) {
-      textoFinal = textoSinImportesAjenos(textoFinal, trasladoPrueba, agente, contacto);
+      if (!decidioReserva) textoFinal = textoSinImportesAjenos(textoFinal, trasladoPrueba, agente, contacto);
       if (agente.firma) textoFinal = `${textoFinal}\n${agente.firma}`;
     }
     return { ok: true, texto: textoFinal, herramientas: [...new Set(usadas)] };
@@ -1428,9 +1470,25 @@ export async function vistaPreviaInstrucciones(): Promise<string | null> {
   const agente = data?.[0];
   if (!agente) return null;
   const contacto = { id: "ejemplo", nombre: "María Pérez", empresa: null, telefono: null };
-  const traslados = (await leerConfigIA(sb)).iaCotiza;
-  return construirSystem(agente, contacto, { id: "ejemplo", canal: "whatsapp" }, true, await nombreEmpresa(sb), { traslados });
+  const cfgIA = await leerConfigIA(sb);
+  const traslados = cfgIA.iaCotiza;
+  // La reserva va en las instrucciones como las recibiría un chat de WhatsApp con el agente autónomo.
+  const autonomos: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
+  const reserva = traslados && cfgIA.reservaIA && autonomos.includes("whatsapp");
+  return construirSystem(agente, contacto, { id: "ejemplo", canal: "whatsapp" }, true, await nombreEmpresa(sb), { traslados, reserva });
 }
+
+/**
+ * Las herramientas de reserva en la PRUEBA del agente: SIMULADAS. Devuelven la lista blanca de
+ * siempre y, en vez del mensaje con montos y cuentas, una línea que dice qué haría el sistema (en la
+ * prueba no hay cotización enviada que reservar). No escriben nada.
+ */
+const RESERVA_DE_PRUEBA: Record<string, () => ResultadoReservaIA> = {
+  reservar_traslado: () => ({ respuestaModelo: respuestaReservaParaModelo("pedir_pago", { numero: "PRUEBA" }), mensaje: "(Prueba) Aquí el sistema le enviaría al cliente el monto del adelanto, las cuentas de pago y el plazo de confirmación (o le pediría esperar a que un ejecutivo confirme la unidad)." }),
+  reportar_pago_traslado: () => ({ respuestaModelo: respuestaReservaParaModelo("comprobante_registrado", { numero: "PRUEBA" }), mensaje: "(Prueba) Aquí el sistema leería el comprobante, le confirmaría al cliente que lo recibió y avisaría a Tesorería para verificarlo en el banco." }),
+  politicas_reserva: () => ({ respuestaModelo: respuestaReservaParaModelo("enviar_politicas", { numero: "PRUEBA" }), mensaje: "(Prueba) Aquí el sistema le enviaría al cliente las políticas de reserva, cambios y cancelación de su cotización, al pie de la letra." }),
+  cancelar_reserva_traslado: () => ({ respuestaModelo: respuestaReservaParaModelo("cancelacion_registrada", { numero: "PRUEBA" }), mensaje: "(Prueba) Aquí el sistema registraría el pedido de cancelación con la hora del mensaje y un ejecutivo resolvería la devolución." }),
+};
 
 /**
  * `cotizar_traslado` en la PRUEBA del agente: cotiza con el motor de verdad (el mismo del
@@ -1496,5 +1554,18 @@ export async function trasladosActivosIA(): Promise<boolean | null> {
     return trasladosDeConfig(await leerConfigIA(db()));
   } catch {
     return null;
+  }
+}
+
+/**
+ * ¿La IA del CRM RESERVA traslados? Para /crm/agente (el auditor y Ajustes): `reserva` es
+ * `estadoReservaIA(...).activa` (null si no se pudo leer: no se afirma nada) y `politica_reserva`
+ * las líneas distintas de la política de las plantillas que usa la IA. Nunca lanza.
+ */
+export async function reservaActivaIA(): Promise<{ reserva: boolean | null; politica_reserva: string[] | null; lineas: string[] | null; ambar: boolean | null }> {
+  try {
+    return await reservaEstadoIA(db());
+  } catch {
+    return { reserva: null, politica_reserva: null, lineas: null, ambar: null };
   }
 }
