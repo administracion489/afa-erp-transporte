@@ -1,0 +1,734 @@
+// ──────────────────────────────────────────────────────────────────────────────
+// lib/traslados/reserva-pago.ts — La RESERVA de un traslado que cotizó la IA del CRM: cuánto es el
+// adelanto, a qué cuentas se paga, qué le falta a cada solicitud y quién lo tiene que hacer, el
+// comprobante del cargo retenido y los TEXTOS que le manda el código al cliente (T1–T11). PURO: no
+// lee la base, no manda nada.
+//
+// LAS REGLAS QUE NO SE AFLOJAN:
+//  1. UN MONTO, UNA FILA AUTORITATIVA. El precio vive en `cotizaciones`; el adelanto se DERIVA con
+//     la MISMA cuenta que imprime el PDF (`cifrasDeFila` → `totalesEnMoneda`), así el chat y el
+//     documento dicen el mismo total al céntimo. Lo cobrado y lo devuelto viven en `pagos`
+//     (`sentido` cobro / pago): se suman al leer y no se guardan. Una DEVOLUCIÓN nunca suma al
+//     adelanto (`dineroDeSolicitud`).
+//  2. LAS CUENTAS DEL CHAT SON LAS DEL PDF: `cuentasCorporativo` + `cuentasDoc`, la misma fuente y
+//     el mismo filtro por moneda. Nunca un literal.
+//  3. EL ERP NO EMITE ANTE SUNAT. El cargo de una cancelación tardía se arma como fila de `facturas`
+//     SIN número (`filaFacturaCargo`): estado y sunat_estado «pendiente», serie y número los escribe
+//     quien lo emite. El IGV de ese cargo NO se decide aquí: subtotal = total, IGV 0, y la
+//     observación pide revisarlo con contabilidad. `total` es una columna GENERADA (subtotal + igv)
+//     en producción: no va en la fila (insertarlo falla); se devuelve aparte.
+//  4. LOS TEXTOS SON DE USTED Y DE TÚ, cada uno escrito entero (`estilo`, el mismo ajuste del agente),
+//     sin un solo dato de la empresa escrito aquí: las cuentas y el correo salen de la configuración.
+// Matriz: npx tsx scripts/prueba-reserva-pago.mts
+// ──────────────────────────────────────────────────────────────────────────────
+
+import { cifrasDeFila, type FilaCotizacionLeida } from "./cotizacion-traslado";
+import { normalizarMoneda, revisarTipoCambio, type Moneda } from "../cotizacion-moneda";
+import { fmtImporte } from "../cotizacion-idioma";
+import { cuentasCorporativo, cuentasDoc } from "../cotizacion-corporativo";
+import type { AvisoPdf, PlantillaPdfCfg } from "../cotizacion-pdf";
+import type { CuentaBancaria, PerfilEmpresa } from "../empresa-perfil";
+import { rucValido } from "../combustible/grifo-canonico";
+import { aLas, describirAtencion, type Atencion } from "../crm-ia-atencion";
+import { minutoDelDiaLima, minutosAHhmm, fechaLima } from "../alertas-horario";
+import type { EstiloMensajes } from "../crm-ia-ajustes";
+import { MARGEN_DEFECTO_MIN, PLAZO_CONFIRMACION_DEFECTO_MIN } from "./reserva-orden";
+import { correosDeTexto } from "../ocupacion/copia-interna";
+
+const r2 = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 100) / 100;
+const num = (v: unknown): number | null => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") { const n = Number(v.trim()); return Number.isFinite(n) ? n : null; }
+  return null;
+};
+const txt = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
+const esTu = (e: EstiloMensajes | null | undefined) => e?.tratamiento === "tu";
+
+// ── 1. Estados y configuración ───────────────────────────────────────────────
+
+export type EstadoSolicitud = "esperando_pago" | "por_confirmar" | "pago_reportado" | "confirmada" | "sin_unidad" | "cancelada" | "completada";
+export const ESTADOS_SOLICITUD: readonly EstadoSolicitud[] = ["esperando_pago", "por_confirmar", "pago_reportado", "confirmada", "sin_unidad", "cancelada", "completada"];
+/** Los que no se reabren (pueden tener aún dinero por devolver o un cargo por emitir: ver `queFalta`). */
+export const ESTADOS_TERMINALES: readonly EstadoSolicitud[] = ["sin_unidad", "cancelada", "completada"];
+export const esEstadoTerminal = (e: EstadoSolicitud) => ESTADOS_TERMINALES.includes(e);
+
+/**
+ * A dónde puede pasar cada estado. Sin entrada = terminal. Lo de la tarjeta del ejecutivo, del
+ * cliente y del tick sale de aquí:
+ *  · esperando_pago → pago_reportado (manda el comprobante) · confirmada («Hay unidad») ·
+ *    sin_unidad («No hay unidad») · cancelada (desistió, duplicada, o el tick la da por vencida).
+ *  · por_confirmar → pago_reportado (pagó igual) · confirmada · sin_unidad · cancelada.
+ *  · pago_reportado → esperando_pago («Pedir otro comprobante», «No encontré el pago») · confirmada ·
+ *    sin_unidad · cancelada.
+ *  · confirmada → completada (Confirmación de Reserva enviada) · sin_unidad · cancelada.
+ */
+export const TRANSICIONES: Record<EstadoSolicitud, readonly EstadoSolicitud[]> = {
+  esperando_pago: ["pago_reportado", "confirmada", "sin_unidad", "cancelada"],
+  por_confirmar: ["pago_reportado", "confirmada", "sin_unidad", "cancelada"],
+  pago_reportado: ["esperando_pago", "confirmada", "sin_unidad", "cancelada"],
+  confirmada: ["completada", "sin_unidad", "cancelada"],
+  sin_unidad: [],
+  cancelada: [],
+  completada: [],
+};
+export const puedePasar = (de: EstadoSolicitud, a: EstadoSolicitud): boolean => (TRANSICIONES[de] ?? []).includes(a);
+
+export type ConfigReserva = {
+  /** `traslados_config.reserva_ia`: la IA puede reservar. Sin la migración, false. */
+  activa: boolean;
+  /** % del total que se pide como adelanto (0 < pct ≤ 100). null = no configurado. */
+  adelantoPct: number | null;
+  /** A quién va el correo del pago reportado (texto: varias direcciones). null = el del perfil. */
+  correo: string | null;
+  /** P: minutos DE ATENCIÓN para confirmar (15..1440). */
+  plazoConfirmacionMin: number;
+  /** M: minutos reales entre la confirmación y el servicio (0..4320). */
+  margenMin: number;
+  /** Lo que se le promete para devolver (1..720 h). null = no se promete un plazo. */
+  devolucionPlazoH: number | null;
+};
+
+export const CONFIG_RESERVA_DEFECTO: ConfigReserva = {
+  activa: false, adelantoPct: null, correo: null,
+  plazoConfirmacionMin: PLAZO_CONFIRMACION_DEFECTO_MIN, margenMin: MARGEN_DEFECTO_MIN, devolucionPlazoH: null,
+};
+
+const enRango = (v: unknown, min: number, max: number): number | null => {
+  const n = num(v);
+  return n != null && n >= min && n <= max ? n : null;
+};
+
+/**
+ * La configuración desde la fila de `traslados_config` (columnas `reserva_*` de traslados-09). Sin
+ * las columnas (undefined) o con un valor fuera del rango de la migración, el defecto: apagada, sin
+ * porcentaje, P = 120, M = 360. Solo `true` enciende.
+ */
+export function normalizarConfigReserva(raw: Record<string, unknown> | null | undefined): ConfigReserva {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const pct = num(r.reserva_adelanto_pct);
+  const P = enRango(r.reserva_plazo_confirmacion_min, 15, 1440);
+  const M = enRango(r.reserva_margen_min, 0, 4320);
+  const h = enRango(r.reserva_devolucion_plazo_h, 1, 720);
+  const correo = txt(r.reserva_correo);
+  return {
+    activa: r.reserva_ia === true,
+    adelantoPct: pct != null && pct > 0 && pct <= 100 ? r2(pct) : null,
+    correo: correo || null,
+    plazoConfirmacionMin: P != null ? Math.round(P) : PLAZO_CONFIRMACION_DEFECTO_MIN,
+    margenMin: M != null ? Math.round(M) : MARGEN_DEFECTO_MIN,
+    devolucionPlazoH: h != null ? Math.round(h) : null,
+  };
+}
+
+// ── 2. El adelanto: la MISMA cuenta del PDF ──────────────────────────────────
+
+export type Adelanto = { moneda: Moneda; total: number; adelanto: number | null; saldo: number | null };
+
+/**
+ * El total que imprime el PDF de la cotización (`cifrasDeFila`, la última figura) y el adelanto del
+ * `pct` %, en la moneda de la cotización y redondeados al céntimo: `adelanto + saldo = total` exacto.
+ * `pct` null (crédito) o fuera de (0, 100] → sin adelanto ni saldo. null si los importes no se pueden
+ * imprimir (sin ítems, dólares sin tipo de cambio).
+ */
+export function adelantoDe(
+  fila: Pick<FilaCotizacionLeida, "items_json" | "moneda" | "tipo_cambio" | "incluye_igv">,
+  pct: number | null,
+): Adelanto | null {
+  const c = cifrasDeFila({ ...fila, traslado_json: null });
+  if (!c || !c.figuras.length) return null;
+  const total = r2(c.figuras[c.figuras.length - 1]);
+  if (!(total > 0)) return null;
+  const moneda = normalizarMoneda(fila.moneda);
+  if (typeof pct !== "number" || !Number.isFinite(pct) || pct <= 0 || pct > 100) return { moneda, total, adelanto: null, saldo: null };
+  const adelanto = r2((total * pct) / 100);
+  return { moneda, total, adelanto, saldo: r2(total - adelanto) };
+}
+
+/**
+ * La firma de lo que se le COMUNICÓ al cliente (total, porcentaje, adelanto y saldo, en su moneda).
+ * Se guarda en la solicitud: si alguien corrige la cotización después, la firma ya no coincide y se
+ * sabe que el monto que tiene el cliente no es el de hoy. Estable: no depende del orden de los
+ * campos ni del formato. null si no hay importes.
+ */
+export function firmaImportes(fila: Pick<FilaCotizacionLeida, "items_json" | "moneda" | "tipo_cambio" | "incluye_igv">, pct: number | null): string | null {
+  const a = adelantoDe(fila, pct);
+  if (!a) return null;
+  return ["r1", a.moneda, a.total.toFixed(2), a.adelanto == null ? "credito" : r2(Number(pct)).toFixed(2), a.adelanto?.toFixed(2) ?? "", a.saldo?.toFixed(2) ?? ""].join("|");
+}
+
+/** Un importe para el cliente: el mismo formato del PDF, al céntimo. */
+export const dinero = (n: number, moneda: Moneda): string => fmtImporte(r2(n), moneda, "es");
+
+/** «50» o «12.5»: el porcentaje sin ceros de sobra. */
+export const fmtPct = (p: number): string => String(r2(p));
+
+// ── 3. Las cuentas del chat: las del PDF ─────────────────────────────────────
+
+export type CuentasMensaje = { cuentas: CuentaBancaria[]; lineas: string[]; aviso: AvisoPdf | null };
+
+/**
+ * Las cuentas que se le mandan al cliente, en la moneda de la cotización: EXACTAMENTE las que
+ * imprime el bloque de cuentas del PDF (`cuentasCorporativo` con la plantilla de la cotización y el
+ * perfil, y `cuentasDoc` para el texto). Una línea por cuenta: «• BCP · S/ · Cta: … · CCI: …».
+ * `cfg` tiene que ser la MISMA que recibe el PDF: la `usada` de `plantillaYReferenciaCuentas`
+ * (lib/traslados/enviar-cotizacion-datos.ts), y la elegibilidad exige además que esas cuentas sean
+ * las de «corporativo» (`cuentasFrenteACorporativo` → `cuentas_distintas`).
+ */
+export function cuentasEnMensaje(cfg: PlantillaPdfCfg | null | undefined, empresa: PerfilEmpresa | null | undefined, moneda: Moneda): CuentasMensaje {
+  const r = cuentasCorporativo(cfg, empresa, normalizarMoneda(moneda));
+  const doc = cuentasDoc(r.cuentas, "es");
+  const lineas = (doc?.items ?? []).map((c) => `• ${[c.banco, ...c.lineas].map(txt).filter(Boolean).join(" · ")}`);
+  return { cuentas: r.cuentas, lineas, aviso: r.aviso };
+}
+
+// ── 4. El dinero de una solicitud ────────────────────────────────────────────
+
+export type PagoSolicitud = { sentido?: string | null; monto?: number | string | null; moneda?: string | null; anulado?: boolean | null };
+
+/**
+ * Lo cobrado (sentido «cobro») y lo devuelto (sentido «pago») en la moneda de la reserva, sin
+ * anulados. Un movimiento sin sentido no cuenta para ninguno de los dos: una devolución que suma
+ * como adelanto es plata que se le pide dos veces al cliente.
+ */
+export function dineroDeSolicitud(pagos: readonly PagoSolicitud[] | null | undefined, moneda: Moneda): { cobrado: number; devuelto: number } {
+  let cobrado = 0, devuelto = 0;
+  for (const p of pagos ?? []) {
+    if (!p || p.anulado === true) continue;
+    const m = num(p.monto);
+    if (m == null || !(m > 0) || normalizarMoneda(p.moneda) !== normalizarMoneda(moneda)) continue;
+    if (p.sentido === "cobro") cobrado += m;
+    else if (p.sentido === "pago") devuelto += m;
+  }
+  return { cobrado: r2(cobrado), devuelto: r2(devuelto) };
+}
+
+/** Lo que se devuelve con un porcentaje decidido sobre lo cobrado. */
+export function devolucionDecidida(cobrado: number, pct: number): number {
+  const c = Math.max(0, Number(cobrado) || 0);
+  const p = Math.min(100, Math.max(0, Number(pct) || 0));
+  return r2((c * p) / 100);
+}
+
+/**
+ * Lo que la empresa RETIENE de lo cobrado: cobrado − devuelto (lo devuelto o lo que se decidió
+ * devolver), nunca negativo. Es el total del comprobante del cargo.
+ */
+export function cargoRetenido(x: { cobrado: number; devuelto: number }): number {
+  const c = Number(x.cobrado), d = Number(x.devuelto);
+  if (!Number.isFinite(c) || !Number.isFinite(d)) return 0;
+  return Math.max(0, r2(c - d));
+}
+
+// ── 5. Qué le falta a una solicitud, y quién lo hace ─────────────────────────
+
+export type CodigoPendiente =
+  | "pagar" | "confirmar_disponibilidad" | "verificar_pago" | "completar_adelanto" | "vincular_cliente"
+  | "emitir_confirmacion" | "enviar_confirmacion" | "cancelar_en_programacion" | "registrar_devolucion"
+  | "emitir_cargo" | "resolver_cancelacion" | "crear_reserva";
+
+export type QuienPendiente = "cliente" | "crm" | "tesoreria" | "programacion" | "facturacion";
+
+export type Pendiente = { codigo: CodigoPendiente; quien: QuienPendiente; detalle: string; vence?: string | null };
+
+export type SolicitudVista = {
+  estado: EstadoSolicitud;
+  orden?: "pago_primero" | "disponibilidad_primero" | null;
+  /** null = crédito (no se pide adelanto). */
+  adelanto_pct: number | null;
+  confirmar_antes_de?: string | null;
+  /** El cliente pidió cancelar y la solicitud sigue abierta: lo resuelve un ejecutivo. */
+  cancelacion_pedida_en?: string | null;
+  devolucion_pct?: number | null;
+  /** Comprobantes que el cliente mandó por el chat (registrados en la solicitud). */
+  comprobantes?: number | null;
+};
+
+const SIN_TC_DETALLE = "El adelanto no se puede calcular (la cotización en dólares no tiene un tipo de cambio válido): corrígela en /cotizaciones.";
+
+/**
+ * Lo que le falta a la solicitud, en orden, cada cosa con su dueño. Una solicitud ABIERTA tiene
+ * siempre al menos una; una COMPLETADA, ninguna; una CANCELADA o SIN UNIDAD, solo lo que queda de
+ * dinero (devolver, emitir el cargo) y de la reserva en Programación — saldado eso, ninguna.
+ * `x.adelanto` es el monto (de `adelantoDe` con `s.adelanto_pct`); `x.devuelto` lo REGISTRADO.
+ */
+export function queFalta(
+  s: SolicitudVista,
+  x: {
+    cobrado: number;
+    devuelto: number;
+    adelanto: number | null;
+    reserva: { id: number; estado: string; cliente_id: number | null } | null;
+    confirmacionEnviada: boolean;
+    /** Ya se emitió (al menos una versión) la Confirmación de Reserva. Sin el dato, = `confirmacionEnviada`. */
+    confirmacionEmitida?: boolean;
+    cargo: { id: number; numero: string | null } | null;
+    /** Para escribir los importes en el detalle. Sin ella, soles. */
+    moneda?: Moneda;
+  },
+): Pendiente[] {
+  const out: Pendiente[] = [];
+  const mon = normalizarMoneda(x.moneda);
+  const cobrado = Math.max(0, Number(x.cobrado) || 0);
+  const devuelto = Math.max(0, Number(x.devuelto) || 0);
+  if (s.estado === "completada") return out;
+
+  if (s.estado === "cancelada" || s.estado === "sin_unidad") {
+    if (x.reserva && x.reserva.estado !== "cancelada") {
+      out.push({ codigo: "cancelar_en_programacion", quien: "programacion", detalle: "La reserva sigue viva en Programación: cancélala ahí (ahí se decide qué pasa con su importe)." });
+    }
+    if (cobrado > 0) {
+      const pct = s.estado === "sin_unidad" ? 100 : s.devolucion_pct;
+      if (pct == null || !Number.isFinite(Number(pct))) {
+        out.push({ codigo: "resolver_cancelacion", quien: "crm", detalle: `Hay ${dinero(cobrado, mon)} cobrados: elige cuánto se devuelve según las políticas de reserva y cancelación.` });
+      } else {
+        const aDevolver = devolucionDecidida(cobrado, Number(pct));
+        if (devuelto + 0.005 < aDevolver) {
+          out.push({ codigo: "registrar_devolucion", quien: "tesoreria", detalle: `Falta devolver ${dinero(aDevolver - devuelto, mon)} (de ${dinero(aDevolver, mon)}): transfiérelo y regístralo como devolución.` });
+        }
+        if (cargoRetenido({ cobrado, devuelto: aDevolver }) > 0) {
+          if (!x.cargo) out.push({ codigo: "emitir_cargo", quien: "facturacion", detalle: "Falta el comprobante del cargo retenido: no se llegó a crear. Créalo en /facturacion." });
+          else if (!txt(x.cargo.numero)) out.push({ codigo: "emitir_cargo", quien: "facturacion", detalle: "El comprobante del cargo retenido está creado sin número: emítelo ante SUNAT y escribe su serie y número en /facturacion." });
+        }
+      }
+    }
+    return out;
+  }
+
+  // Abiertas.
+  const vence = s.confirmar_antes_de ?? null;
+  if (txt(s.cancelacion_pedida_en)) {
+    out.push({ codigo: "resolver_cancelacion", quien: "crm", detalle: "El cliente pidió cancelar: decide cuánto se devuelve según las políticas y las horas de anticipación." });
+    return out;
+  }
+  const credito = s.adelanto_pct == null;
+  const adelanto = x.adelanto;
+  const pagado = credito || (adelanto != null && cobrado + 0.005 >= adelanto);
+  const reportado = Number(s.comprobantes ?? 0) > 0;
+  const pagoPendiente = (): Pendiente => {
+    if (adelanto == null) return { codigo: "pagar", quien: "crm", detalle: SIN_TC_DETALLE };
+    if (cobrado > 0) return { codigo: "completar_adelanto", quien: "cliente", detalle: `Pagó ${dinero(cobrado, mon)}; faltan ${dinero(adelanto - cobrado, mon)} para completar el adelanto.` };
+    if (reportado) return { codigo: "verificar_pago", quien: "tesoreria", detalle: "El cliente reportó un pago: verifícalo en el banco y regístralo como adelanto. No lo registres sin ver el dinero en la cuenta." };
+    return { codigo: "pagar", quien: "cliente", detalle: `Esperando el adelanto de ${dinero(adelanto, mon)}.` };
+  };
+  const confirmar: Pendiente = { codigo: "confirmar_disponibilidad", quien: "crm", detalle: "Confirma si hay una unidad disponible («Hay unidad» / «No hay unidad»).", vence };
+
+  if (s.estado === "esperando_pago") {
+    out.push(pagado ? confirmar : pagoPendiente());
+    return out;
+  }
+  if (s.estado === "por_confirmar") {
+    out.push(confirmar);
+    if (!pagado && reportado) out.push(pagoPendiente());
+    return out;
+  }
+  if (s.estado === "pago_reportado") {
+    if (!pagado) out.push(pagoPendiente());
+    out.push(confirmar);
+    return out;
+  }
+  // confirmada
+  if (!x.reserva) out.push({ codigo: "crear_reserva", quien: "crm", detalle: "La reserva no se llegó a crear en Programación: vuelve a pulsar «Hay unidad» o créala desde /cotizaciones (→ Res.)." });
+  if (!pagado) out.push(pagoPendiente());
+  if (x.reserva && x.reserva.cliente_id == null) out.push({ codigo: "vincular_cliente", quien: "crm", detalle: "La reserva no tiene cliente del ERP: vincúlalo al contacto (la Confirmación de Reserva lo exige)." });
+  if (pagado && x.reserva && x.reserva.cliente_id != null) {
+    const emitida = x.confirmacionEmitida ?? x.confirmacionEnviada;
+    if (!emitida) out.push({ codigo: "emitir_confirmacion", quien: "crm", detalle: "Emite la Confirmación de Reserva." });
+    else out.push({
+      codigo: "enviar_confirmacion", quien: "crm",
+      detalle: x.confirmacionEnviada
+        ? "La Confirmación de Reserva ya se envió: cierra la solicitud desde la tarjeta."
+        : "Envía la Confirmación de Reserva por WhatsApp (dentro de las 24 h de la conversación) o descárgala y envíala por wa.me.",
+    });
+  }
+  return out;
+}
+
+// ── 6. ¿La política escrita contradice la configuración? ─────────────────────
+
+export type ContradiccionPolitica = { linea: string; codigo: "adelanto_pct" | "plazo_devolucion"; leido: number; config: number };
+
+const sinTildes = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+const PCT_ADELANTO = [
+  /(\d+(?:[.,]\d+)?)\s*(?:%|por\s*ciento)\s+(?:[a-z]+\s+){0,3}?(?:de|del|como)\s+(?:adelanto|anticipo)\b/g,
+  /\b(?:adelanto|anticipo)\s+(?:[a-z]+\s+){0,3}?(?:de|del)\s+(\d+(?:[.,]\d+)?)\s*(?:%|por\s*ciento)/g,
+];
+const PLAZO_DEVOLUCION = /\bm[aá]x(?:imo|\.)?\s*(?:de\s+)?(\d+)\s*(?:h|hrs?|horas?)\b/g;
+
+/**
+ * Las líneas de la política (la que se le envía al cliente al pie de la letra) que dicen OTRO
+ * porcentaje de adelanto, u otro plazo máximo de devolución, que la configuración. Solo cuenta un
+ * porcentaje pegado a «adelanto» / «anticipo» («50 % de adelanto», «adelanto del 50 %»): el 10 % de
+ * un cargo o el 100 % de una devolución no son el adelanto.
+ */
+export function politicaContradiceConfig(
+  lineas: readonly unknown[] | null | undefined,
+  cfg: Pick<ConfigReserva, "adelantoPct" | "devolucionPlazoH">,
+): ContradiccionPolitica[] {
+  const out: ContradiccionPolitica[] = [];
+  for (const l of lineas ?? []) {
+    const linea = txt(l);
+    if (!linea) continue;
+    const t = sinTildes(linea);
+    if (cfg.adelantoPct != null) {
+      for (const re of PCT_ADELANTO) {
+        re.lastIndex = 0;
+        for (const m of t.matchAll(re)) {
+          const n = Number(m[1].replace(",", "."));
+          if (Number.isFinite(n) && Math.abs(n - cfg.adelantoPct) > 1e-9) out.push({ linea, codigo: "adelanto_pct", leido: n, config: cfg.adelantoPct });
+        }
+      }
+    }
+    if (cfg.devolucionPlazoH != null && /devol/.test(t)) {
+      PLAZO_DEVOLUCION.lastIndex = 0;
+      for (const m of t.matchAll(PLAZO_DEVOLUCION)) {
+        const n = Number(m[1]);
+        if (Number.isFinite(n) && n !== cfg.devolucionPlazoH) out.push({ linea, codigo: "plazo_devolucion", leido: n, config: cfg.devolucionPlazoH });
+      }
+    }
+  }
+  return out;
+}
+
+// ── 7. El comprobante del cargo retenido (fila de `facturas`) ────────────────
+
+export type ItemFacturaCargo = { descripcion: string; cantidad: 1; precio_unit: number; total: number };
+
+/**
+ * La fila de `facturas` del cargo retenido, SIN `total` (columna generada: subtotal + igv). Las
+ * columnas verificadas contra producción (22-10-2026): `fecha_emision` es NOT NULL (va la fecha en
+ * que el ERP lo arma; quien lo emite la corrige) y `serie` tiene defecto 'F001' (va null a propósito:
+ * una boleta no es F001 y la serie la escribe quien lo emite).
+ */
+export type FilaFacturaCargo = {
+  cliente_id: number | null;
+  cotizacion_id: number;
+  reserva_id: number | null;
+  tipo_comprobante: "factura" | "boleta";
+  serie: null;
+  numero: null;
+  fecha_emision: string;
+  moneda: Moneda;
+  tipo_cambio: number | null;
+  subtotal: number;
+  igv: 0;
+  estado: "pendiente";
+  sunat_estado: "pendiente";
+  items_json: ItemFacturaCargo[];
+  observaciones: string;
+};
+
+/** Lo que se escribe en las observaciones del cargo para encontrarlo después (idempotencia). */
+export const marcaCargoReserva = (solicitudId: number | string): string => `Solicitud de reserva #${txt(solicitudId)}`;
+
+export const OBSERVACION_IGV_CARGO = "Revisar con contabilidad el tratamiento del IGV de este cargo.";
+
+const fechaDdMmAaaa = (iso: string | null | undefined): string | null =>
+  iso && /^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : null;
+const horaHhMm = (h: string | null | undefined): string | null => {
+  const m = /^(\d{1,2}):(\d{2})/.exec(txt(h));
+  return m && Number(m[1]) <= 23 && Number(m[2]) <= 59 ? `${m[1].padStart(2, "0")}:${m[2]}` : null;
+};
+
+/**
+ * El comprobante del cargo de una cancelación con devolución menor al 100 % (decisión del dueño):
+ * total = lo retenido (`cargoRetenido`), en la moneda y al tipo de cambio de la cotización; factura
+ * si el cliente tiene un RUC válido, si no boleta. null si no se retiene nada. No toca la reserva
+ * ni `planDeCancelacion`: es un documento aparte.
+ */
+export function filaFacturaCargo(x: {
+  solicitudId: number | string;
+  cotizacion: { id: number; numero: string; moneda?: string | null; tipo_cambio?: number | string | null };
+  cliente: { id: number; ruc?: string | null } | null;
+  reservaId: number | null;
+  cobrado: number;
+  /** Lo devuelto o lo que se decidió devolver. */
+  devuelto: number;
+  hoy: string;
+  servicio?: { fecha?: string | null; hora?: string | null } | null;
+}): { fila: FilaFacturaCargo; total: number } | null {
+  const total = cargoRetenido({ cobrado: x.cobrado, devuelto: x.devuelto });
+  if (!(total > 0)) return null;
+  const moneda = normalizarMoneda(x.cotizacion.moneda);
+  const rucTxt = txt(x.cliente?.ruc);
+  const ruc = rucValido(rucTxt);
+  const f = fechaDdMmAaaa(x.servicio?.fecha), h = horaHhMm(x.servicio?.hora);
+  const servicio = f ? ` (servicio del ${f}${h ? ` a las ${h}` : ""})` : "";
+  const descripcion = `Cargo por cancelación de la reserva de traslado de la cotización N° ${txt(x.cotizacion.numero)}${servicio}`;
+  const notas = [
+    OBSERVACION_IGV_CARGO,
+    `${marcaCargoReserva(x.solicitudId)}: cobrado ${dinero(x.cobrado, moneda)}, devuelto ${dinero(x.devuelto, moneda)}, retenido ${dinero(total, moneda)}.`,
+    "Lo armó el ERP sin número: la serie, el número y el envío a SUNAT los hace quien lo emite.",
+  ];
+  if (rucTxt && !ruc) notas.push(`El RUC del cliente («${rucTxt.slice(0, 20)}») no es válido: se armó como boleta. Corrige el RUC en /clientes y cambia el tipo si corresponde.`);
+  return {
+    total,
+    fila: {
+      cliente_id: x.cliente?.id ?? null,
+      cotizacion_id: x.cotizacion.id,
+      reserva_id: x.reservaId ?? null,
+      tipo_comprobante: ruc ? "factura" : "boleta",
+      serie: null,
+      numero: null,
+      fecha_emision: x.hoy,
+      moneda,
+      tipo_cambio: moneda === "USD" ? revisarTipoCambio(x.cotizacion.tipo_cambio).tc : 1,
+      subtotal: total,
+      igv: 0,
+      estado: "pendiente",
+      sunat_estado: "pendiente",
+      items_json: [{ descripcion, cantidad: 1, precio_unit: total, total }],
+      observaciones: notas.join(" "),
+    },
+  };
+}
+
+// ── 8. Los textos que le manda el código al cliente (T1–T11) ─────────────────
+// Cada uno de usted Y de tú, escritos enteros. Ningún dato de la empresa: las cuentas y el correo
+// llegan de la configuración. El código los arma; el modelo nunca escribe un importe ni una cuenta.
+
+/** «2 horas», «1 hora y 30 minutos», «45 minutos». */
+export function textoPlazoMinutos(min: number): string {
+  const m = Math.max(0, Math.round(Number(min) || 0));
+  const h = Math.floor(m / 60), r = m % 60;
+  const hs = h === 1 ? "1 hora" : `${h} horas`;
+  const ms = r === 1 ? "1 minuto" : `${r} minutos`;
+  if (h === 0) return ms;
+  return r ? `${hs} y ${ms}` : hs;
+}
+const textoHoras = (h: number) => (h === 1 ? "1 hora" : `${h} horas`);
+
+/** « del 25/12/2026 a las 15:00» (o solo la fecha, o nada). */
+function delCuando(fecha: string | null | undefined, hora: string | null | undefined): string {
+  const f = fechaDdMmAaaa(fecha), h = horaHhMm(hora);
+  if (!f) return "";
+  return h ? ` del ${f} a ${aLas(h)}` : ` del ${f}`;
+}
+
+export type BloquePago = { numero: string; moneda: Moneda; pct: number; adelanto: number; saldo: number; cuentas: readonly string[] };
+
+/** La primera parte de T1 (también va en T4 cuando primero se confirmó la unidad). */
+export function bloquePago(b: BloquePago, estilo: EstiloMensajes): string {
+  const tu = esTu(estilo);
+  // La misma idea que la política publicada («el 50 % restante se paga al iniciar el servicio»):
+  // el mensaje no puede contradecir la política que la IA envía.
+  const saldo = b.saldo > 0.004 ? ` El saldo, ${dinero(b.saldo, b.moneda)}, se paga al iniciar el servicio, cuando la unidad se presente en el punto de recojo.` : "";
+  const cuentas = b.cuentas.map(txt).filter(Boolean).join("\n");
+  return tu
+    ? `Para reservar tu traslado de la cotización N° ${b.numero} se abona el ${fmtPct(b.pct)} % del total como adelanto: *${dinero(b.adelanto, b.moneda)}*.${saldo}\nPuedes pagar a cualquiera de estas cuentas:\n${cuentas}`
+    : `Para reservar su traslado de la cotización N° ${b.numero} se abona el ${fmtPct(b.pct)} % del total como adelanto: *${dinero(b.adelanto, b.moneda)}*.${saldo}\nPuede pagar a cualquiera de estas cuentas:\n${cuentas}`;
+}
+
+/** T1 — pedir el pago (pago primero). */
+export function mensajePedirPago(x: BloquePago & { plazoMin: number; atencion: Atencion; estilo: EstiloMensajes }): string {
+  const plazo = textoPlazoMinutos(x.plazoMin);
+  const horario = describirAtencion(x.atencion);
+  return esTu(x.estilo)
+    ? `${bloquePago(x, x.estilo)}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante. Lo verificamos con el banco y te confirmamos la disponibilidad de la unidad en un máximo de ${plazo} dentro de nuestro horario de atención (${horario}). Si no hubiera una unidad disponible, te devolvemos el 100 % de lo pagado. Si deseas, te envío nuestras políticas de reserva, cambios y cancelación.`
+    : `${bloquePago(x, x.estilo)}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante. Lo verificamos con el banco y le confirmamos la disponibilidad de la unidad en un máximo de ${plazo} dentro de nuestro horario de atención (${horario}). Si no hubiera una unidad disponible, le devolvemos el 100 % de lo pagado. Si desea, le envío nuestras políticas de reserva, cambios y cancelación.`;
+}
+
+/** T2 — primero se confirma la unidad («no pague todavía»). Con crédito, sin adelanto. */
+export function mensajeDisponibilidadPrimero(x: {
+  fecha: string | null; hora: string | null; frasePlazo: string | null; pct: number | null; credito: boolean; estilo: EstiloMensajes;
+}): string {
+  const cuando = delCuando(x.fecha, x.hora);
+  const plazo = x.frasePlazo || "a la brevedad";
+  const pct = x.pct != null && Number.isFinite(x.pct) ? ` (${fmtPct(x.pct)} % del total)` : "";
+  if (esTu(x.estilo)) {
+    return x.credito
+      ? `Un ejecutivo confirma la disponibilidad de la unidad para tu traslado${cuando}, ${plazo}. En cuanto la confirme, te escribimos por este chat; tu pago se coordina según la condición de crédito acordada.`
+      : `Antes de pedirte el pago, un ejecutivo confirma la disponibilidad de la unidad para tu traslado${cuando}, ${plazo}. En cuanto la confirme, te enviamos por este chat el monto del adelanto${pct} y las cuentas. Por favor, no realices ningún pago todavía.`;
+  }
+  return x.credito
+    ? `Un ejecutivo confirma la disponibilidad de la unidad para su traslado${cuando}, ${plazo}. En cuanto la confirme, le escribimos por este chat; su pago se coordina según la condición de crédito acordada.`
+    : `Antes de pedirle el pago, un ejecutivo confirma la disponibilidad de la unidad para su traslado${cuando}, ${plazo}. En cuanto la confirme, le enviamos por este chat el monto del adelanto${pct} y las cuentas. Por favor, no realice ningún pago todavía.`;
+}
+
+/** Lo que T3 necesita del cotejo (lib/traslados/comprobante-pago.ts). */
+export type CotejoParaMensaje = {
+  codigos: readonly string[];
+  seguro: boolean;
+  /** Lo leído, YA normalizado (monto en número y operación sin símbolos). */
+  monto: number | null;
+  operacion: string | null;
+};
+
+/** T3 — comprobante recibido. Nombra el monto SOLO si la lectura es segura. */
+export function mensajeComprobanteRecibido(x: {
+  cotejo: CotejoParaMensaje;
+  /** El adelanto esperado (null con crédito). */
+  esperado: number | null;
+  moneda: Moneda;
+  frasePlazo: string | null;
+  /** La unidad ya está confirmada: lo que falta es verificar el pago y mandar la Confirmación. */
+  unidadConfirmada?: boolean;
+  estilo: EstiloMensajes;
+}): string {
+  const tu = esTu(x.estilo);
+  const c = x.cotejo;
+  const plazo = x.frasePlazo || "a la brevedad";
+  const tiene = (k: string) => c.codigos.includes(k);
+  if (tiene("ilegible") || tiene("no_es_comprobante") || (c.monto == null && !c.seguro)) {
+    return tu
+      ? "No pudimos leer el comprobante. ¿Nos envías una foto o captura donde se vean el monto, la fecha y el número de operación?"
+      : "No pudimos leer el comprobante. ¿Nos envía una foto o captura donde se vean el monto, la fecha y el número de operación?";
+  }
+  const duro = ["otra_moneda", "operacion_repetida", "fecha_futura"].some(tiene);
+  if (tiene("monto_menor") && !duro && c.monto != null && x.esperado != null) {
+    return tu
+      ? `Recibimos tu comprobante. En él leemos ${dinero(c.monto, x.moneda)} y el adelanto de tu reserva es ${dinero(x.esperado, x.moneda)}: un ejecutivo lo revisa con el banco y te escribe por este chat.`
+      : `Recibimos su comprobante. En él leemos ${dinero(c.monto, x.moneda)} y el adelanto de su reserva es ${dinero(x.esperado, x.moneda)}: un ejecutivo lo revisa con el banco y le escribe por este chat.`;
+  }
+  const de = c.seguro && c.monto != null ? ` de ${dinero(c.monto, x.moneda)}${c.operacion ? ` (operación N° ${c.operacion})` : ""}` : "";
+  if (x.unidadConfirmada) {
+    return tu
+      ? `Recibimos tu comprobante${de}. Lo verificamos con el banco y te enviamos la Confirmación de Reserva ${plazo}.`
+      : `Recibimos su comprobante${de}. Lo verificamos con el banco y le enviamos la Confirmación de Reserva ${plazo}.`;
+  }
+  return tu
+    ? `Recibimos tu comprobante${de}. Lo verificamos con el banco y te confirmamos la disponibilidad de la unidad ${plazo}. Si no hubiera una unidad disponible, te devolvemos el 100 % de lo pagado.`
+    : `Recibimos su comprobante${de}. Lo verificamos con el banco y le confirmamos la disponibilidad de la unidad ${plazo}. Si no hubiera una unidad disponible, le devolvemos el 100 % de lo pagado.`;
+}
+
+/** T11 — adelanto incompleto. */
+export function mensajeAdelantoIncompleto(x: { cobrado: number; falta: number; moneda: Moneda; estilo: EstiloMensajes }): string {
+  return esTu(x.estilo)
+    ? `Recibimos ${dinero(x.cobrado, x.moneda)}; para completar el adelanto de tu reserva faltan ${dinero(x.falta, x.moneda)}.`
+    : `Recibimos ${dinero(x.cobrado, x.moneda)}; para completar el adelanto de su reserva faltan ${dinero(x.falta, x.moneda)}.`;
+}
+
+export type PagoEnHayUnidad = "verificado" | "reportado" | "pedir" | "credito" | "incompleto";
+
+/** T4 — hay unidad. `pago` dice qué se le cuenta del pago; con «pedir» e «incompleto» va el bloque de pago. */
+export function mensajeHayUnidad(x: {
+  fecha: string | null; hora: string | null; origen: string; destino: string;
+  pago: PagoEnHayUnidad;
+  moneda: Moneda;
+  cobrado?: number;
+  /** Para «pedir» (el bloque de T1) e «incompleto» (las cuentas y lo que falta). */
+  bloque?: BloquePago | null;
+  estilo: EstiloMensajes;
+}): string {
+  const tu = esTu(x.estilo);
+  const ruta = [txt(x.origen), txt(x.destino)].filter(Boolean).join(" → ");
+  const base = tu
+    ? `Confirmamos que hay una unidad disponible para tu traslado${delCuando(x.fecha, x.hora)}${ruta ? ` (${ruta})` : ""}.`
+    : `Confirmamos que hay una unidad disponible para su traslado${delCuando(x.fecha, x.hora)}${ruta ? ` (${ruta})` : ""}.`;
+  const cobrado = Math.max(0, Number(x.cobrado) || 0);
+  switch (x.pago) {
+    case "verificado":
+      return tu
+        ? `${base} Recibimos tu adelanto de ${dinero(cobrado, x.moneda)}. En breve te enviamos la Confirmación de Reserva.`
+        : `${base} Recibimos su adelanto de ${dinero(cobrado, x.moneda)}. En breve le enviamos la Confirmación de Reserva.`;
+    case "reportado":
+      return tu
+        ? `${base} Tu reserva queda confirmada en cuanto validemos tu pago con el banco; entonces te enviamos la Confirmación de Reserva.`
+        : `${base} Su reserva queda confirmada en cuanto validemos su pago con el banco; entonces le enviamos la Confirmación de Reserva.`;
+    case "credito":
+      return tu ? `${base} En breve te enviamos la Confirmación de Reserva.` : `${base} En breve le enviamos la Confirmación de Reserva.`;
+    case "incompleto": {
+      const b = x.bloque;
+      const falta = b ? Math.max(0, r2(b.adelanto - cobrado)) : 0;
+      const t11 = mensajeAdelantoIncompleto({ cobrado, falta, moneda: x.moneda, estilo: x.estilo });
+      const cuentas = (b?.cuentas ?? []).map(txt).filter(Boolean).join("\n");
+      return tu
+        ? `${base} ${t11}\nPuedes completarlo en cualquiera de estas cuentas:\n${cuentas}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante.`
+        : `${base} ${t11}\nPuede completarlo en cualquiera de estas cuentas:\n${cuentas}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante.`;
+    }
+    case "pedir":
+    default: {
+      const bloque = x.bloque ? bloquePago(x.bloque, x.estilo) : "";
+      return tu
+        ? `${base}\n${bloque}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante; lo verificamos con el banco y te enviamos la Confirmación de Reserva.`
+        : `${base}\n${bloque}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante; lo verificamos con el banco y le enviamos la Confirmación de Reserva.`;
+    }
+  }
+}
+
+/** T5 — no hay unidad. */
+export function mensajeSinUnidad(x: { fecha: string | null; hora: string | null; conPago: boolean; plazoH: number | null; estilo: EstiloMensajes }): string {
+  const cuando = delCuando(x.fecha, x.hora);
+  const plazo = x.plazoH != null && x.plazoH > 0 ? ` en un máximo de ${textoHoras(Math.round(x.plazoH))}` : "";
+  if (esTu(x.estilo)) {
+    return x.conPago
+      ? `Lamentamos informarte que no tenemos una unidad disponible para tu traslado${cuando}. Te devolvemos el 100 % de lo pagado${plazo}; te confirmamos por este chat cuando se realice.`
+      : `Lamentamos informarte que no tenemos una unidad disponible para tu traslado${cuando}. No realices ningún pago por esta cotización.`;
+  }
+  return x.conPago
+    ? `Lamentamos informarle que no tenemos una unidad disponible para su traslado${cuando}. Le devolvemos el 100 % de lo pagado${plazo}; le confirmamos por este chat cuando se realice.`
+    : `Lamentamos informarle que no tenemos una unidad disponible para su traslado${cuando}. No realice ningún pago por esta cotización.`;
+}
+
+/** Las horas ENTERAS de anticipación con que llegó el pedido de cancelación (negativas: después del inicio). */
+export function horasDeAnticipacion(pedidaMs: number, inicioMs: number | null): number | null {
+  if (!Number.isFinite(pedidaMs) || inicioMs == null || !Number.isFinite(inicioMs)) return null;
+  return Math.floor((inicioMs - pedidaMs) / 3_600_000);
+}
+
+/** T6 — cancelación registrada (con pago o con la unidad confirmada). Sin pago: `mensajeCanceladaSinPago`. */
+export function mensajeCancelacionRegistrada(x: { fecha: string | null; hora: string | null; pedidaMs: number; inicioMs: number | null; estilo: EstiloMensajes }): string {
+  const cuando = delCuando(x.fecha, x.hora);
+  const dia = fechaLima(x.pedidaMs);
+  const recibido = `, recibido el ${dia.slice(8, 10)}/${dia.slice(5, 7)} a ${aLas(minutosAHhmm(minutoDelDiaLima(x.pedidaMs)))}`;
+  let antes = "";
+  if (x.inicioMs != null && Number.isFinite(x.inicioMs)) {
+    const diffMs = x.inicioMs - x.pedidaMs;
+    const n = Math.floor(diffMs / 3_600_000);
+    antes = diffMs <= 0 ? ", después de la hora de inicio del servicio"
+      : n < 1 ? ", menos de una hora antes del inicio del servicio"
+      : `, ${textoHoras(n)} antes del inicio del servicio`;
+  }
+  return esTu(x.estilo)
+    ? `Registré tu pedido de cancelación de la reserva de tu traslado${cuando}${recibido}${antes}. Un ejecutivo te confirma por este chat lo que corresponde según nuestras políticas de reserva y cancelación.`
+    : `Registré su pedido de cancelación de la reserva de su traslado${cuando}${recibido}${antes}. Un ejecutivo le confirma por este chat lo que corresponde según nuestras políticas de reserva y cancelación.`;
+}
+
+/** T6, sin ningún pago ni comprobante: la solicitud se cierra sola. */
+export function mensajeCanceladaSinPago(x: { numero: string; estilo: EstiloMensajes }): string {
+  return esTu(x.estilo)
+    ? `Listo, anulamos tu pedido de reserva de la cotización N° ${x.numero}. Si deseas volver a reservar, escríbenos por este chat.`
+    : `Listo, anulamos su pedido de reserva de la cotización N° ${x.numero}. Si desea volver a reservar, escríbanos por este chat.`;
+}
+
+/** T7 — cancelación resuelta por el ejecutivo. `monto` es lo que se devuelve. */
+export function mensajeCancelacionResuelta(x: { monto: number; pct: number; moneda: Moneda; plazoH: number | null; estilo: EstiloMensajes }): string {
+  const tu = esTu(x.estilo);
+  if (!(x.monto > 0.004) || !(x.pct > 0)) {
+    return tu
+      ? "Tu reserva quedó cancelada. Según nuestras políticas de cancelación, en este caso no corresponde devolución."
+      : "Su reserva quedó cancelada. Según nuestras políticas de cancelación, en este caso no corresponde devolución.";
+  }
+  const plazo = x.plazoH != null && x.plazoH > 0 ? ` en un máximo de ${textoHoras(Math.round(x.plazoH))}` : "";
+  return tu
+    ? `Tu reserva quedó cancelada. Te devolvemos ${dinero(x.monto, x.moneda)} (${fmtPct(x.pct)} % de lo pagado)${plazo}.`
+    : `Su reserva quedó cancelada. Le devolvemos ${dinero(x.monto, x.moneda)} (${fmtPct(x.pct)} % de lo pagado)${plazo}.`;
+}
+
+/**
+ * T8 — las políticas, al pie de la letra (las de la cotización). El correo, solo si el del perfil es
+ * una dirección. null sin políticas (no se manda una lista vacía).
+ */
+export function mensajePoliticas(x: { numero: string; lineas: readonly unknown[]; email: string | null; estilo: EstiloMensajes }): string | null {
+  const lineas = (x.lineas ?? []).map(txt).filter(Boolean);
+  if (!lineas.length) return null;
+  const correo = correosDeTexto(x.email)[0] ?? null;
+  const lista = lineas.map((l) => `• ${l}`).join("\n");
+  return esTu(x.estilo)
+    ? `Estas son nuestras políticas de reserva, cambios y cancelación (las mismas de tu cotización N° ${x.numero}):\n${lista}\nPara cancelar o cambiar tu reserva, escríbenos por este mismo chat${correo ? ` o al correo ${correo}` : ""}.`
+    : `Estas son nuestras políticas de reserva, cambios y cancelación (las mismas de su cotización N° ${x.numero}):\n${lista}\nPara cancelar o cambiar su reserva, escríbanos por este mismo chat${correo ? ` o al correo ${correo}` : ""}.`;
+}
+
+/** T9 — el pago no aparece en el banco. */
+export function mensajePagoNoEncontrado(estilo: EstiloMensajes): string {
+  return esTu(estilo)
+    ? "Todavía no encontramos tu pago en el banco. ¿Nos confirmas la fecha, el banco y el número de operación, o nos envías otra captura del comprobante?"
+    : "Todavía no encontramos su pago en el banco. ¿Nos confirma la fecha, el banco y el número de operación, o nos envía otra captura del comprobante?";
+}
+
+/** T10 — la guarda: el texto del modelo habló de dinero con una cotización de traslado en el chat. */
+export function mensajeGuardaReserva(numero: string | null | undefined, estilo: EstiloMensajes): string {
+  const n = txt(numero);
+  return esTu(estilo)
+    ? `Para reservar, te envío por este chat el monto del adelanto y las cuentas de pago. ¿Deseas reservar tu traslado${n ? ` de la cotización N° ${n}` : ""}?`
+    : `Para reservar, le envío por este chat el monto del adelanto y las cuentas de pago. ¿Desea reservar su traslado${n ? ` de la cotización N° ${n}` : ""}?`;
+}

@@ -1,5 +1,6 @@
 // lib/crm-ia-atencion.ts — EL HORARIO DE ATENCIÓN DEL EQUIPO, para lo que dice el agente IA del CRM.
-// Módulo PURO: no lee la base ni mira el reloj; la fecha (ISO de Lima) y la hora entran por parámetro.
+// Módulo PURO: no lee la base ni mira el reloj; la fecha (ISO de Lima) y la hora entran por parámetro
+// (o el instante en ms, en `sumarMinutosAtencion`).
 //
 // NO ES EL HORARIO DE LA IA. `crm_agentes_ia.hora_inicio/hora_fin` dice cuándo la IA contesta sola;
 // éste dice cuándo hay una PERSONA del equipo para atender. Solo sirve para que la derivación no
@@ -11,6 +12,11 @@
 // atencion_hasta). Un horario sin días o con el cierre antes de la apertura se CONSERVA tal cual lo
 // escribió la persona (no se le inventa otro), pero no se usa: atencionValida = false, no entra al
 // prompt y la pantalla lo pinta en ámbar con `PROBLEMA_ATENCION`.
+//
+// LA RESERVA DE TRASLADOS (lib/traslados/reserva-orden.ts) cuenta aquí el plazo que tiene el equipo
+// para confirmar: `aperturaSiguiente` (la próxima apertura; `proximaAtencion` es su frase, extraída
+// sin cambiar una letra: scripts/prueba-reserva-orden.mts la compara contra la copia literal) y
+// `sumarMinutosAtencion` (P minutos de ATENCIÓN desde un instante, que solo corren dentro del horario).
 
 import { diaSemanaLima, sumarDias } from "@/lib/comisiones/calendario";
 import { hhmmAMinutos } from "@/lib/alertas-horario";
@@ -136,28 +142,113 @@ export function dentroDeAtencion(at: Atencion, fecha: string, hhmm: string): boo
 }
 
 /** «las 09:00», pero «la 01:00». */
-const aLas = (hhmm: string) => (hhmm.startsWith("01:") ? `la ${hhmm}` : `las ${hhmm}`);
+export const aLas = (hhmm: string) => (hhmm.startsWith("01:") ? `la ${hhmm}` : `las ${hhmm}`);
+
+/** El nombre del día de la semana (0 = domingo … 6 = sábado), en minúsculas. */
+export const nombreDia = (d: number): string => NOMBRE_DIA[((Math.trunc(d) % 7) + 7) % 7];
+
+/** La próxima apertura del horario, vista desde un momento de Lima. */
+export type Apertura = {
+  /** Días desde `fecha` (0 = hoy, 1 = mañana … 7 = el mismo día de la semana que viene). */
+  k: number;
+  /** El día de la apertura, ISO de Lima. */
+  fecha: string;
+  /** "HH:MM" de la apertura (la del horario). */
+  desde: string;
+  /** El momento ya está dentro del horario: la «apertura» es ahora mismo. */
+  ahora: boolean;
+};
+
+/**
+ * La próxima vez que abre el horario desde ese momento (fecha ISO de Lima + "HH:MM"): hoy si aún
+ * no abrió, «ahora» si ya está dentro, o el siguiente día de atención (hasta 7 días después). null
+ * si el horario no se puede usar o la fecha/hora no se entiende. No mira `activa`.
+ * Es el cuerpo de `proximaAtencion`, EXTRAÍDO (no reescrito): las dos contestan lo mismo y la
+ * reserva de traslados (lib/traslados/reserva-orden.ts) cuenta los plazos desde aquí.
+ */
+export function aperturaSiguiente(at: Atencion, fecha: string, hhmm: string): Apertura | null {
+  const m = minutos(hhmm);
+  if (!atencionValida(at) || !fechaValida(fecha) || m == null) return null;
+  const desde = minutos(at.desde)!, hasta = minutos(at.hasta)!;
+  const hDesde = horaHHMM(at.desde)!;
+  if (at.dias.includes(diaSemanaLima(fecha))) {
+    if (m < desde) return { k: 0, fecha, desde: hDesde, ahora: false };
+    if (m < hasta) return { k: 0, fecha, desde: hDesde, ahora: true };
+  }
+  for (let k = 1; k <= 7; k++) {
+    const f = sumarDias(fecha, k);
+    if (!at.dias.includes(diaSemanaLima(f))) continue;
+    return { k, fecha: f, desde: hDesde, ahora: false };
+  }
+  return null; // inalcanzable con un horario válido (tiene al menos un día)
+}
 
 /** Cuándo vuelve a atender una persona, dicho para el cliente: «hoy desde las 09:00»,
  *  «mañana martes desde las 09:00», «el lunes desde las 09:00» (o «el próximo lunes» si falta una
  *  semana entera). Dentro del horario, «ahora». null si el horario no se puede usar o la fecha/hora
  *  no se entiende: no se inventa una respuesta. No mira `activa`. */
 export function proximaAtencion(at: Atencion, fecha: string, hhmm: string): string | null {
-  const m = minutos(hhmm);
-  if (!atencionValida(at) || !fechaValida(fecha) || m == null) return null;
-  const desde = minutos(at.desde)!, hasta = minutos(at.hasta)!;
-  const abre = `desde ${aLas(horaHHMM(at.desde)!)}`;
-  if (at.dias.includes(diaSemanaLima(fecha))) {
-    if (m < desde) return `hoy ${abre}`;
-    if (m < hasta) return "ahora";
+  const a = aperturaSiguiente(at, fecha, hhmm);
+  if (!a) return null;
+  if (a.ahora) return "ahora";
+  const abre = `desde ${aLas(a.desde)}`;
+  if (a.k === 0) return `hoy ${abre}`;
+  const d = diaSemanaLima(a.fecha);
+  if (a.k === 1) return `mañana ${NOMBRE_DIA[d]} ${abre}`;
+  return `${a.k === 7 ? "el próximo" : "el"} ${NOMBRE_DIA[d]} ${abre}`;
+}
+
+// Aritmética de días en ms, sin parsear cadenas (la usa el barrido de la reserva, que la llama
+// millones de veces). Perú es UTC-5 fijo: el día de Lima N empieza en N × 24 h + 5 h UTC, y el día 0
+// (1970-01-01) fue jueves. Da lo mismo que `fechaLima` + `diaSemanaLima` (la matriz lo compara con un
+// oráculo que cuenta minuto a minuto).
+const DIA_MS = 86_400_000;
+const LIMA_MS = 5 * 3_600_000;
+const diaLima = (ms: number) => Math.floor((ms - LIMA_MS) / DIA_MS);
+const inicioDiaLima = (d: number) => d * DIA_MS + LIMA_MS;
+const diaSemanaDeIndice = (d: number) => (((d + 4) % 7) + 7) % 7;
+
+/**
+ * El instante (ms UTC) en que se cumplen `mins` MINUTOS DE ATENCIÓN contados desde `desdeMs`: solo
+ * corre el reloj dentro del horario (de la apertura al cierre, los días marcados). Si `desdeMs` cae
+ * fuera, se empieza en la próxima apertura; con `mins` = 0 devuelve justamente eso (el propio
+ * `desdeMs` si ya está dentro). El resultado cae SIEMPRE dentro de una ventana de atención (como
+ * mucho en su hora de cierre). null si el horario no se puede usar o los números no son números.
+ * Perú es UTC-5 fijo (el mismo supuesto de lib/alertas-horario.ts). No mira `activa`.
+ */
+export function sumarMinutosAtencion(at: Atencion, desdeMs: number, mins: number): number | null {
+  if (!atencionValida(at) || !Number.isFinite(desdeMs) || !Number.isFinite(mins)) return null;
+  const abreMs = minutos(at.desde)! * 60_000, cierraMs = minutos(at.hasta)! * 60_000;
+  let restante = Math.max(0, mins) * 60_000;
+  let d = diaLima(desdeMs);
+  let t = desdeMs;
+  // Cota: cada día de atención aporta al menos un minuto, y hay uno por semana como mínimo.
+  const maxDias = 7 * (Math.ceil(Math.max(0, mins)) + 2);
+  for (let k = 0; k <= maxDias; k++, d++, t = inicioDiaLima(d)) {
+    if (!at.dias.includes(diaSemanaDeIndice(d))) continue;
+    const abre = inicioDiaLima(d) + abreMs, cierra = inicioDiaLima(d) + cierraMs;
+    const inicio = Math.max(t, abre);
+    if (inicio >= cierra) continue;
+    if (restante <= cierra - inicio) return inicio + restante;
+    restante -= cierra - inicio;
   }
-  for (let k = 1; k <= 7; k++) {
-    const d = diaSemanaLima(sumarDias(fecha, k));
-    if (!at.dias.includes(d)) continue;
-    if (k === 1) return `mañana ${NOMBRE_DIA[d]} ${abre}`;
-    return `${k === 7 ? "el próximo" : "el"} ${NOMBRE_DIA[d]} ${abre}`;
+  return null; // inalcanzable con un horario válido
+}
+
+/**
+ * El último instante de atención ANTES de `hastaMs` (o el propio `hastaMs` si cae dentro de una
+ * ventana): el cierre de la última ventana que abrió antes de él. null si no hay ninguna en las 8
+ * semanas previas o el horario no se puede usar.
+ */
+export function ultimoInstanteAtencionAntes(at: Atencion, hastaMs: number): number | null {
+  if (!atencionValida(at) || !Number.isFinite(hastaMs)) return null;
+  const abreMs = minutos(at.desde)! * 60_000, cierraMs = minutos(at.hasta)! * 60_000;
+  for (let k = 0, d = diaLima(hastaMs); k <= 56; k++, d--) {
+    if (!at.dias.includes(diaSemanaDeIndice(d))) continue;
+    const abre = inicioDiaLima(d) + abreMs;
+    if (abre < hastaMs) return Math.min(inicioDiaLima(d) + cierraMs, hastaMs);
   }
-  return null; // inalcanzable con un horario válido (tiene al menos un día)
+  return null;
 }
 
 /** Lo que se añade a la derivación fuera del horario, con su espacio inicial:
