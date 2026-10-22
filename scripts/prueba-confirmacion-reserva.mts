@@ -164,6 +164,17 @@ t(bytesL.length > 1000, "PDF ida y retorno con nota larga");
 const ir = juzgarConfirmacion(base({ tramos: [ida, ret], asignaciones: { 100: asig[100], 101: { vehiculo: { placa: "B8H-967" }, conductor: { nombre: "Ana Soto" } } }, extras: { vuelo: "LA2045", punto_encuentro: "Llegadas", nota: "Llevar cartel con el nombre del pasajero." } }));
 const bytesIr = await dibujarConfirmacion(docConfirmacion(ir.datos!, "en", { version: 3, emitidoEn: "2026-10-21" }, emp), { empresa: "AFA" });
 if (process.env.MUESTRA_DIR) writeFileSync(`${process.env.MUESTRA_DIR}/confirmacion-ida-retorno-en.pdf`, bytesIr);
+{
+  // Ida y retorno son UNA reserva: cada tramo con su código y un solo total rotulado «ida y retorno».
+  const dIr = docConfirmacion(ir.datos!, "es", { version: 1, emitidoEn: "2026-10-21" }, emp);
+  const subs = dIr.secciones.map((s) => s.subtitulo).filter(Boolean) as string[];
+  t(subs.length === 2 && subs.every((x) => / · \S+/.test(x)), `cada tramo lleva su código: ${subs.join(" | ")}`);
+  t(new Set(ir.datos!.servicio.tramos.map((x) => x.codigo)).size === 2, "los dos tramos tienen códigos distintos");
+  const eco = dIr.secciones.find((s) => s.titulo === "INFORMACIÓN ECONÓMICA")!;
+  t(eco.filas.filter((f) => /^Precio total/.test(f.label)).length === 1 && eco.filas[0].label === "Precio total (ida y retorno)", "un solo total, rotulado ida y retorno");
+  const uno = juzgarConfirmacion(base({}));
+  t(uno.datos!.servicio.tramos.every((x) => !("codigo" in x)), "un tramo solo no cambia su foto (su firma sigue igual)");
+}
 const pagIr = (await PDFDocument.load(bytesIr)).getPageCount();
 t(pagIr === 1, `PDF ida y retorno completo en una hoja (${pagIr})`);
 if (process.env.MUESTRA_DIR) writeFileSync(`${process.env.MUESTRA_DIR}/confirmacion-ida-retorno.pdf`, bytesL);
