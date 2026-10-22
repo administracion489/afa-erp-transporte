@@ -7,12 +7,9 @@
 // lista, por sus extremos, sin hora, fecha anterior, solo ida), completar el retorno de una
 // conversión de antes, USD (con y sin tipo de cambio, aceptando o no), y los fallos de la base
 // (lectura, columna que falta, inserción N, paraderos, enlace).
-import {
-  alertaCreadaUna, alertaCreadasMulti, alertaFalloMulti, alertaRetornoCompletado, enlaceIda, filaRetorno,
-  mensajeErrorComprobar, mensajeErrorRetornoAtras, paradasDeIda, paradasDeRetorno, planConversion, resultadoRetorno,
-  type CotParaReserva, type IdaDelRetorno, type ItemCotReserva, type PlanConversion,
-} from "../lib/cotizacion-a-reserva";
+import { filaRetorno, planConversion, type CotParaReserva, type ItemCotReserva } from "../lib/cotizacion-a-reserva";
 import { planRetorno } from "../lib/cotizacion-retorno";
+import { ejecutarConversion } from "../lib/cotizacion-a-reserva-datos";
 import { insertarServicioNuevo } from "../lib/reservas-autoseleccion";
 import { sugerirNombreRuta } from "../lib/nombre-ruta";
 import { faltaColumna } from "../lib/columna-faltante";
@@ -184,70 +181,20 @@ function crearViejo(d: Deps) {
   return convertirAReserva;
 }
 
-// ── El ejecutor del plan (solo hace lo que el plan dice) ─────────────────────
+// ── El ejecutor del plan: lib/cotizacion-a-reserva-datos.ts (el MISMO que usan la página y el CRM) ──
+// Sin `alert`/`confirm`: devuelve el aviso y si hay que refrescar; aquí se traducen a las mismas
+// llamadas que hace la página, para compararlas con las del algoritmo viejo.
 async function convertirNuevo(cot: CotParaReserva, d: Deps) {
-  const sb = d.supabase;
-  const hoy = d.hoyLima();
-  let plan: PlanConversion = planConversion(cot, { existentes: null, hoy });
-  if (plan.codigo === "no_aprobada") { d.alert(plan.mensaje); return; }
-  const { data: existentes, error: eEx } = await sb.from("reservas").select("id,fecha_servicio,vehiculo_id,vehiculo_tercero_id,reserva_vinculada_id,estado").eq("cotizacion_id", cot.id).limit(20);
-  if (eEx) { d.alert(mensajeErrorComprobar(eEx.message)); return; }
-  plan = planConversion(cot, { existentes: existentes ?? [], hoy });
-  if (plan.codigo === "comprobar_retorno") {
-    const { data: atras, error: eAt } = await sb.from("reservas").select("id").in("reserva_vinculada_id", plan.ids).limit(1);
-    if (eAt) { d.alert(mensajeErrorRetornoAtras(eAt.message)); return; }
-    plan = planConversion(cot, { existentes: existentes ?? [], hoy, retornoAtras: !!atras?.length });
-  }
-  const insertar = (f: Record<string, unknown>) => insertarServicioNuevo((x) => sb.from("reservas").insert(x).select().single(), f);
-  const crearRetorno = async (ida: IdaDelRetorno, retorno: ReturnType<typeof planRetorno>): Promise<string | null> => {
-    if (retorno.codigo !== "ok") return null;
-    const fila = filaRetorno(cot, retorno, ida);
-    let ins = await insertar(fila);
-    if (ins.error && faltaColumna(ins.error, "direccion_servicio")) { const { direccion_servicio: _d, ...sin } = fila; void _d; ins = await insertar(sin); }
-    if (ins.error || !ins.data) return resultadoRetorno({ insertError: ins.error?.message || "sin respuesta", enlaceError: null, paradasError: null });
-    const retId = ins.data.id as number;
-    let up = await sb.from("reservas").update(enlaceIda(retId)).eq("id", ida.id);
-    if (up.error && faltaColumna(up.error, "direccion_servicio")) up = await sb.from("reservas").update(enlaceIda(retId, false)).eq("id", ida.id);
-    const { error: eP } = await sb.from("paradas").insert(paradasDeRetorno(retorno, retId));
-    return resultadoRetorno({ insertError: null, enlaceError: up.error?.message ?? null, paradasError: eP?.message ?? null });
-  };
-  switch (plan.codigo) {
-    case "ya_convertida": case "retorno_imposible": d.alert(plan.mensaje); return;
-    case "completar_retorno": {
-      if (!d.confirm(plan.confirmar)) return;
-      const errs: (string | null)[] = [];
-      for (const ida of plan.idas) errs.push(await crearRetorno(ida, plan.retorno));
-      d.alert(alertaRetornoCompletado(plan.retorno, errs, plan.idas.length));
-      d.refrescar(); return;
-    }
-    case "crear": {
-      if (plan.confirmar && !d.confirm(plan.confirmar)) return;
-      const insertParadas = async (id: number): Promise<string | null> => {
-        if (plan.codigo !== "crear" || plan.paradas.length < 1) return null;
-        const { error } = await sb.from("paradas").insert(paradasDeIda(plan.paradas, id));
-        return error ? error.message : null;
-      };
-      if (!plan.multi) {
-        const { data: r, error } = await insertar(plan.idas[0].fila);
-        if (error) { d.alert(error.message); return; }
-        const eParadas = r ? await insertParadas(r.id) : null;
-        const eRet = r ? await crearRetorno(r, plan.retorno) : null;
-        d.alert(alertaCreadaUna({ nParadas: plan.paradas.length, eParadas, eRet, retorno: plan.retorno, notaTc: plan.notaTc }));
-      } else {
-        let count = 0; let eParadas: string | null = null; const errsRet: (string | null)[] = [];
-        for (const ida of plan.idas) {
-          const { data: r, error } = await insertar(ida.fila);
-          if (error) { d.alert(alertaFalloMulti({ count, total: plan.idas.length, error: `${error.message}`, nParadas: plan.paradas.length, eParadas })); d.refrescar(); return; }
-          if (r && ida.conParadas) eParadas = await insertParadas(r.id);
-          if (r) errsRet.push(await crearRetorno(r, plan.retorno));
-          count++;
-        }
-        d.alert(alertaCreadasMulti({ count, nParadas: plan.paradas.length, eParadas, errsRet, retorno: plan.retorno, notaTc: plan.notaTc }));
-      }
-      d.refrescar(); return;
-    }
-    default: return;
-  }
+  const r = await ejecutarConversion(d.supabase, cot, { hoy: d.hoyLima(), confirmar: (t) => d.confirm(t) });
+  if (r.mensaje) d.alert(r.mensaje);
+  if (r.refrescar) d.refrescar();
+}
+// Lo que el CRM necesita además: los ids de lo que se creó.
+async function idsCreados(cot: CotParaReserva, cfg: Cfg) {
+  const b = base(cfg);
+  const r = await ejecutarConversion(b.supabase, cot, { hoy: "2026-10-22", confirmar: () => true });
+  const insertados = b.log.filter((x) => x.op === "insert" && x.tabla === "reservas" && x.ok).map((x) => x.datos as Record<string, unknown>);
+  return { r, insertados };
 }
 
 // ── Los casos ────────────────────────────────────────────────────────────────
@@ -355,6 +302,23 @@ t("corolario: salen los avisos de crear, completar, ya convertida y fallos", ["�
   t("aprobada sin leer → leer_existentes", planConversion(c, { existentes: null, hoy: "2026-10-22" }).codigo === "leer_existentes");
   t("con idas sin enlace → comprobar_retorno con sus ids", (() => { const r = planConversion(c, { existentes: EXISTENTES.dos as never, hoy: "2026-10-22" }); return r.codigo === "comprobar_retorno" && r.ids.join() === "101,102"; })());
   t("USD con TC → pregunta y nota", (() => { const r = planConversion({ ...c, moneda: "USD", tipo_cambio: 3.75 }, { existentes: [], hoy: "2026-10-22" }); return r.codigo === "crear" && !!r.confirmar?.includes("US$ 157.33") && r.notaTc.includes("S/ 3.75 por US$"); })());
+}
+
+// Los ids que devuelve el ejecutor (los usa el «Hay unidad» del CRM para enlazar la solicitud).
+{
+  const c = cotDe({ estado: "aprobado", moneda: "PEN", tc: null, items: ITEMS.sin, vf: 3, vt: null, ret: RETORNOS.extremos, paradas: PARADAS.tres, fecha: "2026-11-02", hora: "07:30", igv: true, asunto: "Cot. RUTA B" });
+  const { r, insertados } = await idsCreados(c, { existentes: [], atras: false });
+  t("una ida y su retorno: el ejecutor devuelve sus ids", r.codigo === "creada" && r.idas.length === 1 && r.retornos.length === 1 && insertados.length === 2);
+  t("la ida tiene el importe y el retorno va en S/ 0.00", insertados[0].precio_cliente === 590 && insertados[1].precio_cliente === 0 && insertados[1].reserva_vinculada_id === r.idas[0]);
+  const m = cotDe({ estado: "aprobado", moneda: "PEN", tc: null, items: ITEMS.propio_tercero, vf: null, vt: null, ret: RETORNOS.extremos, paradas: PARADAS.tres, fecha: "2026-11-02", hora: "07:30", igv: true, asunto: null });
+  const mm = await idsCreados(m, { existentes: [], atras: false });
+  t("dos vehículos: dos idas y dos retornos", mm.r.codigo === "creada" && mm.r.idas.length === 2 && mm.r.retornos.length === 2);
+  const f = await idsCreados(m, { existentes: [], atras: false, falloInsertN: 3 });
+  t("falla la segunda ida: «parcial» con la primera creada", f.r.codigo === "parcial" && f.r.idas.length === 1);
+  const e = await idsCreados(c, { existentes: [], atras: false, falloInsertN: 1 });
+  t("falla la primera: «error» sin ids", e.r.codigo === "error" && e.r.idas.length === 0 && e.r.retornos.length === 0);
+  const y = await idsCreados(c, { existentes: EXISTENTES.enlazada, atras: false });
+  t("ya convertida: no crea nada", y.r.codigo === "ya_convertida" && y.insertados.length === 0);
 }
 
 if (fallas.length) for (const f of fallas) console.log("✗", f);

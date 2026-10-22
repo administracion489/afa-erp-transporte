@@ -14,8 +14,12 @@
 
 import { createHash } from "node:crypto";
 import { faltaAlguna, tablaFaltante, faltaColumna } from "./columna-faltante";
-import { canonico, codigoDocumento, planVersion, type AsignacionConf, type CodigoCambio, type DatosConfirmacion,
-  type EntradaConfirmacion, type ExtrasConf, type PagoConf, type TramoConf, type VersionGuardada } from "./confirmacion-reserva";
+import { canonico, codigoDocumento, docConfirmacion, fechaValida, nombreArchivo, planVersion, type AsignacionConf, type CodigoCambio, type DatosConfirmacion,
+  type EntradaConfirmacion, type ExtrasConf, type Idioma, type PagoConf, type TramoConf, type VersionGuardada } from "./confirmacion-reserva";
+import { dibujarConfirmacion } from "./confirmacion-reserva-pdf";
+import { bajarLogo, leerPerfilPdf } from "./traslados/enviar-cotizacion-datos";
+import { empresaConDefectos } from "./empresa-perfil";
+import { fechaLima } from "./alertas-horario";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = any;
@@ -104,7 +108,7 @@ export async function leerEntrada(sb: Sb, reservaId: number, extras: ExtrasConf 
   let pagos: PagoConf[] = [];
   let sinMigracion = false;
   if (tramos.length) {
-    const { data, error } = await sb.from("pagos").select("id, codigo, fecha, monto, moneda, metodo, anulado, reserva_id")
+    const { data, error } = await sb.from("pagos").select("id, codigo, sentido, fecha, monto, moneda, metodo, anulado, reserva_id")
       .eq("sentido", "cobro").in("reserva_id", tramos.map((t) => t.id));
     if (error && faltaColumna(error, "reserva_id")) sinMigracion = true;
     else if (error) throw new Error(`No se pudieron leer los cobros: ${error.message}`);
@@ -138,6 +142,27 @@ export async function leerVersion(sb: Sb, versionId: number): Promise<(VersionRe
 }
 
 /**
+ * El PDF de UNA versión, dibujado desde su foto (`datos`), con la empresa del perfil. Es el armado de
+ * GET /api/reservas/confirmacion?version_id=…&pdf=1, EXTRAÍDO para que el CRM envíe por WhatsApp el
+ * mismo papel. La cabecera es azul oscuro: primero la versión clara del logo del perfil; si no hay o
+ * no baja, el principal dentro de su recuadro blanco (nunca la clara sobre blanco). LANZA si el
+ * perfil no se puede leer.
+ */
+export async function pdfDeVersion(
+  sb: Sb, v: Pick<VersionResumen, "version" | "codigo" | "generado_en" | "datos">, idioma: Idioma,
+): Promise<{ bytes: Uint8Array; nombre: string }> {
+  const { perfil } = await leerPerfilPdf(sb);
+  const emp = empresaConDefectos(perfil);
+  const doc = docConfirmacion(v.datos as DatosConfirmacion, idioma, { version: v.version, emitidoEn: fechaLima(new Date(v.generado_en).getTime()) },
+    { nombre: emp.nombre, telefono: emp.telefono, email: emp.email, web: emp.web, direccion: emp.direccion, ruc: emp.ruc });
+  const claro = String(perfil?.logo_claro_url ?? "").trim();
+  const logoClaro = claro ? await bajarLogo(claro).catch(() => null) : null;
+  const logo = logoClaro ?? await bajarLogo(emp.logo).catch(() => null);
+  const bytes = await dibujarConfirmacion(doc, { logo, logoClaro: !!logoClaro, empresa: emp.nombre });
+  return { bytes, nombre: nombreArchivo(v.codigo, idioma) };
+}
+
+/**
  * Emite la versión (o devuelve la vigente si la foto no cambió). Dos clics a la vez no crean dos
  * versiones: el índice único (reserva_id, version) rechaza la segunda y se relee la que ganó.
  */
@@ -166,19 +191,119 @@ export async function emitirVersion(sb: Sb, idDocumento: number, datos: DatosCon
 
 export type AdelantoNuevo = { monto: number; moneda: string; fecha: string; metodo: string | null; referencia: string | null };
 
+/** Los medios con que se registra un cobro o una devolución. */
+export const METODOS_COBRO = new Set(["transferencia", "deposito", "yape", "plin", "efectivo", "tarjeta"]);
+
+/** El SQL que ata los cobros y las devoluciones a la solicitud de reserva de traslado. */
+export const SQL_PAGOS_SOLICITUD = "supabase/reservas-09c-pagos-solicitud.sql";
+
+/**
+ * Las validaciones de un cobro (o una devolución) que se teclea: las del route de la Confirmación de
+ * Reserva, EXTRAÍDAS (los textos son los mismos). PURA. `tope` es lo máximo que puede sumar este
+ * movimiento con lo que ya hay (el precio menos lo cobrado; en una devolución, lo que falta devolver),
+ * con su texto para el error. `hoyMs` entra por parámetro (la fecha de Lima se calcula aquí).
+ */
+export function validarCobro(
+  cuerpo: { monto?: unknown; fecha?: unknown; metodo?: unknown; referencia?: unknown },
+  x: { hoyMs: number; tope: number; textoTope: string },
+): { ok: true; monto: number; fecha: string; metodo: string | null; referencia: string | null } | { ok: false; status: 400 | 409; detalle: string } {
+  const monto = Math.round(Number(cuerpo.monto) * 100) / 100;
+  if (!(monto > 0)) return { ok: false, status: 400, detalle: "El monto tiene que ser mayor que cero." };
+  if (monto > x.tope + 0.005) return { ok: false, status: 409, detalle: x.textoTope };
+  const fecha = String(cuerpo.fecha ?? "").slice(0, 10);
+  const hoy = fechaLima(x.hoyMs);
+  const haceUnAnio = fechaLima(x.hoyMs - 366 * 86_400_000);
+  if (fechaValida(fecha) !== fecha || fecha > hoy || fecha < haceUnAnio) return { ok: false, status: 400, detalle: "La fecha del cobro no es válida: tiene que existir, no ser futura ni de hace más de un año." };
+  const metodo = METODOS_COBRO.has(String(cuerpo.metodo)) ? String(cuerpo.metodo) : null;
+  const referencia = typeof cuerpo.referencia === "string" ? cuerpo.referencia.trim().slice(0, 60) || null : null;
+  if (!referencia && metodo !== "efectivo") return { ok: false, status: 400, detalle: "Escribe el número de operación del pago (o elige efectivo)." };
+  return { ok: true, monto, fecha, metodo, referencia };
+}
+
+/**
+ * La solicitud de reserva de traslado de una reserva (la más reciente que la tenga como ida), para
+ * atarle el cobro que entra por la Confirmación. null si no hay, si falta la migración o si no se
+ * pudo leer: el cobro igual lleva `reserva_id`, y la solicitud también lo lee por ahí.
+ */
+async function solicitudDeReserva(sb: Sb, idsTramos: number[]): Promise<number | null> {
+  if (!idsTramos.length) return null;
+  try {
+    const { data, error } = await sb.from("reserva_solicitudes").select("id").in("reserva_id", idsTramos)
+      .order("creada_en", { ascending: false }).limit(1);
+    if (error) return null;
+    const id = Number((data as { id?: unknown }[] | null)?.[0]?.id);
+    return Number.isInteger(id) && id > 0 ? id : null;
+  } catch { return null; }
+}
+
 /**
  * Registra el cobro en `pagos`, SIN aplicar (es un anticipo, finanzas-01). No asienta un
  * movimiento de banco: eso lo hace la conciliación de Tesorería con el extracto, como con
  * cualquier otro cobro.
+ *  · `reservaId` puede ser null SOLO con `reservaSolicitudId`: el adelanto de una solicitud de
+ *    traslado se registra antes de que exista la reserva (se le ata después, `enlazarCobrosAReserva`).
+ *  · Sin `reservaSolicitudId`, se busca la solicitud de esa reserva (`tramos`, o la reserva sola) y,
+ *    si hay una, el cobro la lleva: así la solicitud ve el cobro que entró por la Confirmación.
+ *    Sin la columna (reservas-09c sin correr), el cobro se guarda sin ella.
+ *  · `comprobanteUrl`: el comprobante que mandó el cliente (el identificador del archivo).
  */
-export async function registrarAdelanto(sb: Sb, reservaId: number, clienteId: number | null, a: AdelantoNuevo, quien: string): Promise<{ id: number; codigo: string | null }> {
-  const { data, error } = await sb.from("pagos").insert({
+export async function registrarAdelanto(
+  sb: Sb, reservaId: number | null, clienteId: number | null, a: AdelantoNuevo, quien: string,
+  opts: { reservaSolicitudId?: number | null; tramos?: number[]; comprobanteUrl?: string | null } = {},
+): Promise<{ id: number; codigo: string | null }> {
+  if (reservaId == null && !opts.reservaSolicitudId) throw new Error("Falta la reserva o la solicitud del cobro.");
+  const pedida = opts.reservaSolicitudId != null;
+  const solicitudId = pedida ? opts.reservaSolicitudId! : await solicitudDeReserva(sb, opts.tramos?.length ? opts.tramos : reservaId != null ? [reservaId] : []);
+  const fila: Record<string, unknown> = {
     sentido: "cobro", fecha: a.fecha, monto: a.monto, moneda: a.moneda, metodo: a.metodo, referencia: a.referencia,
     contraparte_tipo: "cliente", contraparte_id: clienteId,
     reserva_id: reservaId, observaciones: "Adelanto de reserva", creado_por: quien,
-  }).select("id, codigo").single();
-  if (error) throw new Error(faltaColumna(error, "reserva_id") ? `Falta correr ${SQL_CONFIRMACION}.` : `No se pudo registrar el cobro: ${error.message}`);
+  };
+  if (solicitudId != null) fila.reserva_solicitud_id = solicitudId;
+  if (opts.comprobanteUrl) fila.comprobante_url = opts.comprobanteUrl;
+  let r = await sb.from("pagos").insert(fila).select("id, codigo").single();
+  if (r.error && !pedida && fila.reserva_solicitud_id != null && faltaColumna(r.error, "reserva_solicitud_id")) {
+    delete fila.reserva_solicitud_id;
+    r = await sb.from("pagos").insert(fila).select("id, codigo").single();
+  }
+  const { data, error } = r;
+  if (error) {
+    if (faltaColumna(error, "reserva_id")) throw new Error(`Falta correr ${SQL_CONFIRMACION}.`);
+    if (faltaColumna(error, "reserva_solicitud_id")) throw new Error(`Falta correr ${SQL_PAGOS_SOLICITUD}.`);
+    throw new Error(`No se pudo registrar el cobro: ${error.message}`);
+  }
   return { id: Number(data.id), codigo: data.codigo ?? null };
+}
+
+/**
+ * Registra la DEVOLUCIÓN de lo cobrado de una solicitud de reserva de traslado: un `pagos` con
+ * `sentido = 'pago'` (sale dinero hacia el cliente) y `reserva_solicitud_id`. No lleva `reserva_id`:
+ * la Confirmación de Reserva solo lee cobros, y una devolución nunca suma al adelanto. La
+ * transferencia la hace Tesorería; esto la registra.
+ */
+export async function registrarDevolucion(
+  sb: Sb,
+  x: { solicitudId: number; clienteId: number | null; monto: number; moneda: string; fecha: string; metodo: string | null; referencia: string | null; quien: string },
+): Promise<{ id: number; codigo: string | null }> {
+  const { data, error } = await sb.from("pagos").insert({
+    sentido: "pago", fecha: x.fecha, monto: x.monto, moneda: x.moneda, metodo: x.metodo, referencia: x.referencia,
+    contraparte_tipo: "cliente", contraparte_id: x.clienteId, reserva_solicitud_id: x.solicitudId,
+    observaciones: "Devolución de reserva de traslado", creado_por: x.quien,
+  }).select("id, codigo").single();
+  if (error) throw new Error(faltaColumna(error, "reserva_solicitud_id") ? `Falta correr ${SQL_PAGOS_SOLICITUD}.` : `No se pudo registrar la devolución: ${error.message}`);
+  return { id: Number(data.id), codigo: data.codigo ?? null };
+}
+
+/**
+ * Ata a la reserva (`reserva_id`, el id del documento: el menor de los tramos del día) los COBROS de
+ * la solicitud que todavía no la tienen. No toca devoluciones ni anulados. Devuelve cuántos ató.
+ * LANZA si no se pudo escribir.
+ */
+export async function enlazarCobrosAReserva(sb: Sb, solicitudId: number, reservaId: number): Promise<number> {
+  const { data, error } = await sb.from("pagos").update({ reserva_id: reservaId })
+    .eq("reserva_solicitud_id", solicitudId).eq("sentido", "cobro").eq("anulado", false).is("reserva_id", null).select("id");
+  if (error) throw new Error(faltaColumna(error, "reserva_solicitud_id") ? `Falta correr ${SQL_PAGOS_SOLICITUD}.` : `No se pudieron atar los cobros a la reserva: ${error.message}`);
+  return ((data as unknown[] | null) ?? []).length;
 }
 
 /**

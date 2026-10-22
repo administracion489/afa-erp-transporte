@@ -1,7 +1,8 @@
 // Matriz de la Confirmación de Reserva (lib/confirmacion-reserva.ts + su PDF).
 //   npx tsx scripts/prueba-confirmacion-reserva.mts            (MUESTRA_DIR=<carpeta> deja los PDF)
 import { writeFileSync } from "node:fs";
-import { cambiosEntre, canonico, docConfirmacion, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, planVersion,
+import { leerEntrada } from "../lib/confirmacion-reserva-datos";
+import { cambiosEntre, cobradoEn, canonico, docConfirmacion, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, planVersion,
   telefonoWa, horaTexto, fechaLarga, type EntradaConfirmacion, type TramoConf, type DatosConfirmacion } from "../lib/confirmacion-reserva";
 import { dibujarConfirmacion } from "../lib/confirmacion-reserva-pdf";
 import { PDFDocument } from "pdf-lib";
@@ -178,6 +179,49 @@ if (process.env.MUESTRA_DIR) writeFileSync(`${process.env.MUESTRA_DIR}/confirmac
 const pagIr = (await PDFDocument.load(bytesIr)).getPageCount();
 t(pagIr === 1, `PDF ida y retorno completo en una hoja (${pagIr})`);
 if (process.env.MUESTRA_DIR) writeFileSync(`${process.env.MUESTRA_DIR}/confirmacion-ida-retorno.pdf`, bytesL);
+
+// Una DEVOLUCIÓN (sentido «pago», la de una reserva de traslado cancelada) nunca suma al adelanto:
+// ni en el motor (segunda defensa) ni en la lectura (que pide solo cobros a la base).
+{
+  const dev = base({ pagos: [{ id: 1, fecha: "2026-10-20", monto: 100, moneda: "PEN", sentido: "cobro" }, { id: 2, fecha: "2026-10-21", monto: 100, moneda: "PEN", sentido: "pago" }] });
+  t(cobradoEn(dev.pagos, "PEN") === 100, "una devolución no suma en cobradoEn");
+  const jd = juzgarConfirmacion(dev);
+  t(jd.ok && jd.datos!.economia.adelanto === 100, `una devolución no suma al adelanto del papel (${jd.datos?.economia.adelanto})`);
+  const soloDev = juzgarConfirmacion(base({ pagos: [{ id: 2, fecha: "2026-10-21", monto: 100, moneda: "PEN", sentido: "pago" }] }));
+  t(codigos(soloDev).includes("sin_adelanto"), "con solo una devolución no hay adelanto");
+  t(cobradoEn(base().pagos, "PEN") === 100, "sin sentido (filas de antes): el cobro cuenta como siempre");
+
+  // leerEntrada contra una base falsa que FILTRA como PostgREST: la devolución no llega.
+  const filas: Record<string, Record<string, unknown>[]> = {
+    reservas: [{ id: 100, codigo: "OS-1", fecha_servicio: "2026-10-24", hora_servicio: "06:30", estado: "programada", origen: "A", destino: "B", precio_cliente: 236, cliente_id: 7, cotizacion_id: null, reserva_vinculada_id: null, vehiculo_id: null, vehiculo_tercero_id: null, conductor_id: null, conductor_tercero_id: null, direccion_servicio: "ida", capacidad_contratada: 4, tipo_servicio_detalle: "solo_ida", ruta_nombre: null, tipo_asignacion: null }],
+    clientes: [{ id: 7, nombre: "Juan", empresa: null, telefono: null, operativo_nombre: null, operativo_celular: null, condicion_pago: "Contado" }],
+    pagos: [
+      { id: 1, codigo: "RC-1", sentido: "cobro", fecha: "2026-10-20", monto: 100, moneda: "PEN", metodo: "yape", anulado: false, reserva_id: 100 },
+      { id: 2, codigo: "OP-1", sentido: "pago", fecha: "2026-10-21", monto: 100, moneda: "PEN", metodo: "transferencia", anulado: false, reserva_id: 100 },
+    ],
+  };
+  const sbF = {
+    from(tabla: string) {
+      const fs: ((f: Record<string, unknown>) => boolean)[] = [];
+      let uno = false, lim = Infinity;
+      const q: Record<string, unknown> = {
+        select: () => q,
+        eq: (c: string, v: unknown) => { fs.push((f) => String(f[c]) === String(v)); return q; },
+        in: (c: string, vs: unknown[]) => { fs.push((f) => vs.map(String).includes(String(f[c]))); return q; },
+        limit: (n: number) => { lim = n; return q; },
+        maybeSingle: () => { uno = true; return q; },
+        then: (ok: (x: unknown) => unknown) => {
+          const sel = (filas[tabla] ?? []).filter((f) => fs.every((p) => p(f))).slice(0, lim);
+          return Promise.resolve(uno ? { data: sel[0] ?? null, error: null } : { data: sel, error: null }).then(ok);
+        },
+      };
+      return q;
+    },
+  };
+  const { entrada } = await leerEntrada(sbF, 100, null);
+  t(entrada.pagos.length === 1 && entrada.pagos[0].id === 1, `leerEntrada trae solo los cobros (${entrada.pagos.map((x) => x.id)})`);
+  t(juzgarConfirmacion(entrada).datos?.economia.adelanto === 100, "la Confirmación ve el adelanto y no la devolución");
+}
 
 console.log(`\n${ok} ok · ${fallos} fallos`);
 if (fallos) process.exit(1);
