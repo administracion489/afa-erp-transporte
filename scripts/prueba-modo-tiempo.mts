@@ -97,9 +97,12 @@ const MODOS: ModoTiempo[] = ["evento", "anticipacion", "hora_fija"];
 
 // ── 3. Los doce que NO leen el modo ────────────────────────────────────────────
 {
-  console.log("\n— Dieciséis avisos tienen su propio disparador: su selector no lo lee nadie —");
+  console.log("\n— Dieciocho avisos tienen su propio disparador: su selector no lo lee nadie —");
   const inertes = Object.entries(VIA_DE_ALERTA).filter(([, v]) => v === "ignora_modo").map(([k]) => k);
-  chk("son dieciséis (con debio_iniciar y la llamada, que cuentan desde la hora del servicio)", inertes.length === 16, `${inertes.length}: ${inertes.join(", ")}`);
+  chk("son dieciocho (con debio_iniciar y la llamada, que cuentan desde la hora del servicio, y los dos de la reserva de traslados)", inertes.length === 18, `${inertes.length}: ${inertes.join(", ")}`);
+  // Bloque 8 del tick: su reloj es el de la solicitud (plazo para confirmar, margen, horas desde la devolución).
+  chk("los dos de la reserva de traslados están entre ellos",
+    ["reserva_sin_confirmar", "devolucion_pendiente"].every((k) => inertes.includes(k)));
   chk("los cuatro de ciclo de vida están entre ellos",
     ["asignacion", "desasignacion", "cambio", "cancelacion"].every((k) => inertes.includes(k)));
   // Estos dos no los despacha el tick: los manda `lib/notificaciones.ts` cuando ocurre el

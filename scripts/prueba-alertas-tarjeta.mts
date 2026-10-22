@@ -62,7 +62,9 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
   // El bloque 7 retiene el aviso de «Servicio sin cerrar» con planDeEnvioAviso (lib/servicio-abandonado.ts).
   const HORARIO_CONTACTOS = ["servicio_abandonado"];
   const UMBRAL = ["debio_iniciar", "no_inicio", "llamada_inicio", "riesgo_retraso", "retraso_en_ruta", "sin_rastreo_previo",
-    "gps_silencio", "recordar_checkout", "doc_vence", "jornada", "servicio_abandonado"];
+    "gps_silencio", "recordar_checkout", "doc_vence", "jornada", "servicio_abandonado",
+    // Bloque 8 del tick (lib/traslados/reserva-alertas.ts): min tras el plazo · horas tras acordar la devolución.
+    "reserva_sin_confirmar", "devolucion_pendiente"];
   const PASAJERO: Record<string, string> = {
     recordatorio_pasajero: "push,email,whatsapp", confirmacion_pasajero: "push,email,whatsapp", llegada_pasajero: "whatsapp",
   };
@@ -70,6 +72,7 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
   const UMBRAL_DEF: Record<string, number> = {
     no_inicio: 10, debio_iniciar: 1, llamada_inicio: 3, riesgo_retraso: 8, retraso_en_ruta: 10, sin_rastreo_previo: 30,
     gps_silencio: 8, recordar_checkout: 60, doc_vence: 15, jornada: 10 /* horas de CONDUCCIÓN, RENAT art. 30.2 (antes 13 h de amplitud) */, servicio_abandonado: 30,
+    reserva_sin_confirmar: 0, devolucion_pendiente: 48,
   };
 
   const malos: string[] = [];
@@ -95,7 +98,7 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
       if ((c.minAnticipacionDefecto != null) !== (VIA_DE_ALERTA[clave] === "recordatorio")) malos.push(`${clave}: minutos antes`);
     }
   }
-  chk("conductor / tercerizados / horario / umbral / pasajero / activo coinciden con el oráculo en las 26 claves", malos.length === 0, malos.join(" | "));
+  chk(`conductor / tercerizados / horario / umbral / pasajero / activo coinciden con el oráculo en las ${CLAVES.length} claves`, malos.length === 0, malos.join(" | "));
   chk("UMBRAL_DEFECTO son exactamente los que leen umbral, con los números del motor",
     Object.keys(UMBRAL_DEFECTO).sort().join(",") === [...UMBRAL].sort().join(",")
     && UMBRAL.every((k) => (UMBRAL_DEFECTO as Record<string, number>)[k] === UMBRAL_DEF[k]));
@@ -138,7 +141,7 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
       if (!t.trim()) conDigitos.push(`${clave}/${modo}: vacío`);
     }
   }
-  chk("26 claves × 4 modos: quitados los valores de la fila, no queda ningún dígito", conDigitos.length === 0, conDigitos.slice(0, 3).join(" | "));
+  chk(`${CLAVES.length} claves × 4 modos: quitados los valores de la fila, no queda ningún dígito`, conDigitos.length === 0, conDigitos.slice(0, 3).join(" | "));
 
   // Cada campo de `usa` cambia el texto (en el modo que lo lee); los que no están en `usa`, no.
   const modoQueLee = (campo: string, clave: string) =>
@@ -390,6 +393,34 @@ const base = (clave: string, x: Partial<CfgTarjeta> = {}): CfgTarjeta => ({
   chk("la desasignación avisa que manda el horario de «Servicio asignado» mientras esté activo",
     notasHoy("desasignacion", afa, ctx2).some((x) => x.codigo === "horario_de_asignacion")
     && !notasHoy("desasignacion", new Map([...afa, ["asignacion", base("asignacion", { activo: false })]]), ctx2).some((x) => x.codigo === "horario_de_asignacion"));
+}
+
+// ── 7b. Las dos de la reserva de traslados (bloque 8 del tick) ────────────────
+{
+  console.log("\n— Reserva de traslado sin confirmar · Devolución de reserva pendiente —");
+  for (const clave of ["reserva_sin_confirmar", "devolucion_pendiente"]) {
+    const c = controlesDe(base(clave));
+    chk(`${clave}: solo contactos — sin «Conductor», sin tercerizados, sin horario, sin pasajero, sin «Cuándo»`,
+      c.conductor === "oculto" && !c.tercerizados && c.horario === null && !c.canalesPasajero && c.minAnticipacionDefecto === null
+      && !c.canalesConductor && c.activo === "interruptor" && !!c.umbral, JSON.stringify(c));
+    chk(`${clave}: le escribe al directorio`, leeElDirectorio(clave) === true && VIA_DE_ALERTA[clave] === "ignora_modo");
+    const d = destinatariosHoy(clave, new Map([[clave, base(clave, { notifica_conductor: true })]]), ctx2);
+    chk(`${clave}: a quién le llega = solo los contactos (aunque «Conductor» diga marcado)`,
+      !d.conductorPropio && !d.conductorTercero && !d.pasajero && d.directorio === 2 && !d.proveedor, JSON.stringify(d));
+    const sinContactos = notasHoy(clave, new Map([[clave, base(clave)]]), { contactos: () => 0 });
+    chk(`${clave}: encendida sin contactos → ámbar que lo dice`, sinContactos.some((x) => x.codigo === "sin_destinatarios" && x.alarma && /contacto/.test(x.texto)));
+    chk(`${clave}: apagada no alarma`, !notasHoy(clave, new Map([[clave, base(clave, { activo: false })]]), { contactos: () => 0 }).some((x) => x.alarma));
+  }
+  const sc = descripcionDe(base("reserva_sin_confirmar", { umbral: null }), ctx2);
+  chk("«sin confirmar» con umbral vacío dice los 0 min del motor y el escalón de la mitad del margen",
+    /con 0 min de tolerancia/.test(sc) && /mitad del margen/.test(sc) && /urgente/.test(sc), sc);
+  chk("…y dice que las que esperan el pago se cierran solas, sin escribirle al cliente",
+    /se cierran solas/.test(sc) && /sin escribirle al cliente/.test(sc));
+  chk("…con 25 min, dice 25", /con 25 min de tolerancia/.test(descripcionDe(base("reserva_sin_confirmar", { umbral: 25 }), ctx2)));
+  chk("«sin confirmar» apagada: el texto del interruptor dice que el cierre sigue",
+    /se siguen cerrando/.test(controlesDe(base("reserva_sin_confirmar")).textoActivo ?? ""));
+  const dv = descripcionDe(base("devolucion_pendiente", { umbral: null }), ctx2);
+  chk("«devolución pendiente» con umbral vacío dice las 48 h del motor", /48 h después/.test(dv) && /Tesorería/.test(dv), dv);
 }
 
 // ── 8. Una clave desconocida: la descripción de la base y los controles de siempre ──

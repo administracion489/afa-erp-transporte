@@ -158,6 +158,10 @@ export const UMBRAL_DEFECTO = {
   /** Horas de CONDUCCIÓN acumuladas en el día (RENAT art. 30.2/30.9), no la amplitud del día. */
   jornada: CONDUCCION_ACUMULADA_MAX_H,
   servicio_abandonado: 30,
+  /** Minutos de tolerancia tras el plazo para confirmar una reserva de traslado (0 = al vencer). */
+  reserva_sin_confirmar: 0,
+  /** Horas desde que se acordó la devolución de una reserva de traslado hasta avisar. */
+  devolucion_pendiente: 48,
 } as const satisfies Record<string, number>;
 
 /** El default de una clave, o null si su bloque no lee el umbral. */
@@ -445,6 +449,26 @@ export const TARJETAS: Record<string, FichaTarjeta> = {
       umbral: { etiqueta: "Horas en curso antes de cerrarlo" }, usa: ["umbral"], horario: "contactos",
       textoActivo: "Apagada sigue cerrando los servicios abandonados: solo deja de avisar.",
     },
+  ),
+  // Bloque 8 (lib/traslados/reserva-alertas.ts): solo contactos. El margen del segundo aviso es el
+  // de Ajustes de traslados (no es de esta fila: no se escribe su número aquí). Apagada, las
+  // solicitudes que esperan el pago se siguen cerrando solas al vencer (sin escribirle al cliente).
+  reserva_sin_confirmar: aContactos(
+    (c) => "A los contactos marcados, cuando una reserva de traslado de la IA del CRM (por confirmar disponibilidad " +
+      `o con el pago reportado) llega a su plazo para confirmar sin que un ejecutivo la resuelva (con ${n(umbralEfectivo(c))} min ` +
+      "de tolerancia), o en cuanto nace urgente. Vuelve a avisar una vez si el servicio queda a menos de la mitad del " +
+      "margen de reserva (/tarifario → Zonas y traslados → Ajustes) sin resolverse. Las que esperan el pago del cliente " +
+      "no avisan: se cierran solas como vencidas cuando vence la cotización o pasa el servicio, sin escribirle al cliente.",
+    {
+      umbral: { etiqueta: "Min. de tolerancia tras el plazo" }, usa: ["umbral"],
+      textoActivo: "Apagada no avisa, pero las reservas que esperan el pago se siguen cerrando solas al vencer.",
+    },
+  ),
+  devolucion_pendiente: aContactos(
+    (c) => "A los contactos marcados, cuando una devolución acordada de una reserva de traslado de la IA (no hubo unidad, " +
+      `o se canceló con devolución) sigue sin registrarse completa en Tesorería ${n(umbralEfectivo(c))} h después de ` +
+      "acordarse. Una vez por reserva.",
+    { umbral: { etiqueta: "Horas tras acordar la devolución" }, usa: ["umbral"] },
   ),
   // lib/notificaciones.ts (notificarReserva): lo dispara el botón del manifiesto o ELIA; de la
   // fila solo lee los canales del pasajero.
