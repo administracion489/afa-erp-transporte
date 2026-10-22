@@ -34,9 +34,9 @@
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, pintarPieHtml, pintarVehiculosHtml, sharedCSS, buildVehsHtml, esc, type VehiculoPDF } from "./pdf-chrome";
 import { empresaConDefectos, type PerfilEmpresa, type CuentaBancaria } from "./empresa-perfil";
 import type { Moneda, TotalesMoneda } from "./cotizacion-moneda";
-import { t, fmtFechaDoc, fmtImporte, fmtTipoCambio, esConsidFijada, type Idioma, type ClaveTexto, type ConsidFila } from "./cotizacion-idioma";
+import { t, fmtFechaDoc, fmtImporte, fmtTipoCambio, esConsidFijada, type Idioma, type ClaveTexto, type ConsidCot, type ConsidFila } from "./cotizacion-idioma";
 import {
-  anexoDoc, baseCotizacionPdf, cronogramaDoc, cuentasCorporativo, cuentasDoc, docCorporativoDeBase, lineasItinerario, listaVisible, numeroCotizacion,
+  anexoDoc, baseCotizacionPdf, cronogramaDoc, cuentasCorporativo, cuentasDoc, docCorporativoDeBase, lineasItinerario, listaVisible, numeroCotizacion, reservaVisible,
   type AnexoDoc, type CajaDoc, type CronogramaDoc, type CuentasDoc, type DocCorporativo, type FilaDoc, type LineaItinerario, type Segmento,
 } from "./cotizacion-corporativo";
 
@@ -99,6 +99,8 @@ export type PlantillaPdfCfg = {
   titulo_documento?: string | null; subtitulo?: string | null; mensaje_cierre?: string | null;
   mostrar_cuentas_bancarias?: boolean | null; usar_bancos_propios?: boolean | null;
   condiciones_incluye?: string[] | null; condiciones_no_incluye?: string[] | null; condiciones_generales?: string[] | null;
+  /** La política de reserva, cambios y cancelación (supabase/cotizaciones-06). Solo la lee la corporativa. */
+  condiciones_reserva?: string[] | null;
   banco_1_nombre?: string | null; banco_1_cuenta?: string | null; banco_1_cci?: string | null;
   banco_2_nombre?: string | null; banco_2_cuenta?: string | null; banco_2_cci?: string | null;
   banco_3_nombre?: string | null; banco_3_cuenta?: string | null; banco_3_cci?: string | null;
@@ -489,13 +491,21 @@ function htmlCorporativo(d: DocCorporativo): string {
   const saltoIncl = p2.saltoAntesDeCondiciones ? '<div style="page-break-before:always;height:70px;margin:0;"></div>' : "";
   const li = (xs: string[]) => xs.map(i => `<li>${esc(i)}</li>`).join("");
   const vInc = listaVisible(p2.incluye, p2.omitirVacias), vNo = listaVisible(p2.noIncluye, p2.omitirVacias), vGen = listaVisible(p2.generales, p2.omitirVacias);
-  const listas = vInc || vNo || vGen
-    ? `<div class="anexo">${vInc || vNo ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">${vInc ? `<div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">${esc(p2.incluye.titulo)}</h3><ul>${li(p2.incluye.items)}</ul></div>` : ""}${vNo ? `<div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">${esc(p2.noIncluye.titulo)}</h3><ul>${li(p2.noIncluye.items)}</ul></div>` : ""}</div>` : ""}${vGen ? `<h3 style="color:${cp};border-bottom:2px solid ${cp};padding-bottom:3px;">${esc(p2.generales.titulo)}</h3><ul>${li(p2.generales.items)}</ul>` : ""}</div>`
+  // La política de reserva va al final y solo con líneas: sin ella, el HTML de siempre byte a byte.
+  const vRes = reservaVisible(p2);
+  const reserva = vRes ? `<h3 style="color:${cp};border-bottom:2px solid ${cp};padding-bottom:3px;">${esc(p2.reserva.titulo)}</h3><ul>${li(p2.reserva.items)}</ul>` : "";
+  const listas = vInc || vNo || vGen || vRes
+    ? `<div class="anexo">${vInc || vNo ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">${vInc ? `<div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">${esc(p2.incluye.titulo)}</h3><ul>${li(p2.incluye.items)}</ul></div>` : ""}${vNo ? `<div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">${esc(p2.noIncluye.titulo)}</h3><ul>${li(p2.noIncluye.items)}</ul></div>` : ""}</div>` : ""}${vGen ? `<h3 style="color:${cp};border-bottom:2px solid ${cp};padding-bottom:3px;">${esc(p2.generales.titulo)}</h3><ul>${li(p2.generales.items)}</ul>` : ""}${reserva}</div>`
     : "";
   return `<!DOCTYPE html><html lang="${d.idioma}"><head><meta charset="UTF-8"/><title>${esc(d.tituloVentana)}</title><style>${css}</style></head><body>${buildHeaderPDFHtml(esc(d.logoUrl || LOGO_DEFAULT), cp, esc(d.titulo), esc(d.subtitulo))}<div class="grid2">${cajaHtml(d.cliente)}${cajaHtml(d.empresa)}</div><div class="box" style="margin-bottom:10px;"><div class="box-title">${esc(det.titulo)}</div><div style="display:grid;grid-template-columns:${det.lugares.length === 2 ? "1fr 1fr" : "1fr 1fr 1fr"};gap:6px;">${det.lugares.map(f => filaHtml(f)).join("")}</div>${det.asunto ? filaHtml(det.asunto, ' style="margin-top:4px;"') : ""}<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;">${det.fechas.map(f => filaHtml(f)).join("")}</div></div>${d.cronograma ? pintarCronogramaHtml(d.cronograma, cp) : ""}<table><thead><tr><th style="width:40px;">${E[0]}</th><th style="text-align:left;">${E[1]}</th><th style="width:45px;">${E[2]}</th><th style="width:55px;">${E[3]}</th><th style="width:110px;">${E[4]}</th><th style="width:55px;">${E[5]}</th><th style="width:110px;">${E[6]}</th></tr></thead><tbody>${filasItems}<tr><td colspan="7" style="border:1px solid #ccc;padding:0;vertical-align:top;">${totalesCorpHtml}</td></tr></tbody></table>${nota}${d.cuentas ? pintarCuentasHtml(d.cuentas) : ""}${d.anexo ? pintarAnexoHtml(d.anexo, cp, "#1d4ed8") : ""}<div class="page-break"></div><h2 style="font-size:14px;font-weight:900;color:${cp};border-bottom:2px solid ${cp};padding-bottom:6px;margin-bottom:16px;padding-top:82px;">${esc(p2.titulo)}</h2>${caract}` + saltoIncl + listas + `${pintarPieHtml(cp, d.pie.map(p => ({ ...p, texto: esc(p.texto) })))}<script>window.onload=()=>window.print();</script></body></html>`;
 }
 
 // ── La entrada única ───────────────────────────────────────────────────────────
+
+/** Cómo nombra el aviso «tal cual» cada lista (las tres de siempre, como las escribía antes). */
+const NOMBRE_LISTA_AVISO: Record<keyof ConsidCot, string> = {
+  incluye: "incluye", no_incluye: "no incluye", generales: "generales", reserva: "reserva, cambios y cancelación",
+};
 
 /**
  * Los textos que la PLANTILLA escribió a mano (en español) y que en inglés no se imprimen. Con las
@@ -507,7 +517,7 @@ function textosDePlantilla(cfg: PlantillaPdfCfg | null | undefined, considFijada
   const out: string[] = [];
   if (String(cfg.titulo_documento ?? "").trim()) out.push("el título del documento");
   if (String(cfg.mensaje_cierre ?? "").trim()) out.push("el mensaje de cierre");
-  if (!considFijada && (cfg.condiciones_incluye?.length || cfg.condiciones_no_incluye?.length || cfg.condiciones_generales?.length)) out.push("las condiciones de la plantilla");
+  if (!considFijada && (cfg.condiciones_incluye?.length || cfg.condiciones_no_incluye?.length || cfg.condiciones_generales?.length || cfg.condiciones_reserva?.length)) out.push("las condiciones de la plantilla");
   return out;
 }
 
@@ -535,7 +545,7 @@ export function htmlCotizacion(e: EntradaPdfCot): ResultadoPdf {
     }
     const partes: string[] = [];
     if (b.descsTalCual) partes.push(`${b.descsTalCual} descripción(es) de ítem`);
-    if (consid.escritasTalCual.length) partes.push(`las consideraciones (${consid.escritasTalCual.join(", ").replace("no_incluye", "no incluye")})`);
+    if (consid.escritasTalCual.length) partes.push(`las consideraciones (${consid.escritasTalCual.map(k => NOMBRE_LISTA_AVISO[k]).join(", ")})`);
     if (String(cot.itinerario_texto ?? "").trim()) partes.push("el itinerario");
     if (partes.length) {
       avisos.push({

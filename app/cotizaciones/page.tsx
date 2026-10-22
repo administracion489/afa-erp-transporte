@@ -1858,7 +1858,7 @@ export default function CotizacionesPage(){
       vehiculo_tercero_id:form.vehiculo_tercero_id?Number(form.vehiculo_tercero_id):null,
       // Las condiciones quedan ESCRITAS en la fila (versión 2): el PDF imprime estas, las que muestra
       // el formulario, y no las que tenga la plantilla el día que se imprima (lib/cotizacion-plantillas.ts).
-      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,version:CONSID_VERSION,plantilla:plantillaForm},plantilla_pdf:plantillaForm,
+      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),version:CONSID_VERSION,plantilla:plantillaForm},plantilla_pdf:plantillaForm,
       paradas_json:paradas.length>0?paradas:null,paradas_retorno_json:paradasRetorno.length>0?paradasRetorno:null,modo_servicio:form.modo_servicio,
       dias_servicio:Number(form.dias_servicio)||1,horas_servicio:Number(form.horas_servicio)||8,
       pernocte_costo:pernocteF||null,precio_dia:precioDiaNum,precio_mes_estimado:precioMesNum,
@@ -2448,7 +2448,7 @@ export default function CotizacionesPage(){
     }
     // La que se está editando imprime lo que muestra el formulario, como quedará guardada (versión 2).
     // Una sin condiciones guardadas, las de fábrica (lo mismo que carga el formulario al abrirla).
-    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,version:CONSID_VERSION,plantilla:plantillaForm}:(cot.consideraciones_json||{...DEFAULT_CONSID});
+    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),version:CONSID_VERSION,plantilla:plantillaForm}:(cot.consideraciones_json||{...DEFAULT_CONSID});
     const r=htmlCotizacion({
       cot,cliente:cl,items:its,vehiculos,repr:nombreFinal,consid:considFinal,plantilla:diseno,
       cfg:fila,empresa:empData as EmpresaPerfilPDF|null,
@@ -3064,7 +3064,7 @@ export default function CotizacionesPage(){
                   {ambar&&usoAuto.detalle&&<p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {usoAuto.detalle}</p>}
                   {!plantillaFijada&&usoAuto.codigo==="lectura_fallida"&&<p className="text-[11px] text-amber-800">Se usa la corporativa y, si no se pudo leer, las condiciones de fábrica.</p>}
                   {avisoConsidForm&&<p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {avisoConsidForm}</p>}
-                  {otraPl&&<p className="text-[11px] text-gray-600">Las condiciones de abajo no son las de «{otraPl.nombre||otraPl.id}» (se editaron{consid.plantilla?` o vienen de «${nombrePlantilla(consid.plantilla)||consid.plantilla}»`:""}). <button type="button" className="font-bold text-[#0b315f] hover:underline" onClick={()=>{const n=consid.incluye.length+consid.no_incluye.length+consid.generales.length;if(confirm(`Se reemplazan las ${n} condiciones de abajo por las de la plantilla «${otraPl.nombre||otraPl.id}». ¿Continuar?`))setConsidEditada(null);}}>Cargar las condiciones de «{otraPl.nombre||otraPl.id}»</button></p>}
+                  {otraPl&&<p className="text-[11px] text-gray-600">Las condiciones de abajo no son las de «{otraPl.nombre||otraPl.id}» (se editaron{consid.plantilla?` o vienen de «${nombrePlantilla(consid.plantilla)||consid.plantilla}»`:""}). <button type="button" className="font-bold text-[#0b315f] hover:underline" onClick={()=>{const n=consid.incluye.length+consid.no_incluye.length+consid.generales.length+(consid.reserva?.length??0);if(confirm(`Se reemplazan las ${n} condiciones de abajo por las de la plantilla «${otraPl.nombre||otraPl.id}». ¿Continuar?`))setConsidEditada(null);}}>Cargar las condiciones de «{otraPl.nombre||otraPl.id}»</button></p>}
                   <p className="text-[10px] text-gray-400">Al guardar, las condiciones de abajo quedan escritas en la cotización y son las que imprime su PDF; cambiar después la plantilla no las cambia.</p>
                 </div>);
               })()}
@@ -3078,6 +3078,20 @@ export default function CotizacionesPage(){
                 <div className="space-y-1.5">{consid.generales.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,generales:prev.generales.map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,generales:prev.generales.filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
                 <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,generales:[...prev.generales,""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,generales:[...considDePlantilla(filaForm).generales]}))} title={`Vuelve a las consideraciones generales de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar las de la plantilla</button></div>
               </div>
+              {(()=>{
+                // La política de reserva, cambios y cancelación (supabase/cotizaciones-06): la copia la
+                // plantilla al crear y SOLO la imprime el diseño corporativo, después de las generales.
+                const reserva=consid.reserva??[];
+                const corp=disenoDe(filaForm??{id:plantillaForm})==="corporativo";
+                if(!corp&&reserva.length===0)return null;
+                return(<div className="rounded-xl border-2 p-3 space-y-2 mt-4" style={{background:"#f8fafc",borderColor:"#cbd5e1"}}>
+                  <p className="text-xs font-black text-[#0b315f]">📅 Reserva, cambios y cancelación</p>
+                  {!corp&&<p className="text-[10px] text-gray-500">El diseño de esta plantilla no imprime la política de reserva: solo la imprime el corporativo.</p>}
+                  {reserva.length===0&&<p className="text-[10px] text-gray-500">Sin política de reserva: el PDF no imprime este bloque.</p>}
+                  <div className="space-y-1.5">{reserva.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,reserva:(prev.reserva??[]).map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,reserva:(prev.reserva??[]).filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
+                  <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(prev.reserva??[]),""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(considDePlantilla(filaForm).reserva??[])]}))} title={`Vuelve a la política de reserva de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar la de la plantilla</button></div>
+                </div>);
+              })()}
             </div>
 
             <div className={requiereParadas?"rounded-2xl border-2 p-4":""}  style={requiereParadas?{borderColor:paradas.length<2?"#fca5a5":"#86efac",background:paradas.length<2?"#fff5f5":"#f0fdf4"}:{}}>

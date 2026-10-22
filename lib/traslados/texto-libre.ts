@@ -218,17 +218,20 @@ export function motivosLineaIA(linea: string): MotivoTextoLibre[] {
  */
 export const MOTIVOS_CONDICION_REVISION: readonly MotivoTextoLibre[] = ["enlace", "numero_largo"];
 
-export type CondicionSospechosa = { lista: "incluye" | "no_incluye" | "generales"; linea: string; motivos: MotivoTextoLibre[] };
+export type CondicionSospechosa = { lista: "incluye" | "no_incluye" | "generales" | "reserva"; linea: string; motivos: MotivoTextoLibre[] };
 
 /**
  * Las líneas de las condiciones de una cotización (`consideraciones_json`) que la dejan para revisión
  * (`MOTIVOS_CONDICION_REVISION`), en el orden en que se imprimen. Se miran las líneas como las
- * imprime el PDF (sin espacios de más ni vacías).
+ * imprime el PDF (sin espacios de más ni vacías). Incluye la política de reserva, cambios y
+ * cancelación (`reserva`): la IA la manda al cliente igual que las otras, así que un enlace o un
+ * número de 6+ dígitos en ella (un teléfono, una cuenta) también la deja para revisión. Por eso la
+ * política no lleva los datos de contacto: los añade el código desde el perfil de la empresa.
  */
 export function condicionesSospechosas(c: unknown): CondicionSospechosa[] {
   const o = c && typeof c === "object" ? (c as Record<string, unknown>) : {};
   const out: CondicionSospechosa[] = [];
-  for (const lista of ["incluye", "no_incluye", "generales"] as const) {
+  for (const lista of ["incluye", "no_incluye", "generales", "reserva"] as const) {
     const ls = Array.isArray(o[lista]) ? (o[lista] as unknown[]).map(s => String(s ?? "").trim()).filter(Boolean) : [];
     for (const linea of ls) {
       const motivos = motivosLineaIA(linea).filter(m => MOTIVOS_CONDICION_REVISION.includes(m));

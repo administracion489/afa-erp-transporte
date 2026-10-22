@@ -957,6 +957,88 @@ seccion("9. La plantilla de la cotización: el traspaso no cambia el PDF; las cu
   ok(D.COLS_COTIZACION_TRASLADO_ACCESORIAS.join() === "plantilla_pdf" && !D.COLS_COTIZACION_TRASLADO.includes("plantilla_pdf"), "plantilla_pdf va aparte, como accesoria");
 }
 
+// ── 10. La política de reserva, cambios y cancelación (cotizaciones-06) ───────
+// La cuarta lista (`consideraciones_json.reserva`, copiada de `condiciones_reserva` de la plantilla):
+// el HTML y el PDF del servidor la dicen IGUAL y en el mismo orden (después de las Consideraciones
+// generales); se copia a la fila (limpia) solo si la plantilla la tiene; vacía, ausente o en blanco
+// no imprime nada, ni el título, y la fila sin ella sale byte a byte como antes.
+seccion("10. La política de reserva: HTML ↔ PDF, se copia a la fila, vacía no se imprime");
+{
+  const POLITICA = [
+    "La reserva se confirma con el 50 % de adelanto; el saldo se paga al iniciar el servicio.",
+    "Cambios de fecha, hora o recorrido sin costo, sujetos a disponibilidad.",
+    "Cancelación con 24 horas o más de anticipación: sin costo, devolución del 100 %.",
+    "Con menos de 24 horas: reprogramación sin costo o un cargo administrativo del 10 % de lo pagado.",
+  ];
+  const conPolitica = (f: C.FilaCotizacionLeida, reserva: unknown): C.FilaCotizacionLeida => ({ ...f, consideraciones_json: { ...f.consideraciones_json!, reserva } as any });
+  const quitaStyle = (h: string) => h.replace(/<style>[\s\S]*?<\/style>/, "");
+  // (a) Con la lista llena: el HTML y el PDF la dicen igual (compararCaso exige el mismo texto y orden).
+  for (const [n, f] of [["ida · PEN", IDA], ["ida y retorno · PEN", IDA_RET], ["ida y retorno · USD", USD]] as const) {
+    const r = await compararCaso({ n: `política de reserva · ${n}`, fila: conPolitica(f, POLITICA), categoria: catDeFila(f, false), logo: true });
+    const sinEstilo = quitaStyle(r.html);
+    ok(sinEstilo.includes(esc(t("es", "corp_reserva"))) && POLITICA.every((l) => sinEstilo.includes(`<li>${esc(l)}</li>`)), `${n}: el HTML imprime el título y cada línea de la política`);
+    const cuerpo = r.traza.filter((x) => x.zona === "cuerpo").map((x) => x.texto);
+    const iGen = cuerpo.findIndex((x) => x === "CONSIDERACIONES GENERALES");
+    const iRes = cuerpo.findIndex((x) => x === "RESERVA, CAMBIOS Y CANCELACIÓN");
+    ok(iRes > 0 && iGen >= 0 && iRes > iGen, `${n}: el PDF dibuja el título de la política después de las Consideraciones generales (${iGen} → ${iRes})`);
+    ok(POLITICA.every((l) => cuerpo.join(" ").replace(/\s+/g, " ").includes(l)), `${n}: el PDF dibuja cada línea de la política`);
+    ok(r.paginas === 2, `${n}: sigue en dos hojas (${r.paginas})`);
+  }
+  // (b) Una política larga que pasa de hoja: el mismo texto y orden, cabecera y pie en cada hoja.
+  const larga = Array.from({ length: 30 }, (_, i) => `Punto ${i + 1} de la política de reserva, cambios y cancelación`.padEnd(220, " sin costo"));
+  const rl = await compararCaso({ n: "política larga (pasa de hoja)", fila: conPolitica(IDA_RET, larga), categoria: catDeFila(IDA_RET, true), logo: true });
+  ok(rl.paginas >= 3, `la política larga parte la hoja (${rl.paginas} hojas)`);
+  // (c) Vacía, en blanco o ausente: no se imprime nada, ni el título, y el HTML es el de sin la clave.
+  const base = await compararCaso({ n: "sin política (clave ausente)", fila: IDA, categoria: catDeFila(IDA, false), logo: true });
+  for (const [n, v] of [["[]", []], ["solo en blanco", ["", "   "]], ["null", null], ["texto suelto", "Política"]] as const) {
+    const r = await compararCaso({ n: `política ${n}`, fila: conPolitica(IDA, v), categoria: catDeFila(IDA, false), logo: true });
+    ok(r.html === base.html, `política ${n}: el HTML es byte a byte el de sin la clave`);
+    ok(!r.traza.some((x) => /RESERVA, CAMBIOS/.test(x.texto)) && JSON.stringify(textosDelPdf(r.bytes)) === JSON.stringify(textosDelPdf(base.bytes)), `política ${n}: el PDF no dibuja ni el título`);
+  }
+  ok(!/RESERVA, CAMBIOS|Reserva, cambios/.test(quitaStyle(base.html)) && !base.traza.some((x) => /RESERVA/.test(x.texto)), "sin la clave: ni el título en el HTML ni en el PDF");
+  // (d) Solo la política (sin Incluye, No incluye ni generales): sale sola, con su título.
+  const solo = { ...IDA, consideraciones_json: { incluye: [], no_incluye: [], generales: [], reserva: POLITICA } } as C.FilaCotizacionLeida;
+  const rs = await compararCaso({ n: "solo la política", fila: solo, categoria: catDeFila(solo, false), logo: true });
+  ok(rs.traza.some((x) => x.texto === "RESERVA, CAMBIOS Y CANCELACIÓN") && !rs.traza.some((x) => x.texto === "CONSIDERACIONES GENERALES"), "solo la política: su título, sin el de las generales");
+  // (e) Se copia a la fila: desde la plantilla (limpia), nunca desde Ajustes; sin ella, sin la clave.
+  const r0 = M.evaluarTraslado(pedido(), ctx);
+  const filaCon = (plantilla: any) => C.filaCotizacionTraslado(r0, entradaDe(pedido()), { convId: "c", clienteId: null, atencion: null, config, firma: "f", hoy: HOY, plantilla });
+  const PL_BASE = { id: "traslados_ia", nombre: "Traslados (IA)", diseno: "corporativo", idioma: "es", activa: true, condiciones_generales: ["G"], condiciones_incluye: [], condiciones_no_incluye: [] };
+  const fc = filaCon({ ...PL_BASE, condiciones_reserva: ["  Uno  ", "", "Dos", "   "] });
+  ok(JSON.stringify(fc.consideraciones_json.reserva) === JSON.stringify(["Uno", "Dos"]) && fc.consideraciones_json.version === 2, `con la política en la plantilla: se copia limpia a la fila (${JSON.stringify(fc.consideraciones_json.reserva)})`);
+  ok(JSON.stringify(Object.keys(fc.consideraciones_json)) === JSON.stringify(["incluye", "no_incluye", "generales", "reserva", "version", "plantilla"]), `la clave va después de las generales (${Object.keys(fc.consideraciones_json).join(", ")})`);
+  for (const [n, v] of [["null", null], ["ausente", undefined]] as const) {
+    const f = filaCon(v === undefined ? PL_BASE : { ...PL_BASE, condiciones_reserva: v });
+    ok(!("reserva" in f.consideraciones_json), `plantilla con la política ${n}: la fila va sin la clave`);
+  }
+  ok(!("reserva" in filaCon(null).consideraciones_json) && !("reserva" in filaCon(undefined).consideraciones_json), "sin plantilla (Ajustes de traslados): la fila va sin la clave");
+  ok(JSON.stringify(filaCon({ ...PL_BASE, condiciones_reserva: [] }).consideraciones_json.reserva) === "[]", "una política vacía en la plantilla es una lista vacía");
+  // La entrada del PDF la pasa tal cual, limpia; sin la clave, no la agrega.
+  const leida = { ...fc, id: 7, numero_cotizacion: null, created_at: "2026-10-19T15:00:00Z" } as C.FilaCotizacionLeida;
+  const ent = C.entradaCorporativaTraslado(leida, { empresa: perfil, celular: "51966707225" });
+  ok(JSON.stringify(ent.consid?.reserva) === JSON.stringify(["Uno", "Dos"]), "entradaCorporativaTraslado pasa la política");
+  ok(!("reserva" in (C.entradaCorporativaTraslado(IDA, { empresa: perfil, celular: "51966707225" }).consid ?? {})), "y sin ella no agrega la clave");
+  // La plantilla nunca se cuela: la política sale de la fila aunque la plantilla tenga otra.
+  const otra = await compararCaso({ n: "plantilla con otra política", fila: conPolitica(IDA, POLITICA), categoria: catDeFila(IDA, false), logo: true, plantilla: { ...PLANTILLA_CON_CONDICIONES, condiciones_reserva: ["OTRA POLÍTICA"] } });
+  ok(!/OTRA POLÍTICA/.test(otra.html) && !otra.traza.some((x) => /OTRA POL/.test(x.texto)), "la política de la plantilla no se imprime: sale la de la fila");
+  ok(t("es", "corp_reserva") === "📅 Reserva, cambios y cancelación" && t("en", "corp_reserva") === "📅 Booking, changes and cancellation", "el título en castellano y en inglés");
+  // (f) La política sembrada por la migración (si ya existe): el HTML y el PDF la dicen igual, cabe en
+  // los topes y no trae nada que deje la cotización para revisión (sin contactos, como pide el plan).
+  const rutaSql = "supabase/cotizaciones-06-politica-reserva.sql";
+  if ((await import("node:fs")).existsSync(rutaSql)) {
+    const arr = readFileSync(rutaSql, "utf8").match(/condiciones_reserva = array\[([\s\S]*?)\]::text\[\]/)?.[1] ?? "";
+    const sembrada = [...arr.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
+    ok(sembrada.length > 0, `la política sembrada se lee del SQL (${sembrada.length} líneas)`);
+    const rp = await compararCaso({ n: "la política sembrada", fila: conPolitica(IDA_RET, sembrada), categoria: catDeFila(IDA_RET, true), logo: true });
+    ok(sembrada.every((l) => quitaStyle(rp.html).includes(`<li>${esc(l)}</li>`)), "el HTML imprime cada línea sembrada");
+    const T = await import("../lib/traslados/texto-libre");
+    const PLx = await import("../lib/cotizacion-plantillas");
+    ok(T.condicionesSospechosas({ reserva: sembrada }).length === 0 && PLx.excesoCondiciones({ reserva: sembrada }).length === 0, "no deja la cotización para revisión ni pasa los topes");
+  } else {
+    console.log(`    ⏳ todavía no existe ${rutaSql}: la política sembrada se comprueba cuando datos-sql lo entregue.`);
+  }
+}
+
 // ── Muestra para mirar (no la exige la matriz) ───────────────────────────────
 if (process.env.MUESTRA_DIR) {
   const dir = process.env.MUESTRA_DIR;

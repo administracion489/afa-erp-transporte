@@ -22,6 +22,11 @@
 //    vence en la fecha del servicio si llega antes, y «Válida 30 días» sería falso;
 //  · `notaTotales` — una línea bajo la tabla (la de disponibilidad del traslado);
 //  · `omitirListasVacias` — una lista de consideraciones vacía no se imprime, ni su título.
+//
+// LA POLÍTICA DE RESERVA, CAMBIOS Y CANCELACIÓN (`consid.reserva`, supabase/cotizaciones-06) es la
+// cuarta lista y SOLO la imprime esta plantilla: en la hoja 2, después de las Consideraciones
+// generales. Vacía, ausente o solo con líneas en blanco no se imprime NADA, ni su título (con o sin
+// `omitirListasVacias`), así que una cotización o una plantilla sin ella sale como siempre.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import type { AvisoPdf, ClientePdf, CotizacionPdf, EntradaPdfCot, ItemPdf, PlantillaPdfCfg } from "./cotizacion-pdf";
@@ -303,6 +308,8 @@ export type DocCorporativo = {
     incluye: ListaDoc;
     noIncluye: ListaDoc;
     generales: ListaDoc;
+    /** La política de reserva, cambios y cancelación: sin líneas no se imprime (`reservaVisible`). */
+    reserva: ListaDoc;
     /** Una lista vacía no se imprime, ni su título. */
     omitirVacias: boolean;
   };
@@ -463,6 +470,8 @@ export function docCorporativoDeBase(b: BaseCotizacionPdf): DocCorporativo {
       incluye: { titulo: T("corp_incluye"), items: lista(b.consid.incluye) },
       noIncluye: { titulo: T("corp_no_incluye"), items: lista(b.consid.no_incluye) },
       generales: { titulo: T("corp_generales"), items: lista(b.consid.generales) },
+      // Sin líneas en blanco nunca: una política vacía no imprime ni su título.
+      reserva: { titulo: T("corp_reserva"), items: (b.consid.reserva ?? []).map(s).filter(x => x.trim() !== "") },
       omitirVacias,
     },
     pie: partesPie(emp.direccion, emp.telefono, emp.email, emp.web, idioma),
@@ -482,5 +491,8 @@ export function docCorporativo(entrada: EntradaPdfCot): DocCorporativo {
 
 /** ¿Se imprime esta lista? (con `omitirVacias`, una vacía no: ni su título). */
 export const listaVisible = (l: ListaDoc, omitirVacias: boolean): boolean => !omitirVacias || l.items.length > 0;
+
+/** ¿Se imprime la política de reserva? Solo con alguna línea (el HTML y el PDF del servidor leen esta). */
+export const reservaVisible = (p2: Pick<DocCorporativo["pagina2"], "reserva">): boolean => (p2.reserva?.items.length ?? 0) > 0;
 
 export type { ClientePdf };

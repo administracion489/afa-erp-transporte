@@ -290,12 +290,12 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
 
 // ── Las condiciones del PDF, de las plantillas (cotizaciones-05) ─────────────
 
-function ListaSoloLectura({ titulo, lista }: { titulo: string; lista: ListaCondicion }) {
+function ListaSoloLectura({ titulo, lista, sinLista }: { titulo: string; lista: ListaCondicion; sinLista?: string }) {
   return (
     <div className="min-w-0">
       <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{titulo}</p>
       {!lista.propia ? (
-        <p className="text-[11px] text-gray-500 italic">La plantilla no tiene esta lista propia: el PDF del traslado sale sin ella.</p>
+        <p className="text-[11px] text-gray-500 italic">{sinLista ?? "La plantilla no tiene esta lista propia: el PDF del traslado sale sin ella."}</p>
       ) : lista.items.length === 0 ? (
         <p className="text-[11px] text-gray-500 italic">Vacía en la plantilla: el PDF no la imprime.</p>
       ) : (
@@ -319,7 +319,7 @@ function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoC
         <button type="button" onClick={onReleer} className="text-[11px] font-bold text-gray-500 hover:text-gray-700 underline min-h-[32px]">↻ Volver a leer las plantillas</button>
       </div>
       <p className="text-xs text-gray-500">
-        Las consideraciones, <b>Incluye</b> y <b>No incluye</b> del PDF del traslado salen de la plantilla PDF que la regla «Traslado de la IA» asigna a cada tipo de cliente, y se editan en <Link href="/cotizaciones/plantillas" className="font-bold text-[#0b315f] underline">Plantillas PDF</Link>. Las de una plantilla se enseñan aquí en solo lectura: es lo que la IA copia a cada cotización nueva (las ya creadas no cambian). Donde no hay una plantilla que la IA pueda usar, copia las listas de Ajustes, que se editan aquí abajo. En dólares el tipo de cliente es siempre «Extranjero».
+        Las consideraciones, <b>Incluye</b>, <b>No incluye</b> y la política de <b>Reserva, cambios y cancelación</b> del PDF del traslado salen de la plantilla PDF que la regla «Traslado de la IA» asigna a cada tipo de cliente, y se editan en <Link href="/cotizaciones/plantillas" className="font-bold text-[#0b315f] underline">Plantillas PDF</Link>. Las de una plantilla se enseñan aquí en solo lectura: es lo que la IA copia a cada cotización nueva (las ya creadas no cambian). Donde no hay una plantilla que la IA pueda usar, copia las listas de Ajustes, que se editan aquí abajo. En dólares el tipo de cliente es siempre «Extranjero».
       </p>
       {grupos.map((g) => {
         const ambar = g.segmentos.some((s) => s.ambar);
@@ -353,6 +353,10 @@ function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoC
                 <ListaSoloLectura titulo="Consideraciones" lista={g.generales} />
                 <ListaSoloLectura titulo="Incluye" lista={g.incluye} />
                 <ListaSoloLectura titulo="No incluye" lista={g.no_incluye} />
+                <div className="lg:col-span-3">
+                  <ListaSoloLectura titulo="Reserva, cambios y cancelación" lista={g.reserva}
+                    sinLista="La plantilla no tiene política de reserva: el PDF del traslado sale sin ella y la IA no tiene una política que enviar al cliente." />
+                </div>
               </div>
             )}
           </div>

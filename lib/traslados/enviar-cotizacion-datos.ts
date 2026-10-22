@@ -52,7 +52,7 @@ import { faltaAlguna } from "../columna-faltante";
 import { empresaConDefectos, type CuentaBancaria, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { docCorporativo, numeroCotizacion } from "../cotizacion-corporativo";
 import type { PlantillaPdfCfg } from "../cotizacion-pdf";
-import { disenoDe, esActiva, excesoCondiciones, MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES } from "../cotizacion-plantillas";
+import { disenoDe, esActiva, ETIQUETA_LISTA_CONSID, excesoCondiciones, MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES } from "../cotizacion-plantillas";
 import { dibujarPdfCorporativo, type ImagenPdf } from "../pdf-corporativo";
 import { fechaLima } from "../alertas-horario";
 import {
@@ -392,7 +392,7 @@ export function avisosDeRevision(
   }
   const exceso = excesoCondiciones(fila.consideraciones_json);
   if (exceso.length) {
-    const nombreLista = { incluye: "Incluye", no_incluye: "No incluye", generales: "Consideraciones generales" } as const;
+    const nombreLista = ETIQUETA_LISTA_CONSID;
     avisos.push(aviso("condiciones_demasiadas", exceso.map((e) => `«${nombreLista[e.lista]}»: ${e.motivo === "demasiadas_lineas" ? `${e.n} líneas` : `una línea de ${e.n} caracteres`}`).join("; ") + "."));
   }
   return avisos;

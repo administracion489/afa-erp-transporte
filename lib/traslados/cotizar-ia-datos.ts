@@ -31,6 +31,7 @@ import { faltaAlguna, faltaColumna } from "../columna-faltante";
 import { empresaConDefectos } from "../empresa-perfil";
 import { numeroCotizacion } from "../cotizacion-pdf";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
+import { ETIQUETA_LISTA_CONSID } from "../cotizacion-plantillas";
 import { fechaLima } from "../alertas-horario";
 import { telefonosE164 } from "../crm-telefono";
 import { validarEntrada, type EntradaSimulador, type LugarEntrada } from "./api";
@@ -308,7 +309,7 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
 type CampoLibre = { campo: string; texto: string | null };
 
 /** El nombre de cada lista de condiciones, como lo rotula la pantalla. */
-const NOMBRE_LISTA = { incluye: "Incluye", no_incluye: "No incluye", generales: "Consideraciones generales" } as const;
+const NOMBRE_LISTA = ETIQUETA_LISTA_CONSID;
 /** Un texto en una línea y como mucho `n` caracteres (con «…»). */
 const recortar = (t: string, n: number) => { const c = Array.from(String(t ?? "").replace(/\s+/g, " ").trim()); return c.length > n ? `${c.slice(0, n - 1).join("")}…` : c.join(""); };
 

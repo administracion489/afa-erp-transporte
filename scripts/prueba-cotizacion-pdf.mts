@@ -560,5 +560,40 @@ console.log("7. Colores de la plantilla: solo #RRGGBB entra al CSS (divergencia 
   ok(N.colorValido("#a1B2c3") && !N.colorValido("#a1b2c") && !N.colorValido(null) && N.colorCss("x", "#000000") === "#000000" && N.colorCss("#FFFFFF", "#000000") === "#FFFFFF", "colorValido / colorCss");
 }
 
+console.log("8. La política de reserva (cotizaciones-06): solo la corporativa, solo con líneas, después de las generales");
+{
+  // La cuarta lista: fijada en la fila (versión 2) o, en una fila de antes en castellano, la de la
+  // plantilla (la misma regla que las otras tres). Sin ella, el HTML de siempre (sección 1).
+  const POL = ["Se confirma con el 50 % de adelanto.", "Cancelación con 24 horas o más: sin costo."];
+  const TIT = "📅 Reserva, cambios y cancelación";
+  const fija = (reserva?: unknown) => ({ ...DEFAULT_CONSID, ...(reserva === undefined ? {} : { reserva }), version: 2, plantilla: "corporativo" }) as any;
+  const html = (p: string, consid: any, cfg: any = null, idioma: any = "es") =>
+    N.htmlCotizacion({ cot: COTS(1)[0], cliente: CLIENTES[2], items: ITEMS[0], vehiculos: [veh(1)], consid, plantilla: p, cfg, idioma }).html!;
+  const sinEstilo = (h: string) => h.replace(/<style>[\s\S]*?<\/style>/, "");
+  const corp = sinEstilo(html("corporativo", fija(POL)));
+  ok(corp.includes(TIT) && POL.every((l) => corp.includes(`<li>${l}</li>`)), "corporativo: imprime el título y las líneas");
+  ok(corp.indexOf(TIT) > corp.indexOf("📋 Consideraciones generales") && corp.indexOf("📋 Consideraciones generales") > 0, "después de las Consideraciones generales");
+  for (const p of ["moderno_fotos", "turistico", "ejecutivo"] as const) {
+    ok(html(p, fija(POL)) === html(p, fija()), `${p}: no la imprime (el HTML es el de sin la política)`);
+  }
+  for (const [n, v] of [["[]", []], ["en blanco", ["", "  "]], ["null", null]] as const) {
+    ok(html("corporativo", fija(v)) === html("corporativo", fija()), `corporativo con la política ${n}: el HTML de sin la política`);
+  }
+  ok(!sinEstilo(html("corporativo", fija())).includes("Reserva, cambios"), "sin la política: ni el título");
+  // Fila de antes en castellano: la plantilla gana (la misma regla que las otras listas).
+  const vieja = sinEstilo(html("corporativo", DEFAULT_CONSID, { condiciones_reserva: ["DE LA PLANTILLA"] }));
+  ok(vieja.includes(TIT) && vieja.includes("<li>DE LA PLANTILLA</li>"), "fila de antes en castellano: la de la plantilla");
+  ok(html("corporativo", DEFAULT_CONSID, { condiciones_reserva: null }) === html("corporativo", DEFAULT_CONSID, {}), "plantilla sin política (null): el HTML de siempre");
+  // Fila fijada: la plantilla no se cuela.
+  const v2 = sinEstilo(html("corporativo", fija(POL), { condiciones_reserva: ["DE LA PLANTILLA"] }));
+  ok(v2.includes("<li>Se confirma con el 50 % de adelanto.</li>") && !v2.includes("DE LA PLANTILLA"), "fila fijada: la de la fila, no la de la plantilla");
+  // En inglés: el título en inglés y las líneas tal cual (con el aviso).
+  const en = N.htmlCotizacion({ cot: COTS(1)[0], cliente: CLIENTES[2], items: ITEMS[0], vehiculos: [veh(1)], consid: fija(POL), plantilla: "corporativo", idioma: "en" });
+  ok(sinEstilo(en.html!).includes("📅 Booking, changes and cancellation") && sinEstilo(en.html!).includes(`<li>${POL[0]}</li>`), "en inglés: el título traducido y las líneas como se escribieron");
+  ok(en.avisos.some((a) => a.codigo === "textos_escritos_tal_cual" && /reserva, cambios y cancelación/.test(a.detalle)), "en inglés: el aviso nombra la política");
+  const enSin = N.htmlCotizacion({ cot: COTS(1)[0], cliente: CLIENTES[2], items: ITEMS[0], vehiculos: [veh(1)], consid: { ...DEFAULT_CONSID, incluye: ["Agua"] }, plantilla: "corporativo", idioma: "en" });
+  ok(enSin.avisos.some((a) => a.codigo === "textos_escritos_tal_cual" && /las consideraciones \(incluye\)/.test(a.detalle)), "el aviso de las listas de siempre dice lo mismo que antes");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

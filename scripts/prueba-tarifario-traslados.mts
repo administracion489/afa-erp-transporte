@@ -430,6 +430,28 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
   ok(gN.length === 2 && gN.every((g) => g.fuente.tipo === "ajustes" && g.segmentos.every((x) => x.codigo === "sin_plantilla" && x.ambar)), "sin plantillas: las de Ajustes, en ámbar");
   ok(gN[1].generales.items.join("|") === "Precios por tramo. No incluyen IGV.|Incluye 15 minutos de espera.|Pago al tipo de cambio del día", "extranjero sin plantilla: generales + las de dólares, limpias");
 
+  // La política de reserva (cotizaciones-06): Ajustes enseña la MISMA que la IA copia a la fila.
+  {
+    const POL = ["  Se confirma con el 50 % de adelanto. ", "", "Cancelación con 24 horas o más: sin costo."];
+    const plsR = [CORP, { ...TIA, condiciones_reserva: POL }, { ...TUSD, condiciones_reserva: null }];
+    const gR = P.condicionesTrasladoIA(plsR, JUEGOS[0].reglas, CONFIGS[0]);
+    for (const segmento of PL.SEGMENTOS) {
+      const g = gR.find((x) => x.segmentos.some((y) => y.segmento === segmento))!;
+      const uso = PL.plantillaParaUso({ servicio: "traslado_ia", segmento }, plsR, JUEGOS[0].reglas);
+      const usd = segmento === "extranjero";
+      const cj = C.filaCotizacionTraslado(usd ? rUsd : rPen, entradaT(usd ? TEL.USD : TEL.PEN), {
+        convId: "c", clienteId: null, atencion: null, config: { validez_dias: 30, espera_gratis_min: 30, ...CONFIGS[0] } as unknown as CfgT, firma: "f", hoy: HOY, plantilla: uso.plantilla,
+      }).consideraciones_json;
+      ok(JSON.stringify(g.reserva.items) === JSON.stringify(cj.reserva ?? []), `${segmento}: la política que enseña Ajustes = la que copia la IA (${JSON.stringify(g.reserva.items)} vs ${JSON.stringify(cj.reserva)})`);
+      ok(g.reserva.propia === Array.isArray((uso.plantilla as any)?.condiciones_reserva), `${segmento}: «sin política» ⟺ la plantilla no la tiene`);
+    }
+    ok(JSON.stringify(gR[0].reserva.items) === JSON.stringify(["Se confirma con el 50 % de adelanto.", "Cancelación con 24 horas o más: sin costo."]), "limpia: sin espacios de más ni líneas vacías");
+    const gSin = P.condicionesTrasladoIA([], [], CONFIGS[0]);
+    ok(gSin.every((g) => g.reserva.propia === false && g.reserva.items.length === 0), "con las listas de Ajustes no hay política (no la tienen)");
+    const ajustesSrc = (await import("node:fs")).readFileSync("components/tarifario/AjustesTraslado.tsx", "utf8");
+    ok(/titulo="Reserva, cambios y cancelación" lista=\{g\.reserva\}/.test(ajustesSrc), "la pantalla de Ajustes enseña la política de cada plantilla");
+  }
+
   // La espera gratis se coteja con lo que el PDF imprime, y se nombra la plantilla.
   ok(P.esperaQueNoCoincideIA(gT, 30).length === 0, "con 30 min en las plantillas y 30 de espera: nada");
   const e45 = P.esperaQueNoCoincideIA(gT, 45);

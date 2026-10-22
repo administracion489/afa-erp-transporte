@@ -144,5 +144,27 @@ console.log("6. Versión 2: en español gana la fila; en inglés no cambia nada"
   }
 }
 
+console.log("7. La política de reserva (cotizaciones-06): la misma regla, sin lista de fábrica");
+{
+  const POL = ["Se confirma con el 50 % de adelanto."];
+  const J = (x: unknown) => JSON.stringify(x);
+  // Sin la clave en ninguna parte: vacía, en los dos idiomas y con o sin versión.
+  for (const idioma of ["es", "en"] as const) for (const c of [DEFAULT_CONSID_ES, { ...DEFAULT_CONSID_ES, version: CONSID_VERSION }] as any[]) {
+    const r = considParaPdf(null, c, idioma);
+    ok(J(r.reserva) === "[]" && !r.escritasTalCual.includes("reserva"), `${idioma}${c.version ? " + v2" : ""}: sin política, la lista vacía y sin aviso`);
+  }
+  // Español: fijada → la de la fila; de antes → la de la plantilla si la tiene.
+  ok(J(considParaPdf({ condiciones_reserva: ["P"] }, { ...DEFAULT_CONSID_ES, reserva: POL, version: CONSID_VERSION } as any, "es").reserva) === J(POL), "es + v2: la de la fila");
+  ok(J(considParaPdf({ condiciones_reserva: [] }, { ...DEFAULT_CONSID_ES, version: CONSID_VERSION } as any, "es").reserva) === "[]", "es + v2 sin la clave: vacía (la plantilla no se cuela)");
+  ok(J(considParaPdf({ condiciones_reserva: ["P"] }, { ...DEFAULT_CONSID_ES, reserva: POL }, "es").reserva) === J(["P"]), "es, fila de antes: la plantilla gana");
+  ok(J(considParaPdf({ condiciones_reserva: null }, { ...DEFAULT_CONSID_ES, reserva: POL }, "es").reserva) === J(POL), "es, plantilla sin política: la de la fila");
+  // Inglés: la de la cotización tal cual, con aviso; la plantilla nunca.
+  const en = considParaPdf({ condiciones_reserva: ["P"] }, { ...DEFAULT_CONSID_ES, reserva: POL }, "en");
+  ok(J(en.reserva) === J(POL) && en.escritasTalCual.includes("reserva") && J(en.incluye) === J(DEFAULT_CONSID_EN.incluye), "en: la política tal cual (avisada) y las de fábrica traducidas");
+  ok(considParaPdf(null, { ...DEFAULT_CONSID_ES, reserva: ["", "  "] }, "en").escritasTalCual.length === 0, "en: una política en blanco no se avisa");
+  ok(J(considParaPdf(null, { ...DEFAULT_CONSID_ES, reserva: "texto" } as any, "es").reserva) === "[]", "una política que no es lista se imprime vacía");
+  ok(t("es", "corp_reserva") === "📅 Reserva, cambios y cancelación" && t("en", "corp_reserva") === "📅 Booking, changes and cancellation", "el título en los dos idiomas");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);
