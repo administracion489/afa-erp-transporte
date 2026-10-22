@@ -1,4 +1,5 @@
 // npx tsx scripts/diagnostico-crm-ia-coherencia.mts <config.json> [--empresa="Nombre del perfil"] [--traslados=si|no]
+//   [--reserva=si|no] [--politica=<archivo .txt, una regla por línea>]
 //
 // Audita la configuración de un agente IA del CRM con el MISMO motor que /crm/agente
 // (lib/crm-ia-coherencia.ts) e imprime los choques agrupados: primero las alarmas (ámbar), después
@@ -11,6 +12,9 @@
 //   select to_jsonb(a) - 'id' from public.crm_agentes_ia a limit 1;
 // --empresa es el nombre del perfil de la empresa (lo que reemplaza {empresa} en «Cómo se presenta»).
 // --traslados=si audita también contra el cotizador de traslados (sin la bandera no se afirma nada).
+// --reserva=si audita contra la reserva de traslados de la IA (quién envía los datos de pago, el
+// comprobante que no confirma nada). --politica es la política de reserva y cancelación de la
+// plantilla de la IA (condiciones_reserva), una línea por regla: se compara regla contra regla.
 import { readFileSync } from "node:fs";
 import { auditarAgente, TEMAS_COHERENCIA, type ConfigAuditable, type Hallazgo } from "../lib/crm-ia-coherencia";
 
@@ -18,7 +22,7 @@ const args = process.argv.slice(2);
 const ruta = args.find((a) => !a.startsWith("--"));
 const opcion = (nombre: string) => args.find((a) => a.startsWith(`--${nombre}=`))?.slice(nombre.length + 3);
 if (!ruta) {
-  console.error("Uso: npx tsx scripts/diagnostico-crm-ia-coherencia.mts <config.json> [--empresa=\"…\"] [--traslados=si|no]");
+  console.error("Uso: npx tsx scripts/diagnostico-crm-ia-coherencia.mts <config.json> [--empresa=\"…\"] [--traslados=si|no] [--reserva=si|no] [--politica=<archivo>]");
   process.exit(2);
 }
 
@@ -35,9 +39,20 @@ try {
   process.exit(2);
 }
 
-const t = opcion("traslados");
-const traslados = t == null ? null : /^(si|sí|true|1)$/i.test(t);
-const r = auditarAgente(cfg, { trasladosActivos: traslados, empresa: opcion("empresa") ?? "" });
+const siNo = (v: string | undefined) => (v == null ? null : /^(si|sí|true|1)$/i.test(v));
+const traslados = siNo(opcion("traslados"));
+const reserva = siNo(opcion("reserva"));
+let politica: string[] | null = null;
+const rutaPolitica = opcion("politica");
+if (rutaPolitica) {
+  try {
+    politica = readFileSync(rutaPolitica, "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch (e) {
+    console.error(`No se pudo leer la política ${rutaPolitica}: ${(e as Error).message}`);
+    process.exit(2);
+  }
+}
+const r = auditarAgente(cfg, { trasladosActivos: traslados, empresa: opcion("empresa") ?? "", reservaTraslados: reserva, politicaTraslados: politica });
 
 const linea = "─".repeat(90);
 const imprimir = (h: Hallazgo) => {
@@ -57,7 +72,7 @@ const porGrupo = (hs: Hallazgo[]) => {
   }
 };
 
-console.log(`Agente: ${cfg.nombre ?? "(sin nombre)"} · empresa: ${opcion("empresa") ?? "(sin perfil: «la empresa»)"} · traslados: ${traslados == null ? "no se sabe (no se audita)" : traslados ? "encendidos" : "apagados"}`);
+console.log(`Agente: ${cfg.nombre ?? "(sin nombre)"} · empresa: ${opcion("empresa") ?? "(sin perfil: «la empresa»)"} · traslados: ${traslados == null ? "no se sabe (no se audita)" : traslados ? "encendidos" : "apagados"} · reserva: ${reserva == null ? "no se sabe (no se audita)" : reserva ? "encendida" : "apagada"} · política: ${politica ? `${politica.length} regla(s)` : "sin política"}`);
 console.log(`${r.alarmas} choque(s) en ámbar · ${r.grises} frase(s) que repiten un ajuste`);
 const alarmas = r.hallazgos.filter((h) => h.alarma);
 const grises = r.hallazgos.filter((h) => !h.alarma);

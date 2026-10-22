@@ -7,11 +7,13 @@
 //  3. Barrido de polaridad (ajuste × lo que dice el texto) y ciclo cerrado de la propuesta.
 //  4. Corpus de frases benignas: 0 hallazgos.
 //  5. Un positivo por código que el caso AFA no cubre.
+//  5b. La reserva de traslados: quién envía los datos de pago, el comprobante que no confirma nada y
+//      la política de la plantilla (leída del SQL real) regla contra regla.
 //  6. Invariantes (alarma = tabla, cita = subcadena, determinista, sin duplicados, anclas).
 import { readFileSync } from "node:fs";
 import {
   auditarAgente, claveHallazgo, nuevasAlarmas, partirFrases, TABLA_HALLAZGOS, ETIQUETA_CAMPO,
-  type ConfigAuditable, type Hallazgo, type CodigoCoherencia,
+  type ConfigAuditable, type ContextoAuditoria, type Hallazgo, type CodigoCoherencia,
 } from "../lib/crm-ia-coherencia";
 import { TEMAS_AJUSTE, AJUSTES_DEFECTO } from "../lib/crm-ia-ajustes";
 
@@ -403,6 +405,20 @@ const AFA: ConfigAuditable = {
 };
 const CTX_AFA = { trasladosActivos: true, empresa: "AFA TRANSPORTES" };
 
+// La política de reserva, cambios y cancelación REAL: la del bloque SOLO AFA de
+// supabase/cotizaciones-06-politica-reserva.sql, leída del archivo (no copiada a mano).
+const POLITICA_AFA: string[] = (() => {
+  const sql = readFileSync(new URL("../supabase/cotizaciones-06-politica-reserva.sql", import.meta.url), "utf8");
+  const ini = sql.indexOf("set condiciones_reserva = array[");
+  const fin = sql.indexOf("]::text[]", ini);
+  return ini < 0 || fin < 0 ? [] : [...sql.slice(ini, fin).matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
+})();
+const CTX_RESERVA: ContextoAuditoria = { trasladosActivos: true, reservaTraslados: true, politicaTraslados: POLITICA_AFA, empresa: "ACME" };
+/** La frase real (22-10-2026) que dice que un ejecutivo envía los datos de pago. */
+const FRASE_EJECUTIVO_PAGO = "Un ejecutivo de nuestro equipo la está revisando para enviarle los datos de pago por este mismo chat";
+/** La frase real del agente de AFA sobre la disponibilidad: NO es un choque de la reserva. */
+const FRASE_DISPONIBILIDAD = "Disponibilidad: «La disponibilidad se confirma con nuestro equipo de operaciones. Registro su solicitud y un asesor le confirmará».";
+
 const rAfa = auditarAgente(AFA, CTX_AFA);
 const ESPERADO_AFA_AMBAR = [
   "preguntas.contradice@empresa_contexto", "preguntas.contradice@empresa_contexto",
@@ -670,7 +686,7 @@ const CORPUS = [
 }
 
 // ── 5. Positivos sintéticos: un caso por código que el caso AFA no cubre ───────────────────────────
-type Caso = { codigo: CodigoCoherencia; cfg: ConfigAuditable; ctx?: { trasladosActivos?: boolean | null; empresa?: string }; campo?: string | null };
+type Caso = { codigo: CodigoCoherencia; cfg: ConfigAuditable; ctx?: ContextoAuditoria; campo?: string | null };
 const CASOS: Caso[] = [
   { codigo: "tratamiento.contradice", cfg: { persona: "Tutea siempre al cliente." } },
   { codigo: "tratamiento.plantilla", cfg: { empresa_contexto: 'Saludo simple: muestra el Menú Inicial: "Hola 👋 Soy Ana, estoy aquí para brindarte atención"' } },
@@ -704,6 +720,11 @@ const CASOS: Caso[] = [
   { codigo: "horario.derivacion_sin_atencion", cfg: { mensaje_derivacion: "Gracias, {nombre}. Un ejecutivo le responde en breve.", comportamiento: { atencion_activa: true } }, campo: "mensaje_derivacion" },
   { codigo: "llamada.imposible", cfg: { empresa_contexto: "Si el cliente no contesta, llámalo por teléfono." } },
   { codigo: "seguimiento.imposible", cfg: { goals: [{ titulo: "Seguimiento", instrucciones: "Si el cliente no responde, escríbele de nuevo a las 2 horas." }] }, campo: "goals" },
+  { codigo: "traslados.pago_ejecutivo", cfg: { empresa_contexto: FRASE_EJECUTIVO_PAGO }, ctx: CTX_RESERVA },
+  { codigo: "traslados.pago_ejecutivo", cfg: { goals: [{ titulo: "Cobrar", instrucciones: "No compartas los números de cuenta: un asesor los envía." }] }, ctx: CTX_RESERVA, campo: "goals" },
+  { codigo: "traslados.confirma_con_comprobante", cfg: { conocimiento: "Cuando el cliente envíe el comprobante de pago, confírmale la reserva." }, ctx: CTX_RESERVA },
+  { codigo: "traslados.politica_texto", cfg: { empresa_contexto: "Cancelación con 48 horas de anticipación: sin costo." }, ctx: CTX_RESERVA },
+  { codigo: "traslados.politica_texto_duplica", cfg: { comportamiento: { reglas_extra: "La reserva se confirma con un adelanto del 50 % del precio total." } }, ctx: CTX_RESERVA, campo: "reglas_extra" },
 ];
 {
   const cubiertos = new Set<string>(codigos(rAfa.hallazgos));
@@ -822,12 +843,262 @@ const CASOS: Caso[] = [
   ok(r2.hallazgos.length === 0, "derivación propia con {atencion} y horario declarado → nada");
 }
 
+// ── 5b. La reserva de traslados ───────────────────────────────────────────────────────────────────
+/** Las auditorías de la reserva también pasan por las invariantes de la sección 6. */
+const TODAS_RESERVA: { r: ReturnType<typeof auditarAgente>; cfg: ConfigAuditable }[] = [];
+{
+  ok(POLITICA_AFA.length === 18 && POLITICA_AFA.every((l) => l.length > 20 && !/'/.test(l.replace(/'/g, ""))), `la política real se lee del SQL (${POLITICA_AFA.length} líneas)`);
+  ok(POLITICA_AFA.some((l) => /24 horas/.test(l)) && POLITICA_AFA.some((l) => /50 %/.test(l)), "la política real trae las 24 horas y el 50 %");
+  const CAMPOS_RES = ["persona", "empresa_contexto", "conocimiento", "reglas_extra", "goals"] as const;
+  const enCampo = (campo: (typeof CAMPOS_RES)[number], frase: string): ConfigAuditable =>
+    campo === "reglas_extra" ? { comportamiento: { reglas_extra: frase } }
+    : campo === "goals" ? { goals: [{ titulo: "Reservar", instrucciones: frase }] }
+    : { [campo]: frase };
+  const cods = (frase: string, ctx: ContextoAuditoria, campo: (typeof CAMPOS_RES)[number] = "empresa_contexto") =>
+    codigos(auditarAgente(enCampo(campo, frase), ctx).hallazgos);
+  // Los cuatro estados de la reserva: encendida, apagada, no se sabe, sin dato.
+  const RESERVAS: { nombre: string; ctx: ContextoAuditoria }[] = [
+    { nombre: "activa", ctx: CTX_RESERVA },
+    { nombre: "inactiva", ctx: { ...CTX_RESERVA, reservaTraslados: false } },
+    { nombre: "null", ctx: { ...CTX_RESERVA, reservaTraslados: null } },
+    { nombre: "sin dato", ctx: { trasladosActivos: true, politicaTraslados: POLITICA_AFA, empresa: "ACME" } },
+  ];
+
+  // 1. La frase real del ejecutivo que envía los datos de pago: SOLO con la reserva activa, en cada campo.
+  for (const campo of CAMPOS_RES)
+    for (const { nombre, ctx } of RESERVAS) {
+      const r = cods(FRASE_EJECUTIVO_PAGO, ctx, campo);
+      const esperado = nombre === "activa" ? ["traslados.pago_ejecutivo"] : [];
+      ok(igual(r, esperado), `«Un ejecutivo… enviarle los datos de pago» en ${campo}, reserva ${nombre} → ${esperado.join(",") || "nada"}${igual(r, esperado) ? "" : ` (dio ${r.join(",") || "nada"})`}`);
+    }
+  {
+    const h = auditarAgente({ empresa_contexto: FRASE_EJECUTIVO_PAGO }, CTX_RESERVA).hallazgos[0];
+    ok(h.alarma && h.ajuste === null && h.cita === FRASE_EJECUTIVO_PAGO && h.tema === "traslados" && h.relacion === "contradice", "pago_ejecutivo: ámbar, sin ajuste, cita la frase exacta");
+    ok(/los envía el sistema/.test(h.arreglo) && /«salvo los traslados»/.test(h.arreglo) && /Tarifario → Zonas y traslados → Ajustes/.test(h.arreglo), "pago_ejecutivo: el arreglo dice quién envía las cuentas, «salvo los traslados» y dónde se apaga");
+  }
+
+  // 2. La frase real de la disponibilidad: ningún choque nuevo, en ningún campo ni estado.
+  for (const campo of CAMPOS_RES)
+    for (const { nombre, ctx } of RESERVAS) {
+      const r = cods(FRASE_DISPONIBILIDAD, ctx, campo);
+      ok(r.length === 0, `«Disponibilidad: … un asesor le confirmará» en ${campo}, reserva ${nombre} → nada${r.length ? ` (dio ${r.join(",")})` : ""}`);
+    }
+
+  // 3. El caso AFA entero con la reserva activa y su política: ni un hallazgo nuevo.
+  {
+    const ctx = { ...CTX_AFA, reservaTraslados: true, politicaTraslados: POLITICA_AFA };
+    const r = auditarAgente(AFA, ctx);
+    ok(igual(firma(r.hallazgos.filter((h) => h.alarma)), ESPERADO_AFA_AMBAR) && igual(firma(r.hallazgos.filter((h) => !h.alarma)), ESPERADO_AFA_GRIS),
+      `AFA con la reserva activa y la política real: las mismas 13 alarmas y 8 grises${r.alarmas === 13 && r.grises === 8 ? "" : ` (dio ${firma(r.hallazgos).join(", ")})`}`);
+    const rr = auditarAgente({ ...AFA, comportamiento: RECOMENDADO }, ctx);
+    ok(igual(firma(rr.hallazgos), firma(rRec.hallazgos)), "AFA recomendado con la reserva activa: lo mismo que sin ella");
+    const ag = auditarAgente({ ...AFA, empresa_contexto: `${AFA_EMPRESA}\n\n${AFA_REGLA_NUEVA}` }, ctx);
+    ok(!ag.hallazgos.some((h) => h.codigo.startsWith("traslados.") && !["traslados.hoy", "traslados.varias_unidades"].includes(h.codigo)), "AFA + su regla nueva con la reserva activa: ningún choque de la reserva");
+  }
+
+  // 4. Quién envía los datos de pago: positivos (solo con la reserva activa) y negativos.
+  const PAGO_SI = [
+    FRASE_EJECUTIVO_PAGO,
+    "Los datos de pago los envía un ejecutivo.",
+    "Un asesor le indicará las cuentas para el depósito.",
+    "Nuestro equipo de cobranza le enviará las cuentas por este chat.",
+    "Los números de cuenta son enviados por un asesor.",
+    "No compartas los números de cuenta.",
+    "Está prohibido dar los datos bancarios.",
+    "No hables de pagos con el cliente.",
+    "Evita hablar de formas de pago.",
+    "Si el cliente pregunta cómo pagar, deriva a un ejecutivo.",
+  ];
+  for (const frase of PAGO_SI)
+    for (const { nombre, ctx } of RESERVAS) {
+      const r = cods(frase, ctx).filter((c) => c === "traslados.pago_ejecutivo");
+      const esperado = nombre === "activa" ? 1 : 0;
+      ok(r.length === esperado, `pago «${frase.slice(0, 50)}» reserva ${nombre} → ${esperado ? "pago_ejecutivo" : "nada"}`);
+    }
+  const PAGO_NO = [
+    "Un ejecutivo no envía los datos de pago: los envía el sistema.",
+    "Envía los datos de pago al cliente y avisa al ejecutivo.",
+    "Un ejecutivo revisa el comprobante que el cliente envía con los datos de pago.",
+    "No des los datos de pago hasta que el cliente acepte la cotización.",
+    "Si el cliente quiere pagar con tarjeta, deriva a un ejecutivo.",
+    "Un ejecutivo verifica el pago con el banco y confirma la reserva.",
+    "No des por confirmada la reserva hasta que un ejecutivo verifique el pago.",
+    "Un asesor le confirmará la disponibilidad de la unidad.",
+    "No envíes la cotización sin el número de pasajeros.",
+    "Un asesor tendrá en cuenta su pedido.",
+  ];
+  for (const frase of PAGO_NO) {
+    const r = cods(frase, CTX_RESERVA);
+    ok(r.length === 0, `con la reserva activa no choca: «${frase.slice(0, 60)}»${r.length ? ` (dio ${r.join(",")})` : ""}`);
+  }
+  // La exclusión «salvo los traslados»: la misma frase sin ella SÍ choca (es la exclusión la que la apaga).
+  for (const [con, sin] of [
+    ["Salvo los traslados, un asesor le envía las cuentas.", "Un asesor le envía las cuentas."],
+    ["Para servicios que no sean traslados, un ejecutivo envía los datos de pago.", "Para todos los servicios, un ejecutivo envía los datos de pago."],
+    ["Excepto en los traslados, no compartas los números de cuenta.", "No compartas los números de cuenta."],
+    ["Salvo los traslados, si el cliente envía el comprobante de pago, confírmale la reserva.", "Si el cliente envía el comprobante de pago, confírmale la reserva."],
+  ]) {
+    const a = cods(con, CTX_RESERVA), b = cods(sin, CTX_RESERVA);
+    ok(a.length === 0 && b.length === 1 && /pago_ejecutivo|confirma_con_comprobante/.test(b[0]), `«salvo traslados» apaga el choque: «${con.slice(0, 50)}» → nada; sin la exclusión → ${b.join(",") || "nada"}`);
+  }
+
+  // 5. El comprobante no confirma nada: positivos (solo con la reserva activa) y negativos.
+  const COMP_SI = [
+    "Cuando el cliente envíe el comprobante de pago, confírmale la reserva.",
+    "Si manda la captura del Yape, da por confirmada la reserva.",
+    "Al recibir el voucher, dile al cliente que su reserva quedó confirmada.",
+    "Con la foto del depósito, dile que su pago fue validado.",
+    "Cuando llegue el comprobante, envía la confirmación de la reserva.",
+    "Con el comprobante de pago confirmamos la reserva en el día.",
+  ];
+  for (const frase of COMP_SI)
+    for (const { nombre, ctx } of RESERVAS) {
+      const r = cods(frase, ctx);
+      const esperado = nombre === "activa" ? ["traslados.confirma_con_comprobante"] : [];
+      ok(igual(r, esperado), `comprobante «${frase.slice(0, 50)}» reserva ${nombre} → ${esperado.join(",") || "nada"}${igual(r, esperado) ? "" : ` (dio ${r.join(",") || "nada"})`}`);
+    }
+  {
+    const h = auditarAgente({ empresa_contexto: COMP_SI[0] }, CTX_RESERVA).hallazgos[0];
+    ok(h.alarma && h.ajuste === null && h.cita === COMP_SI[0] && /verifica una persona/.test(h.arreglo), "confirma_con_comprobante: ámbar, sin ajuste, el arreglo dice que el pago lo verifica una persona");
+  }
+  const COMP_NO = [
+    "Cuando el cliente envíe el comprobante, dile que lo verificaremos con el banco y que un ejecutivo le confirmará la reserva.",
+    "Confirma la recepción del comprobante.",
+    "Pide el comprobante de pago para confirmar la reserva.",
+    "No confirmes la reserva solo con el comprobante.",
+    "Confirma la reserva cuando un ejecutivo valide el comprobante.",
+    "Si el cliente manda la foto del voucher, dile que la recibiste.",
+    "Emitimos boleta o factura electrónica; el comprobante se envía al correo.",
+    "Tipo de comprobante: Boleta (solicitar DNI), Factura (solicitar RUC) o Sin Comprobante.",
+    "Una vez confirmada la reserva, el ejecutivo envía el comprobante.",
+  ];
+  for (const frase of COMP_NO) {
+    const r = cods(frase, CTX_RESERVA).filter((c) => c === "traslados.confirma_con_comprobante");
+    ok(r.length === 0, `el comprobante no se lee como confirmación: «${frase.slice(0, 60)}»`);
+  }
+
+  // 6. La política: repite (gris) o dice otro número (ámbar), regla contra regla.
+  const REPITE = [
+    "La reserva se confirma con un adelanto del 50 % del precio total.",
+    "Cancelación con 24 horas de anticipación: sin costo y devolución del 100 % en 48 horas.",
+    "Si el pasajero no se presenta, se cobra el 50 %.",
+    "Si el viaje se interrumpe, se cobra lo proporcional con un mínimo del 50 %.",
+    "Los cambios de fecha, hora o itinerario no tienen costo y están sujetos a la disponibilidad de unidades.",
+    "Para cancelar o reprogramar, escríbanos con el nombre del titular y la fecha del servicio.",
+    "Si cancela con menos de 24 horas, puede reprogramar sin costo y su adelanto se aplica a la nueva fecha.",
+  ];
+  for (const frase of REPITE)
+    for (const { nombre, ctx } of RESERVAS) {
+      const r = cods(frase, ctx);
+      ok(igual(r, ["traslados.politica_texto_duplica"]), `repite la política: «${frase.slice(0, 55)}» (reserva ${nombre}) → gris${igual(r, ["traslados.politica_texto_duplica"]) ? "" : ` (dio ${r.join(",") || "nada"})`}`);
+    }
+  const OTRO_NUMERO: { frase: string; leido: RegExp; politica: RegExp }[] = [
+    { frase: "Cancelación con 48 horas.", leido: /48 horas de anticipación/, politica: /dice 24 horas de anticipación/ },
+    { frase: "Cancelación con 48 horas de anticipación: sin costo.", leido: /48 horas de anticipación/, politica: /dice 24 horas de anticipación/ },
+    { frase: "Pedimos un adelanto del 30 % para reservar.", leido: /un adelanto del 30 %/, politica: /dice un adelanto del 50 %/ },
+    { frase: "Si cancela con menos de 24 horas, se cobra un cargo del 50 %.", leido: /un cargo del 50 %/, politica: /dice un cargo del 10 %/ },
+    { frase: "Si cancela con 12 horas de anticipación, se devuelve el 50 %.", leido: /12 horas de anticipación y una devolución del 50 %/, politica: /dice 24 horas de anticipación y una devolución del 100 %/ },
+    { frase: "Si cancela con 24 horas o más, el 100 % se devuelve en un plazo máximo de 72 horas.", leido: /72 horas para devolver/, politica: /48 horas para devolver/ },
+    { frase: "El 40 % restante se paga al iniciar el servicio.", leido: /un saldo del 40 %/, politica: /un saldo del 50 %/ },
+  ];
+  for (const k of OTRO_NUMERO)
+    for (const { nombre, ctx } of RESERVAS) {
+      const hs = auditarAgente({ empresa_contexto: k.frase }, ctx).hallazgos;
+      const h = hs.find((x) => x.codigo === "traslados.politica_texto");
+      ok(hs.length === 1 && !!h && h.alarma && h.ajuste === null && k.leido.test(h.arreglo) && k.politica.test(h.arreglo) && /«Reserva, cambios y cancelación» en \/cotizaciones\/plantillas/.test(h.arreglo),
+        `otro número que la política: «${k.frase.slice(0, 55)}» (reserva ${nombre}) → ámbar con los dos números${h ? "" : ` (dio ${codigos(hs).join(",") || "nada"})`}`);
+    }
+  {
+    // El arreglo dice qué hace la IA con la política según la reserva.
+    const a = auditarAgente({ empresa_contexto: "Cancelación con 48 horas." }, CTX_RESERVA).hallazgos[0];
+    const b = auditarAgente({ empresa_contexto: "Cancelación con 48 horas." }, { ...CTX_RESERVA, reservaTraslados: false }).hallazgos[0];
+    ok(/la envía tal cual al cliente/.test(a.arreglo) && /la imprime el PDF/.test(b.arreglo), "el arreglo de la política: con la reserva la IA la envía; sin ella, la imprime el PDF del traslado");
+    ok(/«Cancelación con 24 horas o más de anticipación/.test(a.arreglo), "el arreglo cita la línea de la política con la que se comparó");
+  }
+  // Se compara contra la POLÍTICA, no contra un número fijo: con la política en 48 h, la frase de 48 h
+  // repite y la de 24 h choca.
+  {
+    const p48 = POLITICA_AFA.map((l) => l.replace(/24 horas/g, "48 horas"));
+    const ctx = { ...CTX_RESERVA, politicaTraslados: p48 };
+    ok(igual(cods("Cancelación con 48 horas de anticipación: sin costo.", ctx), ["traslados.politica_texto_duplica"]), "con la política en 48 h, «Cancelación con 48 horas» repite");
+    ok(igual(cods("Cancelación con 24 horas de anticipación: sin costo.", ctx), ["traslados.politica_texto"]), "con la política en 48 h, «Cancelación con 24 horas» choca");
+  }
+  // Dos reglas igual de parecidas que dicen cosas distintas: no se afirma nada.
+  {
+    const ctx = { ...CTX_RESERVA, politicaTraslados: ["Si cancela con menos de 24 horas se cobra un cargo del 10 %.", "Si cancela tarde se cobra un cargo del 50 %."] };
+    ok(cods("Si cancela, se cobra un cargo del 50 %.", ctx).length === 0, "ambiguo (cargo 10 % o 50 %, igual de parecidas) → nada");
+    ok(igual(cods("Si cancela, se cobra un cargo del 30 %.", ctx), ["traslados.politica_texto"]), "ninguna de las dos dice 30 % → ámbar");
+  }
+  // Sin política, o sin saber que hay traslados ni reserva: nada.
+  for (const ctx of [
+    { ...CTX_RESERVA, politicaTraslados: null }, { ...CTX_RESERVA, politicaTraslados: [] }, { ...CTX_RESERVA, politicaTraslados: ["", "   "] },
+    { trasladosActivos: false, reservaTraslados: false, politicaTraslados: POLITICA_AFA },
+    { trasladosActivos: null, reservaTraslados: null, politicaTraslados: POLITICA_AFA },
+  ] as ContextoAuditoria[])
+    ok(!cods("Cancelación con 48 horas.", ctx).some((c) => c.startsWith("traslados.politica")) && !cods(REPITE[0], ctx).some((c) => c.startsWith("traslados.politica")),
+      `política ${JSON.stringify({ ...ctx, politicaTraslados: Array.isArray(ctx.politicaTraslados) ? ctx.politicaTraslados.length : ctx.politicaTraslados })} → nada`);
+  ok(igual(cods("Cancelación con 48 horas.", { reservaTraslados: true, politicaTraslados: POLITICA_AFA }), ["traslados.politica_texto"]), "con la reserva activa basta (aunque no llegue trasladosActivos)");
+  // Lo que no es una regla de la política no se compara.
+  for (const frase of [
+    "Las reservas de colegios tienen un descuento del 10 %.",
+    "El IGV del 18 % no está incluido en la reserva.",
+    "El sistema envía al pasajero un recordatorio 12 horas antes del servicio.",
+    "Atendemos reservas con 48 horas de anticipación.",
+    "La confirmación del resumen no constituye por sí sola una reserva ni garantiza la disponibilidad del vehículo.",
+    "Consultar sobre una reserva.",
+    "Los cambios de fecha tienen un costo adicional y están sujetos a la disponibilidad de unidades.",
+    "Cancelaciones hasta las 18 horas del día anterior.",
+  ]) {
+    const r = cods(frase, CTX_RESERVA);
+    ok(r.length === 0, `no es una regla de la política (o no se afirma): «${frase.slice(0, 60)}»${r.length ? ` (dio ${r.join(",")})` : ""}`);
+  }
+  // La política contra sí misma: cada línea repite o calla, NUNCA choca (el motor es coherente).
+  {
+    let choques = 0, repiten = 0;
+    for (const l of POLITICA_AFA) {
+      const r = cods(l, CTX_RESERVA);
+      if (r.includes("traslados.politica_texto")) { choques++; console.log(`   la política choca consigo misma: «${l.slice(0, 80)}»`); }
+      if (r.includes("traslados.politica_texto_duplica")) repiten++;
+    }
+    ok(choques === 0, "la política real pegada en un texto: ninguna línea choca consigo misma");
+    ok(repiten >= 10, `corolario: la política pegada repite en ${repiten} de ${POLITICA_AFA.length} líneas (gris)`);
+  }
+  // El corpus de frases benignas con la reserva activa y la política: 0 hallazgos.
+  {
+    let ruido = 0;
+    for (const frase of CORPUS)
+      for (const campo of CAMPOS_RES) {
+        const r = auditarAgente({ nombre: "Ana", ...enCampo(campo, frase) }, CTX_RESERVA);
+        if (r.hallazgos.length) { ruido++; console.log(`   ruido con la reserva en ${campo}: «${frase}» → ${codigos(r.hallazgos).join(", ")}`); }
+      }
+    ok(ruido === 0, `corpus de ${CORPUS.length} frases benignas × ${CAMPOS_RES.length} campos con la reserva activa: 0 hallazgos`);
+  }
+  // Una frase que ya choca con lo que hace el sistema no «repite» la política aunque comparta palabras.
+  ok(igual(cods("Cuando llegue el comprobante, envía la confirmación de la reserva.", CTX_RESERVA), ["traslados.confirma_con_comprobante"]), "la frase que choca no se cuenta además como «repite la política»");
+  // Determinista con la reserva.
+  ok(igual(auditarAgente(AFA, { ...CTX_AFA, ...CTX_RESERVA }), auditarAgente(AFA, { ...CTX_AFA, ...CTX_RESERVA })), "determinista con la reserva activa");
+  // Todo junto, repartido en los campos, para las invariantes.
+  const todo: ConfigAuditable = {
+    persona: PAGO_SI.join("\n"), conocimiento: COMP_SI.join("\n"),
+    empresa_contexto: [...REPITE, ...OTRO_NUMERO.map((k) => k.frase), ...PAGO_NO, ...COMP_NO].join("\n"),
+    goals: [{ titulo: "Reservar", instrucciones: `${FRASE_EJECUTIVO_PAGO}. ${FRASE_DISPONIBILIDAD}` }],
+    comportamiento: { reglas_extra: POLITICA_AFA.join("\n") },
+  };
+  const rTodo = auditarAgente(todo, CTX_RESERVA);
+  ok(rTodo.hallazgos.some((h) => h.codigo === "traslados.pago_ejecutivo" && h.campo === "goals") && rTodo.alarmas > 0 && rTodo.grises > 0, "todo junto: salen las alarmas y los grises de la reserva, también en un objetivo");
+  TODAS_RESERVA.push(
+    { r: rTodo, cfg: todo },
+    { r: auditarAgente(AFA, { ...CTX_AFA, reservaTraslados: true, politicaTraslados: POLITICA_AFA }), cfg: AFA },
+  );
+}
+
 // ── 6. Invariantes ─────────────────────────────────────────────────────────────────────────────────
 const TODAS: { r: ReturnType<typeof auditarAgente>; cfg: ConfigAuditable }[] = [
   { r: rAfa, cfg: AFA }, { r: rRec, cfg: { ...AFA, comportamiento: RECOMENDADO } },
   { r: auditarAgente({ ...AFA, comportamiento: { ...AFA_COMPORTAMIENTO, tratamiento: "tu", preguntas: "una_por_mensaje" } }, CTX_AFA), cfg: { ...AFA, comportamiento: { ...AFA_COMPORTAMIENTO, tratamiento: "tu" } } },
   { r: auditarAgente({ ...AFA, comportamiento: { ...AFA_COMPORTAMIENTO, resumen_pedido: false, ocultar_ia: false, leer_archivos: false, atencion_activa: true, atencion_desde: "18:00", atencion_hasta: "09:00" } }, CTX_AFA), cfg: AFA },
   ...CASOS.map((k) => { const cfg = { nombre: "Ana", ...k.cfg }; return { r: auditarAgente(cfg, k.ctx ?? { empresa: "ACME" }), cfg }; }),
+  ...TODAS_RESERVA,
 ];
 {
   let malas = 0, citasMalas = 0, dup = 0, orden = 0, conteo = 0, anclas = 0;
