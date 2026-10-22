@@ -55,7 +55,12 @@ function partir(texto: string, f: PDFFont, size: number, ancho: number): string[
   return out.length ? out : [""];
 }
 
-export async function dibujarConfirmacion(d: DocConfirmacion, opts: { logo?: ImagenPdf | null; empresa: string; marcaAgua?: string | null }): Promise<Uint8Array> {
+/**
+ * `logoClaro`: el logo es la versión para fondos oscuros (`logo_claro_url`) y va directo sobre
+ * la cabecera azul. Sin él, el logo principal (letras azules) va dentro de un recuadro blanco
+ * — sobre el azul no se leería.
+ */
+export async function dibujarConfirmacion(d: DocConfirmacion, opts: { logo?: ImagenPdf | null; logoClaro?: boolean; empresa: string; marcaAgua?: string | null }): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   doc.setTitle(d.titulo);
   doc.setCreator(opts.empresa);
@@ -78,7 +83,7 @@ export async function dibujarConfirmacion(d: DocConfirmacion, opts: { logo?: Ima
     let xTitulo = MX;
     if (logo) {
       const alto = 46, ancho = Math.min(130, (logo.width / logo.height) * alto);
-      p.drawRectangle({ x: MX - 6, y: AL - CAB / 2 - alto / 2 - 6, width: ancho + 12, height: alto + 12, color: BLANCO });
+      if (!opts.logoClaro) p.drawRectangle({ x: MX - 6, y: AL - CAB / 2 - alto / 2 - 6, width: ancho + 12, height: alto + 12, color: BLANCO });
       p.drawImage(logo, { x: MX, y: AL - CAB / 2 - alto / 2, width: ancho, height: alto });
       xTitulo = MX + ancho + 24;
     } else {

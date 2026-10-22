@@ -72,8 +72,12 @@ export async function GET(req: NextRequest) {
       const emp = empresaConDefectos(perfil);
       const doc = docConfirmacion(v.datos as DatosConfirmacion, idioma, { version: v.version, emitidoEn: fechaLima(new Date(v.generado_en).getTime()) },
         { nombre: emp.nombre, telefono: emp.telefono, email: emp.email, web: emp.web, direccion: emp.direccion, ruc: emp.ruc });
-      const logo = await bajarLogo(emp.logo).catch(() => null);
-      const bytes = await dibujarConfirmacion(doc, { logo, empresa: emp.nombre });
+      // La cabecera es azul oscuro: primero la versión clara del perfil; si no hay o no baja,
+      // el principal dentro de su recuadro blanco (nunca la clara sobre blanco).
+      const claro = String(perfil?.logo_claro_url ?? "").trim();
+      const logoClaro = claro ? await bajarLogo(claro).catch(() => null) : null;
+      const logo = logoClaro ?? await bajarLogo(emp.logo).catch(() => null);
+      const bytes = await dibujarConfirmacion(doc, { logo, logoClaro: !!logoClaro, empresa: emp.nombre });
       return new NextResponse(Buffer.from(bytes), {
         headers: {
           "Content-Type": "application/pdf",
