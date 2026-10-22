@@ -106,7 +106,7 @@ export type PerfilPdf = { perfil: PerfilEmpresa | null };
 
 const COLS_PERFIL = "nombre, razon_social, ruc, logo_url, telefono, email, direccion, web";
 /** `cuentas_bancarias` es de empresa-02: sin ella el PDF sale sin cuentas (y lo avisa). */
-const COLS_PERFIL_ACCESORIAS = ["cuentas_bancarias"] as const;
+const COLS_PERFIL_ACCESORIAS = ["cuentas_bancarias", "logo_claro_url"] as const;
 
 /** El perfil de la empresa (con sus cuentas). LANZA si no se puede leer. */
 export async function leerPerfilPdf(sb: Sb): Promise<PerfilPdf> {
