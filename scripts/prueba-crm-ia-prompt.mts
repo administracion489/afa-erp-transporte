@@ -74,7 +74,8 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
   const ag = { mensaje_derivacion: "Hola {nombre}, un ejecutivo te escribe por este chat." };
   const ct = { nombre: "Paola Huarachi" };
   const auto = textoSinImportesAjenos("El total sería 150 (IGV incluido)", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00123", decision: "automatico", figuras: [283.2], total: "S/ 283.20", validez: "18/11/2026" } }, ag, ct);
-  ok(auto.startsWith("Hola Paola,") && auto.includes("S/ 283.20") && !auto.includes("150"), "con cotización, el texto del código (sin la cifra del modelo)");
+  // ADAPTADA (21-10-2026): el mensaje de la cotización ya no saluda ni usa el nombre del perfil.
+  ok(auto.startsWith("Le envío la cotización N° 00123") && !/Paola|hola/i.test(auto) && auto.includes("S/ 283.20") && !auto.includes("150"), "con cotización, el texto del código (sin la cifra del modelo, sin saludo)");
   const rev = textoSinImportesAjenos("Serán aprox 300", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00124", decision: "revision", figuras: [] } }, ag, ct);
   ok(rev.includes("00124") && !/\d{3}(?!\d)/.test(rev.replace("00124", "")), "en revisión, el del código sin importes");
   const preg = textoSinImportesAjenos("Te sale gratis el retorno, ¿cuántas maletas?", { respuestaModelo: "", accion: "preguntar", faltan: ["la cantidad de maletas"] }, ag, ct);
@@ -99,8 +100,8 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
   ok(preg({ tratamiento: "tu", preguntas: "una_por_mensaje" }) === "Para cotizar tu traslado, ¿me indicas la cantidad de maletas?", "tú + uno por mensaje");
   ok(preg({ tratamiento: "usted", preguntas: "una_por_mensaje" }) === "Para cotizar su traslado, ¿me indica la cantidad de maletas?", "usted + uno por mensaje");
   const cot = { respuestaModelo: "", accion: "cotizar" as const, cotizacion: { cotizacionId: 1, numero: "7", decision: "revision" as const, figuras: [] } };
-  ok(textoSinImportesAjenos("x", cot, { comportamiento: { tratamiento: "tu" } }, ct).includes("registré tu pedido"), "cotización de tú");
-  ok(textoSinImportesAjenos("x", cot, {}, ct).includes("registré su pedido"), "cotización de usted (el defecto)");
+  ok(textoSinImportesAjenos("x", cot, { comportamiento: { tratamiento: "tu" } }, ct).startsWith("Registré tu pedido"), "cotización de tú");
+  ok(textoSinImportesAjenos("x", cot, {}, ct).startsWith("Registré su pedido"), "cotización de usted (el defecto)");
   // La derivación por defecto (sin plantilla del dueño) también lee el trato.
   const der = (comp: Record<string, unknown>) => textoSinImportesAjenos("Son 150$", { respuestaModelo: "", accion: "derivar" }, { comportamiento: comp }, ct);
   ok(der({ tratamiento: "tu" }) === mensajeDerivacionDefecto("tu").replace("{nombre}", "Paola"), "derivación por defecto de tú");
@@ -142,6 +143,9 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
     "## Traslados simples (cotización con el tarifario)",
     "- Un traslado simple es UN punto de recojo → UN destino (por ejemplo aeropuerto ↔ hotel o domicilio), solo ida o ida y retorno, en una sola fecha y con un solo vehículo. Para eso usa cotizar_traslado: el vehículo, el precio, la moneda y la validez los pone el sistema con el tarifario. NUNCA calcules ni inventes un precio de traslado, ni uses cotizacion_estimada para eso.",
     "- Llámala en cuanto el cliente pida el precio de un traslado, aunque falten datos. Si responde «preguntar», pide TODO lo que falta en un solo mensaje y vuelve a llamarla cuando conteste.",
+    // ADAPTADA (21-10-2026): el renglón del equipaje. El cliente dijo «4 personas con maletas» y la IA
+    // preguntó solo por las de 23 kg; el dueño quiere que pregunte el tipo (23 kg, de mano, personales).
+    "- Equipaje: en «maletas» van SOLO las maletas grandes de bodega (23 kg). Si el cliente dice «con maletas» o da un número sin decir de qué tipo, pregúntale cuántas son grandes (23 kg), cuántas de mano (10 kg) y cuántos artículos personales (mochila o cartera); las de mano y los artículos personales viajan con el pasajero y no van en «maletas».",
     "- Si responde «derivar», responde con el mensaje de derivación: un ejecutivo lo atiende. No menciones precios.",
     "- Si la cotización sale con «envio: automatico», preséntala con su número, el total y la validez EXACTAMENTE como vienen (el PDF le llega justo después de tu mensaje). Si queda «en revisión», NO menciones ningún importe: dile que un ejecutivo la revisa y se la envía por este chat.",
     "- Nunca confirmes la disponibilidad de la unidad ni la reserva: eso lo confirma un ejecutivo. Si el cliente acepta la cotización, usa proponer_reserva.",
@@ -151,7 +155,7 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
     "- Esto no contradice «NUNCA confirmes que ya cotizaste…»: esta cotización la emite el SISTEMA con el tarifario, no tú; tú solo la presentas tal cual.",
     "",
   ].join("\n");
-  ok(BLOQUE_TRASLADOS === ANTES && bloqueTraslados("todo_junto") === ANTES, "BLOQUE_TRASLADOS = bloqueTraslados(«todo_junto») = el de antes, byte a byte");
+  ok(BLOQUE_TRASLADOS === ANTES && bloqueTraslados("todo_junto") === ANTES, "BLOQUE_TRASLADOS = bloqueTraslados(«todo_junto») = el literal, byte a byte");
   const una = bloqueTraslados("una_por_mensaje");
   const dif = una.split("\n").filter((l, k) => l !== ANTES.split("\n")[k]);
   ok(dif.length === 1 && /pide SOLO el siguiente dato que falta \(uno por mensaje: el que te indique la herramienta\)/.test(dif[0]), `uno por mensaje: cambia SOLO el renglón de preguntar (${dif[0]})`);

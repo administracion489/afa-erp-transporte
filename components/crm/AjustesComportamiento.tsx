@@ -71,7 +71,7 @@ function Wa({ texto }: { texto: string }) {
 }
 
 /** Lo que falta en los ejemplos, en el orden en que lo da el cotizador de traslados. */
-const FALTAN_EJEMPLO = ["la fecha del servicio", "el número de pasajeros", "si llevan maletas de 23 kg y cuántas"];
+const FALTAN_EJEMPLO = ["la fecha del servicio", "el número de pasajeros", "cuántas maletas grandes (23 kg) llevan y cuántas son de mano (10 kg) o artículos personales"];
 
 /** Días en el orden en que se dicen (la semana empieza el lunes); 0 = domingo. */
 const DIAS = [

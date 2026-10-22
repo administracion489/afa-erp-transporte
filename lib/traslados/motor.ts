@@ -594,7 +594,7 @@ export function evaluarTraslado(pedido: PedidoTraslado, ctx: ContextoTraslado): 
   if (pedido.sentido !== "ida" && pedido.sentido !== "ida_retorno") faltan.push("si es solo ida o ida y retorno");
   if (pedido.sentido === "ida_retorno" && !esFecha(pedido.fecha_retorno)) faltan.push("la fecha del retorno");
   if (pax == null || pax <= 0) faltan.push("el número de pasajeros");
-  if (maletas == null || maletas < 0) faltan.push("si llevan maletas de 23 kg y cuántas");
+  if (maletas == null || maletas < 0) faltan.push("cuántas maletas grandes (23 kg) llevan y cuántas son de mano (10 kg) o artículos personales");
   if (faltan.length) return base("falta_dato", `Falta ${faltan.join(", ")}.`, { faltan });
 
   // 3) Fechas.
