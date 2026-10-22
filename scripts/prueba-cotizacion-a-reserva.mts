@@ -340,7 +340,7 @@ for (let i = 0; i < 3000; i++) {
   await probar(`azar ${i}`, cot, { existentes: EXISTENTES[elegir(Object.keys(EXISTENTES))], atras: azar() < 0.3, ...FALLOS[elegir(Object.keys(FALLOS))] }, azar() < 0.7);
 }
 t(`el plan ≡ el algoritmo viejo (${iguales}/${casos})`, iguales === casos && casos > 3000);
-if (process.env.DETALLE) console.log([...vistos]);
+if (process.env.DETALLE) console.log(casos, [...vistos]);
 t("corolario: salen los avisos de crear, completar, ya convertida y fallos", ["✅ Reserva crea", "✅ Retorno com", "Ya fue convert", "Solo cotizacio", "⚠️ Se crearon", "No se pudo co"].every((k) => [...vistos].some((v) => v.startsWith(k))) && [...vistos].some((k) => k.startsWith("✅ 2 reservas") || k.startsWith("✅ 3 reservas")));
 
 // Casos con nombre sobre el plan mismo.
