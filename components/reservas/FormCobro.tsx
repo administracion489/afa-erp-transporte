@@ -58,7 +58,8 @@ export default function FormCobro({
   const falta = bloqueado ? (motivoBloqueo || "No se puede registrar ahora.")
     : !f.monto.trim() ? "Escribe el monto."
       : monto == null ? "El monto tiene que ser un número mayor que cero, con hasta dos decimales."
-        : !f.fecha ? "Elige la fecha del movimiento." : null;
+        : !f.fecha ? "Elige la fecha del movimiento."
+          : f.metodo !== "efectivo" && !f.referencia.trim() ? "Escribe el número de operación (o elige efectivo)." : null;
 
   const registrar = async () => {
     if (falta || monto == null || ocupado || enviando) return;
@@ -83,7 +84,7 @@ export default function FormCobro({
         <select className={inputCls} aria-label="Medio" value={f.metodo} disabled={bloqueado} onChange={(e) => setF({ ...f, metodo: e.target.value })}>
           {METODOS_COBRO.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
-        <input className={inputCls} aria-label="Número de operación" placeholder={f.metodo === "efectivo" ? "Nº de recibo (opcional)" : "Nº de operación"} value={f.referencia}
+        <input className={inputCls} aria-label="Número de operación" maxLength={60} placeholder={f.metodo === "efectivo" ? "Nº de recibo (opcional)" : "Nº de operación"} value={f.referencia}
           disabled={bloqueado} onChange={(e) => setF({ ...f, referencia: e.target.value })} />
       </div>
       <button type="button" onClick={registrar} disabled={!!falta || ocupado || enviando}
