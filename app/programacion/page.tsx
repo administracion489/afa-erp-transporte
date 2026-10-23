@@ -19,8 +19,8 @@ import {
 } from "@/lib/reservas-pacto";
 import { planDeCancelacion, esCancelacion } from "@/lib/reservas-cancelacion";
 import {
-  planMasivo, TEXTO_MOTIVO, valorTecleado,
-  type EjeMasivo, type ResumenEje, type ServicioMasivo, type ValorEje,
+  planMasivo, TEXTO_MOTIVO, valorTecleado, valorEtiquetas,
+  type EjeMasivo, type ResumenEje, type ServicioMasivo, type ValorEje, type ValorEtiquetas,
 } from "@/lib/reservas-masivo";
 import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxDeServicio,
@@ -41,8 +41,8 @@ import ModalEtiquetas from "@/components/programacion/ModalEtiquetas";
 import ChipEtiquetas from "@/components/programacion/ChipEtiquetas";
 import TableroProgramacion, { type TableroDatos, type MarcaTablero } from "@/components/programacion/TableroProgramacion";
 import {
-  textoDeTramo, validarEtiquetas, etiquetasDeTramo, patchEtiquetas, rotuloEtiquetas, mismasEtiquetas, etiquetasDelDia, claveRutaTurno,
-  type TextoEtiquetas, type TramoConEtiquetas,
+  textoDeTramo, textoDeEtiquetas, validarEtiquetas, etiquetasDeTramo, patchEtiquetas, rotuloEtiquetas, mismasEtiquetas, etiquetasDelDia, claveRutaTurno,
+  type EtiquetasItem, type TextoEtiquetas, type TramoConEtiquetas,
 } from "@/lib/liquidacion-etiquetas";
 import { armarDias, proponerEtiquetas, type TramoEtq } from "@/lib/liquidacion-etiquetas-propuesta";
 import { cabecerasErp } from "@/lib/fetch-erp";
@@ -799,6 +799,17 @@ export default function ReservasPage() {
      * contrato viejo tienen todas la capacidad en NULL. Vacío = no hay con qué comparar.
      */
     rutasObjetivo: string[];
+    /** El servicio editado: las etiquetas lo usan para la hora de su hermano y su origen. */
+    idEditado: number;
+    /**
+     * Las etiquetas del día editado DESPUÉS de guardarlo, y si el operador las tocó. Igual
+     * que el PAX: el campo del modal nace con ellas solo si las tocó, y vaciarlas en lote
+     * solo se puede pedir vaciándolas en el formulario.
+     */
+    etiquetas: EtiquetasItem | null;
+    etqTocadas: boolean;
+    /** Las que el día tenía ANTES: distinguen «este móvil» de «otro móvil». */
+    etiquetasAntes: EtiquetasItem | null;
   } | null>(null);
   const [aplicarScope,         setAplicarScope]         = useState<"todos" | "rango">("todos");
   const [aplicarDesde,         setAplicarDesde]         = useState("");
@@ -818,6 +829,15 @@ export default function ReservasPage() {
   const [aplicarAsignacion,    setAplicarAsignacion]    = useState<"no" | "completa" | "conductor">("completa");
   const [aplicarHora,          setAplicarHora]          = useState(false);
   const [aplicarPax,           setAplicarPax]           = useState(true);
+  /**
+   * LAS ETIQUETAS DEL ÍTEM (RUTA · TURNO · MÓVIL) SON UN EJE. No lo eran: el formulario las
+   * escribía en el servicio y su hermano, y el modal contaba los servicios que recibían el
+   * PAX — el operador leía «7 servicios» y las etiquetas quedaban en un solo día.
+   */
+  const [aplicarEtq,           setAplicarEtq]           = useState(false);
+  const [aplicarEtqTxt,        setAplicarEtqTxt]        = useState<TextoEtiquetas>({ ruta: "", turno: "", movil: "" });
+  /** Incluir los días de otro horario: el turno puede haberse corrido de hora. */
+  const [aplicarEtqOtraHora,   setAplicarEtqOtraHora]   = useState(false);
   /**
    * LOS DOS EJES DE DINERO NACEN APAGADOS, SIEMPRE, y es la única regla de este bloque
    * que no se puede aflojar. Un eje pre-marcado escribe plata en cientos de filas porque
@@ -2805,6 +2825,12 @@ export default function ReservasPage() {
         // dentro de `aplicarMasivo` devolvía siempre "" y el acta salía sin motivo.
         const motivoEditado = form.cambio_motivo || "";
         const notaEditada   = form.cambio_nota.trim() || "";
+        // Las etiquetas del DÍA editado antes de guardar (la ida primero, como las lee la
+        // liquidación) y después. Las de antes separan «este móvil» de «otro móvil».
+        const etqAntesDia = etiquetasDelDia(
+          reservaActual.direccion_servicio === "retorno"
+            ? [hermano, reservaActual] : [reservaActual, hermano]).etiquetas;
+        const etqDespues = etqAGuardar !== undefined ? etqAGuardar : etqAntesDia;
         limpiar();
         setGuardando(false);
         setAplicarScope("todos");
@@ -2832,6 +2858,12 @@ export default function ReservasPage() {
         // estaba invita al Enter ciego sobre todo el contrato (mismo criterio que el
         // importe nuevo de /liquidaciones, que tampoco se precarga con el actual).
         setAplicarPaxTxt(paxTocado && paxEscrito != null ? String(paxEscrito) : "");
+        // Las etiquetas, igual que el PAX: marcadas y con su valor solo si se acaban de
+        // escribir; vaciadas en el formulario, el eje queda apagado y el borrado en lote
+        // se puede pedir pero no viene pedido.
+        setAplicarEtq(!!etqAGuardar);
+        setAplicarEtqTxt(etqAGuardar ? textoDeEtiquetas(etqAGuardar) : { ruta: "", turno: "", movil: "" });
+        setAplicarEtqOtraHora(false);
         setAplicarPrecioTxt(precioTocado ? String(Number(form.precio_cliente)) : "");
         setAplicarCostoTxt(costoTocado ? String(costo) : "");
         setModalAplicarMasivo({
@@ -2857,6 +2889,10 @@ export default function ReservasPage() {
             normalizarNombreRuta(reservaActual.ruta_nombre),
             normalizarNombreRuta(hermano?.ruta_nombre),
           ].filter(Boolean),
+          idEditado: editandoId,
+          etiquetas: etqDespues,
+          etqTocadas: etqAGuardar !== undefined,
+          etiquetasAntes: etqAntesDia,
         });
         cargarDatos();
         return;
@@ -2889,6 +2925,11 @@ export default function ReservasPage() {
     () => valorTecleado(aplicarPaxTxt, { entero: true, vaciarPermitido: vaciarPaxPermitido }),
     [aplicarPaxTxt, vaciarPaxPermitido]);
   const vPrecio: ValorEje = useMemo(() => valorTecleado(aplicarPrecioTxt), [aplicarPrecioTxt]);
+  /** Quitar las etiquetas en lote solo si el operador las quitó en el formulario. */
+  const vaciarEtqPermitido = !!modalAplicarMasivo?.etqTocadas && modalAplicarMasivo?.etiquetas == null;
+  const vEtq: ValorEtiquetas = useMemo(
+    () => valorEtiquetas(aplicarEtqTxt, { vaciarPermitido: vaciarEtqPermitido }),
+    [aplicarEtqTxt, vaciarEtqPermitido]);
   const vCosto:  ValorEje = useMemo(() => valorTecleado(aplicarCostoTxt),  [aplicarCostoTxt]);
   /**
    * El COSTO solo se ofrece sobre una asignación TERCERIZADA, y no es una comodidad: la
@@ -2916,6 +2957,7 @@ export default function ReservasPage() {
         // Un eje marcado sin valor utilizable NO se aplica. La casilla ya sale
         // deshabilitada, pero el motor no puede depender de que la pantalla acierte.
         pax:    aplicarPax    && vPax.aplicable,
+        etiquetas: aplicarEtq && vEtq.aplicable,
         precio: aplicarPrecio && vPrecio.aplicable,
         costo:  aplicarCosto  && vCosto.aplicable && ofreceCosto,
       },
@@ -2935,6 +2977,8 @@ export default function ReservasPage() {
       // que distingue «corregir la capacidad de esta ruta» de «pisarle la suya a otro
       // móvil», y no cambia porque el número nuevo se escriba en otro sitio.
       pax: vPax.valor, paxAntes: m.paxAntes, rutasObjetivo: m.rutasObjetivo,
+      idEditado: m.idEditado, etiquetas: vEtq.valor, etiquetasAntes: m.etiquetasAntes,
+      etiquetasOtraHora: aplicarEtqOtraHora,
       precio: vPrecio.valor, costo: vCosto.valor,
       liquidadasCliente:   aplicarLiquidadas?.cliente,
       liquidadasProveedor: aplicarLiquidadas?.proveedor,
@@ -2942,7 +2986,8 @@ export default function ReservasPage() {
     });
   }, [modalAplicarMasivo, aplicarAsignacion, aplicarHora, aplicarPax, aplicarPrecio,
       aplicarCosto, aplicarScope, aplicarDesde, aplicarHasta, aplicarOtraHora,
-      aplicarOtraUnidad, aplicarLiquidadas, vPax, vPrecio, vCosto, ofreceCosto]);
+      aplicarOtraUnidad, aplicarLiquidadas, vPax, vPrecio, vCosto, ofreceCosto,
+      aplicarEtq, vEtq, aplicarEtqOtraHora]);
 
   /**
    * Esc cierra el modal del masivo, igual que la ✕ y que «No, solo este».
@@ -4435,6 +4480,78 @@ export default function ReservasPage() {
                       ),
                     })}
 
+                  {/* ── LAS ETIQUETAS DEL ÍTEM ─────────────────────────────────────
+                      No eran un eje: el formulario las dejaba en el servicio y su hermano,
+                      y el «Se actualizarán 7» de abajo contaba los PAX. Son del DÍA como el
+                      PAX, pero sin un número exacto que proteja al otro bus, así que solo
+                      alcanzan a los días de esta ruta a esta hora y nunca a un segundo bus
+                      de la misma fecha. Ver lib/reservas-masivo.ts. */}
+                  {casillaEje("etiquetas", aplicarEtq, setAplicarEtq,
+                    <>Ítem de la liquidación <span className="text-gray-400 font-normal">(RUTA · TURNO · MÓVIL)</span></>,
+                    <>Son del <b>día</b>: van a la ida <b>y</b> al retorno, también a los servicios
+                      <b> ya prestados</b>. Solo a los días de esta ruta que salen a las {horaOriginal || "—"},
+                      y <b>nunca a otro bus</b>: un día con otras etiquetas, o una fecha con dos buses a esa
+                      hora, queda fuera.</>,
+                    "#075985",
+                    {
+                      puede: vEtq.aplicable,
+                      campo: (
+                        <div className="mt-2 pl-6 flex items-center gap-2 flex-wrap">
+                          {([["ruta", "Ruta", "RUTA A", "w-24 uppercase"], ["turno", "Turno", "1", "w-14"],
+                             ["movil", "Móvil", "—", "w-14"]] as const).map(([k, rotulo, ph, ancho]) => (
+                            <label key={k} className="flex items-center gap-1">
+                              <span className="text-[10px] font-black uppercase tracking-wide text-gray-400">{rotulo}</span>
+                              <input
+                                value={aplicarEtqTxt[k]} placeholder={ph}
+                                inputMode={k === "ruta" ? undefined : "numeric"}
+                                onChange={ev => { const v = ev.target.value; setAplicarEtqTxt(p => ({ ...p, [k]: v })); }}
+                                className={`${ancho} border rounded-lg px-2 py-1 text-sm font-bold focus:outline-none focus:border-[#075985]`}
+                                style={{ borderColor: vEtq.codigo === "no_valido" ? "#fca5a5" : undefined }}
+                              />
+                            </label>
+                          ))}
+                          <span className="text-[11px] text-gray-400">
+                            este servicio: <b className="text-gray-600">{m.etiquetas ? rotuloEtiquetas(m.etiquetas) : "sin etiquetas"}</b>
+                          </span>
+                        </div>
+                      ),
+                      nota: (
+                        <>
+                          {vEtq.codigo === "vaciar" && (
+                            <p className="mt-1.5 pl-6 text-[11px]" style={{ color: "#b91c1c" }}>
+                              Vacío <b>QUITA</b> las etiquetas de esos días: vuelven a agruparse por el nombre
+                              de la ruta en la liquidación.
+                            </p>
+                          )}
+                          {vEtq.codigo === "sin_valor" && (
+                            <p className="mt-1.5 pl-6 text-[11px] text-gray-400">
+                              Escribe la RUTA y el TURNO para poder aplicarlas. En blanco no se quita nada.
+                            </p>
+                          )}
+                          {vEtq.codigo === "no_valido" && (
+                            <p className="mt-1.5 pl-6 text-[11px]" style={{ color: "#b91c1c" }}>{vEtq.error}</p>
+                          )}
+                          {aplicarEtq && vEtq.aplicable && (
+                            <label className="mt-1.5 pl-6 flex items-start gap-2 cursor-pointer">
+                              <input type="checkbox" checked={aplicarEtqOtraHora}
+                                     onChange={e => setAplicarEtqOtraHora(e.target.checked)}
+                                     className="mt-0.5" style={{ accentColor: "#075985" }} />
+                              <span className="text-[11px] text-gray-600">
+                                Incluir también los días de <b>otro horario</b> (el turno se corrió de hora).
+                                <span className="text-gray-400"> Una fecha con dos buses sigue quedando fuera.</span>
+                              </span>
+                            </label>
+                          )}
+                          {aplicarEtq && vEtq.aplicable && !(vEtq.valor === null ? m.etiquetas === null : mismasEtiquetas(vEtq.valor, m.etiquetas)) && (
+                            <p className="mt-1.5 pl-6 text-[11px]" style={{ color: "#92400e" }}>
+                              ⚠ <b>Este servicio se queda con {m.etiquetas ? rotuloEtiquetas(m.etiquetas) : "sin etiquetas"}</b>:
+                              el masivo solo alcanza a los demás. Si también tiene que cambiar, ábrelo y edítalo.
+                            </p>
+                          )}
+                        </>
+                      ),
+                    })}
+
                   {/* ── EL DINERO ─────────────────────────────────────────────────
                       Nacen apagados SIEMPRE y se pintan aparte: no son "un campo más".
                       Un eje de plata pre-marcado escribe en cientos de filas porque nadie
@@ -5540,7 +5657,10 @@ export default function ReservasPage() {
               {etqTocadas && etqValidacion.ok && (
                 <p className="text-[10px] mt-1 text-gray-500 leading-snug">
                   {etqValidacion.etiquetas
-                    ? <>Quedará <b>{rotuloEtiquetas(etqValidacion.etiquetas, paxResuelto.pax)}</b>{hermano?.id ? <> en este tramo y en <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b> (las etiquetas son del día)</> : ""}.</>
+                    ? <>Quedará <b>{rotuloEtiquetas(etqValidacion.etiquetas, paxResuelto.pax)}</b>{hermano?.id ? <> en este tramo y en <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b> (las etiquetas son del día)</> : ""}.
+                        {reservaEditada?.cotizacion_id && !esEventual(reservaEditada) && (
+                          <> Al guardar te preguntará si las aplicas a <b>más días del contrato</b>.</>
+                        )}</>
                     : <>Se quitan las etiquetas{hermano?.id ? " de este tramo y de su hermano" : ""}: el servicio vuelve a agruparse por el nombre de la ruta.</>}
                 </p>
               )}
