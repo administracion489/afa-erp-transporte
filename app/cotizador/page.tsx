@@ -5,7 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { faltaColumna } from "@/lib/columna-faltante";
 import { calcularCostoUnidad, escenariosPrecio, aplicarPisoHora, recorridoSugerido, RECORRIDO_CARRETERA, type ParametrosUnidad, type Recorrido } from "@/lib/costeo-propio";
 import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
-import { conIgvDe } from "@/lib/igv-par";
+import { conIgvDe, margenSinIgv } from "@/lib/igv-par";
 import {
   NIVELES, NIVEL_CFG, equipamientoDeNivel, nivelDeFicha, fichasDelNivel, planDeNivel,
   type NivelServicio,
@@ -984,8 +984,10 @@ export default function CotizadorPage(){
     if(!resultado||!veh)return;
     setEnviando(true);setErrorEnv("");
     // `cotizaciones.costo_estimado` es el costo interno CON IGV (lib/igv-par.ts) y `baseCosto` es
-    // sin IGV; `costo_cotizador` conserva el sin IGV del cotizador, como siempre.
+    // sin IGV; `costo_cotizador` conserva el sin IGV del cotizador, como siempre. El precio va CON
+    // IGV (la fila nace con `incluye_igv` en true) y el margen se guarda SIN IGV en los dos lados.
     const costoConIgv=conIgvDe(resultado.baseCosto);
+    const precioCot=modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV;
     const{data:{session:sesEnv}}=await supabase.auth.getSession();
     const payloadCot:Record<string,unknown>={
       vendedor_id:sesEnv?.user?.id??null,
@@ -995,7 +997,7 @@ export default function CotizadorPage(){
       tipo_vehiculo:veh.tipo_vehiculo,equipamiento:equipamientoDeNivel(nivel),
       precio_cliente:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
       costo_estimado:costoConIgv,
-      margen_estimado:modo==="eventual"?resultado.totalEst20-costoConIgv:resultado.diaEstIGV-costoConIgv,
+      margen_estimado:margenSinIgv({modo_servicio:modo,incluye_igv:true,precio_cliente:precioCot,precio_dia:modo==="fijo"?resultado.diaEstIGV:null,costo_estimado:costoConIgv}),
       precio_cotizador:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
       costo_cotizador:resultado.baseCosto,margen_cotizador:20,
       vehiculo_cotizador:veh.nombre,

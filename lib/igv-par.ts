@@ -15,7 +15,9 @@
  * del adelanto. Ida y vuelta devuelven el número tecleado: el error del primer redondeo es
  * ≤ 0.005 y al dividir entre 1.18 queda en ≤ 0.0043, que no alcanza para mover el céntimo.
  *
- * PURO: lo usan el formulario y su matriz (`scripts/prueba-igv-par.mts`).
+ * Abajo, el margen de una cotización, que se calcula SIN IGV en los dos lados (`margenSinIgv`).
+ *
+ * PURO: lo usan el formulario, la lista, el cotizador y su matriz (`scripts/prueba-igv-par.mts`).
  */
 
 import { alCentimo } from "./cotizacion-moneda";
@@ -63,4 +65,71 @@ export function textoSinDesdeCon(con: string): string {
 export function textoImporte(valor: unknown): string {
   const n = Number(valor);
   return valor == null || valor === "" || !Number.isFinite(n) || n === 0 ? "" : String(alCentimo(n));
+}
+
+// ── El margen, siempre SIN IGV en los dos lados ─────────────────────────────────────────────
+//
+// Lo pidió el dueño (23-10-2026). `margen_estimado` restaba el costo CON IGV de `precio_cliente`,
+// y `precio_cliente` no siempre está con IGV: en una cotización eventual que NO incluye IGV es el
+// subtotal SIN IGV. Ahí el margen salía corto justo en el IGV del costo, y en las demás salía con
+// el IGV del precio dentro, que no es de la empresa (se le entrega a SUNAT).
+//
+// Sobre qué base está `precio_cliente` lo dice la propia fila, y está medido en producción
+// (23-10-2026, las 716 cotizaciones, ninguna fuera de la regla):
+//   - eventual que no incluye IGV → el subtotal, SIN IGV (403 filas);
+//   - eventual que incluye IGV (o sin dato: la columna nace en true) → el total CON IGV (164);
+//   - fija con precio/día → ese precio/día, que es CON IGV siempre (18).
+// Una fija sin precio/día guarda el total de los ítems, y sigue la regla de las eventuales.
+//
+// La misma pregunta (`precioClienteConIgv`) sirve para LEER el margen y para ESCRIBIR un precio
+// que llega con IGV (los botones del panel de precios): escribir con una base y leer con otra es
+// el error que este ERP ya pagó varias veces.
+
+/** Lo que el margen necesita de una fila de `cotizaciones`. */
+export type FilaMargen = {
+  modo_servicio?: string | null;
+  incluye_igv?: boolean | null;
+  precio_cliente?: number | string | null;
+  precio_dia?: number | string | null;
+  costo_estimado?: number | string | null;
+};
+
+/** ¿El `precio_cliente` de esta fila está CON IGV? */
+export function precioClienteConIgv(f: FilaMargen): boolean {
+  if (f.modo_servicio === "fijo" && Number(f.precio_dia) > 0) return true;
+  return f.incluye_igv !== false;
+}
+
+/** Un importe positivo de la base, o null si no hay (vacío, cero, texto, negativo). */
+function positivo(v: unknown): number | null {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** El precio SIN IGV de la fila, al céntimo; null sin precio. */
+export function precioSinIgvDeFila(f: FilaMargen): number | null {
+  const p = positivo(f.precio_cliente);
+  if (p == null) return null;
+  return precioClienteConIgv(f) ? sinIgvDe(p) : alCentimo(p);
+}
+
+/**
+ * El margen SIN IGV: precio sin IGV − costo interno sin IGV, en soles y al céntimo (en una fija,
+ * por día). Null sin precio o sin costo interno: sin costo no hay margen que calcular, y enseñar
+ * el precio entero como margen sería un número que nadie midió.
+ */
+export function margenSinIgv(f: FilaMargen): number | null {
+  const precio = precioSinIgvDeFila(f);
+  const costo = positivo(f.costo_estimado);
+  if (precio == null || costo == null) return null;
+  return alCentimo(precio - sinIgvDe(costo));
+}
+
+/**
+ * El `precio_cliente` que hay que escribir en esta fila para un precio que llega CON IGV: tal cual
+ * si la fila guarda con IGV, sin IGV si no. Así lo que se escribe se vuelve a leer en su base.
+ */
+export function precioClienteDesdeConIgv(f: FilaMargen, con: number): number {
+  return precioClienteConIgv(f) ? con : sinIgvDe(con);
 }
