@@ -123,8 +123,13 @@ export function alertaCreadaUna(x: { nParadas: number; eParadas: string | null; 
   return `✅ Reserva creada${x.nParadas > 0 && !x.eParadas ? ` con ${x.nParadas} paradas` : ""}${avisoParadas(x.nParadas, x.eParadas)}${textoRetorno(x.retorno, [x.eRet], 1)}${x.notaTc}`;
 }
 
+/**
+ * DIVERGENCIA DECLARADA con el código que vivía en /cotizaciones: con un solo vehículo asignado en
+ * los ítems decía «✅ 1 reservacreada» (faltaba el espacio). Ahora «✅ 1 reserva creada»; la matriz
+ * normaliza ese texto del viejo y exige que el caso exista.
+ */
 export function alertaCreadasMulti(x: { count: number; nParadas: number; eParadas: string | null; errsRet: (string | null)[]; retorno: PlanRetorno; notaTc: string }): string {
-  return `✅ ${x.count} reserva${x.count > 1 ? "s creadas (una por vehículo)" : "creada"}${avisoParadas(x.nParadas, x.eParadas)}${textoRetorno(x.retorno, x.errsRet, x.count)}${x.notaTc}`;
+  return `✅ ${x.count} reserva${x.count > 1 ? "s creadas (una por vehículo)" : " creada"}${avisoParadas(x.nParadas, x.eParadas)}${textoRetorno(x.retorno, x.errsRet, x.count)}${x.notaTc}`;
 }
 
 /** Falló una ida del lote: las ya creadas se quedan (la cotización ya figura como convertida). */

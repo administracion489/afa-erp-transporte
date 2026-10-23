@@ -254,11 +254,19 @@ let semilla = 12345;
 const azar = () => { semilla = (semilla * 1103515245 + 12345) % 2147483648; return semilla / 2147483648; };
 const elegir = <T,>(xs: T[]) => xs[Math.floor(azar() * xs.length)];
 
-let casos = 0, iguales = 0;
+let casos = 0, iguales = 0, espacioArreglado = 0, pegadoNuevo = 0;
 const vistos = new Set<string>();
+// DIVERGENCIA DECLARADA (lib/cotizacion-a-reserva.ts → alertaCreadasMulti): el viejo decía
+// «✅ 1 reservacreada» con un solo vehículo en los ítems; el ejecutor dice «✅ 1 reserva creada».
+// Se normaliza ese texto del viejo (y solo ese) antes de comparar, contando cuántas veces pasó.
+const PEGADO = "✅ 1 reservacreada";
+const arreglarViejo = (v: Awaited<ReturnType<typeof correr>>) => ({
+  ...v, alertas: v.alertas.map((a) => (a.startsWith(PEGADO) ? (espacioArreglado++, "✅ 1 reserva creada" + a.slice(PEGADO.length)) : a)),
+});
 const probar = async (nombre: string, cot: CotParaReserva, cfg: Cfg, respuesta: boolean) => {
-  const v = await correr((d) => crearViejo(d)(cot), cfg, respuesta);
+  const v = arreglarViejo(await correr((d) => crearViejo(d)(cot), cfg, respuesta));
   const n = await correr((d) => convertirNuevo(cot, d), cfg, respuesta);
+  if (n.alertas.some((a) => a.includes("reservacreada"))) pegadoNuevo++;
   casos++;
   if (canon(v) === canon(n)) iguales++;
   else if (fallas.length < 30) fallas.push(`${nombre}\n  viejo: ${canon(v).slice(0, 600)}\n  nuevo: ${canon(n).slice(0, 600)}`);
@@ -287,6 +295,7 @@ for (let i = 0; i < 3000; i++) {
   await probar(`azar ${i}`, cot, { existentes: EXISTENTES[elegir(Object.keys(EXISTENTES))], atras: azar() < 0.3, ...FALLOS[elegir(Object.keys(FALLOS))] }, azar() < 0.7);
 }
 t(`el plan ≡ el algoritmo viejo (${iguales}/${casos})`, iguales === casos && casos > 3000);
+t(`divergencia declarada: «✅ 1 reservacreada» → «✅ 1 reserva creada» (${espacioArreglado} casos), y el ejecutor nunca lo pega`, espacioArreglado > 0 && pegadoNuevo === 0);
 if (process.env.DETALLE) console.log(casos, [...vistos]);
 t("corolario: salen los avisos de crear, completar, ya convertida y fallos", ["✅ Reserva crea", "✅ Retorno com", "Ya fue convert", "Solo cotizacio", "⚠️ Se crearon", "No se pudo co"].every((k) => [...vistos].some((v) => v.startsWith(k))) && [...vistos].some((k) => k.startsWith("✅ 2 reservas") || k.startsWith("✅ 3 reservas")));
 
