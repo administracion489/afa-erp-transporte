@@ -24,11 +24,17 @@
 //  · Los textos desmesurados se recortan con «…» (el HTML los imprime enteros y se saldrían de la
 //    hoja): una celda de la tabla no puede ocupar más de una hoja.
 //  · La marca de agua (el PDF de EJEMPLO del simulador) solo existe aquí.
+//
+// LA POLÍTICA DE RESERVA RESUMIDA (modo `resumen` de `pagina2.reserva`, cotizaciones-08): el resumen a
+// la izquierda, el QR de las condiciones completas a la derecha (los mismos tramos de `matrizQr` que
+// pinta el SVG del HTML, ~25 mm) y, debajo, el rótulo y el enlace. El QR va en la hoja donde empieza
+// el bloque (si el resumen se parte entre hojas, no se repite).
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { PDFDocument, StandardFonts, degrees, rgb, type PDFFont, type PDFImage, type PDFPage, type RGB } from "pdf-lib";
 import { aWinAnsi } from "./pdf-winansi";
 import { listaVisible, reservaVisible, type CajaDoc, type DocCorporativo, type FilaDoc, type ListaDoc } from "./cotizacion-corporativo";
+import { SILENCIO_QR, TAMANO_QR_PX, type MatrizQr } from "./qr-matriz";
 import { NOMBRE_SIN_CONFIGURAR } from "./empresa-perfil";
 import { MAX_DESCRIPCION_RENGLONES, MAX_RENGLONES_DESCRIPCION } from "./pdf-chrome";
 
@@ -83,6 +89,7 @@ const DESC_UNIDAD = hex("#475569");
 const FONDO_FOTO = hex("#f3f4f6");
 const BORDE_CUENTA = hex("#dddddd");
 const LI = hex("#333333");
+const NEGRO_QR = rgb(0, 0, 0);
 
 /** La línea base de un renglón de alto `lh` cuyo borde superior está en `top` (métricas de Arial). */
 const base = (top: number, lh: number, size: number) => top + lh / 2 + 0.3465 * size;
@@ -169,6 +176,12 @@ export async function dibujarPdfCorporativo(d: DocCorporativo, img: ImagenesCorp
   };
   const linea = (p: PDFPage, x1: number, y1: number, x2: number, y2: number, color: RGB, grosor = 1) => {
     p.drawLine({ start: { x: x1 * PX, y: AL - y1 * PX }, end: { x: x2 * PX, y: AL - y2 * PX }, color, thickness: grosor * PX });
+  };
+  /** El QR: fondo blanco y un rectángulo negro por tramo (los MISMOS del SVG del HTML), con su zona de silencio. */
+  const dibujarQr = (p: PDFPage, m: MatrizQr, x: number, top: number, lado: number) => {
+    const k = lado / (m.tamano + 2 * SILENCIO_QR);
+    rect(p, x, top, lado, lado, { color: BLANCO });
+    for (const [f, c, l] of m.tramos) rect(p, x + (c + SILENCIO_QR) * k, top + (f + SILENCIO_QR) * k, l * k, k, { color: NEGRO_QR });
   };
 
   /** Parte un texto en renglones que caben en `w` (una palabra más ancha se corta por caracteres). */
@@ -720,8 +733,29 @@ export async function dibujarPdfCorporativo(d: DocCorporativo, img: ImagenesCorp
       fin(11);
     };
     if (vGen) listaAncha({ lista: p2.generales, color: CP, borde: CP, icono: "nota" });
-    // La política de reserva, después de las generales (como en el HTML), solo con líneas.
-    if (vRes) listaAncha({ lista: p2.reserva, color: CP, borde: CP, icono: "calendario" });
+    // La política de reserva, después de las generales (como en el HTML), solo con líneas. Resumida:
+    // el resumen con el QR a la derecha y, debajo, el enlace a las condiciones completas.
+    const en = p2.reserva.enlace;
+    if (vRes && p2.reserva.modo === "resumen" && en) {
+      const c: Col = { lista: p2.reserva, color: CP, borde: CP, icono: "calendario" };
+      const QR = en.qr ? TAMANO_QR_PX : 0, GAP_QR = en.qr ? 12 : 0;
+      const tit = partir(MAY(c.lista.titulo, 80), neg, LIS, CW - ICONO);
+      const items = c.lista.items.map((it) => partir(T(it, 600), reg, LIS, CW - QR - GAP_QR - 40));
+      const enlace = partirRico([{ texto: T(en.rotulo, 200), f: reg }, { texto: " ", f: reg }, { texto: T(en.url, 200), f: neg }], LIS, CW);
+      bloque(8);
+      // El título no se queda solo al pie, y el QR cabe entero en la hoja donde empieza el bloque.
+      asegurar(altoTit(tit) + 11 + Math.max(QR, items[0] ? Math.max(1, items[0].length) * LILH : 0));
+      pintarTitulo(c, tit, MX, CW);
+      y += 11;
+      const pagQr = pag, yQr = y;
+      if (en.qr) dibujarQr(pag, en.qr, MX + CW - QR, yQr, QR);
+      pintarItems(items, MX, true);
+      if (pag === pagQr) y = Math.max(y, yQr + QR);
+      y += 4;
+      asegurar(enlace.length * LILH);
+      enlace.forEach((r) => { pintarRenglon(r, MX, base(y, LILH, LIS), LIS, LI); y += LILH; });
+      fin(11);
+    } else if (vRes) listaAncha({ lista: p2.reserva, color: CP, borde: CP, icono: "calendario" });
   }
 
   // ════════════════════════════════════════════════════════════════════════════

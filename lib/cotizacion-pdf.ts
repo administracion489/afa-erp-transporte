@@ -39,6 +39,7 @@ import {
   anexoDoc, baseCotizacionPdf, cronogramaDoc, cuentasCorporativo, cuentasDoc, docCorporativoDeBase, lineasItinerario, listaVisible, numeroCotizacion, reservaVisible,
   type AnexoDoc, type CajaDoc, type CronogramaDoc, type CuentasDoc, type DocCorporativo, type FilaDoc, type LineaItinerario, type Segmento,
 } from "./cotizacion-corporativo";
+import { SILENCIO_QR, TAMANO_QR_PX, type MatrizQr } from "./qr-matriz";
 
 // El número que se imprime vive con el modelo corporativo (lib/cotizacion-corporativo.ts); aquí se
 // re-exporta porque es donde lo buscan los demás módulos.
@@ -101,6 +102,11 @@ export type PlantillaPdfCfg = {
   condiciones_incluye?: string[] | null; condiciones_no_incluye?: string[] | null; condiciones_generales?: string[] | null;
   /** La política de reserva, cambios y cancelación (supabase/cotizaciones-06). Solo la lee la corporativa. */
   condiciones_reserva?: string[] | null;
+  /**
+   * Su resumen (supabase/cotizaciones-08): se COPIA a la fila al crear la cotización
+   * (`considSnapshot`); al imprimir nunca se lee de la plantilla (el enlace abre la política de la fila).
+   */
+  condiciones_reserva_resumen?: string[] | null;
   banco_1_nombre?: string | null; banco_1_cuenta?: string | null; banco_1_cci?: string | null;
   banco_2_nombre?: string | null; banco_2_cuenta?: string | null; banco_2_cci?: string | null;
   banco_3_nombre?: string | null; banco_3_cuenta?: string | null; banco_3_cci?: string | null;
@@ -149,6 +155,13 @@ export type EntradaPdfCot = {
   validezHasta?: string | null;
   notaTotales?: string | null;
   omitirListasVacias?: boolean;
+  /**
+   * SOLO LA CORPORATIVA. El enlace a las condiciones completas de ESTA cotización
+   * (`enlaceCondiciones(base, cot.condiciones_token)`, lib/condiciones-publicas.ts). Con él y con un
+   * resumen en `consid.reserva_resumen`, se imprimen el resumen, el enlace y su QR en lugar de la
+   * política entera. Sin él (o sin resumen), la política entera, como siempre.
+   */
+  enlaceCondiciones?: string | null;
 };
 
 /**
@@ -460,6 +473,18 @@ function htmlEjecutivo(c: Ctx): string {
 
 const CSS_CORPORATIVO = `.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}.box{border:1px solid #ccc;border-radius:4px;padding:8px 10px}.box-title{font-weight:900;font-size:10px;color:#0b315f;text-transform:uppercase;border-bottom:1px solid #e5e7eb;padding-bottom:4px;margin-bottom:6px}.box-row{margin:3px 0;font-size:10.5px}table{width:100%;border-collapse:collapse;margin:10px 0;font-size:10.5px}thead{background:#0b315f;color:white}thead th{padding:6px;text-align:center;font-weight:700;font-size:10px;border:1px solid #0b315f}tbody tr:nth-child(even){background:#f8fafc}.totales td{padding:4px 10px}.totales .label{text-align:right;color:#555;font-weight:600}.totales .valor{text-align:right;font-weight:700}.totales .total-neto{font-size:13px;font-weight:900;color:#0b315f}.totales .sep{border-top:2px solid #0b315f}.cuentas{margin-top:12px;border-top:2px solid #0b315f;padding-top:10px}.cuentas h3{font-size:11px;font-weight:900;color:#0b315f;margin:0 0 6px}.cuentas-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.cuenta-box{border:1px solid #ddd;border-radius:4px;padding:6px 8px}.cuenta-box .banco{font-weight:900;font-size:10px;color:#0b315f;margin-bottom:3px}.cuenta-box p{margin:1px 0;font-size:9.5px}.anexo h3{font-size:10.5px;font-weight:900;margin:8px 0 4px;text-transform:uppercase}.anexo li{font-size:10.5px;color:#333;line-height:1.6}`;
 
+export { TAMANO_QR_PX };
+
+/**
+ * El QR como SVG en línea: los MISMOS tramos que dibuja el PDF del servidor (`matrizQr`,
+ * lib/qr-matriz.ts), sobre blanco y con su zona de silencio. Sin texto, sin pedir nada a la red.
+ */
+export function svgQr(m: MatrizQr, px: number): string {
+  const lado = m.tamano + 2 * SILENCIO_QR;
+  const d = m.tramos.map(([f, c, l]) => `M${c + SILENCIO_QR} ${f + SILENCIO_QR}h${l}v1h-${l}z`).join("");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${px}" height="${px}" viewBox="0 0 ${lado} ${lado}" shape-rendering="crispEdges" role="img" aria-label="QR"><rect width="${lado}" height="${lado}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+}
+
 const segHtml = (ss: Segmento[]): string => ss.map(x => (x.negrita ? `<b>${esc(x.texto)}</b>` : esc(x.texto))).join("");
 const filaHtml = (f: FilaDoc, attrs = ""): string => `<div class="box-row"${attrs}><b>${esc(f.rotulo)}</b> ${segHtml(f.segmentos)}</div>`;
 const cajaHtml = (c: CajaDoc): string => `<div class="box"><div class="box-title">${esc(c.titulo)}</div>${c.filas.map(f => filaHtml(f)).join("")}</div>`;
@@ -492,8 +517,15 @@ function htmlCorporativo(d: DocCorporativo): string {
   const li = (xs: string[]) => xs.map(i => `<li>${esc(i)}</li>`).join("");
   const vInc = listaVisible(p2.incluye, p2.omitirVacias), vNo = listaVisible(p2.noIncluye, p2.omitirVacias), vGen = listaVisible(p2.generales, p2.omitirVacias);
   // La política de reserva va al final y solo con líneas: sin ella, el HTML de siempre byte a byte.
+  // Con el resumen (cotizaciones-08): el resumen con el QR a la derecha y, debajo, el enlace a la
+  // política completa. Sin resumen o sin enlace, la política entera, como siempre.
   const vRes = reservaVisible(p2);
-  const reserva = vRes ? `<h3 style="color:${cp};border-bottom:2px solid ${cp};padding-bottom:3px;">${esc(p2.reserva.titulo)}</h3><ul>${li(p2.reserva.items)}</ul>` : "";
+  const tituloRes = vRes ? `<h3 style="color:${cp};border-bottom:2px solid ${cp};padding-bottom:3px;">${esc(p2.reserva.titulo)}</h3>` : "";
+  const en = p2.reserva.enlace;
+  const reserva = !vRes ? ""
+    : p2.reserva.modo === "resumen" && en
+      ? `${tituloRes}<div style="display:flex;gap:12px;align-items:flex-start;"><ul style="flex:1;min-width:0;margin-top:0;">${li(p2.reserva.items)}</ul>${en.qr ? `<div style="flex:0 0 auto;">${svgQr(en.qr, TAMANO_QR_PX)}</div>` : ""}</div><p style="margin:4px 0 0;font-size:10.5px;color:#333;line-height:1.6;">${esc(en.rotulo)} <a href="${esc(en.url)}" style="color:${cp};font-weight:700;overflow-wrap:anywhere;">${esc(en.url)}</a></p>`
+      : `${tituloRes}<ul>${li(p2.reserva.items)}</ul>`;
   const listas = vInc || vNo || vGen || vRes
     ? `<div class="anexo">${vInc || vNo ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">${vInc ? `<div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">${esc(p2.incluye.titulo)}</h3><ul>${li(p2.incluye.items)}</ul></div>` : ""}${vNo ? `<div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">${esc(p2.noIncluye.titulo)}</h3><ul>${li(p2.noIncluye.items)}</ul></div>` : ""}</div>` : ""}${vGen ? `<h3 style="color:${cp};border-bottom:2px solid ${cp};padding-bottom:3px;">${esc(p2.generales.titulo)}</h3><ul>${li(p2.generales.items)}</ul>` : ""}${reserva}</div>`
     : "";
@@ -505,6 +537,7 @@ function htmlCorporativo(d: DocCorporativo): string {
 /** Cómo nombra el aviso «tal cual» cada lista (las tres de siempre, como las escribía antes). */
 const NOMBRE_LISTA_AVISO: Record<keyof ConsidCot, string> = {
   incluye: "incluye", no_incluye: "no incluye", generales: "generales", reserva: "reserva, cambios y cancelación",
+  reserva_resumen: "resumen de la reserva",
 };
 
 /**
@@ -517,7 +550,7 @@ function textosDePlantilla(cfg: PlantillaPdfCfg | null | undefined, considFijada
   const out: string[] = [];
   if (String(cfg.titulo_documento ?? "").trim()) out.push("el título del documento");
   if (String(cfg.mensaje_cierre ?? "").trim()) out.push("el mensaje de cierre");
-  if (!considFijada && (cfg.condiciones_incluye?.length || cfg.condiciones_no_incluye?.length || cfg.condiciones_generales?.length || cfg.condiciones_reserva?.length)) out.push("las condiciones de la plantilla");
+  if (!considFijada && (cfg.condiciones_incluye?.length || cfg.condiciones_no_incluye?.length || cfg.condiciones_generales?.length || cfg.condiciones_reserva?.length || cfg.condiciones_reserva_resumen?.length)) out.push("las condiciones de la plantilla");
   return out;
 }
 

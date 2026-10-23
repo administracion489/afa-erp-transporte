@@ -45,9 +45,18 @@
 //    es OPCIONAL de punta a punta — sin la columna, con NULL o sin la clave en la fila, el snapshot no
 //    la lleva y el PDF no imprime nada, así que todo lo de antes sale byte a byte igual. Solo la
 //    imprime el diseño corporativo (`CAMPOS_POR_DISENO`, medido con centinelas como las demás).
+//
+// 8. SU RESUMEN (`condiciones_reserva_resumen` → `consideraciones_json.reserva_resumen`;
+//    supabase/cotizaciones-08, `SQL_RESUMEN_CONDICIONES`). Los 4-5 puntos de dinero que escribe una
+//    persona; el ERP no recorta la política. Se copia con la política y SOLO si la fila lleva líneas
+//    de política (un resumen sin política no resume nada), y siempre de la MISMA fuente que la
+//    política (la plantilla, o el respaldo si la plantilla no tiene política). El PDF lo imprime en
+//    lugar de la política solo con el enlace a las condiciones completas de la cotización
+//    (`politicaParaImprimir`); sin enlace, la política entera.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { CONSID_VERSION, DEFAULT_CONSID_ES, esConsidFijada, normalizarIdioma, type ConsidCot, type ConsidFila, type Idioma } from "./cotizacion-idioma";
+import { SQL_RESUMEN_CONDICIONES } from "./condiciones-publicas";
 import { normalizarMoneda } from "./cotizacion-moneda";
 import type { AvisoPdf, EntradaPdfCot, PlantillaPdfCfg } from "./cotizacion-pdf";
 
@@ -110,6 +119,9 @@ export const SQL_PLANTILLAS_USO = "supabase/cotizaciones-05-plantillas-uso.sql";
 
 /** El SQL que agrega `condiciones_reserva` (la política de reserva). Sin él, el editor lo nombra. */
 export const SQL_POLITICA_RESERVA = "supabase/cotizaciones-06-politica-reserva.sql";
+
+/** El SQL que agrega el resumen de la política y el token del enlace (vive en lib/condiciones-publicas.ts). */
+export { SQL_RESUMEN_CONDICIONES };
 
 export const TABLA_PLANTILLAS = "cotizacion_plantillas";
 export const TABLA_REGLAS = "cotizacion_plantilla_reglas";
@@ -307,6 +319,16 @@ const copia = (x: unknown): string[] => (Array.isArray(x) ? [...(x as string[])]
  */
 const reservaDe = (x: unknown, r: unknown): string[] | null => (Array.isArray(x) ? [...(x as string[])] : Array.isArray(r) ? [...(r as string[])] : null);
 
+/** ¿La lista tiene alguna línea que se imprima? */
+const conLineas = (l: readonly unknown[] | null | undefined): boolean => Array.isArray(l) && l.some(x => String(x ?? "").trim() !== "");
+
+/**
+ * El RESUMEN de la política (cotizaciones-08) que va con ella: de la MISMA fuente que la política
+ * (`deLaFuente`, la plantilla o el respaldo) y solo si la política tiene líneas. null = sin la clave.
+ */
+const resumenDe = (reserva: string[] | null, deLaFuente: unknown): string[] | null =>
+  conLineas(reserva) && Array.isArray(deLaFuente) ? [...(deLaFuente as string[])] : null;
+
 /**
  * Las condiciones que se COPIAN a la fila al crear o guardar una cotización con la plantilla `p`
  * (versión 2). Una lista NULL de la plantilla («sin condiciones propias») toma la de `respaldo`;
@@ -316,11 +338,14 @@ const reservaDe = (x: unknown, r: unknown): string[] | null => (Array.isArray(x)
 export function considSnapshot(p: PlantillaFila | null, respaldo: ConsidCot): ConsidFila {
   const de = (x: string[] | null | undefined, r: unknown): string[] => (Array.isArray(x) ? [...x] : copia(r));
   const reserva = reservaDe(p?.condiciones_reserva, respaldo?.reserva);
+  // El resumen sale de donde salió la política: la plantilla si la tiene, si no el respaldo.
+  const resumen = resumenDe(reserva, Array.isArray(p?.condiciones_reserva) ? p?.condiciones_reserva_resumen : respaldo?.reserva_resumen);
   return {
     incluye: de(p?.condiciones_incluye, respaldo?.incluye),
     no_incluye: de(p?.condiciones_no_incluye, respaldo?.no_incluye),
     generales: de(p?.condiciones_generales, respaldo?.generales),
     ...(reserva ? { reserva } : {}),
+    ...(resumen ? { reserva_resumen: resumen } : {}),
     version: CONSID_VERSION,
     plantilla: p?.id ?? null,
   };
@@ -336,25 +361,31 @@ export function considSnapshot(p: PlantillaFila | null, respaldo: ConsidCot): Co
  * `cfg` es la plantilla con la que se imprime hoy (`plantilla_pdf`, o la corporativa).
  */
 export function considParaFormulario(cfg: PlantillaPdfCfg | null, fila: ConsidFila | null, idioma: Idioma): ConsidFila {
-  // La política de reserva sigue la misma regla, y sin ninguna no se agrega la clave.
-  const conReserva = (r: string[] | null) => (r ? { reserva: r } : {});
+  // La política de reserva sigue la misma regla, y sin ninguna no se agrega la clave. Su resumen va
+  // con ella y SOLO de la fila (`considParaPdf` nunca imprime el de la plantilla): si gana la
+  // política de la plantilla, sin resumen.
+  const conReserva = (r: string[] | null, resumenFila: unknown) => {
+    const resumen = resumenDe(r, resumenFila);
+    return { ...(r ? { reserva: r } : {}), ...(resumen ? { reserva_resumen: resumen } : {}) };
+  };
   if (fila && esConsidFijada(fila)) {
     return {
       incluye: copia(fila.incluye), no_incluye: copia(fila.no_incluye), generales: copia(fila.generales),
-      ...conReserva(reservaDe(fila.reserva, null)),
+      ...conReserva(reservaDe(fila.reserva, null), fila.reserva_resumen),
       version: CONSID_VERSION, plantilla: typeof fila.plantilla === "string" ? fila.plantilla : null,
     };
   }
   const base: ConsidCot = fila ?? DEFAULT_CONSID_ES;
   if (normalizarIdioma(idioma) === "es") {
+    const ganaPlantilla = !!cfg?.condiciones_reserva;
     return {
       incluye: copia(cfg?.condiciones_incluye || base.incluye),
       no_incluye: copia(cfg?.condiciones_no_incluye || base.no_incluye),
       generales: copia(cfg?.condiciones_generales || base.generales),
-      ...conReserva(reservaDe(cfg?.condiciones_reserva, base.reserva)),
+      ...conReserva(reservaDe(cfg?.condiciones_reserva, base.reserva), ganaPlantilla ? null : base.reserva_resumen),
     };
   }
-  return { incluye: copia(base.incluye), no_incluye: copia(base.no_incluye), generales: copia(base.generales), ...conReserva(reservaDe(base.reserva, null)) };
+  return { incluye: copia(base.incluye), no_incluye: copia(base.no_incluye), generales: copia(base.generales), ...conReserva(reservaDe(base.reserva, null), base.reserva_resumen) };
 }
 
 /**
@@ -384,14 +415,17 @@ export function avisoCondicionesDeOtraPlantilla(
 // pantalla (el editor no deja agregar la línea 31 ni escribir el carácter 501) y una cotización de
 // traslado que los pasa no sale sola (`condiciones_demasiadas`, lib/traslados/envio-ia.ts).
 
-/** Líneas que puede tener una lista de condiciones (Incluye, No incluye, Consideraciones generales o la política de reserva). */
+/** Líneas que puede tener una lista de condiciones (Incluye, No incluye, Consideraciones generales, la política de reserva o su resumen). */
 export const MAX_LINEAS_CONDICIONES = 30;
 /** Caracteres que puede tener una línea de condiciones. */
 export const MAX_CARACTERES_CONDICION = 500;
 
-export type ListaConsid = "incluye" | "no_incluye" | "generales" | "reserva";
-/** Las listas de `consideraciones_json`, en el orden en que las imprime el PDF. */
-export const LISTAS_CONSID: readonly ListaConsid[] = ["incluye", "no_incluye", "generales", "reserva"];
+export type ListaConsid = "incluye" | "no_incluye" | "generales" | "reserva" | "reserva_resumen";
+/**
+ * Las listas de `consideraciones_json`, en el orden en que las imprime el PDF. El resumen va al final:
+ * se imprime en lugar de la política (con el enlace), así que cuenta para los topes como las demás.
+ */
+export const LISTAS_CONSID: readonly ListaConsid[] = ["incluye", "no_incluye", "generales", "reserva", "reserva_resumen"];
 
 /** El nombre de cada lista para las notas y los avisos (una sola definición). */
 export const ETIQUETA_LISTA_CONSID: Record<ListaConsid, string> = {
@@ -399,6 +433,7 @@ export const ETIQUETA_LISTA_CONSID: Record<ListaConsid, string> = {
   no_incluye: "No incluye",
   generales: "Consideraciones generales",
   reserva: "Reserva, cambios y cancelación",
+  reserva_resumen: "Resumen de la reserva, cambios y cancelación",
 };
 
 /** Las líneas de una lista como las imprime el PDF: texto, sin espacios de más, sin las vacías. */
@@ -410,7 +445,7 @@ export type ExcesoCondiciones = { lista: ListaConsid; motivo: "demasiadas_lineas
 
 /**
  * Qué listas de condiciones de una cotización (`consideraciones_json`: incluye, no incluye,
- * generales y la política de reserva) pasan de los topes, con cuántas líneas tienen o cuántos caracteres la línea más larga.
+ * generales, la política de reserva y su resumen) pasan de los topes, con cuántas líneas tienen o cuántos caracteres la línea más larga.
  * Vacío = caben. Se cuenta como imprime el PDF (sin las líneas vacías) y por caracteres completos.
  */
 export function excesoCondiciones(c: unknown): ExcesoCondiciones[] {
@@ -436,11 +471,11 @@ export type CampoPlantilla =
   | "titulo_documento" | "mensaje_cierre"
   | "color_primario" | "color_secundario" | "color_acento"
   | "condiciones_incluye" | "condiciones_no_incluye" | "condiciones_generales" | "condiciones_reserva"
-  | "cuentas" | "idioma";
+  | "condiciones_reserva_resumen" | "cuentas" | "idioma";
 
 export const CAMPOS_PLANTILLA: readonly CampoPlantilla[] = [
   "titulo_documento", "mensaje_cierre", "color_primario", "color_secundario", "color_acento",
-  "condiciones_incluye", "condiciones_no_incluye", "condiciones_generales", "condiciones_reserva", "cuentas", "idioma",
+  "condiciones_incluye", "condiciones_no_incluye", "condiciones_generales", "condiciones_reserva", "condiciones_reserva_resumen", "cuentas", "idioma",
 ];
 
 export const ETIQUETA_CAMPO: Record<CampoPlantilla, string> = {
@@ -453,6 +488,7 @@ export const ETIQUETA_CAMPO: Record<CampoPlantilla, string> = {
   condiciones_no_incluye: "No incluye",
   condiciones_generales: "Consideraciones generales",
   condiciones_reserva: "Reserva, cambios y cancelación",
+  condiciones_reserva_resumen: "Resumen de la reserva (con enlace a las condiciones completas)",
   cuentas: "Cuentas bancarias",
   idioma: "Idioma",
 };
@@ -463,12 +499,14 @@ export const ETIQUETA_CAMPO: Record<CampoPlantilla, string> = {
  * `mostrar_logo`, `mostrar_fotos_vehiculo`, `mostrar_itinerario`, `mostrar_precio_pax`,
  * `mostrar_sla`, la firma— no se ofrece. Detalles que la tabla no dice:
  *  · el corporativo tiene color fijo (`COLOR_CORPORATIVO`) y su título sale del diccionario; es el
- *    único que imprime la política de reserva (`condiciones_reserva`);
+ *    único que imprime la política de reserva (`condiciones_reserva`) y su resumen
+ *    (`condiciones_reserva_resumen`: se copia a la fila con la política y se imprime, en su lugar, solo
+ *    con el enlace a las condiciones completas — la matriz lo mide con un token y una base);
  *  · en el moderno, el color secundario solo se ve en el anexo del itinerario;
  *  · en inglés, título, cierre y condiciones de la plantilla no se imprimen en ningún diseño.
  */
 export const CAMPOS_POR_DISENO: Record<Diseno, readonly CampoPlantilla[]> = {
-  corporativo: ["condiciones_incluye", "condiciones_no_incluye", "condiciones_generales", "condiciones_reserva", "cuentas", "idioma"],
+  corporativo: ["condiciones_incluye", "condiciones_no_incluye", "condiciones_generales", "condiciones_reserva", "condiciones_reserva_resumen", "cuentas", "idioma"],
   moderno_fotos: ["color_primario", "color_secundario", "titulo_documento", "mensaje_cierre", "condiciones_incluye", "condiciones_no_incluye", "idioma"],
   turistico: ["color_primario", "color_secundario", "titulo_documento", "mensaje_cierre", "condiciones_incluye", "condiciones_no_incluye", "idioma"],
   ejecutivo: ["color_primario", "color_acento", "titulo_documento", "mensaje_cierre", "condiciones_incluye", "condiciones_no_incluye", "idioma"],

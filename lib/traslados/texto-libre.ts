@@ -218,7 +218,7 @@ export function motivosLineaIA(linea: string): MotivoTextoLibre[] {
  */
 export const MOTIVOS_CONDICION_REVISION: readonly MotivoTextoLibre[] = ["enlace", "numero_largo"];
 
-export type CondicionSospechosa = { lista: "incluye" | "no_incluye" | "generales" | "reserva"; linea: string; motivos: MotivoTextoLibre[] };
+export type CondicionSospechosa = { lista: "incluye" | "no_incluye" | "generales" | "reserva" | "reserva_resumen"; linea: string; motivos: MotivoTextoLibre[] };
 
 /**
  * Las líneas de las condiciones de una cotización (`consideraciones_json`) que la dejan para revisión
@@ -226,12 +226,14 @@ export type CondicionSospechosa = { lista: "incluye" | "no_incluye" | "generales
  * imprime el PDF (sin espacios de más ni vacías). Incluye la política de reserva, cambios y
  * cancelación (`reserva`): la IA la manda al cliente igual que las otras, así que un enlace o un
  * número de 6+ dígitos en ella (un teléfono, una cuenta) también la deja para revisión. Por eso la
- * política no lleva los datos de contacto: los añade el código desde el perfil de la empresa.
+ * política no lleva los datos de contacto: los añade el código desde el perfil de la empresa. Lo
+ * mismo su RESUMEN (`reserva_resumen`, cotizaciones-08): la IA lo manda en el PDF y en el WhatsApp. El
+ * ENLACE a las condiciones completas no es una línea: lo agrega el código, y no se juzga aquí.
  */
 export function condicionesSospechosas(c: unknown): CondicionSospechosa[] {
   const o = c && typeof c === "object" ? (c as Record<string, unknown>) : {};
   const out: CondicionSospechosa[] = [];
-  for (const lista of ["incluye", "no_incluye", "generales", "reserva"] as const) {
+  for (const lista of ["incluye", "no_incluye", "generales", "reserva", "reserva_resumen"] as const) {
     const ls = Array.isArray(o[lista]) ? (o[lista] as unknown[]).map(s => String(s ?? "").trim()).filter(Boolean) : [];
     for (const linea of ls) {
       const motivos = motivosLineaIA(linea).filter(m => MOTIVOS_CONDICION_REVISION.includes(m));

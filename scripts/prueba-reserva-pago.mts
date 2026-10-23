@@ -19,7 +19,7 @@ import {
   horasDeAnticipacion, marcaCargoReserva, mensajeAdelantoIncompleto, mensajeCanceladaSinPago, mensajeCancelacionRegistrada,
   mensajeCancelacionResuelta, mensajeComprobanteRecibido, mensajeDisponibilidadPrimero, mensajeGuardaReserva,
   mensajeHayUnidad, mensajePagoNoEncontrado, mensajePedirPago, mensajePoliticas, mensajeSinUnidad, normalizarConfigReserva,
-  politicaContradiceConfig, puedePasar, queFalta, textoPlazoMinutos,
+  politicaContradiceConfig, puedePasar, queFalta, textoPlazoMinutos, bloqueCondicionesAntesDePagar,
   cargoEditable, juzgarCargo, mismaReferencia, observacionesConMarca, patchCargoRecalculado, referenciaComprobante,
   type EstadoSolicitud, type FacturaCargoActual, type PagoSolicitud, type SolicitudVista,
 } from "../lib/traslados/reserva-pago";
@@ -30,6 +30,8 @@ import type { EstiloMensajes } from "../lib/crm-ia-ajustes";
 import type { PerfilEmpresa } from "../lib/empresa-perfil";
 import { correoReserva, destinatariosReserva, enlaceConversacion } from "../lib/traslados/reserva-correo";
 import { cotejarComprobante, leerRespuestaComprobante } from "../lib/traslados/comprobante-pago";
+import { describirAtencion } from "../lib/crm-ia-atencion";
+import { enlaceCondiciones } from "../lib/condiciones-publicas";
 
 let ok = 0, mal = 0;
 const fallas: string[] = [];
@@ -381,6 +383,81 @@ const empresa: PerfilEmpresa = {
   t("T8 sin políticas → null", mensajePoliticas({ numero: "1", lineas: [" ", ""], email: null, estilo: USTED }) === null);
   t("T10 con y sin número", u.T10.endsWith("cotización N° 00736?") && mensajeGuardaReserva(null, USTED).endsWith("¿Desea reservar su traslado?"));
   t("textoPlazoMinutos", textoPlazoMinutos(120) === "2 horas" && textoPlazoMinutos(90) === "1 hora y 30 minutos" && textoPlazoMinutos(45) === "45 minutos" && textoPlazoMinutos(61) === "1 hora y 1 minuto");
+}
+
+// ── 10b. Las condiciones antes de pagar: el resumen y el enlace (cotizaciones-08) ──
+// T1, T4 «pedir» / «incompleto» y T8, en tres casos: resumen + enlace, solo el enlace, ninguno. Sin
+// enlace válido, el texto de SIEMPRE: se compara contra las funciones viejas copiadas literal.
+{
+  const cuentas = cuentasEnMensaje(null, empresa, "PEN").lineas;
+  const at = { activa: true, dias: [1, 2, 3, 4, 5, 6], desde: "09:00", hasta: "18:00" };
+  const bloque = { numero: "00736", moneda: "PEN" as const, pct: 50, adelanto: 88.5, saldo: 88.5, cuentas };
+  const ENL = enlaceCondiciones("https://www.ejemplo.pe", "123e4567-e89b-12d3-a456-426614174000")!;
+  const RES = ["Adelanto del 50 % para reservar.", "  Cancelación gratis con 24 h o más.  ", "", "No presentarse: se cobra el 50 %."];
+  const POL = ["Política uno.", "Política dos.", "Política tres."];
+  const esTu = (e: EstiloMensajes) => e.tratamiento === "tu";
+  // Las funciones de ANTES, copiadas literal (lib/traslados/reserva-pago.ts antes de cotizaciones-08).
+  const viejoT1 = (x: typeof bloque & { plazoMin: number; atencion: any; estilo: EstiloMensajes }) => {
+    const plazo = textoPlazoMinutos(x.plazoMin);
+    const horario = describirAtencion(x.atencion);
+    return esTu(x.estilo)
+      ? `${bloquePago(x, x.estilo)}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante. Lo verificamos con el banco y te confirmamos la disponibilidad de la unidad en un máximo de ${plazo} dentro de nuestro horario de atención (${horario}). Si no hubiera una unidad disponible, te devolvemos el 100 % de lo pagado. Si deseas, te envío nuestras políticas de reserva, cambios y cancelación.`
+      : `${bloquePago(x, x.estilo)}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante. Lo verificamos con el banco y le confirmamos la disponibilidad de la unidad en un máximo de ${plazo} dentro de nuestro horario de atención (${horario}). Si no hubiera una unidad disponible, le devolvemos el 100 % de lo pagado. Si desea, le envío nuestras políticas de reserva, cambios y cancelación.`;
+  };
+  const viejoT8 = (x: { numero: string; lineas: string[]; email: string | null; estilo: EstiloMensajes }) => {
+    const lineas = x.lineas.map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+    const lista = lineas.map((l) => `• ${l}`).join("\n");
+    return esTu(x.estilo)
+      ? `Estas son nuestras políticas de reserva, cambios y cancelación (las mismas de tu cotización N° ${x.numero}):\n${lista}\nPara cancelar o cambiar tu reserva, escríbenos por este mismo chat${x.email ? ` o al correo ${x.email}` : ""}.`
+      : `Estas son nuestras políticas de reserva, cambios y cancelación (las mismas de su cotización N° ${x.numero}):\n${lista}\nPara cancelar o cambiar su reserva, escríbanos por este mismo chat${x.email ? ` o al correo ${x.email}` : ""}.`;
+  };
+  const hay = (pago: "pedir" | "incompleto", e: EstiloMensajes, condiciones?: any) =>
+    mensajeHayUnidad({ fecha: "2026-10-25", hora: "10:00", origen: "Aeropuerto", destino: "Miraflores", pago, moneda: "PEN", cobrado: pago === "incompleto" ? 50 : 0, bloque, estilo: e, ...(condiciones !== undefined ? { condiciones } : {}) });
+  const SIN_ENLACE: unknown[] = [undefined, null, {}, { resumen: RES }, { resumen: RES, enlace: null }, { resumen: RES, enlace: "" }, { resumen: RES, enlace: "https://otro.pe/condiciones/x" }, { resumen: RES, enlace: `${ENL}/` }, { enlace: "http://www.ejemplo.pe/condiciones/123e4567-e89b-12d3-a456-426614174000" }];
+  for (const e of [USTED, TU]) {
+    const n = esTu(e) ? "tú" : "usted";
+    const t1 = (condiciones?: any) => mensajePedirPago({ ...bloque, plazoMin: 120, atencion: at, estilo: e, ...(condiciones !== undefined ? { condiciones } : {}) });
+    const viejo1 = viejoT1({ ...bloque, plazoMin: 120, atencion: at, estilo: e });
+    // (1) Ninguno (sin enlace válido): el texto de siempre, byte a byte.
+    for (const c of SIN_ENLACE) {
+      t(`T1 ${n} sin enlace (${JSON.stringify(c)}): el texto de siempre`, t1(c) === viejo1);
+      t(`T4 pedir ${n} sin enlace (${JSON.stringify(c)}): el de siempre`, hay("pedir", e, c) === hay("pedir", e));
+      t(`T4 incompleto ${n} sin enlace (${JSON.stringify(c)}): el de siempre`, hay("incompleto", e, c) === hay("incompleto", e));
+      t(`T8 ${n} sin enlace (${JSON.stringify(c)}): el de siempre`, mensajePoliticas({ numero: "00736", lineas: POL, email: "reservas@ejemplo.pe", estilo: e, ...(c as any ?? {}) }) === viejoT8({ numero: "00736", lineas: POL, email: "reservas@ejemplo.pe", estilo: e }));
+    }
+    t(`T1 ${n} sin el parámetro: el de siempre`, t1() === viejo1);
+    // (2) Resumen + enlace.
+    const c2 = { resumen: RES, enlace: ENL };
+    const b2 = `Antes de pagar, lo principal de nuestras condiciones:\n• Adelanto del 50 % para reservar.\n• Cancelación gratis con 24 h o más.\n• No presentarse: se cobra el 50 %.\nCondiciones completas: ${ENL}`;
+    t(`bloque ${n} con resumen`, bloqueCondicionesAntesDePagar(c2, e) === b2);
+    const cierre = esTu(e) ? " Si deseas, te envío nuestras políticas de reserva, cambios y cancelación." : " Si desea, le envío nuestras políticas de reserva, cambios y cancelación.";
+    t(`T1 ${n} con resumen: el bloque en lugar de ofrecer las políticas`, t1(c2) === viejo1.slice(0, -cierre.length) + `\n${b2}` && !t1(c2).includes("le envío nuestras políticas") && !t1(c2).includes("te envío nuestras políticas"));
+    t(`T4 pedir ${n} con resumen: el bloque al final`, hay("pedir", e, c2) === `${hay("pedir", e)}\n${b2}`);
+    t(`T4 incompleto ${n} con resumen: el bloque al final`, hay("incompleto", e, c2) === `${hay("incompleto", e)}\n${b2}`);
+    const t8 = mensajePoliticas({ numero: "00736", lineas: POL, email: "reservas@ejemplo.pe", estilo: e, resumen: RES, enlace: ENL })!;
+    t(`T8 ${n} con resumen: el resumen y el enlace, sin la política entera`, t8.includes("• Adelanto del 50 % para reservar.\n• Cancelación gratis con 24 h o más.\n• No presentarse: se cobra el 50 %.") && t8.includes(`están aquí: ${ENL}`) && !POL.some((l) => t8.includes(l)) && t8.endsWith("o al correo reservas@ejemplo.pe."));
+    t(`T8 ${n} con resumen y sin política: null (no se manda un resumen sin política)`, mensajePoliticas({ numero: "1", lineas: [], email: null, estilo: e, resumen: RES, enlace: ENL }) === null);
+    // (3) Solo el enlace (sin resumen).
+    for (const c3 of [{ enlace: ENL }, { resumen: [], enlace: ENL }, { resumen: ["", " "], enlace: ENL }, { resumen: null, enlace: ENL }]) {
+      const linea = esTu(e) ? `Antes de pagar, revisa nuestras condiciones de reserva, cambios y cancelación: ${ENL}` : `Antes de pagar, revise nuestras condiciones de reserva, cambios y cancelación: ${ENL}`;
+      t(`bloque ${n} solo enlace (${JSON.stringify(c3.resumen)})`, bloqueCondicionesAntesDePagar(c3, e) === linea);
+      t(`T1 ${n} solo enlace: la línea del enlace en lugar de ofrecer las políticas`, t1(c3) === viejo1.slice(0, -cierre.length) + `\n${linea}`);
+      t(`T4 pedir ${n} solo enlace`, hay("pedir", e, c3) === `${hay("pedir", e)}\n${linea}`);
+      t(`T8 ${n} solo enlace: la política entera, como siempre`, mensajePoliticas({ numero: "00736", lineas: POL, email: null, estilo: e, ...c3 }) === viejoT8({ numero: "00736", lineas: POL, email: null, estilo: e }));
+    }
+  }
+  // Los textos con enlace siguen sin tutear / sin «usted» cruzados.
+  const palabra = (xs: string[]) => new RegExp(`(?<![\\p{L}\\p{N}])(?:${xs.join("|")})(?![\\p{L}\\p{N}])`, "iu");
+  const DE_TU = palabra(["tú", "tu", "tus", "te", "ti", "puedes", "deseas", "hayas", "envíanos", "escríbenos", "revisa"]);
+  const DE_USTED = palabra(["usted", "su", "sus", "le", "puede", "desea", "haya", "envíenos", "escríbanos", "revise"]);
+  const cs = [{ resumen: RES, enlace: ENL }, { enlace: ENL }];
+  for (const c of cs) {
+    const u = [mensajePedirPago({ ...bloque, plazoMin: 120, atencion: at, estilo: USTED, condiciones: c }), hay("pedir", USTED, c), mensajePoliticas({ numero: "1", lineas: POL, email: null, estilo: USTED, ...c })!];
+    const tt = [mensajePedirPago({ ...bloque, plazoMin: 120, atencion: at, estilo: TU, condiciones: c }), hay("pedir", TU, c), mensajePoliticas({ numero: "1", lineas: POL, email: null, estilo: TU, ...c })!];
+    t(`con ${c.resumen ? "resumen" : "solo enlace"}: de usted no tutea`, u.every((x) => !DE_TU.test(x)));
+    t(`con ${c.resumen ? "resumen" : "solo enlace"}: de tú no dice usted`, tt.every((x) => !DE_USTED.test(x)));
+  }
+  t("sin literales de la empresa en el bloque", !/afa|transportesafa/i.test(bloqueCondicionesAntesDePagar({ resumen: RES, enlace: ENL }, USTED)!.replace(ENL, "")));
 }
 
 // ── 11. El correo interno ────────────────────────────────────────────────────

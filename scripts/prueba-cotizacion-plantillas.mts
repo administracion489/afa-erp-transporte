@@ -337,6 +337,16 @@ console.log("9. CAMPOS_POR_DISENO contra el HTML (valores centinela)");
     condiciones_generales: lista("condiciones_generales"),
     // La política de reserva (cotizaciones-06): solo la imprime la corporativa.
     condiciones_reserva: lista("condiciones_reserva"),
+    // Su resumen (cotizaciones-08): se copia a la fila CON la política y se imprime en su lugar solo
+    // con el enlace a las condiciones completas, así que se mide con política, un token y una base.
+    condiciones_reserva_resumen: d => {
+      const enlaceCondiciones = "https://www.ejemplo.pe/condiciones/123e4567-e89b-12d3-a456-426614174000";
+      const POL_C = ["POLITICA CENTINELA"];
+      return cambia(
+        { plantilla: d, cfg: null, consid: P.considSnapshot(PL("p", { condiciones_reserva: POL_C }), DEFAULT_CONSID_ES), enlaceCondiciones },
+        { plantilla: d, cfg: null, consid: P.considSnapshot(PL("p", { condiciones_reserva: POL_C, condiciones_reserva_resumen: ["LISTA CENTINELA"] }), DEFAULT_CONSID_ES), enlaceCondiciones },
+      );
+    },
     // Las cuentas: las propias de la plantilla (sin cuentas en la empresa) o apagarlas (con cuentas en la empresa).
     cuentas: d => cambia({ plantilla: d, cfg: {} }, { plantilla: d, cfg: { usar_bancos_propios: true, banco_1_nombre: "BANCO CENTINELA", banco_1_cuenta: "111", banco_1_cci: "" } })
       || cambia({ plantilla: d, cfg: {}, empresa: EMP_CON_CUENTAS }, { plantilla: d, cfg: { mostrar_cuentas_bancarias: false }, empresa: EMP_CON_CUENTAS }),
@@ -552,9 +562,63 @@ console.log("15. La política de reserva, cambios y cancelación (cotizaciones-0
   ok(J(P.excesoCondiciones({ ...resp, reserva: muchas })) === J([{ lista: "reserva", motivo: "demasiadas_lineas", n: muchas.length }]), "31 líneas en la política → exceso de la lista «reserva»");
   ok(J(P.excesoCondiciones({ ...resp, reserva: ["x".repeat(P.MAX_CARACTERES_CONDICION + 1)] })) === J([{ lista: "reserva", motivo: "linea_larga", n: P.MAX_CARACTERES_CONDICION + 1 }]), "una línea de 501 caracteres en la política → exceso");
   ok(P.excesoCondiciones({ ...resp, reserva: Array.from({ length: P.MAX_LINEAS_CONDICIONES }, () => "ok") }).length === 0 && P.excesoCondiciones(resp).length === 0, "30 líneas o sin la clave: caben");
-  ok(J([...P.LISTAS_CONSID]) === J(["incluye", "no_incluye", "generales", "reserva"]) && J(Object.keys(P.ETIQUETA_LISTA_CONSID).sort()) === J([...P.LISTAS_CONSID].sort()), "LISTAS_CONSID en el orden del PDF y con su etiqueta");
+  ok(J([...P.LISTAS_CONSID]) === J(["incluye", "no_incluye", "generales", "reserva", "reserva_resumen"]) && J(Object.keys(P.ETIQUETA_LISTA_CONSID).sort()) === J([...P.LISTAS_CONSID].sort()), "LISTAS_CONSID en el orden del PDF (el resumen al final) y con su etiqueta");
   ok(P.leeCampo("corporativo", "condiciones_reserva") && P.DISENOS.filter(d => P.leeCampo(d, "condiciones_reserva")).length === 1, "solo la corporativa ofrece la política");
   ok(P.SQL_POLITICA_RESERVA === "supabase/cotizaciones-06-politica-reserva.sql", "el SQL que se nombra");
+}
+
+console.log("16. El resumen de la política (cotizaciones-08): se copia con ella y de la misma fuente");
+{
+  const POL = ["Se confirma con el 50 % de adelanto.", "Cancelación con 24 horas o más: sin costo."];
+  const RES = ["Adelanto del 50 %.", "Gratis con 24 h."];
+  const resp: ConsidCot = { incluye: ["R inc"], no_incluye: ["R no"], generales: ["R gen"] };
+  const ENL = "https://www.ejemplo.pe/condiciones/123e4567-e89b-12d3-a456-426614174000";
+  // (a) considSnapshot.
+  const s1 = P.considSnapshot(PL("p1", { condiciones_reserva: POL, condiciones_reserva_resumen: RES }), resp);
+  ok(J(s1) === J({ ...resp, reserva: POL, reserva_resumen: RES, version: 2, plantilla: "p1" }) && s1.reserva_resumen !== RES, `con política y resumen: los dos (una copia) (${J(s1)})`);
+  ok(!("reserva_resumen" in P.considSnapshot(PL("p2", { condiciones_reserva: POL, condiciones_reserva_resumen: null }), resp)), "resumen NULL: sin la clave (la política va entera)");
+  ok(J(P.considSnapshot(PL("p2b", { condiciones_reserva: POL, condiciones_reserva_resumen: [] }), resp).reserva_resumen) === "[]", "resumen vacío en la plantilla: una lista vacía");
+  for (const [n, pl] of [
+    ["sin política (null)", PL("p3", { condiciones_reserva: null, condiciones_reserva_resumen: RES })],
+    ["política vacía", PL("p4", { condiciones_reserva: [], condiciones_reserva_resumen: RES })],
+    ["política en blanco", PL("p5", { condiciones_reserva: ["", "  "], condiciones_reserva_resumen: RES })],
+    ["sin la columna", PL("p6", { condiciones_reserva_resumen: RES })],
+  ] as const) ok(!("reserva_resumen" in P.considSnapshot(pl, resp)), `${n}: el resumen NO se copia (sin política no resume nada)`);
+  // La misma fuente: la plantilla sin política toma la del respaldo CON su resumen, nunca el suyo.
+  const conResp = { ...resp, reserva: ["DEL RESPALDO"], reserva_resumen: ["RESUMEN DEL RESPALDO"] };
+  const s2 = P.considSnapshot(PL("p7", { condiciones_reserva: null, condiciones_reserva_resumen: ["RESUMEN PROPIO"] }), conResp);
+  ok(J(s2.reserva) === J(["DEL RESPALDO"]) && J(s2.reserva_resumen) === J(["RESUMEN DEL RESPALDO"]), "sin política propia: la del respaldo y SU resumen");
+  const s3 = P.considSnapshot(PL("p8", { condiciones_reserva: POL }), conResp);
+  ok(J(s3.reserva) === J(POL) && !("reserva_resumen" in s3), "con política propia y sin resumen propio: no se cuela el del respaldo");
+  // (b) considParaFormulario: el resumen sale de la fila y solo con la política de la fila.
+  const v2 = { ...resp, reserva: POL, reserva_resumen: RES, version: 2, plantilla: "corporativo" };
+  ok(J(P.considParaFormulario({ condiciones_reserva: ["P"], condiciones_reserva_resumen: ["PR"] }, v2, "es").reserva_resumen) === J(RES), "fila fijada: el de la fila");
+  ok(!("reserva_resumen" in P.considParaFormulario({ condiciones_reserva: ["P"], condiciones_reserva_resumen: ["PR"] }, { ...resp, reserva: POL, reserva_resumen: RES }, "es")), "fila de antes, gana la política de la plantilla: sin resumen");
+  ok(J(P.considParaFormulario({ condiciones_reserva_resumen: ["PR"] }, { ...resp, reserva: POL, reserva_resumen: RES }, "es").reserva_resumen) === J(RES), "fila de antes, la plantilla sin política: el de la fila");
+  ok(J(P.considParaFormulario({ condiciones_reserva: ["P"] }, { ...resp, reserva: POL, reserva_resumen: RES }, "en").reserva_resumen) === J(RES), "en inglés: el de la fila");
+  ok(!("reserva_resumen" in P.considParaFormulario(null, { ...resp, reserva_resumen: RES }, "es")), "sin política: sin resumen");
+  // (c) EL CICLO CON EL ENLACE: abrir y guardar en versión 2 imprime el MISMO HTML, también con el resumen.
+  const cfgs: Any[] = [null, {}, { condiciones_reserva: ["P1"] }, { condiciones_reserva: ["P1"], condiciones_reserva_resumen: ["PR1"] }, { condiciones_reserva_resumen: ["PR1"] }, { condiciones_reserva: [] }];
+  const filas: (Any | null)[] = [null, DEFAULT_CONSID_ES, { ...resp, reserva: ["F1"] }, { ...resp, reserva: ["F1"], reserva_resumen: ["FR1"] }, { ...resp, reserva_resumen: ["FR1"] },
+    P.considSnapshot(PL("corporativo", { condiciones_reserva: POL, condiciones_reserva_resumen: RES }), DEFAULT_CONSID_ES)];
+  let n = 0, iguales = 0, conResumen = 0;
+  for (const cfg of cfgs) for (const fila of filas) for (const idioma of ["es", "en"] as const) for (const d of P.DISENOS) for (const enlaceCondiciones of [undefined, ENL]) {
+    n++;
+    const form = P.considParaFormulario(cfg, fila, idioma);
+    const guardada = { ...form, version: P.CONSID_VERSION, plantilla: "cualquiera" };
+    const h1 = doc({ consid: fila ?? undefined, cfg, plantilla: d, idioma, enlaceCondiciones }).html!;
+    const h2 = doc({ consid: guardada, cfg, plantilla: d, idioma, enlaceCondiciones }).html!;
+    if (h1.includes("Condiciones completas") || h1.includes("Full booking")) conResumen++;
+    if (h1 === h2) iguales++; else if (n - iguales <= 2) console.log(`    html ${d} cfg=${J(cfg)} fila=${J(fila)} ${idioma} enlace=${!!enlaceCondiciones} difiere`);
+  }
+  ok(iguales === n, `ciclo con el resumen y el enlace: HTML idéntico ${iguales}/${n}`);
+  ok(conResumen > 0, `corolario: el ciclo sí imprime resúmenes (${conResumen})`);
+  // (d) Cuenta para el exceso, con su nombre.
+  const muchas = Array.from({ length: P.MAX_LINEAS_CONDICIONES + 1 }, (_, i) => `Punto ${i + 1}`);
+  ok(J(P.excesoCondiciones({ ...resp, reserva: POL, reserva_resumen: muchas })) === J([{ lista: "reserva_resumen", motivo: "demasiadas_lineas", n: muchas.length }]), "31 puntos en el resumen → exceso de «reserva_resumen»");
+  ok(P.ETIQUETA_LISTA_CONSID.reserva_resumen === "Resumen de la reserva, cambios y cancelación", "su nombre en las notas");
+  ok(P.leeCampo("corporativo", "condiciones_reserva_resumen") && P.DISENOS.filter(d => P.leeCampo(d, "condiciones_reserva_resumen")).length === 1, "solo la corporativa ofrece el resumen");
+  ok(P.SQL_RESUMEN_CONDICIONES === "supabase/cotizaciones-08-resumen-condiciones.sql", "el SQL que se nombra");
 }
 
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
