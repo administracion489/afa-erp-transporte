@@ -4,7 +4,9 @@
 -- «todavía no tiene reservas» y los dos las creaban: la reserva quedaba DUPLICADA en Programación.
 --   · cotizaciones.conversion_hasta: quien convierte la toma por unos segundos (con la hora del SERVIDOR, no la del
 --     navegador) y la suelta al terminar. Si la conversión muere a mitad, vence sola.
---   · fn_cotizacion_reclamar_conversion(id, segundos) → {estado: tomado | ocupado | sin_permiso | no_existe, hasta}.
+--   · fn_cotizacion_reclamar_conversion(id, segundos) → {estado: tomado | ocupado | no_tomado | no_existe, hasta}.
+--     «no_tomado»: la fila se ve libre pero no se pudo escribir (otra conversión la tomó en ese mismo instante, o la
+--     sesión no puede editar la cotización). En los dos casos no se crea nada.
 --   · fn_cotizacion_soltar_conversion(id, hasta) → la suelta solo si sigue siendo la suya.
 -- Un candado de más de 15 minutos no es de nadie (nadie lo pide tan largo): se puede volver a tomar.
 -- Sin este SQL todo funciona como antes (sin candado) y la pantalla lo dice al convertir.
@@ -34,7 +36,7 @@ returns jsonb language sql volatile security invoker set search_path = public, p
     when (select a.conversion_hasta from actual a) is null
       or (select a.conversion_hasta from actual a) < now()
       or (select a.conversion_hasta from actual a) > now() + interval '15 minutes'
-      then jsonb_build_object('estado', 'sin_permiso')
+      then jsonb_build_object('estado', 'no_tomado')
     else jsonb_build_object('estado', 'ocupado')
   end;
 $$;

@@ -488,7 +488,12 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     t("9e: emitido y ahora corresponde menos → no se toca y pide la nota de crédito", rE.ok && rE.codigo === "ajustar_emitido" && !!rE.aviso && rE.aviso.includes("nota de crédito por S/ 2.00") && Math.abs(deCot()[0].total - ret2) < 0.01);
     const v3 = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
     t("9e: la tarjeta lo dice: ajustar_cargo para Facturación", v3.pendientes.some((p) => p.codigo === "ajustar_cargo" && p.quien === "facturacion" && p.detalle.includes("F001-25")));
-    sb.t("facturas").push({ id: ++sb.n, cotizacion_id: e.cotId, es_nota_credito: true, nota_credito_ref: "F001-25", subtotal: 2, igv: 0, total: 2, estado: "emitida", numero: "00003", serie: "FC01" });
+    // Una «nota de crédito» sin número, pendiente en SUNAT (o puesta a mano) NO apaga lo que falta.
+    sb.t("facturas").push({ id: ++sb.n, cotizacion_id: e.cotId, cliente_id: c2[0].cliente_id, moneda: "PEN", es_nota_credito: true, nota_credito_ref: "F001-25", subtotal: 2, igv: 0, total: 2, estado: "pendiente", sunat_estado: "pendiente", numero: null, serie: "FC01" });
+    sb.t("facturas").push({ id: ++sb.n, cotizacion_id: e.cotId, cliente_id: 999, moneda: "PEN", es_nota_credito: true, nota_credito_ref: "F001-25", subtotal: 2, igv: 0, total: 2, estado: "emitida", sunat_estado: "aceptada", numero: "00009", serie: "FC01" });
+    const rFalsa = await D.asegurarComprobanteCargo(sb, s.id, deps);
+    t("9e: una nota sin número o de OTRO cliente no cuenta: sigue pidiendo la nota de crédito", rFalsa.codigo === "ajustar_emitido");
+    sb.t("facturas").push({ id: ++sb.n, cotizacion_id: e.cotId, cliente_id: c2[0].cliente_id, moneda: "PEN", es_nota_credito: true, nota_credito_ref: "F001-25", subtotal: 2, igv: 0, total: 2, estado: "emitida", sunat_estado: "aceptada", numero: "00003", serie: "FC01" });
     const rN = await D.asegurarComprobanteCargo(sb, s.id, deps);
     const v4 = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
     t("9e: con la nota de crédito hecha, el cargo queda al día y deja de pedirse", rN.codigo === "al_dia" && !rN.aviso && !v4.pendientes.some((p) => p.codigo === "ajustar_cargo" || p.codigo === "emitir_cargo"));

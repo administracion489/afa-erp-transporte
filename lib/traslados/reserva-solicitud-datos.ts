@@ -1154,11 +1154,11 @@ async function leerHechos(sb: Sb, s: FilaSolicitud): Promise<Hechos> {
   const comprobantes = await comprobantesDe(sb, s.id);
   let cargo: Hechos["cargo"] = null;
   if (s.factura_cargo_id) {
-    const { data, error } = await sb.from("facturas").select("id, serie, numero, total, estado, sunat_estado").eq("id", s.factura_cargo_id).maybeSingle();
+    const { data, error } = await sb.from("facturas").select("id, serie, numero, total, estado, sunat_estado, cliente_id, moneda").eq("id", s.factura_cargo_id).maybeSingle();
     if (error) avisos.push(crudo("No se pudo leer el comprobante del cargo", error));
     else if (data) {
       const base = { id: Number(data.id), serie: data.serie ?? null, numero: data.numero ?? null, total: num(data.total), estado: data.estado ?? null, sunat_estado: data.sunat_estado ?? null };
-      cargo = { ...base, notasCredito: cargoEditable(base) ? 0 : await notasCreditoDe(sb, base) };
+      cargo = { ...base, notasCredito: cargoEditable(base) ? 0 : await notasCreditoDe(sb, { ...base, cliente_id: data.cliente_id, moneda: data.moneda }) };
     }
   }
   let versiones: Hechos["versiones"] = [];
@@ -1569,7 +1569,7 @@ export async function resolverCancelacion(sb: Sb, c: Cadena, quien: Quien, pctPe
 }
 
 /** Las columnas del comprobante del cargo que se leen para juzgarlo. */
-const COLS_CARGO = "id, cotizacion_id, serie, numero, subtotal, igv, total, estado, sunat_estado, observaciones, items_json";
+const COLS_CARGO = "id, cotizacion_id, cliente_id, moneda, serie, numero, subtotal, igv, total, estado, sunat_estado, observaciones, items_json";
 
 /**
  * El comprobante del cargo de la solicitud, del dato más fuerte al más débil: el enlace de la
@@ -1577,7 +1577,7 @@ const COLS_CARGO = "id, cotizacion_id, serie, numero, subtotal, igv, total, esta
  * reservas-09d, que solo escribe el servidor) → y SOLO sin esa columna (una base sin 09d), la marca
  * en las observaciones (no anulada). Uno de otra cotización no es suyo. LANZA si no se puede leer.
  */
-async function cargoDeSolicitud(sb: Sb, s: FilaSolicitud, cotId: number): Promise<{ fila: FacturaCargoActual & { cotizacion_id?: number | null }; por: "enlace" | "columna" | "marca" } | { fila: null; conColumna: boolean }> {
+async function cargoDeSolicitud(sb: Sb, s: FilaSolicitud, cotId: number): Promise<{ fila: FacturaCargoActual & { cotizacion_id?: number | null; cliente_id?: unknown; moneda?: unknown }; por: "enlace" | "columna" | "marca" } | { fila: null; conColumna: boolean }> {
   const deEstaCotizacion = (f: { cotizacion_id?: number | null } | null) => !!f && (f.cotizacion_id == null || Number(f.cotizacion_id) === Number(cotId));
   if (s.factura_cargo_id) {
     const { data, error } = await sb.from("facturas").select(COLS_CARGO).eq("id", s.factura_cargo_id).maybeSingle();
@@ -1588,7 +1588,7 @@ async function cargoDeSolicitud(sb: Sb, s: FilaSolicitud, cotId: number): Promis
   if (col.error && !faltaColumna(col.error, "reserva_solicitud_id")) throw new Error(`No se pudo buscar el comprobante del cargo: ${col.error.message}`);
   const conColumna = !col.error;
   if (conColumna) {
-    const f = ((col.data ?? []) as (FacturaCargoActual & { cotizacion_id?: number | null })[]).find(deEstaCotizacion);
+    const f = ((col.data ?? []) as (FacturaCargoActual & { cotizacion_id?: number | null; cliente_id?: unknown; moneda?: unknown })[]).find(deEstaCotizacion);
     return f ? { fila: f, por: "columna" } : { fila: null, conColumna };
   }
   const marca = `${marcaCargoReserva(s.id)}:`;
@@ -1597,17 +1597,26 @@ async function cargoDeSolicitud(sb: Sb, s: FilaSolicitud, cotId: number): Promis
   return (previa ?? []).length ? { fila: previa[0], por: "marca" } : { fila: null, conColumna };
 }
 
-/** Lo que ya restan las notas de crédito vivas que referencian este comprobante («F001-25»). Best-effort: 0 si no se pueden leer. */
-async function notasCreditoDe(sb: Sb, f: Pick<FacturaCargoActual, "id" | "serie" | "numero">): Promise<number> {
+/**
+ * Lo que ya restan las notas de crédito que referencian este comprobante («F001-25»). Solo cuentan
+ * las EMITIDAS de verdad: con número, aceptadas por SUNAT, no anuladas, del MISMO cliente y en la
+ * MISMA moneda que el cargo (una pendiente, una que SUNAT rechazó, o una fila puesta a mano sin
+ * número no apaga lo que falta: auditoría del 23-10-2026). Best-effort: 0 si no se pueden leer.
+ */
+async function notasCreditoDe(sb: Sb, f: Pick<FacturaCargoActual, "id" | "serie" | "numero"> & { cliente_id?: unknown; moneda?: unknown }): Promise<number> {
   const numero = String(f.numero ?? "").trim();
   if (!numero) return 0;
   try {
-    const patron = `%${numero.replace(/^0+(?=\d)/, "").replace(/[%_\\]/g, "")}%`;
-    const { data, error } = await sb.from("facturas").select("id, total, estado, nota_credito_ref").eq("es_nota_credito", true).ilike("nota_credito_ref", patron).limit(50);
+    const patron = `%${numero.replace(/^0+(?=\d)/, "").replace(/[%_\\]/g, "").slice(0, 20)}%`;
+    const { data, error } = await sb.from("facturas").select("id, total, estado, sunat_estado, numero, cliente_id, moneda, nota_credito_ref")
+      .eq("es_nota_credito", true).ilike("nota_credito_ref", patron).limit(50);
     if (error) return 0;
+    const mon = normalizarMoneda(f.moneda as string | null | undefined);
     let suma = 0;
-    for (const n of (data ?? []) as { id: number; total: unknown; estado: unknown; nota_credito_ref: unknown }[]) {
-      if (Number(n.id) === Number(f.id) || String(n.estado ?? "") === "anulada") continue;
+    for (const n of (data ?? []) as { id: number; total: unknown; estado: unknown; sunat_estado: unknown; numero: unknown; cliente_id: unknown; moneda: unknown; nota_credito_ref: unknown }[]) {
+      if (Number(n.id) === Number(f.id)) continue;
+      if (String(n.estado ?? "") === "anulada" || String(n.sunat_estado ?? "") !== "aceptada" || !String(n.numero ?? "").trim()) continue;
+      if (String(n.cliente_id ?? "") !== String(f.cliente_id ?? "") || normalizarMoneda(n.moneda as string | null | undefined) !== mon) continue;
       if (!mismaReferencia(n.nota_credito_ref, f.serie, f.numero)) continue;
       suma += Math.abs(num(n.total) ?? 0);
     }
@@ -1653,6 +1662,13 @@ export async function asegurarComprobanteCargo(sb: Sb, solicitudId: number, deps
     const fila = actual.fila;
     const notas = fila && !cargoEditable(fila) ? await notasCreditoDe(sb, fila) : 0;
     const j = juzgarCargo({ retenido, actual: fila, notasCredito: notas, moneda: cc.moneda });
+    // Sin reservas-09d el comprobante se encontró por un TEXTO de sus observaciones, que cualquier
+    // sesión puede escribir: sirve para no crear otro, pero el servidor no lo reescribe, ni lo anula,
+    // ni lo ata (sería tocar la factura que eligió otra persona).
+    if ("por" in actual && actual.por === "marca") {
+      const aviso = `Hay un comprobante del cargo en Facturación (#${fila!.id}), pero sin supabase/reservas-09d-cargo-solicitud.sql el ERP no lo recalcula ni lo ata: corre ese SQL o revísalo a mano en /facturacion.`;
+      return fin({ id: fila!.id, codigo: j.codigo === "al_dia" ? "al_dia" : j.codigo, detalle: aviso, aviso: j.codigo === "al_dia" ? null : aviso });
+    }
     const datosMarca = { solicitudId: s.id, cobrado, devuelto: aDevolver, retenido, moneda: cc.moneda };
 
     /** Ata el comprobante a la solicitud si todavía no lo está (UPDATE condicional). */

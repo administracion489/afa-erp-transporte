@@ -112,7 +112,9 @@ export async function reclamarConversion(sb: Sb, cotId: number, segundos = SEGUN
     if (estado === "tomado" && hasta) return { codigo: "tomado", hasta };
     if (estado === "ocupado") return { codigo: "ocupado" };
     if (estado === "no_existe") return { codigo: "error", detalle: "La cotización ya no existe (o no tienes permiso para verla): no se creó nada." };
-    if (estado === "sin_permiso") return { codigo: "error", detalle: "No tienes permiso para editar esta cotización: no se creó ninguna reserva." };
+    // «no_tomado» (y «sin_permiso», el nombre de una versión anterior del SQL): la fila se veía libre y no se
+    // pudo escribir. O alguien la tomó en ese mismo instante, o esta sesión no puede editar la cotización.
+    if (estado === "no_tomado" || estado === "sin_permiso") return { codigo: "error", detalle: "No se pudo tomar el turno para crear la reserva: otra persona la está convirtiendo en este mismo momento, o no tienes permiso para editar esta cotización. Espera unos segundos y vuelve a intentarlo: no se creó nada." };
     return { codigo: "error", detalle: "No se pudo tomar el turno para crear la reserva. Vuelve a intentar en un momento: no se creó nada." };
   } catch (e) {
     return { codigo: "error", detalle: `No se pudo tomar el turno para crear la reserva (${e instanceof Error ? e.message : String(e)}). Vuelve a intentar en un momento: no se creó nada.` };

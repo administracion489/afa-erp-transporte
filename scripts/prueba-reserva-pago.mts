@@ -463,6 +463,18 @@ const empresa: PerfilEmpresa = {
   const nueva = observacionesConMarca(viejaObs, datos);
   t("la línea de la marca se pone al día y lo demás (también lo de una persona) se conserva", nueva.includes("cobrado S/ 120.00, devuelto S/ 60.00, retenido S/ 60.00.") && !nueva.includes("S/ 40.00") && nueva.includes("Nota de Facturación: revisar RUC.") && nueva.startsWith(OBSERVACION_IGV_CARGO));
   t("poner al día dos veces no cambia nada (idempotente)", observacionesConMarca(nueva, datos) === nueva);
+  // Auditoría del 23-10-2026: las observaciones y la referencia de una nota de crédito las escribe
+  // cualquier sesión; armadas a propósito, una regex con varios `.*?` tardaba decenas de segundos.
+  {
+    const malas = `${marcaCargoReserva(31)}: cobrado x` + ", devuelto , retenido ".repeat(3000);
+    const t0 = Date.now();
+    const r1 = observacionesConMarca(malas, datos);
+    const refMala = "F001-" + "0".repeat(60000) + "25X";
+    const r2v = mismaReferencia(refMala, "F001", "25");
+    const ms = Date.now() - t0;
+    t(`texto armado a propósito (60 KB de observaciones y de referencia): responde en < 50 ms (${ms} ms)`, ms < 50 && typeof r1 === "string" && r2v === false);
+    t("una referencia de más de 40 caracteres no se evalúa", !mismaReferencia("F001-" + "0".repeat(50) + "25", "F001", "25"));
+  }
   t("sin la línea de la marca, se agrega al final", observacionesConMarca("Algo escrito.", datos) === `Algo escrito. ${marcaCargoReserva(31)}: cobrado S/ 120.00, devuelto S/ 60.00, retenido S/ 60.00.`);
   const p1 = patchCargoRecalculado(borrador(40, { observaciones: viejaObs, items_json: [{ descripcion: "Cargo por cancelación N° 00512", cantidad: 1, precio_unit: 40, total: 40 }] }), datos);
   t("el patch: todo en la base (sin IGV, como lo arma el ERP) y el ítem con el total nuevo y su descripción", p1.subtotal === 60 && p1.igv === 0 && Array.isArray(p1.items_json) && (p1.items_json as any[])[0].total === 60 && (p1.items_json as any[])[0].descripcion === "Cargo por cancelación N° 00512" && !("total" in p1));

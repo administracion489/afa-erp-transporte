@@ -336,7 +336,7 @@ t("corolario: salen los avisos de crear, completar, ya convertida y fallos", ["�
 // La base falsa de arriba no llama funciones (sin `rpc`): ahí el ejecutor convierte como antes y lo
 // dice en `aviso`. Aquí se le agrega `rpc` con el comportamiento de la migración.
 {
-  type ModoCandado = "tomado" | "ocupado" | "falta" | "error" | "sin_permiso";
+  type ModoCandado = "tomado" | "ocupado" | "falta" | "error" | "no_tomado";
   const conCandado = (cfg: Cfg, modo: ModoCandado, tras?: Record<string, unknown>[]) => {
     const b = base(cfg);
     const rpcs: { fn: string; args: Record<string, unknown> }[] = [];
@@ -354,7 +354,7 @@ t("corolario: salen los avisos de crear, completar, ya convertida y fallos", ["�
         if (modo === "falta") return { data: null, error: { code: "PGRST202", message: "Could not find the function public.fn_cotizacion_reclamar_conversion(p_cotizacion_id, p_segundos) in the schema cache" } };
         if (modo === "error") return { data: null, error: { message: "fetch failed" } };
         if (modo === "ocupado") return { data: { estado: "ocupado" }, error: null };
-        if (modo === "sin_permiso") return { data: { estado: "sin_permiso" }, error: null };
+        if (modo === "no_tomado") return { data: { estado: "no_tomado" }, error: null };
         tomado = true;
         return { data: { estado: "tomado", hasta: "2026-10-23T16:04:08.433078+00:00" }, error: null };
       },
@@ -390,9 +390,9 @@ t("corolario: salen los avisos de crear, completar, ya convertida y fallos", ["�
   const r5 = await ejecutarConversion(err.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
   t("el candado no responde: «error» sin escribir nada (no se arriesga el duplicado)", r5.codigo === "error" && escrituras(err.log) === "[]" && r5.mensaje.includes("no se creó nada"));
 
-  const sp = conCandado({ existentes: [], atras: false }, "sin_permiso");
+  const sp = conCandado({ existentes: [], atras: false }, "no_tomado");
   const r6 = await ejecutarConversion(sp.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
-  t("sin permiso para editar la cotización: «error» sin escribir nada", r6.codigo === "error" && escrituras(sp.log) === "[]" && r6.mensaje.includes("permiso"));
+  t("no se pudo escribir el candado (carrera o sin permiso): «error» sin escribir nada, y lo dice", r6.codigo === "error" && escrituras(sp.log) === "[]" && r6.mensaje.includes("permiso") && r6.mensaje.includes("mismo momento"));
 
   // EL CASO: «→ Res.» pregunta (dólares), y mientras la pregunta está abierta el CRM crea la reserva.
   const usd = { ...c, moneda: "USD", tipo_cambio: 3.75 };

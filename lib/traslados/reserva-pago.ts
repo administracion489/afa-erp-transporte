@@ -665,12 +665,18 @@ export function referenciaComprobante(serie: unknown, numero: unknown): string |
 }
 
 /** ¿La referencia que escribió Facturación en una nota de crédito es este comprobante? */
+/** Más largo que esto no es una referencia «F001-00025»: no se evalúa (texto que cualquier sesión escribe). */
+const MAX_REF = 40;
+
 export function mismaReferencia(ref: unknown, serie: unknown, numero: unknown): boolean {
   const esta = referenciaComprobante(serie, numero);
   if (!esta) return false;
-  const r = txt(ref).replace(/\s+/g, "").toUpperCase();
-  const m = /^([A-Z0-9]+)-0*(\d+)$/.exec(r);
-  const otra = m ? `${m[1]}-${m[2]}` : r.replace(/^0+(?=\d)/, "");
+  const crudo = String(ref ?? "");
+  if (crudo.length > MAX_REF * 2) return false;
+  const r = crudo.replace(/\s+/g, "").toUpperCase();
+  if (!r || r.length > MAX_REF) return false;
+  const m = /^([A-Z0-9]+)-(\d+)$/.exec(r);
+  const otra = m ? `${m[1]}-${m[2].replace(/^0+(?=\d)/, "")}` : r.replace(/^0+(?=\d)/, "");
   return otra === esta;
 }
 
@@ -730,11 +736,23 @@ export function juzgarCargo(x: { retenido: number; actual: FacturaCargoActual | 
 export function observacionesConMarca(actual: unknown, x: { solicitudId: number | string; cobrado: number; devuelto: number; retenido: number; moneda: Moneda }): string {
   const linea = `${marcaCargoReserva(x.solicitudId)}: cobrado ${dinero(x.cobrado, x.moneda)}, devuelto ${dinero(x.devuelto, x.moneda)}, retenido ${dinero(x.retenido, x.moneda)}.`;
   const obs = String(actual ?? "").trim();
-  const marca = marcaCargoReserva(x.solicitudId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`${marca}: cobrado .*?, devuelto .*?, retenido .*?\\.(?=\\s|$)`);
-  if (re.test(obs)) return obs.replace(re, linea);
-  return obs ? `${obs} ${linea}` : linea;
+  // Sin expresiones regulares: las observaciones las puede escribir cualquier sesión, y una regex con
+  // varios `.*?` sobre un texto armado a propósito tarda segundos (auditoría del 23-10-2026). Se busca
+  // el inicio de la línea y su primer punto seguido de un espacio (o del fin): los importes llevan su
+  // punto decimal seguido de una cifra, así que no lo cortan.
+  if (obs.length > MAX_OBS_REESCRIBIR) return `${obs} ${linea}`;
+  const ini = obs.indexOf(`${marcaCargoReserva(x.solicitudId)}: cobrado `);
+  if (ini < 0) return obs ? `${obs} ${linea}` : linea;
+  let fin = -1;
+  for (let i = ini; i < obs.length; i++) {
+    if (obs[i] === "." && (i + 1 === obs.length || /\s/.test(obs[i + 1]))) { fin = i + 1; break; }
+  }
+  if (fin < 0) return `${obs} ${linea}`;
+  return `${obs.slice(0, ini)}${linea}${obs.slice(fin)}`;
 }
+
+/** Más largo que esto no se reescribe por dentro: se agrega la línea al final (operativo, NO medido). */
+const MAX_OBS_REESCRIBIR = 4000;
 
 /**
  * El patch de un borrador que se recalcula. Si Facturación ya repartió el total en base e IGV, el
