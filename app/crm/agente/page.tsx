@@ -133,21 +133,30 @@ export default function AgenteIAPage() {
   const [probando, setProbando] = useState(false);
   const chatEndRef = React.useRef<HTMLDivElement>(null);
 
-  // Lo que solo sabe el servidor: ¿hay clave de transcripción?, el prompt real y si la IA cotiza
-  // traslados (null = no se sabe: el auditor no afirma nada de traslados).
-  const [estadoIA, setEstadoIA] = useState<{ transcripcion: boolean | null; instrucciones: string | null; traslados: boolean | null }>({
-    transcripcion: null, instrucciones: null, traslados: null,
+  // Lo que solo sabe el servidor: ¿hay clave de transcripción?, el prompt real, si la IA cotiza
+  // traslados y si los RESERVA, con la política de reserva que envía (null = no se sabe: el auditor
+  // no afirma nada de eso, lib/crm-ia-coherencia.ts).
+  const [estadoIA, setEstadoIA] = useState<{
+    transcripcion: boolean | null; instrucciones: string | null; traslados: boolean | null;
+    reserva: boolean | null; politicaReserva: string[] | null;
+  }>({
+    transcripcion: null, instrucciones: null, traslados: null, reserva: null, politicaReserva: null,
   });
   const cargarEstadoIA = React.useCallback(async () => {
     try {
       const r = await fetch("/api/crm/ia/estado", { headers: await cabecerasErp() });
       const j = await r.json();
-      if (j?.ok)
-        setEstadoIA({
+      if (j?.ok) {
+        const politica = Array.isArray(j.politica_reserva) ? (j.politica_reserva as unknown[]).filter((x): x is string => typeof x === "string") : null;
+        setEstadoIA((prev) => ({
           transcripcion: !!j.transcripcion,
           instrucciones: j.instrucciones ?? null,
           traslados: typeof j.traslados === "boolean" ? j.traslados : null,
-        });
+          reserva: typeof j.reserva === "boolean" ? j.reserva : null,
+          // La MISMA lista no cambia de identidad: así el auditor (useMemo) no se rehace en cada lectura.
+          politicaReserva: politica && prev.politicaReserva && JSON.stringify(politica) === JSON.stringify(prev.politicaReserva) ? prev.politicaReserva : politica,
+        }));
+      }
     } catch { /* se queda en «no se sabe» */ }
   }, []);
   useEffect(() => { cargarEstadoIA(); }, [cargarEstadoIA]);
@@ -189,7 +198,10 @@ export default function AgenteIAPage() {
 
   // ── Coherencia: el auditor PURO sobre lo que se está editando (se recalcula al teclear, diferido
   // para no frenar la escritura) y sobre lo guardado (para saber qué choques AGREGA una edición). ──
-  const ctxAuditoria = useMemo(() => ({ trasladosActivos: estadoIA.traslados, empresa }), [estadoIA.traslados, empresa]);
+  const ctxAuditoria = useMemo(
+    () => ({ trasladosActivos: estadoIA.traslados, reservaTraslados: estadoIA.reserva, politicaTraslados: estadoIA.politicaReserva, empresa }),
+    [estadoIA.traslados, estadoIA.reserva, estadoIA.politicaReserva, empresa],
+  );
   const agenteDiferido = useDeferredValue(agente);
   const auditoria = useMemo(
     () => (agenteDiferido ? auditarAgente(cfgAuditable(agenteDiferido), ctxAuditoria) : null),

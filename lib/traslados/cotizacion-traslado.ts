@@ -85,8 +85,10 @@ export type TrasladoJson = {
 /**
  * Las condiciones de la fila. `version: 2` y `plantilla` solo cuando se copiaron de una plantilla
  * (`considSnapshot`): el PDF imprime la fila. Sin ellas, como siempre (de `traslados_config`).
+ * `reserva`: la política de reserva, cambios y cancelación de la plantilla (cotizaciones-06); solo
+ * cuando la plantilla la tiene. `traslados_config` no tiene política: sin plantilla, no hay clave.
  */
-export type ConsideracionesJson = { incluye: string[]; no_incluye: string[]; generales: string[]; version?: number; plantilla?: string | null };
+export type ConsideracionesJson = { incluye: string[]; no_incluye: string[]; generales: string[]; reserva?: string[]; version?: number; plantilla?: string | null };
 
 /** Las cuatro listas de `traslados_config` que pueden ir a las condiciones (de antes de cotizaciones-05). */
 export type ListasConfigTraslado = {
@@ -105,14 +107,20 @@ export type ListasConfigTraslado = {
  *    (`considSnapshot` con respaldo VACÍO: una lista NULL de la plantilla es una lista vacía, nunca
  *    las de Ajustes), en versión 2 y con su id. La de dólares ya trae sus líneas de dólares (la
  *    migración las traspasó como consideraciones + consideraciones_usd): no se suman aquí.
+ *    La política de reserva (`reserva`) se copia igual, solo si la plantilla la tiene.
  *  · Sin plantilla: las de `traslados_config`, con las de dólares solo si se cotiza en dólares.
+ *    Ahí no hay política de reserva: la fila va sin esa clave (el PDF no imprime el bloque).
  * En los dos casos, limpias: sin espacios de los bordes ni líneas vacías.
  */
 export function considDeTraslado(plantilla: PlantillaFila | null | undefined, config: ListasConfigTraslado, moneda: Moneda): ConsideracionesJson {
   const limpia = (l: readonly unknown[] | null | undefined) => (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
   if (plantilla) {
     const s = considSnapshot(plantilla, { incluye: [], no_incluye: [], generales: [] });
-    return { incluye: limpia(s.incluye), no_incluye: limpia(s.no_incluye), generales: limpia(s.generales), version: s.version, plantilla: s.plantilla };
+    return {
+      incluye: limpia(s.incluye), no_incluye: limpia(s.no_incluye), generales: limpia(s.generales),
+      ...(Array.isArray(s.reserva) ? { reserva: limpia(s.reserva) } : {}),
+      version: s.version, plantilla: s.plantilla,
+    };
   }
   const usd = moneda === "USD";
   const generales = limpia([...(config.consideraciones ?? []), ...(usd ? config.consideraciones_usd ?? [] : [])]);
@@ -681,7 +689,7 @@ export function entradaCorporativaTraslado(
     })),
     vehiculos: veh ? [veh] : [],
     repr: "",
-    consid: { incluye: lista(cj.incluye), no_incluye: lista(cj.no_incluye), generales: lista(cj.generales) },
+    consid: { incluye: lista(cj.incluye), no_incluye: lista(cj.no_incluye), generales: lista(cj.generales), ...(Array.isArray(cj.reserva) ? { reserva: lista(cj.reserva) } : {}) },
     plantilla: "corporativo",
     cfg: cfgSoloCuentas(x.plantilla),
     empresa: x.empresa,

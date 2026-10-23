@@ -1972,6 +1972,37 @@ seccion("23. Cuentas y condiciones de la plantilla de traslados: inactiva, disti
     ok(motivosDe(rTodo) === "cuentas_distintas,condiciones_demasiadas,texto_libre_sospechoso", `los tres motivos a la vez (${motivosDe(rTodo)})`);
   }
   {
+    // (e) La política de reserva, cambios y cancelación (cotizaciones-06): se copia a la fila desde la
+    // plantilla y sale en el PDF; una línea con un número largo o un enlace → revisión; 31 líneas →
+    // condiciones_demasiadas. «50 % de adelanto» y «pagado» solos NO la dejan para revisión.
+    const POL = [
+      "La reserva se confirma con el 50 % de adelanto; el saldo se paga al iniciar el servicio.",
+      "Cancelación con 24 horas o más de anticipación: sin costo, devolución del 100 %.",
+      "Con menos de 24 horas: reprogramación sin costo o un cargo administrativo del 10 % de lo pagado.",
+    ];
+    const r = await correr(base23(IA23({ condiciones_reserva: ["  " + POL[0] + "  ", "", ...POL.slice(1)] })));
+    ok(r.res.cotizacion?.decision === "automatico" && !!r.res.envioPendiente, `una política limpia sale sola (${r.res.cotizacion?.decision} ${motivosDe(r)})`);
+    ok(JSON.stringify(r.fila?.consideraciones_json?.reserva) === JSON.stringify(POL), `se copia a la fila, limpia (${JSON.stringify(r.fila?.consideraciones_json?.reserva)})`);
+    const txt = r.res.envioPendiente ? textoDelPdf(r.res.envioPendiente.bytes) : "";
+    ok(/RESERVA, CAMBIOS Y CANCELACI/.test(txt) && txt.includes("cargo administrativo del 10 %"), "y el PDF que se envía la imprime");
+    const sin = await correr(base23(IA23()));
+    ok(!("reserva" in (sin.fila?.consideraciones_json ?? {})) && !/RESERVA, CAMBIOS/.test(sin.res.envioPendiente ? textoDelPdf(sin.res.envioPendiente.bytes) : ""), "sin política en la plantilla: ni la clave en la fila ni el bloque en el PDF");
+    const lNum = "Para cancelar llame al 987 654 321.";
+    const rn = await correr(base23(IA23({ condiciones_reserva: [...POL, lNum] })));
+    ok(rn.res.cotizacion?.decision === "revision" && motivosDe(rn) === "texto_libre_sospechoso" && rn.nota.includes(lNum) && rn.nota.includes("Reserva, cambios y cancelación"), `una línea de la política con 6+ dígitos → revisión, y la nota la cita con su lista (${motivosDe(rn)})`);
+    const lEnl = "Política completa en www.ejemplo-traslados.com";
+    const re = await correr(base23(IA23({ condiciones_reserva: [lEnl] })));
+    ok(re.res.cotizacion?.decision === "revision" && motivosDe(re) === "texto_libre_sospechoso" && re.nota.includes(lEnl), `una línea de la política con un enlace → revisión (${motivosDe(re)})`);
+    const r31 = await correr(base23(IA23({ condiciones_reserva: lineas(31) })));
+    ok(r31.res.cotizacion?.decision === "revision" && motivosDe(r31) === "condiciones_demasiadas" && /«Reserva, cambios y cancelación»: 31 líneas/.test(r31.nota), `31 líneas en la política → condiciones_demasiadas, y la nota nombra la lista (${motivosDe(r31)})`);
+    // Las funciones puras, directo.
+    const cs = T.condicionesSospechosas({ incluye: [], no_incluye: [], generales: [], reserva: [POL[0], lNum] });
+    ok(cs.length === 1 && cs[0].lista === "reserva" && cs[0].linea === lNum && cs[0].motivos.includes("numero_largo"), "condicionesSospechosas mira la política");
+    const rv = E.revisionPorCondiciones({ avisosPdf: [], consideraciones: { incluye: [], no_incluye: [], generales: [], reserva: lineas(31) } });
+    ok(rv.motivos.join() === "condiciones_demasiadas", `revisionPorCondiciones cuenta la política para el exceso (${rv.motivos.join()})`);
+    ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: { incluye: [], no_incluye: [], generales: [], reserva: POL } }).motivos.length === 0, "y una política limpia no deja nada para revisión");
+  }
+  {
     // El simulador de /tarifario dice lo mismo que hará la IA; la pantalla de plantillas usa la misma regla.
     const q = (x: string) => x.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
     const ruta = q(readFileSync("app/api/traslados/simular/route.ts", "utf8"));

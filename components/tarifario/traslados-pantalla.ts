@@ -516,6 +516,11 @@ export type GrupoCondicionesIA = {
   generales: ListaCondicion;
   incluye: ListaCondicion;
   no_incluye: ListaCondicion;
+  /**
+   * La política de reserva, cambios y cancelación (cotizaciones-06): la que la IA envía al cliente y
+   * el PDF imprime. Solo existe en una plantilla: en las listas de Ajustes no hay (`propia: false`).
+   */
+  reserva: ListaCondicion;
 };
 
 /** Los códigos de `plantillaParaUso` que pintan ámbar: la configuración dice una cosa y la IA hace otra (o falta el SQL). */
@@ -551,6 +556,7 @@ export function condicionesTrasladoIA(
       generales: { items: c.generales, propia: p ? Array.isArray(p.condiciones_generales) : true },
       incluye: { items: c.incluye, propia: p ? Array.isArray(p.condiciones_incluye) : true },
       no_incluye: { items: c.no_incluye, propia: p ? Array.isArray(p.condiciones_no_incluye) : true },
+      reserva: { items: c.reserva ?? [], propia: !!p && Array.isArray(p.condiciones_reserva) },
     });
   }
   return grupos;

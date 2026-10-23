@@ -10,6 +10,7 @@
 import { supabase } from "@/lib/supabase";
 import { tablaQueFalta, faltaAlguna, type ErrorSupabase } from "@/lib/columna-faltante";
 import type { Moneda } from "@/lib/traslados/motor";
+import { CONFIG_RESERVA_DEFECTO, normalizarConfigReserva, type ConfigReserva } from "@/lib/traslados/reserva-pago";
 import type { CategoriaFila, TarifaFila, UnidadFotos, ZonaFila } from "./traslados-pantalla";
 
 export type ConfigFila = {
@@ -25,11 +26,16 @@ export type ConfigFila = {
   incluye: string[];
   /** traslados-07: lo que NO incluye. Sin la migración, vacía. */
   no_incluye: string[];
+  /**
+   * traslados-09: la reserva y el pago por la IA (`reserva_*`), leídos con `normalizarConfigReserva`
+   * —la MISMA lectura que hace el servidor—. Sin la migración, la reserva apagada y los defectos.
+   */
+  reserva: ConfigReserva;
 };
 
 export const CONFIG_VACIA: ConfigFila = {
   validez_dias: 30, espera_gratis_min: 30, consideraciones: [], consideraciones_usd: [], ia_cotiza: false, envio_automatico: false,
-  incluye: [], no_incluye: [],
+  incluye: [], no_incluye: [], reserva: { ...CONFIG_RESERVA_DEFECTO },
 };
 
 /**
@@ -39,13 +45,15 @@ export const CONFIG_VACIA: ConfigFila = {
  * haría fallar la escritura entera. Lo mismo `colsCategoria` y `colsConfig`.
  * `sinMigracionFotos` / `sinMigracionListas`: faltan columnas de traslados-07 (las fotos y la
  * descripción de la categoría; las listas Incluye / No incluye). Sin ellas la pantalla sigue como
- * antes y lo dice en ámbar.
+ * antes y lo dice en ámbar. `sinMigracionReserva`: faltan las de traslados-09 (`reserva_*`): el
+ * bloque «Reserva y pago por la IA» no se ofrece y lo dice nombrando el SQL.
  */
 export type CargaTraslados =
   | {
     tipo: "ok"; zonas: ZonaFila[]; categorias: CategoriaFila[]; tarifas: TarifaFila[]; config: ConfigFila; configExiste: boolean;
     sinMigracionIA: boolean; colsZona: string; colsConfig: string;
     sinMigracionFotos: boolean; sinMigracionListas: boolean; colsCategoria: string;
+    sinMigracionReserva: boolean;
   }
   | { tipo: "sin_tablas"; tabla: string }
   | { tipo: "error"; detalle: string };
@@ -62,6 +70,10 @@ export const COLS_CATEGORIA_FOTOS = ["foto_externa_url", "foto_interna_url", "de
 /** Las columnas accesorias de `traslados_config`: las de traslados-05 y las de traslados-07. */
 const COLS_CONFIG_IA_LISTA = ["ia_cotiza", "envio_automatico"] as const;
 const COLS_CONFIG_LISTAS = ["incluye", "no_incluye"] as const;
+/** Las de traslados-09: van juntas (es una sola migración), así que si falta una se sueltan todas. */
+export const COLS_CONFIG_RESERVA = [
+  "reserva_ia", "reserva_adelanto_pct", "reserva_correo", "reserva_plazo_confirmacion_min", "reserva_margen_min", "reserva_devolucion_plazo_h",
+] as const;
 const PAG = 1000;
 
 type Lectura<T> = { filas: T[]; error: null } | { filas: null; error: ErrorSupabase };
@@ -141,6 +153,7 @@ export function normalizarConfig(c: Record<string, unknown> | null | undefined):
     envio_automatico: c.envio_automatico === true,
     incluye: lista(c.incluye),
     no_incluye: lista(c.no_incluye),
+    reserva: normalizarConfigReserva(c),
   };
 }
 
@@ -156,10 +169,12 @@ async function conRespaldo<T extends { error: ErrorSupabase }>(
 /**
  * Una lectura con columnas ACCESORIAS: si el error NOMBRA una de ellas, se repite sin ESA (solo la
  * que el error nombra) y se apunta en `faltan`. Cualquier otro error se devuelve tal cual. `cols`
- * son las columnas que sí existen (las que se pueden pedir de vuelta tras escribir).
+ * son las columnas que sí existen (las que se pueden pedir de vuelta tras escribir). Las de un
+ * `grupo` (las de UNA migración) se sueltan juntas: si falta una, faltan todas, y soltarlas de a
+ * una costaría una lectura por columna.
  */
 async function conAccesorias<T extends { error: ErrorSupabase }>(
-  leer: (cols: string) => PromiseLike<T>, base: string, accesorias: readonly string[],
+  leer: (cols: string) => PromiseLike<T>, base: string, accesorias: readonly string[], grupos: readonly (readonly string[])[] = [],
 ): Promise<{ r: T; faltan: string[]; cols: string }> {
   let quedan = [...accesorias];
   const faltan: string[] = [];
@@ -168,8 +183,10 @@ async function conAccesorias<T extends { error: ErrorSupabase }>(
     const r = await leer(cols);
     const col = r.error ? faltaAlguna(r.error, quedan) : null;
     if (!col) return { r, faltan, cols };
-    faltan.push(col);
-    quedan = quedan.filter((c) => c !== col);
+    const grupo = grupos.find((g) => g.includes(col));
+    const fuera = grupo ? quedan.filter((c) => grupo.includes(c)) : [col];
+    faltan.push(...fuera);
+    quedan = quedan.filter((c) => !fuera.includes(c));
   }
 }
 
@@ -187,7 +204,7 @@ export async function cargarTraslados(): Promise<CargaTraslados> {
         ["envio_automatico"]),
       conAccesorias((cols) => todas<Record<string, unknown>>("traslado_categorias", cols, "clave"), COLS_CATEGORIA, COLS_CATEGORIA_FOTOS),
       todas<Record<string, unknown>>("tarifas_traslado", COLS_TARIFA, "id"),
-      conAccesorias((cols) => leerConfig(cols), COLS_CONFIG, [...COLS_CONFIG_IA_LISTA, ...COLS_CONFIG_LISTAS]),
+      conAccesorias((cols) => leerConfig(cols), COLS_CONFIG, [...COLS_CONFIG_IA_LISTA, ...COLS_CONFIG_LISTAS, ...COLS_CONFIG_RESERVA], [COLS_CONFIG_RESERVA]),
     ]);
     const z = zr.r;
     const c = cr.r;
@@ -213,6 +230,7 @@ export async function cargarTraslados(): Promise<CargaTraslados> {
       sinMigracionFotos: cr.faltan.length > 0,
       sinMigracionListas: cfgr.faltan.some((x) => (COLS_CONFIG_LISTAS as readonly string[]).includes(x)),
       colsCategoria: cr.cols,
+      sinMigracionReserva: cfgr.faltan.some((x) => (COLS_CONFIG_RESERVA as readonly string[]).includes(x)),
     };
   } catch (e) {
     return { tipo: "error", detalle: `No se pudo leer el catálogo de traslados: ${(e as Error)?.message ?? "sin conexión"}` };
@@ -308,6 +326,9 @@ export async function leerFichasCosteo(): Promise<{ tipo: "ok"; fichas: FichaCos
 /** Escribir en las cuatro tablas exige el módulo «tarifas» (o admin). Leer, no. */
 export const SIN_PERMISO_TARIFAS = "hace falta el permiso del módulo Tarifas (lo da un administrador en Usuarios)";
 
+/** La regla de supabase/seguridad-05-reserva-dinero.sql sobre `traslados_config.reserva_correo`. */
+export const SOLO_ADMIN_CORREO_RESERVA = "el correo que recibe los comprobantes de pago de las reservas solo lo cambia un administrador del ERP (lleva datos de los clientes). Pídeselo a un administrador; lo demás se guarda sin tocar el correo.";
+
 /** Los límites que exigen los CHECK de traslados-01-tablas.sql: el formulario los valida antes de guardar. */
 export const LIMITES = {
   radio_m: [1, 10000],
@@ -321,6 +342,9 @@ export const LIMITES = {
 export function textoError(e: ErrorSupabase, que: string): string {
   const code = String(e?.code ?? "");
   const msg = String(e?.message ?? "");
+  // supabase/seguridad-05-reserva-dinero.sql: el correo de los comprobantes de reserva solo lo cambia un
+  // administrador (el mismo 42501 que un permiso que falta, pero con su propio motivo).
+  if (code === "42501" && /comprobantes de reserva/i.test(msg)) return `${que}: ${SOLO_ADMIN_CORREO_RESERVA}`;
   if (code === "42501" || /row-level security|permission denied/i.test(msg)) return `${que}: no se guardó porque ${SIN_PERMISO_TARIFAS}.`;
   if (code === "23505") return `${que}: ya existe (los nombres y las claves no se repiten).`;
   if (code === "23514") return `${que}: un dato está fuera de rango o falta (centro en el mapa, radio de 1 a 10 000 m, asientos de 1 a 100, bodega de 0 a 200…).`;

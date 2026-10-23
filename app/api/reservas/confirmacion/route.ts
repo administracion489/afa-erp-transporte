@@ -17,18 +17,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi, verificarUsuarioApiAlguno } from "@/lib/api-auth";
 import { guardarGasto } from "@/lib/api-guard";
-import { cobradoEn, fechaValida, docConfirmacion, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, nombreArchivo, normalizarIdioma,
+import { cobradoEn, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, normalizarIdioma,
   telefonoWa, type DatosConfirmacion, type ExtrasConf } from "@/lib/confirmacion-reserva";
-import { anularAdelanto, emitirVersion, leerEntrada, leerVersion, leerVersiones, registrarAdelanto, SQL_CONFIRMACION } from "@/lib/confirmacion-reserva-datos";
-import { dibujarConfirmacion } from "@/lib/confirmacion-reserva-pdf";
-import { bajarLogo, leerPerfilPdf } from "@/lib/traslados/enviar-cotizacion-datos";
+import { anularAdelanto, emitirVersion, leerEntrada, leerVersion, leerVersiones, pdfDeVersion, registrarAdelanto, validarCobro, SQL_CONFIRMACION } from "@/lib/confirmacion-reserva-datos";
+import { leerPerfilPdf } from "@/lib/traslados/enviar-cotizacion-datos";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
-import { fechaLima } from "@/lib/alertas-horario";
+import { mensajeSeguro } from "@/lib/mensaje-seguro";
 
 export const dynamic = "force-dynamic";
 
 const MODULOS_COBRO = ["tesoreria", "finanzas"];
-const METODOS = new Set(["transferencia", "deposito", "yape", "plin", "efectivo", "tarjeta"]);
 
 function admin() {
   return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { autoRefreshToken: false, persistSession: false } });
@@ -42,14 +40,8 @@ function extrasDe(v: unknown): ExtrasConf {
   return { vuelo: s(o.vuelo, 40), punto_encuentro: s(o.punto_encuentro, 120), nota: s(o.nota, 300), incluir_telefono_conductor: o.incluir_telefono_conductor === true };
 }
 
-/**
- * Los mensajes que escribe este módulo (reglas de negocio) se enseñan; un error crudo de la base
- * no: va al log y el navegador recibe uno genérico.
- */
-function mensajeSeguro(e: unknown): string {
-  const m = (e as Error)?.message ?? "";
-  return /^(Ese cobro|Otra persona|Falta correr)/.test(m) ? m : "No se pudo completar la operación. Vuelve a intentar en un momento.";
-}
+// Los mensajes que escribe este módulo (reglas de negocio) se enseñan; un error crudo de la base
+// no: va al log y el navegador recibe uno genérico (`mensajeSeguro`, lib/mensaje-seguro.ts).
 
 async function puedeCobrar(req: NextRequest): Promise<boolean> {
   return (await verificarUsuarioApiAlguno(req, MODULOS_COBRO)).ok;
@@ -68,20 +60,11 @@ export async function GET(req: NextRequest) {
       const v = await leerVersion(sb, versionId);
       if (!v) return err(404, "Esa confirmación no existe.");
       const idioma = normalizarIdioma(u.searchParams.get("idioma"));
-      const { perfil } = await leerPerfilPdf(sb);
-      const emp = empresaConDefectos(perfil);
-      const doc = docConfirmacion(v.datos as DatosConfirmacion, idioma, { version: v.version, emitidoEn: fechaLima(new Date(v.generado_en).getTime()) },
-        { nombre: emp.nombre, telefono: emp.telefono, email: emp.email, web: emp.web, direccion: emp.direccion, ruc: emp.ruc });
-      // La cabecera es azul oscuro: primero la versión clara del perfil; si no hay o no baja,
-      // el principal dentro de su recuadro blanco (nunca la clara sobre blanco).
-      const claro = String(perfil?.logo_claro_url ?? "").trim();
-      const logoClaro = claro ? await bajarLogo(claro).catch(() => null) : null;
-      const logo = logoClaro ?? await bajarLogo(emp.logo).catch(() => null);
-      const bytes = await dibujarConfirmacion(doc, { logo, logoClaro: !!logoClaro, empresa: emp.nombre });
+      const { bytes, nombre } = await pdfDeVersion(sb, v, idioma);
       return new NextResponse(Buffer.from(bytes), {
         headers: {
           "Content-Type": "application/pdf",
-          "Content-Disposition": `inline; filename="${nombreArchivo(v.codigo, idioma)}"`,
+          "Content-Disposition": `inline; filename="${nombre}"`,
           "Cache-Control": "private, no-store",
         },
       });
@@ -175,19 +158,16 @@ export async function POST(req: NextRequest) {
       if (entrada.tramos.every((t) => t.estado === "cancelada")) return err(409, "La reserva está cancelada.");
       const imp = importeDelDia(entrada.tramos, entrada.cotizacion);
       if (imp.total == null || !(imp.total > 0)) return err(409, "La reserva no tiene un precio registrado en su moneda: no se puede registrar un adelanto contra él.");
-      const monto = Math.round(Number(cuerpo.monto) * 100) / 100;
-      if (!(monto > 0)) return err(400, "El monto tiene que ser mayor que cero.");
       const ya = cobradoEn(entrada.pagos, imp.moneda);
-      if (monto + ya > imp.total + 0.005) return err(409, `Con este cobro se pasaría del precio del servicio (${imp.moneda} ${imp.total.toFixed(2)}; ya cobrado ${ya.toFixed(2)}).`);
-      const fecha = String(cuerpo.fecha ?? "").slice(0, 10);
-      const hoy = fechaLima(Date.now());
-      const haceUnAnio = fechaLima(Date.now() - 366 * 86_400_000);
-      if (fechaValida(fecha) !== fecha || fecha > hoy || fecha < haceUnAnio) return err(400, "La fecha del cobro no es válida: tiene que existir, no ser futura ni de hace más de un año.");
-      const metodo = METODOS.has(String(cuerpo.metodo)) ? String(cuerpo.metodo) : null;
-      const referencia = typeof cuerpo.referencia === "string" ? cuerpo.referencia.trim().slice(0, 60) || null : null;
-      if (!referencia && metodo !== "efectivo") return err(400, "Escribe el número de operación del pago (o elige efectivo).");
+      const v = validarCobro(cuerpo, {
+        hoyMs: Date.now(), tope: imp.total - ya,
+        textoTope: `Con este cobro se pasaría del precio del servicio (${imp.moneda} ${imp.total.toFixed(2)}; ya cobrado ${ya.toFixed(2)}).`,
+      });
+      if (!v.ok) return err(v.status, v.detalle);
+      const { monto, fecha, metodo, referencia } = v;
       const { data: u } = await sb.from("usuarios").select("nombre").eq("id", auth.userId).maybeSingle();
-      const r = await registrarAdelanto(sb, Math.min(...ids), entrada.tramos[0].cliente_id, { monto, moneda: imp.moneda, fecha, metodo, referencia }, String(u?.nombre ?? auth.userId));
+      // Si la reserva nació de una solicitud de traslado del CRM, el cobro la lleva (la solicitud lo ve).
+      const r = await registrarAdelanto(sb, Math.min(...ids), entrada.tramos[0].cliente_id, { monto, moneda: imp.moneda, fecha, metodo, referencia }, String(u?.nombre ?? auth.userId), { tramos: ids });
       // Dos registros a la vez pueden pasar los dos el tope: se relee y, si se pasó, se anula el propio.
       const { entrada: despues } = await leerEntrada(sb, reservaId, null);
       if (cobradoEn(despues.pagos, imp.moneda) > imp.total + 0.005) {

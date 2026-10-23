@@ -84,6 +84,8 @@ const ES = {
   corp_incluye: "✅ Servicio incluye",
   corp_no_incluye: "❌ No incluye",
   corp_generales: "📋 Consideraciones generales",
+  /** La política de reserva (cotizaciones-06). Solo la imprime la corporativa, y solo con líneas. */
+  corp_reserva: "📅 Reserva, cambios y cancelación",
   cuentas_titulo: "Nuestras cuentas bancarias",
   cuentas_cta: "Cta:",
   cuentas_cci: "CCI:",
@@ -198,6 +200,7 @@ const EN: Record<ClaveTexto, string> = {
   corp_incluye: "✅ Service includes",
   corp_no_incluye: "❌ Not included",
   corp_generales: "📋 General terms",
+  corp_reserva: "📅 Booking, changes and cancellation",
   cuentas_titulo: "Our bank accounts",
   cuentas_cta: "Acct:",
   cuentas_cci: "CCI (interbank):",
@@ -312,7 +315,13 @@ export function etiquetaNivelIdioma(equip: string | null | undefined, idioma: Id
   return nivelDeEquipamiento(equip) === "full_equipo" ? "FULL EQUIPMENT" : "STANDARD";
 }
 
-export type ConsidCot = { incluye: string[]; no_incluye: string[]; generales: string[] };
+/**
+ * Las listas de condiciones de una cotización. `reserva` («Reserva, cambios y cancelación»,
+ * supabase/cotizaciones-06) es la cuarta y la única OPCIONAL: ausente = sin política, y el PDF no
+ * imprime nada (ni el título). Por eso una fila o una plantilla de antes imprime byte a byte lo de
+ * siempre. No tiene lista de fábrica: la política la escribe cada empresa (este ERP se vende).
+ */
+export type ConsidCot = { incluye: string[]; no_incluye: string[]; generales: string[]; reserva?: string[] };
 
 /** Las consideraciones de fábrica. Mudadas de app/cotizaciones/page.tsx (`DEFAULT_CONSID`). */
 export const DEFAULT_CONSID_ES: ConsidCot = {
@@ -331,9 +340,10 @@ export const DEFAULT_CONSID_EN: ConsidCot = {
 const mismaLista = (a: readonly string[] | null | undefined, b: readonly string[]) =>
   Array.isArray(a) && a.length === b.length && a.every((x, i) => x === b[i]);
 
-type CfgConsid = { condiciones_incluye?: string[] | null; condiciones_no_incluye?: string[] | null; condiciones_generales?: string[] | null } | null | undefined;
+type CfgConsid = { condiciones_incluye?: string[] | null; condiciones_no_incluye?: string[] | null; condiciones_generales?: string[] | null; condiciones_reserva?: string[] | null } | null | undefined;
 
-export type ConsidPdf = ConsidCot & {
+/** Lo que imprime el PDF: las cuatro listas siempre presentes (`reserva` vacía = no se imprime). */
+export type ConsidPdf = Required<ConsidCot> & {
   /** Listas que se imprimen tal cual las escribió una persona (en inglés, quedan en su idioma). */
   escritasTalCual: (keyof ConsidCot)[];
 };
@@ -371,25 +381,33 @@ const listaDeFila = (x: unknown): string[] => (Array.isArray(x) ? (x as string[]
  * EN (fijada o no, sin cambios): las de la plantilla NO se imprimen (son texto libre en español y
  * la plantilla no tiene versión inglesa); se usan las de la cotización, y la lista que es idéntica
  * a la de fábrica se cambia por su versión inglesa.
+ *
+ * `reserva` sigue la MISMA regla con una diferencia: no tiene lista de fábrica, así que donde falta
+ * (fila sin la clave, plantilla sin la columna o NULL) queda vacía y el PDF no imprime el bloque.
+ * En inglés se imprime tal cual se escribió (se avisa en `escritasTalCual`).
  */
 export function considParaPdf(cfg: CfgConsid, consid: ConsidCot & { version?: unknown }, idioma: Idioma): ConsidPdf {
   if (normalizarIdioma(idioma) === "es") {
     if (esConsidFijada(consid)) {
-      return { incluye: listaDeFila(consid.incluye), no_incluye: listaDeFila(consid.no_incluye), generales: listaDeFila(consid.generales), escritasTalCual: [] };
+      return { incluye: listaDeFila(consid.incluye), no_incluye: listaDeFila(consid.no_incluye), generales: listaDeFila(consid.generales), reserva: listaDeFila(consid.reserva), escritasTalCual: [] };
     }
     return {
       incluye: cfg?.condiciones_incluye || consid.incluye,
       no_incluye: cfg?.condiciones_no_incluye || consid.no_incluye,
       generales: cfg?.condiciones_generales || consid.generales,
+      reserva: cfg?.condiciones_reserva || listaDeFila(consid.reserva),
       escritasTalCual: [],
     };
   }
-  const out: ConsidPdf = { incluye: [], no_incluye: [], generales: [], escritasTalCual: [] };
+  const out: ConsidPdf = { incluye: [], no_incluye: [], generales: [], reserva: [], escritasTalCual: [] };
   for (const k of ["incluye", "no_incluye", "generales"] as const) {
     const lista = consid?.[k] ?? [];
     if (mismaLista(lista, DEFAULT_CONSID_ES[k])) out[k] = [...DEFAULT_CONSID_EN[k]];
     else { out[k] = lista; if (lista.some(x => String(x ?? "").trim())) out.escritasTalCual.push(k); }
   }
+  // Sin lista de fábrica: lo escrito va tal cual (y se avisa).
+  out.reserva = listaDeFila(consid?.reserva);
+  if (out.reserva.some(x => String(x ?? "").trim())) out.escritasTalCual.push("reserva");
   return out;
 }
 

@@ -17,6 +17,8 @@ import PlanillaTab from "./_tabs/PlanillaTab";
 import DetraccionesTab from "./_tabs/DetraccionesTab";
 import LotesTab from "./_tabs/LotesTab";
 import ConciliacionTab from "./_tabs/ConciliacionTab";
+import AdelantosReservasTab from "./_tabs/AdelantosReservasTab";
+import { leerListaTesoreria } from "@/components/reservas/reserva-traslado-pantalla";
 
 const TABS = [
   { key: "cxp", label: "🧾 Cuentas por pagar", Comp: CuentasPorPagarTab },
@@ -24,13 +26,18 @@ const TABS = [
   { key: "detracciones", label: "🏦 Detracciones", Comp: DetraccionesTab },
   { key: "lotes", label: "📦 Lotes de pago", Comp: LotesTab },
   { key: "conciliacion", label: "🔗 Conciliación", Comp: ConciliacionTab },
+  // Los adelantos y devoluciones de las reservas de traslado que tomó la IA del CRM. La alerta de
+  // «pago reportado sin verificar» enlaza aquí (/tesoreria?tab=adelantos).
+  { key: "adelantos", label: "💳 Adelantos de reservas", Comp: AdelantosReservasTab },
 ] as const;
 
 type ClaveTab = (typeof TABS)[number]["key"];
 
-type Contadores = Record<ClaveTab, number>;
+// null = todavía contando o no se pudo contar: el rótulo no enseña un número (un 0 falso diría
+// «no hay nada» sobre una lista que no se leyó).
+type Contadores = Record<ClaveTab, number | null>;
 
-const SIN_CONTAR: Contadores = { cxp: 0, planilla: 0, detracciones: 0, lotes: 0, conciliacion: 0 };
+const SIN_CONTAR: Contadores = { cxp: 0, planilla: 0, detracciones: 0, lotes: 0, conciliacion: 0, adelantos: null };
 
 function HubInterno() {
   const router = useRouter();
@@ -43,13 +50,16 @@ function HubInterno() {
 
   const contar = useCallback(async () => {
     const soloCuenta = { count: "exact" as const, head: true };
-    const [cxp, planilla, detracciones, lotes, fugas] = await Promise.all([
+    const [cxp, planilla, detracciones, lotes, fugas, adelantos] = await Promise.all([
       supabase.from("v_cuentas_por_pagar").select("id", soloCuenta).neq("estado_pago", "pagada"),
       // Un gasto rechazado ya no es trabajo pendiente aunque siga figurando impago.
       supabase.from("gastos_generales").select("id", soloCuenta).neq("estado_pago", "pagada").neq("estado_aprobacion", "rechazado"),
       supabase.from("v_detracciones_pendientes").select("origen_id", soloCuenta).eq("lado", "compra"),
       supabase.from("lotes_pago").select("id", soloCuenta).in("estado", ["borrador", "aprobado", "enviado_banco"]),
       supabase.from("v_fugas_bancarias").select("id", soloCuenta),
+      // Por la ruta (la tabla no tiene políticas para la sesión): lo que le toca a Tesorería. Sin la
+      // migración o sin el módulo, no se pinta ningún número.
+      leerListaTesoreria("pendientes").catch(() => null),
     ]);
     setContadores({
       cxp: Number(cxp.count ?? 0),
@@ -57,6 +67,7 @@ function HubInterno() {
       detracciones: Number(detracciones.count ?? 0),
       lotes: Number(lotes.count ?? 0),
       conciliacion: Number(fugas.count ?? 0),
+      adelantos: adelantos?.ok && !adelantos.datos.sinMigracion ? adelantos.datos.filas.length : null,
     });
   }, []);
 
@@ -80,7 +91,7 @@ function HubInterno() {
                 className="px-4 py-2.5 text-sm font-bold border-b-2 -mb-px transition-all whitespace-nowrap"
                 style={{ borderColor: on ? "#0b315f" : "transparent", color: on ? "#0b315f" : "#9ca3af" }}
               >
-                {t.label} ({contadores[t.key]})
+                {t.label}{contadores[t.key] != null ? ` (${contadores[t.key]})` : ""}
               </button>
             );
           })}

@@ -83,6 +83,8 @@ export type AsignacionConf = {
 export type PagoConf = {
   id: number;
   codigo?: string | null;
+  /** «cobro» (adelanto) o «pago» (una devolución al cliente). Solo los cobros suman al adelanto. */
+  sentido?: string | null;
   fecha: string | null;
   monto: number | null;
   moneda?: string | null;
@@ -251,9 +253,13 @@ export function importeDelDia(tramos: Pick<TramoConf, "precio_cliente">[], cot: 
   return { conImporte: con.length, totalPEN, moneda, tc, total: aMonedaCot(totalPEN, moneda, cot?.tipo_cambio) };
 }
 
-/** Lo ya cobrado en la moneda de la reserva (sin anulados). */
+/**
+ * Lo ya cobrado en la moneda de la reserva (sin anulados). Una DEVOLUCIÓN (`sentido = 'pago'`, la
+ * de una reserva de traslado cancelada) nunca suma: sumarla le pediría al cliente el mismo dinero dos
+ * veces. Quien lee ya filtra los cobros (`leerEntrada`); esto es la segunda defensa.
+ */
 export function cobradoEn(pagos: PagoConf[], moneda: Moneda): number {
-  return r2(pagos.filter((p) => !p.anulado && num(p.monto) > 0 && normalizarMoneda(p.moneda) === moneda).reduce((s, p) => s + num(p.monto), 0));
+  return r2(pagos.filter((p) => !p.anulado && p.sentido !== "pago" && num(p.monto) > 0 && normalizarMoneda(p.moneda) === moneda).reduce((s, p) => s + num(p.monto), 0));
 }
 
 // ── El juicio ────────────────────────────────────────────────────────────────
@@ -306,7 +312,8 @@ export function juzgarConfirmacion(e: EntradaConfirmacion): JuicioConfirmacion {
     b("moneda_sin_tc", "La cotización está en dólares y no tiene un tipo de cambio válido: corrígelo en Cotizaciones.");
   }
 
-  const pagos = e.pagos.filter((p) => !p.anulado && num(p.monto) > 0);
+  // Solo los COBROS: una devolución (`sentido = 'pago'`) no es un adelanto (ver `cobradoEn`).
+  const pagos = e.pagos.filter((p) => !p.anulado && p.sentido !== "pago" && num(p.monto) > 0);
   const otra = pagos.filter((p) => normalizarMoneda(p.moneda) !== moneda);
   if (otra.length) {
     b("pago_otra_moneda", `Hay ${otra.length} cobro(s) registrados en otra moneda que la de la reserva (${moneda}). No se convierten: Tesorería tiene que registrarlos en ${moneda}.`);

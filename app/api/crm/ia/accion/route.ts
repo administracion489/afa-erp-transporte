@@ -94,6 +94,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // La reserva de traslados tiene su propia tarjeta y su ruta (/api/crm/reservas-traslado):
+    // aprobarla aquí la daría por resuelta sin crear nada ni pedir el pago.
+    if (accion.tipo === "reserva_traslado")
+      return NextResponse.json({ ok: false, codigo: "usar_tarjeta_reserva", error: "Esta reserva de traslado se resuelve desde su tarjeta (Hay unidad / No hay unidad), no desde aquí." }, { status: 409 });
+
     if (accion.estado !== "pendiente")
       return NextResponse.json({ ok: false, error: `La acción ya fue ${accion.estado}` }, { status: 409 });
 

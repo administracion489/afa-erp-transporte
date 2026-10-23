@@ -14,7 +14,8 @@
 //
 // DIVERGENCIAS DECLARADAS respecto del HTML (las comprueba la matriz):
 //  · Fuentes estándar (Helvetica, WinAnsi): los emojis (✅ ❌ 📋 ⏰) y los íconos del pie no existen
-//    ahí. Los de las listas se DIBUJAN (un check verde, una X roja, un portapapeles); los demás se
+//    ahí. Los de las listas se DIBUJAN (un check verde, una X roja, un portapapeles, un calendario
+//    para la política de reserva); los demás se
 //    omiten. Todo texto pasa por `aWinAnsi` (lib/pdf-winansi.ts): pdf-lib LANZA con un carácter que
 //    la fuente no tiene, y parte de ese texto lo escribe el cliente.
 //  · Sin logo NO se usa el del bundle (es el de otra empresa, y este ERP se vende): la tarjeta
@@ -27,7 +28,7 @@
 
 import { PDFDocument, StandardFonts, degrees, rgb, type PDFFont, type PDFImage, type PDFPage, type RGB } from "pdf-lib";
 import { aWinAnsi } from "./pdf-winansi";
-import { listaVisible, type CajaDoc, type DocCorporativo, type FilaDoc, type ListaDoc } from "./cotizacion-corporativo";
+import { listaVisible, reservaVisible, type CajaDoc, type DocCorporativo, type FilaDoc, type ListaDoc } from "./cotizacion-corporativo";
 import { NOMBRE_SIN_CONFIGURAR } from "./empresa-perfil";
 import { MAX_DESCRIPCION_RENGLONES, MAX_RENGLONES_DESCRIPCION } from "./pdf-chrome";
 
@@ -630,13 +631,14 @@ export async function dibujarPdfCorporativo(d: DocCorporativo, img: ImagenesCorp
 
   if (p2.saltoAntesDeCondiciones) nueva();
 
-  // ── Servicio incluye | No incluye, y Consideraciones generales ──
+  // ── Servicio incluye | No incluye, Consideraciones generales y la política de reserva ──
   {
     const om = p2.omitirVacias;
     const vInc = listaVisible(p2.incluye, om), vNo = listaVisible(p2.noIncluye, om), vGen = listaVisible(p2.generales, om);
+    const vRes = reservaVisible(p2);
     const VERDE_T = hex("#166534"), VERDE_B = hex("#16a34a"), ROJO_T = hex("#991b1b"), ROJO_B = hex("#dc2626");
     const LIS = 10.5, LILH = 16.8, ICONO = 15;
-    type Col = { lista: ListaDoc; color: RGB; borde: RGB; icono: "check" | "x" | "nota" };
+    type Col = { lista: ListaDoc; color: RGB; borde: RGB; icono: "check" | "x" | "nota" | "calendario" };
     const medirCol = (c: Col, w: number) => {
       const tit = partir(MAY(c.lista.titulo, 80), neg, LIS, w - ICONO);
       const items = c.lista.items.map((it) => partir(T(it, 600), reg, LIS, w - 40));
@@ -653,6 +655,12 @@ export async function dibujarPdfCorporativo(d: DocCorporativo, img: ImagenesCorp
       } else if (k === "x") {
         linea(pag, x + 1.5, yb + 1.5, x + s - 1.5, yb + s - 1.5, ROJO_B, 2.2);
         linea(pag, x + s - 1.5, yb + 1.5, x + 1.5, yb + s - 1.5, ROJO_B, 2.2);
+      } else if (k === "calendario") {
+        redondeado(pag, x + 0.5, yb + 1, s - 1, s - 1, 1.5, { borde: color, grosor: 1.2 });
+        rect(pag, x + 0.5, yb + 1, s - 1, 3, { color });
+        linea(pag, x + 3.5, yb - 0.6, x + 3.5, yb + 2.4, color, 1.2);
+        linea(pag, x + s - 3.5, yb - 0.6, x + s - 3.5, yb + 2.4, color, 1.2);
+        for (const dx of [3, 5.5, 8]) rect(pag, x + dx - 0.7, yb + 6.6, 1.4, 1.4, { color });
       } else {
         redondeado(pag, x + 1, yb, s - 2, s, 1.5, { borde: color, grosor: 1.2 });
         rect(pag, x + 3.5, yb - 1, s - 7, 2.5, { color });
@@ -701,8 +709,8 @@ export async function dibujarPdfCorporativo(d: DocCorporativo, img: ImagenesCorp
       y = y0 + alto;
       fin(10);
     }
-    if (vGen) {
-      const c: Col = { lista: p2.generales, color: CP, borde: CP, icono: "nota" };
+    // Una lista a todo el ancho, partible entre hojas (el título no se queda solo al pie).
+    const listaAncha = (c: Col) => {
       const m = medirCol(c, CW);
       bloque(8);
       asegurar(altoTit(m.tit) + 11 + (m.items[0] ? Math.max(1, m.items[0].length) * LILH : 0));
@@ -710,7 +718,10 @@ export async function dibujarPdfCorporativo(d: DocCorporativo, img: ImagenesCorp
       y += 11;
       pintarItems(m.items, MX, true);
       fin(11);
-    }
+    };
+    if (vGen) listaAncha({ lista: p2.generales, color: CP, borde: CP, icono: "nota" });
+    // La política de reserva, después de las generales (como en el HTML), solo con líneas.
+    if (vRes) listaAncha({ lista: p2.reserva, color: CP, borde: CP, icono: "calendario" });
   }
 
   // ════════════════════════════════════════════════════════════════════════════

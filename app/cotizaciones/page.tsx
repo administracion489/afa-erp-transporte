@@ -19,7 +19,6 @@ import {
   type CodigoUso, type ConsidFila, type Diseno, type PlantillaFila, type ReglaPlantilla,
 } from "@/lib/cotizacion-plantillas";
 import { leerPlantillasYReglas } from "@/lib/cotizacion-plantillas-datos";
-import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
 import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from "@/lib/coordenadas";
@@ -47,8 +46,8 @@ import {
   NIVELES, NIVEL_CFG, nivelDeEquipamiento, equipamientoDeNivel, nivelDeFicha, fichasDelNivel,
   planDeNivel, cotejarUnidadConNivel, type NivelServicio,
 } from "@/lib/costos/nivel-servicio";
-import { insertarServicioNuevo } from "@/lib/reservas-autoseleccion";
-import { planRetorno } from "@/lib/cotizacion-retorno";
+import { ejecutarConversion } from "@/lib/cotizacion-a-reserva-datos";
+import type { CotParaReserva } from "@/lib/cotizacion-a-reserva";
 import { planDePropagacion, MOTIVO_NO_PROPAGA, type MotivoNoPropaga } from "@/lib/paradas-materializar";
 import dynamic from "next/dynamic";
 import { estadoMarca, firmaParaderos, indiceDeInsercion, type HoraCalc, type FilaPlan } from "@/lib/paradas-horario";
@@ -1858,7 +1857,7 @@ export default function CotizacionesPage(){
       vehiculo_tercero_id:form.vehiculo_tercero_id?Number(form.vehiculo_tercero_id):null,
       // Las condiciones quedan ESCRITAS en la fila (versión 2): el PDF imprime estas, las que muestra
       // el formulario, y no las que tenga la plantilla el día que se imprima (lib/cotizacion-plantillas.ts).
-      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,version:CONSID_VERSION,plantilla:plantillaForm},plantilla_pdf:plantillaForm,
+      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),version:CONSID_VERSION,plantilla:plantillaForm},plantilla_pdf:plantillaForm,
       paradas_json:paradas.length>0?paradas:null,paradas_retorno_json:paradasRetorno.length>0?paradasRetorno:null,modo_servicio:form.modo_servicio,
       dias_servicio:Number(form.dias_servicio)||1,horas_servicio:Number(form.horas_servicio)||8,
       pernocte_costo:pernocteF||null,precio_dia:precioDiaNum,precio_mes_estimado:precioMesNum,
@@ -2308,93 +2307,14 @@ export default function CotizacionesPage(){
     alert(`✅ Cotización #${c.numero_cotizacion||c.id} duplicada correctamente${avisoCopia}`);
     refrescar();
   };
+  // «→ Res.»: lo hace el EJECUTOR compartido con el «✅ Hay unidad» del CRM (lib/cotizacion-a-reserva-datos.ts,
+  // con el plan PURO de lib/cotizacion-a-reserva.ts): las mismas preguntas, las mismas escrituras en el
+  // mismo orden y el mismo aviso que el código que vivía aquí (la matriz scripts/prueba-cotizacion-a-reserva.mts
+  // corre el viejo copiado literal contra el ejecutor). La página solo pregunta, avisa y refresca.
   const convertirAReserva=async(cot:Cotizacion)=>{
-    if(cot.estado!=="aprobado"){alert("Solo cotizaciones aprobadas");return;}
-    // `limit(1)` y no `maybeSingle()`: con más de una reserva ya creada (una por vehículo),
-    // `maybeSingle` da error, `existe` queda en null y se volvían a crear todas. Y una lectura que
-    // falla no es «todavía no tiene reservas».
-    const{data:existentes,error:eExiste}=await supabase.from("reservas").select("id,fecha_servicio,vehiculo_id,vehiculo_tercero_id,reserva_vinculada_id,estado").eq("cotizacion_id",cot.id).limit(20);
-    if(eExiste){alert(`No se pudo comprobar si la cotización ya tiene reservas, así que no se creó ninguna: ${eExiste.message}`);return;}
-    const ps=cot.paradas_json||[];const pI=ps.find(p=>p.tipo==="inicio");
-    const fechaIda=cot.fecha_servicio||hoyLima();
-    const planRet=planRetorno(cot,fechaIda);
-    // El retorno es su PROPIA reserva (lib/cotizacion-retorno.ts): nace en S/ 0.00 —el importe va en
-    // la ida— y enlazado a ella por los dos lados. Devuelve null si salió, o el motivo si no.
-    const crearRetorno=async(ida:{id:number;vehiculo_id:number|null;vehiculo_tercero_id:number|null}):Promise<string|null>=>{
-      if(planRet.codigo!=="ok")return null;
-      const paradasSemilla=planRet.paradas.map((p,i,a)=>({id:`ret${i}`,tipo:i===0?"inicio":i===a.length-1?"destino":"intermedia",nombre:p.nombre,direccion:p.direccion||"",lat:p.lat!=null?String(p.lat):"",lng:p.lng!=null?String(p.lng):"",hora:p.hora||""}));
-      const fila:Record<string,unknown>={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:planRet.origen,destino:planRet.destino,fecha_servicio:planRet.fecha,hora_servicio:planRet.hora,estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:paradasSemilla,costo_proveedor:0,precio_cliente:0,vehiculo_id:ida.vehiculo_id,vehiculo_tercero_id:ida.vehiculo_tercero_id,reserva_vinculada_id:ida.id,direccion_servicio:"retorno",ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:paradasSemilla,hora:planRet.hora,sentido:"retorno"})||null};
-      let ins=await insertarServicioNuevo((f)=>supabase.from("reservas").insert(f).select().single(),fila);
-      if(ins.error&&faltaColumna(ins.error,"direccion_servicio")){delete fila.direccion_servicio;ins=await insertarServicioNuevo((f)=>supabase.from("reservas").insert(f).select().single(),fila);}
-      if(ins.error||!ins.data)return ins.error?.message||"sin respuesta";
-      const retId=ins.data.id as number;
-      let up=await supabase.from("reservas").update({reserva_vinculada_id:retId,direccion_servicio:"ida"}).eq("id",ida.id);
-      if(up.error&&faltaColumna(up.error,"direccion_servicio"))up=await supabase.from("reservas").update({reserva_vinculada_id:retId}).eq("id",ida.id);
-      const{error:eP}=await supabase.from("paradas").insert(planRet.paradas.map(p=>({reserva_id:retId,orden:p.orden,nombre:p.nombre,direccion:p.direccion,lat:p.lat,lng:p.lng,hora_estimada:p.hora,estado:"pendiente"})));
-      const avisos=[up.error?`no se pudo enlazar a la ida (${up.error.message}): enlázalos desde Liquidaciones o Programación`:"",eP?`sus paradas no se crearon (${eP.message})`:""].filter(Boolean);
-      return avisos.length?`retorno creado, pero ${avisos.join(" y ")}`:null;
-    };
-    const textoRetorno=(errores:(string|null)[],n:number)=>{
-      if(planRet.codigo==="no_aplica")return"";
-      if(planRet.codigo!=="ok")return `\n⚠️ No se creó el RETORNO: ${planRet.motivo} Créalo desde Programación.`;
-      const e=errores.filter(Boolean);
-      return e.length?`\n⚠️ Retorno: ${e.join(" · ")}`:`\n↩ Y ${n>1?`${n} retornos`:"su retorno"} del ${planRet.fecha.split("-").reverse().join("/")} a las ${planRet.hora} (${planRet.origen} → ${planRet.destino}), en S/ 0.00: el importe va en la ida.`;
-    };
-    if(existentes?.length){
-      // Convertida antes de que «→ Res.» creara el retorno: se completa SOLO si ninguna ida tiene ya
-      // su hermano (por ninguno de los dos lados del enlace) y ninguna está cancelada.
-      const idas=existentes as {id:number;fecha_servicio:string;vehiculo_id:number|null;vehiculo_tercero_id:number|null;reserva_vinculada_id:number|null;estado:string}[];
-      if(planRet.codigo==="no_aplica"||idas.some(r=>r.reserva_vinculada_id!=null||r.estado==="cancelada")){alert("Ya fue convertida en reserva");return;}
-      const{data:atras,error:eAt}=await supabase.from("reservas").select("id").in("reserva_vinculada_id",idas.map(r=>r.id)).limit(1);
-      if(eAt){alert(`No se pudo comprobar si ya tiene retorno, así que no se creó nada: ${eAt.message}`);return;}
-      if(atras?.length){alert("Ya fue convertida en reserva");return;}
-      if(planRet.codigo!=="ok"){alert(`Ya fue convertida en reserva, pero le falta el RETORNO y no se puede crear: ${planRet.motivo} Créalo desde Programación.`);return;}
-      if(!confirm(`La cotización #${cot.numero_cotizacion||cot.id} ya tiene ${idas.length} reserva(s) de IDA, pero no su RETORNO.\n¿Crear ${idas.length>1?`${idas.length} retornos`:"el retorno"}: ${planRet.fecha.split("-").reverse().join("/")} ${planRet.hora} · ${planRet.origen} → ${planRet.destino}, en S/ 0.00 (el importe sigue en la ida)?`))return;
-      const errs:(string|null)[]=[];
-      for(const ida of idas)errs.push(await crearRetorno(ida));
-      alert(`✅ Retorno completado${textoRetorno(errs,idas.length)}`);
-      refrescar();return;
-    }
-    const its=cot.items_json||[];
-    const vehKey=(it:ItemCot)=>it.vehiculo_flota_id?`f_${it.vehiculo_flota_id}`:it.vehiculo_tercero_id?`t_${it.vehiculo_tercero_id}`:"sin";
-    const grupos=its.reduce((m,it)=>{const k=vehKey(it);if(!m[k])m[k]=[];m[k].push(it);return m;},{} as Record<string,ItemCot[]>);
-    const keys=Object.keys(grupos);
-    const useMulti=keys.length>1||(keys.length===1&&keys[0]!=="sin"&&(keys[0].startsWith("f_")||keys[0].startsWith("t_")));
-    const basePayload={cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:cot.destino,fecha_servicio:fechaIda,hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null,costo_proveedor:0,ruta_nombre:sugerirNombreRuta({asunto:cot.asunto,paradas:cot.paradas_json,hora:pI?.hora||cot.hora_ida,sentido:"ida"})||null};
-    const insertParadas=async(reservaId:number):Promise<string|null>=>{if(ps.length<1)return null;const{error}=await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:reservaId,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));return error?error.message:null;};
-    const avisoParadas=(e:string|null)=>e?`\n⚠️ Pero sus ${ps.length} paradas no se pudieron crear (${e}): agrégalas desde Programación.`:"";
-    // La reserva lleva el precio EN SOLES (la fila autoritativa). En una cotización en dólares se
-    // dice a qué tipo de cambio: la reserva y la liquidación ya no hablan de dólares.
-    const monCot=normalizarMoneda(cot.moneda);
-    if(monCot==="USD"&&!confirm(`La cotización #${cot.numero_cotizacion||cot.id} está en dólares (${fmtCot(Number(cot.precio_cliente||0),"USD",cot.tipo_cambio)}).\nLa reserva se crea con el precio EN SOLES: ${fmtS(Number(cot.precio_cliente||0))} al tipo de cambio de la cotización (S/ ${revisarTipoCambio(cot.tipo_cambio).tc??"—"} por US$).\n¿Crear la reserva?`))return;
-    const notaTc=monCot==="USD"?`\nℹ️ La cotización está en dólares: la reserva queda con el precio EN SOLES al tipo de cambio de la cotización (S/ ${revisarTipoCambio(cot.tipo_cambio).tc??"—"} por US$).`:"";
-    if(!useMulti){
-      // Nace con «Permitir autoselección» (lib/reservas-autoseleccion.ts).
-      const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:cot.precio_cliente,vehiculo_id:cot.vehiculo_flota_id||null,vehiculo_tercero_id:cot.vehiculo_tercero_id||null});
-      if(error){alert(error.message);return;}
-      const eParadas=r?await insertParadas(r.id):null;
-      const eRet=r?await crearRetorno(r):null;
-      alert(`✅ Reserva creada${ps.length>0&&!eParadas?` con ${ps.length} paradas`:""}${avisoParadas(eParadas)}${textoRetorno([eRet],1)}${notaTc}`);
-    } else {
-      let count=0;let eParadas:string|null=null;const errsRet:(string|null)[]=[];
-      for(const k of keys){
-        const gItems=grupos[k];
-        const gTotal=totalesEnMoneda(gItems,"PEN",null,cot.incluye_igv!==false)!.total;
-        const vehFlotaId=k.startsWith("f_")?Number(k.slice(2)):(k==="sin"?cot.vehiculo_flota_id||null:null);
-        const vehTercId=k.startsWith("t_")?Number(k.slice(2)):(k==="sin"?cot.vehiculo_tercero_id||null:null);
-        const{data:r,error}=await insertarServicioNuevo((fila)=>supabase.from("reservas").insert(fila).select().single(),{...basePayload,precio_cliente:gTotal,vehiculo_id:vehFlotaId,vehiculo_tercero_id:vehTercId});
-        if(error){
-          // Las ya creadas se quedan, y «→ Res.» ya no vuelve a convertir esta cotización: se dice cuántas faltan.
-          alert(count>0?`⚠️ Se crearon ${count} de ${keys.length} reservas y la siguiente falló: ${error.message}\nLas que faltan créalas desde Programación (esta cotización ya figura como convertida).${avisoParadas(eParadas)}`:error.message);
-          refrescar();return;
-        }
-        if(r&&count===0)eParadas=await insertParadas(r.id);
-        if(r)errsRet.push(await crearRetorno(r));
-        count++;
-      }
-      alert(`✅ ${count} reserva${count>1?"s creadas (una por vehículo)":"creada"}${avisoParadas(eParadas)}${textoRetorno(errsRet,count)}${notaTc}`);
-    }
-    refrescar();
+    const r=await ejecutarConversion(supabase,cot as unknown as CotParaReserva,{hoy:hoyLima(),confirmar:(t)=>confirm(t)});
+    if(r.mensaje)alert(r.mensaje);
+    if(r.refrescar)refrescar();
   };
   const editarCot=(c:Cotizacion)=>{
     // Se teclea en la moneda de la cotización: con dólares y un TC válido, ítems y precio/día se
@@ -2448,7 +2368,7 @@ export default function CotizacionesPage(){
     }
     // La que se está editando imprime lo que muestra el formulario, como quedará guardada (versión 2).
     // Una sin condiciones guardadas, las de fábrica (lo mismo que carga el formulario al abrirla).
-    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,version:CONSID_VERSION,plantilla:plantillaForm}:(cot.consideraciones_json||{...DEFAULT_CONSID});
+    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),version:CONSID_VERSION,plantilla:plantillaForm}:(cot.consideraciones_json||{...DEFAULT_CONSID});
     const r=htmlCotizacion({
       cot,cliente:cl,items:its,vehiculos,repr:nombreFinal,consid:considFinal,plantilla:diseno,
       cfg:fila,empresa:empData as EmpresaPerfilPDF|null,
@@ -3064,7 +2984,7 @@ export default function CotizacionesPage(){
                   {ambar&&usoAuto.detalle&&<p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {usoAuto.detalle}</p>}
                   {!plantillaFijada&&usoAuto.codigo==="lectura_fallida"&&<p className="text-[11px] text-amber-800">Se usa la corporativa y, si no se pudo leer, las condiciones de fábrica.</p>}
                   {avisoConsidForm&&<p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {avisoConsidForm}</p>}
-                  {otraPl&&<p className="text-[11px] text-gray-600">Las condiciones de abajo no son las de «{otraPl.nombre||otraPl.id}» (se editaron{consid.plantilla?` o vienen de «${nombrePlantilla(consid.plantilla)||consid.plantilla}»`:""}). <button type="button" className="font-bold text-[#0b315f] hover:underline" onClick={()=>{const n=consid.incluye.length+consid.no_incluye.length+consid.generales.length;if(confirm(`Se reemplazan las ${n} condiciones de abajo por las de la plantilla «${otraPl.nombre||otraPl.id}». ¿Continuar?`))setConsidEditada(null);}}>Cargar las condiciones de «{otraPl.nombre||otraPl.id}»</button></p>}
+                  {otraPl&&<p className="text-[11px] text-gray-600">Las condiciones de abajo no son las de «{otraPl.nombre||otraPl.id}» (se editaron{consid.plantilla?` o vienen de «${nombrePlantilla(consid.plantilla)||consid.plantilla}»`:""}). <button type="button" className="font-bold text-[#0b315f] hover:underline" onClick={()=>{const n=consid.incluye.length+consid.no_incluye.length+consid.generales.length+(consid.reserva?.length??0);if(confirm(`Se reemplazan las ${n} condiciones de abajo por las de la plantilla «${otraPl.nombre||otraPl.id}». ¿Continuar?`))setConsidEditada(null);}}>Cargar las condiciones de «{otraPl.nombre||otraPl.id}»</button></p>}
                   <p className="text-[10px] text-gray-400">Al guardar, las condiciones de abajo quedan escritas en la cotización y son las que imprime su PDF; cambiar después la plantilla no las cambia.</p>
                 </div>);
               })()}
@@ -3078,6 +2998,20 @@ export default function CotizacionesPage(){
                 <div className="space-y-1.5">{consid.generales.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,generales:prev.generales.map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,generales:prev.generales.filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
                 <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,generales:[...prev.generales,""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,generales:[...considDePlantilla(filaForm).generales]}))} title={`Vuelve a las consideraciones generales de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar las de la plantilla</button></div>
               </div>
+              {(()=>{
+                // La política de reserva, cambios y cancelación (supabase/cotizaciones-06): la copia la
+                // plantilla al crear y SOLO la imprime el diseño corporativo, después de las generales.
+                const reserva=consid.reserva??[];
+                const corp=disenoDe(filaForm??{id:plantillaForm})==="corporativo";
+                if(!corp&&reserva.length===0)return null;
+                return(<div className="rounded-xl border-2 p-3 space-y-2 mt-4" style={{background:"#f8fafc",borderColor:"#cbd5e1"}}>
+                  <p className="text-xs font-black text-[#0b315f]">📅 Reserva, cambios y cancelación</p>
+                  {!corp&&<p className="text-[10px] text-gray-500">El diseño de esta plantilla no imprime la política de reserva: solo la imprime el corporativo.</p>}
+                  {reserva.length===0&&<p className="text-[10px] text-gray-500">Sin política de reserva: el PDF no imprime este bloque.</p>}
+                  <div className="space-y-1.5">{reserva.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,reserva:(prev.reserva??[]).map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,reserva:(prev.reserva??[]).filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
+                  <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(prev.reserva??[]),""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(considDePlantilla(filaForm).reserva??[])]}))} title={`Vuelve a la política de reserva de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar la de la plantilla</button></div>
+                </div>);
+              })()}
             </div>
 
             <div className={requiereParadas?"rounded-2xl border-2 p-4":""}  style={requiereParadas?{borderColor:paradas.length<2?"#fca5a5":"#86efac",background:paradas.length<2?"#fff5f5":"#f0fdf4"}:{}}>

@@ -12,6 +12,9 @@
 // · Qué plantilla resulta de cada regla lo dice `plantillaParaUso` (lib/cotizacion-plantillas.ts), el
 //   mismo motor de /cotizaciones y de la IA: esta pantalla no compone su propia versión.
 // · Toda escritura pide la fila de vuelta: con RLS, sin el módulo Cotizaciones, vuelve vacía sin error.
+// · La política de reserva, cambios y cancelación (`condiciones_reserva`, supabase/cotizaciones-06) es
+//   la cuarta lista: solo la imprime el diseño corporativo y solo se ofrece si la columna existe (la
+//   fila la trae). Sin el SQL no se escribe nunca: el UPDATE fallaría entero por una columna accesoria.
 // ──────────────────────────────────────────────────────────────────────────────
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -23,7 +26,7 @@ import type { PerfilEmpresa } from "@/lib/empresa-perfil";
 import { faltaColumna } from "@/lib/columna-faltante";
 import {
   CAMPOS_PLANTILLA, ETIQUETA_CAMPO, ETIQUETA_DISENO, ETIQUETA_SEGMENTO, SEGMENTOS, SERVICIOS_PLANTILLA,
-  SQL_PLANTILLAS_USO, TABLA_PLANTILLAS, considSnapshot, disenoDe, ejemploParaVistaPrevia, esActiva,
+  SQL_PLANTILLAS_USO, SQL_POLITICA_RESERVA, TABLA_PLANTILLAS, considSnapshot, disenoDe, ejemploParaVistaPrevia, esActiva,
   esIdPlantillaValido, etiquetaCelda, idNuevaPlantilla, leeCampo, plantillaParaUso, plantillaPrincipal,
   reglasQueUsan, sirveParaIA,
   type Diseno, type PlantillaFila, type ReglaPlantilla, type Segmento, type ServicioPlantilla, type UsoPlantilla,
@@ -45,14 +48,20 @@ type Lectura =
 
 type Conteo = { n: number } | { error: string };
 type Tab = "datos" | "colores" | "condiciones" | "cuentas" | "idioma";
-type ListaK = "condiciones_incluye" | "condiciones_no_incluye" | "condiciones_generales";
+type ListaK = "condiciones_incluye" | "condiciones_no_incluye" | "condiciones_generales" | "condiciones_reserva";
 type ColorK = "color_primario" | "color_secundario" | "color_acento";
 
 const LISTAS: { k: ListaK; consid: keyof ConsidCot; titulo: string; nombre: string; color: string }[] = [
   { k: "condiciones_incluye", consid: "incluye", titulo: "✅ Incluye", nombre: "Incluye", color: "#166534" },
   { k: "condiciones_no_incluye", consid: "no_incluye", titulo: "❌ No incluye", nombre: "No incluye", color: "#991b1b" },
   { k: "condiciones_generales", consid: "generales", titulo: "📋 Consideraciones generales", nombre: "Consideraciones generales", color: "#0b315f" },
+  { k: "condiciones_reserva", consid: "reserva", titulo: "📅 Reserva, cambios y cancelación", nombre: "Reserva, cambios y cancelación", color: "#0b315f" },
 ];
+/** La política de reserva: sin la columna (falta cotizaciones-06) la fila no trae la clave. */
+const RESERVA_K: ListaK = "condiciones_reserva";
+const tieneColumnaReserva = (f: Record<string, unknown> | null | undefined): boolean => !!f && RESERVA_K in f;
+/** Lo que pone «Escribir»: las de fábrica, y la política (que no tiene de fábrica) vacía. */
+const deFabrica = (l: { consid: keyof ConsidCot }): string[] => [...(DEFAULT_CONSID_ES[l.consid] ?? [])];
 const COLORES: ColorK[] = ["color_primario", "color_secundario", "color_acento"];
 const COLOR_DEFECTO: Record<ColorK, string> = { color_primario: "#0b315f", color_secundario: "#1262bd", color_acento: "#C8A24B" };
 const MAX_NOMBRE = 80;
@@ -79,6 +88,8 @@ function patchDe(f: Record<string, unknown>, d: Diseno): Record<string, unknown>
     condiciones_incluye: listaLimpia(f.condiciones_incluye),
     condiciones_no_incluye: listaLimpia(f.condiciones_no_incluye),
     condiciones_generales: listaLimpia(f.condiciones_generales),
+    // La política de reserva: solo si el diseño la imprime y la columna existe (cotizaciones-06).
+    ...(leeCampo(d, RESERVA_K) && tieneColumnaReserva(f) ? { condiciones_reserva: listaLimpia(f.condiciones_reserva) } : {}),
   };
   if (leeCampo(d, "titulo_documento")) out.titulo_documento = textoOpcional(f.titulo_documento);
   if (leeCampo(d, "mensaje_cierre")) out.mensaje_cierre = textoOpcional(f.mensaje_cierre);
@@ -226,7 +237,7 @@ export default function PlantillasPDFPage() {
     const colorMalo = COLORES.find(c => patch[c] != null && !colorValido(patch[c]));
     if (colorMalo) { setErrorGuardar(`${ETIQUETA_CAMPO[colorMalo]}: «${String(patch[colorMalo])}» no es un color (se escribe #RRGGBB).`); setTab("colores"); return; }
 
-    const condCambian = LISTAS.some(l => !mismaLista(patch[l.k] as string[] | null, listaLimpia(base[l.k])));
+    const condCambian = LISTAS.some(l => l.k in patch && !mismaLista(patch[l.k] as string[] | null, listaLimpia(base[l.k])));
     if (condCambian) {
       const c = conteos[base.id];
       const ia = usosIA(base.id);
@@ -405,10 +416,11 @@ export default function PlantillasPDFPage() {
     return { texto, ignoradas };
   };
 
-  const listasDe = (d: Diseno) => LISTAS.filter(l => leeCampo(d, l.k));
+  /** Las listas que el diseño imprime (la política de reserva, solo si la fila trae su columna). */
+  const listasDe = (d: Diseno, f: Record<string, unknown> | null) => LISTAS.filter(l => leeCampo(d, l.k) && (l.k !== RESERVA_K || tieneColumnaReserva(f)));
 
   const condicionesResumen = (p: Fila) => {
-    const ls = listasDe(disenoDe(p));
+    const ls = listasDe(disenoDe(p), p);
     if (!ls.some(l => Array.isArray(p[l.k]))) return { propias: false, texto: "Sin condiciones propias: cada cotización imprime las suyas." };
     return {
       propias: true,
@@ -666,7 +678,8 @@ export default function PlantillasPDFPage() {
 
                 {/* ── CONDICIONES ── */}
                 {tab === "condiciones" && (() => {
-                  const ls = listasDe(diseno);
+                  const ls = listasDe(diseno, base);
+                  const faltaReserva = leeCampo(diseno, RESERVA_K) && !tieneColumnaReserva(base);
                   const ninguna = ls.every(l => form[l.k] == null);
                   const c = conteos[base.id];
                   const respaldoNombre = principalActual && principalActual.id !== base.id ? `la plantilla principal «${principalActual.nombre}»` : "fábrica";
@@ -692,7 +705,7 @@ export default function PlantillasPDFPage() {
                           <p style={{ margin: "4px 0 12px", fontSize: 12, color: C.gray600 }}>Una cotización nueva con esta plantilla empieza con las de {respaldoNombre}.</p>
                           <button onClick={() => setForm(prev => {
                             const n = { ...prev };
-                            for (const l of ls) n[l.k] = [...DEFAULT_CONSID_ES[l.consid]];
+                            for (const l of ls) n[l.k] = deFabrica(l);
                             return n;
                           })} style={{ minHeight: 38, padding: "0 16px", borderRadius: 10, border: "none", background: cp, color: "white", fontWeight: 800, fontSize: 12, cursor: "pointer" }}>Escribir condiciones para esta plantilla</button>
                         </div>
@@ -700,27 +713,40 @@ export default function PlantillasPDFPage() {
                         <>
                           {ls.map(l => {
                             const v = form[l.k];
+                            // La política de reserva: qué es y qué no lleva (lo mismo con y sin lista).
+                            const notaReserva = l.k === RESERVA_K
+                              ? <p style={{ fontSize: 11, color: C.gray500, margin: "6px 0 0" }}>La política de reserva, cambios y cancelación: el PDF la imprime después de las Consideraciones generales (si tiene líneas) y es la que la IA del CRM le envía al cliente, tal cual. No escribas teléfonos, correos ni la dirección web: con un enlace o un número de 6 o más dígitos, la IA deja sus cotizaciones de traslado para que las revise un ejecutivo.</p>
+                              : null;
                             if (v == null) {
                               return (
                                 <div key={l.k}>
                                   <p style={{ fontWeight: 800, fontSize: 12, color: l.color, textTransform: "uppercase", margin: "0 0 6px" }}>{l.titulo}</p>
                                   <p style={{ fontSize: 12, color: C.gray600, margin: "0 0 6px" }}>Sin lista propia: cada cotización imprime la suya.</p>
-                                  <button onClick={() => set(l.k, [...DEFAULT_CONSID_ES[l.consid]])} style={{ fontSize: 12, fontWeight: 700, color: l.color, background: "none", border: "none", cursor: "pointer", padding: "4px 0" }}>Escribir esta lista</button>
+                                  <button onClick={() => set(l.k, deFabrica(l))} style={{ fontSize: 12, fontWeight: 700, color: l.color, background: "none", border: "none", cursor: "pointer", padding: "4px 0" }}>Escribir esta lista</button>
+                                  {notaReserva}
                                 </div>
                               );
                             }
                             return (
-                              <ListaCondiciones key={l.k} titulo={l.titulo} color={l.color} items={(Array.isArray(v) ? v : []).map(x => String(x ?? ""))}
-                                onChange={items => set(l.k, items)} avisoLinea={avisoLinea}
-                                vacia={`Lista vacía: el PDF no imprime ninguna línea en «${l.nombre}». Para que cada cotización imprima la suya, quita las condiciones de la plantilla.`} />
+                              <div key={l.k}>
+                                <ListaCondiciones titulo={l.titulo} color={l.color} items={(Array.isArray(v) ? v : []).map(x => String(x ?? ""))}
+                                  onChange={items => set(l.k, items)} avisoLinea={avisoLinea}
+                                  vacia={l.k === RESERVA_K
+                                    ? "Lista vacía: el PDF no imprime la política de reserva (ni su título) y la IA no tiene una política que enviar."
+                                    : `Lista vacía: el PDF no imprime ninguna línea en «${l.nombre}». Para que cada cotización imprima la suya, quita las condiciones de la plantilla.`} />
+                                {notaReserva}
+                              </div>
                             );
                           })}
                           <div style={{ borderTop: `1px solid ${C.gray200}`, paddingTop: 14 }}>
-                            <button onClick={() => setForm(prev => ({ ...prev, condiciones_incluye: null, condiciones_no_incluye: null, condiciones_generales: null }))}
+                            <button onClick={() => setForm(prev => ({ ...prev, condiciones_incluye: null, condiciones_no_incluye: null, condiciones_generales: null, ...(tieneColumnaReserva(prev) ? { condiciones_reserva: null } : {}) }))}
                               style={{ minHeight: 38, padding: "0 16px", borderRadius: 10, border: "1px solid #fca5a5", background: "#fff5f5", color: "#991b1b", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Quitar las condiciones de esta plantilla</button>
                             <p style={{ fontSize: 11, color: C.gray500, margin: "6px 0 0" }}>Sin condiciones propias, cada cotización imprime las suyas (una nueva empieza con las de {respaldoNombre}). Se aplica al guardar.</p>
                           </div>
                         </>
+                      )}
+                      {faltaReserva && (
+                        <div style={ambar}>⚠ La lista «Reserva, cambios y cancelación» se edita aquí cuando se corra {SQL_POLITICA_RESERVA} en Supabase. Mientras tanto, el PDF no imprime ninguna política de reserva.</div>
                       )}
                     </div>
                   );

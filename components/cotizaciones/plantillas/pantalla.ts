@@ -171,7 +171,7 @@ export function lineasConfirmTraslado(x: {
     if (f.codigo === "distintas") out.push("⚠ No son las de la plantilla «corporativo»: la IA dejará cada cotización de traslado para que la revise un ejecutivo antes de enviarla.");
   }
   if (x.resultante) {
-    const lineas = [x.resultante.condiciones_incluye, x.resultante.condiciones_no_incluye, x.resultante.condiciones_generales]
+    const lineas = [x.resultante.condiciones_incluye, x.resultante.condiciones_no_incluye, x.resultante.condiciones_generales, x.resultante.condiciones_reserva]
       .flatMap(l => (Array.isArray(l) ? l : [])).map(s => String(s ?? "").trim()).filter(Boolean);
     for (const l of lineas) {
       const m = motivosLineaIA(l);

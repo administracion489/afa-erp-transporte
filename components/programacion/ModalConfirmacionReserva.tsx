@@ -15,6 +15,8 @@ import { useCallback, useEffect, useState } from "react";
 import { X, FileCheck2, Download, Share2, Eye, AlertTriangle } from "lucide-react";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { ETIQUETA_CAMBIO, nombreArchivo, type CodigoCambio, type Idioma, type JuicioConfirmacion, type ExtrasConf } from "@/lib/confirmacion-reserva";
+import FormCobro, { type DatosCobro } from "@/components/reservas/FormCobro";
+import ComprobanteDeReserva from "@/components/reservas/ComprobanteDeReserva";
 
 type Version = { id: number; version: number; codigo: string; cambios: CodigoCambio[]; generado_en: string; generado_por_nombre: string | null };
 type Pago = { id: number; codigo: string | null; fecha: string | null; monto: number; moneda: string | null; metodo: string | null; anulado: boolean };
@@ -27,7 +29,6 @@ type Estado = {
 
 const inputCls = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20";
 const dinero = (n: number, m: string) => `${m === "USD" ? "US$" : "S/"} ${Number(n || 0).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const hoyLima = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
 const fechaHora = (iso: string) => new Date(iso).toLocaleString("es-PE", { timeZone: "America/Lima", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 
 async function leerEstado(reservaId: number): Promise<{ est: Estado } | { error: string }> {
@@ -48,7 +49,6 @@ export default function ModalConfirmacionReserva({ reservaId, etiqueta, onCerrar
   const [extras, setExtras] = useState<ExtrasConf>({});
   const [idioma, setIdioma] = useState<Idioma>("es");
   const [ocupado, setOcupado] = useState<string | null>(null);
-  const [adel, setAdel] = useState({ monto: "", fecha: hoyLima(), metodo: "transferencia", referencia: "" });
 
   const aplicar = useCallback((r: Awaited<ReturnType<typeof leerEstado>>, primera: boolean) => {
     if ("error" in r) { setError(r.error); return; }
@@ -87,18 +87,19 @@ export default function ModalConfirmacionReserva({ reservaId, etiqueta, onCerrar
     setOcupado(null);
   };
 
-  const registrarAdelanto = async () => {
-    const monto = Number(adel.monto.replace(",", "."));
-    if (!(monto > 0)) { setMsg({ tono: "error", texto: "Escribe el monto del adelanto." }); return; }
-    if (!confirm(`¿Registrar un cobro de ${dinero(monto, est!.importe.moneda)} del ${adel.fecha} para esta reserva?\nSolo regístralo si el dinero ya está en la cuenta (validado contra el banco o recibido en efectivo).`)) return;
+  // El formulario es el compartido con la tarjeta del CRM y Tesorería (components/reservas/FormCobro.tsx):
+  // el monto no se precarga y la pregunta nombra el dinero. Los topes los juzga el servidor.
+  const registrarAdelanto = async (d: DatosCobro): Promise<boolean> => {
     setOcupado("adelanto"); setMsg(null);
+    let ok = false;
     try {
-      const r = await post({ accion: "adelanto", monto, fecha: adel.fecha, metodo: adel.metodo, referencia: adel.referencia });
+      const r = await post({ accion: "adelanto", monto: d.monto, fecha: d.fecha, metodo: d.metodo, referencia: d.referencia });
       setMsg({ tono: "ok", texto: `Cobro ${r.codigo ?? ""} registrado.` });
-      setAdel((a) => ({ ...a, monto: "", referencia: "" }));
+      ok = true;
       await cargar();
     } catch (e) { setMsg({ tono: "error", texto: (e as Error).message }); }
     setOcupado(null);
+    return ok;
   };
 
   const anular = async (p: Pago) => {
@@ -206,24 +207,19 @@ export default function ModalConfirmacionReserva({ reservaId, etiqueta, onCerrar
                 )}
                 {est.puedeCobrar ? (
                   <div className="mt-3 border-t border-dashed border-gray-200 pt-3">
-                    <p className="text-[10px] font-bold uppercase text-gray-500 mb-1.5">Registrar adelanto validado ({moneda})</p>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      <input className={inputCls} inputMode="decimal" placeholder="Monto" value={adel.monto} onChange={(e) => setAdel({ ...adel, monto: e.target.value })} />
-                      <input className={inputCls} type="date" max={hoyLima()} value={adel.fecha} onChange={(e) => setAdel({ ...adel, fecha: e.target.value })} />
-                      <select className={inputCls} value={adel.metodo} onChange={(e) => setAdel({ ...adel, metodo: e.target.value })}>
-                        {["transferencia", "deposito", "yape", "plin", "tarjeta", "efectivo"].map((m) => <option key={m} value={m}>{m}</option>)}
-                      </select>
-                      <input className={inputCls} placeholder={adel.metodo === "efectivo" ? "Nº de recibo (opcional)" : "Nº de operación"} value={adel.referencia} onChange={(e) => setAdel({ ...adel, referencia: e.target.value })} />
-                    </div>
-                    <button onClick={registrarAdelanto} disabled={!!ocupado || est.sinMigracion} className="mt-2 px-3 py-1.5 rounded-xl text-xs font-black text-white bg-green-700 disabled:opacity-40">
-                      {ocupado === "adelanto" ? "Registrando…" : "Registrar cobro"}
-                    </button>
-                    <p className="text-[10px] text-gray-400 mt-1">Queda en Finanzas como cobro sin aplicar (anticipo) de este cliente. Una captura del cliente no basta: regístralo cuando el dinero ya esté en la cuenta.</p>
+                    <FormCobro titulo="Registrar adelanto validado" moneda={moneda} textoBoton="Registrar cobro" ocupado={!!ocupado}
+                      bloqueado={est.sinMigracion} motivoBloqueo={`Falta correr ${est.sql} en Supabase.`}
+                      pregunta={(d) => `¿Registrar un cobro de ${dinero(d.monto, moneda)} del ${d.fecha.split("-").reverse().join("/")} (${d.metodo}${d.referencia ? `, op. ${d.referencia}` : ""}) para esta reserva?\nSolo regístralo si el dinero ya está en la cuenta (validado contra el banco o recibido en efectivo).`}
+                      onRegistrar={registrarAdelanto}
+                      nota="Queda en Finanzas como cobro sin aplicar (anticipo) de este cliente. Una captura del cliente no basta: regístralo cuando el dinero ya esté en la cuenta." />
                   </div>
                 ) : (
                   <p className="text-[11px] text-gray-500 mt-2">El adelanto lo registra quien tiene el módulo Finanzas o Cuentas por Pagar (Tesorería), cuando valida el pago. Pídeselo con el código de la reserva.</p>
                 )}
               </section>
+
+              {/* Si nació de un pedido por WhatsApp, el comprobante que mandó el cliente. */}
+              <ComprobanteDeReserva reservaId={reservaId} />
 
               {j.bloqueos.length > 0 && (
                 <section className="rounded-xl border border-red-200 bg-red-50 p-3">

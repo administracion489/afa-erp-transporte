@@ -308,5 +308,34 @@ ok(trasladosDeConfig(null) === null, "traslados: sin configuración → null");
   ok(!/S\/150|150/.test(d) && d.length > 0, "derivación: un nombre «S/150» no se repite");
   ok(mensajeDerivacion({}, { nombre: "paola huarachi" }).includes("Paola"), "derivación: un nombre normal sigue saliendo");
 }
+// La reserva de traslados (22-10-2026): APAGADA el prompt es byte a byte el de antes; ENCENDIDA
+// (solo con traslados) cambia la frase de proponer_reserva por reservar_traslado y añade «## Reserva
+// y pago de traslados» justo después del bloque de traslados, y NADA más cambia.
+{
+  const { FRASE_PROPONER_RESERVA_TRASLADOS, FRASE_RESERVAR_TRASLADO, bloqueReservaTraslados } = await import("../lib/traslados/reserva-ia");
+  const combos: [string, Record<string, unknown>][] = [
+    ["por defecto", agente],
+    ["de tú, uno por mensaje", { ...agente, comportamiento: { tratamiento: "tu", preguntas: "una_por_mensaje" } }],
+    ["sin resumen", { ...agente, comportamiento: { resumen_pedido: false } }],
+  ];
+  for (const [nom, ag] of combos) {
+    const conT = construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: true });
+    const conT0 = construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: true, reserva: false });
+    const sinT = construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: false });
+    const sinTR = construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: false, reserva: true });
+    const conR = construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: true, reserva: true });
+    ok(conT0 === conT, `reserva apagada (${nom}): el prompt con traslados es byte a byte el de antes`);
+    ok(sinTR === sinT, `reserva sin traslados (${nom}): el prompt es byte a byte el de sin traslados`);
+    ok(conR.includes(FRASE_RESERVAR_TRASLADO) && !conR.includes(FRASE_PROPONER_RESERVA_TRASLADOS), `reserva encendida (${nom}): reservar_traslado reemplaza a proponer_reserva en traslados`);
+    ok(conR.includes("## Reserva y pago de traslados"), `reserva encendida (${nom}): está el bloque de reserva y pago`);
+    ok(conR.indexOf("## Traslados simples") < conR.indexOf("## Reserva y pago de traslados") && conR.indexOf("## Reserva y pago de traslados") < conR.indexOf("## Tus objetivos"),
+      `reserva encendida (${nom}): el bloque va después de traslados y antes de los objetivos`);
+    ok(conR.replace(bloqueReservaTraslados() + "\n", "").replace(FRASE_RESERVAR_TRASLADO, FRASE_PROPONER_RESERVA_TRASLADOS) === conT,
+      `reserva encendida (${nom}): fuera de la frase y del bloque, el prompt es el mismo`);
+    ok(!/\d+\s*%|S\/\s*\d|cuenta\s*\d/.test(bloqueReservaTraslados()), `reserva encendida (${nom}): el bloque no lleva montos, porcentajes ni cuentas`);
+  }
+  ok(bloqueTraslados("todo_junto", {}) === BLOQUE_TRASLADOS && bloqueTraslados("una_por_mensaje", { reserva: false }) === bloqueTraslados("una_por_mensaje"), "bloqueTraslados sin reserva: el de siempre");
+  ok(bloqueTraslados("todo_junto").includes(FRASE_PROPONER_RESERVA_TRASLADOS), "la frase que reemplaza la reserva sigue en el bloque de hoy");
+}
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

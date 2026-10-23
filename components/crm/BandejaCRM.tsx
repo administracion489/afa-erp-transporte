@@ -16,6 +16,7 @@ import { accionReclamable, MOTIVO_REVISION, PLAZO_ENVIO_MS } from "@/lib/traslad
 import { LINEA_DISPONIBILIDAD } from "@/lib/traslados/cotizacion-traslado";
 import { usePuedeVer } from "@/lib/usePuedeVer";
 import { abrirPdf } from "@/components/tarifario/abrir-pdf";
+import TarjetaReservaTraslado from "@/components/crm/TarjetaReservaTraslado";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -77,7 +78,7 @@ const legible = (m: Mensaje): Mensaje => ({ ...m, contenido: textoLegible(m.cont
 // La fecha de la fila es `creada_at` (crm-agente-ia.sql); `created_at` NO existe en esa tabla. Se
 // conserva opcional por si una instalación la tuviera, y se ordena con la que venga.
 type AccionIA = {
-  id: string; conversacion_id: string; tipo: "cotizacion" | "reserva" | "cotizacion_traslado";
+  id: string; conversacion_id: string; tipo: "cotizacion" | "reserva" | "cotizacion_traslado" | "reserva_traslado";
   resumen?: string; payload: any; estado: string; creada_at?: string; created_at?: string;
   resuelta_at?: string | null; resultado_id?: number | null;
 };
@@ -263,6 +264,10 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [trasladoOcupado, setTrasladoOcupado] = useState<{ id: string; que: "pdf" | "enviar" | "rechazar" } | null>(null);
   const [trasladoMsg, setTrasladoMsg] = useState<Record<string, string>>({});
   const puedeVer = usePuedeVer(MODULOS_TRASLADO);
+  // Las tarjetas de RESERVA de traslado sobre las que se actuó: se conservan aunque la acción se
+  // cierre (sin unidad, cancelada, completada) y salga de `acciones`, para no perder el texto y el
+  // enlace wa.me que vuelve fuera de la ventana de 24 h. Se van con «Ocultar».
+  const [reservasFijadas, setReservasFijadas] = useState<Record<string, AccionIA>>({});
   // Los avisos van atados a SU hilo: los de otro chat no se pintan ni un instante.
   const [avisosHilo, setAvisosHilo] = useState<{ conv: string; lista: AvisoAutomatico[] } | null>(null);
   const avisos = useMemo(
@@ -434,6 +439,41 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
     cargarEstadoGmail();
   }, [cargarEstadoGmail]);
 
+  // `/crm?conv=<id>` abre esa conversación: lo usan el correo de un comprobante de reserva y las
+  // alertas de reserva (lib/traslados/reserva-correo.ts → enlaceConversacion). Antes nadie leía el
+  // parámetro y el enlace caía en la bandeja sin abrir nada. Se busca en la lista ya cargada y, si
+  // no está (otro filtro, más de 80 hilos), se lee sola con las mismas columnas. Se lee UNA vez.
+  const convDeEnlace = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (convDeEnlace.current === undefined) {
+      try {
+        const id = new URLSearchParams(window.location.search).get("conv");
+        convDeEnlace.current = id && /^[0-9a-fA-F-]{8,64}$/.test(id) ? id : null;
+      } catch { convDeEnlace.current = null; }
+    }
+    const id = convDeEnlace.current;
+    if (!id || cargando) return;
+    convDeEnlace.current = null;
+    const limpiar = () => {
+      try {
+        const p = new URLSearchParams(window.location.search);
+        p.delete("conv");
+        const q = p.toString();
+        window.history.replaceState(null, "", window.location.pathname + (q ? `?${q}` : ""));
+      } catch { /* la URL se queda como está */ }
+    };
+    const enLista = convs.find((c) => c.id === id);
+    if (enLista) { setSelected(enLista); limpiar(); return; }
+    (async () => {
+      const { data, error } = await supabase.from("crm_conversaciones")
+        .select("*, crm_contactos(id,nombre,empresa,telefono,email,canal_origen,wa_id,fb_psid,ig_id,gmail_email)")
+        .eq("id", id).maybeSingle();
+      if (data) setSelected(data as Conversacion);
+      else setToast({ msg: error ? `No se pudo abrir la conversación del enlace: ${error.message}` : "La conversación del enlace no existe o no la puedes ver.", ok: false });
+      limpiar();
+    })();
+  }, [convs, cargando]);
+
   // Los números de la empresa se DESCUBREN de las conversaciones, no se declaran en
   // código: al conectar uno nuevo aparece solo en el filtro. Sin filtrar por canal/estado
   // para que la lista no cambie según lo que se esté mirando.
@@ -591,6 +631,16 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   }, [selected, mensajes, cargandoChat, cargarAvisosAutomaticos]);
 
   // ── Realtime ───────────────────────────────────────────────────────────
+
+  // Las tarjetas del hilo abierto: las de la bandeja y, al final, las de reserva fijadas que ya salieron.
+  const accionesHilo = useMemo(() => {
+    if (!selected) return [] as AccionIA[];
+    const base = acciones.filter((a) => a.conversacion_id === selected.id);
+    const ids = new Set(base.map((a) => a.id));
+    const fijadas = Object.values(reservasFijadas).filter((a) => a.conversacion_id === selected.id && !ids.has(a.id));
+    return [...base, ...fijadas];
+  }, [acciones, reservasFijadas, selected]);
+  const ultimoMensajeAt = mensajes.length ? mensajes[mensajes.length - 1].created_at : null;
 
   const selectedRef = useRef<Conversacion | null>(null);
   selectedRef.current = selected;
@@ -1461,9 +1511,17 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             </div>
           )}
           {/* Solo las de ESTE hilo: una tarjeta de otra conversación con «Enviar al cliente» mandaría el PDF a otra persona. */}
-          {acciones.some((a) => a.conversacion_id === selected.id) && (
+          {accionesHilo.length > 0 && (
             <div className="bg-amber-50 border-t border-amber-100 px-5 py-3 space-y-2 max-h-[45vh] overflow-y-auto">
-              {acciones.filter((a) => a.conversacion_id === selected.id).map((a) => a.tipo === "cotizacion_traslado" ? (
+              {accionesHilo.map((a) => a.tipo === "reserva_traslado" ? (
+                // La reserva tiene su propia ruta (/api/crm/reservas-traslado): nunca va por la tarjeta genérica,
+                // que la mandaría a /api/crm/ia/accion como si fuera una propuesta para «Aprobar y crear».
+                <TarjetaReservaTraslado key={a.id} accion={a} enBandeja={acciones.some((x) => x.id === a.id)}
+                  ultimoMensajeAt={ultimoMensajeAt}
+                  onActuo={(x) => setReservasFijadas((f) => (f[x.id] ? f : { ...f, [x.id]: a }))}
+                  onOcultar={() => setReservasFijadas((f) => { const n = { ...f }; delete n[a.id]; return n; })}
+                  onToast={(msg, ok = true) => showToast(msg, ok)} />
+              ) : a.tipo === "cotizacion_traslado" ? (
                 <TarjetaTraslado key={a.id} a={a} canal={selected.canal} waId={selected.crm_contactos?.wa_id ?? null}
                   ocupado={trasladoOcupado?.id === a.id ? trasladoOcupado.que : trasladoOcupado ? "otra" : null}
                   mensaje={trasladoMsg[a.id] || null} puedeCotizaciones={puedeVer ? puedeVer.cotizaciones : null}

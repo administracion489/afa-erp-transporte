@@ -37,6 +37,13 @@ import { CLAVE_ESPERA_ABANDONADO, paramsAvisoAbandonados, planDePendientes, type
 import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
 import { detalleAlertaPrevia, listaEnUnaLinea, noInicioRepiteDebio, textoPushInicio, type TextoPush } from "@/lib/escalera-inicio";
 import { resumenAvisosDeReserva } from "@/lib/escalera-inicio-datos";
+import {
+  CLAVE_DEVOLUCION, CLAVE_SIN_CONFIRMAR, fechaReclamo, juzgarDevolucion, juzgarSinConfirmar, juzgarVencimiento,
+  notaConCierre, notaVencida, paramsDevolucion, paramsSinConfirmar,
+} from "@/lib/traslados/reserva-alertas";
+import { cerrarSolicitudVencida, leerHechosAlertasReserva } from "@/lib/traslados/reserva-alertas-datos";
+import { normalizarConfigReserva } from "@/lib/traslados/reserva-pago";
+import { plazosDe } from "@/lib/traslados/reserva-orden";
 
 export const maxDuration = 60;
 
@@ -1245,6 +1252,112 @@ async function handler(req: NextRequest) {
             .eq("clave", CLAVE_ESPERA_ABANDONADO).in("ref", [...borrar]);
           if (eBorrar) console.error("[alertas-flota/tick] no se pudieron limpiar los avisos de servicio abandonado:", eBorrar.message);
         }
+      }
+    }
+
+    // ── BLOQUE 8: las reservas de traslado que toma la IA del CRM ───────────────
+    // Lo decide `lib/traslados/reserva-alertas.ts` (PURO) sobre lo que lee su lector:
+    //  · «Reserva de traslado sin confirmar»: por confirmar o con pago reportado que pasó su plazo
+    //    (+ umbral en min) o nació urgente; y un escalón más, una vez, si el servicio queda a menos de
+    //    la mitad del margen de reserva (Ajustes de traslados) sin resolverse.
+    //  · «Devolución de reserva pendiente»: lo devuelto sigue por debajo de lo acordado `umbral` h
+    //    después de acordarlo (la cuenta de `queFalta`).
+    //  · Y SIEMPRE, con la tarjeta encendida o no (como el cierre de servicios abandonados): una
+    //    solicitud «esperando pago» SIN dinero en juego cuya cotización venció o cuyo servicio pasó
+    //    se cierra como vencida. No le escribe al cliente.
+    // El reclamo lleva la FECHA EN QUE NACIÓ la solicitud, no la de hoy: con la de hoy el mismo aviso
+    // saldría cada día. Sin contactos marcados no se reclama nada: al marcarlos, sale. Sin la tabla
+    // (reservas-09a no corrida) el bloque no hace nada; cualquier otro error se publica y el tick
+    // termina igual.
+    {
+      const cSin = activa(CLAVE_SIN_CONFIRMAR), cDev = activa(CLAVE_DEVOLUCION);
+      try {
+        const lect = await leerHechosAlertasReserva(admin, { ahoraMs, sinConfirmar: !!cSin, devolucion: !!cDev });
+        if (lect.sinTabla) res.reserva_sin_tabla = 1;
+        else {
+          if (lect.avisos.length) {
+            console.warn("[alertas-flota/tick] reservas de traslado, lectura incompleta:", lect.avisos.join(" · "));
+            res.reserva_lectura_incompleta = lect.avisos.length;
+          }
+          const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? null;
+          type Envio = "enviado" | "ya_enviado" | "sin_contactos" | "fallo";
+          const avisarReserva = async (cfg: AlertaConfig, clave: string, refs: string[], fecha: string, params: string[]): Promise<Envio> => {
+            if (!directorioDe(cfg, destinatarios).length) return "sin_contactos";
+            if (!(await reclamarEnvio(clave, refs[0], fecha))) return "ya_enviado";
+            const extra: string[] = [];
+            for (const r of refs.slice(1)) if (await reclamarEnvio(clave, r, fecha)) extra.push(r);
+            const rd = await aDirectorio(cfg, params);
+            if (rd.enviados === 0 && rd.fallos > 0) {        // transitorio → se suelta todo y se reintenta
+              for (const r of [refs[0], ...extra]) await liberarEnvio(clave, r, fecha);
+              return "fallo";
+            }
+            return "enviado";
+          };
+
+          if (cSin) {
+            // M (minutos de margen antes del servicio) de Ajustes de traslados; sin la fila o sin la
+            // columna, el defecto del motor de la reserva.
+            const { data: tc } = await admin.from("traslados_config").select("*").eq("id", 1).maybeSingle();
+            const margenMin = plazosDe(normalizarConfigReserva(tc as Record<string, unknown> | null)).M;
+            const umbralMin = cSin.umbral ?? UMBRAL_DEFECTO.reserva_sin_confirmar;
+            let encontradas = 0, enviadas = 0, sinContactos = 0;
+            for (const h of lect.hechos) {
+              const d = juzgarSinConfirmar(h, { ahoraMs, umbralMin, margenMin });
+              if (!d.ref) continue;
+              encontradas++;
+              const r = await avisarReserva(cSin, CLAVE_SIN_CONFIRMAR, [d.ref, ...d.refsExtra], fechaReclamo(h.solicitud, hoy),
+                paramsSinConfirmar(h, d, { ahoraMs, appUrl }));
+              if (r === "enviado") enviadas++; else if (r === "sin_contactos") sinContactos++;
+            }
+            res.reserva_sin_confirmar_encontradas = encontradas;
+            res.reserva_sin_confirmar = enviadas;
+            if (sinContactos) res.reserva_sin_confirmar_sin_contactos = sinContactos;
+          }
+
+          if (cDev) {
+            const umbralH = cDev.umbral ?? UMBRAL_DEFECTO.devolucion_pendiente;
+            let encontradas = 0, enviadas = 0, sinContactos = 0, sinLectura = 0;
+            for (const h of lect.hechos) {
+              const d = juzgarDevolucion(h, { ahoraMs, umbralH });
+              if (d.codigo === "sin_lectura") { sinLectura++; continue; }
+              if (!d.ref) continue;
+              encontradas++;
+              const r = await avisarReserva(cDev, CLAVE_DEVOLUCION, [d.ref], fechaReclamo(h.solicitud, hoy),
+                paramsDevolucion(h, d, { ahoraMs, appUrl }));
+              if (r === "enviado") enviadas++; else if (r === "sin_contactos") sinContactos++;
+            }
+            res.devolucion_pendiente_encontradas = encontradas;
+            res.devolucion_pendiente = enviadas;
+            if (sinContactos) res.devolucion_pendiente_sin_contactos = sinContactos;
+            if (sinLectura) res.devolucion_pendiente_sin_lectura = sinLectura;
+          }
+
+          // El auto-vencimiento: corre siempre.
+          let vencidas = 0, cerradas = 0, conDinero = 0, conReserva = 0;
+          const ahoraIso = new Date(ahoraMs).toISOString();
+          for (const h of lect.hechos) {
+            const v = juzgarVencimiento(h, { ahoraMs, hoy });
+            // Vencida pero con un pago, un comprobante o una reserva: la resuelve una persona.
+            if (v.codigo === "con_dinero") { conDinero++; continue; }
+            if (v.codigo === "con_reserva") { conReserva++; continue; }
+            if (v.codigo !== "vencer") continue;
+            vencidas++;
+            const nota = notaVencida(h, v.motivos);
+            try {
+              if (await cerrarSolicitudVencida(admin, { solicitud: h.solicitud, nota, notaSolicitud: notaConCierre(h.solicitud.nota, nota), ahoraIso })) cerradas++;
+            } catch (e) {
+              console.error("[alertas-flota/tick]", e instanceof Error ? e.message : String(e));
+            }
+          }
+          res.reserva_vencidas_encontradas = vencidas;
+          res.reserva_vencidas_cerradas = cerradas;
+          if (conDinero) res.reserva_vencidas_con_dinero = conDinero;
+          if (conReserva) res.reserva_vencidas_con_reserva = conReserva;
+        }
+      } catch (e) {
+        // Un extra: si falla, el resto del tick ya corrió y su respuesta lo dice.
+        console.error("[alertas-flota/tick] reservas de traslado:", e instanceof Error ? e.message : String(e));
+        res.reserva_error = 1;
       }
     }
 

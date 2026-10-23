@@ -29,6 +29,19 @@
 // SOLA, otro concepto que el horario de atención del equipo), `campos_pedido` y `lugares_conocidos`
 // como texto (son ajustes, no instrucciones). Y ninguna palabra de una empresa concreta: el ERP se
 // vende, y los nombres salen del perfil y de la configuración.
+//
+// LA RESERVA DE TRASLADOS (ctx.reservaTraslados, ctx.politicaTraslados). Con la reserva encendida,
+// en los traslados que cotiza la IA el monto del adelanto, las cuentas y la política de reserva y
+// cancelación los manda el CÓDIGO (lib/traslados/reserva-*.ts), y el pago lo verifica una persona.
+// Tres temas que ningún ajuste decide pero que el sistema sí hace, así que el texto del dueño que
+// diga lo contrario choca: «un ejecutivo le envía los datos de pago» (`traslados.pago_ejecutivo`),
+// «al recibir el comprobante, confirma la reserva» (`traslados.confirma_con_comprobante`) — los dos
+// SOLO con `reservaTraslados === true`; null = no se sabe y no se afirma nada — y una frase que
+// repite la política de la plantilla (gris) o dice otro porcentaje u otras horas (ámbar). La
+// política se compara REGLA CONTRA REGLA: cada número de la frase lleva su CLASE (adelanto, saldo,
+// devolución, cargo, horas de anticipación, horas para devolver), se busca la línea de la política
+// más parecida que tenga esa clase y solo con ella se compara. Con dos líneas igual de parecidas
+// que dicen cosas distintas no se afirma nada (mismo criterio que `cuadre_ambiguo`).
 
 import {
   normalizarAjustes, presentacion, tituloResumen, TEMAS_AJUSTE, MOTIVOS_DERIVACION_SISTEMA,
@@ -246,6 +259,24 @@ const TABLA = {
   "traslados.hoy": {
     alarma: true, relacion: "contradice", titulo: "Manda los pedidos para hoy a una persona, pero el cotizador de traslados también cotiza los de hoy",
     arreglo: "Con los traslados por zona encendidos, la IA cotiza también un traslado para hoy con el tarifario y puede enviarlo sola. Si eso está bien, aclara en la frase «salvo los traslados»; si no, bórrala o apaga «La IA cotiza traslados» (Tarifario → Zonas y traslados → Ajustes).",
+  },
+  // ── Reserva de traslados (pago_ejecutivo y confirma_con_comprobante: solo con la reserva de la IA
+  //    encendida; la política: con la política de la plantilla de la IA a la vista)
+  "traslados.pago_ejecutivo": {
+    alarma: true, relacion: "contradice", titulo: "Dice que una persona envía los datos de pago, pero en los traslados los envía el sistema",
+    arreglo: "Con la reserva de traslados encendida, en los traslados que cotiza la IA el monto del adelanto y las cuentas de pago los envía el sistema (las mismas cuentas del PDF de la cotización), y una persona verifica el pago. Si la frase es para los demás servicios, aclara en ella «salvo los traslados»; si no, bórrala o apaga la reserva de traslados de la IA (Tarifario → Zonas y traslados → Ajustes).",
+  },
+  "traslados.politica_texto": {
+    alarma: true, relacion: "contradice", titulo: "Dice otro plazo o porcentaje que la política de reserva y cancelación",
+    arreglo: "La política de reserva y cancelación que manda la IA es la de la plantilla PDF («Reserva, cambios y cancelación» en /cotizaciones/plantillas). Corrige la frase o la política para que digan lo mismo: si no, el cliente recibirá dos versiones.",
+  },
+  "traslados.politica_texto_duplica": {
+    alarma: false, relacion: "duplica", titulo: "Repite la política de reserva y cancelación",
+    arreglo: "No hace falta cambiarla: la política de la plantilla PDF («Reserva, cambios y cancelación» en /cotizaciones/plantillas) ya lo dice, y es la que manda la IA. Si cambias la política, esta frase quedará diciendo otra cosa.",
+  },
+  "traslados.confirma_con_comprobante": {
+    alarma: true, relacion: "contradice", titulo: "Pide dar la reserva por confirmada o pagada al recibir el comprobante",
+    arreglo: "Con la reserva de traslados encendida, el comprobante que manda el cliente no confirma nada: la IA lo registra y le dice que se verifica con el banco; el pago lo verifica una persona y la reserva la confirma un ejecutivo. Si la frase es para los demás servicios, aclara en ella «salvo los traslados»; si no, bórrala.",
   },
 } as const satisfies Record<string, FilaTabla>;
 
@@ -590,6 +621,259 @@ const RE_URGENCIA_ACCION = /\bllam\w*|\bderiv\w*|\basesor\w*|\bejecutiv\w*|\btel
 /** «Urgencias, salvo los traslados: …»: la frase ya dejó fuera lo que cotiza el sistema. */
 const RE_SALVO_TRASLADOS = /\b(salvo|excepto|menos)\b[^.]{0,30}\btraslado|\bque no (sea|sean|es|son) (un |una )?traslado|\btraslados?\b[^.]{0,30}\bse cotiza/;
 
+// Reserva de traslados · quién envía los datos de pago. Una frase que ya nombra al sistema («los
+// datos de pago los envía el sistema») tampoco choca: dejó fuera lo que hace el código.
+const RE_SALVO_RESERVA = new RegExp(`${RE_SALVO_TRASLADOS.source}|\\b(el sistema|automaticamente)\\b`);
+/** Un DATO para pagar. No «el pago» a secas: «no des por confirmado el pago» no habla de cuentas. */
+const OBJETO_PAGO =
+  "datos (de pago|bancarios|para (el )?pago|de (la )?cuenta)|cuentas( bancarias| de (pago|deposito|banco|abono))?" +
+  "|cuenta (bancaria|de (pago|deposito|banco|abono|ahorros)|corriente)|numeros? de cuenta|cci|formas? de pago" +
+  "|medios? de pago|metodos? de pago|(link|enlace) de pago|como (pagar|abonar|depositar|realizar el pago|hacer el pago)" +
+  "|instrucciones (de|para (el|realizar el)) pago|monto (del|de) (adelanto|pago|abono)";
+/** Quien no es la IA ni el sistema: una persona del equipo. */
+const QUIEN_PERSONA =
+  "(ejecutiv|asesor|operador|vendedor|encargad|coordinador|cajer|contador)\\w*|persona|humano|equipo|alguien|contabilidad|tesoreria|finanzas|cobranza|administracion";
+/** Los verbos de dar un dato (en sus formas de verbo: «informará», no «información»). */
+const VERBO_ENVIA =
+  "(envi|mand|compart|facilit|entreg|brind)\\w*|proporcion(a|ar|ara|aran|arle|arles|e|en)|inform(a|ar|ara|aran|arle|arles|amos|aremos|e|en)" +
+  "|indic(a|ar|ara|aran|arle|arles|amos|aremos|e|en)|pas(a|ar|ara|aran|arle|arles|e|en)|da|dar|dara|daran|dan|dale|darle|darles|daremos";
+const PARTICIPIO_ENVIA = "(enviad|mandad|compartid|proporcionad|facilitad|entregad|indicad|informad|brindad|dad)(o|a|os|as)";
+/** «Un ejecutivo… le envía los datos de pago». Entre la persona y el verbo, sin negación ni otro sujeto. */
+const RE_PAGO_PERSONA = new RegExp(`\\b(${QUIEN_PERSONA})\\b(?<h1>[^.]{0,60}?)\\b(${VERBO_ENVIA})\\b(?<h2>[^.]{0,40}?)\\b(${OBJETO_PAGO})\\b`, "g");
+/** «Los datos de pago los envía un ejecutivo» / «… son enviados por un asesor». */
+const RE_PAGO_PERSONA_INV = new RegExp(`\\b(${OBJETO_PAGO})\\b(?<h1>[^.]{0,40}?)\\b(${VERBO_ENVIA}|${PARTICIPIO_ENVIA})\\b(?<h2>[^.]{0,25}?)\\b(${QUIEN_PERSONA})\\b`, "g");
+const RE_HUECO_NEGADO = /\b(no|nunca|jamas|ni|tampoco)\b/;
+const RE_HUECO_OTRO_SUJETO = /\b(cliente|pasajero|usuario)s?\b/;
+/** «No compartas las cuentas», «Está prohibido dar los datos bancarios». */
+const RE_PAGO_NO_DES = new RegExp(
+  `\\b(no|nunca|jamas)\\b (\\w+ ){0,2}(des|digas|compartas|envies|mandes|proporciones|facilites|pases|brindes|entregues|indiques|menciones|informes|reveles|escribas|pongas|dictes)\\b[^.]{0,40}?\\b(${OBJETO_PAGO})\\b` +
+  `|\\bprohibid\\w* (\\w+ ){0,2}(dar|enviar|compartir|mandar|proporcionar|facilitar|pasar|brindar|entregar|indicar|mencionar|informar|revelar)\\b[^.]{0,40}?\\b(${OBJETO_PAGO})\\b`,
+);
+/** «No hables de pagos», «No toques el tema de pagos», «Evita hablar de formas de pago». */
+const RE_PAGO_NO_HABLES =
+  /\b(no|nunca|jamas|evita\w*)\b (\w+ ){0,2}(hables|hablar|converses|conversar|trates|tratar|toques|tocar|menciones|mencionar|discutas|discutir|abordes|abordar|negocies|negociar|entres)\b[^.]{0,25}?\b(pagos?|temas? de pagos?|formas? de pago|medios de pago|metodos de pago|cobros?|adelantos?|depositos?|transferencias?|datos bancarios|cuentas bancarias|cuentas)\b/;
+/** Lo que el cliente pide para pagar (no «pagar» a secas: con tarjeta, derivar puede ser lo correcto). */
+const PIDE_PAGO = "como pagar|como (realizar|hacer|efectuar) (el )?pago|como (abonar|depositar|transferir)|donde (pagar|depositar|transferir|abonar)|datos de pago|datos bancarios|cuentas|numeros? de cuenta|formas? de pago|medios? de pago|metodos? de pago";
+const DERIVA = "deriv\\w*|escal\\w*|transfi\\w*|pasa\\w* (el chat |la conversacion )?(a|con)";
+/** «Si pregunta cómo pagar, deriva a un ejecutivo» (y al revés). */
+const RE_PAGO_DERIVA = new RegExp(
+  `\\b(si|cuando)\\b[^.]{0,40}?\\b(${PIDE_PAGO})\\b[^.]{0,60}?\\b(${DERIVA})\\b[^.]{0,30}?\\b(${QUIEN_PERSONA})\\b` +
+  `|\\b(${DERIVA})\\b[^.]{0,30}?\\b(${QUIEN_PERSONA})\\b[^.]{0,20}?\\b(si|cuando)\\b[^.]{0,40}?\\b(${PIDE_PAGO})\\b`,
+);
+/** Una prohibición condicionada («no des las cuentas hasta que acepte») no es «nunca»: no choca. */
+const RE_PAGO_CONDICION = /\b(hasta que|antes de que|antes de|sin que|mientras|si no|salvo que|a menos que)\b|\b(de otros clientes|de terceros|ajen\w*)\b|\bpor (correo|email|mail|telefono|llamada|sms)\b/;
+
+/** ¿La frase dice que una persona envía los datos de pago, que la IA no da cuentas o que no habla de pagos? */
+function diceQuePagaUnaPersona(n: string): boolean {
+  if (RE_SALVO_RESERVA.test(n)) return false;
+  for (const m of n.matchAll(RE_PAGO_PERSONA)) {
+    const h1 = m.groups?.h1 ?? "", h2 = m.groups?.h2 ?? "";
+    // «No es un ejecutivo quien envía…», «Un ejecutivo no envía…», o el que envía es el cliente
+    // («Un ejecutivo revisa lo que el cliente envía con los datos de pago»).
+    if (/\b(no|nunca)\s+(es|son|sera)\s+(un |una |el |la |nuestro |nuestra )?$/.test(n.slice(0, m.index))) continue;
+    if (RE_HUECO_NEGADO.test(h1) || RE_HUECO_OTRO_SUJETO.test(h1) || RE_HUECO_NEGADO.test(h2)) continue;
+    return true;
+  }
+  for (const m of n.matchAll(RE_PAGO_PERSONA_INV)) {
+    const h1 = m.groups?.h1 ?? "", h2 = m.groups?.h2 ?? "";
+    // Entre el dato y el verbo, la MISMA oración: un «y» o una coma abren otra («Envía los datos de
+    // pago al cliente y avisa al ejecutivo»).
+    if (/\by\b|[,;]/.test(h1) || RE_HUECO_NEGADO.test(h1) || RE_HUECO_NEGADO.test(h2)) continue;
+    return true;
+  }
+  if (RE_PAGO_NO_DES.test(n) && !RE_PAGO_CONDICION.test(n)) return true;
+  if (RE_PAGO_NO_HABLES.test(n) && !RE_PAGO_CONDICION.test(n)) return true;
+  return RE_PAGO_DERIVA.test(n);
+}
+
+// Reserva de traslados · dar la reserva por confirmada o pagada con el comprobante.
+/** El comprobante DEL PAGO. «Comprobante» a secas vale, salvo en una frase de boleta o factura. */
+const RE_COMPROBANTE_PAGO =
+  /\b(voucher|vaucher|comprobantes?|constancias? de (pago|deposito|transferencia|abono)|(captura|foto|imagen|pantallazo|screenshot)s? (del?|de la|de su) (pago|deposito|transferencia|yape|plin|abono|operacion))\b/;
+const RE_COMPROBANTE_FISCAL = /\b(boletas?|facturas?|electronic\w*|sunat|ruc)\b/;
+const OBJETO_RESERVA = "reserva|pago|servicio|adelanto|traslado|abono|deposito";
+const RE_DA_POR_CONFIRMADA = new RegExp([
+  // «confírmale la reserva», «confirma el pago» (formas de verbo: «la confirmación» no es una orden)
+  `\\bconfirm(a|ale|alo|ala|ales|ar|arle|arla|arlo|e|ele|en|es|o|amos|aremos|ara|aras|aran)\\b (\\w+ ){0,2}(la |su |el |tu )?(${OBJETO_RESERVA})\\b`,
+  // «da por confirmada / pagada»
+  `\\bd(a|ala|alo|ale|ar|arla|arlo|e|es|en)\\b (\\w+ ){0,2}por (confirmad|pagad|validad|aprobad|reservad|cerrad|hech)\\w*`,
+  // «la reserva queda confirmada», «su pago fue validado»
+  `\\b(${OBJETO_RESERVA})\\b (\\w+ ){0,3}(queda|quedo|quedara|esta|estan|fue|ha sido|se considera|se da) (\\w+ )?(confirmad|pagad|validad|aprobad|reservad|asegurad|acreditad|verificad|recibid)\\w*`,
+  // «envía la confirmación de la reserva»
+  `\\b((envi|mand|emit|gener)\\w*|da|dale|dar|darle) (\\w+ ){0,2}(la )?confirmacion (de (la |su )?)?(reserva|pago|servicio)\\b`,
+  // «pago confirmado», «reserva confirmada»
+  `\\b(reserva|pago|adelanto|abono|deposito) (confirmad|validad|aprobad|verificad|acreditad|recibid)\\w*`,
+].join("|"));
+/** Lo verifica una persona o el banco: la frase dice lo que hace el sistema. */
+const RE_VERIFICA_PERSONA = new RegExp(
+  `\\b(${QUIEN_PERSONA})\\b[^.]{0,25}?\\b(verifi|valid|revis|confirm|aprueb|aprob|chequ|cotej)\\w*|\\b(verific|valid|revis|cotej|chequ)\\w*\\b[^.]{0,30}?\\b(banco|estado de cuenta)\\b`,
+);
+
+/** ¿La frase pide dar la reserva por confirmada o pagada con el comprobante del cliente? */
+function confirmaConComprobante(n: string): boolean {
+  if (!RE_COMPROBANTE_PAGO.test(n) || RE_COMPROBANTE_FISCAL.test(n) || RE_SALVO_RESERVA.test(n) || RE_VERIFICA_PERSONA.test(n)) return false;
+  const re = new RegExp(RE_DA_POR_CONFIRMADA.source, "g");
+  for (const m of n.matchAll(re)) {
+    const antes = n.slice(Math.max(0, m.index - 30), m.index);
+    // «no confirmes la reserva solo con el comprobante», «pide el comprobante para confirmar la reserva»
+    if (/\b(no|nunca|jamas|tampoco|sin)\b/.test(antes) || /\bpara (poder )?$/.test(antes)) continue;
+    return true;
+  }
+  return false;
+}
+
+// Reserva de traslados · la política de reserva, cambios y cancelación de la plantilla, regla por regla.
+/** Lo que pone una frase en el tema de la política. */
+const RE_ANCLA_POLITICA =
+  /\b(cancel\w*|anul\w*|reprogram\w*|devol\w*|devuelv\w*|reembols\w*|penalid\w*|penaliz\w*|interrump\w*|interrupcion|adelanto|anticipo|saldo|restante|reserva\w*|no se presenta\w*|no show|cargo administrativo|cambios? de (fecha|hora|itinerario|ruta|recorrido))\b/;
+const RE_CANCELA = /\b(cancel\w*|anul\w*|reprogram\w*|desist\w*)\b/;
+const RE_DEVUELVE = /\b(devol\w*|devuelv\w*|reembols\w*|reintegr\w*)\b/;
+/** La clase de un número de la política. Un número sin clase no se compara: no se adivina de qué habla. */
+type ClaseCantidad = "adelanto" | "saldo" | "devolucion" | "cargo" | "anticipacion" | "plazo_devolucion";
+type Cantidad = { clase: ClaseCantidad; valor: number };
+const DESCRIBIR_CANTIDAD: Record<ClaseCantidad, (v: string) => string> = {
+  adelanto: (v) => `un adelanto del ${v} %`,
+  saldo: (v) => `un saldo del ${v} %`,
+  devolucion: (v) => `una devolución del ${v} %`,
+  cargo: (v) => `un cargo del ${v} %`,
+  anticipacion: (v) => `${v} horas de anticipación`,
+  plazo_devolucion: (v) => `${v} horas para devolver`,
+};
+const fmtCantidad = (v: number) => String(v).replace(".", ",");
+const describirCantidad = (c: Cantidad) => DESCRIBIR_CANTIDAD[c.clase](fmtCantidad(c.valor));
+
+/** Los números con su clase, por cláusula: «Cancelación con 24 horas o más de anticipación: …, y el
+ *  100 % del monto se devuelve en un plazo máximo de 48 horas» → anticipación 24, devolución 100,
+ *  horas para devolver 48. Las oraciones que empiezan por «Por ejemplo» no son una regla. */
+function cantidadesDe(texto: string): Cantidad[] {
+  const out: Cantidad[] = [];
+  const norm = normalizarTexto(texto);
+  const cancela = RE_CANCELA.test(norm), devuelve = RE_DEVUELVE.test(norm);
+  // Las oraciones se parten sobre el texto CRUDO: partirFrases corta antes de una mayúscula.
+  for (const oracion of partirFrases(texto)) {
+    if (/^\W*(por ejemplo|ej)\b/.test(oracion.norm)) continue;
+    for (const c of oracion.norm.split(/[,;:()]|\by\b/)) {
+      for (const m of c.matchAll(/(\d+(?:[.,]\d+)?)\s?(%|por ?ciento)/g)) {
+        const valor = Number(m[1].replace(",", "."));
+        // Un descuento, una promoción o un impuesto no son una regla de la política.
+        const clase: ClaseCantidad | null =
+          /\b(descuentos?|dscto|promocion\w*|igv|impuestos?|comision\w*)\b/.test(c) ? null
+          : /\b(restante|saldo|resto)\b/.test(c) ? "saldo"
+          : RE_DEVUELVE.test(c) ? "devolucion"
+          : /\b(cargo|penalidad\w*|penaliz\w*|cobra\w*|cobro|retien\w*|retencion|minimo|descuenta\w*)\b/.test(c) ? "cargo"
+          : /\b(adelanto|anticipo|abono|separ\w*|reserv\w*)\b/.test(c) ? "adelanto"
+          : null;
+        if (clase && Number.isFinite(valor)) out.push({ clase, valor });
+      }
+      for (const m of c.matchAll(/(\d+)\s?(horas?|hrs?|h)\b/g)) {
+        const valor = Number(m[1]);
+        const antes = c.slice(Math.max(0, m.index - 30), m.index), despues = c.slice(m.index + m[0].length);
+        const clase: ClaseCantidad | null =
+          cancela && /^\s*\.?\s*(o mas |o menos |de )?(de )?(anticipacion|antelacion|antes)\b/.test(despues) ? "anticipacion"
+          : devuelve && /\b(plazo( maximo)?( de)?|maximo( de)?|dentro de( las)?|en( un plazo)?( maximo)?( de)?|en las|tras|luego de)\s*$/.test(antes) ? "plazo_devolucion"
+          : cancela && /\b(con|menos de|mas de|al menos|minimo|hasta)\s*$/.test(antes) ? "anticipacion"
+          : null;
+        if (clase && Number.isFinite(valor)) out.push({ clase, valor });
+      }
+    }
+  }
+  return out;
+}
+
+/** Palabras que no dicen de qué regla se habla. */
+const PALABRAS_VACIAS = new Set([
+  "para", "como", "pero", "porque", "cuando", "donde", "este", "esta", "esto", "aquel", "todo", "toda", "cual", "sobre",
+  "entre", "desde", "hasta", "segun", "sera", "puede", "debe", "tiene", "hace", "hacer", "usted", "ustede", "nuestro",
+  "nuestra", "cliente", "siempre", "nunca", "solo", "tambien", "mismo", "misma", "otro", "otra", "cada", "mucho", "mucha",
+  "poco", "unica", "unico", "aqui", "dicho", "dicha", "haber", "sido", "siendo", "caso", "estan", "esta",
+]);
+/** Raíces de 5 letras de las palabras con contenido (sin plurales; «devuelve» y «devolución» son la misma). */
+function raices(norm: string): Set<string> {
+  const out = new Set<string>();
+  for (let w of norm.split(/[^a-z0-9]+/)) {
+    if (w.length < 4 || /\d/.test(w)) continue;
+    if (w.length > 4 && w.endsWith("s")) w = w.slice(0, -1);
+    if (PALABRAS_VACIAS.has(w)) continue;
+    if (/^(devuel|devolv)/.test(w)) w = "devol";
+    out.add(w.slice(0, 5));
+  }
+  return out;
+}
+const comunes = (a: Set<string>, b: Set<string>) => { let k = 0; for (const x of a) if (b.has(x)) k++; return k; };
+const esNegativa = (n: string) => /\b(sin|no|ni|nunca|ningun\w*)\b/.test(n);
+
+/** NO MEDIDOS, declarados: cuántas palabras en común hacen falta para decir que una frase habla de
+ *  la MISMA regla que una línea de la política. Con un número de la misma clase basta con 2 («Cancelación
+ *  con 48 horas»); sin números, para afirmar que la repite, 4 palabras y la mitad de las de las DOS
+ *  juntas (Jaccard: «cuando llegue el comprobante, envía la confirmación de la reserva» comparte 4 de
+ *  sus 5 con la línea de la boleta, pero esa línea tiene 8 y habla de otra cosa). El lado seguro es
+ *  subirlos: un falso «repite» calla lo que la frase dice distinto. */
+export const MIN_COMUNES_CANTIDAD = 2;
+export const MIN_COMUNES_REPITE = 4;
+export const PROPORCION_REPITE = 0.5;
+
+type LineaPolitica = { texto: string; raices: Set<string>; cantidades: Cantidad[]; negativa: boolean };
+
+function modeloPolitica(lineas: readonly unknown[] | null | undefined): LineaPolitica[] {
+  const out: LineaPolitica[] = [];
+  for (const l of Array.isArray(lineas) ? lineas : []) {
+    if (typeof l !== "string" || !l.trim()) continue;
+    // Las raíces y la negación, sin las oraciones de ejemplo: no son la regla.
+    const regla = partirFrases(l).filter((o) => !/^\W*(por ejemplo|ej)\b/.test(o.norm)).map((o) => o.norm).join(" ");
+    out.push({ texto: l.trim(), raices: raices(regla), cantidades: cantidadesDe(l), negativa: esNegativa(regla) });
+  }
+  return out;
+}
+
+type JuicioPolitica =
+  | { tipo: "contradice"; distintos: { leido: Cantidad; politica: Cantidad[]; linea: LineaPolitica }[] }
+  | { tipo: "repite"; linea: LineaPolitica };
+
+/** Una frase contra la política: «contradice» si un número de una clase difiere del de la regla más
+ *  parecida; «repite» si todos coinciden (o, sin números, si dice casi lo mismo que una regla); null si
+ *  no habla de la política o no se puede afirmar nada (dos reglas igual de parecidas que dicen distinto). */
+function juzgarContraPolitica(f: Frase, politica: LineaPolitica[]): JuicioPolitica | null {
+  const n = f.norm;
+  if (!politica.length || !RE_ANCLA_POLITICA.test(n)) return null;
+  const rf = raices(n);
+  const cants = cantidadesDe(f.texto);
+  if (cants.length) {
+    const distintos: { leido: Cantidad; politica: Cantidad[]; linea: LineaPolitica }[] = [];
+    let iguales = 0, inciertos = 0;
+    for (const q of cants) {
+      const candidatas = politica.filter((l) => l.cantidades.some((x) => x.clase === q.clase));
+      const puntos = candidatas.map((l) => comunes(rf, l.raices));
+      const max = Math.max(0, ...puntos);
+      if (!candidatas.length || max < MIN_COMUNES_CANTIDAD) continue; // la política no tiene esa regla
+      const mejores = candidatas.filter((_, i) => puntos[i] === max);
+      const valores = mejores.map((l) => l.cantidades.filter((x) => x.clase === q.clase));
+      if (valores.every((vs) => vs.some((x) => x.valor === q.valor))) iguales++;
+      else if (valores.every((vs) => !vs.some((x) => x.valor === q.valor))) {
+        const vistos = new Set<number>();
+        const enPolitica = valores.flat().filter((x) => !vistos.has(x.valor) && vistos.add(x.valor));
+        distintos.push({ leido: q, politica: enPolitica, linea: mejores[0] });
+      } else inciertos++;
+    }
+    if (distintos.length) return { tipo: "contradice", distintos };
+    if (iguales > 0 && inciertos === 0) {
+      const linea = politica
+        .map((l) => ({ l, k: comunes(rf, l.raices) }))
+        .sort((a, b) => b.k - a.k)[0].l;
+      return { tipo: "repite", linea };
+    }
+    return null;
+  }
+  if (/\d/.test(n) || rf.size === 0) return null;
+  let mejor: LineaPolitica | null = null, k = 0, jac = 0;
+  for (const l of politica) {
+    const c = comunes(rf, l.raices), j = c / (rf.size + l.raices.size - c || 1);
+    if (j > jac) { k = c; jac = j; mejor = l; }
+  }
+  if (mejor && k >= MIN_COMUNES_REPITE && k / (rf.size + mejor.raices.size - k) >= PROPORCION_REPITE && esNegativa(n) === mejor.negativa)
+    return { tipo: "repite", linea: mejor };
+  return null;
+}
+
 // ── Fuentes de texto ──────────────────────────────────────────────────────────────────────────────
 
 type Fuente = { campo: CampoTexto; indice?: number; texto: string; orden: number };
@@ -662,7 +946,24 @@ function horasPausa(v: unknown): number {
   return Number.isFinite(n) ? n : 12;
 }
 
-export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: boolean | null; empresa?: string } = {}): ResultadoAuditoria {
+/** Lo que el auditor no puede saber del agente y le dice quien lo llama (lo sabe el servidor). En
+ *  todos, null o ausente = no se sabe: no se afirma nada de ese tema. */
+export type ContextoAuditoria = {
+  /** La IA cotiza traslados por zona (`/api/crm/ia/estado` → `traslados`). */
+  trasladosActivos?: boolean | null;
+  /** El nombre de la empresa (perfil), para leer «Cómo se presenta». */
+  empresa?: string;
+  /** La IA RESERVA traslados de verdad (`estadoReservaIA(...).activa`, lib/traslados/reserva-ia.ts):
+   *  manda el adelanto, las cuentas y la política. Solo con true se avisan `traslados.pago_ejecutivo`
+   *  y `traslados.confirma_con_comprobante`. */
+  reservaTraslados?: boolean | null;
+  /** Las líneas de la política de reserva, cambios y cancelación de la plantilla que usa la IA
+   *  (`cotizacion_plantillas.condiciones_reserva`). Vacía o null = no hay con qué comparar. */
+  politicaTraslados?: readonly string[] | null;
+};
+
+export function auditarAgente(cfg: ConfigAuditable, ctx: ContextoAuditoria = {}): ResultadoAuditoria {
+  ctx = ctx ?? {};
   const aj = normalizarAjustes(cfg?.comportamiento);
   const empresa = typeof ctx.empresa === "string" ? ctx.empresa : "";
   const nombreAgente = str(cfg?.nombre).trim();
@@ -673,6 +974,13 @@ export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: bo
   const mensajeDerivacion = str(cfg?.mensaje_derivacion);
   const presentacionAjuste = presentacion(aj, empresa, nombreAgente);
   const { fuentes, titulos } = fuentesDe(cfg ?? {}, aj);
+  const reservaActiva = ctx.reservaTraslados === true;
+  // La política se compara si se tiene y los traslados están encendidos: la imprime el PDF de la
+  // cotización del traslado y, con la reserva encendida, la IA la envía tal cual.
+  const politica = ctx.trasladosActivos === true || reservaActiva ? modeloPolitica(ctx.politicaTraslados) : [];
+  const quienMandaPolitica = reservaActiva
+    ? "La política que manda la IA es la de la plantilla PDF («Reserva, cambios y cancelación» en /cotizaciones/plantillas): la envía tal cual al cliente cuando reserva"
+    : "La política que manda la IA es la de la plantilla PDF («Reserva, cambios y cancelación» en /cotizaciones/plantillas): la imprime el PDF de la cotización del traslado";
 
   // ── El ajuste que manda en cada tema, con su valor legible ──
   const ref = (tema: TemaAjusteConAjuste, valorLegible: string, clave?: ClaveAjuste, etiqueta?: string): AjusteRef => ({
@@ -867,6 +1175,29 @@ export function auditarAgente(cfg: ConfigAuditable, ctx: { trasladosActivos?: bo
         if (RE_PAX_MUCHOS.test(n) && RE_VARIAS_UNIDADES.test(n)) c("traslados.varias_unidades", { ajuste: null });
         if (RE_URGENCIA_HOY.test(n) && RE_URGENCIA_ACCION.test(n) && !RE_SALVO_TRASLADOS.test(n))
           c("traslados.hoy", { ajuste: null });
+      }
+
+      // Reserva de traslados: lo que manda el código (solo si se sabe que la IA reserva).
+      let alarmaReserva = false;
+      if (reservaActiva) {
+        if (diceQuePagaUnaPersona(n)) { c("traslados.pago_ejecutivo", { ajuste: null }); alarmaReserva = true; }
+        if (confirmaConComprobante(n)) { c("traslados.confirma_con_comprobante", { ajuste: null }); alarmaReserva = true; }
+      }
+      // La política de reserva y cancelación, regla contra regla. Una frase que ya choca con lo que
+      // hace el sistema no «repite» la política aunque comparta sus palabras.
+      const jp = juzgarContraPolitica(f, politica);
+      if (jp?.tipo === "contradice") {
+        const leido = jp.distintos.map((d) => describirCantidad(d.leido)).join(" y ");
+        const dice = jp.distintos.map((d) => d.politica.map(describirCantidad).join(" o ")).join(" y ");
+        c("traslados.politica_texto", {
+          ajuste: null,
+          arreglo: `Tu texto dice ${leido}; la política de reserva y cancelación dice ${dice} (${cortoEntreComillas(jp.distintos[0].linea.texto, 120)}). ${quienMandaPolitica}. Corrige la frase o la política para que digan lo mismo: si no, el cliente recibirá dos versiones.`,
+        });
+      } else if (jp?.tipo === "repite" && !alarmaReserva) {
+        c("traslados.politica_texto_duplica", {
+          ajuste: null,
+          arreglo: `No hace falta cambiarla: la política ya lo dice (${cortoEntreComillas(jp.linea.texto, 120)}). ${quienMandaPolitica}. Si cambias la política, esta frase quedará diciendo otra cosa.`,
+        });
       }
     }
 

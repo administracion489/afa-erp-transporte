@@ -34,6 +34,22 @@ console.log("\n— Lo que el ERP manda —");
   chk("las fijas del código siempre están, y activas", PLANTILLAS_FIJAS.every((f) => de(f.nombre)?.activa === true));
 }
 
+console.log("\n— Las dos de la reserva de traslados usan la del directorio —");
+{
+  // Bloque 8 del tick: `aDirectorio`, o sea `plantilla_directorio || coordinador_alerta`; sin plantilla al conductor.
+  const tarjetas = ["reserva_sin_confirmar", "devolucion_pendiente"].map((clave) => t({
+    clave, nombre: clave, plantilla: null, plantilla_directorio: null, destinatarios: [7],
+    escribeAlDirectorio: leeElDirectorio(clave) === true,
+  }));
+  const u = plantillasQueUsa(tarjetas);
+  const ca = u.find((x) => x.nombre === "coordinador_alerta");
+  chk("con contactos marcados, las dos cuentan coordinador_alerta",
+    !!ca && ["reserva_sin_confirmar", "devolucion_pendiente"].every((k) => ca.usos.some((x) => x.includes(k))), JSON.stringify(ca));
+  chk("y no inventan una plantilla al conductor", u.every((x) => x.nombre === "coordinador_alerta" || PLANTILLAS_FIJAS.some((f) => f.nombre === x.nombre)));
+  const sinNadie = plantillasQueUsa(tarjetas.map((x) => ({ ...x, destinatarios: [] })));
+  chk("sin contactos, no la cuentan", !sinNadie.some((x) => x.nombre === "coordinador_alerta"));
+}
+
 console.log("\n— Su estado en Meta —");
 {
   const meta = [
@@ -56,6 +72,7 @@ console.log("\n— Quién le escribe al directorio —");
   const sinDeclarar = Object.keys(VIA_DE_ALERTA).filter((k) => leeElDirectorio(k) === null);
   chk("todo tipo que conoce el motor está declarado", sinDeclarar.length === 0, sinDeclarar.join(", "));
   chk("los de ciclo de vida no", ["asignacion", "cambio", "cancelacion", "desasignacion"].every((k) => LEE_DIRECTORIO[k] === false));
+  chk("las dos de la reserva de traslados sí", leeElDirectorio("reserva_sin_confirmar") === true && leeElDirectorio("devolucion_pendiente") === true);
   chk("la escalera del conductor no; la del coordinador sí",
     ["proximo_inicio", "recuerda_iniciar", "inicia_ahora", "debio_iniciar"].every((k) => leeElDirectorio(k) === false)
     && ["alerta_no_inicio_previa", "no_inicio", "llamada_inicio", "llamar_conductor"].every((k) => leeElDirectorio(k) === true));

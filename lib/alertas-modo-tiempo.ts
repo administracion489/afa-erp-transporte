@@ -34,9 +34,9 @@
 // es la decisión que `montoDe` rechaza con el falso flete. Lo único correcto es DECIRLO
 // antes de guardar. Misma conclusión que la ventana invertida de `alertas-horario.ts`.
 //
-// Y LA OTRA MITAD: dieciséis de los veintiséis tipos NO leen el modo en absoluto (ciclo de
-// vida, semáforo de puntualidad, GPS, checkout, abandono, la llamada de la central, y los dos avisos al pasajero que
-// despacha `lib/notificaciones.ts`). Ofrecerles el selector es ofrecer un
+// Y LA OTRA MITAD: dieciocho de los veintiocho tipos NO leen el modo en absoluto (ciclo de
+// vida, semáforo de puntualidad, GPS, checkout, abandono, la llamada de la central, los dos avisos al pasajero que
+// despacha `lib/notificaciones.ts` y los dos de la reserva de traslados). Ofrecerles el selector es ofrecer un
 // control que el sistema no lee — el mismo defecto que `multiples_recargas_en_cluster`
 // declarado y sin emitir. `leeElModo()` lo DERIVA de esta tabla en vez de depender de que
 // alguien mantenga a mano `alerta_config.tiempo_editable`: la columna sigue mandando cuando
@@ -136,6 +136,11 @@ export const VIA_DE_ALERTA: Record<string, ViaDespacho> = {
   //    (no se afirma nada) pero les dejaba el selector puesto igual que a los demás. ──
   confirmacion_pasajero: "ignora_modo",
   llegada_pasajero: "ignora_modo",
+  // ── Bloque 8: las reservas de traslado de la IA del CRM (lib/traslados/reserva-alertas.ts). Su
+  //    reloj es el de la solicitud: el plazo para confirmar (+ umbral), el margen antes del servicio
+  //    y las horas desde que se acordó la devolución. El selector «Cuándo» no lo lee. ──
+  reserva_sin_confirmar: "ignora_modo",
+  devolucion_pendiente: "ignora_modo",
 };
 
 /** La vía de una clave, o null si este módulo no la conoce. */
@@ -356,7 +361,7 @@ function limaAUtcMsLocal(fecha?: string | null, horaHHMM?: string | null): numbe
  * que no se pudo juzgar. Al agregar un tipo nuevo, decláralo aquí.
  */
 export const LEE_DIRECTORIO: Record<string, boolean> = {
-  // Le escriben al directorio (tick, bloques 3b-2, 3c, 4, 4b-4e, 5, 5b, 7, 8 y la central).
+  // Le escriben al directorio (tick, bloques 3b-2, 3c, 4, 4b-4e, 5, 5b, 7, 8 —las reservas— y la central).
   llamar_conductor: true,
   alerta_no_inicio_previa: true,
   no_inicio: true,
@@ -370,6 +375,9 @@ export const LEE_DIRECTORIO: Record<string, boolean> = {
   jornada: true,
   servicio_abandonado: true,
   llamada_inicio: true,
+  // Bloque 8: las reservas de traslado solo le escriben al directorio (nunca al conductor ni al cliente).
+  reserva_sin_confirmar: true,
+  devolucion_pendiente: true,
   // Solo le escriben al conductor o al pasajero.
   asignacion: false,
   cambio: false,

@@ -108,10 +108,17 @@ export async function guardarMediaWhatsApp(
 
 const IMAGEN_IA = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
-/** Bloque para Claude con la foto o el PDF guardado (base64). null si no se puede leer. */
-export async function bloqueParaIA(sb: SupabaseClient, url: string | null | undefined): Promise<any | null> {
+/**
+ * Bloque para Claude con la foto o el PDF guardado (base64). null si no se puede leer.
+ * `opts.buckets`: solo esos buckets privados (por defecto, cualquiera de BUCKETS_PRIVADOS);
+ * `opts.maxPdfBytes`: el tope de un PDF (por defecto 10 MB). Sin opciones, lo de siempre.
+ */
+export async function bloqueParaIA(
+  sb: SupabaseClient, url: string | null | undefined, opts: { buckets?: readonly string[]; maxPdfBytes?: number } = {},
+): Promise<any | null> {
   const obj = objetoPrivadoDe(url);
   if (!obj) return null;
+  if (opts.buckets && !opts.buckets.includes(obj.bucket)) return null;
   try {
     const { data, error } = await sb.storage.from(obj.bucket).download(obj.ruta);
     if (error || !data) return null;
@@ -119,7 +126,7 @@ export async function bloqueParaIA(sb: SupabaseClient, url: string | null | unde
     const buf = Buffer.from(await data.arrayBuffer());
     if (IMAGEN_IA.has(mime) && buf.length <= 4.5 * 1024 * 1024)
       return { type: "image", source: { type: "base64", media_type: mime, data: buf.toString("base64") } };
-    if (mime === "application/pdf" && buf.length <= 10 * 1024 * 1024)
+    if (mime === "application/pdf" && buf.length <= (opts.maxPdfBytes ?? 10 * 1024 * 1024))
       return { type: "document", source: { type: "base64", media_type: "application/pdf", data: buf.toString("base64") } };
     return null;
   } catch { return null; }

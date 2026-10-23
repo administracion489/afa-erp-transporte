@@ -42,7 +42,7 @@ export function ProveedorCoherencia({
 const NOMBRE_TEMA_SIN_AJUSTE: Record<Exclude<TemaAjuste, TemaAjusteConAjuste>, string> = {
   seguimiento: "Recordatorios y seguimientos",
   llamada: "Llamadas por teléfono",
-  traslados: "Cotizador de traslados",
+  traslados: "Traslados: cotización y reserva",
 };
 const nombreTema = (t: TemaAjuste): string =>
   t in TEMAS_AJUSTE ? TEMAS_AJUSTE[t as TemaAjusteConAjuste].etiqueta : NOMBRE_TEMA_SIN_AJUSTE[t as keyof typeof NOMBRE_TEMA_SIN_AJUSTE];

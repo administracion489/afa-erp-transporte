@@ -314,7 +314,7 @@ console.log("9. CAMPOS_POR_DISENO contra el HTML (valores centinela)");
   // Cada campo, su par (sin, con centinela). «cambia» = el HTML no es el mismo.
   type Prueba = (d: P.Diseno) => boolean;
   const cambia = (a: Partial<EntradaPdfCot>, b: Partial<EntradaPdfCot>) => doc(a).html !== doc(b).html;
-  const lista = (k: "condiciones_incluye" | "condiciones_no_incluye" | "condiciones_generales"): Prueba => d => {
+  const lista = (k: "condiciones_incluye" | "condiciones_no_incluye" | "condiciones_generales" | "condiciones_reserva"): Prueba => d => {
     // Fila de antes: la plantilla manda al imprimir.
     const viejo = cambia({ plantilla: d, cfg: {}, consid: DEFAULT_CONSID_ES }, { plantilla: d, cfg: { [k]: ["LISTA CENTINELA"] }, consid: DEFAULT_CONSID_ES });
     // Fila nueva: la plantilla se COPIA a la fila y el PDF imprime la fila.
@@ -335,6 +335,8 @@ console.log("9. CAMPOS_POR_DISENO contra el HTML (valores centinela)");
     condiciones_incluye: lista("condiciones_incluye"),
     condiciones_no_incluye: lista("condiciones_no_incluye"),
     condiciones_generales: lista("condiciones_generales"),
+    // La política de reserva (cotizaciones-06): solo la imprime la corporativa.
+    condiciones_reserva: lista("condiciones_reserva"),
     // Las cuentas: las propias de la plantilla (sin cuentas en la empresa) o apagarlas (con cuentas en la empresa).
     cuentas: d => cambia({ plantilla: d, cfg: {} }, { plantilla: d, cfg: { usar_bancos_propios: true, banco_1_nombre: "BANCO CENTINELA", banco_1_cuenta: "111", banco_1_cci: "" } })
       || cambia({ plantilla: d, cfg: {}, empresa: EMP_CON_CUENTAS }, { plantilla: d, cfg: { mostrar_cuentas_bancarias: false }, empresa: EMP_CON_CUENTAS }),
@@ -510,6 +512,49 @@ console.log("14. El SQL de la migración");
     ok(/'diseno',\s*'corporativo'/.test(todo) && /'idioma',\s*'es'/.test(todo) && /'activa',\s*true/.test(todo) && /'es_principal',\s*false/.test(todo), "el traspaso crea plantillas corporativas, en castellano, activas y no principales (sirveParaIA)");
     ok(/'traslado_ia',\s*'empresa'/.test(todo) && /'traslado_ia',\s*'particular'/.test(todo) && /'traslado_ia',\s*'extranjero'/.test(todo), "el traspaso llena las tres celdas del traslado de la IA");
   }
+}
+
+console.log("15. La política de reserva, cambios y cancelación (cotizaciones-06)");
+{
+  // La cuarta lista: se copia como las otras, es OPCIONAL de punta a punta (sin la clave, todo es lo
+  // de antes) y cuenta para el exceso. Solo la imprime la corporativa (sección 9).
+  const POL = ["Se confirma con el 50 % de adelanto.", "Cancelación con 24 horas o más: sin costo."];
+  const resp: ConsidCot = { incluye: ["R inc"], no_incluye: ["R no"], generales: ["R gen"] };
+  // (a) considSnapshot: de la plantilla (copia), del respaldo, o sin la clave.
+  const s1 = P.considSnapshot(PL("p1", { condiciones_reserva: POL }), resp);
+  ok(J(s1) === J({ ...resp, reserva: POL, version: 2, plantilla: "p1" }) && s1.reserva !== POL, `la plantilla con política: se copia (una copia), después de las generales (${J(s1)})`);
+  ok(J(P.considSnapshot(PL("p2", { condiciones_reserva: [] }), resp).reserva) === "[]", "una política vacía en la plantilla es una lista vacía");
+  ok(J(P.considSnapshot(PL("p3", { condiciones_reserva: null }), { ...resp, reserva: ["DEL RESPALDO"] }).reserva) === J(["DEL RESPALDO"]), "NULL en la plantilla → la del respaldo");
+  for (const [n, pl] of [["null", PL("p4", { condiciones_reserva: null })], ["sin la columna", PL("p5")], ["sin plantilla", null]] as const) {
+    ok(!("reserva" in P.considSnapshot(pl, resp)), `${n} y sin respaldo: la fila va SIN la clave`);
+  }
+  // (b) considParaFormulario: la misma regla que el PDF, y sin ninguna no agrega la clave.
+  const v2 = { ...resp, reserva: POL, version: 2, plantilla: "corporativo" };
+  ok(J(P.considParaFormulario({ condiciones_reserva: ["DE LA PLANTILLA"] }, v2, "es").reserva) === J(POL), "fila fijada: la política de la fila");
+  ok(J(P.considParaFormulario({ condiciones_reserva: ["DE LA PLANTILLA"] }, resp, "es").reserva) === J(["DE LA PLANTILLA"]), "fila de antes en castellano: la de la plantilla");
+  ok(J(P.considParaFormulario({ condiciones_reserva: ["DE LA PLANTILLA"] }, resp, "en")) === J(resp), "fila de antes en inglés: la de la fila (sin la clave)");
+  ok(!("reserva" in P.considParaFormulario(null, resp, "es")) && !("reserva" in P.considParaFormulario({}, null, "es")), "sin política en ninguna parte: sin la clave");
+  // (c) El ciclo: abrir y guardar en versión 2 imprime el MISMO HTML, también con la política.
+  const cfgs: Any[] = [null, {}, { condiciones_reserva: ["P1", "P2"] }, { condiciones_reserva: [] }, { condiciones_reserva: null, condiciones_generales: ["G"] }];
+  const filas: (Any | null)[] = [null, DEFAULT_CONSID_ES, { ...resp, reserva: ["F1"] }, { ...resp, reserva: [] }, P.considSnapshot(PL("corporativo", { condiciones_reserva: POL }), DEFAULT_CONSID_ES)];
+  let n = 0, iguales = 0;
+  for (const cfg of cfgs) for (const fila of filas) for (const idioma of ["es", "en"] as const) for (const d of P.DISENOS) {
+    n++;
+    const form = P.considParaFormulario(cfg, fila, idioma);
+    const guardada = { ...form, version: P.CONSID_VERSION, plantilla: "cualquiera" };
+    const h1 = doc({ consid: fila ?? undefined, cfg, plantilla: d, idioma }).html;
+    const h2 = doc({ consid: guardada, cfg, plantilla: d, idioma }).html;
+    if (h1 === h2) iguales++; else if (n - iguales <= 2) console.log(`    html ${d} cfg=${J(cfg)} fila=${J(fila)} ${idioma} difiere`);
+  }
+  ok(iguales === n, `ciclo con la política: HTML idéntico ${iguales}/${n}`);
+  // (d) Cuenta para el exceso, con su nombre.
+  const muchas = Array.from({ length: P.MAX_LINEAS_CONDICIONES + 1 }, (_, i) => `Línea ${i + 1}`);
+  ok(J(P.excesoCondiciones({ ...resp, reserva: muchas })) === J([{ lista: "reserva", motivo: "demasiadas_lineas", n: muchas.length }]), "31 líneas en la política → exceso de la lista «reserva»");
+  ok(J(P.excesoCondiciones({ ...resp, reserva: ["x".repeat(P.MAX_CARACTERES_CONDICION + 1)] })) === J([{ lista: "reserva", motivo: "linea_larga", n: P.MAX_CARACTERES_CONDICION + 1 }]), "una línea de 501 caracteres en la política → exceso");
+  ok(P.excesoCondiciones({ ...resp, reserva: Array.from({ length: P.MAX_LINEAS_CONDICIONES }, () => "ok") }).length === 0 && P.excesoCondiciones(resp).length === 0, "30 líneas o sin la clave: caben");
+  ok(J([...P.LISTAS_CONSID]) === J(["incluye", "no_incluye", "generales", "reserva"]) && J(Object.keys(P.ETIQUETA_LISTA_CONSID).sort()) === J([...P.LISTAS_CONSID].sort()), "LISTAS_CONSID en el orden del PDF y con su etiqueta");
+  ok(P.leeCampo("corporativo", "condiciones_reserva") && P.DISENOS.filter(d => P.leeCampo(d, "condiciones_reserva")).length === 1, "solo la corporativa ofrece la política");
+  ok(P.SQL_POLITICA_RESERVA === "supabase/cotizaciones-06-politica-reserva.sql", "el SQL que se nombra");
 }
 
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);

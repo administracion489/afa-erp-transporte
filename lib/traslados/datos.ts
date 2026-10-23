@@ -11,7 +11,8 @@
 // queda apagado y el catálogo lo DICE (`sinMigracionIA`). Lo demás sigue siendo estricto.
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { faltaAlguna, tablaQueFalta, type ErrorSupabase } from "../columna-faltante";
+import { faltaAlguna, faltaColumna, tablaQueFalta, type ErrorSupabase } from "../columna-faltante";
+import { normalizarConfigReserva, type ConfigReserva } from "./reserva-pago";
 import type { CategoriaTraslado, TarifaTraslado } from "./motor";
 import type { ZonaEnvio } from "./envio-ia";
 
@@ -145,7 +146,54 @@ export type ConfigIA = {
   sinMigracion: boolean;
   /** Por qué no está disponible, para el registro. */
   detalle: string | null;
+  /**
+   * La reserva de traslados (traslados-09, columnas `reserva_*`). Sin las columnas, o con la
+   * cotización apagada, el defecto: apagada. La lee `normalizarConfigReserva` (lib/traslados/reserva-pago.ts).
+   */
+  reserva: ConfigReserva;
+  /** La IA RESERVA: cotiza traslados, `reserva_ia` encendida y existen las tablas de reservas-09a/b/c. */
+  reservaIA: boolean;
+  /** Falta traslados-09 (las columnas) o alguna de reservas-09a/b/c (solo se mira con la reserva encendida). */
+  reservaSinMigracion: boolean;
+  /** Por qué la reserva no está disponible (o lo que no se pudo comprobar), para el registro. */
+  reservaDetalle: string | null;
 };
+
+/** Las columnas de traslados-09 que se leen con los interruptores (accesorias: se suelta SOLO la que el error nombra). */
+export const COLUMNAS_RESERVA = [
+  "reserva_ia", "reserva_adelanto_pct", "reserva_correo", "reserva_plazo_confirmacion_min", "reserva_margen_min", "reserva_devolucion_plazo_h",
+] as const;
+
+/** Los SQL de la reserva de traslados, en el orden en que se corren. */
+export const SQL_RESERVA_TRASLADOS = {
+  config: "supabase/traslados-09-reserva-ia.sql",
+  solicitudes: "supabase/reservas-09a-solicitudes.sql",
+  comprobantes: "supabase/reservas-09b-comprobantes.sql",
+  pagos: "supabase/reservas-09c-pagos-solicitud.sql",
+} as const;
+
+/**
+ * ¿Existen las tablas y la columna de reservas-09a/b/c? null si todo está; si no, el SQL que falta
+ * (o el error de la lectura, que también apaga la reserva: «no sé» no es «está»). Nunca lanza.
+ */
+async function faltaReserva(sb: Sb): Promise<{ sinMigracion: boolean; detalle: string } | null> {
+  const pruebas: [string, () => PromiseLike<{ error: ErrorSupabase | null }>, string][] = [
+    ["reserva_solicitudes", () => sb.from("reserva_solicitudes").select("id").limit(1), SQL_RESERVA_TRASLADOS.solicitudes],
+    ["reserva_solicitud_comprobantes", () => sb.from("reserva_solicitud_comprobantes").select("id").limit(1), SQL_RESERVA_TRASLADOS.comprobantes],
+    ["pagos.reserva_solicitud_id", () => sb.from("pagos").select("id, reserva_solicitud_id").limit(1), SQL_RESERVA_TRASLADOS.pagos],
+  ];
+  for (const [que, consulta, sql] of pruebas) {
+    try {
+      const { error } = await consulta();
+      if (!error) continue;
+      if (tablaQueFalta(error) || faltaColumna(error, "reserva_solicitud_id")) return { sinMigracion: true, detalle: `Falta ${sql}.` };
+      return { sinMigracion: false, detalle: `No se pudo comprobar ${que}: ${error.message ?? error.code ?? "error"}` };
+    } catch (e) {
+      return { sinMigracion: false, detalle: `No se pudo comprobar ${que}: ${(e as Error)?.message ?? e}` };
+    }
+  }
+  return null;
+}
 
 /**
  * Lo que el agente del CRM necesita ANTES de su bucle: ¿se le ofrece `cotizar_traslado`? Una
@@ -153,11 +201,27 @@ export type ConfigIA = {
  * tiene las columnas donde se guarda el traslado (sin ellas la cotización no quedaría atada a la
  * conversación y no habría cómo enviarla). Nunca lanza: ante la duda, la herramienta no se ofrece
  * y el agente se comporta como antes.
+ *
+ * Con la misma lectura, la RESERVA (traslados-09): sus columnas son accesorias (si el error nombra
+ * una, se relee sin ESA y la reserva queda con su defecto), y con `reserva_ia` encendida se
+ * comprueba que existan las tablas de reservas-09a/b/c. Sin ellas, o si no se pudo comprobar, la
+ * IA no reserva (y el prompt es el de antes).
  */
 export async function leerConfigIA(sb: Sb): Promise<ConfigIA> {
-  const no = (sinMigracion: boolean, detalle: string): ConfigIA => ({ iaCotiza: false, envioMaestro: false, sinMigracion, detalle });
+  const apagada = { reserva: normalizarConfigReserva(null), reservaIA: false, reservaSinMigracion: false, reservaDetalle: null };
+  const no = (sinMigracion: boolean, detalle: string): ConfigIA => ({ iaCotiza: false, envioMaestro: false, sinMigracion, detalle, ...apagada });
   try {
-    const { data, error } = await sb.from("traslados_config").select("ia_cotiza, envio_automatico").eq("id", 1).maybeSingle();
+    let quedan: string[] = [...COLUMNAS_RESERVA];
+    const sueltas: string[] = [];
+    let r: { data: Record<string, unknown> | null; error: ErrorSupabase | null };
+    for (;;) {
+      r = await sb.from("traslados_config").select(["ia_cotiza", "envio_automatico", ...quedan].join(", ")).eq("id", 1).maybeSingle();
+      const col = r.error ? faltaAlguna(r.error, quedan) : null;
+      if (!col) break;
+      sueltas.push(col);
+      quedan = quedan.filter((c) => c !== col);
+    }
+    const { data, error } = r;
     if (error) {
       if (tablaQueFalta(error)) return no(true, "Falta supabase/traslados-01-tablas.sql.");
       if (faltaAlguna(error, COLUMNAS_IA)) return no(true, "Falta supabase/traslados-05-cotizacion-ia.sql.");
@@ -165,13 +229,22 @@ export async function leerConfigIA(sb: Sb): Promise<ConfigIA> {
     }
     const iaCotiza = data?.ia_cotiza === true;
     const envioMaestro = data?.envio_automatico === true;
-    if (!iaCotiza) return { iaCotiza: false, envioMaestro, sinMigracion: false, detalle: null };
+    const reserva = normalizarConfigReserva(sueltas.length ? null : data);
+    const reservaBase = sueltas.length
+      ? { reserva, reservaIA: false, reservaSinMigracion: true, reservaDetalle: `Falta ${SQL_RESERVA_TRASLADOS.config} (columna ${sueltas.join(", ")}).` }
+      : { reserva, reservaIA: false, reservaSinMigracion: false, reservaDetalle: null };
+    if (!iaCotiza) return { iaCotiza: false, envioMaestro, sinMigracion: false, detalle: null, ...reservaBase };
     const prueba = await sb.from("cotizaciones").select("id, crm_conversacion_id, traslado_json").limit(1);
     if (prueba.error) {
       if (faltaAlguna(prueba.error, ["crm_conversacion_id", "traslado_json"])) return no(true, "Falta supabase/traslados-05-cotizacion-ia.sql (columnas de cotizaciones).");
       return no(false, `No se pudo comprobar cotizaciones: ${prueba.error.message}`);
     }
-    return { iaCotiza: true, envioMaestro, sinMigracion: false, detalle: null };
+    if (!reserva.activa || sueltas.length) return { iaCotiza: true, envioMaestro, sinMigracion: false, detalle: null, ...reservaBase };
+    const falta = await faltaReserva(sb);
+    return {
+      iaCotiza: true, envioMaestro, sinMigracion: false, detalle: null,
+      reserva, reservaIA: !falta, reservaSinMigracion: falta?.sinMigracion ?? false, reservaDetalle: falta?.detalle ?? null,
+    };
   } catch (e) {
     return no(false, (e as Error)?.message ?? "Error leyendo la configuración de traslados.");
   }

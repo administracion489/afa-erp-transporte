@@ -90,6 +90,11 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
     conceptos: ["estado_admin", "estado_proveedor", "tercerizado", "margen", "liquidacion_cliente", "servicio_adicional"],
     faqs: [
       {
+        pregunta: "Abrí la Confirmación de una reserva y sale «Pedido por WhatsApp». ¿Qué es?",
+        respuesta:
+          "Esa reserva nació de un traslado que el cliente aceptó por WhatsApp con la IA del CRM. Debajo del pago se ve su solicitud y los **comprobantes** que mandó el cliente, con lo que leyó la IA; «👁 Ver» abre el último.\n\nEl comprobante es evidencia, no un cobro: el adelanto se registra solo cuando el dinero ya está en la cuenta. Ver la solicitud exige el módulo CRM; sin él, la pantalla te dice dónde se ve.",
+      },
+      {
         pregunta: "¿Cómo le mando al cliente la Confirmación de Reserva?",
         respuesta:
           "Botón **Confirmación** en la fila del servicio (o **Confirmación de reserva** dentro del formulario). Se abre una ventana con el pago, lo que falta y las confirmaciones ya emitidas.\n\n**Qué la habilita:**\n• Un **adelanto registrado**. Lo registra **Tesorería o Finanzas** en esa misma ventana cuando el dinero ya está en la cuenta — una captura del cliente no basta. Si el cliente tiene condición de **crédito**, se puede emitir sin adelanto y el papel lo dice.\n• Fecha, hora, recojo, destino, cliente y el **precio de venta** registrados. El ERP no imprime un importe que nadie registró.\n\n**Qué imprime:** cliente, servicio (ida y retorno si los hay), unidad y conductor si ya están asignados — si no, dice que se enviarán después —, precio, adelanto con su fecha, saldo y moneda. El teléfono del conductor solo sale si marcas la casilla. Nunca DNI, licencia ni costos.\n\n**Versiones:** si cambias la hora, la unidad, el conductor o el precio, vuelve a pulsar **Generar**: sale la versión siguiente y dice qué cambió. La anterior queda en el historial. Volver a descargar no crea nada nuevo.\n\n**WhatsApp:** en el celular abre la hoja de compartir con el PDF adjunto; en la computadora descarga el PDF y abre WhatsApp con el mensaje y el número del cliente — adjuntas el archivo tú. El ERP no marca nada como enviado.\n\nNo reemplaza al comprobante de pago, y emitirla no cambia el estado del servicio.",
@@ -899,6 +904,11 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
     conceptos: ["igv", "margen"],
     faqs: [
       {
+        pregunta: "¿Qué es «Reserva y pago por la IA» en Zonas y traslados → Ajustes?",
+        respuesta:
+          "Es lo que deja a la IA del CRM **reservar** un traslado cuando el cliente acepta su cotización por WhatsApp. Nace apagado.\n\n**Adelanto (% del total)**: lo que se le pide pagar para reservar; vacío, no se pide pago y un ejecutivo confirma la unidad primero. **Plazo para confirmar**: los minutos, dentro del horario del equipo, para verificar el pago y confirmar la unidad. **Margen antes del servicio**: si entre esa confirmación y el servicio no queda ese margen, primero se confirma la unidad. **Plazo para devolver**: las horas que se le prometen al devolver (vacío, no se promete un plazo).\n\nEl **correo que recibe los comprobantes** solo lo cambia un administrador del ERP, porque esos correos llevan datos del cliente; los demás lo ven en solo lectura.\n\nDebajo se coteja la política de reserva de cada plantilla PDF con lo que escribes, y «Lo que hace hoy» dice, con lo guardado, si la IA de verdad reserva (agente autónomo, horario del equipo, cuentas).",
+      },
+      {
         pregunta: "¿En qué se diferencia del Cotizador?",
         respuesta:
           "El **Cotizador** calcula: le das ruta y vehículo y te dice cuánto cuesta y cuánto cobrar. Responde “¿cuánto vale esto?”.\n\nEl **Tarifario** recuerda: es la decisión ya tomada para las rutas que haces siempre. Responde “¿cuánto cobramos nosotros por esto?”.\n\nEn una cotización los verás juntos, y el ERP propone **el mayor de los dos**. Si tu tarifa oficial se quedó corta frente al costo actual, ese contraste es justo la señal de que hay que actualizarla.",
@@ -1028,7 +1038,13 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
       "Tener el historial completo de lo hablado con cada contacto.",
       "Convertir una conversación en cotización o en reserva sin volver a teclear los datos.",
     ],
+    conceptos: ["pago_reportado"],
     faqs: [
+      {
+        pregunta: "Apareció una tarjeta «📅 Reserva de traslado» en el chat. ¿Qué hago con ella?",
+        respuesta:
+          "La dejó la IA cuando el cliente aceptó una cotización de traslado. La tarjeta dice en qué estado está, el plazo para confirmar la unidad, el dinero (total, adelanto, saldo, lo cobrado) y **lo que falta**, con quién lo tiene que hacer: el cliente, el CRM, Tesorería, Programación o Facturación.\n\nLos botones son solo los que tienen sentido en ese momento: **✅ Hay unidad** crea la reserva en Programación y le escribe al cliente; **❌ No hay unidad** la cierra (y si pagó, se le devuelve todo); **Pedir otro comprobante**, **Registrar el último comprobante**, **Resolver cancelación** (eliges el % que se devuelve según la política), **Vincular cliente** y **Emitir y enviar Confirmación**. Antes de cada uno sale una pregunta que dice qué dinero o qué mensaje va a salir.\n\nSi pasaron más de 24 horas desde el último mensaje del cliente, WhatsApp no deja escribirle desde el CRM: la tarjeta te da el texto y un enlace wa.me para mandarlo desde el celular (y el PDF de la Confirmación para adjuntarlo). Registrar el adelanto o una devolución es de Tesorería: esos botones solo los ve quien tiene ese módulo.",
+      },
       {
         pregunta: "¿Qué canales entran aquí y por qué hay dos números de WhatsApp?",
         respuesta:
