@@ -27,21 +27,31 @@
 //     de comprobantes que no se pudo leer no se toma por vacía, y lo que no se puede comprobar deriva.
 //  5. FUERA DE LA VENTANA DE 24 H NO SE INTENTA ESCRIBIR: se hace lo del ERP y se devuelve el texto
 //     con su enlace wa.me (`fuera_de_ventana`).
+//  6. LOS DATOS DEL CLIENTE SOLO VAN AL CHAT DE UN CLIENTE VERIFICADO (la regla del PDF,
+//     `clienteVerificadoEnChat`: vinculado al contacto o con su número completo como wa_id): la
+//     Confirmación de Reserva por WhatsApp y el crédito. «Vincular cliente» ata el contacto solo si
+//     el número coincide (`vinculoContactoReserva`).
+//  7. EL COMPROBANTE ES UN ARCHIVO QUE LLEGÓ POR META (`meta_message_id`) Y VIVE EN `crm-media`: lo
+//     demás no se lee, no se firma ni se adjunta; el adjunto del correo se reconoce por sus bytes.
+//     «Cuenta como pago reportado» se decide en un solo sitio (`comprobanteCuenta`).
+//  8. UN ERROR DE LA BASE NO SE ENSEÑA: va al log y el usuario del ERP recibe qué falló
+//     (`seguro`/`crudo` sobre `mensajeSeguro`, lib/mensaje-seguro.ts).
 // Matriz de punta a punta: ANTHROPIC_API_KEY=x npx tsx scripts/prueba-reserva-ia.mts
 // ══════════════════════════════════════════════════════════════════════════════
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { faltaColumna, tablaFaltante } from "../columna-faltante";
 import { fechaLima, limaAUtcMs } from "../alertas-horario";
 import { normalizarAjustes, estiloDe, type EstiloMensajes } from "../crm-ia-ajustes";
 import { atencionDe, atencionEnUso, type Atencion } from "../crm-ia-atencion";
 import { leerPlantillasYReglas } from "../cotizacion-plantillas-datos";
-import { plantillaParaUso, SEGMENTOS } from "../cotizacion-plantillas";
+import { excesoCondiciones, plantillaParaUso, SEGMENTOS } from "../cotizacion-plantillas";
+import { mensajeSeguro } from "../mensaje-seguro";
 import { normalizarMoneda, type Moneda } from "../cotizacion-moneda";
 import { numeroCotizacion } from "../cotizacion-corporativo";
 import type { PlantillaPdfCfg } from "../cotizacion-pdf";
 import type { PerfilEmpresa } from "../empresa-perfil";
-import { objetoPrivadoDe } from "../storage-privado";
+import { baseSupabase, objetoPrivadoDe } from "../storage-privado";
 import { BUCKET_CRM_MEDIA, asegurarBucket as asegurarBucketCrm } from "../crm-media";
 import { enviarWhatsAppMedia, explicarErrorEnvioWhatsApp } from "../crm-meta";
 import { phonePara as phoneParaUso } from "../whatsapp-numeros";
@@ -62,20 +72,21 @@ import {
   MOTIVO_ORDEN, elegibilidadDeReserva, frasePlazo, ordenDeReserva, ordenDeSolicitud, type MotivoOrden, type OrdenReserva,
 } from "./reserva-orden";
 import {
-  adelantoDe, cargoRetenido, cuentasEnMensaje, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal, filaFacturaCargo,
-  firmaImportes, marcaCargoReserva, mensajeCanceladaSinPago, mensajeCancelacionRegistrada, mensajeCancelacionResuelta,
+  adelantoDe, cargoRetenido, clienteVerificadoEnChat, cuentasEnMensaje, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal,
+  filaFacturaCargo, firmaConCuentas, firmaImportes, huellaDeFirma, importesDeFirma, juzgarReenvioPedirPago, marcaCargoReserva,
+  mensajeCanceladaSinPago, mensajeCancelacionRegistrada, mensajeCancelacionResuelta, vinculoContactoReserva,
   mensajeComprobanteRecibido, mensajeDisponibilidadPrimero, mensajeHayUnidad, mensajePagoNoEncontrado, mensajePedirPago,
   mensajePoliticas, mensajeSinUnidad, politicaContradiceConfig, puedePasar, queFalta,
   type Adelanto, type BloquePago, type ConfigReserva, type CuentasMensaje, type EstadoSolicitud, type PagoEnHayUnidad,
   type PagoSolicitud, type Pendiente,
 } from "./reserva-pago";
-import { TEXTO_COTEJO, cotejarComprobante, normalizarOperacion, type Cotejo, type LecturaComprobante } from "./comprobante-pago";
+import { TEXTO_COTEJO, comprobanteCuenta, cotejarComprobante, normalizarOperacion, type Cotejo, type LecturaComprobante } from "./comprobante-pago";
 import { leerComprobantePago, type ResultadoLector } from "./comprobante-pago-ia";
 import {
-  decidirTopeReserva, elegirCotizacion, entradaReserva, estadoReservaIA, mensajePedirComprobante, respuestaReservaParaModelo,
+  RE_VUELO, decidirTopeReserva, elegirCotizacion, entradaReserva, estadoReservaIA, mensajePedirComprobante, respuestaReservaParaModelo,
   type AccionReserva, type CotizacionCandidata, type ResultadoReservaIA,
 } from "./reserva-ia";
-import { correoReserva, destinatariosReserva, type DatosCorreoReserva } from "./reserva-correo";
+import { adjuntoDeComprobante, correoReserva, destinatariosReserva, type DatosCorreoReserva } from "./reserva-correo";
 import { inicioServicioMs } from "./reserva-alertas";
 import { leerConfigIA, SQL_RESERVA_TRASLADOS } from "./datos";
 import {
@@ -92,6 +103,11 @@ export const TABLA_SOLICITUDES = "reserva_solicitudes";
 export const TABLA_COMPROBANTES = "reserva_solicitud_comprobantes";
 /** La clave del freno de lecturas de comprobantes en `alerta_enviada` (índice único clave + ref + fecha). */
 export const CLAVE_LECTURA_COMPROBANTE = "reserva_ia_comprobante";
+/**
+ * La clave del correo «comprobante sin cotización que reservar» en `alerta_enviada`: el tope diario
+ * y el RECLAMO del archivo (ref `conv:<id>:msg:<mensaje>`): un archivo se avisa una sola vez.
+ */
+export const CLAVE_CORREO_SIN_COTIZACION = "reserva_ia_pago_sin_cotizacion";
 /** El tipo de la tarjeta del inbox. */
 export const TIPO_ACCION_RESERVA = "reserva_traslado";
 
@@ -103,12 +119,10 @@ const ESTADOS_ABIERTOS_SIN_UNIDAD: readonly EstadoSolicitud[] = ["esperando_pago
 const TIPOS_ARCHIVO = ["image", "document", "imagen"];
 /** Sin solicitud ni cotización: cuánto atrás se busca la foto del comprobante. NO medido. */
 const VENTANA_SIN_COTIZACION_MS = 48 * 3_600_000;
-/** El adjunto del correo, hasta (Resend acepta 40 MB por correo; un comprobante pesa mucho menos). NO medido. */
-const MAX_ADJUNTO_BYTES = 5 * 1024 * 1024;
 /** El enlace firmado del PDF que baja Meta (s). */
 const TTL_URL_META = 3600;
-/** El enlace firmado para que el ejecutivo vea un comprobante (s). */
-const TTL_URL_VER = 3600;
+/** El enlace firmado para que el ejecutivo vea un comprobante (s): lo justo para abrirlo. */
+const TTL_URL_VER = 600;
 
 const COLS_SOLICITUD =
   "id, cotizacion_id, crm_conversacion_id, crm_accion_id, estado, orden, motivos_orden, adelanto_pct, firma_importes, " +
@@ -145,6 +159,8 @@ export type DepsReserva = {
 };
 
 type ConvR = { id: string; canal: string; phone_number_id?: string | null };
+/** El cliente como lo compara `clienteVerificadoEnChat` (solo su teléfono). */
+type ClienteChat = { telefono?: string | null };
 type ContactoR = { id?: string | null; nombre?: string | null; cliente_id?: number | null; wa_id?: string | null; telefono?: string | null } | null;
 
 const num = (v: unknown): number | null => {
@@ -168,6 +184,37 @@ const atencionDeAgente = (agente: unknown): Atencion => atencionDe(normalizarAju
 const appUrlDe = (deps: DepsReserva) => (deps.appUrl !== undefined ? deps.appUrl : process.env.NEXT_PUBLIC_APP_URL ?? null);
 const lineaCorta = (s: unknown, max = 300) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
+/**
+ * Los mensajes que escribe este módulo (y los que lanzan los lectores que llama) y que se pueden
+ * enseñar. Un «No se pudo…: <detalle>» se enseña sin el detalle (`mensajeSeguro` con
+ * `cortarDetalle`): el detalle es el texto crudo de la base, que va al log.
+ */
+const PROPIOS = /^(No se pudo|No se pudieron|Falta\b|La cotización\b|Ese cobro|Otra persona)/;
+
+/**
+ * Un error para el usuario del ERP (la tarjeta, Tesorería, una nota interna): lo crudo va al log.
+ * `generico`: lo que se enseña si el error no es uno escrito por el módulo (por defecto, el genérico).
+ */
+function seguro(e: unknown, donde: string, generico?: string): string {
+  console.error(`[reserva-traslado] ${donde}:`, (e as { message?: unknown } | null)?.message ?? e);
+  return mensajeSeguro(e, { propios: PROPIOS, cortarDetalle: true, generico });
+}
+
+/** «contexto: <error de la base>» → «contexto. Vuelve a intentar en un momento.» (el error, al log). */
+function crudo(contexto: string, error: unknown): string {
+  console.error(`[reserva-traslado] ${contexto}:`, msg(error));
+  return mensajeSeguro(`${contexto}: ${msg(error)}`, { propios: PROPIOS, cortarDetalle: true });
+}
+
+/**
+ * La huella de las cuentas que se le mandan al cliente (las líneas EXACTAS del mensaje): sha256
+ * corto. Se guarda en `firma_importes` (`firmaConCuentas`) para no reenviarle otras. null sin líneas.
+ */
+export function huellaCuentas(lineas: readonly string[] | null | undefined): string | null {
+  const ls = (lineas ?? []).map((l) => String(l ?? "")).filter((l) => l.trim());
+  return ls.length ? createHash("sha256").update(JSON.stringify(ls)).digest("hex").slice(0, 16) : null;
+}
+
 const res = (codigo: CodigoResultadoReserva, detalle: string, extra: Partial<ResultadoAccionReserva> = {}): ResultadoAccionReserva =>
   ({ ok: codigo === "ok" || codigo === "fuera_de_ventana", codigo, detalle, ...extra });
 
@@ -182,8 +229,14 @@ async function enviarCorreoPorDefecto(x: { to: string; subject: string; html: st
   await enviarEmail(x);
 }
 
+/** El objeto de `crm-media` (donde el webhook guarda lo que manda el cliente) al que apunta un enlace; null si es de otro sitio. */
+const objetoCrmMedia = (url: unknown) => {
+  const obj = objetoPrivadoDe(url, baseSupabase());
+  return obj && obj.bucket === BUCKET_CRM_MEDIA ? obj : null;
+};
+
 async function bajarArchivoPorDefecto(sb: Sb, url: string): Promise<{ bytes: Uint8Array; mime: string } | null> {
-  const obj = objetoPrivadoDe(url);
+  const obj = objetoCrmMedia(url);
   if (!obj) return null;
   try {
     const { data, error } = await sb.storage.from(obj.bucket).download(obj.ruta);
@@ -332,18 +385,35 @@ export async function contextoCotizacion(sb: Sb, cotId: number): Promise<Context
   let credito = false;
   const cliId = num(fila.cliente_id);
   if (cliId) {
-    let r = await sb.from("clientes").select("id, nombre, empresa, ruc, condicion_pago").eq("id", cliId).maybeSingle();
-    if (r.error && faltaColumna(r.error, "condicion_pago")) r = await sb.from("clientes").select("id, nombre, empresa, ruc").eq("id", cliId).maybeSingle();
+    let r = await sb.from("clientes").select("id, nombre, empresa, ruc, telefono, condicion_pago").eq("id", cliId).maybeSingle();
+    if (r.error && faltaColumna(r.error, "condicion_pago")) r = await sb.from("clientes").select("id, nombre, empresa, ruc, telefono").eq("id", cliId).maybeSingle();
     if (r.error) throw new Error(`No se pudo leer el cliente de la cotización: ${r.error.message}`);
     if (r.data) {
       cliente = { id: Number(r.data.id), nombre: String(r.data.empresa || r.data.nombre || "").trim() || `Cliente ${r.data.id}`, ruc: r.data.ruc ?? null };
       credito = esCredito(r.data.condicion_pago);
+      // En una cotización del CRM, el crédito se le reconoce solo a un cliente VERIFICADO para ese chat
+      // (la regla del PDF: vinculado al contacto o con su número completo como wa_id). Si no, o si no
+      // se puede comprobar, se le pide el adelanto: el lado seguro.
+      if (credito && fila.crm_conversacion_id) credito = await clienteVerificadoDeConversacion(sb, fila.crm_conversacion_id, Number(r.data.id), r.data);
     }
   }
   return {
     fila, numero: numeroCotizacion(fila), moneda, inicioMs: inicioServicioMs(fila), perfil, usada: pl.usada, referencia: pl.referencia,
     cuentas, frente, politica, politicaSospechosa, zonaEnvio, credito, cliente,
   };
+}
+
+/**
+ * ¿El cliente del ERP es quien escribe en esa conversación? (`clienteVerificadoEnChat`, la regla del
+ * PDF). false si la conversación o su contacto no se pueden leer: nunca se afirma lo que no se sabe.
+ */
+async function clienteVerificadoDeConversacion(sb: Sb, convId: string, clienteId: number, cliente: { telefono?: string | null }): Promise<boolean> {
+  try {
+    const { data, error } = await sb.from("crm_conversaciones").select("id, crm_contactos(wa_id, cliente_id)").eq("id", convId).maybeSingle();
+    if (error || !data) return false;
+    const ct = Array.isArray(data.crm_contactos) ? data.crm_contactos[0] : data.crm_contactos;
+    return clienteVerificadoEnChat(clienteId, cliente, { contactoClienteId: ct?.cliente_id ?? null, waId: ct?.wa_id ?? null });
+  } catch { return false; }
 }
 
 /** El porcentaje de la solicitud (null = crédito o sin porcentaje). */
@@ -402,11 +472,12 @@ async function contarSolicitudesHoy(sb: Sb, convId: string, hoy: string): Promis
   return { conv: n(a), dia: n(b) };
 }
 
-async function contarLecturasHoy(sb: Sb, convId: string, hoy: string): Promise<{ conv: number | null; dia: number | null }> {
+/** Cuántas filas de `clave` (lecturas de comprobantes, o correos sin cotización) hay hoy, en la conversación y en total. */
+async function contarLecturasHoy(sb: Sb, convId: string, hoy: string, clave: string = CLAVE_LECTURA_COMPROBANTE): Promise<{ conv: number | null; dia: number | null }> {
   const n = (r: { count?: number | null; error: unknown }) => (r.error ? null : r.count ?? 0);
   const [a, b] = await Promise.all([
-    sb.from("alerta_enviada").select("ref", { count: "exact", head: true }).eq("clave", CLAVE_LECTURA_COMPROBANTE).eq("fecha", hoy).like("ref", `conv:${convId}:%`),
-    sb.from("alerta_enviada").select("ref", { count: "exact", head: true }).eq("clave", CLAVE_LECTURA_COMPROBANTE).eq("fecha", hoy),
+    sb.from("alerta_enviada").select("ref", { count: "exact", head: true }).eq("clave", clave).eq("fecha", hoy).like("ref", `conv:${convId}:%`),
+    sb.from("alerta_enviada").select("ref", { count: "exact", head: true }).eq("clave", clave).eq("fecha", hoy),
   ]);
   return { conv: n(a), dia: n(b) };
 }
@@ -415,13 +486,18 @@ async function contarLecturasHoy(sb: Sb, convId: string, hoy: string): Promise<{
 
 type EnvioCorreo = { enviado: boolean; error: string | null; destinatarios: string[] };
 
-/** Manda el correo a los destinatarios de la reserva. Nunca lanza: el fallo vuelve en `error`. */
-async function mandarCorreo(datos: DatosCorreoReserva, x: { correoConfig: string | null; emailEmpresa: string | null; adjunto?: { bytes: Uint8Array; mime: string; nombre: string } | null }, deps: DepsReserva): Promise<EnvioCorreo> {
+/**
+ * Manda el correo a los destinatarios de la reserva. Nunca lanza: el fallo vuelve en `error`. El
+ * comprobante (`x.adjunto`: los bytes que se bajaron, o null si no se pudo) va adjunto SOLO si
+ * `adjuntoDeComprobante` lo reconoce por sus primeros bytes; si no, el correo sale sin él y dice por qué.
+ */
+async function mandarCorreo(datos: DatosCorreoReserva, x: { correoConfig: string | null; emailEmpresa: string | null; adjunto?: { bytes: Uint8Array | null; nombreBase: string } | null }, deps: DepsReserva): Promise<EnvioCorreo> {
   const dest = destinatariosReserva({ correoConfig: x.correoConfig, emailEmpresa: x.emailEmpresa });
   if (!dest.correos.length) return { enviado: false, error: "No hay a quién mandar el correo: escribe el correo de reservas en /tarifario → Zonas y traslados → Ajustes o en /configuracion/perfil.", destinatarios: [] };
-  const c = correoReserva(datos);
-  const attachments = x.adjunto && x.adjunto.bytes.length <= MAX_ADJUNTO_BYTES
-    ? [{ filename: x.adjunto.nombre, content: Buffer.from(x.adjunto.bytes).toString("base64") }] : undefined;
+  const adj = x.adjunto ? adjuntoDeComprobante(x.adjunto.bytes, x.adjunto.nombreBase) : null;
+  const c = correoReserva({ ...datos, adjunto: adj?.ok === true, adjuntoMotivo: adj && !adj.ok ? adj.motivo : null });
+  const attachments = adj?.ok && x.adjunto?.bytes
+    ? [{ filename: adj.nombre, content: Buffer.from(x.adjunto.bytes).toString("base64") }] : undefined;
   const errores: string[] = [];
   for (const to of dest.correos) {
     try { await (deps.enviarCorreo ?? enviarCorreoPorDefecto)({ to, subject: c.asunto, html: c.html, attachments }); }
@@ -429,8 +505,6 @@ async function mandarCorreo(datos: DatosCorreoReserva, x: { correoConfig: string
   }
   return { enviado: errores.length < dest.correos.length, error: errores.length ? errores.join(" · ").slice(0, 1900) : null, destinatarios: dest.correos };
 }
-
-const extDe = (mime: string) => (mime === "application/pdf" ? "pdf" : mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg");
 
 // ── 5. Crear la solicitud ────────────────────────────────────────────────────
 
@@ -462,7 +536,7 @@ async function crearSolicitud(
   const { sb } = ctx;
   let cc: ContextoCotizacion;
   try { cc = await contextoCotizacion(sb, cand.cand.id); }
-  catch (e) { return { ok: false, motivo: "No se pudo leer la cotización a reservar", nota: msg(e) }; }
+  catch (e) { return { ok: false, motivo: "No se pudo leer la cotización a reservar", nota: seguro(e, "crearSolicitud/contexto") }; }
   const pct = cc.credito ? null : ctx.cfg.adelantoPct;
   const adel = adelantoDe(cc.fila, pct);
   if (!adel) return { ok: false, motivo: `La cotización N° ${cc.numero} no tiene importes que se puedan calcular`, nota: "Revísala en /cotizaciones (ítems o tipo de cambio)." };
@@ -478,7 +552,9 @@ async function crearSolicitud(
   const fila = {
     cotizacion_id: cc.fila.id, crm_conversacion_id: ctx.conv.id,
     estado: accion === "pedir_pago" ? "esperando_pago" : "por_confirmar", orden: ordenDeSolicitud(accion), motivos_orden: motivos,
-    adelanto_pct: pct, firma_importes: firmaImportes(cc.fila, pct), confirmar_antes_de: isoDe(orden.confirmarAntesMs), urgente: orden.urgente,
+    // Con T1 se le mandan las cuentas: su huella va con los importes (para no reenviarle otras).
+    adelanto_pct: pct, firma_importes: firmaConCuentas(firmaImportes(cc.fila, pct), accion === "pedir_pago" ? huellaCuentas(cc.cuentas.lineas) : null),
+    confirmar_antes_de: isoDe(orden.confirmarAntesMs), urgente: orden.urgente,
     nombre_pasajero: x.pasajero ?? null, vuelo: x.vuelo ?? null, cliente_acepto_en: x.aceptoEn, acepto_mensaje_id: x.aceptoMensajeId,
   };
   const ins = await sb.from(TABLA_SOLICITUDES).insert(fila).select(COLS_SOLICITUD).single();
@@ -489,7 +565,7 @@ async function crearSolicitud(
       return { ok: false, ya: ((data ?? [])[0] ?? null) as FilaSolicitud | null, motivo: "La solicitud ya existía", nota: "" };
     }
     const falta = ins.error && tablaFaltante(ins.error, TABLA_SOLICITUDES);
-    return { ok: false, motivo: "No se pudo registrar la solicitud de reserva", nota: falta ? `Falta correr ${SQL_RESERVA_TRASLADOS.solicitudes}.` : msg(ins.error) };
+    return { ok: false, motivo: "No se pudo registrar la solicitud de reserva", nota: falta ? `Falta correr ${SQL_RESERVA_TRASLADOS.solicitudes}.` : crudo("No se pudo registrar la solicitud de reserva", ins.error) };
   }
   const s = { ...(ins.data as FilaSolicitud), orden: ordenDeSolicitud(accion) } as FilaSolicitud;
   // La tarjeta del inbox (queda `pendiente` mientras la solicitud esté abierta). Best-effort: sin ella la solicitud sigue viva.
@@ -502,12 +578,13 @@ async function crearSolicitud(
       payload: { solicitud_id: s.id, cotizacion_id: cc.fila.id, numero: cc.numero, orden: accion },
       estado: "pendiente", resultado_tipo: TABLA_SOLICITUDES, resultado_id: s.id,
     }).select("id").single();
-    if (error || !acc) throw new Error(msg(error));
+    if (error || !acc) throw new Error(crudo("No se pudo crear la tarjeta", error ?? "sin fila"));
     accionId = String(acc.id);
     await sb.from(TABLA_SOLICITUDES).update({ crm_accion_id: accionId }).eq("id", s.id);
     s.crm_accion_id = accionId;
   } catch (e) {
-    await nota(sb, ctx.conv.id, `📅 Se registró la solicitud de reserva #${s.id} (cotización N° ${cc.numero}) pero no su tarjeta en la bandeja: ${msg(e)}. Ábrela desde /tesoreria?tab=adelantos.`);
+    seguro(e, "crearSolicitud/tarjeta");
+    await nota(sb, ctx.conv.id, `📅 Se registró la solicitud de reserva #${s.id} (cotización N° ${cc.numero}) pero no su tarjeta en la bandeja. Ábrela desde /tesoreria?tab=adelantos.`);
   }
   return { ok: true, c: { s, cc, orden: { ...orden, accion }, adel, pct, accionId } };
 }
@@ -584,7 +661,7 @@ export async function reservarTrasladoIA(ctx: CtxReservaIA, input: unknown, deps
   const e = entradaReserva(input);
   let cands: Candidata[];
   try { cands = await candidatasDeConversacion(ctx.sb, ctx.conv.id, ahora, hoy); }
-  catch (err) { return derivaIA("No se pudieron leer las cotizaciones de traslado del chat", pedido, msg(err)); }
+  catch (err) { return derivaIA("No se pudieron leer las cotizaciones de traslado del chat", pedido, seguro(err, "reservarTrasladoIA/candidatas")); }
   const elec = elegirCotizacion(cands.map((c) => c.cand), e.numeroCotizacion);
   if (elec.accion === "sin_cotizacion") return solo("sin_cotizacion");
   if (elec.accion === "elegir_cotizacion") return solo("elegir_cotizacion", null, elec.opciones);
@@ -616,22 +693,39 @@ export async function reservarTrasladoIA(ctx: CtxReservaIA, input: unknown, deps
   return solo(c.orden.accion, c.cc.numero, undefined, mensaje);
 }
 
+/**
+ * La solicitud ya existe: se le vuelve a mandar su T1/T2. Volver a mandar las CUENTAS (T1) exige lo
+ * mismo que mandarlas la primera vez —cuentas de «corporativo», perfil configurado— y, además, que
+ * sean las MISMAS que recibió (`juzgarReenvioPedirPago` sobre la huella de `firma_importes`). Si
+ * no, o si los importes cambiaron, deriva al ejecutivo con su nota.
+ */
 async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, pedido: string): Promise<ResultadoReservaIA> {
   let cc: ContextoCotizacion;
   try { cc = await contextoCotizacion(ctx.sb, s.cotizacion_id); }
-  catch (e) { return derivaIA("No se pudo leer la cotización de la reserva", pedido, msg(e)); }
-  if (s.estado === "esperando_pago" && s.firma_importes && firmaImportes(cc.fila, pctDe(s)) !== s.firma_importes) {
+  catch (e) { return derivaIA("No se pudo leer la cotización de la reserva", pedido, seguro(e, "yaSolicitada")); }
+  if (s.estado === "esperando_pago" && s.firma_importes && firmaImportes(cc.fila, pctDe(s)) !== importesDeFirma(s.firma_importes)) {
     return derivaIA("La cotización cambió desde que se le pidió el pago", pedido,
       `Solicitud #${s.id}: los importes de la cotización N° ${cc.numero} ya no son los que se le comunicaron al cliente. Revísala antes de volver a pedirle el pago.`, cc.numero);
+  }
+  if (s.estado === "esperando_pago") {
+    const j = juzgarReenvioPedirPago({
+      frente: cc.frente.codigo, perfilConfigurado: perfilConfigurado(cc.perfil), lineas: cc.cuentas.lineas.length,
+      huellaEnviada: huellaDeFirma(s.firma_importes), huellaActual: huellaCuentas(cc.cuentas.lineas),
+    });
+    if (!j.ok) return derivaIA("No se le volvieron a mandar las cuentas de pago", pedido, `Solicitud #${s.id} (cotización N° ${cc.numero}): ${j.nota}`, cc.numero);
   }
   const mensaje = s.estado === "esperando_pago" || s.estado === "por_confirmar" ? mensajeDeSolicitud(s, cc, ahora, ctx) : null;
   return solo("ya_solicitada", cc.numero, undefined, mensaje);
 }
 
-/** La foto o el PDF que puede ser el comprobante: el último entrante desde `desde`, sin usar en ninguna solicitud. LANZA. */
+/**
+ * La foto o el PDF que puede ser el comprobante: el último ENTRANTE desde `desde` que llegó por Meta
+ * (`meta_message_id`: lo escribió el webhook, no una sesión del ERP), sin usar en ninguna solicitud.
+ * LANZA.
+ */
 async function archivoCandidato(sb: Sb, convId: string, desdeIso: string | null): Promise<{ nuevo: { id: string; media_url: string; created_at: string; tipo: string } | null; usado: boolean }> {
   let q = sb.from("crm_mensajes").select("id, media_url, created_at, tipo").eq("conversacion_id", convId).eq("direccion", "entrante")
-    .not("media_url", "is", null).order("created_at", { ascending: false }).limit(20);
+    .not("media_url", "is", null).not("meta_message_id", "is", null).order("created_at", { ascending: false }).limit(20);
   if (desdeIso) q = q.gte("created_at", desdeIso);
   const { data, error } = await q;
   if (error) throw new Error(`No se pudieron leer los archivos del chat: ${error.message}`);
@@ -663,7 +757,7 @@ async function registrarComprobante(
   const estilo = estiloDeAgente(x.agente);
   let cand: Awaited<ReturnType<typeof archivoCandidato>>;
   try { cand = await archivoCandidato(sb, x.conv.id, x.desdeIso); }
-  catch (e) { return { codigo: "error", mensaje: null, detalle: msg(e) }; }
+  catch (e) { return { codigo: "error", mensaje: null, detalle: seguro(e, "registrarComprobante/archivo") }; }
   if (!cand.nuevo) return cand.usado
     ? { codigo: "ya_registrado", mensaje: null, detalle: "El último comprobante del chat ya está registrado." }
     : { codigo: "sin_imagen", mensaje: mensajePedirComprobante(estilo), detalle: "No hay una foto o un PDF nuevo del comprobante en el chat." };
@@ -674,11 +768,11 @@ async function registrarComprobante(
   const tope = decidirTopeReserva(conteo, "lectura");
   if (!tope.ok) return { codigo: "tope", mensaje: null, detalle: tope.motivo ?? "Tope de lecturas de comprobantes." };
   const reg = await sb.from("alerta_enviada").insert({ clave: CLAVE_LECTURA_COMPROBANTE, ref: `conv:${x.conv.id}:${ahora}-${azarDe(deps)}`, fecha: hoy });
-  if (reg.error) return { codigo: "tope", mensaje: null, detalle: `No se pudo registrar la lectura del comprobante: ${reg.error.message}` };
+  if (reg.error) return { codigo: "tope", mensaje: null, detalle: crudo("No se pudo registrar la lectura del comprobante", reg.error) };
 
   let cc: ContextoCotizacion;
   try { cc = await contextoCotizacion(sb, s.cotizacion_id); }
-  catch (e) { return { codigo: "error", mensaje: null, detalle: msg(e) }; }
+  catch (e) { return { codigo: "error", mensaje: null, detalle: seguro(e, "registrarComprobante/contexto") }; }
   const lector = await (deps.leerComprobante ?? leerComprobantePago)(sb, archivo.media_url, { modelo: x.agente?.modelo });
   const lectura = lector.ok ? lector.lectura : null;
   const pct = pctDe(s);
@@ -687,7 +781,7 @@ async function registrarComprobante(
   const op = normalizarOperacion(lectura?.numero_operacion);
   if (op) {
     const { data, error } = await sb.from(TABLA_COMPROBANTES).select("id").eq("operacion_norm", op).limit(1);
-    if (error) return { codigo: "error", mensaje: null, detalle: `No se pudo comprobar si la operación ya se usó: ${error.message}` };
+    if (error) return { codigo: "error", mensaje: null, detalle: crudo("No se pudo comprobar si la operación ya se usó", error) };
     if ((data ?? []).length) operacionesPrevias = [op];
   }
   const creadaMs = msDe(cc.fila.created_at ?? null);
@@ -700,12 +794,13 @@ async function registrarComprobante(
   }).select("id").single();
   if (ins.error || !ins.data) {
     if (ins.error?.code === "23505") return { codigo: "ya_registrado", mensaje: null, detalle: "Ese comprobante ya se registró (a la vez, por otra respuesta)." };
-    return { codigo: "error", mensaje: null, detalle: tablaFaltante(ins.error, TABLA_COMPROBANTES) ? `Falta correr ${SQL_RESERVA_TRASLADOS.comprobantes}.` : `No se pudo registrar el comprobante: ${msg(ins.error)}` };
+    return { codigo: "error", mensaje: null, detalle: tablaFaltante(ins.error, TABLA_COMPROBANTES) ? `Falta correr ${SQL_RESERVA_TRASLADOS.comprobantes}.` : crudo("No se pudo registrar el comprobante", ins.error) };
   }
   const compId = Number(ins.data.id);
 
-  // Una imagen que el lector LEYÓ y que no es un comprobante no mueve la solicitud ni avisa a nadie.
-  const noEs = lector.ok && lectura != null && lectura.es_comprobante !== true;
+  // Una imagen que el lector LEYÓ y que no es un comprobante no mueve la solicitud ni avisa a nadie
+  // (la misma definición que frena la cancelación, el cierre y el vencimiento: `comprobanteCuenta`).
+  const noEs = lector.ok && !comprobanteCuenta(lectura);
   let estado: EstadoSolicitud = s.estado;
   let plazoMs = msDe(s.confirmar_antes_de);
   if (!noEs && s.estado === "esperando_pago" && puedePasar("esperando_pago", "pago_reportado")) {
@@ -722,10 +817,10 @@ async function registrarComprobante(
       cotizacion: { numero: cc.numero, origen: cc.fila.origen, destino: cc.fila.destino, fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida },
       moneda: cc.moneda, total: adel?.total ?? null, adelanto: adel?.adelanto ?? null, pct, lectura, cotejo,
       confirmarAntesMs: plazoMs, ahoraMs: ahora, motivos: (s.motivos_orden ?? []) as MotivoOrden[], urgente: s.urgente === true,
-      adjunto: !!bajado && bajado.bytes.length <= MAX_ADJUNTO_BYTES, convId: x.conv.id, appUrl: appUrlDe(deps),
+      convId: x.conv.id, appUrl: appUrlDe(deps),
     }, {
       correoConfig: x.cfg.correo, emailEmpresa: cc.perfil?.email ?? null,
-      adjunto: bajado ? { ...bajado, nombre: `comprobante-cotizacion-${cc.numero}.${extDe(bajado.mime)}` } : null,
+      adjunto: { bytes: bajado?.bytes ?? null, nombreBase: `comprobante-cotizacion-${cc.numero}` },
     }, deps);
     try {
       await sb.from(TABLA_COMPROBANTES).update(correo.enviado ? { correo_en: new Date(ahora).toISOString(), correo_error: correo.error } : { correo_error: correo.error })
@@ -751,8 +846,9 @@ async function registrarComprobante(
 /**
  * `reportar_pago_traslado`. Con una solicitud viva en el chat, registra el comprobante. Sin ella, si
  * hay UNA cotización enviada que se pueda reservar, crea la solicitud (pagó sin aceptar: la hora de
- * aceptación es la del comprobante) y lo registra. Con ninguna o varias, lo lee igual (cuenta en el
- * tope), avisa por correo y deriva: no hay a qué atar ese pago.
+ * aceptación es la del comprobante) y lo registra. Con ninguna o varias NO se lee con IA (no hay con
+ * qué cotejarlo): se avisa por correo con el archivo adjunto —una vez por archivo y con su tope
+ * diario (`CLAVE_CORREO_SIN_COTIZACION`)— y se deriva: no hay a qué atar ese pago.
  */
 export async function reportarPagoIA(ctx: CtxReservaIA, input: unknown, deps: DepsReserva = {}): Promise<ResultadoReservaIA> {
   const pedido = "El cliente dice que ya pagó su traslado (o mandó el comprobante).";
@@ -762,7 +858,7 @@ export async function reportarPagoIA(ctx: CtxReservaIA, input: unknown, deps: De
   const e = entradaReserva(input);
   let cands: Candidata[];
   try { cands = await candidatasDeConversacion(ctx.sb, ctx.conv.id, ahora, hoy); }
-  catch (err) { return derivaIA("No se pudieron leer las reservas de traslado del chat", pedido, msg(err)); }
+  catch (err) { return derivaIA("No se pudieron leer las reservas de traslado del chat", pedido, seguro(err, "reportarPagoIA/candidatas")); }
   let vivas = cands.filter((c) => c.viva);
   if (e.numeroCotizacion) {
     const elec = elegirCotizacion(vivas.map((c) => ({ ...c.cand, solicitudViva: false })), e.numeroCotizacion);
@@ -788,7 +884,7 @@ export async function reportarPagoIA(ctx: CtxReservaIA, input: unknown, deps: De
     const c = elegibles[0];
     let archivo: Awaited<ReturnType<typeof archivoCandidato>>;
     try { archivo = await archivoCandidato(ctx.sb, ctx.conv.id, desdeDe(c)); }
-    catch (err) { return derivaIA("No se pudieron leer los archivos del chat", pedido, msg(err), c.cand.numero); }
+    catch (err) { return derivaIA("No se pudieron leer los archivos del chat", pedido, seguro(err, "reportarPagoIA/archivo"), c.cand.numero); }
     if (!archivo.nuevo) return archivo.usado ? solo("ya_registrado", c.cand.numero) : solo("pedir_comprobante", c.cand.numero, undefined, mensajePedirComprobante(estiloDeAgente(ctx.agente)));
     const conteo = await contarSolicitudesHoy(ctx.sb, ctx.conv.id, hoy);
     const tope = decidirTopeReserva(conteo, "solicitud");
@@ -802,35 +898,57 @@ export async function reportarPagoIA(ctx: CtxReservaIA, input: unknown, deps: De
     return conSolicitud(r.c.s, c);
   }
 
-  // Ninguna o varias cotizaciones que reservar: se lee el comprobante (si hay), se avisa y se deriva.
+  // Ninguna o varias cotizaciones que reservar: NO se lee con IA (no hay con qué cotejarlo). Se avisa
+  // por correo con el archivo adjunto, una sola vez por archivo y con su tope diario, y se deriva.
   let archivo: Awaited<ReturnType<typeof archivoCandidato>>;
   try { archivo = await archivoCandidato(ctx.sb, ctx.conv.id, new Date(ahora - VENTANA_SIN_COTIZACION_MS).toISOString()); }
-  catch (err) { return derivaIA("No se pudieron leer los archivos del chat", pedido, msg(err)); }
+  catch (err) { return derivaIA("No se pudieron leer los archivos del chat", pedido, seguro(err, "reportarPagoIA/sin_cotizacion")); }
   const motivo = elegibles.length > 1 ? "Pago reportado con varias cotizaciones de traslado en el chat" : "Pago reportado sin una cotización de traslado que reservar";
   if (!archivo.nuevo) return derivaIA(motivo, pedido, "El cliente dice que pagó y no hay un comprobante nuevo en el chat ni una sola cotización a la que atarlo.");
-  const conteo = await contarLecturasHoy(ctx.sb, ctx.conv.id, hoy);
-  const tope = decidirTopeReserva(conteo, "lectura");
-  let lectura: LecturaComprobante | null = null;
-  if (tope.ok) {
-    const reg = await ctx.sb.from("alerta_enviada").insert({ clave: CLAVE_LECTURA_COMPROBANTE, ref: `conv:${ctx.conv.id}:${ahora}-${azarDe(deps)}`, fecha: hoy });
-    if (!reg.error) {
-      const l = await (deps.leerComprobante ?? leerComprobantePago)(ctx.sb, archivo.nuevo.media_url, { modelo: ctx.agente?.modelo });
-      lectura = l.ok ? l.lectura : null;
-    }
+  const notaBase = `El cliente mandó un comprobante y no hay UNA cotización de traslado enviada a la que atarlo (${elegibles.length === 0 ? "ninguna" : "varias"}). No registres ningún adelanto hasta ver el dinero en la cuenta.`;
+  const aviso = await avisarComprobanteSinCotizacion(ctx, archivo.nuevo, { ahora, hoy }, deps);
+  return derivaIA(motivo, pedido, `${notaBase} ${aviso}`);
+}
+
+/**
+ * El correo «comprobante sin cotización que reservar», con el archivo adjunto y SIN leerlo con IA.
+ * Un archivo se avisa UNA vez: antes de enviar se busca y después se RECLAMA en `alerta_enviada`
+ * (`CLAVE_CORREO_SIN_COTIZACION`, ref `conv:<id>:msg:<mensaje>`, índice único clave + ref + fecha),
+ * así otra herramienta del mismo turno —u otro turno— no lo vuelve a mandar. El tope diario se cuenta
+ * con esa misma clave; sin poder contarlo (o reclamarlo) no se envía. Devuelve la frase para la nota
+ * interna. Nunca lanza.
+ */
+async function avisarComprobanteSinCotizacion(
+  ctx: CtxReservaIA, archivo: { id: string; media_url: string }, x: { ahora: number; hoy: string }, deps: DepsReserva,
+): Promise<string> {
+  const ref = `conv:${ctx.conv.id}:msg:${archivo.id}`;
+  try {
+    const { data: previo, error: ePrev } = await ctx.sb.from("alerta_enviada").select("ref").eq("clave", CLAVE_CORREO_SIN_COTIZACION).eq("ref", ref).limit(1);
+    if (ePrev) return `No se envió el correo con el comprobante: ${crudo("No se pudo comprobar si ya se había avisado", ePrev)}`;
+    if ((previo ?? []).length) return "Ese comprobante ya se avisó por correo: no se volvió a enviar.";
+    const tope = decidirTopeReserva(await contarLecturasHoy(ctx.sb, ctx.conv.id, x.hoy, CLAVE_CORREO_SIN_COTIZACION), "correo_sin_cotizacion");
+    if (!tope.ok) return `No se envió el correo con el comprobante: ${tope.motivo ?? "tope del día"}`;
+    const reg = await ctx.sb.from("alerta_enviada").insert({ clave: CLAVE_CORREO_SIN_COTIZACION, ref, fecha: x.hoy });
+    if (reg.error?.code === "23505") return "Ese comprobante ya se avisó por correo: no se volvió a enviar.";
+    if (reg.error) return `No se envió el correo con el comprobante: ${crudo("No se pudo registrar el aviso", reg.error)}`;
+  } catch (e) {
+    return `No se envió el correo con el comprobante: ${seguro(e, "avisarComprobanteSinCotizacion")}`;
   }
   let perfil: PerfilEmpresa | null = null;
   try { perfil = (await leerPerfilPdf(ctx.sb)).perfil; } catch { perfil = null; }
-  const bajado = await (deps.bajarArchivo ?? bajarArchivoPorDefecto)(ctx.sb, archivo.nuevo.media_url).catch(() => null);
+  const bajado = await (deps.bajarArchivo ?? bajarArchivoPorDefecto)(ctx.sb, archivo.media_url).catch(() => null);
   const correo = await mandarCorreo({
     tipo: "pago_sin_cotizacion", cliente: { nombre: ctx.contacto?.nombre ?? null, waId: ctx.remitente.waId }, cotizacion: null,
-    moneda: "PEN", total: null, adelanto: null, pct: null, lectura, ahoraMs: ahora, adjunto: !!bajado && bajado.bytes.length <= MAX_ADJUNTO_BYTES,
-    convId: ctx.conv.id, appUrl: appUrlDe(deps),
-  }, { correoConfig: ctx.cfg.correo, emailEmpresa: perfil?.email ?? null, adjunto: bajado ? { ...bajado, nombre: `comprobante.${extDe(bajado.mime)}` } : null }, deps);
-  return derivaIA(motivo, pedido,
-    `El cliente mandó un comprobante y no hay UNA cotización de traslado enviada a la que atarlo (${elegibles.length === 0 ? "ninguna" : "varias"}). No registres ningún adelanto hasta ver el dinero en la cuenta. ${correo.enviado ? `Correo enviado a ${correo.destinatarios.join(", ")}.` : `El correo no salió: ${correo.error ?? ""}`}`);
+    moneda: "PEN", total: null, adelanto: null, pct: null, lectura: null, ahoraMs: x.ahora, convId: ctx.conv.id, appUrl: appUrlDe(deps),
+  }, { correoConfig: ctx.cfg.correo, emailEmpresa: perfil?.email ?? null, adjunto: { bytes: bajado?.bytes ?? null, nombreBase: "comprobante" } }, deps);
+  return correo.enviado ? `Correo enviado a ${correo.destinatarios.join(", ")}.` : `El correo no salió: ${correo.error ?? ""}`;
 }
 
-/** `politicas_reserva`: las políticas de la cotización, al pie de la letra (T8). */
+/**
+ * `politicas_reserva`: las políticas de la cotización, al pie de la letra (T8). Una política con una
+ * línea sospechosa (un enlace, un número largo: `condicionesSospechosas`) o que no cabe
+ * (`excesoCondiciones`) NO se envía: la misma revisión que tiene la cotización antes de salir sola.
+ */
 export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsReserva = {}): Promise<ResultadoReservaIA> {
   const pedido = "El cliente pregunta por las políticas de reserva, cambios o cancelación.";
   const freno = frenoDelTurno(ctx, pedido);
@@ -839,7 +957,7 @@ export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsR
   const e = entradaReserva(input);
   let cands: Candidata[];
   try { cands = await candidatasDeConversacion(ctx.sb, ctx.conv.id, ahora, hoy); }
-  catch (err) { return derivaIA("No se pudieron leer las cotizaciones de traslado del chat", pedido, msg(err)); }
+  catch (err) { return derivaIA("No se pudieron leer las cotizaciones de traslado del chat", pedido, seguro(err, "politicasIA/candidatas")); }
   const viva = cands.filter((c) => c.viva);
   let elegida: Candidata | null = viva.length === 1 ? viva[0] : null;
   if (!elegida) {
@@ -850,17 +968,27 @@ export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsR
   if (!elegida) return derivaIA("Políticas de reserva sin cotización de traslado", pedido, "No hay una cotización de traslado enviada en el chat de la que leer las políticas.");
   try {
     const cc = await contextoCotizacion(ctx.sb, elegida.cand.id);
+    const exceso = excesoCondiciones({ reserva: cc.politica });
+    if (cc.politicaSospechosa || exceso.length) {
+      const por = [
+        cc.politicaSospechosa ? "una línea trae un enlace o un número largo" : null,
+        ...exceso.map((x) => (x.motivo === "demasiadas_lineas" ? `tiene ${x.n} líneas` : `una línea tiene ${x.n} caracteres`)),
+      ].filter(Boolean).join("; ");
+      return derivaIA("Las políticas de reserva de la cotización necesitan revisión", pedido,
+        `Revisa las políticas de la cotización N° ${cc.numero} (${por}): no se le enviaron al cliente. Se corrigen en la cotización (/cotizaciones) o en su plantilla (/cotizaciones/plantillas).`, cc.numero);
+    }
     const m = mensajePoliticas({ numero: cc.numero, lineas: cc.politica, email: cc.perfil?.email ?? null, estilo: estiloDeAgente(ctx.agente) });
     if (!m) return derivaIA("La cotización no tiene políticas de reserva", pedido, `La cotización N° ${cc.numero} no tiene políticas de reserva y cancelación (/cotizaciones/plantillas).`, cc.numero);
     return solo("enviar_politicas", cc.numero, undefined, m);
   } catch (err) {
-    return derivaIA("No se pudieron leer las políticas de reserva", pedido, msg(err), elegida.cand.numero);
+    return derivaIA("No se pudieron leer las políticas de reserva", pedido, seguro(err, "politicasIA"), elegida.cand.numero);
   }
 }
 
 /**
- * `cancelar_reserva_traslado`. Sin pago, sin comprobante y sin la unidad confirmada, la solicitud se
- * cierra sola (`cancelada`, motivo cliente). Si no, se guarda la hora del MENSAJE del cliente (desde
+ * `cancelar_reserva_traslado`. Sin pago, sin un comprobante que cuente (`comprobanteCuenta`: una
+ * imagen que el lector leyó y no es un comprobante no frena) y sin la unidad confirmada, la solicitud
+ * se cierra sola (`cancelada`, motivo cliente). Si no, se guarda la hora del MENSAJE del cliente (desde
  * ahí se cuentan las horas de anticipación de la política), se deriva y se le dice que un ejecutivo
  * le confirma lo que corresponde (T6). Nunca promete devoluciones.
  */
@@ -872,7 +1000,7 @@ export async function cancelarIA(ctx: CtxReservaIA, input: unknown, deps: DepsRe
   const e = entradaReserva(input);
   let cands: Candidata[];
   try { cands = await candidatasDeConversacion(ctx.sb, ctx.conv.id, ahora, hoy); }
-  catch (err) { return derivaIA("No se pudieron leer las reservas de traslado del chat", pedido, msg(err)); }
+  catch (err) { return derivaIA("No se pudieron leer las reservas de traslado del chat", pedido, seguro(err, "cancelarIA/candidatas")); }
   let vivas = cands.filter((c) => c.viva);
   if (e.numeroCotizacion && vivas.length > 1) {
     const elec = elegirCotizacion(vivas.map((c) => ({ ...c.cand, solicitudViva: false })), e.numeroCotizacion);
@@ -888,13 +1016,13 @@ export async function cancelarIA(ctx: CtxReservaIA, input: unknown, deps: DepsRe
     const comps = await comprobantesDe(ctx.sb, s.id);
     const cc = await contextoCotizacion(ctx.sb, s.cotizacion_id);
     const { cobrado } = dineroDeSolicitud(pagos, cc.moneda);
-    if (cobrado <= 0 && comps.length === 0 && s.estado !== "confirmada") {
+    if (cobrado <= 0 && !comps.some((k) => comprobanteCuenta(k.lectura)) && s.estado !== "confirmada") {
       const { data } = await ctx.sb.from(TABLA_SOLICITUDES)
         .update({ estado: "cancelada", cierre_motivo: "cliente", cerrada_en: new Date(ahora).toISOString() })
         .eq("id", s.id).eq("estado", s.estado).select("id");
       if (!(data ?? []).length) return derivaIA("La reserva cambió mientras se cancelaba", pedido, `Solicitud #${s.id}: otra acción la movió; revisa la tarjeta.`, c.cand.numero);
       await cerrarAccionSiCorresponde(ctx.sb, s.id, deps);
-      await nota(ctx.sb, ctx.conv.id, `📅 El cliente anuló su pedido de reserva (cotización N° ${cc.numero}, solicitud #${s.id}): no había pago ni comprobante. La solicitud quedó cancelada.`, "Asistente IA");
+      await nota(ctx.sb, ctx.conv.id, `📅 El cliente anuló su pedido de reserva (cotización N° ${cc.numero}, solicitud #${s.id}): no había pago ni comprobante${comps.length ? " (lo que mandó no era un comprobante)" : ""}. La solicitud quedó cancelada.`, "Asistente IA");
       return solo("cancelada_sin_pago", cc.numero, undefined, mensajeCanceladaSinPago({ numero: cc.numero, estilo }));
     }
     let ult: { id: string; created_at: string } | null = null;
@@ -914,7 +1042,7 @@ export async function cancelarIA(ctx: CtxReservaIA, input: unknown, deps: DepsRe
       },
     };
   } catch (err) {
-    return derivaIA("No se pudo registrar el pedido de cancelación", pedido, `Solicitud #${s.id}: ${msg(err)}`, c.cand.numero);
+    return derivaIA("No se pudo registrar el pedido de cancelación", pedido, `Solicitud #${s.id}: ${seguro(err, "cancelarIA")}`, c.cand.numero);
   }
 }
 
@@ -938,7 +1066,7 @@ export async function cargarCadena(
 ): Promise<{ ok: true; c: Cadena } | { ok: false; codigo: CodigoResultadoReserva; detalle: string }> {
   let s: FilaSolicitud | null;
   try { s = await leerSolicitud(sb, x.solicitudId); }
-  catch (e) { return { ok: false, codigo: (e as { sinMigracion?: boolean }).sinMigracion ? "sin_migracion" : "error", detalle: msg(e) }; }
+  catch (e) { return { ok: false, codigo: (e as { sinMigracion?: boolean }).sinMigracion ? "sin_migracion" : "error", detalle: seguro(e, "cargarCadena/solicitud") }; }
   if (!s) return { ok: false, codigo: "no_existe", detalle: "Esa solicitud de reserva no existe." };
   const ajena = (d: string) => ({ ok: false as const, codigo: "ajena" as const, detalle: d });
   const pideCadena = x.conversacionId !== undefined || x.accionId !== undefined;
@@ -950,7 +1078,7 @@ export async function cargarCadena(
   }
   let accion: AccionFila | null = null;
   try { accion = await leerAccion(sb, pideCadena ? String(x.accionId) : s.crm_accion_id); }
-  catch (e) { return { ok: false, codigo: "error", detalle: msg(e) }; }
+  catch (e) { return { ok: false, codigo: "error", detalle: seguro(e, "cargarCadena/tarjeta") }; }
   if (pideCadena) {
     if (!accion || accion.tipo !== TIPO_ACCION_RESERVA) return ajena("La tarjeta no es una reserva de traslado.");
     if (accion.conversacion_id !== s.crm_conversacion_id) return ajena("La tarjeta no es de esta conversación.");
@@ -960,7 +1088,7 @@ export async function cargarCadena(
   }
   // La cotización tiene que ser de la conversación de la solicitud.
   const { data: cot, error: eCot } = await sb.from("cotizaciones").select("id, crm_conversacion_id").eq("id", s.cotizacion_id).maybeSingle();
-  if (eCot) return { ok: false, codigo: "error", detalle: `No se pudo leer la cotización: ${eCot.message}` };
+  if (eCot) return { ok: false, codigo: "error", detalle: crudo("No se pudo leer la cotización", eCot) };
   if (!cot) return { ok: false, codigo: "no_existe", detalle: "La cotización de la solicitud ya no existe." };
   if (s.crm_conversacion_id && cot.crm_conversacion_id && cot.crm_conversacion_id !== s.crm_conversacion_id) return ajena("La cotización no es de esta conversación.");
   let conv: Cadena["conv"] = null, contacto: Cadena["contacto"] = null;
@@ -968,7 +1096,7 @@ export async function cargarCadena(
     const { data: c, error: eConv } = await sb.from("crm_conversaciones")
       .select("id, canal, phone_number_id, contacto_id, crm_contactos(id, nombre, wa_id, telefono, cliente_id, fb_psid, ig_id, gmail_email)")
       .eq("id", s.crm_conversacion_id).maybeSingle();
-    if (eConv) return { ok: false, codigo: "error", detalle: `No se pudo leer la conversación: ${eConv.message}` };
+    if (eConv) return { ok: false, codigo: "error", detalle: crudo("No se pudo leer la conversación", eConv) };
     if (c) {
       conv = { id: c.id, canal: String(c.canal ?? ""), phone_number_id: c.phone_number_id ?? null, contacto_id: c.contacto_id ?? null };
       const ct = Array.isArray(c.crm_contactos) ? c.crm_contactos[0] : c.crm_contactos;
@@ -1020,24 +1148,27 @@ type Hechos = {
 async function leerHechos(sb: Sb, s: FilaSolicitud): Promise<Hechos> {
   const avisos: string[] = [];
   let cc: ContextoCotizacion | null = null;
-  try { cc = await contextoCotizacion(sb, s.cotizacion_id); } catch (e) { avisos.push(msg(e)); }
+  try { cc = await contextoCotizacion(sb, s.cotizacion_id); } catch (e) { avisos.push(seguro(e, "leerHechos/contexto")); }
   const tramos = await tramosDeCotizacion(sb, s.cotizacion_id);
   const pagos = await pagosDeSolicitud(sb, s, tramos.map((t) => t.id));
   const comprobantes = await comprobantesDe(sb, s.id);
   let cargo: Hechos["cargo"] = null;
   if (s.factura_cargo_id) {
     const { data, error } = await sb.from("facturas").select("id, serie, numero, total, estado").eq("id", s.factura_cargo_id).maybeSingle();
-    if (error) avisos.push(`No se pudo leer el comprobante del cargo: ${error.message}`);
+    if (error) avisos.push(crudo("No se pudo leer el comprobante del cargo", error));
     else if (data) cargo = { id: Number(data.id), serie: data.serie ?? null, numero: data.numero ?? null, total: num(data.total), estado: data.estado ?? null };
   }
   let versiones: Hechos["versiones"] = [];
   const idDoc = tramos.length ? Math.min(...tramos.map((t) => t.id)) : null;
   if (idDoc) {
     try { versiones = ((await leerVersiones(sb, idDoc)) ?? []).map((v) => ({ id: v.id, version: v.version, codigo: v.codigo })); }
-    catch (e) { avisos.push(msg(e)); }
+    catch (e) { avisos.push(seguro(e, "leerHechos/versiones")); }
   }
   return { cc, tramos, pagos, comprobantes, cargo, versiones, avisos };
 }
+
+/** Los comprobantes que cuentan como un pago reportado (`comprobanteCuenta`). */
+const comprobantesQueCuentan = (h: Pick<Hechos, "comprobantes">): number => h.comprobantes.filter((k) => comprobanteCuenta(k.lectura)).length;
 
 const confirmacionEnviadaDe = (s: FilaSolicitud, accion: AccionFila | null) =>
   s.estado === "completada" || !!(accion?.payload as { confirmacion_enviada?: unknown } | null)?.confirmacion_enviada;
@@ -1047,7 +1178,7 @@ function pendientesDe(s: FilaSolicitud, h: Hechos, accion: AccionFila | null): {
   const { cobrado, devuelto } = dineroDeSolicitud(h.pagos, moneda);
   const adel = h.cc ? adelantoDe(h.cc.fila, pctDe(s)) : null;
   const pendientes = queFalta(
-    { estado: s.estado, orden: s.orden, adelanto_pct: pctDe(s), confirmar_antes_de: s.confirmar_antes_de, cancelacion_pedida_en: s.cancelacion_pedida_en, devolucion_pct: num(s.devolucion_pct), comprobantes: h.comprobantes.length },
+    { estado: s.estado, orden: s.orden, adelanto_pct: pctDe(s), confirmar_antes_de: s.confirmar_antes_de, cancelacion_pedida_en: s.cancelacion_pedida_en, devolucion_pct: num(s.devolucion_pct), comprobantes: comprobantesQueCuentan(h) },
     {
       cobrado, devuelto, adelanto: adel?.adelanto ?? null, reserva: reservaParaQueFalta(s, h.tramos),
       confirmacionEnviada: confirmacionEnviadaDe(s, accion), confirmacionEmitida: h.versiones.length > 0,
@@ -1078,8 +1209,11 @@ export async function cerrarAccionSiCorresponde(sb: Sb, solicitudId: number, dep
   } catch { return false; }
 }
 
-/** Las acciones que tienen sentido en este estado (la ruta las vuelve a comprobar todas). */
-function accionesDe(s: FilaSolicitud, x: { cobrado: number; devuelto: number; total: number | null; comprobantes: number; aDevolver: number | null; emitida: boolean }): (AccionTarjeta | AccionDinero)[] {
+/**
+ * Las acciones que tienen sentido en este estado (la ruta las vuelve a comprobar todas).
+ * `comprobantes`: todos los registrados (se pueden ver); `reportados`: los que cuentan como un pago.
+ */
+function accionesDe(s: FilaSolicitud, x: { cobrado: number; devuelto: number; total: number | null; comprobantes: number; reportados: number; aDevolver: number | null; emitida: boolean }): (AccionTarjeta | AccionDinero)[] {
   const out: (AccionTarjeta | AccionDinero)[] = [];
   const cancelacion = !!s.cancelacion_pedida_en;
   if (x.comprobantes > 0) out.push("ver_comprobante");
@@ -1094,7 +1228,7 @@ function accionesDe(s: FilaSolicitud, x: { cobrado: number; devuelto: number; to
   if (cancelacion && !esEstadoTerminal(s.estado)) out.push("resolver_cancelacion");
   if (!esEstadoTerminal(s.estado) && x.cobrado <= 0) out.push("cerrar");
   if (s.estado !== "completada" && (x.total == null || x.cobrado + 0.005 < x.total)) out.push("registrar_adelanto");
-  if (x.comprobantes > 0 && x.cobrado <= 0 && !esEstadoTerminal(s.estado)) out.push("pago_no_encontrado");
+  if (x.reportados > 0 && x.cobrado <= 0 && !esEstadoTerminal(s.estado)) out.push("pago_no_encontrado");
   if (x.aDevolver != null && x.devuelto + 0.005 < x.aDevolver) out.push("registrar_devolucion");
   return [...new Set(out)];
 }
@@ -1136,7 +1270,7 @@ export async function vistaSolicitud(sb: Sb, c: Cadena, deps: DepsReserva = {}):
       id: h.cc.fila.id, numero: h.cc.numero, origen: h.cc.fila.origen, destino: h.cc.fila.destino,
       fecha: h.cc.fila.fecha_servicio, hora: h.cc.fila.hora_ida, fechaRetorno: h.cc.fila.fecha_retorno, horaRetorno: h.cc.fila.hora_retorno,
       moneda: h.cc.moneda, total: adel?.total ?? null, adelanto: adel?.adelanto ?? null, saldo: adel?.saldo ?? null, pct,
-      importesVigentes: s.firma_importes ? firmaImportes(h.cc.fila, pct) === s.firma_importes : null, clienteId: num(h.cc.fila.cliente_id),
+      importesVigentes: s.firma_importes ? firmaImportes(h.cc.fila, pct) === importesDeFirma(s.firma_importes) : null, clienteId: num(h.cc.fila.cliente_id),
     } : null,
     cliente: h.cc?.cliente ? { id: h.cc.cliente.id, nombre: h.cc.cliente.nombre } : null,
     contacto: { nombre: c.contacto?.nombre ?? null, waId: c.contacto?.wa_id ? String(c.contacto.wa_id) : null },
@@ -1149,7 +1283,7 @@ export async function vistaSolicitud(sb: Sb, c: Cadena, deps: DepsReserva = {}):
     cargo: h.cargo,
     confirmacion: { emitida: h.versiones.length > 0, enviada: confirmacionEnviadaDe(s, c.accion), ultima: h.versiones[0] ?? null },
     ventana, pendientes,
-    acciones: accionesDe(s, { cobrado, devuelto, total: adel?.total ?? null, comprobantes: h.comprobantes.length, aDevolver, emitida: h.versiones.length > 0 }),
+    acciones: accionesDe(s, { cobrado, devuelto, total: adel?.total ?? null, comprobantes: h.comprobantes.length, reportados: comprobantesQueCuentan(h), aDevolver, emitida: h.versiones.length > 0 }),
     politica: h.cc?.politica ?? [], devolucionPlazoH: cfg?.devolucionPlazoH ?? null, avisos: h.avisos,
   };
 }
@@ -1179,34 +1313,39 @@ export async function confirmarDisponibilidad(sb: Sb, c: Cadena, quien: Quien, d
   const ahora = ahoraDe(deps), hoy = fechaLima(ahora), ahoraIso = new Date(ahora).toISOString();
   let cc: ContextoCotizacion, h: Hechos;
   try { cc = await contextoCotizacion(sb, s.cotizacion_id); h = await leerHechos(sb, s); }
-  catch (e) { return res("error", msg(e)); }
+  catch (e) { return res("error", seguro(e, "confirmarDisponibilidad/leer")); }
   const { agente, cfg } = await agenteYConfig(sb);
   const credito = esCreditoSol(s);
   const pct = credito ? null : pctDe(s) ?? cfg.adelantoPct;
   if (!credito && pct == null) return res("sin_adelanto_config", "No hay un porcentaje de adelanto configurado: escríbelo en /tarifario → Zonas y traslados → Ajustes.");
   const adel = adelantoDe(cc.fila, pct);
   if (!adel || (!credito && adel.adelanto == null)) return res("error", `La cotización N° ${cc.numero} no tiene importes que se puedan calcular: revísala en /cotizaciones.`);
-  if (s.firma_importes && s.orden === "pago_primero" && firmaImportes(cc.fila, pct) !== s.firma_importes) {
+  if (s.firma_importes && s.orden === "pago_primero" && firmaImportes(cc.fila, pct) !== importesDeFirma(s.firma_importes)) {
     return res("importes_cambiaron", `La cotización N° ${cc.numero} cambió desde que se le pidió el pago al cliente: revisa los importes antes de confirmar (o cierra esta solicitud y vuelve a cotizar).`);
   }
   const { cobrado } = dineroDeSolicitud(h.pagos, cc.moneda);
   const pago: PagoEnHayUnidad = credito ? "credito"
     : cobrado + 0.005 >= (adel.adelanto ?? 0) ? "verificado"
     : cobrado > 0 ? "incompleto"
-    : h.comprobantes.length > 0 ? "reportado" : "pedir";
+    : comprobantesQueCuentan(h) > 0 ? "reportado" : "pedir";
   let bloque: BloquePago | null = null;
   if (pago === "pedir" || pago === "incompleto") {
     if (!cc.cuentas.lineas.length) return res("sin_cuentas", "La cotización no tiene cuentas bancarias en su moneda para pedirle el pago: agrégalas en /configuracion/perfil.");
     if (cc.frente.codigo === "distintas" || cc.frente.codigo === "sin_comprobar") return res("cuentas_distintas", "Las cuentas de la plantilla de la cotización no son las de «corporativo» (o no se pudo comprobar): revísalas en /cotizaciones/plantillas antes de mandárselas al cliente.");
+    if (!perfilConfigurado(cc.perfil)) return res("sin_cuentas", "El perfil de la empresa no tiene nombre: complétalo en /configuracion/perfil antes de mandarle las cuentas al cliente.");
     bloque = { numero: cc.numero, moneda: adel.moneda, pct: pct!, adelanto: adel.adelanto!, saldo: adel.saldo!, cuentas: cc.cuentas.lineas };
   }
 
   // El reclamo: solo si sigue en el estado que se leyó.
   const patch: Record<string, unknown> = { estado: "confirmada", disponibilidad_en: ahoraIso, disponibilidad_por: quien.id };
-  // Con «disponibilidad primero» el monto se le comunica AHORA (T4): la firma es la de hoy.
-  if (!credito && (pctDe(s) == null || s.orden === "disponibilidad_primero")) { patch.adelanto_pct = pct; patch.firma_importes = firmaImportes(cc.fila, pct); }
+  // Con «disponibilidad primero» el monto se le comunica AHORA (T4): la firma es la de hoy, con la
+  // huella de las cuentas si van en el mensaje.
+  if (!credito && (pctDe(s) == null || s.orden === "disponibilidad_primero")) {
+    patch.adelanto_pct = pct;
+    patch.firma_importes = firmaConCuentas(firmaImportes(cc.fila, pct), bloque ? huellaCuentas(cc.cuentas.lineas) : null);
+  }
   const { data: rec, error: eRec } = await sb.from(TABLA_SOLICITUDES).update(patch).eq("id", s.id).eq("estado", s.estado).is("cancelacion_pedida_en", null).select("id");
-  if (eRec) return res("error", `No se pudo confirmar la solicitud: ${eRec.message}`);
+  if (eRec) return res("error", crudo("No se pudo confirmar la solicitud", eRec));
   if (!(rec ?? []).length) return res("reclamo_perdido", "Otra persona acaba de cambiar esta solicitud: recarga la tarjeta.");
   const revertir = async () => {
     const back: Record<string, unknown> = { estado: s.estado, disponibilidad_en: s.disponibilidad_en, disponibilidad_por: s.disponibilidad_por };
@@ -1219,7 +1358,11 @@ export async function confirmarDisponibilidad(sb: Sb, c: Cadena, quien: Quien, d
   let cotCambiada = false;
   if (estadoCot !== "aprobado") {
     const { data: up, error: eUp } = await sb.from("cotizaciones").update({ estado: "aprobado" }).eq("id", cc.fila.id).eq("estado", estadoCot).select("id");
-    if (eUp || !(up ?? []).length) { await revertir(); return res("reserva_no_creada", `No se pudo aprobar la cotización N° ${cc.numero}${eUp ? `: ${eUp.message}` : " (otra persona la cambió)"}. La solicitud vuelve a su estado.`); }
+    if (eUp || !(up ?? []).length) {
+      if (eUp) seguro(eUp, "confirmarDisponibilidad/aprobar");
+      await revertir();
+      return res("reserva_no_creada", `No se pudo aprobar la cotización N° ${cc.numero}${eUp ? "" : " (otra persona la cambió)"}. La solicitud vuelve a su estado.`);
+    }
     cotCambiada = true;
   }
   const revertirCot = async () => {
@@ -1237,19 +1380,24 @@ export async function confirmarDisponibilidad(sb: Sb, c: Cadena, quien: Quien, d
     if (r.codigo === "creada" || r.codigo === "retorno_completado" || r.codigo === "parcial") {
       if (r.codigo !== "creada" || /⚠️/.test(r.mensaje)) avisos.push(r.mensaje);
     } else if (r.codigo !== "ya_convertida" && r.codigo !== "retorno_imposible") {
+      seguro(r.mensaje || r.codigo, "confirmarDisponibilidad/conversion");
       await revertir(); await revertirCot();
-      return res("reserva_no_creada", `No se pudo crear la reserva en Programación: ${r.mensaje || "error desconocido"}. La solicitud y la cotización vuelven a su estado.`);
+      return res("reserva_no_creada", "No se pudo crear la reserva en Programación. La solicitud y la cotización vuelven a su estado: vuelve a intentar en un momento.");
     } else if (r.codigo === "retorno_imposible") avisos.push(r.mensaje);
     const tramos = await tramosDeCotizacion(sb, cc.fila.id);
     const vivos = tramos.filter((t) => t.estado !== "cancelada");
     reservaId = r.idas.length ? Math.min(...r.idas) : vivos.length ? Math.min(...vivos.map((t) => t.id)) : null;
   } catch (e) {
+    seguro(e, "confirmarDisponibilidad/conversion");
     await revertir(); await revertirCot();
-    return res("reserva_no_creada", `No se pudo crear la reserva en Programación: ${msg(e)}. La solicitud y la cotización vuelven a su estado.`);
+    return res("reserva_no_creada", "No se pudo crear la reserva en Programación. La solicitud y la cotización vuelven a su estado: vuelve a intentar en un momento.");
   }
   if (reservaId == null) { await revertir(); await revertirCot(); return res("reserva_no_creada", "La cotización no dejó ninguna reserva viva en Programación. La solicitud vuelve a su estado."); }
   await sb.from(TABLA_SOLICITUDES).update({ reserva_id: reservaId }).eq("id", s.id);
-  try { await enlazarCobrosAReserva(sb, s.id, reservaId); } catch (e) { avisos.push(`Los cobros no se ataron a la reserva: ${msg(e)}`); }
+  try { await enlazarCobrosAReserva(sb, s.id, reservaId); } catch (e) {
+    const causa = seguro(e, "confirmarDisponibilidad/enlazar", "");
+    avisos.push(`Los cobros no se ataron a la reserva${causa ? ` (${causa})` : ""}. No los vuelvas a registrar: ya están en la solicitud.`);
+  }
 
   const estilo = estiloDeAgente(agente);
   const texto = mensajeHayUnidad({ fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, origen: cc.fila.origen, destino: cc.fila.destino, pago, moneda: adel.moneda, cobrado, bloque, estilo });
@@ -1272,15 +1420,15 @@ export async function sinUnidad(sb: Sb, c: Cadena, quien: Quien, deps: DepsReser
   try {
     if (await reservaViva(sb, s.cotizacion_id)) return res("cancelar_en_programacion", "La reserva sigue viva en Programación: cancélala ahí primero (ahí se decide qué pasa con su importe).");
     cc = await contextoCotizacion(sb, s.cotizacion_id); h = await leerHechos(sb, s);
-  } catch (e) { return res("error", msg(e)); }
+  } catch (e) { return res("error", seguro(e, "sinUnidad/leer")); }
   const { data, error } = await sb.from(TABLA_SOLICITUDES)
     .update({ estado: "sin_unidad", devolucion_pct: 100, cierre_motivo: "sin_unidad", cerrada_en: ahoraIso, cerrada_por: quien.id })
     .eq("id", s.id).eq("estado", s.estado).select("id");
-  if (error) return res("error", `No se pudo cerrar la solicitud: ${error.message}`);
+  if (error) return res("error", crudo("No se pudo cerrar la solicitud", error));
   if (!(data ?? []).length) return res("reclamo_perdido", "Otra persona acaba de cambiar esta solicitud: recarga la tarjeta.");
   const { agente, cfg } = await agenteYConfig(sb);
   const { cobrado } = dineroDeSolicitud(h.pagos, cc.moneda);
-  const texto = mensajeSinUnidad({ fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, conPago: cobrado > 0 || h.comprobantes.length > 0, plazoH: cfg.devolucionPlazoH, estilo: estiloDeAgente(agente) });
+  const texto = mensajeSinUnidad({ fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, conPago: cobrado > 0 || comprobantesQueCuentan(h) > 0, plazoH: cfg.devolucionPlazoH, estilo: estiloDeAgente(agente) });
   const a = await avisarCliente(sb, c, texto, { usuarioId: quien.id }, deps);
   await nota(sb, c.conv?.id, `❌ ${quien.nombre ?? "Un ejecutivo"} marcó SIN UNIDAD la solicitud #${s.id} (cotización N° ${cc.numero}).${cobrado > 0 ? ` Hay que devolver el 100 % de lo cobrado (${r2(cobrado)} ${cc.moneda}): lo registra Tesorería.` : ""}`);
   await cerrarAccionSiCorresponde(sb, s.id, deps);
@@ -1327,16 +1475,21 @@ export async function registrarComprobanteTarjeta(sb: Sb, c: Cadena, quien: Quie
   return conAviso(r.detalle, a, { estado: r.estado, mensaje: r.mensaje });
 }
 
-/** «Leer el último comprobante»: lo marca leído y devuelve un enlace firmado para verlo. */
+/**
+ * «Leer el último comprobante»: lo marca leído y devuelve un enlace firmado (corto) para verlo. Solo
+ * un archivo de `crm-media` (donde el webhook guarda lo que manda el cliente): un enlace a otro
+ * bucket privado no se firma.
+ */
 export async function verComprobante(sb: Sb, c: Cadena, quien: Quien, deps: DepsReserva = {}): Promise<ResultadoAccionReserva> {
   let comps: FilaComprobante[];
-  try { comps = await comprobantesDe(sb, c.s.id); } catch (e) { return res("error", msg(e)); }
+  try { comps = await comprobantesDe(sb, c.s.id); } catch (e) { return res("error", seguro(e, "verComprobante")); }
   const k = comps[0];
   if (!k?.mensaje_id) return res("sin_comprobante", "La solicitud no tiene un comprobante con archivo.");
   const { data: m, error } = await sb.from("crm_mensajes").select("media_url, conversacion_id").eq("id", k.mensaje_id).maybeSingle();
-  if (error) return res("error", `No se pudo leer el mensaje del comprobante: ${error.message}`);
+  if (error) return res("error", crudo("No se pudo leer el mensaje del comprobante", error));
   if (!m?.media_url || (c.s.crm_conversacion_id && m.conversacion_id !== c.s.crm_conversacion_id)) return res("sin_comprobante", "El archivo del comprobante ya no está.");
-  const obj = objetoPrivadoDe(m.media_url);
+  const obj = objetoCrmMedia(m.media_url);
+  if (!obj) return res("sin_comprobante", "El archivo del comprobante no está en el almacenamiento del CRM: ábrelo desde la conversación.");
   let url: string | null = null;
   if (obj) {
     const f = await sb.storage.from(obj.bucket).createSignedUrl(obj.ruta, TTL_URL_VER);
@@ -1365,16 +1518,16 @@ export async function resolverCancelacion(sb: Sb, c: Cadena, quien: Quien, pctPe
   try {
     if (await reservaViva(sb, s.cotizacion_id)) return res("cancelar_en_programacion", "La reserva sigue viva en Programación: cancélala ahí primero (ahí se decide qué pasa con su importe).");
     cc = await contextoCotizacion(sb, s.cotizacion_id); h = await leerHechos(sb, s);
-  } catch (e) { return res("error", msg(e)); }
+  } catch (e) { return res("error", seguro(e, "resolverCancelacion/leer")); }
   const { cobrado } = dineroDeSolicitud(h.pagos, cc.moneda);
   const noEncontrado = !!(c.accion?.payload as { pago_no_encontrado?: unknown } | null)?.pago_no_encontrado;
-  if (h.comprobantes.length > 0 && cobrado <= 0 && !noEncontrado) {
+  if (comprobantesQueCuentan(h) > 0 && cobrado <= 0 && !noEncontrado) {
     return res("pago_sin_registrar", "El cliente reportó un pago que Tesorería todavía no registró: regístralo como adelanto o márcalo «No encontré el pago» antes de resolver la cancelación.");
   }
   const { data, error } = await sb.from(TABLA_SOLICITUDES)
     .update({ estado: "cancelada", devolucion_pct: pct, cierre_motivo: "cliente", cerrada_en: ahoraIso, cerrada_por: quien.id })
     .eq("id", s.id).eq("estado", s.estado).select("id");
-  if (error) return res("error", `No se pudo cerrar la solicitud: ${error.message}`);
+  if (error) return res("error", crudo("No se pudo cerrar la solicitud", error));
   if (!(data ?? []).length) return res("reclamo_perdido", "Otra persona acaba de cambiar esta solicitud: recarga la tarjeta.");
   const { agente, cfg } = await agenteYConfig(sb);
   const estilo = estiloDeAgente(agente);
@@ -1441,7 +1594,8 @@ export async function asegurarComprobanteCargo(sb: Sb, solicitudId: number, deps
     }
     return { ok: true, id, creado, detalle: creado ? `Comprobante del cargo creado (sin número): retenido ${r2(armado.total)} ${cc.moneda}.` : "El comprobante del cargo ya existía." };
   } catch (e) {
-    return { ok: false, id: null, creado: false, detalle: `El comprobante del cargo no se creó: ${msg(e)} Créalo en /facturacion.` };
+    const causa = seguro(e, "asegurarComprobanteCargo", "");
+    return { ok: false, id: null, creado: false, detalle: `El comprobante del cargo no se creó: créalo en /facturacion.${causa ? ` (${causa})` : ""}` };
   }
 }
 
@@ -1455,50 +1609,69 @@ export async function cerrarSolicitud(sb: Sb, c: Cadena, quien: Quien, motivo: u
   try {
     if (await reservaViva(sb, s.cotizacion_id)) return res("cancelar_en_programacion", "La reserva sigue viva en Programación: cancélala ahí primero.");
     h = await leerHechos(sb, s);
-  } catch (e) { return res("error", msg(e)); }
+  } catch (e) { return res("error", seguro(e, "cerrarSolicitud/leer")); }
   const { cobrado } = dineroDeSolicitud(h.pagos, h.cc?.moneda ?? "PEN");
   if (cobrado > 0) return res("con_cobros", "La solicitud tiene cobros registrados: no se cierra, se resuelve como cancelación (con su devolución).");
   const noEncontrado = !!(c.accion?.payload as { pago_no_encontrado?: unknown } | null)?.pago_no_encontrado;
-  if (h.comprobantes.length > 0 && !noEncontrado) return res("pago_sin_registrar", "El cliente reportó un pago: que Tesorería lo registre o marque «No encontré el pago» antes de cerrar.");
+  if (comprobantesQueCuentan(h) > 0 && !noEncontrado) return res("pago_sin_registrar", "El cliente reportó un pago: que Tesorería lo registre o marque «No encontré el pago» antes de cerrar.");
   const n = lineaCorta(notaTxt, 500);
   const notaFinal = n ? [s.nota, `Cierre: ${n}`].filter(Boolean).join("\n").slice(0, 2000) : s.nota;
   const { data, error } = await sb.from(TABLA_SOLICITUDES)
     .update({ estado: "cancelada", cierre_motivo: m, cerrada_en: new Date(ahoraDe(deps)).toISOString(), cerrada_por: quien.id, nota: notaFinal })
     .eq("id", s.id).eq("estado", s.estado).select("id");
-  if (error) return res("error", `No se pudo cerrar la solicitud: ${error.message}`);
+  if (error) return res("error", crudo("No se pudo cerrar la solicitud", error));
   if (!(data ?? []).length) return res("reclamo_perdido", "Otra persona acaba de cambiar esta solicitud: recarga la tarjeta.");
   await cerrarAccionSiCorresponde(sb, s.id, deps);
   return res("ok", "Solicitud cerrada.", { estado: "cancelada" });
 }
 
-/** Ata un cliente del ERP a la cotización, a sus reservas y al contacto (solo donde no hay otro). */
+/**
+ * Ata un cliente del ERP a la cotización y a sus reservas (solo donde no hay otro) y, SOLO si su
+ * número completo (teléfono u operativo) es el wa_id del chat, también al contacto del CRM
+ * (`vinculoContactoReserva`). Atar el contacto es lo que después deja mandarle al chat los datos del
+ * cliente (la Confirmación de Reserva) y reconocerle el crédito: un cliente elegido a mano cuyo
+ * número no es el del chat queda en la cotización, y la respuesta dice que el contacto quedó sin
+ * vincular (se vincula a mano desde el panel del cliente del CRM, si es el mismo).
+ */
 export async function vincularCliente(sb: Sb, c: Cadena, clienteIdPedido: unknown): Promise<ResultadoAccionReserva> {
   const clienteId = num(clienteIdPedido);
   if (!clienteId || !Number.isInteger(clienteId)) return res("datos_invalidos", "Elige un cliente del ERP.");
   if (esEstadoTerminal(c.s.estado) && c.s.estado !== "completada") return res("transicion_invalida", `La solicitud está «${c.s.estado}».`);
-  const { data: cli, error } = await sb.from("clientes").select("id").eq("id", clienteId).maybeSingle();
-  if (error) return res("error", `No se pudo leer el cliente: ${error.message}`);
-  if (!cli) return res("no_existe", "Ese cliente no existe.");
+  let cli = await sb.from("clientes").select("id, telefono, operativo_celular").eq("id", clienteId).maybeSingle();
+  if (cli.error && faltaColumna(cli.error, "operativo_celular")) cli = await sb.from("clientes").select("id, telefono").eq("id", clienteId).maybeSingle();
+  if (cli.error) return res("error", crudo("No se pudo leer el cliente", cli.error));
+  if (!cli.data) return res("no_existe", "Ese cliente no existe.");
   const { data: cot, error: e2 } = await sb.from("cotizaciones").select("id, cliente_id").eq("id", c.s.cotizacion_id).maybeSingle();
-  if (e2 || !cot) return res("error", `No se pudo leer la cotización: ${e2?.message ?? "no existe"}`);
+  if (e2) return res("error", crudo("No se pudo leer la cotización", e2));
+  if (!cot) return res("no_existe", "La cotización de la solicitud ya no existe.");
   if (cot.cliente_id != null && Number(cot.cliente_id) !== clienteId) return res("datos_invalidos", "La cotización ya tiene otro cliente: corrígelo en /cotizaciones.");
+  const vinc = vinculoContactoReserva({ clienteId, cliente: cli.data, contacto: c.contacto });
   const fallos: string[] = [];
   const u1 = await sb.from("cotizaciones").update({ cliente_id: clienteId }).eq("id", c.s.cotizacion_id).is("cliente_id", null);
-  if (u1.error) fallos.push(`cotización: ${u1.error.message}`);
+  if (u1.error) { seguro(u1.error, "vincularCliente/cotizacion"); fallos.push("la cotización"); }
   const u2 = await sb.from("reservas").update({ cliente_id: clienteId }).eq("cotizacion_id", c.s.cotizacion_id).is("cliente_id", null);
-  if (u2.error) fallos.push(`reservas: ${u2.error.message}`);
-  if (c.contacto?.id) {
+  if (u2.error) { seguro(u2.error, "vincularCliente/reservas"); fallos.push("sus reservas"); }
+  if (vinc.ata && c.contacto?.id) {
     const u3 = await sb.from("crm_contactos").update({ cliente_id: clienteId }).eq("id", c.contacto.id).is("cliente_id", null);
-    if (u3.error) fallos.push(`contacto: ${u3.error.message}`);
+    if (u3.error) { seguro(u3.error, "vincularCliente/contacto"); fallos.push("el contacto del CRM"); }
   }
-  return fallos.length ? res("error", `El cliente no se ató en todos lados (${fallos.join(" · ")}).`) : res("ok", "Cliente vinculado a la cotización, sus reservas y el contacto.");
+  if (fallos.length) return res("error", `El cliente no se ató en todos lados (falló: ${fallos.join(", ")}). Vuelve a intentar en un momento.`);
+  const contacto = vinc.codigo === "telefono" || vinc.codigo === "operativo" ? " y al contacto del CRM (su número es el de este chat)"
+    : vinc.codigo === "ya_vinculado" ? " (el contacto del CRM ya era de este cliente)"
+      : vinc.codigo === "otro_cliente" ? ". El contacto del CRM es de OTRO cliente y no se tocó: la Confirmación de Reserva no se le enviará por el chat"
+        : vinc.codigo === "sin_contacto" ? ". La conversación no tiene contacto del CRM"
+          : ". El contacto del CRM quedó SIN vincular: el número del cliente no es el de este chat, así que la Confirmación de Reserva (con sus datos) no se le enviará por WhatsApp. Si es el mismo cliente, vincúlalo en el panel del cliente del CRM";
+  return res("ok", `Cliente vinculado a la cotización y sus reservas${contacto}.`);
 }
 
 /**
  * «Emitir y enviar Confirmación»: emite la versión vigente (la misma de /api/reservas/confirmacion)
- * y, SOLO dentro de la ventana de 24 h, manda su PDF por WhatsApp (copia en `crm-media`, enlace
- * firmado). Enviada, la solicitud pasa a `completada` y la tarjeta a `aprobada`. Fuera de la
- * ventana devuelve la versión para descargarla y mandarla por wa.me.
+ * y, SOLO dentro de la ventana de 24 h y SOLO si el cliente de la reserva está VERIFICADO para el
+ * wa_id del chat (`clienteVerificadoEnChat`, la regla del PDF: vinculado al contacto o con su número
+ * completo), manda su PDF por WhatsApp (copia en `crm-media`, enlace firmado): el documento lleva los
+ * datos del cliente. Enviada, la solicitud pasa a `completada` y la tarjeta a `aprobada`. Fuera de
+ * la ventana, o sin verificar, devuelve la versión para descargarla y mandarla por wa.me (sin
+ * verificar, con el bloqueo `cliente_no_verificado` y su motivo).
  */
 export async function enviarConfirmacionReserva(
   sb: Sb, c: Cadena, quien: Quien, x: { idioma?: unknown; extras?: Partial<ExtrasConf> | null }, deps: DepsReserva = {},
@@ -1509,10 +1682,14 @@ export async function enviarConfirmacionReserva(
   const ahora = ahoraDe(deps);
   const sx = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : null);
   const extras: ExtrasConf = {
-    vuelo: sx(x.extras?.vuelo, 40) ?? s.vuelo ?? null, punto_encuentro: sx(x.extras?.punto_encuentro, 120), nota: sx(x.extras?.nota, 300),
+    // El vuelo que dio la IA solo si es un código de vuelo (`RE_VUELO`): una solicitud de antes pudo
+    // guardar otro texto, y la Confirmación lo imprime.
+    vuelo: sx(x.extras?.vuelo, 40) ?? (s.vuelo && RE_VUELO.test(s.vuelo) ? s.vuelo : null), punto_encuentro: sx(x.extras?.punto_encuentro, 120), nota: sx(x.extras?.nota, 300),
     incluir_telefono_conductor: x.extras?.incluir_telefono_conductor === true,
   };
   let version: { id: number; version: number; codigo: string };
+  let verificado = false;
+  const waId = c.contacto?.wa_id ? String(c.contacto.wa_id) : null;
   try {
     const { entrada, sinMigracion } = await leerEntrada(sb, s.reserva_id, extras);
     if (sinMigracion) return res("sin_migracion", "Falta correr supabase/reservas-08-confirmacion-reserva.sql.");
@@ -1520,12 +1697,21 @@ export async function enviarConfirmacionReserva(
     if (!juicio.ok || !juicio.datos || !juicio.idDocumento) return res("bloqueada", "La Confirmación de Reserva todavía no se puede emitir.", { bloqueos: juicio.bloqueos.map((b) => ({ codigo: String(b.codigo), detalle: b.detalle })) });
     const v = await emitirVersion(sb, juicio.idDocumento, juicio.datos, quien);
     version = { id: v.id, version: v.version, codigo: v.codigo };
-  } catch (e) { return res("error", `No se pudo emitir la Confirmación: ${msg(e)}`); }
+    // El cliente de la reserva (el del primer tramo, el que imprime la Confirmación).
+    verificado = clienteVerificadoEnChat(entrada.tramos[0]?.cliente_id, entrada.cliente as ClienteChat | null, { contactoClienteId: c.contacto?.cliente_id ?? null, waId });
+  } catch (e) { return res("error", seguro(e, "enviarConfirmacionReserva/emitir", "No se pudo emitir la Confirmación de Reserva. Vuelve a intentar en un momento.")); }
   const idioma = normalizarIdioma(x.idioma);
   const pdfUrl = `/api/reservas/confirmacion?version_id=${version.id}&idioma=${idioma}&pdf=1`;
   const verRes = { ...version, pdf: pdfUrl };
-  const waId = c.contacto?.wa_id ? String(c.contacto.wa_id) : null;
   if (!c.conv || c.conv.canal !== "whatsapp" || !waId) return res("fuera_de_ventana", "La conversación no es de WhatsApp: descarga la Confirmación y envíala.", { version: verRes, enviado: false, fueraDeVentana: { texto: version.codigo, waMe: null, cerroEn: null } });
+  if (!verificado) {
+    const texto = `Confirmación de Reserva ${version.codigo}`;
+    const motivo = "El cliente de la reserva no está vinculado a este contacto del CRM y su teléfono no es el número de este chat: la Confirmación lleva sus datos y no se envía sola por WhatsApp. Comprueba que sea el mismo cliente, descárgala y mándala por wa.me (o vincúlalo en el panel del cliente del CRM).";
+    return res("fuera_de_ventana", `Confirmación ${version.codigo} emitida, pero no se envió por el chat. ${motivo}`, {
+      version: verRes, enviado: false, fueraDeVentana: { texto, waMe: enlaceWaMe(waId, texto), cerroEn: null },
+      bloqueos: [{ codigo: "cliente_no_verificado", detalle: motivo }],
+    });
+  }
   let ult: { created_at: string } | null = null;
   try { ult = await ultimoEntrante(sb, c.conv.id); } catch { ult = null; }
   const v24 = ventana24h(ult?.created_at ?? null, ahora);
@@ -1540,7 +1726,7 @@ export async function enviarConfirmacionReserva(
     await (deps.asegurarBucket ?? asegurarBucketCrm)(sb);
     const ruta = `confirmaciones/${s.reserva_id}/${version.codigo.replace(/[^A-Za-z0-9-]/g, "")}-${(deps.uuid ?? randomUUID)()}.pdf`;
     const up = await sb.storage.from(BUCKET_CRM_MEDIA).upload(ruta, pdf.bytes, { contentType: "application/pdf", upsert: false });
-    if (up.error) throw new Error(`No se pudo guardar el PDF: ${up.error.message}`);
+    if (up.error) throw new Error(crudo("No se pudo guardar el PDF de la Confirmación", up.error));
     mediaUrl = sb.storage.from(BUCKET_CRM_MEDIA).getPublicUrl(ruta).data.publicUrl;
     const firmada = await sb.storage.from(BUCKET_CRM_MEDIA).createSignedUrl(ruta, TTL_URL_META);
     const url = firmada?.data?.signedUrl as string | undefined;
@@ -1581,7 +1767,7 @@ export async function marcarConfirmacionEnviada(sb: Sb, c: Cadena, quien: Quien,
   const s = c.s;
   if (s.estado !== "confirmada") return res("transicion_invalida", `La solicitud está «${s.estado}».`);
   let h: Hechos;
-  try { h = await leerHechos(sb, s); } catch (e) { return res("error", msg(e)); }
+  try { h = await leerHechos(sb, s); } catch (e) { return res("error", seguro(e, "marcarConfirmacionEnviada")); }
   if (!h.versiones.length) return res("transicion_invalida", "Todavía no se emitió ninguna Confirmación de Reserva.");
   const at = new Date(ahoraDe(deps)).toISOString();
   const { data } = await sb.from(TABLA_SOLICITUDES).update({ estado: "completada", cerrada_en: at, cerrada_por: quien.id }).eq("id", s.id).eq("estado", "confirmada").select("id");
@@ -1619,7 +1805,7 @@ export async function registrarAdelantoSolicitud(sb: Sb, c: Cadena, cuerpo: Reco
   const s = c.s;
   if (s.estado === "completada") return res("transicion_invalida", "La solicitud ya está completada: un cobro nuevo se registra en la Confirmación de Reserva.");
   let cc: ContextoCotizacion, h: Hechos;
-  try { cc = await contextoCotizacion(sb, s.cotizacion_id); h = await leerHechos(sb, s); } catch (e) { return res("error", msg(e)); }
+  try { cc = await contextoCotizacion(sb, s.cotizacion_id); h = await leerHechos(sb, s); } catch (e) { return res("error", seguro(e, "registrarAdelantoSolicitud/leer")); }
   const total = adelantoDe(cc.fila, null)?.total ?? null;
   if (total == null || !(total > 0)) return res("error", `La cotización N° ${cc.numero} no tiene un total en su moneda: no se puede registrar un adelanto contra él.`);
   const { cobrado } = dineroDeSolicitud(h.pagos, cc.moneda);
@@ -1635,8 +1821,8 @@ export async function registrarAdelantoSolicitud(sb: Sb, c: Cadena, cuerpo: Reco
     r = await registrarAdelanto(sb, reservaId, cc.cliente?.id ?? null, { monto: v.monto, moneda: cc.moneda, fecha: v.fecha, metodo: v.metodo, referencia: v.referencia },
       quien.nombre ?? quien.id, { reservaSolicitudId: s.id, tramos, comprobanteUrl: await comprobanteUrlDe(sb, s.id) });
   } catch (e) {
-    const m = msg(e);
-    return res(/Falta correr/.test(m) ? "sin_migracion" : "error", /Falta correr|No se pudo registrar/.test(m) ? m : "No se pudo registrar el cobro.");
+    const m = seguro(e, "registrarAdelantoSolicitud");
+    return res(/^Falta correr/.test(m) ? "sin_migracion" : "error", /^(Falta|No se pudo registrar)/.test(m) ? m : "No se pudo registrar el cobro. Vuelve a intentar en un momento.");
   }
   // Releer: dos registros a la vez pueden pasar los dos el tope.
   try {
@@ -1655,13 +1841,24 @@ export async function registrarAdelantoSolicitud(sb: Sb, c: Cadena, cuerpo: Reco
   return res("ok", `Adelanto registrado (${r.codigo ?? `#${r.id}`}).`, { estado: s.estado, avisos });
 }
 
-/** «No encontré el pago» (Tesorería): queda en la tarjeta (ámbar) y en una nota; el ejecutivo le manda T9. */
+/**
+ * «No encontré el pago» (Tesorería): queda en la tarjeta (ámbar) y en una nota; el ejecutivo le manda
+ * T9. El payload se relee JUSTO antes de escribir y se mezcla sobre lo recién leído (no sobre la
+ * tarjeta que se leyó al empezar la petición), con UPDATE condicional a que siga `pendiente`: así no
+ * se pisa lo que otra acción escribió entre medio ni se toca una tarjeta ya cerrada.
+ */
 export async function marcarPagoNoEncontrado(sb: Sb, c: Cadena, quien: Quien, deps: DepsReserva = {}): Promise<ResultadoAccionReserva> {
   if (esEstadoTerminal(c.s.estado)) return res("transicion_invalida", `La solicitud está «${c.s.estado}».`);
   if (!c.accion) return res("error", "La solicitud no tiene tarjeta en la bandeja.");
+  let fresca: AccionFila | null;
+  try { fresca = await leerAccion(sb, c.accion.id); } catch (e) { return res("error", seguro(e, "marcarPagoNoEncontrado/leer")); }
+  if (!fresca || fresca.estado !== "pendiente") return res("reclamo_perdido", "La tarjeta ya no está pendiente: recárgala.");
   const at = new Date(ahoraDe(deps)).toISOString();
-  const { error } = await sb.from("crm_acciones_ia").update({ payload: { ...(c.accion.payload ?? {}), pago_no_encontrado: { at, por: quien.nombre ?? quien.id } } }).eq("id", c.accion.id);
-  if (error) return res("error", `No se pudo marcar: ${error.message}`);
+  const { data, error } = await sb.from("crm_acciones_ia")
+    .update({ payload: { ...(fresca.payload ?? {}), pago_no_encontrado: { at, por: quien.nombre ?? quien.id } } })
+    .eq("id", fresca.id).eq("estado", "pendiente").select("id");
+  if (error) return res("error", crudo("No se pudo marcar el pago como no encontrado", error));
+  if (!(data ?? []).length) return res("reclamo_perdido", "Otra persona acaba de cambiar esta tarjeta: recárgala.");
   await nota(sb, c.s.crm_conversacion_id, `🏦 ${quien.nombre ?? "Tesorería"} NO encontró en el banco el pago reportado de la solicitud #${c.s.id}. Pídele al cliente que lo confirme desde la tarjeta («No encontramos el pago»).`);
   return res("ok", "Marcado: no se encontró el pago.", { estado: c.s.estado });
 }
@@ -1677,7 +1874,7 @@ export async function registrarDevolucionSolicitud(sb: Sb, c: Cadena, cuerpo: Re
   const pct = s.estado === "sin_unidad" ? 100 : num(s.devolucion_pct);
   if (pct == null) return res("transicion_invalida", "Todavía no se decidió cuánto se devuelve (lo resuelve el ejecutivo en la tarjeta).");
   let cc: ContextoCotizacion, h: Hechos;
-  try { cc = await contextoCotizacion(sb, s.cotizacion_id); h = await leerHechos(sb, s); } catch (e) { return res("error", msg(e)); }
+  try { cc = await contextoCotizacion(sb, s.cotizacion_id); h = await leerHechos(sb, s); } catch (e) { return res("error", seguro(e, "registrarDevolucionSolicitud/leer")); }
   const { cobrado, devuelto } = dineroDeSolicitud(h.pagos, cc.moneda);
   const aDevolver = devolucionDecidida(cobrado, pct);
   const v = validarCobro(cuerpo, {
@@ -1689,8 +1886,8 @@ export async function registrarDevolucionSolicitud(sb: Sb, c: Cadena, cuerpo: Re
   try {
     r = await registrarDevolucion(sb, { solicitudId: s.id, clienteId: cc.cliente?.id ?? null, monto: v.monto, moneda: cc.moneda, fecha: v.fecha, metodo: v.metodo, referencia: v.referencia, quien: quien.nombre ?? quien.id });
   } catch (e) {
-    const m = msg(e);
-    return res(/Falta correr/.test(m) ? "sin_migracion" : "error", /Falta correr|No se pudo registrar/.test(m) ? m : "No se pudo registrar la devolución.");
+    const m = seguro(e, "registrarDevolucionSolicitud");
+    return res(/^Falta correr/.test(m) ? "sin_migracion" : "error", /^(Falta|No se pudo registrar)/.test(m) ? m : "No se pudo registrar la devolución. Vuelve a intentar en un momento.");
   }
   try {
     const despues = await pagosDeSolicitud(sb, s, h.tramos.map((t) => t.id));
@@ -1753,16 +1950,16 @@ export async function listaParaTesoreria(sb: Sb, x: { filtro: "pendientes" | "to
       if (x.filtro === "pendientes" && !deTesoreria.length) continue;
       const ult = h.comprobantes[0];
       const cot = (ult?.cotejo ?? []);
-      const seguro = cot.length === 1 && (cot[0] === "coincide" || cot[0] === "pago_total");
+      const lecturaSegura = cot.length === 1 && (cot[0] === "coincide" || cot[0] === "pago_total");
       filas.push({
         solicitudId: s.id, estado: s.estado, numero: h.cc?.numero ?? null, cliente: h.cc?.cliente?.nombre ?? null,
         servicio: { fecha: h.cc?.fila.fecha_servicio ?? null, hora: h.cc?.fila.hora_ida ?? null, origen: h.cc?.fila.origen ?? null, destino: h.cc?.fila.destino ?? null },
         moneda, total: adel?.total ?? null, adelanto: adel?.adelanto ?? null, cobrado, devuelto, aDevolver,
-        comprobantes: h.comprobantes.length, ultimoMontoSeguro: seguro ? (ult?.lectura as LecturaComprobante | null)?.monto ?? null : null,
+        comprobantes: h.comprobantes.length, ultimoMontoSeguro: lecturaSegura ? (ult?.lectura as LecturaComprobante | null)?.monto ?? null : null,
         pagoNoEncontrado: pagoNo, pendientesTesoreria: deTesoreria, creadaEn: s.creada_en, convId: s.crm_conversacion_id,
       });
     } catch (e) {
-      avisos.push(`Solicitud #${s.id}: ${msg(e)}`);
+      avisos.push(`Solicitud #${s.id}: ${seguro(e, "listaParaTesoreria")}`);
     }
   }
   return { filas, avisos };

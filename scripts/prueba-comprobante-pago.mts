@@ -6,13 +6,17 @@
 //  · `seguro` ⇒ el monto está entre el adelanto y el total, en la moneda, con fecha en el rango y una
 //    operación no repetida; una fecha futura, una operación repetida, otra moneda o una lectura
 //    ilegible nunca dan `coincide`; corolario: el barrido sí produce lecturas seguras;
-//  · el destino es tri-estado; todo código cumple el CHECK de la base [a-z_]{2,40}.
+//  · el destino es tri-estado; todo código cumple el CHECK de la base [a-z_]{2,40};
+//  · `comprobanteCuenta`: lo que el lector leyó y no es comprobante no cuenta; sin lectura, cuenta;
+//  · el adjunto del correo se reconoce por sus primeros bytes (JPEG, PNG, WEBP, PDF) y nada más.
 import {
-  PROMPT_COMPROBANTE, TEXTO_COTEJO, cotejarComprobante, destinoCoincide, fechaDeLectura, leerRespuestaComprobante,
-  monedaDeTexto, normalizarOperacion, numeroDeTextoMonto, textoMontoCoherente,
+  PROMPT_COMPROBANTE, TEXTO_COTEJO, comprobanteCuenta, cotejarComprobante, destinoCoincide, fechaDeLectura, formatoPorFirma,
+  leerRespuestaComprobante, monedaDeTexto, normalizarOperacion, numeroDeTextoMonto, textoMontoCoherente,
   type CodigoCotejo, type LecturaComprobante,
 } from "../lib/traslados/comprobante-pago";
 import type { CuentaBancaria } from "../lib/empresa-perfil";
+import { MAX_ADJUNTO_BYTES, adjuntoDeComprobante } from "../lib/traslados/reserva-correo";
+import { BUCKETS_LECTOR, MAX_PDF_LECTOR_BYTES } from "../lib/traslados/comprobante-pago-ia";
 
 let ok = 0, mal = 0;
 const fallas: string[] = [];
@@ -110,6 +114,45 @@ t("todo código cumple el CHECK de la base [a-z_]{2,40}", CODIGOS.every((c) => /
   t("crédito (sin adelanto): el total coincide", cotejarComprobante({ ...l, monto: 177, texto_monto: "S/ 177.00" }, { ...x, adelanto: null }).codigos.join() === "coincide");
   t("null → no_es_comprobante", cotejarComprobante(null, x).codigos.join() === "no_es_comprobante");
   t("operación repetida aunque cambie el formato", cotejarComprobante(l, { ...x, operacionesPrevias: ["123456"] }).codigos.includes("operacion_repetida"));
+}
+
+// ── 6. ¿Cuenta como un pago reportado? (UNA definición: cancelación, cierre, vencimiento) ─────
+{
+  const leida = (r: unknown) => leerRespuestaComprobante(JSON.stringify(r));
+  t("una imagen que el lector LEYÓ y dijo que no es comprobante NO cuenta", comprobanteCuenta(leida({ es_comprobante: false, monto: null })) === false && comprobanteCuenta({ es_comprobante: false }) === false);
+  t("un comprobante leído cuenta", comprobanteCuenta(leida({ es_comprobante: true, monto: 50, texto_monto: "S/ 50.00" })) === true);
+  t("sin lectura (el lector falló, fila vieja) cuenta: lo mira una persona", comprobanteCuenta(null) && comprobanteCuenta(undefined) && comprobanteCuenta("x") && comprobanteCuenta([]));
+  t("una lectura rara sin la clave cuenta (el lado seguro: frena)", comprobanteCuenta({ monto: 10 }) && comprobanteCuenta({ es_comprobante: "no" }));
+  // Coherente con cómo se decide al registrarlo: lo que el cotejo llama `no_es_comprobante` con lectura
+  // es exactamente lo que no cuenta; sin lectura el cotejo también dice `no_es_comprobante` y SÍ cuenta.
+  const xc = { adelanto: 50, total: 100, moneda: "PEN" as const, hoy: "2026-10-21", desde: "2026-10-20", operacionesPrevias: [], cuentas: [] };
+  let coherente = true;
+  for (const es of [true, false, undefined]) for (const monto of [null, 50]) {
+    const l = leida({ es_comprobante: es, monto, texto_monto: monto ? "S/ 50.00" : null });
+    const noEs = cotejarComprobante(l, xc).codigos.includes("no_es_comprobante");
+    if (l && noEs === comprobanteCuenta(l)) coherente = false;
+  }
+  t("con lectura: «no es comprobante» en el cotejo ⟺ no cuenta", coherente);
+}
+
+// ── 7. El adjunto del correo, por su contenido ───────────────────────────────
+{
+  const b = (...xs: number[]) => new Uint8Array([...xs, ...new Array(16).fill(0)]);
+  t("JPEG, PNG, WEBP y PDF se reconocen por sus primeros bytes",
+    formatoPorFirma(b(0xff, 0xd8, 0xff, 0xe0))?.ext === "jpg" && formatoPorFirma(b(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a))?.ext === "png"
+    && formatoPorFirma(b(0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50))?.ext === "webp" && formatoPorFirma(b(0x25, 0x50, 0x44, 0x46, 0x2d))?.mime === "application/pdf");
+  const html = new TextEncoder().encode("<html><script>alert(1)</script></html>");
+  t("un HTML, un ZIP, un RIFF que no es WEBP, un archivo corto o vacío → no se reconoce",
+    formatoPorFirma(html) === null && formatoPorFirma(b(0x50, 0x4b, 0x03, 0x04)) === null && formatoPorFirma(b(0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x41, 0x56, 0x49, 0x20)) === null
+    && formatoPorFirma(new Uint8Array([0xff, 0xd8, 0xff])) === null && formatoPorFirma(null) === null && formatoPorFirma(new Uint8Array()) === null);
+  const okJ = adjuntoDeComprobante(b(0xff, 0xd8, 0xff, 0xe0), "comprobante-cotizacion-00736");
+  t("adjunto: con su extensión por el contenido (no por el nombre)", okJ.ok && okJ.nombre === "comprobante-cotizacion-00736.jpg" && okJ.mime === "image/jpeg");
+  const pdf = adjuntoDeComprobante(b(0x25, 0x50, 0x44, 0x46, 0x2d), "comp/../x?y");
+  t("adjunto: el nombre se limpia", pdf.ok && /^[A-Za-z0-9._-]+\.pdf$/.test(pdf.nombre));
+  const noHtml = adjuntoDeComprobante(html, "c"), noBaja = adjuntoDeComprobante(null, "c"), grande = adjuntoDeComprobante(new Uint8Array(MAX_ADJUNTO_BYTES + 1).fill(0xff), "c");
+  t("adjunto: lo que no es imagen ni PDF, lo que no se bajó y lo enorme NO van, y dicen por qué",
+    !noHtml.ok && /no es una imagen/.test(noHtml.motivo) && !noBaja.ok && /no se pudo bajar/.test(noBaja.motivo) && !grande.ok && /pesa más/.test(grande.motivo));
+  t("el lector solo lee de crm-media y un PDF de hasta 2 MB", BUCKETS_LECTOR.join() === "crm-media" && MAX_PDF_LECTOR_BYTES === 2 * 1024 * 1024);
 }
 
 if (fallas.length) for (const f of fallas) console.log("✗", f);

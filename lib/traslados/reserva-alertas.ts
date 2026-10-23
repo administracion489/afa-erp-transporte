@@ -24,7 +24,7 @@
 //     con la MISMA tolerancia de medio céntimo — dos cuentas de la misma plata terminan diciendo
 //     cifras distintas. Sin poder leer los pagos NO se afirma nada (ni «saldada» ni «pendiente»).
 //  3. EL AUTO-VENCIMIENTO: una solicitud «esperando pago» SIN DINERO EN JUEGO (ningún pago ni
-//     comprobante registrado, y sin reserva creada) cuya cotización venció (`traslado_json.
+//     comprobante que cuente —`comprobanteCuenta`—, y sin reserva creada) cuya cotización venció (`traslado_json.
 //     validez_hasta` < hoy, la regla de `elegibilidadDeReserva`) o cuyo servicio ya pasó se cierra
 //     como `cancelada` con `cierre_motivo = 'vencida'`. Sin poder leer pagos o comprobantes no se
 //     cierra: una lista vacía por un error no es «no pagó». No le escribe al cliente.
@@ -100,7 +100,11 @@ export type HechosSolicitud = {
   cotizacion: CotizacionAlerta | null;
   /** null = los pagos no se pudieron leer. [] = no tiene ninguno (o no existe la columna de 09c). */
   pagos: readonly (PagoSolicitud & { reserva_solicitud_id?: number | null })[] | null;
-  /** null = no se pudieron leer. 0 = ninguno (o no existe la tabla de 09b). */
+  /**
+   * Los que CUENTAN como un pago reportado (`comprobanteCuenta`, lib/traslados/comprobante-pago.ts:
+   * no cuenta una imagen que el lector leyó y dijo que no es un comprobante). null = no se pudieron
+   * leer. 0 = ninguno (o no existe la tabla de 09b).
+   */
   comprobantes: number | null;
 };
 

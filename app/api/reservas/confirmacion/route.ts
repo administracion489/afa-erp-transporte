@@ -22,6 +22,7 @@ import { cobradoEn, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, normaliz
 import { anularAdelanto, emitirVersion, leerEntrada, leerVersion, leerVersiones, pdfDeVersion, registrarAdelanto, validarCobro, SQL_CONFIRMACION } from "@/lib/confirmacion-reserva-datos";
 import { leerPerfilPdf } from "@/lib/traslados/enviar-cotizacion-datos";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
+import { mensajeSeguro } from "@/lib/mensaje-seguro";
 
 export const dynamic = "force-dynamic";
 
@@ -39,14 +40,8 @@ function extrasDe(v: unknown): ExtrasConf {
   return { vuelo: s(o.vuelo, 40), punto_encuentro: s(o.punto_encuentro, 120), nota: s(o.nota, 300), incluir_telefono_conductor: o.incluir_telefono_conductor === true };
 }
 
-/**
- * Los mensajes que escribe este módulo (reglas de negocio) se enseñan; un error crudo de la base
- * no: va al log y el navegador recibe uno genérico.
- */
-function mensajeSeguro(e: unknown): string {
-  const m = (e as Error)?.message ?? "";
-  return /^(Ese cobro|Otra persona|Falta correr)/.test(m) ? m : "No se pudo completar la operación. Vuelve a intentar en un momento.";
-}
+// Los mensajes que escribe este módulo (reglas de negocio) se enseñan; un error crudo de la base
+// no: va al log y el navegador recibe uno genérico (`mensajeSeguro`, lib/mensaje-seguro.ts).
 
 async function puedeCobrar(req: NextRequest): Promise<boolean> {
   return (await verificarUsuarioApiAlguno(req, MODULOS_COBRO)).ok;

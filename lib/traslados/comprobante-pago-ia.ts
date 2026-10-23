@@ -17,7 +17,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import Anthropic from "@anthropic-ai/sdk";
-import { bloqueParaIA } from "@/lib/crm-media";
+import { BUCKET_CRM_MEDIA, bloqueParaIA } from "@/lib/crm-media";
 import { PROMPT_COMPROBANTE, leerRespuestaComprobante, type LecturaComprobante } from "./comprobante-pago";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30,6 +30,16 @@ export const MODELO_LECTOR_DEFECTO = "claude-opus-4-8";
 /** El modelo con que se lee: el del agente si es uno de los aceptados; si no, el de siempre. */
 export const modeloLector = (modeloAgente: unknown): string =>
   typeof modeloAgente === "string" && MODELOS_LECTOR.has(modeloAgente) ? modeloAgente : MODELO_LECTOR_DEFECTO;
+
+/**
+ * El PDF más grande que se manda a leer (el de las fotos sigue en 4.5 MB): un comprobante de banco
+ * pesa unos KB, y un PDF de 10 MB son decenas de páginas que se pagan enteras al modelo. NO medido.
+ * Solo para este lector: el resto del CRM sigue con su tope.
+ */
+export const MAX_PDF_LECTOR_BYTES = 2 * 1024 * 1024;
+
+/** El archivo que se lee: solo del bucket del CRM (`crm-media`, donde el webhook guarda lo que manda el cliente). */
+export const BUCKETS_LECTOR: readonly string[] = [BUCKET_CRM_MEDIA];
 
 /** Lo único que acompaña a la imagen: una orden fija, sin datos de la conversación. */
 export const PEDIDO_LECTOR = "Transcribe este comprobante con las claves indicadas. Responde solo con el objeto JSON.";
@@ -65,9 +75,9 @@ export async function leerComprobantePago(sb: Sb, mediaUrl: string | null | unde
   if (!url) return { ok: false, codigo: "sin_archivo", detalle: "El mensaje no trae archivo." };
   let bloque: unknown | null = null;
   try {
-    bloque = await (deps.bloque ?? ((s: Sb, u: string) => bloqueParaIA(s, u)))(sb, url);
+    bloque = await (deps.bloque ?? ((s: Sb, u: string) => bloqueParaIA(s, u, { buckets: BUCKETS_LECTOR, maxPdfBytes: MAX_PDF_LECTOR_BYTES })))(sb, url);
   } catch { bloque = null; }
-  if (!bloque) return { ok: false, codigo: "sin_archivo", detalle: "No se pudo bajar el comprobante (o no es una imagen ni un PDF)." };
+  if (!bloque) return { ok: false, codigo: "sin_archivo", detalle: "No se pudo bajar el comprobante (no está en el almacenamiento del CRM, no es una imagen ni un PDF, o el PDF pasa de 2 MB)." };
   try {
     const resp = await (deps.crear ?? crearPorDefecto)({
       model: modeloLector(x.modelo),

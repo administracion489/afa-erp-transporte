@@ -23,6 +23,7 @@ import {
   type CotizacionAlerta, type HechosSolicitud, type SolicitudAlerta,
 } from "./reserva-alertas";
 import type { PagoSolicitud } from "./reserva-pago";
+import { comprobanteCuenta } from "./comprobante-pago";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = any;
@@ -143,15 +144,17 @@ export async function leerHechosAlertasReserva(sb: Sb, x: { ahoraMs: number; sin
   }
 
   // ── Comprobantes reportados (09b) ──
+  // Solo los que CUENTAN como un pago reportado (`comprobanteCuenta`): una imagen que el lector leyó
+  // y dijo que no es un comprobante no frena el vencimiento automático. Sin lectura, cuenta.
   let comps: Map<number, number> | null = new Map();
   for (const ids of trozos(solIds, LOTE_IN)) {
-    const r = await todas<{ solicitud_id: number }>((d, h) => sb.from("reserva_solicitud_comprobantes").select("id, solicitud_id")
+    const r = await todas<{ solicitud_id: number; lectura?: unknown }>((d, h) => sb.from("reserva_solicitud_comprobantes").select("id, solicitud_id, lectura")
       .in("solicitud_id", ids).order("id").range(d, h));
     if (r.error) {
       if (tablaFaltante(r.error, "reserva_solicitud_comprobantes")) { avisos.push("sin la tabla reserva_solicitud_comprobantes (reservas-09b)"); comps = new Map(); break; }
       avisos.push(`comprobantes: ${r.error.message ?? r.error.code}`); comps = null; break;
     }
-    for (const c of r.filas) comps.set(Number(c.solicitud_id), (comps.get(Number(c.solicitud_id)) ?? 0) + 1);
+    for (const c of r.filas) if (comprobanteCuenta(c.lectura)) comps.set(Number(c.solicitud_id), (comps.get(Number(c.solicitud_id)) ?? 0) + 1);
   }
 
   const hechos: HechosSolicitud[] = solicitudes.map((s) => ({

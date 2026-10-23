@@ -7,17 +7,25 @@
 //    largo cuando hay una cotización de traslado; sin cotización, o con la cotización del turno, no;
 //  · `bloqueReservaTraslados` sin montos, porcentajes ni cuentas, y la frase que reemplaza sigue en
 //    el prompt de hoy (lib/crm-ia.ts → bloqueTraslados).
+//  · la auditoría de seguridad (23-10-2026), de punta a punta: el vuelo es un código de vuelo; no se
+//    le reenvían cuentas distintas de las que recibió (9h); lo que no es comprobante no frena (9i);
+//    solo cuenta un archivo que llegó por Meta (9j) y de crm-media (9k); el pago sin cotización no se
+//    lee con IA y se avisa una vez, con tope y el adjunto por su contenido (9l); políticas
+//    sospechosas no salen (9m); el contacto se ata solo con el número del chat (9n); la Confirmación
+//    y el crédito exigen un cliente verificado (9o, 9p); un error de la base no llega a la tarjeta
+//    (9q, y `mensajeSeguro` en 8b); «No encontré el pago» no pisa el payload (9r).
 // Lo que NO fija todavía: «con la reserva apagada, el prompt de crm-ia byte a byte el de antes».
 // Eso lo conecta B3 en lib/crm-ia.ts y lo fija su matriz.
 import {
   ACCIONES_POR_HERRAMIENTA, CLAVES_COTIZACION_RESERVA, CLAVES_RESPUESTA_RESERVA, FRASE_PROPONER_RESERVA_TRASLADOS, FRASE_RESERVAR_TRASLADO,
   HERRAMIENTAS_RESERVA, INSTRUCCION_RESERVA, NOMBRES_HERRAMIENTAS_RESERVA, TOPES_RESERVA, bloqueReservaTraslados, decidirTopeReserva,
-  elegirCotizacion, entradaReserva, estadoReservaIA, mensajePedirComprobante, respuestaReservaParaModelo, textoFinalReserva,
+  RE_VUELO, elegirCotizacion, entradaReserva, estadoReservaIA, mensajePedirComprobante, respuestaReservaParaModelo, textoFinalReserva,
   type AccionReserva, type CotizacionCandidata, type ResultadoReservaIA,
 } from "../lib/traslados/reserva-ia";
 import { mensajeGuardaReserva, normalizarConfigReserva } from "../lib/traslados/reserva-pago";
 import { importesEnTexto, mencionaDinero } from "../lib/traslados/texto-libre";
 import { bloqueTraslados } from "../lib/crm-ia";
+import { MENSAJE_GENERICO, mensajeSeguro } from "../lib/mensaje-seguro";
 import type { EstiloMensajes } from "../lib/crm-ia-ajustes";
 
 let ok = 0, mal = 0;
@@ -51,6 +59,13 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
   const s = entradaReserva({ numero_cotizacion: "736; drop", nombre_pasajero: "Deposite S/ 50 al Yape 987654321", vuelo: "visita www.x.com" });
   t("lo sospechoso no pasa", s.numeroCotizacion === null && s.nombrePasajero === null && s.vuelo === null);
   t("basura → todo null", JSON.stringify(entradaReserva(null)) === JSON.stringify({ numeroCotizacion: null, nombrePasajero: null, vuelo: null }));
+  // El vuelo se imprime en la Confirmación: solo un código de vuelo (aerolínea de 2 + 1-4 dígitos + letra).
+  const vuelo = (v: string) => entradaReserva({ vuelo: v }).vuelo;
+  t("vuelo: «SALDO 0 PAGADO» no es un vuelo (la regla vieja lo dejaba pasar)", vuelo("SALDO 0 PAGADO") === null && /^[A-Z0-9][A-Z0-9 -]{1,19}$/.test("SALDO 0 PAGADO") && /\d/.test("SALDO 0 PAGADO"));
+  t("vuelo: códigos buenos pasan (con y sin espacio o guion, aerolínea con dígito, letra final)",
+    vuelo("LA2047") === "LA2047" && vuelo("la 2047") === "LA 2047" && vuelo("H2-1234A") === "H2-1234A" && vuelo("2I 5") === "2I 5" && vuelo("AV 1") === "AV 1");
+  t("vuelo: lo que no es un código se descarta", ["2047", "LA 20477", "LAN 2047", "PAGADO 50", "LA 2047 B", "S/ 50", "LA_2047", "L 2047", "LA--2047"].every((v) => vuelo(v) === null));
+  t("vuelo: RE_VUELO es la regla", RE_VUELO.test("LA 2047") && !RE_VUELO.test("SALDO 0 PAGADO"));
 }
 
 // ── 3. Qué cotización se reserva ─────────────────────────────────────────────
@@ -137,6 +152,28 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
   t("un conteo que no se pudo leer bloquea", !decidirTopeReserva({ conv: null, dia: 0 }, "solicitud").ok && !decidirTopeReserva({ conv: 0, dia: null }, "lectura").ok);
   t("por debajo del tope pasa", decidirTopeReserva({ conv: 0, dia: 0, turno: 0 }, "solicitud").ok && decidirTopeReserva({ conv: TOPES_RESERVA.MAX_LECTURAS_CONV_DIA - 1, dia: 0 }, "lectura").ok);
   t("en el tope no pasa", !decidirTopeReserva({ conv: TOPES_RESERVA.MAX_SOLICITUDES_CONV_DIA, dia: 0 }, "solicitud").ok && !decidirTopeReserva({ conv: 0, dia: TOPES_RESERVA.MAX_LECTURAS_DIA }, "lectura").ok && !decidirTopeReserva({ conv: 0, dia: 0, turno: TOPES_RESERVA.MAX_HERRAMIENTAS_RESERVA_TURNO }, "lectura").ok);
+  t("correo sin cotización: su propio tope, y sin poder contar no pasa",
+    decidirTopeReserva({ conv: TOPES_RESERVA.MAX_CORREOS_SIN_COTIZACION_CONV_DIA - 1, dia: 0 }, "correo_sin_cotizacion").ok
+    && !decidirTopeReserva({ conv: TOPES_RESERVA.MAX_CORREOS_SIN_COTIZACION_CONV_DIA, dia: 0 }, "correo_sin_cotizacion").ok
+    && !decidirTopeReserva({ conv: 0, dia: TOPES_RESERVA.MAX_CORREOS_SIN_COTIZACION_DIA }, "correo_sin_cotizacion").ok
+    && !decidirTopeReserva({ conv: null, dia: 0 }, "correo_sin_cotizacion").ok);
+}
+
+// ── 8b. Lo que se le enseña al usuario de un error (lib/mensaje-seguro.ts) ───
+{
+  t("sin opciones, la regla del route de la Confirmación (los tres prefijos y el genérico)",
+    mensajeSeguro(new Error("Ese cobro ya está aplicado a un comprobante: se corrige en Finanzas.")) === "Ese cobro ya está aplicado a un comprobante: se corrige en Finanzas."
+    && mensajeSeguro(new Error("Falta correr supabase/x.sql.")) === "Falta correr supabase/x.sql."
+    && mensajeSeguro(new Error('duplicate key value violates unique constraint "uq_x"')) === MENSAJE_GENERICO
+    && mensajeSeguro(new Error("No se pudo leer la reserva: permission denied for table reservas")) === MENSAJE_GENERICO);
+  const R = /^(No se pudo|Falta\b|La cotización\b)/;
+  t("con cortarDetalle: «No se pudo X: <base>» → «No se pudo X.» sin el texto de la base",
+    mensajeSeguro(new Error('No se pudo cerrar la solicitud: new row for relation "reserva_solicitudes" violates check constraint "ck"'), { propios: R, cortarDetalle: true })
+      === "No se pudo cerrar la solicitud. Vuelve a intentar en un momento.");
+  t("un mensaje propio sin detalle pasa entero; uno ajeno cae al genérico",
+    mensajeSeguro("La cotización 5 ya no existe.", { propios: R, cortarDetalle: true }) === "La cotización 5 ya no existe."
+    && mensajeSeguro("TypeError: fetch failed", { propios: R, cortarDetalle: true }) === MENSAJE_GENERICO
+    && mensajeSeguro(null, { propios: R }) === MENSAJE_GENERICO);
 }
 
 // ── 9. De punta a punta, sobre una base falsa en memoria (B3) ────────────────
@@ -150,6 +187,8 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
   class Sb {
     tablas: Record<string, Fila[]> = {};
     n = 1000;
+    /** Un error de la base para la consulta (tabla, operación); null = sin falla. */
+    falla: ((tabla: string, op: string) => any) | null = null;
     reloj: () => number;
     constructor(reloj: () => number) { this.reloj = reloj; }
     t(nombre: string) { return (this.tablas[nombre] ??= []); }
@@ -184,6 +223,8 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     then<A, B>(ok?: ((v: any) => A | PromiseLike<A>) | null, mal?: ((e: any) => B | PromiseLike<B>) | null): PromiseLike<A | B> { return Promise.resolve().then(() => this.ejecutar()).then(ok, mal); }
     private ejecutar(): any {
       const sb = this.sb, tabla = this.tabla, filas = sb.t(tabla);
+      const f = sb.falla?.(tabla, this.op);
+      if (f) return { data: null, error: f };
       const ahora = new Date(sb.reloj()).toISOString();
       if (this.op === "insert") {
         const lista = Array.isArray(this.payload) ? this.payload : [this.payload];
@@ -269,14 +310,18 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     return { contacto, conv, cotId };
   };
   const textos: { conv: string; texto: string }[] = [];
-  const correos: { to: string; subject: string; adjuntos: number }[] = [];
+  const correos: { to: string; subject: string; adjuntos: number; html: string; nombre: string | null }[] = [];
+  let lecturas = 0;
+  /** Los primeros bytes de un JPEG (el adjunto se reconoce por su contenido, no por el tipo declarado). */
+  const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+  let bytesSiguientes: Uint8Array = JPEG;
   let lecturaSiguiente: any = null;
   const deps: any = {
     ahoraMs: () => reloj, azar: () => String(Math.random()).slice(2, 8), uuid: () => "uuid-x", appUrl: "https://erp.test",
-    leerComprobante: async () => ({ ok: true, lectura: lecturaSiguiente, crudo: "{}" }),
-    enviarCorreo: async (c: any) => { correos.push({ to: c.to, subject: c.subject, adjuntos: c.attachments?.length ?? 0 }); },
+    leerComprobante: async () => { lecturas++; return { ok: true, lectura: lecturaSiguiente, crudo: "{}" }; },
+    enviarCorreo: async (c: any) => { correos.push({ to: c.to, subject: c.subject, adjuntos: c.attachments?.length ?? 0, html: c.html, nombre: c.attachments?.[0]?.filename ?? null }); },
     enviarTexto: async (s: any, conv: any, _ct: any, texto: string) => { textos.push({ conv: conv.id, texto }); await s.from("crm_mensajes").insert({ conversacion_id: conv.id, direccion: "saliente", tipo: "texto", contenido: texto, generado_por_ia: true }); return { error: null, metaId: "wamid" }; },
-    bajarArchivo: async () => ({ bytes: new Uint8Array([1, 2, 3]), mime: "image/jpeg" }),
+    bajarArchivo: async () => ({ bytes: bytesSiguientes, mime: "image/jpeg" }),
   };
   const cfg = (await import("../lib/traslados/datos")).leerConfigIA;
   const cfgIA = await cfg(sb);
@@ -285,7 +330,11 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     sb, conv: e.conv, contacto: e.contacto, remitente: { canal: "whatsapp", waId: e.contacto.wa_id }, agente: sb.tablas.crm_agentes_ia[0],
     modoAuto: true, cfg: cfgIA.reserva, turno: { n: 0 },
   });
-  const foto = (e: ReturnType<typeof escenario>, id: string) => sb.t("crm_mensajes").push({ id, conversacion_id: e.conv.id, direccion: "entrante", tipo: "image", media_url: `https://sb.test/storage/v1/object/public/crm-media/${id}.jpg`, created_at: new Date(reloj).toISOString() });
+  // Un entrante con archivo que llegó por Meta (el webhook guarda su `meta_message_id`).
+  const foto = (e: ReturnType<typeof escenario>, id: string, x: { meta?: string | null; bucket?: string } = {}) => sb.t("crm_mensajes").push({
+    id, conversacion_id: e.conv.id, direccion: "entrante", tipo: "image", meta_message_id: x.meta === undefined ? `wamid.${id}` : x.meta,
+    media_url: `https://sb.test/storage/v1/object/public/${x.bucket ?? "crm-media"}/${id}.jpg`, created_at: new Date(reloj).toISOString(),
+  });
   const lecturaDe = (monto: number, op: string) => ({ es_comprobante: true, monto, texto_monto: `S/ ${monto.toFixed(2)}`, moneda: "PEN", fecha: "2026-10-21", hora: "09:58", numero_operacion: op, medio: "transferencia", banco_origen: "Banco Dos", banco_destino: "Banco Uno", cuenta_destino: "****0-11", titular_destino: null, confianza: "alta" });
   const tarjeta = async (e: ReturnType<typeof escenario>, solId: number) => {
     const accId = sb.t("reserva_solicitudes").find((s) => s.id === solId)!.crm_accion_id;
@@ -320,7 +369,8 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     t("9a: comprobante → comprobante_registrado y T3 con el monto (lectura segura)", JSON.parse(r2.respuestaModelo).accion === "comprobante_registrado" && !!r2.mensaje && r2.mensaje.includes("Recibimos su comprobante") && r2.mensaje.includes(adel.adelanto!.toFixed(2)));
     t("9a: la solicitud pasa a pago_reportado con el plazo recalculado", s2.estado === "pago_reportado" && !!s2.confirmar_antes_de);
     const comp = sb.t("reserva_solicitud_comprobantes").find((k) => k.solicitud_id === s2.id);
-    t("9a: el comprobante queda como evidencia, con su cotejo y el correo", !!comp && comp.cotejo.includes("coincide") && !!comp.correo_en && correos.some((c) => /Pago REPORTADO/.test(c.subject) && c.adjuntos === 1));
+    t("9a: el comprobante queda como evidencia, con su cotejo y el correo (JPEG reconocido → adjunto .jpg)", !!comp && comp.cotejo.includes("coincide") && !!comp.correo_en
+      && correos.some((c) => /Pago REPORTADO/.test(c.subject) && c.adjuntos === 1 && /\.jpg$/.test(c.nombre ?? "")));
     t("9a: un comprobante NO crea ningún cobro", !sb.t("pagos").some((p) => p.reserva_solicitud_id === s2.id));
     const r2b = await D.reportarPagoIA(ctxDe(e), {}, deps);
     t("9a: la misma foto otra vez → ya_registrado", JSON.parse(r2b.respuestaModelo).accion === "ya_registrado");
@@ -460,6 +510,259 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     ctx.turno.n = TOPES_RESERVA.MAX_HERRAMIENTAS_RESERVA_TURNO;
     const r = await D.reservarTrasladoIA(ctx, {}, deps);
     t("9g: con el tope del turno → deriva sin crear solicitud", !!r.derivar && !sb.t("reserva_solicitudes").some((s) => s.cotizacion_id === e.cotId));
+  }
+
+  // ── 9h. Volver a mandarle las cuentas: solo las MISMAS que recibió (la huella de la firma) ──
+  {
+    const e = escenario();
+    const r1 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    const s = solDe(e.cotId);
+    t("9h: la firma guarda la huella de las cuentas que se le mandaron", JSON.parse(r1.respuestaModelo).accion === "pedir_pago" && /\|cta:[0-9a-f]{16}$/.test(String(s.firma_importes)));
+    const perfil = sb.tablas.empresa_perfil[0];
+    const cuentasAntes = perfil.cuentas_bancarias;
+    perfil.cuentas_bancarias = [{ banco: "Banco Tres", cuenta: "999-0000000-0-99", cci: "00299900000000009999", moneda: "PEN" }];
+    const r2 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    t("9h: con otras cuentas → deriva y NO le manda las nuevas", !!r2.derivar && r2.mensaje === null && /cambiaron/.test(r2.derivar.nota));
+    perfil.cuentas_bancarias = cuentasAntes;
+    const r3 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    t("9h: con las mismas → ya_solicitada y le reenvía el mismo T1", JSON.parse(r3.respuestaModelo).accion === "ya_solicitada" && r3.mensaje === r1.mensaje);
+    const nombre = perfil.nombre, razon = perfil.razon_social;
+    perfil.nombre = null; perfil.razon_social = null;
+    const r4 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    t("9h: con el perfil sin nombre → deriva", !!r4.derivar && r4.mensaje === null && /perfil de la empresa/.test(r4.derivar.nota));
+    perfil.nombre = nombre; perfil.razon_social = razon;
+    const original = s.firma_importes;
+    s.firma_importes = String(original).replace(/\|cta:[0-9a-f]+$/, "");
+    const r5 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    t("9h: una solicitud de antes (firma sin huella) → deriva", !!r5.derivar && r5.mensaje === null && /anterior a ese control/.test(r5.derivar.nota));
+    t("9h: la firma sin huella sigue comparando sus importes (no se dan por cambiados)", (await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps)).cotizacion?.importesVigentes === true);
+    s.firma_importes = original;
+    t("9h: con la huella, la vista tampoco da los importes por cambiados", (await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps)).cotizacion?.importesVigentes === true);
+  }
+
+  // ── 9i. Lo que el lector dijo que NO es un comprobante no frena; lo que no pudo leer, sí ──
+  {
+    const e = escenario();
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-selfie`);
+    lecturaSiguiente = { ...lecturaDe(10, "X-1"), es_comprobante: false };
+    await D.reportarPagoIA(ctxDe(e), {}, deps);
+    const s = solDe(e.cotId);
+    const k = sb.t("reserva_solicitud_comprobantes").find((x) => x.solicitud_id === s.id);
+    t("9i: una foto que no es un comprobante queda registrada y la solicitud sigue esperando el pago", !!k && k.lectura?.es_comprobante === false && s.estado === "esperando_pago");
+    const v = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
+    t("9i: …no la pone a verificar en Tesorería ni ofrece «No encontré el pago»", !v.pendientes.some((p) => p.codigo === "verificar_pago") && !v.acciones.includes("pago_no_encontrado") && v.acciones.includes("ver_comprobante"));
+    const rC = await D.cancelarIA(ctxDe(e), {}, deps);
+    t("9i: …y no frena la cancelación sin pago", JSON.parse(rC.respuestaModelo).accion === "cancelada_sin_pago" && solDe(e.cotId).estado === "cancelada");
+  }
+  {
+    const e = escenario();
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-selfie2`);
+    lecturaSiguiente = { ...lecturaDe(10, "X-2"), es_comprobante: false };
+    await D.reportarPagoIA(ctxDe(e), {}, deps);
+    const s = solDe(e.cotId);
+    const r = await D.cerrarSolicitud(sb, await tarjeta(e, s.id), quien, "cliente", "", deps);
+    t("9i: «Cerrar» con solo una foto que no es comprobante → se cierra", r.ok && solDe(e.cotId).estado === "cancelada");
+  }
+  {
+    const e = escenario();
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-sinlect`);
+    await D.reportarPagoIA(ctxDe(e), {}, { ...deps, leerComprobante: async () => ({ ok: false, codigo: "error_modelo", detalle: "x" }) });
+    const s = solDe(e.cotId);
+    t("9i: sin lectura (el lector falló) cuenta como pago reportado", s.estado === "pago_reportado");
+    const rCe = await D.cerrarSolicitud(sb, await tarjeta(e, s.id), quien, "cliente", "", deps);
+    t("9i: …«Cerrar» pide que Tesorería lo resuelva", !rCe.ok && rCe.codigo === "pago_sin_registrar");
+    const rC = await D.cancelarIA(ctxDe(e), {}, deps);
+    t("9i: …y la cancelación de la IA deriva (no se cierra sola)", JSON.parse(rC.respuestaModelo).accion === "cancelacion_registrada" && solDe(e.cotId).estado === "pago_reportado");
+  }
+
+  // ── 9j. Solo un archivo que llegó por Meta puede ser el comprobante ──
+  {
+    const e = escenario();
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-sinmeta`, { meta: null });
+    const r = await D.reportarPagoIA(ctxDe(e), {}, deps);
+    t("9j: sin meta_message_id (no lo escribió el webhook) → pedir_comprobante y nada registrado",
+      JSON.parse(r.respuestaModelo).accion === "pedir_comprobante" && !sb.t("reserva_solicitud_comprobantes").some((k) => k.mensaje_id === `m-${e.cotId}-sinmeta`));
+  }
+
+  // ── 9k. «Ver el comprobante»: solo `crm-media`, con un enlace corto ──
+  {
+    const e = escenario();
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    reloj += 60_000;
+    const idFoto = `m-${e.cotId}-ver`;
+    foto(e, idFoto);
+    lecturaSiguiente = lecturaDe(10, `OP-${e.cotId}`);
+    await D.reportarPagoIA(ctxDe(e), {}, deps);
+    const s = solDe(e.cotId);
+    const storageAntes = sb.storage;
+    const firmados: string[] = [];
+    sb.storage = { from: (b: string) => ({ ...storageAntes.from(b), createSignedUrl: async (_r: string, ttl: number) => { firmados.push(`${b}:${ttl}`); return { data: { signedUrl: "https://firmado.test/x" } }; } }) } as any;
+    const r1 = await D.verComprobante(sb, await tarjeta(e, s.id), quien, deps);
+    t("9k: de crm-media → enlace firmado por 600 s", r1.ok && !!r1.url && firmados.join() === "crm-media:600");
+    sb.t("crm_mensajes").find((m) => m.id === idFoto)!.media_url = "https://sb.test/storage/v1/object/public/documentos/soat/ABC-123.pdf";
+    const r2 = await D.verComprobante(sb, await tarjeta(e, s.id), quien, deps);
+    t("9k: un enlace a otro bucket privado no se firma", !r2.ok && r2.codigo === "sin_comprobante" && firmados.length === 1);
+    sb.storage = storageAntes;
+  }
+
+  // ── 9l. Pago sin cotización que reservar: sin IA, una vez por archivo, con tope y el adjunto por su contenido ──
+  {
+    const e = escenario();
+    sb.t("crm_acciones_ia").find((a) => a.id === `acc-cot-${nCot}`)!.estado = "pendiente"; // la cotización no se envió
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-sc1`);
+    const lecturasAntes = lecturas, correosAntes = correos.length;
+    const r1 = await D.reportarPagoIA(ctxDe(e), {}, deps);
+    const nuevos = correos.slice(correosAntes);
+    t("9l: deriva, NO lee el comprobante con IA y avisa por correo con el archivo adjunto",
+      !!r1.derivar && lecturas === lecturasAntes && nuevos.length >= 1 && nuevos.every((c) => /sin cotización/.test(c.subject) && c.adjuntos === 1) && /Correo enviado/.test(r1.derivar.nota));
+    t("9l: el archivo queda reclamado en alerta_enviada (su clave propia)", sb.t("alerta_enviada").some((a) => a.clave === D.CLAVE_CORREO_SIN_COTIZACION && a.ref === `conv:${e.conv.id}:msg:m-${e.cotId}-sc1`));
+    const n1 = correos.length;
+    const r2 = await D.reportarPagoIA(ctxDe(e), {}, deps);
+    t("9l: el mismo archivo otra vez → no se vuelve a mandar", !!r2.derivar && correos.length === n1 && /ya se avisó/.test(r2.derivar.nota));
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-sc2`);
+    bytesSiguientes = new Uint8Array([0x3c, 0x68, 0x74, 0x6d, 0x6c, 0x3e, 0x61, 0x6c, 0x65, 0x72]); // «<html>alert…»
+    const n2 = correos.length;
+    await D.reportarPagoIA(ctxDe(e), {}, deps);
+    const sin = correos.slice(n2);
+    t("9l: un archivo que por su contenido no es imagen ni PDF → el correo sale SIN adjunto y dice por qué",
+      sin.length >= 1 && sin.every((c) => c.adjuntos === 0 && /no es una imagen JPEG, PNG o WEBP ni un PDF/.test(c.html)));
+    bytesSiguientes = JPEG;
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-sc3`);
+    const n3 = correos.length;
+    const r3 = await D.reportarPagoIA(ctxDe(e), {}, deps);
+    t("9l: con el tope del día de esta conversación → no se envía y queda en la nota", !!r3.derivar && correos.length === n3 && /No se envió el correo/.test(r3.derivar.nota));
+    sb.falla = (tabla, op) => (tabla === "alerta_enviada" && op === "select" ? { code: "57014", message: "statement timeout" } : null);
+    reloj += 60_000;
+    const e2 = escenario();
+    sb.t("crm_acciones_ia").find((a) => a.id === `acc-cot-${nCot}`)!.estado = "pendiente";
+    foto(e2, `m-${e2.cotId}-sc4`);
+    const n4 = correos.length;
+    const r4 = await D.reportarPagoIA(ctxDe(e2), {}, deps);
+    sb.falla = null;
+    t("9l: sin poder contar ni comprobar el aviso → no se envía (y la nota no lleva el error de la base)", !!r4.derivar && correos.length === n4 && /No se envió el correo/.test(r4.derivar.nota) && !/statement timeout/.test(r4.derivar.nota));
+  }
+
+  // ── 9m. Las políticas solo salen si la cotización saldría sola ──
+  {
+    const e = escenario();
+    const cot = sb.t("cotizaciones").find((c) => c.id === e.cotId)!;
+    cot.consideraciones_json = { ...cot.consideraciones_json, reserva: [...POLITICA, "Más información en www.ejemplo.test/politicas"] };
+    const r1 = await D.politicasIA(ctxDe(e), {}, deps);
+    t("9m: una línea con un enlace → deriva sin mandarlas", !!r1.derivar && r1.mensaje === null && /Revisa las políticas de la cotización N°/.test(r1.derivar.nota));
+    cot.consideraciones_json = { ...cot.consideraciones_json, reserva: Array.from({ length: 31 }, (_, i) => `Regla ${String.fromCharCode(65 + (i % 26))}${i > 25 ? "x" : ""} de la reserva.`) };
+    const r2 = await D.politicasIA(ctxDe(e), {}, deps);
+    t("9m: más de 30 líneas → deriva sin mandarlas", !!r2.derivar && r2.mensaje === null && /31 líneas/.test(r2.derivar.nota));
+    cot.consideraciones_json = { ...cot.consideraciones_json, reserva: POLITICA };
+    const r3 = await D.politicasIA(ctxDe(e), {}, deps);
+    t("9m: la política normal sale al pie de la letra", JSON.parse(r3.respuestaModelo).accion === "enviar_politicas" && !!r3.mensaje && r3.mensaje.includes(POLITICA[0]));
+  }
+
+  // ── 9n. «Vincular cliente» ata el contacto solo si el número es el del chat ──
+  {
+    sb.t("clientes").push({ id: 8, nombre: "Otro Cliente", empresa: null, ruc: null, condicion_pago: null, telefono: "912345678", operativo_celular: null });
+    const e = escenario();
+    e.contacto.cliente_id = null as any;
+    sb.t("cotizaciones").find((c) => c.id === e.cotId)!.cliente_id = null;
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    const s = solDe(e.cotId);
+    const r1 = await D.vincularCliente(sb, await tarjeta(e, s.id), 8);
+    t("9n: número que no es el del chat → ata la cotización, NO el contacto, y lo dice",
+      r1.ok && /SIN vincular/.test(r1.detalle) && e.contacto.cliente_id == null && sb.t("cotizaciones").find((c) => c.id === e.cotId)!.cliente_id === 8);
+    const e2 = escenario();
+    e2.contacto.cliente_id = null as any;
+    sb.t("cotizaciones").find((c) => c.id === e2.cotId)!.cliente_id = null;
+    sb.t("clientes").push({ id: 9, nombre: "Cliente Operativo", empresa: null, ruc: null, condicion_pago: null, telefono: "014445555", operativo_celular: `+${e2.contacto.wa_id}` });
+    await D.reservarTrasladoIA(ctxDe(e2), {}, deps);
+    const r2 = await D.vincularCliente(sb, await tarjeta(e2, solDe(e2.cotId).id), 9);
+    t("9n: el celular del contacto operativo es el del chat → ata también el contacto", r2.ok && e2.contacto.cliente_id === 9 && /contacto del CRM/.test(r2.detalle));
+  }
+
+  // ── 9o. La Confirmación por WhatsApp solo a un cliente verificado para ese chat ──
+  {
+    const e = escenario();
+    const adel = adelantoDeCot(sb.t("cotizaciones").find((c) => c.id === e.cotId) as any, 50)!;
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-conf`);
+    lecturaSiguiente = lecturaDe(adel.adelanto!, `OP-C-${e.cotId}`);
+    await D.reportarPagoIA(ctxDe(e), {}, deps);
+    const s = solDe(e.cotId);
+    await D.registrarAdelantoSolicitud(sb, await tarjeta(e, s.id), { monto: adel.adelanto, fecha: hoyIso, metodo: "transferencia", referencia: `OP-C-${e.cotId}` }, quien, deps);
+    await D.confirmarDisponibilidad(sb, await tarjeta(e, s.id), quien, deps);
+    let medias = 0;
+    const depsConf = { ...deps, pdfConfirmacion: async () => ({ bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 1]), nombre: "confirmacion.pdf" }), asegurarBucket: async () => {}, enviarMedia: async () => { medias++; return "wamid.doc"; }, phonePara: async () => "PN" };
+    e.contacto.cliente_id = null as any; // el cliente de la reserva ya no está vinculado al contacto (y su teléfono no es el wa_id)
+    const r1 = await D.enviarConfirmacionReserva(sb, await tarjeta(e, s.id), quien, { idioma: "es" }, depsConf);
+    t("9o: cliente sin verificar → se emite, NO sale por WhatsApp, y vuelve el PDF + wa.me con su bloqueo",
+      r1.codigo === "fuera_de_ventana" && medias === 0 && !!r1.version?.pdf && !!r1.fueraDeVentana?.waMe?.startsWith("https://wa.me/")
+      && r1.bloqueos?.[0]?.codigo === "cliente_no_verificado" && solDe(e.cotId).estado === "confirmada");
+    e.contacto.cliente_id = 7;
+    const r2 = await D.enviarConfirmacionReserva(sb, await tarjeta(e, s.id), quien, { idioma: "es" }, depsConf);
+    t("9o: verificado (vinculado al contacto) → sale por WhatsApp y la solicitud se completa", r2.ok && r2.enviado === true && medias === 1 && solDe(e.cotId).estado === "completada");
+  }
+
+  // ── 9p. El crédito se le reconoce solo a un cliente verificado para ese chat ──
+  {
+    sb.t("clientes").push({ id: 10, nombre: "Empresa a Crédito", empresa: "Empresa a Crédito SAC", ruc: null, condicion_pago: "Crédito 30 días", telefono: "911222333" });
+    const e = escenario();
+    e.contacto.cliente_id = null as any;
+    sb.t("cotizaciones").find((c) => c.id === e.cotId)!.cliente_id = 10;
+    const r1 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    const s1 = solDe(e.cotId);
+    t("9p: cliente a crédito NO verificado → se le pide el adelanto", JSON.parse(r1.respuestaModelo).accion === "pedir_pago" && Number(s1.adelanto_pct) === 50 && !(s1.motivos_orden ?? []).includes("credito"));
+    const e2 = escenario();
+    e2.contacto.cliente_id = 10;
+    sb.t("cotizaciones").find((c) => c.id === e2.cotId)!.cliente_id = 10;
+    const r2 = await D.reservarTrasladoIA(ctxDe(e2), {}, deps);
+    const s2 = solDe(e2.cotId);
+    t("9p: verificado (vinculado al contacto) → crédito: primero la unidad, sin adelanto", JSON.parse(r2.respuestaModelo).accion === "confirmar_disponibilidad" && s2.adelanto_pct == null && (s2.motivos_orden ?? []).includes("credito"));
+  }
+
+  // ── 9q. Un error de la base no llega a la tarjeta ──
+  {
+    const e = escenario();
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    const s = solDe(e.cotId);
+    const c = await tarjeta(e, s.id);
+    sb.falla = (tabla, op) => (tabla === "reserva_solicitudes" && op === "update" ? { code: "23514", message: 'new row for relation "reserva_solicitudes" violates check constraint "ck_secreto"' } : null);
+    const r = await D.sinUnidad(sb, c, quien, deps);
+    sb.falla = (tabla, op) => (tabla === "cotizaciones" && op === "select" ? { code: "42501", message: "permission denied for table cotizaciones" } : null);
+    const cad = await D.cargarCadena(sb, { solicitudId: s.id, conversacionId: e.conv.id, accionId: s.crm_accion_id });
+    sb.falla = null;
+    t("9q: el detalle dice qué falló, sin el texto de la base", !r.ok && /^No se pudo cerrar la solicitud\./.test(r.detalle) && !/ck_secreto|violates/.test(r.detalle));
+    t("9q: también al cargar la tarjeta", !cad.ok && /^No se pudo leer la cotización\./.test(cad.detalle) && !/permission denied/.test(cad.detalle));
+  }
+
+  // ── 9r. «No encontré el pago»: sobre el payload recién leído, y solo con la tarjeta pendiente ──
+  {
+    const e = escenario();
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    reloj += 60_000;
+    foto(e, `m-${e.cotId}-nf`);
+    lecturaSiguiente = lecturaDe(10, `OP-N-${e.cotId}`);
+    await D.reportarPagoIA(ctxDe(e), {}, deps);
+    const s = solDe(e.cotId);
+    const c = await tarjeta(e, s.id);
+    const acc = sb.t("crm_acciones_ia").find((a) => a.id === s.crm_accion_id)!;
+    acc.payload = { ...acc.payload, escrito_entre_medio: true }; // otra acción escribió después de leer la tarjeta
+    const r1 = await D.marcarPagoNoEncontrado(sb, c, quien, deps);
+    t("9r: no pisa lo que otra acción escribió entre medio", r1.ok && acc.payload.escrito_entre_medio === true && !!acc.payload.pago_no_encontrado && acc.payload.solicitud_id === s.id);
+    acc.estado = "aprobada";
+    const antes = JSON.stringify(acc.payload);
+    const r2 = await D.marcarPagoNoEncontrado(sb, c, quien, { ...deps, ahoraMs: () => reloj + 1 });
+    t("9r: con la tarjeta ya cerrada → reclamo_perdido y no se toca", !r2.ok && r2.codigo === "reclamo_perdido" && JSON.stringify(acc.payload) === antes);
+    acc.estado = "pendiente";
   }
 }
 

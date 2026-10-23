@@ -83,9 +83,17 @@ export const NOMBRES_HERRAMIENTAS_RESERVA: readonly HerramientaReserva[] = HERRA
 const unaLinea = (v: unknown) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "");
 
 /**
+ * El código de un vuelo: la aerolínea (2 caracteres, con al menos una letra: «LA», «H2», «2I»), un
+ * espacio o guion opcional, de 1 a 4 dígitos y una letra opcional («LA 2047», «LA2047», «H2-1234A»).
+ * El vuelo se IMPRIME en la Confirmación de Reserva: con la regla anterior (letras, números y algún
+ * dígito, hasta 20) pasaba un texto como «SALDO 0 PAGADO». Lo que no calce se descarta.
+ */
+export const RE_VUELO = /^(?:[A-Z]{2}|[A-Z]\d|\d[A-Z])[ -]?\d{1,4}[A-Z]?$/;
+
+/**
  * La entrada de las herramientas, con lista blanca. El número de cotización solo con letras,
  * números y guiones (hasta 30); el nombre del pasajero hasta 80 caracteres y nunca algo sospechoso
- * (un enlace, un importe, palabras de pago, un número largo); el vuelo, letras y números (2 a 20).
+ * (un enlace, un importe, palabras de pago, un número largo); el vuelo, un código de vuelo (`RE_VUELO`).
  */
 export function entradaReserva(input: unknown): { numeroCotizacion: string | null; nombrePasajero: string | null; vuelo: string | null } {
   const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
@@ -94,7 +102,7 @@ export function entradaReserva(input: unknown): { numeroCotizacion: string | nul
   const nombreCrudo = unaLinea(o.nombre_pasajero);
   const nombre = nombreCrudo && !textoLibreSospechoso(nombreCrudo) && /\p{L}/u.test(nombreCrudo) ? Array.from(nombreCrudo).slice(0, 80).join("").trim() : null;
   const v = unaLinea(o.vuelo).toUpperCase();
-  const vuelo = /^[A-Z0-9][A-Z0-9 -]{1,19}$/.test(v) && /\d/.test(v) ? v.replace(/\s+/g, " ") : null;
+  const vuelo = RE_VUELO.test(v) ? v : null;
   return { numeroCotizacion: numero, nombrePasajero: nombre || null, vuelo };
 }
 
@@ -353,12 +361,15 @@ export const TOPES_RESERVA = {
   MAX_LECTURAS_CONV_DIA: 6,
   MAX_LECTURAS_DIA: 150,
   MAX_HERRAMIENTAS_RESERVA_TURNO: 3,
+  /** El correo «comprobante sin cotización que reservar» (un comprobante, una vez). NO medidos. */
+  MAX_CORREOS_SIN_COTIZACION_CONV_DIA: 2,
+  MAX_CORREOS_SIN_COTIZACION_DIA: 40,
 } as const;
 
 /** Los conteos son de lo YA hecho. Un conteo que no se pudo leer (null) BLOQUEA: «no sé» no es «cero». */
 export function decidirTopeReserva(
   c: { conv: number | null; dia: number | null; turno?: number | null },
-  fase: "solicitud" | "lectura",
+  fase: "solicitud" | "lectura" | "correo_sin_cotizacion",
 ): { ok: boolean; motivo?: string } {
   const leido = (n: number | null | undefined) => typeof n === "number" && Number.isFinite(n);
   if (c.turno != null && c.turno >= TOPES_RESERVA.MAX_HERRAMIENTAS_RESERVA_TURNO) {
@@ -367,7 +378,9 @@ export function decidirTopeReserva(
   if (!leido(c.conv) || !leido(c.dia)) return { ok: false, motivo: "No se pudo contar lo que ya se hizo hoy." };
   const [maxConv, maxDia, que] = fase === "solicitud"
     ? [TOPES_RESERVA.MAX_SOLICITUDES_CONV_DIA, TOPES_RESERVA.MAX_SOLICITUDES_DIA, "solicitudes de reserva"]
-    : [TOPES_RESERVA.MAX_LECTURAS_CONV_DIA, TOPES_RESERVA.MAX_LECTURAS_DIA, "lecturas de comprobantes"];
+    : fase === "lectura"
+      ? [TOPES_RESERVA.MAX_LECTURAS_CONV_DIA, TOPES_RESERVA.MAX_LECTURAS_DIA, "lecturas de comprobantes"]
+      : [TOPES_RESERVA.MAX_CORREOS_SIN_COTIZACION_CONV_DIA, TOPES_RESERVA.MAX_CORREOS_SIN_COTIZACION_DIA, "correos de comprobantes sin cotización"];
   if ((c.conv as number) >= maxConv) return { ok: false, motivo: `Esta conversación ya tiene ${maxConv} ${que} hoy.` };
   if ((c.dia as number) >= maxDia) return { ok: false, motivo: `Se alcanzó el tope de ${maxDia} ${que} del día.` };
   return { ok: true };

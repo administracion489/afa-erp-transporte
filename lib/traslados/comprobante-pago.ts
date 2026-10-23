@@ -308,3 +308,41 @@ export function cotejarComprobante(
   const seguro = codigos.length === 1 && (codigos[0] === "coincide" || codigos[0] === "pago_total");
   return { codigos, seguro, monto, operacion, moneda: l.moneda };
 }
+
+// ── 4. ¿Cuenta como un pago reportado? ───────────────────────────────────────
+
+/**
+ * ¿Un comprobante registrado CUENTA como un pago que el cliente reportó? UNA definición para todo lo
+ * que se frena con un pago reportado: la cancelación sin pago de la IA, «Cerrar» y «Resolver
+ * cancelación» de la tarjeta, el vencimiento automático del tick y lo que falta (`queFalta`).
+ *  · Cuenta, salvo que el lector lo haya LEÍDO y dicho que NO es un comprobante
+ *    (`lectura.es_comprobante === false`): una foto cualquiera no es un pago y no puede impedir que
+ *    la solicitud se cierre sola.
+ *  · Sin lectura (el lector falló, no había clave, el archivo no se pudo bajar) CUENTA: ese
+ *    comprobante pasó la solicitud a «pago reportado» y una persona tiene que mirarlo.
+ * La recibe tal cual se guardó (`reserva_solicitud_comprobantes.lectura`).
+ */
+export function comprobanteCuenta(lectura: unknown): boolean {
+  if (!lectura || typeof lectura !== "object" || Array.isArray(lectura)) return true;
+  return (lectura as { es_comprobante?: unknown }).es_comprobante !== false;
+}
+
+// ── 5. El archivo, por su contenido ──────────────────────────────────────────
+
+export type FormatoArchivo = { mime: "image/jpeg" | "image/png" | "image/webp" | "application/pdf"; ext: "jpg" | "png" | "webp" | "pdf" };
+
+/**
+ * El formato de un archivo por sus PRIMEROS BYTES, no por su tipo declarado (el que trae el
+ * almacenamiento lo puso quien lo subió): JPEG (FF D8 FF), PNG (89 50 4E 47 0D 0A 1A 0A), WEBP
+ * («RIFF» … «WEBP») o PDF («%PDF-»). null si no es ninguno: no se adjunta a un correo.
+ */
+export function formatoPorFirma(bytes: Uint8Array | null | undefined): FormatoArchivo | null {
+  const b = bytes ?? null;
+  if (!b || b.length < 8) return null;
+  const es = (desde: number, xs: readonly number[]) => xs.every((x, i) => b[desde + i] === x);
+  if (es(0, [0xff, 0xd8, 0xff])) return { mime: "image/jpeg", ext: "jpg" };
+  if (es(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return { mime: "image/png", ext: "png" };
+  if (b.length >= 12 && es(0, [0x52, 0x49, 0x46, 0x46]) && es(8, [0x57, 0x45, 0x42, 0x50])) return { mime: "image/webp", ext: "webp" };
+  if (es(0, [0x25, 0x50, 0x44, 0x46, 0x2d])) return { mime: "application/pdf", ext: "pdf" };
+  return null;
+}

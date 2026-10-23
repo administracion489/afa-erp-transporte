@@ -8,10 +8,14 @@
 //  · una devolución nunca suma al adelanto; `cargoRetenido` = cobrado − devuelto y nunca negativo;
 //  · la fila de `facturas` del cargo (sin `total`, IGV 0, la observación de contabilidad);
 //  · los textos: sin literales de la empresa, usted nunca tutea y tú nunca dice «usted»;
-//  · `politicaContradiceConfig` encuentra 40 % vs 50 % y no salta con «50 % de adelanto» y pct 50.
+//  · `politicaContradiceConfig` encuentra 40 % vs 50 % y no salta con «50 % de adelanto» y pct 50;
+//  · la huella de las cuentas viaja en la firma sin cambiar la lectura de sus importes, y se reenvían
+//    las cuentas ⟺ son de «corporativo», hay perfil y la huella es la MISMA (barrido);
+//  · «Vincular cliente» ata el contacto ⟺ un número del cliente es el wa_id completo (barrido).
 import {
-  ESTADOS_SOLICITUD, ESTADOS_TERMINALES, OBSERVACION_IGV_CARGO, TRANSICIONES, adelantoDe, bloquePago, cargoRetenido,
-  cuentasEnMensaje, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal, filaFacturaCargo, firmaImportes,
+  ESTADOS_SOLICITUD, ESTADOS_TERMINALES, NOTA_REENVIO_PAGO, OBSERVACION_IGV_CARGO, TRANSICIONES, adelantoDe, bloquePago, cargoRetenido,
+  clienteVerificadoEnChat, cuentasEnMensaje, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal, filaFacturaCargo, firmaConCuentas,
+  firmaImportes, huellaDeFirma, importesDeFirma, juzgarReenvioPedirPago, vinculoContactoReserva,
   horasDeAnticipacion, marcaCargoReserva, mensajeAdelantoIncompleto, mensajeCanceladaSinPago, mensajeCancelacionRegistrada,
   mensajeCancelacionResuelta, mensajeComprobanteRecibido, mensajeDisponibilidadPrimero, mensajeGuardaReserva,
   mensajeHayUnidad, mensajePagoNoEncontrado, mensajePedirPago, mensajePoliticas, mensajeSinUnidad, normalizarConfigReserva,
@@ -88,6 +92,66 @@ const empresa: PerfilEmpresa = {
   t("firma cambia con el porcentaje y con el total", a !== firmaImportes(f, 40) && a !== firmaImportes(fila(160, 2, "PEN", null), 50));
   t("firma de crédito distinta", firmaImportes(f, null) !== a && firmaImportes(f, null)!.includes("credito"));
   t("firma null sin importes", firmaImportes({ ...f, items_json: [] }, 50) === null);
+  // La huella de las cuentas que se le mandaron viaja detrás de los importes, y no cambia su lectura.
+  const h = "0123456789abcdef";
+  const conH = firmaConCuentas(a, h);
+  t("firma + huella: se separan sin perder nada", conH === `${a}|cta:${h}` && importesDeFirma(conH) === a && huellaDeFirma(conH) === h);
+  t("una firma de antes (sin huella): sus importes son ella misma y no tiene huella", importesDeFirma(a) === a && huellaDeFirma(a) === null);
+  t("firmaConCuentas no acumula huellas y sin huella deja solo los importes", firmaConCuentas(conH, "fedcba9876543210") === `${a}|cta:fedcba9876543210` && firmaConCuentas(conH, null) === a && firmaConCuentas(a, "no-es-hex") === a);
+  t("sin firma no hay huella", firmaConCuentas(null, h) === null && importesDeFirma(null) === null && huellaDeFirma(undefined) === null);
+  t("firma + huella cabe en el CHECK (≤ 500)", String(firmaConCuentas(firmaImportes(fila(99999.99, 99, "USD", 3.75), 12.5), "f".repeat(64))).length <= 500);
+}
+
+// ── 2b. Volver a mandarle las cuentas (T1 otra vez) ──────────────────────────
+{
+  const base = { frente: "iguales", perfilConfigurado: true, lineas: 2, huellaEnviada: "aaaaaaaaaaaaaaaa", huellaActual: "aaaaaaaaaaaaaaaa" };
+  t("las mismas cuentas, de «corporativo» y con perfil → se reenvía", juzgarReenvioPedirPago(base).ok && juzgarReenvioPedirPago({ ...base, frente: "misma_plantilla" }).ok);
+  const casos: [Partial<typeof base>, string][] = [
+    [{ frente: "distintas" }, "cuentas_distintas"], [{ frente: "sin_comprobar" }, "cuentas_sin_comprobar"], [{ frente: undefined as never }, "cuentas_sin_comprobar"],
+    [{ perfilConfigurado: false }, "perfil_sin_configurar"], [{ lineas: 0 }, "sin_cuentas"], [{ huellaActual: null as never }, "sin_cuentas"],
+    [{ huellaEnviada: null as never }, "sin_huella"], [{ huellaActual: "bbbbbbbbbbbbbbbb" }, "cuentas_cambiaron"],
+  ];
+  for (const [cambio, codigo] of casos) {
+    const r = juzgarReenvioPedirPago({ ...base, ...cambio });
+    t(`reenvío: ${JSON.stringify(cambio)} → ${codigo} (con su nota)`, !r.ok && r.codigo === codigo && r.nota === NOTA_REENVIO_PAGO[codigo as keyof typeof NOTA_REENVIO_PAGO]);
+  }
+  // Barrido: se reenvía ⟺ todas las condiciones.
+  let barrido = true;
+  for (const frente of ["iguales", "misma_plantilla", "distintas", "sin_comprobar", null])
+    for (const perfil of [true, false]) for (const lineas of [0, 1]) for (const enviada of ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", null]) for (const actual of ["aaaaaaaaaaaaaaaa", null]) {
+      const r = juzgarReenvioPedirPago({ frente, perfilConfigurado: perfil, lineas, huellaEnviada: enviada, huellaActual: actual });
+      const debe = (frente === "iguales" || frente === "misma_plantilla") && perfil && lineas > 0 && !!actual && enviada === actual;
+      if (r.ok !== debe || (r.ok ? r.codigo !== "ok" : !r.nota)) barrido = false;
+    }
+  t("barrido: se reenvía ⟺ cuentas de «corporativo», perfil, cuentas hoy y la MISMA huella", barrido);
+}
+
+// ── 2c. ¿El cliente es quien escribe? y «Vincular cliente» ───────────────────
+{
+  const wa = "51987654321";
+  t("verificado: vinculado al contacto, o su número completo es el wa_id",
+    clienteVerificadoEnChat(7, { telefono: "000" }, { contactoClienteId: 7, waId: wa }) && clienteVerificadoEnChat(7, { telefono: "987 654 321" }, { contactoClienteId: null, waId: wa }));
+  t("NO verificado: otro contacto, otro número o los últimos dígitos de otro país, y sin cliente",
+    !clienteVerificadoEnChat(7, { telefono: "912345678" }, { contactoClienteId: 8, waId: wa }) && !clienteVerificadoEnChat(7, { telefono: "+44 7987654321" }, { contactoClienteId: null, waId: wa })
+    && !clienteVerificadoEnChat(null, { telefono: "987654321" }, { contactoClienteId: null, waId: wa }));
+  const v = (cli: { telefono?: string | null; operativo_celular?: string | null } | null, ct: { id?: string | null; cliente_id?: number | null; wa_id?: string | null } | null) => vinculoContactoReserva({ clienteId: 7, cliente: cli, contacto: ct });
+  t("vínculo: el teléfono del cliente es el wa_id → ata", (() => { const r = v({ telefono: "987654321" }, { id: "c", cliente_id: null, wa_id: wa }); return r.codigo === "telefono" && r.ata; })());
+  t("vínculo: el del operativo es el wa_id → ata", (() => { const r = v({ telefono: "01 444 5555", operativo_celular: "+51 987 654 321" }, { id: "c", cliente_id: null, wa_id: wa }); return r.codigo === "operativo" && r.ata; })());
+  t("vínculo: ningún número coincide → NO ata", (() => { const r = v({ telefono: "912345678", operativo_celular: null }, { id: "c", cliente_id: null, wa_id: wa }); return r.codigo === "no_verificado" && !r.ata; })());
+  t("vínculo: los últimos 9 dígitos no bastan (otro país)", (() => { const r = v({ telefono: "+44 79 8765 4321" }, { id: "c", cliente_id: null, wa_id: wa }); return !r.ata; })());
+  t("vínculo: ya era de ese cliente → nada que escribir; de otro → no se toca; sin contacto → nada",
+    v({ telefono: "1" }, { id: "c", cliente_id: 7, wa_id: wa }).codigo === "ya_vinculado" && !v({ telefono: "987654321" }, { id: "c", cliente_id: 8, wa_id: wa }).ata
+    && v({ telefono: "987654321" }, { id: "c", cliente_id: 8, wa_id: wa }).codigo === "otro_cliente" && v({ telefono: "987654321" }, null).codigo === "sin_contacto");
+  // Barrido: ata ⟹ algún número del cliente es EXACTAMENTE el wa_id y el contacto no tenía cliente.
+  let barrido = true;
+  const nums = [null, "987654321", "912345678", "+51 987 654 321", "01 444 5555", "+44 7987654321"];
+  for (const tel of nums) for (const op of nums) for (const cid of [null, 7, 8]) {
+    const r = v({ telefono: tel, operativo_celular: op }, { id: "c", cliente_id: cid, wa_id: wa });
+    const coincide = [tel, op].some((n) => n === "987654321" || n === "+51 987 654 321");
+    if (r.ata && !(coincide && cid == null)) barrido = false;
+    if (!r.ata && coincide && cid == null) barrido = false;
+  }
+  t("barrido: ata ⟺ un número del cliente es el wa_id completo y el contacto no tenía cliente", barrido);
 }
 
 // ── 3. Transiciones ──────────────────────────────────────────────────────────

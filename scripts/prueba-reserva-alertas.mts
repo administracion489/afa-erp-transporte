@@ -439,6 +439,21 @@ const filaCot = (id: number, x: Record<string, unknown> = {}) => ({
   t("cotizaciones caídas → sin cotización (nada se cierra ni se afirma «saldada»)", r7.hechos.every((h) => h.cotizacion === null)
     && juzgarDevolucion(r7.hechos.find((h) => h.solicitud.id === 3)!, { ahoraMs: AHORA, umbralH: 48 }).codigo === "sin_lectura");
 
+  // Una imagen que el lector leyó y dijo que NO es un comprobante no cuenta (`comprobanteCuenta`): no
+  // frena el vencimiento automático. Sin lectura (el lector falló) sí cuenta.
+  const dNo = db();
+  dNo.reserva_solicitud_comprobantes.push({ id: 2, solicitud_id: 1, lectura: { es_comprobante: false, monto: null } });
+  const rNo = await leerHechosAlertasReserva(baseFalsa(dNo), opts);
+  const h1No = rNo.hechos.find((h) => h.solicitud.id === 1)!;
+  t("una foto que no es comprobante no cuenta: la #1 vence igual", h1No.comprobantes === 0 && juzgarVencimiento(h1No, { ahoraMs: AHORA, hoy: HOY }).codigo === "vencer");
+  const dSin = db();
+  dSin.reserva_solicitud_comprobantes.push({ id: 3, solicitud_id: 1, lectura: null });
+  const h1Sin = (await leerHechosAlertasReserva(baseFalsa(dSin), opts)).hechos.find((h) => h.solicitud.id === 1)!;
+  t("un comprobante sin lectura cuenta: la #1 no vence sola", h1Sin.comprobantes === 1 && juzgarVencimiento(h1Sin, { ahoraMs: AHORA, hoy: HOY }).codigo === "con_dinero");
+  const dSi = db();
+  dSi.reserva_solicitud_comprobantes.push({ id: 4, solicitud_id: 1, lectura: { es_comprobante: true, monto: 10 } });
+  t("un comprobante leído cuenta", (await leerHechosAlertasReserva(baseFalsa(dSi), opts)).hechos.find((h) => h.solicitud.id === 1)!.comprobantes === 1);
+
   // Paginación: 1205 solicitudes esperando el pago se leen todas, y sus pagos por lotes.
   const muchas = { ...db(), reserva_solicitudes: Array.from({ length: 1205 }, (_, i) => filaSol(100 + i, { estado: "esperando_pago", cotizacion_id: 10 })) };
   const r8 = await leerHechosAlertasReserva(baseFalsa(muchas), opts);

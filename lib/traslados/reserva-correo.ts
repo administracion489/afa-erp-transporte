@@ -16,7 +16,7 @@
 
 import { escHtml } from "../html-escape";
 import { correosDeTexto } from "../ocupacion/copia-interna";
-import { TEXTO_COTEJO, type Cotejo, type LecturaComprobante } from "./comprobante-pago";
+import { TEXTO_COTEJO, formatoPorFirma, type Cotejo, type FormatoArchivo, type LecturaComprobante } from "./comprobante-pago";
 import { MOTIVO_ORDEN, frasePlazo, type MotivoOrden } from "./reserva-orden";
 import { dinero, fmtPct } from "./reserva-pago";
 import { celularImprimible } from "./cotizacion-traslado";
@@ -42,6 +42,27 @@ export function destinatariosReserva(x: { correoConfig?: string | null; emailEmp
   return elegido ? { correos: [...new Set(elegido.correos)], fuente: elegido.fuente } : { correos: [], fuente: null };
 }
 
+// ── 1b. El adjunto ───────────────────────────────────────────────────────────
+
+/** El comprobante adjunto, hasta (Resend acepta 40 MB por correo; un comprobante pesa mucho menos). NO medido. */
+export const MAX_ADJUNTO_BYTES = 5 * 1024 * 1024;
+
+/**
+ * ¿El archivo del comprobante va adjunto al correo, y con qué nombre? Solo si sus PRIMEROS BYTES son
+ * de una imagen JPEG, PNG o WEBP o de un PDF (`formatoPorFirma`: no el tipo que declara el
+ * almacenamiento, que lo puso quien lo subió) y pesa hasta `MAX_ADJUNTO_BYTES`. Si no, el correo
+ * sale SIN adjunto y dice por qué (`motivo`).
+ */
+export function adjuntoDeComprobante(bytes: Uint8Array | null | undefined, nombreBase: string):
+  { ok: true; nombre: string; mime: FormatoArchivo["mime"] } | { ok: false; motivo: string } {
+  if (!bytes || !bytes.length) return { ok: false, motivo: "no se pudo bajar el archivo. Míralo en la conversación del CRM." };
+  if (bytes.length > MAX_ADJUNTO_BYTES) return { ok: false, motivo: `el archivo pesa más de ${Math.round(MAX_ADJUNTO_BYTES / 1024 / 1024)} MB. Míralo en la conversación del CRM.` };
+  const f = formatoPorFirma(bytes);
+  if (!f) return { ok: false, motivo: "por su contenido no es una imagen JPEG, PNG o WEBP ni un PDF. Míralo en la conversación del CRM antes de abrirlo." };
+  const base = String(nombreBase ?? "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "comprobante";
+  return { ok: true, nombre: `${base}.${f.ext}`, mime: f.mime };
+}
+
 // ── 2. El correo ─────────────────────────────────────────────────────────────
 
 export type TipoCorreoReserva = "pago_reportado" | "por_confirmar" | "pago_sin_cotizacion";
@@ -62,6 +83,8 @@ export type DatosCorreoReserva = {
   urgente?: boolean;
   /** El comprobante va adjunto (o no se pudo adjuntar). */
   adjunto?: boolean;
+  /** Por qué no se adjuntó (`adjuntoDeComprobante`): sale en el correo. */
+  adjuntoMotivo?: string | null;
   convId?: string | null;
   /** `NEXT_PUBLIC_APP_URL`. Sin una URL http(s), el correo va sin enlace. */
   appUrl?: string | null;
@@ -152,8 +175,11 @@ export function correoReserva(d: DatosCorreoReserva): CorreoReserva {
   if (leido.length) {
     partes.push(`<p><b>Lo que leyó la IA en el comprobante (puede equivocarse):</b></p>`, tabla(leido));
   }
-  if (d.tipo === "pago_reportado") {
-    partes.push(`<p>${escHtml(d.adjunto ? "El comprobante va adjunto a este correo." : "El comprobante no se pudo adjuntar: míralo en la conversación del CRM.")}</p>`);
+  const lineaAdjunto = d.adjunto ? "El comprobante va adjunto a este correo."
+    : d.adjuntoMotivo ? `El comprobante no se adjuntó: ${linea(d.adjuntoMotivo, 200)}`
+      : "El comprobante no se pudo adjuntar: míralo en la conversación del CRM.";
+  if (d.tipo === "pago_reportado" || (d.tipo === "pago_sin_cotizacion" && (d.adjunto || d.adjuntoMotivo))) {
+    partes.push(`<p>${escHtml(lineaAdjunto)}</p>`);
   }
   if (cotejo.length) partes.push(`<p><b>Cotejo con la cotización:</b></p>`, lista(cotejo));
   if (motivos.length) partes.push(`<p><b>Por qué no se le pidió el pago todavía:</b></p>`, lista(motivos));

@@ -22,7 +22,8 @@
 // Matriz: npx tsx scripts/prueba-reserva-pago.mts
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { cifrasDeFila, type FilaCotizacionLeida } from "./cotizacion-traslado";
+import { cifrasDeFila, clienteParaPdf, type ClienteErp, type FilaCotizacionLeida } from "./cotizacion-traslado";
+import { mismoTelefonoE164 } from "../crm-telefono";
 import { normalizarMoneda, revisarTipoCambio, type Moneda } from "../cotizacion-moneda";
 import { fmtImporte } from "../cotizacion-idioma";
 import { cuentasCorporativo, cuentasDoc } from "../cotizacion-corporativo";
@@ -154,6 +155,115 @@ export function firmaImportes(fila: Pick<FilaCotizacionLeida, "items_json" | "mo
   const a = adelantoDe(fila, pct);
   if (!a) return null;
   return ["r1", a.moneda, a.total.toFixed(2), a.adelanto == null ? "credito" : r2(Number(pct)).toFixed(2), a.adelanto?.toFixed(2) ?? "", a.saldo?.toFixed(2) ?? ""].join("|");
+}
+
+// ── 2b. La huella de las cuentas que se le mandaron ──────────────────────────
+//
+// Al pedirle el pago (T1, o el bloque de pago de T4) el cliente recibe unas CUENTAS. Si la solicitud
+// vuelve a pedir el pago más tarde (`reservar_traslado` con la solicitud ya viva), las cuentas de hoy
+// tienen que ser las MISMAS que recibió: si alguien cambió la plantilla o el perfil entre medio, el
+// cliente pagaría a una cuenta y la tarjeta esperaría el dinero en otra. La huella (un sha256 corto
+// de las líneas, lo calcula el servidor) viaja DENTRO de `firma_importes`, detrás de los importes
+// («…|cta:<hex>»): es la fila autoritativa de «lo que se le comunicó al cliente», la escribe el mismo
+// INSERT que crea la solicitud y la tabla no tiene políticas (solo el servidor la lee y la escribe).
+// Las firmas de antes (sin la huella) siguen comparando sus importes igual (`importesDeFirma`).
+
+const SUFIJO_CUENTAS = "|cta:";
+const RE_HUELLA = /^[0-9a-f]{8,64}$/;
+const RE_FIRMA_CON_HUELLA = /\|cta:([0-9a-f]{8,64})$/;
+
+/** La parte de importes de una firma (sin la huella de las cuentas). null si no hay firma. */
+export function importesDeFirma(firma: string | null | undefined): string | null {
+  if (typeof firma !== "string" || !firma) return null;
+  return firma.replace(RE_FIRMA_CON_HUELLA, "");
+}
+
+/** La huella de las cuentas que guarda una firma, o null (una firma de antes, o sin cuentas mandadas). */
+export function huellaDeFirma(firma: string | null | undefined): string | null {
+  const m = String(firma ?? "").match(RE_FIRMA_CON_HUELLA);
+  return m ? m[1] : null;
+}
+
+/** La firma con la huella de las cuentas que se le mandaron (o solo los importes, si no se mandó ninguna). */
+export function firmaConCuentas(firma: string | null | undefined, huellaCuentas: string | null | undefined): string | null {
+  const base = importesDeFirma(firma);
+  if (!base) return null;
+  return typeof huellaCuentas === "string" && RE_HUELLA.test(huellaCuentas) ? `${base}${SUFIJO_CUENTAS}${huellaCuentas}` : base;
+}
+
+export type CodigoReenvioPago =
+  | "ok" | "cuentas_distintas" | "cuentas_sin_comprobar" | "perfil_sin_configurar" | "sin_cuentas" | "sin_huella" | "cuentas_cambiaron";
+
+/** La nota interna de cada motivo (se deriva al ejecutivo con ella). */
+export const NOTA_REENVIO_PAGO: Record<Exclude<CodigoReenvioPago, "ok">, string> = {
+  cuentas_distintas: "Las cuentas de la plantilla de la cotización ya no son las de «corporativo»: revísalas en /cotizaciones/plantillas antes de volver a mandárselas al cliente.",
+  cuentas_sin_comprobar: "No se pudo comprobar que las cuentas de la plantilla de la cotización sean las de «corporativo»: no se le volvieron a mandar.",
+  perfil_sin_configurar: "El perfil de la empresa no tiene nombre (/configuracion/perfil): no se le volvieron a mandar las cuentas.",
+  sin_cuentas: "La cotización ya no tiene cuentas bancarias en su moneda (/configuracion/perfil): no se le volvieron a mandar.",
+  sin_huella: "No se puede comprobar que las cuentas de hoy sean las mismas que se le mandaron al pedirle el pago (la solicitud es anterior a ese control): si siguen siendo las mismas, mándaselas tú.",
+  cuentas_cambiaron: "Las cuentas bancarias cambiaron desde que se le pidió el pago: revisa a cuál pagó (o va a pagar) antes de volver a mandárselas.",
+};
+
+/**
+ * ¿Se le pueden volver a mandar las cuentas de pago (T1) a una solicitud que ya las recibió? Las
+ * mismas condiciones con que se le mandaron la primera vez (`elegibilidadDeReserva`: cuentas de
+ * «corporativo», perfil con nombre, cuentas en su moneda) y, además, que sean las MISMAS que recibió.
+ * Sin la huella guardada (una solicitud de antes) no se puede saber: no se reenvía.
+ */
+export function juzgarReenvioPedirPago(x: {
+  frente: string | null | undefined; perfilConfigurado: boolean; lineas: number;
+  huellaEnviada: string | null | undefined; huellaActual: string | null | undefined;
+}): { ok: boolean; codigo: CodigoReenvioPago; nota: string | null } {
+  const no = (codigo: Exclude<CodigoReenvioPago, "ok">) => ({ ok: false, codigo, nota: NOTA_REENVIO_PAGO[codigo] });
+  if (x.frente === "distintas") return no("cuentas_distintas");
+  if (x.frente !== "iguales" && x.frente !== "misma_plantilla") return no("cuentas_sin_comprobar");
+  if (x.perfilConfigurado !== true) return no("perfil_sin_configurar");
+  if (!(x.lineas > 0) || !x.huellaActual) return no("sin_cuentas");
+  if (!x.huellaEnviada) return no("sin_huella");
+  if (x.huellaEnviada !== x.huellaActual) return no("cuentas_cambiaron");
+  return { ok: true, codigo: "ok", nota: null };
+}
+
+// ── 2c. ¿El cliente del ERP es quien escribe por el chat? ────────────────────
+
+/**
+ * La regla del PDF (`clienteParaPdf`): el cliente está vinculado al contacto del CRM, o su teléfono
+ * COMPLETO es el wa_id. Con ella se decide si al chat se le mandan los datos del cliente (la
+ * Confirmación de Reserva) y si se le reconoce el crédito. false sin cliente.
+ */
+export function clienteVerificadoEnChat(
+  clienteId: unknown, cliente: ClienteErp | null | undefined, ref: { contactoClienteId?: number | string | null; waId?: string | null },
+): boolean {
+  const v = clienteParaPdf(clienteId, cliente, ref).vinculo;
+  return v === "contacto" || v === "telefono";
+}
+
+/**
+ * Por qué «Vincular cliente» de la tarjeta ata (o no) el CONTACTO del CRM. La cotización y sus
+ * reservas se atan siempre; el contacto solo si el número COMPLETO del cliente (su teléfono o el del
+ * contacto operativo) es el wa_id del chat, o si ya estaba vinculado a ese cliente: atar el contacto
+ * es lo que después deja mandarle al chat los datos del cliente (la Confirmación de Reserva).
+ *  · `ya_vinculado`: el contacto ya era de ese cliente (nada que escribir);
+ *  · `telefono` / `operativo`: el número coincide → se ata;
+ *  · `otro_cliente`: el contacto ya es de otro cliente → no se toca;
+ *  · `no_verificado`: ningún número coincide → no se ata;
+ *  · `sin_contacto`: la conversación no tiene contacto.
+ */
+export type VinculoContacto = "ya_vinculado" | "telefono" | "operativo" | "otro_cliente" | "no_verificado" | "sin_contacto";
+
+export function vinculoContactoReserva(x: {
+  clienteId: number;
+  cliente: { telefono?: string | null; operativo_celular?: string | null } | null | undefined;
+  contacto: { id?: string | null; cliente_id?: number | string | null; wa_id?: string | null } | null | undefined;
+}): { codigo: VinculoContacto; ata: boolean } {
+  const c = x.contacto;
+  if (!c || !String(c.id ?? "").trim()) return { codigo: "sin_contacto", ata: false };
+  const actual = c.cliente_id == null || String(c.cliente_id).trim() === "" ? null : Number(c.cliente_id);
+  if (actual === x.clienteId) return { codigo: "ya_vinculado", ata: false };
+  if (actual != null) return { codigo: "otro_cliente", ata: false };
+  if (mismoTelefonoE164(x.cliente?.telefono, c.wa_id)) return { codigo: "telefono", ata: true };
+  if (mismoTelefonoE164(x.cliente?.operativo_celular, c.wa_id)) return { codigo: "operativo", ata: true };
+  return { codigo: "no_verificado", ata: false };
 }
 
 /** Un importe para el cliente: el mismo formato del PDF, al céntimo. */
