@@ -101,7 +101,7 @@ export async function POST(req: NextRequest) {
       case "sin_unidad": r = await sinUnidad(sb, c, quien); break;
       case "pedir_comprobante": r = await pedirComprobante(sb, c, quien, cuerpo.motivo === "no_encontrado" ? "no_encontrado" : "otro"); break;
       case "registrar_comprobante": r = await registrarComprobanteTarjeta(sb, c, quien); break;
-      case "ver_comprobante": r = await verComprobante(sb, c, quien); break;
+      case "ver_comprobante": r = await verComprobante(sb, c, quien, {}, { comprobanteId: idDe(cuerpo.comprobante_id) }); break;
       case "cerrar": r = await cerrarSolicitud(sb, c, quien, cuerpo.motivo, cuerpo.nota); break;
       case "resolver_cancelacion": r = await resolverCancelacion(sb, c, quien, cuerpo.devolucion_pct); break;
       case "vincular_cliente": r = await vincularCliente(sb, c, cuerpo.cliente_id); break;

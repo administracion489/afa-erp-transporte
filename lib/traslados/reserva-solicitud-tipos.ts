@@ -75,6 +75,14 @@ export const ACCIONES_TARJETA: readonly AccionTarjeta[] = [
 ];
 export const ACCIONES_DINERO: readonly AccionDinero[] = ["registrar_adelanto", "pago_no_encontrado", "registrar_devolucion"];
 
+/**
+ * Lo que acepta POST /api/reservas/solicitudes (Tesorería / Finanzas): las de dinero y abrir un
+ * comprobante del cliente (`ver_comprobante`, con `comprobante_id`): quien verifica el pago contra
+ * el banco tiene que poder ver la imagen sin el módulo CRM.
+ */
+export type AccionTesoreria = AccionDinero | "ver_comprobante";
+export const ACCIONES_TESORERIA: readonly AccionTesoreria[] = [...ACCIONES_DINERO, "ver_comprobante"];
+
 export type MotivoCierre = "duplicada" | "cliente" | "ejecutivo";
 export const MOTIVOS_CIERRE: readonly MotivoCierre[] = ["duplicada", "cliente", "ejecutivo"];
 
@@ -104,12 +112,16 @@ export type CuerpoTarjeta = {
   fecha?: string;
   metodo?: string;
   referencia?: string;
+  /** ver_comprobante: cuál (sin él, el último). Tiene que ser de esta solicitud. */
+  comprobante_id?: number;
 };
 
 /** El cuerpo de POST /api/reservas/solicitudes (Tesorería / Finanzas). */
 export type CuerpoTesoreria = {
-  accion: AccionDinero;
+  accion: AccionTesoreria;
   solicitud_id: number;
+  /** ver_comprobante: cuál (obligatorio). Tiene que ser de esta solicitud. */
+  comprobante_id?: number;
   monto?: number;
   fecha?: string;
   metodo?: string;
@@ -172,7 +184,7 @@ export type ResultadoAccionReserva = {
   version?: { id: number; version: number; codigo: string; pdf: string } | null;
   /** La Confirmación todavía no se puede emitir. */
   bloqueos?: { codigo: string; detalle: string }[];
-  /** ver_comprobante: el enlace firmado (vale una hora). */
+  /** ver_comprobante: el enlace firmado (vale 10 minutos). */
   url?: string | null;
   /** Avisos que no impiden la acción (reserva creada a medias, cargo no creado…). */
   avisos?: string[];

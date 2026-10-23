@@ -1476,14 +1476,27 @@ export async function registrarComprobanteTarjeta(sb: Sb, c: Cadena, quien: Quie
 }
 
 /**
- * «Leer el último comprobante»: lo marca leído y devuelve un enlace firmado (corto) para verlo. Solo
- * un archivo de `crm-media` (donde el webhook guarda lo que manda el cliente): un enlace a otro
- * bucket privado no se firma.
+ * «Ver el comprobante»: lo marca leído (`leido_en`, `leido_por`) y devuelve un enlace firmado (corto)
+ * para verlo. Lo usan la tarjeta del CRM y Tesorería, la misma función. Sin `comprobanteId`, el
+ * último de la solicitud; con él, ESE —y tiene que ser de esta solicitud, o no se abre—. Solo un
+ * archivo de `crm-media` (donde el webhook guarda lo que manda el cliente): un enlace a otro bucket
+ * privado no se firma.
  */
-export async function verComprobante(sb: Sb, c: Cadena, quien: Quien, deps: DepsReserva = {}): Promise<ResultadoAccionReserva> {
-  let comps: FilaComprobante[];
-  try { comps = await comprobantesDe(sb, c.s.id); } catch (e) { return res("error", seguro(e, "verComprobante")); }
-  const k = comps[0];
+export async function verComprobante(
+  sb: Sb, c: Cadena, quien: Quien, deps: DepsReserva = {}, x: { comprobanteId?: number | null } = {},
+): Promise<ResultadoAccionReserva> {
+  let k: FilaComprobante | null;
+  try {
+    if (x.comprobanteId != null) {
+      if (!Number.isInteger(x.comprobanteId) || x.comprobanteId <= 0) return res("datos_invalidos", "Elige el comprobante que quieres ver.");
+      const { data, error } = await sb.from(TABLA_COMPROBANTES)
+        .select("id, solicitud_id, mensaje_id, lectura, cotejo, operacion_norm, correo_en, correo_error, leido_en, creado_en")
+        .eq("id", x.comprobanteId).eq("solicitud_id", c.s.id).maybeSingle();
+      if (error) return res("error", crudo("No se pudo leer el comprobante", error));
+      if (!data) return res("ajena", "Ese comprobante no es de esta solicitud: recarga el detalle.");
+      k = data as FilaComprobante;
+    } else k = (await comprobantesDe(sb, c.s.id))[0] ?? null;
+  } catch (e) { return res("error", seguro(e, "verComprobante")); }
   if (!k?.mensaje_id) return res("sin_comprobante", "La solicitud no tiene un comprobante con archivo.");
   const { data: m, error } = await sb.from("crm_mensajes").select("media_url, conversacion_id").eq("id", k.mensaje_id).maybeSingle();
   if (error) return res("error", crudo("No se pudo leer el mensaje del comprobante", error));

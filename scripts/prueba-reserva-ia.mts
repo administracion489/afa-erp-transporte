@@ -610,6 +610,24 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     sb.t("crm_mensajes").find((m) => m.id === idFoto)!.media_url = "https://sb.test/storage/v1/object/public/documentos/soat/ABC-123.pdf";
     const r2 = await D.verComprobante(sb, await tarjeta(e, s.id), quien, deps);
     t("9k: un enlace a otro bucket privado no se firma", !r2.ok && r2.codigo === "sin_comprobante" && firmados.length === 1);
+    sb.t("crm_mensajes").find((m) => m.id === idFoto)!.media_url = `https://sb.test/storage/v1/object/public/crm-media/${idFoto}.jpg`;
+    // Tesorería abre un comprobante POR SU ID (la cadena sin conversación ni tarjeta, como su ruta).
+    reloj += 60_000;
+    foto(e, `${idFoto}-2`);
+    lecturaSiguiente = lecturaDe(10, `OP-${e.cotId}-2`);
+    await D.reportarPagoIA(ctxDe(e), {}, deps);
+    const comps = sb.t("reserva_solicitud_comprobantes").filter((k) => k.solicitud_id === s.id).sort((a, b) => a.id - b.id);
+    const cadT = await D.cargarCadena(sb, { solicitudId: s.id });
+    if (!cadT.ok) throw new Error(cadT.detalle);
+    comps[0].leido_en = null;
+    const r3 = await D.verComprobante(sb, cadT.c, { id: "u-tes", nombre: "Tesorería" }, deps, { comprobanteId: comps[0].id });
+    t("9k: Tesorería abre el comprobante que elige (no solo el último), 600 s, y queda leído por quien lo abrió",
+      comps.length === 2 && r3.ok && !!r3.url && firmados.at(-1) === "crm-media:600" && !!comps[0].leido_en && comps[0].leido_por === "u-tes");
+    const otra = sb.t("reserva_solicitud_comprobantes").find((k) => k.solicitud_id !== s.id)!;
+    const r4 = await D.verComprobante(sb, cadT.c, quien, deps, { comprobanteId: otra.id });
+    t("9k: un comprobante de OTRA solicitud → ajena, sin firmar nada", !r4.ok && r4.codigo === "ajena" && firmados.length === 2);
+    const r5 = await D.verComprobante(sb, cadT.c, quien, deps, { comprobanteId: -3 });
+    t("9k: un id inválido → datos_invalidos", !r5.ok && r5.codigo === "datos_invalidos");
     sb.storage = storageAntes;
   }
 

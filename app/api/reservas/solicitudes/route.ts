@@ -7,6 +7,10 @@
 //        { accion: "registrar_adelanto", solicitud_id, monto, fecha, metodo, referencia }
 //        { accion: "pago_no_encontrado", solicitud_id }
 //        { accion: "registrar_devolucion", solicitud_id, monto, fecha, metodo, referencia }
+//        { accion: "ver_comprobante", solicitud_id, comprobante_id } → { url } firmado (10 min), solo
+//          de `crm-media` y solo si el comprobante es de esa solicitud; lo marca leído. Es la MISMA
+//          función que la tarjeta del CRM (`verComprobante`): quien verifica el pago contra el banco
+//          tiene que poder ver la imagen sin el módulo CRM.
 //
 // Permisos: «tesoreria» o «finanzas». Un adelanto se registra al VER el dinero en el banco: la foto
 // del comprobante que mandó el cliente es evidencia, no un cobro. Quién registra sale del TOKEN.
@@ -19,11 +23,11 @@ import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 import { guardarGasto } from "@/lib/api-guard";
 import { tablaFaltante } from "@/lib/columna-faltante";
 import {
-  cargarCadena, listaParaTesoreria, marcarPagoNoEncontrado, registrarAdelantoSolicitud, registrarDevolucionSolicitud, vistaSolicitud,
-  TABLA_SOLICITUDES,
+  cargarCadena, listaParaTesoreria, marcarPagoNoEncontrado, registrarAdelantoSolicitud, registrarDevolucionSolicitud, verComprobante,
+  vistaSolicitud, TABLA_SOLICITUDES,
 } from "@/lib/traslados/reserva-solicitud-datos";
 import {
-  ACCIONES_DINERO, STATUS_RESULTADO_RESERVA, type ResultadoAccionReserva,
+  ACCIONES_TESORERIA, STATUS_RESULTADO_RESERVA, type ResultadoAccionReserva,
 } from "@/lib/traslados/reserva-solicitud-tipos";
 
 export const dynamic = "force-dynamic";
@@ -72,15 +76,19 @@ export async function POST(req: NextRequest) {
   let cuerpo: Record<string, unknown>;
   try { cuerpo = (await req.json()) as Record<string, unknown>; } catch { return fallo("datos_invalidos", "Cuerpo inválido."); }
   const accion = String(cuerpo.accion ?? "");
-  if (!(ACCIONES_DINERO as readonly string[]).includes(accion)) return fallo("datos_invalidos", "Acción desconocida.");
+  if (!(ACCIONES_TESORERIA as readonly string[]).includes(accion)) return fallo("datos_invalidos", "Acción desconocida.");
   const solicitudId = idDe(cuerpo.solicitud_id);
   if (!solicitudId) return fallo("datos_invalidos", "Falta solicitud_id.");
+  const comprobanteId = idDe(cuerpo.comprobante_id);
+  if (accion === "ver_comprobante" && !comprobanteId) return fallo("datos_invalidos", "Falta comprobante_id: elige el comprobante que quieres ver.");
   const sb = admin();
   try {
     const cad = await cargarCadena(sb, { solicitudId });
     if (!cad.ok) return fallo(cad.codigo, cad.detalle);
     const { data: u } = await sb.from("usuarios").select("nombre").eq("id", auth.userId).maybeSingle();
     const quien = { id: auth.userId, nombre: (u?.nombre as string | null) ?? null };
+    // Ver un comprobante no cambia la solicitud: vuelve el enlace y nada más (sin repintar la vista).
+    if (accion === "ver_comprobante") return responder(await verComprobante(sb, cad.c, quien, {}, { comprobanteId }));
     const r = accion === "registrar_adelanto" ? await registrarAdelantoSolicitud(sb, cad.c, cuerpo, quien)
       : accion === "registrar_devolucion" ? await registrarDevolucionSolicitud(sb, cad.c, cuerpo, quien)
       : await marcarPagoNoEncontrado(sb, cad.c, quien);

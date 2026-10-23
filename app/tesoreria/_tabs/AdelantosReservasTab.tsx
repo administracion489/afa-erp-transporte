@@ -9,6 +9,8 @@
 //   · «Registrar adelanto» cuando el depósito se ve en el banco (validado contra el extracto);
 //   · «No encontré el pago» si no aparece (el ejecutivo se lo dice al cliente desde el CRM);
 //   · «Registrar devolución» cuando la transferencia de una cancelación ya salió.
+// Cada comprobante se abre aquí mismo con «👁 Ver» (POST ver_comprobante: enlace firmado de 10 min,
+// la misma función que la tarjeta del CRM), sin necesitar el módulo CRM.
 //
 // La lista y el detalle los arma el servidor (GET /api/reservas/solicitudes, módulo Finanzas o
 // Cuentas por Pagar) con la MISMA vista que la tarjeta del CRM, así las dos dicen lo mismo de la
@@ -169,6 +171,7 @@ function DetalleTesoreria({ f, puedeCrm, onCambio }: { f: FilaTesoreria; puedeCr
   const [ocupado, setOcupado] = useState<AccionDinero | null>(null);
   const [res, setRes] = useState<ResultadoAccionReserva | null>(null);
   const [form, setForm] = useState<"adelanto" | "devolucion" | null>(null);
+  const [viendoId, setViendoId] = useState<number | null>(null);
   const [ahora] = useState(() => Date.now());
 
   useEffect(() => {
@@ -193,6 +196,22 @@ function DetalleTesoreria({ f, puedeCrm, onCambio }: { f: FilaTesoreria; puedeCr
     return r.ok;
   };
 
+  const verComprobante = async (comprobanteId: number) => {
+    if (viendoId != null) return;
+    // La ventana se abre ANTES del await: abierta después, el navegador la bloquea.
+    const w = window.open("", "_blank");
+    setViendoId(comprobanteId);
+    const r = await accionTesoreria({ accion: "ver_comprobante", solicitud_id: f.solicitudId, comprobante_id: comprobanteId });
+    setViendoId(null);
+    if (r.ok && r.url) {
+      if (w) { w.opener = null; w.location.href = r.url; } else window.open(r.url, "_blank", "noopener,noreferrer");
+      setPedido((x) => x + 1); // para que diga «abierto el …»
+    } else {
+      w?.close();
+      setRes(r);
+    }
+  };
+
   if (!vista || (!vista.v && vista.n !== pedido)) return <p className="px-3 pb-3 text-xs text-gray-400">Cargando el detalle…</p>;
   if (!vista.v) {
     return (
@@ -207,11 +226,6 @@ function DetalleTesoreria({ f, puedeCrm, onCambio }: { f: FilaTesoreria; puedeCr
   const tiene = (a: AccionDinero) => v.acciones.includes(a);
   const algo = ocupado != null;
   const enlaceCrm = f.convId ? `/crm?conv=${encodeURIComponent(f.convId)}` : null;
-  const sinVer = enlaceCrm
-    ? puedeCrm === false
-      ? "La imagen del comprobante se abre desde la tarjeta del chat en el CRM, y para eso hace falta el módulo CRM: pídele al ejecutivo que te la mande."
-      : "La imagen del comprobante se abre desde la tarjeta del chat en el CRM (botón «👁 Ver»)."
-    : "La solicitud no tiene conversación del CRM: la imagen del comprobante no se puede abrir desde el ERP.";
 
   return (
     <div className="border-t border-gray-100 px-3 py-3 space-y-3">
@@ -231,7 +245,9 @@ function DetalleTesoreria({ f, puedeCrm, onCambio }: { f: FilaTesoreria; puedeCr
       <ListaPagos v={v} />
       <div>
         <p className="text-[10px] font-bold uppercase text-gray-400 mb-1">Comprobantes del cliente</p>
-        <ListaComprobantes v={v} sinVer={sinVer} />
+        <ListaComprobantes v={v} viendoId={viendoId}
+          onVerComprobante={v.acciones.includes("ver_comprobante") ? (id) => void verComprobante(id) : undefined}
+          sinVer="La imagen del comprobante no se puede abrir desde aquí: ábrela desde la conversación del CRM." />
       </div>
       {v.cancelacion && (
         <p className="text-xs text-gray-700">

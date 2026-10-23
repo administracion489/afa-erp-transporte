@@ -111,16 +111,22 @@ function Lectura({ k, moneda }: { k: ComprobanteVista; moneda: "PEN" | "USD" }) 
 }
 
 /**
- * Los comprobantes que mandó el cliente, el más nuevo primero. `onVer` (solo en la tarjeta del CRM)
- * abre el ÚLTIMO con un enlace firmado: es el único que la ruta sabe abrir; los anteriores están en
- * el chat.
+ * Los comprobantes que mandó el cliente, el más nuevo primero. Dos formas de abrirlos, con un enlace
+ * firmado que arma el servidor (la misma función, `verComprobante`):
+ *  · `onVer` (la tarjeta del CRM) abre el ÚLTIMO; los anteriores están en el chat;
+ *  · `onVerComprobante` (Tesorería) abre CUALQUIERA, por su id (el servidor comprueba que sea de esta
+ *    solicitud). Con él, cada comprobante con archivo tiene su «👁 Ver».
  */
-export function ListaComprobantes({ v, onVer, viendo, sinVer }: {
+export function ListaComprobantes({ v, onVer, viendo, sinVer, onVerComprobante, viendoId }: {
   v: VistaSolicitud;
   onVer?: () => void;
   viendo?: boolean;
-  /** Por qué no se puede abrir el archivo desde aquí (Tesorería). */
+  /** Por qué no se puede abrir el archivo desde aquí. */
   sinVer?: string | null;
+  /** Abre ESE comprobante (Tesorería). */
+  onVerComprobante?: (comprobanteId: number) => void;
+  /** El comprobante que se está abriendo. */
+  viendoId?: number | null;
 }) {
   if (!v.comprobantes.length) return <p className="text-xs text-gray-500">El cliente todavía no mandó ningún comprobante registrado.</p>;
   return (
@@ -131,7 +137,12 @@ export function ListaComprobantes({ v, onVer, viendo, sinVer }: {
             <span className="text-[11px] font-bold text-gray-600">📎 Comprobante del {fechaHoraLima(k.creadoEn)}</span>
             {k.seguro && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-green-50 text-green-700">cubre el adelanto</span>}
             {k.leidoEn && <span className="text-[10px] text-gray-400">abierto el {fechaHoraLima(k.leidoEn)}</span>}
-            {i === 0 && onVer && k.mensajeId && (
+            {onVerComprobante && k.mensajeId ? (
+              <button type="button" onClick={() => onVerComprobante(k.id)} disabled={viendoId != null}
+                className="ml-auto text-[11px] font-bold px-2 py-1 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-50 min-h-[32px]">
+                {viendoId === k.id ? "Abriendo…" : "👁 Ver"}
+              </button>
+            ) : i === 0 && onVer && k.mensajeId && (
               <button type="button" onClick={onVer} disabled={viendo}
                 className="ml-auto text-[11px] font-bold px-2 py-1 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-50 min-h-[32px]">
                 {viendo ? "Abriendo…" : "👁 Ver"}
@@ -151,8 +162,8 @@ export function ListaComprobantes({ v, onVer, viendo, sinVer }: {
           ) : null}
         </li>
       ))}
-      {onVer && v.comprobantes.length > 1 && <li className="text-[10px] text-gray-400">Desde aquí se abre el último; los anteriores están en el chat.</li>}
-      {!onVer && sinVer && <li className="text-[10px] text-gray-500">{sinVer}</li>}
+      {onVer && !onVerComprobante && v.comprobantes.length > 1 && <li className="text-[10px] text-gray-400">Desde aquí se abre el último; los anteriores están en el chat.</li>}
+      {!onVer && !onVerComprobante && sinVer && <li className="text-[10px] text-gray-500">{sinVer}</li>}
     </ul>
   );
 }
