@@ -23,8 +23,10 @@
 // detección (`idiomaDelCliente`); sin ellos vale `idioma_cliente` («en» u «otro») tal cual. Y pasa por
 // el MISMO interruptor que en la IA: solo con el inglés encendido (`leerInglesTraslado`: una plantilla
 // en inglés asignada a una celda «inglés») la cotización sale en inglés y con la moneda del idioma; si
-// no, en castellano y con la moneda de siempre (`idioma.codigo = "ingles_apagado"`). `pide_soles`
-// (true) solo cuenta con el cliente en inglés u otro idioma, como en la IA. Esos textos solo se usan
+// no, en castellano y con la moneda de siempre (`idioma.codigo = "ingles_apagado"`; si el interruptor
+// no se pudo LEER, `"no_se_pudo_leer"` con el error: una lectura que falla no es un inglés apagado).
+// `pide_soles` (true) solo cuenta con el cliente en inglés u otro idioma, como en la IA. La regla vive
+// en lib/traslados/simular-idioma.ts (pura, con su matriz). Esos textos solo se usan
 // para detectar el idioma: no se guardan ni se escriben en ningún sitio. La respuesta dice el idioma
 // (`idioma`) y la celda idioma × moneda de la plantilla (`plantilla.celda`, `condiciones.celda`), y
 // `?pdf=1` sale en ese idioma.
@@ -37,15 +39,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { guardarGasto, limitarTasa, segundosParaReintentar } from "@/lib/api-guard";
 import {
-  validarEntrada, type CondicionesSimuladas, type EntradaSimulador, type EnvioSimulado, type IdiomaSimulado, type PlantillaSimulada,
+  validarEntrada, type CondicionesSimuladas, type EnvioSimulado, type PlantillaSimulada,
 } from "@/lib/traslados/api";
 import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
 import { cuadraConMotor, filaCotizacionTraslado, type FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
 import { planEnvio, revisionPorCondiciones } from "@/lib/traslados/envio-ia";
 import { armarPdfDeFila, avisosDeRevision, leerPerfilPdf, plantillaYReferenciaCuentas, type PerfilPdf } from "@/lib/traslados/enviar-cotizacion-datos";
 import { leerInglesTraslado, plantillaParaTraslado } from "@/lib/traslados/plantilla-traslado-datos";
-import { inglesActivo, SQL_REGLAS_TRASLADO, type InglesTraslado } from "@/lib/cotizacion-plantillas";
-import { idiomaDelCliente, type IdiomaCliente, type MensajeParaIdioma } from "@/lib/idioma-cliente";
+import type { InglesTraslado } from "@/lib/cotizacion-plantillas";
+import { idiomaDeLaSimulacion, mensajesDelCuerpo } from "@/lib/traslados/simular-idioma";
 import type { Idioma } from "@/lib/cotizacion-idioma";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
 import { fechaLima } from "@/lib/alertas-horario";
@@ -54,82 +56,6 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 
 const LIMITE_POR_MINUTO = 30;
-/** Lo que se mira de `mensajes_cliente` (no medido: lo que cabe en la caja de texto de la pantalla). */
-const MAX_MENSAJES_CLIENTE = 10;
-const MAX_CARACTERES_MENSAJE = 500;
-
-/**
- * `mensajes_cliente` del cuerpo: null si no viene; un error si no es una lista de textos o pasa de
- * `MAX_MENSAJES_CLIENTE`. Cada texto se recorta a `MAX_CARACTERES_MENSAJE` (por caracteres completos).
- */
-function mensajesDelCuerpo(cuerpo: unknown): { ok: true; mensajes: string[] | null } | { ok: false; detalle: string } {
-  const v = cuerpo && typeof cuerpo === "object" ? (cuerpo as Record<string, unknown>).mensajes_cliente : undefined;
-  if (v == null) return { ok: true, mensajes: null };
-  if (!Array.isArray(v) || v.some((m) => typeof m !== "string")) return { ok: false, detalle: "«mensajes_cliente» tiene que ser una lista de textos." };
-  if (v.length > MAX_MENSAJES_CLIENTE) return { ok: false, detalle: `Como mucho ${MAX_MENSAJES_CLIENTE} mensajes del cliente.` };
-  return { ok: true, mensajes: (v as string[]).map((m) => Array.from(m).slice(0, MAX_CARACTERES_MENSAJE).join("")).filter((m) => m.trim()) };
-}
-
-const NOMBRE_CLIENTE: Record<IdiomaCliente, string> = { es: "castellano", en: "inglés", otro: "otro idioma" };
-
-/**
- * El idioma de la simulación con el MISMO interruptor que la IA (`entradaDelAgente`): la entrada
- * lleva `idioma_cliente` (y `pide_soles`) solo con el cliente en inglés u otro idioma y el inglés
- * encendido; si no, se le quitan (castellano, la moneda de siempre).
- */
-function idiomaDeLaSimulacion(
-  entrada: EntradaSimulador,
-  x: { mensajes: string[] | null; idiomaPedido: unknown; pideSoles: boolean; ingles: InglesTraslado | null; inglesLeido: boolean },
-): { entrada: EntradaSimulador; idioma: IdiomaSimulado } {
-  // La detección de la IA sobre lo que escribió el cliente (del más reciente al más antiguo); sin
-  // mensajes, el idioma que se pidió para probar.
-  let cliente: IdiomaCliente | null;
-  let detalle: string;
-  if (x.mensajes && x.mensajes.length) {
-    const lista: MensajeParaIdioma[] = [...x.mensajes].reverse().map((contenido) => ({ contenido, tipo: "texto", created_at: null }));
-    const d = idiomaDelCliente(lista, Date.now());
-    cliente = d.idioma;
-    detalle = d.detalle;
-  } else if (x.idiomaPedido === "en" || x.idiomaPedido === "otro") {
-    cliente = x.idiomaPedido;
-    detalle = `Se simula un cliente que escribe en ${NOMBRE_CLIENTE[cliente]}.`;
-  } else {
-    cliente = null;
-    detalle = "Sin mensajes del cliente: se simula un cliente en castellano.";
-  }
-  // La entrada sin las claves del idioma ni de la moneda pedida (se vuelven a poner abajo, si aplican).
-  const base: EntradaSimulador = { ...entrada };
-  delete base.idioma_cliente;
-  delete base.pide_soles;
-  const fuera = cliente === "en" || cliente === "otro";
-  if (!fuera) {
-    return { entrada: base, idioma: { idioma: "es", cliente, codigo: cliente === "es" ? "castellano" : "sin_evidencia", detalle } };
-  }
-  if (!inglesActivo(x.ingles)) {
-    const porque = !x.inglesLeido
-      ? "no se pudieron leer las plantillas para saber si el inglés está encendido"
-      : x.ingles === null
-        ? `falta correr ${SQL_REGLAS_TRASLADO}`
-        : "ninguna celda «inglés» de la regla del traslado tiene una plantilla en inglés que la IA pueda usar";
-    return {
-      entrada: base,
-      idioma: { idioma: "es", cliente, codigo: "ingles_apagado", detalle: `${detalle} Inglés apagado (${porque}): la cotización sale en castellano y con la moneda de siempre, como hoy.` },
-    };
-  }
-  // Soles y dólares a la vez: ninguno (manda el defecto del idioma), como en la IA.
-  const pideSoles = x.pideSoles && entrada.pide_dolares !== true;
-  const pideDolares = entrada.pide_dolares === true && !x.pideSoles;
-  const sinDolares: EntradaSimulador = { ...base };
-  delete sinDolares.pide_dolares;
-  const senales = pideSoles && Array.isArray(base.senales) ? base.senales.filter((sn) => sn !== "otra_moneda") : base.senales;
-  return {
-    entrada: {
-      ...sinDolares, senales, ...(pideDolares ? { pide_dolares: true } : {}),
-      idioma_cliente: cliente as "en" | "otro", ...(pideSoles ? { pide_soles: true as const } : {}),
-    },
-    idioma: { idioma: "en", cliente, codigo: cliente === "en" ? "ingles" : "otro_idioma", detalle },
-  };
-}
 
 export async function POST(req: NextRequest) {
   const bloqueo = guardarGasto(req, { etiqueta: "traslados-simular" });
@@ -164,13 +90,12 @@ export async function POST(req: NextRequest) {
     // en castellano, la simulación de siempre.
     const posible = (ms.mensajes && ms.mensajes.length) || pedido.idioma_cliente === "en" || pedido.idioma_cliente === "otro";
     let ingles: InglesTraslado | null = null;
-    let inglesLeido = true;
+    let errorIngles: string | null = null;
     if (posible) {
       const li = await leerInglesTraslado(sb);
-      inglesLeido = li.ok;
-      ingles = li.ok ? li.ingles : null;
+      if (li.ok) ingles = li.ingles; else errorIngles = li.detalle || "error desconocido";
     }
-    const sim = idiomaDeLaSimulacion(v.entrada, { mensajes: ms.mensajes, idiomaPedido: pedido.idioma_cliente, pideSoles: pedido.pide_soles === true, ingles, inglesLeido });
+    const sim = idiomaDeLaSimulacion(v.entrada, { mensajes: ms.mensajes, idiomaPedido: pedido.idioma_cliente, pideSoles: pedido.pide_soles === true, ingles, errorIngles });
     const entrada = sim.entrada;
     const idioma = sim.idioma;
     const { respuesta, catalogo } = await simularTrasladoConCatalogo(sb, entrada, hoy);

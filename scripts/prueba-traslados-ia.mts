@@ -2629,6 +2629,54 @@ seccion("25. Inglés de punta a punta: plantilla por idioma × moneda, interrupt
     const g = await corrida(sbF, pedidoIA, { idioma: { cliente: "en", ingles: { PEN: true, USD: true } } });
     ok(sbF.t("cotizaciones").length === 2 && g.fila?.idioma_pdf === "en", `castellano y después inglés: otra cotización (${sbF.t("cotizaciones").length})`);
   }
+
+  // (h) El idioma del SIMULADOR (lib/traslados/simular-idioma.ts): el mismo interruptor que la IA, y una
+  //     lectura que falla NO es un inglés apagado.
+  {
+    const SI = await import("../lib/traslados/simular-idioma");
+    const ent = (x: Partial<EntradaSimulador> = {}): EntradaSimulador => ({ origen: "Aeropuerto Jorge Chávez", destino: "Miraflores", telefono: "51966707225", ...x } as EntradaSimulador);
+    const ON = { PEN: true, USD: true }, SOLO_USD = { PEN: false, USD: true }, OFF = { PEN: false, USD: false };
+    const ahora = Date.parse("2026-10-23T15:00:00Z");
+    const caso = (x: Partial<Parameters<typeof SI.idiomaDeLaSimulacion>[1]>, e = ent()) =>
+      SI.idiomaDeLaSimulacion(e, { mensajes: null, idiomaPedido: undefined, pideSoles: false, ingles: ON, errorIngles: null, ...x }, ahora);
+    const ordenChat = [...INGLES.slice(0, 2), "Hola, en realidad quiero el traslado mañana temprano por favor"];
+    // Orden del chat (antiguo → reciente): dos en inglés y uno en castellano → mayoría inglés.
+    const a = caso({ mensajes: ordenChat });
+    ok(a.idioma.codigo === "ingles" && a.idioma.idioma === "en" && a.entrada.idioma_cliente === "en", `mensajes en el orden del chat: inglés por mayoría (${a.idioma.codigo})`);
+    const b = caso({ mensajes: ["Hola, quiero un traslado al aeropuerto", "¿Cuánto cuesta para dos personas?"] });
+    ok(b.idioma.codigo === "castellano" && b.idioma.idioma === "es" && !("idioma_cliente" in b.entrada), "en castellano: sin idioma_cliente");
+    const c = caso({ mensajes: INGLES, errorIngles: "timeout" });
+    ok(c.idioma.codigo === "no_se_pudo_leer" && c.idioma.idioma === "es" && /timeout/.test(c.idioma.detalle) && !("idioma_cliente" in c.entrada) && !/apagado/i.test(c.idioma.detalle),
+      `una lectura fallida: no_se_pudo_leer con el error, en castellano, y no dice «apagado» (${c.idioma.detalle})`);
+    const d = caso({ mensajes: INGLES, ingles: null });
+    ok(d.idioma.codigo === "ingles_apagado" && /cotizaciones-09/.test(d.idioma.detalle), "sin la tabla: ingles_apagado nombrando el SQL");
+    const e = caso({ mensajes: INGLES, ingles: OFF });
+    ok(e.idioma.codigo === "ingles_apagado" && /ninguna celda/.test(e.idioma.detalle), "sin celda inglesa: ingles_apagado");
+    const f = caso({ mensajes: INGLES, ingles: SOLO_USD, pideSoles: true });
+    ok(f.idioma.idioma === "en" && f.entrada.idioma_cliente === "en" && f.entrada.pide_soles === true, "pide_soles suelto (sin idioma_cliente) cuenta con el cliente en inglés");
+    const g = caso({ mensajes: ["Hola, quiero un traslado al aeropuerto"], pideSoles: true });
+    ok(!("pide_soles" in g.entrada), "en castellano, pide_soles no cuenta");
+    const h = caso({ idiomaPedido: "otro" });
+    ok(h.idioma.codigo === "otro_idioma" && h.entrada.idioma_cliente === "otro", "sin mensajes vale idioma_cliente");
+    const h2 = caso({ mensajes: INGLES, idiomaPedido: "es" });
+    ok(h2.idioma.codigo === "ingles", "con mensajes, los mensajes mandan sobre idioma_cliente");
+    const i = caso({ mensajes: INGLES, pideSoles: true }, ent({ pide_dolares: true }));
+    ok(!("pide_soles" in i.entrada) && !("pide_dolares" in i.entrada), "soles y dólares a la vez: ninguno (el defecto del idioma)");
+    const j = caso({}, ent({ idioma_cliente: "en", pide_soles: true }));
+    ok(j.idioma.codigo === "sin_evidencia" && !("idioma_cliente" in j.entrada) && !("pide_soles" in j.entrada), "la entrada validada no cuela idioma_cliente ni pide_soles por su cuenta");
+    // El cuerpo.
+    ok(JSON.stringify(SI.mensajesDelCuerpo({})) === JSON.stringify({ ok: true, mensajes: null }), "sin mensajes_cliente: null");
+    ok(!SI.mensajesDelCuerpo({ mensajes_cliente: "hola" }).ok && !SI.mensajesDelCuerpo({ mensajes_cliente: ["a", 3] }).ok, "mensajes_cliente que no es una lista de textos: error");
+    ok(!SI.mensajesDelCuerpo({ mensajes_cliente: Array(SI.MAX_MENSAJES_CLIENTE + 1).fill("x") }).ok, "más de 10 mensajes: error");
+    const largo = SI.mensajesDelCuerpo({ mensajes_cliente: ["😀".repeat(600), "   ", "ok"] });
+    ok(largo.ok && largo.mensajes!.length === 2 && Array.from(largo.mensajes![0]).length === SI.MAX_CARACTERES_MENSAJE, "cada texto se recorta a 500 caracteres completos y los vacíos se quitan");
+    // La ruta: el error de la lectura llega al motor, y nunca se escribe nada con los mensajes.
+    const q = (x: string) => x.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const ruta = q(readFileSync("app/api/traslados/simular/route.ts", "utf8"));
+    ok(/if \(li\.ok\) ingles = li\.ingles; else errorIngles = li\.detalle/.test(ruta) && /idiomaDeLaSimulacion\(v\.entrada, \{[^}]*errorIngles \}\)/.test(ruta),
+      "ruta: el error de leerInglesTraslado viaja como errorIngles");
+    ok(!/\.insert\(|\.update\(|\.upsert\(/.test(ruta), "ruta: el simulador no escribe en la base");
+  }
 }
 
 console.log(`\n${oks} ok · ${fallos} fallos`);

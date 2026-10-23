@@ -823,8 +823,11 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
       && P.idiomaDeMensajesSimulador(["ok", "👍"]).idioma === null, "la detección del simulador es la del chat");
     // El contrato con POST /api/traslados/simular: los mensajes en el orden del chat (el servidor los da
     // vuelta) y `pide_soles` suelto, que el servidor lee del cuerpo y solo toma con el inglés encendido.
+    // La regla vive en lib/traslados/simular-idioma.ts (pura, la barre prueba-traslados-ia.mts § 25 h);
+    // la ruta la importa y le pasa el `pide_soles` del cuerpo.
     const rutaSrc = fsA.readFileSync("app/api/traslados/simular/route.ts", "utf8");
-    ok(/\[\.\.\.x\.mensajes\]\.reverse\(\)/.test(rutaSrc) && /pedido\.pide_soles === true/.test(rutaSrc),
+    const idiomaSrc = fsA.readFileSync("lib/traslados/simular-idioma.ts", "utf8");
+    ok(/\[\.\.\.x\.mensajes\]\.reverse\(\)/.test(idiomaSrc) && /from "@\/lib\/traslados\/simular-idioma"/.test(rutaSrc) && /pedido\.pide_soles === true/.test(rutaSrc),
       "la ruta da vuelta los mensajes (le llegan en el orden del chat) y lee el pedido de soles del cuerpo");
     const simSrc = fsA.readFileSync("components/tarifario/SimuladorTraslado.tsx", "utf8");
     ok(simSrc.includes("Lo que escribió el cliente (para probar el idioma)") && /\.\.\.\(mensajes\.length \? \{ mensajes_cliente: mensajes \} : \{\}\)/.test(simSrc)

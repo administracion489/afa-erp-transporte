@@ -920,6 +920,54 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     t("9s: condicionesDeContexto sin política → nada", JSON.stringify(D.condicionesDeContexto(cc0, "https://erp.test")) === JSON.stringify({ resumen: [], enlace: null }));
     t("9s: condicionesDeContexto con política → el enlace y el resumen", JSON.stringify(D.condicionesDeContexto({ ...cc0, politica: POLITICA }, "https://erp.test/")) === JSON.stringify({ resumen: RES, enlace: ENL }));
   }
+
+  // ── 9t. Una cotización EN INGLÉS (`idioma_pdf = "en"`): los textos del código en inglés, y unas
+  //     condiciones que no se escribieron en inglés no se le mandan (ni su resumen) ──
+  {
+    const TOK = "123e4567-e89b-12d3-a456-426614174000";
+    const ENL = `https://erp.test/condiciones/${TOK}`;
+    const POL_EN = ["The booking is confirmed with a 50% deposit.", "24 hours or more before: 100% refund within 48 hours."];
+    const RES_EN = ["50% deposit to book.", "Free cancellation 24 hours or more before."];
+    const FUGA = /(?<![\p{L}\p{N}])(?:su|usted|pago|comprobante|cotización|traslado|adelanto|cuentas|condiciones|reserva)(?![\p{L}\p{N}])|[¿¡]|N°/iu;
+    const ingles = (x: { condicionesEn: boolean }) => {
+      const e = escenario();
+      const cot = sb.t("cotizaciones").find((c) => c.id === e.cotId)!;
+      cot.idioma_pdf = "en";
+      cot.condiciones_token = TOK;
+      cot.consideraciones_json = x.condicionesEn
+        ? { incluye: [], no_incluye: [], generales: [], reserva: POL_EN, reserva_resumen: RES_EN, version: 2, plantilla: "traslados_ia_en", idioma: "en" }
+        : { ...cot.consideraciones_json, reserva_resumen: ["Adelanto del 50 % para reservar."] };
+      return e;
+    };
+    // (a) Con las condiciones en inglés: T1 en inglés, con el resumen y el enlace.
+    const e = ingles({ condicionesEn: true });
+    const r1 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    t("9t: T1 en inglés: pide el pago, en inglés y sin castellano", JSON.parse(r1.respuestaModelo).accion === "pedir_pago" && !!r1.mensaje
+      && r1.mensaje.startsWith("To book the transfer in your quotation No. ") && !FUGA.test(r1.mensaje.replace(/Banco Uno/g, "").replace(ENL, "")));
+    t("9t: T1 en inglés: el resumen en inglés y el enlace", !!r1.mensaje && r1.mensaje.includes(RES_EN[0]) && r1.mensaje.endsWith(`Full terms: ${ENL}`));
+    t("9t: T1 en inglés: las cuentas de la empresa (las mismas del PDF)", !!r1.mensaje && r1.mensaje.includes("191-1234567-0-11"));
+    const r8 = await D.politicasIA(ctxDe(e), {}, deps);
+    t("9t: T8 en inglés: el resumen y el enlace, sin la política en castellano", JSON.parse(r8.respuestaModelo).accion === "enviar_politicas" && !!r8.mensaje && r8.mensaje.includes(RES_EN[0]) && r8.mensaje.includes(ENL) && !POLITICA.some((l) => r8.mensaje!.includes(l)));
+    // La vista de la tarjeta dice el idioma (la bandeja lo pinta).
+    const s = solDe(e.cotId);
+    const v = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
+    t("9t: la vista de la solicitud dice idioma «en»", v.idioma === "en");
+    const chat = await D.cotizacionTrasladoDelChat(sb, e.conv.id);
+    t("9t: cotizacionTrasladoDelChat devuelve el idioma de la cotización", chat?.id === e.cotId && chat?.idioma === "en");
+    // (b) Con las condiciones en castellano: T1 en inglés SIN el resumen (solo el enlace); T8 deriva.
+    const e2 = ingles({ condicionesEn: false });
+    const r2 = await D.reservarTrasladoIA(ctxDe(e2), {}, deps);
+    t("9t: condiciones en castellano: T1 en inglés, sin el resumen (no se traduce), con el enlace", !!r2.mensaje && r2.mensaje.startsWith("To book the transfer")
+      && !r2.mensaje.includes("Adelanto del 50 %") && r2.mensaje.endsWith(`Before paying, please review our booking, change and cancellation terms: ${ENL}`));
+    const r28 = await D.politicasIA(ctxDe(e2), {}, deps);
+    t("9t: condiciones en castellano: T8 deriva sin mandarlas", !!r28.derivar && r28.mensaje === null && /castellano/.test(r28.derivar.motivo) && /plantilla en inglés/.test(r28.derivar.nota));
+    // (c) La misma conversación en castellano sigue igual (el idioma es de la FILA, no del chat).
+    const e3 = escenario();
+    const r3 = await D.reservarTrasladoIA(ctxDe(e3), {}, deps);
+    t("9t: una cotización en castellano: T1 de siempre", !!r3.mensaje && !r3.mensaje.startsWith("To book") && /adelanto/i.test(r3.mensaje));
+    const v3 = await D.vistaSolicitud(sb, await tarjeta(e3, solDe(e3.cotId).id), deps);
+    t("9t: y su vista dice «es»", v3.idioma === "es");
+  }
 }
 
 // ── 10. En inglés (`estilo.idioma === "en"`) ──────────────────────────────────

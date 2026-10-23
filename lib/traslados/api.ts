@@ -79,9 +79,11 @@ export type CondicionesSimuladas = {
  * En qué idioma sale la cotización y por qué. `idioma` es el del PDF y los mensajes; `cliente`, el
  * que se detectó en sus mensajes (null = sin evidencia). `ingles_apagado`: el cliente escribe en
  * inglés u otro idioma pero ninguna celda «inglés» tiene una plantilla en inglés que la IA pueda
- * usar, así que sale en castellano y con la moneda de siempre.
+ * usar (o falta la tabla de cotizaciones-09), así que sale en castellano y con la moneda de siempre.
+ * `no_se_pudo_leer`: no se pudo saber si el inglés está encendido (falló la lectura de las plantillas
+ * o sus reglas; el error va en `detalle`): NO es un inglés apagado. En los dos se simula en castellano.
  */
-export type IdiomaSimulado = { idioma: "es" | "en"; cliente: IdiomaCliente | null; codigo: CodigoIdiomaCliente | "ingles_apagado"; detalle: string };
+export type IdiomaSimulado = { idioma: "es" | "en"; cliente: IdiomaCliente | null; codigo: CodigoIdiomaCliente | "ingles_apagado" | "no_se_pudo_leer"; detalle: string };
 
 export type RespuestaSimulador =
   | {
