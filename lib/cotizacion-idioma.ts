@@ -18,7 +18,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { etiquetaNivel, nivelDeEquipamiento, equipamientoDeNivel, nivelDeFicha } from "./costos/nivel-servicio";
-import { normalizarMoneda, type Moneda } from "./cotizacion-moneda";
+import { alCentimo, normalizarMoneda, type Moneda } from "./cotizacion-moneda";
 
 export type Idioma = "es" | "en";
 export const IDIOMAS: Idioma[] = ["es", "en"];
@@ -293,15 +293,25 @@ export function fmtFechaDoc(valor: string | Date, idioma: Idioma, estilo: Estilo
 }
 
 /**
- * Un importe con su símbolo. PEN reproduce EXACTO lo que imprimían los generadores
- * (`toLocaleString("es-PE",{minimumFractionDigits:2})`, sin tope de decimales). USD siempre a dos
- * decimales: sus importes ya vienen redondeados a céntimos.
+ * Un importe con su símbolo, SIEMPRE al céntimo y con dos decimales. Se redondea con `alCentimo`
+ * —el mismo de `totalesEnMoneda`, `cifrasDeFila` y `adelantoDe`— ANTES de formatear: lo impreso es
+ * exactamente el número que el ERP calcula y con el que pide el adelanto. Con
+ * `maximumFractionDigits: 2` a secas el redondeo lo haría Intl, que en un empate cae a veces del
+ * otro lado (4.25 × 1.18: Intl «5.02», el ERP 5.01; medido: el 0,32 % de los totales con IGV de un
+ * subtotal al céntimo entre S/ 0 y 20 000).
+ *
+ * Antes PEN no tenía tope de decimales y un total sin redondear salía «S/ 90.005». Un importe que
+ * ya llega al céntimo imprime byte a byte lo de antes, en soles y en dólares (los dólares del ERP
+ * llegan todos al céntimo: `totalesEnMoneda`, `aMonedaCot`, el motor de traslados). El cero
+ * negativo que deja redondear un residuo (−0.001) sale «0.00», no «-0.00». NaN e Infinity no se
+ * tocan. Matriz: la sección 2b de scripts/prueba-cotizacion-idioma.mts.
  */
 export function fmtImporte(n: number, m: Moneda, idioma: Idioma = "es"): string {
   const loc = LOCALE[normalizarIdioma(idioma)];
-  n = Number(n);
-  if (normalizarMoneda(m) === "PEN") return `S/ ${n.toLocaleString(loc, { minimumFractionDigits: 2 })}`;
-  return `US$ ${n.toLocaleString(loc, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const c = alCentimo(Number(n));
+  const v = c === 0 ? 0 : c;
+  const txt = v.toLocaleString(loc, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${normalizarMoneda(m) === "PEN" ? "S/" : "US$"} ${txt}`;
 }
 
 /** El tipo de cambio para imprimir: 2 a 4 decimales. */

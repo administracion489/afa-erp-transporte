@@ -63,7 +63,12 @@ export function tcEfectivo(m: Moneda, tc: unknown): number | null {
   return revisarTipoCambio(tc).tc;
 }
 
-const r2 = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 100) / 100;
+/**
+ * Al céntimo. Es el MISMO redondeo de `totalesEnMoneda` (USD), `cifrasDeFila` y `adelantoDe`, y el
+ * que usa `fmtImporte` antes de imprimir: así lo impreso es exactamente lo que el ERP calcula.
+ */
+export const alCentimo = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 100) / 100;
+const r2 = alCentimo;
 const r4 = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 10000) / 10000;
 
 /**
@@ -130,7 +135,8 @@ export type TotalesMoneda = {
  * Los totales de la cotización en su moneda.
  *
  * PEN: EXACTAMENTE el `calcItems` de siempre (sin redondear, `total = s × 1.18`), porque eso es lo
- * que ya imprimían los PDF y se compara byte a byte.
+ * que ya imprimían los PDF y se compara byte a byte. Al imprimir, `fmtImporte` lleva cada cifra
+ * al céntimo con `alCentimo` (el total impreso = el del adelanto).
  *
  * USD: se calcula DESDE LOS UNITARIOS YA CONVERTIDOS y cada línea se redondea a céntimos, para que
  * el papel cuadre a la vista — unitario × cantidad = línea, Σ líneas = subtotal, subtotal + IGV =

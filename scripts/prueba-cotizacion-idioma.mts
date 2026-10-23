@@ -4,6 +4,7 @@ import {
   DEFAULT_CONSID_ES, DEFAULT_CONSID_EN, etiquetaNivelIdioma, CONSID_VERSION, esConsidFijada, type ClaveTexto,
 } from "../lib/cotizacion-idioma";
 import { htmlCotizacion } from "../lib/cotizacion-pdf";
+import { alCentimo } from "../lib/cotizacion-moneda";
 import { etiquetaNivel, equipamientoDeNivel, nivelDeFicha } from "../lib/costos/nivel-servicio";
 
 let fallos = 0, oks = 0;
@@ -37,6 +38,46 @@ console.log("2. Fechas");
   ok(fmtFechaDoc("2026-11-20", "es", "cronograma") === new Date("2026-11-20T00:00:00").toLocaleDateString("es-PE", { weekday: "short", day: "numeric", month: "short", year: "numeric" }).toUpperCase(), "es cronograma = vieja");
   ok(fmtImporte(1234.5, "PEN", "es") === `S/ ${(1234.5).toLocaleString("es-PE", { minimumFractionDigits: 2 })}`, "PEN es = formato viejo");
   ok(fmtImporte(1234.5, "USD", "en") === "US$ 1,234.50", "USD en");
+}
+
+console.log("2b. Importes: siempre al céntimo, y solo se mueve lo que no llegaba al céntimo");
+{
+  // El formato VIEJO de fmtImporte, literal: PEN sin tope de decimales (Intl corta en tres), USD a dos.
+  const LOC = { es: "es-PE", en: "en-US" } as const;
+  const viejo = (n: number, m: "PEN" | "USD", idioma: "es" | "en") => {
+    const loc = LOC[idioma]; n = Number(n);
+    if (m === "PEN") return `S/ ${n.toLocaleString(loc, { minimumFractionDigits: 2 })}`;
+    return `US$ ${n.toLocaleString(loc, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+  const valor = (txt: string) => Number(txt.replace(/^(S\/|US\$) /, "").replace(/,/g, ""));
+  const DOS = /^(S\/|US\$) -?\d{1,3}(,\d{3})*\.\d{2}$/;
+  let n = 0, igualesDos = 0, movidos = 0, malos: string[] = [];
+  const probar = (x: number) => {
+    for (const m of ["PEN", "USD"] as const) for (const idi of ["es", "en"] as const) {
+      n++;
+      const nuevo = fmtImporte(x, m, idi), antes = viejo(x, m, idi);
+      const bien = DOS.test(nuevo) && valor(nuevo) === alCentimo(x);
+      // Un importe que ya llega al céntimo (todos los que el ERP imprime en dólares, y lo normal en
+      // soles) sale byte a byte igual. Con más decimales: en soles el viejo imprimía tres; en
+      // dólares los redondeaba Intl y ahora `alCentimo` (en un empate pueden caer distinto).
+      const alCent = x === alCentimo(x) && !Object.is(x, -0);
+      if (alCent) { if (nuevo === antes) igualesDos++; else if (malos.length < 8) malos.push(`${x} ${m} ${idi}: «${antes}» → «${nuevo}»`); }
+      else if (nuevo !== antes) movidos++;
+      if (!bien && malos.length < 8) malos.push(`${x} ${m} ${idi}: «${nuevo}» no es alCentimo (${alCentimo(x)})`);
+    }
+  };
+  // Importes al céntimo (lo normal), positivos y negativos.
+  for (let k = 0; k <= 200000; k += 7) { probar(k / 100); probar(-k / 100); }
+  // Con más decimales: totales con IGV de un subtotal al céntimo (donde nace el «S/ 90.005»),
+  // tarifas en dólares guardadas en soles a cuatro decimales (aPENdesdeCot) y residuos.
+  for (let k = 0; k <= 200000; k += 3) { probar((k / 100) * 1.18); probar((k / 100) * 0.18); }
+  for (let k = 0; k <= 50000; k += 11) probar(Math.round(k * 3.7531 * 10000) / 10000 / 100);
+  for (const x of [90.005, 100.005, 1833.3333, 99.995, 3645.48494, 0.001, 0.005, 1e7 + 0.125]) probar(x);
+  ok(malos.length === 0, `${n} importes: dos decimales, igual a alCentimo, y lo que ya tenía dos decimales no cambia${malos.length ? "\n      " + malos.join("\n      ") : ""}`);
+  ok(igualesDos > 0 && movidos > 0, `el barrido cubre los dos lados: ${igualesDos} idénticos, ${movidos} con más decimales que se movieron`);
+  ok(fmtImporte(90.005, "PEN") === "S/ 90.01" && fmtImporte(1833.3333, "PEN", "en") === "S/ 1,833.33" && fmtImporte(3645.48494, "PEN") === "S/ 3,645.48", "S/ 90.005 → S/ 90.01 · 1,833.3333 → 1,833.33 · 3,645.48494 → 3,645.48 (sin doble redondeo)");
+  ok(fmtImporte(-0.001, "PEN") === "S/ 0.00" && fmtImporte(-0, "USD") === "US$ 0.00", "el cero negativo de un residuo sale «0.00», no «-0.00»");
+  ok(fmtImporte(NaN, "PEN") === viejo(NaN, "PEN", "es") && fmtImporte(Infinity, "USD") === viejo(Infinity, "USD", "es"), "NaN e Infinity no se disfrazan de un importe");
 }
 
 console.log("3. Consideraciones");
