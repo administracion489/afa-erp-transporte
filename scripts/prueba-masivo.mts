@@ -24,7 +24,7 @@
 //
 // Correr:  npx tsx scripts/prueba-masivo.mts
 import {
-  planMasivo, tramoDelImporte, conservaSuUnidad, valorTecleado,
+  planMasivo, tramoDelImporte, conservaSuUnidad, valorTecleado, valorEtiquetas,
   TEXTO_MOTIVO, TEXTO_EJE, EJES_MASIVOS,
   type ServicioMasivo, type Seleccion, type EntradaMasivo, type MotivoMasivo,
 } from "../lib/reservas-masivo";
@@ -468,7 +468,7 @@ titulo("8 · Todo candidato está explicado: o lo recibe, o se dice por qué no"
   ok(sinTexto === 0, "y todo motivo que sale tiene su texto: la pantalla enruta por código");
   ok(vistos.has("ya_liquidado"),
      "un servicio ya dentro de una liquidación emitida no se toca desde acá", [...vistos].join(" · "));
-  ok(EJES_MASIVOS.every(e => !!TEXTO_EJE[e]), "los seis ejes tienen rótulo");
+  ok(EJES_MASIVOS.every(e => !!TEXTO_EJE[e]), "todos los ejes tienen rótulo");
   ok(Object.keys(TEXTO_MOTIVO).length >= vistos.size + 1, "y la tabla de textos cubre todos los códigos");
 }
 
@@ -729,6 +729,288 @@ titulo("12 · El valor de cada eje se teclea, y vacío NUNCA escribe");
   ok(planSin.total === 0,
      "un modal en blanco que nadie tocó NO borra la capacidad de todo el contrato", planSin.total);
 }
+
+// ── 13 · LAS ETIQUETAS DEL ÍTEM SON UN EJE ──────────────────────────────────
+//
+// LO REPORTADO (22-10-2026, contrato #239): «al editar las etiquetas, le figura que va a
+// cambiar 7 servicios, pero al revisar el día siguiente solo se cambió 1 día». La base lo
+// confirmó: los 7 recibieron los PAX en el mismo instante y NINGUNO las etiquetas, que
+// solo escribía el formulario (el servicio editado y su hermano). El 7 era cierto y
+// hablaba de otra cosa.
+//
+// Lo que esta sección existe para impedir es la otra mitad: que el eje nuevo etiquete a
+// OTRO móvil. Dos buses de la misma ruta a la misma hora tienen los mismos asientos y
+// distinto MÓVIL, así que aquí no hay un número exacto que los separe como en el PAX.
+titulo("13 · RUTA · TURNO · MÓVIL se propagan por DÍA y nunca a otro móvil");
+
+type OpE = Partial<ServicioMasivo>;
+let seqE = 0;
+/** Un día con ida y retorno, con la forma del contrato #239: RUTA C, 08:40 / 19:00. */
+const diaE = (fecha: string, ida: OpE = {}, ret: OpE | null = {}): ServicioMasivo[] => {
+  const idIda = 1000 + ++seqE * 2, idRet = idIda + 1;
+  const base = (id: number, dir: string, hora: string, nombre: string, o: OpE): ServicioMasivo => ({
+    id, fecha_servicio: fecha, hora_servicio: hora, direccion_servicio: dir,
+    ruta_nombre: nombre, estado: "finalizada",
+    tipo_asignacion: "tercerizado", vehiculo_id: null,
+    empresa_tercerizada_id: EMPRESA_A, vehiculo_tercero_id: 101,
+    precio_cliente: 0, costo_proveedor: 0, capacidad_contratada: 25,
+    reserva_vinculada_id: null, ruta_etiqueta: null, turno: null, movil: null,
+    origen_contractual: "contrato", ...o,
+  });
+  const i = base(idIda, "ida", "08:40", "RUTA C/ENTRADA 08:40/1RO MAYO→BSF PUNTA HERMOSA", ida);
+  if (!ret) return [i];
+  const r = base(idRet, "retorno", "19:00", "RUTA C/RETORNO 19:00/ BSF→1RO DE MAYO", ret);
+  i.reserva_vinculada_id = r.id;
+  r.reserva_vinculada_id = i.id;
+  return [i, r];
+};
+const RC_T2: OpE = { ruta_etiqueta: "RUTA C", turno: 2, movil: 1 };
+const RUTAS_RC = [
+  normalizarNombreRuta("RUTA C/ENTRADA 08:40/1RO MAYO→BSF PUNTA HERMOSA"),
+  normalizarNombreRuta("RUTA C/RETORNO 19:00/ BSF→1RO DE MAYO"),
+];
+const NUEVAS_RC = { ruta: "RUTA C", turno: 2, movil: 1 };
+/** El masivo del formulario: el editado está en el contexto y NO en el universo. */
+const entradaEtq = (ctx: ServicioMasivo[], editado: ServicioMasivo, o: Partial<EntradaMasivo> = {}): EntradaMasivo => ({
+  universo: ctx.filter(t => t.id !== editado.id && t.estado !== "cancelada"),
+  contexto: ctx,
+  seleccion: { ...SEL_NADA, etiquetas: true },
+  payload: PAYLOAD_TER,
+  horaOriginal: String(editado.hora_servicio).slice(0, 5),
+  sentidoEditado: editado.direccion_servicio ?? null,
+  idEditado: editado.id,
+  etiquetas: NUEVAS_RC,
+  etiquetasAntes: null,
+  rutasObjetivo: RUTAS_RC,
+  ...o,
+});
+const etqTras = (t: ServicioMasivo, plan: ReturnType<typeof planMasivo>) => {
+  const p = plan.patches.find(x => x.id === t.id)?.patch;
+  return p && "ruta_etiqueta" in p ? { ...t, ...p } : t;
+};
+{
+  // ── 13a · El caso real ────────────────────────────────────────────────────
+  // Los datos de producción tal como quedaron: el 20 y el 21 ya etiquetados a mano, el
+  // 22 editado (su retorno lo etiquetó el formulario), del 23 al 25 sin nada, el 26 es
+  // domingo y el 27 trae el nombre de ruta vacío.
+  seqE = 0;
+  const d20 = diaE("2026-07-20",
+    { ...RC_T2, ruta_nombre: "RUTA C/ENTRADA 08:40/ALIPIO→BSF PUNTA HERMOSA" },
+    { ...RC_T2, ruta_nombre: "RUTA C/RETORNO 19:00/ BSF→ALIPIO" });
+  const d21 = diaE("2026-07-21", RC_T2, RC_T2);
+  const d22 = diaE("2026-07-22", RC_T2, RC_T2);
+  const d23 = diaE("2026-07-23"), d24 = diaE("2026-07-24"), d25 = diaE("2026-07-25");
+  const d27 = diaE("2026-07-27", { ruta_nombre: null, capacidad_contratada: null },
+                                 { ruta_nombre: null, capacidad_contratada: null });
+  const ctx = [...d20, ...d21, ...d22, ...d23, ...d24, ...d25, ...d27];
+  const editado = d22[0];
+  const rango = { desde: "2026-07-22", hasta: "2026-07-26" };
+
+  // Lo que hacía el modal: PAX marcado, etiquetas sin eje.
+  const viejo = planMasivo({
+    ...entradaEtq(ctx, editado, rango),
+    seleccion: { ...SEL_NADA, pax: true }, pax: 25, paxAntes: 25,
+  });
+  ok(viejo.total === 7 && !viejo.patches.some(p => "ruta_etiqueta" in p.patch),
+     "EL DEFECTO: el modal anunciaba 7 servicios y no llevaba las etiquetas a ninguno",
+     `${viejo.total} · ${JSON.stringify(viejo.patches[0]?.patch)}`);
+
+  const plan = planMasivo({
+    ...entradaEtq(ctx, editado, rango),
+    seleccion: { ...SEL_NADA, pax: true, etiquetas: true }, pax: 25, paxAntes: 25,
+  });
+  const esperados = [...d23, ...d24, ...d25].map(t => t.id).sort((a, b) => a - b);
+  ok(JSON.stringify([...plan.ejes.etiquetas.ids].sort((a, b) => a - b)) === JSON.stringify(esperados),
+     "las etiquetas llegan a las idas Y los retornos del 23, 24 y 25", JSON.stringify(plan.ejes.etiquetas.ids));
+  ok(plan.ejes.etiquetas.fuera.some(f => f.motivo === "sin_cambio" && f.cuantos === 1),
+     "el retorno del 22 ya las tiene (lo escribió el formulario): no se cuenta como cambio",
+     JSON.stringify(plan.ejes.etiquetas.fuera));
+  ok(plan.total === 7, "y el modal sigue diciendo 7: ahora el 7 SÍ incluye las etiquetas", plan.total);
+  const tras = ctx.map(t => etqTras(t, plan));
+  ok([...d23, ...d24, ...d25].every(t => {
+       const x = tras.find(y => y.id === t.id)!;
+       return x.ruta_etiqueta === "RUTA C" && x.turno === 2 && x.movil === 1;
+     }), "después de aplicar, el día siguiente (y los otros) dicen RUTA C · T2 · M1");
+
+  // Todo el contrato: el 20 (otro paradero en el nombre) ya dice lo mismo y no se toca; el
+  // 27, sin nombre de ruta, no tiene con qué compararse y no se afirma que sea otra.
+  const todo = planMasivo(entradaEtq(ctx, editado));
+  ok(todo.ejes.etiquetas.ids.includes(d27[0].id) && todo.ejes.etiquetas.ids.includes(d27[1].id),
+     "un día sin nombre de ruta sí las recibe: no se afirma una ruta distinta sin dato");
+  ok(!todo.ejes.etiquetas.ids.includes(d20[0].id), "el día de otro paradero no se reescribe",
+     JSON.stringify(todo.ejes.etiquetas.fuera));
+}
+{
+  // ── 13b · Dos buses a la misma hora: no se adivina cuál es el editado ─────
+  seqE = 0;
+  const ed = diaE("2026-07-22", RC_T2, RC_T2);
+  const a = diaE("2026-07-23"), b = diaE("2026-07-23");          // dos móviles sin etiquetas
+  const plan = planMasivo(entradaEtq([...ed, ...a, ...b], ed[0]));
+  ok(plan.ejes.etiquetas.ids.length === 0,
+     "dos buses de la misma ruta a la misma hora y sin etiquetas: ninguno recibe M1", JSON.stringify(plan.ejes.etiquetas));
+  ok(plan.ejes.etiquetas.fuera.some(f => f.motivo === "varios_moviles" && f.cuantos === 4),
+     "y se dice por qué, con los cuatro tramos");
+
+  // Si uno de los dos ya lleva estas etiquetas, ese es el móvil editado y el otro no.
+  seqE = 0;
+  const ed2 = diaE("2026-07-22", RC_T2, RC_T2);
+  const m1 = diaE("2026-07-23", RC_T2, {});                      // la ida ya etiquetada
+  const m2 = diaE("2026-07-23");
+  const plan2 = planMasivo(entradaEtq([...ed2, ...m1, ...m2], ed2[0]));
+  ok(JSON.stringify(plan2.ejes.etiquetas.ids) === JSON.stringify([m1[1].id]),
+     "el móvil que ya era M1 completa su retorno, y el otro bus queda fuera", JSON.stringify(plan2.ejes.etiquetas.ids));
+  ok(plan2.ejes.etiquetas.fuera.some(f => f.motivo === "otro_movil" && f.cuantos === 2),
+     "como «otro móvil»", JSON.stringify(plan2.ejes.etiquetas.fuera));
+
+  // El MISMO día del servicio editado: el otro bus de esa fecha es otro móvil.
+  seqE = 0;
+  const ed3 = diaE("2026-07-22", RC_T2, RC_T2);
+  const otro = diaE("2026-07-22");
+  const plan3 = planMasivo(entradaEtq([...ed3, ...otro], ed3[0]));
+  ok(plan3.ejes.etiquetas.ids.length === 0 && plan3.ejes.etiquetas.fuera.some(f => f.motivo === "otro_movil"),
+     "el otro bus del mismo día del editado no recibe sus etiquetas", JSON.stringify(plan3.ejes.etiquetas));
+}
+{
+  // ── 13c · Lo ya escrito: otras etiquetas son otro móvil; las de antes, el mismo ──
+  seqE = 0;
+  const ed = diaE("2026-07-22", RC_T2, RC_T2);
+  const m2 = diaE("2026-07-23", { ruta_etiqueta: "RUTA C", turno: 2, movil: 2 }, { ruta_etiqueta: "RUTA C", turno: 2, movil: 2 });
+  const viejo = diaE("2026-07-24", { ruta_etiqueta: "RUTA C", turno: 1 }, { ruta_etiqueta: "RUTA C", turno: 1 });
+  const ctx = [...ed, ...m2, ...viejo];
+  const sinAntes = planMasivo(entradaEtq(ctx, ed[0]));
+  ok(sinAntes.ejes.etiquetas.ids.length === 0
+     && sinAntes.ejes.etiquetas.fuera.some(f => f.motivo === "otras_etiquetas" && f.cuantos === 4),
+     "un día que declara OTRAS etiquetas no se pisa", JSON.stringify(sinAntes.ejes.etiquetas));
+  const conAntes = planMasivo(entradaEtq(ctx, ed[0], { etiquetasAntes: { ruta: "RUTA C", turno: 1, movil: null } }));
+  ok(JSON.stringify(conAntes.ejes.etiquetas.ids) === JSON.stringify(viejo.map(t => t.id)),
+     "pero las que el editado tenía ANTES sí se corrigen: es el mismo móvil", JSON.stringify(conAntes.ejes.etiquetas.ids));
+}
+{
+  // ── 13d · La hora: otro horario del contrato es otro turno, salvo que se pida ──
+  seqE = 0;
+  const ed = diaE("2026-07-22", RC_T2, RC_T2);
+  const corrido = diaE("2026-07-29", { hora_servicio: "09:00" }, {});   // el turno se corrió de hora
+  const plan = planMasivo(entradaEtq([...ed, ...corrido], ed[0]));
+  ok(plan.ejes.etiquetas.ids.length === 0 && plan.ejes.etiquetas.fuera.some(f => f.motivo === "otro_horario"),
+     "por defecto, un día que sale a otra hora no las recibe");
+  const conOtra = planMasivo(entradaEtq([...ed, ...corrido], ed[0], { etiquetasOtraHora: true }));
+  ok(conOtra.ejes.etiquetas.ids.length === 2, "marcando «otro horario», sí (los dos tramos)", conOtra.ejes.etiquetas.ids.length);
+
+  // Dos turnos del mismo contrato, sin etiquetas, con «otro horario» marcado: la
+  // simultaneidad los separa — nada dice cuál de los dos es el T2.
+  seqE = 0;
+  const ed2 = diaE("2026-07-22", RC_T2, RC_T2);
+  const t1 = diaE("2026-07-23", { hora_servicio: "05:00" }, { hora_servicio: "15:00" });
+  const t2 = diaE("2026-07-23");
+  const amb = planMasivo(entradaEtq([...ed2, ...t1, ...t2], ed2[0], { etiquetasOtraHora: true }));
+  ok(amb.ejes.etiquetas.ids.length === 0 && amb.ejes.etiquetas.fuera.some(f => f.motivo === "varios_moviles"),
+     "dos turnos el mismo día con «otro horario»: ninguno se etiqueta a ciegas", JSON.stringify(amb.ejes.etiquetas));
+
+  // El retorno del editado a la misma hora no basta para ser el mismo móvil: dos entradas
+  // distintas con el mismo retorno son dos buses.
+  seqE = 0;
+  const ed3 = diaE("2026-07-22", RC_T2, RC_T2);
+  const otraEntrada = diaE("2026-07-23", { hora_servicio: "06:30" }, {});     // retorno 19:00 igual
+  const p3 = planMasivo(entradaEtq([...ed3, ...otraEntrada], ed3[0]));
+  ok(p3.ejes.etiquetas.ids.length === 0,
+     "una entrada de otra hora con el mismo retorno NO es el mismo móvil", JSON.stringify(p3.ejes.etiquetas));
+  // Y si el editado es el RETORNO, se compara el retorno.
+  const p4 = planMasivo(entradaEtq([...ed3, ...otraEntrada], ed3[1]));
+  ok(p4.ejes.etiquetas.ids.length === 2,
+     "editando el retorno, el día cuyo retorno sale a esa hora sí lo es", JSON.stringify(p4.ejes.etiquetas));
+}
+{
+  // ── 13e · Origen y ruta ────────────────────────────────────────────────────
+  seqE = 0;
+  const ed = diaE("2026-07-22", RC_T2, RC_T2);
+  const adic = diaE("2026-07-23", { origen_contractual: "adicional" }, { origen_contractual: "adicional" });
+  const rutaA = diaE("2026-07-24", { ruta_nombre: "RUTA A/ENTRADA 08:40/SANTA ANITA→BSF" },
+                                   { ruta_nombre: "RUTA A/RETORNO 19:00/BSF→SANTA ANITA" });
+  const plan = planMasivo(entradaEtq([...ed, ...adic, ...rutaA], ed[0]));
+  ok(plan.ejes.etiquetas.ids.length === 0, "ni el adicional ni otra ruta reciben las etiquetas del contrato");
+  ok(plan.ejes.etiquetas.fuera.some(f => f.motivo === "otro_origen")
+     && plan.ejes.etiquetas.fuera.some(f => f.motivo === "otra_ruta"),
+     "y cada uno con su motivo", JSON.stringify(plan.ejes.etiquetas.fuera));
+}
+{
+  // ── 13f · El valor se teclea; vacío solo quita si se pidió ────────────────
+  ok(valorEtiquetas({ ruta: "c", turno: "2", movil: "" }).codigo === "tecleado"
+     && valorEtiquetas({ ruta: "c", turno: "2", movil: "" }).valor?.ruta === "RUTA C",
+     "«c · 2» se lee como RUTA C · TURNO 2, con la misma regla del formulario");
+  ok(!valorEtiquetas({ ruta: "RUTA C", turno: "", movil: "" }).aplicable
+     && !!valorEtiquetas({ ruta: "RUTA C", turno: "", movil: "" }).error,
+     "una RUTA sin TURNO no se aplica, y dice qué falta");
+  ok(!valorEtiquetas({ ruta: "", turno: "", movil: "" }).aplicable,
+     "tres campos vacíos NO quitan nada si nadie lo pidió");
+  const vaciar = valorEtiquetas({ ruta: "", turno: "", movil: "" }, { vaciarPermitido: true });
+  ok(vaciar.aplicable && vaciar.codigo === "vaciar" && vaciar.valor === null, "vaciar se puede pedir y se declara");
+
+  seqE = 0;
+  const ed = diaE("2026-07-22");                                   // ya sin etiquetas (se quitaron)
+  const conAntes = diaE("2026-07-23", RC_T2, RC_T2);
+  const otras = diaE("2026-07-24", { ruta_etiqueta: "RUTA C", turno: 3 }, { ruta_etiqueta: "RUTA C", turno: 3 });
+  const plan = planMasivo(entradaEtq([...ed, ...conAntes, ...otras], ed[0], { etiquetas: null, etiquetasAntes: NUEVAS_RC }));
+  ok(JSON.stringify(plan.ejes.etiquetas.ids) === JSON.stringify(conAntes.map(t => t.id))
+     && plan.patches.every(p => p.patch.ruta_etiqueta === null && p.patch.turno === null && p.patch.movil === null),
+     "quitar solo alcanza a los días que tenían las MISMAS etiquetas, y escribe null",
+     JSON.stringify(plan.patches));
+}
+{
+  // ── 13g · Barrido: el masivo nunca crea un choque ni deja medio día ───────
+  type Estado = "nada" | "antes" | "nuevas" | "otras";
+  const ETQ: Record<Estado, OpE> = {
+    nada: {}, antes: { ruta_etiqueta: "RUTA C", turno: 1 }, nuevas: RC_T2,
+    otras: { ruta_etiqueta: "RUTA C", turno: 2, movil: 2 },
+  };
+  const ANTES = { ruta: "RUTA C", turno: 1, movil: null };
+  let combos = 0, choquesNuevos = 0, mediosDias = 0, otrasPisadas = 0, conEscritura = 0;
+  const estados: Estado[] = ["nada", "antes", "nuevas", "otras"];
+  for (const e1 of estados) for (const e2 of estados) for (const ret2 of [true, false])
+  for (const hora2 of ["08:40", "06:30"]) for (const cancel2 of [false, true])
+  for (const segundo of [false, true]) for (const otraHora of [false, true])
+  for (const conAntes of [false, true]) {
+    seqE = 0;
+    const ed = diaE("2026-07-22", RC_T2, RC_T2);
+    const x = diaE("2026-07-23", ETQ[e1], ETQ[e1]);
+    const y = segundo
+      ? diaE("2026-07-23", { ...ETQ[e2], hora_servicio: hora2, estado: cancel2 ? "cancelada" : "finalizada" },
+             ret2 ? { ...ETQ[e2], estado: cancel2 ? "cancelada" : "finalizada" } : null)
+      : [];
+    const ctx = [...ed, ...x, ...y];
+    const plan = planMasivo(entradaEtq(ctx, ed[0], {
+      etiquetasOtraHora: otraHora, etiquetasAntes: conAntes ? ANTES : null,
+    }));
+    combos++;
+    if (plan.ejes.etiquetas.ids.length) conEscritura++;
+    const tras = ctx.map(t => etqTras(t, plan));
+    const diasDe = (ts: ServicioMasivo[]) => [x, y].filter(d => d.length).map(d => d.map(t => ts.find(z => z.id === t.id)!));
+    const vivos = (d: ServicioMasivo[]) => d.some(t => t.estado !== "cancelada");
+    const tramoConNuevas = (t: ServicioMasivo) =>
+      t.ruta_etiqueta === "RUTA C" && Number(t.turno) === 2 && Number(t.movil ?? 1) === 1;
+    const conNuevas = (d: ServicioMasivo[]) => tramoConNuevas(d[0]);
+    const antesN = diasDe(ctx).filter(d => vivos(d) && conNuevas(d)).length;
+    const despuesN = diasDe(tras).filter(d => vivos(d) && conNuevas(d)).length;
+    if (despuesN > 1 && antesN < despuesN) {
+      choquesNuevos++;
+      if (process.env.DETALLE) console.log("   choque:", JSON.stringify({ e1, e2, ret2, hora2, cancel2, segundo, otraHora, conAntes, antesN, despuesN, ids: plan.ejes.etiquetas.ids, fuera: plan.ejes.etiquetas.fuera }));
+    }
+    // Un día que se escribió queda con sus tramos vivos iguales.
+    for (const d of diasDe(tras)) {
+      const tocado = d.some(t => plan.ejes.etiquetas.ids.includes(t.id));
+      if (tocado && !d.filter(t => t.estado !== "cancelada").every(tramoConNuevas)) mediosDias++;
+    }
+    // Lo que decía OTRAS etiquetas nunca se reescribe.
+    for (const d of [x, y]) if (d.length && d[0].ruta_etiqueta === "RUTA C" && d[0].movil === 2
+                                && d.some(t => plan.ejes.etiquetas.ids.includes(t.id))) otrasPisadas++;
+  }
+  ok(choquesNuevos === 0, `ninguna fecha termina con DOS buses con las mismas etiquetas por el masivo (${combos} combinaciones)`, choquesNuevos);
+  ok(mediosDias === 0, "todo día que se escribe queda entero: ida y retorno con las mismas etiquetas", mediosDias);
+  ok(otrasPisadas === 0, "un día con otras etiquetas jamás se reescribe", otrasPisadas);
+  ok(conEscritura > 0, "y el barrido SÍ escribe: un motor que nunca etiquetara cumpliría todo lo anterior", conEscritura);
+}
+ok(EJES_MASIVOS.includes("etiquetas") && !!TEXTO_EJE.etiquetas, "el eje está en la lista y tiene rótulo");
+ok((["otro_origen", "otras_etiquetas", "otro_movil", "varios_moviles"] as MotivoMasivo[]).every(m => !!TEXTO_MOTIVO[m]),
+   "y sus motivos tienen texto: la pantalla enruta por código");
 
 // ── Resultado ───────────────────────────────────────────────────────────────
 console.log(`\n${fallos === 0 ? "✓ TODO EN VERDE" : `✗ ${fallos} FALLA(S)`}\n`);

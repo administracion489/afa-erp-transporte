@@ -71,15 +71,44 @@
 // Una pantalla que ofrece un control que el sistema no lee es peor que no ofrecerlo; una
 // que ofrece uno que el sistema SÍ lee y no debería, es peor todavía.
 //
+// ─── EL SÉPTIMO EJE: LAS ETIQUETAS DEL ÍTEM (RUTA · TURNO · MÓVIL) ──────────────
+//
+// Reportado el 22-10-2026 con el contrato #239 delante: el operador cambió las etiquetas
+// de un servicio, el modal dijo «Se actualizarán 7 servicio(s)», y al revisar el día
+// siguiente las etiquetas solo estaban en UN día. La base lo confirmó: los 7 servicios
+// recibieron los PAX (mismo instante de escritura) y ninguno las etiquetas — porque las
+// etiquetas NO ERAN UN EJE. Solo las escribía el formulario, en el servicio editado y en
+// su hermano. El 7 era verdad y describía otra cosa: la pantalla contaba lo que iba a
+// hacer y el operador leía lo que acababa de editar.
+//
+// Las etiquetas son del DÍA como el PAX (van en la ida Y el retorno), y a diferencia del
+// PAX no hay un número exacto que proteja al otro móvil: dos buses de la misma ruta a la
+// misma hora tienen los mismos asientos y distintos MÓVIL. Por eso este eje se juzga por
+// DÍA y con cuatro guardas, de la evidencia al juicio (ver `planEtiquetas`):
+//   · la RUTA, como el PAX (el nombre sin la hora);
+//   · la HORA de salida del tramo del mismo sentido que el editado: el TURNO es el rango
+//     de horas en que trabajan los pasajeros, así que otro horario del contrato es casi
+//     siempre otro turno. Se puede incluir a propósito (`etiquetasOtraHora`);
+//   · lo YA ESCRITO: un día que declara otras etiquetas es otro turno o móvil y las suyas
+//     son correctas (el `otra_capacidad` de este eje);
+//   · y la SIMULTANEIDAD: si ese día salen 2+ buses que pasan todo lo anterior, nada dice
+//     cuál es este — no se adivina, salvo que uno ya lleve estas etiquetas.
+// Lo que la matriz fija por barrido: el masivo nunca deja una fecha con dos días con las
+// mismas etiquetas que no estuvieran ya así (el `choquesDeEtiquetas` del cierre).
+//
 // Matriz: npx tsx scripts/prueba-masivo.mts
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { sentidoDeReserva, sinHoraRuta } from "@/lib/liquidacion-agrupacion";
+import { sentidoDeReserva, sinHoraRuta, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
+import {
+  cambiaEtiquetas, etiquetasDelDia, mismasEtiquetas, patchEtiquetas, validarEtiquetas,
+  type EtiquetasItem, type TextoEtiquetas,
+} from "@/lib/liquidacion-etiquetas";
 
 /** Las dos caras del dinero. El precio es del CLIENTE, el costo del PROVEEDOR. */
 export type LadoDinero = "precio" | "costo";
 
-export type EjeMasivo = "asignacion" | "conductor" | "hora" | "pax" | "precio" | "costo";
+export type EjeMasivo = "asignacion" | "conductor" | "hora" | "pax" | "etiquetas" | "precio" | "costo";
 
 /**
  * La asignación es UN objeto, no tres campos sueltos: empresa, unidad y conductor están
@@ -93,6 +122,8 @@ export type Seleccion = {
   pax: boolean;
   precio: boolean;
   costo: boolean;
+  /** RUTA · TURNO · MÓVIL del ítem. Opcional: quien no lo pasa no lo aplica, como antes. */
+  etiquetas?: boolean;
 };
 
 /** Lo que hace falta saber de un servicio para juzgarlo. Nada de la página. */
@@ -111,6 +142,12 @@ export type ServicioMasivo = {
   costo_proveedor?: number | null;
   capacidad_contratada?: number | null;
   reserva_vinculada_id?: number | null;
+  /** Las etiquetas del ítem (liquidaciones-04). Ausentes = sin etiquetas. */
+  ruta_etiqueta?: string | null;
+  turno?: number | string | null;
+  movil?: number | string | null;
+  /** contrato | adicional | contingencia. Ausente = contrato. */
+  origen_contractual?: string | null;
 };
 
 /**
@@ -158,6 +195,14 @@ export type MotivoMasivo =
   | "flota_propia"
   /** Dinero: ya está dentro de una liquidación emitida. El papel que se mandó no cambia solo. */
   | "ya_liquidado"
+  /** Etiquetas: es de otro origen (adicional vs. contrato que el editado). Va en otro ítem. */
+  | "otro_origen"
+  /** Etiquetas: ese día ya declara OTRAS etiquetas — es otro turno o móvil, y las suyas son correctas. */
+  | "otras_etiquetas"
+  /** Etiquetas: ese día otro bus de esta ruta, a esa hora, ya lleva estas etiquetas: este es otro móvil. */
+  | "otro_movil"
+  /** Etiquetas: ese día salen 2+ buses de esta ruta a esa hora y nada dice cuál es este. */
+  | "varios_moviles"
   /** Ya dice exactamente eso. Contarlo inflaría el número que autoriza una persona. */
   | "sin_cambio";
 
@@ -230,10 +275,26 @@ export type EntradaMasivo = {
   liquidadasProveedor?: Set<number>;
   /** Si el estado del servicio queda completo, un `pendiente` se confirma. */
   estadoPendientes?: string;
+  /**
+   * El servicio editado (está en `contexto`, no en `universo`). Las etiquetas lo usan para
+   * saber a qué hora sale su HERMANO y de qué ORIGEN es su día. Sin él, un día al que le
+   * falta el tramo del sentido editado no se puede comparar por hora y queda fuera.
+   */
+  idEditado?: number | null;
+  /** Las etiquetas que se escriben. `null` = quitarlas (solo si se pidió vaciar). */
+  etiquetas?: EtiquetasItem | null;
+  /**
+   * Las etiquetas que el día editado tenía ANTES de guardarlo. Es lo que distingue
+   * «corregir las etiquetas de este móvil» de «pisarle las suyas a otro»: igual que
+   * `paxAntes` en el eje del PAX.
+   */
+  etiquetasAntes?: EtiquetasItem | null;
+  /** Incluir los días que salen a OTRA hora (el turno puede correrse de horario). */
+  etiquetasOtraHora?: boolean;
 };
 
 /** El orden en que se leen en pantalla: primero lo que despacha, después lo que cobra. */
-export const EJES_MASIVOS: EjeMasivo[] = ["asignacion", "conductor", "hora", "pax", "precio", "costo"];
+export const EJES_MASIVOS: EjeMasivo[] = ["asignacion", "conductor", "hora", "pax", "etiquetas", "precio", "costo"];
 
 const hhmm = (h?: string | null) => String(h ?? "").slice(0, 5);
 const num = (n: unknown) => Number(n ?? 0) || 0;
@@ -281,7 +342,7 @@ function indiceDelDia(contexto: ServicioMasivo[]) {
     const h = hermano(t);
     return h && h.id !== t.id ? [t, h] : [t];
   };
-  return { hermano, delDia };
+  return { hermano, delDia, porId };
 }
 
 /**
@@ -350,20 +411,35 @@ function motivoPaxDe(
   e: EntradaMasivo,
   hermano: (t: ServicioMasivo) => ServicioMasivo | null,
 ): MotivoMasivo {
-  const rutas = (e.rutasObjetivo ?? []).map(sinHoraRuta).filter(Boolean);
-  if (rutas.length) {
-    const h = hermano(r);
-    const suyas = [
-      sinHoraRuta(r.ruta_nombre),
-      sinHoraRuta(h?.ruta_nombre),
-    ].filter(Boolean);
-    if (suyas.length && !suyas.some(x => rutas.includes(x))) return "otra_ruta";
-  }
+  if (deOtraRuta(r, e, hermano)) return "otra_ruta";
   const h = hermano(r);
   const actual = r.capacidad_contratada ?? h?.capacidad_contratada ?? null;
   const pax = e.pax ?? null;
   return actual === null || actual === (e.paxAntes ?? null) || actual === pax
     ? "ok" : "otra_capacidad";
+}
+
+/**
+ * ¿Es de OTRA ruta del contrato? El nombre se compara sin la hora (ver `motivoPaxDe`), y
+ * basta con que uno de los dos tramos del día coincida. Sin nombre con qué comparar —un
+ * contrato viejo, o un servicio sin `ruta_nombre`— no se afirma que sea otra.
+ *
+ * La comparten el PAX y las etiquetas: dos definiciones de «la misma ruta» en el mismo
+ * modal harían que un eje alcanzara a un día que el de al lado deja fuera.
+ */
+function deOtraRuta(
+  r: ServicioMasivo,
+  e: EntradaMasivo,
+  hermano: (t: ServicioMasivo) => ServicioMasivo | null,
+): boolean {
+  const rutas = (e.rutasObjetivo ?? []).map(sinHoraRuta).filter(Boolean);
+  if (!rutas.length) return false;
+  const h = hermano(r);
+  const suyas = [
+    sinHoraRuta(r.ruta_nombre),
+    sinHoraRuta(h?.ruta_nombre),
+  ].filter(Boolean);
+  return suyas.length > 0 && !suyas.some(x => rutas.includes(x));
 }
 
 /** El costo es del PROVEEDOR: solo lo recibe quien va a ser servido por ESA empresa. */
@@ -401,17 +477,19 @@ function resumir(veredictos: { id: number; motivo: MotivoMasivo }[]): ResumenEje
  * terminan contestando distinto, que es el bug del semáforo de puntualidad.
  */
 export function planMasivo(e: EntradaMasivo): PlanMasivo {
-  const { hermano, delDia } = indiceDelDia(e.contexto.length ? e.contexto : e.universo);
+  const base = e.contexto.length ? e.contexto : e.universo;
+  const { hermano, delDia, porId } = indiceDelDia(base);
   const sel = e.seleccion;
   const sentidoEditado: "IDA" | "RETORNO" =
     sentidoDeReserva({ direccion_servicio: e.sentidoEditado } as any);
 
-  const enRango = (r: ServicioMasivo) =>
+  const enRangoFecha = (f: string | null | undefined) =>
     (!e.desde && !e.hasta) || (
-      !!r.fecha_servicio &&
-      (!e.desde || r.fecha_servicio >= e.desde) &&
-      (!e.hasta || r.fecha_servicio <= e.hasta)
+      !!f &&
+      (!e.desde || f >= e.desde) &&
+      (!e.hasta || f <= e.hasta)
     );
+  const enRango = (r: ServicioMasivo) => enRangoFecha(r.fecha_servicio);
 
   /**
    * ¿Este servicio ya ocurrió, o está ocurriendo? SOLO lo miran los ejes de DESPACHO.
@@ -493,6 +571,111 @@ export function planMasivo(e: EntradaMasivo): PlanMasivo {
   }));
   const paxes = sel.pax ? resumir(vPax) : sinEje();
 
+  // ── ETIQUETAS DEL ÍTEM (RUTA · TURNO · MÓVIL) ─────────────────────────────
+  // Son del DÍA, como el PAX: se escriben en la ida Y el retorno, y el veredicto es del día
+  // entero —los dos tramos reciben lo mismo o ninguno— salvo `sin_cambio`, que es por
+  // tramo. Tampoco miran si el servicio ya ocurrió: etiquetar es para LIQUIDAR, y lo que
+  // se liquida es justamente lo que ya se prestó. Ver la cabecera del módulo.
+  function planEtiquetas(): { id: number; motivo: MotivoMasivo }[] {
+    const nuevas = e.etiquetas ?? null;
+    const antes = e.etiquetasAntes ?? null;
+    const sentidoDe = (t: ServicioMasivo) => sentidoDeReserva(t as unknown as ReservaLiq);
+    /** Los tramos del día en orden estable: la ida primero, después por id. Así los dos
+     *  tramos de un mismo día dan siempre el mismo juicio, se entre por el que se entre. */
+    const ordenar = (dia: ServicioMasivo[]) => [...dia].sort((a, b) =>
+      Number(sentidoDe(a) !== "IDA") - Number(sentidoDe(b) !== "IDA") || a.id - b.id);
+    const claveDia = (dia: ServicioMasivo[]) => Math.min(...dia.map(t => t.id));
+    /** La fecha del DÍA es la de su ida (un nocturno que retorna de madrugada es un día). */
+    const fechaDia = (dia: ServicioMasivo[]) => ordenar(dia)[0].fecha_servicio ?? null;
+    const origenDe = (dia: ServicioMasivo[]) =>
+      dia.some(t => String(t.origen_contractual || "contrato") !== "contrato") ? "adicional" : "contrato";
+    const etqDia = (dia: ServicioMasivo[]) => etiquetasDelDia(ordenar(dia)).etiquetas;
+    /** El día ya lleva ESTAS etiquetas (las de antes o las nuevas): es el móvil editado. */
+    const esPropia = (dia: ServicioMasivo[]) => {
+      const a = etqDia(dia);
+      return !!a && (mismasEtiquetas(a, antes) || mismasEtiquetas(a, nuevas));
+    };
+
+    const editado = e.idEditado != null ? porId.get(e.idEditado) ?? null : null;
+    const origenEditado = editado ? origenDe(delDia(editado)) : "contrato";
+    const herEditado = editado ? hermano(editado) : null;
+    const horaHermano = herEditado && sentidoDe(herEditado) !== sentidoEditado
+      ? hhmm(herEditado.hora_servicio) : null;
+    /**
+     * ¿El día sale a la hora del editado? Se mira el tramo del MISMO sentido; si el día no
+     * lo tiene, el otro contra la hora del hermano del editado. Nunca «cualquiera de los
+     * dos»: dos móviles con el mismo retorno a las 15:00 y entradas distintas serían el
+     * mismo «día» para un retorno y no lo son.
+     */
+    const mismaHora = (dia: ServicioMasivo[]) => {
+      const orden = ordenar(dia);
+      const ref = orden.find(t => sentidoDe(t) === sentidoEditado);
+      if (ref) return hhmm(ref.hora_servicio) === e.horaOriginal;
+      return horaHermano != null && hhmm(orden[0].hora_servicio) === horaHermano;
+    };
+
+    /** Lo que se juzga del día sin mirar a los demás días. null = pasa. */
+    const juicios = new Map<number, MotivoMasivo | null>();
+    const juicioDia = (dia: ServicioMasivo[]): MotivoMasivo | null => {
+      const k = claveDia(dia);
+      if (juicios.has(k)) return juicios.get(k)!;
+      const j: MotivoMasivo | null =
+        origenDe(dia) !== origenEditado ? "otro_origen"
+        : deOtraRuta(ordenar(dia)[0], e, hermano) ? "otra_ruta"
+        : !e.etiquetasOtraHora && !mismaHora(dia) ? "otro_horario"
+        : (() => {
+            const a = etqDia(dia);
+            return !a || mismasEtiquetas(a, antes) || mismasEtiquetas(a, nuevas) ? null : "otras_etiquetas";
+          })();
+      juicios.set(k, j);
+      return j;
+    };
+
+    // Los días VIVOS que pasan los filtros, por fecha: si una fecha tiene dos, son dos buses
+    // y nada en esta pantalla dice cuál es el editado. Se cuentan sobre el CONTEXTO —el
+    // contrato entero, el día editado incluido— y no sobre los candidatos.
+    const porFecha = new Map<string, ServicioMasivo[][]>();
+    const ocupadas = new Map<string, number[]>();
+    const vistos = new Set<number>();
+    for (const t of base) {
+      const dia = delDia(t);
+      const k = claveDia(dia);
+      if (vistos.has(k)) continue;
+      vistos.add(k);
+      if (!dia.some(x => !esCancelada(x.estado))) continue;
+      const f = fechaDia(dia) ?? "";
+      // Lo que ya lleva ESTAS etiquetas ese día, a cualquier hora y de cualquier ruta del
+      // contrato: el cierre denuncia dos días del mismo cliente, fecha y origen con las
+      // mismas etiquetas (`choquesDeEtiquetas`), así que ese puesto ya está tomado.
+      if (nuevas && origenDe(dia) === origenEditado && mismasEtiquetas(etqDia(dia), nuevas))
+        ocupadas.set(f, [...(ocupadas.get(f) ?? []), k]);
+      if (juicioDia(dia) !== null) continue;
+      porFecha.set(f, [...(porFecha.get(f) ?? []), dia]);
+    }
+
+    return e.universo.map(r => {
+      const dia = delDia(r);
+      const f = fechaDia(dia);
+      if (!enRangoFecha(f)) return { id: r.id, motivo: "fuera_de_rango" as MotivoMasivo };
+      const j = juicioDia(dia);
+      if (j) return { id: r.id, motivo: j };
+      const k = claveDia(dia);
+      if ((ocupadas.get(f ?? "") ?? []).some(otro => otro !== k))
+        return { id: r.id, motivo: "otro_movil" as MotivoMasivo };
+      const lista = porFecha.get(f ?? "") ?? [];
+      const juntos = lista.some(d => claveDia(d) === k) ? lista : [...lista, dia];
+      if (juntos.length > 1) {
+        const propias = juntos.filter(esPropia);
+        if (propias.length !== 1) return { id: r.id, motivo: "varios_moviles" as MotivoMasivo };
+        if (claveDia(propias[0]) !== k) return { id: r.id, motivo: "otro_movil" as MotivoMasivo };
+      }
+      if (!cambiaEtiquetas(r, nuevas)) return { id: r.id, motivo: "sin_cambio" as MotivoMasivo };
+      return { id: r.id, motivo: "ok" as MotivoMasivo };
+    });
+  }
+  const aplicaEtiquetas = !!sel.etiquetas && e.etiquetas !== undefined;
+  const etiquetas = aplicaEtiquetas ? resumir(planEtiquetas()) : sinEje();
+
   // ── DINERO ────────────────────────────────────────────────────────────────
   // Tampoco filtra por hora ni por unidad… pero por la razón CONTRARIA al pax: no para
   // alcanzar a los dos tramos, sino para elegir a uno solo con conocimiento del día.
@@ -552,6 +735,7 @@ export function planMasivo(e: EntradaMasivo): PlanMasivo {
       : { conductor_tercero_id: e.payload.conductor_tercero_id });
   for (const id of horas.ids) poner(id, { hora_servicio: e.horaNueva });
   for (const id of paxes.ids) poner(id, { capacidad_contratada: e.pax ?? null });
+  for (const id of etiquetas.ids) poner(id, patchEtiquetas(e.etiquetas ?? null));
   for (const id of dPrecio.resumen.ids) poner(id, { precio_cliente: e.precio });
   for (const id of dCosto.resumen.ids)  poner(id, { costo_proveedor: e.costo });
 
@@ -567,7 +751,7 @@ export function planMasivo(e: EntradaMasivo): PlanMasivo {
 
   const ejes: Record<EjeMasivo, ResumenEje> = {
     asignacion: completas, conductor: conductores, hora: horas,
-    pax: paxes, precio: dPrecio.resumen, costo: dCosto.resumen,
+    pax: paxes, etiquetas, precio: dPrecio.resumen, costo: dCosto.resumen,
   };
 
   return {
@@ -601,7 +785,11 @@ export const TEXTO_MOTIVO: Record<MotivoMasivo, string> = {
   no_se_sabe_que_tramo:       "ese día tiene dos tramos vivos y ninguno lleva importe: nada dice cuál debería llevarlo",
   flota_propia:               "son de la flota propia, y la flota propia no le debe nada a un proveedor",
   ya_liquidado:               "ya están dentro de una liquidación emitida: el importe se corrige desde ese documento",
-  sin_cambio:                 "ya dicen exactamente ese importe",
+  sin_cambio:                 "ya dicen exactamente eso",
+  otro_origen:                "son de otro origen (adicional o contrato): van en otro ítem y se etiquetan aparte",
+  otras_etiquetas:            "ya declaran otras etiquetas: son otro turno o móvil del contrato y las suyas son correctas",
+  otro_movil:                 "ese día otro bus de esta ruta, a esa hora, ya lleva estas etiquetas: son otro móvil",
+  varios_moviles:             "ese día salen 2+ buses de esta ruta a esa hora y nada dice cuál es este: etiquétalos desde la lista con «🏷 Etiquetar»",
 };
 
 /** El rótulo de cada eje. Vive acá para que la pantalla no lo redacte dos veces. */
@@ -610,6 +798,7 @@ export const TEXTO_EJE: Record<EjeMasivo, string> = {
   conductor:  "Conductor",
   hora:       "Hora del servicio",
   pax:        "PAX contratados",
+  etiquetas:  "Ítem de la liquidación (RUTA · TURNO · MÓVIL)",
   precio:     "Precio de venta",
   costo:      "Costo del proveedor",
 };
@@ -674,4 +863,33 @@ export function valorTecleado(
   if (opts?.entero && (!Number.isInteger(n) || n <= 0))
     return { valor: null, aplicable: false, codigo: "no_valido" };
   return { valor: n, aplicable: true, codigo: "tecleado" };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// LAS ETIQUETAS TAMBIÉN SE TECLEAN, Y TRES CAMPOS VACÍOS NO QUITAN NADA
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// La misma regla que `valorTecleado`: un campo vacío no es un borrado. Quitar las
+// etiquetas en lote saca cada DÍA de su ítem de la liquidación, así que solo se puede
+// pedir vaciándolas en el formulario (lo DECLARA quien abre el modal); un modal en blanco
+// que nadie tocó significa «no escribí nada». Qué es una etiqueta válida lo decide
+// `validarEtiquetas` (lib/liquidacion-etiquetas.ts), la misma del formulario y del lote.
+export type ValorEtiquetas = {
+  /** Lo que se escribe. `null` con `vaciar` (= quitarlas) y cuando no se aplica. */
+  valor: EtiquetasItem | null;
+  aplicable: boolean;
+  codigo: CodigoValor;
+  /** Por qué no es válido, con las palabras del formulario. */
+  error?: string;
+};
+
+export function valorEtiquetas(t: TextoEtiquetas, opts?: { vaciarPermitido?: boolean }): ValorEtiquetas {
+  const vacio = !String(t.ruta ?? "").trim() && !String(t.turno ?? "").trim() && !String(t.movil ?? "").trim();
+  if (vacio)
+    return opts?.vaciarPermitido
+      ? { valor: null, aplicable: true,  codigo: "vaciar" }
+      : { valor: null, aplicable: false, codigo: "sin_valor" };
+  const v = validarEtiquetas(t);
+  if (!v.ok) return { valor: null, aplicable: false, codigo: "no_valido", error: v.error };
+  return { valor: v.etiquetas, aplicable: true, codigo: "tecleado" };
 }
