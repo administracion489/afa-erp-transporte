@@ -25,6 +25,23 @@
 // puede contestarle en cualquiera de los dos. Por construcción `mencionaDinero(x, "en")` ⊇
 // `mencionaDinero(x, "es")` (la matriz lo barre), y con `"es"` —el defecto— todo es byte a byte lo de
 // siempre. «transfer» NUNCA es una palabra de pago: es el nombre del servicio que se cotiza.
+//
+// LO QUE SE SUMÓ EN LA REVISIÓN DE SEGURIDAD S1 (23-10-2026), SIEMPRE COMO ALTERNATIVAS NUEVAS:
+// ninguna expresión anterior se tocó, así que lo nuevo solo puede ser MÁS estricto (la sección 26 de
+// scripts/prueba-traslados-ia.mts corre las de antes copiadas literal y exige nuevo ⊇ viejo, con cada
+// divergencia DECLARADA). Pasaban impresas en el PDF que sale sin revisión «Miraflores. Send £50 to
+// confirm», «send 50 via Revolut to @joe», «Advance via Bitcoin, wallet in chat» o «Envíe 50 por
+// Skrill para confirmar», y el modelo podía escribir «That will be 150.» o «El total sería ciento
+// cincuenta». Se agregaron: (1) monedas (£, GBP, CHF, CAD, AUD, BTC, USDT, dlls; «libras» y «pounds»
+// solo DETRÁS del importe, porque delante son el nombre de una calle); (2) palabras de pago de
+// servicios y criptomonedas en inglés y «adelanto», «prepago», «cripto», «billetera» en castellano
+// (solo para el TEXTO LIBRE: las condiciones de la plantilla —`motivosLineaIA`— siguen con las listas
+// de antes, porque «adelanto» es la palabra con que toda política de reserva describe el adelanto y
+// marcarla pintaría de ámbar la política de cada empresa); (3) el RESPALDO ESTRUCTURAL: una cifra de 2+
+// dígitos junto a un verbo que ordena pagar o confirmar («send», «envíe», «pay», «pague», «prepay»,
+// «confirm», «confirmar») es sospechosa aunque no nombre ninguna moneda; y (4) en `mencionaDinero`, un
+// importe EN LETRAS después de una palabra de precio («El total sería ciento cincuenta») y pistas
+// nuevas en inglés («the fare is», «that will be», «it's just», «it comes to»), con sus exclusiones.
 // ──────────────────────────────────────────────────────────────────────────────
 
 /** Lo más largo que se imprime de una referencia del cliente (no medido: una dirección cabe). */
@@ -98,15 +115,62 @@ const MONTO_Y_MONEDA = new RegExp(String.raw`(?:^|[^a-z0-9])${MONTO}\s*${MONEDA}
 const PORCENTAJE = /%|\bpor\s*ciento\b/;
 /** Palabras que ya son dinero aunque no lleven cifra. */
 const PALABRAS_DINERO = /\b(?:descuentos?|rebajas?|rebajar|rebajamos|gratis|gratuit[oa]s?|igv)\b/;
+/** Las palabras de precio del castellano (las de siempre). */
+const PISTAS_PRECIO = String.raw`(?:total|precios?|costos?|cuesta|cuestan|costaria|costara|costaran|cobr[a-z]*|tarifas?|monto|importe|pagar|pago|abonar|seran|seria|saldria|aprox[a-z]*|alrededor|valor|vale)`;
+/** Lo que, después de la cifra, dice que NO es dinero: una hora, una fecha, pasajeros, maletas, días… */
+const NO_ES_DINERO = String.raw`h\b|hrs?\b|horas?\b|am\b|pm\b|a\.\s?m|p\.\s?m|pax\b|pasajer|persona|maleta|kg\b|kilo|km\b|min|dia|noche|asiento|unidad|vehicul|bus\b|van\b|auto\b|de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|setiembre|septiembre|octubre|noviembre|diciembre)`;
 /**
  * Una palabra de precio seguida (a tres palabras como mucho) de una cifra que no es una hora, una
  * fecha ni una cantidad de pasajeros, maletas o días: «serán aprox 300», «el total sería 150».
  */
 const PISTA_Y_CIFRA = new RegExp(
-  String.raw`\b(?:total|precios?|costos?|cuesta|cuestan|costaria|costara|costaran|cobr[a-z]*|tarifas?|monto|importe|pagar|pago|abonar|seran|seria|saldria|aprox[a-z]*|alrededor|valor|vale)\b` +
+  String.raw`\b${PISTAS_PRECIO}\b` +
   String.raw`(?:[^a-z0-9]+[a-z]+){0,3}?[^a-z0-9]+${CIFRA}` +
-  String.raw`(?![0-9]|[.,][0-9]|[-/:][0-9]|\s*(?:h\b|hrs?\b|horas?\b|am\b|pm\b|a\.\s?m|p\.\s?m|pax\b|pasajer|persona|maleta|kg\b|kilo|km\b|min|dia|noche|asiento|unidad|vehicul|bus\b|van\b|auto\b|de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|setiembre|septiembre|octubre|noviembre|diciembre)))`,
+  String.raw`(?![0-9]|[.,][0-9]|[-/:][0-9]|\s*(?:${NO_ES_DINERO}))`,
 );
+
+// ── 2a. Lo que se SUMÓ en la revisión S1 (alternativas nuevas: las de arriba no cambian) ──────────
+
+/** Monedas nuevas, delante o detrás del importe: «£150», «GBP 150», «150 usdt», «0.01 btc», «150 dlls». */
+const MONEDA_MAS = String.raw`(?:usdt|gbp|chf|cad|aud|btc|dlls?|dls|£)`;
+/** Solo DETRÁS del importe («50 libras», «50 pounds»): delante serían el nombre de una calle («Calle Libra 123»). */
+const MONEDA_MAS_SUFIJO = String.raw`(?:pounds?|libras?)`;
+const MONEDA_MAS_Y_MONTO = new RegExp(String.raw`(?:^|[^a-z0-9])${MONEDA_MAS}\s*${MONTO}(?![a-z0-9])`);
+const MONTO_Y_MONEDA_MAS = new RegExp(String.raw`(?:^|[^a-z0-9])${MONTO}\s*(?:${MONEDA_MAS}|${MONEDA_MAS_SUFIJO})(?![a-z])`);
+/**
+ * Un importe EN LETRAS que no es un «un», «una» o «dos» suelto (que casi siempre cuentan otra cosa:
+ * «sería un placer», «serán dos personas»): dos o más palabras de número («ciento cincuenta») o una de
+ * veinte para arriba («cincuenta», «doscientos», «mil»).
+ */
+const GRANDE = String.raw`(?:veinte|veinti[a-z]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento|quinient[oa]s|[a-z]+cient[oa]s|mil|millon(?:es)?)`;
+const LETRAS_IMPORTE = String.raw`(?:${PALABRA_NUMERO}(?:\s+(?:y\s+)?${PALABRA_NUMERO})+|${GRANDE})(?![a-z])`;
+/** Lo que, después de un número en letras, dice que no es dinero (además de `NO_ES_DINERO`). */
+const NO_ES_DINERO_LETRAS = String.raw`${NO_ES_DINERO}|y\s+media|y\s+cuarto|en\s+punto|anos?\b|veces|vez\b|cuadras?\b|metros?\b`;
+/** Antes del número en letras: «a las veinte» es una hora. */
+const NO_ES_HORA = String.raw`(?<!\b(?:a\s+)?las?\s+)`;
+/** «El total sería ciento cincuenta», «Le cobramos ciento cincuenta»: la palabra de precio con un importe en letras. */
+const PISTA_Y_LETRAS = new RegExp(
+  String.raw`\b${PISTAS_PRECIO}\b(?:[^a-z0-9]+[a-z]+){0,3}?[^a-z0-9]+${NO_ES_HORA}${LETRAS_IMPORTE}(?!\s*(?:${NO_ES_DINERO_LETRAS}))`,
+);
+/** Una cifra de 2+ dígitos (o un importe en letras): las pistas de una sola palabra que no alcanzan con un «4». */
+const CIFRA_2 = String.raw`\d{2,}(?:[.,]\d+)*(?![0-9]|[.,][0-9]|[-/:][0-9])`;
+/**
+ * Pistas cortas, pegadas al importe (a lo sumo «solo»/«apenas»/«unos» en medio), con una cifra de 2+
+ * dígitos o un importe en letras: «Son 150 por la van» (solo si sigue lo que se cobra: «por la van»,
+ * «por tramo», «en total»…; «son 4 pasajeros» o «son 2 maletas» no), «Quedaría en ciento cincuenta»,
+ * «Le sale en 150».
+ */
+const PISTA_CORTA = new RegExp(
+  String.raw`\b(?:son\s+(?:solo\s+|nada\s+mas\s+|unos\s+|unas\s+|apenas\s+)?(?:${CIFRA_2}|${LETRAS_IMPORTE})\s+(?:por\s+(?:la\s+|el\s+|cada\s+)?(?:van|auto|bus|camioneta|minivan|servicio|traslado|tramo|trayecto|viaje|persona|pasajero|ida|vuelta|retorno|todo)|en\s+total|cada\s+uno|c\/u|ida\s+y\s+vuelta|mas\s+igv|con\s+igv|sin\s+igv)\b` +
+  String.raw`|(?:quedarian?\s+en|(?:le|te|les|nos)\s+(?:sale|saldria|saldra)\s+(?:en|a))\s+(?:solo\s+|apenas\s+|unos\s+)?(?:${CIFRA_2}|${NO_ES_HORA}${LETRAS_IMPORTE})(?!\s*(?:${NO_ES_DINERO_LETRAS})))`,
+);
+/** «150 por tramo», «150 cada tramo»: el importe con la unidad que se cobra. */
+const CIFRA_POR_TRAMO = new RegExp(String.raw`(?:^|[^a-z0-9.,])${CIFRA_2}\s+(?:por\s+(?:tramo|trayecto)|cada\s+tramo)\b`);
+
+/** Las alternativas nuevas del castellano (también corren en inglés, que es castellano ∪ inglés). */
+function mencionaDineroMas(t: string): boolean {
+  return MONEDA_MAS_Y_MONTO.test(t) || MONTO_Y_MONEDA_MAS.test(t) || PISTA_Y_LETRAS.test(t) || PISTA_CORTA.test(t) || CIFRA_POR_TRAMO.test(t);
+}
 
 // ── 2b. Lo mismo en inglés (se SUMA al castellano, nunca lo reemplaza) ─────────
 
