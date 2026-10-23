@@ -344,6 +344,12 @@ export type EscenariosPrecio = {
    * `precioPax`: una división que decide un precio no se escribe dos veces.
    */
   precioPaxSinIgv: number;
+  /**
+   * El asiento SIN IGV en el escenario ALTO. Lo publica el comparativo de flota del
+   * cotizador, que va al margen alto: su columna S/pax tiene que seguir al total de su
+   * misma fila, por la misma razón que `precioPaxSinIgv` sigue al estimado.
+   */
+  precioPaxAltoSinIgv: number;
 };
 
 export function escenariosPrecio(
@@ -367,6 +373,7 @@ export function escenariosPrecio(
     sinIgv: sin, conIgv: con,
     precioPax: con.est / asientos,
     precioPaxSinIgv: sin.est / asientos,
+    precioPaxAltoSinIgv: sin.alto / asientos,
   };
 }
 
@@ -407,6 +414,7 @@ export function aplicarPisoHora(
   return {
     sinIgv: sin, conIgv: con,
     precioPax: con.est / asientos, precioPaxSinIgv: sin.est / asientos,
+    precioPaxAltoSinIgv: sin.alto / asientos,
     piso, pisoAplica: aplica,
   };
 }
