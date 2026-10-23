@@ -25,13 +25,26 @@
 // con `tcParaCotizar` del motor — el mismo juicio que hace el cotizador: si aquí sale ámbar, las
 // cotizaciones en dólares están pasando a un ejecutivo.
 //
+// «📅 Reserva y pago por la IA» (traslados-09): las seis columnas `reserva_*`. El interruptor se
+// guarda AL INSTANTE con un confirm que nombra lo que va a pasar; los números, con su «Guardar». Se
+// leen con `normalizarConfigReserva`, la MISMA lectura del servidor. Lo que la IA hace de verdad lo
+// dice el servidor (`estadoReservaIA` por /api/crm/ia/estado, que exige el módulo CRM); aquí se
+// cotejan además, mientras se escribe, la política de cada plantilla (`politicaContradiceConfig`),
+// a quién va el correo (`destinatariosReserva`) y las cuentas sin moneda declarada del perfil. El
+// correo de los comprobantes solo lo cambia un ADMINISTRADOR (supabase/seguridad-05-reserva-dinero.sql):
+// a los demás se les enseña en solo lectura y «Guardar» nunca lo manda si no cambió.
+//
 // «🤖 Cotización automática por WhatsApp» (fase 2): los dos interruptores de traslados-05 se
 // guardan AL INSTANTE (no con «Guardar ajustes»), y lo que la IA hace de verdad con ellos lo dice
 // `estadoCotizadorIA` (lib/traslados/envio-ia.ts) leyendo además la fila del agente del CRM: un
 // interruptor encendido con el agente en copiloto o sin WhatsApp no cotiza ni envía nada, y la
 // pantalla no puede dar a entender lo contrario.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { useEsAdmin } from "@/lib/usePuedeVer";
+import { politicaContradiceConfig, type ConfigReserva } from "@/lib/traslados/reserva-pago";
+import { destinatariosReserva, FUENTE_CORREO_RESERVA } from "@/lib/traslados/reserva-correo";
+import { cuentasUtiles, monedaDeCuenta, type CuentaBancaria } from "@/lib/empresa-perfil";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
@@ -47,7 +60,7 @@ import {
   fmtFecha, leerEntero, mensajeEncenderEnvio, mensajeEncenderIA, minutosQueNoCoinciden, SQL_COTIZACION_IA, SQL_FOTOS_CATEGORIA,
   subzonasQueHeredan, zonasConEnvioPropio, type GrupoCondicionesIA, type ListaCondicion, type ZonaFila,
 } from "./traslados-pantalla";
-import { filasEscritas, leerUltimoTc, LIMITES, normalizarConfig, type ConfigFila, type LecturaTc } from "./traslados-datos";
+import { filasEscritas, leerUltimoTc, LIMITES, normalizarConfig, SOLO_ADMIN_CORREO_RESERVA, type ConfigFila, type LecturaTc } from "./traslados-datos";
 import { AZUL, iCls, type Decir } from "./traslados-comun";
 
 const hoyLimaIso = () => fechaLima(Date.now());
@@ -92,7 +105,7 @@ function ListaTextos({ items, onCambiar, placeholder, etiqueta }: {
   );
 }
 
-export default function AjustesTraslado({ config, configExiste, onConfig, decir, zonas, sinMigracionIA, sinMigracionListas, colsConfig, onIrAZonas }: {
+export default function AjustesTraslado({ config, configExiste, onConfig, decir, zonas, sinMigracionIA, sinMigracionListas, sinMigracionReserva, colsConfig, onIrAZonas }: {
   config: ConfigFila;
   configExiste: boolean;
   onConfig: (c: ConfigFila) => void;
@@ -101,6 +114,8 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
   sinMigracionIA: boolean;
   /** Faltan las columnas `incluye` / `no_incluye` (traslados-07): no se ofrecen ni se guardan. */
   sinMigracionListas: boolean;
+  /** Faltan las columnas `reserva_*` (traslados-09): el bloque de la reserva no se ofrece. */
+  sinMigracionReserva: boolean;
   /** Las columnas que se piden de vuelta al guardar (sin las de traslados-05 si falta la migración). */
   colsConfig: string;
   onIrAZonas: () => void;
@@ -188,6 +203,8 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
     <div className="space-y-4">
       <CotizacionIA config={config} onConfig={onConfig} decir={decir} zonas={zonas}
         sinMigracionIA={sinMigracionIA} colsConfig={colsConfig} onIrAZonas={onIrAZonas} />
+      <ReservaIA config={config} onConfig={onConfig} decir={decir} colsConfig={colsConfig} sinMigracion={sinMigracionReserva}
+        grupos={grupos} plantillas={plantillas} onReleerPlantillas={releerPlantillas} />
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_22rem] gap-4 items-start">
         <section className="bg-white border rounded-2xl p-4 space-y-4">
           {!configExiste && (
@@ -363,6 +380,306 @@ function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoC
         );
       })}
     </div>
+  );
+}
+
+// ── 📅 Reserva y pago por la IA ──────────────────────────────────────────────
+
+const SQL_RESERVA_IA = "supabase/traslados-09-reserva-ia.sql";
+/** Los límites de los CHECK de traslados-09 (y de `normalizarConfigReserva`). */
+const LIM_RESERVA = { plazo: [15, 1440], margen: [0, 4320], devolucion: [1, 720] } as const;
+
+/** «50», «12,5» → número (0 < x ≤ 100, hasta dos decimales). Vacío = sin adelanto. */
+function leerPctAdelanto(t: string): { tipo: "vacio" } | { tipo: "ok"; valor: number } | { tipo: "error"; detalle: string } {
+  const s = t.trim().replace("%", "").trim();
+  if (!s) return { tipo: "vacio" };
+  if (!/^\d{1,3}([.,]\d{1,2})?$/.test(s)) return { tipo: "error", detalle: `«${s}» no es un porcentaje (hasta dos decimales).` };
+  const v = Number(s.replace(",", "."));
+  if (!(v > 0 && v <= 100)) return { tipo: "error", detalle: "Tiene que ser mayor que 0 y como mucho 100." };
+  return { tipo: "ok", valor: v };
+}
+
+/** La lista de correos escrita: vacía = el del perfil. Cada pedazo tiene que ser un correo. */
+function leerCorreos(t: string): { tipo: "vacio" } | { tipo: "ok"; valor: string } | { tipo: "error"; detalle: string } {
+  const s = t.trim();
+  if (!s) return { tipo: "vacio" };
+  if (s.length > 500) return { tipo: "error", detalle: "Como mucho 500 caracteres." };
+  const malo = s.split(/[,;\s]+/).filter(Boolean).find((x) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x));
+  if (malo) return { tipo: "error", detalle: `«${malo}» no es un correo (sepáralos con comas).` };
+  return { tipo: "ok", valor: s };
+}
+
+type EstadoReservaServidor =
+  | { tipo: "ok"; activa: boolean | null; lineas: string[] | null; ambar: boolean | null }
+  | { tipo: "sin_crm" }
+  | { tipo: "error"; detalle: string };
+
+async function leerEstadoReserva(): Promise<EstadoReservaServidor> {
+  try {
+    const res = await fetch("/api/crm/ia/estado", { headers: await cabecerasErp() });
+    if (res.status === 403) return { tipo: "sin_crm" };
+    const d = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; reserva?: boolean | null; reserva_lineas?: string[] | null; reserva_ambar?: boolean | null } | null;
+    if (res.status === 401) return { tipo: "error", detalle: "Tu sesión venció o no se pudo verificar: vuelve a ingresar." };
+    if (!d?.ok) return { tipo: "error", detalle: d?.error || `El servidor respondió ${res.status}.` };
+    return { tipo: "ok", activa: d.reserva ?? null, lineas: Array.isArray(d.reserva_lineas) ? d.reserva_lineas : null, ambar: d.reserva_ambar ?? null };
+  } catch (e) {
+    return { tipo: "error", detalle: `No se pudo llamar al servidor: ${(e as Error)?.message ?? "sin conexión"}.` };
+  }
+}
+
+type LecturaPerfil = { tipo: "ok"; email: string | null; cuentas: CuentaBancaria[] } | { tipo: "error"; detalle: string };
+
+async function leerPerfilReserva(): Promise<LecturaPerfil> {
+  try {
+    const { data, error } = await supabase.from("empresa_perfil").select("email, cuentas_bancarias").eq("id", 1).maybeSingle();
+    if (error) return { tipo: "error", detalle: error.message };
+    const d = (data ?? {}) as { email?: string | null; cuentas_bancarias?: unknown };
+    return { tipo: "ok", email: typeof d.email === "string" && d.email.trim() ? d.email.trim() : null, cuentas: cuentasUtiles(d.cuentas_bancarias) };
+  } catch (e) {
+    return { tipo: "error", detalle: (e as Error)?.message ?? "sin conexión" };
+  }
+}
+
+function CampoReserva({ titulo, ayuda, children }: { titulo: string; ayuda: string; children: ReactNode }) {
+  return (
+    <label className="block">
+      <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{titulo}</span>
+      {children}
+      <span className="block text-[10px] text-gray-400 mt-0.5">{ayuda}</span>
+    </label>
+  );
+}
+
+function ReservaIA({ config, onConfig, decir, colsConfig, sinMigracion, grupos, plantillas, onReleerPlantillas }: {
+  config: ConfigFila;
+  onConfig: (c: ConfigFila) => void;
+  decir: Decir;
+  colsConfig: string;
+  sinMigracion: boolean;
+  /** Las condiciones que copia la IA por segmento (con reglas); null sin reglas o mientras se comprueba. */
+  grupos: GrupoCondicionesIA[] | null;
+  plantillas: LecturaPlantillas | null;
+  onReleerPlantillas: () => void;
+}) {
+  const r0: ConfigReserva = config.reserva;
+  const esAdmin = useEsAdmin();
+  const [pct, setPct] = useState(r0.adelantoPct == null ? "" : String(r0.adelantoPct));
+  const [correo, setCorreo] = useState(r0.correo ?? "");
+  const [plazo, setPlazo] = useState(String(r0.plazoConfirmacionMin));
+  const [margen, setMargen] = useState(String(r0.margenMin));
+  const [devol, setDevol] = useState(r0.devolucionPlazoH == null ? "" : String(r0.devolucionPlazoH));
+  const [guardando, setGuardando] = useState<"activa" | "campos" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [estado, setEstado] = useState<EstadoReservaServidor | null>(null);
+  const [nE, setNE] = useState(0);
+  const [perfil, setPerfil] = useState<LecturaPerfil | null>(null);
+
+  useEffect(() => {
+    if (sinMigracion) return;
+    let vivo = true;
+    void leerEstadoReserva().then((r) => { if (vivo) setEstado(r); });
+    return () => { vivo = false; };
+  }, [nE, sinMigracion]);
+  useEffect(() => {
+    if (sinMigracion) return;
+    let vivo = true;
+    void leerPerfilReserva().then((r) => { if (vivo) setPerfil(r); });
+    return () => { vivo = false; };
+  }, [sinMigracion]);
+
+  if (sinMigracion) {
+    return (
+      <section className="border rounded-2xl p-4 space-y-2 bg-amber-50 border-amber-200">
+        <h3 className="text-sm font-bold text-gray-700">📅 Reserva y pago por la IA</h3>
+        <p className="text-xs text-amber-900">
+          Todavía no existe en la base: falta correr <span className="font-mono">{SQL_RESERVA_IA}</span> (y antes <span className="font-mono">supabase/reservas-09a-solicitudes.sql</span>, <span className="font-mono">reservas-09b-comprobantes.sql</span>, <span className="font-mono">reservas-09c-pagos-solicitud.sql</span> y <span className="font-mono">cotizaciones-06-politica-reserva.sql</span>) en Supabase → SQL Editor (pegar entero → Run). Hasta entonces la IA cotiza, pero no reserva ni pide pagos.
+        </p>
+      </section>
+    );
+  }
+
+  const lPct = leerPctAdelanto(pct);
+  const lCorreo = leerCorreos(correo);
+  const lPlazo = leerEntero(plazo, LIM_RESERVA.plazo[0], LIM_RESERVA.plazo[1]);
+  const lMargen = leerEntero(margen, LIM_RESERVA.margen[0], LIM_RESERVA.margen[1]);
+  const lDevol = leerEntero(devol, LIM_RESERVA.devolucion[0], LIM_RESERVA.devolucion[1]);
+  const pctNuevo = lPct.tipo === "ok" ? Math.round(lPct.valor * 100) / 100 : null;
+  const correoNuevo = lCorreo.tipo === "ok" ? lCorreo.valor : null;
+  const devolNuevo = lDevol.tipo === "ok" ? lDevol.valor : null;
+  const correoCambio = (correoNuevo ?? null) !== (r0.correo ?? null);
+  const sucio = pctNuevo !== r0.adelantoPct || correoCambio
+    || plazo.trim() !== String(r0.plazoConfirmacionMin) || margen.trim() !== String(r0.margenMin) || devolNuevo !== r0.devolucionPlazoH;
+  const motivo = lPct.tipo === "error" ? `Adelanto: ${lPct.detalle}`
+    : lCorreo.tipo === "error" ? `Correo: ${lCorreo.detalle}`
+      : lPlazo.tipo !== "ok" ? `Plazo para confirmar: un número entero de minutos entre ${LIM_RESERVA.plazo[0]} y ${LIM_RESERVA.plazo[1]}.`
+        : lMargen.tipo !== "ok" ? `Margen antes del servicio: un número entero de minutos entre ${LIM_RESERVA.margen[0]} y ${LIM_RESERVA.margen[1]}.`
+          : lDevol.tipo === "error" ? `Plazo para devolver: un número entero de horas entre ${LIM_RESERVA.devolucion[0]} y ${LIM_RESERVA.devolucion[1]}, o vacío.`
+            : correoCambio && esAdmin !== true ? "El correo solo lo cambia un administrador: deja el que estaba."
+              : !sucio ? "No hay cambios." : null;
+
+  // A quién iría el correo del pago reportado: con lo escrito (o lo guardado) y el correo del perfil.
+  const emailPerfil = perfil?.tipo === "ok" ? perfil.email : null;
+  const dest = destinatariosReserva({ correoConfig: lCorreo.tipo === "error" ? r0.correo : correoNuevo, emailEmpresa: emailPerfil });
+  const sinMoneda = perfil?.tipo === "ok" ? perfil.cuentas.filter((c) => monedaDeCuenta(c.moneda) == null) : [];
+  // La política de cada plantilla contra lo que se está escribiendo (el % y el plazo de devolución).
+  const cfgBorrador = { adelantoPct: pctNuevo, devolucionPlazoH: devolNuevo };
+
+  const guardarActiva = async (v: boolean) => {
+    if (guardando) return;
+    const pctTxt = r0.adelantoPct != null ? `un adelanto del ${r0.adelantoPct} % del total` : "ningún adelanto (no hay porcentaje guardado: cada reserva va «disponibilidad primero» y el ejecutivo pide el pago)";
+    const msg = v
+      ? `¿Encender la reserva por la IA?\n\nCuando un cliente acepte por WhatsApp una cotización de traslado, la IA registra su pedido de reserva y, según el horario del equipo y la zona, le pide ${pctTxt} con las cuentas de la plantilla, o le dice que un ejecutivo confirma la unidad.\n\nLos comprobantes que mande van a ${dest.correos.length ? dest.correos.join(", ") : "nadie (no hay correo de reservas ni correo del perfil)"} y a la tarjeta de su chat en el CRM. El adelanto lo registra Tesorería al verlo en el banco.\n\nSolo funciona con «La IA cotiza traslados» encendida y el agente autónomo en WhatsApp.`
+      : "¿Apagar la reserva por la IA?\n\nLa IA deja de ofrecer reservar. Las solicitudes que ya existen siguen en la bandeja del CRM y en Tesorería.";
+    if (!window.confirm(msg)) return;
+    setGuardando("activa"); setError(null);
+    const r = filasEscritas<Record<string, unknown>>(
+      await supabase.from("traslados_config").upsert({ id: 1, reserva_ia: v }, { onConflict: "id" }).select(colsConfig),
+      v ? "No se encendió la reserva por la IA" : "No se apagó la reserva por la IA");
+    setGuardando(null);
+    if (!r.ok) { setError(r.detalle); return; }
+    onConfig(normalizarConfig(r.filas[0]));
+    decir(v ? "Reserva por la IA encendida." : "Reserva por la IA apagada.");
+    setNE((x) => x + 1);
+  };
+
+  const guardarCampos = async () => {
+    if (motivo || guardando || lPlazo.tipo !== "ok" || lMargen.tipo !== "ok") return;
+    setGuardando("campos"); setError(null);
+    const fila: Record<string, unknown> = {
+      id: 1, reserva_adelanto_pct: pctNuevo, reserva_plazo_confirmacion_min: lPlazo.valor,
+      reserva_margen_min: lMargen.valor, reserva_devolucion_plazo_h: devolNuevo,
+    };
+    // El correo SOLO si cambió: así guardar lo demás nunca choca con la regla de seguridad-05.
+    if (correoCambio) fila.reserva_correo = correoNuevo;
+    const r = filasEscritas<Record<string, unknown>>(
+      await supabase.from("traslados_config").upsert(fila, { onConflict: "id" }).select(colsConfig), "No se guardó la reserva por la IA");
+    setGuardando(null);
+    if (!r.ok) { setError(r.detalle); return; }
+    const c = normalizarConfig(r.filas[0]);
+    onConfig(c);
+    setPct(c.reserva.adelantoPct == null ? "" : String(c.reserva.adelantoPct));
+    setCorreo(c.reserva.correo ?? "");
+    setPlazo(String(c.reserva.plazoConfirmacionMin)); setMargen(String(c.reserva.margenMin));
+    setDevol(c.reserva.devolucionPlazoH == null ? "" : String(c.reserva.devolucionPlazoH));
+    decir("Reserva por la IA guardada.");
+    setNE((x) => x + 1);
+  };
+  const descartar = () => {
+    setPct(r0.adelantoPct == null ? "" : String(r0.adelantoPct)); setCorreo(r0.correo ?? "");
+    setPlazo(String(r0.plazoConfirmacionMin)); setMargen(String(r0.margenMin));
+    setDevol(r0.devolucionPlazoH == null ? "" : String(r0.devolucionPlazoH)); setError(null);
+  };
+
+  const ambarServidor = estado?.tipo === "ok" && estado.ambar === true;
+  return (
+    <section className={`border rounded-2xl p-4 space-y-3 ${ambarServidor ? "bg-amber-50 border-amber-200" : "bg-white"}`}>
+      <div className="flex flex-wrap items-start gap-2">
+        <h3 className="text-sm font-bold text-gray-700 flex-1">📅 Reserva y pago por la IA</h3>
+        <Link href="/tesoreria?tab=adelantos" className="text-[11px] font-bold text-[#0b315f] underline">Tesorería → Adelantos de reservas →</Link>
+      </div>
+      <p className="text-xs text-gray-500">
+        Cuando el cliente acepta por WhatsApp una cotización de traslado, la IA registra su pedido de reserva: o le pide el adelanto con las cuentas del PDF (si el equipo alcanza a confirmar a tiempo y la zona tiene envío automático), o le dice que un ejecutivo confirma la unidad. La unidad la confirma siempre una persona desde la tarjeta del chat en el CRM, y el adelanto lo registra Tesorería al verlo en el banco: la foto del cliente no es un cobro.
+      </p>
+
+      <Casilla marcada={r0.activa} ocupada={guardando === "activa"} bloqueada={guardando === "campos"}
+        onCambiar={(v) => void guardarActiva(v)} titulo="La IA reserva traslados y pide el adelanto"
+        detalle="Apagada, la IA cotiza pero no ofrece reservar: el cliente que acepta la cotización lo atiende un ejecutivo." />
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <CampoReserva titulo="Adelanto (% del total)" ayuda="Vacío = no se pide pago: cada reserva va «disponibilidad primero». Cambiarlo no cambia lo que ya se le pidió a un cliente.">
+          <input className={iCls("font-mono")} inputMode="decimal" value={pct} placeholder="Ej.: 50" onChange={(e) => setPct(e.target.value)} />
+        </CampoReserva>
+        <CampoReserva titulo="Plazo para confirmar la unidad (minutos de atención)" ayuda={`Minutos dentro del horario del equipo para verificar el pago y confirmar (${LIM_RESERVA.plazo[0]}–${LIM_RESERVA.plazo[1]}).`}>
+          <input className={iCls("font-mono")} inputMode="numeric" value={plazo} onChange={(e) => setPlazo(e.target.value)} />
+        </CampoReserva>
+        <CampoReserva titulo="Margen antes del servicio (minutos)" ayuda={`Minutos reales entre esa confirmación y el inicio del servicio (${LIM_RESERVA.margen[0]}–${LIM_RESERVA.margen[1]}). Si no alcanza, primero se confirma la unidad.`}>
+          <input className={iCls("font-mono")} inputMode="numeric" value={margen} onChange={(e) => setMargen(e.target.value)} />
+        </CampoReserva>
+        <CampoReserva titulo="Plazo para devolver (horas)" ayuda={`Lo que se le promete al cliente al devolver (${LIM_RESERVA.devolucion[0]}–${LIM_RESERVA.devolucion[1]}). Vacío = el mensaje no promete un plazo.`}>
+          <input className={iCls("font-mono")} inputMode="numeric" value={devol} onChange={(e) => setDevol(e.target.value)} />
+        </CampoReserva>
+        <div className="sm:col-span-2">
+          <CampoReserva titulo="Correo que recibe los comprobantes de pago"
+            ayuda={esAdmin === false ? "" : "Varios separados por coma. Vacío = el correo del perfil de la empresa. Llevan datos del cliente y la foto del comprobante."}>
+            <input className={iCls()} value={correo} onChange={(e) => setCorreo(e.target.value)} readOnly={esAdmin !== true}
+              aria-readonly={esAdmin !== true} placeholder={esAdmin === true ? "tesoreria@empresa.com, operaciones@empresa.com" : ""} />
+          </CampoReserva>
+          {esAdmin === false && (
+            <p className="text-[11px] text-gray-500 mt-0.5">Solo lectura: {SOLO_ADMIN_CORREO_RESERVA.replace(" Pídeselo a un administrador; lo demás se guarda sin tocar el correo.", "")} Pídeselo a un administrador.</p>
+          )}
+          {esAdmin == null && <p className="text-[11px] text-gray-400 mt-0.5">Comprobando si puedes cambiar el correo…</p>}
+          <p className="text-[11px] text-gray-600 mt-1">
+            {dest.correos.length
+              ? <>Los comprobantes van a <b>{dest.correos.join(", ")}</b> ({FUENTE_CORREO_RESERVA[dest.fuente!]}).</>
+              : perfil == null ? "Comprobando a quién iría el correo…"
+                : <span className="text-amber-900">No hay correo de reservas ni correo en el perfil de la empresa: el aviso de pago reportado no le llega a nadie (sí a la tarjeta del CRM).</span>}
+          </p>
+        </div>
+      </div>
+
+      {perfil?.tipo === "error" && <p className="text-xs text-red-700">No se pudieron leer las cuentas del perfil de la empresa: {perfil.detalle}</p>}
+      {sinMoneda.length > 0 && (
+        <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          {sinMoneda.length === 1 ? "Una cuenta bancaria del perfil no declara" : `${sinMoneda.length} cuentas bancarias del perfil no declaran`} su moneda ({sinMoneda.map((c) => c.banco).join(", ")}): se le envían al cliente tanto si paga en soles como en dólares. Márcala en <Link href="/configuracion/perfil" className="font-bold underline">Configuración → Perfil de la empresa</Link>.
+        </p>
+      )}
+
+      <div className="space-y-1.5">
+        <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400">Política de reserva, cambios y cancelación que envía la IA</p>
+        {plantillas == null ? (
+          <p className="text-xs text-gray-400">Comprobando las plantillas del PDF del traslado…</p>
+        ) : !plantillas.ok ? (
+          <p className="text-xs text-red-700">No se pudieron leer las plantillas ({plantillas.error}).{" "}<button type="button" onClick={onReleerPlantillas} className="font-bold underline">Reintentar</button></p>
+        ) : !grupos ? (
+          <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">Falta correr <span className="font-mono">{SQL_PLANTILLAS_USO}</span>: la política sale de la plantilla PDF del traslado, y sin ese SQL la IA no tiene una política que enviar.</p>
+        ) : grupos.map((g) => {
+          const choques = g.reserva.propia ? politicaContradiceConfig(g.reserva.items, cfgBorrador) : [];
+          const sinPolitica = !g.reserva.propia || g.reserva.items.length === 0;
+          return (
+            <div key={g.clave} className={`rounded-xl border px-3 py-2 text-xs space-y-1 ${sinPolitica || choques.length ? "border-amber-300 bg-amber-50 text-amber-900" : "border-gray-200 text-gray-700"}`}>
+              <p>
+                <b>{g.segmentos.map((x) => ETIQUETA_SEGMENTO[x.segmento]).join(" · ")}:</b>{" "}
+                {g.fuente.tipo === "plantilla"
+                  ? <>plantilla «{g.fuente.plantilla.nombre || g.fuente.plantilla.id}» · {sinPolitica ? "sin política: la IA no tiene qué enviar" : `${g.reserva.items.length} ${g.reserva.items.length === 1 ? "línea" : "líneas"}`}{" "}
+                    <Link href={enlaceEditarPlantilla(g.fuente.plantilla.id)} className="font-bold underline">Editar →</Link></>
+                  : <>sin una plantilla que la IA pueda usar: no hay política que enviar. <Link href="/cotizaciones/plantillas" className="font-bold underline">Asignar una plantilla →</Link></>}
+              </p>
+              {choques.map((c, i) => (
+                <p key={i} className="break-words">⚠ «{c.linea}» dice {c.leido}{c.codigo === "adelanto_pct" ? " % de adelanto" : " h para devolver"} y aquí dice {c.config}{c.codigo === "adelanto_pct" ? " %" : " h"}: el cliente leería dos cosas distintas. Corrige la plantilla o el número.</p>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className={`rounded-xl border px-3 py-2 text-xs space-y-1 ${ambarServidor ? "border-amber-300 text-amber-900 bg-white/60" : "border-gray-200 text-gray-700 bg-gray-50"}`}>
+        <div className="flex items-center gap-2">
+          <p className="text-[11px] font-bold uppercase tracking-wide opacity-70 flex-1">Lo que hace hoy (con lo guardado)</p>
+          <button type="button" onClick={() => { setEstado(null); setNE((x) => x + 1); }} className="text-[11px] underline opacity-70">↻</button>
+        </div>
+        {estado == null ? (
+          <p className="text-gray-400">Comprobando con el servidor…</p>
+        ) : estado.tipo === "sin_crm" ? (
+          <p className="text-gray-500">Lo que hace la IA de verdad (agente autónomo, horario del equipo, cuentas) lo comprueba /crm/agente, y para verlo desde aquí hace falta el módulo CRM.</p>
+        ) : estado.tipo === "error" ? (
+          <p className="text-red-700">No se pudo comprobar: {estado.detalle}</p>
+        ) : estado.lineas?.length ? (
+          estado.lineas.map((l, i) => <p key={i} className={ambarServidor && i === 0 ? "font-bold" : ""}>{l}</p>)
+        ) : (
+          <p className="text-gray-500">El servidor no pudo leer la configuración de la reserva.</p>
+        )}
+      </div>
+
+      {error && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{error}</p>}
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => void guardarCampos()} disabled={!!motivo || !!guardando}
+          className="px-5 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-50 min-h-[44px]" style={{ background: AZUL }}>
+          {guardando === "campos" ? "Guardando…" : "Guardar la reserva"}
+        </button>
+        {sucio && <button type="button" onClick={descartar} disabled={!!guardando} className="px-4 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50 min-h-[44px]">Descartar cambios</button>}
+        {motivo && <span className="text-[11px] text-gray-500">{motivo}</span>}
+      </div>
+    </section>
   );
 }
 

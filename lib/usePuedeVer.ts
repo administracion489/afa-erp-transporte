@@ -85,3 +85,20 @@ export function usePuedeVer(modulos: readonly string[]): Record<string, boolean>
 
   return resultado && resultado.clave === clave ? resultado.valor : null;
 }
+
+/**
+ * ¿El usuario de la sesión es administrador del ERP (`usuarios.rol = 'admin'`)? `null` mientras se
+ * consulta; `false` si la consulta falla (mismo criterio que `usePuedeVer`). Lo usa una pantalla
+ * para enseñar en SOLO LECTURA un dato que la base solo deja cambiar a un administrador (p. ej.
+ * `traslados_config.reserva_correo`, supabase/seguridad-05-reserva-dinero.sql): la regla la aplica
+ * la base; esto solo evita ofrecer un campo que va a rechazar.
+ */
+export function useEsAdmin(): boolean | null {
+  const [admin, setAdmin] = useState<boolean | null>(null);
+  useEffect(() => {
+    let vivo = true;
+    void leerAcceso().then((acceso) => { if (vivo) setAdmin(!!acceso?.admin); });
+    return () => { vivo = false; };
+  }, []);
+  return admin;
+}

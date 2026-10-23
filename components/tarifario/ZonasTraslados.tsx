@@ -165,7 +165,8 @@ export default function ZonasTraslados() {
       {montadas.has("ajustes") && (
         <div className={oculto("ajustes")}>
           <AjustesTraslado key={claveAjustes} config={d.config} configExiste={d.configExiste} onConfig={onConfig} decir={decir}
-            zonas={d.zonas} sinMigracionIA={d.sinMigracionIA} sinMigracionListas={d.sinMigracionListas} colsConfig={d.colsConfig} onIrAZonas={() => irA("zonas")} />
+            zonas={d.zonas} sinMigracionIA={d.sinMigracionIA} sinMigracionListas={d.sinMigracionListas} sinMigracionReserva={d.sinMigracionReserva}
+            colsConfig={d.colsConfig} onIrAZonas={() => irA("zonas")} />
         </div>
       )}
 
