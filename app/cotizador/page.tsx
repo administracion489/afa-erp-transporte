@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { faltaColumna } from "@/lib/columna-faltante";
 import { calcularCostoUnidad, escenariosPrecio, aplicarPisoHora, recorridoSugerido, RECORRIDO_CARRETERA, type ParametrosUnidad, type Recorrido } from "@/lib/costeo-propio";
 import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
+import { conIgvDe } from "@/lib/igv-par";
 import {
   NIVELES, NIVEL_CFG, equipamientoDeNivel, nivelDeFicha, fichasDelNivel, planDeNivel,
   type NivelServicio,
@@ -982,6 +983,9 @@ export default function CotizadorPage(){
   async function enviar(){
     if(!resultado||!veh)return;
     setEnviando(true);setErrorEnv("");
+    // `cotizaciones.costo_estimado` es el costo interno CON IGV (lib/igv-par.ts) y `baseCosto` es
+    // sin IGV; `costo_cotizador` conserva el sin IGV del cotizador, como siempre.
+    const costoConIgv=conIgvDe(resultado.baseCosto);
     const{data:{session:sesEnv}}=await supabase.auth.getSession();
     const payloadCot:Record<string,unknown>={
       vendedor_id:sesEnv?.user?.id??null,
@@ -990,8 +994,8 @@ export default function CotizadorPage(){
       estado:"pendiente",modo_servicio:modo,tipo_servicio:tipoServ,
       tipo_vehiculo:veh.tipo_vehiculo,equipamiento:equipamientoDeNivel(nivel),
       precio_cliente:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
-      costo_estimado:resultado.baseCosto,
-      margen_estimado:modo==="eventual"?resultado.totalEst20-resultado.baseCosto:resultado.diaEstIGV-resultado.baseCosto,
+      costo_estimado:costoConIgv,
+      margen_estimado:modo==="eventual"?resultado.totalEst20-costoConIgv:resultado.diaEstIGV-costoConIgv,
       precio_cotizador:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
       costo_cotizador:resultado.baseCosto,margen_cotizador:20,
       vehiculo_cotizador:veh.nombre,
