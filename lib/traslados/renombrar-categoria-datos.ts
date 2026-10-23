@@ -10,13 +10,22 @@
 //     las fotos que se leyeron): si otra persona cambió algo entretanto, no cambia nada.
 //  3. Se borran las fotos viejas (best-effort: un fallo deja un archivo huérfano que nadie usa).
 //  4. Las cotizaciones guardadas con la clave vieja (`traslado_json.categoria.clave`) pasan a la
-//     nueva, una por una y de forma condicional. Si alguna no se pudo, el resultado dice cuántas
-//     quedan y `completarRenombre` (el «Reintentar» de la pantalla) termina el trabajo.
+//     nueva, de a pocas y de forma condicional, con un PRESUPUESTO de tiempo (la función vive 60 s).
+//     Si alguna no se pudo, el resultado dice cuántas quedan y `completarRenombre` (el «Reintentar»
+//     de la pantalla, o «Terminar» al abrir otra vez la categoría) termina el trabajo.
+// EL CAMBIO QUEDA ANOTADO (`alerta_enviada`, clave `traslado_categoria_renombre`, ref `DE>A`; esa
+// tabla solo la escribe el servidor, seguridad-03) ANTES de tocar nada: `completarRenombre` solo
+// mueve cotizaciones de un par que de verdad se renombró (sin la nota, un usuario con Tarifas podría
+// pasarle a BUS las cotizaciones de una categoría borrada), y la previa de la clave nueva encuentra
+// lo que quedó con la vieja aunque se haya cerrado la pantalla.
+// AL DESHACER SOLO SE BORRA LO QUE ESTA PETICIÓN CREÓ Y NADIE USA: con dos cambios a la vez, una
+// copia «ya existente» es de la otra petición, y la fila puede haber quedado ya con esas URLs.
 // `sb` se inyecta (la matriz corre todo esto contra una base falsa).
 // ──────────────────────────────────────────────────────────────────────────────
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { columnaFaltante, faltaAlguna, tablaQueFalta, type ErrorSupabase } from "@/lib/columna-faltante";
+import { fechaLima } from "@/lib/alertas-horario";
 import { BUCKET_FOTOS_TRASLADO, COLUMNA_FOTO, LADOS_FOTO, rutaDeUrlFoto, type LadoFoto } from "./fotos-categoria";
 import { planFoto, revisarRenombre, trasladoJsonRenombrado, type CodigoRenombre, type PlanFoto, type PreviaRenombre } from "./renombrar-categoria";
 
@@ -28,13 +37,24 @@ const COLS_CATEGORIA = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo,
 const COLS_CATEGORIA_FOTOS = ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] as const;
 /** El camino PostgREST a la clave dentro de `cotizaciones.traslado_json`. */
 export const RUTA_CLAVE_COTIZACION = "traslado_json->categoria->>clave";
-/** Cotizaciones por vuelta al reescribir (y tope de vueltas: 50 × 200 = 10 000, operativo). */
+/** Cotizaciones por vuelta al reescribir, cuántas a la vez y tope de vueltas (operativos, no medidos). */
 const LOTE_COTIZACIONES = 200;
+const A_LA_VEZ = 5;
 const MAX_VUELTAS = 50;
+/** Presupuesto de tiempo para las cotizaciones (la ruta vive 60 s): lo que no entra queda `parcial`. */
+export const PRESUPUESTO_COTIZACIONES_MS = 40_000;
+/** La nota del cambio en `alerta_enviada` (índice único clave + ref + fecha). */
+export const CLAVE_RENOMBRE = "traslado_categoria_renombre";
+export const refRenombre = (de: string, a: string) => `${de}>${a}`;
+/** Reloj inyectable (la matriz simula el presupuesto). */
+export type Reloj = { ahoraMs?: () => number };
 
 export type CodigoResultado =
   | "ok" | "parcial" | Exclude<CodigoRenombre, "ok">
   | "sin_migracion" | "foto" | "cambio_concurrente" | "no_aplica" | "error";
+
+/** Un cambio de clave anterior que dejó cotizaciones con la clave vieja (lo enseña la previa). */
+export type RenombrePendiente = { de: string; cotizaciones: number };
 
 export type ResultadoRenombre = {
   ok: boolean;
@@ -100,10 +120,20 @@ async function contarTarifas(sb: Sb, clave: string): Promise<number | null> {
  * dentro de un jsonb). Cada UPDATE exige que la fila siga con `de`. Recorre por id (las que fallan
  * no se vuelven a pedir en la misma pasada) y al final vuelve a contar las que quedan.
  */
-export async function actualizarCotizaciones(sb: Sb, de: string, a: string): Promise<{ actualizadas: number; pendientes: number | null }> {
+export async function actualizarCotizaciones(sb: Sb, de: string, a: string, reloj: Reloj = {}): Promise<{ actualizadas: number; pendientes: number | null }> {
+  const ahora = reloj.ahoraMs ?? Date.now;
+  const limite = ahora() + PRESUPUESTO_COTIZACIONES_MS;
   let actualizadas = 0;
   let ultimo = 0;
-  for (let vuelta = 0; vuelta < MAX_VUELTAS; vuelta++) {
+  const una = async (f: { id: number; traslado_json: unknown }) => {
+    const nuevo = trasladoJsonRenombrado(f.traslado_json, de, a);
+    if (!nuevo) return;
+    const u = await sb.from("cotizaciones").update({ traslado_json: nuevo }).eq("id", f.id).eq(RUTA_CLAVE_COTIZACION, de).select("id");
+    if (u.error) { console.error("[traslados/renombrar] cotización", f.id, u.error.message); return; }
+    actualizadas += (u.data ?? []).length;
+  };
+  vueltas: for (let vuelta = 0; vuelta < MAX_VUELTAS; vuelta++) {
+    if (ahora() >= limite) break;
     const r = await sb.from("cotizaciones").select("id, traslado_json").eq(RUTA_CLAVE_COTIZACION, de)
       .gt("id", ultimo).order("id", { ascending: true }).limit(LOTE_COTIZACIONES);
     if (r.error) {
@@ -113,22 +143,50 @@ export async function actualizarCotizaciones(sb: Sb, de: string, a: string): Pro
     }
     const filas = (r.data ?? []) as { id: number; traslado_json: unknown }[];
     if (!filas.length) break;
-    for (const f of filas) {
-      ultimo = Math.max(ultimo, Number(f.id) || 0);
-      const nuevo = trasladoJsonRenombrado(f.traslado_json, de, a);
-      if (!nuevo) continue;
-      const u = await sb.from("cotizaciones").update({ traslado_json: nuevo }).eq("id", f.id).eq(RUTA_CLAVE_COTIZACION, de).select("id");
-      if (u.error) { console.error("[traslados/renombrar] cotización", f.id, u.error.message); continue; }
-      actualizadas += (u.data ?? []).length;
+    for (let i = 0; i < filas.length; i += A_LA_VEZ) {
+      if (ahora() >= limite) break vueltas;
+      const tanda = filas.slice(i, i + A_LA_VEZ);
+      await Promise.all(tanda.map(una));
+      for (const f of tanda) ultimo = Math.max(ultimo, Number(f.id) || 0);
     }
     if (filas.length < LOTE_COTIZACIONES) break;
   }
   return { actualizadas, pendientes: await contarCotizaciones(sb, de) };
 }
 
+/** ¿Este par se renombró de verdad? (la nota de `alerta_enviada`). null = no se pudo leer. */
+async function hayNotaRenombre(sb: Sb, de: string, a: string): Promise<boolean | null> {
+  const r = await sb.from("alerta_enviada").select("ref").eq("clave", CLAVE_RENOMBRE).eq("ref", refRenombre(de, a)).limit(1);
+  if (r.error) return null;
+  return (r.data ?? []).length > 0;
+}
+
+/**
+ * Los cambios anteriores HACIA `a` que dejaron cotizaciones con la clave vieja (para ofrecer
+ * «Terminar» al abrir la categoría otra vez). Solo los pares anotados cuya clave vieja ya no existe.
+ */
+async function renombresPendientes(sb: Sb, a: string): Promise<RenombrePendiente[]> {
+  // `_` es comodín en LIKE: se trae por sufijo y se filtra exacto aquí.
+  const r = await sb.from("alerta_enviada").select("ref").eq("clave", CLAVE_RENOMBRE).like("ref", `%>${a}`).limit(50);
+  if (r.error) return [];
+  const viejas = [...new Set(((r.data ?? []) as { ref: string }[]).map((x) => String(x.ref))
+    .filter((ref) => ref.endsWith(`>${a}`)).map((ref) => ref.slice(0, -(a.length + 1))).filter((d) => d && d !== a))];
+  if (!viejas.length) return [];
+  const vivas = await sb.from("traslado_categorias").select("clave").in("clave", viejas);
+  if (vivas.error) return [];
+  const existen = new Set(((vivas.data ?? []) as { clave: string }[]).map((c) => String(c.clave)));
+  const out: RenombrePendiente[] = [];
+  for (const de of viejas) {
+    if (existen.has(de)) continue;
+    const n = await contarCotizaciones(sb, de);
+    if (n) out.push({ de, cotizaciones: n });
+  }
+  return out;
+}
+
 /** Lo que va a pasar si se renombra `de` (para enseñarlo antes del botón). */
 export async function previaRenombre(sb: Sb, de: string, supabaseUrl: string | null | undefined): Promise<
-  { ok: true; previa: PreviaRenombre } | { ok: false; status: number; codigo: CodigoResultado; detalle: string }
+  { ok: true; previa: PreviaRenombre; pendientes: RenombrePendiente[] } | { ok: false; status: number; codigo: CodigoResultado; detalle: string }
 > {
   const cat = await leerCategoria(sb, de);
   if (!cat.ok) {
@@ -139,12 +197,12 @@ export async function previaRenombre(sb: Sb, de: string, supabaseUrl: string | n
   if (!cat.fila) return { ok: false, status: 404, codigo: "no_existe", detalle: `No existe la categoría ${de}: recarga la pantalla.` };
   // Las que se moverían: las fotos DE ESTA categoría (las demás se dejan tal cual).
   const fotos = cat.conFotos.filter((l) => rutaDeUrlFoto(cat.fila![COLUMNA_FOTO[l]], supabaseUrl, { clave: de, lado: l }) != null).length;
-  const [tarifas, cotizaciones] = await Promise.all([contarTarifas(sb, de), contarCotizaciones(sb, de)]);
-  return { ok: true, previa: { tarifas, fotos, cotizaciones } };
+  const [tarifas, cotizaciones, pendientes] = await Promise.all([contarTarifas(sb, de), contarCotizaciones(sb, de), renombresPendientes(sb, de)]);
+  return { ok: true, previa: { tarifas, fotos, cotizaciones }, pendientes };
 }
 
 /** Cambia la clave `de` por `aTecleada`, con sus precios, sus fotos y sus cotizaciones guardadas. */
-export async function renombrarCategoria(sb: Sb, x: { de: string; aTecleada: string; supabaseUrl: string | null | undefined }): Promise<ResultadoRenombre> {
+export async function renombrarCategoria(sb: Sb, x: { de: string; aTecleada: string; supabaseUrl: string | null | undefined } & Reloj): Promise<ResultadoRenombre> {
   const { de } = x;
   const claves = await sb.from("traslado_categorias").select("clave");
   if (claves.error) {
@@ -163,12 +221,34 @@ export async function renombrarCategoria(sb: Sb, x: { de: string; aTecleada: str
   }
   if (!cat.fila) return fallo(de, a, 404, "no_existe", `No existe la categoría ${de}: recarga la pantalla.`);
 
+  // 0. La nota del cambio, ANTES de tocar nada (sin ella «Reintentar» no podría terminarlo). Un
+  //    duplicado (el mismo par hoy) es la misma nota. Si el cambio no llega a entrar, la nota no
+  //    sirve para nada: `completarRenombre` exige además que `de` ya no exista.
+  const hoy = fechaLima((x.ahoraMs ?? Date.now)());
+  const nota = await sb.from("alerta_enviada").insert({ clave: CLAVE_RENOMBRE, ref: refRenombre(de, a), fecha: hoy });
+  if (nota.error && nota.error.code !== "23505") {
+    console.error("[traslados/renombrar] nota", nota.error.message);
+    return fallo(de, a, 500, "error", "No se pudo anotar el cambio de clave. Vuelve a intentarlo en un momento. No se cambió nada.");
+  }
+
   // 1. Las fotos: copiarlas a la carpeta de la clave nueva (las de hoy siguen puestas).
   const bucket = sb.storage.from(BUCKET_FOTOS_TRASLADO);
-  const copiadas: string[] = [];
+  /** Solo las copias que creó ESTA petición (una «ya existente» puede ser de otra que está en curso). */
+  const creadas: string[] = [];
   const deshacerCopias = async () => {
-    if (!copiadas.length) return;
-    try { await bucket.remove(copiadas); } catch { /* quedan huérfanas: ningún PDF las usa */ }
+    if (!creadas.length) return;
+    // Antes de borrar, ¿alguna fila ya las usa? (otra petición pudo terminar el mismo cambio, o el
+    // UPDATE entró y se perdió la respuesta). Sin poder comprobarlo, no se borra nada: una copia
+    // huérfana no la usa ningún PDF; una foto en uso borrada deja el PDF sin foto.
+    const r = await sb.from("traslado_categorias").select(LADOS_FOTO.map((l) => COLUMNA_FOTO[l]).join(", ")).in("clave", [de, a]);
+    if (r.error) return;
+    const enUso = new Set<string>();
+    for (const f of (r.data ?? []) as unknown as Record<string, unknown>[]) {
+      for (const l of LADOS_FOTO) { const ruta = rutaDeUrlFoto(f[COLUMNA_FOTO[l]], x.supabaseUrl); if (ruta) enUso.add(ruta); }
+    }
+    const borrar = creadas.filter((c) => !enUso.has(c));
+    if (!borrar.length) return;
+    try { await bucket.remove(borrar); } catch { /* quedan huérfanas: ningún PDF las usa */ }
   };
   const planes: Partial<Record<LadoFoto, PlanFoto>> = {};
   const nuevasUrl: Partial<Record<LadoFoto, string>> = {};
@@ -184,7 +264,7 @@ export async function renombrarCategoria(sb: Sb, x: { de: string; aTecleada: str
       return fallo(de, a, 502, "foto",
         `No se pudo copiar la foto ${lado === "externa" ? "exterior" : "interior"} de ${de} a la carpeta de ${a}. Si el archivo ya no existe, quítala en «📷 Fotos y descripción» y vuelve a intentarlo; si no, inténtalo en un momento. No se cambió nada.`);
     }
-    copiadas.push(plan.hasta);
+    if (!c.error) creadas.push(plan.hasta);
     const url = bucket.getPublicUrl(plan.hasta).data.publicUrl;
     if (!rutaDeUrlFoto(url, x.supabaseUrl, { clave: a, lado })) {
       await deshacerCopias();
@@ -227,7 +307,7 @@ export async function renombrarCategoria(sb: Sb, x: { de: string; aTecleada: str
   }
 
   // 4. Las cotizaciones guardadas con la clave vieja.
-  const cot = await actualizarCotizaciones(sb, de, a);
+  const cot = await actualizarCotizaciones(sb, de, a, x);
   const tarifas = await contarTarifas(sb, a);
   const completo = cot.pendientes === 0;
   return {
@@ -244,10 +324,11 @@ export async function renombrarCategoria(sb: Sb, x: { de: string; aTecleada: str
 }
 
 /**
- * Termina un renombre que dejó cotizaciones con la clave vieja. Solo si `de` ya no existe y `a` sí
- * (es decir, el renombre ya se hizo): nunca le pasa a una categoría las cotizaciones de otra viva.
+ * Termina un renombre que dejó cotizaciones con la clave vieja. Solo si `de` ya no existe, `a` sí y
+ * el par `de>a` está anotado (el renombre se hizo de verdad): nunca le pasa a una categoría las
+ * cotizaciones de otra, ni viva ni borrada.
  */
-export async function completarRenombre(sb: Sb, x: { de: string; a: string }): Promise<ResultadoRenombre> {
+export async function completarRenombre(sb: Sb, x: { de: string; a: string } & Reloj): Promise<ResultadoRenombre> {
   const { de, a } = x;
   const r = await sb.from("traslado_categorias").select("clave").in("clave", [de, a]);
   if (r.error) {
@@ -261,8 +342,13 @@ export async function completarRenombre(sb: Sb, x: { de: string; a: string }): P
       ? `${de} todavía existe: no hay ningún cambio de clave que terminar.`
       : `No existe la categoría ${a}: recarga la pantalla.`);
   }
+  // Solo un par que de verdad se renombró (la nota del paso 0): nunca le pasa a una categoría las
+  // cotizaciones de otra, ni viva ni borrada.
+  const nota = await hayNotaRenombre(sb, de, a);
+  if (nota == null) return fallo(de, a, 500, "error", "No se pudo comprobar el cambio de clave. Vuelve a intentarlo en un momento.");
+  if (!nota) return fallo(de, a, 409, "no_aplica", `No hay ningún cambio de clave de ${de} a ${a} que terminar.`);
   const cat = await leerCategoria(sb, a);
-  const cot = await actualizarCotizaciones(sb, de, a);
+  const cot = await actualizarCotizaciones(sb, de, a, x);
   const completo = cot.pendientes === 0;
   return {
     ...vacio(de, a), ok: true, status: 200, codigo: completo ? "ok" : "parcial",

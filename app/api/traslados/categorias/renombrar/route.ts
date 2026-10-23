@@ -1,10 +1,12 @@
 // app/api/traslados/categorias/renombrar/route.ts
 // GET  — ?clave=VAN_15 — Lo que pasaría al cambiarle la clave: cuántos precios, fotos y cotizaciones
-//        guardadas la llevan. No cambia nada.
+//        guardadas la llevan, y si un cambio ANTERIOR hacia ella dejó cotizaciones con la clave vieja
+//        (`pendientes`, para ofrecer «Terminar»). No cambia nada.
 // POST — { de, a } — Cambia la CLAVE de una categoría de traslado (VAN_15 → VAN_17) con sus precios
 //        (FK en cascada), sus fotos (se mueven a la carpeta de la clave nueva) y las cotizaciones
 //        guardadas que la nombran (`traslado_json.categoria.clave`).
-//        { de, a, completar: true } — termina uno ya hecho que dejó cotizaciones con la clave vieja.
+//        { de, a, completar: true } — termina uno ya hecho que dejó cotizaciones con la clave vieja
+//        (solo un par anotado al renombrar, con `de` ya inexistente y `a` viva).
 //
 // Las reglas viven en lib/traslados/renombrar-categoria.ts (puro) y renombrar-categoria-datos.ts.
 // Lo hace el SERVIDOR porque el bucket `traslados-fotos` no tiene ninguna política de escritura
@@ -42,7 +44,7 @@ export async function GET(req: NextRequest) {
   try {
     const r = await previaRenombre(db(), de, process.env.NEXT_PUBLIC_SUPABASE_URL);
     if (!r.ok) return responder(r.status, r.codigo, r.detalle);
-    return responder(200, "ok", "", { clave: de, ...r.previa });
+    return responder(200, "ok", "", { clave: de, ...r.previa, pendientes: r.pendientes });
   } catch (e) {
     console.error("[traslados/renombrar] GET", e instanceof Error ? e.message : e);
     return responder(500, "error", "No se pudo comprobar la categoría. Vuelve a intentarlo en un momento.");

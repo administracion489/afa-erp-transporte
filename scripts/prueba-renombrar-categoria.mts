@@ -11,7 +11,7 @@
 //  · la semilla de AFA (traslados-03) ya no resucita una clave renombrada.
 import { readFileSync } from "node:fs";
 import { frasesPlan, planFoto, revisarRenombre, trasladoJsonRenombrado } from "../lib/traslados/renombrar-categoria";
-import { completarRenombre, previaRenombre, renombrarCategoria } from "../lib/traslados/renombrar-categoria-datos";
+import { CLAVE_RENOMBRE, PRESUPUESTO_COTIZACIONES_MS, completarRenombre, previaRenombre, renombrarCategoria } from "../lib/traslados/renombrar-categoria-datos";
 import { RE_RUTA_FOTO, rutaDeUrlFoto } from "../lib/traslados/fotos-categoria";
 
 let bien = 0, mal = 0;
@@ -80,8 +80,10 @@ type Opc = {
   falloCopia?: (desde: string) => boolean;
   falloCotizacion?: Set<number>;
   antesDelUpdate?: (db: Db) => void;      // lo que hace «otra persona» justo antes del UPDATE
+  falloNota?: boolean;                    // no se puede escribir en alerta_enviada
+  falloRelectura?: boolean;               // la relectura antes de deshacer copias falla
 };
-type Db = { traslado_categorias: Fila[]; tarifas_traslado: Fila[]; cotizaciones: Fila[]; objetos: Set<string>; opc: Opc };
+type Db = { traslado_categorias: Fila[]; tarifas_traslado: Fila[]; cotizaciones: Fila[]; alerta_enviada: Fila[]; objetos: Set<string>; opc: Opc };
 
 function crearDb(opc: Opc = {}): Db {
   return {
@@ -101,6 +103,7 @@ function crearDb(opc: Opc = {}): Db {
       { id: 12, traslado_json: null },
       { id: 13, traslado_json: { version: 1, firma: "c", categoria: { clave: "VAN_15", nombre: "Sprinter corta (van) 15 pax", capacidad: 15 } } },
     ],
+    alerta_enviada: [],
     objetos: new Set([`categorias/VAN_15/externa-${U1}.jpg`, `categorias/VAN_15/interna-${U2}.jpg`]),
     opc,
   };
@@ -114,16 +117,25 @@ const leerRuta = (f: Fila, col: string): unknown => {
   return v;
 };
 
+/** LIKE de Postgres: `%` cualquier cosa, `_` un carácter cualquiera (por eso el código filtra exacto después). */
+function comoLike(x: string, pat: string): boolean {
+  const esc = (ch: string) => (/[a-zA-Z0-9]/.test(ch) ? ch : `\\${ch}`);
+  const re = [...pat].map((ch) => (ch === "%" ? ".*" : ch === "_" ? "." : esc(ch))).join("");
+  return new RegExp(`^${re}$`).test(x);
+}
+
 function sbFalso(db: Db) {
   const faltan = new Set(db.opc.faltan ?? []);
   const from = (tabla: keyof Db & string) => {
-    const st: { op: "select" | "update"; cols?: string; head?: boolean; count?: boolean; patch?: Fila; filtros: [string, (v: unknown) => boolean][]; orden?: string; limite?: number; una?: boolean; devolver?: string } = { op: "select", filtros: [] };
+    const st: { op: "select" | "update" | "insert"; cols?: string; head?: boolean; count?: boolean; patch?: Fila; filtros: [string, (v: unknown) => boolean][]; orden?: string; limite?: number; una?: boolean; devolver?: string } = { op: "select", filtros: [] };
     const b = {
       select(cols: string, o?: { count?: string; head?: boolean }) {
         if (st.op === "update") st.devolver = cols; else { st.cols = cols; st.head = !!o?.head; st.count = !!o?.count; }
         return b;
       },
       update(patch: Fila) { st.op = "update"; st.patch = patch; return b; },
+      insert(fila: Fila) { st.op = "insert"; st.patch = fila; return b; },
+      like(c: string, pat: string) { st.filtros.push([c, (x) => comoLike(String(x), pat)]); return b; },
       eq(c: string, v: unknown) { st.filtros.push([c, (x) => x === v]); return b; },
       is(c: string, v: null) { st.filtros.push([c, (x) => x == v]); return b; },
       gt(c: string, v: number) { st.filtros.push([c, (x) => Number(x) > v]); return b; },
@@ -143,13 +155,23 @@ function sbFalso(db: Db) {
       const filas = db[tabla] as Fila[];
       const colsUsadas = [...(st.cols ?? "").split(","), ...(st.devolver ?? "").split(","), ...st.filtros.map(([c]) => c.split("->")[0])].map((s) => s.trim()).filter(Boolean);
       for (const c of colsUsadas) if (faltan.has(`${tabla}.${c}`)) return { data: null, count: null, error: { code: "42703", message: `column ${tabla}.${c} does not exist` } };
+      if (st.op === "insert") {
+        if (tabla === "alerta_enviada" && db.opc.falloNota) return { data: null, error: { message: "fetch failed" } };
+        const f = st.patch!;
+        if (filas.some((x) => x.clave === f.clave && x.ref === f.ref && x.fecha === f.fecha)) return { data: null, error: { code: "23505", message: "duplicate key" } };
+        filas.push({ ...f });
+        return { data: null, error: null };
+      }
+      if (st.op === "select" && tabla === "traslado_categorias" && db.opc.falloRelectura && st.filtros.some(([c]) => c === "clave") && /foto_externa_url/.test(st.cols ?? "") && !/nombre/.test(st.cols ?? "")) {
+        return { data: null, error: { message: "fetch failed" } };
+      }
       if (st.op === "update") {
         for (const k of Object.keys(st.patch!)) if (faltan.has(`${tabla}.${k}`)) return { data: null, error: { code: "PGRST204", message: `Could not find the '${k}' column of '${tabla}' in the schema cache` } };
         if (tabla === "traslado_categorias") db.opc.antesDelUpdate?.(db);
         const hits = filas.filter((f) => st.filtros.every(([c, p]) => p(leerRuta(f, c))));
         if (tabla === "cotizaciones" && hits.some((h) => db.opc.falloCotizacion?.has(Number(h.id)))) return { data: null, error: { message: "fetch failed" } };
         const nueva = st.patch!.clave;
-        if (nueva != null && filas.some((f) => f.clave === nueva && !hits.includes(f))) return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } };
+        if (nueva != null && hits.length && filas.some((f) => f.clave === nueva && !hits.includes(f))) return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } };
         for (const h of hits) {
           const vieja = h.clave;
           Object.assign(h, st.patch);
@@ -185,6 +207,7 @@ function sbFalso(db: Db) {
 
 const foto15 = (db: Db) => db.traslado_categorias.find((c) => c.clave === "VAN_15");
 const sinCambios = (db: Db, n: string) => {
+  // La nota del cambio puede quedar (se escribe antes); lo que no puede cambiar es lo demás.
   const f = crearDb();
   ok(JSON.stringify(db.traslado_categorias) === JSON.stringify(f.traslado_categorias), `${n}: categorías intactas`);
   ok(JSON.stringify(db.tarifas_traslado) === JSON.stringify(f.tarifas_traslado), `${n}: precios intactos`);
@@ -218,6 +241,54 @@ const sinCambios = (db: Db, n: string) => {
   // Repetirlo no hace nada (VAN_15 ya no existe).
   const otra = await renombrarCategoria(sb, { de: "VAN_15", aTecleada: "VAN_18", supabaseUrl: BASE });
   ok(!otra.ok && otra.codigo === "no_existe" && otra.status === 404, "repetir con la clave vieja → no_existe");
+  ok(db.alerta_enviada.some((n) => n.clave === CLAVE_RENOMBRE && n.ref === "VAN_15>VAN_17"), "el cambio queda anotado (VAN_15>VAN_17)");
+}
+
+// a2) No se pudo anotar el cambio → no se toca nada.
+{
+  const db = crearDb({ falloNota: true });
+  const r = await renombrarCategoria(sbFalso(db), { de: "VAN_15", aTecleada: "VAN_17", supabaseUrl: BASE });
+  ok(!r.ok && r.codigo === "error" && /No se cambió nada/.test(r.detalle), "sin nota → error, nada cambia");
+  sinCambios(db, "sin nota");
+}
+
+// a3) Dos cambios a la vez (revisión de seguridad, hallazgo 1). R1 ya copió y su UPDATE entra justo
+//     antes del de R2: R2 encuentra las copias hechas (no son suyas), su UPDATE no entra, y NO puede
+//     borrar las fotos que VAN_17 ya está usando.
+{
+  const db = crearDb({
+    antesDelUpdate: (d) => {
+      const f = d.traslado_categorias.find((c) => c.clave === "VAN_15");
+      if (!f) return;
+      Object.assign(f, { clave: "VAN_17", foto_externa_url: foto("VAN_17", "externa", U1), foto_interna_url: foto("VAN_17", "interna", U2) });
+      for (const t of d.tarifas_traslado) if (t.categoria === "VAN_15") t.categoria = "VAN_17";
+    },
+  });
+  db.objetos.add(`categorias/VAN_17/externa-${U1}.jpg`);
+  db.objetos.add(`categorias/VAN_17/interna-${U2}.jpg`);
+  const r = await renombrarCategoria(sbFalso(db), { de: "VAN_15", aTecleada: "VAN_17", supabaseUrl: BASE });
+  ok(!r.ok && r.codigo === "cambio_concurrente", "carrera: el segundo → cambio_concurrente");
+  ok(db.objetos.has(`categorias/VAN_17/externa-${U1}.jpg`) && db.objetos.has(`categorias/VAN_17/interna-${U2}.jpg`), "carrera: las fotos que VAN_17 usa siguen en su sitio");
+}
+
+// a4) La otra variante: ESTA petición creó las copias, pero la fila ya quedó con esas URLs (la otra
+//     terminó, o el UPDATE entró y se perdió la respuesta). Tampoco se borran.
+{
+  const db = crearDb({
+    antesDelUpdate: (d) => {
+      const f = d.traslado_categorias.find((c) => c.clave === "VAN_15");
+      if (f) Object.assign(f, { clave: "VAN_17", foto_externa_url: foto("VAN_17", "externa", U1), foto_interna_url: foto("VAN_17", "interna", U2) });
+    },
+  });
+  const r = await renombrarCategoria(sbFalso(db), { de: "VAN_15", aTecleada: "VAN_17", supabaseUrl: BASE });
+  ok(!r.ok && db.objetos.has(`categorias/VAN_17/externa-${U1}.jpg`) && db.objetos.has(`categorias/VAN_17/interna-${U2}.jpg`), "copias propias en uso: no se borran");
+}
+
+// a5) Si no se puede comprobar quién usa las copias, no se borra nada (una huérfana no rompe un PDF).
+{
+  const db = crearDb({ falloRelectura: true, antesDelUpdate: (d) => { foto15(d)!.foto_externa_url = null; } });
+  const r = await renombrarCategoria(sbFalso(db), { de: "VAN_15", aTecleada: "VAN_17", supabaseUrl: BASE });
+  ok(!r.ok && r.codigo === "cambio_concurrente" && db.objetos.has(`categorias/VAN_17/interna-${U2}.jpg`), "sin poder comprobar: las copias se quedan");
 }
 
 // b) La clave nueva ya existe → nada cambia.
@@ -226,6 +297,7 @@ const sinCambios = (db: Db, n: string) => {
   const r = await renombrarCategoria(sbFalso(db), { de: "VAN_15", aTecleada: "bus", supabaseUrl: BASE });
   ok(!r.ok && r.codigo === "ya_existe" && r.status === 409, "a existente → 409 ya_existe");
   sinCambios(db, "ya_existe");
+  ok(db.alerta_enviada.length === 0, "ya_existe: tampoco se anota");
 }
 
 // c) Una foto no se pudo copiar → nada cambia y no queda la otra copia.
@@ -288,6 +360,26 @@ const sinCambios = (db: Db, n: string) => {
   ok(db.cotizaciones.filter((x) => (x.traslado_json as { categoria?: { clave: string } } | null)?.categoria?.clave === "VAN_15").length === 0, "no queda ninguna con VAN_15");
 }
 
+// h2) El presupuesto de tiempo (revisión de seguridad, hallazgo 2): con un reloj que avanza 15 s por
+//     consulta, el cambio responde «parcial» antes de que muera la función; la previa de la clave
+//     NUEVA encuentra lo que quedó con la vieja, y «Terminar» lo pasa.
+{
+  const db = crearDb();
+  for (let i = 0; i < 30; i++) db.cotizaciones.push({ id: 100 + i, traslado_json: { categoria: { clave: "VAN_15", nombre: "x", capacidad: 15 } } });
+  let t = 0;
+  const reloj = { ahoraMs: () => (t += 15_000) };
+  const sb = sbFalso(db);
+  const r = await renombrarCategoria(sb, { de: "VAN_15", aTecleada: "VAN_17", supabaseUrl: BASE, ...reloj });
+  ok(r.ok && r.codigo === "parcial" && (r.cotizaciones_pendientes ?? 0) > 0 && r.cotizaciones < 32, `presupuesto: parcial (${r.cotizaciones} hechas, ${r.cotizaciones_pendientes} pendientes)`);
+  ok(PRESUPUESTO_COTIZACIONES_MS < 60_000, "el presupuesto cabe en la vida de la ruta (60 s)");
+  const p = await previaRenombre(sb, "VAN_17", BASE);
+  ok(p.ok && p.pendientes.length === 1 && p.pendientes[0].de === "VAN_15" && p.pendientes[0].cotizaciones === r.cotizaciones_pendientes, "la previa de VAN_17 dice que quedaron cotizaciones con VAN_15");
+  const c = await completarRenombre(sb, { de: "VAN_15", a: "VAN_17" });
+  ok(c.ok && c.codigo === "ok" && c.cotizaciones_pendientes === 0, "Terminar: no queda ninguna");
+  const p2 = await previaRenombre(sb, "VAN_17", BASE);
+  ok(p2.ok && p2.pendientes.length === 0, "y la previa ya no ofrece terminar");
+}
+
 // i) completarRenombre solo termina un renombre YA hecho.
 {
   const db = crearDb();
@@ -298,6 +390,11 @@ const sinCambios = (db: Db, n: string) => {
   db2.traslado_categorias = db2.traslado_categorias.filter((c) => c.clave !== "VAN_15");
   const c2 = await completarRenombre(sbFalso(db2), { de: "VAN_15", a: "VAN_99" });
   ok(!c2.ok && c2.codigo === "no_aplica", "con la nueva inexistente → no_aplica");
+  // Hallazgo 3: una categoría BORRADA (VAN_15 ya no existe) no le pasa sus cotizaciones a BUS sin
+  // un cambio de clave anotado.
+  const c3 = await completarRenombre(sbFalso(db2), { de: "VAN_15", a: "BUS" });
+  ok(!c3.ok && c3.codigo === "no_aplica" && /No hay ningún cambio de clave/.test(c3.detalle), "sin nota → no_aplica (no se mueven cotizaciones de una borrada)");
+  ok((db2.cotizaciones.find((c) => c.id === 10)!.traslado_json as { categoria: { clave: string } }).categoria.clave === "VAN_15", "y las cotizaciones siguen como estaban");
 }
 
 // j) Una foto que no es de esta categoría se deja tal cual (el PDF ya no la usaba).

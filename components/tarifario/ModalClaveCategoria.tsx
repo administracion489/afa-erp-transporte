@@ -8,14 +8,14 @@
 import { useEffect, useState } from "react";
 import { cabecerasErp } from "@/lib/fetch-erp";
 import { frasesPlan, revisarRenombre, type PreviaRenombre } from "@/lib/traslados/renombrar-categoria";
-import type { ResultadoRenombre } from "@/lib/traslados/renombrar-categoria-datos";
+import type { RenombrePendiente, ResultadoRenombre } from "@/lib/traslados/renombrar-categoria-datos";
 import type { CategoriaFila } from "./traslados-pantalla";
 import { normalizarCategoria } from "./traslados-datos";
 import { AZUL, iCls, Modal, type Decir } from "./traslados-comun";
 
 const URL_API = "/api/traslados/categorias/renombrar";
 
-type EstadoPrevia = { tipo: "cargando" } | { tipo: "ok"; previa: PreviaRenombre } | { tipo: "error"; detalle: string };
+type EstadoPrevia = { tipo: "cargando" } | { tipo: "ok"; previa: PreviaRenombre; pendientes: RenombrePendiente[] } | { tipo: "error"; detalle: string };
 
 export default function ModalClaveCategoria({ categoria, claves, onCerrar, onRenombrada, decir }: {
   categoria: CategoriaFila;
@@ -32,7 +32,7 @@ export default function ModalClaveCategoria({ categoria, claves, onCerrar, onRen
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** Quedó hecho pero con cotizaciones pendientes: el botón pasa a «Reintentar». */
-  const [pendiente, setPendiente] = useState<{ a: string; detalle: string } | null>(null);
+  const [pendiente, setPendiente] = useState<{ de: string; a: string; detalle: string } | null>(null);
 
   useEffect(() => {
     let vivo = true;
@@ -42,7 +42,10 @@ export default function ModalClaveCategoria({ categoria, claves, onCerrar, onRen
         const j = await res.json().catch(() => null);
         if (!vivo) return;
         if (!res.ok || !j?.ok) { setPrevia({ tipo: "error", detalle: j?.detalle || `No se pudo comprobar ${de} (${res.status}).` }); return; }
-        setPrevia({ tipo: "ok", previa: { tarifas: j.tarifas ?? null, fotos: Number(j.fotos) || 0, cotizaciones: j.cotizaciones ?? null } });
+        const pendientes = (Array.isArray(j.pendientes) ? j.pendientes : []) as RenombrePendiente[];
+        setPrevia({ tipo: "ok", previa: { tarifas: j.tarifas ?? null, fotos: Number(j.fotos) || 0, cotizaciones: j.cotizaciones ?? null }, pendientes });
+        // Un cambio anterior hacia esta clave dejó cotizaciones con la vieja: se ofrece terminarlo.
+        if (pendientes[0]) setPendiente({ de: pendientes[0].de, a: de, detalle: `Un cambio de clave anterior (${pendientes[0].de} → ${de}) dejó ${pendientes[0].cotizaciones === 1 ? "1 cotización guardada" : `${pendientes[0].cotizaciones} cotizaciones guardadas`} con ${pendientes[0].de}: su PDF saldría sin las fotos del vehículo. Pulsa «Terminar» para pasarlas a ${de}.` });
       } catch {
         if (vivo) setPrevia({ tipo: "error", detalle: "No se pudo contactar al servidor para comprobar la categoría." });
       }
@@ -83,17 +86,17 @@ export default function ModalClaveCategoria({ categoria, claves, onCerrar, onRen
     if (r.tarifas != null) partes.push(`${r.tarifas} precio(s) con ${r.a}.`);
     if (r.fotos_movidas) partes.push(`${r.fotos_movidas} foto(s) movida(s).`);
     if (r.cotizaciones) partes.push(`${r.cotizaciones} cotización(es) actualizada(s).`);
-    if (r.codigo === "parcial") { setPendiente({ a: r.a, detalle: r.detalle }); decir(partes.join(" "), "info"); return; }
+    if (r.codigo === "parcial") { setPendiente({ de, a: r.a, detalle: r.detalle }); decir(partes.join(" "), "info"); return; }
     decir(partes.join(" "));
     onCerrar();
   };
 
   const reintentar = async () => {
     if (!pendiente || enviando) return;
-    const r = await enviar({ de, a: pendiente.a, completar: true });
+    const r = await enviar({ de: pendiente.de, a: pendiente.a, completar: true });
     if (!r) return;
-    if (r.codigo === "parcial") { setPendiente({ a: pendiente.a, detalle: r.detalle }); return; }
-    decir(`Listo: ${r.cotizaciones} cotización(es) más pasaron a ${pendiente.a}.`);
+    if (r.codigo === "parcial") { setPendiente({ ...pendiente, detalle: r.detalle }); return; }
+    decir(`Listo: ${r.cotizaciones} cotización(es) más pasaron de ${pendiente.de} a ${pendiente.a}.`);
     onCerrar();
   };
 
@@ -108,7 +111,7 @@ export default function ModalClaveCategoria({ categoria, claves, onCerrar, onRen
           <p>{pendiente.detalle}</p>
           <button type="button" onClick={reintentar} disabled={enviando}
             className="px-4 py-2 rounded-xl text-xs font-bold border border-amber-400 hover:bg-amber-100 disabled:opacity-50 min-h-[40px]">
-            {enviando ? "Reintentando…" : "↻ Reintentar"}
+            {enviando ? "Terminando…" : pendiente.a === de ? "↻ Terminar" : "↻ Reintentar"}
           </button>
         </div>
       ) : (
