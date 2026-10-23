@@ -18,6 +18,11 @@
 // · Su RESUMEN (`condiciones_reserva_resumen`, supabase/cotizaciones-08) es la quinta: los 4-5 puntos
 //   que el PDF y el WhatsApp llevan en lugar de la política entera, con el enlace (y el QR) a la
 //   política completa de cada cotización. Misma regla: solo con su columna.
+// · El traslado de la IA se elige por IDIOMA × MONEDA desde supabase/cotizaciones-09 (ReglasTraslado):
+//   lo que resulta de cada celda lo dice `plantillaTrasladoIA` (vía `estadosTraslado`), y una celda
+//   «inglés» solo cuenta como uso con el inglés encendido. Sin ese SQL, la fila «Traslado de la IA» de
+//   la cuadrícula por tipo de cliente, como siempre. Guardar o activar una plantilla puede encender o
+//   apagar el inglés (su idioma decide si la IA la puede usar): el `confirm()` lo dice.
 // ──────────────────────────────────────────────────────────────────────────────
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -29,17 +34,19 @@ import type { PerfilEmpresa } from "@/lib/empresa-perfil";
 import { faltaColumna } from "@/lib/columna-faltante";
 import {
   CAMPOS_PLANTILLA, ETIQUETA_CAMPO, ETIQUETA_DISENO, ETIQUETA_SEGMENTO, SEGMENTOS, SERVICIOS_PLANTILLA,
-  SQL_PLANTILLAS_USO, SQL_POLITICA_RESERVA, TABLA_PLANTILLAS, considSnapshot, disenoDe, ejemploParaVistaPrevia, esActiva,
-  esIdPlantillaValido, etiquetaCelda, idNuevaPlantilla, leeCampo, plantillaParaUso, plantillaPrincipal,
-  reglasQueUsan, sirveParaIA,
-  type Diseno, type PlantillaFila, type ReglaPlantilla, type Segmento, type ServicioPlantilla, type UsoPlantilla,
+  SQL_PLANTILLAS_USO, SQL_POLITICA_RESERVA, SQL_REGLAS_TRASLADO, TABLA_PLANTILLAS, considSnapshot, disenoDe, ejemploParaVistaPrevia, esActiva,
+  esIdPlantillaValido, etiquetaCelda, etiquetaCeldaTraslado, idNuevaPlantilla, leeCampo, plantillaParaUso, plantillaPrincipal,
+  reglasQueUsan, reglasTrasladoQueUsan, sirveParaIA,
+  type Diseno, type PlantillaFila, type ReglaPlantilla, type ReglaTraslado, type Segmento, type ServicioPlantilla, type UsoPlantilla,
 } from "@/lib/cotizacion-plantillas";
 import { leerPlantillasYReglas } from "@/lib/cotizacion-plantillas-datos";
 import { enlaceCondiciones, SQL_RESUMEN_CONDICIONES } from "@/lib/condiciones-publicas";
 import { ListaCondiciones } from "@/components/cotizaciones/plantillas/ListaCondiciones";
 import { ReglasUso } from "@/components/cotizaciones/plantillas/ReglasUso";
+import { ReglasTraslado } from "@/components/cotizaciones/plantillas/ReglasTraslado";
 import {
-  DE_FABRICA, avisoLineaIA, colorValido, contarAntiguas, filasDeVuelta, listaLimpia, mismaLista, textoOpcional,
+  DE_FABRICA, avisoLineaIA, cambiosTraslado, celdaTrasladoCorta, colorValido, contarAntiguas, estadosTraslado, filasDeVuelta,
+  lineasCambioTraslado, listaLimpia, mismaLista, textoOpcional,
 } from "@/components/cotizaciones/plantillas/pantalla";
 
 /** Una fila de `cotizacion_plantillas` tal como llega (`select *`). */
@@ -48,7 +55,12 @@ type Fila = PlantillaFila & Record<string, unknown>;
 type Lectura =
   | { estado: "cargando" }
   | { estado: "error"; error: string }
-  | { estado: "ok"; plantillas: Fila[]; reglas: ReglaPlantilla[] | null; sinDiseno: boolean };
+  | { estado: "ok"; plantillas: Fila[]; reglas: ReglaPlantilla[] | null; reglasTraslado: ReglaTraslado[] | null; sinDiseno: boolean };
+
+/** Dónde usa HOY la IA una plantilla en sus traslados: una celda de la regla vieja (por tipo de cliente) o de la nueva (idioma × moneda). */
+type UsoIA = { corta: string; vieja: boolean };
+/** «clientes Empresa, Particular» (regla vieja) o «castellano · soles, inglés · dólares» (la nueva). */
+const quienesIA = (us: UsoIA[]): string => (us.length && us.every(u => u.vieja) ? `clientes ${us.map(u => u.corta).join(", ")}` : us.map(u => u.corta).join(", "));
 
 type Conteo = { n: number } | { error: string };
 type Tab = "datos" | "colores" | "condiciones" | "cuentas" | "idioma";
@@ -76,6 +88,8 @@ const deFabrica = (l: { consid: keyof ConsidCot }): string[] => [...(DEFAULT_CON
 const COLORES: ColorK[] = ["color_primario", "color_secundario", "color_acento"];
 const COLOR_DEFECTO: Record<ColorK, string> = { color_primario: "#0b315f", color_secundario: "#1262bd", color_acento: "#C8A24B" };
 const MAX_NOMBRE = 80;
+/** Una corporativa en inglés que ninguna celda «inglés» del traslado usa todavía. */
+const PUEDE_INGLES = "La IA puede usarla con los clientes que escriben en inglés: asígnala en Traslado de la IA · inglés (abajo, en «¿Qué plantilla usa cada cotización?»).";
 
 const C = { navy: "#0b315f", white: "#fff", gray50: "#f8fafc", gray100: "#f1f5f9", gray200: "#e2e8f0", gray400: "#94a3b8", gray500: "#64748b", gray600: "#475569", gray800: "#1e293b" };
 const iSt: React.CSSProperties = { width: "100%", border: "1px solid #e2e8f0", borderRadius: 10, padding: "8px 12px", fontSize: 13, outline: "none", background: "white", boxSizing: "border-box" };
@@ -151,17 +165,32 @@ export default function PlantillasPDFPage() {
 
   const plantillas: Fila[] = lectura.estado === "ok" ? lectura.plantillas : [];
   const reglas: ReglaPlantilla[] | null = lectura.estado === "ok" ? lectura.reglas : null;
+  /** La regla del traslado por idioma × moneda (cotizaciones-09); null = falta su tabla (la fila vieja «Traslado de la IA» manda). */
+  const reglasTraslado: ReglaTraslado[] | null = lectura.estado === "ok" ? lectura.reglasTraslado : null;
   const sinMigracion = lectura.estado === "ok" && (lectura.sinDiseno || lectura.reglas === null);
 
-  /** Las 12 celdas y lo que RESULTA de cada una, con el motor (sin reglas: la principal; la IA, nada). */
+  /**
+   * Las celdas por servicio × tipo de cliente y lo que RESULTA de cada una, con el motor (sin reglas:
+   * la principal; la IA, nada). Con la regla nueva del traslado, sin la fila «Traslado de la IA»: ya no la lee nadie.
+   */
   const celdas = useMemo(() => {
     if (lectura.estado !== "ok") return [] as { servicio: ServicioPlantilla; segmento: Segmento; uso: UsoPlantilla }[];
-    return SERVICIOS_PLANTILLA.flatMap(s => SEGMENTOS.map(g => ({
+    const servicios = lectura.reglasTraslado !== null ? SERVICIOS_PLANTILLA.filter(s => s !== "traslado_ia") : SERVICIOS_PLANTILLA;
+    return servicios.flatMap(s => SEGMENTOS.map(g => ({
       servicio: s, segmento: g, uso: plantillaParaUso({ servicio: s, segmento: g }, lectura.plantillas, lectura.reglas),
     })));
   }, [lectura]);
+  /** Las cuatro celdas del traslado de la IA (idioma × moneda), o null sin cotizaciones-09. */
+  const traslado = useMemo(() => (lectura.estado === "ok" && lectura.reglasTraslado !== null ? estadosTraslado(lectura.plantillas, lectura.reglasTraslado) : null), [lectura]);
+  /** Las reglas que se leen: sin la fila vieja del traslado de la IA cuando manda la nueva. */
+  const reglasVigentes: ReglaPlantilla[] | null = reglas && reglasTraslado !== null ? reglas.filter(r => r.servicio !== "traslado_ia") : reglas;
   const usosDe = (id: string) => celdas.filter(c => c.uso.plantilla?.id === id);
-  const usosIA = (id: string) => usosDe(id).filter(c => c.servicio === "traslado_ia");
+  const usosIA = (id: string): UsoIA[] => traslado
+    ? traslado.celdas.filter(e => e.vigente && e.uso.plantilla?.id === id).map(e => ({
+      vieja: false,
+      corta: `${celdaTrasladoCorta(e.celda)}${e.uso.codigo === "sin_plantilla_idioma" ? " (en revisión: no hay una plantilla en inglés)" : ""}`,
+    }))
+    : usosDe(id).filter(c => c.servicio === "traslado_ia").map(c => ({ corta: ETIQUETA_SEGMENTO[c.segmento], vieja: true }));
 
   // ── Lectura ────────────────────────────────────────────────────────────────
 
@@ -180,7 +209,7 @@ export default function PlantillasPDFPage() {
       const r = await leerPlantillasYReglas(supabase);
       if (!r.ok) { setLectura({ estado: "error", error: r.error }); return null; }
       const filas = r.plantillas as Fila[];
-      setLectura({ estado: "ok", plantillas: filas, reglas: r.reglas, sinDiseno: r.sinDiseno });
+      setLectura({ estado: "ok", plantillas: filas, reglas: r.reglas, reglasTraslado: r.reglasTraslado, sinDiseno: r.sinDiseno });
       return filas;
     } catch (e) {
       setLectura({ estado: "error", error: `No se pudieron leer las plantillas del PDF: ${errMsg(e)}` });
@@ -251,6 +280,11 @@ export default function PlantillasPDFPage() {
     if (colorMalo) { setErrorGuardar(`${ETIQUETA_CAMPO[colorMalo]}: «${String(patch[colorMalo])}» no es un color (se escribe #RRGGBB).`); setTab("colores"); return; }
 
     const condCambian = LISTAS.some(l => l.k in patch && !mismaLista(patch[l.k] as string[] | null, listaLimpia(base[l.k])));
+    // Cambiar el idioma puede encender o apagar el inglés, o sacar la plantilla de una celda del traslado: se dice.
+    const lineasIA = reglasTraslado !== null
+      ? lineasCambioTraslado(cambiosTraslado({ plantillas, reglasTraslado }, { plantillas: plantillas.map(p => (p.id === base.id ? { ...p, ...patch } : p)), reglasTraslado }))
+      : [];
+    if (lineasIA.length && !condCambian && !window.confirm(`Al guardar «${nombre}» cambia lo que manda la IA en sus traslados:\n\n• ${lineasIA.join("\n• ")}\n\n¿Guardar?`)) return;
     if (condCambian) {
       const c = conteos[base.id];
       const ia = usosIA(base.id);
@@ -260,11 +294,12 @@ export default function PlantillasPDFPage() {
       else if (c.n > 0) lineas.push(`${plural(c.n, "cotización antigua", "cotizaciones antiguas")} (guardadas antes de que cada cotización copiara sus condiciones) ${c.n === 1 ? "imprime" : "imprimen"} las condiciones de esta plantilla al reimprimirse en castellano: su PDF cambiará.`);
       lineas.push("Las cotizaciones nuevas copian estas condiciones al crearse; las que ya las copiaron no cambian.");
       if (ia.length) {
-        lineas.push(`La IA del CRM usa esta plantilla en sus traslados (clientes: ${ia.map(x => ETIQUETA_SEGMENTO[x.segmento]).join(", ")}): sus próximas cotizaciones saldrán por WhatsApp con estas condiciones, sin revisión.`);
+        lineas.push(`La IA del CRM usa esta plantilla en sus traslados (${quienesIA(ia)}): sus próximas cotizaciones saldrán por WhatsApp con estas condiciones, sin revisión.`);
         const raras = LISTAS.flatMap(l => (patch[l.k] as string[] | null) ?? []).filter(x => avisoLineaIA(x)).length;
         if (raras) lineas.push(`${plural(raras, "línea trae", "líneas traen")} un enlace, un número largo o palabras de pago (están marcadas en ámbar): con un enlace o un número largo la IA deja sus cotizaciones para revisión; las palabras de pago salen sin revisión, revisa que no pidan pagos.`);
       }
-      const pedir = !c || "error" in c || c.n > 0 || ia.length > 0;
+      lineas.push(...lineasIA);
+      const pedir = !c || "error" in c || c.n > 0 || ia.length > 0 || lineasIA.length > 0;
       if (pedir && !window.confirm(`Cambiaste las condiciones de «${nombre}».\n\n• ${lineas.join("\n• ")}\n\n¿Guardar?`)) return;
     }
 
@@ -340,14 +375,19 @@ export default function PlantillasPDFPage() {
   const bloqueoDesactivar = (p: Fila): string | null => {
     if (!esActiva(p)) return null;
     if (p.es_principal) return "La plantilla principal no se desactiva: es la que usa toda cotización sin regla.";
-    const enUso = reglasQueUsan(reglas, p.id);
-    if (enUso.length) return `No se puede desactivar: la usan las reglas ${enUso.map(etiquetaCelda).join(", ")}. Cámbialas abajo primero.`;
+    const enUso = [...reglasQueUsan(reglasVigentes, p.id).map(etiquetaCelda), ...reglasTrasladoQueUsan(reglasTraslado, p.id).map(etiquetaCeldaTraslado)];
+    if (enUso.length) return `No se puede desactivar: la usan las reglas ${enUso.join(", ")}. Cámbialas abajo primero.`;
     return null;
   };
 
   const cambiarActiva = async (p: Fila) => {
     const activar = !esActiva(p);
     if (!activar && bloqueoDesactivar(p)) return;
+    if (activar && reglasTraslado !== null) {
+      // Una plantilla desactivada que una celda del traslado ya nombra empieza a usarse (y puede encender el inglés).
+      const lineasIA = lineasCambioTraslado(cambiosTraslado({ plantillas, reglasTraslado }, { plantillas: plantillas.map(x => (x.id === p.id ? { ...x, activa: true } : x)), reglasTraslado }));
+      if (lineasIA.length && !window.confirm(`Activar «${p.nombre}» cambia lo que manda la IA en sus traslados:\n\n• ${lineasIA.join("\n• ")}\n\n¿Activarla?`)) return;
+    }
     setErrorActiva(e => { const n = { ...e }; delete n[p.id]; return n; });
     try {
       const r = filasDeVuelta(await supabase.from(TABLA_PLANTILLAS).update({ activa: activar }).eq("id", p.id).select("id"), `La plantilla «${p.nombre}»`);
@@ -410,14 +450,27 @@ export default function PlantillasPDFPage() {
   /** «Se usa en: …», de lo que RESULTA de las reglas (no solo de las filas que apuntan aquí). */
   const textoUso = (p: Fila): { texto: string; ignoradas: { celda: string; detalle: string }[] } => {
     const usos = usosDe(p.id);
-    const porRegla = usos.filter(u => u.uso.codigo === "regla").map(u => etiquetaCelda(u));
+    // Las celdas del traslado de la IA (idioma × moneda): una celda «inglés» solo con el inglés encendido.
+    const usosT = traslado ? traslado.celdas.filter(e => e.vigente && e.uso.plantilla?.id === p.id) : [];
+    const porRegla = [
+      ...usos.filter(u => u.uso.codigo === "regla").map(u => etiquetaCelda(u)),
+      ...usosT.filter(e => e.uso.codigo === "regla").map(e => etiquetaCeldaTraslado(e.celda)),
+    ];
     const otras = usos.filter(u => u.uso.codigo !== "regla");
-    const ignoradas = reglasQueUsan(reglas, p.id)
-      .map(r => ({ r, uso: celdas.find(c => c.servicio === r.servicio && c.segmento === r.segmento)?.uso }))
-      .filter(x => x.uso && x.uso.plantilla?.id !== p.id)
-      .map(x => ({ celda: etiquetaCelda(x.r), detalle: x.uso!.detalle }));
+    const otrasT = usosT.filter(e => e.uso.codigo !== "regla");
+    const ignoradas = [
+      ...reglasQueUsan(reglasVigentes, p.id)
+        .map(r => ({ r, uso: celdas.find(c => c.servicio === r.servicio && c.segmento === r.segmento)?.uso }))
+        .filter(x => x.uso && x.uso.plantilla?.id !== p.id)
+        .map(x => ({ celda: etiquetaCelda(x.r), detalle: x.uso!.detalle })),
+      // Una regla del traslado que la nombra y no la usa (desactivada, otro idioma…), o que no se usa porque el inglés está apagado.
+      ...(traslado ? reglasTrasladoQueUsan(reglasTraslado, p.id) : [])
+        .map(r => traslado!.celdas.find(e => e.celda.idioma === r.idioma && e.celda.moneda === r.moneda))
+        .filter(e => !!e && !(e.vigente && e.uso.plantilla?.id === p.id))
+        .map(e => ({ celda: etiquetaCeldaTraslado(e!.celda), detalle: e!.texto })),
+    ];
     let texto: string;
-    if (!usos.length) texto = "No la usa ninguna regla: solo se usa si se elige al imprimir.";
+    if (!usos.length && !usosT.length) texto = "No la usa ninguna regla: solo se usa si se elige al imprimir.";
     else {
       const partes: string[] = [];
       if (porRegla.length) partes.push(porRegla.join(", "));
@@ -425,6 +478,9 @@ export default function PlantillasPDFPage() {
         partes.push(reglas === null
           ? "todas las cotizaciones nuevas (es la principal; todavía no hay reglas)"
           : `${otras.length === 1 ? etiquetaCelda(otras[0]) : plural(otras.length, "celda", "celdas")} sin regla (es la principal)`);
+      }
+      for (const e of otrasT) {
+        partes.push(`${etiquetaCeldaTraslado(e.celda)} ${e.uso.codigo === "sin_plantilla_idioma" ? "(no hay una plantilla en inglés: sale con estas condiciones en castellano, en revisión)" : "(es la principal)"}`);
       }
       texto = `Se usa en: ${partes.join(" y ")}.`;
     }
@@ -612,7 +668,7 @@ export default function PlantillasPDFPage() {
                 </p>
                 {iaBase.length > 0 && (
                   <p style={{ margin: "8px 0 0", color: "#5b21b6" }}>
-                    🤖 La IA del CRM manda esta plantilla en sus traslados (clientes {iaBase.map(x => ETIQUETA_SEGMENTO[x.segmento]).join(", ")}): sus condiciones y sus cuentas salen por WhatsApp sin revisión. El PDF exacto que manda la IA se ve en{" "}
+                    🤖 La IA del CRM manda esta plantilla en sus traslados ({quienesIA(iaBase)}): sus condiciones y sus cuentas salen por WhatsApp sin revisión. El PDF exacto que manda la IA se ve en{" "}
                     <Link href="/tarifario?vista=zonas&tab=simulador" style={{ color: "#5b21b6", fontWeight: 800 }}>/tarifario → Zonas y traslados → Simulador</Link>.
                   </p>
                 )}
@@ -700,10 +756,14 @@ export default function PlantillasPDFPage() {
                   const c = conteos[base.id];
                   const respaldoNombre = principalActual && principalActual.id !== base.id ? `la plantilla principal «${principalActual.nombre}»` : "fábrica";
                   // El ámbar sale en toda plantilla que la IA PUEDE usar (activa, corporativa, en castellano
-                  // —con el idioma que hay en el formulario—), no solo en la que ya usa: asignarla a traslados
-                  // es un clic en la cuadrícula de reglas, y ahí ya no se ven sus líneas.
-                  const sirveIA = sirveParaIA({ ...base, idioma: form.idioma ?? base.idioma } as PlantillaFila);
+                  // —con el idioma que hay en el formulario—, o en inglés con la regla del traslado por
+                  // idioma, cotizaciones-09), no solo en la que ya usa: asignarla a traslados es un clic en
+                  // la cuadrícula de reglas, y ahí ya no se ven sus líneas.
+                  const conIdioma = { ...base, idioma: form.idioma ?? base.idioma } as PlantillaFila;
+                  const sirveIngles = reglasTraslado !== null && sirveParaIA(conIdioma, "en");
+                  const sirveIA = sirveParaIA(conIdioma) || sirveIngles;
                   const avisoLinea = iaBase.length > 0 || sirveIA ? (linea: string) => avisoLineaIA(linea, { enUso: iaBase.length > 0 }) : undefined;
+                  const sinCeldaIngles = sirveIngles && !reglasTrasladoQueUsan(reglasTraslado, base.id).some(r => r.idioma === "en");
                   return (
                     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                       <div style={gris}>
@@ -713,6 +773,7 @@ export default function PlantillasPDFPage() {
                         )}
                         {!c && <p style={{ margin: "6px 0 0" }}>Contando las cotizaciones antiguas que usan esta plantilla…</p>}
                         {c && "error" in c && <p style={{ margin: "6px 0 0" }}>No se pudo contar cuántas cotizaciones antiguas usan esta plantilla ({c.error}).</p>}
+                        {sinCeldaIngles && <p style={{ margin: "6px 0 0" }}>{PUEDE_INGLES}</p>}
                       </div>
 
                       {ninguna ? (
@@ -855,9 +916,26 @@ export default function PlantillasPDFPage() {
                       <div style={gris}>
                         El idioma no lo dibuja la plantilla: lo lee la cotización. Con <b>English</b>, una cotización nueva que use esta plantilla preselecciona el PDF en inglés; en inglés no se imprimen el título ni el cierre de la plantilla (están en castellano), y las condiciones copiadas salen tal cual se escribieron.
                       </div>
-                      {idi === "en" && iaBase.length > 0 && (
-                        <div style={ambar}>⚠ En inglés la IA deja de usar esta plantilla (sus textos del sistema solo existen en castellano): sus traslados de clientes {iaBase.map(x => ETIQUETA_SEGMENTO[x.segmento]).join(", ")} pasarían a la plantilla principal.</div>
-                      )}
+                      {reglasTraslado === null ? (
+                        idi === "en" && iaBase.length > 0 && (
+                          <div style={ambar}>⚠ En inglés la IA deja de usar esta plantilla (sin {SQL_REGLAS_TRASLADO} la IA solo cotiza en castellano): sus traslados de {quienesIA(iaBase)} pasarían a la plantilla principal.</div>
+                        )
+                      ) : (() => {
+                        // Lo que cambia en el traslado de la IA con ESTE idioma, con el mismo motor que la cuadrícula.
+                        const conIdioma: PlantillaFila[] = plantillas.map(p => (p.id === base.id ? { ...p, idioma: (form.idioma ?? p.idioma) as string | null } : p));
+                        const lineasIA = lineasCambioTraslado(cambiosTraslado({ plantillas, reglasTraslado }, { plantillas: conIdioma, reglasTraslado }));
+                        if (lineasIA.length) {
+                          return (
+                            <div style={ambar}>
+                              <p style={{ margin: 0, fontWeight: 800 }}>⚠ Al guardar con este idioma cambia lo que manda la IA en sus traslados:</p>
+                              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>{lineasIA.map((l, i) => <li key={i}>{l}</li>)}</ul>
+                            </div>
+                          );
+                        }
+                        const sinCeldaIngles = sirveParaIA({ ...base, idioma: form.idioma ?? base.idioma } as PlantillaFila, "en")
+                          && !reglasTrasladoQueUsan(reglasTraslado, base.id).some(r => r.idioma === "en");
+                        return sinCeldaIngles ? <div style={gris}>{PUEDE_INGLES}</div> : null;
+                      })()}
                     </div>
                   );
                 })()}
@@ -883,7 +961,14 @@ export default function PlantillasPDFPage() {
             {reglas === null ? (
               <div style={ambar}>⚠ Las reglas no están disponibles: falta correr {SQL_PLANTILLAS_USO} en Supabase. Mientras tanto, toda cotización nueva usa la plantilla principal y la IA usa las condiciones de /tarifario → Zonas y traslados → Ajustes.</div>
             ) : (
-              <ReglasUso plantillas={plantillas} reglas={reglas} aviso={mostrarToast} onCambio={async () => { await recargar(); }} perfil={perfil.estado === "ok" ? perfil.perfil : undefined} />
+              <>
+                <ReglasUso plantillas={plantillas} reglas={reglas} reglasTraslado={reglasTraslado} aviso={mostrarToast} onCambio={async () => { await recargar(); }} perfil={perfil.estado === "ok" ? perfil.perfil : undefined} />
+                {reglasTraslado !== null && (
+                  <div style={{ borderTop: `1px solid ${C.gray200}`, marginTop: 14, paddingTop: 14 }}>
+                    <ReglasTraslado plantillas={plantillas} reglasTraslado={reglasTraslado} aviso={mostrarToast} onCambio={async () => { await recargar(); }} perfil={perfil.estado === "ok" ? perfil.perfil : undefined} />
+                  </div>
+                )}
+              </>
             )}
           </div>
         </>

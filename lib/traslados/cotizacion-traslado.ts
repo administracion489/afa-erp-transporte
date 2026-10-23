@@ -700,7 +700,7 @@ export function entradaCorporativaTraslado(
     contactoClienteId?: number | string | null;
     plantilla?: PlantillaPdfCfg | null;
     categoria?: CategoriaPdf | null;
-    /** El PDF de ejemplo del simulador: el número dice EJEMPLO. */
+    /** El PDF de ejemplo del simulador: el número dice EJEMPLO (SAMPLE en una fila en inglés). */
     ejemplo?: boolean;
     /** Para filtrar las fotos que no son del bucket del propio proyecto (el servidor lo pasa). */
     supabaseUrl?: string | null;
@@ -736,7 +736,7 @@ export function entradaCorporativaTraslado(
   return {
     cot: {
       id: fila.id,
-      numero_cotizacion: x.ejemplo ? "EJEMPLO" : fila.numero_cotizacion ?? null,
+      numero_cotizacion: x.ejemplo ? (en ? "SAMPLE" : "EJEMPLO") : fila.numero_cotizacion ?? null,
       origen: v(fila.origen), destino: v(fila.destino), km: null,
       atencion, asunto: null, punto_retorno: null,
       fecha_servicio: fila.fecha_servicio, fecha_retorno: fila.tipo_servicio === "ida_retorno" ? fila.fecha_retorno : null,

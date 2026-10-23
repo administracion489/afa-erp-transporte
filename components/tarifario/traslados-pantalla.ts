@@ -3,7 +3,11 @@
 // su cuenta, en PURO (sin base ni React): el orden por sector, cómo se lee un precio tecleado, qué
 // alias se rechazan y cómo se arman las filas de la tabla de precios. Y, desde cotizaciones-05, qué
 // condiciones del PDF del traslado enseñan Ajustes y el Simulador (`condicionesTrasladoIA`,
-// `condicionesDelSimulador`): la plantilla la elige `plantillaParaUso`, no esta pantalla.
+// `condicionesDelSimulador`): la plantilla la elige `plantillaParaUso`, no esta pantalla. Desde
+// cotizaciones-09 la regla del traslado es IDIOMA × MONEDA (cuatro celdas) y la elige
+// `plantillaTrasladoIA`; si el inglés está encendido lo dice `inglesDisponible` (`lineasInglesIA`), y
+// el idioma que el simulador probó lo dice `idiomaDelSimulador`, con la MISMA detección que el chat
+// (`idiomaDelCliente`, lib/idioma-cliente.ts).
 //
 // QUÉ ZONA, QUÉ VEHÍCULO Y QUÉ PRECIO NO SE DECIDEN AQUÍ: los decide lib/traslados/motor.ts, y esta
 // pantalla lo importa. En particular, el precio «heredado» de una subzona que se enseña en gris
@@ -13,32 +17,38 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import {
-  claveNombre, esGenerico, nombresDeZona, ordenarCategorias, tarifaDelPar,
-  type CategoriaTraslado, type Moneda, type TarifaTraslado, type Zona,
+  claveNombre, esGenerico, monedaDelPedido, nombresDeZona, ordenarCategorias, tarifaDelPar,
+  type CategoriaTraslado, type CodigoMoneda, type Moneda, type TarifaTraslado, type Zona,
 } from "@/lib/traslados/motor";
 import { zonaConEnvio } from "@/lib/traslados/envio-ia";
 import { BUCKETS_PRIVADOS } from "@/lib/storage-privado";
 import {
-  esIdPlantillaValido, etiquetaCelda, plantillaParaUso, SEGMENTOS, SQL_PLANTILLAS_USO,
-  type CodigoUso, type PlantillaFila, type ReglaPlantilla, type Segmento,
+  CELDAS_TRASLADO, ETIQUETA_SEGMENTO, esIdPlantillaValido, etiquetaCelda, etiquetaCeldaTraslado, inglesActivo, inglesDisponible, plantillaParaUso,
+  plantillaTrasladoIA, SEGMENTOS, SQL_PLANTILLAS_USO, SQL_REGLAS_TRASLADO,
+  type CeldaTraslado, type CodigoUso, type InglesTraslado, type PlantillaFila, type ReglaPlantilla, type ReglaTraslado, type Segmento,
 } from "@/lib/cotizacion-plantillas";
 import { considDeTraslado, MAX_DESCRIPCION_CLIENTE, MAX_RENGLONES_CLIENTE, normalizarDescripcionCliente } from "@/lib/traslados/cotizacion-traslado";
+import { idiomaDelCliente, type CodigoIdiomaCliente, type IdiomaCliente } from "@/lib/idioma-cliente";
 
 /** `envio_automatico` es de traslados-05: sin esa migración llega `undefined`, que es «no». */
 export type ZonaFila = Zona & { notas?: string | null; envio_automatico?: boolean | null };
 export type TarifaFila = TarifaTraslado & { id: number; notas?: string | null };
 /**
- * Las tres últimas son de traslados-07 (lo que el PDF de la IA enseña de la categoría): sin esa
- * migración llegan `null` y la pantalla lo dice nombrando el SQL. El motor no las lee.
+ * Las tres primeras son de traslados-07 (lo que el PDF de la IA enseña de la categoría): sin esa
+ * migración llegan `null` y la pantalla lo dice nombrando el SQL. `descripcion_cliente_en` es de
+ * traslados-10 (la descripción EN INGLÉS, aparte: que falte no apaga las fotos). El motor no las lee.
  */
 export type CategoriaFila = CategoriaTraslado & {
   foto_externa_url?: string | null;
   foto_interna_url?: string | null;
   descripcion_cliente?: string | null;
+  descripcion_cliente_en?: string | null;
 };
 
 /** La migración que agrega las fotos y la descripción de la categoría, y las listas Incluye / No incluye. */
 export const SQL_FOTOS_CATEGORIA = "supabase/traslados-07-fotos-categoria.sql";
+/** La migración que agrega la descripción de la categoría EN INGLÉS (la del PDF de una cotización en inglés). */
+export const SQL_DESCRIPCION_INGLES = "supabase/traslados-10-descripcion-ingles.sql";
 
 export const MONEDAS: readonly Moneda[] = ["PEN", "USD"];
 export const SIMBOLO: Record<Moneda, string> = { PEN: "S/", USD: "US$" };
@@ -474,17 +484,26 @@ export function mensajeEnvioZona(z: { id: number | null; nombre: string; tipo: Z
   return partes.join("\n\n");
 }
 
-// ── Las condiciones del PDF del traslado de la IA (cotizaciones-05) ──────────
+// ── Las condiciones del PDF del traslado de la IA (cotizaciones-05 y -09) ────
 // Desde supabase/cotizaciones-05 las condiciones del PDF del traslado salen de la plantilla de la
-// regla «Traslado de la IA × segmento» (lib/traslados/plantilla-traslado-datos.ts), no de Ajustes.
-// QUÉ PLANTILLA usa cada segmento lo decide `plantillaParaUso` (el MISMO motor que usa la IA), y QUÉ
-// LISTAS se copian a la fila lo decide `considDeTraslado` (lib/traslados/cotizacion-traslado.ts), la
-// MISMA función que usa `filaCotizacionTraslado`: la pantalla no tiene su propia copia. La matriz
-// cruza además `condicionesTrasladoIA` contra esa fila, segmento por segmento.
+// regla «Traslado de la IA × segmento» (lib/traslados/plantilla-traslado-datos.ts), no de Ajustes; y
+// desde cotizaciones-09, de la regla IDIOMA × MONEDA (cuatro celdas: castellano o inglés, en soles o
+// en dólares). QUÉ PLANTILLA usa cada celda lo decide `plantillaTrasladoIA` (sin cotizaciones-09,
+// `plantillaParaUso`): el MISMO motor que usa la IA. QUÉ LISTAS se copian a la fila lo decide
+// `considDeTraslado` (lib/traslados/cotizacion-traslado.ts), la MISMA función que usa
+// `filaCotizacionTraslado`: la pantalla no tiene su propia copia. La matriz cruza además
+// `condicionesTrasladoIA` contra esa fila, celda por celda.
 //
-// MIENTRAS ALGÚN SEGMENTO CAIGA A LAS LISTAS DE AJUSTES (sin una plantilla que la IA pueda usar),
+// MIENTRAS ALGUNA CELDA CAIGA A LAS LISTAS DE AJUSTES (sin una plantilla que la IA pueda usar),
 // esas listas se siguen EDITANDO en Ajustes: las lee la IA (`listasDeAjustesEnUso`). Solo las que no
 // lee nadie dejan de ofrecerse y de guardarse.
+//
+// UNA CELDA «INGLÉS» NUNCA CAE POR SU CUENTA A LAS LISTAS DE AJUSTES (están en castellano): sin una
+// plantilla en inglés que sirva, cae a lo que use la celda CASTELLANO de su misma moneda y la
+// cotización queda en revisión (`sin_plantilla_idioma`). Por eso las celdas «inglés» no deciden qué
+// listas de Ajustes se ofrecen; si su castellano cae a Ajustes, el aviso lo dice así. Con el inglés
+// APAGADO (`inglesDisponible`: ninguna celda «inglés» con una plantilla en inglés que sirva), las
+// celdas «inglés» no las usa ninguna cotización: se enseñan en gris, nunca en ámbar.
 
 /** Lo que `traslados_config` aporta a las condiciones (las cuatro listas de antes de cotizaciones-05). */
 export type ConfigCondiciones = {
@@ -498,21 +517,40 @@ export type ConfigCondiciones = {
 export type ListaCondicion = { items: string[]; propia: boolean };
 
 /**
- * Cómo resolvió `plantillaParaUso` un segmento. `detalle` es su frase entera; `porque`, la misma sin
- * el nombre de la celda delante (la pantalla ya lo pone). `ambar`: contradice lo configurado (o no
- * hay una plantilla que la IA pueda usar).
+ * Cómo resolvió el motor UNA celda de la regla del traslado. Con la regla vieja (sin
+ * cotizaciones-09) la celda es un SEGMENTO (`segmento`); con la nueva, IDIOMA × MONEDA (`celda`).
+ * `detalle` es la frase entera del motor; `porque`, la misma sin el nombre de la celda delante (la
+ * pantalla ya lo pone). `ambar`: contradice lo configurado (o no hay una plantilla que la IA pueda
+ * usar). `sinUso`: una celda «inglés» con el inglés apagado — hoy no la usa ninguna cotización.
  */
-export type UsoSegmentoIA = { segmento: Segmento; codigo: CodigoUso; detalle: string; porque: string; ambar: boolean };
+export type UsoCeldaIA = {
+  segmento: Segmento | null;
+  celda: CeldaTraslado | null;
+  /** Identidad estable: el segmento («empresa») o la celda («en|USD»). */
+  clave: string;
+  /** Para los títulos: «Empresa», «Inglés · dólares». */
+  etiqueta: string;
+  /** Para las frases: «empresa», «inglés · dólares». */
+  nombre: string;
+  /** Se cotiza en dólares: lo que copia de Ajustes lleva las líneas solo para dólares. */
+  usd: boolean;
+  codigo: CodigoUso;
+  detalle: string;
+  porque: string;
+  ambar: boolean;
+  sinUso: boolean;
+};
 
 /**
- * Los segmentos que comparten la MISMA fuente de condiciones (empresa y particular suelen llevar la
- * misma plantilla): se enseñan una vez. `fuente.tipo === "ajustes"`: no hay una plantilla que la IA
- * pueda usar en esos segmentos y la IA copia las de `traslados_config` (en dólares, con las de dólares).
+ * Las celdas que comparten la MISMA fuente de condiciones (empresa y particular suelen llevar la
+ * misma plantilla; una celda «inglés» sin plantilla en inglés, la de su castellano): se enseñan una
+ * vez. `fuente.tipo === "ajustes"`: no hay una plantilla que la IA pueda usar en esas celdas y la IA
+ * copia las de `traslados_config` (en dólares, con las de dólares).
  */
 export type GrupoCondicionesIA = {
   clave: string;
   fuente: { tipo: "plantilla"; plantilla: PlantillaFila } | { tipo: "ajustes"; usd: boolean };
-  segmentos: UsoSegmentoIA[];
+  usos: UsoCeldaIA[];
   generales: ListaCondicion;
   incluye: ListaCondicion;
   no_incluye: ListaCondicion;
@@ -537,50 +575,96 @@ export function lineasPoliticaYResumen(g: Pick<GrupoCondicionesIA, "reserva" | "
   return [...g.reserva.items, ...g.reserva_resumen.items];
 }
 
-/** Los códigos de `plantillaParaUso` que pintan ámbar: la configuración dice una cosa y la IA hace otra (o falta el SQL). */
-const USO_AMBAR: readonly CodigoUso[] = ["regla_inactiva", "regla_no_sirve_ia", "sin_plantilla", "sin_reglas"];
+/**
+ * Los códigos del motor que pintan ámbar: la configuración dice una cosa y la IA hace otra (o falta
+ * el SQL). `sin_plantilla_idioma` también: la cotización en inglés sale con condiciones en
+ * castellano y queda en revisión (solo cuando el inglés está encendido: si no, la celda no se usa).
+ */
+const USO_AMBAR: readonly CodigoUso[] = ["regla_inactiva", "regla_no_sirve_ia", "sin_plantilla", "sin_reglas", "sin_plantilla_idioma"];
 export const usoEsAmbar = (c: CodigoUso): boolean => USO_AMBAR.includes(c);
 
+const nombreSegmento = (s: Segmento): string => etiquetaCelda({ servicio: "traslado_ia", segmento: s }).split(" · ")[1] ?? s;
+/** «inglés · dólares»: la celda sin «Traslado de la IA» delante. */
+const nombreCeldaTraslado = (c: CeldaTraslado): string => etiquetaCeldaTraslado(c).split(" · ").slice(1).join(" · ");
+const mayuscula = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1);
+/** Sin el «Traslado de la IA · …: » con que el motor empieza la frase. */
+const sinPrefijo = (detalle: string, prefijo: string): string => (detalle.startsWith(prefijo) ? detalle.slice(prefijo.length) : detalle);
+
+/** La celda castellano de la misma moneda, adonde cae una celda «inglés» sin plantilla en inglés. */
+export const celdaCastellanoDe = (c: CeldaTraslado): CeldaTraslado => ({ idioma: "es", moneda: c.moneda });
+
 /**
- * Qué condiciones copia la IA a la fila en cada segmento, CON reglas (cotizaciones-05 corrida). En
- * el traslado el segmento `extranjero` es SIEMPRE en dólares y los otros dos en soles
- * (`segmentoDeCliente`: la moneda manda), así que el respaldo de Ajustes de `extranjero` lleva las
- * líneas de dólares. Sin reglas (`reglas === null`) no se llama: Ajustes edita sus listas como antes.
+ * Qué condiciones copia la IA a la fila en cada celda, CON reglas. Dos modos, según la tabla que
+ * exista:
+ *  · `reglasTraslado` (cotizaciones-09): las cuatro celdas idioma × moneda (`plantillaTrasladoIA`).
+ *    Las de inglés con el inglés apagado van con `sinUso` (gris, sin ámbar).
+ *  · Sin ella (`reglasTraslado === null`): los tres segmentos de la regla vieja (`plantillaParaUso`),
+ *    byte a byte lo de antes. Ahí `extranjero` es SIEMPRE en dólares y los otros dos en soles
+ *    (`segmentoDeCliente`: la moneda manda), así que el respaldo de Ajustes de `extranjero` lleva las
+ *    líneas de dólares.
+ * Sin ninguna regla no se llama: Ajustes edita sus listas como antes.
  */
 export function condicionesTrasladoIA(
   plantillas: readonly PlantillaFila[],
-  reglas: readonly ReglaPlantilla[],
+  reglas: readonly ReglaPlantilla[] | null,
   config: ConfigCondiciones,
+  reglasTraslado: readonly ReglaTraslado[] | null = null,
 ): GrupoCondicionesIA[] {
   const grupos: GrupoCondicionesIA[] = [];
-  for (const segmento of SEGMENTOS) {
-    const u = plantillaParaUso({ servicio: "traslado_ia", segmento }, plantillas, reglas);
-    const prefijo = `${etiquetaCelda({ servicio: "traslado_ia", segmento })}: `;
-    const porque = u.codigo === "regla" ? "por la regla." : u.detalle.startsWith(prefijo) ? u.detalle.slice(prefijo.length) : u.detalle;
-    const uso: UsoSegmentoIA = { segmento, codigo: u.codigo, detalle: u.detalle, porque, ambar: usoEsAmbar(u.codigo) };
-    const usd = segmento === "extranjero";
-    const clave = u.plantilla ? `plantilla:${u.plantilla.id}` : `ajustes:${usd ? "usd" : "pen"}`;
+  const agregar = (uso: UsoCeldaIA, plantilla: PlantillaFila | null, moneda: Moneda) => {
+    const clave = plantilla ? `plantilla:${plantilla.id}` : `ajustes:${moneda === "USD" ? "usd" : "pen"}`;
     const ya = grupos.find((g) => g.clave === clave);
-    if (ya) { ya.segmentos.push(uso); continue; }
+    if (ya) { ya.usos.push(uso); return; }
     // Lo que la IA copia a la fila: la MISMA función que usa `filaCotizacionTraslado`.
-    const c = considDeTraslado(u.plantilla, config, usd ? "USD" : "PEN");
-    const p = u.plantilla;
+    const c = considDeTraslado(plantilla, config, moneda);
+    const p = plantilla;
     grupos.push({
-      clave, fuente: p ? { tipo: "plantilla", plantilla: p } : { tipo: "ajustes", usd }, segmentos: [uso],
+      clave, fuente: p ? { tipo: "plantilla", plantilla: p } : { tipo: "ajustes", usd: moneda === "USD" }, usos: [uso],
       generales: { items: c.generales, propia: p ? Array.isArray(p.condiciones_generales) : true },
       incluye: { items: c.incluye, propia: p ? Array.isArray(p.condiciones_incluye) : true },
       no_incluye: { items: c.no_incluye, propia: p ? Array.isArray(p.condiciones_no_incluye) : true },
       reserva: { items: c.reserva ?? [], propia: !!p && Array.isArray(p.condiciones_reserva) },
       reserva_resumen: { items: c.reserva_resumen ?? [], propia: !!p && Array.isArray(p.condiciones_reserva_resumen) },
     });
+  };
+
+  if (reglasTraslado) {
+    const inglesOn = inglesActivo(inglesDisponible(plantillas, reglasTraslado));
+    for (const celda of CELDAS_TRASLADO) {
+      const u = plantillaTrasladoIA(celda, plantillas, reglasTraslado, { reglas: reglas ?? null, segmento: celda.moneda === "USD" ? "extranjero" : "particular" });
+      const nombre = nombreCeldaTraslado(celda);
+      const sinUso = celda.idioma === "en" && !inglesOn;
+      const porque = sinUso
+        ? "el inglés está apagado: hoy no la usa ninguna cotización (los clientes que escriben en inglés reciben todo en castellano, como hoy)."
+        : u.codigo === "regla" ? "por la regla." : sinPrefijo(u.detalle, `${etiquetaCeldaTraslado(celda)}: `);
+      agregar({
+        segmento: null, celda, clave: `${celda.idioma}|${celda.moneda}`, etiqueta: mayuscula(nombre), nombre, usd: celda.moneda === "USD",
+        codigo: u.codigo, detalle: u.detalle, porque, ambar: !sinUso && usoEsAmbar(u.codigo), sinUso,
+      }, u.plantilla, celda.moneda);
+    }
+    return grupos;
+  }
+
+  for (const segmento of SEGMENTOS) {
+    const u = plantillaParaUso({ servicio: "traslado_ia", segmento }, plantillas, reglas);
+    const prefijo = `${etiquetaCelda({ servicio: "traslado_ia", segmento })}: `;
+    const porque = u.codigo === "regla" ? "por la regla." : sinPrefijo(u.detalle, prefijo);
+    const usd = segmento === "extranjero";
+    agregar({
+      segmento, celda: null, clave: segmento, etiqueta: ETIQUETA_SEGMENTO[segmento], nombre: nombreSegmento(segmento), usd,
+      codigo: u.codigo, detalle: u.detalle, porque, ambar: usoEsAmbar(u.codigo), sinUso: false,
+    }, u.plantilla, usd ? "USD" : "PEN");
   }
   return grupos;
 }
 
-/** «empresa y particular»: los segmentos de un grupo, en minúsculas. */
-export function segmentosTexto(g: Pick<GrupoCondicionesIA, "segmentos">): string {
-  return listaY(g.segmentos.map((s) => nombreSegmento(s.segmento)));
+/** «empresa y particular»: las celdas de un grupo que se usan hoy, en minúsculas. */
+export function usosTexto(g: Pick<GrupoCondicionesIA, "usos">): string {
+  return listaY(g.usos.filter((u) => !u.sinUso).map((u) => u.nombre));
 }
+
+/** ¿Todas las celdas de un grupo están sin uso (inglés apagado)? Entonces no se imprime en ningún PDF. */
+export const grupoSinUso = (g: Pick<GrupoCondicionesIA, "usos">): boolean => g.usos.length > 0 && g.usos.every((u) => u.sinUso);
 
 /** El enlace al editor de esa plantilla (`?editar=` solo con un id de forma válida: va en la URL). */
 export function enlaceEditarPlantilla(id: string | null | undefined): string {
@@ -589,83 +673,162 @@ export function enlaceEditarPlantilla(id: string | null | undefined): string {
 
 /**
  * QUÉ LISTAS DE AJUSTES LEE HOY LA IA, y por tanto se ofrecen y se guardan. `grupos === null` (sin
- * reglas: falta el SQL, o no se pudo comprobar) → las cuatro, en todos los segmentos (`segmentos:
- * null`). Con reglas, solo las de los segmentos que caen a Ajustes (sin una plantilla que la IA pueda
- * usar): consideraciones, Incluye y No incluye si cae alguno; las de dólares solo si cae
- * `extranjero` (el único que se cotiza en dólares). Si no cae ninguno, ninguna: nadie las lee.
+ * reglas: falta el SQL, o no se pudo comprobar) → las cuatro, en todas las celdas (`usos: null`). Con
+ * reglas, solo las de las celdas que caen a Ajustes (sin una plantilla que la IA pueda usar):
+ * consideraciones, Incluye y No incluye si cae alguna; las de dólares solo si cae una en dólares. Si
+ * no cae ninguna, ninguna: nadie las lee. LAS CELDAS «INGLÉS» NO CUENTAN: nunca caen a Ajustes por su
+ * cuenta (caen a su castellano); las que, por caer su castellano a Ajustes, también imprimen estas
+ * listas van en `ingles`, para decirlo.
  */
-export type UsoListasAjustes = { enUso: boolean; usd: boolean; segmentos: Segmento[] | null };
+export type UsoListasAjustes = {
+  enUso: boolean;
+  usd: boolean;
+  usos: UsoCeldaIA[] | null;
+  /** Cuántas celdas cuentan (los tres segmentos, o las dos de castellano): para decir «las demás». */
+  total: number;
+  /** Las celdas «inglés» en uso que salen con estas listas (en castellano, en revisión). */
+  ingles: UsoCeldaIA[];
+};
+
+const cuentaParaAjustes = (u: UsoCeldaIA): boolean => u.celda?.idioma !== "en";
 
 export function listasDeAjustesEnUso(grupos: readonly GrupoCondicionesIA[] | null): UsoListasAjustes {
-  if (!grupos) return { enUso: true, usd: true, segmentos: null };
-  const segmentos = grupos.filter((g) => g.fuente.tipo === "ajustes").flatMap((g) => g.segmentos.map((x) => x.segmento));
-  return { enUso: segmentos.length > 0, usd: segmentos.includes("extranjero"), segmentos };
+  if (!grupos) return { enUso: true, usd: true, usos: null, total: 0, ingles: [] };
+  const deAjustes = grupos.filter((g) => g.fuente.tipo === "ajustes").flatMap((g) => g.usos);
+  const usos = deAjustes.filter(cuentaParaAjustes);
+  return {
+    enUso: usos.length > 0, usd: usos.some((u) => u.usd), usos,
+    total: grupos.flatMap((g) => g.usos).filter(cuentaParaAjustes).length,
+    ingles: deAjustes.filter((u) => !cuentaParaAjustes(u) && !u.sinUso),
+  };
 }
 
-const nombreSegmento = (s: Segmento): string => etiquetaCelda({ servicio: "traslado_ia", segmento: s }).split(" · ")[1] ?? s;
+const NOMBRE_MONEDA: Record<Moneda, string> = { PEN: "soles", USD: "dólares" };
 
 /**
- * La línea ámbar sobre las listas editables cuando hay reglas y algún segmento cae a Ajustes: qué
- * segmentos las usan, que lo demás usa su plantilla y, si las de dólares no las lee nadie, por qué no
- * se ofrecen. Sin reglas (`segmentos: null`) o sin segmentos que caigan, null (lo dice otra línea).
+ * La línea ámbar sobre las listas editables cuando hay reglas y alguna celda cae a Ajustes: cuáles
+ * las usan, que lo demás usa su plantilla y, si las de dólares no las lee nadie, por qué no se
+ * ofrecen. Y si una celda «inglés» sale con ellas, que cae a su castellano y queda en revisión. Sin
+ * reglas (`usos: null`) o sin celdas que caigan, null (lo dice otra línea).
  */
 export function avisoListasAjustes(u: UsoListasAjustes): string | null {
-  if (!u.segmentos || u.segmentos.length === 0) return null;
-  const todos = u.segmentos.length === SEGMENTOS.length;
-  const partes = [
-    `La IA usa estas listas en ${listaY(u.segmentos.map(nombreSegmento))} porque ahí no hay una plantilla que pueda usar (ver arriba): lo que cambies aquí va en el PDF de ${u.segmentos.length === 1 ? "ese tipo de cliente" : "esos tipos de cliente"}.`,
+  if (!u.usos || u.usos.length === 0) return null;
+  const nuevo = u.usos.some((x) => x.celda != null);
+  const todos = u.usos.length >= u.total;
+  const nombres = listaY(u.usos.map((x) => x.nombre));
+  const partes = [nuevo
+    ? `La IA usa estas listas en ${nombres} porque ahí no hay una plantilla que pueda usar (ver arriba): lo que cambies aquí va en el PDF de esas cotizaciones.`
+    : `La IA usa estas listas en ${nombres} porque ahí no hay una plantilla que pueda usar (ver arriba): lo que cambies aquí va en el PDF de ${u.usos.length === 1 ? "ese tipo de cliente" : "esos tipos de cliente"}.`,
   ];
-  if (!todos) partes.push("Los demás usan su plantilla.");
-  if (!u.usd) partes.push("Las líneas solo para dólares no se ofrecen: el tipo de cliente Extranjero usa su plantilla.");
+  if (!todos) partes.push(nuevo ? "La otra celda usa su plantilla." : "Los demás usan su plantilla.");
+  if (!u.usd) partes.push(nuevo ? "Las líneas solo para dólares no se ofrecen: en dólares se usa una plantilla." : "Las líneas solo para dólares no se ofrecen: el tipo de cliente Extranjero usa su plantilla.");
+  for (const e of u.ingles) {
+    const c = e.celda as CeldaTraslado;
+    partes.push(`Una cotización en inglés en ${NOMBRE_MONEDA[c.moneda]} no tiene plantilla en inglés y cae a ${nombreCeldaTraslado(celdaCastellanoDe(c))}: sale con estas mismas listas, en castellano, y queda en revisión.`);
+  }
   partes.push("Para que salgan de una plantilla, asígnala en Plantillas PDF.");
   return partes.join(" ");
 }
 
 /**
  * Una fuente cuyas consideraciones hablan de otros minutos que la espera gratis: una plantilla
- * (`plantilla`), o las listas de Ajustes (`plantilla: null`, todos los segmentos que caen a ellas
- * juntos: son el mismo texto, y avisarlo dos veces sería ruido).
+ * (`plantilla`), o las listas de Ajustes (`plantilla: null`, todas las celdas que caen a ellas
+ * juntas: son el mismo texto, y avisarlo dos veces sería ruido). `quienes`: las celdas, en minúsculas.
  */
-export type EsperaDistinta = { clave: string; plantilla: PlantillaFila | null; segmentos: Segmento[]; minutos: number[]; texto: string };
+export type EsperaDistinta = { clave: string; plantilla: PlantillaFila | null; quienes: string[]; minutos: number[]; texto: string };
 
 /**
  * `minutosQueNoCoinciden` contra las consideraciones generales que la IA copia de VERDAD (las de la
- * plantilla de cada segmento, o las de Ajustes donde no hay plantilla), con la frase que nombra cuál
+ * plantilla de cada celda, o las de Ajustes donde no hay plantilla), con la frase que nombra cuál
  * corregir. Con reglas, las listas de Ajustes solo se imprimen donde no hay plantilla: compararlas
- * en todos los casos avisaría de un texto que ningún PDF dice, y callaría el que sí.
+ * en todos los casos avisaría de un texto que ningún PDF dice, y callaría el que sí. Una plantilla
+ * que solo usan celdas sin uso (el inglés apagado) no la imprime nadie: no se avisa.
  */
 export function esperaQueNoCoincideIA(grupos: readonly GrupoCondicionesIA[], esperaMin: number): EsperaDistinta[] {
   const out: EsperaDistinta[] = [];
   const habla = (m: number[]) => m.map((x) => `${x} min`).join(", ");
   for (const g of grupos) {
-    if (g.fuente.tipo !== "plantilla") continue;
+    if (g.fuente.tipo !== "plantilla" || grupoSinUso(g)) continue;
     const minutos = minutosQueNoCoinciden(g.generales.items, esperaMin);
     if (minutos.length === 0) continue;
     const p = g.fuente.plantilla;
     out.push({
-      clave: g.clave, plantilla: p, segmentos: g.segmentos.map((x) => x.segmento), minutos,
-      texto: `La plantilla «${p.nombre || p.id}» (traslado de la IA · ${segmentosTexto(g)}) habla de ${habla(minutos)} y la espera gratis dice ${esperaMin} min: el PDF del traslado diría dos cosas distintas. Corrige sus consideraciones en Plantillas PDF, o el número.`,
+      clave: g.clave, plantilla: p, quienes: g.usos.filter((u) => !u.sinUso).map((u) => u.nombre), minutos,
+      texto: `La plantilla «${p.nombre || p.id}» (traslado de la IA · ${usosTexto(g)}) habla de ${habla(minutos)} y la espera gratis dice ${esperaMin} min: el PDF del traslado diría dos cosas distintas. Corrige sus consideraciones en Plantillas PDF, o el número.`,
     });
   }
   const deAjustes = grupos.filter((g) => g.fuente.tipo === "ajustes");
   if (deAjustes.length > 0) {
     const minutos = minutosQueNoCoinciden(deAjustes.flatMap((g) => g.generales.items), esperaMin);
-    if (minutos.length > 0) {
-      const segmentos = deAjustes.flatMap((g) => g.segmentos.map((x) => x.segmento));
+    const quienes = deAjustes.flatMap((g) => g.usos).filter(cuentaParaAjustes).map((u) => u.nombre);
+    if (minutos.length > 0 && quienes.length > 0) {
       out.push({
-        clave: "ajustes", plantilla: null, segmentos, minutos,
-        texto: `Las consideraciones de aquí abajo, que la IA usa en ${listaY(segmentos.map(nombreSegmento))}, hablan de ${habla(minutos)} y la espera gratis dice ${esperaMin} min: el PDF del traslado diría dos cosas distintas. Corrige el texto o el número.`,
+        clave: "ajustes", plantilla: null, quienes, minutos,
+        texto: `Las consideraciones de aquí abajo, que la IA usa en ${listaY(quienes)}, hablan de ${habla(minutos)} y la espera gratis dice ${esperaMin} min: el PDF del traslado diría dos cosas distintas. Corrige el texto o el número.`,
       });
     }
   }
   return out;
 }
 
+// ── El inglés del traslado de la IA (cotizaciones-09) ─────────────────────────
+// SI EL INGLÉS ESTÁ ENCENDIDO LO DICE `inglesDisponible` (el MISMO juicio de la IA): solo una celda
+// «Traslado de la IA · inglés» ASIGNADA por una persona a una plantilla en inglés que la IA pueda
+// usar. Gris apagado (como hoy: todo en castellano), ámbar a medias (una moneda queda en revisión),
+// verde encendido. Es ámbar solo lo que CAMBIA lo que hace el sistema de una forma que hay que mirar.
+
+export type LineasInglesIA = { tono: "gris" | "ambar" | "verde"; titulo: string; lineas: string[] };
+
+export function lineasInglesIA(ingles: InglesTraslado | null | undefined): LineasInglesIA {
+  const celda = (moneda: Moneda) => `«${etiquetaCeldaTraslado({ idioma: "en", moneda })}»`;
+  if (!ingles) {
+    return {
+      tono: "gris", titulo: "Inglés: falta el SQL",
+      lineas: [`Falta correr ${SQL_REGLAS_TRASLADO} en Supabase → SQL Editor (pegar entero → Run). Hasta entonces la IA cotiza todo en castellano, aunque el cliente escriba en inglés, como hoy.`],
+    };
+  }
+  const detecta = "El idioma lo detecta el sistema en los mensajes del cliente (no la IA).";
+  if (!inglesActivo(ingles)) {
+    return {
+      tono: "gris", titulo: "Inglés apagado",
+      lineas: [
+        "Ninguna celda «Traslado de la IA · inglés» tiene una plantilla en inglés: los clientes que escriben en inglés reciben todo en castellano, como hoy.",
+        `Para encenderlo, asigna una plantilla corporativa en inglés a ${celda("USD")} y a ${celda("PEN")} en Plantillas PDF. Con el inglés encendido, un cliente que escribe en inglés recibe el PDF y los mensajes en inglés y en dólares aunque escriba desde un número peruano, salvo que pida soles.`,
+      ],
+    };
+  }
+  if (ingles.PEN && ingles.USD) {
+    return {
+      tono: "verde", titulo: "Inglés encendido",
+      lineas: [
+        "Los clientes que escriben en inglés reciben el PDF y los mensajes en inglés: en dólares aunque escriban desde un número peruano, y en soles si los piden.",
+        "Los que escriben en otro idioma (portugués, francés, alemán, italiano) reciben inglés, con la moneda de su número salvo que pidan otra.",
+        detecta,
+      ],
+    };
+  }
+  const on: Moneda = ingles.USD ? "USD" : "PEN";
+  const falta: Moneda = on === "USD" ? "PEN" : "USD";
+  return {
+    tono: "ambar", titulo: `Inglés encendido solo en ${NOMBRE_MONEDA[on]}`,
+    lineas: [
+      on === "USD"
+        ? "Los clientes que escriben en inglés reciben el PDF y los mensajes en inglés, en dólares aunque escriban desde un número peruano."
+        : "Un cliente que escribe en inglés se cotiza en dólares salvo que pida soles, y en dólares no hay plantilla en inglés: casi toda cotización en inglés irá con las condiciones en castellano y quedará en revisión.",
+      `Una cotización en inglés en ${NOMBRE_MONEDA[falta]} sale con las condiciones de «${etiquetaCeldaTraslado({ idioma: "es", moneda: falta })}» (en castellano) y queda en revisión: asigna una plantilla en inglés a ${celda(falta)} en Plantillas PDF.`,
+      detecta,
+    ],
+  };
+}
+
+// ── Lo que dice el Simulador ─────────────────────────────────────────────────
+
 /**
  * Lo que el simulador dice de las condiciones del PDF, desde `respuesta.plantilla` y
  * `respuesta.condiciones` (lib/traslados/api.ts). Valida la forma (viene de la red). Una respuesta
  * que no trae ninguno de los dos (un servidor de antes) → null: no se dice nada, porque callar es
- * mejor que afirmar una fuente que no se sabe. `enlace`: dónde se arregla.
+ * mejor que afirmar una fuente que no se sabe. `enlace`: dónde se arregla. Con la regla nueva la
+ * respuesta trae la `celda` idioma × moneda, y se nombra esa en vez del segmento.
  */
 export type CondicionesSimuladasPantalla = {
   texto: string;
@@ -675,41 +838,63 @@ export type CondicionesSimuladasPantalla = {
   enlace: { tipo: "plantilla"; href: string } | { tipo: "plantillas"; href: string } | { tipo: "ajustes" } | null;
 };
 
-const CODIGOS_USO: readonly CodigoUso[] = ["regla", "principal", "regla_inactiva", "regla_no_sirve_ia", "sin_reglas", "sin_plantilla"];
+const CODIGOS_USO: readonly CodigoUso[] = ["regla", "principal", "regla_inactiva", "regla_no_sirve_ia", "sin_reglas", "sin_plantilla", "sin_plantilla_idioma"];
 const esCodigoUso = (x: unknown): x is CodigoUso => typeof x === "string" && (CODIGOS_USO as readonly string[]).includes(x);
 const esSegmento = (x: unknown): x is Segmento => typeof x === "string" && (SEGMENTOS as readonly string[]).includes(x);
+/** La celda idioma × moneda de la respuesta, solo con los valores EXACTOS del CHECK de cotizaciones-09. */
+const celdaDeRespuesta = (x: unknown): CeldaTraslado | null => {
+  if (!x || typeof x !== "object") return null;
+  const c = x as { idioma?: unknown; moneda?: unknown };
+  return (c.idioma === "es" || c.idioma === "en") && (c.moneda === "PEN" || c.moneda === "USD") ? { idioma: c.idioma, moneda: c.moneda } : null;
+};
 const textoCorto = (x: unknown, max: number): string | null =>
   (typeof x === "string" && x.trim() ? Array.from(x.trim()).slice(0, max).join("") : null);
+const enMinuscula = (t: string): string => t.charAt(0).toLowerCase() + t.slice(1);
 
 export function condicionesDelSimulador(r: { plantilla?: unknown; condiciones?: unknown } | null | undefined): CondicionesSimuladasPantalla | null {
   if (!r) return null;
-  const p = r.plantilla as { id?: unknown; nombre?: unknown; segmento?: unknown; codigo?: unknown } | null | undefined;
-  const c = r.condiciones as { fuente?: unknown; segmento?: unknown; codigo?: unknown; detalle?: unknown } | null | undefined;
+  const p = r.plantilla as { id?: unknown; nombre?: unknown; segmento?: unknown; codigo?: unknown; celda?: unknown } | null | undefined;
+  const c = r.condiciones as { fuente?: unknown; segmento?: unknown; codigo?: unknown; detalle?: unknown; celda?: unknown } | null | undefined;
   const cond = c && typeof c === "object" && esCodigoUso(c.codigo)
-    ? { fuente: c.fuente === "plantilla" ? ("plantilla" as const) : ("ajustes" as const), segmento: esSegmento(c.segmento) ? c.segmento : null, codigo: c.codigo, detalle: textoCorto(c.detalle, 400) }
+    ? {
+      fuente: c.fuente === "plantilla" ? ("plantilla" as const) : ("ajustes" as const), segmento: esSegmento(c.segmento) ? c.segmento : null,
+      celda: celdaDeRespuesta(c.celda), codigo: c.codigo, detalle: textoCorto(c.detalle, 400),
+    }
     : null;
-  const celda = (s: Segmento) => { const t = etiquetaCelda({ servicio: "traslado_ia", segmento: s }); return t.charAt(0).toLowerCase() + t.slice(1); };
+  const celdaVieja = (s: Segmento) => enMinuscula(etiquetaCelda({ servicio: "traslado_ia", segmento: s }));
+  const celdaNueva = (x: CeldaTraslado) => enMinuscula(etiquetaCeldaTraslado(x));
   // Sin cliente del ERP el segmento sale de la moneda: en soles es «particular» (un cliente empresa
-  // usaría la celda «empresa», que el simulador no puede probar).
+  // usaría la celda «empresa», que el simulador no puede probar). Con la regla nueva no hay tipo de
+  // cliente: no hay nada que avisar.
   const notaDe = (s: Segmento | null) => (s === "particular"
     ? "El simulador no tiene un cliente del ERP: en soles el segmento es «particular». Un cliente empresa (B2B) ya verificado usaría la regla «Traslado de la IA · empresa»."
     : null);
+  const asignar = { tipo: "plantillas" as const, href: "/cotizaciones/plantillas" };
 
-  if (p && typeof p === "object" && typeof p.id === "string" && p.id.trim() && esSegmento(p.segmento) && esCodigoUso(p.codigo)) {
+  const pCelda = p && typeof p === "object" ? celdaDeRespuesta(p.celda) : null;
+  if (p && typeof p === "object" && typeof p.id === "string" && p.id.trim() && (pCelda || esSegmento(p.segmento)) && esCodigoUso(p.codigo)) {
     const nombre = textoCorto(p.nombre, 120) ?? p.id;
+    if (pCelda && p.codigo === "sin_plantilla_idioma") {
+      // La cotización va en inglés y las condiciones salen de la plantilla de castellano: en revisión.
+      return {
+        texto: `Condiciones del PDF: plantilla «${nombre}», en castellano (${celdaNueva(pCelda)} no tiene una plantilla en inglés)`,
+        detalle: cond?.detalle ?? null, nota: null, ambar: true, enlace: asignar,
+      };
+    }
     return {
-      texto: `Condiciones del PDF: plantilla «${nombre}» (${celda(p.segmento)})`,
+      texto: `Condiciones del PDF: plantilla «${nombre}» (${pCelda ? celdaNueva(pCelda) : celdaVieja(p.segmento as Segmento)})`,
       // Por la regla no hace falta decir más; si no, la frase del motor dice por qué esa.
       detalle: p.codigo === "regla" ? null : cond?.detalle ?? null,
-      nota: notaDe(p.segmento),
+      nota: pCelda ? null : notaDe(p.segmento as Segmento),
       ambar: usoEsAmbar(p.codigo),
       enlace: { tipo: "plantilla", href: enlaceEditarPlantilla(p.id) },
     };
   }
   if (!cond) return null;
+  const nota = cond.celda ? null : notaDe(cond.segmento);
   if (cond.fuente === "plantilla") {
     // La respuesta dice que hay plantilla pero no cuál (no debería pasar): se dice lo que se sabe.
-    return { texto: "Condiciones del PDF: las de una plantilla PDF", detalle: cond.detalle, nota: notaDe(cond.segmento), ambar: usoEsAmbar(cond.codigo), enlace: { tipo: "plantillas", href: "/cotizaciones/plantillas" } };
+    return { texto: "Condiciones del PDF: las de una plantilla PDF", detalle: cond.detalle, nota, ambar: usoEsAmbar(cond.codigo), enlace: asignar };
   }
   if (cond.codigo === "sin_reglas") {
     return {
@@ -718,14 +903,126 @@ export function condicionesDelSimulador(r: { plantilla?: unknown; condiciones?: 
       nota: null, ambar: true, enlace: { tipo: "ajustes" },
     };
   }
+  if (cond.codigo === "sin_plantilla_idioma" && cond.celda) {
+    return {
+      texto: `Condiciones del PDF: las de Ajustes de traslados, en castellano (${celdaNueva(cond.celda)} no tiene una plantilla en inglés)`,
+      detalle: cond.detalle, nota: null, ambar: true, enlace: asignar,
+    };
+  }
   if (cond.codigo === "sin_plantilla") {
     return {
       texto: "Condiciones del PDF: las de Ajustes de traslados — hay reglas, pero ninguna plantilla que la IA pueda dibujar",
-      detalle: `${cond.detalle ? `${cond.detalle} ` : ""}La IA solo dibuja una plantilla activa, de diseño Corporativo y en castellano: asígnale una en Plantillas PDF.`,
-      nota: notaDe(cond.segmento), ambar: true, enlace: { tipo: "plantillas", href: "/cotizaciones/plantillas" },
+      detalle: `${cond.detalle ? `${cond.detalle} ` : ""}${cond.celda
+        ? `La IA solo dibuja una plantilla activa, de diseño Corporativo y en el idioma de la cotización: asígnale una a ${celdaNueva(cond.celda)} en Plantillas PDF.`
+        : "La IA solo dibuja una plantilla activa, de diseño Corporativo y en castellano: asígnale una en Plantillas PDF."}`,
+      nota, ambar: true, enlace: asignar,
     };
   }
-  return { texto: "Condiciones del PDF: las de Ajustes de traslados", detalle: cond.detalle, nota: notaDe(cond.segmento), ambar: usoEsAmbar(cond.codigo), enlace: { tipo: "ajustes" } };
+  return { texto: "Condiciones del PDF: las de Ajustes de traslados", detalle: cond.detalle, nota, ambar: usoEsAmbar(cond.codigo), enlace: { tipo: "ajustes" } };
+}
+
+// ── El idioma en el Simulador ────────────────────────────────────────────────
+// «Lo que escribió el cliente» se escribe un mensaje por renglón, como se lee un chat: el de abajo es
+// el más reciente. Al servidor van (`mensajes_cliente`) del MÁS RECIENTE al más antiguo, que es como
+// los lee `idiomaDelCliente` (y como los devuelve la lectura del CRM), y como mucho los 10 últimos de
+// 500 caracteres. Qué idioma se lee lo decide `idiomaDelCliente`, la MISMA detección que el chat:
+// aquí solo se usa para habilitar «Pide soles» mientras se escribe; lo que vale es lo que contesta
+// el servidor, que además aplica el interruptor del inglés.
+
+export const MAX_MENSAJES_SIMULADOR = 10;
+export const MAX_CARACTERES_MENSAJE_SIMULADOR = 500;
+
+/** Recorta a `n` unidades de UTF-16 (como cuenta `.length` el servidor) sin partir un emoji. */
+function recortarUtf16(t: string, n: number): string {
+  if (t.length <= n) return t;
+  let s = t.slice(0, n);
+  const ultimo = s.charCodeAt(s.length - 1);
+  if (ultimo >= 0xd800 && ultimo <= 0xdbff) s = s.slice(0, -1);
+  return s;
+}
+
+/** Los mensajes del cliente escritos en el simulador (un renglón = un mensaje), del más reciente al más antiguo. */
+export function mensajesDelSimulador(texto: string | null | undefined): string[] {
+  return String(texto ?? "")
+    .split(/\r\n?|\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(-MAX_MENSAJES_SIMULADOR)
+    .reverse()
+    .map((l) => recortarUtf16(l, MAX_CARACTERES_MENSAJE_SIMULADOR));
+}
+
+/**
+ * El idioma de esos mensajes con la detección del chat (`idiomaDelCliente`). No llevan fecha, así
+ * que la ventana de 48 h no deja fuera ninguno (un mensaje sin `created_at` cuenta como reciente):
+ * el «ahora» no cambia nada y no se pide.
+ */
+export function idiomaDeMensajesSimulador(mensajesRecientesPrimero: readonly string[]) {
+  return idiomaDelCliente(mensajesRecientesPrimero.map((contenido) => ({ contenido })), Number.NaN);
+}
+
+/** «Pide soles» solo tiene sentido si el cliente escribe en inglés u otro idioma: en castellano desde un número extranjero lo ve un ejecutivo. */
+export const puedePedirSoles = (i: IdiomaCliente | null | undefined): boolean => i === "en" || i === "otro";
+
+const MONEDA_POR: Record<CodigoMoneda, string> = {
+  peru: "número peruano", extranjero: "número extranjero", sin_telefono: "sin número",
+  pide_dolares: "pidió dólares", ingles: "cliente en inglés", pide_soles: "pidió soles",
+};
+const CODIGOS_IDIOMA: readonly (CodigoIdiomaCliente | "ingles_apagado")[] = ["sin_evidencia", "castellano", "ingles", "otro_idioma", "ingles_apagado"];
+
+export type IdiomaSimuladoPantalla = {
+  texto: string;
+  detalle: string | null;
+  tono: "gris" | "azul";
+  /** Dónde se enciende el inglés (solo con el inglés apagado). */
+  enlace: string | null;
+  /** El PDF de ejemplo sale en inglés. */
+  ingles: boolean;
+};
+
+/**
+ * La línea del idioma en el resultado del simulador, desde `respuesta.idioma` (lib/traslados/api.ts →
+ * `IdiomaSimulado`). Valida la forma: una respuesta sin ese campo (un servidor de antes) o deforme →
+ * null, no se dice nada. Sin mensajes escritos y en castellano sin evidencia tampoco: es lo de siempre.
+ * La moneda es la del resultado del MOTOR; su porqué se recalcula con `monedaDelPedido` (la misma
+ * función) y solo se nombra si da la misma moneda: nunca se afirma un motivo que no es el del motor.
+ */
+export function idiomaDelSimulador(
+  r: { idioma?: unknown; resultado?: { moneda?: unknown } | null } | null | undefined,
+  entrada: { telefono?: string | null; pide_dolares?: boolean; pide_soles?: boolean; mensajes_cliente?: readonly string[] },
+): IdiomaSimuladoPantalla | null {
+  const i = r?.idioma as { idioma?: unknown; cliente?: unknown; codigo?: unknown; detalle?: unknown } | null | undefined;
+  if (!i || typeof i !== "object") return null;
+  if (i.idioma !== "es" && i.idioma !== "en") return null;
+  const cliente: IdiomaCliente | null = i.cliente === "es" || i.cliente === "en" || i.cliente === "otro" ? i.cliente : null;
+  if (i.cliente != null && cliente == null) return null;
+  if (typeof i.codigo !== "string" || !(CODIGOS_IDIOMA as readonly string[]).includes(i.codigo)) return null;
+  const codigo = i.codigo as CodigoIdiomaCliente | "ingles_apagado";
+  const mensajes = Array.isArray(entrada.mensajes_cliente) ? entrada.mensajes_cliente : [];
+  const detalle = textoCorto(i.detalle, 400);
+  if (mensajes.length === 0 && i.idioma === "es" && codigo === "sin_evidencia") return null;
+
+  if (codigo === "ingles_apagado") {
+    return {
+      texto: "Inglés apagado: no hay plantilla en inglés asignada",
+      detalle: `El cliente escribe en ${cliente === "otro" ? "otro idioma" : "inglés"}, pero ninguna celda «Traslado de la IA · inglés» tiene una plantilla en inglés que la IA pueda usar: la cotización sale en castellano y con la moneda de siempre, como hoy.`,
+      tono: "gris", enlace: "/cotizaciones/plantillas", ingles: false,
+    };
+  }
+  const en = i.idioma === "en";
+  const local = idiomaDeMensajesSimulador(mensajes);
+  const n = local.idioma === cliente ? local.decisivos : 0;
+  const cuantos = n > 0 ? ` (${n} ${n === 1 ? "mensaje" : "mensajes"})` : cliente == null ? " (ningún mensaje dice el idioma)" : "";
+  const idiomaTxt = en ? (cliente === "otro" ? "inglés, porque el cliente escribe en otro idioma" : "inglés") : "castellano";
+  const moneda = r?.resultado?.moneda === "PEN" || r?.resultado?.moneda === "USD" ? (r.resultado.moneda as Moneda) : null;
+  let monedaTxt = "";
+  if (moneda) {
+    const m = monedaDelPedido(entrada.telefono ?? null, entrada.pide_dolares === true, {
+      idiomaCliente: en && (cliente === "en" || cliente === "otro") ? cliente : null, pideSoles: entrada.pide_soles === true,
+    });
+    monedaTxt = m.moneda === moneda ? ` · moneda ${moneda} (${MONEDA_POR[m.codigo]})` : ` · moneda ${moneda}`;
+  }
+  return { texto: `Idioma: ${idiomaTxt}${cuantos}${monedaTxt}`, detalle, tono: en ? "azul" : "gris", enlace: null, ingles: en };
 }
 
 // ── Fotos y descripción de la categoría (traslados-07) ───────────────────────

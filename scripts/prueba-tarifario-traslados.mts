@@ -373,17 +373,18 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
       const base = JSON.stringify(consDeFila(segmento, cfg, plSeg));
       for (const k of Object.keys(SENT)) if (JSON.stringify(consDeFila(segmento, SENT[k], plSeg)) !== base) leidaEn[k].push(segmento);
     }
-    ok(JSON.stringify(enUso.segmentos) === JSON.stringify(leidaEn.generales) && JSON.stringify(leidaEn.incluye) === JSON.stringify(leidaEn.generales) && JSON.stringify(leidaEn.no_incluye) === JSON.stringify(leidaEn.generales),
-      `${j.nombre}: se ofrecen consideraciones, Incluye y No incluye en los segmentos que las leen (${JSON.stringify(enUso.segmentos)} vs ${JSON.stringify(leidaEn.generales)})`);
+    const clavesEnUso = enUso.usos?.map((u) => u.clave) ?? null;
+    ok(JSON.stringify(clavesEnUso) === JSON.stringify(leidaEn.generales) && JSON.stringify(leidaEn.incluye) === JSON.stringify(leidaEn.generales) && JSON.stringify(leidaEn.no_incluye) === JSON.stringify(leidaEn.generales),
+      `${j.nombre}: se ofrecen consideraciones, Incluye y No incluye en los segmentos que las leen (${JSON.stringify(clavesEnUso)} vs ${JSON.stringify(leidaEn.generales)})`);
     ok(enUso.enUso === (leidaEn.generales.length > 0), `${j.nombre}: las listas de Ajustes se editan ⟺ alguna fila las lee`);
     ok(enUso.usd === (leidaEn.usd.length > 0) && leidaEn.usd.every((x) => x === "extranjero"), `${j.nombre}: las de dólares se editan ⟺ alguna fila las lee (solo extranjero)`);
-    const segsEnGrupos = grupos.flatMap((g) => g.segmentos.map((x) => x.segmento));
+    const segsEnGrupos = grupos.flatMap((g) => g.usos.map((x) => x.segmento));
     ok(segsEnGrupos.length === 3 && PL.SEGMENTOS.every((sg) => segsEnGrupos.filter((x) => x === sg).length === 1), `${j.nombre}: cada segmento sale en un solo grupo`);
     ok(new Set(grupos.map((g) => g.clave)).size === grupos.length, `${j.nombre}: un grupo por fuente`);
     for (const segmento of PL.SEGMENTOS) {
       nCond++;
-      const g = grupos.find((x) => x.segmentos.some((y) => y.segmento === segmento))!;
-      const su = g.segmentos.find((y) => y.segmento === segmento)!;
+      const g = grupos.find((x) => x.usos.some((y) => y.segmento === segmento))!;
+      const su = g.usos.find((y) => y.segmento === segmento)!;
       const uso = PL.plantillaParaUso({ servicio: "traslado_ia", segmento }, j.pls, j.reglas);
       codigosVistos.add(uso.codigo);
       const usd = segmento === "extranjero";
@@ -422,12 +423,13 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
 
   // El traspaso: empresa y particular comparten «Traslados (IA)»; extranjero, la de dólares.
   const gT = P.condicionesTrasladoIA(JUEGOS[0].pls, JUEGOS[0].reglas, CONFIGS[0]);
-  ok(gT.length === 2 && gT[0].segmentos.map((x) => x.segmento).join() === "empresa,particular" && P.segmentosTexto(gT[0]) === "empresa y particular", "el traspaso: empresa y particular juntos, extranjero aparte");
+  ok(gT.length === 2 && gT[0].usos.map((x) => x.segmento).join() === "empresa,particular" && P.usosTexto(gT[0]) === "empresa y particular", "el traspaso: empresa y particular juntos, extranjero aparte");
+  ok(gT.every((g) => g.usos.every((u) => u.celda === null && !u.sinUso)), "con la regla vieja no hay celdas idioma × moneda ni celdas sin uso");
   ok(gT[1].incluye.propia === false && gT[1].incluye.items.length === 0, "lista NULL de la plantilla: «sin lista propia», nunca la de Ajustes");
   ok(!gT.some((g) => g.generales.items.some((x) => x.includes("15 minutos"))), "con plantillas, las consideraciones de Ajustes no se enseñan");
   // Sin una plantilla que la IA pueda usar: las de Ajustes, y en dólares con las de dólares.
   const gN = P.condicionesTrasladoIA([], [], CONFIGS[0]);
-  ok(gN.length === 2 && gN.every((g) => g.fuente.tipo === "ajustes" && g.segmentos.every((x) => x.codigo === "sin_plantilla" && x.ambar)), "sin plantillas: las de Ajustes, en ámbar");
+  ok(gN.length === 2 && gN.every((g) => g.fuente.tipo === "ajustes" && g.usos.every((x) => x.codigo === "sin_plantilla" && x.ambar)), "sin plantillas: las de Ajustes, en ámbar");
   ok(gN[1].generales.items.join("|") === "Precios por tramo. No incluyen IGV.|Incluye 15 minutos de espera.|Pago al tipo de cambio del día", "extranjero sin plantilla: generales + las de dólares, limpias");
 
   // La política de reserva (cotizaciones-06): Ajustes enseña la MISMA que la IA copia a la fila.
@@ -436,7 +438,7 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
     const plsR = [CORP, { ...TIA, condiciones_reserva: POL }, { ...TUSD, condiciones_reserva: null }];
     const gR = P.condicionesTrasladoIA(plsR, JUEGOS[0].reglas, CONFIGS[0]);
     for (const segmento of PL.SEGMENTOS) {
-      const g = gR.find((x) => x.segmentos.some((y) => y.segmento === segmento))!;
+      const g = gR.find((x) => x.usos.some((y) => y.segmento === segmento))!;
       const uso = PL.plantillaParaUso({ servicio: "traslado_ia", segmento }, plsR, JUEGOS[0].reglas);
       const usd = segmento === "extranjero";
       const cj = C.filaCotizacionTraslado(usd ? rUsd : rPen, entradaT(usd ? TEL.USD : TEL.PEN), {
@@ -459,7 +461,7 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
     const plsS = [CORP, { ...TIA, condiciones_reserva: POL, condiciones_reserva_resumen: RES }, { ...TUSD, condiciones_reserva: null, condiciones_reserva_resumen: RES }];
     const gS = P.condicionesTrasladoIA(plsS, JUEGOS[0].reglas, CONFIGS[0]);
     for (const segmento of PL.SEGMENTOS) {
-      const g = gS.find((x) => x.segmentos.some((y) => y.segmento === segmento))!;
+      const g = gS.find((x) => x.usos.some((y) => y.segmento === segmento))!;
       const uso = PL.plantillaParaUso({ servicio: "traslado_ia", segmento }, plsS, JUEGOS[0].reglas);
       const usd = segmento === "extranjero";
       const cj = C.filaCotizacionTraslado(usd ? rUsd : rPen, entradaT(usd ? TEL.USD : TEL.PEN), {
@@ -484,7 +486,7 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
   ok(e45[1].texto.includes("«Traslados (IA) · dólares»") && e45.every((d) => d.plantilla != null), "y la de dólares aparte");
   ok(P.esperaQueNoCoincideIA(gT, 15).length === 2, "los «15 minutos» de Ajustes no cuentan: no los imprime ningún PDF");
   const eN = P.esperaQueNoCoincideIA(gN, 30);
-  ok(eN.length === 1 && eN[0].plantilla === null && eN[0].minutos.join() === "15" && eN[0].segmentos.join() === "empresa,particular,extranjero" && /aquí abajo/.test(eN[0].texto),
+  ok(eN.length === 1 && eN[0].plantilla === null && eN[0].minutos.join() === "15" && eN[0].quienes.join() === "empresa,particular,extranjero" && /aquí abajo/.test(eN[0].texto),
     "sin plantilla: las de Ajustes UNA vez (es el mismo texto), con sus tipos de cliente");
 
   // Mixto: unos segmentos con plantilla, otros caen a Ajustes.
@@ -492,18 +494,19 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
   const gMix2 = P.condicionesTrasladoIA([{ ...CORP, es_principal: false }, TIA], r3("traslados_ia", "moderno_fotos", "apagada"), CONFIGS[0]);
   ok(P.listasDeAjustesEnUso(gMix).enUso === false, "con la principal que sirve, nadie cae a Ajustes: no se ofrecen");
   const uMix = P.listasDeAjustesEnUso(gMix2);
-  ok(uMix.enUso && uMix.usd && JSON.stringify(uMix.segmentos) === JSON.stringify(["particular", "extranjero"]), "particular y extranjero caen a Ajustes: se ofrecen, con las de dólares");
+  ok(uMix.enUso && uMix.usd && JSON.stringify(uMix.usos?.map((u) => u.segmento)) === JSON.stringify(["particular", "extranjero"]), "particular y extranjero caen a Ajustes: se ofrecen, con las de dólares");
   const eMix = P.esperaQueNoCoincideIA(gMix2, 30);
-  ok(eMix.length === 1 && eMix[0].plantilla === null && eMix[0].segmentos.join() === "particular,extranjero", "la espera se coteja también con las de Ajustes donde caen");
+  ok(eMix.length === 1 && eMix[0].plantilla === null && eMix[0].quienes.join() === "particular,extranjero", "la espera se coteja también con las de Ajustes donde caen");
   const uPen = P.listasDeAjustesEnUso(P.condicionesTrasladoIA([{ ...MOD, es_principal: true }, { ...CORP, es_principal: false }, OFF], r3("apagada", "apagada", "corporativo"), CONFIGS[0]));
-  ok(uPen.enUso && !uPen.usd && JSON.stringify(uPen.segmentos) === JSON.stringify(["empresa", "particular"]), "solo los de soles caen: las de dólares no se ofrecen");
-  ok(JSON.stringify(P.listasDeAjustesEnUso(null)) === JSON.stringify({ enUso: true, usd: true, segmentos: null }), "sin reglas (o sin poder comprobarlo): las cuatro, como antes");
-  ok(P.avisoListasAjustes({ enUso: true, usd: true, segmentos: null }) === null && P.avisoListasAjustes({ enUso: false, usd: false, segmentos: [] }) === null, "sin reglas o sin segmentos que caigan: no hay aviso de segmentos");
+  ok(uPen.enUso && !uPen.usd && JSON.stringify(uPen.usos?.map((u) => u.segmento)) === JSON.stringify(["empresa", "particular"]), "solo los de soles caen: las de dólares no se ofrecen");
+  ok(JSON.stringify(P.listasDeAjustesEnUso(null)) === JSON.stringify({ enUso: true, usd: true, usos: null, total: 0, ingles: [] }), "sin reglas (o sin poder comprobarlo): las cuatro, como antes");
+  ok(P.avisoListasAjustes({ enUso: true, usd: true, usos: null, total: 0, ingles: [] }) === null && P.avisoListasAjustes({ enUso: false, usd: false, usos: [], total: 3, ingles: [] }) === null, "sin reglas o sin segmentos que caigan: no hay aviso de segmentos");
   const avPen = P.avisoListasAjustes(uPen)!;
   ok(avPen.includes("empresa y particular") && avPen.includes("Los demás usan su plantilla.") && avPen.includes("dólares no se ofrecen"), "el aviso nombra los segmentos, dice que los demás usan su plantilla y por qué no salen las de dólares");
-  const avTodos = P.avisoListasAjustes({ enUso: true, usd: true, segmentos: ["empresa", "particular", "extranjero"] })!;
-  ok(!avTodos.includes("Los demás") && !avTodos.includes("no se ofrecen") && /Plantillas PDF/.test(avTodos), "con los tres: ni «los demás» ni las de dólares");
-  ok(/ese tipo de cliente/.test(P.avisoListasAjustes({ enUso: true, usd: true, segmentos: ["extranjero"] })!), "con uno solo, en singular");
+  const usosN = P.listasDeAjustesEnUso(gN);
+  const avTodos = P.avisoListasAjustes(usosN)!;
+  ok(usosN.usos?.length === 3 && usosN.total === 3 && !avTodos.includes("Los demás") && !avTodos.includes("no se ofrecen") && /Plantillas PDF/.test(avTodos), "con los tres: ni «los demás» ni las de dólares");
+  ok(/ese tipo de cliente/.test(P.avisoListasAjustes({ ...usosN, usos: usosN.usos!.filter((u) => u.segmento === "extranjero") })!), "con uno solo, en singular");
 
   // El enlace al editor solo lleva un id de forma válida (va en la URL).
   ok(P.enlaceEditarPlantilla("traslados_ia") === "/cotizaciones/plantillas?editar=traslados_ia", "enlace a editar esa plantilla");
@@ -535,7 +538,9 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
     && /const edita = \{ gen: !!enUso\?\.enUso, usd: !!enUso\?\.usd, listas: !!enUso\?\.enUso && !sinMigracionListas \};/.test(src),
     "qué se ofrece lo decide listasDeAjustesEnUso (y mientras se comprueba, nada)");
   const pantallaSrc = fsA.readFileSync("components/tarifario/traslados-pantalla.ts", "utf8");
-  ok(/considDeTraslado\(u\.plantilla, config, usd \? "USD" : "PEN"\)/.test(pantallaSrc) && !/considSnapshot/.test(pantallaSrc) && !/\.trim\(\)\)\.filter\(Boolean\)/.test(pantallaSrc),
+  // ADAPTADA 23-10-2026 (cotizaciones-09): una sola llamada para las dos reglas, con la moneda de la celda.
+  ok(/const c = considDeTraslado\(plantilla, config, moneda\);/.test(pantallaSrc) && (pantallaSrc.match(/considDeTraslado\(/g) ?? []).length === 1
+    && !/considSnapshot/.test(pantallaSrc) && !/\.trim\(\)\)\.filter\(Boolean\)/.test(pantallaSrc),
     "la pantalla usa la copia de la fila (considDeTraslado), no una suya");
 }
 

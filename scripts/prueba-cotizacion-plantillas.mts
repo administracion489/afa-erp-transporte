@@ -748,5 +748,147 @@ console.log("17. La regla del traslado por idioma × moneda (cotizaciones-09) y 
   }
 }
 
+console.log("18. Pantalla: la cuadrícula del traslado por idioma × moneda (components/cotizaciones/plantillas)");
+{
+  // La cuadrícula (ReglasTraslado.tsx) pinta lo que dice `estadosTraslado`, y `estadosTraslado` no decide
+  // qué plantilla se usa: se lo pregunta a `plantillaTrasladoIA` y a `inglesDisponible`. Lo único suyo es
+  // que una celda «inglés» con el inglés apagado no se usa (gris), salvo con una regla escrita que la IA
+  // no puede usar (ámbar). Se fija: (a) una sola definición, por barrido; (b) los textos del plan; (c) la
+  // frase de «encender el inglés» contra el motor de la moneda y el gate de la entrada del agente; (d) el
+  // confirm de la celda; (e) qué cambia al guardar o activar una plantilla; (f) la moneda del confirm; y
+  // (g) que las tres pantallas usan estas funciones y no una copia.
+  const PA = await import("../components/cotizaciones/plantillas/pantalla");
+  const MO = await import("../lib/traslados/motor");
+  const EI = await import("../lib/traslados/envio-ia");
+  const LEG = (c: P.CeldaTraslado) => ({ reglas: null, segmento: (c.moneda === "USD" ? "extranjero" : "particular") as P.Segmento });
+  const usoJ = (u: P.UsoPlantillaTraslado) => J({ c: u.codigo, p: u.plantilla?.id ?? null, d: u.detalle, ce: u.celda, i: u.idiomaCondiciones });
+
+  // (a) Barrido: 4 juegos de plantillas (la principal en castellano, en inglés, de otro diseño, o ninguna)
+  //     × 7^4 reglas (cada celda vacía o apuntando a una plantilla que sirve, no sirve o no existe).
+  const POOL = (principal: string | null): P.PlantillaFila[] => [
+    PL("corporativo", { diseno: "corporativo", es_principal: principal === "corporativo" }),
+    PL("traslados_ia", { diseno: "corporativo" }),
+    PL("trf_en", { diseno: "corporativo", idioma: "en", es_principal: principal === "trf_en" }),
+    PL("trf_en_off", { diseno: "corporativo", idioma: "en", activa: false }),
+    PL("mod_en", { diseno: "moderno_fotos", idioma: "en", es_principal: principal === "mod_en" }),
+  ];
+  const OPC = [null, "corporativo", "traslados_ia", "trf_en", "trf_en_off", "mod_en", "fantasma"];
+  let n = 0, unaDef = 0, vig = 0, tonos = 0, okBien = 0, motivoOk = 0;
+  const vistos = new Set<string>();
+  for (const principal of ["corporativo", "trf_en", "mod_en", null]) {
+    const pls = POOL(principal);
+    for (let k = 0; k < OPC.length ** 4; k++) {
+      const reglasT: P.ReglaTraslado[] = [];
+      P.CELDAS_TRASLADO.forEach((c, i) => { const o = OPC[Math.floor(k / OPC.length ** i) % OPC.length]; if (o) reglasT.push({ ...c, plantilla_id: o }); });
+      const est = PA.estadosTraslado(pls, reglasT);
+      const ingles = P.inglesDisponible(pls, reglasT);
+      if (J(est.ingles) !== J(ingles) || est.activo !== P.inglesActivo(ingles)) ok(false, `el interruptor es el del motor (${J(reglasT)})`);
+      for (const e of est.celdas) {
+        n++;
+        if (usoJ(e.uso) === usoJ(P.plantillaTrasladoIA(e.celda, pls, reglasT, LEG(e.celda)))) unaDef++;
+        if (e.vigente === (e.celda.idioma === "es" || P.inglesActivo(ingles))) vig++;
+        const esperado: import("../components/cotizaciones/plantillas/pantalla").TonoCelda = !e.vigente
+          ? (e.regla ? "ambar" : "gris")
+          : (e.uso.codigo === "regla" || e.uso.codigo === "principal") && e.uso.plantilla ? "ok" : "ambar";
+        if (e.tono === esperado) tonos++;
+        if (e.tono !== "ok" || (e.vigente && !!e.uso.plantilla)) okBien++;
+        // Una regla escrita en una celda «inglés» apagada es una que la IA no puede usar en inglés, y el texto dice por qué.
+        if (e.vigente || !e.regla || (!P.sirveParaIA(P.plantillaPorId(pls, e.regla.plantilla_id), "en") && e.texto.includes(PA.porQueNoSirveIA(P.plantillaPorId(pls, e.regla.plantilla_id), "en")) && e.texto.includes("sigue apagado"))) motivoOk++;
+        vistos.add(`${e.celda.idioma}:${e.tono}:${e.uso.codigo}`);
+        if (e.vigente && e.uso.codigo === "sin_plantilla_idioma" && e.tono !== "ambar") ok(false, "inglés parcial (sin_plantilla_idioma vigente) siempre en ámbar");
+      }
+    }
+  }
+  ok(unaDef === n, `una sola definición: cada celda es lo que dice plantillaTrasladoIA (${unaDef}/${n})`);
+  ok(vig === n, `vigente ⟺ castellano o el inglés encendido (${vig}/${n})`);
+  ok(tonos === n, `el tono: gris = «inglés» apagada y vacía; ámbar = regla que no se obedece, sin plantilla, en revisión, o «inglés» apagada con regla (${tonos}/${n})`);
+  ok(okBien === n, `nunca «ok» sin una plantilla que de verdad se usa (${okBien}/${n})`);
+  ok(motivoOk === n, `una regla en una celda «inglés» apagada nombra por qué la IA no la puede usar (${motivoOk}/${n})`);
+  for (const v of ["es:ok:regla", "es:ok:principal", "es:ambar:regla_inactiva", "es:ambar:regla_no_sirve_ia", "es:ambar:sin_plantilla",
+    "en:ok:regla", "en:ok:principal", "en:ambar:sin_plantilla_idioma", "en:ambar:regla_inactiva", "en:ambar:regla_no_sirve_ia", "en:gris:sin_plantilla_idioma", "en:gris:principal"]) {
+    ok(vistos.has(v), `el barrido produce ${v}`);
+  }
+
+  // (b) Los textos que pide el plan, literales.
+  ok(PA.INGLES_APAGADO === "Inglés apagado: los clientes que escriben en inglés reciben todo en castellano, como hoy.", "el gris del inglés apagado");
+  ok(PA.DESCRIPCION_FILA_INGLES === "El cliente escribe en inglés u otro idioma: el PDF y los mensajes van en inglés.", "la fila «Inglés»");
+  const PLS0 = POOL("corporativo");
+  const apagado = PA.estadosTraslado(PLS0, []);
+  const lApag = PA.lineaInglesTraslado(apagado, 1), lSin = PA.lineaInglesTraslado(apagado, 0);
+  ok(lApag.tono === "gris" && lApag.texto.startsWith(PA.INGLES_APAGADO) && lApag.texto.includes("asigna una plantilla en inglés"), "apagado: gris, y cómo se enciende");
+  ok(lSin.tono === "gris" && lSin.texto.includes("Todavía no hay ninguna plantilla en inglés"), "apagado y sin plantillas en inglés: cómo crear una");
+  const encendido = PA.estadosTraslado(PLS0, [{ idioma: "en", moneda: "USD", plantilla_id: "trf_en" }]);
+  ok(PA.lineaInglesTraslado(encendido, 1).tono === "ok" && encendido.activo, "encendido: la línea ya no es gris");
+  ok(apagado.celdas.filter(e => e.celda.idioma === "en").every(e => e.tono === "gris" && !e.vigente), "sin celdas «inglés»: las dos en gris, sin ámbar (el inglés apagado no es un error)");
+  const parcial = encendido.celdas.find(e => e.celda.idioma === "en" && e.celda.moneda === "PEN")!;
+  ok(parcial.tono === "ambar" && parcial.uso.codigo === "sin_plantilla_idioma" && parcial.uso.plantilla?.id === "corporativo", `inglés parcial: soles sin plantilla en inglés → ámbar, con la de castellano (${parcial.texto})`);
+
+  // (c) La frase de encender el inglés dice lo que hacen el motor de la moneda y el gate de la entrada.
+  const pe = "51987654321", ext = "447987654321";
+  ok(MO.monedaDelPedido(pe, false, { idiomaCliente: "en" }).moneda === "USD" && PA.AL_ENCENDER_INGLES.includes("dólares aunque escriba desde un número peruano"), "en inglés desde un +51: dólares (como dice la frase)");
+  ok(MO.monedaDelPedido(pe, false, { idiomaCliente: "en", pideSoles: true }).moneda === "PEN" && MO.monedaDelPedido(ext, false, { idiomaCliente: "en", pideSoles: true }).moneda === "PEN" && PA.AL_ENCENDER_INGLES.includes("salvo que pida soles"), "…salvo que pida soles");
+  ok(MO.monedaDelPedido(pe, false).moneda === "PEN", "con el inglés apagado (sin idioma), el +51 sigue en soles");
+  const remitente = { canal: "whatsapp", waId: pe };
+  const ingOn = P.inglesDisponible(PLS0, [{ idioma: "en", moneda: "USD", plantilla_id: "trf_en" }]);
+  const ingOff = P.inglesDisponible(PLS0, []);
+  const ent = (cliente: "en" | "otro", ingles: P.InglesTraslado | null) => EI.entradaDelAgente({}, remitente, [], [], { cliente, ingles }) as Any;
+  ok(ent("en", ingOn).idioma_cliente === "en" && ent("otro", ingOn).idioma_cliente === "otro" && PA.AL_ENCENDER_INGLES.includes("en inglés u otro idioma"),
+    "con una celda «inglés» asignada, a quien escribe en inglés u otro idioma se le cotiza en inglés (el gate de la entrada)");
+  ok(!("idioma_cliente" in ent("en", ingOff)) && !("idioma_cliente" in ent("en", null)), "sin celda «inglés» (o sin la tabla), nada en inglés");
+
+  // (d) El confirm de la celda.
+  const conf = (celda: P.CeldaTraslado, nuevo: string, reglasT: P.ReglaTraslado[], pls = PLS0, perfil: Any = undefined) => PA.confirmCeldaTraslado({ celda, nuevo, plantillas: pls, reglasTraslado: reglasT, perfil });
+  const ENU: P.CeldaTraslado = { idioma: "en", moneda: "USD" }, ENP: P.CeldaTraslado = { idioma: "en", moneda: "PEN" }, ESP: P.CeldaTraslado = { idioma: "es", moneda: "PEN" };
+  const enc = conf(ENU, "trf_en", []);
+  ok(enc.startsWith(PA.AL_ENCENDER_INGLES) && enc.includes("«Plantilla trf_en»") && enc.includes("⚠ Traslado de la IA · inglés · soles") && enc.endsWith("¿Cambiar la regla Traslado de la IA · inglés · dólares?"),
+    `encender: lo dice, nombra la plantilla y avisa de la otra moneda que queda en revisión (${enc.replace(/\n/g, " / ")})`);
+  ok(enc.includes("No se pudo leer el perfil de la empresa"), "sin perfil no se afirman cuentas");
+  const apa = conf(ENU, "", [{ ...ENU, plantilla_id: "trf_en" }]);
+  ok(apa.startsWith(PA.AL_APAGAR_INGLES) && apa.includes("El inglés queda apagado") && !apa.includes("salen por WhatsApp"), `apagar: lo dice, y no habla de condiciones que nadie recibirá (${apa.replace(/\n/g, " / ")})`);
+  const otraMoneda = conf(ENP, "trf_en", [{ ...ENU, plantilla_id: "trf_en" }]);
+  ok(!otraMoneda.includes(PA.AL_ENCENDER_INGLES) && !otraMoneda.includes(PA.AL_APAGAR_INGLES) && otraMoneda.includes("a clientes que escriben en inglés u otro idioma, en soles"), "la otra moneda con el inglés ya encendido: ni enciende ni apaga");
+  ok(conf(ESP, "traslados_ia", []).includes("Los traslados que cotiza la IA en soles salen"), "castellano con el inglés apagado: todos los clientes (no «los que escriben en castellano»)");
+  ok(conf(ESP, "traslados_ia", [{ ...ENU, plantilla_id: "trf_en" }]).includes("a clientes que escriben en castellano, en soles"), "castellano con el inglés encendido: los que escriben en castellano");
+  ok(conf(ESP, "", [], [PL("corporativo", { diseno: "moderno_fotos", es_principal: true })]).includes("las condiciones de /tarifario → Ajustes de traslados"), "sin plantilla que sirva: las de Ajustes");
+  ok(conf(ENU, "trf_en", [], PLS0, null).includes("Cuentas bancarias que imprimirá el PDF (dólares)"), "con el perfil leído: las cuentas, en la moneda de la celda");
+
+  // (e) Guardar o activar una plantilla puede encender o apagar el inglés; un nombre nuevo no cambia nada.
+  const R1: P.ReglaTraslado[] = [{ ...ENU, plantilla_id: "trf_en" }];
+  const cambio = (pls2: P.PlantillaFila[], reglasT = R1) => PA.cambiosTraslado({ plantillas: PLS0, reglasTraslado: reglasT }, { plantillas: pls2, reglasTraslado: reglasT });
+  const aEs = cambio(PLS0.map(p => (p.id === "trf_en" ? { ...p, idioma: "es" } : p)));
+  const lAEs = PA.lineasCambioTraslado(aEs);
+  ok(aEs.ingles === "apaga" && lAEs[0] === PA.AL_APAGAR_INGLES && lAEs.some(l => l.startsWith("⚠ Traslado de la IA · inglés · dólares") && l.includes("no está en inglés")), `pasar a castellano la única plantilla en inglés lo apaga y lo dice (${lAEs.join(" / ")})`);
+  const R2: P.ReglaTraslado[] = [{ ...ENP, plantilla_id: "trf_en_off" }];
+  const act = cambio(PLS0.map(p => (p.id === "trf_en_off" ? { ...p, activa: true } : p)), R2);
+  ok(act.ingles === "enciende" && PA.lineasCambioTraslado(act)[0] === PA.AL_ENCENDER_INGLES, "activar una plantilla en inglés que una celda ya nombra lo enciende");
+  ok(PA.lineasCambioTraslado(cambio(PLS0.map(p => (p.id === "trf_en" ? { ...p, nombre: "Otro nombre" } : p)))).length === 0, "cambiarle el nombre no cambia nada que decir");
+  ok(PA.lineasCambioTraslado(cambio(PLS0)).length === 0 && cambio(PLS0).ingles === null, "sin cambios: nada");
+  const otraEs = cambio(PLS0.map(p => (p.id === "traslados_ia" ? { ...p, idioma: "en" } : p)), [{ ...ESP, plantilla_id: "traslados_ia" }]);
+  ok(otraEs.ingles === null && PA.lineasCambioTraslado(otraEs).some(l => l.startsWith("⚠ Traslado de la IA · castellano · soles")), "pasar a inglés la de castellano · soles: esa celda en ámbar (y el inglés no se enciende sin una celda «inglés»)");
+
+  // (f) La moneda del confirm sale de la celda; sin celda, del segmento (la regla vieja), como antes.
+  const cuentasDe = (x: Any) => PA.lineasConfirmTraslado({ resultante: null, plantillas: PLS0, perfil: null, ...x })[0];
+  ok(cuentasDe({ celda: ENU }).includes("(dólares)") && cuentasDe({ celda: ESP, segmento: "extranjero" }).includes("(soles)") && cuentasDe({ segmento: "extranjero" }).includes("(dólares)") && cuentasDe({ segmento: "particular" }).includes("(soles)"),
+    "lineasConfirmTraslado: la celda manda sobre el segmento");
+
+  // (g) porQueNoSirveIA, los nombres cortos y las pantallas.
+  ok(PA.porQueNoSirveIA(null, "en") === "ya no existe" && PA.porQueNoSirveIA(PL("x", { diseno: "corporativo", activa: false }), "en") === "está desactivada"
+    && PA.porQueNoSirveIA(PL("x", { diseno: "ejecutivo", idioma: "en" }), "en").includes("Corporativo")
+    && PA.porQueNoSirveIA(PL("x", { diseno: "corporativo" }), "en") === "no está en inglés" && PA.porQueNoSirveIA(PL("x", { diseno: "corporativo", idioma: "en" }), "es") === "está en inglés", "porQueNoSirveIA");
+  ok(PA.celdaTrasladoCorta(ENU) === "inglés · dólares" && PA.textoConCelda(parcial) === parcial.texto && PA.textoConCelda({ ...parcial, texto: "Usa «X»." }) === "Traslado de la IA · inglés · soles: Usa «X».", "el nombre corto y el texto con su celda (sin repetirla)");
+  const sinCom = (x: string) => x.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rt = sinCom(readFileSync(new URL("../components/cotizaciones/plantillas/ReglasTraslado.tsx", import.meta.url), "utf8"));
+  ok(/estadosTraslado\(plantillas, reglasTraslado\)/.test(rt) && !/plantillaTrasladoIA|inglesDisponible|inglesActivo/.test(rt), "ReglasTraslado pinta estadosTraslado: no llama al motor por su cuenta");
+  ok(/sirveParaIA\(p, f\.idioma\)/.test(rt) && /upsert\(\{ idioma: celda\.idioma, moneda: celda\.moneda, plantilla_id: nuevo \}, \{ onConflict: "idioma,moneda" \}\)/.test(rt)
+    && /from\(TABLA_REGLAS_TRASLADO\)[\s\S]{0,40}\.delete\(\)/.test(rt) && (rt.match(/filasDeVuelta</g) ?? []).length === 2 && /confirmCeldaTraslado\(/.test(rt) && /\.select\("idioma, moneda, plantilla_id"\)/.test(rt),
+    "ReglasTraslado: opciones por idioma, upsert por (idioma, moneda) y borrado, los dos pidiendo la fila de vuelta, con su confirm");
+  const ru = sinCom(readFileSync(new URL("../components/cotizaciones/plantillas/ReglasUso.tsx", import.meta.url), "utf8"));
+  ok(/reglasTraslado !== null/.test(ru) && /filter\(s => s !== "traslado_ia"\)/.test(ru) && /SQL_REGLAS_TRASLADO/.test(ru), "ReglasUso: sin la fila del traslado con la regla nueva, y nombra el SQL sin ella");
+  const pg = sinCom(readFileSync(new URL("../app/cotizaciones/plantillas/page.tsx", import.meta.url), "utf8"));
+  ok((pg.match(/reglasTrasladoQueUsan\(reglasTraslado, p\.id\)/g) ?? []).length >= 2 && /<ReglasTraslado /.test(pg) && /reglasTraslado=\{reglasTraslado\}/.test(pg)
+    && /sirveParaIA\(conIdioma, "en"\)/.test(pg) && /lineasCambioTraslado\(cambiosTraslado\(/.test(pg),
+    "la página: no desactivar ni callar el uso en una celda del traslado, la cuadrícula nueva, el ámbar de las líneas también en inglés y el cambio del inglés al guardar");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

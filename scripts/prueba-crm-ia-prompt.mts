@@ -73,10 +73,10 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
 {
   const ag = { mensaje_derivacion: "Hola {nombre}, un ejecutivo te escribe por este chat." };
   const ct = { nombre: "Paola Huarachi" };
-  const auto = textoSinImportesAjenos("El total sería 150 (IGV incluido)", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00123", decision: "automatico", figuras: [283.2], total: "S/ 283.20", validez: "18/11/2026" } }, ag, ct);
+  const auto = textoSinImportesAjenos("El total sería 150 (IGV incluido)", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00123", decision: "automatico", figuras: [283.2], total: "S/ 283.20", validez: "18/11/2026", idioma: "es" } }, ag, ct);
   // ADAPTADA (21-10-2026): el mensaje de la cotización ya no saluda ni usa el nombre del perfil.
   ok(auto.startsWith("Le envío la cotización N° 00123") && !/Paola|hola/i.test(auto) && auto.includes("S/ 283.20") && !auto.includes("150"), "con cotización, el texto del código (sin la cifra del modelo, sin saludo)");
-  const rev = textoSinImportesAjenos("Serán aprox 300", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00124", decision: "revision", figuras: [] } }, ag, ct);
+  const rev = textoSinImportesAjenos("Serán aprox 300", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00124", decision: "revision", figuras: [], idioma: "es" } }, ag, ct);
   ok(rev.includes("00124") && !/\d{3}(?!\d)/.test(rev.replace("00124", "")), "en revisión, el del código sin importes");
   const preg = textoSinImportesAjenos("Te sale gratis el retorno, ¿cuántas maletas?", { respuestaModelo: "", accion: "preguntar", faltan: ["la cantidad de maletas"] }, ag, ct);
   // ADAPTADA: el agente sin `comportamiento.tratamiento` es de USTED (el defecto del ajuste), y el
@@ -99,7 +99,7 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
   ok(preg({ tratamiento: "tu", preguntas: "todo_junto" }) === "Para cotizar tu traslado me falta: la cantidad de maletas; la hora de recojo.", "tú + todo junto");
   ok(preg({ tratamiento: "tu", preguntas: "una_por_mensaje" }) === "Para cotizar tu traslado, ¿me indicas la cantidad de maletas?", "tú + uno por mensaje");
   ok(preg({ tratamiento: "usted", preguntas: "una_por_mensaje" }) === "Para cotizar su traslado, ¿me indica la cantidad de maletas?", "usted + uno por mensaje");
-  const cot = { respuestaModelo: "", accion: "cotizar" as const, cotizacion: { cotizacionId: 1, numero: "7", decision: "revision" as const, figuras: [] } };
+  const cot = { respuestaModelo: "", accion: "cotizar" as const, cotizacion: { cotizacionId: 1, numero: "7", decision: "revision" as const, figuras: [], idioma: "es" as const } };
   ok(textoSinImportesAjenos("x", cot, { comportamiento: { tratamiento: "tu" } }, ct).startsWith("Registré tu pedido"), "cotización de tú");
   ok(textoSinImportesAjenos("x", cot, {}, ct).startsWith("Registré su pedido"), "cotización de usted (el defecto)");
   // La derivación por defecto (sin plantilla del dueño) también lee el trato.

@@ -32,7 +32,11 @@
 // condiciones que no caben en el PDF (`condiciones_demasiadas`).
 // Cada columna de una migración accesoria se SUELTA solo si el error la nombra
 // (lib/columna-faltante.ts): sin traslados-07 el PDF sale sin fotos y lo avisa; sin `plantilla_pdf`,
-// las cuentas son las de `corporativo`.
+// las cuentas son las de `corporativo`; sin `idioma_pdf` (cotizaciones-04), castellano; sin
+// `descripcion_cliente_en` (traslados-10), el PDF en inglés describe la unidad con la frase del
+// sistema (y eso NO es «falta traslados-07»: va en su propia lista).
+// EL IDIOMA ES EL DE LA FILA (`idioma_pdf`, que se escribe al crear la cotización): el PDF, el nombre
+// del archivo, el caption y la marca de agua del ejemplo («SAMPLE · NOT VALID») lo leen de ahí.
 // Las imágenes se bajan con LISTA BLANCA (el logo, solo del bucket `empresa` del propio Supabase,
 // donde lo sube /configuracion/perfil; las fotos, solo del bucket `traslados-fotos`), sin
 // redirecciones, 4 s y con tope de bytes. Un PNG se recorre ENTERO antes de dárselo a pdf-lib: sin
@@ -53,6 +57,7 @@ import { empresaConDefectos, type CuentaBancaria, type EmpresaResuelta, type Per
 import { docCorporativo, numeroCotizacion } from "../cotizacion-corporativo";
 import type { PlantillaPdfCfg } from "../cotizacion-pdf";
 import { disenoDe, esActiva, ETIQUETA_LISTA_CONSID, excesoCondiciones, MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES } from "../cotizacion-plantillas";
+import { normalizarIdioma } from "../cotizacion-idioma";
 import { dibujarPdfCorporativo, type ImagenPdf } from "../pdf-corporativo";
 import { fechaLima } from "../alertas-horario";
 import {
@@ -72,9 +77,10 @@ export const COLS_COTIZACION_TRASLADO =
   "crm_conversacion_id, traslado_json";
 /**
  * Accesorias: si el error nombra una, se suelta SOLO esa (sin `plantilla_pdf`, las cuentas son las de
- * `corporativo`; sin `condiciones_token` —cotizaciones-08—, la política va entera, sin enlace).
+ * `corporativo`; sin `condiciones_token` —cotizaciones-08—, la política va entera, sin enlace; sin
+ * `idioma_pdf` —cotizaciones-04—, la fila es de castellano, como siempre).
  */
-export const COLS_COTIZACION_TRASLADO_ACCESORIAS = ["plantilla_pdf", "condiciones_token"] as const;
+export const COLS_COTIZACION_TRASLADO_ACCESORIAS = ["plantilla_pdf", "condiciones_token", "idioma_pdf"] as const;
 
 /** La plantilla cuyas CUENTAS imprime el PDF cuando la cotización no dice otra (o la suya no sirve). */
 export const PLANTILLA_CUENTAS_DEFECTO = "corporativo";
@@ -246,6 +252,13 @@ export const COLS_CLIENTE_PDF = ["nombre", "empresa", "tipo", "ruc", "dni", "dir
 /** Las de la categoría: las de traslados-01 y, accesorias, las de traslados-07. */
 export const COLS_CATEGORIA_PDF = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo";
 export const COLS_CATEGORIA_FOTOS = ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] as const;
+/**
+ * La de traslados-10, APARTE de las de traslados-07: que falte no es «falta el SQL de las fotos»
+ * (`sin_migracion_fotos`). Solo se pide para un PDF en inglés (en castellano no la lee nadie).
+ */
+export const COLS_CATEGORIA_INGLES = ["descripcion_cliente_en"] as const;
+/** El SQL que agrega la descripción en inglés (lo nombra la pantalla). */
+export const SQL_DESCRIPCION_INGLES = "supabase/traslados-10-descripcion-ingles.sql";
 /** El SQL que agrega las fotos (lo nombran los avisos y el endpoint de subida). */
 export const SQL_FOTOS = "supabase/traslados-07-fotos-categoria.sql";
 /** Dónde se ponen las fotos y la descripción de la categoría (components/tarifario/FotosCategorias.tsx). */
@@ -340,15 +353,19 @@ export async function leerDatosPdf(
   const categoria = async (): Promise<{ cat: CategoriaPdf | null; faltan: string[] }> => {
     const clave = fila.traslado_json?.categoria?.clave;
     if (!clave) return { cat: null, faltan: [] };
+    // La descripción en inglés solo para un PDF en inglés: en castellano, la consulta de siempre.
+    const accesorias: readonly string[] = normalizarIdioma(fila.idioma_pdf) === "en" ? [...COLS_CATEGORIA_FOTOS, ...COLS_CATEGORIA_INGLES] : COLS_CATEGORIA_FOTOS;
     try {
-      const r = await conAccesorias((cols) => sb.from("traslado_categorias").select(cols).eq("clave", clave).maybeSingle(), COLS_CATEGORIA_PDF, COLS_CATEGORIA_FOTOS);
+      const r = await conAccesorias((cols) => sb.from("traslado_categorias").select(cols).eq("clave", clave).maybeSingle(), COLS_CATEGORIA_PDF, accesorias);
       return { cat: r.error ? null : (((r as { data?: unknown }).data ?? null) as CategoriaPdf | null), faltan: r.faltan };
     } catch { return { cat: null, faltan: [] }; }
   };
   const [cl, conv, pl, ca] = await Promise.all([cliente(), conversacion(), plantillaYReferenciaCuentas(sb, fila.plantilla_pdf), categoria()]);
   return {
     perfil: pp.perfil, cliente: cl, celular: conv.celular, contactoClienteId: conv.contactoClienteId,
-    plantilla: pl.usada, referenciaCuentas: pl.referencia, categoria: ca.cat, sinMigracionFotos: ca.faltan.length > 0,
+    plantilla: pl.usada, referenciaCuentas: pl.referencia, categoria: ca.cat,
+    // Solo las de traslados-07: la de traslados-10 que falta no es «falta el SQL de las fotos».
+    sinMigracionFotos: ca.faltan.some((c) => (COLS_CATEGORIA_FOTOS as readonly string[]).includes(c)),
   };
 }
 
@@ -454,8 +471,11 @@ export async function armarPdfDeFila(
   const faltantes = fotosPedidas.filter((u) => !fotos[u]).length;
   if (faltantes) avisos.push(aviso("foto_no_descargada", faltantes > 1 ? `(${faltantes} fotos)` : ""));
 
-  const bytes = await dibujarPdfCorporativo(doc, { logo, fotos }, { marcaAgua: opts.ejemplo ? "EJEMPLO · SIN VALIDEZ" : null });
-  return { bytes, nombre: nombreArchivoPdf(numeroCotizacion(entrada.cot)), caption: captionDocumento(fila, empresa), empresa, avisos };
+  // El nombre, el caption y la marca de agua, en el idioma de la fila (el mismo que el documento).
+  const idioma = normalizarIdioma(fila.idioma_pdf);
+  const marca = opts.ejemplo ? (idioma === "en" ? "SAMPLE · NOT VALID" : "EJEMPLO · SIN VALIDEZ") : null;
+  const bytes = await dibujarPdfCorporativo(doc, { logo, fotos }, { marcaAgua: marca });
+  return { bytes, nombre: nombreArchivoPdf(numeroCotizacion(entrada.cot), idioma), caption: captionDocumento(fila, empresa), empresa, avisos };
 }
 
 /**
@@ -608,7 +628,7 @@ export async function enviarCotizacionTraslado(
 
   // 4) El PDF (el que ya armó la IA, o uno nuevo desde la fila).
   let bytes = x.bytes ?? null;
-  let nombre = x.nombre ?? nombreArchivoPdf(numeroCotizacion(fila));
+  let nombre = x.nombre ?? nombreArchivoPdf(numeroCotizacion(fila), normalizarIdioma(fila.idioma_pdf));
   let caption = x.caption ?? "";
   try {
     if (!bytes || !caption) {

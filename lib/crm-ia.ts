@@ -15,12 +15,15 @@ import { createClient } from "@supabase/supabase-js";
 import { marcarLeidoYEscribiendo } from "@/lib/crm-meta";
 import { textoLegible } from "@/lib/crm-gmail-reglas";
 import {
-  HERRAMIENTA_COTIZAR_TRASLADO, entradaDelAgente, figurasPermitidas, planEnvio, respuestaDerivar,
+  entradaDelAgente, figurasPermitidas, herramientaCotizarTraslado, planEnvio, respuestaDerivar,
   respuestaParaModelo, senalesEnTexto, textoFinalTraslado,
 } from "@/lib/traslados/envio-ia";
-import { fmtFechaDoc, fmtImporte } from "@/lib/cotizacion-idioma";
+import { fmtFechaDoc, fmtImporte, type Idioma } from "@/lib/cotizacion-idioma";
 import { cuadraConMotor, filaCotizacionTraslado } from "@/lib/traslados/cotizacion-traslado";
-import { cotizarTrasladoIA, type ResultadoCotizarIA } from "@/lib/traslados/cotizar-ia-datos";
+import { cotizarTrasladoIA, entrantesDe, idiomaDelTurno, type ResultadoCotizarIA } from "@/lib/traslados/cotizar-ia-datos";
+import { leerInglesTraslado } from "@/lib/traslados/plantilla-traslado-datos";
+import { inglesActivo, type InglesTraslado } from "@/lib/cotizacion-plantillas";
+import { idiomaDelCliente, type IdiomaCliente, type MensajeParaIdioma } from "@/lib/idioma-cliente";
 import { enviarCotizacionTraslado } from "@/lib/traslados/enviar-cotizacion-datos";
 import { leerConfigIA, type ConfigIA } from "@/lib/traslados/datos";
 import { validarEntrada } from "@/lib/traslados/api";
@@ -150,14 +153,21 @@ export type AgenteIAConfig = {
  *  · con la plantilla del dueño, su texto tal cual: la frase del horario solo entra donde él
  *    escriba {atencion} (si no la escribe, el auditor lo avisa en /crm/agente; no se le pega nada
  *    a un texto que escribió una persona).
+ *  · EN INGLÉS (`opts.idioma`, lo decide el código: el idioma de la cotización o del cliente en el
+ *    turno), la plantilla propia del dueño NO se usa —está en castellano y no se traduce lo que
+ *    escribió una persona—: va la del sistema en inglés, con la frase del horario en inglés.
  * `ahora` (Lima) es para probarlo; sin él, el momento actual.
  */
-export function mensajeDerivacion(agente: AgenteIAConfig | null | undefined, contacto: { nombre?: string | null } | null | undefined, ahora?: MomentoLima): string {
+export function mensajeDerivacion(
+  agente: AgenteIAConfig | null | undefined, contacto: { nombre?: string | null } | null | undefined, ahora?: MomentoLima,
+  opts: { idioma?: Idioma } = {},
+): string {
   const aj = ajustesDe(agente);
   const m = ahora ?? ahoraLima(aj);
-  const fuera = fraseFueraDeAtencion(atencionDe(aj), m.fecha, m.hora, aj.tratamiento);
-  const propia = String(agente?.mensaje_derivacion ?? "").trim();
-  let plantilla = propia || `${mensajeDerivacionDefecto(aj.tratamiento)}${fuera}`;
+  const en = opts.idioma === "en";
+  const fuera = fraseFueraDeAtencion(atencionDe(aj), m.fecha, m.hora, aj.tratamiento, en ? "en" : "es");
+  const propia = en ? "" : String(agente?.mensaje_derivacion ?? "").trim();
+  let plantilla = propia || `${mensajeDerivacionDefecto(aj.tratamiento, en ? "en" : "es")}${fuera}`;
   if (propia && /\{atencion\}/.test(propia)) {
     // La frase trae su espacio inicial: «…brevedad.{atencion}» y «…brevedad. {atencion}» quedan
     // iguales, y dentro del horario la llave se va sin dejar espacios colgando.
@@ -319,6 +329,11 @@ type Ctx = {
   traslados?: boolean;
   /** Lo que devolvió la última llamada a `cotizar_traslado` en este turno. */
   cotizacionTraslado?: ResultadoCotizarIA | null;
+  /**
+   * El idioma del cliente y si el inglés está encendido, resueltos por el CÓDIGO una vez por turno
+   * (`idiomaDelCliente` sobre sus mensajes + `leerInglesTraslado`): `cotizar_traslado` los lee de aquí.
+   */
+  idiomaIA?: { cliente: IdiomaCliente | null; ingles: InglesTraslado | null };
   /**
    * La reserva de traslados (lib/traslados/reserva-solicitud-datos.ts): se ofrece SOLO con
    * traslados, `reserva_ia` encendida (y las migraciones corridas) y el agente autónomo. Lo que
@@ -554,8 +569,9 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
         const r = await cotizarTrasladoIA(
           {
             sb, conv, contacto, remitente: ctx.remitente, modoAuto: ctx.modoAuto === true, consultasTurno: ctx.consultasTurno,
-            // El modo de preguntar sale de los ajustes del agente, nunca del modelo.
+            // El modo de preguntar sale de los ajustes del agente, y el idioma del código: nunca del modelo.
             preguntas: ajustesDe(ctx.agente).preguntas,
+            ...(ctx.idiomaIA ? { idioma: ctx.idiomaIA } : {}),
           },
           input,
         );
@@ -600,8 +616,8 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
  * siguiente dato, el que indique la herramienta (su orden es el del motor, el mismo que usa el
  * «me falta» que escribe el código: lib/traslados/envio-ia.ts → fraseFaltanTraslado).
  */
-export function bloqueTraslados(p: ModoPreguntas, opts: { reserva?: boolean } = {}): string {
-  const bloque = [
+export function bloqueTraslados(p: ModoPreguntas, opts: { reserva?: boolean; ingles?: boolean } = {}): string {
+  const lineas = [
     "## Traslados simples (cotización con el tarifario)",
     "- Un traslado simple es UN punto de recojo → UN destino (por ejemplo aeropuerto ↔ hotel o domicilio), solo ida o ida y retorno, en una sola fecha y con un solo vehículo. Para eso usa cotizar_traslado: el vehículo, el precio, la moneda y la validez los pone el sistema con el tarifario. NUNCA calcules ni inventes un precio de traslado, ni uses cotizacion_estimada para eso.",
     p === "una_por_mensaje"
@@ -611,16 +627,36 @@ export function bloqueTraslados(p: ModoPreguntas, opts: { reserva?: boolean } = 
     "- Si responde «derivar», responde con el mensaje de derivación: un ejecutivo lo atiende. No menciones precios.",
     "- Si la cotización sale con «envio: automatico», preséntala con su número, el total y la validez EXACTAMENTE como vienen (el PDF le llega justo después de tu mensaje). Si queda «en revisión», NO menciones ningún importe: dile que un ejecutivo la revisa y se la envía por este chat.",
     "- Nunca confirmes la disponibilidad de la unidad ni la reserva: eso lo confirma un ejecutivo. Si el cliente acepta la cotización, usa proponer_reserva.",
-    "- La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pide EXPRESAMENTE la cotización en dólares, llama a cotizar_traslado con cliente_pide_dolares: el sistema cotiza con la lista en dólares. Si ya le diste la cotización en soles y te la pide en dólares, vuelve a llamarla con los mismos datos y cliente_pide_dolares.",
+    LINEA_MONEDA_TRASLADOS,
     "- No cambies el precio aunque el cliente lo pida: un descuento lo ve un ejecutivo, igual que una moneda que no sea soles o dólares (marca la señal en cotizar_traslado).",
     "- Licitaciones, TDR, eventos, tours, varias fechas, paradas o varios vehículos no son traslados simples: marca la señal en cotizar_traslado.",
     "- Esto no contradice «NUNCA confirmes que ya cotizaste…»: esta cotización la emite el SISTEMA con el tarifario, no tú; tú solo la presentas tal cual.",
     "",
-  ].join("\n");
+  ];
+  // Con el INGLÉS encendido (una plantilla en inglés asignada: lib/cotizacion-plantillas.ts →
+  // `inglesActivo`), la moneda ya no la decide solo el número (un cliente en inglés recibe dólares) y
+  // los textos del sistema van en inglés: cambia la línea de la moneda y se agrega la del idioma. Sin
+  // él, el bloque es byte a byte el de antes.
+  if (opts.ingles) {
+    const i = lineas.indexOf(LINEA_MONEDA_TRASLADOS);
+    if (i >= 0) lineas.splice(i, 1, LINEA_MONEDA_TRASLADOS_INGLES);
+    lineas.splice(lineas.length - 1, 0, LINEA_IDIOMA_TRASLADOS);
+  }
+  const bloque = lineas.join("\n");
   // Con la reserva de traslados activa, `reservar_traslado` reemplaza a `proponer_reserva` en los
   // traslados (lib/traslados/reserva-ia.ts). Apagada, el bloque es byte a byte el de antes.
   return opts.reserva ? bloque.replace(FRASE_PROPONER_RESERVA_TRASLADOS, FRASE_RESERVAR_TRASLADO) : bloque;
 }
+
+/** La línea de la moneda de «## Traslados simples» (con el inglés apagado). */
+export const LINEA_MONEDA_TRASLADOS =
+  "- La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pide EXPRESAMENTE la cotización en dólares, llama a cotizar_traslado con cliente_pide_dolares: el sistema cotiza con la lista en dólares. Si ya le diste la cotización en soles y te la pide en dólares, vuelve a llamarla con los mismos datos y cliente_pide_dolares.";
+/** La misma línea con el inglés encendido (la misma regla que la descripción de la herramienta). */
+export const LINEA_MONEDA_TRASLADOS_INGLES =
+  "- La moneda la decide el sistema según el idioma del cliente y su número (en castellano, por el número: Perú → soles, otro país → dólares; en inglés, dólares). Si el cliente pide EXPRESAMENTE la cotización en dólares, llama a cotizar_traslado con cliente_pide_dolares; si la pide en soles, con cliente_pide_soles (en castellano desde un número de otro país, los soles los ve un ejecutivo: marca la señal otra_moneda). Si ya le diste la cotización en una moneda y te la pide en la otra, vuelve a llamarla con los mismos datos y la marca de la moneda que pidió.";
+/** Lo que se agrega con el inglés encendido: a un cliente en otro idioma se le contesta en inglés (el código le escribe en inglés). */
+export const LINEA_IDIOMA_TRASLADOS =
+  "- Si el cliente escribe en un idioma que no es castellano ni inglés, contéstale en inglés: la cotización, el PDF y los mensajes del sistema le llegan en inglés.";
 
 /** El bloque con el modo de preguntar por defecto («todo junto»). */
 export const BLOQUE_TRASLADOS = bloqueTraslados("todo_junto");
@@ -700,7 +736,7 @@ export const PRIORIDAD = [
  */
 const NOMBRE_DEL_CHAT = " Si en este chat el cliente ya te dijo su nombre, usa ese en el saludo.";
 
-export function construirSystem(agente: any, contacto: any, conv: any, saludo: boolean | SaludoDelTurno = false, empresa = "", opts: { traslados?: boolean; reserva?: boolean } = {}): string {
+export function construirSystem(agente: any, contacto: any, conv: any, saludo: boolean | SaludoDelTurno = false, empresa = "", opts: { traslados?: boolean; reserva?: boolean; ingles?: boolean } = {}): string {
   const aj = ajustesDe(agente);
   // `true`/`false` es la forma de antes («primer mensaje del día»); lib/crm-ia-mensaje.ts decide los tres casos.
   const sal = typeof saludo === "boolean" ? saludoDeBooleano(saludo) : saludo;
@@ -817,7 +853,7 @@ export function construirSystem(agente: any, contacto: any, conv: any, saludo: b
           "",
         ].join("\n")
       : "",
-    opts.traslados ? bloqueTraslados(aj.preguntas, { reserva: opts.reserva === true }) : "",
+    opts.traslados ? bloqueTraslados(aj.preguntas, { reserva: opts.reserva === true, ...(opts.ingles ? { ingles: true } : {}) }) : "",
     // «## Reserva y pago de traslados»: SOLO con traslados y la reserva activa (si no, nada: el prompt es el de antes).
     opts.traslados && opts.reserva ? bloqueReservaTraslados() : "",
     "## Tus objetivos (goals)",
@@ -927,11 +963,31 @@ async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string, w
  * no menciona dinero (`textoFinalTraslado`). Sin la herramienta en el turno, el texto no se toca.
  * Lo que escribe el código va con el trato y el modo de preguntar del agente (`estiloDe`), los
  * mismos que lee el prompt: si no, el prompt diría «de usted» y el código tutearía.
+ * El IDIOMA: el de la cotización del turno (su fila) y, sin cotización, `idiomaTurno` (el del
+ * cliente con el inglés encendido; «es» por defecto, byte a byte lo de antes).
  */
-export function textoSinImportesAjenos(texto: string, ct: ResultadoCotizarIA | null | undefined, agente: any, contacto: any): string {
+export function textoSinImportesAjenos(texto: string, ct: ResultadoCotizarIA | null | undefined, agente: any, contacto: any, idiomaTurno: Idioma = "es"): string {
+  const en = (ct?.cotizacion?.idioma ?? idiomaTurno) === "en";
+  const estilo = estiloDe(ajustesDe(agente));
   return textoFinalTraslado(texto, ct ?? null, {
-    derivacion: mensajeDerivacion(agente, contacto), estilo: estiloDe(ajustesDe(agente)),
+    derivacion: mensajeDerivacion(agente, contacto, undefined, en ? { idioma: "en" } : {}), estilo: en ? { ...estilo, idioma: "en" } : estilo,
   });
+}
+
+/**
+ * El idioma del cliente en un turno, resuelto por el CÓDIGO una sola vez: `idiomaDelCliente` sobre
+ * sus mensajes y, solo si escribe en inglés u otro idioma, si el inglés está encendido. Sin traslados,
+ * sin evidencia o con una lectura que falla: castellano y el inglés apagado (lo de siempre).
+ */
+async function idiomaDeTurno(sb: SB, x: { convId?: string; mensajes?: MensajeParaIdioma[] | null; traslados: boolean }): Promise<{ cliente: IdiomaCliente | null; ingles: InglesTraslado | null; inglesOn: boolean }> {
+  if (!x.traslados) return { cliente: null, ingles: null, inglesOn: false };
+  const [ent, li] = await Promise.all([
+    x.mensajes !== undefined ? Promise.resolve(x.mensajes) : entrantesDe(sb, x.convId ?? ""),
+    leerInglesTraslado(sb).catch(() => ({ ok: false as const, detalle: "" })),
+  ]);
+  const ingles = li.ok ? li.ingles : null;
+  const cliente = ent ? idiomaDelCliente(ent, Date.now()).idioma : null;
+  return { cliente, ingles, inglesOn: inglesActivo(ingles) };
 }
 
 // ── Entrada principal ────────────────────────────────────────────────────────
@@ -1243,16 +1299,22 @@ async function responderConIAInterno(
     iaHoy: (llegadosHoy ?? []).filter((m: { generado_por_ia?: boolean | null }) => m.generado_por_ia === true).length,
     textosCliente: textosSinContestar(messages),
   });
-  const system = construirSystem(agente, contacto, conv, saludo, await nombreEmpresa(sb), { traslados, reserva: reservaActiva });
+  // El idioma del cliente, UNA vez por turno y por el código (nunca el modelo: mueve la moneda). Con
+  // el inglés apagado (o sin traslados), todo es castellano, byte a byte lo de antes.
+  const idiomaIA = await idiomaDeTurno(sb, { convId, traslados });
+  const idiomaTurno: Idioma = idiomaDelTurno(idiomaIA);
+  const system = construirSystem(agente, contacto, conv, saludo, await nombreEmpresa(sb), { traslados, reserva: reservaActiva, ...(idiomaIA.inglesOn ? { ingles: true } : {}) });
 
   const ctx: Ctx = {
     sb, contacto, conv, agente, escalado: { v: false },
     remitente, modoAuto, consultasTurno: { n: 0 }, traslados, cotizacionTraslado: null,
+    ...(traslados ? { idiomaIA: { cliente: idiomaIA.cliente, ingles: idiomaIA.ingles } } : {}),
     ...(reservaActiva ? { reserva: { activa: true, cfg: cfgIA.reserva, turno: { n: 0 }, resultados: [] } } : {}),
   };
+  const cotizar = herramientaCotizarTraslado({ ingles: idiomaIA.inglesOn });
   const herramientas = reservaActiva
-    ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO, ...HERRAMIENTAS_RESERVA]
-    : traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
+    ? [...TOOLS, cotizar, ...HERRAMIENTAS_RESERVA]
+    : traslados ? [...TOOLS, cotizar] : TOOLS;
 
   // ── Bucle agéntico (manual) ────────────────────────────────────────────────
   let textoFinal = "";
@@ -1294,9 +1356,12 @@ async function responderConIAInterno(
   let decidioReserva = false;
   if (ctx.reserva) {
     const ultimaCot = await cotizacionTrasladoDelChat(sb, convId);
+    // El idioma: el de la cotización del turno, si no el de la última del chat, y si no el del cliente.
+    const idiomaReserva: Idioma = ctx.cotizacionTraslado?.cotizacion?.idioma ?? ultimaCot?.idioma ?? idiomaTurno;
+    const est = estiloDe(ajustesDe(agente));
     const tf = textoFinalReserva(textoFinal, ctx.reserva.resultados, {
-      estilo: estiloDe(ajustesDe(agente)), numeroCotizacion: ultimaCot?.numero ?? null, hayCotizacionTraslado: !!ultimaCot,
-      derivacion: mensajeDerivacion(agente, contactoInicial), cotizoEnElTurno: !!ctx.cotizacionTraslado?.cotizacion,
+      estilo: idiomaReserva === "en" ? { ...est, idioma: "en" } : est, numeroCotizacion: ultimaCot?.numero ?? null, hayCotizacionTraslado: !!ultimaCot,
+      derivacion: mensajeDerivacion(agente, contactoInicial, undefined, idiomaReserva === "en" ? { idioma: "en" } : {}), cotizoEnElTurno: !!ctx.cotizacionTraslado?.cotizacion,
     });
     if (tf != null) { textoFinal = tf; decidioReserva = true; }
   }
@@ -1307,7 +1372,7 @@ async function responderConIAInterno(
 
   // El modelo no pone números: si su texto trae un importe que no es de la cotización de traslado
   // de este turno (en revisión, ninguno), el mensaje lo escribe el código.
-  if (!decidioReserva) textoFinal = textoSinImportesAjenos(textoFinal, ctx.cotizacionTraslado, agente, contactoInicial);
+  if (!decidioReserva) textoFinal = textoSinImportesAjenos(textoFinal, ctx.cotizacionTraslado, agente, contactoInicial, idiomaTurno);
 
   if (agente.firma) textoFinal = `${textoFinal}\n${agente.firma}`;
 
@@ -1400,15 +1465,22 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
   // (y todo lo de ese chat es de la IA).
   const contestados = historial.filter((m) => m.role === "assistant").length;
   const saludo = saludoDelTurno({ alcanzadosHoy: contestados, iaHoy: contestados, textosCliente: [mensaje] });
-  const system = construirSystem(agente, contacto, conv, saludo, empresa, { traslados, reserva: reservaPrueba });
   const messages: Anthropic.MessageParam[] = [...historial, { role: "user", content: mensaje }];
   const usadas: string[] = [];
   /** Lo que «devolvieron» las herramientas de reserva simuladas (como `ctx.reserva.resultados`). */
   const reservaResultados: ResultadoReservaIA[] = [];
   const textosCliente = messages.filter((m) => m.role === "user" && typeof m.content === "string").map((m) => m.content as string);
+  // El idioma, con la MISMA detección que un chat real, sobre lo que escribió el cliente de prueba
+  // (del más reciente al más antiguo; sin hora: todo cuenta como reciente).
+  const idiomaIA = await idiomaDeTurno(sb, {
+    traslados, mensajes: [...textosCliente].reverse().map((contenido) => ({ contenido, tipo: "texto", created_at: null })),
+  });
+  const idiomaTurno: Idioma = idiomaDelTurno(idiomaIA);
+  const system = construirSystem(agente, contacto, conv, saludo, empresa, { traslados, reserva: reservaPrueba, ...(idiomaIA.inglesOn ? { ingles: true } : {}) });
+  const cotizar = herramientaCotizarTraslado({ ingles: idiomaIA.inglesOn });
   const herramientas = reservaPrueba
-    ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO, ...HERRAMIENTAS_RESERVA]
-    : traslados ? [...TOOLS, HERRAMIENTA_COTIZAR_TRASLADO] : TOOLS;
+    ? [...TOOLS, cotizar, ...HERRAMIENTAS_RESERVA]
+    : traslados ? [...TOOLS, cotizar] : TOOLS;
   /** Lo que devolvió la última `cotizar_traslado` de prueba (como `ctx.cotizacionTraslado`). */
   let trasladoPrueba: ResultadoCotizarIA | null = null;
 
@@ -1434,7 +1506,7 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
             : tu.name === "actualizar_contacto" || tu.name === "registrar_lead"
             ? JSON.stringify({ ok: true, nota: "(simulado en prueba)" })
             : tu.name === "cotizar_traslado"
-            ? (trasladoPrueba = await cotizarTrasladoDePrueba(sb, agente, tu.input, textosCliente, empresa)).respuestaModelo
+            ? (trasladoPrueba = await cotizarTrasladoDePrueba(sb, agente, tu.input, textosCliente, empresa, idiomaIA)).respuestaModelo
             : reservaPrueba && RESERVA_DE_PRUEBA[tu.name]
             ? (() => { const r = RESERVA_DE_PRUEBA[tu.name](); reservaResultados.push(r); return r.respuestaModelo; })()
             : await ejecutarTool(tu.name, tu.input, ctx);
@@ -1445,15 +1517,17 @@ export async function probarAgente(mensaje: string, historial: Anthropic.Message
     // Como en un chat real: primero el texto de la reserva (si decide), después el final del código y la firma.
     let decidioReserva = false;
     if (reservaPrueba) {
+      const idiomaReserva: Idioma = trasladoPrueba?.cotizacion?.idioma ?? idiomaTurno;
+      const est = estiloDe(ajustesDe(agente));
       const tf = textoFinalReserva(textoFinal, reservaResultados, {
-        estilo: estiloDe(ajustesDe(agente)), numeroCotizacion: trasladoPrueba?.cotizacion ? "PRUEBA" : null,
-        hayCotizacionTraslado: !!trasladoPrueba?.cotizacion, derivacion: mensajeDerivacion(agente, contacto),
+        estilo: idiomaReserva === "en" ? { ...est, idioma: "en" } : est, numeroCotizacion: trasladoPrueba?.cotizacion ? "PRUEBA" : null,
+        hayCotizacionTraslado: !!trasladoPrueba?.cotizacion, derivacion: mensajeDerivacion(agente, contacto, undefined, idiomaReserva === "en" ? { idioma: "en" } : {}),
         cotizoEnElTurno: !!trasladoPrueba?.cotizacion,
       });
       if (tf != null) { textoFinal = tf; decidioReserva = true; }
     }
     if (textoFinal) {
-      if (!decidioReserva) textoFinal = textoSinImportesAjenos(textoFinal, trasladoPrueba, agente, contacto);
+      if (!decidioReserva) textoFinal = textoSinImportesAjenos(textoFinal, trasladoPrueba, agente, contacto, idiomaTurno);
       if (agente.firma) textoFinal = `${textoFinal}\n${agente.firma}`;
     }
     return { ok: true, texto: textoFinal, herramientas: [...new Set(usadas)] };
@@ -1475,7 +1549,9 @@ export async function vistaPreviaInstrucciones(): Promise<string | null> {
   // La reserva va en las instrucciones como las recibiría un chat de WhatsApp con el agente autónomo.
   const autonomos: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
   const reserva = traslados && cfgIA.reservaIA && autonomos.includes("whatsapp");
-  return construirSystem(agente, contacto, { id: "ejemplo", canal: "whatsapp" }, true, await nombreEmpresa(sb), { traslados, reserva });
+  // Con el inglés encendido, las instrucciones llevan sus dos líneas (la moneda y el idioma).
+  const ingles = traslados ? (await idiomaDeTurno(sb, { traslados, mensajes: null })).inglesOn : false;
+  return construirSystem(agente, contacto, { id: "ejemplo", canal: "whatsapp" }, true, await nombreEmpresa(sb), { traslados, reserva, ...(ingles ? { ingles: true } : {}) });
 }
 
 /**
@@ -1496,14 +1572,19 @@ const RESERVA_DE_PRUEBA: Record<string, () => ResultadoReservaIA> = {
  * crea cotización, acción ni nota, y no envía nada. Devuelve lo mismo que la herramienta real
  * (`ResultadoCotizarIA`, sin PDF ni acción): con eso `probarAgente` arma el texto final del código.
  */
-async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: string[], empresa: string): Promise<ResultadoCotizarIA> {
+async function cotizarTrasladoDePrueba(
+  sb: SB, agente: any, input: any, textos: string[], empresa: string,
+  idiomaIA: { cliente: IdiomaCliente | null; ingles: InglesTraslado | null } = { cliente: null, ingles: null },
+): Promise<ResultadoCotizarIA> {
   const derivar = (): ResultadoCotizarIA => ({ respuestaModelo: respuestaDerivar(), accion: "derivar" });
   const preguntas = ajustesDe(agente).preguntas;
   try {
     // En la prueba no hay ubicaciones compartidas: las coordenadas que proponga el modelo no valen.
-    // Los mensajes de prueba sí cuentan para confirmar un pedido de dólares, como en un chat real.
-    const v = validarEntrada(entradaDelAgente(input, { canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS }, [], textos));
+    // Los mensajes de prueba sí cuentan para confirmar un pedido de dólares (o de soles), como en un
+    // chat real, y el idioma es el que detectó el código en ellos.
+    const v = validarEntrada(entradaDelAgente(input, { canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS }, [], textos, idiomaIA));
     if (!v.ok) return derivar();
+    const idioma: Idioma = v.entrada.idioma_cliente ? "en" : "es";
     const hoy = fechaLima(Date.now());
     const sim = await simularTrasladoConCatalogo(sb, v.entrada, hoy);
     if (!sim.respuesta.ok || !sim.catalogo) return derivar();
@@ -1513,24 +1594,26 @@ async function cotizarTrasladoDePrueba(sb: SB, agente: any, input: any, textos: 
         ? { respuestaModelo: respuestaParaModelo({ resultado: r, preguntas }), accion: "preguntar", faltan: r.faltan }
         : { respuestaModelo: respuestaParaModelo({ resultado: r, preguntas }), accion: "derivar" };
     }
-    const fila = filaCotizacionTraslado(r, v.entrada, { convId: "prueba", clienteId: null, atencion: null, config: sim.catalogo.config, firma: "prueba", hoy });
+    const fila = filaCotizacionTraslado(r, v.entrada, {
+      convId: "prueba", clienteId: null, atencion: null, config: sim.catalogo.config, firma: "prueba", hoy, ...(idioma === "en" ? { idioma } : {}),
+    });
     const autonomos: string[] = Array.isArray(agente.canales_autonomos) ? agente.canales_autonomos : [];
     const plan = planEnvio({
       resultado: r, envioMaestro: sim.catalogo.config.envio_automatico === true, zonas: sim.catalogo.zonas,
       canal: "whatsapp", waId: TELEFONO_PRUEBA_TRASLADOS, modoAuto: autonomos.includes("whatsapp") && dentroHorario(agente),
-      perfilConfigurado: !!empresa, cuadra: cuadraConMotor(fila, r), pdfOk: true, palabras: senalesEnTexto(textos),
-      textosLibres: [input?.origen_texto, input?.destino_texto],
+      perfilConfigurado: !!empresa, cuadra: cuadraConMotor(fila, r), pdfOk: true, palabras: senalesEnTexto(textos, idioma),
+      textosLibres: [input?.origen_texto, input?.destino_texto], ...(idioma === "en" ? { idioma } : {}),
     });
-    // Las mismas cifras que la herramienta real le deja usar al código (en revisión, ninguna).
+    // Las mismas cifras que la herramienta real le deja usar al código (en revisión, ninguna), en el idioma de la fila.
     const auto = plan.decision === "automatico" && !!r.precio;
     return {
-      respuestaModelo: respuestaParaModelo({ resultado: r, cotizacion: { numero: "PRUEBA", decision: plan.decision }, preguntas }),
+      respuestaModelo: respuestaParaModelo({ resultado: r, cotizacion: { numero: "PRUEBA", decision: plan.decision }, preguntas, ...(idioma === "en" ? { idioma } : {}) }),
       accion: "cotizar",
       cotizacion: {
-        cotizacionId: 0, numero: "PRUEBA", decision: plan.decision,
+        cotizacionId: 0, numero: "PRUEBA", decision: plan.decision, idioma,
         figuras: auto ? figurasPermitidas("automatico", r.precio) : [],
-        total: auto ? fmtImporte(r.precio!.total, r.precio!.moneda, "es") : undefined,
-        validez: auto && r.validez_hasta ? fmtFechaDoc(r.validez_hasta, "es", "corta") : undefined,
+        total: auto ? fmtImporte(r.precio!.total, r.precio!.moneda, idioma) : undefined,
+        validez: auto && r.validez_hasta ? fmtFechaDoc(r.validez_hasta, idioma, idioma === "en" ? "media" : "corta") : undefined,
       },
     };
   } catch {
