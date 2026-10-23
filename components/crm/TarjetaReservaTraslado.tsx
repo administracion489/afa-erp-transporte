@@ -678,11 +678,13 @@ function FormConfirmacion({ v, ocupado, sinProgramacion, onCancelar, onEnviar }:
           <select className={`${inputCls} mt-1`} value={idioma} onChange={(e) => setIdioma(e.target.value === "en" ? "en" : "es")}>
             <option value="es">Español</option><option value="en">Inglés</option>
           </select>
-          <span className="block text-[10px] text-gray-500 mt-0.5">
-            {idioma === deLaCotizacion
-              ? `El de la cotización (${deLaCotizacion === "en" ? "inglés" : "español"}): el PDF y su mensaje salen en este idioma.`
-              : `La cotización está en ${deLaCotizacion === "en" ? "inglés" : "español"}: el PDF y su mensaje saldrán en ${idioma === "en" ? "inglés" : "español"}.`}
-          </span>
+          {(deLaCotizacion === "en" || idioma !== deLaCotizacion) && (
+            <span className="block text-[10px] text-gray-500 mt-0.5">
+              {idioma === deLaCotizacion
+                ? "El de la cotización (inglés): el PDF y su mensaje salen en inglés."
+                : `La cotización está en ${deLaCotizacion === "en" ? "inglés" : "español"}: el PDF y su mensaje saldrán en ${idioma === "en" ? "inglés" : "español"}.`}
+            </span>
+          )}
         </label>
         <label className="text-xs text-gray-700">Vuelo (opcional)
           <input className={`${inputCls} mt-1`} maxLength={40} value={vuelo} onChange={(e) => setVuelo(e.target.value)} placeholder="Ej.: LA2045" />

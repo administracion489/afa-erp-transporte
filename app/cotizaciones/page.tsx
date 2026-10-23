@@ -1088,7 +1088,7 @@ export default function CotizacionesPage(){
    * en inglés, así que se suelta la marca `idioma: "en"`. Es el lado seguro: el PDF en inglés la avisa
    * como escrita tal cual y la IA, si reusa la cotización, la deja en revisión.
    */
-  const sinMarcaIngles=({idioma:_soltada,...resto}:ConsidFila):ConsidFila=>resto;
+  const sinMarcaIngles=(c:ConsidFila):ConsidFila=>{const resto={...c};delete resto.idioma;return resto;};
   const [modalPlantilla,setModalPlantilla]=useState<Cotizacion|null>(null);const [plantillaElegida,setPlantillaElegida]=useState("corporativo");
   const [modalEnvio,setModalEnvio]=useState<CotFila|null>(null);
   const [rolUsuario,setRolUsuario]=useState<string>("operador");
