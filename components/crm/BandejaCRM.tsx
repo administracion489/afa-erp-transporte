@@ -13,7 +13,7 @@ import AdjuntarArchivo from "@/components/crm/AdjuntarArchivo";
 import { useRespuestasRapidas, SugerenciasRapidas, ModalRespuestasRapidas, aplicarVariables } from "@/components/crm/RespuestasRapidas";
 import { haceCuanto, textoLegible } from "@/lib/crm-gmail-reglas";
 import { accionReclamable, MOTIVO_REVISION, PLAZO_ENVIO_MS } from "@/lib/traslados/envio-ia";
-import { LINEA_DISPONIBILIDAD } from "@/lib/traslados/cotizacion-traslado";
+import { lineaDisponibilidad } from "@/lib/traslados/cotizacion-traslado";
 import { usePuedeVer } from "@/lib/usePuedeVer";
 import { abrirPdf } from "@/components/tarifario/abrir-pdf";
 import TarjetaReservaTraslado from "@/components/crm/TarjetaReservaTraslado";
@@ -85,10 +85,14 @@ type AccionIA = {
   resuelta_at?: string | null; resultado_id?: number | null;
 };
 
-/** Lo que el agente guarda en `payload` de una `cotizacion_traslado` (lib/traslados/cotizar-ia-datos.ts). */
+/**
+ * Lo que el agente guarda en `payload` de una `cotizacion_traslado` (lib/traslados/cotizar-ia-datos.ts).
+ * `idioma: "en"` solo cuando la IA la cotizó en inglés (el cliente escribe en inglés u otro idioma);
+ * ausente = castellano.
+ */
 type PayloadTraslado = {
   cotizacion_id?: number; numero?: string; decision?: "automatico" | "revision";
-  motivos?: string[]; ultimo_error?: string | null;
+  motivos?: string[]; ultimo_error?: string | null; idioma?: "en";
 };
 
 const fechaAccion = (a: AccionIA) => a.creada_at ?? a.created_at ?? "";
@@ -100,6 +104,7 @@ function payloadTraslado(a: AccionIA): PayloadTraslado {
     decision: p.decision === "automatico" || p.decision === "revision" ? p.decision : undefined,
     motivos: Array.isArray(p.motivos) ? p.motivos.filter((x): x is string => typeof x === "string") : [],
     ultimo_error: typeof p.ultimo_error === "string" && p.ultimo_error.trim() ? p.ultimo_error : null,
+    ...(p.idioma === "en" ? { idioma: "en" as const } : {}),
   };
 }
 
@@ -945,6 +950,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
     const ok = window.confirm(
       `¿Enviar la cotización ${cot} al WhatsApp ${tel}${nombre ? ` (${nombre})` : ""}?\n\n`
       + "Sale el PDF armado con la cotización tal como está ahora en /cotizaciones: si la editaste, sale editada.\n\n"
+      + (p.idioma === "en" ? "La IA la cotizó en inglés: el PDF y su leyenda salen en inglés.\n\n" : "")
       + "Se envía como respuesta del equipo: la IA deja de contestar en este chat por unas horas.");
     if (!ok) return;
     setTrasladoOcupado({ id: a.id, que: "enviar" });
@@ -2370,7 +2376,8 @@ function PorQueNoRespondioIA({ decision, mensajes }: {
 /**
  * La tarjeta de una cotización de traslado que la IA dejó para revisar (o que debía salir sola y no
  * salió). Todo lo que viene de la base se pinta como TEXTO. Los motivos se leen de MOTIVO_REVISION
- * (lib/traslados/envio-ia.ts), el mismo catálogo con que el agente los decidió.
+ * (lib/traslados/envio-ia.ts), el mismo catálogo con que el agente los decidió. Si la IA la cotizó en
+ * inglés (`payload.idioma`), lleva «🇬🇧 EN» y dice que lo que se envía desde aquí sale en inglés.
  */
 function TarjetaTraslado({ a, canal, waId, ocupado, mensaje, puedeCotizaciones, onVerPdf, onEnviar, onRechazar }: {
   a: AccionIA;
@@ -2413,6 +2420,7 @@ function TarjetaTraslado({ a, canal, waId, ocupado, mensaje, puedeCotizaciones, 
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">🚐 Cotización de traslado para revisar</div>
         {p.numero && <div className="text-[11px] font-mono font-bold text-gray-600">N° {p.numero}</div>}
+        {p.idioma === "en" && <span title="La IA la cotizó en inglés: el cliente escribe en inglés u otro idioma." className="text-[10px] font-black px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">🇬🇧 EN</span>}
         {enCurso && <div className="text-[11px] font-semibold text-sky-700">⏳ enviándose…</div>}
       </div>
       {a.resumen && <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">{a.resumen}</p>}
@@ -2431,7 +2439,7 @@ function TarjetaTraslado({ a, canal, waId, ocupado, mensaje, puedeCotizaciones, 
       {p.ultimo_error && (
         <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-2 py-1.5 break-words">Último intento de envío: {p.ultimo_error}</p>
       )}
-      <p className="text-[10px] text-gray-400">{LINEA_DISPONIBILIDAD}</p>
+      <p className="text-[10px] text-gray-400">{lineaDisponibilidad(p.idioma ?? "es")}</p>
       <div className="flex flex-wrap gap-1.5">
         <button onClick={onVerPdf} disabled={algoEnCurso}
           className="text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50 min-h-[36px]">
@@ -2453,6 +2461,9 @@ function TarjetaTraslado({ a, canal, waId, ocupado, mensaje, puedeCotizaciones, 
         </button>
       </div>
       {motivoNoEnviar && <p className="text-[11px] text-gray-500">No se puede enviar ahora: {motivoNoEnviar}</p>}
+      {p.idioma === "en" && (
+        <p className="text-[11px] text-sky-800">🇬🇧 La IA la cotizó en inglés: los mensajes que envíes desde aquí salen en inglés (el PDF y su leyenda), salvo que le cambies el idioma en Cotizaciones.</p>
+      )}
       {p.numero && puedeCotizaciones === false && (
         <p className="text-[11px] text-gray-400">Para abrirla en Cotizaciones hace falta el módulo Cotizaciones.</p>
       )}

@@ -18,7 +18,10 @@
 //  · «Hay unidad» / «No hay unidad» se apagan sin el módulo Programación (`permisos.programacion`),
 //    diciendo por qué (crean o descartan la reserva ahí);
 //  · fuera de la ventana de 24 h de WhatsApp el resultado trae el texto y el enlace wa.me (y el PDF
-//    de la Confirmación para descargarlo): queda FIJO en la tarjeta hasta que se oculte.
+//    de la Confirmación para descargarlo): queda FIJO en la tarjeta hasta que se oculte;
+//  · con la cotización en inglés (`vista.idioma`, su `idioma_pdf`) la cabecera lleva «🇬🇧 EN» y, junto
+//    a los botones que le escriben al cliente (y en su `confirm()`), se dice que esos mensajes salen
+//    en inglés; la Confirmación nace en el idioma de la cotización.
 // El contrato de la ruta es lib/traslados/reserva-solicitud-tipos.ts.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -74,6 +77,14 @@ const btn = "text-xs px-2.5 py-1.5 rounded-lg border font-semibold disabled:opac
 const btnNeutro = `${btn} border-gray-200 text-gray-700 hover:bg-gray-50`;
 const inputCls = "w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 min-h-[40px]";
 const SONDEO_MS = 120_000;
+
+/**
+ * Las acciones de la tarjeta que le ESCRIBEN al cliente (el texto lo arma el servidor en el idioma de
+ * la cotización, `vista.idioma`). Con la cotización en inglés, su pregunta y la línea junto a los
+ * botones lo dicen. «Emitir y enviar Confirmación» elige su idioma en su propio formulario.
+ */
+const ACCIONES_CON_MENSAJE: readonly Accion[] = ["hay_unidad", "sin_unidad", "pedir_comprobante", "registrar_comprobante", "resolver_cancelacion"];
+const SALE_EN_INGLES = "La IA cotizó en inglés: el mensaje al cliente sale en inglés.";
 
 export default function TarjetaReservaTraslado({ accion, enBandeja, ultimoMensajeAt, onActuo, onOcultar, onToast }: {
   accion: AccionReservaIA;
@@ -232,11 +243,17 @@ export default function TarjetaReservaTraslado({ accion, enBandeja, ultimoMensaj
   const sinProgramacion = permisos?.programacion === false;
   const reservaViva = v.reserva && v.reserva.estado !== "cancelada" ? v.reserva : null;
 
+  const enIngles = v.idioma === "en";
   const preguntarY = (pregunta: string, cuerpo: Omit<CuerpoTarjeta, "solicitud_id" | "conversacion_id" | "accion_id">) => {
     if (algo) return;
-    if (!window.confirm(pregunta)) return;
+    // En inglés, la pregunta dice además en qué idioma sale lo que se le escribe al cliente.
+    const conIdioma = enIngles && ACCIONES_CON_MENSAJE.includes(cuerpo.accion) ? `${pregunta}\n\n${SALE_EN_INGLES}` : pregunta;
+    if (!window.confirm(conIdioma)) return;
     void ejecutar(cuerpo);
   };
+  // ¿Hay a la vista algún botón que le escriba al cliente? (para la línea del idioma junto a los botones)
+  const escribeAlCliente = tiene("enviar_confirmacion")
+    || ACCIONES_CON_MENSAJE.some((a) => tiene(a) && (a !== "resolver_cancelacion" || puedeDinero));
 
   return (
     <div className="bg-white border border-amber-200 rounded-xl p-3 space-y-2.5">
@@ -244,6 +261,7 @@ export default function TarjetaReservaTraslado({ accion, enBandeja, ultimoMensaj
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">📅 Reserva de traslado</div>
         {c?.numero && <div className="text-[11px] font-mono font-bold text-gray-600">N° {c.numero}</div>}
+        {enIngles && <span title="La IA cotizó en inglés: el cliente escribe en inglés u otro idioma." className="text-[10px] font-black px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">🇬🇧 EN</span>}
         <ChipEstado estado={v.estado} />
         {v.urgente && !terminal && <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-red-100 text-red-700">URGENTE</span>}
         <span className="ml-auto flex items-center gap-2">
@@ -399,7 +417,7 @@ export default function TarjetaReservaTraslado({ accion, enBandeja, ultimoMensaj
           </button>
         )}
         {tiene("marcar_confirmacion_enviada") && !v.ventana.abierta && v.confirmacion.ultima && !sinProgramacion && (
-          <button type="button" disabled={algo} onClick={() => void descargarPdf(`/api/reservas/confirmacion?version_id=${v.confirmacion.ultima!.id}&idioma=es&pdf=1`, v.confirmacion.ultima!.codigo, "es")} className={btnNeutro}>
+          <button type="button" disabled={algo} onClick={() => void descargarPdf(`/api/reservas/confirmacion?version_id=${v.confirmacion.ultima!.id}&idioma=${enIngles ? "en" : "es"}&pdf=1`, v.confirmacion.ultima!.codigo, enIngles ? "en" : "es")} className={btnNeutro}>
             {ocupado === "pdf" ? "Descargando…" : `⬇ PDF ${v.confirmacion.ultima.codigo}`}
           </button>
         )}
@@ -429,6 +447,9 @@ export default function TarjetaReservaTraslado({ accion, enBandeja, ultimoMensaj
           </button>
         )}
       </div>
+      {enIngles && escribeAlCliente && (
+        <p className="text-[11px] text-sky-800">🇬🇧 La IA cotizó en inglés: los mensajes que envíes desde aquí salen en inglés.</p>
+      )}
       {tiene("enviar_confirmacion") && sinProgramacion && (
         <p className="text-[11px] text-gray-500">«{ETIQUETA_ACCION.enviar_confirmacion}» exige además el módulo Programación (lo da un administrador en Usuarios).</p>
       )}
@@ -642,7 +663,9 @@ function FormConfirmacion({ v, ocupado, sinProgramacion, onCancelar, onEnviar }:
   v: VistaSolicitud; ocupado: boolean; sinProgramacion: boolean; onCancelar: () => void;
   onEnviar: (idioma: "es" | "en", extras: NonNullable<CuerpoTarjeta["extras"]>) => void;
 }) {
-  const [idioma, setIdioma] = useState<"es" | "en">("es");
+  // Nace en el idioma de la cotización (el de los demás mensajes de la reserva); se puede cambiar.
+  const deLaCotizacion: "es" | "en" = v.idioma === "en" ? "en" : "es";
+  const [idioma, setIdioma] = useState<"es" | "en">(deLaCotizacion);
   const [vuelo, setVuelo] = useState(v.vuelo ?? "");
   const [encuentro, setEncuentro] = useState("");
   const [nota, setNota] = useState("");
@@ -655,6 +678,11 @@ function FormConfirmacion({ v, ocupado, sinProgramacion, onCancelar, onEnviar }:
           <select className={`${inputCls} mt-1`} value={idioma} onChange={(e) => setIdioma(e.target.value === "en" ? "en" : "es")}>
             <option value="es">Español</option><option value="en">Inglés</option>
           </select>
+          <span className="block text-[10px] text-gray-500 mt-0.5">
+            {idioma === deLaCotizacion
+              ? `El de la cotización (${deLaCotizacion === "en" ? "inglés" : "español"}): el PDF y su mensaje salen en este idioma.`
+              : `La cotización está en ${deLaCotizacion === "en" ? "inglés" : "español"}: el PDF y su mensaje saldrán en ${idioma === "en" ? "inglés" : "español"}.`}
+          </span>
         </label>
         <label className="text-xs text-gray-700">Vuelo (opcional)
           <input className={`${inputCls} mt-1`} maxLength={40} value={vuelo} onChange={(e) => setVuelo(e.target.value)} placeholder="Ej.: LA2045" />
