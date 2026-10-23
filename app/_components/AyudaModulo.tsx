@@ -19,9 +19,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ayudaDeRuta, buscarConceptos, conceptosDe, glosarioOrdenado } from "@/lib/ayuda";
 import type { AyudaModulo as FichaAyuda, Concepto } from "@/lib/ayuda";
+import { INICIAL_AYUDA, TAMANO_FLOTANTE, useFlotanteArrastrable } from "@/lib/flotante-arrastrable";
 
 const NAVY = "#0b315f";
 const GRIS = "#9ca3af";
+
+// El «?» se arrastra igual que la bola de ELIA (lib/flotante-arrastrable.ts) y se queda donde se
+// soltó. En escritorio nace donde siempre, a la izquierda de ELIA (bottom-5 right-24); en el
+// celular, encima de ELIA en el borde derecho, para no tapar el cuadro de respuesta del CRM.
+const SK_POSICION = "ayuda_posicion_v1";
 
 // Rutas sin chrome del ERP (login + app del conductor, portales de cliente,
 // enlaces públicos con token…). Espeja los checks de RootLayout: ahí no hay
@@ -322,6 +328,7 @@ export default function AyudaModulo() {
 
   const ficha: FichaAyuda | null = useMemo(() => ayudaDeRuta(pathname), [pathname]);
   const publica = esRutaPublica(pathname);
+  const boton = useFlotanteArrastrable(SK_POSICION, INICIAL_AYUDA, TAMANO_FLOTANTE);
 
   const conceptosFicha = useMemo(() => (ficha ? conceptosDe(ficha) : []), [ficha]);
   const todos = useMemo(() => glosarioOrdenado(), []);
@@ -400,15 +407,22 @@ export default function AyudaModulo() {
 
   return (
     <>
-      {/* ── Botón flotante · a la izquierda del de ELIA ── */}
+      {/* ── Botón flotante · nace a la izquierda del de ELIA; se arrastra y se queda donde se suelta ── */}
       {!abierto && (
         <button
           type="button"
-          onClick={abrir}
+          {...boton.manejadores}
+          onClick={() => { if (!boton.consumirClic()) abrir(); }}
           aria-label={ficha ? `Ayuda de esta pantalla: ${ficha.titulo}` : "Abrir el glosario de términos del ERP"}
-          title={ficha ? "Ayuda de esta pantalla" : "Glosario del ERP"}
-          className="fixed bottom-5 right-24 z-40 group"
-          style={{ animation: "eliaIn 0.35s ease-out" }}
+          title={`${ficha ? "Ayuda de esta pantalla" : "Glosario del ERP"} (arrástralo para moverlo)`}
+          className={`fixed z-40 group select-none ${boton.arrastrando ? "cursor-grabbing" : "cursor-pointer"}`}
+          style={{
+            right: boton.pos.right,
+            bottom: boton.pos.bottom,
+            // Sin esto, en el celular el dedo desplaza la página en vez de mover el botón.
+            touchAction: "none",
+            animation: "eliaIn 0.35s ease-out",
+          }}
         >
           <div className="relative">
             <div
@@ -419,9 +433,10 @@ export default function AyudaModulo() {
               ?
             </div>
             <span
-              className="pointer-events-none absolute right-full mr-3 top-1/2 -translate-y-1/2 whitespace-nowrap
+              className={`pointer-events-none absolute top-1/2 -translate-y-1/2 whitespace-nowrap
+                         ${boton.lado === "derecha" ? "left-full ml-3" : "right-full mr-3"}
                          bg-[#0b2545] text-white text-[11px] font-semibold px-2.5 py-1.5 rounded-lg shadow-xl
-                         opacity-0 group-hover:opacity-100 transition-opacity"
+                         opacity-0 transition-opacity ${boton.arrastrando ? "" : "group-hover:opacity-100"}`}
             >
               ¿Qué es todo esto? Te lo explico
             </span>

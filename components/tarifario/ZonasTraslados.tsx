@@ -94,6 +94,12 @@ export default function ZonasTraslados() {
   const onCategoria = (c: CategoriaFila) => conDatos((d) => ({
     ...d, categorias: d.categorias.some((x) => x.clave === c.clave) ? d.categorias.map((x) => (x.clave === c.clave ? c : x)) : [...d.categorias, c],
   }));
+  // El servidor cambió la clave: la base movió en cascada sus precios (FK on update cascade).
+  const onCategoriaRenombrada = (de: string, c: CategoriaFila) => conDatos((d) => ({
+    ...d,
+    categorias: d.categorias.map((x) => (x.clave === de ? c : x)),
+    tarifas: d.tarifas.map((t) => (t.categoria === de ? { ...t, categoria: c.clave } : t)),
+  }));
   const onConfig = (c: ConfigFila) => conDatos((d) => ({ ...d, config: c, configExiste: true }));
 
   if (carga == null) {
@@ -153,7 +159,7 @@ export default function ZonasTraslados() {
       )}
       {montadas.has("vehiculos") && (
         <div className={oculto("vehiculos")}>
-          <VehiculosTraslado categorias={d.categorias} onCategoria={onCategoria} decir={decir}
+          <VehiculosTraslado categorias={d.categorias} onCategoria={onCategoria} onRenombrada={onCategoriaRenombrada} decir={decir}
             colsCategoria={d.colsCategoria} sinMigracionFotos={d.sinMigracionFotos} />
         </div>
       )}

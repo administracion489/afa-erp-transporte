@@ -7,7 +7,11 @@
 -- Capacidad = asientos de pasajeros. maletas_bodega = maletas de 23 kg que van en bodega sin
 -- ocupar asiento (minibús: maletera corta, 15; bus: 45). Sin bodega, cada maleta grande ocupa un
 -- asiento: es la regla «con maletas, el doble de capacidad» escrita por maleta.
-insert into public.traslado_categorias (clave, nombre, capacidad, maletas_bodega, tipo_vehiculo, orden) values
+-- SOLO SI NO HAY NINGUNA CATEGORÍA: las claves se pueden cambiar desde /tarifario (✎, p. ej. VAN_15 →
+-- VAN_17), y volver a correr este archivo resucitaría la clave vieja como un vehículo más (el motor
+-- elegiría la «van de 15» para 11-15 pasajeros). Con categorías ya cargadas, no se agrega ninguna.
+insert into public.traslado_categorias (clave, nombre, capacidad, maletas_bodega, tipo_vehiculo, orden)
+select * from (values
   ('AUTO',        'Auto 4 pax',                  4,  0, 'AUTO_4',      10),
   ('SUV',         'SUV 4 pax',                   4,  0, 'SUV_4',       20),
   ('H1',          'Minivan H1 10 pax',          10,  0, 'MINIVAN_10',  30),
@@ -15,10 +19,14 @@ insert into public.traslado_categorias (clave, nombre, capacidad, maletas_bodega
   ('SPRINTER_20', 'Sprinter larga 20 pax',      20,  0, 'SPRINTER_20', 50),
   ('MINIBUS',     'Minibús 25-30 pax',          30, 15, 'MINIBUS_30',  60),
   ('BUS',         'Bus 45-50 pax',              50, 45, 'BUS_50',      70)
+) as v(clave, nombre, capacidad, maletas_bodega, tipo_vehiculo, orden)
+where not exists (select 1 from public.traslado_categorias)
 on conflict (clave) do nothing;
 
 -- Precio NETO por tramo (sin IGV). Soles para números peruanos (+51); dólares para el resto.
 -- Aeropuerto ↔ Miraflores / San Isidro / Barranco, en los dos sentidos (el par no tiene sentido).
+-- Solo para las categorías que existen: la de una clave renombrada ya tiene sus precios (los movió
+-- la FK en cascada) y no se le crean otros con la clave vieja.
 with aer as (
   select id from public.zonas_traslado where lower(nombre) = lower('Aeropuerto Jorge Chávez')
 ), dest as (
@@ -32,6 +40,7 @@ insert into public.tarifas_traslado (zona_a_id, zona_b_id, categoria, moneda, pr
 select least(aer.id, dest.id), greatest(aer.id, dest.id), p.categoria, m.moneda,
        case m.moneda when 'PEN' then p.pen else p.usd end
 from aer cross join dest cross join p cross join (values ('PEN'), ('USD')) as m(moneda)
+where exists (select 1 from public.traslado_categorias c where c.clave = p.categoria)
 on conflict (zona_a_id, zona_b_id, categoria, moneda) do nothing;
 
 -- Consideraciones que irán en la cotización. Solo se escriben si están vacías.
