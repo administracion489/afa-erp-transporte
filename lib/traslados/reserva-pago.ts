@@ -838,7 +838,7 @@ export function bloquePago(b: BloquePago, estilo: EstiloMensajes): string {
   if (esEn(estilo)) {
     const saldoEn = b.saldo > 0.004 ? ` The balance, ${dinero(b.saldo, b.moneda, "en")}, is paid at the start of the service, when the vehicle arrives at the pick-up point.` : "";
     const cuentasEn = b.cuentas.map(txt).filter(Boolean).join("\n");
-    return `To book your transfer from quotation No. ${b.numero}, a deposit of ${fmtPct(b.pct)}% of the total is required: *${dinero(b.adelanto, b.moneda, "en")}*.${saldoEn}\nYou can pay into any of these accounts:\n${cuentasEn}`;
+    return `To book the transfer in your quotation No. ${b.numero}, a deposit of ${fmtPct(b.pct)}% of the total is required: *${dinero(b.adelanto, b.moneda, "en")}*.${saldoEn}\nYou can pay into any of these accounts:\n${cuentasEn}`;
   }
   const tu = esTu(estilo);
   // La misma idea que la política publicada («el 50 % restante se paga al iniciar el servicio»):

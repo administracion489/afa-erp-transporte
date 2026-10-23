@@ -308,5 +308,117 @@ seccion("6. geocodigo y validarEntrada");
   ok(M.validezHasta("2026-10-31", null, 30) === "2026-11-30", "la validez siempre es una fecha que existe");
 }
 
+// ── 7. El idioma y la moneda (inglés × soles) ────────────────────────────────
+seccion("7. monedaDelPedido con el idioma del cliente · FALTA · la entrada del simulador");
+{
+  // El algoritmo de antes, copiado LITERAL: sin idioma, el nuevo tiene que dar exactamente lo mismo.
+  const monedaViejo = (tel: string | null | undefined, pideDolares: boolean | null | undefined) => {
+    const porNumero = M.monedaPorTelefono(tel);
+    if (pideDolares !== true || porNumero.moneda === "USD") return porNumero;
+    return {
+      moneda: "USD" as M.Moneda, codigo: "pide_dolares" as M.CodigoMoneda,
+      detalle: porNumero.moneda === "PEN"
+        ? "El cliente pidió la cotización en dólares: se cotiza con la lista en dólares aunque escribe desde un número peruano."
+        : "El cliente pidió la cotización en dólares: se cotiza con la lista en dólares.",
+    };
+  };
+  const TELS = ["+51966707225", "966707225", "PE.AbC", "+13055551234", "US.xyz", "34612345678", "", null, "12345"];
+  const PD = [true, false, null, undefined];
+  let n = 0, iguales = 0;
+  for (const tel of TELS) for (const pd of PD) for (const extra of [undefined, {}, { idiomaCliente: null }, { idiomaCliente: null, pideSoles: true }, { pideSoles: true }] as const) {
+    n++;
+    if (JSON.stringify(M.monedaDelPedido(tel, pd, extra as { idiomaCliente?: null; pideSoles?: boolean })) === JSON.stringify(monedaViejo(tel, pd))) iguales++;
+  }
+  ok(iguales === n, `sin idioma, byte a byte el algoritmo de antes (${iguales}/${n}), también con pideSoles (que sin idioma no se mira)`);
+
+  // La tabla del plan, celda por celda.
+  type Fila = { idioma: "en" | "otro"; tel: string | null; d: boolean; so: boolean; moneda: M.Moneda | null; codigo: M.CodigoMoneda };
+  const tabla: Fila[] = [
+    { idioma: "en", tel: "+51966707225", d: false, so: false, moneda: "USD", codigo: "ingles" },
+    { idioma: "en", tel: "+51966707225", d: false, so: true, moneda: "PEN", codigo: "pide_soles" },
+    { idioma: "en", tel: "+51966707225", d: true, so: false, moneda: "USD", codigo: "pide_dolares" },
+    { idioma: "en", tel: "+51966707225", d: true, so: true, moneda: "USD", codigo: "ingles" },
+    { idioma: "en", tel: "+13055551234", d: false, so: false, moneda: "USD", codigo: "extranjero" },
+    { idioma: "en", tel: "+13055551234", d: false, so: true, moneda: "PEN", codigo: "pide_soles" },
+    { idioma: "en", tel: "+13055551234", d: true, so: false, moneda: "USD", codigo: "extranjero" },
+    { idioma: "en", tel: null, d: false, so: false, moneda: "USD", codigo: "ingles" },
+    { idioma: "otro", tel: "+51966707225", d: false, so: false, moneda: "PEN", codigo: "peru" },
+    { idioma: "otro", tel: "+51966707225", d: true, so: false, moneda: "USD", codigo: "pide_dolares" },
+    { idioma: "otro", tel: "+13055551234", d: false, so: false, moneda: "USD", codigo: "extranjero" },
+    { idioma: "otro", tel: "+13055551234", d: false, so: true, moneda: "PEN", codigo: "pide_soles" },
+    { idioma: "otro", tel: "+13055551234", d: true, so: true, moneda: "USD", codigo: "extranjero" },
+    { idioma: "otro", tel: null, d: false, so: false, moneda: null, codigo: "sin_telefono" },
+  ];
+  for (const f of tabla) {
+    const r = M.monedaDelPedido(f.tel, f.d, { idiomaCliente: f.idioma, pideSoles: f.so });
+    ok(r.moneda === f.moneda && r.codigo === f.codigo && r.detalle.length > 0, `${f.idioma} · ${f.tel} · dólares=${f.d} soles=${f.so} → ${f.moneda} ${f.codigo} (salió ${r.moneda} ${r.codigo})`);
+  }
+  // Invariante 4: en castellano (o sin evidencia), pedir soles desde un número extranjero NUNCA da soles.
+  let malos = 0;
+  for (const tel of ["+13055551234", "US.xyz", "34612345678"]) for (const pd of PD) for (const so of [true, false]) {
+    for (const idiomaCliente of [null, undefined]) if (M.monedaDelPedido(tel, pd, { idiomaCliente, pideSoles: so }).moneda === "PEN") malos++;
+  }
+  ok(malos === 0, "con idioma castellano o null, nunca PEN desde un número extranjero por pedir soles");
+  // Un idioma desconocido (lo que no es «en» ni «otro») es castellano.
+  ok(JSON.stringify(M.monedaDelPedido("+51966707225", false, { idiomaCliente: "es" as unknown as "en" })) === JSON.stringify(monedaViejo("+51966707225", false)), "un idioma que no es «en» ni «otro» es castellano");
+
+  // FALTA: los MISMOS literales de antes (los reconoce la traducción por igualdad exacta).
+  ok(M.FALTA.recojo === "el punto de recojo" && M.FALTA.destino === "el destino" && M.FALTA.fecha === "la fecha del servicio"
+    && M.FALTA.sentido === "si es solo ida o ida y retorno" && M.FALTA.fecha_retorno === "la fecha del retorno"
+    && M.FALTA.pax === "el número de pasajeros"
+    && M.FALTA.maletas === "cuántas maletas grandes (23 kg) llevan y cuántas son de mano (10 kg) o artículos personales"
+    && M.FALTA.fecha_futura === "una fecha futura", "FALTA conserva los literales de siempre");
+  ok(M.faltaDireccion("recojo", "mi casa") === "la dirección exacta del recojo (no se encontró «mi casa»)"
+    && M.faltaDireccion("destino", null) === "la dirección exacta del destino (no se encontró «»)", "faltaDireccion: el texto de siempre");
+
+  // Invariante 1: sin idioma el motor da lo mismo; con pide_soles sin idioma, también (no se mira).
+  const hoy = "2026-10-19";
+  const ctx: M.ContextoTraslado = { zonas, categorias, tarifas, tipoCambio: { fecha: hoy, venta: 3.431 }, hoy, igvPct: 18, validezDias: 30 };
+  const MIRA = pt(["Miraflores", "Provincia de Lima"], { texto: "Hotel Belmond, Miraflores", lat: -12.131, lng: -77.03 });
+  const AEROP = pt(["Callao"], { texto: "Aeropuerto Jorge Chávez", lat: -12.0297011, lng: -77.1162278 });
+  const origenes = [MIRA, AEROP, pt(["San Isidro"], { lat: -12.097, lng: -77.034 }), pt(["San Juan de Miraflores"]), pt(["Lima"]), pt([])];
+  let nb = 0, igualesB = 0, enUsd = 0, enCot = 0, enMalos = 0, solesPen = 0;
+  for (const o of origenes) for (const d of origenes) for (const pax of [null, 1, 4, 10, 25, 40, 55]) for (const mal of [null, 0, 5, 30])
+    for (const tel of ["+51966707225", "+13055551234", null]) for (const s of ["ida", "ida_retorno", null] as (M.Sentido | null)[]) for (const sen of [[], ["evento"]] as M.SenalComplejidad[][]) {
+      nb++;
+      const base: M.PedidoTraslado = { origen: o, destino: d, fecha_servicio: "2026-11-02", fecha_retorno: "2026-11-03", sentido: s, pax, maletas: mal, telefono: tel, senales: sen };
+      const r0 = JSON.stringify(M.evaluarTraslado(base, ctx));
+      const r1 = JSON.stringify(M.evaluarTraslado({ ...base, idioma_cliente: null, pide_soles: false }, ctx));
+      const r2 = JSON.stringify(M.evaluarTraslado({ ...base, pide_soles: true }, ctx));
+      if (r0 === r1 && r0 === r2) igualesB++;
+      // En inglés: lo cotizado sale en dólares (con +51 también), salvo que pida soles.
+      const re = M.evaluarTraslado({ ...base, idioma_cliente: "en" }, ctx);
+      if (re.codigo === "cotizable") {
+        enCot++;
+        if (re.precio!.moneda === "USD") enUsd++; else enMalos++;
+        ok(M.tarifaDelPar(re.origen!.zona!, re.destino!.zona!, re.vehiculo!.categoria!.clave, "USD", tarifas, zonas)?.tarifa.precio_tramo === re.precio!.precio_tramo, "en inglés el precio es el de la lista en dólares");
+      }
+      const rs = M.evaluarTraslado({ ...base, idioma_cliente: "en", pide_soles: true }, ctx);
+      if (rs.codigo === "cotizable" && rs.precio!.moneda === "PEN") solesPen++;
+      if (rs.codigo === "cotizable") ok(rs.precio!.moneda === "PEN", "en inglés pidiendo soles, la lista en soles");
+    }
+  ok(igualesB === nb, `barrido de ${nb} pedidos: sin idioma, el motor da byte a byte lo mismo (${igualesB}/${nb})`);
+  ok(enCot > 0 && enMalos === 0 && enUsd === enCot, `en inglés lo cotizado sale en dólares (${enUsd}/${enCot})`);
+  ok(solesPen > 0, `corolario: en inglés con soles sí se cotiza en soles (${solesPen})`);
+
+  // La entrada del simulador: las claves solo cuando aplican.
+  const sin = validarEntrada({ origen: "Miraflores" });
+  ok(sin.ok && !("idioma_cliente" in sin.entrada) && !("pide_soles" in sin.entrada), "sin idioma, la entrada no lleva las claves nuevas");
+  const conEn = validarEntrada({ origen: "x", idioma_cliente: "en", pide_soles: true });
+  ok(conEn.ok && conEn.entrada.idioma_cliente === "en" && conEn.entrada.pide_soles === true, "idioma «en» y pide_soles true pasan");
+  const conOtro = validarEntrada({ origen: "x", idioma_cliente: "otro" });
+  ok(conOtro.ok && conOtro.entrada.idioma_cliente === "otro" && !("pide_soles" in conOtro.entrada), "«otro» pasa; sin pide_soles no hay clave");
+  for (const malo of ["es", "EN", "english", 1, true, null, ""]) {
+    const v = validarEntrada({ origen: "x", idioma_cliente: malo, pide_soles: true });
+    ok(v.ok && !("idioma_cliente" in v.entrada) && !("pide_soles" in v.entrada), `idioma_cliente ${JSON.stringify(malo)} se descarta (y pide_soles con él)`);
+  }
+  for (const malo of ["true", 1, "si", false]) {
+    const v = validarEntrada({ origen: "x", idioma_cliente: "en", pide_soles: malo });
+    ok(v.ok && v.entrada.idioma_cliente === "en" && !("pide_soles" in v.entrada), `pide_soles ${JSON.stringify(malo)} no es un true`);
+  }
+  const soloSoles = validarEntrada({ origen: "x", pide_soles: true });
+  ok(soloSoles.ok && !("pide_soles" in soloSoles.entrada), "pide_soles sin idioma se descarta (en castellano no aplica)");
+}
+
 console.log(`\n${oks} ok · ${fallos} fallos`);
 if (fallos) process.exit(1);

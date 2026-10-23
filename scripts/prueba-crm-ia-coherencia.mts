@@ -10,12 +10,15 @@
 //  5b. La reserva de traslados: quién envía los datos de pago, el comprobante que no confirma nada y
 //      la política de la plantilla (leída del SQL real) regla contra regla.
 //  6. Invariantes (alarma = tabla, cita = subcadena, determinista, sin duplicados, anclas).
+//  7. El auditor le habla al DUEÑO en castellano: el inglés de las frases de horario es solo para el
+//     cliente (lib/crm-ia-atencion.ts con `idioma`), y el auditor nunca lo pide.
 import { readFileSync } from "node:fs";
 import {
   auditarAgente, claveHallazgo, nuevasAlarmas, partirFrases, TABLA_HALLAZGOS, ETIQUETA_CAMPO,
   type ConfigAuditable, type ContextoAuditoria, type Hallazgo, type CodigoCoherencia,
 } from "../lib/crm-ia-coherencia";
 import { TEMAS_AJUSTE, AJUSTES_DEFECTO } from "../lib/crm-ia-ajustes";
+import { describirAtencion, describirDias } from "../lib/crm-ia-atencion";
 
 let fallos = 0;
 const ok = (c: boolean, m: string) => { if (!c) { fallos++; console.log("✗", m); } else console.log("✓", m); };
@@ -1216,6 +1219,29 @@ const ANCLAS_OBLIGATORIAS = true;
   }
   if (ANCLAS_OBLIGATORIAS) ok(faltan.length === 0, `toda ancla de ajuste existe como id en la pantalla${faltan.length ? ` (faltan: ${faltan.join(", ")})` : ""}`);
   else console.log(faltan.length ? `⏳ anclas pendientes hasta la pantalla: faltan ${faltan.length} (${faltan.join(", ")})` : "✓ anclas: todas existen como id en la pantalla (ya se puede poner ANCLAS_OBLIGATORIAS = true)");
+}
+
+// ── 7. El auditor habla en castellano (el inglés es para el cliente) ────────────────────────────
+{
+  const fuente = readFileSync(new URL("../lib/crm-ia-coherencia.ts", import.meta.url), "utf8");
+  ok(!/(describirAtencion|describirDias|proximaAtencion|fraseFueraDeAtencion|mensajeDerivacionDefecto)\([^)]*["']en["']/.test(fuente) && !/idioma\s*:\s*["']en["']/.test(fuente), "el motor del auditor no pide ninguna frase en inglés");
+  const INGLES = /(?<![\p{L}])(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|every day|no days|Lima time|from \d{2}:\d{2})(?![\p{L}])/u;
+  let casos = 0, malos = 0, conHallazgo = 0;
+  for (let mask = 1; mask < 128; mask++) {
+    const dias = [0, 1, 2, 3, 4, 5, 6].filter((d) => mask & (1 << d));
+    const at = { activa: true, dias, desde: "09:00", hasta: "17:00" };
+    const r = auditarAgente({ nombre: "Ana", conocimiento: "Horario de atención: de 8 a 20 h.", comportamiento: { atencion_activa: true, atencion_dias: dias, atencion_desde: "09:00", atencion_hasta: "17:00" } }, { empresa: "ACME" });
+    casos++;
+    const h = r.hallazgos.find((x) => x.codigo === "horario.contradice");
+    if (h) conHallazgo++;
+    const textos = r.hallazgos.flatMap((x) => [x.arreglo ?? "", x.ajuste?.valorLegible ?? "", x.cita ?? ""]);
+    if (textos.some((x) => INGLES.test(x))) malos++;
+    if (h && h.ajuste?.valorLegible !== describirAtencion(at, "es")) malos++;
+    if (h && describirAtencion(at, "en") === h.ajuste?.valorLegible) malos++;
+    if (h && !(h.arreglo ?? "").includes(describirDias(dias))) malos++;
+  }
+  ok(malos === 0, `los textos del auditor van en castellano y el horario se lee como siempre (${casos} conjuntos de días)`);
+  ok(conHallazgo === casos, "corolario: el barrido sí produce el aviso de horario en cada conjunto");
 }
 
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");

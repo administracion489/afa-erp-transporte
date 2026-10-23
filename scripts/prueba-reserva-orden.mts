@@ -9,7 +9,9 @@
 //  · salen las tres acciones (corolario: un motor que nunca pidiera el pago cumpliría lo demás);
 //  · 21:00 con servicio mañana 05:00 → derivar; `zona_sin_envio` nunca da pedir_pago;
 //  · `proximaAtencion` nueva ≡ la vieja copiada literal; `sumarMinutosAtencion` ≡ un oráculo que
-//    cuenta minuto a minuto.
+//    cuenta minuto a minuto;
+//  · `frasePlazo` sin idioma (y con «es») ≡ la de 93c594b copiada literal; en inglés, la MISMA hora
+//    y el mismo día que en castellano, siempre con «(Lima time)» y sin castellano filtrado.
 import {
   aperturaSiguiente, atencionValida, proximaAtencion, sumarMinutosAtencion, ultimoInstanteAtencionAntes, type Atencion,
 } from "../lib/crm-ia-atencion";
@@ -20,7 +22,7 @@ import {
 import { normalizarConfigReserva, type ConfigReserva } from "../lib/traslados/reserva-pago";
 import { diaSemanaLima, sumarDias } from "../lib/comisiones/calendario";
 import { horaHHMM } from "../lib/crm-ia-ajustes";
-import { hhmmAMinutos, limaAUtcMs, fechaLima, minutoDelDiaLima } from "../lib/alertas-horario";
+import { hhmmAMinutos, limaAUtcMs, fechaLima, minutoDelDiaLima, minutosAHhmm } from "../lib/alertas-horario";
 
 let ok = 0, mal = 0;
 const fallas: string[] = [];
@@ -245,6 +247,58 @@ const visto = (a: string) => vistas.add(a);
   const todos = [...MOTIVOS_ELEGIBILIDAD, ...MOTIVOS_TIEMPO];
   t("todo motivo tiene su texto para el ejecutivo", todos.every((m) => typeof MOTIVO_ORDEN[m] === "string" && MOTIVO_ORDEN[m].length > 10));
   t("todo motivo cumple el CHECK de la base [a-z_]{2,40}", todos.every((m) => /^[a-z_]{2,40}$/.test(m)));
+}
+
+// ── 6. frasePlazo en inglés, y el castellano intacto ─────────────────────────
+{
+  // La de antes del inglés (lib/traslados/reserva-orden.ts de 93c594b), copiada literal.
+  const fechaCortaV = (iso: string) => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`;
+  const frasePlazoVieja = (confirmarAntesMs: number | null | undefined, ahoraMs: number): string | null => {
+    if (typeof confirmarAntesMs !== "number" || !Number.isFinite(confirmarAntesMs) || !Number.isFinite(ahoraMs)) return null;
+    const hoy = fechaLima(ahoraMs), dia = fechaLima(confirmarAntesMs);
+    const hora = aLasV(minutosAHhmm(minutoDelDiaLima(confirmarAntesMs)));
+    const k = Math.round((Date.parse(`${dia}T12:00:00Z`) - Date.parse(`${hoy}T12:00:00Z`)) / 86_400_000);
+    const nd = NOMBRE_DIA_V[diaSemanaLima(dia)];
+    if (k <= 0) return `hoy antes de ${hora}`;
+    if (k === 1) return `mañana ${nd} antes de ${hora}`;
+    if (k < 7) return `el ${nd} antes de ${hora}`;
+    return `el ${nd} ${fechaCortaV(dia)} antes de ${hora}`;
+  };
+  const DIA_EN = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const MES_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const FUGA = /(?<![\p{L}\p{N}])(?:hoy|mañana|antes|de|las?|el|lunes|martes|miércoles|jueves|viernes|sábado|domingo|hora)(?![\p{L}\p{N}])|[áéíóúñ¿¡]/iu;
+  let n = 0, distintas = 0;
+  const formas = new Set<string>();
+  for (const ahora0 of [limaAUtcMs("2026-10-19", "00:10")!, limaAUtcMs("2026-10-24", "23:50")!, limaAUtcMs("2026-12-28", "09:00")!]) {
+    for (let d = -1; d < 12; d++) for (let m = 0; m < 1440; m += 37) {
+      const ms = ahora0 + d * 86_400_000 + m * 60_000;
+      const v = frasePlazoVieja(ms, ahora0), es = frasePlazo(ms, ahora0), esX = frasePlazo(ms, ahora0, "es"), en = frasePlazo(ms, ahora0, "en")!;
+      n++;
+      if (v !== es || v !== esX) distintas++;
+      const hh = minutosAHhmm(minutoDelDiaLima(ms));
+      const dia = fechaLima(ms), hoy = fechaLima(ahora0);
+      const k = Math.round((Date.parse(`${dia}T12:00:00Z`) - Date.parse(`${hoy}T12:00:00Z`)) / 86_400_000);
+      const dn = DIA_EN[diaSemanaLima(dia)];
+      const esperado = k <= 0 ? `today by ${hh} (Lima time)`
+        : k === 1 ? `tomorrow, ${dn}, by ${hh} (Lima time)`
+        : k < 7 ? `on ${dn} by ${hh} (Lima time)`
+        : `on ${dn}, ${MES_EN[Number(dia.slice(5, 7)) - 1]} ${Number(dia.slice(8, 10))}, by ${hh} (Lima time)`;
+      if (en !== esperado) t(`frasePlazo en ${dia} ${hh}: «${en}» ≠ «${esperado}»`, false);
+      if (FUGA.test(en)) t(`frasePlazo en sin castellano: «${en}»`, false);
+      if (!es!.includes(hh) || !en.includes(hh)) t(`la misma hora en los dos (${hh})`, false);
+      formas.add(/^on \w+, /.test(en) ? "on_fecha" : en.split(" ")[0]);
+    }
+  }
+  t(`frasePlazo sin idioma y con «es» ≡ la de 93c594b (${n} plazos)`, distintas === 0 && n === 3 * 13 * 39);
+  t("frasePlazo en inglés: salen las cuatro formas (corolario)", ["today", "tomorrow,", "on", "on_fecha"].every((f) => formas.has(f)) && formas.size === 4);
+  const lunes = limaAUtcMs("2026-10-19", "10:00")!;
+  t("frasePlazo en: hoy", frasePlazo(limaAUtcMs("2026-10-19", "15:30"), lunes, "en") === "today by 15:30 (Lima time)");
+  t("frasePlazo en: mañana", frasePlazo(limaAUtcMs("2026-10-20", "11:00"), lunes, "en") === "tomorrow, Tuesday, by 11:00 (Lima time)");
+  t("frasePlazo en: el jueves", frasePlazo(limaAUtcMs("2026-10-22", "11:00"), lunes, "en") === "on Thursday by 11:00 (Lima time)");
+  t("frasePlazo en: a una semana, el mes por su nombre", frasePlazo(limaAUtcMs("2026-10-27", "11:00"), lunes, "en") === "on Tuesday, Oct 27, by 11:00 (Lima time)");
+  t("frasePlazo en: 01:30 sin «la»", frasePlazo(limaAUtcMs("2026-10-19", "01:30"), limaAUtcMs("2026-10-19", "00:10")!, "en") === "today by 01:30 (Lima time)");
+  t("frasePlazo en: sin plazo → null", frasePlazo(null, lunes, "en") === null && frasePlazo(NaN, lunes, "en") === null && frasePlazo(lunes, NaN, "en") === null);
+  t("frasePlazo en: cambio de año", frasePlazo(limaAUtcMs("2027-01-05", "09:30"), limaAUtcMs("2026-12-28", "09:00")!, "en") === "on Tuesday, Jan 5, by 09:30 (Lima time)");
 }
 
 if (fallas.length) for (const f of fallas) console.log("✗", f);

@@ -134,7 +134,9 @@ export function baseCotizacionPdf(entrada: EntradaPdfCot): ResultadoBase {
   let descsTalCual = 0;
   const descs = e0.items.map(it => {
     const d = descripcionParaPdf(it.descripcion, ctxDesc, idioma);
-    if (idioma === "en" && !d.recompuesta && String(it.descripcion ?? "").trim()) descsTalCual++;
+    // Una descripción que el código ya escribió en el idioma del documento (`itemsEnIdioma`) no es
+    // «escrita tal cual»: avisarla sería un aviso que sale siempre.
+    if (idioma === "en" && e0.itemsEnIdioma !== true && !d.recompuesta && String(it.descripcion ?? "").trim()) descsTalCual++;
     return d.texto;
   });
   const cliente = e0.cliente;

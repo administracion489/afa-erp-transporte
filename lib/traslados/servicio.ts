@@ -58,6 +58,9 @@ export async function simularTrasladoConCatalogo(
     fecha_servicio: entrada.fecha_servicio, hora_servicio: entrada.hora_servicio,
     sentido: entrada.sentido, fecha_retorno: entrada.fecha_retorno, hora_retorno: entrada.hora_retorno,
     pax: entrada.pax, maletas: entrada.maletas, telefono: entrada.telefono, pide_dolares: entrada.pide_dolares === true,
+    // El idioma lo deriva el código (nunca el modelo) y solo con el inglés encendido; ausente, la
+    // moneda es la de siempre. El pedido de soles solo cuenta junto al idioma (`monedaDelPedido`).
+    idioma_cliente: entrada.idioma_cliente ?? null, pide_soles: entrada.pide_soles === true,
     paradas_intermedias: entrada.paradas_intermedias, fechas_adicionales: entrada.fechas_adicionales,
     vehiculos_pedidos: entrada.vehiculos_pedidos, senales: entrada.senales,
   }, {

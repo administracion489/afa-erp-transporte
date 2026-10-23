@@ -162,6 +162,12 @@ export type EntradaPdfCot = {
    * política entera. Sin él (o sin resumen), la política entera, como siempre.
    */
   enlaceCondiciones?: string | null;
+  /**
+   * Las descripciones de los ítems YA están en el idioma del documento (las arma el código, como en
+   * el traslado de la IA en inglés: lib/traslados/cotizacion-traslado.ts): no se cuentan como «escritas
+   * tal cual» en el aviso `textos_escritos_tal_cual`. Sin él, el aviso de siempre.
+   */
+  itemsEnIdioma?: boolean;
 };
 
 /**
