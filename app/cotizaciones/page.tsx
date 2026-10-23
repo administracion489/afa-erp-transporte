@@ -47,6 +47,7 @@ import {
   planDeNivel, cotejarUnidadConNivel, type NivelServicio,
 } from "@/lib/costos/nivel-servicio";
 import { ejecutarConversion } from "@/lib/cotizacion-a-reserva-datos";
+import { enlaceCondiciones, SQL_RESUMEN_CONDICIONES } from "@/lib/condiciones-publicas";
 import type { CotParaReserva } from "@/lib/cotizacion-a-reserva";
 import { planDePropagacion, MOTIVO_NO_PROPAGA, type MotivoNoPropaga } from "@/lib/paradas-materializar";
 import dynamic from "next/dynamic";
@@ -77,7 +78,7 @@ type ModoServ="eventual"|"fijo";
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;pax_contratado?:number|null;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;nombre_comercial?:string;ciudad?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidFila|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;moneda?:string|null;tipo_cambio?:number|string|null;idioma_pdf?:string|null;traslado_json?:unknown;crm_conversacion_id?:string|null;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidFila|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;ruta_coords_json?:unknown;moneda?:string|null;tipo_cambio?:number|string|null;idioma_pdf?:string|null;traslado_json?:unknown;crm_conversacion_id?:string|null;condiciones_token?:string|null;};
 /**
  * Una fila de la LISTA liviana (COLS_LISTA de lib/cotizaciones-filtros.ts): solo escalares, sin
  * items_json, paraderos ni consideraciones. Todo lo que edita, duplica, imprime o convierte pide
@@ -1857,7 +1858,7 @@ export default function CotizacionesPage(){
       vehiculo_tercero_id:form.vehiculo_tercero_id?Number(form.vehiculo_tercero_id):null,
       // Las condiciones quedan ESCRITAS en la fila (versión 2): el PDF imprime estas, las que muestra
       // el formulario, y no las que tenga la plantilla el día que se imprima (lib/cotizacion-plantillas.ts).
-      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),version:CONSID_VERSION,plantilla:plantillaForm},plantilla_pdf:plantillaForm,
+      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),...(Array.isArray(consid.reserva)&&Array.isArray(consid.reserva_resumen)?{reserva_resumen:consid.reserva_resumen}:{}),version:CONSID_VERSION,plantilla:plantillaForm},plantilla_pdf:plantillaForm,
       paradas_json:paradas.length>0?paradas:null,paradas_retorno_json:paradasRetorno.length>0?paradasRetorno:null,modo_servicio:form.modo_servicio,
       dias_servicio:Number(form.dias_servicio)||1,horas_servicio:Number(form.horas_servicio)||8,
       pernocte_costo:pernocteF||null,precio_dia:precioDiaNum,precio_mes_estimado:precioMesNum,
@@ -2358,7 +2359,7 @@ export default function CotizacionesPage(){
     if(diseno==="corporativo"&&esTrasladoIA(cot)){
       // Como el servidor (plantillaYReferenciaCuentas): una plantilla DESACTIVADA no presta sus cuentas: las de `corporativo`.
       const plCuentas=fila&&!esActiva(fila)?plantillaPorId(plantillas,"corporativo"):fila;
-      const e=await entradaTrasladoPagina(cot as unknown as FilaCotizacionLeida,{empresa:empData as EmpresaPerfilPDF|null,plantilla:plCuentas,cliente:clienteErpDe(cl)}).catch(()=>null);
+      const e=await entradaTrasladoPagina(cot as unknown as FilaCotizacionLeida,{empresa:empData as EmpresaPerfilPDF|null,plantilla:plCuentas,cliente:clienteErpDe(cl),baseCondiciones:window.location.origin}).catch(()=>null);
       if(e){
         const{clienteNoVerificado,...entrada}=e;
         const rt=htmlCotizacion(entrada);
@@ -2370,11 +2371,13 @@ export default function CotizacionesPage(){
     }
     // La que se está editando imprime lo que muestra el formulario, como quedará guardada (versión 2).
     // Una sin condiciones guardadas, las de fábrica (lo mismo que carga el formulario al abrirla).
-    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),version:CONSID_VERSION,plantilla:plantillaForm}:(cot.consideraciones_json||{...DEFAULT_CONSID});
+    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),...(Array.isArray(consid.reserva)&&Array.isArray(consid.reserva_resumen)?{reserva_resumen:consid.reserva_resumen}:{}),version:CONSID_VERSION,plantilla:plantillaForm}:(cot.consideraciones_json||{...DEFAULT_CONSID});
     const r=htmlCotizacion({
       cot,cliente:cl,items:its,vehiculos,repr:nombreFinal,consid:considFinal,plantilla:diseno,
       cfg:fila,empresa:empData as EmpresaPerfilPDF|null,
       idioma,tipoVehiculoNombre:paramsDB.find(p=>p.tipo_vehiculo===cot.tipo_vehiculo)?.nombre??null,
+      // El enlace (y el QR) a la política completa de ESTA cotización: con él y un resumen, el PDF imprime el resumen.
+      enlaceCondiciones:enlaceCondiciones(window.location.origin,cot.condiciones_token),
     });
     const otra=avisoCondicionesDeOtraPlantilla(considFinal,elegida,nombrePlantilla);
     return{...r,avisos:otra?[...r.avisos,otra]:r.avisos,plantilla};
@@ -2986,7 +2989,7 @@ export default function CotizacionesPage(){
                   {ambar&&usoAuto.detalle&&<p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {usoAuto.detalle}</p>}
                   {!plantillaFijada&&usoAuto.codigo==="lectura_fallida"&&<p className="text-[11px] text-amber-800">Se usa la corporativa y, si no se pudo leer, las condiciones de fábrica.</p>}
                   {avisoConsidForm&&<p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {avisoConsidForm}</p>}
-                  {otraPl&&<p className="text-[11px] text-gray-600">Las condiciones de abajo no son las de «{otraPl.nombre||otraPl.id}» (se editaron{consid.plantilla?` o vienen de «${nombrePlantilla(consid.plantilla)||consid.plantilla}»`:""}). <button type="button" className="font-bold text-[#0b315f] hover:underline" onClick={()=>{const n=consid.incluye.length+consid.no_incluye.length+consid.generales.length+(consid.reserva?.length??0);if(confirm(`Se reemplazan las ${n} condiciones de abajo por las de la plantilla «${otraPl.nombre||otraPl.id}». ¿Continuar?`))setConsidEditada(null);}}>Cargar las condiciones de «{otraPl.nombre||otraPl.id}»</button></p>}
+                  {otraPl&&<p className="text-[11px] text-gray-600">Las condiciones de abajo no son las de «{otraPl.nombre||otraPl.id}» (se editaron{consid.plantilla?` o vienen de «${nombrePlantilla(consid.plantilla)||consid.plantilla}»`:""}). <button type="button" className="font-bold text-[#0b315f] hover:underline" onClick={()=>{const n=consid.incluye.length+consid.no_incluye.length+consid.generales.length+(consid.reserva?.length??0)+(consid.reserva_resumen?.length??0);if(confirm(`Se reemplazan las ${n} condiciones de abajo por las de la plantilla «${otraPl.nombre||otraPl.id}». ¿Continuar?`))setConsidEditada(null);}}>Cargar las condiciones de «{otraPl.nombre||otraPl.id}»</button></p>}
                   <p className="text-[10px] text-gray-400">Al guardar, las condiciones de abajo quedan escritas en la cotización y son las que imprime su PDF; cambiar después la plantilla no las cambia.</p>
                 </div>);
               })()}
@@ -3012,6 +3015,18 @@ export default function CotizacionesPage(){
                   {reserva.length===0&&<p className="text-[10px] text-gray-500">Sin política de reserva: el PDF no imprime este bloque.</p>}
                   <div className="space-y-1.5">{reserva.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,reserva:(prev.reserva??[]).map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,reserva:(prev.reserva??[]).filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
                   <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(prev.reserva??[]),""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(considDePlantilla(filaForm).reserva??[])]}))} title={`Vuelve a la política de reserva de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar la de la plantilla</button></div>
+                  {corp&&reserva.length>0&&(()=>{
+                    // Su RESUMEN (supabase/cotizaciones-08): con él, el PDF imprime estos puntos y el enlace
+                    // (con QR) a la política completa de ESTA cotización; sin resumen, la política entera.
+                    const resumen=consid.reserva_resumen??[];
+                    const dePl=considDePlantilla(filaForm).reserva_resumen??[];
+                    return(<div className="border-t border-slate-200 pt-2 space-y-1.5">
+                      <p className="text-[11px] font-black text-[#0b315f]">Resumen para el PDF y el WhatsApp</p>
+                      <p className="text-[10px] text-gray-500">{resumen.length?"El PDF imprime estos puntos y, debajo, el enlace con su QR a la política completa de esta cotización (la de arriba).":"Sin resumen: el PDF imprime la política entera."} Si la cotización no tiene enlace (falta correr {SQL_RESUMEN_CONDICIONES}), se imprime la política entera. No lleves aquí teléfonos, correos, enlaces ni números largos.</p>
+                      <div className="space-y-1.5">{resumen.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,reserva_resumen:(prev.reserva_resumen??[]).map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>{const r=(prev.reserva_resumen??[]).filter((_,idx)=>idx!==i);if(r.length)return{...prev,reserva_resumen:r};const{reserva_resumen:_q,...resto}=prev;return resto;})} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
+                      <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,reserva_resumen:[...(prev.reserva_resumen??[]),""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar punto</button>{dePl.length>0&&<button onClick={()=>setConsid(prev=>({...prev,reserva_resumen:[...dePl]}))} title={`Vuelve al resumen de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar el de la plantilla</button>}</div>
+                    </div>);
+                  })()}
                 </div>);
               })()}
             </div>

@@ -15,6 +15,9 @@
 // · La política de reserva, cambios y cancelación (`condiciones_reserva`, supabase/cotizaciones-06) es
 //   la cuarta lista: solo la imprime el diseño corporativo y solo se ofrece si la columna existe (la
 //   fila la trae). Sin el SQL no se escribe nunca: el UPDATE fallaría entero por una columna accesoria.
+// · Su RESUMEN (`condiciones_reserva_resumen`, supabase/cotizaciones-08) es la quinta: los 4-5 puntos
+//   que el PDF y el WhatsApp llevan en lugar de la política entera, con el enlace (y el QR) a la
+//   política completa de cada cotización. Misma regla: solo con su columna.
 // ──────────────────────────────────────────────────────────────────────────────
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -32,6 +35,7 @@ import {
   type Diseno, type PlantillaFila, type ReglaPlantilla, type Segmento, type ServicioPlantilla, type UsoPlantilla,
 } from "@/lib/cotizacion-plantillas";
 import { leerPlantillasYReglas } from "@/lib/cotizacion-plantillas-datos";
+import { enlaceCondiciones, SQL_RESUMEN_CONDICIONES } from "@/lib/condiciones-publicas";
 import { ListaCondiciones } from "@/components/cotizaciones/plantillas/ListaCondiciones";
 import { ReglasUso } from "@/components/cotizaciones/plantillas/ReglasUso";
 import {
@@ -48,7 +52,7 @@ type Lectura =
 
 type Conteo = { n: number } | { error: string };
 type Tab = "datos" | "colores" | "condiciones" | "cuentas" | "idioma";
-type ListaK = "condiciones_incluye" | "condiciones_no_incluye" | "condiciones_generales" | "condiciones_reserva";
+type ListaK = "condiciones_incluye" | "condiciones_no_incluye" | "condiciones_generales" | "condiciones_reserva" | "condiciones_reserva_resumen";
 type ColorK = "color_primario" | "color_secundario" | "color_acento";
 
 const LISTAS: { k: ListaK; consid: keyof ConsidCot; titulo: string; nombre: string; color: string }[] = [
@@ -56,10 +60,17 @@ const LISTAS: { k: ListaK; consid: keyof ConsidCot; titulo: string; nombre: stri
   { k: "condiciones_no_incluye", consid: "no_incluye", titulo: "❌ No incluye", nombre: "No incluye", color: "#991b1b" },
   { k: "condiciones_generales", consid: "generales", titulo: "📋 Consideraciones generales", nombre: "Consideraciones generales", color: "#0b315f" },
   { k: "condiciones_reserva", consid: "reserva", titulo: "📅 Reserva, cambios y cancelación", nombre: "Reserva, cambios y cancelación", color: "#0b315f" },
+  { k: "condiciones_reserva_resumen", consid: "reserva_resumen", titulo: "🔗 Resumen de la reserva (con enlace)", nombre: "Resumen de la reserva", color: "#0b315f" },
 ];
 /** La política de reserva: sin la columna (falta cotizaciones-06) la fila no trae la clave. */
 const RESERVA_K: ListaK = "condiciones_reserva";
 const tieneColumnaReserva = (f: Record<string, unknown> | null | undefined): boolean => !!f && RESERVA_K in f;
+/** Su resumen: sin la columna (falta cotizaciones-08) la fila no trae la clave. */
+const RESUMEN_K: ListaK = "condiciones_reserva_resumen";
+const tieneColumnaResumen = (f: Record<string, unknown> | null | undefined): boolean => !!f && RESUMEN_K in f;
+/** ¿La fila trae la columna de esa lista? (las tres de siempre, sí). */
+const tieneColumna = (k: ListaK, f: Record<string, unknown> | null | undefined): boolean =>
+  k === RESERVA_K ? tieneColumnaReserva(f) : k === RESUMEN_K ? tieneColumnaResumen(f) : true;
 /** Lo que pone «Escribir»: las de fábrica, y la política (que no tiene de fábrica) vacía. */
 const deFabrica = (l: { consid: keyof ConsidCot }): string[] => [...(DEFAULT_CONSID_ES[l.consid] ?? [])];
 const COLORES: ColorK[] = ["color_primario", "color_secundario", "color_acento"];
@@ -90,6 +101,8 @@ function patchDe(f: Record<string, unknown>, d: Diseno): Record<string, unknown>
     condiciones_generales: listaLimpia(f.condiciones_generales),
     // La política de reserva: solo si el diseño la imprime y la columna existe (cotizaciones-06).
     ...(leeCampo(d, RESERVA_K) && tieneColumnaReserva(f) ? { condiciones_reserva: listaLimpia(f.condiciones_reserva) } : {}),
+    // Su resumen: igual, con su propia columna (cotizaciones-08).
+    ...(leeCampo(d, RESUMEN_K) && tieneColumnaResumen(f) ? { condiciones_reserva_resumen: listaLimpia(f.condiciones_reserva_resumen) } : {}),
   };
   if (leeCampo(d, "titulo_documento")) out.titulo_documento = textoOpcional(f.titulo_documento);
   if (leeCampo(d, "mensaje_cierre")) out.mensaje_cierre = textoOpcional(f.mensaje_cierre);
@@ -311,7 +324,9 @@ export default function PlantillasPDFPage() {
     const respaldo = considSnapshot(principal && principal.id === fila.id ? cfg : principal, DEFAULT_CONSID_ES);
     const consid = considSnapshot(cfg, respaldo);
     const empresa = perfil.estado === "ok" ? perfil.perfil : null;
-    const r = htmlCotizacion({ ...ejemploParaVistaPrevia(), plantilla: d, cfg, empresa, consid, idioma: normalizarIdioma(cfg.idioma) });
+    // Un enlace de EJEMPLO (no es de ninguna cotización): con resumen, se ve cómo quedan el resumen y su QR.
+    const enlace = enlaceCondiciones(window.location.origin, "00000000-0000-4000-8000-000000000000");
+    const r = htmlCotizacion({ ...ejemploParaVistaPrevia(), plantilla: d, cfg, empresa, consid, idioma: normalizarIdioma(cfg.idioma), enlaceCondiciones: enlace });
     if (!r.html) { window.alert(r.avisos.map(a => a.detalle).join("\n") || "No se pudo armar el PDF de ejemplo."); return; }
     const win = window.open("", "_blank");
     if (!win) { window.alert("El navegador bloqueó la ventana emergente. Permite las ventanas emergentes para este sitio y vuelve a intentarlo."); return; }
@@ -417,7 +432,7 @@ export default function PlantillasPDFPage() {
   };
 
   /** Las listas que el diseño imprime (la política de reserva, solo si la fila trae su columna). */
-  const listasDe = (d: Diseno, f: Record<string, unknown> | null) => LISTAS.filter(l => leeCampo(d, l.k) && (l.k !== RESERVA_K || tieneColumnaReserva(f)));
+  const listasDe = (d: Diseno, f: Record<string, unknown> | null) => LISTAS.filter(l => leeCampo(d, l.k) && tieneColumna(l.k, f));
 
   const condicionesResumen = (p: Fila) => {
     const ls = listasDe(disenoDe(p), p);
@@ -680,6 +695,7 @@ export default function PlantillasPDFPage() {
                 {tab === "condiciones" && (() => {
                   const ls = listasDe(diseno, base);
                   const faltaReserva = leeCampo(diseno, RESERVA_K) && !tieneColumnaReserva(base);
+                  const faltaResumen = !faltaReserva && leeCampo(diseno, RESUMEN_K) && !tieneColumnaResumen(base);
                   const ninguna = ls.every(l => form[l.k] == null);
                   const c = conteos[base.id];
                   const respaldoNombre = principalActual && principalActual.id !== base.id ? `la plantilla principal «${principalActual.nombre}»` : "fábrica";
@@ -716,7 +732,9 @@ export default function PlantillasPDFPage() {
                             // La política de reserva: qué es y qué no lleva (lo mismo con y sin lista).
                             const notaReserva = l.k === RESERVA_K
                               ? <p style={{ fontSize: 11, color: C.gray500, margin: "6px 0 0" }}>La política de reserva, cambios y cancelación: el PDF la imprime después de las Consideraciones generales (si tiene líneas) y es la que la IA del CRM le envía al cliente, tal cual. No escribas teléfonos, correos ni la dirección web: con un enlace o un número de 6 o más dígitos, la IA deja sus cotizaciones de traslado para que las revise un ejecutivo.</p>
-                              : null;
+                              : l.k === RESUMEN_K
+                                ? <p style={{ fontSize: 11, color: C.gray500, margin: "6px 0 0" }}>Los 4 o 5 puntos que mueven dinero (adelanto, cancelación, no presentarse). Con resumen, el PDF y el WhatsApp llevan estos puntos y el enlace (con su QR) a la política completa de cada cotización, en vez de la política entera. Sin resumen, o si una cotización no tiene enlace, va la política entera. Solo cuenta si la política de arriba tiene líneas. Mismo cuidado: sin teléfonos, correos, enlaces ni números largos.</p>
+                                : null;
                             if (v == null) {
                               return (
                                 <div key={l.k}>
@@ -733,17 +751,22 @@ export default function PlantillasPDFPage() {
                                   onChange={items => set(l.k, items)} avisoLinea={avisoLinea}
                                   vacia={l.k === RESERVA_K
                                     ? "Lista vacía: el PDF no imprime la política de reserva (ni su título) y la IA no tiene una política que enviar."
+                                    : l.k === RESUMEN_K
+                                    ? "Sin puntos: el PDF y el WhatsApp llevan la política entera, como siempre."
                                     : `Lista vacía: el PDF no imprime ninguna línea en «${l.nombre}». Para que cada cotización imprima la suya, quita las condiciones de la plantilla.`} />
                                 {notaReserva}
                               </div>
                             );
                           })}
                           <div style={{ borderTop: `1px solid ${C.gray200}`, paddingTop: 14 }}>
-                            <button onClick={() => setForm(prev => ({ ...prev, condiciones_incluye: null, condiciones_no_incluye: null, condiciones_generales: null, ...(tieneColumnaReserva(prev) ? { condiciones_reserva: null } : {}) }))}
+                            <button onClick={() => setForm(prev => ({ ...prev, condiciones_incluye: null, condiciones_no_incluye: null, condiciones_generales: null, ...(tieneColumnaReserva(prev) ? { condiciones_reserva: null } : {}), ...(tieneColumnaResumen(prev) ? { condiciones_reserva_resumen: null } : {}) }))}
                               style={{ minHeight: 38, padding: "0 16px", borderRadius: 10, border: "1px solid #fca5a5", background: "#fff5f5", color: "#991b1b", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Quitar las condiciones de esta plantilla</button>
                             <p style={{ fontSize: 11, color: C.gray500, margin: "6px 0 0" }}>Sin condiciones propias, cada cotización imprime las suyas (una nueva empieza con las de {respaldoNombre}). Se aplica al guardar.</p>
                           </div>
                         </>
+                      )}
+                      {faltaResumen && (
+                        <div style={ambar}>⚠ El «Resumen de la reserva (con enlace)» se edita aquí cuando se corra {SQL_RESUMEN_CONDICIONES} en Supabase. Mientras tanto, el PDF y el WhatsApp llevan la política entera.</div>
                       )}
                       {faltaReserva && (
                         <div style={ambar}>⚠ La lista «Reserva, cambios y cancelación» se edita aquí cuando se corra {SQL_POLITICA_RESERVA} en Supabase. Mientras tanto, el PDF no imprime ninguna política de reserva.</div>

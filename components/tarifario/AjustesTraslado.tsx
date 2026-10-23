@@ -58,7 +58,7 @@ import { ETIQUETA_SEGMENTO, SQL_PLANTILLAS_USO } from "@/lib/cotizacion-plantill
 import {
   avisoListasAjustes, condicionesTrasladoIA, enlaceEditarPlantilla, esperaQueNoCoincideIA, listasDeAjustesEnUso,
   fmtFecha, leerEntero, mensajeEncenderEnvio, mensajeEncenderIA, minutosQueNoCoinciden, SQL_COTIZACION_IA, SQL_FOTOS_CATEGORIA,
-  subzonasQueHeredan, zonasConEnvioPropio, type GrupoCondicionesIA, type ListaCondicion, type ZonaFila,
+  subzonasQueHeredan, zonasConEnvioPropio, lineasPoliticaYResumen, type GrupoCondicionesIA, type ListaCondicion, type ZonaFila,
 } from "./traslados-pantalla";
 import { filasEscritas, leerUltimoTc, LIMITES, normalizarConfig, SOLO_ADMIN_CORREO_RESERVA, type ConfigFila, type LecturaTc } from "./traslados-datos";
 import { AZUL, iCls, type Decir } from "./traslados-comun";
@@ -307,14 +307,14 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
 
 // ── Las condiciones del PDF, de las plantillas (cotizaciones-05) ─────────────
 
-function ListaSoloLectura({ titulo, lista, sinLista }: { titulo: string; lista: ListaCondicion; sinLista?: string }) {
+function ListaSoloLectura({ titulo, lista, sinLista, vacia }: { titulo: string; lista: ListaCondicion; sinLista?: string; vacia?: string }) {
   return (
     <div className="min-w-0">
       <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{titulo}</p>
       {!lista.propia ? (
         <p className="text-[11px] text-gray-500 italic">{sinLista ?? "La plantilla no tiene esta lista propia: el PDF del traslado sale sin ella."}</p>
       ) : lista.items.length === 0 ? (
-        <p className="text-[11px] text-gray-500 italic">Vacía en la plantilla: el PDF no la imprime.</p>
+        <p className="text-[11px] text-gray-500 italic">{vacia ?? "Vacía en la plantilla: el PDF no la imprime."}</p>
       ) : (
         <ol className="list-decimal pl-5 space-y-0.5 text-xs text-gray-700 break-words">{lista.items.map((t, i) => <li key={i}>{t}</li>)}</ol>
       )}
@@ -374,6 +374,13 @@ function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoC
                   <ListaSoloLectura titulo="Reserva, cambios y cancelación" lista={g.reserva}
                     sinLista="La plantilla no tiene política de reserva: el PDF del traslado sale sin ella y la IA no tiene una política que enviar al cliente." />
                 </div>
+                {g.reserva.items.length > 0 && (
+                  <div className="lg:col-span-3">
+                    <ListaSoloLectura titulo="Resumen (va con el enlace a la política completa)" lista={g.reserva_resumen}
+                      sinLista="Sin resumen: el PDF y el WhatsApp llevan la política entera."
+                      vacia="Sin puntos: el PDF y el WhatsApp llevan la política entera." />
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -633,14 +640,15 @@ function ReservaIA({ config, onConfig, decir, colsConfig, sinMigracion, grupos, 
         ) : !grupos ? (
           <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">Falta correr <span className="font-mono">{SQL_PLANTILLAS_USO}</span>: la política sale de la plantilla PDF del traslado, y sin ese SQL la IA no tiene una política que enviar.</p>
         ) : grupos.map((g) => {
-          const choques = g.reserva.propia ? politicaContradiceConfig(g.reserva.items, cfgBorrador) : [];
+          // El resumen también lo recibe el cliente: se coteja junto con la política.
+          const choques = g.reserva.propia ? politicaContradiceConfig(lineasPoliticaYResumen(g), cfgBorrador) : [];
           const sinPolitica = !g.reserva.propia || g.reserva.items.length === 0;
           return (
             <div key={g.clave} className={`rounded-xl border px-3 py-2 text-xs space-y-1 ${sinPolitica || choques.length ? "border-amber-300 bg-amber-50 text-amber-900" : "border-gray-200 text-gray-700"}`}>
               <p>
                 <b>{g.segmentos.map((x) => ETIQUETA_SEGMENTO[x.segmento]).join(" · ")}:</b>{" "}
                 {g.fuente.tipo === "plantilla"
-                  ? <>plantilla «{g.fuente.plantilla.nombre || g.fuente.plantilla.id}» · {sinPolitica ? "sin política: la IA no tiene qué enviar" : `${g.reserva.items.length} ${g.reserva.items.length === 1 ? "línea" : "líneas"}`}{" "}
+                  ? <>plantilla «{g.fuente.plantilla.nombre || g.fuente.plantilla.id}» · {sinPolitica ? "sin política: la IA no tiene qué enviar" : `${g.reserva.items.length} ${g.reserva.items.length === 1 ? "línea" : "líneas"}${g.reserva_resumen.items.length ? ` · resumen de ${g.reserva_resumen.items.length} ${g.reserva_resumen.items.length === 1 ? "punto" : "puntos"} con enlace` : ""}`}{" "}
                     <Link href={enlaceEditarPlantilla(g.fuente.plantilla.id)} className="font-bold underline">Editar →</Link></>
                   : <>sin una plantilla que la IA pueda usar: no hay política que enviar. <Link href="/cotizaciones/plantillas" className="font-bold underline">Asignar una plantilla →</Link></>}
               </p>
