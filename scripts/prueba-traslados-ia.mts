@@ -934,6 +934,11 @@ class ConsultaF implements PromiseLike<any> {
     return Promise.resolve().then(() => this.ejecutar()).then(ok, mal);
   }
   private ejecutar(): any {
+    // La regla del traslado por idioma × moneda (cotizaciones-09) NO existe salvo que la base de la
+    // prueba la siembre: es el estado de producción hasta que alguien corra el SQL (PGRST205).
+    if (this.tabla === "cotizacion_plantilla_reglas_traslado" && !Object.prototype.hasOwnProperty.call(this.sb.tablas, this.tabla)) {
+      return { data: null, count: null, error: { code: "PGRST205", message: `Could not find the table 'public.${this.tabla}' in the schema cache` } };
+    }
     const sb = this.sb, tabla = this.tabla, filas = sb.t(tabla);
     const falla = sb.fallas.find((x) => x.tabla === tabla && x.op === this.op);
     if (falla) return { data: null, count: null, error: { message: falla.mensaje } };
@@ -1548,7 +1553,7 @@ seccion("21. accionAjena, la ruta de la tarjeta, /api/crm/ia/probar y el destino
   const iSnap = cuerpo.indexOf("const waDestinoInicial = waDestinoDe(contacto)"), iBucle = cuerpo.indexOf("for (let iter = 0");
   ok(iSnap > 0 && iSnap < iBucle, "crm-ia: el número de destino se copia antes del bucle del agente");
   ok(/enviarPorCanal\(sb, conv, contacto, textoFinal, waDestinoInicial\)/.test(cuerpo), "crm-ia: y se responde a ese número");
-  ok(/textoSinImportesAjenos\(textoFinal, ctx\.cotizacionTraslado, agente, contactoInicial\)/.test(cuerpo), "crm-ia: el saludo usa el nombre de antes del bucle");
+  ok(/textoSinImportesAjenos\(textoFinal, ctx\.cotizacionTraslado, agente, contactoInicial[,)]/.test(cuerpo), "crm-ia: el saludo usa el nombre de antes del bucle");
 }
 
 // ── 22. Auditoría 20-10: el «me falta» y la derivación que escribe el código no repiten texto con dinero ──
