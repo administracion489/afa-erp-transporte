@@ -6,12 +6,16 @@
 // ventana es falsa y se captura lo escrito). Divergencias DECLARADAS, que la matriz aplica al HTML
 // viejo antes de comparar: (1) la columna «USD ~» (importe / 3.7) de la ejecutiva desaparece;
 // (2) el texto de usuario pasa por `esc` (los datos de prueba no llevan < > & " ', así que no
-// cambia nada); (3) `Day N` también es encabezado de día del itinerario (no aparece en los datos).
+// cambia nada); (3) `Day N` también es encabezado de día del itinerario (no aparece en los datos);
+// (5) un importe en soles con TRES decimales («S/ 1,833.333») sale al céntimo («S/ 1,833.33»):
+// `fmtImporte` redondea con `alCentimo` —el de `cifrasDeFila` y `adelantoDe`— antes de formatear.
+// Solo esos importes cambian; los que ya tenían dos decimales o menos salen byte a byte iguales.
 import * as N from "../lib/cotizacion-pdf";
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, buildVehsHtml, esc, driveImg } from "../lib/pdf-chrome";
 import { empresaConDefectos, cuentasParaMoneda } from "../lib/empresa-perfil";
 import { etiquetaNivel } from "../lib/costos/nivel-servicio";
-import { DEFAULT_CONSID_ES } from "../lib/cotizacion-idioma";
+import { DEFAULT_CONSID_ES, fmtImporte } from "../lib/cotizacion-idioma";
+import { alCentimo } from "../lib/cotizacion-moneda";
 import { readFileSync } from "node:fs";
 
 let fallos = 0, oks = 0;
@@ -376,10 +380,31 @@ let escrito = "";
 (globalThis as any).window = { open: () => ({ document: { write: (h: string) => { escrito = h; }, close: () => {} } }) };
 function viejo(plantilla: string, cot: any, cl: any, items: any[], vehs: any[], repr: string, consid: any, cfg: any, emp: any): string {
   escrito = "";
-  generarPDF(cot, cl, items, vehs, repr, consid, plantilla, cfg, emp);
+  conImporteAlCentimo(() => generarPDF(cot, cl, items, vehs, repr, consid, plantilla, cfg, emp));
   return escrito
     .replace(/<th[^>]*>USD ~<\/th>/g, "")
     .replace(/<td[^>]*>USD -?[\d.]+<\/td>/g, "");
+}
+// Divergencia (5), aplicada al VALOR y no al texto ya impreso: el código viejo formatea cada
+// importe en soles con `toLocaleString("es-PE",{minimumFractionDigits:2})`; aquí ese mismo
+// llamado redondea antes con `alCentimo` y fija dos decimales, que es lo que hace `fmtImporte`.
+// Redondear el TEXTO viejo sería un doble redondeo: «3,645.485» ya es 3645.48494 llevado a tres
+// decimales por Intl, y daría 3,645.49 donde el céntimo es 3,645.48.
+const tlsOriginal = Number.prototype.toLocaleString;
+let importesMovidos = 0;
+const RE_TRES_DECIMALES = /(S\/|US\$) -?[\d,]+\.\d{3}/;
+function conImporteAlCentimo(f: () => void): void {
+  Number.prototype.toLocaleString = function (this: number, loc?: any, op?: any) {
+    if (op && op.minimumFractionDigits === 2 && op.maximumFractionDigits === undefined && Object.keys(op).length === 1) {
+      const antes = tlsOriginal.call(this, loc, op);
+      const c = alCentimo(Number(this));
+      const despues = tlsOriginal.call(c === 0 ? 0 : c, loc, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      if (antes !== despues) importesMovidos++;
+      return despues;
+    }
+    return tlsOriginal.call(this, loc, op);
+  } as any;
+  try { f(); } finally { Number.prototype.toLocaleString = tlsOriginal; }
 }
 
 // ── Datos ───────────────────────────────────────────────────────────────────────
@@ -414,7 +439,7 @@ const COTS = (k: number): any[] => {
 
 console.log("1. Español + soles = generadores viejos, byte a byte (con las divergencias declaradas)");
 {
-  let n = 0, iguales = 0, mostrado = 0;
+  let n = 0, iguales = 0, mostrado = 0, conTres = 0;
   const reprs = ["", "Carla Díaz"];
   const considS = [DEFAULT_CONSID, { incluye: ["Conductor"], no_incluye: [], generales: ["Ninguna"] }];
   for (let k = 0; k < 20; k++) for (const cot of COTS(k)) for (const p of PLANTILLAS) for (const items of ITEMS) for (const cl of CLIENTES) for (const emp of EMPRESAS) for (const cfg of CFGS) {
@@ -423,6 +448,7 @@ console.log("1. Español + soles = generadores viejos, byte a byte (con las dive
     n++;
     const a = viejo(p, cot, cl, items, vehs, repr, consid, cfg, emp);
     const r = N.htmlCotizacion({ cot, cliente: cl, items, vehiculos: vehs, repr, consid, plantilla: p, cfg, empresa: emp });
+    if (RE_TRES_DECIMALES.test(r.html!)) conTres++;
     if (r.html === a) iguales++;
     else if (mostrado++ < 2) {
       let i = 0; while (i < a.length && a[i] === r.html![i]) i++;
@@ -430,6 +456,8 @@ console.log("1. Español + soles = generadores viejos, byte a byte (con las dive
     }
   }
   ok(iguales === n, `${iguales}/${n} documentos idénticos`);
+  ok(importesMovidos > 0, `la divergencia (5) sí se aplicó: ${importesMovidos} importes con tres decimales en los generadores viejos`);
+  ok(conTres === 0, `ningún documento nuevo imprime un importe con tres decimales (${conTres}/${n})`);
 }
 
 console.log("2. Divergencias declaradas, comprobadas");
@@ -446,6 +474,29 @@ console.log("2. Divergencias declaradas, comprobadas");
   const rm = N.htmlCotizacion({ cot: malo, cliente: { nombre: "A & B <i>" }, items: [{ ...items[0], descripcion: "<img src=x onerror=1>" }], vehiculos: [], plantilla: "corporativo" });
   ok(!rm.html!.includes("<script>alert") && !rm.html!.includes("<img src=x") && !rm.html!.includes("<b>x</b>") && rm.html!.includes("A &amp; B &lt;i&gt;"), "texto de usuario escapado");
   ok(/font-weight:900;color:#0b315f;">Day 1<\/div>/.test(rm.html!), "«Day 1» es encabezado de día");
+
+  // Divergencia (5), el caso que la fija: 84.75 + IGV. El viejo imprimía «S/ 15.255» y
+  // «S/ 100.005»; el nuevo imprime el céntimo que calcula el ERP (alCentimo del total de
+  // `totalesEnMoneda`, el mismo que lee `cifrasDeFila` y del que sale el adelanto).
+  const cot5 = { ...COTS(0)[0], incluye_igv: true };
+  const it5 = [{ descripcion: "Traslado", dias: 1, cantidad: 1, precio_unit: 84.75, descuento_pct: 0 }];
+  escrito = ""; generarPDF(cot5, CLIENTES[1], it5, [], "", DEFAULT_CONSID, "corporativo", null, null);
+  ok(escrito.includes("S/ 100.005") && escrito.includes("S/ 15.255"), "el viejo imprimía «S/ 100.005» y «S/ 15.255»");
+  const tot5 = N.htmlCotizacion({ cot: cot5, cliente: CLIENTES[1], items: it5, vehiculos: [], plantilla: "corporativo" }).html!;
+  ok(tot5.includes("S/ 100.01") && tot5.includes("S/ 15.26") && tot5.includes("S/ 84.75") && !RE_TRES_DECIMALES.test(tot5), "el nuevo: «S/ 84.75» + «S/ 15.26» = «S/ 100.01»");
+  ok(fmtImporte(84.75 * 1.18, "PEN") === `S/ ${alCentimo(84.75 * 1.18).toFixed(2)}`, "lo impreso es alCentimo del total que calcula el ERP");
+  // Sin doble redondeo: 76.275 × 1.18 = 90.0045; Intl a tres decimales lo imprimía «90.005», y
+  // redondear ese texto daría 90.01. El céntimo es 90.00.
+  const it6 = [{ ...it5[0], precio_unit: 76.275 }];
+  escrito = ""; generarPDF(cot5, CLIENTES[1], it6, [], "", DEFAULT_CONSID, "turistico", null, null);
+  const tot6 = N.htmlCotizacion({ cot: cot5, cliente: CLIENTES[1], items: it6, vehiculos: [], plantilla: "turistico" }).html!;
+  ok(escrito.includes("S/ 90.005") && tot6.includes("S/ 90.00<") && !tot6.includes("S/ 90.01"), "90.0045 sale «S/ 90.00», no el doble redondeo «S/ 90.01»");
+  // Lo que ya tenía dos decimales o menos no se mueve.
+  const it7 = [{ ...it5[0], precio_unit: 1000 }];
+  const a7 = viejo("ejecutivo", cot5, CLIENTES[1], it7, [], "", DEFAULT_CONSID, null, null);
+  escrito = ""; generarPDF(cot5, CLIENTES[1], it7, [], "", DEFAULT_CONSID, "ejecutivo", null, null);
+  const crudo7 = escrito.replace(/<th[^>]*>USD ~<\/th>/g, "").replace(/<td[^>]*>USD -?[\d.]+<\/td>/g, "");
+  ok(a7 === crudo7 && N.htmlCotizacion({ cot: cot5, cliente: CLIENTES[1], items: it7, vehiculos: [], plantilla: "ejecutivo" }).html === crudo7, "con importes de dos decimales el viejo, sin la divergencia, y el nuevo son el mismo HTML");
 }
 
 console.log("3. pdf-chrome: los parámetros nuevos no cambian el comportamiento por defecto");
