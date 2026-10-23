@@ -108,7 +108,8 @@ const PISTA_Y_CIFRA = new RegExp(
  * Pensado para el texto del MODELO cuando no hay cotización: el falso positivo cuesta que el
  * mensaje lo escriba el código; el falso negativo, un precio que nadie calculó.
  */
-export function mencionaDinero(texto: string): boolean {
+export function mencionaDinero(texto: string, idioma: IdiomaTexto = "es"): boolean {
+  void idioma; // TODO B1a: con "en", castellano ∪ inglés
   const t = minusculas(texto);
   if (!t.trim()) return false;
   return importesEnTexto(texto).length > 0
@@ -117,6 +118,9 @@ export function mencionaDinero(texto: string): boolean {
 }
 
 // ── 3. ¿Se puede imprimir lo que escribió el cliente? ────────────────────────
+
+/** El idioma de los guards: "en" = castellano ∪ inglés (un cliente en inglés puede escribir en los dos). */
+export type IdiomaTexto = "es" | "en";
 
 export type MotivoTextoLibre = "enlace" | "importe" | "palabra_de_pago" | "numero_largo" | "muy_largo";
 
@@ -144,7 +148,8 @@ const PALABRAS_PAGO = [
  * Por qué un texto libre NO se puede imprimir sin que lo vea una persona, o null si se puede. Se
  * declara el motivo (el primero que aplica, en este orden) para que la nota del ejecutivo lo diga.
  */
-export function textoLibreSospechoso(s: string | null | undefined): MotivoTextoLibre | null {
+export function textoLibreSospechoso(s: string | null | undefined, idioma: IdiomaTexto = "es"): MotivoTextoLibre | null {
+  void idioma; // TODO B1a: con "en", castellano ∪ inglés
   const crudo = String(s ?? "");
   if (!crudo.trim()) return null;
   const t = minusculas(crudo);
@@ -160,7 +165,8 @@ export function textoLibreSospechoso(s: string | null | undefined): MotivoTextoL
 const unaLinea = (s: string): string => String(s ?? "").replace(/\s+/g, " ").trim();
 
 /** La referencia del cliente que se puede imprimir (en una línea), o null si no hay o es sospechosa. */
-export function referenciaImprimible(s: string | null | undefined): string | null {
+export function referenciaImprimible(s: string | null | undefined, idioma: IdiomaTexto = "es"): string | null {
+  void idioma; // TODO B1a: con "en", castellano ∪ inglés
   const t = unaLinea(String(s ?? ""));
   if (!t || textoLibreSospechoso(t)) return null;
   return t;

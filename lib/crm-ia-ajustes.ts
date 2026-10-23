@@ -95,7 +95,12 @@ export const MODOS_PREGUNTAS: { valor: ModoPreguntas; etiqueta: string }[] = [
 ];
 
 /** Lo que necesita un texto que arma el código para hablar como el agente. */
-export type EstiloMensajes = { tratamiento: Tratamiento; preguntas: ModoPreguntas };
+/**
+ * La voz de los textos que arma el código. `idioma` NO es un ajuste del agente: lo pone el código
+ * (el idioma de la cotización o el del cliente, lib/idioma-cliente.ts) y `estiloDe` nunca lo llena.
+ * Ausente = castellano, byte a byte lo de siempre.
+ */
+export type EstiloMensajes = { tratamiento: Tratamiento; preguntas: ModoPreguntas; idioma?: "es" | "en" };
 
 export type ResumenCuando = "al_final" | "cada_respuesta";
 export const RESUMEN_CUANDO: { valor: ResumenCuando; etiqueta: string }[] = [
