@@ -3,8 +3,10 @@
 // (traslado_categorias) con su capacidad, su bodega y su ficha de costeo, y un mini calculador.
 //
 // QUÉ VEHÍCULO SALE NO SE DECIDE AQUÍ: el calculador llama a `elegirVehiculo` del motor (sin
-// precios), la misma función que usa el cotizador automático. La CLAVE de una categoría no se
-// edita: los precios la referencian.
+// precios), la misma función que usa el cotizador automático. La CLAVE de una categoría no se edita
+// en la celda: es una identidad que llevan sus precios, sus fotos y las cotizaciones guardadas, y la
+// cambia el servidor con «✎» (ModalClaveCategoria → /api/traslados/categorias/renombrar), que mueve
+// todo junto.
 //
 // Debajo de la tabla, «📷 Fotos y descripción para la cotización» (FotosCategorias.tsx): lo que el
 // cliente ve de cada vehículo en el PDF de la cotización de traslado (traslados-07).
@@ -16,6 +18,7 @@ import { leerEntero, normalizarClaveCategoria, type CategoriaFila } from "./tras
 import { filasEscritas, leerFichasCosteo, LIMITES, motivoCeroFilas, normalizarCategoria, type FichaCosteo } from "./traslados-datos";
 import { AZUL, iCls, InterruptorActivo, type Decir } from "./traslados-comun";
 import FotosCategorias from "./FotosCategorias";
+import ModalClaveCategoria from "./ModalClaveCategoria";
 
 const REGLA = "Se elige el vehículo más chico donde caben. Sin bodega, cada maleta de 23 kg ocupa un asiento (10 pax con maletas = 20 asientos → Sprinter 20). Con bodega, las maletas van primero ahí y solo las que sobran ocupan asiento.";
 
@@ -60,9 +63,11 @@ function Campo({ valor, onGuardar, tipo = "texto", min = 0, max = 100000, ancho 
   );
 }
 
-export default function VehiculosTraslado({ categorias, onCategoria, decir, colsCategoria, sinMigracionFotos }: {
+export default function VehiculosTraslado({ categorias, onCategoria, onRenombrada, decir, colsCategoria, sinMigracionFotos }: {
   categorias: CategoriaFila[];
   onCategoria: (c: CategoriaFila) => void;
+  /** La clave cambió (el servidor movió precios, fotos y cotizaciones): `de` es la vieja. */
+  onRenombrada: (de: string, c: CategoriaFila) => void;
   decir: Decir;
   /** Las columnas que se piden de vuelta al escribir (sin las de traslados-07 si falta la migración). */
   colsCategoria: string;
@@ -71,6 +76,7 @@ export default function VehiculosTraslado({ categorias, onCategoria, decir, cols
 }) {
   const [fichas, setFichas] = useState<EstadoFichas>({ tipo: "cargando" });
   const [ocupada, setOcupada] = useState<string | null>(null);
+  const [renombrar, setRenombrar] = useState<CategoriaFila | null>(null);
   const [pax, setPax] = useState("10");
   const [maletas, setMaletas] = useState("10");
 
@@ -151,7 +157,7 @@ export default function VehiculosTraslado({ categorias, onCategoria, decir, cols
           <table className="w-full text-sm min-w-[52rem]">
             <thead>
               <tr className="bg-gray-50 border-b text-[11px] font-bold text-gray-500 uppercase">
-                <th className="p-2 text-left" title="La clave no se cambia: los precios la referencian.">Clave</th>
+                <th className="p-2 text-left" title="Identificador interno (el cliente no lo ve). Se cambia con ✎: sus precios, fotos y cotizaciones guardadas se mueven con ella.">Clave</th>
                 <th className="p-2 text-left">Nombre</th>
                 <th className="p-2 text-right">Asientos</th>
                 <th className="p-2 text-right" title="Maletas de 23 kg que van en bodega sin ocupar asiento.">Maletas en bodega</th>
@@ -168,7 +174,14 @@ export default function VehiculosTraslado({ categorias, onCategoria, decir, cols
                 const ocupado = ocupada === c.clave;
                 return (
                   <tr key={c.clave} className={c.activo === false ? "bg-gray-50 text-gray-400" : ""}>
-                    <td className="p-2 font-mono text-xs text-gray-400 whitespace-nowrap" title="La clave no se cambia: los precios la referencian.">{c.clave}</td>
+                    <td className="p-2 font-mono text-xs text-gray-400 whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1">
+                        {c.clave}
+                        <button type="button" onClick={() => setRenombrar(c)} disabled={ocupado} aria-label={`Cambiar la clave ${c.clave}`}
+                          title="Cambiar la clave (sus precios, fotos y cotizaciones guardadas se mueven con ella)"
+                          className="w-7 h-7 rounded-lg text-gray-400 hover:text-[#0b315f] hover:bg-gray-100 disabled:opacity-40">✎</button>
+                      </span>
+                    </td>
                     <td className="p-2 min-w-[12rem]">
                       <Campo key={`n-${c.nombre}`} valor={c.nombre} etiqueta={`Nombre de ${c.clave}`} ocupado={ocupado}
                         onGuardar={(v) => actualizar(c, { nombre: String(v) }, `No se pudo cambiar el nombre de ${c.clave}`)} />
@@ -211,6 +224,11 @@ export default function VehiculosTraslado({ categorias, onCategoria, decir, cols
       </section>
 
       <FotosCategorias categorias={lista} colsCategoria={colsCategoria} sinMigracion={sinMigracionFotos} onCategoria={onCategoria} decir={decir} />
+
+      {renombrar && (
+        <ModalClaveCategoria categoria={renombrar} claves={categorias.map((c) => c.clave)} decir={decir}
+          onCerrar={() => setRenombrar(null)} onRenombrada={onRenombrada} />
+      )}
     </div>
   );
 }
@@ -295,7 +313,7 @@ function AltaCategoria({ categorias, fichas, onCreada, decir, colsCategoria }: {
         </button>
         {motivo && <span className="text-[11px] text-gray-500">{motivo}</span>}
       </div>
-      <p className="text-[10px] text-gray-400">La clave no se puede cambiar después: los precios la referencian.</p>
+      <p className="text-[10px] text-gray-400">La clave es interna (el cliente ve el nombre). Se puede cambiar después con ✎ en la tabla: sus precios, fotos y cotizaciones guardadas se mueven con ella.</p>
     </div>
   );
 }
