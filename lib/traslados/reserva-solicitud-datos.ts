@@ -72,13 +72,13 @@ import {
   MOTIVO_ORDEN, elegibilidadDeReserva, frasePlazo, ordenDeReserva, ordenDeSolicitud, type MotivoOrden, type OrdenReserva,
 } from "./reserva-orden";
 import {
-  adelantoDe, cargoRetenido, clienteVerificadoEnChat, cuentasEnMensaje, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal,
+  adelantoDe, cargoEditable, cargoRetenido, clienteVerificadoEnChat, cuentasEnMensaje, juzgarCargo, mismaReferencia, patchCargoRecalculado, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal,
   filaFacturaCargo, firmaConCuentas, firmaImportes, huellaDeFirma, importesDeFirma, juzgarReenvioPedirPago, marcaCargoReserva,
   mensajeCanceladaSinPago, mensajeCancelacionRegistrada, mensajeCancelacionResuelta, vinculoContactoReserva,
   mensajeComprobanteRecibido, mensajeDisponibilidadPrimero, mensajeHayUnidad, mensajePagoNoEncontrado, mensajePedirPago,
   mensajePoliticas, mensajeSinUnidad, politicaContradiceConfig, puedePasar, queFalta,
   type Adelanto, type BloquePago, type ConfigReserva, type CuentasMensaje, type EstadoSolicitud, type PagoEnHayUnidad,
-  type PagoSolicitud, type Pendiente,
+  type PagoSolicitud, type Pendiente, type CodigoCargo, type FacturaCargoActual,
 } from "./reserva-pago";
 import { TEXTO_COTEJO, comprobanteCuenta, cotejarComprobante, normalizarOperacion, type Cotejo, type LecturaComprobante } from "./comprobante-pago";
 import { leerComprobantePago, type ResultadoLector } from "./comprobante-pago-ia";
@@ -1139,7 +1139,7 @@ type Hechos = {
   tramos: ReservaTramo[];
   pagos: (PagoSolicitud & PagoVista)[];
   comprobantes: FilaComprobante[];
-  cargo: { id: number; serie: string | null; numero: string | null; total: number | null; estado: string | null } | null;
+  cargo: { id: number; serie: string | null; numero: string | null; total: number | null; estado: string | null; sunat_estado: string | null; notasCredito: number } | null;
   versiones: { id: number; version: number; codigo: string }[];
   avisos: string[];
 };
@@ -1154,9 +1154,12 @@ async function leerHechos(sb: Sb, s: FilaSolicitud): Promise<Hechos> {
   const comprobantes = await comprobantesDe(sb, s.id);
   let cargo: Hechos["cargo"] = null;
   if (s.factura_cargo_id) {
-    const { data, error } = await sb.from("facturas").select("id, serie, numero, total, estado").eq("id", s.factura_cargo_id).maybeSingle();
+    const { data, error } = await sb.from("facturas").select("id, serie, numero, total, estado, sunat_estado, cliente_id, moneda").eq("id", s.factura_cargo_id).maybeSingle();
     if (error) avisos.push(crudo("No se pudo leer el comprobante del cargo", error));
-    else if (data) cargo = { id: Number(data.id), serie: data.serie ?? null, numero: data.numero ?? null, total: num(data.total), estado: data.estado ?? null };
+    else if (data) {
+      const base = { id: Number(data.id), serie: data.serie ?? null, numero: data.numero ?? null, total: num(data.total), estado: data.estado ?? null, sunat_estado: data.sunat_estado ?? null };
+      cargo = { ...base, notasCredito: cargoEditable(base) ? 0 : await notasCreditoDe(sb, { ...base, cliente_id: data.cliente_id, moneda: data.moneda }) };
+    }
   }
   let versiones: Hechos["versiones"] = [];
   const idDoc = tramos.length ? Math.min(...tramos.map((t) => t.id)) : null;
@@ -1182,7 +1185,7 @@ function pendientesDe(s: FilaSolicitud, h: Hechos, accion: AccionFila | null): {
     {
       cobrado, devuelto, adelanto: adel?.adelanto ?? null, reserva: reservaParaQueFalta(s, h.tramos),
       confirmacionEnviada: confirmacionEnviadaDe(s, accion), confirmacionEmitida: h.versiones.length > 0,
-      cargo: h.cargo ? { id: h.cargo.id, numero: h.cargo.numero } : null, moneda,
+      cargo: h.cargo ? { id: h.cargo.id, numero: h.cargo.numero, serie: h.cargo.serie, total: h.cargo.total, estado: h.cargo.estado, sunat_estado: h.cargo.sunat_estado, notasCredito: h.cargo.notasCredito } : null, moneda,
     },
   );
   return { pendientes, cobrado, devuelto, moneda };
@@ -1377,6 +1380,12 @@ export async function confirmarDisponibilidad(sb: Sb, c: Cadena, quien: Quien, d
     const cot = await leerCotParaReserva(sb, cc.fila.id);
     if (!cot) throw new Error("La cotización ya no existe.");
     const r = await (deps.conversion ?? ejecutarConversion)(sb, cot, { hoy, confirmar: () => true });
+    if (r.aviso) avisos.push(r.aviso);
+    if (r.codigo === "ocupada" || r.codigo === "cambio") {
+      // «→ Res.» de /cotizaciones está creando (o acaba de cambiar) las reservas de esta misma cotización.
+      await revertir(); await revertirCot();
+      return res("reclamo_perdido", `Alguien está creando la reserva de la cotización N° ${cc.numero} desde /cotizaciones («→ Res.») en este mismo momento. La solicitud vuelve a su estado: espera unos segundos y vuelve a pulsar «Hay unidad» (si ya quedó creada, la toma).`);
+    }
     if (r.codigo === "creada" || r.codigo === "retorno_completado" || r.codigo === "parcial") {
       if (r.codigo !== "creada" || /⚠️/.test(r.mensaje)) avisos.push(r.mensaje);
     } else if (r.codigo !== "ya_convertida" && r.codigo !== "retorno_imposible") {
@@ -1549,9 +1558,9 @@ export async function resolverCancelacion(sb: Sb, c: Cadena, quien: Quien, pctPe
     ? mensajeCancelacionResuelta({ monto, pct, moneda: cc.moneda, plazoH: cfg.devolucionPlazoH, estilo })
     : mensajeCanceladaSinPago({ numero: cc.numero, estilo });
   const avisos: string[] = [];
-  if (cargoRetenido({ cobrado, devuelto: monto }) > 0) {
+  if (cobrado > 0) {
     const cargo = await asegurarComprobanteCargo(sb, s.id, deps);
-    if (!cargo.ok) avisos.push(cargo.detalle);
+    if (cargo.aviso) avisos.push(cargo.aviso);
   }
   const a = await avisarCliente(sb, c, texto, { usuarioId: quien.id }, deps);
   await nota(sb, c.conv?.id, `📅 ${quien.nombre ?? "Un ejecutivo"} resolvió la cancelación de la solicitud #${s.id}: se devuelve el ${pct} % de lo cobrado (${r2(monto)} ${cc.moneda}).${avisos.length ? `\n${avisos.join("\n")}` : ""}`);
@@ -1559,57 +1568,210 @@ export async function resolverCancelacion(sb: Sb, c: Cadena, quien: Quien, pctPe
   return conAviso("Cancelación resuelta.", a, { estado: "cancelada", mensaje: texto, avisos });
 }
 
+/** Las columnas del comprobante del cargo que se leen para juzgarlo. */
+const COLS_CARGO = "id, cotizacion_id, cliente_id, moneda, serie, numero, subtotal, igv, total, estado, sunat_estado, observaciones, items_json";
+
 /**
- * El comprobante del cargo retenido (decisión del dueño): cuando lo devuelto es menor que lo
- * cobrado, una fila de `facturas` ya armada y SIN número (`filaFacturaCargo`; `total` es una columna
- * generada y no se inserta). Idempotente: se busca por la marca en las observaciones antes de crear,
- * y la solicitud lo ata con un UPDATE condicional (`factura_cargo_id is null`); si otra llamada ganó,
- * se borra el propio. Nunca toca la reserva ni `planDeCancelacion`.
+ * El comprobante del cargo de la solicitud, del dato más fuerte al más débil: el enlace de la
+ * solicitud (`factura_cargo_id`) → la columna de la factura (`facturas.reserva_solicitud_id`,
+ * reservas-09d, que solo escribe el servidor) → y SOLO sin esa columna (una base sin 09d), la marca
+ * en las observaciones (no anulada). Uno de otra cotización no es suyo. LANZA si no se puede leer.
  */
-export async function asegurarComprobanteCargo(sb: Sb, solicitudId: number, deps: DepsReserva = {}): Promise<{ ok: boolean; id: number | null; creado: boolean; detalle: string }> {
+async function cargoDeSolicitud(sb: Sb, s: FilaSolicitud, cotId: number): Promise<{ fila: FacturaCargoActual & { cotizacion_id?: number | null; cliente_id?: unknown; moneda?: unknown }; por: "enlace" | "columna" | "marca" } | { fila: null; conColumna: boolean }> {
+  const deEstaCotizacion = (f: { cotizacion_id?: number | null } | null) => !!f && (f.cotizacion_id == null || Number(f.cotizacion_id) === Number(cotId));
+  if (s.factura_cargo_id) {
+    const { data, error } = await sb.from("facturas").select(COLS_CARGO).eq("id", s.factura_cargo_id).maybeSingle();
+    if (error) throw new Error(`No se pudo leer el comprobante del cargo: ${error.message}`);
+    if (data && deEstaCotizacion(data)) return { fila: data, por: "enlace" };
+  }
+  const col = await sb.from("facturas").select(COLS_CARGO).eq("reserva_solicitud_id", s.id).limit(2);
+  if (col.error && !faltaColumna(col.error, "reserva_solicitud_id")) throw new Error(`No se pudo buscar el comprobante del cargo: ${col.error.message}`);
+  const conColumna = !col.error;
+  if (conColumna) {
+    const f = ((col.data ?? []) as (FacturaCargoActual & { cotizacion_id?: number | null; cliente_id?: unknown; moneda?: unknown })[]).find(deEstaCotizacion);
+    return f ? { fila: f, por: "columna" } : { fila: null, conColumna };
+  }
+  const marca = `${marcaCargoReserva(s.id)}:`;
+  const { data: previa, error: ePrev } = await sb.from("facturas").select(COLS_CARGO).eq("cotizacion_id", cotId).ilike("observaciones", `%${marca}%`).neq("estado", "anulada").limit(1);
+  if (ePrev) throw new Error(`No se pudo buscar el comprobante del cargo: ${ePrev.message}`);
+  return (previa ?? []).length ? { fila: previa[0], por: "marca" } : { fila: null, conColumna };
+}
+
+/**
+ * Lo que ya restan las notas de crédito que referencian este comprobante («F001-25»). Solo cuentan
+ * las EMITIDAS de verdad: con número, aceptadas por SUNAT, no anuladas, del MISMO cliente y en la
+ * MISMA moneda que el cargo (una pendiente, una que SUNAT rechazó, o una fila puesta a mano sin
+ * número no apaga lo que falta: auditoría del 23-10-2026). Best-effort: 0 si no se pueden leer.
+ */
+async function notasCreditoDe(sb: Sb, f: Pick<FacturaCargoActual, "id" | "serie" | "numero"> & { cliente_id?: unknown; moneda?: unknown }): Promise<number> {
+  const numero = String(f.numero ?? "").trim();
+  if (!numero) return 0;
+  try {
+    const patron = `%${numero.replace(/^0+(?=\d)/, "").replace(/[%_\\]/g, "").slice(0, 20)}%`;
+    const { data, error } = await sb.from("facturas").select("id, total, estado, sunat_estado, numero, cliente_id, moneda, nota_credito_ref")
+      .eq("es_nota_credito", true).ilike("nota_credito_ref", patron).limit(50);
+    if (error) return 0;
+    const mon = normalizarMoneda(f.moneda as string | null | undefined);
+    let suma = 0;
+    for (const n of (data ?? []) as { id: number; total: unknown; estado: unknown; sunat_estado: unknown; numero: unknown; cliente_id: unknown; moneda: unknown; nota_credito_ref: unknown }[]) {
+      if (Number(n.id) === Number(f.id)) continue;
+      if (String(n.estado ?? "") === "anulada" || String(n.sunat_estado ?? "") !== "aceptada" || !String(n.numero ?? "").trim()) continue;
+      if (String(n.cliente_id ?? "") !== String(f.cliente_id ?? "") || normalizarMoneda(n.moneda as string | null | undefined) !== mon) continue;
+      if (!mismaReferencia(n.nota_credito_ref, f.serie, f.numero)) continue;
+      suma += Math.abs(num(n.total) ?? 0);
+    }
+    return r2(suma);
+  } catch { return 0; }
+}
+
+export type ResultadoCargo = {
+  ok: boolean;
+  id: number | null;
+  creado: boolean;
+  codigo: CodigoCargo | null;
+  detalle: string;
+  /** Lo que hay que decirle a quien pulsó (null = nada): un fallo, o un comprobante emitido que ya no corresponde. */
+  aviso: string | null;
+};
+
+/**
+ * El comprobante del cargo retenido (decisión del dueño), AL DÍA con el dinero de hoy: cuando lo
+ * devuelto es menor que lo cobrado, una fila de `facturas` SIN número (`filaFacturaCargo`; `total`
+ * es una columna generada y no se inserta), atada a la solicitud por los dos lados. Mientras no
+ * tenga número se RECALCULA (`juzgarCargo`: un cobro registrado o anulado después cambia lo
+ * retenido) y, si ya no se retiene nada, se retira (queda «anulada» y se desata). Uno emitido no se
+ * toca: `aviso` pide la nota de crédito o el comprobante por la diferencia. Idempotente; dos
+ * llamadas a la vez no crean dos (índice único de reservas-09d, o el UPDATE condicional de la
+ * solicitud). Nunca toca la reserva ni `planDeCancelacion`. Nunca lanza.
+ */
+export async function asegurarComprobanteCargo(sb: Sb, solicitudId: number, deps: DepsReserva = {}): Promise<ResultadoCargo> {
+  const fin = (r: Partial<ResultadoCargo> & { detalle: string }): ResultadoCargo => ({ ok: true, id: null, creado: false, codigo: null, aviso: null, ...r });
   try {
     const s = await leerSolicitud(sb, solicitudId);
-    if (!s) return { ok: false, id: null, creado: false, detalle: "La solicitud no existe." };
-    if (s.factura_cargo_id) return { ok: true, id: s.factura_cargo_id, creado: false, detalle: "El comprobante del cargo ya existía." };
-    if (s.estado !== "cancelada" && s.estado !== "sin_unidad") return { ok: true, id: null, creado: false, detalle: "La solicitud no está cerrada." };
+    if (!s) return fin({ ok: false, detalle: "La solicitud no existe.", aviso: "La solicitud no existe." });
+    if (s.estado !== "cancelada" && s.estado !== "sin_unidad") return fin({ detalle: "La solicitud no está cerrada." });
     const pct = s.estado === "sin_unidad" ? 100 : num(s.devolucion_pct);
-    if (pct == null) return { ok: true, id: null, creado: false, detalle: "Todavía no se decidió la devolución." };
+    if (pct == null) return fin({ detalle: "Todavía no se decidió la devolución." });
     const cc = await contextoCotizacion(sb, s.cotizacion_id);
     const tramos = await tramosDeCotizacion(sb, s.cotizacion_id);
     const pagos = await pagosDeSolicitud(sb, s, tramos.map((t) => t.id));
     const { cobrado } = dineroDeSolicitud(pagos, cc.moneda);
     const aDevolver = devolucionDecidida(cobrado, pct);
-    const armado = filaFacturaCargo({
-      solicitudId: s.id, cotizacion: { id: cc.fila.id, numero: cc.numero, moneda: cc.fila.moneda, tipo_cambio: cc.fila.tipo_cambio },
-      cliente: cc.cliente ? { id: cc.cliente.id, ruc: cc.cliente.ruc } : null, reservaId: s.reserva_id ?? null,
-      cobrado, devuelto: aDevolver, hoy: fechaLima(ahoraDe(deps)), servicio: { fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida },
-    });
-    if (!armado) return { ok: true, id: null, creado: false, detalle: "No se retiene nada: no hace falta comprobante." };
-    const marca = `${marcaCargoReserva(s.id)}:`;
-    const { data: previa, error: ePrev } = await sb.from("facturas").select("id").eq("cotizacion_id", cc.fila.id).ilike("observaciones", `%${marca}%`).limit(1);
-    if (ePrev) throw new Error(`No se pudo buscar el comprobante del cargo: ${ePrev.message}`);
-    let id: number;
-    let creado = false;
-    if ((previa ?? []).length) id = Number(previa[0].id);
-    else {
-      const { data: ins, error: eIns } = await sb.from("facturas").insert(armado.fila).select("id").single();
-      if (eIns || !ins) throw new Error(`No se pudo crear el comprobante del cargo: ${msg(eIns)}`);
-      id = Number(ins.id); creado = true;
+    const retenido = cargoRetenido({ cobrado, devuelto: aDevolver });
+    const actual = await cargoDeSolicitud(sb, s, cc.fila.id);
+    const fila = actual.fila;
+    const notas = fila && !cargoEditable(fila) ? await notasCreditoDe(sb, fila) : 0;
+    const j = juzgarCargo({ retenido, actual: fila, notasCredito: notas, moneda: cc.moneda });
+    // Sin reservas-09d el comprobante se encontró por un TEXTO de sus observaciones, que cualquier
+    // sesión puede escribir: sirve para no crear otro, pero el servidor no lo reescribe, ni lo anula,
+    // ni lo ata (sería tocar la factura que eligió otra persona).
+    if ("por" in actual && actual.por === "marca") {
+      const aviso = `Hay un comprobante del cargo en Facturación (#${fila!.id}), pero sin supabase/reservas-09d-cargo-solicitud.sql el ERP no lo recalcula ni lo ata: corre ese SQL o revísalo a mano en /facturacion.`;
+      return fin({ id: fila!.id, codigo: j.codigo === "al_dia" ? "al_dia" : j.codigo, detalle: aviso, aviso: j.codigo === "al_dia" ? null : aviso });
     }
-    const { data: up, error: eUp } = await sb.from(TABLA_SOLICITUDES).update({ factura_cargo_id: id }).eq("id", s.id).is("factura_cargo_id", null).select("id");
-    if (eUp && eUp.code !== "23505") throw new Error(`No se pudo atar el comprobante del cargo a la solicitud: ${eUp.message}`);
-    if (!(up ?? []).length) {
+    const datosMarca = { solicitudId: s.id, cobrado, devuelto: aDevolver, retenido, moneda: cc.moneda };
+
+    /** Ata el comprobante a la solicitud si todavía no lo está (UPDATE condicional). */
+    const atar = async (id: number): Promise<number> => {
+      if (Number(s.factura_cargo_id) === id) return id;
+      const { data: up, error: eUp } = await sb.from(TABLA_SOLICITUDES).update({ factura_cargo_id: id }).eq("id", s.id).is("factura_cargo_id", null).select("id");
+      if (eUp && eUp.code !== "23505") throw new Error(`No se pudo atar el comprobante del cargo a la solicitud: ${eUp.message}`);
+      if ((up ?? []).length) return id;
       const otra = await leerSolicitud(sb, s.id);
-      if (otra?.factura_cargo_id && otra.factura_cargo_id !== id) {
-        if (creado) { try { await sb.from("facturas").delete().eq("id", id); } catch { /* queda una fila sin número: la marca la delata */ } }
-        return { ok: true, id: otra.factura_cargo_id, creado: false, detalle: "Otra llamada creó el comprobante del cargo a la vez." };
+      return otra?.factura_cargo_id ? Number(otra.factura_cargo_id) : id;
+    };
+
+    switch (j.codigo) {
+      case "nada":
+        return fin({ codigo: j.codigo, detalle: j.detalle });
+      case "al_dia":
+      case "anulado":
+        return fin({ id: await atar(fila!.id), codigo: j.codigo, detalle: j.detalle });
+      case "ajustar_emitido":
+        return fin({ id: await atar(fila!.id), codigo: j.codigo, detalle: j.detalle, aviso: j.detalle });
+      case "actualizar": {
+        const patch = patchCargoRecalculado(fila!, datosMarca);
+        const { data: up, error } = await sb.from("facturas").update(patch).eq("id", fila!.id).is("numero", null).eq("estado", "pendiente").select("id");
+        if (error) throw new Error(`No se pudo recalcular el comprobante del cargo: ${error.message}`);
+        const id = await atar(fila!.id);
+        if (!(up ?? []).length) {
+          const aviso = "El comprobante del cargo se emitió (o cambió) mientras se recalculaba: revísalo en /facturacion.";
+          return fin({ id, codigo: j.codigo, detalle: aviso, aviso });
+        }
+        return fin({ id, codigo: j.codigo, detalle: `${j.detalle} Quedó en ${r2(retenido)} ${cc.moneda}.` });
+      }
+      case "retirar": {
+        const obs = `${String(fila!.observaciones ?? "").trim()} Retirado por el ERP: ya no se retiene nada de la solicitud #${s.id}.`.trim();
+        let patch: Record<string, unknown> = { estado: "anulada", observaciones: obs, reserva_solicitud_id: null };
+        let r = await sb.from("facturas").update(patch).eq("id", fila!.id).is("numero", null).eq("estado", "pendiente").select("id");
+        if (r.error && faltaColumna(r.error, "reserva_solicitud_id")) {
+          const { reserva_solicitud_id: _q, ...sin } = patch; void _q; patch = sin;
+          r = await sb.from("facturas").update(patch).eq("id", fila!.id).is("numero", null).eq("estado", "pendiente").select("id");
+        }
+        if (r.error) throw new Error(`No se pudo retirar el comprobante del cargo: ${r.error.message}`);
+        if (!(r.data ?? []).length) {
+          const aviso = "El comprobante del cargo se emitió (o cambió) mientras se retiraba: revísalo en /facturacion.";
+          return fin({ id: fila!.id, codigo: j.codigo, detalle: aviso, aviso });
+        }
+        await sb.from(TABLA_SOLICITUDES).update({ factura_cargo_id: null }).eq("id", s.id).eq("factura_cargo_id", fila!.id);
+        return fin({ id: null, codigo: j.codigo, detalle: j.detalle });
+      }
+      case "crear": {
+        const armado = filaFacturaCargo({
+          solicitudId: s.id, cotizacion: { id: cc.fila.id, numero: cc.numero, moneda: cc.fila.moneda, tipo_cambio: cc.fila.tipo_cambio },
+          cliente: cc.cliente ? { id: cc.cliente.id, ruc: cc.cliente.ruc } : null, reservaId: s.reserva_id ?? null,
+          cobrado, devuelto: aDevolver, hoy: fechaLima(ahoraDe(deps)), servicio: { fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida },
+        });
+        if (!armado) return fin({ codigo: "nada", detalle: "No se retiene nada: no hace falta comprobante." });
+        const conCol = !("conColumna" in actual) || actual.conColumna;
+        let ins = await sb.from("facturas").insert(conCol ? { ...armado.fila, reserva_solicitud_id: s.id } : armado.fila).select("id").single();
+        if (ins.error && conCol && faltaColumna(ins.error, "reserva_solicitud_id")) ins = await sb.from("facturas").insert(armado.fila).select("id").single();
+        if (ins.error && ins.error.code === "23505") {
+          // Otra llamada lo creó a la vez (índice único de reservas-09d): se toma el suyo.
+          const ganador = await cargoDeSolicitud(sb, s, cc.fila.id);
+          if (ganador.fila) return fin({ id: await atar(ganador.fila.id), codigo: "al_dia", detalle: "Otra llamada creó el comprobante del cargo a la vez." });
+        }
+        if (ins.error || !ins.data) throw new Error(`No se pudo crear el comprobante del cargo: ${msg(ins.error)}`);
+        const id = Number(ins.data.id);
+        const atado = await atar(id);
+        if (atado !== id) {
+          // Sin el índice (base sin reservas-09d) dos llamadas pueden crear dos: se borra el propio.
+          try { await sb.from("facturas").delete().eq("id", id); } catch { /* queda una fila sin número: la marca la delata */ }
+          return fin({ id: atado, codigo: "al_dia", detalle: "Otra llamada creó el comprobante del cargo a la vez." });
+        }
+        return fin({ id, creado: true, codigo: j.codigo, detalle: `Comprobante del cargo creado (sin número): retenido ${r2(armado.total)} ${cc.moneda}.` });
       }
     }
-    return { ok: true, id, creado, detalle: creado ? `Comprobante del cargo creado (sin número): retenido ${r2(armado.total)} ${cc.moneda}.` : "El comprobante del cargo ya existía." };
   } catch (e) {
     const causa = seguro(e, "asegurarComprobanteCargo", "");
-    return { ok: false, id: null, creado: false, detalle: `El comprobante del cargo no se creó: créalo en /facturacion.${causa ? ` (${causa})` : ""}` };
+    const aviso = `El comprobante del cargo no se pudo poner al día: revísalo en /facturacion.${causa ? ` (${causa})` : ""}`;
+    return { ok: false, id: null, creado: false, codigo: null, detalle: aviso, aviso };
   }
+}
+
+/** Las cancelaciones cerradas que se miran en el tick (por si su cargo quedó viejo). NO medido. */
+const DIAS_CARGOS_TICK = 60;
+const MAX_CARGOS_TICK = 40;
+
+/**
+ * El tick (cada 10 min): pone al día el comprobante del cargo de las cancelaciones con devolución
+ * parcial de estos días — un cobro anulado en Finanzas no pasa por la tarjeta, y su cargo quedaría
+ * con el importe viejo. Best-effort: nunca lanza; devuelve cuántas miró y cuántas cambió.
+ */
+export async function sincronizarCargosDeCancelaciones(sb: Sb, deps: DepsReserva = {}): Promise<{ miradas: number; cambiadas: number; avisos: string[] }> {
+  const out = { miradas: 0, cambiadas: 0, avisos: [] as string[] };
+  try {
+    const desde = new Date(ahoraDe(deps) - DIAS_CARGOS_TICK * 86_400_000).toISOString();
+    const { data, error } = await sb.from(TABLA_SOLICITUDES).select("id").eq("estado", "cancelada").lt("devolucion_pct", 100).gte("cerrada_en", desde).order("cerrada_en", { ascending: false }).order("id", { ascending: false }).limit(MAX_CARGOS_TICK);
+    if (error) { out.avisos.push(`No se pudieron leer las cancelaciones: ${error.message}`); return out; }
+    for (const f of (data ?? []) as { id: number }[]) {
+      out.miradas++;
+      const r = await asegurarComprobanteCargo(sb, Number(f.id), deps);
+      if (r.creado || r.codigo === "actualizar" || r.codigo === "retirar") out.cambiadas++;
+      if (!r.ok && r.aviso) out.avisos.push(`#${f.id}: ${r.aviso}`);
+    }
+  } catch (e) { out.avisos.push(seguro(e, "sincronizarCargosDeCancelaciones")); }
+  return out;
 }
 
 /** «Cerrar» (duplicada, el cliente desistió, decisión del ejecutivo). Sin cobros, sin reserva viva y sin un pago reportado sin resolver. */
@@ -1847,8 +2009,9 @@ export async function registrarAdelantoSolicitud(sb: Sb, c: Cadena, cuerpo: Reco
   } catch { /* el cobro quedó; el control de tope lo vuelve a hacer el siguiente registro */ }
   const avisos: string[] = [];
   if (s.estado === "cancelada" || s.estado === "sin_unidad") {
+    // Un cobro que entra después de la cancelación cambia lo retenido: el cargo se pone al día.
     const cargo = await asegurarComprobanteCargo(sb, s.id, deps);
-    if (!cargo.ok) avisos.push(cargo.detalle);
+    if (cargo.aviso) avisos.push(cargo.aviso);
   }
   await nota(sb, s.crm_conversacion_id, `🏦 ${quien.nombre ?? "Tesorería"} registró el adelanto ${r.codigo ?? `#${r.id}`}: ${v.monto.toFixed(2)} ${cc.moneda} (${v.metodo ?? "sin medio"}${v.referencia ? ` · op. ${v.referencia}` : ""}) de la solicitud #${s.id}.`);
   return res("ok", `Adelanto registrado (${r.codigo ?? `#${r.id}`}).`, { estado: s.estado, avisos });
@@ -1910,9 +2073,9 @@ export async function registrarDevolucionSolicitud(sb: Sb, c: Cadena, cuerpo: Re
     }
   } catch { /* la devolución quedó */ }
   const avisos: string[] = [];
-  if (cargoRetenido({ cobrado, devuelto: aDevolver }) > 0) {
+  {
     const cargo = await asegurarComprobanteCargo(sb, s.id, deps);
-    if (!cargo.ok) avisos.push(cargo.detalle);
+    if (cargo.aviso) avisos.push(cargo.aviso);
   }
   await nota(sb, s.crm_conversacion_id, `🏦 ${quien.nombre ?? "Tesorería"} registró la devolución ${r.codigo ?? `#${r.id}`}: ${v.monto.toFixed(2)} ${cc.moneda} de la solicitud #${s.id}.`);
   await cerrarAccionSiCorresponde(sb, s.id, deps);

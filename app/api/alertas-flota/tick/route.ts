@@ -42,6 +42,7 @@ import {
   notaConCierre, notaVencida, paramsDevolucion, paramsSinConfirmar,
 } from "@/lib/traslados/reserva-alertas";
 import { cerrarSolicitudVencida, leerHechosAlertasReserva } from "@/lib/traslados/reserva-alertas-datos";
+import { sincronizarCargosDeCancelaciones } from "@/lib/traslados/reserva-solicitud-datos";
 import { normalizarConfigReserva } from "@/lib/traslados/reserva-pago";
 import { plazosDe } from "@/lib/traslados/reserva-orden";
 
@@ -1353,6 +1354,17 @@ async function handler(req: NextRequest) {
           res.reserva_vencidas_cerradas = cerradas;
           if (conDinero) res.reserva_vencidas_con_dinero = conDinero;
           if (conReserva) res.reserva_vencidas_con_reserva = conReserva;
+
+          // Y el comprobante del cargo de las cancelaciones con devolución parcial, al día con el dinero:
+          // un cobro anulado en Finanzas no pasa por la tarjeta (mientras no tenga número se recalcula;
+          // uno emitido no se toca y la tarjeta pide la nota de crédito).
+          const cargos = await sincronizarCargosDeCancelaciones(admin, { ahoraMs: () => ahoraMs });
+          if (cargos.miradas) res.reserva_cargos_mirados = cargos.miradas;
+          if (cargos.cambiadas) res.reserva_cargos_al_dia = cargos.cambiadas;
+          if (cargos.avisos.length) {
+            console.warn("[alertas-flota/tick] cargo de cancelación:", cargos.avisos.join(" · "));
+            res.reserva_cargos_con_aviso = cargos.avisos.length;
+          }
         }
       } catch (e) {
         // Un extra: si falla, el resto del tick ya corrió y su respuesta lo dice.

@@ -334,7 +334,7 @@ export function cargoRetenido(x: { cobrado: number; devuelto: number }): number 
 export type CodigoPendiente =
   | "pagar" | "confirmar_disponibilidad" | "verificar_pago" | "completar_adelanto" | "vincular_cliente"
   | "emitir_confirmacion" | "enviar_confirmacion" | "cancelar_en_programacion" | "registrar_devolucion"
-  | "emitir_cargo" | "resolver_cancelacion" | "crear_reserva";
+  | "emitir_cargo" | "ajustar_cargo" | "resolver_cancelacion" | "crear_reserva";
 
 export type QuienPendiente = "cliente" | "crm" | "tesoreria" | "programacion" | "facturacion";
 
@@ -352,6 +352,31 @@ export type SolicitudVista = {
   /** Comprobantes que el cliente mandó por el chat (registrados en la solicitud). */
   comprobantes?: number | null;
 };
+
+/** El comprobante del cargo como lo ve `queFalta`. */
+export type CargoParaQueFalta = {
+  id: number; numero: string | null; serie?: string | null;
+  total?: number | null; estado?: string | null; sunat_estado?: string | null;
+  /** La suma de las notas de crédito vivas que ya lo referencian. */
+  notasCredito?: number | null;
+};
+
+/** Lo pendiente del comprobante del cargo con lo retenido de hoy (Facturación). */
+function pendientesDelCargo(retenido: number, cargo: CargoParaQueFalta | null, mon: Moneda): Pendiente[] {
+  if (!cargo) {
+    return retenido > 0 ? [{ codigo: "emitir_cargo", quien: "facturacion", detalle: "Falta el comprobante del cargo retenido: no se llegó a crear. Créalo en /facturacion." }] : [];
+  }
+  const sinNumero: Pendiente = { codigo: "emitir_cargo", quien: "facturacion", detalle: "El comprobante del cargo retenido está creado sin número: emítelo ante SUNAT y escribe su serie y número en /facturacion." };
+  if (cargo.total === undefined) return retenido > 0 && !txt(cargo.numero) ? [sinNumero] : [];
+  const j = juzgarCargo({ retenido, actual: { id: cargo.id, serie: cargo.serie, numero: cargo.numero, total: cargo.total, estado: cargo.estado, sunat_estado: cargo.sunat_estado }, notasCredito: cargo.notasCredito, moneda: mon });
+  switch (j.codigo) {
+    case "al_dia": return cargoEditable({ numero: cargo.numero, estado: cargo.estado, sunat_estado: cargo.sunat_estado }) && retenido > 0 ? [sinNumero] : [];
+    case "actualizar": return [{ codigo: "emitir_cargo", quien: "facturacion", detalle: `${j.detalle} El ERP lo recalcula solo (al registrar un cobro o una devolución, y en la revisión de cada 10 minutos); después, emítelo ante SUNAT y escribe su serie y número en /facturacion.` }];
+    case "retirar": return [{ codigo: "ajustar_cargo", quien: "facturacion", detalle: `${j.detalle} El ERP lo deja anulado solo (en la próxima acción o en la revisión de cada 10 minutos): no lo emitas.` }];
+    case "ajustar_emitido": return [{ codigo: "ajustar_cargo", quien: "facturacion", detalle: j.detalle }];
+    default: return [];
+  }
+}
 
 const SIN_TC_DETALLE = "El adelanto no se puede calcular (la cotización en dólares no tiene un tipo de cambio válido): corrígela en /cotizaciones.";
 
@@ -371,7 +396,11 @@ export function queFalta(
     confirmacionEnviada: boolean;
     /** Ya se emitió (al menos una versión) la Confirmación de Reserva. Sin el dato, = `confirmacionEnviada`. */
     confirmacionEmitida?: boolean;
-    cargo: { id: number; numero: string | null } | null;
+    /**
+     * El comprobante del cargo. Con `total` (lo que lee el servidor) se juzga si sigue al día
+     * (`juzgarCargo`); sin él, solo si tiene número (como antes).
+     */
+    cargo: CargoParaQueFalta | null;
     /** Para escribir los importes en el detalle. Sin ella, soles. */
     moneda?: Moneda;
   },
@@ -389,17 +418,17 @@ export function queFalta(
     if (cobrado > 0) {
       const pct = s.estado === "sin_unidad" ? 100 : s.devolucion_pct;
       if (pct == null || !Number.isFinite(Number(pct))) {
-        out.push({ codigo: "resolver_cancelacion", quien: "crm", detalle: `Hay ${dinero(cobrado, mon)} cobrados: elige cuánto se devuelve según las políticas de reserva y cancelación.` });
+        out.push({ codigo: "resolver_cancelacion", quien: "tesoreria", detalle: `Hay ${dinero(cobrado, mon)} cobrados: elige cuánto se devuelve según las políticas de reserva y cancelación.` });
       } else {
         const aDevolver = devolucionDecidida(cobrado, Number(pct));
         if (devuelto + 0.005 < aDevolver) {
           out.push({ codigo: "registrar_devolucion", quien: "tesoreria", detalle: `Falta devolver ${dinero(aDevolver - devuelto, mon)} (de ${dinero(aDevolver, mon)}): transfiérelo y regístralo como devolución.` });
         }
-        if (cargoRetenido({ cobrado, devuelto: aDevolver }) > 0) {
-          if (!x.cargo) out.push({ codigo: "emitir_cargo", quien: "facturacion", detalle: "Falta el comprobante del cargo retenido: no se llegó a crear. Créalo en /facturacion." });
-          else if (!txt(x.cargo.numero)) out.push({ codigo: "emitir_cargo", quien: "facturacion", detalle: "El comprobante del cargo retenido está creado sin número: emítelo ante SUNAT y escribe su serie y número en /facturacion." });
-        }
+        out.push(...pendientesDelCargo(cargoRetenido({ cobrado, devuelto: aDevolver }), x.cargo, mon));
       }
+    } else if (x.cargo && x.cargo.total !== undefined) {
+      // Sin cobros ya no se retiene nada: un comprobante que quedó de antes se retira o se ajusta.
+      out.push(...pendientesDelCargo(0, x.cargo, mon));
     }
     return out;
   }
@@ -407,7 +436,7 @@ export function queFalta(
   // Abiertas.
   const vence = s.confirmar_antes_de ?? null;
   if (txt(s.cancelacion_pedida_en)) {
-    out.push({ codigo: "resolver_cancelacion", quien: "crm", detalle: "El cliente pidió cancelar: decide cuánto se devuelve según las políticas y las horas de anticipación." });
+    out.push({ codigo: "resolver_cancelacion", quien: "tesoreria", detalle: "El cliente pidió cancelar: decide cuánto se devuelve según las políticas y las horas de anticipación." });
     return out;
   }
   const credito = s.adelanto_pct == null;
@@ -420,7 +449,7 @@ export function queFalta(
     if (reportado) return { codigo: "verificar_pago", quien: "tesoreria", detalle: "El cliente reportó un pago: verifícalo en el banco y regístralo como adelanto. No lo registres sin ver el dinero en la cuenta." };
     return { codigo: "pagar", quien: "cliente", detalle: `Esperando el adelanto de ${dinero(adelanto, mon)}.` };
   };
-  const confirmar: Pendiente = { codigo: "confirmar_disponibilidad", quien: "crm", detalle: "Confirma si hay una unidad disponible («Hay unidad» / «No hay unidad»).", vence };
+  const confirmar: Pendiente = { codigo: "confirmar_disponibilidad", quien: "programacion", detalle: "Confirma si hay una unidad disponible («Hay unidad» / «No hay unidad»).", vence };
 
   if (s.estado === "esperando_pago") {
     out.push(pagado ? confirmar : pagoPendiente());
@@ -437,7 +466,7 @@ export function queFalta(
     return out;
   }
   // confirmada
-  if (!x.reserva) out.push({ codigo: "crear_reserva", quien: "crm", detalle: "La reserva no se llegó a crear en Programación: vuelve a pulsar «Hay unidad» o créala desde /cotizaciones (→ Res.)." });
+  if (!x.reserva) out.push({ codigo: "crear_reserva", quien: "programacion", detalle: "La reserva no se llegó a crear en Programación: vuelve a pulsar «Hay unidad» o créala desde /cotizaciones (→ Res.)." });
   if (!pagado) out.push(pagoPendiente());
   if (x.reserva && x.reserva.cliente_id == null) out.push({ codigo: "vincular_cliente", quien: "crm", detalle: "La reserva no tiene cliente del ERP: vincúlalo al contacto (la Confirmación de Reserva lo exige)." });
   if (pagado && x.reserva && x.reserva.cliente_id != null) {
@@ -589,6 +618,158 @@ export function filaFacturaCargo(x: {
       items_json: [{ descripcion, cantidad: 1, precio_unit: total, total }],
       observaciones: notas.join(" "),
     },
+  };
+}
+
+// ── 7b. El cargo se RECALCULA mientras no tenga número ───────────────────────
+//
+// Antes el comprobante del cargo se creaba UNA vez y quedaba con el importe de ese momento: un cobro
+// registrado después (o uno anulado en Finanzas) lo dejaba diciendo otra cosa que el dinero. Ahora:
+//   · SIN número (un borrador que armó el ERP): se recalcula; si ya no se retiene nada, se retira
+//     (queda «anulada» y se desata de la solicitud);
+//   · CON número (emitido ante SUNAT) o en otro estado que «pendiente»: NO se toca nunca. Si el
+//     importe ya no corresponde, lo que falta es una nota de crédito (o un comprobante por la
+//     diferencia si sube), y eso lo hace Facturación;
+//   · «anulada» por una persona: el ERP no la recrea ni la juzga.
+// Las notas de crédito que ya la referencian («F001-25») se descuentan antes de comparar.
+
+/** El comprobante del cargo como lo lee el servidor (`facturas`). */
+export type FacturaCargoActual = {
+  id: number;
+  serie?: string | null;
+  numero?: string | null;
+  subtotal?: number | string | null;
+  igv?: number | string | null;
+  total?: number | string | null;
+  estado?: string | null;
+  sunat_estado?: string | null;
+  observaciones?: string | null;
+  items_json?: unknown;
+};
+
+/** ¿Es un borrador del ERP (sin número, «pendiente» y sin enviar a SUNAT)? Solo esos se recalculan. */
+export function cargoEditable(f: Pick<FacturaCargoActual, "numero" | "estado" | "sunat_estado"> | null | undefined): boolean {
+  if (!f) return false;
+  if (txt(f.numero)) return false;
+  if (txt(f.estado || "pendiente") !== "pendiente") return false;
+  const sunat = txt(f.sunat_estado || "pendiente");
+  return sunat === "pendiente";
+}
+
+/** «F001-25» desde serie y número (sin espacios, en mayúsculas, el número sin ceros a la izquierda). null sin número. */
+export function referenciaComprobante(serie: unknown, numero: unknown): string | null {
+  const n = txt(numero).replace(/\s+/g, "").toUpperCase().replace(/^0+(?=\d)/, "");
+  if (!n) return null;
+  const s = txt(serie).replace(/\s+/g, "").toUpperCase();
+  return s ? `${s}-${n}` : n;
+}
+
+/** ¿La referencia que escribió Facturación en una nota de crédito es este comprobante? */
+/** Más largo que esto no es una referencia «F001-00025»: no se evalúa (texto que cualquier sesión escribe). */
+const MAX_REF = 40;
+
+export function mismaReferencia(ref: unknown, serie: unknown, numero: unknown): boolean {
+  const esta = referenciaComprobante(serie, numero);
+  if (!esta) return false;
+  const crudo = String(ref ?? "");
+  if (crudo.length > MAX_REF * 2) return false;
+  const r = crudo.replace(/\s+/g, "").toUpperCase();
+  if (!r || r.length > MAX_REF) return false;
+  const m = /^([A-Z0-9]+)-(\d+)$/.exec(r);
+  const otra = m ? `${m[1]}-${m[2].replace(/^0+(?=\d)/, "")}` : r.replace(/^0+(?=\d)/, "");
+  return otra === esta;
+}
+
+export type CodigoCargo =
+  /** No se retiene nada y no hay comprobante. */
+  | "nada"
+  /** Se retiene algo y no hay comprobante: se crea. */
+  | "crear"
+  /** El comprobante (o lo que queda tras sus notas de crédito) dice lo que corresponde. */
+  | "al_dia"
+  /** Una persona lo anuló en Facturación: el ERP no lo recrea. */
+  | "anulado"
+  /** Borrador con otro importe: se recalcula. */
+  | "actualizar"
+  /** Borrador y ya no se retiene nada: se retira. */
+  | "retirar"
+  /** Emitido con otro importe: hace falta una nota de crédito (baja) o un comprobante por la diferencia (sube). */
+  | "ajustar_emitido";
+
+export type JuicioCargo = { codigo: CodigoCargo; antes: number | null; ahora: number; diferencia: number; detalle: string };
+
+/**
+ * Qué pasa con el comprobante del cargo, con lo retenido de HOY. `notasCredito`: la suma de las notas
+ * de crédito vivas que ya lo referencian (solo cuenta en uno emitido).
+ */
+export function juzgarCargo(x: { retenido: number; actual: FacturaCargoActual | null; notasCredito?: number | null; moneda?: Moneda }): JuicioCargo {
+  const mon = normalizarMoneda(x.moneda);
+  const ahora = Math.max(0, r2(Number(x.retenido) || 0));
+  const a = x.actual;
+  if (!a) {
+    return ahora > 0
+      ? { codigo: "crear", antes: null, ahora, diferencia: ahora, detalle: `Se retienen ${dinero(ahora, mon)}: falta su comprobante.` }
+      : { codigo: "nada", antes: null, ahora, diferencia: 0, detalle: "No se retiene nada: no hace falta comprobante." };
+  }
+  if (txt(a.estado) === "anulada") return { codigo: "anulado", antes: null, ahora, diferencia: 0, detalle: "El comprobante del cargo está anulado en Facturación: el ERP no lo recrea." };
+  const total = num(a.total) ?? r2((num(a.subtotal) ?? 0) + (num(a.igv) ?? 0));
+  const editable = cargoEditable(a);
+  const neto = editable ? total : r2(total - Math.max(0, Number(x.notasCredito) || 0));
+  const diferencia = r2(ahora - neto);
+  if (Math.abs(diferencia) < 0.005) return { codigo: "al_dia", antes: neto, ahora, diferencia: 0, detalle: `El comprobante del cargo dice ${dinero(ahora, mon)}, lo que corresponde.` };
+  if (editable) {
+    return ahora > 0
+      ? { codigo: "actualizar", antes: total, ahora, diferencia, detalle: `El borrador del cargo decía ${dinero(total, mon)} y ahora corresponde ${dinero(ahora, mon)}: se recalcula.` }
+      : { codigo: "retirar", antes: total, ahora, diferencia, detalle: `Ya no se retiene nada: el borrador del cargo de ${dinero(total, mon)} se retira.` };
+  }
+  const ref = referenciaComprobante(a.serie, a.numero) ?? `#${a.id}`;
+  const detalle = diferencia < 0
+    ? `El comprobante del cargo ${ref} ya está emitido por ${dinero(neto, mon)} y ahora corresponde ${dinero(ahora, mon)}: emite una nota de crédito por ${dinero(-diferencia, mon)} en /facturacion (con la referencia ${ref}).`
+    : `El comprobante del cargo ${ref} ya está emitido por ${dinero(neto, mon)} y ahora corresponde ${dinero(ahora, mon)}: emite un comprobante por la diferencia de ${dinero(diferencia, mon)} en /facturacion.`;
+  return { codigo: "ajustar_emitido", antes: neto, ahora, diferencia, detalle };
+}
+
+/**
+ * Las observaciones del borrador con la línea de la marca puesta al día (la que escribe
+ * `filaFacturaCargo`); lo demás que tenga, una persona incluida, se conserva. Sin la línea, se agrega.
+ */
+export function observacionesConMarca(actual: unknown, x: { solicitudId: number | string; cobrado: number; devuelto: number; retenido: number; moneda: Moneda }): string {
+  const linea = `${marcaCargoReserva(x.solicitudId)}: cobrado ${dinero(x.cobrado, x.moneda)}, devuelto ${dinero(x.devuelto, x.moneda)}, retenido ${dinero(x.retenido, x.moneda)}.`;
+  const obs = String(actual ?? "").trim();
+  // Sin expresiones regulares: las observaciones las puede escribir cualquier sesión, y una regex con
+  // varios `.*?` sobre un texto armado a propósito tarda segundos (auditoría del 23-10-2026). Se busca
+  // el inicio de la línea y su primer punto seguido de un espacio (o del fin): los importes llevan su
+  // punto decimal seguido de una cifra, así que no lo cortan.
+  if (obs.length > MAX_OBS_REESCRIBIR) return `${obs} ${linea}`;
+  const ini = obs.indexOf(`${marcaCargoReserva(x.solicitudId)}: cobrado `);
+  if (ini < 0) return obs ? `${obs} ${linea}` : linea;
+  let fin = -1;
+  for (let i = ini; i < obs.length; i++) {
+    if (obs[i] === "." && (i + 1 === obs.length || /\s/.test(obs[i + 1]))) { fin = i + 1; break; }
+  }
+  if (fin < 0) return `${obs} ${linea}`;
+  return `${obs.slice(0, ini)}${linea}${obs.slice(fin)}`;
+}
+
+/** Más largo que esto no se reescribe por dentro: se agrega la línea al final (operativo, NO medido). */
+const MAX_OBS_REESCRIBIR = 4000;
+
+/**
+ * El patch de un borrador que se recalcula. Si Facturación ya repartió el total en base e IGV, el
+ * reparto se conserva en la misma proporción; si no, todo va en la base (como lo arma el ERP).
+ */
+export function patchCargoRecalculado(actual: FacturaCargoActual, x: { solicitudId: number | string; cobrado: number; devuelto: number; retenido: number; moneda: Moneda }): Record<string, unknown> {
+  const total = Math.max(0, r2(Number(x.retenido) || 0));
+  const igvAntes = num(actual.igv) ?? 0;
+  const totalAntes = num(actual.total) ?? r2((num(actual.subtotal) ?? 0) + igvAntes);
+  const igv = igvAntes !== 0 && totalAntes > 0 ? r2((total * igvAntes) / totalAntes) : 0;
+  const items = Array.isArray(actual.items_json) ? (actual.items_json as Record<string, unknown>[]) : [];
+  const base = items[0] && typeof items[0] === "object" ? items[0] : { descripcion: "Cargo por cancelación de la reserva de traslado", cantidad: 1 };
+  return {
+    subtotal: r2(total - igv),
+    igv,
+    items_json: [{ ...base, cantidad: 1, precio_unit: total, total }],
+    observaciones: observacionesConMarca(actual.observaciones, x),
   };
 }
 

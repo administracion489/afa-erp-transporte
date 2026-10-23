@@ -232,6 +232,9 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
         for (const p of lista) {
           const fila: Fila = { ...p };
           if (tabla === "facturas" && "total" in fila) return { data: null, error: { code: "428C9", message: 'cannot insert a non-DEFAULT value into column "total"' } };
+          // uq_facturas_reserva_solicitud (reservas-09d): un comprobante de cargo vivo por solicitud.
+          if (tabla === "facturas" && fila.reserva_solicitud_id != null && filas.some((x) => x.reserva_solicitud_id === fila.reserva_solicitud_id))
+            return { data: null, error: { code: "23505", message: 'duplicate key value violates unique constraint "uq_facturas_reserva_solicitud"' } };
           if (tabla === "reserva_solicitudes" && ["esperando_pago", "por_confirmar", "pago_reportado", "confirmada"].includes(fila.estado)
             && filas.some((x) => x.cotizacion_id === fila.cotizacion_id && ["esperando_pago", "por_confirmar", "pago_reportado", "confirmada"].includes(x.estado)))
             return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint \"uq_reserva_solicitudes_viva\"" } };
@@ -254,7 +257,11 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
       }
       let sel = filas.filter((f) => this.filtros.every((p) => p(f)));
       if (this.op === "update") {
-        for (const f of sel) { Object.assign(f, this.payload); if (tabla === "reserva_solicitudes") f.actualizada_en = ahora; }
+        for (const f of sel) {
+          Object.assign(f, this.payload);
+          if (tabla === "reserva_solicitudes") f.actualizada_en = ahora;
+          if (tabla === "facturas") f.total = Number(f.subtotal ?? 0) + Number(f.igv ?? 0);
+        }
         return this.ret ? this.resultado(sel) : { data: null, error: null };
       }
       if (this.op === "delete") { sb.tablas[tabla] = filas.filter((f) => !sel.includes(f)); return { data: null, error: null }; }
@@ -459,9 +466,80 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     // Aunque la solicitud perdiera el enlace, la marca en las observaciones lo encuentra.
     solDe(e.cotId).factura_cargo_id = null;
     const otra2 = await D.asegurarComprobanteCargo(sb, s.id, deps);
-    t("9c: sin el enlace, la marca evita el duplicado y lo vuelve a atar", otra2.ok && !otra2.creado && otra2.id === cargo[0].id && sb.t("facturas").filter((f) => f.cotizacion_id === e.cotId).length === 1 && solDe(e.cotId).factura_cargo_id === cargo[0].id);
+    t("9c: sin el enlace, la factura atada a la solicitud (reservas-09d) evita el duplicado y lo vuelve a atar", otra2.ok && !otra2.creado && otra2.id === cargo[0].id && sb.t("facturas").filter((f) => f.cotizacion_id === e.cotId).length === 1 && solDe(e.cotId).factura_cargo_id === cargo[0].id);
     const v = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
     t("9c: falta devolver el 90 % y emitir el cargo", v.pendientes.some((p) => p.codigo === "registrar_devolucion") && v.pendientes.some((p) => p.codigo === "emitir_cargo") && Math.abs((v.dinero.aDevolver ?? 0) - (adel.adelanto! - retenido)) < 0.01);
+
+    // ── 9e. EL PENDIENTE: el cargo se RECALCULA si entran o se anulan cobros después ──
+    const deCot = () => sb.t("facturas").filter((f) => f.cotizacion_id === e.cotId && !f.es_nota_credito);
+    const rA = await D.registrarAdelantoSolicitud(sb, await tarjeta(e, s.id), { monto: 20, fecha: hoyIso, metodo: "transferencia", referencia: "OP-0003B" }, quien, deps);
+    const ret2 = Math.round((adel.adelanto! + 20) * 10) / 100;
+    const c2 = deCot();
+    t("9e: un cobro registrado DESPUÉS de resolver pone al día el borrador (sin crear otro)", rA.ok && c2.length === 1 && c2[0].id === cargo[0].id && Math.abs(c2[0].total - ret2) < 0.01
+      && String(c2[0].observaciones).includes(`retenido S/ ${ret2.toFixed(2)}`) && !String(c2[0].observaciones).includes(`retenido S/ ${retenido.toFixed(2)}.`));
+    const v2 = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
+    t("9e: la vista ya cuenta lo nuevo: falta devolver y emitir el cargo, sin «ajustar»", v2.pendientes.some((p) => p.codigo === "emitir_cargo") && !v2.pendientes.some((p) => p.codigo === "ajustar_cargo") && Math.abs(v2.dinero.retenido - ret2) < 0.01);
+
+    // Facturación lo emite; después se anula el cobro de 20 en Finanzas: el emitido NO se toca.
+    Object.assign(c2[0], { serie: "F001", numero: "00025", estado: "emitida", sunat_estado: "aceptada" });
+    const extra = sb.t("pagos").find((p) => p.referencia === "OP-0003B")!;
+    extra.anulado = true;
+    const rE = await D.asegurarComprobanteCargo(sb, s.id, deps);
+    t("9e: emitido y ahora corresponde menos → no se toca y pide la nota de crédito", rE.ok && rE.codigo === "ajustar_emitido" && !!rE.aviso && rE.aviso.includes("nota de crédito por S/ 2.00") && Math.abs(deCot()[0].total - ret2) < 0.01);
+    const v3 = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
+    t("9e: la tarjeta lo dice: ajustar_cargo para Facturación", v3.pendientes.some((p) => p.codigo === "ajustar_cargo" && p.quien === "facturacion" && p.detalle.includes("F001-25")));
+    // Una «nota de crédito» sin número, pendiente en SUNAT (o puesta a mano) NO apaga lo que falta.
+    sb.t("facturas").push({ id: ++sb.n, cotizacion_id: e.cotId, cliente_id: c2[0].cliente_id, moneda: "PEN", es_nota_credito: true, nota_credito_ref: "F001-25", subtotal: 2, igv: 0, total: 2, estado: "pendiente", sunat_estado: "pendiente", numero: null, serie: "FC01" });
+    sb.t("facturas").push({ id: ++sb.n, cotizacion_id: e.cotId, cliente_id: 999, moneda: "PEN", es_nota_credito: true, nota_credito_ref: "F001-25", subtotal: 2, igv: 0, total: 2, estado: "emitida", sunat_estado: "aceptada", numero: "00009", serie: "FC01" });
+    const rFalsa = await D.asegurarComprobanteCargo(sb, s.id, deps);
+    t("9e: una nota sin número o de OTRO cliente no cuenta: sigue pidiendo la nota de crédito", rFalsa.codigo === "ajustar_emitido");
+    sb.t("facturas").push({ id: ++sb.n, cotizacion_id: e.cotId, cliente_id: c2[0].cliente_id, moneda: "PEN", es_nota_credito: true, nota_credito_ref: "F001-25", subtotal: 2, igv: 0, total: 2, estado: "emitida", sunat_estado: "aceptada", numero: "00003", serie: "FC01" });
+    const rN = await D.asegurarComprobanteCargo(sb, s.id, deps);
+    const v4 = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
+    t("9e: con la nota de crédito hecha, el cargo queda al día y deja de pedirse", rN.codigo === "al_dia" && !rN.aviso && !v4.pendientes.some((p) => p.codigo === "ajustar_cargo" || p.codigo === "emitir_cargo"));
+  }
+
+  // ── 9f. Sin cobros ya no se retiene nada: el borrador se RETIRA; y el tick lo vuelve a crear si vuelven ──
+  {
+    const e = escenario();
+    const adel = adelantoDeCot(sb.t("cotizaciones").find((c) => c.id === e.cotId) as any, 50)!;
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    let s = solDe(e.cotId);
+    await D.registrarAdelantoSolicitud(sb, await tarjeta(e, s.id), { monto: adel.adelanto, fecha: hoyIso, metodo: "transferencia", referencia: "OP-0009" }, quien, deps);
+    sb.t("crm_mensajes").push({ id: "m-9f-cancela", conversacion_id: e.conv.id, direccion: "entrante", tipo: "texto", contenido: "Cancelo", created_at: new Date(reloj).toISOString() });
+    await D.cancelarIA(ctxDe(e), {}, deps);
+    s = solDe(e.cotId);
+    const rR = await D.resolverCancelacion(sb, await tarjeta(e, s.id), quien, 50, deps);
+    const borr = () => sb.t("facturas").filter((f) => f.cotizacion_id === e.cotId);
+    const id0 = solDe(e.cotId).factura_cargo_id;
+    t("9f: resuelta al 50 % → un borrador del cargo", rR.ok && borr().length === 1 && borr()[0].id === id0 && borr()[0].reserva_solicitud_id === s.id);
+    const cobro = sb.t("pagos").find((p) => p.referencia === "OP-0009")!;
+    cobro.anulado = true;
+    const st = await D.sincronizarCargosDeCancelaciones(sb, deps);
+    const f0 = borr().find((f) => f.id === id0)!;
+    t("9f: el tick: se anuló el cobro → el borrador queda ANULADO y se desata (no se borra)", st.miradas >= 1 && st.cambiadas >= 1 && f0.estado === "anulada" && f0.reserva_solicitud_id == null && solDe(e.cotId).factura_cargo_id == null && String(f0.observaciones).includes("Retirado por el ERP"));
+    const st2 = await D.sincronizarCargosDeCancelaciones(sb, deps);
+    t("9f: otra pasada del tick no crea nada (idempotente)", borr().length === 1 && st2.cambiadas === 0);
+    cobro.anulado = false;
+    await D.sincronizarCargosDeCancelaciones(sb, deps);
+    const vivos = borr().filter((f) => f.estado !== "anulada");
+    t("9f: el cobro vuelve → el tick crea un comprobante NUEVO y lo ata (el anulado queda como está)", vivos.length === 1 && vivos[0].id !== id0 && solDe(e.cotId).factura_cargo_id === vivos[0].id && borr().length === 2);
+  }
+
+  // ── 9g. Dos cálculos a la vez no crean dos borradores (índice único de reservas-09d) ──
+  {
+    const e = escenario();
+    const adel = adelantoDeCot(sb.t("cotizaciones").find((c) => c.id === e.cotId) as any, 50)!;
+    await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    let s = solDe(e.cotId);
+    await D.registrarAdelantoSolicitud(sb, await tarjeta(e, s.id), { monto: adel.adelanto, fecha: hoyIso, metodo: "transferencia", referencia: "OP-0010" }, quien, deps);
+    sb.t("crm_mensajes").push({ id: "m-9g-cancela", conversacion_id: e.conv.id, direccion: "entrante", tipo: "texto", contenido: "Cancelo", created_at: new Date(reloj).toISOString() });
+    await D.cancelarIA(ctxDe(e), {}, deps);
+    s = solDe(e.cotId);
+    Object.assign(solDe(e.cotId), { estado: "cancelada", devolucion_pct: 50, cerrada_en: new Date(reloj).toISOString() });
+    const [a, b] = await Promise.all([D.asegurarComprobanteCargo(sb, s.id, deps), D.asegurarComprobanteCargo(sb, s.id, deps)]);
+    const fs = sb.t("facturas").filter((f) => f.cotizacion_id === e.cotId);
+    t("9g: dos a la vez → un solo comprobante, y los dos devuelven el mismo", fs.length === 1 && a.id === fs[0].id && b.id === fs[0].id && solDe(e.cotId).factura_cargo_id === fs[0].id);
   }
 
   // ── 9d. El ciclo inverso: un cobro por la Confirmación lo ve la solicitud ──

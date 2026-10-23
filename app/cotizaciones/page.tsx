@@ -2313,7 +2313,9 @@ export default function CotizacionesPage(){
   // corre el viejo copiado literal contra el ejecutor). La página solo pregunta, avisa y refresca.
   const convertirAReserva=async(cot:Cotizacion)=>{
     const r=await ejecutarConversion(supabase,cot as unknown as CotParaReserva,{hoy:hoyLima(),confirmar:(t)=>confirm(t)});
-    if(r.mensaje)alert(r.mensaje);
+    // `aviso` va aparte del aviso de siempre: hoy, que se convirtió sin el candado (falta cotizaciones-07).
+    const texto=[r.mensaje,r.aviso?`⚠️ ${r.aviso}`:""].filter(Boolean).join("\n\n");
+    if(texto)alert(texto);
     if(r.refrescar)refrescar();
   };
   const editarCot=(c:Cotizacion)=>{

@@ -6,10 +6,12 @@
 // Barre: aprobada o no, 0 / 1 / N vehículos (propios, tercerizados, sin vehículo), retorno (con
 // lista, por sus extremos, sin hora, fecha anterior, solo ida), completar el retorno de una
 // conversión de antes, USD (con y sin tipo de cambio, aceptando o no), y los fallos de la base
-// (lectura, columna que falta, inserción N, paraderos, enlace).
+// (lectura, columna que falta, inserción N, paraderos, enlace). Al final, el CANDADO de
+// supabase/cotizaciones-07 (lo que comparte «→ Res.» con el «Hay unidad» del CRM): tomado, ocupado,
+// sin la función, con error, y la cotización convertida por otra persona mientras se preguntaba.
 import { filaRetorno, planConversion, type CotParaReserva, type ItemCotReserva } from "../lib/cotizacion-a-reserva";
 import { planRetorno } from "../lib/cotizacion-retorno";
-import { ejecutarConversion } from "../lib/cotizacion-a-reserva-datos";
+import { AVISO_SIN_CANDADO, MENSAJE_CAMBIO, MENSAJE_OCUPADA, ejecutarConversion } from "../lib/cotizacion-a-reserva-datos";
 import { insertarServicioNuevo } from "../lib/reservas-autoseleccion";
 import { sugerirNombreRuta } from "../lib/nombre-ruta";
 import { faltaColumna } from "../lib/columna-faltante";
@@ -328,6 +330,91 @@ t("corolario: salen los avisos de crear, completar, ya convertida y fallos", ["�
   t("falla la primera: «error» sin ids", e.r.codigo === "error" && e.r.idas.length === 0 && e.r.retornos.length === 0);
   const y = await idsCreados(c, { existentes: EXISTENTES.enlazada, atras: false });
   t("ya convertida: no crea nada", y.r.codigo === "ya_convertida" && y.insertados.length === 0);
+}
+
+// ── El candado: «→ Res.» y «Hay unidad» a la vez sobre la misma cotización ────────
+// La base falsa de arriba no llama funciones (sin `rpc`): ahí el ejecutor convierte como antes y lo
+// dice en `aviso`. Aquí se le agrega `rpc` con el comportamiento de la migración.
+{
+  type ModoCandado = "tomado" | "ocupado" | "falta" | "error" | "no_tomado";
+  const conCandado = (cfg: Cfg, modo: ModoCandado, tras?: Record<string, unknown>[]) => {
+    const b = base(cfg);
+    const rpcs: { fn: string; args: Record<string, unknown> }[] = [];
+    let tomado = false;
+    const fromOriginal = b.supabase.from;
+    const supabase = {
+      from: (tabla: string) => {
+        // Después de tomar el candado, la relectura ve lo que hizo la otra persona.
+        if (tomado && tras && tabla === "reservas") return base({ ...cfg, existentes: tras }).supabase.from(tabla);
+        return fromOriginal(tabla);
+      },
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        rpcs.push({ fn, args });
+        if (fn === "fn_cotizacion_soltar_conversion") return { data: true, error: null };
+        if (modo === "falta") return { data: null, error: { code: "PGRST202", message: "Could not find the function public.fn_cotizacion_reclamar_conversion(p_cotizacion_id, p_segundos) in the schema cache" } };
+        if (modo === "error") return { data: null, error: { message: "fetch failed" } };
+        if (modo === "ocupado") return { data: { estado: "ocupado" }, error: null };
+        if (modo === "no_tomado") return { data: { estado: "no_tomado" }, error: null };
+        tomado = true;
+        return { data: { estado: "tomado", hasta: "2026-10-23T16:04:08.433078+00:00" }, error: null };
+      },
+    };
+    return { supabase, log: b.log, rpcs };
+  };
+  const c = cotDe({ estado: "aprobado", moneda: "PEN", tc: null, items: ITEMS.sin, vf: 3, vt: null, ret: RETORNOS.extremos, paradas: PARADAS.tres, fecha: "2026-11-02", hora: "07:30", igv: true, asunto: "Cot. RUTA B" });
+  const escrituras = (log: Registro[]) => canon(log.filter((x) => x.op !== "select" && x.op !== "select_in"));
+  const sinCandado = base({ existentes: [], atras: false });
+  const r0 = await ejecutarConversion(sinCandado.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
+  t("sin `rpc` en el cliente: convierte como antes y `aviso` nombra el SQL", r0.codigo === "creada" && r0.aviso === AVISO_SIN_CANDADO && r0.aviso.includes("cotizaciones-07"));
+
+  const tom = conCandado({ existentes: [], atras: false }, "tomado");
+  const r1 = await ejecutarConversion(tom.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
+  t("candado tomado: crea lo MISMO que sin candado (mismas escrituras, mismo orden)", r1.codigo === "creada" && escrituras(tom.log) === escrituras(sinCandado.log) && !r1.aviso);
+  t("candado tomado: vuelve a leer las reservas DESPUÉS de tomarlo", tom.log.filter((x) => x.op === "select").length === 2);
+  t("candado tomado: lo suelta al terminar, con el mismo `hasta`", tom.rpcs.length === 2 && tom.rpcs[0].fn === "fn_cotizacion_reclamar_conversion" && tom.rpcs[0].args.p_cotizacion_id === 736
+    && tom.rpcs[1].fn === "fn_cotizacion_soltar_conversion" && tom.rpcs[1].args.p_hasta === "2026-10-23T16:04:08.433078+00:00");
+
+  const fallaIns = conCandado({ existentes: [], atras: false, falloInsertN: 1 }, "tomado");
+  const r2 = await ejecutarConversion(fallaIns.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
+  t("si la inserción falla, el candado se suelta igual", r2.codigo === "error" && fallaIns.rpcs.some((x) => x.fn === "fn_cotizacion_soltar_conversion"));
+
+  const ocu = conCandado({ existentes: [], atras: false }, "ocupado");
+  const r3 = await ejecutarConversion(ocu.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
+  t("candado ocupado: «ocupada», no escribe NADA y no suelta el candado ajeno", r3.codigo === "ocupada" && r3.mensaje === MENSAJE_OCUPADA && escrituras(ocu.log) === "[]" && !ocu.rpcs.some((x) => x.fn === "fn_cotizacion_soltar_conversion"));
+
+  const fal = conCandado({ existentes: [], atras: false }, "falta");
+  const r4 = await ejecutarConversion(fal.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
+  t("sin la función (PGRST202): convierte como antes y lo dice", r4.codigo === "creada" && r4.aviso === AVISO_SIN_CANDADO && escrituras(fal.log) === escrituras(sinCandado.log));
+
+  const err = conCandado({ existentes: [], atras: false }, "error");
+  const r5 = await ejecutarConversion(err.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
+  t("el candado no responde: «error» sin escribir nada (no se arriesga el duplicado)", r5.codigo === "error" && escrituras(err.log) === "[]" && r5.mensaje.includes("no se creó nada"));
+
+  const sp = conCandado({ existentes: [], atras: false }, "no_tomado");
+  const r6 = await ejecutarConversion(sp.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
+  t("no se pudo escribir el candado (carrera o sin permiso): «error» sin escribir nada, y lo dice", r6.codigo === "error" && escrituras(sp.log) === "[]" && r6.mensaje.includes("permiso") && r6.mensaje.includes("mismo momento"));
+
+  // EL CASO: «→ Res.» pregunta (dólares), y mientras la pregunta está abierta el CRM crea la reserva.
+  const usd = { ...c, moneda: "USD", tipo_cambio: 3.75 };
+  const carrera = conCandado({ existentes: [], atras: false }, "tomado", EXISTENTES.enlazada);
+  const preguntas: string[] = [];
+  const r7 = await ejecutarConversion(carrera.supabase, usd, { hoy: "2026-10-22", confirmar: (q) => { preguntas.push(q); return true; } });
+  t("carrera: preguntó, otra persona la convirtió, y NO se crea otra (dice «Ya fue convertida»)", preguntas.length === 1 && r7.codigo === "ya_convertida" && escrituras(carrera.log) === "[]" && r7.refrescar);
+  t("carrera: el candado se suelta", carrera.rpcs.some((x) => x.fn === "fn_cotizacion_soltar_conversion"));
+
+  // Otra persona creó SOLO la ida mientras se preguntaba: bajo el candado el plan pasa a «completar el
+  // retorno», que tiene su propia pregunta. No se escribe nada y se pide volver a pulsar.
+  const cambio = conCandado({ existentes: [], atras: false }, "tomado", EXISTENTES.una);
+  const r8 = await ejecutarConversion(cambio.supabase, usd, { hoy: "2026-10-22", confirmar: () => true });
+  t("si bajo el candado el plan es OTRO (y no «ya convertida»), «cambio» sin escribir y suelta el candado",
+    r8.codigo === "cambio" && r8.mensaje === MENSAJE_CAMBIO && escrituras(cambio.log) === "[]" && cambio.rpcs.some((x) => x.fn === "fn_cotizacion_soltar_conversion"));
+
+  const no = conCandado({ existentes: [], atras: false }, "tomado");
+  const r9 = await ejecutarConversion(no.supabase, usd, { hoy: "2026-10-22", confirmar: () => false });
+  t("si dice que no a la pregunta, ni toma el candado", r9.codigo === "cancelada" && no.rpcs.length === 0);
+  const ya = conCandado({ existentes: EXISTENTES.enlazada, atras: false }, "tomado");
+  const r10 = await ejecutarConversion(ya.supabase, c, { hoy: "2026-10-22", confirmar: () => true });
+  t("ya convertida desde antes: ni toma el candado", r10.codigo === "ya_convertida" && ya.rpcs.length === 0);
 }
 
 if (fallas.length) for (const f of fallas) console.log("✗", f);

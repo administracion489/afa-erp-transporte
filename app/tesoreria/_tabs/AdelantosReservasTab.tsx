@@ -22,10 +22,11 @@ import React, { useCallback, useEffect, useState } from "react";
 import { usePuedeVer } from "@/lib/usePuedeVer";
 import type { AccionDinero, FilaTesoreria, ResultadoAccionReserva, VistaSolicitud } from "@/lib/traslados/reserva-solicitud-tipos";
 import FormCobro from "@/components/reservas/FormCobro";
+import FormCancelacion from "@/components/reservas/FormCancelacion";
 import { AvisosVista, BloqueDinero, ChipEstado, ListaComprobantes, ListaPagos, ListaPendientes, PoliticaReserva } from "@/components/reservas/DetalleSolicitud";
 import {
   ETIQUETA_ACCION, QUIEN_PENDIENTE, accionTesoreria, dinero, fechaDdMm, fechaHoraLima, horaCorta, leerListaTesoreria, leerVistaTesoreria,
-  preguntaAdelanto, preguntaDevolucion, preguntaPagoNoEncontrado, textoFallo,
+  preguntaAdelanto, preguntaDevolucion, preguntaPagoNoEncontrado, preguntaResolverCancelacion, textoFallo,
 } from "@/components/reservas/reserva-traslado-pantalla";
 
 type Lista = { filas: FilaTesoreria[]; sinMigracion: boolean; avisos: string[] };
@@ -168,9 +169,9 @@ function FilaSolicitud({ f, abierta, onAbrir, puedeCrm, onCambio }: {
 function DetalleTesoreria({ f, puedeCrm, onCambio }: { f: FilaTesoreria; puedeCrm: boolean | null; onCambio: () => void }) {
   const [vista, setVista] = useState<{ n: number; v: VistaSolicitud | null; error: string | null } | null>(null);
   const [pedido, setPedido] = useState(0);
-  const [ocupado, setOcupado] = useState<AccionDinero | null>(null);
+  const [ocupado, setOcupado] = useState<AccionDinero | "resolver_cancelacion" | null>(null);
   const [res, setRes] = useState<ResultadoAccionReserva | null>(null);
-  const [form, setForm] = useState<"adelanto" | "devolucion" | null>(null);
+  const [form, setForm] = useState<"adelanto" | "devolucion" | "cancelacion" | null>(null);
   const [viendoId, setViendoId] = useState<number | null>(null);
   const [ahora] = useState(() => Date.now());
 
@@ -184,7 +185,7 @@ function DetalleTesoreria({ f, puedeCrm, onCambio }: { f: FilaTesoreria; puedeCr
     return () => { vivo = false; };
   }, [f.solicitudId, pedido]);
 
-  const ejecutar = async (cuerpo: { accion: AccionDinero; monto?: number; fecha?: string; metodo?: string; referencia?: string }): Promise<boolean> => {
+  const ejecutar = async (cuerpo: { accion: AccionDinero | "resolver_cancelacion"; monto?: number; fecha?: string; metodo?: string; referencia?: string; devolucion_pct?: number }): Promise<boolean> => {
     if (ocupado) return false;
     setOcupado(cuerpo.accion); setRes(null);
     const r = await accionTesoreria({ ...cuerpo, solicitud_id: f.solicitudId });
@@ -223,7 +224,8 @@ function DetalleTesoreria({ f, puedeCrm, onCambio }: { f: FilaTesoreria; puedeCr
   }
   const v = vista.v;
   const m = v.dinero.moneda;
-  const tiene = (a: AccionDinero) => v.acciones.includes(a);
+  const tiene = (a: AccionDinero | "resolver_cancelacion") => v.acciones.includes(a);
+  const reservaViva = v.reserva && v.reserva.estado !== "cancelada" ? v.reserva : null;
   const algo = ocupado != null;
   const enlaceCrm = f.convId ? `/crm?conv=${encodeURIComponent(f.convId)}` : null;
 
@@ -285,10 +287,20 @@ function DetalleTesoreria({ f, puedeCrm, onCambio }: { f: FilaTesoreria; puedeCr
             ↩ {ETIQUETA_ACCION.registrar_devolucion}…
           </button>
         )}
-        {!tiene("registrar_adelanto") && !tiene("pago_no_encontrado") && !tiene("registrar_devolucion") && (
+        {tiene("resolver_cancelacion") && (
+          <button type="button" disabled={algo} onClick={() => setForm(form === "cancelacion" ? null : "cancelacion")}
+            className="text-xs px-3 py-2 rounded-lg border border-[#0b315f]/30 text-[#0b315f] font-semibold hover:bg-blue-50 disabled:opacity-40 min-h-[40px]">
+            {ocupado === "resolver_cancelacion" ? "Resolviendo…" : `${ETIQUETA_ACCION.resolver_cancelacion}…`}
+          </button>
+        )}
+        {!tiene("registrar_adelanto") && !tiene("pago_no_encontrado") && !tiene("registrar_devolucion") && !tiene("resolver_cancelacion") && (
           <p className="text-xs text-gray-500">No hay nada de dinero que registrar en esta solicitud.</p>
         )}
       </div>
+      {form === "cancelacion" && (
+        <FormCancelacion v={v} reservaViva={reservaViva} ocupado={algo} onCancelar={() => setForm(null)}
+          onResolver={(pct) => { if (window.confirm(preguntaResolverCancelacion(v, pct))) void ejecutar({ accion: "resolver_cancelacion", devolucion_pct: pct }); }} />
+      )}
       {form === "adelanto" && (
         <div className="rounded-lg border border-green-200 bg-green-50/40 p-2">
           <FormCobro titulo="Registrar el adelanto visto en el banco" moneda={m} textoBoton="Registrar adelanto" ocupado={algo}
