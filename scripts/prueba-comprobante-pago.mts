@@ -65,7 +65,7 @@ t("texto_monto coherente", textoMontoCoherente({ monto: 88.5, texto_monto: "S/ 8
 }
 
 // ── 5. El cotejo: barrido ────────────────────────────────────────────────────
-const CODIGOS: CodigoCotejo[] = ["coincide", "pago_total", "monto_menor", "monto_mayor_total", "otra_moneda", "sin_moneda", "fecha_futura", "fecha_anterior", "sin_fecha", "sin_operacion", "operacion_repetida", "destino_no_coincide", "ilegible", "no_es_comprobante"];
+const CODIGOS: CodigoCotejo[] = ["coincide", "pago_total", "monto_menor", "monto_mayor_total", "otra_moneda", "sin_moneda", "fecha_futura", "fecha_anterior", "sin_fecha", "sin_operacion", "operacion_repetida", "destino_no_coincide", "ilegible", "no_es_comprobante", "sin_lectura"];
 t("todo código tiene su texto", CODIGOS.every((c) => typeof TEXTO_COTEJO[c] === "string" && TEXTO_COTEJO[c].length > 10) && Object.keys(TEXTO_COTEJO).length === CODIGOS.length);
 t("todo código cumple el CHECK de la base [a-z_]{2,40}", CODIGOS.every((c) => /^[a-z_]{2,40}$/.test(c)));
 {
@@ -98,6 +98,7 @@ t("todo código cumple el CHECK de la base [a-z_]{2,40}", CODIGOS.every((c) => /
   t(`ilegible u otra moneda nunca coincide (${duroOk}/${duros})`, duros > 0 && duroOk === duros);
   t("formato de los códigos devueltos", formatoOk);
   t(`corolario: el barrido produce lecturas seguras (${seguros})`, seguros > 0);
+  for (const k of cotejarComprobante(null, { adelanto: 88.5, total: 177, moneda: "PEN", hoy, desde, operacionesPrevias: [], cuentas }).codigos) vistos.add(k);
   t("corolario: salen todos los códigos", CODIGOS.every((k) => vistos.has(k)));
 }
 
@@ -112,7 +113,7 @@ t("todo código cumple el CHECK de la base [a-z_]{2,40}", CODIGOS.every((c) => /
   t("menos que el adelanto → monto_menor, no seguro", (() => { const r = cotejarComprobante({ ...l, monto: 50, texto_monto: "S/ 50.00" }, x); return r.codigos[0] === "monto_menor" && !r.seguro; })());
   t("más que el total → monto_mayor_total", cotejarComprobante({ ...l, monto: 300, texto_monto: "S/ 300.00" }, x).codigos[0] === "monto_mayor_total");
   t("crédito (sin adelanto): el total coincide", cotejarComprobante({ ...l, monto: 177, texto_monto: "S/ 177.00" }, { ...x, adelanto: null }).codigos.join() === "coincide");
-  t("null → no_es_comprobante", cotejarComprobante(null, x).codigos.join() === "no_es_comprobante");
+  t("null (el lector falló) → sin_lectura, nunca «no es comprobante»", cotejarComprobante(null, x).codigos.join() === "sin_lectura" && !cotejarComprobante(null, x).seguro);
   t("operación repetida aunque cambie el formato", cotejarComprobante(l, { ...x, operacionesPrevias: ["123456"] }).codigos.includes("operacion_repetida"));
 }
 
@@ -123,16 +124,17 @@ t("todo código cumple el CHECK de la base [a-z_]{2,40}", CODIGOS.every((c) => /
   t("un comprobante leído cuenta", comprobanteCuenta(leida({ es_comprobante: true, monto: 50, texto_monto: "S/ 50.00" })) === true);
   t("sin lectura (el lector falló, fila vieja) cuenta: lo mira una persona", comprobanteCuenta(null) && comprobanteCuenta(undefined) && comprobanteCuenta("x") && comprobanteCuenta([]));
   t("una lectura rara sin la clave cuenta (el lado seguro: frena)", comprobanteCuenta({ monto: 10 }) && comprobanteCuenta({ es_comprobante: "no" }));
-  // Coherente con cómo se decide al registrarlo: lo que el cotejo llama `no_es_comprobante` con lectura
-  // es exactamente lo que no cuenta; sin lectura el cotejo también dice `no_es_comprobante` y SÍ cuenta.
+  // Coherente con cómo se decide al registrarlo: lo que el cotejo llama `no_es_comprobante` es
+  // exactamente lo que no cuenta; sin lectura el cotejo dice `sin_lectura` y SÍ cuenta.
   const xc = { adelanto: 50, total: 100, moneda: "PEN" as const, hoy: "2026-10-21", desde: "2026-10-20", operacionesPrevias: [], cuentas: [] };
   let coherente = true;
   for (const es of [true, false, undefined]) for (const monto of [null, 50]) {
     const l = leida({ es_comprobante: es, monto, texto_monto: monto ? "S/ 50.00" : null });
     const noEs = cotejarComprobante(l, xc).codigos.includes("no_es_comprobante");
-    if (l && noEs === comprobanteCuenta(l)) coherente = false;
+    if (noEs === comprobanteCuenta(l)) coherente = false;
   }
-  t("con lectura: «no es comprobante» en el cotejo ⟺ no cuenta", coherente);
+  if (cotejarComprobante(null, xc).codigos.includes("no_es_comprobante") || !comprobanteCuenta(null)) coherente = false;
+  t("«no es comprobante» en el cotejo ⟺ no cuenta (con lectura o sin ella)", coherente);
 }
 
 // ── 7. El adjunto del correo, por su contenido ───────────────────────────────

@@ -678,7 +678,7 @@ export function mensajeComprobanteRecibido(x: {
   const c = x.cotejo;
   const plazo = x.frasePlazo || "a la brevedad";
   const tiene = (k: string) => c.codigos.includes(k);
-  if (tiene("ilegible") || tiene("no_es_comprobante") || (c.monto == null && !c.seguro)) {
+  if (tiene("ilegible") || tiene("no_es_comprobante") || tiene("sin_lectura") || (c.monto == null && !c.seguro)) {
     return tu
       ? "No pudimos leer el comprobante. ¿Nos envías una foto o captura donde se vean el monto, la fecha y el número de operación?"
       : "No pudimos leer el comprobante. ¿Nos envía una foto o captura donde se vean el monto, la fecha y el número de operación?";

@@ -510,7 +510,9 @@ function ResultadoBloque({ r, v, ocupado, onPdf, puedeMarcar, onMarcar, onCerrar
         <button type="button" onClick={onCerrar} className="text-[11px] underline opacity-70 hover:opacity-100 flex-shrink-0">quitar</button>
       </div>
       {fuera && (
-        <p>{fuera.cerroEn
+        <p>{r.bloqueos?.some((b) => b.codigo === "cliente_no_verificado")
+          ? "Por el CRM no salió nada: el cliente de la reserva no está verificado para este chat (el motivo va abajo). Si es el mismo cliente, envíaselo tú desde el celular:"
+          : fuera.cerroEn
           ? `Por el CRM no salió nada: la ventana de 24 h de WhatsApp se cerró el ${fechaHoraLima(fuera.cerroEn)}. Envíaselo tú desde el celular:`
           : "Por el CRM no salió nada (la conversación no es de WhatsApp, no tiene número o no se pudo leer la ventana de 24 h). Envíaselo tú desde el celular:"}</p>
       )}

@@ -14,7 +14,7 @@
 //  3. LA TRANSCRIPCIÓN DEBE REPRODUCIR EL NÚMERO: `texto_monto` (lo que se ve, con su símbolo) y
 //     `monto` (el número) tienen que decir lo mismo; si no, es `ilegible`. Dos lecturas del mismo
 //     hecho que no se cruzan dan la sensación de verificar algo sin verificar nada.
-//  4. EL MOTIVO SE DECLARA: catorce códigos (`CodigoCotejo`). `seguro` ⟺ el único código es
+//  4. EL MOTIVO SE DECLARA: quince códigos (`CodigoCotejo`). `seguro` ⟺ el único código es
 //     `coincide` (cubre el adelanto sin pasar del total) o `pago_total`: solo entonces el mensaje al
 //     cliente repite el monto leído. Una fecha futura, una operación ya usada, otra moneda o una
 //     lectura ilegible nunca dan `coincide`. El destino es TRI-ESTADO: sin cuenta visible no se
@@ -211,7 +211,7 @@ export function textoMontoCoherente(l: Pick<LecturaComprobante, "monto" | "texto
 export type CodigoCotejo =
   | "coincide" | "pago_total" | "monto_menor" | "monto_mayor_total" | "otra_moneda" | "sin_moneda"
   | "fecha_futura" | "fecha_anterior" | "sin_fecha" | "sin_operacion" | "operacion_repetida"
-  | "destino_no_coincide" | "ilegible" | "no_es_comprobante";
+  | "destino_no_coincide" | "ilegible" | "no_es_comprobante" | "sin_lectura";
 
 /** Lo que se le dice al ejecutivo (y va en el correo) por cada código. */
 export const TEXTO_COTEJO: Record<CodigoCotejo, string> = {
@@ -229,6 +229,7 @@ export const TEXTO_COTEJO: Record<CodigoCotejo, string> = {
   destino_no_coincide: "La cuenta de destino que se ve no es ninguna de las cuentas de la cotización.",
   ilegible: "No se pudo leer el monto (lo transcrito no reproduce el número).",
   no_es_comprobante: "La imagen no parece un comprobante de pago.",
+  sin_lectura: "No se pudo leer el archivo (el lector falló o no estaba disponible): revísalo a mano.",
 };
 
 /** Los códigos que impiden dar el monto por bueno aunque el número coincida. */
@@ -278,7 +279,10 @@ export function cotejarComprobante(
   l: LecturaComprobante | null,
   x: { adelanto: number | null; total: number; moneda: Moneda; hoy: string; desde: string; operacionesPrevias: string[]; cuentas: CuentaBancaria[] },
 ): Cotejo {
-  if (!l || l.es_comprobante !== true) return { codigos: ["no_es_comprobante"], seguro: false, monto: null, operacion: null, moneda: null };
+  // Sin lectura NO es «no es comprobante»: ese archivo sí cuenta como pago reportado
+  // (`comprobanteCuenta`) y el ejecutivo tiene que mirarlo, no descartarlo.
+  if (!l) return { codigos: ["sin_lectura"], seguro: false, monto: null, operacion: null, moneda: null };
+  if (l.es_comprobante !== true) return { codigos: ["no_es_comprobante"], seguro: false, monto: null, operacion: null, moneda: null };
   const codigos: CodigoCotejo[] = [];
   const poner = (c: CodigoCotejo) => { if (!codigos.includes(c)) codigos.push(c); };
   const operacion = normalizarOperacion(l.numero_operacion);
