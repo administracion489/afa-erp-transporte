@@ -13,7 +13,7 @@
 //    las cuentas ⟺ son de «corporativo», hay perfil y la huella es la MISMA (barrido);
 //  · «Vincular cliente» ata el contacto ⟺ un número del cliente es el wa_id completo (barrido).
 import {
-  ESTADOS_SOLICITUD, ESTADOS_TERMINALES, NOTA_REENVIO_PAGO, OBSERVACION_IGV_CARGO, TRANSICIONES, adelantoDe, bloquePago, cargoRetenido,
+  ESTADOS_SOLICITUD, ESTADOS_TERMINALES, NOTA_REENVIO_PAGO, OBSERVACION_IGV_CARGO, TRANSICIONES, adelantoDe, bloquePago, cargoRetenido, dinero,
   clienteVerificadoEnChat, cuentasEnMensaje, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal, filaFacturaCargo, firmaConCuentas,
   firmaImportes, huellaDeFirma, importesDeFirma, juzgarReenvioPedirPago, vinculoContactoReserva,
   horasDeAnticipacion, marcaCargoReserva, mensajeAdelantoIncompleto, mensajeCanceladaSinPago, mensajeCancelacionRegistrada,
@@ -68,15 +68,31 @@ const empresa: PerfilEmpresa = {
     const doc = docCorporativo(entradaCorporativaTraslado(f, { empresa }));
     const pdf = Number(doc.totales.total.valor.replace(/[^\d.]/g, ""));
     casos++;
-    // El PDF en soles imprime el total SIN redondear (fmtImporte, hasta 3 decimales: «S/ 90.005»):
-    // el adelanto parte del total al céntimo (el mismo de `cifrasDeFila`) y queda a medio céntimo
-    // como mucho de lo impreso.
-    const bien = !!a && a.moneda === moneda && a.total === r2(c.figuras[c.figuras.length - 1]) && Math.abs(a.total - pdf) <= 0.005 + 1e-9
+    // El PDF imprime el total al céntimo con el MISMO redondeo del adelanto (fmtImporte →
+    // alCentimo): lo impreso es EXACTAMENTE el total del que sale el adelanto. Antes, en soles, el
+    // PDF imprimía hasta tres decimales («S/ 90.005») y aquí se toleraba medio céntimo.
+    const bien = !!a && a.moneda === moneda && a.total === r2(c.figuras[c.figuras.length - 1]) && a.total === pdf
+      && c.total === doc.totales.total.valor
       && a.adelanto != null && a.saldo != null && cent(a.adelanto) + cent(a.saldo) === cent(a.total)
       && a.adelanto === r2((a.total * pct) / 100) && a.saldo >= 0;
     if (bien) buenos++; else if (fallas.length < 40) fallas.push(`adelanto ${moneda} ${precio}×${cantidad} igv${igv} d${dscto} ${pct}%: ${JSON.stringify(a)} pdf ${pdf}`);
   }
   t(`el adelanto cuadra al céntimo con el PDF (${buenos}/${casos})`, buenos === casos);
+  // Barrido de los empates: tarifas en cuartos de sol (84.75 × 1.18 = 100.005, 4.25 × 1.18 = 5.015),
+  // con y sin IGV. El total del PDF, el de `cifrasDeFila` y el del adelanto son el MISMO texto.
+  {
+    let n = 0, iguales = 0; const malos: string[] = [];
+    for (let k = 1; k <= 20000; k++) for (const igv of [true, false]) {
+      const f = fila(k / 4, 1, "PEN", null, igv);
+      const a = adelantoDe(f, 50)!;
+      const doc = docCorporativo(entradaCorporativaTraslado(f, { empresa }));
+      const impreso = doc.totales.total.valor;
+      n++;
+      if (impreso === cifrasDeFila(f)!.total && impreso === dinero(a.total, "PEN") && Number(impreso.replace(/[^\d.]/g, "")) === a.total && /\.\d{2}$/.test(impreso)) iguales++;
+      else if (malos.length < 5) malos.push(`${k / 4} igv${igv}: PDF «${impreso}» · adelanto ${a.total}`);
+    }
+    t(`PEN en cuartos de sol: PDF = cifrasDeFila = adelanto, al céntimo (${iguales}/${n})${malos.length ? " · " + malos.join(" · ") : ""}`, iguales === n);
+  }
   t("crédito (pct null) → sin adelanto ni saldo", (() => { const a = adelantoDe(fila(100, 1, "PEN", null), null); return !!a && a.adelanto === null && a.saldo === null && a.total === 118; })());
   t("pct fuera de rango → sin adelanto", adelantoDe(fila(100, 1, "PEN", null), 0)?.adelanto === null && adelantoDe(fila(100, 1, "PEN", null), 150)?.adelanto === null);
   t("USD sin tipo de cambio → null", adelantoDe(fila(100, 1, "USD", null), 50) === null);
