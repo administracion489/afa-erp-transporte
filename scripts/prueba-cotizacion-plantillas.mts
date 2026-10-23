@@ -621,5 +621,132 @@ console.log("16. El resumen de la política (cotizaciones-08): se copia con ella
   ok(P.SQL_RESUMEN_CONDICIONES === "supabase/cotizaciones-08-resumen-condiciones.sql", "el SQL que se nombra");
 }
 
+console.log("17. La regla del traslado por idioma × moneda (cotizaciones-09) y el interruptor del inglés");
+{
+  // (a) sirveParaIA en castellano: idéntica a la de antes (copiada literal), sobre un barrido.
+  const sirveVieja = (p: P.PlantillaFila | null | undefined): boolean =>
+    !!p && P.esActiva(p) && P.disenoDe(p) === "corporativo" && String(p.idioma ?? "").trim().toLowerCase() !== "en";
+  let n = 0, iguales = 0, enOk = 0;
+  for (const id of ["corporativo", "moderno_fotos", "x"]) for (const diseno of [null, undefined, "corporativo", "ejecutivo", "basura", ""])
+    for (const idioma of [null, undefined, "es", "en", "EN", " en ", "es_en", ""]) for (const activa of [true, false, null, undefined]) {
+      const p = PL(id, { diseno: diseno as Any, idioma: idioma as Any, activa: activa as Any });
+      n++;
+      if (P.sirveParaIA(p) === sirveVieja(p) && P.sirveParaIA(p, "es") === sirveVieja(p)) iguales++;
+      const en = P.sirveParaIA(p, "en");
+      if (en === (P.esActiva(p) && P.disenoDe(p) === "corporativo" && String(idioma ?? "").trim().toLowerCase() === "en")) enOk++;
+      if (en && P.sirveParaIA(p, "es")) ok(false, "una plantilla no sirve en los dos idiomas");
+    }
+  ok(iguales === n && !P.sirveParaIA(null) && !P.sirveParaIA(undefined, "en"), `sirveParaIA en castellano = la de antes (${iguales}/${n})`);
+  ok(enOk === n, `sirveParaIA en inglés: activa, corporativa y en inglés (${enOk}/${n})`);
+
+  // (b) El catálogo.
+  ok(P.TABLA_REGLAS_TRASLADO === "cotizacion_plantilla_reglas_traslado" && P.SQL_REGLAS_TRASLADO === "supabase/cotizaciones-09-reglas-traslado-idioma.sql", "la tabla y el SQL");
+  ok(J(P.CELDAS_TRASLADO) === J([{ idioma: "es", moneda: "PEN" }, { idioma: "es", moneda: "USD" }, { idioma: "en", moneda: "PEN" }, { idioma: "en", moneda: "USD" }]), "las cuatro celdas, en orden");
+  ok(P.etiquetaCeldaTraslado({ idioma: "en", moneda: "USD" }) === "Traslado de la IA · inglés · dólares" && P.etiquetaCeldaTraslado({ idioma: "es", moneda: "PEN" }) === "Traslado de la IA · castellano · soles", "el nombre de una celda");
+  const filas = [
+    { idioma: "es", moneda: "PEN", plantilla_id: "a" }, { idioma: "es", moneda: "PEN", plantilla_id: "b" }, { idioma: "en", moneda: "USD", plantilla_id: "c" },
+    { idioma: "EN", moneda: "USD", plantilla_id: "d" }, { idioma: "en", moneda: "usd", plantilla_id: "e" }, { idioma: "fr", moneda: "PEN", plantilla_id: "f" },
+    { idioma: "en", moneda: "PEN", plantilla_id: "" }, { idioma: "en", moneda: "PEN", plantilla_id: 5 }, null, "x", { idioma: "en", moneda: "PEN", plantilla_id: "g" },
+  ];
+  ok(J(P.normalizarReglasTraslado(filas)) === J([{ idioma: "es", moneda: "PEN", plantilla_id: "a" }, { idioma: "en", moneda: "USD", plantilla_id: "c" }, { idioma: "en", moneda: "PEN", plantilla_id: "g" }]),
+    "normalizarReglasTraslado: los valores EXACTOS del CHECK, una por celda (gana la primera)");
+  ok(J(P.normalizarReglasTraslado(null)) === "[]" && J(P.reglasTrasladoQueUsan(P.normalizarReglasTraslado(filas), "c")) === J([{ idioma: "en", moneda: "USD", plantilla_id: "c" }]) && P.reglasTrasladoQueUsan(null, "c").length === 0, "reglasTrasladoQueUsan");
+
+  // (c) plantillaTrasladoIA: sin la tabla nueva, EXACTAMENTE plantillaParaUso (invariante 7).
+  const PLS: P.PlantillaFila[][] = [
+    [PL("corporativo", { es_principal: true })],
+    [PL("corporativo", { es_principal: true }), PL("traslados_ia", { diseno: "corporativo" }), PL("trf_en", { diseno: "corporativo", idioma: "en" })],
+    [PL("corporativo"), PL("trf_en", { diseno: "corporativo", idioma: "en", es_principal: true })],
+    [PL("moderno_fotos", { es_principal: true }), PL("trf_en", { diseno: "corporativo", idioma: "en" }), PL("trf_en_off", { diseno: "corporativo", idioma: "en", activa: false })],
+    [PL("corporativo", { es_principal: true, activa: false }), PL("trf_es", { diseno: "corporativo" }), PL("trf_en_mod", { diseno: "moderno_fotos", idioma: "en" })],
+  ];
+  const LEGADOS: (P.ReglaPlantilla[] | null)[] = [null, [], [{ servicio: "traslado_ia", segmento: "particular", plantilla_id: "traslados_ia" }],
+    P.SEGMENTOS.map(segmento => ({ servicio: "traslado_ia" as const, segmento, plantilla_id: "trf_en" }))];
+  let nl = 0, igualesL = 0;
+  for (const pls of PLS) for (const leg of LEGADOS) for (const segmento of P.SEGMENTOS) for (const c of P.CELDAS_TRASLADO) {
+    nl++;
+    const a = P.plantillaTrasladoIA(c, pls, null, { reglas: leg, segmento });
+    const b = P.plantillaParaUso({ servicio: "traslado_ia", segmento }, pls, leg);
+    if (a.plantilla === b.plantilla && a.codigo === b.codigo && a.detalle === b.detalle && a.celda === null) igualesL++;
+  }
+  ok(igualesL === nl, `sin la tabla nueva, plantillaTrasladoIA = plantillaParaUso (${igualesL}/${nl})`);
+
+  // (d) Con la tabla: barrido de invariantes.
+  const IDS = ["corporativo", "traslados_ia", "trf_en", "trf_en_off", "trf_es", "trf_en_mod", "fantasma", "moderno_fotos"];
+  const codigos = new Set<string>();
+  let nt = 0, malos = 0, corolarioEn = 0, corolarioEs = 0;
+  const rr = rng(20261022);
+  for (let k = 0; k < 4000; k++) {
+    const pls = PLS[Math.floor(rr() * PLS.length)];
+    const reglas: P.ReglaTraslado[] = [];
+    for (const c of P.CELDAS_TRASLADO) if (rr() < 0.7) reglas.push({ ...c, plantilla_id: IDS[Math.floor(rr() * IDS.length)] });
+    for (const c of P.CELDAS_TRASLADO) {
+      nt++;
+      const u = P.plantillaTrasladoIA(c, pls, reglas, { reglas: null, segmento: "particular" });
+      codigos.add(u.codigo);
+      const inv: string[] = [];
+      if (u.plantilla && !P.esActiva(u.plantilla)) inv.push("devolvió una inactiva");
+      if (!u.celda || u.celda.idioma !== c.idioma || u.celda.moneda !== c.moneda) inv.push("la celda no es la pedida");
+      if (u.plantilla && P.disenoDe(u.plantilla) !== "corporativo") inv.push("una que el servidor no dibuja");
+      if (c.idioma === "en" && u.plantilla && !P.sirveParaIA(u.plantilla, "en") && u.codigo !== "sin_plantilla_idioma") inv.push("en inglés, una en castellano sin sin_plantilla_idioma");
+      if (c.idioma === "es" && u.plantilla && !P.sirveParaIA(u.plantilla)) inv.push("en castellano, una que no sirve en castellano");
+      if (u.codigo === "sin_plantilla_idioma" && (c.idioma !== "en" || u.idiomaCondiciones !== "es")) inv.push("sin_plantilla_idioma solo en inglés y con condiciones en castellano");
+      if (u.codigo !== "sin_plantilla_idioma" && u.plantilla && u.idiomaCondiciones !== c.idioma) inv.push("el idioma de las condiciones es el de la celda");
+      if ((u.plantilla === null) !== (u.codigo === "sin_plantilla" || (u.codigo === "sin_plantilla_idioma" && P.plantillaTrasladoIA({ idioma: "es", moneda: c.moneda }, pls, reglas, { reglas: null, segmento: "particular" }).plantilla === null))) inv.push("null ⟺ sin_plantilla (o su caída en inglés)");
+      const celda = reglas.find(x => x.idioma === c.idioma && x.moneda === c.moneda);
+      const pc = celda ? pls.find(x => x.id === celda.plantilla_id) : null;
+      if (pc && P.sirveParaIA(pc, c.idioma)) {
+        if (c.idioma === "en") corolarioEn++; else corolarioEs++;
+        if (u.codigo !== "regla" || u.plantilla?.id !== pc.id) inv.push("con una celda válida no devolvió esa");
+      }
+      if (!u.detalle.trim()) inv.push("sin detalle");
+      if (inv.length && malos++ < 4) console.log(`    ${J(c)} ${J(reglas)} → ${u.plantilla?.id ?? null}/${u.codigo}: ${inv.join("; ")}`);
+    }
+  }
+  ok(malos === 0, `invariantes de plantillaTrasladoIA en ${nt} casos`);
+  ok(corolarioEn > 0 && corolarioEs > 0, `corolario: con una celda válida se obedece, en los dos idiomas (${corolarioEs}/${corolarioEn})`);
+  for (const c of ["regla", "principal", "regla_inactiva", "regla_no_sirve_ia", "sin_plantilla", "sin_plantilla_idioma"]) ok(codigos.has(c), `el barrido produce «${c}»`);
+  // Casos con nombre.
+  const pls = PLS[1];
+  const enVacia = P.plantillaTrasladoIA({ idioma: "en", moneda: "USD" }, pls, [{ idioma: "es", moneda: "USD", plantilla_id: "traslados_ia" }], { reglas: null, segmento: "extranjero" });
+  ok(enVacia.codigo === "sin_plantilla_idioma" && enVacia.plantilla?.id === "traslados_ia" && enVacia.idiomaCondiciones === "es" && enVacia.detalle.includes("Traslado de la IA · inglés · dólares") && enVacia.detalle.includes("/cotizaciones/plantillas"),
+    `inglés vacío → la de castellano de la misma moneda, y lo dice (${enVacia.detalle})`);
+  const enOkU = P.plantillaTrasladoIA({ idioma: "en", moneda: "USD" }, pls, [{ idioma: "en", moneda: "USD", plantilla_id: "trf_en" }], { reglas: null, segmento: "extranjero" });
+  ok(enOkU.codigo === "regla" && enOkU.plantilla?.id === "trf_en" && enOkU.idiomaCondiciones === "en", "inglés con su plantilla en inglés → regla");
+  const enNoSirve = P.plantillaTrasladoIA({ idioma: "en", moneda: "PEN" }, pls, [{ idioma: "en", moneda: "PEN", plantilla_id: "traslados_ia" }], { reglas: null, segmento: "particular" });
+  ok(enNoSirve.codigo === "sin_plantilla_idioma" && enNoSirve.plantilla?.id === "corporativo", "una celda «inglés» con una plantilla en castellano no se obedece: cae a castellano y lo dice");
+  const principalEn = P.plantillaTrasladoIA({ idioma: "en", moneda: "PEN" }, PLS[2], [], { reglas: null, segmento: "particular" });
+  ok(principalEn.codigo === "principal" && principalEn.plantilla?.id === "trf_en", "inglés sin regla, con la principal en inglés: la principal");
+  const esSin = P.plantillaTrasladoIA({ idioma: "es", moneda: "PEN" }, PLS[4], [], { reglas: null, segmento: "particular" });
+  ok(esSin.codigo === "sin_plantilla" && esSin.plantilla === null && esSin.idiomaCondiciones === null && esSin.detalle.includes("Ajustes de traslados"), "castellano sin plantilla que sirva: las de Ajustes, como hoy");
+
+  // (e) El interruptor: solo una celda «inglés» asignada con una plantilla en inglés que sirva.
+  ok(P.inglesDisponible(pls, null) === null && !P.inglesActivo(null) && !P.inglesActivo(undefined), "sin la tabla, el inglés está apagado (null)");
+  ok(J(P.inglesDisponible(pls, [])) === J({ PEN: false, USD: false }) && !P.inglesActivo({ PEN: false, USD: false }), "sin celdas, apagado (la principal en inglés no lo enciende)");
+  ok(J(P.inglesDisponible(PLS[2], [])) === J({ PEN: false, USD: false }), "una principal en inglés tampoco lo enciende");
+  ok(J(P.inglesDisponible(pls, [{ idioma: "en", moneda: "USD", plantilla_id: "trf_en" }])) === J({ PEN: false, USD: true }) && P.inglesActivo({ PEN: false, USD: true }), "una celda asignada lo enciende en su moneda");
+  ok(J(P.inglesDisponible(PLS[3], [{ idioma: "en", moneda: "PEN", plantilla_id: "trf_en_off" }, { idioma: "en", moneda: "USD", plantilla_id: "fantasma" }])) === J({ PEN: false, USD: false }), "una inactiva o que no existe no lo enciende");
+  ok(J(P.inglesDisponible(pls, [{ idioma: "en", moneda: "PEN", plantilla_id: "traslados_ia" }, { idioma: "es", moneda: "USD", plantilla_id: "trf_en" }])) === J({ PEN: false, USD: false }), "una en castellano en una celda «inglés» (o una en inglés en una de castellano) no lo enciende");
+
+  // (f) El SQL de cotizaciones-09: los mismos valores, y correrlo NO enciende el inglés.
+  const ruta09 = new URL("../supabase/cotizaciones-09-reglas-traslado-idioma.sql", import.meta.url);
+  if (!existsSync(ruta09)) {
+    console.log("    ⏳ PENDIENTE: todavía no existe supabase/cotizaciones-09-reglas-traslado-idioma.sql: se comprueba cuando datos-sql lo entregue.");
+  } else {
+    const sql = readFileSync(ruta09, "utf8");
+    const lineas = sql.replace(/\n+$/, "").split("\n");
+    ok(lineas.length < 100 && lineas[lineas.length - 1] === "-- FIN de cotizaciones-09-reglas-traslado-idioma.sql", `cotizaciones-09: menos de 100 líneas y termina en su FIN (${lineas.length})`);
+    const codigo = sql.split("\n").map(l => l.replace(/--.*$/, "")).join("\n");
+    ok(new RegExp(`create table if not exists public\\.${P.TABLA_REGLAS_TRASLADO}\\b`).test(codigo), "la tabla se llama como en el código");
+    ok(/primary key\s*\(\s*idioma\s*,\s*moneda\s*\)/i.test(codigo), "una celda, una plantilla: primary key (idioma, moneda)");
+    const vals = (col: string) => { const m = new RegExp(`\\b${col}\\s+text\\s+not\\s+null\\s+check\\s*\\(\\s*${col}\\s+in\\s*\\(([^)]*)\\)`, "i").exec(codigo); return m ? [...m[1].matchAll(/'([^']*)'/g)].map(x => x[1]).sort() : null; };
+    ok(J(vals("idioma")) === J(["en", "es"]) && J(vals("moneda")) === J(["PEN", "USD"]), `los CHECK = CELDAS_TRASLADO (${J(vals("idioma"))} ${J(vals("moneda"))})`);
+    ok(/references public\.cotizacion_plantillas\(id\) on delete restrict/i.test(codigo), "la plantilla por FK, y no se borra una en uso");
+    ok(new RegExp(`revoke all on public\\.${P.TABLA_REGLAS_TRASLADO} from anon`, "i").test(codigo) && /fn_puede_modulo\(auth\.uid\(\), 'cotizaciones'\)/.test(codigo), "revoke … from anon y escritura con el módulo Cotizaciones");
+    const inserts = [...codigo.matchAll(/insert into public\.cotizacion_plantilla_reglas_traslado[^;]*;/gi)].map(m => m[0]);
+    ok(inserts.length > 0 && inserts.every(x => !/'en'/.test(x)), `el traspaso no inserta nada en inglés: correr el SQL no enciende el inglés (${inserts.length} insert)`);
+  }
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

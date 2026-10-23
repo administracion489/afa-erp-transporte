@@ -1190,5 +1190,59 @@ if (process.env.MUESTRA_DIR) {
   console.log(`  muestra: ${dir}/muestra-traslado.pdf y .html`);
 }
 
+// ── 12. En inglés: el mismo texto en el HTML y en el PDF, y sin castellano del sistema ──
+seccion("12. En inglés: HTML ↔ PDF, los textos del código en inglés, y sin idioma byte a byte");
+{
+  /** La fila de una cotización en inglés (el idioma lo pasa B2: aquí, a mano). */
+  const filaEn = (p: M.PedidoTraslado, plantilla: any = null): C.FilaCotizacionLeida => {
+    const r = M.evaluarTraslado({ ...p, idioma_cliente: "en" }, ctx);
+    if (r.codigo !== "cotizable") throw new Error(`no cotizable: ${r.codigo}`);
+    const f = C.filaCotizacionTraslado(r, { ...entradaDe(p), idioma_cliente: "en" }, { convId: "conv-1", clienteId: null, atencion: "Ana Pérez Núñez", config, firma: "f", hoy: HOY, idioma: "en", plantilla });
+    return { ...f, id: 4321, numero_cotizacion: null, created_at: "2026-10-19T15:00:00Z" };
+  };
+  const PL_EN = {
+    id: "trf_en", nombre: "Transfers (EN)", diseno: "corporativo", idioma: "en", activa: true,
+    condiciones_incluye: ["Professional bilingual driver", "Fuel and tolls"], condiciones_no_incluye: ["Airport parking if the flight is delayed"],
+    condiciones_generales: ["Prices do not include IGV (Peruvian VAT).", "30 minutes of free waiting time."],
+    condiciones_reserva: ["Free cancellation up to 24 hours before the service."],
+  };
+  const EN_IDA = filaEn(pedido({ telefono: "+51966707225" }), PL_EN);
+  const EN_RET = filaEn(pedido({ telefono: "+13055551234", sentido: "ida_retorno", fecha_retorno: "2026-10-28", hora_retorno: "18:00" }), PL_EN);
+  const EN_AJUSTES = filaEn(pedido({ telefono: "+51966707225" }), null);
+  ok(EN_IDA.idioma_pdf === "en" && EN_IDA.moneda === "USD" && EN_IDA.consideraciones_json?.idioma === "en", "la fila en inglés: idioma, dólares por defecto (+51 incluido) y condiciones marcadas «en»");
+  ok(EN_AJUSTES.consideraciones_json?.idioma === undefined, "con las condiciones de Ajustes (castellano), sin la marca");
+  const catEn = (f: C.FilaCotizacionLeida, conFotos: boolean, en: string | null) => ({ ...catDeFila(f, conFotos), descripcion_cliente: "- Aire acondicionado\n- Asientos reclinables", descripcion_cliente_en: en });
+  const casosEn: Caso[] = [
+    { n: "EN ida · USD (+51) · con fotos · con logo · condiciones en inglés", fila: EN_IDA, categoria: catEn(EN_IDA, true, null), logo: true },
+    { n: "EN ida y retorno · USD · descripción en inglés", fila: EN_RET, categoria: catEn(EN_RET, false, "- Air conditioning\n- Reclining seats"), logo: false },
+    { n: "EN · condiciones de Ajustes (castellano)", fila: EN_AJUSTES, categoria: catEn(EN_AJUSTES, false, null), logo: true },
+    { n: "EN EJEMPLO", fila: EN_RET, categoria: catEn(EN_RET, true, null), logo: true, ejemplo: true },
+  ];
+  const res: Awaited<ReturnType<typeof compararCaso>>[] = [];
+  for (const c of casosEn) res.push(await compararCaso(c));
+  const [e0, e1, e2] = res;
+  ok(e0.doc.notaTotales === C.LINEA_DISPONIBILIDAD_EN && e0.traza.some((x) => x.texto === C.LINEA_DISPONIBILIDAD_EN), "la línea de disponibilidad en inglés, bajo los totales");
+  ok(e0.doc.subtitulo.includes("Valid until") && !e0.doc.subtitulo.includes("Válida"), `el subtítulo en inglés (${e0.doc.subtitulo})`);
+  ok(e0.doc.tabla.filas[0].descripcion.startsWith("TRANSFER ONE WAY · ") && e1.doc.tabla.filas[0].descripcion.startsWith("TRANSFER ROUND TRIP · "), "la descripción del ítem en inglés");
+  const desc0 = e0.doc.pagina2.caracteristicas!.vehiculos[0].descripcion, desc1 = e1.doc.pagina2.caracteristicas!.vehiculos[0].descripcion;
+  ok(/for up to \d+ passengers/.test(desc0) && !/Aire acondicionado/.test(desc0), `sin descripción en inglés: la frase del sistema, nunca la de castellano (${desc0})`);
+  ok(desc1 === "- Air conditioning\n- Reclining seats" || desc1.includes("Air conditioning"), `con descripción en inglés, esa (${desc1})`);
+  // Ninguna fuga de castellano en lo que arma el sistema (con las condiciones en inglés).
+  const FUGA = /(?:^|[^\p{L}])su(?=[^\p{L}])|usted|traslado|cotización|le envío|pasajeros|maletas|adelanto|válida/iu;
+  for (const [r, n] of [[e0, "EN ida"], [e1, "EN ida y retorno"]] as const) {
+    const todo = textosDelPdf(r.bytes).join(" ");
+    const m = FUGA.exec(todo);
+    ok(!m, `${n}: el PDF en inglés no lleva castellano del sistema${m ? ` («${todo.slice(Math.max(0, m.index - 30), m.index + 30)}»)` : ""}`);
+    const htmlTxt = desescapar(r.html.replace(/<style>[\s\S]*?<\/style>/, "").replace(/<script>[\s\S]*?<\/script>/g, "").replace(/<[^>]+>/g, " "));
+    const mh = FUGA.exec(htmlTxt);
+    ok(!mh, `${n}: el HTML en inglés tampoco${mh ? ` («${htmlTxt.slice(Math.max(0, mh.index - 30), mh.index + 30)}»)` : ""}`);
+  }
+  ok(e2.doc.notaTotales === C.LINEA_DISPONIBILIDAD_EN, "con condiciones en castellano, lo del sistema sigue en inglés (las condiciones quedan para revisión)");
+  // Sin idioma: la entrada de castellano no cambió (los casos de la sección 2 siguen idénticos).
+  const esA = C.entradaCorporativaTraslado(IDA, { empresa: perfil, celular: "51966707225", supabaseUrl: BASE, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
+  const esB = C.entradaCorporativaTraslado({ ...IDA, idioma_pdf: "es" }, { empresa: perfil, celular: "51966707225", supabaseUrl: BASE, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
+  ok(JSON.stringify(esA) === JSON.stringify(esB) && esA.idioma === "es" && !("itemsEnIdioma" in esA), "sin idioma, la entrada de siempre (castellano)");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

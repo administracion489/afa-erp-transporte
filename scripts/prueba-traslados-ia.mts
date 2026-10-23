@@ -362,7 +362,7 @@ seccion("6. planEnvio: solo el aeropuerto sale solo, y solo con todo encendido")
   const sinCol = zonasBase as E.ZonaEnvio[];
   const r3 = M.evaluarTraslado(pedido(), { ...ctx, zonas: sinCol });
   ok(E.planEnvio({ resultado: r3, envioMaestro: true, zonas: sinCol, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [] }).decision === "revision", "sin la columna de zonas nada sale solo");
-  ok(Object.keys(E.MOTIVO_REVISION).length === 11 && Object.values(E.MOTIVO_REVISION).every((m) => m.texto && m.arreglo), "once motivos, cada uno con su arreglo");
+  ok(Object.keys(E.MOTIVO_REVISION).length === 12 && Object.values(E.MOTIVO_REVISION).every((m) => m.texto && m.arreglo), "doce motivos, cada uno con su arreglo");
 }
 
 // ── 7. Sin precio nunca se envía ─────────────────────────────────────────────
@@ -2119,6 +2119,310 @@ seccion("23. Cuentas y condiciones de la plantilla de traslados: inactiva, disti
     ok(confVacia.some((l) => l.includes("BCP") && l.includes("dólares")) && !confVacia.some((l) => l.includes("No son")), "al vaciar la celda (sin plantilla): las cuentas de corporativo");
     ok(PA.lineasConfirmTraslado({ resultante: null, plantillas: [CORP23], perfil: undefined, segmento: "particular" })[0].startsWith("No se pudo leer el perfil"), "sin perfil no se afirman cuentas");
   }
+}
+
+// ── 24. El cliente en inglés: idioma × moneda, sin que el modelo decida nada ──────
+seccion("24. Inglés: la herramienta, la entrada, la firma, los textos y la fila (sin idioma, byte a byte)");
+{
+  const ON = { PEN: true, USD: true }, OFF = { PEN: false, USD: false }, SOLO_USD = { PEN: false, USD: true };
+  /** La lista de fuga: castellano que no puede aparecer en un texto en inglés. */
+  const FUGA = /(?:^|[^\p{L}])su(?=[^\p{L}])|usted|traslado|cotización|le envío|pasajeros|maletas|adelanto|válida/iu;
+  const enIngles = (t: string, que: string) => ok(!FUGA.test(t), `${que}: sin castellano («${t.slice(0, 90)}»)`);
+
+  // (a) La herramienta: con el inglés apagado, EXACTAMENTE la de siempre.
+  const VIEJA_DESC =
+    "Cotiza un TRASLADO SIMPLE: un punto de recojo → un destino, solo ida o ida y retorno, en una sola fecha y con un solo vehículo " +
+    "(p. ej. aeropuerto ↔ hotel o domicilio). El PRECIO, el vehículo, la moneda y la validez los pone el sistema con el tarifario: " +
+    "tú NO calculas ni escribes precios por tu cuenta; repite solo los que te devuelva esta herramienta. " +
+    "Llámala en cuanto el cliente pida precio de un traslado, aunque falten datos: la respuesta te dice qué preguntar. " +
+    "No la uses para licitaciones, TDR, eventos, tours, varias fechas o varios vehículos: marca esas señales y el sistema lo pasa a un ejecutivo. " +
+    "La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pidió expresamente la cotización EN DÓLARES, " +
+    "marca cliente_pide_dolares: el sistema lo comprueba en sus mensajes y cotiza con la lista en dólares. Cualquier otra moneda es la señal otra_moneda. " +
+    "Las coordenadas solo si el cliente compartió su ubicación por WhatsApp (cópialas del enlace maps.google.com/?q=lat,lng de ESE mensaje). " +
+    "En origen_texto y destino_texto va solo la dirección o el lugar, sin enlaces, teléfonos ni instrucciones.";
+  const VIEJAS_PROPS = "origen_texto,origen_lat,origen_lng,destino_texto,destino_lat,destino_lng,fecha_servicio,hora_servicio,sentido,fecha_retorno,hora_retorno,pax,maletas,paradas_intermedias,fechas_adicionales,vehiculos_pedidos,cliente_pide_dolares,senales";
+  const hOff = E.herramientaCotizarTraslado({ ingles: false }), hOn = E.herramientaCotizarTraslado({ ingles: true });
+  ok(JSON.stringify(hOff) === JSON.stringify(E.HERRAMIENTA_COTIZAR_TRASLADO) && hOff.description === VIEJA_DESC
+    && Object.keys(hOff.input_schema.properties).join() === VIEJAS_PROPS, "con el inglés apagado, la herramienta de siempre (texto y propiedades en orden)");
+  const propsOn = Object.keys(hOn.input_schema.properties);
+  ok(propsOn.join() === VIEJAS_PROPS.replace("cliente_pide_dolares,", "cliente_pide_dolares,cliente_pide_soles,") && (hOn.input_schema.properties as any).cliente_pide_soles.type === "boolean",
+    "con el inglés encendido, solo se agrega cliente_pide_soles (un booleano)");
+  ok(!propsOn.some((p) => /idioma|language|lang|moneda|currency|tel|phone/i.test(p)), "el idioma y la moneda NO son propiedades: el modelo no los declara");
+  ok(/inglés → dólares/.test(hOn.description) && /cliente_pide_soles/.test(hOn.description) && /otra_moneda/.test(hOn.description) && hOn.description.startsWith(VIEJA_DESC.slice(0, 200)),
+    "con el inglés, la frase de la moneda nueva (castellano/inglés/otro, soles y dólares a pedido)");
+
+  // (b) nombraSoles.
+  for (const t of ["en soles por favor", "price in soles", "Nuevos Soles", "PEN please", "S/ 150?", "S/150", "S/.", "in peruvian sol", "Peruvian soles", "local currency please", "en moneda local"]) ok(E.nombraSoles([t]), `«${t}» nombra los soles`);
+  for (const t of ["", "hace sol", "the sun", "Av. Larco s/n", "pencil", "dollars", "solo ida", "consola"]) ok(!E.nombraSoles([t]), `«${t}» no nombra los soles`);
+  ok(!E.nombraSoles(null) && !E.nombraSoles([null, 5] as unknown[]), "sin textos, no");
+
+  // (c) entradaDelAgente: sin idioma, byte a byte el algoritmo de antes (copiado literal); el input
+  //     del modelo nunca pone el idioma ni la moneda.
+  const entradaVieja = (input: unknown, remitente: { canal: string; waId: string | null }, textosUbicacion: string[], textosCliente: readonly unknown[] = []): unknown => {
+    const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+    const lugar = (texto: unknown, lat: unknown, lng: unknown) => {
+      const t = (typeof texto === "string" ? texto : "").trim();
+      const c = E.coordenadasVerificadas(lat, lng, textosUbicacion);
+      return c ? { lat: c.lat, lng: c.lng, texto: t || undefined } : t;
+    };
+    const wa = remitente?.canal === "whatsapp" && typeof remitente.waId === "string" && remitente.waId.trim() ? remitente.waId.trim() : null;
+    const pideDolares = o.cliente_pide_dolares === true && E.nombraDolares(textosCliente);
+    const senales = pideDolares && Array.isArray(o.senales) ? o.senales.filter((x) => x !== "otra_moneda") : o.senales;
+    return {
+      origen: lugar(o.origen_texto, o.origen_lat, o.origen_lng),
+      destino: lugar(o.destino_texto, o.destino_lat, o.destino_lng),
+      fecha_servicio: o.fecha_servicio, hora_servicio: o.hora_servicio,
+      sentido: o.sentido, fecha_retorno: o.fecha_retorno, hora_retorno: o.hora_retorno,
+      pax: o.pax, maletas: o.maletas,
+      paradas_intermedias: o.paradas_intermedias, fechas_adicionales: o.fechas_adicionales,
+      vehiculos_pedidos: o.vehiculos_pedidos, senales,
+      telefono: wa,
+      ...(pideDolares ? { pide_dolares: true } : {}),
+    };
+  };
+  const firmaVieja = (e: EntradaSimulador): string => {
+    const fl = (l: EntradaSimulador["origen"]) => typeof l === "string" ? M.claveNombre(l) : `@${l.lat.toFixed(5)},${l.lng.toFixed(5)}`;
+    const conRetorno = e.sentido === "ida_retorno";
+    return ["v1", fl(e.origen), fl(e.destino), e.fecha_servicio ?? "", e.hora_servicio ?? "", e.sentido ?? "",
+      conRetorno ? e.fecha_retorno ?? "" : "", conRetorno ? e.hora_retorno ?? "" : "", e.pax ?? "", e.maletas ?? "",
+      M.monedaDelPedido(e.telefono, e.pide_dolares).moneda ?? ""].join("|");
+  };
+  const IDIOMAS: ({ cliente: "es" | "en" | "otro" | null; ingles: { PEN: boolean; USD: boolean } | null } | undefined)[] = [
+    undefined, { cliente: null, ingles: ON }, { cliente: "es", ingles: ON }, { cliente: "en", ingles: null }, { cliente: "en", ingles: OFF },
+    { cliente: "otro", ingles: OFF }, { cliente: "en", ingles: ON }, { cliente: "otro", ingles: ON }, { cliente: "en", ingles: SOLO_USD },
+  ];
+  const TEXTOS: string[][] = [[], ["in dollars please"], ["en soles por favor"], ["price in soles or dollars?"], ["Hello, I need a transfer"]];
+  const INTRUSOS = [{}, { idioma_cliente: "en", pide_soles: true, idioma: "en", moneda: "USD", telefono: "+13055551234", language: "en" }];
+  let n = 0, viejas = 0, iguales = 0, firmasOk = 0, monedasOk = 0, conIdioma = 0, conSoles = 0, sinPaso = 0;
+  for (const wa of ["51966707225", "13055551234", null]) for (const pd of [undefined, true]) for (const ps of [undefined, true]) for (const tc of TEXTOS)
+    for (const intr of INTRUSOS) for (const idi of IDIOMAS) for (const sen of [undefined, ["otra_moneda"]]) {
+      n++;
+      const input = { origen_texto: "Aeropuerto Jorge Chávez", destino_texto: "Hotel Belmond, Miraflores", fecha_servicio: "2026-10-25", hora_servicio: "06:30", sentido: "ida", pax: 2, maletas: 2,
+        cliente_pide_dolares: pd, cliente_pide_soles: ps, senales: sen, ...intr };
+      const crudo = E.entradaDelAgente(input, { canal: "whatsapp", waId: wa }, [], tc, idi as any) as Record<string, unknown>;
+      const gate = !!idi && !!idi.ingles && (idi.ingles.PEN || idi.ingles.USD) && (idi.cliente === "en" || idi.cliente === "otro");
+      if (!gate) {
+        viejas++;
+        if (JSON.stringify(crudo) === JSON.stringify(entradaVieja(input, { canal: "whatsapp", waId: wa }, [], tc))) iguales++;
+      } else {
+        conIdioma++;
+        ok(crudo.idioma_cliente === idi!.cliente, "con el inglés encendido, el idioma que derivó el código");
+        const dol = pd === true && E.nombraDolares(tc), sol = ps === true && E.nombraSoles(tc);
+        ok((crudo.pide_soles === true) === (sol && !dol) && (crudo.pide_dolares === true) === (dol && !sol), `soles y dólares con sus dos confirmaciones, y con los dos a la vez ninguno (${JSON.stringify(tc)} ${pd} ${ps})`);
+        if (crudo.pide_soles === true) conSoles++;
+      }
+      // Invariante 3: lo que el modelo pone en el input no llega.
+      ok(crudo.telefono === (wa ?? null) && !("moneda" in crudo) && !("idioma" in crudo) && !("language" in crudo)
+        && (gate || (!("idioma_cliente" in crudo) && !("pide_soles" in crudo))), "el input del modelo no cambia ni el idioma ni la moneda");
+      // Invariante 2: la moneda de la firma es la del motor.
+      const v = validarEntrada(crudo);
+      if (!v.ok) { ok(false, "validable"); continue; }
+      const e = v.entrada;
+      const f = E.firmaPedido(e).split("|");
+      if (!e.idioma_cliente && E.firmaPedido(e) === firmaVieja(e)) firmasOk++;
+      if (e.idioma_cliente) ok(f[f.length - 1] === "en" && f.length === 12, "con idioma, «en» al final de la firma");
+      const r = M.evaluarTraslado({ origen: AEROP, destino: MIRA, fecha_servicio: e.fecha_servicio, hora_servicio: e.hora_servicio, sentido: e.sentido, pax: e.pax, maletas: e.maletas,
+        telefono: e.telefono, pide_dolares: e.pide_dolares === true, idioma_cliente: e.idioma_cliente ?? null, pide_soles: e.pide_soles === true, senales: e.senales }, ctx);
+      // Solo los pedidos que llegan al paso de la moneda (un pedido complejo se deriva antes).
+      if (r.moneda == null && r.codigo !== "sin_moneda") { sinPaso++; continue; }
+      if ((r.moneda ?? "") === f[10]) monedasOk++; else ok(false, `firma ${f[10]} vs motor ${r.moneda} (${JSON.stringify(e)})`);
+    }
+  ok(iguales === viejas, `sin el inglés encendido, entradaDelAgente es byte a byte la de antes (${iguales}/${viejas})`);
+  ok(firmasOk === viejas, `sin idioma, firmaPedido es byte a byte la de antes (${firmasOk}/${viejas})`);
+  ok(monedasOk === n - sinPaso && monedasOk > 0, `la moneda de la firma es la del motor en todo el barrido (${monedasOk}/${n - sinPaso}; ${sinPaso} derivados antes de la moneda)`);
+  ok(conIdioma > 0 && conSoles > 0, `corolario: el barrido sí produce idioma (${conIdioma}) y soles a pedido (${conSoles})`);
+  console.log(`  barrido: ${n} entradas`);
+  // Volver al castellano reusa la cotización de castellano (misma firma).
+  const b = validarEntrada(E.entradaDelAgente({ origen_texto: "Aeropuerto", destino_texto: "Miraflores", fecha_servicio: "2026-10-25", sentido: "ida", pax: 2, maletas: 0 }, { canal: "whatsapp", waId: "51966707225" }, [])) as any;
+  const bEn = validarEntrada(E.entradaDelAgente({ origen_texto: "Aeropuerto", destino_texto: "Miraflores", fecha_servicio: "2026-10-25", sentido: "ida", pax: 2, maletas: 0 }, { canal: "whatsapp", waId: "51966707225" }, [], [], { cliente: "en", ingles: ON })) as any;
+  ok(E.firmaPedido(bEn.entrada) !== E.firmaPedido(b.entrada) && E.firmaPedido(b.entrada) === firmaVieja(b.entrada), "el mismo pedido en inglés es otra cotización; en castellano, la de siempre");
+
+  // (d) faltaEnIdioma: la tabla exacta.
+  for (const f of Object.values(M.FALTA)) {
+    ok(E.faltaEnIdioma(f, "es") === f, `castellano tal cual («${f}»)`);
+    const en = E.faltaEnIdioma(f, "en");
+    ok(!!en && en !== f, `«${f}» tiene su inglés («${en}»)`);
+    enIngles(en ?? "", `falta «${f}»`);
+  }
+  for (const punto of ["recojo", "destino"] as const) {
+    const en = E.faltaEnIdioma(M.faltaDireccion(punto, "Hotel Belmond"), "en")!;
+    ok(en === `the exact address of the ${punto === "recojo" ? "pick-up point" : "destination"} (we could not find «Hotel Belmond»)`, `la dirección no encontrada, con su cita (${en})`);
+  }
+  ok(E.faltaEnIdioma("la hora de recojo", "en") === null && E.faltaEnIdioma("algo inventado", "es") === "algo inventado", "lo que no está en la tabla: null en inglés, tal cual en castellano");
+
+  // (e) Los textos del código en inglés: una sola versión, sin castellano.
+  const EN_TU: EstiloMensajes = { tratamiento: "tu", preguntas: "todo_junto", idioma: "en" };
+  const ESTILOS_EN: EstiloMensajes[] = ESTILOS.map((e) => ({ ...e, idioma: "en" }));
+  const L_EN = C.LINEA_DISPONIBILIDAD_EN;
+  ok(C.lineaDisponibilidad("en") === L_EN && C.lineaDisponibilidad("es") === C.LINEA_DISPONIBILIDAD, "la línea de disponibilidad en los dos idiomas");
+  const baseEn = { numero: "00123", total: "US$ 118.00", validez: "Nov 18, 2026" };
+  const LIT_EN = {
+    auto: `Here is quotation No. 00123 for your transfer. The total is US$ 118.00 (including IGV, Peruvian VAT), valid until Nov 18, 2026. ${L_EN}`,
+    ya: `I already sent you quotation No. 00123 for your transfer in this chat. The total is US$ 118.00 (including IGV, Peruvian VAT), valid until Nov 18, 2026. ${L_EN}`,
+    rev: "I've registered your transfer request with quotation No. 00123. One of our agents is reviewing it and will send it to you in this chat shortly.",
+  };
+  for (const e of ESTILOS_EN) {
+    const auto = E.mensajeCotizacionCodigo({ ...baseEn, decision: "automatico", estilo: e });
+    const ya = E.mensajeCotizacionCodigo({ ...baseEn, decision: "automatico", yaEnviada: true, estilo: e });
+    const rev = E.mensajeCotizacionCodigo({ ...baseEn, decision: "revision", estilo: e });
+    ok(auto === LIT_EN.auto && ya === LIT_EN.ya && rev === LIT_EN.rev, `${nombreEstilo(e)} en inglés: una sola versión, los tres literales (${auto} | ${ya} | ${rev})`);
+    for (const m of [auto, ya, rev]) enIngles(m, `mensaje en inglés ${nombreEstilo(e)}`);
+  }
+  ok(E.mensajeCotizacionCodigo({ numero: "9", decision: "automatico", estilo: EN_TU }) === `Here is quotation No. 9 for your transfer. ${L_EN}`
+    && E.mensajeCotizacionCodigo({ numero: "9", decision: "automatico", validez: "Jan 1, 2027", estilo: EN_TU }) === `Here is quotation No. 9 for your transfer. The quotation is valid until Jan 1, 2027. ${L_EN}`, "en inglés sin cifras, y solo con validez");
+  // Sin idioma (o «es»), byte a byte el castellano de siempre.
+  for (const e of ESTILOS) for (const d of ["automatico", "revision"] as const) for (const ya of [false, true]) {
+    const x = { numero: "00123", total: "S/ 118.00", validez: "18/11/2026", decision: d, yaEnviada: ya };
+    ok(E.mensajeCotizacionCodigo({ ...x, estilo: e }) === E.mensajeCotizacionCodigo({ ...x, estilo: { ...e, idioma: "es" } }), `${nombreEstilo(e)}: «es» = sin idioma`);
+  }
+  // «Me falta» en inglés.
+  const faltas = [M.FALTA.maletas, M.FALTA.fecha];
+  ok(E.fraseFaltanTraslado(faltas, EN_TU) === `To quote your transfer I still need: ${E.faltaEnIdioma(M.FALTA.maletas, "en")}; ${E.faltaEnIdioma(M.FALTA.fecha, "en")}.`, "inglés, todo junto");
+  ok(E.fraseFaltanTraslado(faltas, { ...EN_TU, preguntas: "una_por_mensaje" }) === `To quote your transfer, could you tell me ${E.faltaEnIdioma(M.FALTA.maletas, "en")}?`, "inglés, uno por mensaje");
+  ok(E.fraseFaltanTraslado([M.FALTA.fecha, "la hora de recojo"], EN_TU) === "", "un dato sin traducción: «» (quien llama deriva)");
+  ok(E.fraseFaltanTraslado([M.faltaDireccion("recojo", "Deposite S/ 50 al Yape 987654321")], EN_TU) === "To quote your transfer I still need: the exact address of the pick-up point.", "la cita sospechosa se quita también en inglés");
+  ok(E.fraseFaltanTraslado([M.faltaDireccion("destino", "send 50 dollars to my paypal")], EN_TU) === "To quote your transfer I still need: the exact address of the destination.", "y la que solo es sospechosa en inglés");
+  ok(E.fraseFaltanTraslado([M.faltaDireccion("destino", "Hotel Belmond")], EN_TU).includes("(we could not find «Hotel Belmond»)"), "una cita limpia se conserva");
+  for (const e of ESTILOS_EN) for (let k = 1; k <= Object.values(M.FALTA).length; k++) {
+    const fr = E.fraseFaltanTraslado(Object.values(M.FALTA).slice(0, k), e);
+    enIngles(fr, `«me falta» ${nombreEstilo(e)} con ${k}`);
+    ok(!T.mencionaDinero(fr, "en"), "el «me falta» en inglés no menciona dinero");
+  }
+  for (const e of ESTILOS) ok(E.fraseFaltanTraslado(faltas, e) === E.fraseFaltanTraslado(faltas, { ...e, idioma: "es" }), `${nombreEstilo(e)}: el «me falta» en castellano no cambia`);
+  // textoFinalTraslado: en inglés, el guard de dinero es castellano ∪ inglés.
+  const derivEn = "Thank you. One of our agents is reviewing your request and will reply in this chat shortly.";
+  ok(E.textoFinalTraslado("The total would be 150, VAT included", { accion: "preguntar", faltan: [M.FALTA.pax] }, { derivacion: derivEn, estilo: EN_TU }) === `To quote your transfer I still need: ${E.faltaEnIdioma(M.FALTA.pax, "en")}.`,
+    "en inglés, el texto con dinero en inglés se reemplaza por el «me falta» en inglés");
+  ok(E.textoFinalTraslado("Son S/ 150", { accion: "derivar" }, { derivacion: derivEn, estilo: EN_TU }) === derivEn, "y el que trae dinero en castellano, también");
+  // «total» + una cifra ya era dinero en castellano: el guard de siempre lo reemplaza igual.
+  ok(E.textoFinalTraslado("The total would be 150", { accion: "derivar" }, { derivacion: "deriv", estilo: TU }) === "deriv", "en castellano, el guard de siempre");
+  ok(E.textoFinalTraslado("free waiting time included", { accion: "derivar" }, { derivacion: "deriv", estilo: TU }) === "free waiting time included", "«free» solo cuenta con el inglés (en castellano pasa como siempre)");
+  ok(E.textoFinalTraslado("free waiting time included", { accion: "derivar" }, { derivacion: derivEn, estilo: EN_TU }) === derivEn, "con el inglés, «free» es dinero");
+  ok(E.textoFinalTraslado("Can you tell me your flight number?", { accion: "preguntar", faltan: [M.FALTA.pax] }, { derivacion: derivEn, estilo: EN_TU }) === "Can you tell me your flight number?", "un texto limpio del modelo pasa intacto");
+  const cotEn = { numero: "00123", decision: "automatico" as const, total: "US$ 118.00", validez: "Nov 18, 2026" };
+  ok(E.textoFinalTraslado("anything", { accion: "cotizar", cotizacion: cotEn }, { derivacion: derivEn, estilo: EN_TU }) === LIT_EN.auto, "con cotización, el texto del código en inglés");
+
+  // (f) Invariante 6: mencionaDinero(x, "en") ⊇ mencionaDinero(x, "es").
+  const SI_EN = ["the total would be 150", "around one hundred fifty dollars", "150 USD", "$150", "free waiting time", "20% off", "VAT included", "20 bucks", "it costs 80", "fee of 30", "20 percent discount", "price per leg is 45"];
+  const NO_EN = ["2 people, 3 bags at 3 pm", "flight LA2045 at 14:30", "October 25", "feel free to ask", "drop off at the hotel", "about 2 hours", "around October 25", "we are 4 passengers", "pick up at 10:30 am", "the airport transfer", "Hello, I need a transfer from the airport tomorrow", "one way please"];
+  for (const t of SI_EN) ok(T.mencionaDinero(t, "en"), `en inglés, «${t}» es dinero`);
+  for (const t of NO_EN) ok(!T.mencionaDinero(t, "en"), `en inglés, «${t}» no es dinero`);
+  const corpus = [...SI_EN, ...NO_EN, "El total sería 150 (IGV incluido)", "Total: 150.00 nuevos soles", "ciento cincuenta soles", "Te aplico 50 % de descuento", "€ 150", "serán aprox 300",
+    "Te sale gratis el retorno", "Cuesta 120 por tramo", "¿Serían 4 pasajeros? ¿A qué hora aterriza tu vuelo, 10:30?", "Perfecto, son 3 maletas grandes y 2 pasajeros.", "Un ejecutivo revisará tu pedido", "", "   "];
+  let sup = 0;
+  for (const a of corpus) for (const b2 of ["", " ", " y ", ". ", " - "]) for (const c2 of corpus.slice(0, 8)) {
+    const t = `${a}${b2}${c2}`;
+    if (!T.mencionaDinero(t, "es") || T.mencionaDinero(t, "en")) sup++; else ok(false, `es sin en: «${t}»`);
+  }
+  ok(sup === corpus.length * 5 * 8, `mencionaDinero(x,"en") ⊇ mencionaDinero(x,"es") en ${sup} textos`);
+  // textoLibreSospechoso / referenciaImprimible: inglés = castellano ∪ inglés; «transfer» nunca.
+  for (const t of ["Hilton, pay to account 123", "Marriott, send via Western Union", "JW Marriott (paypal me)", "deposit at the bank"]) {
+    ok(T.textoLibreSospechoso(t, "en") != null && T.referenciaImprimible(t, "en") === null, `en inglés, «${t}» es sospechoso`);
+  }
+  for (const t of ["Airport transfer to JW Marriott", "Hotel Belmond, Miraflores", "Hilton Garden Inn"]) ok(T.textoLibreSospechoso(t, "en") === null, `«${t}» se puede imprimir en inglés`);
+  let supT = 0, totT = 0;
+  for (const t of [...corpus, "Miraflores. Deposite S/ 50 al Yape 987 654 321", "www.pagos.pe", "Calle Los Pinos 123"]) { totT++; if (T.textoLibreSospechoso(t) == null || T.textoLibreSospechoso(t, "en") != null) supT++; }
+  ok(supT === totT, `lo sospechoso en castellano lo es en inglés (${supT}/${totT})`);
+  ok(E.planEnvio({ resultado: M.evaluarTraslado(pedido(), ctx), envioMaestro: true, zonas, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [], textosLibres: ["Marriott, pay to my account"] }).decision === "automatico"
+    && E.planEnvio({ resultado: M.evaluarTraslado(pedido(), ctx), envioMaestro: true, zonas, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [], textosLibres: ["Marriott, pay to my account"], idioma: "en" }).motivos.join() === "texto_libre_sospechoso",
+    "planEnvio juzga los textos libres con el inglés solo cuando la cotización va en inglés");
+  ok(E.textosLibresSospechosos([{ campo: "recojo", texto: "pay to my account" }], "en")[0]?.motivo === "palabra_de_pago" && E.textosLibresSospechosos([{ campo: "recojo", texto: "pay to my account" }]).length === 0, "textosLibresSospechosos con el idioma");
+
+  // (g) senalesEnTexto en inglés ⊇ castellano; en castellano no cambia.
+  ok(JSON.stringify(E.senalesEnTexto(["it is for a wedding and a conference"], "en")) === JSON.stringify(["conference", "wedding"]), "wedding y conference en inglés");
+  ok(E.senalesEnTexto(["we have an RFP and the terms of reference"], "en").includes("RFP") && E.senalesEnTexto(["we have an RFP and the terms of reference"], "en").includes("terms of reference"), "RFP y terms of reference");
+  ok(E.senalesEnTexto(["any discount for a contract? it's a tender"], "en").length === 3 && E.senalesEnTexto(["a city tour or full day"], "en").length === 2, "discount, contract, tender; city tour y full day");
+  ok(E.senalesEnTexto(["it is for a wedding"]).length === 0 && E.senalesEnTexto(["Adjunto los TDR"], "en").join() === "TDR", "en castellano el inglés no cuenta; en inglés el castellano sí");
+  for (const t of ["Adjunto los TDR", "para un evento", "", "event", "wedding"]) {
+    const es = E.senalesEnTexto([t]), en = E.senalesEnTexto([t], "en");
+    ok(es.every((x) => en.includes(x)), `en ⊇ es («${t}»)`);
+  }
+
+  // (h) revisionPorCondiciones: la cotización en inglés con condiciones en castellano queda en revisión.
+  const cEs = { incluye: [], no_incluye: [], generales: ["x"] }, cEn = { ...cEs, version: 2, idioma: "en" };
+  ok(JSON.stringify(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEs })) === JSON.stringify(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEs, idiomaPdf: "es" })), "sin idiomaPdf (o «es»), lo de siempre");
+  ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEs, idiomaPdf: "en" }).motivos.join() === "condiciones_en_otro_idioma", "en inglés con condiciones en castellano → condiciones_en_otro_idioma");
+  ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEn, idiomaPdf: "en" }).motivos.length === 0, "en inglés con condiciones en inglés, nada");
+  ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEn, idiomaPdf: "es" }).motivos.length === 0, "en castellano, el idioma de las condiciones no se mira");
+  ok(E.MOTIVO_REVISION.condiciones_en_otro_idioma.texto === "La cotización va en inglés pero sus condiciones salieron de una plantilla en castellano."
+    && E.MOTIVO_REVISION.condiciones_en_otro_idioma.arreglo.includes("Traslado de la IA · inglés · soles") && E.MOTIVO_REVISION.condiciones_en_otro_idioma.arreglo.includes("/cotizaciones/plantillas"), "el motivo nuevo con su texto y su arreglo");
+
+  // (i) estadoCotizadorIA con el inglés: sin la clave, las líneas de siempre; parcial → ámbar.
+  const AMBAR = new Set(["sin_migracion", "agente_no_autonomo", "envio_sin_zonas"]);
+  const agenteOk = { activo: true, canales: ["whatsapp"], canales_autonomos: ["whatsapp"] };
+  let ne = 0;
+  for (const sinMigracion of [false, true]) for (const iaCotiza of [false, true]) for (const envioMaestro of [false, true]) for (const zs of [[], ["Aeropuerto Jorge Chávez"]])
+    for (const agente of [null, agenteOk, { ...agenteOk, canales_autonomos: [] }]) for (const ingles of [null, OFF, ON, SOLO_USD, { PEN: true, USD: false }]) {
+      ne++;
+      const base0 = { iaCotiza, envioMaestro, zonasConEnvio: zs, agente, sinMigracion };
+      const e0 = E.estadoCotizadorIA(base0), e1 = E.estadoCotizadorIA({ ...base0, ingles });
+      ok(e1.codigo === e0.codigo, "el inglés no cambia el código");
+      const parcial = !!ingles && ingles.PEN !== ingles.USD;
+      const llega = !sinMigracion && iaCotiza && !!agente;
+      ok(e1.ambar === (AMBAR.has(e1.codigo) || (llega && parcial)), `ámbar ⟺ los de siempre o el inglés parcial (${e1.codigo}, ${JSON.stringify(ingles)})`);
+      ok(llega ? e1.lineas.length === e0.lineas.length + 1 && JSON.stringify(e1.lineas.slice(0, -1)) === JSON.stringify(e0.lineas) : JSON.stringify(e1) === JSON.stringify(e0), "una línea más, al final, solo si la IA cotiza");
+    }
+  ok(E.estadoCotizadorIA({ iaCotiza: true, envioMaestro: true, zonasConEnvio: ["A"], agente: agenteOk, sinMigracion: false, ingles: null }).lineas.at(-1)!.includes("cotizaciones-09"), "sin la tabla nueva, nombra el SQL");
+  ok(E.estadoCotizadorIA({ iaCotiza: true, envioMaestro: true, zonasConEnvio: ["A"], agente: agenteOk, sinMigracion: false, ingles: SOLO_USD }).lineas.at(-1)!.includes("Traslado de la IA · inglés · soles"), "parcial: nombra la celda que falta");
+  console.log(`  barrido estadoCotizadorIA: ${ne}`);
+
+  // (j) La fila y su PDF: sin idioma, byte a byte; en inglés, los textos del código en inglés.
+  const p0 = pedido({ sentido: "ida_retorno", fecha_retorno: "2026-10-28", pax: 3, maletas: 2 });
+  const r0 = M.evaluarTraslado(p0, ctx);
+  const e0 = entradaDe(p0);
+  const x0 = { convId: "c", clienteId: null, atencion: "Ana", config, firma: "f", hoy: HOY };
+  const fEs = C.filaCotizacionTraslado(r0, e0, x0);
+  ok(JSON.stringify(fEs) === JSON.stringify(C.filaCotizacionTraslado(r0, e0, { ...x0, idioma: "es" })) && fEs.idioma_pdf === "es" && !("idioma_cliente" in fEs.traslado_json)
+    && fEs.items_json[0].descripcion.startsWith("TRASLADO IDA Y RETORNO · ") && fEs.items_json[0].descripcion.endsWith("pasajeros) · precio por tramo"), "sin idioma, la fila de siempre");
+  const eEn = { ...e0, idioma_cliente: "en" as const };
+  const fEn = C.filaCotizacionTraslado(r0, eEn, { ...x0, idioma: "en" });
+  ok(fEn.idioma_pdf === "en" && fEn.traslado_json.idioma_cliente === "en" && fEn.items_json[0].descripcion === `TRANSFER ROUND TRIP · ${fEn.origen} – ${fEn.destino} · ${r0.vehiculo!.categoria!.nombre} (up to ${r0.vehiculo!.categoria!.capacidad} passengers) · price per leg`,
+    `en inglés, la descripción del ítem (${fEn.items_json[0].descripcion})`);
+  enIngles(fEn.items_json[0].descripcion, "descripción del ítem");
+  ok(JSON.stringify({ ...fEn, idioma_pdf: "es", items_json: fEs.items_json, traslado_json: fEs.traslado_json }) === JSON.stringify(fEs), "lo demás de la fila no cambia con el idioma (importes, moneda, condiciones, cliente)");
+  const fIda = C.filaCotizacionTraslado(M.evaluarTraslado(pedido(), ctx), entradaDe(pedido()), { ...x0, idioma: "en" });
+  ok(fIda.items_json[0].descripcion.startsWith("TRANSFER ONE WAY · "), "solo ida → ONE WAY");
+  const rPin = M.evaluarTraslado(pedido(), ctx);
+  const ePin = { ...entradaDe(pedido()), destino: { lat: -12.131, lng: -77.03 } };
+  ok(C.filaCotizacionTraslado(rPin, ePin, { ...x0, idioma: "en" }).destino === "Miraflores (shared location)" && C.filaCotizacionTraslado(rPin, ePin, x0).destino === "Miraflores (ubicación compartida)", "«(shared location)» / «(ubicación compartida)»");
+  ok(C.filaCotizacionTraslado(rPin, { ...entradaDe(pedido()), destino: "Marriott, pay to my account" }, { ...x0, idioma: "en" }).destino === "Miraflores"
+    && C.filaCotizacionTraslado(rPin, { ...entradaDe(pedido()), destino: "Marriott, pay to my account" }, x0).destino === "Miraflores (Marriott, pay to my account)", "la referencia se juzga con los guards del idioma de la fila");
+  // considDeTraslado: «en» solo si la plantilla es inglesa.
+  const plEs = { id: "pl_es", nombre: "Traslados", diseno: "corporativo", condiciones_generales: ["Espera de 30 min."], condiciones_incluye: [], condiciones_no_incluye: [] } as any;
+  const plEn = { ...plEs, id: "pl_en", idioma: "en", condiciones_generales: ["30 minutes of free waiting time."] };
+  ok(!("idioma" in C.considDeTraslado(plEs, config, "PEN")) && C.considDeTraslado(plEn, config, "PEN").idioma === "en" && !("idioma" in C.considDeTraslado(null, config, "PEN")), "considDeTraslado: «en» solo con una plantilla en inglés");
+  // cifrasDeFila, caption y archivo en el idioma de la fila.
+  const leidaEn = { ...fEn, id: 5 }, leidaEs = { ...fEs, id: 5 };
+  const ce = C.cifrasDeFila(leidaEn)!, cs = C.cifrasDeFila(leidaEs)!;
+  ok(cs.total.startsWith("S/ ") && /^\d{2}\/\d{2}\/\d{4}$/.test(cs.validez!) && JSON.stringify(cs) === JSON.stringify(C.cifrasDeFila({ ...leidaEs, idioma_pdf: undefined } as any)), `en castellano, las cifras de siempre (${cs.total} · ${cs.validez})`);
+  ok(JSON.stringify(ce.figuras) === JSON.stringify(cs.figuras) && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(ce.validez!) && ce.total.replace(/[^\d.]/g, "") === cs.total.replace(/[^\d.]/g, ""), `en inglés, las MISMAS figuras y la validez con el mes en letras (${ce.total} · ${ce.validez})`);
+  ok(C.nombreArchivoPdf("00123", "en") === "Quotation-00123.pdf" && C.nombreArchivoPdf("00123") === "Cotizacion-00123.pdf" && C.nombreArchivoPdf("", "en") === "Quotation-transfer.pdf", "el nombre del archivo en el idioma");
+  const emp = empresaConDefectos({ nombre: "Empresa de Prueba SAC" } as any);
+  ok(C.captionDocumento({ id: 5, numero_cotizacion: "00123", origen: "a", destino: "b", idioma_pdf: "en" }, emp).startsWith("Quotation No. 00123 · a → b")
+    && C.captionDocumento({ id: 5, numero_cotizacion: "00123", origen: "a", destino: "b" }, emp).startsWith("Cotización N° 00123 · a → b"), "el caption en el idioma de la fila");
+  // La descripción de la unidad: en inglés, nunca la de castellano.
+  const catX = { nombre: "Minivan H1 10 pax", capacidad: 10, maletas_bodega: 4, descripcion_cliente: "- Aire acondicionado\n- Asientos reclinables", descripcion_cliente_en: null as string | null };
+  ok(C.descripcionCategoria(catX, "en") === "Minivan H1 for up to 10 passengers · luggage hold for 4 large (23 kg) suitcases" && C.descripcionCategoria(catX) === "- Aire acondicionado\n- Asientos reclinables", "sin descripción en inglés: la frase del sistema en inglés, nunca la de castellano");
+  ok(C.descripcionCategoria({ ...catX, descripcion_cliente_en: " - Air conditioning \n\n - Reclining seats " }, "en") === "- Air conditioning\n- Reclining seats", "con descripción en inglés, la escrita, limpia");
+  ok(C.descripcionCategoria({ nombre: "Auto", capacidad: 1, maletas_bodega: 1, descripcion_cliente: null }, "en") === "Auto for up to 1 passenger · luggage hold for 1 large (23 kg) suitcase", "singulares en inglés");
+  enIngles(C.descripcionCategoria(catX, "en"), "descripción de la unidad");
+  ok(C.vehiculoDeCategoria({ clave: "H1", ...catX }, { idioma: "en" })!.descripcion_unidad === C.descripcionCategoria(catX, "en") && C.vehiculoDeCategoria({ clave: "H1", ...catX })!.descripcion_unidad === C.descripcionCategoria(catX), "vehiculoDeCategoria con el idioma");
+  // La entrada del PDF.
+  const pdfEs = C.entradaCorporativaTraslado(leidaEs, { empresa: null, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
+  ok(JSON.stringify(pdfEs) === JSON.stringify(C.entradaCorporativaTraslado({ ...leidaEs, idioma_pdf: undefined } as any, { empresa: null, ahoraMs: Date.parse("2026-10-19T15:00:00Z") }))
+    && pdfEs.idioma === "es" && pdfEs.cot.idioma_pdf === "es" && pdfEs.notaTotales === C.LINEA_DISPONIBILIDAD && !("itemsEnIdioma" in pdfEs) && !("version" in (pdfEs.consid as object)), "en castellano, la entrada de siempre");
+  const pdfEn = C.entradaCorporativaTraslado(leidaEn, { empresa: null, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
+  ok(pdfEn.idioma === "en" && pdfEn.cot.idioma_pdf === "en" && pdfEn.notaTotales === L_EN && pdfEn.itemsEnIdioma === true && !("version" in (pdfEn.consid as object)), "en inglés: idioma, la línea en inglés, los ítems ya en inglés; condiciones de Ajustes sin marca");
+  const leidaEnCond = { ...leidaEn, consideraciones_json: C.considDeTraslado(plEn, config, "PEN") };
+  const pdfEnCond = C.entradaCorporativaTraslado(leidaEnCond, { empresa: null, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
+  ok((pdfEnCond.consid as any).version === 2 && (pdfEnCond.consid as any).idioma === "en", "con las condiciones de una plantilla en inglés, van marcadas (se imprimen tal cual)");
+  ok(C.entradaCorporativaTraslado({ ...leidaEn, items_json: [{ dias: 1, cantidad: 1, precio_unit: 100, descuento_pct: 0 }] }, { empresa: null }).items[0].descripcion === "Transfer", "el ítem sin descripción cae a «Transfer»");
+  // respuestaParaModelo: el total y la validez como los verá el cliente.
+  const rCot = M.evaluarTraslado(pedido({ telefono: "+13055551234" }), ctx);
+  const resEs = JSON.parse(E.respuestaParaModelo({ resultado: rCot, cotizacion: { numero: "1", decision: "automatico" } }));
+  const resEn = JSON.parse(E.respuestaParaModelo({ resultado: rCot, cotizacion: { numero: "1", decision: "automatico" }, idioma: "en" }));
+  ok(E.respuestaParaModelo({ resultado: rCot, cotizacion: { numero: "1", decision: "automatico" } }) === E.respuestaParaModelo({ resultado: rCot, cotizacion: { numero: "1", decision: "automatico" }, idioma: "es" }), "respuestaParaModelo: «es» = sin idioma");
+  ok(/^\d{2}\/\d{2}\/\d{4}$/.test(resEs.cotizacion.validez) && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(resEn.cotizacion.validez) && resEn.instruccion.includes(L_EN.charAt(0).toLowerCase() + L_EN.slice(1)), `respuestaParaModelo en inglés (${resEn.cotizacion.total} · ${resEn.cotizacion.validez})`);
 }
 
 console.log(`\n${oks} ok · ${fallos} fallos`);
