@@ -198,7 +198,7 @@ async function contarTopes(sb: Sb, convId: string, hoy: string): Promise<Conteos
   return { consultasConv: n(a), consultasDia: n(b), cotizacionesConv: n(c), cotizacionesDia: n(d) };
 }
 
-type Insercion = { ok: true; id: number; numero: string | null; created_at: string | null; sueltas: string[] } | { ok: false; motivo: string; detalle: string };
+type Insercion = { ok: true; id: number; numero: string | null; created_at: string | null; condiciones_token: string | null; sueltas: string[] } | { ok: false; motivo: string; detalle: string };
 
 /**
  * Inserta la cotización. Solo reintenta si el error NOMBRA una columna accesoria (un INSERT que no
@@ -206,13 +206,18 @@ type Insercion = { ok: true; id: number; numero: string | null; created_at: stri
  * `sueltas`: las columnas que no se guardaron (la fila leída de vuelta no las tiene).
  * `plantilla_pdf` es accesoria: sin ella, las condiciones ya van copiadas en la fila y el PDF toma
  * las cuentas de `corporativo`, como antes.
+ * `condiciones_token` (cotizaciones-08) se LEE de vuelta (lo pone la base): es el enlace a las
+ * condiciones completas del PDF. Si el error lo nombra, el INSERT entero falló (es una sola
+ * sentencia: no se escribió nada) y se repite sin pedirlo; la política va entera, sin enlace.
  */
 async function insertarCotizacion(sb: Sb, fila: FilaCotizacion): Promise<Insercion> {
   const f: Record<string, unknown> = { ...fila };
   const sueltas: string[] = [];
-  for (let i = 0; i < 5; i++) {
-    const { data, error } = await sb.from("cotizaciones").insert(f).select("id, numero_cotizacion, created_at").single();
-    if (!error && data) return { ok: true, id: Number(data.id), numero: data.numero_cotizacion ?? null, created_at: data.created_at ?? null, sueltas };
+  let conToken = true;
+  for (let i = 0; i < 6; i++) {
+    const { data, error } = await sb.from("cotizaciones").insert(f).select(`id, numero_cotizacion, created_at${conToken ? ", condiciones_token" : ""}`).single();
+    if (!error && data) return { ok: true, id: Number(data.id), numero: data.numero_cotizacion ?? null, created_at: data.created_at ?? null, condiciones_token: conToken ? (data.condiciones_token ?? null) : null, sueltas };
+    if (conToken && faltaAlguna(error, ["condiciones_token"] as const)) { conToken = false; continue; }
     const col = faltaAlguna(error, ["crm_conversacion_id", "traslado_json", "moneda", "tipo_cambio", "idioma_pdf", "plantilla_pdf"] as const);
     if (!col) return { ok: false, motivo: "No se pudo guardar la cotización del traslado", detalle: String(error?.message ?? "sin respuesta") };
     if (col === "crm_conversacion_id" || col === "traslado_json") {
@@ -302,7 +307,7 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   if (!ins.ok) return deriva(ins.motivo, pedido, ins.detalle);
   const guardada: Record<string, unknown> = { ...fila };
   for (const c of ins.sueltas) delete guardada[c];
-  const leida: FilaCotizacionLeida = { ...(guardada as FilaCotizacion), id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at };
+  const leida: FilaCotizacionLeida = { ...(guardada as FilaCotizacion), id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at, ...(ins.condiciones_token ? { condiciones_token: ins.condiciones_token } : {}) };
   return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n") });
 }
 

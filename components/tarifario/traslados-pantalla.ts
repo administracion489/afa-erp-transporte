@@ -521,7 +521,21 @@ export type GrupoCondicionesIA = {
    * el PDF imprime. Solo existe en una plantilla: en las listas de Ajustes no hay (`propia: false`).
    */
   reserva: ListaCondicion;
+  /**
+   * Su resumen (cotizaciones-08): lo que el PDF y el WhatsApp mandan EN LUGAR de la política cuando
+   * va el enlace a las condiciones completas. Solo con política; `propia: false` = la plantilla no lo
+   * tiene (la política va entera).
+   */
+  reserva_resumen: ListaCondicion;
 };
+
+/**
+ * Las líneas de la política Y de su resumen de un grupo: lo que se coteja con la configuración
+ * (`politicaContradiceConfig`): el resumen también lo recibe el cliente.
+ */
+export function lineasPoliticaYResumen(g: Pick<GrupoCondicionesIA, "reserva" | "reserva_resumen">): string[] {
+  return [...g.reserva.items, ...g.reserva_resumen.items];
+}
 
 /** Los códigos de `plantillaParaUso` que pintan ámbar: la configuración dice una cosa y la IA hace otra (o falta el SQL). */
 const USO_AMBAR: readonly CodigoUso[] = ["regla_inactiva", "regla_no_sirve_ia", "sin_plantilla", "sin_reglas"];
@@ -557,6 +571,7 @@ export function condicionesTrasladoIA(
       incluye: { items: c.incluye, propia: p ? Array.isArray(p.condiciones_incluye) : true },
       no_incluye: { items: c.no_incluye, propia: p ? Array.isArray(p.condiciones_no_incluye) : true },
       reserva: { items: c.reserva ?? [], propia: !!p && Array.isArray(p.condiciones_reserva) },
+      reserva_resumen: { items: c.reserva_resumen ?? [], propia: !!p && Array.isArray(p.condiciones_reserva_resumen) },
     });
   }
   return grupos;

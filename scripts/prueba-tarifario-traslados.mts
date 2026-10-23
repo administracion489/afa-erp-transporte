@@ -452,6 +452,31 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
     ok(/titulo="Reserva, cambios y cancelación" lista=\{g\.reserva\}/.test(ajustesSrc), "la pantalla de Ajustes enseña la política de cada plantilla");
   }
 
+  // Su resumen (cotizaciones-08): Ajustes enseña el MISMO que la IA copia a la fila, y solo con política.
+  {
+    const POL = ["Se confirma con el 50 % de adelanto.", "Cancelación con 24 horas o más: sin costo."];
+    const RES = ["  Adelanto del 50 %. ", "", "Sin costo con 24 h."];
+    const plsS = [CORP, { ...TIA, condiciones_reserva: POL, condiciones_reserva_resumen: RES }, { ...TUSD, condiciones_reserva: null, condiciones_reserva_resumen: RES }];
+    const gS = P.condicionesTrasladoIA(plsS, JUEGOS[0].reglas, CONFIGS[0]);
+    for (const segmento of PL.SEGMENTOS) {
+      const g = gS.find((x) => x.segmentos.some((y) => y.segmento === segmento))!;
+      const uso = PL.plantillaParaUso({ servicio: "traslado_ia", segmento }, plsS, JUEGOS[0].reglas);
+      const usd = segmento === "extranjero";
+      const cj = C.filaCotizacionTraslado(usd ? rUsd : rPen, entradaT(usd ? TEL.USD : TEL.PEN), {
+        convId: "c", clienteId: null, atencion: null, config: { validez_dias: 30, espera_gratis_min: 30, ...CONFIGS[0] } as unknown as CfgT, firma: "f", hoy: HOY, plantilla: uso.plantilla,
+      }).consideraciones_json as { reserva?: string[]; reserva_resumen?: string[] };
+      ok(JSON.stringify(g.reserva_resumen.items) === JSON.stringify(cj.reserva_resumen ?? []), `${segmento}: el resumen que enseña Ajustes = el que copia la IA (${JSON.stringify(g.reserva_resumen.items)} vs ${JSON.stringify(cj.reserva_resumen)})`);
+      ok(g.reserva_resumen.propia === Array.isArray((uso.plantilla as any)?.condiciones_reserva_resumen), `${segmento}: «sin resumen» ⟺ la plantilla no lo tiene`);
+      ok(JSON.stringify(P.lineasPoliticaYResumen(g)) === JSON.stringify([...(cj.reserva ?? []), ...(cj.reserva_resumen ?? [])]), `${segmento}: lineasPoliticaYResumen = la política y su resumen, en ese orden`);
+    }
+    const conPol = gS.find((g) => g.reserva.items.length > 0)!;
+    ok(JSON.stringify(conPol.reserva_resumen.items) === JSON.stringify(["Adelanto del 50 %.", "Sin costo con 24 h."]), "limpio: sin espacios de más ni líneas vacías");
+    const sinPol = gS.find((g) => g.fuente.tipo === "plantilla" && (g.fuente as any).plantilla.id === TUSD.id);
+    ok(!sinPol || sinPol.reserva_resumen.items.length === 0, "un resumen sin política no se copia (la IA no lo manda)");
+    const gSinR = P.condicionesTrasladoIA([], [], CONFIGS[0]);
+    ok(gSinR.every((g) => g.reserva_resumen.propia === false && g.reserva_resumen.items.length === 0 && P.lineasPoliticaYResumen(g).length === 0), "con las listas de Ajustes no hay resumen");
+  }
+
   // La espera gratis se coteja con lo que el PDF imprime, y se nombra la plantilla.
   ok(P.esperaQueNoCoincideIA(gT, 30).length === 0, "con 30 min en las plantillas y 30 de espera: nada");
   const e45 = P.esperaQueNoCoincideIA(gT, 45);

@@ -19,6 +19,11 @@
 //     en producción: no va en la fila (insertarlo falla); se devuelve aparte.
 //  4. LOS TEXTOS SON DE USTED Y DE TÚ, cada uno escrito entero (`estilo`, el mismo ajuste del agente),
 //     sin un solo dato de la empresa escrito aquí: las cuentas y el correo salen de la configuración.
+//  5. ANTES DE PAGAR, EL CLIENTE TIENE LAS CONDICIONES (cotizaciones-08). Con el enlace a las
+//     condiciones completas de la cotización (`/condiciones/<token>`), T1 y el pedido de pago de T4
+//     llevan el resumen de la política (o solo el enlace, si no hay resumen) en lugar de «Si desea, le
+//     envío nuestras políticas…», y T8 manda el resumen con el enlace. Sin enlace, los textos de
+//     siempre, byte a byte: sin el texto completo a mano, nunca se resume lo que mueve dinero.
 // Matriz: npx tsx scripts/prueba-reserva-pago.mts
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -35,6 +40,7 @@ import { minutoDelDiaLima, minutosAHhmm, fechaLima } from "../alertas-horario";
 import type { EstiloMensajes } from "../crm-ia-ajustes";
 import { MARGEN_DEFECTO_MIN, PLAZO_CONFIRMACION_DEFECTO_MIN } from "./reserva-orden";
 import { correosDeTexto } from "../ocupacion/copia-interna";
+import { esEnlaceCondiciones } from "../condiciones-publicas";
 
 const r2 = (x: number) => Math.round((x + Math.sign(x) * Number.EPSILON) * 100) / 100;
 const num = (v: unknown): number | null => {
@@ -809,13 +815,37 @@ export function bloquePago(b: BloquePago, estilo: EstiloMensajes): string {
     : `Para reservar su traslado de la cotización N° ${b.numero} se abona el ${fmtPct(b.pct)} % del total como adelanto: *${dinero(b.adelanto, b.moneda)}*.${saldo}\nPuede pagar a cualquiera de estas cuentas:\n${cuentas}`;
 }
 
-/** T1 — pedir el pago (pago primero). */
-export function mensajePedirPago(x: BloquePago & { plazoMin: number; atencion: Atencion; estilo: EstiloMensajes }): string {
+/**
+ * Las condiciones que acompañan un pedido de pago (T1, T4) y las políticas (T8): el resumen de la
+ * política de la cotización (`consideraciones_json.reserva_resumen`) y el enlace a sus condiciones
+ * completas (`enlaceCondiciones`, lib/condiciones-publicas.ts). Sin enlace válido no cambian nada.
+ */
+export type CondicionesMensaje = { resumen?: readonly unknown[] | null; enlace?: string | null };
+
+/** Las líneas del resumen, en una línea cada una y sin las vacías. */
+const lineasResumen = (c: CondicionesMensaje | null | undefined): string[] => (Array.isArray(c?.resumen) ? c!.resumen!.map(txt).filter(Boolean) : []);
+
+/**
+ * El bloque «Antes de pagar…» de T1 y T4: con resumen, sus puntos y el enlace; con solo el enlace, una
+ * línea con él; sin un enlace válido (`esEnlaceCondiciones`), null (el texto de siempre).
+ */
+export function bloqueCondicionesAntesDePagar(c: CondicionesMensaje | null | undefined, estilo: EstiloMensajes): string | null {
+  if (!c || !esEnlaceCondiciones(c.enlace)) return null;
+  const resumen = lineasResumen(c);
+  if (resumen.length) return `Antes de pagar, lo principal de nuestras condiciones:\n${resumen.map((l) => `• ${l}`).join("\n")}\nCondiciones completas: ${c.enlace}`;
+  return esTu(estilo)
+    ? `Antes de pagar, revisa nuestras condiciones de reserva, cambios y cancelación: ${c.enlace}`
+    : `Antes de pagar, revise nuestras condiciones de reserva, cambios y cancelación: ${c.enlace}`;
+}
+
+/** T1 — pedir el pago (pago primero). Con `condiciones` (y su enlace), el bloque «Antes de pagar…» en lugar de ofrecer las políticas. */
+export function mensajePedirPago(x: BloquePago & { plazoMin: number; atencion: Atencion; estilo: EstiloMensajes; condiciones?: CondicionesMensaje | null }): string {
   const plazo = textoPlazoMinutos(x.plazoMin);
   const horario = describirAtencion(x.atencion);
+  const cond = bloqueCondicionesAntesDePagar(x.condiciones, x.estilo);
   return esTu(x.estilo)
-    ? `${bloquePago(x, x.estilo)}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante. Lo verificamos con el banco y te confirmamos la disponibilidad de la unidad en un máximo de ${plazo} dentro de nuestro horario de atención (${horario}). Si no hubiera una unidad disponible, te devolvemos el 100 % de lo pagado. Si deseas, te envío nuestras políticas de reserva, cambios y cancelación.`
-    : `${bloquePago(x, x.estilo)}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante. Lo verificamos con el banco y le confirmamos la disponibilidad de la unidad en un máximo de ${plazo} dentro de nuestro horario de atención (${horario}). Si no hubiera una unidad disponible, le devolvemos el 100 % de lo pagado. Si desea, le envío nuestras políticas de reserva, cambios y cancelación.`;
+    ? `${bloquePago(x, x.estilo)}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante. Lo verificamos con el banco y te confirmamos la disponibilidad de la unidad en un máximo de ${plazo} dentro de nuestro horario de atención (${horario}). Si no hubiera una unidad disponible, te devolvemos el 100 % de lo pagado.${cond ? `\n${cond}` : " Si deseas, te envío nuestras políticas de reserva, cambios y cancelación."}`
+    : `${bloquePago(x, x.estilo)}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante. Lo verificamos con el banco y le confirmamos la disponibilidad de la unidad en un máximo de ${plazo} dentro de nuestro horario de atención (${horario}). Si no hubiera una unidad disponible, le devolvemos el 100 % de lo pagado.${cond ? `\n${cond}` : " Si desea, le envío nuestras políticas de reserva, cambios y cancelación."}`;
 }
 
 /** T2 — primero se confirma la unidad («no pague todavía»). Con crédito, sin adelanto. */
@@ -890,7 +920,10 @@ export function mensajeAdelantoIncompleto(x: { cobrado: number; falta: number; m
 
 export type PagoEnHayUnidad = "verificado" | "reportado" | "pedir" | "credito" | "incompleto";
 
-/** T4 — hay unidad. `pago` dice qué se le cuenta del pago; con «pedir» e «incompleto» va el bloque de pago. */
+/**
+ * T4 — hay unidad. `pago` dice qué se le cuenta del pago; con «pedir» e «incompleto» va el bloque de
+ * pago y, con `condiciones` (y su enlace), al final el bloque «Antes de pagar…».
+ */
 export function mensajeHayUnidad(x: {
   fecha: string | null; hora: string | null; origen: string; destino: string;
   pago: PagoEnHayUnidad;
@@ -898,9 +931,12 @@ export function mensajeHayUnidad(x: {
   cobrado?: number;
   /** Para «pedir» (el bloque de T1) e «incompleto» (las cuentas y lo que falta). */
   bloque?: BloquePago | null;
+  /** El resumen y el enlace a las condiciones completas: solo los usan «pedir» e «incompleto». */
+  condiciones?: CondicionesMensaje | null;
   estilo: EstiloMensajes;
 }): string {
   const tu = esTu(x.estilo);
+  const condPago = () => { const c = bloqueCondicionesAntesDePagar(x.condiciones, x.estilo); return c ? `\n${c}` : ""; };
   const ruta = [txt(x.origen), txt(x.destino)].filter(Boolean).join(" → ");
   const base = tu
     ? `Confirmamos que hay una unidad disponible para tu traslado${delCuando(x.fecha, x.hora)}${ruta ? ` (${ruta})` : ""}.`
@@ -923,15 +959,15 @@ export function mensajeHayUnidad(x: {
       const t11 = mensajeAdelantoIncompleto({ cobrado, falta, moneda: x.moneda, estilo: x.estilo });
       const cuentas = (b?.cuentas ?? []).map(txt).filter(Boolean).join("\n");
       return tu
-        ? `${base} ${t11}\nPuedes completarlo en cualquiera de estas cuentas:\n${cuentas}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante.`
-        : `${base} ${t11}\nPuede completarlo en cualquiera de estas cuentas:\n${cuentas}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante.`;
+        ? `${base} ${t11}\nPuedes completarlo en cualquiera de estas cuentas:\n${cuentas}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante.${condPago()}`
+        : `${base} ${t11}\nPuede completarlo en cualquiera de estas cuentas:\n${cuentas}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante.${condPago()}`;
     }
     case "pedir":
     default: {
       const bloque = x.bloque ? bloquePago(x.bloque, x.estilo) : "";
       return tu
-        ? `${base}\n${bloque}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante; lo verificamos con el banco y te enviamos la Confirmación de Reserva.`
-        : `${base}\n${bloque}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante; lo verificamos con el banco y le enviamos la Confirmación de Reserva.`;
+        ? `${base}\n${bloque}\nCuando hayas pagado, envíanos por este chat la foto o captura del comprobante; lo verificamos con el banco y te enviamos la Confirmación de Reserva.${condPago()}`
+        : `${base}\n${bloque}\nCuando haya pagado, envíenos por este chat la foto o captura del comprobante; lo verificamos con el banco y le enviamos la Confirmación de Reserva.${condPago()}`;
     }
   }
 }
@@ -997,12 +1033,21 @@ export function mensajeCancelacionResuelta(x: { monto: number; pct: number; mone
 
 /**
  * T8 — las políticas, al pie de la letra (las de la cotización). El correo, solo si el del perfil es
- * una dirección. null sin políticas (no se manda una lista vacía).
+ * una dirección. null sin políticas (no se manda una lista vacía). Con el resumen de la política Y el
+ * enlace a las condiciones completas (`resumen`, `enlace`), el resumen y el enlace; si falta uno de los
+ * dos, la política entera, como siempre.
  */
-export function mensajePoliticas(x: { numero: string; lineas: readonly unknown[]; email: string | null; estilo: EstiloMensajes }): string | null {
+export function mensajePoliticas(x: { numero: string; lineas: readonly unknown[]; email: string | null; estilo: EstiloMensajes; resumen?: readonly unknown[] | null; enlace?: string | null }): string | null {
   const lineas = (x.lineas ?? []).map(txt).filter(Boolean);
   if (!lineas.length) return null;
   const correo = correosDeTexto(x.email)[0] ?? null;
+  const resumen = lineasResumen({ resumen: x.resumen });
+  if (resumen.length && esEnlaceCondiciones(x.enlace)) {
+    const puntos = resumen.map((l) => `• ${l}`).join("\n");
+    return esTu(x.estilo)
+      ? `Lo principal de nuestras políticas de reserva, cambios y cancelación (las de tu cotización N° ${x.numero}):\n${puntos}\nLas condiciones completas de tu reserva están aquí: ${x.enlace}\nPara cancelar o cambiar tu reserva, escríbenos por este mismo chat${correo ? ` o al correo ${correo}` : ""}.`
+      : `Lo principal de nuestras políticas de reserva, cambios y cancelación (las de su cotización N° ${x.numero}):\n${puntos}\nLas condiciones completas de su reserva están aquí: ${x.enlace}\nPara cancelar o cambiar su reserva, escríbanos por este mismo chat${correo ? ` o al correo ${correo}` : ""}.`;
+  }
   const lista = lineas.map((l) => `• ${l}`).join("\n");
   return esTu(x.estilo)
     ? `Estas son nuestras políticas de reserva, cambios y cancelación (las mismas de tu cotización N° ${x.numero}):\n${lista}\nPara cancelar o cambiar tu reserva, escríbenos por este mismo chat${correo ? ` o al correo ${correo}` : ""}.`

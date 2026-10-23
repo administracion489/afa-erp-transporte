@@ -105,7 +105,11 @@ async function leerConversacion(conversacionId: unknown): Promise<{ celular: str
  */
 export async function entradaTrasladoPagina(
   cot: FilaCotizacionLeida,
-  x: { empresa: PerfilEmpresa | null; plantilla: PlantillaPdfCfg | null; cliente: ClienteErp | null },
+  x: {
+    empresa: PerfilEmpresa | null; plantilla: PlantillaPdfCfg | null; cliente: ClienteErp | null;
+    /** El origen del ERP en el navegador (`window.location.origin`): con él y el `condiciones_token` de la fila, el resumen de la política va con su enlace y su QR, como en el servidor. */
+    baseCondiciones?: string | null;
+  },
 ): Promise<(EntradaPdfCot & { clienteNoVerificado: boolean }) | null> {
   if (!esTrasladoIA(cot)) return null;
   const [categoria, conv] = await Promise.all([leerCategoria(cot.traslado_json?.categoria?.clave), leerConversacion(cot.crm_conversacion_id)]);
@@ -114,6 +118,7 @@ export async function entradaTrasladoPagina(
       empresa: x.empresa, cliente: x.cliente, celular: conv.celular, contactoClienteId: conv.contactoClienteId,
       plantilla: x.plantilla, categoria,
       supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL ?? null,
+      baseCondiciones: x.baseCondiciones ?? null,
     });
     const { vinculo } = clienteParaPdf(cot.cliente_id, x.cliente, { contactoClienteId: conv.contactoClienteId, waId: conv.celular });
     return { ...entrada, clienteNoVerificado: vinculo === "no_verificado" };

@@ -38,7 +38,7 @@ import type { ConfigTraslados } from "./datos";
 import { claveNombre, importesTraslado, tarifaDelPar, type CategoriaTraslado, type ResultadoTraslado, type TarifaTraslado, type UbicacionZona, type Zona } from "./motor";
 import { aPENdesdeCot, normalizarMoneda, revisarTipoCambio, totalesEnMoneda, type Moneda } from "../cotizacion-moneda";
 import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
-import { cuentasCorporativo, numeroCotizacion } from "../cotizacion-corporativo";
+import { cuentasCorporativo, enlaceCondiciones, numeroCotizacion } from "../cotizacion-corporativo";
 import type { ClientePdf, EntradaPdfCot, PlantillaPdfCfg } from "../cotizacion-pdf";
 import { considSnapshot, type PlantillaFila } from "../cotizacion-plantillas";
 import { MAX_DESCRIPCION_RENGLONES, MAX_RENGLONES_DESCRIPCION, type VehiculoPDF } from "../pdf-chrome";
@@ -87,8 +87,9 @@ export type TrasladoJson = {
  * (`considSnapshot`): el PDF imprime la fila. Sin ellas, como siempre (de `traslados_config`).
  * `reserva`: la política de reserva, cambios y cancelación de la plantilla (cotizaciones-06); solo
  * cuando la plantilla la tiene. `traslados_config` no tiene política: sin plantilla, no hay clave.
+ * `reserva_resumen`: su resumen (cotizaciones-08), solo con política y si la plantilla lo tiene.
  */
-export type ConsideracionesJson = { incluye: string[]; no_incluye: string[]; generales: string[]; reserva?: string[]; version?: number; plantilla?: string | null };
+export type ConsideracionesJson = { incluye: string[]; no_incluye: string[]; generales: string[]; reserva?: string[]; reserva_resumen?: string[]; version?: number; plantilla?: string | null };
 
 /** Las cuatro listas de `traslados_config` que pueden ir a las condiciones (de antes de cotizaciones-05). */
 export type ListasConfigTraslado = {
@@ -107,7 +108,8 @@ export type ListasConfigTraslado = {
  *    (`considSnapshot` con respaldo VACÍO: una lista NULL de la plantilla es una lista vacía, nunca
  *    las de Ajustes), en versión 2 y con su id. La de dólares ya trae sus líneas de dólares (la
  *    migración las traspasó como consideraciones + consideraciones_usd): no se suman aquí.
- *    La política de reserva (`reserva`) se copia igual, solo si la plantilla la tiene.
+ *    La política de reserva (`reserva`) se copia igual, solo si la plantilla la tiene, y su resumen
+ *    (`reserva_resumen`) solo si además la política quedó con alguna línea.
  *  · Sin plantilla: las de `traslados_config`, con las de dólares solo si se cotiza en dólares.
  *    Ahí no hay política de reserva: la fila va sin esa clave (el PDF no imprime el bloque).
  * En los dos casos, limpias: sin espacios de los bordes ni líneas vacías.
@@ -116,9 +118,11 @@ export function considDeTraslado(plantilla: PlantillaFila | null | undefined, co
   const limpia = (l: readonly unknown[] | null | undefined) => (Array.isArray(l) ? l : []).map((s) => String(s ?? "").trim()).filter(Boolean);
   if (plantilla) {
     const s = considSnapshot(plantilla, { incluye: [], no_incluye: [], generales: [] });
+    const reserva = Array.isArray(s.reserva) ? limpia(s.reserva) : null;
     return {
       incluye: limpia(s.incluye), no_incluye: limpia(s.no_incluye), generales: limpia(s.generales),
-      ...(Array.isArray(s.reserva) ? { reserva: limpia(s.reserva) } : {}),
+      ...(reserva ? { reserva } : {}),
+      ...(reserva?.length && Array.isArray(s.reserva_resumen) ? { reserva_resumen: limpia(s.reserva_resumen) } : {}),
       version: s.version, plantilla: s.plantilla,
     };
   }
@@ -188,6 +192,8 @@ export type FilaCotizacionLeida = {
   consideraciones_json?: Partial<ConsideracionesJson> | null;
   /** La plantilla PDF de la cotización (sus CUENTAS van en el PDF); null o ausente = `corporativo`. */
   plantilla_pdf?: string | null;
+  /** El token del enlace a sus condiciones completas (cotizaciones-08); ausente sin la migración. */
+  condiciones_token?: string | null;
   crm_conversacion_id?: string | null;
   traslado_json?: Partial<TrasladoJson> | null;
 };
@@ -628,6 +634,9 @@ export function celularImprimible(waId: string | null | undefined): string | nul
  * condiciones salen de la fila);
  * `categoria`, la de `traslado_categorias` (sin ella, la de `traslado_json`, sin fotos ni bodega);
  * `celular`, el wa_id de la conversación; `contactoClienteId`, el cliente vinculado a su contacto.
+ * `baseCondiciones`, el origen del ERP (`NEXT_PUBLIC_APP_URL` en el servidor): con él y el
+ * `condiciones_token` de la fila, el PDF imprime el resumen de la política con su enlace y su QR (si la
+ * fila lo tiene); sin él, la política entera.
  * El `cliente` solo se imprime si `clienteParaPdf` lo verifica. LANZA si la fila no tiene ítems.
  */
 export function entradaCorporativaTraslado(
@@ -644,6 +653,8 @@ export function entradaCorporativaTraslado(
     ejemplo?: boolean;
     /** Para filtrar las fotos que no son del bucket del propio proyecto (el servidor lo pasa). */
     supabaseUrl?: string | null;
+    /** El origen del ERP para el enlace a las condiciones completas (`enlaceCondiciones`). */
+    baseCondiciones?: string | null;
     ahoraMs?: number;
   },
 ): EntradaPdfCot {
@@ -667,6 +678,7 @@ export function entradaCorporativaTraslado(
     x.supabaseUrl !== undefined ? { supabaseUrl: x.supabaseUrl } : {});
   const cj = fila.consideraciones_json ?? {};
   const lista = (l: unknown) => (Array.isArray(l) ? l.map(v).filter(Boolean) : []);
+  const enlace = enlaceCondiciones(x.baseCondiciones, fila.condiciones_token);
   return {
     cot: {
       id: fila.id,
@@ -689,7 +701,11 @@ export function entradaCorporativaTraslado(
     })),
     vehiculos: veh ? [veh] : [],
     repr: "",
-    consid: { incluye: lista(cj.incluye), no_incluye: lista(cj.no_incluye), generales: lista(cj.generales), ...(Array.isArray(cj.reserva) ? { reserva: lista(cj.reserva) } : {}) },
+    consid: {
+      incluye: lista(cj.incluye), no_incluye: lista(cj.no_incluye), generales: lista(cj.generales),
+      ...(Array.isArray(cj.reserva) ? { reserva: lista(cj.reserva) } : {}),
+      ...(Array.isArray(cj.reserva_resumen) ? { reserva_resumen: lista(cj.reserva_resumen) } : {}),
+    },
     plantilla: "corporativo",
     cfg: cfgSoloCuentas(x.plantilla),
     empresa: x.empresa,
@@ -701,6 +717,8 @@ export function entradaCorporativaTraslado(
     validezHasta: tj?.validez_hasta ?? null,
     notaTotales: LINEA_DISPONIBILIDAD,
     omitirListasVacias: true,
+    // Sin base o sin token (el ejemplo del simulador, una fila sin la migración): la política entera.
+    ...(enlace ? { enlaceCondiciones: enlace } : {}),
   };
 }
 

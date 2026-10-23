@@ -646,5 +646,62 @@ console.log("8. La política de reserva (cotizaciones-06): solo la corporativa, 
   ok(enSin.avisos.some((a) => a.codigo === "textos_escritos_tal_cual" && /las consideraciones \(incluye\)/.test(a.detalle)), "el aviso de las listas de siempre dice lo mismo que antes");
 }
 
+console.log("9. El resumen de la política con su enlace y su QR (cotizaciones-08)");
+{
+  // Sin resumen O sin enlace: la política entera, BYTE A BYTE. Con los dos: el resumen, el enlace y el QR.
+  const POL = ["Se confirma con el 50 % de adelanto.", "Cancelación con 24 horas o más: sin costo.", "Si no se presenta, se cobra el 50 %."];
+  const RES = ["Adelanto del 50 % para reservar.", "Cancelación gratis con 24 h o más."];
+  const TOK = "123e4567-e89b-12d3-a456-426614174000";
+  const ENL = `https://www.ejemplo.pe/condiciones/${TOK}`;
+  const fija = (x: any = {}) => ({ ...DEFAULT_CONSID, reserva: POL, ...x, version: 2, plantilla: "corporativo" }) as any;
+  const html = (p: string, consid: any, enlace?: unknown, cfg: any = null, idioma: any = "es") =>
+    N.htmlCotizacion({ cot: COTS(1)[0], cliente: CLIENTES[2], items: ITEMS[0], vehiculos: [veh(1)], consid, plantilla: p, cfg, idioma, ...(enlace === undefined ? {} : { enlaceCondiciones: enlace as any }) }).html!;
+  const sinEstilo = (h: string) => h.replace(/<style>[\s\S]*?<\/style>/, "");
+  const base = html("corporativo", fija());
+  // (a) Lo de siempre, byte a byte: sin resumen (con o sin enlace), o con resumen y sin enlace válido.
+  for (const [n, h] of [
+    ["sin resumen ni enlace", html("corporativo", fija(), undefined)],
+    ["sin resumen, con enlace", html("corporativo", fija(), ENL)],
+    ["resumen vacío, con enlace", html("corporativo", fija({ reserva_resumen: [] }), ENL)],
+    ["resumen en blanco, con enlace", html("corporativo", fija({ reserva_resumen: ["", "  "] }), ENL)],
+    ["con resumen, sin enlace", html("corporativo", fija({ reserva_resumen: RES }), undefined)],
+    ["con resumen, enlace null", html("corporativo", fija({ reserva_resumen: RES }), null)],
+    ["con resumen, enlace inválido", html("corporativo", fija({ reserva_resumen: RES }), "https://otro.pe/x")],
+    ["con resumen, enlace http", html("corporativo", fija({ reserva_resumen: RES }), `http://www.ejemplo.pe/condiciones/${TOK}`)],
+  ] as const) ok(h === base, `${n}: el HTML de siempre (la política entera)`);
+  // (b) Con resumen y enlace: el resumen en lugar de la política, el enlace y el QR.
+  const r = sinEstilo(html("corporativo", fija({ reserva_resumen: RES }), ENL));
+  ok(r !== sinEstilo(base), "con resumen y enlace, el documento cambia");
+  ok(RES.every((l) => r.includes(`<li>${l}</li>`)) && !POL.some((l) => r.includes(`<li>${l}</li>`)), "imprime el resumen y no la política entera");
+  ok(r.includes("Condiciones completas de reserva, cambios y cancelación:") && r.includes(`<a href="${ENL}"`) && r.includes(`>${ENL}</a>`), "con el rótulo y el enlace");
+  ok(r.indexOf("📅 Reserva, cambios y cancelación") < r.indexOf(RES[0]) && r.indexOf(RES[0]) < r.indexOf("<svg") && r.indexOf("<svg") < r.indexOf(ENL), "título → resumen → QR → enlace");
+  const svg = r.slice(r.indexOf("<svg"), r.indexOf("</svg>") + 6);
+  ok(/viewBox="0 0 (\d+) \1"/.test(svg) && /width="96" height="96"/.test(svg) && !/https?:|data:|xlink/.test(svg.replace('xmlns="http://www.w3.org/2000/svg"', "")), "el QR es un SVG en línea (sin pedir nada a la red ni data URL)");
+  // El SVG dibuja EXACTAMENTE los módulos del QR (se reconstruye la matriz desde el path).
+  const { matrizQr, casillaOscura, SILENCIO_QR } = await import("../lib/qr-matriz");
+  const m = matrizQr(ENL)!;
+  const d = svg.match(/<path d="([^"]+)"/)![1];
+  const seg = [...d.matchAll(/M(\d+) (\d+)h(\d+)v1h-(\d+)z/g)].map((x) => [Number(x[2]) - SILENCIO_QR, Number(x[1]) - SILENCIO_QR, Number(x[3])]);
+  ok(seg.length === m.tramos.length && JSON.stringify(seg) === JSON.stringify(m.tramos), `el path del SVG son los tramos de matrizQr (${seg.length})`);
+  let malas = 0;
+  for (let f = 0; f < m.tamano; f++) for (let c = 0; c < m.tamano; c++) if (seg.some(([sf, sc, sl]) => sf === f && c >= sc && c < sc + sl) !== casillaOscura(m, f, c)) malas++;
+  ok(malas === 0, "casilla por casilla, el SVG es el QR");
+  // (c) Solo la corporativa: las otras tres no imprimen ni la política ni el resumen.
+  for (const p of ["moderno_fotos", "turistico", "ejecutivo"] as const) ok(html(p, fija({ reserva_resumen: RES }), ENL) === html(p, fija()), `${p}: no lo imprime`);
+  // (d) Sin política no se imprime nada, aunque haya resumen y enlace.
+  ok(html("corporativo", fija({ reserva: [], reserva_resumen: RES }), ENL) === html("corporativo", fija({ reserva: [] })), "sin política: ni el resumen ni el enlace");
+  // (e) Fila de antes en castellano: gana la política de la plantilla y el resumen (que es de la fila) no se usa.
+  const vieja = (cfg: any, enlace?: string) => html("corporativo", { ...DEFAULT_CONSID, reserva: POL, reserva_resumen: RES }, enlace, cfg);
+  ok(vieja({ condiciones_reserva: ["DE LA PLANTILLA"], condiciones_reserva_resumen: ["RESUMEN DE LA PLANTILLA"] }, ENL) === vieja({ condiciones_reserva: ["DE LA PLANTILLA"], condiciones_reserva_resumen: ["RESUMEN DE LA PLANTILLA"] }) && sinEstilo(vieja({ condiciones_reserva: ["DE LA PLANTILLA"] }, ENL)).includes("<li>DE LA PLANTILLA</li>"), "fila de antes con política de la plantilla: la entera, sin resumen (el enlace abriría la de la fila)");
+  ok(!sinEstilo(vieja({ condiciones_reserva_resumen: ["RESUMEN DE LA PLANTILLA"] }, ENL)).includes("RESUMEN DE LA PLANTILLA"), "el resumen de la plantilla nunca se imprime al imprimir (solo se copia al crear)");
+  ok(sinEstilo(vieja({}, ENL)).includes(`<li>${RES[0]}</li>`), "fila de antes sin política de la plantilla: la de la fila, y con su resumen");
+  // (f) En inglés: el rótulo traducido, el resumen tal cual.
+  const en = sinEstilo(html("corporativo", fija({ reserva_resumen: RES }), ENL, null, "en"));
+  ok(en.includes("Full booking, changes and cancellation terms:") && en.includes(`<li>${RES[0]}</li>`) && en.includes("<svg"), "en inglés: el rótulo en inglés y el resumen como se escribió");
+  // (g) Un texto escrito con markup no entra crudo.
+  const malo = sinEstilo(html("corporativo", fija({ reserva_resumen: ["<b>x</b> & \"y\""] }), ENL));
+  ok(malo.includes("<li>&lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;</li>"), "el resumen se escapa");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

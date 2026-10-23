@@ -48,7 +48,7 @@ import { leerPlantillasYReglas } from "../cotizacion-plantillas-datos";
 import { excesoCondiciones, plantillaParaUso, SEGMENTOS } from "../cotizacion-plantillas";
 import { mensajeSeguro } from "../mensaje-seguro";
 import { normalizarMoneda, type Moneda } from "../cotizacion-moneda";
-import { numeroCotizacion } from "../cotizacion-corporativo";
+import { enlaceCondiciones, numeroCotizacion } from "../cotizacion-corporativo";
 import type { PlantillaPdfCfg } from "../cotizacion-pdf";
 import type { PerfilEmpresa } from "../empresa-perfil";
 import { baseSupabase, objetoPrivadoDe } from "../storage-privado";
@@ -77,7 +77,7 @@ import {
   mensajeCanceladaSinPago, mensajeCancelacionRegistrada, mensajeCancelacionResuelta, vinculoContactoReserva,
   mensajeComprobanteRecibido, mensajeDisponibilidadPrimero, mensajeHayUnidad, mensajePagoNoEncontrado, mensajePedirPago,
   mensajePoliticas, mensajeSinUnidad, politicaContradiceConfig, puedePasar, queFalta,
-  type Adelanto, type BloquePago, type ConfigReserva, type CuentasMensaje, type EstadoSolicitud, type PagoEnHayUnidad,
+  type Adelanto, type BloquePago, type CondicionesMensaje, type ConfigReserva, type CuentasMensaje, type EstadoSolicitud, type PagoEnHayUnidad,
   type PagoSolicitud, type Pendiente, type CodigoCargo, type FacturaCargoActual,
 } from "./reserva-pago";
 import { TEXTO_COTEJO, comprobanteCuenta, cotejarComprobante, normalizarOperacion, type Cotejo, type LecturaComprobante } from "./comprobante-pago";
@@ -347,6 +347,9 @@ export type ContextoCotizacion = {
   cuentas: CuentasMensaje;
   frente: CuentasFrente;
   politica: string[];
+  /** El resumen de la política (cotizaciones-08), limpio; vacío sin política o sin resumen. */
+  resumen: string[];
+  /** Una línea de la política O de su resumen trae un enlace o un número de 6+ dígitos. */
   politicaSospechosa: boolean;
   zonaEnvio: boolean;
   credito: boolean;
@@ -361,8 +364,11 @@ export async function contextoCotizacion(sb: Sb, cotId: number): Promise<Context
   const [{ perfil }, pl] = await Promise.all([leerPerfilPdf(sb), plantillaYReferenciaCuentas(sb, fila.plantilla_pdf)]);
   const cuentas = cuentasEnMensaje(pl.usada, perfil, moneda);
   const frente = cuentasFrenteACorporativo({ plantilla: pl.usada, referencia: pl.referencia, empresa: perfil, moneda });
-  const politica = (Array.isArray(fila.consideraciones_json?.reserva) ? fila.consideraciones_json!.reserva! : []).map((l) => String(l ?? "").trim()).filter(Boolean);
-  const politicaSospechosa = condicionesSospechosas({ reserva: politica }).length > 0;
+  const limpia = (l: unknown) => (Array.isArray(l) ? l : []).map((x) => String(x ?? "").trim()).filter(Boolean);
+  const politica = limpia(fila.consideraciones_json?.reserva);
+  // El resumen solo existe con política (un resumen sin política no resume nada).
+  const resumen = politica.length ? limpia(fila.consideraciones_json?.reserva_resumen) : [];
+  const politicaSospechosa = condicionesSospechosas({ reserva: politica, reserva_resumen: resumen }).length > 0;
   // Las zonas del traslado: un fallo de lectura es «sin envío automático» (el lado seguro: primero se confirma la unidad).
   let zonaEnvio = false;
   try {
@@ -399,8 +405,22 @@ export async function contextoCotizacion(sb: Sb, cotId: number): Promise<Context
   }
   return {
     fila, numero: numeroCotizacion(fila), moneda, inicioMs: inicioServicioMs(fila), perfil, usada: pl.usada, referencia: pl.referencia,
-    cuentas, frente, politica, politicaSospechosa, zonaEnvio, credito, cliente,
+    cuentas, frente, politica, resumen, politicaSospechosa, zonaEnvio, credito, cliente,
   };
+}
+
+/**
+ * El resumen y el enlace a las condiciones completas de la cotización (`/condiciones/<token>`) que
+ * acompañan un pedido de pago (T1, T4) y las políticas (T8). Sin política, con una línea sospechosa
+ * (que no se manda), sin el dominio del ERP o sin el token (cotizaciones-08): ni resumen ni enlace, y
+ * los textos son los de siempre. Un resumen que no cabe (`excesoCondiciones`) no se manda: queda el enlace.
+ */
+export function condicionesDeContexto(cc: Pick<ContextoCotizacion, "fila" | "politica" | "resumen" | "politicaSospechosa">, appUrl: string | null | undefined): CondicionesMensaje {
+  if (!cc.politica.length || cc.politicaSospechosa) return { resumen: [], enlace: null };
+  const enlace = enlaceCondiciones(appUrl, cc.fila.condiciones_token);
+  if (!enlace) return { resumen: [], enlace: null };
+  const cabe = excesoCondiciones({ reserva_resumen: cc.resumen }).length === 0;
+  return { resumen: cabe ? cc.resumen : [], enlace };
 }
 
 /**
@@ -608,7 +628,7 @@ async function avisarPorConfirmar(ctx: CtxReservaIA, c: Creada, ahora: number, d
 }
 
 /** El texto que se le manda al cliente al crear (o al volver a pedir) una solicitud: T1 o T2. */
-function mensajeDeSolicitud(s: FilaSolicitud, cc: ContextoCotizacion, ahora: number, x: { cfg: ConfigReserva; agente: CtxReservaIA["agente"] }): string | null {
+function mensajeDeSolicitud(s: FilaSolicitud, cc: ContextoCotizacion, ahora: number, x: { cfg: ConfigReserva; agente: CtxReservaIA["agente"] }, deps: DepsReserva): string | null {
   const estilo = estiloDeAgente(x.agente);
   const pct = pctDe(s);
   const adel = adelantoDe(cc.fila, pct);
@@ -617,6 +637,7 @@ function mensajeDeSolicitud(s: FilaSolicitud, cc: ContextoCotizacion, ahora: num
     return mensajePedirPago({
       numero: cc.numero, moneda: adel.moneda, pct, adelanto: adel.adelanto, saldo: adel.saldo, cuentas: cc.cuentas.lineas,
       plazoMin: x.cfg.plazoConfirmacionMin, atencion: atencionDeAgente(x.agente), estilo,
+      condiciones: condicionesDeContexto(cc, appUrlDe(deps)),
     });
   }
   if (s.estado === "por_confirmar") {
@@ -667,7 +688,7 @@ export async function reservarTrasladoIA(ctx: CtxReservaIA, input: unknown, deps
   if (elec.accion === "elegir_cotizacion") return solo("elegir_cotizacion", null, elec.opciones);
   if (elec.accion === "recotizar") return solo("recotizar", elec.cotizacion.numero);
   const cand = cands.find((c) => c.cand.id === elec.cotizacion.id)!;
-  if (elec.accion === "ya_solicitada") return yaSolicitada(ctx, cand.viva!, ahora, pedido);
+  if (elec.accion === "ya_solicitada") return yaSolicitada(ctx, cand.viva!, ahora, pedido, deps);
 
   const conteo = await contarSolicitudesHoy(ctx.sb, ctx.conv.id, hoy);
   const tope = decidirTopeReserva(conteo, "solicitud");
@@ -676,7 +697,7 @@ export async function reservarTrasladoIA(ctx: CtxReservaIA, input: unknown, deps
   try { ult = await ultimoEntrante(ctx.sb, ctx.conv.id); } catch { ult = null; }
   const r = await crearSolicitud(ctx, cand, { ahora, hoy, aceptoEn: ult?.created_at ?? isoDe(ahora), aceptoMensajeId: ult?.id ?? null, pasajero: e.nombrePasajero, vuelo: e.vuelo });
   if (!r.ok) {
-    if (r.ya) return yaSolicitada(ctx, r.ya, ahora, pedido);
+    if (r.ya) return yaSolicitada(ctx, r.ya, ahora, pedido, deps);
     return derivaIA(r.motivo, pedido, r.nota, cand.cand.numero);
   }
   const c = r.c;
@@ -689,7 +710,7 @@ export async function reservarTrasladoIA(ctx: CtxReservaIA, input: unknown, deps
     );
   }
   if (c.orden.accion === "confirmar_disponibilidad") await avisarPorConfirmar(ctx, c, ahora, deps);
-  const mensaje = mensajeDeSolicitud(c.s, c.cc, ahora, ctx);
+  const mensaje = mensajeDeSolicitud(c.s, c.cc, ahora, ctx, deps);
   return solo(c.orden.accion, c.cc.numero, undefined, mensaje);
 }
 
@@ -699,7 +720,7 @@ export async function reservarTrasladoIA(ctx: CtxReservaIA, input: unknown, deps
  * sean las MISMAS que recibió (`juzgarReenvioPedirPago` sobre la huella de `firma_importes`). Si
  * no, o si los importes cambiaron, deriva al ejecutivo con su nota.
  */
-async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, pedido: string): Promise<ResultadoReservaIA> {
+async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, pedido: string, deps: DepsReserva): Promise<ResultadoReservaIA> {
   let cc: ContextoCotizacion;
   try { cc = await contextoCotizacion(ctx.sb, s.cotizacion_id); }
   catch (e) { return derivaIA("No se pudo leer la cotización de la reserva", pedido, seguro(e, "yaSolicitada")); }
@@ -714,7 +735,7 @@ async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, 
     });
     if (!j.ok) return derivaIA("No se le volvieron a mandar las cuentas de pago", pedido, `Solicitud #${s.id} (cotización N° ${cc.numero}): ${j.nota}`, cc.numero);
   }
-  const mensaje = s.estado === "esperando_pago" || s.estado === "por_confirmar" ? mensajeDeSolicitud(s, cc, ahora, ctx) : null;
+  const mensaje = s.estado === "esperando_pago" || s.estado === "por_confirmar" ? mensajeDeSolicitud(s, cc, ahora, ctx, deps) : null;
   return solo("ya_solicitada", cc.numero, undefined, mensaje);
 }
 
@@ -945,8 +966,9 @@ async function avisarComprobanteSinCotizacion(
 }
 
 /**
- * `politicas_reserva`: las políticas de la cotización, al pie de la letra (T8). Una política con una
- * línea sospechosa (un enlace, un número largo: `condicionesSospechosas`) o que no cabe
+ * `politicas_reserva`: las políticas de la cotización, al pie de la letra (T8), o su resumen con el
+ * enlace a las condiciones completas (cotizaciones-08). Una política (o un resumen) con una línea
+ * sospechosa (un enlace, un número largo: `condicionesSospechosas`) o que no cabe
  * (`excesoCondiciones`) NO se envía: la misma revisión que tiene la cotización antes de salir sola.
  */
 export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsReserva = {}): Promise<ResultadoReservaIA> {
@@ -968,7 +990,7 @@ export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsR
   if (!elegida) return derivaIA("Políticas de reserva sin cotización de traslado", pedido, "No hay una cotización de traslado enviada en el chat de la que leer las políticas.");
   try {
     const cc = await contextoCotizacion(ctx.sb, elegida.cand.id);
-    const exceso = excesoCondiciones({ reserva: cc.politica });
+    const exceso = excesoCondiciones({ reserva: cc.politica, reserva_resumen: cc.resumen });
     if (cc.politicaSospechosa || exceso.length) {
       const por = [
         cc.politicaSospechosa ? "una línea trae un enlace o un número largo" : null,
@@ -977,7 +999,8 @@ export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsR
       return derivaIA("Las políticas de reserva de la cotización necesitan revisión", pedido,
         `Revisa las políticas de la cotización N° ${cc.numero} (${por}): no se le enviaron al cliente. Se corrigen en la cotización (/cotizaciones) o en su plantilla (/cotizaciones/plantillas).`, cc.numero);
     }
-    const m = mensajePoliticas({ numero: cc.numero, lineas: cc.politica, email: cc.perfil?.email ?? null, estilo: estiloDeAgente(ctx.agente) });
+    const cond = condicionesDeContexto(cc, appUrlDe(deps));
+    const m = mensajePoliticas({ numero: cc.numero, lineas: cc.politica, email: cc.perfil?.email ?? null, estilo: estiloDeAgente(ctx.agente), resumen: cond.resumen, enlace: cond.enlace });
     if (!m) return derivaIA("La cotización no tiene políticas de reserva", pedido, `La cotización N° ${cc.numero} no tiene políticas de reserva y cancelación (/cotizaciones/plantillas).`, cc.numero);
     return solo("enviar_politicas", cc.numero, undefined, m);
   } catch (err) {
@@ -1409,7 +1432,10 @@ export async function confirmarDisponibilidad(sb: Sb, c: Cadena, quien: Quien, d
   }
 
   const estilo = estiloDeAgente(agente);
-  const texto = mensajeHayUnidad({ fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, origen: cc.fila.origen, destino: cc.fila.destino, pago, moneda: adel.moneda, cobrado, bloque, estilo });
+  const texto = mensajeHayUnidad({
+    fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, origen: cc.fila.origen, destino: cc.fila.destino, pago, moneda: adel.moneda, cobrado, bloque, estilo,
+    condiciones: bloque ? condicionesDeContexto(cc, appUrlDe(deps)) : null,
+  });
   const a = await avisarCliente(sb, c, texto, { usuarioId: quien.id }, deps);
   await nota(sb, c.conv?.id, `✅ ${quien.nombre ?? "Un ejecutivo"} confirmó la unidad (solicitud #${s.id}, cotización N° ${cc.numero}). Reserva #${reservaId} creada en Programación.${avisos.length ? `\n${avisos.join("\n")}` : ""}`);
   return conAviso(`Unidad confirmada: reserva #${reservaId} creada en Programación.`, a, { estado: "confirmada", mensaje: texto, avisos });
@@ -2172,16 +2198,24 @@ export async function reservaEstadoIA(sb: Sb): Promise<{ reserva: boolean | null
     const autonomos: string[] = Array.isArray(agente?.canales_autonomos) ? (agente!.canales_autonomos as string[]) : [];
     const lp = await leerPlantillasYReglas(sb);
     let politica: string[] | null = null;
+    // El resumen de la política (cotizaciones-08): el auditor y el cotejo con la configuración lo
+    // miran junto a la política (lo manda la IA igual); no cuenta como «hay política».
+    let resumen: string[] = [];
     let plantillaSoles: string | null = null;
     if (lp.ok) {
-      const set = new Set<string>();
+      const set = new Set<string>(), setRes = new Set<string>();
       for (const segmento of SEGMENTOS) {
         const p = plantillaParaUso({ servicio: "traslado_ia", segmento }, lp.plantillas, lp.reglas).plantilla;
         if (segmento === "particular") plantillaSoles = p?.id ?? null;
-        const lineas = (p as { condiciones_reserva?: unknown } | null)?.condiciones_reserva;
-        for (const l of Array.isArray(lineas) ? lineas : []) { const t = String(l ?? "").trim(); if (t) set.add(t); }
+        const pp = p as { condiciones_reserva?: unknown; condiciones_reserva_resumen?: unknown } | null;
+        const lineas = pp?.condiciones_reserva;
+        let tiene = false;
+        for (const l of Array.isArray(lineas) ? lineas : []) { const t = String(l ?? "").trim(); if (t) { set.add(t); tiene = true; } }
+        const res = tiene ? pp?.condiciones_reserva_resumen : null;
+        for (const l of Array.isArray(res) ? res : []) { const t = String(l ?? "").trim(); if (t && !set.has(t)) setRes.add(t); }
       }
       politica = [...set];
+      resumen = [...setRes].filter((t) => !set.has(t));
     }
     const { perfil } = await leerPerfilPdf(sb);
     // Las cuentas en soles que imprimiría el PDF de un traslado (la plantilla de «particular»).
@@ -2191,11 +2225,11 @@ export async function reservaEstadoIA(sb: Sb): Promise<{ reserva: boolean | null
     const est = estadoReservaIA({
       sinMigracion: cfgIA.reservaSinMigracion, cfg: cfgIA.reserva, iaCotiza: cfgIA.iaCotiza, agenteAutonomo: autonomos.includes("whatsapp"),
       atencionEnUso: atencionEnUso(atencionDeAgente(agente)), cuentas, correos, politicaLineas: politica?.length ?? 0,
-      contradicciones: politicaContradiceConfig(politica ?? [], cfgIA.reserva).length,
+      contradicciones: politicaContradiceConfig([...(politica ?? []), ...resumen], cfgIA.reserva).length,
     });
     // Encendida pero sin poder comprobar las tablas de reservas-09: no se afirma que esté activa.
     const reserva = cfgIA.reserva.activa && cfgIA.reservaDetalle && !cfgIA.reservaSinMigracion ? null : est.activa;
-    return { reserva, politica_reserva: politica, lineas: est.lineas, ambar: est.ambar };
+    return { reserva, politica_reserva: politica ? [...politica, ...resumen] : null, lineas: est.lineas, ambar: est.ambar };
   } catch {
     return nada;
   }

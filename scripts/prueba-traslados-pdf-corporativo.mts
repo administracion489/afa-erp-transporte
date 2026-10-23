@@ -164,12 +164,13 @@ const primeraDiferencia = (a: string[], b: string[]) => {
   return i === a.length && i === b.length ? null : `en ${i}: html «${a.slice(Math.max(0, i - 4), i + 4).join(" ")}» · pdf «${b.slice(Math.max(0, i - 4), i + 4).join(" ")}»`;
 };
 
-type Caso = { n: string; fila: C.FilaCotizacionLeida; cliente?: C.ClienteErp | null; contactoClienteId?: number | null; categoria?: C.CategoriaPdf | null; logo: boolean; ejemplo?: boolean; plantilla?: any; perfil?: any };
+type Caso = { n: string; fila: C.FilaCotizacionLeida; cliente?: C.ClienteErp | null; contactoClienteId?: number | null; categoria?: C.CategoriaPdf | null; logo: boolean; ejemplo?: boolean; plantilla?: any; perfil?: any; baseCondiciones?: string | null };
 
 async function compararCaso(c: Caso) {
   const ent = C.entradaCorporativaTraslado(c.fila, {
     empresa: c.perfil ?? perfil, cliente: c.cliente ?? null, contactoClienteId: c.contactoClienteId ?? null, celular: "51966707225", plantilla: c.plantilla ?? null,
     categoria: c.categoria ?? null, ejemplo: c.ejemplo, supabaseUrl: BASE, ahoraMs: Date.parse("2026-10-19T15:00:00Z"),
+    ...(c.baseCondiciones !== undefined ? { baseCondiciones: c.baseCondiciones } : {}),
   });
   const html = htmlCotizacion(ent).html!;
   const doc = docCorporativo(ent);
@@ -954,7 +955,11 @@ seccion("9. La plantilla de la cotización: el traspaso no cambia el PDF; las cu
   let lanza = false;
   try { await D.leerCotizacionTraslado(base({ cotizaciones: [] }, { faltan: { cotizaciones: ["traslado_json"] } }) as any, 55); } catch { lanza = true; }
   ok(lanza, "una columna que no es accesoria sigue siendo un error");
-  ok(D.COLS_COTIZACION_TRASLADO_ACCESORIAS.join() === "plantilla_pdf" && !D.COLS_COTIZACION_TRASLADO.includes("plantilla_pdf"), "plantilla_pdf va aparte, como accesoria");
+  ok(D.COLS_COTIZACION_TRASLADO_ACCESORIAS.join() === "plantilla_pdf,condiciones_token" && !D.COLS_COTIZACION_TRASLADO.includes("plantilla_pdf") && !D.COLS_COTIZACION_TRASLADO.includes("condiciones_token"), "plantilla_pdf y condiciones_token van aparte, como accesorias");
+  const l3 = await D.leerCotizacionTraslado(base({ cotizaciones: [{ ...IDA, id: 55 }] }, { faltan: { cotizaciones: ["condiciones_token"] } }) as any, 55);
+  ok(!!l3 && l3.id === 55 && !("condiciones_token" in l3), "sin la columna condiciones_token (cotizaciones-08), la fila se lee igual (se suelta solo esa)");
+  const l4 = await D.leerCotizacionTraslado(base({ cotizaciones: [{ ...IDA, id: 55, condiciones_token: "123e4567-e89b-12d3-a456-426614174000" }] }) as any, 55);
+  ok(l4?.condiciones_token === "123e4567-e89b-12d3-a456-426614174000", "con la columna, la fila trae su token");
 }
 
 // ── 10. La política de reserva, cambios y cancelación (cotizaciones-06) ───────
@@ -1037,6 +1042,140 @@ seccion("10. La política de reserva: HTML ↔ PDF, se copia a la fila, vacía n
   } else {
     console.log(`    ⏳ todavía no existe ${rutaSql}: la política sembrada se comprueba cuando datos-sql lo entregue.`);
   }
+}
+
+// ── 11. El resumen de la política con su enlace y su QR (cotizaciones-08) ─────
+// Con resumen Y enlace (el token de la fila + el origen del ERP): el resumen, el rótulo con el enlace
+// y el QR, IGUAL en el HTML y en el PDF del servidor. Sin resumen o sin enlace: la política entera,
+// byte a byte (el HTML) y texto por texto (el PDF).
+seccion("11. El resumen de la política: HTML ↔ PDF, el QR dibujado, sin resumen o sin enlace la de siempre");
+{
+  const TOK = "123e4567-e89b-12d3-a456-426614174000";
+  const ORIGEN = "https://www.ejemplo.pe";
+  const ENL = `${ORIGEN}/condiciones/${TOK}`;
+  const POL = [
+    "La reserva se confirma con el 50 % de adelanto; el saldo se paga al iniciar el servicio.",
+    "Cancelación con 24 horas o más de anticipación: sin costo, devolución del 100 %.",
+    "Con menos de 24 horas: reprogramación sin costo o un cargo administrativo del 10 % de lo pagado.",
+    "Si el pasajero no se presenta, se cobra el 50 % del precio total.",
+  ];
+  const RES = ["Adelanto del 50 % para reservar; el saldo al iniciar el servicio.", "Cancelación gratis con 24 horas o más; con menos, 10 % de cargo.", "No presentarse: se cobra el 50 %."];
+  const con = (f: C.FilaCotizacionLeida, x: { reserva?: unknown; reserva_resumen?: unknown; token?: string | null }): C.FilaCotizacionLeida => ({
+    ...f, ...(x.token !== undefined ? { condiciones_token: x.token } : {}),
+    consideraciones_json: { ...f.consideraciones_json!, ...(x.reserva !== undefined ? { reserva: x.reserva } : {}), ...(x.reserva_resumen !== undefined ? { reserva_resumen: x.reserva_resumen } : {}) } as any,
+  });
+  const quitaStyle = (h: string) => h.replace(/<style>[\s\S]*?<\/style>/, "");
+  const negros = (bytes: Uint8Array) => {
+    const s = Buffer.from(bytes).toString("latin1");
+    let n = 0;
+    for (const m of s.matchAll(/stream\r?\n/g)) {
+      const ini = m.index! + m[0].length, fin = s.indexOf("endstream", ini);
+      if (fin < 0) continue;
+      let txt: string;
+      try { txt = inflateSync(Buffer.from(s.slice(ini, fin).replace(/\r?\n$/, ""), "latin1")).toString("latin1"); } catch { continue; }
+      n += [...txt.matchAll(/(^|\s)0 0 0 rg(\s|$)/g)].length;
+    }
+    return n;
+  };
+  const { matrizQr } = await import("../lib/qr-matriz");
+  const m = matrizQr(ENL)!;
+  // (a) Resumen + enlace: el MISMO texto y orden en el HTML y el PDF (compararCaso), el QR dibujado.
+  for (const [n, f] of [["ida · PEN", IDA], ["ida y retorno · PEN", IDA_RET], ["ida y retorno · USD", USD]] as const) {
+    const fila = con(f, { reserva: POL, reserva_resumen: RES, token: TOK });
+    const r = await compararCaso({ n: `resumen · ${n}`, fila, categoria: catDeFila(f, false), logo: true, baseCondiciones: ORIGEN });
+    ok(r.doc.pagina2.reserva.modo === "resumen" && r.doc.pagina2.reserva.enlace?.url === ENL && JSON.stringify(r.doc.pagina2.reserva.items) === JSON.stringify(RES), `${n}: el modelo dice «resumen» con sus puntos y el enlace`);
+    const h = quitaStyle(r.html);
+    ok(RES.every((l) => h.includes(`<li>${esc(l)}</li>`)) && !POL.some((l) => h.includes(`<li>${esc(l)}</li>`)) && h.includes(`href="${ENL}"`) && h.includes("<svg"), `${n}: el HTML lleva el resumen, el enlace y el QR (no la política entera)`);
+    const cuerpo = r.traza.filter((x) => x.zona === "cuerpo").map((x) => x.texto).join(" ");
+    ok(cuerpo.includes("Condiciones completas de reserva, cambios y cancelación:") && cuerpo.includes(ENL) && !POL.some((l) => cuerpo.includes(l.slice(0, 40))), `${n}: el PDF dibuja el rótulo y el enlace entero (en un renglón), no la política`);
+    ok(r.traza.filter((x) => x.texto === ENL).length === 1, `${n}: el enlace va en un solo trazo (no partido por caracteres)`);
+    ok(negros(r.bytes) === m.tramos.length, `${n}: el PDF dibuja un rectángulo negro por tramo del QR (${negros(r.bytes)} / ${m.tramos.length})`);
+    ok(r.paginas === 2, `${n}: sigue en dos hojas (${r.paginas})`);
+    // Sin el QR (no se pudo armar), el documento es el mismo texto y no dibuja ningún negro.
+    const sinQr = { ...r.doc, pagina2: { ...r.doc.pagina2, reserva: { ...r.doc.pagina2.reserva, enlace: { ...r.doc.pagina2.reserva.enlace!, qr: null } } } };
+    const tz: TrazaPdf[] = [];
+    const b2 = await dibujarPdfCorporativo(sinQr, { logo: { bytes: LOGO_PNG, tipo: "png" } }, { traza: tz });
+    ok(negros(b2) === 0 && JSON.stringify(tz.map((x) => x.texto)) === JSON.stringify(r.traza.map((x) => x.texto)), `${n}: sin QR, el mismo texto y ningún negro`);
+  }
+  // (b) Sin resumen O sin enlace: la política entera, como siempre.
+  const ref = await compararCaso({ n: "política entera (referencia)", fila: con(IDA, { reserva: POL }), categoria: catDeFila(IDA, false), logo: true });
+  for (const [n, fila, baseC] of [
+    ["sin resumen, con token y origen", con(IDA, { reserva: POL, token: TOK }), ORIGEN],
+    ["resumen vacío", con(IDA, { reserva: POL, reserva_resumen: [], token: TOK }), ORIGEN],
+    ["con resumen, sin origen", con(IDA, { reserva: POL, reserva_resumen: RES, token: TOK }), undefined],
+    ["con resumen, origen null", con(IDA, { reserva: POL, reserva_resumen: RES, token: TOK }), null],
+    ["con resumen, origen http", con(IDA, { reserva: POL, reserva_resumen: RES, token: TOK }), "http://www.ejemplo.pe"],
+    ["con resumen, origen con ruta", con(IDA, { reserva: POL, reserva_resumen: RES, token: TOK }), `${ORIGEN}/erp`],
+    ["con resumen, sin token (sin la migración)", con(IDA, { reserva: POL, reserva_resumen: RES }), ORIGEN],
+    ["con resumen, token no uuid", con(IDA, { reserva: POL, reserva_resumen: RES, token: "abc" }), ORIGEN],
+  ] as const) {
+    const r = await compararCaso({ n, fila, categoria: catDeFila(IDA, false), logo: true, baseCondiciones: baseC as any });
+    ok(r.html === ref.html, `${n}: el HTML es byte a byte el de la política entera`);
+    ok(JSON.stringify(textosDelPdf(r.bytes)) === JSON.stringify(textosDelPdf(ref.bytes)) && negros(r.bytes) === 0, `${n}: el PDF dibuja la política entera y ningún QR`);
+  }
+  // (c) Sin política no se imprime nada, ni con resumen y enlace.
+  const sinPol = await compararCaso({ n: "sin política (referencia)", fila: IDA, categoria: catDeFila(IDA, false), logo: true });
+  const rSin = await compararCaso({ n: "resumen sin política", fila: con(IDA, { reserva: [], reserva_resumen: RES, token: TOK }), categoria: catDeFila(IDA, false), logo: true, baseCondiciones: ORIGEN });
+  ok(rSin.html === sinPol.html && negros(rSin.bytes) === 0, "sin política: ni el resumen, ni el enlace, ni el QR");
+  // (d) Un resumen largo que pasa de hoja: el mismo texto, el QR una sola vez y entero.
+  const largo = Array.from({ length: 30 }, (_, i) => `Punto ${i + 1} del resumen de la política de reserva`.padEnd(200, " sin costo"));
+  const rl = await compararCaso({ n: "resumen largo (pasa de hoja)", fila: con(IDA_RET, { reserva: POL, reserva_resumen: largo, token: TOK }), categoria: catDeFila(IDA_RET, true), logo: true, baseCondiciones: ORIGEN });
+  ok(rl.paginas >= 3 && negros(rl.bytes) === m.tramos.length, `el resumen largo parte la hoja (${rl.paginas}) y el QR se dibuja una sola vez`);
+  // (e) Se copia a la fila (limpio) solo con política, desde la plantilla; la entrada lo pasa.
+  const r0 = M.evaluarTraslado(pedido(), ctx);
+  const filaCon = (plantilla: any) => C.filaCotizacionTraslado(r0, entradaDe(pedido()), { convId: "c", clienteId: null, atencion: null, config, firma: "f", hoy: HOY, plantilla });
+  const PL_BASE = { id: "traslados_ia", nombre: "Traslados (IA)", diseno: "corporativo", idioma: "es", activa: true, condiciones_generales: ["G"], condiciones_incluye: [], condiciones_no_incluye: [] };
+  const fc = filaCon({ ...PL_BASE, condiciones_reserva: ["Uno"], condiciones_reserva_resumen: ["  R1 ", "", "R2", "  "] });
+  ok(JSON.stringify(fc.consideraciones_json.reserva_resumen) === JSON.stringify(["R1", "R2"]), `con política y resumen: el resumen limpio (${JSON.stringify(fc.consideraciones_json.reserva_resumen)})`);
+  ok(JSON.stringify(Object.keys(fc.consideraciones_json)) === JSON.stringify(["incluye", "no_incluye", "generales", "reserva", "reserva_resumen", "version", "plantilla"]), `la clave va después de la política (${Object.keys(fc.consideraciones_json).join(", ")})`);
+  for (const [n, pl] of [
+    ["sin política", { ...PL_BASE, condiciones_reserva_resumen: ["R1"] }],
+    ["política vacía", { ...PL_BASE, condiciones_reserva: [], condiciones_reserva_resumen: ["R1"] }],
+    ["política en blanco", { ...PL_BASE, condiciones_reserva: ["  ", ""], condiciones_reserva_resumen: ["R1"] }],
+    ["resumen null", { ...PL_BASE, condiciones_reserva: ["Uno"], condiciones_reserva_resumen: null }],
+    ["sin plantilla (Ajustes)", null],
+  ] as const) ok(!("reserva_resumen" in filaCon(pl).consideraciones_json), `${n}: la fila va sin resumen`);
+  const leida = { ...fc, id: 7, numero_cotizacion: null, created_at: "2026-10-19T15:00:00Z", condiciones_token: TOK.toUpperCase() } as C.FilaCotizacionLeida;
+  const ent = C.entradaCorporativaTraslado(leida, { empresa: perfil, celular: "51966707225", baseCondiciones: `${ORIGEN}/` });
+  ok(JSON.stringify(ent.consid?.reserva_resumen) === JSON.stringify(["R1", "R2"]) && ent.enlaceCondiciones === ENL, `la entrada pasa el resumen y el enlace (en minúsculas): ${ent.enlaceCondiciones}`);
+  const entSin = C.entradaCorporativaTraslado(leida, { empresa: perfil, celular: "51966707225" });
+  ok(!("enlaceCondiciones" in entSin) && !("reserva_resumen" in (C.entradaCorporativaTraslado(IDA, { empresa: perfil, celular: "51966707225" }).consid ?? {})), "sin origen no agrega el enlace; sin resumen, no agrega la clave");
+  // (f) armarPdfDeFila: con el origen (por defecto NEXT_PUBLIC_APP_URL) el resumen; sin él, la política entera.
+  const fake = (filas: Record<string, any[]>) => ({
+    from(tabla: string) {
+      const filtros: [string, any][] = [];
+      const q: any = {
+        select() { return q; }, eq(c: string, v: any) { filtros.push([c, v]); return q; }, maybeSingle() { return q; },
+        then(a: any, b: any) { return Promise.resolve({ data: (filas[tabla] ?? []).find((f) => filtros.every(([c, v]) => String(f[c]) === String(v))) ?? null, error: null }).then(a, b); },
+      };
+      return q;
+    },
+  });
+  const sb = fake({ empresa_perfil: [{ id: 1, ...perfil }] });
+  const filaR = con(IDA, { reserva: POL, reserva_resumen: RES, token: TOK });
+  const prevApp = process.env.NEXT_PUBLIC_APP_URL;
+  delete process.env.NEXT_PUBLIC_APP_URL;
+  const sinEnv = await armarPdfDeFila(sb as any, filaR, { bajarLogo: async () => null, bajarFoto: async () => null, celular: "51966707225", contactoClienteId: null });
+  ok(!textosDelPdf(sinEnv.bytes).some((x) => x.includes("/condiciones/")) && textosDelPdf(sinEnv.bytes).some((x) => x.startsWith(POL[0].slice(0, 30))), "sin NEXT_PUBLIC_APP_URL: la política entera, sin enlace");
+  process.env.NEXT_PUBLIC_APP_URL = ORIGEN;
+  const conEnv = await armarPdfDeFila(sb as any, filaR, { bajarLogo: async () => null, bajarFoto: async () => null, celular: "51966707225", contactoClienteId: null });
+  ok(textosDelPdf(conEnv.bytes).includes(ENL) && negros(conEnv.bytes) === m.tramos.length, "con NEXT_PUBLIC_APP_URL: el resumen, el enlace y el QR");
+  const anulado = await armarPdfDeFila(sb as any, filaR, { bajarLogo: async () => null, bajarFoto: async () => null, celular: "51966707225", contactoClienteId: null, baseCondiciones: null });
+  ok(!textosDelPdf(anulado.bytes).some((x) => x.includes("/condiciones/")), "baseCondiciones: null manda sobre la variable");
+  if (prevApp === undefined) delete process.env.NEXT_PUBLIC_APP_URL; else process.env.NEXT_PUBLIC_APP_URL = prevApp;
+  // (g) Los guardas miran el resumen: un enlace o un número largo en él deja la cotización para revisión.
+  const T = await import("../lib/traslados/texto-libre");
+  const cs = T.condicionesSospechosas({ reserva: POL, reserva_resumen: ["Escríbanos al 987 654 321"] });
+  ok(cs.length === 1 && cs[0].lista === "reserva_resumen", "condicionesSospechosas mira el resumen");
+  ok(T.condicionesSospechosas({ reserva: POL, reserva_resumen: RES }).length === 0, "el resumen de ejemplo no deja nada para revisión (el enlace lo agrega el código)");
+  // (h) El resumen sembrado por la migración: cabe y no deja nada para revisión.
+  const rutaSql = "supabase/cotizaciones-08-resumen-condiciones.sql";
+  const arr = readFileSync(rutaSql, "utf8").match(/condiciones_reserva_resumen = array\[([\s\S]*?)\]::text\[\]/)?.[1] ?? "";
+  const sembrado = [...arr.matchAll(/'((?:[^']|'')*)'/g)].map((x) => x[1].replace(/''/g, "'"));
+  const PLx = await import("../lib/cotizacion-plantillas");
+  ok(sembrado.length === 5 && T.condicionesSospechosas({ reserva_resumen: sembrado }).length === 0 && PLx.excesoCondiciones({ reserva_resumen: sembrado }).length === 0, `el resumen sembrado (${sembrado.length} puntos) cabe y no deja nada para revisión`);
+  const rS = await compararCaso({ n: "el resumen sembrado", fila: con(IDA_RET, { reserva: POL, reserva_resumen: sembrado, token: TOK }), categoria: catDeFila(IDA_RET, true), logo: true, baseCondiciones: ORIGEN });
+  ok(rS.paginas === 2 && rS.doc.pagina2.reserva.modo === "resumen", `el resumen sembrado cabe en la hoja 2 (${rS.paginas} hojas)`);
 }
 
 // ── Muestra para mirar (no la exige la matriz) ───────────────────────────────

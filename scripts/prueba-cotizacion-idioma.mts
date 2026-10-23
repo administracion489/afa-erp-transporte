@@ -207,5 +207,30 @@ console.log("7. La política de reserva (cotizaciones-06): la misma regla, sin l
   ok(t("es", "corp_reserva") === "📅 Reserva, cambios y cancelación" && t("en", "corp_reserva") === "📅 Booking, changes and cancellation", "el título en los dos idiomas");
 }
 
+console.log("8. El resumen de la política (cotizaciones-08): solo de la fila, y solo con la política de la fila");
+{
+  const POL = ["Se confirma con el 50 % de adelanto."];
+  const RES = ["Adelanto del 50 %."];
+  const J = (x: unknown) => JSON.stringify(x);
+  // Sin la clave: vacío, en los dos idiomas, con o sin versión (y sin aviso).
+  for (const idioma of ["es", "en"] as const) for (const c of [DEFAULT_CONSID_ES, { ...DEFAULT_CONSID_ES, reserva: POL }, { ...DEFAULT_CONSID_ES, reserva: POL, version: CONSID_VERSION }] as any[]) {
+    const r = considParaPdf({ condiciones_reserva_resumen: ["DE LA PLANTILLA"] }, c, idioma);
+    ok(J(r.reserva_resumen) === "[]" && !r.escritasTalCual.includes("reserva_resumen" as any), `${idioma}${c.version ? " + v2" : ""}${c.reserva ? " con política" : ""}: sin resumen en la fila, vacío (el de la plantilla nunca)`);
+  }
+  // v2: el de la fila, en los dos idiomas.
+  for (const idioma of ["es", "en"] as const) {
+    ok(J(considParaPdf({ condiciones_reserva: ["P"], condiciones_reserva_resumen: ["PR"] }, { ...DEFAULT_CONSID_ES, reserva: POL, reserva_resumen: RES, version: CONSID_VERSION } as any, idioma).reserva_resumen) === J(RES), `${idioma} + v2: el resumen de la fila`);
+  }
+  // Fila de antes en castellano: si gana la política de la plantilla, sin resumen; si no, el de la fila.
+  ok(J(considParaPdf({ condiciones_reserva: ["P"] }, { ...DEFAULT_CONSID_ES, reserva: POL, reserva_resumen: RES }, "es").reserva_resumen) === "[]", "es, fila de antes, gana la política de la plantilla: sin resumen");
+  ok(J(considParaPdf({ condiciones_reserva: [] }, { ...DEFAULT_CONSID_ES, reserva: POL, reserva_resumen: RES }, "es").reserva_resumen) === "[]", "es, la plantilla con política vacía (también gana): sin resumen");
+  ok(J(considParaPdf({ condiciones_reserva: null }, { ...DEFAULT_CONSID_ES, reserva: POL, reserva_resumen: RES }, "es").reserva_resumen) === J(RES), "es, la plantilla sin política: el resumen de la fila");
+  // Inglés: el de la fila tal cual; el aviso sale por la política (el resumen va en su bloque).
+  const en = considParaPdf(null, { ...DEFAULT_CONSID_ES, reserva: POL, reserva_resumen: RES }, "en");
+  ok(J(en.reserva_resumen) === J(RES) && en.escritasTalCual.includes("reserva") && !en.escritasTalCual.includes("reserva_resumen" as any), "en: el resumen tal cual; avisa la política, no dos veces");
+  ok(J(considParaPdf(null, { ...DEFAULT_CONSID_ES, reserva: POL, reserva_resumen: "texto" } as any, "es").reserva_resumen) === "[]", "un resumen que no es lista: vacío");
+  ok(t("es", "corp_reserva_enlace") === "Condiciones completas de reserva, cambios y cancelación:" && t("en", "corp_reserva_enlace") === "Full booking, changes and cancellation terms:", "el rótulo del enlace en los dos idiomas");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

@@ -70,8 +70,11 @@ export const COLS_COTIZACION_TRASLADO =
   "id, cliente_id, numero_cotizacion, created_at, estado, origen, destino, fecha_servicio, hora_ida, fecha_retorno, hora_retorno, " +
   "tipo_servicio, tipo_vehiculo, items_json, incluye_igv, precio_cliente, moneda, tipo_cambio, atencion, consideraciones_json, " +
   "crm_conversacion_id, traslado_json";
-/** Accesorias: si el error nombra una, se suelta SOLO esa (sin `plantilla_pdf`, las cuentas son las de `corporativo`). */
-export const COLS_COTIZACION_TRASLADO_ACCESORIAS = ["plantilla_pdf"] as const;
+/**
+ * Accesorias: si el error nombra una, se suelta SOLO esa (sin `plantilla_pdf`, las cuentas son las de
+ * `corporativo`; sin `condiciones_token` —cotizaciones-08—, la política va entera, sin enlace).
+ */
+export const COLS_COTIZACION_TRASLADO_ACCESORIAS = ["plantilla_pdf", "condiciones_token"] as const;
 
 /** La plantilla cuyas CUENTAS imprime el PDF cuando la cotización no dice otra (o la suya no sirve). */
 export const PLANTILLA_CUENTAS_DEFECTO = "corporativo";
@@ -411,14 +414,20 @@ export async function armarPdfDeFila(
     bajarLogo?: (url: string | null) => Promise<LogoPdf | null>;
     bajarFoto?: (url: string) => Promise<Uint8Array | null>;
     ahoraMs?: number;
+    /** El origen del ERP para el enlace a las condiciones (por defecto `NEXT_PUBLIC_APP_URL`). */
+    baseCondiciones?: string | null;
   } = {},
 ): Promise<PdfArmado> {
   const datos = await leerDatosPdf(sb, fila, { perfil: opts.perfil, celular: opts.celular, contactoClienteId: opts.contactoClienteId });
   const empresa = empresaConDefectos(datos.perfil);
   const base = process.env.NEXT_PUBLIC_SUPABASE_URL ?? null;
+  // El resumen de la política va con el enlace a las condiciones completas de ESTA cotización
+  // (`condiciones_token`, cotizaciones-08); sin el dominio del ERP o sin el token, la política entera.
+  const baseCondiciones = opts.baseCondiciones !== undefined ? opts.baseCondiciones : process.env.NEXT_PUBLIC_APP_URL ?? null;
   const entrada = entradaCorporativaTraslado(fila, {
     empresa: datos.perfil, cliente: datos.cliente, celular: datos.celular, contactoClienteId: datos.contactoClienteId,
     plantilla: datos.plantilla, categoria: datos.categoria, ejemplo: opts.ejemplo, supabaseUrl: base, ahoraMs: opts.ahoraMs,
+    baseCondiciones,
   });
   const doc = docCorporativo(entrada);
 
@@ -464,7 +473,7 @@ export async function leerCotizacionTraslado(sb: Sb, id: number): Promise<FilaCo
 }
 
 /** El PDF de una cotización guardada, leído de su fila. LANZA si no existe o no se puede imprimir. */
-export async function pdfDeCotizacion(sb: Sb, cotId: number, opts: { bajarLogo?: (url: string | null) => Promise<LogoPdf | null>; bajarFoto?: (url: string) => Promise<Uint8Array | null> } = {}): Promise<PdfArmado> {
+export async function pdfDeCotizacion(sb: Sb, cotId: number, opts: { bajarLogo?: (url: string | null) => Promise<LogoPdf | null>; bajarFoto?: (url: string) => Promise<Uint8Array | null>; baseCondiciones?: string | null } = {}): Promise<PdfArmado> {
   const fila = await leerCotizacionTraslado(sb, cotId);
   if (!fila) throw new Error("La cotización ya no existe.");
   return armarPdfDeFila(sb, fila, opts);

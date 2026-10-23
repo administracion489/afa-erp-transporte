@@ -414,6 +414,15 @@ const POLITICA_AFA: string[] = (() => {
   return ini < 0 || fin < 0 ? [] : [...sql.slice(ini, fin).matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
 })();
 const CTX_RESERVA: ContextoAuditoria = { trasladosActivos: true, reservaTraslados: true, politicaTraslados: POLITICA_AFA, empresa: "ACME" };
+// El RESUMEN de esa política (cotizaciones-08, bloque SOLO AFA), leído del archivo. /api/crm/ia/estado
+// le pasa al auditor la política Y el resumen (`reservaEstadoIA` → politica_reserva).
+const RESUMEN_AFA: string[] = (() => {
+  const sql = readFileSync(new URL("../supabase/cotizaciones-08-resumen-condiciones.sql", import.meta.url), "utf8");
+  const ini = sql.indexOf("set condiciones_reserva_resumen = array[");
+  const fin = sql.indexOf("]::text[]", ini);
+  return ini < 0 || fin < 0 ? [] : [...sql.slice(ini, fin).matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
+})();
+const CTX_RESERVA_RES: ContextoAuditoria = { ...CTX_RESERVA, politicaTraslados: [...POLITICA_AFA, ...RESUMEN_AFA] };
 /** La frase real (22-10-2026) que dice que un ejecutivo envía los datos de pago. */
 const FRASE_EJECUTIVO_PAGO = "Un ejecutivo de nuestro equipo la está revisando para enviarle los datos de pago por este mismo chat";
 /** La frase real del agente de AFA sobre la disponibilidad: NO es un choque de la reserva. */
@@ -1073,6 +1082,35 @@ const TODAS_RESERVA: { r: ReturnType<typeof auditarAgente>; cfg: ConfigAuditable
       }
     ok(ruido === 0, `corpus de ${CORPUS.length} frases benignas × ${CAMPOS_RES.length} campos con la reserva activa: 0 hallazgos`);
   }
+  // El resumen (cotizaciones-08): dice lo mismo que la política, así que pegado en un texto nunca choca
+  // con ella; con la política Y el resumen en el contexto (lo que manda /api/crm/ia/estado), nada nuevo.
+  {
+    ok(RESUMEN_AFA.length === 5 && RESUMEN_AFA.every((l) => l.length > 20), `el resumen real se lee del SQL (${RESUMEN_AFA.length} puntos)`);
+    let choques = 0, choquesJuntos = 0, choquesPol = 0;
+    for (const l of RESUMEN_AFA) {
+      const r = cods(l, CTX_RESERVA);
+      if (r.includes("traslados.politica_texto")) { choques++; console.log(`   el resumen choca con la política: «${l.slice(0, 80)}» → ${r.join(",")}`); }
+      const rj = cods(l, CTX_RESERVA_RES);
+      if (rj.includes("traslados.politica_texto")) { choquesJuntos++; console.log(`   el resumen choca con política+resumen: «${l.slice(0, 80)}»`); }
+    }
+    for (const l of POLITICA_AFA) {
+      const r = cods(l, CTX_RESERVA_RES);
+      if (r.includes("traslados.politica_texto")) { choquesPol++; console.log(`   la política choca con política+resumen: «${l.slice(0, 80)}»`); }
+    }
+    ok(choques === 0, "ninguna línea del resumen sembrado choca con la política sembrada (dicen lo mismo)");
+    ok(choquesJuntos === 0 && choquesPol === 0, "con la política y el resumen en el contexto, ni el resumen ni la política pegados chocan");
+    const alarmas = (ctx: ContextoAuditoria) => auditarAgente(AFA, { ...CTX_AFA, ...ctx }).hallazgos.filter((h) => h.codigo === "traslados.politica_texto").length;
+    ok(alarmas(CTX_RESERVA_RES) <= alarmas(CTX_RESERVA), `el caso AFA no gana choques de política al sumar el resumen (${alarmas(CTX_RESERVA)} → ${alarmas(CTX_RESERVA_RES)})`);
+    let ruidoRes = 0;
+    for (const frase of CORPUS)
+      for (const campo of CAMPOS_RES) {
+        const r = auditarAgente({ nombre: "Ana", ...enCampo(campo, frase) }, CTX_RESERVA_RES);
+        if (r.hallazgos.length) { ruidoRes++; console.log(`   ruido con política+resumen en ${campo}: «${frase}» → ${codigos(r.hallazgos).join(", ")}`); }
+      }
+    ok(ruidoRes === 0, `corpus benigno con política + resumen en el contexto: 0 hallazgos`);
+    // Lo que contradice al resumen se sigue viendo (el resumen no tapa la comparación).
+    ok(igual(cods("Cancelación con 48 horas.", CTX_RESERVA_RES), ["traslados.politica_texto"]), "una regla distinta sigue chocando con la política + el resumen");
+  }
   // Una frase que ya choca con lo que hace el sistema no «repite» la política aunque comparta palabras.
   ok(igual(cods("Cuando llegue el comprobante, envía la confirmación de la reserva.", CTX_RESERVA), ["traslados.confirma_con_comprobante"]), "la frase que choca no se cuenta además como «repite la política»");
   // Determinista con la reserva.
@@ -1089,6 +1127,7 @@ const TODAS_RESERVA: { r: ReturnType<typeof auditarAgente>; cfg: ConfigAuditable
   TODAS_RESERVA.push(
     { r: rTodo, cfg: todo },
     { r: auditarAgente(AFA, { ...CTX_AFA, reservaTraslados: true, politicaTraslados: POLITICA_AFA }), cfg: AFA },
+    { r: auditarAgente(AFA, { ...CTX_AFA, ...CTX_RESERVA_RES }), cfg: AFA },
   );
 }
 

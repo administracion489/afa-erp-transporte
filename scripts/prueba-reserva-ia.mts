@@ -860,6 +860,63 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     t("9r: con la tarjeta ya cerrada → reclamo_perdido y no se toca", !r2.ok && r2.codigo === "reclamo_perdido" && JSON.stringify(acc.payload) === antes);
     acc.estado = "pendiente";
   }
+
+  // ── 9s. El resumen y el enlace a las condiciones completas (cotizaciones-08) ──
+  // Con el token de la cotización y el dominio del ERP: T1 y el pedido de pago de T4 llevan el resumen
+  // y el enlace, y T8 manda el resumen con el enlace. Sin dominio o sin token: los textos de siempre.
+  {
+    const TOK = "123e4567-e89b-12d3-a456-426614174000";
+    const ENL = `https://erp.test/condiciones/${TOK}`;
+    const RES = ["Adelanto del 50 % para reservar.", "Cancelación gratis con 24 h o más."];
+    const preparar = (x: { token?: string | null; resumen?: string[] | null }) => {
+      const e = escenario();
+      const cot = sb.t("cotizaciones").find((c) => c.id === e.cotId)!;
+      if (x.token !== undefined) cot.condiciones_token = x.token;
+      if (x.resumen !== undefined) cot.consideraciones_json = { ...cot.consideraciones_json, reserva_resumen: x.resumen };
+      return e;
+    };
+    // (a) Resumen + enlace.
+    const e = preparar({ token: TOK, resumen: RES });
+    const r1 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    t("9s: T1 con resumen y enlace: el bloque «Antes de pagar…» en lugar de ofrecer las políticas", JSON.parse(r1.respuestaModelo).accion === "pedir_pago" && !!r1.mensaje
+      && r1.mensaje.includes("Antes de pagar, lo principal de nuestras condiciones:\n• Adelanto del 50 % para reservar.\n• Cancelación gratis con 24 h o más.") && r1.mensaje.endsWith(`Condiciones completas: ${ENL}`) && !r1.mensaje.includes("le envío nuestras políticas"));
+    const r8 = await D.politicasIA(ctxDe(e), {}, deps);
+    t("9s: T8 con resumen y enlace: el resumen y el enlace, no la política entera", JSON.parse(r8.respuestaModelo).accion === "enviar_politicas" && !!r8.mensaje && r8.mensaje.includes(RES[0]) && r8.mensaje.includes(`están aquí: ${ENL}`) && !POLITICA.some((l) => r8.mensaje!.includes(l)));
+    const s = solDe(e.cotId);
+    const rH = await D.confirmarDisponibilidad(sb, await tarjeta(e, s.id), quien, deps);
+    t("9s: T4 «pedir» con resumen y enlace: el bloque de pago y, al final, las condiciones", rH.ok && !!rH.mensaje && rH.mensaje.includes("191-1234567-0-11") && rH.mensaje.endsWith(`Condiciones completas: ${ENL}`));
+    // (b) Sin el dominio del ERP: los textos de siempre.
+    const e2 = preparar({ token: TOK, resumen: RES });
+    const sinDominio = { ...deps, appUrl: null };
+    const r2 = await D.reservarTrasladoIA(ctxDe(e2), {}, sinDominio);
+    t("9s: sin el dominio del ERP, T1 de siempre (ofrece las políticas, sin enlace)", !!r2.mensaje && r2.mensaje.endsWith("Si desea, le envío nuestras políticas de reserva, cambios y cancelación.") && !r2.mensaje.includes("/condiciones/"));
+    const r28 = await D.politicasIA(ctxDe(e2), {}, sinDominio);
+    t("9s: sin el dominio del ERP, T8 manda la política entera", !!r28.mensaje && POLITICA.every((l) => r28.mensaje!.includes(l)) && !r28.mensaje.includes("/condiciones/"));
+    // (c) Sin token (sin la migración): los textos de siempre.
+    const e3 = preparar({ resumen: RES });
+    const r3 = await D.reservarTrasladoIA(ctxDe(e3), {}, deps);
+    t("9s: sin token (cotizaciones-08 sin correr), T1 de siempre", !!r3.mensaje && r3.mensaje.endsWith("Si desea, le envío nuestras políticas de reserva, cambios y cancelación."));
+    // (d) Solo el enlace (sin resumen): T1 con la línea del enlace; T8 la política entera.
+    const e4 = preparar({ token: TOK });
+    const r4 = await D.reservarTrasladoIA(ctxDe(e4), {}, deps);
+    t("9s: solo enlace: T1 termina con la línea del enlace", !!r4.mensaje && r4.mensaje.endsWith(`Antes de pagar, revise nuestras condiciones de reserva, cambios y cancelación: ${ENL}`));
+    const r48 = await D.politicasIA(ctxDe(e4), {}, deps);
+    t("9s: solo enlace: T8 manda la política entera", !!r48.mensaje && POLITICA.every((l) => r48.mensaje!.includes(l)));
+    // (e) Un resumen sospechoso cuenta como la política: no se pide el pago ni se mandan las políticas.
+    const e5 = preparar({ token: TOK, resumen: ["Escríbanos al 987 654 321 para cancelar."] });
+    const r5 = await D.reservarTrasladoIA(ctxDe(e5), {}, deps);
+    t("9s: resumen con un número largo → no se pide el pago (primero la unidad)", JSON.parse(r5.respuestaModelo).accion !== "pedir_pago" && !(r5.mensaje ?? "").includes("987 654 321"));
+    const r58 = await D.politicasIA(ctxDe(e5), {}, deps);
+    t("9s: resumen con un número largo → T8 deriva sin mandarlo", !!r58.derivar && r58.mensaje === null);
+    // (f) Un resumen que no cabe: T8 deriva.
+    const e6 = preparar({ token: TOK, resumen: Array.from({ length: 31 }, (_, i) => `Punto ${String.fromCharCode(65 + (i % 26))}${i > 25 ? "x" : ""}.`) });
+    const r68 = await D.politicasIA(ctxDe(e6), {}, deps);
+    t("9s: resumen de más de 30 líneas → T8 deriva", !!r68.derivar && r68.mensaje === null && /31 líneas/.test(r68.derivar.nota));
+    // (g) condicionesDeContexto: sin política, ni enlace ni resumen.
+    const cc0 = { fila: { condiciones_token: TOK } as any, politica: [], resumen: RES, politicaSospechosa: false };
+    t("9s: condicionesDeContexto sin política → nada", JSON.stringify(D.condicionesDeContexto(cc0, "https://erp.test")) === JSON.stringify({ resumen: [], enlace: null }));
+    t("9s: condicionesDeContexto con política → el enlace y el resumen", JSON.stringify(D.condicionesDeContexto({ ...cc0, politica: POLITICA }, "https://erp.test/")) === JSON.stringify({ resumen: RES, enlace: ENL }));
+  }
 }
 
 if (fallas.length) for (const f of fallas) console.log("✗", f);

@@ -888,6 +888,8 @@ class SbFalso {
   fallas: { tabla: string; op: string; mensaje: string }[] = [];
   archivos = new Map<string, Uint8Array>();
   firmaFalla = false;
+  /** El `condiciones_token` que la base le pone a una cotización nueva (cotizaciones-08); null = no lo pone. */
+  tokenCot: string | null = null;
   n = 0;
   constructor(public reloj: () => number) {}
   t(nombre: string) { return (this.tablas[nombre] ??= []); }
@@ -905,13 +907,13 @@ class SbFalso {
 }
 class ConsultaF implements PromiseLike<any> {
   op: "select" | "insert" | "update" = "select";
-  cols = "*"; head = false; contar = false; ret = false;
+  cols = "*"; colsRet = ""; head = false; contar = false; ret = false;
   filtros: ((f: FilaF) => boolean)[] = [];
   orden: { c: string; asc: boolean } | null = null;
   desde = 0; hasta = Infinity; uno: "single" | "maybe" | null = null; payload: any = null;
   constructor(private sb: SbFalso, private tabla: string) {}
   select(cols = "*", o?: { count?: string; head?: boolean }) {
-    if (this.op === "select") { this.cols = cols; this.contar = !!o?.count; this.head = !!o?.head; } else this.ret = true;
+    if (this.op === "select") { this.cols = cols; this.contar = !!o?.count; this.head = !!o?.head; } else { this.ret = true; this.colsRet = cols; }
     return this;
   }
   insert(v: any) { this.op = "insert"; this.payload = v; return this; }
@@ -937,6 +939,11 @@ class ConsultaF implements PromiseLike<any> {
     if (falla) return { data: null, count: null, error: { message: falla.mensaje } };
     const faltan = sb.faltan[tabla] ?? [];
     const colsPedidas = this.cols.replace(/\w+\([^)]*\)/g, "").split(",").map((x) => x.trim()).filter((x) => x && x !== "*");
+    // En un insert/update con `.select(...)`, una columna que falta en lo que se devuelve también lo
+    // rechaza entero (es una sola sentencia: no se escribe nada).
+    const colsDevueltas = this.colsRet.split(",").map((x) => x.trim()).filter((x) => x && x !== "*");
+    const malRet = this.op !== "select" ? colsDevueltas.find((c) => faltan.includes(c)) : undefined;
+    if (malRet) return { data: null, error: { code: "42703", message: `column ${tabla}.${malRet} does not exist` } };
     const malCol = this.op === "select" ? colsPedidas.find((c) => faltan.includes(c)) : Object.keys(this.payload ?? {}).find((c) => faltan.includes(c));
     if (malCol) return this.op === "select"
       ? { data: null, error: { code: "42703", message: `column ${tabla}.${malCol} does not exist` } }
@@ -946,6 +953,7 @@ class ConsultaF implements PromiseLike<any> {
       const fila: FilaF = { ...this.payload };
       fila.id ??= tabla === "cotizaciones" ? 100 + ++sb.n : `00000000-0000-4000-8000-${String(++sb.n).padStart(12, "0")}`;
       if (tabla === "crm_acciones_ia") fila.creada_at ??= ahora; else fila.created_at ??= ahora;
+      if (tabla === "cotizaciones" && sb.tokenCot && !faltan.includes("condiciones_token")) fila.condiciones_token ??= sb.tokenCot;
       if (tabla === "alerta_enviada" && filas.some((x) => x.clave === fila.clave && x.ref === fila.ref && x.fecha === fila.fecha))
         return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } };
       filas.push(fila);
@@ -2001,6 +2009,100 @@ seccion("23. Cuentas y condiciones de la plantilla de traslados: inactiva, disti
     const rv = E.revisionPorCondiciones({ avisosPdf: [], consideraciones: { incluye: [], no_incluye: [], generales: [], reserva: lineas(31) } });
     ok(rv.motivos.join() === "condiciones_demasiadas", `revisionPorCondiciones cuenta la política para el exceso (${rv.motivos.join()})`);
     ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: { incluye: [], no_incluye: [], generales: [], reserva: POL } }).motivos.length === 0, "y una política limpia no deja nada para revisión");
+  }
+  {
+    // (f) El RESUMEN de la política (cotizaciones-08): se copia a la fila desde la plantilla junto con
+    // la política (solo si hay política); con el token de la cotización y el dominio del ERP, el PDF
+    // imprime el resumen, el enlace y el QR; sin uno de los dos, la política ENTERA como hasta ahora.
+    // Las líneas del resumen cuentan para la revisión igual que las de la política.
+    const POL = [
+      "La reserva se confirma con el 50 % de adelanto; el saldo se paga al iniciar el servicio.",
+      "Cancelación con 24 horas o más de anticipación: sin costo, devolución del 100 %.",
+      "Con menos de 24 horas: reprogramación sin costo o un cargo administrativo del 10 % de lo pagado.",
+    ];
+    const RES = ["Adelanto del 50 % para reservar.", "Cancelación sin costo con 24 h de anticipación."];
+    const TOKEN = "3F2504E0-4F89-41D3-9A0C-0305E82C3301";
+    const BASE = "https://erp.ejemplo.pe";
+    const URL_OK = `${BASE}/condiciones/${TOKEN.toLowerCase()}`;
+    const plano = (r: Awaited<ReturnType<typeof correr>>) => (r.res.envioPendiente ? textoDelPdf(r.res.envioPendiente.bytes) : "");
+    const sinEsp = (t: string) => t.replace(/\s+/g, "");
+    const envAntes = process.env.NEXT_PUBLIC_APP_URL;
+    const conEnv = async <X,>(v: string | undefined, f: () => Promise<X>): Promise<X> => {
+      if (v === undefined) delete process.env.NEXT_PUBLIC_APP_URL; else process.env.NEXT_PUBLIC_APP_URL = v;
+      try { return await f(); } finally { if (envAntes === undefined) delete process.env.NEXT_PUBLIC_APP_URL; else process.env.NEXT_PUBLIC_APP_URL = envAntes; }
+    };
+    const conRes = (x: Partial<Plantilla> = {}) => IA23({ condiciones_reserva: POL, condiciones_reserva_resumen: ["  " + RES[0] + "  ", "", RES[1]], ...x } as Partial<Plantilla>);
+
+    // Con token y dominio: el resumen, el enlace y el QR; la política entera NO se imprime (va en el enlace).
+    const sbT = base23(conRes()); sbT.tokenCot = TOKEN;
+    const rT = await conEnv(BASE, () => correr(sbT));
+    ok(rT.res.cotizacion?.decision === "automatico" && !!rT.res.envioPendiente, `política + resumen limpios: sale sola (${rT.res.cotizacion?.decision} ${motivosDe(rT)})`);
+    ok(JSON.stringify(rT.fila?.consideraciones_json?.reserva) === JSON.stringify(POL) && JSON.stringify(rT.fila?.consideraciones_json?.reserva_resumen) === JSON.stringify(RES),
+      `el resumen se copia a la fila, limpio, junto con la política (${JSON.stringify(rT.fila?.consideraciones_json?.reserva_resumen)})`);
+    const tT = plano(rT);
+    ok(RES.every((l) => tT.includes(l)) && !tT.includes("cargo administrativo del 10 %") && sinEsp(tT).includes(sinEsp(URL_OK)),
+      "el PDF que se envía imprime el resumen y el enlace a SU cotización (el token se leyó de vuelta del insert), no la política entera");
+    ok(rT.fila?.condiciones_token === TOKEN, "la fila guardada lleva el token que puso la base");
+
+    // Sin dominio del ERP: la política entera, como hasta ahora (el resumen se guarda igual en la fila).
+    const sbE = base23(conRes()); sbE.tokenCot = TOKEN;
+    const rE = await conEnv(undefined, () => correr(sbE));
+    const tE = plano(rE);
+    ok(rE.res.cotizacion?.decision === "automatico" && tE.includes("cargo administrativo del 10 %") && !tE.includes(RES[0]) && !sinEsp(tE).includes("/condiciones/"),
+      "sin NEXT_PUBLIC_APP_URL: la política entera, sin resumen ni enlace");
+    ok(JSON.stringify(rE.fila?.consideraciones_json?.reserva_resumen) === JSON.stringify(RES), "y el resumen queda guardado en la fila para cuando haya enlace");
+
+    // Un dominio que no es un origen https (o localhost): tampoco hay enlace.
+    const sbH = base23(conRes()); sbH.tokenCot = TOKEN;
+    const tH = plano(await conEnv("http://erp.ejemplo.pe", () => correr(sbH)));
+    ok(tH.includes("cargo administrativo del 10 %") && !tH.includes(RES[0]), "un dominio http (no localhost): la política entera");
+
+    // Sin token (la base no lo puso): la política entera.
+    const rN = await conEnv(BASE, () => correr(base23(conRes())));
+    const tN = plano(rN);
+    ok(rN.res.cotizacion?.decision === "automatico" && tN.includes("cargo administrativo del 10 %") && !tN.includes(RES[0]), "sin token: la política entera");
+
+    // Sin la migración: el insert que pide el token de vuelta falla entero (una sentencia, nada escrito);
+    // se reintenta sin pedirlo, se crea UNA cotización y el PDF lleva la política entera.
+    const sbM = base23(conRes()); sbM.tokenCot = TOKEN; sbM.faltan.cotizaciones = ["condiciones_token"];
+    const rM = await conEnv(BASE, () => correr(sbM));
+    const tM = plano(rM);
+    ok(rM.res.cotizacion?.decision === "automatico" && sbM.t("cotizaciones").length === 1 && rM.fila?.condiciones_token === undefined && tM.includes("cargo administrativo del 10 %") && !tM.includes(RES[0]),
+      `sin cotizaciones-08: una sola cotización, sin token y con la política entera (${rM.res.cotizacion?.decision} ${sbM.t("cotizaciones").length})`);
+    // Y el PDF del ejecutivo (relee la fila con COLS accesorias): la misma política entera.
+    const pdfM = await conEnv(BASE, () => pdfDeCotizacion(sbM as any, rM.fila.id, { bajarLogo: async () => null }));
+    ok(textoDelPdf(pdfM.bytes).includes("cargo administrativo del 10 %"), "«Ver PDF» sin la columna: la relectura la suelta y la política va entera");
+    // Con la columna, «Ver PDF» relee el token de la fila y sale el mismo resumen con su enlace.
+    const pdfT = await pdfDeCotizacion(sbT as any, rT.fila.id, { bajarLogo: async () => null, baseCondiciones: BASE });
+    const tPdfT = textoDelPdf(pdfT.bytes);
+    ok(RES.every((l) => tPdfT.includes(l)) && sinEsp(tPdfT).includes(sinEsp(URL_OK)), "«Ver PDF» relee el token: el mismo resumen y el mismo enlace");
+
+    // Resumen sin política en la plantilla: no se copia ninguno de los dos.
+    const rSP = await conEnv(BASE, () => { const sb = base23(IA23({ condiciones_reserva_resumen: RES } as Partial<Plantilla>)); sb.tokenCot = TOKEN; return correr(sb); });
+    ok(!("reserva" in (rSP.fila?.consideraciones_json ?? {})) && !("reserva_resumen" in (rSP.fila?.consideraciones_json ?? {})) && !/RESERVA, CAMBIOS/.test(plano(rSP)),
+      "un resumen sin política en la plantilla no se copia ni se imprime");
+    // Política sin resumen: la clave del resumen no aparece y el PDF lleva la política entera aunque haya enlace.
+    const rPS = await conEnv(BASE, () => { const sb = base23(IA23({ condiciones_reserva: POL })); sb.tokenCot = TOKEN; return correr(sb); });
+    ok(!("reserva_resumen" in (rPS.fila?.consideraciones_json ?? {})) && plano(rPS).includes("cargo administrativo del 10 %") && !sinEsp(plano(rPS)).includes("/condiciones/"),
+      "política sin resumen: sin la clave y con la política entera, aunque haya token y dominio");
+
+    // Las líneas del resumen cuentan para la revisión.
+    const lNum = "Para cancelar llame al 987 654 321.";
+    const rRn = await conEnv(BASE, () => { const sb = base23(conRes({ condiciones_reserva_resumen: [RES[0], lNum] } as Partial<Plantilla>)); sb.tokenCot = TOKEN; return correr(sb); });
+    ok(rRn.res.cotizacion?.decision === "revision" && motivosDe(rRn) === "texto_libre_sospechoso" && rRn.nota.includes(lNum) && rRn.nota.includes("Resumen de la reserva, cambios y cancelación"),
+      `una línea del resumen con 6+ dígitos → revisión, y la nota la cita con su lista (${motivosDe(rRn)})`);
+    const lEnl = "Más en www.ejemplo-traslados.com";
+    const rRe = await conEnv(BASE, () => { const sb = base23(conRes({ condiciones_reserva_resumen: [lEnl] } as Partial<Plantilla>)); sb.tokenCot = TOKEN; return correr(sb); });
+    ok(rRe.res.cotizacion?.decision === "revision" && motivosDe(rRe) === "texto_libre_sospechoso" && rRe.nota.includes(lEnl), `una línea del resumen con un enlace → revisión (${motivosDe(rRe)})`);
+    const rR31 = await conEnv(BASE, () => { const sb = base23(conRes({ condiciones_reserva_resumen: lineas(31) } as Partial<Plantilla>)); sb.tokenCot = TOKEN; return correr(sb); });
+    ok(rR31.res.cotizacion?.decision === "revision" && motivosDe(rR31) === "condiciones_demasiadas" && /«Resumen de la reserva, cambios y cancelación»: 31 líneas/.test(rR31.nota),
+      `31 líneas en el resumen → condiciones_demasiadas, y la nota nombra la lista (${motivosDe(rR31)})`);
+    // Las puras, directo.
+    const cs = T.condicionesSospechosas({ incluye: [], no_incluye: [], generales: [], reserva: POL, reserva_resumen: [RES[0], lNum] });
+    ok(cs.length === 1 && cs[0].lista === "reserva_resumen" && cs[0].linea === lNum && cs[0].motivos.includes("numero_largo"), "condicionesSospechosas mira el resumen");
+    ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: { incluye: [], no_incluye: [], generales: [], reserva: POL, reserva_resumen: lineas(31) } }).motivos.join() === "condiciones_demasiadas",
+      "revisionPorCondiciones cuenta el resumen para el exceso");
+    ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: { incluye: [], no_incluye: [], generales: [], reserva: POL, reserva_resumen: RES } }).motivos.length === 0, "y un resumen limpio no deja nada para revisión");
   }
   {
     // El simulador de /tarifario dice lo mismo que hará la IA; la pantalla de plantillas usa la misma regla.

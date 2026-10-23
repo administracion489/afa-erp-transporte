@@ -27,6 +27,12 @@
 // cuarta lista y SOLO la imprime esta plantilla: en la hoja 2, después de las Consideraciones
 // generales. Vacía, ausente o solo con líneas en blanco no se imprime NADA, ni su título (con o sin
 // `omitirListasVacias`), así que una cotización o una plantilla sin ella sale como siempre.
+//
+// SU RESUMEN (`consid.reserva_resumen`, supabase/cotizaciones-08) la reemplaza SOLO con el enlace a
+// las condiciones completas de la cotización (`enlaceCondiciones` de la entrada): se imprimen los
+// puntos del resumen, el enlace y su QR (`matrizQr`, lib/qr-matriz.ts, los mismos módulos para el
+// HTML y el PDF). Sin resumen o sin enlace, la política entera byte a byte (`politicaParaImprimir`,
+// lib/condiciones-publicas.ts): nunca se esconde lo que mueve dinero.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import type { AvisoPdf, ClientePdf, CotizacionPdf, EntradaPdfCot, ItemPdf, PlantillaPdfCfg } from "./cotizacion-pdf";
@@ -40,9 +46,15 @@ import {
   normalizarIdioma, t, fmtFechaDoc, fmtImporte, fmtTipoCambio, considParaPdf, descripcionParaPdf,
   DEFAULT_CONSID_ES, type Idioma, type ConsidPdf, type CtxDescripcion,
 } from "./cotizacion-idioma";
+import { enlaceCondiciones, esEnlaceCondiciones, politicaParaImprimir, RUTA_CONDICIONES, SQL_RESUMEN_CONDICIONES, type ModoPolitica } from "./condiciones-publicas";
+import { matrizQr, type MatrizQr } from "./qr-matriz";
 
 export { descripcionVehiculoPdf, etiquetaVehiculoPdf, partesPie, vehiculosDoc };
 export type { PartePie, TipoPartePie, VehiculoDoc, VehiculoPDF };
+// El enlace a las condiciones vive en lib/condiciones-publicas.ts (sin dependencias: lo importa la
+// página pública); se re-exporta aquí, que es donde lo buscan los demás módulos del PDF.
+export { enlaceCondiciones, esEnlaceCondiciones, politicaParaImprimir, RUTA_CONDICIONES, SQL_RESUMEN_CONDICIONES, matrizQr };
+export type { ModoPolitica, MatrizQr };
 
 /**
  * El color de la plantilla corporativa. Fijo: la corporativa nunca leyó `color_primario` de la
@@ -276,6 +288,10 @@ export type FilaDoc = { rotulo: string; segmentos: Segmento[] };
 export type CajaDoc = { titulo: string; filas: FilaDoc[] };
 export type FilaTablaDoc = { item: string; descripcion: string; dias: string; cantidad: string; punit: string; dscto: string; total: string };
 export type ListaDoc = { titulo: string; items: string[] };
+/** El enlace a las condiciones completas, en el modo `resumen`: rótulo, la URL y su QR (null si no se pudo armar). */
+export type EnlaceCondicionesDoc = { rotulo: string; url: string; qr: MatrizQr | null };
+/** La política de reserva: la lista que se imprime (la política o su resumen), el modo y el enlace. */
+export type ReservaDoc = ListaDoc & { modo: ModoPolitica; enlace: EnlaceCondicionesDoc | null };
 
 export type DocCorporativo = {
   idioma: Idioma;
@@ -308,8 +324,11 @@ export type DocCorporativo = {
     incluye: ListaDoc;
     noIncluye: ListaDoc;
     generales: ListaDoc;
-    /** La política de reserva, cambios y cancelación: sin líneas no se imprime (`reservaVisible`). */
-    reserva: ListaDoc;
+    /**
+     * La política de reserva, cambios y cancelación: sin líneas no se imprime (`reservaVisible`). En
+     * `resumen`, `items` es el resumen y `enlace` lleva la URL y el QR de las condiciones completas.
+     */
+    reserva: ReservaDoc;
     /** Una lista vacía no se imprime, ni su título. */
     omitirVacias: boolean;
   };
@@ -437,6 +456,8 @@ export function docCorporativoDeBase(b: BaseCotizacionPdf): DocCorporativo {
   const omitirVacias = e.omitirListasVacias === true;
   const lista = (xs: readonly unknown[]): string[] => (omitirVacias ? xs.map(s).filter(x => x.trim() !== "") : xs.map(s));
   const vehs = vehiculosDoc(vehiculos, idioma);
+  // La política o su resumen: el resumen solo con el enlace a las condiciones completas.
+  const pol = politicaParaImprimir({ politica: b.consid.reserva, resumen: b.consid.reserva_resumen, enlace: e.enlaceCondiciones });
 
   return {
     idioma, moneda: b.moneda, color: COLOR_CORPORATIVO,
@@ -471,7 +492,10 @@ export function docCorporativoDeBase(b: BaseCotizacionPdf): DocCorporativo {
       noIncluye: { titulo: T("corp_no_incluye"), items: lista(b.consid.no_incluye) },
       generales: { titulo: T("corp_generales"), items: lista(b.consid.generales) },
       // Sin líneas en blanco nunca: una política vacía no imprime ni su título.
-      reserva: { titulo: T("corp_reserva"), items: (b.consid.reserva ?? []).map(s).filter(x => x.trim() !== "") },
+      reserva: {
+        titulo: T("corp_reserva"), items: pol.items, modo: pol.modo,
+        enlace: pol.modo === "resumen" && pol.enlace ? { rotulo: T("corp_reserva_enlace"), url: pol.enlace, qr: matrizQr(pol.enlace) } : null,
+      },
       omitirVacias,
     },
     pie: partesPie(emp.direccion, emp.telefono, emp.email, emp.web, idioma),

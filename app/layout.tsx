@@ -811,7 +811,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     // Va ANTES que "/conformidad" en la lista por claridad; el `some` no depende del
     // orden, pero sí de que sea su propia entrada — "/conformidad" no lo cubre, porque
     // el prefijo se compara con "/" al final y "conformidad-cambio" no calza.
-    ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero", "/manuales", "/conformidad-cambio", "/conformidad", "/proveedor"].some(
+    // /condiciones/[token] es público: la política de reserva, cambios y cancelación que quedó
+    // guardada en UNA cotización (el enlace del PDF y del WhatsApp), sin datos del cliente.
+    ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero", "/manuales", "/conformidad-cambio", "/conformidad", "/proveedor", "/condiciones"].some(
       (r) => pathname === r || pathname.startsWith(r + "/")
     ) ||
     // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO, y tampoco
