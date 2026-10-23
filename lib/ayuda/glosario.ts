@@ -436,6 +436,18 @@ export const GLOSARIO: Record<string, Concepto> = {
     verTambien: ["adelanto", "liquidacion_proveedor", "liquidacion_cliente", "devengado"],
   },
 
+  pago_reportado: {
+    clave: "pago_reportado",
+    termino: "Pago reportado (reserva de traslado)",
+    definicion:
+      "Es el estado de una reserva de traslado cuando el cliente **dice** que ya pagó el adelanto y manda por WhatsApp la foto o el PDF del comprobante, pero Tesorería **todavía no lo vio en el banco**.\nLa IA del CRM lee el comprobante (monto, fecha, número de operación) y lo coteja con el adelanto pedido, pero eso es evidencia, no un cobro: el dinero cuenta como cobrado recién cuando alguien con el módulo Finanzas o Cuentas por Pagar lo registra en **Tesorería → Adelantos de reservas** (o en la tarjeta del chat).",
+    ejemplo:
+      "La cotización es de S/ 300 y se pidió un adelanto del 50 %. El cliente manda una captura de Yape por S/ 150: la reserva queda en «Pago reportado · por verificar en el banco». Tesorería ve los S/ 150 en el extracto y pulsa «Registrar adelanto»: recién ahí «Cobrado» dice S/ 150.",
+    ojo:
+      "No es el «Adelanto (a cuenta del proveedor)» de las facturas de compra: aquí la plata entra del cliente. Si el pago no aparece en el banco, se pulsa «No encontré el pago» y el ejecutivo se lo dice al cliente desde la tarjeta del chat; nunca se registra un cobro por lo que dice la foto.",
+    verTambien: ["anticipo", "nro_operacion", "conciliacion_bancaria"],
+  },
+
   // ── Banco ───────────────────────────────────────────────────────────────────
 
   conciliacion_bancaria: {

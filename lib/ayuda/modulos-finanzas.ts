@@ -23,16 +23,18 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
     rutas: ["/tesoreria"],
     titulo: "Tesorería · lo que AFA debe y cómo lo paga",
     resumen:
-      "Es el tablero de todo el dinero que sale de la empresa: las facturas de los proveedores, los sueldos y gastos fijos, las detracciones que hay que depositar en el Banco de la Nación, los pagos que se mandan al banco en bloque, y el cruce final contra el extracto bancario. En el menú de la izquierda está como “Cuentas por Pagar”; dentro tiene cinco pestañas.",
+      "Es el tablero de todo el dinero que sale de la empresa: las facturas de los proveedores, los sueldos y gastos fijos, las detracciones que hay que depositar en el Banco de la Nación, los pagos que se mandan al banco en bloque, y el cruce final contra el extracto bancario. En el menú de la izquierda está como “Cuentas por Pagar”; dentro tiene seis pestañas (la última, **Adelantos de reservas**, es la de los traslados que reserva la IA del CRM).",
     paraQueSirve: [
       "Saber cuánto le debes hoy a tus proveedores y cuánto de esa deuda ya está vencida.",
       "Que gerencia visé (apruebe) las facturas antes de que salga un sol del banco.",
       "Armar el archivo de pago masivo del BCP en vez de transferir una por una.",
       "No olvidarte de depositar las detracciones, que tienen plazo legal.",
       "Descubrir cargos en la cuenta que el ERP no sabe explicar.",
+      "Registrar el adelanto de una reserva de traslado cuando el dinero se ve en el banco, o devolverlo si se canceló.",
     ],
     conceptos: [
       "cuentas_por_pagar",
+      "pago_reportado",
       "regla_oro",
       "saldo",
       "estado_aprobacion",
@@ -53,6 +55,11 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       "estado_conciliacion",
     ],
     faqs: [
+      {
+        pregunta: "¿Qué es la pestaña «Adelantos de reservas»?",
+        respuesta:
+          "Son los traslados que un cliente aceptó por WhatsApp con la IA del CRM. Cuando el cliente manda el comprobante de su adelanto, la reserva queda en **Pago reportado**: la IA leyó la foto, pero nadie vio todavía el dinero.\n\nTu trabajo aquí es uno de tres: **Registrar adelanto** cuando el depósito aparece en el banco (el monto no viene escrito: pones el que ves en el extracto, con su número de operación), **No encontré el pago** si no aparece (el ejecutivo se lo dice al cliente desde el chat), y **Registrar devolución** cuando una cancelación o una reserva sin unidad ya tiene la transferencia hecha.\n\nLa pestaña abre en **Le toca a Tesorería**; con **Todas** ves también las que ya no tienen nada pendiente. La imagen del comprobante se abre desde la tarjeta del chat en el CRM.",
+      },
       {
         pregunta: "¿Qué es una “cuenta por pagar”? Entro a Cuentas por pagar y lo que veo son facturas.",
         respuesta:
