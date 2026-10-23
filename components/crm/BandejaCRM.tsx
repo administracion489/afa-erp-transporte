@@ -17,6 +17,8 @@ import { LINEA_DISPONIBILIDAD } from "@/lib/traslados/cotizacion-traslado";
 import { usePuedeVer } from "@/lib/usePuedeVer";
 import { abrirPdf } from "@/components/tarifario/abrir-pdf";
 import TarjetaReservaTraslado from "@/components/crm/TarjetaReservaTraslado";
+import { useAltoAutomatico } from "@/lib/useAltoAutomatico";
+import { CONSULTA_TACTIL, useConsultaMedia, usePantallaChica } from "@/lib/useConsultaMedia";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -279,6 +281,53 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
   const [nuevoForm, setNuevoForm] = useState({ nombre: "", empresa: "", telefono: "", email: "", canal: "whatsapp", notas: "" });
   const chatEndRef = useRef<HTMLDivElement>(null);
   const replyRef = useRef<HTMLTextAreaElement>(null);
+
+  // ── Celular y cuadro de respuesta ──────────────────────────────────────
+  // En el celular la lista ocupa la pantalla y el chat abierto se pinta ENCIMA, a pantalla completa
+  // (como WhatsApp); en escritorio, los dos paneles lado a lado como siempre. La consulta es la
+  // misma con la que el layout colapsa el menú (lib/useConsultaMedia.ts).
+  const pantallaChica = usePantallaChica();
+  // En un teléfono no hay Shift+Enter: ahí Enter es «nueva línea» y se envía con el botón.
+  const tactil = useConsultaMedia(CONSULTA_TACTIL);
+  // El cuadro crece con el texto, como el de WhatsApp Web: de 2 renglones hasta 9 (7 más) y,
+  // pasado eso, desplazamiento. En el celular nace en 1 y para en 6: el teclado ya ocupa media pantalla.
+  const refReply = useAltoAutomatico(replyRef, reply, pantallaChica ? { minFilas: 1, maxFilas: 6 } : { minFilas: 2, maxFilas: 9 });
+
+  // El botón Atrás del teléfono (o el gesto) cierra el chat y vuelve a la lista, en vez de sacar
+  // del CRM. Al abrir un chat en el celular se agrega UNA entrada al historial con la misma URL
+  // (Next integra el pushState nativo a su router) y volver la consume. El «←» del chat hace lo
+  // mismo: si hay entrada, retrocede; si no (se abrió en escritorio y se achicó la ventana), cierra.
+  const chatEnHistorial = useRef(false);
+  const hayChat = !!selected;
+  useEffect(() => {
+    if (!pantallaChica || !hayChat || chatEnHistorial.current) return;
+    window.history.pushState(null, "", window.location.href);
+    chatEnHistorial.current = true;
+  }, [pantallaChica, hayChat]);
+  useEffect(() => {
+    const alVolver = () => {
+      if (!chatEnHistorial.current) return;
+      chatEnHistorial.current = false;
+      setSelected(null);
+    };
+    window.addEventListener("popstate", alVolver);
+    return () => window.removeEventListener("popstate", alVolver);
+  }, []);
+  const cerrarChat = () => {
+    if (chatEnHistorial.current) window.history.back();
+    else setSelected(null);
+  };
+
+  // Si se estaba viendo el final del chat, se sigue viendo el final cuando el área se achica: al
+  // crecer el cuadro de respuesta o al abrirse el teclado del celular. Si se estaba leyendo más
+  // arriba, no se mueve.
+  const pegadoAlFinal = useRef(true);
+  const refAreaChat = useCallback((el: HTMLDivElement | null) => {
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => { if (pegadoAlFinal.current) el.scrollTop = el.scrollHeight; });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -1029,8 +1078,22 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
   // ── Render ─────────────────────────────────────────────────────────────
 
+  // «✨ IA»: en escritorio va encima de «Enviar»; en el celular, en la fila de herramientas.
+  const botonIA = (
+    <button
+      onClick={pedirRespuestaIA}
+      disabled={pidiendoIA}
+      title="Pedir una sugerencia de respuesta a la IA"
+      className="border border-[#0b315f]/30 text-[#0b315f] px-4 py-2 rounded-xl text-sm font-semibold
+        hover:bg-[#0b315f]/5 transition-colors disabled:opacity-40"
+    >
+      {pidiendoIA ? "…" : "✨ IA"}
+    </button>
+  );
+
+  // En el celular el <main> mide el alto visible y va sin padding (RUTAS_BANDEJA en app/layout.tsx).
   return (
-    <div className="flex h-[calc(100vh-4rem)] bg-gray-50 overflow-hidden">
+    <div className="flex h-full md:h-[calc(100vh-4rem)] bg-gray-50 overflow-hidden">
 
       {/* ── Toast ── */}
       {toast && (
@@ -1040,12 +1103,13 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
         </div>
       )}
 
-      {/* ── Panel izquierdo — lista de conversaciones ── */}
-      <div className="w-[30%] min-w-[320px] max-w-[460px] flex-shrink-0 bg-white border-r border-gray-100 flex flex-col">
+      {/* ── Panel izquierdo — lista de conversaciones ──
+          En el celular ocupa todo el ancho; el chat abierto se pinta encima a pantalla completa. */}
+      <div className="w-full md:w-[30%] md:min-w-[320px] md:max-w-[460px] flex-shrink-0 bg-white md:border-r border-gray-100 flex flex-col min-w-0">
 
         {/* Header */}
-        <div className="p-4 border-b border-gray-100">
-          <div className="flex items-center justify-between mb-3">
+        <div className="p-3 md:p-4 border-b border-gray-100">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <div className="flex items-center gap-2">
               <span className="text-lg font-bold text-[#0b315f]">{bandeja === "avisos" ? "Inbox Notificaciones" : "CRM"}</span>
               {totalNoLeidos > 0 && (
@@ -1054,19 +1118,19 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               <button
                 onClick={sincronizarGmail}
                 disabled={sincronizando}
                 title="Sincronizar Gmail"
-                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors disabled:opacity-50"
+                className="whitespace-nowrap text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors disabled:opacity-50"
               >
                 {sincronizando ? "⏳" : "📧↻"}
               </button>
               <button
                 onClick={conectarGmail}
                 title="Conectar (o reconectar) la cuenta de Gmail del CRM"
-                className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-colors ${
+                className={`whitespace-nowrap text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-colors ${
                   gmail && (!gmail.conectado || gmail.ultimo_error) ? "border-red-300 text-red-700 bg-red-50 hover:bg-red-100" : "border-gray-200 hover:bg-gray-50"}`}
               >
                 {gmail && !gmail.conectado ? "📧 Conectar Gmail" : gmail?.ultimo_error ? "📧 Reconectar" : "📧+"}
@@ -1074,13 +1138,13 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
               <button
                 onClick={() => setConectarWaModal(true)}
                 title="Vincular el WhatsApp Business existente al CRM (coexistencia)"
-                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-[#25D366]/40 text-[#0b315f] hover:bg-[#25D366]/10 transition-colors"
+                className="whitespace-nowrap text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-[#25D366]/40 text-[#0b315f] hover:bg-[#25D366]/10 transition-colors"
               >
-                📲 Conectar WhatsApp
+                📲 <span className="hidden sm:inline">Conectar </span>WhatsApp
               </button>
               <button
                 onClick={() => setNuevoContactoModal(true)}
-                className="bg-[#0b315f] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#1262bd] transition-colors"
+                className="whitespace-nowrap bg-[#0b315f] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#1262bd] transition-colors"
               >
                 + Nueva
               </button>
@@ -1135,13 +1199,14 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
           />
         </div>
 
-        {/* Filtros canal */}
-        <div className="px-3 pt-3 pb-1 flex gap-1.5 flex-wrap border-b border-gray-100">
+        {/* Filtros canal — en el celular, una sola fila que se desliza de lado (en dos o tres filas
+            se comían media pantalla de la lista) */}
+        <div className="px-3 pt-3 pb-1 flex gap-1.5 flex-nowrap md:flex-wrap overflow-x-auto md:overflow-visible border-b border-gray-100 [scrollbar-width:none]">
           {(["todos", "whatsapp", "messenger", "instagram", "gmail", "llamada"] as Canal[]).map((c) => (
             <button
               key={c}
               onClick={() => setCanalFiltro(c)}
-              className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors
+              className={`flex-shrink-0 whitespace-nowrap text-xs px-2.5 py-1 rounded-full font-medium transition-colors
                 ${canalFiltro === c ? "bg-[#0b315f] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
             >
               {c === "todos" ? "Todos" : (CANAL_CFG[c]?.icon + " " + CANAL_CFG[c]?.label)}
@@ -1167,12 +1232,12 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
         )}
 
         {/* Filtros estado */}
-        <div className="px-3 py-2 flex gap-1.5 border-b border-gray-100">
+        <div className="px-3 py-2 flex gap-1.5 overflow-x-auto border-b border-gray-100 [scrollbar-width:none]">
           {(["todas", "abierta", "en_progreso", "resuelta"] as const).map((e) => (
             <button
               key={e}
               onClick={() => setEstadoFiltro(e)}
-              className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors
+              className={`flex-shrink-0 whitespace-nowrap text-xs px-2.5 py-1 rounded-full font-medium transition-colors
                 ${estadoFiltro === e
                   ? "bg-[#0b315f]/10 text-[#0b315f] font-semibold"
                   : "text-gray-500 hover:text-gray-700"}`}
@@ -1186,12 +1251,12 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             <button
               key={v}
               onClick={() => setVista(v)}
-              className={`text-xs px-2.5 py-1 rounded-full ${vista === v ? "bg-[#0b315f] text-white" : "text-gray-500 hover:bg-gray-100"}`}
+              className={`flex-shrink-0 whitespace-nowrap text-xs px-2.5 py-1 rounded-full ${vista === v ? "bg-[#0b315f] text-white" : "text-gray-500 hover:bg-gray-100"}`}
             >
               {v === "todas" ? "Todas" : v === "mias" ? "Mías" : `Sin asignar (${convs.filter((c) => !c.asignado_a).length})`}
             </button>
           ))}
-          <select value={filtroEtq} onChange={(e) => setFiltroEtq(e.target.value)} className="ml-auto text-xs border border-gray-200 rounded-lg px-1.5 py-1 bg-white">
+          <select value={filtroEtq} onChange={(e) => setFiltroEtq(e.target.value)} className="ml-auto min-w-0 max-w-[45%] text-xs border border-gray-200 rounded-lg px-1.5 py-1 bg-white">
             <option value="">🏷 Todas</option>
             {[...new Set([...ETIQUETAS.map((x) => x.clave), ...convs.flatMap((c) => c.etiquetas ?? [])])].map((e) => <option key={e} value={e}>{e}</option>)}
           </select>
@@ -1242,7 +1307,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                           📞 {telefonoLegible(c.crm_contactos)}
                         </div>
                       )}
-                      <div className="flex items-center gap-1.5 mt-0.5">
+                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: cfg.bg, color: cfg.color }}>
                           {cfg.icon} {cfg.label}
                         </span>
@@ -1273,27 +1338,38 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
         </div>
       </div>
 
-      {/* ── Panel derecho — chat ── */}
+      {/* ── Panel derecho — chat ──
+          En el celular es una pantalla ENCIMA de la lista (y del menú), como en WhatsApp: fixed a
+          pantalla completa, con «←» para volver. z-30: sobre el menú (z-20) y bajo ELIA y la ayuda
+          (z-40), que se arrastran si tapan algo. En escritorio vuelve a ser el panel de la derecha. */}
       {selected ? (
-        <div className="flex-1 flex flex-col min-w-0">
-          {/* Chat header */}
-          <div className="bg-white border-b border-gray-100 px-5 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-3">
+        <div className="fixed inset-0 z-30 bg-gray-50 md:static md:z-auto flex-1 flex flex-col min-w-0">
+          {/* Chat header — en el celular, nombre arriba y las acciones en una fila que se desliza */}
+          <div className="bg-white border-b border-gray-100 px-3 md:px-5 py-2 md:py-3 flex max-md:flex-wrap items-center justify-between max-md:gap-2">
+            <div className="flex items-center gap-2 md:gap-3 max-md:min-w-0 max-md:flex-1">
+              <button
+                onClick={cerrarChat}
+                aria-label="Volver a la lista de conversaciones"
+                title="Volver a la lista"
+                className="md:hidden -ml-1 w-9 h-9 flex-shrink-0 rounded-full flex items-center justify-center text-xl text-[#0b315f] hover:bg-gray-100"
+              >
+                ←
+              </button>
               <div
-                className="w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-bold"
+                className="w-9 h-9 md:w-10 md:h-10 flex-shrink-0 rounded-full flex items-center justify-center text-white text-sm font-bold"
                 style={{ background: avatarColor(selected.crm_contactos?.nombre ?? "") }}
               >
                 {iniciales(selected.crm_contactos?.nombre ?? "?")}
               </div>
-              <div>
-                <div className="font-semibold text-gray-900">
+              <div className="max-md:min-w-0">
+                <div className="font-semibold text-gray-900 max-md:truncate">
                   {/* Sin nombre de perfil, el webhook guarda el número como nombre: en ese
                       caso se muestra formateado y no se repite abajo. */}
                   {nombreEsElNumero(selected.crm_contactos)
                     ? telefonoLegible(selected.crm_contactos)
                     : selected.crm_contactos?.nombre}
                 </div>
-                <div className="flex items-center gap-2 text-xs text-gray-500">
+                <div className="flex max-md:flex-wrap items-center gap-x-2 text-xs text-gray-500">
                   {selected.crm_contactos?.empresa && <span>{selected.crm_contactos.empresa}</span>}
                   {/* Número DEL CLIENTE. Va con su propio botón de copiar porque para eso
                       se mira: para llamar o guardarlo. No confundir con el chip gris de la
@@ -1322,9 +1398,11 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             </div>
 
             {/* Acciones */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none] max-md:[&>*]:flex-shrink-0 max-md:[&>*]:whitespace-nowrap">
+              {/* En el celular los dos chips informativos van AL FINAL de la fila deslizable: lo que
+                  se ve sin deslizar son las acciones (estado, IA, ficha del cliente). */}
               <span
-                className="text-xs px-2.5 py-1 rounded-full font-medium"
+                className="text-xs px-2.5 py-1 rounded-full font-medium max-md:order-last"
                 style={{
                   background: CANAL_CFG[selected.canal]?.bg,
                   color: CANAL_CFG[selected.canal]?.color,
@@ -1336,7 +1414,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
               {/* Por qué número de la empresa entró este hilo */}
               {selected.display_phone_number && (
                 <span
-                  className="text-xs px-2.5 py-1 rounded-full font-medium bg-gray-100 text-gray-600"
+                  className="text-xs px-2.5 py-1 rounded-full font-medium bg-gray-100 text-gray-600 max-md:order-last"
                   title="Número de la empresa por el que entró esta conversación"
                 >
                   📲 {formatearNumero(selected.display_phone_number)}
@@ -1383,7 +1461,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             </div>
           </div>
 
-          <div className="bg-white border-b border-gray-100 px-5 py-1.5">
+          <div className="bg-white border-b border-gray-100 px-3 md:px-5 py-1.5">
             <EquipoConversacion
               conv={selected}
               aviso={(m, ok = true) => showToast(m, ok)}
@@ -1403,7 +1481,15 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
               crm_mensajes), así que sin intercalarlos un "Muchas gracias" suelto no dice
               nada; debajo del aviso que lo precede se explica solo. No se guarda el texto
               que se envió, sólo el qué/cuándo — nunca se finge citarlo. */}
-          <div className="flex-1 overflow-y-auto px-[6%] py-4 space-y-1.5" style={{ background: "#efeae2" }}>
+          <div
+            ref={refAreaChat}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              pegadoAlFinal.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+            }}
+            className="flex-1 min-h-0 overflow-y-auto px-[4%] md:px-[6%] py-3 md:py-4 space-y-1.5"
+            style={{ background: "#efeae2" }}
+          >
             {hayAnteriores && !cargandoChat && selected && (
               <div className="flex justify-center pb-2">
                 <button
@@ -1436,7 +1522,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                   <React.Fragment key={`n-${n.id}`}>
                     {separador}
                     <div className="flex justify-center">
-                      <div className="max-w-[70%] bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2 text-[13px] text-yellow-900" title="Nota interna: el cliente no la ve">
+                      <div className="max-w-[90%] md:max-w-[70%] bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2 text-[13px] text-yellow-900" title="Nota interna: el cliente no la ve">
                         <div className="text-[10px] font-semibold text-yellow-700 mb-0.5">🔒 Nota interna · {n.autor_nombre ?? "equipo"} · {fmtFechaMsg(n.created_at)}</div>
                         <div className="whitespace-pre-wrap">{n.texto}</div>
                       </div>
@@ -1471,7 +1557,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                   {separador}
                   <div className={`flex ${esMio ? "justify-end" : "justify-start"}`}>
                     <div
-                      className={`max-w-[65%] px-3 py-2 rounded-lg text-[14.5px] leading-snug
+                      className={`max-w-[85%] md:max-w-[65%] min-w-0 break-words px-3 py-2 rounded-lg text-[14.5px] leading-snug
                         ${esBurbujaSinFondo(m.tipo)
                           ? (esMio ? "text-gray-500" : "text-gray-800")
                           : esMio
@@ -1505,14 +1591,14 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
           {/* ── Propuestas de la IA pendientes de confirmación ── */}
           {errorAcciones && (
-            <div className="bg-red-50 border-t border-red-100 px-5 py-2 text-xs text-red-700">
+            <div className="bg-red-50 border-t border-red-100 px-3 md:px-5 py-2 text-xs text-red-700">
               No se pudieron leer las propuestas de la IA de esta conversación: {errorAcciones}{" "}
               <button onClick={() => cargarAcciones(selected.id)} className="underline font-semibold">Reintentar</button>
             </div>
           )}
           {/* Solo las de ESTE hilo: una tarjeta de otra conversación con «Enviar al cliente» mandaría el PDF a otra persona. */}
           {accionesHilo.length > 0 && (
-            <div className="bg-amber-50 border-t border-amber-100 px-5 py-3 space-y-2 max-h-[45vh] overflow-y-auto">
+            <div className="bg-amber-50 border-t border-amber-100 px-3 md:px-5 py-3 space-y-2 max-h-[45vh] overflow-y-auto">
               {accionesHilo.map((a) => a.tipo === "reserva_traslado" ? (
                 // La reserva tiene su propia ruta (/api/crm/reservas-traslado): nunca va por la tarjeta genérica,
                 // que la mandaría a /api/crm/ia/accion como si fuera una propuesta para «Aprobar y crear».
@@ -1527,7 +1613,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                   mensaje={trasladoMsg[a.id] || null} puedeCotizaciones={puedeVer ? puedeVer.cotizaciones : null}
                   onVerPdf={() => void verPdfTraslado(a)} onEnviar={() => void enviarTraslado(a)} onRechazar={() => void rechazarTraslado(a)} />
               ) : (
-                <div key={a.id} className="bg-white border border-amber-200 rounded-xl p-3 flex items-center justify-between gap-3">
+                <div key={a.id} className="bg-white border border-amber-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">
                       ✨ Propuesta de {a.tipo === "cotizacion" ? "cotización" : a.tipo === "reserva" ? "reserva" : String(a.tipo)} (IA)
@@ -1555,7 +1641,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
 
           {/* ── Sugerencia de la IA (borrador para aprobar) ── */}
           {selected.borrador_ia && selected.estado !== "resuelta" && (
-            <div className="bg-[#0b315f]/5 border-t border-[#0b315f]/10 px-5 py-3">
+            <div className="bg-[#0b315f]/5 border-t border-[#0b315f]/10 px-3 md:px-5 py-3 max-md:max-h-[35vh] max-md:overflow-y-auto">
               <div className="flex items-center gap-2 mb-1.5">
                 <span className="text-sm">✨</span>
                 <span className="text-xs font-semibold text-[#0b315f]">Sugerencia de la IA</span>
@@ -1582,7 +1668,7 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
           )}
 
           {/* Reply box */}
-          <div className="bg-white border-t border-gray-100 p-4">
+          <div className="bg-white border-t border-gray-100 p-2 md:p-4">
             {selected.estado === "resuelta" ? (
               <div className="text-center text-sm text-gray-400 py-2">
                 Conversación resuelta.{" "}
@@ -1600,63 +1686,64 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
                 lista={rapidas.lista}
                 onElegir={(r) => { setReply(aplicarVariables(r.texto, selected.crm_contactos?.nombre)); replyRef.current?.focus(); }}
               />
-              <div className="flex gap-3 items-end">
-                <AdjuntarArchivo
-                  conversacionId={selected.id}
-                  habilitado={selected.canal === "whatsapp"}
-                  motivo="Por ahora los archivos solo se envían por WhatsApp."
-                  aviso={(m, ok = true) => showToast(m, ok)}
-                  onEnviado={() => { cargarMensajes(selected.id); cargarConvs(); }}
-                />
-                <button
-                  onClick={() => setModoNota((v) => !v)}
-                  title="Nota interna: la ve el equipo, el cliente no"
-                  className={`px-2.5 py-2 rounded-xl text-sm border ${modoNota ? "bg-yellow-100 border-yellow-300 text-yellow-800" : "border-gray-200 text-gray-500 hover:bg-gray-50"}`}
-                >
-                  🔒
-                </button>
-                <button
-                  onClick={() => setModalRapidas(true)}
-                  title="Respuestas rápidas (escribe / en el mensaje)"
-                  className="border border-gray-200 text-gray-500 px-2.5 py-2 rounded-xl text-sm hover:bg-gray-50"
-                >
-                  ⚡
-                </button>
-                <textarea
-                  ref={replyRef}
-                  value={reply}
-                  onChange={(e) => setReply(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
+              {/* Escritorio: 📎 🔒 ⚡ [texto] [IA / Enviar], como siempre. Celular: las herramientas y la
+                  IA en una fila arriba, y el texto con «Enviar» a lo ancho debajo (en una sola fila el
+                  cuadro quedaba de un dedo de ancho). */}
+              <div className="flex flex-col md:flex-row gap-2 md:gap-3 md:items-end">
+                <div className="flex gap-2 md:gap-3 items-end">
+                  <AdjuntarArchivo
+                    conversacionId={selected.id}
+                    habilitado={selected.canal === "whatsapp"}
+                    motivo="Por ahora los archivos solo se envían por WhatsApp."
+                    aviso={(m, ok = true) => showToast(m, ok)}
+                    onEnviado={() => { cargarMensajes(selected.id); cargarConvs(); }}
+                  />
+                  <button
+                    onClick={() => setModoNota((v) => !v)}
+                    title="Nota interna: la ve el equipo, el cliente no"
+                    className={`px-2.5 py-2 rounded-xl text-sm border ${modoNota ? "bg-yellow-100 border-yellow-300 text-yellow-800" : "border-gray-200 text-gray-500 hover:bg-gray-50"}`}
+                  >
+                    🔒
+                  </button>
+                  <button
+                    onClick={() => setModalRapidas(true)}
+                    title="Respuestas rápidas (escribe / en el mensaje)"
+                    className="border border-gray-200 text-gray-500 px-2.5 py-2 rounded-xl text-sm hover:bg-gray-50"
+                  >
+                    ⚡
+                  </button>
+                  <div className="ml-auto flex md:hidden">{botonIA}</div>
+                </div>
+                <div className="flex gap-2 md:gap-3 items-end flex-1 min-w-0">
+                  <textarea
+                    ref={refReply}
+                    value={reply}
+                    onChange={(e) => setReply(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
                       // «/atajo» exacto + Enter = pega la respuesta rápida en vez de enviar «/atajo».
                       const r = reply.startsWith("/") ? rapidas.lista.find((x) => `/${x.atajo}` === reply.trim().toLowerCase()) : null;
-                      if (r) { setReply(aplicarVariables(r.texto, selected.crm_contactos?.nombre)); return; }
+                      if (r) { e.preventDefault(); setReply(aplicarVariables(r.texto, selected.crm_contactos?.nombre)); return; }
+                      // En el teléfono Enter es «nueva línea» (no hay Shift+Enter): se envía con el botón.
+                      if (tactil) return;
+                      e.preventDefault();
                       enviar();
-                    }
-                  }}
-                  placeholder={modoNota ? "Nota interna para el equipo (el cliente no la ve)…" : `Responder por ${CANAL_CFG[selected.canal]?.label ?? selected.canal}…`}
-                  rows={2}
-                  className={`flex-1 border rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 ${modoNota ? "bg-yellow-50 border-yellow-300" : "border-gray-200"}`}
-                />
-                <div className="flex flex-col gap-1.5">
-                  <button
-                    onClick={pedirRespuestaIA}
-                    disabled={pidiendoIA}
-                    title="Pedir una sugerencia de respuesta a la IA"
-                    className="border border-[#0b315f]/30 text-[#0b315f] px-4 py-2 rounded-xl text-sm font-semibold
-                      hover:bg-[#0b315f]/5 transition-colors disabled:opacity-40"
-                  >
-                    {pidiendoIA ? "…" : "✨ IA"}
-                  </button>
-                  <button
-                    onClick={() => enviar()}
-                    disabled={!reply.trim() || enviando}
-                    className="bg-[#0b315f] text-white px-4 py-2.5 rounded-xl text-sm font-semibold
-                      hover:bg-[#1262bd] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {enviando ? "…" : "Enviar"}
-                  </button>
+                    }}
+                    placeholder={modoNota ? "Nota interna para el equipo (el cliente no la ve)…" : `Responder por ${CANAL_CFG[selected.canal]?.label ?? selected.canal}…`}
+                    rows={pantallaChica ? 1 : 2}
+                    className={`flex-1 min-w-0 border rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 ${modoNota ? "bg-yellow-50 border-yellow-300" : "border-gray-200"}`}
+                  />
+                  <div className="flex flex-col gap-1.5">
+                    <div className="hidden md:flex flex-col">{botonIA}</div>
+                    <button
+                      onClick={() => enviar()}
+                      disabled={!reply.trim() || enviando}
+                      className="bg-[#0b315f] text-white px-4 py-2.5 rounded-xl text-sm font-semibold
+                        hover:bg-[#1262bd] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {enviando ? "…" : "Enviar"}
+                    </button>
+                  </div>
                 </div>
               </div>
               </>
@@ -1664,14 +1751,16 @@ export function BandejaCRM({ bandeja }: { bandeja: "crm" | "avisos" }) {
             {modalRapidas && (
               <ModalRespuestasRapidas lista={rapidas.lista} falta={rapidas.falta} onClose={() => setModalRapidas(false)} onCambio={rapidas.recargar} />
             )}
-            <div className="text-xs text-gray-400 mt-1.5 text-right">
-              Enter para enviar · Shift+Enter para nueva línea
-            </div>
+            {!tactil && (
+              <div className="text-xs text-gray-400 mt-1.5 text-right">
+                Enter para enviar · Shift+Enter para nueva línea
+              </div>
+            )}
           </div>
         </div>
       ) : (
         /* Empty state */
-        <div className="flex-1 flex flex-col items-center justify-center text-center p-12">
+        <div className="hidden md:flex flex-1 flex-col items-center justify-center text-center p-12">
           <div className="text-6xl mb-4">💬</div>
           <h2 className="text-xl font-bold text-gray-700 mb-2">Bandeja unificada</h2>
           <p className="text-gray-400 text-sm max-w-xs">
@@ -2237,20 +2326,20 @@ function VentanaWhatsApp({ mensajes, numero }: { mensajes: { direccion: string; 
   const restanMin = Math.floor((new Date(ult.created_at).getTime() + 24 * 3600_000 - Date.now()) / 60000);
   if (restanMin > 0 && restanMin > 120) {
     return (
-      <div className="px-5 py-1 text-[11px] text-gray-500 bg-white border-b border-gray-100">
+      <div className="px-3 md:px-5 py-1 text-[11px] text-gray-500 bg-white border-b border-gray-100">
         🟢 Ventana de WhatsApp abierta · quedan {Math.floor(restanMin / 60)} h para responder con texto libre
       </div>
     );
   }
   if (restanMin > 0) {
     return (
-      <div className="px-5 py-1 text-[11px] text-amber-800 bg-amber-50 border-b border-amber-100">
+      <div className="px-3 md:px-5 py-1 text-[11px] text-amber-800 bg-amber-50 border-b border-amber-100">
         ⏳ La ventana de 24 h se cierra en {restanMin} min: después, desde el CRM solo con plantilla aprobada; desde el celular sí podrás escribirle normal.
       </div>
     );
   }
   return (
-    <div className="px-5 py-1.5 text-[11px] text-red-700 bg-red-50 border-b border-red-100">
+    <div className="px-3 md:px-5 py-1.5 text-[11px] text-red-700 bg-red-50 border-b border-red-100">
       🔒 Pasaron más de 24 h desde el último mensaje del cliente: desde el CRM WhatsApp ya no deja enviar texto libre ni archivos. <b>Puedes escribirle desde el celular (app WhatsApp Business{numero ? ` del ${numero}` : ""})</b>, que no tiene esa regla, o usar una plantilla aprobada (Campañas).
     </div>
   );
