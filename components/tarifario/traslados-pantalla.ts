@@ -594,6 +594,27 @@ const sinPrefijo = (detalle: string, prefijo: string): string => (detalle.starts
 export const celdaCastellanoDe = (c: CeldaTraslado): CeldaTraslado => ({ idioma: "es", moneda: c.moneda });
 
 /**
+ * La frase con que el motor (`plantillaTrasladoIA`) dice, en `sin_plantilla_idioma`, que no hay una
+ * plantilla en inglés: lo que va ANTES es por qué no se obedece la celda («sin regla.», «la regla
+ * apunta a…»). La matriz exige que toda frase de ese código la traiga.
+ */
+export const MARCA_SIN_PLANTILLA_INGLES = " No hay una plantilla en inglés que la IA pueda usar.";
+
+/**
+ * El porqué de una celda «inglés» sin plantilla en inglés, dicho como lo que es: NO cae a las listas
+ * de Ajustes por su cuenta, cae a la celda CASTELLANO de su misma moneda (con lo que esa use: su
+ * plantilla, o las listas de Ajustes) y la cotización queda en revisión. El código lo decide el motor;
+ * aquí solo se redacta, con la razón que dio el motor delante.
+ */
+function porqueSinIngles(detalle: string, prefijo: string, celda: CeldaTraslado, plantilla: PlantillaFila | null): string {
+  const texto = sinPrefijo(detalle, prefijo);
+  const i = texto.indexOf(MARCA_SIN_PLANTILLA_INGLES);
+  const razon = i > 0 ? `${texto.slice(0, i)} ` : "";
+  const fuente = plantilla ? `plantilla «${plantilla.nombre || plantilla.id}»` : "las listas de Ajustes de traslados";
+  return `${razon}No hay una plantilla en inglés que la IA pueda usar: cae a ${nombreCeldaTraslado(celdaCastellanoDe(celda))} (${fuente}), con las condiciones en castellano, y la cotización queda en revisión.`;
+}
+
+/**
  * Qué condiciones copia la IA a la fila en cada celda, CON reglas. Dos modos, según la tabla que
  * exista:
  *  · `reglasTraslado` (cotizaciones-09): las cuatro celdas idioma × moneda (`plantillaTrasladoIA`).
@@ -634,9 +655,12 @@ export function condicionesTrasladoIA(
       const u = plantillaTrasladoIA(celda, plantillas, reglasTraslado, { reglas: reglas ?? null, segmento: celda.moneda === "USD" ? "extranjero" : "particular" });
       const nombre = nombreCeldaTraslado(celda);
       const sinUso = celda.idioma === "en" && !inglesOn;
+      const prefijo = `${etiquetaCeldaTraslado(celda)}: `;
       const porque = sinUso
         ? "el inglés está apagado: hoy no la usa ninguna cotización (los clientes que escriben en inglés reciben todo en castellano, como hoy)."
-        : u.codigo === "regla" ? "por la regla." : sinPrefijo(u.detalle, `${etiquetaCeldaTraslado(celda)}: `);
+        : u.codigo === "regla" ? "por la regla."
+          : u.codigo === "sin_plantilla_idioma" ? porqueSinIngles(u.detalle, prefijo, celda, u.plantilla)
+            : sinPrefijo(u.detalle, prefijo);
       agregar({
         segmento: null, celda, clave: `${celda.idioma}|${celda.moneda}`, etiqueta: mayuscula(nombre), nombre, usd: celda.moneda === "USD",
         codigo: u.codigo, detalle: u.detalle, porque, ambar: !sinUso && usoEsAmbar(u.codigo), sinUso,
@@ -923,11 +947,12 @@ export function condicionesDelSimulador(r: { plantilla?: unknown; condiciones?: 
 
 // ── El idioma en el Simulador ────────────────────────────────────────────────
 // «Lo que escribió el cliente» se escribe un mensaje por renglón, como se lee un chat: el de abajo es
-// el más reciente. Al servidor van (`mensajes_cliente`) del MÁS RECIENTE al más antiguo, que es como
-// los lee `idiomaDelCliente` (y como los devuelve la lectura del CRM), y como mucho los 10 últimos de
-// 500 caracteres. Qué idioma se lee lo decide `idiomaDelCliente`, la MISMA detección que el chat:
-// aquí solo se usa para habilitar «Pide soles» mientras se escribe; lo que vale es lo que contesta
-// el servidor, que además aplica el interruptor del inglés.
+// el más reciente. Al servidor van (`mensajes_cliente`) en ESE orden, del más antiguo al más reciente
+// (POST /api/traslados/simular los da vuelta para `idiomaDelCliente`, que los lee del más reciente al
+// más antiguo), y como mucho los 10 últimos de 500 caracteres. Qué idioma se lee lo decide
+// `idiomaDelCliente`, la MISMA detección que el chat: aquí solo se usa para habilitar «Pide soles»
+// mientras se escribe; lo que vale es lo que contesta el servidor, que además aplica el interruptor
+// del inglés.
 
 export const MAX_MENSAJES_SIMULADOR = 10;
 export const MAX_CARACTERES_MENSAJE_SIMULADOR = 500;
@@ -941,24 +966,27 @@ function recortarUtf16(t: string, n: number): string {
   return s;
 }
 
-/** Los mensajes del cliente escritos en el simulador (un renglón = un mensaje), del más reciente al más antiguo. */
+/**
+ * Los mensajes del cliente escritos en el simulador (un renglón = un mensaje), en el orden del chat:
+ * del más antiguo al más reciente (el de abajo). Los 10 últimos, de 500 unidades como mucho.
+ */
 export function mensajesDelSimulador(texto: string | null | undefined): string[] {
   return String(texto ?? "")
     .split(/\r\n?|\n/)
     .map((l) => l.trim())
     .filter(Boolean)
     .slice(-MAX_MENSAJES_SIMULADOR)
-    .reverse()
     .map((l) => recortarUtf16(l, MAX_CARACTERES_MENSAJE_SIMULADOR));
 }
 
 /**
- * El idioma de esos mensajes con la detección del chat (`idiomaDelCliente`). No llevan fecha, así
- * que la ventana de 48 h no deja fuera ninguno (un mensaje sin `created_at` cuenta como reciente):
- * el «ahora» no cambia nada y no se pide.
+ * El idioma de esos mensajes (en el orden del chat) con la detección del chat (`idiomaDelCliente`,
+ * que los lee del más reciente al más antiguo: se dan vuelta). No llevan fecha, así que la ventana de
+ * 48 h no deja fuera ninguno (un mensaje sin `created_at` cuenta como reciente): el «ahora» no
+ * cambia nada y no se pide.
  */
-export function idiomaDeMensajesSimulador(mensajesRecientesPrimero: readonly string[]) {
-  return idiomaDelCliente(mensajesRecientesPrimero.map((contenido) => ({ contenido })), Number.NaN);
+export function idiomaDeMensajesSimulador(mensajesDelChat: readonly string[]) {
+  return idiomaDelCliente([...mensajesDelChat].reverse().map((contenido) => ({ contenido, tipo: "texto" })), Number.NaN);
 }
 
 /** «Pide soles» solo tiene sentido si el cliente escribe en inglés u otro idioma: en castellano desde un número extranjero lo ve un ejecutivo. */
@@ -1003,9 +1031,11 @@ export function idiomaDelSimulador(
   if (mensajes.length === 0 && i.idioma === "es" && codigo === "sin_evidencia") return null;
 
   if (codigo === "ingles_apagado") {
+    // La frase del servidor dice el motivo exacto (sin la regla nueva, sin poder leer las plantillas,
+    // o ninguna celda «inglés» asignada); sin ella, la de siempre.
     return {
       texto: "Inglés apagado: no hay plantilla en inglés asignada",
-      detalle: `El cliente escribe en ${cliente === "otro" ? "otro idioma" : "inglés"}, pero ninguna celda «Traslado de la IA · inglés» tiene una plantilla en inglés que la IA pueda usar: la cotización sale en castellano y con la moneda de siempre, como hoy.`,
+      detalle: detalle ?? `El cliente escribe en ${cliente === "otro" ? "otro idioma" : "inglés"}, pero ninguna celda «Traslado de la IA · inglés» tiene una plantilla en inglés que la IA pueda usar: la cotización sale en castellano y con la moneda de siempre, como hoy.`,
       tono: "gris", enlace: "/cotizaciones/plantillas", ingles: false,
     };
   }

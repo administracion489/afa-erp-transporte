@@ -374,13 +374,16 @@ function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoC
       {grupos.map((g) => {
         const sinUso = grupoSinUso(g);
         const ambar = g.usos.some((s) => s.ambar);
+        // Las celdas en uso en el título (las sin uso van en gris debajo); «Castellano · soles» ya lleva « · ».
+        const vivas = g.usos.filter((s) => !s.sinUso);
+        const titulo = (vivas.length ? vivas : g.usos).map((s) => s.etiqueta).join(porIdioma ? " / " : " · ");
         const esPlantilla = g.fuente.tipo === "plantilla";
         const marco = sinUso ? "border-gray-200 bg-gray-50" : ambar ? "border-amber-300 bg-amber-50" : "border-gray-200";
         return (
           <div key={g.clave} className={`border rounded-xl p-3 space-y-2 ${marco}`}>
             <div className="flex flex-wrap items-start gap-2">
               <div className="flex-1 min-w-0">
-                <p className={`text-sm font-bold ${sinUso ? "text-gray-500" : "text-gray-800"}`}>{g.usos.map((s) => s.etiqueta).join(" · ")}</p>
+                <p className={`text-sm font-bold ${sinUso ? "text-gray-500" : "text-gray-800"}`}>{titulo}{sinUso ? " · inglés apagado" : ""}</p>
                 <p className="text-xs text-gray-600 break-words">
                   {g.fuente.tipo === "plantilla"
                     ? <>Plantilla <b>«{g.fuente.plantilla.nombre || g.fuente.plantilla.id}»</b></>
@@ -681,7 +684,7 @@ function ReservaIA({ config, onConfig, decir, colsConfig, sinMigracion, grupos, 
           return (
             <div key={g.clave} className={`rounded-xl border px-3 py-2 text-xs space-y-1 ${sinPolitica || choques.length ? "border-amber-300 bg-amber-50 text-amber-900" : "border-gray-200 text-gray-700"}`}>
               <p>
-                <b>{g.usos.filter((x) => !x.sinUso).map((x) => x.etiqueta).join(" · ")}:</b>{" "}
+                <b>{g.usos.filter((x) => !x.sinUso).map((x) => x.etiqueta).join(g.usos.some((x) => x.celda) ? " / " : " · ")}:</b>{" "}
                 {g.fuente.tipo === "plantilla"
                   ? <>plantilla «{g.fuente.plantilla.nombre || g.fuente.plantilla.id}» · {sinPolitica ? "sin política: la IA no tiene qué enviar" : `${g.reserva.items.length} ${g.reserva.items.length === 1 ? "línea" : "líneas"}${g.reserva_resumen.items.length ? ` · resumen de ${g.reserva_resumen.items.length} ${g.reserva_resumen.items.length === 1 ? "punto" : "puntos"} con enlace` : ""}`}{" "}
                     <Link href={enlaceEditarPlantilla(g.fuente.plantilla.id)} className="font-bold underline">Editar →</Link></>

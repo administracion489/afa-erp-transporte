@@ -17,14 +17,13 @@
 // (un servidor de antes) no dice nada. Desde cotizaciones-09 nombra la CELDA idioma × moneda.
 //
 // EL IDIOMA: «Lo que escribió el cliente» (un mensaje por renglón, el de abajo el más reciente) va al
-// servidor como `mensajes_cliente` (del más reciente al más antiguo, como mucho 10 de 500
-// caracteres), que corre la MISMA detección del chat (`idiomaDelCliente`) con el MISMO interruptor
-// del inglés, y contesta `idioma`. Aquí la detección solo corre para habilitar «Pide soles» mientras
-// se escribe (en castellano desde un número extranjero, pedir soles lo ve un ejecutivo). Con «Pide
-// soles» va además `idioma_cliente` (el de la detección) junto a `pide_soles`, que es como
-// `validarEntrada` acepta el pedido de soles. La línea del resultado la compone `idiomaDelSimulador`;
-// una respuesta sin `idioma` no dice nada nuevo. El PDF de ejemplo sale en el idioma que contestó el
-// servidor (el mismo cuerpo).
+// servidor como `mensajes_cliente` (en el orden del chat, como mucho 10 de 500 caracteres), que corre
+// la MISMA detección del chat (`idiomaDelCliente`) con el MISMO interruptor del inglés, y contesta
+// `idioma`. Aquí la detección solo corre para habilitar «Pide soles» mientras se escribe (en
+// castellano desde un número extranjero, pedir soles lo ve un ejecutivo); el servidor solo lo toma
+// con el cliente en inglés u otro idioma y el inglés encendido. La línea del resultado la compone
+// `idiomaDelSimulador`; una respuesta sin `idioma` no dice nada nuevo. El PDF de ejemplo sale en el
+// idioma que contestó el servidor (el mismo cuerpo).
 
 import { useState } from "react";
 import Link from "next/link";
@@ -164,8 +163,7 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
   const simular = async () => {
     if (motivo || estado.tipo === "simulando") return;
     setEstado({ tipo: "simulando" });
-    const li = idiomaLocal?.idioma;
-    const idiomaSoles = f.pideSoles && (li === "en" || li === "otro") ? li : null;
+    const pideSoles = f.pideSoles && solesPermitido;
     const entrada: EntradaSimulacion = {
       origen: lugarParaApi(f.origen),
       destino: lugarParaApi(f.destino),
@@ -176,9 +174,9 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
       maletas: lMal.tipo === "ok" ? lMal.valor : null,
       telefono: f.telefono.trim() || null,
       ...(f.pideDolares ? { pide_dolares: true } : {}),
-      // El pedido de soles solo junto al idioma (así lo acepta `validarEntrada`); el servidor vuelve a
-      // detectar el idioma de `mensajes_cliente` y le aplica el interruptor del inglés.
-      ...(idiomaSoles ? { idioma_cliente: idiomaSoles, pide_soles: true as const } : {}),
+      // El pedido de soles solo con lo escrito en inglés u otro idioma: el servidor vuelve a detectar
+      // el idioma de `mensajes_cliente` y solo lo toma con el inglés encendido.
+      ...(pideSoles ? { pide_soles: true as const } : {}),
       paradas_intermedias: lPar.tipo === "ok" ? lPar.valor : null,
       senales: f.senales,
       ...(mensajes.length ? { mensajes_cliente: mensajes } : {}),
@@ -432,7 +430,7 @@ function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: Respuesta
             className="px-4 py-2.5 rounded-xl font-bold text-sm border border-[#0b315f] text-[#0b315f] hover:bg-[#eef3f8] disabled:opacity-50 min-h-[44px]">
             {pdf.abriendo ? "Armando el PDF…" : "📄 Ver PDF de ejemplo"}
           </button>
-          <p className="text-[10px] text-gray-400">Es el PDF que recibiría el cliente, con el número «EJEMPLO»{idioma?.ingles ? " («SAMPLE»: sale en inglés)" : ""}. No se guarda ni se envía nada.</p>
+          <p className="text-[10px] text-gray-400">Es el PDF que recibiría el cliente{idioma?.ingles ? ", en inglés" : ""}, marcado como ejemplo (número «EJEMPLO»{idioma?.ingles ? "; en inglés la marca dice «SAMPLE»" : ""}). No se guarda ni se envía nada.</p>
           {pdf.error && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{pdf.error}</p>}
         </div>
       )}

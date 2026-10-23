@@ -62,7 +62,8 @@ export default function FotosCategorias({ categorias, colsCategoria, sinMigracio
 }) {
   const [sinMigracion, setSinMigracion] = useState(sinMigracionInicial);
   // traslados-10, aparte: las columnas que se pudieron pedir lo dicen; un guardado que la nombra, también.
-  const [sinIngles, setSinIngles] = useState(() => faltaDescripcionIngles(colsCategoria));
+  const [inglesFallo, setInglesFallo] = useState(false);
+  const sinIngles = inglesFallo || faltaDescripcionIngles(colsCategoria);
   const [flota, setFlota] = useState<EstadoFlota>(null);
   const [abiertas, setAbiertas] = useState<Set<string>>(new Set());
   /** Lo que está haciendo cada foto (`CLAVE:lado`): «Preparando…», «Subiendo…». */
@@ -215,7 +216,7 @@ export default function FotosCategorias({ categorias, colsCategoria, sinMigracio
               onGuardada={onCategoria} onSinMigracion={() => setSinMigracion(true)} decir={decir} />
             {!sinIngles && (
               <DescripcionCliente key={`en:${c.descripcion_cliente_en ?? ""}`} idioma="en" categoria={c} colsCategoria={colsCategoria}
-                onGuardada={onCategoria} onSinMigracion={() => setSinIngles(true)} decir={decir} />
+                onGuardada={onCategoria} onSinMigracion={() => setInglesFallo(true)} decir={decir} />
             )}
           </div>
         ))}

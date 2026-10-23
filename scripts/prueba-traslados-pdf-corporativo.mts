@@ -955,7 +955,10 @@ seccion("9. La plantilla de la cotización: el traspaso no cambia el PDF; las cu
   let lanza = false;
   try { await D.leerCotizacionTraslado(base({ cotizaciones: [] }, { faltan: { cotizaciones: ["traslado_json"] } }) as any, 55); } catch { lanza = true; }
   ok(lanza, "una columna que no es accesoria sigue siendo un error");
-  ok(D.COLS_COTIZACION_TRASLADO_ACCESORIAS.join() === "plantilla_pdf,condiciones_token" && !D.COLS_COTIZACION_TRASLADO.includes("plantilla_pdf") && !D.COLS_COTIZACION_TRASLADO.includes("condiciones_token"), "plantilla_pdf y condiciones_token van aparte, como accesorias");
+  ok(D.COLS_COTIZACION_TRASLADO_ACCESORIAS.join() === "plantilla_pdf,condiciones_token,idioma_pdf" && !D.COLS_COTIZACION_TRASLADO.includes("plantilla_pdf") && !D.COLS_COTIZACION_TRASLADO.includes("condiciones_token") && !D.COLS_COTIZACION_TRASLADO.includes("idioma_pdf"),
+    "plantilla_pdf, condiciones_token e idioma_pdf van aparte, como accesorias");
+  const l5 = await D.leerCotizacionTraslado(base({ cotizaciones: [{ ...IDA, id: 55 }] }, { faltan: { cotizaciones: ["idioma_pdf"] } }) as any, 55);
+  ok(!!l5 && l5.id === 55 && (l5.idioma_pdf == null || l5.idioma_pdf === "es"), "sin la columna idioma_pdf (cotizaciones-04), la fila se lee igual (se suelta solo esa): es de castellano");
   const l3 = await D.leerCotizacionTraslado(base({ cotizaciones: [{ ...IDA, id: 55 }] }, { faltan: { cotizaciones: ["condiciones_token"] } }) as any, 55);
   ok(!!l3 && l3.id === 55 && !("condiciones_token" in l3), "sin la columna condiciones_token (cotizaciones-08), la fila se lee igual (se suelta solo esa)");
   const l4 = await D.leerCotizacionTraslado(base({ cotizaciones: [{ ...IDA, id: 55, condiciones_token: "123e4567-e89b-12d3-a456-426614174000" }] }) as any, 55);
