@@ -14,6 +14,7 @@ const EliaPanel = dynamic(() => import("./_components/elia"), { ssr: false });
 const AyudaModulo = dynamic(() => import("./_components/AyudaModulo"), { ssr: false });
 import NotificadorMensajesPasajeros from "@/components/NotificadorMensajesPasajeros";
 import { useMensajesNoLeidosPasajero } from "@/lib/useMensajesNoLeidos";
+import { destinoAppNativa, leerEntorno, recordarApp } from "@/lib/app-nativa-destino";
 import "./globals.css";
 
 const manrope = Manrope({
@@ -828,6 +829,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [rolUsuario, setRolUsuario]       = useState("operador");
   const [permisos, setPermisos]           = useState<string[]>([]);
   const [cargando, setCargando]           = useState(true);
+  // En el APK (conductor/pasajero) el ERP no existe: si el WebView cae en una ruta del ERP
+  // (la raíz "/", el login, una recarga), se le devuelve a su app en vez de enseñar el «Login ERP».
+  const [volviendoApp, setVolviendoApp]   = useState(false);
   const [collapsed, setCollapsed]         = useState(false);
   const [fotoPerfil, setFotoPerfil]       = useState<string | null>(null);
   const fotoPedidaRef                     = useRef(false);
@@ -897,6 +901,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const validadoRef = useRef<{ userId: string; permisos: string[]; esAdmin: boolean } | null>(null);
 
   useEffect(() => {
+    recordarApp(pathname);
+    const destino = destinoAppNativa({ ...leerEntorno(), esRutaPublica: esPublica });
+    if (destino) {
+      setVolviendoApp(true);
+      window.location.replace(destino);
+      return;
+    }
     let vigente = true;
     // ¿Puede ver la ruta actual con esta lista de módulos?
     const rutaPermitida = (listaPermisos: string[], esAdmin: boolean) => {
@@ -1053,7 +1064,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="es" className={`${manrope.variable} ${jetbrainsMono.variable}`}>
       <body>
-        {esLogin ? (
+        {volviendoApp ? (
+          <div className="min-h-screen flex items-center justify-center bg-[#eef3f8]">
+            <div className="mx-auto h-12 w-12 animate-spin rounded-full border-4 border-gray-300 border-t-[#0b315f]" />
+          </div>
+        ) : esLogin ? (
           <div className="min-h-screen flex items-center justify-center bg-[#eef3f8] px-4">
             <div className="w-full max-w-md bg-white p-8 rounded-2xl shadow-xl">
               {children}
