@@ -58,10 +58,12 @@ export default function PanelCliente({ contacto, onClose }: { contacto: Contacto
     : null;
 
   return (
-    <aside className="w-[300px] flex-shrink-0 bg-white border-l border-gray-100 flex flex-col overflow-y-auto">
+    // En el celular, a pantalla completa ENCIMA del chat (que ya es fixed z-30 en BandejaCRM); en
+    // escritorio, la columna de la derecha de siempre.
+    <aside className="fixed inset-0 z-[35] w-full md:static md:z-auto md:w-[300px] flex-shrink-0 bg-white border-l border-gray-100 flex flex-col overflow-y-auto">
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
         <span className="font-semibold text-sm text-[#0b315f]">Ficha del cliente</span>
-        <button onClick={onClose} className="text-gray-400 text-lg">×</button>
+        <button onClick={onClose} aria-label="Cerrar la ficha del cliente" className="text-gray-400 text-lg w-9 h-9 -mr-2 rounded-full hover:bg-gray-100 flex items-center justify-center">×</button>
       </div>
       <div className="p-4 space-y-4 text-sm">
         <div>

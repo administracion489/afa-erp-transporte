@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { configEstado } from "@/lib/estados";
+import { INICIAL_ELIA, TAMANO_FLOTANTE, useFlotanteArrastrable } from "@/lib/flotante-arrastrable";
 import type {
   AccionPropuesta,
   BloqueUI,
@@ -27,6 +28,10 @@ type MsgUI = {
 const SK_CHAT = "elia_chat_v1";
 const SK_RADAR = "elia_radar_v1";
 const RADAR_TTL_MS = 5 * 60 * 1000;
+// La bola se arrastra a cualquier parte de la pantalla y se queda donde se soltó
+// (lib/flotante-arrastrable.ts). En escritorio nace donde siempre (bottom-5 right-5); en el celular,
+// pegada al borde derecho y más arriba, para no tapar el «Enviar» del chat del CRM.
+const SK_POSICION = "elia_posicion_v1";
 
 // ── Utilidades ───────────────────────────────────────────────────────────────
 
@@ -390,6 +395,7 @@ export default function EliaPanel({
   const finRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const primerNombre = (nombre || "").trim().split(/\s+/)[0] || "hola";
+  const bola = useFlotanteArrastrable(SK_POSICION, INICIAL_ELIA, TAMANO_FLOTANTE);
 
   // Restaurar conversación (sobrevive a la navegación: el layout remonta en cada ruta)
   useEffect(() => {
@@ -634,13 +640,20 @@ export default function EliaPanel({
 
   return (
     <>
-      {/* ── Botón flotante ── */}
+      {/* ── Botón flotante · se arrastra (ratón o dedo) y se queda donde se suelta ── */}
       {!abierto && (
         <button
-          onClick={abrir}
-          title="ELIA — tu asistente de operaciones"
-          className="fixed bottom-5 right-5 z-40 group"
-          style={{ animation: "eliaIn 0.35s ease-out" }}
+          {...bola.manejadores}
+          onClick={() => { if (!bola.consumirClic()) abrir(); }}
+          title="ELIA — tu asistente de operaciones (arrástrala para moverla)"
+          className={`fixed z-40 group select-none ${bola.arrastrando ? "cursor-grabbing" : "cursor-pointer"}`}
+          style={{
+            right: bola.pos.right,
+            bottom: bola.pos.bottom,
+            // Sin esto, en el celular el dedo desplaza la página en vez de mover la bola.
+            touchAction: "none",
+            animation: "eliaIn 0.35s ease-out",
+          }}
         >
           <div className="relative">
             <OrbeElia size={54} />
@@ -654,9 +667,10 @@ export default function EliaPanel({
               />
             )}
             <span
-              className="pointer-events-none absolute right-full mr-3 top-1/2 -translate-y-1/2 whitespace-nowrap
+              className={`pointer-events-none absolute top-1/2 -translate-y-1/2 whitespace-nowrap
+                         ${bola.lado === "derecha" ? "left-full ml-3" : "right-full mr-3"}
                          bg-[#0b2545] text-white text-[11px] font-semibold px-2.5 py-1.5 rounded-lg shadow-xl
-                         opacity-0 group-hover:opacity-100 transition-opacity"
+                         opacity-0 transition-opacity ${bola.arrastrando ? "" : "group-hover:opacity-100"}`}
             >
               Hola, soy ELIA 👋
             </span>

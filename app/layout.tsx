@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import { Manrope, JetBrains_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabase";
 import { cabecerasErp } from "@/lib/fetch-erp";
@@ -15,6 +15,7 @@ const AyudaModulo = dynamic(() => import("./_components/AyudaModulo"), { ssr: fa
 import NotificadorMensajesPasajeros from "@/components/NotificadorMensajesPasajeros";
 import { useMensajesNoLeidosPasajero } from "@/lib/useMensajesNoLeidos";
 import { destinoAppNativa, leerEntorno, recordarApp } from "@/lib/app-nativa-destino";
+import { usePantallaChica } from "@/lib/useConsultaMedia";
 import "./globals.css";
 
 const manrope = Manrope({
@@ -431,17 +432,13 @@ const GRUPOS_ABIERTOS_DEFAULT = ["Principal", "Comercial", "CRM", "Operaciones",
 // Coincide la ruta exacta o cualquier sub-ruta (`ruta + "/"`).
 const RUTAS_PANTALLA_COMPLETA = ["/monitoreo"];
 
-// Celular: el menú arranca colapsado y se vuelve a colapsar al navegar. Se lee con
-// useSyncExternalStore y no en el render: en el servidor no hay `window`, y el snapshot
-// del servidor (false) es el que React usa al hidratar, así que no hay desajuste.
-const CONSULTA_PANTALLA_CHICA = "(max-width: 767px)";
-function suscribirPantallaChica(aviso: () => void) {
-  const mq = window.matchMedia(CONSULTA_PANTALLA_CHICA);
-  mq.addEventListener("change", aviso);
-  return () => mq.removeEventListener("change", aviso);
-}
-const esPantallaChicaAhora = () => window.matchMedia(CONSULTA_PANTALLA_CHICA).matches;
-const esPantallaChicaEnServidor = () => false;
+// Bandejas de chat: en CELULAR su <main> mide el alto visible y va sin padding, como una app de
+// mensajería (la lista y el chat ocupan la pantalla y cada panel scrollea por dentro); en
+// escritorio, el <main> de siempre. Ruta EXACTA: /crm/agente, /crm/pipeline… son pantallas normales.
+const RUTAS_BANDEJA = ["/crm", "/crm/notificaciones"];
+
+// Celular: el menú arranca colapsado y se vuelve a colapsar al navegar. La consulta vive en
+// lib/useConsultaMedia.ts, la misma con la que el CRM decide su vista de celular.
 
 // Cuánto contenido del menú tiene que quedar por debajo para pintar la pista inferior.
 // Unos pocos px de redondeo de subpíxel no son "más ítems".
@@ -849,7 +846,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   // a colapsar (también volver a una ruta donde ya se había abierto). El reinicio se hace
   // durante el render al ver otro pathname, no en un efecto: así no hay un cuadro con el
   // menú abierto tapando la pantalla nueva.
-  const pantallaChica = useSyncExternalStore(suscribirPantallaChica, esPantallaChicaAhora, esPantallaChicaEnServidor);
+  const pantallaChica = usePantallaChica();
   const [menuAbiertoEnCelular, setMenuAbiertoEnCelular] = useState(false);
   const [rutaDelMenu, setRutaDelMenu] = useState(pathname);
   if (rutaDelMenu !== pathname) {
@@ -865,6 +862,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const esPantallaCompleta = RUTAS_PANTALLA_COMPLETA.some(
     (r) => pathname === r || pathname.startsWith(r + "/")
   );
+  const esBandeja = RUTAS_BANDEJA.includes(pathname);
 
   // Pista de "hay más menú abajo": la barra de scroll del <nav> está oculta, así que sin
   // el degradado no se nota que hay ítems por debajo del borde. Se mide al desplazar y
@@ -1198,14 +1196,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
             {/* El documento es el que scrollea (los window.scrollTo del ERP dependen de eso):
                 el <main> normal NO es el contenedor de scroll. Solo las pantallas de mapa a
-                alto completo (RUTAS_PANTALLA_COMPLETA) miden el alto visible, sin padding.
+                alto completo (RUTAS_PANTALLA_COMPLETA) miden el alto visible, sin padding, y las
+                bandejas de chat (RUTAS_BANDEJA) también, pero solo en el celular.
                 min-w-0: un hijo ancho no empuja el layout (aquí no cambia nada visible: con
                 overflow distinto de visible el mínimo automático de un ítem flex ya es 0). */}
             <main
               className={
                 esPantallaCompleta
                   ? "flex-1 min-w-0 h-dvh overflow-hidden"
-                  : "flex-1 min-w-0 overflow-y-auto p-6"
+                  : esBandeja
+                    ? "flex-1 min-w-0 h-dvh overflow-hidden md:h-auto md:overflow-auto md:p-6"
+                    : "flex-1 min-w-0 overflow-y-auto p-6"
               }
             >
               {children}
