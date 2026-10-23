@@ -357,7 +357,7 @@ function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: Respuesta
       </div>
 
       {idioma && (
-        <div className={`rounded-xl border px-3 py-2 text-xs space-y-0.5 ${idioma.tono === "azul" ? "border-sky-200 bg-sky-50 text-sky-900" : "border-gray-200 bg-gray-50 text-gray-700"}`}>
+        <div className={`rounded-xl border px-3 py-2 text-xs space-y-0.5 ${idioma.tono === "azul" ? "border-sky-200 bg-sky-50 text-sky-900" : idioma.tono === "ambar" ? "border-amber-200 bg-amber-50 text-amber-900" : "border-gray-200 bg-gray-50 text-gray-700"}`}>
           <p className="font-bold break-words">🌐 {idioma.texto}</p>
           {idioma.detalle && <p className="break-words">{idioma.detalle}</p>}
           {idioma.enlace && <Link href={idioma.enlace} className="underline font-bold inline-flex items-center min-h-[32px]">Asignar una plantilla en inglés en Plantillas PDF →</Link>}

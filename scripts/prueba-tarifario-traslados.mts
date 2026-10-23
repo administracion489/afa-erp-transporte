@@ -801,6 +801,10 @@ seccion("10. Ajustes y el Simulador dicen las condiciones que la IA copia de ver
     const iEs = P.idiomaDelSimulador({ idioma: { idioma: "es", cliente: null, codigo: "sin_evidencia", detalle: "x" }, resultado: { moneda: "PEN" } }, { telefono: TEL.PEN, mensajes_cliente: ["ok", "25/12 15:00"] });
     ok(iEs?.texto === "Idioma: castellano (ningún mensaje dice el idioma) · moneda PEN (número peruano)" && iEs.tono === "gris", "mensajes sin idioma: castellano, dicho");
     ok(P.idiomaDelSimulador({ idioma: { idioma: "es", cliente: null, codigo: "sin_evidencia", detalle: "x" }, resultado: { moneda: "PEN" } }, { telefono: TEL.PEN }) === null, "sin mensajes y en castellano: nada nuevo que decir");
+    // Una lectura que falla no es un inglés apagado: ámbar y «no se pudo comprobar», nunca «no hay plantilla».
+    const iLect = P.idiomaDelSimulador({ idioma: { idioma: "es", cliente: "en", codigo: "no_se_pudo_leer", detalle: "No se pudieron leer las plantillas del PDF: timeout" }, resultado: { moneda: "PEN" } }, { telefono: TEL.PEN, mensajes_cliente: ING3 });
+    ok(iLect?.tono === "ambar" && /^No se pudo comprobar si el inglés está encendido/.test(iLect.texto) && !/no hay plantilla/.test(iLect.texto) && iLect.detalle === "No se pudieron leer las plantillas del PDF: timeout" && iLect.ingles === false,
+      `no_se_pudo_leer → ámbar «No se pudo comprobar…» con el error del servidor: ${JSON.stringify(iLect)}`);
     ok(P.idiomaDelSimulador({ idioma: { idioma: "en", cliente: "en", codigo: "ingles", detalle: "x" }, resultado: { moneda: "USD" } }, { telefono: TEL.PEN, mensajes_cliente: ["Hola, quiero un traslado mañana"] })?.texto === "Idioma: inglés · moneda USD (cliente en inglés)",
       "si lo escrito aquí no da el mismo idioma que el servidor, no se cuentan mensajes");
     for (const vieja of [null, undefined, {}, { resultado: { moneda: "USD" } }, { idioma: null }, { idioma: { idioma: "fr", cliente: "en", codigo: "ingles" } }, { idioma: { idioma: "en", cliente: "xx", codigo: "ingles" } }, { idioma: { idioma: "en", cliente: "en", codigo: "inventado" } }]) {

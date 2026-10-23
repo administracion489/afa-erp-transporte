@@ -996,12 +996,13 @@ const MONEDA_POR: Record<CodigoMoneda, string> = {
   peru: "número peruano", extranjero: "número extranjero", sin_telefono: "sin número",
   pide_dolares: "pidió dólares", ingles: "cliente en inglés", pide_soles: "pidió soles",
 };
-const CODIGOS_IDIOMA: readonly (CodigoIdiomaCliente | "ingles_apagado")[] = ["sin_evidencia", "castellano", "ingles", "otro_idioma", "ingles_apagado"];
+type CodigoIdiomaSimulado = CodigoIdiomaCliente | "ingles_apagado" | "no_se_pudo_leer";
+const CODIGOS_IDIOMA: readonly CodigoIdiomaSimulado[] = ["sin_evidencia", "castellano", "ingles", "otro_idioma", "ingles_apagado", "no_se_pudo_leer"];
 
 export type IdiomaSimuladoPantalla = {
   texto: string;
   detalle: string | null;
-  tono: "gris" | "azul";
+  tono: "gris" | "azul" | "ambar";
   /** Dónde se enciende el inglés (solo con el inglés apagado). */
   enlace: string | null;
   /** El PDF de ejemplo sale en inglés. */
@@ -1025,11 +1026,19 @@ export function idiomaDelSimulador(
   const cliente: IdiomaCliente | null = i.cliente === "es" || i.cliente === "en" || i.cliente === "otro" ? i.cliente : null;
   if (i.cliente != null && cliente == null) return null;
   if (typeof i.codigo !== "string" || !(CODIGOS_IDIOMA as readonly string[]).includes(i.codigo)) return null;
-  const codigo = i.codigo as CodigoIdiomaCliente | "ingles_apagado";
+  const codigo = i.codigo as CodigoIdiomaSimulado;
   const mensajes = Array.isArray(entrada.mensajes_cliente) ? entrada.mensajes_cliente : [];
   const detalle = textoCorto(i.detalle, 400);
   if (mensajes.length === 0 && i.idioma === "es" && codigo === "sin_evidencia") return null;
 
+  if (codigo === "no_se_pudo_leer") {
+    // Una lectura que falla no es un inglés apagado: se dice que no se pudo comprobar, con el error.
+    return {
+      texto: "No se pudo comprobar si el inglés está encendido: la simulación sale en castellano",
+      detalle: detalle ?? "No se pudieron leer las plantillas del PDF ni sus reglas.",
+      tono: "ambar", enlace: null, ingles: false,
+    };
+  }
   if (codigo === "ingles_apagado") {
     // La frase del servidor dice el motivo exacto (sin la regla nueva, sin poder leer las plantillas,
     // o ninguna celda «inglés» asignada); sin ella, la de siempre.
