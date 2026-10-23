@@ -135,7 +135,7 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
   useEffect(() => {
     let vivo = true;
     void leerPlantillasYReglas(supabase)
-      .catch((e: unknown): LecturaPlantillas => ({ ok: false, plantillas: [], reglas: null, sinDiseno: false, error: `No se pudieron leer las plantillas del PDF: ${(e as Error)?.message ?? "sin conexión"}` }))
+      .catch((e: unknown): LecturaPlantillas => ({ ok: false, plantillas: [], reglas: null, reglasTraslado: null, sinDiseno: false, error: `No se pudieron leer las plantillas del PDF: ${(e as Error)?.message ?? "sin conexión"}` }))
       .then((r) => { if (vivo) setPlantillas(r); });
     return () => { vivo = false; };
   }, [nPl]);
