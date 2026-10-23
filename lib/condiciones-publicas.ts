@@ -10,8 +10,9 @@
 // fila como `consideraciones_json.reserva_resumen`) solo reemplaza a la política cuando el cliente
 // tiene a mano el texto completo: el enlace. Nunca se esconde lo que mueve dinero.
 //
-// EL ENLACE ABRE LA POLÍTICA GUARDADA EN ESA COTIZACIÓN (la fila, no la plantilla de hoy): es la
-// constancia de lo que se le informó antes de pagar. Por eso el token es uno por cotización
+// EL ENLACE ABRE LA POLÍTICA GUARDADA EN ESA COTIZACIÓN (la fila, no la plantilla de hoy): cambiar
+// la plantilla no la mueve. Editar la cotización misma SÍ (no hay historial ni copia congelada), así
+// que la página no promete más que eso. Por eso el token es uno por cotización
 // (`cotizaciones.condiciones_token`, supabase/cotizaciones-08) y la base solo puede ser un origen
 // limpio (https://host, o http://localhost para probar): nada de rutas, consultas ni credenciales.
 // ──────────────────────────────────────────────────────────────────────────────
@@ -67,7 +68,12 @@ export function enlaceCondiciones(base: unknown, token: unknown): string | null 
   return `${origen}${RUTA_CONDICIONES}/${token.trim().toLowerCase()}`;
 }
 
-/** ¿Es exactamente un enlace que arma `enlaceCondiciones`? (lo que llega de fuera se comprueba antes de imprimirlo). */
+/**
+ * ¿Tiene exactamente la FORMA de un enlace que arma `enlaceCondiciones`? Comprueba la forma, NO que el
+ * dominio sea el del ERP: «https://otro.com/condiciones/<uuid>» también pasa. El origen lo pone siempre
+ * el ERP (`NEXT_PUBLIC_APP_URL` en el servidor, `window.location.origin` en el navegador) y el token es
+ * la columna uuid; un enlace que llegue de una petición o de un texto guardado no se puede validar con esto.
+ */
 export function esEnlaceCondiciones(x: unknown): x is string {
   if (typeof x !== "string") return false;
   const i = x.lastIndexOf(`${RUTA_CONDICIONES}/`);

@@ -2,8 +2,9 @@
 // Página PÚBLICA de las condiciones de reserva, cambios y cancelación de UNA cotización: la que abre el
 // enlace (y el QR) del PDF y del WhatsApp. Sin usuario ni contraseña: el token del enlace ES la llave.
 //
-// Enseña la política GUARDADA EN ESA COTIZACIÓN (no la de hoy de la plantilla): si la empresa la
-// cambia después, quien reservó sigue viendo la suya. Arriba va el resumen (lo mismo que vio en el PDF)
+// Enseña la política GUARDADA EN ESA COTIZACIÓN (no la de hoy de la plantilla): si la empresa cambia
+// la plantilla después, quien reservó sigue viendo la suya. Editar la cotización misma SÍ la cambia
+// (no hay historial), y por eso el texto no promete más que eso. Arriba va el resumen (lo mismo que vio en el PDF)
 // y debajo el texto completo. Nada del cliente, ni precios, ni cuentas: eso lo garantiza la ruta
 // (app/api/condiciones/[token]/route.ts, lib/condiciones-publicas-armar.ts), que es lo único que lee.
 
@@ -20,7 +21,7 @@ const TXT = {
     emitida: "emitida el",
     resumen: "Lo principal",
     completa: "Condiciones completas",
-    constancia: "Estas son las condiciones que se informaron en esta cotización. Si la empresa las cambia después, esta página sigue mostrando las de su reserva.",
+    constancia: "Estas son las condiciones guardadas en esta cotización. Si la empresa cambia sus condiciones generales, esta página sigue mostrando las de esta cotización.",
     contacto: "Para cancelar, cambiar su reserva o hacer una consulta:",
     imprimir: "Imprimir o guardar en PDF",
   },
@@ -30,7 +31,7 @@ const TXT = {
     emitida: "issued on",
     resumen: "Key points",
     completa: "Full terms",
-    constancia: "These are the terms provided with this quote. If the company changes them later, this page keeps showing the ones for your booking.",
+    constancia: "These are the terms saved with this quote. If the company changes its general terms, this page keeps showing the ones for this quote.",
     contacto: "To cancel, change your booking or ask a question:",
     imprimir: "Print or save as PDF",
   },
