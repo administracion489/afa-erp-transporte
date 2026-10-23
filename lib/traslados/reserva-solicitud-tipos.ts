@@ -76,12 +76,27 @@ export const ACCIONES_TARJETA: readonly AccionTarjeta[] = [
 export const ACCIONES_DINERO: readonly AccionDinero[] = ["registrar_adelanto", "pago_no_encontrado", "registrar_devolucion"];
 
 /**
- * Lo que acepta POST /api/reservas/solicitudes (Tesorería / Finanzas): las de dinero y abrir un
- * comprobante del cliente (`ver_comprobante`, con `comprobante_id`): quien verifica el pago contra
- * el banco tiene que poder ver la imagen sin el módulo CRM.
+ * Las de la tarjeta que exigen ADEMÁS el módulo «programacion»: «Hay unidad» crea la ida y el
+ * retorno en Programación y «No hay unidad» los descarta; lo confirma quien opera la flota.
+ * («Emitir y enviar Confirmación» también lo exige, con su propio aviso.)
  */
-export type AccionTesoreria = AccionDinero | "ver_comprobante";
-export const ACCIONES_TESORERIA: readonly AccionTesoreria[] = [...ACCIONES_DINERO, "ver_comprobante"];
+export const ACCIONES_PROGRAMACION: readonly AccionTarjeta[] = ["hay_unidad", "sin_unidad"];
+
+/**
+ * Las de la tarjeta que decide TESORERÍA («tesoreria» o «finanzas»): cuánto se le devuelve al
+ * cliente de lo cobrado. Se hace desde la tarjeta del CRM (con los dos módulos) o desde
+ * Tesorería → Adelantos de reservas (sin el CRM).
+ */
+export const ACCIONES_DECIDE_TESORERIA: readonly AccionTarjeta[] = ["resolver_cancelacion"];
+
+/**
+ * Lo que acepta POST /api/reservas/solicitudes (Tesorería / Finanzas): las de dinero, abrir un
+ * comprobante del cliente (`ver_comprobante`, con `comprobante_id`: quien verifica el pago contra
+ * el banco tiene que poder ver la imagen sin el módulo CRM) y decidir la devolución de una
+ * cancelación (`resolver_cancelacion`, con `devolucion_pct`).
+ */
+export type AccionTesoreria = AccionDinero | "ver_comprobante" | "resolver_cancelacion";
+export const ACCIONES_TESORERIA: readonly AccionTesoreria[] = [...ACCIONES_DINERO, "ver_comprobante", "resolver_cancelacion"];
 
 export type MotivoCierre = "duplicada" | "cliente" | "ejecutivo";
 export const MOTIVOS_CIERRE: readonly MotivoCierre[] = ["duplicada", "cliente", "ejecutivo"];
@@ -126,6 +141,8 @@ export type CuerpoTesoreria = {
   fecha?: string;
   metodo?: string;
   referencia?: string;
+  /** resolver_cancelacion: el % de lo cobrado que se devuelve (0 a 100). */
+  devolucion_pct?: number;
 };
 
 /** Los códigos de resultado de las acciones (la pantalla enruta por código, nunca por el texto). */

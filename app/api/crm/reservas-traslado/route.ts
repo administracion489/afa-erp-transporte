@@ -5,9 +5,11 @@
 //   POST CuerpoTarjeta (lib/traslados/reserva-solicitud-tipos.ts)  → ResultadoAccionReserva
 //
 // Permisos: todo exige el módulo «crm». «Emitir y enviar Confirmación» exige además «programacion»
-// (es el documento de /api/reservas/confirmacion). Las acciones de DINERO (registrar adelanto, «No
-// encontré el pago», registrar devolución) exigen además «tesoreria» o «finanzas»: quien vende no es
-// quien valida que el dinero entró.
+// (es el documento de /api/reservas/confirmacion), y también «Hay unidad» / «No hay unidad» (crean o
+// descartan la reserva en Programación: lo confirma quien opera la flota). Las acciones de DINERO
+// (registrar adelanto, «No encontré el pago», registrar devolución) y DECIDIR cuánto se devuelve de
+// una cancelación exigen además «tesoreria» o «finanzas»: quien vende no es quien valida que el
+// dinero entró ni quien decide cuánto sale.
 // SIEMPRE se comprueba que conversación ↔ tarjeta ↔ solicitud ↔ cotización coincidan
 // (`cargarCadena`); el número del cliente y la conversación los lee el servidor, nunca del cuerpo.
 // Quién actúa sale del TOKEN. La lógica vive en lib/traslados/reserva-solicitud-datos.ts.
@@ -22,7 +24,7 @@ import {
   verComprobante, vincularCliente, vistaSolicitud,
 } from "@/lib/traslados/reserva-solicitud-datos";
 import {
-  ACCIONES_DINERO, ACCIONES_TARJETA, STATUS_RESULTADO_RESERVA, type AccionDinero, type AccionTarjeta, type ResultadoAccionReserva,
+  ACCIONES_DECIDE_TESORERIA, ACCIONES_DINERO, ACCIONES_PROGRAMACION, ACCIONES_TARJETA, STATUS_RESULTADO_RESERVA, type AccionDinero, type AccionTarjeta, type ResultadoAccionReserva,
 } from "@/lib/traslados/reserva-solicitud-tipos";
 
 export const dynamic = "force-dynamic";
@@ -86,6 +88,16 @@ export async function POST(req: NextRequest) {
   if (accion === "enviar_confirmacion") {
     const a3 = await verificarUsuarioApi(req, "programacion");
     if (!a3.ok) return fallo("sin_permiso", "Emitir la Confirmación de Reserva exige además el módulo Programación.");
+  }
+  // Confirmar si hay unidad crea (o descarta) la reserva en Programación: lo hace quien la opera.
+  if (ACCIONES_PROGRAMACION.includes(accion as AccionTarjeta)) {
+    const a4 = await verificarUsuarioApi(req, "programacion");
+    if (!a4.ok) return fallo("sin_permiso", "Confirmar si hay unidad («Hay unidad» / «No hay unidad») exige además el módulo Programación: crea o descarta la reserva ahí.");
+  }
+  // Decidir cuánto se le devuelve al cliente es una decisión de dinero: la toma Tesorería.
+  if (ACCIONES_DECIDE_TESORERIA.includes(accion as AccionTarjeta)) {
+    const a5 = await verificarUsuarioApiAlguno(req, MODULOS_DINERO);
+    if (!a5.ok) return fallo("sin_permiso", "Decidir cuánto se devuelve lo hace Tesorería: exige el módulo Finanzas o Cuentas por Pagar (Tesorería).");
   }
 
   const sb = admin();

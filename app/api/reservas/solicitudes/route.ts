@@ -11,6 +11,9 @@
 //          de `crm-media` y solo si el comprobante es de esa solicitud; lo marca leído. Es la MISMA
 //          función que la tarjeta del CRM (`verComprobante`): quien verifica el pago contra el banco
 //          tiene que poder ver la imagen sin el módulo CRM.
+//        { accion: "resolver_cancelacion", solicitud_id, devolucion_pct } → decide cuánto se devuelve de
+//          una cancelación (lo decide Tesorería), le escribe al cliente (T7) por la conversación de la
+//          solicitud y crea o pone al día el comprobante del cargo si se retiene algo.
 //
 // Permisos: «tesoreria» o «finanzas». Un adelanto se registra al VER el dinero en el banco: la foto
 // del comprobante que mandó el cliente es evidencia, no un cobro. Quién registra sale del TOKEN.
@@ -23,7 +26,7 @@ import { verificarUsuarioApiAlguno } from "@/lib/api-auth";
 import { guardarGasto } from "@/lib/api-guard";
 import { tablaFaltante } from "@/lib/columna-faltante";
 import {
-  cargarCadena, listaParaTesoreria, marcarPagoNoEncontrado, registrarAdelantoSolicitud, registrarDevolucionSolicitud, verComprobante,
+  cargarCadena, listaParaTesoreria, marcarPagoNoEncontrado, registrarAdelantoSolicitud, registrarDevolucionSolicitud, resolverCancelacion, verComprobante,
   vistaSolicitud, TABLA_SOLICITUDES,
 } from "@/lib/traslados/reserva-solicitud-datos";
 import {
@@ -91,6 +94,7 @@ export async function POST(req: NextRequest) {
     if (accion === "ver_comprobante") return responder(await verComprobante(sb, cad.c, quien, {}, { comprobanteId }));
     const r = accion === "registrar_adelanto" ? await registrarAdelantoSolicitud(sb, cad.c, cuerpo, quien)
       : accion === "registrar_devolucion" ? await registrarDevolucionSolicitud(sb, cad.c, cuerpo, quien)
+      : accion === "resolver_cancelacion" ? await resolverCancelacion(sb, cad.c, quien, cuerpo.devolucion_pct)
       : await marcarPagoNoEncontrado(sb, cad.c, quien);
     try {
       const de = await cargarCadena(sb, { solicitudId });

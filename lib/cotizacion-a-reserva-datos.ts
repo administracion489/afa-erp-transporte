@@ -17,6 +17,15 @@
 //    `direccion_servicio` SOLO si el error la nombra;
 //  · crea los paraderos de la ida (en la primera) y el retorno de cada ida, con sus paraderos, y los
 //    enlaza por los dos lados.
+//
+// EL CANDADO (supabase/cotizaciones-07-candado-conversion.sql). «→ Res.» y el «Hay unidad» del CRM
+// convierten la MISMA cotización con este mismo ejecutor; pulsados a la vez, los dos leían «todavía no
+// tiene reservas» y los dos creaban: la reserva quedaba duplicada. Ahora, justo antes de escribir (y
+// DESPUÉS de la pregunta de la página: un `confirm` abierto no retiene a nadie), se toma el candado de
+// la cotización con la hora del servidor, se VUELVE a leer lo que ya tiene y se vuelve a planear; si
+// el plan cambió (otra persona la convirtió mientras tanto), no se escribe nada. El candado se suelta
+// al terminar, falle lo que falle. Sin la migración (o con un cliente que no llama funciones) se
+// convierte como antes y `aviso` lo dice; con el candado tomado por otro, `ocupada`.
 // ══════════════════════════════════════════════════════════════════════════════
 
 import {
@@ -26,7 +35,7 @@ import {
 } from "./cotizacion-a-reserva";
 import type { PlanRetorno } from "./cotizacion-retorno";
 import { insertarServicioNuevo } from "./reservas-autoseleccion";
-import { faltaColumna } from "./columna-faltante";
+import { faltaColumna, funcionQueFalta } from "./columna-faltante";
 
 // El cliente llega de dos sitios (navegador y servicio): se tipa lo mínimo.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -54,7 +63,11 @@ export type CodigoConversion =
   /** No se creó ninguna ida (lectura caída o la primera inserción falló). */
   | "error"
   /** Se crearon algunas idas y la siguiente falló (las creadas se quedan). */
-  | "parcial";
+  | "parcial"
+  /** Otra persona está convirtiendo esta cotización en este momento (el candado está tomado): no se escribió nada. */
+  | "ocupada"
+  /** Mientras se preguntaba, otra persona creó o cambió sus reservas: no se escribió nada. */
+  | "cambio";
 
 export type ResultadoConversion = {
   codigo: CodigoConversion;
@@ -65,7 +78,51 @@ export type ResultadoConversion = {
   /** Las idas que se crearon (en orden) y los retornos que se crearon. */
   idas: number[];
   retornos: number[];
+  /** Lo que la pantalla dice APARTE del aviso (hoy: que se convirtió sin el candado). */
+  aviso?: string | null;
 };
+
+// ── El candado (supabase/cotizaciones-07-candado-conversion.sql) ─────────────
+
+export const SQL_CANDADO_CONVERSION = "supabase/cotizaciones-07-candado-conversion.sql";
+/** Cuánto dura el candado si la conversión muere a mitad (operativo, NO medido: crear ida, retorno y paraderos tarda segundos). */
+export const SEGUNDOS_CANDADO = 120;
+export const MENSAJE_OCUPADA = "Otra persona está creando la reserva de esta cotización en este mismo momento (desde «→ Res.» o desde «Hay unidad» del CRM). Espera unos segundos y vuelve a intentarlo: no se creó nada.";
+export const MENSAJE_CAMBIO = "Mientras confirmabas, otra persona creó o cambió las reservas de esta cotización. No se creó nada: vuelve a pulsar para ver cómo quedó.";
+export const AVISO_SIN_CANDADO = `Se convirtió sin candado: falta correr ${SQL_CANDADO_CONVERSION}. Sin él, dos personas convirtiendo la misma cotización a la vez pueden duplicar la reserva.`;
+
+export type Candado =
+  | { codigo: "tomado"; hasta: string }
+  | { codigo: "ocupado" }
+  /** La función no existe (falta la migración) o el cliente no llama funciones: se convierte como antes. */
+  | { codigo: "sin_candado" }
+  | { codigo: "error"; detalle: string };
+
+/** Toma el candado de la cotización con la hora del SERVIDOR. Nunca lanza. */
+export async function reclamarConversion(sb: Sb, cotId: number, segundos = SEGUNDOS_CANDADO): Promise<Candado> {
+  if (typeof sb?.rpc !== "function") return { codigo: "sin_candado" };
+  try {
+    const { data, error } = await sb.rpc("fn_cotizacion_reclamar_conversion", { p_cotizacion_id: cotId, p_segundos: segundos });
+    if (error) {
+      if (funcionQueFalta(error) != null || faltaColumna(error, "conversion_hasta")) return { codigo: "sin_candado" };
+      return { codigo: "error", detalle: `No se pudo tomar el turno para crear la reserva (${String(error.message ?? "error")}). Vuelve a intentar en un momento: no se creó nada.` };
+    }
+    const estado = String((data as { estado?: unknown } | null)?.estado ?? "");
+    const hasta = String((data as { hasta?: unknown } | null)?.hasta ?? "");
+    if (estado === "tomado" && hasta) return { codigo: "tomado", hasta };
+    if (estado === "ocupado") return { codigo: "ocupado" };
+    if (estado === "no_existe") return { codigo: "error", detalle: "La cotización ya no existe (o no tienes permiso para verla): no se creó nada." };
+    if (estado === "sin_permiso") return { codigo: "error", detalle: "No tienes permiso para editar esta cotización: no se creó ninguna reserva." };
+    return { codigo: "error", detalle: "No se pudo tomar el turno para crear la reserva. Vuelve a intentar en un momento: no se creó nada." };
+  } catch (e) {
+    return { codigo: "error", detalle: `No se pudo tomar el turno para crear la reserva (${e instanceof Error ? e.message : String(e)}). Vuelve a intentar en un momento: no se creó nada.` };
+  }
+}
+
+/** Suelta el candado SI sigue siendo el nuestro. Nunca lanza (si falla, vence solo). */
+export async function soltarConversion(sb: Sb, cotId: number, hasta: string): Promise<void> {
+  try { await sb.rpc("fn_cotizacion_soltar_conversion", { p_cotizacion_id: cotId, p_hasta: hasta }); } catch { /* vence solo */ }
+}
 
 const res = (codigo: CodigoConversion, mensaje: string, refrescar: boolean, idas: number[] = [], retornos: number[] = []): ResultadoConversion =>
   ({ codigo, mensaje, refrescar, idas, retornos });
@@ -82,16 +139,56 @@ export async function ejecutarConversion(
 ): Promise<ResultadoConversion> {
   const preguntar = async (t: string) => (opts.confirmar ? !!(await opts.confirmar(t)) : true);
   const hoy = opts.hoy;
-  let plan: PlanConversion = planConversion(cot, { existentes: null, hoy });
-  if (plan.codigo === "no_aprobada") return res("no_aprobada", plan.mensaje, false);
+  const inicial: PlanConversion = planConversion(cot, { existentes: null, hoy });
+  if (inicial.codigo === "no_aprobada") return res("no_aprobada", inicial.mensaje, false);
+  const leido = await leerYPlanear(sb, cot, hoy);
+  if (!leido.ok) return res("error", leido.mensaje, false);
+  let plan: PlanConversion = leido.plan;
+
+  // Lo que no escribe nada sale antes del candado.
+  if (plan.codigo === "ya_convertida") return res("ya_convertida", plan.mensaje, false);
+  if (plan.codigo === "retorno_imposible") return res("retorno_imposible", plan.mensaje, false);
+  if (plan.codigo !== "crear" && plan.codigo !== "completar_retorno") return res("error", "", false);
+  const pregunta = plan.confirmar || null;
+  if (pregunta && !(await preguntar(pregunta))) return res("cancelada", "", false);
+
+  const candado = await reclamarConversion(sb, cot.id);
+  if (candado.codigo === "ocupado") return res("ocupada", MENSAJE_OCUPADA, false);
+  if (candado.codigo === "error") return res("error", candado.detalle, false);
+  const aviso = candado.codigo === "sin_candado" ? AVISO_SIN_CANDADO : null;
+  try {
+    if (candado.codigo === "tomado") {
+      // Bajo el candado: lo que se leyó antes de la pregunta puede ser viejo.
+      const otra = await leerYPlanear(sb, cot, hoy);
+      if (!otra.ok) return res("error", otra.mensaje, false);
+      if (JSON.stringify(otra.plan) !== JSON.stringify(plan)) {
+        if (otra.plan.codigo === "ya_convertida") return res("ya_convertida", otra.plan.mensaje, true);
+        return res("cambio", MENSAJE_CAMBIO, true);
+      }
+      plan = otra.plan;
+    }
+    const r = await escribirPlan(sb, cot, plan);
+    return aviso ? { ...r, aviso } : r;
+  } finally {
+    if (candado.codigo === "tomado") await soltarConversion(sb, cot.id, candado.hasta);
+  }
+}
+
+/** Lee lo que ya existe de la cotización y planea. Una lectura que falla NO es «todavía no tiene reservas». */
+async function leerYPlanear(sb: Sb, cot: CotParaReserva, hoy: string): Promise<{ ok: true; plan: PlanConversion } | { ok: false; mensaje: string }> {
   const { data: existentes, error: eEx } = await sb.from("reservas").select("id,fecha_servicio,vehiculo_id,vehiculo_tercero_id,reserva_vinculada_id,estado").eq("cotizacion_id", cot.id).limit(20);
-  if (eEx) return res("error", mensajeErrorComprobar(eEx.message), false);
-  plan = planConversion(cot, { existentes: existentes ?? [], hoy });
+  if (eEx) return { ok: false, mensaje: mensajeErrorComprobar(eEx.message) };
+  let plan = planConversion(cot, { existentes: existentes ?? [], hoy });
   if (plan.codigo === "comprobar_retorno") {
     const { data: atras, error: eAt } = await sb.from("reservas").select("id").in("reserva_vinculada_id", plan.ids).limit(1);
-    if (eAt) return res("error", mensajeErrorRetornoAtras(eAt.message), false);
+    if (eAt) return { ok: false, mensaje: mensajeErrorRetornoAtras(eAt.message) };
     plan = planConversion(cot, { existentes: existentes ?? [], hoy, retornoAtras: !!atras?.length });
   }
+  return { ok: true, plan };
+}
+
+/** Escribe lo que dice el plan («crear» o «completar_retorno»; lo demás no escribe nada). */
+async function escribirPlan(sb: Sb, cot: CotParaReserva, plan: PlanConversion): Promise<ResultadoConversion> {
 
   const insertar = (f: Record<string, unknown>) => insertarServicioNuevo((x) => sb.from("reservas").insert(x).select().single(), f);
   const retornos: number[] = [];
@@ -110,16 +207,12 @@ export async function ejecutarConversion(
   };
 
   switch (plan.codigo) {
-    case "ya_convertida": return res("ya_convertida", plan.mensaje, false);
-    case "retorno_imposible": return res("retorno_imposible", plan.mensaje, false);
     case "completar_retorno": {
-      if (!(await preguntar(plan.confirmar))) return res("cancelada", "", false);
       const errs: (string | null)[] = [];
       for (const ida of plan.idas) errs.push(await crearRetorno(ida, plan.retorno));
       return res("retorno_completado", alertaRetornoCompletado(plan.retorno, errs, plan.idas.length), true, [], retornos);
     }
     case "crear": {
-      if (plan.confirmar && !(await preguntar(plan.confirmar))) return res("cancelada", "", false);
       const p = plan;
       const insertParadas = async (id: number): Promise<string | null> => {
         if (p.paradas.length < 1) return null;

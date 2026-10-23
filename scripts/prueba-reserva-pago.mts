@@ -20,7 +20,8 @@ import {
   mensajeCancelacionResuelta, mensajeComprobanteRecibido, mensajeDisponibilidadPrimero, mensajeGuardaReserva,
   mensajeHayUnidad, mensajePagoNoEncontrado, mensajePedirPago, mensajePoliticas, mensajeSinUnidad, normalizarConfigReserva,
   politicaContradiceConfig, puedePasar, queFalta, textoPlazoMinutos,
-  type EstadoSolicitud, type PagoSolicitud, type SolicitudVista,
+  cargoEditable, juzgarCargo, mismaReferencia, observacionesConMarca, patchCargoRecalculado, referenciaComprobante,
+  type EstadoSolicitud, type FacturaCargoActual, type PagoSolicitud, type SolicitudVista,
 } from "../lib/traslados/reserva-pago";
 import { cifrasDeFila, entradaCorporativaTraslado, type FilaCotizacionLeida } from "../lib/traslados/cotizacion-traslado";
 import { docCorporativo, cuentasCorporativo, cuentasDoc } from "../lib/cotizacion-corporativo";
@@ -391,6 +392,79 @@ const empresa: PerfilEmpresa = {
   const p = correoReserva({ tipo: "por_confirmar", cliente: { nombre: "Ana", waId: null }, cotizacion: { numero: "1" }, moneda: "PEN", total: 177, adelanto: null, pct: null, ahoraMs: ahora, urgente: true, motivos: ["zona_sin_envio"] });
   t("por confirmar: urgente, motivos y sin plazo dicho como tal", p.asunto.startsWith("⚠ URGENTE · Reserva por confirmar disponibilidad") && p.texto.includes("Ni el recojo ni el destino") && p.texto.includes("sin plazo calculado"));
   t("el correo no lleva literales de la empresa", !/\bafa\b|afatours/i.test(c.html + c.texto + p.html + p.texto));
+}
+
+// ── 4b. Quién hace cada cosa: «Hay unidad» Programación, la devolución Tesorería ──
+{
+  const s0: SolicitudVista = { estado: "por_confirmar", adelanto_pct: 50, comprobantes: 0 };
+  const sinRes = { reserva: null, confirmacionEnviada: false, cargo: null };
+  t("confirmar la disponibilidad lo hace Programación", queFalta(s0, { cobrado: 0, devuelto: 0, adelanto: 59, ...sinRes }).find((p) => p.codigo === "confirmar_disponibilidad")?.quien === "programacion");
+  t("decidir la devolución de una cancelación pedida lo hace Tesorería", queFalta({ ...s0, estado: "confirmada", cancelacion_pedida_en: "2026-10-21T10:00:00Z" }, { cobrado: 59, devuelto: 0, adelanto: 59, ...sinRes })[0]?.quien === "tesoreria");
+  t("…y también la de una cerrada sin porcentaje", queFalta({ estado: "cancelada", adelanto_pct: 50 }, { cobrado: 59, devuelto: 0, adelanto: 59, ...sinRes }).find((p) => p.codigo === "resolver_cancelacion")?.quien === "tesoreria");
+  t("crear la reserva que faltó lo hace Programación", queFalta({ ...s0, estado: "confirmada" }, { cobrado: 59, devuelto: 0, adelanto: 59, ...sinRes }).find((p) => p.codigo === "crear_reserva")?.quien === "programacion");
+}
+
+// ── 5b. El comprobante del cargo se RECALCULA mientras no tenga número ────────
+{
+  const borrador = (total: number, x: Partial<FacturaCargoActual> = {}): FacturaCargoActual => ({ id: 9, serie: null, numero: null, subtotal: total, igv: 0, total, estado: "pendiente", sunat_estado: "pendiente", ...x });
+  const emitido = (total: number, x: Partial<FacturaCargoActual> = {}): FacturaCargoActual => borrador(total, { serie: "F001", numero: "00025", estado: "emitida", sunat_estado: "aceptada", ...x });
+  t("editable: sin número, pendiente y sin enviar a SUNAT", cargoEditable(borrador(10)) && !cargoEditable(emitido(10)) && !cargoEditable(borrador(10, { estado: "anulada" })) && !cargoEditable(borrador(10, { sunat_estado: "enviada" })) && !cargoEditable(null));
+  t("una serie sin número sigue siendo borrador (facturas.serie trae F001 por defecto)", cargoEditable(borrador(10, { serie: "F001" })));
+  t("referencia «F001-25»", referenciaComprobante("F001", "00025") === "F001-25" && referenciaComprobante(" f001 ", "25") === "F001-25" && referenciaComprobante("F001", null) === null);
+  t("la nota de crédito que dice «F001-00025» (o «f001 - 25») referencia a F001-25", mismaReferencia("F001-00025", "F001", "25") && mismaReferencia("f001 - 25", "F001", "00025") && !mismaReferencia("F002-25", "F001", "25") && !mismaReferencia("F001-250", "F001", "25") && !mismaReferencia("", "F001", "25"));
+
+  const j = (retenido: number, actual: FacturaCargoActual | null, notas = 0) => juzgarCargo({ retenido, actual, notasCredito: notas, moneda: "PEN" });
+  t("sin comprobante y sin retener → nada; reteniendo → crear", j(0, null).codigo === "nada" && j(40, null).codigo === "crear");
+  t("borrador al día → al_dia", j(40, borrador(40)).codigo === "al_dia");
+  t("EL CASO: entró un cobro después → el borrador se recalcula (40 → 60)", (() => { const r = j(60, borrador(40)); return r.codigo === "actualizar" && r.antes === 40 && r.ahora === 60 && r.detalle.includes("S/ 40.00") && r.detalle.includes("S/ 60.00"); })());
+  t("se anuló el cobro → ya no se retiene nada → el borrador se retira", j(0, borrador(40)).codigo === "retirar");
+  t("emitido y ahora corresponde menos → nota de crédito por la diferencia, con la referencia", (() => { const r = j(40, emitido(60)); return r.codigo === "ajustar_emitido" && r.diferencia === -20 && r.detalle.includes("nota de crédito por S/ 20.00") && r.detalle.includes("F001-25"); })());
+  t("emitido y ahora corresponde más → un comprobante por la diferencia", (() => { const r = j(80, emitido(60)); return r.codigo === "ajustar_emitido" && r.diferencia === 20 && r.detalle.includes("diferencia de S/ 20.00"); })());
+  t("emitido con su nota de crédito ya hecha → al día", j(40, emitido(60), 20).codigo === "al_dia");
+  t("las notas de crédito NO cuentan sobre un borrador", j(40, borrador(60), 20).codigo === "actualizar");
+  t("anulado por una persona → anulado (no se recrea)", j(40, borrador(40, { estado: "anulada" })).codigo === "anulado");
+  // Barrido: nunca se recalcula ni se retira uno emitido; al día ⟺ la cuenta cuadra; crear solo sin comprobante.
+  let casos = 0, buenos = 0;
+  for (const ret of [0, 0.004, 10, 39.99, 40, 40.004, 60]) for (const tot of [0, 10, 40, 60]) for (const forma of ["borrador", "emitido", "anulada", "sunat", "ninguno"]) for (const notas of [0, 20, 40]) {
+    casos++;
+    const a = forma === "ninguno" ? null : forma === "borrador" ? borrador(tot) : forma === "emitido" ? emitido(tot) : forma === "anulada" ? borrador(tot, { estado: "anulada" }) : borrador(tot, { sunat_estado: "enviada" });
+    const r = j(ret, a, notas);
+    const editable = cargoEditable(a);
+    const neto = a ? (editable ? tot : tot - notas) : 0;
+    const okCaso =
+      (!["actualizar", "retirar"].includes(r.codigo) || editable)
+      && (r.codigo !== "crear" || (!a && ret > 0.004))
+      && (r.codigo !== "al_dia" || (!!a && Math.abs(Math.round(ret * 100) / 100 - neto) < 0.005))
+      && (r.codigo !== "anulado" || forma === "anulada")
+      && (!a || a.estado === "anulada" || r.codigo !== "al_dia" ? true : true)
+      && (r.codigo !== "retirar" || Math.round(ret * 100) / 100 === 0);
+    if (okCaso) buenos++; else if (fallas.length < 40) fallas.push(`cargo ${forma} tot=${tot} ret=${ret} notas=${notas} → ${r.codigo}`);
+  }
+  t(`barrido del cargo: nunca se toca uno emitido, «al día» ⟺ la cuenta cuadra (${buenos}/${casos})`, buenos === casos);
+
+  const datos = { solicitudId: 31, cobrado: 120, devuelto: 60, retenido: 60, moneda: "PEN" as const };
+  const viejaObs = `${OBSERVACION_IGV_CARGO} ${marcaCargoReserva(31)}: cobrado S/ 80.00, devuelto S/ 40.00, retenido S/ 40.00. Lo armó el ERP sin número. Nota de Facturación: revisar RUC.`;
+  const nueva = observacionesConMarca(viejaObs, datos);
+  t("la línea de la marca se pone al día y lo demás (también lo de una persona) se conserva", nueva.includes("cobrado S/ 120.00, devuelto S/ 60.00, retenido S/ 60.00.") && !nueva.includes("S/ 40.00") && nueva.includes("Nota de Facturación: revisar RUC.") && nueva.startsWith(OBSERVACION_IGV_CARGO));
+  t("poner al día dos veces no cambia nada (idempotente)", observacionesConMarca(nueva, datos) === nueva);
+  t("sin la línea de la marca, se agrega al final", observacionesConMarca("Algo escrito.", datos) === `Algo escrito. ${marcaCargoReserva(31)}: cobrado S/ 120.00, devuelto S/ 60.00, retenido S/ 60.00.`);
+  const p1 = patchCargoRecalculado(borrador(40, { observaciones: viejaObs, items_json: [{ descripcion: "Cargo por cancelación N° 00512", cantidad: 1, precio_unit: 40, total: 40 }] }), datos);
+  t("el patch: todo en la base (sin IGV, como lo arma el ERP) y el ítem con el total nuevo y su descripción", p1.subtotal === 60 && p1.igv === 0 && Array.isArray(p1.items_json) && (p1.items_json as any[])[0].total === 60 && (p1.items_json as any[])[0].descripcion === "Cargo por cancelación N° 00512" && !("total" in p1));
+  const p2 = patchCargoRecalculado(borrador(118, { subtotal: 100, igv: 18 }), { ...datos, retenido: 59 });
+  t("si Facturación ya repartió base e IGV, se conserva la proporción (118 = 100 + 18 → 59 = 50 + 9)", p2.subtotal === 50 && p2.igv === 9);
+
+  // queFalta con el comprobante leído entero.
+  const sCan: SolicitudVista = { estado: "cancelada", adelanto_pct: 50, devolucion_pct: 50 };
+  const base = { cobrado: 120, devuelto: 60, adelanto: 120, reserva: null, confirmacionEnviada: false, moneda: "PEN" as const };
+  const pend = (cargo: Parameters<typeof queFalta>[1]["cargo"], x: Partial<typeof base> = {}) => queFalta(sCan, { ...base, ...x, cargo });
+  t("borrador al día → emitirlo (como antes)", pend({ id: 9, numero: null, total: 60, estado: "pendiente" }).map((p) => p.codigo).join() === "emitir_cargo");
+  t("borrador viejo → emitir_cargo diciendo que se recalcula solo", (() => { const p = pend({ id: 9, numero: null, total: 40, estado: "pendiente" }); return p.length === 1 && p[0].codigo === "emitir_cargo" && p[0].quien === "facturacion" && p[0].detalle.includes("recalcula solo"); })());
+  t("emitido al día → nada", pend({ id: 9, numero: "25", serie: "F001", total: 60, estado: "emitida", sunat_estado: "aceptada" }).length === 0);
+  t("emitido con otro importe → ajustar_cargo (Facturación) con la nota de crédito", (() => { const p = pend({ id: 9, numero: "25", serie: "F001", total: 80, estado: "emitida", sunat_estado: "aceptada" }); return p.length === 1 && p[0].codigo === "ajustar_cargo" && p[0].quien === "facturacion" && p[0].detalle.includes("nota de crédito por S/ 20.00"); })());
+  t("emitido con otro importe y su nota de crédito ya hecha → nada", pend({ id: 9, numero: "25", serie: "F001", total: 80, estado: "emitida", sunat_estado: "aceptada", notasCredito: 20 }).length === 0);
+  t("se anularon todos los cobros y quedó un borrador → ajustar_cargo: se retira solo, no lo emitas", (() => { const p = pend({ id: 9, numero: null, total: 60, estado: "pendiente" }, { cobrado: 0, devuelto: 0 }); return p.length === 1 && p[0].codigo === "ajustar_cargo" && p[0].detalle.includes("no lo emitas"); })());
+  t("anulado por una persona → no queda nada del cargo", pend({ id: 9, numero: null, total: 60, estado: "anulada" }).length === 0);
+  t("sin `total` (quien no lo lee): la regla de siempre", pend({ id: 9, numero: null }).map((p) => p.codigo).join() === "emitir_cargo" && pend({ id: 9, numero: "B001-12" }).length === 0);
 }
 
 if (fallas.length) for (const f of fallas) console.log("✗", f);
