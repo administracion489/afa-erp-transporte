@@ -94,11 +94,11 @@ export const MODOS_PREGUNTAS: { valor: ModoPreguntas; etiqueta: string }[] = [
   { valor: "una_por_mensaje", etiqueta: "Uno por mensaje, en el orden de los datos del pedido" },
 ];
 
-/** Lo que necesita un texto que arma el código para hablar como el agente. */
 /**
- * La voz de los textos que arma el código. `idioma` NO es un ajuste del agente: lo pone el código
- * (el idioma de la cotización o el del cliente, lib/idioma-cliente.ts) y `estiloDe` nunca lo llena.
- * Ausente = castellano, byte a byte lo de siempre.
+ * Lo que necesita un texto que arma el código para hablar como el agente: su voz. `idioma` NO es un
+ * ajuste del agente: lo pone el código (el idioma de la cotización o el del cliente,
+ * lib/idioma-cliente.ts) y `estiloDe` nunca lo llena. Ausente = castellano, byte a byte lo de
+ * siempre. En inglés hay UNA sola versión de cada texto (no hay usted ni tú): `tratamiento` no cuenta.
  */
 export type EstiloMensajes = { tratamiento: Tratamiento; preguntas: ModoPreguntas; idioma?: "es" | "en" };
 
@@ -300,9 +300,15 @@ const DERIVACION_TU =
   "Gracias, {nombre}. Ya registré tu solicitud y un ejecutivo de nuestro equipo la está revisando para enviarte la información por este mismo chat a la brevedad. 🙌";
 const DERIVACION_USTED =
   "Gracias, {nombre}. Ya registré su solicitud y un ejecutivo de nuestro equipo la está revisando para enviarle la información por este mismo chat a la brevedad. 🙌";
+// En inglés, UNA versión (no hay usted ni tú). La plantilla propia del dueño está en castellano y no
+// se traduce: en inglés quien llama usa esta (lib/crm-ia.ts, `mensajeDerivacion`).
+const DERIVACION_EN =
+  "Thank you, {nombre}. I've registered your request; one of our agents is reviewing it and will send you the information in this chat shortly. 🙌";
 
-/** La plantilla de derivación cuando el agente no escribió la suya (con {nombre} sin reemplazar). */
-export function mensajeDerivacionDefecto(t: Tratamiento): string {
+/** La plantilla de derivación cuando el agente no escribió la suya (con {nombre} sin reemplazar).
+ *  Sin `idioma` (o «es»), la de siempre según el trato, byte a byte. */
+export function mensajeDerivacionDefecto(t: Tratamiento, idioma: "es" | "en" = "es"): string {
+  if (idioma === "en") return DERIVACION_EN;
   return t === "tu" ? DERIVACION_TU : DERIVACION_USTED;
 }
 

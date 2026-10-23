@@ -19,6 +19,12 @@
 //     en producción: no va en la fila (insertarlo falla); se devuelve aparte.
 //  4. LOS TEXTOS SON DE USTED Y DE TÚ, cada uno escrito entero (`estilo`, el mismo ajuste del agente),
 //     sin un solo dato de la empresa escrito aquí: las cuentas y el correo salen de la configuración.
+//     Y EN INGLÉS (`estilo.idioma === "en"`, lo pone el código: el idioma de la cotización), UNA
+//     versión escrita entera (no hay usted ni tú): importes con `fmtImporte(…, "en")`, fechas
+//     «Oct 25, 2026», horas de 24 h y «(Lima time)» en los plazos. Sin `idioma`, byte a byte lo de
+//     siempre. LA HUELLA DE LAS CUENTAS NO CAMBIA CON EL IDIOMA: `cuentasEnMensaje` devuelve además
+//     `lineasHuella`, siempre en castellano (con las líneas en inglés, «Acct:» en vez de «Cta:», la
+//     huella cambiaría y `juzgarReenvioPedirPago` diría `cuentas_cambiaron`).
 //  5. ANTES DE PAGAR, EL CLIENTE TIENE LAS CONDICIONES (cotizaciones-08). Con el enlace a las
 //     condiciones completas de la cotización (`/condiciones/<token>`), T1 y el pedido de pago de T4
 //     llevan el resumen de la política (o solo el enlace, si no hay resumen) en lugar de «Si desea, le
@@ -30,12 +36,12 @@
 import { cifrasDeFila, clienteParaPdf, type ClienteErp, type FilaCotizacionLeida } from "./cotizacion-traslado";
 import { mismoTelefonoE164 } from "../crm-telefono";
 import { normalizarMoneda, revisarTipoCambio, type Moneda } from "../cotizacion-moneda";
-import { fmtImporte } from "../cotizacion-idioma";
+import { fmtImporte, type Idioma } from "../cotizacion-idioma";
 import { cuentasCorporativo, cuentasDoc } from "../cotizacion-corporativo";
 import type { AvisoPdf, PlantillaPdfCfg } from "../cotizacion-pdf";
 import type { CuentaBancaria, PerfilEmpresa } from "../empresa-perfil";
 import { rucValido } from "../combustible/grifo-canonico";
-import { aLas, describirAtencion, type Atencion } from "../crm-ia-atencion";
+import { aLas, describirAtencion, fechaMediaIngles, type Atencion } from "../crm-ia-atencion";
 import { minutoDelDiaLima, minutosAHhmm, fechaLima } from "../alertas-horario";
 import type { EstiloMensajes } from "../crm-ia-ajustes";
 import { MARGEN_DEFECTO_MIN, PLAZO_CONFIRMACION_DEFECTO_MIN } from "./reserva-orden";
@@ -50,6 +56,8 @@ const num = (v: unknown): number | null => {
 };
 const txt = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
 const esTu = (e: EstiloMensajes | null | undefined) => e?.tratamiento === "tu";
+/** El texto va en inglés (una sola versión: el trato no cuenta). Ausente o «es» = castellano. */
+const esEn = (e: EstiloMensajes | null | undefined) => e?.idioma === "en";
 
 // ── 1. Estados y configuración ───────────────────────────────────────────────
 
@@ -272,15 +280,22 @@ export function vinculoContactoReserva(x: {
   return { codigo: "no_verificado", ata: false };
 }
 
-/** Un importe para el cliente: el mismo formato del PDF, al céntimo. */
-export const dinero = (n: number, moneda: Moneda): string => fmtImporte(r2(n), moneda, "es");
+/** Un importe para el cliente: el mismo formato del PDF, al céntimo (en inglés, el del PDF en inglés). */
+export const dinero = (n: number, moneda: Moneda, idioma: Idioma = "es"): string => fmtImporte(r2(n), moneda, idioma === "en" ? "en" : "es");
 
 /** «50» o «12.5»: el porcentaje sin ceros de sobra. */
 export const fmtPct = (p: number): string => String(r2(p));
 
 // ── 3. Las cuentas del chat: las del PDF ─────────────────────────────────────
 
-export type CuentasMensaje = { cuentas: CuentaBancaria[]; lineas: string[]; aviso: AvisoPdf | null };
+export type CuentasMensaje = {
+  cuentas: CuentaBancaria[];
+  /** Las líneas que se le mandan al cliente, en el idioma pedido. */
+  lineas: string[];
+  /** Las MISMAS cuentas en castellano, siempre: de ellas sale la huella (`huellaCuentas`), que no puede cambiar con el idioma. */
+  lineasHuella: string[];
+  aviso: AvisoPdf | null;
+};
 
 /**
  * Las cuentas que se le mandan al cliente, en la moneda de la cotización: EXACTAMENTE las que
@@ -288,13 +303,15 @@ export type CuentasMensaje = { cuentas: CuentaBancaria[]; lineas: string[]; avis
  * perfil, y `cuentasDoc` para el texto). Una línea por cuenta: «• BCP · S/ · Cta: … · CCI: …».
  * `cfg` tiene que ser la MISMA que recibe el PDF: la `usada` de `plantillaYReferenciaCuentas`
  * (lib/traslados/enviar-cotizacion-datos.ts), y la elegibilidad exige además que esas cuentas sean
- * las de «corporativo» (`cuentasFrenteACorporativo` → `cuentas_distintas`).
+ * las de «corporativo» (`cuentasFrenteACorporativo` → `cuentas_distintas`). En inglés, las líneas
+ * del PDF en inglés («• BCP · S/ · Acct: … · CCI (interbank): …»); `lineasHuella` sigue en castellano.
  */
-export function cuentasEnMensaje(cfg: PlantillaPdfCfg | null | undefined, empresa: PerfilEmpresa | null | undefined, moneda: Moneda): CuentasMensaje {
+export function cuentasEnMensaje(cfg: PlantillaPdfCfg | null | undefined, empresa: PerfilEmpresa | null | undefined, moneda: Moneda, idioma: Idioma = "es"): CuentasMensaje {
   const r = cuentasCorporativo(cfg, empresa, normalizarMoneda(moneda));
-  const doc = cuentasDoc(r.cuentas, "es");
-  const lineas = (doc?.items ?? []).map((c) => `• ${[c.banco, ...c.lineas].map(txt).filter(Boolean).join(" · ")}`);
-  return { cuentas: r.cuentas, lineas, aviso: r.aviso };
+  const lineasEn = (i: Idioma) => (cuentasDoc(r.cuentas, i)?.items ?? []).map((c) => `• ${[c.banco, ...c.lineas].map(txt).filter(Boolean).join(" · ")}`);
+  const lineasHuella = lineasEn("es");
+  const lineas = idioma === "en" ? lineasEn("en") : lineasHuella;
+  return { cuentas: r.cuentas, lineas, lineasHuella, aviso: r.aviso };
 }
 
 // ── 4. El dinero de una solicitud ────────────────────────────────────────────
@@ -780,24 +797,37 @@ export function patchCargoRecalculado(actual: FacturaCargoActual, x: { solicitud
 }
 
 // ── 8. Los textos que le manda el código al cliente (T1–T11) ─────────────────
-// Cada uno de usted Y de tú, escritos enteros. Ningún dato de la empresa: las cuentas y el correo
-// llegan de la configuración. El código los arma; el modelo nunca escribe un importe ni una cuenta.
+// Cada uno de usted Y de tú, escritos enteros, y en inglés (`estilo.idioma === "en"`) una versión
+// más, también entera. Ningún dato de la empresa: las cuentas y el correo llegan de la configuración.
+// El código los arma; el modelo nunca escribe un importe ni una cuenta.
 
-/** «2 horas», «1 hora y 30 minutos», «45 minutos». */
-export function textoPlazoMinutos(min: number): string {
+/** «2 horas», «1 hora y 30 minutos», «45 minutos». En inglés, «2 hours», «1 hour and 30 minutes». */
+export function textoPlazoMinutos(min: number, idioma: Idioma = "es"): string {
   const m = Math.max(0, Math.round(Number(min) || 0));
   const h = Math.floor(m / 60), r = m % 60;
+  if (idioma === "en") {
+    const hs = h === 1 ? "1 hour" : `${h} hours`;
+    const ms = r === 1 ? "1 minute" : `${r} minutes`;
+    if (h === 0) return ms;
+    return r ? `${hs} and ${ms}` : hs;
+  }
   const hs = h === 1 ? "1 hora" : `${h} horas`;
   const ms = r === 1 ? "1 minuto" : `${r} minutos`;
   if (h === 0) return ms;
   return r ? `${hs} y ${ms}` : hs;
 }
-const textoHoras = (h: number) => (h === 1 ? "1 hora" : `${h} horas`);
+const textoHoras = (h: number, idioma: Idioma = "es") =>
+  idioma === "en" ? (h === 1 ? "1 hour" : `${h} hours`) : h === 1 ? "1 hora" : `${h} horas`;
 
-/** « del 25/12/2026 a las 15:00» (o solo la fecha, o nada). */
-function delCuando(fecha: string | null | undefined, hora: string | null | undefined): string {
-  const f = fechaDdMmAaaa(fecha), h = horaHhMm(hora);
+/** La fecha de un mensaje al cliente: «25/12/2026», o en inglés «Dec 25, 2026» (el formato «medio»). */
+const fechaDelMensaje = (iso: string | null | undefined, idioma: Idioma = "es"): string | null =>
+  idioma === "en" ? fechaMediaIngles(fechaDdMmAaaa(iso) ? iso : null) : fechaDdMmAaaa(iso);
+
+/** « del 25/12/2026 a las 15:00» (o solo la fecha, o nada). En inglés, « on Dec 25, 2026 at 15:00». */
+function delCuando(fecha: string | null | undefined, hora: string | null | undefined, idioma: Idioma = "es"): string {
+  const f = fechaDelMensaje(fecha, idioma), h = horaHhMm(hora);
   if (!f) return "";
+  if (idioma === "en") return h ? ` on ${f} at ${h}` : ` on ${f}`;
   return h ? ` del ${f} a ${aLas(h)}` : ` del ${f}`;
 }
 
@@ -805,6 +835,11 @@ export type BloquePago = { numero: string; moneda: Moneda; pct: number; adelanto
 
 /** La primera parte de T1 (también va en T4 cuando primero se confirmó la unidad). */
 export function bloquePago(b: BloquePago, estilo: EstiloMensajes): string {
+  if (esEn(estilo)) {
+    const saldoEn = b.saldo > 0.004 ? ` The balance, ${dinero(b.saldo, b.moneda, "en")}, is paid at the start of the service, when the vehicle arrives at the pick-up point.` : "";
+    const cuentasEn = b.cuentas.map(txt).filter(Boolean).join("\n");
+    return `To book your transfer from quotation No. ${b.numero}, a deposit of ${fmtPct(b.pct)}% of the total is required: *${dinero(b.adelanto, b.moneda, "en")}*.${saldoEn}\nYou can pay into any of these accounts:\n${cuentasEn}`;
+  }
   const tu = esTu(estilo);
   // La misma idea que la política publicada («el 50 % restante se paga al iniciar el servicio»):
   // el mensaje no puede contradecir la política que la IA envía.
@@ -832,6 +867,11 @@ const lineasResumen = (c: CondicionesMensaje | null | undefined): string[] => (A
 export function bloqueCondicionesAntesDePagar(c: CondicionesMensaje | null | undefined, estilo: EstiloMensajes): string | null {
   if (!c || !esEnlaceCondiciones(c.enlace)) return null;
   const resumen = lineasResumen(c);
+  if (esEn(estilo)) {
+    return resumen.length
+      ? `Before paying, here are the key points of our terms:\n${resumen.map((l) => `• ${l}`).join("\n")}\nFull terms: ${c.enlace}`
+      : `Before paying, please review our booking, change and cancellation terms: ${c.enlace}`;
+  }
   if (resumen.length) return `Antes de pagar, lo principal de nuestras condiciones:\n${resumen.map((l) => `• ${l}`).join("\n")}\nCondiciones completas: ${c.enlace}`;
   return esTu(estilo)
     ? `Antes de pagar, revisa nuestras condiciones de reserva, cambios y cancelación: ${c.enlace}`
@@ -840,6 +880,10 @@ export function bloqueCondicionesAntesDePagar(c: CondicionesMensaje | null | und
 
 /** T1 — pedir el pago (pago primero). Con `condiciones` (y su enlace), el bloque «Antes de pagar…» en lugar de ofrecer las políticas. */
 export function mensajePedirPago(x: BloquePago & { plazoMin: number; atencion: Atencion; estilo: EstiloMensajes; condiciones?: CondicionesMensaje | null }): string {
+  if (esEn(x.estilo)) {
+    const condEn = bloqueCondicionesAntesDePagar(x.condiciones, x.estilo);
+    return `${bloquePago(x, x.estilo)}\nOnce you have paid, please send us a photo or screenshot of the payment receipt in this chat. We will verify it with the bank and confirm vehicle availability within ${textoPlazoMinutos(x.plazoMin, "en")} during our business hours, ${describirAtencion(x.atencion, "en")}. If no vehicle is available, we will refund 100% of your payment.${condEn ? `\n${condEn}` : " If you wish, I can send you our booking, change and cancellation policies."}`;
+  }
   const plazo = textoPlazoMinutos(x.plazoMin);
   const horario = describirAtencion(x.atencion);
   const cond = bloqueCondicionesAntesDePagar(x.condiciones, x.estilo);
@@ -852,6 +896,14 @@ export function mensajePedirPago(x: BloquePago & { plazoMin: number; atencion: A
 export function mensajeDisponibilidadPrimero(x: {
   fecha: string | null; hora: string | null; frasePlazo: string | null; pct: number | null; credito: boolean; estilo: EstiloMensajes;
 }): string {
+  if (esEn(x.estilo)) {
+    const cuandoEn = delCuando(x.fecha, x.hora, "en");
+    const plazoEn = x.frasePlazo || "shortly";
+    const pctEn = x.pct != null && Number.isFinite(x.pct) ? ` (${fmtPct(x.pct)}% of the total)` : "";
+    return x.credito
+      ? `One of our agents will confirm vehicle availability for your transfer${cuandoEn} and let you know ${plazoEn}. Once it is confirmed, we will write to you in this chat; your payment will be arranged under your agreed credit terms.`
+      : `Before we ask you for payment, one of our agents will confirm vehicle availability for your transfer${cuandoEn} and let you know ${plazoEn}. Once it is confirmed, we will send you the deposit amount${pctEn} and the bank accounts in this chat. Please do not make any payment yet.`;
+  }
   const cuando = delCuando(x.fecha, x.hora);
   const plazo = x.frasePlazo || "a la brevedad";
   const pct = x.pct != null && Number.isFinite(x.pct) ? ` (${fmtPct(x.pct)} % del total)` : "";
@@ -887,8 +939,9 @@ export function mensajeComprobanteRecibido(x: {
 }): string {
   const tu = esTu(x.estilo);
   const c = x.cotejo;
-  const plazo = x.frasePlazo || "a la brevedad";
   const tiene = (k: string) => c.codigos.includes(k);
+  if (esEn(x.estilo)) return comprobanteRecibidoEn(x, tiene);
+  const plazo = x.frasePlazo || "a la brevedad";
   if (tiene("ilegible") || tiene("no_es_comprobante") || tiene("sin_lectura") || (c.monto == null && !c.seguro)) {
     return tu
       ? "No pudimos leer el comprobante. ¿Nos envías una foto o captura donde se vean el monto, la fecha y el número de operación?"
@@ -911,8 +964,30 @@ export function mensajeComprobanteRecibido(x: {
     : `Recibimos su comprobante${de}. Lo verificamos con el banco y le confirmamos la disponibilidad de la unidad ${plazo}. Si no hubiera una unidad disponible, le devolvemos el 100 % de lo pagado.`;
 }
 
+/** T3 en inglés: las mismas ramas, en el mismo orden, que la de castellano. */
+function comprobanteRecibidoEn(
+  x: { cotejo: CotejoParaMensaje; esperado: number | null; moneda: Moneda; frasePlazo: string | null; unidadConfirmada?: boolean },
+  tiene: (k: string) => boolean,
+): string {
+  const c = x.cotejo;
+  const plazo = x.frasePlazo || "shortly";
+  if (tiene("ilegible") || tiene("no_es_comprobante") || tiene("sin_lectura") || (c.monto == null && !c.seguro)) {
+    return "We could not read the receipt. Could you send us a photo or screenshot showing the amount, the date and the transaction number?";
+  }
+  const duro = ["otra_moneda", "operacion_repetida", "fecha_futura"].some(tiene);
+  if (tiene("monto_menor") && !duro && c.monto != null && x.esperado != null) {
+    return `We received your receipt. It shows ${dinero(c.monto, x.moneda, "en")}, and the deposit for your booking is ${dinero(x.esperado, x.moneda, "en")}: one of our agents will check it with the bank and write to you in this chat.`;
+  }
+  const de = c.seguro && c.monto != null ? ` for ${dinero(c.monto, x.moneda, "en")}${c.operacion ? ` (transaction No. ${c.operacion})` : ""}` : "";
+  if (x.unidadConfirmada) {
+    return `We received your receipt${de}. We will verify it with the bank and send you the Booking Confirmation ${plazo}.`;
+  }
+  return `We received your receipt${de}. We will verify it with the bank and confirm vehicle availability ${plazo}. If no vehicle is available, we will refund 100% of your payment.`;
+}
+
 /** T11 — adelanto incompleto. */
 export function mensajeAdelantoIncompleto(x: { cobrado: number; falta: number; moneda: Moneda; estilo: EstiloMensajes }): string {
+  if (esEn(x.estilo)) return `We received ${dinero(x.cobrado, x.moneda, "en")}; ${dinero(x.falta, x.moneda, "en")} is still needed to complete the deposit for your booking.`;
   return esTu(x.estilo)
     ? `Recibimos ${dinero(x.cobrado, x.moneda)}; para completar el adelanto de tu reserva faltan ${dinero(x.falta, x.moneda)}.`
     : `Recibimos ${dinero(x.cobrado, x.moneda)}; para completar el adelanto de su reserva faltan ${dinero(x.falta, x.moneda)}.`;
@@ -938,6 +1013,7 @@ export function mensajeHayUnidad(x: {
   const tu = esTu(x.estilo);
   const condPago = () => { const c = bloqueCondicionesAntesDePagar(x.condiciones, x.estilo); return c ? `\n${c}` : ""; };
   const ruta = [txt(x.origen), txt(x.destino)].filter(Boolean).join(" → ");
+  if (esEn(x.estilo)) return hayUnidadEn(x, ruta, condPago);
   const base = tu
     ? `Confirmamos que hay una unidad disponible para tu traslado${delCuando(x.fecha, x.hora)}${ruta ? ` (${ruta})` : ""}.`
     : `Confirmamos que hay una unidad disponible para su traslado${delCuando(x.fecha, x.hora)}${ruta ? ` (${ruta})` : ""}.`;
@@ -972,8 +1048,45 @@ export function mensajeHayUnidad(x: {
   }
 }
 
+/** T4 en inglés: las mismas ramas que la de castellano. */
+function hayUnidadEn(
+  x: { fecha: string | null; hora: string | null; pago: PagoEnHayUnidad; moneda: Moneda; cobrado?: number; bloque?: BloquePago | null; estilo: EstiloMensajes },
+  ruta: string,
+  condPago: () => string,
+): string {
+  const base = `We confirm that a vehicle is available for your transfer${delCuando(x.fecha, x.hora, "en")}${ruta ? ` (${ruta})` : ""}.`;
+  const cobrado = Math.max(0, Number(x.cobrado) || 0);
+  switch (x.pago) {
+    case "verificado":
+      return `${base} We have received your deposit of ${dinero(cobrado, x.moneda, "en")}. We will send you the Booking Confirmation shortly.`;
+    case "reportado":
+      return `${base} Your booking will be confirmed as soon as we verify your payment with the bank; we will then send you the Booking Confirmation.`;
+    case "credito":
+      return `${base} We will send you the Booking Confirmation shortly.`;
+    case "incompleto": {
+      const b = x.bloque;
+      const falta = b ? Math.max(0, r2(b.adelanto - cobrado)) : 0;
+      const t11 = mensajeAdelantoIncompleto({ cobrado, falta, moneda: x.moneda, estilo: x.estilo });
+      const cuentas = (b?.cuentas ?? []).map(txt).filter(Boolean).join("\n");
+      return `${base} ${t11}\nYou can complete it by paying into any of these accounts:\n${cuentas}\nOnce you have paid, please send us a photo or screenshot of the receipt in this chat.${condPago()}`;
+    }
+    case "pedir":
+    default: {
+      const bloque = x.bloque ? bloquePago(x.bloque, x.estilo) : "";
+      return `${base}\n${bloque}\nOnce you have paid, please send us a photo or screenshot of the receipt in this chat; we will verify it with the bank and send you the Booking Confirmation.${condPago()}`;
+    }
+  }
+}
+
 /** T5 — no hay unidad. */
 export function mensajeSinUnidad(x: { fecha: string | null; hora: string | null; conPago: boolean; plazoH: number | null; estilo: EstiloMensajes }): string {
+  if (esEn(x.estilo)) {
+    const cuandoEn = delCuando(x.fecha, x.hora, "en");
+    const plazoEn = x.plazoH != null && x.plazoH > 0 ? ` within ${textoHoras(Math.round(x.plazoH), "en")}` : "";
+    return x.conPago
+      ? `We are sorry to inform you that we do not have a vehicle available for your transfer${cuandoEn}. We will refund 100% of your payment${plazoEn}; we will confirm in this chat once the refund has been made.`
+      : `We are sorry to inform you that we do not have a vehicle available for your transfer${cuandoEn}. Please do not make any payment for this quotation.`;
+  }
   const cuando = delCuando(x.fecha, x.hora);
   const plazo = x.plazoH != null && x.plazoH > 0 ? ` en un máximo de ${textoHoras(Math.round(x.plazoH))}` : "";
   if (esTu(x.estilo)) {
@@ -994,8 +1107,20 @@ export function horasDeAnticipacion(pedidaMs: number, inicioMs: number | null): 
 
 /** T6 — cancelación registrada (con pago o con la unidad confirmada). Sin pago: `mensajeCanceladaSinPago`. */
 export function mensajeCancelacionRegistrada(x: { fecha: string | null; hora: string | null; pedidaMs: number; inicioMs: number | null; estilo: EstiloMensajes }): string {
-  const cuando = delCuando(x.fecha, x.hora);
+  const cuando = delCuando(x.fecha, x.hora, esEn(x.estilo) ? "en" : "es");
   const dia = fechaLima(x.pedidaMs);
+  if (esEn(x.estilo)) {
+    const recibidoEn = `, received on ${fechaMediaIngles(dia, false)} at ${minutosAHhmm(minutoDelDiaLima(x.pedidaMs))} (Lima time)`;
+    let antesEn = "";
+    if (x.inicioMs != null && Number.isFinite(x.inicioMs)) {
+      const diffMs = x.inicioMs - x.pedidaMs;
+      const n = Math.floor(diffMs / 3_600_000);
+      antesEn = diffMs <= 0 ? ", after the service start time"
+        : n < 1 ? ", less than one hour before the service starts"
+        : `, ${textoHoras(n, "en")} before the service starts`;
+    }
+    return `I have registered your request to cancel the booking for your transfer${cuando}${recibidoEn}${antesEn}. One of our agents will confirm in this chat what applies under our booking and cancellation policies.`;
+  }
   const recibido = `, recibido el ${dia.slice(8, 10)}/${dia.slice(5, 7)} a ${aLas(minutosAHhmm(minutoDelDiaLima(x.pedidaMs)))}`;
   let antes = "";
   if (x.inicioMs != null && Number.isFinite(x.inicioMs)) {
@@ -1012,6 +1137,7 @@ export function mensajeCancelacionRegistrada(x: { fecha: string | null; hora: st
 
 /** T6, sin ningún pago ni comprobante: la solicitud se cierra sola. */
 export function mensajeCanceladaSinPago(x: { numero: string; estilo: EstiloMensajes }): string {
+  if (esEn(x.estilo)) return `Done, we have cancelled your booking request for quotation No. ${x.numero}. If you would like to book again, just write to us in this chat.`;
   return esTu(x.estilo)
     ? `Listo, anulamos tu pedido de reserva de la cotización N° ${x.numero}. Si deseas volver a reservar, escríbenos por este chat.`
     : `Listo, anulamos su pedido de reserva de la cotización N° ${x.numero}. Si desea volver a reservar, escríbanos por este chat.`;
@@ -1019,6 +1145,11 @@ export function mensajeCanceladaSinPago(x: { numero: string; estilo: EstiloMensa
 
 /** T7 — cancelación resuelta por el ejecutivo. `monto` es lo que se devuelve. */
 export function mensajeCancelacionResuelta(x: { monto: number; pct: number; moneda: Moneda; plazoH: number | null; estilo: EstiloMensajes }): string {
+  if (esEn(x.estilo)) {
+    if (!(x.monto > 0.004) || !(x.pct > 0)) return "Your booking has been cancelled. Under our cancellation policy, no refund applies in this case.";
+    const plazoEn = x.plazoH != null && x.plazoH > 0 ? ` within ${textoHoras(Math.round(x.plazoH), "en")}` : "";
+    return `Your booking has been cancelled. We will refund ${dinero(x.monto, x.moneda, "en")} (${fmtPct(x.pct)}% of your payment)${plazoEn}.`;
+  }
   const tu = esTu(x.estilo);
   if (!(x.monto > 0.004) || !(x.pct > 0)) {
     return tu
@@ -1042,6 +1173,13 @@ export function mensajePoliticas(x: { numero: string; lineas: readonly unknown[]
   if (!lineas.length) return null;
   const correo = correosDeTexto(x.email)[0] ?? null;
   const resumen = lineasResumen({ resumen: x.resumen });
+  if (esEn(x.estilo)) {
+    const contacto = `To cancel or change your booking, write to us in this same chat${correo ? ` or by email at ${correo}` : ""}.`;
+    if (resumen.length && esEnlaceCondiciones(x.enlace)) {
+      return `The key points of our booking, change and cancellation policies (those of your quotation No. ${x.numero}):\n${resumen.map((l) => `• ${l}`).join("\n")}\nThe full terms of your booking are here: ${x.enlace}\n${contacto}`;
+    }
+    return `These are our booking, change and cancellation policies (the same ones in your quotation No. ${x.numero}):\n${lineas.map((l) => `• ${l}`).join("\n")}\n${contacto}`;
+  }
   if (resumen.length && esEnlaceCondiciones(x.enlace)) {
     const puntos = resumen.map((l) => `• ${l}`).join("\n");
     return esTu(x.estilo)
@@ -1056,6 +1194,7 @@ export function mensajePoliticas(x: { numero: string; lineas: readonly unknown[]
 
 /** T9 — el pago no aparece en el banco. */
 export function mensajePagoNoEncontrado(estilo: EstiloMensajes): string {
+  if (esEn(estilo)) return "We have not found your payment in the bank yet. Could you confirm the date, the bank and the transaction number, or send us another screenshot of the receipt?";
   return esTu(estilo)
     ? "Todavía no encontramos tu pago en el banco. ¿Nos confirmas la fecha, el banco y el número de operación, o nos envías otra captura del comprobante?"
     : "Todavía no encontramos su pago en el banco. ¿Nos confirma la fecha, el banco y el número de operación, o nos envía otra captura del comprobante?";
@@ -1064,6 +1203,7 @@ export function mensajePagoNoEncontrado(estilo: EstiloMensajes): string {
 /** T10 — la guarda: el texto del modelo habló de dinero con una cotización de traslado en el chat. */
 export function mensajeGuardaReserva(numero: string | null | undefined, estilo: EstiloMensajes): string {
   const n = txt(numero);
+  if (esEn(estilo)) return `To book, I will send you the deposit amount and the payment accounts in this chat. Would you like to book your transfer${n ? ` for quotation No. ${n}` : ""}?`;
   return esTu(estilo)
     ? `Para reservar, te envío por este chat el monto del adelanto y las cuentas de pago. ¿Deseas reservar tu traslado${n ? ` de la cotización N° ${n}` : ""}?`
     : `Para reservar, le envío por este chat el monto del adelanto y las cuentas de pago. ¿Desea reservar su traslado${n ? ` de la cotización N° ${n}` : ""}?`;

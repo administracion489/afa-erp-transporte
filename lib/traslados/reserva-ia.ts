@@ -224,7 +224,9 @@ export type ResultadoReservaIA = {
  *  4. la GUARDA: con una cotización de traslado en el chat, un texto del modelo que habla de dinero
  *     (`mencionaDinero`) o trae un número de 6 o más dígitos (una cuenta, un teléfono) → T10;
  *  5. si no, null.
- * Lo que escribe el código va con el `estilo` del agente.
+ * Lo que escribe el código va con el `estilo` del agente (y su `idioma`: en inglés, la guarda T10 en
+ * inglés y `mencionaDinero` mirando también el vocabulario inglés, porque un cliente en inglés
+ * recibe del modelo un texto en inglés: «the total would be 150» no se le escapa).
  */
 export function textoFinalReserva(
   texto: string,
@@ -240,7 +242,7 @@ export function textoFinalReserva(
   if ((turno ?? []).some((r) => r?.derivar) && typeof x.derivacion === "string" && x.derivacion.trim()) return x.derivacion;
   if (x.cotizoEnElTurno) return null;
   const t = String(texto ?? "");
-  if (x.hayCotizacionTraslado && t.trim() && (mencionaDinero(t) || motivosLineaIA(t).includes("numero_largo"))) {
+  if (x.hayCotizacionTraslado && t.trim() && (mencionaDinero(t, x.estilo?.idioma === "en" ? "en" : "es") || motivosLineaIA(t).includes("numero_largo"))) {
     return mensajeGuardaReserva(x.numeroCotizacion, x.estilo);
   }
   return null;
@@ -248,6 +250,7 @@ export function textoFinalReserva(
 
 /** El texto con que el código pide la foto del comprobante (sin imagen nueva en el chat). */
 export function mensajePedirComprobante(estilo: EstiloMensajes): string {
+  if (estilo?.idioma === "en") return "To register your payment, please send us a photo or screenshot of the receipt in this chat, showing the amount, the date and the transaction number.";
   return estilo?.tratamiento === "tu"
     ? "Para registrar tu pago, envíanos por este chat la foto o captura del comprobante, donde se vean el monto, la fecha y el número de operación."
     : "Para registrar su pago, envíenos por este chat la foto o captura del comprobante, donde se vean el monto, la fecha y el número de operación.";
