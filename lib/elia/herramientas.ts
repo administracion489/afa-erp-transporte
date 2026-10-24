@@ -12,6 +12,7 @@ import { familiaCombustible, configCombustible, capacidadTanqueDe } from "@/lib/
 import { utilizacionParaElia } from "@/lib/flota/uso-flota";
 import { cargarSeguros } from "@/lib/seguros-datos";
 import { TIPOS_SEGURO, SCTR_SIN_PRECISAR, kpisSeguros } from "@/lib/seguros";
+import { CATEGORIAS_DOCUMENTO } from "@/lib/documentos-empresa-categorias";
 import { entradaUsoParaElia } from "@/lib/flota/uso-flota-datos";
 import type {
   BloqueUI,
@@ -487,11 +488,14 @@ const TOOLS_DEF: any[] = [
   {
     name: "consultar_documentos_empresa",
     description:
-      "Documentos corporativos (contratos, SST, capacitaciones, permisos, legales): vencidos y por vencer, por categoría y alcance (empresa, cliente, proveedor, conductor). Úsala para '¿qué contratos vencen pronto?', '¿los docs de SST están al día?'.",
+      "Documentos corporativos (contratos, SST, capacitaciones, permisos, legales, el legajo para licitaciones —ficha RUC, vigencia de poder, plan SST…— y los documentos de conductores): vencidos y por vencer, por categoría y alcance (empresa, cliente, proveedor, conductor). Úsala para '¿qué contratos vencen pronto?', '¿los docs de SST están al día?', '¿la vigencia de poder está vigente?'.",
     input_schema: {
       type: "object",
       properties: {
-        categoria: { type: "string", enum: ["contrato", "guia_remision", "sst", "capacitacion", "permiso", "legal", "factura", "interno", "otro"] },
+        // La lista ÚNICA de categorías (lib/documentos-empresa-categorias.ts): la misma que /documentos
+        // y el legajo de licitaciones. Una copia aquí dejaría a ELIA sin poder filtrar lo que esas
+        // pantallas escriben.
+        categoria: { type: "string", enum: [...CATEGORIAS_DOCUMENTO] },
         solo_alertas: { type: "boolean" },
       },
     },

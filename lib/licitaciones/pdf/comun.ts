@@ -171,8 +171,8 @@ export function fuenteDe(f: Fuentes, negrita: boolean, italica: boolean): PDFFon
   return negrita ? (italica ? f.negIta : f.neg) : (italica ? f.ita : f.reg);
 }
 
-const RE_FICHA = /\r\n|\r|\n|[ \t\f\v  ]+|[^ \t\f\v\r\n  ]+/g;
-const RE_BLANCO = /^[ \t\f\v  ]+$/;
+const RE_FICHA = /\r\n|\r|\n|[ \t\f\v\u2028\u2029]+|[^ \t\f\v\r\n\u2028\u2029]+/g;
+const RE_BLANCO = /^[ \t\f\v\u2028\u2029]+$/;
 
 /**
  * Parte un texto en renglones que caben en `ancho` (puntos) a `tam`. Respeta los saltos de línea
