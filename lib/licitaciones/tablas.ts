@@ -70,7 +70,20 @@ export function experienciasElegidas(lic: Licitacion, ctx: ContextoLicitacion): 
 }
 
 /** Filas del cuadro de experiencia (el importe va en la ÚLTIMA columna). */
-export function tablaExperiencia(lic: Licitacion, ctx: ContextoLicitacion, conContacto: boolean): TablaPlano {
+export function tablaExperiencia(lic: Licitacion, ctx: ContextoLicitacion, conContacto: boolean, compacta = false): TablaPlano {
+  if (compacta) {
+    // La de la propuesta (sección «Experiencia y clientes»): N.º | Cliente | Periodo | Ruta / Zona | Importe.
+    return {
+      columnas: ["N.º", "Cliente", ...(conContacto ? ["Datos de contacto"] : []), "Periodo", "Ruta / Zona", "Importe"],
+      filas: experienciasElegidas(lic, ctx).map((e, k) => [
+        String(k + 1), t(e.cliente_nombre),
+        ...(conContacto ? [[e.contacto_nombre, e.contacto_telefono].filter((x) => x && x.trim()).join(" – ") || RAYA] : []),
+        `${mesAnio(e.inicio)} – ${e.vigente ? "Vigente" : mesAnio(e.fin)}`, t(e.zona),
+        e.importe == null ? RAYA : fmtImporte(e.importe, e.moneda === "USD" ? "USD" : "PEN"),
+      ]),
+      pie: null,
+    };
+  }
   const columnas = ["N.º", "Cliente", ...(conContacto ? ["Datos de contacto"] : []), "Objeto", "Inicio", "Fin", "OC / Comprob.", "Fecha", "Ruta / Zona", "Importe"];
   const filas = experienciasElegidas(lic, ctx).map((e, k) => {
     const contacto = [e.contacto_nombre, e.contacto_telefono].filter((x) => x && x.trim()).join(" – ");

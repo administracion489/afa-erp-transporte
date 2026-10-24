@@ -442,6 +442,17 @@ export function revisarLicitacion(lic: Licitacion, ctx: ContextoLicitacion, arch
   const fechaReferencia = ref;
   const parcial: Revision = { hallazgos: [], evaluaciones, cuenta: { alarma: 0, aviso: 0, info: 0 }, fechaReferencia, referenciaEs: presentacion ? "presentacion" : "hoy" };
   const exr = resolverExpediente(lic, ctx, parcial);
+  // Lo que el expediente omite por no tener archivo unible y que ningún control de arriba nombró ya
+  // (un documento del legajo o una póliza con enlace de Drive, un sustento en Word).
+  const FALTANTES_PROPIOS: CodigoHallazgo[] = ["expediente_item_archivo_externo", "expediente_item_sin_archivo", "adjunto_no_unible"];
+  for (const b of exr.bloques) for (const p of b.partes) {
+    if (p.tipo !== "faltante" || !FALTANTES_PROPIOS.includes(p.codigo)) continue;
+    const suj: SujetoHallazgo = { tipo: "item_expediente", id: p.itemId, rotulo: p.titulo };
+    if (yaHay(p.codigo, suj)) continue;
+    add(p.codigo, suj, p.codigo === "expediente_item_archivo_externo"
+      ? `«${p.titulo}» es un enlace externo: se omitirá del expediente unido.`
+      : p.codigo === "adjunto_no_unible" ? `«${p.titulo}» no es PDF ni imagen: se omitirá del expediente unido.` : `«${p.titulo}» está pendiente de subir.`);
+  }
   const partes = exr.bloques.flatMap((b) => b.partes.filter((p) => p.tipo === "archivo").map((p) => ({ b, p: p as Extract<typeof p, { tipo: "archivo" }> })));
   let bytes = 0;
   const vistosUrl = new Set<string>();
