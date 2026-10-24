@@ -5,6 +5,7 @@
 
 import { useState } from "react";
 import { TOPES_DOC, type DocLicitacion, type Seccion } from "@/lib/licitaciones/tipos";
+import { anclaDe } from "../contrato-editor";
 import { Boton, TopeAlcanzado } from "./comun";
 import { useSortable } from "@dnd-kit/sortable";
 import { Asa, ContenedorOrdenable, estiloOrdenable } from "./ordenable";
@@ -52,7 +53,8 @@ export default function ListaSecciones(p: Props) {
     const activo = mismaSeleccion(sel, { tipo: "panel", panel });
     const enc = panelActivo(doc, panel);
     return (
-      <li key={panel}>
+      // Sin elegir, el renglón lleva el id del panel: un «ir a» del editor (contrato-editor.ts) cae aquí.
+      <li key={panel} id={activo ? undefined : panel} className="scroll-mt-24">
         <button type="button" onClick={() => elegir({ tipo: "panel", panel })} aria-current={activo ? "true" : undefined}
           className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm ${activo ? "bg-[#0b315f] text-white" : "text-gray-700 hover:bg-gray-100"}`}>
           <span className={`h-2 w-2 shrink-0 rounded-full ${enc ? (activo ? "bg-white" : "bg-emerald-500") : "bg-gray-300"}`} title={enc ? "Se imprime" : "No se imprime"} />
@@ -100,7 +102,8 @@ export default function ListaSecciones(p: Props) {
 function ItemSeccion({ s, numero, activo, elegir, cuenta, soloLectura }: { s: Seccion; numero: string | null; activo: boolean; elegir: () => void; cuenta: Cuenta; soloLectura: boolean }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: s.id, disabled: soloLectura });
   return (
-    <li ref={setNodeRef} style={estiloOrdenable({ transform, transition, isDragging })} className={isDragging ? "rounded-lg bg-white shadow-md" : ""}>
+    <li ref={setNodeRef} style={estiloOrdenable({ transform, transition, isDragging })} id={activo ? undefined : anclaDe("seccion", s.id)}
+      className={`scroll-mt-24 ${isDragging ? "rounded-lg bg-white shadow-md" : ""}`}>
       <div className={`flex min-h-9 items-center rounded-lg ${activo ? "bg-[#0b315f] text-white" : "text-gray-700 hover:bg-gray-100"}`}>
         {!soloLectura ? <span className={activo ? "text-white/60" : ""}><Asa atributos={attributes} escuchas={listeners} etiqueta={`la sección «${s.titulo || "sin título"}»`} /></span> : <span className="w-2" />}
         <button type="button" onClick={elegir} aria-current={activo ? "true" : undefined} className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pr-2 text-left text-sm">
