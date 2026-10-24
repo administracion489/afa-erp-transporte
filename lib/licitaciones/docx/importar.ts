@@ -1264,7 +1264,8 @@ function preliminaresDe(pre: Unidad[], imp: Importador, nuevoId: () => string): 
     for (const k of carta.usados) usados.add(k);
   }
 
-  const resto = pre.filter((_, k) => !usados.has(k));
+  // En los preliminares un salto de página no dice nada: el ERP maqueta portada, control, carta e índice solo.
+  const resto = pre.filter((u, k) => !usados.has(k) && u.k !== "salto");
   resultado.resto = imp.bloques(resto);
   return resultado;
 }

@@ -899,11 +899,11 @@ const FIRMA_DE_MIME: Record<MimeArchivo, Firma> = {
 async function mimeVerificado(file: Blob & { name?: string }, permitidos: readonly MimeArchivo[]): Promise<MimeArchivo> {
   const nombre = file.name ?? "archivo";
   const declarado: MimeArchivo | null = esMimePermitido(file.type) ? file.type : mimeDeNombre(nombre);
-  const lista = permitidos.map((m) => ETIQUETA_MIME[m]).filter((x, i, a) => a.indexOf(x) === i).join(", ");
+  const aceptados = permitidos.map((m) => ETIQUETA_MIME[m]).filter((x, i, a) => a.indexOf(x) === i).join(", ");
   if (/\.hei[cf]$/i.test(nombre) || /image\/hei[cf]/i.test(file.type)) {
     throw new ErrorLicitaciones(`«${nombre}» es una foto HEIC (iPhone), que el expediente no puede unir. Expórtala como JPG o PDF y súbela de nuevo.`);
   }
-  if (!declarado || !permitidos.includes(declarado)) throw new ErrorLicitaciones(`«${nombre}» no es de un tipo que se acepte aquí. Se aceptan: ${lista}.`);
+  if (!declarado || !permitidos.includes(declarado)) throw new ErrorLicitaciones(`«${nombre}» no es de un tipo que se acepte aquí. Se aceptan: ${aceptados}.`);
   let cab: Uint8Array;
   try { cab = new Uint8Array(await file.slice(0, 1024).arrayBuffer()); }
   catch { throw new ErrorLicitaciones(`No se pudo leer «${nombre}» desde tu equipo: vuelve a elegirlo.`); }

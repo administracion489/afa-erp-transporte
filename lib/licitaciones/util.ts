@@ -135,3 +135,12 @@ export function restarAnios(f: FechaISO, anios: number): FechaISO {
   if (md === "02-29" && !esFechaISO(`${a}-02-29`)) md = "02-28";
   return `${String(a).padStart(4, "0")}-${md}`;
 }
+
+const MESES_LARGOS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+/** "2026-09-21" → "21 de septiembre de 2026" (tabla fija, sin depender del locale). */
+export function fechaLarga(f: string | null | undefined): string {
+  const s = fechaONull(f);
+  if (!s) return RAYA;
+  const [a, m, d] = s.split("-").map(Number);
+  return `${d} de ${MESES_LARGOS[m - 1]} de ${a}`;
+}

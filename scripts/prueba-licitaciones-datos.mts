@@ -514,7 +514,7 @@ sec("8. subirArchivo: rutaNueva, upsert:false, mime del CONTENIDO, páginas con 
 {
   const db = usar(dbBase());
   const pdf = await PDFDocument.create(); pdf.addPage(); pdf.addPage();
-  const bytes = await pdf.save();
+  const bytes = new Uint8Array(await pdf.save());
   const f = new File([bytes], "Bases del concurso.pdf", { type: "application/pdf" });
   const a = await subirArchivo("bases", 12, f);
   const s = db.subidas[0];
