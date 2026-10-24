@@ -22,10 +22,11 @@ import {
   cargarContexto, buscarUnidades, buscarConductores, subirArchivo, ErrorLicitaciones, leerLegajo, subirDocumentoLegajo,
   actualizarFechasLegajo, borrarDocumentoLegajo, subirDocumentoConductor, leerDocsConductor, subirDocUnidad, leerExperiencia,
   guardarExperiencia, desactivarExperiencia, sugerenciaReservas, guardarAnioTercero, leerEmisiones, ultimaEmision,
-  SQL_LICITACIONES, firmaDeBytes, observacionesConEnlaceAnterior, leerPersonal, firmasAnteriores, type ResultadoGuardar,
+  SQL_LICITACIONES, firmaDeBytes, observacionesConEnlaceAnterior, leerPersonal, firmasAnteriores, ultimoAnalisis, type ResultadoGuardar,
 } from "../lib/licitaciones/datos";
 import { normalizarDoc, docVacio } from "../lib/licitaciones/normalizar";
 import { rutaNueva } from "../lib/licitaciones/archivos";
+import { leerAnalisisBases, LARGOS_ANALISIS, TOPES_ANALISIS } from "../lib/licitaciones/analisis";
 import type { Licitacion, FuenteContexto, TipoSeguroLic } from "../lib/licitaciones/tipos";
 import { TIPOS_SEGURO } from "../lib/seguros";
 import { CATEGORIAS_DOCUMENTO } from "../lib/documentos-empresa-categorias";
@@ -753,6 +754,97 @@ sec("14. leerPersonal · firmasAnteriores (ruta jsonb, distintas por url) · ent
   const db2 = usar(dbBase()); sinCol(db2, "documentos_vehiculo", "entidad_emisora");
   const ctx2 = await cargarContexto(await licDe(db2));
   check(ctx2.lecturas.unidades === "ok" && ctx2.unidades["p:1"]?.docs[0].entidad_emisora === null, "sin la columna: se suelta y queda null");
+}
+
+// ══ 15. Último análisis: la normalización es idempotente y la lectura no inventa nada ══
+sec("15. leerAnalisisBases es idempotente sobre su propia salida (barrido) · ultimoAnalisis");
+const ARCH = [{ id: "11111111-1111-4111-8111-111111111111", nombre: "Bases.pdf" }, { id: "22222222-2222-4222-8222-222222222222", nombre: "TDR.pdf" }];
+{
+  // Generador determinista de respuestas «sucias» del modelo.
+  let semilla = 12345;
+  const azar = () => { semilla = (semilla * 1103515245 + 12345) % 2147483648; return semilla / 2147483648; };
+  const de = <T,>(xs: T[]): T => xs[Math.floor(azar() * xs.length)];
+  const largo = (n: number, conEmoji = false) => (conEmoji ? "a".repeat(Math.max(0, n - 3)) + "😀😀😀 \n\n\n fin" : `  ${"palabra ".repeat(Math.ceil(n / 8))}\t\u0007`);
+  const textos = (max: number) => [null, "", "   ", "Texto corto", "línea 1\r\n\r\n\r\n\r\nlínea 2  \t", largo(max + 5), largo(max + 1, true), largo(max - 1), `con\u0000control\u001F`, 42];
+  const REGLAS: unknown[] = [null, "texto", { tipo: "ninguna" }, { tipo: "inventada" }, { tipo: "doc_empresa", legajo: "ficha_ruc", antiguedadMaxDias: 30 },
+    { tipo: "doc_empresa", legajo: "x" }, { tipo: "unidad_antiguedad_max", anios: 10 }, { tipo: "unidad_antiguedad_max", anios: 10, referencia: "otra" },
+    { tipo: "unidad_capacidad_min", asientos: 30, uso: `  Titular \n ${"u".repeat(200)}` }, { tipo: "conductor_licencia", categorias: ["a-iiib", "A-IIIc", "A-IIIc"] },
+    { tipo: "conductor_licencia", categorias: [] }, { tipo: "experiencia_monto_min", monto: 1234.567, moneda: "PEN" }, { tipo: "experiencia_monto_min", monto: 5 },
+    { tipo: "seguro", seguro: "deshonestidad" }, { tipo: "experiencia_anios_min", anios: 5, desde: "constitucion" }, { tipo: "unidad_doc", doc: "soat", vigenteAl: "inicio_servicio" },
+    { tipo: "conductor_doc", doc: "examen_medico", antiguedadMaxDias: 99999 }, { tipo: "unidades_titulares_min", n: 3 }, { tipo: "unidad_fotos", extra: 1 }];
+  const citas: unknown[] = [null, "x", { archivoId: "A1", pagina: 3, texto: "  cita\n\n\n\nlarga " }, { archivoId: "archivo a 2", pagina: 0 }, { archivoId: ARCH[1].id, pagina: 99999 },
+    { archivoId: "A9", pagina: 4 }, { archivoId: null, pagina: 7, texto: largo(400) }, { archivoId: "a1", pagina: "5" }];
+  const clave = (p: string) => de([undefined, `${p}-1`, `${p}-1`, `${p}-ABC`, `${p}-zz9`, "otro-1", 7]);
+  const n = (max: number) => de([0, 1, 3, max + 2]);
+  let casos = 0, distintos = 0, conAvisos = 0, avisosEnSegunda = 0;
+  for (let i = 0; i < 300; i++) {
+    const raw = {
+      concurso: {
+        cliente_nombre: de(textos(LARGOS_ANALISIS.cliente_nombre)), codigo: de(textos(LARGOS_ANALISIS.codigo)), objeto: de(textos(LARGOS_ANALISIS.objeto)),
+        atencion: de(textos(LARGOS_ANALISIS.atencion)), fecha_consultas: de([null, "", "2026-02-30", "2026-11-01", "1999-01-01", "mañana"]),
+        fecha_presentacion: de([null, "2026-11-10", "2026-13-01"]), hora_presentacion: de([null, "", "9:05", "09:30:00", "25:00", " 10:00 "]),
+        fecha_inicio_servicio: de([null, "2027-01-01"]), plazo_meses: de([null, 0, 12, 241, 12.5, "12"]),
+      },
+      requisitos: Array.from({ length: n(TOPES_ANALISIS.maxRequisitos) }, () => ({
+        clave: clave("req"), numeral: de(textos(LARGOS_ANALISIS.numeral)), texto: de([...textos(LARGOS_ANALISIS.requisito), "Requisito real"]),
+        categoria: de(["legal", "unidad", "inventada", null]), obligatorio: de([true, false, "si", undefined]), regla: de(REGLAS), cita: de(citas),
+      })),
+      consultas: Array.from({ length: n(4) }, () => ({ clave: clave("con"), numero: de(["1", null, largo(50)]), pregunta: de([...textos(LARGOS_ANALISIS.pregunta), "¿Pregunta?"]), respuesta: de(textos(LARGOS_ANALISIS.respuesta)), cita: de(citas) })),
+      estructura: Array.from({ length: n(3) }, () => ({ clave: clave("est"), titulo: de(textos(LARGOS_ANALISIS.tituloBloque)), subtitulo: de(textos(300)), referencia: de(textos(200)),
+        contenido: Array.from({ length: n(TOPES_ANALISIS.maxContenidoBloque) }, () => de(textos(LARGOS_ANALISIS.contenidoBloque))) })),
+      penalidades: Array.from({ length: n(3) }, () => ({ clave: clave("pen"), texto: de([...textos(LARGOS_ANALISIS.penalidad), "Multa"]), cita: de(citas) })),
+      criterios: Array.from({ length: n(3) }, () => ({ clave: clave("cri"), texto: de([...textos(LARGOS_ANALISIS.criterio), "Precio"]), peso: de(textos(LARGOS_ANALISIS.peso)), cita: de(citas) })),
+      advertencias: Array.from({ length: n(TOPES_ANALISIS.maxAdvertencias) }, () => de(textos(LARGOS_ANALISIS.advertencia))),
+    };
+    const r1 = leerAnalisisBases(raw, ARCH);
+    const guardado = JSON.parse(JSON.stringify(r1.resultado)); // ida y vuelta por jsonb
+    const r2 = leerAnalisisBases(guardado, ARCH);
+    casos++;
+    if (r1.avisos.length) conAvisos++;
+    if (JSON.stringify(r2.resultado) !== JSON.stringify(r1.resultado)) { distintos++; if (distintos <= 2) console.log("    distinto en el caso", i); }
+    if (r2.avisos.length) { avisosEnSegunda++; if (avisosEnSegunda <= 2) console.log("    avisos en la segunda:", JSON.stringify(r2.avisos).slice(0, 200)); }
+    // y una tercera: lo releído vuelve igual otra vez
+    if (JSON.stringify(leerAnalisisBases(JSON.parse(JSON.stringify(r2.resultado)), ARCH).resultado) !== JSON.stringify(r1.resultado)) distintos++;
+  }
+  check(distintos === 0 && avisosEnSegunda === 0, `idempotente en ${casos} respuestas sucias: ${distintos} distintas, ${avisosEnSegunda} con avisos al releer`);
+  check(conAvisos > casos / 2, `corolario: el barrido sí ensucia (${conAvisos}/${casos} primeras lecturas con avisos)`);
+}
+{
+  const db = usar(dbBase());
+  const sucio = { concurso: { cliente_nombre: "  CLIENTE   UNO  ", plazo_meses: 24 }, requisitos: [{ texto: "Unidades 2018+", categoria: "inventada", regla: { tipo: "unidad_antiguedad_max", anios: 8 }, cita: { archivoId: "A1", pagina: 4 } }] }; // A1 = el único que se envió (TDR)
+  const limpio = leerAnalisisBases(sucio, [ARCH[1]]);
+  const avisoGuardado = { codigo: "archivo_omitido", detalle: "«Bases.pdf» está protegido (cifrado o con contraseña); no se leyó. Sube una copia sin protección." };
+  const archivosFila = [{ id: ARCH[0].id, nombre: "Bases.pdf", tipo: "bases", omitido: "pdf_protegido" }, { id: ARCH[1].id, nombre: "TDR.pdf", tipo: "tdr", omitido: null }];
+  db.tabla("licitacion_analisis", ["id", "licitacion_id", "estado", "usuario_id", "modelo", "archivos", "texto_sha256", "resultado", "avisos", "error", "tokens_entrada", "tokens_salida", "costo_usd", "creado_en", "terminado_en"], [
+    { id: 1, licitacion_id: 1, estado: "listo", usuario_id: "u-yo", modelo: "m", archivos: archivosFila, resultado: { concurso: {}, requisitos: [] }, avisos: [], costo_usd: 0.1, creado_en: "2026-10-01T10:00:00Z", terminado_en: "2026-10-01T10:02:00Z" },
+    { id: 2, licitacion_id: 1, estado: "listo", usuario_id: "u-ana", modelo: "m", archivos: archivosFila, resultado: limpio.resultado, avisos: [avisoGuardado, ...limpio.avisos, { codigo: "inventado", detalle: "x" }], costo_usd: 1.2345, creado_en: "2026-10-05T10:00:00Z", terminado_en: "2026-10-05T10:03:00Z" },
+    { id: 3, licitacion_id: 1, estado: "error", usuario_id: "u-yo", modelo: "m", archivos: [], resultado: null, avisos: [], creado_en: "2026-10-06T10:00:00Z" },
+    { id: 4, licitacion_id: 1, estado: "en_curso", usuario_id: "u-yo", modelo: "m", archivos: [], resultado: null, avisos: [], creado_en: "2026-10-07T10:00:00Z" },
+    { id: 5, licitacion_id: 2, estado: "listo", usuario_id: "u-yo", modelo: "m", archivos: [], resultado: { concurso: {} }, avisos: [], creado_en: "2026-10-08T10:00:00Z" },
+    { id: 6, licitacion_id: 1, estado: "listo", usuario_id: "u-yo", modelo: "m", archivos: archivosFila, resultado: null, avisos: [], creado_en: "2026-10-09T10:00:00Z" },
+  ]);
+  db.llamadas = [];
+  const r = await ultimoAnalisis(1);
+  const q = db.llamadas.find((x) => x.tabla === "licitacion_analisis");
+  check(!!q && q.filtros.includes("licitacion_id=eq.1") && q.filtros.includes("estado=eq.listo") && q.filtros.includes("resultado=not.is.null"), "solo los listos de ESA licitación con resultado");
+  if (r.ok && r.analisis) {
+    const a = r.analisis;
+    check(a.id === 2 && a.usuario_nombre === "Ana Pérez" && a.costo_usd === 1.2345 && a.terminado_en === "2026-10-05T10:03:00Z", "el listo más reciente (no el error, el en curso, ni el de otra licitación), con quién y cuánto");
+    check(a.archivos.length === 2 && a.archivos[0].omitido === "pdf_protegido" && a.archivos[1].omitido === null && a.archivos[1].nombre === "TDR.pdf", "archivos de la fila, con lo omitido");
+    check(JSON.stringify(a.resultado) === JSON.stringify(limpio.resultado), "el resultado guardado vuelve igual (idempotente)");
+    check(a.resultado.requisitos[0].cita.archivoId === ARCH[1].id && a.resultado.requisitos[0].cita.pagina === 4, "la cita sigue apuntando al archivo LEÍDO");
+    check(a.avisos.length === 1 + limpio.avisos.length && a.avisos[0].codigo === "archivo_omitido" && !a.avisos.some((x) => x.codigo === ("inventado" as never)), "avisos: los guardados (sin códigos desconocidos), sin repetir");
+  } else check(false, `ultimoAnalisis: ${r.ok ? "sin análisis" : r.error}`);
+  // Una fila guardada con un resultado que no estaba normalizado: la relectura lo arregla y lo dice.
+  db.tablas.licitacion_analisis!.filas.find((f) => f.id === 2)!.resultado = sucio;
+  db.tablas.licitacion_analisis!.filas.find((f) => f.id === 2)!.avisos = [];
+  const r2 = await ultimoAnalisis(1);
+  check(r2.ok && !!r2.analisis && JSON.stringify(r2.analisis.resultado) === JSON.stringify(limpio.resultado) && r2.analisis.avisos.some((x) => x.codigo === "categoria_desconocida"), "un resultado sin normalizar se normaliza al leer y los avisos nuevos se agregan");
+  const r3 = await ultimoAnalisis(77);
+  check(r3.ok && r3.analisis === null, "sin análisis listo → analisis: null (no es error)");
+  db.tablas.licitacion_analisis = undefined;
+  const r4 = await ultimoAnalisis(1);
+  check(!r4.ok && r4.sinMigracion === SQL_LICITACIONES.tablas && /licitaciones-01a/.test(r4.error), "sin la tabla → nombra licitaciones-01a");
 }
 
 // ══ 13. Retoques en módulos ajenos ═════════════════════════════════════════════

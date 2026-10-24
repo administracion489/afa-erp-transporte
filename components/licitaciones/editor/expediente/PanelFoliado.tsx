@@ -3,8 +3,8 @@
 // si la propuesta va dentro del expediente completo. El ejemplo se calcula con las MISMAS funciones que
 // usa la emisión (textoFolio, mapaFolios, textoRangoFolios de lib/licitaciones/pdf/expediente): lo que se
 // ve aquí es lo que imprimirá, con hojas de ejemplo (las reales se cuentan al emitir).
-import { mapaFolios, textoFolio, textoRangoFolios } from "@/lib/licitaciones/pdf/expediente";
-import { FOLIADO_DEFECTO } from "@/lib/licitaciones/normalizar";
+import { mapaFolios, textoFolio, textoRangoFolios } from "@/lib/licitaciones/folios";
+import { FOLIADO_DEFECTO, LIMITES_TEXTO } from "@/lib/licitaciones/normalizar";
 import type { OpcionesFoliado } from "@/lib/licitaciones/tipos";
 import type { PasoProps } from "../contrato-editor";
 import { conExpediente } from "./acciones";
@@ -64,7 +64,7 @@ export default function PanelFoliado({ p }: { p: PasoProps }) {
 
       <div className="grid gap-3 sm:grid-cols-3">
         <Rotulo texto="Texto del folio" ayuda="{n} es el número. Ej.: «Folio {n}», «Fol. {n}».">
-          <CampoTexto valor={f.formato} alSalir maxLength={40} disabled={!editable || sinFolio} ariaLabel="Texto del folio"
+          <CampoTexto valor={f.formato} alSalir maxLength={LIMITES_TEXTO.formatoFolio} disabled={!editable || sinFolio} ariaLabel="Texto del folio"
             validar={(v) => (v.includes("{n}") ? null : `«${v}» no lleva {n} (el número): no se guardó y sigue «${f.formato}».`)}
             onCambio={(v) => cambiar({ formato: v })} />
         </Rotulo>

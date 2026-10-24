@@ -51,7 +51,7 @@ const T = {
   nombreArchivo: 200, maxBases: 50, maxConsultas: 300, maxContactos: 40, maxGlosario: 200,
   maxVinetas: 300, maxExperiencia: 200, maxAceptados: 1000, maxIdsAnalisis: 2000, clave: 400, nota: 1000,
   subtituloPortada: 300, pieImagen: 500, definicion: 2000, version: 40, codigoDoc: 80,
-  confidencialidad: 300, cartaLargo: 1000, referenciaBloque: 300,
+  confidencialidad: 300, cartaLargo: 1000, referenciaBloque: 300, formatoFolio: 40,
 } as const;
 /** Los topes de texto con que se NORMALIZA el doc. La pantalla los usa como maxLength: si pusiera los
  *  suyos, un texto más largo se cortaría en silencio al guardar. */
@@ -437,7 +437,7 @@ function normalizarBloqueExp(raw: unknown, id: Ids): BloqueExpediente | null {
 
 function normalizarFoliado(raw: unknown): OpcionesFoliado {
   const r = esObjeto(raw) ? raw : {};
-  const formato = textoCorto(r.formato, 40);
+  const formato = textoCorto(r.formato, T.formatoFolio);
   return {
     modo: r.modo === "descendente" || r.modo === "ninguno" ? r.modo : "ascendente",
     formato: formato.includes("{n}") ? formato : FOLIADO_DEFECTO.formato,
