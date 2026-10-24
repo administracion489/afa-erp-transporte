@@ -80,10 +80,20 @@ class Fallo extends Error {
 // ══ Texto: normalizar para comparar rótulos ══════════════════════════════════
 /** minúsculas, sin tildes, espacios colapsados, sin «:» ni «.» al final. Solo para COMPARAR. */
 export function normalizarRotulo(t: string): string {
-  return t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
-    .replace(/\s+/g, " ").trim().replace(/[\s:.\-–—]+$/g, "").trim();
+  const s = t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+  // Recorte final a mano: `/[\s:.]+$/` retrocede en tiempo cuadrático sobre una racha larga de puntos o espacios.
+  let fin = s.length;
+  while (fin > 0 && " :.-–—".includes(s[fin - 1])) fin--;
+  return s.slice(0, fin);
 }
 const colapsar = (t: string) => t.replace(/[ \t ]+/g, " ").replace(/ *\n */g, "\n").trim();
+/** [espacios del inicio, centro, espacios del final], en tiempo lineal (un regex con `(\s*)$` es cuadrático). */
+function bordes(t: string): [string, string, string] {
+  let a = 0, b = t.length;
+  while (a < b && /\s/.test(t[a])) a++;
+  while (b > a && /\s/.test(t[b - 1])) b--;
+  return [t.slice(0, a), t.slice(a, b), t.slice(b)];
+}
 
 /** Quita «3.1 », «1. », «10.4 » del inicio. Exige que quede texto y que el primer número tenga ≤ 2 cifras
  *  («2026 en cifras» no es una numeración). */
@@ -106,7 +116,7 @@ function iso(y: number, m: number, d: number): string | null {
 }
 /** Primera fecha reconocible del texto, en ISO. Día/mes/año (Perú), año-mes-día, o «17 de octubre de 2026». */
 export function fechaIsoDeTexto(t: string): string | null {
-  const s = normalizarRotulo(t);
+  const s = normalizarRotulo(t.slice(0, 200));
   let m = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
   if (m) return iso(+m[1], +m[2], +m[3]);
   m = /(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/.exec(s);
@@ -377,21 +387,16 @@ export function marcarNegrita(segs: { t: string; b: boolean }[], max?: number): 
   const limite = max ?? Infinity;
   for (const s of juntos) {
     const t = s.t.replace(/[ \t ]+/g, " ");
-    let pieza: string;
-    if (!s.b) pieza = t;
-    else {
-      const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(t)!;
-      pieza = m[2] ? `${m[1]}**${m[2]}**${m[3]}` : t;
-    }
+    const [ini, centro, fin] = bordes(t);
+    const pieza = s.b && centro ? `${ini}**${centro}**${fin}` : t;
     if (out.length + pieza.length > limite) {
       recortado = true;
       const resto = limite - out.length - 1;
       if (resto > 0) {
         if (!s.b) out += t.slice(0, resto);
         else {
-          const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(t)!;
-          const dentro = m[2].slice(0, Math.max(0, resto - m[1].length - 4));
-          out += dentro ? `${m[1]}**${dentro}**` : m[1];
+          const dentro = centro.slice(0, Math.max(0, resto - ini.length - 4));
+          out += dentro ? `${ini}**${dentro}**` : ini;
         }
       }
       out = out.trimEnd() + "…";
@@ -1276,6 +1281,10 @@ function parteXml(zip: Map<string, Uint8Array>, ruta: string, obligatoria: boole
   if (!b) {
     if (obligatoria) throw new Fallo("sin_documento", `El archivo no trae «${ruta}»: no es un documento de Word.`);
     return null;
+  }
+  // Un carácter ocupa de 1 a 4 bytes: más de 4× el tope en bytes no puede caber; se mira antes de decodificar.
+  if (b.length > TOPES_IMPORTACION.maxCaracteresXml * 4) {
+    throw new Fallo("demasiado_grande", `La parte «${ruta}» es demasiado grande para importarla.`);
   }
   const texto = textoDeBytes(b);
   if (texto.length > TOPES_IMPORTACION.maxCaracteresXml) {

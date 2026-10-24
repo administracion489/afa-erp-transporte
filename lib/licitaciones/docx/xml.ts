@@ -250,7 +250,8 @@ export function canonizarPrefijos(raiz: NodoXml, prefijoDeUri: Readonly<Record<s
       if (prefijo === "xmlns" || (esAtributo && p < 0) || prefijo === "xml") return nombre;
       const uri = ambito.get(prefijo);
       if (uri === undefined) return nombre;
-      const canon = prefijoDeUri[uri];
+      // El uri lo declara el documento: sin hasOwnProperty, xmlns:x="constructor" leería Object.prototype.
+      const canon = Object.prototype.hasOwnProperty.call(prefijoDeUri, uri) ? prefijoDeUri[uri] : undefined;
       if (canon === undefined) return nombre;
       const local = p < 0 ? nombre : nombre.slice(p + 1);
       return canon ? `${canon}:${local}` : local;

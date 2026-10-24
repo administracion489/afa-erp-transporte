@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { parsearXml, ErrorXml, canonizarPrefijos, decodificarEntidades, type NodoXml } from "../lib/licitaciones/docx/xml";
 import { leerZip, ErrorZip, TOPES_ZIP } from "../lib/licitaciones/docx/zip-lectura";
 import {
-  importarDocx, marcarNegrita, quitarNumeracion, fechaIsoDeTexto, mimeDeImagen, TOPES_IMPORTACION, SECCION_SIN_TITULOS,
+  importarDocx, marcarNegrita, quitarNumeracion, fechaIsoDeTexto, mimeDeImagen, normalizarRotulo, TOPES_IMPORTACION, SECCION_SIN_TITULOS,
 } from "../lib/licitaciones/docx/importar";
 import { TOPES_DOC, type Bloque, type ResultadoImportacion, type AvisoImportacion } from "../lib/licitaciones/tipos";
 
@@ -589,6 +589,12 @@ sec("5. Piezas puras");
   check(fechaIsoDeTexto("17/10/2026") === "2026-10-17" && fechaIsoDeTexto("2026-10-17") === "2026-10-17" && fechaIsoDeTexto("3 de octubre de 2026") === "2026-10-03"
     && fechaIsoDeTexto("1 setiembre 2026") === "2026-09-01", "fechas reconocidas");
   check(fechaIsoDeTexto("31/02/2026") === null && fechaIsoDeTexto("constructor 2026") === null && fechaIsoDeTexto("pronto") === null, "fechas imposibles → null");
+  // Texto hostil: rachas larguísimas que harían cuadrático a un regex con `(\s*)$` o `[\s:.]+$`.
+  const tl = Date.now();
+  const nl = marcarNegrita([{ t: "a" + "\n".repeat(300_000) + "b", b: true }]);
+  const pts = normalizarRotulo("x" + ".".repeat(300_000) + "y");
+  check(Date.now() - tl < 2000 && nl.texto.startsWith("**a") && pts.endsWith("y"), `rachas de 300 000 en ${Date.now() - tl} ms (lineal)`);
+  check(normalizarRotulo("  Glosario de Términos: ") === "glosario de terminos" && normalizarRotulo("Fecha.") === "fecha", "rótulos normalizados");
   check(mimeDeImagen(PNG, "x.jpeg") === "image/png" && mimeDeImagen(EMF, "x.bin") === "image/x-emf" && mimeDeImagen(Uint8Array.from([1, 2, 3]), "x.tif") === "otro", "formato por bytes");
 }
 
