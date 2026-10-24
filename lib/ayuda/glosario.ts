@@ -1036,4 +1036,66 @@ export const GLOSARIO: Record<string, Concepto> = {
       "El saldo **puede salir negativo** y eso no es un error: son vacaciones adelantadas, una deuda real que se muestra tal cual. Los días los gana el **aniversario** de ingreso: antes del primer año cumplido, el saldo ganado es 0. Si no se conoce la fecha de ingreso del empleado en su ficha, no se muestra un 0 (que se leería como “sin derecho”): se dice que falta el dato.",
     verTambien: ["jornada"],
   },
+
+  // ── Licitaciones ─────────────────────────────────────────────────────────────
+
+  tdr: {
+    clave: "tdr",
+    termino: "TDR (Términos de referencia)",
+    definicion:
+      "Es el documento en el que el cliente describe **qué servicio quiere contratar y con qué condiciones**: rutas, horarios, cantidad y tipo de unidades, requisitos de los conductores, documentos que hay que presentar, penalidades y forma de pago.\nJunto con las **bases** (las reglas del concurso: plazos, cómo se presenta, cómo se califica) es lo que la propuesta técnica tiene que responder punto por punto.",
+    ejemplo:
+      "Un TDR puede pedir «unidades de máximo 5 años de antigüedad, con SOAT y revisión técnica vigentes» y «una unidad de retén». Cada frase así se vuelve un requisito de la licitación, con su numeral, para marcarlo en la matriz de cumplimiento.",
+    ojo:
+      "Lo que diga la **absolución de consultas** manda sobre el TDR original: si una respuesta cambió un plazo o prohibió subcontratar, la propuesta tiene que seguir la respuesta, no el texto de antes.",
+    verTambien: ["absolucion_consultas", "legajo_licitacion"],
+  },
+
+  absolucion_consultas: {
+    clave: "absolucion_consultas",
+    termino: "Absolución de consultas",
+    definicion:
+      "Es el documento en el que el cliente **responde las preguntas** que hicieron los postores sobre las bases y el TDR, en la fecha de consultas del concurso.\nSus respuestas **forman parte de las bases**: aclaran, corrigen o agregan requisitos, y valen para todos los postores, no solo para quien preguntó.",
+    ejemplo:
+      "A la pregunta «¿se puede participar con unidades de terceros?», el cliente responde «No, la flota y los conductores deben ser propios». Desde ese momento, ofrecer una unidad tercerizada es un incumplimiento, aunque el TDR no lo dijera.",
+    ojo:
+      "Es fácil leer el TDR y olvidarse de la absolución, que llega después. Súbela junto con las bases: en la propuesta suele ir una tabla con cada consulta, su respuesta y **cómo la incorpora** el postor.",
+    verTambien: ["tdr"],
+  },
+
+  foliado: {
+    clave: "foliado",
+    termino: "Foliado",
+    definicion:
+      "Es **numerar cada hoja** del expediente que se presenta, para que se sepa cuántas hojas tiene y no se pueda sacar ni agregar ninguna sin que se note.\nSe imprime el número en cada hoja (por ejemplo, «Folio 001») y la relación de documentos adjuntos dice en qué folios está cada documento.",
+    ejemplo:
+      "Un expediente de 85 hojas foliado en forma **ascendente** va del folio 001 al 085. En forma **descendente**, la primera hoja lleva el 085 y la última el 001, como piden algunas bases.",
+    ojo:
+      "El número lo dicen las bases: si piden foliado descendente o en otra esquina, hay que cambiarlo antes de emitir. Y si después se agrega un documento, cambian los folios de todo lo que va detrás: se vuelve a emitir completo, no se folia a mano una hoja suelta.",
+    verTambien: ["legajo_licitacion"],
+  },
+
+  unidad_reten: {
+    clave: "unidad_reten",
+    termino: "Unidad de retén",
+    definicion:
+      "Es la unidad que se ofrece **de reserva**: no cubre una ruta fija, sino que reemplaza a una titular cuando esta tiene una falla, un mantenimiento o un control.\nMuchas bases exigen un número mínimo de unidades de retén, y suelen pedirles **los mismos requisitos** que a las titulares (antigüedad, SOAT, revisión técnica, fotos).",
+    ejemplo:
+      "Un contrato de 4 rutas puede pedir 4 unidades titulares (U1 a U4) y 1 de retén (R1). Si la R1 no tiene la revisión técnica vigente, el expediente está incompleto aunque las cuatro titulares estén perfectas.",
+    ojo:
+      "Que sea de reserva no la exime de nada. Y el conductor de **relevo** es la misma idea para las personas: cubre al titular en sus descansos o faltas.",
+    verTambien: ["tdr"],
+  },
+
+  legajo_licitacion: {
+    clave: "legajo_licitacion",
+    termino: "Legajo de la empresa",
+    definicion:
+      "Son los **documentos corporativos** que casi toda licitación pide: ficha RUC, copia literal de la partida registral, vigencia de poder del representante, DNI del representante, autorización del MTC, planes de seguridad y salud en el trabajo, entre otros.\nSe cargan una sola vez en el ERP y cada licitación toma de ahí lo que necesita.",
+    ejemplo:
+      "Si las bases piden una copia literal con **antigüedad no mayor a 30 días** y la que tienes cargada se emitió hace 45, el documento no está vencido, pero ya no sirve para esa licitación: hay que sacar una nueva en SUNARP y cargarla.",
+    ojo:
+      "Vigente no es lo mismo que «reciente»: la ficha RUC o la copia literal no tienen fecha de vencimiento, pero las bases suelen exigir que se hayan emitido hace pocos días. Por eso cada documento se guarda con su **fecha de emisión**.",
+    verTambien: ["tdr", "foliado"],
+  },
 };

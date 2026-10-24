@@ -27,7 +27,7 @@ type Permiso = {
 // y reservas (verificado con grep sobre menuGrupos, usePermiso y verificarUsuarioApi).
 const GRUPOS_MODULOS = [
   { label: "General",      icono: "🏠", modulos: ["dashboard"] },
-  { label: "Comercial",    icono: "📋", modulos: ["cotizaciones", "tarifas", "clientes"] },
+  { label: "Comercial",    icono: "📋", modulos: ["cotizaciones", "licitaciones", "tarifas", "clientes"] },
   { label: "CRM",          icono: "💬", modulos: ["crm", "radar-ia", "redes"] },
   { label: "Operaciones",  icono: "🚌", modulos: ["despachador", "programacion", "programacion-montos", "seguimiento", "monitoreo", "pasajeros", "comunicados", "multas", "incidencias"] },
   { label: "Flota",        icono: "🚗", modulos: ["vehiculos", "mantenimiento", "neumaticos", "combustible", "seguros"] },
@@ -43,7 +43,7 @@ const MODULOS = GRUPOS_MODULOS.flatMap((g) => g.modulos);
 
 const nombresModulo: Record<string, string> = {
   dashboard: "Dashboard",
-  cotizaciones: "Cotizaciones", tarifas: "Tarifas", clientes: "Clientes",
+  cotizaciones: "Cotizaciones", licitaciones: "Licitaciones", tarifas: "Tarifas", clientes: "Clientes",
   crm: "CRM", "radar-ia": "Radar IA", redes: "Redes sociales",
   despachador: "Despachador", programacion: "Programación", "programacion-montos": "Programación · ver ventas/costos/margen", seguimiento: "Seguimiento",
   monitoreo: "Monitoreo", pasajeros: "Pasajeros", comunicados: "Comunicados",

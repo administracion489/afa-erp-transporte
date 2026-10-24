@@ -895,6 +895,104 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
   },
 
   // ══════════════════════════════════════════════════════════════════════════
+  // LICITACIONES  (propuesta técnica + expediente de adjuntos)
+  // ══════════════════════════════════════════════════════════════════════════
+  {
+    clave: "licitaciones",
+    rutas: ["/licitaciones"],
+    titulo: "Licitaciones · la propuesta técnica y su expediente",
+    resumen:
+      "Aquí se arma la **propuesta técnica** de una licitación o concurso privado de transporte de personal, y el **expediente** de documentos que la acompaña. Se trabaja en **cinco pasos**: leer las bases, elegir las unidades y las personas, escribir el contenido, ordenar los adjuntos y revisar antes de emitir. Las placas, los documentos y las vigencias **salen del ERP**: no se copian a mano, así que si se corrige un documento en su pantalla, la licitación lo ve corregido.",
+    paraQueSirve: [
+      "Convertir las **bases** (o el TDR, o la lista de requisitos que manda el cliente) en una lista de requisitos que se puede marcar uno por uno.",
+      "Elegir qué **unidades** y qué **conductores** se ofrecen, de la flota propia y de la tercerizada, viendo al lado sus documentos y si estarán vigentes el día de la presentación y el día que empieza el servicio.",
+      "Escribir la propuesta desde una plantilla, desde otra licitación o importándola de **Word**, con tablas que se llenan solas (relación de unidades, matriz de cumplimiento, cuadro de experiencia…).",
+      "Juntar el **expediente**: separadores, documentos de la empresa, documentos de cada unidad, sustentos de experiencia y anexos firmados, con su **foliado**.",
+      "Ver antes de presentar qué está mal o falta (un SOAT que vence antes, una unidad más antigua de lo permitido, una marca [COMPLETAR] olvidada) y dónde se corrige.",
+      "Dejar constancia de **qué se presentó**: cada emisión queda registrada con sus archivos y no se reescribe.",
+    ],
+    conceptos: ["tdr", "absolucion_consultas", "legajo_licitacion", "unidad_reten", "foliado"],
+    faqs: [
+      {
+        pregunta: "¿Cuáles son los cinco pasos y en qué orden se hacen?",
+        respuesta:
+          "Son pestañas: puedes saltar de una a otra cuando quieras, pero este es el orden que menos trabajo da.\n\n1. **Bases y requisitos** — los datos del concurso (cliente, código, objeto, a quién va dirigida, fecha de consultas, de presentación y de inicio del servicio, plazo en meses), los archivos de las bases y la lista de requisitos.\n2. **Recursos** — las unidades, los conductores, la experiencia que se acredita, los contactos del contrato y el representante legal que firma.\n3. **Contenido** — las secciones de la propuesta técnica.\n4. **Expediente** — los bloques de adjuntos, cada uno con su portada separadora.\n5. **Revisión y emisión** — la lista de hallazgos y el botón para emitir.\n\nTodo se guarda en la licitación. Si otra persona guardó mientras tú editabas, la pantalla te lo dice y te deja **recargar** o **guardar como copia**: no se pisa el trabajo de nadie en silencio.",
+      },
+      {
+        pregunta: "¿Qué hace la IA con las bases? ¿Decide por mí?",
+        respuesta:
+          "No. **La IA propone y una persona acepta.**\n\nEn **Bases y requisitos** subes las bases, el TDR, la absolución de consultas y los anexos en PDF, y pulsas **Leer las bases con IA**. La IA lee esos PDF y te devuelve una **propuesta**: los datos del concurso, la lista de requisitos (con el numeral de las bases de donde salió cada uno), las consultas absueltas, las prohibiciones (por ejemplo, si se puede subcontratar), los documentos exigidos con su antigüedad máxima, los anexos que hay que firmar y cómo se ordena la presentación.\n\nNada de eso entra solo: **aceptas o descartas cada ítem**, y lo puedes editar después. También puedes escribir requisitos a mano.\n\nCada requisito puede llevar una **regla** que el ERP comprueba solo (por ejemplo, «unidades de máximo N años», «SOAT vigente al presentar», «licencia de categoría tal»). Sin regla, el requisito lo marca una persona: cumple, no cumple o no aplica.\n\nDos cosas a saber: leer las bases usa un servicio de IA que **cuesta**, así que hay un tope de lecturas al día; y un PDF **protegido con contraseña** no se puede leer: la pantalla lo nombra y lo deja fuera.",
+      },
+      {
+        pregunta: "¿De dónde salen los datos de las unidades y de los conductores?",
+        respuesta:
+          "De sus fichas en el ERP, en el momento en que abres la licitación: **Vehículos** y **Tercerizadas** para las unidades, **Conductores** para las personas. La licitación guarda **a quién elegiste**, no una copia de su placa o de sus fechas, así que corregir un vencimiento en su pantalla corrige también la licitación.\n\nPor cada unidad ves sus documentos (SOAT, revisión técnica, tarjeta de propiedad, TUC, habilitación) y sus fotos, con dos fechas: si está vigente **el día de la presentación** y si lo seguirá **el día que empieza el servicio**. Cada unidad lleva un código (U1, U2…) y un rol: **titular** o **retén**. Cada conductor, **titular** o **relevo**.\n\nSi a una unidad tercerizada le falta el **año**, el ERP no puede saber si cumple la antigüedad: lo dice como aviso, nunca como «cumple», y te deja escribir el año, que se guarda en la ficha de la unidad.\n\nSi un documento de la unidad está guardado solo como **enlace** (por ejemplo, de Drive), se ve pero **no se puede unir** al expediente: súbelo como PDF y queda guardado en la ficha de esa unidad para la próxima vez.",
+      },
+      {
+        pregunta: "¿Cómo empiezo el contenido? ¿Tengo que escribir todo de cero?",
+        respuesta:
+          "No. Hay tres formas de empezar:\n\n1. **Plantilla del sistema** — una estructura de propuesta completa con texto genérico. Lleva **variables** entre llaves (el nombre de la empresa, el del cliente, el del concurso…) que se llenan solas, y marcas **[COMPLETAR]** donde hace falta escribir algo propio.\n2. **Duplicar otra licitación** — copia su contenido y la estructura del expediente. Revisa bien: la revisión te avisa si el texto todavía nombra al **cliente o el código de la otra licitación**.\n3. **Importar desde Word** — los Títulos 1 pasan a secciones, los Títulos 2 a subtítulos, y las tablas, las listas y las imágenes entran como tales. Lo que no se pudo convertir (un cuadro de texto, un gráfico) se lista para que lo revises.\n\nAdemás de párrafos, viñetas, tablas, notas, imágenes y saltos de página, hay **bloques automáticos** que se arman solos con los datos del ERP: datos generales de la empresa, relación de unidades, exigido vs. ofertado, conductores, matriz de cumplimiento, absolución de consultas, cuadro de experiencia, contactos y relación de documentos adjuntos (con sus folios).\n\nEn el texto solo se interpreta la **negrita** (entre dos asteriscos), las variables y [COMPLETAR].",
+      },
+      {
+        pregunta: "¿Cómo se arma el expediente de adjuntos?",
+        respuesta:
+          "En **Expediente** el documento se divide en **bloques** (Sección I, Sección II, Anexo 3…). Cada bloque tiene su título, su subtítulo, la referencia en las bases y, si lo marcas, una **portada separadora** que se genera sola con la lista de lo que contiene.\n\nDentro de cada bloque eliges los ítems, y cada uno sale de donde ya vive:\n\n• los documentos del **legajo de la empresa** (ficha RUC, copia literal, vigencia de poder…),\n• los **documentos y fotos de cada unidad** elegida, en el orden de sus códigos,\n• los documentos de los **conductores**,\n• el **cuadro de experiencia** firmado y sus sustentos (órdenes de compra, cartas de conformidad),\n• las **pólizas** de Seguros,\n• archivos sueltos que subes a esta licitación (anexos firmados, declaraciones juradas),\n• y páginas **generadas**: la ficha técnica de cada unidad con sus fotos, la relación de unidades o de conductores.\n\nUn ítem se puede desmarcar sin borrarlo. Lo que **no se puede unir** (un PDF protegido, un enlace externo, un archivo que falta) no se pierde en silencio: se nombra en la revisión y, al emitir, en la lista de omitidos.",
+      },
+      {
+        pregunta: "¿Cómo funciona el foliado?",
+        respuesta:
+          "Al emitir, el ERP puede poner un número de folio en cada hoja del expediente. Por defecto es **ascendente**, con el texto **«Folio 001»** (tres dígitos), en la **esquina inferior derecha**, y las portadas separadoras **también se folian**. Se puede cambiar a **descendente** (el folio más alto en la primera hoja, como piden algunas bases) o **sin foliar**, y se puede cambiar el formato y la posición.\n\nLa relación de documentos adjuntos de la propuesta usa **los mismos números**: si un bloque va del folio 012 al 030, eso es lo que dice la tabla y lo que tiene impreso cada hoja.",
+      },
+      {
+        pregunta: "¿Qué significan los colores de la revisión?",
+        respuesta:
+          "Cada hallazgo dice **qué pasa**, **cómo se arregla** y **dónde se corrige**, con un enlace a ese sitio.\n\n• **Rojo (alarma)** — algo que puede descalificar la propuesta o que la contradice: un requisito obligatorio sin cumplir, un documento vencido al presentar, una unidad tercerizada cuando las bases prohíben subcontratar, una marca [COMPLETAR] o una variable sin resolver.\n• **Ámbar (aviso)** — cambia lo que se va a presentar y conviene revisarlo: un documento que vence antes de que empiece el servicio, una unidad sin año, un adjunto que no se puede unir.\n• **Gris (información)** — para que lo sepas, sin nada que corregir.\n\n**Ningún hallazgo bloquea la emisión**: la decisión es de la persona que presenta. Puedes **aceptar** un hallazgo con una nota (por ejemplo, «el cliente lo dio por válido en la absolución»). Si emites con alarmas abiertas, el ERP te las lista antes de seguir y quedan **registradas** en la emisión.\n\nSi una fuente no se pudo leer (por ejemplo, falló la carga de los documentos de las unidades), la revisión lo dice así: no afirma que el documento **falta**.",
+      },
+      {
+        pregunta: "¿Qué se descarga al emitir y qué queda guardado?",
+        respuesta:
+          "Al emitir eliges qué generar:\n\n• la **propuesta técnica** en PDF (portada, control del documento, carta de presentación, índice con las páginas reales, secciones y firma del representante),\n• **un PDF por cada bloque** del expediente, con su portada separadora y los documentos unidos (las imágenes se convierten en páginas),\n• y, si quieres, el **expediente completo foliado** en un solo PDF.\n\nSe descarga en un **ZIP** o en archivos sueltos. Todo se arma **en tu computadora**, así que conviene emitir desde una de escritorio y no desde el celular: un expediente grande puede pesar cientos de megas.\n\nCada emisión queda **registrada** con su número de versión, quién y cuándo la emitió, sus archivos, los documentos que se omitieron y los hallazgos que se aceptaron, y las copias quedan guardadas en el ERP. **Lo emitido no se reescribe**: es la constancia de lo que se presentó. Si después cambias algo, se emite una versión nueva.",
+      },
+      {
+        pregunta: "¿Qué va en la pestaña «Legajo de la empresa»?",
+        respuesta:
+          "Los documentos corporativos que casi toda licitación pide, cargados **una sola vez** para todas: ficha RUC, copia literal, vigencia de poder, DNI del representante, autorización del MTC, constancia del RNP, certificado de inscripción, brochure, plan y programa de SST, plan de emergencias, IPERC, reglamento interno de trabajo, política de alcohol y drogas, organigrama, estados financieros, certificaciones y otros.\n\nCada uno lleva su **fecha de emisión** y, si vence, su **fecha de vencimiento**. Con eso el ERP calcula su estado: **falta**, **vigente**, **por vencer**, **vencido** o **antiguo para licitar** (muchas bases piden, por ejemplo, una copia literal o una vigencia de poder emitida hace pocos días: si el documento es más viejo que lo que pide el requisito, sale en rojo aunque no haya vencido).\n\nEstos documentos son los mismos que ves en **Documentos**: se guardan en un solo sitio. Las **pólizas** de seguro no van aquí: se registran en **Seguros**, y la licitación las lee de ahí.",
+      },
+      {
+        pregunta: "¿Qué va en la pestaña «Experiencia»?",
+        respuesta:
+          "El catálogo de **contratos anteriores** que la empresa puede acreditar: cliente (del ERP o escrito), RUC, contacto (nombre, cargo, teléfono, correo), objeto del servicio, sector, zona, fecha de inicio y de fin (o «vigente»), el sustento (orden de compra, factura, carta, contrato, conformidad) con su número y fecha, el importe con su moneda y si incluye IGV, y los archivos del sustento.\n\nEn cada licitación eliges cuáles se acreditan y se arma solo el **cuadro de experiencia** (con su total y la firma del representante). Si las bases piden experiencia de los **últimos N años**, el ERP marca la que queda fuera. Los importes en soles y en dólares **no se suman entre sí**: se totalizan por separado.\n\nLa experiencia anterior al ERP no está en ninguna otra pantalla: hay que cargarla aquí una vez.",
+      },
+    ],
+    comoHacer: [
+      {
+        titulo: "Preparar una licitación de principio a fin",
+        pasos: [
+          "Antes de la primera licitación: carga los documentos de la empresa en la pestaña **Legajo de la empresa** y los contratos anteriores en **Experiencia**. Revisa que **Configuración → Perfil Empresa** tenga razón social, RUC, dirección y la autorización del MTC.",
+          "Crea la licitación y, en **Bases y requisitos**, llena los datos del concurso, sobre todo la **fecha de presentación** y la **de inicio del servicio**: con ellas se juzgan todas las vigencias.",
+          "Sube las bases y pulsa **Leer las bases con IA**. Acepta o descarta cada requisito propuesto y completa a mano lo que falte.",
+          "En **Recursos**, elige las unidades (con su código y rol) y los conductores, marca la experiencia que se acredita, escribe los contactos y el representante legal con su firma.",
+          "En **Contenido**, empieza desde la plantilla, desde otra licitación o importando el Word, y reemplaza cada [COMPLETAR].",
+          "En **Expediente**, revisa los bloques y sus ítems, sube los anexos firmados y elige el foliado.",
+          "En **Revisión y emisión**, corrige o acepta cada hallazgo y emite. Guarda el ZIP descargado: es lo que se presenta.",
+        ],
+        advertencia:
+          "Una fecha de presentación vacía hace que las vigencias se juzguen contra **hoy**, y la revisión lo avisa. Un documento vigente hoy puede estar vencido el día que se presenta la propuesta.",
+      },
+    ],
+    relacionadas: [
+      { etiqueta: "Documentos · el legajo de la empresa", href: "/documentos" },
+      { etiqueta: "Vehículos · flota propia", href: "/vehiculos" },
+      { etiqueta: "Tercerizadas · flota de terceros", href: "/tercerizadas" },
+      { etiqueta: "Docs. vehiculares · SOAT, CITV, MTC", href: "/documentos-vehiculares" },
+      { etiqueta: "Conductores", href: "/conductores" },
+      { etiqueta: "Seguros · pólizas", href: "/seguros" },
+      { etiqueta: "Perfil de la empresa", href: "/configuracion/perfil" },
+      { etiqueta: "Clientes", href: "/clientes" },
+    ],
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
   // TARIFARIO
   // ══════════════════════════════════════════════════════════════════════════
   {

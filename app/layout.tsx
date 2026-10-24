@@ -307,6 +307,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/cotizaciones",           label: "Cotizaciones",  sub: "Precios y rutas",        icon: Ic.FileText,   modulo: "cotizaciones" },
       { href: "/cotizador",              label: "Cotizador",     sub: "Estructura de costos",   icon: Ic.Calculator, modulo: "cotizaciones" },
       { href: "/cotizaciones/plantillas",label: "Plantillas PDF",sub: "Diseño de cotizaciones", icon: Ic.FileText,   modulo: "cotizaciones" },
+      { href: "/licitaciones",           label: "Licitaciones",  sub: "Propuestas técnicas",    icon: Ic.FileCheck,  modulo: "licitaciones" },
       { href: "/tarifario",    label: "Tarifas",      sub: "Tarifarios",           icon: Ic.DollarSign, modulo: "tarifas"      },
       { href: "/clientes",     label: "Clientes",     sub: "Base comercial",       icon: Ic.Users,      modulo: "clientes"     },
     ],
