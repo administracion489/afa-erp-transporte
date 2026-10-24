@@ -230,7 +230,7 @@ function MenuVariables({ valores, elegir, cerrar }: { valores: ValoresVariables 
   return (
     <>
       <div className="fixed inset-0 z-30" onClick={cerrar} aria-hidden />
-      <div className="absolute left-0 z-40 mt-1 max-h-80 w-[min(22rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1 shadow-lg" role="menu">
+      <div className="fixed inset-x-4 top-20 z-40 max-h-[70vh] overflow-y-auto sm:absolute sm:inset-x-auto sm:left-0 sm:top-auto sm:mt-1 sm:max-h-80 sm:w-[22rem] rounded-xl border border-gray-200 bg-white p-1 shadow-lg" role="menu">
         <p className="px-2 py-1.5 text-[11px] text-gray-500">Se reemplaza al imprimir. Sin valor queda visible tal cual y la revisión lo marca.</p>
         {VARIABLES.map((v) => {
           const val = valores ? valores[v.nombre] : undefined;

@@ -3,24 +3,29 @@
 // contrato: quién atiende, quién responde una emergencia). Lo que se imprime lo arma `tablaContactos`
 // (lib/licitaciones/tablas), la MISMA tabla de la propuesta y del expediente: la vista previa la usa.
 //
-// Un contacto enlazado al personal administrativo (personalId) deriva sus datos de esa ficha; esta
-// pantalla todavía no ofrece elegir a una persona del personal (no hay lector para eso en datos.ts), así
-// que los contactos nuevos se escriben. Uno enlazado (copiado de otra licitación) se respeta y se puede
-// pasar a «escrito a mano».
+// Dos modos por contacto: ELEGIDO del personal del ERP (se guarda `personalId` y los textos van vacíos
+// porque se DERIVAN de personal_administrativo) o ESCRITO a mano. Pasar de uno a otro se dice antes.
+// El `p.ctx` que llega trae el personal activo encima del contexto (PasoRecursos): una persona recién
+// elegida todavía no está en ctx.personal y, sin eso, la pantalla diría «ya no está».
 
+import { useState } from "react";
 import { contactoDe } from "@/lib/licitaciones/texto";
 import { tablaContactos } from "@/lib/licitaciones/tablas";
-import type { Contacto, Hallazgo } from "@/lib/licitaciones/tipos";
+import type { Contacto, Hallazgo, PersonaERP } from "@/lib/licitaciones/tipos";
 import { anclaDe, type PasoProps } from "../contrato-editor";
 import { Boton, CampoTexto, Etiqueta, ListaHallazgos, Nota, Seccion } from "./comun";
 import { generalesDe } from "./hallazgos";
+import SelectorPersonal, { type ResPersonal } from "./SelectorPersonal";
 
 /** Tope de contactos (el de normalizarDoc, T.maxContactos). */
 const MAX_CONTACTOS = 40;
 const ROLES_SUGERIDOS = ["Gerente de cuenta", "Coordinador de operaciones", "Supervisor del servicio", "Emergencias (24 h)", "Facturación y cobranza"];
 
-export default function SeccionContactos({ p, hallazgos }: { p: PasoProps; hallazgos: Hallazgo[] }) {
+export default function SeccionContactos({ p, hallazgos, personal, recargarPersonal }: {
+  p: PasoProps; hallazgos: Hallazgo[]; personal: ResPersonal | null; recargarPersonal: () => void;
+}) {
   const { lic, doc, ctx, soloLectura } = p;
+  const [eligiendo, setEligiendo] = useState<string | null>(null);
   const lleno = doc.contactos.length >= MAX_CONTACTOS;
   const tabla = ctx ? tablaContactos(lic, ctx) : null;
 
@@ -45,12 +50,20 @@ export default function SeccionContactos({ p, hallazgos }: { p: PasoProps; halla
     [arr[k], arr[j]] = [arr[j], arr[k]];
     return { ...d, contactos: arr };
   });
+  /** Enlaza a una persona del personal: guarda su id y vacía los textos (se derivan). */
+  const elegir = (c: Contacto, x: PersonaERP) => {
+    const escrito = c.personalId == null ? [c.nombre, c.cargo, c.telefono, c.email].filter((s) => s.trim()) : [];
+    if (escrito.length && !window.confirm(`Se reemplazan los datos escritos de este contacto (${escrito.join(" · ")}) por los de ${x.nombre}, que se leerán de su ficha del personal. ¿Seguir?`)) return;
+    cambiar(c.id, { personalId: x.id, nombre: "", cargo: "", telefono: "", email: "" });
+    setEligiendo(null);
+    p.recargarCtx();
+  };
   /** Deja de leer los datos del personal: copia lo que hoy dice su ficha y queda escrito a mano. */
   const desenlazar = (c: Contacto) => {
-    if (!ctx) return;
-    const d = contactoDe(c, ctx);
+    const d = ctx ? contactoDe(c, ctx) : null;
     if (!window.confirm("Este contacto dejará de leer sus datos del personal administrativo y quedará escrito a mano con lo que dice hoy su ficha. ¿Seguir?")) return;
-    cambiar(c.id, { personalId: null, nombre: d.nombre, cargo: d.cargo, telefono: d.telefono, email: d.email });
+    cambiar(c.id, { personalId: null, nombre: d?.nombre ?? "", cargo: d?.cargo ?? "", telefono: d?.telefono ?? "", email: d?.email ?? "" });
+    setEligiendo(null);
   };
 
   return (
@@ -69,6 +82,8 @@ export default function SeccionContactos({ p, hallazgos }: { p: PasoProps; halla
             const enlazado = c.personalId != null;
             const d = ctx ? contactoDe(c, ctx) : null;
             const personalLeido = ctx?.lecturas.personal === "ok";
+            const comprobando = enlazado && (!ctx || ((personal === null || p.ctxCargando) && !!d?.personalNoEncontrado));
+            const abierto = eligiendo === c.id && !soloLectura;
             return (
               <li key={c.id} id={anclaDe("contacto", c.id)} className="scroll-mt-24 rounded-xl border border-gray-200 p-3">
                 <div className="grid gap-2 sm:grid-cols-6">
@@ -79,12 +94,17 @@ export default function SeccionContactos({ p, hallazgos }: { p: PasoProps; halla
                   </div>
                   {enlazado ? (
                     <div className="sm:col-span-4">
-                      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Persona del personal administrativo</p>
-                      {!ctx ? <p className="text-xs text-gray-500">Comprobando…</p>
-                        : !personalLeido ? <Nota tono="ambar">No se pudo leer el personal administrativo: no se muestran sus datos (no es que falten).</Nota>
-                        : d?.personalNoEncontrado ? <Nota tono="rojo">La persona enlazada (#{c.personalId}) ya no está en el personal administrativo.</Nota>
+                      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Persona del personal del ERP</p>
+                      {comprobando ? <p className="text-xs text-gray-500">Comprobando…</p>
+                        : !personalLeido && d?.personalNoEncontrado ? <Nota tono="ambar">No se pudo leer el personal administrativo: no se muestran sus datos (no es que falten).</Nota>
+                        : d?.personalNoEncontrado ? <Nota tono="rojo">La persona enlazada (#{c.personalId}) ya no está en el personal administrativo: elige otra o escribe los datos a mano.</Nota>
                         : <p className="text-sm text-gray-800">{[d?.nombre, d?.cargo, d?.telefono, d?.email].filter(Boolean).join(" · ") || "—"}</p>}
-                      {!soloLectura && ctx && personalLeido && <button type="button" onClick={() => desenlazar(c)} className="mt-1 text-xs font-semibold text-[#0b315f] underline">Escribir a mano</button>}
+                      {!soloLectura && (
+                        <div className="mt-1 flex flex-wrap gap-3">
+                          <button type="button" onClick={() => setEligiendo(abierto ? null : c.id)} className="text-xs font-semibold text-[#0b315f] underline">{abierto ? "Cancelar" : "Cambiar persona"}</button>
+                          <button type="button" onClick={() => desenlazar(c)} className="text-xs font-semibold text-[#0b315f] underline">Escribir a mano</button>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <>
@@ -92,9 +112,20 @@ export default function SeccionContactos({ p, hallazgos }: { p: PasoProps; halla
                       <div className="sm:col-span-2"><Etiqueta texto="Cargo (no se imprime en la tabla)"><CampoTexto valor={c.cargo} onCambio={(v) => cambiar(c.id, { cargo: v })} maxLength={120} disabled={soloLectura} /></Etiqueta></div>
                       <div className="sm:col-span-3"><Etiqueta texto="Teléfono"><CampoTexto valor={c.telefono} onCambio={(v) => cambiar(c.id, { telefono: v })} maxLength={120} inputMode="tel" disabled={soloLectura} /></Etiqueta></div>
                       <div className="sm:col-span-3"><Etiqueta texto="Correo"><CampoTexto valor={c.email} onCambio={(v) => cambiar(c.id, { email: v })} maxLength={120} inputMode="email" disabled={soloLectura} /></Etiqueta></div>
+                      {!soloLectura && (
+                        <div className="sm:col-span-6">
+                          <button type="button" onClick={() => setEligiendo(abierto ? null : c.id)} className="text-xs font-semibold text-[#0b315f] underline">{abierto ? "Cancelar" : "Elegir del personal del ERP"}</button>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
+                {abierto && (
+                  <div className="mt-2">
+                    <SelectorPersonal personal={personal} recargar={recargarPersonal} actualId={c.personalId} etiqueta="Buscar persona del personal para este contacto"
+                      onElegir={(x) => { if (x.id === c.personalId) { setEligiendo(null); return; } elegir(c, x); }} />
+                  </div>
+                )}
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                   <label className="flex items-center gap-2 text-sm text-gray-700">
                     <input type="checkbox" className="h-4 w-4" disabled={soloLectura} checked={c.emergencia} onChange={(e) => cambiar(c.id, { emergencia: e.target.checked })} />

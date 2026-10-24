@@ -96,7 +96,7 @@ function PanelPortada(p: PropsPreliminar) {
           </label>
         ))}
       </div>
-      <div className="grid gap-4 lg:grid-cols-[1fr_11rem]">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_11rem]">
         <div className="min-w-0 space-y-3">
           {po.modo === "imagen" ? (
             <div className="rounded-xl border border-gray-200 p-3">
@@ -242,7 +242,7 @@ function PanelCarta(p: PropsPreliminar) {
     <Tarjeta titulo="Carta de presentación" id={p.domId} resaltado={p.resaltado} subtitulo="Va después del control del documento, firmada por el representante legal.">
       <Interruptor marcado={k.activa} disabled={soloLectura} cambiar={(activa) => cambiar({ activa })}>Incluir la carta de presentación</Interruptor>
       <div className={`mt-3 space-y-3 ${k.activa ? "" : "opacity-60"}`}>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Campo etiqueta="Lugar y fecha" ayuda={fechaDefecto ? `Vacío = «${fechaDefecto}».` : "Vacío = la fecha de presentación en letras."}>
             <CampoTexto valor={k.lugarFecha} max={LIM.cartaCorto} valores={valores} soloLectura={ro} aviso={aviso} negrita={false} placeholder={fechaDefecto ? `Lima, ${fechaDefecto}` : "Lima, …"} cambiar={(lugarFecha) => cambiar({ lugarFecha })} />
           </Campo>
@@ -261,7 +261,7 @@ function PanelCarta(p: PropsPreliminar) {
           <CampoTexto multilinea filas={10} valor={k.cuerpo} max={LIM.texto} valores={valores} soloLectura={ro} aviso={aviso}
             placeholder="De nuestra consideración: {razon_social}, con RUC N° {ruc}, representada por…" cambiar={(cuerpo) => cambiar({ cuerpo })} />
         </Campo>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Campo etiqueta="Despedida">
             <input value={k.despedida} readOnly={ro} maxLength={LIM.cartaCorto} placeholder="Atentamente," onChange={(e) => cambiar({ despedida: e.target.value })} className={claseInput} />
           </Campo>
@@ -311,7 +311,7 @@ function PanelGlosario(p: PropsPreliminar) {
       {g.activo && !g.entradas.length ? <p className="mt-2 text-xs text-amber-800">Activo y sin términos: no se imprime hasta que agregues alguno.</p> : null}
       <div className={`mt-3 space-y-2 ${g.activo ? "" : "opacity-60"}`}>
         {g.entradas.map((e, i) => (
-          <div key={e.id} className="grid gap-2 rounded-xl border border-gray-200 p-2 sm:grid-cols-[12rem_1fr_auto]">
+          <div key={e.id} className="grid grid-cols-1 gap-2 rounded-xl border border-gray-200 p-2 sm:grid-cols-[12rem_1fr_auto]">
             <input value={e.termino} readOnly={soloLectura} maxLength={LIM.termino} placeholder="Término o sigla" aria-label={`Término ${i + 1}`}
               onChange={(x) => cambiarEntrada(e.id, { termino: x.target.value })} className={`${claseInput} font-semibold`} />
             <CampoTexto multilinea filas={2} valor={e.definicion} max={LIM.definicion} valores={valores} soloLectura={soloLectura} aviso={aviso} marcas={false} vista={false}

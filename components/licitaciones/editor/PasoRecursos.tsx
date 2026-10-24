@@ -16,7 +16,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { PasoProps } from "./contrato-editor";
-import { buscarConductores, buscarUnidades, leerExperiencia } from "@/lib/licitaciones/datos";
+import { buscarConductores, buscarUnidades, leerExperiencia, leerPersonal } from "@/lib/licitaciones/datos";
+import type { ContextoLicitacion } from "@/lib/licitaciones/tipos";
 import type { RefsRecurso } from "@/lib/licitaciones/recursos";
 import { fechaRef } from "@/lib/licitaciones/texto";
 import { fechaDMY, fechaONull } from "@/lib/licitaciones/util";
@@ -27,6 +28,7 @@ import SeccionConductores from "./recursos/SeccionConductores";
 import SeccionExperiencia from "./recursos/SeccionExperiencia";
 import SeccionContactos from "./recursos/SeccionContactos";
 import SeccionRepresentante from "./recursos/SeccionRepresentante";
+import type { ResPersonal } from "./recursos/SelectorPersonal";
 
 type ResU = Awaited<ReturnType<typeof buscarUnidades>>;
 type ResC = Awaited<ReturnType<typeof buscarConductores>>;
@@ -39,6 +41,8 @@ export default function PasoRecursos(p: PasoProps) {
   const [opU, setOpU] = useState<ResU | null>(null);
   const [opC, setOpC] = useState<ResC | null>(null);
   const [cat, setCat] = useState<ResE | null>(null);
+  const [pers, setPers] = useState<ResPersonal | null>(null);
+  const [vezP, setVezP] = useState(0);
   const [vezU, setVezU] = useState(0);
   const [vezC, setVezC] = useState(0);
   const [vezE, setVezE] = useState(0);
@@ -58,6 +62,21 @@ export default function PasoRecursos(p: PasoProps) {
     leerExperiencia({ incluirInactivas: true }).then((r) => { if (vivo) setCat(r); }, (e) => { if (vivo) setCat(fallo(e, "el catálogo de experiencia")); });
     return () => { vivo = false; };
   }, [vezE]);
+  useEffect(() => {
+    let vivo = true;
+    leerPersonal().then((r) => { if (vivo) setPers(r); }, (e) => { if (vivo) setPers(fallo(e, "el personal")); });
+    return () => { vivo = false; };
+  }, [vezP]);
+  const recargarPersonal = () => { setPers(null); setVezP((n) => n + 1); };
+
+  /**
+   * El contexto con el personal activo encima, para Contactos y Representante: una persona recién elegida
+   * todavía no está en ctx.personal (el editor relee con antirrebote) y la pantalla diría «ya no está».
+   */
+  const ctxPersonal = useMemo<ContextoLicitacion | null>(() => {
+    if (!ctx || !pers?.ok) return ctx;
+    return { ...ctx, personal: { ...Object.fromEntries(pers.filas.map((x) => [x.id, x])), ...ctx.personal } };
+  }, [ctx, pers]);
 
   const refs = useMemo<RefsRecurso | null>(
     () => (ctx ? { presentacion: fechaRef(lic, ctx), inicio: fechaONull(lic.fecha_inicio_servicio) } : null),
@@ -88,7 +107,11 @@ export default function PasoRecursos(p: PasoProps) {
     return s;
   }, [doc.unidades, doc.conductores, doc.experiencia.ids, ctx, p.ctxCargando, opU, opC, cat]);
 
-  const hallazgos = useMemo(() => hallazgosDelPaso(revision?.hallazgos, pendientes), [revision, pendientes]);
+  // El representante recién elegido del personal aún no está en el contexto: su «ya no está» es desfase.
+  const repId = doc.representante.personalId;
+  const repPendiente = repId != null && !!ctx && !ctx.personal[repId] && (p.ctxCargando || !pers || (pers.ok && pers.filas.some((x) => x.id === repId)));
+  const hallazgos = useMemo(() => hallazgosDelPaso(revision?.hallazgos, pendientes)
+    .filter((h) => !(repPendiente && h.codigo === "representante_incompleto")), [revision, pendientes, repPendiente]);
   const total = cuenta(hallazgos);
   const prohibe = doc.requisitos.some((q) => q.regla?.tipo === "prohibe_subcontratacion");
   const presentacion = fechaONull(lic.fecha_presentacion);
@@ -156,8 +179,8 @@ export default function PasoRecursos(p: PasoProps) {
       <SeccionConductores p={p} opciones={opC} recargarOpciones={() => { setOpC(null); setVezC((n) => n + 1); }}
         refs={refs} hallazgos={hallazgos} pendiente={(clave) => pendientes.has(`conductor:${clave}`)} prohibe={prohibe} />
       <SeccionExperiencia p={p} catalogo={cat} recargarCatalogo={() => { setCat(null); setVezE((n) => n + 1); p.recargarCtx(); }} hallazgos={hallazgos} />
-      <SeccionContactos p={p} hallazgos={hallazgos} />
-      <SeccionRepresentante p={p} hallazgos={hallazgos} />
+      <SeccionContactos p={{ ...p, ctx: ctxPersonal }} hallazgos={hallazgos} personal={pers} recargarPersonal={recargarPersonal} />
+      <SeccionRepresentante p={{ ...p, ctx: ctxPersonal }} hallazgos={hallazgos} personal={pers} recargarPersonal={recargarPersonal} />
     </div>
   );
 }

@@ -17,6 +17,7 @@ import { useCallback, useDeferredValue, useEffect, useEffectEvent, useMemo, useS
 import { subirArchivo } from "@/lib/licitaciones/datos";
 import { resolverDocumento } from "@/lib/licitaciones/documento";
 import { docDesdePlantilla } from "@/lib/licitaciones/plantilla-base";
+import { bytesDoc } from "@/lib/licitaciones/normalizar";
 import { valoresVariables } from "@/lib/licitaciones/texto";
 import { TOPES_DOC, type DocLicitacion, type Hallazgo, type Seccion } from "@/lib/licitaciones/tipos";
 import { anclaDe, type PasoProps } from "./contrato-editor";
@@ -97,6 +98,7 @@ export default function PasoContenido(p: PasoProps & { ancla?: string | null }) 
 
   const valores = useMemo(() => (ctx ? valoresVariables(lic, ctx) : null), [lic, ctx]);
   const numeros = useMemo(() => numerosDeSecciones(doc.secciones), [doc.secciones]);
+  const peso = useMemo(() => bytesDoc(doc), [doc]);
 
   // ── Hallazgos de este paso, indexados por dónde se corrigen
   const hallazgos = useMemo(() => (revision ? revision.hallazgos.filter((h) => "paso" in h.donde && h.donde.paso === "contenido") : null), [revision]);
@@ -126,13 +128,15 @@ export default function PasoContenido(p: PasoProps & { ancla?: string | null }) 
   const seccionSel = sel.tipo === "seccion" ? doc.secciones.find((s) => s.id === sel.id) ?? null : null;
   const selId = seccionSel?.id ?? null;
   const hayAuto = !!seccionSel?.bloques.some((b) => b.tipo === "auto");
+  const resolver = hayAuto && !!seccionSel?.activa;
   const licDiferida = useDeferredValue(lic);
   const docResuelto = useMemo<{ ok: true; d: ReturnType<typeof resolverDocumento> } | { ok: false; detalle: string } | null>(() => {
-    if (!hayAuto || !ctx || !revision) return null;
+    if (!resolver || !ctx || !revision) return null;
     try { return { ok: true, d: resolverDocumento(licDiferida, ctx, revision) }; }
     catch (e) { return { ok: false, detalle: e instanceof Error ? e.message : String(e) }; }
-  }, [hayAuto, ctx, revision, licDiferida]);
+  }, [resolver, ctx, revision, licDiferida]);
   const vistaSeccion: VistaAuto | null = !hayAuto || !selId ? null
+    : !seccionSel?.activa ? { estado: "inactiva" }
     : !docResuelto ? { estado: "cargando" }
     : !docResuelto.ok ? { estado: "error", detalle: docResuelto.detalle }
     : { estado: "ok", bloques: docResuelto.d.secciones.find((x) => x.id === selId)?.bloques ?? [] };
@@ -243,12 +247,18 @@ export default function PasoContenido(p: PasoProps & { ancla?: string | null }) 
         </div>
       </div>
       {!puedeVer ? <p className="-mt-2 text-right text-xs text-gray-500">La vista previa se habilita cuando terminen de leerse los datos del ERP…</p> : null}
+      {peso > TOPES_DOC.maxBytesDoc * 0.8 ? (
+        <p className={`rounded-lg px-3 py-2 text-xs ${peso > TOPES_DOC.maxBytesDoc ? "bg-red-50 text-red-800" : "bg-amber-50 text-amber-900"}`}>
+          El documento pesa {(peso / 1e6).toFixed(1)} MB de los {(TOPES_DOC.maxBytesDoc / 1e6).toFixed(0)} MB que admite
+          {peso > TOPES_DOC.maxBytesDoc ? ": así no se puede guardar. Quita secciones o tablas largas que no se usen." : ". Las tablas largas y el texto pegado son lo que más pesa (las imágenes no: viajan aparte)."}
+        </p>
+      ) : null}
 
       <Hallazgos hallazgos={hallazgos} ir={ir} irRevision={() => irA("revision", "hallazgos")} />
 
       {!doc.secciones.length && !soloLectura ? <Comienzo plantilla={usarPlantilla} importar={() => setImportando(true)} blanco={empezarEnBlanco} /> : null}
 
-      <div className="grid min-w-0 gap-4 md:grid-cols-[15rem_minmax(0,1fr)] lg:grid-cols-[17rem_minmax(0,1fr)]">
+      <div className="grid grid-cols-1 min-w-0 gap-4 md:grid-cols-[15rem_minmax(0,1fr)] lg:grid-cols-[17rem_minmax(0,1fr)]">
         <div id="secciones" className="min-w-0 scroll-mt-24">
           <ListaSecciones doc={doc} sel={sel} elegir={setSel} numeros={numeros} soloLectura={soloLectura}
             cuentaPanel={(x) => indice.cuentaPanel.get(x) ?? CERO} cuentaSeccion={(id) => indice.cuentaSeccion.get(id) ?? CERO}

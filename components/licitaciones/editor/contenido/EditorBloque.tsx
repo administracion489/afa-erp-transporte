@@ -15,7 +15,8 @@ import { useSortable } from "@dnd-kit/sortable";
 import { Asa, estiloOrdenable } from "./ordenable";
 import { INFO_AUTO, INFO_BLOQUE, LIM, ORDEN_TIPOS } from "./bloques";
 
-export type VistaAuto = { estado: "cargando" } | { estado: "error"; detalle: string } | { estado: "ok"; bloques: BloqueResuelto[] };
+/** La vista previa de las tablas automáticas de una sección (resolverDocumento). «inactiva»: la sección no se imprime. */
+export type VistaAuto = { estado: "cargando" } | { estado: "inactiva" } | { estado: "error"; detalle: string } | { estado: "ok"; bloques: BloqueResuelto[] };
 type Aviso = (texto: string, tono?: "ok" | "error" | "aviso") => void;
 
 const COLOR_GRAVEDAD: Record<Hallazgo["gravedad"], string> = {
@@ -31,7 +32,7 @@ export function MenuTipos({ elegir, cerrar, alinear = "izq" }: { elegir: (t: Tip
   return (
     <>
       <div className="fixed inset-0 z-30" onClick={cerrar} aria-hidden />
-      <div role="menu" className={`absolute z-40 mt-1 max-h-[70vh] w-[min(22rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1 shadow-lg ${alinear === "der" ? "right-0" : "left-0"}`}>
+      <div role="menu" className={`fixed inset-x-4 top-20 z-40 max-h-[70vh] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1 shadow-lg sm:absolute sm:inset-x-auto sm:top-auto sm:mt-1 sm:w-[22rem] ${alinear === "der" ? "sm:right-0" : "sm:left-0"}`}>
         {ORDEN_TIPOS.filter((t) => t !== "auto").map((t) => (
           <button key={t} type="button" role="menuitem" onClick={() => elegir(t)} className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-gray-50">
             <span className="w-5 shrink-0 text-center text-gray-500">{INFO_BLOQUE[t].icono}</span>
@@ -97,7 +98,7 @@ export default function EditorBloque(p: PropsBloque) {
         {abiertos.length ? (
           <span className={`shrink-0 rounded-full border px-1.5 text-[10px] font-semibold ${COLOR_GRAVEDAD[abiertos.some((h) => h.gravedad === "alarma") ? "alarma" : abiertos.some((h) => h.gravedad === "aviso") ? "aviso" : "info"]}`}
             title={abiertos.map((h) => h.texto).join("\n")}>
-            {abiertos.length} {abiertos.length === 1 ? "observación" : "observaciones"}
+            ⚠ {abiertos.length}<span className="hidden sm:inline"> {abiertos.length === 1 ? "observación" : "observaciones"}</span>
           </span>
         ) : null}
         {!soloLectura ? (
@@ -260,7 +261,7 @@ function EditorImagen(p: PropsBloque) {
         </div>
       )}
       {error ? <p className="text-xs text-red-700">{error}</p> : null}
-      <div className="grid gap-3 sm:grid-cols-[1fr_14rem]">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_14rem]">
         <Campo etiqueta="Pie de la imagen (opcional)">
           <input value={b.pie ?? ""} readOnly={soloLectura} maxLength={LIM.pieImagen} placeholder="Figura 1. …"
             onChange={(e) => cambiar((x) => (x.tipo === "imagen" ? { ...x, pie: e.target.value.trim() ? e.target.value : null } : x))} className={claseInput} />
@@ -297,7 +298,7 @@ function EditorAuto(p: PropsBloque) {
 
   return (
     <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Campo etiqueta="Qué tabla arma">
           <select value={b.auto} disabled={soloLectura} onChange={(e) => cambiarTipo(e.target.value as TipoAuto)} className={`${claseInput} h-9`}>
             {TIPOS_AUTO.map((a) => <option key={a} value={a}>{INFO_AUTO[a].nombre}</option>)}
@@ -326,8 +327,10 @@ function EditorAuto(p: PropsBloque) {
           <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">Comprobando los datos de los que sale la tabla…</p>
         ) : vistaAuto.estado === "error" ? (
           <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">No se pudo armar la vista previa: {vistaAuto.detalle}</p>
-        ) : !tabla ? (
+        ) : vistaAuto.estado === "inactiva" ? (
           <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">La sección está desactivada: la tabla no se arma ni se imprime.</p>
+        ) : !tabla ? (
+          <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">Armando la vista previa…</p>
         ) : (
           <TablaVista tabla={tabla} intro={intro?.texto ?? null} valores={valores} extra={nExtra} />
         )}
@@ -345,7 +348,7 @@ function EditorAuto(p: PropsBloque) {
                 tabla={{ columnas: tabla.columnas, filas: b.filasExtra, anchos: null }}
                 cambiar={(t) => cambiar((x) => (x.tipo === "auto" ? { ...x, filasExtra: t.filas } : x))} />
             ) : (
-              <p className="text-xs text-gray-500">Las columnas las pone la tabla automática: espera a la vista previa (y activa la sección) para escribir filas.</p>
+              <p className="text-xs text-gray-500">{vistaAuto?.estado === "inactiva" ? "Activa la sección para escribir filas: las columnas las pone la tabla automática." : "Las columnas las pone la tabla automática: espera a la vista previa para escribir filas."}</p>
             )}
             <p className="mt-1 text-[11px] text-gray-500">Para un dato que el ERP no tiene (p. ej. una unidad de otro proveedor). Van después de las filas que arma el ERP.</p>
           </div>

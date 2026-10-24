@@ -388,9 +388,9 @@ export default function EditorLicitacion({ id }: { id: number }) {
                       type="button"
                       onClick={() => { cambiarPaso(p); window.scrollTo({ top: 0 }); }}
                       aria-current={activo ? "page" : undefined}
-                      className={`rounded-lg px-1 py-1.5 text-[11px] md:text-xs font-bold border transition-colors min-w-0 ${activo ? "bg-[#0b315f] text-white border-[#0b315f]" : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"}`}
+                      className={`rounded-lg px-0.5 sm:px-1 py-1.5 font-bold border transition-colors min-w-0 ${activo ? "bg-[#0b315f] text-white border-[#0b315f]" : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"}`}
                     >
-                      <span className="block truncate"><span className="opacity-70">{e.n}</span> <span className="hidden sm:inline">{e.largo}</span><span className="sm:hidden">{e.corto}</span></span>
+                      <span className="block truncate text-[10px] sm:text-[11px] md:text-xs"><span className="opacity-70 hidden sm:inline">{e.n} </span><span className="hidden md:inline">{e.largo}</span><span className="md:hidden">{e.corto}</span></span>
                       <span className="flex justify-center gap-1 mt-0.5 min-h-[14px]">
                         {rev.revision == null
                           ? <span className={`text-[9px] font-normal ${activo ? "text-white/70" : "text-gray-400"}`}>{ctxCargando ? "…" : ""}</span>

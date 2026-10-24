@@ -34,7 +34,7 @@ export default function ModalDocUnidad({ u, doc, resumen, onCerrar, onListo }: {
   const [numero, setNumero] = useState(reemplazable ? fila?.numero ?? "" : "");
   const [emision, setEmision] = useState(reemplazable ? fila?.fecha_emision ?? "" : "");
   const [vencimiento, setVencimiento] = useState(reemplazable ? fila?.fecha_vencimiento ?? "" : "");
-  const [entidad, setEntidad] = useState("");
+  const [entidad, setEntidad] = useState(reemplazable ? fila?.entidad_emisora ?? "" : "");
   const [archivo, setArchivo] = useState<File | null>(null);
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,8 +48,8 @@ export default function ModalDocUnidad({ u, doc, resumen, onCerrar, onListo }: {
 
   const cambiarModo = (m: "reemplazar" | "nuevo") => {
     setModo(m);
-    if (m === "reemplazar" && fila) { setNumero(fila.numero ?? ""); setEmision(fila.fecha_emision ?? ""); setVencimiento(fila.fecha_vencimiento ?? ""); }
-    else { setNumero(""); setEmision(""); setVencimiento(""); }
+    if (m === "reemplazar" && fila) { setNumero(fila.numero ?? ""); setEmision(fila.fecha_emision ?? ""); setVencimiento(fila.fecha_vencimiento ?? ""); setEntidad(fila.entidad_emisora ?? ""); }
+    else { setNumero(""); setEmision(""); setVencimiento(""); setEntidad(""); }
   };
 
   const enviar = async () => {
@@ -93,7 +93,7 @@ export default function ModalDocUnidad({ u, doc, resumen, onCerrar, onListo }: {
         <p className="font-semibold text-gray-500">Hoy en la ficha</p>
         {fila ? (
           <div className="mt-1 space-y-1">
-            <p>{fila.tipo || ETIQUETA_DOC_UNIDAD[doc]}{fila.numero ? ` · N° ${fila.numero}` : " · sin número"}{resumen.estado === "no_vence" ? " · no vence" : fila.fecha_vencimiento ? ` · vence ${dmy(fila.fecha_vencimiento)}` : " · sin vencimiento"}</p>
+            <p>{fila.tipo || ETIQUETA_DOC_UNIDAD[doc]}{fila.numero ? ` · N° ${fila.numero}` : " · sin número"}{fila.entidad_emisora ? ` · ${fila.entidad_emisora}` : ""}{resumen.estado === "no_vence" ? " · no vence" : fila.fecha_vencimiento ? ` · vence ${dmy(fila.fecha_vencimiento)}` : " · sin vencimiento"}</p>
             <div className="flex flex-wrap items-center gap-2"><ChipVigencia estado={resumen.estado} dias={resumen.dias} /><ArchivoOrigen url={fila.archivo_url} origen={resumen.origen} /></div>
             {fila.deEmpresa && <p className="text-amber-800">Es un documento de la empresa {u.empresa?.razon_social ?? "tercerizada"}, no de la placa: el PDF se registrará como documento de {u.placa}.</p>}
           </div>
@@ -125,7 +125,7 @@ export default function ModalDocUnidad({ u, doc, resumen, onCerrar, onListo }: {
         <Etiqueta texto="Número">
           <input className={CLASE} value={numero} maxLength={80} onChange={(e) => setNumero(e.target.value)} />
         </Etiqueta>
-        <Etiqueta texto="Entidad emisora (opcional)" ayuda={modo === "reemplazar" ? "Vacío = la que ya tiene." : undefined}>
+        <Etiqueta texto="Entidad emisora (opcional)" ayuda={modo === "reemplazar" ? "Vacío = conserva la de la ficha." : undefined}>
           <input className={CLASE} value={entidad} maxLength={200} onChange={(e) => setEntidad(e.target.value)} />
         </Etiqueta>
         <Etiqueta texto="Fecha de emisión">

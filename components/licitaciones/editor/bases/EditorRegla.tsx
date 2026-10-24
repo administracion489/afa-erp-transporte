@@ -34,7 +34,7 @@ const VACIO: Borrador = {
 /** Rangos: los MISMOS de normalizarRegla (lib/licitaciones/normalizar.ts). */
 const R = { antig: [1, 3650], uAnios: [0, 60], asientos: [1, 120], n: [1, 500], eAnios: [1, 100], monto: [0.01, 1e12] } as const;
 
-function borradorDe(r: Regla | null): Borrador {
+export function borradorDe(r: Regla | null): Borrador {
   if (!r) return VACIO;
   const b: Borrador = { ...VACIO, tipo: r.tipo };
   switch (r.tipo) {

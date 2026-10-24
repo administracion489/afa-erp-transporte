@@ -12,7 +12,7 @@ export default function Comienzo({ plantilla, importar, blanco }: { plantilla: (
     <section className="rounded-2xl border border-[#0b315f]/20 bg-[#0b315f]/[0.03] p-4 sm:p-5" aria-label="Cómo empezar la propuesta">
       <h3 className="text-base font-semibold text-[#0b315f]">La propuesta técnica todavía no tiene secciones</h3>
       <p className="mt-0.5 text-xs text-gray-600">Elige cómo empezar. Todo se puede cambiar después; para copiar otra licitación, usa «Duplicar» en la lista de licitaciones.</p>
-      <div className="mt-3 grid gap-3 md:grid-cols-3">
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
         {opciones.map((o) => (
           <button key={o.titulo} type="button" onClick={o.accion}
             className={`flex min-h-28 flex-col items-start gap-1 rounded-xl border bg-white p-4 text-left transition hover:shadow-md ${o.primario ? "border-[#0b315f]" : "border-gray-200"}`}>
