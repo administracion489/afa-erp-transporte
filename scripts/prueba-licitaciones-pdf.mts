@@ -22,12 +22,12 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { PDFDocument, StandardFonts } from "pdf-lib";
+import { PDFDict, PDFDocument, PDFName } from "pdf-lib";
 import sharp from "sharp";
 import { dibujarPropuesta, type EntradaPropuesta } from "../lib/licitaciones/pdf/propuesta";
 import {
   GEOMETRIA_LIC, anchoTexto, cargarFuentes, colorDe, incrustarImagen, recortarConElipsis, renglones,
-  textoDeRenglon, textoPie, trozosNegrita, type ImagenPdf,
+  sinMarcas, textoDeRenglon, textoPie, trozosNegrita, type ImagenPdf,
 } from "../lib/licitaciones/pdf/comun";
 import { aWinAnsi } from "../lib/pdf-winansi";
 import type { BloqueResuelto, DocumentoResuelto, SeccionResuelta, TrazaLic, EntradaIndice } from "../lib/licitaciones/tipos";
@@ -81,6 +81,7 @@ sec("1. Texto: negrita, saltos, emojis, recortes");
   check(rs.length === 1 && textoDeRenglon(rs[0]) === "Seguridad >= 30 -> ok fin", `emojis y flechas: «${rs.map(textoDeRenglon).join("|")}»`);
   const rb = renglones("normal **negrita** normal", F, 10, 400);
   check(rb[0].piezas.some((p) => p.texto === "negrita" && p.fuente === F.neg) && rb[0].piezas[0].fuente === F.reg, "la negrita usa Helvetica-Bold");
+  check(textoDeRenglon(renglones("aceptar las bases ✓.", F, 10, 400)[0]) === "aceptar las bases.", "la puntuación que deja un emoji quitado se pega a la palabra");
   const rl = renglones("a\nb\n\nc", F, 10, 400);
   check(rl.length === 4 && rl[2].piezas.length === 0 && rl.every((r) => r.fin), "saltos de línea y renglón vacío");
   const largo = "x".repeat(400) + " palabra";
@@ -189,7 +190,7 @@ const limpio = (s: string) => aWinAnsi(s, JUEGO);
 const sinPunto = (n: string | null) => String(n ?? "").trim().replace(/\.+$/, "");
 const etiqueta = (e: { nivel: 1 | 2; numero: string | null; titulo: string }) => {
   const n = sinPunto(e.numero);
-  return limpio(n ? (e.nivel === 1 ? `${n}. ${e.titulo}` : `${n} ${e.titulo}`) : e.titulo);
+  return limpio(sinMarcas(n ? (e.nivel === 1 ? `${n}. ${e.titulo}` : `${n} ${e.titulo}`) : e.titulo));
 };
 /** Hojas que ocupa el índice: las que tienen el título «Índice». Devuelve la última. */
 const finIndice = (traza: TrazaLic[]) => {
@@ -200,6 +201,22 @@ const finIndice = (traza: TrazaLic[]) => {
   for (const t of traza) if (t.zona === "cuerpo" && t.pagina > fin && /^\d+$/.test(t.texto) && Math.abs(t.x + t.ancho - (G.margenX + G.anchoUtil)) < 0.05) fin = t.pagina;
   return fin;
 };
+
+/**
+ * Hojas con una imagen del CUERPO (la traza solo tiene textos): las XObject de cada hoja, sin la que
+ * se repite en todas las hojas con cabecera (el logo).
+ */
+function hojasConImagen(pdf: PDFDocument): Set<number> {
+  const refs = pdf.getPages().map((pg) => {
+    const xo = pg.node.Resources()?.lookup(PDFName.of("XObject"));
+    return new Set(xo instanceof PDFDict ? xo.values().map((v) => String(v)) : []);
+  });
+  const resto = refs.slice(1);
+  const comunes = resto.length ? [...resto[0]].filter((r) => resto.every((s) => s.has(r))) : [];
+  const out = new Set<number>();
+  refs.forEach((s, i) => { if ([...s].some((r) => !comunes.includes(r))) out.add(i + 1); });
+  return out;
+}
 
 type Revision = { paginasPdf: number; titulosOk: number };
 async function revisar(nombre: string, ent: EntradaPropuesta, r: { bytes: Uint8Array; paginas: number; indice: EntradaIndice[]; recortes: string[] }, traza: TrazaLic[], primera: number, conMarca: boolean): Promise<Revision> {
@@ -232,6 +249,7 @@ async function revisar(nombre: string, ent: EntradaPropuesta, r: { bytes: Uint8A
   ok++;
   // Índice: cada entrada apunta a la hoja donde se dibujó su título; el título no queda solo al pie.
   const fin = d.indice ? finIndice(traza) : 1;
+  const conImagen = hojasConImagen(pdf);
   let cursor = 0, titulosOk = 0;
   const cuerpo = traza.map((t, i) => ({ t, i })).filter(({ t }) => t.zona === "cuerpo" && t.pagina > fin);
   for (const e of r.indice) {
@@ -246,8 +264,18 @@ async function revisar(nombre: string, ent: EntradaPropuesta, r: { bytes: Uint8A
     cursor = k + 1;
     const tt = cuerpo[k].t;
     check(primera + tt.pagina - 1 === e.pagina, `${nombre}: «${et}» está en la hoja visible ${primera + tt.pagina - 1} y el índice dice ${e.pagina}`);
-    const despues = traza.slice(cuerpo[k].i + 1).filter((u) => u.pagina === tt.pagina && u.zona === "cuerpo" && u.y < tt.y - 1 && !et.includes(u.texto));
-    check(despues.length > 0, `${nombre}: el título «${et}» quedó solo al pie de la hoja ${tt.pagina}`);
+    // Los renglones que siguen del propio título (se dibujan uno por renglón, en orden).
+    let j = cuerpo[k].i + 1, resto = et.slice(tt.texto.length).trim();
+    while (resto && j < traza.length && traza[j].zona === "cuerpo" && traza[j].texto && resto.startsWith(traza[j].texto)) { resto = resto.slice(traza[j].texto.length).trim(); j++; }
+    const despues = traza.slice(j).filter((u) => u.pagina === tt.pagina && u.zona === "cuerpo");
+    // Lo que sigue al título puede ser una imagen (no deja texto): basta con que la hoja tenga una.
+    const ultimo = !traza.slice(j).some((u) => u.zona === "cuerpo" && u.pagina > fin);
+    const bien = !resto && (despues.length > 0 || conImagen.has(tt.pagina) || ultimo);
+    check(bien, `${nombre}: el título «${et}» quedó solo al pie de la hoja ${tt.pagina}`);
+    if (process.env.DEPURAR && !bien) {
+      console.log("    resto:", JSON.stringify(resto), "título y:", tt.y.toFixed(1));
+      for (const u of traza.slice(cuerpo[k].i - 2, cuerpo[k].i + 12)) console.log(`    h${u.pagina} ${u.zona} y=${u.y.toFixed(1)} x=${u.x.toFixed(1)} «${u.texto.slice(0, 60)}»`);
+    }
     titulosOk++;
   }
   if (d.indice) {
@@ -307,9 +335,9 @@ check(rev.titulosOk === 60, "todos los títulos se encontraron en el cuerpo");
   const largo = R.indice.find((e) => e.numero === "7" && e.nivel === 1)!;
   const enIndice = traza.filter((t) => t.pagina <= finIndice(traza) && t.texto.startsWith("7. Dimensionamiento"));
   check(enIndice.length === 1 && enIndice[0].texto.endsWith("…"), "el título largo ocupa un renglón del índice, recortado con «…»");
-  check(largo && traza.filter((t) => t.pagina === primeraPagina(largo.pagina) && t.zona === "cuerpo" && /no cabe en un solo/.test(t.texto)).length >= 1, "el título largo se dibuja entero en el cuerpo");
+  // Con numeroPrimeraPagina = 1, la hoja visible es la física.
+  check(largo && traza.filter((t) => t.pagina === largo.pagina && t.zona === "cuerpo" && /no cabe en un solo/.test(t.texto)).length >= 1, "el título largo se dibuja entero en el cuerpo (segundo renglón en la misma hoja)");
 }
-function primeraPagina(visible: number) { return visible; }
 
 // Determinismo.
 {
@@ -440,6 +468,5 @@ if (process.env.MUESTRA_DIR) {
   console.log(`\nMuestra: ${ruta} (${R.paginas} hojas)`);
 }
 
-void StandardFonts;
 console.log(`\n${fallos ? "✗" : "✓"} ${ok} comprobaciones, ${fallos} fallos`);
 process.exit(fallos ? 1 : 0);

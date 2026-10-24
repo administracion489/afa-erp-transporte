@@ -155,6 +155,11 @@ export function trozosNegrita(texto: string): TrozoTexto[] {
   return out;
 }
 
+/** El texto sin las marcas de **negrita** (para un título, que ya va entero en negrita, o una búsqueda). */
+export function sinMarcas(texto: string): string {
+  return trozosNegrita(texto).map((t) => t.texto).join("");
+}
+
 /** Una palabra (o trozo de palabra) de un renglón, con su fuente y su desplazamiento desde el inicio. */
 export type Pieza = { texto: string; fuente: PDFFont; dx: number; ancho: number; espacio: boolean };
 /** `fin`: último renglón de su párrafo (antes de un salto o al final): no se justifica. */
@@ -195,7 +200,9 @@ export function renglones(texto: unknown, f: Fuentes, tam: number, ancho: number
       if (RE_BLANCO.test(w)) { espacio = true; continue; }
       const limpio = aWinAnsi(w, f.juego);
       if (!limpio) continue; // lo que la fuente no tiene se cae; el espacio queda pendiente
-      toks.push({ salto: false, texto: limpio, fuente, espacio });
+      // «bases ✓.» → «bases.»: si lo que se cayó dejó la puntuación suelta, se pega a la palabra anterior.
+      const pegar = limpio !== w && /^[.,;:!?)\]}»]/.test(limpio);
+      toks.push({ salto: false, texto: limpio, fuente, espacio: pegar ? false : espacio });
       espacio = false;
     }
   }
@@ -377,7 +384,10 @@ const PAD_H = 4.5, PAD_V = 3.5;
 
 /**
  * El cursor de maquetación de un PDF del módulo. `y` es la distancia desde ARRIBA hasta donde va el
- * siguiente contenido; el cuerpo va de `desde` a `hasta`. Las hojas se agregan con `nueva()`.
+ * siguiente contenido; el cuerpo va de `desde` a `hasta`, y de `x0` a `x0 + anchoUtil` a lo ancho
+ * (por defecto, los márgenes de la hoja A4 vertical). Las hojas se agregan con `nueva()` (A4
+ * vertical; una subclase puede cambiar el tamaño): las primitivas convierten «desde arriba» con el
+ * alto de la hoja en la que dibujan, así que sirven igual en una hoja horizontal.
  */
 export class Lienzo {
   readonly doc: PDFDocument;
@@ -385,17 +395,22 @@ export class Lienzo {
   readonly traza?: TrazaLic[];
   readonly desde: number;
   readonly hasta: number;
+  /** Borde izquierdo del cuerpo y su ancho (puntos). */
+  readonly x0: number;
+  readonly anchoUtil: number;
   readonly paginas: PDFPage[] = [];
   private readonly indices = new Map<PDFPage, number>();
   pag!: PDFPage;
   y = 0;
 
-  constructor(doc: PDFDocument, f: Fuentes, o: { desde?: number; hasta?: number; traza?: TrazaLic[] } = {}) {
+  constructor(doc: PDFDocument, f: Fuentes, o: { desde?: number; hasta?: number; x?: number; ancho?: number; traza?: TrazaLic[] } = {}) {
     this.doc = doc;
     this.f = f;
     this.traza = o.traza;
     this.desde = o.desde ?? GEOMETRIA_LIC.cuerpoDesde;
     this.hasta = o.hasta ?? GEOMETRIA_LIC.cuerpoHasta;
+    this.x0 = o.x ?? MARGEN_X;
+    this.anchoUtil = o.ancho ?? ANCHO_UTIL;
   }
 
   // ── Hojas y cursor ──
@@ -428,14 +443,15 @@ export class Lienzo {
   texto(s: string, x: number, base: number, fuente: PDFFont, tam: number, color: RGB, o: { zona?: ZonaTraza; pag?: PDFPage; opacidad?: number } = {}): void {
     if (!s) return;
     const p = o.pag ?? this.pag;
-    const yPdf = A4.alto - base;
+    const yPdf = p.getHeight() - base;
     p.drawText(s, { x, y: yPdf, size: tam, font: fuente, color, ...(o.opacidad != null ? { opacity: o.opacidad } : {}) });
     this.traza?.push({ pagina: this.numero(p), zona: o.zona ?? "cuerpo", texto: s, x, y: yPdf, ancho: anchoTexto(fuente, s, tam) });
   }
   rect(x: number, top: number, w: number, h: number, o: { relleno?: RGB; borde?: RGB; grosor?: number; pag?: PDFPage; opacidad?: number; guiones?: number[] }): void {
     if (w <= 0 || h <= 0) return;
-    (o.pag ?? this.pag).drawRectangle({
-      x, y: A4.alto - (top + h), width: w, height: h,
+    const p = o.pag ?? this.pag;
+    p.drawRectangle({
+      x, y: p.getHeight() - (top + h), width: w, height: h,
       ...(o.relleno ? { color: o.relleno } : {}),
       ...(o.borde ? { borderColor: o.borde, borderWidth: o.grosor ?? 0.5 } : { borderWidth: 0 }),
       ...(o.guiones ? { borderDashArray: o.guiones } : {}),
@@ -443,10 +459,12 @@ export class Lienzo {
     });
   }
   linea(x1: number, y1: number, x2: number, y2: number, color: RGB, grosor = 0.5, pag?: PDFPage): void {
-    (pag ?? this.pag).drawLine({ start: { x: x1, y: A4.alto - y1 }, end: { x: x2, y: A4.alto - y2 }, color, thickness: grosor });
+    const p = pag ?? this.pag;
+    p.drawLine({ start: { x: x1, y: p.getHeight() - y1 }, end: { x: x2, y: p.getHeight() - y2 }, color, thickness: grosor });
   }
   imagen(img: PDFImage, x: number, top: number, w: number, h: number, pag?: PDFPage): void {
-    (pag ?? this.pag).drawImage(img, { x, y: A4.alto - (top + h), width: w, height: h });
+    const p = pag ?? this.pag;
+    p.drawImage(img, { x, y: p.getHeight() - (top + h), width: w, height: h });
   }
 
   /**
@@ -488,7 +506,7 @@ export class Lienzo {
    */
   parrafo(texto: unknown, o: { tam?: number; lh?: number; color?: RGB; alinear?: Alineacion; estilo?: EstiloTexto; x?: number; ancho?: number; antes?: number; despues?: number; juntos?: number } = {}): number {
     const tam = o.tam ?? 10, lh = o.lh ?? tam * 1.4;
-    const x = o.x ?? MARGEN_X, ancho = o.ancho ?? ANCHO_UTIL;
+    const x = o.x ?? this.x0, ancho = o.ancho ?? this.anchoUtil;
     const rs = renglones(texto, this.f, tam, ancho, o.estilo);
     if (!rs.length) return 0;
     this.reservar(o.antes ?? 0, Math.min(o.juntos ?? 2, rs.length) * lh);
@@ -511,7 +529,7 @@ export class Lienzo {
     const sangria = o.sangria ?? 10;
     const etiquetas = items.map((_, i) => (ordenada ? `${i + 1}.` : "•"));
     const wEt = Math.max(0, ...etiquetas.map((e) => anchoTexto(this.f.reg, e, tam)));
-    const xEt = MARGEN_X + sangria, xTx = xEt + wEt + 6, ancho = MARGEN_X + ANCHO_UTIL - xTx;
+    const xEt = this.x0 + sangria, xTx = xEt + wEt + 6, ancho = this.x0 + this.anchoUtil - xTx;
     const prep = items.map((t) => renglones(t, this.f, tam, ancho)).map((rs, i) => ({ rs, et: etiquetas[i] })).filter((p) => p.rs.length);
     if (!prep.length) return;
     this.reservar(o.antes ?? 0, Math.min(2, prep[0].rs.length) * lh);
@@ -532,7 +550,7 @@ export class Lienzo {
   /** Nota en recuadro con barra de color a la izquierda. Partible entre hojas. */
   nota(texto: unknown, o: { fondo: RGB; barra: RGB; tam?: number; lh?: number; color?: RGB; antes?: number; despues?: number }): void {
     const tam = o.tam ?? 9.5, lh = o.lh ?? tam * 1.4, pad = 7, barra = 3;
-    const xTx = MARGEN_X + barra + pad + 2, ancho = ANCHO_UTIL - barra - 2 * pad - 2;
+    const xTx = this.x0 + barra + pad + 2, ancho = this.anchoUtil - barra - 2 * pad - 2;
     const rs = renglones(texto, this.f, tam, ancho);
     if (!rs.length) return;
     this.reservar(o.antes ?? 0, 2 * pad + Math.min(2, rs.length) * lh);
@@ -542,8 +560,8 @@ export class Lienzo {
       const caben = Math.max(1, Math.floor((this.hasta - this.y - 2 * pad + 0.01) / lh));
       const k = Math.min(caben, rs.length - i);
       const alto = 2 * pad + k * lh;
-      this.rect(MARGEN_X, this.y, ANCHO_UTIL, alto, { relleno: o.fondo });
-      this.rect(MARGEN_X, this.y, barra, alto, { relleno: o.barra });
+      this.rect(this.x0, this.y, this.anchoUtil, alto, { relleno: o.fondo });
+      this.rect(this.x0, this.y, barra, alto, { relleno: o.barra });
       for (let j = 0; j < k; j++) this.pintarRenglon(rs[i + j], xTx, lineaBase(this.y + pad + j * lh, lh, tam), tam, o.color ?? TINTA, "just", ancho);
       this.y += alto;
       i += k;
@@ -555,8 +573,8 @@ export class Lienzo {
   /** Alto de una figura (la imagen escalada a `anchoPct` del ancho útil, o el recuadro si falta, más el pie). */
   medirFigura(img: PDFImage | null, anchoPct: number, pie: string | null): { ancho: number; alto: number; altoImagen: number; pie: Renglon[] } {
     const pct = Number.isFinite(anchoPct) ? Math.max(10, Math.min(100, anchoPct)) : 100;
-    let w = (ANCHO_UTIL * pct) / 100;
-    const pieRs = renglones(pie ?? "", this.f, 8.5, ANCHO_UTIL, { italica: true });
+    let w = (this.anchoUtil * pct) / 100;
+    const pieRs = renglones(pie ?? "", this.f, 8.5, this.anchoUtil, { italica: true });
     const altoPie = pieRs.length ? 4 + pieRs.length * 11 : 0;
     let h: number;
     if (img) {
@@ -570,17 +588,17 @@ export class Lienzo {
   figura(img: PDFImage | null, anchoPct: number, pie: string | null, o: { antes?: number; despues?: number } = {}): void {
     const m = this.medirFigura(img, anchoPct, pie);
     this.reservar(o.antes ?? 0, m.alto);
-    const x = MARGEN_X + (ANCHO_UTIL - m.ancho) / 2;
+    const x = this.x0 + (this.anchoUtil - m.ancho) / 2;
     if (img) this.imagen(img, x, this.y, m.ancho, m.altoImagen);
     else {
       this.rect(x, this.y, m.ancho, m.altoImagen, { relleno: GRIS_CEBRA, borde: GRIS_BORDE, grosor: 0.8, guiones: [4, 3] });
       const t = "imagen no disponible";
-      this.texto(t, MARGEN_X + (ANCHO_UTIL - anchoTexto(this.f.ita, t, 9)) / 2, lineaBase(this.y + m.altoImagen / 2 - 6, 12, 9), this.f.ita, 9, GRIS_TEXTO);
+      this.texto(t, this.x0 + (this.anchoUtil - anchoTexto(this.f.ita, t, 9)) / 2, lineaBase(this.y + m.altoImagen / 2 - 6, 12, 9), this.f.ita, 9, GRIS_TEXTO);
     }
     this.y += m.altoImagen;
     if (m.pie.length) {
       this.y += 4;
-      for (const r of m.pie) { this.pintarRenglon(r, MARGEN_X, lineaBase(this.y, 11, 8.5), 8.5, GRIS_TEXTO, "centro", ANCHO_UTIL); this.y += 11; }
+      for (const r of m.pie) { this.pintarRenglon(r, this.x0, lineaBase(this.y, 11, 8.5), 8.5, GRIS_TEXTO, "centro", this.anchoUtil); this.y += 11; }
     }
     this.y += o.despues ?? 0;
   }
@@ -594,7 +612,7 @@ export class Lienzo {
   firma(fir: Firmante, img: PDFImage | null, o: { antes?: number; x?: number } = {}): void {
     const alto = this.altoFirma(fir, img);
     this.reservar(o.antes ?? 0, alto);
-    const x = o.x ?? MARGEN_X, w = 190;
+    const x = o.x ?? this.x0, w = 190;
     const yLinea = this.y + (img ? 58 : 34);
     if (img) {
       const e = escalarImagen(img, 170, 54);
@@ -603,7 +621,7 @@ export class Lienzo {
     this.linea(x, yLinea, x + w, yLinea, TINTA, 0.6);
     let yy = yLinea + 4;
     const fila = (s: string, fuente: PDFFont) => {
-      const t = recortarConElipsis(limpiar(s, this.f.juego, 200), fuente, 9.5, MARGEN_X + ANCHO_UTIL - x);
+      const t = recortarConElipsis(limpiar(s, this.f.juego, 200), fuente, 9.5, this.x0 + this.anchoUtil - x);
       if (!t) return;
       this.texto(t, x, lineaBase(yy, 13, 9.5), fuente, 9.5, TINTA);
       yy += 13;
@@ -626,7 +644,7 @@ export class Lienzo {
   prepararTabla(e: EspecTabla): TablaPreparada {
     const f = this.f;
     const tam = e.tam ?? 8.5, lh = e.lh ?? tam * 1.3;
-    const x = e.x ?? MARGEN_X, ancho = e.ancho ?? ANCHO_UTIL;
+    const x = e.x ?? this.x0, ancho = e.ancho ?? this.anchoUtil;
     const recortes: string[] = [];
     const nombre = e.nombre ?? (e.titulo ? `Tabla «${limpiar(e.titulo, f.juego, 80)}»` : "Tabla");
     const columnas = (e.columnas ?? []).map((c) => String(c ?? ""));
@@ -754,17 +772,20 @@ export class Lienzo {
   marcaAgua(texto: string): void {
     const mk = limpiar(texto, this.f.juego, 40);
     if (!mk) return;
-    const ang = Math.atan2(A4.alto, A4.ancho);
-    let tam = 96;
-    while (tam > 20 && anchoTexto(this.f.neg, mk, tam) > Math.hypot(A4.ancho, A4.alto) * 0.7) tam -= 4;
-    const w = anchoTexto(this.f.neg, mk, tam);
-    const x = A4.ancho / 2 - (w / 2) * Math.cos(ang) + (tam * 0.35) * Math.sin(ang);
-    const y = A4.alto / 2 - (w / 2) * Math.sin(ang) - (tam * 0.35) * Math.cos(ang);
     for (const p of this.paginas) {
+      const W = p.getWidth(), H = p.getHeight();
+      const ang = Math.atan2(H, W);
+      let tam = 96;
+      while (tam > 20 && anchoTexto(this.f.neg, mk, tam) > Math.hypot(W, H) * 0.7) tam -= 4;
+      const w = anchoTexto(this.f.neg, mk, tam);
+      // El centro del texto (a lo largo de la línea base y a media altura) en el centro de la hoja.
+      const x = W / 2 - (w / 2) * Math.cos(ang) + tam * 0.35 * Math.sin(ang);
+      const y = H / 2 - (w / 2) * Math.sin(ang) - tam * 0.35 * Math.cos(ang);
       p.drawText(mk, { x, y, size: tam, font: this.f.neg, color: colorDe("#808080"), opacity: 0.13, rotate: degrees((ang * 180) / Math.PI) });
       this.traza?.push({ pagina: this.numero(p), zona: "marca", texto: mk, x, y, ancho: w });
     }
   }
+
 }
 
 /** «Página {pagina} de {total}» con los números puestos. Vacío → «Página X de Y». */
@@ -779,26 +800,28 @@ export function dibujarCabecera(l: Lienzo, p: PDFPage, logo: PDFImage | null, te
   let wLogo = 0;
   if (logo) {
     const e = escalarImagen(logo, 110, 28);
-    l.imagen(logo, MARGEN_X, g.cabeceraDesde + (28 - e.alto) / 2, e.ancho, e.alto, p);
+    l.imagen(logo, l.x0, g.cabeceraDesde + (28 - e.alto) / 2, e.ancho, e.alto, p);
     wLogo = e.ancho + 14;
   }
-  const disponible = ANCHO_UTIL - wLogo;
+  const disponible = l.anchoUtil - wLogo;
   const rs = conTope(renglones(texto, l.f, 8, disponible), 2, l.f, 8, disponible).renglones;
   const lh = 10.5;
   const top = g.cabeceraDesde + (28 - rs.length * lh) / 2;
   rs.forEach((r, k) => {
-    l.pintarRenglon(r, MARGEN_X + wLogo, lineaBase(top + k * lh, lh, 8), 8, GRIS_TEXTO, "der", disponible, { zona: "cabecera", pag: p });
+    l.pintarRenglon(r, l.x0 + wLogo, lineaBase(top + k * lh, lh, 8), 8, GRIS_TEXTO, "der", disponible, { zona: "cabecera", pag: p });
   });
-  l.linea(MARGEN_X, g.lineaCabecera, MARGEN_X + ANCHO_UTIL, g.lineaCabecera, color, 1, p);
+  l.linea(l.x0, g.lineaCabecera, l.x0 + l.anchoUtil, g.lineaCabecera, color, 1, p);
 }
 
 /** Pie de una hoja: línea fina, texto a la izquierda (recortado si choca) y el de la derecha (el número). */
 export function dibujarPie(l: Lienzo, p: PDFPage, izquierda: string, derecha: string, color: RGB): void {
   const g = GEOMETRIA_LIC;
-  l.linea(MARGEN_X, g.lineaPie, MARGEN_X + ANCHO_UTIL, g.lineaPie, aclarar(color, 0.55), 0.5, p);
-  const der = recortarConElipsis(limpiar(derecha, l.f.juego, 80), l.f.reg, 7.5, ANCHO_UTIL);
+  // Medidas desde ABAJO de la hoja (en una hoja horizontal el pie también va a 52/38 pt del borde).
+  const lineaPie = p.getHeight() - (A4.alto - g.lineaPie), basePie = p.getHeight() - (A4.alto - g.basePie);
+  l.linea(l.x0, lineaPie, l.x0 + l.anchoUtil, lineaPie, aclarar(color, 0.55), 0.5, p);
+  const der = recortarConElipsis(limpiar(derecha, l.f.juego, 80), l.f.reg, 7.5, l.anchoUtil);
   const wDer = anchoTexto(l.f.reg, der, 7.5);
-  const izq = recortarConElipsis(limpiar(izquierda, l.f.juego, 300), l.f.reg, 7.5, Math.max(0, ANCHO_UTIL - wDer - 12));
-  l.texto(izq, MARGEN_X, g.basePie, l.f.reg, 7.5, GRIS_TEXTO, { zona: "pie", pag: p });
-  l.texto(der, MARGEN_X + ANCHO_UTIL - wDer, g.basePie, l.f.reg, 7.5, GRIS_TEXTO, { zona: "pie", pag: p });
+  const izq = recortarConElipsis(limpiar(izquierda, l.f.juego, 300), l.f.reg, 7.5, Math.max(0, l.anchoUtil - wDer - 12));
+  l.texto(izq, l.x0, basePie, l.f.reg, 7.5, GRIS_TEXTO, { zona: "pie", pag: p });
+  l.texto(der, l.x0 + l.anchoUtil - wDer, basePie, l.f.reg, 7.5, GRIS_TEXTO, { zona: "pie", pag: p });
 }

@@ -76,7 +76,6 @@ export function problemaNombreZip(nombre: string): string | null {
   if (n.startsWith("/") || n.startsWith("\\")) return `«${n}» empieza por una barra.`;
   if (/^[A-Za-z]:/.test(n)) return `«${n}» empieza por una letra de unidad.`;
   if (n.endsWith("/") || n.endsWith("\\")) return `«${n}» termina en barra (sería una carpeta).`;
-  // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(n)) return `«${n}» trae caracteres de control.`;
   if (new TextEncoder().encode(n).length > LIMITES_ZIP.maxBytesNombre) return "El nombre es demasiado largo.";
   return null;

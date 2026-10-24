@@ -564,6 +564,7 @@ export type ComunBloque = {
 };
 
 export type ResultadoBloque = {
+  /** Con `paginas` 0 (sin portada y todo omitido) es un PDF SIN páginas: no se emite ni se une (unirPdfs lo rechaza). */
   bytes: Uint8Array;
   paginas: number;
   /** Una entrada por PARTE, en orden; una parte omitida va con 0 páginas. La portada no es una parte. */
@@ -704,7 +705,7 @@ export async function armarBloque(bloque: BloqueExpedienteResuelto, comun: Comun
   }
 
   const paginas = doc.getPageCount();
-  const bytes = await doc.save();
+  const bytes = await doc.save({ addDefaultPage: false });
   return { bytes, paginas, paginasPorParte, omitidos, avisos };
 }
 
@@ -773,13 +774,23 @@ export function mapaFolios(paginasPorBloque: number[], op: OpcionesFoliado, opts
   };
 }
 
-/** Distancia del recuadro del folio al borde que se VE, y su letra. */
+/** Distancia del recuadro del folio al borde que se VE, y su letra, en una hoja A4. */
 const FOLIO = { margen: 16, tam: 9, padX: 4, padY: 3 } as const;
+/**
+ * Escala del folio según el lado CORTO de lo que se ve, contra el de un A4 (595 pt), acotada a 1..4.
+ * Un escaneo guardado a 1700 × 2200 pt se imprime reducido a A4: un folio de 9 pt saldría de 3 pt.
+ * En A4 o A5 (vertical u horizontal) la escala es 1; en carta, 1.03. No medido: el lado seguro es no achicar nunca.
+ */
+export function escalaFolio(anchoVisto: number, altoVisto: number): number {
+  const corto = Math.min(anchoVisto, altoVisto);
+  return Number.isFinite(corto) && corto > 0 ? Math.max(1, Math.min(4, corto / A4.ancho)) : 1;
+}
 
 /**
  * Escribe el folio de cada página (`folios[i]` para la hoja i; null = no se toca) con `op.formato`
  * y `op.digitos`, en `op.posicion`, en un recuadro blanco con borde. Respeta /Rotate y la CropBox:
- * el folio sale derecho y en la esquina que se ve. Con modo «ninguno» devuelve los mismos bytes.
+ * el folio sale derecho y en la esquina que se ve, del tamaño que tendría impreso en A4 (`escalaFolio`).
+ * Con modo «ninguno» devuelve los mismos bytes.
  * LANZA si `folios` no tiene una entrada por página (un desfase foliaría mal un documento oficial).
  */
 export async function foliar(bytes: Uint8Array, folios: (number | null)[], op: OpcionesFoliado, opts: { traza?: TrazaLic[] } = {}): Promise<Uint8Array> {
@@ -805,10 +816,12 @@ export async function foliar(bytes: Uint8Array, folios: (number | null)[], op: O
     const H = Math.max(1, Math.min(mb.y + mb.height, cb.y + cb.height) - cy);
     const r = ((Math.round((p.getRotation().angle || 0) / 90) * 90) % 360 + 360) % 360;
     const [vW, vH] = r === 90 || r === 270 ? [H, W] : [W, H];   // lo que se VE
-    const wt = anchoTexto(fuente, texto, FOLIO.tam);
-    const bw = wt + 2 * FOLIO.padX, bh = FOLIO.tam + 2 * FOLIO.padY;
-    const u0 = op.posicion === "inferior_centro" ? (vW - bw) / 2 : vW - FOLIO.margen - bw;
-    const v0 = op.posicion === "superior_derecha" ? vH - FOLIO.margen - bh : FOLIO.margen;
+    const k = escalaFolio(vW, vH);
+    const tam = FOLIO.tam * k, padX = FOLIO.padX * k, padY = FOLIO.padY * k, margen = FOLIO.margen * k;
+    const wt = anchoTexto(fuente, texto, tam);
+    const bw = wt + 2 * padX, bh = tam + 2 * padY;
+    const u0 = op.posicion === "inferior_centro" ? (vW - bw) / 2 : vW - margen - bw;
+    const v0 = op.posicion === "superior_derecha" ? vH - margen - bh : margen;
     // (u, v) en lo que se ve → (x, y) en la hoja sin girar.
     const aHoja = (u: number, v: number): [number, number] => {
       if (r === 90) return [cx + W - v, cy + u];
@@ -818,12 +831,12 @@ export async function foliar(bytes: Uint8Array, folios: (number | null)[], op: O
     };
     const rot = degrees(r);
     const [rx, ry] = aHoja(u0, v0);
-    p.drawRectangle({ x: rx, y: ry, width: bw, height: bh, color: colorDe("#ffffff"), borderColor: borde, borderWidth: 0.6, rotate: rot });
-    const [tx, ty] = aHoja(u0 + FOLIO.padX, v0 + FOLIO.padY + 0.22 * FOLIO.tam);
-    p.drawText(texto, { x: tx, y: ty, size: FOLIO.tam, font: fuente, color: negro, rotate: rot });
+    p.drawRectangle({ x: rx, y: ry, width: bw, height: bh, color: colorDe("#ffffff"), borderColor: borde, borderWidth: 0.6 * k, rotate: rot });
+    const [tx, ty] = aHoja(u0 + padX, v0 + padY + 0.22 * tam);
+    p.drawText(texto, { x: tx, y: ty, size: tam, font: fuente, color: negro, rotate: rot });
     opts.traza?.push({ pagina: i + 1, zona: "folio", texto, x: tx, y: ty, ancho: wt });
   });
-  return doc.save();
+  return doc.save({ addDefaultPage: false });
 }
 
 // ══ Unir ═══════════════════════════════════════════════════════════════════════
@@ -842,5 +855,5 @@ export async function unirPdfs(partes: Uint8Array[]): Promise<Uint8Array> {
     const copiadas = await out.copyPages(c.doc, c.doc.getPageIndices());
     for (const pg of copiadas) out.addPage(pg);
   }
-  return out.save();
+  return out.save({ addDefaultPage: false });
 }

@@ -489,7 +489,10 @@ export type RespuestaAnalisis =
 export type ImagenImportada = { clave: string; ruta: string; mime: "image/png" | "image/jpeg" | "image/gif" | "image/x-emf" | "image/x-wmf" | "otro"; bytes: Uint8Array; anchoEmu: number | null; altoEmu: number | null };
 export type AvisoImportacion = {
   codigo: "estilo_desconocido" | "imagen_no_soportada" | "tabla_combinada" | "subtitulo_sospechoso" | "cuadro_de_texto"
-        | "grafico_omitido" | "indice_omitido" | "numeracion_quitada" | "sin_titulos" | "lista_numerada";
+        | "grafico_omitido" | "indice_omitido" | "numeracion_quitada" | "sin_titulos" | "lista_numerada"
+        // recortado: un tope de TOPES_DOC cortó algo · imagen_en_tabla: una imagen de una celda pasó debajo de su
+        // tabla · dato_omitido: algo sin campo en el ERP (fila del control, fecha ilegible, nota al pie, altChunk).
+        | "recortado" | "imagen_en_tabla" | "dato_omitido";
   texto: string; donde: string | null;
 };
 export type ResultadoImportacion =

@@ -35,7 +35,7 @@ import { PDFDocument, type PDFImage, type PDFPage, type RGB } from "pdf-lib";
 import {
   A4, ANCHO_UTIL, BLANCO, Lienzo, MARGEN_X, TINTA,
   aclarar, anchoTexto, cargarFuentes, colorDe, conTope, escalarImagen, incrustarImagen, limpiar, lineaBase,
-  oscurecer, recortarConElipsis, renglones,
+  oscurecer, recortarConElipsis, renglones, sinMarcas,
   type Fuentes, type ImagenPdf, type Renglon, type TablaPreparada,
 } from "./comun";
 import type { BloqueResuelto, DocumentoResuelto, EntradaIndice, SeccionResuelta, TrazaLic } from "../tipos";
@@ -220,112 +220,154 @@ export async function dibujarPropuesta(entrada: EntradaPropuesta, opts: Opciones
   const visible = (p: PDFPage) => primera + L.numero(p) - 1;
 
   // ════════════════════════════════════════════════════════════════════════════
-  // SECCIONES
+  // SECCIONES Y CIERRE
   // ════════════════════════════════════════════════════════════════════════════
+  // El cuerpo es una sola secuencia (títulos de sección, bloques y el cierre): así un título sabe qué
+  // viene DESPUÉS aunque sea el título de la sección siguiente, y no queda solo al pie.
+  type Elem =
+    | { k: "titulo"; s: SeccionResuelta; rs: Renglon[] }
+    | { k: "bloque"; s: SeccionResuelta; b: BloqueResuelto }
+    | { k: "cierre"; parrafos: string[] };
+  const esEncabezado = (e: Elem | undefined) => !!e && (e.k === "titulo" || (e.k === "bloque" && e.b.tipo === "subtitulo"));
+  const esSalto = (e: Elem | undefined) => !!e && e.k === "bloque" && e.b.tipo === "salto_pagina";
+  const elems: Elem[] = [];
+  /**
+   * Un salto de página que sigue a uno o varios encabezados (título, subtítulos) se MUEVE antes de
+   * ellos: un encabezado seguido de un salto quedaría solo al final de su hoja. Dos saltos seguidos
+   * son uno (no dejan una hoja en blanco).
+   */
+  const agregar = (e: Elem) => {
+    if (!esSalto(e)) { elems.push(e); return; }
+    let k = elems.length;
+    while (k > 0 && esEncabezado(elems[k - 1])) k--;
+    if (k > 0 && esSalto(elems[k - 1])) return;
+    elems.splice(k, 0, e);
+  };
+  for (const s of secciones) {
+    if (entradaDe.has(s) || tieneTexto(s.titulo, f)) {
+      agregar({ k: "titulo", s, rs: renglones(etiquetaSeccion(s.numero, s.titulo ?? ""), f, TAM_SEC, ANCHO_UTIL, { negrita: true }) });
+    }
+    for (const b of s.bloques) if (b) agregar({ k: "bloque", s, b });
+  }
+  if (d.cierre) agregar({ k: "cierre", parrafos: String(d.cierre.texto ?? "").split(/\n[ \t]*\n/).filter((t) => tieneTexto(t, f)) });
+
   const tablas = new Map<BloqueResuelto, TablaPreparada>();
-  const nombreSeccion = (s: SeccionResuelta) => (sinPunto(s.numero) ? `sección ${sinPunto(s.numero)}` : `«${limpiar(s.titulo, f.juego, 60)}»`);
+  const nombreSeccion = (s: SeccionResuelta) => (sinPunto(s.numero) ? `sección ${sinPunto(s.numero)}` : `«${limpiar(sinMarcas(s.titulo), f.juego, 60)}»`);
   const tablaDe = (b: Extract<BloqueResuelto, { tipo: "tabla" }>, s: SeccionResuelta) => {
     let t = tablas.get(b);
     if (!t) {
-      const nombre = b.titulo && tieneTexto(b.titulo, f) ? `Tabla «${limpiar(b.titulo, f.juego, 80)}» (${nombreSeccion(s)})` : `Tabla de la ${nombreSeccion(s)}`;
+      const nombre = b.titulo && tieneTexto(b.titulo, f) ? `Tabla «${limpiar(sinMarcas(b.titulo), f.juego, 80)}» (${nombreSeccion(s)})` : `Tabla de la ${nombreSeccion(s)}`;
       t = L.prepararTabla({ titulo: b.titulo, columnas: b.columnas ?? [], filas: b.filas ?? [], anchos: b.anchos, pie: b.pie, color: C, nombre });
       tablas.set(b, t);
     }
     return t;
   };
-  const altoSub = (b: Extract<BloqueResuelto, { tipo: "subtitulo" }>) => {
+  const medidaSub = (b: Extract<BloqueResuelto, { tipo: "subtitulo" }>) => {
     const [tam, lh] = b.nivel === 2 ? [TAM_SUB2, LH_SUB2] : [TAM_SUB3, LH_SUB3];
-    return renglones(etiquetaSub(b.numero, b.texto), f, tam, ANCHO_UTIL, { negrita: true, marcas: false }).length * lh;
+    const rs = renglones(etiquetaSub(b.numero, b.texto), f, tam, ANCHO_UTIL, { negrita: true });
+    return { rs, tam, lh, alto: rs.length ? rs.length * lh + 4 : 0 };
   };
-  const antesDe = (b: BloqueResuelto | undefined) => (b?.tipo === "subtitulo" ? (b.nivel === 2 ? 10 : 7) : 0);
-  /** Lo mínimo de un bloque que tiene que caber junto al título que lo precede. */
-  const minimo = (bs: BloqueResuelto[], i: number, s: SeccionResuelta, prof = 0): number => {
-    const b = bs[i];
-    if (!b) return 0;
+  const altoTitulo = (rs: Renglon[]) => rs.length * LH_SEC + 4 + 0.8 + 8;
+  /** El aire que un elemento deja ARRIBA de sí (se pierde al inicio de una hoja). */
+  const antesDe = (e: Elem | undefined): number => {
+    if (!e) return 0;
+    if (e.k === "titulo") return 18;
+    if (e.k === "cierre") return 14;
+    if (e.b.tipo === "subtitulo") return e.b.nivel === 2 ? 10 : 7;
+    if (e.b.tipo === "tabla") return 2;
+    return 0;
+  };
+  /**
+   * Lo mínimo de un elemento que tiene que caber junto al encabezado que lo precede. Un encabezado
+   * arrastra al siguiente (una cadena de encabezados va junta hasta el primer contenido).
+   */
+  const minimo = (i: number, prof: number): number => {
+    const e = elems[i];
+    if (!e) return 0;
+    const yLuego = (alto: number) => alto + (prof < 8 && !esSalto(elems[i + 1]) ? antesDe(elems[i + 1]) + minimo(i + 1, prof + 1) : 0);
+    if (e.k === "titulo") return yLuego(altoTitulo(e.rs));
+    if (e.k === "cierre") {
+      const r0 = e.parrafos.map((t) => renglones(t, f, TAM, ANCHO_UTIL)).find((r) => r.length);
+      return r0 ? Math.min(2, r0.length) * LH : 0;
+    }
+    const b = e.b;
     switch (b.tipo) {
       case "parrafo": return Math.min(2, renglones(b.texto, f, TAM, ANCHO_UTIL).length) * LH;
       case "vinetas": {
         const r0 = (b.items ?? []).map((t) => renglones(t, f, TAM, ANCHO_UTIL - 30)).find((r) => r.length);
         return r0 ? Math.min(2, r0.length) * LH : 0;
       }
-      case "tabla": return L.altoInicioTabla(tablaDe(b, s));
+      case "tabla": return L.altoInicioTabla(tablaDe(b, e.s));
       case "nota": return 14 + Math.min(2, renglones(b.texto, f, 9.5, ANCHO_UTIL - 19).length) * 9.5 * 1.4;
       case "imagen": return L.medirFigura(imagenDe(b.url), b.anchoPct, b.pie).alto;
-      case "subtitulo": return altoSub(b) + 4 + (prof < 1 ? antesDe(bs[i + 1]) + minimo(bs, i + 1, s, prof + 1) : 0);
+      case "subtitulo": return yLuego(medidaSub(b).alto);
       default: return 0;
     }
   };
+  /** Antes de un encabezado de `alto`: se reserva junto con el comienzo de lo que sigue (o salta de hoja). */
+  const prepararEncabezado = (i: number, alto: number) => {
+    const sigue = Math.min(L.altoCuerpo - alto, esSalto(elems[i + 1]) ? 0 : antesDe(elems[i + 1]) + minimo(i + 1, 1));
+    L.reservar(antesDe(elems[i]), alto + Math.max(0, sigue));
+  };
 
-  const hayCuerpo = secciones.length > 0 || !!d.cierre;
-  if (hayCuerpo) L.nueva();
-  for (const s of secciones) {
-    const bs = s.bloques;
-    // Título de la sección (con lo que sigue, o salta).
-    if (entradaDe.has(s) || tieneTexto(s.titulo, f)) {
-      const rs = renglones(etiquetaSeccion(s.numero, s.titulo ?? ""), f, TAM_SEC, ANCHO_UTIL, { negrita: true, marcas: false });
-      const alto = rs.length * LH_SEC + 4 + 0.8 + 8;
-      const sigue = Math.min(L.altoCuerpo - alto, antesDe(bs[0]) + minimo(bs, 0, s));
-      L.reservar(18, alto + Math.max(0, sigue));
-      const e = entradaDe.get(s);
-      if (e) e.pagina = visible(L.pag);
-      for (const r of rs) { L.pintarRenglon(r, MARGEN_X, lineaBase(L.y, LH_SEC, TAM_SEC), TAM_SEC, C, "izq", ANCHO_UTIL); L.y += LH_SEC; }
+  if (elems.length) L.nueva();
+  elems.forEach((e, i) => {
+    if (e.k === "titulo") {
+      prepararEncabezado(i, altoTitulo(e.rs));
+      const en = entradaDe.get(e.s);
+      if (en) en.pagina = visible(L.pag);
+      for (const r of e.rs) { L.pintarRenglon(r, MARGEN_X, lineaBase(L.y, LH_SEC, TAM_SEC), TAM_SEC, C, "izq", ANCHO_UTIL); L.y += LH_SEC; }
       L.y += 4;
       L.rect(MARGEN_X, L.y, ANCHO_UTIL, 0.8, { relleno: C });
       L.y += 0.8 + 8;
+      return;
     }
-    bs.forEach((b, i) => {
-      switch (b.tipo) {
-        case "parrafo":
-          L.parrafo(b.texto, { alinear: "just", despues: 6 });
-          break;
-        case "subtitulo": {
-          const [tam, lh, color] = b.nivel === 2 ? [TAM_SUB2, LH_SUB2, C] : [TAM_SUB3, LH_SUB3, TINTA];
-          const rs = renglones(etiquetaSub(b.numero, b.texto), f, tam, ANCHO_UTIL, { negrita: true, marcas: false });
-          if (!rs.length) break;
-          const alto = rs.length * lh + 4;
-          const sigue = Math.min(L.altoCuerpo - alto, antesDe(bs[i + 1]) + minimo(bs, i + 1, s, 1));
-          L.reservar(antesDe(b), alto + Math.max(0, sigue));
-          const e = entradaDe.get(b);
-          if (e) e.pagina = visible(L.pag);
-          for (const r of rs) { L.pintarRenglon(r, MARGEN_X, lineaBase(L.y, lh, tam), tam, color as RGB, "izq", ANCHO_UTIL); L.y += lh; }
-          L.y += 4;
-          break;
-        }
-        case "vinetas":
-          L.lista(b.items ?? [], !!b.ordenada, { despues: 6 });
-          break;
-        case "tabla": {
-          const t = tablaDe(b, s);
-          L.dibujarTabla(t, { antes: 2, despues: 10 });
-          recortes.push(...t.recortes);
-          break;
-        }
-        case "nota": {
-          const aviso = b.tono === "aviso";
-          L.nota(b.texto, { fondo: aviso ? colorDe("#fff6e5") : aclarar(C, 0.9), barra: aviso ? colorDe("#d97706") : C, despues: 8 });
-          break;
-        }
-        case "imagen": {
-          const img = imagenDe(b.url);
-          if (!img) recortes.push(`Imagen no disponible (${nombreSeccion(s)})${b.pie && tieneTexto(b.pie, f) ? `: «${limpiar(b.pie, f.juego, 80)}»` : ""}. Quedó su recuadro con el pie.`);
-          L.figura(img, b.anchoPct, b.pie, { despues: 10 });
-          break;
-        }
-        case "salto_pagina":
-          if (!L.enCabeza) L.nueva();
-          break;
+    if (e.k === "cierre") {
+      e.parrafos.forEach((t, j) => L.parrafo(t, { alinear: "just", antes: j === 0 ? antesDe(e) : 0, despues: 8 }));
+      if (d.cierre?.conFirma) L.firma(firmante, firmaImg, { antes: 10 });
+      return;
+    }
+    const b = e.b, s = e.s;
+    switch (b.tipo) {
+      case "parrafo":
+        L.parrafo(b.texto, { alinear: "just", despues: 6 });
+        break;
+      case "subtitulo": {
+        const m = medidaSub(b);
+        if (!m.rs.length) break;
+        prepararEncabezado(i, m.alto);
+        const en = entradaDe.get(b);
+        if (en) en.pagina = visible(L.pag);
+        const color = b.nivel === 2 ? C : TINTA;
+        for (const r of m.rs) { L.pintarRenglon(r, MARGEN_X, lineaBase(L.y, m.lh, m.tam), m.tam, color, "izq", ANCHO_UTIL); L.y += m.lh; }
+        L.y += 4;
+        break;
       }
-    });
-  }
-
-  // ════════════════════════════════════════════════════════════════════════════
-  // CIERRE
-  // ════════════════════════════════════════════════════════════════════════════
-  if (d.cierre) {
-    const parrafos = String(d.cierre.texto ?? "").split(/\n[ \t]*\n/).filter((t) => tieneTexto(t, f));
-    parrafos.forEach((t, i) => L.parrafo(t, { alinear: "just", antes: i === 0 ? 14 : 0, despues: 8 }));
-    if (d.cierre.conFirma) L.firma(firmante, firmaImg, { antes: 10 });
-  }
+      case "vinetas":
+        L.lista(b.items ?? [], !!b.ordenada, { despues: 6 });
+        break;
+      case "tabla": {
+        const t = tablaDe(b, s);
+        L.dibujarTabla(t, { antes: antesDe(e), despues: 10 });
+        recortes.push(...t.recortes);
+        break;
+      }
+      case "nota": {
+        const aviso = b.tono === "aviso";
+        L.nota(b.texto, { fondo: aviso ? colorDe("#fff6e5") : aclarar(C, 0.9), barra: aviso ? colorDe("#d97706") : C, despues: 8 });
+        break;
+      }
+      case "imagen": {
+        const img = imagenDe(b.url);
+        if (!img) recortes.push(`Imagen no disponible (${nombreSeccion(s)})${b.pie && tieneTexto(b.pie, f) ? `: «${limpiar(b.pie, f.juego, 80)}»` : ""}. Quedó su recuadro con el pie.`);
+        L.figura(img, b.anchoPct, b.pie, { despues: 10 });
+        break;
+      }
+      case "salto_pagina":
+        if (!L.enCabeza) L.nueva();
+        break;
+    }
+  });
 
   // ════════════════════════════════════════════════════════════════════════════
   // ÍNDICE (segunda pasada: las hojas reales)
@@ -360,12 +402,12 @@ function renglonIndice(L: Lienzo, e: EntradaIndice, C: RGB): void {
   const num = limpiar(String(e.pagina), f.juego);
   const wNum = anchoTexto(fuente, num, tam);
   const xNum = MARGEN_X + ANCHO_UTIL - wNum;
-  const etiqueta = limpiar(e.nivel === 1 ? etiquetaSeccion(e.numero, e.titulo) : etiquetaSub(e.numero, e.titulo), f.juego, 300);
+  const etiqueta = limpiar(sinMarcas(e.nivel === 1 ? etiquetaSeccion(e.numero, e.titulo) : etiquetaSub(e.numero, e.titulo)), f.juego, 300);
   const titulo = recortarConElipsis(etiqueta, fuente, tam, Math.max(0, xNum - 18 - x0));
   L.texto(titulo, x0, base, fuente, tam, color);
   const xIni = x0 + anchoTexto(fuente, titulo, tam) + 4;
-  const wPunto = anchoTexto(f.reg, ".", tam);
-  const n = Math.floor((xNum - 4 - xIni) / (wPunto * 1.6));
+  const wPunto = anchoTexto(f.reg, ".", tam), wEsp = anchoTexto(f.reg, " ", tam);
+  const n = Math.floor((xNum - 4 - xIni + wEsp) / (wPunto + wEsp));
   if (n > 0) {
     // Puntos guía espaciados, alineados a la derecha (contra el número).
     const guia = Array.from({ length: n }, () => ".").join(" ");
@@ -415,7 +457,7 @@ function portadaGenerada(L: Lienzo, p: DocumentoResuelto["portada"], logo: PDFIm
     let tam = 34;
     let rs: Renglon[] = [];
     for (; tam >= 18; tam -= 2) {
-      rs = renglones(p.titulo, f, tam, ancho, { negrita: true, marcas: false });
+      rs = renglones(p.titulo, f, tam, ancho, { negrita: true });
       if (rs.length <= 3) break;
     }
     tam = Math.max(18, tam);
