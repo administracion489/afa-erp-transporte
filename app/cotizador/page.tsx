@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { faltaColumna } from "@/lib/columna-faltante";
 import { calcularCostoUnidad, escenariosPrecio, aplicarPisoHora, recorridoSugerido, RECORRIDO_CARRETERA, type ParametrosUnidad, type Recorrido } from "@/lib/costeo-propio";
 import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
+import { conIgvDe, margenSinIgv } from "@/lib/igv-par";
 import {
   NIVELES, NIVEL_CFG, equipamientoDeNivel, nivelDeFicha, fichasDelNivel, planDeNivel,
   type NivelServicio,
@@ -39,8 +40,10 @@ type Resultado = {
   sinIGV15:number; sinIGV20:number; sinIGV25:number;
   /** Por asiento, en las DOS bases. La pantalla publica la de sin IGV; ver `escenariosPrecio`. */
   precioPax20:number; precioPax20Sin:number;
+  /** Por asiento y por mes al margen ALTO, sin IGV: los publica el comparativo de flota. */
+  precioPax25Sin:number;
   diaEst:number; diaEstIGV:number; diaMinIGV:number; diaAltoIGV:number;
-  mesEst:number; mesEstIGV:number;
+  mesEst:number; mesEstIGV:number; mesAlto:number;
   /** Piso por hora (sin IGV) y si levantó el precio objetivo. 0 = no hay piso. */
   pisoHora:number; pisoAplicaEst:boolean;
 };
@@ -92,9 +95,11 @@ function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number
     totalMin15:e.conIgv.min, totalEst20:e.conIgv.est, totalAlto25:e.conIgv.alto,
     sinIGV15:e.sinIgv.min,  sinIGV20:e.sinIgv.est,  sinIGV25:e.sinIgv.alto,
     precioPax20:e.precioPax, precioPax20Sin:e.precioPaxSinIgv,
+    precioPax25Sin:e.precioPaxAltoSinIgv,
     diaEst:e.sinIgv.est, diaEstIGV:e.conIgv.est,
     diaMinIGV:e.conIgv.min, diaAltoIGV:e.conIgv.alto,
     mesEst:e.sinIgv.est * MESES_DIAS, mesEstIGV:e.conIgv.est * MESES_DIAS,
+    mesAlto:e.sinIgv.alto * MESES_DIAS,
     pisoHora:e.piso, pisoAplicaEst:e.pisoAplica.est,
   };
 }
@@ -982,6 +987,11 @@ export default function CotizadorPage(){
   async function enviar(){
     if(!resultado||!veh)return;
     setEnviando(true);setErrorEnv("");
+    // `cotizaciones.costo_estimado` es el costo interno CON IGV (lib/igv-par.ts) y `baseCosto` es
+    // sin IGV; `costo_cotizador` conserva el sin IGV del cotizador, como siempre. El precio va CON
+    // IGV (la fila nace con `incluye_igv` en true) y el margen se guarda SIN IGV en los dos lados.
+    const costoConIgv=conIgvDe(resultado.baseCosto);
+    const precioCot=modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV;
     const{data:{session:sesEnv}}=await supabase.auth.getSession();
     const payloadCot:Record<string,unknown>={
       vendedor_id:sesEnv?.user?.id??null,
@@ -990,8 +1000,8 @@ export default function CotizadorPage(){
       estado:"pendiente",modo_servicio:modo,tipo_servicio:tipoServ,
       tipo_vehiculo:veh.tipo_vehiculo,equipamiento:equipamientoDeNivel(nivel),
       precio_cliente:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
-      costo_estimado:resultado.baseCosto,
-      margen_estimado:modo==="eventual"?resultado.totalEst20-resultado.baseCosto:resultado.diaEstIGV-resultado.baseCosto,
+      costo_estimado:costoConIgv,
+      margen_estimado:margenSinIgv({modo_servicio:modo,incluye_igv:true,precio_cliente:precioCot,precio_dia:modo==="fijo"?resultado.diaEstIGV:null,costo_estimado:costoConIgv}),
       precio_cotizador:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
       costo_cotizador:resultado.baseCosto,margen_cotizador:20,
       vehiculo_cotizador:veh.nombre,
@@ -1369,7 +1379,7 @@ export default function CotizadorPage(){
                 {/* Comparativo */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                   <div className="px-5 py-4 border-b">
-                    <h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 20% · <span className="text-gray-400">sin IGV</span></h2>
+                    <h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 25% ·<span className="text-gray-400">sin IGV</span></h2>
                     {/* La usada va PEGADA a su gemela, no suelta en la lista ordenada por
                         capacidad: con las dos separadas por cinco filas, que una cueste más que
                         la otra se lee como un error de la pantalla en vez de como lo que es. */}
@@ -1383,7 +1393,7 @@ export default function CotizadorPage(){
                   {Object.entries(grupos).map(([grupo,vehs])=>{
                     const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
                     return(<div key={grupo}><div className="px-4 py-2 text-[10px] font-black uppercase tracking-wider border-b" style={{background:gc.color+"15",color:gc.color}}>{grupo}</div>
-                    <table className="w-full text-sm"><thead><tr className="bg-gray-50 border-b">{["Vehículo","Cap.",modo==="eventual"?"Total (20%) s/IGV":"Día (20%) s/IGV",modo==="eventual"?"S/pax s/IGV":"Mes ×26 s/IGV","Mín 15% s/IGV","UREA"].map(h=><th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>)}</tr></thead>
+                    <table className="w-full text-sm"><thead><tr className="bg-gray-50 border-b">{["Vehículo","Cap.",modo==="eventual"?"Total (25%) s/IGV":"Día (25%) s/IGV",modo==="eventual"?"S/pax s/IGV":"Mes ×26 s/IGV","Mín 15% s/IGV","UREA"].map(h=><th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>)}</tr></thead>
                     <tbody className="divide-y divide-gray-50">
                       {emparejarFlota(vehs).flatMap(par=>{
                         // El precio de la gemela nueva, para poder restar. Si la premium no
@@ -1392,12 +1402,15 @@ export default function CotizadorPage(){
                         const base=comparativo.find(c=>c.v.tipo_vehiculo===par.premium.tipo_vehiculo)?.r;
                         // Sin IGV en las dos puntas: el Δ es la diferencia entre lo que se
                         // publica arriba, no entre dos números que la tabla ya no enseña.
-                        const baseVal=base?base.sinIGV20:null;
+                        const baseVal=base?base.sinIGV25:null;
                         const filas=[par.premium,...(par.usada?[par.usada]:[])];
                         return filas.map((v,i)=>{
                           const item=comparativo.find(c=>c.v.tipo_vehiculo===v.tipo_vehiculo);
                           if(!item?.r)return null;const r=item.r;const act=v.tipo_vehiculo===idxVeh;
-                          const val=r.sinIGV20;   // eventual → total del evento; fijo → precio/día. Los dos, sin IGV.
+                          // Margen ALTO (25 %), pedido por AFA: el comparativo enseña el precio
+                          // con el que se abre la negociación. Eventual → total del evento; fijo →
+                          // precio/día. Los dos, sin IGV. Las columnas S/pax y Mes van al mismo 25 %.
+                          const val=r.sinIGV25;
                           const esGemela=i===1;
                           const delta=esGemela&&baseVal!==null?val-baseVal:null;
                           return(<tr key={v.tipo_vehiculo} onClick={()=>elegirFicha(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
@@ -1416,7 +1429,7 @@ export default function CotizadorPage(){
                                 <span className="ml-1.5 text-[9px] font-bold text-gray-400">{delta>0?"+":""}{fmtN(delta,0)}</span>
                               )}
                             </td>
-                            <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax20Sin,0)}`:fmt(r.mesEst)}</td>
+                            <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax25Sin,0)}`:fmt(r.mesAlto)}</td>
                             <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(r.sinIGV15)}</td>
                             <td className="px-3 py-2.5 text-center">{v.usa_urea?<span className="text-[10px] text-cyan-600 font-bold">🧪</span>:<span className="text-gray-200 text-xs">—</span>}</td>
                           </tr>);
