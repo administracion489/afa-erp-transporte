@@ -924,6 +924,8 @@ export async function firmasAnteriores(excluirId: number): Promise<Resultado<{ f
 const MIMES_POR_CARPETA: Partial<Record<CarpetaLicitacion, readonly MimeArchivo[]>> = {
   imagenes: ["image/png", "image/jpeg"],
   firmas: ["image/png", "image/jpeg"],
+  legajo: ["application/pdf", "image/png", "image/jpeg"],
+  conductores: ["application/pdf", "image/png", "image/jpeg"],
 };
 /** Lo que se puede UNIR a un expediente: PDF, PNG y JPG (legajo, documentos de unidad y de conductor). */
 const MIMES_UNIBLES: readonly MimeArchivo[] = ["application/pdf", "image/png", "image/jpeg"];
@@ -1026,7 +1028,8 @@ export async function subirArchivo(carpeta: CarpetaLicitacion, licId: number | n
   return { id: uuid, url, nombre, mime, bytes: file.size, sha256, paginas, subidoEn: new Date().toISOString() };
 }
 
-/** Sube al bucket `documentos` (el de documentos_empresa, documentos_vehiculo y documentos_tercero). */
+/** Sube al bucket `documentos`: SOLO para documentos de UNIDAD (subirDocUnidad), porque escribe la ficha de la
+ *  unidad, que es de /vehiculos y /tercerizadas y lee ese bucket. El legajo y los conductores van a subirPrivado. */
 async function subirADocumentos(db: ClienteDb, carpeta: string, file: File): Promise<{ ok: true; url: string; ruta: string; nombre: string; mime: MimeArchivo } | FalloDatos> {
   if (!file || typeof file.size !== "number") return { ok: false, error: "No se eligió ningún archivo." };
   if (file.size <= 0) return { ok: false, error: `«${file.name}» está vacío.` };
@@ -1045,6 +1048,33 @@ async function subirADocumentos(db: ClienteDb, carpeta: string, file: File): Pro
 /** Si la fila no se pudo escribir, el objeto recién subido sobra (best-effort: el bucket `documentos` lo permite). */
 async function retirarSubido(db: ClienteDb, ruta: string): Promise<void> {
   try { await db.storage.from("documentos").remove([ruta]); } catch { /* best-effort */ }
+}
+
+/**
+ * Sube el ARCHIVO de un documento del legajo o de un conductor al bucket PRIVADO e insert-only
+ * `licitaciones` (legajo/<uuid>.<ext> · conductores/<uuid>.<ext>, por rutaNueva). No va a `documentos`:
+ * ese bucket lo lee y lo SOBRESCRIBE cualquier sesión del ERP, y aquí hay DNI, antecedentes penales y
+ * policiales y exámenes médicos (auditoría de seguridad). Solo PDF, PNG o JPG (lo que se une al expediente).
+ * Si después la fila no se puede escribir, el objeto queda huérfano: el bucket no deja borrar (lo emitido
+ * y lo subido no se reescriben) y nadie lo referencia.
+ */
+async function subirPrivado(db: ClienteDb, carpeta: "legajo" | "conductores", file: File): Promise<{ ok: true; url: string; ruta: string; nombre: string; mime: MimeArchivo } | FalloDatos> {
+  if (!file || typeof file.size !== "number") return { ok: false, error: "No se eligió ningún archivo." };
+  if (file.size <= 0) return { ok: false, error: `«${file.name}» está vacío.` };
+  if (file.size > TOPES_DOC.maxBytesArchivo) return { ok: false, error: `«${file.name}» pesa ${(file.size / 1048576).toFixed(1)} MB y el tope es ${TOPES_DOC.maxBytesArchivo / 1048576} MB.` };
+  let mime: MimeArchivo;
+  try { mime = await mimeVerificado(file, MIMES_UNIBLES); }
+  catch (e) { return { ok: false, error: msgDe(e) }; }
+  const ext = extDeMime(mime);
+  let ruta: string;
+  try { ruta = rutaNueva(carpeta, null, nuevoUuid(), ext); }
+  catch (e) { return { ok: false, error: `No se pudo preparar la subida (${msgDe(e)}).` }; }
+  const nombre = nombreArchivo(file.name, ext);
+  const { error } = await db.storage.from(BUCKET_LICITACIONES).upload(ruta, file, { upsert: false, contentType: mime, cacheControl: "3600" });
+  if (error) return explicarStorage(error, BUCKET_LICITACIONES, nombre, SQL_LICITACIONES.bucket);
+  const url = String(db.storage.from(BUCKET_LICITACIONES).getPublicUrl(ruta)?.data?.publicUrl ?? "");
+  if (!url) return { ok: false, error: `«${nombre}» se subió pero no se pudo obtener su enlace. Vuelve a intentarlo.` };
+  return { ok: true, url, ruta, nombre, mime };
 }
 
 // ══ Legajo de la empresa y documentos del conductor (documentos_empresa) ════════
@@ -1066,7 +1096,9 @@ function validarFechas(f: FechasDoc): { fecha_emision?: FechaISO | null; fecha_v
 }
 
 const OPC_DE = ["conductor_tercero_id"];
-async function insertarDocEmpresa(db: ClienteDb, fila: Record<string, unknown>, ruta: string): Promise<Resultado<{ fila: FilaDocEmpresa }>> {
+/** La fila de documentos_empresa del archivo ya subido (por subirPrivado). Si no se puede escribir, el objeto
+ *  queda sin referencia en el bucket insert-only (no se puede retirar). */
+async function insertarDocEmpresa(db: ClienteDb, fila: Record<string, unknown>): Promise<Resultado<{ fila: FilaDocEmpresa }>> {
   let cols = [...COLS_DE];
   for (;;) {
     const { data, error } = await db.from("documentos_empresa").insert(fila).select(cols.join(","));
@@ -1079,7 +1111,6 @@ async function insertarDocEmpresa(db: ClienteDb, fila: Record<string, unknown>, 
     // entera, así que se puede repetir sin ella. Si la que falta es la que se ESCRIBE, se dice.
     const col = columnaFaltante(error);
     if (col && OPC_DE.includes(col) && cols.includes(col) && !tiene(fila, col)) { cols = cols.filter((c) => c !== col); continue; }
-    await retirarSubido(db, ruta);
     if (col === "conductor_tercero_id") {
       return { ok: false, sinMigracion: SQL_LICITACIONES.accesorias, error: `Para guardar documentos de un conductor tercerizado hay que correr ${SQL_LICITACIONES.accesorias} en Supabase → SQL Editor.` };
     }
@@ -1131,8 +1162,9 @@ export async function leerLegajo(): Promise<Resultado<{ filas: FilaDocEmpresa[];
 
 /**
  * Sube un documento del legajo como una fila NUEVA (las anteriores se conservan: el más reciente manda,
- * documentoVigente de legajo.ts). Archivo al bucket `documentos` en legajo/<codigo>/<uuid>.<ext>; fila con
- * alcance 'empresa', categoria = código, privado, y `estado` para /documentos (estadoParaColumna).
+ * documentoVigente de legajo.ts). Archivo al bucket PRIVADO `licitaciones` en legajo/<uuid>.<ext> (subirPrivado);
+ * fila con alcance 'empresa', categoria = código, privado, el enlace público del objeto como identificador
+ * y `estado` para /documentos (estadoParaColumna). Sin el bucket, el error nombra licitaciones-03.
  */
 export async function subirDocumentoLegajo(codigo: CodigoLegajo, file: File,
   datos: { titulo?: string | null; fecha_emision: FechaISO | null; fecha_vencimiento: FechaISO | null }): Promise<Resultado<{ fila: FilaDocEmpresa }>> {
@@ -1140,14 +1172,14 @@ export async function subirDocumentoLegajo(codigo: CodigoLegajo, file: File,
   const v = validarFechas(datos);
   if ("error" in v) return { ok: false, error: v.error };
   const db = await cliente();
-  const sub = await subirADocumentos(db, `legajo/${codigo}`, file);
+  const sub = await subirPrivado(db, "legajo", file);
   if (!sub.ok) return sub;
   return insertarDocEmpresa(db, {
     titulo: textoONull(datos.titulo, 300) ?? etiquetaCategoria(codigo), categoria: codigo, alcance: "empresa",
     archivo_url: sub.url, archivo_nombre: sub.nombre, privado: true,
     fecha_emision: v.fecha_emision ?? null, fecha_vencimiento: v.fecha_vencimiento ?? null,
     estado: estadoParaColumna(v.fecha_vencimiento ?? null),
-  }, sub.ruta);
+  });
 }
 export async function actualizarFechasLegajo(id: number, fechas: FechasDoc): Promise<Resultado<{ fila: FilaDocEmpresa }>> {
   return actualizarDocEmpresa(await cliente(), id, "empresa", fechas, CODIGOS_LEGAJO);
@@ -1174,7 +1206,7 @@ export async function leerDocsConductor(clave: ClaveRecurso): Promise<Resultado<
 
 /**
  * Sube un documento del conductor (fila nueva, alcance 'conductor', conductor_id o conductor_tercero_id).
- * Al bucket `documentos` en conductores/<p|t>-<id>/<codigo>/<uuid>.<ext>. OJO (D5): para el conductor
+ * Archivo al bucket PRIVADO `licitaciones` en conductores/<uuid>.<ext> (subirPrivado). OJO (D5): para el conductor
  * PROPIO la fecha que manda es la de su ficha (conductores.*_venc, se edita en /conductores); la fila
  * guarda el archivo y sus fechas, y la revisión avisa si no coinciden (conductor_doc_fechas_distintas).
  */
@@ -1192,7 +1224,7 @@ export async function subirDocumentoConductor(clave: ClaveRecurso, codigo: Codig
     const probe = await leer(db, "documentos_empresa", ["id", "conductor_tercero_id"], [], (q) => q.eq("id", -1));
     if (probe.faltaColumna === "conductor_tercero_id") return { ok: false, sinMigracion: SQL_LICITACIONES.accesorias, error: `Para subir documentos de un conductor tercerizado hay que correr ${SQL_LICITACIONES.accesorias} en Supabase → SQL Editor.` };
   }
-  const sub = await subirADocumentos(db, `conductores/${k[0]}-${id}/${codigo}`, file);
+  const sub = await subirPrivado(db, "conductores", file);
   if (!sub.ok) return sub;
   return insertarDocEmpresa(db, {
     titulo: textoONull(datos.titulo, 300) ?? etiquetaCategoria(codigo), categoria: codigo, alcance: "conductor",
@@ -1200,7 +1232,7 @@ export async function subirDocumentoConductor(clave: ClaveRecurso, codigo: Codig
     archivo_url: sub.url, archivo_nombre: sub.nombre, privado: true,
     fecha_emision: v.fecha_emision ?? null, fecha_vencimiento: v.fecha_vencimiento ?? null,
     estado: estadoParaColumna(v.fecha_vencimiento ?? null),
-  }, sub.ruta);
+  });
 }
 export async function actualizarFechasDocConductor(id: number, fechas: FechasDoc): Promise<Resultado<{ fila: FilaDocEmpresa }>> {
   return actualizarDocEmpresa(await cliente(), id, "conductor", fechas, CODIGOS_DOC_CONDUCTOR);
@@ -1473,12 +1505,18 @@ export async function guardarAnioTercero(id: number, anio: number | null): Promi
 export type FilaEmisionResumen = Omit<FilaEmision, "foto"> & { emitido_por_nombre: string | null };
 const COLS_EMISION = ["id", "licitacion_id", "version", "carpeta", "emitido_por", "emitido_en", "doc_version", "firma", "archivos", "hallazgos", "omitidos", "nota"];
 
+/** Una lista jsonb de la base: solo si ES un array, y solo sus elementos que son objetos (un null suelto o un
+ *  texto no rompen la pantalla que la recorre). */
+const listaDeObjetos = (x: unknown): Record<string, unknown>[] => lista(x).filter(esObjeto);
+
 function aEmision(r: Fila): Omit<FilaEmision, "foto"> {
   return {
     id: Number(r.id), licitacion_id: Number(r.licitacion_id), version: Number(r.version), carpeta: String(r.carpeta ?? ""),
     emitido_por: String(r.emitido_por ?? ""), emitido_en: instante(r.emitido_en), doc_version: Number(r.doc_version),
-    firma: String(r.firma ?? ""), archivos: lista(r.archivos) as FilaEmision["archivos"], hallazgos: lista(r.hallazgos) as FilaEmision["hallazgos"],
-    omitidos: lista(r.omitidos) as FilaEmision["omitidos"], nota: str(r.nota),
+    firma: String(r.firma ?? ""),
+    archivos: listaDeObjetos(r.archivos) as unknown as FilaEmision["archivos"],
+    hallazgos: listaDeObjetos(r.hallazgos) as unknown as FilaEmision["hallazgos"],
+    omitidos: listaDeObjetos(r.omitidos) as unknown as FilaEmision["omitidos"], nota: str(r.nota),
   };
 }
 
@@ -1500,7 +1538,11 @@ export async function ultimaEmision(licId: number): Promise<Resultado<{ emision:
   if (error) return explicar(error, { accion: "leer la última emisión", tabla: "licitacion_emisiones", sql: SQL_LICITACIONES.tablas });
   if (!data) return { ok: true, emision: null };
   const r = data as Fila;
-  return { ok: true, emision: { ...aEmision(r), foto: (esObjeto(r.foto) ? r.foto : {}) as FilaEmision["foto"] } };
+  // La foto la arma emitir.ts; aquí solo se garantiza que `fuentes` (lo que la revisión recorre para decir qué
+  // archivo cambió desde la emisión) sea una lista de objetos aunque la fila venga mal formada.
+  const foto = esObjeto(r.foto) ? { ...r.foto } : {};
+  foto.fuentes = listaDeObjetos(foto.fuentes);
+  return { ok: true, emision: { ...aEmision(r), foto: foto as unknown as FilaEmision["foto"] } };
 }
 
 // ══ Último análisis IA de las bases (licitacion_analisis, lo escribe SOLO el servidor) ══

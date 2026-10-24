@@ -27,6 +27,7 @@ import ModalEmision, { type Instantanea } from "./revision/ModalEmision";
 import Historial, { useHistorial } from "./revision/Historial";
 import { nombreUsuarioActual } from "./revision/consultas";
 import { firmaArchivos } from "./revision/resumen";
+import { ultimaSegura, versionMostrable } from "./revision/emision-segura";
 import { BOTON_PRIMARIO, BOTON_SECUNDARIO, Nota, Seccion } from "./revision/ui";
 
 /** La emisión arma PDF de cientos de MB en el navegador: solo desde una computadora. */
@@ -56,7 +57,8 @@ export default function PasoRevision(p: PasoProps) {
     if (!ultimaPromesa.current) {
       ultimaPromesa.current = ultimaEmision(licId).then(
         (r) => {
-          if (r.ok) { setUltima(r.emision); setErrorUltima(null); return r.emision; }
+          // Una fila mal formada (insertada a mano) no puede tumbar la revisión: se reconstruye.
+          if (r.ok) { const u = ultimaSegura(r.emision); setUltima(u); setErrorUltima(null); return u; }
           setErrorUltima(r.error); ultimaPromesa.current = null; return null;
         },
         (e) => { setErrorUltima(msg(e) || "error inesperado"); ultimaPromesa.current = null; return null; },
@@ -85,7 +87,6 @@ export default function PasoRevision(p: PasoProps) {
   // ── Historial ──
   const [vezHistorial, setVezHistorial] = useState(0);
   const historial = useHistorial(licId, vezHistorial);
-  const proximaVersion = historial.fase === "ok" ? Math.max(0, ...historial.filas.map((f) => f.version)) + 1 : null;
 
   // ── Lo que el modal lee DESPUÉS de guardar (las props de ese momento quedan viejas) ──
   const inst = useRef<Instantanea>({ lic: p.lic, ctx: p.ctx, pendiente: extra.pendiente, fase: extra.fase, errorGuardado: extra.errorGuardado });
@@ -101,10 +102,13 @@ export default function PasoRevision(p: PasoProps) {
   if (revision && revision !== revModal) setRevModal(revision);
   const { aviso } = p;
   const onEmitida = useCallback((fila: FilaEmision) => {
-    setUltima(fila);
-    ultimaPromesa.current = Promise.resolve(fila);
+    const u = ultimaSegura(fila);
+    setUltima(u);
+    ultimaPromesa.current = Promise.resolve(u);
     setVezHistorial((v) => v + 1);
-    aviso(`Emisión versión ${fila.version} registrada.`);
+    // La versión la asigna la base: se enseña la que devolvió la fila registrada.
+    const v = versionMostrable(fila.version);
+    aviso(v != null ? `Emisión versión ${v} registrada.` : "Emisión registrada.");
   }, [aviso]);
   const cerrarModal = useCallback(() => setModal(false), []);
 
@@ -184,7 +188,7 @@ export default function PasoRevision(p: PasoProps) {
           comprobacionVieja={!!comprobacion && comprobacion.firma !== firmaActual}
           pendiente={extra.pendiente} faseGuardado={extra.fase}
           leer={leer} guardarAhora={extra.guardarAhora} asegurarUltima={asegurarUltima}
-          proximaVersion={proximaVersion} onEmitida={onEmitida} onCerrar={cerrarModal}
+          onEmitida={onEmitida} onCerrar={cerrarModal}
         />
       )}
     </div>

@@ -32,9 +32,9 @@
 
 import { PDFDocument, StandardFonts, degrees, rgb, type PDFFont, type PDFImage, type PDFPage, type RGB } from "pdf-lib";
 import { aWinAnsi } from "../../pdf-winansi";
-import { formatoPorFirma } from "../../traslados/fotos-categoria";
+import { formatoPorFirma, revisarJpeg, revisarPng } from "../../traslados/fotos-categoria";
 import type { ImagenPdf } from "../../pdf-corporativo";
-import type { TrazaLic } from "../tipos";
+import { TOPES_DOC, type TrazaLic } from "../tipos";
 
 export type { ImagenPdf };
 export type ZonaTraza = TrazaLic["zona"];
@@ -308,14 +308,67 @@ export function conTope(rs: Renglon[], max: number, f: Fuentes, tam: number, anc
 // ══ Imágenes ═══════════════════════════════════════════════════════════════════
 
 /**
+ * Topes de una imagen del módulo ANTES de dársela a pdf-lib (NO medidos, declarados; el lado seguro es
+ * bajarlos). pdf-lib DECODIFICA el PNG entero en memoria (UPNG) con las medidas que declara el archivo —
+ * también las de un fotograma APNG (`fcTL`): un PNG de 162 bytes que declara 16000 × 16000 colgó la
+ * pestaña ~24 s y ~1,1 GB —, así que el PNG se limita por lado y por megapíxeles. El JPEG NO lo decodifica
+ * (lo incrusta tal cual), así que su lado admite más: alcanza para la foto de un teléfono de 50 Mpx y un
+ * escaneo A4 a 600 ppp. Bytes: el tope del bucket (TOPES_DOC.maxBytesArchivo).
+ */
+export const IMAGEN_LIC = {
+  ladoMaxPng: 8000,
+  pixelesMaxPng: 24_000_000,
+  ladoMaxJpg: 12_000,
+  bytesMax: TOPES_DOC.maxBytesArchivo,
+} as const;
+
+export type RevisionImagenLic =
+  | { ok: true; formato: "png" | "jpg"; ancho: number; alto: number }
+  | { ok: false; motivo: "no_es_imagen" | "animada" | "demasiado_grande" | "ilegible"; detalle: string };
+
+const MB_IMG = (n: number) => `${Math.round(n / 1048576)} MB`;
+
+/**
+ * ¿Se le puede dar esta imagen a pdf-lib sin riesgo? Mira la FIRMA y recorre el archivo SIN decodificar
+ * (revisarPng / revisarJpeg de lib/traslados/fotos-categoria, con los topes de IMAGEN_LIC): rechaza el PNG
+ * animado (acTL/fcTL/fdAT), el que declara medidas enormes o trae más datos de los que su imagen puede
+ * ocupar, y el JPEG que pdf-lib no sabría leer. El motivo se DECLARA y el detalle dice qué hacer. PURO.
+ */
+export function revisarImagenLic(b: Uint8Array | null | undefined): RevisionImagenLic {
+  if (!b || !(b instanceof Uint8Array) || !b.length) return { ok: false, motivo: "no_es_imagen", detalle: "La imagen está vacía." };
+  const f = formatoPorFirma(b);
+  const L = IMAGEN_LIC;
+  if (f === "png") {
+    const r = revisarPng(b, { maxLado: L.ladoMaxPng, maxPixeles: L.pixelesMaxPng, maxBytes: L.bytesMax });
+    if (r.ok) return { ok: true, formato: "png", ancho: r.ancho, alto: r.alto };
+    if (r.codigo === "animado") return { ok: false, motivo: "animada", detalle: "Es un PNG animado (APNG): el expediente no lo une. Guárdalo como PNG o JPG sin animación." };
+    if (r.codigo === "muy_grande" || r.codigo === "muy_pesado") {
+      return { ok: false, motivo: "demasiado_grande", detalle: `${r.detalle} El expediente acepta un PNG de hasta ${L.ladoMaxPng} px por lado y ${L.pixelesMaxPng / 1e6} megapíxeles (y ${MB_IMG(L.bytesMax)}): guárdalo más chico (300 ppp alcanzan), como JPG o como PDF.` };
+    }
+    return { ok: false, motivo: "ilegible", detalle: `El PNG está dañado o armado de una forma que el PDF no puede leer (${r.detalle}). Vuelve a exportarlo como PNG o JPG.` };
+  }
+  if (f === "jpeg") {
+    const r = revisarJpeg(b, { maxBytes: L.bytesMax, maxLado: L.ladoMaxJpg, exigirFin: false });
+    if (r.ok) return { ok: true, formato: "jpg", ancho: r.ancho, alto: r.alto };
+    if (r.codigo === "muy_grande" || r.codigo === "muy_pesado") {
+      return { ok: false, motivo: "demasiado_grande", detalle: `${r.detalle} El expediente acepta un JPG de hasta ${L.ladoMaxJpg} px por lado (y ${MB_IMG(L.bytesMax)}).` };
+    }
+    return { ok: false, motivo: "ilegible", detalle: `El JPG no se puede unir: ${r.detalle}` };
+  }
+  return { ok: false, motivo: "no_es_imagen", detalle: "No es una imagen PNG ni JPG." };
+}
+
+/**
  * Incrusta un PNG o JPEG después de mirar su FIRMA (la declarada en `tipo` no manda: un PNG con
- * nombre .jpg se incrusta como PNG). Lo que no es PNG ni JPEG, o lo que pdf-lib no sabe leer,
- * devuelve null. Nunca lanza. Se pasa una COPIA de los bytes (pdf-lib lee el JPEG con un DataView
- * sobre el buffer entero, y un subarray de un buffer mayor lo confundiría).
+ * nombre .jpg se incrusta como PNG) y de pasarla por `revisarImagenLic`. Lo que no es PNG ni JPEG, lo
+ * que no pasa la revisión, o lo que pdf-lib no sabe leer, devuelve null. Nunca lanza. Se pasa una COPIA
+ * de los bytes (pdf-lib lee el JPEG con un DataView sobre el buffer entero, y un subarray de un buffer
+ * mayor lo confundiría).
  */
 export async function incrustarImagen(doc: PDFDocument, img: ImagenPdf | null | undefined): Promise<PDFImage | null> {
   const b = img?.bytes;
   if (!b || !(b instanceof Uint8Array) || !b.length) return null;
+  if (!revisarImagenLic(b).ok) return null;
   const formato = formatoPorFirma(b);
   try {
     if (formato === "png") return await doc.embedPng(new Uint8Array(b));

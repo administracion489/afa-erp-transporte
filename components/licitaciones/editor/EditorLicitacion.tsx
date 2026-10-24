@@ -248,7 +248,9 @@ export default function EditorLicitacion({ id }: { id: number }) {
   }, [guardarYa]);
 
   // ── Salir con algo pendiente ──
-  const hayQueAvisarAlSalir = edicion.pendiente || tiendaIA.fase !== "inactivo" || (!!tiendaIA.resultado && !tiendaIA.aplicado);
+  // Un análisis en pantalla sin aplicar ya no avisa: quedó guardado y se puede retomar sin volver a pagar.
+  // Una lectura EN CURSO sí: se cobra igual y, si se corta, puede no llegar a guardarse.
+  const hayQueAvisarAlSalir = edicion.pendiente || tiendaIA.fase !== "inactivo";
   useEffect(() => {
     if (!hayQueAvisarAlSalir) return;
     const antes = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };

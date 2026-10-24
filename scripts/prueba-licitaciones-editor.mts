@@ -10,6 +10,10 @@
 //      archivada = solo lectura, y al desmontar se manda lo pendiente;
 //  2 · la lectura con IA (useLecturaIA): guarda antes, estima, el confirm nombra el costo, lee; cancelar
 //      no lee; sin guardar no se gasta nada; tasa con su plazo; 401/403 nombran el módulo; 504 sin JSON;
+//      RETOMAR: al montar se pregunta por el último análisis guardado (ultimoAnalisis) y se ofrece; se carga
+//      como uno recién leído (mismo id); las etiquetas A1… cuentan solo lo LEÍDO (un protegido no corre la
+//      cuenta de los demás en silencio: recién leído, sin saber cuál se omitió, no se afirma ninguna); si
+//      la consulta falla no se ofrece retomar y nada se rompe;
 //  3 · el editor de reglas: ida y vuelta regla → borrador → regla en los 16 tipos (= normalizarRegla)
 //      y un borrador incompleto nunca entrega una regla;
 //  4 · las anclas: el elemento y, de respaldo, su panel (contrato-editor.ts).
@@ -30,7 +34,7 @@ const { createRoot } = requerir("react-dom/client") as typeof import("react-dom/
 const { fijarClienteDatos } = requerir("../lib/licitaciones/datos.ts") as typeof import("../lib/licitaciones/datos");
 const { docVacio, normalizarRegla } = requerir("../lib/licitaciones/normalizar.ts") as typeof import("../lib/licitaciones/normalizar");
 const { useEdicionLicitacion, RETRASO_GUARDADO_MS } = requerir("../components/licitaciones/editor/useEdicionLicitacion.ts") as typeof import("../components/licitaciones/editor/useEdicionLicitacion");
-const { useLecturaIA } = requerir("../components/licitaciones/editor/analisis-ia.tsx") as typeof import("../components/licitaciones/editor/analisis-ia");
+const { useLecturaIA, resultadoDeGuardado } = requerir("../components/licitaciones/editor/analisis-ia.tsx") as typeof import("../components/licitaciones/editor/analisis-ia");
 const { borradorDe, reglaDeBorrador } = requerir("../components/licitaciones/editor/bases/EditorRegla.tsx") as typeof import("../components/licitaciones/editor/bases/EditorRegla");
 const { candidatosAncla } = requerir("../components/licitaciones/editor/navegacion.ts") as typeof import("../components/licitaciones/editor/navegacion");
 
@@ -56,8 +60,15 @@ const fila: Record<string, unknown> = {
 };
 const llamadas: { patch: Record<string, unknown>; version: unknown }[] = [];
 let enVuelo = 0, maxEnVuelo = 0, retraso = 0;
+// licitacion_analisis: la fila del «último análisis» (null = no hay) o un error de lectura.
+let analisisFila: Record<string, unknown> | null = null, analisisError = false, nConsultasAnalisis = 0;
 async function ejecutar(st: Q) {
   if (st.tabla === "usuarios") return { data: [{ id: "u-otra", nombre: "Ana" }], error: null };
+  if (st.tabla === "licitacion_analisis") {
+    nConsultasAnalisis++;
+    if (analisisError) return { data: null, error: { message: "permission denied for table licitacion_analisis", code: "42501" } };
+    return { data: st.una ? analisisFila : analisisFila ? [analisisFila] : [], error: null };
+  }
   if (st.op === "update") {
     enVuelo++; maxEnVuelo = Math.max(maxEnVuelo, enVuelo);
     await espera(retraso);
@@ -76,6 +87,7 @@ function builder(tabla: string) {
   const b = {
     select() { return b; }, update(p: Record<string, unknown>) { st.op = "update"; st.patch = p; return b; },
     eq(k: string, v: unknown) { st.filtros.push([k, v]); return b; }, in() { return b; }, order() { return b; }, range() { return b; },
+    not() { return b; }, limit() { return b; },
     maybeSingle() { st.una = true; return b; },
     then(res: (x: unknown) => unknown, rej: (e: unknown) => unknown) { return ejecutar(st).then(res, rej); },
   };
@@ -170,18 +182,63 @@ sec("2 · lectura con IA");
   let t: TiendaIA | null = null;
   function SondaIA() { t = useLecturaIA(9, guardarAhora); return null; }
   const T = () => t as TiendaIA;
+  const vacioAnalisis = { concurso: {}, requisitos: [], consultas: [], estructura: [], penalidades: [], criterios: [], advertencias: [] };
+  const filaAnalisis = (id: number, archivos: { id: string; nombre: string; omitido: string | null }[], costo: number | null) => ({
+    id, creado_en: "2026-10-24T14:05:00Z", terminado_en: "2026-10-24T14:07:00Z", usuario_id: "u-otra",
+    archivos, resultado: vacioAnalisis, avisos: [], costo_usd: costo,
+  });
   const root = createRoot(contenedor());
-  await act(async () => { root.render(createElement(SondaIA)); });
+  await act(async () => { root.render(createElement(SondaIA)); await espera(20); });
+  check(nConsultasAnalisis === 1 && T().retomable.estado === "ninguno" && !T().puedeRetomar, "al montar se pregunta por el último análisis; sin ninguno, no se ofrece");
 
+  analisisFila = filaAnalisis(5, [{ id: "b1", nombre: "Bases.pdf", omitido: null }, { id: "b2", nombre: "TDR.pdf", omitido: null }], 0.39);
   respuestas = [
     { status: 200, cuerpo: { ok: true, modo: "estimacion", tokensEntrada: 52000, paginas: 30, costoUsdMax: 1.17 } },
-    { status: 200, cuerpo: { ok: true, modo: "analisis", analisisId: 5, resultado: { concurso: {}, requisitos: [], consultas: [], estructura: [], penalidades: [], criterios: [], advertencias: [] }, avisos: [], uso: { tokensEntrada: 52000, tokensSalida: 9000, costoUsd: 0.39 } } },
+    { status: 200, cuerpo: { ok: true, modo: "analisis", analisisId: 5, resultado: vacioAnalisis, avisos: [], uso: { tokensEntrada: 52000, tokensSalida: 9000, costoUsd: 0.39 } } },
   ];
   await act(async () => { await T().leer(["b1", "b2"], null); });
+  await act(async () => { await espera(20); });
   check(nGuardar === 1, "guarda antes de leer (el servidor lee lo guardado)");
   check(pedidos.length === 2 && pedidos[0].estimar === true && pedidos[1].estimar === false && (pedidos[1].archivo_ids as string[]).join() === "b1,b2" && pedidos[1].licitacion_id === 9, "estima y después lee, con los ids de las bases");
   check(/US\$ 1\.17/.test(textoConfirm) && /30 páginas/.test(textoConfirm), "el confirm nombra el costo máximo y las páginas");
-  check(T().resultado?.analisisId === 5 && T().resultado?.archivos[1].etiqueta === "A2" && T().fase === "inactivo" && !T().aplicado, "el resultado queda en memoria con sus etiquetas A1/A2");
+  check(T().resultado?.analisisId === 5 && T().resultado?.origen === "lectura" && T().resultado?.archivos[1].etiqueta === "A2" && T().fase === "inactivo" && !T().aplicado, "el resultado queda en memoria con sus etiquetas A1/A2");
+  check(nConsultasAnalisis === 2 && T().retomable.estado === "listo" && T().puedeRetomar, "tras leer se vuelve a preguntar: el recién leído queda como retomable");
+
+  await act(async () => { T().descartar(); });
+  check(T().resultado === null && T().puedeRetomar, "cerrar el análisis no lo pierde: sigue ofreciéndose retomarlo");
+  await act(async () => { T().retomar(); });
+  const rr = T().resultado;
+  check(rr?.analisisId === 5 && rr?.origen === "guardado" && rr?.porNombre === "Ana" && rr?.uso.costoUsd === 0.39 && rr?.uso.tokensEntrada === null, "retomar lo carga con su id, quién lo leyó y su costo (sin tokens inventados)");
+  check(rr?.archivos.map((x) => x.etiqueta).join() === "A1,A2" && rr?.archivos[0].nombre === "Bases.pdf", "retomado: etiquetas y nombres de lo leído");
+  await act(async () => { T().descartar(); });
+
+  // Un protegido: el servidor etiqueta solo lo leído (b2 pasa a ser A1).
+  analisisFila = filaAnalisis(6, [{ id: "b1", nombre: "Bases.pdf", omitido: "pdf_protegido" }, { id: "b2", nombre: "TDR.pdf", omitido: null }], 0.2);
+  respuestas = [
+    { status: 200, cuerpo: { ok: true, modo: "estimacion", tokensEntrada: 9000, paginas: 4, costoUsdMax: 0.3 } },
+    { status: 200, cuerpo: { ok: true, modo: "analisis", analisisId: 6, resultado: vacioAnalisis, avisos: [{ codigo: "archivo_omitido", detalle: "«Bases.pdf» está protegido" }], uso: { tokensEntrada: 9000, tokensSalida: 900, costoUsd: 0.2 } } },
+  ];
+  await act(async () => { await T().leer(["b1", "b2"], null); });
+  await act(async () => { await espera(20); });
+  const ro = T().resultado;
+  check(ro?.analisisId === 6 && ro?.origen === "lectura" && ro?.archivos[0].etiqueta === null && ro?.archivos[0].omitido === "pdf_protegido" && ro?.archivos[1].etiqueta === "A1", "con un archivo omitido, la fila guardada dice cuál: b2 es A1 y b1 no tiene etiqueta");
+  await act(async () => { T().descartar(); });
+
+  // Si la consulta del último análisis falla: el recién leído no afirma etiquetas y no se ofrece retomar.
+  analisisError = true;
+  respuestas = [
+    { status: 200, cuerpo: { ok: true, modo: "estimacion", tokensEntrada: 9000, paginas: 4, costoUsdMax: 0.3 } },
+    { status: 200, cuerpo: { ok: true, modo: "analisis", analisisId: 7, resultado: vacioAnalisis, avisos: [{ codigo: "archivo_omitido", detalle: "«Bases.pdf» está protegido" }], uso: { tokensEntrada: 9000, tokensSalida: 900, costoUsd: 0.2 } } },
+  ];
+  await act(async () => { await T().leer(["b1", "b2"], null); });
+  await act(async () => { await espera(20); });
+  check(T().resultado?.analisisId === 7 && T().resultado?.archivos.every((x) => x.etiqueta === null) === true, "sin saber cuál se omitió, no se afirma ninguna etiqueta");
+  check(T().retomable.estado === "error" && !T().puedeRetomar && T().resultado !== null, "la consulta fallida no rompe nada: solo no se ofrece retomar");
+  await act(async () => { T().descartar(); });
+  analisisError = false;
+
+  const rg = resultadoDeGuardado({ id: 3, creado_en: "2026-10-24T14:00:00Z", terminado_en: null, usuario_nombre: null, archivos: [{ id: "x", nombre: "a", omitido: null }, { id: "y", nombre: "b", omitido: "pdf_ilegible" }, { id: "z", nombre: "c", omitido: null }], resultado: vacioAnalisis as never, avisos: [], costo_usd: null });
+  check(rg.archivos.map((x) => x.etiqueta ?? "-").join() === "A1,-,A2" && rg.en === Date.parse("2026-10-24T14:00:00Z") && rg.uso.costoUsd === null, "resultadoDeGuardado: las etiquetas saltan al omitido; sin terminado_en usa creado_en");
 
   pedidos.length = 0; confirmar = false;
   respuestas = [{ status: 200, cuerpo: { ok: true, modo: "estimacion", tokensEntrada: 10, paginas: 1, costoUsdMax: null } }];

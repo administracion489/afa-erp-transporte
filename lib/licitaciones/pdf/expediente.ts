@@ -43,7 +43,7 @@ import { PDFDocument, StandardFonts, degrees, type PDFFont, type PDFImage, type 
 import {
   A4, ANCHO_UTIL, BLANCO, GEOMETRIA_LIC, GRIS_BORDE, GRIS_CEBRA, GRIS_TEXTO, Lienzo, MARGEN_X, TINTA,
   anchoTexto, cargarFuentes, colorDe, conTope, dibujarCabecera, escalarImagen, limpiar, lineaBase,
-  renglones, type Fuentes, type ImagenPdf, type Renglon, type ZonaTraza,
+  renglones, revisarImagenLic, type Fuentes, type ImagenPdf, type Renglon, type ZonaTraza,
 } from "./comun";
 import type {
   BloqueExpedienteResuelto, CodigoHallazgo, CuadroExperiencia, FichaUnidad, Moneda, OmitidoEmision,
@@ -207,9 +207,13 @@ function dibujarImagenEnCaja(p: PDFPage, img: PDFImage, o: Orientacion, caja: { 
   else p.drawImage(img, { x: bx, y: by, width: dW, height: dH });
 }
 
-/** Una imagen incrustada con su orientación. Nunca lanza (null = no se pudo leer). */
+/**
+ * Una imagen incrustada con su orientación. Antes de pdf-lib pasa por `revisarImagenLic` (pdf/comun.ts):
+ * un PNG animado o que declara medidas enormes no se decodifica. Nunca lanza (null = no se pudo leer).
+ */
 async function incrustarConOrientacion(doc: PDFDocument, bytes: Uint8Array | null | undefined): Promise<{ img: PDFImage; o: Orientacion } | null> {
   if (!bytes || !(bytes instanceof Uint8Array) || !bytes.length) return null;
+  if (!revisarImagenLic(bytes).ok) return null;
   const fmt = formatoDeBytes(bytes);
   try {
     if (fmt === "png") return { img: await doc.embedPng(new Uint8Array(bytes)), o: 1 };
@@ -659,6 +663,8 @@ export async function armarBloque(bloque: BloqueExpedienteResuelto, comun: Comun
           const err = await copiarPdf(c.doc);
           if (err) { omitir(parte, parte.url, "pdf_ilegible", err); while (doc.getPageCount() > antes) doc.removePage(doc.getPageCount() - 1); }
         } else {
+          const seg = revisarImagenLic(a.bytes);
+          if (!seg.ok && seg.motivo !== "no_es_imagen") { omitir(parte, parte.url, "archivo_formato_no_soportado", seg.detalle); break; }
           const im = await incrustarConOrientacion(doc, a.bytes);
           if (!im) { omitir(parte, parte.url, "archivo_formato_no_soportado", "No es un PDF, PNG ni JPEG que se pueda leer."); break; }
           hojaDeImagen(doc, im.img, im.o);

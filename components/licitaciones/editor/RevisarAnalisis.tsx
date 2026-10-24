@@ -19,7 +19,7 @@ import {
   type AnalisisBases, type CitaBases, type DocLicitacion, type Licitacion, type Paso, type RequisitoPropuesto,
 } from "@/lib/licitaciones/tipos";
 import type { ColumnasLic, TonoAviso } from "./contrato-editor";
-import type { ResultadoIA } from "./analisis-ia";
+import type { ArchivoAnalisis, ResultadoIA } from "./analisis-ia";
 import { ETIQUETA_CATEGORIA, instanteLima } from "./etiquetas";
 import { BOTON, BOTON_PRIMARIO, Chip, Tarjeta, claveTexto } from "./bases/ui";
 
@@ -59,15 +59,15 @@ export default function RevisarAnalisis({ r, lic, doc, cambiarDoc, cambiarColumn
   const aceptados = useMemo(() => new Set(mismo ? doc.analisis.aceptados : []), [mismo, doc.analisis.aceptados]);
   const descartados = useMemo(() => new Set(mismo ? doc.analisis.descartados : []), [mismo, doc.analisis.descartados]);
 
-  // Nombres de los archivos citados: etiqueta del envío (A1…) + nombre del archivo en las bases.
+  // Nombres de los archivos citados: etiqueta del envío (A1…, si se sabe) + nombre en las bases de hoy
+  // (o el que tenía al leerse, si ya no está).
   const nombres = useMemo(() => {
     const m = new Map<string, string>();
-    for (const x of r.archivos) {
-      const b = doc.bases.find((y) => y.id === x.id);
-      m.set(x.id, `${x.etiqueta}${b ? ` · ${b.nombre}` : " · (ya no está en las bases)"}`);
-    }
+    for (const x of r.archivos) m.set(x.id, nombreArchivo(x, doc.bases));
     return m;
   }, [r.archivos, doc.bases]);
+  const omitidos = r.archivos.filter((x) => x.omitido != null);
+  const leidos = r.archivos.length - omitidos.length;
 
   // ── (a) Datos del concurso ──
   const filasDatos = CAMPOS.map((c) => {
@@ -183,7 +183,7 @@ export default function RevisarAnalisis({ r, lic, doc, cambiarDoc, cambiarColumn
 
   const pendientesAplicar = elegiblesReq.length + elegiblesCon.length + (estructuraUsada ? 0 : a.estructura.length ? 1 : 0);
   const cerrar = () => {
-    if (pendientesAplicar > 0 && !window.confirm("Hay puntos del análisis que no se aplicaron. Si cierras, el resultado se pierde (no queda en la pantalla) y para verlo de nuevo hay que volver a leer las bases, que se cobra otra vez.\n\n¿Cerrar el análisis?")) return;
+    if (pendientesAplicar > 0 && !window.confirm("Hay puntos del análisis que no se aplicaron.\n\nAl cerrar salen de la pantalla, pero el análisis queda guardado: lo puedes retomar desde «Leer las bases con IA» sin volver a pagar. Ojo: se ofrece solo el ÚLTIMO análisis leído de esta licitación; si alguien vuelve a leer las bases, se ofrecerá ese.\n\n¿Cerrar el análisis?")) return;
     onCerrar();
   };
 
@@ -193,8 +193,28 @@ export default function RevisarAnalisis({ r, lic, doc, cambiarDoc, cambiarColumn
 
   return (
     <Tarjeta id="analisis" titulo={`🔎 Revisar el análisis de la IA (N° ${r.analisisId})`}
-      subtitulo={<>Leído {instanteLima(r.en)} · {r.archivos.length} archivo(s){r.conTexto ? " + texto pegado" : ""} · {r.uso.tokensEntrada.toLocaleString("es-PE")} tokens de entrada, {r.uso.tokensSalida.toLocaleString("es-PE")} de salida{r.uso.costoUsd != null ? ` · US$ ${r.uso.costoUsd.toFixed(2)}` : ""}. <b>La IA propone; tú decides qué entra.</b> El resultado vive solo en esta pantalla: si la cierras sin aplicarlo, tendrás que volver a leer las bases.</>}
+      subtitulo={<>{lineaOrigen(r, leidos, omitidos.length)} <b>La IA propone; tú decides qué entra.</b> El análisis queda guardado: si cierras esta revisión, puedes retomarlo desde «Leer las bases con IA» sin volver a pagar (se ofrece el último leído).</>}
       acciones={<button type="button" className={BOTON} onClick={cerrar}>Cerrar el análisis</button>}>
+
+      {mismo && (
+        <p className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+          Ya aplicaste este análisis ({doc.analisis.aceptados.length} punto(s) aceptado(s){doc.analisis.descartados.length ? `, ${doc.analisis.descartados.length} descartado(s)` : ""}): lo que no marcaste sigue disponible para agregarlo.
+        </p>
+      )}
+      {!mismo && doc.analisis.aplicadoId != null && (
+        <p className="text-[11px] text-gray-500">
+          Antes aplicaste otro análisis (N° {doc.analisis.aplicadoId}). Lo que ya agregaste de él se queda; al agregar algo de este, la marca de «ya agregado» pasa a ser la de este análisis.
+        </p>
+      )}
+
+      {omitidos.length > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <p className="font-bold">No se leyó {omitidos.length === 1 ? "1 archivo" : `${omitidos.length} archivos`}: lo que diga no está en este análisis.</p>
+          <ul className="list-disc pl-4 mt-0.5 space-y-0.5">
+            {omitidos.map((x) => <li key={x.id}><span className="break-all">{nombres.get(x.id)}</span> — {MOTIVO_OMITIDO[x.omitido ?? ""] ?? `no se pudo leer (${x.omitido})`}</li>)}
+          </ul>
+        </div>
+      )}
 
       {r.avisos.length > 0 && (
         <details className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
@@ -380,6 +400,30 @@ export default function RevisarAnalisis({ r, lic, doc, cambiarDoc, cambiarColumn
       )}
     </Tarjeta>
   );
+}
+
+/** Por qué el servidor no leyó un archivo (los códigos de licitacion_analisis.archivos[].omitido). */
+export const MOTIVO_OMITIDO: Record<string, string> = {
+  pdf_protegido: "está protegido con contraseña o cifrado: sube una copia sin protección.",
+  pdf_ilegible: "está dañado o no se pudo abrir como PDF.",
+  no_descargado: "no se pudo bajar del almacenamiento.",
+};
+
+/** «A1 · Bases.pdf» (sin etiqueta si no se sabe); el nombre de hoy, o el que tenía al leerse si ya no está. */
+export function nombreArchivo(x: ArchivoAnalisis, bases: DocLicitacion["bases"]): string {
+  const b = bases.find((y) => y.id === x.id);
+  const nombre = b ? b.nombre : `${x.nombre ?? "un archivo"} (ya no está en las bases)`;
+  return x.etiqueta ? `${x.etiqueta} · ${nombre}` : nombre;
+}
+
+function lineaOrigen(r: ResultadoIA, leidos: number, omitidos: number): string {
+  const quien = r.porNombre ? ` por ${r.porNombre}` : "";
+  const cuando = r.origen === "guardado" ? `Análisis guardado: leído el ${instanteLima(r.en)}${quien}` : `Leído ${instanteLima(r.en)}${quien}`;
+  const archivos = `${leidos} archivo(s) leído(s)${omitidos ? `, ${omitidos} sin leer` : ""}${r.conTexto ? " + texto pegado" : ""}`;
+  const tokens = r.uso.tokensEntrada != null && r.uso.tokensSalida != null
+    ? ` · ${r.uso.tokensEntrada.toLocaleString("es-PE")} tokens de entrada, ${r.uso.tokensSalida.toLocaleString("es-PE")} de salida` : "";
+  const costo = r.uso.costoUsd != null ? ` · US$ ${r.uso.costoUsd.toFixed(2)}` : " · costo no registrado";
+  return `${cuando} · ${archivos}${tokens}${costo}.`;
 }
 
 /** «A1 · Bases.pdf · pág. 12 · "cita"»; del texto pegado si no hay archivo. */

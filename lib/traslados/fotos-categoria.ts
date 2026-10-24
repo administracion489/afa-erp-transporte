@@ -69,9 +69,12 @@ const SOF_RECHAZADOS = new Set([0xc3, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 
 
 /**
  * ¿Estos bytes son un JPEG que el PDF puede incrustar tal cual? Recorre los segmentos hasta el SOF
- * sin decodificar nada. `opts` cambia los topes (el logo del perfil admite más).
+ * sin decodificar nada. `opts` cambia los topes (el logo del perfil admite más). `exigirFin: false`
+ * (el expediente de licitaciones) no exige que los últimos bytes sean FF D9: la cámara de varios
+ * teléfonos agrega datos DESPUÉS del final del JPEG (la «foto en movimiento»), y esa foto se ve bien.
+ * Por defecto se exige, como siempre (las fotos de traslado las re-codifica el navegador).
  */
-export function revisarJpeg(bytes: Uint8Array | null | undefined, opts: { maxBytes?: number; maxLado?: number } = {}): RevisionJpeg {
+export function revisarJpeg(bytes: Uint8Array | null | undefined, opts: { maxBytes?: number; maxLado?: number; exigirFin?: boolean } = {}): RevisionJpeg {
   const maxBytes = opts.maxBytes ?? FOTO_MAX_BYTES;
   const maxLado = opts.maxLado ?? FOTO_MAX_LADO;
   const b = bytes ?? new Uint8Array(0);
@@ -87,7 +90,7 @@ export function revisarJpeg(bytes: Uint8Array | null | undefined, opts: { maxByt
   // El final: FF D9 (se toleran ceros de relleno detrás). Sin él la foto está cortada.
   let fin = b.length;
   while (fin > 2 && b[fin - 1] === 0x00) fin--;
-  if (!(b[fin - 2] === 0xff && b[fin - 1] === 0xd9)) return mal("truncado", "La foto está cortada (le falta el final del JPEG): vuelve a exportarla.");
+  if (opts.exigirFin !== false && !(b[fin - 2] === 0xff && b[fin - 1] === 0xd9)) return mal("truncado", "La foto está cortada (le falta el final del JPEG): vuelve a exportarla.");
   // Los segmentos hasta el SOF, como los recorre pdf-lib: marcador de 2 bytes + longitud de 2 bytes.
   let pos = 2;
   while (pos + 4 <= b.length) {

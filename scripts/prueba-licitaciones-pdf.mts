@@ -23,10 +23,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PDFDict, PDFDocument, PDFName } from "pdf-lib";
+import { crc32, deflateSync } from "node:zlib";
 import sharp from "sharp";
 import { dibujarPropuesta, type EntradaPropuesta } from "../lib/licitaciones/pdf/propuesta";
 import {
-  GEOMETRIA_LIC, anchoTexto, cargarFuentes, colorDe, incrustarImagen, recortarConElipsis, renglones,
+  GEOMETRIA_LIC, IMAGEN_LIC, anchoTexto, cargarFuentes, colorDe, incrustarImagen, recortarConElipsis, renglones, revisarImagenLic,
   sinMarcas, textoDeRenglon, textoPie, trozosNegrita, type ImagenPdf,
 } from "../lib/licitaciones/pdf/comun";
 import { aWinAnsi } from "../lib/pdf-winansi";
@@ -458,6 +459,50 @@ sec("5. Barrido de documentos al azar");
     check(partidas === 0, `azar-${caso}: ninguna fila partida (${partidas})`);
   }
   console.log(`   24 documentos, ${hojas} hojas, ${entradasTot} entradas de índice`);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+sec("Imágenes que no se le dan a pdf-lib (auditoría de seguridad): PNG animado, medidas enormes, JPEG con cola");
+{
+  const chunk = (tipo: string, datos: Uint8Array) => {
+    const b = Buffer.alloc(12 + datos.length);
+    b.writeUInt32BE(datos.length, 0); b.write(tipo, 4, "ascii"); Buffer.from(datos).copy(b, 8);
+    b.writeUInt32BE(crc32(b.subarray(4, 8 + datos.length)) >>> 0, 8 + datos.length);
+    return b;
+  };
+  const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = (w: number, h: number) => { const d = Buffer.alloc(13); d.writeUInt32BE(w, 0); d.writeUInt32BE(h, 4); d[8] = 8; d[9] = 6; return chunk("IHDR", d); };
+  const png = (...partes: Buffer[]) => new Uint8Array(Buffer.concat([SIG, ...partes, chunk("IEND", Buffer.alloc(0))]));
+  const crudo10 = deflateSync(Buffer.alloc((10 * 4 + 1) * 10));
+  // (1) El de la auditoría: un APNG de pocos bytes cuyo fotograma declara 16000 × 16000 colgaba la pestaña ~24 s.
+  const actl = Buffer.alloc(8); actl.writeUInt32BE(1, 0);
+  const fctl = Buffer.alloc(26); fctl.writeUInt32BE(1, 0); fctl.writeUInt32BE(16000, 4); fctl.writeUInt32BE(16000, 8);
+  const apng = png(ihdr(10, 10), chunk("acTL", actl), chunk("IDAT", crudo10), chunk("fcTL", fctl));
+  const t0 = Date.now();
+  const ra = revisarImagenLic(apng);
+  check(!ra.ok && ra.motivo === "animada" && Date.now() - t0 < 200, `APNG de ${apng.length} B con un fotograma de 16000 × 16000 → «animada», sin decodificar`);
+  const docA = await PDFDocument.create();
+  const t1 = Date.now();
+  check((await incrustarImagen(docA, { bytes: apng, tipo: "png" })) === null && Date.now() - t1 < 500, "incrustarImagen no se la da a pdf-lib (null, al instante)");
+  // (2) Un PNG que declara más que el tope (por lado y por megapíxeles): «demasiado_grande», con el tope en el detalle.
+  const lado = png(ihdr(IMAGEN_LIC.ladoMaxPng + 1, 10), chunk("IDAT", crudo10));
+  const rl = revisarImagenLic(lado);
+  check(!rl.ok && rl.motivo === "demasiado_grande" && rl.detalle.includes(String(IMAGEN_LIC.ladoMaxPng)), "PNG de 8001 px de lado → demasiado_grande, nombrando el tope");
+  const mpx = png(ihdr(6000, 6000), chunk("IDAT", crudo10));
+  const rm = revisarImagenLic(mpx);
+  check(!rm.ok && rm.motivo === "demasiado_grande", "PNG de 6000 × 6000 (36 Mpx, más de 24) → demasiado_grande");
+  // (3) Lo bueno sigue pasando: el PNG y el JPG de las pruebas, y un JPEG con datos DESPUÉS del final (la «foto en
+  //     movimiento» de varios teléfonos: se ve bien y pdf-lib la incrusta).
+  const rp = revisarImagenLic(PNG);
+  check(rp.ok && rp.formato === "png" && rp.ancho === 160 && rp.alto === 90, "el PNG de prueba (160 × 90) pasa con sus medidas");
+  const rj = revisarImagenLic(JPG);
+  check(rj.ok && rj.formato === "jpg" && rj.ancho === 120 && rj.alto === 160, "el JPG de prueba (120 × 160) pasa con sus medidas");
+  const conCola = new Uint8Array([...JPG, ...new Uint8Array(4096).fill(7)]);
+  check(revisarImagenLic(conCola).ok, "un JPEG con datos detrás del FF D9 pasa (la cámara del teléfono los agrega)");
+  check((await incrustarImagen(await PDFDocument.create(), { bytes: conCola, tipo: "jpg" })) !== null, "… y pdf-lib lo incrusta");
+  // (4) Lo que no es imagen se nombra como tal (no como «dañada»).
+  check(revisarImagenLic(new TextEncoder().encode("%PDF-1.7")).ok === false && (revisarImagenLic(new TextEncoder().encode("%PDF-1.7")) as { motivo: string }).motivo === "no_es_imagen", "un PDF → no_es_imagen");
+  check(!revisarImagenLic(new Uint8Array(0)).ok && !revisarImagenLic(null).ok, "vacía o null → no pasa");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

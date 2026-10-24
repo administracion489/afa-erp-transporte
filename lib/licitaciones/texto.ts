@@ -166,7 +166,7 @@ export function trozosDe(t: string): { texto: string; negrita: boolean }[] {
 
 const RE_RD = /(?:\bR\.\s?D\.?|\bRD\b|\bResoluci[oó]n\s+Directoral)\s*(?:N\s*[°º]\.?|Nro\.?|No\.|N\.)?\s*(\d[\w\-/.]*\w)/g;
 
-/** Los números de resolución directoral que trae un texto («R.D. N° 4968-2021-MTC/17.02» → «4968-2021-MTC/17.02»). */
+/** Los números de resolución directoral que trae un texto («R.D. N° 0450-2020-MTC/17.02» → «0450-2020-MTC/17.02»). */
 export function tokensAutorizacion(t: string): string[] {
   return [...(t ?? "").matchAll(RE_RD)].map((m) => m[1]);
 }
@@ -175,8 +175,8 @@ const normalAut = (t: string) => t.toUpperCase().replace(/[^0-9A-Z]/g, "");
 const nucleoAut = (t: string) => { const m = t.match(/^(\d+)\D+?(\d{4})(?!\d)/); return m ? `${Number(m[1])}-${m[2]}` : null; };
 
 /**
- * ¿Es la MISMA resolución? Por su núcleo «número-año» si los dos lo tienen (así «R.D. 4968-2021» y
- * «4968-2021-MTC/17.02» son la misma); si no, por el texto sin signos. Nunca decide cuál es la correcta.
+ * ¿Es la MISMA resolución? Por su núcleo «número-año» si los dos lo tienen (así «R.D. 0450-2020» y
+ * «0450-2020-MTC/17.02» son la misma); si no, por el texto sin signos. Nunca decide cuál es la correcta.
  */
 export function mismaAutorizacion(a: string, b: string): boolean {
   const na = nucleoAut(a), nb = nucleoAut(b);

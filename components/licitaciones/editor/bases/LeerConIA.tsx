@@ -1,13 +1,15 @@
 "use client";
 // components/licitaciones/editor/bases/LeerConIA.tsx — Elegir qué leer (hasta 5 PDF de las bases y/o el
 // texto que mandó el cliente) y lanzar la lectura. La lectura en sí vive en el editor (analisis-ia.tsx):
-// guarda primero, estima, pide confirmación nombrando el costo y recién entonces lee.
+// guarda primero, estima, pide confirmación nombrando el costo y recién entonces lee. Debajo del botón se
+// ofrece retomar el último análisis guardado (RetomarAnalisis), que no se vuelve a cobrar.
 import { useEffect, useMemo, useState } from "react";
 import { TOPES_ANALISIS } from "@/lib/licitaciones/analisis";
 import type { ArchivoBase, DocLicitacion, TipoBase } from "@/lib/licitaciones/tipos";
 import type { TiendaIA } from "../analisis-ia";
 import { ETIQUETA_TIPO_BASE, instanteLima } from "../etiquetas";
 import { BOTON_PRIMARIO, INPUT, Tarjeta } from "./ui";
+import RetomarAnalisis from "./RetomarAnalisis";
 
 const PRIORIDAD: Record<TipoBase, number> = { bases: 0, tdr: 1, absolucion: 2, requisitos_cliente: 3, anexo: 4, otro: 5 };
 const esPdf = (b: ArchivoBase) => b.mime === "application/pdf";
@@ -83,7 +85,7 @@ export default function LeerConIA({ doc, tienda, soloLectura, bloqueado, pendien
                   <label className="flex items-start gap-2 text-sm cursor-pointer">
                     <input type="checkbox" className="mt-1" checked={elegidos.includes(b.id)} disabled={trabajando || soloLectura} onChange={() => alternar(b.id)} />
                     <span className="min-w-0">
-                      {i >= 0 && <span className="text-[10px] font-bold text-white bg-[#0b315f] rounded px-1 mr-1">A{i + 1}</span>}
+                      {i >= 0 && <span className="text-[10px] font-bold text-white bg-[#0b315f] rounded px-1 mr-1" title="Etiqueta con que la IA lo citará. Si un archivo no se puede leer (protegido, dañado), los siguientes se corren uno (A3 pasa a ser A2).">A{i + 1}</span>}
                       <span className="break-all">{b.nombre}</span>
                       <span className="text-[11px] text-gray-500"> · {ETIQUETA_TIPO_BASE[b.tipo]} · {b.paginas != null ? `${b.paginas} pág.` : <span className="text-amber-700">páginas sin contar (¿protegido?)</span>}</span>
                     </span>
@@ -115,10 +117,12 @@ export default function LeerConIA({ doc, tienda, soloLectura, bloqueado, pendien
         {!trabajando && !motivo && <p className="text-[11px] text-gray-400">Antes de leer se calcula el costo máximo y se te pregunta. Hay un tope de {TOPES_ANALISIS.porDia} lecturas al día para toda la empresa.</p>}
       </div>
 
+      <RetomarAnalisis doc={doc} tienda={tienda} />
+
       {tienda.fase === "analizando" && (
         <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900" role="status">
           <p className="font-bold">La IA está leyendo las bases… {reloj}</p>
-          <p className="text-xs mt-0.5">Suele tardar de 1 a 3 minutos. Puedes cambiar de paso mientras tanto, pero <b>no cierres ni recargues esta pestaña</b>: la lectura se cobra igual y el resultado solo llega aquí.</p>
+          <p className="text-xs mt-0.5">Suele tardar de 1 a 3 minutos. Puedes cambiar de paso mientras tanto. Si cierras o recargas la pestaña, la lectura suele seguir en el servidor y se cobra igual; si llega a terminar, al volver aparece aquí como «Retomar el análisis».</p>
         </div>
       )}
       {tienda.fase === "estimando" && <p className="text-xs text-gray-500" role="status">Calculando las páginas y el costo máximo (esto no se cobra)…</p>}

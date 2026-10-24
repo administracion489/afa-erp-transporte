@@ -7,10 +7,40 @@
 // con HTML crudo. La vista es una AYUDA para leer: lo que manda es lo que arma resolverDocumento.
 
 import { useId, useRef, useState, type ReactNode } from "react";
+import { ImgPrivada } from "@/components/ArchivoPrivado";
+import { origenArchivo } from "@/lib/licitaciones/archivos";
+import { baseSupabase } from "@/lib/storage-privado";
 import { VARIABLES, trozosDe, esVariable, type ValoresVariables } from "@/lib/licitaciones/texto";
 import { alternarNegrita, insertarEnCursor } from "./bloques";
 
 export const MARCA_COMPLETAR = "[COMPLETAR]";
+
+// ══ Archivos del doc: solo los del storage de ESTE proyecto ══════════════════════
+
+/**
+ * ¿La URL es un archivo del storage de este proyecto? La MISMA regla que la emisión (origenArchivo con
+ * baseSupabase): el doc lo escribe cualquiera con el módulo, y una URL de fuera haría que cada colega que
+ * abre la pantalla o la vista previa le pida algo a ese servidor (su IP, la hora) o a la red interna.
+ * Sin la base configurada no se puede comparar el origen y se responde que no.
+ */
+export function esArchivoDelErp(url: string | null | undefined): boolean {
+  const base = baseSupabase();
+  if (!base) return false;
+  const o = origenArchivo(url, base);
+  return o === "storage_privado" || o === "storage_publico";
+}
+
+/** Miniatura de un archivo del doc: se pinta solo si es del ERP; si no, se dice en su lugar (sin pedirla). */
+export function MiniaturaDoc({ url, alt, className }: { url: string; alt: string; className?: string }) {
+  if (!esArchivoDelErp(url)) {
+    return (
+      <span className="block max-w-xs rounded-md bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
+        Enlace externo: no es un archivo del ERP, así que no se muestra ni se imprime. Vuelve a subir la imagen.
+      </span>
+    );
+  }
+  return <ImgPrivada src={url} alt={alt} className={className} />;
+}
 
 // ══ Botones e interruptores ═════════════════════════════════════════════════════
 

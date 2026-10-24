@@ -456,6 +456,9 @@ export function revisarLicitacion(lic: Licitacion, ctx: ContextoLicitacion, arch
   const partes = exr.bloques.flatMap((b) => b.partes.filter((p) => p.tipo === "archivo").map((p) => ({ b, p: p as Extract<typeof p, { tipo: "archivo" }> })));
   let bytes = 0;
   const vistosUrl = new Set<string>();
+  // La última emisión viene de la base (jsonb): una fila mal formada (foto sin `fuentes`, o con algo que no
+  // es un arreglo de objetos) no puede romper la revisión — sin fuentes legibles no se afirma ningún cambio.
+  const fuentesAntes: unknown[] = Array.isArray(ultima?.foto?.fuentes) ? (ultima!.foto.fuentes as unknown[]) : [];
   for (const { p } of partes) {
     if (vistosUrl.has(p.url)) continue;
     vistosUrl.add(p.url);
@@ -465,8 +468,8 @@ export function revisarLicitacion(lic: Licitacion, ctx: ContextoLicitacion, arch
     if (!ra) continue;
     if (ra.ok) {
       bytes += ra.bytes;
-      const antes = ultima?.foto?.fuentes?.find((x) => x.url === p.url);
-      if (antes?.sha256 && ra.sha256 && antes.sha256 !== ra.sha256) add("archivo_cambio_desde_emision", sujA, `«${p.titulo}» cambió desde la emisión versión ${ultima?.version}.`);
+      const antes = fuentesAntes.find((x): x is { url: string; sha256?: unknown } => !!x && typeof x === "object" && (x as { url?: unknown }).url === p.url);
+      if (antes && typeof antes.sha256 === "string" && antes.sha256 && ra.sha256 && antes.sha256 !== ra.sha256) add("archivo_cambio_desde_emision", sujA, `«${p.titulo}» cambió desde la emisión versión ${ultima?.version}.`);
     } else {
       add(ra.codigo === "archivo_externo" ? "expediente_item_archivo_externo" : ra.codigo, sujA, `«${p.titulo}»: ${ra.detalle}`);
     }

@@ -86,7 +86,7 @@ const seguro = (tipo: string, venc: string | null, archivo: string | null = PUB(
   archivo, editarEn: "/seguros", deAfa: true, tipos: [tipo], solicitados: 0,
 });
 
-const PERFIL = { nombre: "Empresa Demo", razon_social: "EMPRESA DEMO S.A.C.", ruc: "20999999999", direccion: "Av. Demo 1", telefono: "01-000", email: "demo@demo.pe", web: "demo.pe", autorizacion_mtc: "R.D. N° 1946-2009-MTC-15.", fecha_constitucion: "2017-03-01" };
+const PERFIL = { nombre: "Empresa Demo", razon_social: "EMPRESA DEMO S.A.C.", ruc: "20999999999", direccion: "Av. Demo 1", telefono: "01-000", email: "demo@demo.pe", web: "demo.pe", autorizacion_mtc: "R.D. N° 0123-2010-MTC-15.", fecha_constitucion: "2017-03-01" };
 
 function ctxBase(extra: Partial<ContextoLicitacion> = {}): ContextoLicitacion {
   return {
@@ -127,7 +127,7 @@ sec("1. Caso MASS: tercerizadas en un concurso sin subcontratación, una placa q
     ],
     secciones: [{ titulo: "Presentación", bloques: [
       { tipo: "parrafo", texto: "Servicio con flota y personal propios, sin subcontratar." },
-      { tipo: "parrafo", texto: "Autorizaciones: MTC (transporte de personal) — R.D. N° 4968-2021-MTC/17.02" },
+      { tipo: "parrafo", texto: "Autorizaciones: MTC (transporte de personal) — R.D. N° 0450-2020-MTC/17.02" },
     ] }],
   });
   const rev = revisarLicitacion(lic, ctx);
@@ -138,7 +138,7 @@ sec("1. Caso MASS: tercerizadas en un concurso sin subcontratación, una placa q
   check(cuantos(hs, "afirma_flota_propia") === 1, "afirma_flota_propia");
   check(cuantos(hs, "autorizacion_mtc_distinta") === 1, "autorizacion_mtc_distinta");
   const aut = hs.find((h) => h.codigo === "autorizacion_mtc_distinta");
-  check(!!aut && aut.texto.includes("4968-2021") && aut.texto.includes("1946-2009"), "nombra las dos R.D. sin decir cuál es la correcta");
+  check(!!aut && aut.texto.includes("0450-2020") && aut.texto.includes("0123-2010"), "nombra las dos R.D. sin decir cuál es la correcta");
   check(aut?.gravedad === "alarma", "es alarma");
   const ev = rev.evaluaciones.find((e) => e.requisitoId === lic.doc.requisitos[0].id);
   check(ev?.final === "no_cumple" && ev.fuente === "regla", "el requisito de la regla queda no_cumple por la regla");
@@ -148,9 +148,9 @@ sec("1. Caso MASS: tercerizadas en un concurso sin subcontratación, una placa q
   const ctxP = ctxBase({ unidades: { "p:1": unidad("p:1", "AAA-111") } });
   check(!codigos(revisarLicitacion(licP, ctxP).hallazgos).includes("afirma_flota_propia"), "con flota propia, «propios» no alarma");
   // La misma R.D. con otro formato no alarma.
-  check(mismaAutorizacion("4968-2021-MTC/17.02", "4968-2021"), "misma R.D. con otro formato");
-  check(!mismaAutorizacion("4968-2021-MTC/17.02", "1946-2009-MTC-15"), "R.D. distintas");
-  check(tokensAutorizacion("R.D. N° 1946-2009-MTC-15.")[0] === "1946-2009-MTC-15", "el punto final no es parte del número");
+  check(mismaAutorizacion("0450-2020-MTC/17.02", "0450-2020"), "misma R.D. con otro formato");
+  check(!mismaAutorizacion("0450-2020-MTC/17.02", "0123-2010-MTC-15"), "R.D. distintas");
+  check(tokensAutorizacion("R.D. N° 0123-2010-MTC-15.")[0] === "0123-2010-MTC-15", "el punto final no es parte del número");
   const ctxSinAut = ctxBase({ unidades: ctx.unidades, perfil: { ...PERFIL, autorizacion_mtc: "" } });
   const hsSin = revisarLicitacion(lic, ctxSinAut).hallazgos;
   check(codigos(hsSin).includes("autorizacion_sin_perfil") && !codigos(hsSin).includes("autorizacion_mtc_distinta"), "sin autorización en el perfil → autorizacion_sin_perfil, nunca «distinta»");

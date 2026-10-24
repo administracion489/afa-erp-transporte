@@ -7,13 +7,14 @@ import { useRef, useState } from "react";
 import { EnlacePrivado } from "@/components/ArchivoPrivado";
 import { subirArchivo, ErrorLicitaciones, SQL_LICITACIONES } from "@/lib/licitaciones/datos";
 import { EXTENSIONES_PERMITIDAS } from "@/lib/licitaciones/archivos";
+import { LIMITES_TEXTO } from "@/lib/licitaciones/normalizar";
 import type { ArchivoBase, DocLicitacion, Licitacion, TipoBase } from "@/lib/licitaciones/tipos";
 import type { TonoAviso } from "../contrato-editor";
 import { ETIQUETA_TIPO_BASE, TIPOS_BASE_LISTA, instanteLima, tamanoArchivo } from "../etiquetas";
 import { BOTON, BOTON_PRIMARIO, INPUT, Tarjeta } from "./ui";
 
-/** Mismo tope que normalizarDoc (lib/licitaciones/normalizar.ts, T.maxBases): más allá se recortaría al guardar. */
-const MAX_BASES = 50;
+/** El tope con que normalizarDoc recorta doc.bases: más allá se perdería al guardar. */
+const MAX_BASES = LIMITES_TEXTO.maxBases;
 
 type Props = {
   lic: Licitacion;

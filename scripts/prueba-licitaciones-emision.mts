@@ -338,7 +338,8 @@ sec("1. Helpers puros");
   check(docTieneRelacionAdjuntos(licitacion().doc) && !docTieneRelacionAdjuntos(licitacion({ relacion: false }).doc), "docTieneRelacionAdjuntos");
   const fuente = fs.readFileSync(new URL("../lib/licitaciones/emitir.ts", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
   check(!/ignoreEncryption/.test(fuente), "el código (sin comentarios) no usa ignoreEncryption (R11)");
-  check(!/emitido_por\s*:/.test(fuente.split("export async function registrarEmision")[1]?.split("const d = data")[0] ?? "x"), "la fila que se inserta no arma emitido_por");
+  const filaInsert = /const fila = \{([\s\S]*?)\};/.exec(fuente.split("export async function registrarEmision")[1] ?? "")?.[1] ?? "emitido_por:";
+  check(!/emitido_(por|en)\s*:/.test(filaInsert) && /carpeta/.test(filaInsert), "la fila que se inserta no arma emitido_por ni emitido_en");
   try {
     const rev = await import("../lib/licitaciones/revision");
     check((rev as { MAX_BYTES_EXPEDIENTE?: number }).MAX_BYTES_EXPEDIENTE === TOPE_FUENTES_BYTES, "TOPE_FUENTES_BYTES ≡ MAX_BYTES_EXPEDIENTE de la revisión (R12, un solo número)");

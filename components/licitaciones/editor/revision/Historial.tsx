@@ -11,6 +11,7 @@ import { CATALOGO_HALLAZGOS } from "@/lib/licitaciones/revision";
 import type { HallazgoEmitido } from "@/lib/licitaciones/tipos";
 import { ESTILO_GRAVEDAD, instanteLima, tamanoArchivo } from "../etiquetas";
 import { BOTON_SECUNDARIO, Chip, ETIQUETA_TIPO_ARCHIVO, Nota, plural } from "./ui";
+import { emisionSegura, enlaceEmitidoValido, versionMostrable } from "./emision-segura";
 
 export type LecturaHistorial =
   | { fase: "cargando" }
@@ -24,7 +25,12 @@ export function useHistorial(licId: number, vez: number): LecturaHistorial {
   useEffect(() => {
     let vivo = true;
     leerEmisiones(licId).then(
-      (r) => { if (vivo) setL({ de: clave, lectura: r.ok ? { fase: "ok", filas: r.filas } : { fase: "error", error: r.error, sinMigracion: r.sinMigracion } }); },
+      (r) => {
+        if (!vivo) return;
+        // Una fila mal formada (insertada a mano) no puede romper la pantalla: arreglos reconstruidos.
+        const filas = r.ok ? (Array.isArray(r.filas) ? r.filas : []).map((f) => emisionSegura(f)) : [];
+        setL({ de: clave, lectura: r.ok ? { fase: "ok", filas } : { fase: "error", error: r.error, sinMigracion: r.sinMigracion } });
+      },
       (e) => { if (vivo) setL({ de: clave, lectura: { fase: "error", error: `No se pudo leer las emisiones (${e instanceof Error ? e.message : String(e)}).` } }); },
     );
     return () => { vivo = false; };
@@ -61,16 +67,18 @@ function FilaHistorial({ e, abierta }: { e: FilaEmisionResumen; abierta: boolean
   const aceptados = e.hallazgos.filter((h) => h.aceptado);
   const alarmas = abiertos.filter((h) => h.gravedad === "alarma").length;
   const avisos = abiertos.filter((h) => h.gravedad === "aviso").length;
-  const subidos = e.archivos.filter((a) => a.url).length;
+  const subidos = e.archivos.filter((a) => enlaceEmitidoValido(a.url)).length;
+  const version = versionMostrable(e.version);
+  const docVersion = versionMostrable(e.doc_version);
   return (
     <li className="rounded-xl border border-gray-200">
       <details open={abierta} className="group">
         <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-xs">
           <span className="text-gray-400 group-open:hidden">▸</span><span className="hidden text-gray-400 group-open:inline">▾</span>
-          <span className="font-bold text-[#0b315f]">Versión {e.version}</span>
+          <span className="font-bold text-[#0b315f]">{version != null ? `Versión ${version}` : "Versión sin número"}</span>
           <span className="text-gray-700">{instanteLima(e.emitido_en)}</span>
           <span className="text-gray-500">· {e.emitido_por_nombre ?? "usuario sin nombre"}</span>
-          <span className="text-gray-400">· guardado v{e.doc_version}</span>
+          {docVersion != null && <span className="text-gray-400">· guardado v{docVersion}</span>}
           <Chip tono="gris">{plural(e.archivos.length, "archivo", "archivos")}{subidos < e.archivos.length ? ` · ${subidos} con copia` : ""}</Chip>
           {alarmas > 0 && <Chip tono="rojo">{plural(alarmas, "alarma abierta", "alarmas abiertas")}</Chip>}
           {avisos > 0 && <Chip tono="ambar">{plural(avisos, "aviso abierto", "avisos abiertos")}</Chip>}
@@ -94,11 +102,13 @@ function FilaHistorial({ e, abierta }: { e: FilaEmisionResumen; abierta: boolean
                     </p>
                     {!a.url && a.motivoNoSubido && <p className="text-[11px] text-gray-500">Sin copia en el ERP: {a.motivoNoSubido}</p>}
                   </div>
-                  {a.url && (
+                  {a.url && enlaceEmitidoValido(a.url) ? (
                     <EnlacePrivado href={a.url} target="_blank" rel="noopener noreferrer" className="shrink-0 rounded-lg border border-gray-300 bg-white px-2.5 py-1 font-bold text-[#0b315f] hover:bg-gray-50">
                       Abrir ↗
                     </EnlacePrivado>
-                  )}
+                  ) : a.url ? (
+                    <span className="shrink-0 text-[11px] text-gray-500" title="El enlace guardado no es una copia del almacenamiento de licitaciones de este ERP: no se abre.">enlace no válido</span>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -139,7 +149,7 @@ function FilaHistorial({ e, abierta }: { e: FilaEmisionResumen; abierta: boolean
           )}
 
           <p className="text-[11px] text-gray-400">
-            Firma <span className="font-mono" title={e.firma}>{e.firma.slice(0, 16)}…</span> · carpeta <span className="font-mono">{e.carpeta.slice(0, 8)}…</span> · lo emitido no se reescribe.
+            Firma <span className="font-mono" title={String(e.firma ?? "")}>{String(e.firma ?? "").slice(0, 16)}…</span> · carpeta <span className="font-mono">{String(e.carpeta ?? "").slice(0, 8)}…</span> · lo emitido no se reescribe.
           </p>
         </div>
       </details>

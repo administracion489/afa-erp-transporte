@@ -5,8 +5,9 @@
 // se imprime y dibujarPropuesta lo dibuja con pdf-lib, que se carga recién al pulsar (no pesa en el resto
 // del editor). No se arma en cada tecla: al pulsar, y otra vez con «Volver a generar».
 //
-// Las imágenes de los buckets privados se firman (firmarUrls) y se bajan en ese momento; el firmado no se
-// guarda en ningún lado. Una imagen que no baja no tumba la vista previa: el PDF dibuja su recuadro con
+// Solo se baja lo que es del storage de ESTE proyecto (la regla de la emisión, esArchivoDelErp): una URL de
+// fuera escrita en el doc no se pide nunca. Las de los buckets privados se firman (firmarUrls) y se bajan en
+// ese momento; el firmado no se guarda en ningún lado. Una imagen que no baja no tumba la vista previa: el PDF dibuja su recuadro con
 // «imagen no disponible» y aquí se nombra. La marca BORRADOR va en cada hoja; los folios de la relación de
 // adjuntos se calculan al emitir (aquí salen «—»).
 
@@ -17,7 +18,7 @@ import { resolverDocumento } from "@/lib/licitaciones/documento";
 import { nombreArchivoEmitido } from "@/lib/licitaciones/archivos";
 import type { ContextoLicitacion, Licitacion, Revision } from "@/lib/licitaciones/tipos";
 import type { ImagenPdf } from "@/lib/pdf-corporativo";
-import { Boton } from "./comun";
+import { Boton, esArchivoDelErp } from "./comun";
 
 const TIMEOUT_IMAGEN_MS = 20_000;
 const SIMULTANEAS = 4;
@@ -83,19 +84,26 @@ export async function armarVistaPrevia(lic: Licitacion, ctx: ContextoLicitacion,
 
   const faltantes: string[] = [];
   const bajadas = new Map<string, ImagenPdf | null>();
-  if (todas.length) {
-    progreso(`Bajando ${todas.length} ${todas.length === 1 ? "imagen" : "imágenes"}…`);
+  const que = (u: string) => (u === logoUrl ? "el logo de la empresa" : u === firmaUrl ? "la imagen de la firma" : rotulos.get(u) ?? "una imagen");
+  // La misma regla que la emisión: solo se pide lo que es del storage de este proyecto. Una URL de fuera
+  // no se toca (ni se firma ni se baja): se nombra y el PDF dibuja su recuadro.
+  const cola = [...new Set(todas)].filter((u) => {
+    if (esArchivoDelErp(u)) return true;
+    bajadas.set(u, null);
+    faltantes.push(`No se bajó ${que(u)}: no es un archivo del ERP (enlace externo). Súbela de nuevo.`);
+    return false;
+  });
+  if (cola.length) {
+    progreso(`Bajando ${cola.length} ${cola.length === 1 ? "imagen" : "imágenes"}…`);
     let firmadas = new Map<string, string>();
-    try { firmadas = await firmarUrls(supabase, todas); } catch { /* se usan los originales */ }
-    const cola = [...new Set(todas)];
+    try { firmadas = await firmarUrls(supabase, cola); } catch { /* se usan los originales */ }
     const trabajar = async () => {
       for (let u = cola.shift(); u !== undefined; u = cola.shift()) {
         const r = await bajar(firmadas.get(u) ?? u);
         if ("img" in r) bajadas.set(u, r.img);
         else {
           bajadas.set(u, null);
-          const que = u === logoUrl ? "el logo de la empresa" : u === firmaUrl ? "la imagen de la firma" : rotulos.get(u) ?? "una imagen";
-          faltantes.push(`No se pudo bajar ${que}: ${r.motivo}.`);
+          faltantes.push(`No se pudo bajar ${que(u)}: ${r.motivo}.`);
         }
       }
     };

@@ -1,14 +1,18 @@
 -- licitaciones-03-bucket.sql — Bucket PRIVADO `licitaciones`: bases y anexos subidos, imágenes de la propuesta,
--- firmas, sustentos de experiencia y las COPIAS EMITIDAS (la constancia de lo presentado).
+-- firmas, sustentos de experiencia, los archivos del LEGAJO y de los CONDUCTORES (DNI, antecedentes, exámenes: sus
+-- filas son de documentos_empresa) y las COPIAS EMITIDAS (la constancia de lo presentado).
 -- NO LA CORRE EL DEPLOY: Supabase → SQL Editor → pegar ENTERA → Run. Idempotente.
--- ORDEN: 01a → 01b → 02-experiencia → 03 (esta) → 04-columnas-accesorias. Requiere 01b (fn_puede_modulo).
+-- ORDEN: 01a → 01b → 02-experiencia → 03 (esta) → 04-columnas-accesorias → 05. Requiere 01b (fn_puede_modulo).
 -- SIN ESTA: no se puede subir ningún archivo a una licitación (la pantalla lo dice nombrando este archivo) y la
 -- emisión se descarga igual, pero sin subir copias: queda registrada con «no se subió» en cada archivo.
--- LEER (firmar un enlace) y SUBIR: solo con el módulo «licitaciones» (o admin). SIN UPDATE NI DELETE, a propósito:
+-- LEER (firmar un enlace) y SUBIR: solo con el módulo «licitaciones» (o admin); legajo/ y conductores/ también con
+-- «documentos», que enseña esas filas en /documentos (la misma regla que 05 pone a documentos_empresa).
+-- SIN UPDATE NI DELETE, a propósito:
 -- nadie sobrescribe ni borra lo subido (se sube siempre con un nombre NUEVO y upsert false); el bucket `documentos`
 -- deja sobrescribir a cualquier sesión y por eso las copias emitidas no viven ahí. Solo se sube a una ruta con la
 -- forma EXACTA que arma lib/licitaciones/archivos.ts:
 --   rutaNueva:   <bases|adjuntos|imagenes|firmas>/<licId>/<uuid>.<ext>  ·  experiencia/<uuid>.<ext>
+--                <legajo|conductores>/<uuid>.<pdf|png|jpg> (solo lo que se une al expediente)
 --   rutaEmision: emisiones/<licId>/<uuid de la emisión>/<nombre ASCII sin ..>
 -- (las carpetas son CARPETAS_LICITACION de lib/licitaciones/tipos.ts). Solo PDF, PNG, JPEG, ZIP, DOCX, XLSX y XLS,
 -- hasta 50 MB por archivo: el navegador manda SIEMPRE el contentType de MimeArchivo (Windows etiqueta un .zip como
@@ -49,12 +53,14 @@ on conflict (id) do update set public = excluded.public, file_size_limit = exclu
 --    service-role) puede sobrescribir, mover ni borrar. (select …): una evaluación por consulta, no por fila.
 drop policy if exists lic_leer on storage.objects;
 create policy lic_leer on storage.objects for select to authenticated
-  using (bucket_id = 'licitaciones' and (select public.fn_puede_modulo((select auth.uid()), 'licitaciones')));
+  using (bucket_id = 'licitaciones' and ((select public.fn_puede_modulo((select auth.uid()), 'licitaciones'))
+    or ((storage.foldername(name))[1] in ('legajo', 'conductores') and (select public.fn_puede_modulo((select auth.uid()), 'documentos')))));
 drop policy if exists lic_subir on storage.objects;
 create policy lic_subir on storage.objects for insert to authenticated
   with check (bucket_id = 'licitaciones' and (select public.fn_puede_modulo((select auth.uid()), 'licitaciones'))
-    and (storage.foldername(name))[1] in ('bases', 'adjuntos', 'imagenes', 'firmas', 'experiencia', 'emisiones')
+    and (storage.foldername(name))[1] in ('bases', 'adjuntos', 'imagenes', 'firmas', 'experiencia', 'emisiones', 'legajo', 'conductores')
     and (name ~ '^((bases|adjuntos|imagenes|firmas)/[1-9][0-9]{0,17}|experiencia)/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[.](pdf|png|jpg|zip|docx|xlsx|xls)$'
+      or name ~ '^(legajo|conductores)/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[.](pdf|png|jpg)$'
       or (name ~ '^emisiones/[1-9][0-9]{0,17}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[A-Za-z0-9][A-Za-z0-9._-]{0,119}$'
           and name !~ '[.][.]')));
 

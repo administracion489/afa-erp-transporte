@@ -5,6 +5,7 @@
 // mano contradice lo que comprueba la regla, lo DICE (no lo arregla). Mientras no hay revisión,
 // «comprobando…»: nunca se pinta «pendiente» por no haber leído.
 import { useMemo, useState } from "react";
+import { LIMITES_TEXTO } from "@/lib/licitaciones/normalizar";
 import { describirRegla } from "@/lib/licitaciones/reglas";
 import {
   CATEGORIAS_REQUISITO, TOPES_DOC,
@@ -212,7 +213,7 @@ function TarjetaRequisito({ q, n, doc, ev, hallazgos, revisando, ctxCargando, ab
             <div className="grid grid-cols-[6rem_minmax(0,1fr)] gap-2">
               <label className="block">
                 <span className="block text-[10px] font-bold uppercase text-gray-500 mb-0.5">Numeral</span>
-                <input className={`${INPUT} py-1.5`} value={q.numeral ?? ""} maxLength={40} disabled={ro} placeholder="5.2"
+                <input className={`${INPUT} py-1.5`} value={q.numeral ?? ""} maxLength={LIMITES_TEXTO.numeral} disabled={ro} placeholder="5.2"
                   onChange={(e) => actualizar({ numeral: e.target.value.trim() ? e.target.value : null })} />
               </label>
               <label className="block min-w-0">
@@ -224,7 +225,7 @@ function TarjetaRequisito({ q, n, doc, ev, hallazgos, revisando, ctxCargando, ab
             </div>
             <label className="block">
               <span className="block text-[10px] font-bold uppercase text-gray-500 mb-0.5">Requisito</span>
-              <textarea className={`${INPUT} min-h-[64px]`} value={q.texto} maxLength={1000} disabled={ro}
+              <textarea className={`${INPUT} min-h-[64px]`} value={q.texto} maxLength={LIMITES_TEXTO.requisito} disabled={ro}
                 placeholder="La exigencia, como la piden las bases" onChange={(e) => actualizar({ texto: e.target.value })} />
               {!q.texto.trim() && <span className="block text-[11px] text-amber-700 mt-0.5">Sin texto, la matriz de cumplimiento tendría un renglón vacío.</span>}
             </label>
@@ -247,13 +248,13 @@ function TarjetaRequisito({ q, n, doc, ev, hallazgos, revisando, ctxCargando, ab
               </label>
               <label className="block min-w-0">
                 <span className="block text-[10px] font-bold uppercase text-gray-500 mb-0.5">Columna «Cumple» (opcional)</span>
-                <input className={`${INPUT} py-1.5`} value={q.cumpleTexto ?? ""} maxLength={120} disabled={ro} placeholder="Vacío = «Sí». P. ej. «Sí (9+ años)»"
+                <input className={`${INPUT} py-1.5`} value={q.cumpleTexto ?? ""} maxLength={LIMITES_TEXTO.corto} disabled={ro} placeholder="Vacío = «Sí». P. ej. «Sí (9+ años)»"
                   onChange={(e) => actualizar({ cumpleTexto: e.target.value.trim() ? e.target.value : null })} />
               </label>
             </div>
             <label className="block">
               <span className="block text-[10px] font-bold uppercase text-gray-500 mb-0.5">Sustento adjunto (columna de la matriz)</span>
-              <textarea className={`${INPUT} min-h-[48px] text-xs`} value={q.sustento} maxLength={1000} disabled={ro}
+              <textarea className={`${INPUT} min-h-[48px] text-xs`} value={q.sustento} maxLength={LIMITES_TEXTO.sustento} disabled={ro}
                 placeholder="P. ej. «Anexo 3 · Sección II, folios 12–15»" onChange={(e) => actualizar({ sustento: e.target.value })} />
               {!q.sustento.trim() && ev?.auto?.sustento && <span className="block text-[11px] text-gray-500 mt-0.5">Si lo dejas vacío, la matriz usará el que arma el ERP: «{ev.auto.sustento}».</span>}
             </label>

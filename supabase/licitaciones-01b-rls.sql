@@ -1,9 +1,10 @@
 -- licitaciones-01b-rls.sql — Quién lee y escribe las tablas del módulo Licitaciones: SOLO quien tiene el módulo
 -- «licitaciones» (o es admin), también para LEER. Las bases, la experiencia y lo presentado son comerciales.
 -- NO LA CORRE EL DEPLOY: Supabase → SQL Editor → pegar ENTERA → Run. Idempotente.
--- ORDEN: 01a → 01b (esta) → 02-experiencia → 03-bucket → 04-columnas-accesorias. Requiere 01a: si falta, se
+-- ORDEN: 01a → 01b (esta) → 02-experiencia → 03-bucket → 04-columnas-accesorias → 05. Requiere 01a: si falta, se
 -- detiene nombrándola y NO cambia nada. SIN ESTA: las tablas de 01a siguen con RLS y sin políticas (nadie lee).
--- QUÉ DEJA: licitaciones → leer y escribir con el módulo (el guardado es un UPDATE con bloqueo por version).
+-- QUÉ DEJA: licitaciones → leer, crear y guardar con el módulo (UPDATE con bloqueo por version), SIN DELETE: se
+-- archiva (borrarla se llevaría su bitácora de análisis IA y con ella el tope diario de gasto).
 -- licitacion_analisis → solo LEER con el módulo; la escribe el servidor (service-role, que no mira RLS).
 -- licitacion_emisiones → leer y REGISTRAR con el módulo, y solo a nombre propio (emitido_por = la sesión);
 -- SIN UPDATE NI DELETE: una emisión es la constancia de lo presentado y no se reescribe. anon: nada.
@@ -44,7 +45,11 @@ do $$ declare p record; begin
 end $$;
 
 -- (select …) alrededor de la función y de auth.uid(): se evalúa UNA vez por consulta, no por fila.
-create policy licitaciones_modulo on public.licitaciones for all to authenticated
+create policy licitaciones_leer on public.licitaciones for select to authenticated
+  using ((select public.fn_puede_modulo((select auth.uid()), 'licitaciones')));
+create policy licitaciones_crear on public.licitaciones for insert to authenticated
+  with check ((select public.fn_puede_modulo((select auth.uid()), 'licitaciones')));
+create policy licitaciones_guardar on public.licitaciones for update to authenticated
   using ((select public.fn_puede_modulo((select auth.uid()), 'licitaciones')))
   with check ((select public.fn_puede_modulo((select auth.uid()), 'licitaciones')));
 create policy licitacion_analisis_leer on public.licitacion_analisis for select to authenticated
@@ -60,12 +65,12 @@ alter table public.licitacion_analisis enable row level security;
 alter table public.licitacion_emisiones enable row level security;
 revoke all on public.licitaciones, public.licitacion_analisis, public.licitacion_emisiones from anon;
 -- Además de no tener política, sin el permiso de tabla (TRUNCATE no pasa por RLS).
-revoke truncate on public.licitaciones from authenticated;
+revoke delete, truncate on public.licitaciones from authenticated;
 revoke insert, update, delete, truncate on public.licitacion_analisis from authenticated;
 revoke update, delete, truncate on public.licitacion_emisiones from authenticated;
 
--- Verificación (solo lee). Debe salir: 4 políticas (licitaciones ALL · analisis SELECT · emisiones SELECT e INSERT),
--- anon «ninguno» en las tres, y authenticated: licitaciones S/I/U/D · analisis solo SELECT · emisiones SELECT, INSERT.
+-- Verificación (solo lee). Debe salir: 6 políticas (licitaciones SELECT, INSERT, UPDATE · analisis SELECT · emisiones
+-- SELECT e INSERT), anon «ninguno» en las tres, y authenticated: licitaciones S/I/U · analisis S · emisiones S, I.
 select 'política' as que, tablename || ' · ' || policyname as nombre, cmd || ' · ' || roles::text as detalle
   from pg_policies where schemaname = 'public' and tablename in ('licitaciones', 'licitacion_analisis', 'licitacion_emisiones')
 union all

@@ -26,6 +26,7 @@ import type { FaseGuardado } from "../contexto-editor";
 import { ESTILO_GRAVEDAD, instanteLima, tamanoArchivo } from "../etiquetas";
 import type { Comprobacion } from "./ComprobarArchivos";
 import { versionEnBase } from "./consultas";
+import { emisionSegura, enlaceEmitidoValido, ultimaSegura, versionMostrable } from "./emision-segura";
 import { abiertosParaEmitir, resumenExpediente, type ResumenExpediente } from "./resumen";
 import {
   BOTON_PRIMARIO, BOTON_SECUNDARIO, Barra, Chip, ETIQUETA_FASE, ETIQUETA_TIPO_ARCHIVO, Nota, ORDEN_FASES, plural,
@@ -49,7 +50,6 @@ type Props = {
   leer: () => Instantanea;
   guardarAhora: () => Promise<boolean>;
   asegurarUltima: () => Promise<FilaEmision | null>;
-  proximaVersion: number | null;
   onEmitida: (fila: FilaEmision) => void;
   onCerrar: () => void;
 };
@@ -207,10 +207,12 @@ export default function ModalEmision(p: Props) {
 
       // 3 · Cargar el armador (emitir.ts trae pdf-lib) y la última emisión (para «cambió desde la emisión»).
       setEstado({ fase: "preparando", detalle: "Cargando el armador de PDF…" });
-      const [mE, mD, mX, ultima] = await Promise.all([
+      const [mE, mD, mX, ultimaLeida] = await Promise.all([
         import("@/lib/licitaciones/emitir"), import("@/lib/licitaciones/documento"), import("@/lib/licitaciones/expediente"),
         p.asegurarUltima(),
       ]);
+      // La revisión recorre `ultima.foto.fuentes`: una fila mal formada no puede tumbar la emisión.
+      const ultima = ultimaSegura(ultimaLeida);
       modRef.current = mE;
       const revisiones = p.comprobacion?.revisiones;
       const rev = revisarLicitacion(s.lic, s.ctx, revisiones, ultima);
@@ -231,7 +233,7 @@ export default function ModalEmision(p: Props) {
       ctrlRef.current = null;
       if (r.ok) {
         entregar(r.archivos, true);
-        if (r.emision) p.onEmitida(r.emision);
+        if (r.emision) p.onEmitida(emisionSegura(r.emision));
       } else if (r.codigo === "registro_fallido" && r.archivos.length) {
         entregar(r.archivos, true);
       } else if (r.codigo === "cancelada" && r.archivos.length) {
@@ -260,7 +262,7 @@ export default function ModalEmision(p: Props) {
     setReintento({ fase: "reintentando" });
     try {
       const x = await mE.registrarEmision(supabase, estado.r.registroPendiente);
-      if (x.ok) { setReintento({ fase: "ok", fila: x.fila }); p.onEmitida(x.fila); }
+      if (x.ok) { setReintento({ fase: "ok", fila: x.fila }); p.onEmitida(emisionSegura(x.fila)); }
       else setReintento({ fase: "error", detalle: x.detalle });
     } catch (e) {
       setReintento({ fase: "error", detalle: msg(e) || "error inesperado" });
@@ -284,7 +286,7 @@ export default function ModalEmision(p: Props) {
         <div className="flex items-start justify-between gap-3 border-b border-gray-200 px-5 py-3">
           <div className="min-w-0">
             <h2 id="emision-titulo" className="text-lg font-bold text-gray-900">
-              Emitir la licitación{p.proximaVersion ? ` · será la versión ${p.proximaVersion}` : ""}
+              Emitir la licitación
             </h2>
             <p className="truncate text-xs text-gray-500">{p.lic.nombre}{p.lic.codigo ? ` · ${p.lic.codigo}` : ""}</p>
           </div>
@@ -507,7 +509,10 @@ function Resultado({ r, descargas, reintento, onReintentar, onVolver }: {
       {r.ok ? (
         <Nota tono="verde">
           <p className="font-bold">
-            {r.emision ? `Emisión versión ${r.emision.version} registrada${r.emision.emitido_en ? ` el ${instanteLima(r.emision.emitido_en)}` : ""}.` : "Emisión armada."}
+            {/* La versión la asigna la base: se enseña la que devolvió la fila registrada, nunca una calculada. */}
+            {r.emision
+              ? `Emisión ${versionMostrable(r.emision.version) != null ? `versión ${versionMostrable(r.emision.version)} ` : ""}registrada${r.emision.emitido_en ? ` el ${instanteLima(r.emision.emitido_en)}` : ""}.`
+              : "Emisión armada."}
           </p>
           <p>{descargas.length ? "La descarga empezó sola. Si el navegador pidió permiso para descargar varios archivos, acéptalo, o descárgalos uno a uno aquí abajo." : "No hubo archivos que descargar."}</p>
         </Nota>
@@ -515,7 +520,7 @@ function Resultado({ r, descargas, reintento, onReintentar, onVolver }: {
         <div className="space-y-2">
           <Nota tono={reintento.fase === "ok" ? "verde" : "rojo"}>
             {reintento.fase === "ok" ? (
-              <p className="font-bold">Registrada como versión {reintento.fila.version}. Los archivos ya se descargaron.</p>
+              <p className="font-bold">Registrada{versionMostrable(reintento.fila.version) != null ? ` como versión ${versionMostrable(reintento.fila.version)}` : ""}. Los archivos ya se descargaron.</p>
             ) : (
               <>
                 <p className="font-bold">Los archivos están listos, pero no se pudo registrar la emisión.</p>
@@ -573,7 +578,7 @@ function Resultado({ r, descargas, reintento, onReintentar, onVolver }: {
               <li key={`${a.nombre}|${i}`} className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-1.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="min-w-0 flex-1 break-words font-semibold text-gray-800">{a.nombre}</span>
-                  {a.url ? <Chip tono="verde">copia en el ERP</Chip> : <Chip tono="gris">sin copia</Chip>}
+                  {enlaceEmitidoValido(a.url) ? <Chip tono="verde">copia en el ERP</Chip> : <Chip tono="gris">sin copia</Chip>}
                 </div>
                 <p className="text-[11px] text-gray-500">
                   {ETIQUETA_TIPO_ARCHIVO[a.tipo]}{a.paginas != null ? ` · ${a.paginas} pág.` : ""} · {tamanoArchivo(a.bytes)}

@@ -17,8 +17,11 @@ export type Gravedad = "alarma" | "aviso" | "info";
 
 // ══ Archivos ══════════════════════════════════════════════════════════════════
 export const BUCKET_LICITACIONES = "licitaciones" as const;
-export type CarpetaLicitacion = "bases" | "adjuntos" | "imagenes" | "firmas" | "experiencia" | "emisiones";
-export const CARPETAS_LICITACION: readonly CarpetaLicitacion[] = ["bases", "adjuntos", "imagenes", "firmas", "experiencia", "emisiones"];
+/** `legajo` y `conductores` guardan los ARCHIVOS de documentos_empresa del legajo y de los conductores (DNI del
+ *  representante, antecedentes, exámenes): en este bucket privado e insert-only, no en `documentos` (que
+ *  cualquier sesión del ERP lee y sobrescribe). Van sin licId, como `experiencia`. */
+export type CarpetaLicitacion = "bases" | "adjuntos" | "imagenes" | "firmas" | "experiencia" | "emisiones" | "legajo" | "conductores";
+export const CARPETAS_LICITACION: readonly CarpetaLicitacion[] = ["bases", "adjuntos", "imagenes", "firmas", "experiencia", "emisiones", "legajo", "conductores"];
 export type MimeArchivo =
   | "application/pdf" | "image/png" | "image/jpeg" | "application/zip"
   | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

@@ -39,9 +39,16 @@ export function mimeDeNombre(nombre: string): MimeArchivo | null {
 const RE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const esUuid = (x: unknown): x is string => typeof x === "string" && RE_UUID.test(x);
 
+/** Carpetas que no son de UNA licitación (van sin licId): el catálogo de experiencia, y los archivos del legajo
+ *  y de los conductores (sus filas viven en documentos_empresa). */
+const CARPETAS_SIN_LICITACION: readonly CarpetaLicitacion[] = ["experiencia", "legajo", "conductores"];
+/** Legajo y conductores: solo lo que se puede UNIR al expediente (la política del bucket admite solo esto ahí). */
+const EXT_UNIBLES = ["pdf", "png", "jpg"];
+
 /**
- * La ruta dentro del bucket `licitaciones` para un archivo nuevo. `carpeta/<licId>/<uuid>.<ext>`; la
- * carpeta `experiencia` es del catálogo de experiencia (no de una licitación) y va sin licId.
+ * La ruta dentro del bucket `licitaciones` para un archivo nuevo. `carpeta/<licId>/<uuid>.<ext>`; las
+ * carpetas `experiencia`, `legajo` y `conductores` no son de una licitación y van sin licId
+ * (`carpeta/<uuid>.<ext>`); las dos últimas solo con pdf, png o jpg.
  * Lanza ante una carpeta, id, uuid o extensión fuera de lo permitido: una ruta inventada no se sube.
  */
 export function rutaNueva(carpeta: CarpetaLicitacion, licId: number | null, uuid: string, ext: string): string {
@@ -49,7 +56,8 @@ export function rutaNueva(carpeta: CarpetaLicitacion, licId: number | null, uuid
   if (!esUuid(uuid)) throw new Error("Identificador de archivo inválido");
   const e = ext.toLowerCase().replace(/^\./, "");
   if (!EXTENSIONES_PERMITIDAS.includes(e)) throw new Error(`Extensión no permitida: ${ext}`);
-  if (carpeta === "experiencia") return `experiencia/${uuid}.${e}`;
+  if ((carpeta === "legajo" || carpeta === "conductores") && !EXT_UNIBLES.includes(e)) throw new Error(`Extensión no permitida en ${carpeta}: ${ext} (solo PDF, PNG o JPG)`);
+  if (CARPETAS_SIN_LICITACION.includes(carpeta)) return `${carpeta}/${uuid}.${e}`;
   if (!Number.isSafeInteger(licId) || (licId as number) <= 0) throw new Error("Licitación inválida");
   return `${carpeta}/${licId}/${uuid}.${e}`;
 }

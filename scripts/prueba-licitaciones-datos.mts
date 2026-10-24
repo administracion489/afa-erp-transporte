@@ -577,7 +577,12 @@ sec("9. Legajo (documentos_empresa) y documentos del conductor");
   const ins = db.llamadas.filter((l) => l.tabla === "documentos_empresa" && l.op === "insert").pop();
   const fila = ins?.filas?.[0] ?? {};
   check(r2.ok && fila.alcance === "empresa" && fila.categoria === "ficha_ruc" && fila.privado === true && fila.estado === "vencido" && fila.titulo === "Ficha RUC", "fila nueva: alcance empresa, categoría, privado, estado y título por defecto");
-  check(/^legajo\/ficha_ruc\/[0-9a-f-]{36}\.pdf$/.test(db.subidas[0].ruta) && db.subidas[0].bucket === "documentos" && db.subidas[0].opts.upsert === false, "al bucket documentos en legajo/<codigo>/<uuid>.pdf");
+  const sl = db.subidas[0];
+  const idL = sl?.ruta.match(/^legajo\/([0-9a-f-]{36})\.pdf$/)?.[1];
+  check(!!idL && sl.ruta === rutaNueva("legajo", null, idL, "pdf") && sl.bucket === "licitaciones" && sl.opts.upsert === false && sl.opts.contentType === "application/pdf",
+    `al bucket PRIVADO licitaciones en legajo/<uuid>.pdf, por rutaNueva (${sl?.bucket}/${sl?.ruta})`);
+  check(!db.subidas.some((x) => x.bucket === "documentos"), "nada del legajo va al bucket documentos");
+  check(r2.ok && r2.fila.archivo_url === `${BASE}/storage/v1/object/public/licitaciones/${sl?.ruta}`, "la fila guarda el enlace público del objeto (identificador)");
   const leg = await leerLegajo();
   check(leg.ok && leg.filas.length === 2 && leg.conductorTercero, "leerLegajo: las del legajo (no el contrato)");
   if (r2.ok) {
@@ -590,7 +595,14 @@ sec("9. Legajo (documentos_empresa) y documentos del conductor");
   check(!b2.ok && b2.noExiste === true && db.tablas.documentos_empresa!.filas.some((f) => f.id === 71), "no borra un documento que no es del legajo");
   db.fallos.push({ tabla: "documentos_empresa", op: "insert", error: { code: "23514", message: 'new row for relation "documentos_empresa" violates check constraint "documentos_empresa_categoria_check"' } });
   const r3 = await subirDocumentoLegajo("iperc", pdf, { fecha_emision: null, fecha_vencimiento: null });
-  check(!r3.ok && /categoría «iperc»/.test(r3.error) && /diagnostico-licitaciones/.test(r3.error) && db.removidos.length === 1, "CHECK de categoría: lo dice y retira el archivo subido");
+  check(!r3.ok && /categoría «iperc»/.test(r3.error) && /diagnostico-licitaciones/.test(r3.error) && db.removidos.length === 0, "CHECK de categoría: lo dice (el objeto queda: el bucket es insert-only, no se intenta borrar)");
+  const docx = new File([new Uint8Array([0x50, 0x4b, 3, 4, 0, 0])], "plan.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+  const antesDocx = db.subidas.length;
+  const r4 = await subirDocumentoLegajo("plan_sst", docx, { fecha_emision: null, fecha_vencimiento: null });
+  check(!r4.ok && /PDF, PNG, JPG/.test(r4.error) && db.subidas.length === antesDocx, "el legajo no acepta un Word: solo PDF, PNG o JPG");
+  db.buckets = { documentos: new Map() };
+  const r5 = await subirDocumentoLegajo("rit", pdf, { fecha_emision: null, fecha_vencimiento: null });
+  check(!r5.ok && r5.sinMigracion === SQL_LICITACIONES.bucket && /licitaciones-03-bucket/.test(r5.error) && !db.subidas.some((x) => x.bucket === "documentos"), "sin el bucket licitaciones → nombra licitaciones-03 (y no cae a documentos)");
 }
 {
   const db = usar(dbBase());
@@ -604,7 +616,9 @@ sec("9. Legajo (documentos_empresa) y documentos del conductor");
   check(p.ok && p.fila.conductor_id === 3 && p.fila.alcance === "conductor", "propio sí, sin la columna");
   const db2 = usar(dbBase());
   const t = await subirDocumentoConductor("t:7", "psicosometrico", pdf, { fecha_emision: null, fecha_vencimiento: null });
-  check(t.ok && t.fila.conductor_tercero_id === 7 && t.fila.conductor_id === null && /^conductores\/t-7\/psicosometrico\//.test(db2.subidas[0].ruta), "tercero con la columna: conductor_tercero_id");
+  check(t.ok && t.fila.conductor_tercero_id === 7 && t.fila.conductor_id === null && /^conductores\/[0-9a-f-]{36}\.pdf$/.test(db2.subidas[0].ruta) && db2.subidas[0].bucket === "licitaciones",
+    "tercero con la columna: conductor_tercero_id, archivo en licitaciones/conductores/<uuid>.pdf");
+  check(!db.subidas.some((x) => x.bucket === "documentos") && db.subidas.every((x) => /^conductores\/[0-9a-f-]{36}\.(pdf|png|jpg)$/.test(x.ruta)), "los documentos del conductor tampoco van a documentos");
 }
 
 // ══ 10. subirDocUnidad ════════════════════════════════════════════════════════
@@ -697,6 +711,16 @@ sec("12. guardarAnioTercero · leerEmisiones · ultimaEmision");
   check(e.ok && e.filas.length === 2 && e.filas[0].version === 2 && !sel?.cols.includes("foto") && e.filas[1].emitido_por_nombre === "Ana Pérez", "leerEmisiones: más reciente primero, sin la foto, con nombre");
   const u = await ultimaEmision(1);
   check(u.ok && u.emision?.version === 2 && (u.emision.foto as unknown as { hoy: string }).hoy === "2026-10-15", "ultimaEmision: la de mayor versión, con foto");
+  // Una fila mal formada (escrita a mano o por una versión vieja) no rompe la pantalla.
+  db.tablas.licitacion_emisiones!.filas.push({ id: 9, licitacion_id: 3, version: 1, carpeta: uuid(), emitido_por: "u-yo", emitido_en: "2026-10-20T10:00:00Z", doc_version: 1,
+    firma: "c".repeat(64), foto: { hoy: "2026-10-20", fuentes: "no es lista" }, archivos: "texto", hallazgos: null, omitidos: [null, 3, { itemId: "i1" }], nota: null });
+  const em = await leerEmisiones(3);
+  check(em.ok && Array.isArray(em.filas[0].archivos) && em.filas[0].archivos.length === 0 && em.filas[0].hallazgos.length === 0 && em.filas[0].omitidos.length === 1, "emisión mal formada: listas que no son arrays → [], elementos que no son objetos fuera");
+  const um = await ultimaEmision(3);
+  check(um.ok && Array.isArray(um.emision?.foto.fuentes) && um.emision!.foto.fuentes.length === 0 && (um.emision!.foto as unknown as { hoy: string }).hoy === "2026-10-20", "foto.fuentes que no es lista → [] (lo demás de la foto se conserva)");
+  db.tablas.licitacion_emisiones!.filas.find((f) => f.id === 9)!.foto = null;
+  const um2 = await ultimaEmision(3);
+  check(um2.ok && Array.isArray(um2.emision?.foto.fuentes) && um2.emision!.foto.fuentes.length === 0, "sin foto → fuentes []");
   const u0 = await ultimaEmision(2);
   check(u0.ok && u0.emision === null, "sin emisiones → null");
 }

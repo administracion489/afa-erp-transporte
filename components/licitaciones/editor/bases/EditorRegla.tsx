@@ -7,7 +7,7 @@
 // cambia desde fuera, manda la de fuera.
 import { useState } from "react";
 import { CATEGORIAS_CLASE_A } from "@/lib/licencias-conducir";
-import { normalizarRegla, RANGOS_REGLA } from "@/lib/licitaciones/normalizar";
+import { LIMITES_TEXTO, normalizarRegla, RANGOS_REGLA } from "@/lib/licitaciones/normalizar";
 import { describirRegla, ETIQUETA_REGLA, ETIQUETA_SEGURO_LIC } from "@/lib/licitaciones/reglas";
 import { DOCS_CONDUCTOR_REGLA, TIPOS_SEGURO_LIC } from "@/lib/licitaciones/analisis";
 import { TIPOS_LEGAJO, tipoLegajo, tipoDocConductor } from "@/lib/licitaciones/legajo";
@@ -200,7 +200,7 @@ export default function EditorRegla({ regla, onCambio, soloLectura, idBase }: Pr
             {num("asientos", "Asientos mínimos")}
             <label className="block min-w-0">
               <span className="block text-[10px] font-bold uppercase text-gray-500 mb-0.5">Solo para el uso / ruta</span>
-              <input className={`${INPUT} ${sel}`} value={b.uso} maxLength={200} disabled={soloLectura} placeholder="Vacío = todas las unidades" onChange={(e) => cambiar({ uso: e.target.value })} />
+              <input className={`${INPUT} ${sel}`} value={b.uso} maxLength={LIMITES_TEXTO.titulo} disabled={soloLectura} placeholder="Vacío = todas las unidades" onChange={(e) => cambiar({ uso: e.target.value })} />
             </label>
           </>)}
           {b.tipo === "unidad_doc" && (<>

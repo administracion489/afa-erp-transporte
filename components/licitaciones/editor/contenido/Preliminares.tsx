@@ -7,12 +7,11 @@
 // nada». Lo que sale solo del concurso o del perfil (cliente, postor) no se ofrece como campo.
 
 import { useState } from "react";
-import { ImgPrivada } from "@/components/ArchivoPrivado";
 import { cabeceraDe } from "@/lib/licitaciones/tablas";
 import { fechaRef, representanteDe, resolverVariables, type ValoresVariables } from "@/lib/licitaciones/texto";
 import type { ArchivoRef, ContextoLicitacion, DocLicitacion, EntradaGlosario, Licitacion, Paso } from "@/lib/licitaciones/tipos";
 import { fechaLarga } from "@/lib/licitaciones/util";
-import { Boton, BotonIcono, Campo, CampoTexto, Interruptor, Tarjeta, TopeAlcanzado, claseInput } from "./comun";
+import { Boton, BotonIcono, Campo, CampoTexto, Interruptor, MiniaturaDoc, Tarjeta, TopeAlcanzado, claseInput } from "./comun";
 import { LIM, mover, parsearTabulado } from "./bloques";
 
 export type PanelPreliminar = "portada" | "control" | "carta" | "glosario" | "indice" | "cierre";
@@ -102,7 +101,7 @@ function PanelPortada(p: PropsPreliminar) {
             <div className="rounded-xl border border-gray-200 p-3">
               {po.imagen ? (
                 <div className="flex flex-wrap items-start gap-3">
-                  <ImgPrivada src={po.imagen.url} alt="Portada" className="h-40 w-auto rounded border border-gray-200 object-contain" />
+                  <MiniaturaDoc url={po.imagen.url} alt="Portada" className="h-40 w-auto rounded border border-gray-200 object-contain" />
                   <div className="min-w-0 space-y-2 text-xs text-gray-600">
                     <p className="break-all font-semibold text-gray-700">{po.imagen.nombre}</p>
                     <p>Cubre la hoja A4 vertical entera; lo que sobre por los bordes queda fuera. Usa una imagen vertical.</p>

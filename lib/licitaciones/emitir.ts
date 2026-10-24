@@ -77,7 +77,7 @@ import {
   armarBloque, revisarPdf, mapaFolios, foliar, unirPdfs, formatoDeBytes,
   type ArchivoBajado, type ComunBloque, type MapaFolios,
 } from "./pdf/expediente";
-import type { ImagenPdf } from "./pdf/comun";
+import { revisarImagenLic, type ImagenPdf } from "./pdf/comun";
 import { armarZip } from "../zip-sin-compresion";
 import { origenArchivo, rutaEmision, nombreArchivoEmitido } from "./archivos";
 import { canonico } from "../json-canonico";
@@ -423,13 +423,18 @@ async function clasificar(url: string, bytes: Uint8Array, uso: Uso, deps: DepsEm
     if (uso === "imagen") return { ok: false, rev: rechazo(url, "archivo_formato_no_soportado", "Es un PDF y aquí va una imagen (PNG o JPG). Súbela como imagen.") };
     return { ok: true, bytes, formato: "pdf" };
   }
-  if (f === "png" || f === "jpg") return { ok: true, bytes, formato: f };
+  if (f === "png" || f === "jpg") {
+    // Antes de que pdf-lib la toque: un PNG animado o que declara medidas enormes cuelga la pestaña.
+    const seg = revisarImagenLic(bytes);
+    if (!seg.ok) return { ok: false, rev: rechazo(url, "archivo_formato_no_soportado", seg.detalle) };
+    return { ok: true, bytes, formato: f };
+  }
   const raro = formatoPorFirma(bytes);
   if (raro === "webp") {
     if (deps.webpAJpeg) {
       let jpg: Uint8Array | null = null;
       try { jpg = await deps.webpAJpeg(bytes); } catch { jpg = null; }
-      if (jpg && formatoDeBytes(jpg) === "jpg") return { ok: true, bytes: jpg, formato: "jpg" };
+      if (jpg && formatoDeBytes(jpg) === "jpg" && revisarImagenLic(jpg).ok) return { ok: true, bytes: jpg, formato: "jpg" };
       return { ok: false, rev: rechazo(url, "archivo_formato_no_soportado", "Es una imagen WebP y el navegador no pudo convertirla a JPG. Guárdala como JPG o PNG y vuelve a subirla.") };
     }
     return { ok: false, rev: rechazo(url, "archivo_formato_no_soportado", "Es una imagen WebP, que el PDF no puede unir. Guárdala como JPG o PNG y vuelve a subirla.") };
@@ -439,8 +444,12 @@ async function clasificar(url: string, bytes: Uint8Array, uso: Uso, deps: DepsEm
   return { ok: false, rev: rechazo(url, "archivo_formato_no_soportado", `Es ${que}: el expediente solo une ${se}. Expórtalo a ${se} y vuelve a subirlo.`) };
 }
 
-/** Prueba que pdf-lib pueda incrustar la imagen (lo mismo que hará el PDF). Solo en el ensayo. */
+/**
+ * Prueba que pdf-lib pueda incrustar la imagen (lo mismo que hará el PDF). Solo en el ensayo, y solo
+ * DESPUÉS de `revisarImagenLic` (que ya pasó en `clasificar`; se repite aquí por si alguien la llama sola).
+ */
 async function imagenLegible(bytes: Uint8Array, formato: "png" | "jpg"): Promise<boolean> {
+  if (!revisarImagenLic(bytes).ok) return false;
   try {
     const d = await PDFDocument.create();
     if (formato === "png") await d.embedPng(new Uint8Array(bytes)); else await d.embedJpg(new Uint8Array(bytes));
@@ -631,9 +640,13 @@ async function siguienteVersion(db: any, licId: number): Promise<{ ok: true; ver
 }
 
 /**
- * Registra la emisión (INSERT) con `version` = la mayor + 1. NO manda emitido_por ni emitido_en (los
- * sella el trigger). Un choque en uq_licitacion_emisiones_version se reintenta UNA vez; cualquier otro
- * error, no (un INSERT reintentado a ciegas duplica). Sirve también para reintentar un registro fallido.
+ * Registra la emisión (INSERT). NO manda emitido_por ni emitido_en (los sella el trigger). La `version` que
+ * se manda (la mayor + 1, leída ahora) es solo una PROPUESTA: la base puede asignar la suya (el trigger
+ * BEFORE INSERT pone max + 1 ignorando la del cliente), así que la fila devuelta MANDA y nada de aquí en
+ * adelante depende de que coincidan. Un choque en uq_licitacion_emisiones_version (dos emisiones a la vez)
+ * se reintenta UNA vez; cualquier otro error, no (un INSERT reintentado a ciegas duplica). Si no se puede
+ * leer la última versión no se inserta (una lectura fallida no es «no hay emisiones»). Sirve también para
+ * reintentar un registro fallido.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function registrarEmision(db: any, nueva: EmisionNueva): Promise<{ ok: true; fila: FilaEmision } | { ok: false; detalle: string }> {
@@ -655,11 +668,23 @@ export async function registrarEmision(db: any, nueva: EmisionNueva): Promise<{ 
       if (intento === 0 && esChoqueDeVersion(error)) continue;
       return { ok: false, detalle: explicarRegistro(error) };
     }
-    const d = data ?? {};
+    let d: Record<string, unknown> = data ?? {};
+    let version = Number(d.version);
+    if (!Number.isSafeInteger(version) || version < 1) {
+      // Se insertó pero la respuesta no trae la versión: se relee la fila por su carpeta (única).
+      try {
+        const r = await db.from("licitacion_emisiones").select(COLUMNAS_FILA_EMISION.join(",")).eq("carpeta", nueva.carpeta).limit(1);
+        const fila0 = (r?.data ?? [])[0] as Record<string, unknown> | undefined;
+        if (fila0) { d = fila0; version = Number(fila0.version); }
+      } catch { /* queda sin versión */ }
+      if (!Number.isSafeInteger(version) || version < 1) {
+        return { ok: false, detalle: "La emisión se registró pero la base no devolvió su versión: recarga la pantalla para verla en el historial (no la vuelvas a registrar)." };
+      }
+    }
     return {
       ok: true,
       fila: {
-        id: Number(d.id), licitacion_id: Number(d.licitacion_id ?? nueva.licitacion_id), version: Number(d.version ?? v.version),
+        id: Number(d.id), licitacion_id: Number(d.licitacion_id ?? nueva.licitacion_id), version,
         carpeta: String(d.carpeta ?? nueva.carpeta), emitido_por: String(d.emitido_por ?? ""), emitido_en: String(d.emitido_en ?? ""),
         doc_version: Number(d.doc_version ?? nueva.doc_version), firma: String(d.firma ?? nueva.firma),
         foto: nueva.foto, archivos: nueva.archivos, hallazgos: nueva.hallazgos, omitidos: nueva.omitidos, nota: nueva.nota,

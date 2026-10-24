@@ -113,7 +113,18 @@ lanzo = false; try { rutaNueva("bases", 7, uuid, "exe"); } catch { lanzo = true;
 check(lanzo, "extensión no permitida lanza");
 lanzo = false; try { rutaNueva("otra" as never, 7, uuid, "pdf"); } catch { lanzo = true; }
 check(lanzo, "carpeta no permitida lanza");
-check(CARPETAS_LICITACION.length === 6, "seis carpetas");
+check(CARPETAS_LICITACION.length === 8 && CARPETAS_LICITACION.includes("legajo") && CARPETAS_LICITACION.includes("conductores"), "ocho carpetas (con legajo y conductores)");
+// Legajo y conductores: sin licId (no son de una licitación) y SOLO pdf|png|jpg — la misma forma que exige la política del bucket.
+for (const c of ["legajo", "conductores"] as const) {
+  check(rutaNueva(c, null, uuid, "pdf") === `${c}/${uuid}.pdf` && rutaNueva(c, 7, uuid, "JPG") === `${c}/${uuid}.jpg` && rutaNueva(c, null, uuid, ".png") === `${c}/${uuid}.png`, `${c}: <uuid>.<ext> sin licId`);
+  for (const e of ["docx", "xlsx", "xls", "zip", "jpeg", "exe"]) {
+    let l = false; try { rutaNueva(c, null, uuid, e); } catch { l = true; }
+    check(l, `${c}: rechaza .${e}`);
+  }
+  const o = objetoPrivadoDe(publica("licitaciones", rutaNueva(c, null, uuid, "pdf")), BASE);
+  check(o?.bucket === "licitaciones" && o.ruta === `${c}/${uuid}.pdf`, `${c}: objetoPrivadoDe devuelve la ruta subida`);
+}
+check(rutaNueva("bases", 7, uuid, "docx") === `bases/7/${uuid}.docx`, "las demás carpetas siguen aceptando docx");
 check(nombreArchivoEmitido("Sección II · Requisitos legales", "pdf") === "Seccion_II_Requisitos_legales.pdf", nombreArchivoEmitido("Sección II · Requisitos legales", "pdf"));
 check(!nombreArchivoEmitido("../../etc/passwd", "pdf").includes(".."), "sin ..");
 check(!nombreArchivoEmitido("a/b\\c", "zip").match(/[\\/]/), "sin separadores");

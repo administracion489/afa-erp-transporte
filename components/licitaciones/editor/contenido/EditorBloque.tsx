@@ -6,10 +6,9 @@
 // la del MISMO resolvedor que usa el PDF (resolverDocumento), no una copia.
 
 import { useState, type ReactNode } from "react";
-import { ImgPrivada } from "@/components/ArchivoPrivado";
 import { TIPOS_AUTO, type ArchivoRef, type Bloque, type BloqueResuelto, type Hallazgo, type Paso, type TipoAuto, type TipoBloque } from "@/lib/licitaciones/tipos";
 import type { ValoresVariables } from "@/lib/licitaciones/texto";
-import { Boton, BotonIcono, CampoTexto, Campo, Interruptor, TextoVista, TopeAlcanzado, claseInput } from "./comun";
+import { Boton, BotonIcono, CampoTexto, Campo, Interruptor, MiniaturaDoc, TextoVista, TopeAlcanzado, claseInput } from "./comun";
 import EditorTabla from "./EditorTabla";
 import { useSortable } from "@dnd-kit/sortable";
 import { Asa, estiloOrdenable } from "./ordenable";
@@ -242,7 +241,7 @@ function EditorImagen(p: PropsBloque) {
       {b.archivo ? (
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
           <div className="flex max-w-full shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-gray-50 p-1 sm:w-56">
-            <ImgPrivada src={b.archivo.url} alt={b.pie ?? b.archivo.nombre} className="max-h-48 max-w-full object-contain" />
+            <MiniaturaDoc url={b.archivo.url} alt={b.pie ?? b.archivo.nombre} className="max-h-48 max-w-full object-contain" />
           </div>
           <div className="min-w-0 space-y-2 text-xs text-gray-600">
             <p className="break-all"><span className="font-semibold text-gray-700">{b.archivo.nombre}</span> · {(b.archivo.bytes / 1024).toFixed(0)} KB</p>
