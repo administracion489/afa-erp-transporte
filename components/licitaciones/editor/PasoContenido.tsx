@@ -9,9 +9,8 @@
 //
 // Anclas: los paneles llevan su nombre como id del DOM («portada», «control», «carta», «glosario»,
 // «indice», «cierre», y «secciones» en la lista) y los elementos anclaDe("seccion"|"bloque", id). Como
-// solo se pinta la sección elegida, el editor puede pasar `ancla` (opcional, misma forma que
-// Hallazgo.donde.ancla) para que el paso elija la sección o el panel antes de llevar a él; también se
-// atiende un #ancla de la dirección.
+// solo se pinta la sección elegida, el paso escucha la navegación del editor (useEditorExtra().ancla) y
+// elige la sección o el panel antes de llevar a él.
 
 import { useCallback, useDeferredValue, useEffect, useEffectEvent, useMemo, useState } from "react";
 import { subirArchivo } from "@/lib/licitaciones/datos";
@@ -21,6 +20,7 @@ import { bytesDoc } from "@/lib/licitaciones/normalizar";
 import { valoresVariables } from "@/lib/licitaciones/texto";
 import { TOPES_DOC, type DocLicitacion, type Hallazgo, type Seccion } from "@/lib/licitaciones/tipos";
 import { anclaDe, type PasoProps } from "./contrato-editor";
+import { useEditorExtra } from "./contexto-editor";
 import { Boton, TopeAlcanzado } from "./contenido/comun";
 import { bloqueNuevo, bloquesConContenido, copiarSeccion, LIM, mover, numerosDeSecciones } from "./contenido/bloques";
 import type { VistaAuto } from "./contenido/EditorBloque";
@@ -60,7 +60,7 @@ function destinoDeAncla(ancla: string | null, doc: DocLicitacion): { sel: Selecc
   return { sel: null, domId: "secciones" };
 }
 
-/** ¿Es un ancla de este paso? (para el #hash: el editor puede usarlo para otras cosas). */
+/** ¿Es un ancla de este paso? (la navegación del editor trae también anclas de otros pasos). */
 const esAnclaDelPaso = (a: string) => a.startsWith("bloque:") || a.startsWith("seccion:") || esPanel(a);
 
 /** Qué del contenido actual reemplazaría la plantilla base (para nombrarlo en la confirmación). */
@@ -88,7 +88,7 @@ const sumar = (m: Map<string, Cuenta>, k: string, h: Hallazgo) => {
 };
 const CERO: Cuenta = { alarma: 0, otras: 0 };
 
-export default function PasoContenido(p: PasoProps & { ancla?: string | null }) {
+export default function PasoContenido(p: PasoProps) {
   const { lic, doc, cambiarDoc, ctx, revision, irA, soloLectura, nuevoId, aviso } = p;
   const [selElegida, setSel] = useState<Seleccion>(() => (doc.secciones[0] ? { tipo: "seccion", id: doc.secciones[0].id } : { tipo: "panel", panel: "portada" }));
   const sel = selValida(selElegida, doc);
@@ -143,7 +143,7 @@ export default function PasoContenido(p: PasoProps & { ancla?: string | null }) 
 
   const subirImagen = useCallback((file: File) => subirArchivo("imagenes", lic.id, file), [lic.id]);
 
-  // ── Navegación a un ancla (hallazgos, el editor, el #hash)
+  // ── Navegación a un ancla (los hallazgos de arriba y la navegación del editor)
   const llevarA = useCallback((domId: string) => {
     setResaltado(domId);
     setTimeout(() => document.getElementById(domId)?.scrollIntoView({ behavior: "smooth", block: "center" }), 60);
@@ -154,23 +154,19 @@ export default function PasoContenido(p: PasoProps & { ancla?: string | null }) 
     if (d.sel) setSel(d.sel);
     llevarA(d.domId);
   }, [doc, llevarA]);
-  const alAncla = useEffectEvent((a: string) => navegar(a));
+  // La navegación del editor (contexto-editor.tsx): `ids` trae el elemento primero y su panel de respaldo.
+  // Como solo se pinta la sección elegida, primero se elige la sección o el panel y después se lleva a él.
+  const { ancla } = useEditorExtra();
+  const nAncla = ancla?.n ?? null;
+  const alNavegarEditor = useEffectEvent(() => {
+    const id = (ancla?.ids ?? []).find((x) => esAnclaDelPaso(x) || x === "secciones");
+    if (id) navegar(id);
+  });
   useEffect(() => {
-    const a = p.ancla;
-    if (!a) return;
-    const t = setTimeout(() => alAncla(a), 0);
+    if (nAncla == null) return;
+    const t = setTimeout(() => alNavegarEditor(), 0);
     return () => clearTimeout(t);
-  }, [p.ancla]);
-  useEffect(() => {
-    const leer = () => {
-      let h = "";
-      try { h = decodeURIComponent(window.location.hash.slice(1)); } catch { h = ""; }
-      if (h && esAnclaDelPaso(h)) alAncla(h);
-    };
-    const t = setTimeout(leer, 0);
-    window.addEventListener("hashchange", leer);
-    return () => { clearTimeout(t); window.removeEventListener("hashchange", leer); };
-  }, []);
+  }, [nAncla]);
 
   // ── Secciones
   const lleno = doc.secciones.length >= TOPES_DOC.maxSecciones;

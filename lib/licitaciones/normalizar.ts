@@ -50,7 +50,12 @@ const T = {
   id: 100, titulo: 200, corto: 120, numeral: 40, requisito: 1000, sustento: 1000, cita: 500,
   nombreArchivo: 200, maxBases: 50, maxConsultas: 300, maxContactos: 40, maxGlosario: 200,
   maxVinetas: 300, maxExperiencia: 200, maxAceptados: 1000, maxIdsAnalisis: 2000, clave: 400, nota: 1000,
+  subtituloPortada: 300, pieImagen: 500, definicion: 2000, version: 40, codigoDoc: 80,
+  confidencialidad: 300, cartaLargo: 1000, referenciaBloque: 300,
 } as const;
+/** Los topes de texto con que se NORMALIZA el doc. La pantalla los usa como maxLength: si pusiera los
+ *  suyos, un texto más largo se cortaría en silencio al guardar. */
+export const LIMITES_TEXTO = T;
 
 const incluye = <X extends string>(lst: readonly X[], x: unknown): x is X => typeof x === "string" && (lst as readonly string[]).includes(x);
 const bool = (x: unknown, def: boolean): boolean => (typeof x === "boolean" ? x : def);
@@ -269,7 +274,7 @@ function normalizarPortada(raw: unknown, id: Ids): Portada {
     modo: r.modo === "imagen" ? "imagen" : "generada",
     imagen: normalizarArchivo(r.imagen, (x) => id("archivo_portada", x)),
     titulo: textoCorto(r.titulo, T.titulo) || "Propuesta Técnica",
-    subtitulo: textoCorto(r.subtitulo, 300),
+    subtitulo: textoCorto(r.subtitulo, T.subtituloPortada),
     cabecera: textoCorto(r.cabecera, T.titulo),
     color: color(r.color),
   };
@@ -280,10 +285,10 @@ function normalizarControl(raw: unknown): ControlDocumento {
   const c = (x: unknown) => textoCorto(x, T.titulo);
   return {
     activo: bool(r.activo, true),
-    documento: c(r.documento), version: textoCorto(r.version, 40), codigo: textoCorto(r.codigo, 80),
+    documento: c(r.documento), version: textoCorto(r.version, T.version), codigo: textoCorto(r.codigo, T.codigoDoc),
     elaboradoPor: c(r.elaboradoPor), revisadoPor: c(r.revisadoPor), aprobadoPor: c(r.aprobadoPor),
     fecha: fechaONull(r.fecha),
-    confidencialidad: textoCorto(r.confidencialidad, 300),
+    confidencialidad: textoCorto(r.confidencialidad, T.confidencialidad),
   };
 }
 
@@ -292,9 +297,9 @@ function normalizarCarta(raw: unknown): Carta {
   return {
     activa: bool(r.activa, true),
     lugarFecha: textoCorto(r.lugarFecha, T.titulo),
-    destinatario: limpiarTexto(r.destinatario, 1000),
+    destinatario: limpiarTexto(r.destinatario, T.cartaLargo),
     atencion: textoCorto(r.atencion, T.titulo),
-    referencia: limpiarTexto(r.referencia, 1000),
+    referencia: limpiarTexto(r.referencia, T.cartaLargo),
     cuerpo: texto(r.cuerpo),
     despedida: textoCorto(r.despedida, T.titulo) || "Atentamente,",
     conFirma: bool(r.conFirma, true),
@@ -337,7 +342,7 @@ function normalizarBloque(raw: unknown, id: Ids): Bloque | null {
       return {
         id: bid(), tipo: "imagen",
         archivo: normalizarArchivo(raw.archivo, (x) => id("archivo_imagen", x)),
-        pie: textoONull(raw.pie, 500),
+        pie: textoONull(raw.pie, T.pieImagen),
         anchoPct: pct === null ? 100 : Math.round(pct),
       };
     }
@@ -419,7 +424,7 @@ function normalizarBloqueExp(raw: unknown, id: Ids): BloqueExpediente | null {
     activo: bool(raw.activo, true),
     titulo: textoCorto(raw.titulo, T.titulo),
     subtitulo: textoCorto(raw.subtitulo, T.titulo),
-    referencia: textoCorto(raw.referencia, 300),
+    referencia: textoCorto(raw.referencia, T.referenciaBloque),
     conPortada: bool(raw.conPortada, true),
     items: lista(raw.items).map((i) => normalizarItem(i, id)).filter((i): i is ItemExpediente => !!i).slice(0, TOPES_DOC.maxItemsBloque),
   };
@@ -504,7 +509,7 @@ export function normalizarDoc(raw: unknown, nuevoId: () => string): DocLicitacio
     glosario: {
       activo: bool(glos.activo, false),
       entradas: lista(glos.entradas).filter(esObjeto).slice(0, T.maxGlosario).map((e): EntradaGlosario => ({
-        id: id("glosario", e.id), termino: textoCorto(e.termino, T.corto), definicion: limpiarTexto(e.definicion, 2000),
+        id: id("glosario", e.id), termino: textoCorto(e.termino, T.corto), definicion: limpiarTexto(e.definicion, T.definicion),
       })),
     },
     indice: { activo: bool(ind.activo, true), niveles: ind.niveles === 1 ? 1 : 2 },

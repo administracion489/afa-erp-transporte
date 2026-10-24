@@ -282,14 +282,15 @@ function FuenteAdjunto({ p, item, archivo, bloqueTitulo, editable }: { p: PasoPr
     setSubiendo(file.name);
     try {
       const ref = await subirArchivo("adjuntos", p.lic.id, file);
-      let quedo = false;
+      // Por id, sobre el doc de AHORA: mientras subía pudo reordenarse o quitarse el ítem.
+      const hecho = { quedo: false };
       p.cambiarDoc((d) => {
         if (!existeItem(d, item.id)) return d;
-        quedo = true;
+        hecho.quedo = true;
         return conItem(d, item.id, (i) => (i.fuente.tipo === "adjunto" ? { ...i, fuente: { tipo: "adjunto", archivo: ref } } : i));
       });
-      if (quedo) p.aviso(`«${ref.nombre}» se subió a «${nombreItem}».`);
-      else p.aviso(`«${ref.nombre}» se subió, pero el ítem ya no existe: el archivo quedó guardado sin usar.`, "aviso");
+      if (hecho.quedo) p.aviso(`«${ref.nombre}» se subió a «${nombreItem}».`);
+      else p.aviso(`«${ref.nombre}» se subió, pero el ítem ya no existe (o la licitación pasó a solo lectura): el archivo quedó guardado sin usar.`, "aviso");
     } catch (e) {
       if (e instanceof ErrorLicitaciones) setError({ texto: e.message, sql: e.sinMigracion });
       else setError({ texto: `No se pudo subir «${file.name}»: ${e instanceof Error ? e.message : String(e)}. Revisa tu conexión y vuelve a intentarlo.`, sql: null });

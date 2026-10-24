@@ -7,29 +7,30 @@
 // si se cambian allí, se cambian aquí). Un tope que la pantalla deja pasar y el normalizador recorta es
 // texto que el operador escribió y desaparece al guardar sin que nadie lo diga.
 
+import { LIMITES_TEXTO as L } from "@/lib/licitaciones/normalizar";
 import { TOPES_DOC, type Bloque, type Paso, type Seccion, type TipoAuto, type TipoBloque } from "@/lib/licitaciones/tipos";
 
-/** Topes de texto del documento (normalizar.ts: T.titulo, T.corto, T.maxGlosario, T.maxVinetas…). */
+/** Topes de texto del documento: los MISMOS con que normalizar.ts recorta al guardar (LIMITES_TEXTO). */
 export const LIM = {
-  tituloSeccion: 200,
-  subtitulo: 200,
-  tituloTabla: 200,
-  encabezado: 200,
-  pieImagen: 500,
+  tituloSeccion: L.titulo,
+  subtitulo: L.titulo,
+  tituloTabla: L.titulo,
+  encabezado: L.titulo,
+  pieImagen: L.pieImagen,
   texto: TOPES_DOC.maxTextoBloque,
-  vinetas: 300,
-  glosario: 200,
-  termino: 120,
-  definicion: 2000,
-  portadaTitulo: 200,
-  portadaSubtitulo: 300,
-  cabecera: 200,
-  controlCampo: 200,
-  controlVersion: 40,
-  controlCodigo: 80,
-  confidencialidad: 300,
-  cartaCorto: 200,
-  cartaLargo: 1000,
+  vinetas: L.maxVinetas,
+  glosario: L.maxGlosario,
+  termino: L.corto,
+  definicion: L.definicion,
+  portadaTitulo: L.titulo,
+  portadaSubtitulo: L.subtituloPortada,
+  cabecera: L.titulo,
+  controlCampo: L.titulo,
+  controlVersion: L.version,
+  controlCodigo: L.codigoDoc,
+  confidencialidad: L.confidencialidad,
+  cartaCorto: L.titulo,
+  cartaLargo: L.cartaLargo,
 } as const;
 
 export const ORDEN_TIPOS: readonly TipoBloque[] = ["parrafo", "subtitulo", "vinetas", "tabla", "nota", "imagen", "salto_pagina", "auto"];
