@@ -703,5 +703,27 @@ console.log("9. El resumen de la política con su enlace y su QR (cotizaciones-0
   ok(malo.includes("<li>&lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;</li>"), "el resumen se escapa");
 }
 
+console.log("10. itemsEnIdioma: una descripción que el código escribió en inglés no se avisa como «escrita tal cual»");
+{
+  const cot = { ...COTS(2)[0], moneda: "PEN", idioma_pdf: "en", itinerario_texto: null };
+  const items = [{ descripcion: "TRANSFER ONE WAY · Airport – Miraflores · Auto (up to 4 passengers) · price per leg", dias: 1, cantidad: 1, precio_unit: 100, descuento_pct: 0 }];
+  const consid = { incluye: ["Bilingual driver"], no_incluye: [], generales: [], version: 2, idioma: "en" };
+  for (const p of PLANTILLAS) {
+    const sin = N.htmlCotizacion({ cot, items, vehiculos: [], plantilla: p, consid });
+    const con = N.htmlCotizacion({ cot, items, vehiculos: [], plantilla: p, consid, itemsEnIdioma: true });
+    const avisoSin = sin.avisos.find(a => a.codigo === "textos_escritos_tal_cual");
+    ok(!!avisoSin && avisoSin.detalle.includes("descripción(es) de ítem"), `${p}: sin itemsEnIdioma, la descripción se avisa (como siempre)`);
+    ok(!con.avisos.some(a => a.codigo === "textos_escritos_tal_cual"), `${p}: con itemsEnIdioma y condiciones en inglés, nada que avisar`);
+    ok(con.html === sin.html, `${p}: itemsEnIdioma solo cambia el aviso, no el documento`);
+  }
+  // En castellano no hace nada.
+  const es = { ...cot, idioma_pdf: "es" };
+  for (const p of PLANTILLAS) {
+    const a = N.htmlCotizacion({ cot: es, items: ITEMS[0], vehiculos: [], plantilla: p });
+    const b = N.htmlCotizacion({ cot: es, items: ITEMS[0], vehiculos: [], plantilla: p, itemsEnIdioma: true });
+    ok(a.html === b.html && JSON.stringify(a.avisos) === JSON.stringify(b.avisos), `${p}: en castellano, itemsEnIdioma no cambia nada`);
+  }
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

@@ -25,29 +25,41 @@
 //     número de 6+ dígitos); después la acción de la bandeja (`crm_acciones_ia`, tipo
 //     `cotizacion_traslado`, siempre `pendiente`) y, si queda en revisión, una nota interna con los
 //     motivos (y la línea de condiciones que la dejó, citada).
+//
+// EL IDIOMA (22-10-2026) LO DECIDE EL CÓDIGO, UNA VEZ: `idiomaDelCliente` sobre los mensajes
+// ENTRANTES del cliente (lib/idioma-cliente.ts) y, solo con el inglés ENCENDIDO (`inglesActivo`: una
+// plantilla en inglés asignada a una celda «inglés»), pasa a la entrada como `idioma_cliente`
+// (`entradaDelAgente`). De ahí salen la moneda por defecto (el motor), la firma, la plantilla de las
+// condiciones (`plantillaParaTraslado({ idioma })`) y la fila (`idioma_pdf`), que es desde entonces la
+// fila autoritativa del idioma de esa cotización: el PDF, el caption y el mensaje la leen, nadie
+// vuelve a detectar. Lo pasa el agente (`ctx.idioma`, calculado una vez por turno); si no viene, se
+// calcula aquí con los mismos entrantes. Sin el inglés encendido (o sin evidencia), todo es
+// castellano, byte a byte lo de antes. La nota interna del ejecutivo sigue en castellano.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { faltaAlguna, faltaColumna } from "../columna-faltante";
 import { empresaConDefectos } from "../empresa-perfil";
 import { numeroCotizacion } from "../cotizacion-pdf";
-import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
-import { ETIQUETA_LISTA_CONSID } from "../cotizacion-plantillas";
+import { fmtFechaDoc, fmtImporte, normalizarIdioma, type Idioma } from "../cotizacion-idioma";
+import { ETIQUETA_LISTA_CONSID, inglesActivo, type InglesTraslado } from "../cotizacion-plantillas";
+import { idiomaDelCliente, type IdiomaCliente } from "../idioma-cliente";
 import { fechaLima } from "../alertas-horario";
 import { telefonosE164 } from "../crm-telefono";
 import { validarEntrada, type EntradaSimulador, type LugarEntrada } from "./api";
 import { cargarCatalogo, leerConfigIA, leerIgvPct, SinMigracionTraslados, type CatalogoTraslados } from "./datos";
-import { plantillaParaTraslado } from "./plantilla-traslado-datos";
+import { leerInglesTraslado, plantillaParaTraslado } from "./plantilla-traslado-datos";
 import {
-  cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, resultadoDeFila,
+  canonImprimible, cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, impresosSospechosos, mismaFilaImpresa, resultadoDeFila,
   type FilaCotizacion, type FilaCotizacionLeida,
 } from "./cotizacion-traslado";
 import {
-  MOTIVO_REVISION, TOPES, decidirTope, entradaDelAgente, figurasPermitidas, firmaPedido, planEnvio,
+  MOTIVO_REVISION, TOPES, decidirTope, entradaDelAgente, figurasPermitidas, firmaPedido, idiomaDeGuarda, planEnvio,
   respuestaDerivar, respuestaEnRevision, respuestaParaModelo, respuestaYaEnviada, revisionPorCondiciones, senalesEnTexto,
   textosDeUbicacion, textosLibresSospechosos,
   type CodigoRevision, type DecisionEnvio,
 } from "./envio-ia";
-import { ETIQUETA_TEXTO_LIBRE } from "./texto-libre";
+import { ETIQUETA_TEXTO_LIBRE, type IdiomaTexto } from "./texto-libre";
+import { createHash } from "node:crypto";
 import { armarPdfDeFila, leerCotizacionTraslado, leerPerfilPdf, type AvisoPdfTraslado, type LogoPdf, type PerfilPdf } from "./enviar-cotizacion-datos";
 import { simularTrasladoConCatalogo } from "./servicio";
 import type { ResultadoTraslado } from "./motor";
@@ -70,10 +82,17 @@ export type CtxCotizarIA = {
   /** Consultas al motor hechas en ESTE turno (se cuentan en memoria). */
   consultasTurno: { n: number };
   /**
-   * Los mensajes ENTRANTES (contenido y tipo); si faltan, se leen. De todos salen las palabras de
-   * pedido complejo; las coordenadas, SOLO de los de tipo «location».
+   * Los mensajes ENTRANTES (contenido, tipo y hora; del más reciente al más antiguo); si faltan, se
+   * leen. De todos salen las palabras de pedido complejo y el idioma; las coordenadas, SOLO de los de
+   * tipo «location».
    */
-  entrantes?: { contenido: string | null; tipo: string | null }[];
+  entrantes?: Entrante[];
+  /**
+   * El idioma del cliente y si el inglés está encendido, calculados por el CÓDIGO una vez por turno
+   * (lib/crm-ia.ts: `idiomaDelCliente` sobre los entrantes + `leerInglesTraslado`). Si no viene, se
+   * calcula aquí. Nunca lo pone el modelo: el idioma mueve la moneda.
+   */
+  idioma?: { cliente: IdiomaCliente | null; ingles: InglesTraslado | null };
   /**
    * El modo de preguntar del agente (`comportamiento.preguntas`, lib/crm-ia-ajustes.ts): con
    * «una_por_mensaje», la instrucción al modelo pide SOLO el primer dato que falta. Sin él, la de
@@ -92,6 +111,8 @@ export type CotizacionIA = {
   total?: string;
   validez?: string;
   accionId?: string;
+  /** El idioma de la cotización (`idioma_pdf` de su fila): el del mensaje que escribe el código. */
+  idioma: Idioma;
 };
 
 export type ResultadoCotizarIA = {
@@ -139,11 +160,15 @@ export async function clienteIdDeRemitente(sb: Sb, contacto: CtxCotizarIA["conta
   return ids.size === 1 ? [...ids][0] : null;
 }
 
-type Entrante = { contenido: string | null; tipo: string | null };
+/** Un mensaje entrante como lo leen la herramienta y la detección del idioma. */
+export type Entrante = { contenido: string | null; tipo: string | null; created_at?: string | null };
 
-/** Los mensajes entrantes de la conversación (más recientes primero), con su tipo. null si no se pudieron leer. */
-async function entrantesDe(sb: Sb, convId: string): Promise<Entrante[] | null> {
-  const { data, error } = await sb.from("crm_mensajes").select("contenido, tipo").eq("conversacion_id", convId).eq("direccion", "entrante")
+/**
+ * Los mensajes entrantes de la conversación (más recientes primero), con su tipo y su hora (la
+ * detección del idioma solo mira las últimas horas). null si no se pudieron leer.
+ */
+export async function entrantesDe(sb: Sb, convId: string): Promise<Entrante[] | null> {
+  const { data, error } = await sb.from("crm_mensajes").select("contenido, tipo, created_at").eq("conversacion_id", convId).eq("direccion", "entrante")
     .order("created_at", { ascending: false }).limit(60);
   if (error) return null;
   return ((data ?? []) as Entrante[]).filter((m) => m && String(m.contenido ?? "").trim() !== "");
@@ -159,6 +184,8 @@ export function pedidoEnUnaLinea(e: EntradaSimulador): string {
     `${e.fecha_servicio ?? "sin fecha"}${e.hora_servicio ? ` ${e.hora_servicio}` : ""}`,
     sentido, `${e.pax ?? "?"} pax`, `${e.maletas ?? "?"} maletas de 23 kg`,
     ...(e.pide_dolares ? ["pide la cotización en dólares"] : []),
+    ...(e.idioma_cliente === "en" ? ["escribe en inglés"] : e.idioma_cliente === "otro" ? ["escribe en otro idioma (se le contesta en inglés)"] : []),
+    ...(e.pide_soles ? ["pide la cotización en soles"] : []),
   ].join(" · ").slice(0, 500);
 }
 
@@ -223,6 +250,11 @@ async function insertarCotizacion(sb: Sb, fila: FilaCotizacion): Promise<Inserci
     if (col === "crm_conversacion_id" || col === "traslado_json") {
       return { ok: false, motivo: "Falta correr supabase/traslados-05-cotizacion-ia.sql", detalle: `La columna cotizaciones.${col} no existe.` };
     }
+    // Una cotización en inglés sin su idioma saldría en castellano (el PDF, el caption y los
+    // mensajes leen `idioma_pdf`): no se guarda a medias.
+    if (col === "idioma_pdf" && fila.idioma_pdf === "en") {
+      return { ok: false, motivo: "Falta correr supabase/cotizaciones-04-moneda-idioma.sql", detalle: "Una cotización en inglés no se guarda sin su idioma (saldría en castellano)." };
+    }
     if (fila.moneda === "USD") {
       return { ok: false, motivo: "Falta correr supabase/cotizaciones-04-moneda-idioma.sql", detalle: "Una cotización en dólares no se guarda sin su moneda y su tipo de cambio." };
     }
@@ -257,20 +289,25 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   const cfg = await leerConfigIA(sb);
   if (!cfg.iaCotiza) return deriva("La cotización automática de traslados no está disponible", "Cotizar un traslado", cfg.detalle ?? "");
 
-  // 2) La entrada, con lista blanca. Coordenadas solo de las ubicaciones compartidas.
+  // 2) La entrada, con lista blanca. Coordenadas solo de las ubicaciones compartidas; el idioma, del
+  //    código (lo que pasó el agente o, si no, los mismos entrantes): nunca del input del modelo.
   const entrantes = ctx.entrantes ?? (await entrantesDe(sb, ctx.conv.id));
   const textos = entrantes ? entrantes.map((m) => String(m.contenido ?? "")) : null;
-  const v = validarEntrada(entradaDelAgente(input, ctx.remitente, textosDeUbicacion(entrantes), textos ?? []));
+  const idioma = ctx.idioma ?? (await idiomaDeEntrantes(sb, entrantes, ahora));
+  const v = validarEntrada(entradaDelAgente(input, ctx.remitente, textosDeUbicacion(entrantes), textos ?? [], idioma));
   if (!v.ok) return deriva(`Pedido de traslado que no se pudo leer: ${v.detalle}`, "Cotizar un traslado");
   const e = v.entrada;
   const pedido = pedidoEnUnaLinea(e);
   const firma = firmaPedido(e);
   const libres = camposLibres(e, ctx.contacto?.nombre ?? null);
+  // El idioma de las GUARDAS (revisión S1): con el cliente en inglés u otro idioma, castellano ∪ inglés
+  // también con el inglés apagado (`idiomaDeGuarda`); sin evidencia, el castellano de siempre.
+  const guarda: IdiomaTexto = idiomaDeGuarda(idioma.cliente, e.idioma_cliente ? "en" : "es");
 
   // 3) ¿Ya se cotizó este mismo pedido?
   const previa = await accionPrevia(sb, ctx.conv.id, firma, ahora);
   if (!previa.ok) return deriva("No se pudo comprobar si este pedido ya se cotizó", pedido, previa.detalle);
-  if (previa.accion) return reusar(ctx, deps, previa.accion, { pedido, firma, textos, libres, ahora, hoy });
+  if (previa.accion) return reusar(ctx, deps, previa.accion, { pedido, firma, textos, libres, ahora, hoy, guarda });
 
   // 4) Topes, antes de gastar Google.
   const conteos = await contarTopes(sb, ctx.conv.id, hoy);
@@ -297,19 +334,69 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   //    sin la migración, o sin una plantilla que la IA pueda dibujar, de `traslados_config` como
   //    siempre. Una lectura que falla no es «sin plantilla»: se deriva.
   const clienteId = await clienteIdDeRemitente(sb, ctx.contacto, ctx.remitente.waId);
-  const pt = await plantillaParaTraslado(sb, { moneda: r.precio!.moneda, clienteId });
+  //    El idioma de la fila es el de la entrada (un enum que derivó el código): «en» con el cliente
+  //    en inglés u otro idioma y el inglés encendido; si no, castellano.
+  const idiomaFila: Idioma = e.idioma_cliente ? "en" : "es";
+  const pt = await plantillaParaTraslado(sb, { moneda: r.precio!.moneda, clienteId, idioma: idiomaFila });
   if (!pt.ok) return deriva("No se pudieron leer las condiciones del PDF (plantilla)", pedido, pt.detalle);
   const fila = filaCotizacionTraslado(r, e, {
     convId: ctx.conv.id, clienteId, atencion: ctx.contacto?.nombre ?? null, config: sim.catalogo.config, firma, hoy,
-    ahora: new Date(ahora).toISOString(), plantilla: pt.plantilla,
+    ahora: new Date(ahora).toISOString(), plantilla: pt.plantilla, ...(idiomaFila === "en" ? { idioma: idiomaFila } : {}),
+    // Lo que no se imprime es lo mismo que deja en revisión: con el cliente en inglés (aunque el inglés esté apagado), castellano ∪ inglés.
+    ...(guarda === "en" && idiomaFila !== "en" ? { guarda } : {}),
   });
   const ins = await insertarCotizacion(sb, fila);
   if (!ins.ok) return deriva(ins.motivo, pedido, ins.detalle);
   const guardada: Record<string, unknown> = { ...fila };
   for (const c of ins.sueltas) delete guardada[c];
   const leida: FilaCotizacionLeida = { ...(guardada as FilaCotizacion), id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at, ...(ins.condiciones_token ? { condiciones_token: ins.condiciones_token } : {}) };
-  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n") });
+  // La HUELLA de lo que se imprime, sobre la fila LEÍDA de la base (la misma lectura con que se
+  // compara al reusarla): queda en la acción. Si no se puede leer, la acción nace sin huella y, si
+  // este pedido se reusa, irá a revisión (`editada_a_mano`): no se puede comprobar. Y si la releída
+  // NO imprime lo mismo que la que escribió la IA (`mismaFilaImpresa`: alguien la editó entre el
+  // INSERT y la relectura), tampoco hay huella —esa fila no es «la de la IA»— y va a revisión ya.
+  let huella: string | null = null;
+  let editada = false;
+  try {
+    const releida = await leerCotizacionTraslado(sb, ins.id);
+    if (releida && mismaFilaImpresa(leida, releida)) huella = huellaImprimible(releida);
+    else if (releida) editada = true;
+  } catch { huella = null; }
+  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n"), guarda, huella, ...(editada ? { editada } : {}) });
 }
+
+/** El sha256 (hex) de lo que imprime la fila (`canonImprimible`): la huella que queda en la acción al crearla. */
+export function huellaImprimible(fila: FilaCotizacionLeida): string {
+  return createHash("sha256").update(canonImprimible(fila)).digest("hex");
+}
+
+/**
+ * ¿La fila ya no es la que escribió la IA? La huella guardada en la acción al CREARLA contra la de la
+ * fila de ahora. Una acción sin huella (de antes de este cambio, o cuya fila no se pudo releer al
+ * crearla) tampoco se puede comprobar: cuenta como editada. PURA salvo el hash.
+ */
+export function filaEditada(payload: Record<string, unknown> | null | undefined, fila: FilaCotizacionLeida): boolean {
+  const guardada = payload && typeof payload === "object" ? (payload as { huella?: unknown }).huella : undefined;
+  if (typeof guardada !== "string" || !/^[0-9a-f]{64}$/.test(guardada)) return true;
+  return guardada !== huellaImprimible(fila);
+}
+
+/**
+ * El idioma del cliente cuando el agente no lo pasó: `idiomaDelCliente` sobre los entrantes y, solo
+ * si escribe en inglés u otro idioma, si el inglés está encendido (una lectura de las plantillas;
+ * para un cliente en castellano no hace falta). Una lectura que falla es «inglés apagado»: castellano,
+ * lo de siempre.
+ */
+async function idiomaDeEntrantes(sb: Sb, entrantes: Entrante[] | null, ahora: number): Promise<{ cliente: IdiomaCliente | null; ingles: InglesTraslado | null }> {
+  const cliente = entrantes ? idiomaDelCliente(entrantes, ahora).idioma : null;
+  if (cliente !== "en" && cliente !== "otro") return { cliente, ingles: null };
+  const li = await leerInglesTraslado(sb);
+  return { cliente, ingles: li.ok ? li.ingles : null };
+}
+
+/** ¿El cliente escribe en inglés u otro idioma y el inglés está encendido? (la misma condición que `entradaDelAgente`). */
+export const idiomaDelTurno = (x: { cliente: IdiomaCliente | null; ingles: InglesTraslado | null } | null | undefined): Idioma =>
+  !!x && inglesActivo(x.ingles) && (x.cliente === "en" || x.cliente === "otro") ? "en" : "es";
 
 type CampoLibre = { campo: string; texto: string | null };
 
@@ -327,7 +414,7 @@ function camposLibres(e: EntradaSimulador, nombre: string | null): CampoLibre[] 
 /** El mismo pedido otra vez: se reusa la cotización (y se vuelve a decidir el envío), se recuerda la enviada, o se deriva. */
 async function reusar(
   ctx: CtxCotizarIA, deps: DepsCotizar, acc: AccionFila,
-  x: { pedido: string; firma: string; textos: string[] | null; libres: CampoLibre[]; ahora: number; hoy: string },
+  x: { pedido: string; firma: string; textos: string[] | null; libres: CampoLibre[]; ahora: number; hoy: string; guarda: IdiomaTexto },
 ): Promise<ResultadoCotizarIA> {
   const { sb } = ctx;
   if (acc.estado === "rechazada") return deriva("Un ejecutivo rechazó hace poco una cotización de este mismo pedido", x.pedido);
@@ -344,6 +431,7 @@ async function reusar(
       cotizacion: {
         cotizacionId: leida.id, numero, decision: "automatico", yaEnviada: true,
         figuras: cifras?.figuras ?? [], total: cifras?.total, validez: cifras?.validez ?? undefined, accionId: acc.id,
+        idioma: normalizarIdioma(leida.idioma_pdf),
       },
     };
   }
@@ -357,7 +445,10 @@ async function reusar(
   }
   const igv = await leerIgvPct(sb);
   const r = resultadoDeFila(leida, catalogo, igv);
-  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo, firma: x.firma, textos: x.textos, libres: x.libres, pedido: x.pedido, nota: "", existente: acc });
+  // ¿La fila sigue siendo la que escribió la IA? Si alguien la editó (o no se puede comprobar), la
+  // envía un ejecutivo (`editada_a_mano`): el PDF imprime la fila tal cual.
+  const editada = filaEditada(acc.payload, leida);
+  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo, firma: x.firma, textos: x.textos, libres: x.libres, pedido: x.pedido, nota: "", existente: acc, guarda: x.guarda, editada });
 }
 
 /** PDF, cuadre, decisión de envío, acción de la bandeja y nota interna. Compartido por la cotización nueva y la reusada. */
@@ -366,10 +457,20 @@ async function decidirYRegistrar(
   x: {
     leida: FilaCotizacionLeida; resultado: ResultadoTraslado | null; catalogo: Pick<CatalogoTraslados, "config" | "zonas">;
     firma: string; textos: string[] | null; libres: CampoLibre[]; pedido: string; nota: string; existente?: AccionFila;
+    /** El idioma de las guardas (`idiomaDeGuarda`): el de la fila o el del cliente si escribe en inglés u otro idioma. */
+    guarda?: IdiomaTexto;
+    /** Al CREAR: la huella de la fila releída, para el payload de la acción (null = no se pudo releer). */
+    huella?: string | null;
+    /** Al REUSAR: la fila ya no es la que escribió la IA (o no se puede comprobar). */
+    editada?: boolean;
   },
 ): Promise<ResultadoCotizarIA> {
   const { sb } = ctx;
   const numero = numeroCotizacion(x.leida);
+  // El idioma lo dice la FILA (se escribió al crearla): aquí no se vuelve a detectar nada.
+  const idioma = normalizarIdioma(x.leida.idioma_pdf);
+  // La guarda: castellano ∪ inglés con la fila en inglés o el cliente escribiendo en inglés u otro idioma.
+  const guarda: IdiomaTexto = idioma === "en" || x.guarda === "en" ? "en" : "es";
 
   // El perfil (para el PDF y para saber si está configurado) y el PDF. Ninguno de los dos lanza aquí.
   let perfil: PerfilPdf | null = null;
@@ -390,7 +491,7 @@ async function decidirYRegistrar(
     catch (err) { errorPdf = String((err as Error)?.message ?? err); }
   } else errorPdf = "No se pudo leer el perfil de la empresa.";
 
-  const palabras = x.textos == null ? ["(no se pudo leer la conversación)"] : senalesEnTexto(x.textos);
+  const palabras = x.textos == null ? ["(no se pudo leer la conversación)"] : senalesEnTexto(x.textos, idioma);
   let decision: DecisionEnvio;
   let motivos: CodigoRevision[];
   if (x.resultado) {
@@ -398,7 +499,7 @@ async function decidirYRegistrar(
       resultado: x.resultado, envioMaestro: x.catalogo.config.envio_automatico === true, zonas: x.catalogo.zonas,
       canal: ctx.remitente.canal, waId: ctx.remitente.waId, modoAuto: ctx.modoAuto,
       perfilConfigurado: !!perfil && !empresa.sinConfigurar, cuadra: cuadraConMotor(x.leida, x.resultado),
-      pdfOk: !!pdf, palabras, textosLibres: x.libres.map((c) => c.texto),
+      pdfOk: !!pdf, palabras, textosLibres: x.libres.map((c) => c.texto), ...(guarda === "en" ? { idioma: guarda } : {}),
     });
     decision = plan.decision;
     motivos = plan.motivos;
@@ -409,14 +510,24 @@ async function decidirYRegistrar(
   }
   // Y lo que dice el PDF de SU fila (respaldo de lo que avisa /cotizaciones/plantillas): cuentas de
   // la plantilla distintas de las de `corporativo`, condiciones que no caben, y condiciones con un
-  // enlace o un número de 6+ dígitos. Cualquiera la deja para revisión.
-  const porPdf = revisionPorCondiciones({ avisosPdf: pdf?.avisos ?? null, consideraciones: x.leida.consideraciones_json });
+  // enlace o un número de 6+ dígitos. Cualquiera la deja para revisión. En inglés, además, unas
+  // condiciones que no salieron de una plantilla en inglés (`condiciones_en_otro_idioma`).
+  const porPdf = revisionPorCondiciones({ avisosPdf: pdf?.avisos ?? null, consideraciones: x.leida.consideraciones_json, idiomaPdf: x.leida.idioma_pdf });
   for (const m of porPdf.motivos) if (!motivos.includes(m)) motivos.push(m);
+  // El RESPALDO sobre la fila (revisión de seguridad): el recojo, el destino y las descripciones TAL
+  // COMO SE IMPRIMEN. Lo que escribió la IA nunca es sospechoso; lo que alguien editó, puede.
+  const impresos = impresosSospechosos(x.leida, guarda);
+  if (impresos.length && !motivos.includes("texto_libre_sospechoso")) motivos.push("texto_libre_sospechoso");
+  // Al REUSAR, una fila que ya no es la que escribió la IA la envía un ejecutivo.
+  if (x.editada === true && !motivos.includes("editada_a_mano")) motivos.push("editada_a_mano");
   if (motivos.length > 0) decision = "revision";
 
   // La acción de la bandeja: nueva, o la misma con la decisión de ahora.
   let accionId = x.existente?.id;
-  const datos = { cotizacion_id: x.leida.id, numero, firma: x.firma, decision, motivos };
+  // El idioma va en la tarjeta solo si es inglés (la bandeja lo pinta); en castellano, el payload de siempre.
+  const datos = { cotizacion_id: x.leida.id, numero, firma: x.firma, decision, motivos, ...(idioma === "en" ? { idioma } : {}) };
+  // La huella va SOLO al crear la acción: al reusarla se conserva la de su creación (si se volviera
+  // a escribir, una fila editada pasaría a ser «la de la IA» en el siguiente reuso).
   if (x.existente) {
     const { error } = await sb.from("crm_acciones_ia")
       .update({ payload: { ...(x.existente.payload ?? {}), ...datos, redecidida_at: new Date(deps.ahoraMs?.() ?? Date.now()).toISOString() } })
@@ -426,7 +537,7 @@ async function decidirYRegistrar(
     const resumen = resumenAccion(x.leida, numero, decision);
     const { data, error } = await sb.from("crm_acciones_ia").insert({
       conversacion_id: ctx.conv.id, contacto_id: ctx.contacto?.id ?? null, tipo: "cotizacion_traslado", resumen,
-      payload: datos, estado: "pendiente", resultado_tipo: "cotizaciones", resultado_id: x.leida.id,
+      payload: x.huella ? { ...datos, huella: x.huella } : datos, estado: "pendiente", resultado_tipo: "cotizaciones", resultado_id: x.leida.id,
     }).select("id").single();
     if (error || !data) {
       return deriva(
@@ -443,7 +554,9 @@ async function decidirYRegistrar(
       const lineas = [
         `🤖 La IA cotizó un traslado y lo dejó para que lo revises: cotización N° ${numero}.`,
         ...motivos.map((m) => `• ${MOTIVO_REVISION[m].texto} ${MOTIVO_REVISION[m].arreglo}`),
-        ...textosLibresSospechosos(x.libres).map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
+        ...(idioma === "en" ? ["• La cotización va en INGLÉS (el cliente escribe en inglés u otro idioma): el PDF y los mensajes del sistema le llegan en inglés."] : []),
+        ...textosLibresSospechosos(x.libres, guarda).map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
+        ...impresos.map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
         ...porPdf.lineas.map((c) => `  – Condición del PDF («${NOMBRE_LISTA[c.lista]}»): «${recortar(c.linea, 160)}» ${c.motivos.map((m) => ETIQUETA_TEXTO_LIBRE[m]).join(" y ")}.`),
         errorPdf ? `• PDF: ${errorPdf.slice(0, 300)}` : "",
         // Lo que el PDF no pudo poner (no bloquea el envío; aquí solo se dice).
@@ -456,12 +569,15 @@ async function decidirYRegistrar(
   }
 
   const r = x.resultado;
-  const respuestaModelo = r ? respuestaParaModelo({ resultado: r, cotizacion: { numero, decision }, preguntas: ctx.preguntas }) : respuestaEnRevision(numero);
+  const respuestaModelo = r
+    ? respuestaParaModelo({ resultado: r, cotizacion: { numero, decision }, preguntas: ctx.preguntas, ...(idioma === "en" ? { idioma } : {}) })
+    : respuestaEnRevision(numero);
+  // El total y la validez, como los verá el cliente: en el idioma de la fila (en inglés, la fecha con el mes en letras).
   const cotizacion: CotizacionIA = {
-    cotizacionId: x.leida.id, numero, decision, accionId,
+    cotizacionId: x.leida.id, numero, decision, accionId, idioma,
     figuras: decision === "automatico" && r?.precio ? figurasPermitidas("automatico", r.precio) : [],
-    total: decision === "automatico" && r?.precio ? fmtImporte(r.precio.total, r.precio.moneda, "es") : undefined,
-    validez: decision === "automatico" && r?.validez_hasta ? fmtFechaDoc(r.validez_hasta, "es", "corta") : undefined,
+    total: decision === "automatico" && r?.precio ? fmtImporte(r.precio.total, r.precio.moneda, idioma) : undefined,
+    validez: decision === "automatico" && r?.validez_hasta ? fmtFechaDoc(r.validez_hasta, idioma, idioma === "en" ? "media" : "corta") : undefined,
   };
   return {
     respuestaModelo, accion: "cotizar", cotizacion,

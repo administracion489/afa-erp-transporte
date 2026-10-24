@@ -36,39 +36,69 @@
 //     (lib/crm-ia-ajustes.ts → `estiloDe`): un prompt de usted y un mensaje del código que tutea son
 //     dos voces en el chat. Por eso `estilo` es OBLIGATORIO en los textos que ve el cliente; la
 //     instrucción al modelo (`respuestaParaModelo`) lo recibe opcional y, sin él, es la de siempre.
+//  6. EL IDIOMA LO DECIDE EL CÓDIGO (22-10-2026), y mueve la moneda: un cliente en inglés recibe la
+//     lista en dólares aunque escriba desde un +51. Por eso el modelo no lo declara: lo deriva
+//     lib/idioma-cliente.ts de los mensajes del cliente y llega aquí como `idioma` de
+//     `entradaDelAgente`, que solo lo deja pasar con el inglés ENCENDIDO (`inglesActivo`: una
+//     plantilla en inglés asignada a una celda «inglés»). Los textos del código tienen una rama en
+//     inglés escrita entera (una sola versión: el inglés no distingue tú y usted) y la eligen con
+//     `estilo.idioma`; ausente, castellano byte a byte. Pedir SOLES se confirma dos veces como los
+//     dólares (`cliente_pide_soles` + `nombraSoles`) y solo cuenta en inglés u otro idioma.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import type { EntradaSimulador, LugarEntrada } from "./api";
 import {
-  SENALES, claveNombre, monedaDelPedido,
+  FALTA, SENALES, claveNombre, monedaDelPedido,
   type PrecioTraslado, type ResultadoTraslado, type Zona,
 } from "./motor";
 import { totalesEnMoneda, normalizarMoneda } from "../cotizacion-moneda";
-import { fmtFechaDoc, fmtImporte } from "../cotizacion-idioma";
-import { LINEA_DISPONIBILIDAD } from "./cotizacion-traslado";
+import { fmtFechaDoc, fmtImporte, normalizarIdioma, type Idioma } from "../cotizacion-idioma";
+import { LINEA_DISPONIBILIDAD, LINEA_DISPONIBILIDAD_EN, lineaDisponibilidad } from "./cotizacion-traslado";
 import {
   condicionesSospechosas, importesEnTexto, mencionaDinero, referenciaImprimible, textoLibreSospechoso,
-  type CondicionSospechosa, type MotivoTextoLibre,
+  type CondicionSospechosa, type IdiomaTexto, type MotivoTextoLibre,
 } from "./texto-libre";
-import { excesoCondiciones, MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES } from "../cotizacion-plantillas";
+import {
+  excesoCondiciones, inglesActivo, MAX_CARACTERES_CONDICION, MAX_LINEAS_CONDICIONES, SQL_REGLAS_TRASLADO, etiquetaCeldaTraslado,
+  type InglesTraslado,
+} from "../cotizacion-plantillas";
 import type { EstiloMensajes, ModoPreguntas } from "../crm-ia-ajustes";
+import type { IdiomaCliente } from "../idioma-cliente";
 
 // ── 1. La herramienta ────────────────────────────────────────────────────────
 
 const CLAVES_SENALES = Object.keys(SENALES);
 
-export const HERRAMIENTA_COTIZAR_TRASLADO = {
+const DESC_INICIO =
+  "Cotiza un TRASLADO SIMPLE: un punto de recojo → un destino, solo ida o ida y retorno, en una sola fecha y con un solo vehículo " +
+  "(p. ej. aeropuerto ↔ hotel o domicilio). El PRECIO, el vehículo, la moneda y la validez los pone el sistema con el tarifario: " +
+  "tú NO calculas ni escribes precios por tu cuenta; repite solo los que te devuelva esta herramienta. " +
+  "Llámala en cuanto el cliente pida precio de un traslado, aunque falten datos: la respuesta te dice qué preguntar. " +
+  "No la uses para licitaciones, TDR, eventos, tours, varias fechas o varios vehículos: marca esas señales y el sistema lo pasa a un ejecutivo. ";
+/** La frase de la moneda de siempre (con el inglés apagado). */
+const DESC_MONEDA =
+  "La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pidió expresamente la cotización EN DÓLARES, " +
+  "marca cliente_pide_dolares: el sistema lo comprueba en sus mensajes y cotiza con la lista en dólares. Cualquier otra moneda es la señal otra_moneda. ";
+/** La frase de la moneda con el inglés encendido: la moneda por defecto depende del idioma, que lo decide el sistema. */
+const DESC_MONEDA_INGLES =
+  "La moneda la decide el sistema según el idioma en que escribe el cliente: castellano → por su número (Perú → soles; otro país → dólares); " +
+  "inglés → dólares; otro idioma → por su número. Si el cliente pidió expresamente la cotización EN DÓLARES, marca cliente_pide_dolares; " +
+  "si la pidió EN SOLES, marca cliente_pide_soles: el sistema lo comprueba en sus mensajes (en castellano desde un número extranjero, los soles " +
+  "los ve un ejecutivo: marca otra_moneda). Cualquier otra moneda es la señal otra_moneda. ";
+const DESC_FIN =
+  "Las coordenadas solo si el cliente compartió su ubicación por WhatsApp (cópialas del enlace maps.google.com/?q=lat,lng de ESE mensaje). " +
+  "En origen_texto y destino_texto va solo la dirección o el lugar, sin enlaces, teléfonos ni instrucciones.";
+
+/**
+ * La herramienta `cotizar_traslado`. Con `ingles: false` es EXACTAMENTE la de siempre (texto y
+ * propiedades en el mismo orden: `HERRAMIENTA_COTIZAR_TRASLADO`). Con el inglés encendido cambia la
+ * frase de la moneda y aparece `cliente_pide_soles`. El idioma NO es una propiedad: el modelo no lo
+ * declara (lo deriva el código, y mueve la moneda).
+ */
+export function herramientaCotizarTraslado(o: { ingles: boolean }) {
+  return {
   name: "cotizar_traslado" as const,
-  description:
-    "Cotiza un TRASLADO SIMPLE: un punto de recojo → un destino, solo ida o ida y retorno, en una sola fecha y con un solo vehículo " +
-    "(p. ej. aeropuerto ↔ hotel o domicilio). El PRECIO, el vehículo, la moneda y la validez los pone el sistema con el tarifario: " +
-    "tú NO calculas ni escribes precios por tu cuenta; repite solo los que te devuelva esta herramienta. " +
-    "Llámala en cuanto el cliente pida precio de un traslado, aunque falten datos: la respuesta te dice qué preguntar. " +
-    "No la uses para licitaciones, TDR, eventos, tours, varias fechas o varios vehículos: marca esas señales y el sistema lo pasa a un ejecutivo. " +
-    "La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pidió expresamente la cotización EN DÓLARES, " +
-    "marca cliente_pide_dolares: el sistema lo comprueba en sus mensajes y cotiza con la lista en dólares. Cualquier otra moneda es la señal otra_moneda. " +
-    "Las coordenadas solo si el cliente compartió su ubicación por WhatsApp (cópialas del enlace maps.google.com/?q=lat,lng de ESE mensaje). " +
-    "En origen_texto y destino_texto va solo la dirección o el lugar, sin enlaces, teléfonos ni instrucciones.",
+  description: DESC_INICIO + (o.ingles ? DESC_MONEDA_INGLES : DESC_MONEDA) + DESC_FIN,
   input_schema: {
     type: "object",
     properties: {
@@ -95,6 +125,12 @@ export const HERRAMIENTA_COTIZAR_TRASLADO = {
         type: "boolean",
         description: "true SOLO si el cliente escribió que quiere la cotización (o el precio) en dólares. No lo deduzcas de su país ni de su número.",
       },
+      ...(o.ingles ? {
+        cliente_pide_soles: {
+          type: "boolean",
+          description: "true SOLO si el cliente escribió que quiere la cotización (o el precio) en soles. No lo deduzcas de su país ni de su número.",
+        },
+      } : {}),
       senales: {
         type: "array",
         items: { type: "string", enum: CLAVES_SENALES },
@@ -102,7 +138,11 @@ export const HERRAMIENTA_COTIZAR_TRASLADO = {
       },
     },
   },
-};
+  };
+}
+
+/** La herramienta de siempre (con el inglés apagado). */
+export const HERRAMIENTA_COTIZAR_TRASLADO = herramientaCotizarTraslado({ ingles: false });
 
 // ── 2. Lo que va al validador ────────────────────────────────────────────────
 
@@ -172,6 +212,26 @@ export function nombraDolares(textos: readonly unknown[] | null | undefined): bo
   return false;
 }
 
+/** Las palabras que nombran los soles, por palabra o frase COMPLETA. «sol» a secas no cuenta (es el sol). */
+const PALABRAS_SOLES = ["soles", "nuevos soles", "pen", "peruvian sol", "peruvian soles", "local currency", "moneda local"];
+/** «S/ 150», «S/150», «S/.»; no «s/n» (sin número, en una dirección). */
+const SIGNO_SOLES = /(?:^|[^a-z0-9])s\/(?![a-z])/i;
+
+/**
+ * Los mensajes del CLIENTE nombran los soles: «soles», «nuevos soles», «PEN», «S/», «peruvian
+ * sol(es)», «local currency» o «moneda local». Es la segunda confirmación de `cliente_pide_soles`
+ * (la primera es que el modelo lo marcó), igual que `nombraDolares`.
+ */
+export function nombraSoles(textos: readonly unknown[] | null | undefined): boolean {
+  for (const t of textos ?? []) {
+    if (typeof t !== "string" || !t) continue;
+    if (SIGNO_SOLES.test(t)) return true;
+    const c = textoComparable(t);
+    if (PALABRAS_SOLES.some((p) => c.includes(` ${p} `))) return true;
+  }
+  return false;
+}
+
 /**
  * La entrada que se le pasa a `validarEntrada` (lib/traslados/api.ts), armada con lista blanca. El teléfono es el `wa_id`
  * del remitente de WhatsApp (en otro canal, null: sin moneda no se cotiza), JAMÁS algo del input.
@@ -179,12 +239,21 @@ export function nombraDolares(textos: readonly unknown[] | null | undefined): bo
  * `textosCliente` son los mensajes ENTRANTES de la conversación: `pide_dolares` solo pasa si el
  * modelo lo marcó Y ahí se nombran los dólares (`nombraDolares`). Con el pedido de dólares
  * confirmado, la señal `otra_moneda` sobra (la moneda pedida SÍ se ofrece) y se quita.
+ *
+ * `idioma` lo pone el CÓDIGO (lib/idioma-cliente.ts sobre los mensajes del cliente, y si el inglés
+ * está encendido: `ingles`), NUNCA el input del modelo: un `idioma_cliente`, `pide_soles`,
+ * `idioma`, `moneda` o `telefono` en el input se ignora. `idioma_cliente` solo pasa con el inglés
+ * encendido y el cliente en inglés u otro idioma; `pide_soles`, solo junto a él, con el modelo
+ * marcando `cliente_pide_soles` Y los mensajes del cliente nombrando los soles (`nombraSoles`). Con
+ * soles y dólares verificados a la vez, ninguno de los dos (manda el defecto del idioma). Sin
+ * `idioma`, byte a byte la entrada de siempre.
  */
 export function entradaDelAgente(
   input: unknown,
   remitente: { canal: string; waId: string | null },
   textosUbicacion: string[],
   textosCliente: readonly unknown[] = [],
+  idioma?: { cliente: IdiomaCliente | null; ingles: InglesTraslado | null },
 ): unknown {
   const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const lugar = (texto: unknown, lat: unknown, lng: unknown): LugarEntrada => {
@@ -193,8 +262,14 @@ export function entradaDelAgente(
     return c ? { lat: c.lat, lng: c.lng, texto: t || undefined } : t;
   };
   const wa = remitente?.canal === "whatsapp" && typeof remitente.waId === "string" && remitente.waId.trim() ? remitente.waId.trim() : null;
-  const pideDolares = o.cliente_pide_dolares === true && nombraDolares(textosCliente);
-  const senales = pideDolares && Array.isArray(o.senales) ? o.senales.filter((x) => x !== "otra_moneda") : o.senales;
+  const idiomaCliente = idioma && inglesActivo(idioma.ingles) && (idioma.cliente === "en" || idioma.cliente === "otro") ? idioma.cliente : null;
+  const dolaresVerificados = o.cliente_pide_dolares === true && nombraDolares(textosCliente);
+  const solesVerificados = idiomaCliente != null && o.cliente_pide_soles === true && nombraSoles(textosCliente);
+  // Los dos a la vez no se sabe cuál quiere: ninguno, y manda el defecto del idioma.
+  const ambos = dolaresVerificados && solesVerificados;
+  const pideDolares = dolaresVerificados && !ambos;
+  const pideSoles = solesVerificados && !ambos;
+  const senales = (pideDolares || pideSoles) && Array.isArray(o.senales) ? o.senales.filter((x) => x !== "otra_moneda") : o.senales;
   return {
     origen: lugar(o.origen_texto, o.origen_lat, o.origen_lng),
     destino: lugar(o.destino_texto, o.destino_lat, o.destino_lng),
@@ -205,6 +280,8 @@ export function entradaDelAgente(
     vehiculos_pedidos: o.vehiculos_pedidos, senales,
     telefono: wa,
     ...(pideDolares ? { pide_dolares: true } : {}),
+    ...(idiomaCliente ? { idioma_cliente: idiomaCliente } : {}),
+    ...(pideSoles ? { pide_soles: true } : {}),
   };
 }
 
@@ -220,8 +297,11 @@ const firmaLugar = (l: LugarEntrada): string =>
  * cambie mayúsculas, tildes o el orden de los campos) dan la misma firma. La moneda entra porque
  * el mismo pedido desde otro número es otra cotización, y el mismo pedido «ahora en dólares» —tras
  * recibirlo en soles— también: si no, se le contestaría «ya te la envié» con la de soles. Es la
- * moneda DECIDIDA (`monedaDelPedido`), así que sin pedido de dólares la firma es la de siempre.
- * Con «solo ida», el retorno no cuenta.
+ * moneda DECIDIDA (`monedaDelPedido`, con la MISMA llamada que el motor), así que sin pedido de
+ * dólares la firma es la de siempre. Con «solo ida», el retorno no cuenta. Con el cliente en inglés
+ * u otro idioma (`idioma_cliente`) se agrega «en» al final: el mismo pedido «ahora en inglés» es otra
+ * cotización (el PDF está en otro idioma), y sin idioma la firma es byte a byte la de antes (las
+ * acciones pendientes de antes se siguen reusando); volver al castellano reusa la de castellano.
  */
 export function firmaPedido(e: EntradaSimulador): string {
   const conRetorno = e.sentido === "ida_retorno";
@@ -232,7 +312,8 @@ export function firmaPedido(e: EntradaSimulador): string {
     e.sentido ?? "",
     conRetorno ? e.fecha_retorno ?? "" : "", conRetorno ? e.hora_retorno ?? "" : "",
     e.pax ?? "", e.maletas ?? "",
-    monedaDelPedido(e.telefono, e.pide_dolares).moneda ?? "",
+    monedaDelPedido(e.telefono, e.pide_dolares, { idiomaCliente: e.idioma_cliente ?? null, pideSoles: e.pide_soles === true }).moneda ?? "",
+    ...(e.idioma_cliente ? ["en"] : []),
   ].join("|");
 }
 
@@ -262,7 +343,8 @@ export function zonaConEnvio(z: Zona | null | undefined, zonas: readonly ZonaEnv
 export type CodigoRevision =
   | "maestro_apagado" | "zona_sin_envio" | "modo_copiloto" | "sin_remitente"
   | "perfil_sin_configurar" | "importes_no_cuadran" | "pdf_no_generado" | "palabras_de_pedido_complejo"
-  | "texto_libre_sospechoso" | "cuentas_distintas" | "condiciones_demasiadas";
+  | "texto_libre_sospechoso" | "cuentas_distintas" | "condiciones_demasiadas" | "condiciones_en_otro_idioma"
+  | "editada_a_mano";
 
 export const MOTIVO_REVISION: Record<CodigoRevision, { texto: string; arreglo: string }> = {
   maestro_apagado: {
@@ -309,6 +391,17 @@ export const MOTIVO_REVISION: Record<CodigoRevision, { texto: string; arreglo: s
     texto: `Las condiciones del PDF pasan de ${MAX_LINEAS_CONDICIONES} líneas en una lista o tienen una línea de más de ${MAX_CARACTERES_CONDICION} caracteres: el PDF podría no mostrarlas enteras.`,
     arreglo: "Acórtalas en la cotización (/cotizaciones) o en la plantilla de traslados (/cotizaciones/plantillas) y mira el PDF antes de enviarla.",
   },
+  condiciones_en_otro_idioma: {
+    texto: "La cotización va en inglés pero sus condiciones salieron de una plantilla en castellano.",
+    arreglo: `Asigna una plantilla en inglés a «${etiquetaCeldaTraslado({ idioma: "en", moneda: "PEN" })}» o «${etiquetaCeldaTraslado({ idioma: "en", moneda: "USD" })}» (la de la moneda de esta cotización) en /cotizaciones/plantillas.`,
+  },
+  // Revisión de seguridad (23-10-2026): al REUSAR una cotización pendiente, la fila ya no es la que
+  // escribió la IA (su huella no coincide con la que quedó en la acción) o la acción es de antes de que
+  // existiera la huella y no se puede comprobar (`canonImprimible` en ./cotizacion-traslado.ts).
+  editada_a_mano: {
+    texto: "La cotización se editó en /cotizaciones después de que la IA la cotizó (o no se puede comprobar que no se editó): la envía un ejecutivo.",
+    arreglo: "Revisa en «Ver PDF» el recojo, el destino, la descripción, las fechas y las condiciones antes de enviarla con «Enviar al cliente».",
+  },
 };
 
 /** Una condición del PDF que deja la cotización para revisión (la cita la nota del ejecutivo). */
@@ -320,11 +413,15 @@ export type CondicionCitada = CondicionSospechosa;
  * `cuentas_distintas_de_corporativo` del PDF → `cuentas_distintas`), condiciones que no caben
  * (`excesoCondiciones` → `condiciones_demasiadas`) y condiciones con un enlace o un número de 6+
  * dígitos (`condicionesSospechosas` → `texto_libre_sospechoso`; las palabras de pago solas NO).
+ * Con `idiomaPdf` «en», unas condiciones que no se copiaron de una plantilla en inglés (sin
+ * `idioma: "en"` en la fila) → `condiciones_en_otro_idioma`: no se traduce lo que nadie escribió.
+ * Sin `idiomaPdf`, lo de siempre.
  * PURO: recibe los códigos de los avisos del PDF y las condiciones de la fila.
  */
 export function revisionPorCondiciones(x: {
   avisosPdf: readonly { codigo: string }[] | null | undefined;
   consideraciones: unknown;
+  idiomaPdf?: unknown;
 }): { motivos: CodigoRevision[]; lineas: CondicionCitada[] } {
   const motivos: CodigoRevision[] = [];
   if ((x.avisosPdf ?? []).some((a) => a?.codigo === "cuentas_distintas_de_corporativo")) motivos.push("cuentas_distintas");
@@ -332,6 +429,10 @@ export function revisionPorCondiciones(x: {
   if (exceso) motivos.push("condiciones_demasiadas");
   const lineas = condicionesSospechosas(x.consideraciones);
   if (lineas.length) motivos.push("texto_libre_sospechoso");
+  if (normalizarIdioma(x.idiomaPdf) === "en") {
+    const c = x.consideraciones && typeof x.consideraciones === "object" ? (x.consideraciones as { idioma?: unknown }) : null;
+    if (c?.idioma !== "en") motivos.push("condiciones_en_otro_idioma");
+  }
   return { motivos, lineas };
 }
 
@@ -356,6 +457,12 @@ export function planEnvio(x: {
   palabras: string[];
   /** El recojo, el destino y el nombre del contacto tal como llegaron (sin recortar). */
   textosLibres?: (string | null | undefined)[];
+  /**
+   * El idioma de la GUARDA de los textos libres (`idiomaDeGuarda`): con «en», castellano ∪ inglés. Es
+   * «en» con la cotización en inglés y también con el cliente escribiendo en inglés u otro idioma
+   * aunque el inglés esté apagado.
+   */
+  idioma?: IdiomaTexto;
 }): { decision: DecisionEnvio; motivos: CodigoRevision[] } {
   const r = x.resultado;
   if (!r || r.codigo !== "cotizable" || !r.precio) return { decision: "revision", motivos: [] };
@@ -368,7 +475,7 @@ export function planEnvio(x: {
   if (x.cuadra !== true) motivos.push("importes_no_cuadran");
   if (x.pdfOk !== true) motivos.push("pdf_no_generado");
   if ((x.palabras ?? []).length > 0) motivos.push("palabras_de_pedido_complejo");
-  if ((x.textosLibres ?? []).some((t) => textoLibreSospechoso(t) != null)) motivos.push("texto_libre_sospechoso");
+  if ((x.textosLibres ?? []).some((t) => textoLibreSospechoso(t, x.idioma === "en" ? "en" : "es") != null)) motivos.push("texto_libre_sospechoso");
   return { decision: motivos.length === 0 ? "automatico" : "revision", motivos };
 }
 
@@ -393,9 +500,22 @@ const PALABRAS_COMPLEJAS: { etiqueta: string; frases: string[] }[] = [
   { etiqueta: "contrato", frases: ["contrato", "contratos"] },
 ];
 
-export function senalesEnTexto(textos: string[]): string[] {
+/** Las de inglés, que se SUMAN a las de castellano con `idioma = "en"` («city tour» y «full day» ya están). */
+const PALABRAS_COMPLEJAS_INGLES: { etiqueta: string; frases: string[] }[] = [
+  { etiqueta: "tender", frases: ["tender", "tenders"] },
+  { etiqueta: "RFP", frases: ["rfp", "rfps"] },
+  { etiqueta: "terms of reference", frases: ["terms of reference"] },
+  { etiqueta: "event", frases: ["event", "events"] },
+  { etiqueta: "conference", frases: ["conference", "conferences"] },
+  { etiqueta: "wedding", frases: ["wedding", "weddings"] },
+  { etiqueta: "discount", frases: ["discount", "discounts"] },
+  { etiqueta: "contract", frases: ["contract", "contracts"] },
+];
+
+export function senalesEnTexto(textos: string[], idioma: IdiomaTexto = "es"): string[] {
   const t = (textos ?? []).filter((x) => typeof x === "string").map(textoComparable).join(" ");
-  return PALABRAS_COMPLEJAS.filter((p) => p.frases.some((f) => t.includes(` ${f} `))).map((p) => p.etiqueta);
+  const listas = idioma === "en" ? [...PALABRAS_COMPLEJAS, ...PALABRAS_COMPLEJAS_INGLES] : PALABRAS_COMPLEJAS;
+  return listas.filter((p) => p.frases.some((f) => t.includes(` ${f} `))).map((p) => p.etiqueta);
 }
 
 // ── 7. El modelo no pone números ─────────────────────────────────────────────
@@ -436,6 +556,7 @@ export function mensajeCotizacionCodigo(x: {
   numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean;
   estilo: EstiloMensajes;
 }): string {
+  if (x.estilo?.idioma === "en") return mensajeCotizacionIngles(x);
   const tu = x.estilo?.tratamiento === "tu";
   const su = tu ? "tu" : "su";
   if (x.yaEnviada) {
@@ -451,6 +572,24 @@ export function mensajeCotizacionCodigo(x: {
 }
 
 /**
+ * El mismo mensaje EN INGLÉS, escrito entero (una sola versión: el inglés no distingue tú y usted).
+ * El total y la validez llegan ya formateados en el idioma de la fila (`cifrasDeFila`). «IGV» se
+ * explica una vez («Peruvian VAT»): un cliente extranjero no conoce la sigla.
+ */
+function mensajeCotizacionIngles(x: { numero: string; decision: DecisionEnvio; total?: string; validez?: string; yaEnviada?: boolean }): string {
+  if (x.yaEnviada) {
+    const total = x.total ? ` The total is ${x.total} (including IGV, Peruvian VAT)${x.validez ? `, valid until ${x.validez}` : ""}.` : "";
+    return `I already sent you quotation No. ${x.numero} for your transfer in this chat.${total} ${LINEA_DISPONIBILIDAD_EN}`;
+  }
+  if (x.decision === "automatico") {
+    const total = x.total ? ` The total is ${x.total} (including IGV, Peruvian VAT)` : "";
+    const validez = x.validez ? `${total ? "," : " The quotation is"} valid until ${x.validez}` : "";
+    return `Here is quotation No. ${x.numero} for your transfer.${total}${validez}${total || validez ? "." : ""} ${LINEA_DISPONIBILIDAD_EN}`;
+  }
+  return `I've registered your transfer request with quotation No. ${x.numero}. One of our agents is reviewing it and will send it to you in this chat shortly.`;
+}
+
+/**
  * «Me falta…»: lo que el CÓDIGO le pide al cliente cuando el texto del modelo no se puede mandar
  * (menciona dinero) y la herramienta pidió datos. Con «todo junto», la lista entera («Para cotizar
  * su traslado me falta: a; b.»); con «uno por mensaje», SOLO el primero, en el orden en que los da
@@ -462,11 +601,54 @@ export function mensajeCotizacionCodigo(x: {
  * («… (no se encontró «X»)»). Esa cita sale sin revisión desde el número oficial: si es texto libre
  * sospechoso (un importe, un Yape, un enlace, demasiado largo) se quita y queda solo el pedido.
  */
-function sinCitaSospechosa(dato: string): string {
+function sinCitaSospechosa(dato: string, idioma: Idioma = "es"): string {
+  if (idioma === "en") {
+    return dato.replace(/\s*\(we could not find «([\s\S]*)»\)\s*$/, (todo, cita: string) => (referenciaImprimible(cita, "en") ? todo : "")).trim();
+  }
   return dato.replace(/\s*\(no se encontró «([\s\S]*)»\)\s*$/, (todo, cita: string) => (referenciaImprimible(cita) ? todo : "")).trim();
 }
 
+/**
+ * Lo que el motor le pide al cliente (`FALTA`), en inglés. Se reconoce por IGUALDAD EXACTA con los
+ * literales del motor, nunca por parecido: un «falta» que no está en la tabla devuelve null y quien
+ * llama manda la derivación (mejor un ejecutivo que una pregunta a medio traducir).
+ */
+const FALTA_INGLES: Record<string, string> = {
+  [FALTA.recojo]: "the pick-up point",
+  [FALTA.destino]: "the destination",
+  [FALTA.fecha]: "the date of the service",
+  [FALTA.sentido]: "whether it is one way or a round trip",
+  [FALTA.fecha_retorno]: "the date of the return trip",
+  [FALTA.pax]: "the number of passengers",
+  [FALTA.maletas]: "how many large (23 kg) suitcases you are bringing, and how many are carry-on (10 kg) or personal items",
+  [FALTA.fecha_futura]: "a future date",
+  "la dirección exacta del recojo": "the exact address of the pick-up point",
+  "la dirección exacta del destino": "the exact address of the destination",
+};
+/** La dirección que Google no encontró, con la cita del cliente (`faltaDireccion` del motor). */
+const FALTA_DIRECCION = /^la dirección exacta del (recojo|destino) \(no se encontró «([\s\S]*)»\)$/;
+
+/** «falta» en el idioma pedido: castellano → tal cual; inglés → la tabla exacta (y las dos citas); desconocido → null. */
+export function faltaEnIdioma(falta: string, idioma: "es" | "en"): string | null {
+  const f = String(falta ?? "").trim();
+  if (idioma !== "en") return f;
+  if (Object.prototype.hasOwnProperty.call(FALTA_INGLES, f)) return FALTA_INGLES[f];
+  const m = FALTA_DIRECCION.exec(f);
+  if (m) return `the exact address of the ${m[1] === "recojo" ? "pick-up point" : "destination"} (we could not find «${m[2]}»)`;
+  return null;
+}
+
 export function fraseFaltanTraslado(faltan: readonly unknown[] | null | undefined, estilo: EstiloMensajes): string {
+  if (estilo?.idioma === "en") {
+    const crudos = (faltan ?? []).map((x) => String(x ?? "").trim()).filter(Boolean);
+    const traducidos = crudos.map((x) => faltaEnIdioma(x, "en"));
+    // Un dato sin traducción: no se manda una pregunta a medias (quien llama deriva).
+    if (traducidos.some((x) => x == null)) return "";
+    const f = (traducidos as string[]).map((x) => sinCitaSospechosa(x, "en")).filter(Boolean);
+    if (f.length === 0) return "";
+    if (estilo?.preguntas === "una_por_mensaje") return `To quote your transfer, could you tell me ${f[0]}?`;
+    return `To quote your transfer I still need: ${f.join("; ")}.`;
+  }
   const f = (faltan ?? []).map((x) => sinCitaSospechosa(String(x ?? "").trim())).filter(Boolean);
   if (f.length === 0) return "";
   const tu = estilo?.tratamiento === "tu";
@@ -495,7 +677,16 @@ export type TrasladoDelTurno = {
 export function textoFinalTraslado(
   texto: string,
   t: TrasladoDelTurno | null | undefined,
-  x: { derivacion: string; estilo: EstiloMensajes },
+  x: {
+    derivacion: string; estilo: EstiloMensajes;
+    /**
+     * El idioma de la GUARDA, que no es el del mensaje (`idiomaDeGuarda`): «en» también con el inglés
+     * APAGADO cuando el cliente escribe en inglés u otro idioma (el modelo le contesta en inglés y el
+     * texto se juzga con castellano ∪ inglés); el mensaje que escribe el código sigue en el idioma del
+     * estilo. Sin él, la de siempre: la del estilo.
+     */
+    idiomaGuarda?: IdiomaTexto;
+  },
 ): string {
   if (!t) return texto;
   const c = t.cotizacion;
@@ -504,18 +695,31 @@ export function textoFinalTraslado(
       numero: c.numero, decision: c.decision, total: c.total, validez: c.validez, yaEnviada: c.yaEnviada, estilo: x.estilo,
     });
   }
-  if (!texto || !mencionaDinero(texto)) return texto;
+  // En inglés, los guards de dinero son castellano ∪ inglés (el modelo puede contestar en los dos).
+  const idioma: IdiomaTexto = x.estilo?.idioma === "en" || x.idiomaGuarda === "en" ? "en" : "es";
+  if (!texto || !mencionaDinero(texto, idioma)) return texto;
   const faltan = t.accion === "preguntar" ? (t.faltan ?? []).filter(Boolean) : [];
   // Lo que reemplaza al texto del modelo tampoco puede hablar de dinero (última barrera).
   const f = faltan.length ? fraseFaltanTraslado(faltan, x.estilo) : "";
-  return f && !mencionaDinero(f) ? f : x.derivacion;
+  return f && !mencionaDinero(f, idioma) ? f : x.derivacion;
 }
 
-/** Qué campo libre es sospechoso y por qué, para la nota del ejecutivo. */
-export function textosLibresSospechosos(campos: { campo: string; texto: string | null | undefined }[]): { campo: string; motivo: MotivoTextoLibre }[] {
+/**
+ * El idioma de las GUARDAS de un turno (revisión S1, 23-10-2026), separado del idioma del MENSAJE: «en»
+ * (castellano ∪ inglés, que solo puede ser MÁS estricto) si el mensaje va en inglés o si el código
+ * detectó que el cliente escribe en inglés u otro idioma (`idiomaDelCliente`) — también con el inglés
+ * APAGADO, que es justo cuando el modelo le contesta en inglés y los textos del código siguen en
+ * castellano. Sin evidencia de otro idioma, «es»: la guarda de siempre, byte a byte.
+ */
+export function idiomaDeGuarda(cliente: IdiomaCliente | null | undefined, idiomaMensaje?: string | null): IdiomaTexto {
+  return idiomaMensaje === "en" || cliente === "en" || cliente === "otro" ? "en" : "es";
+}
+
+/** Qué campo libre es sospechoso y por qué, para la nota del ejecutivo (con «en», castellano ∪ inglés). */
+export function textosLibresSospechosos(campos: { campo: string; texto: string | null | undefined }[], idioma: IdiomaTexto = "es"): { campo: string; motivo: MotivoTextoLibre }[] {
   const out: { campo: string; motivo: MotivoTextoLibre }[] = [];
   for (const c of campos) {
-    const m = textoLibreSospechoso(c.texto);
+    const m = textoLibreSospechoso(c.texto, idioma);
     if (m) out.push({ campo: c.campo, motivo: m });
   }
   return out;
@@ -558,8 +762,12 @@ export function respuestaParaModelo(x: {
   cotizacion?: { numero: string; decision: DecisionEnvio } | null;
   /** El modo de preguntar del agente. Sin él, la instrucción de siempre (todo junto). */
   preguntas?: ModoPreguntas;
+  /** El idioma de la cotización: el total y la validez se le dan al modelo como los verá el cliente. Sin él, castellano. */
+  idioma?: Idioma;
 }): string {
   const r = x.resultado;
+  const idioma: Idioma = x.idioma === "en" ? "en" : "es";
+  const linea = lineaDisponibilidad(idioma);
   const out: Record<string, unknown> = { accion: r.accion, codigo: codigoPublico(r) };
   if (r.accion === "preguntar") {
     const faltan = (r.faltan ?? []).map((f) => String(f).slice(0, 200));
@@ -578,10 +786,10 @@ export function respuestaParaModelo(x: {
     if (c && c.decision === "automatico" && r.precio) {
       out.cotizacion = {
         numero: c.numero, envio: "automatico",
-        total: fmtImporte(r.precio.total, r.precio.moneda, "es"), incluye_igv: true,
-        validez: r.validez_hasta ? fmtFechaDoc(r.validez_hasta, "es", "corta") : null,
+        total: fmtImporte(r.precio.total, r.precio.moneda, idioma), incluye_igv: true,
+        validez: r.validez_hasta ? fmtFechaDoc(r.validez_hasta, idioma, idioma === "en" ? "media" : "corta") : null,
       };
-      out.instruccion = `La cotización N° ${c.numero} se envía en PDF justo después de tu mensaje. Dile al cliente el total y la validez EXACTAMENTE como vienen aquí, que el IGV está incluido y que ${LINEA_EJECUTIVO.charAt(0).toLowerCase()}${LINEA_EJECUTIVO.slice(1)} No escribas ningún otro importe.`;
+      out.instruccion = `La cotización N° ${c.numero} se envía en PDF justo después de tu mensaje. Dile al cliente el total y la validez EXACTAMENTE como vienen aquí, que el IGV está incluido y que ${linea.charAt(0).toLowerCase()}${linea.slice(1)} No escribas ningún otro importe.`;
     } else if (c) {
       out.cotizacion = { numero: c.numero, envio: "revision" };
       out.instruccion = `La cotización N° ${c.numero} quedó registrada y la revisa un ejecutivo, que se la enviará por este chat. NO menciones precios ni importes.`;
@@ -690,6 +898,12 @@ export function estadoCotizadorIA(x: {
   zonasConEnvio: string[];
   agente: { activo?: boolean; canales?: string[]; canales_autonomos?: string[]; horario_activo?: boolean; hora_inicio?: string; hora_fin?: string } | null;
   sinMigracion: boolean;
+  /**
+   * En qué monedas cotiza la IA en inglés (`inglesDisponible`); null = falta la tabla de
+   * cotizaciones-09. Sin la clave (undefined), las líneas de siempre. Con ella, una línea más (gris;
+   * ámbar si está PARCIAL: las cotizaciones en inglés de la otra moneda quedan en revisión).
+   */
+  ingles?: InglesTraslado | null;
 }): { codigo: CodigoCotizadorIA; ambar: boolean; lineas: string[] } {
   if (x.sinMigracion) {
     return {
@@ -714,9 +928,11 @@ export function estadoCotizadorIA(x: {
   const horario = a.horario_activo === true
     ? `El agente solo responde de ${a.hora_inicio ?? "08:00"} a ${a.hora_fin ?? "20:00"}: fuera de ese horario no cotiza.`
     : null;
+  const ingles = x.ingles === undefined ? null : lineaIngles(x.ingles);
   if (!autonomos.includes("whatsapp")) {
     lineas.push("El agente está en modo copiloto para WhatsApp: cotiza, pero cada cotización queda en revisión aunque el envío automático esté encendido. Se cambia en /crm/agente.");
     if (horario) lineas.push(horario);
+    if (ingles) lineas.push(ingles.texto);
     return { codigo: "agente_no_autonomo", ambar: true, lineas };
   }
   let codigo: CodigoCotizadorIA;
@@ -731,7 +947,33 @@ export function estadoCotizadorIA(x: {
     lineas.push(`La cotización se envía sola cuando el recojo o el destino es ${listaY(zonas)}; las demás quedan en revisión.`);
   }
   if (horario) lineas.push(horario);
-  return { codigo, ambar: codigo === "envio_sin_zonas", lineas };
+  if (ingles) lineas.push(ingles.texto);
+  return { codigo, ambar: codigo === "envio_sin_zonas" || (ingles?.ambar ?? false), lineas };
+}
+
+/** La línea del inglés en Ajustes: gris si está apagado o entero; ámbar si está en una sola moneda. */
+function lineaIngles(i: InglesTraslado | null): { texto: string; ambar: boolean } {
+  if (i === null) {
+    return { texto: `La IA cotiza siempre en castellano: falta correr ${SQL_REGLAS_TRASLADO} para que pueda cotizar en inglés.`, ambar: false };
+  }
+  if (!inglesActivo(i)) {
+    return {
+      texto: "La IA cotiza en castellano aunque el cliente escriba en inglés: ninguna celda «inglés» de la regla del traslado tiene una plantilla en inglés. Se asigna en /cotizaciones/plantillas.",
+      ambar: false,
+    };
+  }
+  if (i.PEN && i.USD) {
+    return {
+      texto: "Si el cliente escribe en inglés (u otro idioma que no sea el castellano), la IA le cotiza en inglés: en dólares salvo que pida soles (en otro idioma, con la moneda de su número).",
+      ambar: false,
+    };
+  }
+  const con = i.USD ? "USD" : "PEN";
+  const sin = i.USD ? "PEN" : "USD";
+  return {
+    texto: `La IA cotiza en inglés, pero solo «${etiquetaCeldaTraslado({ idioma: "en", moneda: con })}» tiene una plantilla en inglés: las cotizaciones en inglés en ${sin === "PEN" ? "soles" : "dólares"} salen con las condiciones en castellano y quedan en revisión. Asigna una plantilla en inglés a «${etiquetaCeldaTraslado({ idioma: "en", moneda: sin })}» en /cotizaciones/plantillas.`,
+    ambar: true,
+  };
 }
 
 // ── 11. La tarjeta del CRM: ¿se puede enviar esta cotización? ────────────────

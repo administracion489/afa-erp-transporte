@@ -2,7 +2,7 @@
 //   npx tsx scripts/prueba-confirmacion-reserva.mts            (MUESTRA_DIR=<carpeta> deja los PDF)
 import { writeFileSync } from "node:fs";
 import { leerEntrada } from "../lib/confirmacion-reserva-datos";
-import { cambiosEntre, cobradoEn, canonico, docConfirmacion, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, planVersion,
+import { cambiosEntre, cobradoEn, canonico, docConfirmacion, importeDelDia, juzgarConfirmacion, mensajeWhatsApp, planVersion, captionConfirmacion,
   telefonoWa, horaTexto, fechaLarga, type EntradaConfirmacion, type TramoConf, type DatosConfirmacion } from "../lib/confirmacion-reserva";
 import { dibujarConfirmacion } from "../lib/confirmacion-reserva-pdf";
 import { PDFDocument } from "pdf-lib";
@@ -221,6 +221,24 @@ if (process.env.MUESTRA_DIR) writeFileSync(`${process.env.MUESTRA_DIR}/confirmac
   const { entrada } = await leerEntrada(sbF, 100, null);
   t(entrada.pagos.length === 1 && entrada.pagos[0].id === 1, `leerEntrada trae solo los cobros (${entrada.pagos.map((x) => x.id)})`);
   t(juzgarConfirmacion(entrada).datos?.economia.adelanto === 100, "la Confirmación ve el adelanto y no la devolución");
+}
+
+// ── En inglés: el pie del documento por WhatsApp ─────────────────────────────
+{
+  // El literal que hoy escribe lib/traslados/reserva-solicitud-datos.ts (copiado): en castellano no cambia.
+  const viejo = (codigo: string) => `Confirmación de Reserva ${codigo}`;
+  for (const c of ["CR-2026-000123-V1", "OS-1", ""]) {
+    t(captionConfirmacion("es", c) === viejo(c), `caption en castellano = el de siempre (${c})`);
+    t(captionConfirmacion("en", c) === `Booking Confirmation ${c}`, `caption en inglés (${c})`);
+  }
+  const empD = { nombre: "ACME", telefono: "", email: "", web: "", direccion: "", ruc: "" };
+  const dConf = juzgarConfirmacion(base()).datos!;
+  for (const idi of ["es", "en"] as const) {
+    const titulo = docConfirmacion(dConf, idi, { version: 1, emitidoEn: "2026-10-21" }, empD).titulo;
+    t(captionConfirmacion(idi, "X").toUpperCase() === `${titulo} X`, `el caption dice lo mismo que el título del PDF (${idi}: ${titulo})`);
+  }
+  t(!/[¿¡áéíóúñ]|Confirmación|Reserva/.test(captionConfirmacion("en", "CR-2026-000123-V1")), "el caption en inglés no lleva castellano");
+  t(mensajeWhatsApp("en", "ACME", "X-V1").includes(captionConfirmacion("en", "X-V1")) && mensajeWhatsApp("es", "ACME", "X-V1").includes(captionConfirmacion("es", "X-V1")), "el mensaje y el caption nombran el documento igual, en los dos idiomas");
 }
 
 console.log(`\n${ok} ok · ${fallos} fallos`);

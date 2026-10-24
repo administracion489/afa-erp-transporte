@@ -4,15 +4,20 @@
 // condiciones del PDF) y el tipo de cambio de SUNAT.
 //
 // LAS CONDICIONES DEL PDF DEL TRASLADO TIENEN UNA SOLA FUENTE (cotizaciones-05): la plantilla PDF
-// que la regla «Traslado de la IA × segmento» asigna a cada tipo de cliente, que se edita en
-// /cotizaciones/plantillas. CON las reglas, se ENSEÑA en solo lectura, por segmento, qué plantilla
-// usa la IA y sus tres listas, con el enlace a editarla. Qué plantilla y qué listas lo deciden
-// `plantillaParaUso` y `considDeTraslado` (la misma copia que hace `filaCotizacionTraslado`).
+// que la regla «Traslado de la IA» asigna, que se edita en /cotizaciones/plantillas. Desde
+// cotizaciones-09 la regla es IDIOMA × MONEDA (cuatro celdas: castellano o inglés, en soles o en
+// dólares); sin ese SQL, la de siempre por tipo de cliente. CON las reglas, se ENSEÑA en solo
+// lectura, celda por celda, qué plantilla usa la IA y sus listas, con el enlace a editarla. Qué
+// plantilla y qué listas lo deciden `plantillaTrasladoIA` / `plantillaParaUso` y `considDeTraslado`
+// (la misma copia que hace `filaCotizacionTraslado`). Si el inglés está encendido lo dice
+// `lineasInglesIA` con `inglesDisponible` (el mismo juicio de la IA): gris apagado, ámbar a medias,
+// verde encendido. Una celda «inglés» nunca cae por su cuenta a las listas de Ajustes (están en
+// castellano): cae a su castellano y la cotización queda en revisión.
 // LAS LISTAS DE AJUSTES SE EDITAN (Y SE GUARDAN) SOLO MIENTRAS LA IA LAS LEE (`listasDeAjustesEnUso`):
 // sin reglas (falta el SQL) o sin poder comprobarlo, las cuatro, con una línea que dice el SQL que
 // falta o el error (nunca se pintan unas listas vacías por una lectura que falló); con reglas, solo
-// si algún segmento cae a ellas por no tener una plantilla que la IA pueda usar —y la línea ámbar
-// dice cuáles—, y las de dólares solo si ese segmento es Extranjero. Si no cae ninguno, ninguna se
+// si alguna celda cae a ellas por no tener una plantilla que la IA pueda usar —y la línea ámbar
+// dice cuáles—, y las de dólares solo si esa celda se cotiza en dólares. Si no cae ninguno, ninguna se
 // ofrece ni se guarda: una lista editable que guarda en una columna que nadie lee es peor que no
 // ofrecerla. Mientras se comprueba, no se ofrecen ni se guardan.
 //
@@ -54,9 +59,9 @@ import { TC_MAX_DIAS, tcParaCotizar } from "@/lib/traslados/motor";
 import { estadoCotizadorIA } from "@/lib/traslados/envio-ia";
 import { LINEA_DISPONIBILIDAD } from "@/lib/traslados/cotizacion-traslado";
 import { leerPlantillasYReglas, type LecturaPlantillas } from "@/lib/cotizacion-plantillas-datos";
-import { ETIQUETA_SEGMENTO, SQL_PLANTILLAS_USO } from "@/lib/cotizacion-plantillas";
+import { inglesDisponible, SQL_PLANTILLAS_USO } from "@/lib/cotizacion-plantillas";
 import {
-  avisoListasAjustes, condicionesTrasladoIA, enlaceEditarPlantilla, esperaQueNoCoincideIA, listasDeAjustesEnUso,
+  avisoListasAjustes, condicionesTrasladoIA, enlaceEditarPlantilla, esperaQueNoCoincideIA, grupoSinUso, lineasInglesIA, listasDeAjustesEnUso,
   fmtFecha, leerEntero, mensajeEncenderEnvio, mensajeEncenderIA, minutosQueNoCoinciden, SQL_COTIZACION_IA, SQL_FOTOS_CATEGORIA,
   subzonasQueHeredan, zonasConEnvioPropio, lineasPoliticaYResumen, type GrupoCondicionesIA, type ListaCondicion, type ZonaFila,
 } from "./traslados-pantalla";
@@ -135,16 +140,17 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
   useEffect(() => {
     let vivo = true;
     void leerPlantillasYReglas(supabase)
-      .catch((e: unknown): LecturaPlantillas => ({ ok: false, plantillas: [], reglas: null, sinDiseno: false, error: `No se pudieron leer las plantillas del PDF: ${(e as Error)?.message ?? "sin conexión"}` }))
+      .catch((e: unknown): LecturaPlantillas => ({ ok: false, plantillas: [], reglas: null, reglasTraslado: null, sinDiseno: false, error: `No se pudieron leer las plantillas del PDF: ${(e as Error)?.message ?? "sin conexión"}` }))
       .then((r) => { if (vivo) setPlantillas(r); });
     return () => { vivo = false; };
   }, [nPl]);
   const releerPlantillas = () => { setPlantillas(null); setNPl((x) => x + 1); };
 
-  // CON reglas: qué copia la IA en cada segmento (con el borrador de Ajustes donde cae a ellas, así
-  // los minutos se cotejan mientras se escribe). SIN reglas o con la lectura fallida: null.
-  const grupos: GrupoCondicionesIA[] | null = plantillas && plantillas.ok && plantillas.reglas
-    ? condicionesTrasladoIA(plantillas.plantillas, plantillas.reglas, { consideraciones: cons, consideraciones_usd: consUsd, incluye: incl, no_incluye: noIncl })
+  // CON reglas: qué copia la IA en cada celda (con el borrador de Ajustes donde cae a ellas, así
+  // los minutos se cotejan mientras se escribe). Con la regla idioma × moneda (cotizaciones-09) las
+  // cuatro celdas; sin ella, los tres tipos de cliente. SIN reglas o con la lectura fallida: null.
+  const grupos: GrupoCondicionesIA[] | null = plantillas && plantillas.ok && (plantillas.reglasTraslado || plantillas.reglas)
+    ? condicionesTrasladoIA(plantillas.plantillas, plantillas.reglas, { consideraciones: cons, consideraciones_usd: consUsd, incluye: incl, no_incluye: noIncl }, plantillas.reglasTraslado)
     : null;
   // Qué listas de Ajustes lee hoy la IA: esas, y solo esas, se ofrecen y se guardan. Mientras se comprueba, ninguna.
   const enUso = plantillas == null ? null : listasDeAjustesEnUso(grupos);
@@ -239,6 +245,7 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
             <p className="text-xs text-gray-400">Comprobando de dónde salen las condiciones del PDF del traslado (Ajustes o una plantilla PDF)…</p>
           ) : (
             <>
+              {plantillas.ok && plantillas.reglas && <LineaIngles lectura={plantillas} />}
               {grupos && <CondicionesDePlantillas grupos={grupos} onReleer={releerPlantillas} />}
               {edita.gen && (
                 <>
@@ -258,7 +265,7 @@ export default function AjustesTraslado({ config, configExiste, onConfig, decir,
                     </p>
                   )}
                   <div>
-                    <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones ({grupos ? "van en el PDF de los tipos de cliente de arriba" : "van en toda cotización de traslado"})</p>
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Consideraciones ({grupos ? "van en el PDF de los casos que se nombran arriba" : "van en toda cotización de traslado"})</p>
                     <ListaTextos items={cons} onCambiar={setCons} etiqueta="Consideración" placeholder="Ej: Sujeto a disponibilidad: un ejecutivo confirma la reserva." />
                   </div>
                   {edita.usd && (
@@ -323,12 +330,35 @@ function ListaSoloLectura({ titulo, lista, sinLista, vacia }: { titulo: string; 
 }
 
 /**
- * Las condiciones que la IA copia a cada traslado, por segmento. Las de una plantilla, en SOLO
- * LECTURA (se editan en Plantillas PDF); las de los segmentos que caen a Ajustes no se repiten aquí:
- * se editan en las listas de abajo. Lo que se pinta sale de `condicionesTrasladoIA`, que usa la
- * misma copia que la fila de la IA (`considDeTraslado`).
+ * Si la IA cotiza en inglés, en qué monedas, y dónde se enciende (`lineasInglesIA` con
+ * `inglesDisponible`: el MISMO juicio de la IA). Solo con las reglas de cotizaciones-05: sin ellas
+ * lo dice la línea del SQL que falta de más abajo.
+ */
+function LineaIngles({ lectura }: { lectura: Extract<LecturaPlantillas, { ok: true }> }) {
+  const l = lineasInglesIA(inglesDisponible(lectura.plantillas, lectura.reglasTraslado));
+  const cls = l.tono === "verde" ? "border-green-300 bg-green-50 text-green-900"
+    : l.tono === "ambar" ? "border-amber-300 bg-amber-50 text-amber-900"
+      : "border-gray-200 bg-gray-50 text-gray-600";
+  return (
+    <div className={`rounded-xl border px-3 py-2 text-xs space-y-1 ${cls}`}>
+      <div className="flex flex-wrap items-start gap-2">
+        <p className="font-bold flex-1">🌐 {l.titulo}</p>
+        <Link href="/cotizaciones/plantillas" className="text-[11px] font-bold underline whitespace-nowrap min-h-[32px] inline-flex items-center">Plantillas PDF →</Link>
+      </div>
+      {l.lineas.map((x, i) => <p key={i} className="break-words">{x}</p>)}
+    </div>
+  );
+}
+
+/**
+ * Las condiciones que la IA copia a cada traslado, por celda (idioma × moneda, o tipo de cliente con
+ * la regla vieja). Las de una plantilla, en SOLO LECTURA (se editan en Plantillas PDF); las de las
+ * celdas que caen a Ajustes no se repiten aquí: se editan en las listas de abajo. Las celdas «inglés»
+ * con el inglés apagado van en gris (no las usa nadie). Lo que se pinta sale de
+ * `condicionesTrasladoIA`, que usa la misma copia que la fila de la IA (`considDeTraslado`).
  */
 function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoCondicionesIA[]; onReleer: () => void }) {
+  const porIdioma = grupos.some((g) => g.usos.some((u) => u.celda != null));
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-start gap-2">
@@ -336,16 +366,24 @@ function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoC
         <button type="button" onClick={onReleer} className="text-[11px] font-bold text-gray-500 hover:text-gray-700 underline min-h-[32px]">↻ Volver a leer las plantillas</button>
       </div>
       <p className="text-xs text-gray-500">
-        Las consideraciones, <b>Incluye</b>, <b>No incluye</b> y la política de <b>Reserva, cambios y cancelación</b> del PDF del traslado salen de la plantilla PDF que la regla «Traslado de la IA» asigna a cada tipo de cliente, y se editan en <Link href="/cotizaciones/plantillas" className="font-bold text-[#0b315f] underline">Plantillas PDF</Link>. Las de una plantilla se enseñan aquí en solo lectura: es lo que la IA copia a cada cotización nueva (las ya creadas no cambian). Donde no hay una plantilla que la IA pueda usar, copia las listas de Ajustes, que se editan aquí abajo. En dólares el tipo de cliente es siempre «Extranjero».
+        Las consideraciones, <b>Incluye</b>, <b>No incluye</b> y la política de <b>Reserva, cambios y cancelación</b> del PDF del traslado salen de la plantilla PDF que la regla «Traslado de la IA» asigna {porIdioma ? "a cada idioma (castellano o inglés) y moneda" : "a cada tipo de cliente"}, y se editan en <Link href="/cotizaciones/plantillas" className="font-bold text-[#0b315f] underline">Plantillas PDF</Link>. Las de una plantilla se enseñan aquí en solo lectura: es lo que la IA copia a cada cotización nueva (las ya creadas no cambian). Donde no hay una plantilla que la IA pueda usar, copia las listas de Ajustes, que se editan aquí abajo.{" "}
+        {porIdioma
+          ? "Una celda «inglés» sin plantilla en inglés cae a la de castellano de su misma moneda, y esa cotización queda en revisión."
+          : "En dólares el tipo de cliente es siempre «Extranjero»."}
       </p>
       {grupos.map((g) => {
-        const ambar = g.segmentos.some((s) => s.ambar);
+        const sinUso = grupoSinUso(g);
+        const ambar = g.usos.some((s) => s.ambar);
+        // Las celdas en uso en el título (las sin uso van en gris debajo); «Castellano · soles» ya lleva « · ».
+        const vivas = g.usos.filter((s) => !s.sinUso);
+        const titulo = (vivas.length ? vivas : g.usos).map((s) => s.etiqueta).join(porIdioma ? " / " : " · ");
         const esPlantilla = g.fuente.tipo === "plantilla";
+        const marco = sinUso ? "border-gray-200 bg-gray-50" : ambar ? "border-amber-300 bg-amber-50" : "border-gray-200";
         return (
-          <div key={g.clave} className={`border rounded-xl p-3 space-y-2 ${ambar ? "border-amber-300 bg-amber-50" : "border-gray-200"}`}>
+          <div key={g.clave} className={`border rounded-xl p-3 space-y-2 ${marco}`}>
             <div className="flex flex-wrap items-start gap-2">
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-bold text-gray-800">{g.segmentos.map((s) => ETIQUETA_SEGMENTO[s.segmento]).join(" · ")}</p>
+                <p className={`text-sm font-bold ${sinUso ? "text-gray-500" : "text-gray-800"}`}>{titulo}{sinUso ? " · inglés apagado" : ""}</p>
                 <p className="text-xs text-gray-600 break-words">
                   {g.fuente.tipo === "plantilla"
                     ? <>Plantilla <b>«{g.fuente.plantilla.nombre || g.fuente.plantilla.id}»</b></>
@@ -359,13 +397,13 @@ function CondicionesDePlantillas({ grupos, onReleer }: { grupos: readonly GrupoC
               )}
             </div>
             <div className="space-y-0.5">
-              {g.segmentos.map((s) => (
-                <p key={s.segmento} className={`text-[11px] ${s.ambar ? "text-amber-900" : "text-gray-500"}`}>
-                  <b>{ETIQUETA_SEGMENTO[s.segmento]}:</b> {s.porque}
+              {g.usos.map((s) => (
+                <p key={s.clave} className={`text-[11px] break-words ${s.sinUso ? "text-gray-400" : s.ambar ? "text-amber-900" : "text-gray-500"}`}>
+                  <b>{s.etiqueta}:</b> {s.porque}
                 </p>
               ))}
             </div>
-            {esPlantilla && (
+            {esPlantilla && !sinUso && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 pt-1">
                 <ListaSoloLectura titulo="Consideraciones" lista={g.generales} />
                 <ListaSoloLectura titulo="Incluye" lista={g.incluye} />
@@ -463,7 +501,7 @@ function ReservaIA({ config, onConfig, decir, colsConfig, sinMigracion, grupos, 
   decir: Decir;
   colsConfig: string;
   sinMigracion: boolean;
-  /** Las condiciones que copia la IA por segmento (con reglas); null sin reglas o mientras se comprueba. */
+  /** Las condiciones que copia la IA por celda (con reglas); null sin reglas o mientras se comprueba. */
   grupos: GrupoCondicionesIA[] | null;
   plantillas: LecturaPlantillas | null;
   onReleerPlantillas: () => void;
@@ -639,14 +677,14 @@ function ReservaIA({ config, onConfig, decir, colsConfig, sinMigracion, grupos, 
           <p className="text-xs text-red-700">No se pudieron leer las plantillas ({plantillas.error}).{" "}<button type="button" onClick={onReleerPlantillas} className="font-bold underline">Reintentar</button></p>
         ) : !grupos ? (
           <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">Falta correr <span className="font-mono">{SQL_PLANTILLAS_USO}</span>: la política sale de la plantilla PDF del traslado, y sin ese SQL la IA no tiene una política que enviar.</p>
-        ) : grupos.map((g) => {
+        ) : grupos.filter((g) => !grupoSinUso(g)).map((g) => {
           // El resumen también lo recibe el cliente: se coteja junto con la política.
           const choques = g.reserva.propia ? politicaContradiceConfig(lineasPoliticaYResumen(g), cfgBorrador) : [];
           const sinPolitica = !g.reserva.propia || g.reserva.items.length === 0;
           return (
             <div key={g.clave} className={`rounded-xl border px-3 py-2 text-xs space-y-1 ${sinPolitica || choques.length ? "border-amber-300 bg-amber-50 text-amber-900" : "border-gray-200 text-gray-700"}`}>
               <p>
-                <b>{g.segmentos.map((x) => ETIQUETA_SEGMENTO[x.segmento]).join(" · ")}:</b>{" "}
+                <b>{g.usos.filter((x) => !x.sinUso).map((x) => x.etiqueta).join(g.usos.some((x) => x.celda) ? " / " : " · ")}:</b>{" "}
                 {g.fuente.tipo === "plantilla"
                   ? <>plantilla «{g.fuente.plantilla.nombre || g.fuente.plantilla.id}» · {sinPolitica ? "sin política: la IA no tiene qué enviar" : `${g.reserva.items.length} ${g.reserva.items.length === 1 ? "línea" : "líneas"}${g.reserva_resumen.items.length ? ` · resumen de ${g.reserva_resumen.items.length} ${g.reserva_resumen.items.length === 1 ? "punto" : "puntos"} con enlace` : ""}`}{" "}
                     <Link href={enlaceEditarPlantilla(g.fuente.plantilla.id)} className="font-bold underline">Editar →</Link></>

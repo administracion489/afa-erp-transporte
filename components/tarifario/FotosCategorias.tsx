@@ -17,6 +17,11 @@
 // LA DESCRIPCIÓN la escribe una persona, en renglones (hasta 1000 caracteres y 20 renglones; cada
 // salto de línea sale en el PDF). Vacía, el PDF dice la frase por defecto con DATOS ESCRITOS
 // (`descripcionCategoria`: asientos y bodega), que aquí se enseña tal cual saldrá.
+//
+// LA DESCRIPCIÓN EN INGLÉS (`descripcion_cliente_en`, traslados-10) es la del PDF de una cotización
+// en inglés. Tampoco se traduce sola: vacía, el PDF en inglés dice la frase del sistema en inglés
+// (`descripcionCategoria(c, "en")`), NUNCA la de castellano. Es una columna APARTE de las de
+// traslados-07: si falta, las fotos y la descripción en castellano siguen y un ámbar nombra el SQL.
 
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
@@ -24,10 +29,12 @@ import { faltaAlguna } from "@/lib/columna-faltante";
 import { COLUMNA_FOTO, type LadoFoto } from "@/lib/traslados/fotos-categoria";
 import { descripcionCategoria, MAX_DESCRIPCION_CLIENTE, MAX_RENGLONES_CLIENTE } from "@/lib/traslados/cotizacion-traslado";
 import {
-  descripcionParaGuardar, esTopeViejoDescripcion, largoTexto, MOTIVO_TOPE_VIEJO, motivoDescripcionLarga, origenFoto, SQL_FOTOS_CATEGORIA, sugerenciasFlota,
-  type CategoriaFila, type UnidadFotos,
+  descripcionParaGuardar, esTopeViejoDescripcion, largoTexto, MOTIVO_TOPE_VIEJO, motivoDescripcionLarga, origenFoto, SQL_DESCRIPCION_INGLES, SQL_FOTOS_CATEGORIA,
+  sugerenciasFlota, type CategoriaFila, type UnidadFotos,
 } from "./traslados-pantalla";
-import { COLS_CATEGORIA_FOTOS, filasEscritas, leerFotosFlota, motivoCeroFilas, normalizarCategoria, type FlotaFotos } from "./traslados-datos";
+import {
+  COLS_CATEGORIA_FOTOS, COLS_CATEGORIA_INGLES, faltaDescripcionIngles, filasEscritas, leerFotosFlota, motivoCeroFilas, normalizarCategoria, type FlotaFotos,
+} from "./traslados-datos";
 import { bajarFotoDeFlota, prepararFoto, quitarFotoCategoria, subirFotoCategoria } from "./foto-navegador";
 import { AZUL, type Decir } from "./traslados-comun";
 
@@ -54,6 +61,9 @@ export default function FotosCategorias({ categorias, colsCategoria, sinMigracio
   decir: Decir;
 }) {
   const [sinMigracion, setSinMigracion] = useState(sinMigracionInicial);
+  // traslados-10, aparte: las columnas que se pudieron pedir lo dicen; un guardado que la nombra, también.
+  const [inglesFallo, setInglesFallo] = useState(false);
+  const sinIngles = inglesFallo || faltaDescripcionIngles(colsCategoria);
   const [flota, setFlota] = useState<EstadoFlota>(null);
   const [abiertas, setAbiertas] = useState<Set<string>>(new Set());
   /** Lo que está haciendo cada foto (`CLAVE:lado`): «Preparando…», «Subiendo…». */
@@ -168,6 +178,11 @@ export default function FotosCategorias({ categorias, colsCategoria, sinMigracio
           Lo que el cliente ve de cada vehículo en el PDF de la cotización de traslado (el que la IA del CRM manda por WhatsApp; en /cotizaciones, el mismo con la plantilla corporativa): una foto exterior, una interior y una descripción. Sin fotos, el PDF sale solo con la descripción.
         </p>
       </div>
+      {sinIngles && (
+        <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          La <b>descripción en inglés</b> todavía no se puede guardar: falta correr <span className="font-mono">{SQL_DESCRIPCION_INGLES}</span> en Supabase → SQL Editor (pegar entero → Run). Hasta entonces, cuando la cotización va en inglés el PDF describe cada vehículo con la frase del sistema en inglés (asientos y bodega), nunca con la de castellano. Las fotos y la descripción en castellano funcionan igual.
+        </p>
+      )}
       {categorias.length === 0 && <p className="text-xs text-gray-400">No hay vehículos de traslado: créalos arriba.</p>}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
         {categorias.map((c) => (
@@ -197,8 +212,12 @@ export default function FotosCategorias({ categorias, colsCategoria, sinMigracio
                   onUsar={(u, lado, url) => void usarDeFlota(c, u, lado, url)} />
               )}
             </div>
-            <DescripcionCliente key={c.descripcion_cliente ?? ""} categoria={c} colsCategoria={colsCategoria}
+            <DescripcionCliente key={c.descripcion_cliente ?? ""} idioma="es" categoria={c} colsCategoria={colsCategoria}
               onGuardada={onCategoria} onSinMigracion={() => setSinMigracion(true)} decir={decir} />
+            {!sinIngles && (
+              <DescripcionCliente key={`en:${c.descripcion_cliente_en ?? ""}`} idioma="en" categoria={c} colsCategoria={colsCategoria}
+                onGuardada={onCategoria} onSinMigracion={() => setInglesFallo(true)} decir={decir} />
+            )}
           </div>
         ))}
       </div>
@@ -344,47 +363,61 @@ function FotoDeUnidad({ lado, url, ocupado, onUsar }: { lado: LadoFoto; url: str
   );
 }
 
-// ── La descripción para el cliente ───────────────────────────────────────────
+// ── La descripción para el cliente (en castellano y en inglés) ───────────────
+// El mismo campo en los dos idiomas, cada uno en SU columna: `descripcion_cliente` (traslados-07) y
+// `descripcion_cliente_en` (traslados-10). Vacía = null (`descripcionParaGuardar`), y la vista previa
+// es lo que imprimirá el PDF en ese idioma (`descripcionCategoria(c, idioma)`): en inglés, sin la
+// escrita en inglés, la frase del sistema en inglés — nunca la de castellano.
 
-function DescripcionCliente({ categoria: c, colsCategoria, onGuardada, onSinMigracion, decir }: {
+const CAMPO_DESCRIPCION = { es: "descripcion_cliente", en: "descripcion_cliente_en" } as const;
+
+function DescripcionCliente({ idioma, categoria: c, colsCategoria, onGuardada, onSinMigracion, decir }: {
+  idioma: "es" | "en";
   categoria: CategoriaFila;
   colsCategoria: string;
   onGuardada: (c: CategoriaFila) => void;
+  /** Falta la columna de ESTE idioma: la de castellano apaga el bloque (traslados-07); la de inglés, solo su campo (traslados-10). */
   onSinMigracion: () => void;
   decir: Decir;
 }) {
-  const guardada = descripcionParaGuardar(c.descripcion_cliente);
+  const en = idioma === "en";
+  const campo = CAMPO_DESCRIPCION[idioma];
+  const guardada = descripcionParaGuardar(c[campo]);
   const [texto, setTexto] = useState(guardada ?? "");
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const nueva = descripcionParaGuardar(texto);
   const n = largoTexto(nueva ?? "");
-  const porDefecto = descripcionCategoria({ ...c, descripcion_cliente: null });
+  const porDefecto = descripcionCategoria({ ...c, [campo]: null }, idioma);
   const renglones = nueva ? nueva.split("\n").length : 0;
   const motivo = nueva === guardada ? "No hay cambios." : motivoDescripcionLarga(nueva);
+  const titulo = en ? "Descripción para el cliente (inglés)" : "Descripción para el cliente";
 
   const guardar = async () => {
     if (motivo || guardando) return;
     setGuardando(true);
     setError(null);
-    const que = `No se guardó la descripción de ${c.clave}`;
-    const res = await supabase.from("traslado_categorias").update({ descripcion_cliente: nueva }).eq("clave", c.clave).select(colsCategoria);
+    const que = `No se guardó la descripción${en ? " en inglés" : ""} de ${c.clave}`;
+    // Solo la columna de este idioma: la otra no se toca (y si su SQL falta, no hace fallar este guardado).
+    const res = await supabase.from("traslado_categorias").update({ [campo]: nueva }).eq("clave", c.clave).select(colsCategoria);
     setGuardando(false);
-    if (res.error && faltaAlguna(res.error, COLS_CATEGORIA_FOTOS)) { onSinMigracion(); return; }
-    if (esTopeViejoDescripcion(res.error)) { setError(MOTIVO_TOPE_VIEJO); return; }
+    if (res.error && faltaAlguna(res.error, en ? COLS_CATEGORIA_INGLES : COLS_CATEGORIA_FOTOS)) { onSinMigracion(); return; }
+    if (!en && esTopeViejoDescripcion(res.error)) { setError(MOTIVO_TOPE_VIEJO); return; }
     const r = filasEscritas<Record<string, unknown>>(res, que);
     if (!r.ok) { setError(r.cero ? await motivoCeroFilas("traslado_categorias", "clave", c.clave, que) : r.detalle); return; }
     onGuardada(normalizarCategoria(r.filas[0]));
-    decir(nueva ? `Descripción de «${c.nombre}» guardada.` : `Descripción de «${c.nombre}» vaciada: el PDF usa la frase por defecto.`);
+    decir(nueva
+      ? `Descripción${en ? " en inglés" : ""} de «${c.nombre}» guardada.`
+      : `Descripción${en ? " en inglés" : ""} de «${c.nombre}» vaciada: el PDF${en ? " en inglés" : ""} usa la frase por defecto.`);
   };
 
   return (
     <div className="space-y-1">
       <label className="block">
-        <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Descripción para el cliente</span>
+        <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">{titulo}</span>
         <textarea value={texto} rows={Math.min(14, Math.max(3, texto.split("\n").length + 1))} onChange={(e) => { setTexto(e.target.value); if (error) setError(null); }} disabled={guardando}
-          placeholder={porDefecto} aria-label={`Descripción para el cliente de ${c.clave}`}
+          placeholder={porDefecto} aria-label={`${titulo} de ${c.clave}`} lang={idioma}
           className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f]" />
       </label>
       <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -392,7 +425,7 @@ function DescripcionCliente({ categoria: c, colsCategoria, onGuardada, onSinMigr
         {renglones > 1 && <span className={renglones > MAX_RENGLONES_CLIENTE ? "text-red-700 font-bold" : "text-gray-400"}>· {renglones}/{MAX_RENGLONES_CLIENTE} renglones</span>}
         <button type="button" onClick={guardar} disabled={!!motivo || guardando}
           className="px-3 py-1.5 rounded-lg font-bold text-white disabled:opacity-40 min-h-[36px]" style={{ background: AZUL }}>
-          {guardando ? "Guardando…" : nueva ? "Guardar descripción" : "Guardar vacía"}
+          {guardando ? "Guardando…" : nueva ? `Guardar descripción${en ? " en inglés" : ""}` : "Guardar vacía"}
         </button>
         {nueva !== guardada && !guardando && (
           <button type="button" onClick={() => { setTexto(guardada ?? ""); setError(null); }} className="px-2 py-1.5 font-bold text-gray-500 hover:text-gray-700">Descartar</button>
@@ -401,9 +434,12 @@ function DescripcionCliente({ categoria: c, colsCategoria, onGuardada, onSinMigr
       </div>
       <p className="text-[11px] text-gray-500 whitespace-pre-line">
         {nueva
-          ? <>En el PDF (cada renglón sale en su propia línea):{"\n"}{descripcionCategoria({ ...c, descripcion_cliente: nueva })}</>
-          : <>Vacía, el PDF dice: «{porDefecto}»</>}
+          ? <>En el PDF{en ? " en inglés" : ""} (cada renglón sale en su propia línea):{"\n"}{descripcionCategoria({ ...c, [campo]: nueva }, idioma)}</>
+          : en
+            ? <>Vacía, el PDF en inglés dice: «{porDefecto}». Nunca usa la descripción en castellano: es un texto que nadie tradujo.</>
+            : <>Vacía, el PDF dice: «{porDefecto}»</>}
       </p>
+      {en && <p className="text-[10px] text-gray-400">La imprime el PDF cuando la cotización va en inglés (el cliente escribe en inglés y el inglés está encendido en Plantillas PDF).</p>}
       {error && <p className="text-[11px] text-red-700" role="alert">{error}</p>}
     </div>
   );

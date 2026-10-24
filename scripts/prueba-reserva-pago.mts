@@ -11,7 +11,10 @@
 //  · `politicaContradiceConfig` encuentra 40 % vs 50 % y no salta con «50 % de adelanto» y pct 50;
 //  · la huella de las cuentas viaja en la firma sin cambiar la lectura de sus importes, y se reenvían
 //    las cuentas ⟺ son de «corporativo», hay perfil y la huella es la MISMA (barrido);
-//  · «Vincular cliente» ata el contacto ⟺ un número del cliente es el wa_id completo (barrido).
+//  · «Vincular cliente» ata el contacto ⟺ un número del cliente es el wa_id completo (barrido);
+//  · en inglés (12b): sin idioma, el castellano byte a byte el de antes (huellas medidas contra
+//    93c594b); en inglés una versión, sin castellano filtrado, con los mismos importes, y
+//    `lineasHuella` siempre igual a las líneas en castellano.
 import {
   ESTADOS_SOLICITUD, ESTADOS_TERMINALES, NOTA_REENVIO_PAGO, OBSERVACION_IGV_CARGO, TRANSICIONES, adelantoDe, bloquePago, cargoRetenido, dinero,
   clienteVerificadoEnChat, cuentasEnMensaje, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal, filaFacturaCargo, firmaConCuentas,
@@ -32,6 +35,10 @@ import { correoReserva, destinatariosReserva, enlaceConversacion } from "../lib/
 import { cotejarComprobante, leerRespuestaComprobante } from "../lib/traslados/comprobante-pago";
 import { describirAtencion } from "../lib/crm-ia-atencion";
 import { enlaceCondiciones } from "../lib/condiciones-publicas";
+import { createHash } from "node:crypto";
+import * as PAGO from "../lib/traslados/reserva-pago";
+import { frasePlazo } from "../lib/traslados/reserva-orden";
+import type { PlantillaPdfCfg } from "../lib/cotizacion-pdf";
 
 let ok = 0, mal = 0;
 const fallas: string[] = [];
@@ -570,6 +577,238 @@ const empresa: PerfilEmpresa = {
   t("se anularon todos los cobros y quedó un borrador → ajustar_cargo: se retira solo, no lo emitas", (() => { const p = pend({ id: 9, numero: null, total: 60, estado: "pendiente" }, { cobrado: 0, devuelto: 0 }); return p.length === 1 && p[0].codigo === "ajustar_cargo" && p[0].detalle.includes("no lo emitas"); })());
   t("anulado por una persona → no queda nada del cargo", pend({ id: 9, numero: null, total: 60, estado: "anulada" }).length === 0);
   t("sin `total` (quien no lo lee): la regla de siempre", pend({ id: 9, numero: null }).map((p) => p.codigo).join() === "emitir_cargo" && pend({ id: 9, numero: "B001-12" }).length === 0);
+}
+
+// ── 12a. (corpus) Los textos en castellano de este módulo, agrupados, para fijar su huella ──
+// Se corrió este MISMO código contra lib/traslados/reserva-pago.ts de 93c594b y contra el de hoy:
+// 0 diferencias. `P` es el módulo; `idioma` = «es» explícito, o nada.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function castellanoPago(P: any, limaAUtcMs: (f: string, h: string) => number | null, idioma?: "es"): Record<string, unknown> {
+  const est = (tr: string) => (idioma ? { tratamiento: tr, preguntas: "todo_junto", idioma } : { tratamiento: tr, preguntas: "todo_junto" });
+  const emp = {
+    nombre: "Transportes Ejemplo", ruc: "20100066603", email: "reservas@ejemplo.pe",
+    cuentas_bancarias: [
+      { banco: "BCP", cuenta: "191-1111111-0-11", cci: "002-191-001111111011-11", moneda: "PEN" },
+      { banco: "BBVA", cuenta: "0011-0222-0200333333", cci: "011-222-000200333333-22", moneda: "USD" },
+      { banco: "Interbank", cuenta: "200-3000444444", cci: "003-200-003000444444-33" },
+    ],
+  };
+  const ENL = "https://www.ejemplo.pe/condiciones/123e4567-e89b-12d3-a456-426614174000";
+  const RES = ["Adelanto del 50 % para reservar.", "Cancelación gratis con 24 h o más."];
+  const CONDS = [undefined, null, { resumen: RES, enlace: ENL }, { enlace: ENL }, { resumen: RES, enlace: "https://otro.pe/x" }];
+  const at = { activa: true, dias: [1, 2, 3, 4, 5, 6], desde: "09:00", hasta: "18:00" };
+  const ats = [at, { activa: true, dias: [1, 3, 5], desde: "08:30", hasta: "13:00" }, { activa: true, dias: [0, 6], desde: "01:00", hasta: "05:00" }, { activa: true, dias: [0, 1, 2, 3, 4, 5, 6], desde: "00:00", hasta: "23:59" }];
+  const g: Record<string, unknown[]> = {};
+  const add = (k: string, v: unknown) => { (g[k] ??= []).push(v); };
+  for (const m of ["PEN", "USD"]) {
+    add("cuentas", P.cuentasEnMensaje(null, emp, m).lineas);
+    for (const n of [0, 1, 50, 84.75, 88.5, 1234.5, 99999.99, -3.005]) add("dinero", P.dinero(n, m));
+  }
+  add("plazoMin", [0, 1, 2, 30, 45, 59, 60, 61, 90, 119, 120, 121, 125, 1440].map((n) => P.textoPlazoMinutos(n)));
+  const cuentas = P.cuentasEnMensaje(null, emp, "PEN").lineas;
+  const bloques = [
+    { numero: "00736", moneda: "PEN", pct: 50, adelanto: 88.5, saldo: 88.5, cuentas },
+    { numero: "COT-1", moneda: "USD", pct: 100, adelanto: 177, saldo: 0, cuentas },
+    { numero: "9", moneda: "PEN", pct: 33.33, adelanto: 59, saldo: 118, cuentas: [] },
+  ];
+  const pedida = limaAUtcMs("2026-10-24", "22:05")!, inicio = limaAUtcMs("2026-10-25", "10:00")!;
+  const cotejos = [
+    { codigos: ["coincide"], seguro: true, monto: 88.5, operacion: "123456" },
+    { codigos: ["coincide"], seguro: true, monto: 88.5, operacion: null },
+    { codigos: ["coincide", "sin_operacion"], seguro: false, monto: 88.5, operacion: null },
+    { codigos: ["monto_menor"], seguro: false, monto: 50, operacion: "1" },
+    { codigos: ["monto_menor", "otra_moneda"], seguro: false, monto: 50, operacion: "1" },
+    { codigos: ["ilegible"], seguro: false, monto: null, operacion: null },
+    { codigos: ["no_es_comprobante"], seguro: true, monto: 5, operacion: null },
+    { codigos: ["sin_lectura"], seguro: false, monto: null, operacion: null },
+    { codigos: [], seguro: false, monto: null, operacion: null },
+  ];
+  for (const tr of ["usted", "tu"]) {
+    const e = est(tr);
+    add("bloque", bloques.map((b) => P.bloquePago(b, e)));
+    add("cond", CONDS.map((c) => P.bloqueCondicionesAntesDePagar(c, e)));
+    add("T1", bloques.flatMap((b) => ats.flatMap((a) => CONDS.map((c) => P.mensajePedirPago({ ...b, plazoMin: 120, atencion: a, estilo: e, condiciones: c })))));
+    add("T1", [45, 90, 61].map((pm) => P.mensajePedirPago({ ...bloques[0], plazoMin: pm, atencion: at, estilo: e })));
+    add("T2", [true, false].flatMap((credito) => [null, "hoy antes de las 15:30"].flatMap((fp) => [[null, null], ["2026-10-25", null], ["2026-10-25", "10:00"], ["2026-10-25", "01:15"]].flatMap(([f, h]) => [50, null].map((pct) => P.mensajeDisponibilidadPrimero({ fecha: f, hora: h, frasePlazo: fp, pct, credito, estilo: e }))))));
+    add("T3", cotejos.flatMap((c) => [null, "mañana martes antes de las 11:00"].flatMap((fp) => [false, true].flatMap((u) => [88.5, null].map((esp) => P.mensajeComprobanteRecibido({ cotejo: c, esperado: esp, moneda: "PEN", frasePlazo: fp, unidadConfirmada: u, estilo: e }))))));
+    add("T4", ["verificado", "reportado", "pedir", "credito", "incompleto"].flatMap((pago) => CONDS.flatMap((c) => [["Aeropuerto", "Miraflores"], ["", ""], ["Aeropuerto", ""]].flatMap(([o, d]) => [bloques[0], null].map((b) => P.mensajeHayUnidad({ fecha: "2026-10-25", hora: "10:00", origen: o, destino: d, pago, moneda: "PEN", cobrado: 50, bloque: b, condiciones: c, estilo: e }))))));
+    add("T4", P.mensajeHayUnidad({ fecha: null, hora: null, origen: "A", destino: "B", pago: "verificado", moneda: "USD", cobrado: 10, estilo: e }));
+    add("T5", [true, false].flatMap((cp) => [48, 1, null, 0, 2.6].map((ph) => P.mensajeSinUnidad({ fecha: "2026-10-25", hora: "10:00", conPago: cp, plazoH: ph, estilo: e }))));
+    add("T6", [inicio, null, pedida, pedida + 30 * 60_000, pedida + 3_600_000, inicio + 60_000].map((ini) => P.mensajeCancelacionRegistrada({ fecha: "2026-10-25", hora: "10:00", pedidaMs: pedida, inicioMs: ini, estilo: e })));
+    add("T6", P.mensajeCancelacionRegistrada({ fecha: null, hora: null, pedidaMs: pedida, inicioMs: inicio, estilo: e }));
+    add("T6s", P.mensajeCanceladaSinPago({ numero: "00736", estilo: e }));
+    add("T7", [[79.65, 90, 48], [0, 0, 48], [10, 0, 48], [50, 50, null], [50, 50, 1]].map(([mo, pc, ph]) => P.mensajeCancelacionResuelta({ monto: mo, pct: pc, moneda: "PEN", plazoH: ph, estilo: e })));
+    add("T8", [null, "reservas@ejemplo.pe", "no es correo"].flatMap((em) => [undefined, { resumen: RES, enlace: ENL }, { enlace: ENL }].map((c) => P.mensajePoliticas({ numero: "00736", lineas: ["Línea uno.", " Línea  dos. ", ""], email: em, estilo: e, ...(c ?? {}) }))));
+    add("T8", P.mensajePoliticas({ numero: "1", lineas: [" "], email: null, estilo: e }));
+    add("T9", P.mensajePagoNoEncontrado(e));
+    add("T10", ["00736", null, "  "].map((n) => P.mensajeGuardaReserva(n, e)));
+    add("T11", P.mensajeAdelantoIncompleto({ cobrado: 50, falta: 38.5, moneda: "PEN", estilo: e }));
+  }
+  return g;
+}
+
+// ── 12b. En inglés (`estilo.idioma === "en"`) ─────────────────────────────────
+// (a) Sin `idioma` —y con «es»—, los textos en castellano son byte a byte los de antes: las huellas
+//     de `castellanoPago` se midieron contra el código de 93c594b (antes del inglés), con 0
+//     diferencias sobre el mismo corpus. Si un texto en castellano cambia A PROPÓSITO, se actualiza
+//     su huella aquí, diciendo cuál.
+// (b) En inglés: UNA versión (usted y tú dan lo mismo), sin castellano filtrado, sin literales de la
+//     empresa, con los MISMOS importes, porcentajes y horas que el castellano.
+// (c) `cuentasEnMensaje(…, "en").lineasHuella` es SIEMPRE la lista en castellano: la huella de las
+//     cuentas (`juzgarReenvioPedirPago`) no puede cambiar con el idioma.
+{
+  const huella = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex").slice(0, 16);
+  const HUELLAS_CASTELLANO: Record<string, string> = {
+    cuentas: "1d6da6ae61df657b", dinero: "24e441500b9f7156", plazoMin: "b9fb60a9775c6047", bloque: "ce37ecdc2aabd004",
+    cond: "f873cbb96683655b", T1: "b5513c36d6445dd2", T2: "77b10bb566963424", T3: "73736d695da2b5fc", T4: "aa8e1d9de3cfba40",
+    T5: "4b82e3c5166c4036", T6: "f3f077ce968b037a", T6s: "5e4db9dfceb1b39e", T7: "41f9005116b7c064", T8: "818ff2c30c2209df",
+    T9: "9fd0ac4eea301f03", T10: "6dffa6491dcca25f", T11: "cfa46074068fe99c",
+  };
+  const sin = castellanoPago(PAGO, limaAUtcMs), conEs = castellanoPago(PAGO, limaAUtcMs, "es");
+  t("el corpus en castellano tiene todos sus grupos", Object.keys(sin).sort().join() === Object.keys(HUELLAS_CASTELLANO).sort().join());
+  for (const [k, h] of Object.entries(HUELLAS_CASTELLANO)) {
+    t(`castellano sin idioma: ${k} byte a byte el de antes`, huella(sin[k]) === h);
+    t(`castellano con idioma «es»: ${k} igual que sin idioma`, huella(conEs[k]) === h);
+  }
+
+  const EN: EstiloMensajes = { tratamiento: "usted", preguntas: "todo_junto", idioma: "en" };
+  const EN_TU: EstiloMensajes = { tratamiento: "tu", preguntas: "todo_junto", idioma: "en" };
+  const ENL = enlaceCondiciones("https://www.ejemplo.pe", "123e4567-e89b-12d3-a456-426614174000")!;
+  const ahora = limaAUtcMs("2026-10-26", "10:00")!;
+  const pedida = limaAUtcMs("2026-10-24", "22:05")!, inicio = limaAUtcMs("2026-10-25", "10:00")!;
+  const at = { activa: true, dias: [1, 2, 3, 4, 5, 6], desde: "09:00", hasta: "18:00" };
+  type Datos = { idioma: "es" | "en"; plazoHoy: string; plazoManana: string; origen: string; destino: string; politicas: string[]; resumen: string[] };
+  const datos = (idioma: "es" | "en"): Datos => ({
+    idioma,
+    plazoHoy: frasePlazo(ahora + 330 * 60_000, ahora, idioma)!,
+    plazoManana: frasePlazo(limaAUtcMs("2026-10-27", "11:00")!, ahora, idioma)!,
+    origen: idioma === "en" ? "Lima Airport" : "Aeropuerto",
+    destino: "Miraflores",
+    politicas: idioma === "en" ? ["Policy one.", "Policy two."] : ["Línea uno.", "Línea dos."],
+    resumen: idioma === "en" ? ["A 50 % deposit confirms the booking.", "Free cancellation 24 h or more before."] : ["Adelanto del 50 % para reservar.", "Cancelación gratis con 24 h o más."],
+  });
+  const DES = datos("es"), DEN = datos("en");
+  t("frasePlazo en las dos lenguas (los datos de la prueba)", DES.plazoHoy === "hoy antes de las 15:30" && DEN.plazoHoy === "today by 15:30 (Lima time)" && DES.plazoManana === "mañana martes antes de las 11:00" && DEN.plazoManana === "tomorrow, Tuesday, by 11:00 (Lima time)");
+
+  const textosX = (e: EstiloMensajes, d: Datos): Record<string, string> => {
+    const cuentas = cuentasEnMensaje(null, empresa, "PEN", d.idioma).lineas;
+    const bloque = { numero: "00736", moneda: "PEN" as const, pct: 50, adelanto: 88.5, saldo: 88.5, cuentas };
+    const bloqueUsd = { numero: "COT-9", moneda: "USD" as const, pct: 100, adelanto: 177, saldo: 0, cuentas: cuentasEnMensaje(null, empresa, "USD", d.idioma).lineas };
+    const seguro = { codigos: ["coincide"], seguro: true, monto: 88.5, operacion: "123456" };
+    const cr = { resumen: d.resumen, enlace: ENL }, ce = { enlace: ENL };
+    const hay = (pago: "verificado" | "reportado" | "pedir" | "credito" | "incompleto", extra: Record<string, unknown> = {}) =>
+      mensajeHayUnidad({ fecha: "2026-10-25", hora: "10:00", origen: d.origen, destino: d.destino, pago, moneda: "PEN", cobrado: pago === "verificado" ? 88.5 : 50, bloque, estilo: e, ...extra });
+    return {
+      T1: mensajePedirPago({ ...bloque, plazoMin: 120, atencion: at, estilo: e }),
+      T1usd: mensajePedirPago({ ...bloqueUsd, plazoMin: 90, atencion: at, estilo: e }),
+      T1r: mensajePedirPago({ ...bloque, plazoMin: 120, atencion: at, estilo: e, condiciones: cr }),
+      T1e: mensajePedirPago({ ...bloque, plazoMin: 45, atencion: at, estilo: e, condiciones: ce }),
+      T2: mensajeDisponibilidadPrimero({ fecha: "2026-10-25", hora: "10:00", frasePlazo: d.plazoHoy, pct: 50, credito: false, estilo: e }),
+      T2c: mensajeDisponibilidadPrimero({ fecha: "2026-10-25", hora: "10:00", frasePlazo: null, pct: null, credito: true, estilo: e }),
+      T2s: mensajeDisponibilidadPrimero({ fecha: null, hora: null, frasePlazo: null, pct: 50, credito: false, estilo: e }),
+      T3: mensajeComprobanteRecibido({ cotejo: seguro, esperado: 88.5, moneda: "PEN", frasePlazo: d.plazoManana, estilo: e }),
+      T3m: mensajeComprobanteRecibido({ cotejo: { codigos: ["monto_menor"], seguro: false, monto: 50, operacion: "1" }, esperado: 88.5, moneda: "PEN", frasePlazo: null, estilo: e }),
+      T3i: mensajeComprobanteRecibido({ cotejo: { codigos: ["ilegible"], seguro: false, monto: null, operacion: null }, esperado: 88.5, moneda: "PEN", frasePlazo: null, estilo: e }),
+      T3n: mensajeComprobanteRecibido({ cotejo: { codigos: ["coincide", "sin_operacion"], seguro: false, monto: 88.5, operacion: null }, esperado: 88.5, moneda: "PEN", frasePlazo: d.plazoHoy, estilo: e }),
+      T3u: mensajeComprobanteRecibido({ cotejo: seguro, esperado: 88.5, moneda: "PEN", frasePlazo: d.plazoHoy, unidadConfirmada: true, estilo: e }),
+      T4v: hay("verificado"), T4r: hay("reportado"), T4p: hay("pedir"), T4c: hay("credito"), T4i: hay("incompleto"),
+      T4pr: hay("pedir", { condiciones: cr }), T4ie: hay("incompleto", { condiciones: ce }),
+      T4s: mensajeHayUnidad({ fecha: null, hora: null, origen: "", destino: "", pago: "verificado", moneda: "USD", cobrado: 10, estilo: e }),
+      T5p: mensajeSinUnidad({ fecha: "2026-10-25", hora: "10:00", conPago: true, plazoH: 48, estilo: e }),
+      T5s: mensajeSinUnidad({ fecha: "2026-10-25", hora: "10:00", conPago: false, plazoH: null, estilo: e }),
+      T6: mensajeCancelacionRegistrada({ fecha: "2026-10-25", hora: "10:00", pedidaMs: pedida, inicioMs: inicio, estilo: e }),
+      T6d: mensajeCancelacionRegistrada({ fecha: "2026-10-25", hora: "10:00", pedidaMs: inicio + 60_000, inicioMs: inicio, estilo: e }),
+      T6m: mensajeCancelacionRegistrada({ fecha: "2026-10-25", hora: "10:00", pedidaMs: inicio - 30 * 60_000, inicioMs: inicio, estilo: e }),
+      T6s: mensajeCanceladaSinPago({ numero: "00736", estilo: e }),
+      T7d: mensajeCancelacionResuelta({ monto: 79.65, pct: 90, moneda: "PEN", plazoH: 48, estilo: e }),
+      T7n: mensajeCancelacionResuelta({ monto: 0, pct: 0, moneda: "PEN", plazoH: 48, estilo: e }),
+      T8: mensajePoliticas({ numero: "00736", lineas: d.politicas, email: "reservas@ejemplo.pe", estilo: e })!,
+      T8r: mensajePoliticas({ numero: "00736", lineas: d.politicas, email: null, estilo: e, resumen: d.resumen, enlace: ENL })!,
+      T9: mensajePagoNoEncontrado(e),
+      T10: mensajeGuardaReserva("00736", e),
+      T10s: mensajeGuardaReserva(null, e),
+      T11: mensajeAdelantoIncompleto({ cobrado: 50, falta: 38.5, moneda: "PEN", estilo: e }),
+      cond: bloqueCondicionesAntesDePagar(cr, e)!,
+      condE: bloqueCondicionesAntesDePagar(ce, e)!,
+    };
+  };
+  const es = textosX(USTED, DES), en = textosX(EN, DEN), enTu = textosX(EN_TU, DEN);
+  t("en inglés hay UNA versión: el trato no cuenta", JSON.stringify(en) === JSON.stringify(enTu));
+  const palabra = (xs: string[]) => new RegExp(`(?<![\\p{L}\\p{N}])(?:${xs.join("|")})(?![\\p{L}\\p{N}])`, "iu");
+  // La lista de fuga: palabras del castellano que no existen en inglés (por palabra completa) y los
+  // signos que el inglés no usa.
+  const FUGA = palabra([
+    "su", "sus", "usted", "tu", "tus", "le", "les", "te", "traslado", "traslados", "cotización", "cotizacion", "le envío", "envío",
+    "pasajeros", "pasajero", "maletas", "adelanto", "válida", "valida", "de", "del", "la", "las", "el", "los", "por", "para", "que",
+    "con", "hoy", "mañana", "horas", "hora", "minutos", "pago", "cuenta", "cuentas", "cta", "unidad", "reserva", "servicio", "saldo",
+    "y", "o", "en", "un", "una", "nuestro", "nuestras", "política", "políticas", "recibimos", "comprobante", "banco", "lunes", "martes",
+  ]);
+  const SIGNOS = /[¿¡áéíóúñÁÉÍÓÚÑ]|N°/;
+  const LITERALES = /\bafa\b|afatours|transportesafa|966\s?707|905\s?438|997\s?683|@afa/i;
+  const montos = (s: string) => (s.match(/(?:S\/|US\$) ?-?[\d,]+\.\d{2}/g) ?? []).sort();
+  const pcts = (s: string) => (s.match(/\d+(?:\.\d+)?(?= ?%)/g) ?? []).sort();
+  const horas = (s: string) => (s.match(/(?<!\d)\d{2}:\d{2}(?!\d)/g) ?? []).sort();
+  for (const k of Object.keys(es)) {
+    const x = en[k];
+    t(`${k} en inglés no filtra castellano (${(x.match(FUGA) ?? [])[0] ?? (x.match(SIGNOS) ?? [])[0] ?? ""})`, !FUGA.test(x) && !SIGNOS.test(x));
+    t(`${k} en inglés sin literales de la empresa`, !LITERALES.test(x));
+    t(`${k}: el inglés está escrito (difiere del castellano)`, x !== es[k]);
+    t(`${k}: los mismos importes en castellano y en inglés`, JSON.stringify(montos(x)) === JSON.stringify(montos(es[k])));
+    t(`${k}: los mismos porcentajes`, JSON.stringify(pcts(x)) === JSON.stringify(pcts(es[k])));
+    t(`${k}: las mismas horas`, JSON.stringify(horas(x)) === JSON.stringify(horas(es[k])));
+    // El corolario: la lista de fuga SÍ reconoce el castellano (si no, no probaría nada).
+    t(`${k}: la lista de fuga detecta el texto en castellano`, FUGA.test(es[k]) || SIGNOS.test(es[k]));
+  }
+  t("la comparación de importes no es trivial", Object.keys(en).filter((k) => montos(en[k]).length > 0).length >= 15);
+  // Las fechas: 25/10/2026 ↔ Oct 25, 2026 (y 24/10 ↔ Oct 24).
+  t("las fechas en inglés con el mes por su nombre", en.T2.includes("on Oct 25, 2026 at 10:00") && es.T2.includes("del 25/10/2026 a las 10:00") && en.T6.includes("received on Oct 24 at 22:05 (Lima time)") && es.T6.includes("recibido el 24/10 a las 22:05"));
+  t("T2 sin fecha no dice ninguna", en.T2s.includes("availability for your transfer and let you know shortly."));
+  // Algunos textos, enteros o por sus piezas.
+  const cuentasEn = cuentasEnMensaje(null, empresa, "PEN", "en").lineas;
+  t("T1: adelanto, saldo, cuentas en inglés, plazo y horario", en.T1.startsWith("To book the transfer in your quotation No. 00736, a deposit of 50% of the total is required: *S/ 88.50*. The balance, S/ 88.50, is paid at the start of the service, when the vehicle arrives at the pick-up point.\nYou can pay into any of these accounts:\n") && cuentasEn.every((c) => en.T1.includes(c)) && en.T1.includes("within 2 hours during our business hours, Monday to Saturday, from 09:00 to 18:00 (Lima time).") && en.T1.endsWith(" If you wish, I can send you our booking, change and cancellation policies."));
+  t("T1 al 100 % no nombra un saldo de cero", !en.T1usd.includes("balance") && en.T1usd.includes("*US$ 177.00*") && en.T1usd.includes("within 1 hour and 30 minutes"));
+  t("T1 con resumen: el bloque en lugar de ofrecer las políticas", en.T1r.endsWith(`\n${en.cond}`) && !en.T1r.includes("If you wish") && en.cond === `Before paying, here are the key points of our terms:\n• A 50 % deposit confirms the booking.\n• Free cancellation 24 h or more before.\nFull terms: ${ENL}`);
+  t("T1 solo enlace", en.T1e.endsWith(`\nBefore paying, please review our booking, change and cancellation terms: ${ENL}`) && en.condE === `Before paying, please review our booking, change and cancellation terms: ${ENL}`);
+  t("T2: no pague todavía, el plazo y el porcentaje", en.T2 === "Before we ask you for payment, one of our agents will confirm vehicle availability for your transfer on Oct 25, 2026 at 10:00 and let you know today by 15:30 (Lima time). Once it is confirmed, we will send you the deposit amount (50% of the total) and the bank accounts in this chat. Please do not make any payment yet.");
+  t("T2 crédito sin adelanto, «shortly» sin plazo", en.T2c.includes("agreed credit terms") && !en.T2c.includes("deposit") && en.T2c.includes("let you know shortly"));
+  t("T3 seguro nombra monto y operación", en.T3 === "We received your receipt for S/ 88.50 (transaction No. 123456). We will verify it with the bank and confirm vehicle availability tomorrow, Tuesday, by 11:00 (Lima time). If no vehicle is available, we will refund 100% of your payment.");
+  t("T3 no seguro NO nombra el monto", !en.T3n.includes("88.50") && en.T3n.startsWith("We received your receipt. "));
+  t("T3 monto menor nombra lo leído y lo esperado", en.T3m === "We received your receipt. It shows S/ 50.00, and the deposit for your booking is S/ 88.50: one of our agents will check it with the bank and write to you in this chat.");
+  t("T3 ilegible pide otra foto", en.T3i.startsWith("We could not read the receipt."));
+  t("T3 con la unidad confirmada promete la Confirmación", en.T3u.includes("Booking Confirmation") && !en.T3u.includes("100%"));
+  t("T4 verificado", en.T4v === "We confirm that a vehicle is available for your transfer on Oct 25, 2026 at 10:00 (Lima Airport → Miraflores). We have received your deposit of S/ 88.50. We will send you the Booking Confirmation shortly.");
+  t("T4 pedir lleva el bloque de pago", en.T4p.includes("*S/ 88.50*") && cuentasEn.every((c) => en.T4p.includes(c)) && en.T4pr.endsWith(`\n${en.cond}`));
+  t("T4 incompleto lleva T11 y las cuentas", en.T4i.includes(en.T11) && en.T4i.includes("S/ 38.50 is still needed") && cuentasEn.every((c) => en.T4i.includes(c)) && en.T4ie.endsWith(`\n${en.condE}`));
+  t("T4 sin fecha ni ruta", en.T4s === "We confirm that a vehicle is available for your transfer. We have received your deposit of US$ 10.00. We will send you the Booking Confirmation shortly.");
+  t("T5 con pago devuelve el 100 % en 48 horas", en.T5p.includes("We will refund 100% of your payment within 48 hours;") && en.T5s.endsWith("Please do not make any payment for this quotation."));
+  t("T6 las horas de anticipación, después del inicio y menos de una hora", en.T6.includes(", 11 hours before the service starts.") && en.T6d.includes(", after the service start time.") && en.T6m.includes(", less than one hour before the service starts."));
+  t("T7 con y sin devolución", en.T7d === "Your booking has been cancelled. We will refund S/ 79.65 (90% of your payment) within 48 hours." && en.T7n === "Your booking has been cancelled. Under our cancellation policy, no refund applies in this case.");
+  t("T8 lista las líneas tal cual y el correo", en.T8 === "These are our booking, change and cancellation policies (the same ones in your quotation No. 00736):\n• Policy one.\n• Policy two.\nTo cancel or change your booking, write to us in this same chat or by email at reservas@ejemplo.pe.");
+  t("T8 un correo que no es una dirección no se nombra", !mensajePoliticas({ numero: "1", lineas: ["x"], email: "no es correo", estilo: EN })!.includes("by email"));
+  t("T8 con resumen: el resumen y el enlace, sin la política entera", en.T8r.includes("• A 50 % deposit confirms the booking.") && en.T8r.includes(`The full terms of your booking are here: ${ENL}`) && !DEN.politicas.some((l) => en.T8r.includes(l)));
+  t("T8 sin políticas → null también en inglés", mensajePoliticas({ numero: "1", lineas: [" "], email: null, estilo: EN }) === null);
+  t("T10 con y sin número", en.T10 === "To book, I will send you the deposit amount and the payment accounts in this chat. Would you like to book your transfer for quotation No. 00736?" && en.T10s.endsWith("Would you like to book your transfer?"));
+  t("T11", en.T11 === "We received S/ 50.00; S/ 38.50 is still needed to complete the deposit for your booking.");
+  t("textoPlazoMinutos en inglés", textoPlazoMinutos(120, "en") === "2 hours" && textoPlazoMinutos(90, "en") === "1 hour and 30 minutes" && textoPlazoMinutos(45, "en") === "45 minutes" && textoPlazoMinutos(61, "en") === "1 hour and 1 minute" && textoPlazoMinutos(1, "en") === "1 minute" && textoPlazoMinutos(60, "en") === "1 hour");
+  for (const m of ["PEN", "USD"] as const) for (const n of [0, 1, 50, 84.75, 88.5, 1234.5, 99999.99, -3.005]) {
+    t(`dinero ${m} ${n}: el importe se escribe igual en los dos idiomas`, dinero(n, m, "en") === dinero(n, m));
+  }
+
+  // (c) La huella de las cuentas no cambia con el idioma.
+  const perfiles: (PerfilEmpresa | null)[] = [empresa, null, { ...empresa, cuentas_bancarias: [] }, { ...empresa, cuentas_bancarias: [{ banco: "BCP", cuenta: "191-1", cci: "", moneda: "PEN" }] }];
+  const cfgs: (PlantillaPdfCfg | null | undefined)[] = [null, undefined, { mostrar_cuentas_bancarias: false }, { mostrar_cuentas_bancarias: true }];
+  let barridas = 0;
+  for (const p of perfiles) for (const c of cfgs) for (const m of ["PEN", "USD"] as const) {
+    const ces = cuentasEnMensaje(c, p, m), cen = cuentasEnMensaje(c, p, m, "en");
+    barridas++;
+    t(`cuentas ${m} · ${JSON.stringify(c)}: lineasHuella en inglés = las líneas en castellano`, JSON.stringify(cen.lineasHuella) === JSON.stringify(ces.lineas));
+    t(`cuentas ${m}: en castellano lineasHuella = lineas`, JSON.stringify(ces.lineasHuella) === JSON.stringify(ces.lineas));
+    t(`cuentas ${m}: las mismas cuentas y el mismo aviso`, JSON.stringify(cen.cuentas) === JSON.stringify(ces.cuentas) && JSON.stringify(cen.aviso) === JSON.stringify(ces.aviso));
+    t(`cuentas ${m}: tantas líneas en inglés como en castellano, con «Acct:» donde decía «Cta:»`, cen.lineas.length === ces.lineas.length && cen.lineas.every((l, i) => !l.includes("Cta:") && (!ces.lineas[i].includes("Cta:") || l.includes("Acct:"))));
+    const digitos = (ls: string[]) => ls.map((l) => (l.match(/\d[\d-]*/g) ?? []).join("|"));
+    t(`cuentas ${m}: los mismos números de cuenta`, JSON.stringify(digitos(cen.lineas)) === JSON.stringify(digitos(ces.lineas)));
+  }
+  t("el barrido de las cuentas probó cuentas de verdad", barridas === 32 && cuentasEnMensaje(null, empresa, "PEN", "en").lineas.length === 2);
 }
 
 if (fallas.length) for (const f of fallas) console.log("✗", f);

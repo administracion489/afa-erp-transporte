@@ -16,7 +16,7 @@ import { useCampoSinIgv } from "@/components/cotizaciones/useCampoSinIgv";
 import { normalizarIdioma, DEFAULT_CONSID_ES, descripcionServicio, type Idioma } from "@/lib/cotizacion-idioma";
 import { htmlCotizacion, type AvisoPdf, type ResultadoPdf } from "@/lib/cotizacion-pdf";
 import {
-  CONSID_VERSION, ETIQUETA_DISENO, avisoCondicionesDeOtraPlantilla, considParaFormulario, considSnapshot, disenoDe, esActiva,
+  CONSID_VERSION, ETIQUETA_DISENO, avisoCondicionesDeOtraPlantilla, considParaFormulario, considSnapshot, disenoDe, esActiva, esConsidFijada,
   etiquetaCelda, plantillaParaUso, plantillaPorId, plantillaPrincipal, segmentoDeCliente, servicioDeCotizacion, SQL_PLANTILLAS_USO,
   type CodigoUso, type ConsidFila, type Diseno, type PlantillaFila, type ReglaPlantilla,
 } from "@/lib/cotizacion-plantillas";
@@ -59,7 +59,7 @@ import BarraHorasParaderos, { etiquetaDiaCorta, type ContextoHoras } from "@/com
 import { coordValida, resolverRestauracion, rutaCoordsParaGuardar, rotuloFuente, type PuntoRuta, type Extremo } from "@/lib/cotizacion-ruta-coords";
 import { faltaColumna, faltaAlguna } from "@/lib/columna-faltante";
 import ModalDespachoSinCotizar from "@/components/cotizaciones/ModalDespachoSinCotizar";
-import { AVISO_CLIENTE_NO_VERIFICADO, AVISO_TRASLADO_EN_CASTELLANO, clienteErpDe, entradaTrasladoPagina, esTrasladoIA } from "@/components/cotizaciones/pdf-traslado";
+import { AVISO_CLIENTE_NO_VERIFICADO, AVISO_TRASLADO_IDIOMA, clienteErpDe, entradaTrasladoPagina, esTrasladoIA } from "@/components/cotizaciones/pdf-traslado";
 import type { FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
 import { leerDespachosSinCotizar, vincularCotizacion } from "@/lib/despacho-sin-cotizar-datos";
 import { pendientesDeCotizar, prellenadoCotizacion, type ReservaDespacho } from "@/lib/despacho-sin-cotizar";
@@ -376,8 +376,8 @@ function ModalPlantilla({cot,plantillas,errorPlantillas,plantillaActual,onElegir
         {avisos===null&&!errorAvisos&&<p style={{fontSize:11,color:"#94a3b8",margin:"0 0 12px"}}>Comprobando la plantilla, las cuentas bancarias y el idioma…</p>}
         {errorAvisos&&<p style={{fontSize:11,color:"#92400e",background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:10,padding:"6px 10px",margin:"0 0 12px"}}>⚠ No se pudo comprobar la plantilla: {errorAvisos}</p>}
         {avisos&&avisos.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
-          {avisos.map(a=>(
-            <p key={a.codigo} style={{fontSize:11,margin:0,borderRadius:10,padding:"6px 10px",...(a.bloquea?{color:"#991b1b",background:"#fef2f2",border:"1px solid #fca5a5"}:{color:"#92400e",background:"#fffbeb",border:"1px solid #fcd34d"})}}>{a.bloquea?"⛔":"⚠"} {a.detalle}</p>
+          {avisos.map((a,i)=>(
+            <p key={`${a.codigo}-${i}`} style={{fontSize:11,margin:0,borderRadius:10,padding:"6px 10px",...(a.bloquea?{color:"#991b1b",background:"#fef2f2",border:"1px solid #fca5a5"}:{color:"#92400e",background:"#fffbeb",border:"1px solid #fcd34d"})}}>{a.bloquea?"⛔":"⚠"} {a.detalle}</p>
           ))}
         </div>}
         <div style={{display:"flex",gap:10}}>
@@ -1052,6 +1052,9 @@ export default function CotizacionesPage(){
   // El idioma lo eligió una persona: una plantilla en inglés ya no lo cambia. `idiomaAplicadoRef` =
   // la plantilla cuyo idioma ya se aplicó (para no volver a aplicarlo en cada render).
   const idiomaTocadoRef=useRef(false);const idiomaAplicadoRef=useRef<string|null>(null);
+  // El idioma en que la IA cotizó el TRASLADO que se está editando (su `idioma_pdf` al abrirlo); null si
+  // no es un traslado de la IA. Solo informa junto a «Idioma del PDF»: ese campo es el que manda.
+  const [idiomaTrasladoIA,setIdiomaTrasladoIA]=useState<Idioma|null>(null);
   const [form,setForm]=useState(FORM0);const [items,setItems]=useState<ItemCot[]>([{...ITEM_VACIO}]);const [modalAprob,setModalAprob]=useState<CotFila|null>(null);const [guardarTar,setGuardarTar]=useState(true);const [paradas,setParadas]=useState<ParadaTP[]>([]);const [paradasRetorno,setParadasRetorno]=useState<ParadaTP[]>([]);const [panelId,setPanelId]=useState<number|null>(null);
   const [diasCond,setDiasCond]=useState(1);const [peajesF,setPeajesF]=useState(0);const [pernocteF,setPernocteF]=useState(0);const [viaticosF,setViaticosF]=useState(0);const [reprNombre,setReprNombre]=useState("");
   // Costo interno y precio/día se escriben SIN o CON IGV; el formulario guarda solo el con IGV y
@@ -1086,6 +1089,12 @@ export default function CotizacionesPage(){
   const consid:ConsidFila=considEditada??considAuto;
   /** Editar una condición la vuelve «tocada»: desde ahí ni la regla ni otra plantilla la pisan. */
   const setConsid=(v:ConsidFila|((prev:ConsidFila)=>ConsidFila))=>setConsidEditada(prev=>typeof v==="function"?v(prev??considAuto):v);
+  /**
+   * Volver una lista a la de la plantilla del formulario: ya no es lo que la IA copió de una plantilla
+   * en inglés, así que se suelta la marca `idioma: "en"`. Es el lado seguro: el PDF en inglés la avisa
+   * como escrita tal cual y la IA, si reusa la cotización, la deja en revisión.
+   */
+  const sinMarcaIngles=(c:ConsidFila):ConsidFila=>{const resto={...c};delete resto.idioma;return resto;};
   const [modalPlantilla,setModalPlantilla]=useState<Cotizacion|null>(null);const [plantillaElegida,setPlantillaElegida]=useState("corporativo");
   const [modalEnvio,setModalEnvio]=useState<CotFila|null>(null);
   const [rolUsuario,setRolUsuario]=useState<string>("operador");
@@ -1426,7 +1435,10 @@ export default function CotizacionesPage(){
    * mientras tanto no se guarda. `delBorrador`: las de un borrador de antes de este cambio, que se
    * conservan si alguien las editó (son las que muestra el formulario). Un TRASLADO de la IA con una
    * plantilla de diseño corporativo imprime SIEMPRE las de su fila (`cfgSoloCuentas`): ahí la
-   * plantilla no pone condiciones.
+   * plantilla no pone condiciones. La marca `idioma: "en"` de la fila (la IA las copió de una plantilla
+   * en inglés) se CONSERVA en el formulario: `considParaFormulario` no la copia, y guardarla sin ella
+   * haría que el PDF en inglés las tratara como escritas en castellano y que la IA, al reusar la
+   * cotización, la dejara en revisión (`condiciones_en_otro_idioma`).
    */
   const fijarConsidDeCotizacion=(c:{plantilla_pdf?:string|null;consideraciones_json?:ConsidFila|null;idioma_pdf?:string|null;traslado_json?:unknown},delBorrador?:ConsidFila|null)=>{
     const idPl=c.plantilla_pdf||"corporativo";
@@ -1436,11 +1448,14 @@ export default function CotizacionesPage(){
     // El borrador de antes ponía `consideraciones_json || las de fábrica` al abrir: si sigue igual, nadie las editó.
     const base=fila??DEFAULT_CONSID;
     const editadasEnBorrador=!!delBorrador&&JSON.stringify([delBorrador.incluye,delBorrador.no_incluye,delBorrador.generales])!==JSON.stringify([base.incluye,base.no_incluye,base.generales]);
+    // Solo una fila FIJADA lleva la marca (la escribe la IA en versión 2), y de una fila fijada el
+    // formulario carga siempre sus listas: la marca sigue describiendo lo que se ve.
+    const marcaIngles=esConsidFijada(fila)&&fila?.idioma==="en"?{idioma:"en" as const}:{};
     const fijar=(cfg:PlantillaFila|null)=>{
       if(editadasEnBorrador&&delBorrador){setConsidEditada({...delBorrador,plantilla:idPl});return;}
       const imprimeLaFila=esTrasladoIA(c)&&disenoDe(cfg??{id:idPl})==="corporativo";
       const r:ConsidFila=imprimeLaFila&&!fila?{incluye:[],no_incluye:[],generales:[]}:considParaFormulario(imprimeLaFila?null:cfg,fila,idioma);
-      setConsidEditada({...r,plantilla:r.plantilla??idPl});
+      setConsidEditada({...r,plantilla:r.plantilla??idPl,...marcaIngles});
     };
     const req=++reqConsidRef.current;
     const local=plantillaPorId(plantillas,idPl);
@@ -1461,7 +1476,7 @@ export default function CotizacionesPage(){
     // «Recientes» y «Más cotizados» de los selectores: un año, aparte del periodo de la lista.
     // Best-effort: sin él los selectores solo pierden sus sugerencias.
     leerHistorialSelector(supabase,hoyLimaISO()).then(setHistorialSel).catch(()=>{});
-    const[clR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([leerClientes(),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),leerPlantillasYReglas(supabase).catch((e:unknown)=>({ok:false as const,plantillas:[] as PlantillaFila[],reglas:null,sinDiseno:false,error:String((e as {message?:string})?.message??e)}))]);
+    const[clR,tR,vR,pR,cR,vtR,empR,plR]=await Promise.all([leerClientes(),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url,descripcion_unidad,tipo_vehiculo_costeo").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social"),leerPlantillasYReglas(supabase).catch((e:unknown)=>({ok:false as const,plantillas:[] as PlantillaFila[],reglas:null,reglasTraslado:null,sinDiseno:false,error:String((e as {message?:string})?.message??e)}))]);
     if(clR){setClientes(clR);setErrorClientes(false);}else setErrorClientes(true);setCargandoClientes(false);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
     const pr:Record<string,number>={};(cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});setPreciosDB(pr);
     const emps:any[]=empR.data||[];
@@ -1783,7 +1798,7 @@ export default function CotizacionesPage(){
     if(quiere!==form.idioma_pdf)cambiarIdiomaPdf(quiere);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[filaForm?.id,filaForm?.idioma,editandoId,faltaColMoneda]);
-  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);setMonedaItems("PEN");baseSolesRef.current=null;/* plantilla por regla y condiciones sin tocar: las de la plantilla del formulario */setPlantillaFijada(null);setConsidEditada(null);reqConsidRef.current++;setConsidPendiente(false);setAvisoConsidForm("");idiomaTocadoRef.current=false;idiomaAplicadoRef.current=null;setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{fijarDespachoOrigen(null);setForm(FORM0);setItems([{...ITEM_VACIO}]);setMonedaItems("PEN");baseSolesRef.current=null;/* plantilla por regla y condiciones sin tocar: las de la plantilla del formulario */setPlantillaFijada(null);setConsidEditada(null);reqConsidRef.current++;setConsidPendiente(false);setAvisoConsidForm("");idiomaTocadoRef.current=false;idiomaAplicadoRef.current=null;setIdiomaTrasladoIA(null);setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setRetornoPlace(null);setKmCongelado(null);setPorGeocodificar([]);setGeoFallo([]);setKmBase(null);setKmRet(null);setAvisoRet("");setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);esperaClienteRef.current=false;try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.tipo_vehiculo_costeo?equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo)):(v.equipamiento||"full_equipo"),tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo,...(v.tipo_vehiculo_costeo?{equipamiento:equipamientoDeNivel(nivelDeFicha(v.tipo_vehiculo_costeo))}:{})}));};
@@ -1870,7 +1885,9 @@ export default function CotizacionesPage(){
       vehiculo_tercero_id:form.vehiculo_tercero_id?Number(form.vehiculo_tercero_id):null,
       // Las condiciones quedan ESCRITAS en la fila (versión 2): el PDF imprime estas, las que muestra
       // el formulario, y no las que tenga la plantilla el día que se imprima (lib/cotizacion-plantillas.ts).
-      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),...(Array.isArray(consid.reserva)&&Array.isArray(consid.reserva_resumen)?{reserva_resumen:consid.reserva_resumen}:{}),version:CONSID_VERSION,plantilla:plantillaForm},plantilla_pdf:plantillaForm,
+      // La marca `idioma: "en"` (un traslado de la IA con las condiciones de una plantilla en inglés)
+      // se conserva; el idioma del PDF (`idioma_pdf`, abajo) es el de la fila mientras nadie lo cambie.
+      consideraciones_json:{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),...(Array.isArray(consid.reserva)&&Array.isArray(consid.reserva_resumen)?{reserva_resumen:consid.reserva_resumen}:{}),version:CONSID_VERSION,plantilla:plantillaForm,...(consid.idioma==="en"?{idioma:"en" as const}:{})},plantilla_pdf:plantillaForm,
       paradas_json:paradas.length>0?paradas:null,paradas_retorno_json:paradasRetorno.length>0?paradasRetorno:null,modo_servicio:form.modo_servicio,
       dias_servicio:Number(form.dias_servicio)||1,horas_servicio:Number(form.horas_servicio)||8,
       pernocte_costo:pernocteF||null,precio_dia:precioDiaNum,precio_mes_estimado:precioMesNum,
@@ -2332,6 +2349,7 @@ export default function CotizacionesPage(){
     if(r.refrescar)refrescar();
   };
   const editarCot=(c:Cotizacion)=>{
+    setIdiomaTrasladoIA(esTrasladoIA(c)?normalizarIdioma(c.idioma_pdf):null);
     // Se teclea en la moneda de la cotización: con dólares y un TC válido, ítems y precio/día se
     // enseñan en US$ (lo guardado sigue en soles). Sin TC válido, en soles.
     const mon=normalizarMoneda(c.moneda);const rtc=revisarTipoCambio(c.tipo_cambio);
@@ -2345,8 +2363,9 @@ export default function CotizacionesPage(){
    * Arma el PDF con lib/cotizacion-pdf.ts (`htmlCotizacion`): devuelve el HTML y lo que hay que
    * AVISAR antes de enviarlo. `html: null` solo con dólares sin tipo de cambio válido.
    * Un TRASLADO de la IA del CRM (`traslado_json`) con una plantilla de diseño corporativo imprime
-   * LO MISMO que el PDF que se manda por WhatsApp (components/cotizaciones/pdf-traslado.ts), siempre
-   * en castellano (`idioma` dice en qué idioma salió de verdad). Las demás cotizaciones, como siempre.
+   * LO MISMO que el PDF que se manda por WhatsApp (components/cotizaciones/pdf-traslado.ts), en el
+   * idioma de SU FILA (`idioma_pdf`, el que escribió la IA al cotizarla): el del modal no lo cambia, y
+   * si difiere se avisa. `idioma` dice en qué idioma salió de verdad. Las demás cotizaciones, como siempre.
    * `plantilla` es el ID de la plantilla; el diseño que dibuja es `disenoDe(fila)`.
    */
   const prepararPDF=async(cot:Cotizacion,plantilla:string,idioma:Idioma):Promise<ResultadoPdf&{plantilla:string;idioma?:Idioma}>=>{
@@ -2377,13 +2396,16 @@ export default function CotizacionesPage(){
         const rt=htmlCotizacion(entrada);
         // El traslado imprime las condiciones de SU fila: si se copiaron de otra plantilla, se dice.
         const otra=avisoCondicionesDeOtraPlantilla(cot.consideraciones_json,elegida,nombrePlantilla);
-        const avisos=[...rt.avisos,...(idioma==="es"?[]:[{codigo:"textos_escritos_tal_cual" as const,bloquea:false,detalle:AVISO_TRASLADO_EN_CASTELLANO}]),...(clienteNoVerificado?[{codigo:"cliente_no_verificado" as const,bloquea:false,detalle:AVISO_CLIENTE_NO_VERIFICADO}]:[]),...(otra?[otra]:[])];
-        return{...rt,avisos,plantilla,idioma:"es"};
+        // El idioma es el de la fila (lo devuelve la entrada): se devuelve tal cual, así abrirPDF no
+        // reescribe `idioma_pdf` con el del modal (antes devolvía «es» y pasaba a castellano una en inglés).
+        const idiomaFila:Idioma=entrada.idioma==="en"?"en":"es";
+        const avisos=[...rt.avisos,...(idioma===idiomaFila?[]:[{codigo:"textos_escritos_tal_cual" as const,bloquea:false,detalle:AVISO_TRASLADO_IDIOMA[idiomaFila]}]),...(clienteNoVerificado?[{codigo:"cliente_no_verificado" as const,bloquea:false,detalle:AVISO_CLIENTE_NO_VERIFICADO}]:[]),...(otra?[otra]:[])];
+        return{...rt,avisos,plantilla,idioma:idiomaFila};
       }
     }
     // La que se está editando imprime lo que muestra el formulario, como quedará guardada (versión 2).
     // Una sin condiciones guardadas, las de fábrica (lo mismo que carga el formulario al abrirla).
-    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),...(Array.isArray(consid.reserva)&&Array.isArray(consid.reserva_resumen)?{reserva_resumen:consid.reserva_resumen}:{}),version:CONSID_VERSION,plantilla:plantillaForm}:(cot.consideraciones_json||{...DEFAULT_CONSID});
+    const considFinal:ConsidFila=editandoId===cot.id?{incluye:consid.incluye,no_incluye:consid.no_incluye,generales:consid.generales,...(Array.isArray(consid.reserva)?{reserva:consid.reserva}:{}),...(Array.isArray(consid.reserva)&&Array.isArray(consid.reserva_resumen)?{reserva_resumen:consid.reserva_resumen}:{}),version:CONSID_VERSION,plantilla:plantillaForm,...(consid.idioma==="en"?{idioma:"en" as const}:{})}:(cot.consideraciones_json||{...DEFAULT_CONSID});
     const r=htmlCotizacion({
       cot,cliente:cl,items:its,vehiculos,repr:nombreFinal,consid:considFinal,plantilla:diseno,
       cfg:fila,empresa:empData as EmpresaPerfilPDF|null,
@@ -2681,6 +2703,9 @@ export default function CotizacionesPage(){
                     <option value="es">🇵🇪 Español</option><option value="en" disabled={faltaColMoneda&&form.idioma_pdf!=="en"}>🇺🇸 English</option>
                   </select>
                   {faltaColMoneda&&<p className="text-[10px] text-amber-700 mt-0.5">Sin {SQL_MONEDA} el idioma no se guarda (se elige al generar el PDF).</p>}
+                  {idiomaTrasladoIA&&(form.idioma_pdf===idiomaTrasladoIA
+                    ?<p className="text-[10px] text-gray-500 mt-0.5">Traslado cotizado por la IA en {idiomaTrasladoIA==="en"?"inglés":"castellano"}: su PDF y los mensajes de su reserva salen en este idioma.</p>
+                    :<p className="text-[10px] text-amber-700 mt-0.5">La IA lo cotizó en {idiomaTrasladoIA==="en"?"inglés":"castellano"}: al guardar, su PDF y los mensajes de su reserva pasan a {form.idioma_pdf==="en"?"inglés":"castellano"}. La descripción del ítem y las condiciones no se traducen.</p>)}
                 </Campo>
                 <Campo label="Moneda" span={2}>
                   <div className="flex items-center gap-3 pt-1 flex-wrap">
@@ -3014,7 +3039,7 @@ export default function CotizacionesPage(){
               <div className="rounded-xl border-2 p-3 space-y-2 mt-4" style={{background:"#eef3f8",borderColor:"#93c5fd"}}>
                 <p className="text-xs font-black text-[#0b315f]">📋 Consideraciones generales</p>
                 <div className="space-y-1.5">{consid.generales.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,generales:prev.generales.map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,generales:prev.generales.filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
-                <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,generales:[...prev.generales,""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,generales:[...considDePlantilla(filaForm).generales]}))} title={`Vuelve a las consideraciones generales de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar las de la plantilla</button></div>
+                <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,generales:[...prev.generales,""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>sinMarcaIngles({...prev,generales:[...considDePlantilla(filaForm).generales]}))} title={`Vuelve a las consideraciones generales de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar las de la plantilla</button></div>
               </div>
               {(()=>{
                 // La política de reserva, cambios y cancelación (supabase/cotizaciones-06): la copia la
@@ -3027,7 +3052,7 @@ export default function CotizacionesPage(){
                   {!corp&&<p className="text-[10px] text-gray-500">El diseño de esta plantilla no imprime la política de reserva: solo la imprime el corporativo.</p>}
                   {reserva.length===0&&<p className="text-[10px] text-gray-500">Sin política de reserva: el PDF no imprime este bloque.</p>}
                   <div className="space-y-1.5">{reserva.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,reserva:(prev.reserva??[]).map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>({...prev,reserva:(prev.reserva??[]).filter((_,idx)=>idx!==i)}))} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
-                  <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(prev.reserva??[]),""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(considDePlantilla(filaForm).reserva??[])]}))} title={`Vuelve a la política de reserva de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar la de la plantilla</button></div>
+                  <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,reserva:[...(prev.reserva??[]),""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar ítem</button><button onClick={()=>setConsid(prev=>sinMarcaIngles({...prev,reserva:[...(considDePlantilla(filaForm).reserva??[])]}))} title={`Vuelve a la política de reserva de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar la de la plantilla</button></div>
                   {corp&&reserva.length>0&&(()=>{
                     // Su RESUMEN (supabase/cotizaciones-08): con él, el PDF imprime estos puntos y el enlace
                     // (con QR) a la política completa de ESTA cotización; sin resumen, la política entera.
@@ -3037,7 +3062,7 @@ export default function CotizacionesPage(){
                       <p className="text-[11px] font-black text-[#0b315f]">Resumen para el PDF y el WhatsApp</p>
                       <p className="text-[10px] text-gray-500">{resumen.length?"El PDF imprime estos puntos y, debajo, el enlace con su QR a la política completa de esta cotización (la de arriba).":"Sin resumen: el PDF imprime la política entera."} Si la cotización no tiene enlace (falta correr {SQL_RESUMEN_CONDICIONES}), se imprime la política entera. No lleves aquí teléfonos, correos, enlaces ni números largos.</p>
                       <div className="space-y-1.5">{resumen.map((item,i)=><div key={i} className="flex gap-2 items-center"><input className="flex-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none bg-white" value={item} onChange={e=>setConsid(prev=>({...prev,reserva_resumen:(prev.reserva_resumen??[]).map((it,idx)=>idx===i?e.target.value:it)}))}/><button onClick={()=>setConsid(prev=>{const r=(prev.reserva_resumen??[]).filter((_,idx)=>idx!==i);if(r.length)return{...prev,reserva_resumen:r};const{reserva_resumen:_q,...resto}=prev;return resto;})} className="text-gray-300 hover:text-red-500 font-bold text-sm flex-shrink-0">✕</button></div>)}</div>
-                      <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,reserva_resumen:[...(prev.reserva_resumen??[]),""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar punto</button>{dePl.length>0&&<button onClick={()=>setConsid(prev=>({...prev,reserva_resumen:[...dePl]}))} title={`Vuelve al resumen de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar el de la plantilla</button>}</div>
+                      <div className="flex items-center gap-4"><button onClick={()=>setConsid(prev=>({...prev,reserva_resumen:[...(prev.reserva_resumen??[]),""]}))} className="text-[10px] font-bold text-[#0b315f] hover:underline">+ Agregar punto</button>{dePl.length>0&&<button onClick={()=>setConsid(prev=>sinMarcaIngles({...prev,reserva_resumen:[...dePl]}))} title={`Vuelve al resumen de la plantilla «${filaForm?.nombre||plantillaForm}»`} className="text-[10px] text-gray-400 hover:underline">↺ Restaurar el de la plantilla</button>}</div>
                     </div>);
                   })()}
                 </div>);

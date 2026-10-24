@@ -36,6 +36,14 @@
 //     «Cuenta como pago reportado» se decide en un solo sitio (`comprobanteCuenta`).
 //  8. UN ERROR DE LA BASE NO SE ENSEÑA: va al log y el usuario del ERP recibe qué falló
 //     (`seguro`/`crudo` sobre `mensajeSeguro`, lib/mensaje-seguro.ts).
+//  9. EL IDIOMA DE LOS MENSAJES ES EL DE LA COTIZACIÓN (`idioma_pdf`, escrito al crearla por la IA):
+//     T1–T11, los que manda una persona desde la tarjeta y el caption de la Confirmación lo leen de
+//     ahí (`vozDe`); NADA vuelve a detectar el idioma en los mensajes del chat. La huella de las
+//     cuentas sale SIEMPRE de las líneas en castellano (`lineasHuella`): con las de inglés («Acct:»)
+//     cambiaría con el idioma y el reenvío del pedido de pago diría `cuentas_cambiaron`. Lo que
+//     escribió una persona en castellano no se traduce: el resumen de la política no va en un T1/T4 en
+//     inglés (queda el enlace) y las políticas en castellano (T8) a un cliente en inglés las ve un
+//     ejecutivo.
 // Matriz de punta a punta: ANTHROPIC_API_KEY=x npx tsx scripts/prueba-reserva-ia.mts
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -45,9 +53,10 @@ import { fechaLima, limaAUtcMs } from "../alertas-horario";
 import { normalizarAjustes, estiloDe, type EstiloMensajes } from "../crm-ia-ajustes";
 import { atencionDe, atencionEnUso, type Atencion } from "../crm-ia-atencion";
 import { leerPlantillasYReglas } from "../cotizacion-plantillas-datos";
-import { excesoCondiciones, plantillaParaUso, SEGMENTOS } from "../cotizacion-plantillas";
+import { CELDAS_TRASLADO, excesoCondiciones, plantillaParaUso, plantillaTrasladoIA, segmentoDeCliente, SEGMENTOS, type PlantillaFila } from "../cotizacion-plantillas";
 import { mensajeSeguro } from "../mensaje-seguro";
 import { normalizarMoneda, type Moneda } from "../cotizacion-moneda";
+import { normalizarIdioma as idiomaDeFila, type Idioma } from "../cotizacion-idioma";
 import { enlaceCondiciones, numeroCotizacion } from "../cotizacion-corporativo";
 import type { PlantillaPdfCfg } from "../cotizacion-pdf";
 import type { PerfilEmpresa } from "../empresa-perfil";
@@ -61,7 +70,7 @@ import {
   emitirVersion, enlazarCobrosAReserva, leerEntrada, leerVersiones, pdfDeVersion, registrarAdelanto, registrarDevolucion,
   validarCobro, SQL_PAGOS_SOLICITUD,
 } from "../confirmacion-reserva-datos";
-import { esCredito, juzgarConfirmacion, normalizarIdioma, type ExtrasConf } from "../confirmacion-reserva";
+import { captionConfirmacion, esCredito, juzgarConfirmacion, normalizarIdioma, type ExtrasConf } from "../confirmacion-reserva";
 import {
   cuentasFrenteACorporativo, perfilConfigurado, type CuentasFrente, type FilaCotizacionLeida, type ReferenciaCuentas,
 } from "./cotizacion-traslado";
@@ -180,6 +189,16 @@ const inicioDiaLima = (hoy: string) => `${hoy}T05:00:00.000Z`;
 const ahoraDe = (deps: DepsReserva) => deps.ahoraMs?.() ?? Date.now();
 const azarDe = (deps: DepsReserva) => deps.azar?.() ?? Math.random().toString(36).slice(2, 10);
 const estiloDeAgente = (agente: unknown): EstiloMensajes => estiloDe(normalizarAjustes((agente as { comportamiento?: unknown } | null)?.comportamiento));
+/**
+ * La voz de los textos de UNA cotización: el trato y el modo de preguntar del agente y el idioma de
+ * la cotización (su `idioma_pdf`, ya leído: aquí no se vuelve a detectar nada). En castellano, el
+ * estilo de siempre, sin la clave (byte a byte los textos de antes).
+ */
+const vozDe = (agente: unknown, cc: Pick<ContextoCotizacion, "idioma"> | Idioma | null | undefined): EstiloMensajes => {
+  const idioma = typeof cc === "string" ? cc : cc?.idioma;
+  const e = estiloDeAgente(agente);
+  return idioma === "en" ? { ...e, idioma: "en" } : e;
+};
 const atencionDeAgente = (agente: unknown): Atencion => atencionDe(normalizarAjustes((agente as { comportamiento?: unknown } | null)?.comportamiento));
 const appUrlDe = (deps: DepsReserva) => (deps.appUrl !== undefined ? deps.appUrl : process.env.NEXT_PUBLIC_APP_URL ?? null);
 const lineaCorta = (s: unknown, max = 300) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
@@ -349,6 +368,13 @@ export type ContextoCotizacion = {
   politica: string[];
   /** El resumen de la política (cotizaciones-08), limpio; vacío sin política o sin resumen. */
   resumen: string[];
+  /** El idioma de la cotización (`idioma_pdf`; sin la columna, castellano): el de todos sus mensajes. */
+  idioma: Idioma;
+  /**
+   * Las condiciones copiadas están en el idioma de la cotización: siempre en castellano; en inglés,
+   * solo si se copiaron de una plantilla en inglés (`consideraciones_json.idioma === "en"`).
+   */
+  condicionesEnIdioma: boolean;
   /** Una línea de la política O de su resumen trae un enlace o un número de 6+ dígitos. */
   politicaSospechosa: boolean;
   zonaEnvio: boolean;
@@ -361,8 +387,11 @@ export async function contextoCotizacion(sb: Sb, cotId: number): Promise<Context
   const fila = await leerCotizacionTraslado(sb, cotId);
   if (!fila) throw new Error(`La cotización ${cotId} ya no existe.`);
   const moneda = normalizarMoneda(fila.moneda);
+  const idioma = idiomaDeFila(fila.idioma_pdf);
+  const condicionesEnIdioma = idioma !== "en" || (fila.consideraciones_json as { idioma?: unknown } | null | undefined)?.idioma === "en";
   const [{ perfil }, pl] = await Promise.all([leerPerfilPdf(sb), plantillaYReferenciaCuentas(sb, fila.plantilla_pdf)]);
-  const cuentas = cuentasEnMensaje(pl.usada, perfil, moneda);
+  // Las líneas en el idioma de la cotización; la huella, de `lineasHuella` (siempre en castellano).
+  const cuentas = cuentasEnMensaje(pl.usada, perfil, moneda, idioma);
   const frente = cuentasFrenteACorporativo({ plantilla: pl.usada, referencia: pl.referencia, empresa: perfil, moneda });
   const limpia = (l: unknown) => (Array.isArray(l) ? l : []).map((x) => String(x ?? "").trim()).filter(Boolean);
   const politica = limpia(fila.consideraciones_json?.reserva);
@@ -405,8 +434,21 @@ export async function contextoCotizacion(sb: Sb, cotId: number): Promise<Context
   }
   return {
     fila, numero: numeroCotizacion(fila), moneda, inicioMs: inicioServicioMs(fila), perfil, usada: pl.usada, referencia: pl.referencia,
-    cuentas, frente, politica, resumen, politicaSospechosa, zonaEnvio, credito, cliente,
+    cuentas, frente, politica, resumen, idioma, condicionesEnIdioma, politicaSospechosa, zonaEnvio, credito, cliente,
   };
+}
+
+/**
+ * El idioma de una cotización (`idioma_pdf`, su fila autoritativa) para los textos que no leen su
+ * contexto entero (pedir el comprobante, «no encontramos el pago»). Sin la columna o si no se puede
+ * leer, castellano —lo de siempre—: el idioma de una cotización que ya existe no se vuelve a
+ * detectar en el chat.
+ */
+async function idiomaDeCotizacion(sb: Sb, cotId: number): Promise<Idioma> {
+  try {
+    const { data, error } = await sb.from("cotizaciones").select("id, idioma_pdf").eq("id", cotId).maybeSingle();
+    return error ? "es" : idiomaDeFila((data as { idioma_pdf?: unknown } | null)?.idioma_pdf);
+  } catch { return "es"; }
 }
 
 /**
@@ -414,13 +456,19 @@ export async function contextoCotizacion(sb: Sb, cotId: number): Promise<Context
  * acompañan un pedido de pago (T1, T4) y las políticas (T8). Sin política, con una línea sospechosa
  * (que no se manda), sin el dominio del ERP o sin el token (cotizaciones-08): ni resumen ni enlace, y
  * los textos son los de siempre. Un resumen que no cabe (`excesoCondiciones`) no se manda: queda el enlace.
+ * En una cotización en inglés con las condiciones en castellano (`condicionesEnIdioma` false) el
+ * resumen tampoco va (sus viñetas están en castellano, y nadie las tradujo): queda solo el enlace.
  */
-export function condicionesDeContexto(cc: Pick<ContextoCotizacion, "fila" | "politica" | "resumen" | "politicaSospechosa">, appUrl: string | null | undefined): CondicionesMensaje {
+export function condicionesDeContexto(
+  cc: Pick<ContextoCotizacion, "fila" | "politica" | "resumen" | "politicaSospechosa"> & Partial<Pick<ContextoCotizacion, "idioma" | "condicionesEnIdioma">>,
+  appUrl: string | null | undefined,
+): CondicionesMensaje {
   if (!cc.politica.length || cc.politicaSospechosa) return { resumen: [], enlace: null };
   const enlace = enlaceCondiciones(appUrl, cc.fila.condiciones_token);
   if (!enlace) return { resumen: [], enlace: null };
   const cabe = excesoCondiciones({ reserva_resumen: cc.resumen }).length === 0;
-  return { resumen: cabe ? cc.resumen : [], enlace };
+  const enSuIdioma = cc.idioma !== "en" || cc.condicionesEnIdioma === true;
+  return { resumen: cabe && enSuIdioma ? cc.resumen : [], enlace };
 }
 
 /**
@@ -573,7 +621,7 @@ async function crearSolicitud(
     cotizacion_id: cc.fila.id, crm_conversacion_id: ctx.conv.id,
     estado: accion === "pedir_pago" ? "esperando_pago" : "por_confirmar", orden: ordenDeSolicitud(accion), motivos_orden: motivos,
     // Con T1 se le mandan las cuentas: su huella va con los importes (para no reenviarle otras).
-    adelanto_pct: pct, firma_importes: firmaConCuentas(firmaImportes(cc.fila, pct), accion === "pedir_pago" ? huellaCuentas(cc.cuentas.lineas) : null),
+    adelanto_pct: pct, firma_importes: firmaConCuentas(firmaImportes(cc.fila, pct), accion === "pedir_pago" ? huellaCuentas(cc.cuentas.lineasHuella) : null),
     confirmar_antes_de: isoDe(orden.confirmarAntesMs), urgente: orden.urgente,
     nombre_pasajero: x.pasajero ?? null, vuelo: x.vuelo ?? null, cliente_acepto_en: x.aceptoEn, acepto_mensaje_id: x.aceptoMensajeId,
   };
@@ -629,7 +677,7 @@ async function avisarPorConfirmar(ctx: CtxReservaIA, c: Creada, ahora: number, d
 
 /** El texto que se le manda al cliente al crear (o al volver a pedir) una solicitud: T1 o T2. */
 function mensajeDeSolicitud(s: FilaSolicitud, cc: ContextoCotizacion, ahora: number, x: { cfg: ConfigReserva; agente: CtxReservaIA["agente"] }, deps: DepsReserva): string | null {
-  const estilo = estiloDeAgente(x.agente);
+  const estilo = vozDe(x.agente, cc);
   const pct = pctDe(s);
   const adel = adelantoDe(cc.fila, pct);
   if (s.estado === "esperando_pago") {
@@ -642,7 +690,7 @@ function mensajeDeSolicitud(s: FilaSolicitud, cc: ContextoCotizacion, ahora: num
   }
   if (s.estado === "por_confirmar") {
     return mensajeDisponibilidadPrimero({
-      fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, frasePlazo: frasePlazo(msDe(s.confirmar_antes_de), ahora),
+      fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, frasePlazo: frasePlazo(msDe(s.confirmar_antes_de), ahora, cc.idioma),
       pct, credito: esCreditoSol(s), estilo,
     });
   }
@@ -731,7 +779,7 @@ async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, 
   if (s.estado === "esperando_pago") {
     const j = juzgarReenvioPedirPago({
       frente: cc.frente.codigo, perfilConfigurado: perfilConfigurado(cc.perfil), lineas: cc.cuentas.lineas.length,
-      huellaEnviada: huellaDeFirma(s.firma_importes), huellaActual: huellaCuentas(cc.cuentas.lineas),
+      huellaEnviada: huellaDeFirma(s.firma_importes), huellaActual: huellaCuentas(cc.cuentas.lineasHuella),
     });
     if (!j.ok) return derivaIA("No se le volvieron a mandar las cuentas de pago", pedido, `Solicitud #${s.id} (cotización N° ${cc.numero}): ${j.nota}`, cc.numero);
   }
@@ -775,13 +823,12 @@ async function registrarComprobante(
   deps: DepsReserva,
 ): Promise<ResultadoComprobante> {
   const ahora = ahoraDe(deps), hoy = fechaLima(ahora);
-  const estilo = estiloDeAgente(x.agente);
   let cand: Awaited<ReturnType<typeof archivoCandidato>>;
   try { cand = await archivoCandidato(sb, x.conv.id, x.desdeIso); }
   catch (e) { return { codigo: "error", mensaje: null, detalle: seguro(e, "registrarComprobante/archivo") }; }
   if (!cand.nuevo) return cand.usado
     ? { codigo: "ya_registrado", mensaje: null, detalle: "El último comprobante del chat ya está registrado." }
-    : { codigo: "sin_imagen", mensaje: mensajePedirComprobante(estilo), detalle: "No hay una foto o un PDF nuevo del comprobante en el chat." };
+    : { codigo: "sin_imagen", mensaje: mensajePedirComprobante(vozDe(x.agente, await idiomaDeCotizacion(sb, s.cotizacion_id))), detalle: "No hay una foto o un PDF nuevo del comprobante en el chat." };
   const archivo = cand.nuevo;
 
   // El freno: un conteo que no se pudo leer bloquea; la lectura se RECLAMA antes de hacerla.
@@ -858,8 +905,8 @@ async function registrarComprobante(
     ].join("\n"), x.autor);
   }
   const mensaje = mensajeComprobanteRecibido({
-    cotejo, esperado: adel?.adelanto ?? null, moneda: cc.moneda, frasePlazo: frasePlazo(plazoMs, ahora),
-    unidadConfirmada: estado === "confirmada", estilo,
+    cotejo, esperado: adel?.adelanto ?? null, moneda: cc.moneda, frasePlazo: frasePlazo(plazoMs, ahora, cc.idioma),
+    unidadConfirmada: estado === "confirmada", estilo: vozDe(x.agente, cc),
   });
   return { codigo: "registrado", mensaje, cotejo, estado, detalle: noEs ? "La imagen no parece un comprobante: se le pidió otra." : "Comprobante registrado." };
 }
@@ -906,7 +953,7 @@ export async function reportarPagoIA(ctx: CtxReservaIA, input: unknown, deps: De
     let archivo: Awaited<ReturnType<typeof archivoCandidato>>;
     try { archivo = await archivoCandidato(ctx.sb, ctx.conv.id, desdeDe(c)); }
     catch (err) { return derivaIA("No se pudieron leer los archivos del chat", pedido, seguro(err, "reportarPagoIA/archivo"), c.cand.numero); }
-    if (!archivo.nuevo) return archivo.usado ? solo("ya_registrado", c.cand.numero) : solo("pedir_comprobante", c.cand.numero, undefined, mensajePedirComprobante(estiloDeAgente(ctx.agente)));
+    if (!archivo.nuevo) return archivo.usado ? solo("ya_registrado", c.cand.numero) : solo("pedir_comprobante", c.cand.numero, undefined, mensajePedirComprobante(vozDe(ctx.agente, await idiomaDeCotizacion(ctx.sb, c.cand.id))));
     const conteo = await contarSolicitudesHoy(ctx.sb, ctx.conv.id, hoy);
     const tope = decidirTopeReserva(conteo, "solicitud");
     if (!tope.ok) return derivaIA("Tope de solicitudes de reserva", pedido, tope.motivo ?? "", c.cand.numero);
@@ -999,8 +1046,14 @@ export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsR
       return derivaIA("Las políticas de reserva de la cotización necesitan revisión", pedido,
         `Revisa las políticas de la cotización N° ${cc.numero} (${por}): no se le enviaron al cliente. Se corrigen en la cotización (/cotizaciones) o en su plantilla (/cotizaciones/plantillas).`, cc.numero);
     }
+    // Una cotización en inglés con la política en castellano: no se traduce lo que escribió una
+    // persona, ni se le manda en otro idioma; la ve un ejecutivo.
+    if (cc.idioma === "en" && !cc.condicionesEnIdioma && cc.politica.length) {
+      return derivaIA("Las políticas de esta cotización están en castellano", pedido,
+        `La cotización N° ${cc.numero} va en inglés y sus políticas de reserva, cambios y cancelación están en castellano: no se le enviaron al cliente. Envíaselas tú, o asigna una plantilla en inglés a «Traslado de la IA · inglés» en /cotizaciones/plantillas.`, cc.numero);
+    }
     const cond = condicionesDeContexto(cc, appUrlDe(deps));
-    const m = mensajePoliticas({ numero: cc.numero, lineas: cc.politica, email: cc.perfil?.email ?? null, estilo: estiloDeAgente(ctx.agente), resumen: cond.resumen, enlace: cond.enlace });
+    const m = mensajePoliticas({ numero: cc.numero, lineas: cc.politica, email: cc.perfil?.email ?? null, estilo: vozDe(ctx.agente, cc), resumen: cond.resumen, enlace: cond.enlace });
     if (!m) return derivaIA("La cotización no tiene políticas de reserva", pedido, `La cotización N° ${cc.numero} no tiene políticas de reserva y cancelación (/cotizaciones/plantillas).`, cc.numero);
     return solo("enviar_politicas", cc.numero, undefined, m);
   } catch (err) {
@@ -1032,12 +1085,12 @@ export async function cancelarIA(ctx: CtxReservaIA, input: unknown, deps: DepsRe
   if (!vivas.length) return solo("sin_reserva");
   if (vivas.length > 1) return derivaIA("Pedido de cancelación con varias reservas en curso", pedido, "El cliente pidió cancelar y hay más de una solicitud de reserva viva: revisa cuál.");
   const c = vivas[0], s = c.viva!;
-  const estilo = estiloDeAgente(ctx.agente);
   try {
     const tramos = await tramosDeCotizacion(ctx.sb, s.cotizacion_id);
     const pagos = await pagosDeSolicitud(ctx.sb, s, tramos.map((t) => t.id));
     const comps = await comprobantesDe(ctx.sb, s.id);
     const cc = await contextoCotizacion(ctx.sb, s.cotizacion_id);
+    const estilo = vozDe(ctx.agente, cc);
     const { cobrado } = dineroDeSolicitud(pagos, cc.moneda);
     if (cobrado <= 0 && !comps.some((k) => comprobanteCuenta(k.lectura)) && s.estado !== "confirmada") {
       const { data } = await ctx.sb.from(TABLA_SOLICITUDES)
@@ -1311,6 +1364,7 @@ export async function vistaSolicitud(sb: Sb, c: Cadena, deps: DepsReserva = {}):
     ventana, pendientes,
     acciones: accionesDe(s, { cobrado, devuelto, total: adel?.total ?? null, comprobantes: h.comprobantes.length, reportados: comprobantesQueCuentan(h), aDevolver, emitida: h.versiones.length > 0 }),
     politica: h.cc?.politica ?? [], devolucionPlazoH: cfg?.devolucionPlazoH ?? null, avisos: h.avisos,
+    idioma: h.cc?.idioma ?? "es",
   };
 }
 
@@ -1368,7 +1422,7 @@ export async function confirmarDisponibilidad(sb: Sb, c: Cadena, quien: Quien, d
   // huella de las cuentas si van en el mensaje.
   if (!credito && (pctDe(s) == null || s.orden === "disponibilidad_primero")) {
     patch.adelanto_pct = pct;
-    patch.firma_importes = firmaConCuentas(firmaImportes(cc.fila, pct), bloque ? huellaCuentas(cc.cuentas.lineas) : null);
+    patch.firma_importes = firmaConCuentas(firmaImportes(cc.fila, pct), bloque ? huellaCuentas(cc.cuentas.lineasHuella) : null);
   }
   const { data: rec, error: eRec } = await sb.from(TABLA_SOLICITUDES).update(patch).eq("id", s.id).eq("estado", s.estado).is("cancelacion_pedida_en", null).select("id");
   if (eRec) return res("error", crudo("No se pudo confirmar la solicitud", eRec));
@@ -1431,7 +1485,7 @@ export async function confirmarDisponibilidad(sb: Sb, c: Cadena, quien: Quien, d
     avisos.push(`Los cobros no se ataron a la reserva${causa ? ` (${causa})` : ""}. No los vuelvas a registrar: ya están en la solicitud.`);
   }
 
-  const estilo = estiloDeAgente(agente);
+  const estilo = vozDe(agente, cc);
   const texto = mensajeHayUnidad({
     fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, origen: cc.fila.origen, destino: cc.fila.destino, pago, moneda: adel.moneda, cobrado, bloque, estilo,
     condiciones: bloque ? condicionesDeContexto(cc, appUrlDe(deps)) : null,
@@ -1463,7 +1517,7 @@ export async function sinUnidad(sb: Sb, c: Cadena, quien: Quien, deps: DepsReser
   if (!(data ?? []).length) return res("reclamo_perdido", "Otra persona acaba de cambiar esta solicitud: recarga la tarjeta.");
   const { agente, cfg } = await agenteYConfig(sb);
   const { cobrado } = dineroDeSolicitud(h.pagos, cc.moneda);
-  const texto = mensajeSinUnidad({ fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, conPago: cobrado > 0 || comprobantesQueCuentan(h) > 0, plazoH: cfg.devolucionPlazoH, estilo: estiloDeAgente(agente) });
+  const texto = mensajeSinUnidad({ fecha: cc.fila.fecha_servicio, hora: cc.fila.hora_ida, conPago: cobrado > 0 || comprobantesQueCuentan(h) > 0, plazoH: cfg.devolucionPlazoH, estilo: vozDe(agente, cc) });
   const a = await avisarCliente(sb, c, texto, { usuarioId: quien.id }, deps);
   await nota(sb, c.conv?.id, `❌ ${quien.nombre ?? "Un ejecutivo"} marcó SIN UNIDAD la solicitud #${s.id} (cotización N° ${cc.numero}).${cobrado > 0 ? ` Hay que devolver el 100 % de lo cobrado (${r2(cobrado)} ${cc.moneda}): lo registra Tesorería.` : ""}`);
   await cerrarAccionSiCorresponde(sb, s.id, deps);
@@ -1475,7 +1529,7 @@ export async function pedirComprobante(sb: Sb, c: Cadena, quien: Quien, motivo: 
   const s = c.s;
   if (esEstadoTerminal(s.estado)) return res("transicion_invalida", `La solicitud está «${s.estado}».`);
   const { agente } = await agenteYConfig(sb);
-  const estilo = estiloDeAgente(agente);
+  const estilo = vozDe(agente, await idiomaDeCotizacion(sb, s.cotizacion_id));
   let estado = s.estado;
   if (s.estado === "pago_reportado" && puedePasar("pago_reportado", "esperando_pago")) {
     const { data } = await sb.from(TABLA_SOLICITUDES).update({ estado: "esperando_pago" }).eq("id", s.id).eq("estado", "pago_reportado").select("id");
@@ -1578,7 +1632,7 @@ export async function resolverCancelacion(sb: Sb, c: Cadena, quien: Quien, pctPe
   if (error) return res("error", crudo("No se pudo cerrar la solicitud", error));
   if (!(data ?? []).length) return res("reclamo_perdido", "Otra persona acaba de cambiar esta solicitud: recarga la tarjeta.");
   const { agente, cfg } = await agenteYConfig(sb);
-  const estilo = estiloDeAgente(agente);
+  const estilo = vozDe(agente, cc);
   const monto = devolucionDecidida(cobrado, pct);
   const texto = cobrado > 0
     ? mensajeCancelacionResuelta({ monto, pct, moneda: cc.moneda, plazoH: cfg.devolucionPlazoH, estilo })
@@ -1901,12 +1955,14 @@ export async function enviarConfirmacionReserva(
     // El cliente de la reserva (el del primer tramo, el que imprime la Confirmación).
     verificado = clienteVerificadoEnChat(entrada.tramos[0]?.cliente_id, entrada.cliente as ClienteChat | null, { contactoClienteId: c.contacto?.cliente_id ?? null, waId });
   } catch (e) { return res("error", seguro(e, "enviarConfirmacionReserva/emitir", "No se pudo emitir la Confirmación de Reserva. Vuelve a intentar en un momento.")); }
-  const idioma = normalizarIdioma(x.idioma);
+  // El idioma: el que eligió quien envía y, si no eligió, el de la cotización (su `idioma_pdf`).
+  const idioma = x.idioma != null && String(x.idioma).trim() !== "" ? normalizarIdioma(x.idioma) : await idiomaDeCotizacion(sb, s.cotizacion_id);
+  const caption = captionConfirmacion(idioma, version.codigo);
   const pdfUrl = `/api/reservas/confirmacion?version_id=${version.id}&idioma=${idioma}&pdf=1`;
   const verRes = { ...version, pdf: pdfUrl };
   if (!c.conv || c.conv.canal !== "whatsapp" || !waId) return res("fuera_de_ventana", "La conversación no es de WhatsApp: descarga la Confirmación y envíala.", { version: verRes, enviado: false, fueraDeVentana: { texto: version.codigo, waMe: null, cerroEn: null } });
   if (!verificado) {
-    const texto = `Confirmación de Reserva ${version.codigo}`;
+    const texto = caption;
     const motivo = "El cliente de la reserva no está vinculado a este contacto del CRM y su teléfono no es el número de este chat: la Confirmación lleva sus datos y no se envía sola por WhatsApp. Comprueba que sea el mismo cliente, descárgala y mándala por wa.me (o vincúlalo en el panel del cliente del CRM).";
     return res("fuera_de_ventana", `Confirmación ${version.codigo} emitida, pero no se envió por el chat. ${motivo}`, {
       version: verRes, enviado: false, fueraDeVentana: { texto, waMe: enlaceWaMe(waId, texto), cerroEn: null },
@@ -1917,7 +1973,7 @@ export async function enviarConfirmacionReserva(
   try { ult = await ultimoEntrante(sb, c.conv.id); } catch { ult = null; }
   const v24 = ventana24h(ult?.created_at ?? null, ahora);
   if (!v24.abierta) {
-    const texto = `Confirmación de Reserva ${version.codigo}`;
+    const texto = caption;
     return res("fuera_de_ventana", "Pasaron más de 24 h desde el último mensaje del cliente: descarga la Confirmación y envíala por wa.me.", { version: verRes, enviado: false, fueraDeVentana: { texto, waMe: enlaceWaMe(waId, texto), cerroEn: v24.cierraEn } });
   }
   let metaId: string | null = null, errorEnvio: string | null = null, mediaUrl: string | null = null, nombre = "";
@@ -1933,14 +1989,14 @@ export async function enviarConfirmacionReserva(
     const url = firmada?.data?.signedUrl as string | undefined;
     if (!url) throw new Error("No se pudo firmar el enlace del PDF.");
     const phoneId = c.conv.phone_number_id ?? (await (deps.phonePara ?? phoneParaUso)("crm"));
-    metaId = await (deps.enviarMedia ?? enviarWhatsAppMedia)(waId, "document", url, `Confirmación de Reserva ${version.codigo}`, { phoneId, filename: nombre });
+    metaId = await (deps.enviarMedia ?? enviarWhatsAppMedia)(waId, "document", url, caption, { phoneId, filename: nombre });
     if (!metaId) errorEnvio = "Meta no devolvió el id del mensaje.";
   } catch (e) {
     errorEnvio = explicarErrorEnvioWhatsApp(msg(e));
   }
   try {
     await sb.from("crm_mensajes").insert({
-      conversacion_id: c.conv.id, direccion: "saliente", tipo: "document", contenido: nombre || `Confirmación de Reserva ${version.codigo}`,
+      conversacion_id: c.conv.id, direccion: "saliente", tipo: "document", contenido: nombre || caption,
       media_url: mediaUrl, meta_message_id: metaId, generado_por_ia: true, enviado_por: quien.id, error: errorEnvio,
     });
     await sb.from("crm_conversaciones").update({ ultimo_mensaje_at: new Date(ahora).toISOString() }).eq("id", c.conv.id);
@@ -2168,16 +2224,22 @@ export async function listaParaTesoreria(sb: Sb, x: { filtro: "pendientes" | "to
 }
 
 /**
- * La cotización de traslado más reciente de la conversación (para la guarda T10 del texto final).
- * null si no hay o si no se pudo leer (sin dato, la guarda no salta: el texto sigue por
- * `textoSinImportesAjenos`, que ya quita los importes ajenos).
+ * La cotización de traslado más reciente de la conversación (para la guarda T10 del texto final), con
+ * su idioma (`idioma_pdf`; sin la columna, castellano). null si no hay o si no se pudo leer (sin dato,
+ * la guarda no salta: el texto sigue por `textoSinImportesAjenos`, que ya quita los importes ajenos).
  */
-export async function cotizacionTrasladoDelChat(sb: Sb, convId: string): Promise<{ id: number; numero: string } | null> {
+export async function cotizacionTrasladoDelChat(sb: Sb, convId: string): Promise<{ id: number; numero: string; idioma: Idioma } | null> {
   try {
-    const { data, error } = await sb.from("cotizaciones").select("id, numero_cotizacion").eq("crm_conversacion_id", convId)
+    const leer = (cols: string) => sb.from("cotizaciones").select(cols).eq("crm_conversacion_id", convId)
       .not("traslado_json", "is", null).order("created_at", { ascending: false }).limit(1).maybeSingle();
+    let r = await leer("id, numero_cotizacion, idioma_pdf");
+    if (r.error && faltaColumna(r.error, "idioma_pdf")) r = await leer("id, numero_cotizacion");
+    const { data, error } = r;
     if (error || !data) return null;
-    return { id: Number(data.id), numero: numeroCotizacion({ id: Number(data.id), numero_cotizacion: data.numero_cotizacion ?? null }) };
+    return {
+      id: Number(data.id), numero: numeroCotizacion({ id: Number(data.id), numero_cotizacion: data.numero_cotizacion ?? null }),
+      idioma: idiomaDeFila((data as { idioma_pdf?: unknown }).idioma_pdf),
+    };
   } catch { return null; }
 }
 
@@ -2204,9 +2266,17 @@ export async function reservaEstadoIA(sb: Sb): Promise<{ reserva: boolean | null
     let plantillaSoles: string | null = null;
     if (lp.ok) {
       const set = new Set<string>(), setRes = new Set<string>();
-      for (const segmento of SEGMENTOS) {
-        const p = plantillaParaUso({ servicio: "traslado_ia", segmento }, lp.plantillas, lp.reglas).plantilla;
-        if (segmento === "particular") plantillaSoles = p?.id ?? null;
+      // Las plantillas que usa la IA: con la regla idioma × moneda (cotizaciones-09), las de las dos
+      // celdas en castellano (la política en inglés no la mira el auditor, que lee castellano); sin
+      // ella, las de los tres segmentos, como antes.
+      const usadas: { p: PlantillaFila | null; soles: boolean }[] = lp.reglasTraslado !== null
+        ? CELDAS_TRASLADO.filter((c) => c.idioma === "es").map((c) => ({
+          p: plantillaTrasladoIA(c, lp.plantillas, lp.reglasTraslado, { reglas: lp.reglas, segmento: segmentoDeCliente({ moneda: c.moneda }) }).plantilla,
+          soles: c.moneda === "PEN",
+        }))
+        : SEGMENTOS.map((segmento) => ({ p: plantillaParaUso({ servicio: "traslado_ia", segmento }, lp.plantillas, lp.reglas).plantilla, soles: segmento === "particular" }));
+      for (const { p, soles } of usadas) {
+        if (soles) plantillaSoles = p?.id ?? null;
         const pp = p as { condiciones_reserva?: unknown; condiciones_reserva_resumen?: unknown } | null;
         const lineas = pp?.condiciones_reserva;
         let tiene = false;

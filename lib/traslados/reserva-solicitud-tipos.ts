@@ -281,6 +281,12 @@ export type VistaSolicitud = {
   acciones: (AccionTarjeta | AccionDinero)[];
   politica: string[];
   devolucionPlazoH: number | null;
+  /**
+   * El idioma de la cotización (`idioma_pdf`, que escribió la IA al crearla): el de TODOS los mensajes
+   * de esta tarjeta, también los que envía una persona desde aquí. «en» = el cliente escribe en inglés
+   * u otro idioma. Sin la columna (cotizaciones-04), o si la cotización no se pudo leer, «es».
+   */
+  idioma: "es" | "en";
   /** Lo que no se pudo leer (la vista sale igual, con menos datos). */
   avisos: string[];
 };

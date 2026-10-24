@@ -347,14 +347,13 @@ export function elegirVehiculo(
 
 // ── 4. La moneda: la decide el número de WhatsApp, salvo que el cliente pida dólares ──
 
-export type CodigoMoneda = "peru" | "extranjero" | "sin_telefono" | "pide_dolares";
+export type CodigoMoneda = "peru" | "extranjero" | "sin_telefono" | "pide_dolares" | "ingles" | "pide_soles";
 
 /**
  * Número peruano (+51, o un celular de 9 dígitos sin prefijo) → soles; cualquier otro país →
  * dólares (la lista de precio turista). Un BSUID de WhatsApp («PE.…») lleva el país delante.
- * Las dos listas NO son una conversión entre sí. La única excepción es `monedaDelPedido`: el
- * cliente que pide dólares recibe la lista en dólares; cualquier otro cambio de moneda lo ve un
- * ejecutivo.
+ * Las dos listas NO son una conversión entre sí. Las únicas excepciones las decide
+ * `monedaDelPedido`: el cliente que pide dólares, y el que escribe en inglés u otro idioma.
  */
 export function monedaPorTelefono(tel: string | null | undefined): { moneda: Moneda | null; codigo: CodigoMoneda; detalle: string } {
   const s = String(tel ?? "").trim();
@@ -372,31 +371,69 @@ export function monedaPorTelefono(tel: string | null | undefined): { moneda: Mon
   return { moneda: null, codigo: "sin_telefono", detalle: "Sin un número de WhatsApp válido no se sabe en qué moneda cotizar." };
 }
 
+/** El idioma del cliente cuando NO es castellano (lib/idioma-cliente.ts); null = castellano o sin evidencia. */
+export type IdiomaClienteMoneda = "en" | "otro";
+
 /**
- * La moneda de la cotización. Manda el número (`monedaPorTelefono`), con UNA excepción, pedida por
- * el dueño (19-10-2026): si el cliente pidió la cotización EN DÓLARES, se cotiza con la lista en
- * dólares aunque escriba desde un número peruano (o sin número). Es la lista que alguien tecleó, no
- * una conversión de la de soles: este módulo no inventa precios.
+ * La moneda de la cotización. Manda el número (`monedaPorTelefono`), con estas excepciones:
  *
- * Solo hacia los dólares, y es deliberado: pedir SOLES desde un número extranjero sigue yendo a un
- * ejecutivo (señal `otra_moneda`). La lista en soles suele quedar por debajo de la de dólares al
- * tipo de cambio del día, así que ofrecerla a pedido es cobrar de menos, el error que no vuelve.
+ * 1. EL CLIENTE QUE PIDE DÓLARES (pedido por el dueño, 19-10-2026) recibe la lista en dólares aunque
+ *    escriba desde un número peruano (o sin número). Es la lista que alguien tecleó, no una
+ *    conversión de la de soles: este módulo no inventa precios.
  *
- * `pideDolares` no es lo que dijo el modelo: lo pone `entradaDelAgente` solo cuando el modelo lo
- * marca Y los mensajes del propio cliente nombran los dólares (dos confirmaciones). Sin él, el
- * resultado es byte a byte el de `monedaPorTelefono`.
+ * 2. EL IDIOMA (`extra.idiomaCliente`, que lo pone el CÓDIGO y solo con el inglés encendido;
+ *    lib/traslados/envio-ia.ts → `entradaDelAgente`). Decisiones del dueño (22-10-2026):
+ *    · en INGLÉS la moneda por defecto es el DÓLAR aunque el número sea +51 (`ingles`);
+ *    · en OTRO idioma, la de hoy por número;
+ *    · en inglés u otro idioma, el cliente que PIDE SOLES recibe la lista en soles (`pide_soles`),
+ *      aunque escriba desde un número extranjero. ES UN CAMBIO DE CONFIANZA declarado: la lista en
+ *      soles suele quedar por debajo de la de dólares al tipo de cambio del día. Lo mitigan la doble
+ *      confirmación (el modelo lo marca Y los mensajes del cliente nombran los soles) y que en
+ *      CASTELLANO no aplica: pedir soles desde un número extranjero en castellano sigue yendo a un
+ *      ejecutivo (señal `otra_moneda`) — es el turista hispanohablante típico.
+ *    · con soles Y dólares pedidos a la vez, ninguno de los dos: manda el defecto del idioma.
+ *
+ * `pideDolares` y `extra.pideSoles` no son lo que dijo el modelo: los pone `entradaDelAgente`
+ * solo con las dos confirmaciones. Sin `extra` (o con `idiomaCliente` null), el resultado es byte a
+ * byte el de siempre, y `pideSoles` no se mira.
  */
 export function monedaDelPedido(
   tel: string | null | undefined,
   pideDolares: boolean | null | undefined,
+  extra?: { idiomaCliente?: IdiomaClienteMoneda | null; pideSoles?: boolean | null },
 ): { moneda: Moneda | null; codigo: CodigoMoneda; detalle: string } {
   const porNumero = monedaPorTelefono(tel);
-  if (pideDolares !== true || porNumero.moneda === "USD") return porNumero;
+  const idioma = extra?.idiomaCliente === "en" || extra?.idiomaCliente === "otro" ? extra.idiomaCliente : null;
+  const enDolares = (): { moneda: Moneda | null; codigo: CodigoMoneda; detalle: string } => {
+    if (porNumero.moneda === "USD") return porNumero;
+    return {
+      moneda: "USD", codigo: "pide_dolares",
+      detalle: porNumero.moneda === "PEN"
+        ? "El cliente pidió la cotización en dólares: se cotiza con la lista en dólares aunque escribe desde un número peruano."
+        : "El cliente pidió la cotización en dólares: se cotiza con la lista en dólares.",
+    };
+  };
+  if (!idioma) return pideDolares !== true ? porNumero : enDolares();
+
+  const dolares = pideDolares === true;
+  const soles = extra?.pideSoles === true;
+  const quien = idioma === "en" ? "escribe en inglés" : "escribe en otro idioma";
+  if (soles && !dolares) {
+    return {
+      moneda: "PEN", codigo: "pide_soles",
+      detalle: porNumero.moneda === "USD"
+        ? `El cliente ${quien} y pidió la cotización en soles: se cotiza con la lista en soles aunque escribe desde un número extranjero.`
+        : `El cliente ${quien} y pidió la cotización en soles: se cotiza con la lista en soles.`,
+    };
+  }
+  if (dolares && !soles) return enDolares();
+  // Sin pedido (o con los dos a la vez): el defecto del idioma.
+  if (idioma === "otro" || porNumero.moneda === "USD") return porNumero;
   return {
-    moneda: "USD", codigo: "pide_dolares",
+    moneda: "USD", codigo: "ingles",
     detalle: porNumero.moneda === "PEN"
-      ? "El cliente pidió la cotización en dólares: se cotiza con la lista en dólares aunque escribe desde un número peruano."
-      : "El cliente pidió la cotización en dólares: se cotiza con la lista en dólares.",
+      ? "El cliente escribe en inglés: se cotiza con la lista en dólares aunque escribe desde un número peruano."
+      : "El cliente escribe en inglés: se cotiza con la lista en dólares.",
   };
 }
 
@@ -483,6 +520,10 @@ export type PedidoTraslado = {
   telefono: string | null;
   /** El cliente pidió la cotización en dólares (verificado en sus mensajes): ver `monedaDelPedido`. */
   pide_dolares?: boolean | null;
+  /** El cliente escribe en inglés u otro idioma (lo deriva el código, con el inglés encendido). Ausente = castellano. */
+  idioma_cliente?: IdiomaClienteMoneda | null;
+  /** El cliente que escribe en inglés u otro idioma pidió soles (verificado). Sin `idioma_cliente` no se mira. */
+  pide_soles?: boolean | null;
   paradas_intermedias?: number | null;
   fechas_adicionales?: number | null;
   vehiculos_pedidos?: number | null;
@@ -558,6 +599,27 @@ export type ResultadoTraslado = {
   validez_hasta: string | null;
 };
 
+/**
+ * Lo que el motor le pide al cliente, con los MISMOS literales de siempre: una sola definición, para
+ * que la traducción al inglés (lib/traslados/envio-ia.ts → `faltaEnIdioma`) reconozca cada uno por
+ * igualdad exacta y no por parecido. Las dos direcciones que Google no encontró llevan una cita
+ * del cliente y se arman aparte (`faltaDireccion`).
+ */
+export const FALTA = {
+  recojo: "el punto de recojo",
+  destino: "el destino",
+  fecha: "la fecha del servicio",
+  sentido: "si es solo ida o ida y retorno",
+  fecha_retorno: "la fecha del retorno",
+  pax: "el número de pasajeros",
+  maletas: "cuántas maletas grandes (23 kg) llevan y cuántas son de mano (10 kg) o artículos personales",
+  fecha_futura: "una fecha futura",
+} as const;
+
+/** «la dirección exacta del recojo (no se encontró «X»)»: el texto de siempre, armado en un solo sitio. */
+export const faltaDireccion = (punto: "recojo" | "destino", texto: string | null | undefined): string =>
+  `la dirección exacta del ${punto} (no se encontró «${texto ?? ""}»)`;
+
 const entero = (n: unknown): number | null => {
   const v = Number(n);
   return n == null || n === "" || !Number.isFinite(v) ? null : Math.round(v);
@@ -588,25 +650,27 @@ export function evaluarTraslado(pedido: PedidoTraslado, ctx: ContextoTraslado): 
   const pax = entero(pedido.pax);
   const maletas = entero(pedido.maletas);
   const faltan: string[] = [];
-  if (!pedido.origen) faltan.push("el punto de recojo");
-  if (!pedido.destino) faltan.push("el destino");
-  if (!esFecha(pedido.fecha_servicio)) faltan.push("la fecha del servicio");
-  if (pedido.sentido !== "ida" && pedido.sentido !== "ida_retorno") faltan.push("si es solo ida o ida y retorno");
-  if (pedido.sentido === "ida_retorno" && !esFecha(pedido.fecha_retorno)) faltan.push("la fecha del retorno");
-  if (pax == null || pax <= 0) faltan.push("el número de pasajeros");
-  if (maletas == null || maletas < 0) faltan.push("cuántas maletas grandes (23 kg) llevan y cuántas son de mano (10 kg) o artículos personales");
+  if (!pedido.origen) faltan.push(FALTA.recojo);
+  if (!pedido.destino) faltan.push(FALTA.destino);
+  if (!esFecha(pedido.fecha_servicio)) faltan.push(FALTA.fecha);
+  if (pedido.sentido !== "ida" && pedido.sentido !== "ida_retorno") faltan.push(FALTA.sentido);
+  if (pedido.sentido === "ida_retorno" && !esFecha(pedido.fecha_retorno)) faltan.push(FALTA.fecha_retorno);
+  if (pax == null || pax <= 0) faltan.push(FALTA.pax);
+  if (maletas == null || maletas < 0) faltan.push(FALTA.maletas);
   if (faltan.length) return base("falta_dato", `Falta ${faltan.join(", ")}.`, { faltan });
 
   // 3) Fechas.
   if ((pedido.fecha_servicio as string) < ctx.hoy) {
-    return base("fecha_pasada", `La fecha del servicio (${pedido.fecha_servicio}) ya pasó.`, { faltan: ["una fecha futura"] });
+    return base("fecha_pasada", `La fecha del servicio (${pedido.fecha_servicio}) ya pasó.`, { faltan: [FALTA.fecha_futura] });
   }
   if (pedido.sentido === "ida_retorno" && (pedido.fecha_retorno as string) < (pedido.fecha_servicio as string)) {
-    return base("fecha_pasada", "La fecha del retorno es anterior a la de la ida.", { faltan: ["la fecha del retorno"] });
+    return base("fecha_pasada", "La fecha del retorno es anterior a la de la ida.", { faltan: [FALTA.fecha_retorno] });
   }
 
-  // 4) Moneda: por el número, salvo que el cliente haya pedido dólares.
-  const mon = monedaDelPedido(pedido.telefono, pedido.pide_dolares);
+  // 4) Moneda: por el número, salvo que el cliente haya pedido dólares (o escriba en inglés u otro idioma).
+  const mon = monedaDelPedido(pedido.telefono, pedido.pide_dolares, {
+    idiomaCliente: pedido.idioma_cliente ?? null, pideSoles: pedido.pide_soles === true,
+  });
   exp.push(mon.detalle);
   if (!mon.moneda) return base("sin_moneda", mon.detalle);
   const moneda = mon.moneda;
@@ -617,8 +681,8 @@ export function evaluarTraslado(pedido: PedidoTraslado, ctx: ContextoTraslado): 
   exp.push(`Recojo: ${origen.detalle}`, `Destino: ${destino.detalle}`);
   // Una dirección que Google no encontró se le vuelve a pedir al cliente, más exacta.
   const noUbicadas = [
-    origen.codigo === "sin_ubicacion" ? `la dirección exacta del recojo (no se encontró «${pedido.origen?.texto ?? ""}»)` : null,
-    destino.codigo === "sin_ubicacion" ? `la dirección exacta del destino (no se encontró «${pedido.destino?.texto ?? ""}»)` : null,
+    origen.codigo === "sin_ubicacion" ? faltaDireccion("recojo", pedido.origen?.texto) : null,
+    destino.codigo === "sin_ubicacion" ? faltaDireccion("destino", pedido.destino?.texto) : null,
   ].filter((x): x is string => !!x);
   if (noUbicadas.length) return base("falta_dato", `Falta ${noUbicadas.join(" y ")}.`, { faltan: noUbicadas, origen, destino, moneda });
   if (!origen.zona) return base("sin_zona_origen", `No se pudo asignar zona al recojo: ${origen.detalle}`, { origen, destino, moneda });

@@ -14,6 +14,9 @@
 //    sospechosas no salen (9m); el contacto se ata solo con el número del chat (9n); la Confirmación
 //    y el crédito exigen un cliente verificado (9o, 9p); un error de la base no llega a la tarjeta
 //    (9q, y `mensajeSeguro` en 8b); «No encontré el pago» no pisa el payload (9r).
+//  · en inglés (10): sin `estilo.idioma`, los textos y la guarda byte a byte los de antes; con «en», la
+//    guarda T10 en inglés y mirando también el vocabulario inglés de dinero, y el pedido del
+//    comprobante en inglés, una sola versión y sin castellano.
 // Lo que NO fija todavía: «con la reserva apagada, el prompt de crm-ia byte a byte el de antes».
 // Eso lo conecta B3 en lib/crm-ia.ts y lo fija su matriz.
 import {
@@ -917,6 +920,99 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     t("9s: condicionesDeContexto sin política → nada", JSON.stringify(D.condicionesDeContexto(cc0, "https://erp.test")) === JSON.stringify({ resumen: [], enlace: null }));
     t("9s: condicionesDeContexto con política → el enlace y el resumen", JSON.stringify(D.condicionesDeContexto({ ...cc0, politica: POLITICA }, "https://erp.test/")) === JSON.stringify({ resumen: RES, enlace: ENL }));
   }
+
+  // ── 9t. Una cotización EN INGLÉS (`idioma_pdf = "en"`): los textos del código en inglés, y unas
+  //     condiciones que no se escribieron en inglés no se le mandan (ni su resumen) ──
+  {
+    const TOK = "123e4567-e89b-12d3-a456-426614174000";
+    const ENL = `https://erp.test/condiciones/${TOK}`;
+    const POL_EN = ["The booking is confirmed with a 50% deposit.", "24 hours or more before: 100% refund within 48 hours."];
+    const RES_EN = ["50% deposit to book.", "Free cancellation 24 hours or more before."];
+    const FUGA = /(?<![\p{L}\p{N}])(?:su|usted|pago|comprobante|cotización|traslado|adelanto|cuentas|condiciones|reserva)(?![\p{L}\p{N}])|[¿¡]|N°/iu;
+    const ingles = (x: { condicionesEn: boolean }) => {
+      const e = escenario();
+      const cot = sb.t("cotizaciones").find((c) => c.id === e.cotId)!;
+      cot.idioma_pdf = "en";
+      cot.condiciones_token = TOK;
+      cot.consideraciones_json = x.condicionesEn
+        ? { incluye: [], no_incluye: [], generales: [], reserva: POL_EN, reserva_resumen: RES_EN, version: 2, plantilla: "traslados_ia_en", idioma: "en" }
+        : { ...cot.consideraciones_json, reserva_resumen: ["Adelanto del 50 % para reservar."] };
+      return e;
+    };
+    // (a) Con las condiciones en inglés: T1 en inglés, con el resumen y el enlace.
+    const e = ingles({ condicionesEn: true });
+    const r1 = await D.reservarTrasladoIA(ctxDe(e), {}, deps);
+    t("9t: T1 en inglés: pide el pago, en inglés y sin castellano", JSON.parse(r1.respuestaModelo).accion === "pedir_pago" && !!r1.mensaje
+      && r1.mensaje.startsWith("To book the transfer in your quotation No. ") && !FUGA.test(r1.mensaje.replace(/Banco Uno/g, "").replace(ENL, "")));
+    t("9t: T1 en inglés: el resumen en inglés y el enlace", !!r1.mensaje && r1.mensaje.includes(RES_EN[0]) && r1.mensaje.endsWith(`Full terms: ${ENL}`));
+    t("9t: T1 en inglés: las cuentas de la empresa (las mismas del PDF)", !!r1.mensaje && r1.mensaje.includes("191-1234567-0-11"));
+    const r8 = await D.politicasIA(ctxDe(e), {}, deps);
+    t("9t: T8 en inglés: el resumen y el enlace, sin la política en castellano", JSON.parse(r8.respuestaModelo).accion === "enviar_politicas" && !!r8.mensaje && r8.mensaje.includes(RES_EN[0]) && r8.mensaje.includes(ENL) && !POLITICA.some((l) => r8.mensaje!.includes(l)));
+    // La vista de la tarjeta dice el idioma (la bandeja lo pinta).
+    const s = solDe(e.cotId);
+    const v = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
+    t("9t: la vista de la solicitud dice idioma «en»", v.idioma === "en");
+    const chat = await D.cotizacionTrasladoDelChat(sb, e.conv.id);
+    t("9t: cotizacionTrasladoDelChat devuelve el idioma de la cotización", chat?.id === e.cotId && chat?.idioma === "en");
+    // (b) Con las condiciones en castellano: T1 en inglés SIN el resumen (solo el enlace); T8 deriva.
+    const e2 = ingles({ condicionesEn: false });
+    const r2 = await D.reservarTrasladoIA(ctxDe(e2), {}, deps);
+    t("9t: condiciones en castellano: T1 en inglés, sin el resumen (no se traduce), con el enlace", !!r2.mensaje && r2.mensaje.startsWith("To book the transfer")
+      && !r2.mensaje.includes("Adelanto del 50 %") && r2.mensaje.endsWith(`Before paying, please review our booking, change and cancellation terms: ${ENL}`));
+    const r28 = await D.politicasIA(ctxDe(e2), {}, deps);
+    t("9t: condiciones en castellano: T8 deriva sin mandarlas", !!r28.derivar && r28.mensaje === null && /castellano/.test(r28.derivar.motivo) && /plantilla en inglés/.test(r28.derivar.nota));
+    // (c) La misma conversación en castellano sigue igual (el idioma es de la FILA, no del chat).
+    const e3 = escenario();
+    const r3 = await D.reservarTrasladoIA(ctxDe(e3), {}, deps);
+    t("9t: una cotización en castellano: T1 de siempre", !!r3.mensaje && !r3.mensaje.startsWith("To book") && /adelanto/i.test(r3.mensaje));
+    const v3 = await D.vistaSolicitud(sb, await tarjeta(e3, solDe(e3.cotId).id), deps);
+    t("9t: y su vista dice «es»", v3.idioma === "es");
+  }
+}
+
+// ── 10. En inglés (`estilo.idioma === "en"`) ──────────────────────────────────
+{
+  // La de antes del inglés (lib/traslados/reserva-ia.ts de 93c594b), copiada literal.
+  const pedirComprobanteViejo = (estilo: EstiloMensajes): string => estilo?.tratamiento === "tu"
+    ? "Para registrar tu pago, envíanos por este chat la foto o captura del comprobante, donde se vean el monto, la fecha y el número de operación."
+    : "Para registrar su pago, envíenos por este chat la foto o captura del comprobante, donde se vean el monto, la fecha y el número de operación.";
+  const EN: EstiloMensajes = { tratamiento: "usted", preguntas: "todo_junto", idioma: "en" };
+  const EN_TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje", idioma: "en" };
+  const con = (e: EstiloMensajes): EstiloMensajes => ({ ...e, idioma: "es" });
+  for (const e of [USTED, TU]) {
+    t(`pedir comprobante (${e.tratamiento}) sin idioma y con «es» = el de antes`, mensajePedirComprobante(e) === pedirComprobanteViejo(e) && mensajePedirComprobante(con(e)) === pedirComprobanteViejo(e));
+  }
+  const PEDIR_EN = "To register your payment, please send us a photo or screenshot of the receipt in this chat, showing the amount, the date and the transaction number.";
+  t("pedir comprobante en inglés: una versión", mensajePedirComprobante(EN) === PEDIR_EN && mensajePedirComprobante(EN_TU) === PEDIR_EN);
+  const FUGA = /(?<![\p{L}\p{N}])(?:su|tu|usted|pago|comprobante|cotización|traslado|adelanto|cuentas?|de|del|la|el|por|para|monto|fecha|número|operación|reservar)(?![\p{L}\p{N}])|[¿¡áéíóúñ]|N°/iu;
+  t("pedir comprobante y la guarda en inglés sin castellano", !FUGA.test(PEDIR_EN) && !FUGA.test(mensajeGuardaReserva("00736", EN)) && !FUGA.test(mensajeGuardaReserva(null, EN)));
+
+  // La guarda: sin idioma ≡ «es» (castellano, como antes); en inglés, la T10 en inglés.
+  const MODELO = [
+    "El adelanto es de S/ 50, deposite hoy.", "Se paga el 50 % por adelantado.", "Deposite a la cuenta 191-1234567-0-12 del BCP", "Son S/ 50",
+    "¿Para qué fecha sería su viaje?", "Su recojo es el 25/12/2026 a las 15:00.", "ciento cincuenta soles", "Mi cuenta 1234567890",
+    "The total would be 150", "around one hundred fifty dollars", "the deposit is 50% of the price", "Free waiting time of 30 minutes",
+    "It costs USD 120", "What date is your trip?", "Your pick-up is on Dec 25 at 15:00.", "Call me at 987 654 321", "",
+  ];
+  let iguales = 0, n = 0;
+  for (const e of [USTED, TU]) for (const m of MODELO) for (const hay of [true, false]) for (const turno of [false, true]) {
+    const x = { estilo: e, numeroCotizacion: "00736", hayCotizacionTraslado: hay, cotizoEnElTurno: turno };
+    n++;
+    if (textoFinalReserva(m, [], x) === textoFinalReserva(m, [], { ...x, estilo: con(e) })) iguales++;
+  }
+  t(`la guarda sin idioma ≡ con «es» (${n} casos)`, iguales === n);
+  const xEn = { estilo: EN, numeroCotizacion: "00736", hayCotizacionTraslado: true };
+  const T10_EN = mensajeGuardaReserva("00736", EN);
+  t("la T10 en inglés", T10_EN === "To book, I will send you the deposit amount and the payment accounts in this chat. Would you like to book your transfer for quotation No. 00736?");
+  for (const m of ["The total would be 150", "around one hundred fifty dollars", "the deposit is 50% of the price", "Free waiting time of 30 minutes", "It costs USD 120", "Son S/ 50", "Call me at 987 654 321"]) {
+    t(`guarda en inglés: «${m}» → la T10 en inglés`, textoFinalReserva(m, [], xEn) === T10_EN && textoFinalReserva(m, [], { ...xEn, estilo: EN_TU }) === T10_EN);
+  }
+  t("«around one hundred fifty dollars»: solo el vocabulario inglés lo ve (con castellano, null)", textoFinalReserva("around one hundred fifty dollars", [], { ...xEn, estilo: USTED }) === null && textoFinalReserva("around one hundred fifty dollars", [], xEn) === T10_EN);
+  t("guarda en inglés: un texto neutro → null", textoFinalReserva("What date is your trip?", [], xEn) === null && textoFinalReserva("Your pick-up is on Dec 25 at 15:00.", [], xEn) === null);
+  t("guarda en inglés: sin cotización, o la del turno, → null", textoFinalReserva("The total would be 150", [], { ...xEn, hayCotizacionTraslado: false }) === null && textoFinalReserva("The total would be 150", [], { ...xEn, cotizoEnElTurno: true }) === null);
+  t("guarda en inglés sin número de cotización", textoFinalReserva("It costs USD 120", [], { ...xEn, numeroCotizacion: null }) === mensajeGuardaReserva(null, EN) && mensajeGuardaReserva(null, EN).endsWith("Would you like to book your transfer?"));
+  const r = (mensaje: string | null): ResultadoReservaIA => ({ respuestaModelo: "{}", mensaje });
+  t("en inglés el mensaje del código también gana", textoFinalReserva("Your payment is confirmed! It is S/ 50.", [r("We received your receipt.")], xEn) === "We received your receipt.");
 }
 
 if (fallas.length) for (const f of fallas) console.log("✗", f);

@@ -10,6 +10,12 @@
 // CONDICIONES salen siempre de la fila: desde supabase/cotizaciones-05 la IA las copia ahí, en
 // versión 2, desde la plantilla de su regla; en las de antes, de Ajustes de traslados.
 //
+// EL IDIOMA ES EL DE LA FILA (`idioma_pdf`, que escribió la IA al cotizar: inglés si el cliente
+// escribía en inglés u otro idioma y el inglés estaba encendido). Aquí no se vuelve a detectar nada,
+// y el idioma elegido en el modal NO lo cambia: si difiere, el modal lo dice (`AVISO_TRASLADO_IDIOMA`).
+// Una fila en inglés pide además la descripción de la categoría en inglés (`descripcion_cliente_en`,
+// traslados-10), soltándola si falta, como el servidor; una en castellano hace la consulta de siempre.
+//
 // Sin esto, la página pintaba el traslado con la plantilla genérica: sus seis condiciones generales
 // pisaban las del traslado (los 30 min de espera, el TAM), el subtítulo decía «Válida 30 días» aunque
 // venciera antes, y la unidad salía como «Bus con capacidad… A/C…» siendo un AUTO.
@@ -21,15 +27,15 @@
 import { supabase } from "@/lib/supabase";
 import { faltaAlguna } from "@/lib/columna-faltante";
 import { clienteParaPdf, entradaCorporativaTraslado, type CategoriaPdf, type ClienteErp, type FilaCotizacionLeida } from "@/lib/traslados/cotizacion-traslado";
+import { normalizarIdioma, type Idioma } from "@/lib/cotizacion-idioma";
 import type { EntradaPdfCot, PlantillaPdfCfg } from "@/lib/cotizacion-pdf";
 import type { PerfilEmpresa } from "@/lib/empresa-perfil";
-import { COLS_CATEGORIA_FOTOS } from "@/components/tarifario/traslados-datos";
+import { COLS_CATEGORIA_FOTOS, COLS_CATEGORIA_INGLES } from "@/components/tarifario/traslados-datos";
 import { esTrasladoIA } from "@/lib/cotizacion-plantillas";
 
 /** Las columnas de la categoría que lee el PDF (las mismas que lee el servidor). */
 const COLS_CATEGORIA_PDF = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo";
 
-/** El aviso del modal cuando se pidió el PDF en inglés: el del traslado solo existe en castellano. */
 /**
  * El aviso del modal cuando la cotización tiene un cliente del ERP que el PDF NO imprime: no está
  * vinculado al contacto de la conversación ni su número completo es el WhatsApp. Es la misma regla
@@ -38,8 +44,15 @@ const COLS_CATEGORIA_PDF = "clave, nombre, capacidad, maletas_bodega, tipo_vehic
 export const AVISO_CLIENTE_NO_VERIFICADO =
   "El cliente elegido en esta cotización no se imprime: no está vinculado al contacto de WhatsApp que la pidió ni su teléfono es ese número. El PDF sale con el nombre de quien escribió y su celular, igual que el que se envía por WhatsApp. Para imprimirlo, vincula el cliente al contacto en el CRM.";
 
-export const AVISO_TRASLADO_EN_CASTELLANO =
-  "Esta cotización de traslado la armó la IA del CRM: su PDF se imprime en castellano, igual que el que se envía por WhatsApp (la descripción del vehículo y la línea de disponibilidad no tienen versión en inglés).";
+/**
+ * El aviso del modal cuando se pidió el PDF en un idioma que NO es el de la fila: el traslado de la IA
+ * se imprime en el idioma en que lo cotizó (el mismo del PDF que se envía por WhatsApp y de los
+ * mensajes de su reserva). Va por el idioma de la FILA; la página solo lo enseña si el del modal difiere.
+ */
+export const AVISO_TRASLADO_IDIOMA: Record<Idioma, string> = {
+  es: "Esta cotización de traslado la armó la IA del CRM: su PDF se imprime en el idioma en que la cotizó la IA: castellano, igual que el que se envía por WhatsApp. El idioma elegido aquí no lo cambia.",
+  en: "Esta cotización de traslado la armó la IA del CRM: su PDF se imprime en el idioma en que la cotizó la IA: inglés, igual que el que se envía por WhatsApp. El idioma elegido aquí no lo cambia.",
+};
 
 // ¿Es un traslado cotizado por la IA? (`traslado_json` es un objeto). La regla vive en
 // lib/cotizacion-plantillas.ts (la usa también `servicioDeCotizacion`); aquí se re-exporta.
@@ -57,10 +70,14 @@ export function clienteErpDe(c: {
   };
 }
 
-/** La categoría del vehículo, soltando SOLO la columna de traslados-07 que el error nombre. null si no se pudo leer. */
-async function leerCategoria(clave: unknown): Promise<CategoriaPdf | null> {
+/**
+ * La categoría del vehículo, soltando SOLO la columna accesoria que el error nombre (las de
+ * traslados-07 y, en una fila en inglés, la de traslados-10). null si no se pudo leer. En castellano
+ * no se pide la descripción en inglés: la consulta de siempre, como en el servidor.
+ */
+async function leerCategoria(clave: unknown, idioma: Idioma): Promise<CategoriaPdf | null> {
   if (typeof clave !== "string" || !clave.trim()) return null;
-  let quedan: string[] = [...COLS_CATEGORIA_FOTOS];
+  let quedan: string[] = idioma === "en" ? [...COLS_CATEGORIA_FOTOS, ...COLS_CATEGORIA_INGLES] : [...COLS_CATEGORIA_FOTOS];
   try {
     for (;;) {
       const cols = quedan.length ? `${COLS_CATEGORIA_PDF}, ${quedan.join(", ")}` : COLS_CATEGORIA_PDF;
@@ -101,7 +118,7 @@ async function leerConversacion(conversacionId: unknown): Promise<{ celular: str
  * La entrada del PDF corporativo de un traslado de la IA, o null si no lo es o no se pudo armar.
  * `plantilla` es la plantilla con la que se imprime (la de `plantilla_pdf` de la cotización, de
  * diseño corporativo; o `corporativo`): solo se usan sus CUENTAS (`cfgSoloCuentas`), las condiciones
- * salen de la fila.
+ * salen de la fila. El idioma también es el de la fila (`entrada.idioma` = `idioma_pdf`).
  */
 export async function entradaTrasladoPagina(
   cot: FilaCotizacionLeida,
@@ -112,7 +129,9 @@ export async function entradaTrasladoPagina(
   },
 ): Promise<(EntradaPdfCot & { clienteNoVerificado: boolean }) | null> {
   if (!esTrasladoIA(cot)) return null;
-  const [categoria, conv] = await Promise.all([leerCategoria(cot.traslado_json?.categoria?.clave), leerConversacion(cot.crm_conversacion_id)]);
+  const [categoria, conv] = await Promise.all([
+    leerCategoria(cot.traslado_json?.categoria?.clave, normalizarIdioma(cot.idioma_pdf)), leerConversacion(cot.crm_conversacion_id),
+  ]);
   try {
     const entrada = entradaCorporativaTraslado(cot, {
       empresa: x.empresa, cliente: x.cliente, celular: conv.celular, contactoClienteId: conv.contactoClienteId,

@@ -46,7 +46,8 @@ export const CONFIG_VACIA: ConfigFila = {
  * `sinMigracionFotos` / `sinMigracionListas`: faltan columnas de traslados-07 (las fotos y la
  * descripción de la categoría; las listas Incluye / No incluye). Sin ellas la pantalla sigue como
  * antes y lo dice en ámbar. `sinMigracionReserva`: faltan las de traslados-09 (`reserva_*`): el
- * bloque «Reserva y pago por la IA» no se ofrece y lo dice nombrando el SQL.
+ * bloque «Reserva y pago por la IA» no se ofrece y lo dice nombrando el SQL. `sinMigracionIngles`:
+ * falta la de traslados-10 (la descripción en inglés), que se suelta SOLA: las fotos siguen.
  */
 export type CargaTraslados =
   | {
@@ -54,6 +55,8 @@ export type CargaTraslados =
     sinMigracionIA: boolean; colsZona: string; colsConfig: string;
     sinMigracionFotos: boolean; sinMigracionListas: boolean; colsCategoria: string;
     sinMigracionReserva: boolean;
+    /** Falta la descripción en inglés de la categoría (traslados-10). No apaga las fotos. */
+    sinMigracionIngles: boolean;
   }
   | { tipo: "sin_tablas"; tabla: string }
   | { tipo: "error"; detalle: string };
@@ -67,6 +70,16 @@ export const COLS_TARIFA = "id, zona_a_id, zona_b_id, categoria, moneda, precio_
 export const COLS_CATEGORIA = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo, orden, activo";
 /** Las de traslados-07 en la categoría: se piden y, si el error nombra una, se suelta SOLO esa. */
 export const COLS_CATEGORIA_FOTOS = ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] as const;
+/**
+ * La de traslados-10 (la descripción EN INGLÉS), APARTE de las de traslados-07: si falta, las fotos y
+ * la descripción en castellano siguen funcionando y la pantalla nombra solo ese SQL.
+ */
+export const COLS_CATEGORIA_INGLES = ["descripcion_cliente_en"] as const;
+
+/** ¿Las columnas que se pudieron pedir de la categoría NO traen la descripción en inglés? (falta traslados-10) */
+export function faltaDescripcionIngles(colsCategoria: string): boolean {
+  return !String(colsCategoria ?? "").split(",").map((c) => c.trim()).includes(COLS_CATEGORIA_INGLES[0]);
+}
 /** Las columnas accesorias de `traslados_config`: las de traslados-05 y las de traslados-07. */
 const COLS_CONFIG_IA_LISTA = ["ia_cotiza", "envio_automatico"] as const;
 const COLS_CONFIG_LISTAS = ["incluye", "no_incluye"] as const;
@@ -138,6 +151,8 @@ export function normalizarCategoria(c: Record<string, unknown>): CategoriaFila {
     foto_externa_url: textoONull(c.foto_externa_url),
     foto_interna_url: textoONull(c.foto_interna_url),
     descripcion_cliente: textoONull(c.descripcion_cliente),
+    // traslados-10: sin la migración no viene (el PDF en inglés usa la frase del sistema).
+    descripcion_cliente_en: textoONull(c.descripcion_cliente_en),
   };
 }
 
@@ -171,9 +186,9 @@ async function conRespaldo<T extends { error: ErrorSupabase }>(
  * que el error nombra) y se apunta en `faltan`. Cualquier otro error se devuelve tal cual. `cols`
  * son las columnas que sí existen (las que se pueden pedir de vuelta tras escribir). Las de un
  * `grupo` (las de UNA migración) se sueltan juntas: si falta una, faltan todas, y soltarlas de a
- * una costaría una lectura por columna.
+ * una costaría una lectura por columna. Exportada para la matriz (con un lector falso).
  */
-async function conAccesorias<T extends { error: ErrorSupabase }>(
+export async function conAccesorias<T extends { error: ErrorSupabase }>(
   leer: (cols: string) => PromiseLike<T>, base: string, accesorias: readonly string[], grupos: readonly (readonly string[])[] = [],
 ): Promise<{ r: T; faltan: string[]; cols: string }> {
   let quedan = [...accesorias];
@@ -202,7 +217,7 @@ export async function cargarTraslados(): Promise<CargaTraslados> {
         () => todas<Record<string, unknown>>("zonas_traslado", COLS_ZONA_IA, "id"),
         () => todas<Record<string, unknown>>("zonas_traslado", COLS_ZONA, "id"),
         ["envio_automatico"]),
-      conAccesorias((cols) => todas<Record<string, unknown>>("traslado_categorias", cols, "clave"), COLS_CATEGORIA, COLS_CATEGORIA_FOTOS),
+      conAccesorias((cols) => todas<Record<string, unknown>>("traslado_categorias", cols, "clave"), COLS_CATEGORIA, [...COLS_CATEGORIA_FOTOS, ...COLS_CATEGORIA_INGLES]),
       todas<Record<string, unknown>>("tarifas_traslado", COLS_TARIFA, "id"),
       conAccesorias((cols) => leerConfig(cols), COLS_CONFIG, [...COLS_CONFIG_IA_LISTA, ...COLS_CONFIG_LISTAS, ...COLS_CONFIG_RESERVA], [COLS_CONFIG_RESERVA]),
     ]);
@@ -227,7 +242,9 @@ export async function cargarTraslados(): Promise<CargaTraslados> {
       sinMigracionIA: zr.falta || cfgr.faltan.some((x) => (COLS_CONFIG_IA_LISTA as readonly string[]).includes(x)),
       colsZona: zr.falta ? COLS_ZONA : COLS_ZONA_IA,
       colsConfig: cfgr.cols,
-      sinMigracionFotos: cr.faltan.length > 0,
+      // Solo las de traslados-07 apagan las fotos; la de inglés (traslados-10) se dice aparte.
+      sinMigracionFotos: cr.faltan.some((x) => (COLS_CATEGORIA_FOTOS as readonly string[]).includes(x)),
+      sinMigracionIngles: cr.faltan.some((x) => (COLS_CATEGORIA_INGLES as readonly string[]).includes(x)),
       sinMigracionListas: cfgr.faltan.some((x) => (COLS_CONFIG_LISTAS as readonly string[]).includes(x)),
       colsCategoria: cr.cols,
       sinMigracionReserva: cfgr.faltan.some((x) => (COLS_CONFIG_RESERVA as readonly string[]).includes(x)),

@@ -232,5 +232,32 @@ console.log("8. El resumen de la política (cotizaciones-08): solo de la fila, y
   ok(t("es", "corp_reserva_enlace") === "Condiciones completas de reserva, cambios y cancelación:" && t("en", "corp_reserva_enlace") === "Full booking, changes and cancellation terms:", "el rótulo del enlace en los dos idiomas");
 }
 
+console.log("9. La fecha «media» y las condiciones copiadas de una plantilla en inglés");
+{
+  ok(fmtFechaDoc("2026-10-25", "es", "media") === "25 oct. 2026" && fmtFechaDoc("2026-10-25", "en", "media") === "Oct 25, 2026", `la fecha «media» (${fmtFechaDoc("2026-10-25", "es", "media")} / ${fmtFechaDoc("2026-10-25", "en", "media")})`);
+  ok(fmtFechaDoc("2026-01-05", "en", "media") === "Jan 5, 2026" && fmtFechaDoc("2026-12-31", "en", "media") === "Dec 31, 2026", "sin retroceder un día (medianoche local) y con el mes en letras");
+  for (const est of ["larga_mayus", "corta", "cronograma", "simple"] as const) {
+    ok(fmtFechaDoc("2026-10-25", "es", est) === new Date("2026-10-25T00:00:00").toLocaleDateString("es-PE", est === "larga_mayus" ? { day: "numeric", month: "long", year: "numeric" } : est === "corta" ? { day: "2-digit", month: "2-digit", year: "numeric" } : est === "cronograma" ? { weekday: "short", day: "numeric", month: "short", year: "numeric" } : undefined)[est === "larga_mayus" || est === "cronograma" ? "toUpperCase" : "toString"](), `los demás estilos no cambian («${est}»)`);
+  }
+  const fila = { incluye: ["Bilingual driver"], no_incluye: ["Tips"], generales: ["30 minutes of free waiting time."], reserva: ["Cancel 24 h before for a full refund."], reserva_resumen: ["Refund 100 % up to 24 h before."] };
+  // En inglés, fijada y marcada «en»: la fila tal cual, sin avisar nada.
+  const en = considParaPdf(null, { ...fila, version: CONSID_VERSION, idioma: "en" } as never, "en");
+  ok(JSON.stringify([en.incluye, en.no_incluye, en.generales, en.reserva, en.reserva_resumen]) === JSON.stringify([fila.incluye, fila.no_incluye, fila.generales, fila.reserva, fila.reserva_resumen]) && en.escritasTalCual.length === 0,
+    "en inglés con condiciones de una plantilla en inglés: se imprimen tal cual, sin aviso");
+  // Una plantilla de la cotización no las pisa.
+  const cfg = { condiciones_generales: ["Otra cosa"], condiciones_incluye: ["Otra"] };
+  ok(JSON.stringify(considParaPdf(cfg, { ...fila, version: CONSID_VERSION, idioma: "en" } as never, "en").generales) === JSON.stringify(fila.generales), "la plantilla al imprimir no las pisa");
+  // Sin la marca (o sin versión): la regla de siempre en inglés (se avisa lo escrito tal cual).
+  const sinMarca = considParaPdf(null, { ...fila, version: CONSID_VERSION }, "en");
+  const sinVersion = considParaPdf(null, { ...fila, idioma: "en" } as never, "en");
+  const viejo = considParaPdf(null, { ...fila }, "en");
+  ok(JSON.stringify(sinMarca) === JSON.stringify(viejo) && JSON.stringify(sinVersion) === JSON.stringify(viejo) && viejo.escritasTalCual.length > 0, "sin la marca «en» o sin versión 2, en inglés la regla de siempre (con su aviso)");
+  // La lista de fábrica en castellano sin la marca se sigue traduciendo.
+  ok(JSON.stringify(considParaPdf(null, { ...DEFAULT_CONSID_ES, version: CONSID_VERSION }, "en").incluye) === JSON.stringify(DEFAULT_CONSID_EN.incluye), "la de fábrica se sigue traduciendo");
+  // En castellano, la marca no cambia nada (fijada → la fila).
+  ok(JSON.stringify(considParaPdf(cfg, { ...fila, version: CONSID_VERSION, idioma: "en" } as never, "es")) === JSON.stringify(considParaPdf(cfg, { ...fila, version: CONSID_VERSION }, "es")), "en castellano la marca «en» no cambia nada");
+  ok(esConsidFijada({ ...fila, version: CONSID_VERSION, idioma: "en" }), "la marca no quita la versión");
+}
+
 console.log(fallos ? `\n${fallos} FALLAN (${oks} ok)` : `\nTODO OK (${oks} comprobaciones)`);
 process.exit(fallos ? 1 : 0);

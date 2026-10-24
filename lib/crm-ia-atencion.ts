@@ -17,6 +17,13 @@
 // para confirmar: `aperturaSiguiente` (la próxima apertura; `proximaAtencion` es su frase, extraída
 // sin cambiar una letra: scripts/prueba-reserva-orden.mts la compara contra la copia literal) y
 // `sumarMinutosAtencion` (P minutos de ATENCIÓN desde un instante, que solo corren dentro del horario).
+//
+// EN INGLÉS (el cliente escribe en inglés: lib/idioma-cliente.ts). Las frases que se le dicen al
+// cliente (`describirDias`, `describirAtencion`, `aLas`, `nombreDia`, `proximaAtencion`,
+// `fraseFueraDeAtencion`) aceptan `idioma`; sin él (o «es»), byte a byte las de siempre
+// (scripts/prueba-crm-ia-ajustes.mts las compara contra la copia literal). En inglés: una sola
+// versión (no hay usted ni tú), horas de 24 h, y el horario dice «(Lima time)»: quien escribe en
+// inglés suele estar en otro huso.
 
 import { diaSemanaLima, sumarDias } from "@/lib/comisiones/calendario";
 import { hhmmAMinutos } from "@/lib/alertas-horario";
@@ -77,23 +84,33 @@ export function atencionEnUso(at: Atencion): boolean {
 // ── Cómo se dice ──────────────────────────────────────────────────────────────────────────────────
 
 const NOMBRE_DIA = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+const NOMBRE_DIA_EN = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/** El idioma de las frases para el cliente. Ausente = castellano. */
+export type IdiomaFrase = "es" | "en";
+const esIngles = (i: IdiomaFrase | null | undefined) => i === "en";
 /** La semana empieza el lunes (así se dice en Perú: «de lunes a sábado», no «de domingo a…»). */
 const ORDEN = [1, 2, 3, 4, 5, 6, 0];
 const posicion = (d: number) => ORDEN.indexOf(d);
 
-function lista(items: string[]): string {
-  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} y ${items[items.length - 1]}`;
+function lista(items: string[], idioma: IdiomaFrase = "es"): string {
+  const y = esIngles(idioma) ? "and" : "y";
+  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} ${y} ${items[items.length - 1]}`;
 }
 
 /** «de lunes a sábado» · «lunes, miércoles y viernes» · «sábado y domingo» · «todos los días».
  *  Tres o más días seguidos son un rango; dos seguidos, «x y y». La semana da la vuelta: con sábado,
- *  domingo y lunes se dice «de sábado a lunes». */
-export function describirDias(dias: number[]): string {
+ *  domingo y lunes se dice «de sábado a lunes». En inglés: «Monday to Saturday» · «Monday, Wednesday
+ *  and Friday» · «Saturday and Sunday» · «every day» · «Mondays» (un solo día). */
+export function describirDias(dias: number[], idioma: IdiomaFrase = "es"): string {
+  const en = esIngles(idioma);
+  const N = en ? NOMBRE_DIA_EN : NOMBRE_DIA;
   const sel = new Set((Array.isArray(dias) ? dias : []).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6));
-  if (sel.size === 0) return "ningún día";
-  if (sel.size === 7) return "todos los días";
+  if (sel.size === 0) return en ? "no days" : "ningún día";
+  if (sel.size === 7) return en ? "every day" : "todos los días";
   if (sel.size === 1) {
     const [d] = [...sel];
+    if (en) return `${N[d]}s`;
     return `los ${NOMBRE_DIA[d]}${NOMBRE_DIA[d].endsWith("s") ? "" : "s"}`;
   }
   // Se empieza en el tramo que contiene el lunes (para que lun-sáb no salga como «sábado, lunes…»),
@@ -114,13 +131,16 @@ export function describirDias(dias: number[]): string {
     else tramos.push([d]);
   }
   const items = tramos.flatMap((t) =>
-    t.length >= 3 ? [`de ${NOMBRE_DIA[t[0]]} a ${NOMBRE_DIA[t[t.length - 1]]}`] : t.map((d) => NOMBRE_DIA[d]),
+    t.length >= 3
+      ? [en ? `${N[t[0]]} to ${N[t[t.length - 1]]}` : `de ${NOMBRE_DIA[t[0]]} a ${NOMBRE_DIA[t[t.length - 1]]}`]
+      : t.map((d) => N[d]),
   );
-  return lista(items);
+  return lista(items, idioma);
 }
 
-/** «de lunes a sábado, de 09:00 a 17:00». */
-export function describirAtencion(at: Atencion): string {
+/** «de lunes a sábado, de 09:00 a 17:00». En inglés, «Monday to Saturday, from 09:00 to 17:00 (Lima time)». */
+export function describirAtencion(at: Atencion, idioma: IdiomaFrase = "es"): string {
+  if (esIngles(idioma)) return `${describirDias(at.dias, "en")}, from ${at.desde} to ${at.hasta} (Lima time)`;
   return `${describirDias(at.dias)}, de ${at.desde} a ${at.hasta}`;
 }
 
@@ -141,11 +161,29 @@ export function dentroDeAtencion(at: Atencion, fecha: string, hhmm: string): boo
   return at.dias.includes(diaSemanaLima(fecha)) && m >= minutos(at.desde)! && m < minutos(at.hasta)!;
 }
 
-/** «las 09:00», pero «la 01:00». */
-export const aLas = (hhmm: string) => (hhmm.startsWith("01:") ? `la ${hhmm}` : `las ${hhmm}`);
+/** «las 09:00», pero «la 01:00». En inglés, la hora sola («09:00»): el artículo no existe. */
+export const aLas = (hhmm: string, idioma: IdiomaFrase = "es") =>
+  esIngles(idioma) ? hhmm : hhmm.startsWith("01:") ? `la ${hhmm}` : `las ${hhmm}`;
 
-/** El nombre del día de la semana (0 = domingo … 6 = sábado), en minúsculas. */
-export const nombreDia = (d: number): string => NOMBRE_DIA[((Math.trunc(d) % 7) + 7) % 7];
+/** El nombre del día de la semana (0 = domingo … 6 = sábado), en minúsculas. En inglés, «Monday». */
+export const nombreDia = (d: number, idioma: IdiomaFrase = "es"): string =>
+  (esIngles(idioma) ? NOMBRE_DIA_EN : NOMBRE_DIA)[((Math.trunc(d) % 7) + 7) % 7];
+
+const MES_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * La fecha «media» de los mensajes en inglés: «Oct 25, 2026», o «Oct 25» sin el año. «25/10» se lee
+ * al revés en inglés (MM/DD), el nombre del mes no. Determinista: no depende del huso ni del ICU (da
+ * lo mismo que `toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })`).
+ * null si no es una fecha ISO.
+ */
+export function fechaMediaIngles(iso: string | null | undefined, conAnio = true): string | null {
+  const m = typeof iso === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso) : null;
+  if (!m) return null;
+  const mes = Number(m[2]), dia = Number(m[3]);
+  if (mes < 1 || mes > 12 || dia < 1 || dia > 31) return null;
+  return conAnio ? `${MES_EN[mes - 1]} ${dia}, ${m[1]}` : `${MES_EN[mes - 1]} ${dia}`;
+}
 
 /** La próxima apertura del horario, vista desde un momento de Lima. */
 export type Apertura = {
@@ -186,10 +224,20 @@ export function aperturaSiguiente(at: Atencion, fecha: string, hhmm: string): Ap
 /** Cuándo vuelve a atender una persona, dicho para el cliente: «hoy desde las 09:00»,
  *  «mañana martes desde las 09:00», «el lunes desde las 09:00» (o «el próximo lunes» si falta una
  *  semana entera). Dentro del horario, «ahora». null si el horario no se puede usar o la fecha/hora
- *  no se entiende: no se inventa una respuesta. No mira `activa`. */
-export function proximaAtencion(at: Atencion, fecha: string, hhmm: string): string | null {
+ *  no se entiende: no se inventa una respuesta. No mira `activa`. En inglés: «today from 09:00»,
+ *  «tomorrow, Tuesday, from 09:00», «on Monday from 09:00», «next Monday from 09:00» y «now» (sin
+ *  «(Lima time)»: lo dice el horario que la acompaña en `fraseFueraDeAtencion`). */
+export function proximaAtencion(at: Atencion, fecha: string, hhmm: string, idioma: IdiomaFrase = "es"): string | null {
   const a = aperturaSiguiente(at, fecha, hhmm);
   if (!a) return null;
+  if (esIngles(idioma)) {
+    if (a.ahora) return "now";
+    const abre = `from ${a.desde}`;
+    if (a.k === 0) return `today ${abre}`;
+    const dEn = NOMBRE_DIA_EN[diaSemanaLima(a.fecha)];
+    if (a.k === 1) return `tomorrow, ${dEn}, ${abre}`;
+    return `${a.k === 7 ? "next" : "on"} ${dEn} ${abre}`;
+  }
   if (a.ahora) return "ahora";
   const abre = `desde ${aLas(a.desde)}`;
   if (a.k === 0) return `hoy ${abre}`;
@@ -255,10 +303,14 @@ export function ultimoInstanteAtencionAntes(at: Atencion, hastaMs: number): numb
  *  « Nuestro horario de atención es de lunes a sábado, de 09:00 a 17:00; un ejecutivo le responderá
  *  el lunes desde las 09:00.» (con tú, «te responderá»). "" si el horario no está en uso (apagado o
  *  inválido), si ese momento cae dentro de él, o si la fecha/hora no se entiende: así quien la usa
- *  puede añadirla siempre, y una plantilla con {atencion} queda limpia en horario. */
-export function fraseFueraDeAtencion(at: Atencion, fecha: string, hhmm: string, t: Tratamiento): string {
+ *  puede añadirla siempre, y una plantilla con {atencion} queda limpia en horario. En inglés (sin
+ *  trato): « Our business hours are Monday to Saturday, from 09:00 to 17:00 (Lima time); an agent
+ *  will reply on Monday from 09:00.» */
+export function fraseFueraDeAtencion(at: Atencion, fecha: string, hhmm: string, t: Tratamiento, idioma: IdiomaFrase = "es"): string {
   if (!atencionEnUso(at) || dentroDeAtencion(at, fecha, hhmm)) return "";
-  const prox = proximaAtencion(at, fecha, hhmm);
-  if (!prox || prox === "ahora") return "";
+  const en = esIngles(idioma);
+  const prox = proximaAtencion(at, fecha, hhmm, en ? "en" : "es");
+  if (!prox || prox === (en ? "now" : "ahora")) return "";
+  if (en) return ` Our business hours are ${describirAtencion(at, "en")}; an agent will reply ${prox}.`;
   return ` Nuestro horario de atención es ${describirAtencion(at)}; un ejecutivo ${t === "tu" ? "te" : "le"} responderá ${prox}.`;
 }

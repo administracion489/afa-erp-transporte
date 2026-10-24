@@ -24,7 +24,8 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import {
-  aLas, atencionEnUso, nombreDia, sumarMinutosAtencion, ultimoInstanteAtencionAntes, type Atencion,
+  aLas, atencionEnUso, fechaMediaIngles, nombreDia, sumarMinutosAtencion, ultimoInstanteAtencionAntes, type Atencion,
+  type IdiomaFrase,
 } from "../crm-ia-atencion";
 import { fechaLima, minutoDelDiaLima, minutosAHhmm } from "../alertas-horario";
 import { diaSemanaLima } from "../comisiones/calendario";
@@ -161,12 +162,24 @@ const fechaCorta = (iso: string) => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`;
  * El plazo dicho para el cliente, desde el día de `ahoraMs` en Lima: «hoy antes de las 15:30»,
  * «mañana martes antes de las 10:30», «el jueves antes de las 11:00», y desde una semana después
  * «el jueves 05/11 antes de las 11:00». null sin plazo. Sin pronombres: vale de usted y de tú.
+ * En inglés (24 h y siempre «(Lima time)»: quien escribe en inglés suele estar en otro huso):
+ * «today by 15:30 (Lima time)», «tomorrow, Tuesday, by 10:30 (Lima time)», «on Thursday by 11:00
+ * (Lima time)» y, desde una semana después, «on Thursday, Nov 5, by 11:00 (Lima time)» (el mes con
+ * su nombre: «05/11» se lee al revés en inglés).
  */
-export function frasePlazo(confirmarAntesMs: number | null | undefined, ahoraMs: number): string | null {
+export function frasePlazo(confirmarAntesMs: number | null | undefined, ahoraMs: number, idioma: IdiomaFrase = "es"): string | null {
   if (typeof confirmarAntesMs !== "number" || !Number.isFinite(confirmarAntesMs) || !Number.isFinite(ahoraMs)) return null;
   const hoy = fechaLima(ahoraMs), dia = fechaLima(confirmarAntesMs);
-  const hora = aLas(minutosAHhmm(minutoDelDiaLima(confirmarAntesMs)));
   const k = Math.round((Date.parse(`${dia}T12:00:00Z`) - Date.parse(`${hoy}T12:00:00Z`)) / 86_400_000);
+  if (idioma === "en") {
+    const hh = `${minutosAHhmm(minutoDelDiaLima(confirmarAntesMs))} (Lima time)`;
+    const dEn = nombreDia(diaSemanaLima(dia), "en");
+    if (k <= 0) return `today by ${hh}`;
+    if (k === 1) return `tomorrow, ${dEn}, by ${hh}`;
+    if (k < 7) return `on ${dEn} by ${hh}`;
+    return `on ${dEn}, ${fechaMediaIngles(dia, false)}, by ${hh}`;
+  }
+  const hora = aLas(minutosAHhmm(minutoDelDiaLima(confirmarAntesMs)));
   const nd = nombreDia(diaSemanaLima(dia));
   if (k <= 0) return `hoy antes de ${hora}`;
   if (k === 1) return `mañana ${nd} antes de ${hora}`;

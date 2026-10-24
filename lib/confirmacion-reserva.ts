@@ -605,6 +605,15 @@ export function mensajeWhatsApp(idioma: Idioma, empresa: string, codigo: string)
     : `Estimado/a cliente, le enviamos la Confirmación de Reserva ${codigo} de su servicio con ${empresa}. Agradecemos su confianza. Si necesita alguna coordinación adicional, estamos a su disposición.`;
 }
 
+/**
+ * El pie (caption) del documento cuando se manda por WhatsApp, y el texto que queda en la
+ * conversación: «Confirmación de Reserva {codigo}» (el mismo literal de siempre) o, en inglés,
+ * «Booking Confirmation {codigo}» (el título del PDF en inglés).
+ */
+export function captionConfirmacion(idioma: Idioma, codigo: string): string {
+  return idioma === "en" ? `Booking Confirmation ${codigo}` : `Confirmación de Reserva ${codigo}`;
+}
+
 /** El teléfono del cliente para wa.me: dígitos, con 51 delante si es un celular peruano de 9. */
 export function telefonoWa(t: string | null | undefined): string | null {
   const d = txt(t).replace(/\D/g, "");

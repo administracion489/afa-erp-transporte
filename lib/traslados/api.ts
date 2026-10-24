@@ -8,7 +8,8 @@
 
 import { SENALES, type PuntoUbicado, type ResultadoTraslado, type SenalComplejidad, type Sentido } from "./motor";
 import type { CodigoRevision } from "./envio-ia";
-import type { CodigoUso, Segmento } from "../cotizacion-plantillas";
+import type { CeldaTraslado, CodigoUso, Segmento } from "../cotizacion-plantillas";
+import type { CodigoIdiomaCliente, IdiomaCliente } from "../idioma-cliente";
 
 /** Un punto: el texto que escribió el cliente, o coordenadas (un pin del mapa o de WhatsApp). */
 export type LugarEntrada = string | { lat: number; lng: number; texto?: string };
@@ -30,6 +31,14 @@ export type EntradaSimulador = {
    * nombran los dólares (`entradaDelAgente`). Ausente = la moneda la decide el número.
    */
   pide_dolares?: boolean;
+  /**
+   * El cliente escribe en inglés («en») u otro idioma («otro»): lo deriva el CÓDIGO
+   * (lib/idioma-cliente.ts) y solo con el inglés encendido (`inglesActivo`). Mueve la moneda por
+   * defecto (`monedaDelPedido`). Ausente = castellano, la entrada de siempre.
+   */
+  idioma_cliente?: "en" | "otro";
+  /** El cliente que escribe en inglés u otro idioma pidió soles (verificado). Solo junto a `idioma_cliente`. */
+  pide_soles?: true;
   paradas_intermedias?: number | null;
   fechas_adicionales?: number | null;
   vehiculos_pedidos?: number | null;
@@ -56,13 +65,30 @@ export type EnvioSimulado = { decision: "automatico" | "revision"; motivos: Codi
  * null, «falta el SQL» (`sin_reglas`) y «no hay una plantilla que la IA pueda usar» (`sin_plantilla`)
  * se arreglan en sitios distintos. Solo vienen con un resultado cotizable.
  */
-export type PlantillaSimulada = { id: string; nombre: string; segmento: Segmento; codigo: CodigoUso };
-export type CondicionesSimuladas = { fuente: "plantilla" | "ajustes"; segmento: Segmento; codigo: CodigoUso; detalle: string };
+export type PlantillaSimulada = { id: string; nombre: string; segmento: Segmento; codigo: CodigoUso; celda?: CeldaTraslado };
+export type CondicionesSimuladas = {
+  fuente: "plantilla" | "ajustes"; segmento: Segmento; codigo: CodigoUso; detalle: string;
+  /**
+   * La celda idioma × moneda de la regla nueva (`cotizacion_plantilla_reglas_traslado`) que eligió
+   * la plantilla. Ausente = la regla vieja por segmento (sin la migración); entonces manda `segmento`.
+   */
+  celda?: CeldaTraslado;
+};
+
+/**
+ * En qué idioma sale la cotización y por qué. `idioma` es el del PDF y los mensajes; `cliente`, el
+ * que se detectó en sus mensajes (null = sin evidencia). `ingles_apagado`: el cliente escribe en
+ * inglés u otro idioma pero ninguna celda «inglés» tiene una plantilla en inglés que la IA pueda
+ * usar (o falta la tabla de cotizaciones-09), así que sale en castellano y con la moneda de siempre.
+ * `no_se_pudo_leer`: no se pudo saber si el inglés está encendido (falló la lectura de las plantillas
+ * o sus reglas; el error va en `detalle`): NO es un inglés apagado. En los dos se simula en castellano.
+ */
+export type IdiomaSimulado = { idioma: "es" | "en"; cliente: IdiomaCliente | null; codigo: CodigoIdiomaCliente | "ingles_apagado" | "no_se_pudo_leer"; detalle: string };
 
 export type RespuestaSimulador =
   | {
     ok: true; resultado: ResultadoTraslado; lugares: { origen: LugarUbicado; destino: LugarUbicado }; envio?: EnvioSimulado;
-    plantilla?: PlantillaSimulada | null; condiciones?: CondicionesSimuladas;
+    plantilla?: PlantillaSimulada | null; condiciones?: CondicionesSimuladas; idioma?: IdiomaSimulado;
   }
   | { ok: false; codigo: "sin_migracion" | "entrada_invalida" | "error"; detalle: string };
 
@@ -130,6 +156,12 @@ export function validarEntrada(x: unknown): { ok: true; entrada: EntradaSimulado
       // Solo un `true` de verdad (no «true» en texto ni 1), y la clave solo cuando lo es: sin
       // pedido de dólares, la entrada es la de siempre.
       ...(o.pide_dolares === true ? { pide_dolares: true } : {}),
+      // El idioma, solo «en» u «otro» (el castellano es la ausencia), y el pedido de soles solo
+      // `true` y solo JUNTO al idioma: en castellano, pedir soles desde un número extranjero sigue
+      // yendo a un ejecutivo (`monedaDelPedido` no lo mira sin idioma). Las claves solo cuando
+      // aplican: sin idioma, la entrada es byte a byte la de siempre.
+      ...(o.idioma_cliente === "en" || o.idioma_cliente === "otro" ? { idioma_cliente: o.idioma_cliente } : {}),
+      ...((o.idioma_cliente === "en" || o.idioma_cliente === "otro") && o.pide_soles === true ? { pide_soles: true as const } : {}),
       paradas_intermedias: num(o.paradas_intermedias, 50), fechas_adicionales: num(o.fechas_adicionales, 365),
       vehiculos_pedidos: num(o.vehiculos_pedidos, 50), senales,
     },
