@@ -207,7 +207,11 @@ sec("1. Validación del cuerpo y archivos ajenos");
   check(codigo(await analizarBases(entrada(["b1"]), AUTH, m.deps)) === "archivo_ajeno" && m.bajadas.length === 0, "enlace de Drive → archivo_ajeno");
   // Ruta con «..» que intenta salir de la carpeta.
   m = mundo(); poblar(m, [base(1, PDF2, { url: urlDe(`bases/${LIC}/../99/${uuid(1)}.pdf`) })]);
-  check(["archivo_ajeno", "no_es_pdf"].includes(codigo(await analizarBases(entrada(["b1"]), AUTH, m.deps))) && m.bajadas.length === 0, "ruta con .. → no se baja");
+  check(codigo(await analizarBases(entrada(["b1"]), AUTH, m.deps)) === "archivo_ajeno" && m.bajadas.length === 0, "ruta con .. → archivo_ajeno, no se baja");
+  m = mundo(); poblar(m, [base(1, PDF2, { url: urlDe(`bases/${LIC}/%2E%2E/99/${uuid(1)}.pdf`) })]);
+  check(codigo(await analizarBases(entrada(["b1"]), AUTH, m.deps)) === "archivo_ajeno" && m.bajadas.length === 0, "ruta con %2E%2E → archivo_ajeno, no se baja");
+  m = mundo(); poblar(m, [base(1, PDF2, { url: urlDe(`bases/${LIC}/sub/${uuid(1)}.pdf`) })]);
+  check(codigo(await analizarBases(entrada(["b1"]), AUTH, m.deps)) === "archivo_ajeno" && m.bajadas.length === 0, "subcarpeta → archivo_ajeno");
   // Un docx en la carpeta de bases.
   m = mundo(); poblar(m, [base(1, PDF2, { url: urlDe(`bases/${LIC}/${uuid(1)}.docx`) })]);
   check(codigo(await analizarBases(entrada(["b1"]), AUTH, m.deps)) === "no_es_pdf" && m.bajadas.length === 0, "docx en bases → no_es_pdf, sin bajar");

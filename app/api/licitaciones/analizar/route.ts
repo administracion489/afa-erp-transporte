@@ -28,9 +28,9 @@ import { TOPES_ANALISIS, validarEntradaAnalisis, type RespuestaRutaAnalisis } fr
 import { analizarBases, type DepsAnalisis } from "@/lib/licitaciones/analisis-datos";
 import type { CodigoErrorAnalisis } from "@/lib/licitaciones/tipos";
 
-// El modelo tiene 280 s; el resto es para bajar los PDF y guardar el resultado.
+// El modelo tiene 280 s; el resto es para bajar los PDF y guardar el resultado. (Un POST nunca se cachea:
+// no hace falta `dynamic`, que Next 16 retira con Cache Components.)
 export const maxDuration = 300;
-export const dynamic = "force-dynamic";
 
 /** Estado HTTP de cada error esperado; los que no están van en 200 (la pantalla lee el cuerpo). */
 const ESTADO_HTTP: Partial<Record<CodigoErrorAnalisis, number>> = { entrada_invalida: 400, en_curso: 409 };

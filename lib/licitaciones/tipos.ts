@@ -420,6 +420,7 @@ export type CuadroExperiencia = {
   encabezado: string[]; introduccion: string; tabla: TablaPlano;
   totales: { moneda: Moneda; importe: number }[];            // NUNCA se suman monedas distintas
   firmante: { nombre: string; dni: string; cargo: string; firmaUrl: string | null } | null;
+  lugarFecha?: string | null;                                // «Lima, 21 de septiembre de 2026», encima de la firma
 };
 export type ParteFuente =
   | { tipo: "archivo"; itemId: string; titulo: string; url: string; nombre: string; origen: OrigenArchivo; etiquetaFuente: string }

@@ -159,7 +159,12 @@ export async function analizarBases(entrada: EntradaAnalisis, auth: { userId: st
       return falla("archivo_ajeno", `«${b.nombre || "archivo"}» no es una base subida a esta licitación: vuelve a subirlo desde el paso «Bases».`);
     }
     if (!reBase.test(obj.ruta)) {
-      return falla("no_es_pdf", `«${b.nombre || "archivo"}» no es un PDF. La IA solo lee las bases en PDF.`);
+      // Con la forma de una base pero otra extensión (un .docx subido a Bases) es «no es PDF»; cualquier
+      // otra ruta dentro de la carpeta (`..`, subcarpetas, un nombre que no es un uuid) es ajena.
+      const otraExtension = new RegExp(`^bases/${licId}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.[a-z0-9]{1,5}$`).test(obj.ruta);
+      return otraExtension
+        ? falla("no_es_pdf", `«${b.nombre || "archivo"}» no es un PDF. La IA solo lee las bases en PDF.`)
+        : falla("archivo_ajeno", `«${b.nombre || "archivo"}» no es una base subida a esta licitación: vuelve a subirlo desde el paso «Bases».`);
     }
     elegidas.push({ base: b, ruta: obj.ruta });
   }
