@@ -250,10 +250,13 @@ function TarjetaUnidad({ p, el, k, total, refs, conAncla, u, op, pendiente, hall
 }) {
   const { ctx, soloLectura } = p;
   const leida = ctx?.lecturas.unidades === "ok";
-  const r = u && refs ? resumenUnidad(u, refs) : null;
+  // Con la flota sin leer no se juzga nada de la unidad (una lectura fallida nunca acusa).
+  const r = u && refs && leida ? resumenUnidad(u, refs) : null;
   const prohibida = hallazgos.some((h) => h.codigo === "unidad_tercerizada_prohibida" && !h.aceptado);
   const placa = u?.placa ?? op?.placa ?? null;
-  const mismoCodigo = (x?: UnidadElegida) => !!x && norm(x.codigo) === norm(el.codigo);
+  /** Mover = intercambiar códigos: sin código (o con el mismo) no hay nada que intercambiar. */
+  const noSeMueve = (x?: UnidadElegida) => !x || !norm(x.codigo) || !norm(el.codigo) || norm(x.codigo) === norm(el.codigo);
+  const porQueNo = !norm(el.codigo) ? "Ponle un código para ordenarla" : null;
 
   // Qué se puede afirmar de esta unidad (de la evidencia al juicio; un fallo de lectura nunca acusa).
   let estado: "ok" | "cargando" | "no_leida" | "comprobando" | "no_existe" = "ok";
@@ -292,8 +295,8 @@ function TarjetaUnidad({ p, el, k, total, refs, conAncla, u, op, pendiente, hall
         </div>
         {!soloLectura && (
           <div className="flex flex-shrink-0 items-center gap-1">
-            <Boton chico tono="suave" onClick={() => onMover(-1)} disabled={k === 0 || mismoCodigo(vecinoArriba)} title="Subir un puesto (intercambia el código con la anterior)">↑</Boton>
-            <Boton chico tono="suave" onClick={() => onMover(1)} disabled={k === total - 1 || mismoCodigo(vecinoAbajo)} title="Bajar un puesto (intercambia el código con la siguiente)">↓</Boton>
+            <Boton chico tono="suave" onClick={() => onMover(-1)} disabled={k === 0 || noSeMueve(vecinoArriba)} title={porQueNo ?? "Subir un puesto (intercambia el código con la anterior)"}>↑</Boton>
+            <Boton chico tono="suave" onClick={() => onMover(1)} disabled={k === total - 1 || noSeMueve(vecinoAbajo)} title={porQueNo ?? "Bajar un puesto (intercambia el código con la siguiente)"}>↓</Boton>
             <Boton chico tono="peligro" onClick={onQuitar}>Quitar</Boton>
           </div>
         )}
@@ -314,10 +317,11 @@ function TarjetaUnidad({ p, el, k, total, refs, conAncla, u, op, pendiente, hall
         <Etiqueta texto="Capacidad exigida por las bases" ayuda={<>Asientos de la ficha: <b>{r?.capacidad ?? u?.capacidad ?? op?.capacidad ?? "sin registrar"}</b></>}>
           <CampoEntero valor={el.capacidadExigida} onCambio={(v) => onCambiar({ capacidadExigida: v })} min={1} max={120} disabled={soloLectura} placeholder="Opcional" />
         </Etiqueta>
-        <AnioUnidad p={p} u={u} r={r} anioRef={refs ? anioDe(refs.presentacion) : null} />
+        <AnioUnidad p={p} u={leida ? u : undefined} r={r} anioRef={refs ? anioDe(refs.presentacion) : null} />
       </div>
 
-      {hallazgos.length > 0 && <div className="mt-3"><ListaHallazgos hallazgos={hallazgos} irA={p.irA} /></div>}
+      {/* «No existe» ya lo dice la tarjeta arriba, con su arreglo. */}
+      {hallazgos.some((h) => h.codigo !== "unidad_no_existe") && <div className="mt-3"><ListaHallazgos hallazgos={hallazgos.filter((h) => h.codigo !== "unidad_no_existe")} irA={p.irA} /></div>}
 
       {r && refs && u && (
         <>

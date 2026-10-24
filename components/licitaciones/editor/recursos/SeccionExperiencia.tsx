@@ -45,8 +45,7 @@ export default function SeccionExperiencia({ p, catalogo, recargarCatalogo, hall
     const m = new Map<number, boolean>();
     if (!ctxExp || !sel.ventanaAnios) return m;
     const ref = fechaRef(lic, ctxExp);
-    const todas = new Map<number, Experiencia>([...Object.values(ctxExp.experiencia).map((e) => [e.id, e] as [number, Experiencia])]);
-    for (const e of todas.values()) {
+    for (const e of Object.values(ctxExp.experiencia)) {
       const sub = { ...lic, doc: { ...doc, experiencia: { ...sel, ids: [e.id] } } };
       const r = evaluarRegla({ tipo: "experiencia_ventana_anios", anios: sel.ventanaAnios }, sub, { ...ctxExp, experiencia: { [e.id]: e } }, ref);
       m.set(e.id, r.estado === "no_cumple");
@@ -171,7 +170,7 @@ export default function SeccionExperiencia({ p, catalogo, recargarCatalogo, hall
                       </div>
                     )}
                   </div>
-                  {hs.length > 0 && <div className="mt-2"><ListaHallazgos hallazgos={hs} irA={p.irA} /></div>}
+                  {hs.some((h) => h.codigo !== "experiencia_no_existe") && <div className="mt-2"><ListaHallazgos hallazgos={hs.filter((h) => h.codigo !== "experiencia_no_existe")} irA={p.irA} /></div>}
                 </li>
               );
             })}

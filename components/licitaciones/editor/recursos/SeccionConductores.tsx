@@ -35,7 +35,19 @@ export default function SeccionConductores({ p, opciones, recargarOpciones, refs
   const [modal, setModal] = useState<{ c: ConductorERP; codigo: CodigoDocConductor; resumen: DocConductorResumen; modo: "subir" | "fechas" } | null>(null);
   const elegidos = useMemo(() => new Map(doc.conductores.map((c) => [c.clave as string, c])), [doc.conductores]);
   const opPorClave = useMemo(() => new Map((opciones?.ok ? opciones.opciones : []).map((o) => [o.clave as string, o])), [opciones]);
-  const unidades = useMemo(() => unidadesPorCodigo(lic), [lic]);
+  /** Las unidades elegidas, por código (una entrada por código: dos con el mismo código ya son un hallazgo). */
+  const opcionesUnidad = useMemo(() => {
+    const vistos = new Set<string>();
+    const out: { codigo: string; rotulo: string }[] = [];
+    for (const u of unidadesPorCodigo(lic)) {
+      const codigo = norm(u.codigo);
+      if (!codigo || vistos.has(codigo)) continue;
+      vistos.add(codigo);
+      const placa = ctx?.unidades[u.clave]?.placa;
+      out.push({ codigo, rotulo: `${u.codigo}${placa ? ` · ${placa}` : ""}${u.rol === "reten" ? " (retén)" : ""}` });
+    }
+    return out;
+  }, [lic, ctx]);
   // El orden en que se imprimen: titulares primero, relevo después, cada grupo en el orden del doc.
   const orden = useMemo(() => [...doc.conductores].map((c, k) => ({ c, k })).sort((a, b) => (a.c.rol === b.c.rol ? a.k - b.k : a.c.rol === "titular" ? -1 : 1)).map((x) => x.c), [doc.conductores]);
   const lleno = doc.conductores.length >= TOPES_DOC.maxConductores;
@@ -160,7 +172,7 @@ export default function SeccionConductores({ p, opciones, recargarOpciones, refs
               conAncla={orden.findIndex((x) => x.clave === el.clave) === k}
               c={ctx?.conductores[el.clave]} op={opPorClave.get(el.clave)} pendiente={pendiente(el.clave)}
               hallazgos={deSujeto(hallazgos, "conductor", el.clave)}
-              opcionesUnidad={unidades.map((u) => ({ codigo: norm(u.codigo), rotulo: `${u.codigo || "sin código"}${ctx?.unidades[u.clave]?.placa ? ` · ${ctx.unidades[u.clave].placa}` : ""}` })).filter((x) => x.codigo)}
+              opcionesUnidad={opcionesUnidad}
               onCambiar={(c) => cambiar(el.id, c)} onMover={(dir) => mover(k, dir)} onQuitar={() => quitar(el)}
               onDoc={(c, codigo, resumen, modo) => setModal({ c, codigo, resumen, modo })} onBorrar={borrar} />
           ))}
@@ -188,7 +200,8 @@ function TarjetaConductor({ p, el, k, orden, refs, conAncla, c, op, pendiente, h
 }) {
   const { ctx, soloLectura } = p;
   const leida = ctx?.lecturas.conductores === "ok";
-  const r = c && refs ? resumenConductor(c, refs) : null;
+  // Con los conductores sin leer no se juzga nada (una lectura fallida nunca acusa).
+  const r = c && refs && leida ? resumenConductor(c, refs) : null;
   const prohibido = hallazgos.some((h) => h.codigo === "conductor_tercerizado_prohibido" && !h.aceptado);
   const nombre = c?.nombre ?? op?.nombre ?? el.clave;
   const flota = c?.flota ?? op?.flota ?? (el.clave.startsWith("t:") ? "t" : "p");
@@ -250,7 +263,8 @@ function TarjetaConductor({ p, el, k, orden, refs, conAncla, c, op, pendiente, h
         <div className="mt-2"><Nota tono="rojo">Este conductor no existe en el ERP ({el.clave}): pudo darse de baja o borrarse. Quítalo o elige otro.</Nota></div>
       ) : null}
 
-      {hallazgos.length > 0 && <div className="mt-3"><ListaHallazgos hallazgos={hallazgos} irA={p.irA} /></div>}
+      {/* «No existe» ya lo dice la tarjeta arriba, con su arreglo. */}
+      {hallazgos.some((h) => h.codigo !== "conductor_no_existe") && <div className="mt-3"><ListaHallazgos hallazgos={hallazgos.filter((h) => h.codigo !== "conductor_no_existe")} irA={p.irA} /></div>}
 
       {r && c && refs && (
         <>
