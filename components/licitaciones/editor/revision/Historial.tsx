@@ -29,8 +29,9 @@ export function useHistorial(licId: number, vez: number): LecturaHistorial {
     );
     return () => { vivo = false; };
   }, [licId, clave]);
-  // Mientras llega la lectura de esta `vez`, se sigue enseñando la anterior (si había): no parpadea.
-  if (!l) return { fase: "cargando" };
+  // Mientras llega la lectura de esta `vez`, se sigue enseñando la anterior si fue buena (no parpadea);
+  // una anterior fallida no se repite como si fuera la respuesta nueva.
+  if (!l || (l.de !== clave && l.lectura.fase === "error")) return { fase: "cargando" };
   return l.lectura;
 }
 

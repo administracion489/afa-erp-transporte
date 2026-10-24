@@ -5,6 +5,7 @@
 //
 // La portada y el «Contenido:» se pintan desde el SeparadorResuelto (resolverExpediente), no se rearman.
 import { TOPES_DOC, type BloqueExpediente, type BloqueExpedienteResuelto, type EvaluacionRequisito, type Hallazgo, type ParteFuente } from "@/lib/licitaciones/tipos";
+import { LIMITES_TEXTO } from "@/lib/licitaciones/normalizar";
 import { anclaDe, type PasoProps } from "../contrato-editor";
 import { ETIQUETA_FINAL } from "../etiquetas";
 import { adjuntosConArchivo, agregarItem, conBloque, duplicarBloque, ETIQUETA_FUENTE, moverPorId, conBloques, quitarBloque, TIPOS_FUENTE, type TipoFuente } from "./acciones";
@@ -105,13 +106,13 @@ export default function TarjetaBloque(pr: Props) {
           {/* ── Datos del separador ── */}
           <div className="grid gap-3 sm:grid-cols-2">
             <Rotulo texto="Título" ayuda="«Sección II», «Anexo 3»…">
-              <CampoTexto valor={b.titulo} maxLength={200} disabled={!editable} ariaLabel="Título del bloque" onCambio={(v) => cambiar((x) => ({ ...x, titulo: v }))} />
+              <CampoTexto valor={b.titulo} maxLength={LIMITES_TEXTO.titulo} disabled={!editable} ariaLabel="Título del bloque" onCambio={(v) => cambiar((x) => ({ ...x, titulo: v }))} />
             </Rotulo>
             <Rotulo texto="Subtítulo" ayuda="Va en la banda de color: «Requisitos legales».">
-              <CampoTexto valor={b.subtitulo} maxLength={200} disabled={!editable} ariaLabel="Subtítulo del bloque" onCambio={(v) => cambiar((x) => ({ ...x, subtitulo: v }))} />
+              <CampoTexto valor={b.subtitulo} maxLength={LIMITES_TEXTO.titulo} disabled={!editable} ariaLabel="Subtítulo del bloque" onCambio={(v) => cambiar((x) => ({ ...x, subtitulo: v }))} />
             </Rotulo>
             <Rotulo texto="Referencia en las bases" ayuda="«Sección IV de las bases», «Numerales 5.1 y 5.2».">
-              <CampoTexto valor={b.referencia} maxLength={300} disabled={!editable} ariaLabel="Referencia en las bases" onCambio={(v) => cambiar((x) => ({ ...x, referencia: v }))} />
+              <CampoTexto valor={b.referencia} maxLength={LIMITES_TEXTO.referenciaBloque} disabled={!editable} ariaLabel="Referencia en las bases" onCambio={(v) => cambiar((x) => ({ ...x, referencia: v }))} />
             </Rotulo>
             <div className="flex items-end">
               <Casilla marcado={b.conPortada} disabled={!editable} cambiar={(v) => cambiar((x) => ({ ...x, conPortada: v }))}>

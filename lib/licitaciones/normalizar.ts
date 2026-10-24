@@ -110,21 +110,26 @@ function normalizarCita(raw: unknown): CitaBases | null {
 
 // ══ Reglas ═════════════════════════════════════════════════════════════════════
 
+/** Rangos de los parámetros de una regla: lo que normalizarRegla GUARDA. El editor de reglas valida con
+ *  los mismos (si validara con otros, una regla «válida» en pantalla se perdería al guardar). */
+export const RANGOS_REGLA = {
+  antig: [1, 3650], uAnios: [0, 60], asientos: [1, 120], n: [1, 500], eAnios: [1, 100], monto: [0.01, 1e12],
+} as const;
 const referencia = (x: unknown) => (x === "inicio_servicio" ? "inicio_servicio" as const : "presentacion" as const);
 
 /** Una regla del catálogo cerrado con parámetros válidos, o null (se juzga a mano). */
 export function normalizarRegla(raw: unknown): Regla | null {
   if (!esObjeto(raw)) return null;
-  const antig = (x: unknown) => enteroEn(x, 1, 3650);
+  const antig = (x: unknown) => enteroEn(x, ...RANGOS_REGLA.antig);
   switch (raw.tipo) {
     case "doc_empresa":
       return incluye(CODIGOS_LEGAJO, raw.legajo) ? { tipo: "doc_empresa", legajo: raw.legajo, antiguedadMaxDias: antig(raw.antiguedadMaxDias) } : null;
     case "unidad_antiguedad_max": {
-      const anios = enteroEn(raw.anios, 0, 60);
+      const anios = enteroEn(raw.anios, ...RANGOS_REGLA.uAnios);
       return anios === null ? null : { tipo: "unidad_antiguedad_max", anios, referencia: referencia(raw.referencia) };
     }
     case "unidad_capacidad_min": {
-      const asientos = enteroEn(raw.asientos, 1, 120);
+      const asientos = enteroEn(raw.asientos, ...RANGOS_REGLA.asientos);
       return asientos === null ? null : { tipo: "unidad_capacidad_min", asientos, uso: textoONull(raw.uso, T.titulo) };
     }
     case "unidad_doc":
@@ -135,7 +140,7 @@ export function normalizarRegla(raw: unknown): Regla | null {
     case "unidades_reten_min":
     case "conductores_relevo_min":
     case "experiencia_cartas_min": {
-      const n = enteroEn(raw.n, 1, 500);
+      const n = enteroEn(raw.n, ...RANGOS_REGLA.n);
       return n === null ? null : ({ tipo: raw.tipo, n } as Regla);
     }
     case "conductor_licencia": {
@@ -147,15 +152,15 @@ export function normalizarRegla(raw: unknown): Regla | null {
     case "prohibe_subcontratacion":
       return { tipo: "prohibe_subcontratacion" };
     case "experiencia_anios_min": {
-      const anios = enteroEn(raw.anios, 1, 100);
+      const anios = enteroEn(raw.anios, ...RANGOS_REGLA.eAnios);
       return anios === null ? null : { tipo: "experiencia_anios_min", anios, desde: raw.desde === "constitucion" ? "constitucion" : "primer_contrato" };
     }
     case "experiencia_monto_min": {
-      const monto = numeroEn(raw.monto, 0.01, 1e12);
+      const monto = numeroEn(raw.monto, ...RANGOS_REGLA.monto);
       return monto === null ? null : { tipo: "experiencia_monto_min", monto, moneda: raw.moneda === "USD" ? "USD" : "PEN" };
     }
     case "experiencia_ventana_anios": {
-      const anios = enteroEn(raw.anios, 1, 100);
+      const anios = enteroEn(raw.anios, ...RANGOS_REGLA.eAnios);
       return anios === null ? null : { tipo: "experiencia_ventana_anios", anios };
     }
     case "seguro":

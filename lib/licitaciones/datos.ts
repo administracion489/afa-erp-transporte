@@ -42,13 +42,14 @@ import { hashArchivo } from "@/lib/finanzas/caja-chica";
 import { guardarDocumentoVehiculo } from "@/lib/documentos-vehiculo-datos";
 import { rutaNueva, mimeDeNombre, esMimePermitido, extDeMime, MIMES_PERMITIDOS } from "./archivos";
 import { normalizarDoc, normalizarArchivo, bytesDoc } from "./normalizar";
+import { leerAnalisisBases } from "./analisis";
 import { esFechaISO, textoONull, textoCorto, enteroEn, claveRecurso, esObjeto, lista } from "./util";
 import {
   BUCKET_LICITACIONES, CODIGOS_LEGAJO, CODIGOS_DOC_CONDUCTOR, CANONICOS_DOC_UNIDAD, COLUMNAS_EDITABLES,
   ESTADOS_LICITACION, TOPES_DOC,
   type ArchivoRef, type CarpetaLicitacion, type ClaveRecurso, type CodigoDocConductor, type CodigoLegajo,
   type ConductorERP, type ContextoLicitacion, type DocLicitacion, type DocUnidadERP, type EmpresaTerceroERP,
-  type EstadoLectura, type EstadoLicitacion, type Experiencia, type FechaISO, type FilaDocEmpresa, type FilaEmision,
+  type AnalisisBases, type AvisoAnalisis, type EstadoLectura, type EstadoLicitacion, type Experiencia, type FechaISO, type FilaDocEmpresa, type FilaEmision,
   type Flota, type FuenteContexto, type InstanteISO, type Licitacion, type MimeArchivo, type Moneda,
   type OtraLicitacion, type PersonaERP, type SustentoTipo, type UnidadERP,
 } from "./tipos";
@@ -1500,4 +1501,53 @@ export async function ultimaEmision(licId: number): Promise<Resultado<{ emision:
   if (!data) return { ok: true, emision: null };
   const r = data as Fila;
   return { ok: true, emision: { ...aEmision(r), foto: (esObjeto(r.foto) ? r.foto : {}) as FilaEmision["foto"] } };
+}
+
+// ══ Último análisis IA de las bases (licitacion_analisis, lo escribe SOLO el servidor) ══
+const CODIGOS_AVISO_ANALISIS: readonly AvisoAnalisis["codigo"][] = [
+  "regla_desconocida", "fecha_invalida", "numero_fuera_de_rango", "texto_recortado", "archivo_omitido", "categoria_desconocida"];
+
+export type AnalisisGuardado = {
+  id: number; creado_en: InstanteISO; terminado_en: InstanteISO | null; usuario_nombre: string | null;
+  /** Los archivos que se eligieron, en el orden de sus etiquetas; `omitido` ≠ null = no se leyó (protegido, ilegible…). */
+  archivos: { id: string; nombre: string; omitido: string | null }[];
+  resultado: AnalisisBases; avisos: AvisoAnalisis[]; costo_usd: number | null;
+};
+
+/**
+ * El último análisis LISTO de la licitación (creado_en desc, id desc), para «Retomar el análisis del …»
+ * sin volver a pagar. El `resultado` viene de la base: se vuelve a pasar por leerAnalisisBases —la misma
+ * normalización del servidor, IDEMPOTENTE sobre su propia salida (la matriz lo barre)— con los archivos
+ * que de verdad se LEYERON (los de la fila sin `omitido`, en su orden: así se resolvieron las citas).
+ * `avisos`: los que guardó el servidor (los de la primera lectura; releer lo ya normalizado no los repite)
+ * más los nuevos que diera la relectura, sin repetir. Sin filas → `analisis: null` (no es un error).
+ */
+export async function ultimoAnalisis(licId: number): Promise<Resultado<{ analisis: AnalisisGuardado | null }>> {
+  const db = await cliente();
+  const { data, error } = await db.from("licitacion_analisis")
+    .select("id, creado_en, terminado_en, usuario_id, archivos, resultado, avisos, costo_usd")
+    .eq("licitacion_id", licId).eq("estado", "listo").not("resultado", "is", null)
+    .order("creado_en", { ascending: false }).order("id", { ascending: false }).limit(1).maybeSingle();
+  if (error) return explicar(error, { accion: "leer el último análisis de las bases", tabla: "licitacion_analisis", sql: SQL_LICITACIONES.tablas });
+  if (!data) return { ok: true, analisis: null };
+  const r = data as Fila;
+  const archivos = lista(r.archivos).filter(esObjeto)
+    .map((a) => ({ id: textoCorto(a.id, 80), nombre: textoCorto(a.nombre, 200) || "archivo", omitido: textoONull(a.omitido, 40) }))
+    .filter((a) => !!a.id);
+  const leidos = archivos.filter((a) => a.omitido == null).map(({ id, nombre }) => ({ id, nombre }));
+  const relectura = leerAnalisisBases(r.resultado, leidos);
+  const guardados = lista(r.avisos).filter(esObjeto)
+    .filter((a) => (CODIGOS_AVISO_ANALISIS as readonly string[]).includes(String(a.codigo)) && typeof a.detalle === "string")
+    .map((a) => ({ codigo: a.codigo as AvisoAnalisis["codigo"], detalle: textoCorto(a.detalle, 1000) }));
+  const vistos = new Set(guardados.map((a) => `${a.codigo}|${a.detalle}`));
+  const avisos = [...guardados, ...relectura.avisos.filter((a) => !vistos.has(`${a.codigo}|${a.detalle}`))];
+  const nombres = await nombresDeUsuarios(db, [str(r.usuario_id)]);
+  return {
+    ok: true,
+    analisis: {
+      id: Number(r.id), creado_en: instante(r.creado_en), terminado_en: typeof r.terminado_en === "string" ? r.terminado_en : null,
+      usuario_nombre: str(r.usuario_id) ? nombres.get(String(r.usuario_id)) ?? null : null,
+      archivos, resultado: relectura.resultado, avisos, costo_usd: num(r.costo_usd),
+    },
+  };
 }

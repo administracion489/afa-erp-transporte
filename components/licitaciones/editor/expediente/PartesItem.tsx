@@ -41,7 +41,7 @@ export default function PartesItem({ p, item, partes, bloqueActivo, resuelto }: 
       <div className="flex flex-wrap items-center gap-1">
         <span className="text-[11px] font-semibold text-gray-500">Saldrá:</span>
         {frases.map((f) => <Chip key={f.clase} tono={TONO_CLASE[f.clase]}>{f.texto}</Chip>)}
-        {buenas.length > 0 && (
+        {buenas.some((x) => x.tipo !== "propuesta") && (
           <button type="button" onClick={() => setVerOk((v) => !v)} className="text-[11px] font-semibold text-[#0b315f] underline">
             {verOk ? "ocultar" : buenas.length === 1 ? "ver cuál" : `ver los ${buenas.length}`}
           </button>

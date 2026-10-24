@@ -73,7 +73,7 @@ export default function EditorFuente({ p, item, bloqueTitulo, editable, cambiarF
     case "cuadro_experiencia":
       return (
         <p className="text-xs text-gray-600">
-          Hoja que arma el ERP con los {p.doc.experiencia.ids.length} contrato{p.doc.experiencia.ids.length === 1 ? "" : "s"} elegido{p.doc.experiencia.ids.length === 1 ? "" : "s"} en Recursos, firmada por el representante legal.{" "}
+          Hoja que arma el ERP {contratos(p)}, firmada por el representante legal.{" "}
           <button type="button" onClick={() => p.irA("recursos", "experiencia")} className="font-semibold text-[#0b315f] underline">Elegir contratos</button>
         </p>
       );
@@ -87,7 +87,7 @@ export default function EditorFuente({ p, item, bloqueTitulo, editable, cambiarF
             </select>
           </Rotulo>
           <p className="text-[11px] text-gray-500">
-            De los {p.doc.experiencia.ids.length} contrato{p.doc.experiencia.ids.length === 1 ? "" : "s"} elegido{p.doc.experiencia.ids.length === 1 ? "" : "s"} en Recursos. Los archivos se suben en el{" "}
+            Salen los archivos de sustento de cada contrato elegido en Recursos{p.doc.experiencia.ids.length ? ` (${p.doc.experiencia.ids.length})` : " (todavía ninguno)"}. Se suben en el{" "}
             <Link href="/licitaciones?tab=experiencia" target="_blank" rel="noopener noreferrer" className="font-semibold text-[#0b315f] underline">catálogo de experiencia ↗</Link>.
           </p>
         </div>
@@ -128,6 +128,13 @@ export default function EditorFuente({ p, item, bloqueTitulo, editable, cambiarF
         </div>
       );
   }
+}
+
+/** «con los 3 contratos elegidos en Recursos» · «cuando se elijan contratos en Recursos (todavía ninguno)». */
+function contratos(p: PasoProps): string {
+  const n = p.doc.experiencia.ids.length;
+  if (n === 0) return "con los contratos que se elijan en Recursos (todavía ninguno)";
+  return n === 1 ? "con el contrato elegido en Recursos" : `con los ${n} contratos elegidos en Recursos`;
 }
 
 // ══ Roles ═════════════════════════════════════════════════════════════════════════

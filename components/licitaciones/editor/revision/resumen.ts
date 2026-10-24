@@ -17,8 +17,9 @@ export const grupoDe = (h: Hallazgo): GrupoHallazgo => ("paso" in h.donde ? h.do
 /** `fuente_no_leida` va aparte y arriba: sin esos datos el resto de la revisión no es de fiar. */
 export const esFuenteNoLeida = (h: Hallazgo) => h.codigo === "fuente_no_leida";
 
-/** Solo se aceptan con nota los que piden actuar o cambian lo que se presenta; un «info» no se acepta. */
-export const aceptable = (h: Hallazgo) => h.gravedad === "alarma" || h.gravedad === "aviso";
+/** Se acepta con nota todo hallazgo del contenido. `fuente_no_leida` no: es una lectura que falló (D8),
+ *  no algo que se presente; se arregla volviendo a leer. */
+export const aceptable = (h: Hallazgo) => !esFuenteNoLeida(h);
 
 export type FiltroHallazgos = { gravedad: Record<Gravedad, boolean>; grupo: GrupoHallazgo | "todos"; verAceptados: boolean };
 export const FILTRO_INICIAL: FiltroHallazgos = { gravedad: { alarma: true, aviso: true, info: true }, grupo: "todos", verAceptados: true };

@@ -5,12 +5,13 @@
 // El título es opcional: vacío, el separador usa etiquetaItem (la misma función del motor), y eso es lo
 // que se enseña de marcador para que se vea qué dirá sin escribir nada.
 import { etiquetaItem } from "@/lib/licitaciones/expediente";
+import { LIMITES_TEXTO } from "@/lib/licitaciones/normalizar";
 import { TOPES_DOC, type BloqueExpediente, type FuenteItem, type Hallazgo, type ItemExpediente, type ParteFuente } from "@/lib/licitaciones/tipos";
 import { anclaDe, type PasoProps } from "../contrato-editor";
 import { conItem, ETIQUETA_FUENTE, moverItemABloque, moverPorId, conBloque, quitarItem } from "./acciones";
 import EditorFuente from "./EditorFuente";
 import PartesItem from "./PartesItem";
-import { BotonIcono, CampoTexto, Casilla, Chip, claseSelect } from "./ui";
+import { BotonIcono, CampoTexto, Casilla, Chip, claseSelectChico } from "./ui";
 import { HallazgosEnLinea } from "./HallazgosEnLinea";
 
 type Props = {
@@ -67,7 +68,7 @@ export default function FilaItem({ p, bloque, item, k, editable, partes, resuelt
             <BotonIcono title="Subir un puesto" disabled={k === 0} onClick={() => p.cambiarDoc((d) => conBloque(d, bloque.id, (b) => ({ ...b, items: moverPorId(b.items, item.id, -1) })))}>↑</BotonIcono>
             <BotonIcono title="Bajar un puesto" disabled={k === bloque.items.length - 1} onClick={() => p.cambiarDoc((d) => conBloque(d, bloque.id, (b) => ({ ...b, items: moverPorId(b.items, item.id, 1) })))}>↓</BotonIcono>
             {otros.length > 0 && (
-              <select aria-label="Mover a otro bloque" className={`${claseSelect} h-9 w-auto max-w-[11rem] py-1 text-xs`} value=""
+              <select aria-label="Mover a otro bloque" className={claseSelectChico} value=""
                 onChange={(ev) => { if (ev.target.value) mover(ev.target.value); }}>
                 <option value="">Mover a…</option>
                 {otros.map((b) => {
@@ -85,7 +86,7 @@ export default function FilaItem({ p, bloque, item, k, editable, partes, resuelt
         <div>
           <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-gray-500">Cómo se nombra en la portada separadora</span>
           {editable ? (
-            <CampoTexto valor={item.titulo ?? ""} placeholder={sugerido} maxLength={200} ariaLabel="Título del documento en la portada separadora"
+            <CampoTexto valor={item.titulo ?? ""} placeholder={sugerido} maxLength={LIMITES_TEXTO.titulo} ariaLabel="Título del documento en la portada separadora"
               onCambio={(v) => cambiar((i) => ({ ...i, titulo: v === "" ? null : v }))} />
           ) : (
             <p className="text-sm text-gray-800">{item.titulo?.trim() || sugerido}</p>

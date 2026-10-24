@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
-import { CATALOGO_HALLAZGOS, revisarLicitacion } from "@/lib/licitaciones/revision";
+import { CATALOGO_HALLAZGOS, MAX_BYTES_EXPEDIENTE, revisarLicitacion } from "@/lib/licitaciones/revision";
 import type { ResultadoEmitir } from "@/lib/licitaciones/emitir";
 import type {
   ContextoLicitacion, FaseEmision, FilaEmision, Licitacion, OpcionesEmision, ProgresoEmision, Revision,
@@ -42,6 +42,8 @@ type Props = {
   /** La revisión que se ve (con la comprobación de archivos, si se hizo). */
   revision: Revision;
   comprobacion: Comprobacion | null;
+  /** La comprobación es anterior a cambios del expediente o de los recursos. */
+  comprobacionVieja: boolean;
   pendiente: boolean;
   faseGuardado: FaseGuardado;
   leer: () => Instantanea;
@@ -70,8 +72,6 @@ const MAX_NOTA = 2000;
 const ESPERA_REPINTADO_MS = 4000;
 /** Entre una descarga automática y la siguiente (varias seguidas el navegador las bloquea o pregunta). */
 const PAUSA_DESCARGAS_MS = 700;
-/** R12: tope declarado de las fuentes de una emisión (solo avisa). */
-const TOPE_FUENTES_BYTES = 250 * 1024 * 1024;
 
 const OPCIONES_INICIALES: OpcionesEmision = { propuesta: true, bloques: true, completo: true, empaque: "zip", subirCopias: true };
 
@@ -186,7 +186,7 @@ export default function ModalEmision(p: Props) {
     try {
       // 1 · Guardar lo pendiente: se emite exactamente lo guardado.
       const guardado = await p.guardarAhora();
-      if (!guardado) { volverAOpciones(motivoNoGuardado(p.leer())); return; }
+      if (!guardado) { await dormir(80); volverAOpciones(motivoNoGuardado(p.leer())); return; }
       const limite = Date.now() + ESPERA_REPINTADO_MS;
       while (p.leer().pendiente && Date.now() < limite) await dormir(50);
       const s = p.leer();
@@ -273,7 +273,8 @@ export default function ModalEmision(p: Props) {
     p.faseGuardado === "conflicto" ? "Otra persona guardó esta licitación: resuelve el aviso de arriba antes de emitir."
     : p.faseGuardado === "solo_lectura" ? "La licitación está en solo lectura: no se puede emitir."
     : !algo ? "Marca al menos una pieza: la propuesta, los bloques o el expediente completo."
-    : !opts.propuesta && bloquesActivos === 0 ? "El expediente no tiene bloques activos: marca la propuesta técnica o activa bloques en el paso Expediente."
+    : !opts.propuesta && bloquesActivos === 0 && !(opts.completo && p.lic.doc.expediente.propuestaEnCompleto === "primero")
+      ? "El expediente no tiene bloques activos: marca la propuesta técnica o activa bloques en el paso Expediente."
     : abiertos.length > 0 && !confirmo ? "Confirma arriba que se emite con los hallazgos abiertos."
     : null;
 
@@ -344,9 +345,11 @@ export default function ModalEmision(p: Props) {
                 {!resumen ? <p className="text-gray-500">Contando las partes del expediente…</p>
                   : !resumen.ok ? <p className="text-amber-800">No se pudo contar las partes del expediente ({resumen.error}); la emisión las cuenta igual.</p>
                   : <ResumenPartes r={resumen.r} conPropuesta={opts.propuesta || p.lic.doc.expediente.propuestaEnCompleto === "primero"} comprobado={!!p.comprobacion} />}
-                {!p.comprobacion && (
+                {!p.comprobacion ? (
                   <p className="text-gray-500">No comprobaste los archivos: la emisión los revisa al bajarlos, y lo que no se pueda unir (PDF protegido, Drive…) se omitirá y se nombrará.</p>
-                )}
+                ) : p.comprobacionVieja ? (
+                  <p className="text-gray-500">La comprobación de archivos es anterior a tus últimos cambios del expediente o de los recursos: lo nuevo se revisa al bajarlo.</p>
+                ) : null}
               </div>
 
               {/* Hallazgos abiertos */}
@@ -461,7 +464,7 @@ function ResumenPartes({ r, conPropuesta, comprobado }: { r: ResumenExpediente; 
         {sinComprobar > 0 ? ` + las de ${plural(sinComprobar, "documento", "documentos")} que se cuentan al bajarlos${comprobado ? "" : " (comprueba los archivos para saberlo antes)"}` : ""}.
       </p>
       {r.omitidas > 0 && <p className="text-amber-800">{plural(r.omitidas, "parte se omitirá", "partes se omitirán")} por no tener un archivo que se pueda unir: se nombran al emitir.</p>}
-      {r.bytesConocidos > TOPE_FUENTES_BYTES && (
+      {r.bytesConocidos > MAX_BYTES_EXPEDIENTE && (
         <p className="text-amber-800">Los archivos comprobados suman {tamanoArchivo(r.bytesConocidos)}, más de lo que un navegador sostiene con holgura (~250 MB): si se queda sin memoria, desmarca el expediente completo o emite por partes.</p>
       )}
     </>

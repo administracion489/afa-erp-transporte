@@ -11,6 +11,7 @@
 //    del mismo título o, si no hay, a un bloque «Adjuntos conservados» que se ve y se puede quitar.
 import { expedientePorDefectoConVinculos } from "@/lib/licitaciones/expediente";
 import { TIPOS_LEGAJO } from "@/lib/licitaciones/legajo";
+import { LIMITES_TEXTO } from "@/lib/licitaciones/normalizar";
 import {
   CODIGOS_DOC_CONDUCTOR, DOCS_UNIDAD_LIC, TOPES_DOC,
   type BloqueExpediente, type CodigoDocConductor, type DocLicitacion, type DocUnidadLic, type Expediente,
@@ -115,7 +116,7 @@ export function duplicarBloque(d: DocLicitacion, bloqueId: string, nuevoId: () =
   if (k < 0 || bs.length >= TOPES_DOC.maxBloquesExpediente) return { doc: d, nuevo: null };
   const b = bs[k];
   const copia: BloqueExpediente = {
-    ...b, id: nuevoId(), titulo: `${b.titulo} (copia)`.slice(0, 200),
+    ...b, id: nuevoId(), titulo: Array.from(`${b.titulo} (copia)`).slice(0, LIMITES_TEXTO.titulo).join(""),
     items: b.items.map((i) => ({ ...i, id: nuevoId(), fuente: copiarFuente(i.fuente, nuevoId) })),
   };
   const out = [...bs.slice(0, k + 1), copia, ...bs.slice(k + 1)];

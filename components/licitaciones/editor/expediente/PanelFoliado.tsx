@@ -48,7 +48,7 @@ export default function PanelFoliado({ p }: { p: PasoProps }) {
           <p className="mt-0.5 text-xs text-gray-500">El número que lleva cada hoja del expediente. Se imprime al emitir, en el paso 5.</p>
         </div>
         {editable && !esDefecto && (
-          <Boton chico tono="suave" onClick={() => cambiar({ ...FOLIADO_DEFECTO })} title="Ascendente, «Folio {n}», 3 dígitos, abajo a la derecha, con portadas">Volver al de siempre</Boton>
+          <Boton chico tono="suave" onClick={() => cambiar({ ...FOLIADO_DEFECTO })} title="Ascendente, «Folio {n}», 3 dígitos, abajo a la derecha, con portadas">Usar el foliado por defecto</Boton>
         )}
       </div>
 
@@ -65,7 +65,7 @@ export default function PanelFoliado({ p }: { p: PasoProps }) {
       <div className="grid gap-3 sm:grid-cols-3">
         <Rotulo texto="Texto del folio" ayuda="{n} es el número. Ej.: «Folio {n}», «Fol. {n}».">
           <CampoTexto valor={f.formato} alSalir maxLength={40} disabled={!editable || sinFolio} ariaLabel="Texto del folio"
-            validar={(v) => (v.includes("{n}") ? null : "Tiene que llevar {n} (el número). Si no, se usa «Folio {n}».")}
+            validar={(v) => (v.includes("{n}") ? null : `«${v}» no lleva {n} (el número): no se guardó y sigue «${f.formato}».`)}
             onCambio={(v) => cambiar({ formato: v })} />
         </Rotulo>
         <Rotulo texto="Dígitos" ayuda="Con 3, el folio 7 sale «007».">

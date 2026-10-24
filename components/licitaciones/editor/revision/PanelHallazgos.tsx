@@ -11,6 +11,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { DocLicitacion, Gravedad, Hallazgo, Paso, Revision } from "@/lib/licitaciones/tipos";
+import type { PasoProps } from "../contrato-editor";
 import { ESTILO_GRAVEDAD, ETIQUETA_PASO, instanteLima } from "../etiquetas";
 import {
   FILTRO_INICIAL, GRUPOS, aceptable, aceptacionesSinHallazgo, agrupar, contar, cuentaPorGrupo, esFuenteNoLeida,
@@ -40,7 +41,7 @@ type Props = {
   irA: (p: Paso, ancla?: string | null) => void;
   cambiarDoc: (fn: (d: DocLicitacion) => DocLicitacion) => void;
   recargarCtx: () => void;
-  aviso: (texto: string, tono?: "ok" | "error" | "aviso") => void;
+  aviso: PasoProps["aviso"];
   /** Quién acepta (usuarios.nombre); null si no se supo. */
   nombreUsuario: string | null;
   /** «Incluye la comprobación de archivos de las…», o null si la revisión no la incluye. */

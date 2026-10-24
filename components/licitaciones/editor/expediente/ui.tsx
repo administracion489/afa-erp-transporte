@@ -61,7 +61,8 @@ export const claseCampo = "w-full min-w-0 rounded-lg border border-gray-300 bg-w
 
 /**
  * Texto del doc. Mientras tiene el foco enseña lo tecleado. `alSalir`: solo se manda al salir del campo o
- * con Enter, y `validar` puede rechazarlo (el mensaje queda FIJO debajo y no se manda).
+ * con Enter, y `validar` puede rechazarlo: no se manda, el campo vuelve a lo guardado y el motivo queda
+ * FIJO debajo (nombrando lo que se rechazó).
  */
 export function CampoTexto({ valor, onCambio, placeholder, maxLength, disabled, ariaLabel, alSalir, validar, id }: {
   valor: string; onCambio: (v: string) => void; placeholder?: string; maxLength?: number; disabled?: boolean; ariaLabel?: string;
@@ -74,8 +75,7 @@ export function CampoTexto({ valor, onCambio, placeholder, maxLength, disabled, 
     if (alSalir) {
       const e = validar?.(local) ?? null;
       setError(e);
-      if (e) return;
-      if (local !== valor) onCambio(local);
+      if (!e && local !== valor) onCambio(local);
     }
     setLocal(null);
   };
@@ -116,3 +116,5 @@ export function Casilla({ marcado, cambiar, children, disabled, title }: { marca
 }
 
 export const claseSelect = `${claseCampo} pr-8`;
+/** Un desplegable chico de acción (sin ancho completo): «Mover a…». */
+export const claseSelectChico = "h-9 min-w-0 max-w-[11rem] rounded-lg border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 focus:border-[#0b315f] focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20";

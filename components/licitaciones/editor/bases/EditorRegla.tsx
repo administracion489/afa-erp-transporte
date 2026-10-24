@@ -7,7 +7,7 @@
 // cambia desde fuera, manda la de fuera.
 import { useState } from "react";
 import { CATEGORIAS_CLASE_A } from "@/lib/licencias-conducir";
-import { normalizarRegla } from "@/lib/licitaciones/normalizar";
+import { normalizarRegla, RANGOS_REGLA } from "@/lib/licitaciones/normalizar";
 import { describirRegla, ETIQUETA_REGLA, ETIQUETA_SEGURO_LIC } from "@/lib/licitaciones/reglas";
 import { DOCS_CONDUCTOR_REGLA, TIPOS_SEGURO_LIC } from "@/lib/licitaciones/analisis";
 import { TIPOS_LEGAJO, tipoLegajo, tipoDocConductor } from "@/lib/licitaciones/legajo";
@@ -31,8 +31,8 @@ const VACIO: Borrador = {
   vigenteAl: "presentacion", n: "", categorias: [], desde: "primer_contrato", monto: "", moneda: "PEN", seguro: "",
 };
 
-/** Rangos: los MISMOS de normalizarRegla (lib/licitaciones/normalizar.ts). */
-const R = { antig: [1, 3650], uAnios: [0, 60], asientos: [1, 120], n: [1, 500], eAnios: [1, 100], monto: [0.01, 1e12] } as const;
+/** Rangos: los MISMOS con que normalizarRegla guarda (una sola fuente). */
+const R = RANGOS_REGLA;
 
 export function borradorDe(r: Regla | null): Borrador {
   if (!r) return VACIO;
