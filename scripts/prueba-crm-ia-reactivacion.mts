@@ -1,5 +1,5 @@
 // npx tsx scripts/prueba-crm-ia-reactivacion.mts
-import { inicioVentanaHumano, inicioConteoTurnos, hayClienteEsperando } from "../lib/crm-ia-reactivacion";
+import { inicioVentanaHumano, inicioConteoTurnos, hayClienteEsperando, horasPausaHumano, HORAS_PAUSA_DEFECTO } from "../lib/crm-ia-reactivacion";
 let fallos = 0;
 const ok = (c: boolean, m: string) => { if (!c) { fallos++; console.log("✗", m); } else console.log("✓", m); };
 
@@ -43,6 +43,10 @@ ok(inicioConteoTurnos("x") === null, "fecha ilegible → toda la conversación (
 ok(hayClienteEsperando({ direccion: "entrante" }), "último del cliente → contesta ya");
 ok(!hayClienteEsperando({ direccion: "saliente" }), "último nuestro → espera al cliente");
 ok(!hayClienteEsperando(null), "chat vacío → nada que contestar");
+
+// La pausa del agente (se mudó aquí desde lib/crm-ia.ts, que la reexporta): la misma lectura de siempre.
+ok(horasPausaHumano({}) === HORAS_PAUSA_DEFECTO && HORAS_PAUSA_DEFECTO === 12 && horasPausaHumano(null) === 12, "sin número → 12 h");
+ok(horasPausaHumano({ pausa_humano_horas: null }) === 0 && horasPausaHumano({ pausa_humano_horas: "6" }) === 6 && horasPausaHumano({ pausa_humano_horas: "x" }) === 12, "null → 0 (apagada), «6» → 6, basura → 12");
 
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

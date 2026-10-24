@@ -14,7 +14,8 @@
 //  3. La IDEMPOTENCIA, antes de gastar Google: el mismo pedido (misma `firmaPedido`) en la misma
 //     conversación en las últimas 2 h no crea otra cotización. Pendiente → se reusa y se vuelve a
 //     decidir el envío (el caso típico: el envío anterior se canceló porque el cliente siguió
-//     escribiendo); enviada → «ya te la envié»; rechazada → la ve un ejecutivo.
+//     escribiendo); enviada → «ya te la envié» (sin importes si una persona la corrigió y su pausa
+//     no ha pasado: lib/traslados/cotizacion-corregida.ts); rechazada → la ve un ejecutivo.
 //  4. Los TOPES, contados antes de geocodificar (quien dispara las consultas es un desconocido).
 //     Un conteo que no se pudo leer bloquea: se deriva.
 //  5. El motor (`simularTrasladoConCatalogo`, el mismo del simulador de /tarifario).
@@ -49,9 +50,11 @@ import { validarEntrada, type EntradaSimulador, type LugarEntrada } from "./api"
 import { cargarCatalogo, leerConfigIA, leerIgvPct, SinMigracionTraslados, type CatalogoTraslados } from "./datos";
 import { leerInglesTraslado, plantillaParaTraslado } from "./plantilla-traslado-datos";
 import {
-  canonImprimible, cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, impresosSospechosos, mismaFilaImpresa, resultadoDeFila,
+  cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, impresosSospechosos, mismaFilaImpresa, resultadoDeFila,
   type FilaCotizacion, type FilaCotizacionLeida,
 } from "./cotizacion-traslado";
+import { correccionDeCotizacion, filaEditada, huellaImprimible, type PausaEjecutivo } from "./cotizacion-corregida-datos";
+import { notaEsperaCorreccion } from "./cotizacion-corregida";
 import {
   MOTIVO_REVISION, TOPES, decidirTope, entradaDelAgente, figurasPermitidas, firmaPedido, idiomaDeGuarda, planEnvio,
   respuestaDerivar, respuestaEnRevision, respuestaParaModelo, respuestaYaEnviada, revisionPorCondiciones, senalesEnTexto,
@@ -59,7 +62,6 @@ import {
   type CodigoRevision, type DecisionEnvio,
 } from "./envio-ia";
 import { ETIQUETA_TEXTO_LIBRE, type IdiomaTexto } from "./texto-libre";
-import { createHash } from "node:crypto";
 import { armarPdfDeFila, leerCotizacionTraslado, leerPerfilPdf, type AvisoPdfTraslado, type LogoPdf, type PerfilPdf } from "./enviar-cotizacion-datos";
 import { simularTrasladoConCatalogo } from "./servicio";
 import type { ResultadoTraslado } from "./motor";
@@ -99,6 +101,13 @@ export type CtxCotizarIA = {
    * siempre (todo junto). Lo pone el agente desde sus ajustes, nunca el modelo.
    */
   preguntas?: ModoPreguntas;
+  /**
+   * La pausa tras la actividad de una persona (`pausa_humano_horas` del agente) y la reactivación del
+   * chat (`ia_reactivada_at`), calculadas por el agente una vez por turno: con ellas se juzga una
+   * cotización ya enviada que una persona corrigió (lib/traslados/cotizacion-corregida.ts). Sin ellas,
+   * la pausa por defecto (12 h) y sin reactivación.
+   */
+  pausa?: PausaEjecutivo | null;
 };
 
 export type CotizacionIA = {
@@ -365,21 +374,9 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n"), guarda, huella, ...(editada ? { editada } : {}) });
 }
 
-/** El sha256 (hex) de lo que imprime la fila (`canonImprimible`): la huella que queda en la acción al crearla. */
-export function huellaImprimible(fila: FilaCotizacionLeida): string {
-  return createHash("sha256").update(canonImprimible(fila)).digest("hex");
-}
-
-/**
- * ¿La fila ya no es la que escribió la IA? La huella guardada en la acción al CREARLA contra la de la
- * fila de ahora. Una acción sin huella (de antes de este cambio, o cuya fila no se pudo releer al
- * crearla) tampoco se puede comprobar: cuenta como editada. PURA salvo el hash.
- */
-export function filaEditada(payload: Record<string, unknown> | null | undefined, fila: FilaCotizacionLeida): boolean {
-  const guardada = payload && typeof payload === "object" ? (payload as { huella?: unknown }).huella : undefined;
-  if (typeof guardada !== "string" || !/^[0-9a-f]{64}$/.test(guardada)) return true;
-  return guardada !== huellaImprimible(fila);
-}
+// La huella (`huellaImprimible`) y `filaEditada` viven en ./cotizacion-corregida-datos (las usa
+// también la reserva de traslados) y se reexportan aquí sin cambios.
+export { huellaImprimible, filaEditada };
 
 /**
  * El idioma del cliente cuando el agente no lo pasó: `idiomaDelCliente` sobre los entrantes y, solo
@@ -424,6 +421,26 @@ async function reusar(
   const numero = numeroCotizacion(leida);
   const enCurso = acc.estado === "enviando" && !!acc.resuelta_at && Date.parse(acc.resuelta_at) > x.ahora;
   if (acc.estado === "aprobada" || enCurso) {
+    // Ya enviada: «ya te la envié» con el total y la validez. Si una persona CORRIGIÓ la fila después
+    // y la pausa tras su actividad no ha pasado (o no se sabe cuándo la tocó), el mismo «ya te la
+    // envié» SIN importes y una nota para el ejecutivo; la IA no se pausa (vuelve sola tras la pausa).
+    const corr = filaEditada(acc.payload, leida)
+      ? await correccionDeCotizacion(sb, leida, { convId: ctx.conv.id, pausa: ctx.pausa, ahoraMs: x.ahora, payloads: [acc.payload] })
+      : null;
+    if (corr && !corr.usar) {
+      const notaTxt = notaEsperaCorreccion(corr, { numero, que: "importes", ahoraMs: x.ahora });
+      if (notaTxt) {
+        try { await sb.from("crm_notas").insert({ conversacion_id: ctx.conv.id, texto: notaTxt, autor_nombre: "Asistente IA" }); } catch { /* sin crm_notas */ }
+      }
+      return {
+        respuestaModelo: respuestaYaEnviada(numero, null),
+        accion: "cotizar",
+        cotizacion: {
+          cotizacionId: leida.id, numero, decision: "automatico", yaEnviada: true, figuras: [], accionId: acc.id,
+          idioma: normalizarIdioma(leida.idioma_pdf),
+        },
+      };
+    }
     const cifras = cifrasDeFila(leida);
     return {
       respuestaModelo: respuestaYaEnviada(numero, cifras),

@@ -45,7 +45,14 @@ export type MotivoElegibilidad =
 /** Lo que impide pedir el pago por el reloj. Los pone `ordenDeReserva`. */
 export type MotivoTiempo = "sin_horario_equipo" | "sin_hora" | "muy_pronto" | "no_alcanza_tras_apertura" | "no_llega";
 
-export type MotivoOrden = MotivoElegibilidad | MotivoTiempo;
+/**
+ * Lo que impide pedir el pago porque una persona CORRIGIÓ la cotización hace poco
+ * (lib/traslados/cotizacion-corregida.ts). No lo pone `ordenDeReserva`: lo agrega quien crea la
+ * solicitud, después del orden, y la pasa a «disponibilidad primero».
+ */
+export type MotivoCorreccion = "cotizacion_corregida";
+
+export type MotivoOrden = MotivoElegibilidad | MotivoTiempo | MotivoCorreccion;
 
 export const MOTIVOS_ELEGIBILIDAD: readonly MotivoElegibilidad[] = [
   "zona_sin_envio", "cotizacion_no_enviada", "cotizacion_vencida", "servicio_pasado",
@@ -53,6 +60,7 @@ export const MOTIVOS_ELEGIBILIDAD: readonly MotivoElegibilidad[] = [
   "perfil_sin_configurar", "politica_sospechosa",
 ];
 export const MOTIVOS_TIEMPO: readonly MotivoTiempo[] = ["sin_horario_equipo", "sin_hora", "muy_pronto", "no_alcanza_tras_apertura", "no_llega"];
+export const MOTIVOS_CORRECCION: readonly MotivoCorreccion[] = ["cotizacion_corregida"];
 
 /** Por qué no se pidió el pago, dicho para el ejecutivo (la tarjeta y el correo). */
 export const MOTIVO_ORDEN: Record<MotivoOrden, string> = {
@@ -71,6 +79,7 @@ export const MOTIVO_ORDEN: Record<MotivoOrden, string> = {
   muy_pronto: "El servicio es muy pronto: no alcanza el plazo de confirmación más el margen.",
   no_alcanza_tras_apertura: "Fuera del horario de atención, y desde la próxima apertura no alcanza el plazo de confirmación más el margen.",
   no_llega: "Ninguna persona del equipo alcanza a confirmar antes del servicio (la próxima apertura es después del inicio).",
+  cotizacion_corregida: "La cotización se corrigió después de enviarla y no ha pasado la pausa del ejecutivo (o no se sabe cuándo se corrigió): el adelanto lo pide el ejecutivo desde la tarjeta.",
 };
 
 export type AccionOrden = "pedir_pago" | "confirmar_disponibilidad" | "derivar";

@@ -44,6 +44,12 @@
 //     escribió una persona en castellano no se traduce: el resumen de la política no va en un T1/T4 en
 //     inglés (queda el enlace) y las políticas en castellano (T8) a un cliente en inglés las ve un
 //     ejecutivo.
+// 10. UNA COTIZACIÓN QUE UNA PERSONA CORRIGIÓ SE USA SOLO TRAS LA PAUSA DEL EJECUTIVO (decisión del
+//     dueño, 24-10-2026; lib/traslados/cotizacion-corregida.ts): el pedido del adelanto (T1, que pasa a
+//     «disponibilidad primero» con `cotizacion_corregida`), su reenvío, las políticas (T8) y el adelanto
+//     que nombra T3 salen de la fila; si su huella no es la de la IA y la última corrección de una
+//     persona (`editada_at`) es de hace menos de `pausa_humano_horas` —sin una reactivación posterior—,
+//     la IA no la manda: T12 y una nota, SIN derivar (derivar pausa la IA para siempre).
 // Matriz de punta a punta: ANTHROPIC_API_KEY=x npx tsx scripts/prueba-reserva-ia.mts
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -84,7 +90,7 @@ import {
   adelantoDe, cargoEditable, cargoRetenido, clienteVerificadoEnChat, cuentasEnMensaje, juzgarCargo, mismaReferencia, patchCargoRecalculado, devolucionDecidida, dineroDeSolicitud, esEstadoTerminal,
   filaFacturaCargo, firmaConCuentas, firmaImportes, huellaDeFirma, importesDeFirma, juzgarReenvioPedirPago, marcaCargoReserva,
   mensajeCanceladaSinPago, mensajeCancelacionRegistrada, mensajeCancelacionResuelta, vinculoContactoReserva,
-  mensajeComprobanteRecibido, mensajeDisponibilidadPrimero, mensajeHayUnidad, mensajePagoNoEncontrado, mensajePedirPago,
+  mensajeComprobanteRecibido, mensajeCotizacionActualizada, mensajeDisponibilidadPrimero, mensajeHayUnidad, mensajePagoNoEncontrado, mensajePedirPago,
   mensajePoliticas, mensajeSinUnidad, politicaContradiceConfig, puedePasar, queFalta,
   type Adelanto, type BloquePago, type CondicionesMensaje, type ConfigReserva, type CuentasMensaje, type EstadoSolicitud, type PagoEnHayUnidad,
   type PagoSolicitud, type Pendiente, type CodigoCargo, type FacturaCargoActual,
@@ -98,6 +104,9 @@ import {
 import { adjuntoDeComprobante, correoReserva, destinatariosReserva, type DatosCorreoReserva } from "./reserva-correo";
 import { inicioServicioMs } from "./reserva-alertas";
 import { leerConfigIA, SQL_RESERVA_TRASLADOS } from "./datos";
+import { correccionDeCotizacion, type PausaEjecutivo } from "./cotizacion-corregida-datos";
+import { notaEsperaCorreccion, notaSolicitudCorregida, notaUsoCorreccion, type JuicioCorreccion } from "./cotizacion-corregida";
+import { horasPausaHumano } from "../crm-ia-reactivacion";
 import {
   enlaceWaMe, ventana24h, type AccionDinero, type AccionTarjeta, type CodigoResultadoReserva, type ComprobanteVista,
   type FilaTesoreria, type MotivoCierre, type PagoVista, type ResultadoAccionReserva, type VistaSolicitud,
@@ -582,16 +591,30 @@ export type CtxReservaIA = {
   contacto: ContactoR;
   /** Copiado ANTES del bucle del agente: el canal y el wa_id del hilo. */
   remitente: { canal: string; waId: string | null };
-  agente: { modelo?: unknown; comportamiento?: unknown } | null;
+  agente: { modelo?: unknown; comportamiento?: unknown; pausa_humano_horas?: unknown } | null;
   /** El mismo `modoAuto` con que el agente decide si envía. */
   modoAuto: boolean;
   /** La configuración de la reserva (`leerConfigIA(...).reserva`), leída antes del bucle. */
   cfg: ConfigReserva;
   /** Herramientas de reserva usadas en ESTE turno. */
   turno: { n: number };
+  /**
+   * La pausa tras la actividad de una persona y la reactivación del chat, calculadas por el agente una
+   * vez por turno (lib/crm-ia.ts): con ellas se juzga una cotización que una persona CORRIGIÓ después de
+   * que la IA la escribió (lib/traslados/cotizacion-corregida.ts). Sin ellas, las horas del agente y
+   * sin reactivación.
+   */
+  pausa?: PausaEjecutivo | null;
 };
 
-type Creada = { s: FilaSolicitud; cc: ContextoCotizacion; orden: OrdenReserva; adel: Adelanto; pct: number | null; accionId: string | null };
+/** La pausa con que se juzga una cotización corregida: la del turno, o la del agente sin reactivación. */
+const pausaDe = (ctx: Pick<CtxReservaIA, "pausa" | "agente">): PausaEjecutivo => ctx.pausa ?? { horas: horasPausaHumano(ctx.agente), reactivadaAt: null };
+
+/**
+ * `correccion`: el juicio de la cotización corregida con que se decidió pedir el pago (null si no se
+ * juzgó: el orden ya no era pedir el pago).
+ */
+type Creada = { s: FilaSolicitud; cc: ContextoCotizacion; orden: OrdenReserva; adel: Adelanto; pct: number | null; accionId: string | null; correccion: JuicioCorreccion | null };
 
 /**
  * Crea la solicitud de una cotización enviada, decide el orden (`ordenDeReserva`) y la tarjeta del
@@ -615,8 +638,18 @@ async function crearSolicitud(
   });
   const orden = ordenDeReserva({ ahoraMs: x.ahora, inicioMs: cc.inicioMs, atencion: atencionDeAgente(ctx.agente), cfg: ctx.cfg, elegibilidad });
   // Sin adelanto calculable no se puede pedir el pago (defensa: la elegibilidad ya lo impide).
-  const accion = orden.accion === "pedir_pago" && (adel.adelanto == null || !cc.cuentas.lineas.length) ? "confirmar_disponibilidad" : orden.accion;
-  const motivos = [...new Set([...orden.motivos, ...(x.extraMotivos ?? [])])].filter((m) => /^[a-z_]{2,40}$/.test(m));
+  let accion = orden.accion === "pedir_pago" && (adel.adelanto == null || !cc.cuentas.lineas.length) ? "confirmar_disponibilidad" : orden.accion;
+  // Pedir el pago manda los importes, las cuentas y la política DE LA FILA: si una persona la corrigió
+  // y la pausa tras su actividad no ha pasado (o no se sabe cuándo la tocó), el adelanto lo pide el
+  // ejecutivo desde la tarjeta («disponibilidad primero», motivo `cotizacion_corregida`).
+  let correccion: JuicioCorreccion | null = null;
+  if (accion === "pedir_pago") {
+    correccion = await correccionDeCotizacion(sb, cc.fila, { convId: ctx.conv.id, pausa: pausaDe(ctx), ahoraMs: x.ahora });
+    if (!correccion.usar) accion = "confirmar_disponibilidad";
+  }
+  const espera = correccion != null && !correccion.usar;
+  const motivos = [...new Set([...orden.motivos, ...(espera ? ["cotizacion_corregida"] : []), ...(x.extraMotivos ?? [])])].filter((m) => /^[a-z_]{2,40}$/.test(m));
+  const notaCorr = espera ? notaSolicitudCorregida(correccion!, x.ahora) : null;
   const fila = {
     cotizacion_id: cc.fila.id, crm_conversacion_id: ctx.conv.id,
     estado: accion === "pedir_pago" ? "esperando_pago" : "por_confirmar", orden: ordenDeSolicitud(accion), motivos_orden: motivos,
@@ -624,6 +657,7 @@ async function crearSolicitud(
     adelanto_pct: pct, firma_importes: firmaConCuentas(firmaImportes(cc.fila, pct), accion === "pedir_pago" ? huellaCuentas(cc.cuentas.lineasHuella) : null),
     confirmar_antes_de: isoDe(orden.confirmarAntesMs), urgente: orden.urgente,
     nombre_pasajero: x.pasajero ?? null, vuelo: x.vuelo ?? null, cliente_acepto_en: x.aceptoEn, acepto_mensaje_id: x.aceptoMensajeId,
+    ...(notaCorr ? { nota: notaCorr } : {}),
   };
   const ins = await sb.from(TABLA_SOLICITUDES).insert(fila).select(COLS_SOLICITUD).single();
   if (ins.error || !ins.data) {
@@ -654,7 +688,7 @@ async function crearSolicitud(
     seguro(e, "crearSolicitud/tarjeta");
     await nota(sb, ctx.conv.id, `📅 Se registró la solicitud de reserva #${s.id} (cotización N° ${cc.numero}) pero no su tarjeta en la bandeja. Ábrela desde /tesoreria?tab=adelantos.`);
   }
-  return { ok: true, c: { s, cc, orden: { ...orden, accion }, adel, pct, accionId } };
+  return { ok: true, c: { s, cc, orden: { ...orden, accion }, adel, pct, accionId, correccion } };
 }
 
 /** El correo «por confirmar disponibilidad» y la nota interna de una solicitud que espera a un ejecutivo. */
@@ -670,6 +704,7 @@ async function avisarPorConfirmar(ctx: CtxReservaIA, c: Creada, ahora: number, d
     `📅 Reserva de traslado por CONFIRMAR (cotización N° ${c.cc.numero}, solicitud #${c.s.id})${c.orden.urgente ? " · ⚠ URGENTE" : ""}.`,
     "Todavía NO se le pidió el pago: confirma la unidad desde la tarjeta («Hay unidad» / «No hay unidad»).",
     ...motivos.map((m) => `• ${MOTIVO_ORDEN[m] ?? m}`),
+    ...(c.correccion ? [notaEsperaCorreccion(c.correccion, { numero: c.cc.numero, que: "adelanto", ahoraMs: ahora })].filter((l): l is string => !!l) : []),
     correo.enviado ? `Correo enviado a ${correo.destinatarios.join(", ")}.` : `El correo no salió: ${correo.error ?? "sin destinatarios"}.`,
   ];
   await nota(ctx.sb, ctx.conv.id, lineas.join("\n"), "Asistente IA");
@@ -759,6 +794,12 @@ export async function reservarTrasladoIA(ctx: CtxReservaIA, input: unknown, deps
   }
   if (c.orden.accion === "confirmar_disponibilidad") await avisarPorConfirmar(ctx, c, ahora, deps);
   const mensaje = mensajeDeSolicitud(c.s, c.cc, ahora, ctx, deps);
+  // El pedido del adelanto salió con una cotización CORREGIDA (ya pasó la pausa, o se reactivó la IA):
+  // una nota para el ejecutivo, una sola vez (al crear la solicitud).
+  if (c.orden.accion === "pedir_pago" && mensaje && c.correccion) {
+    const n = notaUsoCorreccion(c.correccion, { numero: c.cc.numero, ahoraMs: ahora });
+    if (n) await nota(ctx.sb, ctx.conv.id, n, "Asistente IA");
+  }
   return solo(c.orden.accion, c.cc.numero, undefined, mensaje);
 }
 
@@ -772,6 +813,12 @@ async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, 
   let cc: ContextoCotizacion;
   try { cc = await contextoCotizacion(ctx.sb, s.cotizacion_id); }
   catch (e) { return derivaIA("No se pudo leer la cotización de la reserva", pedido, seguro(e, "yaSolicitada")); }
+  // Volver a pedir el pago manda los importes y las cuentas de la fila: si una persona la corrigió y la
+  // pausa tras su actividad no ha pasado, T12 y una nota; NO se deriva (la IA vuelve sola tras la pausa).
+  if (s.estado === "esperando_pago") {
+    const espera = await esperaPorCorreccion(ctx, cc, ahora, "adelanto");
+    if (espera) return espera;
+  }
   if (s.estado === "esperando_pago" && s.firma_importes && firmaImportes(cc.fila, pctDe(s)) !== importesDeFirma(s.firma_importes)) {
     return derivaIA("La cotización cambió desde que se le pidió el pago", pedido,
       `Solicitud #${s.id}: los importes de la cotización N° ${cc.numero} ya no son los que se le comunicaron al cliente. Revísala antes de volver a pedirle el pago.`, cc.numero);
@@ -785,6 +832,21 @@ async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, 
   }
   const mensaje = s.estado === "esperando_pago" || s.estado === "por_confirmar" ? mensajeDeSolicitud(s, cc, ahora, ctx, deps) : null;
   return solo("ya_solicitada", cc.numero, undefined, mensaje);
+}
+
+/**
+ * Si una persona CORRIGIÓ la cotización y la pausa tras su actividad no ha pasado (o no se sabe cuándo
+ * la tocó): el aviso al cliente (T12, sin importes ni políticas), la nota para el ejecutivo y la
+ * acción `cotizacion_corregida`. null si se puede usar la fila (y el paso sigue como siempre).
+ */
+async function esperaPorCorreccion(
+  ctx: CtxReservaIA, cc: ContextoCotizacion, ahora: number, que: "adelanto" | "politicas",
+): Promise<ResultadoReservaIA | null> {
+  const j = await correccionDeCotizacion(ctx.sb, cc.fila, { convId: ctx.conv.id, pausa: pausaDe(ctx), ahoraMs: ahora });
+  if (j.usar) return null;
+  const n = notaEsperaCorreccion(j, { numero: cc.numero, que, ahoraMs: ahora });
+  if (n) await nota(ctx.sb, ctx.conv.id, n, "Asistente IA");
+  return solo("cotizacion_corregida", cc.numero, undefined, mensajeCotizacionActualizada(cc.numero, vozDe(ctx.agente, cc)));
 }
 
 /**
@@ -819,7 +881,15 @@ type ResultadoComprobante =
  */
 async function registrarComprobante(
   sb: Sb, s: FilaSolicitud,
-  x: { conv: ConvR; contacto: ContactoR; waId: string | null; agente: CtxReservaIA["agente"]; cfg: ConfigReserva; desdeIso: string | null; autor: string },
+  x: {
+    conv: ConvR; contacto: ContactoR; waId: string | null; agente: CtxReservaIA["agente"]; cfg: ConfigReserva; desdeIso: string | null; autor: string;
+    /**
+     * Solo la IA: con la pausa del turno, si una persona CORRIGIÓ la cotización hace poco el mensaje al
+     * cliente no nombra el adelanto esperado (sale de la fila corregida). La tarjeta no lo pasa: ahí
+     * actúa una persona.
+     */
+    pausa?: PausaEjecutivo | null;
+  },
   deps: DepsReserva,
 ): Promise<ResultadoComprobante> {
   const ahora = ahoraDe(deps), hoy = fechaLima(ahora);
@@ -852,6 +922,10 @@ async function registrarComprobante(
     if (error) return { codigo: "error", mensaje: null, detalle: crudo("No se pudo comprobar si la operación ya se usó", error) };
     if ((data ?? []).length) operacionesPrevias = [op];
   }
+  // El monto del adelanto que el mensaje le recuerda al cliente sale de la fila: con una corrección
+  // reciente de una persona, el mensaje no lo nombra (el cotejo para el equipo sigue igual).
+  const corr = x.pausa ? await correccionDeCotizacion(sb, cc.fila, { convId: x.conv.id, pausa: x.pausa, ahoraMs: ahora }) : null;
+  const esperadoMensaje = corr && !corr.usar ? null : adel?.adelanto ?? null;
   const creadaMs = msDe(cc.fila.created_at ?? null);
   const cotejo = cotejarComprobante(lectura, {
     adelanto: adel?.adelanto ?? null, total: adel?.total ?? 0, moneda: cc.moneda, hoy,
@@ -901,11 +975,12 @@ async function registrarComprobante(
       `💳 El cliente REPORTÓ un pago (cotización N° ${cc.numero}, solicitud #${s.id}). PENDIENTE de verificar en el banco: no registres el adelanto hasta ver el dinero.`,
       `Lo que leyó la IA (puede equivocarse): ${leido}.`,
       ...cotejo.codigos.map((k) => `• ${TEXTO_COTEJO[k] ?? k}`),
+      ...(corr ? [notaEsperaCorreccion(corr, { numero: cc.numero, que: "adelanto_esperado", ahoraMs: ahora })].filter((l): l is string => !!l) : []),
       correo.enviado ? `Correo enviado a ${correo.destinatarios.join(", ")}.` : `El correo no salió: ${correo.error ?? "sin destinatarios"}.`,
     ].join("\n"), x.autor);
   }
   const mensaje = mensajeComprobanteRecibido({
-    cotejo, esperado: adel?.adelanto ?? null, moneda: cc.moneda, frasePlazo: frasePlazo(plazoMs, ahora, cc.idioma),
+    cotejo, esperado: esperadoMensaje, moneda: cc.moneda, frasePlazo: frasePlazo(plazoMs, ahora, cc.idioma),
     unidadConfirmada: estado === "confirmada", estilo: vozDe(x.agente, cc),
   });
   return { codigo: "registrado", mensaje, cotejo, estado, detalle: noEs ? "La imagen no parece un comprobante: se le pidió otra." : "Comprobante registrado." };
@@ -932,7 +1007,7 @@ export async function reportarPagoIA(ctx: CtxReservaIA, input: unknown, deps: De
     const elec = elegirCotizacion(vivas.map((c) => ({ ...c.cand, solicitudViva: false })), e.numeroCotizacion);
     if (elec.accion === "crear") vivas = vivas.filter((c) => c.cand.id === elec.cotizacion.id);
   }
-  const base = { conv: ctx.conv, contacto: ctx.contacto, waId: ctx.remitente.waId, agente: ctx.agente, cfg: ctx.cfg, autor: "Asistente IA" };
+  const base = { conv: ctx.conv, contacto: ctx.contacto, waId: ctx.remitente.waId, agente: ctx.agente, cfg: ctx.cfg, autor: "Asistente IA", pausa: pausaDe(ctx) };
   const desdeDe = (c: Candidata) => c.enviadaEn ?? c.creadaEn;
 
   const conSolicitud = async (s: FilaSolicitud, c: Candidata): Promise<ResultadoReservaIA> => {
@@ -1037,6 +1112,9 @@ export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsR
   if (!elegida) return derivaIA("Políticas de reserva sin cotización de traslado", pedido, "No hay una cotización de traslado enviada en el chat de la que leer las políticas.");
   try {
     const cc = await contextoCotizacion(ctx.sb, elegida.cand.id);
+    // Las políticas salen de la fila: corregida hace poco por una persona → T12 y una nota, sin derivar.
+    const espera = await esperaPorCorreccion(ctx, cc, ahora, "politicas");
+    if (espera) return espera;
     const exceso = excesoCondiciones({ reserva: cc.politica, reserva_resumen: cc.resumen });
     if (cc.politicaSospechosa || exceso.length) {
       const por = [

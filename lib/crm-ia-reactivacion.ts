@@ -29,3 +29,17 @@ export function inicioConteoTurnos(reactivadaAt?: string | null): string | null 
 export function hayClienteEsperando(ultimo: { direccion?: string | null } | null | undefined): boolean {
   return ultimo?.direccion === "entrante";
 }
+
+/** Las horas que la IA se aparta tras la actividad de una persona cuando el agente no dice un número. */
+export const HORAS_PAUSA_DEFECTO = 12;
+
+/**
+ * Horas que la IA se aparta cuando actúa una persona del equipo (`crm_agentes_ia.pausa_humano_horas`):
+ * la MISMA lectura con que el motor decide si contesta (lib/crm-ia.ts, que la reexporta), con que el
+ * prompt lo dice y con que la reserva de traslados juzga una cotización corregida
+ * (lib/traslados/cotizacion-corregida.ts). 12 si no hay un número; 0 (o menos) apaga la pausa. Un
+ * `null` es 0, como siempre (`Number(null)`): lo fija la matriz del prompt.
+ */
+export function horasPausaHumano(agente: { pausa_humano_horas?: unknown } | null | undefined): number {
+  return Number.isFinite(Number(agente?.pausa_humano_horas)) ? Number(agente?.pausa_humano_horas) : HORAS_PAUSA_DEFECTO;
+}

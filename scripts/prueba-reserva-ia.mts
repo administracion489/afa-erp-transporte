@@ -17,6 +17,10 @@
 //  · en inglés (10): sin `estilo.idioma`, los textos y la guarda byte a byte los de antes; con «en», la
 //    guarda T10 en inglés y mirando también el vocabulario inglés de dinero, y el pedido del
 //    comprobante en inglés, una sola versión y sin castellano.
+//  · una cotización CORREGIDA por una persona (9u, lib/traslados/cotizacion-corregida.ts): dentro de la
+//    pausa del ejecutivo, T1 pasa a «disponibilidad primero» con `cotizacion_corregida`, el reenvío y
+//    T8 mandan T12 y T3 no nombra el adelanto, sin derivar; pasada la pausa (o reactivada la IA, o con
+//    la pausa apagada) lo de siempre; sin la columna `editada_at`, espera.
 // Lo que NO fija todavía: «con la reserva apagada, el prompt de crm-ia byte a byte el de antes».
 // Eso lo conecta B3 en lib/crm-ia.ts y lo fija su matriz.
 import {
@@ -191,7 +195,7 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     tablas: Record<string, Fila[]> = {};
     n = 1000;
     /** Un error de la base para la consulta (tabla, operación); null = sin falla. */
-    falla: ((tabla: string, op: string) => any) | null = null;
+    falla: ((tabla: string, op: string, cols?: string) => any) | null = null;
     reloj: () => number;
     constructor(reloj: () => number) { this.reloj = reloj; }
     t(nombre: string) { return (this.tablas[nombre] ??= []); }
@@ -226,7 +230,7 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     then<A, B>(ok?: ((v: any) => A | PromiseLike<A>) | null, mal?: ((e: any) => B | PromiseLike<B>) | null): PromiseLike<A | B> { return Promise.resolve().then(() => this.ejecutar()).then(ok, mal); }
     private ejecutar(): any {
       const sb = this.sb, tabla = this.tabla, filas = sb.t(tabla);
-      const f = sb.falla?.(tabla, this.op);
+      const f = sb.falla?.(tabla, this.op, this.cols);
       if (f) return { data: null, error: f };
       const ahora = new Date(sb.reloj()).toISOString();
       if (this.op === "insert") {
@@ -967,6 +971,153 @@ const TU: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
     t("9t: una cotización en castellano: T1 de siempre", !!r3.mensaje && !r3.mensaje.startsWith("To book") && /adelanto/i.test(r3.mensaje));
     const v3 = await D.vistaSolicitud(sb, await tarjeta(e3, solDe(e3.cotId).id), deps);
     t("9t: y su vista dice «es»", v3.idioma === "es");
+  }
+
+  // ── 9u. Una cotización CORREGIDA por una persona (lib/traslados/cotizacion-corregida.ts) ──
+  // La IA usa la fila corregida (T1, su reenvío, T8, el adelanto de T3) solo cuando pasó la pausa del
+  // ejecutivo desde la última corrección (`editada_at`), o si se reactivó la IA después. Mientras
+  // tanto: T1 pasa a «disponibilidad primero» con `cotizacion_corregida`; el reenvío y T8 mandan T12;
+  // nada deriva (derivar pausaría la IA para siempre). Sin corrección (la huella coincide), lo de siempre.
+  {
+    const { huellaImprimible } = await import("../lib/traslados/cotizacion-corregida-datos");
+    const { mensajeCotizacionActualizada } = await import("../lib/traslados/reserva-pago");
+    const { MOTIVO_ORDEN } = await import("../lib/traslados/reserva-orden");
+    const H = 3_600_000;
+    const USTED_9: EstiloMensajes = { tratamiento: "usted", preguntas: "todo_junto" };
+    /** Un escenario con la cotización corregida (sin huella = no se puede comprobar) o intacta (con su huella). */
+    const corregida = (x: { corregida: boolean; editadaHace?: number | null }) => {
+      const e = escenario();
+      const cot = sb.t("cotizaciones").find((c) => c.id === e.cotId)!;
+      if (x.editadaHace !== undefined) cot.editada_at = x.editadaHace === null ? null : new Date(reloj - x.editadaHace).toISOString();
+      const acc = sb.t("crm_acciones_ia").find((a) => a.tipo === "cotizacion_traslado" && a.resultado_id === e.cotId)!;
+      if (!x.corregida) acc.payload = { ...acc.payload, huella: huellaImprimible(cot as any) };
+      return { e, cot, acc };
+    };
+    const ctxP = (e: ReturnType<typeof escenario>, pausa: { horas: number; reactivadaAt: string | null } = { horas: 12, reactivadaAt: null }) => ({ ...ctxDe(e), pausa });
+    const notasDe = (convId: string) => sb.t("crm_notas").filter((n) => n.conversacion_id === convId).map((n) => String(n.texto));
+    const T12 = (numero: string) => mensajeCotizacionActualizada(numero, USTED_9);
+
+    // (a) Intacta (la huella coincide), aunque una persona haya abierto su PDF hace 1 h: T1 como siempre.
+    {
+      const { e } = corregida({ corregida: false, editadaHace: H });
+      const r = await D.reservarTrasladoIA(ctxP(e), {}, deps);
+      const s = solDe(e.cotId);
+      t("9u (a): intacta → pedir_pago, T1 con las cuentas, sin nota de corrección", JSON.parse(r.respuestaModelo).accion === "pedir_pago" && s.estado === "esperando_pago"
+        && !!r.mensaje && r.mensaje.includes("191-1234567-0-11") && !(s.motivos_orden ?? []).includes("cotizacion_corregida") && !s.nota
+        && !notasDe(e.conv.id).some((n) => /CORREGIDA|🕒/.test(n)));
+    }
+    // (b) Corregida hace 1 h con la pausa de 12 h: «disponibilidad primero» con su motivo, sin derivar.
+    {
+      const { e } = corregida({ corregida: true, editadaHace: H });
+      const r = await D.reservarTrasladoIA(ctxP(e), {}, deps);
+      const s = solDe(e.cotId);
+      t("9u (b): corregida hace 1 h → confirmar_disponibilidad (por_confirmar, disponibilidad primero, motivo cotizacion_corregida)",
+        JSON.parse(r.respuestaModelo).accion === "confirmar_disponibilidad" && s.estado === "por_confirmar" && s.orden === "disponibilidad_primero" && (s.motivos_orden ?? []).includes("cotizacion_corregida"));
+      t("9u (b): el mensaje es T2 (no pague todavía), sin las cuentas ni el adelanto", !!r.mensaje && r.mensaje.includes("no realice ningún pago todavía") && !r.mensaje.includes("191-1234567") && !r.mensaje.includes("*S/"));
+      t("9u (b): no deriva (la IA no se pausa)", !r.derivar);
+      t("9u (b): la solicitud dice a qué hora se corrigió y desde cuándo la IA lo pediría", /^La cotización se corrigió a las \d\d:\d\d: el adelanto lo pide el ejecutivo desde la tarjeta \(la IA lo pediría desde las \d\d:\d\d/.test(s.nota ?? ""));
+      t("9u (b): la nota interna nombra la corrección y la pausa", notasDe(e.conv.id).some((n) => n.includes("por CONFIRMAR") && n.includes(MOTIVO_ORDEN.cotizacion_corregida) && n.includes("🕒 La cotización N°") && n.includes("pausa de 12 h")));
+      const v = await D.vistaSolicitud(sb, await tarjeta(e, s.id), deps);
+      t("9u (b): la tarjeta muestra el motivo con su texto", v.motivos.some((m) => m.codigo === "cotizacion_corregida" && m.texto === MOTIVO_ORDEN.cotizacion_corregida) && v.nota === s.nota);
+      // T8 en la misma ventana: T12, sin la política, sin derivar.
+      const r8 = await D.politicasIA(ctxP(e), {}, deps);
+      t("9u (b): T8 corregida hace poco → cotizacion_corregida con T12 y sin la política", JSON.parse(r8.respuestaModelo).accion === "cotizacion_corregida" && r8.mensaje === T12(`00${e.cotId}`)
+        && !POLITICA.some((l) => r8.mensaje!.includes(l)) && !r8.derivar);
+      t("9u (b): la nota de T8 dice qué no se envió y hasta cuándo", notasDe(e.conv.id).some((n) => n.startsWith("🕒") && n.includes("las políticas de reserva") && /hasta las \d\d:\d\d/.test(n)));
+      // El ejecutivo confirma desde la tarjeta: T4 con el pedido del pago (lo envía una persona).
+      const rH = await D.confirmarDisponibilidad(sb, await tarjeta(e, s.id), quien, deps);
+      t("9u (b): «Hay unidad» del ejecutivo manda T4 con las cuentas (una persona decide)", rH.ok && !!rH.mensaje && rH.mensaje.includes("191-1234567-0-11"));
+    }
+    // (c) Corregida hace 13 h (pausa cumplida): T1 como siempre, y una nota de que salió con la corregida.
+    {
+      const { e } = corregida({ corregida: true, editadaHace: 13 * H });
+      const r = await D.reservarTrasladoIA(ctxP(e), {}, deps);
+      const s = solDe(e.cotId);
+      t("9u (c): pausa cumplida → pedir_pago, T1 con las cuentas", JSON.parse(r.respuestaModelo).accion === "pedir_pago" && s.estado === "esperando_pago" && !!r.mensaje && r.mensaje.includes("191-1234567-0-11") && !s.nota);
+      t("9u (c): UNA nota de que el adelanto salió con la cotización corregida", notasDe(e.conv.id).filter((n) => n.includes("salió con la cotización CORREGIDA")).length === 1);
+      const r8 = await D.politicasIA(ctxP(e), {}, deps);
+      t("9u (c): T8 con la pausa cumplida → la política como siempre", JSON.parse(r8.respuestaModelo).accion === "enviar_politicas" && POLITICA.every((l) => r8.mensaje!.includes(l)));
+      // El reenvío de T1: corregida OTRA VEZ ahora mismo → T12 sin derivar; la solicitud no cambia.
+      sb.t("cotizaciones").find((c) => c.id === e.cotId)!.editada_at = new Date(reloj).toISOString();
+      const rR = await D.reservarTrasladoIA(ctxP(e), {}, deps);
+      t("9u (c): reenvío con una corrección de ahora → T12, sin las cuentas, sin derivar", JSON.parse(rR.respuestaModelo).accion === "cotizacion_corregida" && rR.mensaje === T12(`00${e.cotId}`) && !rR.derivar
+        && sb.t("reserva_solicitudes").filter((x) => x.cotizacion_id === e.cotId).length === 1 && solDe(e.cotId).estado === "esperando_pago");
+      t("9u (c): la nota del reenvío nombra el pedido de adelanto", notasDe(e.conv.id).some((n) => n.startsWith("🕒") && n.includes("el pedido de adelanto con las cuentas")));
+      // …y pasada la pausa (la corrección vuelve a ser de hace 13 h): el T1 de siempre otra vez.
+      sb.t("cotizaciones").find((c) => c.id === e.cotId)!.editada_at = new Date(reloj - 13 * H).toISOString();
+      const rR2 = await D.reservarTrasladoIA(ctxP(e), {}, deps);
+      t("9u (c): pasada la pausa, el reenvío es el T1 de siempre", JSON.parse(rR2.respuestaModelo).accion === "ya_solicitada" && rR2.mensaje === r.mensaje);
+    }
+    // (d) Sin la columna (cotizaciones-10 sin correr): no se sabe cuándo → espera.
+    {
+      const { e } = corregida({ corregida: true });
+      sb.falla = (tabla, op, cols) => (tabla === "cotizaciones" && op === "select" && /editada_at/.test(cols ?? "") ? { code: "42703", message: "column cotizaciones.editada_at does not exist" } : null);
+      const r = await D.reservarTrasladoIA(ctxP(e), {}, deps);
+      const r8 = await D.politicasIA(ctxP(e), {}, deps);
+      sb.falla = null;
+      const s = solDe(e.cotId);
+      t("9u (d): sin la columna → disponibilidad primero con cotizacion_corregida y «no se sabe a qué hora»", JSON.parse(r.respuestaModelo).accion === "confirmar_disponibilidad" && s.estado === "por_confirmar"
+        && (s.motivos_orden ?? []).includes("cotizacion_corregida") && /no se sabe a qué hora/.test(s.nota ?? "") && !r.derivar);
+      t("9u (d): sin la columna, T8 → T12 y la nota nombra la migración", r8.mensaje === T12(`00${e.cotId}`) && notasDe(e.conv.id).some((n) => n.includes("cotizaciones-10-actividad-ejecutivo.sql")));
+      // Otro error de lectura (no de columna) también espera.
+      const { e: e2 } = corregida({ corregida: true, editadaHace: 20 * H });
+      sb.falla = (tabla, op, cols) => (tabla === "cotizaciones" && op === "select" && /editada_at/.test(cols ?? "") ? { code: "57014", message: "statement timeout" } : null);
+      const r2 = await D.reservarTrasladoIA(ctxP(e2), {}, deps);
+      sb.falla = null;
+      t("9u (d): un error de lectura de editada_at (no de columna) también espera", JSON.parse(r2.respuestaModelo).accion === "confirmar_disponibilidad" && (solDe(e2.cotId).motivos_orden ?? []).includes("cotizacion_corregida"));
+      // Sin poder leer la acción de la cotización (su huella): no se puede comprobar → cuenta como
+      // corregida, aunque la huella coincida; con la corrección de hace 1 h, espera.
+      const { e: e3 } = corregida({ corregida: false, editadaHace: H });
+      sb.falla = (tabla, op, cols) => (tabla === "crm_acciones_ia" && op === "select" && cols === "id, conversacion_id, payload" ? { code: "57014", message: "statement timeout" } : null);
+      const r3 = await D.reservarTrasladoIA(ctxP(e3), {}, deps);
+      sb.falla = null;
+      t("9u (d): sin poder leer la huella de la cotización → espera (no se puede comprobar)", JSON.parse(r3.respuestaModelo).accion === "confirmar_disponibilidad" && (solDe(e3.cotId).motivos_orden ?? []).includes("cotizacion_corregida"));
+    }
+    // (e) Reactivada después de la corrección → usa; antes → espera.
+    {
+      const { e } = corregida({ corregida: true, editadaHace: H });
+      const r = await D.reservarTrasladoIA(ctxP(e, { horas: 12, reactivadaAt: new Date(reloj - 10 * 60_000).toISOString() }), {}, deps);
+      t("9u (e): reactivada después de la corrección → pedir_pago", JSON.parse(r.respuestaModelo).accion === "pedir_pago" && notasDe(e.conv.id).some((n) => n.includes("reactivó la IA")));
+      const { e: e2 } = corregida({ corregida: true, editadaHace: H });
+      const r2 = await D.reservarTrasladoIA(ctxP(e2, { horas: 12, reactivadaAt: new Date(reloj - 2 * H).toISOString() }), {}, deps);
+      t("9u (e): reactivada ANTES de la corrección → sigue esperando", JSON.parse(r2.respuestaModelo).accion === "confirmar_disponibilidad");
+    }
+    // (f) Con la pausa apagada (0 h) → usa; ninguna persona la tocó (null) → usa.
+    {
+      const { e } = corregida({ corregida: true, editadaHace: H });
+      const r = await D.reservarTrasladoIA(ctxP(e, { horas: 0, reactivadaAt: null }), {}, deps);
+      t("9u (f): pausa apagada → pedir_pago", JSON.parse(r.respuestaModelo).accion === "pedir_pago");
+      const { e: e2 } = corregida({ corregida: true, editadaHace: null });
+      const r2 = await D.reservarTrasladoIA(ctxP(e2), {}, deps);
+      t("9u (f): corregida por un proceso del servidor (editada_at null) → pedir_pago", JSON.parse(r2.respuestaModelo).accion === "pedir_pago");
+      // Sin `pausa` en el contexto: las horas del agente (12) y sin reactivación.
+      const { e: e3 } = corregida({ corregida: true, editadaHace: H });
+      const r3 = await D.reservarTrasladoIA(ctxDe(e3), {}, deps);
+      t("9u (f): sin la pausa del turno, las horas del agente → espera", JSON.parse(r3.respuestaModelo).accion === "confirmar_disponibilidad");
+    }
+    // (g) T3: el comprobante con un monto menor, con la cotización corregida hace poco → no nombra el adelanto.
+    {
+      const { e } = corregida({ corregida: true, editadaHace: 13 * H });
+      const adel = adelantoDeCot(sb.t("cotizaciones").find((c) => c.id === e.cotId) as any, 50)!;
+      await D.reservarTrasladoIA(ctxP(e), {}, deps);
+      sb.t("cotizaciones").find((c) => c.id === e.cotId)!.editada_at = new Date(reloj).toISOString();
+      reloj += 60_000;
+      foto(e, `m-9u-g-${e.cotId}`);
+      lecturaSiguiente = lecturaDe(20, `OP-9U-${e.cotId}`);
+      const r = await D.reportarPagoIA(ctxP(e), {}, deps);
+      t("9u (g): T3 con la cotización corregida hace poco: no nombra el adelanto esperado", JSON.parse(r.respuestaModelo).accion === "comprobante_registrado" && !!r.mensaje
+        && !r.mensaje.includes(adel.adelanto!.toFixed(2)) && !r.mensaje.includes("el adelanto de su reserva es"));
+      t("9u (g): la nota del comprobante dice por qué", notasDe(e.conv.id).some((n) => n.includes("REPORTÓ un pago") && n.includes("el monto del adelanto al confirmar el comprobante")));
+      // La misma lectura con la cotización intacta sí lo nombra (lo de siempre).
+      const { e: e2 } = corregida({ corregida: false });
+      const adel2 = adelantoDeCot(sb.t("cotizaciones").find((c) => c.id === e2.cotId) as any, 50)!;
+      await D.reservarTrasladoIA(ctxP(e2), {}, deps);
+      reloj += 60_000;
+      foto(e2, `m-9u-g2-${e2.cotId}`);
+      lecturaSiguiente = lecturaDe(20, `OP-9U2-${e2.cotId}`);
+      const r2 = await D.reportarPagoIA(ctxP(e2), {}, deps);
+      t("9u (g): intacta → T3 de siempre (nombra el adelanto esperado)", !!r2.mensaje && r2.mensaje.includes(adel2.adelanto!.toFixed(2)) && r2.mensaje.includes("el adelanto de su reserva es"));
+    }
   }
 }
 
