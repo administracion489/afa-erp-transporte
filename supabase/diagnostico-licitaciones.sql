@@ -5,7 +5,8 @@
 --  3 fn_puede_modulo · 4 buckets · 5 políticas de storage.objects SIN bucket_id (abrirían todos).
 --  6 ¿qué se puede UNIR al expediente? archivo_url por origen: vacío · drive.google (CORS: no se baja
 --    desde el navegador) · supabase /<bucket>/ · otro. Por tipo TAL COMO ESTÁ ESCRITO (el canónico lo deriva
---    tipoCanonico en TS) y fotos de las dos flotas. 7 las placas de la propuesta de referencia. 8 el módulo.
+--    tipoCanonico en TS) y fotos de las dos flotas. 7 las placas de la propuesta de referencia (cámbialas por las de
+--    tu caso en las tres listas). 8 el módulo: tablas, bucket y usuarios con el permiso.
 -- Las columnas que una migración agrega se leen con to_jsonb(fila)->>'col': antes de 04 no fallan, dicen «—».
 with u as (
   select 'documentos_vehiculo'::text f, 'p'::text fl, dv.vehiculo_id vid, coalesce(nullif(btrim(dv.tipo), ''), '(sin tipo)') tipo, dv.archivo_url url from public.documentos_vehiculo dv
